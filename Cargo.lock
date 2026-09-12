@@ -304,6 +304,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "soos-invariants"
+version = "0.1.0"
+
+[[package]]
 name = "soos-pam"
 version = "0.1.0"
 dependencies = [

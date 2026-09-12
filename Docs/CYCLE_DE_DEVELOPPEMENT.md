@@ -68,8 +68,11 @@ Pour toute tâche de code, l'agent IA et le développeur suivent rigoureusement 
 │ Étape 5 : Post-implémentation, Docs & Pull Request          │
 │ 1. Documentation technique dans Docs/                       │
 │ 2. Walkthrough dans AI/walkthroughs/NN_<etape>.md           │
-│ 3. Exécution de ./save.sh (fmt + clippy + test + deny)      │
-│ 4. Création de la Pull Request via gh pr create             │
+│ 3. Exécution de ./save.sh --push-pr :                       │
+│    - fmt, clippy, tests unitaires + invariants, deny        │
+│    - hook pre-commit (anti-commit main, secret scanner)     │
+│    - git push origin <branche>                              │
+│    - création automatique de la Pull Request                │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -77,21 +80,20 @@ Pour toute tâche de code, l'agent IA et le développeur suivent rigoureusement 
 
 ## 4. Préparation et création de la Pull Request
 
-Une fois le code validé localement avec `./save.sh` :
+L'IA et le développeur utilisent la commande unifiée :
 
 ```bash
-# 1. Pousser la branche de travail vers le dépôt distant
-git push -u origin feat/<nom>
+# Sauvegarde locale, push et génération de Pull Request en une seule commande :
+./save.sh --push-pr
 
-# 2. Créer la Pull Request
-gh pr create --title "feat(composant): description concise" --body "## Résumé
-...
-## Tests validés
-- [x] cargo fmt
-- [x] cargo clippy
-- [x] cargo test
-- [x] cargo deny check
-"
+# Ou avec un message de commit explicite :
+./save.sh "feat(policy): implémentation du rate limiting" --push-pr
 ```
 
-La Pull Request déclenche automatiquement la suite complète de vérifications CI GitHub Actions.
+Cette commande :
+1. Valide le pipeline 4/4 local (`cargo fmt`, `cargo clippy`, `cargo test`, `cargo deny check`).
+2. Vérifie qu'aucun invariant de sécurité n'est violé via la crate `tests/invariants`.
+3. Empêche le commit de secrets (hook pre-commit).
+4. Pousse automatiquement la branche courante sur GitHub (`git push -u origin <branche>`).
+5. Déclenche la création de la Pull Request via `gh pr create` (ou fournit le lien web direct en un clic si `gh` n'a pas encore été configuré avec `gh auth login`).
+6. Déclenche le pipeline CI GitHub Actions complet sur la PR.

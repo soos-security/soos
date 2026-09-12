@@ -118,9 +118,13 @@ Avant de commencer, lire obligatoirement :
 Après avoir complété les 4 phases de développement :
 1. Rédiger / mettre à jour la documentation technique dans `Docs/` (ex: `Docs/<composant>.md`)
 2. Rédiger le compte-rendu dans `AI/walkthroughs/NN_<nom_etape>.md` (numérotation séquentielle `01_...`, `02_...`, `03_...`)
-3. Valider et committer avec `./save.sh` (vérifie fmt, clippy, tests et cargo-deny)
-4. Si le composant implique le module PAM, valider `./run_tests.sh` pour les tests Docker
-5. **Créer la Pull Request vers `main`** :
-   - Pousser la branche : `git push -u origin <branche>`
-   - Créer la PR via GitHub CLI : `gh pr create --title "<titre>" --body "<description>"` ou instructions de PR
-   - La PR déclenche automatiquement la CI GitHub Actions (qualité + cargo-deny + PAM Docker)
+3. Valider, committer, pousser et créer la Pull Request en une seule commande :
+   ```bash
+   ./save.sh --push-pr
+   ```
+   Ce script :
+   - Exécute le pipeline 4/4 : `cargo fmt`, `cargo clippy --all-targets -- -D warnings`, `cargo test` (dont la suite d'invariants de sécurité), et `cargo deny check`.
+   - Effectue le commit (vérifié par le hook pre-commit anti-fuite de secrets et anti-commit sur main).
+   - Pousse automatiquement la branche vers GitHub (`git push -u origin <branche>`).
+   - Tente d'ouvrir la Pull Request via `gh pr create` (ou fournit le lien web direct en 1 clic).
+4. Si le composant implique le module PAM, valider en parallèle `./run_tests.sh` pour les tests Docker.

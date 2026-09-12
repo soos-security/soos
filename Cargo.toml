@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/protocol",
     "crates/pam",
+    "tests/invariants",
 ]
 
 # Versions centralisées pour tout le workspace

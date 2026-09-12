@@ -64,6 +64,17 @@ if ! git rev-parse --is-inside-work-tree &> /dev/null; then
     exit 1
 fi
 
+# Interdire physiquement le commit direct sur main
+CURRENT_BRANCH=$(git symbolic-ref --short HEAD 2>/dev/null || echo "detached")
+if [[ "$CURRENT_BRANCH" == "main" && "${ALLOW_MAIN_COMMIT:-0}" != "1" ]]; then
+    error "Commit direct sur la branche 'main' strictement interdit !"
+    error "Créez une branche dédiée avant d'effectuer des modifications :"
+    error "  git checkout -b feat/<nom>   # nouvelle fonctionnalité"
+    error "  git checkout -b fix/<nom>    # correctif"
+    error "  git checkout -b chore/<nom>  # outillage / doc"
+    exit 1
+fi
+
 # S'assurer qu'un .gitignore existe (sécurité : éviter de committer target/)
 if [[ ! -f ".gitignore" ]]; then
     warn "Aucun .gitignore détecté. Création d'un .gitignore minimal..."
@@ -145,6 +156,24 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# Traitement des arguments (--push-pr et message de commit)
+# ---------------------------------------------------------------------------
+PUSH_PR=false
+CUSTOM_MSG=""
+
+for arg in "$@"; do
+    if [[ "$arg" == "--push-pr" || "$arg" == "--pr" ]]; then
+        PUSH_PR=true
+    elif [[ -z "$CUSTOM_MSG" ]]; then
+        CUSTOM_MSG="$arg"
+    fi
+done
+
+if [[ "${PUSH_PR_ENV:-0}" == "1" ]]; then
+    PUSH_PR=true
+fi
+
+# ---------------------------------------------------------------------------
 # Stage des changements
 # ---------------------------------------------------------------------------
 echo ""
@@ -155,15 +184,19 @@ git add .
 if git diff --cached --quiet; then
     echo ""
     warn "Aucune modification à committer. Le dépôt est déjà à jour."
+    if [[ "$PUSH_PR" == "true" ]]; then
+        info "Push de la branche courante demandé..."
+        git push -u origin "$CURRENT_BRANCH"
+    fi
     exit 0
 fi
 
 # ---------------------------------------------------------------------------
 # Génération du message de commit
 # ---------------------------------------------------------------------------
-# Si un message personnalisé est fourni en argument, l'utiliser directement
-if [[ $# -ge 1 ]]; then
-    COMMIT_MSG="$1"
+# Si un message personnalisé est fourni, l'utiliser
+if [[ -n "$CUSTOM_MSG" ]]; then
+    COMMIT_MSG="$CUSTOM_MSG"
 else
     # Génération automatique basée sur les fichiers modifiés
     COMMIT_MSG=""
@@ -184,9 +217,7 @@ else
 
         case "$file" in
             crates/*/src/*)
-                # Extraire le nom du crate
                 crate_name=$(echo "$file" | cut -d'/' -f2)
-                # Ajouter si pas déjà présent
                 if [[ ! " ${CRATES_CHANGED[*]:-} " =~ " ${crate_name} " ]]; then
                     CRATES_CHANGED+=("$crate_name")
                 fi
@@ -203,7 +234,7 @@ else
             Cargo.toml | Cargo.lock | rust-toolchain.toml | deny.toml)
                 CONFIG_CHANGED=true
                 ;;
-            *.sh | Dockerfile | .dockerignore)
+            *.sh | Dockerfile | .dockerignore | .githooks/*)
                 SCRIPTS_CHANGED=true
                 ;;
             *)
@@ -219,7 +250,7 @@ else
         PARTS+=("feat(${CRATES_CHANGED[*]}): mise à jour du code")
     fi
     if [[ "$TESTS_CHANGED" == true ]]; then
-        PARTS+=("test: mise à jour des tests")
+        PARTS+=("test: mise à jour des tests et invariants")
     fi
     if [[ "$DOCS_CHANGED" == true ]]; then
         PARTS+=("docs: mise à jour de la documentation")
@@ -228,20 +259,17 @@ else
         PARTS+=("docs(ai): mise à jour des documents de stratégie")
     fi
     if [[ "$SCRIPTS_CHANGED" == true ]]; then
-        PARTS+=("chore(infra): mise à jour des scripts/conteneur")
+        PARTS+=("chore(infra): mise à jour des scripts et garde-fous")
     fi
     if [[ "$CONFIG_CHANGED" == true ]]; then
         PARTS+=("chore(config): mise à jour de la configuration")
     fi
 
-    # Assembler le message final
     if [[ ${#PARTS[@]} -eq 0 ]]; then
         COMMIT_MSG="chore: mise à jour"
     elif [[ ${#PARTS[@]} -eq 1 ]]; then
         COMMIT_MSG="${PARTS[0]}"
     else
-        # Plusieurs catégories : utiliser la première comme titre,
-        # les autres comme corps
         COMMIT_MSG="${PARTS[0]}"
         for ((i = 1; i < ${#PARTS[@]}; i++)); do
             COMMIT_MSG="${COMMIT_MSG}
@@ -249,7 +277,6 @@ else
         done
     fi
 
-    # Ajouter le nombre de fichiers modifiés
     FILE_COUNT=$(echo "$CHANGED_FILES" | wc -l | tr -d ' ')
     COMMIT_MSG="${COMMIT_MSG}
 
@@ -265,15 +292,59 @@ echo -e "${BLUE}  Message :${NC} $(echo "$COMMIT_MSG" | head -1)"
 git commit -m "$COMMIT_MSG"
 
 # ---------------------------------------------------------------------------
-# Résumé
+# Résumé et Push / Pull Request
 # ---------------------------------------------------------------------------
 echo ""
 success "═══════════════════════════════════════════════"
-success "  Sauvegarde réussie !"
+success "  Sauvegarde locale réussie !"
 success "═══════════════════════════════════════════════"
 echo ""
 info "Dernier commit :"
 git log --oneline -1
-echo ""
-warn "Rappel : ce script ne fait PAS de 'git push'."
-warn "Poussez manuellement quand vous êtes prêt : git push"
+
+if [[ "$PUSH_PR" == "true" ]]; then
+    echo ""
+    info "Option --push-pr détectée. Poussée vers GitHub en cours..."
+    git push -u origin "$CURRENT_BRANCH"
+    success "Branche '$CURRENT_BRANCH' poussée sur origin."
+
+    echo ""
+    info "Préparation de la Pull Request..."
+    FIRST_LINE=$(echo "$COMMIT_MSG" | head -1)
+    PR_BODY="## Résumé
+$COMMIT_MSG
+
+## Vérifications de sécurité passées avec succès
+- [x] cargo fmt --check (formatage officiel)
+- [x] cargo clippy --all-targets -- -D warnings (zéro warning)
+- [x] cargo test --all-targets (tests unitaires + invariants architecturaux)
+- [x] cargo deny check (audit licences, failles RustSec, bans)
+- [x] Contrôle pre-commit (anti-commit main + secret scanner)"
+
+    # Tenter la création automatique si gh est authentifié
+    PR_CREATED=false
+    if command -v gh &> /dev/null; then
+        if gh auth status &> /dev/null; then
+            if gh pr create --title "$FIRST_LINE" --body "$PR_BODY" --base main --head "$CURRENT_BRANCH"; then
+                success "Pull Request créée avec succès via GitHub CLI !"
+                PR_CREATED=true
+            fi
+        fi
+    fi
+
+    if [[ "$PR_CREATED" != "true" ]]; then
+        REPO_URL="https://github.com/Mysticaly622/soos"
+        PR_URL="${REPO_URL}/pull/new/${CURRENT_BRANCH}"
+        echo ""
+        info "Lien direct pour finaliser la Pull Request en 1 clic :"
+        echo -e "${BOLD}${BLUE}  👉 ${PR_URL}${NC}"
+        echo ""
+        warn "Astuce : Pour que gh crée les PRs 100% automatiquement sans ouvrir le navigateur,"
+        warn "lancez 'gh auth login' une fois dans votre terminal."
+    fi
+else
+    echo ""
+    warn "Rappel : la branche n'a pas été poussée vers GitHub."
+    info "Pour pousser et générer la Pull Request automatiquement, utilisez :"
+    echo -e "  ./save.sh --push-pr"
+fi

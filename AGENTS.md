@@ -81,10 +81,11 @@ soos/
   - `test/<nom>` : ajout de tests ou fixtures (ex: `test/docker-pam-matrix`)
   - `chore/<nom>` : CI, outillage, dépendances (ex: `chore/ci-deny-rules`)
 - **Workflow de branche** :
-  1. Avant de coder : créer et basculer sur la branche (`git checkout -b <type>/<nom>`).
+  1. Avant de coder : créer et basculer sur la branche (`git checkout -b <type>/<nom>`). Un hook pre-commit bloque physiquement tout commit direct sur `main`.
   2. Suivre le workflow TDD (Architecte → Testeur → Auditeur → Développeur).
-  3. Valider avec `./save.sh` et vérifier `cargo deny check`.
-  4. Préparer la Pull Request vers `main` (via `gh pr create` ou instructions PR avec description claire et checklist de vérification).
+  3. Valider les invariants de sécurité automatiquement via `cargo test` (crate `tests/invariants`).
+  4. Mettre à jour la documentation dans `Docs/` et le compte-rendu dans `AI/walkthroughs/`.
+  5. Exécuter `./save.sh --push-pr` : valide le pipeline 4/4 (`fmt`, `clippy`, `test`, `deny`), committe, pousse la branche sur GitHub et génère la Pull Request vers `main`.
 
 ## Conventions de code Rust
 - `#![forbid(unsafe_code)]` dans les crates métier (protocol, policy, vision)
