@@ -93,5 +93,13 @@ soos/
 - Utiliser `./save.sh` pour les commits (pipeline qualité automatisé)
 - Utiliser `./run_tests.sh` pour les tests d'intégration PAM (conteneur Docker)
 
+## Documentation et Walkthroughs (OBLIGATOIRE)
+- **Walkthroughs systématiques dans `AI/walkthroughs/`** :
+  - À chaque modification, tâche ou étape importante, créer un fichier de compte-rendu dans `AI/walkthroughs/` numéroté séquentiellement : `AI/walkthroughs/NN_<nom_etape>.md` (ex: `01_...`, `02_...`, `03_...`).
+  - Le walkthrough résume : le contexte, les fichiers livrés/modifiés, les choix techniques, les résultats des tests et vérifications, et la prochaine étape.
+- **Documentation technique systématique dans `Docs/`** :
+  - Pour chaque composant créé, protocole défini, workflow ou configuration notable, créer ou mettre à jour un document technique dans `Docs/` (ex: `Docs/PROTOCOL.md`, `Docs/CI_CD_SECURITY.md`, `Docs/DEVELOPMENT.md`).
+  - Cette documentation s'adresse aux développeurs humains et administrateurs du projet et doit rester synchronisée avec l'état réel du code.
+
 ## Gestion des erreurs de compilation
 Si l'utilisateur fournit une sortie `cargo check`, analyser silencieusement et fournir le code corrigé sans explications verbeuses.

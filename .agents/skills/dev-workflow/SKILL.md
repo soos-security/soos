@@ -110,15 +110,17 @@ Avant de commencer, lire obligatoirement :
 - [ ] `cargo clippy -- -D warnings` — zéro warning
 - [ ] `cargo test` — tous les tests passent
 - [ ] `AI/VERIFICATION_MATRIX.md` mis à jour
+- [ ] Documentation technique créée ou mise à jour dans `Docs/`
+- [ ] Walkthrough créé dans `AI/walkthroughs/NN_<etape>.md`
 
 ## Post-implémentation & Pull Request
 
 Après avoir complété les 4 phases de développement :
-1. Valider et committer avec `./save.sh`
-2. Valider l'audit de sécurité local avec `cargo deny check`
-3. Si le composant implique le module PAM, valider `./run_tests.sh` pour les tests Docker
-4. **Créer la Pull Request vers `main`** :
+1. Rédiger / mettre à jour la documentation technique dans `Docs/` (ex: `Docs/<composant>.md`)
+2. Rédiger le compte-rendu dans `AI/walkthroughs/NN_<nom_etape>.md` (numérotation séquentielle `01_...`, `02_...`, `03_...`)
+3. Valider et committer avec `./save.sh` (vérifie fmt, clippy, tests et cargo-deny)
+4. Si le composant implique le module PAM, valider `./run_tests.sh` pour les tests Docker
+5. **Créer la Pull Request vers `main`** :
    - Pousser la branche : `git push -u origin <branche>`
-   - Créer la PR via GitHub CLI : `gh pr create --title "<titre>" --body "<description>"` ou fournir le lien web de création de PR
+   - Créer la PR via GitHub CLI : `gh pr create --title "<titre>" --body "<description>"` ou instructions de PR
    - La PR déclenche automatiquement la CI GitHub Actions (qualité + cargo-deny + PAM Docker)
-5. Mettre à jour le walkthrough dans `AI/walkthroughs/`

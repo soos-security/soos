@@ -194,7 +194,7 @@ else
             crates/*/tests/* | tests/*)
                 TESTS_CHANGED=true
                 ;;
-            docs/* | *.md)
+            Docs/* | docs/* | *.md)
                 DOCS_CHANGED=true
                 ;;
             AI/*)
