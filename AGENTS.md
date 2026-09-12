@@ -73,6 +73,19 @@ soos/
 └── AI/                     # docs stratégie IA
 ```
 
+## Stratégie de Branches et Pull Requests (OBLIGATOIRE)
+- **Jamais de commit direct sur `main`** : Toute modification ou étape importante se fait sur une branche dédiée.
+- **Nommage des branches** :
+  - `feat/<nom>` : nouvelle fonctionnalité (ex: `feat/ipc-client`, `feat/policy-rate-limit`)
+  - `fix/<nom>` : correction de bug ou vulnérabilité (ex: `fix/pam-timeout`)
+  - `test/<nom>` : ajout de tests ou fixtures (ex: `test/docker-pam-matrix`)
+  - `chore/<nom>` : CI, outillage, dépendances (ex: `chore/ci-deny-rules`)
+- **Workflow de branche** :
+  1. Avant de coder : créer et basculer sur la branche (`git checkout -b <type>/<nom>`).
+  2. Suivre le workflow TDD (Architecte → Testeur → Auditeur → Développeur).
+  3. Valider avec `./save.sh` et vérifier `cargo deny check`.
+  4. Préparer la Pull Request vers `main` (via `gh pr create` ou instructions PR avec description claire et checklist de vérification).
+
 ## Conventions de code Rust
 - `#![forbid(unsafe_code)]` dans les crates métier (protocol, policy, vision)
 - `unsafe` uniquement dans les crates d'adaptation (pam, camera-v4l), isolé et commenté

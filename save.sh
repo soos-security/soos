@@ -116,7 +116,7 @@ fi
 # ---------------------------------------------------------------------------
 # Étape 3 : Tests unitaires
 # ---------------------------------------------------------------------------
-step "3/3 : cargo test"
+step "3/4 : cargo test"
 info "Exécution des tests..."
 if cargo test; then
     success "Tous les tests passent."
@@ -124,6 +124,24 @@ else
     error "Des tests ont échoué."
     error "Corrigez les tests avant de sauvegarder."
     exit 1
+fi
+
+# ---------------------------------------------------------------------------
+# Étape 4 : Audit de sécurité des dépendances (cargo-deny)
+# ---------------------------------------------------------------------------
+step "4/4 : cargo deny check"
+if command -v cargo-deny &> /dev/null; then
+    info "Audit des dépendances (licences, vulnérabilités, sources, bans)..."
+    if cargo deny check; then
+        success "Audit cargo-deny validé."
+    else
+        error "cargo-deny a détecté des violations de sécurité ou de licence."
+        error "Corrigez deny.toml ou vos dépendances avant de sauvegarder."
+        exit 1
+    fi
+else
+    warn "cargo-deny n'est pas installé localement — étape ignorée."
+    warn "Installez-le avec : curl -sSL https://github.com/EmbarkStudios/cargo-deny/releases/latest/download/... ou cargo install cargo-deny"
 fi
 
 # ---------------------------------------------------------------------------

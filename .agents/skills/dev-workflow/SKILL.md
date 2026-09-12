@@ -26,6 +26,17 @@ Avant de commencer, lire obligatoirement :
 2. `AI/DECISIONS.md` — décisions actées
 3. `AI/VERIFICATION_MATRIX.md` — critères d'acceptation du composant concerné
 
+## Phase 0 — Branche Git Dédiée
+
+**Objectif** : Isoler tout travail dans une branche thématique, JAMAIS sur `main`.
+
+1. Vérifier la branche courante (`git status`)
+2. Créer et basculer sur une nouvelle branche :
+   - `git checkout -b feat/<nom>` (ex: `feat/ipc-client`)
+   - `git checkout -b fix/<nom>` (ex: `fix/pam-timeout`)
+   - `git checkout -b test/<nom>` (ex: `test/docker-pam`)
+   - `git checkout -b chore/<nom>` (ex: `chore/ci-rules`)
+
 ## Phase 1 — Agent Architecte
 
 **Objectif** : Concevoir avant de coder.
@@ -100,9 +111,14 @@ Avant de commencer, lire obligatoirement :
 - [ ] `cargo test` — tous les tests passent
 - [ ] `AI/VERIFICATION_MATRIX.md` mis à jour
 
-## Post-implémentation
+## Post-implémentation & Pull Request
 
-Après avoir complété les 4 phases :
-1. Recommander à l'utilisateur de lancer `./save.sh` pour commit
-2. Si le composant implique le module PAM, recommander `./run_tests.sh` pour les tests Docker
-3. Mettre à jour le walkthrough dans `AI/walkthroughs/`
+Après avoir complété les 4 phases de développement :
+1. Valider et committer avec `./save.sh`
+2. Valider l'audit de sécurité local avec `cargo deny check`
+3. Si le composant implique le module PAM, valider `./run_tests.sh` pour les tests Docker
+4. **Créer la Pull Request vers `main`** :
+   - Pousser la branche : `git push -u origin <branche>`
+   - Créer la PR via GitHub CLI : `gh pr create --title "<titre>" --body "<description>"` ou fournir le lien web de création de PR
+   - La PR déclenche automatiquement la CI GitHub Actions (qualité + cargo-deny + PAM Docker)
+5. Mettre à jour le walkthrough dans `AI/walkthroughs/`

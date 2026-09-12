@@ -11,14 +11,15 @@ version = "0.1.0"
 edition = "2021"
 license = "AGPL-3.0-or-later"
 repository = "https://github.com/Mysticaly622/soos"
+publish = false
 
 [workspace.dependencies]
 # Sérialisation IPC (binaire, compact, no-std compatible)
 serde = { version = "1", features = ["derive"] }
-postcard = { version = "1", features = ["alloc"] }
+postcard = { version = "1", default-features = false, features = ["alloc"] }
 
 # Effacement mémoire sécurisé
 zeroize = { version = "1.9", features = ["derive"] }
 
 # Crates internes
-soos-protocol = { path = "crates/protocol" }
+soos-protocol = { path = "crates/protocol", version = "0.1.0" }
