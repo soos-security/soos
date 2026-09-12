@@ -236,6 +236,7 @@ mod tests {
     fn rejects_declared_size_too_large() {
         // Forge un buffer avec un préfixe de taille énorme
         let mut buf = vec![0u8; 8];
+        #[allow(clippy::cast_possible_truncation)]
         let fake_size: u32 = (MAX_MESSAGE_SIZE as u32) + 1;
         buf[..4].copy_from_slice(&fake_size.to_be_bytes());
 

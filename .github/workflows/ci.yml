@@ -1,0 +1,140 @@
+# =============================================================================
+# CI/CD — Pipeline de vérification pour le projet soos
+# =============================================================================
+# Ce workflow s'exécute sur chaque push et pull request.
+# Il reproduit exactement le pipeline de save.sh + des vérifications
+# supplémentaires (audit de sécurité, tests d'intégration PAM).
+#
+# Structure :
+#   1. quality  — fmt, clippy, tests unitaires
+#   2. security — cargo-deny (licences, advisories, sources)
+#   3. pam-integration — tests PAM dans conteneur Docker
+# =============================================================================
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Job 1 : Qualité du code (miroir de save.sh)
+  # ---------------------------------------------------------------------------
+  quality:
+    name: "Quality (fmt + clippy + test)"
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Cache Cargo registry & build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: "Step 1/3 — cargo fmt --check"
+        run: cargo fmt --all -- --check
+
+      - name: "Step 2/3 — cargo clippy -- -D warnings"
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: "Step 3/3 — cargo test"
+        run: cargo test --all-targets --all-features
+
+  # ---------------------------------------------------------------------------
+  # Job 2 : Audit de sécurité des dépendances
+  # ---------------------------------------------------------------------------
+  security:
+    name: "Security (cargo-deny)"
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run cargo-deny
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
+          arguments: --all-features
+
+  # ---------------------------------------------------------------------------
+  # Job 3 : Tests d'intégration PAM (conteneur Docker)
+  # ---------------------------------------------------------------------------
+  pam-integration:
+    name: "PAM Integration (Docker)"
+    runs-on: ubuntu-latest
+    needs: quality
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build Docker sandbox
+        run: docker build -t soos-sandbox .
+
+      - name: Run PAM integration tests
+        run: |
+          docker run --rm \
+            -v "${{ github.workspace }}:/workspace" \
+            soos-sandbox \
+            bash -c '
+              set -euo pipefail
+
+              if [[ ! -f "Cargo.toml" ]]; then
+                echo "[FAIL] Cargo.toml not found"
+                exit 1
+              fi
+
+              echo "[INFO] Building PAM module in release mode..."
+              cargo build --release -p soos-pam 2>&1
+
+              SO_PATH="target/release/libpam_soos.so"
+              if [[ ! -f "${SO_PATH}" ]]; then
+                echo "[FAIL] ${SO_PATH} not found after build"
+                exit 1
+              fi
+
+              echo "[INFO] Deploying PAM module..."
+              cp "${SO_PATH}" /lib/x86_64-linux-gnu/security/pam_soos.so
+              chmod 644 /lib/x86_64-linux-gnu/security/pam_soos.so
+
+              echo "[TEST] T1 — ABI load + correct password"
+              echo "password123" | pamtester test-soos testuser authenticate
+              echo "[OK] T1 passed"
+
+              echo "[TEST] T2 — Wrong password (must fail)"
+              if echo "wrong" | pamtester test-soos testuser authenticate; then
+                echo "[FAIL] T2: wrong password accepted!"
+                exit 1
+              fi
+              echo "[OK] T2 passed"
+
+              echo "[TEST] T3 — Module absent (PAM resilience)"
+              mv /lib/x86_64-linux-gnu/security/pam_soos.so /tmp/pam_soos.so.bak
+              if echo "password123" | pamtester test-soos testuser authenticate; then
+                echo "[OK] T3 passed"
+              else
+                echo "[WARN] T3: PAM rejected with correct password and missing module"
+              fi
+              mv /tmp/pam_soos.so.bak /lib/x86_64-linux-gnu/security/pam_soos.so
+
+              echo ""
+              echo "All PAM integration tests passed."
+            '

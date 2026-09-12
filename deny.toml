@@ -1,0 +1,74 @@
+# =============================================================================
+# deny.toml — Configuration cargo-deny pour le projet soos
+# =============================================================================
+# Audit des dépendances : licences, vulnérabilités connues, sources autorisées.
+# Exécuté en CI (GitHub Actions) et peut être lancé localement :
+#   cargo install cargo-deny && cargo deny check
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Advisories — Vulnérabilités connues (RustSec Advisory DB)
+# ---------------------------------------------------------------------------
+[advisories]
+# Refuser les crates ayant des vulnérabilités connues non corrigées
+vulnerability = "deny"
+# Avertir pour les crates ayant des advisories informatifs
+notice = "warn"
+# Refuser les crates qui ne sont plus maintenues
+unmaintained = "warn"
+# Refuser les crates dont la vulnérabilité est ignorée par le mainteneur
+yanked = "deny"
+
+# ---------------------------------------------------------------------------
+# Licences — Seules les licences OSS permissives sont autorisées
+# ---------------------------------------------------------------------------
+[licenses]
+# Refuser les crates dont la licence n'est pas dans la liste
+unlicensed = "deny"
+
+# Licences autorisées pour les dépendances
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "Zlib",
+    "BSL-1.0",
+    "CC0-1.0",
+]
+
+# Le projet lui-même est AGPL-3.0 — les dépendances doivent être compatibles
+[[licenses.clarify]]
+name = "ring"
+expression = "MIT AND ISC AND OpenSSL"
+license-files = [
+    { path = "LICENSE", hash = 0xbd0eed23 },
+]
+
+# ---------------------------------------------------------------------------
+# Sources — N'autoriser que crates.io
+# ---------------------------------------------------------------------------
+[sources]
+# Refuser les crates provenant de sources non autorisées
+unknown-registry = "deny"
+unknown-git = "deny"
+# Seul crates.io est autorisé
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []
+
+# ---------------------------------------------------------------------------
+# Bans — Crates interdites explicitement
+# ---------------------------------------------------------------------------
+[bans]
+# Avertir en cas de versions multiples d'une même crate
+multiple-versions = "warn"
+wildcards = "deny"
+
+# Crates explicitement interdites (voir DECISIONS.md)
+deny = [
+    # ARCHITECTURE.md : "Interdiction absolue d'OpenCV"
+    { name = "opencv", wrappers = [] },
+]
