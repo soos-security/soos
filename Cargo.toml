@@ -1,0 +1,24 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/protocol",
+    "crates/pam",
+]
+
+# Versions centralisées pour tout le workspace
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0-or-later"
+repository = "https://github.com/Mysticaly622/soos"
+
+[workspace.dependencies]
+# Sérialisation IPC (binaire, compact, no-std compatible)
+serde = { version = "1", features = ["derive"] }
+postcard = { version = "1", features = ["alloc"] }
+
+# Effacement mémoire sécurisé
+zeroize = { version = "1.9", features = ["derive"] }
+
+# Crates internes
+soos-protocol = { path = "crates/protocol" }
