@@ -51,6 +51,7 @@ BRANCH_TO_ISSUE = {
     "feat/camera-v4l": 5,
     "feat/inference-ort": 6,
     "feat/vision-pipeline": 7,
+    "feat/vision-crate": 7,
     "feat/biometric-store": 8,
     "feat/evidence-store": 9,
     "feat/enrollment-cli": 10,
@@ -69,9 +70,12 @@ def run_gh_cmd(args):
     env["PAGER"] = "cat"
     env["GH_PAGER"] = "cat"
     env["GH_NO_PAGER"] = "1"
+    gh_bin = "gh"
+    if not os.path.exists("/usr/bin/gh") and os.path.exists("/home/hadrien/.local/bin/gh"):
+        gh_bin = "/home/hadrien/.local/bin/gh"
     try:
         res = subprocess.run(
-            ["gh"] + args,
+            [gh_bin] + args,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
