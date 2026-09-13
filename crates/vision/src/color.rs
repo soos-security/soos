@@ -1,11 +1,13 @@
 //! Color conversion from camera pixel formats to standard RGB24.
 
 #![allow(
+    unknown_lints,
     clippy::arithmetic_side_effects,
     clippy::cast_possible_truncation,
     clippy::cast_possible_wrap,
     clippy::cast_sign_loss,
     clippy::indexing_slicing,
+    clippy::chunks_exact_to_as_chunks,
     reason = "High-performance pixel format conversions, fixed-point integer arithmetic, and buffer indexing"
 )]
 
