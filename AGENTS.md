@@ -73,12 +73,34 @@ soos/
 └── AI/                     # docs stratégie IA
 ```
 
+## Stratégie de Branches et Pull Requests (OBLIGATOIRE)
+- **Jamais de commit direct sur `main`** : Toute modification ou étape importante se fait sur une branche dédiée.
+- **Nommage des branches** :
+  - `feat/<nom>` : nouvelle fonctionnalité (ex: `feat/ipc-client`, `feat/policy-rate-limit`)
+  - `fix/<nom>` : correction de bug ou vulnérabilité (ex: `fix/pam-timeout`)
+  - `test/<nom>` : ajout de tests ou fixtures (ex: `test/docker-pam-matrix`)
+  - `chore/<nom>` : CI, outillage, dépendances (ex: `chore/ci-deny-rules`)
+- **Workflow de branche** :
+  1. Avant de coder : créer et basculer sur la branche (`git checkout -b <type>/<nom>`). Un hook pre-commit bloque physiquement tout commit direct sur `main`.
+  2. Suivre le workflow TDD (Architecte → Testeur → Auditeur → Développeur).
+  3. Valider les invariants de sécurité automatiquement via `cargo test` (crate `tests/invariants`).
+  4. Mettre à jour la documentation dans `Docs/` et le compte-rendu dans `AI/walkthroughs/`.
+  5. Exécuter `./save.sh --push-pr` : valide le pipeline 4/4 (`fmt`, `clippy`, `test`, `deny`), committe, pousse la branche sur GitHub et génère la Pull Request vers `main`.
+
 ## Conventions de code Rust
 - `#![forbid(unsafe_code)]` dans les crates métier (protocol, policy, vision)
 - `unsafe` uniquement dans les crates d'adaptation (pam, camera-v4l), isolé et commenté
 - `cargo fmt`, `cargo clippy -- -D warnings`, `cargo test` obligatoires avant commit
 - Utiliser `./save.sh` pour les commits (pipeline qualité automatisé)
 - Utiliser `./run_tests.sh` pour les tests d'intégration PAM (conteneur Docker)
+
+## Documentation et Walkthroughs (OBLIGATOIRE)
+- **Walkthroughs systématiques dans `AI/walkthroughs/`** :
+  - À chaque modification, tâche ou étape importante, créer un fichier de compte-rendu dans `AI/walkthroughs/` numéroté séquentiellement : `AI/walkthroughs/NN_<nom_etape>.md` (ex: `01_...`, `02_...`, `03_...`).
+  - Le walkthrough résume : le contexte, les fichiers livrés/modifiés, les choix techniques, les résultats des tests et vérifications, et la prochaine étape.
+- **Documentation technique systématique dans `Docs/`** :
+  - Pour chaque composant créé, protocole défini, workflow ou configuration notable, créer ou mettre à jour un document technique dans `Docs/` (ex: `Docs/PROTOCOL.md`, `Docs/CI_CD_SECURITY.md`, `Docs/DEVELOPMENT.md`).
+  - Cette documentation s'adresse aux développeurs humains et administrateurs du projet et doit rester synchronisée avec l'état réel du code.
 
 ## Gestion des erreurs de compilation
 Si l'utilisateur fournit une sortie `cargo check`, analyser silencieusement et fournir le code corrigé sans explications verbeuses.

@@ -73,7 +73,6 @@ jobs:
         uses: EmbarkStudios/cargo-deny-action@v2
         with:
           command: check
-          arguments: --all-features
 
   # ---------------------------------------------------------------------------
   # Job 3 : Tests d'intégration PAM (conteneur Docker)

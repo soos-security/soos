@@ -26,6 +26,17 @@ Avant de commencer, lire obligatoirement :
 2. `AI/DECISIONS.md` — décisions actées
 3. `AI/VERIFICATION_MATRIX.md` — critères d'acceptation du composant concerné
 
+## Phase 0 — Branche Git Dédiée
+
+**Objectif** : Isoler tout travail dans une branche thématique, JAMAIS sur `main`.
+
+1. Vérifier la branche courante (`git status`)
+2. Créer et basculer sur une nouvelle branche :
+   - `git checkout -b feat/<nom>` (ex: `feat/ipc-client`)
+   - `git checkout -b fix/<nom>` (ex: `fix/pam-timeout`)
+   - `git checkout -b test/<nom>` (ex: `test/docker-pam`)
+   - `git checkout -b chore/<nom>` (ex: `chore/ci-rules`)
+
 ## Phase 1 — Agent Architecte
 
 **Objectif** : Concevoir avant de coder.
@@ -99,10 +110,21 @@ Avant de commencer, lire obligatoirement :
 - [ ] `cargo clippy -- -D warnings` — zéro warning
 - [ ] `cargo test` — tous les tests passent
 - [ ] `AI/VERIFICATION_MATRIX.md` mis à jour
+- [ ] Documentation technique créée ou mise à jour dans `Docs/`
+- [ ] Walkthrough créé dans `AI/walkthroughs/NN_<etape>.md`
 
-## Post-implémentation
+## Post-implémentation & Pull Request
 
-Après avoir complété les 4 phases :
-1. Recommander à l'utilisateur de lancer `./save.sh` pour commit
-2. Si le composant implique le module PAM, recommander `./run_tests.sh` pour les tests Docker
-3. Mettre à jour le walkthrough dans `AI/walkthroughs/`
+Après avoir complété les 4 phases de développement :
+1. Rédiger / mettre à jour la documentation technique dans `Docs/` (ex: `Docs/<composant>.md`)
+2. Rédiger le compte-rendu dans `AI/walkthroughs/NN_<nom_etape>.md` (numérotation séquentielle `01_...`, `02_...`, `03_...`)
+3. Valider, committer, pousser et créer la Pull Request en une seule commande :
+   ```bash
+   ./save.sh --push-pr
+   ```
+   Ce script :
+   - Exécute le pipeline 4/4 : `cargo fmt`, `cargo clippy --all-targets -- -D warnings`, `cargo test` (dont la suite d'invariants de sécurité), et `cargo deny check`.
+   - Effectue le commit (vérifié par le hook pre-commit anti-fuite de secrets et anti-commit sur main).
+   - Pousse automatiquement la branche vers GitHub (`git push -u origin <branche>`).
+   - Tente d'ouvrir la Pull Request via `gh pr create` (ou fournit le lien web direct en 1 clic).
+4. Si le composant implique le module PAM, valider en parallèle `./run_tests.sh` pour les tests Docker.
