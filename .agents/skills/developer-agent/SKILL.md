@@ -31,5 +31,10 @@ Your responsibility is to write the minimal production code necessary to turn pr
    - Never use `#[allow(...)]` without a documented `reason = "..."` (`clippy::allow_attributes_without_reason`).
    - Use safe arithmetic methods (`checked_add`, `checked_sub`) and safe slice access (`.get()`) to avoid indexing and arithmetic warnings.
 
-4. **Deliverable**:
+4. **Bounded Synchronous I/O Primitives**:
+   - Enforce cumulative deadline subtraction (`deadline.checked_sub(elapsed)`) prior to subsequent socket reads in multi-part framing.
+   - Filter out zero-duration timeouts before setting socket options to prevent OS-level `EINVAL` returns.
+   - Map both `io::ErrorKind::TimedOut` and `io::ErrorKind::WouldBlock` to domain timeout variants.
+
+5. **Deliverable**:
    - Fully working, cleanly formatted production code with 100% green test passes.

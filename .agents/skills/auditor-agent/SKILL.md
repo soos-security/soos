@@ -29,9 +29,14 @@ Your responsibility is to conduct a static security and compliance review of spe
 3. **Output Isolation**:
    - Assert zero `println!`, `eprintln!`, `print!`, `eprint!`, or `dbg!` in PAM production code (`clippy::print_stdout`, `clippy::print_stderr`, `clippy::dbg_macro`).
 
-4. **Credential & Sensitive Data Protection**:
+4. **Synchronous Real-Time Deadline & Latency Auditing**:
+   - For synchronous socket operations, verify that timeouts are calculated cumulatively across multi-part reads/writes, rather than relying on a static per-syscall timeout.
+   - Verify that zero-duration timeouts (`Duration::ZERO`) are guarded against before calling `set_read_timeout` / `set_write_timeout` to avoid `EINVAL`.
+   - Verify that both `ErrorKind::TimedOut` and `ErrorKind::WouldBlock` are handled as timeout conditions.
+
+5. **Credential & Sensitive Data Protection**:
    - Assert zero plaintext passwords, unencrypted embeddings, or raw camera frames are stored, transmitted over IPC, or logged.
    - Verify zeroization (`Zeroize` / `ZeroizeOnDrop`) for sensitive temporary buffers.
 
-5. **Deliverable**:
+6. **Deliverable**:
    - Audit clearance or specific security constraint list to be respected by the Developer agent.
