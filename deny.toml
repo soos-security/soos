@@ -1,8 +1,8 @@
 # =============================================================================
-# deny.toml — Configuration cargo-deny pour le projet soos
+# deny.toml — cargo-deny Configuration for soos
 # =============================================================================
-# Audit des dépendances : licences, vulnérabilités connues, sources autorisées.
-# Exécuté en CI (GitHub Actions) et localement :
+# Dependency auditing: licenses, known vulnerabilities, and authorized sources.
+# Executed in CI (GitHub Actions) and locally:
 #   cargo deny check
 # =============================================================================
 
@@ -10,17 +10,18 @@
 all-features = true
 
 # ---------------------------------------------------------------------------
-# Advisories — Vulnérabilités connues (RustSec Advisory DB)
+# Advisories — Known vulnerabilities (RustSec Advisory Database)
 # ---------------------------------------------------------------------------
 [advisories]
 yanked = "deny"
 ignore = []
 
 # ---------------------------------------------------------------------------
-# Licences — Seules les licences OSS permissives sont autorisées
+# Licenses — Only permissive OSS licenses are permitted
 # ---------------------------------------------------------------------------
 [licenses]
 confidence-threshold = 0.8
+unused-allowed-license = "allow"
 
 allow = [
     "MIT",
@@ -36,11 +37,11 @@ allow = [
 ]
 
 [licenses.private]
-# Ignore les crates internes du workspace qui ne sont pas publiées sur crates.io
+# Ignore internal workspace crates that are not published to crates.io
 ignore = true
 
 # ---------------------------------------------------------------------------
-# Sources — N'autoriser que crates.io
+# Sources — Only allow crates.io
 # ---------------------------------------------------------------------------
 [sources]
 unknown-registry = "deny"
@@ -49,13 +50,15 @@ allow-registry = ["https://github.com/rust-lang/crates.io-index"]
 allow-git = []
 
 # ---------------------------------------------------------------------------
-# Bans — Crates interdites explicitement
+# Bans — Explicitly prohibited crates
 # ---------------------------------------------------------------------------
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
 
 deny = [
-    # ARCHITECTURE.md : "Interdiction absolue d'OpenCV"
-    { crate = "opencv", reason = "Interdiction absolue OpenCV (ARCHITECTURE.md)" },
+    # ARCHITECTURE.md: "Strict prohibition against OpenCV"
+    { crate = "opencv", reason = "Strict prohibition against OpenCV (ARCHITECTURE.md)" },
+    # ARCHITECTURE.md: "Root daemon is exclusive owner of /dev/video*. v4l crate in production, not nokhwa."
+    { crate = "nokhwa", reason = "Strict prohibition against Nokhwa camera crate; v4l required (ARCHITECTURE.md)" },
 ]

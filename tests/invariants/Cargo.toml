@@ -9,3 +9,6 @@ publish.workspace = true
 
 [dependencies]
 # Zero external dependencies required for invariant static checking
+
+[lints]
+workspace = true

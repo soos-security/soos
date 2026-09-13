@@ -1,14 +1,13 @@
 # =============================================================================
-# CI/CD — Pipeline de vérification pour le projet soos
+# CI/CD — Verification Pipeline for the soos Project
 # =============================================================================
-# Ce workflow s'exécute sur chaque push et pull request.
-# Il reproduit exactement le pipeline de save.sh + des vérifications
-# supplémentaires (audit de sécurité, tests d'intégration PAM).
+# This workflow runs on every push and pull request against the main branch.
+# It enforces the exact quality and security pipeline from save.sh:
 #
-# Structure :
-#   1. quality  — fmt, clippy, tests unitaires
-#   2. security — cargo-deny (licences, advisories, sources)
-#   3. pam-integration — tests PAM dans conteneur Docker
+# Jobs:
+#   1. quality  — fmt, clippy, unit & invariant tests, candid review
+#   2. security — cargo-deny (licenses, advisories, sources, bans)
+#   3. pam-integration — PAM integration tests in isolated Docker container
 # =============================================================================
 
 name: CI
@@ -25,14 +24,16 @@ env:
 
 jobs:
   # ---------------------------------------------------------------------------
-  # Job 1 : Qualité du code (miroir de save.sh)
+  # Job 1: Code Quality & Architectural Invariants (Mirrors save.sh)
   # ---------------------------------------------------------------------------
   quality:
-    name: "Quality (fmt + clippy + test)"
+    name: "Quality (fmt + clippy + test + candid)"
     runs-on: ubuntu-latest
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -50,17 +51,20 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-
 
-      - name: "Step 1/3 — cargo fmt --check"
+      - name: "Step 1/4 — cargo fmt --check"
         run: cargo fmt --all -- --check
 
-      - name: "Step 2/3 — cargo clippy -- -D warnings"
+      - name: "Step 2/4 — cargo clippy -- -D warnings"
         run: cargo clippy --all-targets --all-features -- -D warnings
 
-      - name: "Step 3/3 — cargo test"
+      - name: "Step 3/4 — cargo test"
         run: cargo test --all-targets --all-features
 
+      - name: "Step 4/4 — candid review"
+        run: ./scripts/candid_review.sh
+
   # ---------------------------------------------------------------------------
-  # Job 2 : Audit de sécurité des dépendances
+  # Job 2: Dependency Supply Chain Security Audit
   # ---------------------------------------------------------------------------
   security:
     name: "Security (cargo-deny)"
@@ -75,7 +79,7 @@ jobs:
           command: check
 
   # ---------------------------------------------------------------------------
-  # Job 3 : Tests d'intégration PAM (conteneur Docker)
+  # Job 3: PAM Integration Tests (Isolated Docker Container)
   # ---------------------------------------------------------------------------
   pam-integration:
     name: "PAM Integration (Docker)"

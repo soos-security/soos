@@ -17,3 +17,6 @@ soos-protocol = { workspace = true }
 
 [build-dependencies]
 # Direct C symbol exports used for initial skeleton.
+
+[lints]
+workspace = true

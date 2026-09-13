@@ -1,18 +1,18 @@
 # =============================================================================
-# .gitignore — Projet soos (Rust / Cargo workspace)
+# .gitignore — soos Project (Rust / Cargo workspace)
 # =============================================================================
 
 # ---------------------------------------------------------------------------
 # Rust / Cargo
 # ---------------------------------------------------------------------------
-# Répertoire de compilation (peut peser des centaines de Mo)
+# Build directory
 /target/
 
-# Fichiers de debug
+# Debug files
 *.pdb
 
 # ---------------------------------------------------------------------------
-# IDE / Éditeurs
+# IDE / Editors
 # ---------------------------------------------------------------------------
 .vscode/
 .idea/
@@ -22,28 +22,28 @@
 .*.sw?
 
 # ---------------------------------------------------------------------------
-# Système d'exploitation
+# Operating System
 # ---------------------------------------------------------------------------
 .DS_Store
 Thumbs.db
 Desktop.ini
 
 # ---------------------------------------------------------------------------
-# Modèles ONNX (volumineux, gérés séparément)
+# ONNX Models (large files managed separately)
 # ---------------------------------------------------------------------------
-# Les poids des modèles ne sont PAS commités dans le dépôt.
-# Ils sont téléchargés et vérifiés par hash via le manifest models/manifest.toml
+# Model weights must NOT be committed to the repository.
+# They are fetched and verified via SHA-256 hashes in models/manifest.toml.
 models/*.onnx
 models/*.ort
 
 # ---------------------------------------------------------------------------
-# Preuves et données biométriques (ne doivent JAMAIS être commités)
+# Evidence and Biometric Data (Must NEVER be committed)
 # ---------------------------------------------------------------------------
 *.enc
 evidence/
 
 # ---------------------------------------------------------------------------
-# Environnement
+# Environment
 # ---------------------------------------------------------------------------
 .env
 .env.local

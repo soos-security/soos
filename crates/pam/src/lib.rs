@@ -29,7 +29,10 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 // ---------------------------------------------------------------------------
 
 /// Success: authentication successfully granted.
-#[allow(dead_code)]
+#[allow(
+    dead_code,
+    reason = "Standard PAM constant reserved for facial verification verdict"
+)]
 const PAM_SUCCESS: i32 = 0;
 
 /// Ignore: module chooses not to participate in decision; PAM continues down stack.
@@ -115,6 +118,12 @@ pub extern "C" fn pam_sm_setcred(
 // ===========================================================================
 
 #[cfg(test)]
+#[allow(
+    clippy::panic,
+    clippy::expect_used,
+    clippy::unwrap_used,
+    reason = "Unit tests verify panics and assertions"
+)]
 mod tests {
     use super::*;
     use std::ptr;

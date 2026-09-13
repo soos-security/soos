@@ -24,3 +24,49 @@ zeroize = { version = "1.9", features = ["derive"] }
 
 # Internal workspace crates
 soos-protocol = { path = "crates/protocol", version = "0.1.0" }
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+unused_must_use = "deny"
+rust_2018_idioms = { level = "deny", priority = -1 }
+
+[workspace.lints.clippy]
+# Disallow panics and unfinished code in production
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+panic_in_result_fn = "deny"
+unimplemented = "deny"
+todo = "deny"
+unreachable = "deny"
+
+# Memory and unsafe block documentation
+undocumented_unsafe_blocks = "deny"
+mem_forget = "deny"
+
+# I/O restrictions (prevent leaking info or corrupting PAM caller output)
+dbg_macro = "deny"
+print_stdout = "deny"
+print_stderr = "deny"
+
+# Code quality & transparency
+allow_attributes_without_reason = "deny"
+fallible_impl_from = "deny"
+
+# Security & numerical warnings
+cast_possible_truncation = "warn"
+cast_possible_wrap = "warn"
+cast_sign_loss = "warn"
+indexing_slicing = "warn"
+arithmetic_side_effects = "warn"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+overflow-checks = true
+strip = "symbols"
+
+[profile.dev]
+overflow-checks = true

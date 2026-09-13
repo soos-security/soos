@@ -112,7 +112,7 @@ if [[ ! -f "Cargo.toml" ]]; then
 fi
 
 echo "[INFO] Compiling PAM module in release mode..."
-cargo build --release -p pam 2>&1
+cargo build --release -p soos-pam 2>&1
 echo "[OK]   Compilation completed."
 
 SO_PATH="target/release/'"${PAM_MODULE_NAME}"'"

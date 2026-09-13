@@ -1,0 +1,133 @@
+# Security & Code Quality Guidelines
+
+This document specifies the technical security guidelines, code-quality gates, and hardening configurations implemented across the `soos` workspace.
+
+Because `soos` develops a biometric Linux PAM module (`pam_soos.so`) that runs directly inside the address space of privileged host processes (`login`, `gdm`, `sudo`, `polkit-1`, `sshd`), standard application-level robustness is insufficient. High-assurance systems programming practices derived from the **Rust Reference**, **The Rustonomicon**, **The Cargo Book**, and **Clippy Restriction Guidelines** are strictly enforced.
+
+---
+
+## 1. Threat Model & PAM Execution Constraints
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│ Privileged Host Process (e.g. login, sudo, gdm-password)    │
+│                                                             │
+│  ┌─────────────────────────┐   ┌──────────────────────────┐ │
+│  │ pam_unix.so (fallback)  │   │ pam_soos.so (C ABI)      │ │
+│  └─────────────────────────┘   └─────────────┬────────────┘ │
+└──────────────────────────────────────────────┼──────────────┘
+                                               │ Blocking IPC
+                                               │ (Unix Domain Socket)
+                                               │ Mode: 0660
+                                               ▼
+┌─────────────────────────────────────────────────────────────┐
+│ Privileged Background Daemon: soos-daemon (root:soos)       │
+│ - Exclusive owner of /dev/video* via v4l crate              │
+│ - Isolated ONNX Runtime CPU inference engine                │
+│ - Peer validation via kernel SO_PEERCRED                    │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### Critical Invariants
+1. **Never Panic Across FFI**: An unwinding panic across an `extern "C"` boundary without `catch_unwind` triggers an abort or undefined behavior. Every PAM FFI entry point must catch all panics and systematically return `PAM_IGNORE`.
+2. **Never Return PAM_SUCCESS on Failure**: Any failure (timeout, network glitch, missing socket, protocol error, corrupted buffer) must silently degrade to `PAM_IGNORE` so Linux-PAM can proceed to traditional password authentication (`pam_unix.so`).
+3. **No Terminal/Stream Pollution**: PAM modules share `stdout` and `stderr` descriptors with the host process. Emitting debugging prints (`println!`, `eprintln!`, `dbg!`) can crash graphical display managers (GDM, SDDM) or corrupt scripts calling `sudo`.
+4. **Strict Concurrency & Latency Deadline**: The PAM module must **never** start an asynchronous runtime (Tokio) and must complete its synchronous IPC handshake within 200–250ms.
+
+---
+
+## 2. Compiler Profile Hardening
+
+Configured centrally in root `Cargo.toml`:
+
+```toml
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+overflow-checks = true
+strip = "symbols"
+
+[profile.dev]
+overflow-checks = true
+```
+
+### Rationale
+
+| Flag | Value | Security Justification |
+|---|---|---|
+| `overflow-checks` | `true` (Release & Dev) | In default Rust release builds, integer overflows wrap modulo $2^N$ (`overflow-checks = false`). In authentication logic where buffer lengths and counts are validated, wrapping can create critical logic bypasses or out-of-bounds access. Enforcing `overflow-checks = true` ensures runtime panics (caught by `catch_unwind`) on overflow. |
+| `lto` | `true` | Cross-crate Link-Time Optimization optimizes call graphs across crate boundaries, eliminating unused symbols and hardening indirect calls. |
+| `codegen-units` | `1` | Maximizes compiler optimization visibility and eliminates codegen discrepancies across compilation units. |
+| `panic` | `"abort"` | Defense-in-depth: if any unexpected panic escapes `catch_unwind`, the process aborts cleanly rather than attempting stack unwinding through C frames. |
+| `strip` | `"symbols"` | Strips internal debug symbols from the compiled shared object to minimize exposed metadata. |
+
+---
+
+## 3. Workspace-Wide Lints & Restriction Rules
+
+Declared centrally in root `Cargo.toml` and inherited by all crates via `[lints] workspace = true`:
+
+### Rust Compiler Lints (`[workspace.lints.rust]`)
+- `unsafe_op_in_unsafe_fn = "deny"`: Requires explicit `unsafe {}` blocks even inside `unsafe fn`, making every unsafe operation clearly visible and auditable.
+- `unused_must_use = "deny"`: Forbids ignoring `Result` or `Option` return values.
+- `rust_2018_idioms = "deny"`: Enforces modern Rust conventions (explicit lifetimes, dyn trait objects).
+
+### Clippy Security & Restriction Lints (`[workspace.lints.clippy]`)
+
+| Lint | Severity | Security Rationale |
+|---|---|---|
+| `unwrap_used` | `deny` | Prevents unhandled errors causing panics in production code. |
+| `expect_used` | `deny` | Same as `unwrap_used`. Explicit error bubbling (`?`) is required. |
+| `panic` | `deny` | Forbids explicit `panic!()` in library and PAM production code. |
+| `panic_in_result_fn` | `deny` | Functions returning `Result` must return `Err`, never panic. |
+| `unimplemented` / `todo` / `unreachable` | `deny` | Prevents unfinished stubs from being accidentally deployed to production. |
+| `undocumented_unsafe_blocks` | `deny` | Every `unsafe` block must be documented with a `// SAFETY:` rationale explaining why invariants hold. |
+| `mem_forget` | `deny` | Prevents memory leaks in long-running daemon and PAM processes. |
+| `dbg_macro` | `deny` | Prevents committing `dbg!()` statements which could leak credentials or memory contents. |
+| `print_stdout` / `print_stderr` | `deny` | Forbids polluting host display managers or terminal output in PAM/library code. |
+| `allow_attributes_without_reason` | `deny` | Enforces accountability: any `#[allow(...)]` must specify `reason = "..."`. |
+| `fallible_impl_from` | `deny` | `From` trait implementations must never fail; use `TryFrom` instead. |
+| `indexing_slicing` | `warn` | Direct slice indexing (`s[i]`) can panic out of bounds; favor `.get()` or bounded iterators. |
+| `arithmetic_side_effects` | `warn` | Flags potential integer overflows or division by zero; favor `checked_*` methods. |
+| `cast_possible_truncation` / `cast_possible_wrap` / `cast_sign_loss` | `warn` | Catches dangerous `as` casts that could silently truncate or alter sign. |
+
+---
+
+## 4. Supply Chain & Dependency Audit (`deny.toml`)
+
+Automated via `cargo-deny`:
+- **Banned Crates**:
+  - `opencv`: Strictly prohibited (threat of native C++ vulnerabilities, memory footprint).
+  - `nokhwa`: Strictly prohibited (root daemon directly owns `/dev/video*` via `v4l` crate).
+- **Advisories**: `yanked = "deny"`, zero unreviewed security advisories.
+- **Licenses**: Only permissive open source licenses (`MIT`, `Apache-2.0`, `BSD-3-Clause`, `ISC`).
+- **Sources**: Only official `crates.io` registry is permitted; arbitrary git dependencies are blocked.
+
+---
+
+## 5. Automated Verification Gates
+
+Quality and security gates are enforced at multiple levels:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│ 1. Git Hook (.githooks/pre-commit)                          │
+│    - Anti-commit to main                                    │
+│    - Secret leak scanner (private keys, tokens)             │
+│    - Automated execution of scripts/candid_review.sh        │
+├─────────────────────────────────────────────────────────────┤
+│ 2. Local Quality Script (./save.sh)                         │
+│    - cargo fmt                                              │
+│    - cargo clippy --all-targets -- -D warnings              │
+│    - cargo test --all-targets (incl. architectural tests)   │
+│    - cargo deny check (supply chain audit)                  │
+│    - scripts/candid_review.sh (impartial cold diff review)  │
+├─────────────────────────────────────────────────────────────┤
+│ 3. Continuous Integration (.github/workflows/ci.yml)        │
+│    - Quality job (fmt, clippy, test, candid_review)         │
+│    - Security job (cargo-deny action)                       │
+│    - pam-integration job (Docker sandbox with pamtester)    │
+└─────────────────────────────────────────────────────────────┘
+```
