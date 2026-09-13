@@ -1,0 +1,36 @@
+# models/manifest.toml — Attested Machine Learning Models Manifest for soos
+# Each model deployed to /var/lib/soos/models/ or models/ must be attested by this manifest.
+# ModelRegistry verifies SHA-256 integrity prior to ONNX Runtime session creation.
+
+[manifest]
+version = "1.0.0"
+
+[models.ultraface_slim_320]
+id = "ultraface_slim_320"
+filename = "version-slim-320.onnx"
+sha256 = "b7a44f4340d0fb9b071e6be94deaa9bcfceeb9f1c7dcf14b1b365bca7f79ff0b"
+license = "MIT"
+source_url = "https://github.com/Linzaer/Ultra-Light-Fast-Generic-Face-Detector-1MB"
+description = "UltraFace Slim 320 lightweight face detector"
+input_shape = [1, 3, 240, 320]
+output_shapes = [[1, 4420, 2], [1, 4420, 4]]
+
+[models.landmark_5point]
+id = "landmark_5point"
+filename = "landmark_5point.onnx"
+sha256 = "94f0e08c843f51a43a0e1b6fef65cbe5b1dbdc3e4bc3929424687771746a5be4"
+license = "MIT"
+source_url = "https://github.com/deepinsight/insightface"
+description = "InsightFace 5-point facial landmark detector (eyes, nose, mouth)"
+input_shape = [1, 3, 112, 112]
+output_shapes = [[1, 10]]
+
+[models.mobilefacenet_arcface]
+id = "mobilefacenet_arcface"
+filename = "mobilefacenet_arcface.onnx"
+sha256 = "66fbe536c4eb827a5e828d11c8cb5f98bb2d7ebec44ec2f35952fdfa3ceee473"
+license = "MIT"
+source_url = "https://github.com/sirius-ai/MobileFaceNet_TF"
+description = "MobileFaceNet ArcFace feature extractor for 128D/512D embeddings"
+input_shape = [1, 3, 112, 112]
+output_shapes = [[1, 128]]

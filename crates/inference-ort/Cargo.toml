@@ -1,0 +1,27 @@
+[package]
+name = "soos-inference-ort"
+description = "Isolated ONNX Runtime CPU inference engine for face detection, 5-point landmarks, and MobileFaceNet embeddings with manifest attestation"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[features]
+default = []
+
+[dependencies]
+ort = { workspace = true }
+ndarray = { workspace = true }
+serde = { workspace = true }
+sha2 = { workspace = true }
+toml = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+proptest = "1"
+
+[lints]
+workspace = true

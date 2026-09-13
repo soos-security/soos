@@ -10,7 +10,7 @@ This document translates the critical gating criteria from §11 of `ARCHITECTURE
 - [x] No camera device is opened by the PAM module (PAM strictly delegates via IPC)
 - [x] Daemon unavailable = standard password fallback works (`authenticate_returns_pam_ignore`)
 - [x] The `.so` never panics across FFI (enforced by `catch_unwind`)
-- [ ] Each ONNX model is attested by manifest + SHA-256 checksum
+- [x] Each ONNX model is attested by manifest + SHA-256 checksum (`manifest_tests::test_parse_workspace_manifest_file`, `manifest_tests::test_verify_model_checksum_success_and_tamper_detection`, `registry_tests::test_registry_verify_integrity_missing_files_fails_closed`)
 - [ ] All biometric templates and evidence are located outside `$HOME` and inaccessible to non-root accounts
 - [ ] Each target distribution integration is validated in a VM with a documented rollback procedure
 
@@ -84,7 +84,7 @@ This document translates the critical gating criteria from §11 of `ARCHITECTURE
 | # | Criterion | Test Method | Status |
 |---|---|---|---|
 | V1 | Golden tests: preprocessing matches training pipeline | Fixture tests | ☐ Pending |
-| V2 | L2-normalized embeddings (norm ≈ 1.0) | Math unit test | ☐ Pending |
+| V2 | L2-normalized embeddings (norm ≈ 1.0) | Unit & property tests (`embedding_tests::test_l2_norm_and_normalization_criterion_v2`, `proptest_suite::prop_embedding_normalization_criterion_v2`) | ☑ Validated |
 | V3 | Cosine similarity correctness | Known vector distance test | ☐ Pending |
 | V4 | Rejects if 0 or > 1 face detected | Unit tests | ☐ Pending |
 | V5 | Full pipeline < 150ms p95 on reference hardware | Benchmark | ☐ Pending |

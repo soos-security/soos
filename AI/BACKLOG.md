@@ -224,30 +224,30 @@ Pure business logic crate: takes structured inputs (score, PAD result, UID conte
 
 #### Sub-issues:
 
-- **#6.1** — Scaffold `crates/inference-ort/` with `Cargo.toml`
+- [x] **#6.1** — Scaffold `crates/inference-ort/` with `Cargo.toml`
   - Dependencies: `ort = "2.0"` (CPU execution provider only)
   - NO OpenCV dependency (invariant test)
 
-- **#6.2** — Implement `ModelRegistry` with manifest verification
+- [x] **#6.2** — Implement `ModelRegistry` with manifest verification
   - Parse `models/manifest.toml`: model ID, license, source URL, SHA-256 checksum
   - Verify checksums at daemon startup before loading any session
   - Acceptance: Global invariant — ONNX model attested by manifest + SHA-256
 
-- **#6.3** — Implement `FaceDetector` (UltraFace Slim 320)
+- [x] **#6.3** — Implement `FaceDetector` (UltraFace Slim 320)
   - Input: raw pixel buffer (RGB, 320×240 or 640×480)
   - Output: `Vec<BoundingBox>` with confidence scores
   - Deterministic Rust NMS (Non-Maximum Suppression)
 
-- **#6.4** — Implement `LandmarkDetector` (5-point landmarks)
+- [x] **#6.4** — Implement `LandmarkDetector` (5-point landmarks)
   - Input: face crop from bounding box
   - Output: 5 landmark points (eye centers, nose tip, mouth corners)
 
-- **#6.5** — Implement `EmbeddingExtractor` (MobileFaceNet)
+- [x] **#6.5** — Implement `EmbeddingExtractor` (MobileFaceNet)
   - Input: aligned 112×112 face crop
   - Output: L2-normalized 128D or 512D embedding vector
   - Acceptance: `V2` — norm ≈ 1.0 for all outputs
 
-- **#6.6** — Create `models/manifest.toml` with checksums
+- [x] **#6.6** — Create `models/manifest.toml` with checksums
   - UltraFace Slim 320 ONNX
   - 5-point landmark ONNX
   - MobileFaceNet ArcFace ONNX
