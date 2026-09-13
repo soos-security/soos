@@ -85,7 +85,14 @@ pub fn encode<T: Serialize>(msg: &T) -> Result<Vec<u8>, CodecError> {
         })?
         .to_be_bytes();
 
-    let mut buf = Vec::with_capacity(4 + payload.len());
+    let total_capacity = payload
+        .len()
+        .checked_add(4)
+        .ok_or(CodecError::MessageTooLarge {
+            size: usize::MAX,
+            max: MAX_MESSAGE_SIZE,
+        })?;
+    let mut buf = Vec::with_capacity(total_capacity);
     buf.extend_from_slice(&size_prefix);
     buf.extend_from_slice(&payload);
     Ok(buf)
@@ -108,14 +115,12 @@ pub fn encode<T: Serialize>(msg: &T) -> Result<Vec<u8>, CodecError> {
 /// - `DeclaredSizeTooLarge` if prefix exceeds [`MAX_MESSAGE_SIZE`]
 /// - `Deserialize` if postcard payload is corrupted
 pub fn decode<T: DeserializeOwned>(buf: &[u8]) -> Result<T, CodecError> {
-    if buf.len() < 4 {
-        return Err(CodecError::BufferTooSmall);
-    }
-
-    let size_bytes: [u8; 4] = buf[..4]
+    let size_slice = buf.get(..4).ok_or(CodecError::BufferTooSmall)?;
+    let size_bytes: [u8; 4] = size_slice
         .try_into()
         .map_err(|_| CodecError::BufferTooSmall)?;
-    let declared_size = u32::from_be_bytes(size_bytes) as usize;
+    let declared_size =
+        usize::try_from(u32::from_be_bytes(size_bytes)).map_err(|_| CodecError::BufferTooSmall)?;
 
     if declared_size > MAX_MESSAGE_SIZE {
         return Err(CodecError::DeclaredSizeTooLarge {
@@ -124,12 +129,15 @@ pub fn decode<T: DeserializeOwned>(buf: &[u8]) -> Result<T, CodecError> {
         });
     }
 
-    let payload_end = 4 + declared_size;
+    let payload_end = declared_size
+        .checked_add(4)
+        .ok_or(CodecError::BufferTooSmall)?;
     if buf.len() < payload_end {
         return Err(CodecError::BufferTooSmall);
     }
 
-    postcard::from_bytes(&buf[4..payload_end]).map_err(CodecError::Deserialize)
+    let payload_slice = buf.get(4..payload_end).ok_or(CodecError::BufferTooSmall)?;
+    postcard::from_bytes(payload_slice).map_err(CodecError::Deserialize)
 }
 
 // ===========================================================================
@@ -137,6 +145,14 @@ pub fn decode<T: DeserializeOwned>(buf: &[u8]) -> Result<T, CodecError> {
 // ===========================================================================
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    reason = "Unit tests use unwrap, expect, panic, and slicing for test assertions"
+)]
 mod tests {
     use super::*;
     use crate::types::*;
@@ -231,7 +247,10 @@ mod tests {
     #[test]
     fn rejects_declared_size_too_large() {
         let mut buf = vec![0u8; 8];
-        #[allow(clippy::cast_possible_truncation)]
+        #[allow(
+            clippy::cast_possible_truncation,
+            reason = "Test boundary deliberately exceeds maximum message size"
+        )]
         let fake_size: u32 = (MAX_MESSAGE_SIZE as u32) + 1;
         buf[..4].copy_from_slice(&fake_size.to_be_bytes());
 

@@ -5,12 +5,12 @@
 # Evaluates code changes without historical conversation context or author bias.
 # Runs automated invariant checks on the diff and formats a candid audit report:
 #   1. Zero unsafe in business crates (protocol, policy, vision)
-#   2. Zero unwrap() / expect() in PAM production code
+#   2. Zero unwrap(), expect(), panic!(), todo!(), unimplemented!() in PAM production code
 #   3. Zero tokio in PAM module
-#   4. Zero opencv in workspace
+#   4. Zero opencv or nokhwa across workspace
 #   5. Shell script syntax validation (bash -n)
-#   6. Language policy check (English only in comments, docs, walkthroughs)
-#   7. Conventional commit conformance
+#   6. Zero stdout/stderr prints (println!, eprintln!, dbg!) in PAM production code
+#   7. Language policy check (English only in comments, docs, configs, walkthroughs)
 # =============================================================================
 
 set -euo pipefail
@@ -82,15 +82,15 @@ else
     success "Zero 'unsafe' additions detected across all crates."
 fi
 
-# 2. Check for unwrap / expect in PAM production pathways
-step "Audit 2: Checking Panic-Safety Invariant in PAM Module"
-PAM_PANICS=$(git diff "$BASE_REF" -- 'crates/pam/src/**/*.rs' 'crates/pam/src/*.rs' 2>/dev/null | grep -E '^\+[^+].*(\.unwrap\(|\.expect\()' | grep -v 'tests' || true)
+# 2. Check for panics, unwraps, and unfinished stubs in PAM production pathways
+step "Audit 2: Checking Panic Safety & Robustness Invariant in PAM Module"
+PAM_PANICS=$(git diff "$BASE_REF" -- 'crates/pam/src/**/*.rs' 'crates/pam/src/*.rs' 2>/dev/null | grep -E '^\+[^+].*(\.unwrap\(|\.expect\(|panic!|todo!|unimplemented!|unreachable!)' | grep -v 'tests' || true)
 if [[ -n "$PAM_PANICS" ]]; then
-    error "Forbidden panic (.unwrap() / .expect()) added in PAM production code!"
+    error "Forbidden panic, unwrap, or unfinished stub added in PAM production code!"
     echo "$PAM_PANICS" | sed 's/^/    /'
     ERRORS_FOUND=$((ERRORS_FOUND + 1))
 else
-    success "Zero unwrap() / expect() added in PAM production pathways."
+    success "Zero unwrap(), expect(), panic!(), or unfinished stubs in PAM production pathways."
 fi
 
 # 3. Check for async/Tokio in PAM crate
@@ -104,12 +104,12 @@ else
     success "Zero Tokio dependencies in crates/pam."
 fi
 
-# 4. Check for forbidden OpenCV dependency
-step "Audit 4: Checking Forbidden Third-Party Dependencies (OpenCV)"
-OPENCV_HITS=$(git diff "$BASE_REF" -- '**/Cargo.toml' 'Cargo.toml' 2>/dev/null | grep -E '^\+[^+].*(opencv|nokhwa)' || true)
-if [[ -n "$OPENCV_HITS" ]]; then
+# 4. Check for forbidden OpenCV and Nokhwa dependencies
+step "Audit 4: Checking Forbidden Third-Party Dependencies (OpenCV & Nokhwa)"
+FORBIDDEN_DEPS=$(git diff "$BASE_REF" -- '**/Cargo.toml' 'Cargo.toml' 2>/dev/null | grep -E '^\+[^+].*(opencv|nokhwa)' || true)
+if [[ -n "$FORBIDDEN_DEPS" ]]; then
     error "Forbidden OpenCV or Nokhwa dependency detected in Cargo.toml!"
-    echo "$OPENCV_HITS" | sed 's/^/    /'
+    echo "$FORBIDDEN_DEPS" | sed 's/^/    /'
     ERRORS_FOUND=$((ERRORS_FOUND + 1))
 else
     success "Zero OpenCV or prohibited camera dependencies detected."
@@ -133,19 +133,31 @@ else
     info "No shell scripts modified."
 fi
 
-# 6. English-Only Deliverables Audit
-step "Audit 6: Checking Strict English-Only Deliverable Policy"
-# Scan code comments in diff for obvious French words
-FRENCH_MARKERS=$(git diff "$BASE_REF" -- '*.rs' '*.md' '*.sh' 2>/dev/null | grep -E '^\+[^+]*(//|/\*|#|<!--).*(\b(pour|avec|dans|faire|ajouter|vérifier|fonction|problème|étape|fichier|modifié|remarque|attention)\b)' || true)
-if [[ -n "$FRENCH_MARKERS" ]]; then
-    warn "Possible non-English comment or text detected in modified files:"
-    echo "$FRENCH_MARKERS" | head -10 | sed 's/^/    /'
-    info "Ensure all comments, docstrings, and technical documentation are strictly in English."
+# 6. PAM output isolation check (no stdout/stderr pollution)
+step "Audit 6: Checking PAM Module Output Isolation (No stdout/stderr prints)"
+PAM_PRINTS=$(git diff "$BASE_REF" -- 'crates/pam/src/**/*.rs' 'crates/pam/src/*.rs' 2>/dev/null | grep -E '^\+[^+].*(println!|eprintln!|print!|eprint!|dbg!)' | grep -v 'tests' || true)
+if [[ -n "$PAM_PRINTS" ]]; then
+    error "Forbidden stdout/stderr print (println!, eprintln!, dbg!) in PAM production code!"
+    echo "$PAM_PRINTS" | sed 's/^/    /'
+    ERRORS_FOUND=$((ERRORS_FOUND + 1))
 else
-    success "All comments and documentation conform to English-only deliverable policy."
+    success "Zero stdout/stderr prints in PAM production code."
 fi
 
-# 7. Summary & Verdict
+# 7. English-Only Deliverables Audit
+step "Audit 7: Checking Strict English-Only Deliverable Policy"
+# Scan all added lines in modified files for common non-English keywords
+FRENCH_MARKERS=$(git diff "$BASE_REF" -- '*.rs' '*.md' '*.sh' '*.yml' '*.yaml' '*.toml' 'Dockerfile' '.gitignore' ':!scripts/candid_review.sh' 2>/dev/null | grep -E '^\+[^+]*(//|/\*|#|<!--|").*(\b(pour|avec|dans|faire|ajouter|vérifier|fonction|problème|étape|fichier|modifié|remarque|attention|défaut|sécurité|exécution|gestion)\b)' || true)
+if [[ -n "$FRENCH_MARKERS" ]]; then
+    error "Non-English comment or text detected in modified files:"
+    echo "$FRENCH_MARKERS" | head -15 | sed 's/^/    /'
+    error "Ensure all comments, docstrings, configs, and technical documentation are strictly in English."
+    ERRORS_FOUND=$((ERRORS_FOUND + 1))
+else
+    success "All additions conform to English-only deliverable policy."
+fi
+
+# 8. Summary & Verdict
 step "Candid Review Summary"
 if [[ $ERRORS_FOUND -gt 0 ]]; then
     error "═════════════════════════════════════════════════════════════"

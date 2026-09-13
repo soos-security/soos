@@ -21,7 +21,10 @@
 
 #![forbid(unsafe_code)]
 #![deny(clippy::all, clippy::pedantic)]
-#![allow(clippy::module_name_repetitions)]
+#![allow(
+    clippy::module_name_repetitions,
+    reason = "Idiomatic protocol type naming"
+)]
 
 pub mod codec;
 pub mod types;

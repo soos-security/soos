@@ -10,6 +10,14 @@
 #![forbid(unsafe_code)]
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    reason = "Architectural invariant test runner utilizes direct assertions, panics, and indexing"
+)]
 mod tests {
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -200,6 +208,106 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    /// Invariant 6 — Absolute prohibition of Nokhwa camera crate across entire workspace
+    #[test]
+    fn test_no_nokhwa_in_any_cargo_toml() {
+        let root = workspace_root();
+        let mut cargo_tomls = Vec::new();
+        collect_files_named(&root, "Cargo.toml", &mut cargo_tomls);
+
+        assert!(
+            !cargo_tomls.is_empty(),
+            "No Cargo.toml files found in project workspace"
+        );
+
+        for cargo_file in cargo_tomls {
+            let content = fs::read_to_string(&cargo_file)
+                .unwrap_or_else(|e| panic!("Error reading {}: {}", cargo_file.display(), e));
+            assert!(
+                !content.contains("nokhwa"),
+                "ARCHITECTURE VIOLATION: Forbidden reference to 'nokhwa' in {}!",
+                cargo_file.display()
+            );
+        }
+    }
+
+    /// Invariant 7 — Mandatory overflow-checks in both release and dev profiles
+    #[test]
+    fn test_workspace_cargo_toml_enforces_overflow_checks() {
+        let root = workspace_root();
+        let root_cargo = root.join("Cargo.toml");
+        assert!(
+            root_cargo.exists(),
+            "STRUCTURE VIOLATION: Root Cargo.toml not found!"
+        );
+
+        let content = fs::read_to_string(&root_cargo)
+            .unwrap_or_else(|e| panic!("Error reading {}: {}", root_cargo.display(), e));
+
+        assert!(
+            content.contains("[profile.release]"),
+            "SECURITY VIOLATION: Root Cargo.toml must define [profile.release]!"
+        );
+        assert!(
+            content.contains("overflow-checks = true"),
+            "SECURITY VIOLATION: Root Cargo.toml must enforce 'overflow-checks = true'!"
+        );
+        assert!(
+            content.contains("[workspace.lints.clippy]"),
+            "SECURITY VIOLATION: Root Cargo.toml must define [workspace.lints.clippy]!"
+        );
+    }
+
+    /// Invariant 8 — Absolute prohibition of stdout/stderr prints in PAM production code
+    #[test]
+    fn test_pam_crate_has_no_stdout_or_stderr_prints_in_production_code() {
+        let root = workspace_root();
+        let pam_src = root.join("crates").join("pam").join("src");
+        assert!(
+            pam_src.exists(),
+            "STRUCTURE VIOLATION: Required directory '{}' not found!",
+            pam_src.display()
+        );
+
+        let mut rs_files = Vec::new();
+        collect_rs_files(&pam_src, &mut rs_files);
+        assert!(
+            !rs_files.is_empty(),
+            "No .rs source files discovered in '{}'",
+            pam_src.display()
+        );
+
+        for file in rs_files {
+            let content = fs::read_to_string(&file)
+                .unwrap_or_else(|e| panic!("Error reading {}: {}", file.display(), e));
+
+            let prod_code = extract_production_code(&content);
+
+            let prints: Vec<(usize, &str)> = prod_code
+                .lines()
+                .enumerate()
+                .filter(|(_, line)| {
+                    let trimmed = line.trim();
+                    !trimmed.starts_with("//")
+                        && !trimmed.starts_with("/*")
+                        && !trimmed.starts_with('*')
+                        && (trimmed.contains("println!(")
+                            || trimmed.contains("eprintln!(")
+                            || trimmed.contains("print!(")
+                            || trimmed.contains("eprint!(")
+                            || trimmed.contains("dbg!("))
+                })
+                .collect();
+
+            assert!(
+                prints.is_empty(),
+                "SECURITY INVARIANT VIOLATION: stdout/stderr print or dbg! detected in PAM production code of {}:\n{:#?}",
+                file.display(),
+                prints
+            );
         }
     }
 
