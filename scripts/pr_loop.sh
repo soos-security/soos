@@ -175,7 +175,7 @@ if [[ "$IS_ALREADY_MERGED" == "true" ]]; then
     success "═════════════════════════════════════════════════════════════"
     success "  Pull Request #$PR_NUMBER already merged into main!"
     success "═════════════════════════════════════════════════════════════"
-elif gh pr merge "$PR_NUMBER" --squash --delete-branch --admin 2>/dev/null || gh pr merge "$PR_NUMBER" --squash --delete-branch; then
+elif gh pr merge "$PR_NUMBER" --squash --admin 2>/dev/null || gh pr merge "$PR_NUMBER" --squash; then
     success "═════════════════════════════════════════════════════════════"
     success "  Pull Request #$PR_NUMBER approved and merged into main!"
     success "═════════════════════════════════════════════════════════════"
