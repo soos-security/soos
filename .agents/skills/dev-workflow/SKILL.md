@@ -163,9 +163,26 @@ Even if the user writes requests, prompts, or questions in French (or any other 
 
 ---
 
-## 9. Autonomous PR, Review & Auto-Merge Loop
+## 9. Phase 5 — Candid Reviewer Sub-Agent (Fresh Reasoning Audit)
 
-Once development is complete:
+**Objective**: Impartial, adversarial code review of the raw diff with fresh, unpolluted context.
+
+1. Activate the `candid-reviewer` skill (`.agents/skills/candid-reviewer/SKILL.md`).
+2. Inspect the raw diff (`git diff origin/main...HEAD` or `target/candid_diff.patch`).
+3. Evaluate against the 5 critical pillars:
+   - **Logic & Architecture**: State transitions, edge cases, bounds.
+   - **PAM Concurrency**: Zero Tokio in PAM, synchronous 200–250ms deadline, zero stdout/stderr prints.
+   - **Panic Safety**: All FFI wrapped in `catch_unwind`, zero unwraps/panics in prod, fail-closed `PAM_IGNORE`.
+   - **Test Integrity**: Zero test weakening; pre-existing test contracts preserved.
+   - **Memory & Secrets**: Bounded allocations (4096 bytes), zeroization, zero passwords/frames in schemas.
+4. Author the formal review report in `AI/candid_review_report.md` with an explicit `VERDICT: APPROVED`.
+5. If findings require changes (`VERDICT: CHANGES_REQUESTED`), return to Phase 4 (Developer Agent) to resolve them before proceeding.
+
+---
+
+## 10. Autonomous PR, Review & Auto-Merge Loop
+
+Once development and Candid Sub-Agent review are complete:
 1. Author or update technical documentation in `Docs/` in professional English.
 2. Author sequential walkthrough in `AI/walkthroughs/NN_<name>.md` in professional English.
 3. Execute the autonomous loop:
@@ -177,7 +194,7 @@ Once development is complete:
    - Runs workspace Clippy (`cargo clippy --all-targets --all-features -- -D warnings`).
    - Executes all unit and architectural invariant test suites (`cargo test --all-targets`).
    - Audits supply chain dependencies and licenses (`cargo deny check`).
-   - Executes the independent **Candid Pre-Push Code Review** (`./scripts/candid_review.sh`) inspecting the raw diff for logic, security invariants, panic safety, and English policy.
+   - Executes the dual-layer **Candid Pre-Push Code Review** (`./scripts/candid_subagent.sh`) combining deterministic invariant checks and the AI Sub-Agent reasoning report.
    - Pushes topic branch to GitHub and opens a Pull Request.
    - Monitors GitHub Actions CI checks (Quality, Security, PAM Integration).
    - Auto-merges into `main` via squash merge upon green CI, and synchronizes local `main`.
