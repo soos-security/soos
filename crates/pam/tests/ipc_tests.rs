@@ -338,6 +338,49 @@ fn test_ipc_password_failed_event_notification() {
     let _ = server_handle.join();
 }
 
+/// Direct call to notify_event validates successful delivery.
+#[test]
+fn test_ipc_notify_event_direct() {
+    let tmp = tempdir().expect("tempdir created");
+    let sock_path = tmp.path().join("notify_direct.sock");
+    let listener = UnixListener::bind(&sock_path).expect("bound test socket");
+
+    let server_handle = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("client connected");
+        let mut len_buf = [0u8; 4];
+        stream.read_exact(&mut len_buf).expect("read length");
+        let size = u32::from_be_bytes(len_buf) as usize;
+        let mut full = vec![0u8; size + 4];
+        full[..4].copy_from_slice(&len_buf);
+        stream.read_exact(&mut full[4..]).expect("read body");
+        let event: Event = decode(&full).expect("decoded event");
+        assert_eq!(event.kind, EventKind::PasswordFailed);
+    });
+
+    let config = pam_soos::config::PamConfig {
+        socket_path: sock_path,
+        ..Default::default()
+    };
+
+    let result = pam_soos::ipc::notify_event(&config, 1000, EventKind::PasswordFailed);
+    assert!(result.is_ok());
+
+    let _ = server_handle.join();
+}
+
+/// Direct call to notify_event with offline daemon returns IpcError::Connect.
+#[test]
+fn test_ipc_notify_event_offline() {
+    let tmp = tempdir().expect("tempdir created");
+    let sock_path = tmp.path().join("notify_offline.sock");
+    let config = pam_soos::config::PamConfig {
+        socket_path: sock_path,
+        ..Default::default()
+    };
+    let result = pam_soos::ipc::notify_event(&config, 1000, EventKind::PasswordFailed);
+    assert!(matches!(result, Err(pam_soos::ipc::IpcError::Connect(_))));
+}
+
 /// Telemetry event: offline daemon when `event=password-failed` never blocks or panics.
 #[test]
 fn test_ipc_password_failed_daemon_offline_returns_ignore() {
@@ -360,4 +403,104 @@ fn test_ipc_password_failed_daemon_offline_returns_ignore() {
 fn test_setcred_always_returns_ignore() {
     let code = pam_sm_setcred(ptr::null_mut(), 0, 0, ptr::null());
     assert_eq!(code, PAM_IGNORE);
+}
+
+/// Adversarial: daemon sends length prefix of 0 -> rejected cleanly with PAM_IGNORE.
+#[test]
+fn test_ipc_empty_response_returns_ignore() {
+    let tmp = tempdir().expect("tempdir created");
+    let sock_path = tmp.path().join("auth_empty.sock");
+    let listener = UnixListener::bind(&sock_path).expect("bound test socket");
+
+    let server_handle = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("client connected");
+
+        let mut len_buf = [0u8; 4];
+        stream.read_exact(&mut len_buf).expect("read length");
+        let size = u32::from_be_bytes(len_buf) as usize;
+        let mut body = vec![0u8; size];
+        stream.read_exact(&mut body).expect("read body");
+
+        // Send declared length of 0 bytes
+        let zero_len = 0u32.to_be_bytes();
+        stream.write_all(&zero_len).expect("wrote prefix");
+    });
+
+    let sock_arg = format!("socket_path={}", sock_path.display());
+    let (_storage, ptrs) = make_pam_args(&[&sock_arg, "timeout_ms=250"]);
+
+    let code = pam_sm_authenticate(ptr::null_mut(), 0, ptrs.len() as i32, ptrs.as_ptr());
+    assert_eq!(code, PAM_IGNORE);
+
+    let _ = server_handle.join();
+}
+
+/// Adversarial PA2: daemon sends 4-byte length prefix promptly, but hangs mid-stream before sending body.
+/// Client must enforce cumulative deadline and NOT allow secondary read to extend execution.
+#[test]
+fn test_ipc_slow_daemon_body_timeout() {
+    let tmp = tempdir().expect("tempdir created");
+    let sock_path = tmp.path().join("slow_body.sock");
+    let listener = UnixListener::bind(&sock_path).expect("bound test socket");
+
+    let server_handle = thread::spawn(move || {
+        if let Ok((mut stream, _)) = listener.accept() {
+            let mut len_buf = [0u8; 4];
+            let _ = stream.read_exact(&mut len_buf);
+            let size = u32::from_be_bytes(len_buf) as usize;
+            let mut body = vec![0u8; size];
+            let _ = stream.read_exact(&mut body);
+
+            // Send length prefix for 50-byte response
+            let body_len = 50u32.to_be_bytes();
+            let _ = stream.write_all(&body_len);
+
+            // Then hang for 350ms before sending the body!
+            thread::sleep(Duration::from_millis(350));
+        }
+    });
+
+    let sock_arg = format!("socket_path={}", sock_path.display());
+    let (_storage, ptrs) = make_pam_args(&[&sock_arg, "timeout_ms=100"]);
+
+    let start = Instant::now();
+    let code = pam_sm_authenticate(ptr::null_mut(), 0, ptrs.len() as i32, ptrs.as_ptr());
+    let elapsed = start.elapsed();
+
+    assert_eq!(code, PAM_IGNORE);
+    // Cumulative budget must be strictly bounded to ~100ms, well below 300ms
+    assert!(elapsed < Duration::from_millis(250));
+
+    let _ = server_handle.join();
+}
+
+/// Direct IPC client error mapping: socket timeout maps to IpcError::Timeout.
+#[test]
+fn test_ipc_direct_authenticate_timeout_mapping() {
+    let tmp = tempdir().expect("tempdir created");
+    let sock_path = tmp.path().join("timeout_direct.sock");
+    let listener = UnixListener::bind(&sock_path).expect("bound test socket");
+
+    let server_handle = thread::spawn(move || {
+        if let Ok((mut stream, _)) = listener.accept() {
+            let mut buf = [0u8; 128];
+            let _ = stream.read(&mut buf);
+            thread::sleep(Duration::from_millis(250));
+        }
+    });
+
+    let config = pam_soos::config::PamConfig {
+        timeout_ms: 50,
+        socket_path: sock_path,
+        ..Default::default()
+    };
+
+    let result = pam_soos::ipc::authenticate(&config, 1000);
+    assert!(
+        matches!(result, Err(pam_soos::ipc::IpcError::Timeout)),
+        "Expected IpcError::Timeout but got: {:?}",
+        result
+    );
+
+    let _ = server_handle.join();
 }
