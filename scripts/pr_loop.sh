@@ -51,7 +51,10 @@ fi
 
 # Ensure git hooks path is configured
 if [[ -d ".githooks" ]]; then
-    git config core.hooksPath .githooks 2>/dev/null || true
+    if ! git config core.hooksPath .githooks; then
+        error "Failed to configure core.hooksPath to .githooks."
+        exit 1
+    fi
 fi
 
 step "1/6: Local Quality Gates, Conventional Commit, and Push"
@@ -142,42 +145,48 @@ INTERVAL=10
 COPILOT_FINISHED=false
 MINIMUM_WAIT_SECONDS=40 # Allow at least 40s for Copilot run to trigger
 TARGET_SHORT_SHA=$(echo "$TARGET_HEAD_SHA" | cut -c1-7)
+COPILOT_RUN_NAME_REGEX='Copilot|Addressing comment on PR'
 
 while [[ $WAITED -lt $MAX_WAIT_SECONDS ]]; do
     # Check all Copilot workflow runs on the repository for this branch
-    RUNS_JSON=$(gh run list --branch "$CURRENT_BRANCH" --json name,status,conclusion,headSha 2>/dev/null || echo "[]")
+    if ! RUNS_JSON=$(gh run list --branch "$CURRENT_BRANCH" --json name,status,conclusion,headSha 2>/dev/null); then
+        error "Failed to query workflow runs while waiting for Copilot review."
+        exit 1
+    fi
     
     # Are any Copilot runs currently queued or in_progress?
-    ACTIVE_COPILOT_RUNS=$(echo "$RUNS_JSON" | jq -r '.[] | select(.name | test("Copilot"; "i")) | select(.status != "completed")' 2>/dev/null || true)
+    ACTIVE_COPILOT_RUNS=$(echo "$RUNS_JSON" | jq -r ".[] | select(.name | test(\"$COPILOT_RUN_NAME_REGEX\"; \"i\")) | select(.headSha == \"$TARGET_HEAD_SHA\") | select(.status != \"completed\")" 2>/dev/null || true)
     
     # Check if a completed Copilot workflow exists specifically for TARGET_HEAD_SHA
-    COMPLETED_TARGET_RUN=$(echo "$RUNS_JSON" | jq -r ".[] | select(.name | test(\"Copilot\"; \"i\")) | select(.headSha == \"$TARGET_HEAD_SHA\") | select(.status == \"completed\")" 2>/dev/null || true)
+    COMPLETED_TARGET_RUN=$(echo "$RUNS_JSON" | jq -r ".[] | select(.name | test(\"$COPILOT_RUN_NAME_REGEX\"; \"i\")) | select(.headSha == \"$TARGET_HEAD_SHA\") | select(.status == \"completed\") | select(.conclusion == \"success\")" 2>/dev/null || true)
     
     # Check if a review object exists specifically for TARGET_HEAD_SHA
-    REVIEWS_JSON=$(gh api "repos/:owner/:repo/pulls/$PR_NUMBER/reviews" 2>/dev/null || echo "[]")
-    MATCHING_REVIEW=$(echo "$REVIEWS_JSON" | jq -r ".[] | select(.user.login | test(\"Copilot\"; \"i\")) | select(.commit_id == \"$TARGET_HEAD_SHA\")" 2>/dev/null || true)
+    if ! REVIEWS_JSON=$(gh api "repos/:owner/:repo/pulls/$PR_NUMBER/reviews" 2>/dev/null); then
+        error "Failed to query PR reviews for PR #$PR_NUMBER."
+        exit 1
+    fi
+    MATCHING_REVIEW=$(echo "$REVIEWS_JSON" | jq -c "[.[] | select(.user.login | test(\"Copilot\"; \"i\")) | select(.commit_id == \"$TARGET_HEAD_SHA\")] | last // empty" 2>/dev/null || true)
     
     # Check if Copilot commented directly in PR conversation (issue comments)
-    ISSUE_COMMENTS_JSON=$(gh api "repos/:owner/:repo/issues/$PR_NUMBER/comments" 2>/dev/null || echo "[]")
+    if ! ISSUE_COMMENTS_JSON=$(gh api "repos/:owner/:repo/issues/$PR_NUMBER/comments" 2>/dev/null); then
+        error "Failed to query PR issue comments for PR #$PR_NUMBER."
+        exit 1
+    fi
     MATCHING_ISSUE_COMMENT=$(echo "$ISSUE_COMMENTS_JSON" | jq -r ".[] | select(.user.login | test(\"Copilot\"; \"i\")) | select((.body | test(\"$TARGET_SHORT_SHA|$TARGET_HEAD_SHA\"; \"i\")) or (.body | test(\"Reviewed the latest commit\"; \"i\"))) | .body" 2>/dev/null | tail -1 || true)
 
-    if [[ -n "$MATCHING_ISSUE_COMMENT" ]]; then
+    if [[ -n "$MATCHING_REVIEW" ]]; then
+        info "Formal review for commit $TARGET_HEAD_SHA submitted by GitHub Copilot!"
+        COPILOT_FINISHED=true
+        break
+    elif [[ -n "$MATCHING_ISSUE_COMMENT" && -n "$COMPLETED_TARGET_RUN" && $WAITED -ge $MINIMUM_WAIT_SECONDS ]]; then
         info "GitHub Copilot posted a review response in PR comments!"
         COPILOT_FINISHED=true
         break
     elif [[ -n "$ACTIVE_COPILOT_RUNS" ]]; then
         # Copilot is currently active, keep waiting
         echo -ne "  ⏳ Copilot analysis actively running (${WAITED}s / ${MAX_WAIT_SECONDS}s)...\r"
-    elif [[ -n "$MATCHING_REVIEW" ]]; then
-        info "Formal review for commit $TARGET_HEAD_SHA submitted by GitHub Copilot!"
-        COPILOT_FINISHED=true
-        break
     elif [[ -n "$COMPLETED_TARGET_RUN" && $WAITED -ge $MINIMUM_WAIT_SECONDS ]]; then
         info "Copilot workflow run for commit $TARGET_HEAD_SHA completed!"
-        COPILOT_FINISHED=true
-        # Wait extra 5s for review comments/body to persist
-        sleep 5
-        break
     else
         echo -ne "  ⏳ Awaiting Copilot review trigger/completion (${WAITED}s / ${MAX_WAIT_SECONDS}s)...\r"
     fi
@@ -196,28 +205,83 @@ else
 fi
 
 step "6/6: Evaluating Copilot Feedback & Auto-Merge Decision"
-# 1. Fetch unresolved review threads via GraphQL
-UNRESOLVED_THREADS=$(gh api graphql -f query='query {
-  repository(owner: ":owner", name: ":repo") {
-    pullRequest(number: '"$PR_NUMBER"') {
-      reviewThreads(first: 100) {
-        nodes {
-          isResolved
-        }
+REPO_FULL_NAME=$(gh repo view --json nameWithOwner --jq '.nameWithOwner' 2>/dev/null)
+if [[ -z "$REPO_FULL_NAME" || "$REPO_FULL_NAME" != */* ]]; then
+    error "Failed to resolve repository owner/name via gh repo view."
+    exit 1
+fi
+REPO_OWNER="${REPO_FULL_NAME%/*}"
+REPO_NAME="${REPO_FULL_NAME#*/}"
+
+# 1. Fetch unresolved review threads via GraphQL (paginated)
+UNRESOLVED_THREADS=0
+THREADS_HAS_NEXT_PAGE=true
+THREADS_CURSOR=""
+
+while [[ "$THREADS_HAS_NEXT_PAGE" == "true" ]]; do
+    if [[ -n "$THREADS_CURSOR" ]]; then
+        if ! THREADS_PAGE_JSON=$(gh api graphql \
+            -f query='query($owner: String!, $repo: String!, $prNumber: Int!, $after: String) {
+  repository(owner: $owner, name: $repo) {
+    pullRequest(number: $prNumber) {
+      reviewThreads(first: 100, after: $after) {
+        pageInfo { hasNextPage endCursor }
+        nodes { isResolved }
       }
     }
   }
-}' --jq '[.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved == false)] | length' 2>/dev/null || echo "0")
+}' \
+            -F owner="$REPO_OWNER" \
+            -F repo="$REPO_NAME" \
+            -F prNumber="$PR_NUMBER" \
+            -F after="$THREADS_CURSOR" 2>/dev/null); then
+            error "Failed to query review threads page for PR #$PR_NUMBER."
+            exit 1
+        fi
+    else
+        if ! THREADS_PAGE_JSON=$(gh api graphql \
+            -f query='query($owner: String!, $repo: String!, $prNumber: Int!, $after: String) {
+  repository(owner: $owner, name: $repo) {
+    pullRequest(number: $prNumber) {
+      reviewThreads(first: 100, after: $after) {
+        pageInfo { hasNextPage endCursor }
+        nodes { isResolved }
+      }
+    }
+  }
+}' \
+            -F owner="$REPO_OWNER" \
+            -F repo="$REPO_NAME" \
+            -F prNumber="$PR_NUMBER" 2>/dev/null); then
+            error "Failed to query review threads for PR #$PR_NUMBER."
+            exit 1
+        fi
+    fi
+
+    PAGE_UNRESOLVED=$(echo "$THREADS_PAGE_JSON" | jq -r '[.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved == false)] | length')
+    UNRESOLVED_THREADS=$((UNRESOLVED_THREADS + PAGE_UNRESOLVED))
+    THREADS_HAS_NEXT_PAGE=$(echo "$THREADS_PAGE_JSON" | jq -r '.data.repository.pullRequest.reviewThreads.pageInfo.hasNextPage')
+    THREADS_CURSOR=$(echo "$THREADS_PAGE_JSON" | jq -r '.data.repository.pullRequest.reviewThreads.pageInfo.endCursor // empty')
+done
 
 # 2. Fetch line comments on TARGET_HEAD_SHA
-COMMENTS=$(gh api "repos/:owner/:repo/pulls/$PR_NUMBER/comments" 2>/dev/null || echo "[]")
+if ! COMMENTS=$(gh api "repos/:owner/:repo/pulls/$PR_NUMBER/comments" 2>/dev/null); then
+    error "Failed to query line-level review comments for PR #$PR_NUMBER."
+    exit 1
+fi
 TARGET_COMMENTS=$(echo "$COMMENTS" | jq -r "[.[] | select(.commit_id == \"$TARGET_HEAD_SHA\")] | length" 2>/dev/null || echo "0")
 
-# 3. Fetch Copilot review specifically for TARGET_HEAD_SHA (or latest)
-REVIEWS_JSON=$(gh api "repos/:owner/:repo/pulls/$PR_NUMBER/reviews" 2>/dev/null || echo "[]")
+# 3. Fetch Copilot review specifically for TARGET_HEAD_SHA
+if ! REVIEWS_JSON=$(gh api "repos/:owner/:repo/pulls/$PR_NUMBER/reviews" 2>/dev/null); then
+    error "Failed to query review state for PR #$PR_NUMBER."
+    exit 1
+fi
 MATCHING_REVIEW=$(echo "$REVIEWS_JSON" | jq -r "[.[] | select(.user.login | test(\"Copilot\"; \"i\")) | select(.commit_id == \"$TARGET_HEAD_SHA\")] | last // empty" 2>/dev/null || true)
+
 if [[ -z "$MATCHING_REVIEW" ]]; then
-    MATCHING_REVIEW=$(echo "$REVIEWS_JSON" | jq -r '[.[] | select(.user.login | test("Copilot"; "i"))] | last // empty' 2>/dev/null || true)
+    error "No GitHub Copilot review found for target commit $TARGET_HEAD_SHA."
+    error "MERGE BLOCKED: target commit must have explicit Copilot feedback."
+    exit 1
 fi
 
 REVIEW_STATE=""
@@ -228,7 +292,11 @@ if [[ -n "$MATCHING_REVIEW" ]]; then
 fi
 
 # 4. Check Copilot issue comment in PR conversation
-ISSUE_COMMENTS_JSON=$(gh api "repos/:owner/:repo/issues/$PR_NUMBER/comments" 2>/dev/null || echo "[]")
+if ! ISSUE_COMMENTS_JSON=$(gh api "repos/:owner/:repo/issues/$PR_NUMBER/comments" 2>/dev/null); then
+    error "Failed to query PR conversation comments for PR #$PR_NUMBER."
+    exit 1
+fi
+TARGET_ISSUE_COMMENTS=$(echo "$ISSUE_COMMENTS_JSON" | jq -r "[.[] | select(.user.login | test(\"Copilot\"; \"i\")) | select((.body | test(\"$TARGET_SHORT_SHA|$TARGET_HEAD_SHA\"; \"i\")) or (.body | test(\"Reviewed the latest commit\"; \"i\")))] | length" 2>/dev/null || echo "0")
 MATCHING_ISSUE_COMMENT=$(echo "$ISSUE_COMMENTS_JSON" | jq -r ".[] | select(.user.login | test(\"Copilot\"; \"i\")) | select((.body | test(\"$TARGET_SHORT_SHA|$TARGET_HEAD_SHA\"; \"i\")) or (.body | test(\"Reviewed the latest commit\"; \"i\"))) | .body" 2>/dev/null | tail -1 || true)
 
 # Check for recommendations or changes
@@ -244,12 +312,16 @@ if [[ "$TARGET_COMMENTS" -gt 0 ]]; then
     CHANGES_REQUESTED=true
 fi
 
+if [[ "$TARGET_ISSUE_COMMENTS" -gt 0 ]]; then
+    info "Found $TARGET_ISSUE_COMMENTS Copilot issue comment(s) for target commit context."
+fi
+
 if [[ "$REVIEW_STATE" == "CHANGES_REQUESTED" ]]; then
     info "Review state is CHANGES_REQUESTED."
     CHANGES_REQUESTED=true
 fi
 
-if echo "$REVIEW_BODY" | grep -qiE "(Changes recommended|Critical issues|Moderate issues|Suppressed comments|Changes requested)"; then
+if echo "$REVIEW_BODY" | grep -qiE "(### 🟡|Changes recommended|Critical issues|Moderate issues|Suppressed comments|Changes requested)"; then
     info "Review body indicates changes are recommended or issues found."
     CHANGES_REQUESTED=true
 fi
@@ -291,6 +363,16 @@ success "Zero blocking comments and zero changes recommended. Copilot approved!"
 info "Auto-merging PR #$PR_NUMBER into 'main'..."
 
 IS_ALREADY_MERGED=$(gh api "repos/:owner/:repo/pulls/$PR_NUMBER" --jq '.merged' 2>/dev/null || echo "false")
+CURRENT_PR_HEAD_SHA=$(gh api "repos/:owner/:repo/pulls/$PR_NUMBER" --jq '.head.sha' 2>/dev/null || true)
+if [[ -z "$CURRENT_PR_HEAD_SHA" ]]; then
+    error "Failed to read current PR head SHA before merge."
+    exit 1
+fi
+if [[ "$CURRENT_PR_HEAD_SHA" != "$TARGET_HEAD_SHA" ]]; then
+    error "PR head changed from $TARGET_HEAD_SHA to $CURRENT_PR_HEAD_SHA during review."
+    error "MERGE BLOCKED: restart ping-pong loop on latest commit."
+    exit 2
+fi
 
 if [[ "$IS_ALREADY_MERGED" == "true" ]]; then
     success "═════════════════════════════════════════════════════════════"
