@@ -3,9 +3,10 @@ name: dev-workflow
 description: >
   Multi-agent TDD development workflow for the soos project.
   Activate this skill when requested to implement a feature,
-  fix a bug, or add a component. Enforces a strict 4-phase TDD
-  cycle (Architect -> Tester -> Auditor -> Developer), English-only
-  deliverables, and Conventional Commits.
+  an issue from AI/BACKLOG.md, fix a bug, or add a component.
+  Enforces full AI/ and Docs/ context ingestion, strict test integrity
+  (zero test weakening), 4-phase TDD cycle (Architect -> Tester ->
+  Auditor -> Developer), English-only deliverables, and autonomous merge.
 ---
 
 # Multi-Agent Development Workflow — soos
@@ -13,136 +14,170 @@ description: >
 ## Scope
 
 This workflow applies to **all Rust codebase modifications**:
-- New features and crates
+- Implementing issues and sub-issues from `AI/BACKLOG.md`
+- Creating new crates and components
 - Bug and vulnerability fixes
-- Significant refactorings and behavioral adjustments
+- Refactoring and architectural adjustments
 
 It does NOT apply to pure documentation fixes, shell script adjustments, or minor configuration tweaks.
 
-## Prerequisites
+---
 
-Before starting, the agent MUST read:
-1. `AI/ARCHITECTURE.md` — Master architecture, threat model, security invariants
-2. `AI/DECISIONS.md` — Architectural decision records (ADRs)
-3. `AI/VERIFICATION_MATRIX.md` — Acceptance criteria for the targeted component
-4. `Docs/COMMIT_CONVENTION.md` — Conventional Commits 1.0.0 specification
+## 1. Mandatory Context Ingestion (AI/ and Docs/ Mandate)
 
-## Strict Language Policy: English Only
+Before writing any code or architecture specifications, the agent **MUST** ingest and align with the complete project context documented in `AI/` and `Docs/`:
+
+### Core Architectural Context (`AI/`)
+1. `AI/ARCHITECTURE.md` — Master system architecture, threat model, security invariants, latency budget
+2. `AI/DECISIONS.md` — Architectural Decision Records (ADRs) preventing hallucinations
+3. `AI/BACKLOG.md` — Comprehensive backlog specifying issues, sub-issues, acceptance criteria, and branches
+4. `AI/VERIFICATION_MATRIX.md` — Acceptance criteria and component verification matrix
+5. `AI/MOCK_STRATEGY.md` — Hardware-free simulation and virtual testing strategy
+6. `AI/ROLES_AND_WORKFLOW.md` — Multi-agent roles and quality committee guidelines
+
+### Technical & Security Guidelines (`Docs/`)
+1. `Docs/SECURITY_AND_QUALITY_GUIDELINES.md` — Master security guidelines, compiler profile hardening, workspace clippy restrictions, and PAM execution constraints
+2. `Docs/DEVELOPMENT_WORKFLOW.md` — Detailed development lifecycle, branch policies, and testing guidelines
+3. `Docs/COMMIT_CONVENTION.md` — Conventional Commits 1.0.0 specification
+4. `Docs/IPC_PROTOCOL.md` — Binary framing layout and IPC communication constraints
+5. `Docs/CI_CD_AND_SECURITY.md` — Continuous integration pipeline and supply-chain auditing
+
+---
+
+## 2. Absolute Invariant: Test Integrity & Anti-Weakening Rule
+
+> [!CAUTION]
+> **STRICT TEST INTEGRITY (ZERO WEAKENING)**:
+> Under **NO circumstances** is an AI agent permitted to modify, weaken, delete, or bypass an existing test to make it pass with broken, incomplete, or flawed production code.
+> 
+> - Tests authored in Phase 2 represent the immutable contractual specification derived from `AI/BACKLOG.md` and `AI/VERIFICATION_MATRIX.md`.
+> - If a test fails or the AI encounters an implementation block: **The AI MUST PERSEVERE, debug, and fix the production implementation** until it cleanly satisfies the test suite.
+> - Artificially modifying test expectations, deleting assertions, or silencing failures is considered an architectural invariant violation and a fatal defect.
+
+---
+
+## 3. Strict Language Policy: English Only
 
 Even if the user writes requests, prompts, or questions in French (or any other language), the AI agent MUST author ALL code, docstrings, inline comments, commit messages, PR titles/bodies, technical documentation in `Docs/`, and walkthroughs in `AI/walkthroughs/` strictly in English.
 
 ---
 
-## Phase 0 — Dedicated Topic Branch
+## 4. Phase 0 — Dedicated Topic Branch
 
 **Objective**: Isolate all work on a dedicated topic branch; NEVER commit directly to `main`.
 
-1. Verify current branch (`git status`).
-2. Create and switch to topic branch:
-   - `git checkout -b feat/<name>` (e.g. `feat/ipc-client`)
+1. Locate the targeted issue in `AI/BACKLOG.md` to identify the designated branch name.
+2. Verify current branch status (`git status`).
+3. Create and switch to topic branch:
+   - `git checkout -b feat/<name>` (e.g. `feat/policy-crate`, `feat/daemon-skeleton`)
    - `git checkout -b fix/<name>` (e.g. `fix/pam-timeout`)
-   - `git checkout -b test/<name>` (e.g. `test/docker-pam`)
-   - `git checkout -b chore/<name>` (e.g. `chore/ci-rules`)
+   - `git checkout -b test/<name>` (e.g. `test/fuzz-codec`)
+   - `git checkout -b chore/<name>` (e.g. `chore/guardrails`)
 
 ---
 
-## Phase 1 — Architect Agent
+## 5. Phase 1 — Architect Agent
 
-**Objective**: Specify and design before writing implementation.
+**Objective**: Specify and design before writing implementation code.
 
-1. Identify the target crate in the monorepo structure.
+1. Locate target crate in the workspace structure (`crates/<name>/`).
 2. Specify structs, enums, traits, and error types.
-3. Validate consistency with `AI/ARCHITECTURE.md`:
+3. Validate strict alignment with `AI/ARCHITECTURE.md` and `Docs/SECURITY_AND_QUALITY_GUIDELINES.md`:
    - Are security invariants respected?
    - Is privilege separation preserved?
    - Are dependencies strictly unidirectional?
-4. Document design choices in the implementation plan.
+   - Are fields and allocations strictly bounded?
+4. Document the technical design in the implementation plan.
 
 **Architect Checklist**:
-- [ ] Target crate identified in workspace
-- [ ] Types defined with bounded fields
-- [ ] Traits and interfaces specified
-- [ ] Security invariants verified
-- [ ] Zero unapproved dependencies
+- [ ] Target crate identified in monorepo
+- [ ] Bounded types and error enums specified
+- [ ] Traits and interfaces declared
+- [ ] Security invariants and latency budget verified
+- [ ] Zero unapproved third-party dependencies
 
 ---
 
-## Phase 2 — Tester Agent
+## 6. Phase 2 — Tester Agent (TDD Red Phase)
 
-**Objective**: Write tests BEFORE production code (TDD Red Phase).
+**Objective**: Write tests BEFORE production code.
 
-1. Write unit and property tests for public types and functions.
-2. Tests MUST fail initially (compilation or assertion failure).
-3. Cover both nominal and error paths (timeouts, malformed buffers, spoofed UIDs).
-4. For PAM components: always include a test asserting `PAM_IGNORE` fallback.
+1. Write unit, property, and invariant tests for public types and functions.
+2. **Tests MUST fail initially** (compilation error or assertion failure).
+3. Cover nominal paths, error paths, and edge cases (timeouts, malformed payloads, spoofed UIDs).
+4. For PAM components: always include a test asserting fail-closed `PAM_IGNORE` fallback.
 5. For protocol components: include round-trip serialization and oversized payload rejection tests.
 
 **Tester Checklist**:
-- [ ] Unit tests authored for all public functions
-- [ ] Error and edge cases covered
-- [ ] `PAM_IGNORE` fallback test included for PAM paths
-- [ ] Conforms to `AI/VERIFICATION_MATRIX.md`
+- [ ] Unit and property tests authored before implementation
+- [ ] Tests initially fail (Red Phase verified)
+- [ ] Error and boundary conditions covered
+- [ ] PAM fallback asserted where applicable
+- [ ] Acceptance criteria from `AI/VERIFICATION_MATRIX.md` implemented
 
 ---
 
-## Phase 3 — Auditor Agent
+## 7. Phase 3 — Auditor Agent (Security & Panic Safety)
 
-**Objective**: Static security and safety review BEFORE implementation.
+**Objective**: Static security and safety review BEFORE production code is written.
 
-1. Ensure zero `unwrap()` or `expect()` in PAM production code.
-2. Audit memory allocations and verify strict length bounds.
-3. Enforce `#![forbid(unsafe_code)]` in business crates.
-4. Verify `unsafe` is minimal, isolated, and documented in adapter crates.
-5. Confirm zero sensitive data (passwords, embeddings, raw frames) is logged or exposed.
-6. Verify `catch_unwind` wraps FFI boundaries.
+1. Ensure zero `unwrap()` or `expect()` in PAM and library production code.
+2. Verify `#![forbid(unsafe_code)]` in business crates (`protocol`, `policy`, `vision`).
+3. For adapter crates (`pam`, `camera-v4l`): verify `unsafe` is minimal, isolated, and documented with `// SAFETY:` comments (`clippy::undocumented_unsafe_blocks`).
+4. Ensure zero sensitive data (passwords, embeddings, raw frames) is logged or exposed in IPC schemas.
+5. Verify `catch_unwind` wraps FFI boundaries.
+6. Verify no stdout/stderr prints (`println!`, `eprintln!`, `dbg!`) exist in library or PAM code.
 
 **Auditor Checklist**:
-- [ ] Zero `unwrap()` / `expect()` in PAM code
-- [ ] Bounded allocations verified
+- [ ] Zero unwrap/expect in production pathways
+- [ ] Bounded allocations and memory bounds verified
 - [ ] `#![forbid(unsafe_code)]` active in business crates
-- [ ] Security invariants honored
-- [ ] Zero sensitive data in logs or IPC schemas
-- [ ] `catch_unwind` on all FFI entry points
+- [ ] `// SAFETY:` rationale on all unsafe blocks
+- [ ] Zero sensitive credentials in logs or schemas
+- [ ] Output isolation verified (no println!/dbg! in PAM)
 
 ---
 
-## Phase 4 — Developer Agent
+## 8. Phase 4 — Developer Agent (TDD Green Phase)
 
 **Objective**: Implement production code satisfying test suite.
 
-1. Write minimal code satisfying the Architect's specification and Auditor's constraints.
-2. Verify all tests pass (TDD Green Phase).
-3. Execute quality gates:
+1. Write the minimal production code satisfying the Architect specification and Auditor constraints.
+2. **Verify all tests pass (TDD Green Phase) WITHOUT modifying or weakening any test.**
+3. If tests fail: analyze root cause, debug, and fix the production code. Persevere until all tests pass cleanly.
+4. Execute workspace quality gates:
    - `cargo fmt --check`
-   - `cargo clippy --all-targets -- -D warnings`
+   - `cargo clippy --all-targets --all-features -- -D warnings`
    - `cargo test --all-targets`
    - `cargo deny check`
-4. Update `AI/VERIFICATION_MATRIX.md` criteria.
+5. Update `AI/VERIFICATION_MATRIX.md` criteria status.
 
 **Developer Checklist**:
-- [ ] Implementation conforms to Architect specification
-- [ ] All tests pass
+- [ ] Minimal production code implemented
+- [ ] All pre-written tests pass cleanly without modifications
 - [ ] `cargo fmt` clean
-- [ ] `cargo clippy -- -D warnings` clean
+- [ ] `cargo clippy` clean (zero warnings with `-D warnings`)
+- [ ] `cargo test` clean (all unit and invariant suites pass)
+- [ ] `cargo deny check` clean
 - [ ] `AI/VERIFICATION_MATRIX.md` updated
-- [ ] Technical documentation in `Docs/` updated
-- [ ] Walkthrough written in `AI/walkthroughs/NN_<name>.md`
 
 ---
 
-## Post-Implementation & Autonomous Pull Request Loop
+## 9. Autonomous PR, Review & Auto-Merge Loop
 
 Once development is complete:
-1. Update technical documentation in `Docs/` in English.
-2. Author walkthrough in `AI/walkthroughs/NN_<name>.md` in English.
-3. Run the autonomous PR and auto-merge loop:
+1. Author or update technical documentation in `Docs/` in professional English.
+2. Author sequential walkthrough in `AI/walkthroughs/NN_<name>.md` in professional English.
+3. Execute the autonomous loop:
    ```bash
    ./save.sh --auto-merge
    ```
-   This autonomous script:
-   - Runs local quality gates (fmt, clippy, unit + invariant tests, cargo-deny).
-   - Executes the independent **Candid Pre-Push Code Review** (`./scripts/candid_review.sh`) inspecting the raw diff without modification context for logic, security invariants, panic-safety, and English policy.
-   - Validates the Conventional Commit message and scans for secrets.
-   - Pushes branch to GitHub and opens a Pull Request.
-   - Polls GitHub Actions CI jobs until completion.
-   - Auto-merges to `main` upon green CI without requiring external review, then synchronizes local `main`.
+   This autonomous pipeline:
+   - Formats code (`cargo fmt`).
+   - Runs workspace Clippy (`cargo clippy --all-targets --all-features -- -D warnings`).
+   - Executes all unit and architectural invariant test suites (`cargo test --all-targets`).
+   - Audits supply chain dependencies and licenses (`cargo deny check`).
+   - Executes the independent **Candid Pre-Push Code Review** (`./scripts/candid_review.sh`) inspecting the raw diff for logic, security invariants, panic safety, and English policy.
+   - Pushes topic branch to GitHub and opens a Pull Request.
+   - Monitors GitHub Actions CI checks (Quality, Security, PAM Integration).
+   - Auto-merges into `main` via squash merge upon green CI, and synchronizes local `main`.

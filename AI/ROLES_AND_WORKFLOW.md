@@ -30,17 +30,18 @@ For every code feature or modification, development is executed in 4 sequential 
 
 ---
 
-## 2. Test-Driven Development (TDD) Invariants
-
-- Never produce business logic without pre-existing automated tests.
-- Always verify that critical security invariants in `tests/invariants/` pass continuously.
+## 2. Test-Driven Development (TDD) Invariants & Test Integrity
+- **Mandatory Context Ingestion**: Before starting, agents must review all architectural and security documents in `AI/` and `Docs/`.
+- **Zero Test Weakening Invariant**: Under **NO circumstances** may an AI agent modify, weaken, delete, or bypass an existing test to match faulty implementation code. When a test fails, the agent MUST persevere and fix the production code.
+- **Pre-Existing Tests Required**: Never produce business logic without pre-existing automated tests (Red Phase first).
+- **Continuous Invariant Verification**: Always assert that architectural security invariants in `tests/invariants/` pass continuously.
 
 ---
 
 ## 3. Automation Tooling & Quality Scripts
-
-- **`save.sh`:** Local quality pipeline and commit automation script (`cargo fmt`, `clippy -D warnings`, `test`, `deny check`, Conventional Commits).
-- **`scripts/pr_loop.sh`:** Autonomous loop orchestrating branch push, PR creation, CI monitoring, GitHub Copilot review integration, and auto-merge to `main`.
+- **`save.sh`:** Local quality pipeline and commit automation script (`cargo fmt`, `clippy -D warnings`, `test`, `deny check`, `scripts/candid_review.sh`, Conventional Commits).
+- **`scripts/candid_review.sh`:** Context-free, impartial pre-push audit asserting all architectural invariants, panic safety, output isolation, and English policy.
+- **`scripts/pr_loop.sh`:** Autonomous loop orchestrating branch push, PR creation, GitHub Actions CI monitoring, and auto-merge to `main`.
 - **`run_tests.sh`:** Isolated ephemeral Docker container executing `pamtester` validation without risking host lockout.
 
 ---
