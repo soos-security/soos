@@ -22,7 +22,7 @@ La branche `main` est protégée. Tout développement (nouvelle fonctionnalité,
 
 ---
 
-## 3. Workflow de développement TDD en 5 étapes
+## 3. Workflow de développement TDD en 6 étapes (Étape 0 à Étape 5)
 
 Pour toute tâche de code, l'agent IA et le développeur suivent rigoureusement ce cycle :
 

@@ -38,7 +38,7 @@ L'étape 2 de la CI échouait pour 3 raisons résolues :
 L'IA et les contributeurs suivent désormais ce cycle pour chaque étape :
 1. `git checkout -b <type>/<nom>` (`feat/`, `fix/`, `test/`, `chore/`)
 2. Workflow TDD (Architecte → Testeur → Auditeur → Développeur)
-3. Rdaction de la documentation dans `Docs/` et du walkthrough dans `AI/walkthroughs/`
+3. Rédaction de la documentation dans `Docs/` et du walkthrough dans `AI/walkthroughs/`
 4. Validation par `./save.sh` (qui exécute les 4 étapes : fmt, clippy, tests, cargo-deny)
 5. Création de la Pull Request vers `main` via `gh pr create`
 

@@ -38,31 +38,34 @@ Le projet impose une vérification de conformité à 3 niveaux concentriques :
 
 ## 2. Le script local `save.sh`
 
-Le script [`save.sh`](file:///home/hadrien/soos/save.sh) est l'outil principal du contributeur et de l'IA pour valider et committer le travail :
+Le script [`save.sh`](../save.sh) est l'outil principal du contributeur et de l'IA pour valider et committer le travail :
 - **Exécution séquentielle** avec arrêt immédiat au premier incident (`set -euo pipefail`).
 - **Génération automatique du message de commit conventionnel** basée sur la nature des fichiers modifiés (`feat(...)`, `test:`, `docs:`, `chore:`).
-- **Sécurité** : `save.sh` ne fait **jamais** de `git push`. Le push reste sous le contrôle exclusif de l'humain ou de l'étape de Pull Request.
+- **Contrôle du push** : Par défaut, `save.sh` effectue uniquement une sauvegarde et un commit locaux sans aucun `git push`. Pour pousser la branche vers GitHub et créer la Pull Request de manière intégrée, utiliser l'option `--push-pr`.
 
 Utilisation :
 ```bash
-# Sauvegarde avec message automatique :
+# Sauvegarde locale avec message automatique :
 ./save.sh
 
-# Sauvegarde avec message personnalisé :
+# Sauvegarde locale avec message personnalisé :
 ./save.sh "feat(policy): implémentation du rate limiting par UID"
+
+# Sauvegarde, push et création automatique de Pull Request :
+./save.sh --push-pr
 ```
 
 ---
 
 ## 3. Audit des dépendances avec `cargo-deny`
 
-Le fichier [`deny.toml`](file:///home/hadrien/soos/deny.toml) verrouille les approvisionnements de code tiers selon les directives d'architecture :
+Le fichier [`deny.toml`](../deny.toml) verrouille les approvisionnements de code tiers selon les directives d'architecture :
 
 ### Règles appliquées :
 - **Advisories** : Toute vulnérabilité RustSec connue non résolue entraîne l'échec de la CI.
 - **Licences** : Seules les licences OSS permissives sont autorisées pour les dépendances (MIT, Apache-2.0, BSD-2/3, ISC, etc.). Les crates internes du workspace sous licence AGPL-3.0 sont isolées via `publish = false` et `[licenses.private] ignore = true`.
 - **Sources** : Seul l'index officiel `crates.io` est autorisé (interdiction des registres obscurs ou dépôts Git non audités).
-- **Bans explicites** : Interdiction absolue de crates indésirables (notamment `opencv` conformément à [`AI/ARCHITECTURE.md`](file:///home/hadrien/soos/AI/ARCHITECTURE.md)).
+- **Bans explicites** : Interdiction absolue de crates indésirables (notamment `opencv` conformément à [`AI/ARCHITECTURE.md`](../AI/ARCHITECTURE.md)).
 
 Pour exécuter l'audit manuellement :
 ```bash
