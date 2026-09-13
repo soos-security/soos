@@ -180,7 +180,13 @@ fi
 success "Zéro commentaire bloquant. Les 3 vérifications CI et l'analyse de code sont 100% au vert !"
 info "Fusion automatique de la PR #$PR_NUMBER vers 'main'..."
 
-if gh pr merge "$PR_NUMBER" --squash --delete-branch --admin 2>/dev/null || gh pr merge "$PR_NUMBER" --squash --delete-branch; then
+IS_ALREADY_MERGED=$(gh api "repos/:owner/:repo/pulls/$PR_NUMBER" --jq '.merged' 2>/dev/null || echo "false")
+
+if [[ "$IS_ALREADY_MERGED" == "true" ]]; then
+    success "═════════════════════════════════════════════════════════════"
+    success "  Pull Request #$PR_NUMBER déjà fusionnée avec succès dans main !"
+    success "═════════════════════════════════════════════════════════════"
+elif gh pr merge "$PR_NUMBER" --squash --delete-branch --admin 2>/dev/null || gh pr merge "$PR_NUMBER" --squash --delete-branch; then
     success "═════════════════════════════════════════════════════════════"
     success "  Pull Request #$PR_NUMBER validée par Copilot et fusionnée dans main !"
     success "═════════════════════════════════════════════════════════════"
@@ -190,6 +196,9 @@ else
 fi
 
 info "Bascule sur la branche locale 'main' et synchronisation..."
+# Préserver les modifications locales éventuelles (ex: compte-rendus générés pendant la relecture)
+git stash --include-untracked >/dev/null 2>&1 || true
 git checkout main
 git pull origin main
+git stash pop >/dev/null 2>&1 || true
 success "Branche locale 'main' synchronisée. Mission accomplie !"
