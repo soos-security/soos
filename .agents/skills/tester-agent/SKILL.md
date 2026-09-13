@@ -40,9 +40,11 @@ Your responsibility is to author comprehensive automated tests that define the c
          clippy::panic,
          clippy::indexing_slicing,
          clippy::arithmetic_side_effects,
+         clippy::manual_range_contains,
          reason = "Contractual test suite utilizes direct assertions, unwrap, and indexing"
      )]
      ```
+   - Range Assertions: Prefer `(min..=max).contains(&val)` over `val >= min && val <= max` to comply with Clippy conventions.
 
 5. **Deliverable**:
    - Well-structured unit and integration tests located in `crates/<name>/src/` or `crates/<name>/tests/`.

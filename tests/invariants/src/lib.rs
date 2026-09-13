@@ -36,7 +36,7 @@ mod tests {
     #[test]
     fn test_business_crates_forbid_unsafe_code() {
         let root = workspace_root();
-        let business_crates = ["protocol", "policy", "vision"];
+        let business_crates = ["protocol", "policy", "vision", "inference-ort"];
 
         for crate_name in business_crates {
             let lib_path = root
