@@ -83,12 +83,12 @@ This document translates the critical gating criteria from §11 of `ARCHITECTURE
 
 | # | Criterion | Test Method | Status |
 |---|---|---|---|
-| V1 | Golden tests: preprocessing matches training pipeline | Fixture tests | ☐ Pending |
+| V1 | Golden tests: preprocessing matches training pipeline | Fixture tests (`align_tests::test_canonical_identity_alignment_matches_reference`, `align_tests::test_translated_face_alignment_recenters`, `align_tests::test_rotated_face_alignment_levels_eyes`) | ☑ Validated |
 | V2 | L2-normalized embeddings (norm ≈ 1.0) | Unit & property tests (`embedding_tests::test_l2_norm_and_normalization_criterion_v2`, `proptest_suite::prop_embedding_normalization_criterion_v2`) | ☑ Validated |
-| V3 | Cosine similarity correctness | Known vector distance test | ☐ Pending |
-| V4 | Rejects if 0 or > 1 face detected | Unit tests | ☐ Pending |
-| V5 | Full pipeline < 150ms p95 on reference hardware | Benchmark | ☐ Pending |
-| V6 | `#![forbid(unsafe_code)]` enabled | Invariant test | ☐ Pending |
+| V3 | Cosine similarity correctness | Known vector distance test (`matcher_tests::test_cosine_similarity_identical_vectors`, `matcher_tests::test_cosine_similarity_orthogonal_vectors`, `matcher_tests::test_cosine_similarity_known_precomputed_vectors`) | ☑ Validated |
+| V4 | Rejects if 0 or > 1 face detected | Unit tests (`pipeline_tests::test_pipeline_rejects_zero_faces`, `pipeline_tests::test_pipeline_rejects_two_faces`, `pipeline_tests::test_pipeline_rejects_three_faces`) | ☑ Validated |
+| V5 | Full pipeline < 150ms p95 on reference hardware | Benchmark (`bench_tests::test_pipeline_latency_budget_under_150ms_p95` — achieved 28.02ms p95) | ☑ Validated |
+| V6 | `#![forbid(unsafe_code)]` enabled | Invariant test (`soos-invariants::test_business_crates_forbid_unsafe_code`) | ☑ Validated |
 
 ---
 

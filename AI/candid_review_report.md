@@ -1,63 +1,60 @@
 # Candid Review Report
 
 - **Date**: 2026-09-13
-- **Target Branch**: feat/inference-ort
+- **Target Branch**: feat/vision-pipeline
 - **Base Reference**: origin/main
 - **Audited Files**:
   - Cargo.lock
   - Cargo.toml
-  - models/manifest.toml
-  - crates/inference-ort/Cargo.toml
-  - crates/inference-ort/src/lib.rs
-  - crates/inference-ort/src/error.rs
-  - crates/inference-ort/src/manifest.rs
-  - crates/inference-ort/src/detector.rs
-  - crates/inference-ort/src/landmarks.rs
-  - crates/inference-ort/src/embedding.rs
-  - crates/inference-ort/src/registry.rs
-  - crates/inference-ort/src/mock.rs
-  - crates/inference-ort/tests/manifest_tests.rs
-  - crates/inference-ort/tests/detector_tests.rs
-  - crates/inference-ort/tests/landmark_tests.rs
-  - crates/inference-ort/tests/embedding_tests.rs
-  - crates/inference-ort/tests/registry_tests.rs
-  - crates/inference-ort/tests/proptest_suite.rs
-  - Docs/INFERENCE_ORT_CRATE.md
+  - crates/vision/Cargo.toml
+  - crates/vision/src/lib.rs
+  - crates/vision/src/error.rs
+  - crates/vision/src/color.rs
+  - crates/vision/src/align.rs
+  - crates/vision/src/matcher.rs
+  - crates/vision/src/pipeline.rs
+  - crates/vision/tests/color_tests.rs
+  - crates/vision/tests/align_tests.rs
+  - crates/vision/tests/matcher_tests.rs
+  - crates/vision/tests/pipeline_tests.rs
+  - crates/vision/tests/bench_tests.rs
+  - tests/fixtures/mod.rs
+  - Docs/VISION_CRATE.md
   - AI/VERIFICATION_MATRIX.md
-  - AI/plan_evaluations/03_inference_ort_plan_evaluation.md
-  - AI/walkthroughs/21_inference_ort_onnx_runtime_wrapper.md
+  - AI/BACKLOG.md
+  - AI/walkthroughs/22_vision_preprocessing_and_matching_pipeline.md
 
 ## 1. Executive Summary
-Audit of the `inference-ort` crate implementation introducing the CPU-isolated ONNX Runtime wrapper for face detection, 5-point landmark regression, MobileFaceNet embedding generation, and cryptographic model manifest attestation. All code strictly adheres to architectural invariants, zero-trust constraints, panic safety, and the English-only deliverable policy.
+Independent, cold diff review of the `soos-vision` crate implementation covering color conversion (YUYV, Grey, RGB24, MJPEG), 5-point facial landmark affine alignment (Umeyama similarity transform to 112×112 ArcFace crop), cosine similarity matching, and end-to-end `VisionPipeline` orchestrator enforcing the single-face security invariant.
 
-## 2. Deep Reasoning Audit
+## 2. Deep Reasoning Audit on 5 Pillars
 
-### Logic & Architecture
-- [PASS]: State transitions, model registry caching, and session lifecycle are sound.
-- [PASS]: Deterministic pure-Rust NMS algorithm guarantees platform-independent suppression order using secondary coordinate sorting.
-- [PASS]: Prior box calculations for UltraFace Slim 320 yield exactly 4,420 anchor boxes matching model topology.
-- [PASS]: Global security invariant enforced: model SHA-256 digests are verified against `models/manifest.toml` before creating ONNX Runtime sessions.
+### Pillar 1: Logic & Architecture
+- [PASS]: Pure Rust implementation of color conversions (YUYV 4:2:2 fixed-point integer BT.601, Grayscale 3-channel broadcast, RGB24 passthrough, MJPEG decompression via `jpeg-decoder`).
+- [PASS]: 2D similarity transform (closed-form Umeyama formulation) accurately maps facial landmarks to standard ArcFace 112×112 reference coordinates with bilinear interpolation and boundary padding.
+- [PASS]: Cosine similarity correctly handles dot products, Euclidean normalization, and rejects degenerate zero-norm vectors.
+- [PASS]: `VisionPipeline` enforces the strict single-face security invariant, failing closed if 0 faces or >1 faces are detected in a frame.
 
-### PAM Concurrency & Deadlines
-- [PASS]: `inference-ort` is strictly decoupled from the PAM module (`pam_soos.so`); PAM never links or executes ONNX Runtime.
-- [PASS]: Sessions are held warm in memory inside `soos-daemon`, satisfying the sub-150ms verification latency budget.
+### Pillar 2: PAM Concurrency & Real-Time Deadlines
+- [PASS]: `soos-vision` is decoupled from the PAM module (`pam_soos.so`); zero Tokio or asynchronous runtimes in the crate.
+- [PASS]: Full verification pipeline latency on 640×480 YUYV frames measured at $p95 = 28.02\text{ms}$, well within the §7 150ms latency budget.
 - [PASS]: Output isolation verified: zero `println!`, `eprintln!`, or `dbg!` macro calls in production code.
 
-### Panic Safety & Fallback
-- [PASS]: Production code declares `#![forbid(unsafe_code)]` and `#![deny(clippy::unwrap_used, clippy::expect_used)]`.
-- [PASS]: Fallible operations return typed `Result<T, InferenceError>`.
-- [PASS]: Output tensor extraction uses safe iteration (`into_iter()`) without unchecked direct array indexing.
-- [PASS]: Corrupted, missing, or tampered models fail closed with typed errors.
+### Pillar 3: Panic Safety & Fallback
+- [PASS]: Production code declares `#![forbid(unsafe_code)]` and inherits workspace zero-panic clippy lints.
+- [PASS]: Zero `unwrap()` or `expect()` in production code.
+- [PASS]: All fallible operations return structured `Result<T, VisionError>`.
+- [PASS]: Arithmetic on image dimensions and buffer sizes uses checked arithmetic (`checked_mul`) preventing integer overflow exploits.
 
-### Test Integrity & Anti-Weakening
-- [PASS]: Pre-existing test contracts are fully preserved; no tests were weakened or deleted.
-- [PASS]: Comprehensive test suite authors 26 new tests covering nominal, edge, and error paths, including adversarial property-based testing (`proptest`).
-- [PASS]: Verification Matrix Criterion `V2` (L2-normalized embeddings $||v||_2 \approx 1.0$) is thoroughly validated across unit and property tests.
+### Pillar 4: Test Integrity & Anti-Weakening
+- [PASS]: Pre-existing test contracts are fully preserved across all crates; zero tests were weakened or deleted.
+- [PASS]: Comprehensive test suite authors 25 new tests covering color conversions, golden affine alignment (V1), cosine similarity correctness (V3), single-face security invariant (V4), and latency benchmark (V5).
+- [PASS]: All tests pass cleanly across the entire workspace monorepo.
 
-### Memory & Secret Bounds
-- [PASS]: Zero credential handling: the crate processes only pixel buffers, geometric coordinates, and numerical embeddings.
-- [PASS]: Bounded memory allocations throughout tensor pre-processing and session outputs.
-- [PASS]: Strict prohibition of `opencv` and `nokhwa` respected across all manifests and source code.
+### Pillar 5: Memory & Secret Bounds
+- [PASS]: Zero credential handling: processes only ephemeral pixel buffers, geometric coordinates, and numerical embeddings.
+- [PASS]: Strict prohibition against `opencv` and `nokhwa` respected; `jpeg-decoder` is pure-Rust and compliant with `deny.toml`.
+- [PASS]: All documentation, comments, and identifiers strictly adhere to the English-only deliverable policy.
 
 ## 3. Detailed Findings & Action Items
 - Zero blocking issues identified. All invariants and acceptance criteria are satisfied.

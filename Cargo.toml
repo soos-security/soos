@@ -7,6 +7,7 @@ members = [
     "crates/daemon",
     "crates/camera-v4l",
     "crates/inference-ort",
+    "crates/vision",
     "tests/invariants",
 ]
 
@@ -54,12 +55,15 @@ tempfile = "3"
 getrandom = "0.3"
 libc = "0.2"
 
+jpeg-decoder = { version = "0.3", default-features = false }
+
 # Internal workspace crates
 soos-protocol = { path = "crates/protocol", version = "0.1.0" }
 soos-policy = { path = "crates/policy", version = "0.1.0" }
 soos-daemon = { path = "crates/daemon", version = "0.1.0" }
 soos-camera-v4l = { path = "crates/camera-v4l", version = "0.1.0" }
 soos-inference-ort = { path = "crates/inference-ort", version = "0.1.0" }
+soos-vision = { path = "crates/vision", version = "0.1.0" }
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"

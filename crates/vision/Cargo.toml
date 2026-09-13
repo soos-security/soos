@@ -1,0 +1,19 @@
+[package]
+name = "soos-vision"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+soos-inference-ort = { workspace = true }
+soos-camera-v4l = { workspace = true }
+thiserror = { workspace = true }
+jpeg-decoder = { workspace = true }
+
+[dev-dependencies]
+proptest = "1"

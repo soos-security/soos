@@ -263,34 +263,34 @@ Pure business logic crate: takes structured inputs (score, PAD result, UID conte
 
 #### Sub-issues:
 
-- **#7.1** — Scaffold `crates/vision/` with `Cargo.toml`, `#![forbid(unsafe_code)]`
+- [x] **#7.1** — Scaffold `crates/vision/` with `Cargo.toml`, `#![forbid(unsafe_code)]`
   - Dependencies: `soos-inference-ort`, `soos-protocol`
   - Acceptance: `V6` — `forbid(unsafe_code)` enforced
 
-- **#7.2** — Implement color conversion (YUYV/MJPEG → RGB)
+- [x] **#7.2** — Implement color conversion (YUYV/MJPEG → RGB)
   - Pure Rust, no OpenCV
   - Support common V4L2 output formats
 
-- **#7.3** — Implement affine alignment from 5-point landmarks
+- [x] **#7.3** — Implement affine alignment from 5-point landmarks
   - Standard alignment transform → 112×112 crop
   - Golden test fixtures: known input image → expected aligned output
   - Acceptance: `V1` — golden tests match training pipeline
 
-- **#7.4** — Implement cosine similarity matcher
+- [x] **#7.4** — Implement cosine similarity matcher
   - `fn cosine_similarity(a: &[f32], b: &[f32]) -> f32`
   - Known-vector distance tests with precomputed expected values
   - Acceptance: `V3` — correctness verified
 
-- **#7.5** — Implement `VisionPipeline` orchestrator
+- [x] **#7.5** — Implement `VisionPipeline` orchestrator
   - detect → count faces → align → extract embedding → match
   - Reject if 0 or > 1 face detected
   - Acceptance: `V4` — rejection tests for 0 and multi-face
 
-- **#7.6** — Benchmark: full pipeline < 150ms p95
+- [x] **#7.6** — Benchmark: full pipeline < 150ms p95
   - On reference hardware (document specs)
   - Acceptance: `V5` — latency budget met
 
-- **#7.7** — Create test fixtures in `tests/fixtures/`
+- [x] **#7.7** — Create test fixtures in `tests/fixtures/`
   - Sample facial images (known subjects, unknown subjects)
   - Pre-computed embeddings for regression testing
   - Multi-face and no-face images for rejection tests
