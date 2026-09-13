@@ -176,35 +176,35 @@ Pure business logic crate: takes structured inputs (score, PAD result, UID conte
 
 #### Sub-issues:
 
-- **#5.1** — Scaffold `crates/camera-v4l/` with `Cargo.toml`
+- [x] **#5.1** — Scaffold `crates/camera-v4l/` with `Cargo.toml`
   - Dependencies: `v4l = "0.14"`, `arc-swap`
   - Feature flag: `mock-camera = []`
 
-- **#5.2** — Define `CameraManager` trait
+- [x] **#5.2** — Define `CameraManager` trait
   - `fn latest_frame(&self) -> Option<Arc<Frame>>`
   - `fn is_ready(&self) -> bool`
   - `Frame` struct: `data: Vec<u8>`, `width: u32`, `height: u32`, `timestamp_mono_ns: u64`, `format: PixelFormat`
 
-- **#5.3** — Implement `V4lCameraManager` (production)
+- [x] **#5.3** — Implement `V4lCameraManager` (production)
   - Open device by `/dev/v4l/by-id/...` path (configurable)
   - MMAP streaming with buffer rotation
   - Dedicated blocking thread, `ArcSwap<Frame>` for lock-free reads
   - Discard first 15–30 frames for auto-exposure stabilization
   - Acceptance: `C4`, `C5`
 
-- **#5.4** — Implement `MockCameraManager` (behind `mock-camera` feature)
+- [x] **#5.4** — Implement `MockCameraManager` (behind `mock-camera` feature)
   - Generate static 640×480 test frames with monotonic timestamps
   - Simulate device errors: `ENODEV`, `EIO`, `EBUSY`
   - Simulate frame starvation (no new frame for N ms)
   - Acceptance: `C1`
 
-- **#5.5** — Implement error recovery with bounded backoff
+- [x] **#5.5** — Implement error recovery with bounded backoff
   - Handle `ENODEV` / `EIO` / `EBUSY` without panic
   - Exponential backoff: 100ms → 200ms → 400ms → cap at 5s
   - Report `Unavailable` to IPC during recovery
   - Acceptance: `C3`
 
-- **#5.6** — Implement idle power management
+- [x] **#5.6** — Implement idle power management
   - Drop to 5 FPS after 60s of inactivity
   - Resume full FPS on next auth request
   - Acceptance: `C2` (frame available in < 5ms via `ArcSwap`)

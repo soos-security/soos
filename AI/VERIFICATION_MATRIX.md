@@ -71,11 +71,11 @@ This document translates the critical gating criteria from §11 of `ARCHITECTURE
 
 | # | Criterion | Test Method | Status |
 |---|---|---|---|
-| C1 | `mock-camera` feature provides functional `MockCameraManager` | Unit test | ☐ Pending |
-| C2 | Fresh frame available in < 5ms via `ArcSwap` | Benchmark | ☐ Pending |
-| C3 | Handles `ENODEV`, `EIO`, `EBUSY` without panic | Error simulation tests | ☐ Pending |
-| C4 | Hardware selection by `/dev/v4l/by-id/` rather than index | Configuration test | ☐ Pending |
-| C5 | Drops first 15–30 frames after startup for auto-exposure | Functional test | ☐ Pending |
+| C1 | `mock-camera` feature provides functional `MockCameraManager` | Unit test (`mock_camera_tests::test_mock_camera_generates_frames_and_readiness`) | ☑ Validated |
+| C2 | Fresh frame available in < 5ms via `ArcSwap` | Benchmark (`bench_latency_tests::test_arcswap_frame_retrieval_latency_under_5ms`) | ☑ Validated |
+| C3 | Handles `ENODEV`, `EIO`, `EBUSY` without panic | Error simulation tests (`error_recovery_tests::test_error_recovery_enodev_without_panic`) | ☑ Validated |
+| C4 | Hardware selection by `/dev/v4l/by-id/` rather than index | Configuration test (`config_hardware_tests::test_config_by_id_path_selection`) | ☑ Validated |
+| C5 | Drops first 15–30 frames after startup for auto-exposure | Functional test (`warmup_tests::test_warmup_frames_discard_before_ready`) | ☑ Validated |
 
 ---
 
