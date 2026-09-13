@@ -79,15 +79,39 @@ fi
 
 step "3/6 : Sollicitation de la review Copilot"
 info "Sollicitation explicite de GitHub Copilot..."
-gh api "repos/:owner/:repo/pulls/$PR_NUMBER/requested_reviewers" -f 'reviewers[]=copilot' 2>/dev/null || true
+gh api "repos/:owner/:repo/pulls/$PR_NUMBER/requested_reviewers" -f 'reviewers[]=copilot' > /dev/null 2>&1 || true
 success "Demande de review transmise à GitHub Copilot."
 
 step "4/6 : Attente des vérifications CI (GitHub Actions)"
 info "Surveillance des 3 jobs CI pour la PR #$PR_NUMBER (Quality, Security, PAM Docker)..."
-if ! gh pr checks "$PR_NUMBER" --watch --interval 10; then
-    error "Les vérifications CI ont échoué sur GitHub Actions !"
-    gh pr checks "$PR_NUMBER"
-    exit 1
+# Attente de 10s pour que GitHub enregistre les workflows déclenchés par la PR
+sleep 10
+
+# Boucler avec tolérance pour le démarrage des checks
+CI_PASSED=false
+for attempt in $(seq 1 60); do
+    STATUS=$(gh pr checks "$PR_NUMBER" 2>&1 || true)
+    if echo "$STATUS" | grep -q "All checks were successful"; then
+        CI_PASSED=true
+        break
+    fi
+    if echo "$STATUS" | grep -qE "(failing|cancelled)"; then
+        error "Les vérifications CI ont échoué sur GitHub Actions !"
+        echo "$STATUS"
+        exit 1
+    fi
+    # Si des checks sont en cours ou pas encore enregistrés, attendre
+    echo -ne "  ⏳ Vérifications CI en cours (tentative ${attempt}/60)...\r"
+    sleep 10
+done
+echo ""
+
+if [[ "$CI_PASSED" != "true" ]]; then
+    # Une dernière tentative avec gh pr checks pour lever l'erreur éventuelle
+    if ! gh pr checks "$PR_NUMBER"; then
+        error "Délai d'attente CI dépassé ou échec des vérifications !"
+        exit 1
+    fi
 fi
 success "Tous les checks CI sont passés au vert !"
 
