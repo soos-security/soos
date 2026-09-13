@@ -28,12 +28,19 @@ When invoked with a target issue (e.g. `Issue #1: policy Crate`), this skill act
                   └──────────────────────────────┬──────────────────────────────┘
                                                  │
                                                  ▼
-                  ┌─────────────────────────────────────────────────────────────┐
-                  │ Phase 1: Architect Sub-Agent (.agents/skills/architect-agent)│
-                  │ Scaffolds crate, specifies bounded types, traits, errors    │
-                  └──────────────────────────────┬──────────────────────────────┘
-                                                 │
-                                                 ▼
+                   ┌─────────────────────────────────────────────────────────────┐
+                   │ Phase 1: Architect Sub-Agent (.agents/skills/architect-agent)│
+                   │ Scaffolds crate, specifies bounded types, traits, errors    │
+                   └──────────────────────────────┬──────────────────────────────┘
+                                                  │
+                                                  ▼
+                   ┌─────────────────────────────────────────────────────────────┐
+                   │ Phase 1.5: Plan Evaluator Sub-Agent (plan-evaluator)        │
+                   │ Audits plan vs AI/ARCHITECTURE.md across 6 pillars          │
+                   │ Self-validates plan (VALIDATION_VERDICT: APPROVED)          │
+                   └──────────────────────────────┬──────────────────────────────┘
+                                                  │
+                                                  ▼
                   ┌─────────────────────────────────────────────────────────────┐
                   │ Phase 2: Tester Sub-Agent (.agents/skills/tester-agent)     │
                   │ Authors unit/property tests, asserts PAM fallback (RED)     │
@@ -103,6 +110,11 @@ Before starting Phase 1, the orchestrator verifies full ingestion of:
 - Inherits workspace lints: `[lints] workspace = true`.
 - Specifies bounded structs, enums, and `thiserror` error types.
 - Asserts `#![forbid(unsafe_code)]` in business crates.
+
+### Phase 1.5: Plan Evaluator Sub-Agent ([plan-evaluator](file:///home/hadrien/soos/.agents/skills/plan-evaluator/SKILL.md))
+- Audits implementation plans and technical specifications against `AI/ARCHITECTURE.md`, `AI/DECISIONS.md`, `AI/BACKLOG.md`, and `AI/VERIFICATION_MATRIX.md`.
+- Evaluates across 6 core pillars: Architectural Alignment, PAM Real-Time Deadlines, Panic Safety, Dependency Isolation, Memory/Secret Hygiene, and Test Integrity.
+- Validates the implementation plan autonomously (`VALIDATION_VERDICT: APPROVED`) before execution proceeds.
 
 ### Phase 2: Tester Sub-Agent ([tester-agent](file:///home/hadrien/soos/.agents/skills/tester-agent/SKILL.md))
 - Authors unit, property (`proptest`), and invariant tests.
