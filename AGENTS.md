@@ -111,9 +111,9 @@ soos/
   1. **Phase 0 — Topic Branch**: `git checkout -b <type>/<name>`. Pre-commit hook prevents direct commits to `main`.
   2. **Phases 1 to 4 — TDD Cycle**: Architect → Tester → Auditor → Developer.
   3. **Documentation & Walkthrough**: Update technical docs in `Docs/` and author sequential walkthrough in `AI/walkthroughs/NN_<name>.md`.
-  4. **Validation & Autonomous Push**: Run `./save.sh --auto-merge` (or `scripts/pr_loop.sh`).
-  5. **Copilot Review Loop**: Autonomous loop requests review, polls CI and Copilot, surfaces review comments, applies corrections, and pushes updates.
-  6. **Auto-Merge**: When all 3 CI checks are green and zero unresolved review comments remain, the PR is automatically squash-merged into `main` and local `main` is updated.
+  4. **Validation & Candid Pre-Push Review**: Execute local quality pipeline and `./scripts/candid_review.sh` (context-free, impartial audit of the raw diff for logic, security invariants, panic safety, and English policy).
+  5. **Autonomous Push & PR**: `./save.sh --auto-merge` (or `scripts/pr_loop.sh`) opens PR and monitors CI checks (Quality, Security, PAM Docker).
+  6. **Streamlined Auto-Merge**: When all GitHub Actions CI checks are green, the PR is automatically squash-merged into `main` without requiring external review, and local `main` is updated.
   7. **Zero Human Friction**: The AI agent completes the cycle autonomously through merge.
 
 ---

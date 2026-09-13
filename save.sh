@@ -136,7 +136,7 @@ fi
 # ---------------------------------------------------------------------------
 # Step 1: Code Formatting
 # ---------------------------------------------------------------------------
-step "1/4: cargo fmt"
+step "1/5: cargo fmt"
 info "Formatting Rust code with rustfmt..."
 if cargo fmt; then
     success "Code formatted successfully."
@@ -148,7 +148,7 @@ fi
 # ---------------------------------------------------------------------------
 # Step 2: Static Analysis (Clippy)
 # ---------------------------------------------------------------------------
-step "2/4: cargo clippy"
+step "2/5: cargo clippy"
 info "Running Clippy linting (--all-targets -- -D warnings)..."
 if cargo clippy --all-targets -- -D warnings; then
     success "Zero Clippy warnings detected."
@@ -161,7 +161,7 @@ fi
 # ---------------------------------------------------------------------------
 # Step 3: Automated Tests (Unit & Invariant Suites)
 # ---------------------------------------------------------------------------
-step "3/4: cargo test"
+step "3/5: cargo test"
 info "Running test suite (unit tests and security invariants)..."
 if cargo test --all-targets; then
     success "All automated tests passed successfully."
@@ -174,7 +174,7 @@ fi
 # ---------------------------------------------------------------------------
 # Step 4: Dependency & Security Auditing (cargo-deny)
 # ---------------------------------------------------------------------------
-step "4/4: cargo deny check"
+step "4/5: cargo deny check"
 if command -v cargo-deny &> /dev/null; then
     info "Auditing third-party supply chain (licenses, advisories, sources, bans)..."
     if cargo deny check; then
@@ -187,6 +187,19 @@ if command -v cargo-deny &> /dev/null; then
 else
     warn "cargo-deny is not installed locally — skipping check."
     warn "Install with: cargo install cargo-deny"
+fi
+
+# ---------------------------------------------------------------------------
+# Step 5: Independent Candid Pre-Push Code Review
+# ---------------------------------------------------------------------------
+step "5/5: candid review"
+if [[ -f "./scripts/candid_review.sh" ]]; then
+    if ./scripts/candid_review.sh; then
+        success "Candid pre-push review passed."
+    else
+        error "Candid pre-push review failed invariant checks."
+        exit 1
+    fi
 fi
 
 # ---------------------------------------------------------------------------
