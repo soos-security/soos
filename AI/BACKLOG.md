@@ -72,37 +72,37 @@ Pure business logic crate: takes structured inputs (score, PAD result, UID conte
 
 #### Sub-issues:
 
-- **#2.1** — Scaffold `crates/daemon/` with `Cargo.toml` (binary crate), add `tokio` workspace dep
+- [x] **#2.1** — Scaffold `crates/daemon/` with `Cargo.toml` (binary crate), add `tokio` workspace dep
   - `[[bin]] name = "soos-daemon"`
   - Dependencies: `tokio`, `soos-protocol`, `soos-policy`, `nix` (for `SO_PEERCRED`)
 
-- **#2.2** — Implement socket lifecycle manager
+- [x] **#2.2** — Implement socket lifecycle manager
   - Validate `/run/soos/` ownership (root:soos, not world-writable, not symlink)
   - Unlink stale socket after `lstat` verification
   - Bind `/run/soos/daemon.sock` with mode `0660`
   - Acceptance: `D1` — socket created with correct permissions
 
-- **#2.3** — Implement `SO_PEERCRED` connection handler
+- [x] **#2.3** — Implement `SO_PEERCRED` connection handler
   - On every `accept()`: extract `peer.uid`, `peer.pid` via `getsockopt(SO_PEERCRED)`
   - Cross-reference against target UID from request
   - Acceptance: `D2` — spoofed UID test rejects mismatched peer
 
-- **#2.4** — Implement connection dispatcher with bounded concurrency
+- [x] **#2.4** — Implement connection dispatcher with bounded concurrency
   - `tokio::sync::Semaphore` capping concurrent connections (configurable, default 8)
   - Per-connection timeout enforcement
   - Read framed request → validate → dispatch to (stubbed) handler → write framed response
 
-- **#2.5** — Implement health check subsystem
+- [x] **#2.5** — Implement health check subsystem
   - Internal struct tracking `socket_ready: bool`, `camera_ready: bool`, `models_verified: bool`
   - Exposed via admin socket or structured logging
   - Acceptance: `D4` — health check reports component readiness
 
-- **#2.6** — Create systemd unit file `packaging/soos-daemon.service`
+- [x] **#2.6** — Create systemd unit file `packaging/soos-daemon.service`
   - Full sandbox: `NoNewPrivileges`, `PrivateTmp`, `ProtectHome`, `ProtectSystem=strict`, `RestrictAddressFamilies=AF_UNIX`, etc.
   - `RuntimeDirectory=soos`, `RuntimeDirectoryMode=0750`
   - Acceptance: `D3` — systemd restrictions active
 
-- **#2.7** — Implement structured logging with sensitive-data filter
+- [x] **#2.7** — Implement structured logging with sensitive-data filter
   - Log framework: `tracing` + `tracing-subscriber`
   - MUST never log: frames, embeddings, passwords, raw request payloads
   - Log: connection accepted (peer_uid, pid), verdict rendered, error class
