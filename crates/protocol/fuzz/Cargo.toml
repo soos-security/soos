@@ -1,0 +1,32 @@
+[package]
+name = "soos-protocol-fuzz"
+description = "cargo-fuzz harness for soos-protocol IPC types and codec"
+version = "0.1.0"
+publish = false
+edition = "2021"
+license = "AGPL-3.0-or-later"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+soos-protocol = { path = ".." }
+
+[[bin]]
+name = "decode_request"
+path = "fuzz_targets/decode_request.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "decode_response"
+path = "fuzz_targets/decode_response.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "decode_event"
+path = "fuzz_targets/decode_event.rs"
+test = false
+doc = false

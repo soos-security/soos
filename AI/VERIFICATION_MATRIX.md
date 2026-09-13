@@ -24,7 +24,7 @@ This document translates the critical gating criteria from §11 of `ARCHITECTURE
 | P2 | Codec enforces maximum 4,096-byte message boundary | Oversized payload rejection test | ☑ Validated |
 | P3 | `request_id` is exactly 256 bits (32 bytes) | Serialization test | ☑ Validated |
 | P4 | Protocol is versioned (`version` field) | v1 compatibility test | ☑ Validated |
-| P5 | Decoder fuzzing: zero panic on arbitrary inputs | Fuzzing / property test | ☐ Pending |
+| P5 | Decoder fuzzing: zero panic on arbitrary inputs | Property tests and libFuzzer harness (`prop_decode_request_never_panics`, `prop_decode_response_never_panics`, `cargo-fuzz`) | ☑ Validated |
 | P6 | `#![forbid(unsafe_code)]` enabled | Invariant test (`test_business_crates_forbid_unsafe_code`) | ☑ Validated |
 
 ---

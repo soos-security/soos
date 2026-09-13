@@ -150,14 +150,14 @@ Pure business logic crate: takes structured inputs (score, PAD result, UID conte
 
 #### Sub-issues:
 
-- **#4.1** — Add `cargo-fuzz` harness for `decode::<Request>`
+- [x] **#4.1** — Add `cargo-fuzz` harness for `decode::<Request>`
   - Feed arbitrary bytes, assert zero panics over 10M iterations
   - Acceptance: `P5`
 
-- **#4.2** — Add `cargo-fuzz` harness for `decode::<Response>`
+- [x] **#4.2** — Add `cargo-fuzz` harness for `decode::<Response>`
   - Same coverage target
 
-- **#4.3** — Add `proptest` round-trip property test
+- [x] **#4.3** — Add `proptest` round-trip property test
   - Generate arbitrary valid `Request` values → encode → decode → assert equality
 
 ---
