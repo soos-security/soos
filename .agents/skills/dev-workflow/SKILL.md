@@ -102,8 +102,13 @@ Before starting Phase 1, the orchestrator verifies full ingestion of:
 ## 3. Sub-Agent Execution Pipeline
 
 ### Phase 0: Topic Branch Isolation
-- Lookup target branch in `AI/BACKLOG.md` (e.g. `feat/policy-crate`).
+- **Issue Disambiguation**: If an issue number could refer to either a Backlog Issue or a GitHub Issue (e.g. user passes `#12`), consult `scripts/sync_issue.py` (`BACKLOG_TO_GITHUB` / `BRANCH_TO_ISSUE`) to resolve the canonical Backlog issue and topic branch.
+- Lookup target branch in `AI/BACKLOG.md` (e.g. `feat/camera-v4l`).
 - Create and switch: `git checkout -b <type>/<name>`.
+- **Sandbox Execution**:
+  - `git checkout -b <type>/<name>` modifies `.git` and must be executed with `BypassSandbox: true` if `.git` is read-only in the sandbox.
+  - If adding new external dependencies to `Cargo.toml`, run a single `cargo fetch` with `BypassSandbox: true` to populate the Cargo cache, then resume sandboxed compilation and testing.
+  - Release steps (`./save.sh --push-pr`, `./scripts/pr_loop.sh`) require `BypassSandbox: true` to communicate with GitHub.
 
 ### Phase 1: Architect Sub-Agent ([architect-agent](file:///home/hadrien/soos/.agents/skills/architect-agent/SKILL.md))
 - Scaffolds crate in `crates/<name>/` and registers in root `Cargo.toml`.

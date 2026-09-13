@@ -31,5 +31,18 @@ Your responsibility is to author comprehensive automated tests that define the c
    - Adversarial boundary testing: property-based tests via `proptest` for codec and parser boundaries.
    - PAM pathway invariant: Every code path touching Linux-PAM must include a test asserting fail-closed `PAM_IGNORE` fallback.
 
-4. **Deliverable**:
+4. **Workspace Clippy Compliance for Test Files**:
+   - Because workspace lints enforce `-D clippy::unwrap_used`, `-D clippy::expect_used`, and `-D clippy::indexing_slicing` across `--all-targets`, all integration test files under `tests/*.rs` MUST declare at the top of the file:
+     ```rust
+     #![allow(
+         clippy::unwrap_used,
+         clippy::expect_used,
+         clippy::panic,
+         clippy::indexing_slicing,
+         clippy::arithmetic_side_effects,
+         reason = "Contractual test suite utilizes direct assertions, unwrap, and indexing"
+     )]
+     ```
+
+5. **Deliverable**:
    - Well-structured unit and integration tests located in `crates/<name>/src/` or `crates/<name>/tests/`.

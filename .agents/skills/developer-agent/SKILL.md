@@ -30,6 +30,10 @@ Your responsibility is to write the minimal production code necessary to turn pr
    - Ensure zero Clippy warnings with `cargo clippy --all-targets --all-features -- -D warnings`.
    - Never use `#[allow(...)]` without a documented `reason = "..."` (`clippy::allow_attributes_without_reason`).
    - Use safe arithmetic methods (`checked_add`, `checked_sub`) and safe slice access (`.get()`) to avoid indexing and arithmetic warnings.
+   - Avoid `as` casts triggering `clippy::cast_possible_truncation`:
+     - Nanosecond timestamps: use `u64::try_from(start.elapsed().as_nanos()).unwrap_or(u64::MAX)`.
+     - Modulo bytes/indices: use `u8::try_from(val % 256).unwrap_or(0)`.
+   - Synthetic/Mock frame timing: always derive frame sleep and warmup intervals dynamically from `cfg.fps` (`Duration::from_micros(1_000_000 / cfg.fps)`) rather than hardcoding static durations.
 
 4. **Bounded Synchronous I/O Primitives**:
    - Enforce cumulative deadline subtraction (`deadline.checked_sub(elapsed)`) prior to subsequent socket reads in multi-part framing.
