@@ -1,53 +1,65 @@
 # Candid Review Report
 
 - **Date**: 2026-09-13
-- **Target Branch / Commit**: `feat/policy-crate`
+- **Target Branch / Commit**: `feat/daemon-skeleton`
 - **Audited Files**:
   - `Cargo.toml`
   - `Cargo.lock`
-  - `crates/policy/Cargo.toml`
-  - `crates/policy/src/lib.rs`
-  - `crates/policy/src/error.rs`
-  - `crates/policy/src/threshold.rs`
-  - `crates/policy/src/rate_limit.rs`
-  - `crates/policy/src/decision.rs`
-  - `crates/policy/tests/threshold_tests.rs`
-  - `crates/policy/tests/rate_limit_tests.rs`
-  - `crates/policy/tests/decision_tests.rs`
+  - `packaging/soos-daemon.service`
+  - `crates/daemon/Cargo.toml`
+  - `crates/daemon/src/lib.rs`
+  - `crates/daemon/src/main.rs`
+  - `crates/daemon/src/config.rs`
+  - `crates/daemon/src/error.rs`
+  - `crates/daemon/src/socket.rs`
+  - `crates/daemon/src/peercred.rs`
+  - `crates/daemon/src/dispatcher.rs`
+  - `crates/daemon/src/health.rs`
+  - `crates/daemon/src/logging.rs`
+  - `crates/daemon/tests/socket_tests.rs`
+  - `crates/daemon/tests/peercred_tests.rs`
+  - `crates/daemon/tests/dispatcher_tests.rs`
+  - `crates/daemon/tests/health_tests.rs`
+  - `crates/daemon/tests/systemd_test.rs`
+  - `crates/daemon/tests/logging_audit_test.rs`
 
 ## 1. Executive Summary
 
-This pull request implements the new `soos-policy` crate fulfilling **Issue #1: policy Crate — Authorization Logic (Zero I/O)**. The crate provides pure business logic evaluation of biometric authentication contexts and sliding-window per-UID rate limiting. The implementation strictly adheres to the Request State Matrix in `AI/ARCHITECTURE.md` §3 and satisfies all verification matrix criteria (`PO1`, `PO2`, `PO3`, `PO4`).
+Implementation of Issue #2 (`daemon` Crate — Socket Listener Skeleton) scaffolding `crates/daemon/` binary and library targets. The daemon provides the hardened local Unix Domain Socket listener at `/run/soos/daemon.sock` (mode `0660`, parent directory symlink/permission checks), kernel-enforced `SO_PEERCRED` caller UID validation, bounded concurrency (`tokio::sync::Semaphore`), per-connection timeouts, component health check readiness tracking, systemd sandboxing (`packaging/soos-daemon.service`), and zero-leakage structured logging. All tests and clippy checks pass cleanly with zero warnings.
 
 ## 2. Deep Reasoning Audit
 
 ### Logic & Architecture
-- **[PASS]**: State evaluation in `AuthorizationEngine::evaluate` correctly maps context attributes to protocol types (`Verdict`, `ReasonClass`). An authorization verdict of `Allow` is granted if and only if `score >= threshold && pad_passed && face_count == 1 && session_valid`.
-- **[PASS]**: Edge cases including `NaN` score values, multi-face frames (`face_count > 1`), missing faces (`face_count == 0`), spoof attempts (`!pad_passed`), and invalid sessions are cleanly mapped to non-authorizing verdicts (`Deny` or `ProtocolError`).
-- **[PASS]**: Per-UID sliding window rate limiter (`RateLimiter`) functions without clock syscalls, accepting caller-provided monotonic timestamps. This ensures full `no_std` readiness and deterministic testability.
-- **[PASS]**: Builder pattern in `ThresholdConfigBuilder` properly enforces closed interval `[0.0, 1.0]` constraints and rejects `NaN` or infinite floats.
+- [Pass]: Socket lifecycle manager validates parent directory `/run/soos` before binding: checks that it is not a symlink, not world-writable, and root-owned.
+- [Pass]: Unlinks stale socket only after verifying it is not a symlink and is a socket file.
+- [Pass]: Socket permissions are explicitly set to `0660`.
+- [Pass]: Peer validation extracts kernel credentials via `SO_PEERCRED` and cross-references against `request.uid_hint`, correctly permitting matching UIDs and root callers (UID 0), while rejecting mismatched callers with `DaemonError::UidMismatch`.
+- [Pass]: Framed requests and responses are strictly length-prefixed with big-endian `u32` and bounded by `MAX_MESSAGE_SIZE` (4096 bytes).
 
 ### PAM Concurrency & Deadlines
-- **[PASS]**: Zero asynchronous runtime or socket operations inside `soos-policy`. The crate contains zero I/O operations and evaluates in sub-microsecond in-memory CPU time, well within the PAM 200–250ms deadline.
-- **[PASS]**: Zero stdout/stderr stream pollution (`println!`, `dbg!`).
+- [Pass]: PAM crate remains completely untouched and free of Tokio or asynchronous runtimes.
+- [Pass]: Privileged daemon runs Tokio with bounded concurrency capped at 8 concurrent connections by default via `tokio::sync::Semaphore`.
+- [Pass]: Connection dispatcher enforces a strict per-connection timeout (default 250ms), dropping slow or hanging connections without stalling the socket listener.
+- [Pass]: Output isolation: zero `println!` or `eprintln!` in production code; all events are handled via structured `tracing` logs.
 
 ### Panic Safety & Fallback
-- **[PASS]**: Zero `unwrap()` or `expect()` invocations in library production code (`crates/policy/src/`).
-- **[PASS]**: All arithmetic in sliding window calculations uses saturating operations (`saturating_sub`, `saturating_add`), eliminating integer overflow hazards.
-- **[PASS]**: Fail-closed principle strictly preserved: any unverified or invalid state systematically renders `Verdict::Deny` or `Verdict::ProtocolError` which maps to `PAM_IGNORE`.
+- [Pass]: Production code declares `#![forbid(unsafe_code)]` in both `crates/daemon/src/lib.rs` and `src/main.rs`.
+- [Pass]: Zero `unwrap()` or `expect()` in daemon production code.
+- [Pass]: All fallible operations return explicit `Result<_, DaemonError>` using `thiserror`.
+- [Pass]: Malformed requests, timeouts, and UID mismatches fail closed with `ProtocolError` or connection teardown.
 
 ### Test Integrity & Anti-Weakening
-- **[PASS]**: Comprehensive contractual test suite authored during Phase 2 (Tester Sub-Agent) comprising 25 test cases across unit, integration, and property-based (`proptest`) paradigms.
-- **[PASS]**: Zero tests were modified, deleted, or weakened. Production code was adapted to satisfy all pre-written assertions.
-- **[PASS]**: Parametric property test `prop_decision_allow_invariant` rigorously proves that `Verdict::Allow` cannot be obtained unless all five security conditions hold simultaneously across arbitrary random inputs.
+- [Pass]: Comprehensive unit and integration test suite authored across 6 test files (`socket_tests`, `peercred_tests`, `dispatcher_tests`, `health_tests`, `systemd_test`, `logging_audit_test`).
+- [Pass]: Tests cover all acceptance criteria: `D1` (socket permissions 0660), `D2` (`SO_PEERCRED` verification), `D3` (systemd sandbox restrictions), `D4` (health component readiness), and `D5` (log sensitive data audit).
+- [Pass]: Zero pre-existing tests were weakened, modified, or deleted. All 67 workspace tests pass.
 
 ### Memory & Secret Bounds
-- **[PASS]**: Bounded memory footprint. Rate limiter includes `prune_stale()` to evict expired UID queues.
-- **[PASS]**: Zero credentials, passwords, raw biometric embeddings, or camera frames are accepted, stored, or processed.
-- **[PASS]**: Business crate security invariant `#![forbid(unsafe_code)]` declared and confirmed by automated architectural invariant tests.
+- [Pass]: Reading from socket strictly checks declared length <= 4096 bytes before allocating buffer memory, preventing memory exhaustion attacks.
+- [Pass]: Safe arithmetic (`checked_add`) used for buffer capacity calculations.
+- [Pass]: Static log audit test confirms zero logging of passwords, raw frames, embeddings, or unencrypted payloads.
 
 ## 3. Detailed Findings & Action Items
-- Zero blocking, major, or minor issues identified. Codebase strictly adheres to workspace lints and English-only deliverable policy.
+- None. All architectural invariants and security constraints are fully satisfied.
 
 ## 4. Final Verdict
 **VERDICT: APPROVED**

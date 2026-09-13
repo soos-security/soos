@@ -59,11 +59,11 @@ This document translates the critical gating criteria from §11 of `ARCHITECTURE
 
 | # | Criterion | Test Method | Status |
 |---|---|---|---|
-| D1 | Socket created in `/run/soos/` with `0660` permissions | Integration test | ☐ Pending |
-| D2 | `SO_PEERCRED` verified on every connection | Spoofed UID test | ☐ Pending |
-| D3 | Starts with `RestrictAddressFamilies=AF_UNIX` | Systemd service test | ☐ Pending |
-| D4 | Health check exposes `socket_ready`, `camera_ready`, `models_verified` | Integration test | ☐ Pending |
-| D5 | Zero sensitive information emitted in logs | Log audit | ☐ Pending |
+| D1 | Socket created in `/run/soos/` with `0660` permissions | Integration test (`socket_tests::test_socket_created_with_0660_permissions`, `test_socket_recreation_cleans_up_stale_socket`) | ☑ Validated |
+| D2 | `SO_PEERCRED` verified on every connection | Spoofed UID test (`peercred_tests::test_peercred_verification_rejects_mismatched_uid`, `dispatcher_tests::test_dispatcher_rejects_spoofed_uid`) | ☑ Validated |
+| D3 | Starts with `RestrictAddressFamilies=AF_UNIX` | Systemd service test (`systemd_test::test_systemd_unit_file_sandboxing_directives`) | ☑ Validated |
+| D4 | Health check exposes `socket_ready`, `camera_ready`, `models_verified` | Integration test (`health_tests::test_health_component_readiness_reporting`) | ☑ Validated |
+| D5 | Zero sensitive information emitted in logs | Log audit (`logging_audit_test::test_daemon_source_code_has_zero_sensitive_data_in_logs`) | ☑ Validated |
 
 ---
 

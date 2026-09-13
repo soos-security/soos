@@ -1,0 +1,35 @@
+[Unit]
+Description=soos Local Facial Biometric Authentication Daemon
+Documentation=https://github.com/Mysticaly622/soos
+After=local-fs.target systemd-udevd.service
+Wants=systemd-udevd.service
+
+[Service]
+Type=simple
+User=root
+Group=root
+ExecStart=/usr/libexec/soos/soos-daemon
+Restart=on-failure
+RestartSec=2
+UMask=0077
+
+# Runtime and persistence directories
+RuntimeDirectory=soos
+RuntimeDirectoryMode=0750
+ReadWritePaths=/var/lib/soos /run/soos
+
+# Security Sandbox Directives (ARCHITECTURE.md §10)
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+DevicePolicy=closed
+DeviceAllow=/dev/video* rw
+RestrictAddressFamilies=AF_UNIX
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictSUIDSGID=yes
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target
