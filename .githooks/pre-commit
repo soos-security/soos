@@ -1,47 +1,47 @@
 #!/usr/bin/env bash
 # =============================================================================
-# .githooks/pre-commit — Garde-fous Git locaux pour le projet soos
+# .githooks/pre-commit — Local Git security guardrails for soos
 # =============================================================================
-# 1. Empêche physiquement tout commit direct sur 'main'
-# 2. Bloque le commit de secrets évidents (clés privées, tokens)
+# 1. Blocks direct commits to the 'main' branch
+# 2. Scans staged diffs for private keys, certificates, and API tokens
 # =============================================================================
 
 set -euo pipefail
 
-# 1. Vérification de la branche courante
+# 1. Branch verification: prevent direct commit on main
 CURRENT_BRANCH=$(git symbolic-ref --short HEAD 2>/dev/null || echo "detached")
 
 if [[ "$CURRENT_BRANCH" == "main" && "${ALLOW_MAIN_COMMIT:-0}" != "1" ]]; then
-    echo -e "\033[0;31m[BLOQUÉ]\033[0m Commit direct sur la branche 'main' strictement interdit !" >&2
-    echo -e "         Veuillez créer une branche dédiée pour vos travaux :" >&2
-    echo -e "           git checkout -b feat/<nom>   # pour une nouvelle fonctionnalité" >&2
-    echo -e "           git checkout -b fix/<nom>    # pour un correctif" >&2
-    echo -e "           git checkout -b chore/<nom>  # pour outillage / CI" >&2
-    echo -e "         (Pour forcer exceptionnellement : ALLOW_MAIN_COMMIT=1 git commit ...)" >&2
+    echo -e "\033[0;31m[BLOCKED]\033[0m Direct commits to the 'main' branch are strictly prohibited!" >&2
+    echo -e "          Please create a dedicated feature/fix branch for your work:" >&2
+    echo -e "            git checkout -b feat/<name>   # for new features" >&2
+    echo -e "            git checkout -b fix/<name>    # for bug fixes" >&2
+    echo -e "            git checkout -b chore/<name>  # for tooling / CI / docs" >&2
+    echo -e "          (Emergency override: ALLOW_MAIN_COMMIT=1 git commit ...)" >&2
     exit 1
 fi
 
-# 2. Vérification anti-fuite de secrets évidents dans les fichiers staged
+# 2. Secret leak prevention in staged files
 while IFS= read -r -d '' file; do
     [[ ! -f "$file" ]] && continue
 
-    # Bloquer les fichiers sensibles par nom
+    # Block sensitive files by extension or pattern
     case "$file" in
         *.pem|*.key|id_rsa*|id_ed25519*|*.p12|*.pfx|*.secret)
-            echo -e "\033[0;31m[BLOQUÉ]\033[0m Fichier de clé ou certificat sensible détecté : $file" >&2
+            echo -e "\033[0;31m[BLOCKED]\033[0m Sensitive key or certificate file detected: $file" >&2
             exit 1
             ;;
     esac
 
-    # Bloquer les motifs de clés privées dans le contenu
+    # Block private key markers inside file content diffs
     if git diff --cached "$file" | grep -qE "BEGIN (RSA|OPENSSH|EC|DSA|PGP) PRIVATE KEY"; then
-        echo -e "\033[0;31m[BLOQUÉ]\033[0m Clé privée détectée dans le diff de : $file" >&2
+        echo -e "\033[0;31m[BLOCKED]\033[0m Private key pattern detected in diff of: $file" >&2
         exit 1
     fi
 
-    # Bloquer les tokens GitHub classiques
+    # Block common GitHub personal access tokens
     if git diff --cached "$file" | grep -qE "(ghp_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{82})"; then
-        echo -e "\033[0;31m[BLOQUÉ]\033[0m Jeton d'accès GitHub détecté dans le diff de : $file" >&2
+        echo -e "\033[0;31m[BLOCKED]\033[0m GitHub access token detected in diff of: $file" >&2
         exit 1
     fi
 done < <(git diff --cached --name-only -z)

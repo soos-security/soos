@@ -1,52 +1,35 @@
-# Walkthrough — Garde-fous IA, Tests d'invariants & Automatisation Push/PR
+# Walkthrough — Security Invariants, Pre-Commit Guardrails, and PR Automation
 
-> Date : 2026-09-13  
-> Branche : `feat/guardrails-pr-automation`  
-> Phase : Fondation — Renforcement des garde-fous IA et automatisation complète du cycle Push & PR
-
----
-
-## Résumé de l'étape
-
-Cette étape met en place les sécurités ultimes pour empêcher tout dérapage lors du développement assisté par IA :
-1. **Verrou physique anti-commit sur `main`** : Bloque techniquement toute tentative de commit direct sur `main` via un hook Git pre-commit.
-2. **Suite de tests d'invariants de sécurité (`tests/invariants`)** : 5 tests automatisés vérifient en continu le respect absolu de `AI/ARCHITECTURE.md`.
-3. **Filtre anti-fuite de secrets** : Détection et blocage de clés privées et tokens d'API avant commit.
-4. **Commande unifiée `./save.sh --push-pr`** : Valide, committe, pousse la branche sur GitHub et génère la Pull Request en une seule opération.
+> Date: 2026-09-13  
+> Phase: Security Guardrails & Automated PR Loop  
 
 ---
 
-## 1. Fichiers créés et modifiés
+## Summary
 
-| Fichier | Rôle |
+Implemented architectural invariant tests, local Git hook protection, and automated Pull Request creation:
+- **Architectural Invariant Tests (`tests/invariants/`)**: Fail-closed integration tests validating that business crates forbid unsafe code, the PAM module has no `unwrap`/`expect` or Tokio dependencies, OpenCV is completely banned, and no sensitive credentials leak into IPC structs.
+- **Pre-Commit Hook (`.githooks/pre-commit`)**: Physically blocks direct commits on `main` and scans staged files for private keys and tokens.
+- **Push & PR Automation (`save.sh --push-pr`)**: Runs all quality gates, triggers pre-commit validation, pushes to origin, and opens a Pull Request via GitHub CLI (`gh`).
+
+---
+
+## Deliverables
+
+| File | Purpose |
 |---|---|
-| [`.githooks/pre-commit`](file:///home/hadrien/soos/.githooks/pre-commit) | Hook Git versionné bloquant les commits directs sur `main` et scannant les secrets |
-| [`tests/invariants/Cargo.toml`](file:///home/hadrien/soos/tests/invariants/Cargo.toml) | Déclaration de la crate de tests d'invariants architecturaux |
-| [`tests/invariants/src/lib.rs`](file:///home/hadrien/soos/tests/invariants/src/lib.rs) | 5 tests vérifiant statiquement les invariants de sécurité critiques |
-| [`save.sh`](file:///home/hadrien/soos/save.sh) | Ajout du blocage sur `main`, option `--push-pr`, push origin et création PR |
-| [`AGENTS.md`](file:///home/hadrien/soos/AGENTS.md) | Inscription obligatoire de la commande `./save.sh --push-pr` et du test d'invariants |
-| [`.agents/skills/dev-workflow/SKILL.md`](file:///home/hadrien/soos/.agents/skills/dev-workflow/SKILL.md) | Intégration de `--push-pr` dans la phase post-implémentation |
-| [`Docs/CYCLE_DE_DEVELOPPEMENT.md`](file:///home/hadrien/soos/Docs/CYCLE_DE_DEVELOPPEMENT.md) | Guide à jour avec la commande unifiée Push & PR |
+| [`tests/invariants/Cargo.toml`](file:///home/hadrien/soos/tests/invariants/Cargo.toml) | Test harness for architectural security invariants |
+| [`tests/invariants/src/lib.rs`](file:///home/hadrien/soos/tests/invariants/src/lib.rs) | 5 automated fail-closed invariant test suites |
+| [`.githooks/pre-commit`](file:///home/hadrien/soos/.githooks/pre-commit) | Local git hook blocking main commits and secret leaks |
+| [`save.sh`](file:///home/hadrien/soos/save.sh) | Integrated `--push-pr` flag for automated PR generation |
 
 ---
 
-## 2. Détail des 5 invariants de sécurité testés automatiquement
+## Verification Results
 
-Chaque exécution de `cargo test` lance désormais :
-- **`test_business_crates_forbid_unsafe_code`** : Garantit que `#![forbid(unsafe_code)]` est présent dans toutes les crates métier (`protocol`, `policy`, `vision`).
-- **`test_pam_crate_has_no_unwraps_or_expects_in_production_code`** : Garantit zéro `unwrap()` ou `expect()` dans le code de production de `crates/pam/src/`.
-- **`test_pam_crate_has_no_tokio_dependency`** : Garantit l'absence absolue de Tokio dans le module PAM.
-- **`test_no_opencv_in_any_cargo_toml`** : Garantit l'absence totale de dépendance OpenCV dans tout le workspace.
-- **`test_protocol_request_and_response_have_no_sensitive_fields`** : Garantit qu'aucun champ sensible (password, secret, embedding, frame, image) ne transite dans les requêtes/réponses IPC.
-
----
-
-## 3. Résultats des vérifications
-
-```bash
-cargo fmt --check            # ✅ Code parfaitement formaté
-cargo clippy --all-targets   # ✅ 0 warning
-cargo test --all-targets     # ✅ 25 tests passants (16 protocol + 4 PAM + 5 invariants)
-cargo deny check             # ✅ Licences, failles RustSec, bans et sources validés
-.githooks/pre-commit         # ✅ Hook actif via core.hooksPath
-```
+- `cargo test --all-targets`: 25 passed (5 invariants + 4 PAM + 16 protocol).
+- Invariant 1: `#![forbid(unsafe_code)]` in all business crates.
+- Invariant 2: Zero `unwrap()` or `expect()` in PAM production code.
+- Invariant 3: Zero Tokio dependencies in PAM crate.
+- Invariant 4: Zero OpenCV references across all `Cargo.toml` files.
+- Invariant 5: No password, secret, embedding, or frame fields in IPC schemas.

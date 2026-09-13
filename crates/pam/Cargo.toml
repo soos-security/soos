@@ -1,6 +1,6 @@
 [package]
 name = "soos-pam"
-description = "Module PAM pam_soos.so — client IPC synchrone vers le démon soos"
+description = "PAM module pam_soos.so — synchronous IPC client to the soos daemon"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -9,13 +9,11 @@ publish.workspace = true
 
 [lib]
 name = "pam_soos"
-# cdylib produit un .so chargeable par PAM
+# cdylib produces a .so dynamically loadable by Linux-PAM
 crate-type = ["cdylib"]
 
 [dependencies]
 soos-protocol = { workspace = true }
 
 [build-dependencies]
-# Aucune pour l'instant — pam-bindings sera ajouté quand les headers PAM
-# seront disponibles dans l'environnement de build (conteneur Docker).
-# Pour le squelette, on exporte directement les symboles C.
+# Direct C symbol exports used for initial skeleton.

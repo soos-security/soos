@@ -1,11 +1,11 @@
-//! Tests automatisés des invariants de sécurité architecturaux pour le projet `soos`.
+//! Automated architectural security invariant test suite for the `soos` workspace.
 //!
-//! Ces tests valident à chaque `cargo test` que le code écrit (par l'humain ou l'IA)
-//! respecte strictement les invariants non négociables définis dans `AI/ARCHITECTURE.md`
-//! et `AGENTS.md`.
+//! These tests validate on every `cargo test` run that all code (written by humans or AI)
+//! strictly adheres to the non-negotiable security invariants defined in `AI/ARCHITECTURE.md`
+//! and `AGENTS.md`.
 //!
-//! Tous les tests échouent de manière stricte (fail-closed) : si un fichier requis
-//! est absent ou déplacé, le test échoue.
+//! All tests fail strictly (fail-closed): if a required file is missing or misplaced,
+//! the test immediately fails.
 
 #![forbid(unsafe_code)]
 
@@ -14,17 +14,17 @@ mod tests {
     use std::fs;
     use std::path::{Path, PathBuf};
 
-    /// Retrouve la racine du workspace Cargo en remontant jusqu'à Cargo.toml
+    /// Locates the Cargo workspace root by traversing up to Cargo.toml
     fn workspace_root() -> PathBuf {
         let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         manifest_dir
             .parent()
             .and_then(|p| p.parent())
-            .expect("Impossible de retrouver la racine du workspace")
+            .expect("Unable to locate workspace root directory")
             .to_path_buf()
     }
 
-    /// Invariant 1 — #![forbid(unsafe_code)] obligatoire dans toutes les crates métier
+    /// Invariant 1 — #![forbid(unsafe_code)] mandatory in all business crates
     #[test]
     fn test_business_crates_forbid_unsafe_code() {
         let root = workspace_root();
@@ -38,10 +38,10 @@ mod tests {
                 .join("lib.rs");
             if lib_path.exists() {
                 let content = fs::read_to_string(&lib_path)
-                    .unwrap_or_else(|e| panic!("Erreur lecture {}: {}", lib_path.display(), e));
+                    .unwrap_or_else(|e| panic!("Error reading {}: {}", lib_path.display(), e));
                 assert!(
                     content.contains("#![forbid(unsafe_code)]"),
-                    "VIOLATION INVARIANT : La crate métier '{}' dans {} DOIT contenir '#![forbid(unsafe_code)]' !",
+                    "INVARIANT VIOLATION: Business crate '{}' in {} MUST declare '#![forbid(unsafe_code)]'!",
                     crate_name,
                     lib_path.display()
                 );
@@ -49,8 +49,8 @@ mod tests {
         }
     }
 
-    /// Invariant 2 — Zéro unwrap() ou expect() dans le code de production du module PAM
-    /// (Fail-closed : échoue si crates/pam/src est manquant)
+    /// Invariant 2 — Zero unwrap() or expect() in PAM module production code
+    /// (Fail-closed: fails if crates/pam/src is missing)
     #[test]
     fn test_pam_crate_has_no_unwraps_or_expects_in_production_code() {
         let root = workspace_root();
@@ -58,7 +58,7 @@ mod tests {
 
         assert!(
             pam_src.exists(),
-            "VIOLATION STRUCTURE : Le répertoire requis '{}' est introuvable !",
+            "STRUCTURE VIOLATION: Required directory '{}' not found!",
             pam_src.display()
         );
 
@@ -66,15 +66,14 @@ mod tests {
         collect_rs_files(&pam_src, &mut rs_files);
         assert!(
             !rs_files.is_empty(),
-            "Aucun fichier source .rs trouvé dans '{}'",
+            "No .rs source files discovered in '{}'",
             pam_src.display()
         );
 
         for file in rs_files {
             let content = fs::read_to_string(&file)
-                .unwrap_or_else(|e| panic!("Erreur lecture {}: {}", file.display(), e));
+                .unwrap_or_else(|e| panic!("Error reading {}: {}", file.display(), e));
 
-            // Extraire uniquement le code hors des blocs #[cfg(test)]
             let prod_code = extract_production_code(&content);
 
             let unwraps: Vec<(usize, &str)> = prod_code
@@ -82,7 +81,6 @@ mod tests {
                 .enumerate()
                 .filter(|(_, line)| {
                     let trimmed = line.trim();
-                    // Ignorer les commentaires
                     !trimmed.starts_with("//")
                         && !trimmed.starts_with("/*")
                         && !trimmed.starts_with('*')
@@ -92,15 +90,15 @@ mod tests {
 
             assert!(
                 unwraps.is_empty(),
-                "VIOLATION INVARIANT SÉCURITÉ PAM : unwrap() ou expect() détecté dans le code de production de {} :\n{:#?}",
+                "SECURITY INVARIANT VIOLATION: unwrap() or expect() detected in PAM production code of {}:\n{:#?}",
                 file.display(),
                 unwraps
             );
         }
     }
 
-    /// Invariant 3 — Interdiction absolue du runtime Tokio dans le module PAM
-    /// (Fail-closed : échoue si crates/pam/Cargo.toml est manquant)
+    /// Invariant 3 — Absolute prohibition of Tokio runtime in PAM module
+    /// (Fail-closed: fails if crates/pam/Cargo.toml is missing)
     #[test]
     fn test_pam_crate_has_no_tokio_dependency() {
         let root = workspace_root();
@@ -108,19 +106,19 @@ mod tests {
 
         assert!(
             pam_cargo.exists(),
-            "VIOLATION STRUCTURE : Le fichier '{}' est introuvable !",
+            "STRUCTURE VIOLATION: Required file '{}' not found!",
             pam_cargo.display()
         );
 
         let content = fs::read_to_string(&pam_cargo)
-            .unwrap_or_else(|e| panic!("Erreur lecture {}: {}", pam_cargo.display(), e));
+            .unwrap_or_else(|e| panic!("Error reading {}: {}", pam_cargo.display(), e));
         assert!(
             !content.contains("tokio"),
-            "VIOLATION ARCHITECTURE : La crate pam_soos ne doit JAMAIS dépendre de Tokio !"
+            "ARCHITECTURE VIOLATION: The pam_soos crate must NEVER depend on Tokio!"
         );
     }
 
-    /// Invariant 4 — Interdiction absolue d'OpenCV dans tout le projet
+    /// Invariant 4 — Absolute prohibition of OpenCV across entire workspace
     #[test]
     fn test_no_opencv_in_any_cargo_toml() {
         let root = workspace_root();
@@ -129,22 +127,22 @@ mod tests {
 
         assert!(
             !cargo_tomls.is_empty(),
-            "Aucun fichier Cargo.toml trouvé dans le projet"
+            "No Cargo.toml files found in project workspace"
         );
 
         for cargo_file in cargo_tomls {
             let content = fs::read_to_string(&cargo_file)
-                .unwrap_or_else(|e| panic!("Erreur lecture {}: {}", cargo_file.display(), e));
+                .unwrap_or_else(|e| panic!("Error reading {}: {}", cargo_file.display(), e));
             assert!(
                 !content.contains("opencv"),
-                "VIOLATION ARCHITECTURE : Référence interdite à 'opencv' dans {} !",
+                "ARCHITECTURE VIOLATION: Forbidden reference to 'opencv' in {}!",
                 cargo_file.display()
             );
         }
     }
 
-    /// Invariant 5 — Aucun mot de passe, secret, image ou embedding dans Request et Response
-    /// (Fail-closed : échoue si crates/protocol/src/types.rs est manquant, analyse rigoureuse du corps des structs)
+    /// Invariant 5 — Zero password, secret, frame, or embedding fields in Request and Response
+    /// (Fail-closed: fails if crates/protocol/src/types.rs is missing)
     #[test]
     fn test_protocol_request_and_response_have_no_sensitive_fields() {
         let root = workspace_root();
@@ -156,12 +154,12 @@ mod tests {
 
         assert!(
             types_rs.exists(),
-            "VIOLATION STRUCTURE : Le fichier '{}' est introuvable !",
+            "STRUCTURE VIOLATION: Required file '{}' not found!",
             types_rs.display()
         );
 
         let content = fs::read_to_string(&types_rs)
-            .unwrap_or_else(|e| panic!("Erreur lecture {}: {}", types_rs.display(), e));
+            .unwrap_or_else(|e| panic!("Error reading {}: {}", types_rs.display(), e));
 
         let forbidden_keywords = [
             "password",
@@ -173,14 +171,11 @@ mod tests {
         ];
 
         for struct_keyword in ["struct Request", "struct Response"] {
-            let body = extract_struct_body(&content, struct_keyword).unwrap_or_else(|| {
-                panic!("Structure '{}' introuvable dans types.rs", struct_keyword)
-            });
+            let body = extract_struct_body(&content, struct_keyword)
+                .unwrap_or_else(|| panic!("Structure '{}' not found in types.rs", struct_keyword));
 
-            // Analyser chaque ligne du corps de la structure
             for line in body.lines() {
                 let trimmed = line.trim();
-                // Ignorer commentaires et attributs
                 if trimmed.starts_with("//")
                     || trimmed.starts_with("/*")
                     || trimmed.starts_with('*')
@@ -189,16 +184,14 @@ mod tests {
                     continue;
                 }
 
-                // Si la ligne contient une déclaration de champ (avant ':')
                 if let Some(colon_idx) = trimmed.find(':') {
                     let field_decl = &trimmed[..colon_idx].to_lowercase();
                     for &forbidden in &forbidden_keywords {
-                        // Chercher le nom du mot interdit comme identifiant de champ
                         let words: Vec<&str> = field_decl.split_whitespace().collect();
                         if let Some(field_name) = words.last() {
                             assert!(
                                 !field_name.contains(forbidden),
-                                "VIOLATION INVARIANT SÉCURITÉ : La structure '{}' contient un champ interdit '{}' (déclaration : '{}') !",
+                                "SECURITY INVARIANT VIOLATION: Struct '{}' contains forbidden field '{}' (declaration: '{}')!",
                                 struct_keyword,
                                 forbidden,
                                 trimmed
@@ -210,9 +203,9 @@ mod tests {
         }
     }
 
-    // --- Utilitaires d'analyse lexicale robustes ---
+    // --- Lexical Analysis Helpers ---
 
-    /// Isole le corps complet d'une struct entre ses accolades `{` et `}`
+    /// Extracts struct body between outer `{` and `}` braces
     fn extract_struct_body<'a>(source: &'a str, struct_keyword: &str) -> Option<&'a str> {
         let pos = source.find(struct_keyword)?;
         let after_keyword = &source[pos..];
@@ -235,7 +228,7 @@ mod tests {
         None
     }
 
-    /// Filtre le code source pour ignorer les modules `#[cfg(test)] mod ... { ... }`
+    /// Filters source code to discard `#[cfg(test)] mod ... { ... }` blocks
     fn extract_production_code(source: &str) -> String {
         let mut result = String::new();
         let lines: Vec<&str> = source.lines().collect();
@@ -243,17 +236,14 @@ mod tests {
 
         while i < lines.len() {
             let trimmed = lines[i].trim();
-            // Détection du début d'un module de test
             if trimmed.contains("#[cfg(test)]")
                 || (trimmed.starts_with("mod tests") && trimmed.contains('{'))
             {
-                // Avancer jusqu'à l'accolade ouvrante
                 while i < lines.len() && !lines[i].contains('{') {
                     i += 1;
                 }
                 if i < lines.len() {
                     let mut depth = 1;
-                    // Ignorer tout le contenu jusqu'à fermeture du bloc de test
                     while i < lines.len() && depth > 0 {
                         i += 1;
                         if i < lines.len() {

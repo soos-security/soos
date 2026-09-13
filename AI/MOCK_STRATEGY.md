@@ -1,15 +1,23 @@
-# Stratégie de Simulation (Environnement de Développement)
+# Mocking & Simulation Strategy (Development Environment)
 
-L'accès à `/dev/video0` (Webcam) n'est pas toujours disponible (conteneur Docker de test, CI, machine sans webcam). Pour garantir la progression du projet sans friction matérielle, l'IA doit implémenter un système de *Mocking*.
+Access to `/dev/video0` (webcam) is not always available in headless environments (CI pipelines, Docker containers, laptops without webcams). To enable smooth development and automated testing without hardware friction, the project implements a comprehensive mocking architecture.
 
-## 1. Feature Flag Cargo
-La crate liée à la caméra (`camera-v4l`) devra intégrer un flag de compilation conditionnelle dans son `Cargo.toml` :
+## 1. Cargo Feature Flag
+The camera crate (`camera-v4l`) exposes a conditional compilation feature in its `Cargo.toml`:
 `[features] mock-camera = []`
 
-## 2. Le "Dummy Driver"
-Si le flag `mock-camera` est actif, le démon ne tentera pas de se lier à `v4l`. À la place, il instanciera une structure `MockCameraManager` qui :
-- Générera des images fixes (tableaux de bits 640x480) simulant une capture vidéo.
-- Fournira une fausse horloge monotonique pour simuler l'âge de la frame (requis pour les tests de latence < 150ms).
+## 2. The "Dummy Camera Driver"
+When the `mock-camera` feature is enabled:
+- The daemon bypasses kernel `v4l` device binding.
+- It instantiates a `MockCameraManager` struct that:
+  - Generates static test frames (e.g. 640x480 pixel arrays) simulating live video capture.
+  - Slices frames with simulated monotonic timestamps to validate latency constraints (< 150ms).
+  - Can simulate device disconnections, frame corruption, or starvation.
 
-## 3. Fixtures pour la Vision
-Pour tester le pipeline d'intelligence artificielle sans caméra, l'IA créera un dossier `tests/fixtures/`. Ce dossier contiendra des images statiques (`.jpg` ou matrices sérialisées) de visages connus et inconnus. Les tests unitaires du composant `vision` chargeront ces fichiers statiques pour valider les étapes de détection (NMS), d'alignement géométrique, et de similarité cosinus.
+## 3. Vision Test Fixtures
+To validate the AI inference pipeline without a live camera, static image fixtures are placed under `tests/fixtures/`:
+- Contains sample facial images (JPEG / serialized tensor arrays) of known and unknown subjects.
+- Unit and integration tests in the `vision` crate ingest these fixtures to validate:
+  - Face detection (NMS thresholds)
+  - 5-point landmark affine transformation (112x112 alignment)
+  - MobileFaceNet embedding generation and cosine distance matching

@@ -1,6 +1,6 @@
 [package]
 name = "soos-invariants"
-description = "Tests automatisés des invariants de sécurité et d'architecture pour le projet soos"
+description = "Automated architectural and security invariant test suite for the soos project"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -8,4 +8,4 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
-# Aucune dépendance externe requise pour l'analyse des invariants
+# Zero external dependencies required for invariant static checking

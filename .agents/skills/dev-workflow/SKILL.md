@@ -1,133 +1,149 @@
 ---
 name: dev-workflow
 description: >
-  Workflow de développement multi-agents pour le projet soos.
-  Active ce skill quand l'utilisateur demande d'implémenter une fonctionnalité,
-  corriger un bug, ou ajouter un composant. Ce skill impose un processus TDD
-  strict en 4 phases (Architecte → Testeur → Auditeur → Développeur).
+  Multi-agent TDD development workflow for the soos project.
+  Activate this skill when requested to implement a feature,
+  fix a bug, or add a component. Enforces a strict 4-phase TDD
+  cycle (Architect -> Tester -> Auditor -> Developer), English-only
+  deliverables, and Conventional Commits.
 ---
 
-# Workflow de Développement Multi-Agents — soos
+# Multi-Agent Development Workflow — soos
 
-## Quand utiliser ce workflow
+## Scope
 
-Ce workflow s'applique à **toute modification du code Rust** :
-- Nouvelle fonctionnalité
-- Nouveau composant/crate
-- Correction de bug
-- Refactoring significatif
+This workflow applies to **all Rust codebase modifications**:
+- New features and crates
+- Bug and vulnerability fixes
+- Significant refactorings and behavioral adjustments
 
-Il ne s'applique PAS aux modifications de documentation pure, scripts shell, ou configuration.
+It does NOT apply to pure documentation fixes, shell script adjustments, or minor configuration tweaks.
 
-## Prérequis
+## Prerequisites
 
-Avant de commencer, lire obligatoirement :
-1. `AI/ARCHITECTURE.md` — architecture maître
-2. `AI/DECISIONS.md` — décisions actées
-3. `AI/VERIFICATION_MATRIX.md` — critères d'acceptation du composant concerné
+Before starting, the agent MUST read:
+1. `AI/ARCHITECTURE.md` — Master architecture, threat model, security invariants
+2. `AI/DECISIONS.md` — Architectural decision records (ADRs)
+3. `AI/VERIFICATION_MATRIX.md` — Acceptance criteria for the targeted component
+4. `Docs/COMMIT_CONVENTION.md` — Conventional Commits 1.0.0 specification
 
-## Phase 0 — Branche Git Dédiée
+## Strict Language Policy: English Only
 
-**Objectif** : Isoler tout travail dans une branche thématique, JAMAIS sur `main`.
+Even if the user writes requests, prompts, or questions in French (or any other language), the AI agent MUST author ALL code, docstrings, inline comments, commit messages, PR titles/bodies, technical documentation in `Docs/`, and walkthroughs in `AI/walkthroughs/` strictly in English.
 
-1. Vérifier la branche courante (`git status`)
-2. Créer et basculer sur une nouvelle branche :
-   - `git checkout -b feat/<nom>` (ex: `feat/ipc-client`)
-   - `git checkout -b fix/<nom>` (ex: `fix/pam-timeout`)
-   - `git checkout -b test/<nom>` (ex: `test/docker-pam`)
-   - `git checkout -b chore/<nom>` (ex: `chore/ci-rules`)
+---
 
-## Phase 1 — Agent Architecte
+## Phase 0 — Dedicated Topic Branch
 
-**Objectif** : Concevoir avant de coder.
+**Objective**: Isolate all work on a dedicated topic branch; NEVER commit directly to `main`.
 
-1. Identifier le composant/crate concerné dans la structure du monorepo
-2. Lister les structs, enums et traits nécessaires
-3. Vérifier la cohérence avec `AI/ARCHITECTURE.md` :
-   - Les invariants de sécurité sont-ils respectés ?
-   - La séparation des responsabilités est-elle maintenue ?
-   - Les dépendances unidirectionnelles sont-elles préservées ?
-4. Documenter les choix dans le plan d'implémentation
+1. Verify current branch (`git status`).
+2. Create and switch to topic branch:
+   - `git checkout -b feat/<name>` (e.g. `feat/ipc-client`)
+   - `git checkout -b fix/<name>` (e.g. `fix/pam-timeout`)
+   - `git checkout -b test/<name>` (e.g. `test/docker-pam`)
+   - `git checkout -b chore/<name>` (e.g. `chore/ci-rules`)
 
-**Checklist Architecte** :
-- [ ] Composant identifié dans le monorepo
-- [ ] Types (structs/enums) listés avec leurs champs
-- [ ] Traits et interfaces définis
-- [ ] Invariants de sécurité vérifiés
-- [ ] Pas de nouvelle dépendance non justifiée
+---
 
-## Phase 2 — Agent Testeur
+## Phase 1 — Architect Agent
 
-**Objectif** : Écrire les tests AVANT le code (TDD Red Phase).
+**Objective**: Specify and design before writing implementation.
 
-1. Écrire les tests unitaires pour chaque type et fonction
-2. Les tests DOIVENT échouer initialement (compilation error ou assertion failure)
-3. Couvrir les cas nominaux ET les cas d'erreur
-4. Pour les composants PAM : toujours un test vérifiant `PAM_IGNORE` en cas d'erreur
-5. Pour les composants protocol : tests de round-trip et de rejet
+1. Identify the target crate in the monorepo structure.
+2. Specify structs, enums, traits, and error types.
+3. Validate consistency with `AI/ARCHITECTURE.md`:
+   - Are security invariants respected?
+   - Is privilege separation preserved?
+   - Are dependencies strictly unidirectional?
+4. Document design choices in the implementation plan.
 
-**Checklist Testeur** :
-- [ ] Tests unitaires écrits pour chaque fonction publique
-- [ ] Cas d'erreur couverts (timeout, buffer invalide, UID falsifié, etc.)
-- [ ] Test `PAM_IGNORE` si composant PAM
-- [ ] Tests conformes à `AI/VERIFICATION_MATRIX.md`
+**Architect Checklist**:
+- [ ] Target crate identified in workspace
+- [ ] Types defined with bounded fields
+- [ ] Traits and interfaces specified
+- [ ] Security invariants verified
+- [ ] Zero unapproved dependencies
 
-## Phase 3 — Agent Auditeur
+---
 
-**Objectif** : Revue de sécurité AVANT l'implémentation.
+## Phase 2 — Tester Agent
 
-1. Vérifier l'absence de `unwrap()` et `expect()` dans le chemin critique
-2. Traquer les fuites mémoire potentielles (allocations non bornées)
-3. Vérifier `#![forbid(unsafe_code)]` dans les crates métier
-4. Vérifier que `unsafe` est minimal, isolé et commenté dans les crates d'adaptation
-5. Contrôler le respect des invariants de `ARCHITECTURE.md`
-6. Vérifier qu'aucune donnée sensible n'apparaît dans les logs
+**Objective**: Write tests BEFORE production code (TDD Red Phase).
 
-**Checklist Auditeur** :
-- [ ] Zéro `unwrap()` / `expect()` dans le chemin PAM
-- [ ] Allocations bornées vérifiées
-- [ ] `forbid(unsafe_code)` dans les crates métier
-- [ ] Invariants ARCHITECTURE.md respectés
-- [ ] Pas de données sensibles dans les logs
-- [ ] `catch_unwind` sur toute frontière FFI
+1. Write unit and property tests for public types and functions.
+2. Tests MUST fail initially (compilation or assertion failure).
+3. Cover both nominal and error paths (timeouts, malformed buffers, spoofed UIDs).
+4. For PAM components: always include a test asserting `PAM_IGNORE` fallback.
+5. For protocol components: include round-trip serialization and oversized payload rejection tests.
 
-## Phase 4 — Agent Développeur
+**Tester Checklist**:
+- [ ] Unit tests authored for all public functions
+- [ ] Error and edge cases covered
+- [ ] `PAM_IGNORE` fallback test included for PAM paths
+- [ ] Conforms to `AI/VERIFICATION_MATRIX.md`
 
-**Objectif** : Implémenter le code qui passe les tests.
+---
 
-1. Écrire l'implémentation en respectant les contraintes de l'Auditeur
-2. Vérifier que tous les tests passent (TDD Green Phase)
-3. Lancer la vérification qualité :
+## Phase 3 — Auditor Agent
+
+**Objective**: Static security and safety review BEFORE implementation.
+
+1. Ensure zero `unwrap()` or `expect()` in PAM production code.
+2. Audit memory allocations and verify strict length bounds.
+3. Enforce `#![forbid(unsafe_code)]` in business crates.
+4. Verify `unsafe` is minimal, isolated, and documented in adapter crates.
+5. Confirm zero sensitive data (passwords, embeddings, raw frames) is logged or exposed.
+6. Verify `catch_unwind` wraps FFI boundaries.
+
+**Auditor Checklist**:
+- [ ] Zero `unwrap()` / `expect()` in PAM code
+- [ ] Bounded allocations verified
+- [ ] `#![forbid(unsafe_code)]` active in business crates
+- [ ] Security invariants honored
+- [ ] Zero sensitive data in logs or IPC schemas
+- [ ] `catch_unwind` on all FFI entry points
+
+---
+
+## Phase 4 — Developer Agent
+
+**Objective**: Implement production code satisfying test suite.
+
+1. Write minimal code satisfying the Architect's specification and Auditor's constraints.
+2. Verify all tests pass (TDD Green Phase).
+3. Execute quality gates:
    - `cargo fmt --check`
-   - `cargo clippy -- -D warnings`
-   - `cargo test`
-4. Mettre à jour `AI/VERIFICATION_MATRIX.md` (cocher les critères validés)
+   - `cargo clippy --all-targets -- -D warnings`
+   - `cargo test --all-targets`
+   - `cargo deny check`
+4. Update `AI/VERIFICATION_MATRIX.md` criteria.
 
-**Checklist Développeur** :
-- [ ] Implémentation conforme aux spécifications de l'Architecte
-- [ ] Tous les tests du Testeur passent
-- [ ] `cargo fmt` — code formaté
-- [ ] `cargo clippy -- -D warnings` — zéro warning
-- [ ] `cargo test` — tous les tests passent
-- [ ] `AI/VERIFICATION_MATRIX.md` mis à jour
-- [ ] Documentation technique créée ou mise à jour dans `Docs/`
-- [ ] Walkthrough créé dans `AI/walkthroughs/NN_<etape>.md`
+**Developer Checklist**:
+- [ ] Implementation conforms to Architect specification
+- [ ] All tests pass
+- [ ] `cargo fmt` clean
+- [ ] `cargo clippy -- -D warnings` clean
+- [ ] `AI/VERIFICATION_MATRIX.md` updated
+- [ ] Technical documentation in `Docs/` updated
+- [ ] Walkthrough written in `AI/walkthroughs/NN_<name>.md`
 
-## Post-implémentation & Pull Request
+---
 
-Après avoir complété les 4 phases de développement :
-1. Rédiger / mettre à jour la documentation technique dans `Docs/` (ex: `Docs/<composant>.md`)
-2. Rédiger le compte-rendu dans `AI/walkthroughs/NN_<nom_etape>.md` (numérotation séquentielle `01_...`, `02_...`, `03_...`)
-3. Lancer la boucle autonome de Pull Request et d'auto-merge :
+## Post-Implementation & Autonomous Pull Request Loop
+
+Once development is complete:
+1. Update technical documentation in `Docs/` in English.
+2. Author walkthrough in `AI/walkthroughs/NN_<name>.md` in English.
+3. Run the autonomous PR and auto-merge loop:
    ```bash
    ./save.sh --auto-merge
    ```
-   Ce processus 100% autonome :
-   - Exécute le pipeline qualité 4/4 (`fmt`, `clippy -D warnings`, `test` incluant les invariants de sécurité, `deny check`).
-   - Bloque tout commit sur `main` ou fuite de secret (hook pre-commit).
-   - Pousse la branche vers GitHub et crée la Pull Request.
-   - Sollicite la review automatique de GitHub Copilot.
-   - Surveille les vérifications CI en temps réel.
-   - Récupère les retours émis par Copilot et permet à l'IA d'appliquer immédiatement les corrections nécessaires.
-   - Dès que la CI est verte (3/3 jobs) et les retours résolus, fusionne automatiquement la PR dans `main` (`gh pr merge --squash --delete-branch`) et synchronise la branche locale `main`.
-4. La tâche est considérée comme achevée uniquement lorsque le code est fusionné dans `main`. L'humain n'a pas besoin d'intervenir manuellement.
+   This autonomous script:
+   - Runs local quality gates (fmt, clippy, unit + invariant tests, cargo-deny).
+   - Validates the Conventional Commit message and scans for secrets.
+   - Pushes branch to GitHub and opens a Pull Request.
+   - Requests automated review from GitHub Copilot.
+   - Polls CI jobs until completion.
+   - Parses Copilot comments, allowing AI agents to fix any feedback immediately.
+   - Auto-merges to `main` upon green CI and clean review, then synchronizes local `main`.

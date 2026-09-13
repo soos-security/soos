@@ -1,35 +1,34 @@
-//! Codec binaire borné pour le protocole IPC v1.
+//! Bounded binary codec for IPC Protocol v1.
 //!
-//! Utilise `postcard` (serde binaire compact) pour la sérialisation.
-//! Chaque message est préfixé par sa taille en `u32` big-endian pour
-//! le framing sur `SOCK_STREAM`. Sur `SOCK_SEQPACKET`, le préfixe
-//! est redondant mais conservé pour la cohérence.
+//! Employs `postcard` (compact binary serde) for payload serialization.
+//! Every message is framed with a 4-byte `u32` Big-Endian length prefix
+//! for streaming framing over `SOCK_STREAM`.
 //!
-//! # Sécurité
+//! # Security Invariants
 //!
-//! - La taille maximale est vérifiée AVANT toute désérialisation.
-//! - Un message trop grand est rejeté sans allocation.
-//! - Le codec ne fait aucune I/O : il opère sur des slices `&[u8]`.
+//! - Declared message size is verified BEFORE any buffer allocation or deserialization.
+//! - Oversized messages are rejected with zero allocation.
+//! - The codec performs zero direct I/O: operations strictly process `&[u8]` slices.
 
 use crate::types::MAX_MESSAGE_SIZE;
 use serde::{de::DeserializeOwned, Serialize};
 
 // ---------------------------------------------------------------------------
-// Erreurs de codec
+// Codec Errors
 // ---------------------------------------------------------------------------
 
-/// Erreurs de sérialisation/désérialisation du protocole.
+/// Protocol serialization and deserialization errors.
 #[derive(Debug)]
 pub enum CodecError {
-    /// Le message sérialisé dépasse la taille maximale autorisée.
+    /// Serialized payload exceeds the maximum allowed byte boundary.
     MessageTooLarge { size: usize, max: usize },
-    /// Erreur de sérialisation postcard.
+    /// Postcard serialization failure.
     Serialize(postcard::Error),
-    /// Erreur de désérialisation postcard.
+    /// Postcard deserialization failure.
     Deserialize(postcard::Error),
-    /// Le buffer fourni est trop petit pour contenir le préfixe de taille.
+    /// Supplied buffer is too small to contain the 4-byte length prefix.
     BufferTooSmall,
-    /// La taille déclarée dans le préfixe dépasse la taille maximale.
+    /// Length prefix claims a size exceeding the maximum message size.
     DeclaredSizeTooLarge { declared: usize, max: usize },
 }
 
@@ -55,20 +54,20 @@ impl core::fmt::Display for CodecError {
 impl std::error::Error for CodecError {}
 
 // ---------------------------------------------------------------------------
-// Encodage
+// Encoding
 // ---------------------------------------------------------------------------
 
-/// Sérialise un message en bytes avec préfixe de taille `u32` big-endian.
+/// Serializes a message into a byte vector with a Big-Endian `u32` length prefix.
 ///
-/// Le format du buffer résultant est :
+/// Output buffer layout:
 /// ```text
-/// [taille: u32 BE][payload: postcard bytes]
+/// [length: u32 BE][payload: postcard bytes]
 /// ```
 ///
 /// # Errors
 ///
-/// Retourne `CodecError::MessageTooLarge` si le payload sérialisé
-/// dépasse [`MAX_MESSAGE_SIZE`] octets.
+/// Returns `CodecError::MessageTooLarge` if the serialized payload exceeds
+/// [`MAX_MESSAGE_SIZE`] bytes.
 pub fn encode<T: Serialize>(msg: &T) -> Result<Vec<u8>, CodecError> {
     let payload = postcard::to_allocvec(msg).map_err(CodecError::Serialize)?;
 
@@ -79,7 +78,6 @@ pub fn encode<T: Serialize>(msg: &T) -> Result<Vec<u8>, CodecError> {
         });
     }
 
-    // Préfixe u32 big-endian + payload
     let size_prefix = u32::try_from(payload.len())
         .map_err(|_| CodecError::MessageTooLarge {
             size: payload.len(),
@@ -94,22 +92,21 @@ pub fn encode<T: Serialize>(msg: &T) -> Result<Vec<u8>, CodecError> {
 }
 
 // ---------------------------------------------------------------------------
-// Décodage
+// Decoding
 // ---------------------------------------------------------------------------
 
-/// Désérialise un message depuis un buffer avec préfixe de taille `u32` big-endian.
+/// Deserializes a message from a byte slice framed by a Big-Endian `u32` length prefix.
 ///
-/// # Sécurité
+/// # Security
 ///
-/// - Vérifie que la taille déclarée ne dépasse pas [`MAX_MESSAGE_SIZE`] AVANT
-///   toute allocation ou désérialisation.
-/// - Un buffer malformé ne peut pas provoquer d'allocation non bornée.
+/// - Validates that declared size <= [`MAX_MESSAGE_SIZE`] prior to allocation.
+/// - Malformed or truncated buffers cannot trigger unbounded memory allocation.
 ///
 /// # Errors
 ///
-/// - `BufferTooSmall` si le buffer fait moins de 4 octets
-/// - `DeclaredSizeTooLarge` si le préfixe annonce plus de [`MAX_MESSAGE_SIZE`]
-/// - `Deserialize` si le payload est invalide
+/// - `BufferTooSmall` if slice has fewer than 4 bytes or fewer than declared payload length
+/// - `DeclaredSizeTooLarge` if prefix exceeds [`MAX_MESSAGE_SIZE`]
+/// - `Deserialize` if postcard payload is corrupted
 pub fn decode<T: DeserializeOwned>(buf: &[u8]) -> Result<T, CodecError> {
     if buf.len() < 4 {
         return Err(CodecError::BufferTooSmall);
@@ -144,7 +141,7 @@ mod tests {
     use super::*;
     use crate::types::*;
 
-    /// Helper : crée une requête de test valide.
+    /// Test helper creating a standard valid authentication request.
     fn test_request() -> Request {
         Request {
             version: CURRENT_VERSION,
@@ -156,7 +153,7 @@ mod tests {
         }
     }
 
-    /// Helper : crée une réponse de test valide.
+    /// Test helper creating a standard valid response with designated verdict.
     fn test_response(verdict: Verdict) -> Response {
         Response {
             version: CURRENT_VERSION,
@@ -168,7 +165,7 @@ mod tests {
         }
     }
 
-    // --- P1 : Round-trip sérialisation/désérialisation ---
+    // --- P1: Serialization / Deserialization Round-Trip ---
 
     #[test]
     fn request_roundtrip() {
@@ -216,7 +213,7 @@ mod tests {
         assert_eq!(decoded.service, evt.service);
     }
 
-    // --- P2 : Rejet des messages trop grands ---
+    // --- P2: Oversized Message Rejection ---
 
     #[test]
     fn rejects_oversized_service_name() {
@@ -228,13 +225,11 @@ mod tests {
             service: "a".repeat(MAX_SERVICE_LEN + 1),
             deadline_monotonic_ns: 0,
         };
-        // La validation doit rejeter un service trop long
         assert!(req.validate().is_err());
     }
 
     #[test]
     fn rejects_declared_size_too_large() {
-        // Forge un buffer avec un préfixe de taille énorme
         let mut buf = vec![0u8; 8];
         #[allow(clippy::cast_possible_truncation)]
         let fake_size: u32 = (MAX_MESSAGE_SIZE as u32) + 1;
@@ -244,7 +239,7 @@ mod tests {
         assert!(result.is_err());
     }
 
-    // --- P3 : request_id est bien 32 octets ---
+    // --- P3: RequestId is 256 Bits ---
 
     #[test]
     fn request_id_is_256_bits() {
@@ -253,7 +248,7 @@ mod tests {
         assert_eq!(req.request_id.len(), 32);
     }
 
-    // --- P4 : Protocole versionné ---
+    // --- P4: Versioned Protocol ---
 
     #[test]
     fn rejects_unsupported_version() {
@@ -273,7 +268,7 @@ mod tests {
         }
     }
 
-    // --- Tests de verdict ---
+    // --- Verdict Tests ---
 
     #[test]
     fn verdict_allow_does_not_ignore() {
@@ -295,7 +290,7 @@ mod tests {
         assert!(Verdict::ProtocolError.should_ignore());
     }
 
-    // --- Tests de Response ---
+    // --- Response Tests ---
 
     #[test]
     fn response_is_allow_only_with_current_version() {
@@ -317,7 +312,7 @@ mod tests {
         assert!(!resp.matches_request(&wrong_id));
     }
 
-    // --- Test de buffer malformé ---
+    // --- Malformed Buffer Tests ---
 
     #[test]
     fn decode_empty_buffer_fails() {
@@ -335,7 +330,6 @@ mod tests {
     fn decode_truncated_payload_fails() {
         let req = test_request();
         let encoded = encode(&req).expect("encode should succeed");
-        // Tronquer le payload
         let truncated = &encoded[..encoded.len() - 5];
         let result: Result<Request, _> = decode(truncated);
         assert!(result.is_err());
