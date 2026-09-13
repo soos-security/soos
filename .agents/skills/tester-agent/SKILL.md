@@ -40,10 +40,13 @@ Your responsibility is to author comprehensive automated tests that define the c
          clippy::panic,
          clippy::indexing_slicing,
          clippy::arithmetic_side_effects,
+         clippy::cast_possible_truncation,
+         clippy::cast_sign_loss,
          clippy::manual_range_contains,
          reason = "Contractual test suite utilizes direct assertions, unwrap, and indexing"
      )]
      ```
+   - For benchmark tests outputting timing metrics, also include `clippy::print_stdout` and `clippy::print_stderr`.
    - Range Assertions: Prefer `(min..=max).contains(&val)` over `val >= min && val <= max` to comply with Clippy conventions.
 
 5. **Deliverable**:
