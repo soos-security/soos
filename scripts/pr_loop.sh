@@ -76,8 +76,29 @@ if [[ -z "$PR_NUMBER" ]]; then
     LAST_COMMIT_MSG=$(git log -1 --pretty=%B)
     FIRST_LINE=$(echo "$LAST_COMMIT_MSG" | head -1)
 
+    CLOSES_KEYWORD=""
+    if [[ -f "./scripts/sync_issue.py" ]]; then
+        info "Synchronizing task checkboxes with GitHub Issues & AI/BACKLOG.md..."
+        python3 ./scripts/sync_issue.py --auto || true
+        GITHUB_ISSUE_ID=$(python3 -c "
+import os
+from scripts.sync_issue import BRANCH_TO_ISSUE, BACKLOG_TO_GITHUB, get_current_branch
+b = os.environ.get('CURRENT_BRANCH') or get_current_branch() or ''
+bi = BRANCH_TO_ISSUE.get(b)
+if bi and bi in BACKLOG_TO_GITHUB:
+    print(BACKLOG_TO_GITHUB[bi])
+" 2>/dev/null || true)
+        if [[ -n "$GITHUB_ISSUE_ID" ]]; then
+            CLOSES_KEYWORD="
+
+Closes #$GITHUB_ISSUE_ID"
+            info "Associated with GitHub Issue #$GITHUB_ISSUE_ID (will auto-close on merge)."
+        fi
+    fi
+
     PR_BODY="## Summary
 $LAST_COMMIT_MSG
+$CLOSES_KEYWORD
 
 ## Automated Quality & Security Checks
 - [x] cargo fmt --check

@@ -348,9 +348,32 @@ if [[ "$PUSH_PR" == "true" ]]; then
 
     echo ""
     info "Preparing Pull Request..."
+
+    # Auto-sync issue checkboxes on GitHub and BACKLOG.md
+    CLOSES_KEYWORD=""
+    if [[ -f "./scripts/sync_issue.py" ]]; then
+        info "Synchronizing task checkboxes with GitHub Issues & AI/BACKLOG.md..."
+        python3 ./scripts/sync_issue.py --auto || true
+        GITHUB_ISSUE_ID=$(python3 -c "
+import os
+from scripts.sync_issue import BRANCH_TO_ISSUE, BACKLOG_TO_GITHUB, get_current_branch
+b = os.environ.get('CURRENT_BRANCH') or get_current_branch() or ''
+bi = BRANCH_TO_ISSUE.get(b)
+if bi and bi in BACKLOG_TO_GITHUB:
+    print(BACKLOG_TO_GITHUB[bi])
+" 2>/dev/null || true)
+        if [[ -n "$GITHUB_ISSUE_ID" ]]; then
+            CLOSES_KEYWORD="
+
+Closes #$GITHUB_ISSUE_ID"
+            info "Associated with GitHub Issue #$GITHUB_ISSUE_ID (will auto-close on merge)."
+        fi
+    fi
+
     FIRST_LINE=$(echo "$COMMIT_MSG" | head -n 1)
     PR_BODY="## Summary
 $COMMIT_MSG
+$CLOSES_KEYWORD
 
 ## Automated Quality & Security Checks
 - [x] cargo fmt --check (official formatting)

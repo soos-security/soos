@@ -132,6 +132,10 @@ Before starting Phase 1, the orchestrator verifies full ingestion of:
 - Authors formal report in `AI/candid_review_report.md` with `VERDICT: APPROVED`.
 
 ### Phase 6: Traceability Sub-Agent ([traceability-agent](file:///home/hadrien/soos/.agents/skills/traceability-agent/SKILL.md))
+- Synchronizes issues and sub-issues automatically via `python3 scripts/sync_issue.py`:
+  - Checks off completed sub-issues (`- [x] **#X.Y**`) in `AI/BACKLOG.md`.
+  - Checks off sub-issues directly in the corresponding GitHub Issue body on `github.com`.
+  - Posts automated progress comments on the GitHub Issue.
 - Updates `AI/VERIFICATION_MATRIX.md` with verified status and test evidence.
 - Updates technical documentation in `Docs/` in professional English.
 - Authors sequential walkthrough `AI/walkthroughs/NN_<name>.md`.
