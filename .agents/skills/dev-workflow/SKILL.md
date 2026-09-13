@@ -141,9 +141,8 @@ Once development is complete:
    ```
    This autonomous script:
    - Runs local quality gates (fmt, clippy, unit + invariant tests, cargo-deny).
+   - Executes the independent **Candid Pre-Push Code Review** (`./scripts/candid_review.sh`) inspecting the raw diff without modification context for logic, security invariants, panic-safety, and English policy.
    - Validates the Conventional Commit message and scans for secrets.
    - Pushes branch to GitHub and opens a Pull Request.
-   - Requests automated review from GitHub Copilot.
-   - Polls CI jobs until completion.
-   - Parses Copilot comments, allowing AI agents to fix any feedback immediately.
-   - Auto-merges to `main` upon green CI and clean review, then synchronizes local `main`.
+   - Polls GitHub Actions CI jobs until completion.
+   - Auto-merges to `main` upon green CI without requiring external review, then synchronizes local `main`.
