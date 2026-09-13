@@ -156,18 +156,26 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# Traitement des arguments (--push-pr et message de commit)
+# Traitement des arguments (--push-pr, --auto-merge et message de commit)
 # ---------------------------------------------------------------------------
 PUSH_PR=false
+AUTO_MERGE=false
 CUSTOM_MSG=""
 
 for arg in "$@"; do
-    if [[ "$arg" == "--push-pr" || "$arg" == "--pr" ]]; then
+    if [[ "$arg" == "--auto-merge" || "$arg" == "--loop" ]]; then
+        AUTO_MERGE=true
+    elif [[ "$arg" == "--push-pr" || "$arg" == "--pr" ]]; then
         PUSH_PR=true
     elif [[ -z "$CUSTOM_MSG" ]]; then
         CUSTOM_MSG="$arg"
     fi
 done
+
+if [[ "$AUTO_MERGE" == "true" ]]; then
+    # Déléguer l'orchestration complète à scripts/pr_loop.sh
+    exec ./scripts/pr_loop.sh "$@"
+fi
 
 if [[ "${PUSH_PR_ENV:-0}" == "1" ]]; then
     PUSH_PR=true

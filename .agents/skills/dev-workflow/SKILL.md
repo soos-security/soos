@@ -118,13 +118,16 @@ Avant de commencer, lire obligatoirement :
 Après avoir complété les 4 phases de développement :
 1. Rédiger / mettre à jour la documentation technique dans `Docs/` (ex: `Docs/<composant>.md`)
 2. Rédiger le compte-rendu dans `AI/walkthroughs/NN_<nom_etape>.md` (numérotation séquentielle `01_...`, `02_...`, `03_...`)
-3. Valider, committer, pousser et créer la Pull Request en une seule commande :
+3. Lancer la boucle autonome de Pull Request et d'auto-merge :
    ```bash
-   ./save.sh --push-pr
+   ./save.sh --auto-merge
    ```
-   Ce script :
-   - Exécute le pipeline 4/4 : `cargo fmt`, `cargo clippy --all-targets -- -D warnings`, `cargo test` (dont la suite d'invariants de sécurité), et `cargo deny check`.
-   - Effectue le commit (vérifié par le hook pre-commit anti-fuite de secrets et anti-commit sur main).
-   - Pousse automatiquement la branche vers GitHub (`git push -u origin <branche>`).
-   - Tente d'ouvrir la Pull Request via `gh pr create` (ou fournit le lien web direct en 1 clic).
-4. Si le composant implique le module PAM, valider en parallèle `./run_tests.sh` pour les tests Docker.
+   Ce processus 100% autonome :
+   - Exécute le pipeline qualité 4/4 (`fmt`, `clippy -D warnings`, `test` incluant les invariants de sécurité, `deny check`).
+   - Bloque tout commit sur `main` ou fuite de secret (hook pre-commit).
+   - Pousse la branche vers GitHub et crée la Pull Request.
+   - Sollicite la review automatique de GitHub Copilot.
+   - Surveille les vérifications CI en temps réel.
+   - Récupère les retours émis par Copilot et permet à l'IA d'appliquer immédiatement les corrections nécessaires.
+   - Dès que la CI est verte (3/3 jobs) et les retours résolus, fusionne automatiquement la PR dans `main` (`gh pr merge --squash --delete-branch`) et synchronise la branche locale `main`.
+4. La tâche est considérée comme achevée uniquement lorsque le code est fusionné dans `main`. L'humain n'a pas besoin d'intervenir manuellement.
