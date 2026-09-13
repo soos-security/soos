@@ -80,12 +80,14 @@ soos/
   - `fix/<nom>` : correction de bug ou vulnérabilité (ex: `fix/pam-timeout`)
   - `test/<nom>` : ajout de tests ou fixtures (ex: `test/docker-pam-matrix`)
   - `chore/<nom>` : CI, outillage, dépendances (ex: `chore/ci-deny-rules`)
-- **Workflow de branche** :
-  1. Avant de coder : créer et basculer sur la branche (`git checkout -b <type>/<nom>`). Un hook pre-commit bloque physiquement tout commit direct sur `main`.
-  2. Suivre le workflow TDD (Architecte → Testeur → Auditeur → Développeur).
-  3. Valider les invariants de sécurité automatiquement via `cargo test` (crate `tests/invariants`).
-  4. Mettre à jour la documentation dans `Docs/` et le compte-rendu dans `AI/walkthroughs/`.
-  5. Exécuter `./save.sh --push-pr` : valide le pipeline 4/4 (`fmt`, `clippy`, `test`, `deny`), committe, pousse la branche sur GitHub et génère la Pull Request vers `main`.
+- **Workflow de branche & Boucle Autonome jusqu'au Merge (OBLIGATOIRE)** :
+  1. **Phase 0 — Branche dédiée** : Créer et basculer sur la branche (`git checkout -b <type>/<nom>`). Un hook pre-commit bloque physiquement tout commit direct sur `main`.
+  2. **Phases 1 à 4 — Cycle TDD** : Suivre rigoureusement le workflow (Architecte → Testeur → Auditeur → Développeur).
+  3. **Documentation & Walkthrough** : Mettre à jour la documentation dans `Docs/` et le walkthrough dans `AI/walkthroughs/`.
+  4. **Validation, Push & PR automatique** : Exécuter `./save.sh --auto-merge` (ou `scripts/pr_loop.sh`).
+  5. **Boucle autonome de revue Copilot** : L'IA surveille la Pull Request, récupère les retours émis par Copilot (`gh api repos/:owner/:repo/pulls/:number/comments`), applique immédiatement les corrections pertinentes (en rejetant uniquement celles qui violeraient `ARCHITECTURE.md`), valide et re-pousse.
+  6. **Auto-merge vers `main`** : Dès que les vérifications CI sont au vert (Quality + Security + Docker PAM) et les retours résolus, l'IA fusionne automatiquement la PR (`gh pr merge --squash --delete-branch`), bascule sur `main` et synchronise (`git pull`).
+  7. **Zéro friction humaine** : L'agent ne s'arrête que lorsque la branche est mergée dans `main`. Aucun contrôle humain n'est requis entre l'ouverture de la PR et la fusion, les garde-fous automatiques (invariants, cargo-deny, Docker) garantissant l'intégrité du système.
 
 ## Conventions de code Rust
 - `#![forbid(unsafe_code)]` dans les crates métier (protocol, policy, vision)

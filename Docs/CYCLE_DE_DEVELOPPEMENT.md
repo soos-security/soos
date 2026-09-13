@@ -78,22 +78,23 @@ Pour toute tâche de code, l'agent IA et le développeur suivent rigoureusement 
 
 ---
 
-## 4. Préparation et création de la Pull Request
+## 4. Préparation, Revue Copilot et Auto-Merge
 
-L'IA et le développeur utilisent la commande unifiée :
+Pour les développements autonomes par IA ou les contributeurs souhaitant une automatisation complète :
 
 ```bash
-# Sauvegarde locale, push et génération de Pull Request en une seule commande :
-./save.sh --push-pr
+# Boucle complète autonome : validation, push, PR, review Copilot, et auto-merge vers main :
+./save.sh --auto-merge
 
-# Ou avec un message de commit explicite :
-./save.sh "feat(policy): implémentation du rate limiting" --push-pr
+# Ou via le script dédié :
+./scripts/pr_loop.sh "feat(composant): description explicite"
 ```
 
-Cette commande :
-1. Valide le pipeline 4/4 local (`cargo fmt`, `cargo clippy`, `cargo test`, `cargo deny check`).
-2. Vérifie qu'aucun invariant de sécurité n'est violé via la crate `tests/invariants`.
-3. Empêche le commit de secrets (hook pre-commit).
-4. Pousse automatiquement la branche courante sur GitHub (`git push -u origin <branche>`).
-5. Déclenche la création de la Pull Request via `gh pr create` (ou fournit le lien web direct en un clic si `gh` n'a pas encore été configuré avec `gh auth login`).
-6. Déclenche le pipeline CI GitHub Actions complet sur la PR.
+### Déroulement de la boucle autonome :
+1. **Quality Gates** : Exécution de `cargo fmt`, `cargo clippy -D warnings`, `cargo test` (y compris invariants architecturaux) et `cargo deny check`.
+2. **Contrôle Pre-Commit** : Vérification de la branche (refus de `main`) et filtre anti-fuite de secrets.
+3. **Push & Pull Request** : Poussée de la branche vers GitHub et création automatique de la Pull Request si elle n'existe pas encore.
+4. **Sollicitation Copilot** : Demande d'analyse automatique à GitHub Copilot.
+5. **Surveillance CI** : Surveillance en temps réel de l'avancement des 3 jobs GitHub Actions (`Quality`, `Security`, `PAM Integration Docker`).
+6. **Résolution des retours** : Si Copilot émet des suggestions ou remarques, l'IA les analyse, apporte les corrections de code ou documentation nécessaires, et re-soumet.
+7. **Fusion automatique (Auto-Merge)** : Dès que les 3 jobs CI sont passés au vert et que les retours sont résolus, la Pull Request est fusionnée automatiquement dans `main` (`gh pr merge --squash --delete-branch`), et l'environnement local est synchronisé sur `main` (`git checkout main && git pull origin main`).
