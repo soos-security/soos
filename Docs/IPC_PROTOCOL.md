@@ -83,3 +83,22 @@ The `Response` struct implements `Zeroize` and `ZeroizeOnDrop`: sensitive reques
 1. **Zero Secrets on Wire**: Neither PAM passwords, biometric embeddings, nor camera frames ever travel over the IPC socket.
 2. **Fail-Closed Fallback (`PAM_IGNORE`)**: Any verdict other than `Allow` (`Deny`, `ProtocolError`, `Unavailable`), network error, or timeout immediately returns `PAM_IGNORE`, seamlessly delegating to fallback modules (`pam_unix.so`).
 3. **Single-Use Binding**: Responses are bound to unique 256-bit nonces and cannot be logically replayed.
+
+---
+
+## 5. Fuzzing and Property-Based Verification
+
+To ensure that untrusted or malformed inputs can never trigger memory corruption or daemon/PAM crashes:
+1. **Property-Based Testing (`proptest`)**:
+   - `prop_request_roundtrip`, `prop_response_roundtrip`, and `prop_event_roundtrip` assert serialization/deserialization idempotency for arbitrary valid messages.
+   - `prop_decode_request_never_panics`, `prop_decode_response_never_panics`, and `prop_decode_event_never_panics` feed arbitrary mutated byte streams ($0$ to $8{,}192$ bytes) asserting that `decode` never panics and always returns either `Ok` or a typed `CodecError`.
+   - `prop_declared_size_bounds` and `prop_truncated_buffer_bounds` verify zero-allocation fast rejection of oversized ($> 4{,}096$ bytes) or truncated payloads.
+   - Executed automatically via standard `cargo test` on every commit and CI run.
+2. **LLVM libFuzzer Integration (`cargo-fuzz`)**:
+   - Targets `decode_request`, `decode_response`, and `decode_event` in `crates/protocol/fuzz/`.
+   - Supports continuous coverage-guided fuzzing over millions of iterations:
+     ```bash
+     cargo +nightly fuzz run decode_request -- -runs=1000000
+     cargo +nightly fuzz run decode_response -- -runs=1000000
+     ```
+

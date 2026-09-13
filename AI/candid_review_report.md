@@ -1,56 +1,61 @@
-# Candid Review Report
+# Candid Code Review Report — Issue #4: Protocol Fuzzing and Property-Based Testing
 
-- **Date**: 2026-09-13
-- **Target Branch / Commit**: `feat/pam-ipc-client`
-- **Audited Files**:
-  - `Cargo.toml`
-  - `Cargo.lock`
-  - `crates/protocol/src/lib.rs`
-  - `crates/pam/Cargo.toml`
-  - `crates/pam/src/lib.rs`
-  - `crates/pam/src/config.rs`
-  - `crates/pam/src/ipc.rs`
-  - `crates/pam/tests/config_tests.rs`
-  - `crates/pam/tests/ipc_tests.rs`
+> **Reviewer**: Independent Candid Reviewer Sub-Agent  
+> **Date**: 2026-09-13  
+> **Branch**: `test/protocol-fuzzing` vs `origin/main`  
+> **Target**: Issue #4 (`test(protocol): Fuzzing harness and property-based testing`)  
 
-## 1. Executive Summary
+---
 
-Implementation of Issue #3 (`pam` Crate — IPC Client Integration) introducing a synchronous, non-blocking-runtime IPC client connecting `pam_soos.so` to `/run/soos/daemon.sock`. The PAM client safely parses command-line arguments (`timeout_ms`, `event=password-failed`, `socket_path`, `service`), establishes synchronous Unix domain socket communication with hard read/write timeouts totaling 200–250ms, generates cryptographic single-use 256-bit nonces via `getrandom`, enforces fail-closed fallback to `PAM_IGNORE` under any error or timeout, and sends best-effort `EventKind::PasswordFailed` telemetry within a bounded 20ms ceiling. All 88 workspace tests pass and zero Clippy warnings are present.
+## 1. Scope of Audit
 
-## 2. Deep Reasoning Audit
+The review analyzed all changes committed and staged on `test/protocol-fuzzing`:
+- `crates/protocol/src/types.rs`: Added `#[derive(PartialEq, Eq)]` to `Request`, `Response`, and `Event`.
+- `crates/protocol/tests/property_tests.rs`: Comprehensive `proptest` suite (round-trip, bounds, decoder fuzzing).
+- `crates/protocol/fuzz/`: libFuzzer harness (`Cargo.toml`, `decode_request.rs`, `decode_response.rs`, `decode_event.rs`, `README.md`).
+- `scripts/sync_issue.py`: Added `test/protocol-fuzzing` branch mapping.
+- `AI/BACKLOG.md`: Checked off sub-issues #4.1, #4.2, and #4.3.
+- `AI/VERIFICATION_MATRIX.md`: Updated criterion `P5` to `Validated`.
+- `Docs/IPC_PROTOCOL.md`: Added Section 5 detailing fuzzing and property tests.
+- `AI/walkthroughs/19_protocol_fuzzing_and_property_testing.md`: Authored walkthrough #19.
 
-### Logic & Architecture
-- [Pass]: PAM module acts strictly as a synchronous client to the privileged daemon socket at `/run/soos/daemon.sock`.
-- [Pass]: All IPC communication is strictly framed with 4-byte big-endian length prefixes and constrained to `MAX_MESSAGE_SIZE` (4096 bytes).
-- [Pass]: Request nonces (`request_id`) are validated against incoming response payloads to prevent replay attacks and message confusion.
-- [Pass]: Authorization verdict `Verdict::Allow` maps exclusively to `PAM_SUCCESS`; all other verdicts (`Deny`, `Unavailable`, `ProtocolError`) map strictly to `PAM_IGNORE`.
-- [Pass]: Sockets are closed immediately after the exchange, preventing fd leaks in PAM-hosting processes.
+---
 
-### PAM Concurrency & Deadlines
-- [Pass]: Absolute prohibition of Tokio or asynchronous runtimes in `crates/pam` is verified.
-- [Pass]: Synchronous `std::os::unix::net::UnixStream` is configured with strict read and write timeouts matching the configured latency budget (default 250ms).
-- [Pass]: Telemetry event notification (`event=password-failed`) executes fire-and-forget under a strict 20ms ceiling without stalling the authentication stack.
-- [Pass]: Output isolation: zero `println!`, `eprintln!`, or `dbg!` in production code, guaranteeing zero display manager or TTY stream corruption.
+## 2. Evaluation on Core Pillars
 
-### Panic Safety & Fallback
-- [Pass]: All FFI entry points (`pam_sm_authenticate`, `pam_sm_setcred`) are guarded with `catch_unwind(AssertUnwindSafe(...))` systematically returning `PAM_IGNORE`.
-- [Pass]: Zero `unwrap()`, `expect()`, `panic!()`, `todo!()`, or `unimplemented!()` in PAM production code.
-- [Pass]: Any connection refusal, timeout, malformed frame, or mismatched nonce safely degrades fail-closed to `PAM_IGNORE`.
-- [Pass]: Under no circumstances is an error converted into `PAM_SUCCESS`.
+### Pillar 1: Logic & Architecture
+- Code changes in `crates/protocol/src/types.rs` are minimal, idiomatic, and non-breaking (`PartialEq, Eq` derives).
+- `crates/protocol` maintains zero direct I/O, zero network, and strict boundary encapsulation.
+- Codec guarantees ($4{,}096$-byte ceiling, length-prefixed postcard binary) are rigorously asserted.
+- **Verdict**: PASS
 
-### Test Integrity & Anti-Weakening
-- [Pass]: Comprehensive unit and integration test suites authored across `crates/pam/tests/config_tests.rs` (7 tests), `crates/pam/tests/ipc_tests.rs` (10 tests), and `crates/pam/src/lib.rs` (4 tests).
-- [Pass]: Tests cover all acceptance criteria: `PA1` (daemon unreachable -> `PAM_IGNORE`), `PA2` (timeout -> `PAM_IGNORE`), `PA7` (C ABI loading), and `PA8` (non-interference).
-- [Pass]: Zero existing tests were modified or weakened; 88/88 workspace tests pass cleanly.
+### Pillar 2: PAM Real-Time Latency & Concurrency
+- `crates/pam` is not modified in this PR.
+- Fuzzing validates that decoding and deserializing payloads completes in microseconds without lockups.
+- **Verdict**: PASS
 
-### Memory & Secret Bounds
-- [Pass]: Length prefix verification occurs prior to body allocation; oversized responses (> 4096 bytes) are rejected without unbounded memory consumption.
-- [Pass]: Raw C string argument reading is bounded by `MAX_ARG_LEN` (256 bytes) and capped at `MAX_ARGC` (64 arguments).
-- [Pass]: Zero passwords, embeddings, or credentials are read, transmitted, or logged.
+### Pillar 3: Panic Safety & Fail-Closed Behavior
+- Decoder fuzzing (`prop_decode_request_never_panics`, `prop_decode_response_never_panics`, `prop_decode_event_never_panics`) subjects the parser to thousands of mutated, adversarial byte sequences with zero panics.
+- Codec errors return structured `CodecError` variants (`DeclaredSizeTooLarge`, `BufferTooSmall`, `Deserialize`).
+- Zero `unwrap()` or `expect()` in production library code.
+- **Verdict**: PASS
 
-## 3. Detailed Findings & Action Items
-- None. All architectural invariants, security guidelines, and acceptance criteria are satisfied.
+### Pillar 4: Dependency Isolation & Banned Crates
+- No OpenCV or Nokhwa dependencies introduced.
+- `#![forbid(unsafe_code)]` remains strictly enforced on `crates/protocol`.
+- Fuzzing harness is cleanly decoupled into `crates/protocol/fuzz/` sub-crate so standard workspace builds and tests remain unaffected.
+- **Verdict**: PASS
 
-## 4. Final Verdict
-**VERDICT: APPROVED**
+### Pillar 5: Test Integrity & Anti-Weakening
+- All 16 existing unit tests in `crates/protocol/src/codec.rs` continue to pass without alteration.
+- 9 new property tests cover 2,250 test executions per run.
+- Zero tests weakened or deleted.
+- **Verdict**: PASS
 
+---
+
+## 3. Final Candid Verdict
+
+```text
+CANDID_REVIEW_VERDICT: APPROVED
+```

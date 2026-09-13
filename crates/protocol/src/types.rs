@@ -52,7 +52,7 @@ pub enum EventKind {
 ///
 /// Note: `uid_hint` is merely a consistency assertion; the authoritative
 /// target UID is obtained by the daemon via kernel `SO_PEERCRED`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Request {
     /// Protocol version.
     pub version: u8,
@@ -70,7 +70,7 @@ pub struct Request {
 }
 
 /// Telemetry event notification following standard authentication failure.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Event {
     /// Protocol version.
     pub version: u8,
@@ -146,7 +146,7 @@ pub enum ReasonClass {
 /// Manually implements `Zeroize` because enums `Verdict` and `ReasonClass`
 /// do not support automatic derive. On drop, sensitive fields are zeroed out
 /// and enums are reset to safe non-authorizing values (`Deny` / `InternalError`).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Response {
     /// Protocol version.
     pub version: u8,

@@ -47,6 +47,7 @@ BRANCH_TO_ISSUE = {
     "feat/daemon-skeleton": 2,
     "feat/pam-ipc-client": 3,
     "test/protocol-fuzz": 4,
+    "test/protocol-fuzzing": 4,
     "feat/camera-v4l": 5,
     "feat/inference-ort": 6,
     "feat/vision-pipeline": 7,
