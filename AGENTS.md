@@ -20,13 +20,25 @@
 
 ---
 
-## Mandatory Reference Documents
-Before any implementation, the agent MUST read:
+## Mandatory Reference Documents (Full Context Mandate)
+Before any implementation, the agent MUST read and ingest the full context from `AI/` and `Docs/`:
 1. `AI/ARCHITECTURE.md` — Master architecture, threat model, invariants, latency budget
 2. `AI/DECISIONS.md` — ADR register (anti-hallucination)
-3. `AI/MOCK_STRATEGY.md` — Hardware-free simulation strategy
+3. `AI/BACKLOG.md` — Complete development backlog and issue specifications
 4. `AI/VERIFICATION_MATRIX.md` — Component acceptance criteria matrix
-5. `Docs/COMMIT_CONVENTION.md` — Conventional Commits 1.0.0 specification
+5. `AI/MOCK_STRATEGY.md` — Hardware-free simulation strategy
+6. `AI/ROLES_AND_WORKFLOW.md` — Multi-agent roles and quality guidelines
+7. `Docs/SECURITY_AND_QUALITY_GUIDELINES.md` — Security guidelines, compiler profiles, workspace lints
+8. `Docs/DEVELOPMENT_WORKFLOW.md` — Complete TDD lifecycle and testing guidelines
+9. `Docs/COMMIT_CONVENTION.md` — Conventional Commits 1.0.0 specification
+10. `Docs/IPC_PROTOCOL.md` — IPC framing and codec constraints
+
+---
+
+## Strict Test Integrity Invariant (Zero Test Weakening)
+- **Tests Are Immutable Contracts**: Tests authored during Phase 2 (Tester Agent) represent the contractual acceptance criteria derived from `AI/BACKLOG.md` and `AI/VERIFICATION_MATRIX.md`.
+- **Zero Weakening / Bypassing**: Under **NO circumstances** is an AI agent permitted to modify, weaken, delete, or bypass an existing test to make it pass with broken or incomplete production code.
+- **Perseverance Required**: If a test fails, the AI MUST persevere, analyze the root cause, and fix the production implementation until all tests pass cleanly. Artificially weakening tests is considered an architectural invariant violation.
 
 ---
 
