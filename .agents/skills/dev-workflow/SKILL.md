@@ -105,9 +105,11 @@ Before starting Phase 1, the orchestrator verifies full ingestion of:
 - **Issue Disambiguation**: If an issue number could refer to either a Backlog Issue or a GitHub Issue (e.g. user passes `#12`), consult `scripts/sync_issue.py` (`BACKLOG_TO_GITHUB` / `BRANCH_TO_ISSUE`) to resolve the canonical Backlog issue and topic branch.
 - Lookup target branch in `AI/BACKLOG.md` (e.g. `feat/camera-v4l`).
 - Create and switch: `git checkout -b <type>/<name>`.
-- **Sandbox Execution**:
+- **Sandbox Execution & Tooling Paths**:
   - `git checkout -b <type>/<name>` modifies `.git` and must be executed with `BypassSandbox: true` if `.git` is read-only in the sandbox.
   - If adding new external dependencies to `Cargo.toml`, run a single `cargo fetch` with `BypassSandbox: true` to populate the Cargo cache, then resume sandboxed compilation and testing.
+  - `gh` CLI path resolution: Ensure `PATH="$HOME/.local/bin:$PATH"` is prepended when executing commands that invoke `gh`, as user-local installs reside under `~/.local/bin/gh`.
+  - Avoid GraphQL classic project deprecation in `gh issue view` by querying specific fields: `gh issue view <id> --json title,body,number,state`.
   - Release steps (`./save.sh --push-pr`, `./scripts/pr_loop.sh`) require `BypassSandbox: true` to communicate with GitHub.
 
 ### Phase 1: Architect Sub-Agent ([architect-agent](file:///home/hadrien/soos/.agents/skills/architect-agent/SKILL.md))

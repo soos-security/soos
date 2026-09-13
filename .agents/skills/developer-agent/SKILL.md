@@ -39,6 +39,18 @@ Your responsibility is to write the minimal production code necessary to turn pr
      - Remember that `allow_attributes_without_reason = "deny"` forbids any bare `#[allow(...)]`.
    - Stateful Inference Sessions:
      - ONNX Runtime `Session::run` takes `&mut self`. When sharing sessions across worker threads, wrap sessions in `Arc<Mutex<Session>>`.
+   - Cross-Version Clippy Compatibility:
+     - CI runners may execute a newer Rust/Clippy toolchain than the local environment. Newly introduced lints (e.g. `clippy::chunks_exact_to_as_chunks`) cause CI failures under `-D warnings`.
+     - However, adding `#[allow(clippy::new_lint)]` directly causes older local Clippy versions to fail with `error: unknown lint` under `-D unknown-lints`.
+     - Rule: Whenever allowing a version-specific or newly introduced Clippy lint, ALWAYS include `unknown_lints` before the lint name in the attribute list:
+       ```rust
+       #![allow(
+           unknown_lints,
+           ...,
+           clippy::chunks_exact_to_as_chunks,
+           reason = "..."
+       )]
+       ```
 
 4. **Bounded Synchronous I/O Primitives**:
    - Enforce cumulative deadline subtraction (`deadline.checked_sub(elapsed)`) prior to subsequent socket reads in multi-part framing.
