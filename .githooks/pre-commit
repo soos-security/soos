@@ -47,7 +47,13 @@ while IFS= read -r -d '' file; do
 done < <(git diff --cached --name-only -z)
 
 # 3. Candid Pre-Commit Review (Architectural Invariants & English Policy)
-if [[ -f "./scripts/candid_review.sh" ]]; then
+if [[ -f "./scripts/candid_subagent.sh" ]]; then
+    if ! ./scripts/candid_subagent.sh; then
+        echo -e "\033[0;31m[BLOCKED]\033[0m Candid review failed invariant checks or AI sub-agent review!" >&2
+        echo -e "          Resolve the invariant errors above before committing." >&2
+        exit 1
+    fi
+elif [[ -f "./scripts/candid_review.sh" ]]; then
     if ! ./scripts/candid_review.sh; then
         echo -e "\033[0;31m[BLOCKED]\033[0m Candid review failed architectural invariant or language checks!" >&2
         echo -e "          Resolve the invariant errors above before committing." >&2

@@ -193,7 +193,14 @@ fi
 # Step 5: Independent Candid Pre-Push Code Review
 # ---------------------------------------------------------------------------
 step "5/5: candid review"
-if [[ -f "./scripts/candid_review.sh" ]]; then
+if [[ -f "./scripts/candid_subagent.sh" ]]; then
+    if ./scripts/candid_subagent.sh; then
+        success "Candid pre-push review passed."
+    else
+        error "Candid pre-push review failed invariant checks or AI sub-agent review."
+        exit 1
+    fi
+elif [[ -f "./scripts/candid_review.sh" ]]; then
     if ./scripts/candid_review.sh; then
         success "Candid pre-push review passed."
     else
