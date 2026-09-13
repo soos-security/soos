@@ -1,167 +1,164 @@
-//! Types du protocole IPC v1 entre le module PAM et le démon soos.
+//! IPC Protocol v1 Types for communication between the PAM module and the soos daemon.
 //!
-//! Tous les types sont bornés en taille et vérifiés à la construction.
-//! Le `request_id` est un identifiant aléatoire de 256 bits (32 octets)
-//! qui lie une requête à sa réponse et empêche le rejeu logique.
+//! All types are strictly bounded in size and validated upon construction.
+//! The `request_id` is a 256-bit (32-byte) cryptographic random identifier
+//! that binds a request to its response and prevents logical replay attacks.
 
 use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
-// Constantes du protocole
+// Protocol Constants
 // ---------------------------------------------------------------------------
 
-/// Version courante du protocole.
+/// Current wire protocol version.
 pub const CURRENT_VERSION: u8 = 1;
 
-/// Taille maximale d'un message sérialisé en octets.
-/// Au-delà de cette taille, le message est rejeté AVANT désérialisation.
+/// Maximum serialized message size in bytes.
+/// Any message exceeding this size is rejected BEFORE deserialization.
 pub const MAX_MESSAGE_SIZE: usize = 4096;
 
-/// Longueur du `request_id` en octets (256 bits).
+/// Length of the `request_id` in bytes (256 bits).
 pub const REQUEST_ID_LEN: usize = 32;
 
-/// Longueur maximale du nom de service PAM en octets.
+/// Maximum allowable length of a PAM service name in bytes.
 pub const MAX_SERVICE_LEN: usize = 64;
 
 // ---------------------------------------------------------------------------
-// Types de requête
+// Request Types
 // ---------------------------------------------------------------------------
 
-/// Identifiant unique d'une requête d'authentification.
-/// Généré par `getrandom`, non réutilisé, lié à la réponse.
+/// Unique identifier for an authentication request.
+/// Generated via `getrandom`, never reused, and bound to the response.
 pub type RequestId = [u8; REQUEST_ID_LEN];
 
-/// Type de requête envoyée par le module PAM au démon.
+/// Request kind sent by the PAM module to the daemon.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[repr(u8)]
 pub enum RequestKind {
-    /// Demande d'authentification faciale.
+    /// Facial authentication verification request.
     Auth = 0,
 }
 
-/// Type d'événement notifié par le module PAM au démon (best-effort).
+/// Telemetry event notified by the PAM module to the daemon (best-effort).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[repr(u8)]
 pub enum EventKind {
-    /// L'authentification par mot de passe a échoué.
-    /// Déclenche potentiellement la capture de preuve (opt-in).
+    /// Password authentication attempt failed.
+    /// Potentially triggers anti-intrusion evidence capture (opt-in).
     PasswordFailed = 0,
 }
 
-/// Requête d'authentification envoyée par le module PAM.
+/// Authentication request payload sent by the PAM module.
 ///
-/// Le `uid_hint` n'est qu'une assertion de cohérence : l'UID faisant
-/// autorité est celui de `SO_PEERCRED` lu par le démon.
+/// Note: `uid_hint` is merely a consistency assertion; the authoritative
+/// target UID is obtained by the daemon via kernel `SO_PEERCRED`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Request {
-    /// Version du protocole.
+    /// Protocol version.
     pub version: u8,
-    /// Type de requête.
+    /// Request operation type.
     pub kind: RequestKind,
-    /// Identifiant unique de la requête (256 bits, `getrandom`).
+    /// Unique 256-bit cryptographic nonce (`getrandom`).
     pub request_id: RequestId,
-    /// UID déclaré par le client PAM (vérifié contre `SO_PEERCRED`).
+    /// Declared UID from PAM client (cross-checked against `SO_PEERCRED`).
     pub uid_hint: u32,
-    /// Nom du service PAM (ex: "gdm", "sudo", "login"). Borné à 64 octets.
+    /// PAM service name (e.g. "gdm", "sudo", "login"). Bounded to 64 bytes.
     pub service: String,
-    /// Deadline monotone en nanosecondes. Au-delà, le démon doit répondre
-    /// `Unavailable` même si le traitement n'est pas terminé.
+    /// Absolute monotonic deadline in nanoseconds. Exceeding this deadline
+    /// forces the daemon to return `Unavailable` immediately.
     pub deadline_monotonic_ns: u64,
 }
 
-/// Événement notifié au démon après un échec d'authentification classique.
+/// Telemetry event notification following standard authentication failure.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Event {
-    /// Version du protocole.
+    /// Protocol version.
     pub version: u8,
-    /// Type d'événement.
+    /// Event notification kind.
     pub kind: EventKind,
-    /// Identifiant de la requête d'authentification faciale associée (si applicable).
+    /// Associated facial authentication request ID, if applicable.
     pub request_id: Option<RequestId>,
-    /// Nom du service PAM.
+    /// PAM service name.
     pub service: String,
-    /// Timestamp monotone en nanosecondes.
+    /// Monotonic timestamp in nanoseconds.
     pub timestamp_monotonic_ns: u64,
 }
 
 // ---------------------------------------------------------------------------
-// Types de réponse
+// Response Types
 // ---------------------------------------------------------------------------
 
-/// Verdict rendu par le démon après analyse faciale.
+/// Verdict returned by the daemon following facial analysis.
 ///
-/// `Deny` et `Unavailable` sont volontairement indiscernables pour le module PAM
-/// (les deux mènent à `PAM_IGNORE`). Le démon peut les distinguer pour
-/// l'observabilité interne.
+/// `Deny` and `Unavailable` are intentionally indistinguishable to the PAM module
+/// (both lead to `PAM_IGNORE`). The daemon separates them for internal observability.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[repr(u8)]
 pub enum Verdict {
-    /// Visage unique, PAD acceptable, score ≥ seuil, contexte valide.
+    /// Single face matched, PAD validated, score >= threshold, valid context.
     Allow = 0,
-    /// Pas de visage, plusieurs visages, score faible, PAD négatif.
+    /// No face, multiple faces, low similarity score, or failed PAD anti-spoof.
     Deny = 1,
-    /// Caméra/modèle/socket non prêt, délai dépassé, erreur interne.
+    /// Camera/model/socket offline, timeout expired, or internal error.
     Unavailable = 2,
-    /// Requête malformée, UID incohérent, rate-limit atteint.
+    /// Malformed request, mismatched UID, or rate-limit reached.
     ProtocolError = 3,
 }
 
-/// Classe de raison du verdict (pour observabilité interne du démon).
-/// Ne doit JAMAIS être exposée au module PAM ni aux logs accessibles utilisateur.
+/// Detailed classification category for internal daemon observability.
+/// Must NEVER be exposed to unprivileged users or leaked into user logs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[repr(u8)]
 pub enum ReasonClass {
-    /// Authentification faciale réussie.
+    /// Facial authentication succeeded.
     FaceMatch = 0,
-    /// Aucun visage détecté dans la frame.
+    /// No face detected in frame.
     NoFace = 1,
-    /// Plusieurs visages détectés.
+    /// Multiple faces detected in frame.
     MultipleFaces = 2,
-    /// Score de similarité sous le seuil.
+    /// Similarity score below acceptance threshold.
     ScoreBelowThreshold = 3,
-    /// PAD (Presentation Attack Detection) négatif.
+    /// Presentation Attack Detection (PAD) rejected spoof attempt.
     PadFailed = 4,
-    /// Caméra indisponible ou non prête.
+    /// Camera hardware unavailable or uninitialized.
     CameraUnavailable = 5,
-    /// Modèle ONNX non chargé ou invalide.
+    /// ONNX model session not loaded or corrupted.
     ModelUnavailable = 6,
-    /// Frame trop ancienne (> 150ms).
+    /// Frame exceeds freshness budget (> 150ms).
     StaleFrame = 7,
-    /// Deadline dépassée.
+    /// Execution deadline exceeded.
     Timeout = 8,
-    /// Rate limit atteint pour cet UID.
+    /// Rate limit reached for requested UID.
     RateLimited = 9,
-    /// UID incohérent entre requête et `SO_PEERCRED`.
+    /// Declared UID does not match kernel `SO_PEERCRED`.
     UidMismatch = 10,
-    /// Requête malformée ou version non supportée.
+    /// Malformed payload or unsupported protocol version.
     MalformedRequest = 11,
-    /// Erreur interne non classifiée.
+    /// Unclassified internal server error.
     InternalError = 12,
 }
 
-/// Réponse du démon au module PAM.
+/// Daemon response sent to the PAM module.
 ///
-/// Mono-usage : liée au `request_id`, à l'UID, au service et à une
-/// échéance courte. Jamais mise en cache côté PAM.
+/// Single-use: cryptographically bound to `request_id`, UID, service, and
+/// short expiration. Never cached by the PAM module.
 ///
-/// Implémente `Zeroize` manuellement car les enums `Verdict` et `ReasonClass`
-/// ne supportent pas le derive automatique (pas de `DefaultIsZeroes`).
-/// À la destruction, les champs sensibles sont effacés et les enums
-/// sont ramenés à des valeurs sûres (`Deny` / `InternalError`).
+/// Manually implements `Zeroize` because enums `Verdict` and `ReasonClass`
+/// do not support automatic derive. On drop, sensitive fields are zeroed out
+/// and enums are reset to safe non-authorizing values (`Deny` / `InternalError`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Response {
-    /// Version du protocole.
+    /// Protocol version.
     pub version: u8,
-    /// Identifiant de la requête à laquelle cette réponse correspond.
+    /// Identifier matching the original authentication request.
     pub request_id: RequestId,
-    /// Verdict rendu par le démon.
+    /// Authentication verdict rendered by daemon.
     pub verdict: Verdict,
-    /// Classe de raison (observabilité interne).
+    /// Internal reason classification for daemon observability.
     pub reason_class: ReasonClass,
-    /// Timestamp monotone d'émission (nanosecondes).
+    /// Monotonic issuance timestamp (nanoseconds).
     pub issued_monotonic_ns: u64,
-    /// Timestamp monotone d'expiration (nanosecondes).
-    /// Typiquement 1-2 secondes après `issued_monotonic_ns`.
+    /// Monotonic expiration timestamp (nanoseconds, 1-2s after issuance).
     pub expires_monotonic_ns: u64,
 }
 
@@ -169,9 +166,8 @@ impl zeroize::Zeroize for Response {
     fn zeroize(&mut self) {
         self.version.zeroize();
         self.request_id.zeroize();
-        // Les enums sans champs ne peuvent pas être "zeroized" au sens binaire.
-        // On les ramène à des valeurs sûres (non-Allow) pour garantir qu'une
-        // réponse effacée ne puisse jamais être interprétée comme une autorisation.
+        // Zero-field enums cannot be binary zeroized; reset to safe fallback defaults
+        // ensuring an erased response can never be misconstrued as authorized.
         self.verdict = Verdict::Deny;
         self.reason_class = ReasonClass::InternalError;
         self.issued_monotonic_ns.zeroize();
@@ -187,15 +183,15 @@ impl Drop for Response {
 }
 
 // ---------------------------------------------------------------------------
-// Validations
+// Validation Logic
 // ---------------------------------------------------------------------------
 
-/// Erreurs de validation des messages du protocole.
+/// Validation errors encountered during message parsing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ValidationError {
-    /// Le nom du service dépasse la taille maximale autorisée.
+    /// Service name exceeds maximum permitted byte length.
     ServiceTooLong { len: usize, max: usize },
-    /// La version du protocole n'est pas supportée.
+    /// Protocol version is not supported.
     UnsupportedVersion { version: u8 },
 }
 
@@ -215,13 +211,13 @@ impl core::fmt::Display for ValidationError {
 impl std::error::Error for ValidationError {}
 
 impl Request {
-    /// Valide la requête selon les contraintes du protocole.
+    /// Validates the request against wire protocol constraints.
     ///
     /// # Errors
     ///
-    /// Retourne `ValidationError` si :
-    /// - Le nom du service dépasse [`MAX_SERVICE_LEN`] octets
-    /// - La version du protocole n'est pas [`CURRENT_VERSION`]
+    /// Returns `ValidationError` if:
+    /// - The service name exceeds [`MAX_SERVICE_LEN`] bytes
+    /// - The protocol version differs from [`CURRENT_VERSION`]
     pub fn validate(&self) -> Result<(), ValidationError> {
         if self.version != CURRENT_VERSION {
             return Err(ValidationError::UnsupportedVersion {
@@ -239,16 +235,15 @@ impl Request {
 }
 
 impl Response {
-    /// Vérifie si cette réponse autorise l'authentification.
+    /// Evaluates whether this response grants authentication authorization.
     ///
-    /// Seul un verdict `Allow` avec la version courante est considéré
-    /// comme une autorisation valide.
+    /// Only an `Allow` verdict matching [`CURRENT_VERSION`] is valid authorization.
     #[must_use]
     pub fn is_allow(&self) -> bool {
         self.version == CURRENT_VERSION && self.verdict == Verdict::Allow
     }
 
-    /// Vérifie si la réponse correspond à la requête donnée.
+    /// Checks if the response corresponds to the specified request identifier.
     #[must_use]
     pub fn matches_request(&self, request_id: &RequestId) -> bool {
         self.request_id == *request_id
@@ -256,9 +251,9 @@ impl Response {
 }
 
 impl Verdict {
-    /// Retourne `true` si le verdict doit mener à `PAM_IGNORE`.
+    /// Returns `true` if the verdict must result in `PAM_IGNORE`.
     ///
-    /// Tous les verdicts sauf `Allow` mènent à `PAM_IGNORE`.
+    /// All verdicts other than `Allow` fall back to `PAM_IGNORE`.
     #[must_use]
     pub fn should_ignore(self) -> bool {
         self != Self::Allow

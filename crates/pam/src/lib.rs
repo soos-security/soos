@@ -1,76 +1,72 @@
-//! # pam_soos — Module PAM pour authentification faciale locale
+//! # pam_soos — Linux PAM Module for Local Facial Verification
 //!
-//! Ce module est un `cdylib` chargé par Linux-PAM. Il exporte les points
-//! d'entrée C `pam_sm_authenticate` et `pam_sm_setcred`.
+//! This module is a `cdylib` loaded dynamically by Linux-PAM. It exports the standard
+//! C ABI entry points `pam_sm_authenticate` and `pam_sm_setcred`.
 //!
-//! ## Principes fondamentaux
+//! ## Core Security Principles
 //!
-//! 1. **Aucun runtime async** — uniquement `std::os::unix::net::UnixStream`
-//! 2. **Budget strict** — 200-250ms maximum, incluant connect + requête + réponse
-//! 3. **Jamais de panic** — `catch_unwind` sur toute entrée FFI, retour `PAM_IGNORE`
-//! 4. **Aucun secret** — ne lit ni ne transmet de mot de passe
-//! 5. **Dégradation sûre** — toute erreur → `PAM_IGNORE` → repli mot de passe
+//! 1. **Zero Async Runtime**: Strictly uses synchronous blocking primitives (`std::os::unix::net::UnixStream`).
+//! 2. **Strict Latency Budget**: Maximum 200–250ms total execution time (connect + request + response).
+//! 3. **Panic Resilience**: `catch_unwind` wraps every FFI entry point, systematically returning `PAM_IGNORE`.
+//! 4. **Zero Secrets on Wire**: Never inspects, processes, or transmits passwords over IPC.
+//! 5. **Safe Fallback**: Any error or timeout degrades silently to `PAM_IGNORE` for password fallback.
 //!
-//! ## Phase actuelle : Squelette Fondation
+//! ## Current Status: Foundation Skeleton
 //!
-//! Retourne systématiquement `PAM_IGNORE` pour valider :
-//! - Le chargement ABI C par PAM
-//! - La non-interférence avec `pam_unix.so`
-//! - La résilience de la pile PAM
+//! Systematically returns `PAM_IGNORE` to validate:
+//! - C ABI loading compatibility by Linux-PAM
+//! - Zero interference with downstream authentication modules (`pam_unix.so`)
+//! - Fault-tolerant resilience of the PAM authentication stack
 
-// NOTE: unsafe est nécessaire UNIQUEMENT pour les exports ABI C (`extern "C"`).
-// Tout le reste du code doit rester safe.
+// NOTE: unsafe is required ONLY for C ABI symbol exports (`extern "C"`).
+// All internal logic remains safe Rust.
 #![deny(clippy::all)]
 
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
 // ---------------------------------------------------------------------------
-// Constantes PAM (from linux-pam headers)
+// PAM Constants (Linux-PAM Specification)
 // ---------------------------------------------------------------------------
-// Ces constantes sont les valeurs standard de Linux-PAM.
-// En phase suivante, elles viendront de la crate `pam-bindings`.
 
-/// Succès — l'authentification est accordée.
+/// Success: authentication successfully granted.
 #[allow(dead_code)]
 const PAM_SUCCESS: i32 = 0;
 
-/// Le module choisit de ne pas participer à la décision.
-/// PAM continue avec les modules suivants de la pile.
+/// Ignore: module chooses not to participate in decision; PAM continues down stack.
 const PAM_IGNORE: i32 = 25;
 
 // ---------------------------------------------------------------------------
-// Opaque PAM handle (pointeur vers la structure interne de PAM)
+// Opaque PAM Handle Pointer
 // ---------------------------------------------------------------------------
 
-/// Handle opaque vers la structure interne de Linux-PAM.
-/// On ne déréférence jamais ce pointeur — il est seulement transmis.
+/// Opaque pointer to Linux-PAM internal handle structure.
+/// This pointer is never dereferenced and only forwarded when required.
 #[repr(C)]
 pub struct PamHandle {
     _opaque: [u8; 0],
 }
 
 // ---------------------------------------------------------------------------
-// Points d'entrée PAM (ABI C)
+// PAM Entry Points (C ABI)
 // ---------------------------------------------------------------------------
 
-/// Point d'entrée principal appelé par PAM pour l'authentification.
+/// Primary authentication entry point called by Linux-PAM.
 ///
 /// # Safety
 ///
-/// Cette fonction est appelée par Linux-PAM via l'ABI C. Le `pamh` est un
-/// pointeur opaque fourni par PAM et ne doit pas être déréférencé.
-/// `argv` pointe vers un tableau de `argc` chaînes C.
+/// Invoked by Linux-PAM via the C ABI. `pamh` is an opaque pointer supplied by
+/// PAM and must not be arbitrarily dereferenced. `argv` points to an array of
+/// `argc` C strings.
 ///
-/// # Comportement actuel (Phase Fondation)
+/// # Behavior
 ///
-/// Retourne systématiquement `PAM_IGNORE` pour valider l'ABI sans
-/// interférer avec la pile PAM.
+/// Returns `PAM_IGNORE` to validate the C ABI without interfering with
+/// the operational PAM stack.
 ///
-/// # Garantie anti-panic
+/// # Panic Safety Guarantee
 ///
-/// Toute panique est interceptée par `catch_unwind`. En cas de panic,
-/// la fonction retourne `PAM_IGNORE` pour garantir le repli sur le
-/// mot de passe.
+/// All panics are intercepted by `catch_unwind`. If an internal panic occurs,
+/// the function returns `PAM_IGNORE` to ensure seamless fallback to password.
 #[no_mangle]
 pub extern "C" fn pam_sm_authenticate(
     _pamh: *mut PamHandle,
@@ -78,32 +74,28 @@ pub extern "C" fn pam_sm_authenticate(
     _argc: i32,
     _argv: *const *const u8,
 ) -> i32 {
-    // catch_unwind garantit qu'aucune panique ne franchit la frontière C.
-    // AssertUnwindSafe est acceptable ici car nous n'accédons à aucun état
-    // mutable partagé dans la closure.
     let result = catch_unwind(AssertUnwindSafe(|| {
-        // Phase Fondation : pas de démon, pas de socket.
-        // Retourne PAM_IGNORE → PAM continue vers pam_unix.so
+        // Foundation phase: returns PAM_IGNORE -> PAM continues to pam_unix.so
         PAM_IGNORE
     }));
 
     match result {
         Ok(code) => code,
         Err(_) => {
-            // Invariant 5 de ARCHITECTURE.md :
-            // "Un panic se dégrade en mot de passe, jamais en autorisation."
+            // Invariant 5 of ARCHITECTURE.md:
+            // "A panic degrades to password fallback, never to authorization."
             PAM_IGNORE
         }
     }
 }
 
-/// Point d'entrée pour la gestion des credentials PAM.
+/// Credential management entry point called by Linux-PAM.
 ///
 /// # Safety
 ///
-/// Mêmes conditions que `pam_sm_authenticate`.
+/// Same conditions as `pam_sm_authenticate`.
 ///
-/// soos ne gère pas de credentials. Retourne toujours `PAM_IGNORE`.
+/// `soos` does not manage credential tokens; systematically returns `PAM_IGNORE`.
 #[no_mangle]
 pub extern "C" fn pam_sm_setcred(
     _pamh: *mut PamHandle,
@@ -119,7 +111,7 @@ pub extern "C" fn pam_sm_setcred(
 }
 
 // ===========================================================================
-// Tests unitaires
+// Unit Tests
 // ===========================================================================
 
 #[cfg(test)]
@@ -127,36 +119,32 @@ mod tests {
     use super::*;
     use std::ptr;
 
-    /// PA1 : Le module retourne PAM_IGNORE quand le démon est indisponible
-    /// (en phase fondation, le démon n'existe pas encore).
+    /// PA1: Module returns PAM_IGNORE when daemon is unreachable.
     #[test]
     fn authenticate_returns_pam_ignore() {
         let result = pam_sm_authenticate(ptr::null_mut(), 0, 0, ptr::null());
         assert_eq!(result, PAM_IGNORE);
     }
 
-    /// Le module ne crash jamais sur setcred.
+    /// Module never panics or aborts on setcred.
     #[test]
     fn setcred_returns_pam_ignore() {
         let result = pam_sm_setcred(ptr::null_mut(), 0, 0, ptr::null());
         assert_eq!(result, PAM_IGNORE);
     }
 
-    /// PA5 : Vérification que PAM_IGNORE est bien 25 (standard Linux-PAM).
+    /// PA5: Verify PAM_IGNORE constant matches Linux-PAM standard value (25).
     #[test]
     fn pam_ignore_has_correct_value() {
         assert_eq!(PAM_IGNORE, 25);
     }
 
-    /// PA3 : catch_unwind empêche les paniques de traverser la frontière C.
-    /// Ce test vérifie que même si le code interne paniquait, le résultat
-    /// serait PAM_IGNORE et non un abort.
+    /// PA3: catch_unwind stops panics from crossing the C ABI boundary.
     #[test]
     fn panic_safety_returns_pam_ignore() {
         let result = catch_unwind(AssertUnwindSafe(|| -> i32 {
             panic!("test panic in PAM module");
         }));
-        // Si panic, on retourne PAM_IGNORE
         let code = match result {
             Ok(c) => c,
             Err(_) => PAM_IGNORE,

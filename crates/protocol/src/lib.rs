@@ -1,20 +1,20 @@
 //! # soos-protocol
 //!
-//! Types IPC bornés et codec v1 pour la communication entre le module PAM
-//! (`pam_soos.so`) et le démon soos (`soos-daemon`).
+//! Bounded IPC schemas and codec v1 for communication between the PAM module
+//! (`pam_soos.so`) and the background daemon (`soos-daemon`).
 //!
-//! ## Principes de conception
+//! ## Design Principles
 //!
-//! - **Aucune I/O** : ce crate ne dépend ni de fichiers, ni de sockets, ni de réseau.
-//! - **Borné** : la taille maximale d'un message sérialisé est de [`MAX_MESSAGE_SIZE`] octets.
-//! - **Versionné** : chaque message contient un champ `version` pour la compatibilité.
-//! - **Sûr** : `#![forbid(unsafe_code)]` est actif.
+//! - **Zero I/O**: This crate contains zero file, socket, or network dependencies.
+//! - **Strictly Bounded**: Maximum serialized payload is constrained to [`MAX_MESSAGE_SIZE`] bytes.
+//! - **Versioned**: Every message payload includes an explicit `version` field.
+//! - **Memory Safe**: `#![forbid(unsafe_code)]` is strictly enforced.
 //!
-//! ## Protocole v1
+//! ## Protocol v1 Frame Layout
 //!
 //! ```text
 //! Request v1:  version | kind=AUTH | request_id[32] | uid_hint:u32 |
-//!              service_len:u8 | service[≤64] | deadline_monotonic_ns:u64
+//!              service_len:u8 | service[<=64] | deadline_monotonic_ns:u64
 //! Response v1: version | request_id[32] | verdict:u8 | reason_class:u8 |
 //!              issued_monotonic_ns:u64 | expires_monotonic_ns:u64
 //! ```

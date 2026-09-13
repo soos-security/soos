@@ -6,7 +6,7 @@ members = [
     "tests/invariants",
 ]
 
-# Versions centralisées pour tout le workspace
+# Centralized versions across workspace
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
@@ -15,12 +15,12 @@ repository = "https://github.com/Mysticaly622/soos"
 publish = false
 
 [workspace.dependencies]
-# Sérialisation IPC (binaire, compact, no-std compatible)
+# IPC binary serialization (compact, bounded)
 serde = { version = "1", features = ["derive"] }
 postcard = { version = "1", default-features = false, features = ["alloc"] }
 
-# Effacement mémoire sécurisé
+# Memory zeroization
 zeroize = { version = "1.9", features = ["derive"] }
 
-# Crates internes
+# Internal workspace crates
 soos-protocol = { path = "crates/protocol", version = "0.1.0" }

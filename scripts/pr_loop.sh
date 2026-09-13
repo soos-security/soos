@@ -1,23 +1,23 @@
 #!/usr/bin/env bash
 # =============================================================================
-# scripts/pr_loop.sh — Boucle autonome PR, review Copilot et auto-merge
+# scripts/pr_loop.sh — Autonomous PR loop, Copilot review, and auto-merge
 # =============================================================================
-# Ce script orchestre la finalisation d'une branche de travail :
-#   1. Vérifie qu'on est sur une branche dédiée (refuse 'main')
-#   2. Exécute ./save.sh --push-pr pour valider, committer et pousser
-#   3. Crée la Pull Request si elle n'existe pas encore
-#   4. Attend les vérifications CI (Quality, Security, PAM Docker)
-#   5. Attend l'analyse complète de GitHub Copilot (jusqu'à publication de sa review)
-#   6. Analyse les commentaires émis par Copilot :
-#      - Si des commentaires sont présents : affiche les détails et s'arrête (code 2)
-#        pour permettre à l'IA de corriger et de relancer.
-#      - Si aucun commentaire et CI 100% verte : fusionne automatiquement dans 'main'
-#        et synchronise la branche locale 'main'.
+# Orchestrates branch finalization:
+#   1. Verifies dedicated topic branch (rejects 'main' and 'detached')
+#   2. Executes ./save.sh --push-pr to validate, commit, and push
+#   3. Opens Pull Request if not already created
+#   4. Monitors CI checks (Quality, Security, PAM Docker)
+#   5. Actively awaits GitHub Copilot code review
+#   6. Evaluates Copilot feedback:
+#      - If review comments exist: outputs targeted line details and exits (code 2)
+#        to allow the AI agent to apply fixes and retry.
+#      - If zero comments and CI 100% green: squash-merges into 'main'
+#        and synchronizes local 'main' branch.
 # =============================================================================
 
 set -euo pipefail
 
-# Couleurs
+# Terminal Colors
 if [[ -t 1 ]]; then
     readonly GREEN='\033[0;32m'
     readonly RED='\033[0;31m'
@@ -40,57 +40,62 @@ warn()    { echo -e "${YELLOW}[WARN]${NC}  $*"; }
 error()   { echo -e "${RED}[FAIL]${NC}  $*" >&2; }
 step()    { echo -e "\n${BOLD}── $* ──${NC}"; }
 
-# 1. Vérification de la branche
+# 1. Branch verification
 CURRENT_BRANCH=$(git symbolic-ref --short HEAD 2>/dev/null || echo "detached")
 if [[ "$CURRENT_BRANCH" == "main" || "$CURRENT_BRANCH" == "detached" ]]; then
-    error "pr_loop.sh doit être exécuté sur une branche dédiée (actuellement : '$CURRENT_BRANCH')."
+    error "pr_loop.sh must be run on a dedicated topic branch (currently on: '$CURRENT_BRANCH')."
     exit 1
 fi
 
-step "1/6 : Validation locale, commit et push"
-info "Exécution du pipeline de qualité et push de la branche '$CURRENT_BRANCH'..."
-./save.sh --push-pr "$@"
+step "1/6: Local Quality Gates, Conventional Commit, and Push"
+info "Running quality pipeline and pushing branch '$CURRENT_BRANCH'..."
+PASSED_ARGS=()
+for arg in "$@"; do
+    if [[ "$arg" != "--auto-merge" && "$arg" != "--loop" ]]; then
+        PASSED_ARGS+=("$arg")
+    fi
+done
+./save.sh --push-pr "${PASSED_ARGS[@]}"
 
-step "2/6 : Vérification ou création de la Pull Request"
+step "2/6: Pull Request Verification or Creation"
 PR_JSON=$(gh pr list --head "$CURRENT_BRANCH" --json number,url,state --state open 2>/dev/null || echo "[]")
 PR_NUMBER=$(echo "$PR_JSON" | grep -o '"number":[0-9]*' | head -1 | cut -d':' -f2 || true)
 
 if [[ -z "$PR_NUMBER" ]]; then
-    info "Création d'une nouvelle Pull Request pour '$CURRENT_BRANCH' vers 'main'..."
+    info "Creating new Pull Request for '$CURRENT_BRANCH' targeting 'main'..."
     LAST_COMMIT_MSG=$(git log -1 --pretty=%B)
     FIRST_LINE=$(echo "$LAST_COMMIT_MSG" | head -1)
 
-    PR_BODY="## Résumé
+    PR_BODY="## Summary
 $LAST_COMMIT_MSG
 
-## Vérifications automatiques
+## Automated Quality & Security Checks
 - [x] cargo fmt --check
 - [x] cargo clippy --all-targets -- -D warnings
-- [x] cargo test --all-targets (y compris invariants architecturaux)
-- [x] cargo deny check (licences, vulnérabilités, sources, bans)"
+- [x] cargo test --all-targets (including architectural invariants)
+- [x] cargo deny check (licenses, advisories, sources, bans)"
 
     PR_URL=$(gh pr create --title "$FIRST_LINE" --body "$PR_BODY" --base main --head "$CURRENT_BRANCH")
     PR_NUMBER=$(gh pr view --json number -q .number)
-    success "Pull Request #$PR_NUMBER créée : $PR_URL"
+    success "Pull Request #$PR_NUMBER created: $PR_URL"
 else
     PR_URL="https://github.com/Mysticaly622/soos/pull/$PR_NUMBER"
-    success "Pull Request #$PR_NUMBER existante détectée : $PR_URL"
+    success "Existing Pull Request #$PR_NUMBER detected: $PR_URL"
 fi
 
-step "3/6 : Sollicitation de la review Copilot"
-info "Sollicitation explicite de GitHub Copilot..."
-# 1. Assignation formelle du bot Copilot dans la section Reviewers via l'API GraphQL GitHub
+step "3/6: Soliciting GitHub Copilot Code Review"
+info "Requesting review from GitHub Copilot (dual-trigger)..."
+# 1. Formal reviewer assignment via GraphQL API
 PR_NODE_ID=$(gh api "repos/:owner/:repo/pulls/$PR_NUMBER" --jq '.node_id' 2>/dev/null || true)
 if [[ -n "$PR_NODE_ID" ]]; then
     gh api graphql -f query='mutation { requestReviews(input: { pullRequestId: "'"$PR_NODE_ID"'", botIds: ["BOT_kgDOCnlnWA"] }) { pullRequest { id } } }' > /dev/null 2>&1 || true
 fi
-# 2. Déclenchement explicite via commentaire de mention @copilot review
+# 2. Trigger review agent via PR comment
 gh pr comment "$PR_NUMBER" --body "@copilot review" > /dev/null 2>&1 || true
-success "Demande de review transmise à GitHub Copilot (reviewers + commentaire)."
+success "Review request sent to GitHub Copilot (reviewers + mention)."
 
-step "4/6 : Attente des vérifications CI (GitHub Actions)"
-info "Surveillance des 3 jobs CI pour la PR #$PR_NUMBER (Quality, Security, PAM Docker)..."
-# Attente initiale pour que GitHub enregistre les workflows déclenchés par le push
+step "4/6: Monitoring CI Workflow Checks (GitHub Actions)"
+info "Monitoring CI jobs for PR #$PR_NUMBER (Quality, Security, PAM Docker)..."
 sleep 5
 
 CI_PASSED=false
@@ -101,25 +106,25 @@ for attempt in $(seq 1 60); do
     fi
     STATUS=$(gh pr checks "$PR_NUMBER" 2>&1 || true)
     if echo "$STATUS" | grep -qiE "(fail|cancelled)"; then
-        error "Les vérifications CI ont échoué sur GitHub Actions !"
+        error "CI checks failed on GitHub Actions!"
         echo "$STATUS"
         exit 1
     fi
-    echo -ne "  ⏳ Vérifications CI en cours (tentative ${attempt}/60)...\r"
+    echo -ne "  ⏳ CI checks in progress (attempt ${attempt}/60)...\r"
     sleep 10
 done
 echo ""
 
 if [[ "$CI_PASSED" != "true" ]]; then
     if ! gh pr checks "$PR_NUMBER"; then
-        error "Délai d'attente CI dépassé ou échec des vérifications !"
+        error "CI check timeout or verification failure!"
         exit 1
     fi
 fi
-success "Tous les checks CI sont passés au vert !"
+success "All CI checks passed successfully!"
 
-step "5/6 : Attente active de l'analyse de code par GitHub Copilot"
-info "Copilot analyse le code (cette analyse prend habituellement entre 30s et 5 minutes)..."
+step "5/6: Actively Awaiting GitHub Copilot Code Review"
+info "Copilot is analyzing the code (typically takes between 30s and 5 minutes)..."
 
 MAX_WAIT_SECONDS=480 # 8 minutes maximum
 WAITED=0
@@ -127,78 +132,76 @@ INTERVAL=10
 COPILOT_FINISHED=false
 
 while [[ $WAITED -lt $MAX_WAIT_SECONDS ]]; do
-    # 1. Vérifier si une review formelle Copilot a été publiée (Pull Request Review)
+    # 1. Formal review published
     REVIEWS_COPILOT=$(gh api "repos/:owner/:repo/pulls/$PR_NUMBER/reviews" 2>/dev/null | grep -E '"login": "Copilot"' || true)
 
-    # 2. Vérifier si un commentaire d'analyse Copilot a été publié en réponse à @copilot
+    # 2. Copilot comment posted
     COMMENTS_COPILOT=$(gh api "repos/:owner/:repo/issues/$PR_NUMBER/comments" 2>/dev/null | grep -E '"login": "Copilot"' || true)
 
-    # 3. Vérifier si le workflow 'Running Copilot Code Review' a terminé
+    # 3. Copilot workflow completed
     COPILOT_RUN_STATUS=$(gh run list --branch "$CURRENT_BRANCH" --json name,status,conclusion 2>/dev/null | grep -i "Copilot" || true)
 
     if [[ -n "$REVIEWS_COPILOT" ]] || [[ -n "$COMMENTS_COPILOT" ]]; then
-        info "Analyse / Réponse de GitHub Copilot détectée !"
+        info "GitHub Copilot review/comment detected!"
         COPILOT_FINISHED=true
         break
     fi
 
     if [[ -n "$COPILOT_RUN_STATUS" ]] && echo "$COPILOT_RUN_STATUS" | grep -q '"status":"completed"'; then
-        info "Le workflow GitHub Copilot s'est achevé !"
+        info "GitHub Copilot workflow run completed!"
         COPILOT_FINISHED=true
         break
     fi
 
-    echo -ne "  ⏳ Attente de Copilot (${WAITED}s / ${MAX_WAIT_SECONDS}s)...\r"
+    echo -ne "  ⏳ Awaiting Copilot review (${WAITED}s / ${MAX_WAIT_SECONDS}s)...\r"
     sleep $INTERVAL
     WAITED=$((WAITED + INTERVAL))
 done
 echo ""
 
 if [[ "$COPILOT_FINISHED" == "true" ]]; then
-    success "Analyse de GitHub Copilot terminée avec succès."
+    success "GitHub Copilot review completed."
 else
-    warn "Délai d'attente de Copilot dépassé (${MAX_WAIT_SECONDS}s) ou Copilot n'a pas déclenché de run."
-    warn "Poursuite de l'évaluation sur la base des commentaires existants et des tests CI."
+    warn "Copilot wait ceiling exceeded (${MAX_WAIT_SECONDS}s) or Copilot did not trigger a run."
+    warn "Proceeding with evaluation based on CI checks and existing comments."
 fi
 
-step "6/6 : Analyse des retours Copilot et Décision de Fusion"
-# Récupérer les commentaires spécifiques de review sur le code
+step "6/6: Evaluating Copilot Feedback & Auto-Merge Decision"
 COMMENTS=$(gh api "repos/:owner/:repo/pulls/$PR_NUMBER/comments" 2>/dev/null || echo "[]")
 COMMENT_COUNT=$(echo "$COMMENTS" | grep -c '"id":' || true)
 
 if [[ "$COMMENT_COUNT" -gt 0 ]]; then
-    warn "GitHub Copilot a émis $COMMENT_COUNT commentaire(s) de révision sur la PR #$PR_NUMBER !"
+    warn "GitHub Copilot posted $COMMENT_COUNT review comment(s) on PR #$PR_NUMBER!"
     echo ""
-    info "Détails des points relevés par Copilot :"
+    info "Review points from Copilot:"
     echo "$COMMENTS" | grep -E '("path"|"line"|"body")' | sed 's/^[[:space:]]*//' | head -40
     echo ""
-    warn "La PR #$PR_NUMBER NE SERA PAS fusionnée tant que ces points ne sont pas traités."
-    info "L'IA va maintenant analyser ces retours, appliquer les corrections, et relancer la boucle."
+    warn "PR #$PR_NUMBER WILL NOT be merged until these review items are addressed."
+    info "Agent will now inspect feedback, apply fixes, and re-run the loop."
     exit 2
 fi
 
-success "Zéro commentaire bloquant. Les 3 vérifications CI et l'analyse de code sont 100% au vert !"
-info "Fusion automatique de la PR #$PR_NUMBER vers 'main'..."
+success "Zero blocking comments. All 3 CI checks and code reviews are 100% green!"
+info "Auto-merging PR #$PR_NUMBER into 'main'..."
 
 IS_ALREADY_MERGED=$(gh api "repos/:owner/:repo/pulls/$PR_NUMBER" --jq '.merged' 2>/dev/null || echo "false")
 
 if [[ "$IS_ALREADY_MERGED" == "true" ]]; then
     success "═════════════════════════════════════════════════════════════"
-    success "  Pull Request #$PR_NUMBER déjà fusionnée avec succès dans main !"
+    success "  Pull Request #$PR_NUMBER already merged into main!"
     success "═════════════════════════════════════════════════════════════"
 elif gh pr merge "$PR_NUMBER" --squash --delete-branch --admin 2>/dev/null || gh pr merge "$PR_NUMBER" --squash --delete-branch; then
     success "═════════════════════════════════════════════════════════════"
-    success "  Pull Request #$PR_NUMBER validée par Copilot et fusionnée dans main !"
+    success "  Pull Request #$PR_NUMBER approved and merged into main!"
     success "═════════════════════════════════════════════════════════════"
 else
-    error "Échec de la commande gh pr merge sur la PR #$PR_NUMBER."
+    error "Failed to merge PR #$PR_NUMBER."
     exit 1
 fi
 
-info "Bascule sur la branche locale 'main' et synchronisation..."
-# Préserver les modifications locales éventuelles (ex: compte-rendus générés pendant la relecture)
+info "Switching to local 'main' branch and synchronizing..."
 git stash --include-untracked >/dev/null 2>&1 || true
 git checkout main
 git pull origin main
 git stash pop >/dev/null 2>&1 || true
-success "Branche locale 'main' synchronisée. Mission accomplie !"
+success "Local 'main' branch synchronized. Mission accomplished!"

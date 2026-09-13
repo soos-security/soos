@@ -1,0 +1,102 @@
+#!/usr/bin/env bash
+# =============================================================================
+# .githooks/commit-msg — Enforces Conventional Commits 1.0.0 for soos
+# =============================================================================
+# Format: <type>(<scope>): <subject>
+# Allowed types: feat, fix, docs, style, refactor, perf, test, build, ci, chore, revert
+# Scope: optional, alphanumeric and hyphen/slash (e.g. pam, protocol, daemon, ci, deps)
+# Subject: imperative mood, lowercase start, no trailing dot, max 80 characters
+# =============================================================================
+
+set -euo pipefail
+
+COMMIT_MSG_FILE="$1"
+
+# If the commit message file is missing or empty, exit cleanly
+if [[ ! -f "$COMMIT_MSG_FILE" ]]; then
+    exit 0
+fi
+
+# Strip comments (lines starting with #) to evaluate the actual message
+RAW_MSG=$(grep -v '^#' "$COMMIT_MSG_FILE" || true)
+
+if [[ -z "${RAW_MSG// /}" ]]; then
+    echo -e "\033[0;31m[COMMIT REJECTED]\033[0m Commit message cannot be empty." >&2
+    exit 1
+fi
+
+# Extract the subject line (first non-empty line)
+FIRST_LINE=$(echo "$RAW_MSG" | head -n 1)
+
+# Ignore merge commits, squash commits, or revert markers automatically created by git
+if [[ "$FIRST_LINE" =~ ^Merge\ |^Revert\ \"|^fixup!\ |^squash!\  ]]; then
+    exit 0
+fi
+
+# Check maximum header length (72 characters recommended, max 80 allowed)
+HEADER_LEN=${#FIRST_LINE}
+if [[ $HEADER_LEN -gt 80 ]]; then
+    echo -e "\033[0;31m[COMMIT REJECTED]\033[0m Commit subject line is too long (${HEADER_LEN} chars > 80 chars max)." >&2
+    echo -e "                 Subject line: \"$FIRST_LINE\"" >&2
+    echo -e "                 Keep the header concise (<= 72 chars recommended)." >&2
+    exit 1
+fi
+
+# Conventional Commit pattern:
+# <type>(<scope>)?: <description>
+# or with breaking change indicator: <type>(<scope>)?!: <description>
+TYPES="feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert"
+CONVENTIONAL_REGEX="^(${TYPES})(\([a-zA-Z0-9_\/\-]+\))?!?: (.+)$"
+
+if ! [[ "$FIRST_LINE" =~ $CONVENTIONAL_REGEX ]]; then
+    echo -e "\033[0;31m[COMMIT REJECTED]\033[0m Invalid commit message format." >&2
+    echo -e "" >&2
+    echo -e "  Your commit subject:" >&2
+    echo -e "    \033[0;33m$FIRST_LINE\033[0m" >&2
+    echo -e "" >&2
+    echo -e "  Expected format (Conventional Commits 1.0.0):" >&2
+    echo -e "    \033[1;32m<type>(<scope>): <short description in imperative mood>\033[0m" >&2
+    echo -e "" >&2
+    echo -e "  Allowed types:" >&2
+    echo -e "    feat     - A new feature" >&2
+    echo -e "    fix      - A bug fix or security patch" >&2
+    echo -e "    docs     - Documentation changes" >&2
+    echo -e "    style    - Code style / formatting changes (no functional impact)" >&2
+    echo -e "    refactor - Code change that neither fixes a bug nor adds a feature" >&2
+    echo -e "    perf     - Code change improving performance" >&2
+    echo -e "    test     - Adding or updating tests" >&2
+    echo -e "    build    - Build system or external dependency changes" >&2
+    echo -e "    ci       - CI configuration files and automation scripts" >&2
+    echo -e "    chore    - Routine repository maintenance or tooling" >&2
+    echo -e "    revert   - Reverts a previous commit" >&2
+    echo -e "" >&2
+    echo -e "  Canonical scopes:" >&2
+    echo -e "    pam, daemon, protocol, policy, vision, camera, biometrics, infra, ci, security, deps, docs" >&2
+    echo -e "" >&2
+    echo -e "  Examples:" >&2
+    echo -e "    feat(protocol): implement bounded request validation" >&2
+    echo -e "    fix(pam): handle timeout gracefully returning PAM_IGNORE" >&2
+    echo -e "    docs(architecture): clarify IPC peer credential validation" >&2
+    echo -e "    chore(ci): update cargo-deny ban rules for openssl" >&2
+    exit 1
+fi
+
+# Validate subject does not end with a period
+if [[ "$FIRST_LINE" =~ \.$ ]]; then
+    echo -e "\033[0;31m[COMMIT REJECTED]\033[0m Subject line must NOT end with a period ('.')." >&2
+    echo -e "                 Subject line: \"$FIRST_LINE\"" >&2
+    exit 1
+fi
+
+# Validate second line is blank if body exists
+LINE_COUNT=$(echo "$RAW_MSG" | wc -l)
+if [[ $LINE_COUNT -gt 1 ]]; then
+    SECOND_LINE=$(echo "$RAW_MSG" | sed -n '2p')
+    if [[ -n "$SECOND_LINE" ]]; then
+        echo -e "\033[0;31m[COMMIT REJECTED]\033[0m The second line must be empty when a body is provided." >&2
+        echo -e "                 Separate subject from body with a blank line." >&2
+        exit 1
+    fi
+fi
+
+exit 0

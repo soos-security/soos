@@ -1,6 +1,6 @@
 [package]
 name = "soos-protocol"
-description = "Types IPC bornés et codec v1 pour la communication PAM ↔ démon soos"
+description = "Bounded IPC types and codec v1 for PAM module and soos daemon communication"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -13,5 +13,5 @@ postcard = { workspace = true }
 zeroize = { workspace = true }
 
 [dev-dependencies]
-# Pour les tests property-based (fuzz léger)
+# Property-based testing
 proptest = "1"

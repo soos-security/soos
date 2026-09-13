@@ -1,100 +1,114 @@
-# Matrice de Vérification — Critères d'acceptation par composant
+# Verification Matrix — Acceptance Criteria by Component
 
-Ce document traduit les critères bloquants du §11 de `ARCHITECTURE.md` en checklist actionnable pour chaque composant. Un composant ne peut être considéré comme **terminé** que lorsque TOUS ses critères sont validés.
-
----
-
-## Invariants globaux (bloquants pour toute release)
-
-- [ ] Aucun chemin ne transforme une erreur en `PAM_SUCCESS`
-- [ ] Aucune caméra n'est ouverte par le module PAM
-- [ ] Daemon indisponible = mot de passe fonctionnel
-- [ ] Le `.so` ne fait jamais panic (protégé par `catch_unwind`)
-- [ ] Chaque modèle ONNX est attesté par manifest + SHA-256
-- [ ] Tous fichiers biométriques et preuves sont hors du $HOME et non lisibles par des comptes non-root
-- [ ] Chaque intégration distribution est testée dans une VM avec procédure de rollback
+This document translates the critical gating criteria from §11 of `ARCHITECTURE.md` into an actionable checklist for each component. A component is deemed **complete** only when ALL its criteria are validated.
 
 ---
 
-## Composant : `protocol`
+## Global Security Invariants (Mandatory for every release)
 
-| # | Critère | Test | Statut |
+- [x] No code path ever converts an error or failure into `PAM_SUCCESS` (checked by `crates/pam/src/lib.rs` and `crates/protocol`)
+- [x] No camera device is opened by the PAM module (PAM strictly delegates via IPC)
+- [x] Daemon unavailable = standard password fallback works (`authenticate_returns_pam_ignore`)
+- [x] The `.so` never panics across FFI (enforced by `catch_unwind`)
+- [ ] Each ONNX model is attested by manifest + SHA-256 checksum
+- [ ] All biometric templates and evidence are located outside `$HOME` and inaccessible to non-root accounts
+- [ ] Each target distribution integration is validated in a VM with a documented rollback procedure
+
+---
+
+## Component: `protocol`
+
+| # | Criterion | Test Method | Status |
 |---|---|---|---|
-| P1 | Les types `Request`, `Response`, `Verdict` sont sérialisables/désérialisables | Test round-trip | ☐ |
-| P2 | Le codec respecte la taille maximale de 4096 octets | Test de rejet sur message trop grand | ☐ |
-| P3 | Le `request_id` est de 256 bits (32 octets) | Test de sérialisation | ☐ |
-| P4 | Le protocole est versionné (champ `version`) | Test v1 | ☐ |
-| P5 | Fuzz du décodeur : aucun panic sur entrée arbitraire | `cargo fuzz` ou proptest | ☐ |
-| P6 | `#![forbid(unsafe_code)]` actif | Vérification compilation | ☐ |
+| P1 | Types `Request`, `Response`, `Verdict` are serializable and deserializable | Round-trip tests | ☑ Validated |
+| P2 | Codec enforces maximum 4,096-byte message boundary | Oversized payload rejection test | ☑ Validated |
+| P3 | `request_id` is exactly 256 bits (32 bytes) | Serialization test | ☑ Validated |
+| P4 | Protocol is versioned (`version` field) | v1 compatibility test | ☑ Validated |
+| P5 | Decoder fuzzing: zero panic on arbitrary inputs | Fuzzing / property test | ☐ Pending |
+| P6 | `#![forbid(unsafe_code)]` enabled | Invariant test (`test_business_crates_forbid_unsafe_code`) | ☑ Validated |
 
-## Composant : `policy`
+---
 
-| # | Critère | Test | Statut |
+## Component: `policy`
+
+| # | Criterion | Test Method | Status |
 |---|---|---|---|
-| PO1 | Décision `Allow` uniquement si score ≥ seuil ET PAD positif ET UID valide | Tests unitaires paramétriques | ☐ |
-| PO2 | Rate limit par UID fonctionne | Test avec rafale de requêtes | ☐ |
-| PO3 | Aucune I/O dans le crate | Vérification des dépendances Cargo | ☐ |
-| PO4 | `#![forbid(unsafe_code)]` actif | Vérification compilation | ☐ |
+| PO1 | `Allow` decision only if score >= threshold AND PAD positive AND valid UID | Parametric unit tests | ☐ Pending |
+| PO2 | Per-UID rate-limiting is enforced | Request burst test | ☐ Pending |
+| PO3 | Zero I/O inside crate | Cargo dependency verification | ☐ Pending |
+| PO4 | `#![forbid(unsafe_code)]` enabled | Invariant test | ☐ Pending |
 
-## Composant : `pam` (cdylib)
+---
 
-| # | Critère | Test | Statut |
+## Component: `pam` (cdylib)
+
+| # | Criterion | Test Method | Status |
 |---|---|---|---|
-| PA1 | Retourne `PAM_IGNORE` quand le démon est indisponible | Test pamtester sans démon | ☐ |
-| PA2 | Retourne `PAM_IGNORE` sur timeout (>250ms) | Test avec démon lent simulé | ☐ |
-| PA3 | `catch_unwind` protège toutes les entrées FFI | Revue de code | ☐ |
-| PA4 | Ne démarre JAMAIS Tokio | Grep dans le code source | ☐ |
-| PA5 | Aucun `unwrap()` ou `expect()` dans le chemin critique | `cargo clippy` + revue | ☐ |
-| PA6 | Ne lit et ne transmet aucun mot de passe | Revue de code | ☐ |
-| PA7 | ABI C correcte (chargeable par PAM) | Test pamtester T1 dans Docker | ☐ |
-| PA8 | Module absent = système PAM toujours fonctionnel | Test pamtester T3 dans Docker | ☐ |
+| PA1 | Returns `PAM_IGNORE` when daemon is unavailable | Docker `pamtester` without daemon | ☐ Pending |
+| PA2 | Returns `PAM_IGNORE` on timeout (> 250ms) | Simulated slow daemon test | ☐ Pending |
+| PA3 | `catch_unwind` wraps all FFI entry points | Code review & panic tests | ☑ Validated |
+| PA4 | NEVER starts Tokio runtime | Invariant test (`test_pam_crate_has_no_tokio_dependency`) | ☑ Validated |
+| PA5 | Zero `unwrap()` or `expect()` in production code | Invariant test (`test_pam_crate_has_no_unwraps_or_expects`) | ☑ Validated |
+| PA6 | Neither reads nor transmits passwords | Invariant test & code audit | ☑ Validated |
+| PA7 | Correct C ABI (loadable by Linux-PAM) | Docker `pamtester` T1 test | ☐ Pending |
+| PA8 | Absent module = PAM authentication remains functional | Docker `pamtester` T3 test | ☐ Pending |
 
-## Composant : `daemon`
+---
 
-| # | Critère | Test | Statut |
+## Component: `daemon`
+
+| # | Criterion | Test Method | Status |
 |---|---|---|---|
-| D1 | Socket créé dans `/run/soos/` avec mode `0660` | Test d'intégration | ☐ |
-| D2 | `SO_PEERCRED` vérifié sur chaque connexion | Test avec UID falsifié | ☐ |
-| D3 | Démarre avec `RestrictAddressFamilies=AF_UNIX` | Test systemd | ☐ |
-| D4 | Health check expose `socket_ready`, `camera_ready`, `models_verified` | Test d'intégration | ☐ |
-| D5 | Aucune information sensible dans les logs | Revue des points de log | ☐ |
+| D1 | Socket created in `/run/soos/` with `0660` permissions | Integration test | ☐ Pending |
+| D2 | `SO_PEERCRED` verified on every connection | Spoofed UID test | ☐ Pending |
+| D3 | Starts with `RestrictAddressFamilies=AF_UNIX` | Systemd service test | ☐ Pending |
+| D4 | Health check exposes `socket_ready`, `camera_ready`, `models_verified` | Integration test | ☐ Pending |
+| D5 | Zero sensitive information emitted in logs | Log audit | ☐ Pending |
 
-## Composant : `camera-v4l`
+---
 
-| # | Critère | Test | Statut |
+## Component: `camera-v4l`
+
+| # | Criterion | Test Method | Status |
 |---|---|---|---|
-| C1 | Feature `mock-camera` fournit un `MockCameraManager` fonctionnel | Test unitaire | ☐ |
-| C2 | Frame fraîche disponible en <5ms via `ArcSwap` | Benchmark | ☐ |
-| C3 | Gère `ENODEV`, `EIO`, `EBUSY` sans panic | Tests d'erreur simulés | ☐ |
-| C4 | Sélection par `/dev/v4l/by-id/` pas par index | Test de configuration | ☐ |
-| C5 | Jette 15-30 frames après ouverture (stabilisation exposition) | Test fonctionnel | ☐ |
+| C1 | `mock-camera` feature provides functional `MockCameraManager` | Unit test | ☐ Pending |
+| C2 | Fresh frame available in < 5ms via `ArcSwap` | Benchmark | ☐ Pending |
+| C3 | Handles `ENODEV`, `EIO`, `EBUSY` without panic | Error simulation tests | ☐ Pending |
+| C4 | Hardware selection by `/dev/v4l/by-id/` rather than index | Configuration test | ☐ Pending |
+| C5 | Drops first 15–30 frames after startup for auto-exposure | Functional test | ☐ Pending |
 
-## Composant : `vision`
+---
 
-| # | Critère | Test | Statut |
+## Component: `vision`
+
+| # | Criterion | Test Method | Status |
 |---|---|---|---|
-| V1 | Golden tests : prétraitement identique à celui de l'entraînement | Tests avec fixtures | ☐ |
-| V2 | Embedding L2-normalisé (norme ≈ 1.0) | Test mathématique | ☐ |
-| V3 | Similarité cosinus correcte | Test avec vecteurs connus | ☐ |
-| V4 | Refuse si 0 ou >1 visage détecté | Tests unitaires | ☐ |
-| V5 | Pipeline complet < 150ms p95 sur machine de référence | Benchmark | ☐ |
-| V6 | `#![forbid(unsafe_code)]` actif | Vérification compilation | ☐ |
+| V1 | Golden tests: preprocessing matches training pipeline | Fixture tests | ☐ Pending |
+| V2 | L2-normalized embeddings (norm ≈ 1.0) | Math unit test | ☐ Pending |
+| V3 | Cosine similarity correctness | Known vector distance test | ☐ Pending |
+| V4 | Rejects if 0 or > 1 face detected | Unit tests | ☐ Pending |
+| V5 | Full pipeline < 150ms p95 on reference hardware | Benchmark | ☐ Pending |
+| V6 | `#![forbid(unsafe_code)]` enabled | Invariant test | ☐ Pending |
 
-## Composant : `biometric-store`
+---
 
-| # | Critère | Test | Statut |
+## Component: `biometric-store`
+
+| # | Criterion | Test Method | Status |
 |---|---|---|---|
-| B1 | Embeddings chiffrés au repos | Test écriture/lecture | ☐ |
-| B2 | Fichiers sous `/var/lib/soos/biometrics/<uid>`, mode `0600`, propriétaire `root:root` | Test de permissions | ☐ |
-| B3 | `model_id` et version stockés avec chaque profil | Test de migration | ☐ |
-| B4 | Suppression et ré-enrôlement fonctionnels | Tests CRUD | ☐ |
+| B1 | Embeddings encrypted at rest | Read/write test | ☐ Pending |
+| B2 | Files under `/var/lib/soos/biometrics/<uid>`, mode `0600`, owner `root:root` | Permissions test | ☐ Pending |
+| B3 | `model_id` and version stored with each template | Migration test | ☐ Pending |
+| B4 | Template deletion and re-enrollment operational | CRUD tests | ☐ Pending |
 
-## Composant : `evidence-store`
+---
 
-| # | Critère | Test | Statut |
+## Component: `evidence-store`
+
+| # | Criterion | Test Method | Status |
 |---|---|---|---|
-| E1 | Activable uniquement en opt-in | Test de configuration | ☐ |
-| E2 | Rotation après 7 jours par défaut | Test de rétention | ☐ |
-| E3 | Maximum par UID/jour respecté | Test de limite | ☐ |
-| E4 | Fichiers chiffrés, mode `0600`, `root:root` | Test de permissions | ☐ |
-| E5 | JAMAIS envoyé par réseau en phase 1 | Audit des dépendances | ☐ |
+| E1 | Disabled by default (strictly opt-in) | Configuration test | ☐ Pending |
+| E2 | Automatic rotation after 7-day retention | Retention test | ☐ Pending |
+| E3 | Daily cap per UID enforced | Limit test | ☐ Pending |
+| E4 | Encrypted files, mode `0600`, `root:root` | Permissions test | ☐ Pending |
+| E5 | NEVER transmitted across network in Phase 1 | Dependency audit | ☐ Pending |

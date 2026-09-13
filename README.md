@@ -1,23 +1,27 @@
-# Documentation Technique — Projet soos
+# soos — Zero-Trust Local Facial Verification PAM Module for Linux
 
-Bienvenue dans la documentation technique du projet **soos** (module PAM de vérification biométrique faciale locale pour Linux).
-
----
-
-## Sommaire de la documentation
-
-| Document | Description | Public cible |
-|---|---|---|
-| [**Protocole IPC**](Docs/PROTOCOLE_IPC.md) | Spécification du protocole binaire v1 entre `pam_soos.so` et `soos-daemon` (types, bornes, codec, invariants). | Développeurs PAM, Développeurs démon |
-| [**CI/CD et Sécurité**](Docs/CI_CD_ET_SECURITE.md) | Fonctionnement du pipeline de qualité, audit des dépendances `cargo-deny`, et tests Docker. | Tous développeurs, DevOps |
-| [**Cycle de Développement & Branches**](Docs/CYCLE_DE_DEVELOPPEMENT.md) | Guide du workflow Git, politique de branches, Pull Requests et cycle TDD multi-agents. | Contributeurs, Orchestration IA |
+**soos** is an enterprise-grade Linux PAM (Pluggable Authentication Module) and privileged daemon designed for secure, local facial verification. It eliminates brittle camera access inside sensitive PAM processes by enforcing strict privilege separation, bounded binary IPC, and multi-stage anti-spoofing (PAD).
 
 ---
 
-## Documents d'architecture de référence
+## Technical Documentation
 
-Pour les spécifications de haut niveau et les choix de conception figés :
-- [`AI/ARCHITECTURE.md`](AI/ARCHITECTURE.md) : Modèle de menace, budget de latence, séparation des privilèges et invariants fondamentaux.
-- [`AI/DECISIONS.md`](AI/DECISIONS.md) : Registre des décisions architecturales actées (anti-dérive).
-- [`AI/VERIFICATION_MATRIX.md`](AI/VERIFICATION_MATRIX.md) : Matrice des critères d'acceptation par composant.
-- [`AI/walkthroughs/`](AI/walkthroughs/) : Historique chronologique et traçabilité de chaque étape de développement.
+Detailed guides and specifications are maintained in the [`Docs/`](Docs/) directory:
+
+| Document | Description |
+|---|---|
+| [**IPC Protocol Specification**](Docs/IPC_PROTOCOL.md) | Bounded binary framing (Postcard over Unix domain socket), type definitions, and security bounds. |
+| [**CI/CD & Security Auditing**](Docs/CI_CD_AND_SECURITY.md) | Quality gates, `cargo-deny` dependency audits, and Docker PAM sandbox testing. |
+| [**Development Workflow & Branching**](Docs/DEVELOPMENT_WORKFLOW.md) | Topic branch rules, multi-agent TDD cycle, PR loop, and automated review. |
+| [**Conventional Commits Specification**](Docs/COMMIT_CONVENTION.md) | Standardized commit message format and git hook enforcement rules. |
+
+---
+
+## Architecture & Security Reference
+
+- [`AI/ARCHITECTURE.md`](AI/ARCHITECTURE.md): Threat model, latency budgets, privilege boundaries, and security invariants.
+- [`AI/DECISIONS.md`](AI/DECISIONS.md): Architectural Decision Records (ADRs).
+- [`AI/MOCK_STRATEGY.md`](AI/MOCK_STRATEGY.md): Hardware mocking and camera-free testing strategy.
+- [`AI/ROLES_AND_WORKFLOW.md`](AI/ROLES_AND_WORKFLOW.md): Multi-agent operational rules and quality assurance.
+- [`AI/VERIFICATION_MATRIX.md`](AI/VERIFICATION_MATRIX.md): Traceable component acceptance matrix.
+- [`AI/walkthroughs/`](AI/walkthroughs/): Step-by-step verifiable implementation walkthroughs.
