@@ -34,6 +34,11 @@ Your responsibility is to write the minimal production code necessary to turn pr
      - Nanosecond timestamps: use `u64::try_from(start.elapsed().as_nanos()).unwrap_or(u64::MAX)`.
      - Modulo bytes/indices: use `u8::try_from(val % 256).unwrap_or(0)`.
    - Synthetic/Mock frame timing: always derive frame sleep and warmup intervals dynamically from `cfg.fps` (`Duration::from_micros(1_000_000 / cfg.fps)`) rather than hardcoding static durations.
+   - Numerical & Vision Math:
+     - In pixel manipulation, color space conversion, and tensor indexing where calculations are mathematically bounded by image dimensions, either use checked arithmetic (`checked_mul`, `checked_add`) or explicitly scope `#[allow(clippy::arithmetic_side_effects, reason = "...")]` with a clear bounding explanation.
+     - Remember that `allow_attributes_without_reason = "deny"` forbids any bare `#[allow(...)]`.
+   - Stateful Inference Sessions:
+     - ONNX Runtime `Session::run` takes `&mut self`. When sharing sessions across worker threads, wrap sessions in `Arc<Mutex<Session>>`.
 
 4. **Bounded Synchronous I/O Primitives**:
    - Enforce cumulative deadline subtraction (`deadline.checked_sub(elapsed)`) prior to subsequent socket reads in multi-part framing.

@@ -23,7 +23,7 @@ Your responsibility is to conduct a static security and compliance review of spe
    - Confirm that any panic inside `catch_unwind` is mapped directly to `PAM_IGNORE` (never to authorization).
 
 2. **Unsafe Isolation & Code Quality**:
-   - Verify `#![forbid(unsafe_code)]` is declared in all business crates (`protocol`, `policy`, `vision`).
+   - Verify `#![forbid(unsafe_code)]` is declared in all business and computational crates (`protocol`, `policy`, `vision`, `inference-ort`, `biometric-store`).
    - If `unsafe` is used in adapter crates (`pam`, `camera-v4l`): assert that it is minimal, isolated, and documented with an explanatory `// SAFETY:` rationale (`clippy::undocumented_unsafe_blocks`).
 
 3. **Output Isolation**:
@@ -34,9 +34,13 @@ Your responsibility is to conduct a static security and compliance review of spe
    - Verify that zero-duration timeouts (`Duration::ZERO`) are guarded against before calling `set_read_timeout` / `set_write_timeout` to avoid `EINVAL`.
    - Verify that both `ErrorKind::TimedOut` and `ErrorKind::WouldBlock` are handled as timeout conditions.
 
-5. **Credential & Sensitive Data Protection**:
+5. **Supply Chain & Licensing Pre-Check**:
+   - Whenever new external crates or transitive dependencies are introduced, verify that their licenses conform to `deny.toml` (`licenses.allow`).
+   - If `cargo-deny` is not installed on the local developer host, perform an explicit pre-audit of newly introduced licenses before pushing to avoid CI rejection.
+
+6. **Credential & Sensitive Data Protection**:
    - Assert zero plaintext passwords, unencrypted embeddings, or raw camera frames are stored, transmitted over IPC, or logged.
    - Verify zeroization (`Zeroize` / `ZeroizeOnDrop`) for sensitive temporary buffers.
 
-6. **Deliverable**:
+7. **Deliverable**:
    - Audit clearance or specific security constraint list to be respected by the Developer agent.
