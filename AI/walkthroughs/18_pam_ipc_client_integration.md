@@ -56,12 +56,14 @@ Issue #3 implements the synchronous IPC client inside `crates/pam/` (`pam_soos.s
   - Confirmed memory bounds: `MAX_MESSAGE_SIZE` (4096) checked prior to body allocation; bounded C string scan.
 
 ### Phase 4 — Developer Sub-Agent (TDD Green Phase)
-- Implemented production code satisfying all pre-written tests:
-  - Bounded argv parsing in `crates/pam/src/config.rs`.
-  - Synchronous socket communication with deadline tracking in `crates/pam/src/ipc.rs`.
+- Implemented production code satisfying all pre-written and edge-case tests:
+  - Bounded argv parsing in `crates/pam/src/config.rs` with whitespace trimming, null pointer checks, and optional target `uid=` override.
+  - Dynamic latency budget tracking in `crates/pam/src/ipc.rs` recalculating remaining budget before both header and payload reads to enforce cumulative deadlines.
+  - Direct single-allocation framed response buffer eliminating redundant secondary `Vec` and `memcpy`.
+  - Strict 20ms ceiling enforcement in `notify_event` without invalid extra grace period.
   - Safe monotonic time extraction via `libc::clock_gettime(libc::CLOCK_MONOTONIC, ...)`.
   - Integrated IPC client in `crates/pam/src/lib.rs`.
-- Ran test suite: **21/21 tests green** in `soos-pam` (88/88 tests green workspace-wide).
+- Ran test suite: **30/30 tests green** in `soos-pam` (98/98 tests green workspace-wide).
 - Formatting verified: `cargo fmt --check` (100% compliant).
 - Linter verified: `cargo clippy --all-targets --all-features -- -D warnings` (zero warnings).
 
@@ -83,7 +85,7 @@ Issue #3 implements the synchronous IPC client inside `crates/pam/` (`pam_soos.s
 | Criteria | Description | Verification Evidence | Status |
 |---|---|---|---|
 | **PA1** | Returns `PAM_IGNORE` when daemon is unavailable | `test_ipc_offline_daemon_returns_ignore`, Docker `pamtester` | ☑ Validated |
-| **PA2** | Returns `PAM_IGNORE` on timeout (> 250ms) | `test_ipc_slow_daemon_timeout` (< 250ms deadline respected) | ☑ Validated |
+| **PA2** | Returns `PAM_IGNORE` on timeout (> 250ms) | `test_ipc_slow_daemon_timeout`, `test_ipc_slow_daemon_body_timeout` (cumulative deadline respected) | ☑ Validated |
 | **PA3** | `catch_unwind` wraps all FFI entry points | `tests::panic_safety_returns_pam_ignore` | ☑ Validated |
 | **PA4** | NEVER starts Tokio runtime | Invariant test `test_pam_crate_has_no_tokio_dependency` | ☑ Validated |
 | **PA5** | Zero `unwrap()` or `expect()` in production code | Invariant test `test_pam_crate_has_no_unwraps_or_expects` | ☑ Validated |
@@ -107,22 +109,33 @@ test tests::test_no_opencv_in_any_cargo_toml ... ok
 
 test test_default_config_on_null_argv ... ok
 test test_negative_or_zero_argc_returns_default ... ok
+test test_parse_argc_exceeding_max_argc_is_bounded ... ok
 test test_parse_custom_socket_and_service ... ok
+test test_parse_empty_socket_and_service_preserves_default ... ok
 test test_parse_event_password_failed ... ok
 test test_parse_timeout_clamping ... ok
 test test_parse_timeout_ms ... ok
+test test_parse_uid_override ... ok
+test test_parse_unterminated_string_exceeding_max_arg_len ... ok
+test test_parse_whitespace_padded_arguments ... ok
+test test_parse_zero_timeout_clamps_to_min ... ok
 test test_safely_ignores_unknown_or_corrupted_arguments ... ok
 
 test test_setcred_always_returns_ignore ... ok
-test test_ipc_password_failed_daemon_offline_returns_ignore ... ok
+test test_ipc_notify_event_offline ... ok
 test test_ipc_offline_daemon_returns_ignore ... ok
+test test_ipc_password_failed_daemon_offline_returns_ignore ... ok
 test test_ipc_deny_returns_ignore ... ok
+test test_ipc_empty_response_returns_ignore ... ok
 test test_ipc_nominal_allow_returns_success ... ok
-test test_ipc_password_failed_event_notification ... ok
+test test_ipc_notify_event_direct ... ok
 test test_ipc_oversized_response_rejected ... ok
 test test_ipc_request_id_mismatch_returns_ignore ... ok
+test test_ipc_password_failed_event_notification ... ok
 test test_ipc_unavailable_returns_ignore ... ok
+test test_ipc_direct_authenticate_timeout_mapping ... ok
 test test_ipc_slow_daemon_timeout ... ok
+test test_ipc_slow_daemon_body_timeout ... ok
 
-test result: ok. 88 passed; 0 failed; 0 ignored; finished in 0.45s
+test result: ok. 98 passed; 0 failed; 0 ignored; finished in 0.45s
 ```

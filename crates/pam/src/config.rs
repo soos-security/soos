@@ -41,6 +41,8 @@ pub struct PamConfig {
     pub socket_path: PathBuf,
     /// PAM service name.
     pub service: String,
+    /// Optional target UID override specified in PAM arguments.
+    pub uid: Option<u32>,
 }
 
 impl Default for PamConfig {
@@ -50,6 +52,7 @@ impl Default for PamConfig {
             event: None,
             socket_path: PathBuf::from(DEFAULT_SOCKET_PATH),
             service: DEFAULT_SERVICE.to_string(),
+            uid: None,
         }
     }
 }
@@ -91,24 +94,30 @@ pub unsafe fn parse_argv(argc: i32, argv: *const *const u8) -> PamConfig {
             None => continue,
         };
 
-        if let Some(val) = arg_str.strip_prefix("timeout_ms=") {
+        let trimmed = arg_str.trim();
+
+        if let Some(val) = trimmed.strip_prefix("timeout_ms=") {
             if let Ok(parsed) = val.trim().parse::<u64>() {
                 config.timeout_ms = parsed.clamp(MIN_TIMEOUT_MS, MAX_TIMEOUT_MS);
             }
-        } else if arg_str == "event=password-failed" {
+        } else if trimmed == "event=password-failed" {
             config.event = Some(PamEvent::PasswordFailed);
-        } else if let Some(val) = arg_str.strip_prefix("socket_path=") {
+        } else if let Some(val) = trimmed.strip_prefix("socket_path=") {
             let path_str = val.trim();
             if !path_str.is_empty() {
                 config.socket_path = PathBuf::from(path_str);
             }
-        } else if let Some(val) = arg_str.strip_prefix("service=") {
+        } else if let Some(val) = trimmed.strip_prefix("service=") {
             let s = val.trim();
             if !s.is_empty() {
                 let bounded_len = s.len().min(soos_protocol::MAX_SERVICE_LEN);
                 if let Some(sub) = s.get(..bounded_len) {
                     config.service = sub.to_string();
                 }
+            }
+        } else if let Some(val) = trimmed.strip_prefix("uid=") {
+            if let Ok(parsed) = val.trim().parse::<u32>() {
+                config.uid = Some(parsed);
             }
         }
     }
@@ -118,6 +127,10 @@ pub unsafe fn parse_argv(argc: i32, argv: *const *const u8) -> PamConfig {
 
 /// Extracts a string from a null-terminated C pointer with a strict byte limit.
 fn extract_bounded_str<'a>(ptr: *const u8) -> Option<&'a str> {
+    if ptr.is_null() {
+        return None;
+    }
+
     let mut len = 0usize;
     while len < MAX_ARG_LEN {
         // SAFETY: `len < MAX_ARG_LEN` bounds the pointer read within a known small region.

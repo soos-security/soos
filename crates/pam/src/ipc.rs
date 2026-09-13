@@ -36,6 +36,8 @@ pub enum IpcError {
     Random(getrandom::Error),
     /// Communication deadline expired.
     Timeout,
+    /// Response declared length is zero.
+    EmptyResponse,
     /// Response declared length exceeds maximum permitted buffer size.
     OversizedMessage { size: usize, max: usize },
     /// Response request ID did not match the original nonce.
@@ -52,6 +54,7 @@ impl core::fmt::Display for IpcError {
             Self::Codec(e) => write!(f, "protocol codec error: {e}"),
             Self::Random(e) => write!(f, "failed to generate random request ID: {e}"),
             Self::Timeout => write!(f, "daemon communication deadline exceeded"),
+            Self::EmptyResponse => write!(f, "daemon returned empty zero-length response"),
             Self::OversizedMessage { size, max } => {
                 write!(f, "response size {size} exceeds maximum {max}")
             }
@@ -67,6 +70,26 @@ impl core::fmt::Display for IpcError {
 
 impl std::error::Error for IpcError {}
 
+/// Computes remaining time before deadline or returns `IpcError::Timeout`.
+///
+/// Filters out zero-duration timeouts since `set_read_timeout` / `set_write_timeout`
+/// reject `Duration::ZERO` with `EINVAL` in Rust standard library.
+fn remaining_budget(start: Instant, total: Duration) -> Result<Duration, IpcError> {
+    let elapsed = start.elapsed();
+    total
+        .checked_sub(elapsed)
+        .filter(|d| !d.is_zero())
+        .ok_or(IpcError::Timeout)
+}
+
+/// Maps std::io::Error to IpcError, converting socket timeout errors to `IpcError::Timeout`.
+fn map_io_err(err: std::io::Error) -> IpcError {
+    match err.kind() {
+        std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock => IpcError::Timeout,
+        _ => IpcError::Io(err),
+    }
+}
+
 /// Sends an authentication request to the daemon and awaits the verification verdict.
 pub fn authenticate(config: &PamConfig, uid: u32) -> Result<Verdict, IpcError> {
     let start_time = Instant::now();
@@ -74,18 +97,11 @@ pub fn authenticate(config: &PamConfig, uid: u32) -> Result<Verdict, IpcError> {
 
     let mut stream = UnixStream::connect(&config.socket_path).map_err(IpcError::Connect)?;
 
-    // Configure write and read timeouts based on remaining latency budget
-    let elapsed = start_time.elapsed();
-    let remaining = total_timeout
-        .checked_sub(elapsed)
-        .ok_or(IpcError::Timeout)?;
-
+    // Configure write timeout based on remaining latency budget
+    let remaining_write = remaining_budget(start_time, total_timeout)?;
     stream
-        .set_write_timeout(Some(remaining))
-        .map_err(IpcError::Io)?;
-    stream
-        .set_read_timeout(Some(remaining))
-        .map_err(IpcError::Io)?;
+        .set_write_timeout(Some(remaining_write))
+        .map_err(map_io_err)?;
 
     // Generate single-use cryptographic 256-bit nonce
     let mut request_id = [0u8; REQUEST_ID_LEN];
@@ -105,12 +121,18 @@ pub fn authenticate(config: &PamConfig, uid: u32) -> Result<Verdict, IpcError> {
     };
 
     let encoded = encode(&req).map_err(IpcError::Codec)?;
-    stream.write_all(&encoded).map_err(IpcError::Io)?;
-    stream.flush().map_err(IpcError::Io)?;
+    stream.write_all(&encoded).map_err(map_io_err)?;
+    stream.flush().map_err(map_io_err)?;
+
+    // Dynamic latency budget refresh: configure read timeout before reading response length prefix
+    let remaining_for_len = remaining_budget(start_time, total_timeout)?;
+    stream
+        .set_read_timeout(Some(remaining_for_len))
+        .map_err(map_io_err)?;
 
     // Read 4-byte big-endian length prefix
     let mut len_buf = [0u8; 4];
-    stream.read_exact(&mut len_buf).map_err(IpcError::Io)?;
+    stream.read_exact(&mut len_buf).map_err(map_io_err)?;
 
     let declared_size =
         usize::try_from(u32::from_be_bytes(len_buf)).map_err(|_| IpcError::OversizedMessage {
@@ -118,7 +140,11 @@ pub fn authenticate(config: &PamConfig, uid: u32) -> Result<Verdict, IpcError> {
             max: MAX_MESSAGE_SIZE,
         })?;
 
-    if declared_size == 0 || declared_size > MAX_MESSAGE_SIZE {
+    if declared_size == 0 {
+        return Err(IpcError::EmptyResponse);
+    }
+
+    if declared_size > MAX_MESSAGE_SIZE {
         return Err(IpcError::OversizedMessage {
             size: declared_size,
             max: MAX_MESSAGE_SIZE,
@@ -132,12 +158,20 @@ pub fn authenticate(config: &PamConfig, uid: u32) -> Result<Verdict, IpcError> {
             max: MAX_MESSAGE_SIZE,
         })?;
 
-    let mut full_buf = Vec::with_capacity(total_capacity);
-    full_buf.extend_from_slice(&len_buf);
+    // Single-allocation framed response buffer avoiding redundant secondary Vec and memcpy
+    let mut full_buf = vec![0u8; total_capacity];
+    let prefix_slice = full_buf.get_mut(..4).ok_or(IpcError::EmptyResponse)?;
+    prefix_slice.copy_from_slice(&len_buf);
 
-    let mut body_buf = vec![0u8; declared_size];
-    stream.read_exact(&mut body_buf).map_err(IpcError::Io)?;
-    full_buf.extend_from_slice(&body_buf);
+    // Dynamic latency budget refresh: recompute remaining budget before reading payload body
+    // to strictly enforce cumulative deadline across multi-part reads
+    let remaining_for_body = remaining_budget(start_time, total_timeout)?;
+    stream
+        .set_read_timeout(Some(remaining_for_body))
+        .map_err(map_io_err)?;
+
+    let body_slice = full_buf.get_mut(4..).ok_or(IpcError::EmptyResponse)?;
+    stream.read_exact(body_slice).map_err(map_io_err)?;
 
     let resp: Response = decode(&full_buf).map_err(IpcError::Codec)?;
 
@@ -164,14 +198,11 @@ pub fn notify_event(config: &PamConfig, _uid: u32, event_kind: EventKind) -> Res
 
     let mut stream = UnixStream::connect(&config.socket_path).map_err(IpcError::Connect)?;
 
-    let elapsed = start_time.elapsed();
-    let remaining = total_timeout
-        .checked_sub(elapsed)
-        .unwrap_or(Duration::from_millis(5));
+    let remaining = remaining_budget(start_time, total_timeout)?;
 
     stream
         .set_write_timeout(Some(remaining))
-        .map_err(IpcError::Io)?;
+        .map_err(map_io_err)?;
 
     let event = Event {
         version: CURRENT_VERSION,
@@ -182,8 +213,8 @@ pub fn notify_event(config: &PamConfig, _uid: u32, event_kind: EventKind) -> Res
     };
 
     let encoded = encode(&event).map_err(IpcError::Codec)?;
-    stream.write_all(&encoded).map_err(IpcError::Io)?;
-    stream.flush().map_err(IpcError::Io)?;
+    stream.write_all(&encoded).map_err(map_io_err)?;
+    stream.flush().map_err(map_io_err)?;
 
     // Fire-and-forget: socket closed immediately
     drop(stream);

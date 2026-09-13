@@ -84,7 +84,7 @@ pub extern "C" fn pam_sm_authenticate(
         let config = unsafe { parse_argv(argc, argv) };
 
         // SAFETY: getuid is a non-allocating, safe libc syscall returning the process UID.
-        let uid = unsafe { libc::getuid() };
+        let uid = config.uid.unwrap_or_else(|| unsafe { libc::getuid() });
 
         if config.event == Some(PamEvent::PasswordFailed) {
             // Best-effort telemetry notification bounded by 20ms ceiling
