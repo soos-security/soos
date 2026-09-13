@@ -79,35 +79,38 @@ fi
 
 step "3/6 : Sollicitation de la review Copilot"
 info "Sollicitation explicite de GitHub Copilot..."
-gh api "repos/:owner/:repo/pulls/$PR_NUMBER/requested_reviewers" -f 'reviewers[]=copilot' > /dev/null 2>&1 || true
-success "Demande de review transmise à GitHub Copilot."
+# 1. Assignation formelle du bot Copilot dans la section Reviewers via l'API GraphQL GitHub
+PR_NODE_ID=$(gh api "repos/:owner/:repo/pulls/$PR_NUMBER" --jq '.node_id' 2>/dev/null || true)
+if [[ -n "$PR_NODE_ID" ]]; then
+    gh api graphql -f query='mutation { requestReviews(input: { pullRequestId: "'"$PR_NODE_ID"'", botIds: ["BOT_kgDOCnlnWA"] }) { pullRequest { id } } }' > /dev/null 2>&1 || true
+fi
+# 2. Déclenchement explicite via commentaire de mention @copilot review
+gh pr comment "$PR_NUMBER" --body "@copilot review" > /dev/null 2>&1 || true
+success "Demande de review transmise à GitHub Copilot (reviewers + commentaire)."
 
 step "4/6 : Attente des vérifications CI (GitHub Actions)"
 info "Surveillance des 3 jobs CI pour la PR #$PR_NUMBER (Quality, Security, PAM Docker)..."
-# Attente de 10s pour que GitHub enregistre les workflows déclenchés par la PR
-sleep 10
+# Attente initiale pour que GitHub enregistre les workflows déclenchés par le push
+sleep 5
 
-# Boucler avec tolérance pour le démarrage des checks
 CI_PASSED=false
 for attempt in $(seq 1 60); do
-    STATUS=$(gh pr checks "$PR_NUMBER" 2>&1 || true)
-    if echo "$STATUS" | grep -q "All checks were successful"; then
+    if gh pr checks "$PR_NUMBER" >/dev/null 2>&1; then
         CI_PASSED=true
         break
     fi
-    if echo "$STATUS" | grep -qE "(failing|cancelled)"; then
+    STATUS=$(gh pr checks "$PR_NUMBER" 2>&1 || true)
+    if echo "$STATUS" | grep -qiE "(fail|cancelled)"; then
         error "Les vérifications CI ont échoué sur GitHub Actions !"
         echo "$STATUS"
         exit 1
     fi
-    # Si des checks sont en cours ou pas encore enregistrés, attendre
     echo -ne "  ⏳ Vérifications CI en cours (tentative ${attempt}/60)...\r"
     sleep 10
 done
 echo ""
 
 if [[ "$CI_PASSED" != "true" ]]; then
-    # Une dernière tentative avec gh pr checks pour lever l'erreur éventuelle
     if ! gh pr checks "$PR_NUMBER"; then
         error "Délai d'attente CI dépassé ou échec des vérifications !"
         exit 1
@@ -116,22 +119,25 @@ fi
 success "Tous les checks CI sont passés au vert !"
 
 step "5/6 : Attente active de l'analyse de code par GitHub Copilot"
-info "Copilot analyse le code (cette analyse prend habituellement entre 2 et 6 minutes)..."
+info "Copilot analyse le code (cette analyse prend habituellement entre 30s et 5 minutes)..."
 
 MAX_WAIT_SECONDS=480 # 8 minutes maximum
 WAITED=0
-INTERVAL=15
+INTERVAL=10
 COPILOT_FINISHED=false
 
 while [[ $WAITED -lt $MAX_WAIT_SECONDS ]]; do
-    # 1. Vérifier si une review Copilot a été publiée
+    # 1. Vérifier si une review formelle Copilot a été publiée (Pull Request Review)
     REVIEWS_COPILOT=$(gh api "repos/:owner/:repo/pulls/$PR_NUMBER/reviews" 2>/dev/null | grep -E '"login": "Copilot"' || true)
 
-    # 2. Vérifier si le workflow 'Running Copilot Code Review' a terminé
+    # 2. Vérifier si un commentaire d'analyse Copilot a été publié en réponse à @copilot
+    COMMENTS_COPILOT=$(gh api "repos/:owner/:repo/issues/$PR_NUMBER/comments" 2>/dev/null | grep -E '"login": "Copilot"' || true)
+
+    # 3. Vérifier si le workflow 'Running Copilot Code Review' a terminé
     COPILOT_RUN_STATUS=$(gh run list --branch "$CURRENT_BRANCH" --json name,status,conclusion 2>/dev/null | grep -i "Copilot" || true)
 
-    if [[ -n "$REVIEWS_COPILOT" ]]; then
-        info "Review de GitHub Copilot publiée détectée !"
+    if [[ -n "$REVIEWS_COPILOT" ]] || [[ -n "$COMMENTS_COPILOT" ]]; then
+        info "Analyse / Réponse de GitHub Copilot détectée !"
         COPILOT_FINISHED=true
         break
     fi
