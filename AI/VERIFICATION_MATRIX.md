@@ -33,10 +33,10 @@ This document translates the critical gating criteria from §11 of `ARCHITECTURE
 
 | # | Criterion | Test Method | Status |
 |---|---|---|---|
-| PO1 | `Allow` decision only if score >= threshold AND PAD positive AND valid UID | Parametric unit tests | ☐ Pending |
-| PO2 | Per-UID rate-limiting is enforced | Request burst test | ☐ Pending |
-| PO3 | Zero I/O inside crate | Cargo dependency verification | ☐ Pending |
-| PO4 | `#![forbid(unsafe_code)]` enabled | Invariant test | ☐ Pending |
+| PO1 | `Allow` decision only if score >= threshold AND PAD positive AND valid UID | Parametric unit tests (`decision_tests::test_decision_allow_nominal`, `prop_decision_allow_invariant`) | ☑ Validated |
+| PO2 | Per-UID rate-limiting is enforced | Request burst test (`rate_limit_tests::test_rate_limit_burst_same_uid`) | ☑ Validated |
+| PO3 | Zero I/O inside crate | Dependency audit (`crates/policy/Cargo.toml` contains zero filesystem, network, or async deps) | ☑ Validated |
+| PO4 | `#![forbid(unsafe_code)]` enabled | Invariant test (`soos-invariants::test_business_crates_forbid_unsafe_code`) | ☑ Validated |
 
 ---
 

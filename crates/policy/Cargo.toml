@@ -1,0 +1,17 @@
+[package]
+name = "soos-policy"
+description = "Pure authorization logic and per-UID rate limiting (Zero I/O) for soos"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+soos-protocol = { workspace = true }
+
+[dev-dependencies]
+proptest = "1"
+
+[lints]
+workspace = true

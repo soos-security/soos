@@ -315,6 +315,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "soos-policy"
+version = "0.1.0"
+dependencies = [
+ "proptest",
+ "soos-protocol",
+]
+
+[[package]]
 name = "soos-protocol"
 version = "0.1.0"
 dependencies = [

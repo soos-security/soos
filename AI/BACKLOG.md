@@ -43,22 +43,22 @@ Pure business logic crate: takes structured inputs (score, PAD result, UID conte
 
 #### Sub-issues:
 
-- **#1.1** — Scaffold `crates/policy/` with `Cargo.toml`, `#![forbid(unsafe_code)]`, workspace membership
+- [x] **#1.1** — Scaffold `crates/policy/` with `Cargo.toml`, `#![forbid(unsafe_code)]`, workspace membership
   - Acceptance: `PO4` — `forbid(unsafe_code)` invariant test passes
   - Acceptance: `PO3` — zero I/O deps in `Cargo.toml` (no `std::fs`, `std::net`, `tokio`)
 
-- **#1.2** — Implement `AuthorizationDecision` engine
+- [x] **#1.2** — Implement `AuthorizationDecision` engine
   - Input: `AuthContext { score: f32, pad_passed: bool, face_count: u8, uid: u32, session_valid: bool }`
   - Output: `(Verdict, ReasonClass)` from `protocol` types
   - Rules: `Allow` only if `score >= threshold AND pad_passed AND face_count == 1 AND session_valid`
   - Acceptance: `PO1` — parametric unit tests cover every branch
 
-- **#1.3** — Implement per-UID rate limiter
+- [x] **#1.3** — Implement per-UID rate limiter
   - Sliding window or token-bucket, configurable `max_attempts` and `window_secs`
   - Must be `no_std`-compatible (no system clock — accepts monotonic timestamp as parameter)
   - Acceptance: `PO2` — burst test: 10 rapid requests from same UID, only first N pass
 
-- **#1.4** — Implement cosine threshold configuration
+- [x] **#1.4** — Implement cosine threshold configuration
   - `ThresholdConfig { match_threshold: f32, pad_threshold: f32 }` with builder pattern
   - Sane defaults documented from MobileFaceNet literature
 

@@ -68,14 +68,18 @@ def run_gh_cmd(args):
     env["PAGER"] = "cat"
     env["GH_PAGER"] = "cat"
     env["GH_NO_PAGER"] = "1"
-    res = subprocess.run(
-        ["gh"] + args,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        env=env,
-        check=False,
-    )
+    try:
+        res = subprocess.run(
+            ["gh"] + args,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=env,
+            check=False,
+        )
+    except FileNotFoundError:
+        print("[WARN] GitHub CLI ('gh') is not installed. Skipping remote GitHub issue sync.", file=sys.stderr)
+        return None
     if res.returncode != 0:
         print(f"[WARN] gh command failed: {res.stderr.strip()}", file=sys.stderr)
         return None
