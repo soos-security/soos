@@ -36,5 +36,16 @@ Your responsibility is to ensure 100% documentation coverage, update the formal 
      - Candid Reviewer findings
      - Automated verification test results
 
-4. **Deliverable**:
-   - Synchronized `AI/VERIFICATION_MATRIX.md`, updated `Docs/`, and new sequential walkthrough in `AI/walkthroughs/`.
+4. **Dual Issue & Sub-Issue Synchronization (Local BACKLOG.md & GitHub Issues)**:
+   - For every completed sub-issue (e.g. `1.1`), execute:
+     ```bash
+     python3 scripts/sync_issue.py --subissue <X.Y> --comment "Sub-issue #<X.Y> completed and verified."
+     ```
+   - This automatically checks off `- [x] **#<X.Y>**` in `AI/BACKLOG.md` AND in the corresponding GitHub Issue body via GitHub API, posting an automated progress comment.
+   - When all sub-issues of the active branch are completed, execute:
+     ```bash
+     python3 scripts/sync_issue.py --auto
+     ```
+
+5. **Deliverable**:
+   - Synchronized `AI/VERIFICATION_MATRIX.md`, updated GitHub issue checkboxes and comments, synchronized `AI/BACKLOG.md`, updated `Docs/`, and new sequential walkthrough in `AI/walkthroughs/`.
