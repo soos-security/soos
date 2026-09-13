@@ -1,0 +1,25 @@
+[package]
+name = "soos-camera-v4l"
+description = "V4L2 MMAP warm camera capture manager with lock-free ArcSwap snapshotting and mock-camera simulation"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[features]
+default = []
+mock-camera = []
+
+[dependencies]
+v4l = { workspace = true }
+arc-swap = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+libc = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true
