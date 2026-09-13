@@ -1,18 +1,19 @@
 #!/usr/bin/env bash
 # =============================================================================
-# scripts/pr_loop.sh — Autonomous PR loop, Copilot review, and auto-merge
+# scripts/pr_loop.sh — Autonomous PR loop, Copilot ping-pong review & auto-merge
 # =============================================================================
-# Orchestrates branch finalization:
+# Orchestrates branch finalization with strict review gating:
 #   1. Verifies dedicated topic branch (rejects 'main' and 'detached')
 #   2. Executes ./save.sh --push-pr to validate, commit, and push
 #   3. Opens Pull Request if not already created
 #   4. Monitors CI checks (Quality, Security, PAM Docker)
-#   5. Actively awaits GitHub Copilot code review
+#   5. Actively awaits GitHub Copilot code review for target commit SHA
 #   6. Evaluates Copilot feedback:
-#      - If review comments exist: outputs targeted line details and exits (code 2)
-#        to allow the AI agent to apply fixes and retry.
-#      - If zero comments and CI 100% green: squash-merges into 'main'
-#        and synchronizes local 'main' branch.
+#      - If review comments exist OR changes are recommended:
+#        outputs targeted details and exits (code 2) for the AI agent
+#        to apply fixes, commit, and re-run (ping-pong cycle).
+#      - Only if ZERO comments, NO changes recommended, and CI 100% green:
+#        squash-merges into 'main' and synchronizes local 'main' branch.
 # =============================================================================
 
 set -euo pipefail
@@ -47,6 +48,11 @@ if [[ "$CURRENT_BRANCH" == "main" || "$CURRENT_BRANCH" == "detached" ]]; then
     exit 1
 fi
 
+# Ensure git hooks path is configured
+if [[ -d ".githooks" ]]; then
+    git config core.hooksPath .githooks 2>/dev/null || true
+fi
+
 step "1/6: Local Quality Gates, Conventional Commit, and Push"
 info "Running quality pipeline and pushing branch '$CURRENT_BRANCH'..."
 PASSED_ARGS=()
@@ -56,6 +62,9 @@ for arg in "$@"; do
     fi
 done
 ./save.sh --push-pr "${PASSED_ARGS[@]}"
+
+TARGET_HEAD_SHA=$(git rev-parse HEAD)
+info "Target HEAD commit SHA: $TARGET_HEAD_SHA"
 
 step "2/6: Pull Request Verification or Creation"
 PR_JSON=$(gh pr list --head "$CURRENT_BRANCH" --json number,url,state --state open 2>/dev/null || echo "[]")
@@ -123,65 +132,136 @@ if [[ "$CI_PASSED" != "true" ]]; then
 fi
 success "All CI checks passed successfully!"
 
-step "5/6: Actively Awaiting GitHub Copilot Code Review"
-info "Copilot is analyzing the code (typically takes between 30s and 5 minutes)..."
+step "5/6: Actively Awaiting GitHub Copilot Code Review for $TARGET_HEAD_SHA"
+info "Copilot is analyzing commit $TARGET_HEAD_SHA..."
 
-MAX_WAIT_SECONDS=480 # 8 minutes maximum
+MAX_WAIT_SECONDS=600 # 10 minutes maximum
 WAITED=0
 INTERVAL=10
 COPILOT_FINISHED=false
+MINIMUM_WAIT_SECONDS=40 # Allow at least 40s for Copilot run to trigger
 
 while [[ $WAITED -lt $MAX_WAIT_SECONDS ]]; do
-    # 1. Formal review published
-    REVIEWS_COPILOT=$(gh api "repos/:owner/:repo/pulls/$PR_NUMBER/reviews" 2>/dev/null | grep -E '"login": "Copilot"' || true)
-
-    # 2. Copilot comment posted
-    COMMENTS_COPILOT=$(gh api "repos/:owner/:repo/issues/$PR_NUMBER/comments" 2>/dev/null | grep -E '"login": "Copilot"' || true)
-
-    # 3. Copilot workflow completed
-    COPILOT_RUN_STATUS=$(gh run list --branch "$CURRENT_BRANCH" --json name,status,conclusion 2>/dev/null | grep -i "Copilot" || true)
-
-    if [[ -n "$REVIEWS_COPILOT" ]] || [[ -n "$COMMENTS_COPILOT" ]]; then
-        info "GitHub Copilot review/comment detected!"
+    # Check all Copilot workflow runs on the repository for this branch
+    RUNS_JSON=$(gh run list --branch "$CURRENT_BRANCH" --json name,status,conclusion,headSha 2>/dev/null || echo "[]")
+    
+    # Are any Copilot runs currently queued or in_progress?
+    ACTIVE_COPILOT_RUNS=$(echo "$RUNS_JSON" | jq -r '.[] | select(.name | test("Copilot"; "i")) | select(.status != "completed")' 2>/dev/null || true)
+    
+    # Check if a completed Copilot workflow exists specifically for TARGET_HEAD_SHA
+    COMPLETED_TARGET_RUN=$(echo "$RUNS_JSON" | jq -r ".[] | select(.name | test(\"Copilot\"; \"i\")) | select(.headSha == \"$TARGET_HEAD_SHA\") | select(.status == \"completed\")" 2>/dev/null || true)
+    
+    # Check if a review object exists specifically for TARGET_HEAD_SHA
+    REVIEWS_JSON=$(gh api "repos/:owner/:repo/pulls/$PR_NUMBER/reviews" 2>/dev/null || echo "[]")
+    MATCHING_REVIEW=$(echo "$REVIEWS_JSON" | jq -r ".[] | select(.user.login | test(\"Copilot\"; \"i\")) | select(.commit_id == \"$TARGET_HEAD_SHA\")" 2>/dev/null || true)
+    
+    if [[ -n "$ACTIVE_COPILOT_RUNS" ]]; then
+        # Copilot is currently active, keep waiting
+        echo -ne "  ⏳ Copilot analysis actively running (${WAITED}s / ${MAX_WAIT_SECONDS}s)...\r"
+    elif [[ -n "$MATCHING_REVIEW" ]]; then
+        info "Formal review for commit $TARGET_HEAD_SHA submitted by GitHub Copilot!"
         COPILOT_FINISHED=true
         break
-    fi
-
-    if [[ -n "$COPILOT_RUN_STATUS" ]] && echo "$COPILOT_RUN_STATUS" | grep -q '"status":"completed"'; then
-        info "GitHub Copilot workflow run completed!"
+    elif [[ -n "$COMPLETED_TARGET_RUN" && $WAITED -ge $MINIMUM_WAIT_SECONDS ]]; then
+        info "Copilot workflow run for commit $TARGET_HEAD_SHA completed!"
         COPILOT_FINISHED=true
+        # Wait extra 5s for review comments/body to persist
+        sleep 5
         break
+    else
+        echo -ne "  ⏳ Awaiting Copilot review trigger/completion (${WAITED}s / ${MAX_WAIT_SECONDS}s)...\r"
     fi
 
-    echo -ne "  ⏳ Awaiting Copilot review (${WAITED}s / ${MAX_WAIT_SECONDS}s)...\r"
     sleep $INTERVAL
     WAITED=$((WAITED + INTERVAL))
 done
 echo ""
 
 if [[ "$COPILOT_FINISHED" == "true" ]]; then
-    success "GitHub Copilot review completed."
+    success "GitHub Copilot analysis completed for $TARGET_HEAD_SHA."
 else
-    warn "Copilot wait ceiling exceeded (${MAX_WAIT_SECONDS}s) or Copilot did not trigger a run."
-    warn "Proceeding with evaluation based on CI checks and existing comments."
+    error "Copilot analysis for $TARGET_HEAD_SHA did not complete within ${MAX_WAIT_SECONDS}s!"
+    error "MERGE BLOCKED: Strict ping-pong policy requires a completed Copilot review on target commit."
+    exit 1
 fi
 
 step "6/6: Evaluating Copilot Feedback & Auto-Merge Decision"
-COMMENTS=$(gh api "repos/:owner/:repo/pulls/$PR_NUMBER/comments" 2>/dev/null || echo "[]")
-COMMENT_COUNT=$(echo "$COMMENTS" | grep -c '"id":' || true)
+# 1. Fetch unresolved review threads via GraphQL
+UNRESOLVED_THREADS=$(gh api graphql -f query='query {
+  repository(owner: ":owner", name: ":repo") {
+    pullRequest(number: '"$PR_NUMBER"') {
+      reviewThreads(first: 100) {
+        nodes {
+          isResolved
+        }
+      }
+    }
+  }
+}' --jq '[.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved == false)] | length' 2>/dev/null || echo "0")
 
-if [[ "$COMMENT_COUNT" -gt 0 ]]; then
-    warn "GitHub Copilot posted $COMMENT_COUNT review comment(s) on PR #$PR_NUMBER!"
+# 2. Fetch line comments on TARGET_HEAD_SHA
+COMMENTS=$(gh api "repos/:owner/:repo/pulls/$PR_NUMBER/comments" 2>/dev/null || echo "[]")
+TARGET_COMMENTS=$(echo "$COMMENTS" | jq -r "[.[] | select(.commit_id == \"$TARGET_HEAD_SHA\")] | length" 2>/dev/null || echo "0")
+
+# 3. Fetch Copilot review specifically for TARGET_HEAD_SHA (or latest)
+REVIEWS_JSON=$(gh api "repos/:owner/:repo/pulls/$PR_NUMBER/reviews" 2>/dev/null || echo "[]")
+MATCHING_REVIEW=$(echo "$REVIEWS_JSON" | jq -r "[.[] | select(.user.login | test(\"Copilot\"; \"i\")) | select(.commit_id == \"$TARGET_HEAD_SHA\")] | last // empty" 2>/dev/null || true)
+if [[ -z "$MATCHING_REVIEW" ]]; then
+    MATCHING_REVIEW=$(echo "$REVIEWS_JSON" | jq -r '[.[] | select(.user.login | test("Copilot"; "i"))] | last // empty' 2>/dev/null || true)
+fi
+
+REVIEW_STATE=""
+REVIEW_BODY=""
+if [[ -n "$MATCHING_REVIEW" ]]; then
+    REVIEW_STATE=$(echo "$MATCHING_REVIEW" | jq -r '.state // empty')
+    REVIEW_BODY=$(echo "$MATCHING_REVIEW" | jq -r '.body // empty')
+fi
+
+# Check for recommendations or changes
+CHANGES_REQUESTED=false
+
+if [[ "$UNRESOLVED_THREADS" -gt 0 ]]; then
+    info "Found $UNRESOLVED_THREADS unresolved review thread(s)."
+    CHANGES_REQUESTED=true
+fi
+
+if [[ "$TARGET_COMMENTS" -gt 0 ]]; then
+    info "Found $TARGET_COMMENTS comment(s) on target commit $TARGET_HEAD_SHA."
+    CHANGES_REQUESTED=true
+fi
+
+if [[ "$REVIEW_STATE" == "CHANGES_REQUESTED" ]]; then
+    info "Review state is CHANGES_REQUESTED."
+    CHANGES_REQUESTED=true
+fi
+
+if echo "$REVIEW_BODY" | grep -qiE "(Changes recommended|Critical issues|Moderate issues|Suppressed comments|Changes requested)"; then
+    info "Review body indicates changes are recommended or issues found."
+    CHANGES_REQUESTED=true
+fi
+
+if [[ "$CHANGES_REQUESTED" == "true" ]]; then
     echo ""
-    info "Review points from Copilot:"
-    echo "$COMMENTS" | grep -E '("path"|"line"|"body")' | sed 's/^[[:space:]]*//' | head -40
+    warn "═════════════════════════════════════════════════════════════"
+    warn "  GitHub Copilot has requested changes on PR #$PR_NUMBER!"
+    warn "═════════════════════════════════════════════════════════════"
     echo ""
-    warn "PR #$PR_NUMBER WILL NOT be merged until these review items are addressed."
-    info "Agent will now inspect feedback, apply fixes, and re-run the loop."
+    if [[ "$TARGET_COMMENTS" -gt 0 ]]; then
+        info "Specific line comments on $TARGET_HEAD_SHA ($TARGET_COMMENTS):"
+        echo "$COMMENTS" | jq -r ".[] | select(.commit_id == \"$TARGET_HEAD_SHA\") | \"[\(.path):\(.line // .original_line // \"?\")] \(.body)\"" | head -30
+        echo ""
+    fi
+    if [[ -n "$REVIEW_BODY" ]]; then
+        info "Copilot review summary:"
+        echo "$REVIEW_BODY" | head -60
+        echo ""
+    fi
+    warn "MERGE BLOCKED: The PR will NOT be merged until all feedback is addressed."
+    info "Ping-pong required: analyze points above, apply corrections, commit, and re-run."
     exit 2
 fi
 
-success "Zero blocking comments. All 3 CI checks and code reviews are 100% green!"
+success "Zero blocking comments and zero changes recommended. Copilot approved!"
 info "Auto-merging PR #$PR_NUMBER into 'main'..."
 
 IS_ALREADY_MERGED=$(gh api "repos/:owner/:repo/pulls/$PR_NUMBER" --jq '.merged' 2>/dev/null || echo "false")

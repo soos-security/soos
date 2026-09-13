@@ -120,7 +120,7 @@ docs(ipc): document peer credentials verification flow
 - `fix bug` *(missing type, scope, context)*
 - `FEAT: ADD NEW CAMERA CODE.` *(uppercase type, uppercase subject, ends with period)*
 - `wip` *(vague, no conventional prefix)*
-- `mise à jour de la documentation` *(non-English)*
+- `updated documentation and fixed some bugs` *(missing type, non-imperative, no scope)*
 - `refactor(protocol): Refactored the thing and made it work better because I changed some stuff in the files and it was necessary.` *(exceeds character limit, conversational, non-imperative)*
 
 ---
