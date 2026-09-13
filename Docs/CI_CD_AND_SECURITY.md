@@ -31,7 +31,7 @@ The project enforces compliance across three concentric verification levels:
 ┌─────────────────────────────────────────────────────────────┐
 │  Level 3: Docker PAM Integration Tests (run_tests.sh)       │
 │  - Clean build of pam_soos.so in Ubuntu 24.04 container     │
-│  - pamtester validation (T1: success, T2: rejection, T3: res│
+│  - pamtester suite: T1 (nominal), T2 (reject), T3 (fallback)│
 └─────────────────────────────────────────────────────────────┘
 ```
 

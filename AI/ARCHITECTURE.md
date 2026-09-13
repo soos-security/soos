@@ -19,7 +19,7 @@ The system is not considered a high-assurance biometric factor until robust Pres
 | Local AI Inference | `ort` (ONNX Runtime) CPU execution provider; UltraFace Slim 320 + MobileFaceNet | Fast, battle-tested, no OpenCV required in application code | Claiming "pure Rust" (ORT is native C/C++); unverified weight downloads |
 | Biometric Storage | AES-GCM encrypted embeddings at rest; intrusion snapshots opt-in and isolated | Minimizes attack surface and persistent biometric risk | Storing raw frames or passwords on disk or sending over socket |
 
-Verified crate versions as of September 2026: `pam-bindings` 0.3.0, `tokio` 1.53.1, `v4l` 0.14.0, `nokhwa` 0.10.11, `ort` 2.0.0-rc.13, `zeroize` 1.9.0. Versions are pinned in `Cargo.lock` and audited via `cargo-deny`.[^pam-bindings][^tokio][^v4l][^nokhwa][^ort][^zeroize]
+Verified crate versions: `pam-bindings` 0.3.0 (target crate), `tokio` 1.53.1, `v4l` 0.14.0, `nokhwa` 0.10.11, `ort` 2.0.0-rc.13, `zeroize` 1.9.0. Versions are pinned in `Cargo.lock` and audited via `cargo-deny`.[^pam-bindings][^tokio][^v4l][^nokhwa][^ort][^zeroize]
 
 ---
 
@@ -63,7 +63,7 @@ PAM Caller (gdm, swaylock, hyprlock, sudo, login)
                          EvidenceStore (only following PasswordFailed, opt-in)
 ```
 
-The daemon starts as a systemd service before login prompts, loads and validates model checksums, opens the camera, and stabilizes auto-exposure. The PAM module contains only the lightweight IPC client, response interpreter, and C ABI bindings.
+The daemon starts as a systemd service before login prompts, loads and validates model checksums, opens the camera, and stabilizes auto-exposure. The PAM module contains only the lightweight IPC client, response interpreter, and C ABI bindings. This separation guarantees that AI model loading, camera reinitialization, or video processing delays cannot block PAM authentication calls beyond the strictly enforced latency budget.
 
 ### Request State Matrix
 
@@ -94,7 +94,7 @@ UMask=0077
 The daemon verifies `/run/soos` is owned by `root:soos`, is not world-writable, and is not a symlink; it unlinks its own socket node following `lstat` verification, then binds `/run/soos/daemon.sock` with mode `0660`, owner `root:soos`. Users permitted to use facial verification are added to the system `soos` group.
 
 On every incoming connection, the daemon queries `getsockopt(..., SO_PEERCRED)`:[^unix7]
-- `peer.uid == uid` of target identity.
+- `peer.uid == uid` of target identity (or documented rule for root PAM caller).
 - Target UID is an authorized local user and owns the active local graphical session.
 - Bounded payload size and protocol version verified before deserialization.
 - Strict per-UID rate limits and global concurrent connection caps.
@@ -122,47 +122,72 @@ Event v1:    version | kind=PASSWORD_FAILED | request_id[32] |
 ## 5. PAM Module Implementation & Universal Stack
 
 ### Crate and ABI
-Built with `pam-bindings` 0.3.0 (`cdylib`), exporting `pam_sm_authenticate` and `pam_sm_setcred`.[^pam-bindings] All entry points are wrapped with `std::panic::catch_unwind(AssertUnwindSafe(...))`. Panics are caught, logged to syslog, and mapped to `PAM_IGNORE`.
+The module compiles to a `cdylib` (`pam_soos.so`).
+- **Current Skeleton Phase**: Direct C ABI exports (`pam_sm_authenticate`, `pam_sm_setcred`) wrapped in `catch_unwind`, systematically returning `PAM_IGNORE` to test PAM ABI compatibility and non-interference without external dependencies.
+- **Planned Target Integration**: Adoption of `pam-bindings` 0.3.0 (`PamHandle`, `PamHooks`), syslog logging on caught panics, and IPC client integration.
 
 ```rust
-// sm_authenticate conceptual flow
+// Conceptual authentication flow
 match ipc_auth(uid, service, deadline) {
     Ok(Allow { request_id, .. }) => PAM_SUCCESS,
     Ok(Deny | Unavailable | ProtocolError) | Err(_) => PAM_IGNORE,
 }
 ```
 
-### Proposed PAM Stack (`/etc/pam.d/soos-auth`)
+### Universal PAM Stack Ordering
 
 ```pam
 # Placed AFTER mandatory faillock preauth, BEFORE pam_unix.
 auth  [success=done default=ignore]  pam_soos.so timeout_ms=250
 
-# Standard password verification.
+# Standard password verification. On failure: marks stack failed but continues.
 auth  [success=done default=bad]     pam_unix.so try_first_pass
 
 # Reached only if pam_unix fails. Zero secrets accessed.
 auth  optional                       pam_soos.so event=password-failed timeout_ms=20
 ```
 
+### Distribution Adaptation Guidelines
+
+| Family | Primary Auth File | Integration Strategy |
+|---|---|---|
+| Debian / Ubuntu | `/etc/pam.d/common-auth` | Managed via `pam-auth-update` profile; preserves `pam_unix` and `pam_faillock`. |
+| RHEL / Fedora | `/etc/pam.d/system-auth` | Managed via custom `authselect` profile; avoid direct manual edits. |
+| Arch Linux | `/etc/pam.d/system-auth` | Inserted into include chain; preserve `.pacnew` files during system updates. |
+| openSUSE | `/etc/pam.d/common-auth` | Managed via `pam-config`; inspect resulting stack before deployment. |
+
+Before deployment, always maintain an active root rescue shell, verify fallback to password in a VM, and test screensavers (`swaylock`, `hyprlock`), TTY, SSH, and `sudo`.
+
 ---
 
 ## 6. Warm Camera Streaming & Low Latency
 
-The daemon exclusively controls the camera by stable hardware ID (`/dev/v4l/by-id/...`), using `v4l` 0.14 MMAP streaming.[^v4l] It continuously captures frames at 640x480 (10–15 FPS) into memory, maintaining the latest frame in an `ArcSwap<LatestFrame>` buffer with monotonic timestamp.
+The daemon exclusively controls the camera by stable hardware ID (`/dev/v4l/by-id/...`), using `v4l` 0.14 MMAP streaming.[^v4l]
 
-When PAM requests authentication, the daemon grabs the snapshot from RAM (age <= 150ms) rather than waiting for camera hardware wake-up.
+```text
+CameraManager thread (blocking): dequeue MMAP -> timestamp CLOCK_MONOTONIC
+ -> convert/scale -> ArcSwap<LatestFrame> -> requeue MMAP buffer immediately
+                                            |
+                              PAM request reads RAM snapshot
+                              (age <= 100-150ms), never touches camera
+```
+
+- Discard first 15–30 frames upon camera initialization for auto-exposure stabilization.
+- Fall back to 5 FPS after 60s of inactivity; close camera only upon explicit user policy.
+- Handle `ENODEV`, `EIO`, `EBUSY` with bounded exponential backoff and seamless `Unavailable` response; never hang the IPC listener.
 
 ---
 
 ## 7. Local Vision Pipeline & Latency Budget (150ms Target)
 
-### Models
+### Models & Verification Pipeline
 1. **Face Detection**: UltraFace Slim 320 ONNX (~1.04MB) -> bounding boxes and confidence scores with deterministic Rust NMS.[^ultraface]
 2. **Landmarks & Alignment**: 5-point landmark ONNX model -> affine transform to 112x112 aligned face crop.
-3. **Presentation Attack Detection (PAD)**: Challenge/response or dedicated ONNX anti-spoofing model.
+3. **Presentation Attack Detection (PAD)**: Active challenge or dedicated ONNX anti-spoofing model.
 4. **Feature Extraction**: MobileFaceNet ArcFace-compatible ONNX FP32/int8 -> 128D/512D L2-normalized embedding.[^mobilefacenet]
 5. **Matching**: Cosine similarity (`cosine = dot(a, b)`). Authorized only if score >= calibrated threshold and single face verified.
+
+Every model file is tracked in `models/manifest.toml` with license, source URL, and SHA-256 checksum.
 
 ### 150ms Latency Budget (p95 Target)
 
@@ -222,9 +247,33 @@ soos/
 
 ## 10. Daemon Hardening & Operational Security
 
-- **Systemd Sandboxing**: `NoNewPrivileges=yes`, `ProtectHome=yes`, `ProtectSystem=strict`, `RestrictAddressFamilies=AF_UNIX`, `MemoryDenyWriteExecute=yes`, `DevicePolicy=closed`.
-- **Memory Scrubbing**: Sensitive keys, nonces, and buffers implement `zeroize::Zeroize` and `ZeroizeOnDrop`.[^zeroize]
-- **Fail-Closed Principle**: Any runtime failure in `soos-daemon` or `pam_soos.so` falls back silently to password authentication.
+### Systemd Sandboxing
+
+```ini
+[Service]
+User=root
+Group=root
+ExecStart=/usr/libexec/soos/soos-daemon
+Restart=on-failure
+RestartSec=2
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/soos /run/soos
+DevicePolicy=closed
+DeviceAllow=/dev/video* rw
+RestrictAddressFamilies=AF_UNIX
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictSUIDSGID=yes
+SystemCallArchitectures=native
+```
+
+### Memory Hygiene
+- **Implemented**: The IPC `Response` struct implements manual `zeroize::Zeroize` and `Drop` to clear nonces and reset verdicts to `Deny` / `InternalError` upon deallocation.
+- **Planned Target**: Key material, decrypted biometric vectors, and raw camera frames in daemon memory will implement zeroization wrappers (`Zeroizing<T>`) and undergo bounds checking to prevent residual copies in heap or swap.
 
 ---
 
@@ -240,11 +289,23 @@ soos/
 
 ---
 
+## 12. Frequent Pitfalls to Avoid
+
+- Directly modifying `/etc/pam.d/system-auth` on an `authselect`-managed distribution.
+- Placing facial authentication before `pam_faillock` preauth, bypassing account lockout.
+- Using `sufficient` without checking previous stack failures.
+- Transmitting camera frames or biometric embeddings across the IPC socket or writing them to logs.
+- Assuming `/dev/video0` index is static or shareable across processes.
+- Downloading unverified ONNX weights at runtime without manifest hash checks.
+- Promising presentation attack security without active or dedicated PAD validation.
+
+---
+
 ## References
 
 [^pam-bindings]: `pam-bindings`, [pam crate 0.3.0 documentation](https://docs.rs/pam-bindings/latest/pam/).
 [^pam-conf]: Linux-PAM, [pam.conf(5) manual](https://man7.org/linux/man-pages/man5/pam.conf.5.html).
-[^pam-exec]: Linux-PAM, [pam_exec(8) manual](https://www.man7.org/linux/man-pages/man8/pam_exec.8.html).
+[^pam-exec]: Linux-PAM, [pam_exec(8) manual](https://man7.org/linux/man-pages/man8/pam_exec.8.html).
 [^unix7]: Linux man-pages, [unix(7) — SO_PEERCRED](https://man7.org/linux/man-pages/man7/unix.7.html).
 [^nix]: `nix`, [PeerCredentials socket API](https://docs.rs/nix/latest/nix/sys/socket/).
 [^tokio]: Tokio, [UnixListener documentation](https://docs.rs/tokio/latest/tokio/net/struct.UnixListener.html).

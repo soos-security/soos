@@ -255,10 +255,13 @@ else
 
     PARTS=()
 
-    if [[ ${#CRATES_CHANGED[@]} -gt 0 ]]; then
-        # Join crate names with comma
-        CRATE_LIST=$(IFS=,; echo "${CRATES_CHANGED[*]}")
-        PARTS+=("feat(${CRATE_LIST}): update component implementation")
+    if [[ ${#CRATES_CHANGED[@]} -eq 1 ]]; then
+        PARTS+=("feat(${CRATES_CHANGED[0]}): update component implementation")
+    elif [[ ${#CRATES_CHANGED[@]} -gt 1 ]]; then
+        PARTS+=("feat(workspace): update multiple crate implementations")
+        for c in "${CRATES_CHANGED[@]}"; do
+            PARTS+=("feat($c): update component")
+        done
     fi
     if [[ "$TESTS_CHANGED" == true ]]; then
         PARTS+=("test: update test suites and security invariants")
@@ -281,11 +284,15 @@ else
     elif [[ ${#PARTS[@]} -eq 1 ]]; then
         COMMIT_MSG="${PARTS[0]}"
     else
-        COMMIT_MSG="${PARTS[0]}"
+        # Enforce empty line between subject line and body bullets
+        SUBJECT="${PARTS[0]}"
+        BODY=""
         for ((i = 1; i < ${#PARTS[@]}; i++)); do
-            COMMIT_MSG="${COMMIT_MSG}
+            BODY="${BODY}
 - ${PARTS[$i]}"
         done
+        COMMIT_MSG="${SUBJECT}
+${BODY}"
     fi
 
     FILE_COUNT=$(echo "$CHANGED_FILES" | wc -l | tr -d ' ')
