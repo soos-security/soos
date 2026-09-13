@@ -11,32 +11,35 @@
 //! 4. **Zero Secrets on Wire**: Never inspects, processes, or transmits passwords over IPC.
 //! 5. **Safe Fallback**: Any error or timeout degrades silently to `PAM_IGNORE` for password fallback.
 //!
-//! ## Current Status: Foundation Skeleton
+//! ## Operational Flow
 //!
-//! Systematically returns `PAM_IGNORE` to validate:
-//! - C ABI loading compatibility by Linux-PAM
-//! - Zero interference with downstream authentication modules (`pam_unix.so`)
-//! - Fault-tolerant resilience of the PAM authentication stack
+//! Linux-PAM invokes `pam_sm_authenticate`:
+//! 1. Arguments (`argc`, `argv`) are parsed safely into a bounded [`config::PamConfig`].
+//! 2. If configured with `event=password-failed`: sends telemetry to the daemon within 20ms and returns `PAM_IGNORE`.
+//! 3. Otherwise: performs synchronous IPC authentication handshake with `soos-daemon`.
+//! 4. Renders `PAM_SUCCESS` exclusively upon receiving `Verdict::Allow` with matching nonce. All other outcomes return `PAM_IGNORE`.
 
-// NOTE: unsafe is required ONLY for C ABI symbol exports (`extern "C"`).
-// All internal logic remains safe Rust.
+// NOTE: unsafe is required ONLY for C ABI symbol exports (`extern "C"`), libc UID query, and bounded argv parsing.
+// All business logic remains safe Rust.
 #![deny(clippy::all)]
 
+pub mod config;
+pub mod ipc;
+
 use std::panic::{catch_unwind, AssertUnwindSafe};
+
+use config::{parse_argv, PamEvent};
+use soos_protocol::types::{EventKind, Verdict};
 
 // ---------------------------------------------------------------------------
 // PAM Constants (Linux-PAM Specification)
 // ---------------------------------------------------------------------------
 
 /// Success: authentication successfully granted.
-#[allow(
-    dead_code,
-    reason = "Standard PAM constant reserved for facial verification verdict"
-)]
-const PAM_SUCCESS: i32 = 0;
+pub const PAM_SUCCESS: i32 = 0;
 
 /// Ignore: module chooses not to participate in decision; PAM continues down stack.
-const PAM_IGNORE: i32 = 25;
+pub const PAM_IGNORE: i32 = 25;
 
 // ---------------------------------------------------------------------------
 // Opaque PAM Handle Pointer
@@ -61,25 +64,39 @@ pub struct PamHandle {
 /// PAM and must not be arbitrarily dereferenced. `argv` points to an array of
 /// `argc` C strings.
 ///
-/// # Behavior
-///
-/// Returns `PAM_IGNORE` to validate the C ABI without interfering with
-/// the operational PAM stack.
-///
 /// # Panic Safety Guarantee
 ///
 /// All panics are intercepted by `catch_unwind`. If an internal panic occurs,
 /// the function returns `PAM_IGNORE` to ensure seamless fallback to password.
+#[allow(
+    clippy::not_unsafe_ptr_arg_deref,
+    reason = "Exported C ABI entry point invoked by Linux-PAM; raw pointers are guarded against null and unbounded reads"
+)]
 #[no_mangle]
 pub extern "C" fn pam_sm_authenticate(
     _pamh: *mut PamHandle,
     _flags: i32,
-    _argc: i32,
-    _argv: *const *const u8,
+    argc: i32,
+    argv: *const *const u8,
 ) -> i32 {
     let result = catch_unwind(AssertUnwindSafe(|| {
-        // Foundation phase: returns PAM_IGNORE -> PAM continues to pam_unix.so
-        PAM_IGNORE
+        // SAFETY: `argv` points to `argc` pointers passed across the C ABI by Linux-PAM.
+        let config = unsafe { parse_argv(argc, argv) };
+
+        // SAFETY: getuid is a non-allocating, safe libc syscall returning the process UID.
+        let uid = unsafe { libc::getuid() };
+
+        if config.event == Some(PamEvent::PasswordFailed) {
+            // Best-effort telemetry notification bounded by 20ms ceiling
+            let _ = ipc::notify_event(&config, uid, EventKind::PasswordFailed);
+            return PAM_IGNORE;
+        }
+
+        match ipc::authenticate(&config, uid) {
+            Ok(Verdict::Allow) => PAM_SUCCESS,
+            Ok(Verdict::Deny | Verdict::Unavailable | Verdict::ProtocolError) => PAM_IGNORE,
+            Err(_) => PAM_IGNORE,
+        }
     }));
 
     match result {

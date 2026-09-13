@@ -38,6 +38,10 @@ thiserror = "2"
 # Test utilities
 tempfile = "3"
 
+# Low-level primitives & random generation
+getrandom = "0.3"
+libc = "0.2"
+
 # Internal workspace crates
 soos-protocol = { path = "crates/protocol", version = "0.1.0" }
 soos-policy = { path = "crates/policy", version = "0.1.0" }

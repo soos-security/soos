@@ -9,11 +9,16 @@ publish.workspace = true
 
 [lib]
 name = "pam_soos"
-# cdylib produces a .so dynamically loadable by Linux-PAM
-crate-type = ["cdylib"]
+# cdylib produces a .so dynamically loadable by Linux-PAM; rlib enables integration tests
+crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 soos-protocol = { workspace = true }
+getrandom = { workspace = true }
+libc = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
 
 [build-dependencies]
 # Direct C symbol exports used for initial skeleton.
