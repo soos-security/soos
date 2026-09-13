@@ -94,7 +94,8 @@ Pour les développements autonomes par IA ou les contributeurs souhaitant une au
 1. **Quality Gates** : Exécution de `cargo fmt`, `cargo clippy -D warnings`, `cargo test` (y compris invariants architecturaux) et `cargo deny check`.
 2. **Contrôle Pre-Commit** : Vérification de la branche (refus de `main`) et filtre anti-fuite de secrets.
 3. **Push & Pull Request** : Poussée de la branche vers GitHub et création automatique de la Pull Request si elle n'existe pas encore.
-4. **Sollicitation Copilot** : Demande d'analyse automatique à GitHub Copilot.
+4. **Sollicitation Copilot** : Demande d'analyse automatique à GitHub Copilot via l'API GitHub.
 5. **Surveillance CI** : Surveillance en temps réel de l'avancement des 3 jobs GitHub Actions (`Quality`, `Security`, `PAM Integration Docker`).
-6. **Résolution des retours** : Si Copilot émet des suggestions ou remarques, l'IA les analyse, apporte les corrections de code ou documentation nécessaires, et re-soumet.
-7. **Fusion automatique (Auto-Merge)** : Dès que les 3 jobs CI sont passés au vert et que les retours sont résolus, la Pull Request est fusionnée automatiquement dans `main` (`gh pr merge --squash --delete-branch`), et l'environnement local est synchronisé sur `main` (`git checkout main && git pull origin main`).
+6. **Attente active de l'analyse Copilot** : Le script attend que le workflow d'analyse Copilot se termine et publie sa review (entre 2 et 6 minutes en moyenne).
+7. **Traitement strict des retours** : Si Copilot émet des commentaires ou demande des changements, la PR n'est **PAS** fusionnée. Le script renvoie les détails précis des fichiers et lignes ciblés pour que l'IA applique les corrections et re-soumette la branche.
+8. **Fusion automatique (Auto-Merge)** : Dès que les 3 jobs CI sont passés au vert et que Copilot n'a plus de remarques non résolues, la Pull Request est fusionnée automatiquement dans `main` (`gh pr merge --squash --delete-branch`), et l'environnement local est synchronisé sur `main` (`git checkout main && git pull origin main`).

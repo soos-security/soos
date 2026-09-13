@@ -6,12 +6,13 @@
 #   1. Vérifie qu'on est sur une branche dédiée (refuse 'main')
 #   2. Exécute ./save.sh --push-pr pour valider, committer et pousser
 #   3. Crée la Pull Request si elle n'existe pas encore
-#   4. Demande la review à Copilot
-#   5. Surveille les checks CI jusqu'à complétion
-#   6. Récupère et analyse les commentaires de review Copilot
-#   7. Si tous les checks sont verts :
-#      - Fusionne automatiquement la PR (--squash --delete-branch)
-#      - Bascule sur 'main' et synchronise 'git pull'
+#   4. Attend les vérifications CI (Quality, Security, PAM Docker)
+#   5. Attend l'analyse complète de GitHub Copilot (jusqu'à publication de sa review)
+#   6. Analyse les commentaires émis par Copilot :
+#      - Si des commentaires sont présents : affiche les détails et s'arrête (code 2)
+#        pour permettre à l'IA de corriger et de relancer.
+#      - Si aucun commentaire et CI 100% verte : fusionne automatiquement dans 'main'
+#        et synchronise la branche locale 'main'.
 # =============================================================================
 
 set -euo pipefail
@@ -46,12 +47,11 @@ if [[ "$CURRENT_BRANCH" == "main" || "$CURRENT_BRANCH" == "detached" ]]; then
     exit 1
 fi
 
-step "1/5 : Validation locale, commit et push"
+step "1/6 : Validation locale, commit et push"
 info "Exécution du pipeline de qualité et push de la branche '$CURRENT_BRANCH'..."
 ./save.sh --push-pr "$@"
 
-step "2/5 : Vérification ou création de la Pull Request"
-# Vérifier si une PR existe déjà pour cette branche
+step "2/6 : Vérification ou création de la Pull Request"
 PR_JSON=$(gh pr list --head "$CURRENT_BRANCH" --json number,url,state --state open 2>/dev/null || echo "[]")
 PR_NUMBER=$(echo "$PR_JSON" | grep -o '"number":[0-9]*' | head -1 | cut -d':' -f2 || true)
 
@@ -77,16 +77,13 @@ else
     success "Pull Request #$PR_NUMBER existante détectée : $PR_URL"
 fi
 
-step "3/5 : Demande de review Copilot"
-info "Sollicitation de l'analyse automatique Copilot..."
-# Demander la review à Copilot ou bot reviewer si supporté
-gh pr edit "$PR_NUMBER" --add-reviewer "copilot" 2>/dev/null || \
-gh pr edit "$PR_NUMBER" --add-reviewer "github-actions[bot]" 2>/dev/null || \
+step "3/6 : Sollicitation de la review Copilot"
+info "Sollicitation explicite de GitHub Copilot..."
 gh api "repos/:owner/:repo/pulls/$PR_NUMBER/requested_reviewers" -f 'reviewers[]=copilot' 2>/dev/null || true
-success "Demande de review transmise."
+success "Demande de review transmise à GitHub Copilot."
 
-step "4/5 : Attente des vérifications CI (GitHub Actions)"
-info "Surveillance des checks CI en temps réel pour la PR #$PR_NUMBER..."
+step "4/6 : Attente des vérifications CI (GitHub Actions)"
+info "Surveillance des 3 jobs CI pour la PR #$PR_NUMBER (Quality, Security, PAM Docker)..."
 if ! gh pr checks "$PR_NUMBER" --watch --interval 10; then
     error "Les vérifications CI ont échoué sur GitHub Actions !"
     gh pr checks "$PR_NUMBER"
@@ -94,34 +91,75 @@ if ! gh pr checks "$PR_NUMBER" --watch --interval 10; then
 fi
 success "Tous les checks CI sont passés au vert !"
 
-step "5/5 : Analyse des retours de review et Fusion vers 'main'"
-# Récupérer les commentaires de review émis sur la PR
+step "5/6 : Attente active de l'analyse de code par GitHub Copilot"
+info "Copilot analyse le code (cette analyse prend habituellement entre 2 et 6 minutes)..."
+
+MAX_WAIT_SECONDS=480 # 8 minutes maximum
+WAITED=0
+INTERVAL=15
+COPILOT_FINISHED=false
+
+while [[ $WAITED -lt $MAX_WAIT_SECONDS ]]; do
+    # 1. Vérifier si une review Copilot a été publiée
+    REVIEWS_COPILOT=$(gh api "repos/:owner/:repo/pulls/$PR_NUMBER/reviews" 2>/dev/null | grep -E '"login": "Copilot"' || true)
+
+    # 2. Vérifier si le workflow 'Running Copilot Code Review' a terminé
+    COPILOT_RUN_STATUS=$(gh run list --branch "$CURRENT_BRANCH" --json name,status,conclusion 2>/dev/null | grep -i "Copilot" || true)
+
+    if [[ -n "$REVIEWS_COPILOT" ]]; then
+        info "Review de GitHub Copilot publiée détectée !"
+        COPILOT_FINISHED=true
+        break
+    fi
+
+    if [[ -n "$COPILOT_RUN_STATUS" ]] && echo "$COPILOT_RUN_STATUS" | grep -q '"status":"completed"'; then
+        info "Le workflow GitHub Copilot s'est achevé !"
+        COPILOT_FINISHED=true
+        break
+    fi
+
+    echo -ne "  ⏳ Attente de Copilot (${WAITED}s / ${MAX_WAIT_SECONDS}s)...\r"
+    sleep $INTERVAL
+    WAITED=$((WAITED + INTERVAL))
+done
+echo ""
+
+if [[ "$COPILOT_FINISHED" == "true" ]]; then
+    success "Analyse de GitHub Copilot terminée avec succès."
+else
+    warn "Délai d'attente de Copilot dépassé (${MAX_WAIT_SECONDS}s) ou Copilot n'a pas déclenché de run."
+    warn "Poursuite de l'évaluation sur la base des commentaires existants et des tests CI."
+fi
+
+step "6/6 : Analyse des retours Copilot et Décision de Fusion"
+# Récupérer les commentaires spécifiques de review sur le code
 COMMENTS=$(gh api "repos/:owner/:repo/pulls/$PR_NUMBER/comments" 2>/dev/null || echo "[]")
-REVIEWS=$(gh api "repos/:owner/:repo/pulls/$PR_NUMBER/reviews" 2>/dev/null || echo "[]")
+COMMENT_COUNT=$(echo "$COMMENTS" | grep -c '"id":' || true)
 
-# Vérifier s'il y a des commentaires non résolus demandant des modifications
-HAS_CHANGES_REQUESTED=$(echo "$REVIEWS" | grep -c '"state":"CHANGES_REQUESTED"' || true)
-
-if [[ "$HAS_CHANGES_REQUESTED" -gt 0 ]]; then
-    warn "Copilot a demandé des modifications sur la PR #$PR_NUMBER."
-    info "Détails des commentaires à traiter :"
-    echo "$COMMENTS" | grep -E '("path"|"body")' | sed 's/^[[:space:]]*//' || true
+if [[ "$COMMENT_COUNT" -gt 0 ]]; then
+    warn "GitHub Copilot a émis $COMMENT_COUNT commentaire(s) de révision sur la PR #$PR_NUMBER !"
     echo ""
-    warn "Veuillez corriger les points relevés puis relancer scripts/pr_loop.sh."
+    info "Détails des points relevés par Copilot :"
+    echo "$COMMENTS" | grep -E '("path"|"line"|"body")' | sed 's/^[[:space:]]*//' | head -40
+    echo ""
+    warn "La PR #$PR_NUMBER NE SERA PAS fusionnée tant que ces points ne sont pas traités."
+    info "L'IA va maintenant analyser ces retours, appliquer les corrections, et relancer la boucle."
     exit 2
 fi
 
-info "Tous les feux sont au vert. Fusion de la PR #$PR_NUMBER dans 'main'..."
+success "Zéro commentaire bloquant. Les 3 vérifications CI et l'analyse de code sont 100% au vert !"
+info "Fusion automatique de la PR #$PR_NUMBER vers 'main'..."
+
 if gh pr merge "$PR_NUMBER" --squash --delete-branch --admin 2>/dev/null || gh pr merge "$PR_NUMBER" --squash --delete-branch; then
     success "═════════════════════════════════════════════════════════════"
-    success "  Pull Request #$PR_NUMBER fusionnée avec succès dans main !"
+    success "  Pull Request #$PR_NUMBER validée par Copilot et fusionnée dans main !"
     success "═════════════════════════════════════════════════════════════"
 else
-    error "Impossible de fusionner automatiquement la PR #$PR_NUMBER."
+    error "Échec de la commande gh pr merge sur la PR #$PR_NUMBER."
     exit 1
 fi
 
-info "Bascule sur la branche 'main' et synchronisation locale..."
+info "Bascule sur la branche locale 'main' et synchronisation..."
 git checkout main
 git pull origin main
-success "Branche locale 'main' synchronisée. Prêt pour la prochaine tâche !"
+success "Branche locale 'main' synchronisée. Mission accomplie !"
