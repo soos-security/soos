@@ -1,65 +1,56 @@
 # Candid Review Report
 
 - **Date**: 2026-09-13
-- **Target Branch / Commit**: `feat/daemon-skeleton`
+- **Target Branch / Commit**: `feat/pam-ipc-client`
 - **Audited Files**:
   - `Cargo.toml`
   - `Cargo.lock`
-  - `packaging/soos-daemon.service`
-  - `crates/daemon/Cargo.toml`
-  - `crates/daemon/src/lib.rs`
-  - `crates/daemon/src/main.rs`
-  - `crates/daemon/src/config.rs`
-  - `crates/daemon/src/error.rs`
-  - `crates/daemon/src/socket.rs`
-  - `crates/daemon/src/peercred.rs`
-  - `crates/daemon/src/dispatcher.rs`
-  - `crates/daemon/src/health.rs`
-  - `crates/daemon/src/logging.rs`
-  - `crates/daemon/tests/socket_tests.rs`
-  - `crates/daemon/tests/peercred_tests.rs`
-  - `crates/daemon/tests/dispatcher_tests.rs`
-  - `crates/daemon/tests/health_tests.rs`
-  - `crates/daemon/tests/systemd_test.rs`
-  - `crates/daemon/tests/logging_audit_test.rs`
+  - `crates/protocol/src/lib.rs`
+  - `crates/pam/Cargo.toml`
+  - `crates/pam/src/lib.rs`
+  - `crates/pam/src/config.rs`
+  - `crates/pam/src/ipc.rs`
+  - `crates/pam/tests/config_tests.rs`
+  - `crates/pam/tests/ipc_tests.rs`
 
 ## 1. Executive Summary
 
-Implementation of Issue #2 (`daemon` Crate — Socket Listener Skeleton) scaffolding `crates/daemon/` binary and library targets. The daemon provides the hardened local Unix Domain Socket listener at `/run/soos/daemon.sock` (mode `0660`, parent directory symlink/permission checks), kernel-enforced `SO_PEERCRED` caller UID validation, bounded concurrency (`tokio::sync::Semaphore`), per-connection timeouts, component health check readiness tracking, systemd sandboxing (`packaging/soos-daemon.service`), and zero-leakage structured logging. All tests and clippy checks pass cleanly with zero warnings.
+Implementation of Issue #3 (`pam` Crate — IPC Client Integration) introducing a synchronous, non-blocking-runtime IPC client connecting `pam_soos.so` to `/run/soos/daemon.sock`. The PAM client safely parses command-line arguments (`timeout_ms`, `event=password-failed`, `socket_path`, `service`), establishes synchronous Unix domain socket communication with hard read/write timeouts totaling 200–250ms, generates cryptographic single-use 256-bit nonces via `getrandom`, enforces fail-closed fallback to `PAM_IGNORE` under any error or timeout, and sends best-effort `EventKind::PasswordFailed` telemetry within a bounded 20ms ceiling. All 88 workspace tests pass and zero Clippy warnings are present.
 
 ## 2. Deep Reasoning Audit
 
 ### Logic & Architecture
-- [Pass]: Socket lifecycle manager validates parent directory `/run/soos` before binding: checks that it is not a symlink, not world-writable, and root-owned.
-- [Pass]: Unlinks stale socket only after verifying it is not a symlink and is a socket file.
-- [Pass]: Socket permissions are explicitly set to `0660`.
-- [Pass]: Peer validation extracts kernel credentials via `SO_PEERCRED` and cross-references against `request.uid_hint`, correctly permitting matching UIDs and root callers (UID 0), while rejecting mismatched callers with `DaemonError::UidMismatch`.
-- [Pass]: Framed requests and responses are strictly length-prefixed with big-endian `u32` and bounded by `MAX_MESSAGE_SIZE` (4096 bytes).
+- [Pass]: PAM module acts strictly as a synchronous client to the privileged daemon socket at `/run/soos/daemon.sock`.
+- [Pass]: All IPC communication is strictly framed with 4-byte big-endian length prefixes and constrained to `MAX_MESSAGE_SIZE` (4096 bytes).
+- [Pass]: Request nonces (`request_id`) are validated against incoming response payloads to prevent replay attacks and message confusion.
+- [Pass]: Authorization verdict `Verdict::Allow` maps exclusively to `PAM_SUCCESS`; all other verdicts (`Deny`, `Unavailable`, `ProtocolError`) map strictly to `PAM_IGNORE`.
+- [Pass]: Sockets are closed immediately after the exchange, preventing fd leaks in PAM-hosting processes.
 
 ### PAM Concurrency & Deadlines
-- [Pass]: PAM crate remains completely untouched and free of Tokio or asynchronous runtimes.
-- [Pass]: Privileged daemon runs Tokio with bounded concurrency capped at 8 concurrent connections by default via `tokio::sync::Semaphore`.
-- [Pass]: Connection dispatcher enforces a strict per-connection timeout (default 250ms), dropping slow or hanging connections without stalling the socket listener.
-- [Pass]: Output isolation: zero `println!` or `eprintln!` in production code; all events are handled via structured `tracing` logs.
+- [Pass]: Absolute prohibition of Tokio or asynchronous runtimes in `crates/pam` is verified.
+- [Pass]: Synchronous `std::os::unix::net::UnixStream` is configured with strict read and write timeouts matching the configured latency budget (default 250ms).
+- [Pass]: Telemetry event notification (`event=password-failed`) executes fire-and-forget under a strict 20ms ceiling without stalling the authentication stack.
+- [Pass]: Output isolation: zero `println!`, `eprintln!`, or `dbg!` in production code, guaranteeing zero display manager or TTY stream corruption.
 
 ### Panic Safety & Fallback
-- [Pass]: Production code declares `#![forbid(unsafe_code)]` in both `crates/daemon/src/lib.rs` and `src/main.rs`.
-- [Pass]: Zero `unwrap()` or `expect()` in daemon production code.
-- [Pass]: All fallible operations return explicit `Result<_, DaemonError>` using `thiserror`.
-- [Pass]: Malformed requests, timeouts, and UID mismatches fail closed with `ProtocolError` or connection teardown.
+- [Pass]: All FFI entry points (`pam_sm_authenticate`, `pam_sm_setcred`) are guarded with `catch_unwind(AssertUnwindSafe(...))` systematically returning `PAM_IGNORE`.
+- [Pass]: Zero `unwrap()`, `expect()`, `panic!()`, `todo!()`, or `unimplemented!()` in PAM production code.
+- [Pass]: Any connection refusal, timeout, malformed frame, or mismatched nonce safely degrades fail-closed to `PAM_IGNORE`.
+- [Pass]: Under no circumstances is an error converted into `PAM_SUCCESS`.
 
 ### Test Integrity & Anti-Weakening
-- [Pass]: Comprehensive unit and integration test suite authored across 6 test files (`socket_tests`, `peercred_tests`, `dispatcher_tests`, `health_tests`, `systemd_test`, `logging_audit_test`).
-- [Pass]: Tests cover all acceptance criteria: `D1` (socket permissions 0660), `D2` (`SO_PEERCRED` verification), `D3` (systemd sandbox restrictions), `D4` (health component readiness), and `D5` (log sensitive data audit).
-- [Pass]: Zero pre-existing tests were weakened, modified, or deleted. All 67 workspace tests pass.
+- [Pass]: Comprehensive unit and integration test suites authored across `crates/pam/tests/config_tests.rs` (7 tests), `crates/pam/tests/ipc_tests.rs` (10 tests), and `crates/pam/src/lib.rs` (4 tests).
+- [Pass]: Tests cover all acceptance criteria: `PA1` (daemon unreachable -> `PAM_IGNORE`), `PA2` (timeout -> `PAM_IGNORE`), `PA7` (C ABI loading), and `PA8` (non-interference).
+- [Pass]: Zero existing tests were modified or weakened; 88/88 workspace tests pass cleanly.
 
 ### Memory & Secret Bounds
-- [Pass]: Reading from socket strictly checks declared length <= 4096 bytes before allocating buffer memory, preventing memory exhaustion attacks.
-- [Pass]: Safe arithmetic (`checked_add`) used for buffer capacity calculations.
-- [Pass]: Static log audit test confirms zero logging of passwords, raw frames, embeddings, or unencrypted payloads.
+- [Pass]: Length prefix verification occurs prior to body allocation; oversized responses (> 4096 bytes) are rejected without unbounded memory consumption.
+- [Pass]: Raw C string argument reading is bounded by `MAX_ARG_LEN` (256 bytes) and capped at `MAX_ARGC` (64 arguments).
+- [Pass]: Zero passwords, embeddings, or credentials are read, transmitted, or logged.
 
 ## 3. Detailed Findings & Action Items
-- None. All architectural invariants and security constraints are fully satisfied.
+- None. All architectural invariants, security guidelines, and acceptance criteria are satisfied.
 
 ## 4. Final Verdict
 **VERDICT: APPROVED**
+

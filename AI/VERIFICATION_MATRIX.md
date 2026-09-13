@@ -44,14 +44,14 @@ This document translates the critical gating criteria from §11 of `ARCHITECTURE
 
 | # | Criterion | Test Method | Status |
 |---|---|---|---|
-| PA1 | Returns `PAM_IGNORE` when daemon is unavailable | Docker `pamtester` without daemon | ☐ Pending |
-| PA2 | Returns `PAM_IGNORE` on timeout (> 250ms) | Simulated slow daemon test | ☐ Pending |
+| PA1 | Returns `PAM_IGNORE` when daemon is unavailable | Integration test (`test_ipc_offline_daemon_returns_ignore`), Docker `pamtester` | ☑ Validated |
+| PA2 | Returns `PAM_IGNORE` on timeout (> 250ms) | Simulated slow daemon test (`test_ipc_slow_daemon_timeout`) | ☑ Validated |
 | PA3 | `catch_unwind` wraps all FFI entry points | Code review & panic tests | ☑ Validated |
 | PA4 | NEVER starts Tokio runtime | Invariant test (`test_pam_crate_has_no_tokio_dependency`) | ☑ Validated |
 | PA5 | Zero `unwrap()` or `expect()` in production code | Invariant test (`test_pam_crate_has_no_unwraps_or_expects`) | ☑ Validated |
 | PA6 | Neither reads nor transmits passwords | Invariant test & code audit | ☑ Validated |
-| PA7 | Correct C ABI (loadable by Linux-PAM) | Docker `pamtester` T1 test | ☐ Pending |
-| PA8 | Absent module = PAM authentication remains functional | Docker `pamtester` T3 test | ☐ Pending |
+| PA7 | Correct C ABI (loadable by Linux-PAM) | Docker `pamtester` T1 test & ABI symbol verification | ☑ Validated |
+| PA8 | Absent module = PAM authentication remains functional | Docker `pamtester` T3 test | ☑ Validated |
 
 ---
 

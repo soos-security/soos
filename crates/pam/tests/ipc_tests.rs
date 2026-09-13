@@ -1,0 +1,363 @@
+//! Contractual integration tests for PAM synchronous IPC client.
+//!
+//! Validates:
+//! - PA1: Returns PAM_IGNORE when daemon is unavailable.
+//! - PA2: Returns PAM_IGNORE on timeout (> timeout_ms).
+//! - Fail-closed degradation for all errors and anomalies.
+//! - Request ID verification (anti-replay binding).
+//! - Password-failed event emission (20ms bounded budget).
+
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    reason = "Contractual integration tests use assertions, unwrap, and expect"
+)]
+
+use pam_soos::{pam_sm_authenticate, pam_sm_setcred};
+use soos_protocol::codec::{decode, encode};
+use soos_protocol::types::{
+    Event, EventKind, ReasonClass, Request, Response, Verdict, CURRENT_VERSION, MAX_MESSAGE_SIZE,
+};
+use std::ffi::CString;
+use std::io::{Read, Write};
+use std::os::unix::net::UnixListener;
+use std::ptr;
+use std::thread;
+use std::time::{Duration, Instant};
+use tempfile::tempdir;
+
+const PAM_SUCCESS: i32 = 0;
+const PAM_IGNORE: i32 = 25;
+
+/// Helper to format PAM argv with custom socket path and options.
+fn make_pam_args(args: &[&str]) -> (Vec<CString>, Vec<*const u8>) {
+    let cstrings: Vec<CString> = args
+        .iter()
+        .map(|s| CString::new(*s).expect("valid cstring"))
+        .collect();
+    let ptrs: Vec<*const u8> = cstrings.iter().map(|cs| cs.as_ptr().cast::<u8>()).collect();
+    (cstrings, ptrs)
+}
+
+/// PA1: PAM returns PAM_IGNORE when daemon socket is unreachable.
+#[test]
+fn test_ipc_offline_daemon_returns_ignore() {
+    let tmp = tempdir().expect("tempdir created");
+    let sock_path = tmp.path().join("nonexistent_daemon.sock");
+    let sock_arg = format!("socket_path={}", sock_path.display());
+
+    let (_storage, ptrs) = make_pam_args(&[&sock_arg, "timeout_ms=100"]);
+
+    let start = Instant::now();
+    let code = pam_sm_authenticate(ptr::null_mut(), 0, ptrs.len() as i32, ptrs.as_ptr());
+    let elapsed = start.elapsed();
+
+    assert_eq!(code, PAM_IGNORE);
+    // Offline connect failure must resolve promptly
+    assert!(elapsed < Duration::from_millis(200));
+}
+
+/// PA2: PAM returns PAM_IGNORE when daemon hangs beyond timeout deadline.
+#[test]
+fn test_ipc_slow_daemon_timeout() {
+    let tmp = tempdir().expect("tempdir created");
+    let sock_path = tmp.path().join("slow_daemon.sock");
+    let listener = UnixListener::bind(&sock_path).expect("bound test socket");
+
+    let server_handle = thread::spawn(move || {
+        if let Ok((mut stream, _)) = listener.accept() {
+            // Read 4-byte length prefix + request body
+            let mut len_buf = [0u8; 4];
+            let _ = stream.read_exact(&mut len_buf);
+            let size = u32::from_be_bytes(len_buf) as usize;
+            let mut body = vec![0u8; size];
+            let _ = stream.read_exact(&mut body);
+
+            // Intentionally sleep beyond PAM client timeout (100ms)
+            thread::sleep(Duration::from_millis(300));
+        }
+    });
+
+    let sock_arg = format!("socket_path={}", sock_path.display());
+    let (_storage, ptrs) = make_pam_args(&[&sock_arg, "timeout_ms=100"]);
+
+    let start = Instant::now();
+    let code = pam_sm_authenticate(ptr::null_mut(), 0, ptrs.len() as i32, ptrs.as_ptr());
+    let elapsed = start.elapsed();
+
+    assert_eq!(code, PAM_IGNORE);
+    // Latency must respect the client's configured timeout (~100ms), well below 300ms
+    assert!(elapsed < Duration::from_millis(250));
+
+    let _ = server_handle.join();
+}
+
+/// Nominal authentication success: daemon renders Allow -> PAM returns PAM_SUCCESS.
+#[test]
+fn test_ipc_nominal_allow_returns_success() {
+    let tmp = tempdir().expect("tempdir created");
+    let sock_path = tmp.path().join("auth_allow.sock");
+    let listener = UnixListener::bind(&sock_path).expect("bound test socket");
+
+    let server_handle = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("client connected");
+
+        // Read request length
+        let mut len_buf = [0u8; 4];
+        stream.read_exact(&mut len_buf).expect("read length");
+        let size = u32::from_be_bytes(len_buf) as usize;
+
+        let mut full_req = Vec::with_capacity(size + 4);
+        full_req.extend_from_slice(&len_buf);
+        let mut body = vec![0u8; size];
+        stream.read_exact(&mut body).expect("read body");
+        full_req.extend_from_slice(&body);
+
+        let req: Request = decode(&full_req).expect("decoded request");
+
+        // Reply with Verdict::Allow bound to req.request_id
+        let resp = Response {
+            version: CURRENT_VERSION,
+            request_id: req.request_id,
+            verdict: Verdict::Allow,
+            reason_class: ReasonClass::FaceMatch,
+            issued_monotonic_ns: 1000,
+            expires_monotonic_ns: 2000,
+        };
+        let encoded = encode(&resp).expect("encoded response");
+        stream.write_all(&encoded).expect("wrote response");
+    });
+
+    let sock_arg = format!("socket_path={}", sock_path.display());
+    let (_storage, ptrs) = make_pam_args(&[&sock_arg, "timeout_ms=250"]);
+
+    let code = pam_sm_authenticate(ptr::null_mut(), 0, ptrs.len() as i32, ptrs.as_ptr());
+    assert_eq!(code, PAM_SUCCESS);
+
+    let _ = server_handle.join();
+}
+
+/// Authentication denial: daemon renders Deny -> PAM returns PAM_IGNORE.
+#[test]
+fn test_ipc_deny_returns_ignore() {
+    let tmp = tempdir().expect("tempdir created");
+    let sock_path = tmp.path().join("auth_deny.sock");
+    let listener = UnixListener::bind(&sock_path).expect("bound test socket");
+
+    let server_handle = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("client connected");
+
+        let mut len_buf = [0u8; 4];
+        stream.read_exact(&mut len_buf).expect("read length");
+        let size = u32::from_be_bytes(len_buf) as usize;
+
+        let mut full_req = Vec::with_capacity(size + 4);
+        full_req.extend_from_slice(&len_buf);
+        let mut body = vec![0u8; size];
+        stream.read_exact(&mut body).expect("read body");
+        full_req.extend_from_slice(&body);
+
+        let req: Request = decode(&full_req).expect("decoded request");
+
+        let resp = Response {
+            version: CURRENT_VERSION,
+            request_id: req.request_id,
+            verdict: Verdict::Deny,
+            reason_class: ReasonClass::ScoreBelowThreshold,
+            issued_monotonic_ns: 1000,
+            expires_monotonic_ns: 2000,
+        };
+        let encoded = encode(&resp).expect("encoded response");
+        stream.write_all(&encoded).expect("wrote response");
+    });
+
+    let sock_arg = format!("socket_path={}", sock_path.display());
+    let (_storage, ptrs) = make_pam_args(&[&sock_arg, "timeout_ms=250"]);
+
+    let code = pam_sm_authenticate(ptr::null_mut(), 0, ptrs.len() as i32, ptrs.as_ptr());
+    assert_eq!(code, PAM_IGNORE);
+
+    let _ = server_handle.join();
+}
+
+/// Daemon unavailable: daemon renders Unavailable -> PAM returns PAM_IGNORE.
+#[test]
+fn test_ipc_unavailable_returns_ignore() {
+    let tmp = tempdir().expect("tempdir created");
+    let sock_path = tmp.path().join("auth_unavail.sock");
+    let listener = UnixListener::bind(&sock_path).expect("bound test socket");
+
+    let server_handle = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("client connected");
+
+        let mut len_buf = [0u8; 4];
+        stream.read_exact(&mut len_buf).expect("read length");
+        let size = u32::from_be_bytes(len_buf) as usize;
+
+        let mut full_req = Vec::with_capacity(size + 4);
+        full_req.extend_from_slice(&len_buf);
+        let mut body = vec![0u8; size];
+        stream.read_exact(&mut body).expect("read body");
+        full_req.extend_from_slice(&body);
+
+        let req: Request = decode(&full_req).expect("decoded request");
+
+        let resp = Response {
+            version: CURRENT_VERSION,
+            request_id: req.request_id,
+            verdict: Verdict::Unavailable,
+            reason_class: ReasonClass::CameraUnavailable,
+            issued_monotonic_ns: 1000,
+            expires_monotonic_ns: 2000,
+        };
+        let encoded = encode(&resp).expect("encoded response");
+        stream.write_all(&encoded).expect("wrote response");
+    });
+
+    let sock_arg = format!("socket_path={}", sock_path.display());
+    let (_storage, ptrs) = make_pam_args(&[&sock_arg, "timeout_ms=250"]);
+
+    let code = pam_sm_authenticate(ptr::null_mut(), 0, ptrs.len() as i32, ptrs.as_ptr());
+    assert_eq!(code, PAM_IGNORE);
+
+    let _ = server_handle.join();
+}
+
+/// Request ID mismatch: daemon returns response with incorrect nonce -> rejected with PAM_IGNORE.
+#[test]
+fn test_ipc_request_id_mismatch_returns_ignore() {
+    let tmp = tempdir().expect("tempdir created");
+    let sock_path = tmp.path().join("auth_mismatch.sock");
+    let listener = UnixListener::bind(&sock_path).expect("bound test socket");
+
+    let server_handle = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("client connected");
+
+        let mut len_buf = [0u8; 4];
+        stream.read_exact(&mut len_buf).expect("read length");
+        let size = u32::from_be_bytes(len_buf) as usize;
+        let mut body = vec![0u8; size];
+        stream.read_exact(&mut body).expect("read body");
+
+        // Use arbitrary mismatched nonce
+        let mismatched_id = [0xAAu8; 32];
+        let resp = Response {
+            version: CURRENT_VERSION,
+            request_id: mismatched_id,
+            verdict: Verdict::Allow, // Even if Allow, nonce mismatch must reject!
+            reason_class: ReasonClass::FaceMatch,
+            issued_monotonic_ns: 1000,
+            expires_monotonic_ns: 2000,
+        };
+        let encoded = encode(&resp).expect("encoded response");
+        stream.write_all(&encoded).expect("wrote response");
+    });
+
+    let sock_arg = format!("socket_path={}", sock_path.display());
+    let (_storage, ptrs) = make_pam_args(&[&sock_arg, "timeout_ms=250"]);
+
+    let code = pam_sm_authenticate(ptr::null_mut(), 0, ptrs.len() as i32, ptrs.as_ptr());
+    assert_eq!(code, PAM_IGNORE);
+
+    let _ = server_handle.join();
+}
+
+/// Oversized payload rejection: daemon writes length prefix > 4096 bytes -> rejected with PAM_IGNORE.
+#[test]
+fn test_ipc_oversized_response_rejected() {
+    let tmp = tempdir().expect("tempdir created");
+    let sock_path = tmp.path().join("auth_oversized.sock");
+    let listener = UnixListener::bind(&sock_path).expect("bound test socket");
+
+    let server_handle = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("client connected");
+
+        let mut len_buf = [0u8; 4];
+        stream.read_exact(&mut len_buf).expect("read length");
+        let size = u32::from_be_bytes(len_buf) as usize;
+        let mut body = vec![0u8; size];
+        stream.read_exact(&mut body).expect("read body");
+
+        // Send declared length prefix of 8192 bytes (> MAX_MESSAGE_SIZE 4096)
+        let oversized_len = (MAX_MESSAGE_SIZE as u32 * 2).to_be_bytes();
+        stream.write_all(&oversized_len).expect("wrote prefix");
+    });
+
+    let sock_arg = format!("socket_path={}", sock_path.display());
+    let (_storage, ptrs) = make_pam_args(&[&sock_arg, "timeout_ms=250"]);
+
+    let code = pam_sm_authenticate(ptr::null_mut(), 0, ptrs.len() as i32, ptrs.as_ptr());
+    assert_eq!(code, PAM_IGNORE);
+
+    let _ = server_handle.join();
+}
+
+/// Telemetry event: `event=password-failed` mode transmits Event to daemon within 20ms and returns PAM_IGNORE.
+#[test]
+fn test_ipc_password_failed_event_notification() {
+    let tmp = tempdir().expect("tempdir created");
+    let sock_path = tmp.path().join("pw_failed.sock");
+    let listener = UnixListener::bind(&sock_path).expect("bound test socket");
+
+    let server_handle = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("client connected");
+
+        let mut len_buf = [0u8; 4];
+        stream.read_exact(&mut len_buf).expect("read length");
+        let size = u32::from_be_bytes(len_buf) as usize;
+
+        let mut full_buf = Vec::with_capacity(size + 4);
+        full_buf.extend_from_slice(&len_buf);
+        let mut body = vec![0u8; size];
+        stream.read_exact(&mut body).expect("read body");
+        full_buf.extend_from_slice(&body);
+
+        let event: Event = decode(&full_buf).expect("decoded event");
+        assert_eq!(event.version, CURRENT_VERSION);
+        assert_eq!(event.kind, EventKind::PasswordFailed);
+        assert_eq!(event.service, "pam_soos");
+    });
+
+    let sock_arg = format!("socket_path={}", sock_path.display());
+    let (_storage, ptrs) = make_pam_args(&[&sock_arg, "event=password-failed", "timeout_ms=20"]);
+
+    let start = Instant::now();
+    let code = pam_sm_authenticate(ptr::null_mut(), 0, ptrs.len() as i32, ptrs.as_ptr());
+    let elapsed = start.elapsed();
+
+    assert_eq!(code, PAM_IGNORE);
+    // Event sending must be fast and bounded to 20ms budget
+    assert!(elapsed < Duration::from_millis(50));
+
+    let _ = server_handle.join();
+}
+
+/// Telemetry event: offline daemon when `event=password-failed` never blocks or panics.
+#[test]
+fn test_ipc_password_failed_daemon_offline_returns_ignore() {
+    let tmp = tempdir().expect("tempdir created");
+    let sock_path = tmp.path().join("pw_failed_offline.sock");
+    let sock_arg = format!("socket_path={}", sock_path.display());
+
+    let (_storage, ptrs) = make_pam_args(&[&sock_arg, "event=password-failed", "timeout_ms=20"]);
+
+    let start = Instant::now();
+    let code = pam_sm_authenticate(ptr::null_mut(), 0, ptrs.len() as i32, ptrs.as_ptr());
+    let elapsed = start.elapsed();
+
+    assert_eq!(code, PAM_IGNORE);
+    assert!(elapsed < Duration::from_millis(50));
+}
+
+/// Credential management: `pam_sm_setcred` always returns PAM_IGNORE.
+#[test]
+fn test_setcred_always_returns_ignore() {
+    let code = pam_sm_setcred(ptr::null_mut(), 0, 0, ptr::null());
+    assert_eq!(code, PAM_IGNORE);
+}

@@ -1,15 +1,15 @@
-# Plan Evaluation Report — Issue #2: `daemon` Crate — Socket Listener Skeleton
+# Plan Evaluation Report — Issue #3: PAM Module — IPC Client Integration
 
 - **Evaluator**: Plan Evaluator Sub-Agent (`plan-evaluator`)
 - **Date**: 2026-09-13
-- **Target Plan**: `implementation_plan.md` for Issue #2
+- **Target Plan**: Implementation plan for Issue #3 (`feat/pam-ipc-client`)
 - **References**: `AI/ARCHITECTURE.md`, `AI/DECISIONS.md`, `AI/BACKLOG.md`, `AI/VERIFICATION_MATRIX.md`, `Docs/SECURITY_AND_QUALITY_GUIDELINES.md`, `AGENTS.md`
 
 ---
 
 ## 1. Executive Summary
 
-The proposed implementation plan addresses all 7 sub-issues of Issue #2 (`#2.1` to `#2.7`) in `AI/BACKLOG.md`, setting up the privileged daemon binary crate (`soos-daemon`) with a secure local Unix Domain Socket listener, strict `SO_PEERCRED` kernel credential verification, bounded concurrency, per-connection timeouts, health monitoring, systemd sandboxing, and zero-leakage structured logging.
+The proposed implementation plan addresses all four sub-issues of Issue #3 (`#3.1` to `#3.4`) in `AI/BACKLOG.md`, providing a fully synchronous, panic-safe, bounded IPC client for `pam_soos.so`. It enables secure communication with the privileged daemon (`soos-daemon`), strictly obeys the 200–250ms latency budget, implements best-effort `event=password-failed` notification within a 20ms ceiling, guarantees fail-closed `PAM_IGNORE` fallback under any error or timeout, and validates end-to-end Linux-PAM compatibility via Dockerized `pamtester` tests.
 
 ---
 
@@ -18,54 +18,54 @@ The proposed implementation plan addresses all 7 sub-issues of Issue #2 (`#2.1` 
 ### Pillar 1: Architectural Alignment & Threat Model
 - **Evaluation**: PASS
 - **Analysis**:
-  - The plan enforces the clear separation between the unprivileged PAM module (`pam_soos.so`) and the privileged root daemon (`soos-daemon`).
-  - UDS path is `/run/soos/daemon.sock`, configured with permissions `0660` and owned by `root:soos`.
-  - The daemon strictly verifies the parent directory `/run/soos`: checks that it is not a symlink, not world-writable, and root-owned.
-  - Stale sockets are safely unlinked only after `lstat` confirms they are socket nodes and not symlinks.
-  - Incoming connections are verified via `SO_PEERCRED` (`getsockopt`) against `request.uid_hint` (or root caller UID 0).
-  - No abstract sockets or world-writable modes are permitted.
+  - Unprivileged PAM module (`pam_soos.so`) acts strictly as a synchronous IPC client to `/run/soos/daemon.sock`.
+  - The module neither executes AI inference nor accesses camera hardware; all privilege and hardware interactions remain isolated inside `soos-daemon`.
+  - UID hint is provided as an assertion, while the daemon independently enforces `SO_PEERCRED` validation.
+  - Sockets are closed immediately following single-use request/response exchanges.
 
 ### Pillar 2: PAM Real-Time Latency & Concurrency
 - **Evaluation**: PASS
 - **Analysis**:
-  - While PAM remains strictly synchronous standard-library-only, the daemon runs Tokio to dispatch connections asynchronously and efficiently without blocking the OS.
-  - Concurrency is capped with `tokio::sync::Semaphore` (default: 8 concurrent connections) to prevent resource exhaustion or DoS attacks.
-  - Per-connection timeout (default 250ms) is enforced to ensure responsiveness.
-  - No `println!` or `dbg!` macro in production code; structured logging via `tracing` is used exclusively.
+  - Module uses standard library synchronous blocking primitives (`std::os::unix::net::UnixStream`); zero Tokio runtime.
+  - Strict read/write timeouts (default 250ms configurable via `timeout_ms=...`) enforce the latency budget.
+  - `event=password-failed` enforces a hard 20ms timeout ceiling and runs fire-and-forget without blocking the PAM stack.
+  - Zero stdout/stderr stream pollution (`println!`, `eprintln!`, `dbg!`), ensuring display manager and TTY stability.
 
 ### Pillar 3: Panic Safety & Fail-Closed Behavior
 - **Evaluation**: PASS
 - **Analysis**:
-  - Production code strictly avoids `unwrap()`, `expect()`, `panic!()`, `todo!()`, or `unimplemented!()`.
-  - Comprehensive error handling is encapsulated in `DaemonError` with `thiserror`.
-  - Fallible calls return explicit `Result` types.
-  - Corrupted frames, oversized payloads (>4096 bytes), timeouts, and mismatched UIDs fail closed and emit appropriate error classes.
+  - Every FFI boundary (`pam_sm_authenticate`, `pam_sm_setcred`) is wrapped with `catch_unwind(AssertUnwindSafe(...))` systematically returning `PAM_IGNORE`.
+  - Zero `unwrap()`, `expect()`, `panic!()`, `todo!()`, or `unimplemented!()` in production code.
+  - Any connection failure, codec error, response mismatch, or timeout degrades fail-closed to `PAM_IGNORE`.
+  - Under no circumstances does an error convert into `PAM_SUCCESS`.
 
 ### Pillar 4: Dependency Isolation & Banned Crates
 - **Evaluation**: PASS
 - **Analysis**:
-  - Crates used: `tokio`, `nix`, `tracing`, `tracing-subscriber`, `thiserror`, `soos-protocol`, `soos-policy`.
-  - Absolute prohibition against `opencv` and `nokhwa` is preserved.
-  - Workspace lints (`[lints] workspace = true`) are inherited.
-  - Safe Rust is prioritized throughout.
+  - Dependencies are constrained to `soos-protocol`, `getrandom`, and `libc`.
+  - Zero Tokio dependency in `crates/pam/Cargo.toml`.
+  - Zero `opencv` or `nokhwa` across the workspace.
+  - Inherits workspace lints (`[lints] workspace = true`).
 
 ### Pillar 5: Data Confidentiality & Zeroization
 - **Evaluation**: PASS
 - **Analysis**:
-  - No passwords, embeddings, or raw frames exist in the IPC schema or daemon listener skeleton.
-  - Structured logging is audited to confirm that no sensitive parameters or payloads are recorded. Only non-sensitive audit metadata (peer_uid, pid, verdict, reason_class, latency) is logged.
+  - The module neither inspects, stores, nor transmits passwords over IPC or across any boundary.
+  - Cryptographic `request_id` (256-bit nonce) is generated via `getrandom`.
+  - Response objects implement `zeroize::Zeroize` to wipe sensitive memory upon drop.
 
 ### Pillar 6: Test Integrity & TDD Contracts
 - **Evaluation**: PASS
 - **Analysis**:
-  - Contractual test suite designed in Phase 2 before production implementation.
-  - Tests cover all acceptance criteria in `AI/VERIFICATION_MATRIX.md`:
-    - `D1`: Socket creation in `/run/soos/` with `0660` permissions (`socket_tests.rs`).
-    - `D2`: `SO_PEERCRED` verified on every connection (`peercred_tests.rs`).
-    - `D3`: Systemd unit with sandbox restrictions (`systemd_test.rs`).
-    - `D4`: Health check component readiness reporting (`health_tests.rs`).
-    - `D5`: Zero sensitive information emitted in logs (`logging_audit_test.rs`).
-  - Strict test integrity invariant is upheld: tests are immutable contracts that will not be weakened.
+  - Comprehensive contract tests authored in Phase 2 before production code.
+  - Unit and integration tests cover:
+    - `PA1`: Module returns `PAM_IGNORE` when daemon is offline.
+    - `PA2`: Module returns `PAM_IGNORE` on timeout (> 250ms).
+    - `PA7`: C ABI loading compatibility in Linux-PAM (`pamtester`).
+    - `PA8`: Absence of module retains functional PAM authentication.
+    - Password-failed event firing within 20ms budget.
+    - Replay prevention via request ID binding.
+  - Tests represent immutable contracts with zero weakening permitted.
 
 ---
 

@@ -118,24 +118,24 @@ Pure business logic crate: takes structured inputs (score, PAD result, UID conte
 
 #### Sub-issues:
 
-- **#3.1** — Implement synchronous IPC client in `crates/pam/src/ipc.rs`
+- [x] **#3.1** — Implement synchronous IPC client in `crates/pam/src/ipc.rs`
   - `std::os::unix::net::UnixStream::connect()` with `set_read_timeout` / `set_write_timeout`
   - Total budget: 200–250ms (configurable via PAM module argument `timeout_ms=250`)
   - Generate `request_id` via `getrandom` crate (no openssl)
   - Send framed `Request`, receive framed `Response`
   - Close socket immediately after response
 
-- **#3.2** — Integrate IPC client into `pam_sm_authenticate`
+- [x] **#3.2** — Integrate IPC client into `pam_sm_authenticate`
   - Parse `timeout_ms` from `argv`
   - Connect → send AuthAttempt → receive verdict → map to `PAM_SUCCESS` or `PAM_IGNORE`
   - All errors (connect fail, timeout, malformed response) → `PAM_IGNORE`
 
-- **#3.3** — Implement `event=password-failed` mode
+- [x] **#3.3** — Implement `event=password-failed` mode
   - When `argv` contains `event=password-failed`: send `Event::PasswordFailed` to daemon (best-effort, fire-and-forget)
   - 20ms timeout, zero blocking of PAM stack
   - Used in 3rd position of PAM stack (after `pam_unix` failure)
 
-- **#3.4** — Dockerized pamtester validation
+- [x] **#3.4** — Dockerized pamtester validation
   - T1: `.so` loadable by Linux-PAM → `pamtester` reports module found
   - T2: `pam_sm_authenticate` returns `PAM_IGNORE` when daemon is offline → password prompt works
   - T3: Removing `.so` from PAM config → auth still works (non-interference)
