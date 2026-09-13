@@ -20,6 +20,7 @@ Previously, the automation script could evaluate review status prematurely if a 
 2. **Commit-Specific Await**:
    - Explicitly monitors the GitHub Actions Copilot workflow until it finishes for `TARGET_HEAD_SHA`.
    - Polls `/pulls/$PR_NUMBER/reviews` specifically matching `commit_id == TARGET_HEAD_SHA`.
+   - Polls `/issues/$PR_NUMBER/comments` for Copilot conversational reviews matching `TARGET_HEAD_SHA` (or short SHA) answering `@copilot review`.
    - While any Copilot workflow run is `queued` or `in_progress`, the script remains in active wait state.
 3. **Strict Quality Gating**:
    - Inspects diff comments (`/pulls/$PR_NUMBER/comments`).

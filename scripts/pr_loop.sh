@@ -17,6 +17,7 @@
 # =============================================================================
 
 set -euo pipefail
+export GH_PAGER=cat
 
 # Terminal Colors
 if [[ -t 1 ]]; then
@@ -140,6 +141,7 @@ WAITED=0
 INTERVAL=10
 COPILOT_FINISHED=false
 MINIMUM_WAIT_SECONDS=40 # Allow at least 40s for Copilot run to trigger
+TARGET_SHORT_SHA=$(echo "$TARGET_HEAD_SHA" | cut -c1-7)
 
 while [[ $WAITED -lt $MAX_WAIT_SECONDS ]]; do
     # Check all Copilot workflow runs on the repository for this branch
@@ -155,7 +157,15 @@ while [[ $WAITED -lt $MAX_WAIT_SECONDS ]]; do
     REVIEWS_JSON=$(gh api "repos/:owner/:repo/pulls/$PR_NUMBER/reviews" 2>/dev/null || echo "[]")
     MATCHING_REVIEW=$(echo "$REVIEWS_JSON" | jq -r ".[] | select(.user.login | test(\"Copilot\"; \"i\")) | select(.commit_id == \"$TARGET_HEAD_SHA\")" 2>/dev/null || true)
     
-    if [[ -n "$ACTIVE_COPILOT_RUNS" ]]; then
+    # Check if Copilot commented directly in PR conversation (issue comments)
+    ISSUE_COMMENTS_JSON=$(gh api "repos/:owner/:repo/issues/$PR_NUMBER/comments" 2>/dev/null || echo "[]")
+    MATCHING_ISSUE_COMMENT=$(echo "$ISSUE_COMMENTS_JSON" | jq -r ".[] | select(.user.login | test(\"Copilot\"; \"i\")) | select((.body | test(\"$TARGET_SHORT_SHA|$TARGET_HEAD_SHA\"; \"i\")) or (.body | test(\"Reviewed the latest commit\"; \"i\"))) | .body" 2>/dev/null | tail -1 || true)
+
+    if [[ -n "$MATCHING_ISSUE_COMMENT" ]]; then
+        info "GitHub Copilot posted a review response in PR comments!"
+        COPILOT_FINISHED=true
+        break
+    elif [[ -n "$ACTIVE_COPILOT_RUNS" ]]; then
         # Copilot is currently active, keep waiting
         echo -ne "  ⏳ Copilot analysis actively running (${WAITED}s / ${MAX_WAIT_SECONDS}s)...\r"
     elif [[ -n "$MATCHING_REVIEW" ]]; then
@@ -217,6 +227,10 @@ if [[ -n "$MATCHING_REVIEW" ]]; then
     REVIEW_BODY=$(echo "$MATCHING_REVIEW" | jq -r '.body // empty')
 fi
 
+# 4. Check Copilot issue comment in PR conversation
+ISSUE_COMMENTS_JSON=$(gh api "repos/:owner/:repo/issues/$PR_NUMBER/comments" 2>/dev/null || echo "[]")
+MATCHING_ISSUE_COMMENT=$(echo "$ISSUE_COMMENTS_JSON" | jq -r ".[] | select(.user.login | test(\"Copilot\"; \"i\")) | select((.body | test(\"$TARGET_SHORT_SHA|$TARGET_HEAD_SHA\"; \"i\")) or (.body | test(\"Reviewed the latest commit\"; \"i\"))) | .body" 2>/dev/null | tail -1 || true)
+
 # Check for recommendations or changes
 CHANGES_REQUESTED=false
 
@@ -238,6 +252,18 @@ fi
 if echo "$REVIEW_BODY" | grep -qiE "(Changes recommended|Critical issues|Moderate issues|Suppressed comments|Changes requested)"; then
     info "Review body indicates changes are recommended or issues found."
     CHANGES_REQUESTED=true
+fi
+
+if [[ -n "$MATCHING_ISSUE_COMMENT" ]]; then
+    info "Copilot conversation comment: $(echo "$MATCHING_ISSUE_COMMENT" | head -2)"
+    if echo "$MATCHING_ISSUE_COMMENT" | grep -qiE "(didn't find|didn’t find|no additional blocking|looks good|no issues found)"; then
+        info "Copilot explicitly confirmed no blocking issues in conversation comment!"
+    elif echo "$MATCHING_ISSUE_COMMENT" | grep -qiE "(blocking issue|changes recommended|critical issue|moderate issue|changes requested|please fix)"; then
+        info "Copilot conversation comment reported issues to resolve."
+        CHANGES_REQUESTED=true
+        REVIEW_BODY="${REVIEW_BODY}
+${MATCHING_ISSUE_COMMENT}"
+    fi
 fi
 
 if [[ "$CHANGES_REQUESTED" == "true" ]]; then
