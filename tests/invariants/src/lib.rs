@@ -44,6 +44,7 @@ mod tests {
             "biometric-store",
             "evidence-store",
             "enrollment-cli",
+            "admin-cli",
         ];
 
         for crate_name in business_crates {

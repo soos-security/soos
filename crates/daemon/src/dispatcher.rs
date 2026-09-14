@@ -13,14 +13,17 @@ use crate::health::HealthState;
 use crate::peercred::{get_peer_credentials, verify_peer_credentials};
 use soos_protocol::codec::{decode, encode};
 use soos_protocol::types::{
-    ReasonClass, Request, Response, Verdict, CURRENT_VERSION, MAX_MESSAGE_SIZE,
+    ReasonClass, Request, RequestKind, Response, StatusResponse, Verdict, CURRENT_VERSION,
+    MAX_MESSAGE_SIZE,
 };
+use std::time::Instant;
 
 /// Connection dispatcher managing concurrent incoming client requests.
 pub struct ConnectionDispatcher {
     config: DispatcherConfig,
     health: Arc<HealthState>,
     semaphore: Arc<Semaphore>,
+    start_time: Instant,
 }
 
 impl ConnectionDispatcher {
@@ -31,6 +34,7 @@ impl ConnectionDispatcher {
             config,
             health,
             semaphore,
+            start_time: Instant::now(),
         }
     }
 
@@ -109,6 +113,25 @@ impl ConnectionDispatcher {
                 return Err(DaemonError::Codec(err));
             }
         };
+
+        // Step 5b: Diagnostic status query (non-biometric)
+        if req.kind == RequestKind::Status {
+            let status = self.health.snapshot();
+            let status_resp = StatusResponse {
+                version: CURRENT_VERSION,
+                socket_ready: status.socket_ready,
+                camera_ready: status.camera_ready,
+                models_verified: status.models_verified,
+                is_healthy: status.is_healthy,
+                pid: std::process::id(),
+                uptime_secs: self.start_time.elapsed().as_secs(),
+            };
+            let encoded_resp = encode(&status_resp)?;
+            stream.write_all(&encoded_resp).await?;
+            stream.flush().await?;
+            debug!("Delivered diagnostic status response");
+            return Ok(());
+        }
 
         // Step 6: Verify peer credentials against request
         let (verdict, reason_class) = match verify_peer_credentials(&peer, req.uid_hint) {

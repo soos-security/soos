@@ -31,6 +31,6 @@ pub mod types;
 
 pub use codec::{decode, encode};
 pub use types::{
-    Event, EventKind, ReasonClass, Request, RequestKind, Response, Verdict, CURRENT_VERSION,
-    MAX_MESSAGE_SIZE, MAX_SERVICE_LEN, REQUEST_ID_LEN,
+    Event, EventKind, ReasonClass, Request, RequestKind, Response, StatusResponse, Verdict,
+    CURRENT_VERSION, MAX_MESSAGE_SIZE, MAX_SERVICE_LEN, REQUEST_ID_LEN,
 };

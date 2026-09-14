@@ -1,0 +1,31 @@
+[package]
+name = "soos-admin-cli"
+description = "Non-biometric diagnostic and administrative CLI tool for soos local biometric PAM"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "soos-admin"
+path = "src/main.rs"
+
+[lib]
+name = "soos_admin_cli"
+path = "src/lib.rs"
+
+[dependencies]
+clap = { workspace = true }
+thiserror = { workspace = true }
+nix = { workspace = true }
+libc = { workspace = true }
+getrandom = { workspace = true }
+serde = { workspace = true }
+soos-protocol = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true
