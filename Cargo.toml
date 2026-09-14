@@ -10,6 +10,7 @@ members = [
     "crates/vision",
     "crates/biometric-store",
     "crates/evidence-store",
+    "crates/enrollment-cli",
     "tests/invariants",
 ]
 
@@ -63,6 +64,9 @@ jpeg-decoder = { version = "0.3", default-features = false }
 aes-gcm = "0.10"
 ciborium = "0.2"
 
+# CLI argument parsing
+clap = { version = "4", features = ["derive"] }
+
 # Internal workspace crates
 soos-protocol = { path = "crates/protocol", version = "0.1.0" }
 soos-policy = { path = "crates/policy", version = "0.1.0" }
@@ -72,6 +76,7 @@ soos-inference-ort = { path = "crates/inference-ort", version = "0.1.0" }
 soos-vision = { path = "crates/vision", version = "0.1.0" }
 soos-biometric-store = { path = "crates/biometric-store", version = "0.1.0" }
 soos-evidence-store = { path = "crates/evidence-store", version = "0.1.0" }
+soos-enrollment-cli = { path = "crates/enrollment-cli", version = "0.1.0" }
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"

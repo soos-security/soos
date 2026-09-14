@@ -1,68 +1,66 @@
 # Candid Review Report
 
 - **Date**: 2026-09-14
-- **Target Branch / Commit**: `feat/evidence-store`
+- **Target Branch / Commit**: `feat/enrollment-cli`
 - **Audited Files**:
   - `Cargo.toml`
   - `Cargo.lock`
-  - `crates/evidence-store/Cargo.toml`
-  - `crates/evidence-store/src/lib.rs`
-  - `crates/evidence-store/src/config.rs`
-  - `crates/evidence-store/src/crypto.rs`
-  - `crates/evidence-store/src/error.rs`
-  - `crates/evidence-store/src/snapshot.rs`
-  - `crates/evidence-store/src/store.rs`
-  - `crates/evidence-store/tests/opt_in_tests.rs`
-  - `crates/evidence-store/tests/permissions_tests.rs`
-  - `crates/evidence-store/tests/encryption_tests.rs`
-  - `crates/evidence-store/tests/retention_tests.rs`
-  - `crates/evidence-store/tests/daily_cap_tests.rs`
-  - `crates/evidence-store/tests/zero_network_tests.rs`
-  - `crates/evidence-store/tests/proptest_suite.rs`
+  - `crates/enrollment-cli/Cargo.toml`
+  - `crates/enrollment-cli/src/lib.rs`
+  - `crates/enrollment-cli/src/main.rs`
+  - `crates/enrollment-cli/src/args.rs`
+  - `crates/enrollment-cli/src/error.rs`
+  - `crates/enrollment-cli/src/quality.rs`
+  - `crates/enrollment-cli/src/service.rs`
+  - `crates/enrollment-cli/src/shred.rs`
+  - `crates/enrollment-cli/tests/scaffold_tests.rs`
+  - `crates/enrollment-cli/tests/root_check_tests.rs`
+  - `crates/enrollment-cli/tests/quality_tests.rs`
+  - `crates/enrollment-cli/tests/shred_tests.rs`
+  - `crates/enrollment-cli/tests/enroll_tests.rs`
+  - `crates/enrollment-cli/tests/verify_tests.rs`
+  - `crates/enrollment-cli/tests/delete_tests.rs`
+  - `crates/enrollment-cli/tests/list_tests.rs`
   - `tests/invariants/src/lib.rs`
-  - `AI/plan_evaluator_report.md`
 
 ## 1. Executive Summary
 
-The `evidence-store` crate introduces local, encrypted anti-intrusion evidence snapshot capture with automated 7-day retention rotation and per-UID daily capture limits. The crate is strictly opt-in (`EvidenceConfig.enabled` defaults to `false`), uses authenticated AES-256-GCM encryption with CSPRNG nonces and `SOOSEVD1` magic header, enforces POSIX permissions `0600` for files and `0700` for directories, uses atomic temporary writes before renaming, enforces `#![forbid(unsafe_code)]`, and has zero network dependencies. All tests pass with zero warnings under Clippy `-D warnings`.
+The `soos-enrollment-cli` binary crate (`crates/enrollment-cli`) implements the privileged root enrollment and diagnostics CLI tool (`soos-enroll`) in strict accordance with Issue #10 and `AI/ARCHITECTURE.md`. It provides four primary subcommands: `enroll`, `verify`, `delete`, and `list`. Privilege checks mandate root EUID (EUID 0) for modifying operations, multi-frame enrollment evaluates up to N frames enforcing the single-face invariant and picking the highest quality candidate, template deletion implements anti-forensic secure erasure (CSPRNG random overwrite + zeroization + sync + unlink), and diagnostic verification provides sub-millisecond latency breakdown. The crate enforces `#![forbid(unsafe_code)]`, zero unwrap/expect in production code, zero banned dependencies, and passes 100% of unit, integration, invariant, and clippy checks.
 
 ## 2. Deep Reasoning Audit
 
 ### Logic & Architecture
 - **Pass**:
-  - State machine and persistence flows are cleanly separated between configuration (`EvidenceConfig`), cryptography (`MasterKey`, `encrypt_payload`, `decrypt_payload`), metadata handling (`EvidenceRecord`, `parse_date`, `days_since_epoch`), and storage engine (`EvidenceStore`).
-  - Edge cases are robustly handled: disabled store cleanly returns `Err(EvidenceStoreError::Disabled)` without disk touches; daily cap enforcement atomically tracks `(uid, date)` and rejects requests beyond `daily_cap_per_uid` with `Err(EvidenceStoreError::DailyCapExceeded)`.
-  - Retention rotation uses pure, standard Gregorian affine arithmetic without third-party calendar dependencies, accurately calculating elapsed days and removing directories strictly older than `retention_days`. Non-date directories are safely ignored without panic.
+  - State machine and CLI dispatching are cleanly organized between argument definitions (`args.rs`), domain errors (`error.rs`), frame quality assessment (`quality.rs`), anti-forensic secure erasure (`shred.rs`), and core service orchestration (`service.rs`).
+  - Target user resolution supports explicit UID (`--uid`), system username resolution (`-u, --username`), or defaults to current caller UID.
+  - Multi-frame quality evaluation strictly rejects zero-face and multi-face frames, selecting the candidate with the highest detection score exceeding the minimum confidence threshold.
+  - Deletion verifies existence, prompts for confirmation unless `-y/--yes` is passed, and shreds disk content prior to unlinking.
+  - Verification reports cosine similarity against threshold, face count, PAD result, and precise latency breakdown.
 
 ### PAM Concurrency & Deadlines
 - **Pass**:
-  - The crate is entirely synchronous and library-oriented with zero asynchronous runtimes (zero Tokio dependency).
-  - Snapshot persistence runs synchronously in root daemon context upon authentication failure, decoupled from the real-time path of `pam_soos.so`.
-  - Zero `println!`, `eprintln!`, or `dbg!` macro calls in production code.
+  - The CLI is executed out-of-band by administrators and diagnostic tools, operating outside the PAM module hot path.
+  - Does not start asynchronous runtimes in synchronous libraries.
+  - Frame acquisition uses bounded polling with timeout safeguards.
 
 ### Panic Safety & Fallback
 - **Pass**:
-  - Zero `unwrap()`, `expect()`, `panic!()`, `todo!()`, or `unimplemented!()` in crate production code.
-  - All fallible operations return typed `Result<_, EvidenceStoreError>` using `thiserror`.
-  - Fail-closed behavior: invalid headers, truncated payloads, or tampered ciphertexts fail immediately with descriptive errors.
+  - Zero `unwrap()`, `expect()`, `panic!()`, `todo!()`, or `unimplemented!()` calls in crate production code.
+  - All errors are typed with `thiserror` and cleanly propagated.
+  - Saturating arithmetic and safe slice indexing prevent bounds violations or integer overflows.
 
 ### Test Integrity & Anti-Weakening
 - **Pass**:
-  - Comprehensive contract test suites authored during Phase 2 (Tester Agent):
-    - `opt_in_tests.rs` covers Criterion E1.
-    - `retention_tests.rs` covers Criterion E2.
-    - `daily_cap_tests.rs` covers Criterion E3.
-    - `permissions_tests.rs` and `encryption_tests.rs` cover Criterion E4.
-    - `zero_network_tests.rs` covers Criterion E5.
-    - `proptest_suite.rs` executes 50 property-based runs with arbitrary payloads and identifiers.
-  - Zero tests weakened, modified, or bypassed.
+  - 8 independent contract test suites in `crates/enrollment-cli/tests/` (23 total tests) written before production implementation.
+  - All tests pass with zero test weakening or modification.
+  - Test suites exercise both nominal paths and adversarial error conditions (low quality frames, multi-face frames, unauthorized users, non-existent UIDs, interactive cancellations).
 
 ### Memory & Secret Bounds
 - **Pass**:
-  - Sensitive buffers use `zeroize::Zeroizing<Vec<u8>>` on decryption and `ZeroizeOnDrop` for `MasterKey`.
-  - `MasterKey::fmt` redacts key bytes (`MasterKey([REDACTED])`).
-  - Zero network dependencies: crate has no `std::net`, `tokio::net`, or HTTP crates, verified by invariant test `test_evidence_store_has_no_network_dependencies`.
-  - `#![forbid(unsafe_code)]` unconditionally declared.
+  - Biometric templates are stored encrypted with AES-256-GCM via `BiometricStore`.
+  - Feature vectors implement `Zeroize` and are scrubbed from memory upon drop.
+  - Shredding uses stack-allocated buffers and kernel CSPRNG for overwrite passes.
+  - `#![forbid(unsafe_code)]` unconditionally declared in `crates/enrollment-cli/src/lib.rs` and `src/main.rs`.
 
 ## 3. Detailed Findings & Action Items
 - None. All security invariants and workspace quality standards are satisfied.

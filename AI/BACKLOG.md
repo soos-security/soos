@@ -385,23 +385,23 @@ Pure business logic crate: takes structured inputs (score, PAD result, UID conte
 
 #### Sub-issues:
 
-- **#10.1** — Scaffold `crates/enrollment-cli/` with `Cargo.toml` (binary)
+- [x] **#10.1** — Scaffold `crates/enrollment-cli/` with `Cargo.toml` (binary)
   - Dependencies: `clap`, `soos-protocol`, `soos-biometric-store`, `soos-inference-ort`, `soos-camera-v4l`
 
-- **#10.2** — Implement `enroll` command
+- [x] **#10.2** — Implement `enroll` command
   - Must be run as root
   - Capture N frames → select best quality → extract embedding → encrypt → store
   - Interactive confirmation with enrollment summary
 
-- **#10.3** — Implement `delete` command
+- [x] **#10.3** — Implement `delete` command
   - Delete enrollment for specified UID
   - Secure erasure of stored template
 
-- **#10.4** — Implement `verify` command (diagnostic)
+- [x] **#10.4** — Implement `verify` command (diagnostic)
   - One-shot capture → detect → match against stored template
   - Report: score, face count, PAD result, latency breakdown
 
-- **#10.5** — Implement `list` command
+- [x] **#10.5** — Implement `list` command
   - List all enrolled UIDs with enrollment metadata (date, model version)
 
 ---
