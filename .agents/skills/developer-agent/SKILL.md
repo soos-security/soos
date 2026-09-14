@@ -33,6 +33,9 @@ Your responsibility is to write the minimal production code necessary to turn pr
    - Avoid `as` casts triggering `clippy::cast_possible_truncation`:
      - Nanosecond timestamps: use `u64::try_from(start.elapsed().as_nanos()).unwrap_or(u64::MAX)`.
      - Modulo bytes/indices: use `u8::try_from(val % 256).unwrap_or(0)`.
+   - Avoid `as` casts triggering `clippy::cast_possible_wrap`:
+     - Unsigned-to-signed same-width casts (e.g. `u64` to `i64`): use `i64::try_from(val).unwrap_or(0)` or `val.cast_signed()` instead of `val as i64`.
+     - For widening integer conversions (`u32`, `u16`, `u8` to `i64`), always prefer lossless `i64::from(...)`.
    - Synthetic/Mock frame timing: always derive frame sleep and warmup intervals dynamically from `cfg.fps` (`Duration::from_micros(1_000_000 / cfg.fps)`) rather than hardcoding static durations.
    - Numerical & Vision Math:
      - In pixel manipulation, color space conversion, and tensor indexing where calculations are mathematically bounded by image dimensions, either use checked arithmetic (`checked_mul`, `checked_add`) or explicitly scope `#[allow(clippy::arithmetic_side_effects, reason = "...")]` with a clear bounding explanation.
@@ -57,5 +60,7 @@ Your responsibility is to write the minimal production code necessary to turn pr
    - Filter out zero-duration timeouts before setting socket options to prevent OS-level `EINVAL` returns.
    - Map both `io::ErrorKind::TimedOut` and `io::ErrorKind::WouldBlock` to domain timeout variants.
 
-5. **Deliverable**:
+5. **Deliverable & Tooling Rules**:
    - Fully working, cleanly formatted production code with 100% green test passes.
+   - **Artifact Metadata vs Repository Files**:
+     When generating files with `write_to_file`, provide `ArtifactMetadata` ONLY for documents saved inside the artifact directory (`<appDataDir>/brain/<conversation-id>/`). For all project repository files (`AI/plan_evaluator_report.md`, `crates/*`, `Docs/*`), omit `ArtifactMetadata`.

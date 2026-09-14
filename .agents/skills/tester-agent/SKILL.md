@@ -48,6 +48,15 @@ Your responsibility is to author comprehensive automated tests that define the c
      ```
    - For benchmark tests outputting timing metrics, also include `clippy::print_stdout` and `clippy::print_stderr`.
    - Range Assertions: Prefer `(min..=max).contains(&val)` over `val >= min && val <= max` to comply with Clippy conventions.
+   - Struct Initialization via Struct Update Syntax:
+     When overriding fields of a default struct in tests, avoid mutable reassignment after `Default::default()` (which violates `-D clippy::field_reassign_with_default`). Always initialize directly using struct update syntax:
+     ```rust
+     let config = EvidenceConfig {
+         enabled: true,
+         base_dir: temp.path().join("evidence"),
+         ..Default::default()
+     };
+     ```
 
 5. **Deliverable**:
    - Well-structured unit and integration tests located in `crates/<name>/src/` or `crates/<name>/tests/`.
