@@ -112,3 +112,17 @@ This document translates the critical gating criteria from §11 of `ARCHITECTURE
 | E3 | Daily cap per UID enforced | Limit test | ✅ Verified (`test_daily_cap_per_uid_enforced`, `test_custom_daily_cap`) |
 | E4 | Encrypted files, mode `0600`, `root:root` | Permissions test | ✅ Verified (`test_evidence_file_and_directory_permissions`, `test_encryption_roundtrip_and_structure`) |
 | E5 | NEVER transmitted across network in Phase 1 | Dependency audit | ✅ Verified (`test_evidence_store_has_zero_network_dependencies`, `test_evidence_store_has_no_network_dependencies`) |
+
+---
+
+## Component: `enrollment-cli`
+
+| # | Criterion | Test Method | Status |
+|---|---|---|---|
+| EN1 | Scaffolding and CLI argument parsing (subcommands enroll, verify, delete, list) | Unit tests | ✅ Verified (`test_cli_parse_enroll_subcommand_*`, `test_cli_parse_verify_subcommand`, `test_cli_parse_delete_subcommand`, `test_cli_parse_list_subcommand_*`, `test_cli_global_options`) |
+| EN2 | Root privilege enforcement (EUID 0) | System call verification | ✅ Verified (`test_root_check_enforced_against_euid`, `test_root_check_bypassed_when_flag_disabled`, `test_root_required_error_message`) |
+| EN3 | Multi-frame quality selection & single-face invariant | Quality selection test | ✅ Verified (`test_quality_selects_highest_scoring_single_face`, `test_quality_ignores_multi_face_or_zero_face_frames`, `test_quality_fails_when_all_frames_below_confidence`, `test_enroll_nominal_with_auto_confirm`, `test_enroll_interactive_confirmation_rejected`, `test_enroll_already_enrolled_overwrite_rejected`) |
+| EN4 | Anti-forensic secure erasure on template deletion | Destruction test | ✅ Verified (`test_shred_overwrites_and_removes_file`, `test_shred_empty_file_removes_cleanly`, `test_delete_existing_template_with_auto_confirm`, `test_delete_interactive_prompt_cancelled`, `test_delete_non_existent_uid_fails`) |
+| EN5 | Diagnostic one-shot verification with latency breakdown and PAD | Diagnostic test | ✅ Verified (`test_verify_matching_user_reports_allow_and_metrics`, `test_verify_non_matching_user_reports_deny`, `test_verify_unenrolled_uid_fails`) |
+| EN6 | Enumeration of enrolled UIDs and metadata resolution | Listing test | ✅ Verified (`test_list_empty_store_returns_empty_vec`, `test_list_multiple_enrolled_users_returns_sorted_summaries`) |
+

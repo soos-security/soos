@@ -43,6 +43,7 @@ mod tests {
             "inference-ort",
             "biometric-store",
             "evidence-store",
+            "enrollment-cli",
         ];
 
         for crate_name in business_crates {
