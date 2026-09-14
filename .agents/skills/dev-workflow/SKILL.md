@@ -114,7 +114,7 @@ Before starting Phase 1, the orchestrator verifies full ingestion of:
 
 ### Phase 1: Architect Sub-Agent ([architect-agent](file:///home/hadrien/soos/.agents/skills/architect-agent/SKILL.md))
 - Scaffolds crate in `crates/<name>/` and registers in root `Cargo.toml`.
-- Inherits workspace lints: `[lints] workspace = true`.
+- Inherits workspace settings: `publish.workspace = true`, `[lints] workspace = true`.
 - Specifies bounded structs, enums, and `thiserror` error types.
 - Asserts `#![forbid(unsafe_code)]` in business crates.
 
