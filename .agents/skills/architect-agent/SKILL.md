@@ -18,10 +18,14 @@ Your responsibility is to design interfaces, data structures, and invariants **b
 
 ## Directives
 
-1. **Backlog & Requirement Analysis**:
+1. **Backlog Analysis & Crate Scaffolding**:
    - Ingest target issue specifications from `AI/BACKLOG.md`.
    - Identify affected components in the workspace monorepo (`crates/<crate-name>/`).
    - Identify acceptance criteria in `AI/VERIFICATION_MATRIX.md`.
+   - **Crate Scaffolding & Manifest Privacy**:
+     - When scaffolding `crates/<name>/Cargo.toml`, MUST declare `publish.workspace = true` under `[package]` to inherit `publish = false` from the root workspace.
+     - **Rationale**: `deny.toml` ignores private crates via `[licenses.private] ignore = true`. Omitting `publish.workspace = true` causes `cargo-deny` in CI to evaluate the internal crate against `licenses.allow`, rejecting the project's `AGPL-3.0-or-later` license.
+     - Always declare `[lints] workspace = true`.
 
 2. **Type & Schema Design**:
    - Define bounded structs, enums, and explicit error types (`thiserror`).

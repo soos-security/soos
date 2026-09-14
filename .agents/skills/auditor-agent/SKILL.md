@@ -37,6 +37,11 @@ Your responsibility is to conduct a static security and compliance review of spe
 5. **Supply Chain & Licensing Pre-Check**:
    - Whenever new external crates or transitive dependencies are introduced, verify that their licenses conform to `deny.toml` (`licenses.allow`).
    - If `cargo-deny` is not installed on the local developer host, perform an explicit pre-audit of newly introduced licenses before pushing to avoid CI rejection.
+   - **Internal Workspace Crate Privacy**:
+     - Verify that every crate manifest in `crates/*/Cargo.toml` declares `publish.workspace = true`.
+     - Ensure `deny.toml` private crate exemptions apply properly (`[licenses.private] ignore = true`) to prevent CI failures on `AGPL-3.0-or-later`.
+   - **Cargo Deny Toolchain Compatibility**:
+     - Ensure `cargo-deny >= 0.20` is used for auditing to support dependencies targeting Rust edition 2024 (`base64ct`, `zeroize`, etc.) without parser error `unknown variant 2024`.
 
 6. **Credential & Sensitive Data Protection**:
    - Assert zero plaintext passwords, unencrypted embeddings, or raw camera frames are stored, transmitted over IPC, or logged.
