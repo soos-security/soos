@@ -42,6 +42,7 @@ mod tests {
             "vision",
             "inference-ort",
             "biometric-store",
+            "evidence-store",
         ];
 
         for crate_name in business_crates {
@@ -314,6 +315,60 @@ mod tests {
                 file.display(),
                 prints
             );
+        }
+    }
+
+    /// Invariant 9 — Zero network dependencies or socket usage in evidence-store crate
+    #[test]
+    fn test_evidence_store_has_no_network_dependencies() {
+        let root = workspace_root();
+        let evidence_cargo = root
+            .join("crates")
+            .join("evidence-store")
+            .join("Cargo.toml");
+
+        assert!(
+            evidence_cargo.exists(),
+            "STRUCTURE VIOLATION: Required file '{}' not found!",
+            evidence_cargo.display()
+        );
+
+        let cargo_content = fs::read_to_string(&evidence_cargo)
+            .unwrap_or_else(|e| panic!("Error reading {}: {}", evidence_cargo.display(), e));
+
+        let forbidden_crates = [
+            "reqwest",
+            "hyper",
+            "curl",
+            "ureq",
+            "tungstenite",
+            "tokio-tungstenite",
+            "surf",
+        ];
+
+        for &banned in &forbidden_crates {
+            assert!(
+                !cargo_content.contains(banned),
+                "SECURITY INVARIANT VIOLATION: Forbidden network dependency '{}' found in {}!",
+                banned,
+                evidence_cargo.display()
+            );
+        }
+
+        let evidence_src = root.join("crates").join("evidence-store").join("src");
+        if evidence_src.exists() {
+            let mut rs_files = Vec::new();
+            collect_rs_files(&evidence_src, &mut rs_files);
+            for file in rs_files {
+                let content = fs::read_to_string(&file)
+                    .unwrap_or_else(|e| panic!("Error reading {}: {}", file.display(), e));
+                let prod = extract_production_code(&content);
+                assert!(
+                    !prod.contains("std::net") && !prod.contains("tokio::net"),
+                    "SECURITY INVARIANT VIOLATION: Network namespace usage found in production code of {}!",
+                    file.display()
+                );
+            }
         }
     }
 

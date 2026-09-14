@@ -107,8 +107,8 @@ This document translates the critical gating criteria from §11 of `ARCHITECTURE
 
 | # | Criterion | Test Method | Status |
 |---|---|---|---|
-| E1 | Disabled by default (strictly opt-in) | Configuration test | ☐ Pending |
-| E2 | Automatic rotation after 7-day retention | Retention test | ☐ Pending |
-| E3 | Daily cap per UID enforced | Limit test | ☐ Pending |
-| E4 | Encrypted files, mode `0600`, `root:root` | Permissions test | ☐ Pending |
-| E5 | NEVER transmitted across network in Phase 1 | Dependency audit | ☐ Pending |
+| E1 | Disabled by default (strictly opt-in) | Configuration test | ✅ Verified (`test_evidence_config_disabled_by_default`, `test_store_snapshot_rejected_when_disabled`) |
+| E2 | Automatic rotation after 7-day retention | Retention test | ✅ Verified (`test_retention_rotation_7_days`, `test_retention_rotation_custom_days`) |
+| E3 | Daily cap per UID enforced | Limit test | ✅ Verified (`test_daily_cap_per_uid_enforced`, `test_custom_daily_cap`) |
+| E4 | Encrypted files, mode `0600`, `root:root` | Permissions test | ✅ Verified (`test_evidence_file_and_directory_permissions`, `test_encryption_roundtrip_and_structure`) |
+| E5 | NEVER transmitted across network in Phase 1 | Dependency audit | ✅ Verified (`test_evidence_store_has_zero_network_dependencies`, `test_evidence_store_has_no_network_dependencies`) |

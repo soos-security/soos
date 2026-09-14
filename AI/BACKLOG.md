@@ -346,26 +346,26 @@ Pure business logic crate: takes structured inputs (score, PAD result, UID conte
 
 #### Sub-issues:
 
-- **#9.1** — Scaffold `crates/evidence-store/` with `Cargo.toml`
+- [x] **#9.1** — Scaffold `crates/evidence-store/` with `Cargo.toml`
 
-- **#9.2** — Implement opt-in configuration
+- [x] **#9.2** — Implement opt-in configuration
   - Disabled by default in daemon config
   - Acceptance: `E1` — disabled by default
 
-- **#9.3** — Implement encrypted evidence storage
+- [x] **#9.3** — Implement encrypted evidence storage
   - Path: `/var/lib/soos/evidence/YYYY-MM-DD/<uuid>.webp.enc`
   - Mode `0600`, owner `root:root`
   - Acceptance: `E4` — correct permissions
 
-- **#9.4** — Implement 7-day retention rotation
+- [x] **#9.4** — Implement 7-day retention rotation
   - Cron-like cleanup: delete evidence directories older than 7 days
   - Acceptance: `E2` — automatic rotation
 
-- **#9.5** — Implement per-UID daily cap
+- [x] **#9.5** — Implement per-UID daily cap
   - Configurable max snapshots per UID per day (default: 10)
   - Acceptance: `E3` — daily cap enforced
 
-- **#9.6** — Ensure zero network transmission
+- [x] **#9.6** — Ensure zero network transmission
   - No network dependency in `Cargo.toml`
   - Invariant test: crate has no `std::net`, no `tokio::net`, no `reqwest`
   - Acceptance: `E5` — dependency audit passes

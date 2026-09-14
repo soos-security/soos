@@ -9,6 +9,7 @@ members = [
     "crates/inference-ort",
     "crates/vision",
     "crates/biometric-store",
+    "crates/evidence-store",
     "tests/invariants",
 ]
 
@@ -70,6 +71,7 @@ soos-camera-v4l = { path = "crates/camera-v4l", version = "0.1.0" }
 soos-inference-ort = { path = "crates/inference-ort", version = "0.1.0" }
 soos-vision = { path = "crates/vision", version = "0.1.0" }
 soos-biometric-store = { path = "crates/biometric-store", version = "0.1.0" }
+soos-evidence-store = { path = "crates/evidence-store", version = "0.1.0" }
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
