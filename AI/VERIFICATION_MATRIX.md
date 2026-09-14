@@ -96,10 +96,10 @@ This document translates the critical gating criteria from §11 of `ARCHITECTURE
 
 | # | Criterion | Test Method | Status |
 |---|---|---|---|
-| B1 | Embeddings encrypted at rest | Read/write test | ☐ Pending |
-| B2 | Files under `/var/lib/soos/biometrics/<uid>`, mode `0600`, owner `root:root` | Permissions test | ☐ Pending |
-| B3 | `model_id` and version stored with each template | Migration test | ☐ Pending |
-| B4 | Template deletion and re-enrollment operational | CRUD tests | ☐ Pending |
+| B1 | Embeddings encrypted at rest | `encryption_tests::test_b1_*`, `proptest_suite::prop_encrypt_decrypt_roundtrip` | ☑ Validated |
+| B2 | Files under `/var/lib/soos/biometrics/<uid>`, mode `0600`, owner `root:root` | `permissions_tests::test_b2_permissions_and_atomic_writes`, `test_b2_master_key_file_permissions` | ☑ Validated |
+| B3 | `model_id` and version stored with each template | `metadata_tests::test_b3_metadata_tracking_and_model_migration_support` | ☑ Validated |
+| B4 | Template deletion and re-enrollment operational | `crud_tests::test_b4_full_crud_lifecycle` | ☑ Validated |
 
 ---
 

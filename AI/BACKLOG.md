@@ -311,28 +311,28 @@ Pure business logic crate: takes structured inputs (score, PAD result, UID conte
 
 #### Sub-issues:
 
-- **#8.1** — Scaffold `crates/biometric-store/` with `Cargo.toml`
+- [x] **#8.1** — Scaffold `crates/biometric-store/` with `Cargo.toml`
   - Dependencies: `aes-gcm`, `serde`, `cbor`, `zeroize`
 
-- **#8.2** — Implement AES-GCM encryption/decryption for embeddings
+- [x] **#8.2** — Implement AES-GCM encryption/decryption for embeddings
   - Key derivation from daemon master key (or hardware-backed key)
   - Unique nonce per template write
   - Acceptance: `B1` — encrypted at rest
 
-- **#8.3** — Implement file storage at `/var/lib/soos/biometrics/<uid>.cbor.enc`
+- [x] **#8.3** — Implement file storage at `/var/lib/soos/biometrics/<uid>.cbor.enc`
   - Mode `0600`, owner `root:root`
   - Atomic writes (write to `.tmp` → `rename`)
   - Acceptance: `B2` — permissions correct
 
-- **#8.4** — Implement metadata storage with each template
+- [x] **#8.4** — Implement metadata storage with each template
   - `model_id`, `model_version`, `enrollment_timestamp`, `embedding_dim`
   - Acceptance: `B3` — model version tracked for migration
 
-- **#8.5** — Implement CRUD operations
+- [x] **#8.5** — Implement CRUD operations
   - Enroll (create/replace), verify (read + compare), delete, list enrolled UIDs
   - Acceptance: `B4` — full CRUD tested
 
-- **#8.6** — Implement zeroization on drop
+- [x] **#8.6** — Implement zeroization on drop
   - All decrypted embedding vectors use `Zeroizing<Vec<f32>>`
   - Raw frames deleted immediately after extraction
 

@@ -1,63 +1,60 @@
 # Candid Review Report
 
-- **Date**: 2026-09-13
-- **Target Branch**: feat/vision-pipeline
+- **Date**: 2026-09-14
+- **Target Branch / Commit**: feat/biometric-store
 - **Base Reference**: origin/main
 - **Audited Files**:
-  - Cargo.lock
   - Cargo.toml
-  - crates/vision/Cargo.toml
-  - crates/vision/src/lib.rs
-  - crates/vision/src/error.rs
-  - crates/vision/src/color.rs
-  - crates/vision/src/align.rs
-  - crates/vision/src/matcher.rs
-  - crates/vision/src/pipeline.rs
-  - crates/vision/tests/color_tests.rs
-  - crates/vision/tests/align_tests.rs
-  - crates/vision/tests/matcher_tests.rs
-  - crates/vision/tests/pipeline_tests.rs
-  - crates/vision/tests/bench_tests.rs
-  - tests/fixtures/mod.rs
-  - Docs/VISION_CRATE.md
-  - AI/VERIFICATION_MATRIX.md
-  - AI/BACKLOG.md
-  - AI/walkthroughs/22_vision_preprocessing_and_matching_pipeline.md
+  - Cargo.lock
+  - tests/invariants/src/lib.rs
+  - AI/plan_evaluator_report.md
+  - crates/biometric-store/Cargo.toml
+  - crates/biometric-store/src/lib.rs
+  - crates/biometric-store/src/error.rs
+  - crates/biometric-store/src/crypto.rs
+  - crates/biometric-store/src/template.rs
+  - crates/biometric-store/src/store.rs
+  - crates/biometric-store/tests/encryption_tests.rs
+  - crates/biometric-store/tests/permissions_tests.rs
+  - crates/biometric-store/tests/metadata_tests.rs
+  - crates/biometric-store/tests/crud_tests.rs
+  - crates/biometric-store/tests/zeroize_tests.rs
+  - crates/biometric-store/tests/proptest_suite.rs
 
 ## 1. Executive Summary
-Independent, cold diff review of the `soos-vision` crate implementation covering color conversion (YUYV, Grey, RGB24, MJPEG), 5-point facial landmark affine alignment (Umeyama similarity transform to 112×112 ArcFace crop), cosine similarity matching, and end-to-end `VisionPipeline` orchestrator enforcing the single-face security invariant.
+Implementation of `crates/biometric-store` providing AES-256-GCM authenticated encrypted persistence at rest for biometric embedding vectors. Supports atomic file writes with POSIX file mode 0600 and directory mode 0700, model migration metadata tracking, memory zeroization on drop, and full CRUD operations. Comprehensive unit, integration, and property-based test suites verify all contractual requirements.
 
-## 2. Deep Reasoning Audit on 5 Pillars
+## 2. Deep Reasoning Audit
 
-### Pillar 1: Logic & Architecture
-- [PASS]: Pure Rust implementation of color conversions (YUYV 4:2:2 fixed-point integer BT.601, Grayscale 3-channel broadcast, RGB24 passthrough, MJPEG decompression via `jpeg-decoder`).
-- [PASS]: 2D similarity transform (closed-form Umeyama formulation) accurately maps facial landmarks to standard ArcFace 112×112 reference coordinates with bilinear interpolation and boundary padding.
-- [PASS]: Cosine similarity correctly handles dot products, Euclidean normalization, and rejects degenerate zero-norm vectors.
-- [PASS]: `VisionPipeline` enforces the strict single-face security invariant, failing closed if 0 faces or >1 faces are detected in a frame.
+### Logic & Architecture
+- [PASS]: State transitions and CRUD operations (`enroll`, `get`, `delete`, `list_enrolled`, `exists`) are logically sound.
+- [PASS]: Atomic writes use unique `.tmp` files with `fsync` and atomic `rename` to prevent partial or corrupted template reads.
+- [PASS]: Magic header validation (`SOOSBIO1`) and minimum payload length checks prevent parsing corrupted or mismatched data.
 
-### Pillar 2: PAM Concurrency & Real-Time Deadlines
-- [PASS]: `soos-vision` is decoupled from the PAM module (`pam_soos.so`); zero Tokio or asynchronous runtimes in the crate.
-- [PASS]: Full verification pipeline latency on 640×480 YUYV frames measured at $p95 = 28.02\text{ms}$, well within the §7 150ms latency budget.
-- [PASS]: Output isolation verified: zero `println!`, `eprintln!`, or `dbg!` macro calls in production code.
+### PAM Concurrency & Deadlines
+- [PASS]: `biometric-store` is completely synchronous and self-contained; zero Tokio or asynchronous runtimes.
+- [PASS]: Fast AES-256-GCM hardware operations execute in sub-millisecond timeframe.
+- [PASS]: Output isolation preserved: zero `println!`, `eprintln!`, or `dbg!` macro calls in production code.
 
-### Pillar 3: Panic Safety & Fallback
-- [PASS]: Production code declares `#![forbid(unsafe_code)]` and inherits workspace zero-panic clippy lints.
-- [PASS]: Zero `unwrap()` or `expect()` in production code.
-- [PASS]: All fallible operations return structured `Result<T, VisionError>`.
-- [PASS]: Arithmetic on image dimensions and buffer sizes uses checked arithmetic (`checked_mul`) preventing integer overflow exploits.
+### Panic Safety & Fallback
+- [PASS]: Zero `unwrap()`, `expect()`, `panic!()`, or unfinished stubs in library production code.
+- [PASS]: Explicit `BiometricStoreError` domain error enum using `thiserror`.
+- [PASS]: Safe bounds on slices using `.get()` rather than raw indexing.
 
-### Pillar 4: Test Integrity & Anti-Weakening
-- [PASS]: Pre-existing test contracts are fully preserved across all crates; zero tests were weakened or deleted.
-- [PASS]: Comprehensive test suite authors 25 new tests covering color conversions, golden affine alignment (V1), cosine similarity correctness (V3), single-face security invariant (V4), and latency benchmark (V5).
-- [PASS]: All tests pass cleanly across the entire workspace monorepo.
+### Test Integrity & Anti-Weakening
+- [PASS]: All contractual test suites written during Phase 2 (Tester Agent) were preserved without modification or weakening.
+- [PASS]: All 13 tests across 6 test suites passed cleanly in nominal, error, and adversarial cases.
+- [PASS]: `proptest` property-based testing covers arbitrary payloads, key variations, tamper detection, and CBOR serialization round-trips.
 
-### Pillar 5: Memory & Secret Bounds
-- [PASS]: Zero credential handling: processes only ephemeral pixel buffers, geometric coordinates, and numerical embeddings.
-- [PASS]: Strict prohibition against `opencv` and `nokhwa` respected; `jpeg-decoder` is pure-Rust and compliant with `deny.toml`.
-- [PASS]: All documentation, comments, and identifiers strictly adhere to the English-only deliverable policy.
+### Memory & Secret Bounds
+- [PASS]: `MasterKey` derives `Zeroize` and `ZeroizeOnDrop`, with custom `Debug` implementation preventing key leakage.
+- [PASS]: Plaintext embedding vectors stored in `zeroize::Zeroizing<Vec<f32>>` with redacted `Debug` output.
+- [PASS]: Decrypted temporary buffers wrapped in `Zeroizing<Vec<u8>>` and zeroized on drop.
+- [PASS]: Unique 96-bit CSPRNG nonces generated on every single encryption write.
+- [PASS]: `#![forbid(unsafe_code)]` declared and enforced across the crate and registered in invariant tests.
 
 ## 3. Detailed Findings & Action Items
-- Zero blocking issues identified. All invariants and acceptance criteria are satisfied.
+- Zero blocking issues identified. All invariants and quality gates satisfied.
 
 ## 4. Final Verdict
 **VERDICT: APPROVED**
