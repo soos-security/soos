@@ -1,0 +1,201 @@
+//! Simulated PAM authentication cycle runner and latency benchmark.
+//!
+//! Connects to `/run/soos/daemon.sock` out-of-band and performs a complete
+//! authentication request cycle, benchmarking socket connection latency,
+//! daemon processing latency, and returning the rendered verdict.
+
+use std::io::{Read, Write};
+use std::os::unix::net::UnixStream;
+use std::path::Path;
+use std::time::{Duration, Instant};
+
+use serde::{Deserialize, Serialize};
+use soos_protocol::codec::{decode, encode};
+use soos_protocol::types::{
+    ReasonClass, Request, RequestKind, Response, Verdict, CURRENT_VERSION, MAX_MESSAGE_SIZE,
+    REQUEST_ID_LEN,
+};
+
+use crate::error::AdminCliError;
+
+/// Sub-millisecond latency breakdown for simulated authentication.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LatencyMetrics {
+    /// Time required to establish the Unix domain socket connection (ms).
+    pub connect_ms: f64,
+    /// Time from request transmission until complete response receipt (ms).
+    pub response_ms: f64,
+    /// Total simulated authentication latency (ms).
+    pub total_ms: f64,
+}
+
+/// Simulated PAM authentication cycle report.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PamTestReport {
+    /// Target UID verified.
+    pub uid: u32,
+    /// Declared PAM service name.
+    pub service: String,
+    /// Verdict rendered by daemon.
+    pub verdict: Verdict,
+    /// Diagnostic classification reason.
+    pub reason_class: ReasonClass,
+    /// Latency breakdown.
+    pub latency: LatencyMetrics,
+    /// Resulting PAM stack interpretation.
+    pub pam_result: String,
+}
+
+impl PamTestReport {
+    /// Formats the report as a structured JSON string.
+    #[must_use]
+    pub fn to_json(&self) -> String {
+        format!(
+            "{{\n  \"uid\": {},\n  \"service\": \"{}\",\n  \"verdict\": \"{:?}\",\n  \"reason_class\": \"{:?}\",\n  \"pam_result\": \"{}\",\n  \"latency\": {{\n    \"connect_ms\": {:.2},\n    \"response_ms\": {:.2},\n    \"total_ms\": {:.2}\n  }}\n}}",
+            self.uid,
+            self.service,
+            self.verdict,
+            self.reason_class,
+            self.pam_result,
+            self.latency.connect_ms,
+            self.latency.response_ms,
+            self.latency.total_ms
+        )
+    }
+
+    /// Formats the report as an aligned terminal summary table.
+    #[must_use]
+    pub fn format_table(&self) -> String {
+        let mut out = String::new();
+        out.push_str("====================================================\n");
+        out.push_str("          SOOS SIMULATED PAM AUTHENTICATION         \n");
+        out.push_str("====================================================\n");
+        out.push_str(&format!("Target UID:          {}\n", self.uid));
+        out.push_str(&format!("Service:             {}\n", self.service));
+        out.push_str(&format!("Daemon Verdict:      {:?}\n", self.verdict));
+        out.push_str(&format!("Reason Class:        {:?}\n", self.reason_class));
+        out.push_str(&format!("PAM Action:          {}\n", self.pam_result));
+        out.push_str("----------------------------------------------------\n");
+        out.push_str("Latency Metrics:\n");
+        out.push_str(&format!(
+            "  Socket Connect:    {:.2} ms\n",
+            self.latency.connect_ms
+        ));
+        out.push_str(&format!(
+            "  Daemon Response:   {:.2} ms\n",
+            self.latency.response_ms
+        ));
+        out.push_str(&format!(
+            "  Total Roundtrip:   {:.2} ms\n",
+            self.latency.total_ms
+        ));
+        out.push_str("====================================================\n");
+        out
+    }
+}
+
+/// Simulates a PAM authentication cycle by issuing an IPC verification request.
+///
+/// # Errors
+///
+/// Returns `AdminCliError` on socket, codec, timeout, or random number generator failures.
+pub fn simulate_pam_auth(
+    socket_path: &Path,
+    uid: u32,
+    service: &str,
+    timeout_ms: u64,
+) -> Result<PamTestReport, AdminCliError> {
+    let connect_start = Instant::now();
+    let mut stream =
+        UnixStream::connect(socket_path).map_err(|e| AdminCliError::SocketConnect {
+            path: socket_path.display().to_string(),
+            source: e,
+        })?;
+    let connect_ms = connect_start.elapsed().as_secs_f64() * 1000.0;
+
+    let timeout = Duration::from_millis(timeout_ms);
+    stream
+        .set_read_timeout(Some(timeout))
+        .map_err(AdminCliError::SocketIo)?;
+    stream
+        .set_write_timeout(Some(timeout))
+        .map_err(AdminCliError::SocketIo)?;
+
+    let mut request_id = [0u8; REQUEST_ID_LEN];
+    getrandom::fill(&mut request_id)?;
+
+    let now_monotonic_ns = get_monotonic_ns();
+    let deadline_monotonic_ns =
+        now_monotonic_ns.saturating_add(timeout_ms.saturating_mul(1_000_000));
+
+    let req = Request {
+        version: CURRENT_VERSION,
+        kind: RequestKind::Auth,
+        request_id,
+        uid_hint: uid,
+        service: service.to_string(),
+        deadline_monotonic_ns,
+    };
+
+    let req_start = Instant::now();
+    let encoded_req = encode(&req)?;
+    stream
+        .write_all(&encoded_req)
+        .map_err(AdminCliError::SocketIo)?;
+    stream.flush().map_err(AdminCliError::SocketIo)?;
+
+    let mut len_bytes = [0u8; 4];
+    stream
+        .read_exact(&mut len_bytes)
+        .map_err(AdminCliError::SocketIo)?;
+    let declared_size = usize::try_from(u32::from_be_bytes(len_bytes))
+        .map_err(|_| AdminCliError::UnexpectedResponse("overflow in length prefix".to_string()))?;
+
+    if declared_size > MAX_MESSAGE_SIZE || declared_size == 0 {
+        return Err(AdminCliError::UnexpectedResponse(format!(
+            "invalid declared response size {declared_size} (max {MAX_MESSAGE_SIZE})"
+        )));
+    }
+
+    let mut body = vec![0u8; declared_size];
+    stream
+        .read_exact(&mut body)
+        .map_err(AdminCliError::SocketIo)?;
+    let response_ms = req_start.elapsed().as_secs_f64() * 1000.0;
+    let total_ms = connect_ms + response_ms;
+
+    let total_capacity = declared_size.saturating_add(4);
+    let mut full = Vec::with_capacity(total_capacity);
+    full.extend_from_slice(&len_bytes);
+    full.extend_from_slice(&body);
+
+    let resp: Response = decode(&full)?;
+
+    let pam_result = if resp.verdict == Verdict::Allow {
+        "PAM_SUCCESS (Authentication authorized)".to_string()
+    } else {
+        format!(
+            "PAM_IGNORE (Fallback to standard password authentication: {:?})",
+            resp.verdict
+        )
+    };
+
+    Ok(PamTestReport {
+        uid,
+        service: service.to_string(),
+        verdict: resp.verdict,
+        reason_class: resp.reason_class,
+        latency: LatencyMetrics {
+            connect_ms,
+            response_ms,
+            total_ms,
+        },
+        pam_result,
+    })
+}
+
+fn get_monotonic_ns() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX))
+}

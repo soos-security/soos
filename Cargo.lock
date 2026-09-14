@@ -1325,6 +1325,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "soos-admin-cli"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "getrandom 0.3.4",
+ "libc",
+ "nix",
+ "serde",
+ "soos-protocol",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
 name = "soos-biometric-store"
 version = "0.1.0"
 dependencies = [

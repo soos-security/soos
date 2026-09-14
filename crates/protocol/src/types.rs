@@ -31,12 +31,14 @@ pub const MAX_SERVICE_LEN: usize = 64;
 /// Generated via `getrandom`, never reused, and bound to the response.
 pub type RequestId = [u8; REQUEST_ID_LEN];
 
-/// Request kind sent by the PAM module to the daemon.
+/// Request kind sent by PAM or diagnostic tools to the daemon.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[repr(u8)]
 pub enum RequestKind {
     /// Facial authentication verification request.
     Auth = 0,
+    /// Non-biometric status diagnostic query.
+    Status = 1,
 }
 
 /// Telemetry event notified by the PAM module to the daemon (best-effort).
@@ -180,6 +182,29 @@ impl Drop for Response {
         use zeroize::Zeroize;
         self.zeroize();
     }
+}
+
+/// Non-biometric health and readiness status response.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "Component readiness booleans are atomic snapshot flags representing daemon state"
+)]
+pub struct StatusResponse {
+    /// Protocol version.
+    pub version: u8,
+    /// Whether the Unix domain socket is bound and accepting connections.
+    pub socket_ready: bool,
+    /// Whether the camera device is initialized and capturing frames.
+    pub camera_ready: bool,
+    /// Whether all local ONNX models have been verified against manifest checksums.
+    pub models_verified: bool,
+    /// Aggregated overall health (all components must be ready).
+    pub is_healthy: bool,
+    /// Daemon process ID.
+    pub pid: u32,
+    /// Daemon uptime in seconds.
+    pub uptime_secs: u64,
 }
 
 // ---------------------------------------------------------------------------

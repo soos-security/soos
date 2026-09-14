@@ -21,8 +21,9 @@ mod tests {
     use proptest::prelude::*;
     use soos_protocol::codec::CodecError;
     use soos_protocol::types::{
-        Event, EventKind, ReasonClass, Request, RequestId, RequestKind, Response, ValidationError,
-        Verdict, CURRENT_VERSION, MAX_MESSAGE_SIZE, MAX_SERVICE_LEN, REQUEST_ID_LEN,
+        Event, EventKind, ReasonClass, Request, RequestId, RequestKind, Response, StatusResponse,
+        ValidationError, Verdict, CURRENT_VERSION, MAX_MESSAGE_SIZE, MAX_SERVICE_LEN,
+        REQUEST_ID_LEN,
     };
     use soos_protocol::{decode, encode};
 
@@ -41,7 +42,7 @@ mod tests {
 
     /// Strategy generating valid RequestKind variants.
     fn arb_request_kind() -> impl Strategy<Value = RequestKind> {
-        Just(RequestKind::Auth)
+        prop_oneof![Just(RequestKind::Auth), Just(RequestKind::Status)]
     }
 
     /// Strategy generating valid EventKind variants.
@@ -147,6 +148,31 @@ mod tests {
             )
     }
 
+    /// Strategy generating arbitrary valid StatusResponses.
+    fn arb_valid_status_response() -> impl Strategy<Value = StatusResponse> {
+        (
+            any::<bool>(),
+            any::<bool>(),
+            any::<bool>(),
+            any::<bool>(),
+            any::<u32>(),
+            any::<u64>(),
+        )
+            .prop_map(
+                |(socket_ready, camera_ready, models_verified, is_healthy, pid, uptime_secs)| {
+                    StatusResponse {
+                        version: CURRENT_VERSION,
+                        socket_ready,
+                        camera_ready,
+                        models_verified,
+                        is_healthy,
+                        pid,
+                        uptime_secs,
+                    }
+                },
+            )
+    }
+
     // ---------------------------------------------------------------------------
     // Property Tests
     // ---------------------------------------------------------------------------
@@ -188,6 +214,17 @@ mod tests {
             let decoded: Event = decode(&encoded).expect("decoding valid encoded event must succeed");
 
             prop_assert_eq!(&decoded, &evt);
+        }
+
+        /// StatusResponse round-trip property.
+        /// Any valid StatusResponse serialized via `encode` must deserialize via `decode`
+        /// into an identical StatusResponse.
+        #[test]
+        fn prop_status_response_roundtrip(status_resp in arb_valid_status_response()) {
+            let encoded = encode(&status_resp).expect("encoding valid status response must succeed");
+            let decoded: StatusResponse = decode(&encoded).expect("decoding valid encoded status response must succeed");
+
+            prop_assert_eq!(&decoded, &status_resp);
         }
 
         /// Criterion P5 / Sub-issue #4.1: Robustness against arbitrary byte sequences.

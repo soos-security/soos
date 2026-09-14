@@ -1,69 +1,76 @@
-# Candid Review Report
+# Candid Review Report: `admin-cli` Diagnostics Tool (#18)
 
 - **Date**: 2026-09-14
-- **Target Branch / Commit**: `feat/enrollment-cli`
-- **Audited Files**:
-  - `Cargo.toml`
-  - `Cargo.lock`
-  - `crates/enrollment-cli/Cargo.toml`
-  - `crates/enrollment-cli/src/lib.rs`
-  - `crates/enrollment-cli/src/main.rs`
-  - `crates/enrollment-cli/src/args.rs`
-  - `crates/enrollment-cli/src/error.rs`
-  - `crates/enrollment-cli/src/quality.rs`
-  - `crates/enrollment-cli/src/service.rs`
-  - `crates/enrollment-cli/src/shred.rs`
-  - `crates/enrollment-cli/tests/scaffold_tests.rs`
-  - `crates/enrollment-cli/tests/root_check_tests.rs`
-  - `crates/enrollment-cli/tests/quality_tests.rs`
-  - `crates/enrollment-cli/tests/shred_tests.rs`
-  - `crates/enrollment-cli/tests/enroll_tests.rs`
-  - `crates/enrollment-cli/tests/verify_tests.rs`
-  - `crates/enrollment-cli/tests/delete_tests.rs`
-  - `crates/enrollment-cli/tests/list_tests.rs`
-  - `tests/invariants/src/lib.rs`
+- **Target Branch**: feat/admin-cli
+- **Base Reference**: origin/main
+- **Reviewer**: Candid Reviewer Sub-Agent (`.agents/skills/candid-reviewer`)
+- **Status**: Complete
+
+---
 
 ## 1. Executive Summary
 
-The `soos-enrollment-cli` binary crate (`crates/enrollment-cli`) implements the privileged root enrollment and diagnostics CLI tool (`soos-enroll`) in strict accordance with Issue #10 and `AI/ARCHITECTURE.md`. It provides four primary subcommands: `enroll`, `verify`, `delete`, and `list`. Privilege checks mandate root EUID (EUID 0) for modifying operations, multi-frame enrollment evaluates up to N frames enforcing the single-face invariant and picking the highest quality candidate, template deletion implements anti-forensic secure erasure (CSPRNG random overwrite + zeroization + sync + unlink), and diagnostic verification provides sub-millisecond latency breakdown. The crate enforces `#![forbid(unsafe_code)]`, zero unwrap/expect in production code, zero banned dependencies, and passes 100% of unit, integration, invariant, and clippy checks.
+An independent, cold diff audit was performed on the `feat/admin-cli` branch implementing Issue #11 / GitHub Issue #18 (`crates/admin-cli`). The implementation provides the non-biometric diagnostic CLI tool (`soos-admin`) supporting `status`, `test-pam`, and `logs` subcommands. The changeset includes crate scaffolding, protocol types (`RequestKind::Status`, `StatusResponse`), daemon dispatcher integration, comprehensive log redaction, and 22 contractual unit and integration tests.
 
-## 2. Deep Reasoning Audit
+---
 
-### Logic & Architecture
-- **Pass**:
-  - State machine and CLI dispatching are cleanly organized between argument definitions (`args.rs`), domain errors (`error.rs`), frame quality assessment (`quality.rs`), anti-forensic secure erasure (`shred.rs`), and core service orchestration (`service.rs`).
-  - Target user resolution supports explicit UID (`--uid`), system username resolution (`-u, --username`), or defaults to current caller UID.
-  - Multi-frame quality evaluation strictly rejects zero-face and multi-face frames, selecting the candidate with the highest detection score exceeding the minimum confidence threshold.
-  - Deletion verifies existence, prompts for confirmation unless `-y/--yes` is passed, and shreds disk content prior to unlinking.
-  - Verification reports cosine similarity against threshold, face count, PAD result, and precise latency breakdown.
+## 2. Five-Pillar Deep Reasoning Audit
 
-### PAM Concurrency & Deadlines
-- **Pass**:
-  - The CLI is executed out-of-band by administrators and diagnostic tools, operating outside the PAM module hot path.
-  - Does not start asynchronous runtimes in synchronous libraries.
-  - Frame acquisition uses bounded polling with timeout safeguards.
+### Pillar 1: Logic & Architecture
+- **Evaluation**: **PASS**
+- **Findings**:
+  - `soos-admin-cli` provides clear separation of responsibilities across `status`, `test_pam`, `logs`, and `redact` modules.
+  - The `status` command queries both the local Unix Domain Socket for component readiness (`socket_ready`, `camera_ready`, `models_verified`, PID, uptime) and the systemd manager for unit execution state (`ActiveState`, `SubState`).
+  - When the daemon is offline, `query_status` gracefully reports offline status and systemd unit state rather than terminating prematurely or panicking.
+  - Protocol extension: `RequestKind::Status` cleanly routes to daemon component readiness snapshots, serializing `StatusResponse` via Postcard. PAM module wire compatibility is preserved.
 
-### Panic Safety & Fallback
-- **Pass**:
-  - Zero `unwrap()`, `expect()`, `panic!()`, `todo!()`, or `unimplemented!()` calls in crate production code.
-  - All errors are typed with `thiserror` and cleanly propagated.
-  - Saturating arithmetic and safe slice indexing prevent bounds violations or integer overflows.
+### Pillar 2: PAM Concurrency & Real-Time Deadlines
+- **Evaluation**: **PASS**
+- **Findings**:
+  - The `admin-cli` tool operates strictly out-of-band and does not execute in the PAM module process space.
+  - The PAM module (`pam_soos.so`) remains completely untouched and free of asynchronous runtimes.
+  - `test-pam` benchmarks the end-to-end simulated authentication roundtrip, recording connection latency, response latency, and validating the PAM fallback contract (`Allow` -> `PAM_SUCCESS`, others -> `PAM_IGNORE`).
 
-### Test Integrity & Anti-Weakening
-- **Pass**:
-  - 8 independent contract test suites in `crates/enrollment-cli/tests/` (23 total tests) written before production implementation.
-  - All tests pass with zero test weakening or modification.
-  - Test suites exercise both nominal paths and adversarial error conditions (low quality frames, multi-face frames, unauthorized users, non-existent UIDs, interactive cancellations).
+### Pillar 3: Panic Safety & Fallback
+- **Evaluation**: **PASS**
+- **Findings**:
+  - `#![forbid(unsafe_code)]` declared unconditionally in `crates/admin-cli/src/lib.rs` and `crates/admin-cli/src/main.rs`.
+  - Zero `unwrap()` or `expect()` invocations in `crates/admin-cli/src/`.
+  - All fallible operations (socket I/O, process execution, codec serialization) return typed `AdminCliError` variants.
+  - Safe fallbacks handle non-systemd environments (e.g. test containers) gracefully.
 
-### Memory & Secret Bounds
-- **Pass**:
-  - Biometric templates are stored encrypted with AES-256-GCM via `BiometricStore`.
-  - Feature vectors implement `Zeroize` and are scrubbed from memory upon drop.
-  - Shredding uses stack-allocated buffers and kernel CSPRNG for overwrite passes.
-  - `#![forbid(unsafe_code)]` unconditionally declared in `crates/enrollment-cli/src/lib.rs` and `src/main.rs`.
+### Pillar 4: Test Integrity & Anti-Weakening
+- **Evaluation**: **PASS**
+- **Findings**:
+  - Pre-existing test contracts in `crates/protocol`, `crates/daemon`, and `tests/invariants` were strictly preserved with zero test weakening.
+  - New test suites authored during Phase 2 (`scaffold_tests.rs`, `status_tests.rs`, `test_pam_tests.rs`, `redact_tests.rs`, `logs_tests.rs`) thoroughly validate all edge cases and failure modes.
+  - All 22 tests in `soos-admin-cli` and 150+ workspace tests pass with 100% green status.
 
-## 3. Detailed Findings & Action Items
-- None. All security invariants and workspace quality standards are satisfied.
+### Pillar 5: Memory & Secret Bounds
+- **Evaluation**: **PASS**
+- **Findings**:
+  - `admin-cli` is strictly non-biometric: zero access to `/var/lib/soos/biometrics/` or raw camera frames.
+  - Socket frame parsing adheres strictly to `MAX_MESSAGE_SIZE` (4,096 bytes), preventing memory exhaustion.
+  - `RedactionFilter` provides defense-in-depth sanitization of passwords, bearer tokens, hex cryptographic keys, and embedding float vectors.
+
+---
+
+## 3. Invariant Checks Summary
+
+| Check | Requirement | Result |
+|---|---|---|
+| Safe Rust | `#![forbid(unsafe_code)]` declared | ✅ PASS |
+| Panic Safety | Zero `unwrap()` / `expect()` in production | ✅ PASS |
+| Banned Crates | Zero `opencv` / `nokhwa` | ✅ PASS |
+| License Audit | `cargo deny check` | ✅ PASS |
+| Formatting | `cargo fmt --check` | ✅ PASS |
+| Lints | `cargo clippy --all-targets -- -D warnings` | ✅ PASS |
+| Language Policy | 100% professional English deliverables | ✅ PASS |
+
+---
 
 ## 4. Final Verdict
+
+The changeset satisfies all security invariants, architectural boundaries, and quality requirements.
+
 **VERDICT: APPROVED**

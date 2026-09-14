@@ -413,17 +413,17 @@ Pure business logic crate: takes structured inputs (score, PAD result, UID conte
 
 #### Sub-issues:
 
-- **#11.1** — Scaffold `crates/admin-cli/` with `Cargo.toml` (binary)
+- [x] **#11.1** — Scaffold `crates/admin-cli/` with `Cargo.toml` (binary)
 
-- **#11.2** — Implement `status` command
+- [x] **#11.2** — Implement `status` command
   - Query daemon health check: socket_ready, camera_ready, models_verified
   - Report daemon PID, uptime, systemd unit state
 
-- **#11.3** — Implement `test-pam` command
+- [x] **#11.3** — Implement `test-pam` command
   - Simulate a PAM authentication cycle without affecting the real PAM stack
   - Report: connection latency, daemon response time, verdict
 
-- **#11.4** — Implement `logs` command
+- [x] **#11.4** — Implement `logs` command
   - Filtered view of daemon journal logs (via `journalctl`)
   - Redact any sensitive fields
 

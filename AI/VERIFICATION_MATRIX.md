@@ -126,3 +126,13 @@ This document translates the critical gating criteria from §11 of `ARCHITECTURE
 | EN5 | Diagnostic one-shot verification with latency breakdown and PAD | Diagnostic test | ✅ Verified (`test_verify_matching_user_reports_allow_and_metrics`, `test_verify_non_matching_user_reports_deny`, `test_verify_unenrolled_uid_fails`) |
 | EN6 | Enumeration of enrolled UIDs and metadata resolution | Listing test | ✅ Verified (`test_list_empty_store_returns_empty_vec`, `test_list_multiple_enrolled_users_returns_sorted_summaries`) |
 
+---
+
+## Component: `admin-cli`
+
+| # | Criterion | Test Method | Status |
+|---|---|---|---|
+| AD1 | Scaffolding and CLI argument parsing (`status`, `test-pam`, `logs`, global options) | Unit tests (`test_cli_parse_status_*`, `test_cli_parse_test_pam_*`, `test_cli_parse_logs_*`, `test_cli_constants_conform_to_spec`) | ✅ Verified |
+| AD2 | Daemon status inspection (component readiness, PID, uptime, systemd unit state, offline reporting) | Unit tests (`test_status_query_mock_daemon_healthy`, `test_status_query_mock_daemon_component_unready`, `test_status_query_offline_daemon_does_not_panic`, `test_status_report_json_serialization`) | ✅ Verified |
+| AD3 | Simulated PAM authentication cycle with latency breakdown and verdict evaluation | Unit tests (`test_simulate_pam_auth_allow`, `test_simulate_pam_auth_deny_yields_pam_ignore`, `test_simulate_pam_auth_offline_socket_fails_closed`) | ✅ Verified |
+| AD4 | Log stream filtering with automatic redaction of sensitive patterns (passwords, tokens, keys, embeddings) | Unit tests (`test_redact_preserves_benign_logs`, `test_redact_masks_password_fields`, `test_redact_masks_tokens_and_secrets`, `test_redact_masks_master_key_and_hex_keys`, `test_redact_masks_embedding_vector_arrays`, `test_fetch_and_filter_logs_from_file_with_redaction`, `test_fetch_and_filter_logs_limits_line_count`) | ✅ Verified |
