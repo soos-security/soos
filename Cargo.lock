@@ -1251,6 +1251,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "soos-evidence-store"
+version = "0.1.0"
+dependencies = [
+ "aes-gcm",
+ "ciborium",
+ "getrandom 0.3.4",
+ "proptest",
+ "serde",
+ "tempfile",
+ "thiserror",
+ "zeroize",
+]
+
+[[package]]
 name = "soos-inference-ort"
 version = "0.1.0"
 dependencies = [

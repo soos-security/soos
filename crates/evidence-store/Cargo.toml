@@ -1,0 +1,22 @@
+[package]
+name = "soos-evidence-store"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+aes-gcm = { workspace = true, features = ["zeroize"] }
+ciborium.workspace = true
+serde = { workspace = true, features = ["derive"] }
+zeroize = { workspace = true, features = ["derive"] }
+thiserror.workspace = true
+getrandom.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+proptest = "1"
