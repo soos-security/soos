@@ -92,8 +92,16 @@ impl TestPipelineFixture {
             .build();
 
         let camera = Arc::new(MockCameraManager::new(camera_config));
-        // Wait briefly for mock camera thread to stabilize and output a frame
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        // Wait for mock camera thread to stabilize and output initial frame
+        let mut frame_opt = None;
+        for _ in 0..100 {
+            if let Some(f) = camera.latest_frame() {
+                frame_opt = Some(f);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let frame = frame_opt.expect("Mock camera should have frame");
 
         // Configure neural inference mocks
         let dummy_detection = FaceDetection {
@@ -117,9 +125,6 @@ impl TestPipelineFixture {
             vision_config,
         ));
 
-        let frame = camera
-            .latest_frame()
-            .expect("Mock camera should have frame");
         let output = vision.process_frame(&frame).expect("Process frame");
         let enrolled_vector = output.embedding.as_slice().to_vec();
 
