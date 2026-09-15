@@ -1,0 +1,52 @@
+# =============================================================================
+# Dockerfile.ubuntu — Isolated Debian / Ubuntu PAM Sandbox for soos
+# =============================================================================
+
+FROM ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV RUSTUP_HOME=/usr/local/rustup
+ENV CARGO_HOME=/usr/local/cargo
+ENV PATH="/usr/local/cargo/bin:${PATH}"
+
+# System dependencies for PAM compilation, pamtester, and python mock daemon
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential \
+        pkg-config \
+        libpam0g-dev \
+        libclang-dev \
+        pamtester \
+        python3 \
+        curl \
+        ca-certificates \
+        git \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Rust toolchain
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+    | sh -s -- -y --default-toolchain stable --profile minimal \
+    && rustup component add clippy rustfmt
+
+# Create testuser with known password
+RUN useradd -m -s /bin/bash testuser \
+    && echo "testuser:password123" | chpasswd
+
+# Configure Ubuntu / Debian test PAM stack (/etc/pam.d/test-soos)
+# Validates Invariant 5 of ARCHITECTURE.md:
+# "An absent socket degrades to password, never to authorization."
+RUN echo "# Test PAM service for soos (Ubuntu/Debian)\n\
+auth  [success=done default=ignore]  pam_soos.so timeout_ms=250\n\
+auth  required                       pam_unix.so\n\
+account required pam_unix.so\n\
+session required pam_unix.so" > /etc/pam.d/test-soos
+
+# Configure standard Debian/Ubuntu common-auth integration
+RUN echo "# /etc/pam.d/common-auth integration for soos\n\
+auth  [success=done default=ignore]  pam_soos.so timeout_ms=250\n\
+auth  [success=1 default=ignore]    pam_unix.so nullok\n\
+auth  requisite                      pam_deny.so\n\
+auth  required                       pam_permit.so" > /etc/pam.d/common-auth
+
+WORKDIR /workspace
+
+CMD ["bash"]

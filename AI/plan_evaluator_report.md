@@ -1,83 +1,82 @@
-# Plan Evaluator Report: `soos-daemon` Full Pipeline Integration (#19)
+# Plan Evaluation Report: Issue #13 (GitHub #20) — Full PAM Docker Test Matrix
 
-- **Date**: 2026-09-14
-- **Target Issue**: Backlog Issue #12 / GitHub Issue #19 (`feat/daemon-pipeline`)
-- **Evaluator**: Plan Evaluator Sub-Agent (`.agents/skills/plan-evaluator`)
-- **Status**: Complete
-
----
-
-## 1. Context Ingestion Audit
-
-The evaluator has verified the ingestion and strict alignment with:
-- `AI/ARCHITECTURE.md` (§3 System Architecture & Request State Matrix, §4 IPC & Boundaries, §6 Warm Camera Streaming, §7 Local Vision Pipeline & Latency Budget, §9 Privacy & Persistence)
-- `AI/DECISIONS.md` (ADRs: zero OpenCV, local Unix Domain Sockets, v4l/mock camera, ort CPU-only, postcard IPC, Conventional Commits 1.0.0, English policy)
-- `AI/BACKLOG.md` (Sub-issues #12.1 through #12.6)
-- `AI/VERIFICATION_MATRIX.md` (Global Security Invariants & Daemon Criteria D1–D5, D6–D9)
-- `Docs/SECURITY_AND_QUALITY_GUIDELINES.md` (Panic safety, real-time deadlines, bounds, memory zeroization)
-- `AGENTS.md` (Monorepo architecture, immutable test contracts, zero test weakening)
+**Evaluator**: Plan Evaluator Sub-Agent (`plan-evaluator`)  
+**Target Issue**: Backlog Issue #13 / GitHub Issue #20 — `test(pam): Full Docker test matrix — timeout, crash, multi-distro`  
+**Reference Invariants**: `AI/ARCHITECTURE.md` (§5, §11), `AI/DECISIONS.md`, `AI/VERIFICATION_MATRIX.md` (`PA1`, `PA2`, `PA5`, `PA7`, `PA8`)  
+**Timestamp**: 2026-09-15T15:05:00+02:00  
 
 ---
 
-## 2. Evaluation Across the 6 Pillars
+## 1. Executive Summary
+
+This plan evaluation report audits the proposed implementation and test architecture for **Issue #13: Full PAM Docker Test Matrix**. The feature establishes comprehensive multi-distribution Docker validation covering nominal facial authentication, timeout degradation (> 250ms), mid-request daemon crashes, and distribution-specific PAM stack integrations across Debian/Ubuntu, RHEL/Fedora, and Arch Linux.
+
+---
+
+## 2. Evaluation on the 6 Core Pillars
 
 ### Pillar 1: Architectural Alignment & Threat Model
-- **Evaluation**: **PASS**
-- **Rationale**:
-  - The privileged daemon (`soos-daemon`) maintains exclusive ownership of the hardware camera and system storage paths (`/var/lib/soos/biometrics/` and `/var/lib/soos/evidence/`), both strictly inaccessible to non-root accounts (mode `0700`/`0600`).
-  - Strict Unix Domain Socket communication (`/run/soos/daemon.sock`, mode `0660`, owner `root:soos`).
-  - Kernel `SO_PEERCRED` validation is executed on every incoming stream, rejecting any spoofed `uid_hint` with `(Verdict::ProtocolError, ReasonClass::UidMismatch)`.
-  - Non-authorizing fallback: all error and edge conditions map cleanly to `Verdict::Unavailable`, `Verdict::Deny`, or `Verdict::ProtocolError`, which systematically trigger fail-closed `PAM_IGNORE` in the PAM module.
+- **Criterion**: Strict adherence to the unprivileged PAM module (`pam_soos.so`) boundary, communicating strictly over local Unix Domain Socket (`/run/soos/daemon.sock`, `0660`, `root:soos`).
+- **Audit Findings**:
+  - The plan enforces that `pam_soos.so` operates as a client connecting to `/run/soos/daemon.sock`.
+  - Simulates nominal authentication, slow daemon degradation, and daemon crash without modifying security boundaries.
+  - Distribution integration configurations preserve standard fail-closed semantics (`[success=done default=ignore]`).
+- **Verdict**: **COMPLIANT**
 
 ### Pillar 2: PAM Real-Time Latency & Concurrency
-- **Evaluation**: **PASS**
-- **Rationale**:
-  - The daemon enforces a strict 150ms total decision budget (p95 target from ARCHITECTURE.md §7) and propagates the caller's `deadline_monotonic_ns`. If monotonic deadline is exceeded at any stage, the dispatcher immediately terminates execution and returns `(Verdict::Unavailable, ReasonClass::Timeout)`.
-  - Lock-free warm camera frame retrieval via `ArcSwap` takes < 5ms.
-  - Frame freshness is strictly validated: frames older than 150ms are rejected with `(Verdict::Unavailable, ReasonClass::StaleFrame)`.
-  - Zero stream pollution: production daemon code uses structured `tracing` macros exclusively; zero `println!`, `eprintln!`, or `dbg!` macros are present.
+- **Criterion**: Zero Tokio runtime in `pam_soos.so`. Strict 200–250ms timeout budget. Synchronous `std::os::unix::net::UnixStream`. Zero standard stream pollution.
+- **Audit Findings**:
+  - The plan uses purely synchronous primitives in `crates/pam/tests/ipc_tests.rs`.
+  - Verifies that timeout > 250ms triggers immediate failover to `PAM_IGNORE` within the 250ms budget (validating Criterion `PA2`).
+  - Container-level tests assert standard exit codes without standard stream corruption.
+- **Verdict**: **COMPLIANT**
 
 ### Pillar 3: Panic Safety & Fail-Closed Behavior
-- **Evaluation**: **PASS**
-- **Rationale**:
-  - All daemon production code adheres to `#![forbid(unsafe_code)]` and workspace Clippy lints (`-D clippy::unwrap_used`, `-D clippy::expect_used`, `-D clippy::panic`).
-  - Fallible operations (I/O, IPC decoding, cryptographic operations, image conversions) use strongly typed `DaemonError` and `Result<T, DaemonError>` propagation.
-  - Missing biometric enrollment returns `(Verdict::Unavailable, ReasonClass::InternalError)` without panic.
-  - Uninitialized camera or missing frames return `(Verdict::Unavailable, ReasonClass::CameraUnavailable)` without hanging or crashing.
+- **Criterion**: Mandatory `catch_unwind` wrapping FFI boundaries. Zero `unwrap()` / `expect()` in production code. No error converting into `PAM_SUCCESS`.
+- **Audit Findings**:
+  - All mid-request crash paths (immediate socket disconnect, partial header transmission, truncated body) systematically yield `PAM_IGNORE`.
+  - Password fallback is explicitly verified on all degradation paths (`wrong_password` must be rejected).
+- **Verdict**: **COMPLIANT**
 
 ### Pillar 4: Dependency Isolation & Banned Crates
-- **Evaluation**: **PASS**
-- **Rationale**:
-  - Absolute prohibition of banned crates (`opencv`, `nokhwa`).
-  - Uses only approved workspace dependencies: `soos-camera-v4l`, `soos-inference-ort`, `soos-vision`, `soos-biometric-store`, `soos-evidence-store`, `soos-policy`, `soos-protocol`, `tokio`, `nix`, `tracing`, `thiserror`.
-  - Uses safe monotonic clock access via `nix::time::clock_gettime(ClockId::CLOCK_MONOTONIC)` with zero unsafe code.
-  - Declares `publish.workspace = true` in `crates/daemon/Cargo.toml` ensuring alignment with `cargo-deny`.
+- **Criterion**: Absolute prohibition against `opencv` and `nokhwa`. `#![forbid(unsafe_code)]` in all business crates.
+- **Audit Findings**:
+  - No new external crate dependencies added to production crates.
+  - Test harness uses standard library Unix networking and lightweight simulation scripts.
+- **Verdict**: **COMPLIANT**
 
 ### Pillar 5: Data Confidentiality & Zeroization
-- **Evaluation**: **PASS**
-- **Rationale**:
-  - Zero plaintext passwords or biometric vector arrays are accepted or returned over the IPC socket.
-  - `soos_protocol::Response` implements `Zeroize` and resets sensitive fields on drop.
-  - Biometric templates are decrypted in-memory only for the duration of the verification request and zeroized upon drop via `ZeroizeOnDrop`.
-  - Intrusion evidence snapshots are encrypted with AES-256-GCM at rest under `/var/lib/soos/evidence/` with mode `0600` and restricted retention.
+- **Criterion**: Zero passwords transmitted over IPC. No secrets or frames logged.
+- **Audit Findings**:
+  - Simulated test scripts and C harness never transmit passwords over IPC.
+  - Tests verify `pam_unix` handles passwords locally when `pam_soos.so` degrades to `PAM_IGNORE`.
+- **Verdict**: **COMPLIANT**
 
 ### Pillar 6: Test Integrity & TDD Contracts
-- **Evaluation**: **PASS**
-- **Rationale**:
-  - Comprehensive contractual test suite defined in Phase 2 (`crates/daemon/tests/pipeline_integration_tests.rs`):
-    - Sub-issue #12.1: CameraManager initialization and readiness reporting to HealthState.
-    - Sub-issue #12.2: VisionPipeline request handling, monotonic deadline propagation, and stale frame rejection.
-    - Sub-issue #12.3: BiometricStore template loading and graceful handling of unenrolled UIDs.
-    - Sub-issue #12.4: EvidenceStore intrusion snapshot capture on `EventKind::PasswordFailed`.
-    - Sub-issue #12.5: Policy engine authorization decision and per-UID rate limiting.
-    - Sub-issue #12.6: End-to-end multi-verdict verification asserting all 4 paths (`Allow`, `Deny`, `Unavailable`, `ProtocolError`).
-  - Pre-existing tests in `crates/daemon/tests/dispatcher_tests.rs` remain completely intact and unmodified (Zero Test Weakening invariant).
-  - All tests authored in Phase 2 will be verified in RED state before Phase 4 developer implementation.
+- **Criterion**: Immutable test contracts authored before implementation. Comprehensive coverage of all sub-issues #13.1 through #13.6.
+- **Audit Findings**:
+  - Authoring Rust integration tests for mid-request crash scenarios in `crates/pam/tests/ipc_tests.rs`.
+  - Authoring architectural invariant tests in `tests/invariants/src/lib.rs`.
+  - Authoring multi-distro Docker configurations and end-to-end test execution scripts.
+- **Verdict**: **COMPLIANT**
 
 ---
 
-## 3. Plan Evaluation Conclusion & Verdict
+## 3. Pillar Verification Matrix
 
-The proposed implementation plan for the Daemon Full Pipeline Integration strictly complies with all architectural boundaries, security invariants, latency requirements, panic safety standards, and testing contracts.
+| Pillar | Requirement | Plan Status |
+|---|---|---|
+| **Pillar 1** | Architectural Alignment & Threat Model | Compliant |
+| **Pillar 2** | PAM Real-Time Latency & Concurrency | Compliant |
+| **Pillar 3** | Panic Safety & Fail-Closed Behavior | Compliant |
+| **Pillar 4** | Dependency Isolation & Banned Crates | Compliant |
+| **Pillar 5** | Data Confidentiality & Zeroization | Compliant |
+| **Pillar 6** | Test Integrity & TDD Contracts | Compliant |
 
-**VALIDATION_VERDICT: APPROVED**
+---
+
+## 4. Final Verdict
+
+```
+VALIDATION_VERDICT: APPROVED
+```

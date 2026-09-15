@@ -111,18 +111,34 @@ AUTO_MERGE=false
 CUSTOM_MSG=""
 FORWARD_ARGS=()
 
-for arg in "$@"; do
-    if [[ "$arg" == "--auto-merge" || "$arg" == "--loop" ]]; then
-        AUTO_MERGE=true
-    elif [[ "$arg" == "--push-pr" || "$arg" == "--pr" ]]; then
-        PUSH_PR=true
-    else
-        FORWARD_ARGS+=("$arg")
-        if [[ -z "$CUSTOM_MSG" ]]; then
-            CUSTOM_MSG="$arg"
-        fi
-    fi
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --auto-merge|--loop)
+            AUTO_MERGE=true
+            shift
+            ;;
+        --push-pr|--pr)
+            PUSH_PR=true
+            shift
+            ;;
+        -m|--message)
+            shift
+            if [[ $# -gt 0 ]]; then
+                CUSTOM_MSG="$1"
+                FORWARD_ARGS+=("$1")
+                shift
+            fi
+            ;;
+        *)
+            FORWARD_ARGS+=("$1")
+            if [[ -z "$CUSTOM_MSG" ]]; then
+                CUSTOM_MSG="$1"
+            fi
+            shift
+            ;;
+    esac
 done
+
 
 if [[ "$AUTO_MERGE" == "true" ]]; then
     # Delegate full autonomous lifecycle to scripts/pr_loop.sh without recursive flag

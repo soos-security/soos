@@ -482,12 +482,12 @@ Pure business logic crate: takes structured inputs (score, PAD result, UID conte
 
 #### Sub-issues:
 
-- **#13.1** — Dockerized test: `pam_soos.so` loaded + daemon running → facial auth succeeds (mock camera)
-- **#13.2** — Dockerized test: daemon timeout > 250ms → `PAM_IGNORE` → password fallback
-- **#13.3** — Dockerized test: daemon crashes mid-request → `PAM_IGNORE`
-- **#13.4** — Dockerized test: Debian/Ubuntu PAM stack integration
-- **#13.5** — Dockerized test: RHEL/Fedora PAM stack integration
-- **#13.6** — Dockerized test: Arch Linux PAM stack integration
+- [x] **#13.1** — Dockerized test: `pam_soos.so` loaded + daemon running → facial auth succeeds (mock camera)
+- [x] **#13.2** — Dockerized test: daemon timeout > 250ms → `PAM_IGNORE` → password fallback
+- [x] **#13.3** — Dockerized test: daemon crashes mid-request → `PAM_IGNORE`
+- [x] **#13.4** — Dockerized test: Debian/Ubuntu PAM stack integration
+- [x] **#13.5** — Dockerized test: RHEL/Fedora PAM stack integration
+- [x] **#13.6** — Dockerized test: Arch Linux PAM stack integration
 
 ---
 

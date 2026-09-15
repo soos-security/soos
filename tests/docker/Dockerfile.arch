@@ -1,0 +1,47 @@
+# =============================================================================
+# Dockerfile.arch — Isolated Arch Linux PAM Sandbox for soos
+# =============================================================================
+
+FROM archlinux:latest
+
+ENV RUSTUP_HOME=/usr/local/rustup
+ENV CARGO_HOME=/usr/local/cargo
+ENV PATH="/usr/local/cargo/bin:${PATH}"
+
+# Install Arch Linux system dependencies
+RUN pacman -Syu --noconfirm \
+        base-devel \
+        pam \
+        clang \
+        python \
+        curl \
+        ca-certificates \
+        git \
+    && pacman -Scc --noconfirm
+
+# Install Rust toolchain
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+    | sh -s -- -y --default-toolchain stable --profile minimal \
+    && rustup component add clippy rustfmt
+
+# Create testuser with known password
+RUN useradd -m -s /bin/bash testuser \
+    && echo "testuser:password123" | chpasswd
+
+# Configure Arch Linux test PAM stack (/etc/pam.d/test-soos)
+RUN echo "# Test PAM service for soos (Arch Linux)\n\
+auth  [success=done default=ignore]  pam_soos.so timeout_ms=250\n\
+auth  required                       pam_unix.so\n\
+account required pam_unix.so\n\
+session required pam_unix.so" > /etc/pam.d/test-soos
+
+# Configure Arch Linux system-auth integration
+RUN echo "# /etc/pam.d/system-auth integration for soos\n\
+auth  [success=done default=ignore]  pam_soos.so timeout_ms=250\n\
+auth  required                       pam_unix.so try_first_pass nullok\n\
+account required pam_unix.so\n\
+session required pam_unix.so" > /etc/pam.d/system-auth
+
+WORKDIR /workspace
+
+CMD ["bash"]

@@ -11,10 +11,18 @@
 #   6. Automatically removes ephemeral container
 #
 # Usage:
-#   ./run_tests.sh
+#   ./run_tests.sh [--matrix|--all|ubuntu|fedora|arch]
 # =============================================================================
 
 set -euo pipefail
+
+MODE="${1:-default}"
+
+if [[ "${MODE}" == "--matrix" || "${MODE}" == "--all" ]]; then
+    exec ./tests/docker/run_matrix.sh all
+elif [[ "${MODE}" == "ubuntu" || "${MODE}" == "fedora" || "${MODE}" == "arch" ]]; then
+    exec ./tests/docker/run_matrix.sh "${MODE}"
+fi
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -91,76 +99,14 @@ fi
 # ---------------------------------------------------------------------------
 info "Launching ephemeral sandbox container '${CONTAINER_NAME}'..."
 info "  → Mount: $(pwd) → /workspace"
-info "  → Release compilation + pamtester assertions"
+info "  → Running full PAM test matrix suite..."
 
 docker run --rm \
     --name "${CONTAINER_NAME}" \
     -v "$(pwd)":/workspace \
     "${IMAGE_NAME}" \
-    bash -c '
-set -euo pipefail
+    bash /workspace/tests/docker/test_suite.sh
 
-echo ""
-echo "========================================="
-echo "  SOOS — PAM Testing Sandbox"
-echo "========================================="
-echo ""
-
-if [[ ! -f "Cargo.toml" ]]; then
-    echo "[FAIL] Cargo.toml not found in /workspace."
-    exit 1
-fi
-
-echo "[INFO] Compiling PAM module in release mode..."
-cargo build --release -p soos-pam 2>&1
-echo "[OK]   Compilation completed."
-
-SO_PATH="target/release/'"${PAM_MODULE_NAME}"'"
-if [[ ! -f "${SO_PATH}" ]]; then
-    echo "[FAIL] Artifact ${SO_PATH} not found after build."
-    exit 1
-fi
-
-echo "[INFO] Deploying PAM module..."
-cp "${SO_PATH}" '"${PAM_MODULES_DIR}"'/pam_soos.so
-chmod 644 '"${PAM_MODULES_DIR}"'/pam_soos.so
-echo "[OK]   Module deployed to '"${PAM_MODULES_DIR}"'/pam_soos.so"
-
-echo ""
-echo "[TEST] T1 — C ABI loading + valid password authentication"
-if echo "password123" | pamtester test-soos testuser authenticate; then
-    echo "[OK]   T1 passed: module loaded, PAM_IGNORE returned, pam_unix verified password."
-else
-    echo "[FAIL] T1 failed: module crashed or pam_unix rejected password."
-    exit 1
-fi
-
-echo ""
-echo "[TEST] T2 — Invalid password (must reject cleanly)"
-if echo "wrong_password" | pamtester test-soos testuser authenticate; then
-    echo "[FAIL] T2 failed: invalid password was unexpectedly accepted!"
-    exit 1
-else
-    echo "[OK]   T2 passed: invalid password rejected as expected."
-fi
-
-echo ""
-echo "[TEST] T3 — Absent .so module (PAM stack fault tolerance)"
-mv '"${PAM_MODULES_DIR}"'/pam_soos.so '"${PAM_MODULES_DIR}"'/pam_soos.so.bak
-
-if echo "password123" | pamtester test-soos testuser authenticate; then
-    echo "[OK]   T3 passed: PAM stack remains fully functional without pam_soos.so."
-else
-    echo "[WARN] T3: PAM rejected valid password without module."
-fi
-mv '"${PAM_MODULES_DIR}"'/pam_soos.so.bak '"${PAM_MODULES_DIR}"'/pam_soos.so
-
-echo ""
-echo "========================================="
-echo "  ALL SANDBOX INTEGRATION TESTS: OK"
-echo "========================================="
-echo ""
-'
 
 echo ""
 success "═══════════════════════════════════════════"
