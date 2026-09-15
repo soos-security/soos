@@ -26,6 +26,9 @@ Your responsibility is to design interfaces, data structures, and invariants **b
      - When scaffolding `crates/<name>/Cargo.toml`, MUST declare `publish.workspace = true` under `[package]` to inherit `publish = false` from the root workspace.
      - **Rationale**: `deny.toml` ignores private crates via `[licenses.private] ignore = true`. Omitting `publish.workspace = true` causes `cargo-deny` in CI to evaluate the internal crate against `licenses.allow`, rejecting the project's `AGPL-3.0-or-later` license.
      - Always declare `[lints] workspace = true`.
+   - **PAM Linkage & Package Aliasing Conventions**:
+     - When integrating `pam-bindings`, the package name on crates.io is `pam-bindings`, but its internal library name is `pam`. In workspace `Cargo.toml`, declare `pam_bindings = { package = "pam-bindings", version = "0.3.0" }` to allow consistent `use pam_bindings::...` across the workspace.
+     - When crates link to Linux-PAM (`-lpam`), standard Linux systems without developer packages only supply `libpam.so.0`. Always include a `build.rs` in `crates/pam/` that detects `libpam.so.0` in standard library directories and creates a symlink in `OUT_DIR` with `cargo:rustc-link-search=native={OUT_DIR}` for self-contained compilation.
 
 2. **Type & Schema Design**:
    - Define bounded structs, enums, and explicit error types (`thiserror`).

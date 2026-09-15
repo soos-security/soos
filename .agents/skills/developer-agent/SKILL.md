@@ -60,7 +60,17 @@ Your responsibility is to write the minimal production code necessary to turn pr
    - Filter out zero-duration timeouts before setting socket options to prevent OS-level `EINVAL` returns.
    - Map both `io::ErrorKind::TimedOut` and `io::ErrorKind::WouldBlock` to domain timeout variants.
 
-5. **Deliverable & Tooling Rules**:
+5. **PAM FFI & Display Manager Stream Isolation**:
+   - **Safe Function Signature on C Exports**:
+     - Declare PAM C ABI entry points as `pub extern "C" fn pam_sm_authenticate(...) -> i32` (omitting the `unsafe` keyword on the function signature). In Rust 2021, `extern "C"` functions are safe to call by default. Marking the signature `unsafe` breaks existing test harnesses that invoke `pam_sm_authenticate` without an `unsafe` block.
+     - Confine pointer operations to internal `unsafe { ... }` blocks with explicit `// SAFETY:` documentation.
+   - **Null Handle Resilience in Tests**:
+     - Support unit tests that call entry points with `ptr::null_mut()`. Accept `Option<&mut PamHandle>` internally, falling back to `libc::getuid()`, and only invoke `pamh.get_user(None)` when `pamh` is non-null.
+   - **Display Manager Output Isolation & Silent Panic Hook**:
+     - Rust's default panic hook writes backtraces to `stderr`, which can corrupt graphical display manager streams (`gdm`, `sddm`, `lightdm`) and crash sessions.
+     - Register a silent panic hook via `std::sync::Once` that captures source location (`file:line:col`) to thread-local storage for syslog logging (`libc::syslog(LOG_AUTHPRIV | LOG_ERR, ...)`) while suppressing `stderr` printing.
+
+6. **Deliverable & Tooling Rules**:
    - Fully working, cleanly formatted production code with 100% green test passes.
    - **Artifact Metadata vs Repository Files**:
      When generating files with `write_to_file`, provide `ArtifactMetadata` ONLY for documents saved inside the artifact directory (`<appDataDir>/brain/<conversation-id>/`). For all project repository files (`AI/plan_evaluator_report.md`, `crates/*`, `Docs/*`), omit `ArtifactMetadata`.
