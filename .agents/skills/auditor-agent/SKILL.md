@@ -21,6 +21,7 @@ Your responsibility is to conduct a static security and compliance review of spe
    - Verify zero `unwrap()` or `expect()` in PAM and library production code paths.
    - Verify that all C FFI entry points (`pam_sm_authenticate`, `pam_sm_setcred`) are safely encapsulated with `catch_unwind`.
    - Confirm that any panic inside `catch_unwind` is mapped directly to `PAM_IGNORE` (never to authorization).
+   - Verify that any panic caught by `catch_unwind` is logged via `libc::syslog(LOG_AUTHPRIV | LOG_ERR, ...)` using a fixed `"%s"` format specifier without exposing passwords, usernames, or IPC payloads, and with embedded nul characters sanitized.
 
 2. **Unsafe Isolation & Code Quality**:
    - Verify `#![forbid(unsafe_code)]` is declared in all business and computational crates (`protocol`, `policy`, `vision`, `inference-ort`, `biometric-store`).
@@ -28,6 +29,7 @@ Your responsibility is to conduct a static security and compliance review of spe
 
 3. **Output Isolation**:
    - Assert zero `println!`, `eprintln!`, `print!`, `eprint!`, or `dbg!` in PAM production code (`clippy::print_stdout`, `clippy::print_stderr`, `clippy::dbg_macro`).
+   - Confirm that a silent panic hook is initialized to prevent Rust's default panic printer from polluting `stderr` in graphical display managers.
 
 4. **Synchronous Real-Time Deadline & Latency Auditing**:
    - For synchronous socket operations, verify that timeouts are calculated cumulatively across multi-part reads/writes, rather than relying on a static per-syscall timeout.
