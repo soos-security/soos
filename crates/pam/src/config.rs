@@ -57,6 +57,53 @@ impl Default for PamConfig {
     }
 }
 
+/// Parses an iterator of [`&CStr`] references (e.g. from `pam-bindings`) into a [`PamConfig`].
+pub fn parse_cstrs<'a, I>(args: I) -> PamConfig
+where
+    I: IntoIterator<Item = &'a std::ffi::CStr>,
+{
+    let mut config = PamConfig::default();
+    for (i, cstr) in args.into_iter().enumerate() {
+        if i >= MAX_ARGC {
+            break;
+        }
+        if let Ok(s) = cstr.to_str() {
+            apply_arg(&mut config, s.trim());
+        }
+    }
+    config
+}
+
+fn apply_arg(config: &mut PamConfig, trimmed: &str) {
+    if let Some(val) = trimmed.strip_prefix("timeout_ms=") {
+        if let Ok(parsed) = val.trim().parse::<u64>() {
+            config.timeout_ms = parsed.clamp(MIN_TIMEOUT_MS, MAX_TIMEOUT_MS);
+        }
+    } else if trimmed == "event=password-failed" {
+        config.event = Some(PamEvent::PasswordFailed);
+    } else if let Some(val) = trimmed
+        .strip_prefix("socket_path=")
+        .or_else(|| trimmed.strip_prefix("socket="))
+    {
+        let path_str = val.trim();
+        if !path_str.is_empty() {
+            config.socket_path = PathBuf::from(path_str);
+        }
+    } else if let Some(val) = trimmed.strip_prefix("service=") {
+        let s = val.trim();
+        if !s.is_empty() {
+            let bounded_len = s.len().min(soos_protocol::MAX_SERVICE_LEN);
+            if let Some(sub) = s.get(..bounded_len) {
+                config.service = sub.to_string();
+            }
+        }
+    } else if let Some(val) = trimmed.strip_prefix("uid=") {
+        if let Ok(parsed) = val.trim().parse::<u32>() {
+            config.uid = Some(parsed);
+        }
+    }
+}
+
 /// Parses PAM `argc` and `argv` into a [`PamConfig`].
 ///
 /// # Safety
@@ -94,32 +141,7 @@ pub unsafe fn parse_argv(argc: i32, argv: *const *const u8) -> PamConfig {
             None => continue,
         };
 
-        let trimmed = arg_str.trim();
-
-        if let Some(val) = trimmed.strip_prefix("timeout_ms=") {
-            if let Ok(parsed) = val.trim().parse::<u64>() {
-                config.timeout_ms = parsed.clamp(MIN_TIMEOUT_MS, MAX_TIMEOUT_MS);
-            }
-        } else if trimmed == "event=password-failed" {
-            config.event = Some(PamEvent::PasswordFailed);
-        } else if let Some(val) = trimmed.strip_prefix("socket_path=") {
-            let path_str = val.trim();
-            if !path_str.is_empty() {
-                config.socket_path = PathBuf::from(path_str);
-            }
-        } else if let Some(val) = trimmed.strip_prefix("service=") {
-            let s = val.trim();
-            if !s.is_empty() {
-                let bounded_len = s.len().min(soos_protocol::MAX_SERVICE_LEN);
-                if let Some(sub) = s.get(..bounded_len) {
-                    config.service = sub.to_string();
-                }
-            }
-        } else if let Some(val) = trimmed.strip_prefix("uid=") {
-            if let Ok(parsed) = val.trim().parse::<u32>() {
-                config.uid = Some(parsed);
-            }
-        }
+        apply_arg(&mut config, arg_str.trim());
     }
 
     config

@@ -59,6 +59,7 @@ BRANCH_TO_ISSUE = {
     "feat/daemon-pipeline": 12,
     "test/pam-docker-matrix": 13,
     "feat/pam-bindings-upgrade": 14,
+    "feat/pam-bindings-migration": 14,
     "feat/vision-pad": 15,
     "chore/production-hardening": 16,
 }

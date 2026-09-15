@@ -498,11 +498,11 @@ Pure business logic crate: takes structured inputs (score, PAD result, UID conte
 
 #### Sub-issues:
 
-- **#14.1** — Migrate from raw C ABI exports to `pam-bindings` 0.3.0
+- [x] **#14.1** — Migrate from raw C ABI exports to `pam-bindings` 0.3.0
   - Implement `PamHooks` trait
   - Maintain `catch_unwind` wrapping
 
-- **#14.2** — Implement syslog logging on caught panics
+- [x] **#14.2** — Implement syslog logging on caught panics
   - Log panic location and backtrace summary to syslog
   - NEVER log request content or user data
 
