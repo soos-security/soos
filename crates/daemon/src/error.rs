@@ -50,4 +50,24 @@ pub enum DaemonError {
         /// Maximum allowable size.
         max: usize,
     },
+
+    /// Biometric store error.
+    #[error("Biometric store error: {0}")]
+    BiometricStore(#[from] soos_biometric_store::BiometricStoreError),
+
+    /// Evidence store error.
+    #[error("Evidence store error: {0}")]
+    EvidenceStore(#[from] soos_evidence_store::EvidenceStoreError),
+
+    /// Vision pipeline error.
+    #[error("Vision pipeline error: {0}")]
+    Vision(#[from] soos_vision::VisionError),
+
+    /// Camera capture error.
+    #[error("Camera error: {0}")]
+    Camera(#[from] soos_camera_v4l::CameraError),
+
+    /// Monotonic clock error.
+    #[error("Clock error: {0}")]
+    Clock(String),
 }

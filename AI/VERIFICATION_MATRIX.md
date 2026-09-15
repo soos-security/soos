@@ -64,6 +64,12 @@ This document translates the critical gating criteria from §11 of `ARCHITECTURE
 | D3 | Starts with `RestrictAddressFamilies=AF_UNIX` | Systemd service test (`systemd_test::test_systemd_unit_file_sandboxing_directives`) | ☑ Validated |
 | D4 | Health check exposes `socket_ready`, `camera_ready`, `models_verified` | Integration test (`health_tests::test_health_component_readiness_reporting`) | ☑ Validated |
 | D5 | Zero sensitive information emitted in logs | Log audit (`logging_audit_test::test_daemon_source_code_has_zero_sensitive_data_in_logs`) | ☑ Validated |
+| D6 | Camera readiness integrated with HealthState and auth checks | Integration test (`pipeline_integration_tests::test_12_1_camera_startup_reports_readiness_to_health`) | ✅ Verified |
+| D7 | Monotonic deadline propagation and 150ms decision budget enforced | Integration test (`pipeline_integration_tests::test_12_2_deadline_exceeded_returns_unavailable_timeout`) | ✅ Verified |
+| D8 | BiometricStore template retrieval with missing enrollment fallback | Integration test (`pipeline_integration_tests::test_12_3_missing_enrollment_returns_unavailable`) | ✅ Verified |
+| D9 | EvidenceStore intrusion snapshot on PasswordFailed event | Integration test (`pipeline_integration_tests::test_12_4_password_failed_event_captures_evidence_snapshot`) | ✅ Verified |
+| D10 | Policy rate limiting integrated per UID | Integration test (`pipeline_integration_tests::test_12_5_rate_limit_exceeded_returns_protocol_error_rate_limited`) | ✅ Verified |
+| D11 | Full pipeline end-to-end all 4 verdict paths (Allow, Deny, Unavailable, ProtocolError) | Integration test (`pipeline_integration_tests::test_12_6_all_four_verdict_paths`) | ✅ Verified |
 
 ---
 

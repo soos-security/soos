@@ -206,7 +206,7 @@ fn open_and_stream(
         config.format
     );
 
-    let start_time = Instant::now();
+    let _start_time = Instant::now();
     let mut warmup_discarded: usize = 0;
     let mut sequence: u64 = 0;
 
@@ -226,7 +226,7 @@ fn open_and_stream(
         // Camera is now stabilized and ready
         is_ready.store(true, Ordering::Relaxed);
 
-        let mono_ns = u64::try_from(start_time.elapsed().as_nanos()).unwrap_or(u64::MAX);
+        let mono_ns = monotonic_nanos();
         let frame = Frame::new(
             buf.to_vec(),
             config.width,
@@ -264,4 +264,20 @@ fn open_and_stream(
     }
 
     Ok(())
+}
+
+/// Returns the current monotonic clock timestamp in nanoseconds.
+fn monotonic_nanos() -> u64 {
+    let mut ts = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: Stack-allocated timespec pointer is valid and non-null for clock_gettime.
+    let ret = unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) };
+    if ret == 0 && ts.tv_sec >= 0 && ts.tv_nsec >= 0 {
+        let sec = ts.tv_sec.cast_unsigned().saturating_mul(1_000_000_000);
+        sec.saturating_add(ts.tv_nsec.cast_unsigned())
+    } else {
+        0
+    }
 }
