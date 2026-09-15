@@ -1,82 +1,42 @@
-# Plan Evaluation Report: Issue #13 (GitHub #20) — Full PAM Docker Test Matrix
+# Plan Evaluation Report — PAM Module pam-bindings 0.3.0 Migration (#21)
 
-**Evaluator**: Plan Evaluator Sub-Agent (`plan-evaluator`)  
-**Target Issue**: Backlog Issue #13 / GitHub Issue #20 — `test(pam): Full Docker test matrix — timeout, crash, multi-distro`  
-**Reference Invariants**: `AI/ARCHITECTURE.md` (§5, §11), `AI/DECISIONS.md`, `AI/VERIFICATION_MATRIX.md` (`PA1`, `PA2`, `PA5`, `PA7`, `PA8`)  
-**Timestamp**: 2026-09-15T15:05:00+02:00  
-
----
-
-## 1. Executive Summary
-
-This plan evaluation report audits the proposed implementation and test architecture for **Issue #13: Full PAM Docker Test Matrix**. The feature establishes comprehensive multi-distribution Docker validation covering nominal facial authentication, timeout degradation (> 250ms), mid-request daemon crashes, and distribution-specific PAM stack integrations across Debian/Ubuntu, RHEL/Fedora, and Arch Linux.
+- **Issue**: Issue #14 (`feat/pam-bindings-migration` / GitHub Issue #21)
+- **Target Component**: `crates/pam` (`soos-pam` / `pam_soos.so`)
+- **Evaluator**: Plan Evaluator Sub-Agent
+- **Date**: 2026-09-15
 
 ---
 
-## 2. Evaluation on the 6 Core Pillars
+## 1. Evaluation Against Architectural Pillars
 
 ### Pillar 1: Architectural Alignment & Threat Model
-- **Criterion**: Strict adherence to the unprivileged PAM module (`pam_soos.so`) boundary, communicating strictly over local Unix Domain Socket (`/run/soos/daemon.sock`, `0660`, `root:soos`).
-- **Audit Findings**:
-  - The plan enforces that `pam_soos.so` operates as a client connecting to `/run/soos/daemon.sock`.
-  - Simulates nominal authentication, slow daemon degradation, and daemon crash without modifying security boundaries.
-  - Distribution integration configurations preserve standard fail-closed semantics (`[success=done default=ignore]`).
-- **Verdict**: **COMPLIANT**
+- **Evaluation**: The proposed plan strictly maintains the role of `pam_soos.so` as an unprivileged client communicating with the privileged `soos-daemon` over the local Unix domain socket (`/run/soos/daemon.sock`).
+- **Compliance**: Fully compliant. The module does not attempt to access root storage (`/var/lib/soos/`) or open camera devices directly; all authentication decisions continue to be delegated via IPC.
 
 ### Pillar 2: PAM Real-Time Latency & Concurrency
-- **Criterion**: Zero Tokio runtime in `pam_soos.so`. Strict 200–250ms timeout budget. Synchronous `std::os::unix::net::UnixStream`. Zero standard stream pollution.
-- **Audit Findings**:
-  - The plan uses purely synchronous primitives in `crates/pam/tests/ipc_tests.rs`.
-  - Verifies that timeout > 250ms triggers immediate failover to `PAM_IGNORE` within the 250ms budget (validating Criterion `PA2`).
-  - Container-level tests assert standard exit codes without standard stream corruption.
-- **Verdict**: **COMPLIANT**
+- **Evaluation**: The plan uses `pam-bindings` 0.3.0 which wraps Linux-PAM's C ABI synchronously. No asynchronous runtimes (Tokio) are introduced. Synchronous socket calls maintain strict timeouts (200–250ms for authentication, 20ms for password-failed telemetry). Output stream isolation is strictly preserved: `println!`, `eprintln!`, and `dbg!` remain denied. A custom silent panic hook suppresses stderr output, preventing display manager corruption.
+- **Compliance**: Fully compliant.
 
 ### Pillar 3: Panic Safety & Fail-Closed Behavior
-- **Criterion**: Mandatory `catch_unwind` wrapping FFI boundaries. Zero `unwrap()` / `expect()` in production code. No error converting into `PAM_SUCCESS`.
-- **Audit Findings**:
-  - All mid-request crash paths (immediate socket disconnect, partial header transmission, truncated body) systematically yield `PAM_IGNORE`.
-  - Password fallback is explicitly verified on all degradation paths (`wrong_password` must be rejected).
-- **Verdict**: **COMPLIANT**
+- **Evaluation**: Every entrypoint is protected by `catch_unwind(AssertUnwindSafe(...))`. On any caught panic, the module captures the panic location and summary, logs it to syslog via `libc::syslog(LOG_AUTHPRIV | LOG_ERR, ...)`, and returns `PamResultCode::PAM_IGNORE`. Under no circumstances can a panic or error degrade to `PAM_SUCCESS`.
+- **Compliance**: Fully compliant with Invariant 5 and fail-closed security.
 
 ### Pillar 4: Dependency Isolation & Banned Crates
-- **Criterion**: Absolute prohibition against `opencv` and `nokhwa`. `#![forbid(unsafe_code)]` in all business crates.
-- **Audit Findings**:
-  - No new external crate dependencies added to production crates.
-  - Test harness uses standard library Unix networking and lightweight simulation scripts.
-- **Verdict**: **COMPLIANT**
+- **Evaluation**: The plan introduces `pam-bindings` 0.3.0. The crate has zero dependencies on `opencv`, `nokhwa`, or Tokio. Workspace lints (`unwrap_used = "deny"`, `expect_used = "deny"`, `print_stdout = "deny"`, `print_stderr = "deny"`) remain strictly enforced.
+- **Compliance**: Fully compliant.
 
 ### Pillar 5: Data Confidentiality & Zeroization
-- **Criterion**: Zero passwords transmitted over IPC. No secrets or frames logged.
-- **Audit Findings**:
-  - Simulated test scripts and C harness never transmit passwords over IPC.
-  - Tests verify `pam_unix` handles passwords locally when `pam_soos.so` degrades to `PAM_IGNORE`.
-- **Verdict**: **COMPLIANT**
+- **Evaluation**: Syslog panic logging explicitly forbids logging passwords, user input, biometric vectors, or request contents. The log format is strictly constrained to `soos-pam: authentication panic caught at {location}: {summary}`.
+- **Compliance**: Fully compliant.
 
 ### Pillar 6: Test Integrity & TDD Contracts
-- **Criterion**: Immutable test contracts authored before implementation. Comprehensive coverage of all sub-issues #13.1 through #13.6.
-- **Audit Findings**:
-  - Authoring Rust integration tests for mid-request crash scenarios in `crates/pam/tests/ipc_tests.rs`.
-  - Authoring architectural invariant tests in `tests/invariants/src/lib.rs`.
-  - Authoring multi-distro Docker configurations and end-to-end test execution scripts.
-- **Verdict**: **COMPLIANT**
+- **Evaluation**: The plan mandates the authoring of comprehensive integration and unit tests before modifying production code (TDD Red Phase). Tests will assert fail-closed `PAM_IGNORE` fallback, `PamHooks` method execution, and panic logging safety. All tests are treated as immutable contracts (zero test weakening).
+- **Compliance**: Fully compliant.
 
 ---
 
-## 3. Pillar Verification Matrix
+## 2. Recommendation & Verdict
 
-| Pillar | Requirement | Plan Status |
-|---|---|---|
-| **Pillar 1** | Architectural Alignment & Threat Model | Compliant |
-| **Pillar 2** | PAM Real-Time Latency & Concurrency | Compliant |
-| **Pillar 3** | Panic Safety & Fail-Closed Behavior | Compliant |
-| **Pillar 4** | Dependency Isolation & Banned Crates | Compliant |
-| **Pillar 5** | Data Confidentiality & Zeroization | Compliant |
-| **Pillar 6** | Test Integrity & TDD Contracts | Compliant |
+All 6 architectural pillars have been thoroughly evaluated and satisfy the zero-trust invariants of `AI/ARCHITECTURE.md` and `AGENTS.md`.
 
----
-
-## 4. Final Verdict
-
-```
-VALIDATION_VERDICT: APPROVED
-```
+**VALIDATION_VERDICT: APPROVED**

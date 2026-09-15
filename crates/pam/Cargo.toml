@@ -16,12 +16,12 @@ crate-type = ["cdylib", "rlib"]
 soos-protocol = { workspace = true }
 getrandom = { workspace = true }
 libc = { workspace = true }
+pam_bindings = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
 
 [build-dependencies]
-# Direct C symbol exports used for initial skeleton.
 
 [lints]
 workspace = true

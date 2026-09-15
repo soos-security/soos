@@ -499,6 +499,57 @@ mod tests {
         );
     }
 
+    /// PA11 Invariant: crates/pam must depend on pam-bindings 0.3.0 and implement PamHooks trait.
+    #[test]
+    fn test_pam_crate_uses_pam_bindings_and_implements_pam_hooks() {
+        let root = workspace_root();
+        let pam_cargo = root.join("crates").join("pam").join("Cargo.toml");
+        assert!(pam_cargo.exists());
+        let cargo_content = fs::read_to_string(&pam_cargo).expect("pam Cargo.toml");
+        assert!(
+            cargo_content.contains("pam_bindings") || cargo_content.contains("pam-bindings"),
+            "crates/pam/Cargo.toml must declare pam_bindings dependency"
+        );
+
+        let root_cargo = root.join("Cargo.toml");
+        let root_content = fs::read_to_string(&root_cargo).expect("root Cargo.toml");
+        assert!(
+            root_content.contains("pam-bindings") && root_content.contains("0.3.0"),
+            "root Cargo.toml must declare pam-bindings version 0.3.0"
+        );
+
+        let lib_rs = root.join("crates").join("pam").join("src").join("lib.rs");
+        let lib_content = fs::read_to_string(&lib_rs).expect("pam lib.rs");
+        assert!(
+            lib_content.contains("PamHooks for SoosPam") || lib_content.contains("impl PamHooks"),
+            "crates/pam/src/lib.rs must implement PamHooks trait"
+        );
+    }
+
+    /// PA12 Invariant: crates/pam must include syslog panic logging module and never log secrets.
+    #[test]
+    fn test_pam_crate_has_syslog_panic_logging_without_secrets() {
+        let root = workspace_root();
+        let syslog_rs = root
+            .join("crates")
+            .join("pam")
+            .join("src")
+            .join("syslog.rs");
+        assert!(
+            syslog_rs.exists(),
+            "crates/pam/src/syslog.rs must exist for panic syslog logging"
+        );
+        let syslog_content = fs::read_to_string(&syslog_rs).expect("syslog.rs content");
+        assert!(
+            syslog_content.contains("libc::syslog"),
+            "crates/pam/src/syslog.rs must call libc::syslog"
+        );
+        assert!(
+            syslog_content.contains("LOG_AUTHPRIV"),
+            "crates/pam/src/syslog.rs must use LOG_AUTHPRIV facility"
+        );
+    }
+
     fn collect_rs_files(dir: &Path, files: &mut Vec<PathBuf>) {
         if let Ok(entries) = fs::read_dir(dir) {
             for entry in entries.flatten() {

@@ -58,6 +58,7 @@ tempfile = "3"
 # Low-level primitives & random generation
 getrandom = "0.3"
 libc = "0.2"
+pam_bindings = { package = "pam-bindings", version = "0.3.0" }
 
 jpeg-decoder = { version = "0.3", default-features = false }
 

@@ -1,34 +1,38 @@
 //! # pam_soos — Linux PAM Module for Local Facial Verification
 //!
-//! This module is a `cdylib` loaded dynamically by Linux-PAM. It exports the standard
-//! C ABI entry points `pam_sm_authenticate` and `pam_sm_setcred`.
+//! This module is a `cdylib` loaded dynamically by Linux-PAM. It implements the
+//! [`pam_bindings::module::PamHooks`] trait via [`SoosPam`] and exports the standard
+//! Linux-PAM C ABI entry points.
 //!
 //! ## Core Security Principles
 //!
 //! 1. **Zero Async Runtime**: Strictly uses synchronous blocking primitives (`std::os::unix::net::UnixStream`).
 //! 2. **Strict Latency Budget**: Maximum 200–250ms total execution time (connect + request + response).
-//! 3. **Panic Resilience**: `catch_unwind` wraps every FFI entry point, systematically returning `PAM_IGNORE`.
+//! 3. **Panic Resilience**: `catch_unwind` wraps every entry point, logging caught panics to syslog and systematically returning `PAM_IGNORE`.
 //! 4. **Zero Secrets on Wire**: Never inspects, processes, or transmits passwords over IPC.
 //! 5. **Safe Fallback**: Any error or timeout degrades silently to `PAM_IGNORE` for password fallback.
 //!
 //! ## Operational Flow
 //!
 //! Linux-PAM invokes `pam_sm_authenticate`:
-//! 1. Arguments (`argc`, `argv`) are parsed safely into a bounded [`config::PamConfig`].
-//! 2. If configured with `event=password-failed`: sends telemetry to the daemon within 20ms and returns `PAM_IGNORE`.
-//! 3. Otherwise: performs synchronous IPC authentication handshake with `soos-daemon`.
-//! 4. Renders `PAM_SUCCESS` exclusively upon receiving `Verdict::Allow` with matching nonce. All other outcomes return `PAM_IGNORE`.
+//! 1. Arguments are parsed into a bounded [`config::PamConfig`].
+//! 2. Target UID is determined via explicit PAM argument override, `pamh.get_user(None)` lookup, or `libc::getuid()` fallback.
+//! 3. If configured with `event=password-failed`: sends telemetry to daemon within 20ms and returns `PAM_IGNORE`.
+//! 4. Otherwise: performs synchronous IPC authentication handshake with `soos-daemon`.
+//! 5. Renders `PAM_SUCCESS` exclusively upon receiving `Verdict::Allow`. All other outcomes return `PAM_IGNORE`.
 
-// NOTE: unsafe is required ONLY for C ABI symbol exports (`extern "C"`), libc UID query, and bounded argv parsing.
-// All business logic remains safe Rust.
 #![deny(clippy::all)]
 
 pub mod config;
 pub mod ipc;
+pub mod syslog;
 
+use std::ffi::CStr;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
-use config::{parse_argv, PamEvent};
+use config::{parse_cstrs, PamConfig, PamEvent};
+pub use pam_bindings::constants::{PamFlag, PamResultCode};
+pub use pam_bindings::module::{PamHandle, PamHooks};
 use soos_protocol::types::{EventKind, Verdict};
 
 // ---------------------------------------------------------------------------
@@ -42,14 +46,112 @@ pub const PAM_SUCCESS: i32 = 0;
 pub const PAM_IGNORE: i32 = 25;
 
 // ---------------------------------------------------------------------------
-// Opaque PAM Handle Pointer
+// SoosPam and PamHooks Trait Implementation
 // ---------------------------------------------------------------------------
 
-/// Opaque pointer to Linux-PAM internal handle structure.
-/// This pointer is never dereferenced and only forwarded when required.
-#[repr(C)]
-pub struct PamHandle {
-    _opaque: [u8; 0],
+/// Main PAM module hook handler implementing [`PamHooks`].
+pub struct SoosPam;
+
+impl SoosPam {
+    /// Internal authentication logic shared between `PamHooks` and C ABI exports.
+    ///
+    /// # Panic Safety Guarantee
+    ///
+    /// All internal execution is wrapped in `catch_unwind`. Any panic triggers a syslog
+    /// alert with source location and backtrace summary, and systematically returns
+    /// [`PamResultCode::PAM_IGNORE`].
+    pub fn authenticate_with_config(
+        pamh: Option<&mut PamHandle>,
+        config: &PamConfig,
+    ) -> PamResultCode {
+        syslog::init_panic_hook();
+
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            let uid = config.uid.unwrap_or_else(|| {
+                if let Some(h) = pamh {
+                    if let Ok(username) = h.get_user(None) {
+                        if let Some(resolved_uid) = resolve_username_to_uid(&username) {
+                            return resolved_uid;
+                        }
+                    }
+                }
+                // SAFETY: getuid is a safe, non-allocating libc syscall returning caller process UID.
+                unsafe { libc::getuid() }
+            });
+
+            if config.event == Some(PamEvent::PasswordFailed) {
+                // Best-effort telemetry notification bounded by 20ms ceiling
+                let _ = ipc::notify_event(config, uid, EventKind::PasswordFailed);
+                return PamResultCode::PAM_IGNORE;
+            }
+
+            match ipc::authenticate(config, uid) {
+                Ok(Verdict::Allow) => PamResultCode::PAM_SUCCESS,
+                Ok(Verdict::Deny | Verdict::Unavailable | Verdict::ProtocolError) => {
+                    PamResultCode::PAM_IGNORE
+                }
+                Err(_) => PamResultCode::PAM_IGNORE,
+            }
+        }));
+
+        match result {
+            Ok(code) => code,
+            Err(payload) => {
+                let location = syslog::take_panic_location();
+                let summary = if let Some(s) = payload.downcast_ref::<&str>() {
+                    *s
+                } else if let Some(s) = payload.downcast_ref::<String>() {
+                    s.as_str()
+                } else {
+                    "unspecified panic payload"
+                };
+
+                syslog::log_panic(summary, location.as_deref());
+
+                // Invariant 5 of ARCHITECTURE.md:
+                // "A panic degrades to password fallback, never to authorization."
+                PamResultCode::PAM_IGNORE
+            }
+        }
+    }
+}
+
+impl PamHooks for SoosPam {
+    fn sm_authenticate(pamh: &mut PamHandle, args: Vec<&CStr>, _flags: PamFlag) -> PamResultCode {
+        let config = parse_cstrs(args);
+        Self::authenticate_with_config(Some(pamh), &config)
+    }
+
+    fn sm_setcred(_pamh: &mut PamHandle, _args: Vec<&CStr>, _flags: PamFlag) -> PamResultCode {
+        PamResultCode::PAM_IGNORE
+    }
+}
+
+/// Resolves a PAM username string to a numeric POSIX UID using reentrant `getpwnam_r`.
+fn resolve_username_to_uid(username: &str) -> Option<u32> {
+    let c_user = std::ffi::CString::new(username).ok()?;
+    let mut pwd = std::mem::MaybeUninit::<libc::passwd>::uninit();
+    let mut result = std::ptr::null_mut();
+    let mut buf = vec![0u8; 1024];
+
+    // SAFETY: getpwnam_r is standard POSIX reentrant user lookup.
+    let ret = unsafe {
+        libc::getpwnam_r(
+            c_user.as_ptr(),
+            pwd.as_mut_ptr(),
+            buf.as_mut_ptr().cast(),
+            buf.len(),
+            &mut result,
+        )
+    };
+
+    if ret == 0 && !result.is_null() {
+        // SAFETY: pwd initialized by getpwnam_r when result is non-null.
+        let pwd_val = unsafe { pwd.assume_init() };
+        Some(pwd_val.pw_uid)
+    } else {
+        None
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -60,60 +162,36 @@ pub struct PamHandle {
 ///
 /// # Safety
 ///
-/// Invoked by Linux-PAM via the C ABI. `pamh` is an opaque pointer supplied by
-/// PAM and must not be arbitrarily dereferenced. `argv` points to an array of
-/// `argc` C strings.
-///
-/// # Panic Safety Guarantee
-///
-/// All panics are intercepted by `catch_unwind`. If an internal panic occurs,
-/// the function returns `PAM_IGNORE` to ensure seamless fallback to password.
+/// Invoked by Linux-PAM via the C ABI. `pamh` is supplied by PAM. If non-null,
+/// it is forwarded to `SoosPam`. `argv` points to an array of `argc` C strings.
 #[allow(
     clippy::not_unsafe_ptr_arg_deref,
     reason = "Exported C ABI entry point invoked by Linux-PAM; raw pointers are guarded against null and unbounded reads"
 )]
 #[no_mangle]
 pub extern "C" fn pam_sm_authenticate(
-    _pamh: *mut PamHandle,
+    pamh: *mut PamHandle,
     _flags: i32,
     argc: i32,
     argv: *const *const u8,
 ) -> i32 {
-    let result = catch_unwind(AssertUnwindSafe(|| {
-        // SAFETY: `argv` points to `argc` pointers passed across the C ABI by Linux-PAM.
-        let config = unsafe { parse_argv(argc, argv) };
+    let pamh_opt = if pamh.is_null() {
+        None
+    } else {
+        // SAFETY: pamh was verified non-null and is a valid PAM handle.
+        unsafe { pamh.as_mut() }
+    };
 
-        // SAFETY: getuid is a non-allocating, safe libc syscall returning the process UID.
-        let uid = config.uid.unwrap_or_else(|| unsafe { libc::getuid() });
+    // SAFETY: argv points to argc pointers passed across the C ABI.
+    let config = unsafe { config::parse_argv(argc, argv) };
 
-        if config.event == Some(PamEvent::PasswordFailed) {
-            // Best-effort telemetry notification bounded by 20ms ceiling
-            let _ = ipc::notify_event(&config, uid, EventKind::PasswordFailed);
-            return PAM_IGNORE;
-        }
-
-        match ipc::authenticate(&config, uid) {
-            Ok(Verdict::Allow) => PAM_SUCCESS,
-            Ok(Verdict::Deny | Verdict::Unavailable | Verdict::ProtocolError) => PAM_IGNORE,
-            Err(_) => PAM_IGNORE,
-        }
-    }));
-
-    match result {
-        Ok(code) => code,
-        Err(_) => {
-            // Invariant 5 of ARCHITECTURE.md:
-            // "A panic degrades to password fallback, never to authorization."
-            PAM_IGNORE
-        }
+    match SoosPam::authenticate_with_config(pamh_opt, &config) {
+        PamResultCode::PAM_SUCCESS => PAM_SUCCESS,
+        _ => PAM_IGNORE,
     }
 }
 
 /// Credential management entry point called by Linux-PAM.
-///
-/// # Safety
-///
-/// Same conditions as `pam_sm_authenticate`.
 ///
 /// `soos` does not manage credential tokens; systematically returns `PAM_IGNORE`.
 #[no_mangle]
@@ -123,11 +201,51 @@ pub extern "C" fn pam_sm_setcred(
     _argc: i32,
     _argv: *const *const u8,
 ) -> i32 {
-    let result = catch_unwind(AssertUnwindSafe(|| PAM_IGNORE));
-    match result {
-        Ok(code) => code,
-        Err(_) => PAM_IGNORE,
-    }
+    PAM_IGNORE
+}
+
+/// Account management entry point called by Linux-PAM.
+#[no_mangle]
+pub extern "C" fn pam_sm_acct_mgmt(
+    _pamh: *mut PamHandle,
+    _flags: i32,
+    _argc: i32,
+    _argv: *const *const u8,
+) -> i32 {
+    PAM_IGNORE
+}
+
+/// Authentication token update entry point called by Linux-PAM.
+#[no_mangle]
+pub extern "C" fn pam_sm_chauthtok(
+    _pamh: *mut PamHandle,
+    _flags: i32,
+    _argc: i32,
+    _argv: *const *const u8,
+) -> i32 {
+    PAM_IGNORE
+}
+
+/// Session open entry point called by Linux-PAM.
+#[no_mangle]
+pub extern "C" fn pam_sm_open_session(
+    _pamh: *mut PamHandle,
+    _flags: i32,
+    _argc: i32,
+    _argv: *const *const u8,
+) -> i32 {
+    PAM_IGNORE
+}
+
+/// Session close entry point called by Linux-PAM.
+#[no_mangle]
+pub extern "C" fn pam_sm_close_session(
+    _pamh: *mut PamHandle,
+    _flags: i32,
+    _argc: i32,
+    _argv: *const *const u8,
+) -> i32 {
+    PAM_IGNORE
 }
 
 // ===========================================================================

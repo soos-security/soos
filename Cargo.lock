@@ -898,6 +898,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "pam-bindings"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "95ca8ded51d7b55e02c84ee36e024ea9843d800da0ed371e07e6733092bd073e"
+dependencies = [
+ "libc",
+ "zeroize",
+]
+
+[[package]]
 name = "peeking_take_while"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1442,6 +1452,7 @@ version = "0.1.0"
 dependencies = [
  "getrandom 0.3.4",
  "libc",
+ "pam-bindings",
  "soos-protocol",
  "tempfile",
 ]
