@@ -442,27 +442,27 @@ Pure business logic crate: takes structured inputs (score, PAD result, UID conte
 
 #### Sub-issues:
 
-- **#12.1** — Integrate `CameraManager` into daemon startup
+- [x] **#12.1** — Integrate `CameraManager` into daemon startup
   - Initialize camera (or mock) on dedicated thread
   - Report readiness to health check subsystem
 
-- **#12.2** — Integrate `VisionPipeline` as request handler
+- [x] **#12.2** — Integrate `VisionPipeline` as request handler
   - On auth request: grab latest frame → run full pipeline → render verdict
   - Enforce 150ms decision budget with deadline propagation
 
-- **#12.3** — Integrate `BiometricStore` for template loading
+- [x] **#12.3** — Integrate `BiometricStore` for template loading
   - Load enrolled templates for target UID on auth request
   - Handle missing enrollment gracefully (→ `Unavailable`)
 
-- **#12.4** — Integrate `EvidenceStore` for intrusion capture
+- [x] **#12.4** — Integrate `EvidenceStore` for intrusion capture
   - On `PasswordFailed` event: if opt-in enabled, capture and encrypt current frame
   - Enforce daily cap and retention policy
 
-- **#12.5** — Integrate `Policy` engine for verdict rendering
+- [x] **#12.5** — Integrate `Policy` engine for verdict rendering
   - Wire pipeline outputs (score, PAD, face_count) into `AuthorizationDecision`
   - Apply rate limiting per UID
 
-- **#12.6** — End-to-end integration test
+- [x] **#12.6** — End-to-end integration test
   - Mock camera + real codec + real policy → verify full request/response cycle
   - Test all 4 verdict paths: Allow, Deny, Unavailable, ProtocolError
 

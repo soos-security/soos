@@ -47,7 +47,7 @@ impl MockCameraManager {
             .name("soos-mock-camera".into())
             .spawn(move || {
                 let mut sequence: u64 = 0;
-                let start_time = Instant::now();
+                let _start_time = Instant::now();
 
                 let full_frame_interval = Duration::from_micros(
                     1_000_000u64.checked_div(cfg.fps as u64).unwrap_or(33_333),
@@ -96,9 +96,8 @@ impl MockCameraManager {
                             .unwrap_or(33_333),
                     );
 
-                    // Generate synthetic frame
-                    let mono_ns =
-                        u64::try_from(start_time.elapsed().as_nanos()).unwrap_or(u64::MAX);
+                    // Generate synthetic frame with true CLOCK_MONOTONIC timestamp
+                    let mono_ns = monotonic_nanos();
                     let frame = generate_synthetic_frame(
                         cfg.width, cfg.height, cfg.format, sequence, mono_ns,
                     );
@@ -232,4 +231,20 @@ fn generate_synthetic_frame(
     }
 
     Frame::new(data, width, height, timestamp_mono_ns, format, sequence)
+}
+
+/// Returns the current monotonic clock timestamp in nanoseconds.
+fn monotonic_nanos() -> u64 {
+    let mut ts = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: Stack-allocated timespec pointer is valid and non-null for clock_gettime.
+    let ret = unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) };
+    if ret == 0 && ts.tv_sec >= 0 && ts.tv_nsec >= 0 {
+        let sec = ts.tv_sec.cast_unsigned().saturating_mul(1_000_000_000);
+        sec.saturating_add(ts.tv_nsec.cast_unsigned())
+    } else {
+        0
+    }
 }

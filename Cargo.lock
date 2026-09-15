@@ -1369,13 +1369,20 @@ name = "soos-daemon"
 version = "0.1.0"
 dependencies = [
  "nix",
+ "postcard",
+ "soos-biometric-store",
+ "soos-camera-v4l",
+ "soos-evidence-store",
+ "soos-inference-ort",
  "soos-policy",
  "soos-protocol",
+ "soos-vision",
  "tempfile",
  "thiserror",
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "zeroize",
 ]
 
 [[package]]

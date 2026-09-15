@@ -17,15 +17,22 @@ path = "src/lib.rs"
 
 [dependencies]
 tokio = { workspace = true }
-nix = { workspace = true }
+nix = { workspace = true, features = ["time"] }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 thiserror = { workspace = true }
 soos-protocol = { workspace = true }
 soos-policy = { workspace = true }
+soos-camera-v4l = { workspace = true }
+soos-inference-ort = { workspace = true }
+soos-vision = { workspace = true }
+soos-biometric-store = { workspace = true }
+soos-evidence-store = { workspace = true }
+postcard = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+zeroize = { workspace = true }
 
 [lints]
 workspace = true
