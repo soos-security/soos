@@ -441,6 +441,64 @@ mod tests {
         result
     }
 
+    /// Invariant: Full PAM Docker test matrix artifacts must exist and specify supported distributions
+    #[test]
+    fn test_pam_docker_matrix_files_and_distro_configs_exist() {
+        let root = workspace_root();
+        let docker_dir = root.join("tests").join("docker");
+        assert!(
+            docker_dir.exists(),
+            "INVARIANT VIOLATION: tests/docker directory must exist for PAM test matrix"
+        );
+
+        let required_files = [
+            "Dockerfile.ubuntu",
+            "Dockerfile.fedora",
+            "Dockerfile.arch",
+            "run_matrix.sh",
+            "test_suite.sh",
+            "mock_daemon.py",
+            "pam_test_runner.c",
+        ];
+
+        for file_name in required_files {
+            let path = docker_dir.join(file_name);
+            assert!(
+                path.exists(),
+                "INVARIANT VIOLATION: Required matrix artifact '{}' not found in tests/docker/",
+                file_name
+            );
+            let metadata = fs::metadata(&path).expect("metadata accessible");
+            assert!(
+                metadata.len() > 0,
+                "INVARIANT VIOLATION: Matrix artifact '{}' is empty!",
+                file_name
+            );
+        }
+
+        // Verify multi-distro PAM configuration integration in Dockerfiles
+        let ubuntu_df =
+            fs::read_to_string(docker_dir.join("Dockerfile.ubuntu")).expect("ubuntu dockerfile");
+        assert!(
+            ubuntu_df.contains("common-auth") || ubuntu_df.contains("test-soos"),
+            "Ubuntu Dockerfile must configure PAM stack (common-auth or test-soos)"
+        );
+
+        let fedora_df =
+            fs::read_to_string(docker_dir.join("Dockerfile.fedora")).expect("fedora dockerfile");
+        assert!(
+            fedora_df.contains("system-auth") || fedora_df.contains("test-soos"),
+            "Fedora Dockerfile must configure PAM stack (system-auth or test-soos)"
+        );
+
+        let arch_df =
+            fs::read_to_string(docker_dir.join("Dockerfile.arch")).expect("arch dockerfile");
+        assert!(
+            arch_df.contains("system-auth") || arch_df.contains("test-soos"),
+            "Arch Dockerfile must configure PAM stack (system-auth or test-soos)"
+        );
+    }
+
     fn collect_rs_files(dir: &Path, files: &mut Vec<PathBuf>) {
         if let Ok(entries) = fs::read_dir(dir) {
             for entry in entries.flatten() {

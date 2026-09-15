@@ -504,3 +504,107 @@ fn test_ipc_direct_authenticate_timeout_mapping() {
 
     let _ = server_handle.join();
 }
+
+/// Daemon crash mid-request: connection closed immediately after accepting connection.
+/// Must degrade gracefully to PAM_IGNORE (Sub-issue #13.3).
+#[test]
+fn test_ipc_daemon_crash_immediate_disconnect_returns_ignore() {
+    let tmp = tempdir().expect("tempdir created");
+    let sock_path = tmp.path().join("crash_immediate.sock");
+    let listener = UnixListener::bind(&sock_path).expect("bound test socket");
+
+    let server_handle = thread::spawn(move || {
+        if let Ok((mut stream, _)) = listener.accept() {
+            // Read partial or full request then drop stream immediately (simulating daemon SIGKILL / crash)
+            let mut buf = [0u8; 16];
+            let _ = stream.read(&mut buf);
+            drop(stream);
+        }
+    });
+
+    let sock_arg = format!("socket_path={}", sock_path.display());
+    let (_storage, ptrs) = make_pam_args(&[&sock_arg, "timeout_ms=250"]);
+
+    let start = Instant::now();
+    let code = pam_sm_authenticate(ptr::null_mut(), 0, ptrs.len() as i32, ptrs.as_ptr());
+    let elapsed = start.elapsed();
+
+    assert_eq!(code, PAM_IGNORE);
+    assert!(elapsed < Duration::from_millis(250));
+
+    let _ = server_handle.join();
+}
+
+/// Daemon crash mid-request: connection severed after sending partial 2-byte header.
+/// Must degrade gracefully to PAM_IGNORE (Sub-issue #13.3).
+#[test]
+fn test_ipc_daemon_crash_partial_header_returns_ignore() {
+    let tmp = tempdir().expect("tempdir created");
+    let sock_path = tmp.path().join("crash_partial_hdr.sock");
+    let listener = UnixListener::bind(&sock_path).expect("bound test socket");
+
+    let server_handle = thread::spawn(move || {
+        if let Ok((mut stream, _)) = listener.accept() {
+            let mut len_buf = [0u8; 4];
+            let _ = stream.read_exact(&mut len_buf);
+            let size = u32::from_be_bytes(len_buf) as usize;
+            let mut body = vec![0u8; size];
+            let _ = stream.read_exact(&mut body);
+
+            // Send partial 2 bytes of the 4-byte length prefix and crash
+            let partial = [0u8, 0u8];
+            let _ = stream.write_all(&partial);
+            drop(stream);
+        }
+    });
+
+    let sock_arg = format!("socket_path={}", sock_path.display());
+    let (_storage, ptrs) = make_pam_args(&[&sock_arg, "timeout_ms=250"]);
+
+    let start = Instant::now();
+    let code = pam_sm_authenticate(ptr::null_mut(), 0, ptrs.len() as i32, ptrs.as_ptr());
+    let elapsed = start.elapsed();
+
+    assert_eq!(code, PAM_IGNORE);
+    assert!(elapsed < Duration::from_millis(250));
+
+    let _ = server_handle.join();
+}
+
+/// Daemon crash mid-request: connection severed after sending full length prefix but truncated payload body.
+/// Must degrade gracefully to PAM_IGNORE (Sub-issue #13.3).
+#[test]
+fn test_ipc_daemon_crash_truncated_body_returns_ignore() {
+    let tmp = tempdir().expect("tempdir created");
+    let sock_path = tmp.path().join("crash_trunc_body.sock");
+    let listener = UnixListener::bind(&sock_path).expect("bound test socket");
+
+    let server_handle = thread::spawn(move || {
+        if let Ok((mut stream, _)) = listener.accept() {
+            let mut len_buf = [0u8; 4];
+            let _ = stream.read_exact(&mut len_buf);
+            let size = u32::from_be_bytes(len_buf) as usize;
+            let mut body = vec![0u8; size];
+            let _ = stream.read_exact(&mut body);
+
+            // Announce 64 bytes of body but write only 10 bytes then crash
+            let len_prefix = 64u32.to_be_bytes();
+            let _ = stream.write_all(&len_prefix);
+            let partial_body = [0xAAu8; 10];
+            let _ = stream.write_all(&partial_body);
+            drop(stream);
+        }
+    });
+
+    let sock_arg = format!("socket_path={}", sock_path.display());
+    let (_storage, ptrs) = make_pam_args(&[&sock_arg, "timeout_ms=250"]);
+
+    let start = Instant::now();
+    let code = pam_sm_authenticate(ptr::null_mut(), 0, ptrs.len() as i32, ptrs.as_ptr());
+    let elapsed = start.elapsed();
+
+    assert_eq!(code, PAM_IGNORE);
+    assert!(elapsed < Duration::from_millis(250));
+
+    let _ = server_handle.join();
+}

@@ -1,0 +1,53 @@
+# =============================================================================
+# Dockerfile.fedora — Isolated RHEL / Fedora PAM Sandbox for soos
+# =============================================================================
+
+FROM fedora:40
+
+ENV RUSTUP_HOME=/usr/local/rustup
+ENV CARGO_HOME=/usr/local/cargo
+ENV PATH="/usr/local/cargo/bin:${PATH}"
+
+# Install Fedora packages
+RUN dnf install -y --setopt=install_weak_deps=False \
+        gcc \
+        gcc-c++ \
+        make \
+        pkgconf-pkg-config \
+        pam-devel \
+        clang-devel \
+        python3 \
+        curl \
+        ca-certificates \
+        git \
+        util-linux \
+        shadow-utils \
+    && dnf clean all
+
+# Install Rust toolchain
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+    | sh -s -- -y --default-toolchain stable --profile minimal \
+    && rustup component add clippy rustfmt
+
+# Create testuser with known password
+RUN useradd -m -s /bin/bash testuser \
+    && echo "testuser:password123" | chpasswd
+
+# Configure Fedora test PAM stack (/etc/pam.d/test-soos)
+RUN echo "# Test PAM service for soos (Fedora/RHEL)\n\
+auth  [success=done default=ignore]  pam_soos.so timeout_ms=250\n\
+auth  required                       pam_unix.so\n\
+account required pam_unix.so\n\
+session required pam_unix.so" > /etc/pam.d/test-soos
+
+# Configure Fedora / RHEL system-auth integration
+RUN echo "# /etc/pam.d/system-auth integration for soos\n\
+auth  [success=done default=ignore]  pam_soos.so timeout_ms=250\n\
+auth  sufficient                     pam_unix.so try_first_pass nullok\n\
+auth  required                       pam_deny.so\n\
+account required pam_unix.so\n\
+session required pam_unix.so" > /etc/pam.d/system-auth
+
+WORKDIR /workspace
+
+CMD ["bash"]

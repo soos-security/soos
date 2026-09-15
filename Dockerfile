@@ -44,6 +44,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libpam0g-dev \
         libclang-dev \
         pamtester \
+        python3 \
         curl \
         ca-certificates \
         git \
@@ -92,6 +93,13 @@ auth  required                       pam_unix.so\n\
 # Minimal account and session management\n\
 account required pam_unix.so\n\
 session required pam_unix.so" > /etc/pam.d/test-soos
+
+# Configure standard Debian/Ubuntu common-auth integration
+RUN echo "# /etc/pam.d/common-auth integration for soos\n\
+auth  [success=done default=ignore]  pam_soos.so timeout_ms=250\n\
+auth  [success=1 default=ignore]    pam_unix.so nullok\n\
+auth  requisite                      pam_deny.so\n\
+auth  required                       pam_permit.so" > /etc/pam.d/common-auth
 
 # ---------------------------------------------------------------------------
 # Working Directory
