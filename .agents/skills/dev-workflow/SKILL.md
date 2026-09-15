@@ -122,6 +122,7 @@ Before starting Phase 1, the orchestrator verifies full ingestion of:
 - Audits implementation plans and technical specifications against `AI/ARCHITECTURE.md`, `AI/DECISIONS.md`, `AI/BACKLOG.md`, and `AI/VERIFICATION_MATRIX.md`.
 - Evaluates across 6 core pillars: Architectural Alignment, PAM Real-Time Deadlines, Panic Safety, Dependency Isolation, Memory/Secret Hygiene, and Test Integrity.
 - Authors formal evaluation report in `AI/plan_evaluator_report.md` with explicit verdict: `VALIDATION_VERDICT: APPROVED` before execution proceeds.
+  - *Tool Constraint*: Target file is in the project workspace; do NOT include `ArtifactMetadata` in `write_to_file`.
 
 ### Phase 2: Tester Sub-Agent ([tester-agent](file:///home/hadrien/soos/.agents/skills/tester-agent/SKILL.md))
 - Authors unit, property (`proptest`), and invariant tests.
@@ -149,6 +150,7 @@ Before starting Phase 1, the orchestrator verifies full ingestion of:
   4. Test Integrity & Anti-Weakening
   5. Memory & Secret Bounds
 - Authors formal report in `AI/candid_review_report.md` with `VERDICT: APPROVED`.
+  - *Tool Constraint*: Target file is in the project workspace; do NOT include `ArtifactMetadata` in `write_to_file`.
 
 ### Phase 6: Traceability Sub-Agent ([traceability-agent](file:///home/hadrien/soos/.agents/skills/traceability-agent/SKILL.md))
 - Synchronizes issues and sub-issues automatically via `python3 scripts/sync_issue.py`:
@@ -163,9 +165,12 @@ Before starting Phase 1, the orchestrator verifies full ingestion of:
 - Executes:
   ```bash
   ./save.sh --auto-merge
+  # Or with explicit Conventional Commit message:
+  # ./save.sh --auto-merge -m "<type>(<scope>): <short description>"
   ```
 - Runs local quality gates + dual-layer candid review (`scripts/candid_subagent.sh`).
 - Pushes topic branch and opens GitHub Pull Request.
 - Monitors GitHub Actions CI checks until 100% green.
 - Auto-merges into `main` via squash merge and synchronizes local `main`.
 - **/goal Autonomous Completion**: When running under `/goal`, verify local `main` sync via `git log -1` and include `<!-- GOAL_COMPLETE -->` in the concluding summary to satisfy the goal supervisor stop hook.
+
