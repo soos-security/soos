@@ -57,3 +57,5 @@ Your responsibility is to critically evaluate proposed implementation plans and 
 3. **Deliverable**:
    - Structured Plan Evaluation Report with explicit verdict:
      `VALIDATION_VERDICT: APPROVED` or `VALIDATION_VERDICT: REVISION_REQUIRED`.
+   - Authored in `AI/plan_evaluator_report.md` as a workspace file (without `ArtifactMetadata`).
+
