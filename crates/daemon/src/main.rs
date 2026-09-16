@@ -21,6 +21,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     info!("Starting soos-daemon (Linux Local Biometric PAM Daemon)");
 
+    // Enable swap protection by locking process memory into physical RAM
+    if soos_daemon::mlock::mlock_process_address_space() {
+        info!("Swap protection active: process memory pages locked into RAM via mlockall");
+    } else {
+        tracing::debug!("Swap protection mlockall not granted (requires CAP_IPC_LOCK); continuing with granular buffer protection");
+    }
+
     let health = Arc::new(HealthState::new());
     let (listener, socket_guard) = bind_socket(&config.socket).await?;
     health.set_socket_ready(true);

@@ -8,23 +8,27 @@
     reason = "Vector normalization, cosine similarity dot product, and pixel buffer normalization"
 )]
 
+use zeroize::{Zeroize, Zeroizing};
+
 use crate::error::InferenceError;
 
-/// High-dimensional facial biometric embedding vector (e.g. 128D or 512D).
-#[derive(Debug, Clone, PartialEq)]
+/// High-dimensional facial biometric embedding vector (e.g. 128D or 512D) with automatic memory zeroization.
+#[derive(Debug, Clone, PartialEq, Zeroize)]
 pub struct BiometricEmbedding {
-    vector: Vec<f32>,
+    vector: Zeroizing<Vec<f32>>,
 }
 
 impl BiometricEmbedding {
     /// Constructs a biometric embedding from raw floating point features.
     pub fn new(vector: Vec<f32>) -> Self {
-        Self { vector }
+        Self {
+            vector: Zeroizing::new(vector),
+        }
     }
 
     /// Constructs an embedding asserting that the vector is already L2-normalized.
     pub fn from_normalized(vector: Vec<f32>, epsilon: f32) -> Result<Self, InferenceError> {
-        let emb = Self { vector };
+        let emb = Self::new(vector);
         if !emb.is_normalized(epsilon) {
             return Err(InferenceError::EmbeddingFailed(format!(
                 "Vector is not L2-normalized: L2 norm is {}, expected 1.0 ± {}",
@@ -65,11 +69,21 @@ impl BiometricEmbedding {
             ));
         }
 
-        for x in &mut self.vector {
+        for x in &mut *self.vector {
             *x /= norm;
         }
 
         Ok(())
+    }
+
+    /// Returns the inner zeroized vector container.
+    pub fn into_inner(self) -> Zeroizing<Vec<f32>> {
+        self.vector
+    }
+
+    /// Clones the inner floats into a raw vector.
+    pub fn to_vec(&self) -> Vec<f32> {
+        self.vector.to_vec()
     }
 
     /// Checks whether the embedding vector satisfies the L2-normalization criterion `V2` (norm ≈ 1.0).

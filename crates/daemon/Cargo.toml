@@ -29,6 +29,8 @@ soos-vision = { workspace = true }
 soos-biometric-store = { workspace = true }
 soos-evidence-store = { workspace = true }
 postcard = { workspace = true }
+libc = { workspace = true }
+zeroize = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

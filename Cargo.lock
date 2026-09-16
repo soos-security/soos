@@ -1372,12 +1372,14 @@ dependencies = [
  "thiserror",
  "tracing",
  "v4l",
+ "zeroize",
 ]
 
 [[package]]
 name = "soos-daemon"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "nix",
  "postcard",
  "soos-biometric-store",
@@ -1440,6 +1442,7 @@ dependencies = [
  "thiserror",
  "toml",
  "tracing",
+ "zeroize",
 ]
 
 [[package]]
@@ -1484,6 +1487,7 @@ dependencies = [
  "soos-camera-v4l",
  "soos-inference-ort",
  "thiserror",
+ "zeroize",
 ]
 
 [[package]]

@@ -1,5 +1,7 @@
 //! Frame structures and pixel formats for camera capture.
 
+use zeroize::Zeroize;
+
 /// Supported pixel formats for camera capture.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PixelFormat {
@@ -83,5 +85,17 @@ impl Frame {
     /// Returns true if the frame age exceeds the specified maximum allowed age in milliseconds.
     pub fn is_stale(&self, now_mono_ns: u64, max_age_ms: u64) -> bool {
         self.age_ms(now_mono_ns) > max_age_ms
+    }
+}
+
+impl zeroize::Zeroize for Frame {
+    fn zeroize(&mut self) {
+        self.data.zeroize();
+    }
+}
+
+impl Drop for Frame {
+    fn drop(&mut self) {
+        self.data.zeroize();
     }
 }

@@ -449,6 +449,10 @@ impl ConnectionDispatcher {
                 }
             };
 
+            // Security hardening: immediately scrub and discard raw camera capture and enrolled template
+            drop(frame);
+            drop(enrolled_template);
+
             // 8h: Decision budget (< 150ms) and deadline check
             let cur_ns = current_monotonic_nanos();
             if req.deadline_monotonic_ns > 0 && cur_ns >= req.deadline_monotonic_ns {

@@ -541,20 +541,20 @@ Pure business logic crate: takes structured inputs (score, PAD result, UID conte
 
 #### Sub-issues:
 
-- **#16.1** — Memory zeroization audit
+- [x] **#16.1** — Memory zeroization audit
   - Verify all decrypted embeddings use `Zeroizing<T>`
   - Verify raw frames are dropped after pipeline completion
   - Verify key material is zeroized on daemon shutdown
 
-- **#16.2** — Swap protection
+- [x] **#16.2** — Swap protection
   - Document `mlock` strategy for sensitive pages
   - Implement for embedding and key buffers
 
-- **#16.3** — Systemd hardening validation
+- [x] **#16.3** — Systemd hardening validation
   - Test all sandbox directives in `soos-daemon.service`
   - Verify `MemoryDenyWriteExecute`, `RestrictSUIDSGID`, `SystemCallArchitectures=native`
 
-- **#16.4** — `cargo-deny` audit enforcement
+- [x] **#16.4** — `cargo-deny` audit enforcement
   - Verify license compliance for all transitive deps
   - Ban known-vulnerable advisories
   - Block duplicate dependency versions
