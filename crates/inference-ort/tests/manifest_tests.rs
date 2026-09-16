@@ -61,6 +61,14 @@ fn test_parse_workspace_manifest_file() {
     assert_eq!(mobilefacenet.filename, "mobilefacenet_arcface.onnx");
     assert_eq!(mobilefacenet.input_shape, vec![1, 3, 112, 112]);
     assert_eq!(mobilefacenet.output_shapes, vec![vec![1, 128]]);
+
+    let pad = manifest
+        .get_model("minifasnet_pad")
+        .expect("minifasnet_pad missing");
+    assert_eq!(pad.filename, "minifasnet_pad.onnx");
+    assert_eq!(pad.license, "Apache-2.0");
+    assert_eq!(pad.input_shape, vec![1, 3, 112, 112]);
+    assert_eq!(pad.output_shapes, vec![vec![1, 3]]);
 }
 
 #[test]

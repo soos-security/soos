@@ -5,7 +5,7 @@ use std::sync::Arc;
 use soos_camera_v4l::Frame;
 use soos_inference_ort::{
     BiometricEmbedding, EmbeddingExtractor, FaceDetection, FaceDetector, FaceLandmarks,
-    LandmarkDetector,
+    LandmarkDetector, PadDetector, PadResult,
 };
 
 use crate::align::align_face_112;
@@ -20,6 +20,8 @@ pub struct VisionPipelineConfig {
     pub min_face_confidence: f32,
     /// Cosine similarity threshold required to grant biometric match.
     pub match_threshold: f32,
+    /// Presentation attack detection (liveness) score threshold (standard 0.80).
+    pub pad_threshold: f32,
     /// Target aligned face width in pixels (standard 112).
     pub target_width: u32,
     /// Target aligned face height in pixels (standard 112).
@@ -31,6 +33,7 @@ impl Default for VisionPipelineConfig {
         Self {
             min_face_confidence: 0.70,
             match_threshold: 0.45,
+            pad_threshold: 0.80,
             target_width: 112,
             target_height: 112,
         }
@@ -46,6 +49,8 @@ pub struct PipelineOutput {
     pub landmarks: FaceLandmarks,
     /// 112x112 aligned face crop in RGB24 format.
     pub aligned_crop_rgb: Vec<u8>,
+    /// Presentation attack detection evaluation result.
+    pub pad_result: PadResult,
     /// Extracted L2-normalized biometric embedding.
     pub embedding: BiometricEmbedding,
 }
@@ -63,6 +68,7 @@ pub struct VerificationOutcome {
 pub struct VisionPipeline {
     detector: Arc<dyn FaceDetector>,
     landmarks: Arc<dyn LandmarkDetector>,
+    pad: Arc<dyn PadDetector>,
     extractor: Arc<dyn EmbeddingExtractor>,
     config: VisionPipelineConfig,
 }
@@ -72,12 +78,14 @@ impl VisionPipeline {
     pub fn new(
         detector: Arc<dyn FaceDetector>,
         landmarks: Arc<dyn LandmarkDetector>,
+        pad: Arc<dyn PadDetector>,
         extractor: Arc<dyn EmbeddingExtractor>,
         config: VisionPipelineConfig,
     ) -> Self {
         Self {
             detector,
             landmarks,
+            pad,
             extractor,
             config,
         }
@@ -88,12 +96,18 @@ impl VisionPipeline {
         &self.config
     }
 
+    /// Access the presentation attack detector.
+    pub fn pad(&self) -> &Arc<dyn PadDetector> {
+        &self.pad
+    }
+
     /// Processes a single camera frame:
     /// 1. Color converts to RGB24
     /// 2. Detects faces; enforces single-face security invariant (rejects 0 or >1 faces)
     /// 3. Detects 5-point facial landmarks
     /// 4. Warps face to normalized 112x112 RGB crop
-    /// 5. Extracts L2-normalized biometric embedding
+    /// 5. Evaluates Presentation Attack Detection (PAD) liveness; short-circuits on spoof
+    /// 6. Extracts L2-normalized biometric embedding
     pub fn process_frame(&self, frame: &Frame) -> Result<PipelineOutput, VisionError> {
         let rgb = convert_to_rgb(&frame.data, frame.width, frame.height, frame.format)?;
 
@@ -125,6 +139,21 @@ impl VisionPipeline {
 
         let aligned_crop = align_face_112(&rgb, frame.width, frame.height, &landmarks)?;
 
+        // Step 5: Presentation Attack Detection (anti-spoofing) evaluation
+        let pad_result = self.pad.evaluate_liveness(
+            &aligned_crop,
+            self.config.target_width,
+            self.config.target_height,
+        )?;
+
+        if !pad_result.is_live || pad_result.score < self.config.pad_threshold {
+            return Err(VisionError::PadFailed {
+                score: pad_result.score,
+                threshold: self.config.pad_threshold,
+            });
+        }
+
+        // Step 6: Feature extraction only if PAD passed
         let embedding = self.extractor.extract_embedding(
             &aligned_crop,
             self.config.target_width,
@@ -135,6 +164,7 @@ impl VisionPipeline {
             detection,
             landmarks,
             aligned_crop_rgb: aligned_crop,
+            pad_result,
             embedding,
         })
     }

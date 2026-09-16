@@ -15,6 +15,7 @@ pub mod error;
 pub mod landmarks;
 pub mod manifest;
 pub mod mock;
+pub mod pad;
 pub mod registry;
 
 // Re-export primary types for ergonomic workspace usage
@@ -23,5 +24,6 @@ pub use embedding::{BiometricEmbedding, EmbeddingExtractor, OrtEmbeddingExtracto
 pub use error::InferenceError;
 pub use landmarks::{FaceLandmarks, LandmarkDetector, OrtLandmarkDetector, Point2f};
 pub use manifest::{ManifestHeader, ModelManifest, ModelMetadata};
-pub use mock::{MockEmbeddingExtractor, MockFaceDetector, MockLandmarkDetector};
+pub use mock::{MockEmbeddingExtractor, MockFaceDetector, MockLandmarkDetector, MockPadDetector};
+pub use pad::{AttackType, OrtPadDetector, PadDetector, PadResult};
 pub use registry::{ModelRegistry, RegistryConfig};

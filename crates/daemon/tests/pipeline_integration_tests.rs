@@ -35,7 +35,8 @@ use soos_daemon::health::HealthState;
 use soos_daemon::pipeline::PipelineComponents;
 use soos_evidence_store::{EvidenceConfig, EvidenceStore, MasterKey as EvMasterKey};
 use soos_inference_ort::{
-    BoundingBox, FaceDetection, MockEmbeddingExtractor, MockFaceDetector, MockLandmarkDetector,
+    AttackType, BoundingBox, FaceDetection, MockEmbeddingExtractor, MockFaceDetector,
+    MockLandmarkDetector, MockPadDetector, PadResult,
 };
 use soos_policy::{AuthorizationEngine, RateLimitConfig, RateLimiter, ThresholdConfig};
 use soos_protocol::codec::{decode, encode};
@@ -56,6 +57,7 @@ struct TestPipelineFixture {
     pub bio_store: Arc<BiometricStore>,
     pub evidence_store: Arc<EvidenceStore>,
     pub camera: Arc<MockCameraManager>,
+    pub pad: Arc<MockPadDetector>,
     pub sock_path: std::path::PathBuf,
     pub enrolled_vector: Vec<f32>,
     pub current_uid: u32,
@@ -110,17 +112,20 @@ impl TestPipelineFixture {
         };
         let detector = Arc::new(MockFaceDetector::new_with_detections(vec![dummy_detection]));
         let landmarks = Arc::new(MockLandmarkDetector::new_canonical());
+        let pad = Arc::new(MockPadDetector::new_live());
         let extractor = Arc::new(MockEmbeddingExtractor::new(128));
 
         let vision_config = VisionPipelineConfig {
             min_face_confidence: 0.70,
             match_threshold: 0.45,
+            pad_threshold: 0.80,
             target_width: 112,
             target_height: 112,
         };
         let vision = Arc::new(VisionPipeline::new(
             detector,
             landmarks,
+            pad.clone(),
             extractor,
             vision_config,
         ));
@@ -182,6 +187,7 @@ impl TestPipelineFixture {
             bio_store,
             evidence_store,
             camera,
+            pad,
             sock_path,
             enrolled_vector,
             current_uid,
@@ -192,6 +198,25 @@ impl TestPipelineFixture {
     pub fn start_listener(&self) -> UnixListener {
         UnixListener::bind(&self.sock_path).expect("Bind listener failed")
     }
+}
+
+async fn send_req(sock_path: &std::path::Path, req: Request) -> Response {
+    let mut client = UnixStream::connect(sock_path)
+        .await
+        .expect("Connect client failed");
+
+    let encoded = encode(&req).expect("Encode request");
+    client.write_all(&encoded).await.expect("Write request");
+    client.flush().await.expect("Flush client");
+
+    let mut len_bytes = [0u8; 4];
+    client.read_exact(&mut len_bytes).await.expect("Read len");
+    let resp_len = u32::from_be_bytes(len_bytes) as usize;
+    let mut buf = vec![0u8; 4 + resp_len];
+    buf[..4].copy_from_slice(&len_bytes);
+    client.read_exact(&mut buf[4..]).await.expect("Read body");
+
+    decode::<Response>(&buf).expect("Decode response")
 }
 
 // ---------------------------------------------------------------------------
@@ -456,25 +481,6 @@ async fn test_12_6_all_four_verdict_paths() {
         }
     });
 
-    async fn send_req(sock_path: &std::path::Path, req: Request) -> Response {
-        let mut client = UnixStream::connect(sock_path)
-            .await
-            .expect("Connect client failed");
-
-        let encoded = encode(&req).expect("Encode request");
-        client.write_all(&encoded).await.expect("Write request");
-        client.flush().await.expect("Flush client");
-
-        let mut len_bytes = [0u8; 4];
-        client.read_exact(&mut len_bytes).await.expect("Read len");
-        let resp_len = u32::from_be_bytes(len_bytes) as usize;
-        let mut buf = vec![0u8; 4 + resp_len];
-        buf[..4].copy_from_slice(&len_bytes);
-        client.read_exact(&mut buf[4..]).await.expect("Read body");
-
-        decode::<Response>(&buf).expect("Decode response")
-    }
-
     // Path 1: Allow (Nominal matching authentication)
     let req_allow = Request {
         version: CURRENT_VERSION,
@@ -543,4 +549,47 @@ async fn test_12_6_all_four_verdict_paths() {
     assert!(status_resp.socket_ready);
     assert!(status_resp.camera_ready);
     assert!(status_resp.is_healthy);
+}
+
+// ---------------------------------------------------------------------------
+// Issue #15: Presentation Attack Detection (PAD) — Anti-Spoofing
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_15_pad_presentation_attack_spoof_returns_deny_pad_failed() {
+    let fixture = TestPipelineFixture::new(true, 5).await;
+    let listener = fixture.start_listener();
+
+    // Inject presentation attack spoof into PAD mock
+    fixture
+        .pad
+        .set_result(PadResult::spoof(0.04, AttackType::PrintPhoto));
+
+    let disp = fixture.dispatcher.clone();
+    tokio::spawn(async move {
+        if let Ok((stream, _)) = listener.accept().await {
+            let _ = disp.handle_connection(stream).await;
+        }
+    });
+
+    let req = Request {
+        version: CURRENT_VERSION,
+        kind: RequestKind::Auth,
+        request_id: [15u8; 32],
+        uid_hint: fixture.current_uid,
+        service: "sudo".into(),
+        deadline_monotonic_ns: u64::MAX,
+    };
+
+    let resp = send_req(&fixture.sock_path, req).await;
+    assert_eq!(
+        resp.verdict,
+        Verdict::Deny,
+        "PAD failure must result in Verdict::Deny"
+    );
+    assert_eq!(
+        resp.reason_class,
+        ReasonClass::PadFailed,
+        "PAD failure must yield ReasonClass::PadFailed"
+    );
 }

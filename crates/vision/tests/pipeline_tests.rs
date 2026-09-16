@@ -15,7 +15,9 @@
 use std::sync::Arc;
 
 use soos_camera_v4l::{Frame, PixelFormat};
-use soos_inference_ort::mock::{MockEmbeddingExtractor, MockFaceDetector, MockLandmarkDetector};
+use soos_inference_ort::mock::{
+    MockEmbeddingExtractor, MockFaceDetector, MockLandmarkDetector, MockPadDetector,
+};
 use soos_inference_ort::{BiometricEmbedding, BoundingBox, FaceDetection};
 use soos_vision::{VisionError, VisionPipeline, VisionPipelineConfig};
 
@@ -24,10 +26,11 @@ fn setup_pipeline(detections: Vec<FaceDetection>) -> (VisionPipeline, Frame) {
     let height = 240;
     let detector = Arc::new(MockFaceDetector::new_with_detections(detections));
     let landmarks = Arc::new(MockLandmarkDetector::new_canonical());
+    let pad = Arc::new(MockPadDetector::new_live());
     let extractor = Arc::new(MockEmbeddingExtractor::new(128));
     let config = VisionPipelineConfig::default();
 
-    let pipeline = VisionPipeline::new(detector, landmarks, extractor, config);
+    let pipeline = VisionPipeline::new(detector, landmarks, pad, extractor, config);
     let frame = Frame::new(
         vec![128u8; (width * height * 3) as usize],
         width,

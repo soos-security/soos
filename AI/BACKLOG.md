@@ -521,15 +521,15 @@ Pure business logic crate: takes structured inputs (score, PAD result, UID conte
 
 #### Sub-issues:
 
-- **#15.1** — Research and select PAD model (ONNX anti-spoofing)
+- [x] **#15.1** — Research and select PAD model (ONNX anti-spoofing)
   - Evaluate: printed photo, smartphone screen, recorded video detection
   - Add to `models/manifest.toml` with checksum
 
-- **#15.2** — Integrate PAD into vision pipeline
+- [x] **#15.2** — Integrate PAD into vision pipeline
   - Insert between alignment and embedding extraction
   - PAD failure → `Deny` with `ReasonClass::PadFailed`
 
-- **#15.3** — PAD test fixtures
+- [x] **#15.3** — PAD test fixtures
   - Real face images vs. screen photos vs. printed photos
   - Benchmark false-accept and false-reject rates
 

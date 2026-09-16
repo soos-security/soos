@@ -21,7 +21,7 @@ use soos_enrollment_cli::error::EnrollmentCliError;
 use soos_enrollment_cli::service::EnrollmentService;
 use soos_inference_ort::{
     BoundingBox, EmbeddingExtractor, FaceDetection, FaceLandmarks, MockEmbeddingExtractor,
-    MockFaceDetector, MockLandmarkDetector, Point2f,
+    MockFaceDetector, MockLandmarkDetector, MockPadDetector, Point2f,
 };
 use soos_protocol::Verdict;
 use soos_vision::{VisionPipeline, VisionPipelineConfig};
@@ -70,9 +70,11 @@ fn setup_verify_env(
         match_threshold: 0.50,
         ..Default::default()
     };
+    let pad = Arc::new(MockPadDetector::new_live());
     let pipeline = Arc::new(VisionPipeline::new(
         detector,
         landmark_detector,
+        pad,
         seed_extractor,
         pipeline_config,
     ));

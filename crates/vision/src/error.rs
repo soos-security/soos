@@ -43,6 +43,12 @@ pub enum VisionError {
     #[error("Landmark alignment failed: {0}")]
     AlignmentFailed(String),
 
+    /// Presentation attack detected (spoof attempt: printed photo, screen replay, or mask).
+    #[error(
+        "Presentation attack detected: liveness score {score:.3} is below threshold {threshold:.3}"
+    )]
+    PadFailed { score: f32, threshold: f32 },
+
     /// Embedding dimension mismatch during cosine similarity matching.
     #[error("Embedding dimension mismatch: expected {expected}, actual {actual}")]
     DimensionMismatch { expected: usize, actual: usize },

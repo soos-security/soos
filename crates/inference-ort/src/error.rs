@@ -61,6 +61,9 @@ pub enum InferenceError {
     #[error("Embedding extraction failed: {0}")]
     EmbeddingFailed(String),
 
+    #[error("Presentation attack detection failed: {0}")]
+    PadFailed(String),
+
     #[error("Vector dimension mismatch: expected {expected}, got {actual}")]
     DimensionMismatch { expected: usize, actual: usize },
 
