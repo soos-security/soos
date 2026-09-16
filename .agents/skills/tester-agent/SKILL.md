@@ -57,6 +57,10 @@ Your responsibility is to author comprehensive automated tests that define the c
          ..Default::default()
      };
      ```
+   - Shared Fixtures Dead-Code Invariant:
+     When test files import shared fixtures via `#[path = "..."] mod fixtures;`, the shared fixture file MUST declare `#![allow(dead_code, reason = "Shared test fixtures library used conditionally across test modules")]` at file top. Otherwise, helper functions in the fixture used by other test binaries will fail with `-D dead-code`.
+   - Short-Circuit Verification for Multi-Stage Pipelines:
+     When testing multi-stage verification pipelines (e.g. alignment -> PAD -> embedding extraction), systematically author tests with a spy/mock asserting that downstream compute-heavy stages are NOT invoked when an upstream stage (PAD spoof detection, multiple face detection) fails.
 
 5. **Deliverable**:
    - Well-structured unit and integration tests located in `crates/<name>/src/` or `crates/<name>/tests/`.

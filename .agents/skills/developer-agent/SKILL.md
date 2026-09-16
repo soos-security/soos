@@ -37,6 +37,11 @@ Your responsibility is to write the minimal production code necessary to turn pr
      - Unsigned-to-signed same-width casts (e.g. `u64` to `i64`): use `i64::try_from(val).unwrap_or(0)` or `val.cast_signed()` instead of `val as i64`.
      - For widening integer conversions (`u32`, `u16`, `u8` to `i64`), always prefer lossless `i64::from(...)`.
    - Synthetic/Mock frame timing: always derive frame sleep and warmup intervals dynamically from `cfg.fps` (`Duration::from_micros(1_000_000 / cfg.fps)`) rather than hardcoding static durations.
+   - Common Clippy Patterns & Invariants:
+     - First element access: always prefer `.first()` over `.get(0)` (`clippy::get_first`).
+     - Struct initialization: prefer struct update syntax `Struct { field: val, ..Default::default() }` over `let mut s = Struct::default(); s.field = val;` (`clippy::field_reassign_with_default`).
+     - Divisibility checks: prefer `x.is_multiple_of(n)` over `(x % n) == 0` (`clippy::manual_is_multiple_of`).
+     - Shared fixtures dead-code: shared fixture modules under `tests/fixtures/` must declare `#![allow(dead_code, reason = "...")]` at file top to prevent dead-code errors in tests that only consume a subset of fixtures.
    - Numerical & Vision Math:
      - In pixel manipulation, color space conversion, and tensor indexing where calculations are mathematically bounded by image dimensions, either use checked arithmetic (`checked_mul`, `checked_add`) or explicitly scope `#[allow(clippy::arithmetic_side_effects, reason = "...")]` with a clear bounding explanation.
      - Remember that `allow_attributes_without_reason = "deny"` forbids any bare `#[allow(...)]`.
