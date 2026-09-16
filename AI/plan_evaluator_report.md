@@ -1,66 +1,52 @@
-# Plan Evaluation Report: Issue #15 / GitHub Issue #22 — Presentation Attack Detection (PAD)
+# Plan Evaluation Report — Issue #16: Production Hardening
 
-**Evaluator**: Plan Evaluator Sub-Agent (`plan-evaluator`)  
-**Target Issue**: Backlog Issue #15 / GitHub Issue #22 (`feat/vision-pad`)  
-**Target Specification**: Implementation Plan for Presentation Attack Detection (PAD)  
-**Date**: 2026-09-16  
+## Evaluation Overview
+- **Issue**: Issue #16 (GitHub #23): Production Hardening — zeroization audit, swap protection, cargo-deny
+- **Evaluator**: Independent Plan Evaluator Sub-Agent (`plan-evaluator`)
+- **Target Branch**: `chore/production-hardening`
+- **Scope**: Memory zeroization audit, swap protection (`mlock`), systemd hardening validation, `cargo-deny` audit enforcement
 
 ---
 
-## Evaluation Against the 6 Architectural Pillars
+## Evaluation Against 6 Architectural Pillars
 
 ### Pillar 1: Architectural Alignment & Threat Model
-- **Boundary Preservation**: PAD is integrated exclusively inside `soos-vision` and `soos-inference-ort`, managed and executed within the privileged background daemon (`soos-daemon`). The unprivileged PAM module (`pam_soos.so`) remains completely unaware of camera frames or neural tensors, receiving only the bounded IPC response.
-- **Threat Model Adherence**: Direct mitigation for presentation attack vectors identified in NIST SP 800-63B and `AI/ARCHITECTURE.md` §1 (paper printouts, digital screens, replay attacks).
-- **Socket & Permissions Invariant**: Socket communication remains strictly over `/run/soos/daemon.sock` (`0660`, `root:soos`) with `SO_PEERCRED` validation. No file or socket permission changes are introduced.
-- **Verdict**: PASS.
+- **Boundary Preservation**: The plan maintains the strict separation between the unprivileged PAM module (`pam_soos.so`) and the privileged root daemon (`soos-daemon`).
+- **File System & Permissions**: Storage remains confined to `/var/lib/soos/` (mode `0600`, `root:root`) and `/run/soos/` (mode `0750`).
+- **Verdict**: **PASS**
 
 ### Pillar 2: PAM Real-Time Latency & Concurrency
-- **Zero Async in PAM**: No changes to `pam_soos.so`. No Tokio or asynchronous runtime is imported or executed in the PAM pathway.
-- **Latency Budget Compliance**:
-  - `AI/ARCHITECTURE.md` §7 allocates a 35ms budget for PAD liveness verification out of a 150ms total decision budget.
-  - Aligned 112x112 crop reuse: PAD operates directly on the pre-aligned 112x112 RGB crop produced by landmark affine transformation, avoiding redundant color conversion or landmark re-computation.
-  - Short-circuit optimization: On PAD failure (`is_live == false`), embedding extraction (~30ms) is immediately bypassed, returning `Err(VisionError::PadFailed)`. This reduces worst-case latency during attack presentation to ~65ms, well within the 150ms limit.
-- **No Stream Pollution**: No `println!`, `eprintln!`, or `dbg!` macro calls are permitted in production code.
-- **Verdict**: PASS.
+- **Zero Tokio in PAM**: The PAM module pathway remains strictly synchronous blocking I/O with standard library `UnixStream` and 200–250ms deadline.
+- **Zero Output Pollution**: Zero `println!`, `eprintln!`, or `dbg!` macro usage.
+- **Verdict**: **PASS**
 
 ### Pillar 3: Panic Safety & Fail-Closed Behavior
-- **Panic Safety**: All tensor index lookups, dimension calculations, and probabilities use checked arithmetic or fallible conversion. Zero `unwrap()` or `expect()` in production library code.
-- **Fail-Closed Guarantees**: Any PAD failure or model inference error results in `pad_passed = false` and `ReasonClass::PadFailed`, resolving to `Verdict::Deny`. Under no circumstances does a PAD failure or model error convert to `Allow` or `PAM_SUCCESS`.
-- **PAM Module Fallback**: When receiving `Verdict::Deny`, `pam_soos.so` maps to `PAM_IGNORE`, preserving silent fallback to system password authentication.
-- **Verdict**: PASS.
+- **Panic Avoidance**: All error propagation uses `Result` and explicit `?` operators without `unwrap()` or `expect()`.
+- **FFI Boundary**: PAM FFI entry points maintain `catch_unwind` returning `PAM_IGNORE`.
+- **Verdict**: **PASS**
 
 ### Pillar 4: Dependency Isolation & Banned Crates
-- **Banned Dependencies**: No `opencv` or `nokhwa` dependencies are introduced.
-- **Inference Runtime**: Standardized on existing `ort` (ONNX Runtime CPU).
-- **Workspace Lints**: `#![forbid(unsafe_code)]` enforced in `crates/inference-ort` and `crates/vision`.
-- **Verdict**: PASS.
+- **Banned Crates**: Prohibitions on `opencv` and `nokhwa` remain strictly enforced in `deny.toml`.
+- **Cargo-Deny**: Enforces `multiple-versions = "deny"`, licenses, and advisories check.
+- **Safety Invariant**: Unsafe code for `mlock` is strictly isolated, audited, and documented with explicit `// SAFETY:` rationales. Business crates (`protocol`, `policy`, `vision`) maintain `#![forbid(unsafe_code)]`.
+- **Verdict**: **PASS**
 
 ### Pillar 5: Data Confidentiality & Zeroization
-- **No Credential / Frame Leakage**: Sensitive facial crops, raw camera frames, and intermediate tensor buffers are processed in memory and dropped immediately after the pipeline step.
-- **Log Hygiene**: Logging around PAD failures records only the numeric score and threshold at `debug` level; zero raw pixel data or biometric embeddings are logged.
-- **Verdict**: PASS.
+- **Memory Zeroization**: Decrypted embeddings in `BiometricEmbedding`, biometric templates in `BiometricTemplate`, camera frames in `Frame`, and intermediate crops in `PipelineOutput` enforce `Zeroize` / `ZeroizeOnDrop`.
+- **Frame Cleanup**: Raw frames are dropped immediately following pipeline processing.
+- **Swap Protection**: Sensitive master keys and embedding memory implement `mlock` page pinning to prevent secrets from being paged to unencrypted swap.
+- **Key Zeroization**: Master keys in `BiometricStore` and `EvidenceStore` zeroize on daemon termination.
+- **Verdict**: **PASS**
 
 ### Pillar 6: Test Integrity & TDD Contracts
-- **TDD Red Phase Sequencing**: Comprehensive unit tests and integration tests will be authored and verified to fail prior to production implementation.
-- **Zero Test Weakening**: Strict adherence to the immutable test contract.
-- **Acceptance Coverage**: Full coverage across:
-  1. `PadDetector` trait and `MockPadDetector` simulation.
-  2. `OrtPadDetector` model inference and softmax scoring.
-  3. `models/manifest.toml` cryptographic attestation.
-  4. Vision pipeline integration with short-circuit on spoof detection.
-  5. End-to-end daemon verification resulting in `Verdict::Deny` and `ReasonClass::PadFailed`.
-  6. Synthetic test fixtures evaluating real faces vs screen photos vs printed photos, benchmarking FAR/FRR.
-- **Verdict**: PASS.
+- **Test-First Red Phase**: Unit and invariant tests for zeroization, swap protection, systemd unit validation, and cargo-deny will be authored in Phase 2 before production changes.
+- **Immutability**: Tests act as an immutable acceptance contract with zero test weakening.
+- **Verdict**: **PASS**
 
 ---
 
-## Formal Evaluation Verdict
+## Conclusion & Verdict
 
-```text
-======================================================================
-VALIDATION_VERDICT: APPROVED
-======================================================================
-```
+All 6 architectural pillars satisfy the requirements defined in `AI/ARCHITECTURE.md`, `AI/DECISIONS.md`, and `Docs/SECURITY_AND_QUALITY_GUIDELINES.md`.
 
-The proposed implementation plan complies with all zero-trust architectural invariants, real-time latency budgets, panic safety guidelines, and security requirements of the `soos` project. Execution may proceed autonomously to Phase 0 and Phase 1 through Phase 7.
+**VALIDATION_VERDICT: APPROVED**

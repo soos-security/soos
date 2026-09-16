@@ -12,6 +12,7 @@ use crate::align::align_face_112;
 use crate::color::convert_to_rgb;
 use crate::error::VisionError;
 use crate::matcher::{match_embeddings, MatchResult};
+use zeroize::Zeroize;
 
 /// Configuration options for the vision verification pipeline.
 #[derive(Debug, Clone, PartialEq)]
@@ -53,6 +54,19 @@ pub struct PipelineOutput {
     pub pad_result: PadResult,
     /// Extracted L2-normalized biometric embedding.
     pub embedding: BiometricEmbedding,
+}
+
+impl zeroize::Zeroize for PipelineOutput {
+    fn zeroize(&mut self) {
+        self.aligned_crop_rgb.zeroize();
+        self.embedding.zeroize();
+    }
+}
+
+impl Drop for PipelineOutput {
+    fn drop(&mut self) {
+        self.zeroize();
+    }
 }
 
 /// Verification outcome containing both pipeline output and biometric comparison.

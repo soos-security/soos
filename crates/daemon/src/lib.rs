@@ -1,12 +1,13 @@
 //! Privileged background daemon for soos local facial biometric PAM verification.
 
-#![forbid(unsafe_code)]
+#![deny(clippy::undocumented_unsafe_blocks)]
 
 pub mod config;
 pub mod dispatcher;
 pub mod error;
 pub mod health;
 pub mod logging;
+pub mod mlock;
 pub mod peercred;
 pub mod pipeline;
 pub mod socket;

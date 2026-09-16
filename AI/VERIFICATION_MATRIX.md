@@ -161,3 +161,14 @@ This document translates the critical gating criteria from §11 of `ARCHITECTURE
 | PAD6 | PAD verification execution latency remains well within the 35ms budget allocated in `ARCHITECTURE.md` §7 | Benchmark test (`pad_tests::test_pad_latency_budget_compliance`) | ✅ Verified |
 | PAD7 | Daemon integration: PAD presentation attack yields `Verdict::Deny` with `ReasonClass::PadFailed` | Integration test (`pipeline_integration_tests::test_15_pad_presentation_attack_spoof_returns_deny_pad_failed`) | ✅ Verified |
 
+---
+
+## Component: `production-hardening` (Issue #16 / GitHub #23)
+
+| # | Criterion | Test Method | Status |
+|---|---|---|---|
+| H1 | Memory zeroization: `BiometricEmbedding`, `Frame`, and `PipelineOutput` wipe sensitive vectors and camera pixel buffers on drop | Unit tests (`zeroize_tests::test_biometric_embedding_zeroize_trait`, `frame_zeroize_tests::test_frame_zeroize_trait`) | ✅ Verified |
+| H2 | Swap protection: `mlock(2)` and `mlockall(2)` page locking prevents sensitive keys and embedding vectors from being paged to disk/swap | Integration tests (`hardening_tests::test_mlock_slice_and_munlock_slice_lifecycle`, `test_locked_buffer_raii_wrapper`, `test_mlock_process_address_space_call`) | ✅ Verified |
+| H3 | Systemd sandboxing validation: verifies all security directives in `soos-daemon.service` (`MemoryDenyWriteExecute`, `RestrictSUIDSGID`, `SystemCallArchitectures=native`) | Unit & integration tests (`systemd_test::test_systemd_unit_file_sandboxing_directives`, `hardening_tests::test_systemd_hardening_directives_complete`) | ✅ Verified |
+| H4 | Supply chain audit: `cargo-deny` enforces license compliance, zero vulnerabilities, and blocks duplicate dependencies (`multiple-versions = "deny"`) | Integration tests (`hardening_tests::test_cargo_deny_bans_duplicate_versions`, `cargo deny check`) | ✅ Verified |
+

@@ -1,75 +1,49 @@
-# Candid Review Report: Issue #15 / GitHub Issue #22 — Presentation Attack Detection (PAD)
+# Candid Review Report — Issue #16: Production Hardening
 
-**Reviewer**: Independent Candid Reviewer Sub-Agent (`candid-reviewer`)  
-**Target Branch**: `feat/vision-pad`  
-**Base Commit**: `origin/main`  
-**Date**: 2026-09-16  
-
----
-
-## 1. Logic & Architecture
-- **Pipeline Integration Ordering**: PAD is placed precisely between landmark affine alignment and embedding extraction, satisfying `AI/ARCHITECTURE.md` §7 step 3.
-- **Short-Circuit Optimization**: When PAD detects a presentation attack (`!pad_result.is_live`), `VisionPipeline::process_frame` returns `Err(VisionError::PadFailed)` immediately. Feature embedding extraction (~30ms) is completely bypassed.
-- **Model Registry & Attestation**: MiniFASNet anti-spoofing model is registered in `models/manifest.toml` with license, description, expected tensor input/output shapes (`[1, 3, 112, 112]` -> `[1, 3]`), and SHA-256 integrity hash.
-- **Policy & Daemon Routing**: `crates/daemon/src/dispatcher.rs` catches `VisionError::PadFailed`, emits a structured audit log with score and threshold (without raw frame data), and evaluates `AuthContext` with `pad_passed: false`. The policy engine deterministically yields `(Verdict::Deny, ReasonClass::PadFailed)`.
-- **Verdict**: PASS.
+## Audit Summary
+- **Reviewer**: Independent Candid Reviewer Sub-Agent (`candid-reviewer`)
+- **Target Branch**: `chore/production-hardening`
+- **Base Reference**: `origin/main`
+- **Scope**: Memory zeroization audit, swap protection (`mlock`), systemd hardening validation, and `cargo-deny` audit enforcement
 
 ---
 
-## 2. PAM Concurrency & Real-Time Latency Deadlines
-- **No Tokio in PAM**: Changes are strictly confined to the daemon (`soos-daemon`), inference engine (`soos-inference-ort`), and vision pipeline (`soos-vision`). The PAM module remains untouched and free of asynchronous runtimes.
-- **Latency Budget Compliance**:
-  - `AI/ARCHITECTURE.md` allocates 35ms for the PAD verification step within the 150ms total decision budget.
-  - Aligned crop reuse: PAD operates directly on the 112x112 aligned RGB crop produced by the landmark stage, avoiding duplicated color conversion or cropping overhead.
-  - Automated benchmark test `test_pad_latency_budget_compliance` proves that PAD verification executes well within the 35ms budget.
-- **Verdict**: PASS.
+## Evaluation Across the 5 Review Pillars
+
+### Pillar 1: Logic & Architectural Soundness
+- **State & Transitions**: Decrypted embeddings, raw camera capture buffers, and intermediate aligned face crops enforce automatic memory scrubbing on drop.
+- **Resource Management**: Sensitive frames and enrolled templates in the daemon dispatcher are explicitly scrubbed and dropped immediately following cosine similarity computation rather than being retained across IPC response generation.
+- **Supply Chain**: `deny.toml` elevates `multiple-versions` to `"deny"`, blocking unauthorized duplicated dependencies while explicitly documenting necessary transitive toolchain skips (`bindgen 0.65` / `v4l2-sys-mit`).
+- **Verdict**: **PASS**
+
+### Pillar 2: PAM Concurrency & Real-Time Deadlines
+- **Zero Tokio in PAM**: No asynchronous runtimes added or modified in PAM modules.
+- **Output Isolation**: Zero `println!`, `eprintln!`, or `dbg!` stream pollution.
+- **Verdict**: **PASS**
+
+### Pillar 3: Panic Safety & Fail-Closed Behavior
+- **Zero Panics**: No unhandled `unwrap()` or `expect()` introduced in production pathways.
+- **Fail-Closed Fallback**: Memory locking primitives (`mlock_slice`, `mlock_process_address_space`) handle unprivileged environments gracefully without panicking or aborting.
+- **Verdict**: **PASS**
+
+### Pillar 4: Strict Test Integrity (Zero Weakening)
+- **Immutable Test Contracts**: All existing tests remained strictly untouched.
+- **Challenging Coverage**: Added comprehensive test suites:
+  - `crates/inference-ort/tests/zeroize_tests.rs`: tests embedding zeroization.
+  - `crates/camera-v4l/tests/frame_zeroize_tests.rs`: tests frame zeroization.
+  - `crates/daemon/tests/hardening_tests.rs`: tests `mlock` lifecycle, `LockedBuffer` RAII wrapper, systemd directives, and `cargo-deny` duplicate ban.
+- **Verdict**: **PASS**
+
+### Pillar 5: Memory Safety, Bounds & Secrets
+- **Zeroization**: `BiometricEmbedding` wraps `Zeroizing<Vec<f32>>` and implements `Zeroize`. `Frame` implements `Zeroize` and `Drop`. `PipelineOutput` implements `Zeroize` and `Drop`.
+- **Swap Protection**: Memory locking (`mlock_slice`, `mlockall`) guards against sensitive pages being paged out to unencrypted swap.
+- **Unsafe Code Isolation**: Unsafe calls are confined to `crates/daemon/src/mlock.rs` with documented `// SAFETY:` rationale explaining pointer validity and kernel virtual memory behavior. All business crates strictly maintain `#![forbid(unsafe_code)]`.
+- **Verdict**: **PASS**
 
 ---
 
-## 3. Panic Safety & Fallback
-- **Zero Unwraps/Expects in Production**:
-  - Tensor indexing and dimension conversions use `.get()`, `.first()`, `copied().unwrap_or(0.0)`, and checked arithmetic.
-  - Softmax calculation in `OrtPadDetector::softmax` handles empty slices, identical values, and extreme float inputs safely without `NaN` or panics.
-- **Fail-Closed Behavior**: Any error in PAD evaluation or spoof detection results in `pad_passed = false` and `Verdict::Deny` with `ReasonClass::PadFailed`. PAM module maps this to `PAM_IGNORE`, preserving silent fallback to system password authentication.
-- **Verdict**: PASS.
+## Conclusion & Verdict
 
----
+The changes adhere to all architectural invariants, security rules, and code quality guidelines of the `soos` workspace.
 
-## 4. Test Integrity & Anti-Weakening
-- **Immutable Acceptance Contract**:
-  - No existing tests were deleted, weakened, or bypassed.
-  - All existing unit, property, and integration tests continue to pass cleanly.
-- **New Test Coverage**:
-  - `crates/inference-ort/tests/pad_tests.rs`: Tests `MockPadDetector` (live, spoof, fault injection, dynamic updates) and `OrtPadDetector::softmax` numerical stability.
-  - `crates/inference-ort/tests/manifest_tests.rs`: Asserts `minifasnet_pad` presence, filename, license, and tensor shapes in `models/manifest.toml`.
-  - `crates/vision/tests/pad_tests.rs`: Contractual test suite covering live face acceptance, printed photo spoof rejection, screen replay spoof rejection, embedding extraction skipping on spoof, threshold calibration, FAR/FRR population benchmarking (0.0% FAR, 0.0% FRR), and latency budget compliance.
-  - `crates/daemon/tests/pipeline_integration_tests.rs`: Full pipeline integration test `test_15_pad_presentation_attack_spoof_returns_deny_pad_failed` asserting `Verdict::Deny` and `ReasonClass::PadFailed`.
-- **Verdict**: PASS.
-
----
-
-## 5. Memory & Secret Bounds
-- **Zero Frame / Biometric Leakage**:
-  - Intermediate aligned crops and tensor buffers are dropped in memory immediately after processing.
-  - Debug logs in `dispatcher.rs` only log numeric score and threshold fields; no pixel data or embedding vectors are logged.
-- **`#![forbid(unsafe_code)]`**:
-  - Strictly preserved in `crates/inference-ort`, `crates/vision`, and `crates/daemon`.
-- **Verdict**: PASS.
-
----
-
-## 6. Language Policy Compliance
-- All code, function signatures, comments, documentation, and error strings are written exclusively in English.
-- **Verdict**: PASS.
-
----
-
-## Conclusion & Review Verdict
-
-```text
-======================================================================
-VERDICT: APPROVED
-======================================================================
-```
-
-The presentation attack detection implementation adheres to all architectural invariants, zero-trust constraints, and quality standards. Ready for documentation synchronization and release loop.
+**VERDICT: APPROVED**
