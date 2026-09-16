@@ -400,7 +400,15 @@ impl ConnectionDispatcher {
                             0.0
                         }
                     };
-                    (sim, 1u8, true)
+                    (sim, 1u8, output.pad_result.is_live)
+                }
+                Err(soos_vision::VisionError::PadFailed { score, threshold }) => {
+                    debug!(
+                        score = score,
+                        threshold = threshold,
+                        "Presentation attack detected (PAD failed)"
+                    );
+                    (0.0, 1u8, false)
                 }
                 Err(soos_vision::VisionError::NoFaceDetected) => {
                     debug!("Zero faces detected in capture");

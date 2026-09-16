@@ -21,7 +21,7 @@ use soos_enrollment_cli::error::EnrollmentCliError;
 use soos_enrollment_cli::service::EnrollmentService;
 use soos_inference_ort::{
     BoundingBox, FaceDetection, FaceLandmarks, MockEmbeddingExtractor, MockFaceDetector,
-    MockLandmarkDetector, Point2f,
+    MockLandmarkDetector, MockPadDetector, Point2f,
 };
 use soos_vision::{VisionPipeline, VisionPipelineConfig};
 
@@ -48,11 +48,13 @@ fn setup_mock_service(temp: &TempDir) -> (EnrollmentService, Arc<BiometricStore>
 
     // Embedding (dimension 128)
     let extractor = Arc::new(MockEmbeddingExtractor::new(128));
+    let pad = Arc::new(MockPadDetector::new_live());
 
     let pipeline_config = VisionPipelineConfig::default();
     let pipeline = Arc::new(VisionPipeline::new(
         detector,
         landmark_detector,
+        pad,
         extractor,
         pipeline_config,
     ));

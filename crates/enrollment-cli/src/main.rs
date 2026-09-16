@@ -19,7 +19,8 @@ use soos_enrollment_cli::args::{Cli, Commands, OutputFormat};
 use soos_enrollment_cli::error::EnrollmentCliError;
 use soos_enrollment_cli::service::EnrollmentService;
 use soos_inference_ort::{
-    ModelRegistry, OrtEmbeddingExtractor, OrtFaceDetector, OrtLandmarkDetector, RegistryConfig,
+    ModelRegistry, OrtEmbeddingExtractor, OrtFaceDetector, OrtLandmarkDetector, OrtPadDetector,
+    RegistryConfig,
 };
 use soos_protocol::Verdict;
 use soos_vision::{VisionPipeline, VisionPipelineConfig};
@@ -57,16 +58,19 @@ fn build_service(cli: &Cli) -> Result<EnrollmentService, EnrollmentCliError> {
 
     let det_session = registry.get_or_load_session("face_detector")?;
     let lm_session = registry.get_or_load_session("facial_landmarks")?;
+    let pad_session = registry.get_or_load_session("minifasnet_pad")?;
     let emb_session = registry.get_or_load_session("face_embedding")?;
 
     let detector = Arc::new(OrtFaceDetector::new(det_session, 0.70, 0.40));
     let landmarks = Arc::new(OrtLandmarkDetector::new(lm_session));
+    let pad = Arc::new(OrtPadDetector::new(pad_session, 0.80));
     let extractor = Arc::new(OrtEmbeddingExtractor::new(emb_session));
 
     let pipeline_config = VisionPipelineConfig::default();
     let pipeline = Arc::new(VisionPipeline::new(
         detector,
         landmarks,
+        pad,
         extractor,
         pipeline_config,
     ));

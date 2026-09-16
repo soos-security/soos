@@ -146,3 +146,18 @@ This document translates the critical gating criteria from §11 of `ARCHITECTURE
 | AD2 | Daemon status inspection (component readiness, PID, uptime, systemd unit state, offline reporting) | Unit tests (`test_status_query_mock_daemon_healthy`, `test_status_query_mock_daemon_component_unready`, `test_status_query_offline_daemon_does_not_panic`, `test_status_report_json_serialization`) | ✅ Verified |
 | AD3 | Simulated PAM authentication cycle with latency breakdown and verdict evaluation | Unit tests (`test_simulate_pam_auth_allow`, `test_simulate_pam_auth_deny_yields_pam_ignore`, `test_simulate_pam_auth_offline_socket_fails_closed`) | ✅ Verified |
 | AD4 | Log stream filtering with automatic redaction of sensitive patterns (passwords, tokens, keys, embeddings) | Unit tests (`test_redact_preserves_benign_logs`, `test_redact_masks_password_fields`, `test_redact_masks_tokens_and_secrets`, `test_redact_masks_master_key_and_hex_keys`, `test_redact_masks_embedding_vector_arrays`, `test_fetch_and_filter_logs_from_file_with_redaction`, `test_fetch_and_filter_logs_limits_line_count`) | ✅ Verified |
+
+---
+
+## Component: `vision-pad` (Presentation Attack Detection)
+
+| # | Criterion | Test Method | Status |
+|---|---|---|---|
+| PAD1 | MiniFASNet anti-spoofing model attested in `models/manifest.toml` with SHA-256 checksum and input/output shapes | Manifest parsing test (`manifest_tests::test_parse_workspace_manifest_file`) | ✅ Verified |
+| PAD2 | `PadDetector` trait, `OrtPadDetector`, and `MockPadDetector` with numerically stable softmax and fault injection | Unit tests (`pad_tests::test_mock_pad_detector_nominal_live`, `test_mock_pad_detector_spoof_*`, `test_softmax_numerical_stability`) | ✅ Verified |
+| PAD3 | Vision pipeline short-circuits on spoof detection, completely skipping embedding extraction | Pipeline unit tests (`pad_tests::test_pipeline_rejects_printed_photo_spoof`, `test_pipeline_rejects_screen_replay_spoof`) | ✅ Verified |
+| PAD4 | Genuine live face candidates pass PAD and extract biometric embeddings | Pipeline unit tests (`pad_tests::test_pipeline_accepts_live_face`, `test_pad_threshold_calibration`) | ✅ Verified |
+| PAD5 | FAR/FRR benchmark on test fixtures population confirms 0.0% False Accept Rate and 0.0% False Reject Rate | Benchmark test (`pad_tests::test_pad_far_frr_benchmark`) | ✅ Verified |
+| PAD6 | PAD verification execution latency remains well within the 35ms budget allocated in `ARCHITECTURE.md` §7 | Benchmark test (`pad_tests::test_pad_latency_budget_compliance`) | ✅ Verified |
+| PAD7 | Daemon integration: PAD presentation attack yields `Verdict::Deny` with `ReasonClass::PadFailed` | Integration test (`pipeline_integration_tests::test_15_pad_presentation_attack_spoof_returns_deny_pad_failed`) | ✅ Verified |
+

@@ -20,7 +20,9 @@ use soos_camera_v4l::{CameraConfig, MockCameraManager};
 use soos_enrollment_cli::args::DeleteArgs;
 use soos_enrollment_cli::error::EnrollmentCliError;
 use soos_enrollment_cli::service::EnrollmentService;
-use soos_inference_ort::{MockEmbeddingExtractor, MockFaceDetector, MockLandmarkDetector};
+use soos_inference_ort::{
+    MockEmbeddingExtractor, MockFaceDetector, MockLandmarkDetector, MockPadDetector,
+};
 use soos_vision::{VisionPipeline, VisionPipelineConfig};
 
 fn setup_delete_service(temp: &TempDir) -> (EnrollmentService, Arc<BiometricStore>) {
@@ -29,10 +31,12 @@ fn setup_delete_service(temp: &TempDir) -> (EnrollmentService, Arc<BiometricStor
 
     let detector = Arc::new(MockFaceDetector::new_empty());
     let landmarks = Arc::new(MockLandmarkDetector::new_canonical());
+    let pad = Arc::new(MockPadDetector::new_live());
     let extractor = Arc::new(MockEmbeddingExtractor::new(128));
     let pipeline = Arc::new(VisionPipeline::new(
         detector,
         landmarks,
+        pad,
         extractor,
         VisionPipelineConfig::default(),
     ));

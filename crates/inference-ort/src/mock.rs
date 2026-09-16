@@ -14,6 +14,7 @@ use crate::detector::{BoundingBox, FaceDetection, FaceDetector};
 use crate::embedding::{BiometricEmbedding, EmbeddingExtractor};
 use crate::error::InferenceError;
 use crate::landmarks::{FaceLandmarks, LandmarkDetector, Point2f};
+use crate::pad::{AttackType, PadDetector, PadResult};
 
 /// Mock face detector for automated tests and headless environments.
 pub struct MockFaceDetector {
@@ -241,5 +242,88 @@ impl EmbeddingExtractor for MockEmbeddingExtractor {
         let mut embedding = BiometricEmbedding::new(vec);
         embedding.normalize()?;
         Ok(embedding)
+    }
+}
+
+/// Mock presentation attack detector for automated tests and headless environments.
+pub struct MockPadDetector {
+    result: RwLock<PadResult>,
+    fail_next: RwLock<bool>,
+}
+
+impl MockPadDetector {
+    /// Creates a mock detector that returns a genuine live face verdict.
+    pub fn new_live() -> Self {
+        Self {
+            result: RwLock::new(PadResult::live(0.98)),
+            fail_next: RwLock::new(false),
+        }
+    }
+
+    /// Creates a mock detector that returns a presentation attack (spoof) verdict.
+    pub fn new_spoof(attack_type: AttackType, score: f32) -> Self {
+        Self {
+            result: RwLock::new(PadResult::spoof(score, attack_type)),
+            fail_next: RwLock::new(false),
+        }
+    }
+
+    /// Creates a mock detector with an explicit initial result.
+    pub fn new_with_result(result: PadResult) -> Self {
+        Self {
+            result: RwLock::new(result),
+            fail_next: RwLock::new(false),
+        }
+    }
+
+    /// Updates the configured mock result.
+    pub fn set_result(&self, result: PadResult) {
+        if let Ok(mut guard) = self.result.write() {
+            *guard = result;
+        }
+    }
+
+    /// Injects a fault on the next evaluation call.
+    pub fn set_fail_next(&self, fail: bool) {
+        if let Ok(mut guard) = self.fail_next.write() {
+            *guard = fail;
+        }
+    }
+}
+
+impl PadDetector for MockPadDetector {
+    fn evaluate_liveness(
+        &self,
+        rgb: &[u8],
+        width: u32,
+        height: u32,
+    ) -> Result<PadResult, InferenceError> {
+        if let Ok(mut guard) = self.fail_next.write() {
+            if *guard {
+                *guard = false;
+                return Err(InferenceError::PadFailed(
+                    "Simulated PAD inference failure".to_string(),
+                ));
+            }
+        }
+
+        let expected_len = (width as usize)
+            .checked_mul(height as usize)
+            .and_then(|px| px.checked_mul(3))
+            .ok_or_else(|| InferenceError::InvalidInput("Image dimensions overflow".to_string()))?;
+
+        if rgb.len() != expected_len {
+            return Err(InferenceError::InvalidBufferSize {
+                expected: expected_len,
+                actual: rgb.len(),
+            });
+        }
+
+        let guard = self
+            .result
+            .read()
+            .map_err(|_| InferenceError::PadFailed("Lock poisoned".to_string()))?;
+
+        Ok(guard.clone())
     }
 }
