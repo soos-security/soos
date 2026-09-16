@@ -123,6 +123,7 @@ Before starting Phase 1, the orchestrator verifies full ingestion of:
 - Evaluates across 6 core pillars: Architectural Alignment, PAM Real-Time Deadlines, Panic Safety, Dependency Isolation, Memory/Secret Hygiene, and Test Integrity.
 - Authors formal evaluation report in `AI/plan_evaluator_report.md` with explicit verdict: `VALIDATION_VERDICT: APPROVED` before execution proceeds.
   - *Tool Constraint*: Target file is in the project workspace; do NOT include `ArtifactMetadata` in `write_to_file`.
+  - **/goal Autonomous Execution Protocol**: When invoked under `/goal` with `plan-evaluator` ("auto-plan verificateur"), generating `AI/plan_evaluator_report.md` with `VALIDATION_VERDICT: APPROVED` serves as the formal gate, allowing the orchestrator to proceed directly to Phase 2 without pausing for interactive human confirmation.
 
 ### Phase 2: Tester Sub-Agent ([tester-agent](file:///home/hadrien/soos/.agents/skills/tester-agent/SKILL.md))
 - Authors unit, property (`proptest`), and invariant tests.
@@ -141,6 +142,7 @@ Before starting Phase 1, the orchestrator verifies full ingestion of:
 - Iterates until 100% of tests pass cleanly (TDD Green Phase).
 - **Strict Anti-Weakening Rule**: Under NO circumstances may the developer modify, weaken, or delete a test. The developer must persevere and fix production code only.
 - Formats code (`cargo fmt`) and ensures zero Clippy warnings (`cargo clippy --all-targets --all-features -- -D warnings`).
+- **Cross-Crate Refactoring Invariant**: When modifying shared pipeline constructors (e.g. `VisionPipeline::new`), immediately update downstream consumers across the workspace (`enrollment-cli`, `daemon` fixtures) to preserve workspace-wide build integrity.
 
 ### Phase 5: Candid Reviewer Sub-Agent ([candid-reviewer](file:///home/hadrien/soos/.agents/skills/candid-reviewer/SKILL.md))
 - Executes independent, cold diff review against `origin/main` on 5 pillars:
