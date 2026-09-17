@@ -704,7 +704,7 @@ Zero `.onnx` files exist in the repository. The manifest specifies SHA-256 check
 
 #### Sub-issues
 
-- [ ] **#18.1** — Create `scripts/download_models.sh`
+- [x] **#18.1** — Create `scripts/download_models.sh`
   - Download each model from its `source_url` in `manifest.toml`
   - Verify SHA-256 checksum against manifest
   - Install to `/var/lib/soos/models/` with mode `0644 root:root`
@@ -713,17 +713,17 @@ Zero `.onnx` files exist in the repository. The manifest specifies SHA-256 check
   - Acceptance: All 4 ONNX files downloaded and verified
   - TDD: `test_download_script_verifies_checksums`
 
-- [ ] **#18.2** — Document model acquisition in `models/README.md`
+- [x] **#18.2** — Document model acquisition in `models/README.md`
   - List each model with license, source, and acquisition instructions
   - Include legal notice for redistribution restrictions
   - Acceptance: README is complete and accurate
 
-- [ ] **#18.3** — Add model verification to daemon startup (fail-fast)
+- [x] **#18.3** — Add model verification to daemon startup (fail-fast)
   - `ModelRegistry::verify_integrity()` at startup
   - Missing or tampered models → daemon refuses to start with clear error
   - Acceptance: `test_daemon_refuses_start_with_missing_models`
 
-- [ ] **#18.4** — CI integration: model download in Docker test environment
+- [x] **#18.4** — CI integration: model download in Docker test environment
   - Dockerfile step to download models (or use mock stubs for CI)
   - Acceptance: CI pipeline can run full integration tests
 

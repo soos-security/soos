@@ -102,6 +102,11 @@ auth  requisite                      pam_deny.so\n\
 auth  required                       pam_permit.so" > /etc/pam.d/common-auth
 
 # ---------------------------------------------------------------------------
+# Biometric & Model Storage Directory
+# ---------------------------------------------------------------------------
+RUN mkdir -p /var/lib/soos/models && chmod 755 /var/lib/soos/models
+
+# ---------------------------------------------------------------------------
 # Working Directory
 # ---------------------------------------------------------------------------
 WORKDIR /workspace

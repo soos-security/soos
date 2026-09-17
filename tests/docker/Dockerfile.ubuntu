@@ -47,6 +47,9 @@ auth  [success=1 default=ignore]    pam_unix.so nullok\n\
 auth  requisite                      pam_deny.so\n\
 auth  required                       pam_permit.so" > /etc/pam.d/common-auth
 
+# Provision /var/lib/soos/models directory
+RUN mkdir -p /var/lib/soos/models && chmod 755 /var/lib/soos/models
+
 WORKDIR /workspace
 
 CMD ["bash"]

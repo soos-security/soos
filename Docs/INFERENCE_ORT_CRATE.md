@@ -88,11 +88,30 @@ Implemented by `OrtEmbeddingExtractor` (MobileFaceNet ArcFace) and `MockEmbeddin
 
 ---
 
+## Model Acquisition & Deployment
+
+Production models are deployed to `/var/lib/soos/models/` via `scripts/download_models.sh`:
+- Cryptographic SHA-256 verification against `models/manifest.toml`.
+- File permissions enforced: `0644` (owner `root:root`).
+- Manifest copied to `/var/lib/soos/models/manifest.toml`.
+- Automated fail-fast startup verification: `soos-daemon` validates model integrity before opening the IPC socket.
+
+```bash
+# Production model download and installation (requires root)
+sudo ./scripts/download_models.sh
+
+# Validation of installed models
+./scripts/download_models.sh --check-only
+```
+
+---
+
 ## Verification Matrix Mapping
 
 | Matrix ID | Criterion | Verification Method | Status |
 |---|---|---|---|
 | **Global** | Each ONNX model is attested by manifest + SHA-256 checksum | `manifest_tests::test_parse_workspace_manifest_file`, `manifest_tests::test_verify_model_checksum_success_and_tamper_detection`, `registry_tests::test_registry_verify_integrity_missing_files_fails_closed` | Validated |
+| **D14** | ONNX model download, SHA-256 verification, and fail-fast startup attestation | `model_deployment_tests::test_download_script_verifies_checksums`, `model_deployment_tests::test_daemon_refuses_start_with_missing_models`, `model_deployment_tests::test_daemon_refuses_start_with_tampered_models` | Validated |
 | **V2** | L2-normalized embeddings (norm ≈ 1.0) | `embedding_tests::test_l2_norm_and_normalization_criterion_v2`, `proptest_suite::prop_embedding_normalization_criterion_v2` | Validated |
 | **Invariant** | `#![forbid(unsafe_code)]` enabled | Invariant test & compile-time crate declaration | Validated |
 | **Invariant** | Zero OpenCV across workspace | `tests/invariants::test_no_opencv_in_any_cargo_toml` | Validated |

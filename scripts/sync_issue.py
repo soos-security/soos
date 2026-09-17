@@ -82,6 +82,7 @@ BRANCH_TO_ISSUE = {
     "feat/vision-pad": 15,
     "chore/production-hardening": 16,
     "fix/daemon-fail-closed": 17,
+    "feat/model-deployment": 18,
 }
 
 
