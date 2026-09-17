@@ -138,6 +138,9 @@ This document translates the critical gating criteria from §11 of `ARCHITECTURE
 | EN4 | Anti-forensic secure erasure on template deletion | Destruction test | ✅ Verified (`test_shred_overwrites_and_removes_file`, `test_shred_empty_file_removes_cleanly`, `test_delete_existing_template_with_auto_confirm`, `test_delete_interactive_prompt_cancelled`, `test_delete_non_existent_uid_fails`) |
 | EN5 | Diagnostic one-shot verification with latency breakdown and PAD | Diagnostic test | ✅ Verified (`test_verify_matching_user_reports_allow_and_metrics`, `test_verify_non_matching_user_reports_deny`, `test_verify_unenrolled_uid_fails`) |
 | EN6 | Enumeration of enrolled UIDs and metadata resolution | Listing test | ✅ Verified (`test_list_empty_store_returns_empty_vec`, `test_list_multiple_enrolled_users_returns_sorted_summaries`) |
+| EN7 | Model registry ID attestation matching `models/manifest.toml` (`ultraface_slim_320`, `landmark_5point`, `mobilefacenet_arcface`, `minifasnet_pad`) | Model ID attestation test | ✅ Verified (`test_enrollment_cli_model_ids_match_manifest`) |
+| EN8 | Lazy initialization: non-biometric commands (`list`, `delete`) execute store-only without camera or neural models | Lazy init test | ✅ Verified (`test_list_command_works_without_camera_or_models`, `test_delete_command_works_with_store_only`) |
+| EN9 | Deterministic hardware camera addressing defaulting to `/dev/v4l/by-id/` (Criterion C4) | Hardware path resolution test | ✅ Verified (`test_camera_device_path_uses_stable_by_id`) |
 
 ---
 

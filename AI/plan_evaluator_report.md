@@ -1,65 +1,65 @@
-# Implementation Plan Evaluation Report
+# Plan Evaluator Report: Issue #19 — fix(enrollment-cli): Correct model registry IDs and lazy initialization
 
-- **Target Issue**: Issue #18 — `feat(daemon): ONNX model download, verification, and deployment script` (GitHub #57)
-- **Target Branch**: `feat/model-deployment`
-- **Architecture Reference**: `AI/ARCHITECTURE.md` §7 Models & Verification Pipeline, §8 Monorepo Structure
-- **Evaluator**: Plan Evaluator Sub-Agent (Autonomous Mode)
-- **Evaluation Date**: 2026-09-17
-
----
-
-## 1. Executive Evaluation
-
-The proposed technical implementation plan covers the complete scope of Backlog Issue #18:
-1. **Sub-issue #18.1**: Creation of `scripts/download_models.sh` for downloading, cryptographically verifying (SHA-256), and deploying models to `/var/lib/soos/models/` with `0644` permissions and copying `manifest.toml`.
-2. **Sub-issue #18.2**: Authoring `models/README.md` documenting model acquisition, licenses, upstream sources, and legal redistribution notices.
-3. **Sub-issue #18.3**: Fail-fast model verification at daemon startup (`ModelRegistry::verify_integrity()`) ensuring missing or tampered models immediately abort startup before opening the IPC socket.
-4. **Sub-issue #18.4**: CI and Docker integration ensuring model storage paths and verification are supported in the isolated container test sandbox.
+## Overview
+- **Issue**: Backlog Issue #19 / GitHub Issue #58 (`fix(enrollment-cli): Correct model registry IDs and lazy initialization`)
+- **Target Branch**: `fix/enrollment-cli-model-ids`
+- **Component**: `crates/enrollment-cli`
+- **Evaluator**: Independent Plan Evaluator Sub-Agent (`plan-evaluator`)
 
 ---
 
-## 2. Evaluation on 6 Architectural Pillars
+## Evaluation Across 6 Architectural Pillars
 
 ### Pillar 1: Architectural Alignment & Threat Model
-- **Compliance: PASS**
-- The deployment script targets `/var/lib/soos/models/` (owned by root, mode `0644` for files, `0755` for directory) as specified in `AI/ARCHITECTURE.md` §7.
-- Models are strictly attested by cryptographic SHA-256 checksums cataloged in `manifest.toml` before any execution session is instantiated.
-- IPC boundary remains unpolluted: models are loaded and verified exclusively within the privileged daemon process, keeping the unprivileged PAM module free of neural dependencies.
+- **Evaluation**: PASS
+- **Details**:
+  - The plan cleanly isolates administrative/diagnostic commands (`list`, `delete`) from camera and ONNX model runtime dependencies.
+  - Template storage remains strictly anchored in `/var/lib/soos/biometrics/` with `0600` root permissions.
+  - Root privilege checking (`check_privileges(require_root)`) remains enforced on modifying commands (`enroll`, `delete`).
+  - No privilege escalation or world-writable socket exposure.
 
 ### Pillar 2: PAM Real-Time Latency & Concurrency
-- **Compliance: PASS**
-- Zero asynchronous runtime (Tokio) or neural code is introduced into `crates/pam`.
-- The PAM module remains a synchronous, blocking IPC client with a strict 200–250ms deadline.
-- Daemon-side model verification occurs strictly during startup prior to binding the socket (`bind_socket`), ensuring zero latency impact on active PAM verification requests.
+- **Evaluation**: PASS
+- **Details**:
+  - `enrollment-cli` is a standalone administrative CLI binary (`soos-enroll`) and library (`soos_enrollment_cli`), completely distinct from the PAM runtime (`pam_soos.so`).
+  - No asynchronous runtimes (Tokio) or blocking delays are introduced into the PAM authentication pathway.
 
 ### Pillar 3: Panic Safety & Fail-Closed Behavior
-- **Compliance: PASS**
-- All model loading and verification functions return typed `Result<(), InferenceError>` and `Result<(), DaemonError>`.
-- Startup errors in `crates/daemon/src/main.rs` result in an immediate fail-closed process exit with structured tracing logs (`error!`), preventing the daemon from entering an inconsistent listening state.
-- Zero `unwrap()` or `expect()` introduced in production code.
+- **Evaluation**: PASS
+- **Details**:
+  - All errors are propagated using typed `EnrollmentCliError` (via `thiserror`).
+  - Zero `unwrap()` or `expect()` in production library code.
+  - Added typed variants `CameraNotInitialized` and `PipelineNotInitialized` ensuring predictable, fail-closed handling if a caller invokes camera/vision pipelines on a store-only service.
+  - `#![forbid(unsafe_code)]` remains strictly enforced on `crates/enrollment-cli/src/lib.rs` and `main.rs`.
 
 ### Pillar 4: Dependency Isolation & Banned Crates
-- **Compliance: PASS**
-- Strict prohibition against `opencv` and `nokhwa` is preserved.
-- Model execution relies exclusively on `ort` (ONNX Runtime CPU).
-- No new external crate dependencies are required; existing SHA-256 verification via `sha2` and manifest parsing via `toml` and `serde` are leveraged.
+- **Evaluation**: PASS
+- **Details**:
+  - No prohibited crates (`opencv`, `nokhwa`) are introduced.
+  - Model inference relies on `ort` via `soos-inference-ort`, camera relies on `v4l` via `soos-camera-v4l`.
+  - Reuses existing workspace dependencies without adding redundant external crates.
 
 ### Pillar 5: Data Confidentiality & Zeroization
-- **Compliance: PASS**
-- Zero passwords, raw biometric embeddings, or camera frames are logged or transmitted.
-- Model weights are public neural parameters; cryptographic checksums guarantee supply-chain integrity.
+- **Evaluation**: PASS
+- **Details**:
+  - Master keys and biometric embeddings continue to utilize `zeroize::Zeroizing` buffers.
+  - Deletion command retains cryptographic anti-forensic shredding (`secure_shred_file`) before unlinking templates.
+  - No passwords or plain embeddings are logged to stdout or stderr.
 
 ### Pillar 6: Test Integrity & TDD Contracts
-- **Compliance: PASS**
-- Contractual acceptance tests (`test_download_script_verifies_checksums`, `test_daemon_refuses_start_with_missing_models`, `test_daemon_refuses_start_with_tampered_models`) are authored in Phase 2 before implementation.
-- Tests will strictly fail initially (Red Phase) and will be preserved without weakening.
+- **Evaluation**: PASS
+- **Details**:
+  - TDD Red phase precedes production implementation.
+  - Strict anti-weakening: existing test suites (`scaffold_tests`, `list_tests`, `delete_tests`, `enroll_tests`, `verify_tests`) remain untouched or expanded, never weakened or bypassed.
+  - Implements contractual test requirements from `AI/BACKLOG.md`:
+    - `test_enrollment_cli_model_ids_match_manifest` (#19.1)
+    - `test_list_command_works_without_camera_or_models` (#19.2)
+    - `test_camera_device_path_uses_stable_by_id` (#19.3)
 
 ---
 
-## 3. Plan Evaluation Verdict
+## Conclusion & Verdict
 
-```
-VALIDATION_VERDICT: APPROVED
-```
+The proposed implementation plan fully adheres to the project rules in `AGENTS.md`, `AI/ARCHITECTURE.md`, `AI/DECISIONS.md`, and `AI/BACKLOG.md`. All security, architectural, and test integrity invariants are satisfied.
 
-The implementation plan satisfies all 6 architectural pillars and security invariants. Execution may proceed directly to Phase 2 (Tester Sub-Agent).
+**VALIDATION_VERDICT: APPROVED**

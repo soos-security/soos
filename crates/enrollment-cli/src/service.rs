@@ -1,21 +1,79 @@
 //! Core business logic and service orchestration for enrollment CLI.
 
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use nix::unistd::{Uid, User};
 use zeroize::Zeroizing;
 
-use soos_biometric_store::{BiometricStore, BiometricTemplate};
-use soos_camera_v4l::{CameraManager, Frame};
-use soos_inference_ort::{BoundingBox, FaceDetection};
+use soos_biometric_store::{BiometricStore, BiometricTemplate, MasterKey, DEFAULT_BIOMETRICS_DIR};
+use soos_camera_v4l::{CameraConfigBuilder, CameraManager, Frame, V4lCameraManager};
+use soos_inference_ort::{
+    BoundingBox, FaceDetection, ModelRegistry, OrtEmbeddingExtractor, OrtFaceDetector,
+    OrtLandmarkDetector, OrtPadDetector, RegistryConfig,
+};
 use soos_protocol::Verdict;
-use soos_vision::{cosine_similarity, PipelineOutput, VisionError, VisionPipeline};
+use soos_vision::{
+    cosine_similarity, PipelineOutput, VisionError, VisionPipeline, VisionPipelineConfig,
+};
 
-use crate::args::{resolve_target_uid, DeleteArgs, EnrollArgs, ListArgs, VerifyArgs};
+use crate::args::{resolve_target_uid, Cli, DeleteArgs, EnrollArgs, ListArgs, VerifyArgs};
 use crate::error::EnrollmentCliError;
 use crate::quality::{select_best_frame, CandidateEvaluation};
 use crate::shred::secure_shred_file;
+
+/// Default master key path for biometric encryption.
+pub const DEFAULT_KEY_PATH: &str = "/var/lib/soos/master.key";
+
+/// Default neural models directory containing `manifest.toml`.
+pub const DEFAULT_MODELS_DIR: &str = "/var/lib/soos/models";
+
+/// Default stable camera device identifier per Criterion C4.
+pub const DEFAULT_CAMERA_DEVICE: &str = "/dev/v4l/by-id/default-camera";
+
+/// Attested model registry ID for UltraFace Slim 320 detector.
+pub const MODEL_ID_FACE_DETECTOR: &str = "ultraface_slim_320";
+
+/// Attested model registry ID for InsightFace 5-point landmark detector.
+pub const MODEL_ID_LANDMARKS: &str = "landmark_5point";
+
+/// Attested model registry ID for MiniFASNet presentation attack detector.
+pub const MODEL_ID_PAD: &str = "minifasnet_pad";
+
+/// Attested model registry ID for MobileFaceNet ArcFace feature extractor.
+pub const MODEL_ID_EMBEDDING: &str = "mobilefacenet_arcface";
+
+/// Set of all 4 neural model IDs required by the biometric vision pipeline.
+pub const REQUIRED_MODEL_IDS: [&str; 4] = [
+    MODEL_ID_FACE_DETECTOR,
+    MODEL_ID_LANDMARKS,
+    MODEL_ID_PAD,
+    MODEL_ID_EMBEDDING,
+];
+
+/// Resolves the camera device path, preferring an explicit CLI argument if provided,
+/// then the first deterministic entry in `/dev/v4l/by-id/`, and falling back to
+/// `/dev/v4l/by-id/default-camera`.
+pub fn resolve_camera_device(cli_device: Option<PathBuf>) -> PathBuf {
+    if let Some(device) = cli_device {
+        return device;
+    }
+    let by_id_dir = Path::new("/dev/v4l/by-id");
+    if by_id_dir.is_dir() {
+        if let Ok(entries) = std::fs::read_dir(by_id_dir) {
+            let mut paths: Vec<_> = entries
+                .filter_map(|e| e.ok().map(|entry| entry.path()))
+                .filter(|p| p.is_file() || p.is_symlink())
+                .collect();
+            paths.sort();
+            if let Some(first) = paths.into_iter().next() {
+                return first;
+            }
+        }
+    }
+    PathBuf::from(DEFAULT_CAMERA_DEVICE)
+}
 
 /// Verifies that the process is running with root privileges (EUID 0) if required.
 pub fn check_privileges(require_root: bool) -> Result<(), EnrollmentCliError> {
@@ -83,13 +141,13 @@ pub struct EnrolledUserSummary {
 /// Core enrollment service orchestrator.
 pub struct EnrollmentService {
     store: Arc<BiometricStore>,
-    camera: Arc<dyn CameraManager>,
-    pipeline: Arc<VisionPipeline>,
+    camera: Option<Arc<dyn CameraManager>>,
+    pipeline: Option<Arc<VisionPipeline>>,
     require_root: bool,
 }
 
 impl EnrollmentService {
-    /// Creates a new `EnrollmentService`.
+    /// Creates a new full `EnrollmentService` with camera and vision pipeline.
     pub fn new(
         store: Arc<BiometricStore>,
         camera: Arc<dyn CameraManager>,
@@ -98,17 +156,36 @@ impl EnrollmentService {
     ) -> Self {
         Self {
             store,
-            camera,
-            pipeline,
+            camera: Some(camera),
+            pipeline: Some(pipeline),
             require_root,
         }
     }
 
+    /// Creates a new store-only `EnrollmentService` without initializing camera or models.
+    pub fn new_store_only(store: Arc<BiometricStore>, require_root: bool) -> Self {
+        Self {
+            store,
+            camera: None,
+            pipeline: None,
+            require_root,
+        }
+    }
+
+    /// Returns `true` if camera and vision pipeline are initialized.
+    pub fn is_full_service(&self) -> bool {
+        self.camera.is_some() && self.pipeline.is_some()
+    }
+
     /// Acquires a fresh, stabilized camera frame.
     fn acquire_frame(&self) -> Result<Arc<Frame>, EnrollmentCliError> {
-        self.camera.notify_activity();
+        let camera = self
+            .camera
+            .as_ref()
+            .ok_or(EnrollmentCliError::CameraNotInitialized)?;
+        camera.notify_activity();
         for _ in 0..200 {
-            if let Some(frame) = self.camera.latest_frame() {
+            if let Some(frame) = camera.latest_frame() {
                 return Ok(frame);
             }
             std::thread::sleep(Duration::from_millis(10));
@@ -126,6 +203,11 @@ impl EnrollmentService {
     ) -> Result<EnrollmentOutcome, EnrollmentCliError> {
         check_privileges(self.require_root)?;
 
+        let pipeline = self
+            .pipeline
+            .as_ref()
+            .ok_or(EnrollmentCliError::PipelineNotInitialized)?;
+
         let uid = resolve_target_uid(args.uid, args.username.as_deref())?;
 
         let already_enrolled = self.store.exists(uid)?;
@@ -136,7 +218,7 @@ impl EnrollmentService {
 
         for idx in 0..frames_to_capture {
             let frame = self.acquire_frame()?;
-            match self.pipeline.process_frame(&frame) {
+            match pipeline.process_frame(&frame) {
                 Ok(output) => {
                     candidates.push(CandidateEvaluation {
                         frame_idx: idx,
@@ -178,7 +260,7 @@ impl EnrollmentService {
             }
         }
 
-        let best = select_best_frame(&candidates, self.pipeline.config().min_face_confidence)?;
+        let best = select_best_frame(&candidates, pipeline.config().min_face_confidence)?;
         let best_output = outputs
             .get(best.frame_idx)
             .and_then(|opt| opt.as_ref())
@@ -195,7 +277,7 @@ impl EnrollmentService {
                 c.detections.len() == 1
                     && c.detections
                         .first()
-                        .map(|d| d.score >= self.pipeline.config().min_face_confidence)
+                        .map(|d| d.score >= pipeline.config().min_face_confidence)
                         .unwrap_or(false)
             })
             .count();
@@ -248,6 +330,11 @@ impl EnrollmentService {
         &self,
         args: &VerifyArgs,
     ) -> Result<DiagnosticVerificationReport, EnrollmentCliError> {
+        let pipeline = self
+            .pipeline
+            .as_ref()
+            .ok_or(EnrollmentCliError::PipelineNotInitialized)?;
+
         let uid = resolve_target_uid(args.uid, args.username.as_deref())?;
 
         let template = self
@@ -264,10 +351,10 @@ impl EnrollmentService {
 
         // 2. Vision processing
         let start_pipe = Instant::now();
-        let process_res = self.pipeline.process_frame(&frame);
+        let process_res = pipeline.process_frame(&frame);
         let pipeline_ms = start_pipe.elapsed().as_secs_f64() * 1000.0;
 
-        let threshold = self.pipeline.config().match_threshold;
+        let threshold = pipeline.config().match_threshold;
 
         match process_res {
             Ok(output) => {
@@ -406,4 +493,86 @@ impl EnrollmentService {
         summaries.sort_by_key(|s| s.uid);
         Ok(summaries)
     }
+}
+
+/// Builds an `EnrollmentService` initialized with only the biometric store (master key and templates).
+///
+/// Defers camera hardware access and ONNX model loading, making it safe and fast
+/// for read-only / administrative commands (`list`, `delete`).
+pub fn build_store_only(cli: &Cli) -> Result<EnrollmentService, EnrollmentCliError> {
+    let key_path = cli
+        .key_file
+        .clone()
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_KEY_PATH));
+    let key = MasterKey::load_or_create(&key_path)?;
+
+    let bio_dir = cli
+        .biometrics_dir
+        .clone()
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_BIOMETRICS_DIR));
+    let store = Arc::new(BiometricStore::new(bio_dir, key)?);
+
+    Ok(EnrollmentService::new_store_only(
+        store,
+        !cli.skip_root_check,
+    ))
+}
+
+/// Builds a full `EnrollmentService` with camera hardware streaming and all 4 ONNX models.
+///
+/// Required for biometric capture and comparison commands (`enroll`, `verify`).
+pub fn build_full_service(cli: &Cli) -> Result<EnrollmentService, EnrollmentCliError> {
+    let key_path = cli
+        .key_file
+        .clone()
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_KEY_PATH));
+    let key = MasterKey::load_or_create(&key_path)?;
+
+    let bio_dir = cli
+        .biometrics_dir
+        .clone()
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_BIOMETRICS_DIR));
+    let store = Arc::new(BiometricStore::new(bio_dir, key)?);
+
+    let device_path = resolve_camera_device(cli.camera_device.clone());
+    let camera_config = CameraConfigBuilder::new().device_path(device_path).build();
+    let camera: Arc<dyn CameraManager> = Arc::new(V4lCameraManager::spawn(camera_config)?);
+
+    let models_dir = cli
+        .models_dir
+        .clone()
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_MODELS_DIR));
+    let mut registry = ModelRegistry::new(RegistryConfig::new(models_dir))?;
+    registry.verify_integrity()?;
+
+    let det_session = registry.get_or_load_session(MODEL_ID_FACE_DETECTOR)?;
+    let lm_session = registry.get_or_load_session(MODEL_ID_LANDMARKS)?;
+    let pad_session = registry.get_or_load_session(MODEL_ID_PAD)?;
+    let emb_session = registry.get_or_load_session(MODEL_ID_EMBEDDING)?;
+
+    let detector = Arc::new(OrtFaceDetector::new(det_session, 0.70, 0.40));
+    let landmarks = Arc::new(OrtLandmarkDetector::new(lm_session));
+    let pad = Arc::new(OrtPadDetector::new(pad_session, 0.80));
+    let extractor = Arc::new(OrtEmbeddingExtractor::new(emb_session));
+
+    let pipeline_config = VisionPipelineConfig::default();
+    let pipeline = Arc::new(VisionPipeline::new(
+        detector,
+        landmarks,
+        pad,
+        extractor,
+        pipeline_config,
+    ));
+
+    Ok(EnrollmentService::new(
+        store,
+        camera,
+        pipeline,
+        !cli.skip_root_check,
+    ))
+}
+
+/// Builds an `EnrollmentService` (full service alias for backward compatibility).
+pub fn build_service(cli: &Cli) -> Result<EnrollmentService, EnrollmentCliError> {
+    build_full_service(cli)
 }

@@ -8,80 +8,13 @@
 )]
 
 use std::io::{self, Write};
-use std::path::PathBuf;
-use std::sync::Arc;
 
 use clap::Parser;
 
-use soos_biometric_store::{BiometricStore, MasterKey, DEFAULT_BIOMETRICS_DIR};
-use soos_camera_v4l::{CameraConfigBuilder, CameraManager, V4lCameraManager};
 use soos_enrollment_cli::args::{Cli, Commands, OutputFormat};
 use soos_enrollment_cli::error::EnrollmentCliError;
-use soos_enrollment_cli::service::EnrollmentService;
-use soos_inference_ort::{
-    ModelRegistry, OrtEmbeddingExtractor, OrtFaceDetector, OrtLandmarkDetector, OrtPadDetector,
-    RegistryConfig,
-};
+use soos_enrollment_cli::{build_full_service, build_store_only};
 use soos_protocol::Verdict;
-use soos_vision::{VisionPipeline, VisionPipelineConfig};
-
-const DEFAULT_KEY_PATH: &str = "/var/lib/soos/master.key";
-const DEFAULT_MODELS_DIR: &str = "/var/lib/soos/models";
-const DEFAULT_CAMERA_DEVICE: &str = "/dev/video0";
-
-fn build_service(cli: &Cli) -> Result<EnrollmentService, EnrollmentCliError> {
-    let key_path = cli
-        .key_file
-        .clone()
-        .unwrap_or_else(|| PathBuf::from(DEFAULT_KEY_PATH));
-    let key = MasterKey::load_or_create(&key_path)?;
-
-    let bio_dir = cli
-        .biometrics_dir
-        .clone()
-        .unwrap_or_else(|| PathBuf::from(DEFAULT_BIOMETRICS_DIR));
-    let store = Arc::new(BiometricStore::new(bio_dir, key)?);
-
-    let device_path = cli
-        .camera_device
-        .clone()
-        .unwrap_or_else(|| PathBuf::from(DEFAULT_CAMERA_DEVICE));
-    let camera_config = CameraConfigBuilder::new().device_path(device_path).build();
-    let camera: Arc<dyn CameraManager> = Arc::new(V4lCameraManager::spawn(camera_config)?);
-
-    let models_dir = cli
-        .models_dir
-        .clone()
-        .unwrap_or_else(|| PathBuf::from(DEFAULT_MODELS_DIR));
-    let mut registry = ModelRegistry::new(RegistryConfig::new(models_dir))?;
-    registry.verify_integrity()?;
-
-    let det_session = registry.get_or_load_session("face_detector")?;
-    let lm_session = registry.get_or_load_session("facial_landmarks")?;
-    let pad_session = registry.get_or_load_session("minifasnet_pad")?;
-    let emb_session = registry.get_or_load_session("face_embedding")?;
-
-    let detector = Arc::new(OrtFaceDetector::new(det_session, 0.70, 0.40));
-    let landmarks = Arc::new(OrtLandmarkDetector::new(lm_session));
-    let pad = Arc::new(OrtPadDetector::new(pad_session, 0.80));
-    let extractor = Arc::new(OrtEmbeddingExtractor::new(emb_session));
-
-    let pipeline_config = VisionPipelineConfig::default();
-    let pipeline = Arc::new(VisionPipeline::new(
-        detector,
-        landmarks,
-        pad,
-        extractor,
-        pipeline_config,
-    ));
-
-    Ok(EnrollmentService::new(
-        store,
-        camera,
-        pipeline,
-        !cli.skip_root_check,
-    ))
-}
 
 fn prompt_stdin(prompt: &str) -> bool {
     print!("{prompt}");
@@ -97,10 +30,10 @@ fn prompt_stdin(prompt: &str) -> bool {
 
 fn run() -> Result<(), EnrollmentCliError> {
     let cli = Cli::parse();
-    let service = build_service(&cli)?;
 
     match &cli.command {
         Commands::Enroll(args) => {
+            let service = build_full_service(&cli)?;
             let outcome = service.enroll(args, |summary| {
                 println!("\n=== Biometric Enrollment Summary ===");
                 println!("Target UID:           {}", summary.uid);
@@ -122,6 +55,7 @@ fn run() -> Result<(), EnrollmentCliError> {
         }
 
         Commands::Verify(args) => {
+            let service = build_full_service(&cli)?;
             let report = service.verify(args)?;
 
             println!("\n====================================================");
@@ -149,6 +83,7 @@ fn run() -> Result<(), EnrollmentCliError> {
         }
 
         Commands::Delete(args) => {
+            let service = build_store_only(&cli)?;
             service.delete(args, |uid| {
                 let prompt = format!(
                     "Are you sure you want to securely shred and delete template for UID {uid}? [y/N]: "
@@ -160,6 +95,7 @@ fn run() -> Result<(), EnrollmentCliError> {
         }
 
         Commands::List(args) => {
+            let service = build_store_only(&cli)?;
             let summaries = service.list(args)?;
 
             match args.format {

@@ -93,3 +93,29 @@ fn test_list_multiple_enrolled_users_returns_sorted_summaries() {
     assert_eq!(list[1].uid, 1005);
     assert_eq!(list[1].embedding_dim, 128);
 }
+
+#[test]
+fn test_list_command_works_without_camera_or_models() {
+    let temp = TempDir::new().unwrap();
+    let bio_dir = temp.path().join("biometrics");
+    let key_file = temp.path().join("master.key");
+
+    let cli = soos_enrollment_cli::args::Cli {
+        biometrics_dir: Some(bio_dir),
+        key_file: Some(key_file),
+        models_dir: Some(temp.path().join("nonexistent_models")),
+        camera_device: Some(std::path::PathBuf::from("/dev/nonexistent_camera")),
+        skip_root_check: true,
+        command: soos_enrollment_cli::args::Commands::List(ListArgs::default()),
+    };
+
+    // build_store_only should succeed even if models and camera do not exist
+    let service = soos_enrollment_cli::build_store_only(&cli)
+        .expect("build_store_only must succeed without camera or models");
+    assert!(!service.is_full_service(), "Service should be store-only");
+
+    let list = service
+        .list(&ListArgs::default())
+        .expect("List command must succeed");
+    assert!(list.is_empty());
+}

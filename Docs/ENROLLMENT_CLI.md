@@ -76,4 +76,17 @@ sudo soos-enroll list --format json
 - `--biometrics-dir <PATH>`: Override biometric template storage directory (default: `/var/lib/soos/biometrics`).
 - `--key-file <PATH>`: Override cryptographic master key path (default: `/var/lib/soos/master.key`).
 - `--models-dir <PATH>`: Override ONNX neural models directory (default: `/var/lib/soos/models`).
-- `--camera-device <PATH>`: Override V4L2 camera device node (default: `/dev/video0`).
+- `--camera-device <PATH>`: Override V4L2 camera device node (default: `/dev/v4l/by-id/default-camera` or first detected entry in `/dev/v4l/by-id/`).
+
+---
+
+## 4. Lazy Initialization & Model Attestation
+
+- **Lazy Service Construction**: The CLI separates store-only initialization (`build_store_only`) from full biometric pipeline initialization (`build_full_service`). Non-biometric operations (`list`, `delete`) initialize solely the cryptographic `BiometricStore`, avoiding camera device allocation and neural model loading. This allows headless or unprovisioned machines to inspect and clean up templates without camera or model files.
+- **Model Registry Attestation**: Biometric capture operations (`enroll`, `verify`) attest against official neural models defined in `models/manifest.toml`:
+  - Face Detection: `ultraface_slim_320` (`version-slim-320.onnx`)
+  - 5-Point Landmarks: `landmark_5point` (`landmark_5point.onnx`)
+  - Presentation Attack Detection: `minifasnet_pad` (`minifasnet_pad.onnx`)
+  - Feature Embedding: `mobilefacenet_arcface` (`mobilefacenet_arcface.onnx`)
+- **Deterministic Camera Addressing**: Satisfies Criterion C4 by resolving camera device paths via `/dev/v4l/by-id/`, eliminating enumeration races across kernel restarts.
+
