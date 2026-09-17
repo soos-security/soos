@@ -35,6 +35,7 @@ Your responsibility is to conduct a static security and compliance review of spe
    - For synchronous socket operations, verify that timeouts are calculated cumulatively across multi-part reads/writes, rather than relying on a static per-syscall timeout.
    - Verify that zero-duration timeouts (`Duration::ZERO`) are guarded against before calling `set_read_timeout` / `set_write_timeout` to avoid `EINVAL`.
    - Verify that both `ErrorKind::TimedOut` and `ErrorKind::WouldBlock` are handled as timeout conditions.
+   - **Async Cancellation & Write Isolation Audit**: In daemon async request dispatchers, verify that `write_all` is never wrapped in the same timeout future as request reading/inference. Verify that socket writes occur exclusively after response serialization completes, and that client stream readers validate frame completeness (`total_received == expected_total`) before deserialization.
 
 5. **Supply Chain & Licensing Pre-Check**:
    - Whenever new external crates or transitive dependencies are introduced, verify that their licenses conform to `deny.toml` (`licenses.allow`).
