@@ -774,18 +774,18 @@ The enrollment CLI uses incorrect model registry IDs (`face_detector` instead of
 
 #### Sub-issues
 
-- [ ] **#20.1** — Atomic socket binding: use `flock()` or `O_TMPFILE` + `linkat()` to eliminate TOCTOU race
+- [x] **#20.1** — Atomic socket binding: use `flock()` or `O_TMPFILE` + `linkat()` to eliminate TOCTOU race
   - Alternative: open parent directory, `fstatat()` → `unlinkat()` → `bind()` → `fchmod()` using directory fd to prevent symlink races
   - Acceptance: No exploitable TOCTOU window between stale socket check and bind
   - TDD: `test_socket_binding_resists_symlink_race`
 
-- [ ] **#20.2** — Set socket ownership to `root:soos` group after binding
+- [x] **#20.2** — Set socket ownership to `root:soos` group after binding
   - Create `soos` group if needed
   - `chown(socket_path, 0, soos_gid)`
   - Acceptance: Socket has correct `root:soos` ownership
   - TDD: `test_socket_ownership_root_soos`
 
-- [ ] **#20.3** — Validate `Request.validate()` in dispatcher before processing
+- [x] **#20.3** — Validate `Request.validate()` in dispatcher before processing
   - Call `req.validate()` after decoding, reject with `ProtocolError` on failure
   - Acceptance: Requests with invalid version or oversized service names are rejected
   - TDD: `test_dispatcher_rejects_invalid_protocol_version`, `test_dispatcher_rejects_oversized_service_name`
@@ -1277,8 +1277,8 @@ graph TD
 | D12 | Dispatcher returns `Unavailable` (not `Allow`) when pipeline is `None` | Unit test | ⬜ Pending |
 | D13 | Daemon `main.rs` initializes all pipeline components at startup | Integration test | ⬜ Pending |
 | D14 | ONNX models verified at startup; missing models prevent daemon start | Integration test | ⬜ Pending |
-| D15 | Configuration file parsed from TOML; defaults used when absent | Unit test | ⬜ Pending |
-| D16 | Socket binding is TOCTOU-safe with symlink protection | Security test | ⬜ Pending |
+| D15 | Configuration file parsed from TOML; defaults used when absent | Unit test | ✅ Verified |
+| D16 | Socket binding is TOCTOU-safe with symlink protection | Security test | ✅ Verified |
 | D17 | Async timeout during response write does not corrupt IPC framing | Integration test | ⬜ Pending |
 | C6 | Camera format auto-negotiated from device capabilities | Integration test | ⬜ Pending |
 | C7 | NV12 pixel format conversion to RGB24 | Unit test | ⬜ Pending |

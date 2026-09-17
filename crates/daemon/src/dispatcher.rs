@@ -202,6 +202,20 @@ impl ConnectionDispatcher {
         peer_uid: u32,
         req: Request,
     ) -> Result<(), DaemonError> {
+        // Step 5a: Wire protocol validation (version and bounded fields)
+        if let Err(val_err) = req.validate() {
+            warn!(error = %val_err, "Request wire validation failed; rejecting with ProtocolError");
+            self.send_response(
+                stream,
+                req.request_id,
+                Verdict::ProtocolError,
+                ReasonClass::MalformedRequest,
+                0,
+            )
+            .await?;
+            return Err(DaemonError::Validation(val_err));
+        }
+
         // Step 5b: Diagnostic status query (non-biometric)
         if req.kind == RequestKind::Status {
             let status = self.health.snapshot();

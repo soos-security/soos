@@ -102,3 +102,22 @@ To ensure that untrusted or malformed inputs can never trigger memory corruption
      cargo +nightly fuzz run decode_response -- -runs=1000000
      ```
 
+---
+
+## 6. Socket Lifecycle, TOCTOU Protection & Permission Hardening
+
+### Socket Path & Permissions
+- **Socket Path**: `/run/soos/daemon.sock`
+- **File Mode**: `0660` (`srw-rw----`)
+- **Ownership**: `root:soos` (UID `0`, GID of `soos` system group)
+
+### TOCTOU-Safe Binding Architecture
+To prevent symlink substitution, race conditions, and privilege escalations, `soos-daemon` adheres to a strict descriptor-relative binding sequence:
+1. **Directory Descriptor Verification**: Opens the parent runtime directory (`/run/soos`) with `O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW` and asserts via `fstat` that it is not a symlink, not world-writable, and root-owned.
+2. **Critical Section Serialization**: Acquires an exclusive non-blocking file lock (`nix::fcntl::Flock`) on the directory descriptor, serializing socket creation and preventing concurrent daemon startup races.
+3. **Descriptor-Relative Stale Check & Cleanup**: Inspects any existing socket node using `fstatat` with `AT_SYMLINK_NOFOLLOW`. Stale symlinks or non-socket files are immediately rejected fail-closed; verified stale sockets are unlinked via `unlinkat(..., NoRemoveDir)`.
+4. **Post-Bind Invariant Assertion**: Immediately verifies via `fstatat` that the created filesystem entry is a genuine Unix socket.
+5. **Symlink-Safe Permission & Ownership**: Applies mode `0660` using `fchmodat` with `NoFollowSymlink` and assigns `root:soos` ownership using `fchownat` with `AT_SYMLINK_NOFOLLOW`.
+6. **Early Dispatcher Wire Validation**: The connection dispatcher invokes `Request::validate()` immediately after decoding, rejecting invalid protocol versions or oversized service names fail-closed with `Verdict::ProtocolError` and `ReasonClass::MalformedRequest`.
+
+

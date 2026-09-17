@@ -34,6 +34,10 @@ pub enum DaemonError {
     #[error("Protocol error: {0}")]
     Protocol(String),
 
+    /// Wire protocol validation error.
+    #[error("Protocol validation error: {0}")]
+    Validation(#[from] soos_protocol::types::ValidationError),
+
     /// Connection operation timed out.
     #[error("Connection timed out")]
     Timeout,
