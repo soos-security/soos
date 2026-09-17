@@ -283,6 +283,21 @@ else
 fi
 mv "${PAM_MOD_DIR}/pam_soos.so.bak" "${PAM_MOD_DIR}/pam_soos.so"
 
+# ---------------------------------------------------------------------------
+# T9: Model Deployment Script Integrity & Manifest Validation (Sub-issue #18.4)
+# ---------------------------------------------------------------------------
+echo ""
+info "-------------------------------------------------------------------"
+info "T9: Model Deployment Script Integrity & Manifest Validation"
+info "-------------------------------------------------------------------"
+mkdir -p /var/lib/soos/models
+if bash /workspace/scripts/download_models.sh --dry-run; then
+    success "T9 passed: Model deployment script validated manifest in container environment."
+else
+    error "T9 failed: Model deployment script failed during dry-run validation."
+    exit 1
+fi
+
 echo ""
 echo "==================================================================="
 success "  ALL IN-CONTAINER PAM MATRIX TESTS PASSED SUCCESSFULLY!"

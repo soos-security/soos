@@ -48,6 +48,9 @@ auth  required                       pam_deny.so\n\
 account required pam_unix.so\n\
 session required pam_unix.so" > /etc/pam.d/system-auth
 
+# Provision /var/lib/soos/models directory
+RUN mkdir -p /var/lib/soos/models && chmod 755 /var/lib/soos/models
+
 WORKDIR /workspace
 
 CMD ["bash"]
