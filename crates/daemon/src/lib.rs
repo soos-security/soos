@@ -12,8 +12,8 @@ pub mod peercred;
 pub mod pipeline;
 pub mod socket;
 
-pub use config::{DaemonConfig, DispatcherConfig, SocketConfig};
+pub use config::{DaemonConfig, DispatcherConfig, PipelineConfig, SocketConfig};
 pub use error::DaemonError;
 pub use health::{HealthState, HealthStatus};
-pub use pipeline::PipelineComponents;
+pub use pipeline::{initialize_pipeline, PipelineComponents};
 pub use socket::{bind_socket, validate_directory, SocketGuard};

@@ -654,12 +654,12 @@ The daemon's `ConnectionDispatcher::new()` initializes with `pipeline: None`, an
 
 #### Sub-issues
 
-- [ ] **#17.1** — Remove the fail-open skeleton fallback from `dispatcher.rs`
+- [x] **#17.1** — Remove the fail-open skeleton fallback from `dispatcher.rs`
   - Replace L497–506 with `(Verdict::Unavailable, ReasonClass::InternalError)` when `pipeline` is `None`
   - Acceptance: No code path in dispatcher returns `Allow` without a fully initialized pipeline
   - TDD: `test_dispatcher_no_pipeline_returns_unavailable_not_allow`
 
-- [ ] **#17.2** — Implement full pipeline initialization in `main.rs`
+- [x] **#17.2** — Implement full pipeline initialization in `main.rs`
   - Parse `PipelineConfig` from configuration
   - Initialize `V4lCameraManager::spawn()` (or `MockCameraManager` if `--mock-camera` flag)
   - Load and verify `ModelRegistry` with `verify_integrity()`
@@ -674,14 +674,14 @@ The daemon's `ConnectionDispatcher::new()` initializes with `pipeline: None`, an
   - Acceptance: Daemon starts and reports `is_healthy: true` with all components initialized
   - TDD: `test_daemon_startup_initializes_all_pipeline_components`
 
-- [ ] **#17.3** — Implement daemon configuration file parser (TOML)
+- [x] **#17.3** — Implement daemon configuration file parser (TOML)
   - Support config path via `--config /etc/soos/daemon.toml`
   - Fields: socket path, camera device, models directory, biometrics directory, key path, evidence config, thresholds, rate limits, log level, mock-camera flag
   - Fall back to `DaemonConfig::default()` when no config file specified
   - Acceptance: All runtime parameters configurable without recompilation
   - TDD: `test_config_file_parsing_complete`, `test_config_defaults_when_file_absent`
 
-- [ ] **#17.4** — Add `--mock-camera` CLI flag for development/testing
+- [x] **#17.4** — Add `--mock-camera` CLI flag for development/testing
   - When set, use `MockCameraManager` instead of `V4lCameraManager`
   - Acceptance: CI integration tests can run without hardware
   - TDD: `test_mock_camera_flag_uses_mock_manager`

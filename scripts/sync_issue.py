@@ -81,6 +81,7 @@ BRANCH_TO_ISSUE = {
     "feat/pam-bindings-migration": 14,
     "feat/vision-pad": 15,
     "chore/production-hardening": 16,
+    "fix/daemon-fail-closed": 17,
 }
 
 

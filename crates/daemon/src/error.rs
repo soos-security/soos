@@ -70,4 +70,12 @@ pub enum DaemonError {
     /// Monotonic clock error.
     #[error("Clock error: {0}")]
     Clock(String),
+
+    /// Machine learning inference and model registry error.
+    #[error("Inference error: {0}")]
+    Inference(#[from] soos_inference_ort::InferenceError),
+
+    /// Configuration file parsing or loading error.
+    #[error("Configuration error: {0}")]
+    Config(String),
 }

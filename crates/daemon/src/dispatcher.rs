@@ -494,16 +494,19 @@ impl ConnectionDispatcher {
                 .await;
         }
 
-        // Skeleton fallback when no pipeline components are configured
-        let status = self.health.snapshot();
-        let (verdict, reason_class) = if status.socket_ready {
-            (Verdict::Allow, ReasonClass::FaceMatch)
-        } else {
-            (Verdict::Unavailable, ReasonClass::CameraUnavailable)
-        };
-
-        self.send_response(stream, req.request_id, verdict, reason_class, now_ns)
-            .await
+        // Fail-closed fallback: never authorize authentication without an initialized pipeline
+        warn!(
+            request_id = ?req.request_id,
+            "Rejecting authentication request: daemon pipeline is not initialized"
+        );
+        self.send_response(
+            stream,
+            req.request_id,
+            Verdict::Unavailable,
+            ReasonClass::InternalError,
+            now_ns,
+        )
+        .await
     }
 
     async fn send_response(
