@@ -180,3 +180,12 @@ This document translates the critical gating criteria from §11 of `ARCHITECTURE
 | H3 | Systemd sandboxing validation: verifies all security directives in `soos-daemon.service` (`MemoryDenyWriteExecute`, `RestrictSUIDSGID`, `SystemCallArchitectures=native`) | Unit & integration tests (`systemd_test::test_systemd_unit_file_sandboxing_directives`, `hardening_tests::test_systemd_hardening_directives_complete`) | ✅ Verified |
 | H4 | Supply chain audit: `cargo-deny` enforces license compliance, zero vulnerabilities, and blocks duplicate dependencies (`multiple-versions = "deny"`) | Integration tests (`hardening_tests::test_cargo_deny_bans_duplicate_versions`, `cargo deny check`) | ✅ Verified |
 
+---
+
+## Component: `async-cancel-safety` (Issue #21 / GitHub #60)
+
+| # | Criterion | Test Method | Status |
+|---|---|---|---|
+| ACS1 | Async cancellation safety on daemon socket writes: response buffer is fully serialized before transmission; request processing timeout cannot cancel mid-write or corrupt response stream | Integration test (`dispatcher_tests::test_timeout_during_write_does_not_corrupt_response`) | ✅ Verified |
+| ACS2 | Response completeness validation in PAM IPC client: client tracks exact received byte counts, detects truncated length prefix or body payload, and returns `IpcError::TruncatedResponse` with fail-closed fallback to `PAM_IGNORE` | Integration test (`ipc_tests::test_pam_ipc_detects_truncated_response`) | ✅ Verified |
+

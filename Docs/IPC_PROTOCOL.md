@@ -120,4 +120,18 @@ To prevent symlink substitution, race conditions, and privilege escalations, `so
 5. **Symlink-Safe Permission & Ownership**: Applies mode `0660` using `fchmodat` with `NoFollowSymlink` and assigns `root:soos` ownership using `fchownat` with `AT_SYMLINK_NOFOLLOW`.
 6. **Early Dispatcher Wire Validation**: The connection dispatcher invokes `Request::validate()` immediately after decoding, rejecting invalid protocol versions or oversized service names fail-closed with `Verdict::ProtocolError` and `ReasonClass::MalformedRequest`.
 
+---
 
+## 7. Async Cancellation Safety & Response Completeness Validation
+
+### Decoupled Request Processing and Response Transmission
+In `soos-daemon`, the connection lifecycle is explicitly decoupled into two non-overlapping phases:
+1. **Request Reading & Verification Phase**: Runs under Tokio `timeout(connection_timeout, ...)`. The daemon reads and decodes the message, performs peer credential verification, and executes the vision verification pipeline. The resulting response is fully encoded into an in-memory byte buffer (`Vec<u8>`). Zero socket write syscalls are performed during this phase.
+   - If the request processing times out, the future is cancelled *before* any response bytes are written to the socket. The stream is closed with 0 bytes sent, guaranteeing that partial or corrupted response fragments never reach the PAM client.
+2. **Response Transmission Phase**: Runs *after* the request processing timeout has completed cleanly. The pre-encoded buffer is transmitted atomically via `tokio::io::AsyncWriteExt::write_all` and `flush` under a dedicated write timeout, protecting worker threads from slow-client stalls.
+
+### Client-Side Response Completeness Validation
+In `pam_soos.so`, the synchronous IPC client (`crates/pam/src/ipc.rs`) enforces strict byte-counted frame completeness:
+- Both the 4-byte Big-Endian length header and the variable-length body payload are read using a byte-counted stream reader.
+- If the socket connection is severed prematurely before the declared frame is fully received, the client detects the discrepancy and raises `IpcError::TruncatedResponse { expected, received }`.
+- In accordance with fail-closed security invariants, any truncated response degrades safely to `PAM_IGNORE`.

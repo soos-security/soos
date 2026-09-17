@@ -21,6 +21,22 @@ use soos_protocol::types::{
     Verdict, CURRENT_VERSION, MAX_MESSAGE_SIZE,
 };
 
+/// Internal representation of processed connection output before socket transmission.
+#[derive(Debug)]
+struct ProcessedOutput {
+    /// Serialized wire response frame (including 4-byte BE length prefix), if a response is expected.
+    encoded_response: Option<Vec<u8>>,
+    /// Deferred error to return after response transmission (e.g. wire validation error).
+    completion_error: Option<DaemonError>,
+}
+
+/// Internal representation of a request response before transmission.
+#[derive(Debug)]
+struct ResponseOutput {
+    encoded_response: Vec<u8>,
+    completion_error: Option<DaemonError>,
+}
+
 /// Connection dispatcher managing concurrent incoming client requests.
 pub struct ConnectionDispatcher {
     config: DispatcherConfig,
@@ -75,18 +91,39 @@ impl ConnectionDispatcher {
             }
         };
 
-        timeout(
+        // Phase 1: Request Reading & Processing Phase.
+        // Bounded by connection_timeout. Strictly performs socket reading and pipeline computation,
+        // producing a fully encoded in-memory response buffer (Option<Vec<u8>>).
+        // Zero response bytes are written during this phase, guaranteeing that async cancellation
+        // upon timeout will never leave partial response bytes on the wire.
+        let output = timeout(
             self.config.connection_timeout,
-            self.process_stream(&mut stream),
+            self.read_and_process(&mut stream),
         )
         .await
         .map_err(|_| {
             warn!("Connection timed out");
             DaemonError::Timeout
-        })?
+        })??;
+
+        // Phase 2: Response Transmission Phase.
+        // Runs outside the request processing timeout. Writes the pre-encoded response frame
+        // atomically using a dedicated write timeout to prevent slow client stalls.
+        if let Some(ref encoded_resp) = output.encoded_response {
+            self.write_response(&mut stream, encoded_resp).await?;
+        }
+
+        if let Some(err) = output.completion_error {
+            return Err(err);
+        }
+
+        Ok(())
     }
 
-    async fn process_stream(&self, stream: &mut UnixStream) -> Result<(), DaemonError> {
+    async fn read_and_process(
+        &self,
+        stream: &mut UnixStream,
+    ) -> Result<ProcessedOutput, DaemonError> {
         // Step 1: Extract peer credentials via SO_PEERCRED
         let peer = get_peer_credentials(stream)?;
 
@@ -113,18 +150,8 @@ impl ConnectionDispatcher {
             });
         }
 
-        let total_capacity = declared_size
-            .checked_add(4)
-            .ok_or(DaemonError::OversizedPayload {
-                size: usize::MAX,
-                max: MAX_MESSAGE_SIZE,
-            })?;
-        let mut full_buffer = Vec::with_capacity(total_capacity);
-        full_buffer.extend_from_slice(&len_bytes);
-
         let mut body_buffer = vec![0u8; declared_size];
         stream.read_exact(&mut body_buffer).await?;
-        full_buffer.extend_from_slice(&body_buffer);
 
         // Step 4: Decode message — may be Request or Event
         // Uses exact deserialization without unconsumed trailing bytes to reliably differentiate schemas
@@ -143,13 +170,33 @@ impl ConnectionDispatcher {
                 // of `event.request_id`. If `req.uid_hint == peer.uid`, it is a valid Request.
                 // Otherwise, it is an Event notification.
                 if req.uid_hint == peer.uid {
-                    self.handle_request(stream, peer.uid, req).await
+                    let res = self.handle_request(peer.uid, req).await?;
+                    Ok(ProcessedOutput {
+                        encoded_response: Some(res.encoded_response),
+                        completion_error: res.completion_error,
+                    })
                 } else {
-                    self.handle_event(peer.uid, event).await
+                    self.handle_event(peer.uid, event).await?;
+                    Ok(ProcessedOutput {
+                        encoded_response: None,
+                        completion_error: None,
+                    })
                 }
             }
-            (Some(req), None) => self.handle_request(stream, peer.uid, req).await,
-            (None, Some(event)) => self.handle_event(peer.uid, event).await,
+            (Some(req), None) => {
+                let res = self.handle_request(peer.uid, req).await?;
+                Ok(ProcessedOutput {
+                    encoded_response: Some(res.encoded_response),
+                    completion_error: res.completion_error,
+                })
+            }
+            (None, Some(event)) => {
+                self.handle_event(peer.uid, event).await?;
+                Ok(ProcessedOutput {
+                    encoded_response: None,
+                    completion_error: None,
+                })
+            }
             (None, None) => {
                 warn!("Failed to decode payload as Request or Event");
                 Err(DaemonError::Protocol("Malformed wire payload".into()))
@@ -198,22 +245,22 @@ impl ConnectionDispatcher {
 
     async fn handle_request(
         &self,
-        stream: &mut UnixStream,
         peer_uid: u32,
         req: Request,
-    ) -> Result<(), DaemonError> {
+    ) -> Result<ResponseOutput, DaemonError> {
         // Step 5a: Wire protocol validation (version and bounded fields)
         if let Err(val_err) = req.validate() {
             warn!(error = %val_err, "Request wire validation failed; rejecting with ProtocolError");
-            self.send_response(
-                stream,
+            let encoded = self.build_response(
                 req.request_id,
                 Verdict::ProtocolError,
                 ReasonClass::MalformedRequest,
                 0,
-            )
-            .await?;
-            return Err(DaemonError::Validation(val_err));
+            )?;
+            return Ok(ResponseOutput {
+                encoded_response: encoded,
+                completion_error: Some(DaemonError::Validation(val_err)),
+            });
         }
 
         // Step 5b: Diagnostic status query (non-biometric)
@@ -228,11 +275,12 @@ impl ConnectionDispatcher {
                 pid: std::process::id(),
                 uptime_secs: self.start_time.elapsed().as_secs(),
             };
-            let encoded_resp = encode(&status_resp)?;
-            stream.write_all(&encoded_resp).await?;
-            stream.flush().await?;
-            debug!("Delivered diagnostic status response");
-            return Ok(());
+            let encoded = encode(&status_resp)?;
+            debug!("Generated diagnostic status response");
+            return Ok(ResponseOutput {
+                encoded_response: encoded,
+                completion_error: None,
+            });
         }
 
         // Step 6: Verify peer credentials against request
@@ -257,9 +305,11 @@ impl ConnectionDispatcher {
                 }
                 _ => (Verdict::ProtocolError, ReasonClass::MalformedRequest),
             };
-            return self
-                .send_response(stream, req.request_id, verdict, reason_class, 0)
-                .await;
+            let encoded = self.build_response(req.request_id, verdict, reason_class, 0)?;
+            return Ok(ResponseOutput {
+                encoded_response: encoded,
+                completion_error: None,
+            });
         }
 
         // Step 7: Monotonic deadline propagation check
@@ -270,15 +320,16 @@ impl ConnectionDispatcher {
                 deadline = req.deadline_monotonic_ns,
                 "Request exceeded monotonic deadline before processing"
             );
-            return self
-                .send_response(
-                    stream,
-                    req.request_id,
-                    Verdict::Unavailable,
-                    ReasonClass::Timeout,
-                    now_ns,
-                )
-                .await;
+            let encoded = self.build_response(
+                req.request_id,
+                Verdict::Unavailable,
+                ReasonClass::Timeout,
+                now_ns,
+            )?;
+            return Ok(ResponseOutput {
+                encoded_response: encoded,
+                completion_error: None,
+            });
         }
 
         // Step 8: Full pipeline processing
@@ -288,15 +339,16 @@ impl ConnectionDispatcher {
             // 8a: Verify camera readiness
             if !pipe.camera.is_ready() {
                 warn!("Camera is not ready; rejecting auth request");
-                return self
-                    .send_response(
-                        stream,
-                        req.request_id,
-                        Verdict::Unavailable,
-                        ReasonClass::CameraUnavailable,
-                        now_ns,
-                    )
-                    .await;
+                let encoded = self.build_response(
+                    req.request_id,
+                    Verdict::Unavailable,
+                    ReasonClass::CameraUnavailable,
+                    now_ns,
+                )?;
+                return Ok(ResponseOutput {
+                    encoded_response: encoded,
+                    completion_error: None,
+                });
             }
 
             // 8b: Notify activity and grab latest frame
@@ -305,15 +357,16 @@ impl ConnectionDispatcher {
                 Some(f) => f,
                 None => {
                     warn!("No camera capture available");
-                    return self
-                        .send_response(
-                            stream,
-                            req.request_id,
-                            Verdict::Unavailable,
-                            ReasonClass::CameraUnavailable,
-                            now_ns,
-                        )
-                        .await;
+                    let encoded = self.build_response(
+                        req.request_id,
+                        Verdict::Unavailable,
+                        ReasonClass::CameraUnavailable,
+                        now_ns,
+                    )?;
+                    return Ok(ResponseOutput {
+                        encoded_response: encoded,
+                        completion_error: None,
+                    });
                 }
             };
 
@@ -326,29 +379,31 @@ impl ConnectionDispatcher {
                         age_ms = age_ns / 1_000_000,
                         "Latest camera capture exceeds freshness threshold"
                     );
-                    return self
-                        .send_response(
-                            stream,
-                            req.request_id,
-                            Verdict::Unavailable,
-                            ReasonClass::StaleFrame,
-                            cur_ns,
-                        )
-                        .await;
+                    let encoded = self.build_response(
+                        req.request_id,
+                        Verdict::Unavailable,
+                        ReasonClass::StaleFrame,
+                        cur_ns,
+                    )?;
+                    return Ok(ResponseOutput {
+                        encoded_response: encoded,
+                        completion_error: None,
+                    });
                 }
             }
 
             // 8d: Deadline check before template retrieval
             if req.deadline_monotonic_ns > 0 && cur_ns >= req.deadline_monotonic_ns {
-                return self
-                    .send_response(
-                        stream,
-                        req.request_id,
-                        Verdict::Unavailable,
-                        ReasonClass::Timeout,
-                        cur_ns,
-                    )
-                    .await;
+                let encoded = self.build_response(
+                    req.request_id,
+                    Verdict::Unavailable,
+                    ReasonClass::Timeout,
+                    cur_ns,
+                )?;
+                return Ok(ResponseOutput {
+                    encoded_response: encoded,
+                    completion_error: None,
+                });
             }
 
             // 8e: Retrieve enrolled biometric template
@@ -359,15 +414,16 @@ impl ConnectionDispatcher {
                         uid = req.uid_hint,
                         "Target UID is not enrolled; returning Unavailable"
                     );
-                    return self
-                        .send_response(
-                            stream,
-                            req.request_id,
-                            Verdict::Unavailable,
-                            ReasonClass::InternalError,
-                            cur_ns,
-                        )
-                        .await;
+                    let encoded = self.build_response(
+                        req.request_id,
+                        Verdict::Unavailable,
+                        ReasonClass::InternalError,
+                        cur_ns,
+                    )?;
+                    return Ok(ResponseOutput {
+                        encoded_response: encoded,
+                        completion_error: None,
+                    });
                 }
                 Err(err) => {
                     warn!(
@@ -375,30 +431,32 @@ impl ConnectionDispatcher {
                         uid = req.uid_hint,
                         "Biometric store error retrieving template"
                     );
-                    return self
-                        .send_response(
-                            stream,
-                            req.request_id,
-                            Verdict::Unavailable,
-                            ReasonClass::InternalError,
-                            cur_ns,
-                        )
-                        .await;
+                    let encoded = self.build_response(
+                        req.request_id,
+                        Verdict::Unavailable,
+                        ReasonClass::InternalError,
+                        cur_ns,
+                    )?;
+                    return Ok(ResponseOutput {
+                        encoded_response: encoded,
+                        completion_error: None,
+                    });
                 }
             };
 
             // 8f: Deadline check before neural inference
             let cur_ns = current_monotonic_nanos();
             if req.deadline_monotonic_ns > 0 && cur_ns >= req.deadline_monotonic_ns {
-                return self
-                    .send_response(
-                        stream,
-                        req.request_id,
-                        Verdict::Unavailable,
-                        ReasonClass::Timeout,
-                        cur_ns,
-                    )
-                    .await;
+                let encoded = self.build_response(
+                    req.request_id,
+                    Verdict::Unavailable,
+                    ReasonClass::Timeout,
+                    cur_ns,
+                )?;
+                return Ok(ResponseOutput {
+                    encoded_response: encoded,
+                    completion_error: None,
+                });
             }
 
             // 8g: Execute neural vision verification pipeline
@@ -439,27 +497,29 @@ impl ConnectionDispatcher {
                 }
                 Err(soos_vision::VisionError::Inference(err)) => {
                     warn!(error = %err, "Vision neural inference failure");
-                    return self
-                        .send_response(
-                            stream,
-                            req.request_id,
-                            Verdict::Unavailable,
-                            ReasonClass::ModelUnavailable,
-                            cur_ns,
-                        )
-                        .await;
+                    let encoded = self.build_response(
+                        req.request_id,
+                        Verdict::Unavailable,
+                        ReasonClass::ModelUnavailable,
+                        cur_ns,
+                    )?;
+                    return Ok(ResponseOutput {
+                        encoded_response: encoded,
+                        completion_error: None,
+                    });
                 }
                 Err(err) => {
                     warn!(error = %err, "Vision pipeline processing error");
-                    return self
-                        .send_response(
-                            stream,
-                            req.request_id,
-                            Verdict::Unavailable,
-                            ReasonClass::InternalError,
-                            cur_ns,
-                        )
-                        .await;
+                    let encoded = self.build_response(
+                        req.request_id,
+                        Verdict::Unavailable,
+                        ReasonClass::InternalError,
+                        cur_ns,
+                    )?;
+                    return Ok(ResponseOutput {
+                        encoded_response: encoded,
+                        completion_error: None,
+                    });
                 }
             };
 
@@ -470,15 +530,16 @@ impl ConnectionDispatcher {
             // 8h: Decision budget (< 150ms) and deadline check
             let cur_ns = current_monotonic_nanos();
             if req.deadline_monotonic_ns > 0 && cur_ns >= req.deadline_monotonic_ns {
-                return self
-                    .send_response(
-                        stream,
-                        req.request_id,
-                        Verdict::Unavailable,
-                        ReasonClass::Timeout,
-                        cur_ns,
-                    )
-                    .await;
+                let encoded = self.build_response(
+                    req.request_id,
+                    Verdict::Unavailable,
+                    ReasonClass::Timeout,
+                    cur_ns,
+                )?;
+                return Ok(ResponseOutput {
+                    encoded_response: encoded,
+                    completion_error: None,
+                });
             }
             if auth_start.elapsed() > Duration::from_millis(DECISION_BUDGET_MS) {
                 warn!(
@@ -486,15 +547,16 @@ impl ConnectionDispatcher {
                     budget_ms = DECISION_BUDGET_MS,
                     "Exceeded total decision budget"
                 );
-                return self
-                    .send_response(
-                        stream,
-                        req.request_id,
-                        Verdict::Unavailable,
-                        ReasonClass::Timeout,
-                        cur_ns,
-                    )
-                    .await;
+                let encoded = self.build_response(
+                    req.request_id,
+                    Verdict::Unavailable,
+                    ReasonClass::Timeout,
+                    cur_ns,
+                )?;
+                return Ok(ResponseOutput {
+                    encoded_response: encoded,
+                    completion_error: None,
+                });
             }
 
             // 8i: Evaluate through AuthorizationEngine with per-UID rate limiting
@@ -503,9 +565,11 @@ impl ConnectionDispatcher {
             let mut engine = pipe.policy.lock().await;
             let (verdict, reason_class) = engine.evaluate_with_rate_limit(&ctx, cur_ns);
 
-            return self
-                .send_response(stream, req.request_id, verdict, reason_class, cur_ns)
-                .await;
+            let encoded = self.build_response(req.request_id, verdict, reason_class, cur_ns)?;
+            return Ok(ResponseOutput {
+                encoded_response: encoded,
+                completion_error: None,
+            });
         }
 
         // Fail-closed fallback: never authorize authentication without an initialized pipeline
@@ -513,24 +577,25 @@ impl ConnectionDispatcher {
             request_id = ?req.request_id,
             "Rejecting authentication request: daemon pipeline is not initialized"
         );
-        self.send_response(
-            stream,
+        let encoded = self.build_response(
             req.request_id,
             Verdict::Unavailable,
             ReasonClass::InternalError,
             now_ns,
-        )
-        .await
+        )?;
+        Ok(ResponseOutput {
+            encoded_response: encoded,
+            completion_error: None,
+        })
     }
 
-    async fn send_response(
+    fn build_response(
         &self,
-        stream: &mut UnixStream,
         request_id: RequestId,
         verdict: Verdict,
         reason_class: ReasonClass,
         now_ns: u64,
-    ) -> Result<(), DaemonError> {
+    ) -> Result<Vec<u8>, DaemonError> {
         let resp = Response {
             version: CURRENT_VERSION,
             request_id,
@@ -546,9 +611,25 @@ impl ConnectionDispatcher {
             "Rendered authentication response"
         );
 
-        let encoded_resp = encode(&resp)?;
-        stream.write_all(&encoded_resp).await?;
-        stream.flush().await?;
+        encode(&resp).map_err(DaemonError::from)
+    }
+
+    async fn write_response(
+        &self,
+        stream: &mut UnixStream,
+        encoded_resp: &[u8],
+    ) -> Result<(), DaemonError> {
+        timeout(self.config.connection_timeout, async {
+            stream.write_all(encoded_resp).await?;
+            stream.flush().await?;
+            Ok::<(), std::io::Error>(())
+        })
+        .await
+        .map_err(|_| {
+            warn!("Response transmission timed out");
+            DaemonError::Timeout
+        })?
+        .map_err(DaemonError::Io)?;
 
         debug!("Response delivered successfully");
         Ok(())

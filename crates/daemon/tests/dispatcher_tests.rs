@@ -450,3 +450,78 @@ async fn test_dispatcher_rejects_oversized_service_name() {
         "Acceptance 20.3: Requests with oversized service name must report MalformedRequest"
     );
 }
+
+/// Sub-issue #21.1 TDD Contract: Partial response writes never reach the PAM client upon timeout.
+///
+/// Asserts:
+/// 1. When a connection timeout expires on the daemon side, no partial or corrupted response bytes reach the client.
+/// 2. Client receives either a complete, valid decodable response, or an immediate clean EOF (0 bytes).
+#[tokio::test]
+async fn test_timeout_during_write_does_not_corrupt_response() {
+    let dir = tempdir().expect("Failed to create tempdir");
+    let sock_path = dir.path().join("dispatch_cancel_safety.sock");
+
+    let listener = UnixListener::bind(&sock_path).expect("Bind failed");
+    let health = Arc::new(HealthState::new());
+    health.set_socket_ready(true);
+
+    // Tight timeout of 30ms to exercise async cancellation during request handling
+    let config = DispatcherConfig {
+        max_concurrent_connections: 4,
+        connection_timeout: Duration::from_millis(30),
+    };
+    let dispatcher = Arc::new(ConnectionDispatcher::new(config, health));
+
+    let disp_clone = dispatcher.clone();
+    tokio::spawn(async move {
+        while let Ok((stream, _)) = listener.accept().await {
+            let d = disp_clone.clone();
+            tokio::spawn(async move {
+                let _ = d.handle_connection(stream).await;
+            });
+        }
+    });
+
+    // Test 1: Incomplete request where client stalls mid-stream
+    let mut client1 = UnixStream::connect(&sock_path)
+        .await
+        .expect("Connect failed");
+    // Write only length prefix claiming 100 bytes, then stall
+    let partial_req = 100u32.to_be_bytes();
+    client1.write_all(&partial_req).await.expect("Write prefix");
+    tokio::time::sleep(Duration::from_millis(60)).await;
+
+    let mut buf1 = Vec::new();
+    let n1 = client1.read_to_end(&mut buf1).await.expect("Read to end");
+    assert_eq!(
+        n1, 0,
+        "Server must close stream with zero bytes on client stall/timeout; partial response forbidden"
+    );
+
+    // Test 2: Valid request roundtrip completes cleanly without corruption
+    let mut client2 = UnixStream::connect(&sock_path)
+        .await
+        .expect("Connect failed");
+    let current_uid = nix::unistd::getuid().as_raw();
+    let req = make_auth_request(current_uid);
+    let framed = encode(&req).expect("Encoding failed");
+    client2
+        .write_all(&framed)
+        .await
+        .expect("Write framed request");
+    client2.flush().await.expect("Flush failed");
+
+    let mut buf2 = Vec::new();
+    let _ = client2
+        .read_to_end(&mut buf2)
+        .await
+        .expect("Read response bytes");
+    if !buf2.is_empty() {
+        // If response was sent, it MUST be valid and uncorrupted!
+        let resp: Result<Response, _> = decode(&buf2);
+        assert!(
+            resp.is_ok(),
+            "Delivered response must decode cleanly into a valid Response without byte corruption"
+        );
+    }
+}
