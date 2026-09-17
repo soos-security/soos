@@ -74,6 +74,8 @@ This document translates the critical gating criteria from §11 of `ARCHITECTURE
 | D9 | EvidenceStore intrusion snapshot on PasswordFailed event | Integration test (`pipeline_integration_tests::test_12_4_password_failed_event_captures_evidence_snapshot`) | ✅ Verified |
 | D10 | Policy rate limiting integrated per UID | Integration test (`pipeline_integration_tests::test_12_5_rate_limit_exceeded_returns_protocol_error_rate_limited`) | ✅ Verified |
 | D11 | Full pipeline end-to-end all 4 verdict paths (Allow, Deny, Unavailable, ProtocolError) | Integration test (`pipeline_integration_tests::test_12_6_all_four_verdict_paths`) | ✅ Verified |
+| D12 | Fail-closed dispatcher fallback (returns `Unavailable`/`InternalError`, never `Allow` without pipeline) | Integration test (`dispatcher_tests::test_dispatcher_no_pipeline_returns_unavailable_not_allow`) | ✅ Verified |
+| D13 | Full pipeline initialization and TOML configuration (`--config`, `--mock-camera`, missing models fail closed) | Integration & unit tests (`config_tests::test_config_file_parsing_complete`, `config_tests::test_config_defaults_when_file_absent`, `config_tests::test_config_file_invalid_syntax_fails_closed`, `pipeline_init_tests::test_daemon_startup_initializes_all_pipeline_components`, `pipeline_init_tests::test_mock_camera_flag_uses_mock_manager`, `pipeline_init_tests::test_pipeline_init_missing_models_fails_closed`) | ✅ Verified |
 
 ---
 

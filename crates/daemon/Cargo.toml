@@ -31,6 +31,9 @@ soos-evidence-store = { workspace = true }
 postcard = { workspace = true }
 libc = { workspace = true }
 zeroize = { workspace = true }
+serde = { workspace = true }
+toml = { workspace = true }
+clap = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

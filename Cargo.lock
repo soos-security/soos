@@ -1379,9 +1379,11 @@ dependencies = [
 name = "soos-daemon"
 version = "0.1.0"
 dependencies = [
+ "clap",
  "libc",
  "nix",
  "postcard",
+ "serde",
  "soos-biometric-store",
  "soos-camera-v4l",
  "soos-evidence-store",
@@ -1392,6 +1394,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
+ "toml",
  "tracing",
  "tracing-subscriber",
  "zeroize",
