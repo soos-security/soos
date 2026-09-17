@@ -317,3 +317,136 @@ async fn test_dispatcher_no_pipeline_returns_unavailable_not_allow() {
         "Dispatcher with no pipeline must report InternalError"
     );
 }
+
+#[tokio::test]
+async fn test_dispatcher_rejects_invalid_protocol_version() {
+    let dir = tempdir().expect("Failed to create tempdir");
+    let sock_path = dir.path().join("dispatch_ver.sock");
+
+    let listener = UnixListener::bind(&sock_path).expect("Bind failed");
+    let health = Arc::new(HealthState::new());
+    health.set_socket_ready(true);
+
+    let config = DispatcherConfig {
+        max_concurrent_connections: 4,
+        connection_timeout: Duration::from_millis(500),
+    };
+    let dispatcher = Arc::new(ConnectionDispatcher::new(config, health));
+
+    let disp_clone = dispatcher.clone();
+    tokio::spawn(async move {
+        if let Ok((stream, _)) = listener.accept().await {
+            let _ = disp_clone.handle_connection(stream).await;
+        }
+    });
+
+    let mut client = UnixStream::connect(&sock_path)
+        .await
+        .expect("Connect failed");
+
+    let current_uid = nix::unistd::getuid().as_raw();
+    let mut req = make_auth_request(current_uid);
+    req.version = 99; // Invalid version != CURRENT_VERSION
+    let framed = encode(&req).expect("Encoding failed");
+
+    client
+        .write_all(&framed)
+        .await
+        .expect("Write framed request failed");
+    client.flush().await.expect("Flush failed");
+
+    let mut resp_len_bytes = [0u8; 4];
+    client
+        .read_exact(&mut resp_len_bytes)
+        .await
+        .expect("Read resp len failed");
+    let resp_len = u32::from_be_bytes(resp_len_bytes) as usize;
+
+    let mut full_resp_buf = Vec::with_capacity(4 + resp_len);
+    full_resp_buf.extend_from_slice(&resp_len_bytes);
+    let mut resp_payload = vec![0u8; resp_len];
+    client
+        .read_exact(&mut resp_payload)
+        .await
+        .expect("Read resp payload failed");
+    full_resp_buf.extend_from_slice(&resp_payload);
+
+    let resp: Response = decode(&full_resp_buf).expect("Decode response failed");
+    assert_eq!(
+        resp.verdict,
+        Verdict::ProtocolError,
+        "Acceptance 20.3: Requests with invalid protocol version must be rejected with ProtocolError"
+    );
+    assert_eq!(
+        resp.reason_class,
+        ReasonClass::MalformedRequest,
+        "Acceptance 20.3: Requests with invalid protocol version must report MalformedRequest"
+    );
+}
+
+#[tokio::test]
+async fn test_dispatcher_rejects_oversized_service_name() {
+    let dir = tempdir().expect("Failed to create tempdir");
+    let sock_path = dir.path().join("dispatch_svc.sock");
+
+    let listener = UnixListener::bind(&sock_path).expect("Bind failed");
+    let health = Arc::new(HealthState::new());
+    health.set_socket_ready(true);
+
+    let config = DispatcherConfig {
+        max_concurrent_connections: 4,
+        connection_timeout: Duration::from_millis(500),
+    };
+    let dispatcher = Arc::new(ConnectionDispatcher::new(config, health));
+
+    let disp_clone = dispatcher.clone();
+    tokio::spawn(async move {
+        if let Ok((stream, _)) = listener.accept().await {
+            let _ = disp_clone.handle_connection(stream).await;
+        }
+    });
+
+    let mut client = UnixStream::connect(&sock_path)
+        .await
+        .expect("Connect failed");
+
+    let current_uid = nix::unistd::getuid().as_raw();
+    let mut req = make_auth_request(current_uid);
+    // Exceeds MAX_SERVICE_LEN (64)
+    req.service = "a".repeat(128);
+    let framed = encode(&req).expect("Encoding failed");
+
+    client
+        .write_all(&framed)
+        .await
+        .expect("Write framed request failed");
+    client.flush().await.expect("Flush failed");
+
+    let mut resp_len_bytes = [0u8; 4];
+    client
+        .read_exact(&mut resp_len_bytes)
+        .await
+        .expect("Read resp len failed");
+    let resp_len = u32::from_be_bytes(resp_len_bytes) as usize;
+
+    let mut full_resp_buf = Vec::with_capacity(4 + resp_len);
+    full_resp_buf.extend_from_slice(&resp_len_bytes);
+    let mut resp_payload = vec![0u8; resp_len];
+    client
+        .read_exact(&mut resp_payload)
+        .await
+        .expect("Read resp payload failed");
+    full_resp_buf.extend_from_slice(&resp_payload);
+
+    let resp: Response = decode(&full_resp_buf).expect("Decode response failed");
+    assert_eq!(
+        resp.verdict,
+        Verdict::ProtocolError,
+        "Acceptance 20.3: Requests with oversized service name must be rejected with ProtocolError"
+    );
+    assert_eq!(
+        resp.reason_class,
+        ReasonClass::MalformedRequest,
+        "Acceptance 20.3: Requests with oversized service name must report MalformedRequest"
+    );
+}

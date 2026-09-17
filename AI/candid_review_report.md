@@ -1,43 +1,63 @@
-# Candid Pre-Push Code Review Report
+# Candid Code Review Report: Issue #20 — fix(daemon): TOCTOU-safe socket binding and permission hardening
 
-## Task Context
-- **Issue**: Backlog Issue #19 / GitHub Issue #58 (`fix(enrollment-cli): Correct model registry IDs and lazy initialization`)
-- **Branch**: `fix/enrollment-cli-model-ids`
-- **Target**: `origin/main`
-- **Reviewer**: Independent Candid Reviewer Sub-Agent (`candid-reviewer`)
-
----
-
-## Evaluation Across 5 Core Pillars
-
-### 1. Logic & Architecture
-- **Model Registry IDs (#19.1)**: Corrected model ID identifiers from legacy strings (`face_detector`, `facial_landmarks`, `face_embedding`) to attested manifest IDs (`ultraface_slim_320`, `landmark_5point`, `mobilefacenet_arcface`). The MiniFASNet anti-spoofing ID remains `minifasnet_pad`. Constants are publicly declared in `soos_enrollment_cli::service` and re-exported in `lib.rs`.
-- **Lazy Service Initialization (#19.2)**: `EnrollmentService` refactored into store-only mode (`build_store_only`) and full-pipeline mode (`build_full_service`). Non-biometric operations (`list`, `delete`) instantiate only the encrypted `BiometricStore`, bypassing camera hardware and ONNX model loading. Headless or unprovisioned systems can list and delete templates cleanly without camera or neural model files.
-- **Hardware Addressing by ID (#19.3)**: Device addressing resolution in `resolve_camera_device` defaults to `/dev/v4l/by-id/default-camera` and dynamically scans `/dev/v4l/by-id/` for deterministic persistent hardware paths, satisfying Criterion C4. Explicit `--camera-device` flags are respected.
-
-### 2. PAM Concurrency & Real-Time Deadlines
-- `enrollment-cli` is an administrative CLI binary and library. It does not introduce any Tokio runtime or latency regressions into the PAM authentication module (`pam_soos.so`).
-
-### 3. Panic Safety & Fallback
-- Zero `unwrap()`, `expect()`, or panics in library production code (`crates/enrollment-cli/src/`).
-- Fallback paths use typed `EnrollmentCliError` variants (`CameraNotInitialized`, `PipelineNotInitialized`).
-- `#![forbid(unsafe_code)]` remains strictly enforced on `lib.rs` and `main.rs`.
-
-### 4. Test Integrity & Anti-Weakening
-- 100% of preexisting tests (`delete_tests`, `enroll_tests`, `list_tests`, `quality_tests`, `root_check_tests`, `scaffold_tests`, `shred_tests`, `verify_tests`) remain intact with zero weakening or deletion.
-- Three contractual tests added:
-  - `test_enrollment_cli_model_ids_match_manifest`: asserts all 4 required model IDs match official `models/manifest.toml`.
-  - `test_list_command_works_without_camera_or_models`: asserts `list` executes without camera hardware or models present.
-  - `test_camera_device_path_uses_stable_by_id`: validates deterministic `/dev/v4l/by-id/` device path resolution.
-- All 30 crate tests and full workspace test suite pass cleanly.
-
-### 5. Memory & Secret Bounds
-- `Zeroizing` containers protect plaintext embeddings during enrollment, verification, and deletion.
-- Deletion operations execute multi-pass cryptographic shredding (`secure_shred_file`) prior to template unlinking.
-- Strict English-only documentation and docstrings across all touched files.
+**Reviewer**: Candid Reviewer Sub-Agent (`candid-reviewer`)  
+**Target Branch**: `fix/socket-toctou`  
+**Base**: `origin/main`  
+**Issue**: Issue #20 (GitHub Issue #59) — `fix(daemon): TOCTOU-safe socket binding and permission hardening`
 
 ---
 
-## Verdict
+## 1. Diff Scope & Summary
+
+The reviewed diff contains modifications across the following files:
+- `crates/daemon/src/config.rs`: Added `socket_group: Option<String>` to `SocketConfig` (defaulting to `Some("soos".to_string())`) with full TOML deserialization support.
+- `crates/daemon/src/error.rs`: Added `DaemonError::Validation(#[from] soos_protocol::types::ValidationError)` error propagation.
+- `crates/daemon/src/socket.rs`: Replaced vulnerable `exists()` and unisolated `set_permissions` with descriptor-relative operations:
+  - `open_and_validate_directory` using safe `fs::OpenOptions` with `O_DIRECTORY | O_NOFOLLOW` and `fstat` validation.
+  - Serialization of the socket creation critical section via `nix::fcntl::Flock` on the directory descriptor.
+  - Descriptor-relative stale socket inspection and cleanup via `fstatat` and `unlinkat` (`NoRemoveDir`) with `AT_SYMLINK_NOFOLLOW`.
+  - Post-bind validation verifying the newly bound inode is a genuine socket.
+  - Safe permissions application via `fchmodat` with `NoFollowSymlink`.
+  - Hardened group ownership application via `fchownat` with `AT_SYMLINK_NOFOLLOW` and system group discovery.
+- `crates/daemon/src/dispatcher.rs`: Enforced early wire protocol validation in `ConnectionDispatcher::handle_request` via `Request::validate()`, rejecting invalid versions and oversized service names fail-closed with `Verdict::ProtocolError` and `ReasonClass::MalformedRequest`.
+- `crates/daemon/tests/dispatcher_tests.rs`: Added contractual tests `test_dispatcher_rejects_invalid_protocol_version` and `test_dispatcher_rejects_oversized_service_name`.
+- `crates/daemon/tests/socket_tests.rs`: Added contractual tests `test_socket_binding_resists_symlink_race` and `test_socket_ownership_root_soos`.
+- `scripts/sync_issue.py`: Registered `"fix/socket-toctou": 20` in `BRANCH_TO_ISSUE`.
+
+---
+
+## 2. 5-Pillar Architectural Audit
+
+### Pillar 1: Logic & Architecture
+- **TOCTOU Elimination**: The binding critical section is guarded by `nix::fcntl::Flock` on the verified directory descriptor. Stale node inspection and deletion happen exclusively relative to `dir_lock` using `fstatat` and `unlinkat` with `AT_SYMLINK_NOFOLLOW`.
+- **Symlink Protection**: Symlinks at `socket_path` (whether target-pointing or broken) are detected and fail closed with `DaemonError::SocketDirValidation` without following or modifying target files.
+- **Ownership Hardening**: The socket owner is set to `root:soos` (0:soos_gid) with fallback and unprivileged accommodation in non-root test environments.
+- **Protocol Defense-in-Depth**: Wire validation in the dispatcher prevents invalid requests from reaching downstream biometric evaluation.
+- **Verdict**: PASS
+
+### Pillar 2: PAM Concurrency & Real-Time Deadlines
+- **Zero PAM Impact**: All socket validation and binding occur at daemon startup prior to servicing requests. Dispatcher `Request::validate()` is an in-memory bound check executing in nanoseconds.
+- **Zero Stream Pollution**: Clean structured `tracing` events only; no `println!` or `eprintln!` stdout/stderr pollution.
+- **Verdict**: PASS
+
+### Pillar 3: Panic Safety & Fail-Closed Behavior
+- **Zero Unwraps / Expects in Production**: All operations propagate `Result<(), DaemonError>` using `?`.
+- **Safe POSIX Calls**: System call return codes (`ELOOP`, `ENOTDIR`, `ENOENT`, `EOPNOTSUPP`) are handled explicitly.
+- **Fail-Closed Fallback**: Request validation failures return `Verdict::ProtocolError`, never `Verdict::Allow`.
+- **Verdict**: PASS
+
+### Pillar 4: Test Integrity & Anti-Weakening
+- **Zero Test Weakening**: All 4 pre-existing socket tests and 6 pre-existing dispatcher tests remain intact and passing.
+- **Immutable Acceptance Contracts**: `test_socket_binding_resists_symlink_race`, `test_socket_ownership_root_soos`, `test_dispatcher_rejects_invalid_protocol_version`, and `test_dispatcher_rejects_oversized_service_name` satisfy the acceptance criteria of Backlog Issue #20.
+- **Verdict**: PASS
+
+### Pillar 5: Memory & Secret Bounds
+- **Zero Unsafe Code**: All production logic is 100% safe Rust (`OpenOptionsExt` replaces raw unsafe fd conversions).
+- **No Secret Leakage**: No credential or biometric data is exposed in logs.
+- **Verdict**: PASS
+
+---
+
+## 3. Review Verdict
 
 **VERDICT: APPROVED**

@@ -18,6 +18,8 @@ pub struct SocketConfig {
     pub socket_mode: u32,
     /// Whether to enforce that the parent directory is owned by root (`uid == 0`).
     pub enforce_root_owner: bool,
+    /// Target system group for socket ownership (defaults to `"soos"`).
+    pub socket_group: Option<String>,
 }
 
 impl Default for SocketConfig {
@@ -27,6 +29,7 @@ impl Default for SocketConfig {
             socket_dir: PathBuf::from("/run/soos"),
             socket_mode: 0o660,
             enforce_root_owner: true,
+            socket_group: Some("soos".to_string()),
         }
     }
 }
@@ -130,6 +133,7 @@ struct SocketConfigFile {
     socket_dir: Option<PathBuf>,
     socket_mode: Option<u32>,
     enforce_root_owner: Option<bool>,
+    socket_group: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -198,6 +202,9 @@ impl DaemonConfig {
             }
             if let Some(enforce_root) = socket.enforce_root_owner {
                 config.socket.enforce_root_owner = enforce_root;
+            }
+            if let Some(grp) = socket.socket_group {
+                config.socket.socket_group = Some(grp);
             }
         }
 
