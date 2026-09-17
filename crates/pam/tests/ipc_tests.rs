@@ -608,3 +608,89 @@ fn test_ipc_daemon_crash_truncated_body_returns_ignore() {
 
     let _ = server_handle.join();
 }
+
+/// Sub-issue #21.2 TDD Contract: Truncated responses are detected and treated as errors.
+///
+/// Asserts:
+/// 1. Direct call to authenticate returns IpcError::TruncatedResponse when body is severed prematurely.
+/// 2. Direct call to authenticate returns IpcError::TruncatedResponse when length header is truncated.
+/// 3. PAM FFI entry point pam_sm_authenticate degrades fail-closed to PAM_IGNORE.
+#[test]
+fn test_pam_ipc_detects_truncated_response() {
+    // Case 1: Truncated payload body (announced 64 bytes, sent only 16 bytes)
+    let tmp = tempdir().expect("tempdir created");
+    let sock_path = tmp.path().join("trunc_body_detect.sock");
+    let listener = UnixListener::bind(&sock_path).expect("bound test socket");
+
+    let server_handle = thread::spawn(move || {
+        if let Ok((mut stream, _)) = listener.accept() {
+            let mut len_buf = [0u8; 4];
+            let _ = stream.read_exact(&mut len_buf);
+            let size = u32::from_be_bytes(len_buf) as usize;
+            let mut body = vec![0u8; size];
+            let _ = stream.read_exact(&mut body);
+
+            // Announce 64 bytes of body but write only 16 bytes then close
+            let len_prefix = 64u32.to_be_bytes();
+            let _ = stream.write_all(&len_prefix);
+            let partial_body = [0x77u8; 16];
+            let _ = stream.write_all(&partial_body);
+            drop(stream);
+        }
+    });
+
+    let config = pam_soos::config::PamConfig {
+        socket_path: sock_path.clone(),
+        timeout_ms: 250,
+        ..Default::default()
+    };
+
+    let result = pam_soos::ipc::authenticate(&config, 1000);
+    match result {
+        Err(pam_soos::ipc::IpcError::TruncatedResponse { expected, received }) => {
+            assert_eq!(expected, 68, "Expected full frame size of 4 + 64 bytes");
+            assert_eq!(received, 20, "Received only 4 header + 16 body bytes");
+        }
+        other => panic!("Expected IpcError::TruncatedResponse, got: {:?}", other),
+    }
+
+    let _ = server_handle.join();
+
+    // Verify PAM FFI fails closed into PAM_IGNORE
+    let sock_arg = format!("socket_path={}", sock_path.display());
+    let (_storage, ptrs) = make_pam_args(&[&sock_arg, "timeout_ms=250"]);
+    let code = pam_sm_authenticate(ptr::null_mut(), 0, ptrs.len() as i32, ptrs.as_ptr());
+    assert_eq!(code, PAM_IGNORE);
+
+    // Case 2: Truncated length header (expected 4 bytes, sent only 2 bytes)
+    let sock_path_hdr = tmp.path().join("trunc_hdr_detect.sock");
+    let listener_hdr = UnixListener::bind(&sock_path_hdr).expect("bound test socket");
+
+    let server_handle_hdr = thread::spawn(move || {
+        if let Ok((mut stream, _)) = listener_hdr.accept() {
+            let mut buf = [0u8; 128];
+            let _ = stream.read(&mut buf);
+            // Send only 2 bytes of the 4-byte length prefix
+            let partial_hdr = [0u8, 1u8];
+            let _ = stream.write_all(&partial_hdr);
+            drop(stream);
+        }
+    });
+
+    let config_hdr = pam_soos::config::PamConfig {
+        socket_path: sock_path_hdr.clone(),
+        timeout_ms: 250,
+        ..Default::default()
+    };
+
+    let result_hdr = pam_soos::ipc::authenticate(&config_hdr, 1000);
+    match result_hdr {
+        Err(pam_soos::ipc::IpcError::TruncatedResponse { expected, received }) => {
+            assert_eq!(expected, 4, "Expected 4-byte length header");
+            assert_eq!(received, 2, "Received only 2 bytes");
+        }
+        other => panic!("Expected IpcError::TruncatedResponse, got: {:?}", other),
+    }
+
+    let _ = server_handle_hdr.join();
+}

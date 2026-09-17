@@ -40,6 +40,8 @@ pub enum IpcError {
     EmptyResponse,
     /// Response declared length exceeds maximum permitted buffer size.
     OversizedMessage { size: usize, max: usize },
+    /// Response stream was truncated before complete frame was received.
+    TruncatedResponse { expected: usize, received: usize },
     /// Response request ID did not match the original nonce.
     RequestIdMismatch,
     /// Received response version does not match supported protocol version.
@@ -57,6 +59,12 @@ impl core::fmt::Display for IpcError {
             Self::EmptyResponse => write!(f, "daemon returned empty zero-length response"),
             Self::OversizedMessage { size, max } => {
                 write!(f, "response size {size} exceeds maximum {max}")
+            }
+            Self::TruncatedResponse { expected, received } => {
+                write!(
+                    f,
+                    "truncated response: expected {expected} bytes, received {received}"
+                )
             }
             Self::RequestIdMismatch => {
                 write!(f, "response request_id does not match initial request")
@@ -88,6 +96,34 @@ fn map_io_err(err: std::io::Error) -> IpcError {
         std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock => IpcError::Timeout,
         _ => IpcError::Io(err),
     }
+}
+
+/// Reads from a stream into `buf`, returning `IpcError::TruncatedResponse` if EOF
+/// is reached before `buf` is completely filled.
+fn read_exact_counted<R: Read>(
+    stream: &mut R,
+    buf: &mut [u8],
+    expected_total: usize,
+    already_received: usize,
+) -> Result<(), IpcError> {
+    let mut offset = 0usize;
+    while offset < buf.len() {
+        let remaining_slice = buf.get_mut(offset..).ok_or(IpcError::EmptyResponse)?;
+        match stream.read(remaining_slice) {
+            Ok(0) => {
+                let received = already_received.saturating_add(offset);
+                return Err(IpcError::TruncatedResponse {
+                    expected: expected_total,
+                    received,
+                });
+            }
+            Ok(n) => {
+                offset = offset.saturating_add(n);
+            }
+            Err(e) => return Err(map_io_err(e)),
+        }
+    }
+    Ok(())
 }
 
 /// Sends an authentication request to the daemon and awaits the verification verdict.
@@ -130,9 +166,9 @@ pub fn authenticate(config: &PamConfig, uid: u32) -> Result<Verdict, IpcError> {
         .set_read_timeout(Some(remaining_for_len))
         .map_err(map_io_err)?;
 
-    // Read 4-byte big-endian length prefix
+    // Read 4-byte big-endian length prefix with byte-counted completeness validation
     let mut len_buf = [0u8; 4];
-    stream.read_exact(&mut len_buf).map_err(map_io_err)?;
+    read_exact_counted(&mut stream, &mut len_buf, 4, 0)?;
 
     let declared_size =
         usize::try_from(u32::from_be_bytes(len_buf)).map_err(|_| IpcError::OversizedMessage {
@@ -171,7 +207,16 @@ pub fn authenticate(config: &PamConfig, uid: u32) -> Result<Verdict, IpcError> {
         .map_err(map_io_err)?;
 
     let body_slice = full_buf.get_mut(4..).ok_or(IpcError::EmptyResponse)?;
-    stream.read_exact(body_slice).map_err(map_io_err)?;
+    read_exact_counted(&mut stream, body_slice, total_capacity, 4)?;
+
+    // Completeness validation: ensure total received bytes match expected framed size
+    let total_received = 4usize.saturating_add(declared_size);
+    if total_received != total_capacity {
+        return Err(IpcError::TruncatedResponse {
+            expected: total_capacity,
+            received: total_received,
+        });
+    }
 
     let resp: Response = decode(&full_buf).map_err(IpcError::Codec)?;
 

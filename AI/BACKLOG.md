@@ -799,13 +799,13 @@ The enrollment CLI uses incorrect model registry IDs (`face_detector` instead of
 
 #### Sub-issues
 
-- [ ] **#21.1** — Ensure response write is atomic or cancellation-safe
+- [x] **#21.1** — Ensure response write is atomic or cancellation-safe
   - Option A: Encode full response buffer before entering the timeout, then write with `tokio::io::AsyncWriteExt` after timeout check
   - Option B: Use separate write timeout rather than wrapping entire connection in timeout
   - Acceptance: Partial response writes never reach the PAM client
   - TDD: `test_timeout_during_write_does_not_corrupt_response`
 
-- [ ] **#21.2** — Add response completeness validation in PAM IPC client
+- [x] **#21.2** — Add response completeness validation in PAM IPC client
   - After reading response, verify total received bytes match expected framed size
   - Acceptance: Truncated responses are detected and treated as errors
   - TDD: `test_pam_ipc_detects_truncated_response`

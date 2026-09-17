@@ -85,6 +85,7 @@ BRANCH_TO_ISSUE = {
     "feat/model-deployment": 18,
     "fix/enrollment-cli-model-ids": 19,
     "fix/socket-toctou": 20,
+    "fix/async-cancel-safety": 21,
 }
 
 

@@ -1,64 +1,58 @@
-# Plan Evaluation Report: Issue #20 — fix(daemon): TOCTOU-safe socket binding and permission hardening
+# Plan Evaluation Report — Issue #21: Async Cancellation Safety on Socket Writes
 
-**Evaluator**: Plan Evaluator Sub-Agent (`plan-evaluator`)  
-**Target Issue**: Backlog Issue #20 (GitHub Issue #59) — `fix(daemon): TOCTOU-safe socket binding and permission hardening`  
-**Target Branch**: `fix/socket-toctou`  
-**Architecture Reference**: `AI/ARCHITECTURE.md` §4 (Socket Path and Permissions, Wire Protocol Framing, Async Boundaries)
-
----
-
-## Executive Summary
-
-The proposed implementation plan addresses security vulnerabilities in the Unix domain socket lifecycle of `soos-daemon`:
-1. **Sub-issue #20.1**: Eliminates TOCTOU and symlink race conditions during socket creation, directory validation, stale socket cleanup, binding, and permission application using `O_DIRECTORY | O_NOFOLLOW` parent directory descriptors, `flock()` critical section serialization, and `fstatat` / `unlinkat` / `fchmodat` descriptor-relative operations.
-2. **Sub-issue #20.2**: Hardens socket ownership to `root:soos` (`0:soos_gid`) via `fchownat` with `AT_SYMLINK_NOFOLLOW`, with automatic system group discovery/creation for `soos`.
-3. **Sub-issue #20.3**: Enforces early wire protocol validation in `ConnectionDispatcher::handle_request` via `Request::validate()`, rejecting invalid protocol versions and oversized service names with `Verdict::ProtocolError` and `ReasonClass::MalformedRequest`.
+- **Target Issue**: Issue #21 (GitHub #60) — `fix(daemon): Async cancellation safety on socket writes`
+- **Target Branch**: `fix/async-cancel-safety`
+- **Evaluator**: Independent Plan Evaluator Sub-Agent
+- **Date**: 2026-09-17
 
 ---
 
-## 6-Pillar Compliance Audit
+## 1. Executive Summary
 
-### 1. Architectural Alignment & Threat Model
-- **Boundary Preservation**: The privileged daemon (`soos-daemon`) resides at UID 0 and handles socket binding at `/run/soos/daemon.sock` with mode `0660` and owner `root:soos`.
-- **Symlink Race Protection**: Directory validation uses `open` with `O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW` and `fstat` on the directory file descriptor, guaranteeing an unprivileged local attacker cannot redirect socket creation to sensitive system files (e.g. `/etc/shadow`).
-- **TOCTOU Elimination**: Critical section serialization via `flock` and atomic directory descriptor operations (`fstatat`, `unlinkat`, `fchmodat` with `AT_SYMLINK_NOFOLLOW`) completely close the time-of-check to time-of-use window.
-- **Group Isolation**: Only members of the `soos` group have read/write access to the socket.
-- **Verdict**: PASS
+The proposed implementation addresses async cancellation hazards during Unix domain socket writes in `soos-daemon` and adds response completeness verification in `pam_soos.so`.
 
-### 2. PAM Real-Time Latency & Concurrency
-- **Non-blocking Operations**: Socket directory validation, binding, and ownership setting execute during daemon initialization prior to accepting connections, adding 0ms to PAM request latency.
-- **Dispatcher Wire Validation**: `Request::validate()` is an in-memory boundary check on `version` and `service.len()` taking < 100 nanoseconds, safely within the 150ms daemon decision budget.
-- **Zero Output Pollution**: All diagnostic output uses `tracing` structured logging; zero `println!` or `eprintln!` stream pollution.
-- **Verdict**: PASS
-
-### 3. Panic Safety & Fail-Closed Behavior
-- **Zero Unwraps / Expects in Production**: All error paths in `socket.rs` and `dispatcher.rs` propagate `Result<(), DaemonError>` using `?`.
-- **Fail-Closed Protocol Validation**: Requests failing `req.validate()` immediately trigger a rejection response with `Verdict::ProtocolError` and `ReasonClass::MalformedRequest`, closing the stream without executing pipeline or policy logic.
-- **Verdict**: PASS
-
-### 4. Dependency Isolation & Banned Crates
-- **Banned Dependencies**: No forbidden crates (`opencv`, `nokhwa`) are introduced.
-- **Standard POSIX Primitives**: Utilizes `nix` (already in workspace with `features = ["socket", "fs", "user"]`) and `libc`.
-- **Verdict**: PASS
-
-### 5. Data Confidentiality & Zeroization
-- **No Secret Leakage**: No passwords, biometric embeddings, or private data are logged or exposed.
-- **Safe Error Reporting**: Validation errors indicate schema violations (unsupported version or service length) without reflecting unbounded user input into logs.
-- **Verdict**: PASS
-
-### 6. Test Integrity & TDD Contracts
-- **Test Contracts**:
-  - `test_socket_binding_resists_symlink_race`: Verifies that broken symlinks, target file symlinks, and stale symlinks are rejected without following or modifying target files.
-  - `test_socket_ownership_root_soos`: Verifies that socket ownership is set to `root:soos` when running as root, and verifies group resolution and permission enforcement.
-  - `test_dispatcher_rejects_invalid_protocol_version`: Verifies that requests with `version != CURRENT_VERSION` are rejected with `ProtocolError`.
-  - `test_dispatcher_rejects_oversized_service_name`: Verifies that requests with `service.len() > MAX_SERVICE_LEN` are rejected with `ProtocolError`.
-- **Zero Weakening**: All existing tests in `crates/daemon/tests/socket_tests.rs` and `crates/daemon/tests/dispatcher_tests.rs` remain intact and must pass.
-- **Verdict**: PASS
+By decoupling the request handling timeout from socket write transmission, `soos-daemon` guarantees that async timeout cancellations occur strictly *before* any byte has been written to the client stream. The pre-encoded in-memory response buffer is subsequently written using `write_all` and `flush` under a dedicated write timeout. On the client side, `pam_soos.so` introduces `IpcError::TruncatedResponse` and verifies that total received bytes match the declared wire frame size before invoking postcard deserialization, ensuring fail-closed fallback to `PAM_IGNORE`.
 
 ---
 
-## Conclusion & Verdict
+## 2. Six Architectural Pillars Audit
 
-The implementation plan is thoroughly compliant with all security invariants of `soos`.
+### Pillar 1: Architectural Alignment & Threat Model
+- **Evaluation**: PASS
+- **Details**: The architecture maintains the strict separation of privilege between the unprivileged PAM module (`pam_soos.so`) and the privileged root daemon (`soos-daemon`). Communication occurs strictly over the private Unix domain stream socket (`/run/soos/daemon.sock`). Kernel `SO_PEERCRED` validation remains mandatory on all connection requests prior to processing.
 
-**VALIDATION_VERDICT: APPROVED**
+### Pillar 2: PAM Real-Time Latency & Concurrency
+- **Evaluation**: PASS
+- **Details**: Zero asynchronous runtimes or Tokio tasks are introduced into `crates/pam`. `pam_soos.so` strictly uses synchronous `std::os::unix::net::UnixStream` with cumulative read and write timeouts bounded by `config.timeout_ms` (200–250ms). Zero stream pollution (`println!`, `eprintln!`, `dbg!`) is introduced in PAM production code.
+
+### Pillar 3: Panic Safety & Fail-Closed Behavior
+- **Evaluation**: PASS
+- **Details**: All PAM FFI entry points remain guarded by `catch_unwind`, systematically returning `PAM_IGNORE` upon any error or unexpected condition. Production code in both `crates/daemon` and `crates/pam` strictly avoids `unwrap()` and `expect()`. Truncated responses are mapped to `IpcError::TruncatedResponse`, which cleanly degrades to `PAM_IGNORE`.
+
+### Pillar 4: Dependency Isolation & Banned Crates
+- **Evaluation**: PASS
+- **Details**: No banned crates (`opencv`, `nokhwa`) or new external dependencies are introduced. `#![forbid(unsafe_code)]` remains intact where declared. Standard `tokio::io::AsyncWriteExt` is used within `crates/daemon` (which already runs Tokio), and synchronous `std::io::Read` within `crates/pam`.
+
+### Pillar 5: Data Confidentiality & Zeroization
+- **Evaluation**: PASS
+- **Details**: No passwords, raw embeddings, or unredacted biometric vectors travel across the IPC socket or appear in log lines. The wire schema continues to use zeroized `Response` types.
+
+### Pillar 6: Test Integrity & TDD Contracts
+- **Evaluation**: PASS
+- **Details**: Acceptance tests are specified directly from `AI/BACKLOG.md` sub-issues #21.1 and #21.2:
+  - `test_timeout_during_write_does_not_corrupt_response` in `crates/daemon/tests/dispatcher_tests.rs`
+  - `test_pam_ipc_detects_truncated_response` in `crates/pam/tests/ipc_tests.rs`
+  No existing test assertions will be weakened or bypassed.
+
+---
+
+## 3. Findings & Recommendations
+
+- **Write Timeout Tuning**: Ensure write operations in `soos-daemon` use a separate write timeout (defaulting to e.g. `Duration::from_millis(100)` or matching connection timeout) so that an uncooperative or frozen client cannot exhaust worker permits indefinitely during the transmission phase.
+- **Counted Stream Reader**: In `pam_soos::ipc`, count the exact received bytes across chunked reads to provide accurate `expected` and `received` diagnostics in `IpcError::TruncatedResponse`.
+
+---
+
+## 4. Final Verdict
+
+VALIDATION_VERDICT: APPROVED
