@@ -118,6 +118,7 @@ Before starting Phase 1, the orchestrator verifies full ingestion of:
 - Inherits workspace settings: `publish.workspace = true`, `[lints] workspace = true`.
 - Specifies bounded structs, enums, and `thiserror` error types.
 - Asserts `#![forbid(unsafe_code)]` in business crates.
+- **Lazy Hardware & Inference Scaffolding Invariant**: In administrative and diagnostic crates that interact with both storage and hardware/neural pipelines (e.g. `enrollment-cli`), decouple storage-only service initialization (`build_store_only`) from full perception pipelines (`build_full_service`). Non-biometric maintenance subcommands (`list`, `delete`) must only require master keys and template directories, guaranteeing zero runtime dependency on physical camera devices or neural model files on disk.
 
 ### Phase 1.5: Plan Evaluator Sub-Agent ([plan-evaluator](file:///home/hadrien/soos/.agents/skills/plan-evaluator/SKILL.md))
 - Audits implementation plans and technical specifications against `AI/ARCHITECTURE.md`, `AI/DECISIONS.md`, `AI/BACKLOG.md`, and `AI/VERIFICATION_MATRIX.md`.
@@ -176,5 +177,6 @@ Before starting Phase 1, the orchestrator verifies full ingestion of:
 - Pushes topic branch and opens GitHub Pull Request.
 - Monitors GitHub Actions CI checks until 100% green.
 - Auto-merges into `main` via squash merge and synchronizes local `main`.
+- **Working Tree Concurrency Lockdown**: While `./save.sh --auto-merge` or `./scripts/pr_loop.sh` is actively executing in the background, the agent MUST NOT run any `git checkout`, `git switch`, or working tree modifications in parallel. The background release loop relies on working tree branch stability to verify commit SHAs prior to squash merging.
 - **/goal Autonomous Completion**: When running under `/goal`, verify local `main` sync via `git log -1` and include `<!-- GOAL_COMPLETE -->` in the concluding summary to satisfy the goal supervisor stop hook.
 

@@ -64,7 +64,7 @@ for arg in "$@"; do
 done
 ./save.sh --push-pr "${PASSED_ARGS[@]}"
 
-TARGET_HEAD_SHA=$(git rev-parse HEAD)
+TARGET_HEAD_SHA=$(git rev-parse "$CURRENT_BRANCH")
 info "Target HEAD commit SHA: $TARGET_HEAD_SHA"
 
 step "2/6: Pull Request Verification or Creation"
