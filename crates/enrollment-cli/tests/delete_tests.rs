@@ -133,3 +133,50 @@ fn test_delete_non_existent_uid_fails() {
         other => panic!("Expected Err(NotEnrolled(9999)), got: {other:?}"),
     }
 }
+
+#[test]
+fn test_delete_command_works_with_store_only() {
+    let temp = TempDir::new().unwrap();
+    let bio_dir = temp.path().join("biometrics");
+    let key_file = temp.path().join("master.key");
+
+    let key = MasterKey::load_or_create(&key_file).unwrap();
+    let store = BiometricStore::new(bio_dir.clone(), key).unwrap();
+    let template = BiometricTemplate::new(
+        4000,
+        "mobilefacenet".to_string(),
+        "1.0.0".to_string(),
+        1700000000,
+        Zeroizing::new(vec![0.5; 128]),
+    )
+    .unwrap();
+    store.enroll(&template).unwrap();
+    assert!(store.exists(4000).unwrap());
+
+    let cli = soos_enrollment_cli::args::Cli {
+        biometrics_dir: Some(bio_dir),
+        key_file: Some(key_file),
+        models_dir: Some(temp.path().join("nonexistent_models")),
+        camera_device: Some(std::path::PathBuf::from("/dev/nonexistent_camera")),
+        skip_root_check: true,
+        command: soos_enrollment_cli::args::Commands::Delete(DeleteArgs {
+            uid: Some(4000),
+            username: None,
+            yes: true,
+        }),
+    };
+
+    let service = soos_enrollment_cli::build_store_only(&cli)
+        .expect("build_store_only must succeed without camera or models");
+
+    let delete_args = DeleteArgs {
+        uid: Some(4000),
+        username: None,
+        yes: true,
+    };
+    let deleted = service
+        .delete(&delete_args, |_| true)
+        .expect("Delete must succeed with store-only service");
+    assert!(deleted);
+    assert!(!store.exists(4000).unwrap());
+}

@@ -83,6 +83,7 @@ BRANCH_TO_ISSUE = {
     "chore/production-hardening": 16,
     "fix/daemon-fail-closed": 17,
     "feat/model-deployment": 18,
+    "fix/enrollment-cli-model-ids": 19,
 }
 
 

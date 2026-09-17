@@ -740,7 +740,7 @@ The enrollment CLI uses incorrect model registry IDs (`face_detector` instead of
 
 #### Sub-issues
 
-- [ ] **#19.1** — Fix model ID strings to match `manifest.toml`
+- [x] **#19.1** — Fix model ID strings to match `manifest.toml`
   - `face_detector` → `ultraface_slim_320`
   - `facial_landmarks` → `landmark_5point`
   - `face_embedding` → `mobilefacenet_arcface`
@@ -748,14 +748,14 @@ The enrollment CLI uses incorrect model registry IDs (`face_detector` instead of
   - Acceptance: `soos-enroll enroll --uid 1000` loads all 4 models successfully
   - TDD: `test_enrollment_cli_model_ids_match_manifest`
 
-- [ ] **#19.2** — Implement lazy initialization: defer camera/model loading to commands that need them
+- [x] **#19.2** — Implement lazy initialization: defer camera/model loading to commands that need them
   - `list` and `delete` commands should only require `BiometricStore` (key + directory)
   - `enroll` and `verify` commands need full pipeline
   - Refactor `build_service()` into `build_store_only()` and `build_full_service()`
   - Acceptance: `soos-enroll list` works without camera or models installed
   - TDD: `test_list_command_works_without_camera_or_models`
 
-- [ ] **#19.3** — Use stable device path (`/dev/v4l/by-id/`) instead of `/dev/video0` default
+- [x] **#19.3** — Use stable device path (`/dev/v4l/by-id/`) instead of `/dev/video0` default
   - Acceptance: Camera selection is deterministic across reboots
   - TDD: `test_camera_device_path_uses_stable_by_id`
 

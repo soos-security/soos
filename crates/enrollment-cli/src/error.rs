@@ -40,6 +40,12 @@ pub enum EnrollmentCliError {
     #[error("Camera error: {0}")]
     Camera(#[from] soos_camera_v4l::CameraError),
 
+    #[error("Camera is not initialized; operation requires full service")]
+    CameraNotInitialized,
+
+    #[error("Vision pipeline is not initialized; operation requires full service")]
+    PipelineNotInitialized,
+
     #[error("Internal error: {0}")]
     Internal(String),
 

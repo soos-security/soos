@@ -18,7 +18,10 @@ pub use args::{Cli, Commands, DeleteArgs, EnrollArgs, ListArgs, OutputFormat, Ve
 pub use error::EnrollmentCliError;
 pub use quality::{select_best_frame, BestCandidate, CandidateEvaluation};
 pub use service::{
-    check_privileges, DiagnosticVerificationReport, EnrolledUserSummary, EnrollmentOutcome,
-    EnrollmentService, EnrollmentSummary, LatencyBreakdown,
+    build_full_service, build_service, build_store_only, check_privileges, resolve_camera_device,
+    DiagnosticVerificationReport, EnrolledUserSummary, EnrollmentOutcome, EnrollmentService,
+    EnrollmentSummary, LatencyBreakdown, DEFAULT_CAMERA_DEVICE, DEFAULT_KEY_PATH,
+    DEFAULT_MODELS_DIR, MODEL_ID_EMBEDDING, MODEL_ID_FACE_DETECTOR, MODEL_ID_LANDMARKS,
+    MODEL_ID_PAD, REQUIRED_MODEL_IDS,
 };
 pub use shred::secure_shred_file;
