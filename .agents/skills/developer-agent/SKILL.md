@@ -83,3 +83,12 @@ Your responsibility is to write the minimal production code necessary to turn pr
    - Fully working, cleanly formatted production code with 100% green test passes.
    - **Artifact Metadata vs Repository Files**:
      When generating files with `write_to_file`, provide `ArtifactMetadata` ONLY for documents saved inside the artifact directory (`<appDataDir>/brain/<conversation-id>/`). For all project repository files (`AI/plan_evaluator_report.md`, `crates/*`, `Docs/*`), omit `ArtifactMetadata`.
+
+7. **Privileged Daemon Socket Binding & POSIX File Descriptor Safety**:
+   - **Safe Directory Descriptors without Unsafe Code**:
+     When opening directories securely for atomic descriptor-relative operations (`fstatat`, `unlinkat`, `fchmodat`, `fchownat`), prefer `std::fs::OpenOptions::new().read(true).custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW).open(dir)` over raw `nix::fcntl::open` + `FromRawFd::from_raw_fd`. This guarantees 100% safe Rust and avoids triggering `clippy::undocumented_unsafe_blocks`.
+   - **Modern RAII Critical Section Locking with `nix::fcntl::Flock`**:
+     In `nix 0.29+`, `nix::fcntl::flock` is deprecated. Use the built-in RAII type `nix::fcntl::Flock::lock(dir_file, nix::fcntl::FlockArg::LockExclusiveNonblock)` to serialize binding critical sections. When the `Flock` guard is dropped, it automatically unlocks without manual error-prone cleanup.
+   - **Socket Permissions & Symlink Defense-in-Depth**:
+     Calling `fchmod` on an active socket file descriptor on Linux modifies the in-memory inode, NOT the directory entry on disk. Always use `fchmodat(Some(dir_lock.as_raw_fd()), socket_name, mode, FchmodatFlags::NoFollowSymlink)` and `fchownat(..., AtFlags::AT_SYMLINK_NOFOLLOW)` relative to the locked directory descriptor to ensure disk permissions update properly while preventing symlink redirection.
+
