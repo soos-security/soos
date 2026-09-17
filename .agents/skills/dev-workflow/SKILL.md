@@ -111,6 +111,7 @@ Before starting Phase 1, the orchestrator verifies full ingestion of:
   - `gh` CLI path resolution: Ensure `PATH="$HOME/.local/bin:$PATH"` is prepended when executing commands that invoke `gh`, as user-local installs reside under `~/.local/bin/gh`.
   - Avoid GraphQL classic project deprecation in `gh issue view` by querying specific fields: `gh issue view <id> --json title,body,number,state`.
   - Release steps (`./save.sh --push-pr`, `./scripts/pr_loop.sh`) require `BypassSandbox: true` to communicate with GitHub.
+- **Dual Sync Branch Registration**: Verify that the topic branch is registered in `BRANCH_TO_ISSUE` in `scripts/sync_issue.py`. If absent, register it immediately (`"<type>/<name>": <backlog_id>`) so automated issue synchronization (`scripts/sync_issue.py --auto`) functions without manual intervention throughout the lifecycle.
 
 ### Phase 1: Architect Sub-Agent ([architect-agent](file:///home/hadrien/soos/.agents/skills/architect-agent/SKILL.md))
 - Scaffolds crate in `crates/<name>/` and registers in root `Cargo.toml`.
