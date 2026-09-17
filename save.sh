@@ -63,6 +63,28 @@ if ! git rev-parse --is-inside-work-tree &> /dev/null; then
     exit 1
 fi
 
+# Quick help check before branch validation
+for arg in "$@"; do
+    if [[ "$arg" == "-h" || "$arg" == "--help" ]]; then
+        cat << 'EOF'
+Usage: ./save.sh [OPTIONS] [COMMIT_MESSAGE]
+
+Quality pipeline and automated commit/release script for soos.
+
+Options:
+  --auto-merge, --loop   Run full autonomous PR, review, and merge loop
+  --push-pr, --pr        Run quality pipeline, commit, and push PR
+  -m, --message <MSG>    Specify Conventional Commit message
+  -h, --help             Display this help message and exit
+
+Examples:
+  ./save.sh "feat(daemon): add model verification"
+  ./save.sh --auto-merge -m "fix(pam): handle timeout gracefully"
+EOF
+        exit 0
+    fi
+done
+
 # Prevent direct commits on main branch
 CURRENT_BRANCH=$(git symbolic-ref --short HEAD 2>/dev/null || echo "detached")
 if [[ "$CURRENT_BRANCH" == "main" && "${ALLOW_MAIN_COMMIT:-0}" != "1" ]]; then
@@ -120,6 +142,24 @@ while [[ $# -gt 0 ]]; do
         --push-pr|--pr)
             PUSH_PR=true
             shift
+            ;;
+        -h|--help)
+            cat << 'EOF'
+Usage: ./save.sh [OPTIONS] [COMMIT_MESSAGE]
+
+Quality pipeline and automated commit/release script for soos.
+
+Options:
+  --auto-merge, --loop   Run full autonomous PR, review, and merge loop
+  --push-pr, --pr        Run quality pipeline, commit, and push PR
+  -m, --message <MSG>    Specify Conventional Commit message
+  -h, --help             Display this help message and exit
+
+Examples:
+  ./save.sh "feat(daemon): add model verification"
+  ./save.sh --auto-merge -m "fix(pam): handle timeout gracefully"
+EOF
+            exit 0
             ;;
         -m|--message)
             shift

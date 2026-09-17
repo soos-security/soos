@@ -131,6 +131,7 @@ Before starting Phase 1, the orchestrator verifies full ingestion of:
 - Verifies tests **FAIL** initially (TDD Red Phase).
 - Systematically writes tests asserting fail-closed `PAM_IGNORE` for PAM pathways.
 - **Contractual Invariant**: Tests written in this phase are immutable. They define the non-negotiable contract of acceptance.
+- **Domain Helper Reuse Invariant**: In higher-level crates (e.g. `daemon`, `enrollment-cli`), author test contracts leveraging verified helper functions and cryptographic utilities already exported by upstream workspace crates (e.g. `ModelManifest::compute_sha256` from `inference-ort`) rather than pulling in duplicate low-level dependencies directly into consumer crates.
 
 ### Phase 3: Auditor Sub-Agent ([auditor-agent](file:///home/hadrien/soos/.agents/skills/auditor-agent/SKILL.md))
 - Audits interfaces for panic safety (zero unwrap/expect in production code).
