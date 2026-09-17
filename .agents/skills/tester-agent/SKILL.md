@@ -30,6 +30,7 @@ Your responsibility is to author comprehensive automated tests that define the c
    - Error path testing: timeouts, buffer truncation, malformed headers, oversized payloads.
    - Adversarial boundary testing: property-based tests via `proptest` for codec and parser boundaries.
    - PAM pathway invariant: Every code path touching Linux-PAM must include a test asserting fail-closed `PAM_IGNORE` fallback.
+   - **Async Cancellation & Truncated Framing Tests**: Author integration tests asserting that daemon timeouts during request handling drop the connection cleanly with 0 bytes sent without partial response framing, and client stream readers explicitly detect truncated frames and fail closed to `PAM_IGNORE`.
 
 4. **Workspace Clippy Compliance for Test Files**:
    - Because workspace lints enforce `-D clippy::unwrap_used`, `-D clippy::expect_used`, and `-D clippy::indexing_slicing` across `--all-targets`, all integration test files under `tests/*.rs` MUST declare at the top of the file:

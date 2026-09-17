@@ -40,6 +40,7 @@ Your responsibility is to design interfaces, data structures, and invariants **b
    - Ensure zero unapproved third-party dependencies. Banned crates: `opencv`, `nokhwa`.
    - Ensure PAM crate (`crates/pam`) NEVER depends on Tokio or asynchronous runtimes.
    - Ensure zero sensitive fields (passwords, raw embeddings, unencrypted frames) in IPC schemas.
+   - **Async Cancellation Safety Invariant**: In asynchronous server components (`soos-daemon`), architectures must strictly decouple request computation from response transmission. Handlers must produce in-memory serialized wire payloads (`Option<Vec<u8>>`) under the request processing timeout, isolating socket writes into an independent transmission phase to prevent partial frame emission upon cancellation.
 
 4. **Deliverable**:
    - Output clear struct definitions, method signatures, error enums, and module declarations for the Tester and Developer agents.
