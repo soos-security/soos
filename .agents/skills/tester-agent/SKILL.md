@@ -61,6 +61,8 @@ Your responsibility is to author comprehensive automated tests that define the c
      When test files import shared fixtures via `#[path = "..."] mod fixtures;`, the shared fixture file MUST declare `#![allow(dead_code, reason = "Shared test fixtures library used conditionally across test modules")]` at file top. Otherwise, helper functions in the fixture used by other test binaries will fail with `-D dead-code`.
    - Short-Circuit Verification for Multi-Stage Pipelines:
      When testing multi-stage verification pipelines (e.g. alignment -> PAD -> embedding extraction), systematically author tests with a spy/mock asserting that downstream compute-heavy stages are NOT invoked when an upstream stage (PAD spoof detection, multiple face detection) fails.
+   - Monotonic Clock Deadline Invariant in Test Requests:
+     When authoring tests that synthesize IPC `Request` structs (e.g. `make_auth_request`), always set `deadline_monotonic_ns` to `u64::MAX` or compute it dynamically relative to `current_monotonic_nanos().saturating_add(delta)`. Never use a small static literal (like `1_000_000_000`), which represents only 1 second of kernel uptime and will immediately trigger a premature `Timeout` / `Unavailable` verdict on any system booted for more than one second.
 
 5. **Deliverable**:
    - Well-structured unit and integration tests located in `crates/<name>/src/` or `crates/<name>/tests/`.

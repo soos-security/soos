@@ -59,6 +59,10 @@ Your responsibility is to write the minimal production code necessary to turn pr
            reason = "..."
        )]
        ```
+   - Composite Containers with Dynamic Trait Objects (`Arc<dyn Trait>`):
+     When creating composite runtime structs that encapsulate dynamic trait objects (e.g. `PipelineComponents`), standard `#[derive(Debug)]` is unavailable because trait objects do not implement `Debug`. Always manually implement `std::fmt::Debug` using placeholder descriptor strings (e.g. `f.debug_struct("...").field("camera", &"<dyn CameraManager>").finish()`). This allows `Result<T, E>::expect_err` to compile in contractual tests and enables structured logging.
+   - Error Coercion in `#[tokio::main]` Async Entry Points:
+     In `main()` returning `Result<(), Box<dyn std::error::Error>>`, avoid explicit `return Err(Box::new(err))` which can cause rustc to infer the closure's return type as `Result<(), Box<ConcreteError>>` rather than `Box<dyn Error>`, breaking subsequent `?` operators and `Ok(())`. Always use `return Err(err.into())` to invoke standard `From<E> for Box<dyn std::error::Error>` trait coercion.
 
 4. **Bounded Synchronous I/O Primitives**:
    - Enforce cumulative deadline subtraction (`deadline.checked_sub(elapsed)`) prior to subsequent socket reads in multi-part framing.
