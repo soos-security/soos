@@ -257,12 +257,13 @@ fn generate_synthetic_frame(
     );
 
     let mut data = vec![0u8; size];
-    let step = (sequence & 0xFF) as u8;
+    let step = u8::try_from(sequence & 0xFF).unwrap_or(0);
 
     // Fill with a synthetic gradient pattern based on sequence number
-    for (idx, byte) in data.iter_mut().enumerate() {
-        let idx_u8 = (idx & 0xFF) as u8;
-        *byte = (idx_u8.wrapping_add(step)).wrapping_mul(31);
+    let mut val = step;
+    for byte in data.iter_mut() {
+        *byte = val.wrapping_mul(31);
+        val = val.wrapping_add(1);
     }
 
     Frame::new(data, width, height, timestamp_mono_ns, format, sequence)
