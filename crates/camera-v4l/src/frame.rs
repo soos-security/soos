@@ -13,6 +13,8 @@ pub enum PixelFormat {
     Grey,
     /// Motion-JPEG compressed stream
     Mjpeg,
+    /// NV12 YUV 4:2:0 bi-planar (1.5 bytes per pixel)
+    Nv12,
 }
 
 impl PixelFormat {
@@ -23,6 +25,7 @@ impl PixelFormat {
             Self::Rgb24 => "RGB3",
             Self::Grey => "GREY",
             Self::Mjpeg => "MJPG",
+            Self::Nv12 => "NV12",
         }
     }
 
@@ -35,6 +38,7 @@ impl PixelFormat {
             Self::Rgb24 => Some(pixels.saturating_mul(3)),
             Self::Grey => Some(pixels),
             Self::Mjpeg => None,
+            Self::Nv12 => Some(pixels.saturating_add(pixels / 2)),
         }
     }
 }

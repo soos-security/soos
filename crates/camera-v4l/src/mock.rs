@@ -65,6 +65,7 @@ impl MockCameraManager {
                     if has_error || is_starved {
                         ready_clone.store(false, Ordering::Relaxed);
                         latest_clone.store(None);
+                        warmup_clone.store(cfg.warmup_frames, Ordering::Relaxed);
                         thread::sleep(Duration::from_millis(20));
                         continue;
                     }

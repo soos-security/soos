@@ -105,6 +105,53 @@ pub fn convert_to_rgb(
 
             Ok(rgb)
         }
+        PixelFormat::Nv12 => {
+            if !width.is_multiple_of(2) || !height.is_multiple_of(2) {
+                return Err(VisionError::InvalidDimensions { width, height });
+            }
+
+            let uv_len = pixel_count
+                .checked_div(2)
+                .ok_or(VisionError::InvalidDimensions { width, height })?;
+            let expected_nv12_len = pixel_count
+                .checked_add(uv_len)
+                .ok_or(VisionError::InvalidDimensions { width, height })?;
+
+            if raw_buffer.len() != expected_nv12_len {
+                return Err(VisionError::InvalidBufferSize {
+                    expected: expected_nv12_len,
+                    actual: raw_buffer.len(),
+                });
+            }
+
+            let y_plane = &raw_buffer[..pixel_count];
+            let uv_plane = &raw_buffer[pixel_count..];
+
+            let mut rgb = Vec::with_capacity(expected_rgb_len);
+            let w = width as usize;
+            let h = height as usize;
+
+            for y in 0..h {
+                let y_row_offset = y * w;
+                let uv_row_offset = (y / 2) * w;
+                for x in 0..w {
+                    let y_val = y_plane[y_row_offset + x] as i32;
+                    let uv_idx = uv_row_offset + (x / 2) * 2;
+                    let u_val = uv_plane[uv_idx] as i32 - 128;
+                    let v_val = uv_plane[uv_idx + 1] as i32 - 128;
+
+                    let r = (y_val + (1436 * v_val + 512) / 1024).clamp(0, 255) as u8;
+                    let g = (y_val - (352 * u_val + 731 * v_val - 512) / 1024).clamp(0, 255) as u8;
+                    let b = (y_val + (1815 * u_val + 512) / 1024).clamp(0, 255) as u8;
+
+                    rgb.push(r);
+                    rgb.push(g);
+                    rgb.push(b);
+                }
+            }
+
+            Ok(rgb)
+        }
         PixelFormat::Mjpeg => {
             let mut decoder = jpeg_decoder::Decoder::new(raw_buffer);
             let decoded_bytes = decoder.decode().map_err(|e| {

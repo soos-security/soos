@@ -1,52 +1,64 @@
 # Candid Review Report
 
-- **Date**: 2026-09-17
-- **Target Branch / Commit**: `fix/async-cancel-safety`
+- **Date**: 2026-09-18
+- **Target Branch**: `feat/camera-format-negotiation`
+- **Base Reference**: `origin/main`
 - **Audited Files**:
-  - `crates/daemon/src/dispatcher.rs`
-  - `crates/daemon/tests/dispatcher_tests.rs`
-  - `crates/pam/src/ipc.rs`
-  - `crates/pam/tests/ipc_tests.rs`
+  - `crates/camera-v4l/src/config.rs`
+  - `crates/camera-v4l/src/error.rs`
+  - `crates/camera-v4l/src/frame.rs`
+  - `crates/camera-v4l/src/lib.rs`
+  - `crates/camera-v4l/src/mock.rs`
+  - `crates/camera-v4l/src/sensor.rs`
+  - `crates/camera-v4l/src/v4l_impl.rs`
+  - `crates/camera-v4l/tests/dual_sensor_tests.rs`
+  - `crates/camera-v4l/tests/format_negotiation_tests.rs`
+  - `crates/camera-v4l/tests/hotunplug_tests.rs`
+  - `crates/vision/src/color.rs`
+  - `crates/vision/tests/color_tests.rs`
   - `scripts/sync_issue.py`
 
----
-
 ## 1. Executive Summary
-
-This pull request hardens Unix domain socket IPC communication against asynchronous cancellation hazards on the daemon side and introduces explicit response completeness validation in the PAM IPC client.
-
-In `crates/daemon`, request reading and pipeline evaluation are completely decoupled from socket transmission. The entire verification pipeline generates a fully encoded in-memory wire buffer without performing any socket write operations. If a connection timeout triggers during request processing, the future is cancelled before any bytes are written to the socket, preventing partial or corrupt responses from reaching the client. Response transmission subsequently executes under a dedicated write timeout.
-
-In `crates/pam`, `IpcError::TruncatedResponse` is introduced alongside counted buffer reading. The client strictly validates that the received byte count matches the framed payload size before attempting postcard deserialization. Any severed connection or truncated frame fails closed to `PAM_IGNORE`.
-
----
+Audit of proposed changes for Backlog Issue #22 (Automatic format negotiation and NV12 support).
+The changes implement the `NV12` pixel format with fixed-point RGB24 conversion, priority-based format negotiation (`RGB24 -> YUYV -> NV12 -> MJPEG -> Grey`), hot-unplug recovery on `ENODEV`, and dual-sensor device classification (RGB vs IR preference).
+All changes conform strictly to architectural invariants, maintain zero unsafe code in business crates, introduce zero unwrap/expect in production pathways, and preserve 100% test contract integrity.
 
 ## 2. Deep Reasoning Audit
 
 ### Logic & Architecture
-- **Pass**: State transitions and framing logic are sound. Response encoding is completed prior to socket writing. The dispatcher cleanly disambiguates Requests from Events, and handles both nominal responses, diagnostic queries, and early rejection errors (e.g. UID mismatch and wire validation failures) through the decoupled write path.
+- [PASS]: State transitions and protocol boundaries are sound.
+- Format negotiation follows strict priority order `[PixelFormat::Rgb24, PixelFormat::Yuyv, PixelFormat::Nv12, PixelFormat::Mjpeg, PixelFormat::Grey]`.
+- Empty supported format list correctly fails closed with `CameraError::NoSupportedFormats`.
+- Sensor classification deterministically prioritizes RGB sensors while allowing configuration override to IR.
+- NV12 conversion properly checks for even dimensions and bounds check for buffer size `(width * height * 3) / 2`.
 
 ### PAM Concurrency & Deadlines
-- **Pass**: `crates/pam` maintains strict zero-Tokio isolation, relying exclusively on synchronous `std::os::unix::net::UnixStream` with cumulative read and write timeout budgeting. Sockets are closed immediately upon verdict extraction. Zero stdout/stderr logging occurs in production PAM code.
+- [PASS]: The changes operate within `camera-v4l` background capture thread and `vision` pure conversion.
+- Zero asynchronous runtime (Tokio) is introduced in PAM pathways.
+- The PAM module consumes lock-free RAM snapshots via `ArcSwapOption<Frame>` with zero contention.
+- Zero standard output or error stream pollution (`println!`, `eprintln!`, `dbg!`).
 
 ### Panic Safety & Fallback
-- **Pass**: No `unwrap()`, `expect()`, or panicking macros are introduced in production code. All error pathways in `crates/pam` degrade to `PAM_IGNORE`. Any truncation in the length header or body payload returns `IpcError::TruncatedResponse`, which is safely mapped to `PAM_IGNORE` by the C FFI boundary.
+- [PASS]: Zero `unwrap()`, `expect()`, or `panic!()` in production code.
+- Hot-unplug `ENODEV` error from `stream.next()` is trapped and mapped to `CameraError::DeviceNotFound`, resetting `is_ready` to `false` and clearing `latest_frame`.
+- Background supervisor initiates bounded exponential backoff and transparently reinitializes when the device reappears.
 
 ### Test Integrity & Anti-Weakening
-- **Pass**: Pre-existing tests remain untouched and functional. New contractual tests were added (`test_timeout_during_write_does_not_corrupt_response` in `dispatcher_tests.rs` and `test_pam_ipc_detects_truncated_response` in `ipc_tests.rs`) asserting the acceptance criteria for both sub-issues #21.1 and #21.2.
+- [PASS]: Pre-existing test contracts are completely preserved with zero test weakening.
+- Comprehensive new test contracts covering all 4 sub-issues:
+  - `format_negotiation_tests.rs` (5 tests)
+  - `hotunplug_tests.rs` (1 test)
+  - `dual_sensor_tests.rs` (4 tests)
+  - `color_tests.rs` (NV12 conversion, known reference, invalid buffer size, odd dimensions)
+- All tests pass cleanly across the workspace.
 
 ### Memory & Secret Bounds
-- **Pass**: Socket buffers adhere to `MAX_MESSAGE_SIZE` (4,096 bytes). Memory allocations are strictly bounded. Zero raw biometric embeddings, passwords, or frames are written to the socket or logged.
-
----
+- [PASS]: Memory allocations are bounded by uncompressed frame dimensions.
+- Sensitive frame buffers implement `Zeroize`.
+- Zero credentials, embeddings, or raw frame dumps in log messages.
 
 ## 3. Detailed Findings & Action Items
-
-- **Observation** `crates/daemon/src/dispatcher.rs:107`: By writing the fully serialized response in `write_response` with a dedicated timeout, partial frames from aborted pipeline evaluations are eliminated by design.
-- **Observation** `crates/pam/src/ipc.rs:103`: `read_exact_counted` records exact byte counts, allowing fine-grained diagnostics in `IpcError::TruncatedResponse` without compromising fail-closed behavior.
-
----
+- Zero blocking issues or invariant violations found.
 
 ## 4. Final Verdict
-
 **VERDICT: APPROVED**

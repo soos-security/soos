@@ -1,6 +1,7 @@
 //! Camera manager configuration and builder.
 
 use crate::frame::PixelFormat;
+use crate::sensor::SensorPreference;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -15,6 +16,10 @@ pub struct CameraConfig {
     pub height: u32,
     /// Requested pixel format.
     pub format: PixelFormat,
+    /// Enable automatic priority-based format negotiation (RGB24 -> YUYV -> NV12 -> MJPEG -> Grey).
+    pub auto_format: bool,
+    /// Sensor selection preference on multi-camera hardware (RGB vs IR).
+    pub sensor_preference: SensorPreference,
     /// Active capture rate in frames per second.
     pub fps: u32,
     /// Throttled idle rate in frames per second during prolonged inactivity.
@@ -36,6 +41,8 @@ impl Default for CameraConfig {
             width: 640,
             height: 480,
             format: PixelFormat::Yuyv,
+            auto_format: false,
+            sensor_preference: SensorPreference::PreferRgb,
             fps: 30,
             idle_fps: 5,
             idle_timeout: Duration::from_secs(60),
@@ -74,6 +81,18 @@ impl CameraConfigBuilder {
     /// Sets the preferred pixel format.
     pub fn format(mut self, format: PixelFormat) -> Self {
         self.config.format = format;
+        self
+    }
+
+    /// Enables or disables automatic format negotiation.
+    pub fn auto_format(mut self, auto: bool) -> Self {
+        self.config.auto_format = auto;
+        self
+    }
+
+    /// Sets the sensor selection preference (RGB vs IR).
+    pub fn sensor_preference(mut self, preference: SensorPreference) -> Self {
+        self.config.sensor_preference = preference;
         self
     }
 

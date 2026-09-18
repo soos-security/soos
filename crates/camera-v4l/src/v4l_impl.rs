@@ -150,6 +150,65 @@ fn run_v4l_supervisor(
     latest_frame.store(None);
 }
 
+/// Priority order for automatic format negotiation:
+/// RGB24 (highest priority, uncompressed) -> YUYV -> NV12 -> MJPEG -> Grey.
+pub const FORMAT_PRIORITY: [PixelFormat; 5] = [
+    PixelFormat::Rgb24,
+    PixelFormat::Yuyv,
+    PixelFormat::Nv12,
+    PixelFormat::Mjpeg,
+    PixelFormat::Grey,
+];
+
+/// Negotiates the optimal capture pixel format given supported formats and optional preferred format.
+pub fn negotiate_format(
+    supported: &[PixelFormat],
+    preferred: Option<PixelFormat>,
+) -> Result<PixelFormat, CameraError> {
+    if supported.is_empty() {
+        return Err(CameraError::NoSupportedFormats);
+    }
+
+    if let Some(pref) = preferred {
+        if supported.contains(&pref) {
+            return Ok(pref);
+        }
+    }
+
+    for &prio in &FORMAT_PRIORITY {
+        if supported.contains(&prio) {
+            return Ok(prio);
+        }
+    }
+
+    Err(CameraError::NoCompatibleFormat {
+        supported: supported.to_vec(),
+    })
+}
+
+/// Maps a V4L2 FourCC to a known `PixelFormat`.
+pub fn fourcc_to_pixel_format(fourcc: FourCC) -> Option<PixelFormat> {
+    match &fourcc.repr {
+        b"RGB3" | b"RGB4" | b"BGR3" => Some(PixelFormat::Rgb24),
+        b"YUYV" => Some(PixelFormat::Yuyv),
+        b"NV12" => Some(PixelFormat::Nv12),
+        b"MJPG" => Some(PixelFormat::Mjpeg),
+        b"GREY" | b"Y800" | b"Y8  " => Some(PixelFormat::Grey),
+        _ => None,
+    }
+}
+
+/// Maps a `PixelFormat` to its canonical V4L2 FourCC representation.
+pub fn pixel_format_to_fourcc(format: PixelFormat) -> FourCC {
+    match format {
+        PixelFormat::Yuyv => FourCC::new(b"YUYV"),
+        PixelFormat::Rgb24 => FourCC::new(b"RGB3"),
+        PixelFormat::Grey => FourCC::new(b"GREY"),
+        PixelFormat::Mjpeg => FourCC::new(b"MJPG"),
+        PixelFormat::Nv12 => FourCC::new(b"NV12"),
+    }
+}
+
 /// Opens device, allocates MMAP queue, discards warmup frames, and streams frames into RAM snapshot.
 fn open_and_stream(
     config: &CameraConfig,
@@ -174,19 +233,32 @@ fn open_and_stream(
         });
     }
 
-    let fourcc = match config.format {
-        PixelFormat::Yuyv => FourCC::new(b"YUYV"),
-        PixelFormat::Rgb24 => FourCC::new(b"RGB3"),
-        PixelFormat::Grey => FourCC::new(b"GREY"),
-        PixelFormat::Mjpeg => FourCC::new(b"MJPG"),
+    // Query hardware-supported formats via VIDIOC_ENUM_FMT
+    let enum_fmts = Capture::enum_formats(&device).unwrap_or_default();
+    let supported: Vec<PixelFormat> = enum_fmts
+        .into_iter()
+        .filter_map(|desc| fourcc_to_pixel_format(desc.fourcc))
+        .collect();
+
+    let target_format = if supported.is_empty() {
+        config.format
+    } else {
+        let preferred = if config.auto_format {
+            None
+        } else {
+            Some(config.format)
+        };
+        negotiate_format(&supported, preferred)?
     };
+
+    let fourcc = pixel_format_to_fourcc(target_format);
 
     let req_format = v4l::Format::new(config.width, config.height, fourcc);
     Capture::set_format(&device, &req_format).map_err(|e| CameraError::SetFormat {
         path: config.device_path.clone(),
         width: config.width,
         height: config.height,
-        format: config.format,
+        format: target_format,
         reason: e.to_string(),
     })?;
 
@@ -203,7 +275,7 @@ fn open_and_stream(
         config.device_path.display(),
         config.width,
         config.height,
-        config.format
+        target_format
     );
 
     let _start_time = Instant::now();
@@ -211,9 +283,18 @@ fn open_and_stream(
     let mut sequence: u64 = 0;
 
     while running.load(Ordering::Relaxed) {
-        let (buf, _meta) = stream.next().map_err(|e| CameraError::BufferDequeue {
-            path: config.device_path.clone(),
-            reason: e.to_string(),
+        let (buf, _meta) = stream.next().map_err(|e| {
+            if let Some(libc::ENODEV) = e.raw_os_error() {
+                CameraError::DeviceNotFound {
+                    path: config.device_path.clone(),
+                    source: e,
+                }
+            } else {
+                CameraError::BufferDequeue {
+                    path: config.device_path.clone(),
+                    reason: e.to_string(),
+                }
+            }
         })?;
 
         // Discard initial frames for auto-exposure convergence
@@ -232,7 +313,7 @@ fn open_and_stream(
             config.width,
             config.height,
             mono_ns,
-            config.format,
+            target_format,
             sequence,
         );
 

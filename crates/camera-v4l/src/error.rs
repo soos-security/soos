@@ -101,6 +101,17 @@ pub enum CameraError {
         /// Error message.
         message: String,
     },
+
+    /// Device reports no supported capture formats.
+    #[error("Camera device reports zero supported video capture formats")]
+    NoSupportedFormats,
+
+    /// No supported capture format matched supported formats.
+    #[error("No compatible video capture format supported (available: {supported:?})")]
+    NoCompatibleFormat {
+        /// Formats reported by camera hardware.
+        supported: Vec<crate::frame::PixelFormat>,
+    },
 }
 
 impl CameraError {

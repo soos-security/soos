@@ -91,6 +91,9 @@ This document translates the critical gating criteria from §11 of `ARCHITECTURE
 | C3 | Handles `ENODEV`, `EIO`, `EBUSY` without panic | Error simulation tests (`error_recovery_tests::test_error_recovery_enodev_without_panic`) | ☑ Validated |
 | C4 | Hardware selection by `/dev/v4l/by-id/` rather than index | Configuration test (`config_hardware_tests::test_config_by_id_path_selection`) | ☑ Validated |
 | C5 | Drops first 15–30 frames after startup for auto-exposure | Functional test (`warmup_tests::test_warmup_frames_discard_before_ready`) | ☑ Validated |
+| C6 | Priority format negotiation (`RGB24 -> YUYV -> NV12 -> MJPEG -> Grey`) and fallback | Unit tests (`format_negotiation_tests::test_format_negotiation_prefers_rgb24`, `format_negotiation_tests::test_format_fallback_on_unsupported`, `format_negotiation_tests::test_format_negotiation_all_priority_order`) | ✅ Verified |
+| C7 | Graceful hot-unplug recovery on `ENODEV` with automatic reconnection | Integration test (`hotunplug_tests::test_camera_hotunplug_recovery`) | ✅ Verified |
+| C8 | Multi-sensor device classification distinguishing RGB vs IR sensors | Unit tests (`dual_sensor_tests::test_dual_sensor_prefers_rgb`, `dual_sensor_tests::test_dual_sensor_override_prefers_ir`, `dual_sensor_tests::test_sensor_classification_by_card_name`, `dual_sensor_tests::test_sensor_classification_by_formats`) | ✅ Verified |
 
 ---
 
@@ -104,6 +107,7 @@ This document translates the critical gating criteria from §11 of `ARCHITECTURE
 | V4 | Rejects if 0 or > 1 face detected | Unit tests (`pipeline_tests::test_pipeline_rejects_zero_faces`, `pipeline_tests::test_pipeline_rejects_two_faces`, `pipeline_tests::test_pipeline_rejects_three_faces`) | ☑ Validated |
 | V5 | Full pipeline < 150ms p95 on reference hardware | Benchmark (`bench_tests::test_pipeline_latency_budget_under_150ms_p95` — achieved 28.02ms p95) | ☑ Validated |
 | V6 | `#![forbid(unsafe_code)]` enabled | Invariant test (`soos-invariants::test_business_crates_forbid_unsafe_code`) | ☑ Validated |
+| V7 | NV12 YUV 4:2:0 bi-planar decoding to RGB24 with dimension and size validation | Unit tests (`color_tests::test_nv12_to_rgb_conversion`, `color_tests::test_nv12_known_reference_image`, `color_tests::test_nv12_invalid_size_fails_closed`, `color_tests::test_nv12_odd_dimensions_rejected`) | ✅ Verified |
 
 ---
 

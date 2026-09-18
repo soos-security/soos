@@ -825,25 +825,25 @@ The enrollment CLI uses incorrect model registry IDs (`face_detector` instead of
 
 #### Sub-issues
 
-- [ ] **#22.1** — Add `NV12` variant to `PixelFormat` enum
+- [x] **#22.1** — Add `NV12` variant to `PixelFormat` enum
   - Implement NV12 → RGB24 conversion in `color.rs`
   - Acceptance: NV12 camera frames are correctly converted
   - TDD: `test_nv12_to_rgb_conversion`, `test_nv12_known_reference_image`
 
-- [ ] **#22.2** — Implement automatic format negotiation in `open_and_stream()`
+- [x] **#22.2** — Implement automatic format negotiation in `open_and_stream()`
   - Query `VIDIOC_ENUM_FMT` to discover supported formats
   - Prefer: RGB24 → YUYV → NV12 → MJPEG → Grey (in priority order)
   - Fall back gracefully if configured format is unsupported
   - Acceptance: Camera works with any supported format
   - TDD: `test_format_negotiation_prefers_rgb24`, `test_format_fallback_on_unsupported`
 
-- [ ] **#22.3** — Implement graceful camera hot-unplug handling
+- [x] **#22.3** — Implement graceful camera hot-unplug handling
   - When `stream.next()` returns `ENODEV`, signal `is_ready = false`, enter backoff
   - When device reappears, reinitialize stream transparently
   - Acceptance: Camera disconnection doesn't crash daemon
   - TDD: `test_camera_hotunplug_recovery`
 
-- [ ] **#22.4** — Add IR camera filtering for dual-sensor devices
+- [x] **#22.4** — Add IR camera filtering for dual-sensor devices
   - Query device capabilities to distinguish RGB vs IR sensors
   - Prefer RGB sensor; allow configuration override
   - Acceptance: Correct sensor selected on dual-camera laptops
