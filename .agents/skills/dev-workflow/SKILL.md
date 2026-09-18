@@ -112,6 +112,7 @@ Before starting Phase 1, the orchestrator verifies full ingestion of:
   - Avoid GraphQL classic project deprecation in `gh issue view` by querying specific fields: `gh issue view <id> --json title,body,number,state`.
   - Release steps (`./save.sh --push-pr`, `./scripts/pr_loop.sh`) require `BypassSandbox: true` to communicate with GitHub.
 - **Dual Sync Branch Registration**: Verify that the topic branch is registered in `BRANCH_TO_ISSUE` in `scripts/sync_issue.py`. If absent, register it immediately (`"<type>/<name>": <backlog_id>`) so automated issue synchronization (`scripts/sync_issue.py --auto`) functions without manual intervention throughout the lifecycle.
+  - **Execution Timing Guard**: Do NOT execute `python3 scripts/sync_issue.py --auto` during Phase 0, as `--auto` marks all sub-issues of the branch as completed. Branch registration in `scripts/sync_issue.py` is purely declarative in Phase 0; actual synchronization must only run during Phase 6 (Traceability).
 
 ### Phase 1: Architect Sub-Agent ([architect-agent](file:///home/hadrien/soos/.agents/skills/architect-agent/SKILL.md))
 - Scaffolds crate in `crates/<name>/` and registers in root `Cargo.toml`.
