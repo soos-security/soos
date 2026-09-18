@@ -129,3 +129,90 @@ fn test_mjpeg_corrupt_data_fails_closed() {
     let result = convert_to_rgb(&corrupt_jpeg, width, height, PixelFormat::Mjpeg);
     assert!(result.is_err(), "Corrupt MJPEG stream must fail closed");
 }
+
+#[test]
+fn test_nv12_to_rgb_conversion() {
+    // 4x4 image in NV12 format
+    // Y plane: 16 bytes
+    // UV plane: 8 bytes (4 pairs of U, V for four 2x2 blocks)
+    // Total size: 24 bytes
+    let width = 4;
+    let height = 4;
+    let mut nv12 = vec![128u8; 16]; // Y plane = 128 (neutral grey)
+    nv12.extend_from_slice(&[128u8; 8]); // UV plane = 128 (neutral chroma)
+
+    let result = convert_to_rgb(&nv12, width, height, PixelFormat::Nv12);
+    assert!(
+        result.is_ok(),
+        "NV12 conversion should succeed for valid 4x4 buffer"
+    );
+    let rgb = result.expect("Valid RGB24");
+    assert_eq!(rgb.len(), (width * height * 3) as usize);
+
+    // All pixels should be neutral grey ~128
+    for (i, &val) in rgb.iter().enumerate() {
+        let diff = (val as i32 - 128).abs();
+        assert!(diff <= 2, "Pixel byte {} expected ~128, got {}", i, val);
+    }
+}
+
+#[test]
+fn test_nv12_known_reference_image() {
+    // 2x2 image:
+    // Y: 4 pixels: [Y00=255, Y01=0, Y10=128, Y11=200]
+    // UV: 1 pair: U=128, V=128 (neutral chroma -> R=Y, G=Y, B=Y)
+    let width = 2;
+    let height = 2;
+    let nv12 = vec![
+        255, 0, 128, 200, 128, 128, // UV
+    ];
+
+    let result = convert_to_rgb(&nv12, width, height, PixelFormat::Nv12);
+    assert!(
+        result.is_ok(),
+        "NV12 known reference conversion should succeed"
+    );
+    let rgb = result.expect("Valid RGB24");
+    assert_eq!(rgb.len(), 12);
+
+    // Pixel (0, 0): Y=255 -> RGB (255, 255, 255)
+    assert_eq!(&rgb[0..3], &[255, 255, 255]);
+    // Pixel (1, 0): Y=0 -> RGB (0, 0, 0)
+    assert_eq!(&rgb[3..6], &[0, 0, 0]);
+    // Pixel (0, 1): Y=128 -> RGB (~128, ~128, ~128)
+    assert_eq!(&rgb[6..9], &[128, 128, 128]);
+    // Pixel (1, 1): Y=200 -> RGB (~200, ~200, ~200)
+    assert_eq!(&rgb[9..12], &[200, 200, 200]);
+}
+
+#[test]
+fn test_nv12_invalid_size_fails_closed() {
+    let width = 4;
+    let height = 4;
+    // Expected 24 bytes, pass 20 bytes
+    let nv12_short = vec![128u8; 20];
+    let result = convert_to_rgb(&nv12_short, width, height, PixelFormat::Nv12);
+    assert!(matches!(result, Err(VisionError::InvalidBufferSize { .. })));
+
+    // Oversized buffer: 30 bytes
+    let nv12_long = vec![128u8; 30];
+    let result2 = convert_to_rgb(&nv12_long, width, height, PixelFormat::Nv12);
+    assert!(matches!(
+        result2,
+        Err(VisionError::InvalidBufferSize { .. })
+    ));
+}
+
+#[test]
+fn test_nv12_odd_dimensions_rejected() {
+    let data = vec![128u8; 100];
+    // Odd width or height must fail closed because NV12 requires 2x2 chroma subsampling
+    assert!(matches!(
+        convert_to_rgb(&data, 3, 4, PixelFormat::Nv12),
+        Err(VisionError::InvalidDimensions { .. })
+    ));
+    assert!(matches!(
+        convert_to_rgb(&data, 4, 3, PixelFormat::Nv12),
+        Err(VisionError::InvalidDimensions { .. })
+    ));
+}

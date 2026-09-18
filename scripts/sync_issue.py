@@ -86,6 +86,7 @@ BRANCH_TO_ISSUE = {
     "fix/enrollment-cli-model-ids": 19,
     "fix/socket-toctou": 20,
     "fix/async-cancel-safety": 21,
+    "feat/camera-format-negotiation": 22,
 }
 
 

@@ -1,58 +1,64 @@
-# Plan Evaluation Report — Issue #21: Async Cancellation Safety on Socket Writes
+# Plan Evaluation Report: Issue #22 — feat(camera-v4l): Automatic format negotiation and NV12 support
 
-- **Target Issue**: Issue #21 (GitHub #60) — `fix(daemon): Async cancellation safety on socket writes`
-- **Target Branch**: `fix/async-cancel-safety`
-- **Evaluator**: Independent Plan Evaluator Sub-Agent
-- **Date**: 2026-09-17
-
----
-
-## 1. Executive Summary
-
-The proposed implementation addresses async cancellation hazards during Unix domain socket writes in `soos-daemon` and adds response completeness verification in `pam_soos.so`.
-
-By decoupling the request handling timeout from socket write transmission, `soos-daemon` guarantees that async timeout cancellations occur strictly *before* any byte has been written to the client stream. The pre-encoded in-memory response buffer is subsequently written using `write_all` and `flush` under a dedicated write timeout. On the client side, `pam_soos.so` introduces `IpcError::TruncatedResponse` and verifies that total received bytes match the declared wire frame size before invoking postcard deserialization, ensuring fail-closed fallback to `PAM_IGNORE`.
+- **Evaluator**: Independent Plan Evaluator Sub-Agent (dev-workflow / plan-evaluator)
+- **Target Issue**: Backlog Issue #22 (GitHub Issue #61)
+- **Target Branch**: `feat/camera-format-negotiation`
+- **Date**: 2026-09-18
+- **Evaluated Scope**:
+  - `crates/camera-v4l`: `frame.rs`, `error.rs`, `config.rs`, `sensor.rs`, `v4l_impl.rs`, `mock.rs`, `lib.rs`
+  - `crates/vision`: `color.rs`
+  - `tests`: `format_negotiation_tests.rs`, `hotunplug_tests.rs`, `dual_sensor_tests.rs`, `color_tests.rs`
 
 ---
 
-## 2. Six Architectural Pillars Audit
+## Evaluation Across 6 Core Architectural Pillars
 
 ### Pillar 1: Architectural Alignment & Threat Model
-- **Evaluation**: PASS
-- **Details**: The architecture maintains the strict separation of privilege between the unprivileged PAM module (`pam_soos.so`) and the privileged root daemon (`soos-daemon`). Communication occurs strictly over the private Unix domain stream socket (`/run/soos/daemon.sock`). Kernel `SO_PEERCRED` validation remains mandatory on all connection requests prior to processing.
+- **Evaluation**: The proposed design aligns with §6 ("Warm Camera Streaming & Low Latency") of `AI/ARCHITECTURE.md`.
+- Exclusive hardware ownership remains confined to `soos-daemon` and `camera-v4l`.
+- Format negotiation operates entirely within the isolated camera streaming thread; no IPC protocol changes are required, preserving binary message bounds and serialization integrity.
+- Sensor classification ensures deterministic device selection on multi-camera hardware (such as laptops with RGB + IR modules).
+- **Verdict**: PASS
 
 ### Pillar 2: PAM Real-Time Latency & Concurrency
-- **Evaluation**: PASS
-- **Details**: Zero asynchronous runtimes or Tokio tasks are introduced into `crates/pam`. `pam_soos.so` strictly uses synchronous `std::os::unix::net::UnixStream` with cumulative read and write timeouts bounded by `config.timeout_ms` (200–250ms). Zero stream pollution (`println!`, `eprintln!`, `dbg!`) is introduced in PAM production code.
+- **Evaluation**: The changes do not touch the synchronous PAM module (`pam_soos.so`).
+- The camera streaming thread operates independently in background MMAP capture mode, serving lock-free frame snapshots to PAM requests via `ArcSwapOption<Frame>` in < 5ms (Criterion C2).
+- Zero asynchronous runtime (Tokio) is introduced in client pathways; standard thread supervisor and atomics are preserved.
+- **Verdict**: PASS
 
 ### Pillar 3: Panic Safety & Fail-Closed Behavior
-- **Evaluation**: PASS
-- **Details**: All PAM FFI entry points remain guarded by `catch_unwind`, systematically returning `PAM_IGNORE` upon any error or unexpected condition. Production code in both `crates/daemon` and `crates/pam` strictly avoids `unwrap()` and `expect()`. Truncated responses are mapped to `IpcError::TruncatedResponse`, which cleanly degrades to `PAM_IGNORE`.
+- **Evaluation**: All error conditions in format negotiation (`NoCompatibleFormat`, `NoSupportedFormats`), device capabilities querying, and frame buffer dequeuing return explicit `CameraError` or `VisionError` variants.
+- Hot-unplug `ENODEV` detection gracefully flags `is_ready = false` and clears `latest_frame`, failing closed and preventing any unhandled panic or stale frame serving.
+- Zero `unwrap()` or `expect()` introduced in production code.
+- **Verdict**: PASS
 
 ### Pillar 4: Dependency Isolation & Banned Crates
-- **Evaluation**: PASS
-- **Details**: No banned crates (`opencv`, `nokhwa`) or new external dependencies are introduced. `#![forbid(unsafe_code)]` remains intact where declared. Standard `tokio::io::AsyncWriteExt` is used within `crates/daemon` (which already runs Tokio), and synchronous `std::io::Read` within `crates/pam`.
+- **Evaluation**: Zero unapproved or banned dependencies.
+- Neither `opencv` nor `nokhwa` is used.
+- Uses standard workspace dependencies: `v4l 0.14`, `arc-swap`, `zeroize`, `thiserror`, `tracing`, `libc`.
+- `#![forbid(unsafe_code)]` remains strictly enforced in `crates/vision` and is preserved.
+- **Verdict**: PASS
 
 ### Pillar 5: Data Confidentiality & Zeroization
-- **Evaluation**: PASS
-- **Details**: No passwords, raw embeddings, or unredacted biometric vectors travel across the IPC socket or appear in log lines. The wire schema continues to use zeroized `Response` types.
+- **Evaluation**: Frame buffers in `Frame` implement `Zeroize` and are bounded by explicit uncompressed dimensions.
+- NV12 buffer allocation is bounded and verified against expected dimension formulas (`(width * height * 3) / 2`).
+- No raw frames or biometric embeddings are logged in tracing or exposed in errors.
+- **Verdict**: PASS
 
 ### Pillar 6: Test Integrity & TDD Contracts
-- **Evaluation**: PASS
-- **Details**: Acceptance tests are specified directly from `AI/BACKLOG.md` sub-issues #21.1 and #21.2:
-  - `test_timeout_during_write_does_not_corrupt_response` in `crates/daemon/tests/dispatcher_tests.rs`
-  - `test_pam_ipc_detects_truncated_response` in `crates/pam/tests/ipc_tests.rs`
-  No existing test assertions will be weakened or bypassed.
+- **Evaluation**: Pre-existing test contracts are completely preserved with zero test weakening.
+- Comprehensive test contracts are designed for all 4 sub-issues:
+  - Sub-issue #22.1: `test_nv12_to_rgb_conversion`, `test_nv12_known_reference_image`, `test_nv12_invalid_size_fails_closed`, `test_nv12_odd_dimensions_rejected`
+  - Sub-issue #22.2: `test_format_negotiation_prefers_rgb24`, `test_format_fallback_on_unsupported`, `test_format_negotiation_all_priority_order`, `test_format_negotiation_empty_fails`
+  - Sub-issue #22.3: `test_camera_hotunplug_recovery`
+  - Sub-issue #22.4: `test_dual_sensor_prefers_rgb`, `test_dual_sensor_override_prefers_ir`, `test_sensor_classification_by_card_name`, `test_sensor_classification_by_formats`
+- All tests will be authored in Phase 2 (Tester Agent) BEFORE production code and verified to fail (TDD Red).
+- **Verdict**: PASS
 
 ---
 
-## 3. Findings & Recommendations
+## Conclusion & Formal Validation Verdict
 
-- **Write Timeout Tuning**: Ensure write operations in `soos-daemon` use a separate write timeout (defaulting to e.g. `Duration::from_millis(100)` or matching connection timeout) so that an uncooperative or frozen client cannot exhaust worker permits indefinitely during the transmission phase.
-- **Counted Stream Reader**: In `pam_soos::ipc`, count the exact received bytes across chunked reads to provide accurate `expected` and `received` diagnostics in `IpcError::TruncatedResponse`.
+All criteria have been rigorously evaluated and conform to `AI/ARCHITECTURE.md`, `AI/DECISIONS.md`, and `Docs/SECURITY_AND_QUALITY_GUIDELINES.md`.
 
----
-
-## 4. Final Verdict
-
-VALIDATION_VERDICT: APPROVED
+**VALIDATION_VERDICT: APPROVED**
