@@ -81,12 +81,7 @@ impl MockCameraManager {
                         ready_clone.store(false, Ordering::Release);
                         latest_clone.store(None);
                         warmup_clone.store(cfg.warmup_frames, Ordering::Release);
-                        let sleep_start = Instant::now();
-                        while running_clone.load(Ordering::Acquire)
-                            && sleep_start.elapsed() < Duration::from_millis(20)
-                        {
-                            thread::sleep(Duration::from_millis(5));
-                        }
+                        thread::sleep(Duration::from_millis(20));
                         continue;
                     }
 
@@ -96,13 +91,7 @@ impl MockCameraManager {
                         ready_clone.store(false, Ordering::Release);
                         warmup_clone.fetch_sub(1, Ordering::AcqRel);
                         sequence_clone.fetch_add(1, Ordering::SeqCst);
-                        let sleep_start = Instant::now();
-                        while running_clone.load(Ordering::Acquire)
-                            && sleep_start.elapsed() < full_frame_interval
-                        {
-                            let rem = full_frame_interval.saturating_sub(sleep_start.elapsed());
-                            thread::sleep(Duration::from_millis(10).min(rem));
-                        }
+                        thread::sleep(full_frame_interval);
                         continue;
                     }
 
@@ -268,11 +257,11 @@ fn generate_synthetic_frame(
     );
 
     let mut data = vec![0u8; size];
-    let step = u8::try_from(sequence % 256).unwrap_or(0);
+    let step = (sequence & 0xFF) as u8;
 
     // Fill with a synthetic gradient pattern based on sequence number
     for (idx, byte) in data.iter_mut().enumerate() {
-        let idx_u8 = u8::try_from(idx % 256).unwrap_or(0);
+        let idx_u8 = (idx & 0xFF) as u8;
         *byte = (idx_u8.wrapping_add(step)).wrapping_mul(31);
     }
 
