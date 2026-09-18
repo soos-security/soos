@@ -194,3 +194,14 @@ This document translates the critical gating criteria from §11 of `ARCHITECTURE
 | ACS1 | Async cancellation safety on daemon socket writes: response buffer is fully serialized before transmission; request processing timeout cannot cancel mid-write or corrupt response stream | Integration test (`dispatcher_tests::test_timeout_during_write_does_not_corrupt_response`) | ✅ Verified |
 | ACS2 | Response completeness validation in PAM IPC client: client tracks exact received byte counts, detects truncated length prefix or body payload, and returns `IpcError::TruncatedResponse` with fail-closed fallback to `PAM_IGNORE` | Integration test (`ipc_tests::test_pam_ipc_detects_truncated_response`) | ✅ Verified |
 
+---
+
+## Component: `vision-zeroize-frames` (Issue #24 / GitHub #63)
+
+| # | Criterion | Test Method | Status |
+|---|---|---|---|
+| VZF1 | Memory zeroization of RGB intermediate frame buffers: `VisionPipeline::process_frame` wraps RGB conversion from `convert_to_rgb` in `Zeroizing<Vec<u8>>` and guards intermediate aligned crops via `AlignedCropGuard`, guaranteeing heap face pixel wiping upon pipeline completion and early error exits | Unit tests (`zeroize_tests::test_rgb_buffer_zeroized_after_pipeline`, `test_pipeline_zeroizes_intermediate_buffers_on_error`) | ✅ Verified |
+| VZF2 | `Zeroize` and `Drop` implementation on `VerificationOutcome`: `VerificationOutcome` implements `zeroize::Zeroize` and `Drop`, delegating to `self.output.zeroize()`, ensuring both primary and cloned outcomes deterministically clear the underlying embedding and crop | Unit test (`zeroize_tests::test_verification_outcome_zeroize_on_drop`) | ✅ Verified |
+| VZF3 | Memory zeroization of neural inference input tensors: `OrtFaceDetector`, `OrtEmbeddingExtractor`, `OrtLandmarkDetector`, and `OrtPadDetector` prepare inputs in `Zeroizing<Vec<f32>>` buffers, pass zero-copy slice views (`TensorRef`) to ONNX Runtime, and deterministically zeroize all normalized face pixels post-inference and on drop | Unit test (`zeroize_tests::test_inference_input_buffers_zeroized`) | ✅ Verified |
+
+

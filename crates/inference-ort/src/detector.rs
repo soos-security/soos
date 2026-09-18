@@ -10,6 +10,7 @@
 
 use crate::error::InferenceError;
 use std::cmp::Ordering;
+use zeroize::{Zeroize, Zeroizing};
 
 /// Axis-aligned 2D bounding box in pixel coordinates.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -209,15 +210,13 @@ impl OrtFaceDetector {
 
         priors
     }
-}
 
-impl FaceDetector for OrtFaceDetector {
-    fn detect(
-        &self,
+    /// Prepares, resizes, and normalizes an RGB frame to 320x240 NCHW format inside a zeroized container.
+    pub fn prepare_input(
         rgb: &[u8],
         width: u32,
         height: u32,
-    ) -> Result<Vec<FaceDetection>, InferenceError> {
+    ) -> Result<Zeroizing<Vec<f32>>, InferenceError> {
         let expected_len = (width as usize)
             .checked_mul(height as usize)
             .and_then(|px| px.checked_mul(3))
@@ -233,7 +232,7 @@ impl FaceDetector for OrtFaceDetector {
         // Resize and normalize RGB buffer to 320x240 NCHW [1, 3, 240, 320]
         let target_w = 320usize;
         let target_h = 240usize;
-        let mut input_data = vec![0.0f32; 3 * target_h * target_w];
+        let mut input_data = Zeroizing::new(vec![0.0f32; 3 * target_h * target_w]);
 
         let scale_x = width as f32 / target_w as f32;
         let scale_y = height as f32 / target_h as f32;
@@ -268,11 +267,22 @@ impl FaceDetector for OrtFaceDetector {
             }
         }
 
-        let input_tensor = ndarray::Array4::from_shape_vec((1, 3, target_h, target_w), input_data)
-            .map_err(|e| InferenceError::TensorError(e.to_string()))?;
+        Ok(input_data)
+    }
+}
 
-        let tensor = ort::value::Tensor::from_array(input_tensor)
-            .map_err(|e| InferenceError::Ort(e.to_string()))?;
+impl FaceDetector for OrtFaceDetector {
+    fn detect(
+        &self,
+        rgb: &[u8],
+        width: u32,
+        height: u32,
+    ) -> Result<Vec<FaceDetection>, InferenceError> {
+        let mut input_data = Self::prepare_input(rgb, width, height)?;
+
+        let tensor =
+            ort::value::TensorRef::from_array_view(([1usize, 3, 240, 320], input_data.as_slice()))
+                .map_err(|e| InferenceError::Ort(e.to_string()))?;
 
         let mut session = self
             .session
@@ -282,6 +292,9 @@ impl FaceDetector for OrtFaceDetector {
         let outputs = session
             .run(ort::inputs![tensor])
             .map_err(|e| InferenceError::Ort(e.to_string()))?;
+
+        // Zeroize input buffer immediately post-inference
+        input_data.zeroize();
 
         let mut out_iter = outputs.into_iter();
         let (_, conf_tensor) = out_iter.next().ok_or_else(|| {

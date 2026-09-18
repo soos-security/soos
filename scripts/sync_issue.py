@@ -88,6 +88,7 @@ BRANCH_TO_ISSUE = {
     "fix/async-cancel-safety": 21,
     "feat/camera-format-negotiation": 22,
     "fix/camera-thread-shutdown": 23,
+    "fix/vision-zeroize-frames": 24,
 }
 
 

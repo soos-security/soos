@@ -884,17 +884,17 @@ The enrollment CLI uses incorrect model registry IDs (`face_detector` instead of
 
 #### Sub-issues
 
-- [ ] **#24.1** — Zeroize RGB buffer from `convert_to_rgb()` after pipeline completion
+- [x] **#24.1** — Zeroize RGB buffer from `convert_to_rgb()` after pipeline completion
   - Wrap in `Zeroizing<Vec<u8>>` or explicitly zeroize before drop
   - Acceptance: No raw face image data remains in freed heap
   - TDD: `test_rgb_buffer_zeroized_after_pipeline`
 
-- [ ] **#24.2** — Implement `Zeroize` for `VerificationOutcome`
+- [x] **#24.2** — Implement `Zeroize` for `VerificationOutcome`
   - Delegate to inner `PipelineOutput::zeroize()`
   - Acceptance: Cloned outcomes are zeroized on drop
   - TDD: `test_verification_outcome_zeroize_on_drop`
 
-- [ ] **#24.3** — Zeroize ONNX input tensor buffers after inference
+- [x] **#24.3** — Zeroize ONNX input tensor buffers after inference
   - `input_data` in `OrtFaceDetector::detect()` and `OrtEmbeddingExtractor::extract_embedding()` contain normalized face pixels
   - Zeroize after `session.run()` returns
   - Acceptance: No face data persists in inference input buffers

@@ -12,7 +12,7 @@ use crate::align::align_face_112;
 use crate::color::convert_to_rgb;
 use crate::error::VisionError;
 use crate::matcher::{match_embeddings, MatchResult};
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 /// Configuration options for the vision verification pipeline.
 #[derive(Debug, Clone, PartialEq)]
@@ -78,6 +78,18 @@ pub struct VerificationOutcome {
     pub match_result: MatchResult,
 }
 
+impl zeroize::Zeroize for VerificationOutcome {
+    fn zeroize(&mut self) {
+        self.output.zeroize();
+    }
+}
+
+impl Drop for VerificationOutcome {
+    fn drop(&mut self) {
+        self.zeroize();
+    }
+}
+
 /// End-to-end vision processing orchestrator.
 pub struct VisionPipeline {
     detector: Arc<dyn FaceDetector>,
@@ -85,6 +97,20 @@ pub struct VisionPipeline {
     pad: Arc<dyn PadDetector>,
     extractor: Arc<dyn EmbeddingExtractor>,
     config: VisionPipelineConfig,
+}
+
+/// RAII guard that deterministically zeroizes the aligned face crop if processing fails before output transfer.
+struct AlignedCropGuard {
+    crop: Vec<u8>,
+    disarmed: bool,
+}
+
+impl Drop for AlignedCropGuard {
+    fn drop(&mut self) {
+        if !self.disarmed {
+            self.crop.zeroize();
+        }
+    }
 }
 
 impl VisionPipeline {
@@ -123,7 +149,12 @@ impl VisionPipeline {
     /// 5. Evaluates Presentation Attack Detection (PAD) liveness; short-circuits on spoof
     /// 6. Extracts L2-normalized biometric embedding
     pub fn process_frame(&self, frame: &Frame) -> Result<PipelineOutput, VisionError> {
-        let rgb = convert_to_rgb(&frame.data, frame.width, frame.height, frame.format)?;
+        let rgb = Zeroizing::new(convert_to_rgb(
+            &frame.data,
+            frame.width,
+            frame.height,
+            frame.format,
+        )?);
 
         let mut detections = self.detector.detect(&rgb, frame.width, frame.height)?;
 
@@ -151,11 +182,14 @@ impl VisionPipeline {
             self.landmarks
                 .detect_landmarks(&rgb, frame.width, frame.height, &detection.box_)?;
 
-        let aligned_crop = align_face_112(&rgb, frame.width, frame.height, &landmarks)?;
+        let mut aligned_crop_guard = AlignedCropGuard {
+            crop: align_face_112(&rgb, frame.width, frame.height, &landmarks)?,
+            disarmed: false,
+        };
 
         // Step 5: Presentation Attack Detection (anti-spoofing) evaluation
         let pad_result = self.pad.evaluate_liveness(
-            &aligned_crop,
+            &aligned_crop_guard.crop,
             self.config.target_width,
             self.config.target_height,
         )?;
@@ -169,10 +203,13 @@ impl VisionPipeline {
 
         // Step 6: Feature extraction only if PAD passed
         let embedding = self.extractor.extract_embedding(
-            &aligned_crop,
+            &aligned_crop_guard.crop,
             self.config.target_width,
             self.config.target_height,
         )?;
+
+        aligned_crop_guard.disarmed = true;
+        let aligned_crop = std::mem::take(&mut aligned_crop_guard.crop);
 
         Ok(PipelineOutput {
             detection,

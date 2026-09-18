@@ -14,6 +14,7 @@ use std::sync::{Arc, Mutex};
 use ort::session::Session;
 
 use crate::error::InferenceError;
+use zeroize::{Zeroize, Zeroizing};
 
 /// Classification of detected presentation attack vectors.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -113,15 +114,13 @@ impl OrtPadDetector {
 
         exps.iter().map(|&v| v / sum).collect()
     }
-}
 
-impl PadDetector for OrtPadDetector {
-    fn evaluate_liveness(
-        &self,
+    /// Prepares, resizes, and normalizes an RGB image to 112x112 NCHW format inside a zeroized container.
+    pub fn prepare_input(
         rgb: &[u8],
         width: u32,
         height: u32,
-    ) -> Result<PadResult, InferenceError> {
+    ) -> Result<Zeroizing<Vec<f32>>, InferenceError> {
         let expected_len = (width as usize)
             .checked_mul(height as usize)
             .and_then(|px| px.checked_mul(3))
@@ -143,7 +142,7 @@ impl PadDetector for OrtPadDetector {
 
         // Standard MiniFASNet expects 112x112 NCHW tensor [1, 3, 112, 112]
         let target_size = 112usize;
-        let mut input_data = vec![0.0f32; 3 * target_size * target_size];
+        let mut input_data = Zeroizing::new(vec![0.0f32; 3 * target_size * target_size]);
 
         let scale_x = width as f32 / target_size as f32;
         let scale_y = height as f32 / target_size as f32;
@@ -179,12 +178,22 @@ impl PadDetector for OrtPadDetector {
             }
         }
 
-        let input_tensor =
-            ndarray::Array4::from_shape_vec((1, 3, target_size, target_size), input_data)
-                .map_err(|e| InferenceError::TensorError(e.to_string()))?;
+        Ok(input_data)
+    }
+}
 
-        let tensor = ort::value::Tensor::from_array(input_tensor)
-            .map_err(|e| InferenceError::Ort(e.to_string()))?;
+impl PadDetector for OrtPadDetector {
+    fn evaluate_liveness(
+        &self,
+        rgb: &[u8],
+        width: u32,
+        height: u32,
+    ) -> Result<PadResult, InferenceError> {
+        let mut input_data = Self::prepare_input(rgb, width, height)?;
+
+        let tensor =
+            ort::value::TensorRef::from_array_view(([1usize, 3, 112, 112], input_data.as_slice()))
+                .map_err(|e| InferenceError::Ort(e.to_string()))?;
 
         let mut session = self
             .session
@@ -194,6 +203,9 @@ impl PadDetector for OrtPadDetector {
         let outputs = session
             .run(ort::inputs![tensor])
             .map_err(|e| InferenceError::Ort(e.to_string()))?;
+
+        // Zeroize input buffer immediately post-inference
+        input_data.zeroize();
 
         let mut out_iter = outputs.into_iter();
         let (_, pad_tensor) = out_iter.next().ok_or_else(|| {
