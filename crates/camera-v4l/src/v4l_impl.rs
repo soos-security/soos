@@ -81,7 +81,7 @@ impl CameraManager for V4lCameraManager {
     }
 
     fn is_ready(&self) -> bool {
-        self.is_ready.load(Ordering::Relaxed)
+        self.is_ready.load(Ordering::Acquire)
     }
 
     fn notify_activity(&self) {
@@ -93,14 +93,15 @@ impl CameraManager for V4lCameraManager {
     }
 
     fn stop(&self) {
-        self.running.store(false, Ordering::Relaxed);
-        self.is_ready.store(false, Ordering::Relaxed);
+        self.running.store(false, Ordering::Release);
+        self.is_ready.store(false, Ordering::Release);
     }
 }
 
 impl Drop for V4lCameraManager {
     fn drop(&mut self) {
-        self.running.store(false, Ordering::Relaxed);
+        self.running.store(false, Ordering::Release);
+        self.is_ready.store(false, Ordering::Release);
         if let Some(handle) = self.worker_handle.take() {
             let _ = handle.join();
         }
@@ -117,14 +118,14 @@ fn run_v4l_supervisor(
 ) {
     let mut current_backoff = config.min_backoff;
 
-    while running.load(Ordering::Relaxed) {
+    while running.load(Ordering::Acquire) {
         match open_and_stream(&config, &latest_frame, &is_ready, &running, &last_activity) {
             Ok(()) => {
                 // Clean shutdown
                 break;
             }
             Err(err) => {
-                is_ready.store(false, Ordering::Relaxed);
+                is_ready.store(false, Ordering::Release);
                 latest_frame.store(None);
 
                 warn!(
@@ -136,8 +137,9 @@ fn run_v4l_supervisor(
 
                 // Sleep backoff with periodic running check
                 let sleep_start = Instant::now();
-                while running.load(Ordering::Relaxed) && sleep_start.elapsed() < current_backoff {
-                    thread::sleep(Duration::from_millis(50));
+                while running.load(Ordering::Acquire) && sleep_start.elapsed() < current_backoff {
+                    let rem = current_backoff.saturating_sub(sleep_start.elapsed());
+                    thread::sleep(Duration::from_millis(20).min(rem));
                 }
 
                 // Exponential backoff doubling up to max_backoff
@@ -146,7 +148,7 @@ fn run_v4l_supervisor(
         }
     }
 
-    is_ready.store(false, Ordering::Relaxed);
+    is_ready.store(false, Ordering::Release);
     latest_frame.store(None);
 }
 
@@ -270,6 +272,13 @@ fn open_and_stream(
             },
         )?;
 
+    // Set a non-infinite timeout on the MMAP stream handle so DQBUF does not block indefinitely.
+    // Timeout is computed adaptively from the configured FPS (e.g. 3x frame interval, clamped to 150-250ms),
+    // ensuring Drop completes in < 500ms (Criterion C9) even if the hardware is idle or stalled.
+    let frame_interval_ms = 1_000u64.checked_div(config.fps as u64).unwrap_or(33);
+    let stream_timeout_ms = frame_interval_ms.saturating_mul(3).clamp(150, 250);
+    stream.set_timeout(Duration::from_millis(stream_timeout_ms));
+
     info!(
         "Camera stream initialized on '{}' ({}x{}, {:?})",
         config.device_path.display(),
@@ -282,30 +291,40 @@ fn open_and_stream(
     let mut warmup_discarded: usize = 0;
     let mut sequence: u64 = 0;
 
-    while running.load(Ordering::Relaxed) {
-        let (buf, _meta) = stream.next().map_err(|e| {
-            if let Some(libc::ENODEV) = e.raw_os_error() {
-                CameraError::DeviceNotFound {
-                    path: config.device_path.clone(),
-                    source: e,
+    while running.load(Ordering::Acquire) {
+        let (buf, _meta) = match stream.next() {
+            Ok(val) => val,
+            Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {
+                if !running.load(Ordering::Acquire) {
+                    // Graceful shutdown requested while waiting for DQBUF
+                    return Ok(());
                 }
-            } else {
-                CameraError::BufferDequeue {
+                return Err(CameraError::BufferDequeue {
                     path: config.device_path.clone(),
-                    reason: e.to_string(),
+                    reason: "Frame capture timed out waiting for hardware buffer".to_string(),
+                });
+            }
+            Err(e) => {
+                if let Some(libc::ENODEV) = e.raw_os_error() {
+                    return Err(CameraError::DeviceNotFound {
+                        path: config.device_path.clone(),
+                        source: e,
+                    });
+                } else {
+                    return Err(CameraError::BufferDequeue {
+                        path: config.device_path.clone(),
+                        reason: e.to_string(),
+                    });
                 }
             }
-        })?;
+        };
 
         // Discard initial frames for auto-exposure convergence
         if warmup_discarded < config.warmup_frames {
             warmup_discarded = warmup_discarded.saturating_add(1);
-            is_ready.store(false, Ordering::Relaxed);
+            is_ready.store(false, Ordering::Release);
             continue;
         }
-
-        // Camera is now stabilized and ready
-        is_ready.store(true, Ordering::Relaxed);
 
         let mono_ns = monotonic_nanos();
         let frame = Frame::new(
@@ -318,6 +337,8 @@ fn open_and_stream(
         );
 
         latest_frame.store(Some(Arc::new(frame)));
+        // Camera is now stabilized and ready: publish ready flag with Release after storing frame
+        is_ready.store(true, Ordering::Release);
         sequence = sequence.saturating_add(1);
 
         // Check for idle throttling
@@ -339,7 +360,14 @@ fn open_and_stream(
                     .unwrap_or(200_000),
             );
             if let Some(extra) = idle_interval.checked_sub(full_interval) {
-                thread::sleep(extra);
+                let sleep_start = Instant::now();
+                while running.load(Ordering::Acquire) && sleep_start.elapsed() < extra {
+                    let rem = extra.saturating_sub(sleep_start.elapsed());
+                    thread::sleep(Duration::from_millis(20).min(rem));
+                }
+                if !running.load(Ordering::Acquire) {
+                    break;
+                }
             }
         }
     }

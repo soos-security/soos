@@ -94,6 +94,7 @@ This document translates the critical gating criteria from §11 of `ARCHITECTURE
 | C6 | Priority format negotiation (`RGB24 -> YUYV -> NV12 -> MJPEG -> Grey`) and fallback | Unit tests (`format_negotiation_tests::test_format_negotiation_prefers_rgb24`, `format_negotiation_tests::test_format_fallback_on_unsupported`, `format_negotiation_tests::test_format_negotiation_all_priority_order`) | ✅ Verified |
 | C7 | Graceful hot-unplug recovery on `ENODEV` with automatic reconnection | Integration test (`hotunplug_tests::test_camera_hotunplug_recovery`) | ✅ Verified |
 | C8 | Multi-sensor device classification distinguishing RGB vs IR sensors | Unit tests (`dual_sensor_tests::test_dual_sensor_prefers_rgb`, `dual_sensor_tests::test_dual_sensor_override_prefers_ir`, `dual_sensor_tests::test_sensor_classification_by_card_name`, `dual_sensor_tests::test_sensor_classification_by_formats`) | ✅ Verified |
+| C9 | Capture thread shutdown completes within 500ms even if camera is idle | Unit & integration tests (`shutdown_tests::test_camera_drop_completes_within_timeout`, `shutdown_tests::test_camera_stop_signals_graceful_shutdown`, `shutdown_tests::test_v4l_camera_drop_completes_within_timeout`, `shutdown_tests::test_is_ready_memory_visibility_acquire_release`) | ✅ Verified |
 
 ---
 
