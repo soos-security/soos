@@ -1,80 +1,40 @@
-# Candid Pre-Push Code Review Report
+# Candid Review Report
 
-**Reviewer**: Candid Reviewer Sub-Agent (Cold Context Independent Audit)
-**Commit/Branch**: `fix/camera-thread-shutdown` -> `main`
-**Target Issue**: Issue #23 (`fix(camera-v4l): Graceful capture thread shutdown`) — GitHub #62
-**Diff Base**: `origin/main` (commit `d40bbd4`)
-**Date**: 2026-09-18
+- **Date**: 2026-09-18
+- **Target Branch / Commit**: `fix/vision-zeroize-frames`
+- **Audited Files**:
+  - `crates/vision/src/pipeline.rs`
+  - `crates/vision/tests/zeroize_tests.rs`
+  - `crates/inference-ort/src/detector.rs`
+  - `crates/inference-ort/src/embedding.rs`
+  - `crates/inference-ort/src/landmarks.rs`
+  - `crates/inference-ort/src/pad.rs`
+  - `crates/inference-ort/tests/zeroize_tests.rs`
+  - `scripts/sync_issue.py`
 
----
+## 1. Executive Summary
 
-## 1. Diff Inspection & Scope of Changes
+This cold, adversarial review evaluated the modifications introduced for Issue #24 (`fix(vision): Complete zeroization of intermediate frame buffers`, GitHub #63). The changes eliminate critical security gaps where un-zeroized raw facial frame data, intermediate RGB conversions, aligned crops, and normalized ONNX inference tensors could linger in deallocated heap memory. All intermediate buffers are wrapped in RAII zeroizing constructs (`Zeroizing<Vec<T>>` or `AlignedCropGuard`) and wiped post-inference. `VerificationOutcome` systematically implements `Zeroize` and `Drop`. The changes preserve panic safety, contain zero `unsafe` additions, and adhere strictly to zero-trust invariants and the English-only deliverable policy.
 
-The audited diff consists of:
-- `crates/camera-v4l/src/v4l_impl.rs`:
-  - Configured adaptive timeout on `v4l::io::mmap::Stream` via `set_timeout(Duration)` computed adaptively from `config.fps` (clamped to 150–250ms).
-  - Handled `io::ErrorKind::TimedOut` during `stream.next()`: returns `Ok(())` if `!running.load(Ordering::Acquire)`, cleanly exiting supervisor loop within 250ms; returns `Err(CameraError::BufferDequeue)` if running, triggering backoff and reconnection.
-  - Replaced monolithic `thread::sleep(extra)` in idle sleep with sliced polling in 20ms increments checking `running.load(Ordering::Acquire)`.
-  - Upgraded `is_ready`, `running` atomic operations to `Acquire`/`Release` semantics.
-  - Sequenced `latest_frame.store(...)` before `is_ready.store(true, Ordering::Release)`.
-- `crates/camera-v4l/src/mock.rs`:
-  - Added atomic `sequence: Arc<AtomicU64>` and `store_frame_monotonic` enforcing non-decreasing frame sequence visibility.
-  - Added responsive sleep checking `running_clone` and `starved_clone` in 10ms increments.
-  - Upgraded `is_ready`, `running`, `starved` to `Acquire`/`Release` orderings.
-- `crates/camera-v4l/tests/shutdown_tests.rs`:
-  - Authored contractual tests for Criterion C9 and sub-issues #23.1 and #23.2:
-    - `test_camera_drop_completes_within_timeout` (< 500ms drop under 1 FPS idle mode).
-    - `test_camera_stop_signals_graceful_shutdown` (immediate transition to not-ready).
-    - `test_v4l_camera_drop_completes_within_timeout` (drop during backoff < 500ms).
-    - `test_is_ready_memory_visibility_acquire_release` (multi-threaded Acquire/Release stress test).
-- `scripts/sync_issue.py`:
-  - Registered `"fix/camera-thread-shutdown": 23`.
+## 2. Deep Reasoning Audit
 
----
+### Logic & Architecture
+- **Pass**: State transitions, error propagation, and memory lifecycles are robust. In `VisionPipeline::process_frame`, `rgb` is wrapped in `Zeroizing`, guaranteeing deterministic deallocation wiping regardless of nominal or early exit pathways. Intermediate aligned crops are guarded via `AlignedCropGuard` ensuring zeroization upon spoof aborts (`PadFailed`) or extraction failures. In `soos-inference-ort`, input preprocessing has been factored into dedicated `prepare_input` methods that return `Zeroizing<Vec<f32>>`, from which zero-copy tensor views (`TensorRef`) are passed directly into ONNX Runtime sessions, eliminating intermediate `ndarray::Array4` heap duplication.
 
-## 2. Five Pillars Review
+### PAM Concurrency & Deadlines
+- **Pass**: The PAM module (`crates/pam`) is unaffected. No asynchronous runtimes or blocking socket loops are introduced. The replacement of heap-allocated `ndarray` structures with borrowed slice views in inference reduces allocation pressure and latency jitter during biometric authentication.
 
-### Pillar 1: Logic & Architecture
-- **Evaluation**:
-  - The shutdown protocol correctly decouples thread termination signaling (`running.store(false, Ordering::Release)`) from I/O unblocking.
-  - The use of `stream.set_timeout(...)` directly interfaces with the underlying V4L2 device's non-blocking poll mechanism without resorting to unsafe file descriptor closing across thread boundaries.
-  - The adaptive timeout formula (`3 * frame_interval_ms` clamped between 150ms and 250ms) provides adequate margin for varying camera capture frame rates while strictly satisfying the < 500ms `Drop` deadline.
-- **Verdict**: PASS.
+### Panic Safety & Fallback
+- **Pass**: Zero `unwrap()`, `expect()`, `panic!()`, or unfinished stubs are introduced in production code. Error paths return typed errors (`VisionError`, `InferenceError`). RAII drop implementations guarantee memory zeroization even if thread unwinding occurs.
 
-### Pillar 2: PAM Concurrency & Real-Time Deadlines
-- **Evaluation**:
-  - Zero async runtime or Tokio usage introduced into camera-v4l or PAM module.
-  - Background capture threads terminate cleanly on drop, preventing deadlocks or thread starvation during daemon shutdown.
-  - Zero stream pollution (`println!`, `eprintln!`, `dbg!`).
-- **Verdict**: PASS.
+### Test Integrity & Anti-Weakening
+- **Pass**: Contractual acceptance tests were authored in Phase 2 before production changes and tested in the RED phase. No pre-existing unit or integration tests were altered, weakened, or bypassed. The full workspace test suite passed with 100% green status.
 
-### Pillar 3: Panic Safety & Fallback
-- **Evaluation**:
-  - Zero `.unwrap()` or `.expect()` calls in production library code (`crates/camera-v4l/src/`).
-  - `Stream::next()` timeout errors are safely caught via pattern matching (`Err(e) if e.kind() == std::io::ErrorKind::TimedOut`).
-  - Thread join failures in `Drop` are safely discarded with `let _ = handle.join();`.
-- **Verdict**: PASS.
+### Memory & Secret Bounds
+- **Pass**: Conforms to `ARCHITECTURE.md` §10 Memory Hygiene. Face pixel buffers in RGB and normalized float representations are deterministically zeroized. `VerificationOutcome` implements `Zeroize` and `Drop` delegating to `PipelineOutput::zeroize()`. Zero credentials, biometric vectors, or raw pixel frames are exposed across IPC sockets or logged to disk/streams.
 
-### Pillar 4: Test Integrity & Anti-Weakening
-- **Evaluation**:
-  - Contractual test suite `shutdown_tests.rs` strictly adheres to acceptance criteria in `AI/BACKLOG.md` (Issue #23.1 and #23.2) and `AI/VERIFICATION_MATRIX.md` (Criterion C9).
-  - Tests failed initially during the TDD Red phase and now pass cleanly with genuine production implementation improvements.
-  - Zero tests weakened, commented out, or bypassed.
-- **Verdict**: PASS.
+## 3. Detailed Findings & Action Items
+- None. All 7 audits in `./scripts/candid_review.sh` passed cleanly.
 
-### Pillar 5: Memory & Secret Bounds
-- **Evaluation**:
-  - Frames remain zeroized on drop via existing `Zeroize` implementation.
-  - `latest_frame` slot is cleared to `None` on shutdown, error, and starvation.
-  - All atomic loads and stores enforce explicit `Acquire`/`Release` memory ordering, eliminating stale reads or out-of-order data exposure on weakly-ordered architectures.
-- **Verdict**: PASS.
-
----
-
-## 3. Formal Verdict
-
-```
-VERDICT: APPROVED
-```
-
-The changeset satisfies all five architectural pillars, security invariants, and code quality standards. Ready for Phase 6 (Traceability Sub-Agent) and release.
+## 4. Final Verdict
+**VERDICT: APPROVED**

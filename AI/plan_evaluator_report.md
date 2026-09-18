@@ -1,70 +1,49 @@
-# Plan Evaluation Report — Issue #23: Graceful Capture Thread Shutdown
+# Plan Evaluation Report — Issue #24: fix(vision): Complete zeroization of intermediate frame buffers
 
-**Evaluator**: Plan Evaluator Sub-Agent
-**Target**: Issue #23 (`fix(camera-v4l): Graceful capture thread shutdown`) — GitHub #62
-**Branch**: `fix/camera-thread-shutdown`
-**Date**: 2026-09-18
-
----
-
-## 1. Executive Summary
-
-This evaluation critically analyzes the technical design and implementation plan for Issue #23, covering:
-- Graceful shutdown of `V4lCameraManager` and `MockCameraManager` background capture threads within 500ms.
-- Elimination of indefinite blocking in `v4l::io::mmap::Stream::next()` via adaptive stream timeouts (`set_timeout`).
-- Upgrading atomic memory orderings for `is_ready`, `running`, and `starved` to `Acquire`/`Release` pairing with `latest_frame` updates to guarantee frame visibility on weakly-ordered architectures (AArch64).
+- **Date**: 2026-09-18
+- **Evaluator**: Plan Evaluator Sub-Agent
+- **Target Issue**: Issue #24 (GitHub #63) — `fix(vision): Complete zeroization of intermediate frame buffers`
+- **Target Branch**: `fix/vision-zeroize-frames`
+- **Architecture References**: `AI/ARCHITECTURE.md` §10 Memory Hygiene, `AI/BACKLOG.md` Issue #24
 
 ---
 
-## 2. Six Pillars Evaluation
+## 1. Evaluation Against Architectural Pillars
 
 ### Pillar 1: Architectural Alignment & Threat Model
-- **Evaluation**: The proposed changes are confined entirely to `crates/camera-v4l/`, the sole hardware-interfacing crate owned exclusively by the root daemon (`soos-daemon`).
-- **PAM Module Decoupling**: Zero changes to the PAM module. PAM remains an unprivileged consumer communicating strictly via IPC Unix Domain Socket.
-- **Root Daemon Safety**: Clean worker thread termination prevents zombie threads and dangling V4L2 device file descriptors during daemon shutdown or reconfiguration.
-- **Verdict**: COMPLIANT.
+- **Evaluation**: PASS
+- **Analysis**: The plan targets internal memory hygiene for `soos-vision` and `soos-inference-ort`. In a zero-trust biometric daemon, unencrypted biometric frames, intermediate color-converted buffers, and normalized inference tensors residing in heap memory represent a critical attack surface if left un-zeroized. The plan ensures that all intermediate face representations are deterministically wiped from memory immediately after use and on drop, fully complying with §10 Memory Hygiene.
 
 ### Pillar 2: PAM Real-Time Latency & Concurrency
-- **Evaluation**: The PAM module has a strict 200–250ms deadline. While this issue resides in the daemon's camera capture layer, the 500ms shutdown guarantee ensures that daemon restarts or teardown cycles complete deterministically without blocking system service managers (systemd).
-- **Zero Stream Pollution**: Confirmed zero `println!`, `eprintln!`, or `dbg!` macros; all logging adheres to structured `tracing` instrumentation.
-- **Verdict**: COMPLIANT.
+- **Evaluation**: PASS
+- **Analysis**: The PAM module (`crates/pam`) remains untouched. Inside `soos-vision` and `soos-inference-ort`, replacing heap-allocated `ndarray::Array4` intermediate containers with direct borrowed slices (`TensorRef::from_array_view`) avoids extraneous heap reallocation while maintaining zero-copy views into the `Zeroizing<Vec<f32>>` buffer, which actually improves execution latency and cache locality within the 150ms total verification budget.
 
 ### Pillar 3: Panic Safety & Fail-Closed Behavior
-- **Evaluation**:
-  - `stream.next()` timeout handling safely intercepts `io::ErrorKind::TimedOut` without panic or unwrapping.
-  - Shutdown paths systematically reset `is_ready` to `false` with `Ordering::Release`, guaranteeing fail-closed behavior if frames are read during or after shutdown.
-  - Thread joins in `Drop` discard JoinResult safely via `let _ = handle.join();` without unwrapping panic errors.
-- **Verdict**: COMPLIANT.
+- **Evaluation**: PASS
+- **Analysis**: The zeroization mechanisms rely on RAII containers (`zeroize::Zeroizing<T>`) and trait implementations (`zeroize::Zeroize`, `Drop`). All error propagation uses `Result<_, VisionError>` and `Result<_, InferenceError>`. Zero `unwrap()` or `expect()` calls are introduced in production code. In case of early error exits (e.g. `PadFailed`, `NoFaceDetected`), the RAII drops guarantee memory zeroization.
 
 ### Pillar 4: Dependency Isolation & Banned Crates
-- **Evaluation**:
-  - Prohibited crates (`opencv`, `nokhwa`) remain absent.
-  - The implementation uses standard library atomics (`std::sync::atomic`), `arc-swap`, and the existing `v4l` (v0.14.0) dependency.
-  - Unsafe blocks remain strictly documented with safety invariants and confined to existing POSIX monotonic clock calls.
-- **Verdict**: COMPLIANT.
+- **Evaluation**: PASS
+- **Analysis**: No banned crates (`opencv`, `nokhwa`) are introduced. `zeroize = { workspace = true }` is already present in `crates/vision/Cargo.toml` and `crates/inference-ort/Cargo.toml`. Business crates retain `#![forbid(unsafe_code)]`.
 
 ### Pillar 5: Data Confidentiality & Zeroization
-- **Evaluation**:
-  - Memory buffers for frames continue to implement `Zeroize` on drop.
-  - No camera frames or timestamps are logged or exposed over unauthenticated channels.
-  - `latest_frame` slot is deterministically cleared (`None`) on shutdown and error.
-- **Verdict**: COMPLIANT.
+- **Evaluation**: PASS
+- **Analysis**: The plan comprehensively resolves all three sub-issues from `AI/BACKLOG.md`:
+  - Sub-issue #24.1: Intermediate RGB buffer from `convert_to_rgb()` is wrapped in `Zeroizing<Vec<u8>>`. Aligned crop is also protected during PAD evaluation.
+  - Sub-issue #24.2: `VerificationOutcome` implements `Zeroize` and `Drop`, ensuring both primary and cloned outcomes deterministically clear the underlying embedding and crop.
+  - Sub-issue #24.3: ONNX input tensors in `OrtFaceDetector`, `OrtEmbeddingExtractor`, `OrtLandmarkDetector`, and `OrtPadDetector` are zeroized post-`session.run()` and on drop.
 
 ### Pillar 6: Test Integrity & TDD Contracts
-- **Evaluation**:
-  - Contractual test suite `shutdown_tests.rs` defines Criterion C9:
-    - `test_camera_drop_completes_within_timeout` asserting `drop()` completes in < 500ms even under idle conditions.
-    - `test_camera_stop_signals_graceful_shutdown` asserting immediate transition to not-ready and thread exit.
-    - `test_is_ready_memory_visibility_acquire_release` verifying multi-threaded frame visibility under `Acquire`/`Release` ordering.
-  - Zero tests will be weakened or bypassed.
-- **Verdict**: COMPLIANT.
+- **Evaluation**: PASS
+- **Analysis**: The plan prescribes new contractual unit tests authored in Phase 2 before production implementation:
+  - `crates/vision/tests/zeroize_tests.rs`: `test_rgb_buffer_zeroized_after_pipeline`, `test_verification_outcome_zeroize_on_drop`.
+  - `crates/inference-ort/tests/zeroize_tests.rs`: `test_inference_input_buffers_zeroized`.
+  Existing tests are strictly preserved with zero weakening.
 
 ---
 
-## 3. Formal Verdict
+## 2. Recommendation & Gating Verdict
 
-```
-VALIDATION_VERDICT: APPROVED
-```
+The proposed implementation plan completely satisfies all 6 architectural pillars, adheres to zero-trust invariants, and introduces zero breaking interface changes.
 
-The implementation plan satisfies all 6 architectural pillars and security invariants. Execution may proceed autonomously to Phase 2 (Tester Sub-Agent).
+**VALIDATION_VERDICT: APPROVED**
