@@ -858,13 +858,13 @@ The enrollment CLI uses incorrect model registry IDs (`face_detector` instead of
 
 #### Sub-issues
 
-- [ ] **#23.1** — Interrupt blocking `stream.next()` on shutdown
+- [x] **#23.1** — Interrupt blocking `stream.next()` on shutdown
   - Set a flag and then close the underlying `v4l::Device` file descriptor from the main thread to unblock `DQBUF`
   - Or: use non-blocking mode with `poll()` + shutdown flag check
   - Acceptance: `Drop` completes within 500ms even if camera is idle
   - TDD: `test_camera_drop_completes_within_timeout`
 
-- [ ] **#23.2** — Add `is_ready.load(Ordering::Acquire)` (upgrade from `Relaxed`)
+- [x] **#23.2** — Add `is_ready.load(Ordering::Acquire)` (upgrade from `Relaxed`)
   - Use `Acquire`/`Release` ordering for `is_ready` flag to ensure frame data visibility
   - Acceptance: No stale reads of `is_ready` on weakly-ordered architectures
   - TDD: verified by code review and memory model analysis
@@ -1283,7 +1283,7 @@ graph TD
 | C6 | Camera format auto-negotiated from device capabilities | Integration test | ⬜ Pending |
 | C7 | NV12 pixel format conversion to RGB24 | Unit test | ⬜ Pending |
 | C8 | Camera hot-unplug recovery without daemon crash | Integration test | ⬜ Pending |
-| C9 | Capture thread shutdown completes within 500ms | Benchmark test | ⬜ Pending |
+| C9 | Capture thread shutdown completes within 500ms | Benchmark test | ✅ Verified |
 | V7 | Intermediate RGB buffers zeroized after pipeline completion | Memory audit test | ⬜ Pending |
 | B5 | Master key file created with `0600` from inception (no permission window) | Security test | ⬜ Pending |
 | B6 | Template deletion performs secure erasure before unlink | Destruction test | ⬜ Pending |

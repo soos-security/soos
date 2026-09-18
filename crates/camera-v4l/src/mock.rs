@@ -5,7 +5,7 @@ use crate::error::CameraError;
 use crate::frame::{Frame, PixelFormat};
 use crate::manager::CameraManager;
 use arc_swap::ArcSwapOption;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -18,9 +18,23 @@ pub struct MockCameraManager {
     starved: Arc<AtomicBool>,
     running: Arc<AtomicBool>,
     warmup_remaining: Arc<AtomicUsize>,
+    sequence: Arc<AtomicU64>,
     active_error: Arc<RwLock<Option<CameraError>>>,
     last_activity: Arc<RwLock<Instant>>,
     worker_handle: Option<JoinHandle<()>>,
+}
+
+/// Stores a new frame into the ArcSwapOption slot only if its sequence number is >=
+/// the current frame's sequence number, enforcing strict monotonic visibility.
+fn store_frame_monotonic(latest: &ArcSwapOption<Frame>, new_frame: Arc<Frame>) {
+    latest.rcu(|current| {
+        if let Some(cur) = current.as_ref() {
+            if new_frame.sequence < cur.sequence {
+                return Some(Arc::clone(cur));
+            }
+        }
+        Some(Arc::clone(&new_frame))
+    });
 }
 
 impl MockCameraManager {
@@ -31,6 +45,7 @@ impl MockCameraManager {
         let starved = Arc::new(AtomicBool::new(false));
         let running = Arc::new(AtomicBool::new(true));
         let warmup_remaining = Arc::new(AtomicUsize::new(config.warmup_frames));
+        let sequence = Arc::new(AtomicU64::new(0));
         let active_error = Arc::new(RwLock::new(None));
         let last_activity = Arc::new(RwLock::new(Instant::now()));
 
@@ -39,6 +54,7 @@ impl MockCameraManager {
         let starved_clone = Arc::clone(&starved);
         let running_clone = Arc::clone(&running);
         let warmup_clone = Arc::clone(&warmup_remaining);
+        let sequence_clone = Arc::clone(&sequence);
         let error_clone = Arc::clone(&active_error);
         let activity_clone = Arc::clone(&last_activity);
         let cfg = config.clone();
@@ -46,42 +62,49 @@ impl MockCameraManager {
         let handle = thread::Builder::new()
             .name("soos-mock-camera".into())
             .spawn(move || {
-                let mut sequence: u64 = 0;
                 let _start_time = Instant::now();
 
                 let full_frame_interval = Duration::from_micros(
                     1_000_000u64.checked_div(cfg.fps as u64).unwrap_or(33_333),
                 );
 
-                while running_clone.load(Ordering::Relaxed) {
+                while running_clone.load(Ordering::Acquire) {
                     // Check if an error is injected
                     let has_error = {
                         let guard = error_clone.read().unwrap_or_else(|e| e.into_inner());
                         guard.is_some()
                     };
 
-                    let is_starved = starved_clone.load(Ordering::Relaxed);
+                    let is_starved = starved_clone.load(Ordering::Acquire);
 
                     if has_error || is_starved {
-                        ready_clone.store(false, Ordering::Relaxed);
+                        ready_clone.store(false, Ordering::Release);
                         latest_clone.store(None);
-                        warmup_clone.store(cfg.warmup_frames, Ordering::Relaxed);
-                        thread::sleep(Duration::from_millis(20));
+                        warmup_clone.store(cfg.warmup_frames, Ordering::Release);
+                        let sleep_start = Instant::now();
+                        while running_clone.load(Ordering::Acquire)
+                            && sleep_start.elapsed() < Duration::from_millis(20)
+                        {
+                            thread::sleep(Duration::from_millis(5));
+                        }
                         continue;
                     }
 
                     // Handle warmup frame discard at configured frame rate
-                    let remaining = warmup_clone.load(Ordering::Relaxed);
+                    let remaining = warmup_clone.load(Ordering::Acquire);
                     if remaining > 0 {
-                        ready_clone.store(false, Ordering::Relaxed);
-                        warmup_clone.fetch_sub(1, Ordering::Relaxed);
-                        sequence = sequence.saturating_add(1);
-                        thread::sleep(full_frame_interval);
+                        ready_clone.store(false, Ordering::Release);
+                        warmup_clone.fetch_sub(1, Ordering::AcqRel);
+                        sequence_clone.fetch_add(1, Ordering::SeqCst);
+                        let sleep_start = Instant::now();
+                        while running_clone.load(Ordering::Acquire)
+                            && sleep_start.elapsed() < full_frame_interval
+                        {
+                            let rem = full_frame_interval.saturating_sub(sleep_start.elapsed());
+                            thread::sleep(Duration::from_millis(10).min(rem));
+                        }
                         continue;
                     }
-
-                    // Camera has completed warmup and is healthy
-                    ready_clone.store(true, Ordering::Relaxed);
 
                     // Compute capture interval based on idle timeout
                     let now = Instant::now();
@@ -97,16 +120,31 @@ impl MockCameraManager {
                             .unwrap_or(33_333),
                     );
 
+                    let seq = sequence_clone.fetch_add(1, Ordering::SeqCst);
                     // Generate synthetic frame with true CLOCK_MONOTONIC timestamp
                     let mono_ns = monotonic_nanos();
-                    let frame = generate_synthetic_frame(
-                        cfg.width, cfg.height, cfg.format, sequence, mono_ns,
-                    );
+                    let frame =
+                        generate_synthetic_frame(cfg.width, cfg.height, cfg.format, seq, mono_ns);
 
-                    latest_clone.store(Some(Arc::new(frame)));
-                    sequence = sequence.saturating_add(1);
+                    if starved_clone.load(Ordering::Acquire) {
+                        ready_clone.store(false, Ordering::Release);
+                        latest_clone.store(None);
+                        continue;
+                    }
 
-                    thread::sleep(frame_interval);
+                    store_frame_monotonic(&latest_clone, Arc::new(frame));
+                    // Camera has completed warmup and is healthy: publish ready flag after frame store
+                    ready_clone.store(true, Ordering::Release);
+
+                    // Responsive sleep checking running_clone and starved_clone in small increments
+                    let sleep_start = Instant::now();
+                    while running_clone.load(Ordering::Acquire)
+                        && !starved_clone.load(Ordering::Acquire)
+                        && sleep_start.elapsed() < frame_interval
+                    {
+                        let rem = frame_interval.saturating_sub(sleep_start.elapsed());
+                        thread::sleep(Duration::from_millis(10).min(rem));
+                    }
                 }
             })
             .ok();
@@ -118,6 +156,7 @@ impl MockCameraManager {
             starved,
             running,
             warmup_remaining,
+            sequence,
             active_error,
             last_activity,
             worker_handle: handle,
@@ -134,37 +173,39 @@ impl MockCameraManager {
         let mut guard = self.active_error.write().unwrap_or_else(|e| e.into_inner());
         *guard = error;
         if guard.is_some() {
-            self.is_ready.store(false, Ordering::Relaxed);
+            self.is_ready.store(false, Ordering::Release);
             self.latest_frame.store(None);
         }
     }
 
     /// Simulates frame starvation (no new frames generated).
     pub fn set_starved(&self, starved: bool) {
-        self.starved.store(starved, Ordering::Relaxed);
+        self.starved.store(starved, Ordering::Release);
         if starved {
-            self.is_ready.store(false, Ordering::Relaxed);
+            self.is_ready.store(false, Ordering::Release);
             self.latest_frame.store(None);
         }
     }
 
     /// Overrides the ready status directly.
     pub fn set_ready(&self, ready: bool) {
-        self.is_ready.store(ready, Ordering::Relaxed);
+        self.is_ready.store(ready, Ordering::Release);
     }
 
     /// Sets remaining warmup frames before becoming ready.
     pub fn set_warmup_remaining(&self, frames: usize) {
-        self.warmup_remaining.store(frames, Ordering::Relaxed);
+        self.warmup_remaining.store(frames, Ordering::Release);
         if frames > 0 {
-            self.is_ready.store(false, Ordering::Relaxed);
+            self.is_ready.store(false, Ordering::Release);
         }
     }
 
     /// Injects a specific frame into the latest frame slot.
     pub fn push_frame(&self, frame: Frame) {
-        self.latest_frame.store(Some(Arc::new(frame)));
-        self.is_ready.store(true, Ordering::Relaxed);
+        self.sequence
+            .fetch_max(frame.sequence.saturating_add(1), Ordering::SeqCst);
+        store_frame_monotonic(&self.latest_frame, Arc::new(frame));
+        self.is_ready.store(true, Ordering::Release);
     }
 
     /// Returns the current configuration.
@@ -182,7 +223,10 @@ impl CameraManager for MockCameraManager {
     }
 
     fn is_ready(&self) -> bool {
-        self.is_ready.load(Ordering::Relaxed)
+        if self.starved.load(Ordering::Acquire) {
+            return false;
+        }
+        self.is_ready.load(Ordering::Acquire)
     }
 
     fn notify_activity(&self) {
@@ -194,14 +238,15 @@ impl CameraManager for MockCameraManager {
     }
 
     fn stop(&self) {
-        self.running.store(false, Ordering::Relaxed);
-        self.is_ready.store(false, Ordering::Relaxed);
+        self.running.store(false, Ordering::Release);
+        self.is_ready.store(false, Ordering::Release);
     }
 }
 
 impl Drop for MockCameraManager {
     fn drop(&mut self) {
-        self.running.store(false, Ordering::Relaxed);
+        self.running.store(false, Ordering::Release);
+        self.is_ready.store(false, Ordering::Release);
         if let Some(handle) = self.worker_handle.take() {
             let _ = handle.join();
         }
