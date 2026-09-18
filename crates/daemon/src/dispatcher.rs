@@ -336,6 +336,29 @@ impl ConnectionDispatcher {
         if let Some(ref pipe) = self.pipeline {
             let auth_start = Instant::now();
 
+            // 8-pre: Fail-fast rate limiting check (anti-DoS: avoid neural & camera workload if already blocked)
+            {
+                let engine = pipe.policy.lock().await;
+                if let Some(limiter) = engine.rate_limiter() {
+                    if limiter.check_only(req.uid_hint, now_ns).is_err() {
+                        warn!(
+                            uid = req.uid_hint,
+                            "UID has exceeded rate limit quota; rejecting request immediately"
+                        );
+                        let encoded = self.build_response(
+                            req.request_id,
+                            Verdict::ProtocolError,
+                            ReasonClass::RateLimited,
+                            now_ns,
+                        )?;
+                        return Ok(ResponseOutput {
+                            encoded_response: encoded,
+                            completion_error: None,
+                        });
+                    }
+                }
+            }
+
             // 8a: Verify camera readiness
             if !pipe.camera.is_ready() {
                 warn!("Camera is not ready; rejecting auth request");
