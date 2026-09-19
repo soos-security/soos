@@ -70,6 +70,7 @@ Best-effort telemetry notification sent by PAM following password failures:
 - `version: u8`: Protocol version (must be 1).
 - `kind: EventKind`: `PasswordFailed`.
 - `request_id: Option<RequestId>`: Related authentication request if applicable.
+- `uid: Option<u32>`: Target POSIX user ID whose authentication failed, if known.
 - `service: String`: PAM service name.
 - `timestamp_monotonic_ns: u64`: Monotonic timestamp.
 

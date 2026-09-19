@@ -694,3 +694,45 @@ fn test_pam_ipc_detects_truncated_response() {
 
     let _ = server_handle_hdr.join();
 }
+
+/// Sub-issue #29.2: PasswordFailed event notification must include target user UID in payload.
+#[test]
+fn test_password_failed_event_includes_uid() {
+    let tmp = tempdir().expect("tempdir created");
+    let sock_path = tmp.path().join("pw_failed_uid.sock");
+    let listener = UnixListener::bind(&sock_path).expect("bound test socket");
+
+    let expected_uid = 1001u32;
+
+    let server_handle = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("client connected");
+
+        let mut len_buf = [0u8; 4];
+        stream.read_exact(&mut len_buf).expect("read length");
+        let size = u32::from_be_bytes(len_buf) as usize;
+
+        let mut full_buf = vec![0u8; size + 4];
+        full_buf[..4].copy_from_slice(&len_buf);
+        stream.read_exact(&mut full_buf[4..]).expect("read body");
+
+        let event: Event = decode(&full_buf).expect("decoded event");
+        assert_eq!(event.version, CURRENT_VERSION);
+        assert_eq!(event.kind, EventKind::PasswordFailed);
+        assert_eq!(event.service, "pam_soos");
+        assert_eq!(
+            event.uid,
+            Some(expected_uid),
+            "Event payload must contain target UID"
+        );
+    });
+
+    let config = pam_soos::config::PamConfig {
+        socket_path: sock_path,
+        ..Default::default()
+    };
+
+    let result = pam_soos::ipc::notify_event(&config, expected_uid, EventKind::PasswordFailed);
+    assert!(result.is_ok());
+
+    let _ = server_handle.join();
+}

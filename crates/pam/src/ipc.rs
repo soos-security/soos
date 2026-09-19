@@ -237,7 +237,7 @@ pub fn authenticate(config: &PamConfig, uid: u32) -> Result<Verdict, IpcError> {
 }
 
 /// Transmits a best-effort telemetry event notification to the daemon within 20ms.
-pub fn notify_event(config: &PamConfig, _uid: u32, event_kind: EventKind) -> Result<(), IpcError> {
+pub fn notify_event(config: &PamConfig, uid: u32, event_kind: EventKind) -> Result<(), IpcError> {
     let start_time = Instant::now();
     let total_timeout = Duration::from_millis(EVENT_TIMEOUT_MS);
 
@@ -253,6 +253,7 @@ pub fn notify_event(config: &PamConfig, _uid: u32, event_kind: EventKind) -> Res
         version: CURRENT_VERSION,
         kind: event_kind,
         request_id: None,
+        uid: Some(uid),
         service: config.service.clone(),
         timestamp_monotonic_ns: monotonic_nanos(),
     };

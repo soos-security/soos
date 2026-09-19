@@ -217,6 +217,7 @@ mod tests {
             version: CURRENT_VERSION,
             kind: EventKind::PasswordFailed,
             request_id: Some([0xCD; REQUEST_ID_LEN]),
+            uid: Some(1000),
             service: "gdm".to_string(),
             timestamp_monotonic_ns: 500_000_000,
         };
@@ -226,6 +227,7 @@ mod tests {
         assert_eq!(decoded.version, evt.version);
         assert_eq!(decoded.kind, evt.kind);
         assert_eq!(decoded.request_id, evt.request_id);
+        assert_eq!(decoded.uid, evt.uid);
         assert_eq!(decoded.service, evt.service);
     }
 

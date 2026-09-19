@@ -80,6 +80,8 @@ pub struct Event {
     pub kind: EventKind,
     /// Associated facial authentication request ID, if applicable.
     pub request_id: Option<RequestId>,
+    /// Target POSIX user ID whose authentication failed, if known.
+    pub uid: Option<u32>,
     /// PAM service name.
     pub service: String,
     /// Monotonic timestamp in nanoseconds.
