@@ -1158,8 +1158,8 @@ The decision engine accepts `f32::INFINITY` as a valid biometric match, bypassin
 
 #### Sub-issues
 
-- [ ] **#33.1** — Enforce finite score checks in `evaluate()` (`decision.rs`)
-- [ ] **#33.2** — Implement LRU/Capacity bounds on `RateLimiter` (`rate_limit.rs`)
+- [x] **#33.1** — Enforce finite score checks in `evaluate()` (`decision.rs`)
+- [x] **#33.2** — Implement LRU/Capacity bounds on `RateLimiter` (`rate_limit.rs`)
 
 ### Issue #34 — fix(pam): FFI panic safety and IPC blocking timeout
 
@@ -1294,8 +1294,8 @@ graph TD
 | PKG3 | Uninstall script safely restores original PAM configuration | Integration test | ⬜ Pending |
 | PHY1 | End-to-end enrollment + verification on physical hardware | Physical test | ⬜ Pending |
 | PHY2 | PAD rejects printed photos and screen replays on real hardware | Physical test | ⬜ Pending |
-| POL1 | Decision engine explicitly rejects `f32::INFINITY` scores | Unit test | ⬜ Pending |
-| POL2 | RateLimiter evicts stale UIDs and maintains capacity bounds | Unit test | ⬜ Pending |
+| POL1 | Decision engine explicitly rejects `f32::INFINITY` scores | Unit test | ✅ Verified |
+| POL2 | RateLimiter evicts stale UIDs and maintains capacity bounds | Unit test | ✅ Verified |
 | PAM1 | OOM during parsing correctly unwinds without host abort | FFI/Integration test | ⬜ Pending |
 | PAM2 | IPC connect enforces strict timeout even if socket backlog is full | Integration test | ⬜ Pending |
 | EN9 | CLI rejects operations by unprivileged users without bypasses | Security test | ⬜ Pending |

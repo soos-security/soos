@@ -150,10 +150,7 @@ impl TestPipelineFixture {
         }
 
         let threshold_cfg = ThresholdConfig::default();
-        let rate_cfg = RateLimitConfig {
-            max_attempts: rate_limit_max,
-            window_duration_ns: 60_000_000_000,
-        };
+        let rate_cfg = RateLimitConfig::new(rate_limit_max, 60_000_000_000);
         let rate_limiter = RateLimiter::new(rate_cfg);
         let policy = Arc::new(RwLock::new(AuthorizationEngine::with_rate_limiter(
             threshold_cfg,

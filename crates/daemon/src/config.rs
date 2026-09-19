@@ -184,6 +184,7 @@ struct ThresholdConfigFile {
 struct RateLimitConfigFile {
     max_attempts: Option<u32>,
     window_duration_secs: Option<u64>,
+    max_tracked_uids: Option<usize>,
 }
 
 impl DaemonConfig {
@@ -282,6 +283,9 @@ impl DaemonConfig {
                 if let Some(secs) = rl.window_duration_secs {
                     config.pipeline.rate_limit.window_duration_ns =
                         secs.saturating_mul(1_000_000_000);
+                }
+                if let Some(max_uids) = rl.max_tracked_uids {
+                    config.pipeline.rate_limit.max_tracked_uids = max_uids;
                 }
             }
         }

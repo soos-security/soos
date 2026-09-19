@@ -60,6 +60,28 @@ fn test_decision_deny_score_nan() {
 }
 
 #[test]
+fn test_decision_deny_score_infinity() {
+    let thresholds = ThresholdConfig::default();
+    let ctx = AuthContext::new(f32::INFINITY, true, 1, 1000, true);
+
+    let (verdict, reason) = evaluate_decision(&thresholds, &ctx);
+    assert_eq!(verdict, Verdict::Deny);
+    assert_eq!(reason, ReasonClass::ScoreBelowThreshold);
+    assert!(verdict.should_ignore());
+}
+
+#[test]
+fn test_decision_deny_score_neg_infinity() {
+    let thresholds = ThresholdConfig::default();
+    let ctx = AuthContext::new(f32::NEG_INFINITY, true, 1, 1000, true);
+
+    let (verdict, reason) = evaluate_decision(&thresholds, &ctx);
+    assert_eq!(verdict, Verdict::Deny);
+    assert_eq!(reason, ReasonClass::ScoreBelowThreshold);
+    assert!(verdict.should_ignore());
+}
+
+#[test]
 fn test_decision_deny_pad_failed() {
     let thresholds = ThresholdConfig::default();
     let ctx = AuthContext::new(0.95, false, 1, 1000, true);
