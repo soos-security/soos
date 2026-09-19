@@ -8,10 +8,13 @@ use nix::unistd::{Uid, User};
 use zeroize::Zeroizing;
 
 use soos_biometric_store::{BiometricStore, BiometricTemplate, MasterKey, DEFAULT_BIOMETRICS_DIR};
-use soos_camera_v4l::{CameraConfigBuilder, CameraManager, Frame, V4lCameraManager};
+use soos_camera_v4l::{
+    CameraConfigBuilder, CameraManager, Frame, MockCameraManager, V4lCameraManager,
+};
 use soos_inference_ort::{
-    BoundingBox, FaceDetection, ModelRegistry, OrtEmbeddingExtractor, OrtFaceDetector,
-    OrtLandmarkDetector, OrtPadDetector, RegistryConfig,
+    BoundingBox, FaceDetection, MockEmbeddingExtractor, MockFaceDetector, MockLandmarkDetector,
+    MockPadDetector, ModelRegistry, OrtEmbeddingExtractor, OrtFaceDetector, OrtLandmarkDetector,
+    OrtPadDetector, RegistryConfig,
 };
 use soos_protocol::Verdict;
 use soos_vision::{
@@ -527,6 +530,33 @@ pub fn build_full_service(cli: &Cli) -> Result<EnrollmentService, EnrollmentCliE
         .clone()
         .unwrap_or_else(|| PathBuf::from(DEFAULT_BIOMETRICS_DIR));
     let store = Arc::new(BiometricStore::new(bio_dir, key)?);
+
+    if cli.mock {
+        let camera_config = CameraConfigBuilder::new().build();
+        let camera: Arc<dyn CameraManager> = Arc::new(MockCameraManager::new(camera_config));
+        let detection = FaceDetection {
+            box_: BoundingBox::new(20.0, 20.0, 80.0, 80.0),
+            score: 0.95,
+        };
+        let detector = Arc::new(MockFaceDetector::new_with_detections(vec![detection]));
+        let landmarks = Arc::new(MockLandmarkDetector::new_canonical());
+        let pad = Arc::new(MockPadDetector::new_live());
+        let extractor = Arc::new(MockEmbeddingExtractor::new(128));
+        let pipeline_config = VisionPipelineConfig::default();
+        let pipeline = Arc::new(VisionPipeline::new(
+            detector,
+            landmarks,
+            pad,
+            extractor,
+            pipeline_config,
+        ));
+        return Ok(EnrollmentService::new(
+            store,
+            camera,
+            pipeline,
+            !cli.skip_root_check,
+        ));
+    }
 
     let device_path = resolve_camera_device(cli.camera_device.clone());
     let camera_config = CameraConfigBuilder::new().device_path(device_path).build();

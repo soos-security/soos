@@ -1087,4 +1087,160 @@ mod tests {
             "build_packages.sh --help must exit successfully"
         );
     }
+
+    /// Invariant: Physical Hardware End-to-End Validation Suite (Issue #31 / GitHub #70)
+    #[test]
+    fn test_physical_hardware_validation_suite_spec() {
+        let root = workspace_root();
+        let physical_dir = root.join("tests/physical");
+        assert!(
+            physical_dir.exists(),
+            "tests/physical/ directory must exist for physical validation suite"
+        );
+
+        let enrollment_script = physical_dir.join("enrollment_test.sh");
+        let pam_script = physical_dir.join("pam_integration_test.sh");
+        let multi_user_script = physical_dir.join("multi_user_test.sh");
+        let screensaver_doc = physical_dir.join("screensaver_test.md");
+        let adversarial_script = physical_dir.join("adversarial_test.sh");
+
+        assert!(
+            enrollment_script.exists(),
+            "tests/physical/enrollment_test.sh must exist (Sub-issue #31.1)"
+        );
+        assert!(
+            pam_script.exists(),
+            "tests/physical/pam_integration_test.sh must exist (Sub-issue #31.2)"
+        );
+        assert!(
+            multi_user_script.exists(),
+            "tests/physical/multi_user_test.sh must exist (Sub-issue #31.3)"
+        );
+        assert!(
+            screensaver_doc.exists(),
+            "tests/physical/screensaver_test.md must exist (Sub-issue #31.4)"
+        );
+        assert!(
+            adversarial_script.exists(),
+            "tests/physical/adversarial_test.sh must exist (Sub-issue #31.5)"
+        );
+
+        // Verify executable permissions on shell scripts
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            for script in [
+                &enrollment_script,
+                &pam_script,
+                &multi_user_script,
+                &adversarial_script,
+            ] {
+                let meta = fs::metadata(script).expect("script metadata");
+                assert_ne!(
+                    meta.permissions().mode() & 0o111,
+                    0,
+                    "Script {:?} must have executable permissions",
+                    script.file_name()
+                );
+            }
+        }
+
+        // Verify shell script safety headers
+        for script in [
+            &enrollment_script,
+            &pam_script,
+            &multi_user_script,
+            &adversarial_script,
+        ] {
+            let content = fs::read_to_string(script).expect("read script");
+            assert!(
+                content.starts_with("#!/usr/bin/env bash") || content.starts_with("#!/bin/bash"),
+                "Script {:?} must start with bash shebang",
+                script.file_name()
+            );
+            assert!(
+                content.contains("set -euo pipefail"),
+                "Script {:?} must enable strict bash error flags 'set -euo pipefail'",
+                script.file_name()
+            );
+        }
+
+        // Verify screensaver_test.md contains required display managers and operational procedures
+        let doc_content = fs::read_to_string(&screensaver_doc).expect("read screensaver_test.md");
+        for dm in ["swaylock", "hyprlock", "gdm", "login", "sudo"] {
+            assert!(
+                doc_content.contains(dm),
+                "screensaver_test.md must document operational validation for '{}'",
+                dm
+            );
+        }
+
+        // Verify enrollment_test.sh covers the full lifecycle
+        let enroll_content =
+            fs::read_to_string(&enrollment_script).expect("read enrollment_test.sh");
+        for cmd in ["enroll", "verify", "list", "delete"] {
+            assert!(
+                enroll_content.contains(cmd),
+                "enrollment_test.sh must exercise '{}' subcommand",
+                cmd
+            );
+        }
+
+        // Verify pam_integration_test.sh tests nominal PAM_SUCCESS and password fallback
+        let pam_content = fs::read_to_string(&pam_script).expect("read pam_integration_test.sh");
+        assert!(
+            pam_content.contains("PAM_SUCCESS") || pam_content.contains("pam_soos.so"),
+            "pam_integration_test.sh must test PAM module integration"
+        );
+        assert!(
+            pam_content.contains("PAM_IGNORE") || pam_content.contains("password"),
+            "pam_integration_test.sh must test fallback to password authentication"
+        );
+
+        // Verify multi_user_test.sh covers multi-user and cross-user rejection
+        let multi_content =
+            fs::read_to_string(&multi_user_script).expect("read multi_user_test.sh");
+        assert!(
+            multi_content.contains("cross")
+                || multi_content.contains("User B")
+                || multi_content.contains("mismatch"),
+            "multi_user_test.sh must test cross-user isolation and rejection"
+        );
+
+        // Verify adversarial_test.sh covers presentation attacks
+        let adv_content =
+            fs::read_to_string(&adversarial_script).expect("read adversarial_test.sh");
+        for attack in ["photo", "screen", "video"] {
+            assert!(
+                adv_content.to_lowercase().contains(attack),
+                "adversarial_test.sh must evaluate presentation attack type '{}'",
+                attack
+            );
+        }
+
+        // Verify all scripts handle --help cleanly with exit code 0
+        for script in [
+            &enrollment_script,
+            &pam_script,
+            &multi_user_script,
+            &adversarial_script,
+        ] {
+            let output = std::process::Command::new("bash")
+                .arg(script)
+                .arg("--help")
+                .output()
+                .expect("execute script --help");
+            assert!(
+                output.status.success(),
+                "Script {:?} --help must exit with status 0",
+                script.file_name()
+            );
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                !stdout.trim().is_empty(),
+                "Script {:?} --help must print usage information to stdout",
+                script.file_name()
+            );
+        }
+    }
 }

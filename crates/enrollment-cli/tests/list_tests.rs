@@ -106,6 +106,7 @@ fn test_list_command_works_without_camera_or_models() {
         models_dir: Some(temp.path().join("nonexistent_models")),
         camera_device: Some(std::path::PathBuf::from("/dev/nonexistent_camera")),
         skip_root_check: true,
+        mock: false,
         command: soos_enrollment_cli::args::Commands::List(ListArgs::default()),
     };
 

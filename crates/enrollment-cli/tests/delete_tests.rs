@@ -159,6 +159,7 @@ fn test_delete_command_works_with_store_only() {
         models_dir: Some(temp.path().join("nonexistent_models")),
         camera_device: Some(std::path::PathBuf::from("/dev/nonexistent_camera")),
         skip_root_check: true,
+        mock: false,
         command: soos_enrollment_cli::args::Commands::Delete(DeleteArgs {
             uid: Some(4000),
             username: None,

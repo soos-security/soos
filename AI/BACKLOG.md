@@ -1092,27 +1092,27 @@ The enrollment CLI uses incorrect model registry IDs (`face_detector` instead of
 
 #### Sub-issues
 
-- [ ] **#31.1** — Create `tests/physical/enrollment_test.sh`
+- [x] **#31.1** — Create `tests/physical/enrollment_test.sh`
   - Full enrollment lifecycle: enroll → verify → list → delete
   - On physical hardware with real USB webcam
   - Acceptance: Enrollment completes with real face capture and model inference
 
-- [ ] **#31.2** — Create `tests/physical/pam_integration_test.sh`
+- [x] **#31.2** — Create `tests/physical/pam_integration_test.sh`
   - Install `pam_soos.so` in test PAM stack
   - Start `soos-daemon` with real camera
   - Run `pamtester` with enrolled user
   - Verify `PAM_SUCCESS` on genuine face, `PAM_IGNORE` on absent/wrong face
   - Test password fallback when daemon is stopped
 
-- [ ] **#31.3** — Create `tests/physical/multi_user_test.sh`
+- [x] **#31.3** — Create `tests/physical/multi_user_test.sh`
   - Enroll 2+ users, verify each user authenticates only as themselves
   - Test cross-user rejection (user A's face doesn't authenticate as user B)
 
-- [ ] **#31.4** — Create `tests/physical/screensaver_test.md` (manual test procedure)
+- [x] **#31.4** — Create `tests/physical/screensaver_test.md` (manual test procedure)
   - Test with `swaylock`, `hyprlock`, `gdm`, `login` TTY, `sudo`
   - Document expected behavior for each display manager
 
-- [ ] **#31.5** — Create `tests/physical/adversarial_test.sh`
+- [x] **#31.5** — Create `tests/physical/adversarial_test.sh`
   - Test with printed photo, phone screen, video replay
   - Verify PAD model rejects all presentation attacks
   - Document false-accept rates
