@@ -1,76 +1,73 @@
-# Plan Evaluation Report — Issue #30: Symlink Safety and Atomic Operations in Evidence Store
+# Plan Evaluation Report — Issue #31: Physical Hardware End-to-End Validation Suite (#70)
 
-- **Target Issue**: Issue #30 (`fix/evidence-store-safety`, GitHub Issue #69)
-- **Evaluator**: Independent Plan Evaluator Sub-Agent
-- **Date**: 2026-09-19
-- **Status**: Complete
-
----
-
-## 1. Context Ingestion Audit
-
-| Source Document | Status | Notes |
-| :--- | :--- | :--- |
-| `AI/ARCHITECTURE.md` | Ingested | Verified §9 Evidence Snapshots, `/var/lib/soos/evidence` invariants, permissions `0700`/`0600` |
-| `AI/DECISIONS.md` | Ingested | Verified ADR-001..ADR-012 constraints |
-| `AI/BACKLOG.md` | Ingested | Verified Issue #30 sub-issues #30.1, #30.2, and #30.3 |
-| `AI/VERIFICATION_MATRIX.md` | Ingested | Verified acceptance criteria E1..E5, symlink & concurrent safety |
-| `Docs/SECURITY_AND_QUALITY_GUIDELINES.md` | Ingested | Invariants on panic safety, bounds, zeroization, atomic file creation |
-| `AGENTS.md` | Ingested | Strict test integrity, `#![forbid(unsafe_code)]`, and English policy |
+**Evaluation Date**: 2026-09-19  
+**Target Issue**: Issue #31 / GitHub #70 (`test/physical-hardware-validation`)  
+**Evaluator**: Plan Evaluator Sub-Agent (`plan-evaluator`)  
+**Scope**: Physical hardware end-to-end validation suite, including enrollment lifecycle, PAM stack integration, multi-user isolation, screensaver manual test protocol, adversarial PAD testing, and invariant test contract.
 
 ---
 
-## 2. Pillar-by-Pillar Compliance Assessment
+## 1. Evaluation Against Architectural Pillars
 
 ### Pillar 1: Architectural Alignment & Threat Model
-- **Evaluation**: PASS
-- **Details**:
-  - Respects `/var/lib/soos/evidence/` storage hierarchy with `0700` directories and `0600` encrypted files.
-  - Mitigates local unprivileged symlink attacks: pre-creation verification via `symlink_metadata` ensures date directories and root base directories cannot be hijacked via symlinks to escape `/var/lib/soos/evidence/`.
-  - Ensures atomic creation of files with mode `0600` from inception (`O_CREAT | O_EXCL`), closing world/group-readable exposure windows.
+- **Boundary Separation**: The test suite strictly respects the separation between unprivileged PAM caller (`pam_soos.so`) and privileged daemon (`soos-daemon`).
+- **Socket & Permissions**: In physical PAM integration tests, the daemon listens on a dedicated Unix Domain Socket with mode `0660`, verified credentials, and isolated runtime paths.
+- **Fail-Closed Fallback**: Tests explicitly verify that offline daemons, missing cameras, or unrecognized faces degrade cleanly to password authentication.
+- **Storage Isolation**: The enrollment and multi-user validation suites verify template encryption and proper file permissions (mode `0700` directories, `0600` files).
+- **Assessment**: **PASSED**
 
 ### Pillar 2: PAM Real-Time Latency & Concurrency
-- **Evaluation**: PASS
-- **Details**:
-  - Evidence store is utilized exclusively by `soos-daemon` during background processing; zero impact on PAM synchronous 200-250ms authentication latency.
-  - Serialization of retention rotation using RAII `nix::fcntl::Flock` on the evidence base directory prevents concurrent rotation races and avoids file system corruption across daemon restarts.
+- **Zero Tokio in PAM**: Confirms PAM module remains synchronous without async runtimes.
+- **Deadline Adherence**: Tests verify that nominal facial verification succeeds within the 200–250ms deadline without prompting for passwords.
+- **Output Isolation**: PAM module execution generates zero stdout/stderr stream pollution that could destabilize display managers or lock screens.
+- **Assessment**: **PASSED**
 
 ### Pillar 3: Panic Safety & Fail-Closed Behavior
-- **Evaluation**: PASS
-- **Details**:
-  - `#![forbid(unsafe_code)]` remains strictly enforced in `crates/evidence-store`.
-  - Zero `unwrap()` or `expect()` in production code.
-  - Uses `nix::fcntl::Flock`, which provides a 100% safe RAII lock guard over `std::fs::File`.
-  - Systematic fail-closed error handling returning typed `EvidenceStoreError` (`InvalidPath`, `InvalidUid`, `Io`).
+- **FFI Safety**: Module maintains `catch_unwind` wrapping all PAM entry points.
+- **Fail-Closed Invariant**: Rejection of absent/wrong faces returns `PAM_IGNORE`, never converting an error or non-match into `PAM_SUCCESS`.
+- **Process Robustness**: Daemon crash or abnormal termination mid-auth is tested to ensure immediate fallback to password authentication.
+- **Assessment**: **PASSED**
 
 ### Pillar 4: Dependency Isolation & Banned Crates
-- **Evaluation**: PASS
-- **Details**:
-  - Zero banned dependencies (no OpenCV, no nokhwa).
-  - Uses existing workspace dependency `nix` with safe `fs` features for RAII directory locking.
-  - Zero network dependencies, upholding Criterion E5.
+- **Banned Crates**: Strictly zero `opencv` or `nokhwa`.
+- **Camera Capture**: Hardware access uses `v4l` V4L2 MMAP streaming or deterministic `MockCameraManager` simulation.
+- **Code Safety**: `#![forbid(unsafe_code)]` remains strictly enforced across all business crates.
+- **Assessment**: **PASSED**
 
 ### Pillar 5: Data Confidentiality & Zeroization
-- **Evaluation**: PASS
-- **Details**:
-  - Encrypted snapshots continue using AES-256-GCM with master key protection.
-  - Temporary files created with `mode(0o600)` and `create_new(true)`.
-  - Master key loading and creation strictly rejects symlinks and wipes temporary memory buffers.
-  - Excessively large or negative (sign-bit set) UIDs are rejected before any disk persistence or cap tracking.
+- **Credential Protection**: Zero passwords logged, transmitted over IPC, or stored in plaintext.
+- **Temporary State Cleanliness**: All test scripts register robust traps (`trap cleanup EXIT INT TERM`) to securely remove temporary biometric templates, socket files, and master keys upon script completion or interrupt.
+- **Assessment**: **PASSED**
 
 ### Pillar 6: Test Integrity & TDD Contracts
-- **Evaluation**: PASS
-- **Details**:
-  - Three explicit contractual tests authored in Phase 2:
-    - `test_evidence_store_rejects_symlink_date_directory` (#30.1)
-    - `test_concurrent_rotation_does_not_corrupt` (#30.2)
-    - `test_evidence_store_rejects_path_traversal_uid` (#30.3)
-  - Immutable test contracts: tests are immutable acceptance criteria, with zero weakening allowed.
+- **Contractual Pre-Implementation Testing**: An architectural invariant test (`test_physical_hardware_validation_suite_spec`) will be authored in `tests/invariants/src/lib.rs` during Phase 2 (Tester Agent) BEFORE production implementation, asserting that all required scripts, execution bits, and verification sections exist.
+- **Red Phase Verification**: The invariant test will be run and verified to fail initially prior to implementation.
+- **Zero Test Weakening**: Strict enforcement that tests authored during Phase 2 will not be weakened, altered, or bypassed.
+- **Assessment**: **PASSED**
 
 ---
 
-## 3. Plan Evaluator Conclusion
+## 2. Risk Analysis & Mitigation
 
-The implementation plan satisfies all zero-trust architectural invariants, panic safety constraints, concurrency guarantees, and test integrity requirements.
+1. **Hardware Webcam Availability in Headless / CI Environments**:
+   - *Risk*: Running physical hardware tests on headless CI runners lacking `/dev/video*` devices could cause false test failures or hangs.
+   - *Mitigation*: All physical validation shell scripts (`enrollment_test.sh`, `pam_integration_test.sh`, `multi_user_test.sh`, `adversarial_test.sh`) will automatically detect available `/dev/video*` devices, support explicit device override flags (`--device <path>`), and provide a deterministic `--mock` flag or fallback mode to enable automated regression testing on headless systems without hardware webcams.
 
-**VALIDATION_VERDICT: APPROVED**
+2. **System PAM Configuration Safety**:
+   - *Risk*: Inadvertently corrupting `/etc/pam.d/common-auth` or `/etc/pam.d/system-auth` on developer host.
+   - *Mitigation*: `pam_integration_test.sh` utilizes an isolated, standalone PAM service definition (`/etc/pam.d/test-soos-physical` or dedicated test service), leaving host distribution PAM configurations completely untouched.
+
+---
+
+## 3. Evaluation Verdict
+
+```text
+===================================================================
+VALIDATION_VERDICT: APPROVED
+===================================================================
+The implementation plan for Issue #31: Physical Hardware End-to-End
+Validation Suite (#70) strictly complies with all 6 architectural
+pillars, security invariants, and test integrity mandates.
+Execution may proceed directly to Phase 2 (Tester Sub-Agent).
+===================================================================
+```

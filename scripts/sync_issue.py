@@ -95,6 +95,7 @@ BRANCH_TO_ISSUE = {
     "fix/policy-concurrency": 28,
     "fix/pam-uid-resolution": 29,
     "fix/evidence-store-safety": 30,
+    "test/physical-hardware-validation": 31,
 }
 
 

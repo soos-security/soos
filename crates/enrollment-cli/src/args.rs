@@ -44,6 +44,10 @@ pub struct Cli {
     #[arg(long, global = true, hide = true)]
     pub skip_root_check: bool,
 
+    /// Force mock camera and synthetic neural inference (for testing without hardware)
+    #[arg(long, global = true)]
+    pub mock: bool,
+
     /// Subcommand to execute
     #[command(subcommand)]
     pub command: Commands,

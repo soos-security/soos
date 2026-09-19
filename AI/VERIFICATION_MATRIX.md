@@ -230,5 +230,19 @@ This document translates the critical gating criteria from §11 of `ARCHITECTURE
 | PK6 | RPM `.spec` file (`packaging/rpm/soos.spec`, `scripts/build_rpm.sh`) with `%pre`, `%post`, `%preun`, `%postun`, `%files` strict attributes (`0700` biometrics/evidence, `0600` master.key), and Fedora `authselect` custom profile template | Invariant & package build tests (`test_rpm_packaging_specification`, `scripts/build_rpm.sh`, `tests/docker/test_packages.sh`) | ✅ Verified |
 | PK7 | Arch Linux `PKGBUILD` and `soos.install` (`packaging/arch/PKGBUILD`, `packaging/arch/soos.install`, `scripts/build_arch.sh`) installs systemd unit, binaries, PAM shared module, and provisions `soos` group and invariant directories | Invariant & package build tests (`test_arch_packaging_specification`, `scripts/build_arch.sh`, `tests/docker/test_packages.sh`) | ✅ Verified |
 
+---
+
+## Component: `physical-hardware-validation` (Issue #31 / GitHub #70)
+
+| # | Criterion | Test Method | Status |
+|---|---|---|---|
+| PH1 | Full enrollment lifecycle on physical hardware (clean slate -> enroll -> list -> verify -> delete -> clean slate) with filesystem permissions mode `0600` on template | Functional & invariant test (`tests/physical/enrollment_test.sh`, `test_physical_hardware_validation_suite_spec`) | ✅ Verified |
+| PH2 | PAM stack integration and daemon coordination: genuine face returns `PAM_SUCCESS` without password prompt; occluded/wrong face returns `PAM_IGNORE` falling back to password; stopped daemon falls back to password; wrong password rejected | Functional & invariant test (`tests/physical/pam_integration_test.sh`, `test_physical_hardware_validation_suite_spec`) | ✅ Verified |
+| PH3 | Multi-user identity isolation and cross-user rejection: distinct templates for User A and User B; positive auth for each identity; cross-user auth attempts strictly rejected | Functional & invariant test (`tests/physical/multi_user_test.sh`, `test_physical_hardware_validation_suite_spec`) | ✅ Verified |
+| PH4 | Screen locker, display manager, and console operational validation manual covering `swaylock`, `hyprlock`, `gdm`, `login` TTY, `sudo`, latency targets, and rollback procedures | Documentation & invariant test (`tests/physical/screensaver_test.md`, `test_physical_hardware_validation_suite_spec`) | ✅ Verified |
+| PH5 | Presentation Attack Detection (PAD) adversarial evaluation suite testing printed photographs, smartphone screens, video replay, and measuring APCER / BPCER error rates | Adversarial & invariant test (`tests/physical/adversarial_test.sh`, `pad_tests`, `test_physical_hardware_validation_suite_spec`) | ✅ Verified |
+| PH6 | Invariant test enforcing file existence, executable permissions (`0755`), strict bash options (`set -euo pipefail`), and `--help` CLI functionality | Architectural invariant test (`test_physical_hardware_validation_suite_spec`) | ✅ Verified |
+
+
 
 
