@@ -88,6 +88,46 @@ pub struct Event {
     pub timestamp_monotonic_ns: u64,
 }
 
+impl zeroize::Zeroize for Request {
+    fn zeroize(&mut self) {
+        self.version.zeroize();
+        self.kind = RequestKind::Auth;
+        self.request_id.zeroize();
+        self.uid_hint.zeroize();
+        self.service.zeroize();
+        self.deadline_monotonic_ns.zeroize();
+    }
+}
+
+impl Drop for Request {
+    fn drop(&mut self) {
+        use zeroize::Zeroize;
+        self.zeroize();
+    }
+}
+
+impl zeroize::Zeroize for Event {
+    fn zeroize(&mut self) {
+        self.version.zeroize();
+        self.kind = EventKind::PasswordFailed;
+        if let Some(ref mut rid) = self.request_id {
+            rid.zeroize();
+        }
+        if let Some(ref mut uid) = self.uid {
+            uid.zeroize();
+        }
+        self.service.zeroize();
+        self.timestamp_monotonic_ns.zeroize();
+    }
+}
+
+impl Drop for Event {
+    fn drop(&mut self) {
+        use zeroize::Zeroize;
+        self.zeroize();
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Response Types
 // ---------------------------------------------------------------------------

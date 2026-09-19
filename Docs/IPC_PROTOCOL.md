@@ -136,3 +136,21 @@ In `pam_soos.so`, the synchronous IPC client (`crates/pam/src/ipc.rs`) enforces 
 - Both the 4-byte Big-Endian length header and the variable-length body payload are read using a byte-counted stream reader.
 - If the socket connection is severed prematurely before the declared frame is fully received, the client detects the discrepancy and raises `IpcError::TruncatedResponse { expected, received }`.
 - In accordance with fail-closed security invariants, any truncated response degrades safely to `PAM_IGNORE`.
+
+---
+
+## 8. Client Connection Timeout & Memory Zeroization
+
+### Non-Blocking Connection with Timeout
+To prevent `pam_soos.so` from blocking indefinitely if `soos-daemon` is unresponsive or its listen queue is full, the client does not use a blocking connect:
+1. `connect_with_timeout` creates an `AF_UNIX` socket with `SOCK_NONBLOCK` and `SOCK_CLOEXEC`.
+2. `libc::connect` is called; if it returns `EINPROGRESS`, `libc::poll` monitors the socket for writability within the remaining time budget.
+3. Socket status is verified using `getsockopt` (`SO_ERROR`).
+4. Upon successful connection, `stream.set_nonblocking(false)` restores blocking mode for read and write timeouts (`SO_RCVTIMEO` / `SO_SNDTIMEO`).
+
+### Memory Zeroization
+All sensitive payloads and buffers in the IPC pipeline are scrubbed on drop:
+- `Request` implements `zeroize::Zeroize` and `Drop`, zeroing `request_id`, `service`, and metadata.
+- `Response` implements `zeroize::Zeroize` and `Drop`, resetting `verdict` to `Deny` and zeroing `request_id` and timestamps.
+- Raw message buffers (`encoded`, `len_buf`, `full_buf`) are wrapped in `zeroize::Zeroizing` to ensure cryptographic hygiene.
+

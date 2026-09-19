@@ -1463,6 +1463,7 @@ dependencies = [
  "pam-bindings",
  "soos-protocol",
  "tempfile",
+ "zeroize",
 ]
 
 [[package]]

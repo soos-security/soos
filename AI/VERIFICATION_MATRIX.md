@@ -48,7 +48,7 @@ This document translates the critical gating criteria from §11 of `ARCHITECTURE
 |---|---|---|---|
 | PA1 | Returns `PAM_IGNORE` when daemon is unavailable | Integration test (`test_ipc_offline_daemon_returns_ignore`), Docker `pamtester` | ☑ Validated |
 | PA2 | Returns `PAM_IGNORE` on timeout (> 250ms) | Simulated slow daemon test (`test_ipc_slow_daemon_timeout`), Docker T2/T3 | ✅ Verified |
-| PA3 | `catch_unwind` wraps all FFI entry points | Code review & panic tests | ☑ Validated |
+| PA3 | `catch_unwind` wraps all FFI entry points and argument parsing (`pam_sm_*`, `parse_argv`, `parse_cstrs`) | Unit & integration tests (`panic_safety_returns_pam_ignore`, `authenticate_catches_parse_argv_panics`, `test_c_abi_all_entry_points_panic_safe`) | ✅ Verified |
 | PA4 | NEVER starts Tokio runtime | Invariant test (`test_pam_crate_has_no_tokio_dependency`) | ☑ Validated |
 | PA5 | Zero `unwrap()` or `expect()` in production code | Invariant test (`test_pam_crate_has_no_unwraps_or_expects`) | ☑ Validated |
 | PA6 | Neither reads nor transmits passwords | Invariant test & code audit | ☑ Validated |
@@ -60,6 +60,8 @@ This document translates the critical gating criteria from §11 of `ARCHITECTURE
 | PA12 | Syslog panic logging on caught panics without secret leakage | Unit & integration tests (`test_syslog_panic_message_formatting`, `test_syslog_panic_message_sanitization`, `test_syslog_log_panic_execution`, `test_pam_crate_has_syslog_panic_logging_without_secrets`) | ✅ Verified |
 | PA13 | Dynamic buffer growth for POSIX `getpwnam_r` resolving users with LDAP/AD backends | Unit & retry tests (`uid_resolution_tests::test_getpwnam_r_handles_erange_retry`, `uid_resolution_tests::test_getpwnam_r_caps_at_max_buffer_size`, `uid_resolution_tests::test_getpwnam_r_nominal_resolution`, `uid_resolution_tests::test_getpwnam_r_nonexistent_user_returns_none`) | ✅ Verified |
 | PA14 | Telemetry `PasswordFailed` event payload includes target `uid` for evidence snapshot attribution | Unit & integration tests (`ipc_tests::test_password_failed_event_includes_uid`, `pipeline_integration_tests::test_12_4_password_failed_event_captures_evidence_snapshot`) | ✅ Verified |
+| PA15 | Non-blocking socket connect with strict timeout budget: saturated listen backlog or frozen daemon times out within budget (< 250ms) and fails closed to `PAM_IGNORE` | Integration test (`ipc_tests::test_ipc_connect_timeout_frozen_daemon`) | ✅ Verified |
+| PA16 | Memory zeroization of IPC requests, nonces, and buffers: `Request` and `Event` implement `Zeroize` on `Drop`, and PAM IPC buffers are zeroized upon deallocation | Unit & integration tests (`ipc_tests::test_request_and_event_zeroize_on_drop`) | ✅ Verified |
 
 ---
 
@@ -258,6 +260,12 @@ This document translates the critical gating criteria from §11 of `ARCHITECTURE
 | DV5 | Comprehensive distribution deployment, operational verification, and emergency recovery manual covering Debian/Ubuntu, Fedora/RHEL, and Arch Linux | Documentation & invariant test (`Docs/DISTRIBUTION_DEPLOYMENT.md`, `test_distro_validation_suite_spec`) | ✅ Verified |
 | DV6 | Automated architectural security invariant test asserting distribution validation suite presence, executable permissions (`0755`), strict bash options (`set -euo pipefail`), CLI `--help` functionality, and acceptance criteria coverage | Architectural invariant test (`test_distro_validation_suite_spec`) | ✅ Verified |
 
+---
 
+## Component: `pam-ffi-timeout` (Issue #34 / GitHub #73)
 
-
+| # | Criterion | Test Method | Status |
+|---|---|---|---|
+| PFT1 | FFI Panic Safety: All exported PAM entry points (`pam_sm_authenticate`, `pam_sm_setcred`, `pam_sm_acct_mgmt`, `pam_sm_chauthtok`, `pam_sm_open_session`, `pam_sm_close_session`) and argument parsing (`parse_argv`, `parse_cstrs`) are wrapped in `catch_unwind` and systematically return `PAM_IGNORE` on panic | Unit & integration tests (`test_c_abi_all_entry_points_panic_safe`, `authenticate_catches_parse_argv_panics`, `panic_safety_returns_pam_ignore`) | ✅ Verified |
+| PFT2 | Non-blocking IPC connect timeout: `connect_with_timeout` uses POSIX `poll` to enforce configured latency budget (`timeout_ms`), preventing unbounded blocking on frozen daemon sockets | Integration test (`ipc_tests::test_ipc_connect_timeout_frozen_daemon`) | ✅ Verified |
+| PFT3 | Memory Zeroization: `Request` and `Event` implement `zeroize::Zeroize` and `Drop`, and temporary IPC buffers (`request_id`, `encoded`, `full_buf`) are scrubbed on drop | Unit & integration test (`ipc_tests::test_request_and_event_zeroize_on_drop`) | ✅ Verified |

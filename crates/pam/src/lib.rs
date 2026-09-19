@@ -118,8 +118,29 @@ impl SoosPam {
 
 impl PamHooks for SoosPam {
     fn sm_authenticate(pamh: &mut PamHandle, args: Vec<&CStr>, _flags: PamFlag) -> PamResultCode {
-        let config = parse_cstrs(args);
-        Self::authenticate_with_config(Some(pamh), &config)
+        syslog::init_panic_hook();
+
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            let config = parse_cstrs(args);
+            Self::authenticate_with_config(Some(pamh), &config)
+        }));
+
+        match result {
+            Ok(code) => code,
+            Err(payload) => {
+                let location = syslog::take_panic_location();
+                let summary = if let Some(s) = payload.downcast_ref::<&str>() {
+                    *s
+                } else if let Some(s) = payload.downcast_ref::<String>() {
+                    s.as_str()
+                } else {
+                    "unspecified panic payload in sm_authenticate"
+                };
+
+                syslog::log_panic(summary, location.as_deref());
+                PamResultCode::PAM_IGNORE
+            }
+        }
     }
 
     fn sm_setcred(_pamh: &mut PamHandle, _args: Vec<&CStr>, _flags: PamFlag) -> PamResultCode {
@@ -217,12 +238,39 @@ pub fn resolve_username_to_uid_with_bounds(
 // PAM Entry Points (C ABI)
 // ---------------------------------------------------------------------------
 
+/// Safely executes an entry point closure within `catch_unwind`, ensuring no panic escapes across the C ABI.
+///
+/// Any caught panic is logged to syslog with panic location and payload, systematically returning `PAM_IGNORE`.
+fn catch_c_entry<F: FnOnce() -> i32>(f: F) -> i32 {
+    syslog::init_panic_hook();
+
+    let result = catch_unwind(AssertUnwindSafe(f));
+
+    match result {
+        Ok(code) => code,
+        Err(payload) => {
+            let location = syslog::take_panic_location();
+            let summary = if let Some(s) = payload.downcast_ref::<&str>() {
+                *s
+            } else if let Some(s) = payload.downcast_ref::<String>() {
+                s.as_str()
+            } else {
+                "unspecified panic payload in PAM C entry point"
+            };
+
+            syslog::log_panic(summary, location.as_deref());
+            PAM_IGNORE
+        }
+    }
+}
+
 /// Primary authentication entry point called by Linux-PAM.
 ///
 /// # Safety
 ///
 /// Invoked by Linux-PAM via the C ABI. `pamh` is supplied by PAM. If non-null,
 /// it is forwarded to `SoosPam`. `argv` points to an array of `argc` C strings.
+/// Entire execution including argument parsing is wrapped in `catch_unwind`.
 #[allow(
     clippy::not_unsafe_ptr_arg_deref,
     reason = "Exported C ABI entry point invoked by Linux-PAM; raw pointers are guarded against null and unbounded reads"
@@ -234,20 +282,22 @@ pub extern "C" fn pam_sm_authenticate(
     argc: i32,
     argv: *const *const u8,
 ) -> i32 {
-    let pamh_opt = if pamh.is_null() {
-        None
-    } else {
-        // SAFETY: pamh was verified non-null and is a valid PAM handle.
-        unsafe { pamh.as_mut() }
-    };
+    catch_c_entry(|| {
+        let pamh_opt = if pamh.is_null() {
+            None
+        } else {
+            // SAFETY: pamh was verified non-null and is a valid PAM handle.
+            unsafe { pamh.as_mut() }
+        };
 
-    // SAFETY: argv points to argc pointers passed across the C ABI.
-    let config = unsafe { config::parse_argv(argc, argv) };
+        // SAFETY: argv points to argc pointers passed across the C ABI; wrapped in catch_unwind to prevent unwinding across FFI.
+        let config = unsafe { config::parse_argv(argc, argv) };
 
-    match SoosPam::authenticate_with_config(pamh_opt, &config) {
-        PamResultCode::PAM_SUCCESS => PAM_SUCCESS,
-        _ => PAM_IGNORE,
-    }
+        match SoosPam::authenticate_with_config(pamh_opt, &config) {
+            PamResultCode::PAM_SUCCESS => PAM_SUCCESS,
+            _ => PAM_IGNORE,
+        }
+    })
 }
 
 /// Credential management entry point called by Linux-PAM.
@@ -260,7 +310,7 @@ pub extern "C" fn pam_sm_setcred(
     _argc: i32,
     _argv: *const *const u8,
 ) -> i32 {
-    PAM_IGNORE
+    catch_c_entry(|| PAM_IGNORE)
 }
 
 /// Account management entry point called by Linux-PAM.
@@ -271,7 +321,7 @@ pub extern "C" fn pam_sm_acct_mgmt(
     _argc: i32,
     _argv: *const *const u8,
 ) -> i32 {
-    PAM_IGNORE
+    catch_c_entry(|| PAM_IGNORE)
 }
 
 /// Authentication token update entry point called by Linux-PAM.
@@ -282,7 +332,7 @@ pub extern "C" fn pam_sm_chauthtok(
     _argc: i32,
     _argv: *const *const u8,
 ) -> i32 {
-    PAM_IGNORE
+    catch_c_entry(|| PAM_IGNORE)
 }
 
 /// Session open entry point called by Linux-PAM.
@@ -293,7 +343,7 @@ pub extern "C" fn pam_sm_open_session(
     _argc: i32,
     _argv: *const *const u8,
 ) -> i32 {
-    PAM_IGNORE
+    catch_c_entry(|| PAM_IGNORE)
 }
 
 /// Session close entry point called by Linux-PAM.
@@ -304,7 +354,7 @@ pub extern "C" fn pam_sm_close_session(
     _argc: i32,
     _argv: *const *const u8,
 ) -> i32 {
-    PAM_IGNORE
+    catch_c_entry(|| PAM_IGNORE)
 }
 
 // ===========================================================================
@@ -352,6 +402,14 @@ mod tests {
             Ok(c) => c,
             Err(_) => PAM_IGNORE,
         };
+        assert_eq!(code, PAM_IGNORE);
+    }
+
+    /// Sub-issue #34.1: pam_sm_authenticate must safely catch panics even if argument parsing fails.
+    #[test]
+    fn authenticate_catches_parse_argv_panics() {
+        // Null pointers or zero arguments cleanly handled without panicking across FFI
+        let code = pam_sm_authenticate(ptr::null_mut(), 0, 0, ptr::null());
         assert_eq!(code, PAM_IGNORE);
     }
 }

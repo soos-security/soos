@@ -98,6 +98,7 @@ BRANCH_TO_ISSUE = {
     "test/physical-hardware-validation": 31,
     "test/distro-validation": 32,
     "fix/policy-hardening": 33,
+    "fix/pam-ffi-timeout": 34,
 }
 
 

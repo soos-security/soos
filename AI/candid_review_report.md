@@ -1,64 +1,53 @@
 # Candid Review Report
 
 - **Date**: 2026-09-19
-- **Target Branch / Commit**: `fix/policy-hardening`
+- **Target Branch / Commit**: `fix/pam-ffi-timeout`
 - **Audited Files**:
-  - `crates/policy/src/decision.rs`
-  - `crates/policy/src/rate_limit.rs`
-  - `crates/policy/tests/decision_tests.rs`
-  - `crates/policy/tests/rate_limit_tests.rs`
-  - `crates/daemon/src/config.rs`
-  - `crates/daemon/tests/pipeline_integration_tests.rs`
-  - `crates/daemon/tests/policy_concurrency_tests.rs`
+  - `crates/pam/Cargo.toml`
+  - `crates/pam/src/lib.rs`
+  - `crates/pam/src/ipc.rs`
+  - `crates/pam/tests/ipc_tests.rs`
+  - `crates/protocol/src/types.rs`
   - `scripts/sync_issue.py`
 
 ## 1. Executive Summary
 
-This cold-audit inspects the implementation of **Issue #33: Policy Hardening** (`#33.1`, `#33.2` / GitHub Issue `#72`).
-The changes address two critical vulnerabilities discovered in `soos-policy`:
-1. Biometric threshold bypass via `f32::INFINITY` scores in `evaluate()`.
-2. Memory exhaustion DoS vulnerability caused by unbounded `BTreeMap` capacity in `RateLimiter`.
-
-The implementation enforces finite score validation, bounded LRU capacity in `RateLimiter` (`max_tracked_uids`), and provides full workspace test coverage without weakening any pre-existing contracts.
+This pull request implements comprehensive security hardening for the Linux-PAM module `pam_soos.so` under Issue #34 (GitHub #73). The changes eliminate risks of undefined behavior across the C ABI by encapsulating argument parsing and all exported PAM symbols within `catch_unwind`, implement non-blocking socket connection (`connect_with_timeout`) with strict POSIX `poll` timeouts to prevent host process stalls if the daemon freezes, and enforce complete memory zeroization on drop for requests, nonces, and IPC communication buffers.
 
 ## 2. Deep Reasoning Audit
 
 ### Logic & Architecture
-- **Pass**: In `decision.rs`, `!ctx.score.is_finite()` guarantees that `f32::INFINITY`, `f32::NEG_INFINITY`, and `f32::NAN` are explicitly rejected with `(Verdict::Deny, ReasonClass::ScoreBelowThreshold)`.
-- **Pass**: In `rate_limit.rs`, `RateLimiter` strictly bounds memory to `max_tracked_uids` (default 1024). When capacity is reached and a new UID arrives, `prune_stale` evicts expired entries first; if still at capacity, the least recently used UID (by oldest recent attempt) is evicted.
-- **Pass**: All state transitions and rate limiter queries (`check_allowed`, `check_only`, `remaining_attempts`) remain deterministic and zero-I/O.
+- **Pass**: State transitions, non-blocking connection with `libc::poll`, and subsequent blocking socket I/O transitions are completely sound.
+- **Socket Path Validation**: `path_bytes.len() >= 108` check strictly protects against `sockaddr_un` buffer overflow.
+- **Descriptor Lifetime**: RAII wrapper `FdGuard` disarms via `.into_raw()` only when ownership is transferred to `UnixStream`, preventing any file descriptor leaks on connection timeout or error.
 
 ### PAM Concurrency & Deadlines
-- **Pass**: Zero asynchronous runtimes or blocking socket operations are introduced.
-- **Pass**: `soos-policy` continues to enforce clockless deterministic evaluation via caller-provided monotonic timestamps.
-- **Pass**: Eviction execution is $O(N)$ with $N \le 1024$, taking < 2 microseconds and preserving the strict 150ms total decision latency budget.
-- **Pass**: Output isolation is strictly maintained with zero standard output pollution (`println!`, `dbg!`).
+- **Pass**: Zero async runtime (Tokio) inside `crates/pam`.
+- **Strict Real-Time Latency**: `connect_with_timeout` dynamically computes remaining time from the total budget (`remaining_budget(start_time, total_timeout)`). Saturated or frozen daemon sockets cannot stall beyond the configured `timeout_ms` (250ms nominal, 20ms telemetry).
+- **Stream Isolation**: Zero `println!`, `eprintln!`, or `dbg!` calls in PAM production code.
 
 ### Panic Safety & Fallback
-- **Pass**: All floating point validations use `.is_finite()`, which is pure and non-panicking.
-- **Pass**: Arithmetic calculations use `saturating_add` and `saturating_sub` preventing numeric overflow/underflow panics.
-- **Pass**: Zero `unwrap()` or `expect()` calls in production code.
-- **Pass**: If `max_tracked_uids == 0` or capacity cannot be allocated, the rate limiter fails closed with `PolicyError::RateLimitExceeded`.
+- **Pass**: All exported C ABI entry points (`pam_sm_authenticate`, `pam_sm_setcred`, `pam_sm_acct_mgmt`, `pam_sm_chauthtok`, `pam_sm_open_session`, `pam_sm_close_session`) are encapsulated via `catch_c_entry` (`catch_unwind`).
+- **Argument Parsing Protected**: `config::parse_argv(argc, argv)` and `pamh.as_mut()` execute strictly inside `catch_unwind`, ensuring allocation errors or pointer faults degrade safely to `PAM_IGNORE` rather than unwinding across the C boundary.
+- **Fail-Closed Guarantee**: Caught panics are logged to syslog and systematically return `PAM_IGNORE`. No pathway allows error-to-success conversion.
 
 ### Test Integrity & Anti-Weakening
-- **Pass**: Zero pre-existing tests were weakened, modified, or bypassed. Pre-existing unit tests and proptest invariants (`prop_decision_allow_invariant`) pass untouched.
-- **Pass**: Comprehensive new contractual tests authored in Phase 2:
-  - `test_decision_deny_score_infinity`
-  - `test_decision_deny_score_neg_infinity`
-  - `test_rate_limit_default_capacity`
-  - `test_rate_limit_capacity_bounds_and_lru_eviction`
-  - `test_rate_limit_stale_uid_eviction_on_capacity`
-  - `test_rate_limit_zero_capacity_fails_closed`
-- **Pass**: All tests assert fail-closed verdicts (`Verdict::Deny` or `PolicyError::RateLimitExceeded`).
+- **Pass**: Zero existing tests were modified or weakened.
+- **Contractual Tests Added**:
+  - `test_ipc_connect_timeout_frozen_daemon`: Contractually verifies that saturated backlog / frozen daemon sockets time out within budget (< 250ms) and return `PAM_IGNORE`.
+  - `test_request_and_event_zeroize_on_drop`: Contractually asserts that `Request` and `Event` zeroize nonces, UIDs, and strings on drop.
+  - `test_c_abi_all_entry_points_panic_safe`: Contractually asserts that all C ABI exports return `PAM_IGNORE` without panicking.
+  - `authenticate_catches_parse_argv_panics`: Unit test verifying `pam_sm_authenticate` argument parsing panic containment.
 
 ### Memory & Secret Bounds
-- **Pass**: `RateLimiter` memory footprint is strictly bounded by `max_tracked_uids`. With `DEFAULT_MAX_TRACKED_UIDS = 1024` and max 5 attempts per UID, maximum memory usage is capped under 100 KB, preventing UID spoofing DoS attacks.
-- **Pass**: Zero sensitive data (passwords, raw frames, embeddings) is handled or stored in `soos-policy`.
-- **Pass**: `#![forbid(unsafe_code)]` remains strictly enforced.
+- **Pass**: `Request` and `Event` in `soos-protocol` implement `zeroize::Zeroize` and `Drop`.
+- **Buffer Sanitization**: `request_id`, `encoded` request, length header, and `full_buf` response are wrapped in `Zeroizing` or cleared.
+- **Unsafe Audit**: Unsafe blocks in `crates/pam` are strictly confined to POSIX socket syscalls and PAM C ABI boundary glue, each documented with an explicit `// SAFETY:` rationale.
 
 ## 3. Detailed Findings & Action Items
 
-None. All architectural and security invariants are respected.
+- **[MINOR / RESOLVED]** `crates/pam/src/ipc.rs:134` — Replaced `std::mem::forget(self)` with `self.0 = -1` in `FdGuard::into_raw` to eliminate `clippy::mem_forget` on `Drop` types.
+- **[MINOR / RESOLVED]** `crates/pam/src/ipc.rs:175` — Safely mapped `libc::AF_UNIX` using `sa_family_t::try_from(libc::AF_UNIX).unwrap_or(0)` to prevent integer truncation warnings.
 
 ## 4. Final Verdict
 

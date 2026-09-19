@@ -1,54 +1,66 @@
-# Plan Evaluator Audit Report — Issue #33: Policy Hardening (f32::INFINITY Bypass & Bounded Rate Limiter) (#72)
+# Plan Evaluation Report — Issue #34: fix(pam): FFI panic safety and IPC blocking timeout
 
-## Executive Summary
-This evaluation report conducts an independent, rigorous architectural and security compliance audit of the implementation plan for **Issue #33: Policy Hardening** (`#33.1`, `#33.2` / GitHub Issue `#72`), in accordance with the 6 core architectural pillars of the `soos` workspace.
+## Evaluation Overview
+- **Target Issue**: Issue #34 — fix(pam): FFI panic safety and IPC blocking timeout (#73)
+- **Target Branch**: `fix/pam-ffi-timeout`
+- **Evaluator**: Plan Evaluator Sub-Agent (Phase 1.5)
+- **Reference Invariants**: `AI/ARCHITECTURE.md` §10 (PAM Module Hardening), `AI/BACKLOG.md`, `AI/DECISIONS.md`, `AI/VERIFICATION_MATRIX.md`
 
 ---
 
-## Evaluation Across 6 Core Architectural Pillars
+## 6-Pillar Compliance Audit
 
 ### Pillar 1: Architectural Alignment & Threat Model
-- **Evaluation**: The proposed plan addresses two direct security vulnerabilities identified during the codebase audit:
-  1. Biometric threshold bypass using `f32::INFINITY` scores in `evaluate()`.
-  2. Memory exhaustion DoS via unbounded `BTreeMap` growth in `RateLimiter`.
-- **Zero-Trust Invariants**: Enforces strict mathematical validity on biometric verification scores, guaranteeing that non-finite floating point numbers (`f32::INFINITY`, `f32::NEG_INFINITY`, `f32::NAN`) can never authorize authentication and are systematically classified as non-authorizing denials (`Verdict::Deny`, `ReasonClass::ScoreBelowThreshold`).
-- **DoS Mitigation**: Bounding the rate limiter by a configurable maximum tracked UID count (`DEFAULT_MAX_TRACKED_UIDS = 1024`) prevents memory exhaustion attacks from spoofed UIDs while retaining strict per-UID isolation.
-- **Verdict**: Compliant.
+- **Evaluation**: The proposed plan strictly maintains the security boundary between the unprivileged PAM module (`pam_soos.so`) and the privileged root daemon (`soos-daemon`).
+- **Socket Communication**: Uses the exclusive local Unix Domain Socket (`/run/soos/daemon.sock`).
+- **Privilege Separation**: PAM client requests only provide a `uid_hint`; daemon independently verifies UID via `SO_PEERCRED`.
+- **Verdict**: PASS
 
 ### Pillar 2: PAM Real-Time Latency & Concurrency
-- **Evaluation**: All operations in `crates/policy` remain zero-I/O and purely deterministic.
-- **Clockless Evaluation**: Monotonic timestamps continue to be passed from callers without system clock queries or async runtimes.
-- **Microsecond Latency**: The eviction algorithm in `RateLimiter` operates in $O(N)$ where $N \le 1024$, taking less than a few microseconds and comfortably fitting within the 5ms IPC dispatch budget. Reader locks (`check_allowed`) remain read-only and unmutated.
-- **Verdict**: Compliant.
+- **Evaluation**:
+  - Zero async runtime or Tokio inside the PAM module.
+  - Non-blocking socket connect (`libc::SOCK_NONBLOCK`) combined with `libc::poll` enforces the strict timeout budget during connection establishment.
+  - Sockets switch to blocking mode (`stream.set_nonblocking(false)`) for subsequent bounded I/O (`SO_RCVTIMEO` / `SO_SNDTIMEO`), preserving deterministic execution within the 200–250ms authentication deadline and 20ms telemetry event deadline.
+  - Zero stdout/stderr stream pollution (`println!`, `eprintln!`, `dbg!`).
+- **Verdict**: PASS
 
 ### Pillar 3: Panic Safety & Fail-Closed Behavior
-- **Evaluation**: 
-  - Float checks use standard Rust `.is_finite()`, which is pure, deterministic, and panic-free.
-  - Rate limiting capacity checks fail closed: if capacity cannot accommodate a new UID and cannot be pruned, or if `max_tracked_uids == 0`, `PolicyError::RateLimitExceeded` is returned.
-  - Zero `unwrap()` or `expect()` calls in production code. Arithmetic uses `saturating_add` and `saturating_sub`.
-- **Verdict**: Compliant.
+- **Evaluation**:
+  - `pam_sm_authenticate` expands its `catch_unwind` boundary to wrap the entire entry point, including `unsafe { config::parse_argv(argc, argv) }` and `pamh.as_mut()`.
+  - `PamHooks::sm_authenticate` wraps `parse_cstrs(args)` within `catch_unwind`.
+  - All C ABI exports (`pam_sm_*`) are wrapped in `catch_unwind`, ensuring no panic can ever cross the C ABI boundary.
+  - Caught panics are systematically logged to syslog via `syslog::log_panic` and return `PAM_IGNORE`.
+  - Under no circumstances can any error, panic, or timeout convert into `PAM_SUCCESS`.
+- **Verdict**: PASS
 
 ### Pillar 4: Dependency Isolation & Banned Crates
-- **Evaluation**: `crates/policy` maintains `#![forbid(unsafe_code)]` and zero external dependencies outside `soos-protocol` (and `proptest` in dev-dependencies). No prohibited crates (`opencv`, `nokhwa`, `tokio`) are added.
-- **Verdict**: Compliant.
+- **Evaluation**:
+  - Zero prohibited crates (`opencv`, `nokhwa`).
+  - No new external crates introduced. `zeroize = { workspace = true }` is an approved workspace dependency already present in the root `Cargo.toml`.
+  - Unsafe code in `crates/pam` is strictly confined to POSIX socket and PAM C ABI glue, documented with explicit safety invariants.
+- **Verdict**: PASS
 
 ### Pillar 5: Data Confidentiality & Zeroization
-- **Evaluation**: `RateLimiter` and `AuthorizationEngine` process only numeric user IDs, timestamps, and confidence scores. Zero passwords, raw image frames, or unencrypted embeddings are stored or passed into `soos-policy`.
-- **Verdict**: Compliant.
+- **Evaluation**:
+  - Passwords never cross IPC and are never handled by `pam_soos`.
+  - `Request` and `Event` implement `zeroize::Zeroize` and `Drop` to wipe cryptographic nonces (`request_id`) and metadata from memory.
+  - In `crates/pam/src/ipc.rs`, temporary serialized buffers and raw length/response vectors are wrapped in `Zeroizing<Vec<u8>>` or explicitly wiped.
+- **Verdict**: PASS
 
 ### Pillar 6: Test Integrity & TDD Contracts
 - **Evaluation**:
-  - TDD Red Phase: New contractual unit tests will be authored in `crates/policy/tests/decision_tests.rs` (`test_decision_deny_score_infinity`, `test_decision_deny_score_neg_infinity`) and `crates/policy/tests/rate_limit_tests.rs` (`test_rate_limit_capacity_bounds_and_lru_eviction`, `test_rate_limit_stale_uid_eviction_on_capacity`, `test_rate_limit_zero_capacity_fails_closed`) BEFORE updating production code.
-  - Zero Test Weakening: Pre-existing unit tests and proptest invariants (`prop_decision_allow_invariant`) are preserved unchanged as immutable contracts.
-  - Traceability: Directly maps to acceptance criteria `POL1` (finite score check) and `POL2` (stale UID eviction & capacity bounds).
-- **Verdict**: Compliant.
+  - The plan defines explicit test contracts in `crates/pam/tests/ipc_tests.rs`:
+    1. Frozen daemon connection timeout (`test_ipc_connect_timeout_frozen_daemon`).
+    2. Buffer zeroization verification on drop (`test_pam_buffers_zeroized_on_drop`).
+    3. FFI entry point panic safety across all exported entry points (`test_c_abi_entry_points_catch_unwind`).
+  - All tests represent immutable contracts authored before implementation (TDD Red phase).
+  - Strict zero test weakening policy enforced.
+- **Verdict**: PASS
 
 ---
 
 ## Conclusion & Verdict
 
-The implementation plan satisfies all requirements of `AI/ARCHITECTURE.md`, `AI/BACKLOG.md` (Issue #33), `AI/VERIFICATION_MATRIX.md`, and project security guidelines.
+The implementation plan for Issue #34 completely satisfies all architectural, security, latency, and panic safety invariants defined in `AI/ARCHITECTURE.md` and `AI/BACKLOG.md`.
 
-```text
 VALIDATION_VERDICT: APPROVED
-```

@@ -1172,9 +1172,9 @@ The `pam_sm_authenticate` entry point parses arguments outside `catch_unwind`, r
 
 #### Sub-issues
 
-- [ ] **#34.1** — Expand `catch_unwind` to encompass `parse_argv`
-- [ ] **#34.2** — Implement non-blocking `connect()` with strict timeout in `ipc.rs`
-- [ ] **#34.3** — Add `zeroize` dependency and enforce cleanup for `Request` and IPC buffers
+- [x] **#34.1** — Expand `catch_unwind` to encompass `parse_argv`
+- [x] **#34.2** — Implement non-blocking `connect()` with strict timeout in `ipc.rs`
+- [x] **#34.3** — Add `zeroize` dependency and enforce cleanup for `Request` and IPC buffers
 
 ### Issue #35 — fix(cli): Remove root bypass and enforce path validation
 
@@ -1296,6 +1296,6 @@ graph TD
 | PHY2 | PAD rejects printed photos and screen replays on real hardware | Physical test | ⬜ Pending |
 | POL1 | Decision engine explicitly rejects `f32::INFINITY` scores | Unit test | ✅ Verified |
 | POL2 | RateLimiter evicts stale UIDs and maintains capacity bounds | Unit test | ✅ Verified |
-| PAM1 | OOM during parsing correctly unwinds without host abort | FFI/Integration test | ⬜ Pending |
-| PAM2 | IPC connect enforces strict timeout even if socket backlog is full | Integration test | ⬜ Pending |
+| PAM1 | OOM during parsing correctly unwinds without host abort | FFI/Integration test | ✅ Verified |
+| PAM2 | IPC connect enforces strict timeout even if socket backlog is full | Integration test | ✅ Verified |
 | EN9 | CLI rejects operations by unprivileged users without bypasses | Security test | ⬜ Pending |
