@@ -163,3 +163,94 @@ fn test_rate_limit_zero_max_attempts_always_denies() {
     let res = limiter.check_and_record(uid, SECOND_NS);
     assert!(matches!(res, Err(PolicyError::RateLimitExceeded { .. })));
 }
+
+#[test]
+fn test_rate_limit_default_capacity() {
+    let config = RateLimitConfig::default();
+    assert_eq!(
+        config.max_tracked_uids,
+        RateLimitConfig::DEFAULT_MAX_TRACKED_UIDS
+    );
+    assert_eq!(config.max_tracked_uids, 1024);
+
+    let limiter = RateLimiter::new(config);
+    assert_eq!(limiter.max_tracked_uids(), 1024);
+    assert_eq!(limiter.tracked_uids(), 0);
+}
+
+#[test]
+fn test_rate_limit_capacity_bounds_and_lru_eviction() {
+    // Capacity of 3 UIDs, max 2 attempts each in a 60s window
+    let config = RateLimitConfig::new(2, MINUTE_NS).with_max_tracked_uids(3);
+    let mut limiter = RateLimiter::new(config);
+    assert_eq!(limiter.max_tracked_uids(), 3);
+
+    // Fill capacity with 3 distinct UIDs
+    assert!(limiter.check_and_record(1001, 10 * SECOND_NS).is_ok());
+    assert!(limiter.check_and_record(1002, 20 * SECOND_NS).is_ok());
+    assert!(limiter.check_and_record(1003, 30 * SECOND_NS).is_ok());
+    assert_eq!(limiter.tracked_uids(), 3);
+
+    // UID 1004 arrives at t=40s (none are stale yet).
+    // Must evict the least recently used: UID 1001 (last active at 10s)
+    assert!(limiter.check_and_record(1004, 40 * SECOND_NS).is_ok());
+    assert_eq!(limiter.tracked_uids(), 3, "Capacity must not exceed 3");
+
+    // UID 1001 was evicted -> history reset, so it can make 2 fresh attempts
+    assert_eq!(limiter.remaining_attempts(1001, 40 * SECOND_NS), 2);
+
+    // Update UID 1002 recency at t=50s
+    assert!(limiter.check_and_record(1002, 50 * SECOND_NS).is_ok());
+    // UID 1002 has now used its 2 attempts: next is blocked
+    assert!(limiter.check_and_record(1002, 51 * SECOND_NS).is_err());
+
+    // UID 1005 arrives at t=60s. Active: 1002 (50s), 1003 (30s), 1004 (40s).
+    // UID 1003 is the oldest -> evicted!
+    assert!(limiter.check_and_record(1005, 60 * SECOND_NS).is_ok());
+    assert_eq!(
+        limiter.tracked_uids(),
+        3,
+        "Capacity must stay strictly bounded"
+    );
+
+    // 1003 was evicted: quota reset
+    assert_eq!(limiter.remaining_attempts(1003, 60 * SECOND_NS), 2);
+    // 1002 was not evicted: still blocked
+    assert!(limiter.check_and_record(1002, 61 * SECOND_NS).is_err());
+}
+
+#[test]
+fn test_rate_limit_stale_uid_eviction_on_capacity() {
+    // Capacity of 2 UIDs, window of 10s
+    let config = RateLimitConfig::new(2, 10 * SECOND_NS).with_max_tracked_uids(2);
+    let mut limiter = RateLimiter::new(config);
+
+    assert!(limiter.check_and_record(1001, SECOND_NS).is_ok());
+    assert!(limiter.check_and_record(1002, 2 * SECOND_NS).is_ok());
+    assert_eq!(limiter.tracked_uids(), 2);
+
+    // At t=20s, both 1001 and 1002 are stale (> 10s window).
+    // Adding 1003 should evict stale entries first, not active ones.
+    assert!(limiter.check_and_record(1003, 20 * SECOND_NS).is_ok());
+    assert_eq!(
+        limiter.tracked_uids(),
+        1,
+        "Stale UIDs must be pruned on capacity eviction"
+    );
+    assert_eq!(limiter.remaining_attempts(1003, 20 * SECOND_NS), 1);
+}
+
+#[test]
+fn test_rate_limit_zero_capacity_fails_closed() {
+    let config = RateLimitConfig::new(2, MINUTE_NS).with_max_tracked_uids(0);
+    let mut limiter = RateLimiter::new(config);
+
+    assert!(matches!(
+        limiter.check_and_record(1000, SECOND_NS),
+        Err(PolicyError::RateLimitExceeded { .. })
+    ));
+    assert!(matches!(
+        limiter.check_allowed(1000, SECOND_NS),
+        Err(PolicyError::RateLimitExceeded { .. })
+    ));
+}

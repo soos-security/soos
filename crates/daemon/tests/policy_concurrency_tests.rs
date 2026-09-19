@@ -68,10 +68,7 @@ async fn read_response(client: &mut UnixStream) -> Response {
 #[tokio::test]
 async fn test_concurrent_auth_requests_no_lock_starvation() {
     let threshold_cfg = ThresholdConfig::default();
-    let rate_cfg = RateLimitConfig {
-        max_attempts: 10,
-        window_duration_ns: 60_000_000_000,
-    };
+    let rate_cfg = RateLimitConfig::new(10, 60_000_000_000);
     let rate_limiter = RateLimiter::new(rate_cfg);
     let policy = Arc::new(RwLock::new(AuthorizationEngine::with_rate_limiter(
         threshold_cfg,

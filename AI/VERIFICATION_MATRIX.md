@@ -37,6 +37,8 @@ This document translates the critical gating criteria from §11 of `ARCHITECTURE
 | PO2 | Per-UID rate-limiting is enforced | Request burst test (`rate_limit_tests::test_rate_limit_burst_same_uid`) | ☑ Validated |
 | PO3 | Zero I/O inside crate | Dependency audit (`crates/policy/Cargo.toml` contains zero filesystem, network, or async deps) | ☑ Validated |
 | PO4 | `#![forbid(unsafe_code)]` enabled | Invariant test (`soos-invariants::test_business_crates_forbid_unsafe_code`) | ☑ Validated |
+| POL1 | Decision engine explicitly rejects `f32::INFINITY` scores | Unit tests (`decision_tests::test_decision_deny_score_infinity`, `decision_tests::test_decision_deny_score_neg_infinity`) | ✅ Verified |
+| POL2 | RateLimiter evicts stale UIDs and maintains capacity bounds | Unit tests (`rate_limit_tests::test_rate_limit_capacity_bounds_and_lru_eviction`, `rate_limit_tests::test_rate_limit_stale_uid_eviction_on_capacity`, `rate_limit_tests::test_rate_limit_default_capacity`, `rate_limit_tests::test_rate_limit_zero_capacity_fails_closed`) | ✅ Verified |
 
 ---
 

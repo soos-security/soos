@@ -97,6 +97,7 @@ BRANCH_TO_ISSUE = {
     "fix/evidence-store-safety": 30,
     "test/physical-hardware-validation": 31,
     "test/distro-validation": 32,
+    "fix/policy-hardening": 33,
 }
 
 

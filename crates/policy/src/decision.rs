@@ -118,7 +118,7 @@ impl AuthorizationEngine {
         if !ctx.pad_passed {
             return (Verdict::Deny, ReasonClass::PadFailed);
         }
-        if ctx.score.is_nan() || ctx.score < self.thresholds.match_threshold() {
+        if !ctx.score.is_finite() || ctx.score < self.thresholds.match_threshold() {
             return (Verdict::Deny, ReasonClass::ScoreBelowThreshold);
         }
 
