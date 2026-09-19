@@ -43,4 +43,12 @@ pub enum EvidenceStoreError {
     /// Invalid date format string.
     #[error("Invalid date format: {0}")]
     InvalidDate(String),
+
+    /// Invalid UID parameter.
+    #[error("Invalid UID {0}: must be a valid POSIX UID")]
+    InvalidUid(u32),
+
+    /// Invalid storage path, symlink detected, or path traversal attempt.
+    #[error("Invalid store path: {0}")]
+    InvalidPath(String),
 }

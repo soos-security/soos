@@ -7,13 +7,20 @@ use crate::snapshot::{
     days_since_epoch, format_date_from_timestamp, generate_uuid_v4, parse_date, EvidenceRecord,
     RetentionReport, SnapshotResult,
 };
+use nix::fcntl::{Flock, FlockArg};
 use std::collections::HashMap;
-use std::fs::{self, File};
+use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+/// Maximum valid POSIX UID accepted by the evidence store (2^31 - 1).
+///
+/// Values above this range typically represent negative signed integers cast to unsigned
+/// or reserved POSIX sentinel values like `(uid_t)-1` (4,294,967,295).
+pub const MAX_VALID_UID: u32 = 2_147_483_647;
 
 /// Primary evidence store engine.
 pub struct EvidenceStore {
@@ -63,6 +70,21 @@ impl EvidenceStore {
             return Err(EvidenceStoreError::Disabled);
         }
 
+        // Validate UID parameter against POSIX bounds (Sub-issue #30.3)
+        if uid > MAX_VALID_UID {
+            return Err(EvidenceStoreError::InvalidUid(uid));
+        }
+
+        // Reject symlinks targeting base directory
+        if let Ok(meta) = fs::symlink_metadata(&self.config.base_dir) {
+            if meta.file_type().is_symlink() {
+                return Err(EvidenceStoreError::InvalidPath(format!(
+                    "Evidence base directory '{}' is a symlink; symlinks are forbidden",
+                    self.config.base_dir.display()
+                )));
+            }
+        }
+
         let ts = match timestamp_override {
             Some(t) => t,
             None => {
@@ -99,9 +121,34 @@ impl EvidenceStore {
         let snapshot_id = generate_uuid_v4()?;
         let target_dir = self.config.base_dir.join(&date_str);
 
-        if !target_dir.exists() {
-            fs::create_dir_all(&target_dir)?;
-            fs::set_permissions(&target_dir, fs::Permissions::from_mode(0o700))?;
+        // Pre-creation symlink check on date directory (Sub-issue #30.1)
+        match fs::symlink_metadata(&target_dir) {
+            Ok(meta) => {
+                if meta.file_type().is_symlink() {
+                    return Err(EvidenceStoreError::InvalidPath(format!(
+                        "Date directory '{}' is a symlink; symlinks are forbidden",
+                        target_dir.display()
+                    )));
+                }
+                if !meta.is_dir() {
+                    return Err(EvidenceStoreError::InvalidPath(format!(
+                        "Date path '{}' exists but is not a directory",
+                        target_dir.display()
+                    )));
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                fs::create_dir_all(&target_dir)?;
+                fs::set_permissions(&target_dir, fs::Permissions::from_mode(0o700))?;
+                let meta = fs::symlink_metadata(&target_dir)?;
+                if meta.file_type().is_symlink() {
+                    return Err(EvidenceStoreError::InvalidPath(format!(
+                        "Date directory '{}' was created as a symlink; symlinks are forbidden",
+                        target_dir.display()
+                    )));
+                }
+            }
+            Err(e) => return Err(EvidenceStoreError::Io(e)),
         }
 
         let record = EvidenceRecord {
@@ -117,13 +164,35 @@ impl EvidenceStore {
 
         let filename = format!("{snapshot_id}.webp.enc");
         let final_path = target_dir.join(filename);
-        let tmp_path = target_dir.join(format!(".tmp.{snapshot_id}.{}", std::process::id()));
+        let mut rand_bytes = [0u8; 8];
+        getrandom::fill(&mut rand_bytes).map_err(|e| {
+            EvidenceStoreError::Crypto(format!("Failed to generate random salt: {e}"))
+        })?;
+        let tmp_path = target_dir.join(format!(
+            ".tmp.{snapshot_id}.{}.{:016x}",
+            std::process::id(),
+            u64::from_ne_bytes(rand_bytes)
+        ));
 
         {
-            let mut file = File::create(&tmp_path)?;
-            fs::set_permissions(&tmp_path, fs::Permissions::from_mode(0o600))?;
+            let mut file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&tmp_path)?;
             file.write_all(&ciphertext)?;
             file.sync_all()?;
+        }
+
+        // Verify final path is not a symlink before renaming
+        if let Ok(meta) = fs::symlink_metadata(&final_path) {
+            if meta.file_type().is_symlink() {
+                let _ = fs::remove_file(&tmp_path);
+                return Err(EvidenceStoreError::InvalidPath(format!(
+                    "Final snapshot path '{}' is a symlink",
+                    final_path.display()
+                )));
+            }
         }
 
         fs::rename(&tmp_path, &final_path)?;
@@ -159,6 +228,14 @@ impl EvidenceStore {
     /// Lists snapshot file paths for a specific date partition.
     pub fn list_snapshots_for_date(&self, date: &str) -> Result<Vec<PathBuf>, EvidenceStoreError> {
         let date_dir = self.config.base_dir.join(date);
+        if let Ok(meta) = fs::symlink_metadata(&date_dir) {
+            if meta.file_type().is_symlink() {
+                return Err(EvidenceStoreError::InvalidPath(format!(
+                    "Date directory '{}' is a symlink; symlinks are forbidden",
+                    date_dir.display()
+                )));
+            }
+        }
         if !date_dir.exists() {
             return Ok(Vec::new());
         }
@@ -167,7 +244,11 @@ impl EvidenceStore {
         for entry in fs::read_dir(&date_dir)? {
             let entry = entry?;
             let path = entry.path();
-            if path.is_file() && path.extension().and_then(|e| e.to_str()) == Some("enc") {
+            let file_type = entry.file_type()?;
+            if file_type.is_symlink() {
+                continue;
+            }
+            if file_type.is_file() && path.extension().and_then(|e| e.to_str()) == Some("enc") {
                 results.push(path);
             }
         }
@@ -176,6 +257,8 @@ impl EvidenceStore {
     }
 
     /// Executes retention rotation: deletes date directories strictly older than `retention_days`.
+    ///
+    /// Synchronizes concurrent executions using an exclusive file lock (`flock`) on the evidence base directory.
     pub fn rotate_retention(
         &self,
         current_date: &str,
@@ -183,23 +266,48 @@ impl EvidenceStore {
         let (cur_y, cur_m, cur_d) = parse_date(current_date)?;
         let current_days = days_since_epoch(cur_y, cur_m, cur_d);
 
+        if let Ok(meta) = fs::symlink_metadata(&self.config.base_dir) {
+            if meta.file_type().is_symlink() {
+                return Err(EvidenceStoreError::InvalidPath(format!(
+                    "Evidence base directory '{}' is a symlink; symlinks are forbidden",
+                    self.config.base_dir.display()
+                )));
+            }
+        }
+
         if !self.config.base_dir.exists() {
             return Ok(RetentionReport::default());
         }
+
+        // Acquire exclusive RAII file lock on the evidence root directory (Sub-issue #30.2)
+        let dir_file = File::open(&self.config.base_dir)?;
+        let _lock = Flock::lock(dir_file, FlockArg::LockExclusive).map_err(|(_, e)| {
+            EvidenceStoreError::Io(std::io::Error::from_raw_os_error(e as i32))
+        })?;
 
         let mut pruned_dates = Vec::new();
 
         for entry in fs::read_dir(&self.config.base_dir)? {
             let entry = entry?;
             let path = entry.path();
-            if path.is_dir() {
+            let file_type = entry.file_type()?;
+            // Never follow symlinks in evidence root
+            if file_type.is_symlink() {
+                continue;
+            }
+            if file_type.is_dir() {
                 if let Some(folder_name) = path.file_name().and_then(|s| s.to_str()) {
                     if let Ok((y, m, d)) = parse_date(folder_name) {
                         let dir_days = days_since_epoch(y, m, d);
                         let age_days = current_days.saturating_sub(dir_days);
                         if age_days > i64::from(self.config.retention_days) {
-                            fs::remove_dir_all(&path)?;
-                            pruned_dates.push(folder_name.to_string());
+                            match fs::remove_dir_all(&path) {
+                                Ok(()) => pruned_dates.push(folder_name.to_string()),
+                                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                                    // Directory already pruned concurrently by another thread/process
+                                }
+                                Err(e) => return Err(EvidenceStoreError::Io(e)),
+                            }
                         }
                     }
                 }

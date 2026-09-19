@@ -1,60 +1,50 @@
 # Candid Review Report
 
 - **Date**: 2026-09-19
-- **Target Branch / Commit**: `fix/pam-uid-resolution`
+- **Target Branch / Commit**: `fix/evidence-store-safety`
+- **Base Reference**: `origin/main`
 - **Audited Files**:
-  - `crates/pam/src/lib.rs`
-  - `crates/pam/src/ipc.rs`
-  - `crates/pam/tests/uid_resolution_tests.rs`
-  - `crates/pam/tests/ipc_tests.rs`
-  - `crates/protocol/src/types.rs`
-  - `crates/protocol/src/codec.rs`
-  - `crates/protocol/tests/property_tests.rs`
-  - `crates/daemon/src/dispatcher.rs`
-  - `crates/daemon/tests/pipeline_integration_tests.rs`
-  - `Docs/IPC_PROTOCOL.md`
+  - `crates/evidence-store/Cargo.toml`
+  - `crates/evidence-store/src/lib.rs`
+  - `crates/evidence-store/src/error.rs`
+  - `crates/evidence-store/src/crypto.rs`
+  - `crates/evidence-store/src/store.rs`
+  - `crates/evidence-store/tests/safety_hardening_tests.rs`
+  - `crates/evidence-store/tests/proptest_suite.rs`
   - `scripts/sync_issue.py`
 
 ## 1. Executive Summary
 
-This pull request implements robust UID resolution in `pam_soos` and telemetry event attribution in `soos-protocol` and `soos-daemon`. It resolves POSIX `getpwnam_r` buffer exhaustion (`ERANGE`) when querying users in enterprise directories (LDAP, Active Directory / SSSD) by dynamically doubling buffer allocations up to a strict 64KB cap. Additionally, it wires the resolved target UID into the `Event` wire payload on `PasswordFailed`, enabling `EvidenceStore` snapshots to accurately record the targeted account rather than the calling process UID (e.g. GDM / root).
+This cold code review examines the security hardening and atomic operations in `crates/evidence-store` for Issue #30 (GitHub #69). The changes prevent symbolic link path traversal across root and date partition directories, implement atomic file creation with mode `0600` from inception (`O_CREAT | O_EXCL`), synchronize retention rotation across concurrent threads and daemon instances using safe RAII `nix::fcntl::Flock`, and enforce strict POSIX UID boundary validation (`0 <= uid <= MAX_VALID_UID`). The modifications preserve `#![forbid(unsafe_code)]` and pass all deterministic invariant checks.
 
 ## 2. Deep Reasoning Audit
 
 ### Logic & Architecture
-- **Pass**: State transitions, error handling, and bounds checking are correct.
-- `resolve_username_to_uid_with_bounds` starts with clamped initial sizing (`sysconf(_SC_GETPW_R_SIZE_MAX)` or 1024), doubles buffer size upon receiving `libc::ERANGE` using checked arithmetic (`checked_mul(2)`), and halts when exceeding `max_size` (64KB).
-- `handle_event` in `soos-daemon` accurately reads `target_uid = event.uid.unwrap_or(peer_uid)` and stores evidence snapshots indexed by `target_uid`.
-- Full alignment with §5 PAM Module and Issue #29 requirements.
+- [PASS]: Date directories and root base directory are verified with `symlink_metadata` (`lstat`) before access or creation, preventing symlink traversal attacks.
+- [PASS]: Temporary files for snapshots and master keys are created with explicit mode `0600` via `create_new(true)` atomically, closing exposure windows.
+- [PASS]: Retention rotation acquires an exclusive blocking file lock (`nix::fcntl::Flock`) on the evidence base directory, preventing concurrent daemon race conditions and file system corruption during pruning.
+- [PASS]: POSIX UID validation strictly caps input user identifiers at `MAX_VALID_UID = 2_147_483_647` (`i32::MAX as u32`), rejecting negative numbers cast to unsigned (high sign bit set) and sentinel invalid UIDs (`(uid_t)-1`).
 
 ### PAM Concurrency & Deadlines
-- **Pass**: Zero Tokio or asynchronous runtime invocations within `pam_soos`.
-- Strict 20ms write timeout maintained for `notify_event`.
-- Reentrant `libc::getpwnam_r` is safe for multi-threaded PAM consumers and executes within sub-millisecond budgets.
-- Output isolation verified: zero `println!`, `eprintln!`, or `dbg!` macro usages in PAM pathways.
+- [PASS]: `evidence-store` is utilized exclusively by daemon background task dispatchers; zero Tokio or asynchronous runtimes are introduced into PAM modules.
+- [PASS]: Zero stdout/stderr stream pollution (`println!`, `eprintln!`, `dbg!`).
 
 ### Panic Safety & Fallback
-- **Pass**: Zero `unwrap()`, `expect()`, or panicking branches in production code (`crates/pam/src/lib.rs`, `crates/pam/src/ipc.rs`).
-- All conversions from libc types use safe constructs (`usize::try_from(sc)`, `checked_mul`).
-- `resolve_username_to_uid` gracefully returns `None` on unresolvable users or buffer exhaustion, falling back to `libc::getuid()` or `PAM_IGNORE`.
-- All C ABI entry points remain shielded by `catch_unwind`.
+- [PASS]: Zero `unwrap()`, `expect()`, `panic!()`, or unhandled stubs in `crates/evidence-store/src/`.
+- [PASS]: All error paths fail closed and return typed `EvidenceStoreError` (`InvalidPath`, `InvalidUid`, `Io`).
+- [PASS]: Directory lock drops cleanly via RAII on function return.
 
 ### Test Integrity & Anti-Weakening
-- **Pass**: Zero pre-existing tests were weakened, modified, or deleted.
-- Contractual unit and integration tests authored before production implementation:
-  - `test_getpwnam_r_handles_erange_retry`: Verifies recovery and doubling from a tiny 4-byte buffer to successful resolution of root UID 0.
-  - `test_getpwnam_r_caps_at_max_buffer_size`: Verifies fail-closed behavior when cap prevents resolution.
-  - `test_password_failed_event_includes_uid`: Verifies wire transmission of `event.uid == Some(1001)`.
-  - `test_12_4_password_failed_event_captures_evidence_snapshot`: Verifies daemon records snapshot with `target_uid` distinct from caller `peer_uid`.
+- [PASS]: Contractual tests `test_evidence_store_rejects_symlink_date_directory`, `test_concurrent_rotation_does_not_corrupt`, and `test_evidence_store_rejects_path_traversal_uid` comprehensively cover acceptance criteria E1..E5 and sub-issues #30.1, #30.2, and #30.3.
+- [PASS]: Existing tests and property tests remain intact and verified.
 
 ### Memory & Secret Bounds
-- **Pass**: Allocations are bounded by `MAX_PW_BUF_SIZE` (64KB), eliminating heap exhaustion (OOM) attack vectors.
-- FFI pointers are checked for nullity (`result.is_null()`).
-- No passwords, tokens, or biometric templates are exposed in the `Event` schema or logs.
-- Memory zeroization invariants remain intact.
+- [PASS]: `#![forbid(unsafe_code)]` is strictly preserved.
+- [PASS]: Sensitive key material in `load_or_create` is zeroized before return.
+- [PASS]: Zero plaintext credentials, passwords, or raw embeddings exposed.
 
 ## 3. Detailed Findings & Action Items
-- None. All checks passed with zero warnings or deficiencies.
+- None. All architectural invariants, bounds, and test contracts pass without findings.
 
 ## 4. Final Verdict
 **VERDICT: APPROVED**

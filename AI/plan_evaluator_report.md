@@ -1,6 +1,6 @@
-# Plan Evaluation Report — Issue #29: Robust UID Resolution and Buffer Safety
+# Plan Evaluation Report — Issue #30: Symlink Safety and Atomic Operations in Evidence Store
 
-- **Target Issue**: Issue #29 (`fix/pam-uid-resolution`, GitHub Issue #68)
+- **Target Issue**: Issue #30 (`fix/evidence-store-safety`, GitHub Issue #69)
 - **Evaluator**: Independent Plan Evaluator Sub-Agent
 - **Date**: 2026-09-19
 - **Status**: Complete
@@ -11,12 +11,12 @@
 
 | Source Document | Status | Notes |
 | :--- | :--- | :--- |
-| `AI/ARCHITECTURE.md` | Ingested | Verified §5 PAM Module, wire layout, latency budget |
+| `AI/ARCHITECTURE.md` | Ingested | Verified §9 Evidence Snapshots, `/var/lib/soos/evidence` invariants, permissions `0700`/`0600` |
 | `AI/DECISIONS.md` | Ingested | Verified ADR-001..ADR-012 constraints |
-| `AI/BACKLOG.md` | Ingested | Verified Issue #29 sub-issues #29.1 and #29.2 |
-| `AI/VERIFICATION_MATRIX.md` | Ingested | Acceptance criteria for UID resolution and Event telemetry |
-| `Docs/SECURITY_AND_QUALITY_GUIDELINES.md` | Ingested | Invariants on panic safety, bounds, zeroization |
-| `AGENTS.md` | Ingested | Strict test integrity and English policy |
+| `AI/BACKLOG.md` | Ingested | Verified Issue #30 sub-issues #30.1, #30.2, and #30.3 |
+| `AI/VERIFICATION_MATRIX.md` | Ingested | Verified acceptance criteria E1..E5, symlink & concurrent safety |
+| `Docs/SECURITY_AND_QUALITY_GUIDELINES.md` | Ingested | Invariants on panic safety, bounds, zeroization, atomic file creation |
+| `AGENTS.md` | Ingested | Strict test integrity, `#![forbid(unsafe_code)]`, and English policy |
 
 ---
 
@@ -25,52 +25,52 @@
 ### Pillar 1: Architectural Alignment & Threat Model
 - **Evaluation**: PASS
 - **Details**:
-  - Respects clear boundary between unprivileged PAM client and root daemon.
-  - Differentiates `peer_uid` (caller process credential verified via `SO_PEERCRED`) from `event.uid` (target account whose authentication failed).
-  - Associates intrusion evidence snapshots in `/var/lib/soos/evidence` with the target UID, preventing GDM/root UID hijacking in evidence records.
+  - Respects `/var/lib/soos/evidence/` storage hierarchy with `0700` directories and `0600` encrypted files.
+  - Mitigates local unprivileged symlink attacks: pre-creation verification via `symlink_metadata` ensures date directories and root base directories cannot be hijacked via symlinks to escape `/var/lib/soos/evidence/`.
+  - Ensures atomic creation of files with mode `0600` from inception (`O_CREAT | O_EXCL`), closing world/group-readable exposure windows.
 
 ### Pillar 2: PAM Real-Time Latency & Concurrency
 - **Evaluation**: PASS
 - **Details**:
-  - PAM module uses synchronous `UnixStream` with strict 20ms timeout ceiling for `notify_event`.
-  - Zero Tokio runtime or asynchronous task spawning in `pam_soos`.
-  - `getpwnam_r` dynamic buffer allocation is strictly capped at 64KB, executing within microseconds without latency degradation.
-  - Zero stdout/stderr stream pollution (`println!`, `eprintln!`, `dbg!`).
+  - Evidence store is utilized exclusively by `soos-daemon` during background processing; zero impact on PAM synchronous 200-250ms authentication latency.
+  - Serialization of retention rotation using RAII `nix::fcntl::Flock` on the evidence base directory prevents concurrent rotation races and avoids file system corruption across daemon restarts.
 
 ### Pillar 3: Panic Safety & Fail-Closed Behavior
 - **Evaluation**: PASS
 - **Details**:
-  - All PAM entry points remain protected by `catch_unwind` returning `PAM_IGNORE`.
-  - Zero `unwrap()` or `expect()` in `crates/pam/src/lib.rs` and `crates/pam/src/ipc.rs`.
-  - Buffer allocation and arithmetic use checked operations (`checked_mul`), clamped bounds, and safe pointer checking (`result.is_null()`).
-  - Fail-closed: failures in UID resolution return `None`, gracefully falling back to `libc::getuid()` or `PAM_IGNORE`, never `PAM_SUCCESS`.
+  - `#![forbid(unsafe_code)]` remains strictly enforced in `crates/evidence-store`.
+  - Zero `unwrap()` or `expect()` in production code.
+  - Uses `nix::fcntl::Flock`, which provides a 100% safe RAII lock guard over `std::fs::File`.
+  - Systematic fail-closed error handling returning typed `EvidenceStoreError` (`InvalidPath`, `InvalidUid`, `Io`).
 
 ### Pillar 4: Dependency Isolation & Banned Crates
 - **Evaluation**: PASS
 - **Details**:
   - Zero banned dependencies (no OpenCV, no nokhwa).
-  - `#![forbid(unsafe_code)]` remains strictly intact in `crates/protocol`.
-  - Unsafe code in `crates/pam` is strictly isolated to libc FFI (`libc::getpwnam_r`, `libc::sysconf`) with documented safety preconditions.
+  - Uses existing workspace dependency `nix` with safe `fs` features for RAII directory locking.
+  - Zero network dependencies, upholding Criterion E5.
 
 ### Pillar 5: Data Confidentiality & Zeroization
 - **Evaluation**: PASS
 - **Details**:
-  - Zero passwords or biometric embeddings transmitted over IPC or stored in `Event`.
-  - Buffer growth is bounded at 64KB, preventing heap exhaustion (OOM attack vector).
-  - Temporary buffers are strictly scoped and deallocated immediately upon function return.
+  - Encrypted snapshots continue using AES-256-GCM with master key protection.
+  - Temporary files created with `mode(0o600)` and `create_new(true)`.
+  - Master key loading and creation strictly rejects symlinks and wipes temporary memory buffers.
+  - Excessively large or negative (sign-bit set) UIDs are rejected before any disk persistence or cap tracking.
 
 ### Pillar 6: Test Integrity & TDD Contracts
 - **Evaluation**: PASS
 - **Details**:
-  - Two explicit contractual tests authored in Phase 2:
-    - `test_getpwnam_r_handles_erange_retry`: Verifies dynamic buffer growth from small initial buffer (e.g. 4 bytes) through `ERANGE` retries to resolution, and validates cap enforcement.
-    - `test_password_failed_event_includes_uid`: Verifies that `notify_event` correctly populates `uid: Some(1000)` on the wire.
-  - Immutable test contracts: zero test weakening or deletion.
+  - Three explicit contractual tests authored in Phase 2:
+    - `test_evidence_store_rejects_symlink_date_directory` (#30.1)
+    - `test_concurrent_rotation_does_not_corrupt` (#30.2)
+    - `test_evidence_store_rejects_path_traversal_uid` (#30.3)
+  - Immutable test contracts: tests are immutable acceptance criteria, with zero weakening allowed.
 
 ---
 
 ## 3. Plan Evaluator Conclusion
 
-The implementation plan satisfies all security invariants, real-time deadlines, bounds checking, and test integrity requirements.
+The implementation plan satisfies all zero-trust architectural invariants, panic safety constraints, concurrency guarantees, and test integrity requirements.
 
 **VALIDATION_VERDICT: APPROVED**

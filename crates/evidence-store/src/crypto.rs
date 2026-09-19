@@ -64,6 +64,17 @@ impl MasterKey {
     /// Loads an existing master key or creates a new one on disk with mode `0600`.
     pub fn load_or_create<P: AsRef<Path>>(path: P) -> Result<Self, EvidenceStoreError> {
         let path = path.as_ref();
+
+        // Reject symlinks targeting master key
+        if let Ok(meta) = std::fs::symlink_metadata(path) {
+            if meta.file_type().is_symlink() {
+                return Err(EvidenceStoreError::InvalidPath(format!(
+                    "Master key path '{}' is a symlink; symlinks are forbidden for key files",
+                    path.display()
+                )));
+            }
+        }
+
         if path.exists() {
             let mut file = File::open(path)?;
             let mut key_bytes = Vec::new();
@@ -80,10 +91,23 @@ impl MasterKey {
             }
 
             let key = Self::generate()?;
-            let tmp_path = format!("{}.tmp.{}", path.display(), std::process::id());
+            let mut rand_bytes = [0u8; 8];
+            getrandom::fill(&mut rand_bytes).map_err(|e| {
+                EvidenceStoreError::Crypto(format!("Failed to generate random salt: {e}"))
+            })?;
+            let tmp_path = format!(
+                "{}.tmp.{}.{:016x}",
+                path.display(),
+                std::process::id(),
+                u64::from_ne_bytes(rand_bytes)
+            );
             {
-                let mut tmp_file = File::create(&tmp_path)?;
-                std::fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(0o600))?;
+                use std::os::unix::fs::OpenOptionsExt;
+                let mut tmp_file = std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .mode(0o600)
+                    .open(&tmp_path)?;
                 tmp_file.write_all(key.as_bytes())?;
                 tmp_file.sync_all()?;
             }
