@@ -10,10 +10,12 @@ pub mod logging;
 pub mod mlock;
 pub mod peercred;
 pub mod pipeline;
+pub mod session;
 pub mod socket;
 
 pub use config::{DaemonConfig, DispatcherConfig, PipelineConfig, SocketConfig};
 pub use error::DaemonError;
 pub use health::{HealthState, HealthStatus};
 pub use pipeline::{initialize_pipeline, PipelineComponents};
+pub use session::SessionValidator;
 pub use socket::{bind_socket, validate_directory, SocketGuard};

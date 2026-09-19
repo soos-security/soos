@@ -115,6 +115,15 @@ impl RateLimiter {
     ///
     /// Returns [`PolicyError::RateLimitExceeded`] if currently blocked.
     pub fn check_only(&self, uid: u32, now_monotonic_ns: u64) -> Result<(), PolicyError> {
+        self.check_allowed(uid, now_monotonic_ns)
+    }
+
+    /// Check whether a request from `uid` is allowed without mutating state.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PolicyError::RateLimitExceeded`] if currently blocked.
+    pub fn check_allowed(&self, uid: u32, now_monotonic_ns: u64) -> Result<(), PolicyError> {
         if self.config.max_attempts == 0 {
             return Err(PolicyError::RateLimitExceeded {
                 uid,

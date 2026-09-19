@@ -25,7 +25,7 @@ use std::time::Duration;
 use tempfile::tempdir;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
-use tokio::sync::Mutex;
+use tokio::sync::RwLock;
 
 use soos_biometric_store::{BiometricStore, BiometricTemplate, MasterKey as BioMasterKey};
 use soos_camera_v4l::{CameraConfigBuilder, CameraManager, MockCameraManager, PixelFormat};
@@ -155,7 +155,7 @@ impl TestPipelineFixture {
             window_duration_ns: 60_000_000_000,
         };
         let rate_limiter = RateLimiter::new(rate_cfg);
-        let policy = Arc::new(Mutex::new(AuthorizationEngine::with_rate_limiter(
+        let policy = Arc::new(RwLock::new(AuthorizationEngine::with_rate_limiter(
             threshold_cfg,
             rate_limiter,
         )));
@@ -176,6 +176,8 @@ impl TestPipelineFixture {
         let disp_config = DispatcherConfig {
             max_concurrent_connections: 8,
             connection_timeout: Duration::from_millis(500),
+            enforce_active_session: false,
+            logind_sessions_dir: std::path::PathBuf::from("/run/systemd/sessions"),
         };
 
         let dispatcher = Arc::new(ConnectionDispatcher::with_pipeline(

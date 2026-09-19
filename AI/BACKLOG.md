@@ -1009,19 +1009,19 @@ The enrollment CLI uses incorrect model registry IDs (`face_detector` instead of
 
 #### Sub-issues
 
-- [ ] **#28.1** — Replace `Arc<Mutex<AuthorizationEngine>>` with `RwLock` or sharded rate limiter
+- [x] **#28.1** — Replace `Arc<Mutex<AuthorizationEngine>>` with `RwLock` or sharded rate limiter
   - Rate limit reads (`check_allowed`) only need read access; rate limit updates need write access
   - Or: use per-UID atomic rate counters
   - Acceptance: 8 concurrent auth requests don't serialize on a single lock
   - TDD: `test_concurrent_auth_requests_no_lock_starvation`
 
-- [ ] **#28.2** — Improve `current_monotonic_nanos()` fallback behavior
+- [x] **#28.2** — Improve `current_monotonic_nanos()` fallback behavior
   - Return `Err` instead of 0 when `clock_gettime` fails
   - Caller handles error by returning `Unavailable` instead of silently disabling deadline checks
   - Acceptance: Clock failure triggers fail-closed behavior
   - TDD: `test_monotonic_clock_failure_returns_unavailable`
 
-- [ ] **#28.3** — Add `logind` session validation
+- [x] **#28.3** — Add `logind` session validation
   - ARCHITECTURE.md §2.3 requires: "Target UID is an authorized local user and owns the active local graphical session"
   - Query `systemd-logind` (via D-Bus or `/run/systemd/sessions/`) to verify target UID has an active session
   - Acceptance: Auth requests for UIDs without active sessions are rejected
