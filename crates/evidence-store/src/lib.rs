@@ -18,4 +18,4 @@ pub use config::{
 pub use crypto::MasterKey;
 pub use error::EvidenceStoreError;
 pub use snapshot::{EvidenceRecord, RetentionReport, SnapshotResult};
-pub use store::EvidenceStore;
+pub use store::{EvidenceStore, MAX_VALID_UID};

@@ -1062,17 +1062,17 @@ The enrollment CLI uses incorrect model registry IDs (`face_detector` instead of
 
 #### Sub-issues
 
-- [ ] **#30.1** — Add symlink check before creating date-based directories
+- [x] **#30.1** — Add symlink check before creating date-based directories
   - Use `lstat()` before `mkdir()`, reject if symlink exists at path
   - Acceptance: Symlink traversal blocked in evidence directory
   - TDD: `test_evidence_store_rejects_symlink_date_directory`
 
-- [ ] **#30.2** — Add file locking for concurrent retention rotation
+- [x] **#30.2** — Add file locking for concurrent retention rotation
   - Use `flock()` on evidence root directory during rotation
   - Acceptance: Concurrent daemon restarts don't corrupt evidence store
   - TDD: `test_concurrent_rotation_does_not_corrupt`
 
-- [ ] **#30.3** — Validate UID parameter in `store_snapshot()`
+- [x] **#30.3** — Validate UID parameter in `store_snapshot()`
   - Reject negative or excessively large UID values that could cause path traversal (e.g., `../../etc/passwd`)
   - Acceptance: Only valid POSIX UIDs accepted
   - TDD: `test_evidence_store_rejects_path_traversal_uid`

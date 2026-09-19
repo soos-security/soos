@@ -140,6 +140,9 @@ This document translates the critical gating criteria from §11 of `ARCHITECTURE
 | E3 | Daily cap per UID enforced | Limit test | ✅ Verified (`test_daily_cap_per_uid_enforced`, `test_custom_daily_cap`) |
 | E4 | Encrypted files, mode `0600`, `root:root` | Permissions test | ✅ Verified (`test_evidence_file_and_directory_permissions`, `test_encryption_roundtrip_and_structure`) |
 | E5 | NEVER transmitted across network in Phase 1 | Dependency audit | ✅ Verified (`test_evidence_store_has_zero_network_dependencies`, `test_evidence_store_has_no_network_dependencies`) |
+| E6 | Symlink traversal prevention on date and base directories | `safety_hardening_tests::test_evidence_store_rejects_symlink_date_directory` | ✅ Verified |
+| E7 | Concurrent retention rotation serialized via `flock()` | `safety_hardening_tests::test_concurrent_rotation_does_not_corrupt` | ✅ Verified |
+| E8 | Strict POSIX UID validation & path traversal prevention | `safety_hardening_tests::test_evidence_store_rejects_path_traversal_uid` | ✅ Verified |
 
 ---
 

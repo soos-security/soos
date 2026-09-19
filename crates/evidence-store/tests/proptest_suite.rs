@@ -44,7 +44,20 @@ proptest! {
         };
 
         let store = EvidenceStore::open(config).unwrap();
-        let res = store.store_snapshot(uid, &reason, &frame, Some("2026-09-14"), Some(1726300000)).unwrap();
+        let res = match store.store_snapshot(
+            uid,
+            &reason,
+            &frame,
+            Some("2026-09-14"),
+            Some(1726300000),
+        ) {
+            Ok(r) => r,
+            Err(soos_evidence_store::EvidenceStoreError::InvalidUid(bad_uid)) => {
+                prop_assert!(bad_uid > soos_evidence_store::MAX_VALID_UID);
+                return Ok(());
+            }
+            Err(e) => panic!("Unexpected error during store_snapshot: {e:?}"),
+        };
 
         let loaded = store.load_snapshot(&res.path).unwrap();
         prop_assert_eq!(loaded.snapshot_id, res.snapshot_id);
