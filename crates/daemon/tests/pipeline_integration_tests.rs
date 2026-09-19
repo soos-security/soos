@@ -200,6 +200,12 @@ impl TestPipelineFixture {
     }
 }
 
+impl Drop for TestPipelineFixture {
+    fn drop(&mut self) {
+        self.camera.stop();
+    }
+}
+
 async fn send_req(sock_path: &std::path::Path, req: Request) -> Response {
     let mut client = UnixStream::connect(sock_path)
         .await
@@ -407,7 +413,7 @@ async fn test_12_5_rate_limit_exceeded_returns_protocol_error_rate_limited() {
     let listener = fixture.start_listener();
 
     let disp = fixture.dispatcher.clone();
-    tokio::spawn(async move {
+    let server_handle = tokio::spawn(async move {
         while let Ok((stream, _)) = listener.accept().await {
             let d = disp.clone();
             tokio::spawn(async move {
@@ -460,6 +466,8 @@ async fn test_12_5_rate_limit_exceeded_returns_protocol_error_rate_limited() {
         "Exceeded rate limit must return ProtocolError"
     );
     assert_eq!(resp3.reason_class, ReasonClass::RateLimited);
+
+    server_handle.abort();
 }
 
 // ---------------------------------------------------------------------------
@@ -472,7 +480,7 @@ async fn test_12_6_all_four_verdict_paths() {
     let listener = fixture.start_listener();
 
     let disp = fixture.dispatcher.clone();
-    tokio::spawn(async move {
+    let server_handle = tokio::spawn(async move {
         while let Ok((stream, _)) = listener.accept().await {
             let d = disp.clone();
             tokio::spawn(async move {
@@ -549,6 +557,57 @@ async fn test_12_6_all_four_verdict_paths() {
     assert!(status_resp.socket_ready);
     assert!(status_resp.camera_ready);
     assert!(status_resp.is_healthy);
+
+    server_handle.abort();
+}
+
+// ---------------------------------------------------------------------------
+// Sub-issue #12.7: Frozen Camera Frame Staleness Check
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_12_7_frozen_camera_returns_unavailable_stale_frame() {
+    let fixture = TestPipelineFixture::new(true, 5).await;
+    let listener = fixture.start_listener();
+
+    let disp = fixture.dispatcher.clone();
+    let server_handle = tokio::spawn(async move {
+        while let Ok((stream, _)) = listener.accept().await {
+            let d = disp.clone();
+            tokio::spawn(async move {
+                let _ = d.handle_connection(stream).await;
+            });
+        }
+    });
+
+    // Freeze frame generation so no new frames or timestamp updates occur
+    fixture.camera.set_frozen(true);
+
+    // Wait for frame age to exceed MAX_FRAME_AGE_NS (150ms)
+    tokio::time::sleep(Duration::from_millis(160)).await;
+
+    let req = Request {
+        version: CURRENT_VERSION,
+        kind: RequestKind::Auth,
+        request_id: [127u8; 32],
+        uid_hint: fixture.current_uid,
+        service: "sudo".into(),
+        deadline_monotonic_ns: u64::MAX,
+    };
+
+    let resp = send_req(&fixture.sock_path, req).await;
+    assert_eq!(
+        resp.verdict,
+        Verdict::Unavailable,
+        "Stale camera frame must result in Verdict::Unavailable"
+    );
+    assert_eq!(
+        resp.reason_class,
+        ReasonClass::StaleFrame,
+        "Stale camera frame must return ReasonClass::StaleFrame"
+    );
+
+    server_handle.abort();
 }
 
 // ---------------------------------------------------------------------------

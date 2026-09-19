@@ -19,6 +19,7 @@ pub struct MockCameraManager {
     running: Arc<AtomicBool>,
     warmup_remaining: Arc<AtomicUsize>,
     sequence: Arc<AtomicU64>,
+    frozen: Arc<AtomicBool>,
     active_error: Arc<RwLock<Option<CameraError>>>,
     last_activity: Arc<RwLock<Instant>>,
     worker_handle: Option<JoinHandle<()>>,
@@ -44,6 +45,7 @@ impl MockCameraManager {
         let is_ready = Arc::new(AtomicBool::new(false));
         let starved = Arc::new(AtomicBool::new(false));
         let running = Arc::new(AtomicBool::new(true));
+        let frozen = Arc::new(AtomicBool::new(false));
         let warmup_remaining = Arc::new(AtomicUsize::new(config.warmup_frames));
         let sequence = Arc::new(AtomicU64::new(0));
         let active_error = Arc::new(RwLock::new(None));
@@ -53,6 +55,7 @@ impl MockCameraManager {
         let ready_clone = Arc::clone(&is_ready);
         let starved_clone = Arc::clone(&starved);
         let running_clone = Arc::clone(&running);
+        let frozen_clone = Arc::clone(&frozen);
         let warmup_clone = Arc::clone(&warmup_remaining);
         let sequence_clone = Arc::clone(&sequence);
         let error_clone = Arc::clone(&active_error);
@@ -69,6 +72,11 @@ impl MockCameraManager {
                 );
 
                 while running_clone.load(Ordering::Acquire) {
+                    let is_frozen = frozen_clone.load(Ordering::Acquire);
+                    if is_frozen {
+                        thread::sleep(Duration::from_millis(20));
+                        continue;
+                    }
                     // Check if an error is injected
                     let has_error = {
                         let guard = error_clone.read().unwrap_or_else(|e| e.into_inner());
@@ -144,6 +152,7 @@ impl MockCameraManager {
             is_ready,
             starved,
             running,
+            frozen,
             warmup_remaining,
             sequence,
             active_error,
@@ -165,6 +174,11 @@ impl MockCameraManager {
             self.is_ready.store(false, Ordering::Release);
             self.latest_frame.store(None);
         }
+    }
+
+    /// Freezes frame generation without dropping readiness, simulating a frozen sensor.
+    pub fn set_frozen(&self, frozen: bool) {
+        self.frozen.store(frozen, Ordering::Release);
     }
 
     /// Simulates frame starvation (no new frames generated).
@@ -224,6 +238,32 @@ impl CameraManager for MockCameraManager {
             .write()
             .unwrap_or_else(|e| e.into_inner());
         *guard = Instant::now();
+
+        // Fulfill CameraManager contract ("immediately restoring full FPS") and
+        // guarantee fresh frame availability for incoming auth requests under CI load.
+        if self.is_ready.load(Ordering::Acquire)
+            && !self.starved.load(Ordering::Acquire)
+            && !self.frozen.load(Ordering::Acquire)
+            && self.running.load(Ordering::Acquire)
+        {
+            let has_error = self
+                .active_error
+                .read()
+                .map(|g| g.is_some())
+                .unwrap_or(false);
+            if !has_error {
+                let seq = self.sequence.fetch_add(1, Ordering::SeqCst);
+                let mono_ns = monotonic_nanos();
+                let frame = generate_synthetic_frame(
+                    self.config.width,
+                    self.config.height,
+                    self.config.format,
+                    seq,
+                    mono_ns,
+                );
+                store_frame_monotonic(&self.latest_frame, Arc::new(frame));
+            }
+        }
     }
 
     fn stop(&self) {
@@ -257,10 +297,7 @@ fn generate_synthetic_frame(
     );
 
     let mut data = vec![0u8; size];
-    let step = u8::try_from(sequence & 0xFF).unwrap_or(0);
-
-    // Fill with a synthetic gradient pattern based on sequence number
-    let mut val = step;
+    let mut val: u8 = 0;
     for byte in data.iter_mut() {
         *byte = val.wrapping_mul(31);
         val = val.wrapping_add(1);

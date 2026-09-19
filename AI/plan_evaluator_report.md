@@ -1,60 +1,57 @@
-# Plan Evaluator Report — Issue #25
+# Plan Evaluator Report — CI Flakiness Fix
 
-**Evaluation Target**: Issue #25 (`fix(biometric-store): Atomic key creation and secure deletion`)  
+**Evaluation Target**: Fix mock camera frame staleness and worker thread starvation in daemon pipeline integration tests  
 **Evaluator**: Plan Evaluator Sub-Agent (`plan-evaluator`)  
-**Specification Ref**: `AI/BACKLOG.md` § Issue #25, `AI/ARCHITECTURE.md` §9 Privacy & Persistence  
+**Specification Ref**: `AI/ARCHITECTURE.md` § Latency Budget & Frame Freshness, `AI/MOCK_STRATEGY.md`, Criteria `C1`, `C9`, `D7`, `D10`
 
 ---
 
 ## 1. Architectural Alignment & Threat Model
-- **Evaluation**: The proposed design addresses atomic master key file creation and anti-forensic secure erasure for encrypted templates stored under `/var/lib/soos/biometrics/`.
-- **Inception Mode**: Key creation switches from `File::create()` + `set_permissions()` to atomic `OpenOptions::new().write(true).create_new(true).mode(0o600).open()`, eliminating any momentary window where the key could be world/group-readable.
-- **Symlink Traversal**: Template path resolution validates against symlink traversal using `std::fs::symlink_metadata` and `libc::O_NOFOLLOW`, preventing symlink attack vectors against privileged storage.
+- **Evaluation**: The proposed change preserves all architectural security invariants:
+  - `MAX_FRAME_AGE_NS = 150_000_000` (150ms) in `soos-daemon` is strictly preserved and not modified or relaxed.
+  - Fail-closed behavior on camera starvation, hardware errors, or expired deadlines is strictly preserved.
+  - `notify_activity()` in `MockCameraManager` implements the contractual trait obligation to restore active frame delivery upon authentication activity.
+  - Deterministic frame staleness testing is introduced via `set_frozen(true)` without relying on unpredictable sleep races.
 - **Status**: COMPLIANT
 
 ---
 
 ## 2. PAM Real-Time Latency & Concurrency
-- **Evaluation**: `soos-biometric-store` is a storage library utilized by the privileged daemon (`soos-daemon`) and the enrollment utility (`soos-enroll`), completely separated from the synchronous PAM module (`pam_soos.so`).
+- **Evaluation**: The PAM module (`pam_soos.so`) is untouched. The changes are confined to test fixtures and the mock camera driver in `soos-camera-v4l`.
 - **Status**: COMPLIANT
 
 ---
 
 ## 3. Panic Safety & Fail-Closed Behavior
-- **Evaluation**: All file operations, metadata inspections, and cryptographic calls return typed `Result<T, BiometricStoreError>`. No `unwrap()` or `expect()` are introduced into production code. Symlink detection and I/O failures fail closed by returning explicit `Err` variants.
+- **Evaluation**: No panics (`unwrap()`, `expect()`) introduced in production pathways. `frozen` atomic state gracefully pauses frame generation.
 - **Status**: COMPLIANT
 
 ---
 
 ## 4. Dependency Isolation & Banned Crates
-- **Evaluation**: Zero banned dependencies (`opencv`, `nokhwa`) are referenced. Standard POSIX flags are leveraged via `libc` (already in workspace dependencies).
-- **Safety Invariant**: `#![forbid(unsafe_code)]` remains strictly enforced across the entire `soos-biometric-store` crate.
+- **Evaluation**: Zero banned dependencies. Standard atomic primitives (`AtomicBool`, `Ordering`) are used.
 - **Status**: COMPLIANT
 
 ---
 
 ## 5. Data Confidentiality & Zeroization
-- **Evaluation**:
-  - `MasterKey` retains `Zeroize` and `ZeroizeOnDrop` guarantees.
-  - Intermediate key buffers are zeroized upon loading.
-  - Template deletion performs a minimum 3-pass CSPRNG random byte overwriting cycle followed by synchronous disk sync (`sync_all`) prior to `std::fs::remove_file()`, preventing physical data recovery from block storage sectors.
+- **Evaluation**: No sensitive credentials or embeddings are touched or exposed.
 - **Status**: COMPLIANT
 
 ---
 
 ## 6. Test Integrity & TDD Contracts
-- **Evaluation**: The plan defines three contractual tests strictly derived from `AI/BACKLOG.md` #25.1, #25.2, and #25.3:
-  1. `test_master_key_created_with_0600_from_inception`
-  2. `test_delete_securely_overwrites_before_unlink`
-  3. `test_biometric_store_rejects_symlink_template_path`
-- No existing tests are weakened or bypassed.
+- **Evaluation**:
+  - Zero existing tests are weakened or deleted.
+  - Contractual test `test_12_7_frozen_camera_returns_unavailable_stale_frame` is added to verify `Verdict::Unavailable` with `ReasonClass::StaleFrame` under controlled frozen camera conditions.
+  - Thread lifecycle is cleanly managed via `Drop for TestPipelineFixture`, preventing zombie background threads from polluting test runs.
 - **Status**: COMPLIANT
 
 ---
 
 ## Conclusion & Verdict
 
-All 6 architectural pillars are satisfied with zero regressions and strict compliance with Zero-Trust invariants.
+All 6 architectural pillars are satisfied with zero regressions.
 
 ```
 VALIDATION_VERDICT: APPROVED
