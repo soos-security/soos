@@ -2,7 +2,7 @@
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use nix::unistd::User;
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 
 use crate::error::EnrollmentCliError;
 
@@ -39,10 +39,6 @@ pub struct Cli {
     /// Camera device path (e.g. /dev/video0 or /dev/v4l/by-id/...)
     #[arg(long, global = true)]
     pub camera_device: Option<PathBuf>,
-
-    /// Skip root privilege check (useful for unprivileged testing and diagnostics)
-    #[arg(long, global = true, hide = true)]
-    pub skip_root_check: bool,
 
     /// Force mock camera and synthetic neural inference (for testing without hardware)
     #[arg(long, global = true)]
@@ -146,4 +142,70 @@ pub fn resolve_target_uid(
     }
 
     Ok(nix::unistd::getuid().as_raw())
+}
+
+/// Validates and sanitizes a path to ensure it is absolute and contains no traversal (`..`) components.
+pub fn sanitize_path(path: &Path) -> Result<PathBuf, EnrollmentCliError> {
+    if !path.is_absolute() {
+        return Err(EnrollmentCliError::InvalidPath(format!(
+            "Path '{}' must be an absolute path",
+            path.display()
+        )));
+    }
+
+    for component in path.components() {
+        if let Component::ParentDir = component {
+            return Err(EnrollmentCliError::InvalidPath(format!(
+                "Path traversal ('..') is strictly forbidden: '{}'",
+                path.display()
+            )));
+        }
+    }
+
+    let mut clean = PathBuf::from("/");
+    for component in path.components() {
+        if let Component::Normal(c) = component {
+            clean.push(c);
+        }
+    }
+
+    Ok(clean)
+}
+
+/// Allowed FHS top-level directory prefixes for soos system assets.
+pub const ALLOWED_FHS_PREFIXES: [&str; 8] = [
+    "/var", "/run", "/etc", "/usr", "/tmp", "/dev", "/opt", "/home",
+];
+
+/// Validates that an absolute, sanitized path complies with standard FHS hierarchies.
+pub fn validate_fhs_path(path: &Path) -> Result<PathBuf, EnrollmentCliError> {
+    let clean = sanitize_path(path)?;
+
+    let matches_fhs = ALLOWED_FHS_PREFIXES
+        .iter()
+        .any(|prefix| clean.starts_with(Path::new(prefix)));
+
+    if !matches_fhs {
+        return Err(EnrollmentCliError::InvalidPath(format!(
+            "Path '{}' violates FHS hierarchy; must reside under permitted system prefixes: {:?}",
+            clean.display(),
+            ALLOWED_FHS_PREFIXES
+        )));
+    }
+
+    Ok(clean)
+}
+
+/// Validates that a camera device path resides strictly under `/dev/` and is not `/dev` itself.
+pub fn validate_camera_device_path(path: &Path) -> Result<PathBuf, EnrollmentCliError> {
+    let clean = sanitize_path(path)?;
+
+    if !clean.starts_with(Path::new("/dev")) || clean == Path::new("/dev") {
+        return Err(EnrollmentCliError::InvalidPath(format!(
+            "Camera device path '{}' must reside under /dev/",
+            clean.display()
+        )));
+    }
+
+    Ok(clean)
 }

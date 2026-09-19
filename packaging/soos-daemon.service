@@ -7,7 +7,7 @@ Wants=systemd-udevd.service
 [Service]
 Type=simple
 User=root
-Group=root
+Group=soos
 ExecStart=/usr/libexec/soos/soos-daemon
 Restart=on-failure
 RestartSec=2
@@ -16,6 +16,8 @@ UMask=0077
 # Runtime and persistence directories
 RuntimeDirectory=soos
 RuntimeDirectoryMode=0750
+StateDirectory=soos
+StateDirectoryMode=0755
 ReadWritePaths=/var/lib/soos /run/soos
 
 # Security Sandbox Directives (ARCHITECTURE.md §10)

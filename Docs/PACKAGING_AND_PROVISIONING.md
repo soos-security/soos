@@ -18,7 +18,7 @@ The `soos` installation script (`scripts/install.sh`) guarantees the following f
 | `/usr/bin/soos-enroll` | `0755` | `root:root` | Biometric enrollment CLI | §8 Monorepo Structure |
 | `/usr/bin/soos-admin` | `0755` | `root:root` | Non-biometric diagnostic & admin CLI | §8 Monorepo Structure |
 | `/lib/security/pam_soos.so` (or arch/distro equiv) | `0644` | `root:root` | PAM shared object module | §5 PAM Crate & ABI |
-| `/etc/systemd/system/soos-daemon.service` | `0644` | `root:root` | Hardened systemd service unit | §10 Systemd Sandboxing |
+| `/etc/systemd/system/soos-daemon.service` | `0644` | `root:root` | Hardened systemd service unit (`Group=soos`, `StateDirectory=soos`) | §10 Systemd Sandboxing |
 | `/var/lib/soos/` | `0755` | `root:root` | Persistent base state directory | §9 Privacy & Persistence |
 | `/var/lib/soos/biometrics/` | `0700` | `root:root` | Encrypted biometric vector templates | §9 Biometric Templates |
 | `/var/lib/soos/evidence/` | `0700` | `root:root` | Opt-in encrypted intrusion snapshots | §9 Evidence Snapshots |

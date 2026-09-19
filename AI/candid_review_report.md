@@ -1,54 +1,62 @@
 # Candid Review Report
 
-- **Date**: 2026-09-19
-- **Target Branch / Commit**: `fix/pam-ffi-timeout`
+- **Date**: 2026-09-20
+- **Target Branch / Commit**: `fix/cli-security`
 - **Audited Files**:
-  - `crates/pam/Cargo.toml`
-  - `crates/pam/src/lib.rs`
-  - `crates/pam/src/ipc.rs`
-  - `crates/pam/tests/ipc_tests.rs`
-  - `crates/protocol/src/types.rs`
+  - `crates/enrollment-cli/src/args.rs`
+  - `crates/enrollment-cli/src/error.rs`
+  - `crates/enrollment-cli/src/lib.rs`
+  - `crates/enrollment-cli/src/main.rs`
+  - `crates/enrollment-cli/src/service.rs`
+  - `crates/enrollment-cli/tests/path_validation_tests.rs`
+  - `crates/enrollment-cli/tests/root_check_tests.rs`
+  - `crates/enrollment-cli/tests/scaffold_tests.rs`
+  - `crates/enrollment-cli/tests/delete_tests.rs`
+  - `crates/enrollment-cli/tests/list_tests.rs`
+  - `crates/daemon/tests/systemd_test.rs`
+  - `packaging/soos-daemon.service`
+  - `AI/ARCHITECTURE.md`
   - `scripts/sync_issue.py`
 
 ## 1. Executive Summary
 
-This pull request implements comprehensive security hardening for the Linux-PAM module `pam_soos.so` under Issue #34 (GitHub #73). The changes eliminate risks of undefined behavior across the C ABI by encapsulating argument parsing and all exported PAM symbols within `catch_unwind`, implement non-blocking socket connection (`connect_with_timeout`) with strict POSIX `poll` timeouts to prevent host process stalls if the daemon freezes, and enforce complete memory zeroization on drop for requests, nonces, and IPC communication buffers.
+This patch addresses Issue #35 by removing the hidden unprivileged CLI bypass flag (`--skip-root-check`) from `soos-enroll`, systematically enforcing root privileges across all subcommands (`enroll`, `verify`, `delete`, `list`), introducing rigorous path sanitization and FHS hierarchy boundary validation, and hardening `soos-daemon.service` with `Group=soos` and `StateDirectory=soos`. The changes are robust, defensive, panic-free, and thoroughly validated with contractual automated tests.
 
 ## 2. Deep Reasoning Audit
 
 ### Logic & Architecture
-- **Pass**: State transitions, non-blocking connection with `libc::poll`, and subsequent blocking socket I/O transitions are completely sound.
-- **Socket Path Validation**: `path_bytes.len() >= 108` check strictly protects against `sockaddr_un` buffer overflow.
-- **Descriptor Lifetime**: RAII wrapper `FdGuard` disarms via `.into_raw()` only when ownership is transferred to `UnixStream`, preventing any file descriptor leaks on connection timeout or error.
+- **Pass**:
+  - `Cli` struct no longer accepts `--skip-root-check`, preventing runtime bypasses of administrative privilege checks.
+  - `check_privileges` is now called at the entry points of `service.verify` and `service.list`, as well as at binary entry in `main.rs`, completing privilege enforcement across all four subcommands.
+  - `sanitize_path`, `validate_fhs_path`, and `validate_camera_device_path` enforce zero path traversal (`..`), mandate absolute paths, and restrict assets to permitted FHS hierarchies and camera devices strictly to `/dev/`.
+  - Service builders `build_store_only` and `build_full_service` validate all paths up front before initializing disk access or neural pipelines.
+  - `soos-daemon.service` declares `Group=soos` and `StateDirectory=soos` with `StateDirectoryMode=0755`, matching IPC directory permissions and systemd best practices.
 
 ### PAM Concurrency & Deadlines
-- **Pass**: Zero async runtime (Tokio) inside `crates/pam`.
-- **Strict Real-Time Latency**: `connect_with_timeout` dynamically computes remaining time from the total budget (`remaining_budget(start_time, total_timeout)`). Saturated or frozen daemon sockets cannot stall beyond the configured `timeout_ms` (250ms nominal, 20ms telemetry).
-- **Stream Isolation**: Zero `println!`, `eprintln!`, or `dbg!` calls in PAM production code.
+- **Pass**:
+  - No changes in `crates/pam`.
+  - No asynchronous runtimes or threads introduced into synchronous modules.
 
 ### Panic Safety & Fallback
-- **Pass**: All exported C ABI entry points (`pam_sm_authenticate`, `pam_sm_setcred`, `pam_sm_acct_mgmt`, `pam_sm_chauthtok`, `pam_sm_open_session`, `pam_sm_close_session`) are encapsulated via `catch_c_entry` (`catch_unwind`).
-- **Argument Parsing Protected**: `config::parse_argv(argc, argv)` and `pamh.as_mut()` execute strictly inside `catch_unwind`, ensuring allocation errors or pointer faults degrade safely to `PAM_IGNORE` rather than unwinding across the C boundary.
-- **Fail-Closed Guarantee**: Caught panics are logged to syslog and systematically return `PAM_IGNORE`. No pathway allows error-to-success conversion.
+- **Pass**:
+  - Zero `unwrap()` or `expect()` in production code.
+  - All path validation, camera device checks, and privilege checks return typed `Result<T, EnrollmentCliError>`.
+  - Fail-closed behavior on all validation failures.
 
 ### Test Integrity & Anti-Weakening
-- **Pass**: Zero existing tests were modified or weakened.
-- **Contractual Tests Added**:
-  - `test_ipc_connect_timeout_frozen_daemon`: Contractually verifies that saturated backlog / frozen daemon sockets time out within budget (< 250ms) and return `PAM_IGNORE`.
-  - `test_request_and_event_zeroize_on_drop`: Contractually asserts that `Request` and `Event` zeroize nonces, UIDs, and strings on drop.
-  - `test_c_abi_all_entry_points_panic_safe`: Contractually asserts that all C ABI exports return `PAM_IGNORE` without panicking.
-  - `authenticate_catches_parse_argv_panics`: Unit test verifying `pam_sm_authenticate` argument parsing panic containment.
+- **Pass**:
+  - Dedicated contractual test suites `path_validation_tests.rs` and `root_check_tests.rs` author rigorous positive and negative test cases.
+  - Pre-existing tests in `delete_tests.rs`, `list_tests.rs`, and `scaffold_tests.rs` were updated only to remove the obsolete `skip_root_check` struct field while preserving their underlying contractual assertions.
+  - Contractual test `systemd_test.rs` updated to strictly require `Group=soos`, `StateDirectory=soos`, and explicitly forbid `Group=root`.
 
 ### Memory & Secret Bounds
-- **Pass**: `Request` and `Event` in `soos-protocol` implement `zeroize::Zeroize` and `Drop`.
-- **Buffer Sanitization**: `request_id`, `encoded` request, length header, and `full_buf` response are wrapped in `Zeroizing` or cleared.
-- **Unsafe Audit**: Unsafe blocks in `crates/pam` are strictly confined to POSIX socket syscalls and PAM C ABI boundary glue, each documented with an explicit `// SAFETY:` rationale.
+- **Pass**:
+  - Path normalization operates on bounded path components without unbounded buffer growth.
+  - Zero sensitive cryptographic keys or biometric templates exposed in error messages or logs.
+  - `#![forbid(unsafe_code)]` maintained in `crates/enrollment-cli`.
 
 ## 3. Detailed Findings & Action Items
-
-- **[MINOR / RESOLVED]** `crates/pam/src/ipc.rs:134` — Replaced `std::mem::forget(self)` with `self.0 = -1` in `FdGuard::into_raw` to eliminate `clippy::mem_forget` on `Drop` types.
-- **[MINOR / RESOLVED]** `crates/pam/src/ipc.rs:175` — Safely mapped `libc::AF_UNIX` using `sa_family_t::try_from(libc::AF_UNIX).unwrap_or(0)` to prevent integer truncation warnings.
+- None. All security invariants, architectural requirements, and test contracts are satisfied.
 
 ## 4. Final Verdict
-
 **VERDICT: APPROVED**

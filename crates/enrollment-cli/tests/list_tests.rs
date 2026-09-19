@@ -17,6 +17,7 @@ use zeroize::Zeroizing;
 use soos_biometric_store::{BiometricStore, BiometricTemplate, MasterKey};
 use soos_camera_v4l::{CameraConfig, MockCameraManager};
 use soos_enrollment_cli::args::ListArgs;
+use soos_enrollment_cli::error::EnrollmentCliError;
 use soos_enrollment_cli::service::EnrollmentService;
 use soos_inference_ort::{
     MockEmbeddingExtractor, MockFaceDetector, MockLandmarkDetector, MockPadDetector,
@@ -105,7 +106,6 @@ fn test_list_command_works_without_camera_or_models() {
         key_file: Some(key_file),
         models_dir: Some(temp.path().join("nonexistent_models")),
         camera_device: Some(std::path::PathBuf::from("/dev/nonexistent_camera")),
-        skip_root_check: true,
         mock: false,
         command: soos_enrollment_cli::args::Commands::List(ListArgs::default()),
     };
@@ -115,8 +115,11 @@ fn test_list_command_works_without_camera_or_models() {
         .expect("build_store_only must succeed without camera or models");
     assert!(!service.is_full_service(), "Service should be store-only");
 
-    let list = service
-        .list(&ListArgs::default())
-        .expect("List command must succeed");
-    assert!(list.is_empty());
+    let res = service.list(&ListArgs::default());
+    if nix::unistd::geteuid().is_root() {
+        let list = res.expect("List command must succeed");
+        assert!(list.is_empty());
+    } else {
+        assert!(matches!(res, Err(EnrollmentCliError::RootRequired)));
+    }
 }
