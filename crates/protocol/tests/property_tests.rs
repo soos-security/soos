@@ -134,14 +134,16 @@ mod tests {
         (
             arb_event_kind(),
             proptest::option::of(arb_request_id()),
+            proptest::option::of(any::<u32>()),
             arb_valid_service_name(),
             any::<u64>(),
         )
             .prop_map(
-                |(kind, request_id, service, timestamp_monotonic_ns)| Event {
+                |(kind, request_id, uid, service, timestamp_monotonic_ns)| Event {
                     version: CURRENT_VERSION,
                     kind,
                     request_id,
+                    uid,
                     service,
                     timestamp_monotonic_ns,
                 },

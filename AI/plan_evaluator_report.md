@@ -1,59 +1,76 @@
-# Plan Evaluation Report — Issue #28: Policy Engine Lock Contention and Monotonic Clock Fallback
+# Plan Evaluation Report — Issue #29: Robust UID Resolution and Buffer Safety
 
+- **Target Issue**: Issue #29 (`fix/pam-uid-resolution`, GitHub Issue #68)
+- **Evaluator**: Independent Plan Evaluator Sub-Agent
 - **Date**: 2026-09-19
-- **Evaluator**: Independent Plan Evaluator Sub-Agent (`plan-evaluator`)
-- **Target**: Issue #28 (`fix(daemon): Policy engine lock contention and monotonic clock fallback`) / GitHub #67
-- **Branch**: `fix/policy-concurrency`
+- **Status**: Complete
 
 ---
 
-## Executive Summary
+## 1. Context Ingestion Audit
 
-The proposed implementation plan addresses all three sub-issues of Issue #28:
-1. `#28.1`: Replace `Arc<Mutex<AuthorizationEngine>>` with `Arc<tokio::sync::RwLock<AuthorizationEngine>>` in `PipelineComponents`, add `check_allowed` to `AuthorizationEngine` and `RateLimiter`, and acquire read locks during pre-pipeline rate limit checks (`check_allowed`) so concurrent auth requests do not serialize or starve on a single lock.
-2. `#28.2`: Enhance `current_monotonic_nanos()` fallback behavior to return `Result<u64, DaemonError>` instead of silently returning 0 on clock failure, provide `current_monotonic_nanos_from_clock`, and handle clock failure in `ConnectionDispatcher` by failing closed with `Verdict::Unavailable` and `ReasonClass::InternalError`.
-3. `#28.3`: Introduce `SessionValidator` to cross-reference `/run/systemd/sessions/` active session files (`ACTIVE=1` or `STATE=active` with matching `UID`), rejecting authentication requests fail-closed with `Verdict::ProtocolError` and `ReasonClass::UidMismatch` when target UIDs lack an active session, fully complying with `AI/ARCHITECTURE.md` §2.3 and §4.
+| Source Document | Status | Notes |
+| :--- | :--- | :--- |
+| `AI/ARCHITECTURE.md` | Ingested | Verified §5 PAM Module, wire layout, latency budget |
+| `AI/DECISIONS.md` | Ingested | Verified ADR-001..ADR-012 constraints |
+| `AI/BACKLOG.md` | Ingested | Verified Issue #29 sub-issues #29.1 and #29.2 |
+| `AI/VERIFICATION_MATRIX.md` | Ingested | Acceptance criteria for UID resolution and Event telemetry |
+| `Docs/SECURITY_AND_QUALITY_GUIDELINES.md` | Ingested | Invariants on panic safety, bounds, zeroization |
+| `AGENTS.md` | Ingested | Strict test integrity and English policy |
 
 ---
 
-## 6-Pillar Compliance Assessment
+## 2. Pillar-by-Pillar Compliance Assessment
 
 ### Pillar 1: Architectural Alignment & Threat Model
-- **Boundary & Authority**: Cross-referencing `SO_PEERCRED` with active `logind` sessions (`/run/systemd/sessions/`) satisfies `AI/ARCHITECTURE.md` §2.3 Invariant 3 ("The daemon never trusts the username, PID, PAM service, or UID declared in payload messages: it strictly cross-references `SO_PEERCRED`, `/etc/passwd`, and active `logind` sessions").
-- **Fail-Closed Session Control**: Requests asserting UIDs without verified active graphical/local sessions are immediately rejected prior to heavy neural processing, preventing denial-of-service and unauthorized background PAM invocation.
-- **Compliance**: **PASS**
+- **Evaluation**: PASS
+- **Details**:
+  - Respects clear boundary between unprivileged PAM client and root daemon.
+  - Differentiates `peer_uid` (caller process credential verified via `SO_PEERCRED`) from `event.uid` (target account whose authentication failed).
+  - Associates intrusion evidence snapshots in `/var/lib/soos/evidence` with the target UID, preventing GDM/root UID hijacking in evidence records.
 
 ### Pillar 2: PAM Real-Time Latency & Concurrency
-- **Lock Contention Elimination**: Replacing `Mutex` with `RwLock` ensures that multiple incoming PAM authentication requests (up to the concurrency limit of 8) concurrently check rate limit quotas via shared read locks (`policy.read().await`) without serializing behind long-running evaluations.
-- **Strict Budget Preservation**: Evaluating rate limits in read mode takes sub-millisecond execution, strictly preserving the <= 150ms p95 decision budget (`AI/ARCHITECTURE.md` §7).
-- **Compliance**: **PASS**
+- **Evaluation**: PASS
+- **Details**:
+  - PAM module uses synchronous `UnixStream` with strict 20ms timeout ceiling for `notify_event`.
+  - Zero Tokio runtime or asynchronous task spawning in `pam_soos`.
+  - `getpwnam_r` dynamic buffer allocation is strictly capped at 64KB, executing within microseconds without latency degradation.
+  - Zero stdout/stderr stream pollution (`println!`, `eprintln!`, `dbg!`).
 
 ### Pillar 3: Panic Safety & Fail-Closed Behavior
-- **Clock Failure Degradation**: When monotonic time extraction via `clock_gettime(CLOCK_MONOTONIC)` fails or encounters negative values, `current_monotonic_nanos()` returns `Err(DaemonError::Clock(...))`. The dispatcher catches this and systematically emits `Verdict::Unavailable` (`ReasonClass::InternalError`), ensuring zero panic, zero deadline bypass, and safe fallback to password authentication (`PAM_IGNORE`).
-- **No Unwrap/Expect in Production**: All error conversions use `map_err`, `?`, or structured pattern matching.
-- **Compliance**: **PASS**
+- **Evaluation**: PASS
+- **Details**:
+  - All PAM entry points remain protected by `catch_unwind` returning `PAM_IGNORE`.
+  - Zero `unwrap()` or `expect()` in `crates/pam/src/lib.rs` and `crates/pam/src/ipc.rs`.
+  - Buffer allocation and arithmetic use checked operations (`checked_mul`), clamped bounds, and safe pointer checking (`result.is_null()`).
+  - Fail-closed: failures in UID resolution return `None`, gracefully falling back to `libc::getuid()` or `PAM_IGNORE`, never `PAM_SUCCESS`.
 
 ### Pillar 4: Dependency Isolation & Banned Crates
-- **Pure Nix/POSIX & Filesystem**: Safe POSIX clock queries utilize `nix::time::clock_gettime`. Logind session validation is performed by inspectable filesystem traversal over `/run/systemd/sessions/` with strict bounded buffer reads (4KB per file), requiring zero foreign C D-Bus libraries or external unvetted dependencies.
-- **Banned Crates**: Neither `opencv` nor `nokhwa` are referenced or introduced.
-- **Compliance**: **PASS**
+- **Evaluation**: PASS
+- **Details**:
+  - Zero banned dependencies (no OpenCV, no nokhwa).
+  - `#![forbid(unsafe_code)]` remains strictly intact in `crates/protocol`.
+  - Unsafe code in `crates/pam` is strictly isolated to libc FFI (`libc::getpwnam_r`, `libc::sysconf`) with documented safety preconditions.
 
 ### Pillar 5: Data Confidentiality & Zeroization
-- **Output Isolation**: Session validation and clock error paths emit structured tracing logs containing only non-sensitive numeric UIDs, request IDs, and error descriptions. Zero passwords, biometric templates, or raw frames are touched or logged.
-- **Compliance**: **PASS**
+- **Evaluation**: PASS
+- **Details**:
+  - Zero passwords or biometric embeddings transmitted over IPC or stored in `Event`.
+  - Buffer growth is bounded at 64KB, preventing heap exhaustion (OOM attack vector).
+  - Temporary buffers are strictly scoped and deallocated immediately upon function return.
 
 ### Pillar 6: Test Integrity & TDD Contracts
-- **Contractual Tests Authored in Phase 2**:
-  - `test_concurrent_auth_requests_no_lock_starvation`: Asserts that 8 concurrent auth requests read rate-limit state concurrently without mutex contention.
-  - `test_monotonic_clock_failure_returns_unavailable`: Asserts that failure of the monotonic clock returns `Verdict::Unavailable` and fails closed.
-  - `test_auth_rejected_for_uid_without_active_session`: Asserts that target UIDs lacking active logind sessions are rejected with `Verdict::ProtocolError` and `ReasonClass::UidMismatch`, and permitted when an active session file is present.
-- **Zero Test Weakening**: Existing test suites in `crates/daemon/tests/` remain intact and green.
-- **Compliance**: **PASS**
+- **Evaluation**: PASS
+- **Details**:
+  - Two explicit contractual tests authored in Phase 2:
+    - `test_getpwnam_r_handles_erange_retry`: Verifies dynamic buffer growth from small initial buffer (e.g. 4 bytes) through `ERANGE` retries to resolution, and validates cap enforcement.
+    - `test_password_failed_event_includes_uid`: Verifies that `notify_event` correctly populates `uid: Some(1000)` on the wire.
+  - Immutable test contracts: zero test weakening or deletion.
 
 ---
 
-## Formal Evaluation Verdict
+## 3. Plan Evaluator Conclusion
 
-The implementation plan is exhaustive, fully compliant with `AI/ARCHITECTURE.md`, `AI/DECISIONS.md`, and `AI/BACKLOG.md`, and satisfies all 6 architectural pillars.
+The implementation plan satisfies all security invariants, real-time deadlines, bounds checking, and test integrity requirements.
 
 **VALIDATION_VERDICT: APPROVED**

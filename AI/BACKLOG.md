@@ -1036,13 +1036,13 @@ The enrollment CLI uses incorrect model registry IDs (`face_detector` instead of
 
 #### Sub-issues
 
-- [ ] **#29.1** — Implement dynamic buffer growth for `getpwnam_r`
+- [x] **#29.1** — Implement dynamic buffer growth for `getpwnam_r`
   - Start with 1024, retry with `sysconf(_SC_GETPW_R_SIZE_MAX)` or double on `ERANGE`
   - Cap at 64KB to prevent OOM
   - Acceptance: UID resolution works with LDAP/AD backends
   - TDD: `test_getpwnam_r_handles_erange_retry`
 
-- [ ] **#29.2** — Include `uid` in `Event` payload for `PasswordFailed`
+- [x] **#29.2** — Include `uid` in `Event` payload for `PasswordFailed`
   - Use the `_uid` parameter that is currently ignored
   - Acceptance: Evidence store associates snapshots with correct UID
   - TDD: `test_password_failed_event_includes_uid`

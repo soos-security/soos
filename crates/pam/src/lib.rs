@@ -127,30 +127,89 @@ impl PamHooks for SoosPam {
     }
 }
 
+/// Initial allocation buffer size for `getpwnam_r` lookups (1 KB).
+pub const INITIAL_PW_BUF_SIZE: usize = 1024;
+
+/// Absolute maximum allocation ceiling for `getpwnam_r` lookups (64 KB) to prevent OOM.
+pub const MAX_PW_BUF_SIZE: usize = 64 * 1024;
+
 /// Resolves a PAM username string to a numeric POSIX UID using reentrant `getpwnam_r`.
-fn resolve_username_to_uid(username: &str) -> Option<u32> {
-    let c_user = std::ffi::CString::new(username).ok()?;
-    let mut pwd = std::mem::MaybeUninit::<libc::passwd>::uninit();
-    let mut result = std::ptr::null_mut();
-    let mut buf = vec![0u8; 1024];
+///
+/// Starts with `sysconf(_SC_GETPW_R_SIZE_MAX)` (minimum 1024 bytes) and dynamically
+/// doubles the buffer on `ERANGE` up to a maximum cap of 64KB to support LDAP/AD backends.
+pub fn resolve_username_to_uid(username: &str) -> Option<u32> {
+    let initial = initial_buffer_size();
+    resolve_username_to_uid_with_bounds(username, initial, MAX_PW_BUF_SIZE)
+}
 
-    // SAFETY: getpwnam_r is standard POSIX reentrant user lookup.
-    let ret = unsafe {
-        libc::getpwnam_r(
-            c_user.as_ptr(),
-            pwd.as_mut_ptr(),
-            buf.as_mut_ptr().cast(),
-            buf.len(),
-            &mut result,
-        )
-    };
-
-    if ret == 0 && !result.is_null() {
-        // SAFETY: pwd initialized by getpwnam_r when result is non-null.
-        let pwd_val = unsafe { pwd.assume_init() };
-        Some(pwd_val.pw_uid)
+/// Queries `sysconf(_SC_GETPW_R_SIZE_MAX)`, clamping between `INITIAL_PW_BUF_SIZE` and `MAX_PW_BUF_SIZE`.
+fn initial_buffer_size() -> usize {
+    // SAFETY: sysconf is a safe, standard POSIX query with no side effects.
+    let sc = unsafe { libc::sysconf(libc::_SC_GETPW_R_SIZE_MAX) };
+    if let Ok(sc_usize) = usize::try_from(sc) {
+        sc_usize.clamp(INITIAL_PW_BUF_SIZE, MAX_PW_BUF_SIZE)
     } else {
-        None
+        INITIAL_PW_BUF_SIZE
+    }
+}
+
+/// Resolves a PAM username string to a numeric POSIX UID with explicit buffer bounds.
+///
+/// Retries with doubled buffer size when `libc::getpwnam_r` returns `ERANGE`,
+/// capping growth at `max_size` to prevent memory exhaustion.
+pub fn resolve_username_to_uid_with_bounds(
+    username: &str,
+    initial_size: usize,
+    max_size: usize,
+) -> Option<u32> {
+    let c_user = std::ffi::CString::new(username).ok()?;
+    let mut buf_size = initial_size.max(1).min(max_size);
+
+    loop {
+        let mut pwd = std::mem::MaybeUninit::<libc::passwd>::uninit();
+        let mut result = std::ptr::null_mut();
+        let mut buf = vec![0u8; buf_size];
+
+        // SAFETY: getpwnam_r is standard POSIX reentrant user lookup.
+        // `c_user` is a valid null-terminated C string.
+        // `pwd` is a valid pointer to uninitialized `passwd` memory.
+        // `buf` is a valid allocated memory region of `buf_size` bytes.
+        // `result` is a valid pointer to a `*mut passwd` pointer.
+        let ret = unsafe {
+            libc::getpwnam_r(
+                c_user.as_ptr(),
+                pwd.as_mut_ptr(),
+                buf.as_mut_ptr().cast(),
+                buf.len(),
+                &mut result,
+            )
+        };
+
+        if ret == 0 {
+            if result.is_null() {
+                // User not found in system database
+                return None;
+            }
+            // SAFETY: pwd initialized by getpwnam_r when ret == 0 and result is non-null.
+            let pwd_val = unsafe { pwd.assume_init() };
+            return Some(pwd_val.pw_uid);
+        } else if ret == libc::ERANGE {
+            if buf_size >= max_size {
+                // Cap reached: fail closed to prevent unbounded heap allocation
+                return None;
+            }
+            let next_size = match buf_size.checked_mul(2) {
+                Some(doubled) => doubled.min(max_size),
+                None => max_size,
+            };
+            if next_size <= buf_size {
+                return None;
+            }
+            buf_size = next_size;
+        } else {
+            // Unrecoverable libc lookup error
+            return None;
+        }
     }
 }
 

@@ -246,15 +246,17 @@ impl ConnectionDispatcher {
         }
 
         if event.kind == EventKind::PasswordFailed {
+            let target_uid = event.uid.unwrap_or(peer_uid);
             info!(
                 peer_uid = peer_uid,
+                target_uid = target_uid,
                 "Processing telemetry auth failure event"
             );
             if let Some(ref pipe) = self.pipeline {
                 if pipe.evidence_store.config().enabled {
                     if let Some(frame) = pipe.camera.latest_frame() {
                         match pipe.evidence_store.store_snapshot(
-                            peer_uid,
+                            target_uid,
                             "PasswordFailed",
                             &frame.data,
                             None,

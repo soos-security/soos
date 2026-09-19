@@ -56,6 +56,8 @@ This document translates the critical gating criteria from §11 of `ARCHITECTURE
 | PA10 | Multi-distribution PAM stack integration across Debian/Ubuntu, RHEL/Fedora, and Arch Linux | Invariant test (`test_pam_docker_matrix_files_and_distro_configs_exist`), Docker matrix runner (`tests/docker/run_matrix.sh`) | ✅ Verified |
 | PA11 | `pam-bindings` 0.3.0 `PamHooks` trait implementation with unhandled hook defaults | Unit & integration tests (`test_pam_hooks_unhandled_hooks_return_ignore`, `test_pam_hooks_authenticate_offline_daemon_returns_ignore`, `test_pam_crate_uses_pam_bindings_and_implements_pam_hooks`) | ✅ Verified |
 | PA12 | Syslog panic logging on caught panics without secret leakage | Unit & integration tests (`test_syslog_panic_message_formatting`, `test_syslog_panic_message_sanitization`, `test_syslog_log_panic_execution`, `test_pam_crate_has_syslog_panic_logging_without_secrets`) | ✅ Verified |
+| PA13 | Dynamic buffer growth for POSIX `getpwnam_r` resolving users with LDAP/AD backends | Unit & retry tests (`uid_resolution_tests::test_getpwnam_r_handles_erange_retry`, `uid_resolution_tests::test_getpwnam_r_caps_at_max_buffer_size`, `uid_resolution_tests::test_getpwnam_r_nominal_resolution`, `uid_resolution_tests::test_getpwnam_r_nonexistent_user_returns_none`) | ✅ Verified |
+| PA14 | Telemetry `PasswordFailed` event payload includes target `uid` for evidence snapshot attribution | Unit & integration tests (`ipc_tests::test_password_failed_event_includes_uid`, `pipeline_integration_tests::test_12_4_password_failed_event_captures_evidence_snapshot`) | ✅ Verified |
 
 ---
 

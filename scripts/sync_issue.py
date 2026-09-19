@@ -93,6 +93,7 @@ BRANCH_TO_ISSUE = {
     "feat/install-script": 26,
     "feat/distro-packages": 27,
     "fix/policy-concurrency": 28,
+    "fix/pam-uid-resolution": 29,
 }
 
 

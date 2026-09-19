@@ -363,10 +363,13 @@ async fn test_12_4_password_failed_event_captures_evidence_snapshot() {
         .await
         .expect("Connect client failed");
 
+    let target_uid = fixture.current_uid.saturating_add(42);
+
     let event = Event {
         version: CURRENT_VERSION,
         kind: EventKind::PasswordFailed,
         request_id: Some([7u8; 32]),
+        uid: Some(target_uid),
         service: "gdm".into(),
         timestamp_monotonic_ns: 1_000_000,
     };
@@ -397,7 +400,10 @@ async fn test_12_4_password_failed_event_captures_evidence_snapshot() {
                     .evidence_store
                     .load_snapshot(&file)
                     .expect("Load snapshot");
-                assert_eq!(record.uid, fixture.current_uid);
+                assert_eq!(
+                    record.uid, target_uid,
+                    "Snapshot must be associated with target UID from Event payload"
+                );
             }
         }
     }
