@@ -9,7 +9,10 @@
 //! - Sockets are closed immediately upon receiving the verdict.
 
 use std::io::{Read, Write};
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::io::{FromRawFd, RawFd};
 use std::os::unix::net::UnixStream;
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 use soos_protocol::codec::{decode, encode};
@@ -17,6 +20,7 @@ use soos_protocol::types::{
     Event, EventKind, Request, RequestKind, Response, Verdict, CURRENT_VERSION, MAX_MESSAGE_SIZE,
     REQUEST_ID_LEN,
 };
+use zeroize::Zeroizing;
 
 use crate::config::PamConfig;
 
@@ -126,12 +130,155 @@ fn read_exact_counted<R: Read>(
     Ok(())
 }
 
+/// RAII guard ensuring a raw file descriptor is closed on drop unless disarmed via `into_raw()`.
+struct FdGuard(RawFd);
+
+impl FdGuard {
+    fn into_raw(mut self) -> RawFd {
+        let fd = self.0;
+        self.0 = -1;
+        fd
+    }
+}
+
+impl Drop for FdGuard {
+    fn drop(&mut self) {
+        if self.0 >= 0 {
+            // SAFETY: self.0 is an owned, open file descriptor.
+            unsafe { libc::close(self.0) };
+        }
+    }
+}
+
+/// Connects to a Unix domain socket at `path` within a non-blocking timeout budget.
+///
+/// Implements non-blocking `connect()` with POSIX `poll` to ensure frozen or
+/// saturated daemon listening sockets do not block indefinitely. Upon successful
+/// connection, the socket is switched back to blocking mode for subsequent timed I/O.
+pub fn connect_with_timeout(path: &Path, timeout: Duration) -> Result<UnixStream, IpcError> {
+    let path_bytes = path.as_os_str().as_bytes();
+    if path_bytes.len() >= 108 {
+        return Err(IpcError::Connect(std::io::Error::from_raw_os_error(
+            libc::ENAMETOOLONG,
+        )));
+    }
+
+    // SAFETY: Creating a non-blocking, close-on-exec UNIX domain stream socket.
+    let fd = unsafe {
+        libc::socket(
+            libc::AF_UNIX,
+            libc::SOCK_STREAM | libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK,
+            0,
+        )
+    };
+    if fd < 0 {
+        return Err(IpcError::Connect(std::io::Error::last_os_error()));
+    }
+    let guard = FdGuard(fd);
+
+    let mut sun = libc::sockaddr_un {
+        sun_family: libc::sa_family_t::try_from(libc::AF_UNIX).unwrap_or(0),
+        sun_path: [0; 108],
+    };
+
+    for (dest, src) in sun.sun_path.iter_mut().zip(path_bytes.iter()) {
+        *dest = i8::from_ne_bytes([*src]);
+    }
+
+    let sun_len = std::mem::size_of::<libc::sa_family_t>()
+        .saturating_add(path_bytes.len())
+        .saturating_add(1);
+
+    // SAFETY: guard.0 is a valid non-blocking socket descriptor; sun is an initialized sockaddr_un struct.
+    let ret = unsafe {
+        libc::connect(
+            guard.0,
+            &sun as *const libc::sockaddr_un as *const libc::sockaddr,
+            libc::socklen_t::try_from(sun_len).unwrap_or(0),
+        )
+    };
+
+    if ret < 0 {
+        let err = std::io::Error::last_os_error();
+        let raw_err = err.raw_os_error().unwrap_or(0);
+        if raw_err == libc::EINPROGRESS {
+            let start = Instant::now();
+            loop {
+                let remaining = remaining_budget(start, timeout)?;
+                let timeout_ms = i32::try_from(remaining.as_millis()).unwrap_or(i32::MAX);
+
+                let mut pfd = libc::pollfd {
+                    fd: guard.0,
+                    events: libc::POLLOUT,
+                    revents: 0,
+                };
+
+                // SAFETY: pfd points to 1 valid stack-allocated pollfd.
+                let poll_ret = unsafe { libc::poll(&mut pfd, 1, timeout_ms) };
+                if poll_ret == 0 {
+                    return Err(IpcError::Timeout);
+                }
+                if poll_ret < 0 {
+                    let poll_err = std::io::Error::last_os_error();
+                    if poll_err.raw_os_error() == Some(libc::EINTR) {
+                        continue;
+                    }
+                    return Err(IpcError::Io(poll_err));
+                }
+
+                // Poll returned > 0: inspect SO_ERROR via getsockopt
+                let mut so_err: libc::c_int = 0;
+                let mut so_err_len =
+                    libc::socklen_t::try_from(std::mem::size_of::<libc::c_int>()).unwrap_or(0);
+                // SAFETY: guard.0 is valid; so_err points to a stack-allocated c_int.
+                let opt_ret = unsafe {
+                    libc::getsockopt(
+                        guard.0,
+                        libc::SOL_SOCKET,
+                        libc::SO_ERROR,
+                        &mut so_err as *mut _ as *mut libc::c_void,
+                        &mut so_err_len,
+                    )
+                };
+                if opt_ret < 0 {
+                    return Err(IpcError::Io(std::io::Error::last_os_error()));
+                }
+                if so_err != 0 {
+                    return Err(IpcError::Connect(std::io::Error::from_raw_os_error(so_err)));
+                }
+
+                if (pfd.revents & (libc::POLLERR | libc::POLLHUP)) != 0
+                    && (pfd.revents & libc::POLLOUT) == 0
+                {
+                    return Err(IpcError::Connect(std::io::Error::from_raw_os_error(
+                        libc::ECONNREFUSED,
+                    )));
+                }
+
+                break;
+            }
+        } else {
+            return Err(IpcError::Connect(err));
+        }
+    }
+
+    let raw_fd = guard.into_raw();
+    // SAFETY: raw_fd is an owned, valid, connected UNIX domain socket file descriptor.
+    let stream = unsafe { UnixStream::from_raw_fd(raw_fd) };
+
+    // Restore blocking mode so that subsequent read/write calls adhere to set_read_timeout/set_write_timeout
+    stream.set_nonblocking(false).map_err(map_io_err)?;
+
+    Ok(stream)
+}
+
 /// Sends an authentication request to the daemon and awaits the verification verdict.
 pub fn authenticate(config: &PamConfig, uid: u32) -> Result<Verdict, IpcError> {
     let start_time = Instant::now();
     let total_timeout = Duration::from_millis(config.timeout_ms);
 
-    let mut stream = UnixStream::connect(&config.socket_path).map_err(IpcError::Connect)?;
+    let connect_timeout = remaining_budget(start_time, total_timeout)?;
+    let mut stream = connect_with_timeout(&config.socket_path, connect_timeout)?;
 
     // Configure write timeout based on remaining latency budget
     let remaining_write = remaining_budget(start_time, total_timeout)?;
@@ -140,8 +287,8 @@ pub fn authenticate(config: &PamConfig, uid: u32) -> Result<Verdict, IpcError> {
         .map_err(map_io_err)?;
 
     // Generate single-use cryptographic 256-bit nonce
-    let mut request_id = [0u8; REQUEST_ID_LEN];
-    getrandom::fill(&mut request_id).map_err(IpcError::Random)?;
+    let mut request_id = Zeroizing::new([0u8; REQUEST_ID_LEN]);
+    getrandom::fill(&mut *request_id).map_err(IpcError::Random)?;
 
     let now_ns = monotonic_nanos();
     let timeout_ns = config.timeout_ms.saturating_mul(1_000_000);
@@ -150,15 +297,16 @@ pub fn authenticate(config: &PamConfig, uid: u32) -> Result<Verdict, IpcError> {
     let req = Request {
         version: CURRENT_VERSION,
         kind: RequestKind::Auth,
-        request_id,
+        request_id: *request_id,
         uid_hint: uid,
         service: config.service.clone(),
         deadline_monotonic_ns,
     };
 
-    let encoded = encode(&req).map_err(IpcError::Codec)?;
+    let encoded = Zeroizing::new(encode(&req).map_err(IpcError::Codec)?);
     stream.write_all(&encoded).map_err(map_io_err)?;
     stream.flush().map_err(map_io_err)?;
+    drop(encoded);
 
     // Dynamic latency budget refresh: configure read timeout before reading response length prefix
     let remaining_for_len = remaining_budget(start_time, total_timeout)?;
@@ -167,11 +315,11 @@ pub fn authenticate(config: &PamConfig, uid: u32) -> Result<Verdict, IpcError> {
         .map_err(map_io_err)?;
 
     // Read 4-byte big-endian length prefix with byte-counted completeness validation
-    let mut len_buf = [0u8; 4];
-    read_exact_counted(&mut stream, &mut len_buf, 4, 0)?;
+    let mut len_buf = Zeroizing::new([0u8; 4]);
+    read_exact_counted(&mut stream, &mut *len_buf, 4, 0)?;
 
     let declared_size =
-        usize::try_from(u32::from_be_bytes(len_buf)).map_err(|_| IpcError::OversizedMessage {
+        usize::try_from(u32::from_be_bytes(*len_buf)).map_err(|_| IpcError::OversizedMessage {
             size: usize::MAX,
             max: MAX_MESSAGE_SIZE,
         })?;
@@ -195,9 +343,9 @@ pub fn authenticate(config: &PamConfig, uid: u32) -> Result<Verdict, IpcError> {
         })?;
 
     // Single-allocation framed response buffer avoiding redundant secondary Vec and memcpy
-    let mut full_buf = vec![0u8; total_capacity];
+    let mut full_buf = Zeroizing::new(vec![0u8; total_capacity]);
     let prefix_slice = full_buf.get_mut(..4).ok_or(IpcError::EmptyResponse)?;
-    prefix_slice.copy_from_slice(&len_buf);
+    prefix_slice.copy_from_slice(&*len_buf);
 
     // Dynamic latency budget refresh: recompute remaining budget before reading payload body
     // to strictly enforce cumulative deadline across multi-part reads
@@ -241,7 +389,8 @@ pub fn notify_event(config: &PamConfig, uid: u32, event_kind: EventKind) -> Resu
     let start_time = Instant::now();
     let total_timeout = Duration::from_millis(EVENT_TIMEOUT_MS);
 
-    let mut stream = UnixStream::connect(&config.socket_path).map_err(IpcError::Connect)?;
+    let connect_timeout = remaining_budget(start_time, total_timeout)?;
+    let mut stream = connect_with_timeout(&config.socket_path, connect_timeout)?;
 
     let remaining = remaining_budget(start_time, total_timeout)?;
 
@@ -258,7 +407,7 @@ pub fn notify_event(config: &PamConfig, uid: u32, event_kind: EventKind) -> Resu
         timestamp_monotonic_ns: monotonic_nanos(),
     };
 
-    let encoded = encode(&event).map_err(IpcError::Codec)?;
+    let encoded = Zeroizing::new(encode(&event).map_err(IpcError::Codec)?);
     stream.write_all(&encoded).map_err(map_io_err)?;
     stream.flush().map_err(map_io_err)?;
 

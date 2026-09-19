@@ -736,3 +736,137 @@ fn test_password_failed_event_includes_uid() {
 
     let _ = server_handle.join();
 }
+
+/// Sub-issue #34.2 TDD Contract: Frozen daemon connection timeout.
+///
+/// Verifies that when a Unix socket exists and is in listening state, but the
+/// listener backlog is saturated and connections are not accepted, `pam_sm_authenticate`
+/// and `authenticate()` strictly enforce the configured `timeout_ms` (< 250ms)
+/// rather than blocking indefinitely in kernel space.
+#[test]
+fn test_ipc_connect_timeout_frozen_daemon() {
+    let tmp = tempdir().expect("tempdir created");
+    let sock_path = tmp.path().join("frozen_daemon.sock");
+
+    // SAFETY: standard POSIX socket syscalls to simulate a frozen daemon with saturated backlog
+    let (server_fd, client_fd) = unsafe {
+        let fd = libc::socket(libc::AF_UNIX, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0);
+        assert!(fd >= 0, "socket creation failed");
+        let mut sun = libc::sockaddr_un {
+            sun_family: libc::sa_family_t::try_from(libc::AF_UNIX).unwrap_or(0),
+            sun_path: [0; 108],
+        };
+        let path_bytes = sock_path.as_os_str().as_encoded_bytes();
+        for (dest, src) in sun.sun_path.iter_mut().zip(path_bytes.iter()) {
+            *dest = i8::from_ne_bytes([*src]);
+        }
+        let addr_len = std::mem::size_of::<libc::sa_family_t>() + path_bytes.len() + 1;
+        let bind_res = libc::bind(
+            fd,
+            &sun as *const libc::sockaddr_un as *const libc::sockaddr,
+            addr_len as libc::socklen_t,
+        );
+        assert_eq!(bind_res, 0, "bind failed");
+        let listen_res = libc::listen(fd, 0);
+        assert_eq!(listen_res, 0, "listen failed");
+
+        // Sockets with backlog 0 saturate with one pending connection
+        let cfd = libc::socket(libc::AF_UNIX, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0);
+        let _ = libc::connect(
+            cfd,
+            &sun as *const libc::sockaddr_un as *const libc::sockaddr,
+            addr_len as libc::socklen_t,
+        );
+        (fd, cfd)
+    };
+
+    let sock_arg = format!("socket_path={}", sock_path.display());
+    let (_storage, ptrs) = make_pam_args(&[&sock_arg, "timeout_ms=100"]);
+
+    let start = Instant::now();
+    let code = pam_sm_authenticate(ptr::null_mut(), 0, ptrs.len() as i32, ptrs.as_ptr());
+    let elapsed = start.elapsed();
+
+    // SAFETY: Closing test socket file descriptors.
+    unsafe {
+        libc::close(client_fd);
+        libc::close(server_fd);
+    }
+
+    assert_eq!(code, PAM_IGNORE);
+    assert!(
+        elapsed < Duration::from_millis(250),
+        "Frozen connect blocked for {:?}, exceeding 250ms budget",
+        elapsed
+    );
+}
+
+/// Sub-issue #34.3 TDD Contract: Memory zeroization of Request and Event.
+#[test]
+fn test_request_and_event_zeroize_on_drop() {
+    use zeroize::Zeroize;
+
+    let mut req = Request {
+        version: CURRENT_VERSION,
+        kind: soos_protocol::types::RequestKind::Auth,
+        request_id: [0x42u8; 32],
+        uid_hint: 1001,
+        service: "test_service".to_string(),
+        deadline_monotonic_ns: 999_999,
+    };
+
+    req.zeroize();
+    assert_eq!(req.request_id, [0u8; 32], "request_id must be zeroed");
+    assert_eq!(req.uid_hint, 0, "uid_hint must be zeroed");
+    assert!(
+        req.service.is_empty(),
+        "service string must be zeroed / cleared"
+    );
+    assert_eq!(req.deadline_monotonic_ns, 0, "deadline must be zeroed");
+
+    let mut event = Event {
+        version: CURRENT_VERSION,
+        kind: EventKind::PasswordFailed,
+        request_id: Some([0x77u8; 32]),
+        uid: Some(1002),
+        service: "test_service".to_string(),
+        timestamp_monotonic_ns: 888_888,
+    };
+
+    event.zeroize();
+    assert_eq!(
+        event.request_id,
+        Some([0u8; 32]),
+        "event request_id must be zeroed"
+    );
+    assert_eq!(event.uid, Some(0), "uid must be zeroed");
+    assert!(event.service.is_empty(), "service must be zeroed");
+    assert_eq!(event.timestamp_monotonic_ns, 0, "timestamp must be zeroed");
+}
+
+/// Sub-issue #34.1 TDD Contract: All C ABI entry points catch panics and return PAM_IGNORE.
+#[test]
+fn test_c_abi_all_entry_points_panic_safe() {
+    use pam_soos::*;
+
+    assert_eq!(
+        pam_sm_setcred(ptr::null_mut(), 0, 0, ptr::null()),
+        PAM_IGNORE
+    );
+    assert_eq!(
+        pam_sm_acct_mgmt(ptr::null_mut(), 0, 0, ptr::null()),
+        PAM_IGNORE
+    );
+    assert_eq!(
+        pam_sm_chauthtok(ptr::null_mut(), 0, 0, ptr::null()),
+        PAM_IGNORE
+    );
+    assert_eq!(
+        pam_sm_open_session(ptr::null_mut(), 0, 0, ptr::null()),
+        PAM_IGNORE
+    );
+    assert_eq!(
+        pam_sm_close_session(ptr::null_mut(), 0, 0, ptr::null()),
+        PAM_IGNORE
+    );
+}
