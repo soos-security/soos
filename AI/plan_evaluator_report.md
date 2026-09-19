@@ -1,73 +1,50 @@
-# Plan Evaluation Report — Issue #31: Physical Hardware End-to-End Validation Suite (#70)
+# Plan Evaluator Audit Report — Issue #32: Distribution-Specific Deployment Validation (#71)
 
-**Evaluation Date**: 2026-09-19  
-**Target Issue**: Issue #31 / GitHub #70 (`test/physical-hardware-validation`)  
-**Evaluator**: Plan Evaluator Sub-Agent (`plan-evaluator`)  
-**Scope**: Physical hardware end-to-end validation suite, including enrollment lifecycle, PAM stack integration, multi-user isolation, screensaver manual test protocol, adversarial PAD testing, and invariant test contract.
+## Executive Summary
+This evaluation report conducts an independent, rigorous architectural and security compliance audit of the implementation plan for **Issue #32: Distribution-Specific Deployment Validation** (`#32.1`, `#32.2`, `#32.3` / GitHub Issue `#71`), in accordance with the 6 core architectural pillars of the `soos` workspace.
 
 ---
 
-## 1. Evaluation Against Architectural Pillars
+## Evaluation Across 6 Core Architectural Pillars
 
 ### Pillar 1: Architectural Alignment & Threat Model
-- **Boundary Separation**: The test suite strictly respects the separation between unprivileged PAM caller (`pam_soos.so`) and privileged daemon (`soos-daemon`).
-- **Socket & Permissions**: In physical PAM integration tests, the daemon listens on a dedicated Unix Domain Socket with mode `0660`, verified credentials, and isolated runtime paths.
-- **Fail-Closed Fallback**: Tests explicitly verify that offline daemons, missing cameras, or unrecognized faces degrade cleanly to password authentication.
-- **Storage Isolation**: The enrollment and multi-user validation suites verify template encryption and proper file permissions (mode `0700` directories, `0600` files).
-- **Assessment**: **PASSED**
+- **Evaluation**: The proposed plan validates deployment on Debian 12 / Ubuntu 24.04, Fedora 40 / RHEL 9, and Arch Linux without compromising the boundary between the unprivileged PAM module (`pam_soos.so`) and the privileged root daemon (`soos-daemon`).
+- **Filesystem Invariants**: The validation suite asserts directory hierarchy and permissions: `/var/lib/soos/{biometrics,evidence}` (`0700`, `root:root`), `/var/lib/soos/master.key` (`0600`, `root:root`), and `/run/soos` (`0750`, `root:soos`).
+- **Distribution PAM Ordering**: The suite validates PAM configurations against `AI/ARCHITECTURE.md` §5: `pam_soos.so` is placed before `pam_unix`, and `event=password-failed` is placed after `pam_unix`.
+- **Verdict**: Compliant.
 
 ### Pillar 2: PAM Real-Time Latency & Concurrency
-- **Zero Tokio in PAM**: Confirms PAM module remains synchronous without async runtimes.
-- **Deadline Adherence**: Tests verify that nominal facial verification succeeds within the 200–250ms deadline without prompting for passwords.
-- **Output Isolation**: PAM module execution generates zero stdout/stderr stream pollution that could destabilize display managers or lock screens.
-- **Assessment**: **PASSED**
+- **Evaluation**: The PAM module testing harnesses enforce synchronous execution via blocking sockets with strict timeouts (`timeout_ms=250`).
+- **Display Manager & Screen Locker Safety**: Explicitly tests `swaylock`, `hyprlock`, `gdm`, and `sudo` PAM interactions, guaranteeing zero stream pollution (`println!`, `dbg!`) that could corrupt display manager IPC or cause screensaver lockups.
+- **Verdict**: Compliant.
 
 ### Pillar 3: Panic Safety & Fail-Closed Behavior
-- **FFI Safety**: Module maintains `catch_unwind` wrapping all PAM entry points.
-- **Fail-Closed Invariant**: Rejection of absent/wrong faces returns `PAM_IGNORE`, never converting an error or non-match into `PAM_SUCCESS`.
-- **Process Robustness**: Daemon crash or abnormal termination mid-auth is tested to ensure immediate fallback to password authentication.
-- **Assessment**: **PASSED**
+- **Evaluation**: All test scenarios explicitly test fail-closed behavior:
+  - Absent daemon / missing socket -> returns `PAM_IGNORE` -> password fallback succeeds.
+  - Wrong password during fallback -> strictly rejected (fails closed).
+  - Preserves `pam_faillock` in Fedora `authselect` configuration, ensuring password lockout counters are never reset or bypassed by biometric module failures.
+- **Verdict**: Compliant.
 
 ### Pillar 4: Dependency Isolation & Banned Crates
-- **Banned Crates**: Strictly zero `opencv` or `nokhwa`.
-- **Camera Capture**: Hardware access uses `v4l` V4L2 MMAP streaming or deterministic `MockCameraManager` simulation.
-- **Code Safety**: `#![forbid(unsafe_code)]` remains strictly enforced across all business crates.
-- **Assessment**: **PASSED**
+- **Evaluation**: The deployment validation relies strictly on native distribution tooling (`dpkg`, `rpm`, `authselect`, `pacman`, `makepkg`, `pamtester`, native C test harness `pam_test_runner`). No prohibited libraries (e.g. `opencv`, `nokhwa`) are introduced.
+- **Verdict**: Compliant.
 
 ### Pillar 5: Data Confidentiality & Zeroization
-- **Credential Protection**: Zero passwords logged, transmitted over IPC, or stored in plaintext.
-- **Temporary State Cleanliness**: All test scripts register robust traps (`trap cleanup EXIT INT TERM`) to securely remove temporary biometric templates, socket files, and master keys upon script completion or interrupt.
-- **Assessment**: **PASSED**
+- **Evaluation**: Invariant tests assert that passwords are never logged or stored. Biometric vector templates in `/var/lib/soos/biometrics/` are validated to maintain permissions `0600` (`root:root`). Rollback procedures ensure biometric templates are preserved under `--keep-data` without compromising access permissions.
+- **Verdict**: Compliant.
 
 ### Pillar 6: Test Integrity & TDD Contracts
-- **Contractual Pre-Implementation Testing**: An architectural invariant test (`test_physical_hardware_validation_suite_spec`) will be authored in `tests/invariants/src/lib.rs` during Phase 2 (Tester Agent) BEFORE production implementation, asserting that all required scripts, execution bits, and verification sections exist.
-- **Red Phase Verification**: The invariant test will be run and verified to fail initially prior to implementation.
-- **Zero Test Weakening**: Strict enforcement that tests authored during Phase 2 will not be weakened, altered, or bypassed.
-- **Assessment**: **PASSED**
+- **Evaluation**:
+  - TDD Red Phase: Authored tests in `tests/invariants/src/lib.rs` (`test_distro_validation_suite_spec`) will assert script presence, executable bits, strict flags (`set -euo pipefail`), CLI `--help` handling, and specific scenario coverage before test scripts are finalized.
+  - Zero Test Weakening: Invariant tests are immutable contracts aligned with acceptance criteria DV1–DV6.
+- **Verdict**: Compliant.
 
 ---
 
-## 2. Risk Analysis & Mitigation
+## Conclusion & Verdict
 
-1. **Hardware Webcam Availability in Headless / CI Environments**:
-   - *Risk*: Running physical hardware tests on headless CI runners lacking `/dev/video*` devices could cause false test failures or hangs.
-   - *Mitigation*: All physical validation shell scripts (`enrollment_test.sh`, `pam_integration_test.sh`, `multi_user_test.sh`, `adversarial_test.sh`) will automatically detect available `/dev/video*` devices, support explicit device override flags (`--device <path>`), and provide a deterministic `--mock` flag or fallback mode to enable automated regression testing on headless systems without hardware webcams.
-
-2. **System PAM Configuration Safety**:
-   - *Risk*: Inadvertently corrupting `/etc/pam.d/common-auth` or `/etc/pam.d/system-auth` on developer host.
-   - *Mitigation*: `pam_integration_test.sh` utilizes an isolated, standalone PAM service definition (`/etc/pam.d/test-soos-physical` or dedicated test service), leaving host distribution PAM configurations completely untouched.
-
----
-
-## 3. Evaluation Verdict
+The implementation plan satisfies all requirements of `AI/ARCHITECTURE.md`, `AI/BACKLOG.md` (Issue #32), `AI/VERIFICATION_MATRIX.md`, and project security guidelines.
 
 ```text
-===================================================================
 VALIDATION_VERDICT: APPROVED
-===================================================================
-The implementation plan for Issue #31: Physical Hardware End-to-End
-Validation Suite (#70) strictly complies with all 6 architectural
-pillars, security invariants, and test integrity mandates.
-Execution may proceed directly to Phase 2 (Tester Sub-Agent).
-===================================================================
 ```

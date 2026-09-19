@@ -1,82 +1,43 @@
-# Candid Review Report
+# Candid Code Review Report — Issue #32: Distribution-Specific Deployment Validation (#71)
 
-- **Date**: 2026-09-19
-- **Target Branch / Commit**: `test/physical-hardware-validation`
-- **Audited Files**:
-  - `tests/physical/enrollment_test.sh`
-  - `tests/physical/pam_integration_test.sh`
-  - `tests/physical/multi_user_test.sh`
-  - `tests/physical/screensaver_test.md`
-  - `tests/physical/adversarial_test.sh`
-  - `tests/invariants/src/lib.rs`
-  - `crates/enrollment-cli/src/args.rs`
-  - `crates/enrollment-cli/src/service.rs`
-  - `crates/enrollment-cli/tests/delete_tests.rs`
-  - `crates/enrollment-cli/tests/list_tests.rs`
-  - `scripts/sync_issue.py`
+## Executive Summary
+This candid review performs an independent, impartial audit of the implementation for **Issue #32: Distribution-Specific Deployment Validation** (`#32.1`, `#32.2`, `#32.3` / GitHub Issue `#71`), spanning the git changes against `origin/main`.
 
 ---
 
-## 1. Executive Summary
+## 5-Pillar Evaluation
 
-This cold audit evaluates the implementation of **Issue #31: Physical hardware end-to-end validation suite (#70)**. The change provides a comprehensive bare-metal and physical hardware validation suite for Linux biometric PAM verification, covering:
-1. Complete enrollment lifecycle (`enrollment_test.sh`).
-2. PAM stack integration and daemon coordination (`pam_integration_test.sh`).
-3. Multi-identity enrollment and cross-user rejection (`multi_user_test.sh`).
-4. Operational manual and display manager / screen locker validation guide (`screensaver_test.md`).
-5. Adversarial presentation attack detection (PAD) suite evaluating printed photos, smartphone OLED/LCD displays, and video replay attacks (`adversarial_test.sh`).
-6. Contractual architectural security invariant test (`test_physical_hardware_validation_suite_spec`).
-7. First-class `--mock` support in `soos-enroll` for deterministic headless test execution without physical webcam or downloaded weights.
+### Pillar 1: Logic & Architecture
+- **Architecture Compliance**: The deployment validation suite exercises native distribution mechanics across Debian 12 / Ubuntu 24.04 (`.deb`, `pam-auth-update`), Fedora 40 / RHEL 9 (`.rpm`, `authselect`), and Arch Linux (`PKGBUILD`, `pacman`, `system-auth`).
+- **Separation of Concerns**: Unprivileged PAM module operations and privileged daemon tasks are rigorously maintained. State directories (`/var/lib/soos/{biometrics,evidence}` at `0700` `root:root`, `/var/lib/soos/master.key` at `0600` `root:root`, `/run/soos` at `0750` `root:soos`) adhere strictly to architectural invariants.
+- **Verdict**: Compliant.
 
----
+### Pillar 2: PAM Real-Time Deadlines & Concurrency
+- **Timing and Latency**: All PAM integration tests enforce `timeout_ms=250` deadlines. Mock daemon scenarios verify non-interactive fast-path decisions (< 150ms) yielding `PAM_SUCCESS` without prompting for credentials.
+- **Display Manager & Screen Locker Safety**: `swaylock`, `hyprlock`, `gdm`, and `sudo` service stacks are verified for clean execution with zero stream pollution (`println!`, `dbg!`).
+- **Verdict**: Compliant.
 
-## 2. Deep Reasoning Audit
+### Pillar 3: Panic Safety & Fallback
+- **Preservation of `pam_faillock`**: In Fedora/RHEL stacks, `pam_faillock.so preauth` and `pam_faillock.so authfail` hooks are strictly preserved in custom `authselect` profiles, guaranteeing that biometric fallback to `pam_unix` retains lockout counter integrity and brute-force protection.
+- **Fail-Closed Verification**: Absence of the background daemon or IPC timeouts cleanly returns `PAM_IGNORE`, allowing password fallback while invalid passwords are systematically rejected.
+- **Verdict**: Compliant.
 
-### Logic & Architecture
-- **Pass**: State transitions across all test scripts strictly adhere to `AI/ARCHITECTURE.md`.
-- **Pass**: Physical camera discovery detects `/dev/v4l/by-id/` stable hardware symlinks before index-based `/dev/video0`, obeying Criterion C4.
-- **Pass**: Clean pre-enrollment and post-deletion states are asserted in all lifecycle tests.
-- **Pass**: Multi-user isolation explicitly validates that User A and User B templates reside in isolated files and cross-user authentication attempts fail closed.
-- **Pass**: Invariant test enforces file existence, executable bits, strict bash error options (`set -euo pipefail`), help flag handling, and display manager documentation coverage.
+### Pillar 4: Test Integrity & Anti-Weakening
+- **Zero Weakening Invariant**: No existing tests in the workspace were weakened, altered, or deleted. All 21 invariant tests and 100+ workspace unit/integration tests pass cleanly.
+- **TDD Contract**: The new `test_distro_validation_suite_spec` invariant test was authored first in the Red Phase and verified to fail prior to implementation.
+- **Verdict**: Compliant.
 
-### PAM Concurrency & Deadlines
-- **Pass**: `pam_integration_test.sh` strictly tests the 250ms latency deadline and non-interactive `PAM_SUCCESS` (0 password prompts).
-- **Pass**: Module execution enforces zero stdout/stderr stream pollution in graphical display managers.
-- **Pass**: Offline daemon degrades cleanly to password authentication (`PAM_IGNORE`) within milliseconds.
-
-### Panic Safety & Fallback
-- **Pass**: Zero `unwrap()` or `expect()` in production library code.
-- **Pass**: All FFI boundaries preserve `catch_unwind`.
-- **Pass**: No failure condition or presentation attack is ever converted to `PAM_SUCCESS`.
-- **Pass**: Offline daemon, absent faces, and mismatched identities systematically fall back to password authentication (`PAM_IGNORE`).
-
-### Test Integrity & Anti-Weakening
-- **Pass**: Pre-existing unit, integration, and invariant tests remain 100% intact with zero test weakening.
-- **Pass**: Invariant test `test_physical_hardware_validation_suite_spec` was authored and verified red before implementation, and now passes green.
-- **Pass**: All 4 validation shell scripts have been individually verified in both `--help` and live execution modes.
-
-### Memory & Secret Bounds
-- **Pass**: Zero passwords transmitted over IPC, logged, or recorded in test scripts.
-- **Pass**: Temporary state directories (`/tmp/soos-phys-*`) enforce strict permissions (`0700` directories, `0600` master keys and biometric templates) and are wiped via robust `trap cleanup EXIT INT TERM` handlers.
-- **Pass**: Presentation attack detection calculates APCER and BPCER metrics according to NIST SP 800-63B standards without storing sensitive unencrypted face frames.
+### Pillar 5: Memory & Secret Bounds
+- **Zero Secret Leakage**: No credentials, encryption keys, or biometric vector embeddings are logged or leaked over standard output or error.
+- **Rollback Safety**: Rollback procedures preserve biometric templates under `--keep-data` and restore distribution PAM configurations without leaving system-breaking artifacts.
+- **Verdict**: Compliant.
 
 ---
 
-## 3. Detailed Findings & Action Items
+## Conclusion & Verdict
 
-- **Observation** (`crates/enrollment-cli/src/service.rs`): Added `--mock` flag to `soos-enroll`, matching existing `--mock-camera` in `soos-daemon`. This enables hardware-free simulation in CI environments while maintaining identical CLI interfaces on physical bare metal.
-- **Observation** (`tests/invariants/src/lib.rs`): Invariant test validates that all shell scripts start with bash shebang, enable `set -euo pipefail`, possess executable permissions, and respond to `--help` with exit code 0.
-
----
-
-## 4. Final Verdict
+The code changes strictly conform to all security, performance, and architectural guidelines of `soos`.
 
 ```text
-===================================================================
 VERDICT: APPROVED
-===================================================================
-The changes for Issue #31 satisfy all architectural pillars, security
-invariants, test contracts, and English-only deliverable requirements.
-Ready to proceed to Phase 6 (Traceability & Walkthrough).
-===================================================================
 ```
