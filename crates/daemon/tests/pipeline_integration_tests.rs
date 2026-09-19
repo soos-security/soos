@@ -66,6 +66,8 @@ struct TestPipelineFixture {
 
 impl TestPipelineFixture {
     pub async fn new(enroll_current_user: bool, rate_limit_max: u32) -> Self {
+        let _ = tracing_subscriber::fmt().with_test_writer().try_init();
+
         let temp_dir = tempdir().expect("Failed to create tempdir");
         let sock_path = temp_dir.path().join("test_daemon.sock");
         let bio_dir = temp_dir.path().join("biometrics");
@@ -87,8 +89,9 @@ impl TestPipelineFixture {
 
         let camera_config = CameraConfigBuilder::new()
             .device_path("/dev/null")
-            .resolution(640, 480)
+            .resolution(320, 240)
             .fps(30)
+            .idle_timeout(Duration::from_secs(60))
             .format(PixelFormat::Rgb24)
             .warmup_frames(0)
             .build();
@@ -197,6 +200,12 @@ impl TestPipelineFixture {
 
     pub fn start_listener(&self) -> UnixListener {
         UnixListener::bind(&self.sock_path).expect("Bind listener failed")
+    }
+}
+
+impl Drop for TestPipelineFixture {
+    fn drop(&mut self) {
+        self.camera.stop();
     }
 }
 
@@ -400,14 +409,14 @@ async fn test_12_4_password_failed_event_captures_evidence_snapshot() {
 // Sub-issue #12.5: Policy Engine Integration & Rate Limiting
 // ---------------------------------------------------------------------------
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_12_5_rate_limit_exceeded_returns_protocol_error_rate_limited() {
     // Configure rate limit of max 2 attempts
     let fixture = TestPipelineFixture::new(true, 2).await;
     let listener = fixture.start_listener();
 
     let disp = fixture.dispatcher.clone();
-    tokio::spawn(async move {
+    let server_handle = tokio::spawn(async move {
         while let Ok((stream, _)) = listener.accept().await {
             let d = disp.clone();
             tokio::spawn(async move {
@@ -446,11 +455,23 @@ async fn test_12_5_rate_limit_exceeded_returns_protocol_error_rate_limited() {
 
     // Attempt 1 -> Allow
     let resp1 = send_auth().await;
-    assert_eq!(resp1.verdict, Verdict::Allow);
+    assert_eq!(
+        resp1.verdict,
+        Verdict::Allow,
+        "Attempt 1 failed: verdict={:?}, reason={:?}",
+        resp1.verdict,
+        resp1.reason_class
+    );
 
     // Attempt 2 -> Allow
     let resp2 = send_auth().await;
-    assert_eq!(resp2.verdict, Verdict::Allow);
+    assert_eq!(
+        resp2.verdict,
+        Verdict::Allow,
+        "Attempt 2 failed: verdict={:?}, reason={:?}",
+        resp2.verdict,
+        resp2.reason_class
+    );
 
     // Attempt 3 -> Rate limit exceeded!
     let resp3 = send_auth().await;
@@ -460,19 +481,21 @@ async fn test_12_5_rate_limit_exceeded_returns_protocol_error_rate_limited() {
         "Exceeded rate limit must return ProtocolError"
     );
     assert_eq!(resp3.reason_class, ReasonClass::RateLimited);
+
+    server_handle.abort();
 }
 
 // ---------------------------------------------------------------------------
 // Sub-issue #12.6: End-to-End Verification — All 4 Verdict Paths
 // ---------------------------------------------------------------------------
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_12_6_all_four_verdict_paths() {
     let fixture = TestPipelineFixture::new(true, 10).await;
     let listener = fixture.start_listener();
 
     let disp = fixture.dispatcher.clone();
-    tokio::spawn(async move {
+    let server_handle = tokio::spawn(async move {
         while let Ok((stream, _)) = listener.accept().await {
             let d = disp.clone();
             tokio::spawn(async move {
@@ -549,6 +572,57 @@ async fn test_12_6_all_four_verdict_paths() {
     assert!(status_resp.socket_ready);
     assert!(status_resp.camera_ready);
     assert!(status_resp.is_healthy);
+
+    server_handle.abort();
+}
+
+// ---------------------------------------------------------------------------
+// Sub-issue #12.7: Frozen Camera Frame Staleness Check
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_12_7_frozen_camera_returns_unavailable_stale_frame() {
+    let fixture = TestPipelineFixture::new(true, 5).await;
+    let listener = fixture.start_listener();
+
+    let disp = fixture.dispatcher.clone();
+    let server_handle = tokio::spawn(async move {
+        while let Ok((stream, _)) = listener.accept().await {
+            let d = disp.clone();
+            tokio::spawn(async move {
+                let _ = d.handle_connection(stream).await;
+            });
+        }
+    });
+
+    // Freeze frame generation so no new frames or timestamp updates occur
+    fixture.camera.set_frozen(true);
+
+    // Wait for frame age to exceed MAX_FRAME_AGE_NS (150ms)
+    tokio::time::sleep(Duration::from_millis(160)).await;
+
+    let req = Request {
+        version: CURRENT_VERSION,
+        kind: RequestKind::Auth,
+        request_id: [127u8; 32],
+        uid_hint: fixture.current_uid,
+        service: "sudo".into(),
+        deadline_monotonic_ns: u64::MAX,
+    };
+
+    let resp = send_req(&fixture.sock_path, req).await;
+    assert_eq!(
+        resp.verdict,
+        Verdict::Unavailable,
+        "Stale camera frame must result in Verdict::Unavailable"
+    );
+    assert_eq!(
+        resp.reason_class,
+        ReasonClass::StaleFrame,
+        "Stale camera frame must return ReasonClass::StaleFrame"
+    );
+
+    server_handle.abort();
 }
 
 // ---------------------------------------------------------------------------
