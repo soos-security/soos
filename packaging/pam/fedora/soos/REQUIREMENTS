@@ -1,0 +1,2 @@
+pam_unix.so
+pam_soos.so

@@ -1,58 +1,68 @@
-# Plan Evaluator Report — CI Flakiness Fix
+# Plan Evaluation Report — Issue #26: Installation Script & System Provisioning
 
-**Evaluation Target**: Fix mock camera frame staleness and worker thread starvation in daemon pipeline integration tests  
-**Evaluator**: Plan Evaluator Sub-Agent (`plan-evaluator`)  
-**Specification Ref**: `AI/ARCHITECTURE.md` § Latency Budget & Frame Freshness, `AI/MOCK_STRATEGY.md`, Criteria `C1`, `C9`, `D7`, `D10`
-
----
-
-## 1. Architectural Alignment & Threat Model
-- **Evaluation**: The proposed change preserves all architectural security invariants:
-  - `MAX_FRAME_AGE_NS = 150_000_000` (150ms) in `soos-daemon` is strictly preserved and not modified or relaxed.
-  - Fail-closed behavior on camera starvation, hardware errors, or expired deadlines is strictly preserved.
-  - `notify_activity()` in `MockCameraManager` implements the contractual trait obligation to restore active frame delivery upon authentication activity.
-  - Deterministic frame staleness testing is introduced via `set_frozen(true)` without relying on unpredictable sleep races.
-- **Status**: COMPLIANT
+- **Date**: 2026-09-19
+- **Evaluator**: Independent Plan Evaluator Sub-Agent (`plan-evaluator`)
+- **Target**: Issue #26 (`feat(packaging): Installation script and system provisioning`) / GitHub #65
+- **Branch**: `feat/install-script`
 
 ---
 
-## 2. PAM Real-Time Latency & Concurrency
-- **Evaluation**: The PAM module (`pam_soos.so`) is untouched. The changes are confined to test fixtures and the mock camera driver in `soos-camera-v4l`.
-- **Status**: COMPLIANT
+## Executive Summary
+
+The proposed implementation plan addresses all four sub-issues of Issue #26:
+1. `#26.1`: `scripts/install.sh` system provisioning, directory hierarchy, permissions, binary placement, master key generation, and model verification.
+2. `#26.2`: Distribution-specific PAM configurations (Debian `pam-auth-update`, Fedora `authselect`, Arch direct snippet) enforcing universal PAM stack ordering from `AI/ARCHITECTURE.md` §5.
+3. `#26.3`: `scripts/uninstall.sh` safe rollback, PAM restoration, service teardown, and granular data preservation (`--keep-data` / `--purge-data`).
+4. `#26.4`: `soos-admin add-user <username>` subcommand provisioning users to the `soos` system group via `usermod -aG soos`.
 
 ---
 
-## 3. Panic Safety & Fail-Closed Behavior
-- **Evaluation**: No panics (`unwrap()`, `expect()`) introduced in production pathways. `frozen` atomic state gracefully pauses frame generation.
-- **Status**: COMPLIANT
+## 6-Pillar Compliance Assessment
+
+### Pillar 1: Architectural Alignment & Threat Model
+- **Boundary Preservation**: The daemon binary is installed to `/usr/libexec/soos/soos-daemon` and managed via systemd sandboxing (`packaging/soos-daemon.service`). PAM shared object `pam_soos.so` is installed into system security modules directories (`/lib/security`, `/usr/lib64/security`, etc.).
+- **Permissions and Ownership**: `/var/lib/soos/{biometrics,evidence}` are provisioned with mode `0700` owned by `root:root`. Master key `/var/lib/soos/master.key` is created with mode `0600` owned by `root:root`. Runtime directory `/run/soos` is assigned mode `0750` owned by `root:soos`.
+- **System Group**: System group `soos` is created without login shell or home directory, strictly for group access control to `/run/soos/daemon.sock`.
+- **Compliance**: **PASS**
+
+### Pillar 2: PAM Real-Time Latency & Concurrency
+- **Zero Asynchronous Runtime**: The installation scripts and PAM configuration templates introduce zero async runtimes or background daemon threads into the PAM pathway.
+- **Stack Ordering**: The ordering specified in `AI/ARCHITECTURE.md` §5 is strictly preserved across all distribution templates:
+  1. `pam_soos.so` before `pam_unix` with `timeout_ms=250` and `[success=done default=ignore]`.
+  2. `pam_unix` password fallback.
+  3. `pam_soos.so` with `event=password-failed timeout_ms=20` after `pam_unix`.
+- **Compliance**: **PASS**
+
+### Pillar 3: Panic Safety & Fail-Closed Behavior
+- **Non-Interference**: If PAM module is uninstalled or absent, PAM control flags (`default=ignore`) guarantee transparent fallback to password authentication without locking out users.
+- **Command Safety in `admin-cli`**: Username input for `add-user` is strictly validated against POSIX username specifications (`^[a-z_][a-z0-9_-]*\$?$`, <= 32 chars) prior to argument dispatch, preventing shell injection or malformed execution.
+- **Error Propagation**: All errors in `admin-cli` are mapped to typed `AdminCliError` variants; zero `unwrap()` or `expect()` in production code.
+- **Compliance**: **PASS**
+
+### Pillar 4: Dependency Isolation & Banned Crates
+- **Banned Crates**: Neither `opencv` nor `nokhwa` are used or introduced.
+- **Crate Scope**: `crates/admin-cli` maintains `#![forbid(unsafe_code)]` and consumes only authorized workspace dependencies (`clap`, `nix`, `thiserror`).
+- **Standard Tooling**: `install.sh` and `uninstall.sh` utilize standard POSIX shell constructs and utilities (`groupadd`, `usermod`, `chmod`, `install`, `openssl` / `dd`), avoiding external dependencies.
+- **Compliance**: **PASS**
+
+### Pillar 5: Data Confidentiality & Zeroization
+- **Credential Protection**: Zero passwords, biometric templates, or key material are logged, printed to stdout, or exposed during installation, uninstallation, or group management.
+- **Safe Rollback**: `uninstall.sh` defaults to preserving encrypted biometric templates and master key unless `--purge-data` is explicitly instructed.
+- **Compliance**: **PASS**
+
+### Pillar 6: Test Integrity & TDD Contracts
+- **Contractual Tests**: The plan incorporates all four required TDD tests from `AI/BACKLOG.md`:
+  - `test_install_script_creates_required_directories`
+  - `test_pam_config_ordering_matches_spec`
+  - `test_uninstall_restores_pam_config`
+  - `test_add_user_to_soos_group`
+- **Zero Weakening**: Pre-existing tests in `tests/invariants` and `crates/admin-cli` will remain completely untouched.
+- **Compliance**: **PASS**
 
 ---
 
-## 4. Dependency Isolation & Banned Crates
-- **Evaluation**: Zero banned dependencies. Standard atomic primitives (`AtomicBool`, `Ordering`) are used.
-- **Status**: COMPLIANT
+## Formal Evaluation Verdict
 
----
+The implementation plan is exhaustive, fully compliant with `AI/ARCHITECTURE.md`, `AI/DECISIONS.md`, and `AI/BACKLOG.md`, and satisfies all 6 architectural pillars.
 
-## 5. Data Confidentiality & Zeroization
-- **Evaluation**: No sensitive credentials or embeddings are touched or exposed.
-- **Status**: COMPLIANT
-
----
-
-## 6. Test Integrity & TDD Contracts
-- **Evaluation**:
-  - Zero existing tests are weakened or deleted.
-  - Contractual test `test_12_7_frozen_camera_returns_unavailable_stale_frame` is added to verify `Verdict::Unavailable` with `ReasonClass::StaleFrame` under controlled frozen camera conditions.
-  - Thread lifecycle is cleanly managed via `Drop for TestPipelineFixture`, preventing zombie background threads from polluting test runs.
-- **Status**: COMPLIANT
-
----
-
-## Conclusion & Verdict
-
-All 6 architectural pillars are satisfied with zero regressions.
-
-```
-VALIDATION_VERDICT: APPROVED
-```
+**VALIDATION_VERDICT: APPROVED**

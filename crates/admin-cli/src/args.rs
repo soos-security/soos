@@ -49,6 +49,17 @@ pub enum Commands {
 
     /// Display and filter daemon journal logs with sensitive data redaction.
     Logs(LogsArgs),
+
+    /// Add a user to the soos biometric authentication system group.
+    AddUser(AddUserArgs),
+}
+
+/// Arguments for `add-user` subcommand.
+#[derive(Parser, Debug, Clone)]
+pub struct AddUserArgs {
+    /// Target username to add to the `soos` group.
+    #[arg(value_name = "USERNAME")]
+    pub username: String,
 }
 
 /// Arguments for `status` subcommand.

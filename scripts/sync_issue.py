@@ -90,6 +90,7 @@ BRANCH_TO_ISSUE = {
     "fix/camera-thread-shutdown": 23,
     "fix/vision-zeroize-frames": 24,
     "fix/biometric-store-security": 25,
+    "feat/install-script": 26,
 }
 
 

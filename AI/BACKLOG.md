@@ -939,7 +939,7 @@ The enrollment CLI uses incorrect model registry IDs (`face_detector` instead of
 
 #### Sub-issues
 
-- [ ] **#26.1** — Create `scripts/install.sh`
+- [x] **#26.1** — Create `scripts/install.sh`
   - Create `soos` system group
   - Create `/var/lib/soos/{biometrics,models,evidence}` with `0700 root:root`
   - Install `soos-daemon` binary to `/usr/libexec/soos/`
@@ -951,7 +951,7 @@ The enrollment CLI uses incorrect model registry IDs (`face_detector` instead of
   - Acceptance: Clean install on fresh Debian/Fedora/Arch system
   - TDD: `test_install_script_creates_required_directories`
 
-- [ ] **#26.2** — Create PAM configuration files per distribution
+- [x] **#26.2** — Create PAM configuration files per distribution
   - Debian: `pam-auth-update` profile
   - Fedora: `authselect` custom profile
   - Arch: Direct `/etc/pam.d/system-auth` snippet
@@ -959,7 +959,7 @@ The enrollment CLI uses incorrect model registry IDs (`face_detector` instead of
   - Acceptance: PAM stack ordering matches ARCHITECTURE.md §5
   - TDD: `test_pam_config_ordering_matches_spec`
 
-- [ ] **#26.3** — Create `scripts/uninstall.sh` with safe rollback
+- [x] **#26.3** — Create `scripts/uninstall.sh` with safe rollback
   - Remove PAM configuration (restore backup)
   - Remove binaries and .so
   - Stop and disable systemd unit
@@ -967,7 +967,7 @@ The enrollment CLI uses incorrect model registry IDs (`face_detector` instead of
   - Acceptance: Clean removal without breaking authentication
   - TDD: `test_uninstall_restores_pam_config`
 
-- [ ] **#26.4** — Add user to `soos` group enrollment command
+- [x] **#26.4** — Add user to `soos` group enrollment command
   - `soos-admin add-user <username>` → `usermod -aG soos <username>`
   - Acceptance: Added users can authenticate via facial verification
   - TDD: `test_add_user_to_soos_group`
