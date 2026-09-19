@@ -1,0 +1,30 @@
+#!/bin/sh
+# =============================================================================
+# packaging/debian/prerm — Debian pre-removal hook for soos
+# =============================================================================
+set -e
+
+case "$1" in
+    remove|deconfigure)
+        # Stop and disable systemd service
+        if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
+            systemctl stop soos-daemon.service || true
+            systemctl disable soos-daemon.service || true
+        fi
+
+        # Deregister PAM profile if pam-auth-update exists
+        if command -v pam-auth-update >/dev/null 2>&1; then
+            pam-auth-update --package --remove soos soos-notify || true
+        fi
+        ;;
+
+    upgrade|failed-upgrade)
+        ;;
+
+    *)
+        echo "prerm called with unknown argument \`$1'" >&2
+        exit 1
+        ;;
+esac
+
+exit 0

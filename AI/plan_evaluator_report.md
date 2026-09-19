@@ -1,62 +1,58 @@
-# Plan Evaluation Report — Issue #26: Installation Script & System Provisioning
+# Plan Evaluation Report — Issue #27: Distribution Packages (deb, rpm, PKGBUILD)
 
 - **Date**: 2026-09-19
 - **Evaluator**: Independent Plan Evaluator Sub-Agent (`plan-evaluator`)
-- **Target**: Issue #26 (`feat(packaging): Installation script and system provisioning`) / GitHub #65
-- **Branch**: `feat/install-script`
+- **Target**: Issue #27 (`feat(packaging): Distribution packages (deb, rpm, PKGBUILD)`) / GitHub #66
+- **Branch**: `feat/distro-packages`
 
 ---
 
 ## Executive Summary
 
-The proposed implementation plan addresses all four sub-issues of Issue #26:
-1. `#26.1`: `scripts/install.sh` system provisioning, directory hierarchy, permissions, binary placement, master key generation, and model verification.
-2. `#26.2`: Distribution-specific PAM configurations (Debian `pam-auth-update`, Fedora `authselect`, Arch direct snippet) enforcing universal PAM stack ordering from `AI/ARCHITECTURE.md` §5.
-3. `#26.3`: `scripts/uninstall.sh` safe rollback, PAM restoration, service teardown, and granular data preservation (`--keep-data` / `--purge-data`).
-4. `#26.4`: `soos-admin add-user <username>` subcommand provisioning users to the `soos` system group via `usermod -aG soos`.
+The proposed implementation plan addresses all three sub-issues of Issue #27:
+1. `#27.1`: Debian `.deb` package specification (`packaging/debian/control`, `packaging/debian/rules`, `packaging/debian/postinst`, `packaging/debian/prerm`, `packaging/debian/postrm`, and `scripts/build_deb.sh`) with post-install group creation, directory hierarchy provisioning, master key generation, and PAM configuration.
+2. `#27.2`: RPM `.spec` file (`packaging/rpm/soos.spec` and `scripts/build_rpm.sh`) with `%pre`, `%post`, `%preun`, `%postun`, `%files` with strict file permissions, and Fedora `authselect` custom profile integration.
+3. `#27.3`: Arch Linux `PKGBUILD` and `soos.install` (`packaging/arch/PKGBUILD`, `packaging/arch/soos.install`, and `scripts/build_arch.sh`) with `build()`, `package()`, and post-install system group and permission setup.
+
+The plan also integrates invariant tests in `tests/invariants/src/lib.rs` and Dockerized package verification in `tests/docker/test_packages.sh`.
 
 ---
 
 ## 6-Pillar Compliance Assessment
 
 ### Pillar 1: Architectural Alignment & Threat Model
-- **Boundary Preservation**: The daemon binary is installed to `/usr/libexec/soos/soos-daemon` and managed via systemd sandboxing (`packaging/soos-daemon.service`). PAM shared object `pam_soos.so` is installed into system security modules directories (`/lib/security`, `/usr/lib64/security`, etc.).
-- **Permissions and Ownership**: `/var/lib/soos/{biometrics,evidence}` are provisioned with mode `0700` owned by `root:root`. Master key `/var/lib/soos/master.key` is created with mode `0600` owned by `root:root`. Runtime directory `/run/soos` is assigned mode `0750` owned by `root:soos`.
-- **System Group**: System group `soos` is created without login shell or home directory, strictly for group access control to `/run/soos/daemon.sock`.
+- **Filesystem Hierarchy**: The daemon binary is installed to `/usr/libexec/soos/soos-daemon` (mode `0755 root:root`). The command-line utilities are installed to `/usr/bin/soos-admin` and `/usr/bin/soos-enroll` (mode `0755 root:root`). PAM shared library `pam_soos.so` is placed in distribution PAM module paths (`0644 root:root`).
+- **Permissions and Ownership**: All package specs enforce `/var/lib/soos/` mode `0755`, `/var/lib/soos/{biometrics,evidence}` mode `0700 root:root`, `/var/lib/soos/master.key` mode `0600 root:root` (32 bytes), and `/run/soos/` mode `0750 root:soos`.
+- **System Group**: Every package spec registers the dedicated system group `soos` prior to file deployment or in post-install hooks.
 - **Compliance**: **PASS**
 
 ### Pillar 2: PAM Real-Time Latency & Concurrency
-- **Zero Asynchronous Runtime**: The installation scripts and PAM configuration templates introduce zero async runtimes or background daemon threads into the PAM pathway.
-- **Stack Ordering**: The ordering specified in `AI/ARCHITECTURE.md` §5 is strictly preserved across all distribution templates:
-  1. `pam_soos.so` before `pam_unix` with `timeout_ms=250` and `[success=done default=ignore]`.
-  2. `pam_unix` password fallback.
-  3. `pam_soos.so` with `event=password-failed timeout_ms=20` after `pam_unix`.
+- **Non-Interference**: Packaging files deploy distribution PAM templates strictly matching the universal stack ordering in `AI/ARCHITECTURE.md` §5:
+  1. `auth [success=done default=ignore] pam_soos.so timeout_ms=250`
+  2. `auth required pam_unix.so`
+  3. `auth optional pam_soos.so event=password-failed timeout_ms=20`
+- **Zero Runtime Bloat**: Zero asynchronous runtimes or background daemon threads are introduced into PAM pathways.
 - **Compliance**: **PASS**
 
 ### Pillar 3: Panic Safety & Fail-Closed Behavior
-- **Non-Interference**: If PAM module is uninstalled or absent, PAM control flags (`default=ignore`) guarantee transparent fallback to password authentication without locking out users.
-- **Command Safety in `admin-cli`**: Username input for `add-user` is strictly validated against POSIX username specifications (`^[a-z_][a-z0-9_-]*\$?$`, <= 32 chars) prior to argument dispatch, preventing shell injection or malformed execution.
-- **Error Propagation**: All errors in `admin-cli` are mapped to typed `AdminCliError` variants; zero `unwrap()` or `expect()` in production code.
+- **Failure Resilience**: Package install and removal scripts use strict `set -euo pipefail` and conditional checks (`getent group`, `command -v`).
+- **PAM Safety**: In the event of daemon failure or package removal, `default=ignore` ensures the PAM stack falls back to password verification without causing lockout or crashing display managers.
 - **Compliance**: **PASS**
 
 ### Pillar 4: Dependency Isolation & Banned Crates
-- **Banned Crates**: Neither `opencv` nor `nokhwa` are used or introduced.
-- **Crate Scope**: `crates/admin-cli` maintains `#![forbid(unsafe_code)]` and consumes only authorized workspace dependencies (`clap`, `nix`, `thiserror`).
-- **Standard Tooling**: `install.sh` and `uninstall.sh` utilize standard POSIX shell constructs and utilities (`groupadd`, `usermod`, `chmod`, `install`, `openssl` / `dd`), avoiding external dependencies.
+- **Banned Crates**: Neither `opencv` nor `nokhwa` are used or referenced.
+- **Clean Tooling**: Package building scripts rely on standard distribution packaging tools (`dpkg-deb`, `rpmbuild`, `makepkg`, `cargo`), without introducing forbidden crates or unvetted foreign dependencies.
 - **Compliance**: **PASS**
 
 ### Pillar 5: Data Confidentiality & Zeroization
-- **Credential Protection**: Zero passwords, biometric templates, or key material are logged, printed to stdout, or exposed during installation, uninstallation, or group management.
-- **Safe Rollback**: `uninstall.sh` defaults to preserving encrypted biometric templates and master key unless `--purge-data` is explicitly instructed.
+- **Key Protection**: Master key generation ensures `0600` permissions immediately upon creation via `openssl rand 32` or `/dev/urandom`.
+- **Zero Credential Exposure**: Package installation scripts and spec files never log, transmit, or expose passwords, raw frames, or biometric vectors.
 - **Compliance**: **PASS**
 
 ### Pillar 6: Test Integrity & TDD Contracts
-- **Contractual Tests**: The plan incorporates all four required TDD tests from `AI/BACKLOG.md`:
-  - `test_install_script_creates_required_directories`
-  - `test_pam_config_ordering_matches_spec`
-  - `test_uninstall_restores_pam_config`
-  - `test_add_user_to_soos_group`
-- **Zero Weakening**: Pre-existing tests in `tests/invariants` and `crates/admin-cli` will remain completely untouched.
+- **Test Authoring**: Invariant unit tests covering Debian, RPM, and Arch Linux package specs and scripts are authored in Phase 2 before production packaging scripts and specs are completed.
+- **Zero Test Weakening**: Existing invariant and pipeline tests in `tests/` remain immutable and intact.
+- **Acceptance Criteria**: Directly mirrors acceptance criteria defined in `AI/BACKLOG.md` #27.1, #27.2, and #27.3.
 - **Compliance**: **PASS**
 
 ---

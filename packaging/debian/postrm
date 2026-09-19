@@ -1,0 +1,30 @@
+#!/bin/sh
+# =============================================================================
+# packaging/debian/postrm — Debian post-removal hook for soos
+# =============================================================================
+set -e
+
+case "$1" in
+    purge)
+        # On purge, remove runtime directory
+        rm -rf /run/soos
+        # Retain biometric vector store unless explicitly wiped
+        ;;
+
+    remove)
+        rm -rf /run/soos
+        if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
+            systemctl daemon-reload || true
+        fi
+        ;;
+
+    upgrade|failed-upgrade|abort-install|abort-upgrade)
+        ;;
+
+    *)
+        echo "postrm called with unknown argument \`$1'" >&2
+        exit 1
+        ;;
+esac
+
+exit 0

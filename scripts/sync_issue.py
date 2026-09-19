@@ -91,6 +91,7 @@ BRANCH_TO_ISSUE = {
     "fix/vision-zeroize-frames": 24,
     "fix/biometric-store-security": 25,
     "feat/install-script": 26,
+    "feat/distro-packages": 27,
 }
 
 

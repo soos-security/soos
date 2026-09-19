@@ -126,3 +126,51 @@ sudo soos-admin add-user <username>
 - Verifies user existence via `nix::unistd::User::from_name`.
 - Dispatches `usermod -aG soos <username>`.
 - Fails closed on invalid usernames, unknown users, or permission failures.
+
+---
+
+## 7. Native Distribution Packages (deb, rpm, PKGBUILD)
+
+`soos` provides native distribution packaging specifications and automated builder scripts supporting the three primary Linux distribution ecosystems.
+
+### 7.1 Package Architectures & Specifications
+
+| Ecosystem | Specification Files | Target Package Format | Installation Tool | PAM Integration Method |
+|---|---|---|---|---|
+| **Debian / Ubuntu** | `packaging/debian/control`<br>`packaging/debian/rules`<br>`packaging/debian/postinst`<br>`packaging/debian/prerm`<br>`packaging/debian/postrm` | `soos_<version>_<arch>.deb` | `dpkg -i` / `apt` | `pam-auth-update` profiles in `/usr/share/pam-configs/` |
+| **Fedora / RHEL** | `packaging/rpm/soos.spec` | `soos-<version>-<release>.<arch>.rpm` | `rpm -i` / `dnf` | `authselect` custom profile in `/etc/authselect/custom/soos/` |
+| **Arch Linux** | `packaging/arch/PKGBUILD`<br>`packaging/arch/soos.install` | `soos-<version>-<release>-<arch>.pkg.tar.zst` | `pacman -U` / `makepkg -si` | Snippet in `/etc/pam.d/soos.snippet` |
+
+### 7.2 Building Distribution Packages
+
+Distribution packages can be built individually or collectively via the master unified package builder:
+
+```bash
+# Build all supported distribution packages
+./scripts/build_packages.sh all
+
+# Build specific package format
+./scripts/build_packages.sh deb
+./scripts/build_packages.sh rpm
+./scripts/build_packages.sh arch
+
+# Fast packaging using pre-compiled release artifacts
+./scripts/build_packages.sh deb --skip-build
+```
+
+Generated packages are placed in `target/packages/`.
+
+### 7.3 Security and Filesystem Invariants Enforced by Packages
+
+Every distribution package enforces the following invariant properties during post-installation:
+1. **Dedicated System Group**: Creates `soos` system group if absent (`groupadd -r soos` / `addgroup --system soos`).
+2. **Persistence Hardening**:
+   - `/var/lib/soos/` mode `0755` (`root:root`)
+   - `/var/lib/soos/biometrics/` mode `0700` (`root:root`)
+   - `/var/lib/soos/evidence/` mode `0700` (`root:root`)
+   - `/var/lib/soos/models/` mode `0755` (`root:root`)
+   - `/run/soos/` mode `0750` (`root:soos`)
+3. **Master Key Generation**: Automatically generates a 32-byte cryptographically secure AES key at `/var/lib/soos/master.key` (mode `0600 root:root`) if absent.
+4. **Service Management**: Installs `/usr/lib/systemd/system/soos-daemon.service` (or `/etc/systemd/system/`), triggers `systemctl daemon-reload`, and enables the service unit.
+5. **Fail-Closed Teardown**: Pre-removal scriptlets (`prerm`, `%preun`, `pre_remove`) stop and disable `soos-daemon.service` before removing binaries, and remove runtime sockets while preserving biometric data at rest.
+

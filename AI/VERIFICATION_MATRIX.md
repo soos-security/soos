@@ -210,7 +210,7 @@ This document translates the critical gating criteria from §11 of `ARCHITECTURE
 
 ---
 
-## Component: `packaging` (Issue #26 / GitHub #65)
+## Component: `packaging` (Issues #26, #27 / GitHub #65, #66)
 
 | # | Criterion | Test Method | Status |
 |---|---|---|---|
@@ -218,5 +218,9 @@ This document translates the critical gating criteria from §11 of `ARCHITECTURE
 | PK2 | PAM configuration templates for Debian (`pam-auth-update`), Fedora (`authselect`), and Arch Linux (`system-auth`) conform strictly to universal PAM stack ordering in `ARCHITECTURE.md` §5 (`pam_soos.so` before `pam_unix`, `event=password-failed` after `pam_unix`) | Invariant test (`test_pam_config_ordering_matches_spec`) | ✅ Verified |
 | PK3 | `scripts/uninstall.sh` executes safe rollback, restoring PAM configuration backups, disabling systemd units, removing binaries, and preserving biometric data by default under `--keep-data` | Invariant test (`test_uninstall_restores_pam_config`) | ✅ Verified |
 | PK4 | `soos-admin add-user <username>` validates POSIX username conventions and adds user to `soos` system group via `usermod -aG soos <username>` | Unit & integration tests (`test_add_user_to_soos_group`) | ✅ Verified |
+| PK5 | Debian `.deb` package specification (`packaging/debian/control`, `rules`, `postinst`, `prerm`, `postrm`, `scripts/build_deb.sh`) installs complete system with group provisioning, invariant permissions, and PAM integration | Invariant & package build tests (`test_debian_packaging_specification`, `scripts/build_deb.sh`, `tests/docker/test_packages.sh`) | ✅ Verified |
+| PK6 | RPM `.spec` file (`packaging/rpm/soos.spec`, `scripts/build_rpm.sh`) with `%pre`, `%post`, `%preun`, `%postun`, `%files` strict attributes (`0700` biometrics/evidence, `0600` master.key), and Fedora `authselect` custom profile template | Invariant & package build tests (`test_rpm_packaging_specification`, `scripts/build_rpm.sh`, `tests/docker/test_packages.sh`) | ✅ Verified |
+| PK7 | Arch Linux `PKGBUILD` and `soos.install` (`packaging/arch/PKGBUILD`, `packaging/arch/soos.install`, `scripts/build_arch.sh`) installs systemd unit, binaries, PAM shared module, and provisions `soos` group and invariant directories | Invariant & package build tests (`test_arch_packaging_specification`, `scripts/build_arch.sh`, `tests/docker/test_packages.sh`) | ✅ Verified |
+
 
 

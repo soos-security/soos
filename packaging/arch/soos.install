@@ -1,0 +1,72 @@
+# =============================================================================
+# packaging/arch/soos.install — Arch Linux Install Scriptlet for soos
+# =============================================================================
+
+post_install() {
+    # 1. Create system group 'soos' if absent
+    if ! getent group soos >/dev/null 2>&1; then
+        groupadd -r soos || true
+    fi
+
+    # 2. Enforce directory hierarchy and security permissions
+    mkdir -p /var/lib/soos/biometrics
+    mkdir -p /var/lib/soos/evidence
+    mkdir -p /var/lib/soos/models
+    mkdir -p /run/soos
+
+    chmod 0755 /var/lib/soos
+    chmod 0700 /var/lib/soos/biometrics
+    chmod 0700 /var/lib/soos/evidence
+    chmod 0755 /var/lib/soos/models
+    chmod 0750 /run/soos
+
+    if [ "$(id -u)" -eq 0 ]; then
+        chown root:root /var/lib/soos
+        chown root:root /var/lib/soos/biometrics
+        chown root:root /var/lib/soos/evidence
+        chown root:root /var/lib/soos/models
+        chown root:soos /run/soos || chown root:root /run/soos
+    fi
+
+    # 3. Generate cryptographic master key (32 bytes, mode 0600) if absent
+    MASTER_KEY="/var/lib/soos/master.key"
+    if [ ! -f "$MASTER_KEY" ]; then
+        if command -v openssl >/dev/null 2>&1; then
+            openssl rand 32 > "$MASTER_KEY"
+        else
+            head -c 32 /dev/urandom > "$MASTER_KEY"
+        fi
+        chmod 0600 "$MASTER_KEY"
+        if [ "$(id -u)" -eq 0 ]; then
+            chown root:root "$MASTER_KEY"
+        fi
+    fi
+
+    # 4. Reload systemd manager configuration
+    if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
+        systemctl daemon-reload || true
+    fi
+
+    echo "==> soos installed successfully."
+    echo "==> To enable biometric authentication in Arch PAM, integrate /etc/pam.d/soos.snippet into /etc/pam.d/system-auth."
+    echo "==> Start and enable daemon: systemctl enable --now soos-daemon.service"
+}
+
+post_upgrade() {
+    post_install
+}
+
+pre_remove() {
+    # Stop and disable systemd service
+    if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
+        systemctl stop soos-daemon.service || true
+        systemctl disable soos-daemon.service || true
+    fi
+}
+
+post_remove() {
+    rm -rf /run/soos
+    if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
+        systemctl daemon-reload || true
+    fi
+}
