@@ -17,7 +17,7 @@ use std::time::Duration;
 use tempfile::tempdir;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
-use tokio::sync::Mutex;
+use tokio::sync::RwLock;
 
 use soos_biometric_store::{BiometricStore, MasterKey as BioMasterKey};
 use soos_camera_v4l::{CameraConfigBuilder, MockCameraManager, PixelFormat};
@@ -93,7 +93,7 @@ async fn test_daemon_startup_initializes_all_pipeline_components() {
         VisionPipelineConfig::default(),
     ));
 
-    let policy = Arc::new(Mutex::new(AuthorizationEngine::with_rate_limiter(
+    let policy = Arc::new(RwLock::new(AuthorizationEngine::with_rate_limiter(
         ThresholdConfig::default(),
         RateLimiter::new(RateLimitConfig::default()),
     )));
@@ -117,6 +117,8 @@ async fn test_daemon_startup_initializes_all_pipeline_components() {
     let config = DispatcherConfig {
         max_concurrent_connections: 4,
         connection_timeout: Duration::from_millis(500),
+        enforce_active_session: false,
+        logind_sessions_dir: std::path::PathBuf::from("/run/systemd/sessions"),
     };
     let dispatcher = Arc::new(ConnectionDispatcher::with_pipeline(
         config,

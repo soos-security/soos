@@ -41,6 +41,10 @@ pub struct DispatcherConfig {
     pub max_concurrent_connections: usize,
     /// Per-connection execution timeout deadline.
     pub connection_timeout: Duration,
+    /// Whether to enforce that the target UID owns an active logind session.
+    pub enforce_active_session: bool,
+    /// Directory containing systemd logind runtime session state files.
+    pub logind_sessions_dir: PathBuf,
 }
 
 impl Default for DispatcherConfig {
@@ -48,6 +52,8 @@ impl Default for DispatcherConfig {
         Self {
             max_concurrent_connections: 8,
             connection_timeout: Duration::from_millis(250),
+            enforce_active_session: true,
+            logind_sessions_dir: PathBuf::from(crate::session::DEFAULT_LOGIND_SESSIONS_DIR),
         }
     }
 }
@@ -140,6 +146,8 @@ struct SocketConfigFile {
 struct DispatcherConfigFile {
     max_concurrent_connections: Option<usize>,
     connection_timeout_ms: Option<u64>,
+    enforce_active_session: Option<bool>,
+    logind_sessions_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -214,6 +222,12 @@ impl DaemonConfig {
             }
             if let Some(timeout_ms) = dispatcher.connection_timeout_ms {
                 config.dispatcher.connection_timeout = Duration::from_millis(timeout_ms);
+            }
+            if let Some(enforce_session) = dispatcher.enforce_active_session {
+                config.dispatcher.enforce_active_session = enforce_session;
+            }
+            if let Some(sessions_dir) = dispatcher.logind_sessions_dir {
+                config.dispatcher.logind_sessions_dir = sessions_dir;
             }
         }
 

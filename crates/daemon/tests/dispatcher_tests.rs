@@ -9,6 +9,7 @@
     reason = "Contractual integration tests use assertions, unwrap, and expect"
 )]
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use tempfile::tempdir;
@@ -20,6 +21,18 @@ use soos_daemon::dispatcher::ConnectionDispatcher;
 use soos_daemon::health::HealthState;
 use soos_protocol::codec::{decode, encode};
 use soos_protocol::types::{ReasonClass, Request, RequestKind, Response, Verdict, CURRENT_VERSION};
+
+fn test_dispatcher_config(
+    max_concurrent_connections: usize,
+    connection_timeout: Duration,
+) -> DispatcherConfig {
+    DispatcherConfig {
+        max_concurrent_connections,
+        connection_timeout,
+        enforce_active_session: false,
+        logind_sessions_dir: PathBuf::from("/run/systemd/sessions"),
+    }
+}
 
 fn make_auth_request(uid: u32) -> Request {
     Request {
@@ -41,10 +54,7 @@ async fn test_dispatcher_nominal_roundtrip() {
     let health = Arc::new(HealthState::new());
     health.set_socket_ready(true);
 
-    let config = DispatcherConfig {
-        max_concurrent_connections: 4,
-        connection_timeout: Duration::from_millis(500),
-    };
+    let config = test_dispatcher_config(4, Duration::from_millis(500));
     let dispatcher = Arc::new(ConnectionDispatcher::new(config, health));
 
     // Spawn server loop accepting 1 connection
@@ -106,10 +116,7 @@ async fn test_dispatcher_rejects_spoofed_uid() {
     let health = Arc::new(HealthState::new());
     health.set_socket_ready(true);
 
-    let config = DispatcherConfig {
-        max_concurrent_connections: 4,
-        connection_timeout: Duration::from_millis(500),
-    };
+    let config = test_dispatcher_config(4, Duration::from_millis(500));
     let dispatcher = Arc::new(ConnectionDispatcher::new(config, health));
 
     tokio::spawn(async move {
@@ -164,10 +171,7 @@ async fn test_dispatcher_timeout_on_idle_connection() {
     let listener = UnixListener::bind(&sock_path).expect("Bind failed");
     let health = Arc::new(HealthState::new());
 
-    let config = DispatcherConfig {
-        max_concurrent_connections: 4,
-        connection_timeout: Duration::from_millis(50),
-    };
+    let config = test_dispatcher_config(4, Duration::from_millis(50));
     let dispatcher = Arc::new(ConnectionDispatcher::new(config, health));
 
     tokio::spawn(async move {
@@ -197,10 +201,7 @@ async fn test_dispatcher_rejects_oversized_payload() {
     let listener = UnixListener::bind(&sock_path).expect("Bind failed");
     let health = Arc::new(HealthState::new());
 
-    let config = DispatcherConfig {
-        max_concurrent_connections: 4,
-        connection_timeout: Duration::from_millis(500),
-    };
+    let config = test_dispatcher_config(4, Duration::from_millis(500));
     let dispatcher = Arc::new(ConnectionDispatcher::new(config, health));
 
     tokio::spawn(async move {
@@ -235,10 +236,7 @@ async fn test_dispatcher_concurrency_bounding() {
     let _listener = UnixListener::bind(&sock_path).expect("Bind failed");
     let health = Arc::new(HealthState::new());
 
-    let config = DispatcherConfig {
-        max_concurrent_connections: 2,
-        connection_timeout: Duration::from_millis(200),
-    };
+    let config = test_dispatcher_config(2, Duration::from_millis(200));
     let dispatcher = ConnectionDispatcher::new(config, health);
 
     // Semaphore permits should be 2
@@ -254,10 +252,7 @@ async fn test_dispatcher_no_pipeline_returns_unavailable_not_allow() {
     let health = Arc::new(HealthState::new());
     health.set_socket_ready(true);
 
-    let config = DispatcherConfig {
-        max_concurrent_connections: 4,
-        connection_timeout: Duration::from_millis(500),
-    };
+    let config = test_dispatcher_config(4, Duration::from_millis(500));
     // Initialize dispatcher without pipeline
     let dispatcher = Arc::new(ConnectionDispatcher::new(config, health));
 
@@ -327,10 +322,7 @@ async fn test_dispatcher_rejects_invalid_protocol_version() {
     let health = Arc::new(HealthState::new());
     health.set_socket_ready(true);
 
-    let config = DispatcherConfig {
-        max_concurrent_connections: 4,
-        connection_timeout: Duration::from_millis(500),
-    };
+    let config = test_dispatcher_config(4, Duration::from_millis(500));
     let dispatcher = Arc::new(ConnectionDispatcher::new(config, health));
 
     let disp_clone = dispatcher.clone();
@@ -393,10 +385,7 @@ async fn test_dispatcher_rejects_oversized_service_name() {
     let health = Arc::new(HealthState::new());
     health.set_socket_ready(true);
 
-    let config = DispatcherConfig {
-        max_concurrent_connections: 4,
-        connection_timeout: Duration::from_millis(500),
-    };
+    let config = test_dispatcher_config(4, Duration::from_millis(500));
     let dispatcher = Arc::new(ConnectionDispatcher::new(config, health));
 
     let disp_clone = dispatcher.clone();
@@ -466,10 +455,7 @@ async fn test_timeout_during_write_does_not_corrupt_response() {
     health.set_socket_ready(true);
 
     // Tight timeout of 30ms to exercise async cancellation during request handling
-    let config = DispatcherConfig {
-        max_concurrent_connections: 4,
-        connection_timeout: Duration::from_millis(30),
-    };
+    let config = test_dispatcher_config(4, Duration::from_millis(30));
     let dispatcher = Arc::new(ConnectionDispatcher::new(config, health));
 
     let disp_clone = dispatcher.clone();

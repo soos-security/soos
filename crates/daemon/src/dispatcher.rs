@@ -15,6 +15,7 @@ use crate::peercred::{get_peer_credentials, verify_peer_credentials};
 use crate::pipeline::{
     current_monotonic_nanos, PipelineComponents, DECISION_BUDGET_MS, MAX_FRAME_AGE_NS,
 };
+use crate::session::SessionValidator;
 use soos_protocol::codec::encode;
 use soos_protocol::types::{
     Event, EventKind, ReasonClass, Request, RequestId, RequestKind, Response, StatusResponse,
@@ -44,18 +45,27 @@ pub struct ConnectionDispatcher {
     pipeline: Option<PipelineComponents>,
     semaphore: Arc<Semaphore>,
     start_time: Instant,
+    session_validator: SessionValidator,
+    clock_fn: fn() -> Result<u64, DaemonError>,
 }
 
 impl ConnectionDispatcher {
     /// Creates a new connection dispatcher wrapping configuration and health state.
     pub fn new(config: DispatcherConfig, health: Arc<HealthState>) -> Self {
         let semaphore = Arc::new(Semaphore::new(config.max_concurrent_connections));
+        let session_validator = if config.enforce_active_session {
+            SessionValidator::with_sessions_dir(config.logind_sessions_dir.clone())
+        } else {
+            SessionValidator::disabled()
+        };
         Self {
             config,
             health,
             pipeline: None,
             semaphore,
             start_time: Instant::now(),
+            session_validator,
+            clock_fn: current_monotonic_nanos,
         }
     }
 
@@ -66,13 +76,38 @@ impl ConnectionDispatcher {
         pipeline: PipelineComponents,
     ) -> Self {
         let semaphore = Arc::new(Semaphore::new(config.max_concurrent_connections));
+        let session_validator = if config.enforce_active_session {
+            SessionValidator::with_sessions_dir(config.logind_sessions_dir.clone())
+        } else {
+            SessionValidator::disabled()
+        };
         Self {
             config,
             health,
             pipeline: Some(pipeline),
             semaphore,
             start_time: Instant::now(),
+            session_validator,
+            clock_fn: current_monotonic_nanos,
         }
+    }
+
+    /// Overrides the monotonic clock function (used for simulation and test harnesses).
+    #[must_use]
+    pub fn with_clock_fn(mut self, clock_fn: fn() -> Result<u64, DaemonError>) -> Self {
+        self.clock_fn = clock_fn;
+        self
+    }
+
+    /// Overrides the session validator (used for custom or mock session directories).
+    #[must_use]
+    pub fn with_session_validator(mut self, validator: SessionValidator) -> Self {
+        self.session_validator = validator;
+        self
+    }
+
+    fn now_nanos(&self) -> Result<u64, DaemonError> {
+        (self.clock_fn)()
     }
 
     /// Returns the number of currently available concurrency permits.
@@ -312,8 +347,46 @@ impl ConnectionDispatcher {
             });
         }
 
+        // Step 6b: Verify active logind session
+        if req.kind == RequestKind::Auth && !self.session_validator.is_active_session(req.uid_hint)
+        {
+            warn!(
+                uid = req.uid_hint,
+                "Target UID has no active logind session; rejecting auth request"
+            );
+            let encoded = self.build_response(
+                req.request_id,
+                Verdict::ProtocolError,
+                ReasonClass::UidMismatch,
+                0,
+            )?;
+            return Ok(ResponseOutput {
+                encoded_response: encoded,
+                completion_error: None,
+            });
+        }
+
         // Step 7: Monotonic deadline propagation check
-        let now_ns = current_monotonic_nanos();
+        let now_ns = match self.now_nanos() {
+            Ok(ns) => ns,
+            Err(err) => {
+                warn!(
+                    error = %err,
+                    "Failed to query monotonic clock; returning Unavailable"
+                );
+                let encoded = self.build_response(
+                    req.request_id,
+                    Verdict::Unavailable,
+                    ReasonClass::InternalError,
+                    0,
+                )?;
+                return Ok(ResponseOutput {
+                    encoded_response: encoded,
+                    completion_error: Some(err),
+                });
+            }
+        };
+
         if req.deadline_monotonic_ns > 0 && now_ns >= req.deadline_monotonic_ns {
             warn!(
                 now_ns = now_ns,
@@ -338,24 +411,23 @@ impl ConnectionDispatcher {
 
             // 8-pre: Fail-fast rate limiting check (anti-DoS: avoid neural & camera workload if already blocked)
             {
-                let engine = pipe.policy.lock().await;
-                if let Some(limiter) = engine.rate_limiter() {
-                    if limiter.check_only(req.uid_hint, now_ns).is_err() {
-                        warn!(
-                            uid = req.uid_hint,
-                            "UID has exceeded rate limit quota; rejecting request immediately"
-                        );
-                        let encoded = self.build_response(
-                            req.request_id,
-                            Verdict::ProtocolError,
-                            ReasonClass::RateLimited,
-                            now_ns,
-                        )?;
-                        return Ok(ResponseOutput {
-                            encoded_response: encoded,
-                            completion_error: None,
-                        });
-                    }
+                let engine = pipe.policy.read().await;
+                if let Err(err) = engine.check_allowed(req.uid_hint, now_ns) {
+                    warn!(
+                        uid = req.uid_hint,
+                        error = %err,
+                        "UID has exceeded rate limit quota; rejecting request immediately"
+                    );
+                    let encoded = self.build_response(
+                        req.request_id,
+                        Verdict::ProtocolError,
+                        ReasonClass::RateLimited,
+                        now_ns,
+                    )?;
+                    return Ok(ResponseOutput {
+                        encoded_response: encoded,
+                        completion_error: None,
+                    });
                 }
             }
 
@@ -394,7 +466,22 @@ impl ConnectionDispatcher {
             };
 
             // 8c: Validate frame age against staleness threshold
-            let cur_ns = current_monotonic_nanos();
+            let cur_ns = match self.now_nanos() {
+                Ok(ns) => ns,
+                Err(err) => {
+                    warn!(error = %err, "Monotonic clock query failed checking capture freshness");
+                    let encoded = self.build_response(
+                        req.request_id,
+                        Verdict::Unavailable,
+                        ReasonClass::InternalError,
+                        0,
+                    )?;
+                    return Ok(ResponseOutput {
+                        encoded_response: encoded,
+                        completion_error: Some(err),
+                    });
+                }
+            };
             if frame.timestamp_mono_ns > 0 && cur_ns > frame.timestamp_mono_ns {
                 let age_ns = cur_ns.saturating_sub(frame.timestamp_mono_ns);
                 if age_ns > MAX_FRAME_AGE_NS {
@@ -468,7 +555,22 @@ impl ConnectionDispatcher {
             };
 
             // 8f: Deadline check before neural inference
-            let cur_ns = current_monotonic_nanos();
+            let cur_ns = match self.now_nanos() {
+                Ok(ns) => ns,
+                Err(err) => {
+                    warn!(error = %err, "Monotonic clock query failed checking inference deadline");
+                    let encoded = self.build_response(
+                        req.request_id,
+                        Verdict::Unavailable,
+                        ReasonClass::InternalError,
+                        0,
+                    )?;
+                    return Ok(ResponseOutput {
+                        encoded_response: encoded,
+                        completion_error: Some(err),
+                    });
+                }
+            };
             if req.deadline_monotonic_ns > 0 && cur_ns >= req.deadline_monotonic_ns {
                 let encoded = self.build_response(
                     req.request_id,
@@ -551,7 +653,22 @@ impl ConnectionDispatcher {
             drop(enrolled_template);
 
             // 8h: Decision budget (< 150ms) and deadline check
-            let cur_ns = current_monotonic_nanos();
+            let cur_ns = match self.now_nanos() {
+                Ok(ns) => ns,
+                Err(err) => {
+                    warn!(error = %err, "Monotonic clock query failed checking decision deadline");
+                    let encoded = self.build_response(
+                        req.request_id,
+                        Verdict::Unavailable,
+                        ReasonClass::InternalError,
+                        0,
+                    )?;
+                    return Ok(ResponseOutput {
+                        encoded_response: encoded,
+                        completion_error: Some(err),
+                    });
+                }
+            };
             if req.deadline_monotonic_ns > 0 && cur_ns >= req.deadline_monotonic_ns {
                 let encoded = self.build_response(
                     req.request_id,
@@ -585,7 +702,7 @@ impl ConnectionDispatcher {
             // 8i: Evaluate through AuthorizationEngine with per-UID rate limiting
             let ctx =
                 soos_policy::AuthContext::new(score, pad_passed, face_count, req.uid_hint, true);
-            let mut engine = pipe.policy.lock().await;
+            let mut engine = pipe.policy.write().await;
             let (verdict, reason_class) = engine.evaluate_with_rate_limit(&ctx, cur_ns);
 
             let encoded = self.build_response(req.request_id, verdict, reason_class, cur_ns)?;

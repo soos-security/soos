@@ -2,13 +2,15 @@
 //! evidence store, and authorization policy engine.
 
 use std::sync::Arc;
-use tokio::sync::Mutex;
+use tokio::sync::RwLock;
 
 use soos_biometric_store::BiometricStore;
 use soos_camera_v4l::CameraManager;
 use soos_evidence_store::EvidenceStore;
 use soos_policy::AuthorizationEngine;
 use soos_vision::VisionPipeline;
+
+use crate::error::DaemonError;
 
 /// Maximum allowed age for a captured camera frame before it is considered stale (150ms).
 pub const MAX_FRAME_AGE_NS: u64 = 150_000_000;
@@ -27,7 +29,7 @@ pub struct PipelineComponents {
     /// Anti-intrusion evidence snapshot store.
     pub evidence_store: Arc<EvidenceStore>,
     /// Thread-safe authorization decision engine with per-UID rate limiting.
-    pub policy: Arc<Mutex<AuthorizationEngine>>,
+    pub policy: Arc<RwLock<AuthorizationEngine>>,
 }
 
 impl PipelineComponents {
@@ -37,7 +39,7 @@ impl PipelineComponents {
         vision: Arc<VisionPipeline>,
         biometric_store: Arc<BiometricStore>,
         evidence_store: Arc<EvidenceStore>,
-        policy: Arc<Mutex<AuthorizationEngine>>,
+        policy: Arc<RwLock<AuthorizationEngine>>,
     ) -> Self {
         Self {
             camera,
@@ -64,22 +66,41 @@ impl std::fmt::Debug for PipelineComponents {
 /// Retrieves the current monotonic timestamp in nanoseconds safely without `unsafe`.
 ///
 /// Uses kernel `CLOCK_MONOTONIC` via `nix::time::clock_gettime`.
-pub fn current_monotonic_nanos() -> u64 {
-    match nix::time::clock_gettime(nix::time::ClockId::CLOCK_MONOTONIC) {
+///
+/// # Errors
+///
+/// Returns [`DaemonError::Clock`] if `clock_gettime` fails or reports negative values.
+pub fn current_monotonic_nanos() -> Result<u64, DaemonError> {
+    current_monotonic_nanos_from_clock(nix::time::ClockId::CLOCK_MONOTONIC)
+}
+
+/// Retrieves monotonic nanoseconds from the specified POSIX clock identifier.
+///
+/// # Errors
+///
+/// Returns [`DaemonError::Clock`] if `clock_gettime` fails or returns negative components.
+pub fn current_monotonic_nanos_from_clock(
+    clock_id: nix::time::ClockId,
+) -> Result<u64, DaemonError> {
+    match nix::time::clock_gettime(clock_id) {
         Ok(ts) => {
             let sec = ts.tv_sec();
             let nsec = ts.tv_nsec();
             if sec >= 0 && nsec >= 0 {
                 let sec_ns = u64::try_from(sec)
-                    .unwrap_or(0)
+                    .map_err(|e| DaemonError::Clock(format!("Invalid clock seconds {sec}: {e}")))?
                     .saturating_mul(1_000_000_000);
-                let nsec_u64 = u64::try_from(nsec).unwrap_or(0);
-                sec_ns.saturating_add(nsec_u64)
+                let nsec_u64 = u64::try_from(nsec).map_err(|e| {
+                    DaemonError::Clock(format!("Invalid clock nanoseconds {nsec}: {e}"))
+                })?;
+                Ok(sec_ns.saturating_add(nsec_u64))
             } else {
-                0
+                Err(DaemonError::Clock(format!(
+                    "Negative clock timestamp returned: sec={sec}, nsec={nsec}"
+                )))
             }
         }
-        Err(_) => 0,
+        Err(err) => Err(DaemonError::Clock(format!("clock_gettime failed: {err}"))),
     }
 }
 
@@ -130,7 +151,7 @@ pub fn initialize_pipeline(
 
     // 4. Policy Engine & Rate Limiter
     let rate_limiter = soos_policy::RateLimiter::new(config.rate_limit);
-    let policy = Arc::new(Mutex::new(
+    let policy = Arc::new(RwLock::new(
         soos_policy::AuthorizationEngine::with_rate_limiter(config.thresholds, rate_limiter),
     ));
 

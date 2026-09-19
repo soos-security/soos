@@ -1,66 +1,68 @@
 # Candid Review Report
 
 - **Date**: 2026-09-19
-- **Target Branch / Commit**: `feat/distro-packages`
+- **Target Branch / Commit**: `fix/policy-concurrency`
 - **Audited Files**:
-  - `packaging/debian/control`
-  - `packaging/debian/rules`
-  - `packaging/debian/postinst`
-  - `packaging/debian/prerm`
-  - `packaging/debian/postrm`
-  - `packaging/rpm/soos.spec`
-  - `packaging/arch/PKGBUILD`
-  - `packaging/arch/soos.install`
-  - `scripts/build_deb.sh`
-  - `scripts/build_rpm.sh`
-  - `scripts/build_arch.sh`
-  - `scripts/build_packages.sh`
-  - `tests/docker/test_packages.sh`
+  - `crates/policy/src/rate_limit.rs`
+  - `crates/policy/src/decision.rs`
+  - `crates/daemon/src/pipeline.rs`
+  - `crates/daemon/src/session.rs`
+  - `crates/daemon/src/config.rs`
+  - `crates/daemon/src/dispatcher.rs`
+  - `crates/daemon/src/lib.rs`
+  - `crates/daemon/tests/policy_concurrency_tests.rs`
+  - `crates/daemon/tests/dispatcher_tests.rs`
+  - `crates/daemon/tests/pipeline_init_tests.rs`
+  - `crates/daemon/tests/pipeline_integration_tests.rs`
   - `scripts/sync_issue.py`
-  - `tests/invariants/src/lib.rs`
 
 ## 1. Executive Summary
 
-This pull request implements native distribution packaging specifications, builder automation, and verification harnesses for the three major Linux distribution ecosystems, fulfilling Issue #27 (GitHub #66):
-1. **Debian / Ubuntu (`.deb`)**:
-   - `packaging/debian/control`, `rules`, `postinst`, `prerm`, `postrm`, and `scripts/build_deb.sh`.
-   - Post-install scriptlet idempotently provisions the `soos` system group, enforces directory hierarchy permissions (`0700` biometrics/evidence, `0600` master key, `0750` runtime directory), generates 32-byte cryptographic key if absent, registers PAM profile via `pam-auth-update`, and integrates `soos-daemon.service`.
-2. **Fedora / RHEL (`.rpm`)**:
-   - `packaging/rpm/soos.spec` and `scripts/build_rpm.sh`.
-   - Complete RPM spec with `%prep`, `%build`, `%install`, `%pre`, `%post`, `%preun`, `%postun`, and `%files`. Enforces systemd scriptlet macros, `soos` group creation in `%pre`, Fedora `authselect` custom template deployment, and `%attr` directives for all invariant directories.
-3. **Arch Linux (`PKGBUILD`)**:
-   - `packaging/arch/PKGBUILD`, `packaging/arch/soos.install`, and `scripts/build_arch.sh`.
-   - Standard Arch Linux build recipe, package function, and `soos.install` scriptlet handling post-installation group creation, invariant directory permissions, master key generation, and service reload.
-4. **Master Unified Builder & Docker Harness**:
-   - `scripts/build_packages.sh`: Master packaging driver supporting `deb`, `rpm`, `arch`, or `all`.
-   - `tests/docker/test_packages.sh`: In-container distribution test script validating package installation and uninstallation via `dpkg -i`, `rpm -i`, and `pacman -U`.
-5. **Contractual Invariant Tests**:
-   - Four comprehensive invariant unit tests in `tests/invariants/src/lib.rs` asserting spec validity, script executability, directory permissions, and group management.
+This pull request resolves Issue #28 (`fix(daemon): Policy engine lock contention and monotonic clock fallback` / GitHub #67), covering all three specified sub-issues:
+1. **#28.1 — Policy Engine Concurrency**:
+   - Replaced `Arc<Mutex<AuthorizationEngine>>` with `Arc<tokio::sync::RwLock<AuthorizationEngine>>` in `PipelineComponents`.
+   - Added `check_allowed` to `AuthorizationEngine` and `RateLimiter`.
+   - In `ConnectionDispatcher::handle_request`, the fail-fast rate-limiting check (Step 8-pre) acquires shared read access via `pipe.policy.read().await` instead of exclusive lock, preventing lock starvation and serialization across concurrent authentication requests. Exclusive write lock (`write().await`) is deferred to Step 8i when recording attempts.
+2. **#28.2 — Monotonic Clock Fallback**:
+   - Updated `current_monotonic_nanos()` to return `Result<u64, DaemonError>` rather than silently returning 0 upon POSIX clock failure.
+   - Added `current_monotonic_nanos_from_clock(clock_id)` and clock function injection (`with_clock_fn`) to `ConnectionDispatcher`.
+   - Handled clock errors in `ConnectionDispatcher` by failing closed with `Verdict::Unavailable` (`ReasonClass::InternalError`), ensuring zero deadline bypass and seamless password fallback (`PAM_IGNORE`).
+3. **#28.3 — Systemd-Logind Session Validation**:
+   - Created `SessionValidator` in `crates/daemon/src/session.rs` to verify that asserted target UIDs own active local sessions (`ACTIVE=1` or `STATE=active`) in `/run/systemd/sessions/`.
+   - Added Step 6b to `ConnectionDispatcher::handle_request`, rejecting requests for UIDs without active sessions with `Verdict::ProtocolError` and `ReasonClass::UidMismatch`.
+   - Added `enforce_active_session` and `logind_sessions_dir` configuration options to `DispatcherConfig` and `DaemonConfig`, allowing flexible configuration in containerized test environments while enforcing active session verification in production.
 
 ## 2. Deep Reasoning Audit
 
 ### Logic & Architecture
-- **Pass**: All package specifications conform strictly to `AI/ARCHITECTURE.md` §5 (Distribution Adaptation) and §10 (Daemon Hardening).
-- Daemon executable is located at `/usr/libexec/soos/soos-daemon` (mode `0755 root:root`), user administration utilities at `/usr/bin/` (mode `0755 root:root`), PAM shared library at the distribution-specific security directory (mode `0644 root:root`), and systemd unit at standard system unit locations.
-- Shell scripts employ `set -euo pipefail`, trap handlers for temporary staging directories, and support `--destdir`, `--dry-run`, and `--skip-build` options.
+- **Pass**: Fully aligns with `AI/ARCHITECTURE.md` §2.3 (Invariant 3) and §4:
+  - "The daemon never trusts the username, PID, PAM service, or UID declared in payload messages: it strictly cross-references `SO_PEERCRED`, `/etc/passwd`, and active `logind` sessions."
+  - Target UID session check at Step 6b ensures unauthenticated or background callers cannot trigger heavy biometric pipeline execution for inactive users.
+  - Safe POSIX clock integration via `nix::time::clock_gettime` with proper validation of seconds and nanoseconds.
 
-### PAM Concurrency & Deadlines
-- **Pass**: Zero asynchronous runtimes or threads introduced into the PAM module pathway.
-- Package specifications integrate PAM configuration templates strictly honoring universal stack ordering (`timeout_ms=250` before `pam_unix`, and `event=password-failed timeout_ms=20` after `pam_unix`).
+### PAM Concurrency & Real-Time Deadlines
+- **Pass**: Replacing `Mutex` with `RwLock` in `PipelineComponents` eliminates thread serialization during rate-limit checks.
+- 8 concurrent authentication requests read rate limit state simultaneously without lock starvation.
+- Real-time decision budget (< 150ms) is preserved with sub-millisecond read lock acquisitions.
 
 ### Panic Safety & Fallback
 - **Pass**: Zero `unwrap()`, `expect()`, or `panic!()` in production code.
-- Package removal scriptlets (`prerm`, `%preun`, `pre_remove`) stop and disable `soos-daemon.service` cleanly before file removal, preventing dangling socket operations or locking issues.
-- Fallback to password authentication is preserved at all times via `default=ignore`.
+- Clock failure degrades gracefully to `Verdict::Unavailable` (`ReasonClass::InternalError`), guaranteeing `PAM_IGNORE` password fallback in PAM callers.
+- All session file operations handle missing directories, I/O errors, and parse failures by failing closed.
 
 ### Test Integrity & Anti-Weakening
-- **Pass**: Contractual tests authored during Phase 2 (`test_debian_packaging_specification`, `test_rpm_packaging_specification`, `test_arch_packaging_specification`, `test_package_build_scripts_executable_and_help`) were preserved without weakening.
-- Production code in `packaging/rpm/soos.spec` was refined to satisfy the exact test contract.
+- **Pass**: Comprehensive contractual integration tests authored in Phase 2 in `crates/daemon/tests/policy_concurrency_tests.rs`:
+  - `test_concurrent_auth_requests_no_lock_starvation`: Verifies 8 concurrent tasks calling `check_allowed` concurrently without contention.
+  - `test_monotonic_clock_invalid_clock_id_returns_error`: Verifies that invalid clock IDs return `Err(DaemonError::Clock)`.
+  - `test_monotonic_clock_failure_returns_unavailable`: Verifies fail-closed `Unavailable` verdict upon clock failure.
+  - `test_session_validator_parses_active_session`: Verifies session state parsing.
+  - `test_auth_rejected_for_uid_without_active_session`: Verifies rejection of UIDs without active sessions and acceptance when session is active.
+- Existing tests were updated for the `RwLock` and `DispatcherConfig` struct evolution without weakening assertions.
 
 ### Memory & Secret Bounds
-- **Pass**: Zero secrets, passwords, or biometric vectors are logged, stored in cleartext, or exposed.
-- All package post-install scripts verify and set mode `0700` on `/var/lib/soos/biometrics` and `/var/lib/soos/evidence`, and mode `0600` on `/var/lib/soos/master.key`.
-- Master key generation uses 32 bytes of cryptographic entropy (`openssl rand 32` or `/dev/urandom`).
+- **Pass**: Zero sensitive data (passwords, embeddings, raw frames) logged or exposed.
+- Logind session file reading is strictly bounded to 4KB (`take(4096)`) to prevent unbounded memory allocation.
+- Static logging audit passes with zero sensitive keywords in log statements.
 
 ## 3. Detailed Findings & Action Items
 - None. All checks passed with zero warnings.

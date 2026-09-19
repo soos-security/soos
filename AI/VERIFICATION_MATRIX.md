@@ -79,6 +79,9 @@ This document translates the critical gating criteria from §11 of `ARCHITECTURE
 | D14 | ONNX model download, SHA-256 verification, and fail-fast startup attestation | Integration & script tests (`model_deployment_tests::test_download_script_verifies_checksums`, `model_deployment_tests::test_models_readme_complete_and_accurate`, `model_deployment_tests::test_daemon_refuses_start_with_missing_models`, `model_deployment_tests::test_daemon_refuses_start_with_tampered_models`) | ✅ Verified |
 | D15 | Configuration file parsed from TOML; defaults used when absent | Unit test (`config_tests::test_config_file_parsing_complete`, `config_tests::test_config_defaults_when_file_absent`, `config_tests::test_config_file_invalid_syntax_fails_closed`) | ✅ Verified |
 | D16 | Socket binding is TOCTOU-safe with symlink protection and root:soos ownership | Security & integration tests (`socket_tests::test_socket_binding_resists_symlink_race`, `socket_tests::test_socket_ownership_root_soos`, `dispatcher_tests::test_dispatcher_rejects_invalid_protocol_version`, `dispatcher_tests::test_dispatcher_rejects_oversized_service_name`) | ✅ Verified |
+| D17 | Policy engine concurrency with `RwLock` and `check_allowed` without lock starvation | Unit & integration tests (`policy_concurrency_tests::test_concurrent_auth_requests_no_lock_starvation`) | ✅ Verified |
+| D18 | Safe monotonic clock fallback with fail-closed `Unavailable` verdict | Unit & integration tests (`policy_concurrency_tests::test_monotonic_clock_invalid_clock_id_returns_error`, `policy_concurrency_tests::test_monotonic_clock_failure_returns_unavailable`) | ✅ Verified |
+| D19 | `systemd-logind` session validation cross-referencing `/run/systemd/sessions/` for active local sessions | Unit & integration tests (`policy_concurrency_tests::test_session_validator_parses_active_session`, `policy_concurrency_tests::test_auth_rejected_for_uid_without_active_session`) | ✅ Verified |
 
 ---
 

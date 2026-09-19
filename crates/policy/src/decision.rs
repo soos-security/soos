@@ -1,5 +1,6 @@
 //! Biometric authorization decision engine adhering to ARCHITECTURE.md §3.
 
+use crate::error::PolicyError;
 use crate::rate_limit::RateLimiter;
 use crate::threshold::ThresholdConfig;
 use soos_protocol::{ReasonClass, Verdict};
@@ -80,6 +81,21 @@ impl AuthorizationEngine {
     /// Mutably access the internal rate limiter if configured.
     pub fn rate_limiter_mut(&mut self) -> Option<&mut RateLimiter> {
         self.rate_limiter.as_mut()
+    }
+
+    /// Check whether a request from `uid` is allowed under the configured rate limiter.
+    ///
+    /// If no rate limiter is configured, this always succeeds.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PolicyError::RateLimitExceeded`] if currently blocked.
+    pub fn check_allowed(&self, uid: u32, now_monotonic_ns: u64) -> Result<(), PolicyError> {
+        if let Some(ref limiter) = self.rate_limiter {
+            limiter.check_allowed(uid, now_monotonic_ns)
+        } else {
+            Ok(())
+        }
     }
 
     /// Pure evaluation of an [`AuthContext`] without rate-limiting state changes.
