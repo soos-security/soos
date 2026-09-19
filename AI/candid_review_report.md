@@ -1,40 +1,65 @@
-# Candid Review Report
+# Candid Review Report — Issue #25
 
-- **Date**: 2026-09-18
-- **Target Branch / Commit**: `fix/vision-zeroize-frames`
-- **Audited Files**:
-  - `crates/vision/src/pipeline.rs`
-  - `crates/vision/tests/zeroize_tests.rs`
-  - `crates/inference-ort/src/detector.rs`
-  - `crates/inference-ort/src/embedding.rs`
-  - `crates/inference-ort/src/landmarks.rs`
-  - `crates/inference-ort/src/pad.rs`
-  - `crates/inference-ort/tests/zeroize_tests.rs`
-  - `scripts/sync_issue.py`
+**Review Target**: `origin/main...HEAD` (`fix/biometric-store-security`)  
+**Reviewer**: Candid Reviewer Sub-Agent (`candid-reviewer`)  
+**Issue ID**: #25 (`fix(biometric-store): Atomic key creation and secure deletion`)  
+**GitHub Issue**: #64  
 
-## 1. Executive Summary
+---
 
-This cold, adversarial review evaluated the modifications introduced for Issue #24 (`fix(vision): Complete zeroization of intermediate frame buffers`, GitHub #63). The changes eliminate critical security gaps where un-zeroized raw facial frame data, intermediate RGB conversions, aligned crops, and normalized ONNX inference tensors could linger in deallocated heap memory. All intermediate buffers are wrapped in RAII zeroizing constructs (`Zeroizing<Vec<T>>` or `AlignedCropGuard`) and wiped post-inference. `VerificationOutcome` systematically implements `Zeroize` and `Drop`. The changes preserve panic safety, contain zero `unsafe` additions, and adhere strictly to zero-trust invariants and the English-only deliverable policy.
+## 1. Logic & Architecture Audit
+- **Atomic 0600 File Inception**:
+  - `MasterKey::load_or_create` and `BiometricStore::enroll` create temporary files using `OpenOptions::new().write(true).create_new(true).mode(0o600).open(...)`.
+  - The combination of `O_CREAT | O_EXCL` with kernel `mode 0600` guarantees the key and template files are never created world- or group-readable, even momentarily.
+- **Anti-Forensic Secure Erasure**:
+  - `BiometricStore::delete` performs a 3-pass overwrite with CSPRNG random bytes via `getrandom::fill`, with synchronous `file.sync_all()` after each pass, before `std::fs::remove_file`.
+  - Probed in tests via hard links sharing identical disk sectors, verifying in-place sector overwrite and header destruction.
+- **Symlink Traversal Prevention**:
+  - `BiometricStore::template_path` inspects `std::fs::symlink_metadata` and returns `Err(BiometricStoreError::InvalidPath)` if `meta.file_type().is_symlink()`.
+  - `MasterKey::load_or_create` similarly validates symlinks and opens existing keys with `libc::O_NOFOLLOW`.
+  - `BiometricStore::new` rejects symlinked base directories.
+- **Status**: APPROVED
 
-## 2. Deep Reasoning Audit
+---
 
-### Logic & Architecture
-- **Pass**: State transitions, error propagation, and memory lifecycles are robust. In `VisionPipeline::process_frame`, `rgb` is wrapped in `Zeroizing`, guaranteeing deterministic deallocation wiping regardless of nominal or early exit pathways. Intermediate aligned crops are guarded via `AlignedCropGuard` ensuring zeroization upon spoof aborts (`PadFailed`) or extraction failures. In `soos-inference-ort`, input preprocessing has been factored into dedicated `prepare_input` methods that return `Zeroizing<Vec<f32>>`, from which zero-copy tensor views (`TensorRef`) are passed directly into ONNX Runtime sessions, eliminating intermediate `ndarray::Array4` heap duplication.
+## 2. PAM Concurrency & Real-Time Deadlines
+- `soos-biometric-store` is completely isolated from `crates/pam`.
+- Zero Tokio runtimes or async executors introduced.
+- Strict fail-closed semantics preserved across all paths.
+- **Status**: APPROVED
 
-### PAM Concurrency & Deadlines
-- **Pass**: The PAM module (`crates/pam`) is unaffected. No asynchronous runtimes or blocking socket loops are introduced. The replacement of heap-allocated `ndarray` structures with borrowed slice views in inference reduces allocation pressure and latency jitter during biometric authentication.
+---
 
-### Panic Safety & Fallback
-- **Pass**: Zero `unwrap()`, `expect()`, `panic!()`, or unfinished stubs are introduced in production code. Error paths return typed errors (`VisionError`, `InferenceError`). RAII drop implementations guarantee memory zeroization even if thread unwinding occurs.
+## 3. Panic Safety & Fallback
+- Zero `unwrap()` or `expect()` introduced in production library code.
+- All buffer accesses use `.get_mut()` with explicit bounds and error propagation (`BiometricStoreError::Crypto`).
+- All error paths return typed `BiometricStoreError`.
+- **Status**: APPROVED
 
-### Test Integrity & Anti-Weakening
-- **Pass**: Contractual acceptance tests were authored in Phase 2 before production changes and tested in the RED phase. No pre-existing unit or integration tests were altered, weakened, or bypassed. The full workspace test suite passed with 100% green status.
+---
 
-### Memory & Secret Bounds
-- **Pass**: Conforms to `ARCHITECTURE.md` §10 Memory Hygiene. Face pixel buffers in RGB and normalized float representations are deterministically zeroized. `VerificationOutcome` implements `Zeroize` and `Drop` delegating to `PipelineOutput::zeroize()`. Zero credentials, biometric vectors, or raw pixel frames are exposed across IPC sockets or logged to disk/streams.
+## 4. Test Integrity & Anti-Weakening
+- Zero existing tests modified or weakened.
+- Three strict contractual tests authored and validated:
+  - `test_master_key_created_with_0600_from_inception` (#25.1)
+  - `test_delete_securely_overwrites_before_unlink` (#25.2)
+  - `test_biometric_store_rejects_symlink_template_path` (#25.3)
+- Contractual tests confirm immutable contract compliance.
+- **Status**: APPROVED
 
-## 3. Detailed Findings & Action Items
-- None. All 7 audits in `./scripts/candid_review.sh` passed cleanly.
+---
 
-## 4. Final Verdict
-**VERDICT: APPROVED**
+## 5. Memory & Secret Bounds
+- `#![forbid(unsafe_code)]` remains strictly enforced.
+- Memory zeroization preserved for `MasterKey` and intermediate key buffers.
+- Fixed 4096-byte shredding buffer with loop bounds checked via `.min(BUFFER_SIZE as u64)`.
+- Zero raw embeddings, keys, or decrypted payloads leaked in error messages.
+- **Status**: APPROVED
+
+---
+
+## Final Review Verdict
+
+```
+VERDICT: APPROVED
+```
