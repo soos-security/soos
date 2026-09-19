@@ -1243,4 +1243,146 @@ mod tests {
             );
         }
     }
+
+    /// Invariant: Distribution-Specific Deployment Validation Suite (Issue #32 / GitHub #71)
+    #[test]
+    fn test_distro_validation_suite_spec() {
+        let root = workspace_root();
+        let distro_dir = root.join("tests/distro");
+        assert!(
+            distro_dir.exists(),
+            "tests/distro/ directory must exist for distribution validation suite"
+        );
+
+        let deb_script = distro_dir.join("debian_ubuntu_test.sh");
+        let fedora_script = distro_dir.join("fedora_rhel_test.sh");
+        let arch_script = distro_dir.join("arch_linux_test.sh");
+        let runner_script = distro_dir.join("run_distro_validation.sh");
+        let distro_doc = root.join("Docs/DISTRIBUTION_DEPLOYMENT.md");
+
+        assert!(
+            deb_script.exists(),
+            "tests/distro/debian_ubuntu_test.sh must exist (Sub-issue #32.1)"
+        );
+        assert!(
+            fedora_script.exists(),
+            "tests/distro/fedora_rhel_test.sh must exist (Sub-issue #32.2)"
+        );
+        assert!(
+            arch_script.exists(),
+            "tests/distro/arch_linux_test.sh must exist (Sub-issue #32.3)"
+        );
+        assert!(
+            runner_script.exists(),
+            "tests/distro/run_distro_validation.sh must exist"
+        );
+        assert!(
+            distro_doc.exists(),
+            "Docs/DISTRIBUTION_DEPLOYMENT.md must exist"
+        );
+
+        // Verify executable permissions on all shell scripts
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            for script in [&deb_script, &fedora_script, &arch_script, &runner_script] {
+                let meta = fs::metadata(script).expect("script metadata");
+                assert_ne!(
+                    meta.permissions().mode() & 0o111,
+                    0,
+                    "Script {:?} must have executable permissions",
+                    script.file_name()
+                );
+            }
+        }
+
+        // Verify strict bash error flags on all scripts
+        for script in [&deb_script, &fedora_script, &arch_script, &runner_script] {
+            let content = fs::read_to_string(script).expect("read script");
+            assert!(
+                content.starts_with("#!/usr/bin/env bash") || content.starts_with("#!/bin/bash"),
+                "Script {:?} must start with bash shebang",
+                script.file_name()
+            );
+            assert!(
+                content.contains("set -euo pipefail"),
+                "Script {:?} must enable strict bash error flags 'set -euo pipefail'",
+                script.file_name()
+            );
+        }
+
+        // Verify debian_ubuntu_test.sh covers package/install, enrollment, PAM auth, fallback, rollback
+        let deb_content = fs::read_to_string(&deb_script).expect("read debian_ubuntu_test.sh");
+        for needle in ["install", "enroll", "PAM_SUCCESS", "password", "rollback"] {
+            assert!(
+                deb_content.to_lowercase().contains(&needle.to_lowercase()),
+                "debian_ubuntu_test.sh must cover '{}'",
+                needle
+            );
+        }
+
+        // Verify fedora_rhel_test.sh covers authselect, pam_faillock, sudo, gdm
+        let fedora_content = fs::read_to_string(&fedora_script).expect("read fedora_rhel_test.sh");
+        for needle in ["authselect", "pam_faillock", "sudo", "gdm"] {
+            assert!(
+                fedora_content.contains(needle),
+                "fedora_rhel_test.sh must cover '{}'",
+                needle
+            );
+        }
+
+        // Verify arch_linux_test.sh covers PKGBUILD/pacman, system-auth, swaylock/hyprlock
+        let arch_content = fs::read_to_string(&arch_script).expect("read arch_linux_test.sh");
+        for needle in ["system-auth", "swaylock"] {
+            assert!(
+                arch_content.contains(needle),
+                "arch_linux_test.sh must cover '{}'",
+                needle
+            );
+        }
+        assert!(
+            arch_content.contains("PKGBUILD") || arch_content.contains("pacman"),
+            "arch_linux_test.sh must cover PKGBUILD or pacman"
+        );
+
+        // Verify Docs/DISTRIBUTION_DEPLOYMENT.md documents all 3 distribution families and procedures
+        let doc_content = fs::read_to_string(&distro_doc).expect("read DISTRIBUTION_DEPLOYMENT.md");
+        for topic in [
+            "Debian",
+            "Ubuntu",
+            "Fedora",
+            "RHEL",
+            "Arch",
+            "authselect",
+            "pam_faillock",
+            "swaylock",
+            "rollback",
+        ] {
+            assert!(
+                doc_content.contains(topic),
+                "Docs/DISTRIBUTION_DEPLOYMENT.md must document '{}'",
+                topic
+            );
+        }
+
+        // Verify all scripts handle --help cleanly with exit code 0 and non-empty output
+        for script in [&deb_script, &fedora_script, &arch_script, &runner_script] {
+            let output = std::process::Command::new("bash")
+                .arg(script)
+                .arg("--help")
+                .output()
+                .expect("execute script --help");
+            assert!(
+                output.status.success(),
+                "Script {:?} --help must exit with status 0",
+                script.file_name()
+            );
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                !stdout.trim().is_empty(),
+                "Script {:?} --help must print usage information to stdout",
+                script.file_name()
+            );
+        }
+    }
 }

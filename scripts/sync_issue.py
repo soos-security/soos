@@ -96,6 +96,7 @@ BRANCH_TO_ISSUE = {
     "fix/pam-uid-resolution": 29,
     "fix/evidence-store-safety": 30,
     "test/physical-hardware-validation": 31,
+    "test/distro-validation": 32,
 }
 
 

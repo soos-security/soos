@@ -1126,16 +1126,16 @@ The enrollment CLI uses incorrect model registry IDs (`face_detector` instead of
 
 #### Sub-issues
 
-- [ ] **#32.1** — VM-based Debian 12/Ubuntu 24.04 full deployment test
+- [x] **#32.1** — VM-based Debian 12/Ubuntu 24.04 full deployment test
   - Install via `.deb` package or `install.sh`
   - Enroll user, verify facial auth, test password fallback
   - Document rollback procedure
 
-- [ ] **#32.2** — VM-based Fedora 40/RHEL 9 deployment test with `authselect`
+- [x] **#32.2** — VM-based Fedora 40/RHEL 9 deployment test with `authselect`
   - Verify custom `authselect` profile preserves `pam_faillock`
   - Test `sudo` and `gdm` integration
 
-- [ ] **#32.3** — VM-based Arch Linux deployment test
+- [x] **#32.3** — VM-based Arch Linux deployment test
   - Verify PKGBUILD installation
   - Test `swaylock` integration with Hyprland/Sway
 

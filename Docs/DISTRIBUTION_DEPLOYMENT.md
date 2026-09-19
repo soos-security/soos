@@ -1,0 +1,238 @@
+# Distribution-Specific Deployment & Validation Guide — soos
+
+## 1. Architectural Scope & Purpose
+
+This document provides complete, operational guidelines for deploying, validating, and rolling back the `soos` local facial biometric authentication subsystem across the Tier-1 Linux distribution families:
+- **Debian 12 ("Bookworm") / Ubuntu 24.04 LTS ("Noble Numbat")**
+- **Fedora 40 / Red Hat Enterprise Linux 9 (RHEL 9)**
+- **Arch Linux**
+
+All deployment workflows strictly adhere to the operational invariants and security specifications established in `AI/ARCHITECTURE.md` §5 (Distribution Adaptation), §9 (Biometric Storage), and §10 (Daemon Hardening).
+
+---
+
+## 2. Universal PAM Stack Ordering
+
+Regardless of distribution, every PAM integration must preserve the universal 3-stage PAM stack ordering:
+
+```pam
+# 1. Primary Biometric Check (runs before pam_unix)
+auth  [success=done default=ignore]  pam_soos.so timeout_ms=250
+
+# 2. Standard Password Authentication Fallback
+auth  [success=done default=bad]     pam_unix.so try_first_pass
+
+# 3. Password Failure Event Notification (reached ONLY if pam_unix fails)
+auth  optional                       pam_soos.so event=password-failed timeout_ms=20
+```
+
+### Safety Invariants
+1. **Never bypass password authentication**: If `pam_soos.so` fails, times out, or encounters a missing daemon/socket, it **MUST** return `PAM_IGNORE`, yielding execution to `pam_unix`.
+2. **Never convert error into `PAM_SUCCESS`**: Any internal panic or unhandled error strictly returns `PAM_IGNORE` via `catch_unwind`.
+3. **No stream pollution**: The PAM module must never write to `stdout` or `stderr` (`println!`, `dbg!`), which would corrupt display manager (GDM, LightDM, SDDM) and screen locker (swaylock, hyprlock) communications.
+
+---
+
+## 3. Debian 12 & Ubuntu 24.04 Deployment
+
+### 3.1 Installation Methods
+
+#### Option A: Native Debian Package (`.deb`)
+```bash
+# Build native package
+./scripts/build_deb.sh
+
+# Install package
+sudo dpkg -i target/packages/soos_*.deb
+
+# Verify installation invariants
+sudo soos-admin status
+```
+
+#### Option B: Universal Installer
+```bash
+# Install binaries, unit files, and provision invariant directories
+sudo ./scripts/install.sh
+```
+
+### 3.2 PAM Stack Integration via `pam-auth-update`
+Debian and Ubuntu dynamically manage `/etc/pam.d/common-auth` using `pam-auth-update`. `soos` provides two profiles in `/usr/share/pam-configs/`:
+1. `/usr/share/pam-configs/soos` (Priority `260`, placed before `unix` at `256`)
+2. `/usr/share/pam-configs/soos-notify` (Priority `128`, placed after `unix`)
+
+Enable the profiles non-interactively:
+```bash
+sudo pam-auth-update --package --enable soos soos-notify
+```
+
+### 3.3 User Enrollment & Verification
+```bash
+# 1. Add user to soos system group
+sudo soos-admin add-user alice
+
+# 2. Enroll facial biometric vector
+sudo soos-enroll alice
+
+# 3. Verify encrypted biometric template permissions
+sudo stat -c "%a %U:%G" /var/lib/soos/biometrics/alice.bin
+# Expected: 600 root:root
+```
+
+### 3.4 Operational Testing & Password Fallback
+```bash
+# Test nominal facial authentication (daemon active)
+sudo pamtester common-auth alice authenticate
+
+# Test password fallback (daemon stopped or face occluded)
+sudo systemctl stop soos-daemon
+sudo pamtester common-auth alice authenticate
+# System prompts for password and succeeds with valid credentials
+```
+
+### 3.5 Rollback & Uninstallation
+```bash
+# Safe rollback preserving biometric templates
+sudo ./scripts/uninstall.sh --keep-data
+
+# Or remove package via dpkg
+sudo dpkg -r soos
+```
+
+---
+
+## 4. Fedora 40 & RHEL 9 Deployment with `authselect`
+
+### 4.1 Custom `authselect` Profile
+Fedora and RHEL mandate the use of `authselect` to manage `/etc/pam.d/system-auth` and `/etc/pam.d/password-auth`. Direct manual editing of PAM configuration files is prohibited.
+
+`soos` deploys a custom `authselect` profile template to `/etc/authselect/custom/soos/`:
+- `system-auth`: Configures local and console services (e.g. `sudo`, `login`)
+- `password-auth`: Configures display managers and graphical sessions (e.g. `gdm`)
+- `REQUIREMENTS`: Declares `pam_unix.so` and `pam_soos.so` requirements
+
+### 4.2 Preservation of `pam_faillock` Lockout Policy
+To prevent brute-force attacks against user passwords, Fedora employs `pam_faillock`. The `soos` custom profile preserves `pam_faillock` with strict hook placement:
+
+```pam
+# Pre-authentication lockout check (denies locked accounts immediately)
+{?with-faillock:auth        required      pam_faillock.so preauth silent}
+
+# Primary facial biometric authentication
+auth        [success=done default=ignore] pam_soos.so timeout_ms=250
+
+# Standard password fallback
+auth        [success=done default=bad]    pam_unix.so try_first_pass
+
+# Failure accounting hook (increments failure counter on wrong password)
+{?with-faillock:auth        [default=die] pam_faillock.so authfail}
+
+# Intrusion detection notification
+auth        optional                      pam_soos.so event=password-failed timeout_ms=20
+```
+
+When biometric verification succeeds (`pam_soos.so` returns `[success=done]`), `pam_unix` and `pam_faillock` are bypassed cleanly. When biometric verification falls back (`PAM_IGNORE`), `pam_faillock` continues counting consecutive password authentication failures.
+
+### 4.3 Activation and Service Verification
+```bash
+# Activate custom profile with faillock enabled
+sudo authselect select custom/soos with-faillock --force
+
+# Verify authselect profile consistency
+sudo authselect check
+
+# Test sudo service integration
+sudo pamtester sudo alice authenticate
+
+# Test GDM display manager integration
+sudo pamtester gdm-password alice authenticate
+```
+
+### 4.4 Rollback & Uninstallation
+```bash
+# Restore standard distribution profile (e.g. local or sssd)
+sudo authselect select local --force
+
+# Remove package
+sudo rpm -e soos
+```
+
+---
+
+## 5. Arch Linux Deployment & Screen Lockers
+
+### 5.1 Installation via PKGBUILD
+```bash
+# Build Arch package
+./scripts/build_arch.sh
+
+# Install package
+sudo pacman -U target/packages/soos-*.pkg.tar.zst
+```
+
+### 5.2 `/etc/pam.d/system-auth` Integration
+Arch Linux utilizes a modular `/etc/pam.d/system-auth` stack. The `soos` snippet (`packaging/pam/arch/system-auth.snippet`) is placed immediately prior to `pam_unix.so`:
+
+```pam
+# Inserted into /etc/pam.d/system-auth:
+auth  [success=done default=ignore]  pam_soos.so timeout_ms=250
+auth  required                       pam_unix.so try_first_pass nullok
+auth  optional                       pam_soos.so event=password-failed timeout_ms=20
+```
+
+### 5.3 Wayland Screen Locker Integration (`swaylock` & `hyprlock`)
+Wayland compositors (Hyprland, Sway) rely on dedicated PAM service files located in `/etc/pam.d/`:
+- `/etc/pam.d/swaylock`
+- `/etc/pam.d/hyprlock`
+
+Both configurations standardly include `system-auth`:
+```pam
+#%PAM-1.0
+auth include system-auth
+account include system-auth
+```
+
+#### Operational Guarantees
+- **Instant Unlock**: Upon user face recognition, `pam_soos.so` returns `PAM_SUCCESS` within `< 150ms`, unlocking the screen locker without requiring Enter or keyboard input.
+- **Graceful Fallback**: If the camera is occluded or the user is absent, the screen locker remains locked and immediately accepts the user's password.
+- **Zero Lockup**: Because `pam_soos.so` forbids stdout/stderr writes, no escape sequences or debug messages corrupt Wayland client/compositor sockets.
+
+### 5.4 Rollback & Uninstallation
+```bash
+# Remove pacman package
+sudo pacman -R soos
+
+# Restore system-auth configuration from backup
+sudo cp /etc/pam.d/system-auth.soos-backup /etc/pam.d/system-auth
+```
+
+---
+
+## 6. Automated Validation Test Harness
+
+To execute the automated distribution validation suite:
+
+```bash
+# Run multi-distribution test runner (auto-detects environment or uses Docker)
+bash tests/distro/run_distro_validation.sh --help
+
+# Run Debian 12 / Ubuntu 24.04 test harness
+bash tests/distro/debian_ubuntu_test.sh --dry-run
+
+# Run Fedora 40 / RHEL 9 test harness
+bash tests/distro/fedora_rhel_test.sh --dry-run
+
+# Run Arch Linux test harness
+bash tests/distro/arch_linux_test.sh --dry-run
+```
+
+---
+
+## 7. Emergency Rescue Shell & Disaster Recovery
+
+If a misconfiguration occurs during manual PAM adjustments:
+1. **Always maintain an open root shell** (`sudo -s`) in a separate terminal before modifying `/etc/pam.d/`.
+2. **Boot with systemd emergency target**: Append `systemd.unit=emergency.target` to the GRUB kernel command line.
+3. **Restore PAM backup**:
+   - Debian: `pam-auth-update --force`
+   - Fedora: `authselect select local --force`
+   - Arch: `cp /etc/pam.d/system-auth.soos-backup /etc/pam.d/system-auth`

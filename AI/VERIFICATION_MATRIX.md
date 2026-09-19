@@ -243,6 +243,19 @@ This document translates the critical gating criteria from §11 of `ARCHITECTURE
 | PH5 | Presentation Attack Detection (PAD) adversarial evaluation suite testing printed photographs, smartphone screens, video replay, and measuring APCER / BPCER error rates | Adversarial & invariant test (`tests/physical/adversarial_test.sh`, `pad_tests`, `test_physical_hardware_validation_suite_spec`) | ✅ Verified |
 | PH6 | Invariant test enforcing file existence, executable permissions (`0755`), strict bash options (`set -euo pipefail`), and `--help` CLI functionality | Architectural invariant test (`test_physical_hardware_validation_suite_spec`) | ✅ Verified |
 
+---
+
+## Component: `distro-validation` (Issue #32 / GitHub #71)
+
+| # | Criterion | Test Method | Status |
+|---|---|---|---|
+| DV1 | Debian 12 / Ubuntu 24.04 end-to-end deployment verification: `.deb` package and `scripts/install.sh` deployment, directory permissions (`0700` biometrics/evidence, `0600` master.key), `pam-auth-update` configuration, user enrollment, nominal facial auth (`PAM_SUCCESS`), password fallback, and automated rollback | Functional & invariant test (`tests/distro/debian_ubuntu_test.sh`, `test_distro_validation_suite_spec`) | ✅ Verified |
+| DV2 | Fedora 40 / RHEL 9 deployment verification with `authselect`: custom profile activation, strict preservation of `pam_faillock` (preauth and authfail hooks), `sudo` and `gdm` PAM service stack verification, and clean profile rollback | Functional & invariant test (`tests/distro/fedora_rhel_test.sh`, `test_distro_validation_suite_spec`) | ✅ Verified |
+| DV3 | Arch Linux deployment verification: `PKGBUILD` packaging, `system-auth` snippet integration, Wayland screen lockers (`swaylock`, `hyprlock`) integration, password fallback, and pacman rollback | Functional & invariant test (`tests/distro/arch_linux_test.sh`, `test_distro_validation_suite_spec`) | ✅ Verified |
+| DV4 | Multi-distribution orchestration runner supporting automated environment detection, direct local invocation, and Dockerized matrix execution across distributions | Orchestrator & invariant test (`tests/distro/run_distro_validation.sh`, `test_distro_validation_suite_spec`) | ✅ Verified |
+| DV5 | Comprehensive distribution deployment, operational verification, and emergency recovery manual covering Debian/Ubuntu, Fedora/RHEL, and Arch Linux | Documentation & invariant test (`Docs/DISTRIBUTION_DEPLOYMENT.md`, `test_distro_validation_suite_spec`) | ✅ Verified |
+| DV6 | Automated architectural security invariant test asserting distribution validation suite presence, executable permissions (`0755`), strict bash options (`set -euo pipefail`), CLI `--help` functionality, and acceptance criteria coverage | Architectural invariant test (`test_distro_validation_suite_spec`) | ✅ Verified |
+
 
 
 
