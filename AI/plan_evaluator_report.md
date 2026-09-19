@@ -1,49 +1,61 @@
-# Plan Evaluation Report — Issue #24: fix(vision): Complete zeroization of intermediate frame buffers
+# Plan Evaluator Report — Issue #25
 
-- **Date**: 2026-09-18
-- **Evaluator**: Plan Evaluator Sub-Agent
-- **Target Issue**: Issue #24 (GitHub #63) — `fix(vision): Complete zeroization of intermediate frame buffers`
-- **Target Branch**: `fix/vision-zeroize-frames`
-- **Architecture References**: `AI/ARCHITECTURE.md` §10 Memory Hygiene, `AI/BACKLOG.md` Issue #24
+**Evaluation Target**: Issue #25 (`fix(biometric-store): Atomic key creation and secure deletion`)  
+**Evaluator**: Plan Evaluator Sub-Agent (`plan-evaluator`)  
+**Specification Ref**: `AI/BACKLOG.md` § Issue #25, `AI/ARCHITECTURE.md` §9 Privacy & Persistence  
 
 ---
 
-## 1. Evaluation Against Architectural Pillars
-
-### Pillar 1: Architectural Alignment & Threat Model
-- **Evaluation**: PASS
-- **Analysis**: The plan targets internal memory hygiene for `soos-vision` and `soos-inference-ort`. In a zero-trust biometric daemon, unencrypted biometric frames, intermediate color-converted buffers, and normalized inference tensors residing in heap memory represent a critical attack surface if left un-zeroized. The plan ensures that all intermediate face representations are deterministically wiped from memory immediately after use and on drop, fully complying with §10 Memory Hygiene.
-
-### Pillar 2: PAM Real-Time Latency & Concurrency
-- **Evaluation**: PASS
-- **Analysis**: The PAM module (`crates/pam`) remains untouched. Inside `soos-vision` and `soos-inference-ort`, replacing heap-allocated `ndarray::Array4` intermediate containers with direct borrowed slices (`TensorRef::from_array_view`) avoids extraneous heap reallocation while maintaining zero-copy views into the `Zeroizing<Vec<f32>>` buffer, which actually improves execution latency and cache locality within the 150ms total verification budget.
-
-### Pillar 3: Panic Safety & Fail-Closed Behavior
-- **Evaluation**: PASS
-- **Analysis**: The zeroization mechanisms rely on RAII containers (`zeroize::Zeroizing<T>`) and trait implementations (`zeroize::Zeroize`, `Drop`). All error propagation uses `Result<_, VisionError>` and `Result<_, InferenceError>`. Zero `unwrap()` or `expect()` calls are introduced in production code. In case of early error exits (e.g. `PadFailed`, `NoFaceDetected`), the RAII drops guarantee memory zeroization.
-
-### Pillar 4: Dependency Isolation & Banned Crates
-- **Evaluation**: PASS
-- **Analysis**: No banned crates (`opencv`, `nokhwa`) are introduced. `zeroize = { workspace = true }` is already present in `crates/vision/Cargo.toml` and `crates/inference-ort/Cargo.toml`. Business crates retain `#![forbid(unsafe_code)]`.
-
-### Pillar 5: Data Confidentiality & Zeroization
-- **Evaluation**: PASS
-- **Analysis**: The plan comprehensively resolves all three sub-issues from `AI/BACKLOG.md`:
-  - Sub-issue #24.1: Intermediate RGB buffer from `convert_to_rgb()` is wrapped in `Zeroizing<Vec<u8>>`. Aligned crop is also protected during PAD evaluation.
-  - Sub-issue #24.2: `VerificationOutcome` implements `Zeroize` and `Drop`, ensuring both primary and cloned outcomes deterministically clear the underlying embedding and crop.
-  - Sub-issue #24.3: ONNX input tensors in `OrtFaceDetector`, `OrtEmbeddingExtractor`, `OrtLandmarkDetector`, and `OrtPadDetector` are zeroized post-`session.run()` and on drop.
-
-### Pillar 6: Test Integrity & TDD Contracts
-- **Evaluation**: PASS
-- **Analysis**: The plan prescribes new contractual unit tests authored in Phase 2 before production implementation:
-  - `crates/vision/tests/zeroize_tests.rs`: `test_rgb_buffer_zeroized_after_pipeline`, `test_verification_outcome_zeroize_on_drop`.
-  - `crates/inference-ort/tests/zeroize_tests.rs`: `test_inference_input_buffers_zeroized`.
-  Existing tests are strictly preserved with zero weakening.
+## 1. Architectural Alignment & Threat Model
+- **Evaluation**: The proposed design addresses atomic master key file creation and anti-forensic secure erasure for encrypted templates stored under `/var/lib/soos/biometrics/`.
+- **Inception Mode**: Key creation switches from `File::create()` + `set_permissions()` to atomic `OpenOptions::new().write(true).create_new(true).mode(0o600).open()`, eliminating any momentary window where the key could be world/group-readable.
+- **Symlink Traversal**: Template path resolution validates against symlink traversal using `std::fs::symlink_metadata` and `libc::O_NOFOLLOW`, preventing symlink attack vectors against privileged storage.
+- **Status**: COMPLIANT
 
 ---
 
-## 2. Recommendation & Gating Verdict
+## 2. PAM Real-Time Latency & Concurrency
+- **Evaluation**: `soos-biometric-store` is a storage library utilized by the privileged daemon (`soos-daemon`) and the enrollment utility (`soos-enroll`), completely separated from the synchronous PAM module (`pam_soos.so`).
+- **Status**: COMPLIANT
 
-The proposed implementation plan completely satisfies all 6 architectural pillars, adheres to zero-trust invariants, and introduces zero breaking interface changes.
+---
 
-**VALIDATION_VERDICT: APPROVED**
+## 3. Panic Safety & Fail-Closed Behavior
+- **Evaluation**: All file operations, metadata inspections, and cryptographic calls return typed `Result<T, BiometricStoreError>`. No `unwrap()` or `expect()` are introduced into production code. Symlink detection and I/O failures fail closed by returning explicit `Err` variants.
+- **Status**: COMPLIANT
+
+---
+
+## 4. Dependency Isolation & Banned Crates
+- **Evaluation**: Zero banned dependencies (`opencv`, `nokhwa`) are referenced. Standard POSIX flags are leveraged via `libc` (already in workspace dependencies).
+- **Safety Invariant**: `#![forbid(unsafe_code)]` remains strictly enforced across the entire `soos-biometric-store` crate.
+- **Status**: COMPLIANT
+
+---
+
+## 5. Data Confidentiality & Zeroization
+- **Evaluation**:
+  - `MasterKey` retains `Zeroize` and `ZeroizeOnDrop` guarantees.
+  - Intermediate key buffers are zeroized upon loading.
+  - Template deletion performs a minimum 3-pass CSPRNG random byte overwriting cycle followed by synchronous disk sync (`sync_all`) prior to `std::fs::remove_file()`, preventing physical data recovery from block storage sectors.
+- **Status**: COMPLIANT
+
+---
+
+## 6. Test Integrity & TDD Contracts
+- **Evaluation**: The plan defines three contractual tests strictly derived from `AI/BACKLOG.md` #25.1, #25.2, and #25.3:
+  1. `test_master_key_created_with_0600_from_inception`
+  2. `test_delete_securely_overwrites_before_unlink`
+  3. `test_biometric_store_rejects_symlink_template_path`
+- No existing tests are weakened or bypassed.
+- **Status**: COMPLIANT
+
+---
+
+## Conclusion & Verdict
+
+All 6 architectural pillars are satisfied with zero regressions and strict compliance with Zero-Trust invariants.
+
+```
+VALIDATION_VERDICT: APPROVED
+```

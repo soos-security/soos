@@ -909,17 +909,17 @@ The enrollment CLI uses incorrect model registry IDs (`face_detector` instead of
 
 #### Sub-issues
 
-- [ ] **#25.1** — Fix master key file creation to set permissions before writing
+- [x] **#25.1** — Fix master key file creation to set permissions before writing
   - Use `open()` with `O_CREAT | O_EXCL` and explicit mode `0600` rather than `File::create()` + `set_permissions()`
   - Acceptance: Key file is never world-readable, even momentarily
   - TDD: `test_master_key_created_with_0600_from_inception`
 
-- [ ] **#25.2** — Implement secure erasure in `BiometricStore::delete()`
+- [x] **#25.2** — Implement secure erasure in `BiometricStore::delete()`
   - Overwrite file contents with random bytes before unlinking (3-pass minimum)
   - Acceptance: Deleted template data is irrecoverable from disk sectors
   - TDD: `test_delete_securely_overwrites_before_unlink`
 
-- [ ] **#25.3** — Add symlink check in `BiometricStore::template_path()`
+- [x] **#25.3** — Add symlink check in `BiometricStore::template_path()`
   - Before reading or writing, verify path is not a symlink
   - Acceptance: Symlink traversal in biometric store directory is blocked
   - TDD: `test_biometric_store_rejects_symlink_template_path`

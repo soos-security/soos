@@ -21,7 +21,6 @@ use soos_vision::{
 use crate::args::{resolve_target_uid, Cli, DeleteArgs, EnrollArgs, ListArgs, VerifyArgs};
 use crate::error::EnrollmentCliError;
 use crate::quality::{select_best_frame, CandidateEvaluation};
-use crate::shred::secure_shred_file;
 
 /// Default master key path for biometric encryption.
 pub const DEFAULT_KEY_PATH: &str = "/var/lib/soos/master.key";
@@ -456,11 +455,6 @@ impl EnrollmentService {
 
         if !args.yes && !prompt_confirm(uid) {
             return Err(EnrollmentCliError::Cancelled);
-        }
-
-        let template_path = self.store.template_path(uid);
-        if template_path.exists() {
-            secure_shred_file(&template_path)?;
         }
 
         self.store.delete(uid)?;

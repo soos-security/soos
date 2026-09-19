@@ -120,6 +120,9 @@ This document translates the critical gating criteria from §11 of `ARCHITECTURE
 | B2 | Files under `/var/lib/soos/biometrics/<uid>`, mode `0600`, owner `root:root` | `permissions_tests::test_b2_permissions_and_atomic_writes`, `test_b2_master_key_file_permissions` | ☑ Validated |
 | B3 | `model_id` and version stored with each template | `metadata_tests::test_b3_metadata_tracking_and_model_migration_support` | ☑ Validated |
 | B4 | Template deletion and re-enrollment operational | `crud_tests::test_b4_full_crud_lifecycle` | ☑ Validated |
+| B5 | Master key created atomically with mode `0600` from inception (`O_CREAT \| O_EXCL`) | `permissions_tests::test_master_key_created_with_0600_from_inception` | ✅ Verified |
+| B6 | Anti-forensic secure erasure on template deletion (3-pass CSPRNG overwrite before unlinking) | `crud_tests::test_delete_securely_overwrites_before_unlink` | ✅ Verified |
+| B7 | Symlink traversal prevention on template and key paths | `crud_tests::test_biometric_store_rejects_symlink_template_path`, `permissions_tests::test_master_key_created_with_0600_from_inception` | ✅ Verified |
 
 ---
 

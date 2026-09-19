@@ -39,7 +39,7 @@ fn test_b2_permissions_and_atomic_writes() {
 
     store.enroll(&template).expect("enroll");
 
-    let file_path = store.template_path(1001);
+    let file_path = store.template_path(1001).expect("template path");
     assert!(file_path.exists());
 
     // File permissions must be 0600 (-rw-------)
@@ -76,4 +76,35 @@ fn test_b2_master_key_file_permissions() {
     // Reloading the same key preserves key bytes
     let reloaded = MasterKey::load_or_create(&key_path).expect("reload key");
     assert_eq!(key.as_bytes(), reloaded.as_bytes());
+}
+
+#[test]
+fn test_master_key_created_with_0600_from_inception() {
+    let tmp = TempDir::new().expect("tempdir");
+    let key_path = tmp.path().join("secure_master.key");
+
+    let key = MasterKey::load_or_create(&key_path).expect("load or create key");
+    assert!(key_path.exists());
+
+    let key_meta = std::fs::symlink_metadata(&key_path).expect("key metadata");
+    let key_mode = key_meta.permissions().mode() & 0o777;
+    assert_eq!(
+        key_mode, 0o600,
+        "master key file must be created with 0600 permissions from inception"
+    );
+    assert!(!key_meta.file_type().is_symlink());
+    assert_eq!(key.as_bytes().len(), 32);
+
+    // Symlink attack prevention: if key_path is a symlink, load_or_create must reject it
+    let symlink_dir = TempDir::new().expect("symlink dir");
+    let decoy_target = symlink_dir.path().join("decoy_target");
+    std::fs::write(&decoy_target, b"decoy").expect("write decoy");
+    let symlink_key_path = symlink_dir.path().join("symlink.key");
+    std::os::unix::fs::symlink(&decoy_target, &symlink_key_path).expect("create symlink");
+
+    let err = MasterKey::load_or_create(&symlink_key_path);
+    assert!(
+        err.is_err(),
+        "MasterKey::load_or_create must reject symlink path"
+    );
 }

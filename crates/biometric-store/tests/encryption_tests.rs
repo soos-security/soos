@@ -76,7 +76,7 @@ fn test_b1_file_on_disk_is_encrypted() {
 
     store.enroll(&template).expect("enroll");
 
-    let template_file = store.template_path(1000);
+    let template_file = store.template_path(1000).expect("template path");
     assert!(template_file.is_file());
 
     let raw_bytes = std::fs::read(&template_file).expect("read file");

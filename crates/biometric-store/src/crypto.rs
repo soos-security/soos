@@ -4,8 +4,9 @@ use crate::error::BiometricStoreError;
 use aes_gcm::aead::{Aead, KeyInit};
 use aes_gcm::{Aes256Gcm, Key, Nonce};
 use std::fmt;
-use std::fs::File;
+use std::fs::OpenOptions;
 use std::io::{Read, Write};
+use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
@@ -64,8 +65,22 @@ impl MasterKey {
     /// Loads an existing master key from disk or generates and saves a new one with mode `0600`.
     pub fn load_or_create<P: AsRef<Path>>(path: P) -> Result<Self, BiometricStoreError> {
         let path = path.as_ref();
+
+        // Reject symlinks targeting master key
+        if let Ok(meta) = std::fs::symlink_metadata(path) {
+            if meta.file_type().is_symlink() {
+                return Err(BiometricStoreError::InvalidPath(format!(
+                    "Master key path '{}' is a symlink; symlinks are forbidden for key files",
+                    path.display()
+                )));
+            }
+        }
+
         if path.exists() {
-            let mut file = File::open(path)?;
+            let mut file = OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_NOFOLLOW)
+                .open(path)?;
             let mut key_bytes = Vec::new();
             file.read_to_end(&mut key_bytes)?;
             let key = Self::from_slice(&key_bytes)?;
@@ -81,10 +96,18 @@ impl MasterKey {
             }
 
             let key = Self::generate()?;
-            let tmp_path = format!("{}.tmp.{}", path.display(), std::process::id());
+            let mut rand_bytes = [0u8; 8];
+            getrandom::fill(&mut rand_bytes)
+                .map_err(|e| BiometricStoreError::KeyError(format!("CSPRNG error: {e}")))?;
+            let rand_num = u64::from_ne_bytes(rand_bytes);
+            let tmp_path = format!("{}.tmp.{}.{}", path.display(), std::process::id(), rand_num);
             {
-                let mut tmp_file = File::create(&tmp_path)?;
-                std::fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(0o600))?;
+                // Atomically create file with O_CREAT | O_EXCL and explicit mode 0600
+                let mut tmp_file = OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .mode(0o600)
+                    .open(&tmp_path)?;
                 tmp_file.write_all(key.as_bytes())?;
                 tmp_file.sync_all()?;
             }

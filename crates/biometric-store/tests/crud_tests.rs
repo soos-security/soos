@@ -94,3 +94,117 @@ fn test_b4_full_crud_lifecycle() {
     let enrolled_after = store.list_enrolled().expect("list after delete");
     assert_eq!(enrolled_after, vec![1001, 1005]);
 }
+
+#[test]
+fn test_delete_securely_overwrites_before_unlink() {
+    let tmp = TempDir::new().expect("tempdir");
+    let key = MasterKey::generate().expect("key");
+    let store = BiometricStore::new(tmp.path(), key).expect("store");
+
+    let t = BiometricTemplate::new(
+        2001,
+        "facenet_v1".to_string(),
+        "1.0.0".to_string(),
+        1700000000,
+        Zeroizing::new(vec![0.42_f32; 128]),
+    )
+    .expect("template");
+    store.enroll(&t).expect("enroll");
+
+    let template_path = store.template_path(2001).expect("template path");
+    assert!(template_path.exists());
+
+    // Create a hard link to the template file. Hard links share the exact same inode and data blocks.
+    let hard_link = tmp.path().join("hardlink_probe.bin");
+    std::fs::hard_link(&template_path, &hard_link).expect("create hard link probe");
+
+    let original_bytes = std::fs::read(&hard_link).expect("read original bytes via probe");
+    assert!(!original_bytes.is_empty());
+    assert!(original_bytes.starts_with(b"SOOSBIO1"));
+
+    // Delete the template
+    let deleted = store.delete(2001).expect("delete must succeed");
+    assert!(deleted, "delete must return true for existing template");
+
+    // Template path must be unlinked
+    assert!(!template_path.exists(), "template path must be unlinked");
+    assert!(!store.exists(2001).expect("exists query"));
+
+    // The hard link probe still points to the same sectors: verify secure overwrite
+    let overwritten_bytes = std::fs::read(&hard_link).expect("read overwritten probe bytes");
+    assert_eq!(
+        overwritten_bytes.len(),
+        original_bytes.len(),
+        "file sectors must be overwritten in-place before unlinking"
+    );
+    assert_ne!(
+        overwritten_bytes, original_bytes,
+        "file content on disk must be completely overwritten before unlinking"
+    );
+    assert!(
+        !overwritten_bytes.starts_with(b"SOOSBIO1"),
+        "overwritten file must no longer contain the SOOSBIO1 magic header"
+    );
+}
+
+#[test]
+fn test_biometric_store_rejects_symlink_template_path() {
+    let tmp = TempDir::new().expect("tempdir");
+    let key = MasterKey::generate().expect("key");
+    let store = BiometricStore::new(tmp.path(), key).expect("store");
+
+    // 1. Target file simulation (/etc/shadow or decoy)
+    let decoy = tmp.path().join("decoy_secret.txt");
+    std::fs::write(&decoy, b"super_secret_payload").expect("write decoy");
+
+    // 2. Create symlink pointing to decoy at template path for UID 2002
+    let symlink_path = tmp.path().join("2002.cbor.enc");
+    std::os::unix::fs::symlink(&decoy, &symlink_path).expect("create symlink");
+
+    // template_path(2002) must reject the symlink
+    let res = store.template_path(2002);
+    assert!(
+        res.is_err(),
+        "template_path must return Err when path is a symlink"
+    );
+
+    // All CRUD operations for UID 2002 must fail closed
+    assert!(
+        store.exists(2002).is_err(),
+        "exists must fail on symlink template path"
+    );
+    assert!(
+        store.get(2002).is_err(),
+        "get must fail on symlink template path"
+    );
+    assert!(
+        store.delete(2002).is_err(),
+        "delete must fail on symlink template path"
+    );
+
+    let template = BiometricTemplate::new(
+        2002,
+        "facenet_v1".to_string(),
+        "1.0.0".to_string(),
+        1700000000,
+        Zeroizing::new(vec![0.7_f32; 128]),
+    )
+    .expect("template");
+    assert!(
+        store.enroll(&template).is_err(),
+        "enroll must fail on symlink template path"
+    );
+
+    // Decoy file must NOT have been modified or deleted
+    let decoy_content = std::fs::read_to_string(&decoy).expect("read decoy");
+    assert_eq!(decoy_content, "super_secret_payload");
+
+    // 3. Broken symlink (target does not exist) must also be rejected
+    let broken_symlink = tmp.path().join("2003.cbor.enc");
+    std::os::unix::fs::symlink("/tmp/nonexistent_target_soos_12345", &broken_symlink)
+        .expect("create broken symlink");
+    assert!(
+        store.template_path(2003).is_err(),
+        "template_path must reject broken symlinks"
+    );
+}

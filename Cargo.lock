@@ -1355,6 +1355,7 @@ dependencies = [
  "aes-gcm",
  "ciborium",
  "getrandom 0.3.4",
+ "libc",
  "proptest",
  "serde",
  "tempfile",
