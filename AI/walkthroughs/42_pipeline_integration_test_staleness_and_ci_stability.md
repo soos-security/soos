@@ -36,7 +36,10 @@
         }
     }
     ```
-  - Aborted background listener tasks in `test_12_5` and `test_12_6`.
+  - Aborted background listener tasks in `test_12_5`, `test_12_6`, and `test_12_7`.
+- **Tokio Multi-Thread Flavor & Resolution Optimization**:
+  - Configured `#[tokio::test(flavor = "multi_thread", worker_threads = 2)]` on multi-request integration tests to prevent single-threaded starvation between caller and server tasks.
+  - Adjusted camera resolution to 320x240 in test fixtures, reducing frame buffer allocation and affine transformation compute by 4x.
 - **Contractual Stale Frame Verification**:
   - Authored `test_12_7_frozen_camera_returns_unavailable_stale_frame`:
     Contractually asserts that freezing the camera and allowing 160ms (> `MAX_FRAME_AGE_NS`) to elapse deterministically returns `Verdict::Unavailable` with `ReasonClass::StaleFrame`.
