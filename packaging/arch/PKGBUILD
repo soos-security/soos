@@ -1,0 +1,42 @@
+# Maintainer: soos developers <dev@soos.local>
+# =============================================================================
+# packaging/arch/PKGBUILD — Arch Linux Package Recipe for soos
+# =============================================================================
+
+pkgname=soos
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Local facial biometric authentication PAM module and daemon for Linux"
+arch=('x86_64' 'aarch64')
+url="https://github.com/Mysticaly622/soos"
+license=('Apache-2.0' 'MIT')
+depends=('pam' 'systemd')
+makedepends=('cargo' 'rust' 'clang')
+install=soos.install
+source=()
+
+build() {
+    cargo build --release --workspace
+}
+
+package() {
+    # 1. Install binaries
+    install -Dm755 "target/release/soos-daemon" "${pkgdir}/usr/libexec/soos/soos-daemon"
+    install -Dm755 "target/release/soos-admin" "${pkgdir}/usr/bin/soos-admin"
+    install -Dm755 "target/release/soos-enroll" "${pkgdir}/usr/bin/soos-enroll"
+
+    # 2. Install PAM module
+    install -Dm644 "target/release/libpam_soos.so" "${pkgdir}/usr/lib/security/pam_soos.so"
+
+    # 3. Install systemd service unit
+    install -Dm644 "packaging/soos-daemon.service" "${pkgdir}/usr/lib/systemd/system/soos-daemon.service"
+
+    # 4. Install PAM configuration snippet
+    install -Dm644 "packaging/pam/arch/system-auth.snippet" "${pkgdir}/etc/pam.d/soos.snippet"
+
+    # 5. Provision persistent and runtime directory structures
+    install -dm755 "${pkgdir}/var/lib/soos"
+    install -dm700 "${pkgdir}/var/lib/soos/biometrics"
+    install -dm700 "${pkgdir}/var/lib/soos/evidence"
+    install -dm755 "${pkgdir}/var/lib/soos/models"
+}

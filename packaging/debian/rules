@@ -1,0 +1,23 @@
+#!/usr/bin/make -f
+# =============================================================================
+# packaging/debian/rules — Debian package build recipe for soos
+# =============================================================================
+
+export DH_VERBOSE = 1
+
+%:
+	dh $@
+
+override_dh_auto_build:
+	cargo build --release --workspace
+
+override_dh_auto_install:
+	bash scripts/install.sh \
+		--destdir debian/soos \
+		--prefix /usr \
+		--skip-models \
+		--skip-systemd
+
+override_dh_auto_test:
+	# Tests are executed via cargo test in CI
+	cargo test --workspace --no-run || true

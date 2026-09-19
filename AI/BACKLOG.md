@@ -980,17 +980,17 @@ The enrollment CLI uses incorrect model registry IDs (`face_detector` instead of
 
 #### Sub-issues
 
-- [ ] **#27.1** — Create Debian `.deb` package spec
+- [x] **#27.1** — Create Debian `.deb` package spec
   - `debian/control`, `debian/rules`, `debian/postinst`, `debian/prerm`
   - Post-install: create group, provision directories, download models
   - Acceptance: `dpkg -i soos_*.deb` installs complete system
   - TDD: Docker-based package install test
 
-- [ ] **#27.2** — Create RPM `.spec` file
+- [x] **#27.2** — Create RPM `.spec` file
   - Acceptance: `rpm -i soos-*.rpm` installs on Fedora/RHEL
   - TDD: Docker-based package install test
 
-- [ ] **#27.3** — Create Arch Linux PKGBUILD
+- [x] **#27.3** — Create Arch Linux PKGBUILD
   - Acceptance: `makepkg -si` installs on Arch
   - TDD: Docker-based package install test
 

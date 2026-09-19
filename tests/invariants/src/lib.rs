@@ -834,4 +834,257 @@ mod tests {
 
         let _ = fs::remove_dir_all(&tmp_dir);
     }
+
+    /// Invariant: Debian Packaging Specification (Sub-issue #27.1)
+    #[test]
+    fn test_debian_packaging_specification() {
+        let root = workspace_root();
+        let control_path = root.join("packaging/debian/control");
+        let rules_path = root.join("packaging/debian/rules");
+        let postinst_path = root.join("packaging/debian/postinst");
+        let prerm_path = root.join("packaging/debian/prerm");
+
+        assert!(control_path.exists(), "packaging/debian/control must exist");
+        assert!(rules_path.exists(), "packaging/debian/rules must exist");
+        assert!(
+            postinst_path.exists(),
+            "packaging/debian/postinst must exist"
+        );
+        assert!(prerm_path.exists(), "packaging/debian/prerm must exist");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let rules_meta = fs::metadata(&rules_path).expect("rules metadata");
+            assert_ne!(
+                rules_meta.permissions().mode() & 0o111,
+                0,
+                "packaging/debian/rules must be executable"
+            );
+
+            let postinst_meta = fs::metadata(&postinst_path).expect("postinst metadata");
+            assert_ne!(
+                postinst_meta.permissions().mode() & 0o111,
+                0,
+                "packaging/debian/postinst must be executable"
+            );
+
+            let prerm_meta = fs::metadata(&prerm_path).expect("prerm metadata");
+            assert_ne!(
+                prerm_meta.permissions().mode() & 0o111,
+                0,
+                "packaging/debian/prerm must be executable"
+            );
+        }
+
+        let control_content = fs::read_to_string(&control_path).expect("read control");
+        assert!(
+            control_content.contains("Package: soos"),
+            "control must declare Package: soos"
+        );
+        assert!(
+            control_content.contains("Architecture:"),
+            "control must declare Architecture"
+        );
+        assert!(
+            control_content.contains("pam"),
+            "control must specify PAM dependency"
+        );
+        assert!(
+            control_content.contains("systemd"),
+            "control must specify systemd dependency"
+        );
+
+        let postinst_content = fs::read_to_string(&postinst_path).expect("read postinst");
+        assert!(
+            postinst_content.contains("soos"),
+            "postinst must handle soos system group"
+        );
+        assert!(
+            postinst_content.contains("0700"),
+            "postinst must enforce mode 0700 on biometrics/evidence"
+        );
+        assert!(
+            postinst_content.contains("0750"),
+            "postinst must enforce mode 0750 on runtime dir"
+        );
+        assert!(
+            postinst_content.contains("master.key") && postinst_content.contains("0600"),
+            "postinst must generate/enforce master.key mode 0600"
+        );
+        assert!(
+            postinst_content.contains("pam-auth-update")
+                || postinst_content.contains("pam-configs"),
+            "postinst must configure Debian PAM stack"
+        );
+
+        let prerm_content = fs::read_to_string(&prerm_path).expect("read prerm");
+        assert!(
+            prerm_content.contains("soos-daemon.service"),
+            "prerm must stop/disable soos-daemon.service"
+        );
+    }
+
+    /// Invariant: RPM Packaging Specification (Sub-issue #27.2)
+    #[test]
+    fn test_rpm_packaging_specification() {
+        let root = workspace_root();
+        let spec_path = root.join("packaging/rpm/soos.spec");
+        assert!(spec_path.exists(), "packaging/rpm/soos.spec must exist");
+
+        let spec_content = fs::read_to_string(&spec_path).expect("read spec");
+        assert!(
+            spec_content.contains("Name: soos") || spec_content.contains("Name:\tsoos"),
+            "RPM spec must declare Name: soos"
+        );
+        assert!(
+            spec_content.contains("Requires:") && spec_content.contains("pam"),
+            "RPM spec must require pam"
+        );
+        assert!(
+            spec_content.contains("systemd"),
+            "RPM spec must specify systemd requirement or build requirement"
+        );
+        assert!(
+            spec_content.contains("%pre\n") || spec_content.contains("%pre "),
+            "RPM spec must include %pre scriptlet"
+        );
+        assert!(
+            spec_content.contains("%post\n") || spec_content.contains("%post "),
+            "RPM spec must include %post scriptlet"
+        );
+        assert!(
+            spec_content.contains("%preun\n") || spec_content.contains("%preun "),
+            "RPM spec must include %preun scriptlet"
+        );
+        assert!(
+            spec_content.contains("%files\n") || spec_content.contains("%files "),
+            "RPM spec must include %files section"
+        );
+
+        // Verify group creation in %pre
+        assert!(
+            spec_content.contains("groupadd") || spec_content.contains("getent group soos"),
+            "RPM spec %pre must create soos group"
+        );
+
+        // Verify directory and key permissions in %files or %post
+        assert!(
+            spec_content.contains("0700") && spec_content.contains("biometrics"),
+            "RPM spec must specify 0700 mode for biometrics"
+        );
+        assert!(
+            spec_content.contains("0600") && spec_content.contains("master.key"),
+            "RPM spec must specify 0600 mode for master key"
+        );
+        assert!(
+            spec_content.contains("0750") && spec_content.contains("soos"),
+            "RPM spec must specify 0750 mode for runtime socket directory"
+        );
+
+        // Verify authselect integration for Fedora
+        assert!(
+            spec_content.contains("authselect"),
+            "RPM spec must integrate with Fedora authselect"
+        );
+    }
+
+    /// Invariant: Arch Linux PKGBUILD Specification (Sub-issue #27.3)
+    #[test]
+    fn test_arch_packaging_specification() {
+        let root = workspace_root();
+        let pkgbuild_path = root.join("packaging/arch/PKGBUILD");
+        let install_path = root.join("packaging/arch/soos.install");
+
+        assert!(pkgbuild_path.exists(), "packaging/arch/PKGBUILD must exist");
+        assert!(
+            install_path.exists(),
+            "packaging/arch/soos.install must exist"
+        );
+
+        let pkgbuild_content = fs::read_to_string(&pkgbuild_path).expect("read PKGBUILD");
+        assert!(
+            pkgbuild_content.contains("pkgname=soos"),
+            "PKGBUILD must declare pkgname=soos"
+        );
+        assert!(
+            pkgbuild_content.contains("depends=") && pkgbuild_content.contains("pam"),
+            "PKGBUILD must depend on pam"
+        );
+        assert!(
+            pkgbuild_content.contains("install=soos.install"),
+            "PKGBUILD must specify install=soos.install"
+        );
+        assert!(
+            pkgbuild_content.contains("build()"),
+            "PKGBUILD must define build() function"
+        );
+        assert!(
+            pkgbuild_content.contains("package()"),
+            "PKGBUILD must define package() function"
+        );
+
+        let install_content = fs::read_to_string(&install_path).expect("read soos.install");
+        assert!(
+            install_content.contains("post_install()"),
+            "soos.install must define post_install()"
+        );
+        assert!(
+            install_content.contains("pre_remove()"),
+            "soos.install must define pre_remove()"
+        );
+        assert!(
+            install_content.contains("groupadd") || install_content.contains("getent group soos"),
+            "soos.install must create soos system group"
+        );
+        assert!(
+            install_content.contains("0700"),
+            "soos.install must enforce mode 0700 on biometrics/evidence"
+        );
+        assert!(
+            install_content.contains("master.key") && install_content.contains("0600"),
+            "soos.install must provision master.key with mode 0600"
+        );
+    }
+
+    /// Invariant: Distribution Package Build Scripts Executable & CLI Help
+    #[test]
+    fn test_package_build_scripts_executable_and_help() {
+        let root = workspace_root();
+        let deb_script = root.join("scripts/build_deb.sh");
+        let rpm_script = root.join("scripts/build_rpm.sh");
+        let arch_script = root.join("scripts/build_arch.sh");
+        let pkg_script = root.join("scripts/build_packages.sh");
+
+        assert!(deb_script.exists(), "scripts/build_deb.sh must exist");
+        assert!(rpm_script.exists(), "scripts/build_rpm.sh must exist");
+        assert!(arch_script.exists(), "scripts/build_arch.sh must exist");
+        assert!(pkg_script.exists(), "scripts/build_packages.sh must exist");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            for script in [&deb_script, &rpm_script, &arch_script, &pkg_script] {
+                let meta = fs::metadata(script).expect("script metadata");
+                assert_ne!(
+                    meta.permissions().mode() & 0o111,
+                    0,
+                    "script {:?} must be executable",
+                    script.file_name()
+                );
+            }
+        }
+
+        // Test running scripts/build_packages.sh --help
+        let status = std::process::Command::new("bash")
+            .arg(&pkg_script)
+            .arg("--help")
+            .status()
+            .expect("execute build_packages.sh --help");
+
+        assert!(
+            status.success(),
+            "build_packages.sh --help must exit successfully"
+        );
+    }
 }

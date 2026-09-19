@@ -1,0 +1,74 @@
+#!/bin/sh
+# =============================================================================
+# packaging/debian/postinst — Debian post-installation hook for soos
+# =============================================================================
+set -e
+
+case "$1" in
+    configure)
+        # 1. Create system group 'soos' if absent
+        if ! getent group soos >/dev/null 2>&1; then
+            if command -v addgroup >/dev/null 2>&1; then
+                addgroup --system soos
+            elif command -v groupadd >/dev/null 2>&1; then
+                groupadd -r soos
+            fi
+        fi
+
+        # 2. Provision directory hierarchy with invariant permissions
+        mkdir -p /var/lib/soos/biometrics
+        mkdir -p /var/lib/soos/evidence
+        mkdir -p /var/lib/soos/models
+        mkdir -p /run/soos
+        mkdir -p /usr/libexec/soos
+
+        chmod 0755 /var/lib/soos
+        chmod 0700 /var/lib/soos/biometrics
+        chmod 0700 /var/lib/soos/evidence
+        chmod 0755 /var/lib/soos/models
+        chmod 0750 /run/soos
+
+        if [ "$(id -u)" -eq 0 ]; then
+            chown root:root /var/lib/soos
+            chown root:root /var/lib/soos/biometrics
+            chown root:root /var/lib/soos/evidence
+            chown root:root /var/lib/soos/models
+            chown root:soos /run/soos || chown root:root /run/soos
+        fi
+
+        # 3. Generate cryptographic master key (32 bytes, mode 0600) if absent
+        MASTER_KEY="/var/lib/soos/master.key"
+        if [ ! -f "$MASTER_KEY" ]; then
+            if command -v openssl >/dev/null 2>&1; then
+                openssl rand 32 > "$MASTER_KEY"
+            else
+                head -c 32 /dev/urandom > "$MASTER_KEY"
+            fi
+            chmod 0600 "$MASTER_KEY"
+            if [ "$(id -u)" -eq 0 ]; then
+                chown root:root "$MASTER_KEY"
+            fi
+        fi
+
+        # 4. Integrate PAM configuration via pam-auth-update if present
+        if command -v pam-auth-update >/dev/null 2>&1; then
+            pam-auth-update --package --enable soos soos-notify || true
+        fi
+
+        # 5. Reload and enable systemd service if systemd is active
+        if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
+            systemctl daemon-reload || true
+            systemctl enable soos-daemon.service || true
+        fi
+        ;;
+
+    abort-upgrade|abort-remove|abort-deconfigure)
+        ;;
+
+    *)
+        echo "postinst called with unknown argument \`$1'" >&2
+        exit 1
+        ;;
+esac
+
+exit 0
