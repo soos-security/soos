@@ -111,7 +111,7 @@ fn test_cli_global_options() {
         "/tmp/soos/models",
         "--camera-device",
         "/dev/video2",
-        "--skip-root-check",
+        "--mock",
         "list",
     ];
     let cli = Cli::try_parse_from(args).expect("Failed to parse global args");
@@ -129,5 +129,5 @@ fn test_cli_global_options() {
         "/tmp/soos/models"
     );
     assert_eq!(cli.camera_device.unwrap().to_str().unwrap(), "/dev/video2");
-    assert!(cli.skip_root_check);
+    assert!(cli.mock);
 }

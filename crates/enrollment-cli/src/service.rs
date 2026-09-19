@@ -21,7 +21,10 @@ use soos_vision::{
     cosine_similarity, PipelineOutput, VisionError, VisionPipeline, VisionPipelineConfig,
 };
 
-use crate::args::{resolve_target_uid, Cli, DeleteArgs, EnrollArgs, ListArgs, VerifyArgs};
+use crate::args::{
+    resolve_target_uid, validate_camera_device_path, validate_fhs_path, Cli, DeleteArgs,
+    EnrollArgs, ListArgs, VerifyArgs,
+};
 use crate::error::EnrollmentCliError;
 use crate::quality::{select_best_frame, CandidateEvaluation};
 
@@ -332,6 +335,8 @@ impl EnrollmentService {
         &self,
         args: &VerifyArgs,
     ) -> Result<DiagnosticVerificationReport, EnrollmentCliError> {
+        check_privileges(self.require_root)?;
+
         let pipeline = self
             .pipeline
             .as_ref()
@@ -466,6 +471,8 @@ impl EnrollmentService {
 
     /// Lists all currently enrolled UIDs and metadata.
     pub fn list(&self, _args: &ListArgs) -> Result<Vec<EnrolledUserSummary>, EnrollmentCliError> {
+        check_privileges(self.require_root)?;
+
         let uids = self.store.list_enrolled()?;
         let mut summaries = Vec::with_capacity(uids.len());
 
@@ -497,38 +504,50 @@ impl EnrollmentService {
 /// Defers camera hardware access and ONNX model loading, making it safe and fast
 /// for read-only / administrative commands (`list`, `delete`).
 pub fn build_store_only(cli: &Cli) -> Result<EnrollmentService, EnrollmentCliError> {
-    let key_path = cli
+    let raw_key_path = cli
         .key_file
         .clone()
         .unwrap_or_else(|| PathBuf::from(DEFAULT_KEY_PATH));
-    let key = MasterKey::load_or_create(&key_path)?;
+    let key_path = validate_fhs_path(&raw_key_path)?;
 
-    let bio_dir = cli
+    let raw_bio_dir = cli
         .biometrics_dir
         .clone()
         .unwrap_or_else(|| PathBuf::from(DEFAULT_BIOMETRICS_DIR));
+    let bio_dir = validate_fhs_path(&raw_bio_dir)?;
+
+    let key = MasterKey::load_or_create(&key_path)?;
     let store = Arc::new(BiometricStore::new(bio_dir, key)?);
 
-    Ok(EnrollmentService::new_store_only(
-        store,
-        !cli.skip_root_check,
-    ))
+    Ok(EnrollmentService::new_store_only(store, true))
 }
 
 /// Builds a full `EnrollmentService` with camera hardware streaming and all 4 ONNX models.
 ///
 /// Required for biometric capture and comparison commands (`enroll`, `verify`).
 pub fn build_full_service(cli: &Cli) -> Result<EnrollmentService, EnrollmentCliError> {
-    let key_path = cli
+    let raw_key_path = cli
         .key_file
         .clone()
         .unwrap_or_else(|| PathBuf::from(DEFAULT_KEY_PATH));
-    let key = MasterKey::load_or_create(&key_path)?;
+    let key_path = validate_fhs_path(&raw_key_path)?;
 
-    let bio_dir = cli
+    let raw_bio_dir = cli
         .biometrics_dir
         .clone()
         .unwrap_or_else(|| PathBuf::from(DEFAULT_BIOMETRICS_DIR));
+    let bio_dir = validate_fhs_path(&raw_bio_dir)?;
+
+    let raw_camera = resolve_camera_device(cli.camera_device.clone());
+    let device_path = validate_camera_device_path(&raw_camera)?;
+
+    let raw_models_dir = cli
+        .models_dir
+        .clone()
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_MODELS_DIR));
+    let models_dir = validate_fhs_path(&raw_models_dir)?;
+
+    let key = MasterKey::load_or_create(&key_path)?;
     let store = Arc::new(BiometricStore::new(bio_dir, key)?);
 
     if cli.mock {
@@ -550,22 +569,12 @@ pub fn build_full_service(cli: &Cli) -> Result<EnrollmentService, EnrollmentCliE
             extractor,
             pipeline_config,
         ));
-        return Ok(EnrollmentService::new(
-            store,
-            camera,
-            pipeline,
-            !cli.skip_root_check,
-        ));
+        return Ok(EnrollmentService::new(store, camera, pipeline, true));
     }
 
-    let device_path = resolve_camera_device(cli.camera_device.clone());
     let camera_config = CameraConfigBuilder::new().device_path(device_path).build();
     let camera: Arc<dyn CameraManager> = Arc::new(V4lCameraManager::spawn(camera_config)?);
 
-    let models_dir = cli
-        .models_dir
-        .clone()
-        .unwrap_or_else(|| PathBuf::from(DEFAULT_MODELS_DIR));
     let mut registry = ModelRegistry::new(RegistryConfig::new(models_dir))?;
     registry.verify_integrity()?;
 
@@ -588,12 +597,7 @@ pub fn build_full_service(cli: &Cli) -> Result<EnrollmentService, EnrollmentCliE
         pipeline_config,
     ));
 
-    Ok(EnrollmentService::new(
-        store,
-        camera,
-        pipeline,
-        !cli.skip_root_check,
-    ))
+    Ok(EnrollmentService::new(store, camera, pipeline, true))
 }
 
 /// Builds an `EnrollmentService` (full service alias for backward compatibility).

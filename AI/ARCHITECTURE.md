@@ -252,11 +252,15 @@ soos/
 ```ini
 [Service]
 User=root
-Group=root
+Group=soos
 ExecStart=/usr/libexec/soos/soos-daemon
 Restart=on-failure
 RestartSec=2
 UMask=0077
+RuntimeDirectory=soos
+RuntimeDirectoryMode=0750
+StateDirectory=soos
+StateDirectoryMode=0755
 NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectHome=yes

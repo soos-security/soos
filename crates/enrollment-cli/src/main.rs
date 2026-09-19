@@ -13,7 +13,7 @@ use clap::Parser;
 
 use soos_enrollment_cli::args::{Cli, Commands, OutputFormat};
 use soos_enrollment_cli::error::EnrollmentCliError;
-use soos_enrollment_cli::{build_full_service, build_store_only};
+use soos_enrollment_cli::{build_full_service, build_store_only, check_privileges};
 use soos_protocol::Verdict;
 
 fn prompt_stdin(prompt: &str) -> bool {
@@ -29,6 +29,7 @@ fn prompt_stdin(prompt: &str) -> bool {
 }
 
 fn run() -> Result<(), EnrollmentCliError> {
+    check_privileges(true)?;
     let cli = Cli::parse();
 
     match &cli.command {

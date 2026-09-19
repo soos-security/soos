@@ -158,7 +158,6 @@ fn test_delete_command_works_with_store_only() {
         key_file: Some(key_file),
         models_dir: Some(temp.path().join("nonexistent_models")),
         camera_device: Some(std::path::PathBuf::from("/dev/nonexistent_camera")),
-        skip_root_check: true,
         mock: false,
         command: soos_enrollment_cli::args::Commands::Delete(DeleteArgs {
             uid: Some(4000),
@@ -169,15 +168,19 @@ fn test_delete_command_works_with_store_only() {
 
     let service = soos_enrollment_cli::build_store_only(&cli)
         .expect("build_store_only must succeed without camera or models");
+    assert!(!service.is_full_service(), "Service should be store-only");
 
     let delete_args = DeleteArgs {
         uid: Some(4000),
         username: None,
         yes: true,
     };
-    let deleted = service
-        .delete(&delete_args, |_| true)
-        .expect("Delete must succeed with store-only service");
-    assert!(deleted);
-    assert!(!store.exists(4000).unwrap());
+    let res = service.delete(&delete_args, |_| true);
+    if nix::unistd::geteuid().is_root() {
+        let deleted = res.expect("Delete must succeed with store-only service");
+        assert!(deleted);
+        assert!(!store.exists(4000).unwrap());
+    } else {
+        assert!(matches!(res, Err(EnrollmentCliError::RootRequired)));
+    }
 }

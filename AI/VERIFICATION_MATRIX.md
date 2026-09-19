@@ -163,6 +163,8 @@ This document translates the critical gating criteria from §11 of `ARCHITECTURE
 | EN7 | Model registry ID attestation matching `models/manifest.toml` (`ultraface_slim_320`, `landmark_5point`, `mobilefacenet_arcface`, `minifasnet_pad`) | Model ID attestation test | ✅ Verified (`test_enrollment_cli_model_ids_match_manifest`) |
 | EN8 | Lazy initialization: non-biometric commands (`list`, `delete`) execute store-only without camera or neural models | Lazy init test | ✅ Verified (`test_list_command_works_without_camera_or_models`, `test_delete_command_works_with_store_only`) |
 | EN9 | Deterministic hardware camera addressing defaulting to `/dev/v4l/by-id/` (Criterion C4) | Hardware path resolution test | ✅ Verified (`test_camera_device_path_uses_stable_by_id`) |
+| EN10 | Strict path validation and sanitization: blocks parent directory traversal (`..`), mandates absolute paths, enforces standard FHS prefixes, and restricts camera devices to `/dev/` | Path validation tests | ✅ Verified (`test_sanitize_path_blocks_parent_dir_traversal`, `test_sanitize_path_blocks_relative_paths`, `test_validate_fhs_path_allows_valid_system_directories`, `test_validate_fhs_path_rejects_non_fhs_locations`, `test_validate_camera_device_path_requires_dev`, `test_build_store_only_rejects_traversal_paths`, `test_build_full_service_rejects_non_dev_camera`) |
+| EN11 | Subcommand root privilege enforcement & CLI bypass elimination: removal of `--skip-root-check` and systematic EUID 0 validation across `enroll`, `verify`, `delete`, and `list` | Privilege enforcement tests | ✅ Verified (`test_verify_subcommand_enforces_root_privileges`, `test_list_subcommand_enforces_root_privileges`, `test_delete_subcommand_enforces_root_privileges`, `test_cli_rejects_skip_root_check_argument`) |
 
 ---
 
@@ -198,7 +200,7 @@ This document translates the critical gating criteria from §11 of `ARCHITECTURE
 |---|---|---|---|
 | H1 | Memory zeroization: `BiometricEmbedding`, `Frame`, and `PipelineOutput` wipe sensitive vectors and camera pixel buffers on drop | Unit tests (`zeroize_tests::test_biometric_embedding_zeroize_trait`, `frame_zeroize_tests::test_frame_zeroize_trait`) | ✅ Verified |
 | H2 | Swap protection: `mlock(2)` and `mlockall(2)` page locking prevents sensitive keys and embedding vectors from being paged to disk/swap | Integration tests (`hardening_tests::test_mlock_slice_and_munlock_slice_lifecycle`, `test_locked_buffer_raii_wrapper`, `test_mlock_process_address_space_call`) | ✅ Verified |
-| H3 | Systemd sandboxing validation: verifies all security directives in `soos-daemon.service` (`MemoryDenyWriteExecute`, `RestrictSUIDSGID`, `SystemCallArchitectures=native`) | Unit & integration tests (`systemd_test::test_systemd_unit_file_sandboxing_directives`, `hardening_tests::test_systemd_hardening_directives_complete`) | ✅ Verified |
+| H3 | Systemd sandboxing validation: verifies all security directives in `soos-daemon.service` (`MemoryDenyWriteExecute`, `RestrictSUIDSGID`, `SystemCallArchitectures=native`, `Group=soos`, `StateDirectory=soos`) | Unit & integration tests (`systemd_test::test_systemd_unit_file_sandboxing_directives`, `hardening_tests::test_systemd_hardening_directives_complete`) | ✅ Verified |
 | H4 | Supply chain audit: `cargo-deny` enforces license compliance, zero vulnerabilities, and blocks duplicate dependencies (`multiple-versions = "deny"`) | Integration tests (`hardening_tests::test_cargo_deny_bans_duplicate_versions`, `cargo deny check`) | ✅ Verified |
 
 ---

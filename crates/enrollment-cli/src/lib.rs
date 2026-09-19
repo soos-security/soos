@@ -14,7 +14,10 @@ pub mod quality;
 pub mod service;
 pub mod shred;
 
-pub use args::{Cli, Commands, DeleteArgs, EnrollArgs, ListArgs, OutputFormat, VerifyArgs};
+pub use args::{
+    sanitize_path, validate_camera_device_path, validate_fhs_path, Cli, Commands, DeleteArgs,
+    EnrollArgs, ListArgs, OutputFormat, VerifyArgs, ALLOWED_FHS_PREFIXES,
+};
 pub use error::EnrollmentCliError;
 pub use quality::{select_best_frame, BestCandidate, CandidateEvaluation};
 pub use service::{

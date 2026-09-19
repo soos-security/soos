@@ -1187,9 +1187,9 @@ The `pam_sm_authenticate` entry point parses arguments outside `catch_unwind`, r
 
 #### Sub-issues
 
-- [ ] **#35.1** — Remove `--skip-root-check` and enforce `check_privileges` on all subcommands
-- [ ] **#35.2** — Validate `PathBuf` arguments against FHS paths or sanitize them
-- [ ] **#35.3** — Fix systemd `StateDirectory` and correct `Group=soos` ownership in `soos-daemon.service`
+- [x] **#35.1** — Remove `--skip-root-check` and enforce `check_privileges` on all subcommands
+- [x] **#35.2** — Validate `PathBuf` arguments against FHS paths or sanitize them
+- [x] **#35.3** — Fix systemd `StateDirectory` and correct `Group=soos` ownership in `soos-daemon.service`
 
 ---
 

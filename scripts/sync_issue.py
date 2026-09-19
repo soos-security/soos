@@ -99,6 +99,7 @@ BRANCH_TO_ISSUE = {
     "test/distro-validation": 32,
     "fix/policy-hardening": 33,
     "fix/pam-ffi-timeout": 34,
+    "fix/cli-security": 35,
 }
 
 

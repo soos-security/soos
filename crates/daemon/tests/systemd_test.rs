@@ -34,16 +34,17 @@ fn test_systemd_unit_file_sandboxing_directives() {
 
     let content = fs::read_to_string(&service_file).expect("Failed to read unit file");
 
-    // Acceptance D3: Verify all systemd sandbox directives are explicitly enabled
+    // Acceptance D3 & Issue #35.3: Verify all systemd sandbox directives are explicitly enabled
     let mandatory_directives = [
         "User=root",
-        "Group=root",
+        "Group=soos",
         "ExecStart=/usr/libexec/soos/soos-daemon",
         "Restart=on-failure",
         "RestartSec=2",
         "UMask=0077",
         "RuntimeDirectory=soos",
         "RuntimeDirectoryMode=0750",
+        "StateDirectory=soos",
         "ReadWritePaths=/var/lib/soos /run/soos",
         "NoNewPrivileges=yes",
         "PrivateTmp=yes",
@@ -66,4 +67,9 @@ fn test_systemd_unit_file_sandboxing_directives() {
             service_file.display()
         );
     }
+
+    assert!(
+        !content.contains("Group=root"),
+        "SECURITY INVARIANT VIOLATION: soos-daemon.service must run under Group=soos, not Group=root"
+    );
 }

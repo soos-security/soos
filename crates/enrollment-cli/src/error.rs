@@ -63,4 +63,7 @@ pub enum EnrollmentCliError {
 
     #[error("Nix system error: {0}")]
     Nix(#[from] nix::Error),
+
+    #[error("Invalid path or path traversal attempt: {0}")]
+    InvalidPath(String),
 }
