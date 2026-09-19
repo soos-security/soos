@@ -17,6 +17,7 @@ use soos_admin_cli::logs::fetch_and_filter_logs;
 use soos_admin_cli::redact::DefaultRedactionFilter;
 use soos_admin_cli::status::query_status;
 use soos_admin_cli::test_pam::simulate_pam_auth;
+use soos_admin_cli::user::add_user_to_soos_group;
 use soos_protocol::types::Verdict;
 
 fn run() -> Result<(), AdminCliError> {
@@ -66,6 +67,11 @@ fn run() -> Result<(), AdminCliError> {
             let filter = DefaultRedactionFilter;
             let mut stdout = io::stdout();
             fetch_and_filter_logs(args, &filter, &mut stdout)?;
+        }
+
+        Commands::AddUser(args) => {
+            add_user_to_soos_group(&args.username)?;
+            println!("[OK] User '{}' added to 'soos' group.", args.username);
         }
     }
 

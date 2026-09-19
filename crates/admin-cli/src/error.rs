@@ -40,6 +40,18 @@ pub enum AdminCliError {
     /// Journal log retrieval error.
     #[error("failed to retrieve logs: {0}")]
     Logs(String),
+
+    /// Invalid username format.
+    #[error("invalid username '{0}': must follow POSIX naming rules and not exceed 32 characters")]
+    InvalidUsername(String),
+
+    /// User does not exist on the system.
+    #[error("user '{0}' does not exist on this system")]
+    UserNotFound(String),
+
+    /// Execution failure for administrative user provisioning command.
+    #[error("failed to execute user provisioning command: {0}")]
+    CommandFailed(String),
 }
 
 impl From<getrandom::Error> for AdminCliError {

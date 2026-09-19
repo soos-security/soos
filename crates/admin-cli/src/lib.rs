@@ -13,10 +13,15 @@ pub mod logs;
 pub mod redact;
 pub mod status;
 pub mod test_pam;
+pub mod user;
 
-pub use args::{Cli, Commands, LogsArgs, OutputFormat, StatusArgs, TestPamArgs};
+pub use args::{AddUserArgs, Cli, Commands, LogsArgs, OutputFormat, StatusArgs, TestPamArgs};
 pub use error::AdminCliError;
 pub use logs::fetch_and_filter_logs;
 pub use redact::{default_redact, RedactionFilter};
 pub use status::{query_status, DaemonStatusReport};
 pub use test_pam::{simulate_pam_auth, PamTestReport};
+pub use user::{
+    add_user_to_group, add_user_to_group_with_runner, add_user_to_soos_group, validate_username,
+    DEFAULT_SOOS_GROUP,
+};

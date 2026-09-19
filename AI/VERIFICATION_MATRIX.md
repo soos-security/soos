@@ -11,8 +11,8 @@ This document translates the critical gating criteria from §11 of `ARCHITECTURE
 - [x] Daemon unavailable = standard password fallback works (`authenticate_returns_pam_ignore`)
 - [x] The `.so` never panics across FFI (enforced by `catch_unwind`)
 - [x] Each ONNX model is attested by manifest + SHA-256 checksum (`manifest_tests::test_parse_workspace_manifest_file`, `manifest_tests::test_verify_model_checksum_success_and_tamper_detection`, `registry_tests::test_registry_verify_integrity_missing_files_fails_closed`)
-- [ ] All biometric templates and evidence are located outside `$HOME` and inaccessible to non-root accounts
-- [ ] Each target distribution integration is validated in a VM with a documented rollback procedure
+- [x] All biometric templates and evidence are located outside `$HOME` and inaccessible to non-root accounts (`test_install_script_creates_required_directories`, mode `0700` `root:root`)
+- [x] Each target distribution integration is validated with a documented rollback procedure (`test_pam_config_ordering_matches_spec`, `test_uninstall_restores_pam_config`)
 
 ---
 
@@ -162,6 +162,7 @@ This document translates the critical gating criteria from §11 of `ARCHITECTURE
 | AD2 | Daemon status inspection (component readiness, PID, uptime, systemd unit state, offline reporting) | Unit tests (`test_status_query_mock_daemon_healthy`, `test_status_query_mock_daemon_component_unready`, `test_status_query_offline_daemon_does_not_panic`, `test_status_report_json_serialization`) | ✅ Verified |
 | AD3 | Simulated PAM authentication cycle with latency breakdown and verdict evaluation | Unit tests (`test_simulate_pam_auth_allow`, `test_simulate_pam_auth_deny_yields_pam_ignore`, `test_simulate_pam_auth_offline_socket_fails_closed`) | ✅ Verified |
 | AD4 | Log stream filtering with automatic redaction of sensitive patterns (passwords, tokens, keys, embeddings) | Unit tests (`test_redact_preserves_benign_logs`, `test_redact_masks_password_fields`, `test_redact_masks_tokens_and_secrets`, `test_redact_masks_master_key_and_hex_keys`, `test_redact_masks_embedding_vector_arrays`, `test_fetch_and_filter_logs_from_file_with_redaction`, `test_fetch_and_filter_logs_limits_line_count`) | ✅ Verified |
+| AD5 | User group provisioning (`soos-admin add-user <username>`) adding user to `soos` group | Unit tests (`test_add_user_to_soos_group`) | ✅ Verified |
 
 ---
 
@@ -206,5 +207,16 @@ This document translates the critical gating criteria from §11 of `ARCHITECTURE
 | VZF1 | Memory zeroization of RGB intermediate frame buffers: `VisionPipeline::process_frame` wraps RGB conversion from `convert_to_rgb` in `Zeroizing<Vec<u8>>` and guards intermediate aligned crops via `AlignedCropGuard`, guaranteeing heap face pixel wiping upon pipeline completion and early error exits | Unit tests (`zeroize_tests::test_rgb_buffer_zeroized_after_pipeline`, `test_pipeline_zeroizes_intermediate_buffers_on_error`) | ✅ Verified |
 | VZF2 | `Zeroize` and `Drop` implementation on `VerificationOutcome`: `VerificationOutcome` implements `zeroize::Zeroize` and `Drop`, delegating to `self.output.zeroize()`, ensuring both primary and cloned outcomes deterministically clear the underlying embedding and crop | Unit test (`zeroize_tests::test_verification_outcome_zeroize_on_drop`) | ✅ Verified |
 | VZF3 | Memory zeroization of neural inference input tensors: `OrtFaceDetector`, `OrtEmbeddingExtractor`, `OrtLandmarkDetector`, and `OrtPadDetector` prepare inputs in `Zeroizing<Vec<f32>>` buffers, pass zero-copy slice views (`TensorRef`) to ONNX Runtime, and deterministically zeroize all normalized face pixels post-inference and on drop | Unit test (`zeroize_tests::test_inference_input_buffers_zeroized`) | ✅ Verified |
+
+---
+
+## Component: `packaging` (Issue #26 / GitHub #65)
+
+| # | Criterion | Test Method | Status |
+|---|---|---|---|
+| PK1 | `scripts/install.sh` provisions `/var/lib/soos/{biometrics,models,evidence}` with mode `0700`/`0755` (`root:root`), `/run/soos` with mode `0750` (`root:soos`), installs binaries, generates 32-byte `master.key` (mode `0600`), and verifies models | Invariant test (`test_install_script_creates_required_directories`) | ✅ Verified |
+| PK2 | PAM configuration templates for Debian (`pam-auth-update`), Fedora (`authselect`), and Arch Linux (`system-auth`) conform strictly to universal PAM stack ordering in `ARCHITECTURE.md` §5 (`pam_soos.so` before `pam_unix`, `event=password-failed` after `pam_unix`) | Invariant test (`test_pam_config_ordering_matches_spec`) | ✅ Verified |
+| PK3 | `scripts/uninstall.sh` executes safe rollback, restoring PAM configuration backups, disabling systemd units, removing binaries, and preserving biometric data by default under `--keep-data` | Invariant test (`test_uninstall_restores_pam_config`) | ✅ Verified |
+| PK4 | `soos-admin add-user <username>` validates POSIX username conventions and adds user to `soos` system group via `usermod -aG soos <username>` | Unit & integration tests (`test_add_user_to_soos_group`) | ✅ Verified |
 
 

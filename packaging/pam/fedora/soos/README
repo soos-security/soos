@@ -1,0 +1,9 @@
+soos authselect profile
+========================
+Custom authselect profile integrating soos facial biometric authentication
+with standard system-auth and password-auth stacks.
+
+Stack ordering strictly conforms to ARCHITECTURE.md §5:
+1. pam_soos.so is called with [success=done default=ignore] timeout_ms=250 before pam_unix.so.
+2. pam_unix.so performs standard password verification.
+3. pam_soos.so event=password-failed timeout_ms=20 is invoked only upon pam_unix failure.

@@ -1,0 +1,9 @@
+Name: soos Local Facial Biometric Authentication
+Default: yes
+Priority: 260
+Conflicts:
+Auth-Type: Primary
+Auth:
+	[success=done default=ignore]	pam_soos.so timeout_ms=250
+Auth-Initial:
+	[success=done default=ignore]	pam_soos.so timeout_ms=250

@@ -579,4 +579,259 @@ mod tests {
             }
         }
     }
+
+    /// Invariant: PAM Configuration Ordering Matches Spec (Sub-issue #26.2)
+    /// Validates that Debian, Fedora, and Arch PAM configurations place pam_soos.so
+    /// before pam_unix, and password-failed event handler after pam_unix.
+    #[test]
+    fn test_pam_config_ordering_matches_spec() {
+        let root = workspace_root();
+
+        // 1. Debian pam-auth-update profiles
+        let debian_soos = root.join("packaging/pam/debian/soos");
+        let debian_notify = root.join("packaging/pam/debian/soos-notify");
+        assert!(debian_soos.exists(), "packaging/pam/debian/soos must exist");
+        assert!(
+            debian_notify.exists(),
+            "packaging/pam/debian/soos-notify must exist"
+        );
+
+        let deb_soos_content = fs::read_to_string(&debian_soos).expect("read debian soos");
+        let deb_notify_content = fs::read_to_string(&debian_notify).expect("read debian notify");
+
+        assert!(deb_soos_content.contains("pam_soos.so timeout_ms=250"));
+        assert!(
+            deb_soos_content.contains("Priority: 260") || deb_soos_content.contains("Priority: 26")
+        );
+        assert!(deb_notify_content.contains("pam_soos.so event=password-failed timeout_ms=20"));
+        assert!(
+            deb_notify_content.contains("Priority: 128")
+                || deb_notify_content.contains("Priority: 12")
+        );
+
+        // 2. Fedora authselect profile
+        let fedora_system_auth = root.join("packaging/pam/fedora/soos/system-auth");
+        assert!(
+            fedora_system_auth.exists(),
+            "packaging/pam/fedora/soos/system-auth must exist"
+        );
+        let fedora_content =
+            fs::read_to_string(&fedora_system_auth).expect("read fedora system-auth");
+
+        let soos_pos = fedora_content
+            .find("pam_soos.so timeout_ms=250")
+            .expect("soos auth in fedora");
+        let unix_pos = fedora_content
+            .find("pam_unix.so")
+            .expect("unix auth in fedora");
+        let fail_pos = fedora_content
+            .find("pam_soos.so event=password-failed")
+            .expect("failed auth in fedora");
+        assert!(
+            soos_pos < unix_pos,
+            "soos must appear before pam_unix in Fedora PAM stack"
+        );
+        assert!(
+            unix_pos < fail_pos,
+            "password-failed handler must appear after pam_unix in Fedora PAM stack"
+        );
+
+        // 3. Arch Linux system-auth and snippet
+        let arch_system_auth = root.join("packaging/pam/arch/system-auth");
+        let arch_snippet = root.join("packaging/pam/arch/system-auth.snippet");
+        assert!(
+            arch_system_auth.exists(),
+            "packaging/pam/arch/system-auth must exist"
+        );
+        assert!(
+            arch_snippet.exists(),
+            "packaging/pam/arch/system-auth.snippet must exist"
+        );
+
+        let arch_content = fs::read_to_string(&arch_system_auth).expect("read arch system-auth");
+        let arch_soos_pos = arch_content
+            .find("pam_soos.so timeout_ms=250")
+            .expect("soos auth in arch");
+        let arch_unix_pos = arch_content.find("pam_unix.so").expect("unix auth in arch");
+        let arch_fail_pos = arch_content
+            .find("pam_soos.so event=password-failed")
+            .expect("failed auth in arch");
+        assert!(
+            arch_soos_pos < arch_unix_pos,
+            "soos must appear before pam_unix in Arch PAM stack"
+        );
+        assert!(
+            arch_unix_pos < arch_fail_pos,
+            "password-failed handler must appear after pam_unix in Arch PAM stack"
+        );
+
+        let snippet_content = fs::read_to_string(&arch_snippet).expect("read arch snippet");
+        assert!(snippet_content
+            .contains("auth  [success=done default=ignore]  pam_soos.so timeout_ms=250"));
+        assert!(snippet_content.contains(
+            "auth  optional                       pam_soos.so event=password-failed timeout_ms=20"
+        ));
+    }
+
+    /// Invariant: Install Script Creates Required Directories (Sub-issue #26.1)
+    #[test]
+    fn test_install_script_creates_required_directories() {
+        let root = workspace_root();
+        let install_sh = root.join("scripts/install.sh");
+        assert!(install_sh.exists(), "scripts/install.sh must exist");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let metadata = fs::metadata(&install_sh).expect("metadata of install.sh");
+            assert_ne!(
+                metadata.permissions().mode() & 0o111,
+                0,
+                "scripts/install.sh must be executable"
+            );
+        }
+
+        // Test running install.sh with --destdir into a temporary directory
+        let tmp_dir =
+            std::env::temp_dir().join(format!("soos_install_test_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp_dir);
+        fs::create_dir_all(&tmp_dir).expect("create tmp_dir");
+
+        let status = std::process::Command::new("bash")
+            .arg(&install_sh)
+            .arg("--destdir")
+            .arg(&tmp_dir)
+            .arg("--skip-models")
+            .arg("--skip-systemd")
+            .status()
+            .expect("execute install.sh");
+
+        assert!(
+            status.success(),
+            "install.sh must exit successfully with --destdir"
+        );
+
+        // Verify required directory hierarchy and permissions
+        let biometrics_dir = tmp_dir.join("var/lib/soos/biometrics");
+        let evidence_dir = tmp_dir.join("var/lib/soos/evidence");
+        let models_dir = tmp_dir.join("var/lib/soos/models");
+        let libexec_dir = tmp_dir.join("usr/libexec/soos");
+        let master_key = tmp_dir.join("var/lib/soos/master.key");
+
+        assert!(
+            biometrics_dir.is_dir(),
+            "biometrics directory must be created"
+        );
+        assert!(evidence_dir.is_dir(), "evidence directory must be created");
+        assert!(models_dir.is_dir(), "models directory must be created");
+        assert!(libexec_dir.is_dir(), "libexec directory must be created");
+        assert!(master_key.is_file(), "master.key must be created");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let bio_meta = fs::metadata(&biometrics_dir).expect("biometrics meta");
+            assert_eq!(
+                bio_meta.permissions().mode() & 0o777,
+                0o700,
+                "biometrics dir must be mode 0700"
+            );
+
+            let ev_meta = fs::metadata(&evidence_dir).expect("evidence meta");
+            assert_eq!(
+                ev_meta.permissions().mode() & 0o777,
+                0o700,
+                "evidence dir must be mode 0700"
+            );
+
+            let key_meta = fs::metadata(&master_key).expect("master.key meta");
+            assert_eq!(
+                key_meta.permissions().mode() & 0o777,
+                0o600,
+                "master.key must be mode 0600"
+            );
+            assert_eq!(key_meta.len(), 32, "master.key must be 32 bytes");
+        }
+
+        let _ = fs::remove_dir_all(&tmp_dir);
+    }
+
+    /// Invariant: Uninstall Restores PAM Config and Cleans Up (Sub-issue #26.3)
+    #[test]
+    fn test_uninstall_restores_pam_config() {
+        let root = workspace_root();
+        let uninstall_sh = root.join("scripts/uninstall.sh");
+        assert!(uninstall_sh.exists(), "scripts/uninstall.sh must exist");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let metadata = fs::metadata(&uninstall_sh).expect("metadata of uninstall.sh");
+            assert_ne!(
+                metadata.permissions().mode() & 0o111,
+                0,
+                "scripts/uninstall.sh must be executable"
+            );
+        }
+
+        let tmp_dir =
+            std::env::temp_dir().join(format!("soos_uninstall_test_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp_dir);
+        let bio_dir = tmp_dir.join("var/lib/soos/biometrics");
+        let bin_file = tmp_dir.join("usr/bin/soos-admin");
+        let service_file = tmp_dir.join("etc/systemd/system/soos-daemon.service");
+        let backup_pam = tmp_dir.join("etc/pam.d/system-auth.soos-backup");
+        let active_pam = tmp_dir.join("etc/pam.d/system-auth");
+
+        fs::create_dir_all(&bio_dir).expect("create bio_dir");
+        fs::create_dir_all(tmp_dir.join("usr/bin")).expect("create bin dir");
+        fs::create_dir_all(tmp_dir.join("etc/systemd/system")).expect("create systemd dir");
+        fs::create_dir_all(tmp_dir.join("etc/pam.d")).expect("create pam.d dir");
+
+        fs::write(&bin_file, b"binary content").expect("write bin");
+        fs::write(&service_file, b"unit content").expect("write service");
+        fs::write(
+            &backup_pam,
+            b"# Original PAM config\nauth required pam_unix.so\n",
+        )
+        .expect("write backup pam");
+        fs::write(&active_pam, b"# Modified PAM config\nauth pam_soos.so\n")
+            .expect("write active pam");
+        fs::write(tmp_dir.join("var/lib/soos/master.key"), vec![0u8; 32]).expect("write key");
+
+        // Run uninstall.sh with --destdir and --keep-data
+        let status = std::process::Command::new("bash")
+            .arg(&uninstall_sh)
+            .arg("--destdir")
+            .arg(&tmp_dir)
+            .arg("--keep-data")
+            .arg("--skip-systemd")
+            .status()
+            .expect("execute uninstall.sh");
+
+        assert!(status.success(), "uninstall.sh must succeed");
+        assert!(!bin_file.exists(), "binary must be removed");
+        assert!(!service_file.exists(), "service file must be removed");
+        assert!(
+            bio_dir.exists(),
+            "biometric data must be kept when --keep-data is specified"
+        );
+        assert!(
+            tmp_dir.join("var/lib/soos/master.key").exists(),
+            "master.key kept with --keep-data"
+        );
+
+        // Verify PAM restoration from backup
+        let restored_content = fs::read_to_string(&active_pam).expect("read restored pam");
+        assert!(
+            restored_content.contains("auth required pam_unix.so"),
+            "PAM backup must be restored"
+        );
+        assert!(
+            !restored_content.contains("pam_soos.so"),
+            "pam_soos must be gone after restoration"
+        );
+
+        let _ = fs::remove_dir_all(&tmp_dir);
+    }
 }

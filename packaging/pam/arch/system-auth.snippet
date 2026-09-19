@@ -1,0 +1,11 @@
+# =============================================================================
+# soos Local Facial Biometric PAM Snippet (ARCHITECTURE.md §5)
+# Place immediately BEFORE standard pam_unix line in /etc/pam.d/system-auth
+# =============================================================================
+auth  [success=done default=ignore]  pam_soos.so timeout_ms=250
+
+# Note: The standard pam_unix line should be configured as:
+# auth  [success=done default=bad]     pam_unix.so try_first_pass
+
+# Password failure event handler (reached only if pam_unix fails)
+auth  optional                       pam_soos.so event=password-failed timeout_ms=20
