@@ -12,7 +12,7 @@ use zeroize::{Zeroize, Zeroizing};
 
 use crate::error::InferenceError;
 
-/// High-dimensional facial biometric embedding vector (e.g. 128D or 512D) with automatic memory zeroization.
+/// High-dimensional facial biometric embedding vector (e.g. 512D w600k or 128D) with automatic memory zeroization.
 #[derive(Debug, Clone, PartialEq, Zeroize)]
 pub struct BiometricEmbedding {
     vector: Zeroizing<Vec<f32>>,
@@ -136,7 +136,7 @@ pub trait EmbeddingExtractor: Send + Sync {
 use ort::session::Session;
 use std::sync::{Arc, Mutex};
 
-/// MobileFaceNet ArcFace feature extractor backed by an ONNX Runtime session.
+/// ArcFace w600k (512D) feature extractor backed by an ONNX Runtime session.
 pub struct OrtEmbeddingExtractor {
     session: Arc<Mutex<Session>>,
 }
@@ -182,9 +182,9 @@ impl OrtEmbeddingExtractor {
                     aligned_crop_rgb.get(src_idx + 1),
                     aligned_crop_rgb.get(src_idx + 2),
                 ) {
-                    let norm_r = (r as f32 - 127.5) / 128.0;
-                    let norm_g = (g as f32 - 127.5) / 128.0;
-                    let norm_b = (b as f32 - 127.5) / 128.0;
+                    let norm_r = (r as f32 - 127.5) / 127.5;
+                    let norm_g = (g as f32 - 127.5) / 127.5;
+                    let norm_b = (b as f32 - 127.5) / 127.5;
 
                     let r_idx = y * target_size + x;
                     let g_idx = target_size * target_size + y * target_size + x;

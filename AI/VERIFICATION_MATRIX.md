@@ -300,3 +300,12 @@ This document translates the critical gating criteria from §11 of `ARCHITECTURE
 |---|---|---|---|
 | NGM6 | `OrtLandmarkDetector` removed from `soos-inference-ort`; `FaceLandmarks`, `Point2f`, and `LandmarkDetector` trait preserved | Unit tests (`landmarks_tests::test_point2f_geometry_and_distance`, `landmarks_tests::test_face_landmarks_array_conversion_and_geometry`, `landmarks_tests::test_landmark_detector_trait_mock_dispatch`) | ✅ Verified |
 
+---
+
+## Component: `embedding-512d-w600k` (Issue #39 / GitHub #105)
+
+| # | Criterion | Test Method | Status |
+|---|---|---|---|
+| NGM7 | `OrtEmbeddingExtractor` uses symmetric `[-1.0, +1.0]` normalization `(pixel - 127.5) / 127.5` and `MockEmbeddingExtractor` produces 512D vectors by default | Unit tests (`embedding_tests::test_embedding_normalization_symmetric_range`, `embedding_tests::test_mock_embedding_default_512d`) | ✅ Verified |
+
+

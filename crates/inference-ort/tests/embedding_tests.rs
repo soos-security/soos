@@ -11,7 +11,9 @@
     reason = "Contractual test suite utilizes direct assertions, unwrap, and indexing"
 )]
 
-use soos_inference_ort::embedding::{BiometricEmbedding, EmbeddingExtractor};
+use soos_inference_ort::embedding::{
+    BiometricEmbedding, EmbeddingExtractor, OrtEmbeddingExtractor,
+};
 use soos_inference_ort::error::InferenceError;
 use soos_inference_ort::mock::MockEmbeddingExtractor;
 
@@ -134,4 +136,79 @@ fn test_mock_embedding_extractor_criterion_v2() {
         }
         other => panic!("Expected InvalidBufferSize, got: {:?}", other),
     }
+}
+
+#[test]
+fn test_embedding_normalization_symmetric_range() {
+    // Test input with pixel values 0, 127, 128, and 255
+    let width = 112u32;
+    let height = 112u32;
+    let mut pixels = vec![0u8; (width * height * 3) as usize];
+    // First pixel: R=0, G=127, B=255
+    pixels[0] = 0;
+    pixels[1] = 127;
+    pixels[2] = 255;
+
+    // Last pixel: R=255, G=128, B=0
+    let last_idx = ((width * height * 3) - 3) as usize;
+    pixels[last_idx] = 255;
+    pixels[last_idx + 1] = 128;
+    pixels[last_idx + 2] = 0;
+
+    let input_tensor = OrtEmbeddingExtractor::prepare_input(&pixels, width, height)
+        .expect("prepare_input must succeed");
+
+    // Pixel value 0 must normalize to exactly -1.0: (0.0 - 127.5) / 127.5 == -1.0
+    let norm_0 = input_tensor[0];
+    assert!(
+        (norm_0 - (-1.0)).abs() < 1e-6,
+        "Pixel value 0 must normalize to -1.0, got: {norm_0}"
+    );
+
+    // Pixel value 255 must normalize to exactly +1.0: (255.0 - 127.5) / 127.5 == +1.0
+    let norm_255 = input_tensor[2 * (width * height) as usize]; // B channel for pixel 0
+    assert!(
+        (norm_255 - 1.0).abs() < 1e-6,
+        "Pixel value 255 must normalize to +1.0, got: {norm_255}"
+    );
+
+    // Pixel value 127: (127.0 - 127.5) / 127.5 = -0.5 / 127.5
+    // Pixel value 128: (128.0 - 127.5) / 127.5 = +0.5 / 127.5
+    let norm_127 = input_tensor[(width * height) as usize]; // G channel for pixel 0
+    let norm_128 = input_tensor[(width * height) as usize + (width * height - 1) as usize]; // G channel for last pixel
+    assert!(
+        (norm_127 + norm_128).abs() < 1e-6,
+        "Values around 127.5 must be anti-symmetric, got norm_127={norm_127}, norm_128={norm_128}"
+    );
+}
+
+#[test]
+fn test_mock_embedding_default_512d() {
+    let mock_default = MockEmbeddingExtractor::default();
+    assert_eq!(mock_default.dim(), 512);
+
+    let dummy_112x112 = vec![120u8; 112 * 112 * 3];
+    let emb = mock_default
+        .extract_embedding(&dummy_112x112, 112, 112)
+        .expect("extraction failed");
+
+    assert_eq!(
+        emb.len(),
+        512,
+        "Mock embedding extractor must produce 512D vectors by default for ArcFace w600k"
+    );
+
+    let norm = emb.l2_norm();
+    assert!(
+        (norm - 1.0).abs() < 1e-5,
+        "Criterion V2 invariant failed: norm is {}",
+        norm
+    );
+
+    let mock_new_default = MockEmbeddingExtractor::new_default();
+    assert_eq!(mock_new_default.dim(), 512);
+    let emb_new_default = mock_new_default
+        .extract_embedding(&dummy_112x112, 112, 112)
+        .expect("extraction failed");
+    assert_eq!(emb_new_default.len(), 512);
 }
