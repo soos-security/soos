@@ -1,74 +1,76 @@
-# Plan Evaluation Report — Issue #35: fix(cli): Remove root bypass and enforce path validation
+# Plan Evaluation Report — Issue #36: [manifest] Download and Attest Next-Generation ONNX Models
 
-- **Date**: 2026-09-19
-- **Target Issue**: Issue #35 (Sub-issues #35.1, #35.2, #35.3)
-- **Target Branch**: `fix/cli-security`
-- **Evaluator**: Plan Evaluator Sub-Agent (Autonomous Gate)
-
----
-
-## 1. Executive Summary
-
-This plan addresses critical security hygiene in `soos-enroll` (`crates/enrollment-cli`) and daemon systemd sandboxing (`packaging/soos-daemon.service`). Specifically:
-1. Completely removes the hidden CLI bypass flag `--skip-root-check` from argument parsing (`Cli`), eliminating arbitrary unprivileged elevation pathways in production.
-2. Systematically enforces EUID 0 root privilege verification (`check_privileges`) across all 4 administrative subcommands: `enroll`, `verify`, `delete`, and `list` (previously omitted on `verify` and `list`).
-3. Introduces strict path validation and sanitization (`sanitize_path`, `validate_fhs_path`, `validate_camera_device_path`), rejecting directory traversal (`..`), relative paths, and non-FHS boundaries for biometric directory, master key, neural models, and camera device arguments.
-4. Hardens `packaging/soos-daemon.service` by assigning daemon group ownership to `Group=soos` (aligning with `/run/soos/` mode 0750 IPC socket directory) and declaring `StateDirectory=soos` with `StateDirectoryMode=0755` for automated `/var/lib/soos` provisioning.
+**Evaluation Date**: 2026-09-20  
+**Target Issue**: Issue #36 (`feat/nextgen-models-manifest`, GitHub #102)  
+**Evaluator**: Plan Evaluator Sub-Agent (Dev-Workflow Phase 1.5)  
+**Scope**: `models/manifest.toml`, `scripts/download_models.sh`, `models/README.md`, `crates/inference-ort/tests/manifest_tests.rs`, `crates/enrollment-cli/tests/model_id_tests.rs`
 
 ---
 
-## 2. Six-Pillar Architectural Audit
+## 1. Context & Architectural References
+
+- **Master Architecture**: `AI/ARCHITECTURE.md` §7 (Models & Verification Pipeline)
+- **ADR Register**: `AI/DECISIONS.md` [2026-09-20 Next-Generation AI Models]
+- **Backlog & Sub-issues**: `AI/BACKLOG.md` Issue #36 (Sub-issues #36.1 to #36.6)
+- **Verification Matrix**: `AI/VERIFICATION_MATRIX.md` criteria `NGM1`, `NGM2`
+- **Modernization Walkthrough**: `AI/walkthroughs/53_nextgen_model_migration_architecture.md` §2
+
+---
+
+## 2. Evaluation Across 6 Core Pillars
 
 ### Pillar 1: Architectural Alignment & Threat Model
-- **Evaluation**: PASS
-- **Rationale**:
-  - `soos-enroll` is an administrative tool operating directly on root-restricted persistent state in `/var/lib/soos/` (biometric vectors, cryptographic master keys). An unprivileged attacker must not be able to bypass root checks using hidden CLI flags or traverse outside permitted FHS hierarchies.
-  - Enforcing EUID 0 on `verify` and `list` closes the information disclosure hole where non-root callers could enumerate enrolled UIDs or verify against enrolled templates.
-  - Setting `Group=soos` in `soos-daemon.service` complies with `AI/ARCHITECTURE.md` §4 and §10 where IPC socket files are owned by `root:soos` (mode 0660).
-  - Adding `StateDirectory=soos` leverages standard systemd directory lifecycle management for persistent state under `/var/lib/soos`.
+- **Evaluation**: The plan establishes cryptographic attestation for the modernized 3-model neural pipeline:
+  1. `scrfd_500m_kps` (unified face detection and 5-point landmark regression, 640×640 BGR)
+  2. `arcface_w600k_mbf` (512D biometric embedding extraction, 112×112 RGB)
+  3. `minifasnet_v2_pad` (presentation attack detection, 80×80 BGR)
+- **Zero-Trust Security**: No neural model weights are bundled into git. All models are fetched from authenticated sources and attested strictly via SHA-256 digests in `models/manifest.toml`. Tampered or uncataloged models are rejected fail-closed before loading into ORT sessions.
+- **Verdict**: Compliant.
 
-### Pillar 2: PAM Real-Time Deadlines & Concurrency
-- **Evaluation**: PASS
-- **Rationale**:
-  - The changes are strictly confined to `enrollment-cli`, `packaging/soos-daemon.service`, and `daemon/tests/systemd_test.rs`.
-  - Zero modifications to `crates/pam`, ensuring zero impact on PAM real-time deadline budgets (200–250ms) or asynchronous runtime prohibition.
+### Pillar 2: PAM Real-Time Latency & Concurrency
+- **Evaluation**: Manifest attestation and model deployment occur offline during setup and installation (`scripts/download_models.sh`), as well as during daemon initialization. No network calls or unbounded operations occur in the PAM module pathway (`pam_soos.so`).
+- **Verdict**: Compliant.
 
 ### Pillar 3: Panic Safety & Fail-Closed Behavior
-- **Evaluation**: PASS
-- **Rationale**:
-  - All path sanitization and privilege checking functions return typed `Result<T, EnrollmentCliError>`.
-  - No `unwrap()` or `expect()` is introduced into library or binary production code.
-  - Path traversal attempts, relative paths, or disallowed FHS prefixes fail closed with typed `EnrollmentCliError::InvalidPath`.
-  - Missing root privileges fail closed immediately with `EnrollmentCliError::RootRequired`.
+- **Evaluation**: Manifest parsing uses `ModelManifest::from_file()` and `from_toml_str()` which return strongly-typed `Result<Self, InferenceError>`. In case of corrupted TOML, missing model files, or SHA-256 mismatches, the system returns `InferenceError::ManifestParse`, `InferenceError::ModelNotFound`, or `InferenceError::ChecksumMismatch`. Zero `unwrap()` or `expect()` in production library code.
+- **Verdict**: Compliant.
 
 ### Pillar 4: Dependency Isolation & Banned Crates
-- **Evaluation**: PASS
-- **Rationale**:
-  - No new external crates are introduced. Path validation uses standard library `std::path::{Component, Path, PathBuf}`.
-  - Business crate invariant `#![forbid(unsafe_code)]` remains strictly enforced in `crates/enrollment-cli`.
-  - Prohibition against OpenCV and nokhwa remains 100% intact.
+- **Evaluation**: Retains `#![forbid(unsafe_code)]` in all business crates. Uses `sha2` crate for cryptographic hashing. Zero OpenCV or Nokhwa dependencies introduced. Standard POSIX permissions (`0644` files, `0755` directories) maintained.
+- **Verdict**: Compliant.
 
 ### Pillar 5: Data Confidentiality & Zeroization
-- **Evaluation**: PASS
-- **Rationale**:
-  - Biometric embeddings and master keys remain strictly protected under `/var/lib/soos/` with mode `0600` / `0700`.
-  - Path sanitization prevents attackers from directing key creation or template deletion to unintended system paths (e.g. `/etc/shadow`, `/boot`).
-  - Sensitive buffers continue to use `Zeroizing` as established in previous phases.
+- **Evaluation**: Manifest metadata contains only public model properties (ID, filename, SHA-256 digest, license, source URL, tensor dimensions). No sensitive biometric templates, embeddings, or keys are exposed or logged.
+- **Verdict**: Compliant.
 
-### Pillar 6: Test Integrity & Acceptance Criteria
-- **Evaluation**: PASS
-- **Rationale**:
-  - Contractual test suite in Phase 2 will author explicit negative tests:
-    - Rejection of `--skip-root-check` CLI argument.
-    - Privilege enforcement on all 4 subcommands (`enroll`, `verify`, `delete`, `list`).
-    - Traversal rejection (`..`), non-absolute path rejection, and camera path restriction.
-    - Systemd unit verification for `Group=soos` and `StateDirectory=soos`.
-  - Acceptance criteria EN1, EN2, EN8, and H3 are fully respected and strengthened.
+### Pillar 6: Test Integrity & TDD Contracts
+- **Evaluation**: Contractual tests for `NGM1` and `NGM2` are authored in Phase 2 before production changes. The test suite verifies:
+  1. Manifest parsing of version `2.0.0` with exactly 3 models (`test_parse_workspace_manifest_file`, `test_manifest_v2_model_count_and_checksum_attestation`).
+  2. Input and output tensor shape integrity.
+  3. Model download script verification under `--dry-run` and live verification.
+  4. Non-weakening preservation of existing regression tests.
+- **Verdict**: Compliant.
 
 ---
 
-## 3. Formal Conclusion & Autonomous Clearance
+## 3. Plan Specification Summary
 
-The implementation plan satisfies all zero-trust architectural invariants, security guidelines, and backlog requirements for Issue #35.
+1. **Manifest (`models/manifest.toml`)**:
+   - Manifest version bumped to `"2.0.0"`.
+   - Replaces 4 obsolete models with 3 modern models:
+     - `scrfd_500m_kps` (SHA-256: `a3562ef62592bf387f6ef19151282ac127518e51c77696e62e0661bee95ba1ad`)
+     - `arcface_w600k_mbf` (SHA-256: `ffe014a45c9488506719d37fd578ece6661bb385535b36e8039975fa5d4683db`)
+     - `minifasnet_v2_pad` (SHA-256: `0cbe5caec95c31de9d2ef845cb85407d76aecd1b6a2c0e343f7d35306bfbccb8`)
+2. **Download Script (`scripts/download_models.sh`)**:
+   - Updates model definitions and source URLs.
+   - Enforces SHA-256 verification and atomic deployment to `/var/lib/soos/models/`.
+3. **Documentation (`models/README.md`)**:
+   - Updates model documentation, preprocessing specifications, licenses, and lineage.
+4. **Test Suite (`crates/inference-ort/tests/manifest_tests.rs`)**:
+   - Updates `test_parse_workspace_manifest_file` to test v2.0.0 specification and validates exact count of 3 models.
+
+---
+
+## 4. Formal Verdict
 
 **VALIDATION_VERDICT: APPROVED**

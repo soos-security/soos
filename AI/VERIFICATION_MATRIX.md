@@ -271,3 +271,13 @@ This document translates the critical gating criteria from §11 of `ARCHITECTURE
 | PFT1 | FFI Panic Safety: All exported PAM entry points (`pam_sm_authenticate`, `pam_sm_setcred`, `pam_sm_acct_mgmt`, `pam_sm_chauthtok`, `pam_sm_open_session`, `pam_sm_close_session`) and argument parsing (`parse_argv`, `parse_cstrs`) are wrapped in `catch_unwind` and systematically return `PAM_IGNORE` on panic | Unit & integration tests (`test_c_abi_all_entry_points_panic_safe`, `authenticate_catches_parse_argv_panics`, `panic_safety_returns_pam_ignore`) | ✅ Verified |
 | PFT2 | Non-blocking IPC connect timeout: `connect_with_timeout` uses POSIX `poll` to enforce configured latency budget (`timeout_ms`), preventing unbounded blocking on frozen daemon sockets | Integration test (`ipc_tests::test_ipc_connect_timeout_frozen_daemon`) | ✅ Verified |
 | PFT3 | Memory Zeroization: `Request` and `Event` implement `zeroize::Zeroize` and `Drop`, and temporary IPC buffers (`request_id`, `encoded`, `full_buf`) are scrubbed on drop | Unit & integration test (`ipc_tests::test_request_and_event_zeroize_on_drop`) | ✅ Verified |
+
+---
+
+## Component: `nextgen-models-manifest` (Issue #36 / GitHub #102)
+
+| # | Criterion | Test Method | Status |
+|---|---|---|---|
+| NGM1 | `models/manifest.toml` v2.0.0 contains exactly 3 model entries (`scrfd_500m_kps`, `arcface_w600k_mbf`, `minifasnet_v2_pad`) with valid SHA-256 checksums and tensor shapes | Manifest parsing test (`manifest_tests::test_parse_workspace_manifest_file`, `manifest_tests::test_manifest_v2_model_count_and_checksum_attestation`) | ✅ Verified |
+| NGM2 | All 3 ONNX model files download successfully and pass cryptographic SHA-256 verification and dry-run validation | Script test (`scripts/download_models.sh --dry-run`, `scripts/download_models.sh --check-only`) | ✅ Verified |
+

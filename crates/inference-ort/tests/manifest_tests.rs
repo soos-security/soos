@@ -36,39 +36,119 @@ fn test_parse_workspace_manifest_file() {
     );
 
     let manifest = ModelManifest::from_file(&manifest_path).expect("Failed to parse manifest.toml");
-    assert_eq!(manifest.manifest.version, "1.0.0");
-
-    let ultraface = manifest
-        .get_model("ultraface_slim_320")
-        .expect("ultraface_slim_320 missing");
-    assert_eq!(ultraface.filename, "version-slim-320.onnx");
-    assert_eq!(ultraface.license, "MIT");
-    assert_eq!(ultraface.input_shape, vec![1, 3, 240, 320]);
+    assert_eq!(manifest.manifest.version, "2.0.0");
     assert_eq!(
-        ultraface.output_shapes,
-        vec![vec![1, 4420, 2], vec![1, 4420, 4]]
+        manifest.models.len(),
+        3,
+        "Manifest v2.0.0 must contain exactly 3 models"
     );
 
-    let landmark = manifest
-        .get_model("landmark_5point")
-        .expect("landmark_5point missing");
-    assert_eq!(landmark.filename, "landmark_5point.onnx");
-    assert_eq!(landmark.input_shape, vec![1, 3, 112, 112]);
+    // 1. SCRFD 500M KPS
+    let scrfd = manifest
+        .get_model("scrfd_500m_kps")
+        .expect("scrfd_500m_kps missing from manifest");
+    assert_eq!(scrfd.filename, "scrfd_500m_kps.onnx");
+    assert_eq!(scrfd.license, "MIT");
+    assert_eq!(scrfd.input_shape, vec![1, 3, 640, 640]);
+    assert_eq!(
+        scrfd.output_shapes,
+        vec![
+            vec![1, 12800, 1],
+            vec![1, 3200, 1],
+            vec![1, 800, 1],
+            vec![1, 12800, 4],
+            vec![1, 3200, 4],
+            vec![1, 800, 4],
+            vec![1, 12800, 10],
+            vec![1, 3200, 10],
+            vec![1, 800, 10],
+        ]
+    );
+    assert_eq!(
+        scrfd.sha256,
+        "a3562ef62592bf387f6ef19151282ac127518e51c77696e62e0661bee95ba1ad"
+    );
 
-    let mobilefacenet = manifest
-        .get_model("mobilefacenet_arcface")
-        .expect("mobilefacenet_arcface missing");
-    assert_eq!(mobilefacenet.filename, "mobilefacenet_arcface.onnx");
-    assert_eq!(mobilefacenet.input_shape, vec![1, 3, 112, 112]);
-    assert_eq!(mobilefacenet.output_shapes, vec![vec![1, 128]]);
+    // 2. ArcFace w600k MBF
+    let arcface = manifest
+        .get_model("arcface_w600k_mbf")
+        .expect("arcface_w600k_mbf missing from manifest");
+    assert_eq!(arcface.filename, "arcface_w600k_mbf.onnx");
+    assert_eq!(arcface.license, "MIT");
+    assert_eq!(arcface.input_shape, vec![1, 3, 112, 112]);
+    assert_eq!(arcface.output_shapes, vec![vec![1, 512]]);
+    assert_eq!(
+        arcface.sha256,
+        "ffe014a45c9488506719d37fd578ece6661bb385535b36e8039975fa5d4683db"
+    );
 
+    // 3. MiniFASNetV2 PAD
     let pad = manifest
-        .get_model("minifasnet_pad")
-        .expect("minifasnet_pad missing");
-    assert_eq!(pad.filename, "minifasnet_pad.onnx");
+        .get_model("minifasnet_v2_pad")
+        .expect("minifasnet_v2_pad missing from manifest");
+    assert_eq!(pad.filename, "minifasnet_v2_80x80.onnx");
     assert_eq!(pad.license, "Apache-2.0");
-    assert_eq!(pad.input_shape, vec![1, 3, 112, 112]);
+    assert_eq!(pad.input_shape, vec![1, 3, 80, 80]);
     assert_eq!(pad.output_shapes, vec![vec![1, 3]]);
+    assert_eq!(
+        pad.sha256,
+        "0cbe5caec95c31de9d2ef845cb85407d76aecd1b6a2c0e343f7d35306bfbccb8"
+    );
+
+    // Ensure legacy models are strictly removed
+    assert!(
+        manifest.get_model("ultraface_slim_320").is_none(),
+        "ultraface_slim_320 must be removed in manifest v2.0.0"
+    );
+    assert!(
+        manifest.get_model("landmark_5point").is_none(),
+        "landmark_5point must be removed in manifest v2.0.0"
+    );
+    assert!(
+        manifest.get_model("mobilefacenet_arcface").is_none(),
+        "mobilefacenet_arcface must be removed in manifest v2.0.0"
+    );
+    assert!(
+        manifest.get_model("minifasnet_pad").is_none(),
+        "minifasnet_pad must be removed in manifest v2.0.0"
+    );
+}
+
+#[test]
+fn test_manifest_v2_model_count_and_checksum_attestation() {
+    let manifest_path = workspace_models_dir().join("manifest.toml");
+    let manifest = ModelManifest::from_file(&manifest_path).expect("Failed to parse manifest.toml");
+
+    assert_eq!(manifest.manifest.version, "2.0.0");
+    assert_eq!(manifest.models.len(), 3);
+
+    for (id, meta) in &manifest.models {
+        assert_eq!(
+            &meta.id, id,
+            "Model table key must match internal id for {id}"
+        );
+        assert!(
+            !meta.filename.is_empty(),
+            "Filename must not be empty for {id}"
+        );
+        assert_eq!(
+            meta.sha256.len(),
+            64,
+            "SHA-256 digest must be 64 characters for {id}"
+        );
+        assert!(
+            meta.sha256.chars().all(|c| c.is_ascii_hexdigit()),
+            "SHA-256 digest must be hex characters for {id}"
+        );
+        assert!(
+            !meta.source_url.is_empty(),
+            "Source URL must not be empty for {id}"
+        );
+        assert!(
+            !meta.description.is_empty(),
+            "Description must not be empty for {id}"
+        );
+    }
 }
 
 #[test]

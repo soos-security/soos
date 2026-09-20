@@ -164,6 +164,15 @@ resolve_download_url() {
 
     # Known upstream direct download locations
     case "${model_id}" in
+        scrfd_500m_kps)
+            echo "https://huggingface.co/ykk648/face_lib/resolve/main/face_detect/scrfd_onnx/scrfd_500m_bnkps.onnx"
+            ;;
+        arcface_w600k_mbf)
+            echo "https://huggingface.co/garavv/arcface-onnx/resolve/main/arc.onnx"
+            ;;
+        minifasnet_v2_pad)
+            echo "https://github.com/QingHeYang/Silent-Face-Anti-Spoofing-onnx/raw/main/onnx/2.7_80x80_MiniFASNetV2.onnx"
+            ;;
         ultraface_slim_320)
             echo "https://raw.githubusercontent.com/Linzaer/Ultra-Light-Fast-Generic-Face-Detector-1MB/master/models/onnx/version-slim-320.onnx"
             ;;
