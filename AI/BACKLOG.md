@@ -1482,7 +1482,7 @@ MiniFASNetV2 has three critical differences from the current MiniFASNet: input s
 
 #### Sub-issues
 
-- [ ] **#40.1** — Update `OrtPadDetector::prepare_input()` for 80×80 BGR input
+- [x] **#40.1** — Update `OrtPadDetector::prepare_input()` for 80×80 BGR input
   - Change `target_size` from 112 to 80
   - Change normalization from `(pixel - 127.5) / 128.0` to `pixel / 255.0`
   - Swap channel ordering: write B→channel 0, G→channel 1, R→channel 2
@@ -1490,14 +1490,14 @@ MiniFASNetV2 has three critical differences from the current MiniFASNet: input s
   - Acceptance: Input tensor matches MiniFASNetV2 expected format
   - TDD: `test_pad_prepare_input_80x80_bgr`, `test_pad_normalization_0_1_range`
 
-- [ ] **#40.2** — Add configurable `live_class_index` to `OrtPadDetector`
+- [x] **#40.2** — Add configurable `live_class_index` to `OrtPadDetector`
   - Add `live_class_index: usize` field to struct, default `0`
   - Update `evaluate_liveness()` to read `p_live` from `probs[live_class_index]`
   - Determine attack type from remaining non-live classes
   - Acceptance: Class ordering is configurable and defaults correctly for MiniFASNetV2
   - TDD: `test_pad_class_ordering_live_index_0`, `test_pad_class_ordering_configurable`
 
-- [ ] **#40.3** — Update `InvalidDimensions` error for 80×80 expected dimensions
+- [x] **#40.3** — Update `InvalidDimensions` error for 80×80 expected dimensions
   - Change the dimension validation message from `(112, 112)` to `(80, 80)`
   - Acceptance: Error messages reference correct expected dimensions
 

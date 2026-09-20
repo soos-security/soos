@@ -86,9 +86,9 @@ fn test_inference_input_buffers_zeroized() {
         );
     }
 
-    // 4. OrtPadDetector input buffer
+    // 4. OrtPadDetector input buffer (MiniFASNetV2 80x80)
     let mut pad_buf = OrtPadDetector::prepare_input(&dummy_crop, 112, 112).expect("pad input");
-    assert_eq!(pad_buf.len(), 3 * 112 * 112);
+    assert_eq!(pad_buf.len(), 3 * 80 * 80);
     assert!(
         pad_buf.iter().any(|&v| v != 0.0),
         "PAD buffer must contain non-zero normalized pixels"

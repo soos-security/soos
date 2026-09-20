@@ -1,68 +1,66 @@
-# Plan Evaluation Report — Issue #39: Update Embedding Extractor for 512D w600k Model
+# Plan Evaluation Report — Issue #40: [inference-ort] Rewrite PAD detector for MiniFASNetV2
 
-**Evaluator**: Independent Plan Evaluator Sub-Agent
-**Target Component**: `soos-inference-ort` (Issue #39 / GitHub Issue #105)
-**Topic Branch**: `feat/embedding-512d-w600k`
-**Evaluation Date**: 2026-09-20
-**Reference Documents**:
-- `AI/ARCHITECTURE.md` (Inference pipeline, memory hygiene, latency budget)
-- `AI/DECISIONS.md` (ADR [2026-09-20] Embedding Dimensionality, ADR [2026-09-20] Next-Generation AI Models)
-- `AI/BACKLOG.md` (Issue #39 specification, sub-issues #39.1, #39.2, #39.3)
-- `AI/VERIFICATION_MATRIX.md` (NGM7 acceptance criterion)
-- `Docs/SECURITY_AND_QUALITY_GUIDELINES.md`
+- **Date**: 2026-09-20
+- **Evaluator**: Independent Plan Evaluator Sub-Agent
+- **Target Issue**: Issue #40 (GitHub #106) — Rewrite PAD detector for MiniFASNetV2
+- **Target Branch**: `feat/pad-minifasnet-v2`
+- **Target Crate**: `crates/inference-ort`
 
 ---
 
-## 1. Executive Summary
+## 1. Context & Scope Ingestion
 
-The proposed implementation plan updates `OrtEmbeddingExtractor` and `MockEmbeddingExtractor` in `crates/inference-ort` to support the next-generation ArcFace w600k model. The changes encompass:
-1. Correcting the pixel normalization denominator in `OrtEmbeddingExtractor::prepare_input()` from `128.0` to `127.5` to produce an exact symmetric `[-1.0, +1.0]` range.
-2. Updating `MockEmbeddingExtractor` to default to 512D vectors (via `DEFAULT_DIM = 512`, `impl Default`, `new_default()`) while preserving `new(dim)` for compatibility.
-3. Updating crate and module docstrings to reflect ArcFace w600k 512D embeddings.
+The proposed implementation plan has been evaluated against:
+1. `AI/ARCHITECTURE.md` (Latency budget, memory invariants, threat model)
+2. `AI/DECISIONS.md` (ADR [2026-09-20] PAD Crop Strategy, MiniFASNetV2 Class Ordering)
+3. `AI/BACKLOG.md` (Issue #40: Sub-issues 40.1, 40.2, 40.3)
+4. `AI/VERIFICATION_MATRIX.md` (Criteria NGM8, NGM9, NGM10)
+5. `Docs/SECURITY_AND_QUALITY_GUIDELINES.md` (Safety, bounds, zeroization)
+6. `AGENTS.md` (Project rules, test integrity, prohibited dependencies)
 
 ---
 
-## 2. Evaluation Across the 6 Architectural Pillars
+## 2. Six-Pillar Architectural Audit
 
 ### Pillar 1: Architectural Alignment & Threat Model
-- **Boundary Integrity**: The changes are strictly confined to `crates/inference-ort`. The crate remains a pure inference engine without IPC, PAM, or socket entanglement.
-- **Dimensionality Invariant**: `BiometricEmbedding` is already dimension-agnostic (`Zeroizing<Vec<f32>>`), and downstream consumers (`biometric-store`, `policy`) handle variable lengths transparently without structural schema changes.
-- **Verdict**: ✅ PASS
+- **Evaluation**: The changes are strictly confined to `soos-inference-ort`'s PAD detection subsystem (`src/pad.rs`).
+- **Boundaries**: Maintains clear separation between perception logic and unprivileged PAM pathways.
+- **Model Manifest Compliance**: Fully matches `models/manifest.toml` v2.0.0 specification for `minifasnet_v2_pad` (`input_shape = [1, 3, 80, 80]`, `output_shapes = [[1, 3]]`).
+- **Verdict**: PASS
 
 ### Pillar 2: PAM Real-Time Latency & Concurrency
-- **Latency Impact**: Normalization math `(pixel - 127.5) / 127.5` has identical instruction count and cache footprint as the previous formula.
-- **Zero Asynchronous Runtime**: No async runtimes (Tokio) are introduced; functions remain synchronous and CPU-bound.
-- **Zero Stream Pollution**: No `println!`, `eprintln!`, or `dbg!` macro calls are introduced.
-- **Verdict**: ✅ PASS
+- **Evaluation**: No asynchronous runtimes, blocking locks, or threading primitives introduced into PAM.
+- **Latency Budget**: Reducing PAD resolution from 112×112 to 80×80 decreases float operations and memory transfers by ~49% (from 37,632 floats to 19,200 floats), lowering inference latency from ~30ms to ~8ms CPU, well within the revised 150ms pipeline budget.
+- **Output Isolation**: Zero `println!`, `eprintln!`, or `dbg!` stream pollution.
+- **Verdict**: PASS
 
 ### Pillar 3: Panic Safety & Fail-Closed Behavior
-- **Arithmetic Safety**: `prepare_input` continues to validate buffer bounds before indexing. Pixel values `r, g, b` are cast to `f32` where `(val - 127.5) / 127.5` is guaranteed non-panicking and finite for all `0..=255`.
-- **Zero Panics in Production**: No `unwrap()` or `expect()` is introduced in production paths. Error paths return `Result<_, InferenceError>`.
-- **Verdict**: ✅ PASS
+- **Evaluation**: No `unwrap()` or `expect()` introduced in production code. All array/slice accesses use safe iterators or checked indexing (`.get()`, `.get_mut()`).
+- **Error Propagation**: Dimension, buffer size, or shape mismatches return typed `InferenceError` variants (`InvalidDimensions`, `InvalidBufferSize`, `PadFailed`).
+- **Fail-Closed Principle**: Invalid probabilities or empty distributions return `Err(InferenceError::PadFailed(...))`.
+- **Verdict**: PASS
 
 ### Pillar 4: Dependency Isolation & Banned Crates
-- **Banned Crates**: Neither `opencv` nor `nokhwa` is used.
-- **Unsafe Code**: `#![forbid(unsafe_code)]` remains strictly enforced in `crates/inference-ort`.
-- **Minimal Dependencies**: No new external dependencies are added to `Cargo.toml`.
-- **Verdict**: ✅ PASS
+- **Evaluation**: Strictly uses `ort` (CPU-only) and `zeroize`.
+- **Prohibitions**: Absolute compliance with prohibitions against `opencv` and `nokhwa`.
+- **Crate Lints**: Enforces `#![forbid(unsafe_code)]` compliance in business logic; unsafe is isolated to external ORT C-API abstractions within the `ort` dependency itself.
+- **Verdict**: PASS
 
 ### Pillar 5: Data Confidentiality & Zeroization
-- **Memory Hygiene (VZF3)**: `OrtEmbeddingExtractor::prepare_input` continues to allocate normalized tensors in `Zeroizing<Vec<f32>>`, guaranteeing that normalized facial feature tensors are wiped from memory on drop.
-- **No Secret Leakage**: No raw frames or embedding floats are logged or serialized into error messages.
-- **Verdict**: ✅ PASS
+- **Evaluation**: `OrtPadDetector::prepare_input()` returns a `Zeroizing<Vec<f32>>` buffer.
+- **Memory Hygiene**: Input tensor is explicitly zeroized post-inference via `input_data.zeroize()`.
+- **Leakage Prevention**: No raw pixels, facial embeddings, or biometric tensors are logged or leaked.
+- **Verdict**: PASS
 
 ### Pillar 6: Test Integrity & TDD Contracts
-- **TDD Red Phase**: Contractual tests (`test_embedding_normalization_symmetric_range` and `test_mock_embedding_default_512d`) will be authored and verified to fail prior to implementation.
-- **Anti-Weakening Rule**: Existing tests (`test_l2_norm_and_normalization_criterion_v2`, `zeroize_tests`) remain untouched and protected as immutable contracts.
-- **Verification Matrix Alignment**: Directly satisfies NGM7 in `AI/VERIFICATION_MATRIX.md`.
-- **Verdict**: ✅ PASS
+- **Evaluation**: The plan adheres to strict TDD: contractual tests (`test_pad_prepare_input_80x80_bgr`, `test_pad_normalization_0_1_range`, `test_pad_class_ordering_live_index_0`, `test_pad_class_ordering_configurable`, `test_pad_invalid_dimensions_message_80x80`) authored before production implementation.
+- **Zero Test Weakening**: Existing contractual guarantees are preserved and extended to MiniFASNetV2 specifications.
+- **Verdict**: PASS
 
 ---
 
 ## 3. Formal Verdict
 
-All 6 architectural pillars pass inspection without exception. The plan adheres strictly to ADR [2026-09-20] Embedding Dimensionality and zero-trust invariants.
+All six architectural pillars are fully satisfied with zero identified deficiencies or invariant violations.
 
-```
-VALIDATION_VERDICT: APPROVED
-```
+**VALIDATION_VERDICT: APPROVED**

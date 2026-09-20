@@ -69,7 +69,7 @@ impl PadResult {
 
 /// Trait implemented by presentation attack detection backends.
 pub trait PadDetector: Send + Sync {
-    /// Evaluates liveness of a face candidate RGB buffer (typically 112x112 aligned crop).
+    /// Evaluates liveness of a face candidate RGB buffer (typically 80x80 expanded crop).
     fn evaluate_liveness(
         &self,
         rgb: &[u8],
@@ -78,10 +78,11 @@ pub trait PadDetector: Send + Sync {
     ) -> Result<PadResult, InferenceError>;
 }
 
-/// MiniFASNet ONNX Runtime Presentation Attack Detector.
+/// MiniFASNetV2 ONNX Runtime Presentation Attack Detector.
 pub struct OrtPadDetector {
     session: Arc<Mutex<Session>>,
     liveness_threshold: f32,
+    live_class_index: usize,
 }
 
 impl OrtPadDetector {
@@ -90,12 +91,102 @@ impl OrtPadDetector {
         Self {
             session,
             liveness_threshold,
+            live_class_index: 0,
         }
+    }
+
+    /// Constructs a new `OrtPadDetector` with an explicit live class index.
+    pub fn new_with_class_index(
+        session: Arc<Mutex<Session>>,
+        liveness_threshold: f32,
+        live_class_index: usize,
+    ) -> Self {
+        Self {
+            session,
+            liveness_threshold,
+            live_class_index,
+        }
+    }
+
+    /// Configures the live class index using a builder pattern.
+    pub fn with_live_class_index(mut self, live_class_index: usize) -> Self {
+        self.live_class_index = live_class_index;
+        self
+    }
+
+    /// Current live class index.
+    pub fn live_class_index(&self) -> usize {
+        self.live_class_index
     }
 
     /// Current liveness decision threshold.
     pub fn liveness_threshold(&self) -> f32 {
         self.liveness_threshold
+    }
+
+    /// Interprets model output probabilities into a [`PadResult`].
+    ///
+    /// Reads `p_live` from `probs[live_class_index]`. For 3-class models, non-live classes
+    /// are mapped to attack types in ordinal order (first non-live is PrintPhoto, second is ScreenReplay).
+    pub fn interpret_probabilities(
+        probs: &[f32],
+        liveness_threshold: f32,
+        live_class_index: usize,
+    ) -> Result<PadResult, InferenceError> {
+        if probs.is_empty() {
+            return Err(InferenceError::PadFailed(
+                "Empty probability distribution returned from PAD model".to_string(),
+            ));
+        }
+
+        if probs.len() >= 3 {
+            let p_live = probs.get(live_class_index).copied().unwrap_or(0.0);
+
+            if p_live >= liveness_threshold {
+                Ok(PadResult::live(p_live))
+            } else {
+                // Collect remaining non-live classes in ordinal index order
+                let non_live: Vec<f32> = probs
+                    .iter()
+                    .enumerate()
+                    .filter(|&(idx, _)| idx != live_class_index)
+                    .map(|(_, &p)| p)
+                    .collect();
+
+                let p_print = non_live.first().copied().unwrap_or(0.0);
+                let p_replay = non_live.get(1).copied().unwrap_or(0.0);
+
+                let attack = if p_print >= p_replay {
+                    AttackType::PrintPhoto
+                } else {
+                    AttackType::ScreenReplay
+                };
+                Ok(PadResult::spoof(p_live, attack))
+            }
+        } else if probs.len() == 2 {
+            let p_live = probs.get(live_class_index).copied().unwrap_or(0.0);
+            if p_live >= liveness_threshold {
+                Ok(PadResult::live(p_live))
+            } else {
+                Ok(PadResult::spoof(p_live, AttackType::UnknownSpoof))
+            }
+        } else if let Some(&single) = probs.first() {
+            // Single sigmoid output
+            if single >= liveness_threshold {
+                Ok(PadResult::live(single))
+            } else {
+                Ok(PadResult::spoof(single, AttackType::UnknownSpoof))
+            }
+        } else {
+            Err(InferenceError::PadFailed(
+                "Empty probability distribution returned from PAD model".to_string(),
+            ))
+        }
+    }
+
+    /// Classifies softmax probabilities according to the detector's configured threshold and live class index.
+    pub fn classify_probabilities(&self, probs: &[f32]) -> Result<PadResult, InferenceError> {
+        Self::interpret_probabilities(probs, self.liveness_threshold, self.live_class_index)
     }
 
     /// Computes numerically stable softmax probabilities over a slice of raw logits.
@@ -115,7 +206,10 @@ impl OrtPadDetector {
         exps.iter().map(|&v| v / sum).collect()
     }
 
-    /// Prepares, resizes, and normalizes an RGB image to 112x112 NCHW format inside a zeroized container.
+    /// Prepares, resizes, and normalizes an RGB image to 80x80 NCHW BGR format inside a zeroized container.
+    ///
+    /// Normalization maps `[0, 255]` pixel bytes to `[0.0, 1.0]` floats via `pixel / 255.0`.
+    /// Channel ordering is BGR: channel 0 = Blue, channel 1 = Green, channel 2 = Red.
     pub fn prepare_input(
         rgb: &[u8],
         width: u32,
@@ -135,13 +229,13 @@ impl OrtPadDetector {
 
         if width == 0 || height == 0 {
             return Err(InferenceError::InvalidDimensions {
-                expected: (112, 112),
+                expected: (80, 80),
                 actual: (width, height),
             });
         }
 
-        // Standard MiniFASNet expects 112x112 NCHW tensor [1, 3, 112, 112]
-        let target_size = 112usize;
+        // MiniFASNetV2 expects 80x80 NCHW BGR tensor [1, 3, 80, 80]
+        let target_size = 80usize;
         let mut input_data = Zeroizing::new(vec![0.0f32; 3 * target_size * target_size]);
 
         let scale_x = width as f32 / target_size as f32;
@@ -156,23 +250,24 @@ impl OrtPadDetector {
                 if let (Some(&r), Some(&g), Some(&b)) =
                     (rgb.get(src_idx), rgb.get(src_idx + 1), rgb.get(src_idx + 2))
                 {
-                    // Normalize to [-1.0, 1.0] standard float tensor range
-                    let norm_r = (r as f32 - 127.5) / 128.0;
-                    let norm_g = (g as f32 - 127.5) / 128.0;
-                    let norm_b = (b as f32 - 127.5) / 128.0;
+                    // MiniFASNetV2 normalization: pixel / 255.0 in [0.0, 1.0] range
+                    let norm_b = b as f32 / 255.0;
+                    let norm_g = g as f32 / 255.0;
+                    let norm_r = r as f32 / 255.0;
 
-                    let r_idx = y * target_size + x;
+                    // Channel ordering: BGR (channel 0 = B, channel 1 = G, channel 2 = R)
+                    let b_idx = y * target_size + x;
                     let g_idx = target_size * target_size + y * target_size + x;
-                    let b_idx = 2 * target_size * target_size + y * target_size + x;
+                    let r_idx = 2 * target_size * target_size + y * target_size + x;
 
-                    if let Some(slot) = input_data.get_mut(r_idx) {
-                        *slot = norm_r;
+                    if let Some(slot) = input_data.get_mut(b_idx) {
+                        *slot = norm_b;
                     }
                     if let Some(slot) = input_data.get_mut(g_idx) {
                         *slot = norm_g;
                     }
-                    if let Some(slot) = input_data.get_mut(b_idx) {
-                        *slot = norm_b;
+                    if let Some(slot) = input_data.get_mut(r_idx) {
+                        *slot = norm_r;
                     }
                 }
             }
@@ -192,7 +287,7 @@ impl PadDetector for OrtPadDetector {
         let mut input_data = Self::prepare_input(rgb, width, height)?;
 
         let tensor =
-            ort::value::TensorRef::from_array_view(([1usize, 3, 112, 112], input_data.as_slice()))
+            ort::value::TensorRef::from_array_view(([1usize, 3, 80, 80], input_data.as_slice()))
                 .map_err(|e| InferenceError::Ort(e.to_string()))?;
 
         let mut session = self
@@ -218,48 +313,6 @@ impl PadDetector for OrtPadDetector {
         let logits = logits_binding.1;
 
         let probs = Self::softmax(logits);
-
-        // Classification interpretation:
-        // For MiniFASNet 3-class models:
-        //   Class 0: Print Photo attack
-        //   Class 1: Real / Live face
-        //   Class 2: Screen Replay attack
-        // For binary 2-class models:
-        //   Class 0: Spoof
-        //   Class 1: Real / Live face
-        if probs.len() >= 3 {
-            let p_print = probs.first().copied().unwrap_or(0.0);
-            let p_live = probs.get(1).copied().unwrap_or(0.0);
-            let p_replay = probs.get(2).copied().unwrap_or(0.0);
-
-            if p_live >= self.liveness_threshold {
-                Ok(PadResult::live(p_live))
-            } else {
-                let attack = if p_print >= p_replay {
-                    AttackType::PrintPhoto
-                } else {
-                    AttackType::ScreenReplay
-                };
-                Ok(PadResult::spoof(p_live, attack))
-            }
-        } else if probs.len() == 2 {
-            let p_live = probs.get(1).copied().unwrap_or(0.0);
-            if p_live >= self.liveness_threshold {
-                Ok(PadResult::live(p_live))
-            } else {
-                Ok(PadResult::spoof(p_live, AttackType::UnknownSpoof))
-            }
-        } else if let Some(&single) = probs.first() {
-            // Single sigmoid output
-            if single >= self.liveness_threshold {
-                Ok(PadResult::live(single))
-            } else {
-                Ok(PadResult::spoof(single, AttackType::UnknownSpoof))
-            }
-        } else {
-            Err(InferenceError::PadFailed(
-                "Empty probability distribution returned from PAD model".to_string(),
-            ))
-        }
+        Self::interpret_probabilities(&probs, self.liveness_threshold, self.live_class_index)
     }
 }
