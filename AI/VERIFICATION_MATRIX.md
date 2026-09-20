@@ -291,3 +291,12 @@ This document translates the critical gating criteria from §11 of `ARCHITECTURE
 | NGM3 | `OrtScrfdDetector` parses 9 output tensors across 3 strides (8, 16, 32) with distance-to-border box decoding and startup validation | Unit tests (`scrfd_tests::test_scrfd_decode_stride8_known_output`, `scrfd_tests::test_scrfd_decode_all_strides`, `scrfd_tests::test_scrfd_rejects_invalid_output_count`, `scrfd_tests::test_scrfd_validates_shape_patterns`) | ✅ Verified |
 | NGM4 | SCRFD input is BGR 640×640 with letterbox padding and `(pixel - 127.5) / 128.0` normalization | Unit & property tests (`scrfd_tests::test_letterbox_preserves_aspect_ratio`, `scrfd_tests::test_prepare_input_bgr_channel_ordering`, `scrfd_tests::test_letterbox_unproject_roundtrip`) | ✅ Verified |
 | NGM5 | SCRFD detection includes 5-point landmarks in `FaceDetection` struct with coordinate un-projection | Unit tests (`scrfd_tests::test_face_detection_carries_landmarks`, `scrfd_tests::test_unproject_coordinates_match_original_image`) | ✅ Verified |
+
+---
+
+## Component: `remove-ort-landmark-detector` (Issue #38 / GitHub #104)
+
+| # | Criterion | Test Method | Status |
+|---|---|---|---|
+| NGM6 | `OrtLandmarkDetector` removed from `soos-inference-ort`; `FaceLandmarks`, `Point2f`, and `LandmarkDetector` trait preserved | Unit tests (`landmarks_tests::test_point2f_geometry_and_distance`, `landmarks_tests::test_face_landmarks_array_conversion_and_geometry`, `landmarks_tests::test_landmark_detector_trait_mock_dispatch`) | ✅ Verified |
+

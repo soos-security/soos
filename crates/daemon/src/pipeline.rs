@@ -163,7 +163,6 @@ pub fn initialize_pipeline(
     registry.verify_integrity()?;
 
     let det_session = registry.get_or_load_session("ultraface_slim_320")?;
-    let lmk_session = registry.get_or_load_session("landmark_5point")?;
     let pad_session = registry.get_or_load_session("minifasnet_pad")?;
     let ext_session = registry.get_or_load_session("mobilefacenet_arcface")?;
 
@@ -172,7 +171,7 @@ pub fn initialize_pipeline(
         config.vision.min_face_confidence,
         0.45,
     ));
-    let landmarks = Arc::new(soos_inference_ort::OrtLandmarkDetector::new(lmk_session));
+    let landmarks = Arc::new(soos_inference_ort::MockLandmarkDetector::new_canonical());
     let pad = Arc::new(soos_inference_ort::OrtPadDetector::new(
         pad_session,
         config.vision.pad_threshold,

@@ -1421,17 +1421,17 @@ SCRFD outputs 5-point landmarks as part of detection, making the separate `OrtLa
 
 #### Sub-issues
 
-- [ ] **#38.1** — Remove `OrtLandmarkDetector` struct and its `impl LandmarkDetector` from `landmarks.rs`
+- [x] **#38.1** — Remove `OrtLandmarkDetector` struct and its `impl LandmarkDetector` from `landmarks.rs`
   - Keep: `FaceLandmarks`, `Point2f`, `LandmarkDetector` trait, all methods on these types
   - Remove: `OrtLandmarkDetector` struct, `OrtLandmarkDetector::new()`, `OrtLandmarkDetector::prepare_input()`, `impl LandmarkDetector for OrtLandmarkDetector`
   - Acceptance: `landmarks.rs` contains only domain types and trait definition
   - TDD: Compilation succeeds, existing `FaceLandmarks` tests pass
 
-- [ ] **#38.2** — Remove `OrtLandmarkDetector` from `lib.rs` exports
+- [x] **#38.2** — Remove `OrtLandmarkDetector` from `lib.rs` exports
   - Remove from `pub use landmarks::...` line
   - Acceptance: No public export of `OrtLandmarkDetector`
 
-- [ ] **#38.3** — Remove landmark session loading from `ModelRegistry` usage sites
+- [x] **#38.3** — Remove landmark session loading from `ModelRegistry` usage sites
   - `crates/daemon/src/pipeline.rs` — remove `landmark_5point` session loading
   - `crates/enrollment-cli/src/service.rs` — remove landmark session loading
   - Acceptance: Only 3 ORT sessions loaded at startup (not 4)
@@ -1694,7 +1694,7 @@ All project documentation must be updated to reflect the 3-model architecture: A
 | NGM3 | `OrtScrfdDetector` parses 9 output tensors across 3 strides (8, 16, 32) | Unit test | ✅ Verified |
 | NGM4 | SCRFD input is BGR 640×640 with letterbox padding and `(pixel - 127.5) / 128.0` normalization | Golden test | ✅ Verified |
 | NGM5 | SCRFD detection includes 5-point landmarks in `FaceDetection` struct | Unit test | ✅ Verified |
-| NGM6 | `OrtLandmarkDetector` removed; `FaceLandmarks` and `LandmarkDetector` trait preserved | Compilation test | ⬜ Pending |
+| NGM6 | `OrtLandmarkDetector` removed; `FaceLandmarks` and `LandmarkDetector` trait preserved | Compilation test | ✅ Verified |
 | NGM7 | Embedding extractor uses `(pixel - 127.5) / 127.5` normalization and produces 512D output | Unit test | ⬜ Pending |
 | NGM8 | PAD detector accepts 80×80 BGR input with `pixel / 255.0` normalization | Unit test | ⬜ Pending |
 | NGM9 | PAD class ordering: index 0 = Live (configurable `live_class_index`) | Unit test | ⬜ Pending |

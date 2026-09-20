@@ -8,9 +8,8 @@
     reason = "Test suite assertions"
 )]
 
-use soos_inference_ort::detector::BoundingBox;
 use soos_inference_ort::{
-    BiometricEmbedding, OrtEmbeddingExtractor, OrtFaceDetector, OrtLandmarkDetector, OrtPadDetector,
+    BiometricEmbedding, OrtEmbeddingExtractor, OrtFaceDetector, OrtPadDetector, OrtScrfdDetector,
 };
 use zeroize::Zeroize;
 
@@ -70,22 +69,20 @@ fn test_inference_input_buffers_zeroized() {
         );
     }
 
-    // 3. OrtLandmarkDetector input buffer
-    let face_box = BoundingBox::new(20.0, 20.0, 100.0, 100.0);
-    let mut landmark_buf = OrtLandmarkDetector::prepare_input(&dummy_rgb, 320, 240, &face_box)
-        .expect("landmark input");
-    assert_eq!(landmark_buf.len(), 3 * 112 * 112);
+    // 3. OrtScrfdDetector input buffer
+    let mut scrfd_buf = OrtScrfdDetector::prepare_input(&dummy_rgb, 320, 240).expect("scrfd input");
+    assert_eq!(scrfd_buf.len(), 3 * 640 * 640);
     assert!(
-        landmark_buf.iter().any(|&v| v != 0.0),
-        "Landmark buffer must contain non-zero normalized pixels"
+        scrfd_buf.iter().any(|&v| v != 0.0),
+        "SCRFD buffer must contain non-zero normalized pixels"
     );
 
-    landmark_buf.zeroize();
-    for (i, &val) in landmark_buf.iter().enumerate() {
+    scrfd_buf.zeroize();
+    for (i, &val) in scrfd_buf.iter().enumerate() {
         assert_eq!(
             val.to_bits(),
             0,
-            "Landmark buffer element at index {i} was not zeroed: {val}"
+            "SCRFD buffer element at index {i} was not zeroed: {val}"
         );
     }
 

@@ -24,7 +24,7 @@ pub use detector::{
 };
 pub use embedding::{BiometricEmbedding, EmbeddingExtractor, OrtEmbeddingExtractor};
 pub use error::InferenceError;
-pub use landmarks::{FaceLandmarks, LandmarkDetector, OrtLandmarkDetector, Point2f};
+pub use landmarks::{FaceLandmarks, LandmarkDetector, Point2f};
 pub use manifest::{ManifestHeader, ModelManifest, ModelMetadata};
 pub use mock::{MockEmbeddingExtractor, MockFaceDetector, MockLandmarkDetector, MockPadDetector};
 pub use pad::{AttackType, OrtPadDetector, PadDetector, PadResult};

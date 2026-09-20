@@ -61,6 +61,7 @@ BACKLOG_TO_GITHUB = {
     35: 74,
     36: 102,
     37: 103,
+    38: 104,
 }
 
 BRANCH_TO_ISSUE = {
@@ -104,6 +105,7 @@ BRANCH_TO_ISSUE = {
     "fix/cli-security": 35,
     "feat/nextgen-models-manifest": 36,
     "feat/scrfd-face-detector": 37,
+    "refactor/remove-ort-landmark-detector": 38,
 }
 
 

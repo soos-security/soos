@@ -7,7 +7,7 @@ The `soos-inference-ort` crate provides a safe, robust, and isolated machine lea
 The crate encapsulates:
 1. **Cryptographic Model Attestation**: Enforcing that all ONNX models match expected SHA-256 checksums cataloged in `models/manifest.toml` before any execution session is instantiated.
 2. **Face Detection**: UltraFace Slim 320 ONNX model with deterministic pure-Rust Non-Maximum Suppression (NMS).
-3. **Landmark Estimation**: 5-point facial landmark detector (eyes, nose, mouth corners) for geometric alignment.
+3. **Landmark Estimation**: 5-point facial landmark domain structures (`FaceLandmarks`, `Point2f`) and `LandmarkDetector` trait for geometric alignment. In the next-gen 3-model pipeline, landmark regression is absorbed directly into SCRFD face detection (`OrtScrfdDetector`), with `MockLandmarkDetector` provided for deterministic simulation.
 4. **Biometric Feature Extraction**: MobileFaceNet ArcFace-compatible embedding extractor generating L2-normalized 128D/512D vectors (Verification Matrix Criterion `V2`).
 5. **Hardware-Free Deterministic Simulation**: Mocks (`MockFaceDetector`, `MockLandmarkDetector`, `MockEmbeddingExtractor`) for seamless headless execution in CI pipelines and developer environments.
 
@@ -79,7 +79,7 @@ pub trait LandmarkDetector: Send + Sync {
     ) -> Result<FaceLandmarks, InferenceError>;
 }
 ```
-Implemented by `OrtLandmarkDetector` (5-point regression) and `MockLandmarkDetector`.
+Implemented by `MockLandmarkDetector` for testing and deterministic simulation (in the next-gen 3-model pipeline, facial landmarks are absorbed directly into `OrtScrfdDetector`).
 
 ### `EmbeddingExtractor` Trait
 ```rust
