@@ -66,6 +66,7 @@ BACKLOG_TO_GITHUB = {
     40: 106,
     41: 107,
     42: 108,
+    43: 109,
 }
 
 BRANCH_TO_ISSUE = {
@@ -114,6 +115,7 @@ BRANCH_TO_ISSUE = {
     "feat/pad-minifasnet-v2": 40,
     "refactor/vision-pipeline-3-model": 41,
     "feat/vision-letterbox-and-bbox-crop": 42,
+    "refactor/model-ids-nextgen": 43,
 }
 
 

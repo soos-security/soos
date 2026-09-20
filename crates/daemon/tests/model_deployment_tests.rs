@@ -152,11 +152,10 @@ fn test_models_readme_complete_and_accurate() {
 
     let content = fs::read_to_string(&readme_path).expect("Read models/README.md");
 
-    // Must document all 4 models
-    assert!(content.contains("ultraface_slim_320") || content.contains("version-slim-320.onnx"));
-    assert!(content.contains("landmark_5point"));
-    assert!(content.contains("mobilefacenet_arcface"));
-    assert!(content.contains("minifasnet_pad"));
+    // Must document all 3 next-gen models
+    assert!(content.contains("scrfd_500m_kps"));
+    assert!(content.contains("arcface_w600k_mbf"));
+    assert!(content.contains("minifasnet_v2_pad"));
 
     // Must document licenses
     assert!(content.contains("MIT"));
@@ -181,20 +180,20 @@ fn test_daemon_refuses_start_with_missing_models() {
     let models_dir = dir.path().join("models");
     fs::create_dir_all(&models_dir).expect("create models dir");
 
-    // Put an attested manifest requiring ultraface_slim_320, but don't place the model file
+    // Put an attested manifest requiring scrfd_500m_kps, but don't place the model file
     let manifest_path = models_dir.join("manifest.toml");
     let manifest_content = r#"[manifest]
-version = "1.0.0"
+version = "2.0.0"
 
-[models.ultraface_slim_320]
-id = "ultraface_slim_320"
-filename = "version-slim-320.onnx"
-sha256 = "b7a44f4340d0fb9b071e6be94deaa9bcfceeb9f1c7dcf14b1b365bca7f79ff0b"
+[models.scrfd_500m_kps]
+id = "scrfd_500m_kps"
+filename = "scrfd_500m_kps.onnx"
+sha256 = "a3562ef62592bf387f6ef19151282ac127518e51c77696e62e0661bee95ba1ad"
 license = "MIT"
-source_url = "https://github.com/Linzaer/Ultra-Light-Fast-Generic-Face-Detector-1MB"
-description = "UltraFace Slim 320 lightweight face detector"
-input_shape = [1, 3, 240, 320]
-output_shapes = [[1, 4420, 2], [1, 4420, 4]]
+source_url = "https://huggingface.co/ykk648/face_lib/resolve/main/face_detect/scrfd_onnx/scrfd_500m_bnkps.onnx"
+description = "SCRFD 500M KPS unified face detection and 5-point facial landmarks"
+input_shape = [1, 3, 640, 640]
+output_shapes = [[1, 12800, 1], [1, 3200, 1], [1, 800, 1], [1, 12800, 4], [1, 3200, 4], [1, 800, 4], [1, 12800, 10], [1, 3200, 10], [1, 800, 10]]
 "#;
     fs::write(&manifest_path, manifest_content).expect("write manifest");
 
@@ -211,7 +210,7 @@ output_shapes = [[1, 4420, 2], [1, 4420, 4]]
     let res = initialize_pipeline(&config);
     match res {
         Err(DaemonError::Inference(InferenceError::ModelNotFound { id, .. })) => {
-            assert_eq!(id, "ultraface_slim_320");
+            assert_eq!(id, "scrfd_500m_kps");
         }
         other => panic!(
             "Expected DaemonError::Inference(ModelNotFound), got: {:?}",
@@ -229,22 +228,22 @@ fn test_daemon_refuses_start_with_tampered_models() {
     // Put manifest with expected sha256
     let manifest_path = models_dir.join("manifest.toml");
     let manifest_content = r#"[manifest]
-version = "1.0.0"
+version = "2.0.0"
 
-[models.ultraface_slim_320]
-id = "ultraface_slim_320"
-filename = "version-slim-320.onnx"
-sha256 = "b7a44f4340d0fb9b071e6be94deaa9bcfceeb9f1c7dcf14b1b365bca7f79ff0b"
+[models.scrfd_500m_kps]
+id = "scrfd_500m_kps"
+filename = "scrfd_500m_kps.onnx"
+sha256 = "a3562ef62592bf387f6ef19151282ac127518e51c77696e62e0661bee95ba1ad"
 license = "MIT"
-source_url = "https://github.com/Linzaer/Ultra-Light-Fast-Generic-Face-Detector-1MB"
-description = "UltraFace Slim 320 lightweight face detector"
-input_shape = [1, 3, 240, 320]
-output_shapes = [[1, 4420, 2], [1, 4420, 4]]
+source_url = "https://huggingface.co/ykk648/face_lib/resolve/main/face_detect/scrfd_onnx/scrfd_500m_bnkps.onnx"
+description = "SCRFD 500M KPS unified face detection and 5-point facial landmarks"
+input_shape = [1, 3, 640, 640]
+output_shapes = [[1, 12800, 1], [1, 3200, 1], [1, 800, 1], [1, 12800, 4], [1, 3200, 4], [1, 800, 4], [1, 12800, 10], [1, 3200, 10], [1, 800, 10]]
 "#;
     fs::write(&manifest_path, manifest_content).expect("write manifest");
 
     // Create the file but with tampered/wrong content
-    let model_path = models_dir.join("version-slim-320.onnx");
+    let model_path = models_dir.join("scrfd_500m_kps.onnx");
     fs::write(&model_path, b"corrupted-tampered-weights-data").expect("write tampered model");
 
     let mut config = PipelineConfig {
@@ -260,10 +259,10 @@ output_shapes = [[1, 4420, 2], [1, 4420, 4]]
     let res = initialize_pipeline(&config);
     match res {
         Err(DaemonError::Inference(InferenceError::ChecksumMismatch { id, expected, .. })) => {
-            assert_eq!(id, "ultraface_slim_320");
+            assert_eq!(id, "scrfd_500m_kps");
             assert_eq!(
                 expected,
-                "b7a44f4340d0fb9b071e6be94deaa9bcfceeb9f1c7dcf14b1b365bca7f79ff0b"
+                "a3562ef62592bf387f6ef19151282ac127518e51c77696e62e0661bee95ba1ad"
             );
         }
         other => panic!(
