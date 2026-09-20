@@ -140,3 +140,156 @@ fn test_softmax_numerical_stability() {
     let extreme_sum: f32 = extreme.iter().sum();
     assert!((extreme_sum - 1.0).abs() < 1e-4);
 }
+
+#[test]
+fn test_pad_prepare_input_80x80_bgr() {
+    // 80x80 RGB image with distinct channel values per pixel:
+    // Pixel (x, y): R = 255, G = 128, B = 64
+    let mut rgb = Vec::with_capacity(80 * 80 * 3);
+    for _ in 0..(80 * 80) {
+        rgb.push(255u8); // R
+        rgb.push(128u8); // G
+        rgb.push(64u8); // B
+    }
+
+    let input_tensor =
+        OrtPadDetector::prepare_input(&rgb, 80, 80).expect("prepare_input for 80x80 must succeed");
+
+    // MiniFASNetV2 tensor shape: [1, 3, 80, 80] -> length 19,200
+    assert_eq!(
+        input_tensor.len(),
+        3 * 80 * 80,
+        "Tensor length must be 3 * 80 * 80 = 19200"
+    );
+
+    // Channel 0 = Blue: 64 / 255.0 ≈ 0.25098
+    // Channel 1 = Green: 128 / 255.0 ≈ 0.50196
+    // Channel 2 = Red: 255 / 255.0 = 1.0
+    let b_val = input_tensor[0];
+    let g_val = input_tensor[80 * 80];
+    let r_val = input_tensor[2 * 80 * 80];
+
+    assert!(
+        (b_val - (64.0 / 255.0)).abs() < 1e-4,
+        "Channel 0 must be Blue normalized to [0, 1], got {b_val}"
+    );
+    assert!(
+        (g_val - (128.0 / 255.0)).abs() < 1e-4,
+        "Channel 1 must be Green normalized to [0, 1], got {g_val}"
+    );
+    assert!(
+        (r_val - 1.0).abs() < 1e-4,
+        "Channel 2 must be Red normalized to [0, 1], got {r_val}"
+    );
+}
+
+#[test]
+fn test_pad_normalization_0_1_range() {
+    // 80x80 image with extreme pixel values (0 and 255)
+    let mut rgb = vec![0u8; 80 * 80 * 3];
+    // Fill first pixel with 255
+    rgb[0] = 255;
+    rgb[1] = 255;
+    rgb[2] = 255;
+    // Fill second pixel with 128
+    rgb[3] = 128;
+    rgb[4] = 128;
+    rgb[5] = 128;
+
+    let tensor = OrtPadDetector::prepare_input(&rgb, 80, 80).expect("prepare_input must succeed");
+
+    for (i, &val) in tensor.iter().enumerate() {
+        assert!(
+            (0.0..=1.0).contains(&val),
+            "Pixel at index {i} must be normalized in [0.0, 1.0], got {val}"
+        );
+    }
+
+    // Min value should be 0.0 (pixel 2 is 0)
+    assert_eq!(tensor[2], 0.0, "Black pixel must normalize to 0.0");
+    // Max value should be 1.0 (pixel 0 is 255)
+    assert!(
+        (tensor[2 * 80 * 80] - 1.0).abs() < 1e-4,
+        "White pixel must normalize to 1.0"
+    );
+}
+
+#[test]
+fn test_pad_invalid_dimensions_message_80x80() {
+    let err =
+        OrtPadDetector::prepare_input(&[], 0, 0).expect_err("Zero dimension must fail validation");
+
+    match err {
+        InferenceError::InvalidDimensions { expected, actual } => {
+            assert_eq!(expected, (80, 80), "Expected dimensions must be (80, 80)");
+            assert_eq!(actual, (0, 0));
+        }
+        other => panic!("Unexpected error variant: {:?}", other),
+    }
+}
+
+#[test]
+fn test_pad_class_ordering_live_index_0() {
+    let threshold = 0.80f32;
+
+    // MiniFASNetV2 class ordering: [Class 0 = Live, Class 1 = Print, Class 2 = Replay]
+    // 1. Nominal Live presentation: Class 0 has highest prob >= threshold
+    let live_probs = [0.95, 0.03, 0.02];
+    let res = OrtPadDetector::interpret_probabilities(&live_probs, threshold, 0)
+        .expect("interpret_probabilities should succeed");
+    assert!(res.is_live, "Should be classified as live");
+    assert_eq!(res.score, 0.95);
+    assert_eq!(res.attack_type, None);
+
+    // 2. PrintPhoto spoof: Class 0 < threshold, Class 1 (Print) > Class 2 (Replay)
+    let print_probs = [0.10, 0.70, 0.20];
+    let res = OrtPadDetector::interpret_probabilities(&print_probs, threshold, 0)
+        .expect("interpret_probabilities should succeed");
+    assert!(!res.is_live, "Should be spoof");
+    assert_eq!(res.score, 0.10);
+    assert_eq!(res.attack_type, Some(AttackType::PrintPhoto));
+
+    // 3. ScreenReplay spoof: Class 0 < threshold, Class 2 (Replay) > Class 1 (Print)
+    let replay_probs = [0.10, 0.20, 0.70];
+    let res = OrtPadDetector::interpret_probabilities(&replay_probs, threshold, 0)
+        .expect("interpret_probabilities should succeed");
+    assert!(!res.is_live, "Should be spoof");
+    assert_eq!(res.score, 0.10);
+    assert_eq!(res.attack_type, Some(AttackType::ScreenReplay));
+}
+
+#[test]
+fn test_pad_class_ordering_configurable() {
+    let threshold = 0.80f32;
+
+    // Legacy MiniFASNet class ordering: [Class 0 = Print, Class 1 = Live, Class 2 = Replay]
+    // When live_class_index = 1:
+    // 1. Live presentation at index 1
+    let probs_legacy_live = [0.05, 0.92, 0.03];
+    let res_idx1 = OrtPadDetector::interpret_probabilities(&probs_legacy_live, threshold, 1)
+        .expect("interpret_probabilities should succeed");
+    assert!(res_idx1.is_live);
+    assert_eq!(res_idx1.score, 0.92);
+    assert_eq!(res_idx1.attack_type, None);
+
+    // With index 0, same probs would be spoof (p_live = 0.05)
+    let res_idx0 = OrtPadDetector::interpret_probabilities(&probs_legacy_live, threshold, 0)
+        .expect("interpret_probabilities should succeed");
+    assert!(!res_idx0.is_live);
+    assert_eq!(res_idx0.score, 0.05);
+
+    // 2. Print photo spoof with live_class_index = 1:
+    // Non-live are Class 0 (0.75) and Class 2 (0.15)
+    let probs_legacy_print = [0.75, 0.10, 0.15];
+    let res_print = OrtPadDetector::interpret_probabilities(&probs_legacy_print, threshold, 1)
+        .expect("interpret_probabilities should succeed");
+    assert!(!res_print.is_live);
+    assert_eq!(res_print.attack_type, Some(AttackType::PrintPhoto));
+
+    // 3. Screen replay spoof with live_class_index = 1:
+    let probs_legacy_replay = [0.15, 0.10, 0.75];
+    let res_replay = OrtPadDetector::interpret_probabilities(&probs_legacy_replay, threshold, 1)
+        .expect("interpret_probabilities should succeed");
+    assert!(!res_replay.is_live);
+    assert_eq!(res_replay.attack_type, Some(AttackType::ScreenReplay));
+}

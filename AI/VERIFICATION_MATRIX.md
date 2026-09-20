@@ -308,4 +308,14 @@ This document translates the critical gating criteria from §11 of `ARCHITECTURE
 |---|---|---|---|
 | NGM7 | `OrtEmbeddingExtractor` uses symmetric `[-1.0, +1.0]` normalization `(pixel - 127.5) / 127.5` and `MockEmbeddingExtractor` produces 512D vectors by default | Unit tests (`embedding_tests::test_embedding_normalization_symmetric_range`, `embedding_tests::test_mock_embedding_default_512d`) | ✅ Verified |
 
+---
+
+## Component: `pad-minifasnet-v2` (Issue #40 / GitHub #106)
+
+| # | Criterion | Test Method | Status |
+|---|---|---|---|
+| NGM8 | `OrtPadDetector::prepare_input()` produces 80×80 NCHW BGR tensors with `pixel / 255.0` normalization into `[0.0, 1.0]`, deterministic zeroization post-inference, and 80×80 dimension validation | Unit tests (`pad_tests::test_pad_prepare_input_80x80_bgr`, `pad_tests::test_pad_normalization_0_1_range`, `pad_tests::test_pad_invalid_dimensions_message_80x80`, `zeroize_tests::test_inference_input_buffers_zeroized`) | ✅ Verified |
+| NGM9 | `OrtPadDetector` defaults `live_class_index` to 0 (MiniFASNetV2 `[Live, Print, Replay]`) and supports configurable class indices with ordinal spoof attack classification (`PrintPhoto` vs `ScreenReplay`) | Unit tests (`pad_tests::test_pad_class_ordering_live_index_0`, `pad_tests::test_pad_class_ordering_configurable`) | ✅ Verified |
+| NGM10 | `OrtPadDetector` handles empty probability distributions fail-closed and preserves panic safety and numerical softmax stability | Unit tests (`pad_tests::test_softmax_numerical_stability`, `pad_tests::test_mock_pad_detector_*`) | ✅ Verified |
+
 

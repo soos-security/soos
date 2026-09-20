@@ -63,6 +63,7 @@ BACKLOG_TO_GITHUB = {
     37: 103,
     38: 104,
     39: 105,
+    40: 106,
 }
 
 BRANCH_TO_ISSUE = {
@@ -108,6 +109,7 @@ BRANCH_TO_ISSUE = {
     "feat/scrfd-face-detector": 37,
     "refactor/remove-ort-landmark-detector": 38,
     "feat/embedding-512d-w600k": 39,
+    "feat/pad-minifasnet-v2": 40,
 }
 
 

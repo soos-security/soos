@@ -9,7 +9,8 @@ The crate encapsulates:
 2. **Face Detection**: UltraFace Slim 320 ONNX model with deterministic pure-Rust Non-Maximum Suppression (NMS).
 3. **Landmark Estimation**: 5-point facial landmark domain structures (`FaceLandmarks`, `Point2f`) and `LandmarkDetector` trait for geometric alignment. In the next-gen 3-model pipeline, landmark regression is absorbed directly into SCRFD face detection (`OrtScrfdDetector`), with `MockLandmarkDetector` provided for deterministic simulation.
 4. **Biometric Feature Extraction**: ArcFace w600k embedding extractor generating L2-normalized 512D vectors with symmetric `[-1.0, +1.0]` normalization `(pixel - 127.5) / 127.5` (Verification Matrix Criteria `V2` and `NGM7`).
-5. **Hardware-Free Deterministic Simulation**: Mocks (`MockFaceDetector`, `MockLandmarkDetector`, `MockEmbeddingExtractor`) for seamless headless execution in CI pipelines and developer environments.
+5. **Presentation Attack Detection (Anti-Spoofing)**: MiniFASNetV2 80×80 BGR anti-spoofing model with `pixel / 255.0` normalization into `[0.0, 1.0]`, configurable `live_class_index` defaulting to 0 (`[Live, Print, Replay]`), and deterministic post-inference buffer zeroization (Verification Matrix Criteria `NGM8`, `NGM9`, `NGM10`).
+6. **Hardware-Free Deterministic Simulation**: Mocks (`MockFaceDetector`, `MockLandmarkDetector`, `MockEmbeddingExtractor`, `MockPadDetector`) for seamless headless execution in CI pipelines and developer environments.
 
 ---
 
@@ -94,6 +95,26 @@ pub trait EmbeddingExtractor: Send + Sync {
 ```
 Implemented by `OrtEmbeddingExtractor` (ArcFace w600k 512D) and `MockEmbeddingExtractor` (defaulting to 512D).
 
+### `PadDetector` Trait
+```rust
+pub trait PadDetector: Send + Sync {
+    fn evaluate_liveness(
+        &self,
+        rgb: &[u8],
+        width: u32,
+        height: u32,
+    ) -> Result<PadResult, InferenceError>;
+}
+```
+Implemented by `OrtPadDetector` (MiniFASNetV2 80×80 BGR) and `MockPadDetector`.
+
+`OrtPadDetector` incorporates:
+- BGR channel ordering with `pixel / 255.0` normalization into `[0.0, 1.0]`.
+- 80×80 NCHW tensor layout (`[1, 3, 80, 80]`).
+- Configurable `live_class_index` defaulting to 0 (MiniFASNetV2 `[Live, Print, Replay]`).
+- Softmax probability interpretation into `PadResult` with ordinal non-live attack detection (`PrintPhoto` vs `ScreenReplay`).
+- Immediate deterministic post-inference zeroization of input tensors (`Zeroizing<Vec<f32>>`).
+
 ---
 
 ## Model Acquisition & Deployment
@@ -121,5 +142,9 @@ sudo ./scripts/download_models.sh
 | **Global** | Each ONNX model is attested by manifest + SHA-256 checksum | `manifest_tests::test_parse_workspace_manifest_file`, `manifest_tests::test_verify_model_checksum_success_and_tamper_detection`, `registry_tests::test_registry_verify_integrity_missing_files_fails_closed` | Validated |
 | **D14** | ONNX model download, SHA-256 verification, and fail-fast startup attestation | `model_deployment_tests::test_download_script_verifies_checksums`, `model_deployment_tests::test_daemon_refuses_start_with_missing_models`, `model_deployment_tests::test_daemon_refuses_start_with_tampered_models` | Validated |
 | **V2** | L2-normalized embeddings (norm ≈ 1.0) | `embedding_tests::test_l2_norm_and_normalization_criterion_v2`, `proptest_suite::prop_embedding_normalization_criterion_v2` | Validated |
+| **NGM7** | ArcFace w600k 512D embeddings and symmetric `[-1.0, +1.0]` normalization | `embedding_tests::test_embedding_normalization_symmetric_range`, `embedding_tests::test_mock_embedding_default_512d` | Validated |
+| **NGM8** | MiniFASNetV2 80×80 BGR tensor preparation, `[0.0, 1.0]` normalization, and buffer zeroization | `pad_tests::test_pad_prepare_input_80x80_bgr`, `pad_tests::test_pad_normalization_0_1_range`, `pad_tests::test_pad_invalid_dimensions_message_80x80`, `zeroize_tests::test_inference_input_buffers_zeroized` | Validated |
+| **NGM9** | Configurable `live_class_index` defaulting to 0 with ordinal spoof attack classification | `pad_tests::test_pad_class_ordering_live_index_0`, `pad_tests::test_pad_class_ordering_configurable` | Validated |
+| **NGM10** | Fail-closed empty probability handling, panic safety, and numerical softmax stability | `pad_tests::test_softmax_numerical_stability`, `pad_tests::test_mock_pad_detector_*` | Validated |
 | **Invariant** | `#![forbid(unsafe_code)]` enabled | Invariant test & compile-time crate declaration | Validated |
 | **Invariant** | Zero OpenCV across workspace | `tests/invariants::test_no_opencv_in_any_cargo_toml` | Validated |
