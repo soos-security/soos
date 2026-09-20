@@ -328,5 +328,11 @@ This document translates the critical gating criteria from §11 of `ARCHITECTURE
 | NGM12 | Pipeline extracts 5-point landmarks directly from `FaceDetection` and fails closed on missing landmarks (`VisionError::MissingLandmarks`) | Unit tests (`pipeline_tests::test_pipeline_extracts_landmarks_from_detection`, `pipeline_tests::test_pipeline_fails_when_detection_lacks_landmarks`) | ✅ Verified |
 | NGM13 | Presentation Attack Detection receives 2.7× expanded bbox context crop resized to 80×80; embedding extractor receives 112×112 aligned crop | Unit tests (`pipeline_tests::test_expand_bbox_centered`, `pipeline_tests::test_expand_bbox_clamped_to_image`, `pipeline_tests::test_pipeline_pad_receives_expanded_crop`, `pipeline_tests::test_pipeline_embedding_receives_aligned_crop`) | ✅ Verified |
 
+---
 
+## Component: `vision-letterbox-and-bbox-crop` (Issue #42 / GitHub #108)
 
+| # | Criterion | Test Method | Status |
+|---|---|---|---|
+| NGM14 | Letterbox padding preserves aspect ratio with correct coordinate un-projection | Property test (`letterbox_tests::test_letterbox_unproject_roundtrip`, `letterbox_tests::test_letterbox_640x480_to_640x640`, `letterbox_tests::test_letterbox_1280x720_to_640x640`, `letterbox_tests::test_letterbox_square_no_padding`) | ✅ Verified |
+| NGM14b | Bounding box crop and resize with bilinear interpolation and out-of-bounds zero (black) padding | Unit tests (`crop_tests::test_crop_and_resize_known_image`, `crop_tests::test_crop_and_resize_out_of_bounds_padding`, `crop_tests::test_crop_and_resize_degenerate_bbox_returns_black`, `crop_tests::test_expand_bbox_for_pad_expansion_and_clamping`) | ✅ Verified |

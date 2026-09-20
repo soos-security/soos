@@ -19,6 +19,7 @@ crates/vision/
     ├── color.rs        # Pure Rust color conversion (YUYV, Grey, RGB24, MJPEG)
     ├── align.rs        # 5-point landmark affine alignment to 112x112
     ├── crop.rs         # Bounding box 2.7x expansion and crop-and-resize for PAD
+    ├── letterbox.rs    # Aspect-preserving letterbox padding and coordinate projection
     ├── matcher.rs      # Cosine similarity and template verification
     └── pipeline.rs     # VisionPipeline 3-model orchestrator & single-face invariant
 ```
@@ -85,6 +86,31 @@ $$\text{similarity}(a, b) = \frac{a \cdot b}{\|a\|_2 \|b\|_2}$$
 10. Extracts L2-normalized 512D biometric embedding (`EmbeddingExtractor`, ArcFace w600k).
 11. Compares against enrolled template via `match_embeddings`.
 
+### 2.5 Letterbox Padding & Coordinate Projection (`letterbox.rs`)
+
+Next-generation face detection (SCRFD) operates on uniform 640×640 square inputs. To accommodate arbitrary camera aspect ratios (e.g. 640×480, 1280×720, 1920×1080) without distortion or stretching:
+
+1. `letterbox_params(img_w, img_h, target_w, target_h) -> Result<LetterboxParams, VisionError>`
+   - Computes isotropic scale $s = \min(W_{\text{target}} / W_{\text{orig}}, H_{\text{target}} / H_{\text{orig}})$.
+   - Computes centered padding offsets $\text{pad}_x = (W_{\text{target}} - s \cdot W_{\text{orig}}) / 2$ and $\text{pad}_y = (H_{\text{target}} - s \cdot H_{\text{orig}}) / 2$.
+2. `letterbox_resize(rgb, img_w, img_h, target_w, target_h) -> Result<(Vec<u8>, LetterboxParams), VisionError>`
+   - Allocates zero-filled black canvas of target dimensions.
+   - Bilinear-interpolates the scaled image into the centered region.
+3. `LetterboxParams` Coordinate Mappings:
+   - `project(x, y)`: Transforms source frame coordinates to letterbox canvas space: $(x \cdot s + \text{pad}_x, y \cdot s + \text{pad}_y)$.
+   - `unproject(x, y)`: Inversely projects detection coordinates from letterbox space back to original camera frame coordinates: $((x - \text{pad}_x) / s, (y - \text{pad}_y) / s)$.
+   - `unproject_bbox(bbox)`: Unprojects bounding box corner coordinates.
+
+### 2.6 Bounding Box Expansion & Cropping (`crop.rs`)
+
+MiniFASNetV2 anti-spoofing requires wider facial context than the aligned 112×112 face crop:
+1. `expand_bbox_for_pad(bbox, scale, img_w, img_h) -> BoundingBox`:
+   - Scales the bounding box from its center by `scale` factor (typically 2.7×).
+   - Clamps the resulting coordinates to valid image dimensions $[0, W]$ and $[0, H]$.
+2. `crop_and_resize(rgb, img_w, img_h, bbox, target_w, target_h) -> Result<Vec<u8>, VisionError>`:
+   - Resizes the cropped region to target dimensions (e.g. 80×80) using bilinear interpolation.
+   - Any region extending beyond original image boundaries is padded with black (zero).
+
 ---
 
 ## 3. Performance & Latency Budget (Criterion V5)
@@ -113,3 +139,5 @@ The 3-model pipeline completes in under 30ms on mock fixtures and estimated ~80m
 | **NGM11** | VisionPipeline constructs with 3 backends (detector, pad, extractor) | `pipeline_tests::test_pipeline_constructs_with_three_backends` | ☑ Validated |
 | **NGM12** | Pipeline extracts landmarks from `FaceDetection`, not separate detector | `pipeline_tests::test_pipeline_extracts_landmarks_from_detection`, `test_pipeline_fails_when_detection_lacks_landmarks` | ☑ Validated |
 | **NGM13** | PAD receives 2.7× expanded crop (80×80); embedding receives aligned 112×112 crop | `pipeline_tests::test_pipeline_pad_receives_expanded_crop`, `test_pipeline_embedding_receives_aligned_crop`, `test_expand_bbox_centered`, `test_expand_bbox_clamped_to_image` | ☑ Validated |
+| **NGM14** | Letterbox padding preserves aspect ratio with correct coordinate un-projection | `letterbox_tests::test_letterbox_unproject_roundtrip`, `letterbox_tests::test_letterbox_640x480_to_640x640`, `letterbox_tests::test_letterbox_1280x720_to_640x640`, `letterbox_tests::test_letterbox_square_no_padding` | ✅ Verified |
+| **NGM14b** | Bounding box crop and resize with bilinear interpolation and out-of-bounds zero (black) padding | `crop_tests::test_crop_and_resize_known_image`, `crop_tests::test_crop_and_resize_out_of_bounds_padding`, `crop_tests::test_crop_and_resize_degenerate_bbox_returns_black`, `crop_tests::test_expand_bbox_for_pad_expansion_and_clamping` | ✅ Verified |
