@@ -1,59 +1,49 @@
 # Candid Review Report
 
 - **Date**: 2026-09-20
-- **Target Branch / Commit**: `refactor/vision-pipeline-3-model`
+- **Target Branch / Commit**: `feat/vision-letterbox-and-bbox-crop`
 - **Audited Files**:
-  - `crates/vision/src/crop.rs`
-  - `crates/vision/src/error.rs`
+  - `crates/vision/src/letterbox.rs`
   - `crates/vision/src/lib.rs`
-  - `crates/vision/src/pipeline.rs`
-  - `crates/vision/tests/pipeline_tests.rs`
-  - `crates/vision/tests/pad_tests.rs`
-  - `crates/vision/tests/zeroize_tests.rs`
-  - `crates/vision/tests/bench_tests.rs`
-  - `crates/inference-ort/src/mock.rs`
-  - `crates/daemon/src/pipeline.rs`
-  - `crates/daemon/tests/pipeline_init_tests.rs`
-  - `crates/daemon/tests/pipeline_integration_tests.rs`
-  - `crates/enrollment-cli/src/service.rs`
-  - `crates/enrollment-cli/tests/delete_tests.rs`
-  - `crates/enrollment-cli/tests/enroll_tests.rs`
-  - `crates/enrollment-cli/tests/list_tests.rs`
-  - `crates/enrollment-cli/tests/root_check_tests.rs`
-  - `crates/enrollment-cli/tests/verify_tests.rs`
+  - `crates/vision/tests/crop_tests.rs`
+  - `crates/vision/tests/letterbox_tests.rs`
   - `scripts/sync_issue.py`
 
 ## 1. Executive Summary
-This pull request cleanly restructures `VisionPipeline` from a 4-inference pipeline to the next-generation 3-model architecture mandated by ADR [2026-09-20]. The separate landmark detection model has been removed from `VisionPipeline`, with 5-point facial landmarks extracted directly from the primary `FaceDetection` candidate populated by SCRFD. Furthermore, the Presentation Attack Detection (PAD) stage now receives a 2.7x expanded bounding box context crop resized to 80x80 pixels, while feature embedding extraction retains the canonical 112x112 affine-aligned crop. Downstream consumers across `soos-daemon` and `soos-enrollment-cli` have been systematically updated to preserve workspace-wide build and test integrity.
+
+This pull request implements Issue #42 (GitHub #108), providing two essential image preprocessing utility modules in `crates/vision`:
+1. `letterbox_resize()` and `LetterboxParams`: Uniform scaling, symmetric padding, and forward/inverse coordinate projection preserving aspect ratio for next-generation face detection (SCRFD 640×640).
+2. `crop_and_resize()` test suite: Contractual verification for bounding box cropping, bilinear interpolation, and out-of-bounds zero (black) padding for presentation attack detection (MiniFASNetV2 80×80).
+
+The implementation adheres strictly to `#![forbid(unsafe_code)]`, eliminates potential arithmetic overflow through `checked_mul`, maintains sub-millisecond execution without async runtimes, and enforces zero test weakening.
+
+---
 
 ## 2. Deep Reasoning Audit
 
 ### Logic & Architecture
-- **Pass**: State transitions and pipeline stages execute in strict security sequence: color conversion -> single-face detection invariant -> landmark extraction check -> 2.7x expanded bbox PAD evaluation -> 112x112 affine alignment -> biometric embedding extraction.
-- **Pass**: `expand_bbox_for_pad` accurately computes center-expanded coordinates clamped to `[0, img_w]` and `[0, img_h]`.
-- **Pass**: `crop_and_resize` properly validates buffer dimensions, preventing integer overflow with checked arithmetic (`checked_mul`), and applies bilinear interpolation with zero-padding for out-of-bounds regions.
+- **Pass**: Aspect ratio calculation accurately selects isotropic scale `min(target_w / img_w, target_h / img_h)` and computes centered offsets `(target - scaled) / 2.0`. Forward projection (`project`) and inverse un-projection (`unproject`) are exact inverses, confirmed across arbitrary dimensions by proptest property testing. Bilinear interpolation correctly samples and interpolates 4 neighboring pixels while keeping padded border pixels strictly black (0, 0, 0).
 
 ### PAM Concurrency & Deadlines
-- **Pass**: No asynchronous runtime (Tokio) or blocking without deadlines in PAM pathways.
-- **Pass**: Zero standard output or error stream pollution (`println!`, `dbg!`) introduced.
-- **Pass**: Pipeline benchmark confirms full perception pipeline executes well within the 150ms budget (~80ms).
+- **Pass**: Zero asynchronous runtimes or threads. Zero blocking I/O calls. Pure in-memory computation executes in < 1ms for 640×640 frames, easily satisfying the 150ms PAM latency budget. Zero stream pollution (`println!`, `eprintln!`, `dbg!`).
 
 ### Panic Safety & Fallback
-- **Pass**: Zero `unwrap()` or `expect()` introduced in production code.
-- **Pass**: Missing landmarks in `FaceDetection` fail closed with explicit `VisionError::MissingLandmarks` rather than panicking.
-- **Pass**: `#![forbid(unsafe_code)]` remains strictly enforced in `soos-vision`.
+- **Pass**: All public functions return `Result<_, VisionError>`. Zero `unwrap()` or `expect()` in production code. Degenerate scales (`scale <= 0.0`) fail closed returning `(0.0, 0.0)`. Zero-dimensions (`width == 0` or `height == 0`) and buffer length mismatches fail closed with `VisionError::InvalidDimensions` and `VisionError::InvalidBufferSize`.
 
 ### Test Integrity & Anti-Weakening
-- **Pass**: Pre-written contractual tests in `crates/vision/tests/pipeline_tests.rs` comprehensively cover 3-backend construction, landmark extraction from detection, centered and clamped bbox expansion, 80x80 PAD crop reception, 112x112 embedding crop reception, and config defaults.
-- **Pass**: Existing tests were updated exclusively to adapt to the 3-backend constructor signature without altering or relaxing any security threshold, assertion, or invariant.
+- **Pass**: Zero existing tests were modified or weakened. Two comprehensive contractual test suites were added: `letterbox_tests.rs` (9 unit and property tests including proptest NGM14) and `crop_tests.rs` (6 unit tests verifying known patterns, OOB padding, degenerate bboxes, and clamping).
 
 ### Memory & Secret Bounds
-- **Pass**: Intermediate `pad_crop` buffer is wrapped in `Zeroizing` and automatically scrubbed on drop.
-- **Pass**: `AlignedCropGuard` guarantees zeroization of aligned crops if processing terminates prematurely.
-- **Pass**: No raw embeddings or facial frames are logged or leaked across module boundaries.
+- **Pass**: Allocations are strictly bounded by canvas dimensions checked with `checked_mul`. No passwords, credentials, or raw biometric templates are touched or leaked. Intermediate pixel arrays stay within local scopes.
+
+---
 
 ## 3. Detailed Findings & Action Items
-- None. All checks and security invariants pass cleanly with zero compiler warnings.
+
+- None. All quality checks, bounds validations, and test invariants are strictly satisfied.
+
+---
 
 ## 4. Final Verdict
+
 **VERDICT: APPROVED**

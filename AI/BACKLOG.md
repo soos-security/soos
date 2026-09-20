@@ -1571,13 +1571,13 @@ Two new image utility functions are needed: letterbox padding for SCRFD input, a
 
 #### Sub-issues
 
-- [ ] **#42.1** — Implement `letterbox_resize()` utility in `vision` crate
+- [x] **#42.1** — Implement `letterbox_resize()` utility in `vision` crate
   - Compute scale and padding to fit arbitrary W×H into target×target with aspect ratio preserved
   - Return `LetterboxParams { scale, pad_x, pad_y }` for coordinate un-projection
   - Acceptance: Non-square frames are correctly padded
   - TDD: `test_letterbox_640x480_to_640x640`, `test_letterbox_1280x720_to_640x640`, `test_letterbox_square_no_padding`
 
-- [ ] **#42.2** — Implement `crop_and_resize()` utility in `vision` crate
+- [x] **#42.2** — Implement `crop_and_resize()` utility in `vision` crate
   - Crop an RGB buffer by bounding box, resize to target dimensions using nearest-neighbor or bilinear interpolation
   - Handle out-of-bounds regions with black padding
   - Acceptance: Crop + resize produces correct output for known input
