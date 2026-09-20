@@ -243,6 +243,7 @@ impl EnrollmentService {
                         .map(|i| FaceDetection {
                             box_: BoundingBox::new(10.0 * (i as f32 + 1.0), 10.0, 50.0, 50.0),
                             score: 0.90,
+                            landmarks: None,
                         })
                         .collect();
                     candidates.push(CandidateEvaluation {
@@ -257,6 +258,7 @@ impl EnrollmentService {
                         detections: vec![FaceDetection {
                             box_: BoundingBox::new(10.0, 10.0, 50.0, 50.0),
                             score: confidence,
+                            landmarks: None,
                         }],
                     });
                     outputs.push(None);
@@ -556,6 +558,7 @@ pub fn build_full_service(cli: &Cli) -> Result<EnrollmentService, EnrollmentCliE
         let detection = FaceDetection {
             box_: BoundingBox::new(20.0, 20.0, 80.0, 80.0),
             score: 0.95,
+            landmarks: None,
         };
         let detector = Arc::new(MockFaceDetector::new_with_detections(vec![detection]));
         let landmarks = Arc::new(MockLandmarkDetector::new_canonical());

@@ -18,8 +18,10 @@ pub mod mock;
 pub mod pad;
 pub mod registry;
 
-// Re-export primary types for ergonomic workspace usage
-pub use detector::{nms, BoundingBox, FaceDetection, FaceDetector, OrtFaceDetector};
+pub use detector::{
+    letterbox_pad, nms, unproject, BoundingBox, FaceDetection, FaceDetector, OrtFaceDetector,
+    OrtScrfdDetector,
+};
 pub use embedding::{BiometricEmbedding, EmbeddingExtractor, OrtEmbeddingExtractor};
 pub use error::InferenceError;
 pub use landmarks::{FaceLandmarks, LandmarkDetector, OrtLandmarkDetector, Point2f};

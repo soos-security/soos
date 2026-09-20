@@ -281,3 +281,13 @@ This document translates the critical gating criteria from §11 of `ARCHITECTURE
 | NGM1 | `models/manifest.toml` v2.0.0 contains exactly 3 model entries (`scrfd_500m_kps`, `arcface_w600k_mbf`, `minifasnet_v2_pad`) with valid SHA-256 checksums and tensor shapes | Manifest parsing test (`manifest_tests::test_parse_workspace_manifest_file`, `manifest_tests::test_manifest_v2_model_count_and_checksum_attestation`) | ✅ Verified |
 | NGM2 | All 3 ONNX model files download successfully and pass cryptographic SHA-256 verification and dry-run validation | Script test (`scripts/download_models.sh --dry-run`, `scripts/download_models.sh --check-only`) | ✅ Verified |
 
+
+---
+
+## Component: `scrfd-face-detector` (Issue #37 / GitHub #103)
+
+| # | Criterion | Test Method | Status |
+|---|---|---|---|
+| NGM3 | `OrtScrfdDetector` parses 9 output tensors across 3 strides (8, 16, 32) with distance-to-border box decoding and startup validation | Unit tests (`scrfd_tests::test_scrfd_decode_stride8_known_output`, `scrfd_tests::test_scrfd_decode_all_strides`, `scrfd_tests::test_scrfd_rejects_invalid_output_count`, `scrfd_tests::test_scrfd_validates_shape_patterns`) | ✅ Verified |
+| NGM4 | SCRFD input is BGR 640×640 with letterbox padding and `(pixel - 127.5) / 128.0` normalization | Unit & property tests (`scrfd_tests::test_letterbox_preserves_aspect_ratio`, `scrfd_tests::test_prepare_input_bgr_channel_ordering`, `scrfd_tests::test_letterbox_unproject_roundtrip`) | ✅ Verified |
+| NGM5 | SCRFD detection includes 5-point landmarks in `FaceDetection` struct with coordinate un-projection | Unit tests (`scrfd_tests::test_face_detection_carries_landmarks`, `scrfd_tests::test_unproject_coordinates_match_original_image`) | ✅ Verified |
