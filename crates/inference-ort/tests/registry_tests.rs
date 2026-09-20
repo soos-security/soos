@@ -33,16 +33,10 @@ fn test_registry_initialization_with_workspace_manifest() {
     let config = RegistryConfig::new(&models_dir);
     let registry = ModelRegistry::new(config).expect("failed to load registry");
 
-    assert_eq!(registry.manifest().manifest.version, "1.0.0");
-    assert!(registry
-        .manifest()
-        .get_model("ultraface_slim_320")
-        .is_some());
-    assert!(registry.manifest().get_model("landmark_5point").is_some());
-    assert!(registry
-        .manifest()
-        .get_model("mobilefacenet_arcface")
-        .is_some());
+    assert_eq!(registry.manifest().manifest.version, "2.0.0");
+    assert!(registry.manifest().get_model("scrfd_500m_kps").is_some());
+    assert!(registry.manifest().get_model("arcface_w600k_mbf").is_some());
+    assert!(registry.manifest().get_model("minifasnet_v2_pad").is_some());
 }
 
 #[test]

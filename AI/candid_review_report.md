@@ -1,62 +1,64 @@
-# Candid Review Report
+# Candid Code Review Report — Issue #36: [manifest] Download and Attest Next-Generation ONNX Models
 
-- **Date**: 2026-09-20
-- **Target Branch / Commit**: `fix/cli-security`
-- **Audited Files**:
-  - `crates/enrollment-cli/src/args.rs`
-  - `crates/enrollment-cli/src/error.rs`
-  - `crates/enrollment-cli/src/lib.rs`
-  - `crates/enrollment-cli/src/main.rs`
-  - `crates/enrollment-cli/src/service.rs`
-  - `crates/enrollment-cli/tests/path_validation_tests.rs`
-  - `crates/enrollment-cli/tests/root_check_tests.rs`
-  - `crates/enrollment-cli/tests/scaffold_tests.rs`
-  - `crates/enrollment-cli/tests/delete_tests.rs`
-  - `crates/enrollment-cli/tests/list_tests.rs`
-  - `crates/daemon/tests/systemd_test.rs`
-  - `packaging/soos-daemon.service`
-  - `AI/ARCHITECTURE.md`
-  - `scripts/sync_issue.py`
+**Date**: 2026-09-20  
+**Target Issue**: Issue #36 (`feat/nextgen-models-manifest`, GitHub #102)  
+**Reviewer**: Candid Reviewer Sub-Agent (Dev-Workflow Phase 5)  
+**Base Reference**: `origin/main`
+
+---
 
 ## 1. Executive Summary
 
-This patch addresses Issue #35 by removing the hidden unprivileged CLI bypass flag (`--skip-root-check`) from `soos-enroll`, systematically enforcing root privileges across all subcommands (`enroll`, `verify`, `delete`, `list`), introducing rigorous path sanitization and FHS hierarchy boundary validation, and hardening `soos-daemon.service` with `Group=soos` and `StateDirectory=soos`. The changes are robust, defensive, panic-free, and thoroughly validated with contractual automated tests.
+This candid code review evaluates the changes implemented for Issue #36:
+- Modernized `models/manifest.toml` from v1.0.0 (4 obsolete models) to v2.0.0 (3 unified models: `scrfd_500m_kps`, `arcface_w600k_mbf`, `minifasnet_v2_pad`).
+- Updated `scripts/download_models.sh` with the verified direct download URLs for the next-generation models.
+- Updated `models/README.md` with comprehensive specifications, tensor shapes, normalization rules, and legacy model lineage.
+- Updated `crates/inference-ort/tests/manifest_tests.rs`, `crates/inference-ort/tests/registry_tests.rs`, and `crates/enrollment-cli/tests/model_id_tests.rs` with contractual acceptance tests for `NGM1` and `NGM2`.
+- Validated all tests against live downloaded model binaries, confirming exact SHA-256 digests and 9-output tensor parsing for SCRFD.
 
-## 2. Deep Reasoning Audit
+---
 
-### Logic & Architecture
-- **Pass**:
-  - `Cli` struct no longer accepts `--skip-root-check`, preventing runtime bypasses of administrative privilege checks.
-  - `check_privileges` is now called at the entry points of `service.verify` and `service.list`, as well as at binary entry in `main.rs`, completing privilege enforcement across all four subcommands.
-  - `sanitize_path`, `validate_fhs_path`, and `validate_camera_device_path` enforce zero path traversal (`..`), mandate absolute paths, and restrict assets to permitted FHS hierarchies and camera devices strictly to `/dev/`.
-  - Service builders `build_store_only` and `build_full_service` validate all paths up front before initializing disk access or neural pipelines.
-  - `soos-daemon.service` declares `Group=soos` and `StateDirectory=soos` with `StateDirectoryMode=0755`, matching IPC directory permissions and systemd best practices.
+## 2. Pillar Analysis
 
-### PAM Concurrency & Deadlines
-- **Pass**:
-  - No changes in `crates/pam`.
-  - No asynchronous runtimes or threads introduced into synchronous modules.
+### Pillar 1: Logic & Architecture
+- `models/manifest.toml` establishes version `"2.0.0"` with exactly 3 models, fulfilling `NGM1`.
+- `scrfd_500m_kps.onnx` unifies face detection and 5-point landmark regression into a single pass, outputting 9 tensors across strides 8, 16, and 32.
+- `arcface_w600k_mbf.onnx` outputs 512D embeddings.
+- `minifasnet_v2_80x80.onnx` performs presentation attack detection with 80×80 BGR input.
+- `scripts/download_models.sh` correctly resolves download URLs and enforces strict SHA-256 verification before deployment.
 
-### Panic Safety & Fallback
-- **Pass**:
-  - Zero `unwrap()` or `expect()` in production code.
-  - All path validation, camera device checks, and privilege checks return typed `Result<T, EnrollmentCliError>`.
-  - Fail-closed behavior on all validation failures.
+### Pillar 2: PAM Concurrency & Real-Time Deadlines
+- No runtime modifications to the PAM module or blocking calls introduced.
+- Model attestation occurs offline during setup and during daemon startup.
+- Real-time deadlines in PAM (`pam_soos.so`) are completely unaffected.
 
-### Test Integrity & Anti-Weakening
-- **Pass**:
-  - Dedicated contractual test suites `path_validation_tests.rs` and `root_check_tests.rs` author rigorous positive and negative test cases.
-  - Pre-existing tests in `delete_tests.rs`, `list_tests.rs`, and `scaffold_tests.rs` were updated only to remove the obsolete `skip_root_check` struct field while preserving their underlying contractual assertions.
-  - Contractual test `systemd_test.rs` updated to strictly require `Group=soos`, `StateDirectory=soos`, and explicitly forbid `Group=root`.
+### Pillar 3: Panic Safety & Fallback
+- `ModelManifest::from_file()` and `from_toml_str()` return typed errors (`InferenceError`).
+- Invariant tests confirm fail-closed behavior on missing or corrupted models.
+- Zero `unwrap()` or `expect()` in production library code.
 
-### Memory & Secret Bounds
-- **Pass**:
-  - Path normalization operates on bounded path components without unbounded buffer growth.
-  - Zero sensitive cryptographic keys or biometric templates exposed in error messages or logs.
-  - `#![forbid(unsafe_code)]` maintained in `crates/enrollment-cli`.
+### Pillar 4: Test Integrity & Anti-Weakening
+- Contractual tests in `crates/inference-ort/tests/manifest_tests.rs` rigorously assert:
+  - Manifest version `2.0.0`
+  - Exactly 3 models
+  - Accurate shapes, licenses, and SHA-256 digests
+  - Absence of obsolete v1 models
+- All regression suites across the entire monorepo pass without modification.
 
-## 3. Detailed Findings & Action Items
-- None. All security invariants, architectural requirements, and test contracts are satisfied.
+### Pillar 5: Memory & Secret Bounds
+- Model manifest metadata only contains public model architecture details.
+- Zero secret, key, or biometric embedding exposure in logs or schemas.
+- File permissions strictly maintained (`0644` files, `0755` directories).
 
-## 4. Final Verdict
+---
+
+## 3. Deliverable Language Policy Compliance
+
+- All code comments, docstrings, commits, documentation, and error strings are strictly in English.
+- Script outputs conform to standard POSIX conventions.
+
+---
+
+## 4. Formal Review Verdict
+
 **VERDICT: APPROVED**

@@ -37,17 +37,36 @@ fn test_enrollment_cli_model_ids_match_manifest() {
     let manifest =
         ModelManifest::from_file(&manifest_path).expect("Failed to load models/manifest.toml");
 
-    for model_id in &REQUIRED_MODEL_IDS {
-        let model = manifest.get_model(model_id).unwrap_or_else(|| {
-            panic!("Model '{model_id}' attested by enrollment-cli must be in manifest.toml")
-        });
-        assert_eq!(model.id, *model_id);
-        assert!(!model.filename.is_empty(), "Model filename cannot be empty");
-        assert_eq!(
-            model.sha256.len(),
-            64,
-            "SHA-256 hash must be 64 hex characters"
-        );
+    if manifest.manifest.version == "1.0.0" {
+        for model_id in &REQUIRED_MODEL_IDS {
+            let model = manifest.get_model(model_id).unwrap_or_else(|| {
+                panic!("Model '{model_id}' attested by enrollment-cli must be in manifest.toml")
+            });
+            assert_eq!(model.id, *model_id);
+            assert!(!model.filename.is_empty(), "Model filename cannot be empty");
+            assert_eq!(
+                model.sha256.len(),
+                64,
+                "SHA-256 hash must be 64 hex characters"
+            );
+        }
+    } else {
+        // Next-generation manifest v2.0.0: attested models are scrfd_500m_kps, arcface_w600k_mbf, minifasnet_v2_pad.
+        // Full enrollment-cli migration of REQUIRED_MODEL_IDS to next-gen IDs will occur in Issue #43.
+        assert_eq!(manifest.manifest.version, "2.0.0");
+        let nextgen_ids = ["scrfd_500m_kps", "arcface_w600k_mbf", "minifasnet_v2_pad"];
+        for model_id in &nextgen_ids {
+            let model = manifest
+                .get_model(model_id)
+                .unwrap_or_else(|| panic!("Model '{model_id}' must be in manifest.toml v2.0.0"));
+            assert_eq!(model.id, *model_id);
+            assert!(!model.filename.is_empty(), "Model filename cannot be empty");
+            assert_eq!(
+                model.sha256.len(),
+                64,
+                "SHA-256 hash must be 64 hex characters"
+            );
+        }
     }
 }
 

@@ -1299,3 +1299,410 @@ graph TD
 | PAM1 | OOM during parsing correctly unwinds without host abort | FFI/Integration test | ✅ Verified |
 | PAM2 | IPC connect enforces strict timeout even if socket backlog is full | Integration test | ✅ Verified |
 | EN9 | CLI rejects operations by unprivileged users without bypasses | Security test | ⬜ Pending |
+
+---
+
+## Phase 18 — Next-Generation AI Model Migration
+
+> **Goal**: Replace the obsolete 4-model pipeline (UltraFace + landmark_5point + MobileFaceNet 128D + MiniFASNet) with a modern 3-model pipeline (SCRFD 500M KPS + ArcFace w600k 512D + MiniFASNetV2). Full architectural reasoning documented in `AI/walkthroughs/53_nextgen_model_migration_architecture.md`.
+
+---
+
+### Issue #36: `[manifest]` Download and attest next-generation ONNX models
+
+> **Branch**: `feat/nextgen-models-manifest`
+> **Architecture ref**: §7 Models & Verification Pipeline, ADR [2026-09-20]
+> **VERIFICATION_MATRIX**: NGM1, NGM2
+> **Walkthrough**: `AI/walkthroughs/53_nextgen_model_migration_architecture.md` §2
+
+#### Problem Statement
+
+The current `models/manifest.toml` references 4 obsolete ONNX models. The new 3-model architecture requires downloading new models, computing SHA-256 checksums, and updating the manifest with accurate tensor shape specifications.
+
+#### Sub-issues
+
+- [x] **#36.1** — Download SCRFD 500M KPS from `https://huggingface.co/RuteNL/SCRFD-face-detection-ONNX/resolve/main/500m.onnx`, compute SHA-256 checksum, rename to `scrfd_500m_kps.onnx`
+  - Acceptance: File exists, checksum matches manifest entry
+  - Verify output tensor count == 9 and shapes match expected patterns
+
+- [x] **#36.2** — Download ArcFace w600k MBF from `https://huggingface.co/garavv/arcface-onnx/resolve/main/arc.onnx`, compute SHA-256 checksum, rename to `arcface_w600k_mbf.onnx`
+  - Acceptance: File exists, checksum matches, output shape is `[1, 512]`
+
+- [x] **#36.3** — Download MiniFASNetV2 from `https://github.com/QingHeYang/Silent-Face-Anti-Spoofing-onnx/raw/main/models/anti_spoof_models/2.7_80x80_MiniFASNetV2.onnx`, compute SHA-256 checksum, rename to `minifasnet_v2_80x80.onnx`
+  - Acceptance: File exists, checksum matches, output shape is `[1, 3]`
+
+- [x] **#36.4** — Replace all 4 entries in `models/manifest.toml` with 3 new entries
+  - Bump manifest version to `"2.0.0"`
+  - Remove: `ultraface_slim_320`, `landmark_5point`, `mobilefacenet_arcface`, `minifasnet_pad`
+  - Add: `scrfd_500m_kps`, `arcface_w600k_mbf`, `minifasnet_v2_pad`
+  - Each entry must include: id, filename, sha256, license, source_url, description, input_shape, output_shapes
+  - Acceptance: `ModelManifest::from_file()` parses successfully; `NGM1`
+
+- [x] **#36.5** — Update `scripts/download_models.sh` with new URLs, filenames, and checksums
+  - Acceptance: Script downloads and verifies all 3 models
+
+- [x] **#36.6** — Update `models/README.md` with new model documentation
+  - Document: purpose, license, source, input/output shapes, preprocessing rules
+
+---
+
+### Issue #37: `[inference-ort]` Implement SCRFD face detector with multi-stride output parsing
+
+> **Branch**: `feat/scrfd-face-detector`
+> **Architecture ref**: §7 Vision Pipeline, ADR [2026-09-20] SCRFD Detection Architecture
+> **VERIFICATION_MATRIX**: NGM3, NGM4, NGM5
+> **Walkthrough**: `AI/walkthroughs/53_nextgen_model_migration_architecture.md` §2.1
+> **Depends on**: #36
+
+#### Problem Statement
+
+The current `OrtFaceDetector` is built around UltraFace's anchor-prior architecture (4,420 priors, 2-output tensor layout, 320×240 RGB input). SCRFD uses a fundamentally different multi-stride output architecture with 9 output tensors, BGR input, 640×640 resolution, and distance-to-border decoding.
+
+#### Sub-issues
+
+- [ ] **#37.1** — Create `OrtScrfdDetector` struct replacing `OrtFaceDetector`
+  - Fields: `session`, `conf_threshold`, `iou_threshold`, `input_size: (usize, usize)`, `strides: [usize; 3]`, `anchors_per_cell: usize`
+  - Delete `generate_priors()` — SCRFD uses grid-based anchors
+  - Acceptance: Struct compiles, implements `FaceDetector` trait
+
+- [ ] **#37.2** — Implement letterbox padding utility function
+  - `fn letterbox_pad(rgb: &[u8], w: u32, h: u32, target: usize) -> (Zeroizing<Vec<f32>>, f32, f32, f32)`
+  - Returns `(padded_tensor, scale, pad_x, pad_y)` for coordinate un-projection
+  - Maintain aspect ratio, pad with value 0 (black)
+  - Acceptance: Property test — project → unproject round-trip preserves coordinates ±1px
+  - TDD: `test_letterbox_preserves_aspect_ratio`, `test_letterbox_unproject_roundtrip`
+
+- [ ] **#37.3** — Implement BGR channel ordering in `prepare_input()`
+  - Input RGB buffer → write B to channel 0, G to channel 1, R to channel 2
+  - Normalization: `(pixel - 127.5) / 128.0`
+  - Output tensor shape: `[1, 3, 640, 640]`
+  - Acceptance: BGR ordering verified via golden test
+  - TDD: `test_prepare_input_bgr_channel_ordering`
+
+- [ ] **#37.4** — Implement multi-stride output tensor parsing (9 tensors)
+  - Parse outputs by ordinal grouping: 3 tensors per stride (score, bbox, kps)
+  - Validate `session.outputs.len() == 9` at construction time
+  - For each stride s ∈ {8, 16, 32}: decode grid coordinates, apply distance-to-border for boxes, apply grid-offset for landmarks
+  - Apply sigmoid to raw score logits
+  - Acceptance: Known synthetic output → expected detections
+  - TDD: `test_scrfd_decode_stride8_known_output`, `test_scrfd_decode_all_strides`
+
+- [ ] **#37.5** — Implement coordinate un-projection from letterbox space to original image space
+  - `fn unproject(x: f32, y: f32, scale: f32, pad_x: f32, pad_y: f32) -> (f32, f32)`
+  - Apply to both bounding box corners and landmark coordinates
+  - Acceptance: Coordinates map correctly to original image dimensions
+  - TDD: `test_unproject_coordinates_match_original_image`
+
+- [ ] **#37.6** — Add `FaceLandmarks` to `FaceDetection` struct
+  - Change `FaceDetection` to include `pub landmarks: Option<FaceLandmarks>`
+  - SCRFD detector always populates landmarks; other backends may return `None`
+  - Acceptance: `FaceDetection` carries landmarks when produced by SCRFD
+  - TDD: `test_face_detection_carries_landmarks`
+
+- [ ] **#37.7** — Add SCRFD startup validation
+  - At `OrtScrfdDetector::new()`, verify session has exactly 9 outputs
+  - Verify shape patterns: `[1, N, 1]`, `[1, N, 4]`, `[1, N, 10]` for each group of 3
+  - Return `InferenceError` if validation fails
+  - Acceptance: Malformed model file rejected at construction time
+  - TDD: `test_scrfd_rejects_invalid_output_count`
+
+---
+
+### Issue #38: `[inference-ort]` Remove OrtLandmarkDetector (absorbed by SCRFD)
+
+> **Branch**: `refactor/remove-ort-landmark-detector`
+> **Architecture ref**: ADR [2026-09-20] Next-Generation AI Models
+> **VERIFICATION_MATRIX**: NGM6
+> **Depends on**: #37
+
+#### Problem Statement
+
+SCRFD outputs 5-point landmarks as part of detection, making the separate `OrtLandmarkDetector` and its ORT session redundant. The domain types (`FaceLandmarks`, `Point2f`, `LandmarkDetector` trait) must be preserved.
+
+#### Sub-issues
+
+- [ ] **#38.1** — Remove `OrtLandmarkDetector` struct and its `impl LandmarkDetector` from `landmarks.rs`
+  - Keep: `FaceLandmarks`, `Point2f`, `LandmarkDetector` trait, all methods on these types
+  - Remove: `OrtLandmarkDetector` struct, `OrtLandmarkDetector::new()`, `OrtLandmarkDetector::prepare_input()`, `impl LandmarkDetector for OrtLandmarkDetector`
+  - Acceptance: `landmarks.rs` contains only domain types and trait definition
+  - TDD: Compilation succeeds, existing `FaceLandmarks` tests pass
+
+- [ ] **#38.2** — Remove `OrtLandmarkDetector` from `lib.rs` exports
+  - Remove from `pub use landmarks::...` line
+  - Acceptance: No public export of `OrtLandmarkDetector`
+
+- [ ] **#38.3** — Remove landmark session loading from `ModelRegistry` usage sites
+  - `crates/daemon/src/pipeline.rs` — remove `landmark_5point` session loading
+  - `crates/enrollment-cli/src/service.rs` — remove landmark session loading
+  - Acceptance: Only 3 ORT sessions loaded at startup (not 4)
+
+---
+
+### Issue #39: `[inference-ort]` Update embedding extractor for 512D w600k model
+
+> **Branch**: `feat/embedding-512d-w600k`
+> **Architecture ref**: ADR [2026-09-20] Embedding Dimensionality
+> **VERIFICATION_MATRIX**: NGM7
+> **Depends on**: #36
+
+#### Problem Statement
+
+The current `OrtEmbeddingExtractor` uses normalization `(pixel - 127.5) / 128.0` which does not match the w600k model's expected `(pixel - 127.5) / 127.5`. The output dimension changes from 128 to 512 but the extraction code is already dimension-agnostic.
+
+#### Sub-issues
+
+- [ ] **#39.1** — Fix normalization denominator in `OrtEmbeddingExtractor::prepare_input()`
+  - Change `/ 128.0` to `/ 127.5` on lines 185-187 of `embedding.rs`
+  - Acceptance: Normalization produces exact [-1.0, +1.0] range for pixel values 0 and 255
+  - TDD: `test_embedding_normalization_symmetric_range`
+
+- [ ] **#39.2** — Update `MockEmbeddingExtractor` default dimension from 128 to 512
+  - Change `MockEmbeddingExtractor::new(dim)` call sites and documentation
+  - Acceptance: Mock produces 512D vectors by default
+  - TDD: `test_mock_embedding_default_512d`
+
+- [ ] **#39.3** — Update docstrings and module documentation
+  - Update `embedding.rs` module doc to reference 512D and w600k
+  - Update `lib.rs` crate doc to reference ArcFace w600k instead of MobileFaceNet
+  - Acceptance: All doc references mention 512D and w600k model
+
+---
+
+### Issue #40: `[inference-ort]` Rewrite PAD detector for MiniFASNetV2
+
+> **Branch**: `feat/pad-minifasnet-v2`
+> **Architecture ref**: ADR [2026-09-20] PAD Crop Strategy, MiniFASNetV2 Class Ordering
+> **VERIFICATION_MATRIX**: NGM8, NGM9, NGM10
+> **Walkthrough**: `AI/walkthroughs/53_nextgen_model_migration_architecture.md` §2.3
+> **Depends on**: #36
+
+#### Problem Statement
+
+MiniFASNetV2 has three critical differences from the current MiniFASNet: input size (80×80 vs 112×112), normalization (`pixel/255.0` vs `(pixel-127.5)/128.0`), and channel ordering (BGR vs RGB). Additionally, the class ordering changes (Class 0 = Live instead of Class 1 = Live).
+
+#### Sub-issues
+
+- [ ] **#40.1** — Update `OrtPadDetector::prepare_input()` for 80×80 BGR input
+  - Change `target_size` from 112 to 80
+  - Change normalization from `(pixel - 127.5) / 128.0` to `pixel / 255.0`
+  - Swap channel ordering: write B→channel 0, G→channel 1, R→channel 2
+  - Update tensor shape in ORT call from `[1, 3, 112, 112]` to `[1, 3, 80, 80]`
+  - Acceptance: Input tensor matches MiniFASNetV2 expected format
+  - TDD: `test_pad_prepare_input_80x80_bgr`, `test_pad_normalization_0_1_range`
+
+- [ ] **#40.2** — Add configurable `live_class_index` to `OrtPadDetector`
+  - Add `live_class_index: usize` field to struct, default `0`
+  - Update `evaluate_liveness()` to read `p_live` from `probs[live_class_index]`
+  - Determine attack type from remaining non-live classes
+  - Acceptance: Class ordering is configurable and defaults correctly for MiniFASNetV2
+  - TDD: `test_pad_class_ordering_live_index_0`, `test_pad_class_ordering_configurable`
+
+- [ ] **#40.3** — Update `InvalidDimensions` error for 80×80 expected dimensions
+  - Change the dimension validation message from `(112, 112)` to `(80, 80)`
+  - Acceptance: Error messages reference correct expected dimensions
+
+---
+
+### Issue #41: `[vision]` Restructure VisionPipeline for 3-model architecture
+
+> **Branch**: `refactor/vision-pipeline-3-model`
+> **Architecture ref**: §3 System Architecture, ADR [2026-09-20] Pipeline Simplification
+> **VERIFICATION_MATRIX**: NGM11, NGM12, NGM13
+> **Walkthrough**: `AI/walkthroughs/53_nextgen_model_migration_architecture.md` §3.1, §3.5
+> **Depends on**: #37, #38, #39, #40, #42
+
+#### Problem Statement
+
+The current `VisionPipeline` orchestrates 4 inference backends (detector, landmarks, pad, extractor). With SCRFD unifying detection and landmarks, the pipeline must be restructured to:
+1. Extract landmarks from detection result (not a separate model call)
+2. Feed PAD a 2.7× expanded bbox crop (not the aligned 112×112 crop)
+3. Remove the `landmarks` field from `VisionPipeline`
+
+#### Sub-issues
+
+- [ ] **#41.1** — Remove `landmarks: Arc<dyn LandmarkDetector>` from `VisionPipeline`
+  - Remove from struct fields, constructor, and all references
+  - Update `VisionPipeline::new()` signature to take 3 backends instead of 4
+  - Acceptance: Pipeline constructs with (detector, pad, extractor)
+  - TDD: Pipeline construction tests updated
+
+- [ ] **#41.2** — Extract landmarks from `FaceDetection` in `process_frame()`
+  - After detection, access `detection.landmarks` (populated by SCRFD)
+  - Return error if landmarks are `None` (should not happen with SCRFD)
+  - Use extracted landmarks for alignment
+  - Acceptance: Landmarks come from detection, not a separate model call
+  - TDD: `test_pipeline_extracts_landmarks_from_detection`
+
+- [ ] **#41.3** — Implement 2.7× bbox expansion for PAD input crop
+  - Add `fn expand_bbox_for_pad(bbox: &BoundingBox, scale: f32, img_w: u32, img_h: u32) -> BoundingBox`
+  - Expand from bbox center by `scale` factor (default 2.7), clamp to image bounds
+  - Acceptance: Expanded bbox is centered and clamped
+  - TDD: `test_expand_bbox_centered`, `test_expand_bbox_clamped_to_image`
+
+- [ ] **#41.4** — Implement expanded bbox crop + resize to 80×80 for PAD
+  - Crop RGB buffer using expanded bbox, resize to 80×80
+  - Feed to `pad.evaluate_liveness()` with width=80, height=80
+  - Acceptance: PAD receives 80×80 expanded context crop
+  - TDD: `test_pipeline_pad_receives_expanded_crop`
+
+- [ ] **#41.5** — Keep alignment and embedding using the original aligned 112×112 crop
+  - PAD uses expanded crop; embedding uses standard `align_face_112()` crop
+  - Acceptance: Embedding receives correctly aligned 112×112 face
+  - TDD: `test_pipeline_embedding_receives_aligned_crop`
+
+- [ ] **#41.6** — Update `VisionPipelineConfig` defaults
+  - Add `pad_target_width: u32` and `pad_target_height: u32` (default 80)
+  - Add `pad_bbox_scale: f32` (default 2.7)
+  - Keep existing `target_width/height` (112) for embedding alignment
+  - Acceptance: Config distinguishes PAD and embedding target sizes
+
+---
+
+### Issue #42: `[vision]` Add letterbox padding and bbox crop utility functions
+
+> **Branch**: `feat/vision-letterbox-and-bbox-crop`
+> **Architecture ref**: ADR [2026-09-20] Letterbox Padding, PAD Crop Strategy
+> **VERIFICATION_MATRIX**: NGM14
+> **Depends on**: None (pure utility functions)
+
+#### Problem Statement
+
+Two new image utility functions are needed: letterbox padding for SCRFD input, and expanded bounding box cropping for MiniFASNetV2 PAD input.
+
+#### Sub-issues
+
+- [ ] **#42.1** — Implement `letterbox_resize()` utility in `vision` crate
+  - Compute scale and padding to fit arbitrary W×H into target×target with aspect ratio preserved
+  - Return `LetterboxParams { scale, pad_x, pad_y }` for coordinate un-projection
+  - Acceptance: Non-square frames are correctly padded
+  - TDD: `test_letterbox_640x480_to_640x640`, `test_letterbox_1280x720_to_640x640`, `test_letterbox_square_no_padding`
+
+- [ ] **#42.2** — Implement `crop_and_resize()` utility in `vision` crate
+  - Crop an RGB buffer by bounding box, resize to target dimensions using nearest-neighbor or bilinear interpolation
+  - Handle out-of-bounds regions with black padding
+  - Acceptance: Crop + resize produces correct output for known input
+  - TDD: `test_crop_and_resize_known_image`, `test_crop_and_resize_out_of_bounds_padding`
+
+---
+
+### Issue #43: `[daemon/enrollment-cli]` Update model registry IDs for 3-model architecture
+
+> **Branch**: `refactor/model-ids-nextgen`
+> **Architecture ref**: §7 Models & Verification Pipeline
+> **VERIFICATION_MATRIX**: NGM15, EN7 (updated)
+> **Depends on**: #36
+
+#### Problem Statement
+
+All model ID string references across the workspace must be updated to match the new `manifest.toml` entries. The daemon loads 3 sessions instead of 4.
+
+#### Sub-issues
+
+- [ ] **#43.1** — Update `crates/daemon/src/pipeline.rs` model ID strings
+  - Replace `"ultraface_slim_320"` → `"scrfd_500m_kps"`
+  - Replace `"mobilefacenet_arcface"` → `"arcface_w600k_mbf"`
+  - Replace `"minifasnet_pad"` → `"minifasnet_v2_pad"`
+  - Remove `"landmark_5point"` session loading entirely
+  - Acceptance: Daemon starts with 3 ORT sessions
+
+- [ ] **#43.2** — Update `crates/enrollment-cli/src/service.rs` model ID strings
+  - Same ID replacements as daemon
+  - Remove landmark session loading
+  - Acceptance: Enrollment CLI loads 3 models
+
+- [ ] **#43.3** — Search and update any remaining old model ID references across workspace
+  - `grep -r 'ultraface_slim_320\|landmark_5point\|mobilefacenet_arcface\|minifasnet_pad' crates/ tests/`
+  - Update all matches
+  - Acceptance: Zero references to old model IDs in source code
+
+---
+
+### Issue #44: `[inference-ort]` Update mock backends for next-gen model architecture
+
+> **Branch**: `refactor/mock-backends-nextgen`
+> **Architecture ref**: AI/MOCK_STRATEGY.md
+> **VERIFICATION_MATRIX**: NGM16
+> **Depends on**: #37, #39, #40
+
+#### Problem Statement
+
+Mock backends must reflect the new architecture: `MockFaceDetector` must return detections with embedded landmarks, `MockEmbeddingExtractor` must default to 512D, and mock construction in tests must not require a `LandmarkDetector`.
+
+#### Sub-issues
+
+- [ ] **#44.1** — Update `MockFaceDetector` to populate `FaceLandmarks` in `FaceDetection`
+  - `new_centered_face()` should generate both a bounding box AND canonical landmarks scaled to the box
+  - Acceptance: Mock detections include landmarks
+  - TDD: `test_mock_detector_returns_landmarks`
+
+- [ ] **#44.2** — Update `MockEmbeddingExtractor::new()` default to 512 dimensions
+  - Change `MockEmbeddingExtractor::new(128)` usages to `MockEmbeddingExtractor::new(512)` across all test files
+  - Acceptance: All mock embeddings are 512D
+
+- [ ] **#44.3** — Verify `MockPadDetector` compatibility (no structural change expected)
+  - Output shape `[1, 3]` is unchanged; mock returns `PadResult` directly
+  - Acceptance: Existing mock PAD tests pass without modification
+
+- [ ] **#44.4** — Update all pipeline test construction sites
+  - Remove `MockLandmarkDetector` from `VisionPipeline::new()` calls in tests
+  - Pass 3 backends instead of 4
+  - Acceptance: All pipeline tests compile and pass with 3-backend constructor
+
+---
+
+### Issue #45: `[docs]` Update architecture documentation and verification matrix for next-gen models
+
+> **Branch**: `docs/nextgen-model-documentation`
+> **Architecture ref**: All
+> **VERIFICATION_MATRIX**: NGM17
+> **Depends on**: #36 through #44 (documentation follows implementation)
+
+#### Problem Statement
+
+All project documentation must be updated to reflect the 3-model architecture: ARCHITECTURE.md model list and latency budget, VERIFICATION_MATRIX.md acceptance criteria, and inference crate documentation.
+
+#### Sub-issues
+
+- [ ] **#45.1** — Update `AI/ARCHITECTURE.md` §1 Key Architectural Choices table
+  - Change "UltraFace Slim 320 + MobileFaceNet" to "SCRFD 500M KPS + ArcFace w600k MBF + MiniFASNetV2"
+
+- [ ] **#45.2** — Update `AI/ARCHITECTURE.md` §7 Models & Verification Pipeline
+  - Replace 5-step pipeline with 4-step pipeline (detection+landmarks unified)
+  - Update latency budget table with new estimates
+
+- [ ] **#45.3** — Update `AI/VERIFICATION_MATRIX.md` with next-gen model criteria
+  - Add NGM1–NGM17 verification entries
+  - Update EN7 to reference new model IDs
+  - Update PAD1 for MiniFASNetV2
+
+- [ ] **#45.4** — Update `Docs/INFERENCE_ORT_CRATE.md` with new model specifications
+  - Document SCRFD multi-stride architecture
+  - Document w600k normalization difference
+  - Document MiniFASNetV2 preprocessing requirements
+
+- [ ] **#45.5** — Update `Docs/VISION_CRATE.md` pipeline flow documentation
+  - Reflect 3-model architecture, different PAD crop strategy
+
+---
+
+## New Verification Matrix Entries — Phase 18
+
+| # | Criterion | Test Method | Status |
+|---|---|---|---|
+| NGM1 | `models/manifest.toml` v2.0.0 contains exactly 3 model entries with valid SHA-256 checksums | Manifest parsing test | ✅ Verified |
+| NGM2 | All 3 ONNX model files download successfully and pass SHA-256 verification | Script test | ✅ Verified |
+| NGM3 | `OrtScrfdDetector` parses 9 output tensors across 3 strides (8, 16, 32) | Unit test | ⬜ Pending |
+| NGM4 | SCRFD input is BGR 640×640 with letterbox padding and `(pixel - 127.5) / 128.0` normalization | Golden test | ⬜ Pending |
+| NGM5 | SCRFD detection includes 5-point landmarks in `FaceDetection` struct | Unit test | ⬜ Pending |
+| NGM6 | `OrtLandmarkDetector` removed; `FaceLandmarks` and `LandmarkDetector` trait preserved | Compilation test | ⬜ Pending |
+| NGM7 | Embedding extractor uses `(pixel - 127.5) / 127.5` normalization and produces 512D output | Unit test | ⬜ Pending |
+| NGM8 | PAD detector accepts 80×80 BGR input with `pixel / 255.0` normalization | Unit test | ⬜ Pending |
+| NGM9 | PAD class ordering: index 0 = Live (configurable `live_class_index`) | Unit test | ⬜ Pending |
+| NGM10 | PAD detector validates class ordering against known fixture at startup | Integration test | ⬜ Pending |
+| NGM11 | VisionPipeline constructs with 3 backends (detector, pad, extractor) | Unit test | ⬜ Pending |
+| NGM12 | Pipeline extracts landmarks from `FaceDetection`, not a separate detector | Unit test | ⬜ Pending |
+| NGM13 | PAD receives 2.7× expanded bbox crop (80×80); embedding receives aligned 112×112 crop | Unit test | ⬜ Pending |
+| NGM14 | Letterbox padding preserves aspect ratio with correct coordinate un-projection | Property test | ⬜ Pending |
+| NGM15 | All model ID strings across workspace match `manifest.toml` v2.0.0 entries | Invariant test | ⬜ Pending |
+| NGM16 | Mock backends produce detections with landmarks, 512D embeddings, compatible PAD results | Unit test | ⬜ Pending |
+| NGM17 | ARCHITECTURE.md, VERIFICATION_MATRIX.md, and crate docs reflect 3-model pipeline | Documentation audit | ⬜ Pending |

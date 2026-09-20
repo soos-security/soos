@@ -3,45 +3,44 @@
 # ModelRegistry verifies SHA-256 integrity prior to ONNX Runtime session creation.
 
 [manifest]
-version = "1.0.0"
+version = "2.0.0"
 
-[models.ultraface_slim_320]
-id = "ultraface_slim_320"
-filename = "version-slim-320.onnx"
-sha256 = "b7a44f4340d0fb9b071e6be94deaa9bcfceeb9f1c7dcf14b1b365bca7f79ff0b"
+[models.scrfd_500m_kps]
+id = "scrfd_500m_kps"
+filename = "scrfd_500m_kps.onnx"
+sha256 = "a3562ef62592bf387f6ef19151282ac127518e51c77696e62e0661bee95ba1ad"
 license = "MIT"
-source_url = "https://github.com/Linzaer/Ultra-Light-Fast-Generic-Face-Detector-1MB"
-description = "UltraFace Slim 320 lightweight face detector"
-input_shape = [1, 3, 240, 320]
-output_shapes = [[1, 4420, 2], [1, 4420, 4]]
+source_url = "https://huggingface.co/ykk648/face_lib/resolve/main/face_detect/scrfd_onnx/scrfd_500m_bnkps.onnx"
+description = "SCRFD 500M KPS unified face detection and 5-point facial landmarks"
+input_shape = [1, 3, 640, 640]
+output_shapes = [
+    [1, 12800, 1],
+    [1, 3200, 1],
+    [1, 800, 1],
+    [1, 12800, 4],
+    [1, 3200, 4],
+    [1, 800, 4],
+    [1, 12800, 10],
+    [1, 3200, 10],
+    [1, 800, 10],
+]
 
-[models.landmark_5point]
-id = "landmark_5point"
-filename = "landmark_5point.onnx"
-sha256 = "94f0e08c843f51a43a0e1b6fef65cbe5b1dbdc3e4bc3929424687771746a5be4"
+[models.arcface_w600k_mbf]
+id = "arcface_w600k_mbf"
+filename = "arcface_w600k_mbf.onnx"
+sha256 = "ffe014a45c9488506719d37fd578ece6661bb385535b36e8039975fa5d4683db"
 license = "MIT"
-source_url = "https://github.com/deepinsight/insightface"
-description = "InsightFace 5-point facial landmark detector (eyes, nose, mouth)"
+source_url = "https://huggingface.co/garavv/arcface-onnx/resolve/main/arc.onnx"
+description = "ArcFace MobileFaceNet w600k 512D biometric embedding extractor"
 input_shape = [1, 3, 112, 112]
-output_shapes = [[1, 10]]
+output_shapes = [[1, 512]]
 
-[models.mobilefacenet_arcface]
-id = "mobilefacenet_arcface"
-filename = "mobilefacenet_arcface.onnx"
-sha256 = "66fbe536c4eb827a5e828d11c8cb5f98bb2d7ebec44ec2f35952fdfa3ceee473"
-license = "MIT"
-source_url = "https://github.com/sirius-ai/MobileFaceNet_TF"
-description = "MobileFaceNet ArcFace feature extractor for 128D/512D embeddings"
-input_shape = [1, 3, 112, 112]
-output_shapes = [[1, 128]]
-
-[models.minifasnet_pad]
-id = "minifasnet_pad"
-filename = "minifasnet_pad.onnx"
-sha256 = "65b8e9076c8c4a4a6873523f858203cba21efae9d13e314ad4b87e2dbf77c867"
+[models.minifasnet_v2_pad]
+id = "minifasnet_v2_pad"
+filename = "minifasnet_v2_80x80.onnx"
+sha256 = "0cbe5caec95c31de9d2ef845cb85407d76aecd1b6a2c0e343f7d35306bfbccb8"
 license = "Apache-2.0"
-source_url = "https://github.com/minivision-ai/Silent-Face-Anti-Spoofing"
-description = "MiniFASNet presentation attack detection (anti-spoofing) model"
-input_shape = [1, 3, 112, 112]
+source_url = "https://github.com/QingHeYang/Silent-Face-Anti-Spoofing-onnx/raw/main/onnx/2.7_80x80_MiniFASNetV2.onnx"
+description = "MiniFASNetV2 80x80 presentation attack detection (anti-spoofing)"
+input_shape = [1, 3, 80, 80]
 output_shapes = [[1, 3]]
-

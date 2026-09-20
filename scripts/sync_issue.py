@@ -59,6 +59,7 @@ BACKLOG_TO_GITHUB = {
     33: 72,
     34: 73,
     35: 74,
+    36: 102,
 }
 
 BRANCH_TO_ISSUE = {
@@ -100,6 +101,7 @@ BRANCH_TO_ISSUE = {
     "fix/policy-hardening": 33,
     "fix/pam-ffi-timeout": 34,
     "fix/cli-security": 35,
+    "feat/nextgen-models-manifest": 36,
 }
 
 
