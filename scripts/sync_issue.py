@@ -67,6 +67,7 @@ BACKLOG_TO_GITHUB = {
     41: 107,
     42: 108,
     43: 109,
+    44: 110,
 }
 
 BRANCH_TO_ISSUE = {
@@ -116,6 +117,7 @@ BRANCH_TO_ISSUE = {
     "refactor/vision-pipeline-3-model": 41,
     "feat/vision-letterbox-and-bbox-crop": 42,
     "refactor/model-ids-nextgen": 43,
+    "refactor/mock-backends-nextgen": 44,
 }
 
 

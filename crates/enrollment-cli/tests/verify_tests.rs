@@ -34,7 +34,7 @@ fn setup_verify_env(
     let store = Arc::new(BiometricStore::new(temp.path().join("biometrics"), key).unwrap());
 
     // Generate enrolled embedding matching standard extractor
-    let standard_extractor = MockEmbeddingExtractor::new(128);
+    let standard_extractor = MockEmbeddingExtractor::new(512);
     let sample_crop = vec![128u8; 112 * 112 * 3];
     let enrolled_embedding = standard_extractor
         .extract_embedding(&sample_crop, 112, 112)
@@ -90,7 +90,7 @@ fn setup_verify_env(
 #[test]
 fn test_verify_unenrolled_uid_fails() {
     let temp = TempDir::new().unwrap();
-    let extractor = Arc::new(MockEmbeddingExtractor::new(128));
+    let extractor = Arc::new(MockEmbeddingExtractor::new(512));
     let (service, _) = setup_verify_env(&temp, extractor);
 
     let args = VerifyArgs {
@@ -109,7 +109,7 @@ fn test_verify_unenrolled_uid_fails() {
 fn test_verify_matching_user_reports_allow_and_metrics() {
     let temp = TempDir::new().unwrap();
     // Identical extractor -> produces matching embedding
-    let extractor = Arc::new(MockEmbeddingExtractor::new(128));
+    let extractor = Arc::new(MockEmbeddingExtractor::new(512));
     let (service, _) = setup_verify_env(&temp, extractor);
 
     let args = VerifyArgs {
@@ -130,7 +130,7 @@ fn test_verify_matching_user_reports_allow_and_metrics() {
 fn test_verify_non_matching_user_reports_deny() {
     let temp = TempDir::new().unwrap();
     // Different seed -> produces non-matching embedding
-    let extractor = Arc::new(MockEmbeddingExtractor::with_seed(128, 50.0));
+    let extractor = Arc::new(MockEmbeddingExtractor::with_seed(512, 50.0));
     let (service, _) = setup_verify_env(&temp, extractor);
 
     let args = VerifyArgs {

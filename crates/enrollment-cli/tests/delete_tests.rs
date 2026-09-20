@@ -29,7 +29,7 @@ fn setup_delete_service(temp: &TempDir) -> (EnrollmentService, Arc<BiometricStor
 
     let detector = Arc::new(MockFaceDetector::new_empty());
     let pad = Arc::new(MockPadDetector::new_live());
-    let extractor = Arc::new(MockEmbeddingExtractor::new(128));
+    let extractor = Arc::new(MockEmbeddingExtractor::new(512));
     let pipeline = Arc::new(VisionPipeline::new(
         detector,
         pad,
@@ -53,7 +53,7 @@ fn test_delete_existing_template_with_auto_confirm() {
         "mobilefacenet".to_string(),
         "1.0.0".to_string(),
         1700000000,
-        Zeroizing::new(vec![0.5; 128]),
+        Zeroizing::new(vec![0.5; 512]),
     )
     .unwrap();
     store.enroll(&template).unwrap();
@@ -87,7 +87,7 @@ fn test_delete_interactive_prompt_cancelled() {
         "mobilefacenet".to_string(),
         "1.0.0".to_string(),
         1700000000,
-        Zeroizing::new(vec![0.5; 128]),
+        Zeroizing::new(vec![0.5; 512]),
     )
     .unwrap();
     store.enroll(&template).unwrap();
@@ -143,7 +143,7 @@ fn test_delete_command_works_with_store_only() {
         "mobilefacenet".to_string(),
         "1.0.0".to_string(),
         1700000000,
-        Zeroizing::new(vec![0.5; 128]),
+        Zeroizing::new(vec![0.5; 512]),
     )
     .unwrap();
     store.enroll(&template).unwrap();

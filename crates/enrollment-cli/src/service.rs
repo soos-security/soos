@@ -549,7 +549,7 @@ pub fn build_full_service(cli: &Cli) -> Result<EnrollmentService, EnrollmentCliE
         let camera: Arc<dyn CameraManager> = Arc::new(MockCameraManager::new(camera_config));
         let detector = Arc::new(MockFaceDetector::new_centered_face(640, 480, 0.95));
         let pad = Arc::new(MockPadDetector::new_live());
-        let extractor = Arc::new(MockEmbeddingExtractor::new(128));
+        let extractor = Arc::new(MockEmbeddingExtractor::new(512));
         let pipeline_config = VisionPipelineConfig::default();
         let pipeline = Arc::new(VisionPipeline::new(
             detector,

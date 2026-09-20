@@ -1,56 +1,64 @@
 # Candid Review Report
 
 - **Date**: 2026-09-20
-- **Target Branch / Commit**: `refactor/model-ids-nextgen`
+- **Target Branch / Commit**: `refactor/mock-backends-nextgen`
 - **Audited Files**:
-  - `crates/daemon/src/pipeline.rs`
-  - `crates/daemon/tests/model_deployment_tests.rs`
-  - `crates/enrollment-cli/src/lib.rs`
+  - `crates/inference-ort/src/mock.rs`
+  - `crates/inference-ort/tests/detector_tests.rs`
   - `crates/enrollment-cli/src/service.rs`
-  - `crates/enrollment-cli/tests/model_id_tests.rs`
-  - `Docs/ENROLLMENT_CLI.md`
+  - `crates/enrollment-cli/tests/delete_tests.rs`
+  - `crates/enrollment-cli/tests/enroll_tests.rs`
+  - `crates/enrollment-cli/tests/list_tests.rs`
+  - `crates/enrollment-cli/tests/root_check_tests.rs`
+  - `crates/enrollment-cli/tests/verify_tests.rs`
+  - `crates/daemon/tests/pipeline_init_tests.rs`
+  - `crates/daemon/tests/pipeline_integration_tests.rs`
+  - `crates/vision/tests/bench_tests.rs`
+  - `crates/vision/tests/pad_tests.rs`
+  - `crates/vision/tests/pipeline_tests.rs`
+  - `crates/vision/tests/zeroize_tests.rs`
   - `scripts/sync_issue.py`
+  - `AI/plan_evaluator_report.md`
 
 ## 1. Executive Summary
 
-This pull request completes Issue #43 / GitHub #109 by migrating all model registry identifiers and ONNX Runtime session initializations across `soos-daemon` and `soos-enrollment-cli` to the 3-model next-generation architecture (`scrfd_500m_kps`, `minifasnet_v2_pad`, `arcface_w600k_mbf`). The legacy landmark model (`landmark_5point`) session and constants have been completely excised, and `OrtScrfdDetector` is properly instantiated with error propagation via `?`. All contractual test assertions and documentation have been synchronized with `models/manifest.toml` v2.0.0.
+This cold code review examines the implementation of Issue #44: `[inference-ort] Update mock backends for next-gen model architecture` (GitHub Issue #110). The diff systematically updates mock detector and extractor implementations to align with the 3-model next-generation neural architecture (SCRFD 500M KPS + ArcFace w600k MBF 512D + MiniFASNetV2). Canonical 5-point facial landmarks are embedded in `MockFaceDetector::new_centered_face` via a reusable `canonical_landmarks_for_box` helper, mock embeddings default to 512 dimensions across all test files and production CLI mock services, obsolete `MockLandmarkDetector` construction arguments are purged from vision test pipelines, and `MockPadDetector` compatibility is verified.
 
 ## 2. Deep Reasoning Audit
 
 ### Logic & Architecture
 - **Pass**:
-  - `crates/daemon/src/pipeline.rs` loads exactly 3 sessions: `"scrfd_500m_kps"`, `"minifasnet_v2_pad"`, and `"arcface_w600k_mbf"`.
-  - Detector initialization invokes `soos_inference_ort::OrtScrfdDetector::new(...)` which performs multi-stride 9-tensor validation and passes 5-point landmarks directly to `VisionPipeline`.
-  - `crates/enrollment-cli/src/service.rs` updates `MODEL_ID_FACE_DETECTOR`, `MODEL_ID_PAD`, and `MODEL_ID_EMBEDDING`, eliminates `MODEL_ID_LANDMARKS`, and updates `REQUIRED_MODEL_IDS` to length 3.
-  - Lazy initialization in `build_store_only` remains completely isolated from camera and model loading.
+  - `MockFaceDetector::canonical_landmarks_for_box` accurately computes ArcFace standard 112x112 canonical reference landmarks scaled linearly to the detected face bounding box.
+  - `MockFaceDetector::new_centered_face` returns detections with populated `landmarks: Some(FaceLandmarks)`.
+  - All mock pipelines construct with 3 backends (`detector`, `pad`, `extractor`), matching the unified detection+landmark pipeline design.
+  - Sub-issue mapping in `scripts/sync_issue.py` is registered accurately.
 
 ### PAM Concurrency & Deadlines
 - **Pass**:
-  - Changes are strictly isolated to the privileged daemon and enrollment CLI binaries; the synchronous PAM module (`crates/pam`) is untouched.
-  - Verification latency is reduced due to eliminating the redundant landmark localization inference stage.
-  - Zero stdout/stderr stream pollution or unapproved asynchronous runtimes.
+  - Zero asynchronous runtimes or Tokio calls introduced.
+  - Zero changes to `crates/pam` FFI boundary.
+  - Output isolation is preserved: zero `println!` or `dbg!` statements added to library pathways.
 
 ### Panic Safety & Fallback
 - **Pass**:
-  - `OrtScrfdDetector::new` produces `Result<Self, InferenceError>`, safely mapped via `?` operator into `DaemonError` and `EnrollmentCliError`.
-  - Zero instances of `unwrap()`, `expect()`, `panic!()`, or unhandled stubs in production paths.
-  - Missing or tampered models fail closed during cryptographic attestation (`registry.verify_integrity()?`).
+  - Pure arithmetic scaling in `canonical_landmarks_for_box` does not panic.
+  - Zero `unwrap()` or `expect()` added in production code paths.
+  - Error propagation via `Result<_, InferenceError>` and `Result<_, VisionError>` remains strictly enforced.
 
 ### Test Integrity & Anti-Weakening
 - **Pass**:
-  - Pre-existing tests were not weakened or bypassed.
-  - Contractual test `test_enrollment_cli_model_ids_match_manifest` was updated to assert the 3-model v2.0.0 manifest specification.
-  - Added negative test `test_enrollment_cli_legacy_model_ids_absent` to actively prevent regression to legacy model IDs.
-  - `model_deployment_tests.rs` tests missing and tampered next-gen models against v2.0.0 SHA-256 digests.
+  - Pre-existing assertions were not weakened; assertions on embedding dimensionality were upgraded from 128 to 512 to enforce the stricter ArcFace w600k contract.
+  - New contractual test `test_mock_detector_returns_landmarks` and `test_mock_face_detector_canonical_landmarks_for_box` were authored and verified in the Red Phase before production implementation.
+  - All 200+ unit and integration tests across the workspace pass.
 
 ### Memory & Secret Bounds
 - **Pass**:
-  - `OrtScrfdDetector` maintains input buffer zeroization (`Zeroizing<Vec<f32>>`) post-inference.
-  - Zero sensitive credentials, passwords, or raw biometric embeddings are exposed or logged.
-  - `#![forbid(unsafe_code)]` remains strictly enforced across all business and computational crates.
+  - `#![forbid(unsafe_code)]` remains strictly enforced.
+  - `BiometricEmbedding` and zeroization contracts in `zeroize_tests.rs` are maintained at 512 dimensions.
+  - No secret or credential leakage.
 
 ## 3. Detailed Findings & Action Items
-- None. All architectural invariants, security constraints, and workspace conventions are fully respected.
+- None. All changes conform to project invariants and coding conventions.
 
 ## 4. Final Verdict
 **VERDICT: APPROVED**

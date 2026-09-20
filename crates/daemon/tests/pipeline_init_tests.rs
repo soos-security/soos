@@ -75,7 +75,7 @@ async fn test_daemon_startup_initializes_all_pipeline_components() {
     // Neural mocks
     let detector = Arc::new(MockFaceDetector::new_centered_face(640, 480, 0.95));
     let pad = Arc::new(MockPadDetector::new_live());
-    let extractor = Arc::new(MockEmbeddingExtractor::new(128));
+    let extractor = Arc::new(MockEmbeddingExtractor::new(512));
 
     let vision = Arc::new(VisionPipeline::new(
         detector,

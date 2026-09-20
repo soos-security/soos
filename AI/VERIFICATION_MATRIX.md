@@ -345,3 +345,12 @@ This document translates the critical gating criteria from §11 of `ARCHITECTURE
 |---|---|---|---|
 | NGM15 | Model registry IDs in `daemon` and `enrollment-cli` updated to 3-model architecture (`scrfd_500m_kps`, `minifasnet_v2_pad`, `arcface_w600k_mbf`), eliminating `landmark_5point`, with `OrtScrfdDetector` instantiation and error propagation | Unit & integration tests (`test_enrollment_cli_model_ids_match_manifest`, `test_enrollment_cli_legacy_model_ids_absent`, `test_daemon_refuses_start_with_missing_models`, `test_daemon_refuses_start_with_tampered_models`, `test_models_readme_complete_and_accurate`) | ✅ Verified |
 
+---
+
+## Component: `mock-backends-nextgen` (Issue #44 / GitHub #110)
+
+| # | Criterion | Test Method | Status |
+|---|---|---|---|
+| NGM16 | Mock backends produce detections with landmarks, 512D embeddings, compatible PAD results, and 3-backend test construction sites | Unit tests (`detector_tests::test_mock_detector_returns_landmarks`, `detector_tests::test_mock_face_detector_canonical_landmarks_for_box`, `embedding_tests::test_mock_embedding_default_512d`, `pad_tests::test_mock_pad_detector_*`, `pipeline_tests::test_pipeline_constructs_with_three_backends`) | ✅ Verified |
+
+

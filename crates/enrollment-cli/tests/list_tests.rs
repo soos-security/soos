@@ -28,7 +28,7 @@ fn setup_list_service(temp: &TempDir) -> (EnrollmentService, Arc<BiometricStore>
 
     let detector = Arc::new(MockFaceDetector::new_empty());
     let pad = Arc::new(MockPadDetector::new_live());
-    let extractor = Arc::new(MockEmbeddingExtractor::new(128));
+    let extractor = Arc::new(MockEmbeddingExtractor::new(512));
     let pipeline = Arc::new(VisionPipeline::new(
         detector,
         pad,
@@ -62,7 +62,7 @@ fn test_list_multiple_enrolled_users_returns_sorted_summaries() {
         "mobilefacenet".to_string(),
         "1.0.0".to_string(),
         1700001000,
-        Zeroizing::new(vec![0.1; 128]),
+        Zeroizing::new(vec![0.1; 512]),
     )
     .unwrap();
     let t2 = BiometricTemplate::new(
@@ -70,7 +70,7 @@ fn test_list_multiple_enrolled_users_returns_sorted_summaries() {
         "mobilefacenet".to_string(),
         "1.0.0".to_string(),
         1700002000,
-        Zeroizing::new(vec![0.2; 128]),
+        Zeroizing::new(vec![0.2; 512]),
     )
     .unwrap();
 
@@ -85,10 +85,10 @@ fn test_list_multiple_enrolled_users_returns_sorted_summaries() {
     assert_eq!(list[0].uid, 1001);
     assert_eq!(list[0].model_id, "mobilefacenet");
     assert_eq!(list[0].model_version, "1.0.0");
-    assert_eq!(list[0].embedding_dim, 128);
+    assert_eq!(list[0].embedding_dim, 512);
 
     assert_eq!(list[1].uid, 1005);
-    assert_eq!(list[1].embedding_dim, 128);
+    assert_eq!(list[1].embedding_dim, 512);
 }
 
 #[test]

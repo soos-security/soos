@@ -19,9 +19,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use soos_inference_ort::error::InferenceError;
-use soos_inference_ort::mock::{
-    MockEmbeddingExtractor, MockFaceDetector, MockLandmarkDetector, MockPadDetector,
-};
+use soos_inference_ort::mock::{MockEmbeddingExtractor, MockFaceDetector, MockPadDetector};
 use soos_inference_ort::pad::{AttackType, PadDetector, PadResult};
 use soos_inference_ort::{BiometricEmbedding, EmbeddingExtractor};
 use soos_vision::{VisionError, VisionPipeline, VisionPipelineConfig};
@@ -67,23 +65,21 @@ fn create_test_pipeline(
 ) -> (
     VisionPipeline,
     Arc<MockFaceDetector>,
-    Arc<MockLandmarkDetector>,
     Arc<SpyEmbeddingExtractor>,
 ) {
     let detector = Arc::new(MockFaceDetector::new_centered_face(640, 480, 0.95));
-    let landmarks = Arc::new(MockLandmarkDetector::new_canonical());
-    let extractor = Arc::new(SpyEmbeddingExtractor::new(128));
+    let extractor = Arc::new(SpyEmbeddingExtractor::new(512));
 
     let pipeline = VisionPipeline::new(detector.clone(), pad, extractor.clone(), config);
 
-    (pipeline, detector, landmarks, extractor)
+    (pipeline, detector, extractor)
 }
 
 #[test]
 fn test_pipeline_accepts_live_face() {
     let pad = Arc::new(MockPadDetector::new_live());
     let config = VisionPipelineConfig::default();
-    let (pipeline, _, _, extractor) = create_test_pipeline(pad, config);
+    let (pipeline, _, extractor) = create_test_pipeline(pad, config);
 
     let frame = fixtures::pad::create_live_face_frame(640, 480);
     let output = pipeline
@@ -97,14 +93,14 @@ fn test_pipeline_accepts_live_face() {
         extractor.was_called(),
         "Embedding extraction must be performed on live face"
     );
-    assert_eq!(output.embedding.len(), 128);
+    assert_eq!(output.embedding.len(), 512);
 }
 
 #[test]
 fn test_pipeline_rejects_printed_photo_spoof() {
     let pad = Arc::new(MockPadDetector::new_spoof(AttackType::PrintPhoto, 0.05));
     let config = VisionPipelineConfig::default();
-    let (pipeline, _, _, extractor) = create_test_pipeline(pad, config);
+    let (pipeline, _, extractor) = create_test_pipeline(pad, config);
 
     let frame = fixtures::pad::create_printed_photo_frame(640, 480);
     let err = pipeline
@@ -129,7 +125,7 @@ fn test_pipeline_rejects_printed_photo_spoof() {
 fn test_pipeline_rejects_screen_replay_spoof() {
     let pad = Arc::new(MockPadDetector::new_spoof(AttackType::ScreenReplay, 0.15));
     let config = VisionPipelineConfig::default();
-    let (pipeline, _, _, extractor) = create_test_pipeline(pad, config);
+    let (pipeline, _, extractor) = create_test_pipeline(pad, config);
 
     let frame = fixtures::pad::create_screen_replay_frame(640, 480);
     let err = pipeline
@@ -162,7 +158,7 @@ fn test_pad_threshold_calibration() {
         pad_threshold: 0.70,
         ..Default::default()
     };
-    let (pipe_low, _, _, _) = create_test_pipeline(pad.clone(), config_low);
+    let (pipe_low, _, _) = create_test_pipeline(pad.clone(), config_low);
     let frame = fixtures::pad::create_live_face_frame(640, 480);
     assert!(pipe_low.process_frame(&frame).is_ok());
 
@@ -171,7 +167,7 @@ fn test_pad_threshold_calibration() {
         pad_threshold: 0.80,
         ..Default::default()
     };
-    let (pipe_high, _, _, _) = create_test_pipeline(pad, config_high);
+    let (pipe_high, _, _) = create_test_pipeline(pad, config_high);
     let err = pipe_high
         .process_frame(&frame)
         .expect_err("Borderline score must fail high threshold");
@@ -189,7 +185,7 @@ fn test_pad_far_frr_benchmark() {
     // Evaluate across a population of 50 live presentations, 25 printed photos, and 25 screen replays.
     let pad = Arc::new(MockPadDetector::new_live());
     let config = VisionPipelineConfig::default();
-    let (pipeline, _, _, _) = create_test_pipeline(pad.clone(), config);
+    let (pipeline, _, _) = create_test_pipeline(pad.clone(), config);
 
     let mut false_accepts = 0usize;
     let mut false_rejects = 0usize;
