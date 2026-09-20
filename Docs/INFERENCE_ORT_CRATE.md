@@ -8,7 +8,7 @@ The crate encapsulates:
 1. **Cryptographic Model Attestation**: Enforcing that all ONNX models match expected SHA-256 checksums cataloged in `models/manifest.toml` before any execution session is instantiated.
 2. **Face Detection**: UltraFace Slim 320 ONNX model with deterministic pure-Rust Non-Maximum Suppression (NMS).
 3. **Landmark Estimation**: 5-point facial landmark domain structures (`FaceLandmarks`, `Point2f`) and `LandmarkDetector` trait for geometric alignment. In the next-gen 3-model pipeline, landmark regression is absorbed directly into SCRFD face detection (`OrtScrfdDetector`), with `MockLandmarkDetector` provided for deterministic simulation.
-4. **Biometric Feature Extraction**: MobileFaceNet ArcFace-compatible embedding extractor generating L2-normalized 128D/512D vectors (Verification Matrix Criterion `V2`).
+4. **Biometric Feature Extraction**: ArcFace w600k embedding extractor generating L2-normalized 512D vectors with symmetric `[-1.0, +1.0]` normalization `(pixel - 127.5) / 127.5` (Verification Matrix Criteria `V2` and `NGM7`).
 5. **Hardware-Free Deterministic Simulation**: Mocks (`MockFaceDetector`, `MockLandmarkDetector`, `MockEmbeddingExtractor`) for seamless headless execution in CI pipelines and developer environments.
 
 ---
@@ -92,7 +92,7 @@ pub trait EmbeddingExtractor: Send + Sync {
     ) -> Result<BiometricEmbedding, InferenceError>;
 }
 ```
-Implemented by `OrtEmbeddingExtractor` (MobileFaceNet ArcFace) and `MockEmbeddingExtractor`.
+Implemented by `OrtEmbeddingExtractor` (ArcFace w600k 512D) and `MockEmbeddingExtractor` (defaulting to 512D).
 
 ---
 

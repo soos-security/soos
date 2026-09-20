@@ -4,7 +4,7 @@
 //! - Cryptographic manifest attestation and model SHA-256 verification (`manifest`, `registry`)
 //! - UltraFace Slim 320 face detection and deterministic Rust NMS (`detector`)
 //! - 5-point facial landmark estimation (`landmarks`)
-//! - MobileFaceNet ArcFace feature extraction with L2-normalized embeddings (`embedding`)
+//! - ArcFace w600k 512D feature extraction with L2-normalized embeddings (`embedding`)
 //! - Hardware-free deterministic simulation mocks (`mock`)
 
 #![forbid(unsafe_code)]

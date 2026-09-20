@@ -196,13 +196,16 @@ impl LandmarkDetector for MockLandmarkDetector {
     }
 }
 
-/// Mock embedding extractor generating deterministic L2-normalized vectors.
+/// Mock embedding extractor generating deterministic L2-normalized vectors (defaults to 512D for ArcFace w600k).
 pub struct MockEmbeddingExtractor {
     dim: usize,
     base_seed: f32,
 }
 
 impl MockEmbeddingExtractor {
+    /// Default embedding dimensionality matching ArcFace w600k (512 dimensions).
+    pub const DEFAULT_DIM: usize = 512;
+
     /// Creates a mock extractor that produces L2-normalized vectors of length `dim`.
     pub fn new(dim: usize) -> Self {
         Self {
@@ -211,9 +214,26 @@ impl MockEmbeddingExtractor {
         }
     }
 
+    /// Creates a mock extractor with default 512-dimensional output for ArcFace w600k.
+    pub fn new_default() -> Self {
+        Self::new(Self::DEFAULT_DIM)
+    }
+
+    /// Returns the embedding dimensionality configured for this mock extractor.
+    pub fn dim(&self) -> usize {
+        self.dim
+    }
+
     /// Creates a mock extractor with a custom seed to generate distinct identity embeddings.
     pub fn with_seed(dim: usize, base_seed: f32) -> Self {
         Self { dim, base_seed }
+    }
+}
+
+impl Default for MockEmbeddingExtractor {
+    /// Default constructor returning a 512D mock embedding extractor.
+    fn default() -> Self {
+        Self::new_default()
     }
 }
 

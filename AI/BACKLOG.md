@@ -1451,17 +1451,17 @@ The current `OrtEmbeddingExtractor` uses normalization `(pixel - 127.5) / 128.0`
 
 #### Sub-issues
 
-- [ ] **#39.1** — Fix normalization denominator in `OrtEmbeddingExtractor::prepare_input()`
+- [x] **#39.1** — Fix normalization denominator in `OrtEmbeddingExtractor::prepare_input()`
   - Change `/ 128.0` to `/ 127.5` on lines 185-187 of `embedding.rs`
   - Acceptance: Normalization produces exact [-1.0, +1.0] range for pixel values 0 and 255
   - TDD: `test_embedding_normalization_symmetric_range`
 
-- [ ] **#39.2** — Update `MockEmbeddingExtractor` default dimension from 128 to 512
+- [x] **#39.2** — Update `MockEmbeddingExtractor` default dimension from 128 to 512
   - Change `MockEmbeddingExtractor::new(dim)` call sites and documentation
   - Acceptance: Mock produces 512D vectors by default
   - TDD: `test_mock_embedding_default_512d`
 
-- [ ] **#39.3** — Update docstrings and module documentation
+- [x] **#39.3** — Update docstrings and module documentation
   - Update `embedding.rs` module doc to reference 512D and w600k
   - Update `lib.rs` crate doc to reference ArcFace w600k instead of MobileFaceNet
   - Acceptance: All doc references mention 512D and w600k model

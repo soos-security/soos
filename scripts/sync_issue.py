@@ -62,6 +62,7 @@ BACKLOG_TO_GITHUB = {
     36: 102,
     37: 103,
     38: 104,
+    39: 105,
 }
 
 BRANCH_TO_ISSUE = {
@@ -106,6 +107,7 @@ BRANCH_TO_ISSUE = {
     "feat/nextgen-models-manifest": 36,
     "feat/scrfd-face-detector": 37,
     "refactor/remove-ort-landmark-detector": 38,
+    "feat/embedding-512d-w600k": 39,
 }
 
 
