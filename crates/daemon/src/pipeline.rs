@@ -171,7 +171,6 @@ pub fn initialize_pipeline(
         config.vision.min_face_confidence,
         0.45,
     ));
-    let landmarks = Arc::new(soos_inference_ort::MockLandmarkDetector::new_canonical());
     let pad = Arc::new(soos_inference_ort::OrtPadDetector::new(
         pad_session,
         config.vision.pad_threshold,
@@ -180,7 +179,6 @@ pub fn initialize_pipeline(
 
     let vision = Arc::new(soos_vision::VisionPipeline::new(
         detector,
-        landmarks,
         pad,
         extractor,
         config.vision.clone(),

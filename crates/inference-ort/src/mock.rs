@@ -39,12 +39,19 @@ impl MockFaceDetector {
         }
     }
 
-    /// Creates a mock detector returning a centered face bounding box.
+    /// Creates a mock detector returning a centered face bounding box with canonical landmarks.
     pub fn new_centered_face(width: u32, height: u32, score: f32) -> Self {
         let w = width as f32;
         let h = height as f32;
         let box_ = BoundingBox::new(w * 0.25, h * 0.2, w * 0.75, h * 0.8);
-        Self::new_with_detections(vec![FaceDetection::new(box_, score)])
+        let landmarks = FaceLandmarks::new(
+            Point2f::new(w * 0.38, h * 0.35),
+            Point2f::new(w * 0.62, h * 0.35),
+            Point2f::new(w * 0.50, h * 0.50),
+            Point2f::new(w * 0.40, h * 0.65),
+            Point2f::new(w * 0.60, h * 0.65),
+        );
+        Self::new_with_detections(vec![FaceDetection::with_landmarks(box_, score, landmarks)])
     }
 
     /// Updates the mock detections to return.

@@ -1,66 +1,56 @@
-# Plan Evaluation Report — Issue #40: [inference-ort] Rewrite PAD detector for MiniFASNetV2
+# Implementation Plan Evaluation Report: Issue #41
 
-- **Date**: 2026-09-20
-- **Evaluator**: Independent Plan Evaluator Sub-Agent
-- **Target Issue**: Issue #40 (GitHub #106) — Rewrite PAD detector for MiniFASNetV2
-- **Target Branch**: `feat/pad-minifasnet-v2`
-- **Target Crate**: `crates/inference-ort`
-
----
-
-## 1. Context & Scope Ingestion
-
-The proposed implementation plan has been evaluated against:
-1. `AI/ARCHITECTURE.md` (Latency budget, memory invariants, threat model)
-2. `AI/DECISIONS.md` (ADR [2026-09-20] PAD Crop Strategy, MiniFASNetV2 Class Ordering)
-3. `AI/BACKLOG.md` (Issue #40: Sub-issues 40.1, 40.2, 40.3)
-4. `AI/VERIFICATION_MATRIX.md` (Criteria NGM8, NGM9, NGM10)
-5. `Docs/SECURITY_AND_QUALITY_GUIDELINES.md` (Safety, bounds, zeroization)
-6. `AGENTS.md` (Project rules, test integrity, prohibited dependencies)
+## Context & Objectives
+- **Target Issue**: Issue #41 — `[vision]` Restructure VisionPipeline for 3-model architecture (GitHub #107)
+- **Branch**: `refactor/vision-pipeline-3-model`
+- **Scope**:
+  - Remove `landmarks: Arc<dyn LandmarkDetector>` from `VisionPipeline` (Sub-issue #41.1)
+  - Extract landmarks from `FaceDetection` in `process_frame()` (Sub-issue #41.2)
+  - Implement 2.7× bbox expansion for PAD input crop (Sub-issue #41.3)
+  - Implement expanded bbox crop + resize to 80×80 for PAD (Sub-issue #41.4)
+  - Retain aligned 112×112 crop for feature embedding extraction (Sub-issue #41.5)
+  - Update `VisionPipelineConfig` defaults with PAD target dimensions and scale (Sub-issue #41.6)
+  - Cross-crate refactoring across workspace (`daemon`, `enrollment-cli`, tests)
+- **Relevant Matrix Criteria**: NGM11, NGM12, NGM13
 
 ---
 
-## 2. Six-Pillar Architectural Audit
+## Evaluation Against 6 Architectural Pillars
 
 ### Pillar 1: Architectural Alignment & Threat Model
-- **Evaluation**: The changes are strictly confined to `soos-inference-ort`'s PAD detection subsystem (`src/pad.rs`).
-- **Boundaries**: Maintains clear separation between perception logic and unprivileged PAM pathways.
-- **Model Manifest Compliance**: Fully matches `models/manifest.toml` v2.0.0 specification for `minifasnet_v2_pad` (`input_shape = [1, 3, 80, 80]`, `output_shapes = [[1, 3]]`).
-- **Verdict**: PASS
+- **Evaluation**: The proposed 3-model architecture restructures `VisionPipeline` to consume landmarks directly from the SCRFD detection stage, eliminating the redundant 4th model call while preserving the single-face security invariant.
+- **Boundaries**: Unprivileged PAM module remains separate; all vision processing runs inside the privileged daemon or enrollment CLI.
+- **Finding**: **COMPLIANT**
 
 ### Pillar 2: PAM Real-Time Latency & Concurrency
-- **Evaluation**: No asynchronous runtimes, blocking locks, or threading primitives introduced into PAM.
-- **Latency Budget**: Reducing PAD resolution from 112×112 to 80×80 decreases float operations and memory transfers by ~49% (from 37,632 floats to 19,200 floats), lowering inference latency from ~30ms to ~8ms CPU, well within the revised 150ms pipeline budget.
-- **Output Isolation**: Zero `println!`, `eprintln!`, or `dbg!` stream pollution.
-- **Verdict**: PASS
+- **Evaluation**: The elimination of the separate landmark inference model directly reduces CPU inference overhead by ~20ms, bringing estimated total perception pipeline latency from ~100ms down to ~80ms (well under the 150ms p95 budget).
+- **Concurrency**: Zero Tokio runtimes in PAM module; purely synchronous evaluation.
+- **Finding**: **COMPLIANT**
 
 ### Pillar 3: Panic Safety & Fail-Closed Behavior
-- **Evaluation**: No `unwrap()` or `expect()` introduced in production code. All array/slice accesses use safe iterators or checked indexing (`.get()`, `.get_mut()`).
-- **Error Propagation**: Dimension, buffer size, or shape mismatches return typed `InferenceError` variants (`InvalidDimensions`, `InvalidBufferSize`, `PadFailed`).
-- **Fail-Closed Principle**: Invalid probabilities or empty distributions return `Err(InferenceError::PadFailed(...))`.
-- **Verdict**: PASS
+- **Evaluation**: All boundary operations, array slicing, and dimension validations use checked arithmetic and `Result<T, VisionError>`.
+- **Fail-Closed**: If `FaceDetection.landmarks` is `None`, the pipeline immediately returns `VisionError::MissingLandmarks` rather than panicking or guessing. If zero or multiple faces are found, it fails closed with `VisionError::NoFaceDetected` or `VisionError::MultipleFacesDetected`.
+- **Finding**: **COMPLIANT**
 
 ### Pillar 4: Dependency Isolation & Banned Crates
-- **Evaluation**: Strictly uses `ort` (CPU-only) and `zeroize`.
-- **Prohibitions**: Absolute compliance with prohibitions against `opencv` and `nokhwa`.
-- **Crate Lints**: Enforces `#![forbid(unsafe_code)]` compliance in business logic; unsafe is isolated to external ORT C-API abstractions within the `ort` dependency itself.
-- **Verdict**: PASS
+- **Evaluation**: Pure Rust implementation in `crates/vision`. No OpenCV, no Nokhwa, no unsafe code (`#![forbid(unsafe_code)]` strictly preserved).
+- **Inference**: Uses `soos_inference_ort` abstractions (`FaceDetector`, `PadDetector`, `EmbeddingExtractor`).
+- **Finding**: **COMPLIANT**
 
 ### Pillar 5: Data Confidentiality & Zeroization
-- **Evaluation**: `OrtPadDetector::prepare_input()` returns a `Zeroizing<Vec<f32>>` buffer.
-- **Memory Hygiene**: Input tensor is explicitly zeroized post-inference via `input_data.zeroize()`.
-- **Leakage Prevention**: No raw pixels, facial embeddings, or biometric tensors are logged or leaked.
-- **Verdict**: PASS
+- **Evaluation**: Intermediate PAD crop buffer (`pad_crop`) and aligned crop buffer are wrapped in `Zeroizing` guards. `PipelineOutput` and `VerificationOutcome` implement deterministic zeroization on drop. Zero sensitive biometric data or raw frames logged.
+- **Finding**: **COMPLIANT**
 
 ### Pillar 6: Test Integrity & TDD Contracts
-- **Evaluation**: The plan adheres to strict TDD: contractual tests (`test_pad_prepare_input_80x80_bgr`, `test_pad_normalization_0_1_range`, `test_pad_class_ordering_live_index_0`, `test_pad_class_ordering_configurable`, `test_pad_invalid_dimensions_message_80x80`) authored before production implementation.
-- **Zero Test Weakening**: Existing contractual guarantees are preserved and extended to MiniFASNetV2 specifications.
-- **Verdict**: PASS
+- **Evaluation**: Contractual acceptance tests (TDD Red Phase) authored before production code modifications.
+- **Coverage**: Tests covering 3-backend construction, landmark extraction from `FaceDetection`, centered and clamped 2.7× bbox expansion, PAD 80×80 crop reception, embedding 112×112 aligned crop reception, and config defaults.
+- **Test Invariant**: Existing tests updated only for constructor signature change (non-weakening), with zero tolerance for relaxing thresholds or invariants.
+- **Finding**: **COMPLIANT**
 
 ---
 
-## 3. Formal Verdict
+## Conclusion & Verdict
 
-All six architectural pillars are fully satisfied with zero identified deficiencies or invariant violations.
+The proposed architectural plan for Issue #41 strictly aligns with all master architectural decisions, security invariants, latency constraints, and coding standards.
 
 **VALIDATION_VERDICT: APPROVED**

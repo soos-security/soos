@@ -12,9 +12,8 @@ use soos_camera_v4l::{
     CameraConfigBuilder, CameraManager, Frame, MockCameraManager, V4lCameraManager,
 };
 use soos_inference_ort::{
-    BoundingBox, FaceDetection, MockEmbeddingExtractor, MockFaceDetector, MockLandmarkDetector,
-    MockPadDetector, ModelRegistry, OrtEmbeddingExtractor, OrtFaceDetector, OrtPadDetector,
-    RegistryConfig,
+    BoundingBox, FaceDetection, MockEmbeddingExtractor, MockFaceDetector, MockPadDetector,
+    ModelRegistry, OrtEmbeddingExtractor, OrtFaceDetector, OrtPadDetector, RegistryConfig,
 };
 use soos_protocol::Verdict;
 use soos_vision::{
@@ -555,19 +554,12 @@ pub fn build_full_service(cli: &Cli) -> Result<EnrollmentService, EnrollmentCliE
     if cli.mock {
         let camera_config = CameraConfigBuilder::new().build();
         let camera: Arc<dyn CameraManager> = Arc::new(MockCameraManager::new(camera_config));
-        let detection = FaceDetection {
-            box_: BoundingBox::new(20.0, 20.0, 80.0, 80.0),
-            score: 0.95,
-            landmarks: None,
-        };
-        let detector = Arc::new(MockFaceDetector::new_with_detections(vec![detection]));
-        let landmarks = Arc::new(MockLandmarkDetector::new_canonical());
+        let detector = Arc::new(MockFaceDetector::new_centered_face(640, 480, 0.95));
         let pad = Arc::new(MockPadDetector::new_live());
         let extractor = Arc::new(MockEmbeddingExtractor::new(128));
         let pipeline_config = VisionPipelineConfig::default();
         let pipeline = Arc::new(VisionPipeline::new(
             detector,
-            landmarks,
             pad,
             extractor,
             pipeline_config,
@@ -586,14 +578,12 @@ pub fn build_full_service(cli: &Cli) -> Result<EnrollmentService, EnrollmentCliE
     let emb_session = registry.get_or_load_session(MODEL_ID_EMBEDDING)?;
 
     let detector = Arc::new(OrtFaceDetector::new(det_session, 0.70, 0.40));
-    let landmarks = Arc::new(MockLandmarkDetector::new_canonical());
     let pad = Arc::new(OrtPadDetector::new(pad_session, 0.80));
     let extractor = Arc::new(OrtEmbeddingExtractor::new(emb_session));
 
     let pipeline_config = VisionPipelineConfig::default();
     let pipeline = Arc::new(VisionPipeline::new(
         detector,
-        landmarks,
         pad,
         extractor,
         pipeline_config,

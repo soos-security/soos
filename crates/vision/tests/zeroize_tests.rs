@@ -9,6 +9,8 @@
     reason = "Contractual test suite utilizes direct assertions, unwrap, and indexing"
 )]
 
+use std::sync::Arc;
+
 use soos_camera_v4l::{Frame, PixelFormat};
 use soos_inference_ort::mock::{
     MockEmbeddingExtractor, MockFaceDetector, MockLandmarkDetector, MockPadDetector,
@@ -105,7 +107,6 @@ fn test_pipeline_zeroizes_intermediate_buffers_on_error() {
     let width = 320;
     let height = 240;
     let detector = Arc::new(MockFaceDetector::new_centered_face(width, height, 0.95));
-    let landmarks = Arc::new(MockLandmarkDetector::new_canonical());
     let pad = Arc::new(MockPadDetector::new_spoof(
         soos_inference_ort::AttackType::PrintPhoto,
         0.10,
@@ -113,8 +114,7 @@ fn test_pipeline_zeroizes_intermediate_buffers_on_error() {
     let extractor = Arc::new(MockEmbeddingExtractor::new(128));
     let config = VisionPipelineConfig::default();
 
-    use std::sync::Arc;
-    let pipeline = VisionPipeline::new(detector, landmarks, pad, extractor, config);
+    let pipeline = VisionPipeline::new(detector, pad, extractor, config);
     let frame = Frame::new(
         vec![0xEE_u8; (width * height * 3) as usize],
         width,

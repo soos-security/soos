@@ -11,12 +11,14 @@
 
 pub mod align;
 pub mod color;
+pub mod crop;
 pub mod error;
 pub mod matcher;
 pub mod pipeline;
 
 pub use align::{align_face_112, TARGET_LANDMARKS_112};
 pub use color::convert_to_rgb;
+pub use crop::{crop_and_resize, expand_bbox_for_pad};
 pub use error::VisionError;
 pub use matcher::{cosine_similarity, match_embeddings, MatchResult};
 pub use pipeline::{PipelineOutput, VerificationOutcome, VisionPipeline, VisionPipelineConfig};

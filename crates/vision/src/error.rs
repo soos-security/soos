@@ -39,6 +39,10 @@ pub enum VisionError {
         min_confidence: f32,
     },
 
+    /// Face detection is missing required 5-point facial landmarks.
+    #[error("Face detection is missing required 5-point landmarks")]
+    MissingLandmarks,
+
     /// 5-point facial landmark alignment transformation failed.
     #[error("Landmark alignment failed: {0}")]
     AlignmentFailed(String),

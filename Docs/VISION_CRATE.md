@@ -18,8 +18,9 @@ crates/vision/
     ├── error.rs        # VisionError enum using thiserror
     ├── color.rs        # Pure Rust color conversion (YUYV, Grey, RGB24, MJPEG)
     ├── align.rs        # 5-point landmark affine alignment to 112x112
+    ├── crop.rs         # Bounding box 2.7x expansion and crop-and-resize for PAD
     ├── matcher.rs      # Cosine similarity and template verification
-    └── pipeline.rs     # VisionPipeline orchestrator & single-face invariant
+    └── pipeline.rs     # VisionPipeline 3-model orchestrator & single-face invariant
 ```
 
 ### 2.1 Color Conversion (`color.rs`)
@@ -69,17 +70,20 @@ $$\text{similarity}(a, b) = \frac{a \cdot b}{\|a\|_2 \|b\|_2}$$
 
 ### 2.4 Vision Pipeline Orchestrator (`pipeline.rs`)
 
-`VisionPipeline` coordinates the entire verification flow:
-1. Decompresses/converts the raw frame to RGB24.
-2. Runs face detection (`FaceDetector`).
+`VisionPipeline` coordinates the 3-model verification flow:
+1. Decompresses/converts the raw frame to RGB24 (`convert_to_rgb`).
+2. Runs face detection (`FaceDetector`, e.g. SCRFD).
 3. **Enforces Single-Face Invariant (Criterion V4)**:
    - 0 faces detected $\implies$ returns `Err(VisionError::NoFaceDetected)`.
    - $> 1$ faces detected $\implies$ returns `Err(VisionError::MultipleFacesDetected { count })`.
 4. Validates face confidence against `min_face_confidence` (default `0.70`).
-5. Regresses 5-point facial landmarks (`LandmarkDetector`).
-6. Warps face to normalized 112×112 RGB crop (`align_face_112`).
-7. Extracts L2-normalized 128D/512D embedding (`EmbeddingExtractor`).
-8. Compares against enrolled template via `match_embeddings`.
+5. Extracts 5-point facial landmarks directly from `FaceDetection.landmarks` (fails closed with `VisionError::MissingLandmarks` if absent).
+6. Expands bounding box by `pad_bbox_scale` (2.7×) centered on face and clamps to image bounds (`expand_bbox_for_pad`).
+7. Crops and resizes the expanded bounding box to 80×80 for Presentation Attack Detection (`crop_and_resize`).
+8. Evaluates Presentation Attack Detection (`PadDetector`, MiniFASNetV2) and short-circuits on spoof (`VisionError::PadFailed`).
+9. Warps face to normalized 112×112 RGB crop using 5-point landmarks (`align_face_112`).
+10. Extracts L2-normalized 512D biometric embedding (`EmbeddingExtractor`, ArcFace w600k).
+11. Compares against enrolled template via `match_embeddings`.
 
 ---
 
@@ -92,7 +96,7 @@ Automated benchmark results (`bench_tests.rs`) across 50 iterations on 640×480 
 - **p95**: $28.02\text{ms}$
 - **p99**: $28.87\text{ms}$
 
-The pipeline completes in under 30ms, leaving more than 120ms of headroom for PAM deadline compliance.
+The 3-model pipeline completes in under 30ms on mock fixtures and estimated ~80ms on hardware, leaving ample headroom for PAM deadline compliance.
 
 ---
 
@@ -106,3 +110,6 @@ The pipeline completes in under 30ms, leaving more than 120ms of headroom for PA
 | **V4** | Rejects if 0 or > 1 face detected | `pipeline_tests::test_pipeline_rejects_zero_faces`, `test_pipeline_rejects_two_faces`, `test_pipeline_rejects_three_faces` | ☑ Validated |
 | **V5** | Full pipeline < 150ms p95 on reference hardware | `bench_tests::test_pipeline_latency_budget_under_150ms_p95` (achieved 28.02ms p95) | ☑ Validated |
 | **V6** | `forbid(unsafe_code)` enabled | `soos-invariants::test_business_crates_forbid_unsafe_code` | ☑ Validated |
+| **NGM11** | VisionPipeline constructs with 3 backends (detector, pad, extractor) | `pipeline_tests::test_pipeline_constructs_with_three_backends` | ☑ Validated |
+| **NGM12** | Pipeline extracts landmarks from `FaceDetection`, not separate detector | `pipeline_tests::test_pipeline_extracts_landmarks_from_detection`, `test_pipeline_fails_when_detection_lacks_landmarks` | ☑ Validated |
+| **NGM13** | PAD receives 2.7× expanded crop (80×80); embedding receives aligned 112×112 crop | `pipeline_tests::test_pipeline_pad_receives_expanded_crop`, `test_pipeline_embedding_receives_aligned_crop`, `test_expand_bbox_centered`, `test_expand_bbox_clamped_to_image` | ☑ Validated |

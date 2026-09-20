@@ -318,4 +318,15 @@ This document translates the critical gating criteria from §11 of `ARCHITECTURE
 | NGM9 | `OrtPadDetector` defaults `live_class_index` to 0 (MiniFASNetV2 `[Live, Print, Replay]`) and supports configurable class indices with ordinal spoof attack classification (`PrintPhoto` vs `ScreenReplay`) | Unit tests (`pad_tests::test_pad_class_ordering_live_index_0`, `pad_tests::test_pad_class_ordering_configurable`) | ✅ Verified |
 | NGM10 | `OrtPadDetector` handles empty probability distributions fail-closed and preserves panic safety and numerical softmax stability | Unit tests (`pad_tests::test_softmax_numerical_stability`, `pad_tests::test_mock_pad_detector_*`) | ✅ Verified |
 
+---
+
+## Component: `vision-pipeline-3-model` (Issue #41 / GitHub #107)
+
+| # | Criterion | Test Method | Status |
+|---|---|---|---|
+| NGM11 | `VisionPipeline` constructs with 3 backends (detector, pad, extractor), eliminating dedicated landmark detector | Unit tests (`pipeline_tests::test_pipeline_constructs_with_three_backends`) | ✅ Verified |
+| NGM12 | Pipeline extracts 5-point landmarks directly from `FaceDetection` and fails closed on missing landmarks (`VisionError::MissingLandmarks`) | Unit tests (`pipeline_tests::test_pipeline_extracts_landmarks_from_detection`, `pipeline_tests::test_pipeline_fails_when_detection_lacks_landmarks`) | ✅ Verified |
+| NGM13 | Presentation Attack Detection receives 2.7× expanded bbox context crop resized to 80×80; embedding extractor receives 112×112 aligned crop | Unit tests (`pipeline_tests::test_expand_bbox_centered`, `pipeline_tests::test_expand_bbox_clamped_to_image`, `pipeline_tests::test_pipeline_pad_receives_expanded_crop`, `pipeline_tests::test_pipeline_embedding_receives_aligned_crop`) | ✅ Verified |
+
+
 

@@ -1520,37 +1520,37 @@ The current `VisionPipeline` orchestrates 4 inference backends (detector, landma
 
 #### Sub-issues
 
-- [ ] **#41.1** — Remove `landmarks: Arc<dyn LandmarkDetector>` from `VisionPipeline`
+- [x] **#41.1** — Remove `landmarks: Arc<dyn LandmarkDetector>` from `VisionPipeline`
   - Remove from struct fields, constructor, and all references
   - Update `VisionPipeline::new()` signature to take 3 backends instead of 4
   - Acceptance: Pipeline constructs with (detector, pad, extractor)
   - TDD: Pipeline construction tests updated
 
-- [ ] **#41.2** — Extract landmarks from `FaceDetection` in `process_frame()`
+- [x] **#41.2** — Extract landmarks from `FaceDetection` in `process_frame()`
   - After detection, access `detection.landmarks` (populated by SCRFD)
   - Return error if landmarks are `None` (should not happen with SCRFD)
   - Use extracted landmarks for alignment
   - Acceptance: Landmarks come from detection, not a separate model call
   - TDD: `test_pipeline_extracts_landmarks_from_detection`
 
-- [ ] **#41.3** — Implement 2.7× bbox expansion for PAD input crop
+- [x] **#41.3** — Implement 2.7× bbox expansion for PAD input crop
   - Add `fn expand_bbox_for_pad(bbox: &BoundingBox, scale: f32, img_w: u32, img_h: u32) -> BoundingBox`
   - Expand from bbox center by `scale` factor (default 2.7), clamp to image bounds
   - Acceptance: Expanded bbox is centered and clamped
   - TDD: `test_expand_bbox_centered`, `test_expand_bbox_clamped_to_image`
 
-- [ ] **#41.4** — Implement expanded bbox crop + resize to 80×80 for PAD
+- [x] **#41.4** — Implement expanded bbox crop + resize to 80×80 for PAD
   - Crop RGB buffer using expanded bbox, resize to 80×80
   - Feed to `pad.evaluate_liveness()` with width=80, height=80
   - Acceptance: PAD receives 80×80 expanded context crop
   - TDD: `test_pipeline_pad_receives_expanded_crop`
 
-- [ ] **#41.5** — Keep alignment and embedding using the original aligned 112×112 crop
+- [x] **#41.5** — Keep alignment and embedding using the original aligned 112×112 crop
   - PAD uses expanded crop; embedding uses standard `align_face_112()` crop
   - Acceptance: Embedding receives correctly aligned 112×112 face
   - TDD: `test_pipeline_embedding_receives_aligned_crop`
 
-- [ ] **#41.6** — Update `VisionPipelineConfig` defaults
+- [x] **#41.6** — Update `VisionPipelineConfig` defaults
   - Add `pad_target_width: u32` and `pad_target_height: u32` (default 80)
   - Add `pad_bbox_scale: f32` (default 2.7)
   - Keep existing `target_width/height` (112) for embedding alignment
@@ -1699,9 +1699,9 @@ All project documentation must be updated to reflect the 3-model architecture: A
 | NGM8 | PAD detector accepts 80×80 BGR input with `pixel / 255.0` normalization | Unit test | ⬜ Pending |
 | NGM9 | PAD class ordering: index 0 = Live (configurable `live_class_index`) | Unit test | ⬜ Pending |
 | NGM10 | PAD detector validates class ordering against known fixture at startup | Integration test | ⬜ Pending |
-| NGM11 | VisionPipeline constructs with 3 backends (detector, pad, extractor) | Unit test | ⬜ Pending |
-| NGM12 | Pipeline extracts landmarks from `FaceDetection`, not a separate detector | Unit test | ⬜ Pending |
-| NGM13 | PAD receives 2.7× expanded bbox crop (80×80); embedding receives aligned 112×112 crop | Unit test | ⬜ Pending |
+| NGM11 | VisionPipeline constructs with 3 backends (detector, pad, extractor) | Unit test | ✅ Verified |
+| NGM12 | Pipeline extracts landmarks from `FaceDetection`, not a separate detector | Unit test | ✅ Verified |
+| NGM13 | PAD receives 2.7× expanded bbox crop (80×80); embedding receives aligned 112×112 crop | Unit test | ✅ Verified |
 | NGM14 | Letterbox padding preserves aspect ratio with correct coordinate un-projection | Property test | ⬜ Pending |
 | NGM15 | All model ID strings across workspace match `manifest.toml` v2.0.0 entries | Invariant test | ⬜ Pending |
 | NGM16 | Mock backends produce detections with landmarks, 512D embeddings, compatible PAD results | Unit test | ⬜ Pending |

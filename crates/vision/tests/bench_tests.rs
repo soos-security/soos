@@ -18,10 +18,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use soos_camera_v4l::{Frame, PixelFormat};
-use soos_inference_ort::mock::{
-    MockEmbeddingExtractor, MockFaceDetector, MockLandmarkDetector, MockPadDetector,
-};
-use soos_inference_ort::{BoundingBox, FaceDetection};
+use soos_inference_ort::mock::{MockEmbeddingExtractor, MockFaceDetector, MockPadDetector};
 use soos_vision::{VisionPipeline, VisionPipelineConfig};
 
 #[test]
@@ -29,15 +26,12 @@ fn test_pipeline_latency_budget_under_150ms_p95() {
     let width = 640;
     let height = 480;
 
-    let detector = Arc::new(MockFaceDetector::new_with_detections(vec![
-        FaceDetection::new(BoundingBox::new(160.0, 100.0, 480.0, 400.0), 0.99),
-    ]));
-    let landmarks = Arc::new(MockLandmarkDetector::new_canonical());
+    let detector = Arc::new(MockFaceDetector::new_centered_face(width, height, 0.99));
     let pad = Arc::new(MockPadDetector::new_live());
     let extractor = Arc::new(MockEmbeddingExtractor::new(128));
     let config = VisionPipelineConfig::default();
 
-    let pipeline = VisionPipeline::new(detector, landmarks, pad, extractor, config);
+    let pipeline = VisionPipeline::new(detector, pad, extractor, config);
 
     // Warm-up iteration
     let yuyv_data = vec![128u8; (width * height * 2) as usize];

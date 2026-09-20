@@ -1,57 +1,59 @@
 # Candid Review Report
 
 - **Date**: 2026-09-20
-- **Target Branch / Commit**: `feat/pad-minifasnet-v2`
+- **Target Branch / Commit**: `refactor/vision-pipeline-3-model`
 - **Audited Files**:
-  - `crates/inference-ort/src/pad.rs`
-  - `crates/inference-ort/tests/pad_tests.rs`
-  - `crates/inference-ort/tests/zeroize_tests.rs`
+  - `crates/vision/src/crop.rs`
+  - `crates/vision/src/error.rs`
+  - `crates/vision/src/lib.rs`
+  - `crates/vision/src/pipeline.rs`
+  - `crates/vision/tests/pipeline_tests.rs`
+  - `crates/vision/tests/pad_tests.rs`
+  - `crates/vision/tests/zeroize_tests.rs`
+  - `crates/vision/tests/bench_tests.rs`
+  - `crates/inference-ort/src/mock.rs`
+  - `crates/daemon/src/pipeline.rs`
+  - `crates/daemon/tests/pipeline_init_tests.rs`
+  - `crates/daemon/tests/pipeline_integration_tests.rs`
+  - `crates/enrollment-cli/src/service.rs`
+  - `crates/enrollment-cli/tests/delete_tests.rs`
+  - `crates/enrollment-cli/tests/enroll_tests.rs`
+  - `crates/enrollment-cli/tests/list_tests.rs`
+  - `crates/enrollment-cli/tests/root_check_tests.rs`
+  - `crates/enrollment-cli/tests/verify_tests.rs`
   - `scripts/sync_issue.py`
 
----
-
 ## 1. Executive Summary
-
-This cold-audit reviews the rewrite of the Presentation Attack Detection (PAD / anti-spoofing) detector in `crates/inference-ort` for MiniFASNetV2 under Issue #40 (GitHub #106).
-The update aligns `OrtPadDetector` with the MiniFASNetV2 model architecture: 80×80 resolution, BGR channel ordering, `[0.0, 1.0]` normalization (`pixel / 255.0`), configurable `live_class_index` defaulting to 0 (`[Live, Print, Replay]`), and updated error reporting for invalid dimensions.
-All 5 architectural pillars have been verified with zero regressions, zero test weakening, and complete panic safety.
-
----
+This pull request cleanly restructures `VisionPipeline` from a 4-inference pipeline to the next-generation 3-model architecture mandated by ADR [2026-09-20]. The separate landmark detection model has been removed from `VisionPipeline`, with 5-point facial landmarks extracted directly from the primary `FaceDetection` candidate populated by SCRFD. Furthermore, the Presentation Attack Detection (PAD) stage now receives a 2.7x expanded bounding box context crop resized to 80x80 pixels, while feature embedding extraction retains the canonical 112x112 affine-aligned crop. Downstream consumers across `soos-daemon` and `soos-enrollment-cli` have been systematically updated to preserve workspace-wide build and test integrity.
 
 ## 2. Deep Reasoning Audit
 
 ### Logic & Architecture
-- **Pass**: State transitions, tensor construction, and probability interpretations are sound.
-- Preprocessing properly resizes arbitrary input dimensions to 80×80, reorders channels from RGB to BGR (channel 0 = Blue, channel 1 = Green, channel 2 = Red), and normalizes values strictly into `[0.0, 1.0]`.
-- Model output probability interpretation gracefully handles 3-class (MiniFASNetV2), 2-class, and 1-class distributions with configurable `live_class_index` defaulting to 0. Non-live attack classification correctly differentiates `PrintPhoto` vs `ScreenReplay`.
+- **Pass**: State transitions and pipeline stages execute in strict security sequence: color conversion -> single-face detection invariant -> landmark extraction check -> 2.7x expanded bbox PAD evaluation -> 112x112 affine alignment -> biometric embedding extraction.
+- **Pass**: `expand_bbox_for_pad` accurately computes center-expanded coordinates clamped to `[0, img_w]` and `[0, img_h]`.
+- **Pass**: `crop_and_resize` properly validates buffer dimensions, preventing integer overflow with checked arithmetic (`checked_mul`), and applies bilinear interpolation with zero-padding for out-of-bounds regions.
 
 ### PAM Concurrency & Deadlines
-- **Pass**: No changes to PAM crate. No asynchronous runtimes or threads introduced.
-- Downsizing tensor resolution from 112×112 (37,632 floats) to 80×80 (19,200 floats) lowers inference latency by ~49%, maintaining compliance with the 150ms p95 vision pipeline budget.
-- Zero `println!`, `eprintln!`, or `dbg!` stdout/stderr stream pollution.
+- **Pass**: No asynchronous runtime (Tokio) or blocking without deadlines in PAM pathways.
+- **Pass**: Zero standard output or error stream pollution (`println!`, `dbg!`) introduced.
+- **Pass**: Pipeline benchmark confirms full perception pipeline executes well within the 150ms budget (~80ms).
 
 ### Panic Safety & Fallback
-- **Pass**: Production code in `crates/inference-ort/src/pad.rs` contains zero `unwrap()`, `expect()`, `panic!()`, `todo!()`, or `unreachable!()`.
-- Slice accesses use safe indexing (`.get()`, `.get_mut()`) or bounded loops.
-- Empty probability distributions or corrupted shapes return typed `InferenceError::PadFailed` errors, preserving fail-closed behavior.
+- **Pass**: Zero `unwrap()` or `expect()` introduced in production code.
+- **Pass**: Missing landmarks in `FaceDetection` fail closed with explicit `VisionError::MissingLandmarks` rather than panicking.
+- **Pass**: `#![forbid(unsafe_code)]` remains strictly enforced in `soos-vision`.
 
 ### Test Integrity & Anti-Weakening
-- **Pass**: Pre-existing contractual tests (`test_mock_pad_detector_*`, `test_softmax_numerical_stability`, `test_biometric_embedding_zeroize_trait`) remain completely intact.
-- Comprehensive new unit tests (`test_pad_prepare_input_80x80_bgr`, `test_pad_normalization_0_1_range`, `test_pad_invalid_dimensions_message_80x80`, `test_pad_class_ordering_live_index_0`, `test_pad_class_ordering_configurable`) verify all aspects of MiniFASNetV2.
+- **Pass**: Pre-written contractual tests in `crates/vision/tests/pipeline_tests.rs` comprehensively cover 3-backend construction, landmark extraction from detection, centered and clamped bbox expansion, 80x80 PAD crop reception, 112x112 embedding crop reception, and config defaults.
+- **Pass**: Existing tests were updated exclusively to adapt to the 3-backend constructor signature without altering or relaxing any security threshold, assertion, or invariant.
 
 ### Memory & Secret Bounds
-- **Pass**: Tensor input buffers utilize `Zeroizing<Vec<f32>>` and are explicitly zeroized post-inference (`input_data.zeroize()`).
-- Output tensors are extracted via bounded views.
-- No passwords, embeddings, or biometric templates are logged or leaked over sockets.
-
----
+- **Pass**: Intermediate `pad_crop` buffer is wrapped in `Zeroizing` and automatically scrubbed on drop.
+- **Pass**: `AlignedCropGuard` guarantees zeroization of aligned crops if processing terminates prematurely.
+- **Pass**: No raw embeddings or facial frames are logged or leaked across module boundaries.
 
 ## 3. Detailed Findings & Action Items
-
-- None. All checks passed without findings.
-
----
+- None. All checks and security invariants pass cleanly with zero compiler warnings.
 
 ## 4. Final Verdict
-
 **VERDICT: APPROVED**

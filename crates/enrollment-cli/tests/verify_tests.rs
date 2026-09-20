@@ -21,7 +21,7 @@ use soos_enrollment_cli::error::EnrollmentCliError;
 use soos_enrollment_cli::service::EnrollmentService;
 use soos_inference_ort::{
     BoundingBox, EmbeddingExtractor, FaceDetection, FaceLandmarks, MockEmbeddingExtractor,
-    MockFaceDetector, MockLandmarkDetector, MockPadDetector, Point2f,
+    MockFaceDetector, MockPadDetector, Point2f,
 };
 use soos_protocol::Verdict;
 use soos_vision::{VisionPipeline, VisionPipelineConfig};
@@ -51,13 +51,6 @@ fn setup_verify_env(
     .unwrap();
     store.enroll(&template).unwrap();
 
-    let detection = FaceDetection {
-        box_: BoundingBox::new(20.0, 20.0, 80.0, 80.0),
-        score: 0.98,
-        landmarks: None,
-    };
-    let detector = Arc::new(MockFaceDetector::new_with_detections(vec![detection]));
-
     let landmarks = FaceLandmarks {
         left_eye: Point2f { x: 38.0, y: 52.0 },
         right_eye: Point2f { x: 74.0, y: 52.0 },
@@ -65,7 +58,12 @@ fn setup_verify_env(
         mouth_left: Point2f { x: 42.0, y: 88.0 },
         mouth_right: Point2f { x: 70.0, y: 88.0 },
     };
-    let landmark_detector = Arc::new(MockLandmarkDetector::new_with_landmarks(landmarks));
+    let detection = FaceDetection {
+        box_: BoundingBox::new(20.0, 20.0, 80.0, 80.0),
+        score: 0.98,
+        landmarks: Some(landmarks),
+    };
+    let detector = Arc::new(MockFaceDetector::new_with_detections(vec![detection]));
 
     let pipeline_config = VisionPipelineConfig {
         match_threshold: 0.50,
@@ -74,7 +72,6 @@ fn setup_verify_env(
     let pad = Arc::new(MockPadDetector::new_live());
     let pipeline = Arc::new(VisionPipeline::new(
         detector,
-        landmark_detector,
         pad,
         seed_extractor,
         pipeline_config,
