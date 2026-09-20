@@ -57,7 +57,15 @@ pub trait FaceDetector: Send + Sync {
     fn detect(&self, rgb: &[u8], width: u32, height: u32) -> Result<Vec<FaceDetection>, InferenceError>;
 }
 ```
-Implemented by `OrtFaceDetector` (UltraFace Slim 320) and `MockFaceDetector`.
+Implemented by `OrtScrfdDetector` (SCRFD 500M KPS with multi-stride output parsing and 5-point landmarks), `OrtFaceDetector` (legacy UltraFace Slim 320), and `MockFaceDetector`.
+
+`OrtScrfdDetector` incorporates:
+- BGR channel ordering and `(pixel - 127.5) / 128.0` normalization.
+- Aspect ratio-preserving letterbox padding to 640×640 with zero-padded borders.
+- 9-output multi-stride tensor decoding (strides 8, 16, 32) using distance-to-border box regression.
+- 5-point facial keypoints integration directly into `FaceDetection.landmarks`.
+- Coordinate un-projection mapping detections back to original camera resolution.
+- Startup validation verifying session output count (9) and shape patterns.
 
 ### `LandmarkDetector` Trait
 ```rust

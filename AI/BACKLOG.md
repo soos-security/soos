@@ -1360,26 +1360,26 @@ The current `OrtFaceDetector` is built around UltraFace's anchor-prior architect
 
 #### Sub-issues
 
-- [ ] **#37.1** — Create `OrtScrfdDetector` struct replacing `OrtFaceDetector`
+- [x] **#37.1** — Create `OrtScrfdDetector` struct replacing `OrtFaceDetector`
   - Fields: `session`, `conf_threshold`, `iou_threshold`, `input_size: (usize, usize)`, `strides: [usize; 3]`, `anchors_per_cell: usize`
   - Delete `generate_priors()` — SCRFD uses grid-based anchors
   - Acceptance: Struct compiles, implements `FaceDetector` trait
 
-- [ ] **#37.2** — Implement letterbox padding utility function
+- [x] **#37.2** — Implement letterbox padding utility function
   - `fn letterbox_pad(rgb: &[u8], w: u32, h: u32, target: usize) -> (Zeroizing<Vec<f32>>, f32, f32, f32)`
   - Returns `(padded_tensor, scale, pad_x, pad_y)` for coordinate un-projection
   - Maintain aspect ratio, pad with value 0 (black)
   - Acceptance: Property test — project → unproject round-trip preserves coordinates ±1px
   - TDD: `test_letterbox_preserves_aspect_ratio`, `test_letterbox_unproject_roundtrip`
 
-- [ ] **#37.3** — Implement BGR channel ordering in `prepare_input()`
+- [x] **#37.3** — Implement BGR channel ordering in `prepare_input()`
   - Input RGB buffer → write B to channel 0, G to channel 1, R to channel 2
   - Normalization: `(pixel - 127.5) / 128.0`
   - Output tensor shape: `[1, 3, 640, 640]`
   - Acceptance: BGR ordering verified via golden test
   - TDD: `test_prepare_input_bgr_channel_ordering`
 
-- [ ] **#37.4** — Implement multi-stride output tensor parsing (9 tensors)
+- [x] **#37.4** — Implement multi-stride output tensor parsing (9 tensors)
   - Parse outputs by ordinal grouping: 3 tensors per stride (score, bbox, kps)
   - Validate `session.outputs.len() == 9` at construction time
   - For each stride s ∈ {8, 16, 32}: decode grid coordinates, apply distance-to-border for boxes, apply grid-offset for landmarks
@@ -1387,19 +1387,19 @@ The current `OrtFaceDetector` is built around UltraFace's anchor-prior architect
   - Acceptance: Known synthetic output → expected detections
   - TDD: `test_scrfd_decode_stride8_known_output`, `test_scrfd_decode_all_strides`
 
-- [ ] **#37.5** — Implement coordinate un-projection from letterbox space to original image space
+- [x] **#37.5** — Implement coordinate un-projection from letterbox space to original image space
   - `fn unproject(x: f32, y: f32, scale: f32, pad_x: f32, pad_y: f32) -> (f32, f32)`
   - Apply to both bounding box corners and landmark coordinates
   - Acceptance: Coordinates map correctly to original image dimensions
   - TDD: `test_unproject_coordinates_match_original_image`
 
-- [ ] **#37.6** — Add `FaceLandmarks` to `FaceDetection` struct
+- [x] **#37.6** — Add `FaceLandmarks` to `FaceDetection` struct
   - Change `FaceDetection` to include `pub landmarks: Option<FaceLandmarks>`
   - SCRFD detector always populates landmarks; other backends may return `None`
   - Acceptance: `FaceDetection` carries landmarks when produced by SCRFD
   - TDD: `test_face_detection_carries_landmarks`
 
-- [ ] **#37.7** — Add SCRFD startup validation
+- [x] **#37.7** — Add SCRFD startup validation
   - At `OrtScrfdDetector::new()`, verify session has exactly 9 outputs
   - Verify shape patterns: `[1, N, 1]`, `[1, N, 4]`, `[1, N, 10]` for each group of 3
   - Return `InferenceError` if validation fails
@@ -1691,9 +1691,9 @@ All project documentation must be updated to reflect the 3-model architecture: A
 |---|---|---|---|
 | NGM1 | `models/manifest.toml` v2.0.0 contains exactly 3 model entries with valid SHA-256 checksums | Manifest parsing test | ✅ Verified |
 | NGM2 | All 3 ONNX model files download successfully and pass SHA-256 verification | Script test | ✅ Verified |
-| NGM3 | `OrtScrfdDetector` parses 9 output tensors across 3 strides (8, 16, 32) | Unit test | ⬜ Pending |
-| NGM4 | SCRFD input is BGR 640×640 with letterbox padding and `(pixel - 127.5) / 128.0` normalization | Golden test | ⬜ Pending |
-| NGM5 | SCRFD detection includes 5-point landmarks in `FaceDetection` struct | Unit test | ⬜ Pending |
+| NGM3 | `OrtScrfdDetector` parses 9 output tensors across 3 strides (8, 16, 32) | Unit test | ✅ Verified |
+| NGM4 | SCRFD input is BGR 640×640 with letterbox padding and `(pixel - 127.5) / 128.0` normalization | Golden test | ✅ Verified |
+| NGM5 | SCRFD detection includes 5-point landmarks in `FaceDetection` struct | Unit test | ✅ Verified |
 | NGM6 | `OrtLandmarkDetector` removed; `FaceLandmarks` and `LandmarkDetector` trait preserved | Compilation test | ⬜ Pending |
 | NGM7 | Embedding extractor uses `(pixel - 127.5) / 127.5` normalization and produces 512D output | Unit test | ⬜ Pending |
 | NGM8 | PAD detector accepts 80×80 BGR input with `pixel / 255.0` normalization | Unit test | ⬜ Pending |

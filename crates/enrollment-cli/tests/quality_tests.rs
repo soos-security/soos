@@ -20,11 +20,13 @@ fn make_candidate(frame_idx: usize, score: f32, face_count: usize) -> CandidateE
         1 => vec![FaceDetection {
             box_: BoundingBox::new(10.0, 10.0, 100.0, 100.0),
             score,
+            landmarks: None,
         }],
         n => (0..n)
             .map(|i| FaceDetection {
                 box_: BoundingBox::new(10.0 * (i as f32 + 1.0), 10.0, 50.0, 50.0),
                 score,
+                landmarks: None,
             })
             .collect(),
     };

@@ -79,6 +79,7 @@ async fn test_daemon_startup_initializes_all_pipeline_components() {
     let dummy_detection = FaceDetection {
         box_: BoundingBox::new(50.0, 50.0, 200.0, 200.0),
         score: 0.95,
+        landmarks: None,
     };
     let detector = Arc::new(MockFaceDetector::new_with_detections(vec![dummy_detection]));
     let landmarks = Arc::new(MockLandmarkDetector::new_canonical());

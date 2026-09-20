@@ -1,64 +1,57 @@
-# Candid Code Review Report — Issue #36: [manifest] Download and Attest Next-Generation ONNX Models
+# Candid Code Review Report — Issue #37: [inference-ort] SCRFD Face Detector
 
-**Date**: 2026-09-20  
-**Target Issue**: Issue #36 (`feat/nextgen-models-manifest`, GitHub #102)  
-**Reviewer**: Candid Reviewer Sub-Agent (Dev-Workflow Phase 5)  
-**Base Reference**: `origin/main`
-
----
-
-## 1. Executive Summary
-
-This candid code review evaluates the changes implemented for Issue #36:
-- Modernized `models/manifest.toml` from v1.0.0 (4 obsolete models) to v2.0.0 (3 unified models: `scrfd_500m_kps`, `arcface_w600k_mbf`, `minifasnet_v2_pad`).
-- Updated `scripts/download_models.sh` with the verified direct download URLs for the next-generation models.
-- Updated `models/README.md` with comprehensive specifications, tensor shapes, normalization rules, and legacy model lineage.
-- Updated `crates/inference-ort/tests/manifest_tests.rs`, `crates/inference-ort/tests/registry_tests.rs`, and `crates/enrollment-cli/tests/model_id_tests.rs` with contractual acceptance tests for `NGM1` and `NGM2`.
-- Validated all tests against live downloaded model binaries, confirming exact SHA-256 digests and 9-output tensor parsing for SCRFD.
+- **Target Branch**: `feat/scrfd-face-detector`
+- **Target Issue**: Issue #37 (`[inference-ort] Implement SCRFD face detector with multi-stride output parsing`) / GitHub #103
+- **Reviewer**: Candid Reviewer Sub-Agent (`candid-reviewer`)
+- **Review Date**: 2026-09-20
+- **Status**: VERDICT: APPROVED
 
 ---
 
-## 2. Pillar Analysis
+## 1. Logic & Architecture
+- `OrtScrfdDetector` successfully implements the `FaceDetector` trait, replacing the obsolete UltraFace anchor-prior logic with grid-based distance-to-border box decoding and 5-point landmark extraction.
+- Output tensor parsing handles all 9 output tensors across strides 8, 16, and 32 with dynamic shape verification, supporting both interleaved (`[score_s, bbox_s, kps_s]`) and grouped tensor layouts.
+- Input preprocessing adheres strictly to specification:
+  - Preserves aspect ratio via centered letterbox padding with zero-padded borders.
+  - Implements BGR channel ordering (B=0, G=1, R=2).
+  - Normalizes pixel values using `(pixel - 127.5) / 128.0`.
+- Coordinate un-projection (`unproject`) correctly maps bounding boxes and 5-point landmarks back to original image space with boundary clamping.
+- `FaceDetection` struct extended with `pub landmarks: Option<FaceLandmarks>`, populated by `OrtScrfdDetector`.
 
-### Pillar 1: Logic & Architecture
-- `models/manifest.toml` establishes version `"2.0.0"` with exactly 3 models, fulfilling `NGM1`.
-- `scrfd_500m_kps.onnx` unifies face detection and 5-point landmark regression into a single pass, outputting 9 tensors across strides 8, 16, and 32.
-- `arcface_w600k_mbf.onnx` outputs 512D embeddings.
-- `minifasnet_v2_80x80.onnx` performs presentation attack detection with 80×80 BGR input.
-- `scripts/download_models.sh` correctly resolves download URLs and enforces strict SHA-256 verification before deployment.
+## 2. PAM Concurrency & Real-Time Latency
+- Zero asynchronous runtimes or event loops introduced; remains fully synchronous and thread-safe (`Arc<Mutex<Session>>`).
+- Pure Rust letterbox padding, distance-to-border decoding, and un-projection execute in sub-millisecond time.
+- Zero standard output or error stream pollution (`println!`, `eprintln!`, `dbg!`).
 
-### Pillar 2: PAM Concurrency & Real-Time Deadlines
-- No runtime modifications to the PAM module or blocking calls introduced.
-- Model attestation occurs offline during setup and during daemon startup.
-- Real-time deadlines in PAM (`pam_soos.so`) are completely unaffected.
+## 3. Panic Safety & Fail-Closed Behavior
+- Zero `unwrap()` or `expect()` in `crates/inference-ort/src/detector.rs` production code.
+- All array lookups, tensor extractions, and slice accesses use checked indexing (`.get()`, `.checked_mul()`, `.ok_or_else()`).
+- Session output count and shape pattern validation in `OrtScrfdDetector::new()` reject malformed ONNX models at startup, returning typed `InferenceError` variants.
+- Poisoned session mutexes fail closed cleanly with `InferenceError::DetectionFailed`.
 
-### Pillar 3: Panic Safety & Fallback
-- `ModelManifest::from_file()` and `from_toml_str()` return typed errors (`InferenceError`).
-- Invariant tests confirm fail-closed behavior on missing or corrupted models.
-- Zero `unwrap()` or `expect()` in production library code.
+## 4. Test Integrity & Anti-Weakening
+- Zero existing tests weakened, bypassed, or deleted across the entire workspace.
+- Added comprehensive contractual test suite in `crates/inference-ort/tests/scrfd_tests.rs` covering:
+  - `test_face_detection_carries_landmarks`
+  - `test_letterbox_preserves_aspect_ratio`
+  - `test_prepare_input_bgr_channel_ordering`
+  - `test_unproject_coordinates_match_original_image`
+  - `test_scrfd_decode_stride8_known_output`
+  - `test_scrfd_decode_all_strides`
+  - `test_scrfd_rejects_invalid_output_count`
+  - `test_scrfd_validates_shape_patterns`
+  - `test_letterbox_unproject_roundtrip` (proptest property test)
+- Downstream fixtures across `daemon` and `enrollment-cli` updated to accommodate the `landmarks` field while preserving all test assertions.
 
-### Pillar 4: Test Integrity & Anti-Weakening
-- Contractual tests in `crates/inference-ort/tests/manifest_tests.rs` rigorously assert:
-  - Manifest version `2.0.0`
-  - Exactly 3 models
-  - Accurate shapes, licenses, and SHA-256 digests
-  - Absence of obsolete v1 models
-- All regression suites across the entire monorepo pass without modification.
-
-### Pillar 5: Memory & Secret Bounds
-- Model manifest metadata only contains public model architecture details.
-- Zero secret, key, or biometric embedding exposure in logs or schemas.
-- File permissions strictly maintained (`0644` files, `0755` directories).
+## 5. Memory & Secret Bounds
+- Inference input tensors reside in `Zeroizing<Vec<f32>>` containers and are explicitly zeroized immediately post-inference.
+- `#![forbid(unsafe_code)]` remains strictly enforced in `crates/inference-ort`.
+- Zero sensitive data (pixel buffers, biometric embeddings) leaked in error messages or logs.
 
 ---
 
-## 3. Deliverable Language Policy Compliance
+## Conclusion & Verdict
 
-- All code comments, docstrings, commits, documentation, and error strings are strictly in English.
-- Script outputs conform to standard POSIX conventions.
+The implementation adheres to all architectural invariants, zero-trust constraints, and coding standards.
 
----
-
-## 4. Formal Review Verdict
-
-**VERDICT: APPROVED**
+VERDICT: APPROVED

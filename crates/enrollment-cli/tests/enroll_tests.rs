@@ -33,6 +33,7 @@ fn setup_mock_service(temp: &TempDir) -> (EnrollmentService, Arc<BiometricStore>
     let detection = FaceDetection {
         box_: BoundingBox::new(20.0, 20.0, 80.0, 80.0),
         score: 0.95,
+        landmarks: None,
     };
     let detector = Arc::new(MockFaceDetector::new_with_detections(vec![detection]));
 

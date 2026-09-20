@@ -60,6 +60,7 @@ BACKLOG_TO_GITHUB = {
     34: 73,
     35: 74,
     36: 102,
+    37: 103,
 }
 
 BRANCH_TO_ISSUE = {
@@ -102,6 +103,7 @@ BRANCH_TO_ISSUE = {
     "fix/pam-ffi-timeout": 34,
     "fix/cli-security": 35,
     "feat/nextgen-models-manifest": 36,
+    "feat/scrfd-face-detector": 37,
 }
 
 
