@@ -5,11 +5,12 @@ use std::sync::Arc;
 use soos_camera_v4l::Frame;
 use soos_inference_ort::{
     BiometricEmbedding, EmbeddingExtractor, FaceDetection, FaceDetector, FaceLandmarks,
-    LandmarkDetector, PadDetector, PadResult,
+    PadDetector, PadResult,
 };
 
 use crate::align::align_face_112;
 use crate::color::convert_to_rgb;
+use crate::crop::{crop_and_resize, expand_bbox_for_pad};
 use crate::error::VisionError;
 use crate::matcher::{match_embeddings, MatchResult};
 use zeroize::{Zeroize, Zeroizing};
@@ -27,6 +28,12 @@ pub struct VisionPipelineConfig {
     pub target_width: u32,
     /// Target aligned face height in pixels (standard 112).
     pub target_height: u32,
+    /// Target expanded face crop width in pixels for PAD (standard 80).
+    pub pad_target_width: u32,
+    /// Target expanded face crop height in pixels for PAD (standard 80).
+    pub pad_target_height: u32,
+    /// Bounding box expansion scale factor for PAD context crop (standard 2.7).
+    pub pad_bbox_scale: f32,
 }
 
 impl Default for VisionPipelineConfig {
@@ -37,6 +44,9 @@ impl Default for VisionPipelineConfig {
             pad_threshold: 0.80,
             target_width: 112,
             target_height: 112,
+            pad_target_width: 80,
+            pad_target_height: 80,
+            pad_bbox_scale: 2.7,
         }
     }
 }
@@ -93,7 +103,6 @@ impl Drop for VerificationOutcome {
 /// End-to-end vision processing orchestrator.
 pub struct VisionPipeline {
     detector: Arc<dyn FaceDetector>,
-    landmarks: Arc<dyn LandmarkDetector>,
     pad: Arc<dyn PadDetector>,
     extractor: Arc<dyn EmbeddingExtractor>,
     config: VisionPipelineConfig,
@@ -114,17 +123,15 @@ impl Drop for AlignedCropGuard {
 }
 
 impl VisionPipeline {
-    /// Constructs a new `VisionPipeline` with the provided neural inference backends.
+    /// Constructs a new `VisionPipeline` with the provided 3 neural inference backends.
     pub fn new(
         detector: Arc<dyn FaceDetector>,
-        landmarks: Arc<dyn LandmarkDetector>,
         pad: Arc<dyn PadDetector>,
         extractor: Arc<dyn EmbeddingExtractor>,
         config: VisionPipelineConfig,
     ) -> Self {
         Self {
             detector,
-            landmarks,
             pad,
             extractor,
             config,
@@ -144,10 +151,11 @@ impl VisionPipeline {
     /// Processes a single camera frame:
     /// 1. Color converts to RGB24
     /// 2. Detects faces; enforces single-face security invariant (rejects 0 or >1 faces)
-    /// 3. Detects 5-point facial landmarks
-    /// 4. Warps face to normalized 112x112 RGB crop
+    /// 3. Extracts 5-point facial landmarks from detection
+    /// 4. Crops and resizes 2.7x expanded bounding box to 80x80 for PAD
     /// 5. Evaluates Presentation Attack Detection (PAD) liveness; short-circuits on spoof
-    /// 6. Extracts L2-normalized biometric embedding
+    /// 6. Warps face to normalized 112x112 RGB crop using landmarks
+    /// 7. Extracts L2-normalized biometric embedding
     pub fn process_frame(&self, frame: &Frame) -> Result<PipelineOutput, VisionError> {
         let rgb = Zeroizing::new(convert_to_rgb(
             &frame.data,
@@ -178,20 +186,29 @@ impl VisionPipeline {
             });
         }
 
-        let landmarks =
-            self.landmarks
-                .detect_landmarks(&rgb, frame.width, frame.height, &detection.box_)?;
+        let landmarks = detection.landmarks.ok_or(VisionError::MissingLandmarks)?;
 
-        let mut aligned_crop_guard = AlignedCropGuard {
-            crop: align_face_112(&rgb, frame.width, frame.height, &landmarks)?,
-            disarmed: false,
-        };
+        // Step 4: Presentation Attack Detection using 2.7x expanded bounding box context crop
+        let expanded_bbox = expand_bbox_for_pad(
+            &detection.box_,
+            self.config.pad_bbox_scale,
+            frame.width,
+            frame.height,
+        );
 
-        // Step 5: Presentation Attack Detection (anti-spoofing) evaluation
+        let pad_crop = Zeroizing::new(crop_and_resize(
+            &rgb,
+            frame.width,
+            frame.height,
+            &expanded_bbox,
+            self.config.pad_target_width,
+            self.config.pad_target_height,
+        )?);
+
         let pad_result = self.pad.evaluate_liveness(
-            &aligned_crop_guard.crop,
-            self.config.target_width,
-            self.config.target_height,
+            &pad_crop,
+            self.config.pad_target_width,
+            self.config.pad_target_height,
         )?;
 
         if !pad_result.is_live || pad_result.score < self.config.pad_threshold {
@@ -200,6 +217,12 @@ impl VisionPipeline {
                 threshold: self.config.pad_threshold,
             });
         }
+
+        // Step 5: Affine alignment to 112x112 using landmarks for recognition embedding
+        let mut aligned_crop_guard = AlignedCropGuard {
+            crop: align_face_112(&rgb, frame.width, frame.height, &landmarks)?,
+            disarmed: false,
+        };
 
         // Step 6: Feature extraction only if PAD passed
         let embedding = self.extractor.extract_embedding(

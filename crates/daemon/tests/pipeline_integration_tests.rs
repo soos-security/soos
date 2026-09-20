@@ -35,8 +35,7 @@ use soos_daemon::health::HealthState;
 use soos_daemon::pipeline::PipelineComponents;
 use soos_evidence_store::{EvidenceConfig, EvidenceStore, MasterKey as EvMasterKey};
 use soos_inference_ort::{
-    AttackType, BoundingBox, FaceDetection, MockEmbeddingExtractor, MockFaceDetector,
-    MockLandmarkDetector, MockPadDetector, PadResult,
+    AttackType, MockEmbeddingExtractor, MockFaceDetector, MockPadDetector, PadResult,
 };
 use soos_policy::{AuthorizationEngine, RateLimitConfig, RateLimiter, ThresholdConfig};
 use soos_protocol::codec::{decode, encode};
@@ -109,13 +108,7 @@ impl TestPipelineFixture {
         let frame = frame_opt.expect("Mock camera should have frame");
 
         // Configure neural inference mocks
-        let dummy_detection = FaceDetection {
-            box_: BoundingBox::new(50.0, 50.0, 200.0, 200.0),
-            score: 0.95,
-            landmarks: None,
-        };
-        let detector = Arc::new(MockFaceDetector::new_with_detections(vec![dummy_detection]));
-        let landmarks = Arc::new(MockLandmarkDetector::new_canonical());
+        let detector = Arc::new(MockFaceDetector::new_centered_face(640, 480, 0.95));
         let pad = Arc::new(MockPadDetector::new_live());
         let extractor = Arc::new(MockEmbeddingExtractor::new(128));
 
@@ -125,10 +118,10 @@ impl TestPipelineFixture {
             pad_threshold: 0.80,
             target_width: 112,
             target_height: 112,
+            ..Default::default()
         };
         let vision = Arc::new(VisionPipeline::new(
             detector,
-            landmarks,
             pad.clone(),
             extractor,
             vision_config,

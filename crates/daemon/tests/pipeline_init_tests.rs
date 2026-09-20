@@ -27,10 +27,7 @@ use soos_daemon::error::DaemonError;
 use soos_daemon::health::HealthState;
 use soos_daemon::pipeline::{initialize_pipeline, PipelineComponents};
 use soos_evidence_store::{EvidenceConfig, EvidenceStore, MasterKey as EvMasterKey};
-use soos_inference_ort::{
-    BoundingBox, FaceDetection, MockEmbeddingExtractor, MockFaceDetector, MockLandmarkDetector,
-    MockPadDetector,
-};
+use soos_inference_ort::{MockEmbeddingExtractor, MockFaceDetector, MockPadDetector};
 use soos_policy::{AuthorizationEngine, RateLimitConfig, RateLimiter, ThresholdConfig};
 use soos_protocol::codec::{decode, encode};
 use soos_protocol::types::{Request, RequestKind, Response, CURRENT_VERSION};
@@ -76,19 +73,12 @@ async fn test_daemon_startup_initializes_all_pipeline_components() {
     let camera = Arc::new(MockCameraManager::new(camera_config));
 
     // Neural mocks
-    let dummy_detection = FaceDetection {
-        box_: BoundingBox::new(50.0, 50.0, 200.0, 200.0),
-        score: 0.95,
-        landmarks: None,
-    };
-    let detector = Arc::new(MockFaceDetector::new_with_detections(vec![dummy_detection]));
-    let landmarks = Arc::new(MockLandmarkDetector::new_canonical());
+    let detector = Arc::new(MockFaceDetector::new_centered_face(640, 480, 0.95));
     let pad = Arc::new(MockPadDetector::new_live());
     let extractor = Arc::new(MockEmbeddingExtractor::new(128));
 
     let vision = Arc::new(VisionPipeline::new(
         detector,
-        landmarks,
         pad,
         extractor,
         VisionPipelineConfig::default(),

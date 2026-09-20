@@ -74,13 +74,7 @@ fn create_test_pipeline(
     let landmarks = Arc::new(MockLandmarkDetector::new_canonical());
     let extractor = Arc::new(SpyEmbeddingExtractor::new(128));
 
-    let pipeline = VisionPipeline::new(
-        detector.clone(),
-        landmarks.clone(),
-        pad,
-        extractor.clone(),
-        config,
-    );
+    let pipeline = VisionPipeline::new(detector.clone(), pad, extractor.clone(), config);
 
     (pipeline, detector, landmarks, extractor)
 }

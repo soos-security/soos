@@ -21,21 +21,13 @@ use soos_enrollment_cli::error::EnrollmentCliError;
 use soos_enrollment_cli::service::EnrollmentService;
 use soos_inference_ort::{
     BoundingBox, FaceDetection, FaceLandmarks, MockEmbeddingExtractor, MockFaceDetector,
-    MockLandmarkDetector, MockPadDetector, Point2f,
+    MockPadDetector, Point2f,
 };
 use soos_vision::{VisionPipeline, VisionPipelineConfig};
 
 fn setup_mock_service(temp: &TempDir) -> (EnrollmentService, Arc<BiometricStore>) {
     let key = MasterKey::generate().unwrap();
     let store = Arc::new(BiometricStore::new(temp.path().join("biometrics"), key).unwrap());
-
-    // Single face detection
-    let detection = FaceDetection {
-        box_: BoundingBox::new(20.0, 20.0, 80.0, 80.0),
-        score: 0.95,
-        landmarks: None,
-    };
-    let detector = Arc::new(MockFaceDetector::new_with_detections(vec![detection]));
 
     // 5-point landmarks
     let landmarks = FaceLandmarks {
@@ -45,7 +37,14 @@ fn setup_mock_service(temp: &TempDir) -> (EnrollmentService, Arc<BiometricStore>
         mouth_left: Point2f { x: 42.0, y: 88.0 },
         mouth_right: Point2f { x: 70.0, y: 88.0 },
     };
-    let landmark_detector = Arc::new(MockLandmarkDetector::new_with_landmarks(landmarks));
+
+    // Single face detection
+    let detection = FaceDetection {
+        box_: BoundingBox::new(20.0, 20.0, 80.0, 80.0),
+        score: 0.95,
+        landmarks: Some(landmarks),
+    };
+    let detector = Arc::new(MockFaceDetector::new_with_detections(vec![detection]));
 
     // Embedding (dimension 128)
     let extractor = Arc::new(MockEmbeddingExtractor::new(128));
@@ -54,7 +53,6 @@ fn setup_mock_service(temp: &TempDir) -> (EnrollmentService, Arc<BiometricStore>
     let pipeline_config = VisionPipelineConfig::default();
     let pipeline = Arc::new(VisionPipeline::new(
         detector,
-        landmark_detector,
         pad,
         extractor,
         pipeline_config,

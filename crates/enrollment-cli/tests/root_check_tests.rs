@@ -48,9 +48,7 @@ fn test_verify_subcommand_enforces_root_privileges() {
     use soos_camera_v4l::{CameraConfig, MockCameraManager};
     use soos_enrollment_cli::args::VerifyArgs;
     use soos_enrollment_cli::service::EnrollmentService;
-    use soos_inference_ort::{
-        MockEmbeddingExtractor, MockFaceDetector, MockLandmarkDetector, MockPadDetector,
-    };
+    use soos_inference_ort::{MockEmbeddingExtractor, MockFaceDetector, MockPadDetector};
     use soos_vision::{VisionPipeline, VisionPipelineConfig};
     use std::sync::Arc;
     use tempfile::TempDir;
@@ -59,12 +57,10 @@ fn test_verify_subcommand_enforces_root_privileges() {
     let key = MasterKey::generate().unwrap();
     let store = Arc::new(BiometricStore::new(temp.path().join("biometrics"), key).unwrap());
     let detector = Arc::new(MockFaceDetector::new_empty());
-    let landmarks = Arc::new(MockLandmarkDetector::new_canonical());
     let pad = Arc::new(MockPadDetector::new_live());
     let extractor = Arc::new(MockEmbeddingExtractor::new(128));
     let pipeline = Arc::new(VisionPipeline::new(
         detector,
-        landmarks,
         pad,
         extractor,
         VisionPipelineConfig::default(),
