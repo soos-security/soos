@@ -68,6 +68,7 @@ BACKLOG_TO_GITHUB = {
     42: 108,
     43: 109,
     44: 110,
+    45: 111,
 }
 
 BRANCH_TO_ISSUE = {
@@ -118,6 +119,7 @@ BRANCH_TO_ISSUE = {
     "feat/vision-letterbox-and-bbox-crop": 42,
     "refactor/model-ids-nextgen": 43,
     "refactor/mock-backends-nextgen": 44,
+    "docs/nextgen-model-documentation": 45,
 }
 
 

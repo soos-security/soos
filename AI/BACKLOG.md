@@ -1663,24 +1663,24 @@ All project documentation must be updated to reflect the 3-model architecture: A
 
 #### Sub-issues
 
-- [ ] **#45.1** — Update `AI/ARCHITECTURE.md` §1 Key Architectural Choices table
+- [x] **#45.1** — Update `AI/ARCHITECTURE.md` §1 Key Architectural Choices table
   - Change "UltraFace Slim 320 + MobileFaceNet" to "SCRFD 500M KPS + ArcFace w600k MBF + MiniFASNetV2"
 
-- [ ] **#45.2** — Update `AI/ARCHITECTURE.md` §7 Models & Verification Pipeline
+- [x] **#45.2** — Update `AI/ARCHITECTURE.md` §7 Models & Verification Pipeline
   - Replace 5-step pipeline with 4-step pipeline (detection+landmarks unified)
   - Update latency budget table with new estimates
 
-- [ ] **#45.3** — Update `AI/VERIFICATION_MATRIX.md` with next-gen model criteria
+- [x] **#45.3** — Update `AI/VERIFICATION_MATRIX.md` with next-gen model criteria
   - Add NGM1–NGM17 verification entries
   - Update EN7 to reference new model IDs
   - Update PAD1 for MiniFASNetV2
 
-- [ ] **#45.4** — Update `Docs/INFERENCE_ORT_CRATE.md` with new model specifications
+- [x] **#45.4** — Update `Docs/INFERENCE_ORT_CRATE.md` with new model specifications
   - Document SCRFD multi-stride architecture
   - Document w600k normalization difference
   - Document MiniFASNetV2 preprocessing requirements
 
-- [ ] **#45.5** — Update `Docs/VISION_CRATE.md` pipeline flow documentation
+- [x] **#45.5** — Update `Docs/VISION_CRATE.md` pipeline flow documentation
   - Reflect 3-model architecture, different PAD crop strategy
 
 ---
@@ -1695,14 +1695,14 @@ All project documentation must be updated to reflect the 3-model architecture: A
 | NGM4 | SCRFD input is BGR 640×640 with letterbox padding and `(pixel - 127.5) / 128.0` normalization | Golden test | ✅ Verified |
 | NGM5 | SCRFD detection includes 5-point landmarks in `FaceDetection` struct | Unit test | ✅ Verified |
 | NGM6 | `OrtLandmarkDetector` removed; `FaceLandmarks` and `LandmarkDetector` trait preserved | Compilation test | ✅ Verified |
-| NGM7 | Embedding extractor uses `(pixel - 127.5) / 127.5` normalization and produces 512D output | Unit test | ⬜ Pending |
-| NGM8 | PAD detector accepts 80×80 BGR input with `pixel / 255.0` normalization | Unit test | ⬜ Pending |
-| NGM9 | PAD class ordering: index 0 = Live (configurable `live_class_index`) | Unit test | ⬜ Pending |
-| NGM10 | PAD detector validates class ordering against known fixture at startup | Integration test | ⬜ Pending |
+| NGM7 | Embedding extractor uses `(pixel - 127.5) / 127.5` normalization and produces 512D output | Unit test | ✅ Verified |
+| NGM8 | PAD detector accepts 80×80 BGR input with `pixel / 255.0` normalization | Unit test | ✅ Verified |
+| NGM9 | PAD class ordering: index 0 = Live (configurable `live_class_index`) | Unit test | ✅ Verified |
+| NGM10 | PAD detector validates class ordering against known fixture at startup | Integration test | ✅ Verified |
 | NGM11 | VisionPipeline constructs with 3 backends (detector, pad, extractor) | Unit test | ✅ Verified |
 | NGM12 | Pipeline extracts landmarks from `FaceDetection`, not a separate detector | Unit test | ✅ Verified |
 | NGM13 | PAD receives 2.7× expanded bbox crop (80×80); embedding receives aligned 112×112 crop | Unit test | ✅ Verified |
-| NGM14 | Letterbox padding preserves aspect ratio with correct coordinate un-projection | Property test | ⬜ Pending |
-| NGM15 | All model ID strings across workspace match `manifest.toml` v2.0.0 entries | Invariant test | ⬜ Pending |
+| NGM14 | Letterbox padding preserves aspect ratio with correct coordinate un-projection | Property test | ✅ Verified |
+| NGM15 | All model ID strings across workspace match `manifest.toml` v2.0.0 entries | Invariant test | ✅ Verified |
 | NGM16 | Mock backends produce detections with landmarks, 512D embeddings, compatible PAD results | Unit test | ✅ Verified |
-| NGM17 | ARCHITECTURE.md, VERIFICATION_MATRIX.md, and crate docs reflect 3-model pipeline | Documentation audit | ⬜ Pending |
+| NGM17 | ARCHITECTURE.md, VERIFICATION_MATRIX.md, and crate docs reflect 3-model pipeline | Documentation audit | ✅ Verified |

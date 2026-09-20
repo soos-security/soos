@@ -5,9 +5,9 @@
 The `soos-inference-ort` crate provides a safe, robust, and isolated machine learning inference engine for `soos-daemon`. In accordance with `AI/ARCHITECTURE.md` §7, face authentication relies on local deep neural networks running on CPU with minimal latency.
 
 The crate encapsulates:
-1. **Cryptographic Model Attestation**: Enforcing that all ONNX models match expected SHA-256 checksums cataloged in `models/manifest.toml` before any execution session is instantiated.
-2. **Face Detection**: UltraFace Slim 320 ONNX model with deterministic pure-Rust Non-Maximum Suppression (NMS).
-3. **Landmark Estimation**: 5-point facial landmark domain structures (`FaceLandmarks`, `Point2f`) and `LandmarkDetector` trait for geometric alignment. In the next-gen 3-model pipeline, landmark regression is absorbed directly into SCRFD face detection (`OrtScrfdDetector`), with `MockLandmarkDetector` provided for deterministic simulation.
+1. **Cryptographic Model Attestation**: Enforcing that all ONNX models match expected SHA-256 checksums cataloged in `models/manifest.toml` v2.0.0 before any execution session is instantiated.
+2. **Face Detection + Landmarks**: SCRFD 500M KPS ONNX model with multi-stride (8/16/32) distance-to-border box decoding, letterbox padding, BGR input normalization, and embedded 5-point facial keypoints. Replaces the legacy UltraFace Slim 320 + separate landmark model architecture.
+3. **Landmark Domain Types**: `FaceLandmarks`, `Point2f`, and `LandmarkDetector` trait for geometric alignment. In the 3-model pipeline, landmark regression is absorbed directly into SCRFD face detection (`OrtScrfdDetector`); `MockLandmarkDetector` provided for deterministic simulation.
 4. **Biometric Feature Extraction**: ArcFace w600k embedding extractor generating L2-normalized 512D vectors with symmetric `[-1.0, +1.0]` normalization `(pixel - 127.5) / 127.5` (Verification Matrix Criteria `V2` and `NGM7`).
 5. **Presentation Attack Detection (Anti-Spoofing)**: MiniFASNetV2 80×80 BGR anti-spoofing model with `pixel / 255.0` normalization into `[0.0, 1.0]`, configurable `live_class_index` defaulting to 0 (`[Live, Print, Replay]`), and deterministic post-inference buffer zeroization (Verification Matrix Criteria `NGM8`, `NGM9`, `NGM10`).
 6. **Hardware-Free Deterministic Simulation**: Mocks (`MockFaceDetector`, `MockLandmarkDetector`, `MockEmbeddingExtractor`, `MockPadDetector`) for seamless headless execution in CI pipelines and developer environments.
@@ -58,7 +58,7 @@ pub trait FaceDetector: Send + Sync {
     fn detect(&self, rgb: &[u8], width: u32, height: u32) -> Result<Vec<FaceDetection>, InferenceError>;
 }
 ```
-Implemented by `OrtScrfdDetector` (SCRFD 500M KPS with multi-stride output parsing and 5-point landmarks), `OrtFaceDetector` (legacy UltraFace Slim 320), and `MockFaceDetector`.
+Implemented by `OrtScrfdDetector` (production: SCRFD 500M KPS with multi-stride output parsing, 5-point landmark integration, letterbox padding, and BGR normalization), `OrtFaceDetector` (legacy UltraFace Slim 320 — retained for reference), and `MockFaceDetector`.
 
 `OrtScrfdDetector` incorporates:
 - BGR channel ordering and `(pixel - 127.5) / 128.0` normalization.

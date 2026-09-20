@@ -16,7 +16,7 @@ The system is not considered a high-assurance biometric factor until robust Pres
 | PAM Module Execution | Pure synchronous blocking Rust, `std::os::unix::net::UnixStream`, hard 200–250ms deadline | Critical authentication path must never spawn a persistent async runtime | AI inference, direct camera access, or network downloads inside `.so` |
 | Privileged Daemon | Rust + Tokio root process, sole owner of `/dev/video*` and ONNX sessions | Keeps camera warm and models in memory; central arbitration | Re-opening `/dev/video0` inside PAM on every authentication attempt |
 | Linux Camera Capture | `v4l` 0.14, MMAP buffers on dedicated worker thread; `nokhwa` only as prototype | Deterministic V4L2 control and predictable zero-copy buffer rotation | Depending on OpenCV or allowing competing camera consumers |
-| Local AI Inference | `ort` (ONNX Runtime) CPU execution provider; UltraFace Slim 320 + MobileFaceNet | Fast, battle-tested, no OpenCV required in application code | Claiming "pure Rust" (ORT is native C/C++); unverified weight downloads |
+| Local AI Inference | `ort` (ONNX Runtime) CPU execution provider; **SCRFD 500M KPS** (face detection + 5-point landmarks) + **ArcFace w600k MBF** (512D embeddings) + **MiniFASNetV2** (anti-spoofing) | Fast 3-model pipeline with unified detection+landmarks, battle-tested ORT runtime, no OpenCV required | Claiming "pure Rust" (ORT is native C/C++); unverified weight downloads; separate landmark model (absorbed into SCRFD) |
 | Biometric Storage | AES-GCM encrypted embeddings at rest; intrusion snapshots opt-in and isolated | Minimizes attack surface and persistent biometric risk | Storing raw frames or passwords on disk or sending over socket |
 
 Verified crate versions: `pam-bindings` 0.3.0 (target crate), `tokio` 1.53.1, `v4l` 0.14.0, `nokhwa` 0.10.11, `ort` 2.0.0-rc.13, `zeroize` 1.9.0. Versions are pinned in `Cargo.lock` and audited via `cargo-deny`.[^pam-bindings][^tokio][^v4l][^nokhwa][^ort][^zeroize]
@@ -181,24 +181,26 @@ CameraManager thread (blocking): dequeue MMAP -> timestamp CLOCK_MONOTONIC
 ## 7. Local Vision Pipeline & Latency Budget (150ms Target)
 
 ### Models & Verification Pipeline
-1. **Face Detection**: UltraFace Slim 320 ONNX (~1.04MB) -> bounding boxes and confidence scores with deterministic Rust NMS.[^ultraface]
-2. **Landmarks & Alignment**: 5-point landmark ONNX model -> affine transform to 112x112 aligned face crop.
-3. **Presentation Attack Detection (PAD)**: Active challenge or dedicated ONNX anti-spoofing model.
-4. **Feature Extraction**: MobileFaceNet ArcFace-compatible ONNX FP32/int8 -> 128D/512D L2-normalized embedding.[^mobilefacenet]
-5. **Matching**: Cosine similarity (`cosine = dot(a, b)`). Authorized only if score >= calibrated threshold and single face verified.
 
-Every model file is tracked in `models/manifest.toml` with license, source URL, and SHA-256 checksum.
+The soos vision pipeline uses a **3-model architecture** (manifest version 2.0.0), with SCRFD unifying face detection and landmark regression into a single model:
+
+1. **Face Detection + Landmarks**: SCRFD 500M KPS ONNX (~2.4 MB, MIT) → bounding boxes with confidence scores AND 5-point facial keypoints directly, via multi-stride (8/16/32) distance-to-border box decoding. BGR 640×640 input with letterbox padding and `(pixel - 127.5) / 128.0` normalization. Eliminates the separate landmark model of the legacy pipeline.
+2. **Presentation Attack Detection (PAD)**: MiniFASNetV2 ONNX (~1.8 MB, Apache-2.0) → `[Live, Print, Replay]` 3-class liveness scores. Receives an **80×80 BGR** crop of the 2.7× expanded bounding box (wider context than the aligned face), normalized with `pixel / 255.0`. Class index 0 = Live (configurable).
+3. **Feature Extraction**: ArcFace w600k MobileFaceNet ONNX (~3.6 MB, MIT) → **512D** L2-normalized embedding vector. Receives the standard **112×112** aligned face crop produced by affine alignment from the 5-point landmarks. Normalization: `(pixel - 127.5) / 127.5` for exact symmetric `[-1.0, +1.0]` range.
+4. **Matching**: Cosine similarity (`cosine = dot(a, b)` for L2-normalized vectors). Authorized only if score ≥ calibrated threshold and a single face is verified with PAD passed.
+
+Every model file is tracked in `models/manifest.toml` v2.0.0 with license, source URL, SHA-256 checksum, and tensor shape specifications.
 
 ### 150ms Latency Budget (p95 Target)
 
 | Segment | Budget (p95) |
 |---|---:|
 | IPC dispatch and RAM snapshot | 5 ms |
-| Color conversion & face detection | 35 ms |
-| 5-point landmarks & affine alignment | 20 ms |
-| PAD liveness verification | 35 ms |
-| MobileFaceNet embedding & cosine distance | 30 ms |
-| OS scheduler margin | 25 ms |
+| Color conversion & SCRFD face detection + landmarks (640×640 BGR, letterbox) | 40 ms |
+| 2.7× bbox expansion + crop-resize to 80×80 + MiniFASNetV2 PAD | 30 ms |
+| Affine alignment (112×112) + ArcFace w600k embedding (512D) | 30 ms |
+| OS scheduler margin | 20 ms |
+| Cosine matching + policy verdict | 5 ms |
 | **Total Decision Budget** | **<= 150 ms** |
 
 ---
@@ -319,8 +321,9 @@ SystemCallArchitectures=native
 [^nokhwa-v4l]: `nokhwa`, [V4LCaptureDevice documentation](https://docs.rs/nokhwa/latest/nokhwa/backends/capture/struct.V4LCaptureDevice.html).
 [^ort]: `ort`, [ort 2.0.0-rc.13 documentation](https://docs.rs/ort/latest/ort/).
 [^zeroize]: RustCrypto, [zeroize 1.9.0 documentation](https://docs.rs/zeroize/latest/zeroize/).
-[^ultraface]: Linzaer, [UltraFace Slim 320 ONNX](https://github.com/Linzaer/Ultra-Light-Fast-Generic-Face-Detector-1MB).
-[^mobilefacenet]: Chen et al., [*MobileFaceNets: Efficient CNNs for Accurate Real-Time Face Verification on Mobile Devices*](https://arxiv.org/abs/1804.07573), 2018.
+[^scrfd]: Guo et al., [*Sample and Computation Redistribution for Efficient Face Detection*](https://arxiv.org/abs/2105.04714), ICLR 2022. Model: SCRFD 500M KPS ONNX (RuteNL fork, MIT license).
+[^arcface-w600k]: Deng et al., [*ArcFace: Additive Angular Margin Loss for Deep Face Recognition*](https://arxiv.org/abs/1801.07698), CVPR 2019. Model: ArcFace w600k MobileFaceNet ONNX, 512D embeddings.
+[^minifasnetv2]: Zhang et al., [*A Dataset and Benchmark for Large-Scale Multi-Modal Face Anti-Spoofing*](https://arxiv.org/abs/1812.00408), CVPR 2019. Model: MiniFASNetV2 ONNX fork by QingHeYang (Apache-2.0).
 [^nist-63b]: NIST, [SP 800-63B Digital Identity Guidelines](https://pages.nist.gov/800-63-4/sp800-63b.html).
 [^nist-blog]: NIST, [Facing the Facts to Keep Our Biometrics Secure](https://www.nist.gov/blogs/taking-measure/facing-facts-keep-our-biometrics-secure), 2024.
 [^nist-pad]: NIST, [IR 8491 — Face Analysis Technology Evaluation, Part 10](https://nvlpubs.nist.gov/nistpubs/ir/2023/NIST.IR.8491.pdf), 2023.

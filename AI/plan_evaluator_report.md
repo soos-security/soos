@@ -1,94 +1,92 @@
-# Implementation Plan Evaluation Report — Issue #44
+# Plan Evaluator Report — Issue #45: Next-Gen Model Documentation Update
 
-> **Target Issue**: Issue #44: `[inference-ort]` Update mock backends for next-gen model architecture  
-> **GitHub Issue**: #110  
-> **Branch**: `refactor/mock-backends-nextgen`  
-> **Verification Matrix**: `NGM16`  
-> **Evaluation Date**: 2026-09-20  
-> **Evaluator**: Plan Evaluator Sub-Agent (Dev-Workflow)
+**Branch**: `docs/nextgen-model-documentation`
+**GitHub Issue**: #111
+**Evaluator**: Plan-Evaluator Sub-Agent
+**Date**: 2026-09-21
 
 ---
 
-## 1. Executive Summary
+## Scope
 
-This report evaluates the implementation plan for Issue #44 (`[inference-ort]` Update mock backends for next-gen model architecture) against `AI/ARCHITECTURE.md`, `AI/DECISIONS.md`, `AI/BACKLOG.md`, `AI/VERIFICATION_MATRIX.md`, and project security guidelines.
+Issue #45 is a **documentation-only** update. It requires synchronizing five documentation artefacts with the 3-model pipeline implemented in Issues #36–#44:
 
-The proposed modifications align mock implementations (`MockFaceDetector`, `MockEmbeddingExtractor`, `MockPadDetector`) and test construction sites across all crates with the next-generation 3-model neural architecture (SCRFD 500M KPS + ArcFace w600k MBF 512D + MiniFASNetV2).
-
----
-
-## 2. Evaluation Across Architectural Pillars
-
-### Pillar 1: Architectural Alignment & Threat Model
-- **Alignment**:
-  - `MockFaceDetector` embeds 5-point facial landmarks (`FaceLandmarks`) directly in `FaceDetection`, scaling canonical reference points to the bounding box. This eliminates external landmark detector dependencies in mock pipelines, matching the single-stage SCRFD architecture.
-  - `MockEmbeddingExtractor` standardizes on 512 dimensions (`DEFAULT_DIM = 512`), matching ArcFace w600k MBF.
-  - Zero violation of daemon privilege boundaries; all changes are confined to deterministic mocks and unit/integration test suites.
-- **Verdict**: PASS
-
-### Pillar 2: PAM Real-Time Latency & Concurrency
-- **Alignment**:
-  - Mocks run in thread-safe memory without blocking IPC or network I/O.
-  - No asynchronous runtimes (Tokio) or unbounded synchronization primitives introduced.
-  - Zero stdout/stderr stream pollution (`println!`, `dbg!`) introduced into PAM or shared library pathways.
-- **Verdict**: PASS
-
-### Pillar 3: Panic Safety & Fail-Closed Behavior
-- **Alignment**:
-  - `FaceLandmarks::new` and `Point2f::new` are pure value object constructors.
-  - Coordinate scaling uses bounded arithmetic (`bw / 112.0`, `bh / 112.0`).
-  - Zero `unwrap()` or `expect()` introduced in production code; all fallible operations propagate via `Result<_, InferenceError>`.
-- **Verdict**: PASS
-
-### Pillar 4: Dependency Isolation & Banned Crates
-- **Alignment**:
-  - `#![forbid(unsafe_code)]` remains strictly enforced in `crates/inference-ort` and `crates/vision`.
-  - Zero external crates added; no OpenCV or prohibited libraries.
-  - Preserves trait abstractions: `FaceDetector`, `EmbeddingExtractor`, `PadDetector`, and `LandmarkDetector`.
-- **Verdict**: PASS
-
-### Pillar 5: Data Confidentiality & Zeroization
-- **Alignment**:
-  - `BiometricEmbedding` zeroization and memory hygiene invariants are preserved.
-  - No sensitive credentials, keys, or vectors logged or leaked.
-- **Verdict**: PASS
-
-### Pillar 6: Test Integrity & TDD Contracts
-- **Alignment**:
-  - Adheres strictly to the TDD cycle: authors contractual unit test `test_mock_detector_returns_landmarks` in `crates/inference-ort/tests/detector_tests.rs` before implementation.
-  - Verifies test failure in the Red Phase.
-  - Updates all existing mock usages from 128D to 512D without weakening any assertion contracts.
-  - Aligns with criterion `NGM16` in `AI/VERIFICATION_MATRIX.md`.
-- **Verdict**: PASS
+1. `AI/ARCHITECTURE.md` §1 Key Architectural Choices table — update model names
+2. `AI/ARCHITECTURE.md` §7 Models & Verification Pipeline — replace 5-step with 4-step, update latency budget
+3. `AI/VERIFICATION_MATRIX.md` — add NGM1–NGM17, update EN7 and PAD1, mark all complete
+4. `Docs/INFERENCE_ORT_CRATE.md` — update for SCRFD, w600k, MiniFASNetV2
+5. `Docs/VISION_CRATE.md` — reflect 3-model architecture and new PAD crop strategy
 
 ---
 
-## 3. Scope of Modifications
+## Evaluation Against 6 Pillars
 
-1. **`crates/inference-ort/src/mock.rs`**:
-   - Provide `MockFaceDetector::canonical_landmarks_for_box(&BoundingBox) -> FaceLandmarks`.
-   - Update `MockFaceDetector::new_centered_face` to scale canonical landmarks to the bounding box.
-2. **`crates/inference-ort/tests/detector_tests.rs`**:
-   - Add contractual unit test `test_mock_detector_returns_landmarks` asserting that detections returned by `MockFaceDetector::new_centered_face` include valid `landmarks` scaled to the face bounding box.
-3. **`crates/enrollment-cli/src/service.rs`**:
-   - Update `build_mock_pipeline` from 128D to 512D (`MockEmbeddingExtractor::new(512)` / `new_default()`).
-4. **All Workspace Test Suites**:
-   - Update test construction sites and mock embedding extractors to 512D:
-     - `crates/daemon/tests/pipeline_init_tests.rs`
-     - `crates/daemon/tests/pipeline_integration_tests.rs`
-     - `crates/enrollment-cli/tests/delete_tests.rs`
-     - `crates/enrollment-cli/tests/enroll_tests.rs`
-     - `crates/enrollment-cli/tests/list_tests.rs`
-     - `crates/enrollment-cli/tests/root_check_tests.rs`
-     - `crates/enrollment-cli/tests/verify_tests.rs`
-     - `crates/vision/tests/bench_tests.rs`
-     - `crates/vision/tests/pad_tests.rs`
-     - `crates/vision/tests/pipeline_tests.rs`
-     - `crates/vision/tests/zeroize_tests.rs`
-   - Clean up remaining `MockLandmarkDetector` instances from test setups in `pad_tests.rs` and `zeroize_tests.rs`.
+### 1. Architectural Alignment
+- ✅ All changes are strictly additive documentation; zero production code modification.
+- ✅ ARCHITECTURE.md updates match ADR [2026-09-20] Next-Generation AI Models and ADR SCRFD/PAD decisions.
+- ✅ No new Cargo dependencies introduced.
+
+### 2. PAM Real-Time Deadlines
+- ✅ Not applicable — documentation only.
+
+### 3. Panic Safety
+- ✅ Not applicable — documentation only.
+
+### 4. Dependency Isolation
+- ✅ Not applicable — no code changes.
+
+### 5. Memory & Secret Hygiene
+- ✅ Not applicable — no code changes.
+
+### 6. Test Integrity & Anti-Weakening
+- ✅ No tests modified. The documentation adds NGM17 criterion to VERIFICATION_MATRIX.md with test evidence for all NGM1–NGM17 items already implemented.
 
 ---
 
-## 4. Final Verdict
+## Changes Planned
 
-VALIDATION_VERDICT: APPROVED
+### AI/ARCHITECTURE.md
+- **§1 Key Architectural Choices table**: Replace "UltraFace Slim 320 + MobileFaceNet" with "SCRFD 500M KPS + ArcFace w600k MBF + MiniFASNetV2"
+- **§7 Models & Verification Pipeline**: Replace 5-step with 4-step unified pipeline; update latency budget table; add references to new model specs
+
+### AI/VERIFICATION_MATRIX.md
+- Add complete `nextgen-model-documentation` component section (NGM17)
+- Update NGM1–NGM16 statuses to ✅ Verified (already done in preceding issues, now authoritative)
+- Update EN7 to reference `manifest.toml` v2.0.0 new IDs
+- Update PAD1 to reference MiniFASNetV2
+
+### Docs/INFERENCE_ORT_CRATE.md
+- Already largely updated (contains references to OrtScrfdDetector, w600k, MiniFASNetV2)
+- Verify and complete NGM3–NGM10 coverage in verification matrix table
+
+### Docs/VISION_CRATE.md
+- Already updated to 3-model pipeline (contains 11-step pipeline)
+- Verify NGM11–NGM14 coverage in verification table
+
+### AI/BACKLOG.md
+- Mark all #45.x sub-issues as `[x]` complete
+
+---
+
+## Risk Assessment
+
+- **Risk**: Low — purely additive documentation. Zero risk of regression.
+- **English compliance**: All documentation authored exclusively in English.
+
+---
+
+## Verification Plan
+
+1. All five files updated and consistent.
+2. `AI/BACKLOG.md` sub-issues #45.1–#45.5 marked `[x]`.
+3. `AI/VERIFICATION_MATRIX.md` NGM17 entry added with `✅ Verified`.
+4. Walkthrough `AI/walkthroughs/63_nextgen_model_documentation.md` authored.
+5. `cargo fmt && cargo clippy && cargo test` pass (no code changes — trivially green).
+
+---
+
+## VALIDATION_VERDICT: APPROVED
+
+All changes are strictly bounded to documentation artefacts. Zero risk of introducing regressions, panic paths, or security violations. The documentation faithfully reflects the 3-model pipeline implemented in Issues #36–#44 as confirmed by review of ADR register, DECISIONS.md, and the current state of ARCHITECTURE.md, VERIFICATION_MATRIX.md, and Docs/ files.
+
+Autonomous execution proceeds directly to implementation.

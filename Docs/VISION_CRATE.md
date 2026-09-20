@@ -42,7 +42,7 @@ $$B = \text{clamp}\left(Y + \frac{1815 \cdot (U - 128) + 512}{1024}, 0, 255\righ
 
 ### 2.2 5-Point Landmark Affine Alignment (`align.rs`)
 
-MobileFaceNet ArcFace requires facial images to be aligned to canonical reference facial coordinates on a 112×112 canvas:
+ArcFace w600k MBF requires facial images to be aligned to canonical reference facial coordinates on a 112×112 canvas:
 
 ```text
 Canonical Target Reference Coordinates (TARGET_LANDMARKS_112):
@@ -61,7 +61,7 @@ The alignment computes a closed-form least-squares 2D similarity transform (scal
 
 ### 2.3 Cosine Similarity Matching (`matcher.rs`)
 
-Biometric feature vectors extracted from MobileFaceNet are compared via cosine similarity:
+Biometric feature vectors extracted from ArcFace w600k are compared via cosine similarity:
 $$\text{similarity}(a, b) = \frac{a \cdot b}{\|a\|_2 \|b\|_2}$$
 
 - **Dimension Mismatch Protection**: Verifies `a.len() == b.len()`.

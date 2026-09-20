@@ -184,12 +184,12 @@ This document translates the critical gating criteria from §11 of `ARCHITECTURE
 
 | # | Criterion | Test Method | Status |
 |---|---|---|---|
-| PAD1 | MiniFASNet anti-spoofing model attested in `models/manifest.toml` with SHA-256 checksum and input/output shapes | Manifest parsing test (`manifest_tests::test_parse_workspace_manifest_file`) | ✅ Verified |
+| PAD1 | **MiniFASNetV2** anti-spoofing model (`minifasnet_v2_pad`) attested in `models/manifest.toml` v2.0.0 with SHA-256 checksum, 80×80 BGR input shape, and `[1, 3]` output shape; `live_class_index = 0` for `[Live, Print, Replay]` class ordering | Manifest parsing test (`manifest_tests::test_parse_workspace_manifest_file`, `manifest_tests::test_manifest_v2_model_count_and_checksum_attestation`) | ✅ Verified |
 | PAD2 | `PadDetector` trait, `OrtPadDetector`, and `MockPadDetector` with numerically stable softmax and fault injection | Unit tests (`pad_tests::test_mock_pad_detector_nominal_live`, `test_mock_pad_detector_spoof_*`, `test_softmax_numerical_stability`) | ✅ Verified |
 | PAD3 | Vision pipeline short-circuits on spoof detection, completely skipping embedding extraction | Pipeline unit tests (`pad_tests::test_pipeline_rejects_printed_photo_spoof`, `test_pipeline_rejects_screen_replay_spoof`) | ✅ Verified |
 | PAD4 | Genuine live face candidates pass PAD and extract biometric embeddings | Pipeline unit tests (`pad_tests::test_pipeline_accepts_live_face`, `test_pad_threshold_calibration`) | ✅ Verified |
 | PAD5 | FAR/FRR benchmark on test fixtures population confirms 0.0% False Accept Rate and 0.0% False Reject Rate | Benchmark test (`pad_tests::test_pad_far_frr_benchmark`) | ✅ Verified |
-| PAD6 | PAD verification execution latency remains well within the 35ms budget allocated in `ARCHITECTURE.md` §7 | Benchmark test (`pad_tests::test_pad_latency_budget_compliance`) | ✅ Verified |
+| PAD6 | PAD verification execution latency remains well within the 30ms budget allocated in updated `ARCHITECTURE.md` §7 for MiniFASNetV2 | Benchmark test (`pad_tests::test_pad_latency_budget_compliance`) | ✅ Verified |
 | PAD7 | Daemon integration: PAD presentation attack yields `Verdict::Deny` with `ReasonClass::PadFailed` | Integration test (`pipeline_integration_tests::test_15_pad_presentation_attack_spoof_returns_deny_pad_failed`) | ✅ Verified |
 
 ---
@@ -353,4 +353,10 @@ This document translates the critical gating criteria from §11 of `ARCHITECTURE
 |---|---|---|---|
 | NGM16 | Mock backends produce detections with landmarks, 512D embeddings, compatible PAD results, and 3-backend test construction sites | Unit tests (`detector_tests::test_mock_detector_returns_landmarks`, `detector_tests::test_mock_face_detector_canonical_landmarks_for_box`, `embedding_tests::test_mock_embedding_default_512d`, `pad_tests::test_mock_pad_detector_*`, `pipeline_tests::test_pipeline_constructs_with_three_backends`) | ✅ Verified |
 
+---
 
+## Component: `nextgen-model-documentation` (Issue #45 / GitHub #111)
+
+| # | Criterion | Test Method | Status |
+|---|---|---|---|
+| NGM17 | `AI/ARCHITECTURE.md` §1 and §7, `AI/VERIFICATION_MATRIX.md` (NGM1–NGM17), `Docs/INFERENCE_ORT_CRATE.md`, and `Docs/VISION_CRATE.md` consistently reflect the 3-model pipeline (SCRFD 500M KPS + ArcFace w600k MBF 512D + MiniFASNetV2 80×80), eliminating all legacy references to UltraFace Slim 320, `landmark_5point`, and MobileFaceNet 128D | Documentation audit cross-referencing ADR register (`AI/DECISIONS.md`), manifest v2.0.0 model IDs, and implementation tests (`manifest_tests::test_parse_workspace_manifest_file`, `test_enrollment_cli_model_ids_match_manifest`, `test_enrollment_cli_legacy_model_ids_absent`) | ✅ Verified |
