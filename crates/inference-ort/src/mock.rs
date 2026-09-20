@@ -135,6 +135,12 @@ impl MockLandmarkDetector {
     }
 }
 
+impl Default for MockLandmarkDetector {
+    fn default() -> Self {
+        Self::new_canonical()
+    }
+}
+
 impl LandmarkDetector for MockLandmarkDetector {
     fn detect_landmarks(
         &self,

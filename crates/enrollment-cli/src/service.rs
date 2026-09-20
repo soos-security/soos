@@ -13,8 +13,8 @@ use soos_camera_v4l::{
 };
 use soos_inference_ort::{
     BoundingBox, FaceDetection, MockEmbeddingExtractor, MockFaceDetector, MockLandmarkDetector,
-    MockPadDetector, ModelRegistry, OrtEmbeddingExtractor, OrtFaceDetector, OrtLandmarkDetector,
-    OrtPadDetector, RegistryConfig,
+    MockPadDetector, ModelRegistry, OrtEmbeddingExtractor, OrtFaceDetector, OrtPadDetector,
+    RegistryConfig,
 };
 use soos_protocol::Verdict;
 use soos_vision::{
@@ -582,12 +582,11 @@ pub fn build_full_service(cli: &Cli) -> Result<EnrollmentService, EnrollmentCliE
     registry.verify_integrity()?;
 
     let det_session = registry.get_or_load_session(MODEL_ID_FACE_DETECTOR)?;
-    let lm_session = registry.get_or_load_session(MODEL_ID_LANDMARKS)?;
     let pad_session = registry.get_or_load_session(MODEL_ID_PAD)?;
     let emb_session = registry.get_or_load_session(MODEL_ID_EMBEDDING)?;
 
     let detector = Arc::new(OrtFaceDetector::new(det_session, 0.70, 0.40));
-    let landmarks = Arc::new(OrtLandmarkDetector::new(lm_session));
+    let landmarks = Arc::new(MockLandmarkDetector::new_canonical());
     let pad = Arc::new(OrtPadDetector::new(pad_session, 0.80));
     let extractor = Arc::new(OrtEmbeddingExtractor::new(emb_session));
 
