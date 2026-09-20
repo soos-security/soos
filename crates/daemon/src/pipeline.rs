@@ -162,15 +162,15 @@ pub fn initialize_pipeline(
     // Cryptographic attestation: verify all models in directory match manifest checksums
     registry.verify_integrity()?;
 
-    let det_session = registry.get_or_load_session("ultraface_slim_320")?;
-    let pad_session = registry.get_or_load_session("minifasnet_pad")?;
-    let ext_session = registry.get_or_load_session("mobilefacenet_arcface")?;
+    let det_session = registry.get_or_load_session("scrfd_500m_kps")?;
+    let pad_session = registry.get_or_load_session("minifasnet_v2_pad")?;
+    let ext_session = registry.get_or_load_session("arcface_w600k_mbf")?;
 
-    let detector = Arc::new(soos_inference_ort::OrtFaceDetector::new(
+    let detector = Arc::new(soos_inference_ort::OrtScrfdDetector::new(
         det_session,
         config.vision.min_face_confidence,
         0.45,
-    ));
+    )?);
     let pad = Arc::new(soos_inference_ort::OrtPadDetector::new(
         pad_session,
         config.vision.pad_threshold,

@@ -11,62 +11,58 @@
 )]
 
 use soos_enrollment_cli::{
-    resolve_camera_device, MODEL_ID_EMBEDDING, MODEL_ID_FACE_DETECTOR, MODEL_ID_LANDMARKS,
-    MODEL_ID_PAD, REQUIRED_MODEL_IDS,
+    resolve_camera_device, MODEL_ID_EMBEDDING, MODEL_ID_FACE_DETECTOR, MODEL_ID_PAD,
+    REQUIRED_MODEL_IDS,
 };
 use soos_inference_ort::ModelManifest;
 use std::path::PathBuf;
 
 #[test]
 fn test_enrollment_cli_model_ids_match_manifest() {
-    // 1. Assert exact required model IDs per Sub-issue #19.1
-    assert_eq!(MODEL_ID_FACE_DETECTOR, "ultraface_slim_320");
-    assert_eq!(MODEL_ID_LANDMARKS, "landmark_5point");
-    assert_eq!(MODEL_ID_PAD, "minifasnet_pad");
-    assert_eq!(MODEL_ID_EMBEDDING, "mobilefacenet_arcface");
+    // 1. Assert exact required model IDs for 3-model architecture (Issue #43)
+    assert_eq!(MODEL_ID_FACE_DETECTOR, "scrfd_500m_kps");
+    assert_eq!(MODEL_ID_PAD, "minifasnet_v2_pad");
+    assert_eq!(MODEL_ID_EMBEDDING, "arcface_w600k_mbf");
 
-    assert_eq!(REQUIRED_MODEL_IDS.len(), 4);
-    assert_eq!(REQUIRED_MODEL_IDS[0], "ultraface_slim_320");
-    assert_eq!(REQUIRED_MODEL_IDS[1], "landmark_5point");
-    assert_eq!(REQUIRED_MODEL_IDS[2], "minifasnet_pad");
-    assert_eq!(REQUIRED_MODEL_IDS[3], "mobilefacenet_arcface");
+    assert_eq!(REQUIRED_MODEL_IDS.len(), 3);
+    assert_eq!(REQUIRED_MODEL_IDS[0], "scrfd_500m_kps");
+    assert_eq!(REQUIRED_MODEL_IDS[1], "minifasnet_v2_pad");
+    assert_eq!(REQUIRED_MODEL_IDS[2], "arcface_w600k_mbf");
 
-    // 2. Assert against official models/manifest.toml
+    // 2. Assert against official models/manifest.toml v2.0.0
     let manifest_path =
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../models/manifest.toml");
     let manifest =
         ModelManifest::from_file(&manifest_path).expect("Failed to load models/manifest.toml");
 
-    if manifest.manifest.version == "1.0.0" {
-        for model_id in &REQUIRED_MODEL_IDS {
-            let model = manifest.get_model(model_id).unwrap_or_else(|| {
-                panic!("Model '{model_id}' attested by enrollment-cli must be in manifest.toml")
-            });
-            assert_eq!(model.id, *model_id);
-            assert!(!model.filename.is_empty(), "Model filename cannot be empty");
-            assert_eq!(
-                model.sha256.len(),
-                64,
-                "SHA-256 hash must be 64 hex characters"
-            );
-        }
-    } else {
-        // Next-generation manifest v2.0.0: attested models are scrfd_500m_kps, arcface_w600k_mbf, minifasnet_v2_pad.
-        // Full enrollment-cli migration of REQUIRED_MODEL_IDS to next-gen IDs will occur in Issue #43.
-        assert_eq!(manifest.manifest.version, "2.0.0");
-        let nextgen_ids = ["scrfd_500m_kps", "arcface_w600k_mbf", "minifasnet_v2_pad"];
-        for model_id in &nextgen_ids {
-            let model = manifest
-                .get_model(model_id)
-                .unwrap_or_else(|| panic!("Model '{model_id}' must be in manifest.toml v2.0.0"));
-            assert_eq!(model.id, *model_id);
-            assert!(!model.filename.is_empty(), "Model filename cannot be empty");
-            assert_eq!(
-                model.sha256.len(),
-                64,
-                "SHA-256 hash must be 64 hex characters"
-            );
-        }
+    assert_eq!(manifest.manifest.version, "2.0.0");
+    for model_id in &REQUIRED_MODEL_IDS {
+        let model = manifest.get_model(model_id).unwrap_or_else(|| {
+            panic!("Model '{model_id}' attested by enrollment-cli must be in manifest.toml v2.0.0")
+        });
+        assert_eq!(model.id, *model_id);
+        assert!(!model.filename.is_empty(), "Model filename cannot be empty");
+        assert_eq!(
+            model.sha256.len(),
+            64,
+            "SHA-256 hash must be 64 hex characters"
+        );
+    }
+}
+
+#[test]
+fn test_enrollment_cli_legacy_model_ids_absent() {
+    let legacy_ids = [
+        "ultraface_slim_320",
+        "landmark_5point",
+        "mobilefacenet_arcface",
+        "minifasnet_pad",
+    ];
+    for legacy in &legacy_ids {
+        assert!(
+            !REQUIRED_MODEL_IDS.contains(legacy),
+            "Legacy model '{legacy}' must NOT be in REQUIRED_MODEL_IDS"
+        );
     }
 }
 

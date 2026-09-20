@@ -24,7 +24,7 @@ pub use service::{
     build_full_service, build_service, build_store_only, check_privileges, resolve_camera_device,
     DiagnosticVerificationReport, EnrolledUserSummary, EnrollmentOutcome, EnrollmentService,
     EnrollmentSummary, LatencyBreakdown, DEFAULT_CAMERA_DEVICE, DEFAULT_KEY_PATH,
-    DEFAULT_MODELS_DIR, MODEL_ID_EMBEDDING, MODEL_ID_FACE_DETECTOR, MODEL_ID_LANDMARKS,
-    MODEL_ID_PAD, REQUIRED_MODEL_IDS,
+    DEFAULT_MODELS_DIR, MODEL_ID_EMBEDDING, MODEL_ID_FACE_DETECTOR, MODEL_ID_PAD,
+    REQUIRED_MODEL_IDS,
 };
 pub use shred::secure_shred_file;

@@ -1,49 +1,56 @@
 # Candid Review Report
 
 - **Date**: 2026-09-20
-- **Target Branch / Commit**: `feat/vision-letterbox-and-bbox-crop`
+- **Target Branch / Commit**: `refactor/model-ids-nextgen`
 - **Audited Files**:
-  - `crates/vision/src/letterbox.rs`
-  - `crates/vision/src/lib.rs`
-  - `crates/vision/tests/crop_tests.rs`
-  - `crates/vision/tests/letterbox_tests.rs`
+  - `crates/daemon/src/pipeline.rs`
+  - `crates/daemon/tests/model_deployment_tests.rs`
+  - `crates/enrollment-cli/src/lib.rs`
+  - `crates/enrollment-cli/src/service.rs`
+  - `crates/enrollment-cli/tests/model_id_tests.rs`
+  - `Docs/ENROLLMENT_CLI.md`
   - `scripts/sync_issue.py`
 
 ## 1. Executive Summary
 
-This pull request implements Issue #42 (GitHub #108), providing two essential image preprocessing utility modules in `crates/vision`:
-1. `letterbox_resize()` and `LetterboxParams`: Uniform scaling, symmetric padding, and forward/inverse coordinate projection preserving aspect ratio for next-generation face detection (SCRFD 640×640).
-2. `crop_and_resize()` test suite: Contractual verification for bounding box cropping, bilinear interpolation, and out-of-bounds zero (black) padding for presentation attack detection (MiniFASNetV2 80×80).
-
-The implementation adheres strictly to `#![forbid(unsafe_code)]`, eliminates potential arithmetic overflow through `checked_mul`, maintains sub-millisecond execution without async runtimes, and enforces zero test weakening.
-
----
+This pull request completes Issue #43 / GitHub #109 by migrating all model registry identifiers and ONNX Runtime session initializations across `soos-daemon` and `soos-enrollment-cli` to the 3-model next-generation architecture (`scrfd_500m_kps`, `minifasnet_v2_pad`, `arcface_w600k_mbf`). The legacy landmark model (`landmark_5point`) session and constants have been completely excised, and `OrtScrfdDetector` is properly instantiated with error propagation via `?`. All contractual test assertions and documentation have been synchronized with `models/manifest.toml` v2.0.0.
 
 ## 2. Deep Reasoning Audit
 
 ### Logic & Architecture
-- **Pass**: Aspect ratio calculation accurately selects isotropic scale `min(target_w / img_w, target_h / img_h)` and computes centered offsets `(target - scaled) / 2.0`. Forward projection (`project`) and inverse un-projection (`unproject`) are exact inverses, confirmed across arbitrary dimensions by proptest property testing. Bilinear interpolation correctly samples and interpolates 4 neighboring pixels while keeping padded border pixels strictly black (0, 0, 0).
+- **Pass**:
+  - `crates/daemon/src/pipeline.rs` loads exactly 3 sessions: `"scrfd_500m_kps"`, `"minifasnet_v2_pad"`, and `"arcface_w600k_mbf"`.
+  - Detector initialization invokes `soos_inference_ort::OrtScrfdDetector::new(...)` which performs multi-stride 9-tensor validation and passes 5-point landmarks directly to `VisionPipeline`.
+  - `crates/enrollment-cli/src/service.rs` updates `MODEL_ID_FACE_DETECTOR`, `MODEL_ID_PAD`, and `MODEL_ID_EMBEDDING`, eliminates `MODEL_ID_LANDMARKS`, and updates `REQUIRED_MODEL_IDS` to length 3.
+  - Lazy initialization in `build_store_only` remains completely isolated from camera and model loading.
 
 ### PAM Concurrency & Deadlines
-- **Pass**: Zero asynchronous runtimes or threads. Zero blocking I/O calls. Pure in-memory computation executes in < 1ms for 640×640 frames, easily satisfying the 150ms PAM latency budget. Zero stream pollution (`println!`, `eprintln!`, `dbg!`).
+- **Pass**:
+  - Changes are strictly isolated to the privileged daemon and enrollment CLI binaries; the synchronous PAM module (`crates/pam`) is untouched.
+  - Verification latency is reduced due to eliminating the redundant landmark localization inference stage.
+  - Zero stdout/stderr stream pollution or unapproved asynchronous runtimes.
 
 ### Panic Safety & Fallback
-- **Pass**: All public functions return `Result<_, VisionError>`. Zero `unwrap()` or `expect()` in production code. Degenerate scales (`scale <= 0.0`) fail closed returning `(0.0, 0.0)`. Zero-dimensions (`width == 0` or `height == 0`) and buffer length mismatches fail closed with `VisionError::InvalidDimensions` and `VisionError::InvalidBufferSize`.
+- **Pass**:
+  - `OrtScrfdDetector::new` produces `Result<Self, InferenceError>`, safely mapped via `?` operator into `DaemonError` and `EnrollmentCliError`.
+  - Zero instances of `unwrap()`, `expect()`, `panic!()`, or unhandled stubs in production paths.
+  - Missing or tampered models fail closed during cryptographic attestation (`registry.verify_integrity()?`).
 
 ### Test Integrity & Anti-Weakening
-- **Pass**: Zero existing tests were modified or weakened. Two comprehensive contractual test suites were added: `letterbox_tests.rs` (9 unit and property tests including proptest NGM14) and `crop_tests.rs` (6 unit tests verifying known patterns, OOB padding, degenerate bboxes, and clamping).
+- **Pass**:
+  - Pre-existing tests were not weakened or bypassed.
+  - Contractual test `test_enrollment_cli_model_ids_match_manifest` was updated to assert the 3-model v2.0.0 manifest specification.
+  - Added negative test `test_enrollment_cli_legacy_model_ids_absent` to actively prevent regression to legacy model IDs.
+  - `model_deployment_tests.rs` tests missing and tampered next-gen models against v2.0.0 SHA-256 digests.
 
 ### Memory & Secret Bounds
-- **Pass**: Allocations are strictly bounded by canvas dimensions checked with `checked_mul`. No passwords, credentials, or raw biometric templates are touched or leaked. Intermediate pixel arrays stay within local scopes.
-
----
+- **Pass**:
+  - `OrtScrfdDetector` maintains input buffer zeroization (`Zeroizing<Vec<f32>>`) post-inference.
+  - Zero sensitive credentials, passwords, or raw biometric embeddings are exposed or logged.
+  - `#![forbid(unsafe_code)]` remains strictly enforced across all business and computational crates.
 
 ## 3. Detailed Findings & Action Items
-
-- None. All quality checks, bounds validations, and test invariants are strictly satisfied.
-
----
+- None. All architectural invariants, security constraints, and workspace conventions are fully respected.
 
 ## 4. Final Verdict
-
 **VERDICT: APPROVED**

@@ -13,7 +13,7 @@ use soos_camera_v4l::{
 };
 use soos_inference_ort::{
     BoundingBox, FaceDetection, MockEmbeddingExtractor, MockFaceDetector, MockPadDetector,
-    ModelRegistry, OrtEmbeddingExtractor, OrtFaceDetector, OrtPadDetector, RegistryConfig,
+    ModelRegistry, OrtEmbeddingExtractor, OrtPadDetector, OrtScrfdDetector, RegistryConfig,
 };
 use soos_protocol::Verdict;
 use soos_vision::{
@@ -36,25 +36,18 @@ pub const DEFAULT_MODELS_DIR: &str = "/var/lib/soos/models";
 /// Default stable camera device identifier per Criterion C4.
 pub const DEFAULT_CAMERA_DEVICE: &str = "/dev/v4l/by-id/default-camera";
 
-/// Attested model registry ID for UltraFace Slim 320 detector.
-pub const MODEL_ID_FACE_DETECTOR: &str = "ultraface_slim_320";
+/// Attested model registry ID for SCRFD 500M KPS face detector with 5-point landmarks.
+pub const MODEL_ID_FACE_DETECTOR: &str = "scrfd_500m_kps";
 
-/// Attested model registry ID for InsightFace 5-point landmark detector.
-pub const MODEL_ID_LANDMARKS: &str = "landmark_5point";
+/// Attested model registry ID for MiniFASNetV2 presentation attack detector.
+pub const MODEL_ID_PAD: &str = "minifasnet_v2_pad";
 
-/// Attested model registry ID for MiniFASNet presentation attack detector.
-pub const MODEL_ID_PAD: &str = "minifasnet_pad";
+/// Attested model registry ID for ArcFace MobileFaceNet w600k 512D feature extractor.
+pub const MODEL_ID_EMBEDDING: &str = "arcface_w600k_mbf";
 
-/// Attested model registry ID for MobileFaceNet ArcFace feature extractor.
-pub const MODEL_ID_EMBEDDING: &str = "mobilefacenet_arcface";
-
-/// Set of all 4 neural model IDs required by the biometric vision pipeline.
-pub const REQUIRED_MODEL_IDS: [&str; 4] = [
-    MODEL_ID_FACE_DETECTOR,
-    MODEL_ID_LANDMARKS,
-    MODEL_ID_PAD,
-    MODEL_ID_EMBEDDING,
-];
+/// Set of all 3 neural model IDs required by the biometric vision pipeline.
+pub const REQUIRED_MODEL_IDS: [&str; 3] =
+    [MODEL_ID_FACE_DETECTOR, MODEL_ID_PAD, MODEL_ID_EMBEDDING];
 
 /// Resolves the camera device path, preferring an explicit CLI argument if provided,
 /// then the first deterministic entry in `/dev/v4l/by-id/`, and falling back to
@@ -577,7 +570,7 @@ pub fn build_full_service(cli: &Cli) -> Result<EnrollmentService, EnrollmentCliE
     let pad_session = registry.get_or_load_session(MODEL_ID_PAD)?;
     let emb_session = registry.get_or_load_session(MODEL_ID_EMBEDDING)?;
 
-    let detector = Arc::new(OrtFaceDetector::new(det_session, 0.70, 0.40));
+    let detector = Arc::new(OrtScrfdDetector::new(det_session, 0.70, 0.40)?);
     let pad = Arc::new(OrtPadDetector::new(pad_session, 0.80));
     let extractor = Arc::new(OrtEmbeddingExtractor::new(emb_session));
 

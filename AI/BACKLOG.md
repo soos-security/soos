@@ -1598,19 +1598,19 @@ All model ID string references across the workspace must be updated to match the
 
 #### Sub-issues
 
-- [ ] **#43.1** — Update `crates/daemon/src/pipeline.rs` model ID strings
+- [x] **#43.1** — Update `crates/daemon/src/pipeline.rs` model ID strings
   - Replace `"ultraface_slim_320"` → `"scrfd_500m_kps"`
   - Replace `"mobilefacenet_arcface"` → `"arcface_w600k_mbf"`
   - Replace `"minifasnet_pad"` → `"minifasnet_v2_pad"`
   - Remove `"landmark_5point"` session loading entirely
   - Acceptance: Daemon starts with 3 ORT sessions
 
-- [ ] **#43.2** — Update `crates/enrollment-cli/src/service.rs` model ID strings
+- [x] **#43.2** — Update `crates/enrollment-cli/src/service.rs` model ID strings
   - Same ID replacements as daemon
   - Remove landmark session loading
   - Acceptance: Enrollment CLI loads 3 models
 
-- [ ] **#43.3** — Search and update any remaining old model ID references across workspace
+- [x] **#43.3** — Search and update any remaining old model ID references across workspace
   - `grep -r 'ultraface_slim_320\|landmark_5point\|mobilefacenet_arcface\|minifasnet_pad' crates/ tests/`
   - Update all matches
   - Acceptance: Zero references to old model IDs in source code

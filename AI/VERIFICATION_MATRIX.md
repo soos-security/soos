@@ -160,7 +160,7 @@ This document translates the critical gating criteria from §11 of `ARCHITECTURE
 | EN4 | Anti-forensic secure erasure on template deletion | Destruction test | ✅ Verified (`test_shred_overwrites_and_removes_file`, `test_shred_empty_file_removes_cleanly`, `test_delete_existing_template_with_auto_confirm`, `test_delete_interactive_prompt_cancelled`, `test_delete_non_existent_uid_fails`) |
 | EN5 | Diagnostic one-shot verification with latency breakdown and PAD | Diagnostic test | ✅ Verified (`test_verify_matching_user_reports_allow_and_metrics`, `test_verify_non_matching_user_reports_deny`, `test_verify_unenrolled_uid_fails`) |
 | EN6 | Enumeration of enrolled UIDs and metadata resolution | Listing test | ✅ Verified (`test_list_empty_store_returns_empty_vec`, `test_list_multiple_enrolled_users_returns_sorted_summaries`) |
-| EN7 | Model registry ID attestation matching `models/manifest.toml` (`ultraface_slim_320`, `landmark_5point`, `mobilefacenet_arcface`, `minifasnet_pad`) | Model ID attestation test | ✅ Verified (`test_enrollment_cli_model_ids_match_manifest`) |
+| EN7 | Model registry ID attestation matching `models/manifest.toml` v2.0.0 (`scrfd_500m_kps`, `minifasnet_v2_pad`, `arcface_w600k_mbf`) | Model ID attestation tests | ✅ Verified (`test_enrollment_cli_model_ids_match_manifest`, `test_enrollment_cli_legacy_model_ids_absent`) |
 | EN8 | Lazy initialization: non-biometric commands (`list`, `delete`) execute store-only without camera or neural models | Lazy init test | ✅ Verified (`test_list_command_works_without_camera_or_models`, `test_delete_command_works_with_store_only`) |
 | EN9 | Deterministic hardware camera addressing defaulting to `/dev/v4l/by-id/` (Criterion C4) | Hardware path resolution test | ✅ Verified (`test_camera_device_path_uses_stable_by_id`) |
 | EN10 | Strict path validation and sanitization: blocks parent directory traversal (`..`), mandates absolute paths, enforces standard FHS prefixes, and restricts camera devices to `/dev/` | Path validation tests | ✅ Verified (`test_sanitize_path_blocks_parent_dir_traversal`, `test_sanitize_path_blocks_relative_paths`, `test_validate_fhs_path_allows_valid_system_directories`, `test_validate_fhs_path_rejects_non_fhs_locations`, `test_validate_camera_device_path_requires_dev`, `test_build_store_only_rejects_traversal_paths`, `test_build_full_service_rejects_non_dev_camera`) |
@@ -336,3 +336,12 @@ This document translates the critical gating criteria from §11 of `ARCHITECTURE
 |---|---|---|---|
 | NGM14 | Letterbox padding preserves aspect ratio with correct coordinate un-projection | Property test (`letterbox_tests::test_letterbox_unproject_roundtrip`, `letterbox_tests::test_letterbox_640x480_to_640x640`, `letterbox_tests::test_letterbox_1280x720_to_640x640`, `letterbox_tests::test_letterbox_square_no_padding`) | ✅ Verified |
 | NGM14b | Bounding box crop and resize with bilinear interpolation and out-of-bounds zero (black) padding | Unit tests (`crop_tests::test_crop_and_resize_known_image`, `crop_tests::test_crop_and_resize_out_of_bounds_padding`, `crop_tests::test_crop_and_resize_degenerate_bbox_returns_black`, `crop_tests::test_expand_bbox_for_pad_expansion_and_clamping`) | ✅ Verified |
+
+---
+
+## Component: `model-ids-nextgen` (Issue #43 / GitHub #109)
+
+| # | Criterion | Test Method | Status |
+|---|---|---|---|
+| NGM15 | Model registry IDs in `daemon` and `enrollment-cli` updated to 3-model architecture (`scrfd_500m_kps`, `minifasnet_v2_pad`, `arcface_w600k_mbf`), eliminating `landmark_5point`, with `OrtScrfdDetector` instantiation and error propagation | Unit & integration tests (`test_enrollment_cli_model_ids_match_manifest`, `test_enrollment_cli_legacy_model_ids_absent`, `test_daemon_refuses_start_with_missing_models`, `test_daemon_refuses_start_with_tampered_models`, `test_models_readme_complete_and_accurate`) | ✅ Verified |
+
