@@ -12,12 +12,8 @@
 use std::sync::Arc;
 
 use soos_camera_v4l::{Frame, PixelFormat};
-use soos_inference_ort::mock::{
-    MockEmbeddingExtractor, MockFaceDetector, MockLandmarkDetector, MockPadDetector,
-};
-use soos_inference_ort::{
-    BiometricEmbedding, BoundingBox, FaceDetection, LandmarkDetector, PadDetector,
-};
+use soos_inference_ort::mock::{MockEmbeddingExtractor, MockFaceDetector, MockPadDetector};
+use soos_inference_ort::{BiometricEmbedding, BoundingBox, FaceDetection, PadDetector};
 use soos_vision::{
     convert_to_rgb, MatchResult, PipelineOutput, VerificationOutcome, VisionPipeline,
     VisionPipelineConfig,
@@ -43,15 +39,13 @@ fn test_rgb_buffer_zeroized_after_pipeline() {
 #[test]
 fn test_verification_outcome_zeroize_on_drop() {
     let box_ = BoundingBox::new(10.0, 10.0, 100.0, 100.0);
-    let detection = FaceDetection::new(box_, 0.95);
-    let landmarks = MockLandmarkDetector::new_canonical()
-        .detect_landmarks(&[0u8; 12], 2, 2, &box_)
-        .expect("landmarks");
+    let landmarks = MockFaceDetector::canonical_landmarks_for_box(&box_);
+    let detection = FaceDetection::with_landmarks(box_, 0.95, landmarks);
     let aligned_crop = vec![0xCC_u8; 112 * 112 * 3];
     let pad_result = MockPadDetector::new_live()
         .evaluate_liveness(&aligned_crop, 112, 112)
         .expect("pad");
-    let embedding = BiometricEmbedding::new(vec![0.42_f32; 128]);
+    let embedding = BiometricEmbedding::new(vec![0.42_f32; 512]);
 
     let output = PipelineOutput {
         detection,
@@ -111,7 +105,7 @@ fn test_pipeline_zeroizes_intermediate_buffers_on_error() {
         soos_inference_ort::AttackType::PrintPhoto,
         0.10,
     ));
-    let extractor = Arc::new(MockEmbeddingExtractor::new(128));
+    let extractor = Arc::new(MockEmbeddingExtractor::new(512));
     let config = VisionPipelineConfig::default();
 
     let pipeline = VisionPipeline::new(detector, pad, extractor, config);

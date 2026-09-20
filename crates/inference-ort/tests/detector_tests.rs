@@ -11,6 +11,7 @@
 
 use soos_inference_ort::detector::{nms, BoundingBox, FaceDetection, FaceDetector};
 use soos_inference_ort::error::InferenceError;
+use soos_inference_ort::landmarks::Point2f;
 use soos_inference_ort::mock::MockFaceDetector;
 
 #[test]
@@ -142,4 +143,114 @@ fn test_mock_face_detector_nominal_and_error_handling() {
         }
         other => panic!("Expected DetectionFailed, got {:?}", other),
     }
+}
+
+#[test]
+fn test_mock_detector_returns_landmarks() {
+    let width = 640;
+    let height = 480;
+    let detector = MockFaceDetector::new_centered_face(width, height, 0.95);
+    let rgb = vec![128u8; (width * height * 3) as usize];
+    let detections = detector
+        .detect(&rgb, width, height)
+        .expect("detection succeeds");
+
+    assert_eq!(detections.len(), 1);
+    let det = &detections[0];
+    assert!(
+        det.landmarks.is_some(),
+        "Mock detection must include FaceLandmarks"
+    );
+
+    let lm = det.landmarks.unwrap();
+    let box_ = det.box_;
+    let bw = box_.width();
+    let bh = box_.height();
+    let scale_x = bw / 112.0;
+    let scale_y = bh / 112.0;
+
+    let expected_left_eye = Point2f::new(box_.x1 + 38.2946 * scale_x, box_.y1 + 51.6963 * scale_y);
+    let expected_right_eye = Point2f::new(box_.x1 + 73.5318 * scale_x, box_.y1 + 51.5014 * scale_y);
+    let expected_nose = Point2f::new(box_.x1 + 56.0252 * scale_x, box_.y1 + 71.7366 * scale_y);
+    let expected_mouth_left =
+        Point2f::new(box_.x1 + 41.5493 * scale_x, box_.y1 + 92.3655 * scale_y);
+    let expected_mouth_right =
+        Point2f::new(box_.x1 + 70.7299 * scale_x, box_.y1 + 92.2041 * scale_y);
+
+    assert!(
+        (lm.left_eye.x - expected_left_eye.x).abs() < 1e-3,
+        "left_eye.x mismatch: got {}, expected {}",
+        lm.left_eye.x,
+        expected_left_eye.x
+    );
+    assert!(
+        (lm.left_eye.y - expected_left_eye.y).abs() < 1e-3,
+        "left_eye.y mismatch: got {}, expected {}",
+        lm.left_eye.y,
+        expected_left_eye.y
+    );
+    assert!(
+        (lm.right_eye.x - expected_right_eye.x).abs() < 1e-3,
+        "right_eye.x mismatch: got {}, expected {}",
+        lm.right_eye.x,
+        expected_right_eye.x
+    );
+    assert!(
+        (lm.right_eye.y - expected_right_eye.y).abs() < 1e-3,
+        "right_eye.y mismatch: got {}, expected {}",
+        lm.right_eye.y,
+        expected_right_eye.y
+    );
+    assert!(
+        (lm.nose.x - expected_nose.x).abs() < 1e-3,
+        "nose.x mismatch: got {}, expected {}",
+        lm.nose.x,
+        expected_nose.x
+    );
+    assert!(
+        (lm.nose.y - expected_nose.y).abs() < 1e-3,
+        "nose.y mismatch: got {}, expected {}",
+        lm.nose.y,
+        expected_nose.y
+    );
+    assert!(
+        (lm.mouth_left.x - expected_mouth_left.x).abs() < 1e-3,
+        "mouth_left.x mismatch: got {}, expected {}",
+        lm.mouth_left.x,
+        expected_mouth_left.x
+    );
+    assert!(
+        (lm.mouth_left.y - expected_mouth_left.y).abs() < 1e-3,
+        "mouth_left.y mismatch: got {}, expected {}",
+        lm.mouth_left.y,
+        expected_mouth_left.y
+    );
+    assert!(
+        (lm.mouth_right.x - expected_mouth_right.x).abs() < 1e-3,
+        "mouth_right.x mismatch: got {}, expected {}",
+        lm.mouth_right.x,
+        expected_mouth_right.x
+    );
+    assert!(
+        (lm.mouth_right.y - expected_mouth_right.y).abs() < 1e-3,
+        "mouth_right.y mismatch: got {}, expected {}",
+        lm.mouth_right.y,
+        expected_mouth_right.y
+    );
+}
+
+#[test]
+fn test_mock_face_detector_canonical_landmarks_for_box() {
+    let box_ = BoundingBox::new(0.0, 0.0, 112.0, 112.0);
+    let lm = MockFaceDetector::canonical_landmarks_for_box(&box_);
+    assert!((lm.left_eye.x - 38.2946).abs() < 1e-3);
+    assert!((lm.left_eye.y - 51.6963).abs() < 1e-3);
+    assert!((lm.right_eye.x - 73.5318).abs() < 1e-3);
+    assert!((lm.right_eye.y - 51.5014).abs() < 1e-3);
+    assert!((lm.nose.x - 56.0252).abs() < 1e-3);
+    assert!((lm.nose.y - 71.7366).abs() < 1e-3);
+    assert!((lm.mouth_left.x - 41.5493).abs() < 1e-3);
+    assert!((lm.mouth_left.y - 92.3655).abs() < 1e-3);
+    assert!((lm.mouth_right.x - 70.7299).abs() < 1e-3);
+    assert!((lm.mouth_right.y - 92.2041).abs() < 1e-3);
 }

@@ -28,7 +28,7 @@ fn test_pipeline_latency_budget_under_150ms_p95() {
 
     let detector = Arc::new(MockFaceDetector::new_centered_face(width, height, 0.99));
     let pad = Arc::new(MockPadDetector::new_live());
-    let extractor = Arc::new(MockEmbeddingExtractor::new(128));
+    let extractor = Arc::new(MockEmbeddingExtractor::new(512));
     let config = VisionPipelineConfig::default();
 
     let pipeline = VisionPipeline::new(detector, pad, extractor, config);

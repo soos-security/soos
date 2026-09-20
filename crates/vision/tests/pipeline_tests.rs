@@ -109,7 +109,7 @@ fn setup_pipeline(detections: Vec<FaceDetection>) -> (VisionPipeline, Frame) {
     let height = 240;
     let detector = Arc::new(MockFaceDetector::new_with_detections(detections));
     let pad = Arc::new(MockPadDetector::new_live());
-    let extractor = Arc::new(MockEmbeddingExtractor::new(128));
+    let extractor = Arc::new(MockEmbeddingExtractor::new(512));
     let config = VisionPipelineConfig::default();
 
     let pipeline = VisionPipeline::new(detector, pad, extractor, config);
@@ -203,7 +203,7 @@ fn test_pipeline_nominal_single_face_verification() {
         .expect("Nominal single face should succeed");
 
     assert_eq!(output.aligned_crop_rgb.len(), 112 * 112 * 3);
-    assert_eq!(output.embedding.len(), 128);
+    assert_eq!(output.embedding.len(), 512);
     assert!(output.embedding.is_normalized(1e-4));
 
     // Matching against the extracted embedding itself should verify successfully
@@ -217,8 +217,8 @@ fn test_pipeline_nominal_single_face_verification() {
     assert!((outcome.match_result.score - 1.0).abs() < 1e-4);
 
     // Matching against orthogonal template should fail
-    let mut orthogonal = vec![0.0_f32; 128];
-    orthogonal[127] = 1.0;
+    let mut orthogonal = vec![0.0_f32; 512];
+    orthogonal[511] = 1.0;
     let ortho_emb = BiometricEmbedding::new(orthogonal);
     let outcome_fail = pipeline
         .verify(&frame, &ortho_emb)
@@ -233,7 +233,7 @@ fn test_pipeline_nominal_single_face_verification() {
 fn test_pipeline_constructs_with_three_backends() {
     let detector = Arc::new(MockFaceDetector::new_empty());
     let pad = Arc::new(MockPadDetector::new_live());
-    let extractor = Arc::new(MockEmbeddingExtractor::new(128));
+    let extractor = Arc::new(MockEmbeddingExtractor::new(512));
     let config = VisionPipelineConfig::default();
 
     let pipeline = VisionPipeline::new(detector, pad, extractor, config.clone());
@@ -256,7 +256,7 @@ fn test_pipeline_extracts_landmarks_from_detection() {
     let height = 240;
     let detector = Arc::new(MockFaceDetector::new_with_detections(vec![detection]));
     let pad = Arc::new(MockPadDetector::new_live());
-    let extractor = Arc::new(MockEmbeddingExtractor::new(128));
+    let extractor = Arc::new(MockEmbeddingExtractor::new(512));
     let config = VisionPipelineConfig::default();
 
     let pipeline = VisionPipeline::new(detector, pad, extractor, config);
@@ -287,7 +287,7 @@ fn test_pipeline_fails_when_detection_lacks_landmarks() {
     let height = 240;
     let detector = Arc::new(MockFaceDetector::new_with_detections(vec![detection]));
     let pad = Arc::new(MockPadDetector::new_live());
-    let extractor = Arc::new(MockEmbeddingExtractor::new(128));
+    let extractor = Arc::new(MockEmbeddingExtractor::new(512));
     let config = VisionPipelineConfig::default();
 
     let pipeline = VisionPipeline::new(detector, pad, extractor, config);
@@ -366,7 +366,7 @@ fn test_pipeline_pad_receives_expanded_crop() {
     let height = 240;
     let detector = Arc::new(MockFaceDetector::new_with_detections(vec![detection]));
     let pad = Arc::new(SpyPadDetector::new_live());
-    let extractor = Arc::new(MockEmbeddingExtractor::new(128));
+    let extractor = Arc::new(MockEmbeddingExtractor::new(512));
     let config = VisionPipelineConfig::default();
 
     let pipeline = VisionPipeline::new(detector, pad.clone(), extractor, config);
@@ -410,7 +410,7 @@ fn test_pipeline_embedding_receives_aligned_crop() {
     let height = 240;
     let detector = Arc::new(MockFaceDetector::new_with_detections(vec![detection]));
     let pad = Arc::new(MockPadDetector::new_live());
-    let extractor = Arc::new(SpyExtractor::new(128));
+    let extractor = Arc::new(SpyExtractor::new(512));
     let config = VisionPipelineConfig::default();
 
     let pipeline = VisionPipeline::new(detector, pad, extractor.clone(), config);

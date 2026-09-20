@@ -39,18 +39,50 @@ impl MockFaceDetector {
         }
     }
 
-    /// Creates a mock detector returning a centered face bounding box with canonical landmarks.
+    /// Computes canonical 5-point facial landmarks scaled to the provided bounding box.
+    ///
+    /// Uses standard ArcFace / InsightFace 112x112 canonical reference points:
+    /// - Left eye: (38.2946, 51.6963)
+    /// - Right eye: (73.5318, 51.5014)
+    /// - Nose: (56.0252, 71.7366)
+    /// - Mouth left: (41.5493, 92.3655)
+    /// - Mouth right: (70.7299, 92.2041)
+    pub fn canonical_landmarks_for_box(face_box: &BoundingBox) -> FaceLandmarks {
+        let bw = face_box.width();
+        let bh = face_box.height();
+        let scale_x = bw / 112.0;
+        let scale_y = bh / 112.0;
+
+        FaceLandmarks::new(
+            Point2f::new(
+                face_box.x1 + 38.2946 * scale_x,
+                face_box.y1 + 51.6963 * scale_y,
+            ),
+            Point2f::new(
+                face_box.x1 + 73.5318 * scale_x,
+                face_box.y1 + 51.5014 * scale_y,
+            ),
+            Point2f::new(
+                face_box.x1 + 56.0252 * scale_x,
+                face_box.y1 + 71.7366 * scale_y,
+            ),
+            Point2f::new(
+                face_box.x1 + 41.5493 * scale_x,
+                face_box.y1 + 92.3655 * scale_y,
+            ),
+            Point2f::new(
+                face_box.x1 + 70.7299 * scale_x,
+                face_box.y1 + 92.2041 * scale_y,
+            ),
+        )
+    }
+
+    /// Creates a mock detector returning a centered face bounding box with canonical landmarks scaled to the box.
     pub fn new_centered_face(width: u32, height: u32, score: f32) -> Self {
         let w = width as f32;
         let h = height as f32;
         let box_ = BoundingBox::new(w * 0.25, h * 0.2, w * 0.75, h * 0.8);
-        let landmarks = FaceLandmarks::new(
-            Point2f::new(w * 0.38, h * 0.35),
-            Point2f::new(w * 0.62, h * 0.35),
-            Point2f::new(w * 0.50, h * 0.50),
-            Point2f::new(w * 0.40, h * 0.65),
-            Point2f::new(w * 0.60, h * 0.65),
-        );
+        let landmarks = Self::canonical_landmarks_for_box(&box_);
         Self::new_with_detections(vec![FaceDetection::with_landmarks(box_, score, landmarks)])
     }
 

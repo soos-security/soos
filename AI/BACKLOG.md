@@ -1630,20 +1630,20 @@ Mock backends must reflect the new architecture: `MockFaceDetector` must return 
 
 #### Sub-issues
 
-- [ ] **#44.1** — Update `MockFaceDetector` to populate `FaceLandmarks` in `FaceDetection`
+- [x] **#44.1** — Update `MockFaceDetector` to populate `FaceLandmarks` in `FaceDetection`
   - `new_centered_face()` should generate both a bounding box AND canonical landmarks scaled to the box
   - Acceptance: Mock detections include landmarks
   - TDD: `test_mock_detector_returns_landmarks`
 
-- [ ] **#44.2** — Update `MockEmbeddingExtractor::new()` default to 512 dimensions
+- [x] **#44.2** — Update `MockEmbeddingExtractor::new()` default to 512 dimensions
   - Change `MockEmbeddingExtractor::new(128)` usages to `MockEmbeddingExtractor::new(512)` across all test files
   - Acceptance: All mock embeddings are 512D
 
-- [ ] **#44.3** — Verify `MockPadDetector` compatibility (no structural change expected)
+- [x] **#44.3** — Verify `MockPadDetector` compatibility (no structural change expected)
   - Output shape `[1, 3]` is unchanged; mock returns `PadResult` directly
   - Acceptance: Existing mock PAD tests pass without modification
 
-- [ ] **#44.4** — Update all pipeline test construction sites
+- [x] **#44.4** — Update all pipeline test construction sites
   - Remove `MockLandmarkDetector` from `VisionPipeline::new()` calls in tests
   - Pass 3 backends instead of 4
   - Acceptance: All pipeline tests compile and pass with 3-backend constructor
@@ -1704,5 +1704,5 @@ All project documentation must be updated to reflect the 3-model architecture: A
 | NGM13 | PAD receives 2.7× expanded bbox crop (80×80); embedding receives aligned 112×112 crop | Unit test | ✅ Verified |
 | NGM14 | Letterbox padding preserves aspect ratio with correct coordinate un-projection | Property test | ⬜ Pending |
 | NGM15 | All model ID strings across workspace match `manifest.toml` v2.0.0 entries | Invariant test | ⬜ Pending |
-| NGM16 | Mock backends produce detections with landmarks, 512D embeddings, compatible PAD results | Unit test | ⬜ Pending |
+| NGM16 | Mock backends produce detections with landmarks, 512D embeddings, compatible PAD results | Unit test | ✅ Verified |
 | NGM17 | ARCHITECTURE.md, VERIFICATION_MATRIX.md, and crate docs reflect 3-model pipeline | Documentation audit | ⬜ Pending |

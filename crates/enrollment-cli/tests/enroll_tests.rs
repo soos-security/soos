@@ -46,8 +46,8 @@ fn setup_mock_service(temp: &TempDir) -> (EnrollmentService, Arc<BiometricStore>
     };
     let detector = Arc::new(MockFaceDetector::new_with_detections(vec![detection]));
 
-    // Embedding (dimension 128)
-    let extractor = Arc::new(MockEmbeddingExtractor::new(128));
+    // Embedding (dimension 512)
+    let extractor = Arc::new(MockEmbeddingExtractor::new(512));
     let pad = Arc::new(MockPadDetector::new_live());
 
     let pipeline_config = VisionPipelineConfig::default();
@@ -92,14 +92,14 @@ fn test_enroll_nominal_with_auto_confirm() {
     assert_eq!(outcome.frames_evaluated, 3);
     assert_eq!(outcome.model_id, "mobilefacenet");
     assert_eq!(outcome.model_version, "1.0.0");
-    assert_eq!(outcome.embedding_dim, 128);
+    assert_eq!(outcome.embedding_dim, 512);
 
     // Verify persisted in store
     let enrolled_opt = store.get(1000).expect("Store get must succeed");
     assert!(enrolled_opt.is_some());
     let enrolled = enrolled_opt.unwrap();
     assert_eq!(enrolled.uid, 1000);
-    assert_eq!(enrolled.embedding.len(), 128);
+    assert_eq!(enrolled.embedding.len(), 512);
 }
 
 #[test]
