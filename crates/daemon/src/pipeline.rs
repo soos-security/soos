@@ -171,9 +171,10 @@ pub fn initialize_pipeline(
         config.vision.min_face_confidence,
         0.45,
     )?);
-    let pad = Arc::new(soos_inference_ort::OrtPadDetector::new(
+    let pad = Arc::new(soos_inference_ort::OrtPadDetector::new_with_class_index(
         pad_session,
         config.vision.pad_threshold,
+        1,
     ));
     let extractor = Arc::new(soos_inference_ort::OrtEmbeddingExtractor::new(ext_session));
 
