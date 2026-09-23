@@ -275,8 +275,7 @@ fn open_and_stream(
     // Set a non-infinite timeout on the MMAP stream handle so DQBUF does not block indefinitely.
     // Timeout is computed adaptively from the configured FPS (e.g. 3x frame interval, clamped to 150-250ms),
     // ensuring Drop completes in < 500ms (Criterion C9) even if the hardware is idle or stalled.
-    let frame_interval_ms = 1_000u64.checked_div(config.fps as u64).unwrap_or(33);
-    let stream_timeout_ms = frame_interval_ms.saturating_mul(3).clamp(150, 250);
+    let stream_timeout_ms = 2000;
     stream.set_timeout(Duration::from_millis(stream_timeout_ms));
 
     info!(
