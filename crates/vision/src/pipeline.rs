@@ -143,6 +143,11 @@ impl VisionPipeline {
         &self.config
     }
 
+    /// Access the face detector.
+    pub fn detector(&self) -> &Arc<dyn FaceDetector> {
+        &self.detector
+    }
+
     /// Access the presentation attack detector.
     pub fn pad(&self) -> &Arc<dyn PadDetector> {
         &self.pad

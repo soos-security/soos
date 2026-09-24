@@ -139,6 +139,14 @@ fn run() -> Result<(), EnrollmentCliError> {
                 }
             }
         }
+
+        Commands::DebugVision => {
+            let service = build_full_service(&cli)?;
+            let path = service.debug_vision()?;
+            println!("\n[OK] Visual debugging report generated successfully.");
+            println!("Open the following file in your web browser to visualize the detection:");
+            println!("  file://{}\n", path);
+        }
     }
 
     Ok(())

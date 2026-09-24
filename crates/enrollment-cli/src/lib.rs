@@ -10,6 +10,7 @@
 
 pub mod args;
 pub mod error;
+pub mod html_report;
 pub mod quality;
 pub mod service;
 pub mod shred;

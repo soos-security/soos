@@ -25,6 +25,7 @@ use crate::args::{
     EnrollArgs, ListArgs, VerifyArgs,
 };
 use crate::error::EnrollmentCliError;
+use crate::html_report::{base64_encode, encode_bmp, generate_html_report};
 use crate::quality::{select_best_frame, CandidateEvaluation};
 
 /// Default master key path for biometric encryption.
@@ -490,6 +491,57 @@ impl EnrollmentService {
 
         summaries.sort_by_key(|s| s.uid);
         Ok(summaries)
+    }
+
+    /// Captures a frame, runs face detection, and generates an HTML report.
+    pub fn debug_vision(&self) -> Result<String, EnrollmentCliError> {
+        check_privileges(self.require_root)?;
+
+        let pipeline = self
+            .pipeline
+            .as_ref()
+            .ok_or(EnrollmentCliError::PipelineNotInitialized)?;
+
+        let frame = self.acquire_frame()?;
+
+        let rgb = soos_vision::color::convert_to_rgb(
+            &frame.data,
+            frame.width,
+            frame.height,
+            frame.format,
+        )
+        .map_err(|e| EnrollmentCliError::Internal(e.to_string()))?;
+
+        // Extract internal detector via pipeline config? No, we don't have a public getter for detector.
+        // Wait, VisionPipeline doesn't expose detector.
+        // We can just use process_frame? But process_frame fails fast on 0 or >1 face.
+        // Let's just use process_frame, and if it fails, we don't get the detection boxes.
+        // Actually, we can get around this by accessing the detector directly if we had a getter.
+        // Let's add a public method to VisionPipeline if needed, OR we can just add it to service.rs?
+        // Wait, I will just call `process_frame` and if it succeeds, visualize it.
+        // But what if it fails? That's EXACTLY what we want to debug.
+        // Wait! Let's modify VisionPipeline to expose detector or we just rebuild the detector?
+        // I will just use `pipeline.process_frame`, and if it fails, I still generate the report with NO detections (empty).
+        // Actually, to get the detections, we need the detector.
+
+        // Let's just create a new detector instance? No, that's heavy.
+        // Wait, I can't access `pipeline.detector` because it's private.
+        // Let's just add `pub fn detector(&self) -> &Arc<dyn FaceDetector>` to `VisionPipeline` in `vision/src/pipeline.rs`.
+        // For now, let's assume we'll add that getter.
+        let detections = pipeline
+            .detector()
+            .detect(&rgb, frame.width, frame.height)
+            .unwrap_or_default();
+
+        let bmp = encode_bmp(frame.width, frame.height, &rgb);
+        let base64_img = base64_encode(&bmp);
+        let html = generate_html_report(frame.width, frame.height, &base64_img, &detections);
+
+        let out_path = "/tmp/soos-debug.html";
+        std::fs::write(out_path, html)
+            .map_err(|e| EnrollmentCliError::Internal(format!("Failed to write HTML: {}", e)))?;
+
+        Ok(out_path.to_string())
     }
 }
 

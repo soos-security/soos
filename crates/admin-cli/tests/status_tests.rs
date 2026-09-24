@@ -110,7 +110,7 @@ fn test_status_query_offline_daemon_does_not_panic() {
     let dir = tempdir().expect("tempdir");
     let non_existent_socket = dir.path().join("non_existent.sock");
 
-    let report = query_status(&non_existent_socket, "soos-daemon").expect(
+    let report = query_status(&non_existent_socket, "non_existent_soos_daemon.service").expect(
         "query status on offline daemon should return offline report rather than hard error",
     );
 

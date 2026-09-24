@@ -629,6 +629,7 @@ graph TD
 | ⚫ P5 | #14 `pam-bindings` migration | Medium | #13 |
 | ⚫ P5 | #15 PAD liveness | High | #6, #7 |
 | ⚫ P5 | #16 Production hardening | Medium | All above |
+| 🟢 P1 | #22 Visual Debugging GUI | Low | #5, #6, #7 |
 
 
 # Phase 9+ Master Implementation Backlog
@@ -1706,3 +1707,26 @@ All project documentation must be updated to reflect the 3-model architecture: A
 | NGM15 | All model ID strings across workspace match `manifest.toml` v2.0.0 entries | Invariant test | ✅ Verified |
 | NGM16 | Mock backends produce detections with landmarks, 512D embeddings, compatible PAD results | Unit test | ✅ Verified |
 | NGM17 | ARCHITECTURE.md, VERIFICATION_MATRIX.md, and crate docs reflect 3-model pipeline | Documentation audit | ✅ Verified |
+
+---
+
+### Issue #22: `admin-cli` — Visual Debugging GUI (HTML report generation)
+
+> **Branch**: `feat/admin-debug-gui`  
+> **Architecture ref**: §8 Monorepo Structure
+
+#### Problem Statement
+
+Users experience issues enrolling their face due to environmental factors (lighting, camera crop, PAD failure). We need a tool to visualize the exact output of the vision pipeline (bounding boxes, landmarks, crop) overlaid on the captured frame to assist with debugging.
+
+#### Sub-issues
+
+- [ ] **#22.1** — Implement `Base64` and `BMP` encoding in `vision` or `admin-cli`
+  - Zero dependencies (no `image` crate if possible, or only what's allowed).
+  - Ability to convert RGB frame to a base64-encoded BMP string.
+
+- [ ] **#22.2** — Implement `soos-admin debug-vision` command
+  - Initialize `CameraManager` and capture a frame.
+  - Run `convert_to_rgb` and `detector.detect()`.
+  - Generate an HTML report (`debug.html`) containing the base64 image and SVG/Canvas overlays for bounding boxes and landmarks.
+  - Print the path of the generated HTML file so the user can open it in a browser.

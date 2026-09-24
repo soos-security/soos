@@ -60,6 +60,8 @@ pub enum Commands {
     Delete(DeleteArgs),
     /// List all enrolled users and metadata
     List(ListArgs),
+    /// Capture a frame, run vision pipeline, and output HTML debug visualization
+    DebugVision,
 }
 
 /// Arguments for `enroll` subcommand.
