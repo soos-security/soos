@@ -67,7 +67,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let pad_session = registry.get_or_load_session(MODEL_ID_PAD)?;
         let emb_session = registry.get_or_load_session(MODEL_ID_EMBEDDING)?;
 
-        let detector = Arc::new(OrtScrfdDetector::new(det_session, 0.70, 0.40)?);
+        let detector = Arc::new(OrtScrfdDetector::new(det_session, 0.60, 0.40)?);
         let pad = Arc::new(OrtPadDetector::new_with_class_index(pad_session, 0.80, 1));
         let extractor = Arc::new(OrtEmbeddingExtractor::new(emb_session));
 
@@ -85,6 +85,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1120.0, 780.0])
             .with_min_inner_size([900.0, 600.0])
+            .with_active(true)
             .with_title("SOOS — Linux Biometric PAM"),
         ..Default::default()
     };

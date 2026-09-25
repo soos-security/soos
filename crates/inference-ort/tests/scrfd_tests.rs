@@ -396,3 +396,43 @@ fn test_scrfd_validates_shape_patterns() {
     ];
     assert!(OrtScrfdDetector::validate_output_shapes(&invalid_shapes).is_err());
 }
+
+#[test]
+fn test_scrfd_supports_preactivated_probabilities() {
+    let stride = 8usize;
+    let grid_w = 10usize;
+    let grid_h = 10usize;
+    let anchors_per_cell = 2usize;
+    let num_anchors = grid_w * grid_h * anchors_per_cell;
+
+    let mut scores = vec![0.001f32; num_anchors]; // low pre-activated probabilities
+    let mut bboxes = vec![0.0f32; num_anchors * 4];
+    let kps = vec![0.0f32; num_anchors * 10];
+
+    // High confidence pre-activated probability score
+    let target_idx = 5usize;
+    scores[target_idx] = 0.7839f32;
+    bboxes[target_idx * 4 + 0] = 2.0;
+    bboxes[target_idx * 4 + 1] = 2.0;
+    bboxes[target_idx * 4 + 2] = 2.0;
+    bboxes[target_idx * 4 + 3] = 2.0;
+
+    let detections = OrtScrfdDetector::decode_stride(
+        stride,
+        grid_w,
+        grid_h,
+        anchors_per_cell,
+        &scores,
+        &bboxes,
+        &kps,
+        0.70, // conf_threshold
+        1.0,
+        0.0,
+        0.0,
+        640,
+        480,
+    );
+
+    assert_eq!(detections.len(), 1);
+    assert!((detections[0].score - 0.7839).abs() < 1e-4);
+}

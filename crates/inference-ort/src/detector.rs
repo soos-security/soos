@@ -594,7 +594,11 @@ impl OrtScrfdDetector {
                         Some(&val) => val,
                         None => continue,
                     };
-                    let conf = 1.0 / (1.0 + (-raw_score).exp());
+                    let conf = if (0.0..=1.0).contains(&raw_score) {
+                        raw_score
+                    } else {
+                        1.0 / (1.0 + (-raw_score).exp())
+                    };
                     if conf > conf_threshold {
                         let bbox_offset = idx * 4;
                         let (l, t, r, b) = match (
