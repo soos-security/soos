@@ -184,9 +184,14 @@ impl SoosApp {
 
     /// Renders Tab 1: Live camera view with authentic ONNX model overlays.
     fn render_live_inspection(&mut self, ui: &mut egui::Ui, frame: &LatestFrameData) {
+        let total_avail = ui.available_size();
+        let main_width = (total_avail.x * 0.70).max(450.0);
+        let sidebar_width = (total_avail.x - main_width - 24.0).max(280.0);
+        let content_height = total_avail.y;
+
         ui.horizontal(|ui| {
-            // Main camera view area (75% width)
-            ui.vertical(|ui| {
+            // Main camera view area (70% width)
+            ui.allocate_ui(Vec2::new(main_width, content_height), |ui| {
                 ui.horizontal(|ui| {
                     ui.checkbox(&mut self.show_bbox, "Bounding Box (SCRFD)");
                     ui.checkbox(&mut self.show_landmarks, "5 Landmarks (SCRFD)");
@@ -195,17 +200,16 @@ impl SoosApp {
                     ui.checkbox(&mut self.show_pose_stats, "Pose & Angles");
                 });
 
+                let avail_size = ui.available_size();
+                let aspect_ratio = (frame.width as f32) / (frame.height as f32);
+                let target_w = avail_size.x.min(avail_size.y * aspect_ratio);
+                let target_h = target_w / aspect_ratio;
+                let target_size = Vec2::new(target_w, target_h);
+
+                let (response, painter) = ui.allocate_painter(target_size, egui::Sense::hover());
+                let rect = response.rect;
+
                 if let Some(texture) = &self.video_texture {
-                    let avail_size = ui.available_size();
-                    let aspect_ratio = (frame.width as f32) / (frame.height as f32);
-                    let target_w = avail_size.x.min(avail_size.y * aspect_ratio);
-                    let target_h = target_w / aspect_ratio;
-                    let target_size = Vec2::new(target_w, target_h);
-
-                    let (response, painter) =
-                        ui.allocate_painter(target_size, egui::Sense::hover());
-                    let rect = response.rect;
-
                     // 1. Paint live camera image
                     painter.image(
                         texture.id(),
@@ -337,12 +341,21 @@ impl SoosApp {
                             );
                         }
                     }
+                } else {
+                    painter.rect_filled(rect, 4.0, Color32::from_rgb(20, 20, 25));
+                    painter.text(
+                        rect.center(),
+                        egui::Align2::CENTER_CENTER,
+                        "Acquiring video stream...",
+                        egui::FontId::proportional(18.0),
+                        Color32::GRAY,
+                    );
                 }
             });
 
-            // Sidebar telemetry and controls (25% width)
+            // Sidebar telemetry and controls (30% width)
             ui.separator();
-            ui.vertical(|ui| {
+            ui.allocate_ui(Vec2::new(sidebar_width, content_height), |ui| {
                 ui.heading("Telemetry & Analysis");
                 ui.add_space(8.0);
 
@@ -470,20 +483,25 @@ impl SoosApp {
 
     /// Renders Tab 2: Apple FaceID-style guided multi-step enrollment flow.
     fn render_guided_enrollment(&mut self, ui: &mut egui::Ui, frame: &LatestFrameData) {
+        let total_avail = ui.available_size();
+        let main_width = (total_avail.x * 0.65).max(450.0);
+        let sidebar_width = (total_avail.x - main_width - 24.0).max(300.0);
+        let content_height = total_avail.y;
+
         ui.horizontal(|ui| {
             // Main guided video panel (65% width)
-            ui.vertical(|ui| {
+            ui.allocate_ui(Vec2::new(main_width, content_height), |ui| {
+                let avail_size = ui.available_size();
+                let aspect_ratio = (frame.width as f32) / (frame.height as f32);
+                let target_w = (avail_size.x * 0.95).min(avail_size.y * aspect_ratio);
+                let target_h = target_w / aspect_ratio;
+                let target_size = Vec2::new(target_w, target_h);
+
+                let (response, painter) =
+                    ui.allocate_painter(target_size, egui::Sense::hover());
+                let rect = response.rect;
+
                 if let Some(texture) = &self.video_texture {
-                    let avail_size = ui.available_size();
-                    let aspect_ratio = (frame.width as f32) / (frame.height as f32);
-                    let target_w = (avail_size.x * 0.95).min(avail_size.y * aspect_ratio);
-                    let target_h = target_w / aspect_ratio;
-                    let target_size = Vec2::new(target_w, target_h);
-
-                    let (response, painter) =
-                        ui.allocate_painter(target_size, egui::Sense::hover());
-                    let rect = response.rect;
-
                     painter.image(
                         texture.id(),
                         rect,
@@ -531,12 +549,21 @@ impl SoosApp {
                             _ => {}
                         }
                     }
+                } else {
+                    painter.rect_filled(rect, 4.0, Color32::from_rgb(20, 20, 25));
+                    painter.text(
+                        rect.center(),
+                        egui::Align2::CENTER_CENTER,
+                        "Acquiring video stream...",
+                        egui::FontId::proportional(18.0),
+                        Color32::GRAY,
+                    );
                 }
             });
 
             // Guided enrollment guidance cards and controls (35% width)
             ui.separator();
-            ui.vertical(|ui| {
+            ui.allocate_ui(Vec2::new(sidebar_width, content_height), |ui| {
                 ui.heading("Guided Multi-Angle Enrollment");
                 ui.label(
                     "Captures high-quality embeddings across multiple head angles (Center, Left, Right, Up) \
@@ -870,21 +897,23 @@ impl eframe::App for SoosApp {
         }
 
         let frame_ref = latest.as_deref();
-        self.render_header(ui, frame_ref);
+        egui::CentralPanel::default().show(ui, |ui| {
+            self.render_header(ui, frame_ref);
 
-        if let Some(frame) = frame_ref {
-            match self.current_tab {
-                AppTab::LiveInspection => self.render_live_inspection(ui, frame),
-                AppTab::GuidedEnrollment => self.render_guided_enrollment(ui, frame),
-                AppTab::Profiles => self.render_profiles(ui),
+            if let Some(frame) = frame_ref {
+                match self.current_tab {
+                    AppTab::LiveInspection => self.render_live_inspection(ui, frame),
+                    AppTab::GuidedEnrollment => self.render_guided_enrollment(ui, frame),
+                    AppTab::Profiles => self.render_profiles(ui),
+                }
+            } else {
+                ui.vertical_centered(|ui| {
+                    ui.add_space(100.0);
+                    ui.spinner();
+                    ui.heading("Connecting to camera and initializing models...");
+                });
             }
-        } else {
-            ui.vertical_centered(|ui| {
-                ui.add_space(100.0);
-                ui.spinner();
-                ui.heading("Connecting to camera and initializing models...");
-            });
-        }
+        });
     }
 }
 
