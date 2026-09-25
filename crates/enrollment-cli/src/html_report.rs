@@ -1,9 +1,11 @@
 #![allow(
+    unknown_lints,
     clippy::indexing_slicing,
     clippy::arithmetic_side_effects,
     clippy::same_item_push,
     clippy::cast_possible_truncation,
     clippy::cast_possible_wrap,
+    clippy::chunks_exact_to_as_chunks,
     reason = "Diagnostic tool encoding logic requires integer arithmetic and bounds-checked indexing"
 )]
 
@@ -21,8 +23,8 @@ pub fn encode_bmp(width: u32, height: u32, rgb: &[u8]) -> Vec<u8> {
     // DIB Header (BITMAPINFOHEADER)
     bmp.extend_from_slice(&40u32.to_le_bytes());
     bmp.extend_from_slice(&width.to_le_bytes());
-    // Negative height for top-down bitmap
-    bmp.extend_from_slice(&(-(height as i32)).to_le_bytes());
+    // Positive height for standard bottom-up bitmap (supported by all browsers)
+    bmp.extend_from_slice(&height.to_le_bytes());
     bmp.extend_from_slice(&1u16.to_le_bytes()); // planes
     bmp.extend_from_slice(&24u16.to_le_bytes()); // bpp
     bmp.extend_from_slice(&0u32.to_le_bytes()); // BI_RGB
@@ -32,9 +34,9 @@ pub fn encode_bmp(width: u32, height: u32, rgb: &[u8]) -> Vec<u8> {
     bmp.extend_from_slice(&0u32.to_le_bytes());
     bmp.extend_from_slice(&0u32.to_le_bytes());
 
-    // Pixels (RGB to BGR)
+    // Pixels (RGB to BGR), bottom-up (reverse y loop)
     let w3 = (width * 3) as usize;
-    for y in 0..height as usize {
+    for y in (0..height as usize).rev() {
         let row_start = y * w3;
         let row_end = row_start + w3;
         let row = &rgb[row_start..row_end];
@@ -146,12 +148,23 @@ pub fn generate_html_report(
     <script>
         const canvas = document.getElementById('canvas');
         const ctx = canvas.getContext('2d');
-        const img = new Image();
-        img.onload = () => {{
-            ctx.drawImage(img, 0, 0);
-            {}
-        }};
-        img.src = "data:image/bmp;base64,{}";
+        
+        // Decode raw RGB Base64
+        const b64 = "{}";
+        const bin = atob(b64);
+        const imgData = ctx.createImageData({}, {});
+        
+        let j = 0;
+        for (let i = 0; i < bin.length; i += 3) {{
+            imgData.data[j++] = bin.charCodeAt(i);
+            imgData.data[j++] = bin.charCodeAt(i+1);
+            imgData.data[j++] = bin.charCodeAt(i+2);
+            imgData.data[j++] = 255; // Alpha
+        }}
+        ctx.putImageData(imgData, 0, 0);
+        
+        // Draw detections
+        {}
     </script>
 </body>
 </html>"#,
@@ -160,7 +173,9 @@ pub fn generate_html_report(
         height,
         width,
         height,
-        boxes_js,
-        base64_bmp
+        base64_bmp, // Actually just raw RGB base64 now
+        width,
+        height,
+        boxes_js
     )
 }

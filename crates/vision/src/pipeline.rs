@@ -100,6 +100,40 @@ impl Drop for VerificationOutcome {
     }
 }
 
+/// Diagnostic and real-time visualization output for GUI and monitoring tools.
+#[derive(Debug, Clone)]
+pub struct VisionAnalysis {
+    /// Frame converted to RGB24.
+    pub rgb: Zeroizing<Vec<u8>>,
+    /// All raw face detections from the detector.
+    pub detections: Vec<FaceDetection>,
+    /// Anti-spoofing PAD evaluation result if a primary face is detected.
+    pub pad_result: Option<PadResult>,
+    /// Estimated head rotation pose in degrees if landmarks are available.
+    pub pose: Option<crate::pose::HeadPose>,
+    /// 112x112 normalized aligned face crop for visual preview.
+    pub aligned_crop: Option<Zeroizing<Vec<u8>>>,
+    /// 512D biometric embedding if feature extraction succeeded.
+    pub embedding: Option<Zeroizing<Vec<f32>>>,
+}
+
+impl zeroize::Zeroize for VisionAnalysis {
+    fn zeroize(&mut self) {
+        if let Some(crop) = &mut self.aligned_crop {
+            crop.zeroize();
+        }
+        if let Some(emb) = &mut self.embedding {
+            emb.zeroize();
+        }
+    }
+}
+
+impl Drop for VisionAnalysis {
+    fn drop(&mut self) {
+        self.zeroize();
+    }
+}
+
 /// End-to-end vision processing orchestrator.
 pub struct VisionPipeline {
     detector: Arc<dyn FaceDetector>,
@@ -151,6 +185,89 @@ impl VisionPipeline {
     /// Access the presentation attack detector.
     pub fn pad(&self) -> &Arc<dyn PadDetector> {
         &self.pad
+    }
+
+    /// Access the feature embedding extractor.
+    pub fn extractor(&self) -> &Arc<dyn EmbeddingExtractor> {
+        &self.extractor
+    }
+
+    /// Analyzes a camera frame without fail-closed short circuiting for GUI live inspection.
+    pub fn analyze_frame(&self, frame: &Frame) -> Result<VisionAnalysis, VisionError> {
+        let rgb = Zeroizing::new(convert_to_rgb(
+            &frame.data,
+            frame.width,
+            frame.height,
+            frame.format,
+        )?);
+
+        let detections = self.detector.detect(&rgb, frame.width, frame.height)?;
+
+        let primary = detections
+            .iter()
+            .filter(|d| d.score >= self.config.min_face_confidence)
+            .max_by(|a, b| {
+                a.score
+                    .partial_cmp(&b.score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+
+        let mut pad_result = None;
+        let mut pose = None;
+        let mut aligned_crop = None;
+        let mut embedding = None;
+
+        if let Some(det) = primary {
+            if let Some(landmarks) = &det.landmarks {
+                pose = Some(crate::pose::estimate_head_pose(landmarks));
+
+                let expanded_bbox = expand_bbox_for_pad(
+                    &det.box_,
+                    self.config.pad_bbox_scale,
+                    frame.width,
+                    frame.height,
+                );
+
+                if let Ok(crop) = crop_and_resize(
+                    &rgb,
+                    frame.width,
+                    frame.height,
+                    &expanded_bbox,
+                    self.config.pad_target_width,
+                    self.config.pad_target_height,
+                ) {
+                    let pad_crop = Zeroizing::new(crop);
+                    pad_result = self
+                        .pad
+                        .evaluate_liveness(
+                            &pad_crop,
+                            self.config.pad_target_width,
+                            self.config.pad_target_height,
+                        )
+                        .ok();
+                }
+
+                if let Ok(aligned) = align_face_112(&rgb, frame.width, frame.height, landmarks) {
+                    if let Ok(emb) = self.extractor.extract_embedding(
+                        &aligned,
+                        self.config.target_width,
+                        self.config.target_height,
+                    ) {
+                        embedding = Some(Zeroizing::new(emb.as_slice().to_vec()));
+                    }
+                    aligned_crop = Some(Zeroizing::new(aligned));
+                }
+            }
+        }
+
+        Ok(VisionAnalysis {
+            rgb,
+            detections,
+            pad_result,
+            pose,
+            aligned_crop,
+            embedding,
+        })
     }
 
     /// Processes a single camera frame:

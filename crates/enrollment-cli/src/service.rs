@@ -25,7 +25,7 @@ use crate::args::{
     EnrollArgs, ListArgs, VerifyArgs,
 };
 use crate::error::EnrollmentCliError;
-use crate::html_report::{base64_encode, encode_bmp, generate_html_report};
+use crate::html_report::{base64_encode, generate_html_report};
 use crate::quality::{select_best_frame, CandidateEvaluation};
 
 /// Default master key path for biometric encryption.
@@ -533,15 +533,15 @@ impl EnrollmentService {
             .detect(&rgb, frame.width, frame.height)
             .unwrap_or_default();
 
-        let bmp = encode_bmp(frame.width, frame.height, &rgb);
-        let base64_img = base64_encode(&bmp);
+        let base64_img = base64_encode(&rgb);
         let html = generate_html_report(frame.width, frame.height, &base64_img, &detections);
 
-        let out_path = "/tmp/soos-debug.html";
-        std::fs::write(out_path, html)
+        let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let out_path = cwd.join("soos-debug.html");
+        std::fs::write(&out_path, html)
             .map_err(|e| EnrollmentCliError::Internal(format!("Failed to write HTML: {}", e)))?;
 
-        Ok(out_path.to_string())
+        Ok(out_path.display().to_string())
     }
 }
 
