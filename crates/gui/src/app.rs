@@ -185,321 +185,350 @@ impl SoosApp {
     /// Renders Tab 1: Live camera view with authentic ONNX model overlays.
     fn render_live_inspection(&mut self, ui: &mut egui::Ui, frame: &LatestFrameData) {
         let total_avail = ui.available_size();
-        let main_width = (total_avail.x * 0.70).max(450.0);
-        let sidebar_width = (total_avail.x - main_width - 24.0).max(280.0);
+        let sidebar_width = (total_avail.x * 0.32).clamp(280.0, 380.0);
+        let main_width = (total_avail.x - sidebar_width - 16.0).max(300.0);
         let content_height = total_avail.y;
 
         ui.horizontal(|ui| {
-            // Main camera view area (70% width)
-            ui.allocate_ui(Vec2::new(main_width, content_height), |ui| {
-                ui.horizontal(|ui| {
-                    ui.checkbox(&mut self.show_bbox, "Bounding Box (SCRFD)");
-                    ui.checkbox(&mut self.show_landmarks, "5 Landmarks (SCRFD)");
-                    ui.checkbox(&mut self.show_pad_crop, "PAD Area (MiniFASNetV2)");
-                    ui.checkbox(&mut self.show_crop_inset, "Aligned Crop (112×112)");
-                    ui.checkbox(&mut self.show_pose_stats, "Pose & Angles");
-                });
+            // Main camera view area
+            ui.allocate_ui_with_layout(
+                Vec2::new(main_width, content_height),
+                egui::Layout::top_down(egui::Align::Min),
+                |ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.checkbox(&mut self.show_bbox, "Bounding Box (SCRFD)");
+                        ui.checkbox(&mut self.show_landmarks, "5 Landmarks (SCRFD)");
+                        ui.checkbox(&mut self.show_pad_crop, "PAD Area (MiniFASNetV2)");
+                        ui.checkbox(&mut self.show_crop_inset, "Aligned Crop (112×112)");
+                        ui.checkbox(&mut self.show_pose_stats, "Pose & Angles");
+                    });
+                    ui.add_space(4.0);
 
-                let avail_size = ui.available_size();
-                let aspect_ratio = (frame.width as f32) / (frame.height as f32);
-                let target_w = avail_size.x.min(avail_size.y * aspect_ratio);
-                let target_h = target_w / aspect_ratio;
-                let target_size = Vec2::new(target_w, target_h);
+                    let avail_size = ui.available_size();
+                    let aspect_ratio = (frame.width as f32) / (frame.height as f32);
+                    let target_w = avail_size.x.min(avail_size.y * aspect_ratio);
+                    let target_h = target_w / aspect_ratio;
+                    let target_size = Vec2::new(target_w, target_h);
 
-                let (response, painter) = ui.allocate_painter(target_size, egui::Sense::hover());
-                let rect = response.rect;
+                    let (response, painter) =
+                        ui.allocate_painter(target_size, egui::Sense::hover());
+                    let rect = response.rect;
 
-                if let Some(texture) = &self.video_texture {
-                    // 1. Paint live camera image
-                    painter.image(
-                        texture.id(),
-                        rect,
-                        Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(1.0, 1.0)),
-                        Color32::WHITE,
-                    );
+                    if let Some(texture) = &self.video_texture {
+                        // 1. Paint live camera image
+                        painter.image(
+                            texture.id(),
+                            rect,
+                            Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(1.0, 1.0)),
+                            Color32::WHITE,
+                        );
 
-                    let to_screen = |x: f32, y: f32| -> Pos2 {
-                        Pos2::new(
-                            rect.min.x + (x / frame.width as f32) * rect.width(),
-                            rect.min.y + (y / frame.height as f32) * rect.height(),
-                        )
-                    };
-
-                    // 2. Paint authentic ONNX detections
-                    for det in &frame.detections {
-                        let is_live = frame
-                            .pad_result
-                            .as_ref()
-                            .map(|p| p.is_live && p.score >= 0.80)
-                            .unwrap_or(false);
-
-                        let box_color = if is_live {
-                            Color32::from_rgb(0, 230, 118) // Bright Green (Live)
-                        } else {
-                            Color32::from_rgb(255, 23, 68) // Red (Spoof / Unverified)
+                        let to_screen = |x: f32, y: f32| -> Pos2 {
+                            Pos2::new(
+                                rect.min.x + (x / frame.width as f32) * rect.width(),
+                                rect.min.y + (y / frame.height as f32) * rect.height(),
+                            )
                         };
 
-                        if self.show_bbox {
-                            let p1 = to_screen(det.box_.x1, det.box_.y1);
-                            let p2 = to_screen(det.box_.x2, det.box_.y2);
-                            painter.rect_stroke(
-                                Rect::from_two_pos(p1, p2),
-                                4.0,
-                                Stroke::new(2.5, box_color),
-                                egui::StrokeKind::Outside,
-                            );
+                        // 2. Paint authentic ONNX detections
+                        for det in &frame.detections {
+                            let is_live = frame
+                                .pad_result
+                                .as_ref()
+                                .map(|p| p.is_live && p.score >= 0.80)
+                                .unwrap_or(false);
 
-                            // Confidence badge
-                            let label = format!("Face: {:.1}%", det.score * 100.0);
-                            painter.text(
-                                Pos2::new(p1.x + 4.0, p1.y + 14.0),
-                                egui::Align2::LEFT_BOTTOM,
-                                label,
-                                egui::FontId::proportional(14.0),
-                                box_color,
-                            );
-                        }
+                            let box_color = if is_live {
+                                Color32::from_rgb(0, 230, 118) // Bright Green (Live)
+                            } else {
+                                Color32::from_rgb(255, 23, 68) // Red (Spoof / Unverified)
+                            };
 
-                        // 3. Paint authentic 5-point landmarks
-                        if self.show_landmarks {
-                            if let Some(lmk) = &det.landmarks {
-                                let pts = [
-                                    (lmk.left_eye, Color32::from_rgb(0, 229, 255)), // Cyan: Left eye
-                                    (lmk.right_eye, Color32::from_rgb(0, 229, 255)), // Cyan: Right eye
-                                    (lmk.nose, Color32::from_rgb(255, 234, 0)),      // Yellow: Nose
-                                    (lmk.mouth_left, Color32::from_rgb(255, 145, 0)), // Orange: Mouth L
-                                    (lmk.mouth_right, Color32::from_rgb(255, 145, 0)), // Orange: Mouth R
-                                ];
+                            if self.show_bbox {
+                                let p1 = to_screen(det.box_.x1, det.box_.y1);
+                                let p2 = to_screen(det.box_.x2, det.box_.y2);
+                                painter.rect_stroke(
+                                    Rect::from_two_pos(p1, p2),
+                                    4.0,
+                                    Stroke::new(2.5, box_color),
+                                    egui::StrokeKind::Outside,
+                                );
 
-                                for (pt, color) in pts {
-                                    painter.circle_filled(to_screen(pt.x, pt.y), 4.5, color);
-                                    painter.circle_stroke(
-                                        to_screen(pt.x, pt.y),
-                                        5.5,
-                                        Stroke::new(1.0, Color32::BLACK),
+                                // Confidence badge
+                                let label = format!("Face: {:.1}%", det.score * 100.0);
+                                painter.text(
+                                    Pos2::new(p1.x + 4.0, p1.y + 14.0),
+                                    egui::Align2::LEFT_BOTTOM,
+                                    label,
+                                    egui::FontId::proportional(14.0),
+                                    box_color,
+                                );
+                            }
+
+                            // 3. Paint authentic 5-point landmarks
+                            if self.show_landmarks {
+                                if let Some(lmk) = &det.landmarks {
+                                    let pts = [
+                                        (lmk.left_eye, Color32::from_rgb(0, 229, 255)), // Cyan: Left eye
+                                        (lmk.right_eye, Color32::from_rgb(0, 229, 255)), // Cyan: Right eye
+                                        (lmk.nose, Color32::from_rgb(255, 234, 0)), // Yellow: Nose
+                                        (lmk.mouth_left, Color32::from_rgb(255, 145, 0)), // Orange: Mouth L
+                                        (lmk.mouth_right, Color32::from_rgb(255, 145, 0)), // Orange: Mouth R
+                                    ];
+
+                                    for (pt, color) in pts {
+                                        painter.circle_filled(to_screen(pt.x, pt.y), 4.5, color);
+                                        painter.circle_stroke(
+                                            to_screen(pt.x, pt.y),
+                                            5.5,
+                                            Stroke::new(1.0, Color32::BLACK),
+                                        );
+                                    }
+
+                                    // Eye axis
+                                    painter.line_segment(
+                                        [
+                                            to_screen(lmk.left_eye.x, lmk.left_eye.y),
+                                            to_screen(lmk.right_eye.x, lmk.right_eye.y),
+                                        ],
+                                        Stroke::new(1.5, Color32::LIGHT_BLUE),
                                     );
                                 }
+                            }
 
-                                // Eye axis
-                                painter.line_segment(
-                                    [
-                                        to_screen(lmk.left_eye.x, lmk.left_eye.y),
-                                        to_screen(lmk.right_eye.x, lmk.right_eye.y),
-                                    ],
-                                    Stroke::new(1.5, Color32::LIGHT_BLUE),
+                            // 4. Paint PAD 2.7x expanded bounding box context crop
+                            if self.show_pad_crop {
+                                let pad_box = soos_vision::crop::expand_bbox_for_pad(
+                                    &det.box_,
+                                    2.7,
+                                    frame.width,
+                                    frame.height,
+                                );
+                                let pad_p1 = to_screen(pad_box.x1, pad_box.y1);
+                                let pad_p2 = to_screen(pad_box.x2, pad_box.y2);
+                                painter.rect_stroke(
+                                    Rect::from_two_pos(pad_p1, pad_p2),
+                                    2.0,
+                                    Stroke::new(
+                                        1.0,
+                                        Color32::from_rgba_premultiplied(200, 200, 200, 100),
+                                    ),
+                                    egui::StrokeKind::Outside,
                                 );
                             }
                         }
 
-                        // 4. Paint PAD 2.7x expanded bounding box context crop
-                        if self.show_pad_crop {
-                            let pad_box = soos_vision::crop::expand_bbox_for_pad(
-                                &det.box_,
-                                2.7,
-                                frame.width,
-                                frame.height,
-                            );
-                            let pad_p1 = to_screen(pad_box.x1, pad_box.y1);
-                            let pad_p2 = to_screen(pad_box.x2, pad_box.y2);
-                            painter.rect_stroke(
-                                Rect::from_two_pos(pad_p1, pad_p2),
-                                2.0,
-                                Stroke::new(
-                                    1.0,
-                                    Color32::from_rgba_premultiplied(200, 200, 200, 100),
-                                ),
-                                egui::StrokeKind::Outside,
-                            );
+                        // 5. Inset preview: 112x112 aligned face crop
+                        if self.show_crop_inset {
+                            if let Some(crop_tex) = &self.aligned_crop_texture {
+                                let inset_size = Vec2::new(112.0, 112.0);
+                                let inset_rect = Rect::from_min_size(
+                                    Pos2::new(rect.max.x - 124.0, rect.max.y - 124.0),
+                                    inset_size,
+                                );
+                                painter.rect_filled(
+                                    inset_rect.expand(4.0),
+                                    4.0,
+                                    Color32::from_black_alpha(180),
+                                );
+                                painter.image(
+                                    crop_tex.id(),
+                                    inset_rect,
+                                    Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(1.0, 1.0)),
+                                    Color32::WHITE,
+                                );
+                                painter.text(
+                                    Pos2::new(inset_rect.min.x + 2.0, inset_rect.min.y - 4.0),
+                                    egui::Align2::LEFT_BOTTOM,
+                                    "ArcFace (112×112)",
+                                    egui::FontId::proportional(11.0),
+                                    Color32::LIGHT_GRAY,
+                                );
+                            }
                         }
+                    } else {
+                        painter.rect_filled(rect, 4.0, Color32::from_rgb(20, 20, 25));
+                        painter.text(
+                            rect.center(),
+                            egui::Align2::CENTER_CENTER,
+                            "Acquiring video stream...",
+                            egui::FontId::proportional(18.0),
+                            Color32::GRAY,
+                        );
                     }
+                },
+            );
 
-                    // 5. Inset preview: 112x112 aligned face crop
-                    if self.show_crop_inset {
-                        if let Some(crop_tex) = &self.aligned_crop_texture {
-                            let inset_size = Vec2::new(112.0, 112.0);
-                            let inset_rect = Rect::from_min_size(
-                                Pos2::new(rect.max.x - 124.0, rect.max.y - 124.0),
-                                inset_size,
-                            );
-                            painter.rect_filled(
-                                inset_rect.expand(4.0),
-                                4.0,
-                                Color32::from_black_alpha(180),
-                            );
-                            painter.image(
-                                crop_tex.id(),
-                                inset_rect,
-                                Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(1.0, 1.0)),
-                                Color32::WHITE,
-                            );
-                            painter.text(
-                                Pos2::new(inset_rect.min.x + 2.0, inset_rect.min.y - 4.0),
-                                egui::Align2::LEFT_BOTTOM,
-                                "ArcFace (112×112)",
-                                egui::FontId::proportional(11.0),
-                                Color32::LIGHT_GRAY,
-                            );
-                        }
-                    }
-                } else {
-                    painter.rect_filled(rect, 4.0, Color32::from_rgb(20, 20, 25));
-                    painter.text(
-                        rect.center(),
-                        egui::Align2::CENTER_CENTER,
-                        "Acquiring video stream...",
-                        egui::FontId::proportional(18.0),
-                        Color32::GRAY,
-                    );
-                }
-            });
-
-            // Sidebar telemetry and controls (30% width)
+            // Sidebar telemetry and controls
             ui.separator();
-            ui.allocate_ui(Vec2::new(sidebar_width, content_height), |ui| {
-                ui.heading("Telemetry & Analysis");
-                ui.add_space(8.0);
+            ui.allocate_ui_with_layout(
+                Vec2::new(sidebar_width, content_height),
+                egui::Layout::top_down(egui::Align::Min),
+                |ui| {
+                    egui::ScrollArea::vertical()
+                        .auto_shrink([false; 2])
+                        .show(ui, |ui| {
+                            ui.heading("Telemetry & Analysis");
+                            ui.add_space(8.0);
 
-                egui::Grid::new("telemetry_grid")
-                    .num_columns(2)
-                    .spacing([20.0, 8.0])
-                    .striped(true)
-                    .show(ui, |ui| {
-                        ui.label("Face Count:");
-                        ui.label(format!("{}", frame.detections.len()));
-                        ui.end_row();
+                            egui::Grid::new("telemetry_grid")
+                                .num_columns(2)
+                                .spacing([20.0, 8.0])
+                                .striped(true)
+                                .show(ui, |ui| {
+                                    ui.label("Face Count:");
+                                    ui.label(format!("{}", frame.detections.len()));
+                                    ui.end_row();
 
-                        ui.label("Detection Score:");
-                        if let Some(det) = frame.detections.first() {
-                            ui.label(format!("{:.2}%", det.score * 100.0));
-                        } else {
-                            ui.label("None");
-                        }
-                        ui.end_row();
+                                    ui.label("Detection Score:");
+                                    if let Some(det) = frame.detections.first() {
+                                        ui.label(format!("{:.2}%", det.score * 100.0));
+                                    } else {
+                                        ui.label("None");
+                                    }
+                                    ui.end_row();
 
-                        ui.label("Anti-Spoof (PAD):");
-                        if let Some(pad) = &frame.pad_result {
-                            let status = if pad.is_live && pad.score >= 0.80 {
-                                "LIVE ✓"
+                                    ui.label("Anti-Spoof (PAD):");
+                                    if let Some(pad) = &frame.pad_result {
+                                        let status = if pad.is_live && pad.score >= 0.80 {
+                                            "LIVE ✓"
+                                        } else {
+                                            "SPOOF ✗"
+                                        };
+                                        let color = if pad.is_live {
+                                            Color32::GREEN
+                                        } else {
+                                            Color32::RED
+                                        };
+                                        ui.colored_label(
+                                            color,
+                                            format!("{status} ({:.2})", pad.score),
+                                        );
+                                    } else {
+                                        ui.label("Waiting...");
+                                    }
+                                    ui.end_row();
+
+                                    if let Some(pose) = &frame.pose {
+                                        ui.label("Head Yaw:");
+                                        ui.label(format!("{:.1}°", pose.yaw));
+                                        ui.end_row();
+
+                                        ui.label("Head Pitch:");
+                                        ui.label(format!("{:.1}°", pose.pitch));
+                                        ui.end_row();
+
+                                        ui.label("Head Roll:");
+                                        ui.label(format!("{:.1}°", pose.roll));
+                                        ui.end_row();
+                                    }
+
+                                    ui.label("Inference Time:");
+                                    ui.label(format!("{:.1} ms", frame.pipeline_latency_ms));
+                                    ui.end_row();
+                                });
+
+                            ui.add_space(16.0);
+                            ui.separator();
+                            ui.heading("Live 1-to-1 Match Test");
+                            ui.label(
+                                "Test real-time biometric PAM unlocking against enrolled profiles:",
+                            );
+
+                            if self.profiles.profiles.is_empty() {
+                                ui.label("No enrolled profiles available.");
                             } else {
-                                "SPOOF ✗"
-                            };
-                            let color = if pad.is_live {
-                                Color32::GREEN
-                            } else {
-                                Color32::RED
-                            };
-                            ui.colored_label(color, format!("{status} ({:.2})", pad.score));
-                        } else {
-                            ui.label("Waiting...");
-                        }
-                        ui.end_row();
-
-                        if let Some(pose) = &frame.pose {
-                            ui.label("Head Yaw:");
-                            ui.label(format!("{:.1}°", pose.yaw));
-                            ui.end_row();
-
-                            ui.label("Head Pitch:");
-                            ui.label(format!("{:.1}°", pose.pitch));
-                            ui.end_row();
-
-                            ui.label("Head Roll:");
-                            ui.label(format!("{:.1}°", pose.roll));
-                            ui.end_row();
-                        }
-
-                        ui.label("Inference Time:");
-                        ui.label(format!("{:.1} ms", frame.pipeline_latency_ms));
-                        ui.end_row();
-                    });
-
-                ui.add_space(16.0);
-                ui.separator();
-                ui.heading("Live 1-to-1 Match Test");
-                ui.label("Test real-time biometric PAM unlocking against enrolled profiles:");
-
-                if self.profiles.profiles.is_empty() {
-                    ui.label("No enrolled profiles available.");
-                } else {
-                    egui::ComboBox::from_label("Profile")
-                        .selected_text(
-                            self.profiles
-                                .selected_uid
-                                .map(|u| format!("UID {u}"))
-                                .unwrap_or_else(|| "Select Profile...".to_string()),
-                        )
-                        .show_ui(ui, |ui| {
-                            for p in &self.profiles.profiles {
-                                if ui
-                                    .selectable_label(
-                                        self.profiles.selected_uid == Some(p.uid),
-                                        format!("{} (UID {})", p.username, p.uid),
+                                egui::ComboBox::from_label("Profile")
+                                    .selected_text(
+                                        self.profiles
+                                            .selected_uid
+                                            .map(|u| format!("UID {u}"))
+                                            .unwrap_or_else(|| "Select Profile...".to_string()),
                                     )
-                                    .clicked()
-                                {
-                                    self.profiles.selected_uid = Some(p.uid);
-                                    if let Ok(Some(template)) = self.store.get(p.uid) {
-                                        if let Ok(mut ref_guard) =
-                                            self.worker_input.match_reference.lock()
-                                        {
-                                            *ref_guard =
-                                                Some(template.embedding.as_slice().to_vec());
+                                    .show_ui(ui, |ui| {
+                                        for p in &self.profiles.profiles {
+                                            if ui
+                                                .selectable_label(
+                                                    self.profiles.selected_uid == Some(p.uid),
+                                                    format!("{} (UID {})", p.username, p.uid),
+                                                )
+                                                .clicked()
+                                            {
+                                                self.profiles.selected_uid = Some(p.uid);
+                                                if let Ok(Some(template)) = self.store.get(p.uid) {
+                                                    if let Ok(mut ref_guard) =
+                                                        self.worker_input.match_reference.lock()
+                                                    {
+                                                        *ref_guard = Some(
+                                                            template.embedding.as_slice().to_vec(),
+                                                        );
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    });
+
+                                if let Ok(score_guard) = self.worker_input.live_match_score.lock() {
+                                    if let Some(score) = *score_guard {
+                                        let match_threshold = 0.45f32;
+                                        let is_match = score >= match_threshold;
+                                        ui.add_space(8.0);
+                                        ui.label(format!("Cosine Match Score: {:.4}", score));
+
+                                        let bar_color = if is_match {
+                                            Color32::GREEN
+                                        } else {
+                                            Color32::RED
+                                        };
+                                        let progress = (score / 1.0).clamp(0.0, 1.0);
+                                        ui.add(
+                                            egui::ProgressBar::new(progress)
+                                                .fill(bar_color)
+                                                .text(format!("{:.1}%", score * 100.0)),
+                                        );
+
+                                        if is_match {
+                                            ui.colored_label(
+                                                Color32::GREEN,
+                                                "VERDICT: PAM_SUCCESS (UNLOCKED)",
+                                            );
+                                        } else {
+                                            ui.colored_label(
+                                                Color32::RED,
+                                                "VERDICT: PAM_IGNORE (LOCKED)",
+                                            );
                                         }
                                     }
                                 }
                             }
                         });
-
-                    if let Ok(score_guard) = self.worker_input.live_match_score.lock() {
-                        if let Some(score) = *score_guard {
-                            let match_threshold = 0.45f32;
-                            let is_match = score >= match_threshold;
-                            ui.add_space(8.0);
-                            ui.label(format!("Cosine Match Score: {:.4}", score));
-
-                            let bar_color = if is_match {
-                                Color32::GREEN
-                            } else {
-                                Color32::RED
-                            };
-                            let progress = (score / 1.0).clamp(0.0, 1.0);
-                            ui.add(
-                                egui::ProgressBar::new(progress)
-                                    .fill(bar_color)
-                                    .text(format!("{:.1}%", score * 100.0)),
-                            );
-
-                            if is_match {
-                                ui.colored_label(Color32::GREEN, "VERDICT: PAM_SUCCESS (UNLOCKED)");
-                            } else {
-                                ui.colored_label(Color32::RED, "VERDICT: PAM_IGNORE (LOCKED)");
-                            }
-                        }
-                    }
-                }
-            });
+                },
+            );
         });
     }
 
     /// Renders Tab 2: Apple FaceID-style guided multi-step enrollment flow.
     fn render_guided_enrollment(&mut self, ui: &mut egui::Ui, frame: &LatestFrameData) {
         let total_avail = ui.available_size();
-        let main_width = (total_avail.x * 0.65).max(450.0);
-        let sidebar_width = (total_avail.x - main_width - 24.0).max(300.0);
+        let sidebar_width = (total_avail.x * 0.35).clamp(300.0, 420.0);
+        let main_width = (total_avail.x - sidebar_width - 16.0).max(300.0);
         let content_height = total_avail.y;
 
         ui.horizontal(|ui| {
-            // Main guided video panel (65% width)
-            ui.allocate_ui(Vec2::new(main_width, content_height), |ui| {
-                let avail_size = ui.available_size();
-                let aspect_ratio = (frame.width as f32) / (frame.height as f32);
-                let target_w = (avail_size.x * 0.95).min(avail_size.y * aspect_ratio);
-                let target_h = target_w / aspect_ratio;
-                let target_size = Vec2::new(target_w, target_h);
+            // Main guided video panel
+            ui.allocate_ui_with_layout(
+                Vec2::new(main_width, content_height),
+                egui::Layout::top_down(egui::Align::Min),
+                |ui| {
+                    let avail_size = ui.available_size();
+                    let aspect_ratio = (frame.width as f32) / (frame.height as f32);
+                    let target_w = (avail_size.x * 0.95).min(avail_size.y * aspect_ratio);
+                    let target_h = target_w / aspect_ratio;
+                    let target_size = Vec2::new(target_w, target_h);
 
-                let (response, painter) =
-                    ui.allocate_painter(target_size, egui::Sense::hover());
-                let rect = response.rect;
+                    let (response, painter) =
+                        ui.allocate_painter(target_size, egui::Sense::hover());
+                    let rect = response.rect;
 
                 if let Some(texture) = &self.video_texture {
                     painter.image(
@@ -561,15 +590,21 @@ impl SoosApp {
                 }
             });
 
-            // Guided enrollment guidance cards and controls (35% width)
+            // Guided enrollment guidance cards and controls
             ui.separator();
-            ui.allocate_ui(Vec2::new(sidebar_width, content_height), |ui| {
-                ui.heading("Guided Multi-Angle Enrollment");
-                ui.label(
-                    "Captures high-quality embeddings across multiple head angles (Center, Left, Right, Up) \
-                     to optimize real-time unlock accuracy.",
-                );
-                ui.add_space(10.0);
+            ui.allocate_ui_with_layout(
+                Vec2::new(sidebar_width, content_height),
+                egui::Layout::top_down(egui::Align::Min),
+                |ui| {
+                    egui::ScrollArea::vertical()
+                        .auto_shrink([false; 2])
+                        .show(ui, |ui| {
+                            ui.heading("Guided Multi-Angle Enrollment");
+                            ui.label(
+                                "Captures high-quality embeddings across multiple head angles (Center, Left, Right, Up) \
+                                 to optimize real-time unlock accuracy.",
+                            );
+                            ui.add_space(10.0);
 
                 ui.horizontal(|ui| {
                     ui.label("Username:");
@@ -764,7 +799,9 @@ impl SoosApp {
                     ui.colored_label(color, msg);
                 }
             });
-        });
+        },
+    );
+});
     }
 
     /// Renders Tab 3: Enrolled profiles and template deletion.

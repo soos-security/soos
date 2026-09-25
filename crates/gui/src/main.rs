@@ -68,7 +68,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let emb_session = registry.get_or_load_session(MODEL_ID_EMBEDDING)?;
 
         let detector = Arc::new(OrtScrfdDetector::new(det_session, 0.60, 0.40)?);
-        let pad = Arc::new(OrtPadDetector::new_with_class_index(pad_session, 0.80, 1));
+        let pad = Arc::new(OrtPadDetector::new_with_class_index(pad_session, 0.80, 2));
         let extractor = Arc::new(OrtEmbeddingExtractor::new(emb_session));
 
         let pipe = Arc::new(VisionPipeline::new(
