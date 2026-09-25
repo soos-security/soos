@@ -128,3 +128,8 @@ strip = "symbols"
 
 [profile.dev]
 overflow-checks = true
+debug = 1
+
+[profile.test]
+overflow-checks = true
+debug = 1
