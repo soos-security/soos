@@ -12,6 +12,7 @@ members = [
     "crates/evidence-store",
     "crates/enrollment-cli",
     "crates/admin-cli",
+    "crates/gui",
     "tests/invariants",
 ]
 
@@ -80,6 +81,7 @@ soos-biometric-store = { path = "crates/biometric-store", version = "0.1.0" }
 soos-evidence-store = { path = "crates/evidence-store", version = "0.1.0" }
 soos-enrollment-cli = { path = "crates/enrollment-cli", version = "0.1.0" }
 soos-admin-cli = { path = "crates/admin-cli", version = "0.1.0" }
+soos-gui = { path = "crates/gui", version = "0.1.0" }
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
@@ -126,3 +128,8 @@ strip = "symbols"
 
 [profile.dev]
 overflow-checks = true
+debug = 1
+
+[profile.test]
+overflow-checks = true
+debug = 1

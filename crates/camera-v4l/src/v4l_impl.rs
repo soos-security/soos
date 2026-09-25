@@ -256,13 +256,17 @@ fn open_and_stream(
     let fourcc = pixel_format_to_fourcc(target_format);
 
     let req_format = v4l::Format::new(config.width, config.height, fourcc);
-    Capture::set_format(&device, &req_format).map_err(|e| CameraError::SetFormat {
-        path: config.device_path.clone(),
-        width: config.width,
-        height: config.height,
-        format: target_format,
-        reason: e.to_string(),
-    })?;
+    let actual_format =
+        Capture::set_format(&device, &req_format).map_err(|e| CameraError::SetFormat {
+            path: config.device_path.clone(),
+            width: config.width,
+            height: config.height,
+            format: target_format,
+            reason: e.to_string(),
+        })?;
+
+    let actual_width = actual_format.width;
+    let actual_height = actual_format.height;
 
     let mut stream =
         v4l::io::mmap::Stream::with_buffers(&device, v4l::buffer::Type::VideoCapture, 4).map_err(
@@ -281,8 +285,8 @@ fn open_and_stream(
     info!(
         "Camera stream initialized on '{}' ({}x{}, {:?})",
         config.device_path.display(),
-        config.width,
-        config.height,
+        actual_width,
+        actual_height,
         target_format
     );
 
@@ -328,8 +332,8 @@ fn open_and_stream(
         let mono_ns = monotonic_nanos();
         let frame = Frame::new(
             buf.to_vec(),
-            config.width,
-            config.height,
+            actual_width,
+            actual_height,
             mono_ns,
             target_format,
             sequence,

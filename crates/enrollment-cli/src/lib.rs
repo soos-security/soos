@@ -10,6 +10,8 @@
 
 pub mod args;
 pub mod error;
+pub mod guided_enrollment;
+pub mod html_report;
 pub mod quality;
 pub mod service;
 pub mod shred;
@@ -19,6 +21,7 @@ pub use args::{
     EnrollArgs, ListArgs, OutputFormat, VerifyArgs, ALLOWED_FHS_PREFIXES,
 };
 pub use error::EnrollmentCliError;
+pub use guided_enrollment::{EnrollmentStep, EnrollmentStepFeedback, GuidedEnrollmentSession};
 pub use quality::{select_best_frame, BestCandidate, CandidateEvaluation};
 pub use service::{
     build_full_service, build_service, build_store_only, check_privileges, resolve_camera_device,

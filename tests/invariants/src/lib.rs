@@ -45,6 +45,7 @@ mod tests {
             "evidence-store",
             "enrollment-cli",
             "admin-cli",
+            "gui",
         ];
 
         for crate_name in business_crates {

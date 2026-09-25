@@ -1,0 +1,29 @@
+[package]
+name = "soos-gui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+soos-protocol = { workspace = true }
+soos-policy = { workspace = true }
+soos-camera-v4l = { workspace = true }
+soos-inference-ort = { workspace = true }
+soos-vision = { workspace = true }
+soos-biometric-store = { workspace = true }
+soos-enrollment-cli = { workspace = true }
+
+clap = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+thiserror = { workspace = true }
+zeroize = { workspace = true }
+arc-swap = { workspace = true }
+nix = { workspace = true }
+
+eframe = { version = "0.35", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }
+
+[lints]
+workspace = true
