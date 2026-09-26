@@ -158,6 +158,23 @@ impl SoosApp {
 
     /// Reloads the enrolled profiles list from the biometric store.
     pub fn refresh_profiles(&mut self) {
+        if !self.is_system_store {
+            // When running unprivileged, fetch the enrolled list from soos-enroll CLI via Polkit
+            if let Ok(output) = std::process::Command::new("pkexec")
+                .args(["soos-enroll", "list", "--format", "json"])
+                .output()
+            {
+                if output.status.success() {
+                    if let Ok(summaries) =
+                        serde_json::from_slice::<Vec<EnrolledUserSummary>>(&output.stdout)
+                    {
+                        self.profiles.profiles = summaries;
+                        return;
+                    }
+                }
+            }
+        }
+
         let uids = self.store.list_enrolled().unwrap_or_default();
         let mut summaries = Vec::with_capacity(uids.len());
 
@@ -932,7 +949,20 @@ impl SoosApp {
         ui.add_space(10.0);
 
         if self.profiles.profiles.is_empty() {
-            ui.label("No biometric templates currently enrolled on this system.");
+            ui.label("No biometric templates currently loaded.");
+            if !self.is_system_store {
+                ui.label(
+                    "Click below to query the root-protected system biometric store via Polkit:",
+                );
+                if ui
+                    .button("🔑 Load Profiles via System Authorization")
+                    .clicked()
+                {
+                    self.refresh_profiles();
+                }
+            } else {
+                ui.label("No biometric templates currently enrolled on this system.");
+            }
         } else {
             egui::Grid::new("profiles_table")
                 .striped(true)
@@ -983,11 +1013,36 @@ impl SoosApp {
                         ui.horizontal(|ui| {
                             if ui.button("Yes, Shred Template").clicked() {
                                 if !self.is_system_store {
-                                    let _ = std::process::Command::new("pkexec")
-                                        .args(["soos-enroll", "delete", "--uid", &uid.to_string(), "--yes"])
+                                    let del_status = std::process::Command::new("pkexec")
+                                        .args([
+                                            "soos-enroll",
+                                            "delete",
+                                            "--uid",
+                                            &uid.to_string(),
+                                            "--yes",
+                                        ])
                                         .status();
-                                }
-                                if let Err(e) = self.store.delete(uid) {
+                                    let _ = self.store.delete(uid);
+                                    match del_status {
+                                        Ok(s) if s.success() => {
+                                            self.profiles.status_message = Some((
+                                                format!(
+                                                    "Template for UID {uid} shredded and removed from system store."
+                                                ),
+                                                false,
+                                            ));
+                                            self.refresh_profiles();
+                                        }
+                                        _ => {
+                                            self.profiles.status_message = Some((
+                                                format!(
+                                                    "Failed to delete template for UID {uid} from system store via Polkit."
+                                                ),
+                                                true,
+                                            ));
+                                        }
+                                    }
+                                } else if let Err(e) = self.store.delete(uid) {
                                     self.profiles.status_message = Some((
                                         format!("Failed to delete template: {e}"),
                                         true,

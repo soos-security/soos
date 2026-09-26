@@ -158,7 +158,7 @@ pub struct DiagnosticVerificationReport {
 }
 
 /// Metadata summary of an enrolled user.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct EnrolledUserSummary {
     pub uid: u32,
     pub username: String,

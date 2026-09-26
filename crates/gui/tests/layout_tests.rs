@@ -186,3 +186,21 @@ fn test_guided_enrollment_layout_allocates_large_canvas() {
         });
     });
 }
+
+#[test]
+fn test_enrolled_user_summary_json_roundtrip() {
+    let json_data = r#"[
+        {"uid": 1000, "username": "hadrien", "model_id": "arcface_w600k_mbf", "model_version": "2.0.0", "enrollment_timestamp": 1790426080, "embedding_dim": 512}
+    ]"#;
+    let summaries: Vec<soos_enrollment_cli::service::EnrolledUserSummary> =
+        serde_json::from_str(json_data).unwrap_or_default();
+    assert_eq!(summaries.len(), 1);
+    if let Some(first) = summaries.first() {
+        assert_eq!(first.uid, 1000);
+        assert_eq!(first.username, "hadrien");
+        assert_eq!(first.model_id, "arcface_w600k_mbf");
+        assert_eq!(first.model_version, "2.0.0");
+        assert_eq!(first.enrollment_timestamp, 1790426080);
+        assert_eq!(first.embedding_dim, 512);
+    }
+}

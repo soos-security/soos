@@ -3286,6 +3286,7 @@ dependencies = [
  "getrandom 0.3.4",
  "libc",
  "nix",
+ "serde",
  "serde_json",
  "soos-biometric-store",
  "soos-camera-v4l",
