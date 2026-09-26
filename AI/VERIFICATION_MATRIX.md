@@ -384,4 +384,16 @@ This document translates the critical gating criteria from §11 of `ARCHITECTURE
 | PRX1 | Bounded daemon video proxy (`RequestKind::PreviewFrame`, `PreviewResponse`, 2 MiB boundary) with lock-free `ArcSwapOption` load and zero sensitive keyword logging | Unit & integration tests (`preview_tests::test_preview_request_and_response_roundtrip`, `preview_tests::test_preview_frame_large_payload_rejected`, `dispatcher_tests::test_dispatcher_handles_preview_frame_request`, `logging_audit_test::test_daemon_source_code_has_zero_sensitive_data_in_logs`) | ✅ Verified |
 | PRX2 | `soos-gui` `IpcCameraManager` querying `/run/soos/daemon.sock` without root privileges, eliminating `pkexec systemctl stop soos-daemon` Polkit prompt and V4L2 `EBUSY` conflict | Integration & unit tests (`crates/gui/src/ipc_camera.rs`, `crates/gui/src/main.rs`, `cargo test -p soos-gui`) | ✅ Verified |
 
+---
+
+## Component: `anti-spoof-ir-gdm-integration` (Issue #47 / GitHub #134)
+
+| # | Criterion | Test Method | Status |
+|---|---|---|---|
+| ASG1 | MiniFASNet live class index alignment (class index 1 = live, class 0 = print photo, class 2 = screen replay), preventing screen replay spoof attacks | Unit & integration tests (`pad_tests::test_minifasnet_live_class_index_is_1`, `pad_tests::test_minifasnet_rejects_screen_replay_spoof`, `pad_tests::test_pipeline_rejects_screen_replay_spoof`) | ✅ Verified |
+| ASG2 | Aspect-ratio preserving ROI expansion for PAD without distortion (`expand_bbox_for_pad` using Minivision shifting algorithm `_get_new_box`) | Unit tests (`pad_tests::test_expand_bbox_shifts_roi_without_distortion`, `crop_tests::test_expand_bbox_for_pad_expansion_and_clamping`) | ✅ Verified |
+| ASG3 | Dual-sensor hardware IR camera preference defaulted in `camera-v4l` (`SensorPreference::PreferIr`) and 31-character truncated V4L2 device name classification (`USB2.0 FHD UVC WebCam: USB2.0 I`) | Unit tests (`dual_sensor_tests::test_sensor_preference_defaults_to_prefer_ir`, `dual_sensor_tests::test_v4l2_31_char_truncated_name_classified_as_ir`) | ✅ Verified |
+| ASG4 | Latency budget & auto-standby wake calibration (daemon pipeline decision budget 900ms, wake timeout 800ms) ensuring reliable first-attempt authentication within PAM 1000ms deadline | Unit tests (`config_tests::test_daemon_pipeline_decision_budget_calibrated_for_warmup`, `config_tests::test_daemon_camera_config_defaults_prefer_ir`) | ✅ Verified |
+| ASG5 | GDM integration with safe disable toggle: PAM module supports `is_disabled()` via `/etc/soos/disabled`, service-specific `/etc/soos/gdm.disable` (for `gdm-password`), and `disabled` argument; CLI provides `soos-admin gdm status\|enable\|disable` to eliminate lockout risk | Unit tests (`config_tests::test_parse_disabled_arg_and_file_check`, `config_tests::test_gdm_disable_file_triggers_disabled_state`, `gdm_tests::test_gdm_status_unconfigured`, `gdm_tests::test_gdm_status_configured_enabled`, `gdm_tests::test_gdm_status_configured_disabled`, `gdm_tests::test_gdm_enable_idempotent`, `gdm_tests::test_gdm_disable_creates_flag`) | ✅ Verified |
+
 

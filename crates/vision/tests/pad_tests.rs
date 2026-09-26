@@ -246,3 +246,24 @@ fn test_pad_latency_budget_compliance() {
         duration
     );
 }
+
+#[test]
+fn test_expand_bbox_shifts_roi_without_distortion() {
+    use soos_inference_ort::BoundingBox;
+    use soos_vision::crop::expand_bbox_for_pad;
+
+    // A 40x40 face box placed close to the top-left edge: (10, 10) to (50, 50).
+    let bbox = BoundingBox::new(10.0, 10.0, 50.0, 50.0);
+    // Expanding by 2.7x gives expected width = 40 * 2.7 = 108.0, height = 40 * 2.7 = 108.0.
+    // Center is (30, 30). Unshifted bounds would be [30 - 54, 30 + 54] = [-24, 84].
+    // Under Minivision shifting algorithm:
+    // left_top_x < 0 -> right_bottom_x += 24 -> 108; left_top_x = 0.
+    // Width and height remain 108.0, maintaining 1:1 aspect ratio and full context without distortion!
+    let expanded = expand_bbox_for_pad(&bbox, 2.7, 640, 480);
+    assert_eq!(expanded.x1, 0.0);
+    assert_eq!(expanded.y1, 0.0);
+    assert_eq!(expanded.x2, 108.0);
+    assert_eq!(expanded.y2, 108.0);
+    assert_eq!(expanded.x2 - expanded.x1, 108.0);
+    assert_eq!(expanded.y2 - expanded.y1, 108.0);
+}

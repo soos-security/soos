@@ -295,41 +295,48 @@ fn test_pad_class_ordering_configurable() {
 }
 
 #[test]
-fn test_pad_default_live_class_index_is_two() {
+fn test_pad_default_live_class_index_is_one() {
     assert_eq!(
-        soos_inference_ort::pad::DEFAULT_MINIFASNET_LIVE_CLASS_INDEX, 2,
-        "MiniFASNetV2 default live class index must be 2 (Class 0: PrintPhoto, Class 1: ScreenReplay, Class 2: Genuine Live)"
+        soos_inference_ort::pad::DEFAULT_MINIFASNET_LIVE_CLASS_INDEX, 1,
+        "MiniFASNetV2 default live class index must be 1 (Class 0: PrintPhoto, Class 1: Genuine Live, Class 2: ScreenReplay)"
     );
 }
 
 #[test]
-fn test_pad_class_ordering_live_index_2_minifasnet_v2() {
+fn test_screen_replay_detected_as_spoof_with_default_index() {
     let threshold = 0.80f32;
+    let live_index = soos_inference_ort::pad::DEFAULT_MINIFASNET_LIVE_CLASS_INDEX;
 
-    // MiniFASNetV2 production class ordering:
-    // Class 0 = PrintPhoto, Class 1 = ScreenReplay, Class 2 = Genuine Live
-
-    // 1. Live presentation at index 2 (e.g. authentic user camera crop: [0.0003, 0.0054, 0.9943])
-    let probs_live = [0.0003, 0.0054, 0.9943];
-    let res_live = OrtPadDetector::interpret_probabilities(&probs_live, threshold, 2)
+    // 1. Genuine Live presentation (Class 1 dominant):
+    let probs_live = [0.03, 0.94, 0.03];
+    let res_live = OrtPadDetector::interpret_probabilities(&probs_live, threshold, live_index)
         .expect("interpret_probabilities should succeed");
-    assert!(res_live.is_live, "Should be classified as live");
-    assert!((res_live.score - 0.9943).abs() < 1e-4);
+    assert!(
+        res_live.is_live,
+        "Real face at class 1 must be classified as live"
+    );
+    assert_eq!(res_live.score, 0.94);
     assert_eq!(res_live.attack_type, None);
 
-    // 2. PrintPhoto attack: Class 0 is dominant spoof
-    let probs_print = [0.85, 0.10, 0.05];
-    let res_print = OrtPadDetector::interpret_probabilities(&probs_print, threshold, 2)
+    // 2. Phone Screen Replay attack (Class 2 dominant):
+    let probs_replay = [0.05, 0.05, 0.90];
+    let res_replay = OrtPadDetector::interpret_probabilities(&probs_replay, threshold, live_index)
         .expect("interpret_probabilities should succeed");
-    assert!(!res_print.is_live, "Should be spoof");
-    assert_eq!(res_print.score, 0.05);
-    assert_eq!(res_print.attack_type, Some(AttackType::PrintPhoto));
-
-    // 3. ScreenReplay attack: Class 1 is dominant spoof
-    let probs_replay = [0.08, 0.82, 0.10];
-    let res_replay = OrtPadDetector::interpret_probabilities(&probs_replay, threshold, 2)
-        .expect("interpret_probabilities should succeed");
-    assert!(!res_replay.is_live, "Should be spoof");
-    assert_eq!(res_replay.score, 0.10);
+    assert!(
+        !res_replay.is_live,
+        "Phone screen replay must be classified as spoof"
+    );
+    assert_eq!(res_replay.score, 0.05);
     assert_eq!(res_replay.attack_type, Some(AttackType::ScreenReplay));
+
+    // 3. Print Photo attack (Class 0 dominant):
+    let probs_print = [0.92, 0.04, 0.04];
+    let res_print = OrtPadDetector::interpret_probabilities(&probs_print, threshold, live_index)
+        .expect("interpret_probabilities should succeed");
+    assert!(
+        !res_print.is_live,
+        "Printed photo must be classified as spoof"
+    );
+    assert_eq!(res_print.score, 0.04);
+    assert_eq!(res_print.attack_type, Some(AttackType::PrintPhoto));
 }

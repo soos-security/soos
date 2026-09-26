@@ -67,6 +67,14 @@ impl SoosPam {
         syslog::init_panic_hook();
 
         let result = catch_unwind(AssertUnwindSafe(|| {
+            if config.is_disabled() {
+                syslog::log_info(&format!(
+                    "soos authentication is disabled for service '{}'; ignoring",
+                    config.service
+                ));
+                return PamResultCode::PAM_IGNORE;
+            }
+
             let uid = config.uid.unwrap_or_else(|| {
                 if let Some(h) = pamh {
                     if let Ok(username) = h.get_user(None) {

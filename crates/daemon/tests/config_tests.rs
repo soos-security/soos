@@ -178,3 +178,25 @@ fn test_config_file_invalid_syntax_fails_closed() {
         "Invalid TOML must fail with DaemonError::Config"
     );
 }
+
+#[test]
+fn test_decision_budget_calibrated_to_pam_deadline() {
+    assert_eq!(
+        soos_daemon::pipeline::DECISION_BUDGET_MS, 900,
+        "Decision budget must be 900ms to allow camera cold-start while staying within 1000ms PAM deadline"
+    );
+}
+
+#[test]
+fn test_pipeline_default_sensor_preference_is_prefer_ir() {
+    let config = DaemonConfig::default();
+    assert_eq!(
+        config.pipeline.camera.sensor_preference,
+        soos_camera_v4l::SensorPreference::PreferIr,
+        "Daemon pipeline camera config must default to PreferIr"
+    );
+    assert_eq!(
+        config.pipeline.camera.warmup_frames, 20,
+        "Camera warmup frames must default to 20 per Criterion C5"
+    );
+}

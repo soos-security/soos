@@ -179,3 +179,37 @@ fn test_parse_unterminated_string_exceeding_max_arg_len() {
     let config = unsafe { parse_argv(1, args.as_ptr()) };
     assert_eq!(config.timeout_ms, 1000); // Kept default
 }
+
+#[test]
+fn test_parse_disabled_arg_and_file_check() {
+    let arg = CString::new("disabled").unwrap();
+    let args = [arg.as_ptr().cast::<u8>()];
+    // SAFETY: args contains 1 valid pointer to a null-terminated C string
+    let config = unsafe { parse_argv(1, args.as_ptr()) };
+    assert!(
+        config.disabled,
+        "Argument 'disabled' must set config.disabled = true"
+    );
+    assert!(
+        config.is_disabled(),
+        "config.is_disabled() must be true when disabled argument is set"
+    );
+}
+
+#[test]
+fn test_gdm_disable_file_triggers_disabled_state() {
+    let temp = tempfile::tempdir().unwrap();
+    let disable_file = temp.path().join("gdm.disable");
+    std::fs::write(&disable_file, "disabled").unwrap();
+
+    let config = pam_soos::config::PamConfig {
+        service: "gdm-password".to_string(),
+        disable_file: Some(disable_file),
+        ..Default::default()
+    };
+
+    assert!(
+        config.is_disabled(),
+        "GDM password service must be reported as disabled when disable_file exists"
+    );
+}

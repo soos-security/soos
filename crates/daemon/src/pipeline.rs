@@ -15,8 +15,8 @@ use crate::error::DaemonError;
 /// Maximum allowed age for a captured camera frame before it is considered stale (150ms).
 pub const MAX_FRAME_AGE_NS: u64 = 150_000_000;
 
-/// Total decision latency budget per PAM authentication request (220ms, within 250ms PAM deadline).
-pub const DECISION_BUDGET_MS: u64 = 220;
+/// Total decision latency budget per PAM authentication request (900ms, within 1000ms PAM deadline).
+pub const DECISION_BUDGET_MS: u64 = 900;
 
 /// Composite runtime container holding all operational pipeline components.
 pub struct PipelineComponents {

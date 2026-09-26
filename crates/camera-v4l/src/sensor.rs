@@ -17,11 +17,11 @@ pub enum SensorType {
 /// Preference for selecting camera devices on multi-sensor hardware.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum SensorPreference {
-    /// Prefer RGB color sensor; fallback to Unknown then Infrared if RGB is unavailable.
-    #[default]
-    PreferRgb,
     /// Prefer Infrared sensor; fallback to Unknown then RGB if Infrared is unavailable.
+    #[default]
     PreferIr,
+    /// Prefer RGB color sensor; fallback to Unknown then Infrared if RGB is unavailable.
+    PreferRgb,
     /// Select the first candidate without sensor-type filtering.
     Any,
 }
@@ -48,12 +48,16 @@ impl CameraDeviceInfo {
 pub fn classify_sensor(card_name: &str, supported_formats: &[PixelFormat]) -> SensorType {
     let lower = card_name.to_ascii_lowercase();
 
-    // Check known infrared markers in V4L2 device names
+    // Check known infrared markers in V4L2 device names.
+    // Note: V4L2 caps.card is capped at 31 characters, so device names like
+    // "USB2.0 FHD UVC WebCam: USB2.0 IR" are truncated to "USB2.0 FHD UVC WebCam: USB2.0 I".
     if lower.contains("infrared")
         || lower.contains("ir camera")
         || lower.contains("ir-camera")
         || lower.contains(": ir")
         || lower.contains(" ir ")
+        || lower.ends_with(": ir")
+        || lower.ends_with(" i")
     {
         return SensorType::Infrared;
     }
@@ -147,11 +151,13 @@ pub fn enumerate_capture_devices() -> Vec<CameraDeviceInfo> {
                                 })
                                 .collect();
 
-                            devices.push(CameraDeviceInfo {
-                                path: dev_path,
-                                card_name: caps.card,
-                                supported_formats,
-                            });
+                            if !supported_formats.is_empty() {
+                                devices.push(CameraDeviceInfo {
+                                    path: dev_path,
+                                    card_name: caps.card,
+                                    supported_formats,
+                                });
+                            }
                         }
                     }
                 }

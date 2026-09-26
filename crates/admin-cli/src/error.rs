@@ -52,6 +52,10 @@ pub enum AdminCliError {
     /// Execution failure for administrative user provisioning command.
     #[error("failed to execute user provisioning command: {0}")]
     CommandFailed(String),
+
+    /// GDM configuration error.
+    #[error("GDM configuration error: {0}")]
+    GdmConfig(String),
 }
 
 impl From<getrandom::Error> for AdminCliError {

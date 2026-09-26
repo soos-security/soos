@@ -20,26 +20,56 @@ pub fn expand_bbox_for_pad(bbox: &BoundingBox, scale: f32, img_w: u32, img_h: u3
         return BoundingBox::new(0.0, 0.0, 0.0, 0.0);
     }
 
-    let effective_scale = if scale > 0.0 { scale } else { 1.0 };
     let orig_w = (bbox.x2 - bbox.x1).max(0.0);
     let orig_h = (bbox.y2 - bbox.y1).max(0.0);
-    let cx = (bbox.x1 + bbox.x2) / 2.0;
-    let cy = (bbox.y1 + bbox.y2) / 2.0;
-
-    let new_w = orig_w * effective_scale;
-    let new_h = orig_h * effective_scale;
-    let half_w = new_w / 2.0;
-    let half_h = new_h / 2.0;
+    if orig_w <= 0.0 || orig_h <= 0.0 {
+        return BoundingBox::new(0.0, 0.0, 0.0, 0.0);
+    }
 
     let max_x = img_w as f32;
     let max_y = img_h as f32;
 
-    let x1 = (cx - half_w).clamp(0.0, max_x);
-    let y1 = (cy - half_h).clamp(0.0, max_y);
-    let x2 = (cx + half_w).clamp(0.0, max_x);
-    let y2 = (cy + half_h).clamp(0.0, max_y);
+    let requested_scale = if scale > 0.0 { scale } else { 1.0 };
+    // Bound effective scale so expanded box does not exceed total image canvas
+    let effective_scale = requested_scale.min(max_x / orig_w).min(max_y / orig_h);
 
-    BoundingBox::new(x1, y1, x2, y2)
+    let new_w = orig_w * effective_scale;
+    let new_h = orig_h * effective_scale;
+    let cx = (bbox.x1 + bbox.x2) / 2.0;
+    let cy = (bbox.y1 + bbox.y2) / 2.0;
+
+    let mut x1 = cx - new_w / 2.0;
+    let mut y1 = cy - new_h / 2.0;
+    let mut x2 = cx + new_w / 2.0;
+    let mut y2 = cy + new_h / 2.0;
+
+    // Translation-preserving shifting matching Minivision CropImage::_get_new_box:
+    // When expanding over an image boundary, shift the window inward rather than
+    // clamping coordinates independently, maintaining context scale and 1:1 aspect ratio.
+    if x1 < 0.0 {
+        x2 -= x1;
+        x1 = 0.0;
+    }
+    if y1 < 0.0 {
+        y2 -= y1;
+        y1 = 0.0;
+    }
+
+    if x2 > max_x {
+        x1 -= x2 - max_x;
+        x2 = max_x;
+    }
+    if y2 > max_y {
+        y1 -= y2 - max_y;
+        y2 = max_y;
+    }
+
+    let clamped_x1 = x1.clamp(0.0, max_x);
+    let clamped_y1 = y1.clamp(0.0, max_y);
+    let clamped_x2 = x2.clamp(0.0, max_x);
+    let clamped_y2 = y2.clamp(0.0, max_y);
+
+    BoundingBox::new(clamped_x1, clamped_y1, clamped_x2, clamped_y2)
 }
 
 /// Crops an RGB24 buffer by bounding box and resizes to target dimensions using bilinear interpolation.
