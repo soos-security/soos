@@ -241,9 +241,7 @@ impl DaemonConfig {
                     config.pipeline.camera.device_path = camera_device;
                 }
             }
-            if let Some(warmup) = pipe.warmup_frames {
-                config.pipeline.camera.warmup_frames = warmup;
-            }
+            config.pipeline.camera.warmup_frames = pipe.warmup_frames.unwrap_or(0);
             if let Some(sensor_pref) = pipe.sensor_preference {
                 match sensor_pref.to_lowercase().as_str() {
                     "prefer_ir" | "ir" => {

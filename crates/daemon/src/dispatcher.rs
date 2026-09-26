@@ -126,30 +126,53 @@ impl ConnectionDispatcher {
             }
         };
 
-        // Phase 1: Request Reading & Processing Phase.
-        // Bounded by connection_timeout. Strictly performs socket reading and pipeline computation,
-        // producing a fully encoded in-memory response buffer (Option<Vec<u8>>).
-        // Zero response bytes are written during this phase, guaranteeing that async cancellation
-        // upon timeout will never leave partial response bytes on the wire.
-        let output = timeout(
-            self.config.connection_timeout,
-            self.read_and_process(&mut stream),
-        )
-        .await
-        .map_err(|_| {
-            warn!("Connection timed out");
-            DaemonError::Timeout
-        })??;
+        let mut requests_processed: usize = 0;
+        loop {
+            // Phase 1: Request Reading & Processing Phase.
+            // Bounded by connection_timeout. Strictly performs socket reading and pipeline computation,
+            // producing a fully encoded in-memory response buffer (Option<Vec<u8>>).
+            // Zero response bytes are written during this phase, guaranteeing that async cancellation
+            // upon timeout will never leave partial response bytes on the wire.
+            let res = timeout(
+                self.config.connection_timeout,
+                self.read_and_process(&mut stream),
+            )
+            .await;
 
-        // Phase 2: Response Transmission Phase.
-        // Runs outside the request processing timeout. Writes the pre-encoded response frame
-        // atomically using a dedicated write timeout to prevent slow client stalls.
-        if let Some(ref encoded_resp) = output.encoded_response {
-            self.write_response(&mut stream, encoded_resp).await?;
-        }
+            let output = match res {
+                Ok(Ok(output)) => {
+                    requests_processed = requests_processed.saturating_add(1);
+                    output
+                }
+                Ok(Err(DaemonError::Io(e))) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                    // Client disconnected cleanly.
+                    break;
+                }
+                Ok(Err(e)) => {
+                    return Err(e);
+                }
+                Err(_) => {
+                    if requests_processed == 0 {
+                        warn!("Connection timed out");
+                        return Err(DaemonError::Timeout);
+                    } else {
+                        // After servicing requests, client went idle past timeout; disconnect gracefully.
+                        debug!("Persistent connection timed out while idle");
+                        break;
+                    }
+                }
+            };
 
-        if let Some(err) = output.completion_error {
-            return Err(err);
+            // Phase 2: Response Transmission Phase.
+            // Runs outside the request processing timeout. Writes the pre-encoded response frame
+            // atomically using a dedicated write timeout to prevent slow client stalls.
+            if let Some(ref encoded_resp) = output.encoded_response {
+                self.write_response(&mut stream, encoded_resp).await?;
+            }
+
+            if let Some(err) = output.completion_error {
+                return Err(err);
+            }
         }
 
         Ok(())
@@ -325,10 +348,13 @@ impl ConnectionDispatcher {
             if let Some(ref pipe) = self.pipeline {
                 pipe.camera.notify_activity();
                 if !pipe.camera.is_ready() {
+                    let max_wake = self
+                        .config
+                        .connection_timeout
+                        .saturating_sub(Duration::from_millis(100))
+                        .min(Duration::from_millis(1000));
                     let wake_start = Instant::now();
-                    while !pipe.camera.is_ready()
-                        && wake_start.elapsed() < Duration::from_millis(200)
-                    {
+                    while !pipe.camera.is_ready() && wake_start.elapsed() < max_wake {
                         tokio::time::sleep(Duration::from_millis(15)).await;
                     }
                 }
@@ -770,6 +796,13 @@ impl ConnectionDispatcher {
             } else {
                 last_reason
             };
+
+            if req.service.contains("gdm")
+                || req.service.contains("lock")
+                || req.service.contains("screen")
+            {
+                pipe.camera.notify_activity();
+            }
 
             let encoded =
                 self.build_response(req.request_id, final_verdict, final_reason, cur_ns)?;

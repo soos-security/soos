@@ -55,36 +55,9 @@ impl IpcCameraManager {
         Self::spawn("/run/soos/daemon.sock")
     }
 
-    /// Probes whether the daemon socket is alive and responsive to preview queries.
+    /// Probes whether the daemon socket is alive and accepting connections.
     pub fn probe<P: AsRef<Path>>(socket_path: P) -> bool {
-        let Ok(mut stream) = UnixStream::connect(socket_path) else {
-            return false;
-        };
-        let _ = stream.set_read_timeout(Some(Duration::from_millis(300)));
-        let _ = stream.set_write_timeout(Some(Duration::from_millis(300)));
-
-        let req = Request {
-            version: CURRENT_VERSION,
-            kind: RequestKind::PreviewFrame,
-            request_id: [0xAA; 32],
-            uid_hint: nix::unistd::getuid().as_raw(),
-            service: "soos-gui".to_string(),
-            deadline_monotonic_ns: u64::MAX,
-        };
-
-        let Ok(framed) = encode(&req) else {
-            return false;
-        };
-        if stream.write_all(&framed).is_err() || stream.flush().is_err() {
-            return false;
-        }
-
-        let mut len_bytes = [0u8; 4];
-        if stream.read_exact(&mut len_bytes).is_err() {
-            return false;
-        }
-
-        true
+        UnixStream::connect(socket_path).is_ok()
     }
 }
 

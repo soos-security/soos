@@ -174,3 +174,36 @@ fn test_mock_camera_auto_suspend_and_resume_lifecycle() {
 
     camera.stop();
 }
+
+#[test]
+fn test_mock_camera_idle_timeout_zero_disables_auto_standby() {
+    let config = CameraConfigBuilder::new()
+        .fps(30)
+        .idle_timeout(Duration::ZERO)
+        .warmup_frames(0)
+        .build();
+
+    let camera = MockCameraManager::new(config);
+
+    // Wait for camera to be ready
+    let start = std::time::Instant::now();
+    while !camera.is_ready() && start.elapsed() < Duration::from_millis(500) {
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert!(camera.is_ready(), "Camera must be ready");
+
+    // Sleep for 100ms without calling notify_activity()
+    thread::sleep(Duration::from_millis(100));
+
+    // When idle_timeout is Duration::ZERO, auto-standby is disabled and camera NEVER suspends
+    assert!(
+        camera.is_ready(),
+        "Camera must remain ready indefinitely when idle_timeout is Duration::ZERO"
+    );
+    assert!(
+        camera.latest_frame().is_some(),
+        "Camera must continue serving frames when auto-standby is disabled"
+    );
+
+    camera.stop();
+}

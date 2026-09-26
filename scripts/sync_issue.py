@@ -72,6 +72,7 @@ BACKLOG_TO_GITHUB = {
     46: 132,
     47: 134,
     48: 136,
+    49: 138,
 }
 
 BRANCH_TO_ISSUE = {
@@ -128,6 +129,7 @@ BRANCH_TO_ISSUE = {
     "feat/biometric-reliability-and-camera-lifecycle": 46,
     "feat/anti-spoof-ir-gdm-integration": 47,
     "feat/gdm-lockscreen-feedback-and-stability": 48,
+    "feat/camera-latency-lockscreen-gui-preview": 49,
 }
 
 
