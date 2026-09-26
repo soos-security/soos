@@ -52,6 +52,36 @@ pub enum Commands {
 
     /// Add a user to the soos biometric authentication system group.
     AddUser(AddUserArgs),
+
+    /// Manage GDM login PAM integration and disable flag.
+    Gdm(GdmArgs),
+}
+
+/// Action to perform for GDM integration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum GdmAction {
+    /// Check current status of GDM integration and disable flag.
+    Status,
+    /// Enable GDM facial authentication.
+    Enable,
+    /// Disable GDM facial authentication (creates /etc/soos/gdm.disable).
+    Disable,
+}
+
+/// Arguments for `gdm` management command.
+#[derive(Parser, Debug, Clone)]
+pub struct GdmArgs {
+    /// Action to perform.
+    #[arg(value_enum)]
+    pub action: GdmAction,
+
+    /// Path to PAM service file (defaults to /etc/pam.d/gdm-password).
+    #[arg(long, default_value = "/etc/pam.d/gdm-password")]
+    pub pam_file: PathBuf,
+
+    /// Path to disable flag file (defaults to /etc/soos/gdm.disable).
+    #[arg(long, default_value = "/etc/soos/gdm.disable")]
+    pub disable_file: PathBuf,
 }
 
 /// Arguments for `add-user` subcommand.

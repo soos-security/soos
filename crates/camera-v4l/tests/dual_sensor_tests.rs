@@ -121,3 +121,75 @@ fn test_dual_sensor_override_prefers_ir() {
     );
     assert_eq!(selected.sensor_type(), SensorType::Infrared);
 }
+
+#[test]
+fn test_default_sensor_preference_is_prefer_ir() {
+    use soos_camera_v4l::CameraConfig;
+
+    assert_eq!(
+        SensorPreference::default(),
+        SensorPreference::PreferIr,
+        "Default SensorPreference must be PreferIr to prioritize anti-spoofing IR hardware"
+    );
+
+    assert_eq!(
+        CameraConfig::default().sensor_preference,
+        SensorPreference::PreferIr,
+        "CameraConfig default sensor preference must be PreferIr"
+    );
+
+    let ir_device = CameraDeviceInfo {
+        path: PathBuf::from("/dev/video2"),
+        card_name: "USB2.0 FHD UVC WebCam: USB2.0 I".to_string(),
+        supported_formats: vec![PixelFormat::Grey],
+    };
+
+    let rgb_device = CameraDeviceInfo {
+        path: PathBuf::from("/dev/video0"),
+        card_name: "USB2.0 FHD UVC WebCam: USB2.0 F".to_string(),
+        supported_formats: vec![PixelFormat::Yuyv, PixelFormat::Mjpeg],
+    };
+
+    let candidates = vec![rgb_device.clone(), ir_device.clone()];
+    let selected =
+        select_camera_device(&candidates, SensorPreference::default()).expect("Must select device");
+    assert_eq!(
+        selected.path, ir_device.path,
+        "Default selection must prefer IR camera when present"
+    );
+    assert_eq!(selected.sensor_type(), SensorType::Infrared);
+}
+
+#[test]
+fn test_sensor_classification_truncated_ir_card_name() {
+    // 31-character truncated V4L2 card name ending with " I" from "IR"
+    assert_eq!(
+        classify_sensor("USB2.0 FHD UVC WebCam: USB2.0 I", &[]),
+        SensorType::Infrared,
+        "Card name ending with ' I' truncated from ' IR' must be classified as Infrared"
+    );
+    assert_eq!(
+        classify_sensor("USB2.0 FHD UVC WebCam: USB2.0 I", &[PixelFormat::Grey]),
+        SensorType::Infrared
+    );
+}
+
+#[test]
+fn test_select_camera_device_ignores_empty_format_nodes() {
+    let metadata_node = CameraDeviceInfo {
+        path: PathBuf::from("/dev/video1"),
+        card_name: "USB2.0 FHD UVC WebCam: USB2.0 F".to_string(),
+        supported_formats: vec![],
+    };
+
+    let ir_device = CameraDeviceInfo {
+        path: PathBuf::from("/dev/video2"),
+        card_name: "USB2.0 FHD UVC WebCam: USB2.0 I".to_string(),
+        supported_formats: vec![PixelFormat::Grey],
+    };
+
+    let candidates = vec![metadata_node.clone(), ir_device.clone()];
+    let selected = select_camera_device(&candidates, SensorPreference::PreferIr)
+        .expect("Must select valid device");
+    assert_eq!(selected.path, ir_device.path);
+}

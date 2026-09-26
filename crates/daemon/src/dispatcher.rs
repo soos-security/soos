@@ -502,10 +502,10 @@ impl ConnectionDispatcher {
             // 8a: Notify activity to wake camera from auto-standby
             pipe.camera.notify_activity();
 
-            // 8b: If camera is resuming from auto-standby, wait up to 600ms for it to become ready
+            // 8b: If camera is resuming from auto-standby, wait up to 800ms for it to become ready
             if !pipe.camera.is_ready() {
                 let wake_start = Instant::now();
-                while !pipe.camera.is_ready() && wake_start.elapsed() < Duration::from_millis(600) {
+                while !pipe.camera.is_ready() && wake_start.elapsed() < Duration::from_millis(800) {
                     tokio::time::sleep(Duration::from_millis(15)).await;
                 }
             }

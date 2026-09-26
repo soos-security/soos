@@ -70,6 +70,7 @@ BACKLOG_TO_GITHUB = {
     44: 110,
     45: 111,
     46: 132,
+    47: 134,
 }
 
 BRANCH_TO_ISSUE = {
@@ -124,6 +125,7 @@ BRANCH_TO_ISSUE = {
     "feat/admin-debug-gui": 22,
     "feat/guided-enrollment-production-unlock": 22,
     "feat/biometric-reliability-and-camera-lifecycle": 46,
+    "feat/anti-spoof-ir-gdm-integration": 47,
 }
 
 

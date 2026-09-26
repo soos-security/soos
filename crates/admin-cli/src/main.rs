@@ -73,6 +73,39 @@ fn run() -> Result<(), AdminCliError> {
             add_user_to_soos_group(&args.username)?;
             println!("[OK] User '{}' added to 'soos' group.", args.username);
         }
+
+        Commands::Gdm(args) => {
+            let status = soos_admin_cli::gdm::configure_gdm(
+                &args.action,
+                &args.pam_file,
+                &args.disable_file,
+            )?;
+            match cli.format {
+                OutputFormat::Table => {
+                    println!("GDM Biometric Integration Status:");
+                    println!("  PAM Service File:  {}", status.pam_file.display());
+                    println!(
+                        "  Installed in PAM:  {}",
+                        if status.installed { "Yes" } else { "No" }
+                    );
+                    println!("  Disable Flag File: {}", status.disable_file.display());
+                    println!(
+                        "  Status:            {}",
+                        if status.enabled {
+                            "Enabled"
+                        } else {
+                            "Disabled"
+                        }
+                    );
+                }
+                OutputFormat::Json => {
+                    let json = serde_json::to_string_pretty(&status).map_err(|e| {
+                        AdminCliError::GdmConfig(format!("Failed to serialize JSON: {e}"))
+                    })?;
+                    println!("{json}");
+                }
+            }
+        }
     }
 
     Ok(())

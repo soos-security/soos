@@ -1785,3 +1785,52 @@ Hardware testing on dual-sensor laptops revealed false accepts under loose defau
   - Acceptance: `soos-gui` renders live video stream while `soos-daemon` runs with zero EBUSY error or Polkit prompts
   - TDD: `test_preview_request_and_response_roundtrip`, `test_dispatcher_handles_preview_frame_request`
 
+---
+
+### Issue #47: `[anti-spoof/ir-default/verification-stability/gdm]` MiniFASNet Anti-Spoofing Class Alignment, Automatic IR Selection, Decision Latency Calibration, and Safe GDM Test Integration
+
+> **Branch**: `feat/anti-spoof-ir-gdm-integration`  
+> **Architecture ref**: §6 Warm Camera Streaming, §7 Models & Verification Pipeline, §8 Monorepo Structure, §10 Hardening  
+> **VERIFICATION_MATRIX**: PAD1, CAM2, DEC1, GDM1
+
+#### Problem Statement
+
+Hardware validation revealed that:
+1. Anti-spoofing is bypassed by smartphone screen replays because `DEFAULT_MINIFASNET_LIVE_CLASS_INDEX` was inverted (set to 2 instead of 1), and `expand_bbox_for_pad` lacked translation-preserving aspect ratio bounds from Minivision `CropImage`.
+2. Hardware IR cameras are not prioritized by default (`SensorPreference::PreferRgb` was the default), so dual-sensor laptops continued using RGB sensors rather than IR sensors which naturally defeat 2D screen reflections.
+3. Face verification fails intermittently on cold start / wake from auto-standby because `DECISION_BUDGET_MS` was constrained to 220ms while PAM allows 1000ms, and `warmup_frames` was 20 frames (667ms).
+4. Safe GDM login integration requires an easy disable mechanism (`soos-admin gdm enable/disable/status` and disable flag check) to ensure seamless fallback without user lockout.
+
+#### Sub-issues
+
+- [x] **#47.1** — MiniFASNet PAD class alignment and Bounding Box context shifting
+  - Set `DEFAULT_MINIFASNET_LIVE_CLASS_INDEX = 1` in `soos-inference-ort` (Class 0: PrintPhoto, Class 1: Genuine/Live, Class 2: ScreenReplay).
+  - Update non-live attack type mapping: class 0 maps to `PrintPhoto`, class 2 maps to `ScreenReplay`.
+  - Implement translation-preserving ROI shifting in `expand_bbox_for_pad` matching Minivision `_get_new_box` logic.
+  - Acceptance: Screen replay attacks are classified as `AttackType::ScreenReplay` with high spoof score; genuine live faces are classified as `is_live = true`.
+  - TDD: `test_minifasnet_live_class_is_index_one`, `test_screen_replay_detected_as_spoof`, `test_expand_bbox_shifts_roi_without_distortion`.
+
+- [x] **#47.2** — Automatic IR sensor prioritization and capture device filtering
+  - Change default `SensorPreference` to `PreferIr` in `CameraConfig` and `PipelineConfig`.
+  - Filter out capture devices with empty `supported_formats` (metadata nodes like `video1`, `video3`) in `enumerate_capture_devices()`.
+  - Detect 31-character truncated V4L2 device names (e.g. `...: USB2.0 I` truncated from `IR`) in `classify_sensor`.
+  - Ensure seamless format negotiation for `Grey` sensors at 640x360.
+  - Acceptance: IR camera is selected automatically by default when present; metadata nodes are ignored.
+  - TDD: `test_default_sensor_preference_is_prefer_ir`, `test_sensor_classification_truncated_ir_card_name`, `test_enumerate_filters_empty_format_nodes`.
+
+- [x] **#47.3** — Decision latency budget calibration and camera wake acceleration
+  - Increase `DECISION_BUDGET_MS` in `crates/daemon/src/pipeline.rs` to 900ms (calibrated within the 1000ms PAM deadline).
+  - Decrease `warmup_frames` in `CameraConfig` to 5 (166ms at 30 fps), accelerating auto-exposure stabilization upon waking from auto-standby.
+  - Fix `auth_start` in `dispatcher.rs` to account for camera wake-up properly and prevent spurious timeouts.
+  - Acceptance: Verification requests waking from auto-standby succeed cleanly on the first attempt within latency budget without `CameraUnavailable` or `Timeout`.
+  - TDD: `test_decision_budget_calibrated_to_pam_deadline`, `test_warmup_frames_fast_stabilization`.
+
+- [x] **#47.4** — Safe GDM PAM integration and CLI toggle management
+  - Support disable flag file checking in `pam_soos`: `/etc/soos/gdm.disable` or `/etc/soos/disabled` or PAM argument `disabled`.
+  - When disabled, `pam_soos` logs to syslog and immediately returns `PAM_IGNORE` (0ms, 0 socket activity, no camera wake).
+  - Add `gdm` command group to `soos-admin`: `soos-admin gdm enable`, `soos-admin gdm disable`, `soos-admin gdm status`.
+  - Configure `/etc/pam.d/gdm-password` with `auth sufficient pam_soos.so timeout_ms=1000`.
+  - Acceptance: GDM face login works when enabled; easily disabled with single CLI command; password fallback is 100% reliable.
+  - TDD: `test_pam_returns_ignore_when_gdm_disabled_file_present`, `test_admin_cli_gdm_status_and_toggle`.
+
+

@@ -87,3 +87,25 @@ pub fn log_panic(summary: &str, location: Option<&str>) {
         );
     }
 }
+
+/// Dispatches an informational message to the system authentication log facility (`LOG_AUTHPRIV | LOG_INFO`).
+pub fn log_info(message: &str) {
+    let sanitized: String = message
+        .chars()
+        .map(|c| if c == '\0' { ' ' } else { c })
+        .collect();
+    let c_str = match CString::new(format!("soos-pam: {sanitized}")) {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+
+    let fmt = b"%s\0";
+    // SAFETY: fmt and c_str are valid null-terminated C strings. LOG_AUTHPRIV | LOG_INFO are standard syslog flags.
+    unsafe {
+        libc::syslog(
+            libc::LOG_AUTHPRIV | libc::LOG_INFO,
+            fmt.as_ptr().cast(),
+            c_str.as_ptr(),
+        );
+    }
+}

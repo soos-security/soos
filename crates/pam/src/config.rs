@@ -43,6 +43,40 @@ pub struct PamConfig {
     pub service: String,
     /// Optional target UID override specified in PAM arguments.
     pub uid: Option<u32>,
+    /// Explicitly disabled via PAM argument.
+    pub disabled: bool,
+    /// Custom disable flag file path (defaults to checking standard system flags).
+    pub disable_file: Option<PathBuf>,
+}
+
+impl PamConfig {
+    /// Returns true if PAM authentication is explicitly disabled for this service or globally.
+    pub fn is_disabled(&self) -> bool {
+        if self.disabled {
+            return true;
+        }
+
+        // Check global disable flag
+        if std::path::Path::new("/etc/soos/disabled").exists() {
+            return true;
+        }
+
+        // Check custom disable file if provided
+        if let Some(ref path) = self.disable_file {
+            if path.exists() {
+                return true;
+            }
+        }
+
+        // Check service-specific disable flag for GDM
+        if (self.service == "gdm-password" || self.service.contains("gdm"))
+            && std::path::Path::new("/etc/soos/gdm.disable").exists()
+        {
+            return true;
+        }
+
+        false
+    }
 }
 
 impl Default for PamConfig {
@@ -53,6 +87,8 @@ impl Default for PamConfig {
             socket_path: PathBuf::from(DEFAULT_SOCKET_PATH),
             service: DEFAULT_SERVICE.to_string(),
             uid: None,
+            disabled: false,
+            disable_file: None,
         }
     }
 }
@@ -81,6 +117,13 @@ fn apply_arg(config: &mut PamConfig, trimmed: &str) {
         }
     } else if trimmed == "event=password-failed" {
         config.event = Some(PamEvent::PasswordFailed);
+    } else if trimmed == "disabled" {
+        config.disabled = true;
+    } else if let Some(val) = trimmed.strip_prefix("disable_if_file=") {
+        let path_str = val.trim();
+        if !path_str.is_empty() {
+            config.disable_file = Some(PathBuf::from(path_str));
+        }
     } else if let Some(val) = trimmed
         .strip_prefix("socket_path=")
         .or_else(|| trimmed.strip_prefix("socket="))
