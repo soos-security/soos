@@ -85,7 +85,7 @@ impl CameraManager for V4lCameraManager {
             let last = self.last_activity.read().unwrap_or_else(|e| e.into_inner());
             last.elapsed()
         };
-        if elapsed > self.config.idle_timeout {
+        if !self.config.idle_timeout.is_zero() && elapsed > self.config.idle_timeout {
             return false;
         }
         self.is_ready.load(Ordering::Acquire)
@@ -146,7 +146,7 @@ fn run_v4l_supervisor(
                 while running.load(Ordering::Acquire) {
                     let recent_activity = {
                         let last = last_activity.read().unwrap_or_else(|e| e.into_inner());
-                        last.elapsed() < config.idle_timeout
+                        config.idle_timeout.is_zero() || last.elapsed() < config.idle_timeout
                     };
                     if recent_activity {
                         info!(
@@ -380,7 +380,7 @@ fn open_and_stream(
 
         // Check for idle auto-standby: if idle for more than idle_timeout,
         // suspend capture and release hardware device handle to extinguish privacy LED
-        let is_idle = {
+        let is_idle = !config.idle_timeout.is_zero() && {
             let last = last_activity.read().unwrap_or_else(|e| e.into_inner());
             Instant::now().duration_since(*last) > config.idle_timeout
         };

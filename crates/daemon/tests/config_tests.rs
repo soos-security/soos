@@ -227,3 +227,30 @@ camera_device = "auto"
         "camera_device = 'auto' must preserve default-camera sentinel for auto device resolution"
     );
 }
+
+#[test]
+fn test_daemon_toml_default_warmup_frames_is_zero() {
+    let toml = r#"
+[pipeline]
+camera_device = "auto"
+"#;
+    let config = DaemonConfig::from_toml_str(toml).unwrap();
+    assert_eq!(
+        config.pipeline.camera.warmup_frames, 0,
+        "When running from daemon.toml, warmup_frames must default to 0 for instant wake"
+    );
+}
+
+#[test]
+fn test_pipeline_config_idle_timeout_zero_from_toml() {
+    let toml = r#"
+[pipeline]
+idle_timeout_secs = 0
+"#;
+    let config = DaemonConfig::from_toml_str(toml).unwrap();
+    assert_eq!(
+        config.pipeline.camera.idle_timeout,
+        Duration::ZERO,
+        "idle_timeout_secs = 0 must configure Duration::ZERO to disable auto-standby"
+    );
+}

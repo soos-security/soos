@@ -116,7 +116,7 @@ impl MockCameraManager {
                         now.duration_since(*last)
                     };
 
-                    if elapsed_idle > cfg.idle_timeout {
+                    if !cfg.idle_timeout.is_zero() && elapsed_idle > cfg.idle_timeout {
                         // Suspended state: camera device is closed, privacy LED extinguished
                         ready_clone.store(false, Ordering::Release);
                         latest_clone.store(None);
@@ -126,7 +126,8 @@ impl MockCameraManager {
                         while running_clone.load(Ordering::Acquire) {
                             let recent_activity = {
                                 let last = activity_clone.read().unwrap_or_else(|e| e.into_inner());
-                                Instant::now().duration_since(*last) < cfg.idle_timeout
+                                cfg.idle_timeout.is_zero()
+                                    || Instant::now().duration_since(*last) < cfg.idle_timeout
                             };
                             if recent_activity {
                                 break;
@@ -168,7 +169,7 @@ impl MockCameraManager {
                         && !starved_clone.load(Ordering::Acquire)
                         && sleep_start.elapsed() < frame_interval
                     {
-                        let is_idle_expired = {
+                        let is_idle_expired = !cfg.idle_timeout.is_zero() && {
                             let last = activity_clone.read().unwrap_or_else(|e| e.into_inner());
                             last.elapsed() > cfg.idle_timeout
                         };
@@ -280,7 +281,7 @@ impl CameraManager for MockCameraManager {
             let last = self.last_activity.read().unwrap_or_else(|e| e.into_inner());
             last.elapsed()
         };
-        if elapsed > self.config.idle_timeout {
+        if !self.config.idle_timeout.is_zero() && elapsed > self.config.idle_timeout {
             return false;
         }
         self.is_ready.load(Ordering::Acquire)

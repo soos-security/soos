@@ -4,7 +4,12 @@
 //! - Camera video view area expands to fill the available panel height and width
 //! - Sizing does not collapse to default interact height (18px)
 //! - Checkboxes and controls do not push video canvas out-of-bounds in windowed mode
-//! - Aspect ratio (4:3 or 16:9) is strictly preserved in both fullscreen and windowed modes
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    reason = "Contractual integration tests use assertions, unwrap, and expect"
+)]
 
 use eframe::egui::{self, Vec2};
 
@@ -203,4 +208,58 @@ fn test_enrolled_user_summary_json_roundtrip() {
         assert_eq!(first.enrollment_timestamp, 1790426080);
         assert_eq!(first.embedding_dim, 512);
     }
+}
+
+#[test]
+fn test_ipc_camera_manager_receives_persistent_frames() {
+    use soos_camera_v4l::CameraManager;
+    use soos_protocol::codec::encode_preview;
+    use soos_protocol::types::{PreviewResponse, CURRENT_VERSION};
+    use std::io::{Read, Write};
+    use std::os::unix::net::UnixListener;
+
+    let sock_path = std::env::temp_dir().join(format!("gui_test_{}.sock", std::process::id()));
+    let _ = std::fs::remove_file(&sock_path);
+    let listener = UnixListener::bind(&sock_path).unwrap();
+
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        // Serve 3 frames on the SAME stream
+        for seq in 0..3 {
+            let mut len_bytes = [0u8; 4];
+            stream.read_exact(&mut len_bytes).unwrap();
+            let len = u32::from_be_bytes(len_bytes) as usize;
+            let mut req_buf = vec![0u8; len];
+            stream.read_exact(&mut req_buf).unwrap();
+
+            let resp = PreviewResponse {
+                version: CURRENT_VERSION,
+                sequence: seq,
+                width: 640,
+                height: 480,
+                format: 0, // Rgb24
+                timestamp_monotonic_ns: 1000 + seq,
+                data: vec![128u8; 640 * 480 * 3],
+            };
+            let encoded = encode_preview(&resp).unwrap();
+            stream.write_all(&encoded).unwrap();
+            stream.flush().unwrap();
+        }
+    });
+
+    let manager = soos_gui::IpcCameraManager::spawn(&sock_path);
+
+    // Wait for manager to receive frames and become ready
+    let start = std::time::Instant::now();
+    while !manager.is_ready() && start.elapsed() < std::time::Duration::from_millis(1000) {
+        std::thread::sleep(std::time::Duration::from_millis(15));
+    }
+
+    assert!(manager.is_ready(), "IPC Camera Manager must become ready");
+    let frame = manager.latest_frame().expect("Frame must exist");
+    assert_eq!(frame.width, 640);
+    assert_eq!(frame.height, 480);
+
+    server.join().unwrap();
+    let _ = std::fs::remove_file(&sock_path);
 }

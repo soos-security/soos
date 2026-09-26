@@ -1881,5 +1881,52 @@ On physical hardware lock screens (GDM):
   - Acceptance: `soos-admin gdm enable` writes `timeout_ms=2500`; `daemon.toml` with `camera_device = "auto"` selects IR sensor `/dev/video2`.
   - TDD: `test_gdm_enable_configures_2500ms_timeout`, `test_daemon_config_camera_device_auto_resolution`.
 
+---
+
+### Issue #49: Camera Latency, Auto-Standby Disable, Lockscreen Persistence & GUI Preview Streaming
+
+> **Component**: `crates/camera-v4l`, `crates/daemon`, `crates/gui`  
+> **Type**: Bugfix / Feature / Performance Hardening  
+> **Status**: Completed  
+> **Branch**: `feat/camera-latency-lockscreen-gui-preview`  
+> **Architecture ref**: §2 Threat Model & Invariants, §4 IPC Protocol, §6 Warm Camera Streaming, §11 Implementation Phases  
+> **VERIFICATION_MATRIX**: CLP1, CLP2, CLP3, CLP4
+
+#### Problem Statement
+
+1. Camera activation often experiences delay or responds "Camera unavailable" because the camera manager discards warmup frames upon waking from auto-standby and times out.
+2. Auto-standby `idle_timeout_secs = 0` was broken: setting `0` caused immediate and perpetual suspension (`Instant::now() > Duration::ZERO` always true), making it impossible to disable auto-standby and keep the camera permanently streaming.
+3. On physical lock screens (GDM), users require the camera to remain active without aggressive auto-standby so verification is instantaneous as soon as the screen is on.
+4. The GUI (`soos-gui`) no longer activates the camera or shows live preview frames because the daemon closes the Unix socket after each response, causing `BrokenPipe` on subsequent frames and flipping `is_ready` to false, while falling back to direct V4L2 conflicts with the running daemon holding `/dev/video2`.
+
+#### Sub-issues
+
+- [x] **#49.1** — Fix auto-standby disable (`idle_timeout_secs = 0` / `Duration::ZERO`) across `camera-v4l`
+  - In `crates/camera-v4l/src/v4l_impl.rs` and `mock.rs`: check `!self.config.idle_timeout.is_zero()` before comparing elapsed idle time.
+  - When `idle_timeout` is `Duration::ZERO`, auto-standby is completely disabled: `is_ready()` always reports active status, and `open_and_stream` never yields `SupervisorAction::Suspend`.
+  - Acceptance: `idle_timeout: Duration::ZERO` keeps camera actively streaming indefinitely without suspend.
+  - TDD: `test_idle_timeout_zero_disables_auto_standby`.
+
+- [x] **#49.2** — Calibrate default warmup frames to 0 and idle timeout to 60-120s in daemon config
+  - In `crates/daemon/src/config.rs`: set default `camera.warmup_frames` to 0 in `PipelineConfig::default()`, eliminating the 700-1300ms warmup discard on wake.
+  - Set default `camera.idle_timeout` to 60s (or 120s) instead of 10s.
+  - In `crates/daemon/src/dispatcher.rs`: when authenticating lockscreen services (`gdm-password`, `swaylock`, `hyprlock`), refresh activity so the camera stays awake for the full lockscreen interaction.
+  - Acceptance: Resuming from standby takes < 150ms instead of 800ms+; camera does not prematurely shut down during user interaction.
+  - TDD: `test_daemon_pipeline_default_warmup_frames_is_zero`, `test_dispatcher_lockscreen_service_extends_activity`.
+
+- [x] **#49.3** — Implement persistent connection streaming in daemon dispatcher for GUI preview frames
+  - In `crates/daemon/src/dispatcher.rs`: update `handle_connection` to loop over incoming requests on a persistent stream until clean EOF (`UnexpectedEof`) or connection timeout.
+  - In `PreviewFrame` handling: raise wake timeout from 200ms to 1000ms so initial wake smoothly serves the first frame.
+  - Acceptance: A single Unix domain socket connection can send multiple `PreviewFrame` requests sequentially and receive responses without `BrokenPipe` or connection teardown.
+  - TDD: `test_dispatcher_persistent_preview_stream_roundtrip`.
+
+- [x] **#49.4** — Enhance GUI IPC camera manager to maintain persistent streaming without frame drops
+  - In `crates/gui/src/ipc_camera.rs`: reuse the open stream across frames at 30 FPS, reconnect with backoff on error without clearing `latest_frame`, and prevent premature `is_ready` flapping.
+  - In `crates/gui/src/main.rs`: ensure when `daemon.sock` is present, GUI exclusively uses `IpcCameraManager` without falling back to conflicting direct V4L2 device open.
+  - Acceptance: `soos-gui` connects to `soos-daemon`, activates preview immediately, and maintains continuous 30 FPS video feedback.
+  - TDD: `test_ipc_camera_persistent_stream_maintains_ready_flag`.
+
+
+
 
 
