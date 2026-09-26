@@ -9,7 +9,7 @@ use eframe::egui;
 use soos_biometric_store::{BiometricStore, MasterKey};
 use soos_camera_v4l::{CameraConfigBuilder, CameraManager, MockCameraManager, V4lCameraManager};
 use soos_enrollment_cli::service::{
-    resolve_camera_device, MODEL_ID_EMBEDDING, MODEL_ID_FACE_DETECTOR, MODEL_ID_PAD,
+    resolve_camera_device_from_config, MODEL_ID_EMBEDDING, MODEL_ID_FACE_DETECTOR, MODEL_ID_PAD,
 };
 use soos_gui::app::SoosApp;
 use soos_gui::args::GuiArgs;
@@ -23,21 +23,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = GuiArgs::parse();
 
     // 1. Initialize Biometric Store
-    let key = match MasterKey::load_or_create(&args.key_file) {
-        Ok(k) => k,
+    let (key, is_system_key) = match MasterKey::load_or_create(&args.key_file) {
+        Ok(k) => (k, true),
         Err(_) => {
             // Fallback for non-root testing if /var/lib/soos/master.key is root-only
             let fallback_key = std::env::temp_dir().join("soos-gui-master.key");
-            MasterKey::load_or_create(&fallback_key)?
+            (MasterKey::load_or_create(&fallback_key)?, false)
         }
     };
 
-    let store = match BiometricStore::new(&args.biometrics_dir, key.clone()) {
-        Ok(s) => Arc::new(s),
+    let (store, is_system_store) = match BiometricStore::new(&args.biometrics_dir, key.clone()) {
+        Ok(s) => (Arc::new(s), is_system_key),
         Err(_) => {
             let fallback_bio = std::env::temp_dir().join("soos-gui-biometrics");
             std::fs::create_dir_all(&fallback_bio)?;
-            Arc::new(BiometricStore::new(&fallback_bio, key)?)
+            (Arc::new(BiometricStore::new(&fallback_bio, key)?), false)
         }
     };
 
@@ -56,9 +56,45 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ));
         (cam, pipe)
     } else {
-        let device_path = resolve_camera_device(args.camera_device);
-        let camera_config = CameraConfigBuilder::new().device_path(device_path).build();
-        let cam: Arc<dyn CameraManager> = Arc::new(V4lCameraManager::spawn(camera_config)?);
+        let device_path = resolve_camera_device_from_config(
+            args.camera_device,
+            Some(std::path::Path::new("/etc/soos/daemon.toml")),
+        );
+        let camera_config = CameraConfigBuilder::new()
+            .device_path(device_path.clone())
+            .build();
+        let cam: Arc<dyn CameraManager> = match V4lCameraManager::spawn(camera_config.clone()) {
+            Ok(c) => Arc::new(c),
+            Err(e) => {
+                let daemon_active = std::process::Command::new("systemctl")
+                    .args(["is-active", "--quiet", "soos-daemon.service"])
+                    .status()
+                    .map(|s| s.success())
+                    .unwrap_or(false);
+
+                if daemon_active {
+                    tracing::info!(
+                        "Camera device '{}' is busy. 'soos-daemon' is running.",
+                        device_path.display()
+                    );
+                    tracing::info!(
+                        "Requesting authorization to pause 'soos-daemon' for GUI camera capture..."
+                    );
+                    let res = std::process::Command::new("pkexec")
+                        .args(["systemctl", "stop", "soos-daemon.service"])
+                        .status();
+                    if res.map(|s| s.success()).unwrap_or(false) {
+                        tracing::info!("Paused soos-daemon. Initializing camera stream...");
+                        std::thread::sleep(std::time::Duration::from_millis(500));
+                        Arc::new(V4lCameraManager::spawn(camera_config)?)
+                    } else {
+                        return Err(Box::new(e));
+                    }
+                } else {
+                    return Err(Box::new(e));
+                }
+            }
+        };
 
         let mut registry = ModelRegistry::new(RegistryConfig::new(&args.models_dir))?;
         registry.verify_integrity()?;
@@ -93,7 +129,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     eframe::run_native(
         "SOOS — Biometric Management & Live Analysis",
         native_options,
-        Box::new(|cc| Ok(Box::new(SoosApp::new(cc, store, camera, pipeline)))),
+        Box::new(move |cc| {
+            Ok(Box::new(SoosApp::new(
+                cc,
+                store,
+                camera,
+                pipeline,
+                is_system_store,
+            )))
+        }),
     )?;
 
     Ok(())

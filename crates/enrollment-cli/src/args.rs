@@ -60,6 +60,8 @@ pub enum Commands {
     Delete(DeleteArgs),
     /// List all enrolled users and metadata
     List(ListArgs),
+    /// Import and encrypt a biometric template from file
+    Import(ImportArgs),
     /// Capture a frame, run vision pipeline, and output HTML debug visualization
     DebugVision,
 }
@@ -126,6 +128,30 @@ pub struct ListArgs {
     /// Output format (table or json).
     #[arg(short = 'f', long, default_value = "table")]
     pub format: OutputFormat,
+}
+
+/// Arguments for `import` subcommand.
+#[derive(Args, Debug, Clone)]
+pub struct ImportArgs {
+    /// Target Linux User ID (UID). If not specified, defaults to caller UID.
+    #[arg(short = 'i', long)]
+    pub uid: Option<u32>,
+
+    /// Target username (resolved to UID via system user database).
+    #[arg(short = 'u', long, conflicts_with = "uid")]
+    pub username: Option<String>,
+
+    /// Path to input template file (CBOR or JSON float array).
+    #[arg(short = 'f', long)]
+    pub file: PathBuf,
+
+    /// Facial recognition model identifier.
+    #[arg(long, default_value = "arcface_w600k_mbf")]
+    pub model_id: String,
+
+    /// Attested model version.
+    #[arg(long, default_value = "2.0.0")]
+    pub model_version: String,
 }
 
 /// Resolves target UID from optional explicit UID, optional username, or defaults to current UID.

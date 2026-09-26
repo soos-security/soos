@@ -17,7 +17,8 @@ pub use frame::{Frame, PixelFormat};
 pub use manager::CameraManager;
 pub use mock::MockCameraManager;
 pub use sensor::{
-    classify_sensor, select_camera_device, CameraDeviceInfo, SensorPreference, SensorType,
+    classify_sensor, enumerate_capture_devices, select_camera_device, CameraDeviceInfo,
+    SensorPreference, SensorType,
 };
 pub use v4l_impl::{
     fourcc_to_pixel_format, negotiate_format, pixel_format_to_fourcc, V4lCameraManager,

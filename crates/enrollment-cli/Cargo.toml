@@ -27,6 +27,8 @@ soos-biometric-store = { workspace = true }
 soos-camera-v4l = { workspace = true }
 soos-inference-ort = { workspace = true }
 soos-vision = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

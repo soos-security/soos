@@ -43,6 +43,7 @@ pub enum AppTab {
 pub struct SoosApp {
     current_tab: AppTab,
     store: Arc<BiometricStore>,
+    is_system_store: bool,
     _camera: Arc<dyn CameraManager>,
     _pipeline: Arc<VisionPipeline>,
     latest_frame_slot: Arc<ArcSwapOption<LatestFrameData>>,
@@ -68,12 +69,48 @@ pub struct SoosApp {
 }
 
 impl SoosApp {
+    /// Checks whether `soos-daemon.service` is actively running.
+    pub fn is_daemon_active() -> bool {
+        std::process::Command::new("systemctl")
+            .args(["is-active", "--quiet", "soos-daemon.service"])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
+
+    /// Pauses `soos-daemon` via Polkit to release camera hardware for the GUI.
+    pub fn pause_daemon() -> Result<(), String> {
+        let res = std::process::Command::new("pkexec")
+            .args(["systemctl", "stop", "soos-daemon.service"])
+            .status()
+            .map_err(|e| format!("Failed to invoke pkexec: {e}"))?;
+        if res.success() {
+            Ok(())
+        } else {
+            Err("Failed to pause soos-daemon (authorization denied or error)".to_string())
+        }
+    }
+
+    /// Resumes `soos-daemon` via Polkit to restore background PAM unlock readiness.
+    pub fn resume_daemon() -> Result<(), String> {
+        let res = std::process::Command::new("pkexec")
+            .args(["systemctl", "start", "soos-daemon.service"])
+            .status()
+            .map_err(|e| format!("Failed to invoke pkexec: {e}"))?;
+        if res.success() {
+            Ok(())
+        } else {
+            Err("Failed to resume soos-daemon (authorization denied or error)".to_string())
+        }
+    }
+
     /// Creates and initializes a new `SoosApp` with background inference worker.
     pub fn new(
         cc: &eframe::CreationContext<'_>,
         store: Arc<BiometricStore>,
         camera: Arc<dyn CameraManager>,
         pipeline: Arc<VisionPipeline>,
+        is_system_store: bool,
     ) -> Self {
         let latest_frame_slot = Arc::new(ArcSwapOption::empty());
         let worker_input = Arc::new(WorkerSharedInput::default());
@@ -96,6 +133,7 @@ impl SoosApp {
         let mut app = Self {
             current_tab: AppTab::LiveInspection,
             store,
+            is_system_store,
             _camera: camera,
             _pipeline: pipeline,
             latest_frame_slot,
@@ -166,6 +204,20 @@ impl SoosApp {
                 AppTab::Profiles,
                 "📁 Biometric Profiles",
             );
+            ui.separator();
+
+            let daemon_active = Self::is_daemon_active();
+            if daemon_active {
+                ui.colored_label(Color32::GREEN, "● Daemon Active");
+                if ui.small_button("⏸ Pause").clicked() {
+                    let _ = Self::pause_daemon();
+                }
+            } else {
+                ui.colored_label(Color32::YELLOW, "○ Daemon Paused");
+                if ui.small_button("▶ Resume").clicked() {
+                    let _ = Self::resume_daemon();
+                }
+            }
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if let Some(frame) = latest_frame {
@@ -760,16 +812,77 @@ impl SoosApp {
                                 "arcface_w600k_mbf".to_string(),
                                 "2.0.0".to_string(),
                                 timestamp,
-                                Zeroizing::new(fused_embedding),
+                                Zeroizing::new(fused_embedding.clone()),
                             );
 
                             match res {
                                 Ok(template) => {
-                                    if let Err(e) = self.store.enroll(&template) {
-                                        self.enrollment.status_message = Some((
-                                            format!("Failed to save template: {e}"),
-                                            true,
+                                    // Enroll into GUI store for immediate display
+                                    let _ = self.store.enroll(&template);
+
+                                    // If not running as root, import into system store via Polkit
+                                    if !self.is_system_store {
+                                        let tmp_path = std::env::temp_dir().join(format!(
+                                            ".soos_gui_import_{}_{}.json",
+                                            self.enrollment.target_uid,
+                                            std::process::id()
                                         ));
+
+                                        let write_res = serde_json::to_string(&fused_embedding)
+                                            .map_err(|e| format!("Failed to serialize embedding: {e}"))
+                                            .and_then(|json| {
+                                                std::fs::write(&tmp_path, json)
+                                                    .map_err(|e| format!("Failed to write temporary embedding: {e}"))
+                                            });
+
+                                        match write_res {
+                                            Ok(()) => {
+                                                let import_status = std::process::Command::new("pkexec")
+                                                    .args([
+                                                        "soos-enroll",
+                                                        "import",
+                                                        "--uid",
+                                                        &self.enrollment.target_uid.to_string(),
+                                                        "--file",
+                                                        &tmp_path.to_string_lossy(),
+                                                    ])
+                                                    .status();
+
+                                                let _ = std::fs::remove_file(&tmp_path);
+
+                                                match import_status {
+                                                    Ok(status) if status.success() => {
+                                                        self.enrollment.status_message = Some((
+                                                            format!(
+                                                                "User {} enrolled successfully into system store! Ready for PAM unlock.",
+                                                                self.enrollment.target_username
+                                                            ),
+                                                            false,
+                                                        ));
+                                                        self.refresh_profiles();
+                                                        self.enrollment.is_active = false;
+                                                    }
+                                                    Ok(status) => {
+                                                        self.enrollment.status_message = Some((
+                                                            format!(
+                                                                "System store import failed with exit code {:?}. Please grant Polkit authorization.",
+                                                                status.code()
+                                                            ),
+                                                            true,
+                                                        ));
+                                                    }
+                                                    Err(e) => {
+                                                        self.enrollment.status_message = Some((
+                                                            format!("Failed to execute pkexec soos-enroll: {e}"),
+                                                            true,
+                                                        ));
+                                                    }
+                                                }
+                                            }
+                                            Err(e) => {
+                                                self.enrollment.status_message = Some((e, true));
+                                            }
+                                        }
                                     } else {
                                         self.enrollment.status_message = Some((
                                             format!(
@@ -869,6 +982,11 @@ impl SoosApp {
                         ui.label("This operation cannot be undone.");
                         ui.horizontal(|ui| {
                             if ui.button("Yes, Shred Template").clicked() {
+                                if !self.is_system_store {
+                                    let _ = std::process::Command::new("pkexec")
+                                        .args(["soos-enroll", "delete", "--uid", &uid.to_string(), "--yes"])
+                                        .status();
+                                }
                                 if let Err(e) = self.store.delete(uid) {
                                     self.profiles.status_message = Some((
                                         format!("Failed to delete template: {e}"),

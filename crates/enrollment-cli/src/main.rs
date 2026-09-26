@@ -140,6 +140,15 @@ fn run() -> Result<(), EnrollmentCliError> {
             }
         }
 
+        Commands::Import(args) => {
+            let service = build_store_only(&cli)?;
+            let outcome = service.import(args)?;
+            println!(
+                "[OK] Biometric template for UID {} imported successfully (embedding dim: {}).",
+                outcome.uid, outcome.embedding_dim
+            );
+        }
+
         Commands::DebugVision => {
             let service = build_full_service(&cli)?;
             let path = service.debug_vision()?;

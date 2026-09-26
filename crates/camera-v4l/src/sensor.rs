@@ -109,3 +109,54 @@ pub fn select_camera_device(
             .or_else(|| devices.first()),
     }
 }
+
+/// Enumerates all physical video capture devices, querying capabilities and supported formats.
+pub fn enumerate_capture_devices() -> Vec<CameraDeviceInfo> {
+    let mut devices = Vec::new();
+    let sys_v4l = std::path::Path::new("/sys/class/video4linux");
+    if sys_v4l.is_dir() {
+        if let Ok(entries) = std::fs::read_dir(sys_v4l) {
+            let mut node_names: Vec<_> = entries
+                .filter_map(|e| {
+                    e.ok()
+                        .map(|ent| ent.file_name().to_string_lossy().into_owned())
+                })
+                .filter(|name| name.starts_with("video"))
+                .collect();
+            // Sort deterministically (video0, video1, video2...)
+            node_names.sort_by_key(|n| {
+                n.strip_prefix("video")
+                    .and_then(|s| s.parse::<u32>().ok())
+                    .unwrap_or(u32::MAX)
+            });
+
+            for name in node_names {
+                let dev_path = PathBuf::from(format!("/dev/{name}"));
+                if let Ok(dev) = v4l::Device::with_path(&dev_path) {
+                    if let Ok(caps) = dev.query_caps() {
+                        if caps
+                            .capabilities
+                            .contains(v4l::capability::Flags::VIDEO_CAPTURE)
+                        {
+                            let enum_fmts =
+                                v4l::video::Capture::enum_formats(&dev).unwrap_or_default();
+                            let supported_formats: Vec<PixelFormat> = enum_fmts
+                                .into_iter()
+                                .filter_map(|desc| {
+                                    crate::v4l_impl::fourcc_to_pixel_format(desc.fourcc)
+                                })
+                                .collect();
+
+                            devices.push(CameraDeviceInfo {
+                                path: dev_path,
+                                card_name: caps.card,
+                                supported_formats,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+    devices
+}
