@@ -22,7 +22,7 @@ use soos_vision::{
 
 use crate::args::{
     resolve_target_uid, validate_camera_device_path, validate_fhs_path, Cli, DeleteArgs,
-    EnrollArgs, ListArgs, VerifyArgs,
+    EnrollArgs, ImportArgs, ListArgs, VerifyArgs,
 };
 use crate::error::EnrollmentCliError;
 use crate::html_report::{base64_encode, generate_html_report};
@@ -50,13 +50,37 @@ pub const MODEL_ID_EMBEDDING: &str = "arcface_w600k_mbf";
 pub const REQUIRED_MODEL_IDS: [&str; 3] =
     [MODEL_ID_FACE_DETECTOR, MODEL_ID_PAD, MODEL_ID_EMBEDDING];
 
-/// Resolves the camera device path, preferring an explicit CLI argument if provided,
-/// then the first deterministic entry in `/dev/v4l/by-id/`, and falling back to
-/// `/dev/v4l/by-id/default-camera`.
-pub fn resolve_camera_device(cli_device: Option<PathBuf>) -> PathBuf {
+/// Resolves the camera device path:
+/// 1. Explicit CLI argument (`cli_device`), if provided.
+/// 2. Active `camera_device` from daemon config, if explicitly provided or default exists.
+/// 3. First deterministic entry in `/dev/v4l/by-id/`.
+/// 4. Fallback `/dev/v4l/by-id/default-camera`.
+pub fn resolve_camera_device_from_config(
+    cli_device: Option<PathBuf>,
+    config_path: Option<&Path>,
+) -> PathBuf {
     if let Some(device) = cli_device {
         return device;
     }
+
+    // 1. Check daemon configuration if provided
+    if let Some(cfg) = config_path {
+        if cfg.is_file() {
+            if let Ok(content) = std::fs::read_to_string(cfg) {
+                if let Ok(value) = content.parse::<toml::Value>() {
+                    if let Some(dev_str) = value
+                        .get("pipeline")
+                        .and_then(|p| p.get("camera_device"))
+                        .and_then(|d| d.as_str())
+                    {
+                        return PathBuf::from(dev_str);
+                    }
+                }
+            }
+        }
+    }
+
+    // 2. Deterministic entry in /dev/v4l/by-id/ per Criterion C4
     let by_id_dir = Path::new("/dev/v4l/by-id");
     if by_id_dir.is_dir() {
         if let Ok(entries) = std::fs::read_dir(by_id_dir) {
@@ -70,7 +94,15 @@ pub fn resolve_camera_device(cli_device: Option<PathBuf>) -> PathBuf {
             }
         }
     }
+
     PathBuf::from(DEFAULT_CAMERA_DEVICE)
+}
+
+/// Resolves the camera device path, preferring an explicit CLI argument if provided,
+/// then the first deterministic entry in `/dev/v4l/by-id/`, and falling back to
+/// `/dev/v4l/by-id/default-camera` per Criterion C4.
+pub fn resolve_camera_device(cli_device: Option<PathBuf>) -> PathBuf {
+    resolve_camera_device_from_config(cli_device, None)
 }
 
 /// Verifies that the process is running with root privileges (EUID 0) if required.
@@ -493,6 +525,63 @@ impl EnrollmentService {
         Ok(summaries)
     }
 
+    /// Imports and encrypts an existing biometric template (from file) into the biometric store.
+    pub fn import(&self, args: &ImportArgs) -> Result<EnrollmentOutcome, EnrollmentCliError> {
+        check_privileges(self.require_root)?;
+
+        let uid = resolve_target_uid(args.uid, args.username.as_deref())?;
+
+        let file_bytes = std::fs::read(&args.file)?;
+
+        // Support either JSON array of f32 or CBOR-encoded BiometricTemplate
+        let (embedding, model_id, model_version) =
+            if let Ok(parsed) = serde_json::from_slice::<Vec<f32>>(&file_bytes) {
+                (parsed, args.model_id.clone(), args.model_version.clone())
+            } else if let Ok(template) = BiometricTemplate::from_cbor(&file_bytes) {
+                (
+                    (*template.embedding).clone(),
+                    template.model_id,
+                    template.model_version,
+                )
+            } else {
+                return Err(EnrollmentCliError::Internal(
+                "Input file is neither a valid JSON float array nor a valid CBOR BiometricTemplate"
+                    .to_string(),
+            ));
+            };
+
+        if embedding.len() != 512 {
+            return Err(EnrollmentCliError::Internal(format!(
+                "Invalid embedding dimension: expected 512, found {}",
+                embedding.len()
+            )));
+        }
+
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+
+        let template = BiometricTemplate::new(
+            uid,
+            model_id.clone(),
+            model_version.clone(),
+            now,
+            Zeroizing::new(embedding),
+        )?;
+
+        self.store.enroll(&template)?;
+
+        Ok(EnrollmentOutcome {
+            uid,
+            frames_evaluated: 1,
+            best_score: 1.0,
+            embedding_dim: 512,
+            model_id,
+            model_version,
+        })
+    }
+
     /// Captures a frame, runs face detection, and generates an HTML report.
     pub fn debug_vision(&self) -> Result<String, EnrollmentCliError> {
         check_privileges(self.require_root)?;
@@ -584,7 +673,10 @@ pub fn build_full_service(cli: &Cli) -> Result<EnrollmentService, EnrollmentCliE
         .unwrap_or_else(|| PathBuf::from(DEFAULT_BIOMETRICS_DIR));
     let bio_dir = validate_fhs_path(&raw_bio_dir)?;
 
-    let raw_camera = resolve_camera_device(cli.camera_device.clone());
+    let raw_camera = resolve_camera_device_from_config(
+        cli.camera_device.clone(),
+        Some(Path::new("/etc/soos/daemon.toml")),
+    );
     let device_path = validate_camera_device_path(&raw_camera)?;
 
     let raw_models_dir = cli

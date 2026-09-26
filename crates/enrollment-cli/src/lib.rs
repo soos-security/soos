@@ -18,16 +18,16 @@ pub mod shred;
 
 pub use args::{
     sanitize_path, validate_camera_device_path, validate_fhs_path, Cli, Commands, DeleteArgs,
-    EnrollArgs, ListArgs, OutputFormat, VerifyArgs, ALLOWED_FHS_PREFIXES,
+    EnrollArgs, ImportArgs, ListArgs, OutputFormat, VerifyArgs, ALLOWED_FHS_PREFIXES,
 };
 pub use error::EnrollmentCliError;
 pub use guided_enrollment::{EnrollmentStep, EnrollmentStepFeedback, GuidedEnrollmentSession};
 pub use quality::{select_best_frame, BestCandidate, CandidateEvaluation};
 pub use service::{
     build_full_service, build_service, build_store_only, check_privileges, resolve_camera_device,
-    DiagnosticVerificationReport, EnrolledUserSummary, EnrollmentOutcome, EnrollmentService,
-    EnrollmentSummary, LatencyBreakdown, DEFAULT_CAMERA_DEVICE, DEFAULT_KEY_PATH,
-    DEFAULT_MODELS_DIR, MODEL_ID_EMBEDDING, MODEL_ID_FACE_DETECTOR, MODEL_ID_PAD,
-    REQUIRED_MODEL_IDS,
+    resolve_camera_device_from_config, DiagnosticVerificationReport, EnrolledUserSummary,
+    EnrollmentOutcome, EnrollmentService, EnrollmentSummary, LatencyBreakdown,
+    DEFAULT_CAMERA_DEVICE, DEFAULT_KEY_PATH, DEFAULT_MODELS_DIR, MODEL_ID_EMBEDDING,
+    MODEL_ID_FACE_DETECTOR, MODEL_ID_PAD, REQUIRED_MODEL_IDS,
 };
 pub use shred::secure_shred_file;

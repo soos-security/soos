@@ -360,3 +360,15 @@ This document translates the critical gating criteria from §11 of `ARCHITECTURE
 | # | Criterion | Test Method | Status |
 |---|---|---|---|
 | NGM17 | `AI/ARCHITECTURE.md` §1 and §7, `AI/VERIFICATION_MATRIX.md` (NGM1–NGM17), `Docs/INFERENCE_ORT_CRATE.md`, and `Docs/VISION_CRATE.md` consistently reflect the 3-model pipeline (SCRFD 500M KPS + ArcFace w600k MBF 512D + MiniFASNetV2 80×80), eliminating all legacy references to UltraFace Slim 320, `landmark_5point`, and MobileFaceNet 128D | Documentation audit cross-referencing ADR register (`AI/DECISIONS.md`), manifest v2.0.0 model IDs, and implementation tests (`manifest_tests::test_parse_workspace_manifest_file`, `test_enrollment_cli_model_ids_match_manifest`, `test_enrollment_cli_legacy_model_ids_absent`) | ✅ Verified |
+
+---
+
+## Component: `guided-enrollment-production-unlock` (Issue #22 / GitHub #61)
+
+| # | Criterion | Test Method | Status |
+|---|---|---|---|
+| GEPU1 | Template import via `soos-enroll import`: accepts JSON float arrays and CBOR `BiometricTemplate`, validates 512D ArcFace embeddings, encrypts with master key, and stores in `/var/lib/soos/biometrics/<uid>.bio` | Contractual integration tests (`import_tests::test_import_embedding_success`, `import_tests::test_import_embedding_dimension_mismatch_fails`, `import_tests::test_import_nonexistent_file_fails`) | ✅ Verified |
+| GEPU2 | Config-driven camera device resolution: resolves camera device prioritizing CLI arguments, then daemon config (`/etc/soos/daemon.toml`), then stable `/dev/v4l/by-id/` (preserving Criterion C4) | Contractual integration tests (`import_tests::test_resolve_camera_device_from_daemon_config`, `model_id_tests::test_camera_device_path_uses_stable_by_id`) | ✅ Verified |
+| GEPU3 | Hardware camera arbitration between `soos-daemon` and GUI: detects when daemon is holding `/dev/video0`, supports pausing and resuming daemon via Polkit, preventing `EBUSY` crashes on startup | Integration & interactive GUI tests (`SoosApp::is_daemon_active`, `SoosApp::pause_daemon`, `SoosApp::resume_daemon`) | ✅ Verified |
+| GEPU4 | Guided enrollment production unlock integration: unprivileged `soos-gui` exports composite template and invokes `pkexec soos-enroll import` to write to `/var/lib/soos/biometrics`, allowing real PAM unlock with background `soos-daemon` | Physical verification (`soos-enroll import`, `soos-enroll verify`, PAM `sudo` authentication) | ✅ Verified |
+
