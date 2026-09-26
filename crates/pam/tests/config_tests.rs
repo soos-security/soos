@@ -213,3 +213,14 @@ fn test_gdm_disable_file_triggers_disabled_state() {
         "GDM password service must be reported as disabled when disable_file exists"
     );
 }
+
+#[test]
+fn test_authenticate_with_none_handle_returns_ignore_cleanly() {
+    let config = pam_soos::config::PamConfig::default();
+    let result = pam_soos::SoosPam::authenticate_with_config(None, &config);
+    assert_eq!(
+        result,
+        pam_soos::PamResultCode::PAM_IGNORE,
+        "authenticate_with_config(None) must return PAM_IGNORE without panicking"
+    );
+}

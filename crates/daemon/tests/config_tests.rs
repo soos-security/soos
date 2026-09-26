@@ -200,3 +200,30 @@ fn test_pipeline_default_sensor_preference_is_prefer_ir() {
         "Camera warmup frames must default to 20 per Criterion C5"
     );
 }
+
+#[test]
+fn test_pipeline_config_warmup_frames_from_toml() {
+    let toml = r#"
+[pipeline]
+warmup_frames = 5
+"#;
+    let config = DaemonConfig::from_toml_str(toml).unwrap();
+    assert_eq!(
+        config.pipeline.camera.warmup_frames, 5,
+        "Pipeline config must allow overriding warmup_frames from TOML"
+    );
+}
+
+#[test]
+fn test_pipeline_config_camera_device_auto_resolution() {
+    let toml = r#"
+[pipeline]
+camera_device = "auto"
+"#;
+    let config = DaemonConfig::from_toml_str(toml).unwrap();
+    assert_eq!(
+        config.pipeline.camera.device_path,
+        std::path::PathBuf::from("/dev/v4l/by-id/default-camera"),
+        "camera_device = 'auto' must preserve default-camera sentinel for auto device resolution"
+    );
+}

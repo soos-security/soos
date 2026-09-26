@@ -502,10 +502,26 @@ impl ConnectionDispatcher {
             // 8a: Notify activity to wake camera from auto-standby
             pipe.camera.notify_activity();
 
-            // 8b: If camera is resuming from auto-standby, wait up to 800ms for it to become ready
+            // 8b: If camera is resuming from auto-standby, wait up to 1000-1200ms for it to become ready
+            let max_wake = if req.deadline_monotonic_ns > 0
+                && req.deadline_monotonic_ns < u64::MAX
+                && req.deadline_monotonic_ns > now_ns
+            {
+                let remaining =
+                    Duration::from_nanos(req.deadline_monotonic_ns.saturating_sub(now_ns));
+                remaining.min(Duration::from_millis(1200))
+            } else {
+                Duration::from_millis(1000)
+            };
+            let max_wake = max_wake.min(
+                self.config
+                    .connection_timeout
+                    .saturating_sub(Duration::from_millis(100)),
+            );
+
             if !pipe.camera.is_ready() {
                 let wake_start = Instant::now();
-                while !pipe.camera.is_ready() && wake_start.elapsed() < Duration::from_millis(800) {
+                while !pipe.camera.is_ready() && wake_start.elapsed() < max_wake {
                     tokio::time::sleep(Duration::from_millis(15)).await;
                 }
             }
@@ -524,76 +540,7 @@ impl ConnectionDispatcher {
                 });
             }
 
-            // 8c: Grab latest frame
-            let frame = match pipe.camera.latest_frame() {
-                Some(f) => f,
-                None => {
-                    warn!("No camera capture available");
-                    let encoded = self.build_response(
-                        req.request_id,
-                        Verdict::Unavailable,
-                        ReasonClass::CameraUnavailable,
-                        now_ns,
-                    )?;
-                    return Ok(ResponseOutput {
-                        encoded_response: encoded,
-                        completion_error: None,
-                    });
-                }
-            };
-
-            // 8c: Validate frame age against staleness threshold
-            let cur_ns = match self.now_nanos() {
-                Ok(ns) => ns,
-                Err(err) => {
-                    warn!(error = %err, "Monotonic clock query failed checking capture freshness");
-                    let encoded = self.build_response(
-                        req.request_id,
-                        Verdict::Unavailable,
-                        ReasonClass::InternalError,
-                        0,
-                    )?;
-                    return Ok(ResponseOutput {
-                        encoded_response: encoded,
-                        completion_error: Some(err),
-                    });
-                }
-            };
-            if frame.timestamp_mono_ns > 0 && cur_ns > frame.timestamp_mono_ns {
-                let age_ns = cur_ns.saturating_sub(frame.timestamp_mono_ns);
-                if age_ns > MAX_FRAME_AGE_NS {
-                    warn!(
-                        age_ms = age_ns / 1_000_000,
-                        "Latest camera capture exceeds freshness threshold"
-                    );
-                    let encoded = self.build_response(
-                        req.request_id,
-                        Verdict::Unavailable,
-                        ReasonClass::StaleFrame,
-                        cur_ns,
-                    )?;
-                    return Ok(ResponseOutput {
-                        encoded_response: encoded,
-                        completion_error: None,
-                    });
-                }
-            }
-
-            // 8d: Deadline check before template retrieval
-            if req.deadline_monotonic_ns > 0 && cur_ns >= req.deadline_monotonic_ns {
-                let encoded = self.build_response(
-                    req.request_id,
-                    Verdict::Unavailable,
-                    ReasonClass::Timeout,
-                    cur_ns,
-                )?;
-                return Ok(ResponseOutput {
-                    encoded_response: encoded,
-                    completion_error: None,
-                });
-            }
-
-            // 8e: Retrieve enrolled biometric template
+            // 8c: Retrieve enrolled biometric template once
             let enrolled_template = match pipe.biometric_store.get(req.uid_hint) {
                 Ok(Some(tmpl)) => tmpl,
                 Ok(None) => {
@@ -605,7 +552,7 @@ impl ConnectionDispatcher {
                         req.request_id,
                         Verdict::Unavailable,
                         ReasonClass::InternalError,
-                        cur_ns,
+                        now_ns,
                     )?;
                     return Ok(ResponseOutput {
                         encoded_response: encoded,
@@ -622,7 +569,7 @@ impl ConnectionDispatcher {
                         req.request_id,
                         Verdict::Unavailable,
                         ReasonClass::InternalError,
-                        cur_ns,
+                        now_ns,
                     )?;
                     return Ok(ResponseOutput {
                         encoded_response: encoded,
@@ -631,158 +578,201 @@ impl ConnectionDispatcher {
                 }
             };
 
-            // 8f: Deadline check before neural inference
-            let cur_ns = match self.now_nanos() {
-                Ok(ns) => ns,
-                Err(err) => {
-                    warn!(error = %err, "Monotonic clock query failed checking inference deadline");
-                    let encoded = self.build_response(
-                        req.request_id,
-                        Verdict::Unavailable,
-                        ReasonClass::InternalError,
-                        0,
-                    )?;
-                    return Ok(ResponseOutput {
-                        encoded_response: encoded,
-                        completion_error: Some(err),
-                    });
-                }
+            // 8d: Dynamic decision budget from client deadline, strictly bounded by connection_timeout
+            let client_budget = if req.deadline_monotonic_ns > 0
+                && req.deadline_monotonic_ns < u64::MAX
+                && req.deadline_monotonic_ns > now_ns
+            {
+                Duration::from_nanos(req.deadline_monotonic_ns.saturating_sub(now_ns))
+            } else {
+                Duration::from_millis(DECISION_BUDGET_MS)
             };
-            if req.deadline_monotonic_ns > 0 && cur_ns >= req.deadline_monotonic_ns {
-                let encoded = self.build_response(
-                    req.request_id,
-                    Verdict::Unavailable,
-                    ReasonClass::Timeout,
-                    cur_ns,
-                )?;
-                return Ok(ResponseOutput {
-                    encoded_response: encoded,
-                    completion_error: None,
-                });
+            let max_allowed_budget = self
+                .config
+                .connection_timeout
+                .saturating_sub(Duration::from_millis(50));
+            let total_budget = client_budget.min(max_allowed_budget);
+
+            let mut last_verdict = Verdict::Unavailable;
+            let mut last_reason = ReasonClass::Timeout;
+            let mut last_sequence: Option<u64> = None;
+            let mut last_ctx = soos_policy::AuthContext::new(0.0, false, 0, req.uid_hint, true);
+
+            // 8e: Multi-frame evaluation loop until match or budget expiry
+            while auth_start.elapsed() < total_budget {
+                let cur_ns = match self.now_nanos() {
+                    Ok(ns) => ns,
+                    Err(err) => {
+                        warn!(error = %err, "Monotonic clock query failed checking loop deadline");
+                        let encoded = self.build_response(
+                            req.request_id,
+                            Verdict::Unavailable,
+                            ReasonClass::InternalError,
+                            0,
+                        )?;
+                        return Ok(ResponseOutput {
+                            encoded_response: encoded,
+                            completion_error: Some(err),
+                        });
+                    }
+                };
+
+                if req.deadline_monotonic_ns > 0 && cur_ns >= req.deadline_monotonic_ns {
+                    break;
+                }
+
+                if let Some(frame) = pipe.camera.latest_frame() {
+                    let is_new = match last_sequence {
+                        Some(seq) => frame.sequence != seq,
+                        None => true,
+                    };
+
+                    if is_new {
+                        last_sequence = Some(frame.sequence);
+
+                        let is_fresh =
+                            if frame.timestamp_mono_ns > 0 && cur_ns > frame.timestamp_mono_ns {
+                                let age_ns = cur_ns.saturating_sub(frame.timestamp_mono_ns);
+                                age_ns <= MAX_FRAME_AGE_NS
+                            } else {
+                                true
+                            };
+
+                        if is_fresh {
+                            let (score, face_count, pad_passed) = match pipe
+                                .vision
+                                .process_frame(&frame)
+                            {
+                                Ok(output) => {
+                                    let sim = match soos_vision::cosine_similarity(
+                                        enrolled_template.embedding.as_slice(),
+                                        output.embedding.as_slice(),
+                                    ) {
+                                        Ok(s) => s,
+                                        Err(e) => {
+                                            warn!(error = %e, "Cosine similarity calculation error");
+                                            0.0
+                                        }
+                                    };
+                                    (sim, 1u8, output.pad_result.is_live)
+                                }
+                                Err(soos_vision::VisionError::PadFailed { score, threshold }) => {
+                                    debug!(
+                                        score = score,
+                                        threshold = threshold,
+                                        "Presentation attack detected (PAD failed)"
+                                    );
+                                    (0.0, 1u8, false)
+                                }
+                                Err(soos_vision::VisionError::NoFaceDetected) => {
+                                    debug!("Zero faces detected in capture");
+                                    (0.0, 0u8, false)
+                                }
+                                Err(soos_vision::VisionError::MultipleFacesDetected { count }) => {
+                                    let count_u8 = u8::try_from(count).unwrap_or(u8::MAX);
+                                    debug!(count = count, "Multiple faces detected in capture");
+                                    (0.0, count_u8, false)
+                                }
+                                Err(soos_vision::VisionError::FaceBelowConfidence { .. }) => {
+                                    debug!("Face detected below confidence threshold");
+                                    (0.0, 0u8, false)
+                                }
+                                Err(soos_vision::VisionError::Inference(err)) => {
+                                    warn!(error = %err, "Vision neural inference failure");
+                                    let encoded = self.build_response(
+                                        req.request_id,
+                                        Verdict::Unavailable,
+                                        ReasonClass::ModelUnavailable,
+                                        cur_ns,
+                                    )?;
+                                    return Ok(ResponseOutput {
+                                        encoded_response: encoded,
+                                        completion_error: None,
+                                    });
+                                }
+                                Err(err) => {
+                                    warn!(error = %err, "Vision pipeline processing error");
+                                    let encoded = self.build_response(
+                                        req.request_id,
+                                        Verdict::Unavailable,
+                                        ReasonClass::InternalError,
+                                        cur_ns,
+                                    )?;
+                                    return Ok(ResponseOutput {
+                                        encoded_response: encoded,
+                                        completion_error: None,
+                                    });
+                                }
+                            };
+
+                            let ctx = soos_policy::AuthContext::new(
+                                score,
+                                pad_passed,
+                                face_count,
+                                req.uid_hint,
+                                true,
+                            );
+
+                            let engine = pipe.policy.read().await;
+                            let (verdict, reason_class) = engine.evaluate(&ctx);
+                            drop(engine);
+
+                            last_ctx = ctx;
+                            last_verdict = verdict;
+                            last_reason = reason_class;
+
+                            if verdict == Verdict::Allow {
+                                info!(
+                                    uid = req.uid_hint,
+                                    score = score,
+                                    "Face verification succeeded; authorizing authentication"
+                                );
+                                let mut engine_write = pipe.policy.write().await;
+                                let _ = engine_write.evaluate_with_rate_limit(&last_ctx, cur_ns);
+                                drop(engine_write);
+
+                                let encoded = self.build_response(
+                                    req.request_id,
+                                    verdict,
+                                    reason_class,
+                                    cur_ns,
+                                )?;
+                                return Ok(ResponseOutput {
+                                    encoded_response: encoded,
+                                    completion_error: None,
+                                });
+                            }
+                        } else {
+                            last_verdict = Verdict::Unavailable;
+                            last_reason = ReasonClass::StaleFrame;
+                        }
+                    }
+                }
+
+                tokio::time::sleep(Duration::from_millis(25)).await;
             }
 
-            // 8g: Execute neural vision verification pipeline
-            let (score, face_count, pad_passed) = match pipe.vision.process_frame(&frame) {
-                Ok(output) => {
-                    let sim = match soos_vision::cosine_similarity(
-                        enrolled_template.embedding.as_slice(),
-                        output.embedding.as_slice(),
-                    ) {
-                        Ok(s) => s,
-                        Err(e) => {
-                            warn!(error = %e, "Cosine similarity calculation error");
-                            0.0
-                        }
-                    };
-                    (sim, 1u8, output.pad_result.is_live)
-                }
-                Err(soos_vision::VisionError::PadFailed { score, threshold }) => {
-                    debug!(
-                        score = score,
-                        threshold = threshold,
-                        "Presentation attack detected (PAD failed)"
-                    );
-                    (0.0, 1u8, false)
-                }
-                Err(soos_vision::VisionError::NoFaceDetected) => {
-                    debug!("Zero faces detected in capture");
-                    (0.0, 0u8, false)
-                }
-                Err(soos_vision::VisionError::MultipleFacesDetected { count }) => {
-                    let count_u8 = u8::try_from(count).unwrap_or(u8::MAX);
-                    debug!(count = count, "Multiple faces detected in capture");
-                    (0.0, count_u8, false)
-                }
-                Err(soos_vision::VisionError::FaceBelowConfidence { .. }) => {
-                    debug!("Face detected below confidence threshold");
-                    (0.0, 0u8, false)
-                }
-                Err(soos_vision::VisionError::Inference(err)) => {
-                    warn!(error = %err, "Vision neural inference failure");
-                    let encoded = self.build_response(
-                        req.request_id,
-                        Verdict::Unavailable,
-                        ReasonClass::ModelUnavailable,
-                        cur_ns,
-                    )?;
-                    return Ok(ResponseOutput {
-                        encoded_response: encoded,
-                        completion_error: None,
-                    });
-                }
-                Err(err) => {
-                    warn!(error = %err, "Vision pipeline processing error");
-                    let encoded = self.build_response(
-                        req.request_id,
-                        Verdict::Unavailable,
-                        ReasonClass::InternalError,
-                        cur_ns,
-                    )?;
-                    return Ok(ResponseOutput {
-                        encoded_response: encoded,
-                        completion_error: None,
-                    });
-                }
-            };
-
-            // Security hardening: immediately scrub and discard raw camera capture and enrolled template
-            drop(frame);
             drop(enrolled_template);
 
-            // 8h: Decision budget (< 150ms) and deadline check
-            let cur_ns = match self.now_nanos() {
-                Ok(ns) => ns,
-                Err(err) => {
-                    warn!(error = %err, "Monotonic clock query failed checking decision deadline");
-                    let encoded = self.build_response(
-                        req.request_id,
-                        Verdict::Unavailable,
-                        ReasonClass::InternalError,
-                        0,
-                    )?;
-                    return Ok(ResponseOutput {
-                        encoded_response: encoded,
-                        completion_error: Some(err),
-                    });
-                }
+            // Loop finished without Allow: record attempt in rate limiter and return final verdict
+            let cur_ns = self.now_nanos().unwrap_or(0);
+            let mut engine_write = pipe.policy.write().await;
+            let (verdict, reason_class) = engine_write.evaluate_with_rate_limit(&last_ctx, cur_ns);
+            drop(engine_write);
+
+            let final_verdict = if last_verdict == Verdict::Allow {
+                verdict
+            } else {
+                last_verdict
             };
-            if req.deadline_monotonic_ns > 0 && cur_ns >= req.deadline_monotonic_ns {
-                let encoded = self.build_response(
-                    req.request_id,
-                    Verdict::Unavailable,
-                    ReasonClass::Timeout,
-                    cur_ns,
-                )?;
-                return Ok(ResponseOutput {
-                    encoded_response: encoded,
-                    completion_error: None,
-                });
-            }
-            if auth_start.elapsed() > Duration::from_millis(DECISION_BUDGET_MS) {
-                warn!(
-                    elapsed_ms = auth_start.elapsed().as_millis(),
-                    budget_ms = DECISION_BUDGET_MS,
-                    "Exceeded total decision budget"
-                );
-                let encoded = self.build_response(
-                    req.request_id,
-                    Verdict::Unavailable,
-                    ReasonClass::Timeout,
-                    cur_ns,
-                )?;
-                return Ok(ResponseOutput {
-                    encoded_response: encoded,
-                    completion_error: None,
-                });
-            }
+            let final_reason = if last_verdict == Verdict::Allow {
+                reason_class
+            } else {
+                last_reason
+            };
 
-            // 8i: Evaluate through AuthorizationEngine with per-UID rate limiting
-            let ctx =
-                soos_policy::AuthContext::new(score, pad_passed, face_count, req.uid_hint, true);
-            let mut engine = pipe.policy.write().await;
-            let (verdict, reason_class) = engine.evaluate_with_rate_limit(&ctx, cur_ns);
-
-            let encoded = self.build_response(req.request_id, verdict, reason_class, cur_ns)?;
+            let encoded =
+                self.build_response(req.request_id, final_verdict, final_reason, cur_ns)?;
             return Ok(ResponseOutput {
                 encoded_response: encoded,
                 completion_error: None,

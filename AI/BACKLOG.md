@@ -1833,4 +1833,53 @@ Hardware validation revealed that:
   - Acceptance: GDM face login works when enabled; easily disabled with single CLI command; password fallback is 100% reliable.
   - TDD: `test_pam_returns_ignore_when_gdm_disabled_file_present`, `test_admin_cli_gdm_status_and_toggle`.
 
+---
+
+### Issue #48: `[gdm/lockscreen/feedback/multi-frame]` Lock Screen Status Feedback, Multi-Frame Evaluation, and Camera Warmup Calibration
+
+> **Branch**: `feat/gdm-lockscreen-feedback-and-stability`  
+> **Architecture ref**: §2 Threat Model & Invariants, §4 IPC Protocol, §6 Warm Camera Streaming, §11 Implementation Phases  
+> **VERIFICATION_MATRIX**: LSF1, LSF2, LSF3, LSF4
+
+#### Problem Statement
+
+On physical hardware lock screens (GDM):
+1. Users lack visible feedback indicating biometric authentication status ("Looking for face...", "Face recognized...", "Timed out").
+2. Authentication times out prematurely or fails on the first attempt because only a single frame is evaluated before immediately returning Deny or Unavailable.
+3. If the user blinks, shifts slightly, or auto-exposure is converging, a single-frame evaluation fails-closed without giving subsequent frames an opportunity.
+4. Auto-standby wake needs reliable warmup and deadline handling calibrated to display manager lockscreens (2500ms default timeout in GDM).
+
+#### Sub-issues
+
+- [x] **#48.1** — Implement PAM conversation status messages (`Conv` / `PAM_TEXT_INFO`) in `pam_soos`
+  - In `crates/pam/src/lib.rs` and `ipc.rs`: retrieve `Conv` from `pamh.get_item::<Conv>()`.
+  - Send non-blocking progress message `"[soos] Looking for face..."` when verification begins.
+  - Return `(Verdict, ReasonClass)` from `ipc::authenticate()` to provide informative completion feedback:
+    - `Verdict::Allow` -> `"[soos] Face recognized. Unlocking..."`
+    - `Verdict::Deny` (PadFailed) -> `"[soos] Biometric spoof detected."`
+    - `Verdict::Deny` (ScoreBelowThreshold) -> `"[soos] Face not recognized."`
+    - `Verdict::Unavailable` (Timeout/NoFace) -> `"[soos] Face verification timed out."`
+  - Acceptance: PAM conversation handler receives text info messages without blocking or panicking.
+  - TDD: `test_pam_conversation_sends_progress_and_verdict_messages`, `test_authenticate_returns_verdict_and_reason`.
+
+- [x] **#48.2** — Implement multi-frame evaluation loop in daemon dispatcher until deadline or match
+  - In `crates/daemon/src/dispatcher.rs`: instead of evaluating 1 single frame, loop over frames while remaining time exists before `req.deadline_monotonic_ns`.
+  - If a frame achieves `Verdict::Allow`, break immediately and return Allow with minimum latency.
+  - If a frame has `NoFaceDetected` or `FaceBelowConfidence`, sleep briefly (25-30ms) and retry with the next frame until match or deadline.
+  - Acceptance: A face appearing on frame 2 or 3 is successfully authenticated; auth does not prematurely abort on frame 1.
+  - TDD: `test_dispatcher_multi_frame_evaluation_succeeds_on_subsequent_frame`.
+
+- [x] **#48.3** — Calibrate camera warmup frames (5 frames, ~166ms) and dynamic deadline handling
+  - In `crates/camera-v4l/src/config.rs`: set default `warmup_frames` to 5 (166ms at 30 fps), accelerating stabilization upon waking from auto-standby.
+  - In `crates/daemon/src/dispatcher.rs`: wait up to 1000ms for camera wake, and respect client `deadline_monotonic_ns` dynamically rather than hardcoding a strict 900ms decision cutoff when a larger deadline (e.g. 2500ms) is supplied.
+  - Acceptance: Camera wakes smoothly from auto-standby and becomes ready within ~300-500ms; requests with 2500ms budget utilize the full available window.
+  - TDD: `test_camera_config_warmup_frames_calibrated`, `test_dispatcher_respects_client_deadline_budget`.
+
+- [x] **#48.4** — Calibrate GDM PAM default timeout to 2500ms and support 'camera_device = "auto"' in daemon config
+  - In `crates/admin-cli/src/gdm.rs`: update `GDM_PAM_LINE` to configure `timeout_ms=2500`.
+  - In `crates/daemon/src/config.rs`: support `camera_device = "auto"` in `daemon.toml` to automatically trigger `select_camera_device(&candidates, sensor_preference)`.
+  - Acceptance: `soos-admin gdm enable` writes `timeout_ms=2500`; `daemon.toml` with `camera_device = "auto"` selects IR sensor `/dev/video2`.
+  - TDD: `test_gdm_enable_configures_2500ms_timeout`, `test_daemon_config_camera_device_auto_resolution`.
+
+
 

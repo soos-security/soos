@@ -155,6 +155,7 @@ struct PipelineConfigFile {
     camera_device: Option<PathBuf>,
     sensor_preference: Option<String>,
     idle_timeout_secs: Option<u64>,
+    warmup_frames: Option<usize>,
     use_mock_camera: Option<bool>,
     models_dir: Option<PathBuf>,
     biometrics_dir: Option<PathBuf>,
@@ -236,7 +237,12 @@ impl DaemonConfig {
 
         if let Some(pipe) = file.pipeline {
             if let Some(camera_device) = pipe.camera_device {
-                config.pipeline.camera.device_path = camera_device;
+                if camera_device.as_os_str() != "auto" && !camera_device.as_os_str().is_empty() {
+                    config.pipeline.camera.device_path = camera_device;
+                }
+            }
+            if let Some(warmup) = pipe.warmup_frames {
+                config.pipeline.camera.warmup_frames = warmup;
             }
             if let Some(sensor_pref) = pipe.sensor_preference {
                 match sensor_pref.to_lowercase().as_str() {

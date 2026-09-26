@@ -33,7 +33,22 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use config::{parse_cstrs, PamConfig, PamEvent};
 pub use pam_bindings::constants::{PamFlag, PamResultCode};
 pub use pam_bindings::module::{PamHandle, PamHooks};
-use soos_protocol::types::{EventKind, Verdict};
+use soos_protocol::types::{EventKind, ReasonClass, Verdict};
+
+/// Sends an informational message to the PAM client (display manager / lock screen) via PAM conversation.
+///
+/// Fail-safe: if the client does not provide a conversation handler or if conversation fails,
+/// the message is silently discarded without panicking or affecting authentication flow.
+fn send_pam_info(pamh: &Option<&mut PamHandle>, msg: &str) {
+    if let Some(h) = pamh {
+        let addr = (*h) as *const PamHandle as usize;
+        if addr >= 0x10000 {
+            if let Ok(Some(conv)) = h.get_item::<pam_bindings::conv::Conv<'_>>() {
+                let _ = conv.send(pam_bindings::constants::PAM_TEXT_INFO, msg);
+            }
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // PAM Constants (Linux-PAM Specification)
@@ -61,7 +76,7 @@ impl SoosPam {
     /// alert with source location and backtrace summary, and systematically returns
     /// [`PamResultCode::PAM_IGNORE`].
     pub fn authenticate_with_config(
-        pamh: Option<&mut PamHandle>,
+        mut pamh: Option<&mut PamHandle>,
         config: &PamConfig,
     ) -> PamResultCode {
         syslog::init_panic_hook();
@@ -76,7 +91,7 @@ impl SoosPam {
             }
 
             let uid = config.uid.unwrap_or_else(|| {
-                if let Some(h) = pamh {
+                if let Some(ref mut h) = pamh {
                     if let Ok(username) = h.get_user(None) {
                         if let Some(resolved_uid) = resolve_username_to_uid(&username) {
                             return resolved_uid;
@@ -93,12 +108,33 @@ impl SoosPam {
                 return PamResultCode::PAM_IGNORE;
             }
 
+            send_pam_info(&pamh, "[soos] Looking for face...");
+
             match ipc::authenticate(config, uid) {
-                Ok(Verdict::Allow) => PamResultCode::PAM_SUCCESS,
-                Ok(Verdict::Deny | Verdict::Unavailable | Verdict::ProtocolError) => {
+                Ok((Verdict::Allow, _)) => {
+                    send_pam_info(&pamh, "[soos] Face recognized. Unlocking...");
+                    PamResultCode::PAM_SUCCESS
+                }
+                Ok((Verdict::Deny, ReasonClass::PadFailed)) => {
+                    send_pam_info(&pamh, "[soos] Biometric spoof detected.");
                     PamResultCode::PAM_IGNORE
                 }
-                Err(_) => PamResultCode::PAM_IGNORE,
+                Ok((Verdict::Deny, _)) => {
+                    send_pam_info(&pamh, "[soos] Face not recognized.");
+                    PamResultCode::PAM_IGNORE
+                }
+                Ok((Verdict::Unavailable, ReasonClass::CameraUnavailable)) => {
+                    send_pam_info(&pamh, "[soos] Camera unavailable.");
+                    PamResultCode::PAM_IGNORE
+                }
+                Ok((Verdict::Unavailable, _)) | Ok((Verdict::ProtocolError, _)) => {
+                    send_pam_info(&pamh, "[soos] Face verification timed out.");
+                    PamResultCode::PAM_IGNORE
+                }
+                Err(_) => {
+                    send_pam_info(&pamh, "[soos] Face verification unavailable.");
+                    PamResultCode::PAM_IGNORE
+                }
             }
         }));
 
