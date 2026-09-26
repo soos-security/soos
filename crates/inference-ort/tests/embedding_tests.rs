@@ -158,18 +158,20 @@ fn test_embedding_normalization_symmetric_range() {
     let input_tensor = OrtEmbeddingExtractor::prepare_input(&pixels, width, height)
         .expect("prepare_input must succeed");
 
-    // Pixel value 0 must normalize to exactly -1.0: (0.0 - 127.5) / 127.5 == -1.0
-    let norm_0 = input_tensor[0];
-    assert!(
-        (norm_0 - (-1.0)).abs() < 1e-6,
-        "Pixel value 0 must normalize to -1.0, got: {norm_0}"
-    );
-
-    // Pixel value 255 must normalize to exactly +1.0: (255.0 - 127.5) / 127.5 == +1.0
-    let norm_255 = input_tensor[2 * (width * height) as usize]; // B channel for pixel 0
+    // Under BGR NCHW layout:
+    // Pixel 0 has R=0, G=127, B=255.
+    // Channel 0 is B (value 255): (255.0 - 127.5) / 127.5 == +1.0
+    let norm_255 = input_tensor[0];
     assert!(
         (norm_255 - 1.0).abs() < 1e-6,
         "Pixel value 255 must normalize to +1.0, got: {norm_255}"
+    );
+
+    // Channel 2 is R (value 0): (0.0 - 127.5) / 127.5 == -1.0
+    let norm_0 = input_tensor[2 * (width * height) as usize];
+    assert!(
+        (norm_0 - (-1.0)).abs() < 1e-6,
+        "Pixel value 0 must normalize to -1.0, got: {norm_0}"
     );
 
     // Pixel value 127: (127.0 - 127.5) / 127.5 = -0.5 / 127.5
@@ -223,19 +225,65 @@ fn test_prepare_input_layout_nhwc_and_nchw() {
     pixels[1] = 127;
     pixels[2] = 255;
 
-    // Test NCHW layout
+    // Test NCHW layout: ArcFace w600k expects BGR channel ordering (B=0, G=1, R=2)
     let nchw = OrtEmbeddingExtractor::prepare_input_layout(&pixels, width, height, false)
         .expect("prepare_input_layout NCHW must succeed");
     assert_eq!(nchw.len(), 3 * 112 * 112);
-    assert!((nchw[0] - (-1.0)).abs() < 1e-6); // R channel
-    assert!((nchw[112 * 112] - ((127.0 - 127.5) / 127.5)).abs() < 1e-6); // G channel
-    assert!((nchw[2 * 112 * 112] - 1.0).abs() < 1e-6); // B channel
+    assert!(
+        (nchw[0] - 1.0).abs() < 1e-6,
+        "Channel 0 must be B (value 1.0)"
+    );
+    assert!(
+        (nchw[112 * 112] - ((127.0 - 127.5) / 127.5)).abs() < 1e-6,
+        "Channel 1 must be G"
+    );
+    assert!(
+        (nchw[2 * 112 * 112] - (-1.0)).abs() < 1e-6,
+        "Channel 2 must be R (value -1.0)"
+    );
 
-    // Test NHWC layout
+    // Test NHWC layout: Pixel layout must be [B, G, R]
     let nhwc = OrtEmbeddingExtractor::prepare_input_layout(&pixels, width, height, true)
         .expect("prepare_input_layout NHWC must succeed");
     assert_eq!(nhwc.len(), 3 * 112 * 112);
-    assert!((nhwc[0] - (-1.0)).abs() < 1e-6); // R
-    assert!((nhwc[1] - ((127.0 - 127.5) / 127.5)).abs() < 1e-6); // G
-    assert!((nhwc[2] - 1.0).abs() < 1e-6); // B
+    assert!(
+        (nhwc[0] - 1.0).abs() < 1e-6,
+        "Index 0 must be B (value 1.0)"
+    );
+    assert!(
+        (nhwc[1] - ((127.0 - 127.5) / 127.5)).abs() < 1e-6,
+        "Index 1 must be G"
+    );
+    assert!(
+        (nhwc[2] - (-1.0)).abs() < 1e-6,
+        "Index 2 must be R (value -1.0)"
+    );
+}
+
+#[test]
+fn test_arcface_input_bgr_ordering() {
+    let width = 112u32;
+    let height = 112u32;
+    // Pure Red image (R=255, G=0, B=0)
+    let red_pixels = [255, 0, 0].repeat(112 * 112);
+
+    let tensor = OrtEmbeddingExtractor::prepare_input_layout(&red_pixels, width, height, false)
+        .expect("prepare_input_layout must succeed");
+
+    // In BGR NCHW layout:
+    // Channel 0 (B) should be -1.0 ((0 - 127.5)/127.5)
+    // Channel 1 (G) should be -1.0 ((0 - 127.5)/127.5)
+    // Channel 2 (R) should be +1.0 ((255 - 127.5)/127.5)
+    assert!(
+        (tensor[0] - (-1.0)).abs() < 1e-5,
+        "BGR Channel 0 (B) must be normalized from 0 to -1.0"
+    );
+    assert!(
+        (tensor[112 * 112] - (-1.0)).abs() < 1e-5,
+        "BGR Channel 1 (G) must be normalized from 0 to -1.0"
+    );
+    assert!(
+        (tensor[2 * 112 * 112] - 1.0).abs() < 1e-5,
+        "BGR Channel 2 (R) must be normalized from 255 to +1.0"
+    );
 }

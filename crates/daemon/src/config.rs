@@ -51,7 +51,7 @@ impl Default for DispatcherConfig {
     fn default() -> Self {
         Self {
             max_concurrent_connections: 8,
-            connection_timeout: Duration::from_millis(250),
+            connection_timeout: Duration::from_millis(1000),
             enforce_active_session: true,
             logind_sessions_dir: PathBuf::from(crate::session::DEFAULT_LOGIND_SESSIONS_DIR),
         }
@@ -153,6 +153,8 @@ struct DispatcherConfigFile {
 #[derive(Debug, Deserialize)]
 struct PipelineConfigFile {
     camera_device: Option<PathBuf>,
+    sensor_preference: Option<String>,
+    idle_timeout_secs: Option<u64>,
     use_mock_camera: Option<bool>,
     models_dir: Option<PathBuf>,
     biometrics_dir: Option<PathBuf>,
@@ -236,6 +238,22 @@ impl DaemonConfig {
             if let Some(camera_device) = pipe.camera_device {
                 config.pipeline.camera.device_path = camera_device;
             }
+            if let Some(sensor_pref) = pipe.sensor_preference {
+                match sensor_pref.to_lowercase().as_str() {
+                    "prefer_ir" | "ir" => {
+                        config.pipeline.camera.sensor_preference =
+                            soos_camera_v4l::SensorPreference::PreferIr;
+                    }
+                    "prefer_rgb" | "rgb" => {
+                        config.pipeline.camera.sensor_preference =
+                            soos_camera_v4l::SensorPreference::PreferRgb;
+                    }
+                    _ => {}
+                }
+            }
+            if let Some(idle_secs) = pipe.idle_timeout_secs {
+                config.pipeline.camera.idle_timeout = Duration::from_secs(idle_secs);
+            }
             if let Some(use_mock) = pipe.use_mock_camera {
                 config.pipeline.use_mock_camera = use_mock;
             }
@@ -274,6 +292,8 @@ impl DaemonConfig {
                 let pad_thresh = th.pad_threshold.unwrap_or(current_pad);
                 config.pipeline.thresholds =
                     soos_policy::ThresholdConfig::new_raw(match_thresh, pad_thresh);
+                config.pipeline.vision.match_threshold = match_thresh;
+                config.pipeline.vision.pad_threshold = pad_thresh;
             }
 
             if let Some(rl) = pipe.rate_limit {

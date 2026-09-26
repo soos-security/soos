@@ -6,7 +6,7 @@ use std::path::PathBuf;
 pub const DEFAULT_SOCKET_PATH: &str = "/run/soos/daemon.sock";
 
 /// Default total execution timeout budget (milliseconds).
-pub const DEFAULT_TIMEOUT_MS: u64 = 250;
+pub const DEFAULT_TIMEOUT_MS: u64 = 1000;
 
 /// Minimum allowable timeout budget (milliseconds).
 pub const MIN_TIMEOUT_MS: u64 = 10;

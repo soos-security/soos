@@ -56,45 +56,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ));
         (cam, pipe)
     } else {
-        let device_path = resolve_camera_device_from_config(
-            args.camera_device,
-            Some(std::path::Path::new("/etc/soos/daemon.toml")),
-        );
-        let camera_config = CameraConfigBuilder::new()
-            .device_path(device_path.clone())
-            .build();
-        let cam: Arc<dyn CameraManager> = match V4lCameraManager::spawn(camera_config.clone()) {
-            Ok(c) => Arc::new(c),
-            Err(e) => {
-                let daemon_active = std::process::Command::new("systemctl")
-                    .args(["is-active", "--quiet", "soos-daemon.service"])
-                    .status()
-                    .map(|s| s.success())
-                    .unwrap_or(false);
-
-                if daemon_active {
-                    tracing::info!(
-                        "Camera device '{}' is busy. 'soos-daemon' is running.",
-                        device_path.display()
-                    );
-                    tracing::info!(
-                        "Requesting authorization to pause 'soos-daemon' for GUI camera capture..."
-                    );
-                    let res = std::process::Command::new("pkexec")
-                        .args(["systemctl", "stop", "soos-daemon.service"])
-                        .status();
-                    if res.map(|s| s.success()).unwrap_or(false) {
-                        tracing::info!("Paused soos-daemon. Initializing camera stream...");
-                        std::thread::sleep(std::time::Duration::from_millis(500));
-                        Arc::new(V4lCameraManager::spawn(camera_config)?)
-                    } else {
-                        return Err(Box::new(e));
-                    }
-                } else {
-                    return Err(Box::new(e));
-                }
-            }
-        };
+        let daemon_sock = std::path::Path::new("/run/soos/daemon.sock");
+        let cam: Arc<dyn CameraManager> =
+            if daemon_sock.exists() && soos_gui::IpcCameraManager::probe(daemon_sock) {
+                tracing::info!(
+                    "Connected to 'soos-daemon' video proxy at '{}'. Streaming via daemon IPC.",
+                    daemon_sock.display()
+                );
+                Arc::new(soos_gui::IpcCameraManager::spawn_default())
+            } else {
+                let device_path = resolve_camera_device_from_config(
+                    args.camera_device,
+                    Some(std::path::Path::new("/etc/soos/daemon.toml")),
+                );
+                let camera_config = CameraConfigBuilder::new()
+                    .device_path(device_path.clone())
+                    .build();
+                tracing::info!(
+                    "Opening direct V4L2 camera device '{}'",
+                    device_path.display()
+                );
+                Arc::new(V4lCameraManager::spawn(camera_config)?)
+            };
 
         let mut registry = ModelRegistry::new(RegistryConfig::new(&args.models_dir))?;
         registry.verify_integrity()?;

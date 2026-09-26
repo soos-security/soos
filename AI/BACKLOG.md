@@ -1739,3 +1739,49 @@ Users experience issues enrolling their face due to environmental factors (light
   - List and inspect enrolled biometric templates with creation timestamps.
   - Live 1-to-1 face verification simulator showing real-time cosine similarity against selected user template and PAM decision verdict.
   - Secure template shredding with multi-pass zeroization before unlinking.
+
+---
+
+### Issue #46: `[biometric/camera/proxy]` Biometric Reliability, Camera Power Lifecycle, IR Prioritization, and Daemon-Proxied GUI Preview
+
+> **Branch**: `feat/biometric-reliability-and-camera-lifecycle`  
+> **Architecture ref**: §6 Warm Camera Streaming, §7 Models & Verification Pipeline, §8 Monorepo Structure  
+> **VERIFICATION_MATRIX**: BIO1, CAM1, PRX1, PRX2
+
+#### Problem Statement
+
+Hardware testing on dual-sensor laptops revealed false accepts under loose default threshold (0.45) and inverted RGB channels in ArcFace, continuous battery/LED drain from background camera streaming, absence of automatic IR camera prioritization, and V4L2 device conflicts (`EBUSY`) when launching `soos-gui` alongside `soos-daemon`.
+
+#### Sub-issues
+
+- [x] **#46.1** — Biometric separability & threshold calibration
+  - Fix ArcFace ONNX input channel ordering: supply BGR (`b`, `g`, `r`) instead of RGB in `soos-inference-ort`
+  - Synchronize `VisionPipelineConfig::default()` thresholds to `match_threshold: 0.70` and `pad_threshold: 0.85`
+  - Safe clamping and scale retention in `expand_bbox_for_pad`
+  - Acceptance: ArcFace receives BGR layout; default match threshold is 0.70; zero false accepts on mismatched identities
+  - TDD: `test_arcface_input_bgr_ordering`, `test_vision_pipeline_default_thresholds_match_policy`
+
+- [x] **#46.2** — Hardware IR camera prioritization & grey ingestion
+  - Expose `sensor_preference = "prefer_ir"` in daemon configuration
+  - Use `select_camera_device(&candidates, SensorPreference::PreferIr)` to prioritize IR sensors
+  - Ensure clean `PixelFormat::Grey` pipeline ingestion and template enrollment consistency under IR
+  - Acceptance: IR camera selected when preference configured; Grey frames processed correctly
+  - TDD: `test_select_camera_device_prefers_ir`, `test_grey_frame_pipeline_ingestion`
+
+- [x] **#46.3** — Camera power lifecycle & on-demand auto-standby
+  - Implement worker state machine: `Active` -> `Idle` -> `Suspended`
+  - Drop V4L2 device handle after `idle_timeout` (10s) to extinguish privacy LED and eliminate battery drain
+  - Re-initialize stream on-demand upon incoming auth request or `notify_activity()`
+  - Adjust default PAM timeout configuration to 1000ms (`DEFAULT_TIMEOUT_MS = 1000`)
+  - Acceptance: Camera closes handle after 10s idle; wakes cleanly on auth within latency budget
+  - TDD: `test_camera_auto_suspend_after_idle_timeout`, `test_camera_resumes_on_activity`, `test_pam_default_timeout_1000ms`
+
+- [x] **#46.4** — Daemon video proxy for GUI (eliminate V4L2 EBUSY lock)
+  - Add `RequestKind::PreviewFrame` and `PreviewResponse` to `soos-protocol`
+  - Define `MAX_PREVIEW_MESSAGE_SIZE = 2 * 1024 * 1024` and `encode_preview` / `decode_preview`
+  - Handle `RequestKind::PreviewFrame` in `soos-daemon` dispatcher, returning latest acquired frame
+  - Implement `IpcCameraManager` in `soos-gui` streaming preview frames directly from `/run/soos/daemon.sock`
+  - Remove direct V4L2 device lock and Polkit shutdown commands from `soos-gui`
+  - Acceptance: `soos-gui` renders live video stream while `soos-daemon` runs with zero EBUSY error or Polkit prompts
+  - TDD: `test_preview_request_and_response_roundtrip`, `test_dispatcher_handles_preview_frame_request`
+

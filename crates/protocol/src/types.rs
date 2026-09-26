@@ -13,9 +13,12 @@ use serde::{Deserialize, Serialize};
 /// Current wire protocol version.
 pub const CURRENT_VERSION: u8 = 1;
 
-/// Maximum serialized message size in bytes.
+/// Maximum serialized message size in bytes for standard PAM auth/status payloads.
 /// Any message exceeding this size is rejected BEFORE deserialization.
 pub const MAX_MESSAGE_SIZE: usize = 4096;
+
+/// Maximum serialized message size for video preview frames (2 MiB).
+pub const MAX_PREVIEW_MESSAGE_SIZE: usize = 2 * 1024 * 1024;
 
 /// Length of the `request_id` in bytes (256 bits).
 pub const REQUEST_ID_LEN: usize = 32;
@@ -39,6 +42,8 @@ pub enum RequestKind {
     Auth = 0,
     /// Non-biometric status diagnostic query.
     Status = 1,
+    /// Live video camera preview frame request for GUI diagnostics.
+    PreviewFrame = 2,
 }
 
 /// Telemetry event notified by the PAM module to the daemon (best-effort).
@@ -247,6 +252,25 @@ pub struct StatusResponse {
     pub pid: u32,
     /// Daemon uptime in seconds.
     pub uptime_secs: u64,
+}
+
+/// Video preview frame response returned by the daemon proxy to GUI or diagnostic clients.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PreviewResponse {
+    /// Protocol version.
+    pub version: u8,
+    /// Monotonic frame sequence number.
+    pub sequence: u64,
+    /// Frame width in pixels.
+    pub width: u32,
+    /// Frame height in pixels.
+    pub height: u32,
+    /// Pixel format identifier (0 = RGB24, 1 = Grey, 2 = YUYV, 3 = NV12, 4 = MJPEG).
+    pub format: u8,
+    /// Monotonic capture timestamp in nanoseconds.
+    pub timestamp_monotonic_ns: u64,
+    /// Raw frame pixel data. Bounded to [`MAX_PREVIEW_MESSAGE_SIZE`].
+    pub data: Vec<u8>,
 }
 
 // ---------------------------------------------------------------------------

@@ -204,27 +204,28 @@ impl OrtEmbeddingExtractor {
                     if is_nhwc {
                         let idx = (y * target_size + x) * 3;
                         if let Some(slot) = input_data.get_mut(idx) {
-                            *slot = norm_r;
+                            *slot = norm_b;
                         }
                         if let Some(slot) = input_data.get_mut(idx + 1) {
                             *slot = norm_g;
                         }
                         if let Some(slot) = input_data.get_mut(idx + 2) {
-                            *slot = norm_b;
+                            *slot = norm_r;
                         }
                     } else {
-                        let r_idx = y * target_size + x;
+                        // NCHW format: ArcFace w600k expects BGR channel ordering (B=0, G=1, R=2)
+                        let b_idx = y * target_size + x;
                         let g_idx = target_size * target_size + y * target_size + x;
-                        let b_idx = 2 * target_size * target_size + y * target_size + x;
+                        let r_idx = 2 * target_size * target_size + y * target_size + x;
 
-                        if let Some(slot) = input_data.get_mut(r_idx) {
-                            *slot = norm_r;
+                        if let Some(slot) = input_data.get_mut(b_idx) {
+                            *slot = norm_b;
                         }
                         if let Some(slot) = input_data.get_mut(g_idx) {
                             *slot = norm_g;
                         }
-                        if let Some(slot) = input_data.get_mut(b_idx) {
-                            *slot = norm_b;
+                        if let Some(slot) = input_data.get_mut(r_idx) {
+                            *slot = norm_r;
                         }
                     }
                 }

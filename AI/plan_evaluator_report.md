@@ -1,50 +1,60 @@
-# Plan Evaluator Report: Guided Biometric Enrollment & Camera Arbitration
+# Plan Evaluator Report: Issue #46 — Biometric Reliability, Camera Power Lifecycle, IR Prioritization, and Daemon-Proxied GUI Preview
 
-## Target Scope
-- **Issue**: Issue #22 (Backlog #22 / GitHub #61) — Admin Debug GUI & Guided Biometric Enrollment
-- **Branch**: `feat/guided-enrollment-production-unlock`
-- **Objective**: 
-  1. Synchronize camera device resolution across GUI, CLI, and daemon to ensure consistent RGB color camera selection and avoid unintended infrared black-and-white selection.
-  2. Implement camera hardware arbitration and daemon status control (releasing `/dev/video0` during GUI enrollment).
-  3. Enable end-to-end production biometric template saving into `/var/lib/soos/biometrics/` with master key encryption so `soos-daemon` can unlock the workstation via PAM (`pam_soos`).
+- **Date**: 2026-09-26
+- **Target Issue**: Issue #46 (Backlog #46, GitHub #132)
+- **Target Branch**: `feat/biometric-reliability-and-camera-lifecycle`
+- **Evaluator**: Plan Evaluator Sub-Agent (Dev-Workflow Phase 1.5)
 
 ---
 
-## 6-Pillar Architectural Audit
+## 1. Executive Summary
+
+The proposed implementation plan addresses four physical hardware integration findings:
+1. **Biometric Reliability & Separability**: Fixes ArcFace BGR channel layout mapping in `soos-inference-ort` and synchronizes default verification thresholds across the workspace to `0.70` (matching `soos_policy::ThresholdConfig::DEFAULT_MATCH_THRESHOLD`) and PAD to `0.85`.
+2. **Infrared Sensor Prioritization**: Exposes `sensor_preference = "prefer_ir"` in daemon configuration, integrates `select_camera_device(&candidates, SensorPreference::PreferIr)`, and ensures clean `PixelFormat::Grey` pipeline ingestion.
+3. **Camera Power Management & Auto-Standby**: Implements a 3-state worker lifecycle (`Active` -> `Idle` -> `Suspended`) in `soos-camera-v4l`, releasing the V4L2 device file descriptor and extinguishing the hardware privacy LED after 10s of inactivity. Accommodates cold-start wakeups with an updated 1000ms default PAM execution timeout budget.
+4. **Daemon Video Proxy for GUI**: Eliminates the V4L2 device lock conflict (`EBUSY`) and removes Polkit `systemctl stop soos-daemon` calls in `soos-gui`. Extends `soos-protocol` with `RequestKind::PreviewFrame`, `PreviewResponse`, and bounded preview codecs up to 2 MiB, allowing `soos-gui` to stream preview frames directly from `soos-daemon` without stopping the service.
+
+The plan has been rigorously audited against `AI/ARCHITECTURE.md`, `AI/DECISIONS.md`, `AI/BACKLOG.md`, and `AI/VERIFICATION_MATRIX.md`.
+
+---
+
+## 2. Six-Pillar Architectural Audit
 
 ### Pillar 1: Architectural Alignment & Threat Model
-- **Evaluation**: The proposal respects the privilege boundaries between unprivileged desktop GUI (`soos-gui`), the PAM module (`pam_soos.so`), and the privileged daemon (`soos-daemon`).
-- **Template Storage Invariant**: Storage remains strictly at `/var/lib/soos/biometrics/<uid>.bio` with permissions `0600 root:soos` (or `root:root`). Cryptographic keys remain exclusively at `/var/lib/soos/master.key` (mode `0600`).
-- **Privilege Separation**: Unprivileged users cannot directly write to `/var/lib/soos/master.key`. When saving from an unprivileged GUI session, privileged installation is brokered via PolicyKit (`pkexec soos-enroll import`) with explicit interactive authentication, preventing unauthorized template tampering.
-- **Compliance**: PASS
+- **Boundary Preservation**: `soos-daemon` retains exclusive root ownership of `/dev/video*` and the Unix domain socket `/run/soos/daemon.sock` (`0660`, `root:soos`).
+- **Unprivileged GUI Streaming**: `soos-gui` no longer attempts to acquire exclusive V4L2 locks or execute Polkit commands (`pkexec systemctl stop soos-daemon`). It acts as a standard IPC client over `/run/soos/daemon.sock`.
+- **SO_PEERCRED & Session Checks**: Peer verification and active session checks remain strictly enforced. `RequestKind::PreviewFrame` provides frame snapshots for diagnostic rendering without bypassing authentication policy.
 
 ### Pillar 2: PAM Real-Time Latency & Concurrency
-- **Evaluation**: Zero modifications are made to the blocking PAM module (`crates/pam`). The PAM module continues its synchronous 200–250ms deadline over the Unix Domain Socket (`/run/soos/daemon.sock`).
-- **Compliance**: PASS
+- **Zero Async in PAM**: `crates/pam` continues to rely strictly on blocking `std::os::unix::net::UnixStream` with synchronous polling.
+- **Latency Budget Accommodation**: Raising `DEFAULT_TIMEOUT_MS` from 250ms to 1000ms provides sufficient headroom for camera cold-start initialization and auto-exposure convergence from `Suspended` state.
+- **Dispatcher Wakeup**: When an authentication request arrives while the camera is suspended, the dispatcher triggers `notify_activity()` and awaits readiness with a bounded deadline (< 600ms) before rendering verdicts.
 
 ### Pillar 3: Panic Safety & Fail-Closed Behavior
-- **Evaluation**: All newly authored functions in `camera-v4l`, `enrollment-cli`, and `gui` avoid `unwrap()` and `expect()` in operational code paths, adhering to `Result<T, E>` and `thiserror`. If camera enumeration or Polkit authorization fails, the system fails closed with descriptive errors and leaves existing templates intact.
-- **Compliance**: PASS
+- **Zero Panics in Production**: Interfaces avoid `unwrap()` / `expect()`.
+- **Fallback Integrity**: Any failure during cold start, format negotiation, or socket communication systematically degrades to `Verdict::Unavailable` or `PAM_IGNORE`.
+- **Bound Checking**: Frame dimension and buffer length validation in `convert_to_rgb`, `crop_and_resize`, and `expand_bbox_for_pad` fail safely if dimensions are zero or invalid.
 
 ### Pillar 4: Dependency Isolation & Banned Crates
-- **Evaluation**: Zero forbidden dependencies (`opencv`, `nokhwa`, `imageproc`). Camera access continues to use `v4l`. Neural inference continues to use CPU-only `ort`. Monorepo crates continue to enforce `#![forbid(unsafe_code)]` in business layers.
-- **Compliance**: PASS
+- **Banned Crates**: Absolute prohibition against `opencv` and `nokhwa` is strictly maintained.
+- **Language & Safety**: `#![forbid(unsafe_code)]` remains strictly enforced in `protocol`, `vision`, and `policy`.
+- **Adapter Isolation**: `unsafe` remains confined to `v4l` MMAP handling and POSIX `clock_gettime`.
 
 ### Pillar 5: Data Confidentiality & Zeroization
-- **Evaluation**: Raw camera frames and sensitive embeddings are protected. The composite 512-dim embedding is wrapped in `Zeroizing<Vec<f32>>`. Any temporary exchange files used during Polkit import are created with mode `0600`, zeroized upon drop, and shredded immediately after ingestion.
-- **Compliance**: PASS
+- **Strict Size Boundaries**: PAM authentication messages remain strictly bounded by `MAX_MESSAGE_SIZE` (4,096 bytes).
+- **Preview Size Ceiling**: `MAX_PREVIEW_MESSAGE_SIZE` is capped at 2 MiB, preventing memory exhaustion while comfortably accommodating downscaled or 640x480 video frames.
+- **Zero Wire Secrets**: Passwords and biometric templates are strictly excluded from IPC messages.
 
 ### Pillar 6: Test Integrity & TDD Contracts
-- **Evaluation**: Contractual unit tests will be authored in Phase 2 for:
-  - Configuration parsing of `/etc/soos/daemon.toml` in camera device resolution.
-  - Sensor type classification and RGB preference on multi-camera systems.
-  - Template import validation (dimension 512, valid UID, encryption roundtrip).
-  - UI state and storage target reporting.
-- **Compliance**: PASS
+- **Red Phase Precondition**: Unit and integration tests for all 4 sub-issues will be written and verified failing before modifying production code.
+- **Contractual Immutability**: Existing test contracts are preserved with zero test weakening.
+- **Coverage**: Covers ArcFace BGR channel order, threshold synchronization, camera auto-standby, IR device selection, and IPC preview request/response handling.
 
 ---
 
-## Conclusion & Formal Gate
-The technical specification fulfills all 6 architectural pillars, adheres to zero-trust invariants, preserves strict panic safety, and guarantees system unlock readiness.
+## 3. Evaluation Verdict
 
 **VALIDATION_VERDICT: APPROVED**
+
+The implementation plan satisfies all zero-trust architectural invariants and quality criteria. The dev-workflow orchestrator may proceed directly to Phase 2 (Tester Sub-Agent).

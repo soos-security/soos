@@ -16,10 +16,10 @@ use crate::pipeline::{
     current_monotonic_nanos, PipelineComponents, DECISION_BUDGET_MS, MAX_FRAME_AGE_NS,
 };
 use crate::session::SessionValidator;
-use soos_protocol::codec::encode;
+use soos_protocol::codec::{encode, encode_preview};
 use soos_protocol::types::{
-    Event, EventKind, ReasonClass, Request, RequestId, RequestKind, Response, StatusResponse,
-    Verdict, CURRENT_VERSION, MAX_MESSAGE_SIZE,
+    Event, EventKind, PreviewResponse, ReasonClass, Request, RequestId, RequestKind, Response,
+    StatusResponse, Verdict, CURRENT_VERSION, MAX_MESSAGE_SIZE,
 };
 
 /// Internal representation of processed connection output before socket transmission.
@@ -320,6 +320,72 @@ impl ConnectionDispatcher {
             });
         }
 
+        // Step 5c: Diagnostic camera preview frame query (non-biometric)
+        if req.kind == RequestKind::PreviewFrame {
+            if let Some(ref pipe) = self.pipeline {
+                pipe.camera.notify_activity();
+                if !pipe.camera.is_ready() {
+                    let wake_start = Instant::now();
+                    while !pipe.camera.is_ready()
+                        && wake_start.elapsed() < Duration::from_millis(200)
+                    {
+                        tokio::time::sleep(Duration::from_millis(15)).await;
+                    }
+                }
+                let (width, height, format, timestamp_monotonic_ns, data, sequence) =
+                    if let Some(frame) = pipe.camera.latest_frame() {
+                        let fmt_u8 = match frame.format {
+                            soos_camera_v4l::PixelFormat::Rgb24 => 0,
+                            soos_camera_v4l::PixelFormat::Grey => 1,
+                            soos_camera_v4l::PixelFormat::Yuyv => 2,
+                            soos_camera_v4l::PixelFormat::Nv12 => 3,
+                            soos_camera_v4l::PixelFormat::Mjpeg => 4,
+                        };
+                        (
+                            frame.width,
+                            frame.height,
+                            fmt_u8,
+                            frame.timestamp_mono_ns,
+                            frame.data.clone(),
+                            frame.sequence,
+                        )
+                    } else {
+                        (0, 0, 255, 0, Vec::new(), 0)
+                    };
+
+                let preview_resp = PreviewResponse {
+                    version: CURRENT_VERSION,
+                    sequence,
+                    width,
+                    height,
+                    format,
+                    timestamp_monotonic_ns,
+                    data,
+                };
+                let encoded = encode_preview(&preview_resp)?;
+                debug!("Generated preview response ({} bytes)", encoded.len());
+                return Ok(ResponseOutput {
+                    encoded_response: encoded,
+                    completion_error: None,
+                });
+            } else {
+                let preview_resp = PreviewResponse {
+                    version: CURRENT_VERSION,
+                    sequence: 0,
+                    width: 0,
+                    height: 0,
+                    format: 255,
+                    timestamp_monotonic_ns: 0,
+                    data: Vec::new(),
+                };
+                let encoded = encode_preview(&preview_resp)?;
+                return Ok(ResponseOutput {
+                    encoded_response: encoded,
+                    completion_error: None,
+                });
+            }
+        }
+
         // Step 6: Verify peer credentials against request
         let peer_cred = nix::unistd::Uid::from_raw(peer_uid);
         let cred_struct = crate::peercred::PeerCredentials {
@@ -433,7 +499,17 @@ impl ConnectionDispatcher {
                 }
             }
 
-            // 8a: Verify camera readiness
+            // 8a: Notify activity to wake camera from auto-standby
+            pipe.camera.notify_activity();
+
+            // 8b: If camera is resuming from auto-standby, wait up to 600ms for it to become ready
+            if !pipe.camera.is_ready() {
+                let wake_start = Instant::now();
+                while !pipe.camera.is_ready() && wake_start.elapsed() < Duration::from_millis(600) {
+                    tokio::time::sleep(Duration::from_millis(15)).await;
+                }
+            }
+
             if !pipe.camera.is_ready() {
                 warn!("Camera is not ready; rejecting auth request");
                 let encoded = self.build_response(
@@ -448,8 +524,7 @@ impl ConnectionDispatcher {
                 });
             }
 
-            // 8b: Notify activity and grab latest frame
-            pipe.camera.notify_activity();
+            // 8c: Grab latest frame
             let frame = match pipe.camera.latest_frame() {
                 Some(f) => f,
                 None => {

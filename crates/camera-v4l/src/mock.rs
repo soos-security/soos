@@ -100,17 +100,46 @@ impl MockCameraManager {
                         warmup_clone.fetch_sub(1, Ordering::AcqRel);
                         sequence_clone.fetch_add(1, Ordering::SeqCst);
                         thread::sleep(full_frame_interval);
+                        if warmup_clone.load(Ordering::Acquire) == 0 {
+                            // Warmup completed: refresh activity timestamp so idle timeout starts from here
+                            let mut guard =
+                                activity_clone.write().unwrap_or_else(|e| e.into_inner());
+                            *guard = Instant::now();
+                        }
                         continue;
                     }
 
                     // Compute capture interval based on idle timeout
                     let now = Instant::now();
-                    let is_idle = {
+                    let elapsed_idle = {
                         let last = activity_clone.read().unwrap_or_else(|e| e.into_inner());
-                        now.duration_since(*last) > cfg.idle_timeout
+                        now.duration_since(*last)
                     };
 
-                    let effective_fps = if is_idle { cfg.idle_fps } else { cfg.fps };
+                    if elapsed_idle > cfg.idle_timeout {
+                        // Suspended state: camera device is closed, privacy LED extinguished
+                        ready_clone.store(false, Ordering::Release);
+                        latest_clone.store(None);
+                        warmup_clone.store(cfg.warmup_frames, Ordering::Release);
+
+                        // Sleep in suspended state until activity is notified or stopped
+                        while running_clone.load(Ordering::Acquire) {
+                            let recent_activity = {
+                                let last = activity_clone.read().unwrap_or_else(|e| e.into_inner());
+                                Instant::now().duration_since(*last) < cfg.idle_timeout
+                            };
+                            if recent_activity {
+                                break;
+                            }
+                            thread::sleep(Duration::from_millis(15));
+                        }
+                        continue;
+                    }
+
+                    // Idle throttled state: when idle for more than half idle_timeout
+                    let half_timeout = cfg.idle_timeout.checked_div(2).unwrap_or(cfg.idle_timeout);
+                    let is_throttled = elapsed_idle > half_timeout;
+                    let effective_fps = if is_throttled { cfg.idle_fps } else { cfg.fps };
                     let frame_interval = Duration::from_micros(
                         1_000_000u64
                             .checked_div(effective_fps as u64)
@@ -139,8 +168,15 @@ impl MockCameraManager {
                         && !starved_clone.load(Ordering::Acquire)
                         && sleep_start.elapsed() < frame_interval
                     {
+                        let is_idle_expired = {
+                            let last = activity_clone.read().unwrap_or_else(|e| e.into_inner());
+                            last.elapsed() > cfg.idle_timeout
+                        };
+                        if is_idle_expired {
+                            break;
+                        }
                         let rem = frame_interval.saturating_sub(sleep_start.elapsed());
-                        thread::sleep(Duration::from_millis(10).min(rem));
+                        thread::sleep(Duration::from_millis(5).min(rem));
                     }
                 }
             })
@@ -192,6 +228,13 @@ impl MockCameraManager {
 
     /// Overrides the ready status directly.
     pub fn set_ready(&self, ready: bool) {
+        if ready {
+            let mut guard = self
+                .last_activity
+                .write()
+                .unwrap_or_else(|e| e.into_inner());
+            *guard = Instant::now();
+        }
         self.is_ready.store(ready, Ordering::Release);
     }
 
@@ -205,6 +248,13 @@ impl MockCameraManager {
 
     /// Injects a specific frame into the latest frame slot.
     pub fn push_frame(&self, frame: Frame) {
+        let mut guard = self
+            .last_activity
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        *guard = Instant::now();
+        drop(guard);
+
         self.sequence
             .fetch_max(frame.sequence.saturating_add(1), Ordering::SeqCst);
         store_frame_monotonic(&self.latest_frame, Arc::new(frame));
@@ -219,14 +269,18 @@ impl MockCameraManager {
 
 impl CameraManager for MockCameraManager {
     fn latest_frame(&self) -> Option<Arc<Frame>> {
-        if !self.is_ready() {
-            return None;
-        }
         self.latest_frame.load_full()
     }
 
     fn is_ready(&self) -> bool {
         if self.starved.load(Ordering::Acquire) {
+            return false;
+        }
+        let elapsed = {
+            let last = self.last_activity.read().unwrap_or_else(|e| e.into_inner());
+            last.elapsed()
+        };
+        if elapsed > self.config.idle_timeout {
             return false;
         }
         self.is_ready.load(Ordering::Acquire)
@@ -241,8 +295,7 @@ impl CameraManager for MockCameraManager {
 
         // Fulfill CameraManager contract ("immediately restoring full FPS") and
         // guarantee fresh frame availability for incoming auth requests under CI load.
-        if self.is_ready.load(Ordering::Acquire)
-            && !self.starved.load(Ordering::Acquire)
+        if !self.starved.load(Ordering::Acquire)
             && !self.frozen.load(Ordering::Acquire)
             && self.running.load(Ordering::Acquire)
         {
@@ -262,6 +315,7 @@ impl CameraManager for MockCameraManager {
                     mono_ns,
                 );
                 store_frame_monotonic(&self.latest_frame, Arc::new(frame));
+                self.is_ready.store(true, Ordering::Release);
             }
         }
     }

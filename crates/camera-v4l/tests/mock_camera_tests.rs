@@ -131,3 +131,46 @@ fn test_mock_camera_idle_throttling_and_wake() {
 
     camera.stop();
 }
+
+#[test]
+fn test_mock_camera_auto_suspend_and_resume_lifecycle() {
+    let config = CameraConfigBuilder::new()
+        .fps(30)
+        .idle_fps(5)
+        .idle_timeout(Duration::from_millis(60))
+        .warmup_frames(2)
+        .build();
+
+    let camera = MockCameraManager::new(config);
+
+    // Wait for initial warmup
+    let start = std::time::Instant::now();
+    while !camera.is_ready() && start.elapsed() < Duration::from_millis(500) {
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        camera.is_ready(),
+        "Camera must become ready after initial warmup"
+    );
+
+    // Wait for idle_timeout to expire without activity
+    thread::sleep(Duration::from_millis(150));
+    assert!(
+        !camera.is_ready(),
+        "Camera must transition to Suspended (!is_ready) after idle_timeout to turn off LED"
+    );
+
+    // Notify activity: camera must re-initialize on-demand and become ready
+    camera.notify_activity();
+    let wake_start = std::time::Instant::now();
+    while !camera.is_ready() && wake_start.elapsed() < Duration::from_millis(500) {
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        camera.is_ready(),
+        "Camera must resume from Suspended state upon notify_activity()"
+    );
+    assert!(camera.latest_frame().is_some());
+
+    camera.stop();
+}
