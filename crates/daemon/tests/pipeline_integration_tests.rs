@@ -56,6 +56,7 @@ struct TestPipelineFixture {
     pub bio_store: Arc<BiometricStore>,
     pub evidence_store: Arc<EvidenceStore>,
     pub camera: Arc<MockCameraManager>,
+    pub detector: Arc<MockFaceDetector>,
     pub pad: Arc<MockPadDetector>,
     pub sock_path: std::path::PathBuf,
     pub enrolled_vector: Vec<f32>,
@@ -121,7 +122,7 @@ impl TestPipelineFixture {
             ..Default::default()
         };
         let vision = Arc::new(VisionPipeline::new(
-            detector,
+            detector.clone(),
             pad.clone(),
             extractor,
             vision_config,
@@ -183,6 +184,7 @@ impl TestPipelineFixture {
             bio_store,
             evidence_store,
             camera,
+            detector,
             pad,
             sock_path,
             enrolled_vector,
@@ -664,5 +666,59 @@ async fn test_15_pad_presentation_attack_spoof_returns_deny_pad_failed() {
         resp.reason_class,
         ReasonClass::PadFailed,
         "PAD failure must yield ReasonClass::PadFailed"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Issue #48: Multi-frame evaluation & lock screen stability
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_48_multi_frame_evaluation_recovers_from_initial_no_face_to_allow() {
+    let fixture = TestPipelineFixture::new(true, 5).await;
+    let listener = fixture.start_listener();
+
+    // Start with zero faces detected (user looking away / camera adjusting)
+    fixture.detector.set_detections(Vec::new());
+
+    let detector_clone = fixture.detector.clone();
+    tokio::spawn(async move {
+        // After 40ms, simulate user turning toward the camera / exposure settling
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        let w = 640.0;
+        let h = 480.0;
+        let box_ = soos_inference_ort::BoundingBox::new(w * 0.25, h * 0.2, w * 0.75, h * 0.8);
+        let landmarks = MockFaceDetector::canonical_landmarks_for_box(&box_);
+        detector_clone.set_detections(vec![soos_inference_ort::FaceDetection::with_landmarks(
+            box_, 0.95, landmarks,
+        )]);
+    });
+
+    let disp = fixture.dispatcher.clone();
+    tokio::spawn(async move {
+        if let Ok((stream, _)) = listener.accept().await {
+            let _ = disp.handle_connection(stream).await;
+        }
+    });
+
+    let req = Request {
+        version: CURRENT_VERSION,
+        kind: RequestKind::Auth,
+        request_id: [48u8; 32],
+        uid_hint: fixture.current_uid,
+        service: "gdm-password".into(),
+        deadline_monotonic_ns: u64::MAX,
+    };
+
+    let resp = send_req(&fixture.sock_path, req).await;
+    assert_eq!(
+        resp.verdict,
+        Verdict::Allow,
+        "Multi-frame evaluation must recover from initial empty capture and return Verdict::Allow"
+    );
+    assert_eq!(
+        resp.reason_class,
+        ReasonClass::FaceMatch,
+        "Multi-frame evaluation must yield ReasonClass::FaceMatch"
     );
 }

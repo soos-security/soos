@@ -17,8 +17,8 @@ use std::time::{Duration, Instant};
 
 use soos_protocol::codec::{decode, encode};
 use soos_protocol::types::{
-    Event, EventKind, Request, RequestKind, Response, Verdict, CURRENT_VERSION, MAX_MESSAGE_SIZE,
-    REQUEST_ID_LEN,
+    Event, EventKind, ReasonClass, Request, RequestKind, Response, Verdict, CURRENT_VERSION,
+    MAX_MESSAGE_SIZE, REQUEST_ID_LEN,
 };
 use zeroize::Zeroizing;
 
@@ -272,8 +272,8 @@ pub fn connect_with_timeout(path: &Path, timeout: Duration) -> Result<UnixStream
     Ok(stream)
 }
 
-/// Sends an authentication request to the daemon and awaits the verification verdict.
-pub fn authenticate(config: &PamConfig, uid: u32) -> Result<Verdict, IpcError> {
+/// Sends an authentication request to the daemon and awaits the verification verdict and reason.
+pub fn authenticate(config: &PamConfig, uid: u32) -> Result<(Verdict, ReasonClass), IpcError> {
     let start_time = Instant::now();
     let total_timeout = Duration::from_millis(config.timeout_ms);
 
@@ -381,7 +381,7 @@ pub fn authenticate(config: &PamConfig, uid: u32) -> Result<Verdict, IpcError> {
     // Explicit drop: socket is closed immediately after response receipt
     drop(stream);
 
-    Ok(resp.verdict)
+    Ok((resp.verdict, resp.reason_class))
 }
 
 /// Transmits a best-effort telemetry event notification to the daemon within 20ms.

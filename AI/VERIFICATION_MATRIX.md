@@ -396,4 +396,16 @@ This document translates the critical gating criteria from §11 of `ARCHITECTURE
 | ASG4 | Latency budget & auto-standby wake calibration (daemon pipeline decision budget 900ms, wake timeout 800ms) ensuring reliable first-attempt authentication within PAM 1000ms deadline | Unit tests (`config_tests::test_daemon_pipeline_decision_budget_calibrated_for_warmup`, `config_tests::test_daemon_camera_config_defaults_prefer_ir`) | ✅ Verified |
 | ASG5 | GDM integration with safe disable toggle: PAM module supports `is_disabled()` via `/etc/soos/disabled`, service-specific `/etc/soos/gdm.disable` (for `gdm-password`), and `disabled` argument; CLI provides `soos-admin gdm status\|enable\|disable` to eliminate lockout risk | Unit tests (`config_tests::test_parse_disabled_arg_and_file_check`, `config_tests::test_gdm_disable_file_triggers_disabled_state`, `gdm_tests::test_gdm_status_unconfigured`, `gdm_tests::test_gdm_status_configured_enabled`, `gdm_tests::test_gdm_status_configured_disabled`, `gdm_tests::test_gdm_enable_idempotent`, `gdm_tests::test_gdm_disable_creates_flag`) | ✅ Verified |
 
+---
+
+## Component: `gdm-lockscreen-feedback-and-stability` (Issue #48 / GitHub #136)
+
+| # | Criterion | Test Method | Status |
+|---|---|---|---|
+| LSF1 | GDM lock screen 2500ms timeout configuration in `soos-admin gdm enable` (`GDM_PAM_LINE` includes `timeout_ms=2500`) allowing adequate time for camera wake and multi-frame processing | Unit tests (`gdm_tests::test_gdm_pam_line_includes_timeout_ms_2500`, `gdm_tests::test_gdm_enable_idempotent`) | ✅ Verified |
+| LSF2 | Configurable `warmup_frames` from `daemon.toml` and explicit support for `camera_device = "auto"` sentinel preserving auto-resolution and IR prioritization | Unit tests (`config_tests::test_pipeline_config_warmup_frames_from_toml`, `config_tests::test_pipeline_config_camera_device_auto_resolution`) | ✅ Verified |
+| LSF3 | GDM/lockscreen interactive feedback via `PAM_TEXT_INFO` conversation callback with safe pointer guard (`addr >= 0x10000`) and distinct status messages (`[soos] Looking for face...`, `[soos] Face recognized. Unlocking...`, `[soos] Face not recognized.`, `[soos] Biometric spoof detected.`, `[soos] Face verification timed out.`, `[soos] Camera unavailable.`) | Unit tests (`config_tests::test_send_pam_info_null_safe`, `config_tests::test_send_pam_info_low_address_guard`) | ✅ Verified |
+| LSF4 | Multi-frame evaluation loop in daemon dispatcher recovering from initial empty capture or low score within client budget, and dynamic decision budget bounding strictly clamped by `connection_timeout` | Integration tests (`pipeline_integration_tests::test_48_multi_frame_evaluation_recovers_from_initial_no_face_to_allow`, `pipeline_init_tests::test_daemon_startup_initializes_all_pipeline_components`) | ✅ Verified |
+
+
 

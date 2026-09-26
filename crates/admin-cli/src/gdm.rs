@@ -94,7 +94,7 @@ pub fn configure_gdm(
                     for line in content.lines() {
                         if !inserted && line.contains("@include common-auth") {
                             new_lines
-                                .push("auth  sufficient  pam_soos.so timeout_ms=1000".to_string());
+                                .push("auth  sufficient  pam_soos.so timeout_ms=2500".to_string());
                             inserted = true;
                         }
                         new_lines.push(line.to_string());
@@ -102,7 +102,7 @@ pub fn configure_gdm(
                     if !inserted {
                         new_lines.insert(
                             0,
-                            "auth  sufficient  pam_soos.so timeout_ms=1000".to_string(),
+                            "auth  sufficient  pam_soos.so timeout_ms=2500".to_string(),
                         );
                     }
                     new_lines.push(String::new());

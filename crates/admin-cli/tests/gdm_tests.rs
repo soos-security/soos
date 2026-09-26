@@ -64,6 +64,10 @@ fn test_gdm_disable_and_enable_lifecycle() {
         "pam-password must include pam_soos.so"
     );
     assert!(
+        content.contains("timeout_ms=2500"),
+        "GDM configuration must configure timeout_ms=2500 for reliable multi-frame capture"
+    );
+    assert!(
         !disable_file.exists(),
         "disable_file must not exist after enable"
     );
