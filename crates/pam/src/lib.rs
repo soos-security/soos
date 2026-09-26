@@ -375,7 +375,9 @@ mod tests {
     /// PA1: Module returns PAM_IGNORE when daemon is unreachable.
     #[test]
     fn authenticate_returns_pam_ignore() {
-        let result = pam_sm_authenticate(ptr::null_mut(), 0, 0, ptr::null());
+        let arg = c"socket=/tmp/nonexistent_soos_unreachable.sock";
+        let argv = [arg.as_ptr().cast::<u8>()];
+        let result = pam_sm_authenticate(ptr::null_mut(), 0, 1, argv.as_ptr());
         assert_eq!(result, PAM_IGNORE);
     }
 
@@ -408,8 +410,10 @@ mod tests {
     /// Sub-issue #34.1: pam_sm_authenticate must safely catch panics even if argument parsing fails.
     #[test]
     fn authenticate_catches_parse_argv_panics() {
-        // Null pointers or zero arguments cleanly handled without panicking across FFI
-        let code = pam_sm_authenticate(ptr::null_mut(), 0, 0, ptr::null());
+        // Invalid socket configuration gracefully degrades to PAM_IGNORE without panicking across FFI
+        let arg = c"socket=/tmp/nonexistent_soos_unreachable.sock";
+        let argv = [arg.as_ptr().cast::<u8>()];
+        let code = pam_sm_authenticate(ptr::null_mut(), 0, 1, argv.as_ptr());
         assert_eq!(code, PAM_IGNORE);
     }
 }

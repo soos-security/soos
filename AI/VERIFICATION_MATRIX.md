@@ -372,3 +372,16 @@ This document translates the critical gating criteria from §11 of `ARCHITECTURE
 | GEPU3 | Hardware camera arbitration between `soos-daemon` and GUI: detects when daemon is holding `/dev/video0`, supports pausing and resuming daemon via Polkit, preventing `EBUSY` crashes on startup | Integration & interactive GUI tests (`SoosApp::is_daemon_active`, `SoosApp::pause_daemon`, `SoosApp::resume_daemon`) | ✅ Verified |
 | GEPU4 | Guided enrollment production unlock integration: unprivileged `soos-gui` exports composite template and invokes `pkexec soos-enroll import` to write to `/var/lib/soos/biometrics`, allowing real PAM unlock with background `soos-daemon` | Physical verification (`soos-enroll import`, `soos-enroll verify`, PAM `sudo` authentication) | ✅ Verified |
 
+---
+
+## Component: `biometric-reliability-camera-lifecycle-and-proxy` (Issue #46 / GitHub #132)
+
+| # | Criterion | Test Method | Status |
+|---|---|---|---|
+| BIO1 | ArcFace ONNX input channel ordering (BGR rather than RGB), threshold calibration (`match_threshold: 0.70`, `pad_threshold: 0.85`) across `VisionPipelineConfig` and GUI/CLIs, and hardened `expand_bbox_for_pad` bounds clamping | Unit tests (`embedding_tests::test_prepare_input_bgr_channel_ordering`, `pipeline_tests::test_vision_pipeline_default_thresholds_calibrated`, `pad_tests::test_pad_threshold_calibration`, `crop_tests::test_expand_bbox_for_pad_expansion_and_clamping`) | ✅ Verified |
+| CAM1 | Hardware IR camera prioritization (`sensor_preference = "prefer_ir"` / `SensorPreference`) in daemon config and clean `PixelFormat::Grey` pipeline ingestion | Unit & configuration tests (`config_tests::test_config_sensor_preference_and_idle_timeout`, `pipeline_init_tests::test_pipeline_init_device_selection_prefers_ir`, `color_tests::test_grey_to_rgb_conversion`) | ✅ Verified |
+| CAM2 | Camera power lifecycle & on-demand auto-standby (`Active` -> `Idle` -> `Suspended`), releasing V4L2 device file descriptor after `idle_timeout` (default 10s) to extinguish privacy LED, instant wake on `notify_activity()`, and 1000ms PAM timeout | Unit & integration tests (`mock_camera_tests::test_mock_camera_auto_suspend_and_resume_lifecycle`, `mock_camera_tests::test_mock_camera_idle_throttling_and_wake`, `shutdown_tests::test_is_ready_memory_visibility_acquire_release`, `pam_config_tests::test_default_timeout_is_1000ms`) | ✅ Verified |
+| PRX1 | Bounded daemon video proxy (`RequestKind::PreviewFrame`, `PreviewResponse`, 2 MiB boundary) with lock-free `ArcSwapOption` load and zero sensitive keyword logging | Unit & integration tests (`preview_tests::test_preview_request_and_response_roundtrip`, `preview_tests::test_preview_frame_large_payload_rejected`, `dispatcher_tests::test_dispatcher_handles_preview_frame_request`, `logging_audit_test::test_daemon_source_code_has_zero_sensitive_data_in_logs`) | ✅ Verified |
+| PRX2 | `soos-gui` `IpcCameraManager` querying `/run/soos/daemon.sock` without root privileges, eliminating `pkexec systemctl stop soos-daemon` Polkit prompt and V4L2 `EBUSY` conflict | Integration & unit tests (`crates/gui/src/ipc_camera.rs`, `crates/gui/src/main.rs`, `cargo test -p soos-gui`) | ✅ Verified |
+
+

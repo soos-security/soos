@@ -10,7 +10,7 @@
 //! - Oversized messages are rejected with zero allocation.
 //! - The codec performs zero direct I/O: operations strictly process `&[u8]` slices.
 
-use crate::types::MAX_MESSAGE_SIZE;
+use crate::types::{MAX_MESSAGE_SIZE, MAX_PREVIEW_MESSAGE_SIZE};
 use serde::{de::DeserializeOwned, Serialize};
 
 // ---------------------------------------------------------------------------
@@ -57,31 +57,48 @@ impl std::error::Error for CodecError {}
 // Encoding
 // ---------------------------------------------------------------------------
 
-/// Serializes a message into a byte vector with a Big-Endian `u32` length prefix.
-///
-/// Output buffer layout:
-/// ```text
-/// [length: u32 BE][payload: postcard bytes]
-/// ```
+/// Serializes a message into a byte vector with a Big-Endian `u32` length prefix,
+/// strictly bounded by [`MAX_MESSAGE_SIZE`] (4,096 bytes).
 ///
 /// # Errors
 ///
-/// Returns `CodecError::MessageTooLarge` if the serialized payload exceeds
-/// [`MAX_MESSAGE_SIZE`] bytes.
+/// Returns [`CodecError::Serialize`] if serialization fails, or
+/// [`CodecError::MessageTooLarge`] if the serialized payload exceeds [`MAX_MESSAGE_SIZE`].
 pub fn encode<T: Serialize>(msg: &T) -> Result<Vec<u8>, CodecError> {
+    encode_with_limit(msg, MAX_MESSAGE_SIZE)
+}
+
+/// Serializes a video preview message into a byte vector with a Big-Endian `u32` length prefix,
+/// bounded by [`MAX_PREVIEW_MESSAGE_SIZE`] (2 MiB).
+///
+/// # Errors
+///
+/// Returns [`CodecError::Serialize`] if serialization fails, or
+/// [`CodecError::MessageTooLarge`] if the serialized payload exceeds [`MAX_PREVIEW_MESSAGE_SIZE`].
+pub fn encode_preview<T: Serialize>(msg: &T) -> Result<Vec<u8>, CodecError> {
+    encode_with_limit(msg, MAX_PREVIEW_MESSAGE_SIZE)
+}
+
+/// Serializes a message with a custom maximum size limit.
+///
+/// # Errors
+///
+/// Returns [`CodecError::Serialize`] if serialization fails, or
+/// [`CodecError::MessageTooLarge`] if the serialized payload exceeds `max_size`.
+pub fn encode_with_limit<T: Serialize>(msg: &T, max_size: usize) -> Result<Vec<u8>, CodecError> {
     let payload = postcard::to_allocvec(msg).map_err(CodecError::Serialize)?;
 
-    if payload.len() > MAX_MESSAGE_SIZE {
+    if payload.len() > max_size {
         return Err(CodecError::MessageTooLarge {
             size: payload.len(),
-            max: MAX_MESSAGE_SIZE,
+            max: max_size,
         });
     }
 
     let size_prefix = u32::try_from(payload.len())
         .map_err(|_| CodecError::MessageTooLarge {
             size: payload.len(),
-            max: MAX_MESSAGE_SIZE,
+            max: max_size,
         })?
         .to_be_bytes();
 
@@ -90,7 +107,7 @@ pub fn encode<T: Serialize>(msg: &T) -> Result<Vec<u8>, CodecError> {
         .checked_add(4)
         .ok_or(CodecError::MessageTooLarge {
             size: usize::MAX,
-            max: MAX_MESSAGE_SIZE,
+            max: max_size,
         })?;
     let mut buf = Vec::with_capacity(total_capacity);
     buf.extend_from_slice(&size_prefix);
@@ -102,19 +119,41 @@ pub fn encode<T: Serialize>(msg: &T) -> Result<Vec<u8>, CodecError> {
 // Decoding
 // ---------------------------------------------------------------------------
 
-/// Deserializes a message from a byte slice framed by a Big-Endian `u32` length prefix.
-///
-/// # Security
-///
-/// - Validates that declared size <= [`MAX_MESSAGE_SIZE`] prior to allocation.
-/// - Malformed or truncated buffers cannot trigger unbounded memory allocation.
+/// Deserializes a message from a byte slice framed by a Big-Endian `u32` length prefix,
+/// strictly bounded by [`MAX_MESSAGE_SIZE`] (4,096 bytes).
 ///
 /// # Errors
 ///
-/// - `BufferTooSmall` if slice has fewer than 4 bytes or fewer than declared payload length
-/// - `DeclaredSizeTooLarge` if prefix exceeds [`MAX_MESSAGE_SIZE`]
-/// - `Deserialize` if postcard payload is corrupted
+/// Returns [`CodecError::BufferTooSmall`] if `buf` is too short,
+/// [`CodecError::DeclaredSizeTooLarge`] if declared size exceeds [`MAX_MESSAGE_SIZE`], or
+/// [`CodecError::Deserialize`] if deserialization fails.
 pub fn decode<T: DeserializeOwned>(buf: &[u8]) -> Result<T, CodecError> {
+    decode_with_limit(buf, MAX_MESSAGE_SIZE)
+}
+
+/// Deserializes a video preview message from a byte slice framed by a Big-Endian `u32` length prefix,
+/// bounded by [`MAX_PREVIEW_MESSAGE_SIZE`] (2 MiB).
+///
+/// # Errors
+///
+/// Returns [`CodecError::BufferTooSmall`] if `buf` is too short,
+/// [`CodecError::DeclaredSizeTooLarge`] if declared size exceeds [`MAX_PREVIEW_MESSAGE_SIZE`], or
+/// [`CodecError::Deserialize`] if deserialization fails.
+pub fn decode_preview<T: DeserializeOwned>(buf: &[u8]) -> Result<T, CodecError> {
+    decode_with_limit(buf, MAX_PREVIEW_MESSAGE_SIZE)
+}
+
+/// Deserializes a message with a custom maximum size limit.
+///
+/// # Errors
+///
+/// Returns [`CodecError::BufferTooSmall`] if `buf` is too short,
+/// [`CodecError::DeclaredSizeTooLarge`] if declared size exceeds `max_size`, or
+/// [`CodecError::Deserialize`] if deserialization fails.
+pub fn decode_with_limit<T: DeserializeOwned>(
+    buf: &[u8],
+    max_size: usize,
+) -> Result<T, CodecError> {
     let size_slice = buf.get(..4).ok_or(CodecError::BufferTooSmall)?;
     let size_bytes: [u8; 4] = size_slice
         .try_into()
@@ -122,10 +161,10 @@ pub fn decode<T: DeserializeOwned>(buf: &[u8]) -> Result<T, CodecError> {
     let declared_size =
         usize::try_from(u32::from_be_bytes(size_bytes)).map_err(|_| CodecError::BufferTooSmall)?;
 
-    if declared_size > MAX_MESSAGE_SIZE {
+    if declared_size > max_size {
         return Err(CodecError::DeclaredSizeTooLarge {
             declared: declared_size,
-            max: MAX_MESSAGE_SIZE,
+            max: max_size,
         });
     }
 

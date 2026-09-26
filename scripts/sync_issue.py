@@ -69,6 +69,7 @@ BACKLOG_TO_GITHUB = {
     43: 109,
     44: 110,
     45: 111,
+    46: 132,
 }
 
 BRANCH_TO_ISSUE = {
@@ -122,6 +123,7 @@ BRANCH_TO_ISSUE = {
     "docs/nextgen-model-documentation": 45,
     "feat/admin-debug-gui": 22,
     "feat/guided-enrollment-production-unlock": 22,
+    "feat/biometric-reliability-and-camera-lifecycle": 46,
 }
 
 

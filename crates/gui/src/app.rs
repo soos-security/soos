@@ -539,7 +539,7 @@ impl SoosApp {
 
                                 if let Ok(score_guard) = self.worker_input.live_match_score.lock() {
                                     if let Some(score) = *score_guard {
-                                        let match_threshold = 0.45f32;
+                                        let match_threshold = 0.70f32;
                                         let is_match = score >= match_threshold;
                                         ui.add_space(8.0);
                                         ui.label(format!("Cosine Match Score: {:.4}", score));

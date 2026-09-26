@@ -150,7 +150,7 @@ fn test_config_defaults_when_file_absent() {
     assert_eq!(config.dispatcher.max_concurrent_connections, 8);
     assert_eq!(
         config.dispatcher.connection_timeout,
-        Duration::from_millis(250)
+        Duration::from_millis(1000)
     );
 
     assert_eq!(

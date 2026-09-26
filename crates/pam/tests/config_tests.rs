@@ -19,7 +19,7 @@ use std::path::PathBuf;
 fn test_default_config_on_null_argv() {
     // SAFETY: null pointer passed with argc 0
     let config = unsafe { parse_argv(0, std::ptr::null()) };
-    assert_eq!(config.timeout_ms, 250);
+    assert_eq!(config.timeout_ms, 1000);
     assert_eq!(config.event, None);
     assert_eq!(config.socket_path, PathBuf::from("/run/soos/daemon.sock"));
     assert_eq!(config.service, "pam_soos");
@@ -30,12 +30,12 @@ fn test_negative_or_zero_argc_returns_default() {
     let ptr = std::ptr::null();
     // SAFETY: null pointer with negative or zero argc
     let config_neg = unsafe { parse_argv(-5, ptr) };
-    assert_eq!(config_neg.timeout_ms, 250);
+    assert_eq!(config_neg.timeout_ms, 1000);
     assert_eq!(config_neg.event, None);
 
     // SAFETY: null pointer with zero argc
     let config_zero = unsafe { parse_argv(0, ptr) };
-    assert_eq!(config_zero.timeout_ms, 250);
+    assert_eq!(config_zero.timeout_ms, 1000);
 }
 
 #[test]
@@ -104,7 +104,7 @@ fn test_safely_ignores_unknown_or_corrupted_arguments() {
 
     // SAFETY: args array has length 4 with valid pointers and deliberate null
     let config = unsafe { parse_argv(4, args.as_ptr()) };
-    assert_eq!(config.timeout_ms, 250); // Kept default
+    assert_eq!(config.timeout_ms, 1000); // Kept default
     assert_eq!(config.event, None);
 }
 
@@ -177,5 +177,5 @@ fn test_parse_unterminated_string_exceeding_max_arg_len() {
 
     // SAFETY: pointer has 300 non-null bytes; extract_bounded_str must safely stop at MAX_ARG_LEN without out-of-bounds read
     let config = unsafe { parse_argv(1, args.as_ptr()) };
-    assert_eq!(config.timeout_ms, 250); // Kept default
+    assert_eq!(config.timeout_ms, 1000); // Kept default
 }

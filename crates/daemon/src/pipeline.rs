@@ -120,19 +120,34 @@ pub fn initialize_pipeline(
     config: &crate::config::PipelineConfig,
 ) -> Result<PipelineComponents, crate::error::DaemonError> {
     // 1. Camera Manager
+    let mut camera_cfg = config.camera.clone();
+    if !config.use_mock_camera
+        && (camera_cfg.device_path == std::path::Path::new("/dev/v4l/by-id/default-camera")
+            || !camera_cfg.device_path.exists())
+    {
+        let candidates = soos_camera_v4l::enumerate_capture_devices();
+        if let Some(selected) =
+            soos_camera_v4l::select_camera_device(&candidates, camera_cfg.sensor_preference)
+        {
+            tracing::info!(
+                selected = %selected.path.display(),
+                sensor_type = ?selected.sensor_type(),
+                preference = ?camera_cfg.sensor_preference,
+                "Auto-selected camera device matching sensor preference"
+            );
+            camera_cfg.device_path = selected.path.clone();
+        }
+    }
+
     let camera: Arc<dyn CameraManager> = if config.use_mock_camera {
         tracing::info!("Initializing mock camera manager for simulation/testing");
-        Arc::new(soos_camera_v4l::MockCameraManager::new(
-            config.camera.clone(),
-        ))
+        Arc::new(soos_camera_v4l::MockCameraManager::new(camera_cfg))
     } else {
         tracing::info!(
-            device = %config.camera.device_path.display(),
+            device = %camera_cfg.device_path.display(),
             "Spawning production V4L2 camera manager"
         );
-        Arc::new(soos_camera_v4l::V4lCameraManager::spawn(
-            config.camera.clone(),
-        )?)
+        Arc::new(soos_camera_v4l::V4lCameraManager::spawn(camera_cfg)?)
     };
 
     // 2. Biometric Store & Master Key

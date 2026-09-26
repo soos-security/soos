@@ -9,8 +9,10 @@
 
 pub mod app;
 pub mod args;
+pub mod ipc_camera;
 pub mod state;
 pub mod worker;
 
 pub use app::SoosApp;
 pub use args::GuiArgs;
+pub use ipc_camera::IpcCameraManager;

@@ -452,4 +452,28 @@ fn test_pipeline_config_defaults_3_model() {
     assert!((config.pad_bbox_scale - 2.7).abs() < 1e-4);
     assert_eq!(config.target_width, 112);
     assert_eq!(config.target_height, 112);
+    assert!(
+        (config.match_threshold - 0.70).abs() < 1e-6,
+        "VisionPipelineConfig default match_threshold must be 0.70 to eliminate false accepts"
+    );
+    assert!(
+        (config.pad_threshold - 0.85).abs() < 1e-6,
+        "VisionPipelineConfig default pad_threshold must be 0.85 matching policy"
+    );
+}
+
+#[test]
+fn test_vision_pipeline_default_thresholds_calibrated() {
+    let vision_cfg = VisionPipelineConfig::default();
+
+    assert!(
+        (vision_cfg.match_threshold - 0.70).abs() < 1e-6,
+        "Vision match_threshold ({}) must be 0.70 to eliminate false accepts",
+        vision_cfg.match_threshold
+    );
+    assert!(
+        (vision_cfg.pad_threshold - 0.85).abs() < 1e-6,
+        "Vision pad_threshold ({}) must be 0.85 matching NIST SP 800-63B standards",
+        vision_cfg.pad_threshold
+    );
 }

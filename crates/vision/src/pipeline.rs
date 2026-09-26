@@ -40,8 +40,8 @@ impl Default for VisionPipelineConfig {
     fn default() -> Self {
         Self {
             min_face_confidence: 0.70,
-            match_threshold: 0.45,
-            pad_threshold: 0.80,
+            match_threshold: 0.70,
+            pad_threshold: 0.85,
             target_width: 112,
             target_height: 112,
             pad_target_width: 80,

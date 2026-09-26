@@ -19,8 +19,10 @@ use tokio::net::{UnixListener, UnixStream};
 use soos_daemon::config::DispatcherConfig;
 use soos_daemon::dispatcher::ConnectionDispatcher;
 use soos_daemon::health::HealthState;
-use soos_protocol::codec::{decode, encode};
-use soos_protocol::types::{ReasonClass, Request, RequestKind, Response, Verdict, CURRENT_VERSION};
+use soos_protocol::codec::{decode, decode_preview, encode};
+use soos_protocol::types::{
+    PreviewResponse, ReasonClass, Request, RequestKind, Response, Verdict, CURRENT_VERSION,
+};
 
 fn test_dispatcher_config(
     max_concurrent_connections: usize,
@@ -510,4 +512,52 @@ async fn test_timeout_during_write_does_not_corrupt_response() {
             "Delivered response must decode cleanly into a valid Response without byte corruption"
         );
     }
+}
+
+#[tokio::test]
+async fn test_dispatcher_preview_frame_roundtrip() {
+    let dir = tempdir().expect("Failed to create tempdir");
+    let sock_path = dir.path().join("preview_dispatch.sock");
+
+    let listener = UnixListener::bind(&sock_path).expect("Bind failed");
+    let health = Arc::new(HealthState::new());
+    health.set_socket_ready(true);
+
+    let config = test_dispatcher_config(4, Duration::from_millis(500));
+    let dispatcher = Arc::new(ConnectionDispatcher::new(config, health));
+
+    let disp_clone = dispatcher.clone();
+    tokio::spawn(async move {
+        if let Ok((stream, _)) = listener.accept().await {
+            let _ = disp_clone.handle_connection(stream).await;
+        }
+    });
+
+    let mut client = UnixStream::connect(&sock_path)
+        .await
+        .expect("Connect failed");
+    let current_uid = nix::unistd::getuid().as_raw();
+    let req = Request {
+        version: CURRENT_VERSION,
+        kind: RequestKind::PreviewFrame,
+        request_id: [77u8; 32],
+        uid_hint: current_uid,
+        service: "soos-gui".to_string(),
+        deadline_monotonic_ns: u64::MAX,
+    };
+    let framed = encode(&req).expect("Encoding failed");
+    client.write_all(&framed).await.expect("Write request");
+    client.flush().await.expect("Flush client");
+
+    let mut len_bytes = [0u8; 4];
+    client.read_exact(&mut len_bytes).await.expect("Read len");
+    let resp_len = u32::from_be_bytes(len_bytes) as usize;
+    let mut buf = vec![0u8; 4 + resp_len];
+    buf[..4].copy_from_slice(&len_bytes);
+    client.read_exact(&mut buf[4..]).await.expect("Read body");
+
+    let preview_resp: PreviewResponse = decode_preview(&buf).expect("Decode preview response");
+    assert_eq!(preview_resp.version, CURRENT_VERSION);
+    assert_eq!(preview_resp.format, 255);
+    assert!(preview_resp.data.is_empty());
 }

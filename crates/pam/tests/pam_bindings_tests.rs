@@ -160,7 +160,7 @@ fn test_parse_cstrs_unknown_and_defaults() {
     let args = vec![arg1.as_c_str(), arg2.as_c_str()];
 
     let config = parse_cstrs(args);
-    assert_eq!(config.timeout_ms, 250);
+    assert_eq!(config.timeout_ms, 1000);
     assert_eq!(config.event, None);
     assert_eq!(config.socket_path, PathBuf::from("/run/soos/daemon.sock"));
     assert_eq!(config.service, "pam_soos");

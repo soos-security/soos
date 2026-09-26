@@ -16,9 +16,13 @@ use crate::error::VisionError;
 ///
 /// Designed for Presentation Attack Detection (PAD) context cropping (typically 2.7x expansion).
 pub fn expand_bbox_for_pad(bbox: &BoundingBox, scale: f32, img_w: u32, img_h: u32) -> BoundingBox {
+    if img_w == 0 || img_h == 0 {
+        return BoundingBox::new(0.0, 0.0, 0.0, 0.0);
+    }
+
     let effective_scale = if scale > 0.0 { scale } else { 1.0 };
-    let orig_w = bbox.x2 - bbox.x1;
-    let orig_h = bbox.y2 - bbox.y1;
+    let orig_w = (bbox.x2 - bbox.x1).max(0.0);
+    let orig_h = (bbox.y2 - bbox.y1).max(0.0);
     let cx = (bbox.x1 + bbox.x2) / 2.0;
     let cy = (bbox.y1 + bbox.y2) / 2.0;
 

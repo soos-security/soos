@@ -81,6 +81,13 @@ impl CameraManager for V4lCameraManager {
     }
 
     fn is_ready(&self) -> bool {
+        let elapsed = {
+            let last = self.last_activity.read().unwrap_or_else(|e| e.into_inner());
+            last.elapsed()
+        };
+        if elapsed > self.config.idle_timeout {
+            return false;
+        }
         self.is_ready.load(Ordering::Acquire)
     }
 
@@ -108,7 +115,13 @@ impl Drop for V4lCameraManager {
     }
 }
 
-/// Supervisor loop handling device reconnection, streaming, and exponential backoff.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SupervisorAction {
+    Shutdown,
+    Suspend,
+}
+
+/// Supervisor loop handling device reconnection, streaming, exponential backoff, and auto-standby.
 fn run_v4l_supervisor(
     config: CameraConfig,
     latest_frame: Arc<ArcSwapOption<Frame>>,
@@ -120,9 +133,30 @@ fn run_v4l_supervisor(
 
     while running.load(Ordering::Acquire) {
         match open_and_stream(&config, &latest_frame, &is_ready, &running, &last_activity) {
-            Ok(()) => {
-                // Clean shutdown
+            Ok(SupervisorAction::Shutdown) => {
+                // Clean shutdown requested
                 break;
+            }
+            Ok(SupervisorAction::Suspend) => {
+                is_ready.store(false, Ordering::Release);
+                latest_frame.store(None);
+                current_backoff = config.min_backoff;
+
+                // Suspended state: wait for notify_activity() or shutdown
+                while running.load(Ordering::Acquire) {
+                    let recent_activity = {
+                        let last = last_activity.read().unwrap_or_else(|e| e.into_inner());
+                        last.elapsed() < config.idle_timeout
+                    };
+                    if recent_activity {
+                        info!(
+                            "Camera activity requested on '{}'; resuming from auto-standby",
+                            config.device_path.display()
+                        );
+                        break;
+                    }
+                    thread::sleep(Duration::from_millis(50));
+                }
             }
             Err(err) => {
                 is_ready.store(false, Ordering::Release);
@@ -218,7 +252,7 @@ fn open_and_stream(
     is_ready: &Arc<AtomicBool>,
     running: &Arc<AtomicBool>,
     last_activity: &Arc<RwLock<Instant>>,
-) -> Result<(), CameraError> {
+) -> Result<SupervisorAction, CameraError> {
     let device = v4l::Device::with_path(&config.device_path)
         .map_err(|e| CameraError::from_io_error(config.device_path.clone(), e))?;
 
@@ -300,7 +334,7 @@ fn open_and_stream(
             Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {
                 if !running.load(Ordering::Acquire) {
                     // Graceful shutdown requested while waiting for DQBUF
-                    return Ok(());
+                    return Ok(SupervisorAction::Shutdown);
                 }
                 return Err(CameraError::BufferDequeue {
                     path: config.device_path.clone(),
@@ -344,38 +378,23 @@ fn open_and_stream(
         is_ready.store(true, Ordering::Release);
         sequence = sequence.saturating_add(1);
 
-        // Check for idle throttling
+        // Check for idle auto-standby: if idle for more than idle_timeout,
+        // suspend capture and release hardware device handle to extinguish privacy LED
         let is_idle = {
             let last = last_activity.read().unwrap_or_else(|e| e.into_inner());
             Instant::now().duration_since(*last) > config.idle_timeout
         };
 
         if is_idle {
-            // In idle mode, sleep extra time to lower effective capture FPS
-            let full_interval = Duration::from_micros(
-                1_000_000u64
-                    .checked_div(config.fps as u64)
-                    .unwrap_or(33_333),
+            info!(
+                "Camera idle timeout reached on '{}'; releasing device handle for auto-standby",
+                config.device_path.display()
             );
-            let idle_interval = Duration::from_micros(
-                1_000_000u64
-                    .checked_div(config.idle_fps as u64)
-                    .unwrap_or(200_000),
-            );
-            if let Some(extra) = idle_interval.checked_sub(full_interval) {
-                let sleep_start = Instant::now();
-                while running.load(Ordering::Acquire) && sleep_start.elapsed() < extra {
-                    let rem = extra.saturating_sub(sleep_start.elapsed());
-                    thread::sleep(Duration::from_millis(20).min(rem));
-                }
-                if !running.load(Ordering::Acquire) {
-                    break;
-                }
-            }
+            return Ok(SupervisorAction::Suspend);
         }
     }
 
-    Ok(())
+    Ok(SupervisorAction::Shutdown)
 }
 
 /// Returns the current monotonic clock timestamp in nanoseconds.

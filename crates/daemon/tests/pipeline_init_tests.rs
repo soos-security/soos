@@ -19,7 +19,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::RwLock;
 
-use soos_biometric_store::{BiometricStore, MasterKey as BioMasterKey};
+use soos_biometric_store::{BiometricStore, BiometricTemplate, MasterKey as BioMasterKey};
 use soos_camera_v4l::{CameraConfigBuilder, MockCameraManager, PixelFormat};
 use soos_daemon::config::{DispatcherConfig, PipelineConfig};
 use soos_daemon::dispatcher::ConnectionDispatcher;
@@ -143,6 +143,16 @@ async fn test_daemon_startup_initializes_all_pipeline_components() {
         .await
         .expect("Connect failed");
     let current_uid = nix::unistd::getuid().as_raw();
+    let template = BiometricTemplate::new(
+        current_uid,
+        "mock-model".into(),
+        "1.0".into(),
+        1,
+        zeroize::Zeroizing::new(vec![0.1f32; 512]),
+    )
+    .expect("Template creation");
+    bio_store.enroll(&template).expect("Enroll template");
+
     let req = make_auth_request(current_uid);
     let framed = encode(&req).expect("Encoding failed");
 

@@ -45,7 +45,7 @@ impl Default for CameraConfig {
             sensor_preference: SensorPreference::PreferRgb,
             fps: 30,
             idle_fps: 5,
-            idle_timeout: Duration::from_secs(60),
+            idle_timeout: Duration::from_secs(10),
             warmup_frames: 20,
             min_backoff: Duration::from_millis(100),
             max_backoff: Duration::from_secs(5),

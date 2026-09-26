@@ -110,7 +110,7 @@ fn test_pipeline_rejects_printed_photo_spoof() {
     match err {
         VisionError::PadFailed { score, threshold } => {
             assert_eq!(score, 0.05);
-            assert_eq!(threshold, 0.80);
+            assert_eq!(threshold, 0.85);
         }
         other => panic!("Expected VisionError::PadFailed, got {:?}", other),
     }
@@ -135,7 +135,7 @@ fn test_pipeline_rejects_screen_replay_spoof() {
     match err {
         VisionError::PadFailed { score, threshold } => {
             assert_eq!(score, 0.15);
-            assert_eq!(threshold, 0.80);
+            assert_eq!(threshold, 0.85);
         }
         other => panic!("Expected VisionError::PadFailed, got {:?}", other),
     }
