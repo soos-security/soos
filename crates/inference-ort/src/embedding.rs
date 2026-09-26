@@ -139,18 +139,34 @@ use std::sync::{Arc, Mutex};
 /// ArcFace w600k (512D) feature extractor backed by an ONNX Runtime session.
 pub struct OrtEmbeddingExtractor {
     session: Arc<Mutex<Session>>,
+    is_nhwc: bool,
 }
 
 impl OrtEmbeddingExtractor {
     pub fn new(session: Arc<Mutex<Session>>) -> Self {
-        Self { session }
+        let is_nhwc = if let Ok(guard) = session.lock() {
+            if let Some(input) = guard.inputs().first() {
+                match input.dtype() {
+                    ort::value::ValueType::Tensor { shape, .. } => shape.last().copied() == Some(3),
+                    _ => false,
+                }
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+
+        Self { session, is_nhwc }
     }
 
-    /// Prepares, resizes, and normalizes an aligned face crop to 112x112 NCHW format inside a zeroized container.
-    pub fn prepare_input(
+    /// Prepares, resizes, and normalizes an aligned face crop inside a zeroized container.
+    /// If `is_nhwc` is true, formats as `[1, 112, 112, 3]` (NHWC); otherwise `[1, 3, 112, 112]` (NCHW).
+    pub fn prepare_input_layout(
         aligned_crop_rgb: &[u8],
         width: u32,
         height: u32,
+        is_nhwc: bool,
     ) -> Result<Zeroizing<Vec<f32>>, InferenceError> {
         let expected_len = (width as usize)
             .checked_mul(height as usize)
@@ -164,7 +180,6 @@ impl OrtEmbeddingExtractor {
             });
         }
 
-        // Resize and normalize aligned face to 112x112 NCHW [1, 3, 112, 112]
         let target_size = 112usize;
         let mut input_data = Zeroizing::new(vec![0.0f32; 3 * target_size * target_size]);
 
@@ -186,24 +201,46 @@ impl OrtEmbeddingExtractor {
                     let norm_g = (g as f32 - 127.5) / 127.5;
                     let norm_b = (b as f32 - 127.5) / 127.5;
 
-                    let r_idx = y * target_size + x;
-                    let g_idx = target_size * target_size + y * target_size + x;
-                    let b_idx = 2 * target_size * target_size + y * target_size + x;
+                    if is_nhwc {
+                        let idx = (y * target_size + x) * 3;
+                        if let Some(slot) = input_data.get_mut(idx) {
+                            *slot = norm_r;
+                        }
+                        if let Some(slot) = input_data.get_mut(idx + 1) {
+                            *slot = norm_g;
+                        }
+                        if let Some(slot) = input_data.get_mut(idx + 2) {
+                            *slot = norm_b;
+                        }
+                    } else {
+                        let r_idx = y * target_size + x;
+                        let g_idx = target_size * target_size + y * target_size + x;
+                        let b_idx = 2 * target_size * target_size + y * target_size + x;
 
-                    if let Some(slot) = input_data.get_mut(r_idx) {
-                        *slot = norm_r;
-                    }
-                    if let Some(slot) = input_data.get_mut(g_idx) {
-                        *slot = norm_g;
-                    }
-                    if let Some(slot) = input_data.get_mut(b_idx) {
-                        *slot = norm_b;
+                        if let Some(slot) = input_data.get_mut(r_idx) {
+                            *slot = norm_r;
+                        }
+                        if let Some(slot) = input_data.get_mut(g_idx) {
+                            *slot = norm_g;
+                        }
+                        if let Some(slot) = input_data.get_mut(b_idx) {
+                            *slot = norm_b;
+                        }
                     }
                 }
             }
         }
 
         Ok(input_data)
+    }
+
+    /// Prepares, resizes, and normalizes an aligned face crop to 112x112 NCHW format inside a zeroized container.
+    pub fn prepare_input(
+        aligned_crop_rgb: &[u8],
+        width: u32,
+        height: u32,
+    ) -> Result<Zeroizing<Vec<f32>>, InferenceError> {
+        Self::prepare_input_layout(aligned_crop_rgb, width, height, false)
     }
 }
 
@@ -214,20 +251,33 @@ impl EmbeddingExtractor for OrtEmbeddingExtractor {
         width: u32,
         height: u32,
     ) -> Result<BiometricEmbedding, InferenceError> {
-        let mut input_data = Self::prepare_input(aligned_crop_rgb, width, height)?;
-
-        let tensor =
-            ort::value::TensorRef::from_array_view(([1usize, 3, 112, 112], input_data.as_slice()))
-                .map_err(|e| InferenceError::Ort(e.to_string()))?;
+        let mut input_data =
+            Self::prepare_input_layout(aligned_crop_rgb, width, height, self.is_nhwc)?;
 
         let mut session = self
             .session
             .lock()
             .map_err(|_| InferenceError::EmbeddingFailed("Session mutex poisoned".to_string()))?;
 
-        let outputs = session
-            .run(ort::inputs![tensor])
+        let outputs = if self.is_nhwc {
+            let tensor = ort::value::TensorRef::from_array_view((
+                [1usize, 112, 112, 3],
+                input_data.as_slice(),
+            ))
             .map_err(|e| InferenceError::Ort(e.to_string()))?;
+            session
+                .run(ort::inputs![tensor])
+                .map_err(|e| InferenceError::Ort(e.to_string()))?
+        } else {
+            let tensor = ort::value::TensorRef::from_array_view((
+                [1usize, 3, 112, 112],
+                input_data.as_slice(),
+            ))
+            .map_err(|e| InferenceError::Ort(e.to_string()))?;
+            session
+                .run(ort::inputs![tensor])
+                .map_err(|e| InferenceError::Ort(e.to_string()))?
+        };
 
         // Zeroize input buffer immediately post-inference
         input_data.zeroize();

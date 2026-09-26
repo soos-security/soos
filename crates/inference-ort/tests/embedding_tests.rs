@@ -212,3 +212,30 @@ fn test_mock_embedding_default_512d() {
         .expect("extraction failed");
     assert_eq!(emb_new_default.len(), 512);
 }
+
+#[test]
+fn test_prepare_input_layout_nhwc_and_nchw() {
+    let width = 112u32;
+    let height = 112u32;
+    let mut pixels = vec![0u8; (width * height * 3) as usize];
+    // First pixel: R=0, G=127, B=255
+    pixels[0] = 0;
+    pixels[1] = 127;
+    pixels[2] = 255;
+
+    // Test NCHW layout
+    let nchw = OrtEmbeddingExtractor::prepare_input_layout(&pixels, width, height, false)
+        .expect("prepare_input_layout NCHW must succeed");
+    assert_eq!(nchw.len(), 3 * 112 * 112);
+    assert!((nchw[0] - (-1.0)).abs() < 1e-6); // R channel
+    assert!((nchw[112 * 112] - ((127.0 - 127.5) / 127.5)).abs() < 1e-6); // G channel
+    assert!((nchw[2 * 112 * 112] - 1.0).abs() < 1e-6); // B channel
+
+    // Test NHWC layout
+    let nhwc = OrtEmbeddingExtractor::prepare_input_layout(&pixels, width, height, true)
+        .expect("prepare_input_layout NHWC must succeed");
+    assert_eq!(nhwc.len(), 3 * 112 * 112);
+    assert!((nhwc[0] - (-1.0)).abs() < 1e-6); // R
+    assert!((nhwc[1] - ((127.0 - 127.5) / 127.5)).abs() < 1e-6); // G
+    assert!((nhwc[2] - 1.0).abs() < 1e-6); // B
+}
