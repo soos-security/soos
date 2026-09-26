@@ -78,6 +78,9 @@ pub trait PadDetector: Send + Sync {
     ) -> Result<PadResult, InferenceError>;
 }
 
+/// Default live class index for MiniFASNetV2 models (Class 0: PrintPhoto, Class 1: ScreenReplay, Class 2: Live).
+pub const DEFAULT_MINIFASNET_LIVE_CLASS_INDEX: usize = 2;
+
 /// MiniFASNetV2 ONNX Runtime Presentation Attack Detector.
 pub struct OrtPadDetector {
     session: Arc<Mutex<Session>>,
@@ -91,7 +94,7 @@ impl OrtPadDetector {
         Self {
             session,
             liveness_threshold,
-            live_class_index: 0,
+            live_class_index: DEFAULT_MINIFASNET_LIVE_CLASS_INDEX,
         }
     }
 

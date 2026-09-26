@@ -623,7 +623,7 @@ pub fn build_full_service(cli: &Cli) -> Result<EnrollmentService, EnrollmentCliE
     let emb_session = registry.get_or_load_session(MODEL_ID_EMBEDDING)?;
 
     let detector = Arc::new(OrtScrfdDetector::new(det_session, 0.70, 0.40)?);
-    let pad = Arc::new(OrtPadDetector::new_with_class_index(pad_session, 0.80, 1));
+    let pad = Arc::new(OrtPadDetector::new_with_class_index(pad_session, 0.80, 2));
     let extractor = Arc::new(OrtEmbeddingExtractor::new(emb_session));
 
     let pipeline_config = VisionPipelineConfig::default();
