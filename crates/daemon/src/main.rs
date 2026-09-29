@@ -70,11 +70,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
-    let dispatcher = Arc::new(ConnectionDispatcher::with_pipeline(
-        config.dispatcher,
-        health.clone(),
-        components,
-    ));
+    if config.preview.enabled {
+        info!(
+            allowed_uids = ?config.preview.allowed_uids,
+            max_requests_per_sec = config.preview.max_requests_per_sec,
+            "Camera preview stream enabled for the configured unprivileged peers"
+        );
+    }
+
+    let dispatcher = Arc::new(
+        ConnectionDispatcher::with_pipeline(config.dispatcher, health.clone(), components)
+            .with_preview_config(config.preview),
+    );
 
     let (listener, socket_guard) = bind_socket(&config.socket).await?;
     health.set_socket_ready(true);

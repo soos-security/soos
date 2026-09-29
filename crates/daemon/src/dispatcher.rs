@@ -7,6 +7,7 @@ use tokio::net::UnixStream;
 use tokio::sync::Semaphore;
 use tokio::time::timeout;
 use tracing::{debug, info, warn};
+use zeroize::Zeroizing;
 
 use crate::config::DispatcherConfig;
 use crate::error::DaemonError;
@@ -16,8 +17,9 @@ use crate::pipeline::{
     current_monotonic_nanos, PipelineComponents, DECISION_BUDGET_MS, FRAME_POLL_INTERVAL_MS,
     MAX_FRAME_AGE_NS,
 };
+use crate::preview::{authorize_preview, PreviewConfig};
 use crate::session::SessionValidator;
-use soos_policy::{ConsensusDecision, FrameEvaluation, PadAggregator};
+use soos_policy::{ConsensusDecision, FrameEvaluation, PadAggregator, RateLimiter};
 use soos_protocol::codec::{encode, encode_preview};
 use soos_protocol::types::{
     Event, EventKind, PreviewResponse, ReasonClass, Request, RequestId, RequestKind, Response,
@@ -27,8 +29,9 @@ use soos_protocol::types::{
 /// Internal representation of processed connection output before socket transmission.
 #[derive(Debug)]
 struct ProcessedOutput {
-    /// Serialized wire response frame (including 4-byte BE length prefix), if a response is expected.
-    encoded_response: Option<Vec<u8>>,
+    /// Serialized wire response (including 4-byte BE length prefix), if a response is expected.
+    /// Wrapped in `Zeroizing` because preview responses carry camera pixel data.
+    encoded_response: Option<Zeroizing<Vec<u8>>>,
     /// Deferred error to return after response transmission (e.g. wire validation error).
     completion_error: Option<DaemonError>,
 }
@@ -36,7 +39,7 @@ struct ProcessedOutput {
 /// Internal representation of a request response before transmission.
 #[derive(Debug)]
 struct ResponseOutput {
-    encoded_response: Vec<u8>,
+    encoded_response: Zeroizing<Vec<u8>>,
     completion_error: Option<DaemonError>,
 }
 
@@ -49,6 +52,8 @@ pub struct ConnectionDispatcher {
     start_time: Instant,
     session_validator: SessionValidator,
     clock_fn: fn() -> Result<u64, DaemonError>,
+    preview: PreviewConfig,
+    preview_limiter: tokio::sync::Mutex<RateLimiter>,
 }
 
 impl ConnectionDispatcher {
@@ -60,6 +65,9 @@ impl ConnectionDispatcher {
         } else {
             SessionValidator::disabled()
         };
+        let preview = PreviewConfig::default();
+        let preview_limiter =
+            tokio::sync::Mutex::new(RateLimiter::new(preview.rate_limit_config()));
         Self {
             config,
             health,
@@ -68,6 +76,8 @@ impl ConnectionDispatcher {
             start_time: Instant::now(),
             session_validator,
             clock_fn: current_monotonic_nanos,
+            preview,
+            preview_limiter,
         }
     }
 
@@ -83,6 +93,9 @@ impl ConnectionDispatcher {
         } else {
             SessionValidator::disabled()
         };
+        let preview = PreviewConfig::default();
+        let preview_limiter =
+            tokio::sync::Mutex::new(RateLimiter::new(preview.rate_limit_config()));
         Self {
             config,
             health,
@@ -91,6 +104,8 @@ impl ConnectionDispatcher {
             start_time: Instant::now(),
             session_validator,
             clock_fn: current_monotonic_nanos,
+            preview,
+            preview_limiter,
         }
     }
 
@@ -106,6 +121,24 @@ impl ConnectionDispatcher {
     pub fn with_session_validator(mut self, validator: SessionValidator) -> Self {
         self.session_validator = validator;
         self
+    }
+
+    /// Configures the `[preview]` authorization policy (GitHub #143).
+    ///
+    /// Without this call the dispatcher keeps [`PreviewConfig::default`], which serves
+    /// preview frames to a root peer only (fail-closed).
+    #[must_use]
+    pub fn with_preview_config(mut self, preview: PreviewConfig) -> Self {
+        self.preview_limiter =
+            tokio::sync::Mutex::new(RateLimiter::new(preview.rate_limit_config()));
+        self.preview = preview;
+        self
+    }
+
+    /// Returns the active preview authorization policy.
+    #[must_use]
+    pub const fn preview_config(&self) -> &PreviewConfig {
+        &self.preview
     }
 
     fn now_nanos(&self) -> Result<u64, DaemonError> {
@@ -337,81 +370,12 @@ impl ConnectionDispatcher {
                 pid: std::process::id(),
                 uptime_secs: self.start_time.elapsed().as_secs(),
             };
-            let encoded = encode(&status_resp)?;
+            let encoded = Zeroizing::new(encode(&status_resp)?);
             debug!("Generated diagnostic status response");
             return Ok(ResponseOutput {
                 encoded_response: encoded,
                 completion_error: None,
             });
-        }
-
-        // Step 5c: Diagnostic camera preview frame query (non-biometric)
-        if req.kind == RequestKind::PreviewFrame {
-            if let Some(ref pipe) = self.pipeline {
-                pipe.camera.notify_activity();
-                if !pipe.camera.is_ready() {
-                    let max_wake = self
-                        .config
-                        .connection_timeout
-                        .saturating_sub(Duration::from_millis(100))
-                        .min(Duration::from_millis(1000));
-                    let wake_start = Instant::now();
-                    while !pipe.camera.is_ready() && wake_start.elapsed() < max_wake {
-                        tokio::time::sleep(Duration::from_millis(15)).await;
-                    }
-                }
-                let (width, height, format, timestamp_monotonic_ns, data, sequence) =
-                    if let Some(frame) = pipe.camera.latest_frame() {
-                        let fmt_u8 = match frame.format {
-                            soos_camera_v4l::PixelFormat::Rgb24 => 0,
-                            soos_camera_v4l::PixelFormat::Grey => 1,
-                            soos_camera_v4l::PixelFormat::Yuyv => 2,
-                            soos_camera_v4l::PixelFormat::Nv12 => 3,
-                            soos_camera_v4l::PixelFormat::Mjpeg => 4,
-                        };
-                        (
-                            frame.width,
-                            frame.height,
-                            fmt_u8,
-                            frame.timestamp_mono_ns,
-                            frame.data.clone(),
-                            frame.sequence,
-                        )
-                    } else {
-                        (0, 0, 255, 0, Vec::new(), 0)
-                    };
-
-                let preview_resp = PreviewResponse {
-                    version: CURRENT_VERSION,
-                    sequence,
-                    width,
-                    height,
-                    format,
-                    timestamp_monotonic_ns,
-                    data,
-                };
-                let encoded = encode_preview(&preview_resp)?;
-                debug!("Generated preview response ({} bytes)", encoded.len());
-                return Ok(ResponseOutput {
-                    encoded_response: encoded,
-                    completion_error: None,
-                });
-            } else {
-                let preview_resp = PreviewResponse {
-                    version: CURRENT_VERSION,
-                    sequence: 0,
-                    width: 0,
-                    height: 0,
-                    format: 255,
-                    timestamp_monotonic_ns: 0,
-                    data: Vec::new(),
-                };
-                let encoded = encode_preview(&preview_resp)?;
-                return Ok(ResponseOutput {
-                    encoded_response: encoded,
-                    completion_error: None,
-                });
-            }
         }
 
         // Step 6: Verify peer credentials against request
@@ -460,6 +424,12 @@ impl ConnectionDispatcher {
                 encoded_response: encoded,
                 completion_error: None,
             });
+        }
+
+        // Step 6c: Camera preview stream (GitHub #143): served only after kernel peer
+        // verification, explicit authorization, session validation and rate limiting.
+        if req.kind == RequestKind::PreviewFrame {
+            return self.handle_preview_request(peer_uid, &req).await;
         }
 
         // Step 7: Monotonic deadline propagation check
@@ -843,13 +813,173 @@ impl ConnectionDispatcher {
         })
     }
 
+    /// Authorizes and serves one `RequestKind::PreviewFrame` request.
+    ///
+    /// Order of checks (each one fails closed with zero pixel bytes on the wire):
+    /// 1. `authorize_preview`: root peer, or `enabled` + allow-listed + `peer_uid == uid_hint`;
+    /// 2. active logind session for unprivileged peers (same validator as Step 6b);
+    /// 3. per-peer-UID rate limit (`[preview] max_requests_per_sec`), root included.
+    ///
+    /// Only then is the camera woken (`notify_activity`) and the latest capture copied.
+    async fn handle_preview_request(
+        &self,
+        peer_uid: u32,
+        req: &Request,
+    ) -> Result<ResponseOutput, DaemonError> {
+        if let Err(denied) = authorize_preview(&self.preview, peer_uid, req.uid_hint) {
+            warn!(
+                peer_uid = peer_uid,
+                target_uid = req.uid_hint,
+                reason = %denied,
+                "Preview request refused by authorization policy"
+            );
+            let encoded = self.build_response(
+                req.request_id,
+                Verdict::ProtocolError,
+                ReasonClass::UidMismatch,
+                0,
+            )?;
+            return Ok(ResponseOutput {
+                encoded_response: encoded,
+                completion_error: None,
+            });
+        }
+
+        if peer_uid != 0 && !self.session_validator.is_active_session(peer_uid) {
+            warn!(
+                peer_uid = peer_uid,
+                "Preview peer has no active logind session; refusing preview request"
+            );
+            let encoded = self.build_response(
+                req.request_id,
+                Verdict::ProtocolError,
+                ReasonClass::UidMismatch,
+                0,
+            )?;
+            return Ok(ResponseOutput {
+                encoded_response: encoded,
+                completion_error: None,
+            });
+        }
+
+        let now_ns = match self.now_nanos() {
+            Ok(ns) => ns,
+            Err(err) => {
+                warn!(error = %err, "Failed to query monotonic clock; refusing preview request");
+                let encoded = self.build_response(
+                    req.request_id,
+                    Verdict::Unavailable,
+                    ReasonClass::InternalError,
+                    0,
+                )?;
+                return Ok(ResponseOutput {
+                    encoded_response: encoded,
+                    completion_error: Some(err),
+                });
+            }
+        };
+
+        {
+            let mut limiter = self.preview_limiter.lock().await;
+            if let Err(err) = limiter.check_and_record(peer_uid, now_ns) {
+                warn!(
+                    peer_uid = peer_uid,
+                    error = %err,
+                    "Preview request quota exceeded; refusing preview request"
+                );
+                let encoded = self.build_response(
+                    req.request_id,
+                    Verdict::ProtocolError,
+                    ReasonClass::RateLimited,
+                    now_ns,
+                )?;
+                return Ok(ResponseOutput {
+                    encoded_response: encoded,
+                    completion_error: None,
+                });
+            }
+        }
+
+        let Some(ref pipe) = self.pipeline else {
+            let preview_resp = PreviewResponse {
+                version: CURRENT_VERSION,
+                sequence: 0,
+                width: 0,
+                height: 0,
+                format: 255,
+                timestamp_monotonic_ns: 0,
+                data: Vec::new(),
+            };
+            let encoded = Zeroizing::new(encode_preview(&preview_resp)?);
+            return Ok(ResponseOutput {
+                encoded_response: encoded,
+                completion_error: None,
+            });
+        };
+
+        pipe.camera.notify_activity();
+        if !pipe.camera.is_ready() {
+            let max_wake = self
+                .config
+                .connection_timeout
+                .saturating_sub(Duration::from_millis(100))
+                .min(Duration::from_millis(1000));
+            let wake_start = Instant::now();
+            while !pipe.camera.is_ready() && wake_start.elapsed() < max_wake {
+                tokio::time::sleep(Duration::from_millis(15)).await;
+            }
+        }
+
+        let preview_resp = if let Some(captured) = pipe.camera.latest_frame() {
+            let fmt_u8 = match captured.format {
+                soos_camera_v4l::PixelFormat::Rgb24 => 0,
+                soos_camera_v4l::PixelFormat::Grey => 1,
+                soos_camera_v4l::PixelFormat::Yuyv => 2,
+                soos_camera_v4l::PixelFormat::Nv12 => 3,
+                soos_camera_v4l::PixelFormat::Mjpeg => 4,
+            };
+            PreviewResponse {
+                version: CURRENT_VERSION,
+                sequence: captured.sequence,
+                width: captured.width,
+                height: captured.height,
+                format: fmt_u8,
+                timestamp_monotonic_ns: captured.timestamp_mono_ns,
+                data: captured.data.clone(),
+            }
+        } else {
+            PreviewResponse {
+                version: CURRENT_VERSION,
+                sequence: 0,
+                width: 0,
+                height: 0,
+                format: 255,
+                timestamp_monotonic_ns: 0,
+                data: Vec::new(),
+            }
+        };
+
+        // `PreviewResponse` zeroizes its pixel buffer on drop; the encoded copy is wrapped
+        // in `Zeroizing` so both copies are erased once written to the peer.
+        let encoded = Zeroizing::new(encode_preview(&preview_resp)?);
+        debug!(
+            peer_uid = peer_uid,
+            bytes = encoded.len(),
+            "Generated preview response"
+        );
+        Ok(ResponseOutput {
+            encoded_response: encoded,
+            completion_error: None,
+        })
+    }
+
     fn build_response(
         &self,
         request_id: RequestId,
         verdict: Verdict,
         reason_class: ReasonClass,
         now_ns: u64,
-    ) -> Result<Vec<u8>, DaemonError> {
+    ) -> Result<Zeroizing<Vec<u8>>, DaemonError> {
         let resp = Response {
             version: CURRENT_VERSION,
             request_id,
@@ -865,7 +995,7 @@ impl ConnectionDispatcher {
             "Rendered authentication response"
         );
 
-        encode(&resp).map_err(DaemonError::from)
+        encode(&resp).map(Zeroizing::new).map_err(DaemonError::from)
     }
 
     async fn write_response(

@@ -302,7 +302,7 @@ SystemCallArchitectures=native
 - Directly modifying `/etc/pam.d/system-auth` on an `authselect`-managed distribution.
 - Placing facial authentication before `pam_faillock` preauth, bypassing account lockout.
 - Using `sufficient` without checking previous stack failures.
-- Transmitting camera frames or biometric embeddings across the IPC socket or writing them to logs.
+- Transmitting biometric embeddings across the IPC socket, or writing frames or embeddings to logs. Camera frames leave the daemon only through the authorized diagnostic preview stream (`RequestKind::PreviewFrame`: root peer or explicit `[preview]` opt-in, active session, rate limited — see ADR 2026-09-29 and walkthrough 81); never through PAM.
 - Assuming `/dev/video0` index is static or shareable across processes.
 - Downloading unverified ONNX weights at runtime without manifest hash checks.
 - Promising presentation attack security without active or dedicated PAD validation.

@@ -47,7 +47,7 @@ Every message transmitted over the Unix domain stream socket is framed by a 4-by
 
 ### `Request`
 Sent by the PAM module to the daemon to request facial verification:
-- `kind: RequestKind`: Request operation (`Authenticate`).
+- `kind: RequestKind`: Request operation (`Auth`, `Status`, or `PreviewFrame` — the latter is reserved for the diagnostic GUI and governed by §9).
 - `request_id: RequestId`: 256-bit cryptographic random identifier (`[u8; 32]`) sourced via `getrandom`.
 - `uid_hint: u32`: Declared UID from the PAM client (authoritatively cross-checked by the daemon using kernel `SO_PEERCRED`).
 - `service: String`: PAM service name (`"sudo"`, `"su"`, `"gdm-password"`...). Bounded to 64 bytes.
@@ -81,7 +81,7 @@ The `Response` struct implements `Zeroize` and `ZeroizeOnDrop`: sensitive reques
 
 ## 4. Strict Security Invariants
 
-1. **Zero Secrets on Wire**: Neither PAM passwords, biometric embeddings, nor camera frames ever travel over the IPC socket.
+1. **Zero Secrets on Wire**: Neither PAM passwords nor biometric embeddings ever travel over the IPC socket. Camera frames travel only on the authorized diagnostic preview stream described in §9, never towards the PAM module.
 2. **Fail-Closed Fallback (`PAM_IGNORE`)**: Any verdict other than `Allow` (`Deny`, `ProtocolError`, `Unavailable`), network error, or timeout immediately returns `PAM_IGNORE`, seamlessly delegating to fallback modules (`pam_unix.so`).
 3. **Single-Use Binding**: Responses are bound to unique 256-bit nonces and cannot be logically replayed.
 
@@ -152,5 +152,41 @@ To prevent `pam_soos.so` from blocking indefinitely if `soos-daemon` is unrespon
 All sensitive payloads and buffers in the IPC pipeline are scrubbed on drop:
 - `Request` implements `zeroize::Zeroize` and `Drop`, zeroing `request_id`, `service`, and metadata.
 - `Response` implements `zeroize::Zeroize` and `Drop`, resetting `verdict` to `Deny` and zeroing `request_id` and timestamps.
+- `PreviewResponse` implements `zeroize::Zeroize` and `Drop`, erasing the pixel buffer and metadata; the daemon wraps every encoded response (`ResponseOutput::encoded_response`) in `zeroize::Zeroizing`.
 - Raw message buffers (`encoded`, `len_buf`, `full_buf`) are wrapped in `zeroize::Zeroizing` to ensure cryptographic hygiene.
+
+---
+
+## 9. Camera Preview Stream Authorization (`RequestKind::PreviewFrame`)
+
+Camera frames are protected biometric data (`AI/ARCHITECTURE.md` §1). `RequestKind::PreviewFrame` lets the diagnostic GUI (`soos-gui`) display the daemon-owned camera without opening `/dev/video*` itself. Since GitHub #143 (review findings CAM-01 / DMN-02) the daemon treats it as a privileged operation.
+
+### Daemon configuration (`/etc/soos/daemon.toml`)
+
+```toml
+[preview]
+enabled = false            # default: only a root peer may request preview frames
+allowed_uids = []          # unprivileged peer UIDs allowed when enabled = true (max 64 entries)
+max_requests_per_sec = 40  # per peer UID sliding window (root included); 0 refuses every request
+```
+
+Constants live in `crates/daemon/src/preview.rs`: `MAX_PREVIEW_ALLOWED_UIDS = 64`, `DEFAULT_PREVIEW_MAX_REQUESTS_PER_SEC = 40`, `PREVIEW_RATE_WINDOW_NS = 1 s`, `PREVIEW_RATE_MAX_TRACKED_UIDS = 64`. A configuration with more than 64 allow-listed UIDs is rejected at startup (`DaemonError::Config`). The dispatcher created without `with_preview_config` uses `PreviewConfig::default()` (fail-closed).
+
+### Dispatcher decision order (`ConnectionDispatcher::handle_preview_request`)
+
+| Step | Check | Refusal (`Response`, zero pixel bytes) |
+|---|---|---|
+| 6 | Kernel `SO_PEERCRED` UID versus `uid_hint` (`verify_peer_credentials`) | `ProtocolError` / `UidMismatch` |
+| 6c-1 | `authorize_preview`: `peer_uid == 0`, or `enabled` and `peer_uid ∈ allowed_uids` and `peer_uid == uid_hint` | `ProtocolError` / `UidMismatch` |
+| 6c-2 | Unprivileged peer owns an active logind session (`SessionValidator`, same as `Auth`) | `ProtocolError` / `UidMismatch` |
+| 6c-3 | Per-peer-UID rate limit (`soos_policy::RateLimiter`, `check_and_record`) | `ProtocolError` / `RateLimited` |
+| 6c-4 | Monotonic clock available | `Unavailable` / `InternalError` |
+
+Only after these checks does the daemon call `camera.notify_activity()`, wait for readiness and copy the latest capture into a `PreviewResponse` (`format = 255` and empty `data` when no capture is available). The camera is therefore never woken, and the privacy LED never lit, by an unauthorized peer.
+
+### Client contract (`soos-gui` `IpcCameraManager`)
+
+- Each request carries a fresh 256-bit `request_id` (`getrandom`) and the caller's real UID as `uid_hint`; a refusal is recognised as a `Response` bounded by `MAX_MESSAGE_SIZE` whose `request_id` matches the nonce.
+- `IpcPreviewError::Unauthorized` stops the polling worker (no reconnect storm); `RateLimited` backs off 250 ms; `Unavailable` backs off 100 ms; `Protocol` / `Io` reconnect after 200 ms.
+- `IpcCameraManager::probe_preview` performs one round-trip at GUI start-up; on refusal the GUI logs the reason and falls back to direct V4L2 access.
 
