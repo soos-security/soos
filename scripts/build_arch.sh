@@ -100,6 +100,10 @@ bash "${WORKSPACE_ROOT}/scripts/install.sh" \
     --skip-models \
     --skip-systemd
 
+# Hard guard (GitHub #144): a package must never contain key material. The
+# master key is generated on the target host by the post-install scriptlet.
+bash "${WORKSPACE_ROOT}/scripts/check_no_key_material.sh" "${ARCH_STAGE}"
+
 echo "[3/4] Generating Arch Linux package metadata..."
 # Create .PKGINFO
 BUILD_DATE=$(date +%s)

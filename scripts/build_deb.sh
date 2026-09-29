@@ -103,6 +103,10 @@ bash "${WORKSPACE_ROOT}/scripts/install.sh" \
     --skip-models \
     --skip-systemd
 
+# Hard guard (GitHub #144): a package must never contain key material. The
+# master key is generated on the target host by the post-install scriptlet.
+bash "${WORKSPACE_ROOT}/scripts/check_no_key_material.sh" "${STAGE_DIR}"
+
 echo "[3/4] Configuring DEBIAN metadata and control files..."
 mkdir -p "${STAGE_DIR}/DEBIAN"
 
