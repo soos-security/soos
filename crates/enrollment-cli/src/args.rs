@@ -62,8 +62,25 @@ pub enum Commands {
     List(ListArgs),
     /// Import and encrypt a biometric template from file
     Import(ImportArgs),
-    /// Capture a frame, run vision pipeline, and output HTML debug visualization
-    DebugVision,
+    /// Capture a frame, run face detection, and write an HTML debug visualization
+    DebugVision(DebugVisionArgs),
+}
+
+/// Arguments for `debug-vision` subcommand.
+///
+/// The report is written atomically with mode `0600`; the raw camera frame
+/// (biometric data) is embedded only when `--embed-frame` is passed explicitly.
+#[derive(Args, Debug, Clone, Default)]
+pub struct DebugVisionArgs {
+    /// Absolute output path of the HTML report (default: a timestamped file under
+    /// /var/lib/soos/debug). The file must not exist; symbolic links are refused.
+    #[arg(short = 'o', long)]
+    pub output: Option<PathBuf>,
+
+    /// Embed the raw camera frame in the report. The frame is biometric data:
+    /// without this flag only detection geometry (boxes, landmarks) is written.
+    #[arg(long)]
+    pub embed_frame: bool,
 }
 
 /// Arguments for `enroll` subcommand.

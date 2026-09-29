@@ -66,4 +66,10 @@ pub enum EnrollmentCliError {
 
     #[error("Invalid path or path traversal attempt: {0}")]
     InvalidPath(String),
+
+    #[error("Refusing to write debug report to '{}': {reason}", path.display())]
+    DebugReportRefused {
+        path: std::path::PathBuf,
+        reason: String,
+    },
 }
