@@ -146,7 +146,8 @@ Quality and security gates are enforced at multiple levels (details in
 │ 3. Continuous Integration (.github/workflows/ci.yml)        │
 │    - lint (fmt, ShellCheck, candid layers 1+2, per-commit   │
 │      secrets), clippy, test, security (cargo-deny, daily),  │
-│      pam-integration (Docker), ci-success aggregate;        │
+│      pam-integration + authselect-profile (Docker),         │
+│      ci-success aggregate;                                  │
 │      pr-title.yml (Conventional Commits on the PR title)    │
 │    - read-only token, SHA-pinned actions, --locked builds   │
 └─────────────────────────────────────────────────────────────┘

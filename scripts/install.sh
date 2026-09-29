@@ -343,6 +343,21 @@ if [[ -d "${PAM_PKG_DIR}/fedora/soos" ]]; then
     mkdir -p "${FEDORA_AUTH_DIR}"
     cp -r "${PAM_PKG_DIR}/fedora/soos/"* "${FEDORA_AUTH_DIR}/"
     success "Installed Fedora custom authselect profile template."
+
+    # Record the currently selected authselect profile (id + features) so that
+    # scripts/uninstall.sh can restore it once custom/soos has been activated.
+    # The profile is never activated automatically (GitHub #145).
+    if [[ -z "${DESTDIR}" ]] && command -v authselect >/dev/null 2>&1; then
+        AUTHSELECT_CURRENT="$(authselect current --raw 2>/dev/null || true)"
+        AUTHSELECT_PREVIOUS_FILE="${SYSCONFDIR}/soos/authselect.previous"
+        if [[ -n "${AUTHSELECT_CURRENT}" && "${AUTHSELECT_CURRENT}" != custom/soos* ]]; then
+            mkdir -p "${SYSCONFDIR}/soos"
+            printf '%s\n' "${AUTHSELECT_CURRENT}" > "${AUTHSELECT_PREVIOUS_FILE}"
+            chmod 0644 "${AUTHSELECT_PREVIOUS_FILE}"
+            success "Recorded current authselect profile for rollback: ${AUTHSELECT_CURRENT}"
+        fi
+        info "Activate with: authselect select custom/soos with-faillock --force && authselect check"
+    fi
 fi
 
 # Arch snippet

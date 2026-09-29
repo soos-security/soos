@@ -12,7 +12,10 @@
 #   6. Automatically removes ephemeral container
 #
 # Usage:
-#   ./run_tests.sh [--matrix|--all|ubuntu|fedora|arch]
+#   ./run_tests.sh [--matrix|--all|ubuntu|fedora|arch|authselect]
+#
+#   authselect: activates, validates and rolls back the Fedora authselect
+#               profile in a fedora:40 container (tests/docker/authselect_profile_test.sh)
 # =============================================================================
 
 set -euo pipefail
@@ -23,6 +26,8 @@ if [[ "${MODE}" == "--matrix" || "${MODE}" == "--all" ]]; then
     exec ./tests/docker/run_matrix.sh all
 elif [[ "${MODE}" == "ubuntu" || "${MODE}" == "fedora" || "${MODE}" == "arch" ]]; then
     exec ./tests/docker/run_matrix.sh "${MODE}"
+elif [[ "${MODE}" == "authselect" ]]; then
+    exec ./tests/docker/authselect_profile_test.sh
 fi
 
 # ---------------------------------------------------------------------------

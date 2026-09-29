@@ -211,11 +211,54 @@ if [[ -f "${DEBIAN_PAM_DIR}/soos" || -f "${DEBIAN_PAM_DIR}/soos-notify" ]]; then
     success "Removed Debian pam-auth-update profiles."
 fi
 
-# Clean up Fedora authselect custom profile
+# Clean up Fedora authselect custom profile. When custom/soos is the selected
+# profile, the previously recorded profile is restored first: deleting the
+# selected profile would leave authselect without a valid configuration
+# (GitHub #145). If no restoration is possible, the profile is kept in place.
 FEDORA_AUTH_DIR="${DESTDIR}${SYSCONFDIR}/authselect/custom/soos"
-if [[ -d "${FEDORA_AUTH_DIR}" ]]; then
-    rm -rf "${FEDORA_AUTH_DIR}"
-    success "Removed Fedora authselect custom profile."
+AUTHSELECT_PREVIOUS_FILE="${DESTDIR}${SYSCONFDIR}/soos/authselect.previous"
+AUTHSELECT_RESTORED=true
+if [[ -z "${DESTDIR}" ]] && command -v authselect >/dev/null 2>&1; then
+    AUTHSELECT_CURRENT="$(authselect current --raw 2>/dev/null || true)"
+    if [[ "${AUTHSELECT_CURRENT}" == custom/soos* ]]; then
+        AUTHSELECT_PREVIOUS=""
+        if [[ -f "${AUTHSELECT_PREVIOUS_FILE}" ]]; then
+            # Profile id and feature names only (defensive filtering of the recorded line).
+            AUTHSELECT_PREVIOUS="$(head -n 1 "${AUTHSELECT_PREVIOUS_FILE}" | tr -cd 'A-Za-z0-9/_. -')"
+        fi
+        if [[ -z "${AUTHSELECT_PREVIOUS}" || "${AUTHSELECT_PREVIOUS}" == custom/soos* ]]; then
+            AUTHSELECT_PREVIOUS=""
+            for fallback in local minimal sssd; do
+                if authselect list 2>/dev/null | grep -q "^- ${fallback}[[:space:]]"; then
+                    AUTHSELECT_PREVIOUS="${fallback}"
+                    break
+                fi
+            done
+        fi
+        if [[ -z "${AUTHSELECT_PREVIOUS}" ]]; then
+            error "No authselect profile available to replace custom/soos."
+            AUTHSELECT_RESTORED=false
+        else
+            info "Restoring authselect profile: ${AUTHSELECT_PREVIOUS}"
+            # shellcheck disable=SC2086 # word splitting intended: profile id followed by features
+            if authselect select ${AUTHSELECT_PREVIOUS} --force >/dev/null; then
+                success "Restored authselect profile '${AUTHSELECT_PREVIOUS}'."
+            else
+                error "Failed to restore authselect profile '${AUTHSELECT_PREVIOUS}'."
+                AUTHSELECT_RESTORED=false
+            fi
+        fi
+    fi
+fi
+if [[ "${AUTHSELECT_RESTORED}" = true ]]; then
+    rm -f "${AUTHSELECT_PREVIOUS_FILE}"
+    if [[ -d "${FEDORA_AUTH_DIR}" ]]; then
+        rm -rf "${FEDORA_AUTH_DIR}"
+        success "Removed Fedora authselect custom profile."
+    fi
+else
+    warn "Keeping ${FEDORA_AUTH_DIR}: it is still the selected authselect profile."
+    warn "Run 'authselect select <profile> [features] --force' and remove it manually."
 fi
 
 # Clean up Arch snippet

@@ -1,9 +1,98 @@
-soos authselect profile
-========================
-Custom authselect profile integrating soos facial biometric authentication
-with standard system-auth and password-auth stacks.
+Local users with soos facial biometric verification
+===================================================
 
-Stack ordering strictly conforms to ARCHITECTURE.md §5:
-1. pam_soos.so is called with [success=done default=ignore] timeout_ms=250 before pam_unix.so.
+Selecting this profile enables local files as the source of identity and
+authentication providers (it is derived from the authselect "local" profile,
+Fedora 40) and inserts the soos facial biometric PAM module into the
+system-auth and password-auth stacks, in the order mandated by
+AI/ARCHITECTURE.md section 5:
+
+1. pam_soos.so [success=done default=ignore] timeout_ms=250 runs before the
+   password module: a successful facial verification completes authentication,
+   every other outcome (deny, timeout, daemon unavailable) is ignored.
 2. pam_unix.so performs standard password verification.
-3. pam_soos.so event=password-failed timeout_ms=20 is invoked only upon pam_unix failure.
+3. pam_soos.so event=password-failed timeout_ms=20 (optional) notifies the
+   daemon of a failed password attempt for the intrusion evidence store.
+
+pam_faillock.so keeps its "local" profile placement: preauth before pam_soos.so,
+authfail after pam_unix.so and the account-phase check, all enabled by the
+with-faillock feature.
+
+AVAILABLE OPTIONAL FEATURES
+---------------------------
+
+with-faillock::
+    Enable account locking in case of too many consecutive
+    authentication failures.
+
+with-mkhomedir::
+    Enable automatic creation of home directories for users on their
+    first login.
+
+with-ecryptfs::
+    Enable automatic per-user ecryptfs.
+
+with-fingerprint::
+    Enable authentication with fingerprint reader through *pam_fprintd*.
+
+with-pam-gnome-keyring::
+    Enable pam-gnome-keyring support.
+
+with-pam-u2f::
+    Enable authentication via u2f dongle through *pam_u2f*.
+
+with-pam-u2f-2fa::
+    Enable 2nd factor authentication via u2f dongle through *pam_u2f*.
+
+without-pam-u2f-nouserok::
+    Module argument nouserok is omitted if also with-pam-u2f-2fa is used.
+    *WARNING*: Omitting nouserok argument means that users without pam-u2f
+    authentication configured will not be able to log in *INCLUDING* root.
+    Make sure you are able to log in before losing root privileges.
+
+with-silent-lastlog::
+    Do not produce pam_lastlog message during login.
+
+with-pamaccess::
+    Check access.conf during account authorization.
+
+with-pwhistory::
+    Enable pam_pwhistory module for local users.
+
+with-altfiles::
+    Use nss_altfiles for passwd and group nsswitch databases.
+
+with-mdns4::
+    Enable multicast DNS over IPv4.
+
+with-mdns6::
+    Enable multicast DNS over IPv6.
+
+with-systemd-homed::
+    If set, pam_systemd_homed is enabled for all pam operations.
+
+with-libvirt::
+    Enable connecting to libvirt VMs using the hostname configured in the
+    guest OS or, as a fallback, their name.
+
+without-nullok::
+    Do not add nullok parameter to pam_unix.
+
+EXAMPLES
+--------
+
+* Enable the soos profile with account locking (recommended)
+
+  authselect select custom/soos with-faillock
+
+* Carry over the features of the currently selected profile
+
+  authselect current --raw
+  authselect select custom/soos with-faillock with-silent-lastlog
+
+SEE ALSO
+--------
+* man authselect(8)
+* man authselect-profiles(5)
+* man passwd(5)
+* man group(5)
