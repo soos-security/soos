@@ -184,7 +184,7 @@ This document translates the critical gating criteria from §11 of `ARCHITECTURE
 
 | # | Criterion | Test Method | Status |
 |---|---|---|---|
-| PAD1 | **MiniFASNetV2** anti-spoofing model (`minifasnet_v2_pad`) attested in `models/manifest.toml` v2.0.0 with SHA-256 checksum, 80×80 BGR input shape, and `[1, 3]` output shape; `live_class_index = 0` for `[Live, Print, Replay]` class ordering | Manifest parsing test (`manifest_tests::test_parse_workspace_manifest_file`, `manifest_tests::test_manifest_v2_model_count_and_checksum_attestation`) | ✅ Verified |
+| PAD1 | **MiniFASNetV2** anti-spoofing model (`minifasnet_v2_pad`) attested in `models/manifest.toml` v2.0.0 with SHA-256 checksum, 80×80 BGR input shape, and `[1, 3]` output shape; live class index 1 (`DEFAULT_MINIFASNET_LIVE_CLASS_INDEX`) for `[PrintPhoto, Live, ScreenReplay]` class ordering (see ASG1, PLC1–PLC3) | Manifest parsing test (`manifest_tests::test_parse_workspace_manifest_file`, `manifest_tests::test_manifest_v2_model_count_and_checksum_attestation`) | ✅ Verified |
 | PAD2 | `PadDetector` trait, `OrtPadDetector`, and `MockPadDetector` with numerically stable softmax and fault injection | Unit tests (`pad_tests::test_mock_pad_detector_nominal_live`, `test_mock_pad_detector_spoof_*`, `test_softmax_numerical_stability`) | ✅ Verified |
 | PAD3 | Vision pipeline short-circuits on spoof detection, completely skipping embedding extraction | Pipeline unit tests (`pad_tests::test_pipeline_rejects_printed_photo_spoof`, `test_pipeline_rejects_screen_replay_spoof`) | ✅ Verified |
 | PAD4 | Genuine live face candidates pass PAD and extract biometric embeddings | Pipeline unit tests (`pad_tests::test_pipeline_accepts_live_face`, `test_pad_threshold_calibration`) | ✅ Verified |
@@ -315,7 +315,7 @@ This document translates the critical gating criteria from §11 of `ARCHITECTURE
 | # | Criterion | Test Method | Status |
 |---|---|---|---|
 | NGM8 | `OrtPadDetector::prepare_input()` produces 80×80 NCHW BGR tensors with `pixel / 255.0` normalization into `[0.0, 1.0]`, deterministic zeroization post-inference, and 80×80 dimension validation | Unit tests (`pad_tests::test_pad_prepare_input_80x80_bgr`, `pad_tests::test_pad_normalization_0_1_range`, `pad_tests::test_pad_invalid_dimensions_message_80x80`, `zeroize_tests::test_inference_input_buffers_zeroized`) | ✅ Verified |
-| NGM9 | `OrtPadDetector` defaults `live_class_index` to 0 (MiniFASNetV2 `[Live, Print, Replay]`) and supports configurable class indices with ordinal spoof attack classification (`PrintPhoto` vs `ScreenReplay`) | Unit tests (`pad_tests::test_pad_class_ordering_live_index_0`, `pad_tests::test_pad_class_ordering_configurable`) | ✅ Verified |
+| NGM9 | `OrtPadDetector` defaults `live_class_index` to `DEFAULT_MINIFASNET_LIVE_CLASS_INDEX` (1, MiniFASNetV2 `[PrintPhoto, Live, ScreenReplay]`); `interpret_probabilities` supports explicit class indices (test-only constructors) with ordinal spoof attack classification (`PrintPhoto` vs `ScreenReplay`) | Unit tests (`pad_tests::test_pad_default_live_class_index_is_one`, `pad_tests::test_pad_class_ordering_live_index_0`, `pad_tests::test_pad_class_ordering_configurable`) | ✅ Verified |
 | NGM10 | `OrtPadDetector` handles empty probability distributions fail-closed and preserves panic safety and numerical softmax stability | Unit tests (`pad_tests::test_softmax_numerical_stability`, `pad_tests::test_mock_pad_detector_*`) | ✅ Verified |
 
 ---
@@ -390,7 +390,7 @@ This document translates the critical gating criteria from §11 of `ARCHITECTURE
 
 | # | Criterion | Test Method | Status |
 |---|---|---|---|
-| ASG1 | MiniFASNet live class index alignment (class index 1 = live, class 0 = print photo, class 2 = screen replay), preventing screen replay spoof attacks | Unit & integration tests (`pad_tests::test_minifasnet_live_class_index_is_1`, `pad_tests::test_minifasnet_rejects_screen_replay_spoof`, `pad_tests::test_pipeline_rejects_screen_replay_spoof`) | ✅ Verified |
+| ASG1 | MiniFASNet live class index alignment (class index 1 = live, class 0 = print photo, class 2 = screen replay), preventing screen replay spoof attacks | Unit & integration tests (`pad_tests::test_pad_default_live_class_index_is_one`, `pad_tests::test_screen_replay_detected_as_spoof_with_default_index` in `crates/inference-ort`, `pad_tests::test_pipeline_rejects_screen_replay_spoof` in `crates/vision`; production wiring covered by PLC1–PLC3) | ✅ Verified |
 | ASG2 | Aspect-ratio preserving ROI expansion for PAD without distortion (`expand_bbox_for_pad` using Minivision shifting algorithm `_get_new_box`) | Unit tests (`pad_tests::test_expand_bbox_shifts_roi_without_distortion`, `crop_tests::test_expand_bbox_for_pad_expansion_and_clamping`) | ✅ Verified |
 | ASG3 | Dual-sensor hardware IR camera preference defaulted in `camera-v4l` (`SensorPreference::PreferIr`) and 31-character truncated V4L2 device name classification (`USB2.0 FHD UVC WebCam: USB2.0 I`) | Unit tests (`dual_sensor_tests::test_sensor_preference_defaults_to_prefer_ir`, `dual_sensor_tests::test_v4l2_31_char_truncated_name_classified_as_ir`) | ✅ Verified |
 | ASG4 | Latency budget & auto-standby wake calibration (daemon pipeline decision budget 900ms, wake timeout 800ms) ensuring reliable first-attempt authentication within PAM 1000ms deadline | Unit tests (`config_tests::test_daemon_pipeline_decision_budget_calibrated_for_warmup`, `config_tests::test_daemon_camera_config_defaults_prefer_ir`) | ✅ Verified |
@@ -428,4 +428,14 @@ This document translates the critical gating criteria from §11 of `ARCHITECTURE
 | GARP2 | V4L2 MMAP buffer payload slicing in `crates/camera-v4l/src/v4l_impl.rs` bounds buffer to `meta.bytesused`, eliminating trailing buffer padding bytes on compressed/MJPEG formats | Integration tests (`soos_camera_v4l::v4l_impl`, `tests/physical_hardware_tests.rs`) | ✅ Verified |
 | GARP3 | `soos-gui` vision worker fallback converts raw camera frame to RGB24 and populates preview slot on neural pipeline error, keeping preview responsive, and sets default MiniFASNet live class index (1) | Unit tests (`layout_tests::test_gui_worker_fallback_renders_raw_rgb_on_pipeline_error`, `layout_tests::test_windowed_mode_live_inspection_layout_with_checkboxes`) | ✅ Verified |
 | GARP4 | System provisioning scripts (`scripts/install.sh`, `scripts/uninstall.sh`) manage `soos-gui` binary lifecycle in `/usr/bin/soos-gui` | Invariant tests (`soos-invariants::tests::test_install_script_creates_required_directories`, `soos-invariants::tests::test_uninstall_restores_pam_config`) | ✅ Verified |
+
+---
+
+## Component: `pad-live-class-index-single-source` (Review finding PAD-01 / GitHub #146)
+
+| # | Criterion | Test Method | Status |
+|---|---|---|---|
+| PLC1 | `soos-daemon` builds its PAD detector through `pipeline::build_pad_detector` with the crate default live class index (`DEFAULT_MINIFASNET_LIVE_CLASS_INDEX = 1`) and the configured `vision.pad_threshold`; no literal index on the PAM authentication path | Integration tests with an in-memory ONNX session (`pad_wiring_tests::test_pipeline_pad_detector_uses_default_live_class_index`, `pad_wiring_tests::test_pipeline_pad_detector_classifies_replay_as_spoof` in `crates/daemon`, fixture `tests/fixtures/mod.rs::onnx::minimal_identity_model`) | ✅ Verified |
+| PLC2 | `soos-enroll` builds its PAD detector through `service::build_pad_detector` with the crate default live class index, so enrollment and `verify` diagnostics score liveness from the same class as the daemon and the GUI (class 2 = screen replay is a spoof, class 1 = live passes) | Integration tests (`pad_wiring_tests::test_enrollment_pad_detector_uses_default_live_class_index`, `pad_wiring_tests::test_enrollment_pad_detector_classifies_replay_as_spoof`) | ✅ Verified |
+| PLC3 | Repository invariant: `DEFAULT_MINIFASNET_LIVE_CLASS_INDEX` is defined once (value 1) in `crates/inference-ort/src/pad.rs`; `new_with_class_index(` / `with_live_class_index(` never appear in production code of any crate (test-only constructors), and at least three production sites construct `OrtPadDetector::new` | Invariant test (`soos-invariants::tests::test_no_pad_live_class_index_override_outside_tests`) | ✅ Verified |
 

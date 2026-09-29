@@ -770,7 +770,7 @@ pub fn build_full_service(cli: &Cli) -> Result<EnrollmentService, EnrollmentCliE
     let emb_session = registry.get_or_load_session(MODEL_ID_EMBEDDING)?;
 
     let detector = Arc::new(OrtScrfdDetector::new(det_session, 0.70, 0.40)?);
-    let pad = Arc::new(OrtPadDetector::new_with_class_index(pad_session, 0.80, 2));
+    let pad = Arc::new(build_pad_detector(pad_session, 0.80));
     let extractor = Arc::new(OrtEmbeddingExtractor::new(emb_session));
 
     let pipeline_config = VisionPipelineConfig::default();
@@ -782,6 +782,19 @@ pub fn build_full_service(cli: &Cli) -> Result<EnrollmentService, EnrollmentCliE
     ));
 
     Ok(EnrollmentService::new(store, camera, pipeline, true))
+}
+
+/// Builds the CLI's production Presentation Attack Detector.
+///
+/// Sole PAD construction site of `soos-enroll`. The live class index is never overridden
+/// here: `soos_inference_ort::pad::DEFAULT_MINIFASNET_LIVE_CLASS_INDEX` is the single source
+/// of truth shared with `soos-daemon` and `soos-gui` (GitHub #146, enforced by the
+/// `test_no_pad_live_class_index_override_outside_tests` invariant).
+pub fn build_pad_detector(
+    pad_session: soos_inference_ort::SharedSession,
+    liveness_threshold: f32,
+) -> OrtPadDetector {
+    OrtPadDetector::new(pad_session, liveness_threshold)
 }
 
 /// Builds an `EnrollmentService` (full service alias for backward compatibility).

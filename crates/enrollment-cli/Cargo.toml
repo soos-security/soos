@@ -33,6 +33,7 @@ toml = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+ort = { workspace = true }
 
 [lints]
 workspace = true

@@ -7,6 +7,10 @@ use ort::session::Session;
 use crate::error::InferenceError;
 use crate::manifest::ModelManifest;
 
+/// Thread-safe, shared ONNX Runtime session handle as returned by
+/// [`ModelRegistry::get_or_load_session`] and consumed by every detector constructor.
+pub type SharedSession = Arc<Mutex<Session>>;
+
 /// Configuration for ONNX Runtime sessions and model storage paths.
 #[derive(Debug, Clone)]
 pub struct RegistryConfig {

@@ -104,6 +104,19 @@ pub fn current_monotonic_nanos_from_clock(
     }
 }
 
+/// Builds the daemon's production Presentation Attack Detector.
+///
+/// Sole PAD construction site of the daemon. The live class index is never overridden here:
+/// `soos_inference_ort::pad::DEFAULT_MINIFASNET_LIVE_CLASS_INDEX` is the single source of
+/// truth shared with `soos-enroll` and `soos-gui` (GitHub #146, enforced by the
+/// `test_no_pad_live_class_index_override_outside_tests` invariant).
+pub fn build_pad_detector(
+    pad_session: soos_inference_ort::SharedSession,
+    pad_threshold: f32,
+) -> soos_inference_ort::OrtPadDetector {
+    soos_inference_ort::OrtPadDetector::new(pad_session, pad_threshold)
+}
+
 /// Initializes all production pipeline components from a strongly-typed [`PipelineConfig`].
 ///
 /// This includes:
@@ -186,11 +199,7 @@ pub fn initialize_pipeline(
         config.vision.min_face_confidence,
         0.45,
     )?);
-    let pad = Arc::new(soos_inference_ort::OrtPadDetector::new_with_class_index(
-        pad_session,
-        config.vision.pad_threshold,
-        2,
-    ));
+    let pad = Arc::new(build_pad_detector(pad_session, config.vision.pad_threshold));
     let extractor = Arc::new(soos_inference_ort::OrtEmbeddingExtractor::new(ext_session));
 
     let vision = Arc::new(soos_vision::VisionPipeline::new(
