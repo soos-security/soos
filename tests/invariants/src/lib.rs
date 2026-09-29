@@ -1389,4 +1389,353 @@ mod tests {
             );
         }
     }
+
+    /// Files an authselect custom profile must ship so that activating it never leaves a
+    /// generated system file empty (authselect writes every managed file from the profile).
+    const AUTHSELECT_PROFILE_FILES: [&str; 10] = [
+        "README",
+        "REQUIREMENTS",
+        "system-auth",
+        "password-auth",
+        "nsswitch.conf",
+        "fingerprint-auth",
+        "smartcard-auth",
+        "postlogin",
+        "dconf-db",
+        "dconf-locks",
+    ];
+
+    /// Returns the byte offset of `needle` in `haystack`, failing with `what` when absent.
+    fn offset_of(haystack: &str, needle: &str, what: &str) -> usize {
+        haystack
+            .find(needle)
+            .unwrap_or_else(|| panic!("{what}: '{needle}' not found"))
+    }
+
+    /// Collects the feature names referenced by authselect conditionals
+    /// (`{include if "x"}`, `{if "x":...}`, `{exclude if "x"}`, `{continue if "x"}`).
+    fn referenced_features(template: &str) -> std::collections::BTreeSet<String> {
+        let mut features = std::collections::BTreeSet::new();
+        for (idx, _) in template.match_indices("{") {
+            let rest = &template[idx..];
+            let Some(end) = rest.find('}') else { continue };
+            let block = &rest[..end];
+            let is_conditional = block.starts_with("{include if ")
+                || block.starts_with("{exclude if ")
+                || block.starts_with("{continue if ")
+                || block.starts_with("{if ");
+            if !is_conditional {
+                continue;
+            }
+            let mut parts = block.split('"');
+            parts.next();
+            while let (Some(name), Some(_)) = (parts.next(), parts.next()) {
+                features.insert(name.to_string());
+            }
+        }
+        features
+    }
+
+    /// Invariant: Fedora authselect profile is complete (Issue ONB-02 / GitHub #145)
+    ///
+    /// `authselect select custom/soos` regenerates every managed file from the profile
+    /// directory. A profile shipping only `system-auth`/`password-auth` empties
+    /// `/etc/nsswitch.conf` on activation. The profile must therefore ship the full
+    /// `local` layout and use real authselect conditional syntax.
+    #[test]
+    fn test_fedora_authselect_profile_is_complete() {
+        let root = workspace_root();
+        let profile_dir = root.join("packaging/pam/fedora/soos");
+        assert!(
+            profile_dir.is_dir(),
+            "packaging/pam/fedora/soos must be a directory"
+        );
+
+        for name in AUTHSELECT_PROFILE_FILES {
+            let path = profile_dir.join(name);
+            assert!(
+                path.is_file(),
+                "authselect profile file '{name}' is missing from packaging/pam/fedora/soos"
+            );
+            let content = fs::read_to_string(&path).expect("read profile file");
+            assert!(
+                !content.contains("{?"),
+                "'{name}' uses the unsupported '{{?feature:...}}' syntax; use \
+                 '{{include if \"feature\"}}' (authselect-profiles(5))"
+            );
+        }
+
+        let nsswitch =
+            fs::read_to_string(profile_dir.join("nsswitch.conf")).expect("read nsswitch.conf");
+        for database in ["passwd:", "shadow:", "group:", "hosts:", "services:"] {
+            assert!(
+                nsswitch.lines().any(|l| l.starts_with(database)),
+                "nsswitch.conf template must define the '{database}' database"
+            );
+        }
+        assert!(
+            nsswitch.contains("hosts:") && nsswitch.contains("resolve [!UNAVAIL=return] dns"),
+            "nsswitch.conf template must keep the systemd-resolved hosts chain"
+        );
+
+        let readme = fs::read_to_string(profile_dir.join("README")).expect("read README");
+        assert!(
+            readme.contains("AVAILABLE OPTIONAL FEATURES"),
+            "README must declare its optional features under 'AVAILABLE OPTIONAL FEATURES'"
+        );
+        assert!(
+            readme.contains("with-faillock::"),
+            "README must declare the 'with-faillock' feature (otherwise \
+             'authselect select custom/soos with-faillock' is rejected)"
+        );
+
+        // Every feature referenced by a template must be declared in the README,
+        // otherwise authselect rejects it with "Unknown profile feature".
+        let mut referenced = std::collections::BTreeSet::new();
+        for name in AUTHSELECT_PROFILE_FILES {
+            if name == "README" {
+                continue;
+            }
+            let content = fs::read_to_string(profile_dir.join(name)).expect("read template");
+            referenced.extend(referenced_features(&content));
+        }
+        assert!(
+            referenced.contains("with-faillock"),
+            "templates must reference the 'with-faillock' feature"
+        );
+        for feature in &referenced {
+            assert!(
+                readme.contains(&format!("{feature}::")),
+                "feature '{feature}' is referenced by a template but not declared in README"
+            );
+        }
+    }
+
+    /// Invariant: Fedora authselect profile preserves pam_faillock ordering
+    /// (Issue ONB-02 / GitHub #145, auditor checklist item 8)
+    ///
+    /// Generated stacks must contain `pam_faillock.so preauth` before `pam_soos.so`,
+    /// `pam_soos.so` before `pam_unix.so`, `pam_faillock.so authfail` after `pam_unix.so`
+    /// and the account-phase `pam_faillock.so`, all gated by `{include if "with-faillock"}`.
+    #[test]
+    fn test_fedora_authselect_profile_preserves_faillock_ordering() {
+        let root = workspace_root();
+        let profile_dir = root.join("packaging/pam/fedora/soos");
+        let include_if = "{include if \"with-faillock\"}";
+
+        for template in ["system-auth", "password-auth"] {
+            let content = fs::read_to_string(profile_dir.join(template)).expect("read template");
+            let ctx = format!("packaging/pam/fedora/soos/{template}");
+
+            let preauth = offset_of(&content, "pam_faillock.so preauth silent", &ctx);
+            let soos = offset_of(&content, "pam_soos.so timeout_ms=250", &ctx);
+            let unix = offset_of(&content, "pam_unix.so", &ctx);
+            let authfail = offset_of(&content, "pam_faillock.so authfail", &ctx);
+            let event = offset_of(&content, "pam_soos.so event=password-failed", &ctx);
+
+            assert!(
+                preauth < soos,
+                "{ctx}: faillock preauth must precede pam_soos"
+            );
+            assert!(soos < unix, "{ctx}: pam_soos must precede pam_unix");
+            assert!(
+                unix < authfail,
+                "{ctx}: faillock authfail must follow pam_unix"
+            );
+            assert!(
+                unix < event,
+                "{ctx}: password-failed event must follow pam_unix"
+            );
+            assert!(
+                content.lines().any(|l| l.starts_with("auth")
+                    && l.contains("[success=done default=ignore]")
+                    && l.contains("pam_soos.so timeout_ms=250")),
+                "{ctx}: pam_soos primary line must be [success=done default=ignore]"
+            );
+            assert!(
+                content.lines().any(|l| l.starts_with("auth")
+                    && l.contains("optional")
+                    && l.contains("pam_soos.so event=password-failed timeout_ms=20")),
+                "{ctx}: password-failed line must be 'auth optional ... timeout_ms=20'"
+            );
+
+            // Each pam_faillock line must be conditional on the declared feature.
+            let faillock_lines: Vec<&str> = content
+                .lines()
+                .filter(|l| l.contains("pam_faillock.so"))
+                .collect();
+            assert_eq!(
+                faillock_lines.len(),
+                3,
+                "{ctx}: expected preauth, authfail and account pam_faillock lines"
+            );
+            for line in &faillock_lines {
+                assert!(
+                    line.trim_end().ends_with(include_if),
+                    "{ctx}: pam_faillock line must end with {include_if}: '{line}'"
+                );
+            }
+            assert!(
+                faillock_lines
+                    .iter()
+                    .any(|l| l.starts_with("account") && !l.contains("preauth")),
+                "{ctx}: account phase must run pam_faillock.so"
+            );
+
+            // The password fallback must remain reachable: pam_unix stays `sufficient`,
+            // and no `[default=die]` control can short-circuit the stack before pam_deny.
+            assert!(
+                content.lines().any(|l| l.starts_with("auth")
+                    && l.contains("sufficient")
+                    && l.contains("pam_unix.so")),
+                "{ctx}: pam_unix.so auth line must be 'sufficient'"
+            );
+            assert!(
+                !content.contains("[default=die]"),
+                "{ctx}: '[default=die]' would skip the password-failed event"
+            );
+            assert!(
+                content
+                    .lines()
+                    .any(|l| l.starts_with("auth") && l.contains("pam_deny.so")),
+                "{ctx}: auth stack must end with pam_deny.so"
+            );
+        }
+    }
+
+    /// Invariant: activation, validation and rollback of the Fedora profile are
+    /// scripted and documented with commands authselect accepts (Issue ONB-02 / GitHub #145)
+    #[test]
+    fn test_fedora_authselect_activation_and_rollback_are_scripted() {
+        let root = workspace_root();
+        let activation = "authselect select custom/soos with-faillock --force";
+
+        // 1. Documentation uses the supported activation command and real syntax.
+        for doc in [
+            "Docs/DISTRIBUTION_DEPLOYMENT.md",
+            "Docs/PACKAGING_AND_PROVISIONING.md",
+        ] {
+            let content = fs::read_to_string(root.join(doc)).expect("read doc");
+            assert!(
+                content.contains(activation),
+                "{doc} must document '{activation}'"
+            );
+            assert!(
+                !content.contains("{?with-faillock"),
+                "{doc} must not show the unsupported '{{?with-faillock:...}}' syntax"
+            );
+            assert!(
+                content.contains("authselect.previous"),
+                "{doc} must document the recorded previous profile used for rollback"
+            );
+        }
+
+        // 2. install.sh records the previously selected profile; uninstall.sh restores it
+        //    before deleting the custom profile directory.
+        let install = fs::read_to_string(root.join("scripts/install.sh")).expect("read install");
+        assert!(
+            install.contains("authselect current --raw") && install.contains("authselect.previous"),
+            "scripts/install.sh must record 'authselect current --raw' into authselect.previous"
+        );
+        let uninstall =
+            fs::read_to_string(root.join("scripts/uninstall.sh")).expect("read uninstall");
+        assert!(
+            uninstall.contains("authselect.previous") && uninstall.contains("authselect select"),
+            "scripts/uninstall.sh must restore the recorded profile with 'authselect select'"
+        );
+        let restore_pos = offset_of(&uninstall, "authselect select", "uninstall.sh");
+        let remove_pos = offset_of(&uninstall, "rm -rf \"${FEDORA_AUTH_DIR}\"", "uninstall.sh");
+        assert!(
+            restore_pos < remove_pos,
+            "scripts/uninstall.sh must restore the previous profile before removing custom/soos"
+        );
+
+        // 3. RPM scriptlets implement the same record/restore contract.
+        let spec = fs::read_to_string(root.join("packaging/rpm/soos.spec")).expect("read spec");
+        // Section headers start a line; comments may mention other scriptlets.
+        let post = offset_of(&spec, "\n%post\n", "soos.spec");
+        let preun = offset_of(&spec, "\n%preun\n", "soos.spec");
+        let postun = offset_of(&spec, "\n%postun\n", "soos.spec");
+        assert!(post < preun && preun < postun, "soos.spec scriptlet order");
+        let post_section = &spec[post..preun];
+        let preun_section = &spec[preun..postun];
+        assert!(
+            post_section.contains("authselect current --raw")
+                && post_section.contains("authselect.previous"),
+            "soos.spec %post must record the current authselect profile"
+        );
+        assert!(
+            preun_section.contains("authselect select")
+                && preun_section.contains("authselect.previous"),
+            "soos.spec %preun must restore the recorded authselect profile"
+        );
+        assert!(
+            spec.contains("%ghost %{_sysconfdir}/soos/authselect.previous"),
+            "soos.spec must own authselect.previous as a %ghost file"
+        );
+
+        // 4. The distribution test activates the profile for real instead of tolerating
+        //    an `authselect check` failure.
+        let fedora_test = fs::read_to_string(root.join("tests/distro/fedora_rhel_test.sh"))
+            .expect("read fedora_rhel_test.sh");
+        assert!(
+            !fedora_test.contains("authselect check || true"),
+            "fedora_rhel_test.sh must not ignore 'authselect check' failures"
+        );
+        assert!(
+            fedora_test.contains(activation),
+            "fedora_rhel_test.sh must activate the profile with '{activation}'"
+        );
+        assert!(
+            fedora_test.contains("/etc/nsswitch.conf"),
+            "fedora_rhel_test.sh must verify /etc/nsswitch.conf after activation"
+        );
+
+        // 5. A Dockerized Fedora validation exists, is strict and is wired into run_tests.sh.
+        let docker_test = root.join("tests/docker/authselect_profile_test.sh");
+        assert!(
+            docker_test.is_file(),
+            "tests/docker/authselect_profile_test.sh must exist"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let meta = fs::metadata(&docker_test).expect("docker test metadata");
+            assert_ne!(
+                meta.permissions().mode() & 0o111,
+                0,
+                "tests/docker/authselect_profile_test.sh must be executable"
+            );
+        }
+        let docker_content = fs::read_to_string(&docker_test).expect("read docker test");
+        assert!(
+            docker_content.starts_with("#!/usr/bin/env bash")
+                && docker_content.contains("set -euo pipefail"),
+            "authselect_profile_test.sh must be a strict bash script"
+        );
+        for needle in [
+            activation,
+            "authselect check",
+            "/etc/nsswitch.conf",
+            "pam_faillock.so preauth",
+            "pam_faillock.so authfail",
+            "pamtester",
+            "scripts/uninstall.sh",
+        ] {
+            assert!(
+                docker_content.contains(needle),
+                "authselect_profile_test.sh must cover '{needle}'"
+            );
+        }
+        let run_tests = fs::read_to_string(root.join("run_tests.sh")).expect("read run_tests.sh");
+        assert!(
+            run_tests.contains("authselect_profile_test.sh"),
+            "run_tests.sh must expose the authselect profile test"
+        );
+        let ci = fs::read_to_string(root.join(".github/workflows/ci.yml")).expect("read ci.yml");
+        assert!(
+            ci.contains("authselect_profile_test.sh"),
+            "ci.yml must run the Fedora authselect profile test"
+        );
+    }
 }

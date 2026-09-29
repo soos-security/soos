@@ -69,7 +69,8 @@ tests/docker/
 ├── pam_test_runner.c        # Native C non-interactive & interactive PAM test harness
 ├── mock_daemon.py           # Socket simulator for allow, timeout, and mid-stream crash
 ├── test_suite.sh            # In-container test suite executing T1..T8
-└── run_matrix.sh            # Host driver orchestrating multi-distro builds & runs
+├── run_matrix.sh            # Host driver orchestrating multi-distro builds & runs
+└── authselect_profile_test.sh  # Fedora authselect profile activation/rollback (A1..A7)
 ```
 
 ### Execution Commands
@@ -87,4 +88,12 @@ tests/docker/
 - Run targeted distribution test:
   ```bash
   ./tests/docker/run_matrix.sh fedora
+  ```
+- Validate the Fedora `authselect` custom profile (activation with `with-faillock`,
+  `authselect check`, generated `system-auth`/`password-auth` ordering, `/etc/nsswitch.conf`
+  preserved, password fallback via `pamtester`, rollback through `scripts/uninstall.sh`):
+  ```bash
+  ./run_tests.sh authselect
+  # Or:
+  ./tests/docker/authselect_profile_test.sh
   ```

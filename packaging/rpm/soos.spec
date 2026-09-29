@@ -52,6 +52,8 @@ install -m 0644 packaging/soos-daemon.service %{buildroot}%{_unitdir}/soos-daemo
 # Install Fedora custom authselect profile
 install -d -m 0755 %{buildroot}%{_sysconfdir}/authselect/custom/soos
 cp -r packaging/pam/fedora/soos/* %{buildroot}%{_sysconfdir}/authselect/custom/soos/
+# Configuration directory (disable flags, recorded authselect profile)
+install -d -m 0755 %{buildroot}%{_sysconfdir}/soos
 
 # Provision state and runtime directories
 install -d -m 0755 %{buildroot}%{_sharedstatedir}/soos
@@ -90,8 +92,47 @@ mkdir -p %{_rundir}/soos
 chmod 0750 %{_rundir}/soos || :
 chown root:soos %{_rundir}/soos 2>/dev/null || :
 
+# Record the selected authselect profile (id + features) so that %preun can
+# restore it once custom/soos has been activated. The profile is never
+# activated automatically: run 'authselect select custom/soos with-faillock --force'.
+if command -v authselect >/dev/null 2>&1; then
+    current="$(authselect current --raw 2>/dev/null || :)"
+    case "${current}" in
+        ""|custom/soos*) : ;;
+        *)
+            mkdir -p %{_sysconfdir}/soos || :
+            echo "${current}" > %{_sysconfdir}/soos/authselect.previous || :
+            chmod 0644 %{_sysconfdir}/soos/authselect.previous || :
+            ;;
+    esac
+fi
+
 %preun
 %systemd_preun soos-daemon.service
+
+# On package removal, leave authselect on a valid profile before the custom
+# profile files disappear: restore the recorded profile, else a stock one.
+if [ "$1" -eq 0 ] && command -v authselect >/dev/null 2>&1; then
+    current="$(authselect current --raw 2>/dev/null || :)"
+    case "${current}" in
+        custom/soos*)
+            previous=""
+            if [ -f %{_sysconfdir}/soos/authselect.previous ]; then
+                previous="$(head -n 1 %{_sysconfdir}/soos/authselect.previous | tr -cd 'A-Za-z0-9/_. -')"
+            fi
+            case "${previous}" in
+                ""|custom/soos*) previous="local" ;;
+            esac
+            # Word splitting intended: profile id followed by feature names.
+            authselect select ${previous} --force >/dev/null 2>&1 \
+                || authselect select local --force >/dev/null 2>&1 \
+                || authselect select minimal --force >/dev/null 2>&1 \
+                || authselect select sssd --force >/dev/null 2>&1 \
+                || echo "soos: unable to restore an authselect profile, run 'authselect select <profile> --force' manually" >&2
+            ;;
+    esac
+    rm -f %{_sysconfdir}/soos/authselect.previous || :
+fi
 
 %postun
 %systemd_postun_with_restart soos-daemon.service
@@ -103,6 +144,8 @@ chown root:soos %{_rundir}/soos 2>/dev/null || :
 %{_libdir}/security/pam_soos.so
 %{_unitdir}/soos-daemon.service
 %{_sysconfdir}/authselect/custom/soos
+%dir %attr(0755, root, root) %{_sysconfdir}/soos
+%ghost %{_sysconfdir}/soos/authselect.previous
 %dir %attr(0755, root, root) %{_sharedstatedir}/soos
 %dir %attr(0700, root, root) %{_sharedstatedir}/soos/biometrics
 %dir %attr(0700, root, root) %{_sharedstatedir}/soos/evidence

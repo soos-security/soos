@@ -79,9 +79,15 @@ auth  optional                       pam_soos.so event=password-failed timeout_m
 - Enable command: `pam-auth-update --enable soos soos-notify`
 
 #### Fedora / RHEL (`authselect`)
-- Custom `authselect` profile template located in `packaging/pam/fedora/soos/`.
-- Deployed to `/etc/authselect/custom/soos/`.
-- Enable command: `authselect select custom/soos`
+- Complete custom `authselect` profile in `packaging/pam/fedora/soos/` (derived from the Fedora 40
+  `local` profile: `README` with the declared features, `REQUIREMENTS`, `system-auth`,
+  `password-auth`, `nsswitch.conf`, `fingerprint-auth`, `smartcard-auth`, `postlogin`, `dconf-db`,
+  `dconf-locks`). Conditionals use the `{include if "with-faillock"}` syntax of `authselect-profiles(5)`.
+- Deployed to `/etc/authselect/custom/soos/`; the previously selected profile is recorded in
+  `/etc/soos/authselect.previous` for rollback. The profile is never activated automatically.
+- Enable command: `authselect select custom/soos with-faillock --force` then `authselect check`
+  (append the other features listed by `authselect current --raw`).
+- Validation: `./run_tests.sh authselect` (fedora:40 container, see `Docs/DISTRIBUTION_DEPLOYMENT.md` §4).
 
 #### Arch Linux
 - Universal snippet in `packaging/pam/arch/system-auth.snippet`.
@@ -95,7 +101,7 @@ The uninstallation script guarantees that removing `soos` will **never lock an a
 
 ### Capabilities
 - **Systemd Teardown**: Stops and disables `soos-daemon.service`, removes the unit file, and issues `daemon-reload`.
-- **PAM Configuration Rollback**: Restores original PAM configurations from backup (`*.soos-backup`), deregisters profiles from `pam-auth-update`, or removes custom `authselect` profiles.
+- **PAM Configuration Rollback**: Restores original PAM configurations from backup (`*.soos-backup`), deregisters profiles from `pam-auth-update`, or — when `custom/soos` is the selected `authselect` profile — re-selects the profile recorded in `/etc/soos/authselect.previous` (fallback `local`, `minimal`, `sssd`) before removing the custom profile; the profile is kept if no restoration succeeds.
 - **Binary Cleanup**: Removes `soos-daemon`, `soos-enroll`, `soos-admin`, and `pam_soos.so`.
 - **Data Protection**:
   - By default (or with `--keep-data`): strictly retains `/var/lib/soos/biometrics`, `/var/lib/soos/evidence`, and `/var/lib/soos/master.key`.

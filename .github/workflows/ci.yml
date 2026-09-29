@@ -12,7 +12,9 @@
 #   3. test            — cargo test (unit, integration, invariant suites)
 #   4. security        — cargo-deny (advisories, licenses, sources, bans)
 #   5. pam-integration — Dockerized PAM matrix T1–T9 (after lint)
-#   6. ci-success      — single aggregate status for merge gating
+#   6. authselect-profile — Fedora authselect profile activation and rollback
+#                        in fedora:40 (after lint)
+#   7. ci-success      — single aggregate status for merge gating
 # The PR title convention is checked by pr-title.yml (it must also re-run when
 # a PR is retitled, which would needlessly re-run this whole pipeline).
 #
@@ -211,12 +213,30 @@ jobs:
             bash /workspace/tests/docker/test_suite.sh
 
   # ---------------------------------------------------------------------------
-  # Job 6: Aggregate status (single required check for merge gating)
+  # Job 6: Fedora authselect profile — activation, generated PAM/NSS files,
+  # password fallback and rollback in a stock fedora:40 container (GitHub #145)
+  # ---------------------------------------------------------------------------
+  authselect-profile:
+    name: "Fedora authselect profile (Docker)"
+    if: github.event_name != 'schedule'
+    needs: lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Activate, validate and roll back custom/soos in fedora:40
+        run: ./tests/docker/authselect_profile_test.sh
+
+  # ---------------------------------------------------------------------------
+  # Job 7: Aggregate status (single required check for merge gating)
   # ---------------------------------------------------------------------------
   ci-success:
     name: "CI Success"
     if: always() && github.event_name != 'schedule'
-    needs: [lint, clippy, test, security, pam-integration]
+    needs: [lint, clippy, test, security, pam-integration, authselect-profile]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
