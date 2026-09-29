@@ -1,13 +1,24 @@
 # =============================================================================
 # CI/CD — Verification Pipeline for the soos Project
 # =============================================================================
-# This workflow runs on every push and pull request against the main branch.
-# It enforces the exact quality and security pipeline from save.sh:
+# Runs on every pull request against main, every push to main, daily (supply
+# chain advisories only) and on manual dispatch. Commands are identical to
+# save.sh so that a green local run predicts a green CI run.
 #
-# Jobs:
-#   1. quality  — fmt, clippy, unit & invariant tests, candid review
-#   2. security — cargo-deny (licenses, advisories, sources, bans)
-#   3. pam-integration — PAM integration tests in isolated Docker container
+# Jobs (parallel unless noted):
+#   1. lint            — fmt, shell syntax/shellcheck, candid review layers 1+2,
+#                        per-commit secret scan (no compilation)
+#   2. clippy          — cargo clippy -D warnings (all targets, all features)
+#   3. test            — cargo test (unit, integration, invariant suites)
+#   4. security        — cargo-deny (advisories, licenses, sources, bans)
+#   5. pam-integration — Dockerized PAM matrix T1–T9 (after lint)
+#   6. ci-success      — single aggregate status for merge gating
+# The PR title convention is checked by pr-title.yml (it must also re-run when
+# a PR is retitled, which would needlessly re-run this whole pipeline).
+#
+# Hardening: read-only token, third-party actions pinned to full commit SHAs,
+# no persisted git credentials, untrusted event data passed through env only,
+# Cargo.lock enforced (--locked), per-job timeouts.
 # =============================================================================
 
 name: CI
@@ -17,91 +28,206 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  schedule:
+    # Daily RustSec advisory scan: new vulnerabilities surface without code changes.
+    - cron: "17 5 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  # One group per PR (superseded runs are cancelled); every other run gets its own
+  # group keyed by event and commit, so runs on main are never cancelled or dropped.
+  group: ci-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || format('{0}-{1}', github.event_name, github.sha) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always
-  RUST_BACKTRACE: 1
   CARGO_INCREMENTAL: 0
+  CARGO_NET_RETRY: 10
+  RUSTUP_MAX_RETRIES: 10
+  RUST_BACKTRACE: 1
+  # CI needs no debuginfo: smaller target dir, faster links, smaller caches.
+  CARGO_PROFILE_DEV_DEBUG: 0
+  CARGO_PROFILE_TEST_DEBUG: 0
 
 jobs:
   # ---------------------------------------------------------------------------
-  # Job 1: Code Quality & Architectural Invariants (Mirrors save.sh)
+  # Job 1: Fast static gates (no compilation, ~1 min)
   # ---------------------------------------------------------------------------
-  quality:
-    name: "Quality (fmt + clippy + test + candid)"
+  lint:
+    name: "Lint (fmt + scripts + candid + secrets)"
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
-
+    timeout-minutes: 10
     steps:
-      - name: Free runner disk space
-        run: |
-          sudo rm -rf /usr/share/dotnet
-          sudo rm -rf /usr/local/lib/android
-          sudo rm -rf /opt/ghc
-          sudo rm -rf /opt/hostedtoolcache/CodeQL
-
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+          persist-credentials: false
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy, rustfmt
+      - name: Install Rust toolchain (rust-toolchain.toml)
+        run: rustup toolchain install --profile minimal
 
-      - name: Cache Cargo registry
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-
-
-      - name: "Step 1/4 — cargo fmt --check"
+      - name: cargo fmt --check
         run: cargo fmt --all -- --check
 
-      - name: "Step 2/4 — cargo clippy -- -D warnings"
-        run: cargo clippy --all-targets --all-features -- -D warnings
+      - name: Shell syntax and ShellCheck (errors)
+        run: |
+          mapfile -t scripts < <(git ls-files '*.sh' '.githooks/*')
+          for f in "${scripts[@]}"; do bash -n "$f"; done
+          shellcheck --version | head -2
+          shellcheck --severity=error "${scripts[@]}"
 
-      - name: "Step 3/4 — cargo test"
-        run: cargo test --all-targets --all-features
-
-      - name: "Step 4/4 — candid review"
+      - name: Candid review — layer 1 (deterministic invariants)
         run: ./scripts/candid_review.sh
 
+      - name: Candid review — layer 2 (fingerprint-bound report)
+        # No bot exemption: actor checks are spoofable, and every merged diff is reviewed.
+        if: github.event_name == 'pull_request'
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: ./scripts/candid_subagent.sh --rev "$HEAD_SHA" --skip-layer1
+
+      - name: Secret and sensitive artifact scan (every commit in range)
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
+        run: |
+          if [[ "$EVENT_NAME" == "pull_request" ]]; then
+            range="$(git merge-base origin/main "$PR_HEAD_SHA")..$PR_HEAD_SHA"
+          elif [[ -n "$PUSH_BEFORE" && ! "$PUSH_BEFORE" =~ ^0+$ ]] && git cat-file -e "${PUSH_BEFORE}^{commit}" 2>/dev/null; then
+            range="$PUSH_BEFORE..$GITHUB_SHA"
+          else
+            echo "Scanning the full history of $GITHUB_SHA"
+            exec ./scripts/secret_scan.sh --history "$GITHUB_SHA"
+          fi
+          echo "Scanning $range"
+          ./scripts/secret_scan.sh --range "$range"
+
   # ---------------------------------------------------------------------------
-  # Job 2: Dependency Supply Chain Security Audit
+  # Job 2: Clippy (metadata-only build, cached)
+  # ---------------------------------------------------------------------------
+  clippy:
+    name: "Clippy (-D warnings)"
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain (rust-toolchain.toml)
+        run: rustup toolchain install --profile minimal && rustc --version && cargo clippy --version
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          # Only main writes caches; PRs restore them (avoids cache thrash and poisoning).
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: cargo clippy
+        run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+
+  # ---------------------------------------------------------------------------
+  # Job 3: Tests (unit, integration, property, architectural invariants)
+  # ---------------------------------------------------------------------------
+  test:
+    name: "Test (unit + integration + invariants)"
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain (rust-toolchain.toml)
+        run: rustup toolchain install --profile minimal && rustc --version
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Build test binaries
+        run: cargo test --locked --workspace --all-targets --all-features --no-run
+
+      - name: cargo test
+        run: cargo test --locked --workspace --all-targets --all-features
+
+  # ---------------------------------------------------------------------------
+  # Job 4: Dependency supply chain audit (also runs daily on schedule)
   # ---------------------------------------------------------------------------
   security:
     name: "Security (cargo-deny)"
     runs-on: ubuntu-latest
-
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Run cargo-deny
-        uses: EmbarkStudios/cargo-deny-action@v2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          command: check
+          persist-credentials: false
+
+      - name: Install cargo-deny (prebuilt, checksum-verified)
+        uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2.87.21
+        with:
+          tool: cargo-deny@0.20.2
+
+      - name: cargo deny check
+        run: cargo deny --locked check
 
   # ---------------------------------------------------------------------------
-  # Job 3: PAM Integration Tests (Isolated Docker Container)
+  # Job 5: PAM integration tests in an isolated, cached Docker sandbox
   # ---------------------------------------------------------------------------
   pam-integration:
     name: "PAM Integration (Docker)"
+    if: github.event_name != 'schedule'
+    needs: lint
     runs-on: ubuntu-latest
-    needs: quality
-
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
-      - name: Build Docker sandbox
-        run: docker build -t soos-sandbox .
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
-      - name: Run PAM integration tests
+      - name: Build Docker sandbox (layer cache)
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          load: true
+          push: false
+          tags: soos-sandbox:ci
+          cache-from: type=gha,scope=pam-sandbox
+          cache-to: ${{ github.ref == 'refs/heads/main' && 'type=gha,mode=max,scope=pam-sandbox' || '' }}
+
+      - name: Run PAM integration tests (T1–T9)
         run: |
           docker run --rm \
-            -v "${{ github.workspace }}:/workspace" \
-            soos-sandbox \
+            -v "${GITHUB_WORKSPACE}:/workspace" \
+            soos-sandbox:ci \
             bash /workspace/tests/docker/test_suite.sh
+
+  # ---------------------------------------------------------------------------
+  # Job 6: Aggregate status (single required check for merge gating)
+  # ---------------------------------------------------------------------------
+  ci-success:
+    name: "CI Success"
+    if: always() && github.event_name != 'schedule'
+    needs: [lint, clippy, test, security, pam-integration]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Verify every job succeeded
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          echo "Job results: $RESULTS"
+          for r in $RESULTS; do
+            if [[ "$r" != "success" ]]; then
+              echo "::error::At least one required job did not succeed ($r)."
+              exit 1
+            fi
+          done

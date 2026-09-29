@@ -1,0 +1,50 @@
+# =============================================================================
+# PR Title — Conventional Commits check for the squash-merge commit subject
+# =============================================================================
+# The PR title becomes the commit subject on main (squash merge), so it is
+# validated with the same .githooks/commit-msg hook used locally. Runs on
+# 'edited' too, so retitling a PR re-validates it without re-running CI.
+# =============================================================================
+
+name: PR Title
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, edited, reopened, synchronize]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr-title-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  pr-title:
+    name: "PR Title (Conventional Commits)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: .githooks
+
+      - name: Validate PR title
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          # The hook tolerates git-generated subjects; a PR title must never be one.
+          if [[ "$PR_TITLE" =~ ^(Merge\ |Revert\ \"|fixup!\ |squash!\ ) ]]; then
+            echo "::error::PR title must be a Conventional Commit subject, not a git-generated one."
+            exit 1
+          fi
+          # GitHub appends " (#NNN)" to squash subjects; keep the result within the 80-char hook limit.
+          if (( ${#PR_TITLE} > 72 )); then
+            echo "::error::PR title is ${#PR_TITLE} characters; the maximum is 72 (squash suffix ' (#NNN)' is appended)."
+            exit 1
+          fi
+          msg_file="$(mktemp)"
+          printf '%s\n' "$PR_TITLE" > "$msg_file"
+          .githooks/commit-msg "$msg_file"

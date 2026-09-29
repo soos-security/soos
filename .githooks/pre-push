@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+# =============================================================================
+# .githooks/pre-push — Push-time guardrails for soos
+# =============================================================================
+# For every pushed ref:
+#   1. Refuses direct pushes to, or deletion of, 'main' (merge through a PR)
+#   2. Scans every commit not yet on any remote for secrets and sensitive
+#      artifacts (scripts/secret_scan.sh --unpushed)
+#   3. Requires an APPROVED candid review report bound to the pushed diff
+#      (scripts/candid_subagent.sh --rev <sha> --skip-layer1)
+#
+# Git feeds "<local ref> <local sha> <remote ref> <remote sha>" lines on stdin.
+# Emergency override: ALLOW_MAIN_PUSH=1 or git push --no-verify. CI re-runs the
+# secret scan and, on pull requests, the fingerprint-bound review gate.
+# =============================================================================
+
+set -euo pipefail
+
+readonly ZERO_SHA="0000000000000000000000000000000000000000"
+FAILED=0
+
+while read -r local_ref local_sha remote_ref _remote_sha; do
+    if [[ "$remote_ref" == "refs/heads/main" && "${ALLOW_MAIN_PUSH:-0}" != "1" ]]; then
+        echo -e "\033[0;31m[BLOCKED]\033[0m Direct push to (or deletion of) 'main' is prohibited. Open a Pull Request." >&2
+        FAILED=1
+        continue
+    fi
+
+    # Branch deletion: nothing else to verify
+    [[ "$local_sha" == "$ZERO_SHA" ]] && continue
+
+    if ! ./scripts/secret_scan.sh --unpushed "$local_sha" < /dev/null; then
+        echo -e "\033[0;31m[BLOCKED]\033[0m Secret scan failed for ${local_ref}." >&2
+        FAILED=1
+        continue
+    fi
+
+    if ! ./scripts/candid_subagent.sh --rev "$local_sha" --skip-layer1 < /dev/null; then
+        echo -e "\033[0;31m[BLOCKED]\033[0m ${local_ref} has no fresh APPROVED candid review." >&2
+        FAILED=1
+    fi
+done
+
+exit "$FAILED"

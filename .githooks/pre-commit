@@ -3,7 +3,11 @@
 # .githooks/pre-commit — Local Git security guardrails for soos
 # =============================================================================
 # 1. Blocks direct commits to the 'main' branch
-# 2. Scans staged diffs for private keys, certificates, and API tokens
+# 2. Scans staged changes for secrets and sensitive artifacts (scripts/secret_scan.sh)
+# 3. Runs the deterministic candid invariant checks (scripts/candid_review.sh)
+#
+# The fingerprint-bound AI review gate (Layer 2) is enforced before pushing
+# (.githooks/pre-push, save.sh, and CI), so intermediate commits stay possible.
 # =============================================================================
 
 set -euo pipefail
@@ -21,44 +25,17 @@ if [[ "$CURRENT_BRANCH" == "main" && "${ALLOW_MAIN_COMMIT:-0}" != "1" ]]; then
     exit 1
 fi
 
-# 2. Secret leak prevention in staged files
-while IFS= read -r -d '' file; do
-    [[ ! -f "$file" ]] && continue
+# 2. Secret and sensitive artifact scan on the staged index
+if ! ./scripts/secret_scan.sh --staged; then
+    echo -e "\033[0;31m[BLOCKED]\033[0m Secret or sensitive artifact detected in staged changes." >&2
+    exit 1
+fi
 
-    # Block sensitive files by extension or pattern
-    case "$file" in
-        *.pem|*.key|id_rsa*|id_ed25519*|*.p12|*.pfx|*.secret)
-            echo -e "\033[0;31m[BLOCKED]\033[0m Sensitive key or certificate file detected: $file" >&2
-            exit 1
-            ;;
-    esac
-
-    # Block private key markers inside file content diffs
-    if git diff --cached "$file" | grep -qE "BEGIN (RSA|OPENSSH|EC|DSA|PGP) PRIVATE KEY"; then
-        echo -e "\033[0;31m[BLOCKED]\033[0m Private key pattern detected in diff of: $file" >&2
-        exit 1
-    fi
-
-    # Block common GitHub personal access tokens
-    if git diff --cached "$file" | grep -qE "(ghp_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{82})"; then
-        echo -e "\033[0;31m[BLOCKED]\033[0m GitHub access token detected in diff of: $file" >&2
-        exit 1
-    fi
-done < <(git diff --cached --name-only -z)
-
-# 3. Candid Pre-Commit Review (Architectural Invariants & English Policy)
-if [[ -f "./scripts/candid_subagent.sh" ]]; then
-    if ! ./scripts/candid_subagent.sh; then
-        echo -e "\033[0;31m[BLOCKED]\033[0m Candid review failed invariant checks or AI sub-agent review!" >&2
-        echo -e "          Resolve the invariant errors above before committing." >&2
-        exit 1
-    fi
-elif [[ -f "./scripts/candid_review.sh" ]]; then
-    if ! ./scripts/candid_review.sh; then
-        echo -e "\033[0;31m[BLOCKED]\033[0m Candid review failed architectural invariant or language checks!" >&2
-        echo -e "          Resolve the invariant errors above before committing." >&2
-        exit 1
-    fi
+# 3. Deterministic candid invariant checks (architecture, panic safety, English policy)
+if ! ./scripts/candid_review.sh; then
+    echo -e "\033[0;31m[BLOCKED]\033[0m Candid review failed architectural invariant or language checks!" >&2
+    echo -e "          Resolve the invariant errors above before committing." >&2
+    exit 1
 fi
 
 exit 0

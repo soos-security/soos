@@ -130,4 +130,4 @@ docs(ipc): document peer credentials verification flow
 The commit convention is validated at multiple stages:
 1. **Pre-commit**: Local hook `.githooks/commit-msg` validates every commit made with `git commit`.
 2. **Quality Script (`save.sh`)**: Automatically generates conventional commit headers in English based on changed files when no custom message is provided.
-3. **CI Pipeline**: Automated CI checks fail if non-compliant commits are detected on pull requests.
+3. **CI Pipeline**: The `PR Title` workflow (`.github/workflows/pr-title.yml`) runs `.githooks/commit-msg` against the pull request title (maximum 72 characters, since GitHub appends ` (#NNN)`), which becomes the squash-merge commit subject on `main`; a non-compliant title fails CI.

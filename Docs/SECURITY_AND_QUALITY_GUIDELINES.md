@@ -109,25 +109,32 @@ Automated via `cargo-deny`:
 
 ## 5. Automated Verification Gates
 
-Quality and security gates are enforced at multiple levels:
+Quality and security gates are enforced at multiple levels (details in
+[`CI_CD_AND_SECURITY.md`](CI_CD_AND_SECURITY.md)):
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│ 1. Git Hook (.githooks/pre-commit)                          │
-│    - Anti-commit to main                                    │
-│    - Secret leak scanner (private keys, tokens)             │
-│    - Automated execution of scripts/candid_review.sh        │
+│ 1. Git Hooks (.githooks/)                                   │
+│    - pre-commit: anti-commit to main, secret scanner,       │
+│      scripts/candid_review.sh (deterministic invariants)    │
+│    - commit-msg: Conventional Commits 1.0.0                 │
+│    - pre-push: anti-push to main, secret scanner,           │
+│      fingerprint-bound candid review report                 │
 ├─────────────────────────────────────────────────────────────┤
-│ 2. Local Quality Script (./save.sh)                         │
+│ 2. Local Quality Script (./save.sh) — same flags as CI      │
 │    - cargo fmt                                              │
-│    - cargo clippy --all-targets -- -D warnings              │
-│    - cargo test --all-targets (incl. architectural tests)   │
-│    - cargo deny check (supply chain audit)                  │
-│    - scripts/candid_review.sh (impartial cold diff review)  │
+│    - cargo clippy --locked --workspace --all-targets        │
+│      --all-features -- -D warnings                          │
+│    - cargo test --locked --workspace --all-targets          │
+│      --all-features (incl. architectural tests)             │
+│    - cargo deny --locked check (supply chain audit)         │
+│    - scripts/candid_subagent.sh (dual-layer candid review)  │
 ├─────────────────────────────────────────────────────────────┤
 │ 3. Continuous Integration (.github/workflows/ci.yml)        │
-│    - Quality job (fmt, clippy, test, candid_review)         │
-│    - Security job (cargo-deny action)                       │
-│    - pam-integration job (Docker sandbox with pamtester)    │
+│    - lint (fmt, ShellCheck, candid layers 1+2, per-commit   │
+│      secrets), clippy, test, security (cargo-deny, daily),  │
+│      pam-integration (Docker), ci-success aggregate;        │
+│      pr-title.yml (Conventional Commits on the PR title)    │
+│    - read-only token, SHA-pinned actions, --locked builds   │
 └─────────────────────────────────────────────────────────────┘
 ```
