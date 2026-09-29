@@ -1822,7 +1822,7 @@ mod tests {
             .unwrap_or_else(|| panic!("TOML section '{}' not found", header));
         let body_start = start + header.len();
         let rest = &content[body_start..];
-        let end = rest.find("\n[").map_or(rest.len(), |i| i);
+        let end = rest.find("\n[").unwrap_or(rest.len());
         &rest[..end]
     }
 
