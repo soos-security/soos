@@ -49,6 +49,8 @@ sudo dpkg -i target/packages/soos_*.deb
 sudo soos-admin status
 ```
 
+The package contains no key material: `postinst` generates `/var/lib/soos/master.key` (mode `0600 root:root`) on this host at first install through `/usr/libexec/soos/provision-master-key`, and package upgrades or removal never touch it (see `Docs/PACKAGING_AND_PROVISIONING.md` §7.4).
+
 #### Option B: Universal Installer
 ```bash
 # Install binaries, unit files, and provision invariant directories
@@ -105,40 +107,70 @@ sudo dpkg -r soos
 ### 4.1 Custom `authselect` Profile
 Fedora and RHEL mandate the use of `authselect` to manage `/etc/pam.d/system-auth` and `/etc/pam.d/password-auth`. Direct manual editing of PAM configuration files is prohibited.
 
-`soos` deploys a custom `authselect` profile template to `/etc/authselect/custom/soos/`:
-- `system-auth`: Configures local and console services (e.g. `sudo`, `login`)
-- `password-auth`: Configures display managers and graphical sessions (e.g. `gdm`)
-- `REQUIREMENTS`: Declares `pam_unix.so` and `pam_soos.so` requirements
+`soos` deploys a **complete** custom `authselect` profile (`packaging/pam/fedora/soos/`, derived
+from the Fedora 40 `local` profile) to `/etc/authselect/custom/soos/`. `authselect select`
+regenerates *every* managed file from the profile directory, so a profile shipping only the PAM
+stacks would empty `/etc/nsswitch.conf` on activation (review finding ONB-02, GitHub #145). The
+profile therefore ships the full layout:
+- `README`: Profile description and the **declared optional features** (`with-faillock`,
+  `with-mkhomedir`, `with-fingerprint`, `with-silent-lastlog`, `with-pam-u2f`, ... — the same set as
+  the `local` profile; a feature that is not declared here is rejected by `authselect select`)
+- `system-auth`: Local and console services (e.g. `sudo`, `login`)
+- `password-auth`: Display managers and graphical sessions (e.g. `gdm`)
+- `nsswitch.conf`: Name service switch template (`passwd`, `group`, `shadow`, `hosts`, ...)
+- `fingerprint-auth`, `smartcard-auth`, `postlogin`, `dconf-db`, `dconf-locks`: Inherited from `local`
+- `REQUIREMENTS`: Operator notes printed on activation (`pam_soos.so` + `soos-daemon.service`)
+
+The only lines that differ from the `local` profile are the two `pam_soos.so` lines in the `auth`
+sections of `system-auth` and `password-auth`.
 
 ### 4.2 Preservation of `pam_faillock` Lockout Policy
-To prevent brute-force attacks against user passwords, Fedora employs `pam_faillock`. The `soos` custom profile preserves `pam_faillock` with strict hook placement:
+To prevent brute-force attacks against user passwords, Fedora employs `pam_faillock`. The `soos`
+custom profile preserves `pam_faillock` with strict hook placement, using the `authselect`
+conditional syntax (`{include if "feature"}`, see `authselect-profiles(5)`); the lines are emitted
+only when the profile is selected with `with-faillock`:
 
 ```pam
 # Pre-authentication lockout check (denies locked accounts immediately)
-{?with-faillock:auth        required      pam_faillock.so preauth silent}
+auth        required                      pam_faillock.so preauth silent    {include if "with-faillock"}
 
 # Primary facial biometric authentication
 auth        [success=done default=ignore] pam_soos.so timeout_ms=250
 
 # Standard password fallback
-auth        [success=done default=bad]    pam_unix.so try_first_pass
+auth        sufficient                    pam_unix.so nullok
 
 # Failure accounting hook (increments failure counter on wrong password)
-{?with-faillock:auth        [default=die] pam_faillock.so authfail}
+auth        required                      pam_faillock.so authfail          {include if "with-faillock"}
 
 # Intrusion detection notification
 auth        optional                      pam_soos.so event=password-failed timeout_ms=20
+
+auth        required                      pam_deny.so
+
+account     required                      pam_faillock.so                   {include if "with-faillock"}
 ```
 
-When biometric verification succeeds (`pam_soos.so` returns `[success=done]`), `pam_unix` and `pam_faillock` are bypassed cleanly. When biometric verification falls back (`PAM_IGNORE`), `pam_faillock` continues counting consecutive password authentication failures.
+When biometric verification succeeds (`pam_soos.so` returns `[success=done]`), `pam_unix` and
+`pam_faillock authfail` are bypassed cleanly. When biometric verification falls back (`PAM_IGNORE`),
+`pam_faillock` continues counting consecutive password authentication failures, and the
+`event=password-failed` notification is still reached because `authfail` is `required` (not `die`).
 
 ### 4.3 Activation and Service Verification
+`scripts/install.sh` and the RPM `%post` scriptlet install the profile and record the currently
+selected profile (`authselect current --raw`, e.g. `local with-silent-lastlog`) in
+`/etc/soos/authselect.previous`; they never activate the profile themselves.
+
 ```bash
-# Activate custom profile with faillock enabled
+# Inspect the features currently enabled and carry them over
+authselect current --raw
+
+# Activate the custom profile with faillock enabled (add the other features from above)
 sudo authselect select custom/soos with-faillock --force
 
-# Verify authselect profile consistency
+# Verify authselect profile consistency and the generated stacks
 sudo authselect check
+grep -n 'pam_faillock\|pam_soos\|pam_unix' /etc/pam.d/system-auth
 
 # Test sudo service integration
 sudo pamtester sudo alice authenticate
@@ -147,13 +179,24 @@ sudo pamtester sudo alice authenticate
 sudo pamtester gdm-password alice authenticate
 ```
 
-### 4.4 Rollback & Uninstallation
-```bash
-# Restore standard distribution profile (e.g. local or sssd)
-sudo authselect select local --force
+A dockerized validation of the whole sequence (activation, `authselect check`, generated
+`system-auth`/`password-auth` ordering, `/etc/nsswitch.conf` preserved, password fallback,
+rollback) runs with `./run_tests.sh authselect` (see section 6).
 
-# Remove package
-sudo rpm -e soos
+### 4.4 Rollback & Uninstallation
+`scripts/uninstall.sh` and the RPM `%preun` scriptlet restore the profile recorded in
+`/etc/soos/authselect.previous` (falling back to `local`, then `minimal`, then `sssd`) **before**
+removing `/etc/authselect/custom/soos`; if no profile can be restored, the custom profile is kept
+so that `authselect` never points at a deleted profile.
+
+```bash
+# Automatic rollback (restores the recorded profile, then removes the custom profile)
+sudo ./scripts/uninstall.sh --keep-data      # or: sudo rpm -e soos
+
+# Manual rollback: restore the recorded profile, or the stock local profile
+sudo authselect select $(cat /etc/soos/authselect.previous) --force
+sudo authselect select local --force
+sudo authselect check
 ```
 
 ---
@@ -223,6 +266,10 @@ bash tests/distro/fedora_rhel_test.sh --dry-run
 
 # Run Arch Linux test harness
 bash tests/distro/arch_linux_test.sh --dry-run
+
+# Fedora authselect profile: activation, generated PAM/NSS files, password
+# fallback and rollback in a stock fedora:40 container (also a CI job)
+./run_tests.sh authselect        # = tests/docker/authselect_profile_test.sh
 ```
 
 ---

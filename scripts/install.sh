@@ -4,7 +4,13 @@
 # =============================================================================
 # Provisions system groups, directory hierarchies with strict permissions,
 # compiles/installs binaries, installs PAM shared library, installs systemd unit,
-# generates master encryption key if absent, and verifies neural models.
+# generates the master encryption key on a live install if absent, and verifies
+# neural models.
+#
+# Staging mode (--destdir): the tree is package content, so NO key material is
+# ever generated inside it (GitHub #144). The key is produced on the target host
+# at first install by /usr/libexec/soos/provision-master-key (called from the
+# package post-install scriptlets), which this script ships in libexec.
 #
 # Supported Options:
 #   -d, --destdir <DIR>      Target staging root directory (default: /)
@@ -20,7 +26,8 @@
 #
 # Security Invariants:
 #   - /var/lib/soos/{biometrics,evidence} created mode 0700 (root:root)
-#   - /var/lib/soos/master.key created mode 0600 (root:root, 32 bytes)
+#   - /var/lib/soos/master.key created mode 0600 (root:root, 32 bytes) on the
+#     target host only (never under --destdir)
 #   - /run/soos created mode 0750 (root:soos)
 #   - Binaries installed mode 0755
 #   - PAM module installed mode 0644
@@ -231,22 +238,14 @@ if [[ "$(id -u)" -eq 0 && -z "${DESTDIR}" ]]; then
 fi
 success "Directories provisioned with verified permissions."
 
-# 3. Generate Master Key if Absent
-MASTER_KEY_FILE="${TARGET_STATE_DIR}/master.key"
-if [[ ! -f "${MASTER_KEY_FILE}" ]]; then
-    info "Generating cryptographic master key (32 bytes)..."
-    if command -v openssl >/dev/null 2>&1; then
-        openssl rand 32 > "${MASTER_KEY_FILE}"
-    else
-        head -c 32 /dev/urandom > "${MASTER_KEY_FILE}"
-    fi
-    chmod 0600 "${MASTER_KEY_FILE}"
-    if [[ "$(id -u)" -eq 0 && -z "${DESTDIR}" ]]; then
-        chown root:root "${MASTER_KEY_FILE}"
-    fi
-    success "Master key generated at ${MASTER_KEY_FILE} (mode 0600)."
+# 3. Provision Master Key (live install only — never inside a staging tree)
+KEY_HELPER_SRC="${SCRIPT_DIR}/provision_master_key.sh"
+if [[ -z "${DESTDIR}" ]]; then
+    info "Provisioning cryptographic master key if absent..."
+    sh "${KEY_HELPER_SRC}" --state-dir "${TARGET_STATE_DIR}"
+    success "Master key provisioned at ${TARGET_STATE_DIR}/master.key (mode 0600)."
 else
-    info "Master key already present at ${MASTER_KEY_FILE}."
+    info "Staging mode (--destdir): master key is NOT generated; it will be created on the target host at first install."
 fi
 
 # 4. Install Binaries and Shared Library
@@ -267,6 +266,10 @@ find_artifact() {
 }
 
 info "Installing executable binaries..."
+# Key provisioning helper (shared by install.sh and all package scriptlets)
+install -m 0755 "${KEY_HELPER_SRC}" "${TARGET_LIBEXEC_DIR}/provision-master-key"
+success "Installed ${TARGET_LIBEXEC_DIR}/provision-master-key"
+
 DAEMON_BIN=$(find_artifact "soos-daemon" || true)
 if [[ -n "${DAEMON_BIN}" ]]; then
     install -m 0755 "${DAEMON_BIN}" "${TARGET_LIBEXEC_DIR}/soos-daemon"
@@ -340,6 +343,21 @@ if [[ -d "${PAM_PKG_DIR}/fedora/soos" ]]; then
     mkdir -p "${FEDORA_AUTH_DIR}"
     cp -r "${PAM_PKG_DIR}/fedora/soos/"* "${FEDORA_AUTH_DIR}/"
     success "Installed Fedora custom authselect profile template."
+
+    # Record the currently selected authselect profile (id + features) so that
+    # scripts/uninstall.sh can restore it once custom/soos has been activated.
+    # The profile is never activated automatically (GitHub #145).
+    if [[ -z "${DESTDIR}" ]] && command -v authselect >/dev/null 2>&1; then
+        AUTHSELECT_CURRENT="$(authselect current --raw 2>/dev/null || true)"
+        AUTHSELECT_PREVIOUS_FILE="${SYSCONFDIR}/soos/authselect.previous"
+        if [[ -n "${AUTHSELECT_CURRENT}" && "${AUTHSELECT_CURRENT}" != custom/soos* ]]; then
+            mkdir -p "${SYSCONFDIR}/soos"
+            printf '%s\n' "${AUTHSELECT_CURRENT}" > "${AUTHSELECT_PREVIOUS_FILE}"
+            chmod 0644 "${AUTHSELECT_PREVIOUS_FILE}"
+            success "Recorded current authselect profile for rollback: ${AUTHSELECT_CURRENT}"
+        fi
+        info "Activate with: authselect select custom/soos with-faillock --force && authselect check"
+    fi
 fi
 
 # Arch snippet

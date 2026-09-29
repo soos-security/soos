@@ -24,6 +24,8 @@
 #![deny(clippy::all)]
 
 pub mod config;
+#[cfg(feature = "fault-injection")]
+pub mod fault_injection;
 pub mod ipc;
 pub mod syslog;
 
@@ -82,6 +84,10 @@ impl SoosPam {
         syslog::init_panic_hook();
 
         let result = catch_unwind(AssertUnwindSafe(|| {
+            // Test-only hook (Docker T10): panics here when armed, before any socket activity.
+            #[cfg(feature = "fault-injection")]
+            fault_injection::trigger(config.fault_inject);
+
             if config.is_disabled() {
                 syslog::log_info(&format!(
                     "soos authentication is disabled for service '{}'; ignoring",

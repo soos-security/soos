@@ -76,6 +76,8 @@ The daemon starts as a systemd service before login prompts, loads and validates
 
 `Deny` and `Unavailable` are intentionally indistinguishable to the PAM caller, preventing timing or enumeration attacks.
 
+**Multi-frame consensus (GitHub #147).** The `Allow` row is never satisfied by a single capture. The daemon evaluates successive distinct camera captures within the decision budget and feeds them to the zero-I/O `soos_policy::PadAggregator`: `Allow` requires `k = 3` consecutive captures (window `n = 5`) that are live at or above the PAD threshold and match at or above the cosine threshold, and any capture classified as a spoof vetoes `Allow` for the whole request. A request whose budget expires before consensus returns `Unavailable`/`Timeout`.
+
 ---
 
 ## 4. IPC Architecture (PAM ↔ Daemon)
@@ -185,7 +187,7 @@ CameraManager thread (blocking): dequeue MMAP -> timestamp CLOCK_MONOTONIC
 The soos vision pipeline uses a **3-model architecture** (manifest version 2.0.0), with SCRFD unifying face detection and landmark regression into a single model:
 
 1. **Face Detection + Landmarks**: SCRFD 500M KPS ONNX (~2.4 MB, MIT) → bounding boxes with confidence scores AND 5-point facial keypoints directly, via multi-stride (8/16/32) distance-to-border box decoding. BGR 640×640 input with letterbox padding and `(pixel - 127.5) / 128.0` normalization. Eliminates the separate landmark model of the legacy pipeline.
-2. **Presentation Attack Detection (PAD)**: MiniFASNetV2 ONNX (~1.8 MB, Apache-2.0) → `[Live, Print, Replay]` 3-class liveness scores. Receives an **80×80 BGR** crop of the 2.7× expanded bounding box (wider context than the aligned face), normalized with `pixel / 255.0`. Class index 0 = Live (configurable).
+2. **Presentation Attack Detection (PAD)**: MiniFASNetV2 ONNX (~1.8 MB, Apache-2.0) → `[PrintPhoto, Live, ScreenReplay]` 3-class liveness scores. Receives an **80×80 BGR** crop of the 2.7× expanded bounding box (wider context than the aligned face), normalized with `pixel / 255.0`. Live class index 1 = `DEFAULT_MINIFASNET_LIVE_CLASS_INDEX` (single source of truth in `crates/inference-ort/src/pad.rs`; never overridden in production, see ADR 2026-09-29 and GitHub #146).
 3. **Feature Extraction**: ArcFace w600k MobileFaceNet ONNX (~3.6 MB, MIT) → **512D** L2-normalized embedding vector. Receives the standard **112×112** aligned face crop produced by affine alignment from the 5-point landmarks. Normalization: `(pixel - 127.5) / 127.5` for exact symmetric `[-1.0, +1.0]` range.
 4. **Matching**: Cosine similarity (`cosine = dot(a, b)` for L2-normalized vectors). Authorized only if score ≥ calibrated threshold and a single face is verified with PAD passed.
 
@@ -300,7 +302,7 @@ SystemCallArchitectures=native
 - Directly modifying `/etc/pam.d/system-auth` on an `authselect`-managed distribution.
 - Placing facial authentication before `pam_faillock` preauth, bypassing account lockout.
 - Using `sufficient` without checking previous stack failures.
-- Transmitting camera frames or biometric embeddings across the IPC socket or writing them to logs.
+- Transmitting biometric embeddings across the IPC socket, or writing frames or embeddings to logs. Camera frames leave the daemon only through the authorized diagnostic preview stream (`RequestKind::PreviewFrame`: root peer or explicit `[preview]` opt-in, active session, rate limited — see ADR 2026-09-29 and walkthrough 81); never through PAM.
 - Assuming `/dev/video0` index is static or shareable across processes.
 - Downloading unverified ONNX weights at runtime without manifest hash checks.
 - Promising presentation attack security without active or dedicated PAD validation.

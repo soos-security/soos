@@ -56,6 +56,14 @@ auth  required                       pam_unix.so try_first_pass nullok
 | **T6** | Distro Stack Integration | Native `common-auth` / `system-auth` | `PAM_SUCCESS` / Fallback | Verified on native distribution stack |
 | **T7** | Absent Socket | `/run/soos/daemon.sock` does not exist | `PAM_IGNORE` (25) | Fallback to `pam_unix`, valid password accepted |
 | **T8** | Missing Module Resilience | `pam_soos.so` missing from disk | `PAM_IGNORE` | PAM stack continues functional operation |
+| **T9** | Model Deployment Integrity | `scripts/download_models.sh --dry-run` against `models/manifest.toml` | n/a | Manifest and checksums validated in-container |
+| **T10** | Release-Build Panic Safety (PAM-01, GitHub #148) | Module rebuilt with the same `[profile.release]` plus the opt-in `fault-injection` feature, loaded as `pam_soos_fault.so` and armed with `fault_inject=panic` then `fault_inject=overflow` | `PAM_IGNORE` (25); host process never killed (exit code < 128, never 134/SIGABRT) | Fallback to `pam_unix`, valid password accepted, invalid password rejected |
+
+T10 exists because `cargo test` runs under `[profile.test]` (always `panic = "unwind"`) and
+therefore cannot detect a release profile that aborts; only the release-built shared object
+loaded by a real PAM host proves that `catch_unwind` is effective in production. The
+fault-injection variant is built into `target/fault-injection/` so the artifact used by T1–T9
+stays the exact production configuration.
 
 ---
 
@@ -68,8 +76,9 @@ tests/docker/
 ├── Dockerfile.arch           # Arch Linux container image
 ├── pam_test_runner.c        # Native C non-interactive & interactive PAM test harness
 ├── mock_daemon.py           # Socket simulator for allow, timeout, and mid-stream crash
-├── test_suite.sh            # In-container test suite executing T1..T8
-└── run_matrix.sh            # Host driver orchestrating multi-distro builds & runs
+├── test_suite.sh            # In-container test suite executing T1..T10
+├── run_matrix.sh            # Host driver orchestrating multi-distro builds & runs
+└── authselect_profile_test.sh  # Fedora authselect profile activation/rollback (A1..A7)
 ```
 
 ### Execution Commands
@@ -87,4 +96,12 @@ tests/docker/
 - Run targeted distribution test:
   ```bash
   ./tests/docker/run_matrix.sh fedora
+  ```
+- Validate the Fedora `authselect` custom profile (activation with `with-faillock`,
+  `authselect check`, generated `system-auth`/`password-auth` ordering, `/etc/nsswitch.conf`
+  preserved, password fallback via `pamtester`, rollback through `scripts/uninstall.sh`):
+  ```bash
+  ./run_tests.sh authselect
+  # Or:
+  ./tests/docker/authselect_profile_test.sh
   ```

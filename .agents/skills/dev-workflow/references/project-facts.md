@@ -46,6 +46,8 @@ ADR entry in `AI/DECISIONS.md`. Re-check every value below with the listed `grep
 | `EVENT_TIMEOUT_MS` | `crates/pam/src/ipc.rs` | 20 ms (password-failed event) |
 | `DECISION_BUDGET_MS` | `crates/daemon/src/pipeline.rs` | 900 ms |
 | `MAX_FRAME_AGE_NS` | `crates/daemon/src/pipeline.rs` | 150 ms |
+| `FRAME_POLL_INTERVAL_MS` | `crates/daemon/src/pipeline.rs` | 10 ms (consensus loop poll) |
+| `DEFAULT_PAD_CONSENSUS_REQUIRED` / `_WINDOW` / `MAX_PAD_CONSENSUS_WINDOW` | `crates/policy/src/pad_consensus.rs` | 3 / 5 / 32 captures (Allow needs 3 consecutive; any spoof vetoes the request) |
 | GDM PAM line | `crates/admin-cli/src/gdm.rs` | `auth sufficient pam_soos.so timeout_ms=2500` |
 | admin-cli `DEFAULT_TIMEOUT_MS` | `crates/admin-cli/src/args.rs` | 250 ms |
 | Match / PAD thresholds | `crates/vision/src/pipeline.rs`, policy | 0.70 / 0.85 |
@@ -53,8 +55,10 @@ ADR entry in `AI/DECISIONS.md`. Re-check every value below with the listed `grep
 
 Known prose drift: `AGENTS.md`, `AI/ARCHITECTURE.md` and `AI/DECISIONS.md` still say "200–250ms".
 The enforced invariant is **"every blocking PAM operation has an explicit deadline derived from the
-clamped `timeout_ms`; nothing is ever unbounded"**, not the literal 250ms figure. `DECISIONS.md` also
-still says MiniFASNet live class 0; the code (and walkthrough 72) says 1.
+clamped `timeout_ms`; nothing is ever unbounded"**, not the literal 250ms figure. The MiniFASNet live
+class index is 1 everywhere since ADR 2026-09-29 (code, `AI/ARCHITECTURE.md`, matrix ASG1/PLC1–PLC3);
+production never overrides it — `OrtPadDetector::new` only, enforced by the invariant
+`test_no_pad_live_class_index_override_outside_tests` [79].
 
 ## 3. Runtime Paths & Modes
 
@@ -73,7 +77,7 @@ still says MiniFASNet live class 0; the code (and walkthrough 72) says 1.
 | ID | File | Input | Normalization | Notes |
 |---|---|---|---|---|
 | `scrfd_500m_kps` | `scrfd_500m_kps.onnx` | 640×640 BGR, letterbox | `(x-127.5)/128` | 9 outputs (3 strides × score/bbox/kps); **scores are already sigmoided** [65] |
-| `minifasnet_v2_pad` | `minifasnet_v2_80x80.onnx` | 80×80 BGR, 2.7× expanded bbox | `x/255` | live class index **1** [72] |
+| `minifasnet_v2_pad` | `minifasnet_v2_80x80.onnx` | 80×80 BGR, 2.7× expanded bbox | `x/255` | live class index **1** [72, 79]; `[PrintPhoto, Live, ScreenReplay]`, never overridden in production |
 | `arcface_w600k_mbf` | `arcface_w600k_mbf.onnx` | 112×112 aligned, **NHWC**, **BGR** [68, 71] | `(x-127.5)/127.5` | 512D, L2-normalized |
 
 Any change to channel order, layout, class index or normalization MUST be validated against the real
@@ -89,11 +93,17 @@ cargo deny --locked check                      # cargo-deny >= 0.20
 ./scripts/candid_review.sh                     # Layer 1 deterministic invariants
 ./scripts/candid_subagent.sh --prepare         # Layer 2: diff + fingerprint for the reviewer
 ./scripts/candid_subagent.sh                   # Layer 2 gate (fresh, fingerprint-bound report)
-./run_tests.sh                                 # Dockerized PAM matrix T1–T9 (ubuntu)
+./run_tests.sh                                 # Dockerized PAM matrix T1–T10 (ubuntu)
 ```
 
 Omitting `--all-features` locally was the root cause of several CI-only failures [65–75].
 `cargo test --all-targets` does not run doctests; do not rely on doctests as acceptance evidence.
+
+Release profile: `[profile.release]` in the root `Cargo.toml` MUST keep `panic = "unwind"`
+(ADR 2026-09-29, review PAM-01 [78]). `cargo test` runs under `[profile.test]` and can never detect
+an aborting release profile; only Docker case T10 (release-built `.so` + opt-in `fault-injection`
+feature of `soos-pam`) proves `catch_unwind` on the shipped artifact. Never enable that feature in
+packaging, install or CI build commands.
 
 ## 6. Traceability Conventions
 

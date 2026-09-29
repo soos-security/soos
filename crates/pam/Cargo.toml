@@ -12,6 +12,14 @@ name = "pam_soos"
 # cdylib produces a .so dynamically loadable by Linux-PAM; rlib enables integration tests
 crate-type = ["cdylib", "rlib"]
 
+[features]
+# Test-only hook (review finding PAM-01, GitHub #148): adds the PAM argument
+# `fault_inject=<panic|overflow>` that deliberately panics inside the catch_unwind
+# region so the Docker matrix (T10) can prove that the RELEASE-built .so degrades
+# to PAM_IGNORE instead of aborting the host. Never a default feature, never
+# enabled by packaging/install scripts (enforced by tests/invariants).
+fault-injection = []
+
 [dependencies]
 soos-protocol = { workspace = true }
 getrandom = { workspace = true }

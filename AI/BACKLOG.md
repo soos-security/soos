@@ -1972,8 +1972,36 @@ On physical hardware lock screens (GDM):
   - Acceptance: Running `install.sh` installs the current `soos-gui` binary to `/usr/bin/soos-gui`.
   - TDD: `test_install_script_includes_gui_binary`.
 
+---
 
+## Full Project Review Remediation (2026-09-29)
 
+> Findings from `AI/reviews/FULL_PROJECT_REVIEW_2026-09-29.md` tracked as GitHub issues. Review-issue branches are not registered in `scripts/sync_issue.py`.
 
+### GitHub #144 — fix(packaging): Never ship `/var/lib/soos/master.key` inside a package (ONB-01)
 
+> **Branch**: `fix/package-master-key`  
+> **Architecture ref**: §9 Privacy & Persistence (encrypted at rest, root-only key), §5 Distribution Adaptation  
+> **VERIFICATION_MATRIX**: PK1, PMK1–PMK6
 
+#### Problem Statement
+
+`scripts/install.sh` generated the master key whenever it was absent, including under `--destdir`. `build_deb.sh`, `build_arch.sh` and `debian/rules` stage through `install.sh --destdir`, so every `.deb` / Arch package shipped a shared AES-256-GCM master key, the package-owned file was overwritten on upgrade and deleted on removal, and `postinst` / `post_install` skipped generation because the file already existed.
+
+#### Sub-issues
+
+- [x] **#144.1** — Staging mode never produces key material
+  - `install.sh` skips key generation when `DESTDIR` is non-empty and ships `/usr/libexec/soos/provision-master-key` instead
+  - Acceptance: the staged tree contains no `*.key` file (contract migration of `test_install_script_creates_required_directories`, which previously asserted the opposite)
+  - TDD: `test_install_script_destdir_stages_no_key_material`, `test_install_script_creates_required_directories`
+
+- [x] **#144.2** — One shared, hardened key generator on the target host
+  - `scripts/provision_master_key.sh`: 32 bytes from the CSPRNG, `umask 077`, atomic hard-link publish, idempotent, symlink-safe, `0600 root:root`
+  - Called by `debian/postinst` (`configure`), `arch/soos.install` (`post_install`), `rpm/soos.spec` (`%post`) and `install.sh` (live install)
+  - Acceptance: each post-install path generates the key if absent and never overwrites an existing key
+  - TDD: `test_provision_master_key_helper_generates_0600_key_once`, `test_provision_master_key_helper_refuses_symlink_and_non_regular`, `test_package_scriptlets_provision_key_via_shared_helper`
+
+- [x] **#144.3** — Fail-closed packaging guard and Docker evidence
+  - `scripts/check_no_key_material.sh` run by `build_deb.sh`, `build_arch.sh`, `debian/rules`; `tests/docker/test_packages.sh` asserts no key entry in the archive, key survival on removal and distinct keys across fresh installs
+  - Acceptance: a staged key aborts the build; two fresh installs of one artifact yield different keys
+  - TDD: `test_package_builders_refuse_staged_key_material`, `tests/docker/test_packages.sh`

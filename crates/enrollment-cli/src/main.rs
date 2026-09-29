@@ -149,12 +149,21 @@ fn run() -> Result<(), EnrollmentCliError> {
             );
         }
 
-        Commands::DebugVision => {
+        Commands::DebugVision(args) => {
             let service = build_full_service(&cli)?;
-            let path = service.debug_vision()?;
-            println!("\n[OK] Visual debugging report generated successfully.");
+            let path = service.debug_vision(args)?;
+            println!("\n[OK] Visual debugging report generated successfully (mode 0600).");
+            if args.embed_frame {
+                println!(
+                    "[WARNING] The report embeds a raw camera frame (biometric data); delete it after use."
+                );
+            } else {
+                println!(
+                    "The report contains detection geometry only; pass --embed-frame to include the camera frame."
+                );
+            }
             println!("Open the following file in your web browser to visualize the detection:");
-            println!("  file://{}\n", path);
+            println!("  file://{}\n", path.display());
         }
     }
 

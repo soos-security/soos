@@ -50,6 +50,9 @@ Adheres strictly to `AI/ARCHITECTURE.md` §3 Request State Matrix:
 
 Non-finite floating-point scores (`f32::INFINITY`, `f32::NEG_INFINITY`, `f32::NAN`) are strictly classified as non-authorizing denials.
 
+The per-capture `Allow` row above is a necessary, not sufficient, condition: the daemon only
+authorizes once the multi-frame consensus of section 5 is reached.
+
 ---
 
 ## 3. Threshold Configuration (`ThresholdConfig`)
@@ -94,9 +97,76 @@ limiter.check_and_record(1000, now_monotonic_ns)?;
 
 ---
 
-## 5. Security & Quality Invariants
+## 5. Multi-Frame PAD Consensus (`PadAggregator`)
+
+The daemon evaluates several camera captures per authentication request. Authorizing on the first
+capture that passed PAD and matching gave an attacker one independent liveness trial per capture
+(GitHub #147 / review finding PAD-02). `pad_consensus.rs` replaces that rule with a zero-I/O,
+clockless aggregator created once per request:
+
+| Item | Location | Value |
+|---|---|---|
+| `DEFAULT_PAD_CONSENSUS_REQUIRED` (`k`) | `crates/policy/src/pad_consensus.rs` | 3 consecutive passing captures |
+| `DEFAULT_PAD_CONSENSUS_WINDOW` (`n`) | `crates/policy/src/pad_consensus.rs` | 5 retained classifications |
+| `MAX_PAD_CONSENSUS_WINDOW` | `crates/policy/src/pad_consensus.rs` | 32 (memory bound) |
+| `FRAME_POLL_INTERVAL_MS` | `crates/daemon/src/pipeline.rs` | 10 ms between capture checks |
+
+`PadConsensusConfig::new(window, required)` rejects `required == 0`, `required > window` and
+`window > MAX_PAD_CONSENSUS_WINDOW` with `PolicyError::InvalidConsensus`.
+
+### Frame classification (`FrameEvaluation` → `FrameClass`)
+
+| Condition (evaluated in order) | `FrameClass` | Effect on the run |
+|---|---|---|
+| `face_count == 0` | `NoFace` | resets the consecutive run |
+| `face_count > 1` | `MultipleFaces` | resets the consecutive run |
+| `!pad_live \|\| !pad_score.is_finite() \|\| pad_score < pad_threshold` | `Spoof` | **sticky veto** for the request |
+| `!match_score.is_finite() \|\| match_score < match_threshold` | `NoMatch` | resets the consecutive run |
+| otherwise | `Passing` | extends the consecutive run |
+
+### Aggregate decision (`ConsensusDecision::verdict()`)
+
+| Condition | `Verdict` | `ReasonClass` |
+|---|---|---|
+| Any `Spoof` capture recorded in the request | `Deny` | `PadFailed` |
+| Trailing run of `Passing` captures `>= k` (and no spoof) | `Allow` | `FaceMatch` |
+| Last capture `NoFace` / `MultipleFaces` / `NoMatch` | `Deny` | `NoFace` / `MultipleFaces` / `ScoreBelowThreshold` |
+| No capture recorded, or run shorter than `k` when the budget expires | `Unavailable` | `Timeout` |
+
+There is deliberately no reset method: a spoof veto cannot be cleared within a request. The
+aggregator only ever stores the last `n` classifications and saturating counters.
+
+```rust
+use soos_policy::{ConsensusDecision, FrameEvaluation, PadAggregator, ThresholdConfig};
+
+let mut aggregator = PadAggregator::with_defaults(ThresholdConfig::default());
+for _ in 0..3 {
+    aggregator.record(&FrameEvaluation::live(0.97, 0.90));
+}
+assert_eq!(aggregator.decision(), ConsensusDecision::Allow);
+aggregator.record(&FrameEvaluation::spoof(0.05));
+assert_eq!(aggregator.decision(), ConsensusDecision::SpoofVetoed);
+```
+
+### Daemon integration
+
+`crates/daemon/src/dispatcher.rs` (step 8e) records one `FrameEvaluation` per **distinct, fresh**
+camera capture (new sequence number, age `<= MAX_FRAME_AGE_NS`), stops as soon as the decision is
+`Allow` or `SpoofVetoed`, and otherwise polls every `FRAME_POLL_INTERVAL_MS` until the decision
+budget expires (the poll never sleeps past the budget). After the loop the engine records exactly
+one rate-limit attempt (`AuthorizationEngine::record_attempt`); if that recording is rejected, an
+`Allow` is downgraded to `ProtocolError`/`RateLimited`.
+
+Latency: with a 30 fps camera the third distinct capture is available about 67 ms after the first,
+so consensus adds roughly two capture intervals plus two inference passes to the previous
+single-capture latency, well within `DECISION_BUDGET_MS` (900 ms) and the 2500 ms GDM budget.
+
+---
+
+## 6. Security & Quality Invariants
 
 - `#![forbid(unsafe_code)]` at crate root.
 - Zero `unwrap()` or `expect()` in production pathways.
 - Bounded memory allocations with strict LRU capacity limits and automatic eviction of expired attempts.
 - Clockless determinism: zero syscalls or async runtimes in the policy layer.
+- Multi-frame consensus: no single capture can authorize; any spoof capture vetoes the request.

@@ -45,7 +45,7 @@ Configured centrally in root `Cargo.toml`:
 opt-level = 3
 lto = true
 codegen-units = 1
-panic = "abort"
+panic = "unwind"
 overflow-checks = true
 strip = "symbols"
 
@@ -57,11 +57,24 @@ overflow-checks = true
 
 | Flag | Value | Security Justification |
 |---|---|---|
-| `overflow-checks` | `true` (Release & Dev) | In default Rust release builds, integer overflows wrap modulo $2^N$ (`overflow-checks = false`). In authentication logic where buffer lengths and counts are validated, wrapping can create critical logic bypasses or out-of-bounds access. Enforcing `overflow-checks = true` ensures runtime panics (caught by `catch_unwind`) on overflow. |
+| `overflow-checks` | `true` (Release & Dev) | In default Rust release builds, integer overflows wrap modulo $2^N$ (`overflow-checks = false`). In authentication logic where buffer lengths and counts are validated, wrapping can create critical logic bypasses or out-of-bounds access. Enforcing `overflow-checks = true` turns an overflow into a panic, which `catch_unwind` in `pam_soos.so` converts into `PAM_IGNORE` — this only holds because the profile unwinds (see `panic` below). |
 | `lto` | `true` | Cross-crate Link-Time Optimization optimizes call graphs across crate boundaries, eliminating unused symbols and hardening indirect calls. |
 | `codegen-units` | `1` | Maximizes compiler optimization visibility and eliminates codegen discrepancies across compilation units. |
-| `panic` | `"abort"` | Defense-in-depth: if any unexpected panic escapes `catch_unwind`, the process aborts cleanly rather than attempting stack unwinding through C frames. |
+| `panic` | `"unwind"` | **Mandatory for panic safety of `pam_soos.so`** (ADR 2026-09-29, review finding PAM-01 / GitHub #148). Under `panic = "abort"` every `catch_unwind` in the module is a no-op: a panic (including an overflow trapped by `overflow-checks`) aborts the PAM host process — gdm, sudo, login, the screen locker — instead of degrading to `PAM_IGNORE` and password fallback (ARCHITECTURE.md invariant 5). The panic strategy cannot be set per package, and every packaging path builds with `[profile.release]`, so the whole workspace unwinds. Rust already aborts when a panic escapes an `extern "C"` function, so the defense-in-depth that `abort` used to provide at the FFI boundary is retained for free. `tests/invariants::test_release_profile_unwinds_so_pam_catch_unwind_is_effective` pins this value and Docker case T10 proves it on the release-built artifact. |
 | `strip` | `"symbols"` | Strips internal debug symbols from the compiled shared object to minimize exposed metadata. |
+
+### Proving panic safety on the shipped artifact
+
+Unit and integration tests run under `[profile.test]`, which always unwinds, so they cannot
+detect a wrong release panic strategy. The `soos-pam` crate therefore has an opt-in Cargo
+feature `fault-injection` (never a default feature, never enabled by `scripts/build_*.sh`,
+`packaging/**`, `scripts/install.sh` or CI builds — enforced by
+`tests/invariants::test_pam_fault_injection_feature_is_opt_in_and_never_packaged`). It adds the
+PAM argument `fault_inject=<panic|overflow>` that panics inside the `catch_unwind` region
+before any socket activity. `tests/docker/test_suite.sh` case T10 builds this variant with the
+same `[profile.release]` into `target/fault-injection/`, loads it as `pam_soos_fault.so` and
+asserts that the PAM host process is not killed (exit 134 = SIGABRT) and that password fallback
+still works (valid password accepted, invalid password rejected).
 
 ---
 
@@ -133,7 +146,8 @@ Quality and security gates are enforced at multiple levels (details in
 │ 3. Continuous Integration (.github/workflows/ci.yml)        │
 │    - lint (fmt, ShellCheck, candid layers 1+2, per-commit   │
 │      secrets), clippy, test, security (cargo-deny, daily),  │
-│      pam-integration (Docker), ci-success aggregate;        │
+│      pam-integration + authselect-profile (Docker),         │
+│      ci-success aggregate;                                  │
 │      pr-title.yml (Conventional Commits on the PR title)    │
 │    - read-only token, SHA-pinned actions, --locked builds   │
 └─────────────────────────────────────────────────────────────┘

@@ -220,39 +220,60 @@ fi
 success "All directory hierarchy and permission invariants verified."
 
 # ---------------------------------------------------------------------------
-# Step 4: authselect Custom Profile & pam_faillock Preservation Verification
+# Step 4: authselect Custom Profile Activation & pam_faillock Preservation
 # ---------------------------------------------------------------------------
-info "Verifying custom authselect profile template and pam_faillock preservation..."
+# The profile is activated for real (GitHub #145): a template-only inspection
+# cannot detect unsupported syntax, undeclared features or missing templates.
+info "Activating custom authselect profile and verifying pam_faillock preservation..."
 
 AUTHSELECT_PROFILE_DIR="/etc/authselect/custom/soos"
-if [[ ! -d "${AUTHSELECT_PROFILE_DIR}" ]]; then
-    AUTHSELECT_PROFILE_DIR="packaging/pam/fedora/soos"
-fi
+test -d "${AUTHSELECT_PROFILE_DIR}" || { error "custom authselect profile missing: ${AUTHSELECT_PROFILE_DIR}"; exit 1; }
+for template in README REQUIREMENTS system-auth password-auth nsswitch.conf fingerprint-auth smartcard-auth postlogin; do
+    test -f "${AUTHSELECT_PROFILE_DIR}/${template}" || { error "custom authselect profile template missing: ${template}"; exit 1; }
+done
+command -v authselect >/dev/null 2>&1 || { error "authselect is required on Fedora / RHEL"; exit 1; }
 
-test -f "${AUTHSELECT_PROFILE_DIR}/system-auth" || { error "custom authselect system-auth template missing"; exit 1; }
-test -f "${AUTHSELECT_PROFILE_DIR}/password-auth" || { error "custom authselect password-auth template missing"; exit 1; }
+AUTHSELECT_ORIGINAL="$(authselect current --raw 2>/dev/null || true)"
+if [[ -f /etc/soos/authselect.previous ]]; then
+    AUTHSELECT_ORIGINAL="$(head -n 1 /etc/soos/authselect.previous)"
+fi
+info "Original authselect profile: ${AUTHSELECT_ORIGINAL:-<none>}"
+NSSWITCH_BEFORE="$(grep -v '^[[:space:]]*#' /etc/nsswitch.conf | sed '/^[[:space:]]*$/d')"
 
-# Verify pam_faillock preservation in template
-SYSTEM_AUTH_CONTENT=$(cat "${AUTHSELECT_PROFILE_DIR}/system-auth")
-if ! echo "${SYSTEM_AUTH_CONTENT}" | grep -q "pam_faillock.so"; then
-    error "INVARIANT VIOLATION: custom authselect profile does not preserve pam_faillock!"
-    exit 1
-fi
+info "Running: authselect select custom/soos with-faillock --force"
+authselect select custom/soos with-faillock --force || { error "custom authselect profile activation failed"; exit 1; }
+authselect check || { error "authselect check failed after activating custom/soos"; exit 1; }
 
-# Verify ordering: faillock preauth -> pam_soos -> pam_unix -> faillock authfail
-if ! echo "${SYSTEM_AUTH_CONTENT}" | grep -q "pam_faillock.so preauth"; then
-    error "INVARIANT VIOLATION: pam_faillock.so preauth hook missing!"; exit 1;
-fi
-if ! echo "${SYSTEM_AUTH_CONTENT}" | grep -q "pam_faillock.so authfail"; then
-    error "INVARIANT VIOLATION: pam_faillock.so authfail hook missing!"; exit 1;
-fi
-success "Custom authselect profile verified: pam_faillock preauth and authfail hooks preserved."
+# Verify generated stacks: faillock preauth -> pam_soos -> pam_unix -> faillock authfail
+for stack in system-auth password-auth; do
+    STACK_FILE="/etc/pam.d/${stack}"
+    if grep -q '{' "${STACK_FILE}"; then
+        error "INVARIANT VIOLATION: unresolved template syntax in ${STACK_FILE}"; exit 1
+    fi
+    PREAUTH_LINE="$(grep -n 'pam_faillock.so preauth' "${STACK_FILE}" | head -n 1 | cut -d: -f1)"
+    SOOS_LINE="$(grep -n 'pam_soos.so timeout_ms=250' "${STACK_FILE}" | head -n 1 | cut -d: -f1)"
+    UNIX_LINE="$(grep -n 'pam_unix.so' "${STACK_FILE}" | head -n 1 | cut -d: -f1)"
+    AUTHFAIL_LINE="$(grep -n 'pam_faillock.so authfail' "${STACK_FILE}" | head -n 1 | cut -d: -f1)"
+    if [[ -z "${PREAUTH_LINE}" || -z "${SOOS_LINE}" || -z "${UNIX_LINE}" || -z "${AUTHFAIL_LINE}" ]]; then
+        error "INVARIANT VIOLATION: pam_faillock/pam_soos/pam_unix lines missing in ${STACK_FILE}"; exit 1
+    fi
+    if (( PREAUTH_LINE >= SOOS_LINE || SOOS_LINE >= UNIX_LINE || UNIX_LINE >= AUTHFAIL_LINE )); then
+        error "INVARIANT VIOLATION: ${STACK_FILE} ordering preauth=${PREAUTH_LINE} soos=${SOOS_LINE} unix=${UNIX_LINE} authfail=${AUTHFAIL_LINE}"; exit 1
+    fi
+    grep -qE '^account[[:space:]]+required[[:space:]]+pam_faillock\.so' "${STACK_FILE}" \
+        || { error "INVARIANT VIOLATION: account-phase pam_faillock.so missing in ${STACK_FILE}"; exit 1; }
+done
 
-# Test authselect check if authselect binary is present
-if command -v authselect >/dev/null 2>&1; then
-    info "Validating authselect profile syntax via authselect check..."
-    authselect check || true
+# Verify /etc/nsswitch.conf was regenerated with its databases (never emptied)
+NSSWITCH_AFTER="$(grep -v '^[[:space:]]*#' /etc/nsswitch.conf | sed '/^[[:space:]]*$/d')"
+for database in passwd shadow group hosts; do
+    echo "${NSSWITCH_AFTER}" | grep -q "^${database}:" \
+        || { error "INVARIANT VIOLATION: /etc/nsswitch.conf lost its '${database}' database"; exit 1; }
+done
+if [[ "${AUTHSELECT_ORIGINAL%% *}" == "local" && "${NSSWITCH_AFTER}" != "${NSSWITCH_BEFORE}" ]]; then
+    error "INVARIANT VIOLATION: /etc/nsswitch.conf changed after activating custom/soos"; exit 1
 fi
+success "Custom authselect profile activated: pam_faillock preauth/authfail preserved, nsswitch.conf intact."
 
 # ---------------------------------------------------------------------------
 # Step 5: sudo and gdm PAM Integration Verification
@@ -390,6 +411,19 @@ else
     test ! -f "/usr/bin/soos-admin" || { error "soos-admin still present after uninstall"; exit 1; }
     success "scripts/uninstall.sh rollback completed cleanly."
 fi
+
+# Verify the authselect rollback: custom/soos is no longer selected, the recorded
+# profile is back and the configuration is valid.
+AUTHSELECT_AFTER="$(authselect current --raw 2>/dev/null || true)"
+if [[ "${AUTHSELECT_AFTER}" == custom/soos* ]]; then
+    error "authselect still points at custom/soos after rollback"; exit 1
+fi
+if [[ -n "${AUTHSELECT_ORIGINAL}" && "${AUTHSELECT_AFTER}" != "${AUTHSELECT_ORIGINAL}" ]]; then
+    error "authselect rollback restored '${AUTHSELECT_AFTER}' instead of '${AUTHSELECT_ORIGINAL}'"; exit 1
+fi
+authselect check || { error "authselect check failed after rollback"; exit 1; }
+test ! -d "${AUTHSELECT_PROFILE_DIR}" || { error "${AUTHSELECT_PROFILE_DIR} still present after rollback"; exit 1; }
+success "authselect rollback verified: profile '${AUTHSELECT_AFTER}' restored."
 
 # Clean up test files
 rm -f /etc/pam.d/test-sudo-fedora /etc/pam.d/test-gdm-fedora /etc/pam.d/test-system-auth-fedora /etc/pam.d/test-password-auth-fedora "${ENROLLED_TEMPLATE}"

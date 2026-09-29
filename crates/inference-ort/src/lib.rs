@@ -28,4 +28,4 @@ pub use landmarks::{FaceLandmarks, LandmarkDetector, Point2f};
 pub use manifest::{ManifestHeader, ModelManifest, ModelMetadata};
 pub use mock::{MockEmbeddingExtractor, MockFaceDetector, MockLandmarkDetector, MockPadDetector};
 pub use pad::{AttackType, OrtPadDetector, PadDetector, PadResult};
-pub use registry::{ModelRegistry, RegistryConfig};
+pub use registry::{ModelRegistry, RegistryConfig, SharedSession};

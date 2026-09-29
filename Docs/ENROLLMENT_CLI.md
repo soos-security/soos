@@ -69,6 +69,32 @@ sudo soos-enroll list
 sudo soos-enroll list --format json
 ```
 
+### `soos-enroll debug-vision`
+Captures one camera frame, runs the face detector and writes a standalone HTML report drawing the bounding boxes, confidence scores and 5-point landmarks on an HTML5 canvas (GitHub #149 / STO-02 hardening):
+
+```bash
+# Geometry-only report in the root-only default directory (/var/lib/soos/debug/soos-debug-<unix_secs>-<pid>.html)
+sudo soos-enroll debug-vision
+
+# Explicit output path (absolute, no '..', under an allowed FHS prefix; the file must not exist)
+sudo soos-enroll debug-vision --output /var/lib/soos/debug/lighting-check.html
+
+# Opt in to embedding the raw camera frame (biometric data) in the report
+sudo soos-enroll debug-vision --embed-frame
+
+# Mock camera and synthetic detector, no hardware required
+sudo soos-enroll --mock debug-vision
+```
+
+Filesystem and privacy contract (`crates/enrollment-cli/src/service.rs`):
+- **Atomic root-only creation**: the report is opened with `O_CREAT | O_EXCL | O_NOFOLLOW` and mode `DEBUG_REPORT_FILE_MODE` (`0600`) in a single `open(2)` call; the mode is never fixed up with `chmod` after the write.
+- **Never overwrite, never follow**: a pre-existing file or symbolic link at the output path, or a symbolic link in place of the parent directory, aborts the command with `EnrollmentCliError::DebugReportRefused` and leaves the existing target byte-identical. This closes the root truncate-through-symlink primitive of the former `std::fs::write` into the current working directory.
+- **Safe default location**: without `--output`, reports go to `DEFAULT_DEBUG_REPORT_DIR` (`/var/lib/soos/debug`), created with `DEBUG_REPORT_DIR_MODE` (`0700`) when missing; an existing directory is accepted as is and never `chmod`-ed. An explicit `--output` passes `validate_fhs_path` (absolute, no `..`, allowed FHS prefix) and is validated before the camera is touched.
+- **Frame embedding is opt-in**: by default the report contains only detection geometry and resolution. `--embed-frame` embeds the raw RGB24 frame as base64; the report then carries a visible privacy warning and the CLI prints a reminder to delete it after use. The raw frame is biometric data (`AI/ARCHITECTURE.md` lists storing raw frames on disk as an anti-pattern), so embedding is a deliberate, per-invocation administrator decision.
+- **Detector errors are propagated**: a failing detector aborts the command (`EnrollmentCliError::Inference`) instead of silently producing a report with zero detections, and no file is created.
+
+Verification: `crates/enrollment-cli/tests/debug_vision_tests.rs` (matrix rows EN12–EN14).
+
 ---
 
 ## 3. Global Options
@@ -85,7 +111,7 @@ sudo soos-enroll list --format json
 - **Lazy Service Construction**: The CLI separates store-only initialization (`build_store_only`) from full biometric pipeline initialization (`build_full_service`). Non-biometric operations (`list`, `delete`) initialize solely the cryptographic `BiometricStore`, avoiding camera device allocation and neural model loading. This allows headless or unprovisioned machines to inspect and clean up templates without camera or model files.
 - **Model Registry Attestation**: Biometric capture operations (`enroll`, `verify`) attest against official neural models defined in `models/manifest.toml`:
   - Face Detection & 5-Point Landmarks: `scrfd_500m_kps` (`scrfd_500m_kps.onnx`)
-  - Presentation Attack Detection: `minifasnet_v2_pad` (`minifasnet_v2_80x80.onnx`)
+  - Presentation Attack Detection: `minifasnet_v2_pad` (`minifasnet_v2_80x80.onnx`), constructed by `service::build_pad_detector` with `OrtPadDetector::new`, i.e. the crate default live class index `DEFAULT_MINIFASNET_LIVE_CLASS_INDEX = 1` shared with `soos-daemon` and `soos-gui` (never overridden; matrix PLC2, GitHub #146)
   - Feature Embedding (512D): `arcface_w600k_mbf` (`arcface_w600k_mbf.onnx`)
 - **Deterministic Camera Addressing**: Satisfies Criterion C4 by resolving camera device paths via `/dev/v4l/by-id/`, eliminating enumeration races across kernel restarts.
 

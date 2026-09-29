@@ -18,6 +18,12 @@ pub const MAX_FRAME_AGE_NS: u64 = 150_000_000;
 /// Total decision latency budget per PAM authentication request (900ms, within 1000ms PAM deadline).
 pub const DECISION_BUDGET_MS: u64 = 900;
 
+/// Polling interval of the multi-frame consensus loop between camera snapshot checks (10ms).
+///
+/// Short enough to pick up every new capture at 30 fps (33ms interval) so the `k` consecutive
+/// passing captures required by `soos_policy::PadAggregator` are reached with minimal latency.
+pub const FRAME_POLL_INTERVAL_MS: u64 = 10;
+
 /// Composite runtime container holding all operational pipeline components.
 pub struct PipelineComponents {
     /// Warm camera capture manager.
@@ -104,6 +110,19 @@ pub fn current_monotonic_nanos_from_clock(
     }
 }
 
+/// Builds the daemon's production Presentation Attack Detector.
+///
+/// Sole PAD construction site of the daemon. The live class index is never overridden here:
+/// `soos_inference_ort::pad::DEFAULT_MINIFASNET_LIVE_CLASS_INDEX` is the single source of
+/// truth shared with `soos-enroll` and `soos-gui` (GitHub #146, enforced by the
+/// `test_no_pad_live_class_index_override_outside_tests` invariant).
+pub fn build_pad_detector(
+    pad_session: soos_inference_ort::SharedSession,
+    pad_threshold: f32,
+) -> soos_inference_ort::OrtPadDetector {
+    soos_inference_ort::OrtPadDetector::new(pad_session, pad_threshold)
+}
+
 /// Initializes all production pipeline components from a strongly-typed [`PipelineConfig`].
 ///
 /// This includes:
@@ -186,11 +205,7 @@ pub fn initialize_pipeline(
         config.vision.min_face_confidence,
         0.45,
     )?);
-    let pad = Arc::new(soos_inference_ort::OrtPadDetector::new_with_class_index(
-        pad_session,
-        config.vision.pad_threshold,
-        2,
-    ));
+    let pad = Arc::new(build_pad_detector(pad_session, config.vision.pad_threshold));
     let extractor = Arc::new(soos_inference_ort::OrtEmbeddingExtractor::new(ext_session));
 
     let vision = Arc::new(soos_vision::VisionPipeline::new(

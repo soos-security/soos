@@ -57,14 +57,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         (cam, pipe)
     } else {
         let daemon_sock = std::path::Path::new("/run/soos/daemon.sock");
-        let cam: Arc<dyn CameraManager> =
-            if daemon_sock.exists() && soos_gui::IpcCameraManager::probe(daemon_sock) {
+        // GitHub #143: the daemon serves preview frames only to root or to UIDs listed in its
+        // `[preview]` configuration; probe the authorization once before committing to IPC.
+        let preview_probe = if daemon_sock.exists() {
+            soos_gui::IpcCameraManager::probe_preview(daemon_sock)
+        } else {
+            Err(soos_gui::IpcPreviewError::Io)
+        };
+        let cam: Arc<dyn CameraManager> = match preview_probe {
+            Ok(()) => {
                 tracing::info!(
                     "Connected to 'soos-daemon' video proxy at '{}'. Streaming via daemon IPC.",
                     daemon_sock.display()
                 );
                 Arc::new(soos_gui::IpcCameraManager::spawn_default())
-            } else {
+            }
+            Err(err) => {
+                if daemon_sock.exists() {
+                    tracing::warn!(
+                        error = %err,
+                        "soos-daemon video proxy is not usable for this user (enable it with \
+                         `[preview] enabled = true` and `allowed_uids` in /etc/soos/daemon.toml); \
+                         falling back to direct V4L2 access"
+                    );
+                }
                 let device_path = resolve_camera_device_from_config(
                     args.camera_device,
                     Some(std::path::Path::new("/etc/soos/daemon.toml")),
@@ -79,7 +95,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     device_path.display()
                 );
                 Arc::new(V4lCameraManager::spawn(camera_config)?)
-            };
+            }
+        };
 
         let mut registry = ModelRegistry::new(RegistryConfig::new(&args.models_dir))?;
         registry.verify_integrity()?;

@@ -79,6 +79,12 @@ pub trait PadDetector: Send + Sync {
 }
 
 /// Default live class index for MiniFASNetV2 models (Class 0: PrintPhoto, Class 1: Genuine Live, Class 2: ScreenReplay).
+///
+/// Single source of truth for the whole workspace: every production construction site
+/// (`soos-daemon`, `soos-enroll`, `soos-gui`) uses [`OrtPadDetector::new`], which reads this
+/// constant. Overriding the index in production is rejected by the repository invariant
+/// `test_no_pad_live_class_index_override_outside_tests` (GitHub #146). Changing the value
+/// requires a new ADR entry in `AI/DECISIONS.md` backed by a measurement on the real model.
 pub const DEFAULT_MINIFASNET_LIVE_CLASS_INDEX: usize = 1;
 
 /// MiniFASNetV2 ONNX Runtime Presentation Attack Detector.
@@ -99,6 +105,10 @@ impl OrtPadDetector {
     }
 
     /// Constructs a new `OrtPadDetector` with an explicit live class index.
+    ///
+    /// Test-only: production code must use [`OrtPadDetector::new`] so that
+    /// [`DEFAULT_MINIFASNET_LIVE_CLASS_INDEX`] stays the single source of truth
+    /// (repository invariant, GitHub #146).
     pub fn new_with_class_index(
         session: Arc<Mutex<Session>>,
         liveness_threshold: f32,
@@ -112,6 +122,9 @@ impl OrtPadDetector {
     }
 
     /// Configures the live class index using a builder pattern.
+    ///
+    /// Test-only: production code must never override the index (see
+    /// [`DEFAULT_MINIFASNET_LIVE_CLASS_INDEX`] and GitHub #146).
     pub fn with_live_class_index(mut self, live_class_index: usize) -> Self {
         self.live_class_index = live_class_index;
         self

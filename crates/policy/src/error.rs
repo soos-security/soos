@@ -14,6 +14,15 @@ pub enum PolicyError {
         /// Detailed description of the invariant failure.
         reason: &'static str,
     },
+    /// Multi-frame PAD consensus parameters are invalid (e.g. `required == 0` or `required > window`).
+    InvalidConsensus {
+        /// Requested window size (`n`).
+        window: usize,
+        /// Requested consecutive passing frame count (`k`).
+        required: usize,
+        /// Detailed description of the invariant failure.
+        reason: &'static str,
+    },
     /// Rate limit has been exceeded for the target user ID.
     RateLimitExceeded {
         /// User ID subject to the rate limit.
@@ -45,6 +54,16 @@ impl fmt::Display for PolicyError {
             } => {
                 let val = f32::from_bits(*value_bits);
                 write!(f, "invalid threshold for {name} ({val}): {reason}")
+            }
+            Self::InvalidConsensus {
+                window,
+                required,
+                reason,
+            } => {
+                write!(
+                    f,
+                    "invalid PAD consensus parameters (window={window}, required={required}): {reason}"
+                )
             }
             Self::RateLimitExceeded {
                 uid,

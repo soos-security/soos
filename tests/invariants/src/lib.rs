@@ -726,7 +726,13 @@ mod tests {
         assert!(evidence_dir.is_dir(), "evidence directory must be created");
         assert!(models_dir.is_dir(), "models directory must be created");
         assert!(libexec_dir.is_dir(), "libexec directory must be created");
-        assert!(master_key.is_file(), "master.key must be created");
+        // Contract migration (GitHub #144 / ONB-01): a staged tree is package
+        // content, so the master key must be generated on the target host by the
+        // post-install scriptlet, never inside the staging root.
+        assert!(
+            !master_key.exists(),
+            "master.key must NOT be generated under --destdir (GitHub #144)"
+        );
 
         #[cfg(unix)]
         {
@@ -744,15 +750,427 @@ mod tests {
                 0o700,
                 "evidence dir must be mode 0700"
             );
+        }
 
-            let key_meta = fs::metadata(&master_key).expect("master.key meta");
+        let _ = fs::remove_dir_all(&tmp_dir);
+    }
+
+    /// Recursively collects every regular file below `dir` whose name ends with `.key`.
+    fn collect_key_files(dir: &Path, found: &mut Vec<PathBuf>) {
+        let Ok(entries) = fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let file_type = entry.file_type().expect("file type");
+            if file_type.is_dir() {
+                collect_key_files(&path, found);
+            } else if path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.ends_with(".key"))
+            {
+                found.push(path);
+            }
+        }
+    }
+
+    /// Invariant: `install.sh --destdir` stages a package tree that contains no key
+    /// material and ships the key provisioning helper instead (GitHub #144 / ONB-01).
+    #[test]
+    fn test_install_script_destdir_stages_no_key_material() {
+        let root = workspace_root();
+        let install_sh = root.join("scripts/install.sh");
+
+        let tmp_dir =
+            std::env::temp_dir().join(format!("soos_install_nokey_test_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp_dir);
+        fs::create_dir_all(&tmp_dir).expect("create tmp_dir");
+
+        let status = std::process::Command::new("bash")
+            .arg(&install_sh)
+            .arg("--destdir")
+            .arg(&tmp_dir)
+            .arg("--skip-models")
+            .arg("--skip-systemd")
+            .status()
+            .expect("execute install.sh");
+        assert!(status.success(), "install.sh --destdir must succeed");
+
+        let mut staged_keys = Vec::new();
+        collect_key_files(&tmp_dir, &mut staged_keys);
+        assert!(
+            staged_keys.is_empty(),
+            "staged tree must contain no *.key file, found: {staged_keys:?}"
+        );
+        assert!(
+            !tmp_dir.join("var/lib/soos/master.key").exists(),
+            "var/lib/soos/master.key must be absent from the staged tree"
+        );
+
+        // The helper that generates the key on the target host must be shipped.
+        let helper = tmp_dir.join("usr/libexec/soos/provision-master-key");
+        assert!(
+            helper.is_file(),
+            "usr/libexec/soos/provision-master-key must be staged"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let meta = fs::metadata(&helper).expect("helper meta");
             assert_eq!(
-                key_meta.permissions().mode() & 0o777,
+                meta.permissions().mode() & 0o777,
+                0o755,
+                "provision-master-key must be mode 0755"
+            );
+        }
+
+        let _ = fs::remove_dir_all(&tmp_dir);
+    }
+
+    /// Invariant: the shared key provisioning helper generates a 32-byte key with
+    /// mode 0600 exactly once and never overwrites an existing key (GitHub #144).
+    #[test]
+    fn test_provision_master_key_helper_generates_0600_key_once() {
+        let root = workspace_root();
+        let helper = root.join("scripts/provision_master_key.sh");
+        assert!(
+            helper.exists(),
+            "scripts/provision_master_key.sh must exist"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let meta = fs::metadata(&helper).expect("helper metadata");
+            assert_ne!(
+                meta.permissions().mode() & 0o111,
+                0,
+                "scripts/provision_master_key.sh must be executable"
+            );
+        }
+        let helper_content = fs::read_to_string(&helper).expect("read helper");
+        assert!(
+            helper_content.contains("umask 077"),
+            "helper must restrict the creation umask so the key is 0600 from inception"
+        );
+
+        let tmp_dir =
+            std::env::temp_dir().join(format!("soos_provision_key_test_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp_dir);
+        let state_dir = tmp_dir.join("var/lib/soos");
+        let key_path = state_dir.join("master.key");
+
+        // 1. Fresh state directory (created by the helper): key generated.
+        let status = std::process::Command::new("sh")
+            .arg(&helper)
+            .arg("--state-dir")
+            .arg(&state_dir)
+            .status()
+            .expect("execute provision_master_key.sh");
+        assert!(status.success(), "helper must succeed on a fresh state dir");
+        assert!(key_path.is_file(), "helper must create master.key");
+        let first = fs::read(&key_path).expect("read key");
+        assert_eq!(first.len(), 32, "master.key must be 32 bytes");
+        assert!(
+            first.iter().any(|b| *b != 0),
+            "master.key must not be all zeros"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let meta = fs::metadata(&key_path).expect("key meta");
+            assert_eq!(
+                meta.permissions().mode() & 0o777,
                 0o600,
                 "master.key must be mode 0600"
             );
-            assert_eq!(key_meta.len(), 32, "master.key must be 32 bytes");
         }
+        assert!(
+            !state_dir.join("master.key.tmp").exists()
+                && fs::read_dir(&state_dir)
+                    .expect("read state dir")
+                    .flatten()
+                    .all(|e| e.file_name() == "master.key"),
+            "helper must leave no temporary file behind"
+        );
+
+        // 2. Second run: idempotent, key content unchanged.
+        let status = std::process::Command::new("sh")
+            .arg(&helper)
+            .arg("--state-dir")
+            .arg(&state_dir)
+            .status()
+            .expect("execute provision_master_key.sh twice");
+        assert!(status.success(), "helper must succeed when the key exists");
+        let second = fs::read(&key_path).expect("read key again");
+        assert_eq!(
+            first, second,
+            "an existing master.key must never be overwritten"
+        );
+
+        // 3. Pre-existing key with lax permissions: content kept, mode tightened.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&key_path, fs::Permissions::from_mode(0o644))
+                .expect("loosen key mode");
+            let status = std::process::Command::new("sh")
+                .arg(&helper)
+                .arg("--state-dir")
+                .arg(&state_dir)
+                .status()
+                .expect("execute provision_master_key.sh on lax key");
+            assert!(status.success(), "helper must succeed on a lax key");
+            let meta = fs::metadata(&key_path).expect("key meta");
+            assert_eq!(
+                meta.permissions().mode() & 0o777,
+                0o600,
+                "helper must tighten an existing key to mode 0600"
+            );
+            assert_eq!(
+                fs::read(&key_path).expect("read key"),
+                first,
+                "tightening permissions must not change the key"
+            );
+        }
+
+        let _ = fs::remove_dir_all(&tmp_dir);
+    }
+
+    /// Invariant: the key provisioning helper refuses symlinks and non-regular
+    /// files at the key path and fails closed without writing through them.
+    #[test]
+    fn test_provision_master_key_helper_refuses_symlink_and_non_regular() {
+        let root = workspace_root();
+        let helper = root.join("scripts/provision_master_key.sh");
+        assert!(
+            helper.exists(),
+            "scripts/provision_master_key.sh must exist"
+        );
+
+        let tmp_dir = std::env::temp_dir().join(format!(
+            "soos_provision_key_symlink_test_{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&tmp_dir);
+
+        // 1. Dangling symlink at master.key: must not be followed.
+        let state_dir = tmp_dir.join("symlink/var/lib/soos");
+        fs::create_dir_all(&state_dir).expect("create state dir");
+        let target = tmp_dir.join("symlink/escaped.bin");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&target, state_dir.join("master.key")).expect("symlink");
+        let status = std::process::Command::new("sh")
+            .arg(&helper)
+            .arg("--state-dir")
+            .arg(&state_dir)
+            .status()
+            .expect("execute helper on symlink");
+        assert!(
+            !status.success(),
+            "helper must fail when master.key is a symlink"
+        );
+        assert!(
+            !target.exists(),
+            "helper must not write through the symlink target"
+        );
+
+        // 2. Directory at master.key: must fail closed.
+        let dir_state = tmp_dir.join("dir/var/lib/soos");
+        fs::create_dir_all(dir_state.join("master.key")).expect("create dir at key path");
+        let status = std::process::Command::new("sh")
+            .arg(&helper)
+            .arg("--state-dir")
+            .arg(&dir_state)
+            .status()
+            .expect("execute helper on directory");
+        assert!(
+            !status.success(),
+            "helper must fail when master.key is not a regular file"
+        );
+
+        let _ = fs::remove_dir_all(&tmp_dir);
+    }
+
+    /// Invariant: every native package scriptlet generates the master key on the
+    /// target host through the shared helper, and no installer or scriptlet keeps an
+    /// inline key generator (one source of truth, GitHub #144 / ONB-01).
+    #[test]
+    fn test_package_scriptlets_provision_key_via_shared_helper() {
+        let root = workspace_root();
+        let helper_path = "/usr/libexec/soos/provision-master-key";
+
+        let postinst = fs::read_to_string(root.join("packaging/debian/postinst"))
+            .expect("read debian postinst");
+        let arch_install = fs::read_to_string(root.join("packaging/arch/soos.install"))
+            .expect("read arch soos.install");
+        let spec = fs::read_to_string(root.join("packaging/rpm/soos.spec")).expect("read rpm spec");
+        let pkgbuild =
+            fs::read_to_string(root.join("packaging/arch/PKGBUILD")).expect("read PKGBUILD");
+        let install_sh =
+            fs::read_to_string(root.join("scripts/install.sh")).expect("read install.sh");
+        let uninstall_sh =
+            fs::read_to_string(root.join("scripts/uninstall.sh")).expect("read uninstall.sh");
+
+        // 1. Each post-install path invokes the shipped helper.
+        let configure_branch = postinst
+            .split("configure)")
+            .nth(1)
+            .expect("postinst configure branch");
+        assert!(
+            configure_branch.contains(helper_path),
+            "debian postinst configure branch must call {helper_path}"
+        );
+        let post_install = arch_install
+            .split("post_install()")
+            .nth(1)
+            .expect("soos.install post_install body");
+        assert!(
+            post_install.contains(helper_path),
+            "arch post_install must call {helper_path}"
+        );
+        let post_section = spec.split("%post\n").nth(1).expect("spec %post section");
+        assert!(
+            post_section.contains(helper_path),
+            "rpm %post must call {helper_path}"
+        );
+
+        // 2. The helper is shipped by every package recipe and removed on uninstall.
+        assert!(
+            spec.contains(&format!("%{{buildroot}}{helper_path}"))
+                || spec.contains(&format!("%{{buildroot}}/{}", &helper_path[1..])),
+            "rpm %install must stage {helper_path}"
+        );
+        let files_section = spec.split("%files\n").nth(1).expect("spec %files section");
+        assert!(
+            files_section.contains(helper_path),
+            "rpm %files must list {helper_path}"
+        );
+        assert!(
+            files_section.contains("%ghost") && files_section.contains("master.key"),
+            "rpm %files must keep master.key as %ghost (never packaged)"
+        );
+        assert!(
+            pkgbuild.contains("provision-master-key"),
+            "PKGBUILD package() must install the provision-master-key helper"
+        );
+        assert!(
+            install_sh.contains("provision-master-key"),
+            "install.sh must install the provision-master-key helper"
+        );
+        assert!(
+            uninstall_sh.contains("provision-master-key"),
+            "uninstall.sh must remove the provision-master-key helper"
+        );
+
+        // 3. One source of truth: no inline key generator outside the helper.
+        for (name, content) in [
+            ("packaging/debian/postinst", postinst.as_str()),
+            ("packaging/arch/soos.install", arch_install.as_str()),
+            ("packaging/rpm/soos.spec", spec.as_str()),
+            ("packaging/arch/PKGBUILD", pkgbuild.as_str()),
+            ("scripts/install.sh", install_sh.as_str()),
+        ] {
+            assert!(
+                !content.contains("openssl rand") && !content.contains("/dev/urandom"),
+                "{name} must not generate key material inline (use the shared helper)"
+            );
+        }
+
+        // 4. install.sh only provisions the key for a live install (empty DESTDIR).
+        assert!(
+            install_sh.contains("provision_master_key.sh"),
+            "install.sh must delegate live key generation to scripts/provision_master_key.sh"
+        );
+    }
+
+    /// Invariant: package builders refuse to package a staged tree that contains key
+    /// material, through a shared, fail-closed guard (GitHub #144 / ONB-01).
+    #[test]
+    fn test_package_builders_refuse_staged_key_material() {
+        let root = workspace_root();
+        let guard = root.join("scripts/check_no_key_material.sh");
+        assert!(
+            guard.exists(),
+            "scripts/check_no_key_material.sh must exist"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let meta = fs::metadata(&guard).expect("guard metadata");
+            assert_ne!(
+                meta.permissions().mode() & 0o111,
+                0,
+                "scripts/check_no_key_material.sh must be executable"
+            );
+        }
+
+        // 1. Every builder that stages through install.sh --destdir invokes the guard.
+        for builder in [
+            "scripts/build_deb.sh",
+            "scripts/build_arch.sh",
+            "packaging/debian/rules",
+        ] {
+            let content = fs::read_to_string(root.join(builder)).expect("read builder");
+            assert!(
+                content.contains("check_no_key_material.sh"),
+                "{builder} must run scripts/check_no_key_material.sh on the staged tree"
+            );
+        }
+
+        // 2. Functional: clean tree passes, a staged key fails closed.
+        let tmp_dir =
+            std::env::temp_dir().join(format!("soos_key_guard_test_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp_dir);
+        let clean = tmp_dir.join("clean/var/lib/soos/biometrics");
+        fs::create_dir_all(&clean).expect("create clean tree");
+        fs::write(tmp_dir.join("clean/var/lib/soos/README"), b"no key here").expect("write");
+        let status = std::process::Command::new("bash")
+            .arg(&guard)
+            .arg(tmp_dir.join("clean"))
+            .status()
+            .expect("execute guard on clean tree");
+        assert!(
+            status.success(),
+            "guard must accept a tree without key material"
+        );
+
+        let dirty = tmp_dir.join("dirty/var/lib/soos");
+        fs::create_dir_all(&dirty).expect("create dirty tree");
+        fs::write(dirty.join("master.key"), [0x5Au8; 32]).expect("write fake key");
+        let status = std::process::Command::new("bash")
+            .arg(&guard)
+            .arg(tmp_dir.join("dirty"))
+            .status()
+            .expect("execute guard on dirty tree");
+        assert!(
+            !status.success(),
+            "guard must reject a tree containing var/lib/soos/master.key"
+        );
+
+        let nested = tmp_dir.join("nested/usr/share/soos");
+        fs::create_dir_all(&nested).expect("create nested tree");
+        fs::write(nested.join("evidence.key"), [0x11u8; 32]).expect("write nested key");
+        let status = std::process::Command::new("bash")
+            .arg(&guard)
+            .arg(tmp_dir.join("nested"))
+            .status()
+            .expect("execute guard on nested tree");
+        assert!(
+            !status.success(),
+            "guard must reject any *.key file anywhere in the tree"
+        );
+
+        // 3. A missing directory argument is an error, never a silent pass.
+        let status = std::process::Command::new("bash")
+            .arg(&guard)
+            .arg(tmp_dir.join("does-not-exist"))
+            .status()
+            .expect("execute guard on missing dir");
+        assert!(
+            !status.success(),
+            "guard must fail when the staged tree does not exist"
+        );
 
         let _ = fs::remove_dir_all(&tmp_dir);
     }
@@ -781,17 +1199,20 @@ mod tests {
         let bio_dir = tmp_dir.join("var/lib/soos/biometrics");
         let bin_file = tmp_dir.join("usr/bin/soos-admin");
         let gui_bin_file = tmp_dir.join("usr/bin/soos-gui");
+        let helper_file = tmp_dir.join("usr/libexec/soos/provision-master-key");
         let service_file = tmp_dir.join("etc/systemd/system/soos-daemon.service");
         let backup_pam = tmp_dir.join("etc/pam.d/system-auth.soos-backup");
         let active_pam = tmp_dir.join("etc/pam.d/system-auth");
 
         fs::create_dir_all(&bio_dir).expect("create bio_dir");
         fs::create_dir_all(tmp_dir.join("usr/bin")).expect("create bin dir");
+        fs::create_dir_all(tmp_dir.join("usr/libexec/soos")).expect("create libexec dir");
         fs::create_dir_all(tmp_dir.join("etc/systemd/system")).expect("create systemd dir");
         fs::create_dir_all(tmp_dir.join("etc/pam.d")).expect("create pam.d dir");
 
         fs::write(&bin_file, b"binary content").expect("write bin");
         fs::write(&gui_bin_file, b"gui binary content").expect("write gui bin");
+        fs::write(&helper_file, b"#!/bin/sh\nexit 0\n").expect("write helper");
         fs::write(&service_file, b"unit content").expect("write service");
         fs::write(
             &backup_pam,
@@ -815,6 +1236,10 @@ mod tests {
         assert!(status.success(), "uninstall.sh must succeed");
         assert!(!bin_file.exists(), "binary must be removed");
         assert!(!gui_bin_file.exists(), "gui binary must be removed");
+        assert!(
+            !helper_file.exists(),
+            "provision-master-key helper must be removed (GitHub #144)"
+        );
         assert!(!service_file.exists(), "service file must be removed");
         assert!(
             bio_dir.exists(),
@@ -1388,5 +1813,699 @@ mod tests {
                 script.file_name()
             );
         }
+    }
+
+    /// Extracts one `[section]` of a TOML document as raw text (up to the next `[` header).
+    fn toml_section<'a>(content: &'a str, header: &str) -> &'a str {
+        let start = content
+            .find(header)
+            .unwrap_or_else(|| panic!("TOML section '{}' not found", header));
+        let body_start = start + header.len();
+        let rest = &content[body_start..];
+        let end = rest.find("\n[").unwrap_or(rest.len());
+        &rest[..end]
+    }
+
+    /// Returns true if a line is TOML/shell content rather than a comment or blank line.
+    fn is_code_line(line: &str) -> bool {
+        let trimmed = line.trim();
+        !trimmed.is_empty() && !trimmed.starts_with('#')
+    }
+
+    /// PAM-01 / TCI-01 (GitHub #148) — The shipped `pam_soos.so` must be built with
+    /// `panic = "unwind"`: under `panic = "abort"` every `catch_unwind` in the module is a
+    /// no-op and a panic aborts the host login process (gdm, sudo, login) instead of
+    /// degrading to `PAM_IGNORE` (ARCHITECTURE.md invariant 5).
+    ///
+    /// The artifact is produced by `[profile.release]` in every packaging path, so that profile
+    /// is the single source of truth: it must say `panic = "unwind"` explicitly, and no
+    /// packaging or Docker build command may select another profile.
+    #[test]
+    fn test_release_profile_unwinds_so_pam_catch_unwind_is_effective() {
+        let root = workspace_root();
+        let root_cargo = root.join("Cargo.toml");
+        let content = fs::read_to_string(&root_cargo)
+            .unwrap_or_else(|e| panic!("Error reading {}: {}", root_cargo.display(), e));
+
+        let release = toml_section(&content, "[profile.release]");
+        let panic_lines: Vec<&str> = release
+            .lines()
+            .filter(|l| is_code_line(l) && l.trim().starts_with("panic"))
+            .collect();
+
+        assert_eq!(
+            panic_lines.len(),
+            1,
+            "SECURITY VIOLATION (PAM-01): [profile.release] must declare the panic strategy exactly once, found: {:?}",
+            panic_lines
+        );
+        assert_eq!(
+            panic_lines[0].trim(),
+            "panic = \"unwind\"",
+            "SECURITY VIOLATION (PAM-01): [profile.release] must set panic = \"unwind\" so that catch_unwind in pam_soos.so is effective (found: {})",
+            panic_lines[0].trim()
+        );
+
+        // No profile in the workspace may reintroduce abort: the PAM cdylib inherits whatever
+        // profile the packaging scripts select, and `panic` cannot be overridden per package.
+        let manifests = [
+            root_cargo.clone(),
+            root.join("crates").join("pam").join("Cargo.toml"),
+        ];
+        for manifest in manifests {
+            let text = fs::read_to_string(&manifest)
+                .unwrap_or_else(|e| panic!("Error reading {}: {}", manifest.display(), e));
+            let abort_lines: Vec<&str> = text
+                .lines()
+                .filter(|l| is_code_line(l) && l.replace(' ', "").starts_with("panic=\"abort\""))
+                .collect();
+            assert!(
+                abort_lines.is_empty(),
+                "SECURITY VIOLATION (PAM-01): {} must not set panic = \"abort\" in any profile: {:?}",
+                manifest.display(),
+                abort_lines
+            );
+        }
+
+        // Every production build path must use the plain release profile (no `--profile <x>`),
+        // otherwise the artifact could silently come from a profile with different semantics.
+        let build_paths = [
+            "scripts/build_deb.sh",
+            "scripts/build_rpm.sh",
+            "scripts/build_arch.sh",
+            "scripts/build_packages.sh",
+            "packaging/debian/rules",
+            "packaging/rpm/soos.spec",
+            "packaging/arch/PKGBUILD",
+            "tests/docker/test_suite.sh",
+            "tests/docker/test_packages.sh",
+        ];
+        for rel in build_paths {
+            let path = root.join(rel);
+            let text = fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("Error reading {}: {}", path.display(), e));
+            // Command lines only (usage text such as "Skip cargo build step" is not a build).
+            let builds: Vec<&str> = text
+                .lines()
+                .filter(|l| l.trim_start().starts_with("cargo build"))
+                .collect();
+            assert!(
+                !builds.is_empty(),
+                "{} must contain at least one 'cargo build' invocation",
+                rel
+            );
+            for line in builds {
+                assert!(
+                    line.contains("--release"),
+                    "PACKAGING VIOLATION (PAM-01): {} builds without --release: '{}'",
+                    rel,
+                    line.trim()
+                );
+                assert!(
+                    !line.contains("--profile"),
+                    "PACKAGING VIOLATION (PAM-01): {} selects a custom profile; the PAM artifact must come from [profile.release]: '{}'",
+                    rel,
+                    line.trim()
+                );
+            }
+        }
+    }
+
+    /// PAM-01 (GitHub #148) — The test-only fault-injection hook of `soos-pam` must be an
+    /// opt-in Cargo feature that is never part of `default`, never referenced by any packaging,
+    /// install or CI build command, and whose production call sites are `cfg`-gated.
+    #[test]
+    fn test_pam_fault_injection_feature_is_opt_in_and_never_packaged() {
+        let root = workspace_root();
+        let pam_cargo = root.join("crates").join("pam").join("Cargo.toml");
+        let content = fs::read_to_string(&pam_cargo)
+            .unwrap_or_else(|e| panic!("Error reading {}: {}", pam_cargo.display(), e));
+
+        assert!(
+            content.contains("[features]"),
+            "crates/pam/Cargo.toml must declare a [features] table for the fault-injection hook"
+        );
+        let features = toml_section(&content, "[features]");
+        let feature_line = features
+            .lines()
+            .find(|l| is_code_line(l) && l.trim().starts_with("fault-injection"))
+            .expect("crates/pam/Cargo.toml must declare the 'fault-injection' feature");
+        assert_eq!(
+            feature_line.replace(' ', "").trim(),
+            "fault-injection=[]",
+            "The fault-injection feature must not pull any dependency or other feature"
+        );
+        let default_line = features
+            .lines()
+            .find(|l| is_code_line(l) && l.trim().starts_with("default"));
+        if let Some(default_line) = default_line {
+            assert!(
+                !default_line.contains("fault-injection"),
+                "SECURITY VIOLATION: fault-injection must never be a default feature: '{}'",
+                default_line.trim()
+            );
+        }
+
+        // Production code: the hook module and its call sites are compiled only under the feature.
+        let lib_rs = root.join("crates").join("pam").join("src").join("lib.rs");
+        let lib_src = fs::read_to_string(&lib_rs)
+            .unwrap_or_else(|e| panic!("Error reading {}: {}", lib_rs.display(), e));
+        let prod = extract_production_code(&lib_src);
+        assert!(
+            prod.contains("#[cfg(feature = \"fault-injection\")]\npub mod fault_injection;"),
+            "crates/pam/src/lib.rs must declare `pub mod fault_injection;` guarded by #[cfg(feature = \"fault-injection\")]"
+        );
+        let hook_calls = prod.matches("fault_injection::").count();
+        assert!(
+            hook_calls >= 1,
+            "crates/pam/src/lib.rs must invoke the fault-injection hook inside the catch_unwind region"
+        );
+        assert_eq!(
+            prod.matches("#[cfg(feature = \"fault-injection\")]").count(),
+            hook_calls + 1,
+            "Every reference to fault_injection in crates/pam/src/lib.rs must be preceded by #[cfg(feature = \"fault-injection\")]"
+        );
+
+        // Packaging, install and CI must never enable the feature.
+        let never_enable = [
+            "scripts/build_deb.sh",
+            "scripts/build_rpm.sh",
+            "scripts/build_arch.sh",
+            "scripts/build_packages.sh",
+            "scripts/install.sh",
+            "packaging/debian/rules",
+            "packaging/rpm/soos.spec",
+            "packaging/arch/PKGBUILD",
+            "tests/docker/test_packages.sh",
+            ".github/workflows/ci.yml",
+            "Dockerfile",
+            "tests/docker/Dockerfile.ubuntu",
+            "tests/docker/Dockerfile.fedora",
+            "tests/docker/Dockerfile.arch",
+        ];
+        for rel in never_enable {
+            let path = root.join(rel);
+            let text = fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("Error reading {}: {}", path.display(), e));
+            let offending: Vec<&str> = text
+                .lines()
+                .filter(|l| is_code_line(l) && l.contains("fault-injection"))
+                .collect();
+            assert!(
+                offending.is_empty(),
+                "SECURITY VIOLATION: {} must never enable the fault-injection feature: {:?}",
+                rel,
+                offending
+            );
+        }
+    }
+
+    /// PAM-01 (GitHub #148) — The Docker matrix must load the *release-built* `pam_soos.so`
+    /// (same `[profile.release]` as packaging, plus the opt-in fault-injection feature built
+    /// into a separate target directory) and prove that a panic inside the module returns
+    /// `PAM_IGNORE` with password fallback instead of aborting the PAM host process.
+    #[test]
+    fn test_pam_docker_suite_proves_release_panic_returns_pam_ignore() {
+        let root = workspace_root();
+        let suite = root.join("tests").join("docker").join("test_suite.sh");
+        let text = fs::read_to_string(&suite)
+            .unwrap_or_else(|e| panic!("Error reading {}: {}", suite.display(), e));
+
+        let build_lines: Vec<&str> = text
+            .lines()
+            .filter(|l| {
+                is_code_line(l) && l.contains("cargo build") && l.contains("fault-injection")
+            })
+            .collect();
+        assert_eq!(
+            build_lines.len(),
+            1,
+            "test_suite.sh must build the fault-injection variant of soos-pam exactly once: {:?}",
+            build_lines
+        );
+        let build = build_lines[0];
+        for required in [
+            "--release",
+            "-p soos-pam",
+            "--features fault-injection",
+            "--target-dir target/fault-injection",
+        ] {
+            assert!(
+                build.contains(required),
+                "test_suite.sh fault-injection build must contain '{}': '{}'",
+                required,
+                build.trim()
+            );
+        }
+
+        for required in [
+            "T10",
+            "fault_inject=panic",
+            "fault_inject=overflow",
+            "pam_soos_fault.so",
+            "134",
+        ] {
+            assert!(
+                text.contains(required),
+                "test_suite.sh must contain '{}' for the release panic-safety case (T10)",
+                required
+            );
+        }
+
+        let matrix_doc = root.join("Docs").join("PAM_DOCKER_TEST_MATRIX.md");
+        let doc = fs::read_to_string(&matrix_doc)
+            .unwrap_or_else(|e| panic!("Error reading {}: {}", matrix_doc.display(), e));
+        assert!(
+            doc.contains("T10") && doc.contains("fault_inject=panic"),
+            "Docs/PAM_DOCKER_TEST_MATRIX.md must document the T10 release panic-safety case"
+        );
+    }
+
+    /// Invariant (GitHub #146, PAD-01): `DEFAULT_MINIFASNET_LIVE_CLASS_INDEX` is the single
+    /// source of truth for the MiniFASNet live class. Production code must construct
+    /// `OrtPadDetector` with `OrtPadDetector::new`; the explicit-index constructors
+    /// (`new_with_class_index`, `with_live_class_index`) are test-only. A production override
+    /// silently inverts anti-spoofing (walkthrough 72 fixed the constant, the daemon and the
+    /// enrollment CLI kept a literal `2` = ScreenReplay).
+    #[test]
+    fn test_no_pad_live_class_index_override_outside_tests() {
+        let root = workspace_root();
+        let crates_dir = root.join("crates");
+        assert!(crates_dir.is_dir(), "crates/ directory must exist");
+
+        let definition_file = crates_dir.join("inference-ort/src/pad.rs");
+        let definition_source =
+            fs::read_to_string(&definition_file).expect("read crates/inference-ort/src/pad.rs");
+        assert!(
+            definition_source.contains("pub const DEFAULT_MINIFASNET_LIVE_CLASS_INDEX: usize = 1;"),
+            "DEFAULT_MINIFASNET_LIVE_CLASS_INDEX must be defined as 1 in crates/inference-ort/src/pad.rs"
+        );
+
+        let forbidden = ["new_with_class_index(", "with_live_class_index("];
+        let mut src_files = Vec::new();
+        for entry in fs::read_dir(&crates_dir).expect("read crates/") {
+            let crate_dir = entry.expect("crate dir entry").path();
+            let src_dir = crate_dir.join("src");
+            if src_dir.is_dir() {
+                collect_rs_files(&src_dir, &mut src_files);
+            }
+        }
+        assert!(
+            !src_files.is_empty(),
+            "At least one production source file must be scanned"
+        );
+
+        let mut violations = Vec::new();
+        let mut construction_sites = 0usize;
+        for file in &src_files {
+            let source = fs::read_to_string(file).expect("read production source file");
+            let production = extract_production_code(&source);
+            let rel = file
+                .strip_prefix(&root)
+                .unwrap_or(file)
+                .display()
+                .to_string();
+            for (line_no, line) in production.lines().enumerate() {
+                let trimmed = line.trim();
+                if trimmed.starts_with("//") {
+                    continue;
+                }
+                if trimmed.contains("OrtPadDetector::new(") {
+                    construction_sites += 1;
+                }
+                for pattern in forbidden {
+                    if !trimmed.contains(pattern) {
+                        continue;
+                    }
+                    // The definitions in pad.rs are the only permitted occurrences.
+                    let is_definition = *file == definition_file
+                        && trimmed.starts_with("pub fn ")
+                        && trimmed.contains(pattern);
+                    if !is_definition {
+                        violations.push(format!("{rel}:{}: {trimmed}", line_no + 1));
+                    }
+                }
+            }
+        }
+
+        assert!(
+            violations.is_empty(),
+            "Production code must not override the MiniFASNet live class index \
+             (use OrtPadDetector::new so DEFAULT_MINIFASNET_LIVE_CLASS_INDEX is the single source of truth):\n{}",
+            violations.join("\n")
+        );
+        assert!(
+            construction_sites >= 3,
+            "Expected the daemon, the enrollment CLI and the GUI to construct OrtPadDetector::new, found {construction_sites} site(s)"
+        );
+    }
+
+    /// Files an authselect custom profile must ship so that activating it never leaves a
+    /// generated system file empty (authselect writes every managed file from the profile).
+    const AUTHSELECT_PROFILE_FILES: [&str; 10] = [
+        "README",
+        "REQUIREMENTS",
+        "system-auth",
+        "password-auth",
+        "nsswitch.conf",
+        "fingerprint-auth",
+        "smartcard-auth",
+        "postlogin",
+        "dconf-db",
+        "dconf-locks",
+    ];
+
+    /// Returns the byte offset of `needle` in `haystack`, failing with `what` when absent.
+    fn offset_of(haystack: &str, needle: &str, what: &str) -> usize {
+        haystack
+            .find(needle)
+            .unwrap_or_else(|| panic!("{what}: '{needle}' not found"))
+    }
+
+    /// Collects the feature names referenced by authselect conditionals
+    /// (`{include if "x"}`, `{if "x":...}`, `{exclude if "x"}`, `{continue if "x"}`).
+    fn referenced_features(template: &str) -> std::collections::BTreeSet<String> {
+        let mut features = std::collections::BTreeSet::new();
+        for (idx, _) in template.match_indices("{") {
+            let rest = &template[idx..];
+            let Some(end) = rest.find('}') else { continue };
+            let block = &rest[..end];
+            let is_conditional = block.starts_with("{include if ")
+                || block.starts_with("{exclude if ")
+                || block.starts_with("{continue if ")
+                || block.starts_with("{if ");
+            if !is_conditional {
+                continue;
+            }
+            let mut parts = block.split('"');
+            parts.next();
+            while let (Some(name), Some(_)) = (parts.next(), parts.next()) {
+                features.insert(name.to_string());
+            }
+        }
+        features
+    }
+
+    /// Invariant: Fedora authselect profile is complete (Issue ONB-02 / GitHub #145)
+    ///
+    /// `authselect select custom/soos` regenerates every managed file from the profile
+    /// directory. A profile shipping only `system-auth`/`password-auth` empties
+    /// `/etc/nsswitch.conf` on activation. The profile must therefore ship the full
+    /// `local` layout and use real authselect conditional syntax.
+    #[test]
+    fn test_fedora_authselect_profile_is_complete() {
+        let root = workspace_root();
+        let profile_dir = root.join("packaging/pam/fedora/soos");
+        assert!(
+            profile_dir.is_dir(),
+            "packaging/pam/fedora/soos must be a directory"
+        );
+
+        for name in AUTHSELECT_PROFILE_FILES {
+            let path = profile_dir.join(name);
+            assert!(
+                path.is_file(),
+                "authselect profile file '{name}' is missing from packaging/pam/fedora/soos"
+            );
+            let content = fs::read_to_string(&path).expect("read profile file");
+            assert!(
+                !content.contains("{?"),
+                "'{name}' uses the unsupported '{{?feature:...}}' syntax; use \
+                 '{{include if \"feature\"}}' (authselect-profiles(5))"
+            );
+        }
+
+        let nsswitch =
+            fs::read_to_string(profile_dir.join("nsswitch.conf")).expect("read nsswitch.conf");
+        for database in ["passwd:", "shadow:", "group:", "hosts:", "services:"] {
+            assert!(
+                nsswitch.lines().any(|l| l.starts_with(database)),
+                "nsswitch.conf template must define the '{database}' database"
+            );
+        }
+        assert!(
+            nsswitch.contains("hosts:") && nsswitch.contains("resolve [!UNAVAIL=return] dns"),
+            "nsswitch.conf template must keep the systemd-resolved hosts chain"
+        );
+
+        let readme = fs::read_to_string(profile_dir.join("README")).expect("read README");
+        assert!(
+            readme.contains("AVAILABLE OPTIONAL FEATURES"),
+            "README must declare its optional features under 'AVAILABLE OPTIONAL FEATURES'"
+        );
+        assert!(
+            readme.contains("with-faillock::"),
+            "README must declare the 'with-faillock' feature (otherwise \
+             'authselect select custom/soos with-faillock' is rejected)"
+        );
+
+        // Every feature referenced by a template must be declared in the README,
+        // otherwise authselect rejects it with "Unknown profile feature".
+        let mut referenced = std::collections::BTreeSet::new();
+        for name in AUTHSELECT_PROFILE_FILES {
+            if name == "README" {
+                continue;
+            }
+            let content = fs::read_to_string(profile_dir.join(name)).expect("read template");
+            referenced.extend(referenced_features(&content));
+        }
+        assert!(
+            referenced.contains("with-faillock"),
+            "templates must reference the 'with-faillock' feature"
+        );
+        for feature in &referenced {
+            assert!(
+                readme.contains(&format!("{feature}::")),
+                "feature '{feature}' is referenced by a template but not declared in README"
+            );
+        }
+    }
+
+    /// Invariant: Fedora authselect profile preserves pam_faillock ordering
+    /// (Issue ONB-02 / GitHub #145, auditor checklist item 8)
+    ///
+    /// Generated stacks must contain `pam_faillock.so preauth` before `pam_soos.so`,
+    /// `pam_soos.so` before `pam_unix.so`, `pam_faillock.so authfail` after `pam_unix.so`
+    /// and the account-phase `pam_faillock.so`, all gated by `{include if "with-faillock"}`.
+    #[test]
+    fn test_fedora_authselect_profile_preserves_faillock_ordering() {
+        let root = workspace_root();
+        let profile_dir = root.join("packaging/pam/fedora/soos");
+        let include_if = "{include if \"with-faillock\"}";
+
+        for template in ["system-auth", "password-auth"] {
+            let content = fs::read_to_string(profile_dir.join(template)).expect("read template");
+            let ctx = format!("packaging/pam/fedora/soos/{template}");
+
+            let preauth = offset_of(&content, "pam_faillock.so preauth silent", &ctx);
+            let soos = offset_of(&content, "pam_soos.so timeout_ms=250", &ctx);
+            let unix = offset_of(&content, "pam_unix.so", &ctx);
+            let authfail = offset_of(&content, "pam_faillock.so authfail", &ctx);
+            let event = offset_of(&content, "pam_soos.so event=password-failed", &ctx);
+
+            assert!(
+                preauth < soos,
+                "{ctx}: faillock preauth must precede pam_soos"
+            );
+            assert!(soos < unix, "{ctx}: pam_soos must precede pam_unix");
+            assert!(
+                unix < authfail,
+                "{ctx}: faillock authfail must follow pam_unix"
+            );
+            assert!(
+                unix < event,
+                "{ctx}: password-failed event must follow pam_unix"
+            );
+            assert!(
+                content.lines().any(|l| l.starts_with("auth")
+                    && l.contains("[success=done default=ignore]")
+                    && l.contains("pam_soos.so timeout_ms=250")),
+                "{ctx}: pam_soos primary line must be [success=done default=ignore]"
+            );
+            assert!(
+                content.lines().any(|l| l.starts_with("auth")
+                    && l.contains("optional")
+                    && l.contains("pam_soos.so event=password-failed timeout_ms=20")),
+                "{ctx}: password-failed line must be 'auth optional ... timeout_ms=20'"
+            );
+
+            // Each pam_faillock line must be conditional on the declared feature.
+            let faillock_lines: Vec<&str> = content
+                .lines()
+                .filter(|l| l.contains("pam_faillock.so"))
+                .collect();
+            assert_eq!(
+                faillock_lines.len(),
+                3,
+                "{ctx}: expected preauth, authfail and account pam_faillock lines"
+            );
+            for line in &faillock_lines {
+                assert!(
+                    line.trim_end().ends_with(include_if),
+                    "{ctx}: pam_faillock line must end with {include_if}: '{line}'"
+                );
+            }
+            assert!(
+                faillock_lines
+                    .iter()
+                    .any(|l| l.starts_with("account") && !l.contains("preauth")),
+                "{ctx}: account phase must run pam_faillock.so"
+            );
+
+            // The password fallback must remain reachable: pam_unix stays `sufficient`,
+            // and no `[default=die]` control can short-circuit the stack before pam_deny.
+            assert!(
+                content.lines().any(|l| l.starts_with("auth")
+                    && l.contains("sufficient")
+                    && l.contains("pam_unix.so")),
+                "{ctx}: pam_unix.so auth line must be 'sufficient'"
+            );
+            assert!(
+                !content.contains("[default=die]"),
+                "{ctx}: '[default=die]' would skip the password-failed event"
+            );
+            assert!(
+                content
+                    .lines()
+                    .any(|l| l.starts_with("auth") && l.contains("pam_deny.so")),
+                "{ctx}: auth stack must end with pam_deny.so"
+            );
+        }
+    }
+
+    /// Invariant: activation, validation and rollback of the Fedora profile are
+    /// scripted and documented with commands authselect accepts (Issue ONB-02 / GitHub #145)
+    #[test]
+    fn test_fedora_authselect_activation_and_rollback_are_scripted() {
+        let root = workspace_root();
+        let activation = "authselect select custom/soos with-faillock --force";
+
+        // 1. Documentation uses the supported activation command and real syntax.
+        for doc in [
+            "Docs/DISTRIBUTION_DEPLOYMENT.md",
+            "Docs/PACKAGING_AND_PROVISIONING.md",
+        ] {
+            let content = fs::read_to_string(root.join(doc)).expect("read doc");
+            assert!(
+                content.contains(activation),
+                "{doc} must document '{activation}'"
+            );
+            assert!(
+                !content.contains("{?with-faillock"),
+                "{doc} must not show the unsupported '{{?with-faillock:...}}' syntax"
+            );
+            assert!(
+                content.contains("authselect.previous"),
+                "{doc} must document the recorded previous profile used for rollback"
+            );
+        }
+
+        // 2. install.sh records the previously selected profile; uninstall.sh restores it
+        //    before deleting the custom profile directory.
+        let install = fs::read_to_string(root.join("scripts/install.sh")).expect("read install");
+        assert!(
+            install.contains("authselect current --raw") && install.contains("authselect.previous"),
+            "scripts/install.sh must record 'authselect current --raw' into authselect.previous"
+        );
+        let uninstall =
+            fs::read_to_string(root.join("scripts/uninstall.sh")).expect("read uninstall");
+        assert!(
+            uninstall.contains("authselect.previous") && uninstall.contains("authselect select"),
+            "scripts/uninstall.sh must restore the recorded profile with 'authselect select'"
+        );
+        let restore_pos = offset_of(&uninstall, "authselect select", "uninstall.sh");
+        let remove_pos = offset_of(&uninstall, "rm -rf \"${FEDORA_AUTH_DIR}\"", "uninstall.sh");
+        assert!(
+            restore_pos < remove_pos,
+            "scripts/uninstall.sh must restore the previous profile before removing custom/soos"
+        );
+
+        // 3. RPM scriptlets implement the same record/restore contract.
+        let spec = fs::read_to_string(root.join("packaging/rpm/soos.spec")).expect("read spec");
+        // Section headers start a line; comments may mention other scriptlets.
+        let post = offset_of(&spec, "\n%post\n", "soos.spec");
+        let preun = offset_of(&spec, "\n%preun\n", "soos.spec");
+        let postun = offset_of(&spec, "\n%postun\n", "soos.spec");
+        assert!(post < preun && preun < postun, "soos.spec scriptlet order");
+        let post_section = &spec[post..preun];
+        let preun_section = &spec[preun..postun];
+        assert!(
+            post_section.contains("authselect current --raw")
+                && post_section.contains("authselect.previous"),
+            "soos.spec %post must record the current authselect profile"
+        );
+        assert!(
+            preun_section.contains("authselect select")
+                && preun_section.contains("authselect.previous"),
+            "soos.spec %preun must restore the recorded authselect profile"
+        );
+        assert!(
+            spec.contains("%ghost %{_sysconfdir}/soos/authselect.previous"),
+            "soos.spec must own authselect.previous as a %ghost file"
+        );
+
+        // 4. The distribution test activates the profile for real instead of tolerating
+        //    an `authselect check` failure.
+        let fedora_test = fs::read_to_string(root.join("tests/distro/fedora_rhel_test.sh"))
+            .expect("read fedora_rhel_test.sh");
+        assert!(
+            !fedora_test.contains("authselect check || true"),
+            "fedora_rhel_test.sh must not ignore 'authselect check' failures"
+        );
+        assert!(
+            fedora_test.contains(activation),
+            "fedora_rhel_test.sh must activate the profile with '{activation}'"
+        );
+        assert!(
+            fedora_test.contains("/etc/nsswitch.conf"),
+            "fedora_rhel_test.sh must verify /etc/nsswitch.conf after activation"
+        );
+
+        // 5. A Dockerized Fedora validation exists, is strict and is wired into run_tests.sh.
+        let docker_test = root.join("tests/docker/authselect_profile_test.sh");
+        assert!(
+            docker_test.is_file(),
+            "tests/docker/authselect_profile_test.sh must exist"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let meta = fs::metadata(&docker_test).expect("docker test metadata");
+            assert_ne!(
+                meta.permissions().mode() & 0o111,
+                0,
+                "tests/docker/authselect_profile_test.sh must be executable"
+            );
+        }
+        let docker_content = fs::read_to_string(&docker_test).expect("read docker test");
+        assert!(
+            docker_content.starts_with("#!/usr/bin/env bash")
+                && docker_content.contains("set -euo pipefail"),
+            "authselect_profile_test.sh must be a strict bash script"
+        );
+        for needle in [
+            activation,
+            "authselect check",
+            "/etc/nsswitch.conf",
+            "pam_faillock.so preauth",
+            "pam_faillock.so authfail",
+            "pamtester",
+            "scripts/uninstall.sh",
+        ] {
+            assert!(
+                docker_content.contains(needle),
+                "authselect_profile_test.sh must cover '{needle}'"
+            );
+        }
+        let run_tests = fs::read_to_string(root.join("run_tests.sh")).expect("read run_tests.sh");
+        assert!(
+            run_tests.contains("authselect_profile_test.sh"),
+            "run_tests.sh must expose the authselect profile test"
+        );
+        let ci = fs::read_to_string(root.join(".github/workflows/ci.yml")).expect("read ci.yml");
+        assert!(
+            ci.contains("authselect_profile_test.sh"),
+            "ci.yml must run the Fedora authselect profile test"
+        );
     }
 }
