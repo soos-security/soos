@@ -84,10 +84,16 @@ pub fn base64_encode(data: &[u8]) -> String {
 
 use soos_inference_ort::FaceDetection;
 
+/// Renders the standalone HTML debug report.
+///
+/// `embedded_frame_base64` is the base64-encoded raw RGB24 frame. It is biometric
+/// data: when `None` (the default for `debug-vision`) the report draws detection
+/// geometry only on a blank canvas and explains how to opt in; when `Some`, the frame
+/// is decoded on the canvas and the report carries a visible privacy warning.
 pub fn generate_html_report(
     width: u32,
     height: u32,
-    base64_bmp: &str,
+    embedded_frame_base64: Option<&str>,
     detections: &[FaceDetection],
 ) -> String {
     let mut boxes_js = String::new();
@@ -122,6 +128,36 @@ pub fn generate_html_report(
         }
     }
 
+    let (notice_html, frame_js) = match embedded_frame_base64 {
+        Some(b64) => (
+            "<p class=\"warning\"><strong>Privacy warning:</strong> this report embeds a raw camera frame \
+             (biometric data). Keep it root-only and delete it after use.</p>"
+                .to_string(),
+            format!(
+                r#"// Decode the raw RGB24 base64 frame
+        const b64 = "{b64}";
+        const bin = atob(b64);
+        const imgData = ctx.createImageData({width}, {height});
+        let j = 0;
+        for (let i = 0; i < bin.length; i += 3) {{
+            imgData.data[j++] = bin.charCodeAt(i);
+            imgData.data[j++] = bin.charCodeAt(i+1);
+            imgData.data[j++] = bin.charCodeAt(i+2);
+            imgData.data[j++] = 255; // Alpha
+        }}
+        ctx.putImageData(imgData, 0, 0);"#
+            ),
+        ),
+        None => (
+            "<p class=\"notice\">Camera frame not embedded: only detection geometry is shown. \
+             Re-run with <code>--embed-frame</code> to include the raw camera frame (biometric data).</p>"
+                .to_string(),
+            "// No frame embedded: geometry-only report\n        \
+             ctx.fillStyle = '#000'; ctx.fillRect(0, 0, canvas.width, canvas.height);"
+                .to_string(),
+        ),
+    };
+
     format!(
         r#"<!DOCTYPE html>
 <html>
@@ -134,48 +170,31 @@ pub fn generate_html_report(
         .container {{ display: flex; flex-direction: column; align-items: flex-start; }}
         canvas {{ border: 2px solid #444; background: #000; margin-top: 10px; max-width: 100%; height: auto; }}
         .info {{ background: #222; padding: 15px; border-radius: 8px; margin-bottom: 20px; border: 1px solid #333; }}
+        .warning {{ color: #ffb347; }}
+        .notice {{ color: #9ecbff; }}
     </style>
 </head>
 <body>
     <div class="container">
         <h1>SOOS Vision Debugger</h1>
         <div class="info">
-            <p><strong>Detections:</strong> {}</p>
-            <p><strong>Resolution:</strong> {}x{}</p>
+            <p><strong>Detections:</strong> {detections_count}</p>
+            <p><strong>Resolution:</strong> {width}x{height}</p>
+            {notice_html}
         </div>
-        <canvas id="canvas" width="{}" height="{}"></canvas>
+        <canvas id="canvas" width="{width}" height="{height}"></canvas>
     </div>
     <script>
         const canvas = document.getElementById('canvas');
         const ctx = canvas.getContext('2d');
-        
-        // Decode raw RGB Base64
-        const b64 = "{}";
-        const bin = atob(b64);
-        const imgData = ctx.createImageData({}, {});
-        
-        let j = 0;
-        for (let i = 0; i < bin.length; i += 3) {{
-            imgData.data[j++] = bin.charCodeAt(i);
-            imgData.data[j++] = bin.charCodeAt(i+1);
-            imgData.data[j++] = bin.charCodeAt(i+2);
-            imgData.data[j++] = 255; // Alpha
-        }}
-        ctx.putImageData(imgData, 0, 0);
-        
+
+        {frame_js}
+
         // Draw detections
-        {}
+        {boxes_js}
     </script>
 </body>
 </html>"#,
-        detections.len(),
-        width,
-        height,
-        width,
-        height,
-        base64_bmp, // Actually just raw RGB base64 now
-        width,
-        height,
-        boxes_js
+        detections_count = detections.len(),
     )
 }

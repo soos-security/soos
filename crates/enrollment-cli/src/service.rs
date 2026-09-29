@@ -1,5 +1,8 @@
 //! Core business logic and service orchestration for enrollment CLI.
 
+use std::fs::OpenOptions;
+use std::io::Write;
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -21,8 +24,8 @@ use soos_vision::{
 };
 
 use crate::args::{
-    resolve_target_uid, validate_camera_device_path, validate_fhs_path, Cli, DeleteArgs,
-    EnrollArgs, ImportArgs, ListArgs, VerifyArgs,
+    resolve_target_uid, validate_camera_device_path, validate_fhs_path, Cli, DebugVisionArgs,
+    DeleteArgs, EnrollArgs, ImportArgs, ListArgs, VerifyArgs,
 };
 use crate::error::EnrollmentCliError;
 use crate::html_report::{base64_encode, generate_html_report};
@@ -637,8 +640,14 @@ impl EnrollmentService {
         })
     }
 
-    /// Captures a frame, runs face detection, and generates an HTML report.
-    pub fn debug_vision(&self) -> Result<String, EnrollmentCliError> {
+    /// Captures a frame, runs face detection, and writes an HTML debug report.
+    ///
+    /// The report is created atomically (`O_EXCL | O_NOFOLLOW`, mode `0600`) at the
+    /// resolved output path; a pre-existing file or symbolic link is refused. The raw
+    /// camera frame is biometric data and is embedded only when `args.embed_frame` is
+    /// set; otherwise the report carries detection geometry only. Detector failures are
+    /// propagated so that a broken model is never reported as "zero faces".
+    pub fn debug_vision(&self, args: &DebugVisionArgs) -> Result<PathBuf, EnrollmentCliError> {
         check_privileges(self.require_root)?;
 
         let pipeline = self
@@ -646,47 +655,176 @@ impl EnrollmentService {
             .as_ref()
             .ok_or(EnrollmentCliError::PipelineNotInitialized)?;
 
+        // Validate the destination before touching the camera so that a bad path
+        // fails fast and no frame is captured for nothing.
+        let out_path = resolve_debug_report_path(args.output.as_deref())?;
+
         let frame = self.acquire_frame()?;
 
-        let rgb = soos_vision::color::convert_to_rgb(
-            &frame.data,
-            frame.width,
-            frame.height,
-            frame.format,
-        )
-        .map_err(|e| EnrollmentCliError::Internal(e.to_string()))?;
+        let rgb = Zeroizing::new(
+            soos_vision::color::convert_to_rgb(
+                &frame.data,
+                frame.width,
+                frame.height,
+                frame.format,
+            )
+            .map_err(|e| EnrollmentCliError::Internal(e.to_string()))?,
+        );
 
-        // Extract internal detector via pipeline config? No, we don't have a public getter for detector.
-        // Wait, VisionPipeline doesn't expose detector.
-        // We can just use process_frame? But process_frame fails fast on 0 or >1 face.
-        // Let's just use process_frame, and if it fails, we don't get the detection boxes.
-        // Actually, we can get around this by accessing the detector directly if we had a getter.
-        // Let's add a public method to VisionPipeline if needed, OR we can just add it to service.rs?
-        // Wait, I will just call `process_frame` and if it succeeds, visualize it.
-        // But what if it fails? That's EXACTLY what we want to debug.
-        // Wait! Let's modify VisionPipeline to expose detector or we just rebuild the detector?
-        // I will just use `pipeline.process_frame`, and if it fails, I still generate the report with NO detections (empty).
-        // Actually, to get the detections, we need the detector.
-
-        // Let's just create a new detector instance? No, that's heavy.
-        // Wait, I can't access `pipeline.detector` because it's private.
-        // Let's just add `pub fn detector(&self) -> &Arc<dyn FaceDetector>` to `VisionPipeline` in `vision/src/pipeline.rs`.
-        // For now, let's assume we'll add that getter.
         let detections = pipeline
             .detector()
-            .detect(&rgb, frame.width, frame.height)
-            .unwrap_or_default();
+            .detect(&rgb, frame.width, frame.height)?;
 
-        let base64_img = base64_encode(&rgb);
-        let html = generate_html_report(frame.width, frame.height, &base64_img, &detections);
+        let embedded_frame = args
+            .embed_frame
+            .then(|| Zeroizing::new(base64_encode(&rgb)));
+        let html = generate_html_report(
+            frame.width,
+            frame.height,
+            embedded_frame.as_deref().map(String::as_str),
+            &detections,
+        );
 
-        let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-        let out_path = cwd.join("soos-debug.html");
-        std::fs::write(&out_path, html)
-            .map_err(|e| EnrollmentCliError::Internal(format!("Failed to write HTML: {}", e)))?;
+        write_debug_report(&out_path, &html)?;
 
-        Ok(out_path.display().to_string())
+        Ok(out_path)
     }
+}
+
+/// Default root-only directory receiving `debug-vision` reports.
+pub const DEFAULT_DEBUG_REPORT_DIR: &str = "/var/lib/soos/debug";
+
+/// Mode applied when `DEFAULT_DEBUG_REPORT_DIR` is created.
+pub const DEBUG_REPORT_DIR_MODE: u32 = 0o700;
+
+/// Mode of every report file written by `debug-vision`.
+pub const DEBUG_REPORT_FILE_MODE: u32 = 0o600;
+
+/// Ensures the report directory exists as a real directory.
+///
+/// A missing directory is created with `DEBUG_REPORT_DIR_MODE` (non-recursively, so
+/// the parent must already exist). A pre-existing directory is accepted as is: its
+/// mode is never rewritten. A symbolic link or a non-directory at `dir` is refused.
+pub fn ensure_debug_report_dir(dir: &Path) -> Result<(), EnrollmentCliError> {
+    match std::fs::symlink_metadata(dir) {
+        Ok(meta) if meta.file_type().is_symlink() => Err(EnrollmentCliError::DebugReportRefused {
+            path: dir.to_path_buf(),
+            reason: "report directory is a symbolic link".to_string(),
+        }),
+        Ok(meta) if meta.is_dir() => Ok(()),
+        Ok(_) => Err(EnrollmentCliError::DebugReportRefused {
+            path: dir.to_path_buf(),
+            reason: "report directory path exists but is not a directory".to_string(),
+        }),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            std::fs::DirBuilder::new()
+                .mode(DEBUG_REPORT_DIR_MODE)
+                .create(dir)?;
+            Ok(())
+        }
+        Err(e) => Err(EnrollmentCliError::Io(e)),
+    }
+}
+
+/// Resolves the report path from the optional explicit `--output`.
+///
+/// An explicit path must be absolute, free of `..` components and under a permitted
+/// FHS prefix (`validate_fhs_path`). Without an explicit path, a timestamped file name
+/// under `DEFAULT_DEBUG_REPORT_DIR` is used and that root-only directory is prepared.
+pub fn resolve_debug_report_path(output: Option<&Path>) -> Result<PathBuf, EnrollmentCliError> {
+    if let Some(explicit) = output {
+        let clean = validate_fhs_path(explicit)?;
+        if clean.file_name().is_none() || clean.parent().is_none() {
+            return Err(EnrollmentCliError::InvalidPath(format!(
+                "Debug report path '{}' must name a file",
+                clean.display()
+            )));
+        }
+        return Ok(clean);
+    }
+
+    let dir = PathBuf::from(DEFAULT_DEBUG_REPORT_DIR);
+    ensure_debug_report_dir(&dir)?;
+
+    let unix_secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    Ok(dir.join(format!(
+        "soos-debug-{}-{}.html",
+        unix_secs,
+        std::process::id()
+    )))
+}
+
+/// Writes the report to `path` with fail-closed filesystem semantics.
+///
+/// The parent must be a real directory (a symbolic link is refused), nothing may
+/// already exist at `path` (regular file, symbolic link or anything else), and the file
+/// is created with `O_CREAT | O_EXCL | O_NOFOLLOW` and mode `DEBUG_REPORT_FILE_MODE`
+/// in a single `open(2)` call, so a concurrently planted symbolic link cannot be
+/// followed and no pre-existing file is ever truncated.
+pub fn write_debug_report(path: &Path, html: &str) -> Result<(), EnrollmentCliError> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| EnrollmentCliError::DebugReportRefused {
+            path: path.to_path_buf(),
+            reason: "output path has no parent directory".to_string(),
+        })?;
+    match std::fs::symlink_metadata(parent) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            return Err(EnrollmentCliError::DebugReportRefused {
+                path: path.to_path_buf(),
+                reason: "parent directory is a symbolic link".to_string(),
+            });
+        }
+        Ok(meta) if meta.is_dir() => {}
+        Ok(_) => {
+            return Err(EnrollmentCliError::DebugReportRefused {
+                path: path.to_path_buf(),
+                reason: "parent path is not a directory".to_string(),
+            });
+        }
+        Err(e) => return Err(EnrollmentCliError::Io(e)),
+    }
+
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            return Err(EnrollmentCliError::DebugReportRefused {
+                path: path.to_path_buf(),
+                reason: "output path is a symbolic link".to_string(),
+            });
+        }
+        Ok(_) => {
+            return Err(EnrollmentCliError::DebugReportRefused {
+                path: path.to_path_buf(),
+                reason: "output path already exists; it is never overwritten".to_string(),
+            });
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(EnrollmentCliError::Io(e)),
+    }
+
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(DEBUG_REPORT_FILE_MODE)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(path)
+        .map_err(|e| {
+            if e.kind() == std::io::ErrorKind::AlreadyExists {
+                EnrollmentCliError::DebugReportRefused {
+                    path: path.to_path_buf(),
+                    reason: "output path appeared concurrently; it is never overwritten"
+                        .to_string(),
+                }
+            } else {
+                EnrollmentCliError::Io(e)
+            }
+        })?;
+    file.write_all(html.as_bytes())?;
+    file.sync_all()?;
+    Ok(())
 }
 
 /// Builds an `EnrollmentService` initialized with only the biometric store (master key and templates).
