@@ -81,7 +81,56 @@ verify_installation() {
         return 1
     fi
 
+    local key_size
+    key_size=$(wc -c < "/var/lib/soos/master.key" | tr -d ' ')
+    if [[ "${key_size}" != "32" ]]; then
+        error "Incorrect size for /var/lib/soos/master.key: ${key_size} bytes (expected 32)"
+        return 1
+    fi
+
+    test -x "/usr/libexec/soos/provision-master-key" || { error "/usr/libexec/soos/provision-master-key missing or not executable"; return 1; }
+
     success "Package installation verified with complete filesystem invariants."
+}
+
+# GitHub #144 (ONB-01): a distributable artifact must never contain key material.
+# $1 = human-readable package path, remaining args = command printing the archive listing.
+verify_package_has_no_key_material() {
+    local pkg="$1"
+    shift
+    info "Verifying that ${pkg} ships no key material..."
+    local listing
+    listing=$("$@")
+    local key_entries
+    key_entries=$(echo "${listing}" | grep -E '\.key$' || true)
+    if [[ -n "${key_entries}" ]]; then
+        error "Package ${pkg} contains key material:"
+        echo "${key_entries}" >&2
+        return 1
+    fi
+    success "Package ${pkg} contains no *.key entry."
+}
+
+# The key must be generated on the target host: a second fresh install must
+# produce a different key, and package removal must leave the key untouched
+# (it is not package-owned, so enrolled templates survive remove/upgrade).
+key_fingerprint() {
+    sha256sum "/var/lib/soos/master.key" | cut -d' ' -f1
+}
+
+verify_key_survives_removal() {
+    test -f "/var/lib/soos/master.key" || { error "master.key must survive package removal (it is host state, not package content)"; return 1; }
+    success "master.key preserved across package removal."
+}
+
+verify_fresh_install_generates_distinct_key() {
+    local first_fp="$1"
+    local second_fp="$2"
+    if [[ "${first_fp}" == "${second_fp}" ]]; then
+        error "Two fresh installs produced the same master key: the key is baked into the package"
+        return 1
+    fi
+    success "Fresh install generated a distinct master key (not shipped in the package)."
 }
 
 case "${DISTRO}" in
@@ -90,6 +139,8 @@ case "${DISTRO}" in
         bash scripts/build_deb.sh --skip-build
 
         DEB_FILE=$(ls -t target/packages/soos_*.deb | head -n 1)
+        verify_package_has_no_key_material "${DEB_FILE}" dpkg-deb -c "${DEB_FILE}"
+
         info "Installing ${DEB_FILE} via dpkg -i..."
         dpkg -i "${DEB_FILE}"
 
@@ -99,10 +150,19 @@ case "${DISTRO}" in
         fi
 
         verify_installation "${PAM_DIR}"
+        FIRST_KEY_FP=$(key_fingerprint)
 
         info "Testing package removal via dpkg -r soos..."
         dpkg -r soos
         test ! -f "/usr/bin/soos-admin" || { error "soos-admin still present after dpkg -r"; exit 1; }
+        verify_key_survives_removal
+
+        info "Simulating a second fresh host: removing the key and reinstalling..."
+        rm -f /var/lib/soos/master.key
+        dpkg -i "${DEB_FILE}"
+        verify_installation "${PAM_DIR}"
+        verify_fresh_install_generates_distinct_key "${FIRST_KEY_FP}" "$(key_fingerprint)"
+        dpkg -r soos
         success "Debian (.deb) package test passed cleanly."
         ;;
 
@@ -115,6 +175,9 @@ case "${DISTRO}" in
         bash scripts/build_rpm.sh --skip-build
 
         RPM_FILE=$(ls -t target/packages/soos-*.rpm | head -n 1)
+        # --noghost: %ghost entries are metadata only and carry no payload.
+        verify_package_has_no_key_material "${RPM_FILE}" rpm -qlp --noghost "${RPM_FILE}"
+
         info "Installing ${RPM_FILE} via rpm -i..."
         rpm -i "${RPM_FILE}"
 
@@ -124,10 +187,19 @@ case "${DISTRO}" in
         fi
 
         verify_installation "${PAM_DIR}"
+        FIRST_KEY_FP=$(key_fingerprint)
 
         info "Testing package removal via rpm -e soos..."
         rpm -e soos
         test ! -f "/usr/bin/soos-admin" || { error "soos-admin still present after rpm -e"; exit 1; }
+        verify_key_survives_removal
+
+        info "Simulating a second fresh host: removing the key and reinstalling..."
+        rm -f /var/lib/soos/master.key
+        rpm -i "${RPM_FILE}"
+        verify_installation "${PAM_DIR}"
+        verify_fresh_install_generates_distinct_key "${FIRST_KEY_FP}" "$(key_fingerprint)"
+        rpm -e soos
         success "RPM package test passed cleanly."
         ;;
 
@@ -136,14 +208,25 @@ case "${DISTRO}" in
         bash scripts/build_arch.sh --skip-build
 
         PKG_FILE=$(ls -t target/packages/soos-*.pkg.tar.* | head -n 1)
+        verify_package_has_no_key_material "${PKG_FILE}" bsdtar -tf "${PKG_FILE}"
+
         info "Installing ${PKG_FILE} via pacman -U..."
         pacman -U --noconfirm "${PKG_FILE}"
 
         verify_installation "/usr/lib/security"
+        FIRST_KEY_FP=$(key_fingerprint)
 
         info "Testing package removal via pacman -R soos..."
         pacman -R --noconfirm soos
         test ! -f "/usr/bin/soos-admin" || { error "soos-admin still present after pacman -R"; exit 1; }
+        verify_key_survives_removal
+
+        info "Simulating a second fresh host: removing the key and reinstalling..."
+        rm -f /var/lib/soos/master.key
+        pacman -U --noconfirm "${PKG_FILE}"
+        verify_installation "/usr/lib/security"
+        verify_fresh_install_generates_distinct_key "${FIRST_KEY_FP}" "$(key_fingerprint)"
+        pacman -R --noconfirm soos
         success "Arch Linux package test passed cleanly."
         ;;
 

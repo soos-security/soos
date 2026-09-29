@@ -28,19 +28,12 @@ post_install() {
         chown root:soos /run/soos || chown root:root /run/soos
     fi
 
-    # 3. Generate cryptographic master key (32 bytes, mode 0600) if absent
-    MASTER_KEY="/var/lib/soos/master.key"
-    if [ ! -f "$MASTER_KEY" ]; then
-        if command -v openssl >/dev/null 2>&1; then
-            openssl rand 32 > "$MASTER_KEY"
-        else
-            head -c 32 /dev/urandom > "$MASTER_KEY"
-        fi
-        chmod 0600 "$MASTER_KEY"
-        if [ "$(id -u)" -eq 0 ]; then
-            chown root:root "$MASTER_KEY"
-        fi
-    fi
+    # 3. Generate the cryptographic master key on THIS host if absent
+    #    (/var/lib/soos/master.key, 32 bytes, mode 0600 root:root).
+    #    The key is never part of the package (GitHub #144); the shipped
+    #    helper creates it with mode 0600 from inception and never overwrites
+    #    an existing key.
+    /usr/libexec/soos/provision-master-key --state-dir /var/lib/soos
 
     # 4. Reload systemd manager configuration
     if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then

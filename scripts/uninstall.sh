@@ -227,6 +227,7 @@ fi
 # 3. Remove Binaries and Shared Libraries
 info "Removing binaries and shared libraries..."
 rm -f "${TARGET_LIBEXEC_DIR}/soos-daemon"
+rm -f "${TARGET_LIBEXEC_DIR}/provision-master-key"
 rmdir "${TARGET_LIBEXEC_DIR}" 2>/dev/null || true
 rm -f "${TARGET_BIN_DIR}/soos-admin"
 rm -f "${TARGET_BIN_DIR}/soos-enroll"

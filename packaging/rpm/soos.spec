@@ -36,6 +36,7 @@ rm -rf %{buildroot}
 # Install binaries
 install -d -m 0755 %{buildroot}/usr/libexec/soos
 install -m 0755 target/release/soos-daemon %{buildroot}/usr/libexec/soos/soos-daemon
+install -m 0755 scripts/provision_master_key.sh %{buildroot}/usr/libexec/soos/provision-master-key
 
 install -d -m 0755 %{buildroot}%{_bindir}
 install -m 0755 target/release/soos-admin %{buildroot}%{_bindir}/soos-admin
@@ -75,15 +76,10 @@ chmod 0700 %{_sharedstatedir}/soos/biometrics || :
 chmod 0700 %{_sharedstatedir}/soos/evidence || :
 chmod 0755 %{_sharedstatedir}/soos/models || :
 
-# Generate cryptographic master key (32 bytes, mode 0600) if absent
-if [ ! -f "%{_sharedstatedir}/soos/master.key" ]; then
-    if command -v openssl >/dev/null 2>&1; then
-        openssl rand 32 > "%{_sharedstatedir}/soos/master.key" 2>/dev/null || :
-    else
-        head -c 32 /dev/urandom > "%{_sharedstatedir}/soos/master.key" 2>/dev/null || :
-    fi
-    chmod 0600 "%{_sharedstatedir}/soos/master.key" || :
-fi
+# Generate the cryptographic master key on this host if absent (32 bytes,
+# mode 0600 root:root). Never packaged (%ghost, GitHub #144): the shipped helper
+# creates it with mode 0600 from inception and never overwrites an existing key.
+/usr/libexec/soos/provision-master-key --state-dir "%{_sharedstatedir}/soos"
 
 # Ensure runtime socket directory exists with proper permissions
 mkdir -p %{_rundir}/soos
@@ -98,6 +94,7 @@ chown root:soos %{_rundir}/soos 2>/dev/null || :
 
 %files
 /usr/libexec/soos/soos-daemon
+/usr/libexec/soos/provision-master-key
 %{_bindir}/soos-admin
 %{_bindir}/soos-enroll
 %{_libdir}/security/pam_soos.so

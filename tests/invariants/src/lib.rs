@@ -726,7 +726,13 @@ mod tests {
         assert!(evidence_dir.is_dir(), "evidence directory must be created");
         assert!(models_dir.is_dir(), "models directory must be created");
         assert!(libexec_dir.is_dir(), "libexec directory must be created");
-        assert!(master_key.is_file(), "master.key must be created");
+        // Contract migration (GitHub #144 / ONB-01): a staged tree is package
+        // content, so the master key must be generated on the target host by the
+        // post-install scriptlet, never inside the staging root.
+        assert!(
+            !master_key.exists(),
+            "master.key must NOT be generated under --destdir (GitHub #144)"
+        );
 
         #[cfg(unix)]
         {
@@ -744,15 +750,427 @@ mod tests {
                 0o700,
                 "evidence dir must be mode 0700"
             );
+        }
 
-            let key_meta = fs::metadata(&master_key).expect("master.key meta");
+        let _ = fs::remove_dir_all(&tmp_dir);
+    }
+
+    /// Recursively collects every regular file below `dir` whose name ends with `.key`.
+    fn collect_key_files(dir: &Path, found: &mut Vec<PathBuf>) {
+        let Ok(entries) = fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let file_type = entry.file_type().expect("file type");
+            if file_type.is_dir() {
+                collect_key_files(&path, found);
+            } else if path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.ends_with(".key"))
+            {
+                found.push(path);
+            }
+        }
+    }
+
+    /// Invariant: `install.sh --destdir` stages a package tree that contains no key
+    /// material and ships the key provisioning helper instead (GitHub #144 / ONB-01).
+    #[test]
+    fn test_install_script_destdir_stages_no_key_material() {
+        let root = workspace_root();
+        let install_sh = root.join("scripts/install.sh");
+
+        let tmp_dir =
+            std::env::temp_dir().join(format!("soos_install_nokey_test_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp_dir);
+        fs::create_dir_all(&tmp_dir).expect("create tmp_dir");
+
+        let status = std::process::Command::new("bash")
+            .arg(&install_sh)
+            .arg("--destdir")
+            .arg(&tmp_dir)
+            .arg("--skip-models")
+            .arg("--skip-systemd")
+            .status()
+            .expect("execute install.sh");
+        assert!(status.success(), "install.sh --destdir must succeed");
+
+        let mut staged_keys = Vec::new();
+        collect_key_files(&tmp_dir, &mut staged_keys);
+        assert!(
+            staged_keys.is_empty(),
+            "staged tree must contain no *.key file, found: {staged_keys:?}"
+        );
+        assert!(
+            !tmp_dir.join("var/lib/soos/master.key").exists(),
+            "var/lib/soos/master.key must be absent from the staged tree"
+        );
+
+        // The helper that generates the key on the target host must be shipped.
+        let helper = tmp_dir.join("usr/libexec/soos/provision-master-key");
+        assert!(
+            helper.is_file(),
+            "usr/libexec/soos/provision-master-key must be staged"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let meta = fs::metadata(&helper).expect("helper meta");
             assert_eq!(
-                key_meta.permissions().mode() & 0o777,
+                meta.permissions().mode() & 0o777,
+                0o755,
+                "provision-master-key must be mode 0755"
+            );
+        }
+
+        let _ = fs::remove_dir_all(&tmp_dir);
+    }
+
+    /// Invariant: the shared key provisioning helper generates a 32-byte key with
+    /// mode 0600 exactly once and never overwrites an existing key (GitHub #144).
+    #[test]
+    fn test_provision_master_key_helper_generates_0600_key_once() {
+        let root = workspace_root();
+        let helper = root.join("scripts/provision_master_key.sh");
+        assert!(
+            helper.exists(),
+            "scripts/provision_master_key.sh must exist"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let meta = fs::metadata(&helper).expect("helper metadata");
+            assert_ne!(
+                meta.permissions().mode() & 0o111,
+                0,
+                "scripts/provision_master_key.sh must be executable"
+            );
+        }
+        let helper_content = fs::read_to_string(&helper).expect("read helper");
+        assert!(
+            helper_content.contains("umask 077"),
+            "helper must restrict the creation umask so the key is 0600 from inception"
+        );
+
+        let tmp_dir =
+            std::env::temp_dir().join(format!("soos_provision_key_test_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp_dir);
+        let state_dir = tmp_dir.join("var/lib/soos");
+        let key_path = state_dir.join("master.key");
+
+        // 1. Fresh state directory (created by the helper): key generated.
+        let status = std::process::Command::new("sh")
+            .arg(&helper)
+            .arg("--state-dir")
+            .arg(&state_dir)
+            .status()
+            .expect("execute provision_master_key.sh");
+        assert!(status.success(), "helper must succeed on a fresh state dir");
+        assert!(key_path.is_file(), "helper must create master.key");
+        let first = fs::read(&key_path).expect("read key");
+        assert_eq!(first.len(), 32, "master.key must be 32 bytes");
+        assert!(
+            first.iter().any(|b| *b != 0),
+            "master.key must not be all zeros"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let meta = fs::metadata(&key_path).expect("key meta");
+            assert_eq!(
+                meta.permissions().mode() & 0o777,
                 0o600,
                 "master.key must be mode 0600"
             );
-            assert_eq!(key_meta.len(), 32, "master.key must be 32 bytes");
         }
+        assert!(
+            !state_dir.join("master.key.tmp").exists()
+                && fs::read_dir(&state_dir)
+                    .expect("read state dir")
+                    .flatten()
+                    .all(|e| e.file_name() == "master.key"),
+            "helper must leave no temporary file behind"
+        );
+
+        // 2. Second run: idempotent, key content unchanged.
+        let status = std::process::Command::new("sh")
+            .arg(&helper)
+            .arg("--state-dir")
+            .arg(&state_dir)
+            .status()
+            .expect("execute provision_master_key.sh twice");
+        assert!(status.success(), "helper must succeed when the key exists");
+        let second = fs::read(&key_path).expect("read key again");
+        assert_eq!(
+            first, second,
+            "an existing master.key must never be overwritten"
+        );
+
+        // 3. Pre-existing key with lax permissions: content kept, mode tightened.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&key_path, fs::Permissions::from_mode(0o644))
+                .expect("loosen key mode");
+            let status = std::process::Command::new("sh")
+                .arg(&helper)
+                .arg("--state-dir")
+                .arg(&state_dir)
+                .status()
+                .expect("execute provision_master_key.sh on lax key");
+            assert!(status.success(), "helper must succeed on a lax key");
+            let meta = fs::metadata(&key_path).expect("key meta");
+            assert_eq!(
+                meta.permissions().mode() & 0o777,
+                0o600,
+                "helper must tighten an existing key to mode 0600"
+            );
+            assert_eq!(
+                fs::read(&key_path).expect("read key"),
+                first,
+                "tightening permissions must not change the key"
+            );
+        }
+
+        let _ = fs::remove_dir_all(&tmp_dir);
+    }
+
+    /// Invariant: the key provisioning helper refuses symlinks and non-regular
+    /// files at the key path and fails closed without writing through them.
+    #[test]
+    fn test_provision_master_key_helper_refuses_symlink_and_non_regular() {
+        let root = workspace_root();
+        let helper = root.join("scripts/provision_master_key.sh");
+        assert!(
+            helper.exists(),
+            "scripts/provision_master_key.sh must exist"
+        );
+
+        let tmp_dir = std::env::temp_dir().join(format!(
+            "soos_provision_key_symlink_test_{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&tmp_dir);
+
+        // 1. Dangling symlink at master.key: must not be followed.
+        let state_dir = tmp_dir.join("symlink/var/lib/soos");
+        fs::create_dir_all(&state_dir).expect("create state dir");
+        let target = tmp_dir.join("symlink/escaped.bin");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&target, state_dir.join("master.key")).expect("symlink");
+        let status = std::process::Command::new("sh")
+            .arg(&helper)
+            .arg("--state-dir")
+            .arg(&state_dir)
+            .status()
+            .expect("execute helper on symlink");
+        assert!(
+            !status.success(),
+            "helper must fail when master.key is a symlink"
+        );
+        assert!(
+            !target.exists(),
+            "helper must not write through the symlink target"
+        );
+
+        // 2. Directory at master.key: must fail closed.
+        let dir_state = tmp_dir.join("dir/var/lib/soos");
+        fs::create_dir_all(dir_state.join("master.key")).expect("create dir at key path");
+        let status = std::process::Command::new("sh")
+            .arg(&helper)
+            .arg("--state-dir")
+            .arg(&dir_state)
+            .status()
+            .expect("execute helper on directory");
+        assert!(
+            !status.success(),
+            "helper must fail when master.key is not a regular file"
+        );
+
+        let _ = fs::remove_dir_all(&tmp_dir);
+    }
+
+    /// Invariant: every native package scriptlet generates the master key on the
+    /// target host through the shared helper, and no installer or scriptlet keeps an
+    /// inline key generator (one source of truth, GitHub #144 / ONB-01).
+    #[test]
+    fn test_package_scriptlets_provision_key_via_shared_helper() {
+        let root = workspace_root();
+        let helper_path = "/usr/libexec/soos/provision-master-key";
+
+        let postinst = fs::read_to_string(root.join("packaging/debian/postinst"))
+            .expect("read debian postinst");
+        let arch_install = fs::read_to_string(root.join("packaging/arch/soos.install"))
+            .expect("read arch soos.install");
+        let spec = fs::read_to_string(root.join("packaging/rpm/soos.spec")).expect("read rpm spec");
+        let pkgbuild =
+            fs::read_to_string(root.join("packaging/arch/PKGBUILD")).expect("read PKGBUILD");
+        let install_sh =
+            fs::read_to_string(root.join("scripts/install.sh")).expect("read install.sh");
+        let uninstall_sh =
+            fs::read_to_string(root.join("scripts/uninstall.sh")).expect("read uninstall.sh");
+
+        // 1. Each post-install path invokes the shipped helper.
+        let configure_branch = postinst
+            .split("configure)")
+            .nth(1)
+            .expect("postinst configure branch");
+        assert!(
+            configure_branch.contains(helper_path),
+            "debian postinst configure branch must call {helper_path}"
+        );
+        let post_install = arch_install
+            .split("post_install()")
+            .nth(1)
+            .expect("soos.install post_install body");
+        assert!(
+            post_install.contains(helper_path),
+            "arch post_install must call {helper_path}"
+        );
+        let post_section = spec.split("%post\n").nth(1).expect("spec %post section");
+        assert!(
+            post_section.contains(helper_path),
+            "rpm %post must call {helper_path}"
+        );
+
+        // 2. The helper is shipped by every package recipe and removed on uninstall.
+        assert!(
+            spec.contains(&format!("%{{buildroot}}{helper_path}"))
+                || spec.contains(&format!("%{{buildroot}}/{}", &helper_path[1..])),
+            "rpm %install must stage {helper_path}"
+        );
+        let files_section = spec.split("%files\n").nth(1).expect("spec %files section");
+        assert!(
+            files_section.contains(helper_path),
+            "rpm %files must list {helper_path}"
+        );
+        assert!(
+            files_section.contains("%ghost") && files_section.contains("master.key"),
+            "rpm %files must keep master.key as %ghost (never packaged)"
+        );
+        assert!(
+            pkgbuild.contains("provision-master-key"),
+            "PKGBUILD package() must install the provision-master-key helper"
+        );
+        assert!(
+            install_sh.contains("provision-master-key"),
+            "install.sh must install the provision-master-key helper"
+        );
+        assert!(
+            uninstall_sh.contains("provision-master-key"),
+            "uninstall.sh must remove the provision-master-key helper"
+        );
+
+        // 3. One source of truth: no inline key generator outside the helper.
+        for (name, content) in [
+            ("packaging/debian/postinst", postinst.as_str()),
+            ("packaging/arch/soos.install", arch_install.as_str()),
+            ("packaging/rpm/soos.spec", spec.as_str()),
+            ("packaging/arch/PKGBUILD", pkgbuild.as_str()),
+            ("scripts/install.sh", install_sh.as_str()),
+        ] {
+            assert!(
+                !content.contains("openssl rand") && !content.contains("/dev/urandom"),
+                "{name} must not generate key material inline (use the shared helper)"
+            );
+        }
+
+        // 4. install.sh only provisions the key for a live install (empty DESTDIR).
+        assert!(
+            install_sh.contains("provision_master_key.sh"),
+            "install.sh must delegate live key generation to scripts/provision_master_key.sh"
+        );
+    }
+
+    /// Invariant: package builders refuse to package a staged tree that contains key
+    /// material, through a shared, fail-closed guard (GitHub #144 / ONB-01).
+    #[test]
+    fn test_package_builders_refuse_staged_key_material() {
+        let root = workspace_root();
+        let guard = root.join("scripts/check_no_key_material.sh");
+        assert!(
+            guard.exists(),
+            "scripts/check_no_key_material.sh must exist"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let meta = fs::metadata(&guard).expect("guard metadata");
+            assert_ne!(
+                meta.permissions().mode() & 0o111,
+                0,
+                "scripts/check_no_key_material.sh must be executable"
+            );
+        }
+
+        // 1. Every builder that stages through install.sh --destdir invokes the guard.
+        for builder in [
+            "scripts/build_deb.sh",
+            "scripts/build_arch.sh",
+            "packaging/debian/rules",
+        ] {
+            let content = fs::read_to_string(root.join(builder)).expect("read builder");
+            assert!(
+                content.contains("check_no_key_material.sh"),
+                "{builder} must run scripts/check_no_key_material.sh on the staged tree"
+            );
+        }
+
+        // 2. Functional: clean tree passes, a staged key fails closed.
+        let tmp_dir =
+            std::env::temp_dir().join(format!("soos_key_guard_test_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp_dir);
+        let clean = tmp_dir.join("clean/var/lib/soos/biometrics");
+        fs::create_dir_all(&clean).expect("create clean tree");
+        fs::write(tmp_dir.join("clean/var/lib/soos/README"), b"no key here").expect("write");
+        let status = std::process::Command::new("bash")
+            .arg(&guard)
+            .arg(tmp_dir.join("clean"))
+            .status()
+            .expect("execute guard on clean tree");
+        assert!(
+            status.success(),
+            "guard must accept a tree without key material"
+        );
+
+        let dirty = tmp_dir.join("dirty/var/lib/soos");
+        fs::create_dir_all(&dirty).expect("create dirty tree");
+        fs::write(dirty.join("master.key"), [0x5Au8; 32]).expect("write fake key");
+        let status = std::process::Command::new("bash")
+            .arg(&guard)
+            .arg(tmp_dir.join("dirty"))
+            .status()
+            .expect("execute guard on dirty tree");
+        assert!(
+            !status.success(),
+            "guard must reject a tree containing var/lib/soos/master.key"
+        );
+
+        let nested = tmp_dir.join("nested/usr/share/soos");
+        fs::create_dir_all(&nested).expect("create nested tree");
+        fs::write(nested.join("evidence.key"), [0x11u8; 32]).expect("write nested key");
+        let status = std::process::Command::new("bash")
+            .arg(&guard)
+            .arg(tmp_dir.join("nested"))
+            .status()
+            .expect("execute guard on nested tree");
+        assert!(
+            !status.success(),
+            "guard must reject any *.key file anywhere in the tree"
+        );
+
+        // 3. A missing directory argument is an error, never a silent pass.
+        let status = std::process::Command::new("bash")
+            .arg(&guard)
+            .arg(tmp_dir.join("does-not-exist"))
+            .status()
+            .expect("execute guard on missing dir");
+        assert!(
+            !status.success(),
+            "guard must fail when the staged tree does not exist"
+        );
 
         let _ = fs::remove_dir_all(&tmp_dir);
     }
@@ -781,17 +1199,20 @@ mod tests {
         let bio_dir = tmp_dir.join("var/lib/soos/biometrics");
         let bin_file = tmp_dir.join("usr/bin/soos-admin");
         let gui_bin_file = tmp_dir.join("usr/bin/soos-gui");
+        let helper_file = tmp_dir.join("usr/libexec/soos/provision-master-key");
         let service_file = tmp_dir.join("etc/systemd/system/soos-daemon.service");
         let backup_pam = tmp_dir.join("etc/pam.d/system-auth.soos-backup");
         let active_pam = tmp_dir.join("etc/pam.d/system-auth");
 
         fs::create_dir_all(&bio_dir).expect("create bio_dir");
         fs::create_dir_all(tmp_dir.join("usr/bin")).expect("create bin dir");
+        fs::create_dir_all(tmp_dir.join("usr/libexec/soos")).expect("create libexec dir");
         fs::create_dir_all(tmp_dir.join("etc/systemd/system")).expect("create systemd dir");
         fs::create_dir_all(tmp_dir.join("etc/pam.d")).expect("create pam.d dir");
 
         fs::write(&bin_file, b"binary content").expect("write bin");
         fs::write(&gui_bin_file, b"gui binary content").expect("write gui bin");
+        fs::write(&helper_file, b"#!/bin/sh\nexit 0\n").expect("write helper");
         fs::write(&service_file, b"unit content").expect("write service");
         fs::write(
             &backup_pam,
@@ -815,6 +1236,10 @@ mod tests {
         assert!(status.success(), "uninstall.sh must succeed");
         assert!(!bin_file.exists(), "binary must be removed");
         assert!(!gui_bin_file.exists(), "gui binary must be removed");
+        assert!(
+            !helper_file.exists(),
+            "provision-master-key helper must be removed (GitHub #144)"
+        );
         assert!(!service_file.exists(), "service file must be removed");
         assert!(
             bio_dir.exists(),

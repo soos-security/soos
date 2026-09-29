@@ -49,6 +49,8 @@ sudo dpkg -i target/packages/soos_*.deb
 sudo soos-admin status
 ```
 
+The package contains no key material: `postinst` generates `/var/lib/soos/master.key` (mode `0600 root:root`) on this host at first install through `/usr/libexec/soos/provision-master-key`, and package upgrades or removal never touch it (see `Docs/PACKAGING_AND_PROVISIONING.md` §7.4).
+
 #### Option B: Universal Installer
 ```bash
 # Install binaries, unit files, and provision invariant directories
