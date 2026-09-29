@@ -1389,4 +1389,270 @@ mod tests {
             );
         }
     }
+
+    /// Extracts one `[section]` of a TOML document as raw text (up to the next `[` header).
+    fn toml_section<'a>(content: &'a str, header: &str) -> &'a str {
+        let start = content
+            .find(header)
+            .unwrap_or_else(|| panic!("TOML section '{}' not found", header));
+        let body_start = start + header.len();
+        let rest = &content[body_start..];
+        let end = rest.find("\n[").map_or(rest.len(), |i| i);
+        &rest[..end]
+    }
+
+    /// Returns true if a line is TOML/shell content rather than a comment or blank line.
+    fn is_code_line(line: &str) -> bool {
+        let trimmed = line.trim();
+        !trimmed.is_empty() && !trimmed.starts_with('#')
+    }
+
+    /// PAM-01 / TCI-01 (GitHub #148) — The shipped `pam_soos.so` must be built with
+    /// `panic = "unwind"`: under `panic = "abort"` every `catch_unwind` in the module is a
+    /// no-op and a panic aborts the host login process (gdm, sudo, login) instead of
+    /// degrading to `PAM_IGNORE` (ARCHITECTURE.md invariant 5).
+    ///
+    /// The artifact is produced by `[profile.release]` in every packaging path, so that profile
+    /// is the single source of truth: it must say `panic = "unwind"` explicitly, and no
+    /// packaging or Docker build command may select another profile.
+    #[test]
+    fn test_release_profile_unwinds_so_pam_catch_unwind_is_effective() {
+        let root = workspace_root();
+        let root_cargo = root.join("Cargo.toml");
+        let content = fs::read_to_string(&root_cargo)
+            .unwrap_or_else(|e| panic!("Error reading {}: {}", root_cargo.display(), e));
+
+        let release = toml_section(&content, "[profile.release]");
+        let panic_lines: Vec<&str> = release
+            .lines()
+            .filter(|l| is_code_line(l) && l.trim().starts_with("panic"))
+            .collect();
+
+        assert_eq!(
+            panic_lines.len(),
+            1,
+            "SECURITY VIOLATION (PAM-01): [profile.release] must declare the panic strategy exactly once, found: {:?}",
+            panic_lines
+        );
+        assert_eq!(
+            panic_lines[0].trim(),
+            "panic = \"unwind\"",
+            "SECURITY VIOLATION (PAM-01): [profile.release] must set panic = \"unwind\" so that catch_unwind in pam_soos.so is effective (found: {})",
+            panic_lines[0].trim()
+        );
+
+        // No profile in the workspace may reintroduce abort: the PAM cdylib inherits whatever
+        // profile the packaging scripts select, and `panic` cannot be overridden per package.
+        let manifests = [
+            root_cargo.clone(),
+            root.join("crates").join("pam").join("Cargo.toml"),
+        ];
+        for manifest in manifests {
+            let text = fs::read_to_string(&manifest)
+                .unwrap_or_else(|e| panic!("Error reading {}: {}", manifest.display(), e));
+            let abort_lines: Vec<&str> = text
+                .lines()
+                .filter(|l| is_code_line(l) && l.replace(' ', "").starts_with("panic=\"abort\""))
+                .collect();
+            assert!(
+                abort_lines.is_empty(),
+                "SECURITY VIOLATION (PAM-01): {} must not set panic = \"abort\" in any profile: {:?}",
+                manifest.display(),
+                abort_lines
+            );
+        }
+
+        // Every production build path must use the plain release profile (no `--profile <x>`),
+        // otherwise the artifact could silently come from a profile with different semantics.
+        let build_paths = [
+            "scripts/build_deb.sh",
+            "scripts/build_rpm.sh",
+            "scripts/build_arch.sh",
+            "scripts/build_packages.sh",
+            "packaging/debian/rules",
+            "packaging/rpm/soos.spec",
+            "packaging/arch/PKGBUILD",
+            "tests/docker/test_suite.sh",
+            "tests/docker/test_packages.sh",
+        ];
+        for rel in build_paths {
+            let path = root.join(rel);
+            let text = fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("Error reading {}: {}", path.display(), e));
+            // Command lines only (usage text such as "Skip cargo build step" is not a build).
+            let builds: Vec<&str> = text
+                .lines()
+                .filter(|l| l.trim_start().starts_with("cargo build"))
+                .collect();
+            assert!(
+                !builds.is_empty(),
+                "{} must contain at least one 'cargo build' invocation",
+                rel
+            );
+            for line in builds {
+                assert!(
+                    line.contains("--release"),
+                    "PACKAGING VIOLATION (PAM-01): {} builds without --release: '{}'",
+                    rel,
+                    line.trim()
+                );
+                assert!(
+                    !line.contains("--profile"),
+                    "PACKAGING VIOLATION (PAM-01): {} selects a custom profile; the PAM artifact must come from [profile.release]: '{}'",
+                    rel,
+                    line.trim()
+                );
+            }
+        }
+    }
+
+    /// PAM-01 (GitHub #148) — The test-only fault-injection hook of `soos-pam` must be an
+    /// opt-in Cargo feature that is never part of `default`, never referenced by any packaging,
+    /// install or CI build command, and whose production call sites are `cfg`-gated.
+    #[test]
+    fn test_pam_fault_injection_feature_is_opt_in_and_never_packaged() {
+        let root = workspace_root();
+        let pam_cargo = root.join("crates").join("pam").join("Cargo.toml");
+        let content = fs::read_to_string(&pam_cargo)
+            .unwrap_or_else(|e| panic!("Error reading {}: {}", pam_cargo.display(), e));
+
+        assert!(
+            content.contains("[features]"),
+            "crates/pam/Cargo.toml must declare a [features] table for the fault-injection hook"
+        );
+        let features = toml_section(&content, "[features]");
+        let feature_line = features
+            .lines()
+            .find(|l| is_code_line(l) && l.trim().starts_with("fault-injection"))
+            .expect("crates/pam/Cargo.toml must declare the 'fault-injection' feature");
+        assert_eq!(
+            feature_line.replace(' ', "").trim(),
+            "fault-injection=[]",
+            "The fault-injection feature must not pull any dependency or other feature"
+        );
+        let default_line = features
+            .lines()
+            .find(|l| is_code_line(l) && l.trim().starts_with("default"));
+        if let Some(default_line) = default_line {
+            assert!(
+                !default_line.contains("fault-injection"),
+                "SECURITY VIOLATION: fault-injection must never be a default feature: '{}'",
+                default_line.trim()
+            );
+        }
+
+        // Production code: the hook module and its call sites are compiled only under the feature.
+        let lib_rs = root.join("crates").join("pam").join("src").join("lib.rs");
+        let lib_src = fs::read_to_string(&lib_rs)
+            .unwrap_or_else(|e| panic!("Error reading {}: {}", lib_rs.display(), e));
+        let prod = extract_production_code(&lib_src);
+        assert!(
+            prod.contains("#[cfg(feature = \"fault-injection\")]\npub mod fault_injection;"),
+            "crates/pam/src/lib.rs must declare `pub mod fault_injection;` guarded by #[cfg(feature = \"fault-injection\")]"
+        );
+        let hook_calls = prod.matches("fault_injection::").count();
+        assert!(
+            hook_calls >= 1,
+            "crates/pam/src/lib.rs must invoke the fault-injection hook inside the catch_unwind region"
+        );
+        assert_eq!(
+            prod.matches("#[cfg(feature = \"fault-injection\")]").count(),
+            hook_calls + 1,
+            "Every reference to fault_injection in crates/pam/src/lib.rs must be preceded by #[cfg(feature = \"fault-injection\")]"
+        );
+
+        // Packaging, install and CI must never enable the feature.
+        let never_enable = [
+            "scripts/build_deb.sh",
+            "scripts/build_rpm.sh",
+            "scripts/build_arch.sh",
+            "scripts/build_packages.sh",
+            "scripts/install.sh",
+            "packaging/debian/rules",
+            "packaging/rpm/soos.spec",
+            "packaging/arch/PKGBUILD",
+            "tests/docker/test_packages.sh",
+            ".github/workflows/ci.yml",
+            "Dockerfile",
+            "tests/docker/Dockerfile.ubuntu",
+            "tests/docker/Dockerfile.fedora",
+            "tests/docker/Dockerfile.arch",
+        ];
+        for rel in never_enable {
+            let path = root.join(rel);
+            let text = fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("Error reading {}: {}", path.display(), e));
+            let offending: Vec<&str> = text
+                .lines()
+                .filter(|l| is_code_line(l) && l.contains("fault-injection"))
+                .collect();
+            assert!(
+                offending.is_empty(),
+                "SECURITY VIOLATION: {} must never enable the fault-injection feature: {:?}",
+                rel,
+                offending
+            );
+        }
+    }
+
+    /// PAM-01 (GitHub #148) — The Docker matrix must load the *release-built* `pam_soos.so`
+    /// (same `[profile.release]` as packaging, plus the opt-in fault-injection feature built
+    /// into a separate target directory) and prove that a panic inside the module returns
+    /// `PAM_IGNORE` with password fallback instead of aborting the PAM host process.
+    #[test]
+    fn test_pam_docker_suite_proves_release_panic_returns_pam_ignore() {
+        let root = workspace_root();
+        let suite = root.join("tests").join("docker").join("test_suite.sh");
+        let text = fs::read_to_string(&suite)
+            .unwrap_or_else(|e| panic!("Error reading {}: {}", suite.display(), e));
+
+        let build_lines: Vec<&str> = text
+            .lines()
+            .filter(|l| {
+                is_code_line(l) && l.contains("cargo build") && l.contains("fault-injection")
+            })
+            .collect();
+        assert_eq!(
+            build_lines.len(),
+            1,
+            "test_suite.sh must build the fault-injection variant of soos-pam exactly once: {:?}",
+            build_lines
+        );
+        let build = build_lines[0];
+        for required in [
+            "--release",
+            "-p soos-pam",
+            "--features fault-injection",
+            "--target-dir target/fault-injection",
+        ] {
+            assert!(
+                build.contains(required),
+                "test_suite.sh fault-injection build must contain '{}': '{}'",
+                required,
+                build.trim()
+            );
+        }
+
+        for required in [
+            "T10",
+            "fault_inject=panic",
+            "fault_inject=overflow",
+            "pam_soos_fault.so",
+            "134",
+        ] {
+            assert!(
+                text.contains(required),
+                "test_suite.sh must contain '{}' for the release panic-safety case (T10)",
+                required
+            );
+        }
+
+        let matrix_doc = root.join("Docs").join("PAM_DOCKER_TEST_MATRIX.md");
+        let doc = fs::read_to_string(&matrix_doc)
+            .unwrap_or_else(|e| panic!("Error reading {}: {}", matrix_doc.display(), e));
+        assert!(
+            doc.contains("T10") && doc.contains("fault_inject=panic"),
+            "Docs/PAM_DOCKER_TEST_MATRIX.md must document the T10 release panic-safety case"
+        );
+    }
 }

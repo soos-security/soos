@@ -11,6 +11,9 @@
 #   - T6: Distribution stack integration (common-auth or system-auth)
 #   - T7: Offline daemon (PAM_IGNORE -> password fallback)
 #   - T8: Absent module resilience (PAM stack remains functional)
+#   - T9: Model deployment script integrity (manifest dry-run)
+#   - T10: Panic inside the RELEASE-built .so returns PAM_IGNORE (never aborts
+#          the PAM host process) — review finding PAM-01 / TCI-01 (GitHub #148)
 # =============================================================================
 
 set -euo pipefail
@@ -90,7 +93,20 @@ cleanup_daemon() {
     pkill -f "mock_daemon.py" || true
     rm -f /run/soos/daemon.sock
 }
-trap cleanup_daemon EXIT INT TERM
+
+# T10 artifacts: fault-injection variant of the module and its dedicated PAM services.
+FAULT_SO_PATH="target/fault-injection/release/libpam_soos.so"
+FAULT_MODULE_NAME="pam_soos_fault.so"
+cleanup_fault_injection() {
+    rm -f "${PAM_MOD_DIR}/${FAULT_MODULE_NAME}"
+    rm -f /etc/pam.d/test-soos-fault-panic /etc/pam.d/test-soos-fault-overflow
+}
+
+cleanup_all() {
+    cleanup_daemon
+    cleanup_fault_injection
+}
+trap cleanup_all EXIT INT TERM
 
 # ===========================================================================
 # Test Executions
@@ -297,6 +313,76 @@ else
     error "T9 failed: Model deployment script failed during dry-run validation."
     exit 1
 fi
+
+# ---------------------------------------------------------------------------
+# T10: Panic Inside the RELEASE-Built Module -> PAM_IGNORE (PAM-01 / GitHub #148)
+# ---------------------------------------------------------------------------
+# The shipped pam_soos.so is a release build. If [profile.release] used
+# panic = "abort", every catch_unwind in the module would be a no-op and a panic
+# would kill the PAM host process (gdm, sudo, login) with SIGABRT (exit 134)
+# instead of degrading to PAM_IGNORE + password fallback (ARCHITECTURE.md
+# invariant 5). This case builds the module with the SAME release profile plus
+# the opt-in `fault-injection` feature (never enabled by packaging), loads it
+# under a distinct module name, and arms a deliberate panic through the PAM
+# argument `fault_inject=<panic|overflow>`.
+echo ""
+info "-------------------------------------------------------------------"
+info "T10: Release-Built Module Panic Safety (catch_unwind -> PAM_IGNORE)"
+info "-------------------------------------------------------------------"
+cleanup_daemon
+cleanup_fault_injection
+
+info "Compiling fault-injection variant of pam_soos (release profile)..."
+cargo build --release -p soos-pam --features fault-injection --target-dir target/fault-injection
+if [[ ! -f "${FAULT_SO_PATH}" ]]; then
+    error "T10 failed: fault-injection artifact not found at ${FAULT_SO_PATH}"
+    exit 1
+fi
+cp "${FAULT_SO_PATH}" "${PAM_MOD_DIR}/${FAULT_MODULE_NAME}"
+chmod 644 "${PAM_MOD_DIR}/${FAULT_MODULE_NAME}"
+
+for FAULT_ARG in fault_inject=panic fault_inject=overflow; do
+    FAULT_MODE="${FAULT_ARG#fault_inject=}"
+    FAULT_SERVICE="test-soos-fault-${FAULT_MODE}"
+    cat > "/etc/pam.d/${FAULT_SERVICE}" <<EOF
+# T10 PAM service: the module is armed to panic (${FAULT_MODE}) inside catch_unwind
+auth  [success=done default=ignore]  ${FAULT_MODULE_NAME} ${FAULT_ARG} timeout_ms=250
+auth  required                       pam_unix.so
+account required pam_unix.so
+session required pam_unix.so
+EOF
+
+    # Valid password: the panic must degrade to PAM_IGNORE and pam_unix must succeed.
+    set +e
+    /usr/local/bin/pam_test_runner "${FAULT_SERVICE}" testuser password123
+    T10_RC=$?
+    set -e
+    if [[ ${T10_RC} -eq 134 || ${T10_RC} -ge 128 ]]; then
+        error "T10 (${FAULT_MODE}) failed: PAM host process was killed by a signal (exit ${T10_RC}); catch_unwind is not effective in the release build."
+        exit 1
+    fi
+    if [[ ${T10_RC} -ne 0 ]]; then
+        error "T10 (${FAULT_MODE}) failed: valid password rejected after in-module panic (exit ${T10_RC})."
+        exit 1
+    fi
+    success "T10 (${FAULT_MODE}) passed: in-module panic degraded to PAM_IGNORE, password fallback succeeded."
+
+    # Wrong password: the panic must never be converted into an authorization.
+    set +e
+    /usr/local/bin/pam_test_runner "${FAULT_SERVICE}" testuser wrong_password 2>/dev/null
+    T10_RC=$?
+    set -e
+    if [[ ${T10_RC} -eq 0 ]]; then
+        error "T10 (${FAULT_MODE}) failed: invalid password accepted after in-module panic!"
+        exit 1
+    fi
+    if [[ ${T10_RC} -ge 128 ]]; then
+        error "T10 (${FAULT_MODE}) failed: PAM host process was killed by a signal (exit ${T10_RC})."
+        exit 1
+    fi
+    success "T10 (${FAULT_MODE}) passed: invalid password still rejected after in-module panic (exit ${T10_RC})."
+done
+cleanup_fault_injection
 
 echo ""
 echo "==================================================================="

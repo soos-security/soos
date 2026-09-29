@@ -89,11 +89,17 @@ cargo deny --locked check                      # cargo-deny >= 0.20
 ./scripts/candid_review.sh                     # Layer 1 deterministic invariants
 ./scripts/candid_subagent.sh --prepare         # Layer 2: diff + fingerprint for the reviewer
 ./scripts/candid_subagent.sh                   # Layer 2 gate (fresh, fingerprint-bound report)
-./run_tests.sh                                 # Dockerized PAM matrix T1–T9 (ubuntu)
+./run_tests.sh                                 # Dockerized PAM matrix T1–T10 (ubuntu)
 ```
 
 Omitting `--all-features` locally was the root cause of several CI-only failures [65–75].
 `cargo test --all-targets` does not run doctests; do not rely on doctests as acceptance evidence.
+
+Release profile: `[profile.release]` in the root `Cargo.toml` MUST keep `panic = "unwind"`
+(ADR 2026-09-29, review PAM-01 [78]). `cargo test` runs under `[profile.test]` and can never detect
+an aborting release profile; only Docker case T10 (release-built `.so` + opt-in `fault-injection`
+feature of `soos-pam`) proves `catch_unwind` on the shipped artifact. Never enable that feature in
+packaging, install or CI build commands.
 
 ## 6. Traceability Conventions
 
