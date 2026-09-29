@@ -70,83 +70,122 @@ pub fn spawn_vision_worker(
                         }
 
                         let start_analysis = Instant::now();
-                        if let Ok(analysis) = pipeline.analyze_frame(&frame) {
-                            let total_latency = start_analysis.elapsed().as_secs_f64() * 1000.0;
+                        match pipeline.analyze_frame(&frame) {
+                            Ok(analysis) => {
+                                let total_latency = start_analysis.elapsed().as_secs_f64() * 1000.0;
 
-                            // Handle active guided enrollment if enabled
-                            let is_live = analysis
-                                .pad_result
-                                .as_ref()
-                                .map(|p| p.is_live && p.score >= pipeline.config().pad_threshold)
-                                .unwrap_or(false);
+                                // Handle active guided enrollment if enabled
+                                let is_live = analysis
+                                    .pad_result
+                                    .as_ref()
+                                    .map(|p| {
+                                        p.is_live && p.score >= pipeline.config().pad_threshold
+                                    })
+                                    .unwrap_or(false);
 
-                            let is_centered = analysis
-                                .detections
-                                .first()
-                                .map(|d| {
-                                    let center_x = (d.box_.x1 + d.box_.x2) * 0.5;
-                                    let center_y = (d.box_.y1 + d.box_.y2) * 0.5;
-                                    let w = frame.width as f32;
-                                    let h = frame.height as f32;
-                                    (center_x - w * 0.5).abs() < w * 0.25
-                                        && (center_y - h * 0.5).abs() < h * 0.25
-                                })
-                                .unwrap_or(false);
+                                let is_centered = analysis
+                                    .detections
+                                    .first()
+                                    .map(|d| {
+                                        let center_x = (d.box_.x1 + d.box_.x2) * 0.5;
+                                        let center_y = (d.box_.y1 + d.box_.y2) * 0.5;
+                                        let w = frame.width as f32;
+                                        let h = frame.height as f32;
+                                        (center_x - w * 0.5).abs() < w * 0.25
+                                            && (center_y - h * 0.5).abs() < h * 0.25
+                                    })
+                                    .unwrap_or(false);
 
-                            if let (Some(pose), Some(emb)) = (&analysis.pose, &analysis.embedding) {
-                                if let Ok(mut session_guard) =
-                                    shared_input.enrollment_session.lock()
+                                if let (Some(pose), Some(emb)) =
+                                    (&analysis.pose, &analysis.embedding)
                                 {
-                                    if let Some(session) = session_guard.as_mut() {
-                                        let fb = session.process_sample(
-                                            pose,
-                                            emb.as_slice(),
-                                            is_live,
-                                            is_centered,
-                                        );
-                                        if let Ok(mut fb_guard) =
-                                            shared_input.enrollment_feedback.lock()
-                                        {
-                                            *fb_guard = Some(fb);
-                                        }
-                                    }
-                                }
-                            }
-
-                            // Handle live 1-to-1 verification matching if reference is set
-                            if let Some(emb) = &analysis.embedding {
-                                if let Ok(ref_guard) = shared_input.match_reference.lock() {
-                                    if let Some(ref_emb) = ref_guard.as_ref() {
-                                        if let Ok(score) =
-                                            cosine_similarity(ref_emb, emb.as_slice())
-                                        {
-                                            if let Ok(mut score_guard) =
-                                                shared_input.live_match_score.lock()
+                                    if let Ok(mut session_guard) =
+                                        shared_input.enrollment_session.lock()
+                                    {
+                                        if let Some(session) = session_guard.as_mut() {
+                                            let fb = session.process_sample(
+                                                pose,
+                                                emb.as_slice(),
+                                                is_live,
+                                                is_centered,
+                                            );
+                                            if let Ok(mut fb_guard) =
+                                                shared_input.enrollment_feedback.lock()
                                             {
-                                                *score_guard = Some(score);
+                                                *fb_guard = Some(fb);
                                             }
                                         }
                                     }
                                 }
+
+                                // Handle live 1-to-1 verification matching if reference is set
+                                if let Some(emb) = &analysis.embedding {
+                                    if let Ok(ref_guard) = shared_input.match_reference.lock() {
+                                        if let Some(ref_emb) = ref_guard.as_ref() {
+                                            if let Ok(score) =
+                                                cosine_similarity(ref_emb, emb.as_slice())
+                                            {
+                                                if let Ok(mut score_guard) =
+                                                    shared_input.live_match_score.lock()
+                                                {
+                                                    *score_guard = Some(score);
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+
+                                let frame_data = LatestFrameData {
+                                    rgb: analysis.rgb.to_vec(),
+                                    width: frame.width,
+                                    height: frame.height,
+                                    detections: analysis.detections.clone(),
+                                    pad_result: analysis.pad_result.clone(),
+                                    pose: analysis.pose,
+                                    aligned_crop: analysis
+                                        .aligned_crop
+                                        .as_ref()
+                                        .map(|c| c.to_vec()),
+                                    pipeline_latency_ms: total_latency,
+                                    det_latency_ms: total_latency * 0.45,
+                                    pad_latency_ms: total_latency * 0.25,
+                                    fps: current_fps,
+                                    sequence: frame.sequence,
+                                };
+
+                                latest_frame_slot.store(Some(Arc::new(frame_data)));
+                                egui_ctx.request_repaint();
                             }
-
-                            let frame_data = LatestFrameData {
-                                rgb: analysis.rgb.to_vec(),
-                                width: frame.width,
-                                height: frame.height,
-                                detections: analysis.detections.clone(),
-                                pad_result: analysis.pad_result.clone(),
-                                pose: analysis.pose,
-                                aligned_crop: analysis.aligned_crop.as_ref().map(|c| c.to_vec()),
-                                pipeline_latency_ms: total_latency,
-                                det_latency_ms: total_latency * 0.45,
-                                pad_latency_ms: total_latency * 0.25,
-                                fps: current_fps,
-                                sequence: frame.sequence,
-                            };
-
-                            latest_frame_slot.store(Some(Arc::new(frame_data)));
-                            egui_ctx.request_repaint();
+                            Err(err) => {
+                                tracing::warn!(
+                                    "Vision pipeline analysis failed on frame #{}: {}",
+                                    frame.sequence,
+                                    err
+                                );
+                                if let Ok(rgb_buf) = soos_vision::convert_to_rgb(
+                                    &frame.data,
+                                    frame.width,
+                                    frame.height,
+                                    frame.format,
+                                ) {
+                                    let fallback_frame = LatestFrameData {
+                                        rgb: rgb_buf,
+                                        width: frame.width,
+                                        height: frame.height,
+                                        detections: Vec::new(),
+                                        pad_result: None,
+                                        pose: None,
+                                        aligned_crop: None,
+                                        pipeline_latency_ms: 0.0,
+                                        det_latency_ms: 0.0,
+                                        pad_latency_ms: 0.0,
+                                        fps: current_fps,
+                                        sequence: frame.sequence,
+                                    };
+                                    latest_frame_slot.store(Some(Arc::new(fallback_frame)));
+                                    egui_ctx.request_repaint();
+                                }
+                            }
                         }
                     }
                 }

@@ -73,6 +73,7 @@ BACKLOG_TO_GITHUB = {
     47: 134,
     48: 136,
     49: 138,
+    50: 140,
 }
 
 BRANCH_TO_ISSUE = {
@@ -130,6 +131,7 @@ BRANCH_TO_ISSUE = {
     "feat/anti-spoof-ir-gdm-integration": 47,
     "feat/gdm-lockscreen-feedback-and-stability": 48,
     "feat/camera-latency-lockscreen-gui-preview": 49,
+    "fix/gui-camera-auto-resolution-and-packaging": 50,
 }
 
 

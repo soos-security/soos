@@ -71,6 +71,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 );
                 let camera_config = CameraConfigBuilder::new()
                     .device_path(device_path.clone())
+                    .warmup_frames(0)
+                    .idle_timeout(std::time::Duration::ZERO)
                     .build();
                 tracing::info!(
                     "Opening direct V4L2 camera device '{}'",
@@ -87,7 +89,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let emb_session = registry.get_or_load_session(MODEL_ID_EMBEDDING)?;
 
         let detector = Arc::new(OrtScrfdDetector::new(det_session, 0.60, 0.40)?);
-        let pad = Arc::new(OrtPadDetector::new_with_class_index(pad_session, 0.80, 2));
+        let pad = Arc::new(OrtPadDetector::new(pad_session, 0.80));
         let extractor = Arc::new(OrtEmbeddingExtractor::new(emb_session));
 
         let pipe = Arc::new(VisionPipeline::new(

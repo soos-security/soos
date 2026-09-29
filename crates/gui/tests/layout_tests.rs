@@ -263,3 +263,82 @@ fn test_ipc_camera_manager_receives_persistent_frames() {
     server.join().unwrap();
     let _ = std::fs::remove_file(&sock_path);
 }
+
+#[test]
+fn test_gui_worker_fallback_renders_raw_rgb_on_pipeline_error() {
+    use arc_swap::ArcSwapOption;
+    use soos_camera_v4l::{CameraConfigBuilder, CameraManager, MockCameraManager, PixelFormat};
+    use soos_inference_ort::{MockEmbeddingExtractor, MockPadDetector};
+    use soos_vision::{VisionPipeline, VisionPipelineConfig};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    let camera_config = CameraConfigBuilder::new()
+        .resolution(640, 480)
+        .format(PixelFormat::Rgb24)
+        .fps(30)
+        .warmup_frames(0)
+        .build();
+    let camera = Arc::new(MockCameraManager::new(camera_config));
+
+    struct AlwaysFailDetector;
+    impl soos_inference_ort::FaceDetector for AlwaysFailDetector {
+        fn detect(
+            &self,
+            _rgb: &[u8],
+            _w: u32,
+            _h: u32,
+        ) -> Result<Vec<soos_inference_ort::FaceDetection>, soos_inference_ort::InferenceError>
+        {
+            Err(soos_inference_ort::InferenceError::DetectionFailed(
+                "Continuous failure".to_string(),
+            ))
+        }
+    }
+
+    let detector = Arc::new(AlwaysFailDetector);
+    let pad = Arc::new(MockPadDetector::new_live());
+    let extractor = Arc::new(MockEmbeddingExtractor::new(512));
+    let pipeline = Arc::new(VisionPipeline::new(
+        detector.clone(),
+        pad,
+        extractor,
+        VisionPipelineConfig::default(),
+    ));
+
+    let latest_frame_slot = Arc::new(ArcSwapOption::empty());
+    let worker_input = Arc::new(soos_gui::worker::WorkerSharedInput::default());
+    let running = Arc::new(AtomicBool::new(true));
+    let egui_ctx = egui::Context::default();
+
+    let _handle = soos_gui::worker::spawn_vision_worker(
+        camera.clone(),
+        pipeline.clone(),
+        latest_frame_slot.clone(),
+        worker_input.clone(),
+        running.clone(),
+        egui_ctx,
+    );
+
+    // Wait up to 600ms for worker to process frame
+    let start = std::time::Instant::now();
+    while latest_frame_slot.load().is_none()
+        && start.elapsed() < std::time::Duration::from_millis(600)
+    {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+
+    running.store(false, Ordering::Release);
+    camera.stop();
+
+    let frame = latest_frame_slot.load();
+    assert!(
+        frame.is_some(),
+        "Worker must populate latest_frame_slot with fallback RGB even on pipeline error"
+    );
+    let data = frame.as_ref().unwrap();
+    assert_eq!(data.width, 640);
+    assert_eq!(data.height, 480);
+    assert!(!data.rgb.is_empty());
+    assert!(data.detections.is_empty());
+}
