@@ -34,7 +34,7 @@ Under the modernized 3-model vision architecture (ADR [2026-09-20]), the pipelin
    - **Resolution & Crop**: 80×80 context crop generated from a 2.7× expanded face bounding box (captures facial margins, bezels, and printed paper boundaries).
    - **Color Format**: BGR channel ordering.
    - **Normalization**: Standard scaling `pixel / 255.0` mapping `[0, 255]` to `[0.0, 1.0]`.
-   - **Class Ordering**: Softmax logits with Class 0 = Live, Class 1 = Print Spoof, Class 2 = Replay Spoof.
+   - **Class Ordering**: Softmax logits with Class 0 = Print Spoof, Class 1 = Live, Class 2 = Replay Spoof (`DEFAULT_MINIFASNET_LIVE_CLASS_INDEX = 1` in `crates/inference-ort/src/pad.rs`, ADR 2026-09-29; never overridden in production).
 
 ---
 

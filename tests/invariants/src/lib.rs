@@ -1655,4 +1655,83 @@ mod tests {
             "Docs/PAM_DOCKER_TEST_MATRIX.md must document the T10 release panic-safety case"
         );
     }
+
+    /// Invariant (GitHub #146, PAD-01): `DEFAULT_MINIFASNET_LIVE_CLASS_INDEX` is the single
+    /// source of truth for the MiniFASNet live class. Production code must construct
+    /// `OrtPadDetector` with `OrtPadDetector::new`; the explicit-index constructors
+    /// (`new_with_class_index`, `with_live_class_index`) are test-only. A production override
+    /// silently inverts anti-spoofing (walkthrough 72 fixed the constant, the daemon and the
+    /// enrollment CLI kept a literal `2` = ScreenReplay).
+    #[test]
+    fn test_no_pad_live_class_index_override_outside_tests() {
+        let root = workspace_root();
+        let crates_dir = root.join("crates");
+        assert!(crates_dir.is_dir(), "crates/ directory must exist");
+
+        let definition_file = crates_dir.join("inference-ort/src/pad.rs");
+        let definition_source =
+            fs::read_to_string(&definition_file).expect("read crates/inference-ort/src/pad.rs");
+        assert!(
+            definition_source.contains("pub const DEFAULT_MINIFASNET_LIVE_CLASS_INDEX: usize = 1;"),
+            "DEFAULT_MINIFASNET_LIVE_CLASS_INDEX must be defined as 1 in crates/inference-ort/src/pad.rs"
+        );
+
+        let forbidden = ["new_with_class_index(", "with_live_class_index("];
+        let mut src_files = Vec::new();
+        for entry in fs::read_dir(&crates_dir).expect("read crates/") {
+            let crate_dir = entry.expect("crate dir entry").path();
+            let src_dir = crate_dir.join("src");
+            if src_dir.is_dir() {
+                collect_rs_files(&src_dir, &mut src_files);
+            }
+        }
+        assert!(
+            !src_files.is_empty(),
+            "At least one production source file must be scanned"
+        );
+
+        let mut violations = Vec::new();
+        let mut construction_sites = 0usize;
+        for file in &src_files {
+            let source = fs::read_to_string(file).expect("read production source file");
+            let production = extract_production_code(&source);
+            let rel = file
+                .strip_prefix(&root)
+                .unwrap_or(file)
+                .display()
+                .to_string();
+            for (line_no, line) in production.lines().enumerate() {
+                let trimmed = line.trim();
+                if trimmed.starts_with("//") {
+                    continue;
+                }
+                if trimmed.contains("OrtPadDetector::new(") {
+                    construction_sites += 1;
+                }
+                for pattern in forbidden {
+                    if !trimmed.contains(pattern) {
+                        continue;
+                    }
+                    // The definitions in pad.rs are the only permitted occurrences.
+                    let is_definition = *file == definition_file
+                        && trimmed.starts_with("pub fn ")
+                        && trimmed.contains(pattern);
+                    if !is_definition {
+                        violations.push(format!("{rel}:{}: {trimmed}", line_no + 1));
+                    }
+                }
+            }
+        }
+
+        assert!(
+            violations.is_empty(),
+            "Production code must not override the MiniFASNet live class index \
+             (use OrtPadDetector::new so DEFAULT_MINIFASNET_LIVE_CLASS_INDEX is the single source of truth):\n{}",
+            violations.join("\n")
+        );
+        assert!(
+            construction_sites >= 3,
+            "Expected the daemon, the enrollment CLI and the GUI to construct OrtPadDetector::new, found {construction_sites} site(s)"
+        );
+    }
 }

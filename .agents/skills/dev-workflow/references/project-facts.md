@@ -53,8 +53,10 @@ ADR entry in `AI/DECISIONS.md`. Re-check every value below with the listed `grep
 
 Known prose drift: `AGENTS.md`, `AI/ARCHITECTURE.md` and `AI/DECISIONS.md` still say "200–250ms".
 The enforced invariant is **"every blocking PAM operation has an explicit deadline derived from the
-clamped `timeout_ms`; nothing is ever unbounded"**, not the literal 250ms figure. `DECISIONS.md` also
-still says MiniFASNet live class 0; the code (and walkthrough 72) says 1.
+clamped `timeout_ms`; nothing is ever unbounded"**, not the literal 250ms figure. The MiniFASNet live
+class index is 1 everywhere since ADR 2026-09-29 (code, `AI/ARCHITECTURE.md`, matrix ASG1/PLC1–PLC3);
+production never overrides it — `OrtPadDetector::new` only, enforced by the invariant
+`test_no_pad_live_class_index_override_outside_tests` [79].
 
 ## 3. Runtime Paths & Modes
 
@@ -73,7 +75,7 @@ still says MiniFASNet live class 0; the code (and walkthrough 72) says 1.
 | ID | File | Input | Normalization | Notes |
 |---|---|---|---|---|
 | `scrfd_500m_kps` | `scrfd_500m_kps.onnx` | 640×640 BGR, letterbox | `(x-127.5)/128` | 9 outputs (3 strides × score/bbox/kps); **scores are already sigmoided** [65] |
-| `minifasnet_v2_pad` | `minifasnet_v2_80x80.onnx` | 80×80 BGR, 2.7× expanded bbox | `x/255` | live class index **1** [72] |
+| `minifasnet_v2_pad` | `minifasnet_v2_80x80.onnx` | 80×80 BGR, 2.7× expanded bbox | `x/255` | live class index **1** [72, 79]; `[PrintPhoto, Live, ScreenReplay]`, never overridden in production |
 | `arcface_w600k_mbf` | `arcface_w600k_mbf.onnx` | 112×112 aligned, **NHWC**, **BGR** [68, 71] | `(x-127.5)/127.5` | 512D, L2-normalized |
 
 Any change to channel order, layout, class index or normalization MUST be validated against the real

@@ -143,3 +143,76 @@ pub mod pad {
         Frame::new(data, width, height, 1_000_000, PixelFormat::Rgb24, 1)
     }
 }
+
+pub mod onnx {
+    //! Minimal hand-encoded ONNX models for wiring tests that need a real ORT session
+    //! without any model file on disk.
+
+    fn varint(mut value: u64, out: &mut Vec<u8>) {
+        loop {
+            let byte = (value & 0x7F) as u8;
+            value >>= 7;
+            if value == 0 {
+                out.push(byte);
+                return;
+            }
+            out.push(byte | 0x80);
+        }
+    }
+
+    fn field_varint(field: u64, value: u64, out: &mut Vec<u8>) {
+        varint(field << 3, out);
+        varint(value, out);
+    }
+
+    fn field_bytes(field: u64, bytes: &[u8], out: &mut Vec<u8>) {
+        varint((field << 3) | 2, out);
+        varint(bytes.len() as u64, out);
+        out.extend_from_slice(bytes);
+    }
+
+    /// `ValueInfoProto` for a float tensor named `name` with shape `[1, 3]`.
+    fn float_value_info(name: &str) -> Vec<u8> {
+        let mut dims = Vec::new();
+        for dim_value in [1u64, 3u64] {
+            let mut dim = Vec::new();
+            field_varint(1, dim_value, &mut dim); // Dimension.dim_value
+            field_bytes(1, &dim, &mut dims); // TensorShapeProto.dim
+        }
+        let mut tensor_type = Vec::new();
+        field_varint(1, 1, &mut tensor_type); // Tensor.elem_type = FLOAT
+        field_bytes(2, &dims, &mut tensor_type); // Tensor.shape
+        let mut type_proto = Vec::new();
+        field_bytes(1, &tensor_type, &mut type_proto); // TypeProto.tensor_type
+        let mut value_info = Vec::new();
+        field_bytes(1, name.as_bytes(), &mut value_info); // ValueInfoProto.name
+        field_bytes(2, &type_proto, &mut value_info); // ValueInfoProto.type
+        value_info
+    }
+
+    /// Serialized `ModelProto` of a single-node `Identity` graph (`x[1,3] -> y[1,3]`).
+    ///
+    /// The bytes are deterministic and independent of any file under `/var/lib/soos`, so
+    /// production factories that take an ORT session can be exercised in CI.
+    pub fn minimal_identity_model() -> Vec<u8> {
+        let mut node = Vec::new();
+        field_bytes(1, b"x", &mut node); // NodeProto.input
+        field_bytes(2, b"y", &mut node); // NodeProto.output
+        field_bytes(4, b"Identity", &mut node); // NodeProto.op_type
+
+        let mut graph = Vec::new();
+        field_bytes(1, &node, &mut graph); // GraphProto.node
+        field_bytes(2, b"soos_identity", &mut graph); // GraphProto.name
+        field_bytes(11, &float_value_info("x"), &mut graph); // GraphProto.input
+        field_bytes(12, &float_value_info("y"), &mut graph); // GraphProto.output
+
+        let mut opset = Vec::new();
+        field_varint(2, 13, &mut opset); // OperatorSetIdProto.version
+
+        let mut model = Vec::new();
+        field_varint(1, 7, &mut model); // ModelProto.ir_version
+        field_bytes(7, &graph, &mut model); // ModelProto.graph
+        field_bytes(8, &opset, &mut model); // ModelProto.opset_import
+        model
+    }
+}
