@@ -196,3 +196,31 @@ proptest! {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// GitHub #147: single rate-limit attempt recording after multi-frame consensus
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_record_attempt_enforces_rate_limit_without_evaluation() {
+    let limiter = RateLimiter::new(RateLimitConfig::new(2, 60_000_000_000));
+    let mut engine = AuthorizationEngine::with_rate_limiter(ThresholdConfig::default(), limiter);
+
+    assert!(engine.record_attempt(1000, 1_000).is_ok());
+    assert!(engine.record_attempt(1000, 2_000).is_ok());
+    assert!(
+        matches!(
+            engine.record_attempt(1000, 3_000),
+            Err(soos_policy::PolicyError::RateLimitExceeded { uid: 1000, .. })
+        ),
+        "third attempt inside the window must be rejected"
+    );
+    // Another UID is unaffected.
+    assert!(engine.record_attempt(1001, 3_000).is_ok());
+
+    // Without a rate limiter, recording always succeeds.
+    let mut plain = AuthorizationEngine::new(ThresholdConfig::default());
+    for _ in 0..10 {
+        assert!(plain.record_attempt(1000, 0).is_ok());
+    }
+}

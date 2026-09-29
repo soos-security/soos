@@ -125,6 +125,23 @@ impl AuthorizationEngine {
         (Verdict::Allow, ReasonClass::FaceMatch)
     }
 
+    /// Records one authentication attempt for `uid` in the rate limiter without evaluating
+    /// a biometric context (used once per request after multi-frame consensus).
+    ///
+    /// If no rate limiter is configured, this always succeeds.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PolicyError::RateLimitExceeded`] if the attempt is rejected; the caller
+    /// must then downgrade any `Allow` to `ProtocolError`/`RateLimited` (fail closed).
+    pub fn record_attempt(&mut self, uid: u32, now_monotonic_ns: u64) -> Result<(), PolicyError> {
+        if let Some(ref mut limiter) = self.rate_limiter {
+            limiter.check_and_record(uid, now_monotonic_ns)
+        } else {
+            Ok(())
+        }
+    }
+
     /// Evaluates an [`AuthContext`] with rate-limiting enforcement.
     ///
     /// If the rate limiter is configured and the attempt limit is exceeded,

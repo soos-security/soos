@@ -76,6 +76,8 @@ The daemon starts as a systemd service before login prompts, loads and validates
 
 `Deny` and `Unavailable` are intentionally indistinguishable to the PAM caller, preventing timing or enumeration attacks.
 
+**Multi-frame consensus (GitHub #147).** The `Allow` row is never satisfied by a single capture. The daemon evaluates successive distinct camera captures within the decision budget and feeds them to the zero-I/O `soos_policy::PadAggregator`: `Allow` requires `k = 3` consecutive captures (window `n = 5`) that are live at or above the PAD threshold and match at or above the cosine threshold, and any capture classified as a spoof vetoes `Allow` for the whole request. A request whose budget expires before consensus returns `Unavailable`/`Timeout`.
+
 ---
 
 ## 4. IPC Architecture (PAM ↔ Daemon)

@@ -13,9 +13,11 @@ use crate::error::DaemonError;
 use crate::health::HealthState;
 use crate::peercred::{get_peer_credentials, verify_peer_credentials};
 use crate::pipeline::{
-    current_monotonic_nanos, PipelineComponents, DECISION_BUDGET_MS, MAX_FRAME_AGE_NS,
+    current_monotonic_nanos, PipelineComponents, DECISION_BUDGET_MS, FRAME_POLL_INTERVAL_MS,
+    MAX_FRAME_AGE_NS,
 };
 use crate::session::SessionValidator;
+use soos_policy::{ConsensusDecision, FrameEvaluation, PadAggregator};
 use soos_protocol::codec::{encode, encode_preview};
 use soos_protocol::types::{
     Event, EventKind, PreviewResponse, ReasonClass, Request, RequestId, RequestKind, Response,
@@ -619,12 +621,15 @@ impl ConnectionDispatcher {
                 .saturating_sub(Duration::from_millis(50));
             let total_budget = client_budget.min(max_allowed_budget);
 
-            let mut last_verdict = Verdict::Unavailable;
-            let mut last_reason = ReasonClass::Timeout;
+            // 8e: Multi-frame PAD consensus loop (GitHub #147 / PAD-02).
+            // Allow requires k consecutive passing captures (live at or above the PAD
+            // threshold and matching at or above the cosine threshold) inside a bounded
+            // window; any spoof-classified capture vetoes the whole request (fail closed).
+            let consensus_thresholds = *pipe.policy.read().await.thresholds();
+            let mut aggregator = PadAggregator::with_defaults(consensus_thresholds);
             let mut last_sequence: Option<u64> = None;
-            let mut last_ctx = soos_policy::AuthContext::new(0.0, false, 0, req.uid_hint, true);
+            let mut last_capture_stale = false;
 
-            // 8e: Multi-frame evaluation loop until match or budget expiry
             while auth_start.elapsed() < total_budget {
                 let cur_ns = match self.now_nanos() {
                     Ok(ns) => ns,
@@ -665,10 +670,8 @@ impl ConnectionDispatcher {
                             };
 
                         if is_fresh {
-                            let (score, face_count, pad_passed) = match pipe
-                                .vision
-                                .process_frame(&frame)
-                            {
+                            last_capture_stale = false;
+                            let evaluation = match pipe.vision.process_frame(&frame) {
                                 Ok(output) => {
                                     let sim = match soos_vision::cosine_similarity(
                                         enrolled_template.embedding.as_slice(),
@@ -680,7 +683,12 @@ impl ConnectionDispatcher {
                                             0.0
                                         }
                                     };
-                                    (sim, 1u8, output.pad_result.is_live)
+                                    FrameEvaluation::new(
+                                        1,
+                                        output.pad_result.is_live,
+                                        output.pad_result.score,
+                                        sim,
+                                    )
                                 }
                                 Err(soos_vision::VisionError::PadFailed { score, threshold }) => {
                                     debug!(
@@ -688,20 +696,20 @@ impl ConnectionDispatcher {
                                         threshold = threshold,
                                         "Presentation attack detected (PAD failed)"
                                     );
-                                    (0.0, 1u8, false)
+                                    FrameEvaluation::spoof(score)
                                 }
                                 Err(soos_vision::VisionError::NoFaceDetected) => {
                                     debug!("Zero faces detected in capture");
-                                    (0.0, 0u8, false)
+                                    FrameEvaluation::no_face()
                                 }
                                 Err(soos_vision::VisionError::MultipleFacesDetected { count }) => {
                                     let count_u8 = u8::try_from(count).unwrap_or(u8::MAX);
                                     debug!(count = count, "Multiple faces detected in capture");
-                                    (0.0, count_u8, false)
+                                    FrameEvaluation::multiple_faces(count_u8)
                                 }
                                 Err(soos_vision::VisionError::FaceBelowConfidence { .. }) => {
                                     debug!("Face detected below confidence threshold");
-                                    (0.0, 0u8, false)
+                                    FrameEvaluation::no_face()
                                 }
                                 Err(soos_vision::VisionError::Inference(err)) => {
                                     warn!(error = %err, "Vision neural inference failure");
@@ -731,70 +739,76 @@ impl ConnectionDispatcher {
                                 }
                             };
 
-                            let ctx = soos_policy::AuthContext::new(
-                                score,
-                                pad_passed,
-                                face_count,
-                                req.uid_hint,
-                                true,
-                            );
-
-                            let engine = pipe.policy.read().await;
-                            let (verdict, reason_class) = engine.evaluate(&ctx);
-                            drop(engine);
-
-                            last_ctx = ctx;
-                            last_verdict = verdict;
-                            last_reason = reason_class;
-
-                            if verdict == Verdict::Allow {
-                                info!(
-                                    uid = req.uid_hint,
-                                    score = score,
-                                    "Face verification succeeded; authorizing authentication"
-                                );
-                                let mut engine_write = pipe.policy.write().await;
-                                let _ = engine_write.evaluate_with_rate_limit(&last_ctx, cur_ns);
-                                drop(engine_write);
-
-                                let encoded = self.build_response(
-                                    req.request_id,
-                                    verdict,
-                                    reason_class,
-                                    cur_ns,
-                                )?;
-                                return Ok(ResponseOutput {
-                                    encoded_response: encoded,
-                                    completion_error: None,
-                                });
+                            let class = aggregator.record(&evaluation);
+                            match aggregator.decision() {
+                                ConsensusDecision::Allow => break,
+                                ConsensusDecision::SpoofVetoed => {
+                                    warn!(
+                                        uid = req.uid_hint,
+                                        captures_evaluated = aggregator.frames_evaluated(),
+                                        "Presentation attack detected; vetoing request"
+                                    );
+                                    break;
+                                }
+                                ConsensusDecision::Pending(_) => {
+                                    debug!(
+                                        class = ?class,
+                                        consecutive_live = aggregator.consecutive_passing(),
+                                        required = aggregator.config().required(),
+                                        "Capture recorded; consensus pending"
+                                    );
+                                }
                             }
                         } else {
-                            last_verdict = Verdict::Unavailable;
-                            last_reason = ReasonClass::StaleFrame;
+                            last_capture_stale = true;
                         }
                     }
                 }
 
-                tokio::time::sleep(Duration::from_millis(25)).await;
+                // Deadline-aware poll: never sleep past the decision budget so the response
+                // is always rendered before the connection timeout.
+                let remaining = total_budget.saturating_sub(auth_start.elapsed());
+                if remaining.is_zero() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(FRAME_POLL_INTERVAL_MS).min(remaining))
+                    .await;
             }
 
             drop(enrolled_template);
 
-            // Loop finished without Allow: record attempt in rate limiter and return final verdict
+            // 8f: Record exactly one attempt per request, then render the aggregate verdict.
+            // A rate-limit rejection at this point downgrades Allow (fail closed).
             let cur_ns = self.now_nanos().unwrap_or(0);
-            let mut engine_write = pipe.policy.write().await;
-            let (verdict, reason_class) = engine_write.evaluate_with_rate_limit(&last_ctx, cur_ns);
-            drop(engine_write);
-
-            let final_verdict = if last_verdict == Verdict::Allow {
-                verdict
-            } else {
-                last_verdict
+            let rate_limited = {
+                let mut engine_write = pipe.policy.write().await;
+                engine_write.record_attempt(req.uid_hint, cur_ns).is_err()
             };
-            let final_reason = if last_verdict == Verdict::Allow {
-                reason_class
-            } else {
-                last_reason
+
+            let decision = aggregator.decision();
+            let (final_verdict, final_reason) = match decision {
+                ConsensusDecision::Allow if rate_limited => {
+                    warn!(
+                        uid = req.uid_hint,
+                        "Rate limit reached while recording attempt; withholding authorization"
+                    );
+                    (Verdict::ProtocolError, ReasonClass::RateLimited)
+                }
+                ConsensusDecision::Allow => {
+                    info!(
+                        uid = req.uid_hint,
+                        captures_evaluated = aggregator.frames_evaluated(),
+                        consecutive_live = aggregator.consecutive_passing(),
+                        "Face verification consensus reached; authorizing authentication"
+                    );
+                    decision.verdict()
+                }
+                ConsensusDecision::Pending(_) if last_capture_stale => {
+                    (Verdict::Unavailable, ReasonClass::StaleFrame)
+                }
+                ConsensusDecision::SpoofVetoed | ConsensusDecision::Pending(_) => {
+                    decision.verdict()
+                }
             };
 
             if req.service.contains("gdm")

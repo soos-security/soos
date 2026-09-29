@@ -722,3 +722,120 @@ async fn test_48_multi_frame_evaluation_recovers_from_initial_no_face_to_allow()
         "Multi-frame evaluation must yield ReasonClass::FaceMatch"
     );
 }
+
+// ---------------------------------------------------------------------------
+// GitHub #147 (PAD-02): Multi-frame PAD consensus and spoof veto
+// ---------------------------------------------------------------------------
+
+fn auth_request(uid: u32, tag: u8) -> Request {
+    Request {
+        version: CURRENT_VERSION,
+        kind: RequestKind::Auth,
+        request_id: [tag; 32],
+        uid_hint: uid,
+        service: "sudo".into(),
+        deadline_monotonic_ns: u64::MAX,
+    }
+}
+
+fn spawn_single_connection_server(fixture: &TestPipelineFixture) {
+    let listener = fixture.start_listener();
+    let disp = fixture.dispatcher.clone();
+    tokio::spawn(async move {
+        if let Ok((stream, _)) = listener.accept().await {
+            let _ = disp.handle_connection(stream).await;
+        }
+    });
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_147_alternating_live_spoof_pad_never_allows() {
+    let fixture = TestPipelineFixture::new(true, 5).await;
+
+    // The PAD model flickers between live and spoof on every evaluated frame. Under
+    // "first passing frame wins" the very first live frame would authorize.
+    fixture.pad.set_result_sequence(vec![
+        PadResult::live(0.98),
+        PadResult::spoof(0.04, AttackType::PrintPhoto),
+    ]);
+
+    spawn_single_connection_server(&fixture);
+    let resp = send_req(&fixture.sock_path, auth_request(fixture.current_uid, 147)).await;
+
+    assert_ne!(
+        resp.verdict,
+        Verdict::Allow,
+        "alternating live/spoof frames must never authorize"
+    );
+    assert_eq!(resp.verdict, Verdict::Deny);
+    assert_eq!(resp.reason_class, ReasonClass::PadFailed);
+    assert!(resp.verdict.should_ignore());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_147_spoof_frame_vetoes_subsequent_live_frames_for_whole_request() {
+    let fixture = TestPipelineFixture::new(true, 5).await;
+
+    // One spoof frame followed by a long run of live, matching frames: the request
+    // must stay vetoed even though k consecutive live frames follow.
+    let mut sequence = vec![PadResult::spoof(0.10, AttackType::ScreenReplay)];
+    sequence.extend(std::iter::repeat_n(PadResult::live(0.99), 40));
+    fixture.pad.set_result_sequence(sequence);
+
+    spawn_single_connection_server(&fixture);
+    let resp = send_req(&fixture.sock_path, auth_request(fixture.current_uid, 148)).await;
+
+    assert_eq!(
+        resp.verdict,
+        Verdict::Deny,
+        "a spoof-classified frame must veto Allow for the entire request"
+    );
+    assert_eq!(resp.reason_class, ReasonClass::PadFailed);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_147_live_frame_below_pad_threshold_vetoes_request() {
+    let fixture = TestPipelineFixture::new(true, 5).await;
+
+    // Classified live but with a liveness score under the configured PAD threshold (0.80).
+    fixture
+        .pad
+        .set_result_sequence(vec![PadResult::live(0.98), PadResult::live(0.50)]);
+
+    spawn_single_connection_server(&fixture);
+    let resp = send_req(&fixture.sock_path, auth_request(fixture.current_uid, 149)).await;
+
+    assert_eq!(resp.verdict, Verdict::Deny);
+    assert_eq!(resp.reason_class, ReasonClass::PadFailed);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_147_k_consecutive_live_frames_allow_within_budget() {
+    let fixture = TestPipelineFixture::new(true, 5).await;
+    let pad_calls_before = fixture.pad.call_count();
+
+    spawn_single_connection_server(&fixture);
+    let started = std::time::Instant::now();
+    let resp = send_req(&fixture.sock_path, auth_request(fixture.current_uid, 150)).await;
+    let elapsed = started.elapsed();
+
+    assert_eq!(
+        resp.verdict,
+        Verdict::Allow,
+        "k consecutive live matching frames must authorize: reason={:?}",
+        resp.reason_class
+    );
+    assert_eq!(resp.reason_class, ReasonClass::FaceMatch);
+
+    let pad_calls = fixture.pad.call_count() - pad_calls_before;
+    assert!(
+        pad_calls >= soos_policy::DEFAULT_PAD_CONSENSUS_REQUIRED,
+        "Allow requires at least k={} evaluated frames, observed {}",
+        soos_policy::DEFAULT_PAD_CONSENSUS_REQUIRED,
+        pad_calls
+    );
+    assert!(
+        elapsed <= Duration::from_millis(soos_daemon::pipeline::DECISION_BUDGET_MS),
+        "consensus must be reached within DECISION_BUDGET_MS, took {elapsed:?}"
+    );
+}
