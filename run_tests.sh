@@ -7,7 +7,8 @@
 #   2. Runs ephemeral container with workspace bind-mounted
 #   3. Compiles PAM module in release mode
 #   4. Deploys .so into container PAM directory
-#   5. Runs pamtester to validate ABI loading, refusal, and password fallback
+#   5. Runs the PAM matrix T1–T10 (ABI loading, refusal, password fallback,
+#      release-build panic safety)
 #   6. Automatically removes ephemeral container
 #
 # Usage:

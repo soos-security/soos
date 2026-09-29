@@ -30,6 +30,20 @@ pub enum PamEvent {
     PasswordFailed,
 }
 
+/// Test-only fault to inject inside the `catch_unwind` region (review finding PAM-01).
+///
+/// The variants are always defined so that [`PamConfig`] has the same shape in every build,
+/// but the PAM argument `fault_inject=<mode>` is parsed **only** when the crate is compiled
+/// with the opt-in `fault-injection` feature; production builds always keep `None`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FaultInject {
+    /// Explicit panic with a fixed, secret-free payload.
+    Panic,
+    /// Arithmetic overflow trapped by `overflow-checks = true` (the class of panic the
+    /// release profile deliberately enables).
+    Overflow,
+}
+
 /// Parsed configuration for the PAM module execution.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PamConfig {
@@ -47,6 +61,9 @@ pub struct PamConfig {
     pub disabled: bool,
     /// Custom disable flag file path (defaults to checking standard system flags).
     pub disable_file: Option<PathBuf>,
+    /// Armed fault-injection mode; only ever `Some` when built with the `fault-injection`
+    /// feature (Docker matrix T10). Always `None` in production builds.
+    pub fault_inject: Option<FaultInject>,
 }
 
 impl PamConfig {
@@ -89,6 +106,7 @@ impl Default for PamConfig {
             uid: None,
             disabled: false,
             disable_file: None,
+            fault_inject: None,
         }
     }
 }
@@ -144,8 +162,24 @@ fn apply_arg(config: &mut PamConfig, trimmed: &str) {
         if let Ok(parsed) = val.trim().parse::<u32>() {
             config.uid = Some(parsed);
         }
+    } else if let Some(val) = trimmed.strip_prefix("fault_inject=") {
+        apply_fault_inject_arg(config, val.trim());
     }
 }
+
+/// Parses the test-only `fault_inject=<mode>` argument (feature `fault-injection` only).
+#[cfg(feature = "fault-injection")]
+fn apply_fault_inject_arg(config: &mut PamConfig, mode: &str) {
+    config.fault_inject = match mode {
+        "panic" => Some(FaultInject::Panic),
+        "overflow" => Some(FaultInject::Overflow),
+        _ => None,
+    };
+}
+
+/// Production builds ignore `fault_inject=<mode>` entirely: the hook cannot be armed.
+#[cfg(not(feature = "fault-injection"))]
+fn apply_fault_inject_arg(_config: &mut PamConfig, _mode: &str) {}
 
 /// Parses PAM `argc` and `argv` into a [`PamConfig`].
 ///

@@ -65,7 +65,7 @@ retitling a PR re-validates it without re-running the whole pipeline.
 | `clippy` | `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings` | Cached `target/` |
 | `test` | `cargo test --locked --workspace --all-targets --all-features` (build step separated from run step) | Cached `target/` |
 | `security` | `cargo deny --locked check` with cargo-deny 0.20.2 | Also runs daily for new RustSec advisories |
-| `pam-integration` | Dockerized PAM matrix T1–T9 (`tests/docker/test_suite.sh`) | Starts after `lint`; Buildx layer cache |
+| `pam-integration` | Dockerized PAM matrix T1–T10 (`tests/docker/test_suite.sh`) | Starts after `lint`; Buildx layer cache |
 | `ci-success` | Fails unless every job above succeeded | Single check to require in branch protection |
 
 ### Performance Design
@@ -173,7 +173,7 @@ are reviewed like any other and receive their report on the Dependabot branch.
 
 To guarantee that experimental PAM modules never compromise the host operating system, all PAM integration tests run inside an isolated, ephemeral Ubuntu 24.04 Docker container:
 ```bash
-./run_tests.sh             # Ubuntu sandbox, T1–T9
+./run_tests.sh             # Ubuntu sandbox, T1–T10
 ./run_tests.sh --matrix    # Ubuntu, Fedora and Arch Linux
 ```
 
