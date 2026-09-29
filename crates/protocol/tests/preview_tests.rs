@@ -89,3 +89,28 @@ fn test_preview_codec_rejects_oversized_payload() {
         "encode_preview must reject payloads exceeding MAX_PREVIEW_MESSAGE_SIZE"
     );
 }
+
+/// GitHub #143 (DMN-02): preview pixel data must be erased from memory when discarded.
+#[test]
+fn test_preview_response_zeroize_erases_pixel_data() {
+    use zeroize::Zeroize;
+
+    let mut resp = PreviewResponse {
+        version: CURRENT_VERSION,
+        sequence: 7,
+        width: 4,
+        height: 2,
+        format: 0,
+        timestamp_monotonic_ns: 123,
+        data: vec![0xAB; 4 * 2 * 3],
+    };
+    resp.zeroize();
+    assert!(
+        resp.data.is_empty(),
+        "Zeroize must erase and clear pixel data"
+    );
+    assert_eq!(resp.width, 0);
+    assert_eq!(resp.height, 0);
+    assert_eq!(resp.sequence, 0);
+    assert_eq!(resp.timestamp_monotonic_ns, 0);
+}

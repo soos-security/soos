@@ -3322,6 +3322,7 @@ dependencies = [
  "arc-swap",
  "clap",
  "eframe",
+ "getrandom 0.3.4",
  "nix",
  "serde_json",
  "soos-biometric-store",

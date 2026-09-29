@@ -6,6 +6,7 @@ use std::time::Duration;
 use serde::Deserialize;
 
 use crate::error::DaemonError;
+use crate::preview::PreviewConfig;
 
 /// Configuration for the Unix domain socket listener.
 #[derive(Debug, Clone)]
@@ -106,6 +107,8 @@ pub struct DaemonConfig {
     pub dispatcher: DispatcherConfig,
     /// Pipeline configuration.
     pub pipeline: PipelineConfig,
+    /// GUI preview stream authorization (`[preview]`, disabled by default).
+    pub preview: PreviewConfig,
     /// Logging filter directive (e.g. "info", "debug").
     pub log_level: String,
 }
@@ -116,6 +119,7 @@ impl Default for DaemonConfig {
             socket: SocketConfig::default(),
             dispatcher: DispatcherConfig::default(),
             pipeline: PipelineConfig::default(),
+            preview: PreviewConfig::default(),
             log_level: "info".to_string(),
         }
     }
@@ -130,7 +134,16 @@ struct DaemonConfigFile {
     #[serde(default)]
     pipeline: Option<PipelineConfigFile>,
     #[serde(default)]
+    preview: Option<PreviewConfigFile>,
+    #[serde(default)]
     log_level: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PreviewConfigFile {
+    enabled: Option<bool>,
+    allowed_uids: Option<Vec<u32>>,
+    max_requests_per_sec: Option<u32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -313,6 +326,19 @@ impl DaemonConfig {
                 }
             }
         }
+
+        if let Some(preview) = file.preview {
+            if let Some(enabled) = preview.enabled {
+                config.preview.enabled = enabled;
+            }
+            if let Some(uids) = preview.allowed_uids {
+                config.preview.allowed_uids = uids;
+            }
+            if let Some(max_per_sec) = preview.max_requests_per_sec {
+                config.preview.max_requests_per_sec = max_per_sec;
+            }
+        }
+        config.preview.validate()?;
 
         Ok(config)
     }

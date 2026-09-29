@@ -19,6 +19,7 @@ use tokio::net::{UnixListener, UnixStream};
 use soos_daemon::config::DispatcherConfig;
 use soos_daemon::dispatcher::ConnectionDispatcher;
 use soos_daemon::health::HealthState;
+use soos_daemon::preview::PreviewConfig;
 use soos_protocol::codec::{decode, decode_preview, encode};
 use soos_protocol::types::{
     PreviewResponse, ReasonClass, Request, RequestKind, Response, Verdict, CURRENT_VERSION,
@@ -33,6 +34,15 @@ fn test_dispatcher_config(
         connection_timeout,
         enforce_active_session: false,
         logind_sessions_dir: PathBuf::from("/run/systemd/sessions"),
+    }
+}
+
+/// Preview opt-in for the current test peer (GitHub #143: preview is denied by default).
+fn preview_allow(uid: u32) -> PreviewConfig {
+    PreviewConfig {
+        enabled: true,
+        allowed_uids: vec![uid],
+        ..PreviewConfig::default()
     }
 }
 
@@ -524,7 +534,11 @@ async fn test_dispatcher_preview_frame_roundtrip() {
     health.set_socket_ready(true);
 
     let config = test_dispatcher_config(4, Duration::from_millis(500));
-    let dispatcher = Arc::new(ConnectionDispatcher::new(config, health));
+    // Contract migration (GitHub #143): the unprivileged test peer must be explicitly allowed.
+    let current_uid = nix::unistd::getuid().as_raw();
+    let dispatcher = Arc::new(
+        ConnectionDispatcher::new(config, health).with_preview_config(preview_allow(current_uid)),
+    );
 
     let disp_clone = dispatcher.clone();
     tokio::spawn(async move {
@@ -536,7 +550,6 @@ async fn test_dispatcher_preview_frame_roundtrip() {
     let mut client = UnixStream::connect(&sock_path)
         .await
         .expect("Connect failed");
-    let current_uid = nix::unistd::getuid().as_raw();
     let req = Request {
         version: CURRENT_VERSION,
         kind: RequestKind::PreviewFrame,
@@ -572,7 +585,11 @@ async fn test_dispatcher_persistent_stream_multiple_requests() {
     health.set_socket_ready(true);
 
     let config = test_dispatcher_config(4, Duration::from_millis(1000));
-    let dispatcher = Arc::new(ConnectionDispatcher::new(config, health));
+    // Contract migration (GitHub #143): the unprivileged test peer must be explicitly allowed.
+    let current_uid = nix::unistd::getuid().as_raw();
+    let dispatcher = Arc::new(
+        ConnectionDispatcher::new(config, health).with_preview_config(preview_allow(current_uid)),
+    );
 
     let disp_clone = dispatcher.clone();
     tokio::spawn(async move {
@@ -584,7 +601,6 @@ async fn test_dispatcher_persistent_stream_multiple_requests() {
     let mut client = UnixStream::connect(&sock_path)
         .await
         .expect("Connect failed");
-    let current_uid = nix::unistd::getuid().as_raw();
 
     for i in 0u8..3u8 {
         let req = Request {

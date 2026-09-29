@@ -273,6 +273,25 @@ pub struct PreviewResponse {
     pub data: Vec<u8>,
 }
 
+impl zeroize::Zeroize for PreviewResponse {
+    fn zeroize(&mut self) {
+        self.version.zeroize();
+        self.sequence.zeroize();
+        self.width.zeroize();
+        self.height.zeroize();
+        self.format.zeroize();
+        self.timestamp_monotonic_ns.zeroize();
+        self.data.zeroize();
+    }
+}
+
+impl Drop for PreviewResponse {
+    fn drop(&mut self) {
+        use zeroize::Zeroize;
+        self.zeroize();
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Validation Logic
 // ---------------------------------------------------------------------------
