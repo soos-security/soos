@@ -1,0 +1,30 @@
+# =============================================================================
+# Dependabot — keeps SHA-pinned GitHub Actions current (security patches).
+# =============================================================================
+# A 7-day cooldown avoids adopting a release in the window where a compromised
+# action version is typically detected and yanked.
+# Dependabot PRs go through the same gates as any other PR, including the
+# fingerprint-bound candid review (push the report onto the Dependabot branch).
+# Commit prefix "ci(deps)" keeps PR titles compliant with Conventional Commits,
+# which CI validates because the PR title becomes the squash commit subject.
+# A title longer than 72 characters (e.g. many grouped updates) fails the
+# PR Title check: retitle the PR by hand before merging.
+# Cargo dependencies are intentionally not auto-bumped: deny.toml enforces
+# multiple-versions = "deny", so crate updates are reviewed through the normal
+# dev-workflow instead.
+# =============================================================================
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      # Short group name keeps grouped titles within the 72-character PR title limit.
+      actions:
+        patterns: ["*"]
+    commit-message:
+      prefix: "ci"
+      include: scope

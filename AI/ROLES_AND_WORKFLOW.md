@@ -39,9 +39,12 @@ For every code feature or modification, development is executed in 4 sequential 
 ---
 
 ## 3. Automation Tooling & Quality Scripts
-- **`save.sh`:** Local quality pipeline and commit automation script (`cargo fmt`, `clippy -D warnings`, `test`, `deny check`, `scripts/candid_review.sh`, Conventional Commits).
-- **`scripts/candid_review.sh`:** Context-free, impartial pre-push audit asserting all architectural invariants, panic safety, output isolation, and English policy.
-- **`scripts/pr_loop.sh`:** Autonomous loop orchestrating branch push, PR creation, GitHub Actions CI monitoring, and auto-merge to `main`.
+- **`save.sh`:** Local quality pipeline and commit automation script (`cargo fmt`, `clippy -D warnings`, `test`, `deny check` with the exact CI flags, dual-layer candid review, Conventional Commits).
+- **`scripts/candid_review.sh`:** Layer 1 — deterministic, context-free audit of the diff asserting architectural invariants, panic safety, output isolation, and English policy.
+- **`scripts/candid_subagent.sh`:** Layer 2 — verifies that `AI/candid_review_report.md` is APPROVED and bound to the current diff fingerprint (`--prepare` produces the patch and fingerprint for the reviewer).
+- **`scripts/secret_scan.sh`:** Secret and sensitive-artifact scanner shared by git hooks and CI.
+- **`scripts/pr_loop.sh`:** Autonomous loop orchestrating branch push, PR creation, fail-fast CI monitoring, and `--match-head-commit` squash merge to `main`.
+- **Agent skills:** `.agents/skills/*/SKILL.md` (shared facts in `.agents/skills/dev-workflow/references/project-facts.md`).
 - **`run_tests.sh`:** Isolated ephemeral Docker container executing `pamtester` validation without risking host lockout.
 
 ---

@@ -131,9 +131,9 @@ For automated AI workflows or contributors desiring end-to-end automation:
 ```
 
 ### Execution Steps in the Autonomous Loop:
-1. **Local Quality Gates**: Executes `cargo fmt`, `cargo clippy --all-targets --all-features -- -D warnings`, `cargo test --all-targets` (including architectural invariants), and `cargo deny check`.
-2. **Candid Pre-Push Code Review**: Runs `./scripts/candid_review.sh` to perform an impartial, context-free audit of the raw diff for panic safety, `#![forbid(unsafe_code)]`, forbidden dependencies (`opencv`, `nokhwa`), shell script syntax, output isolation, and strict English policy.
-3. **Pre-Commit Guardrails**: Verifies active topic branch (refuses `main`), validates Conventional Commit message format, and scans for secret leaks.
-4. **Push & Pull Request**: Pushes branch to GitHub and opens a Pull Request if not already created.
-5. **CI Monitoring**: Monitors all 3 GitHub Actions jobs (`Quality`, `Security`, `PAM Integration Docker`).
-6. **Streamlined Auto-Merge**: As soon as all CI checks are 100% green, the PR is automatically squash-merged into `main` (`gh pr merge --squash --delete-branch`), and local `main` is synchronized.
+1. **Local Quality Gates**: Executes `cargo fmt`, `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`, `cargo test --locked --workspace --all-targets --all-features` (including architectural invariants), and `cargo deny --locked check` — the exact CI commands.
+2. **Dual-Layer Candid Review**: `./scripts/candid_subagent.sh` runs the deterministic invariant audit (`scripts/candid_review.sh`: panic safety, `#![forbid(unsafe_code)]`, forbidden dependencies, shell syntax, output isolation, English policy) and verifies that `AI/candid_review_report.md` is `VERDICT: APPROVED` **and** bound to the current diff fingerprint (`--prepare` prints it for the reviewer). A stale or template report is rejected.
+3. **Git Guardrails**: pre-commit refuses `main` and scans staged changes for secrets; commit-msg validates Conventional Commits; pre-push refuses pushes to (and deletion of) `main`, scans every unpushed commit and re-verifies the review fingerprint.
+4. **Push & Pull Request**: Pushes the branch to GitHub and opens a Pull Request if not already created.
+5. **CI Monitoring**: Waits until the PR head is the pushed commit and CI has started on it, then watches all GitHub Actions jobs (`lint`, `clippy`, `test`, `security`, `pam-integration`, `PR Title`) with fail-fast and a 45-minute ceiling, and finally polls the `CI Success` aggregate of that commit (created only once its dependencies finish) until it completes.
+6. **Streamlined Auto-Merge**: Only if `CI Success` concluded `success` **on that exact commit**, the PR is squash-merged with `gh pr merge --squash --match-head-commit <validated sha>` (GitHub refuses the merge if the head moved; `--admin` is never used), and local `main` is fast-forwarded. The loop never stashes: if the working tree is dirty it stays on the topic branch.

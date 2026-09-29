@@ -1,183 +1,98 @@
 ---
 name: dev-workflow
 description: >
-  Master Multi-Agent Orchestrator for the soos project.
-  Activate this skill with an issue ID from AI/BACKLOG.md to autonomously
-  execute the full end-to-end development lifecycle through its specialized
-  sub-agents: Architect, Tester, Auditor, Developer, Candid Reviewer,
-  and Traceability Sub-Agents, concluding with automated merge to main.
+  Master orchestrator for soos development. Use when asked to implement,
+  fix or deliver a backlog issue (e.g. "Issue #50", "#12", a branch name) end
+  to end: topic branch → architect → plan-evaluator → tester → auditor →
+  developer → candid-reviewer → traceability → quality gates → PR → CI →
+  squash merge. Coordinates the specialized sub-agent skills and enforces the
+  gate between every phase.
 ---
 
-# Master Multi-Agent Development Workflow — soos
+# Master Development Workflow — soos
 
-## Scope & Purpose
+Shared facts (crate map, constants, commands, conventions):
+[`references/project-facts.md`](references/project-facts.md). Read it first.
 
-`dev-workflow` is the **Master Orchestration Skill** for all code development in the `soos` workspace.
-When invoked with a target issue (e.g. `Issue #1: policy Crate`), this skill acts as the conductor that sequentially and autonomously coordinates the 6 specialized sub-agents:
+## 0. Preconditions
 
+- Ingest `AGENTS.md`, `AI/ARCHITECTURE.md`, `AI/DECISIONS.md`, the target issue in `AI/BACKLOG.md`,
+  its rows in `AI/VERIFICATION_MATRIX.md`, `AI/MOCK_STRATEGY.md`, `AI/ROLES_AND_WORKFLOW.md`,
+  `Docs/SECURITY_AND_QUALITY_GUIDELINES.md`, `Docs/DEVELOPMENT_WORKFLOW.md`,
+  `Docs/COMMIT_CONVENTION.md`, `Docs/IPC_PROTOCOL.md`, `Docs/CI_CD_AND_SECURITY.md`, and the
+  `Docs/*` page of each affected crate.
+- Working tree clean and up to date: `git fetch origin && git status --short` is empty.
+- `git config core.hooksPath` prints `.githooks` (run `git config core.hooksPath .githooks` if not).
+
+## 1. Phase Pipeline and Gates
+
+| Phase | Skill | Output | Gate to continue |
+|---|---|---|---|
+| 0 Branch | — | `<type>/<name>` from BACKLOG | branch registered in `scripts/sync_issue.py` |
+| 1 Spec | `architect-agent` | Architect Spec | every acceptance line mapped |
+| 1.5 Plan gate | `plan-evaluator` | `AI/plan_evaluator_report.md` | `VALIDATION_VERDICT: APPROVED` |
+| 2 Red | `tester-agent` | tests + contract table | tests fail on assertions/specified API only |
+| 3 Audit | `auditor-agent` | constraint list | `Clearance: CLEARED` |
+| 4 Green | `developer-agent` | implementation | fmt + clippy + test + candid layer 1 green |
+| 5 Review | `candid-reviewer` (fresh context) | `AI/candid_review_report.md` | `./scripts/candid_subagent.sh` passes |
+| 6 Trace | `traceability-agent` | matrix, backlog, Docs, walkthrough NN | self-check green |
+| 7 Release | `./save.sh --auto-merge -m "<conventional message>"` | PR merged | CI `CI Success` green |
+
+A failed gate loops back to the phase that owns the defect (plan → architect, weak test → tester,
+failing code → developer). Never skip a phase because the change "looks small"; for a docs-only
+or CI-only change, phases 1–4 may be condensed into one written plan, but 5–7 always run.
+
+## 2. Phase Details
+
+### Phase 0 — Topic branch
+- Resolve ambiguous numbers (`#12` may be backlog #12 or GitHub #12) with `BACKLOG_TO_GITHUB` /
+  `BRANCH_TO_ISSUE` in `scripts/sync_issue.py`.
+- Branch name from the issue's `> **Branch**:` line; allowed prefixes `feat/ fix/ test/ chore/`.
+  `git switch -c <type>/<name> origin/main`.
+- Register `"<type>/<name>": <backlog_id>` in `BRANCH_TO_ISSUE` if absent. Do **not** run
+  `sync_issue.py --auto` now — it checks off every sub-issue of the branch.
+
+### Phases 1–4
+Invoke each skill in order and keep their deliverables in the conversation/plan; they feed the
+walkthrough. The developer must run the exact CI commands (with `--locked --all-features`).
+
+### Phase 5 — Candid review
+Run the reviewer as an independent sub-agent when the harness supports it, giving it only: the
+skill, the branch name and the instruction to start with `./scripts/candid_subagent.sh --prepare`.
+If it returns CHANGES_REQUESTED, fix production code and run a **new** review (the fingerprint
+changes with every code change; a stale report is rejected by the gate, the pre-push hook and CI).
+Phase 6 edits only docs, but they are part of the diff: run `--prepare` + gate again after Phase 6
+if any file changed (docs are reviewed for accuracy and English policy too).
+
+### Phase 6 — Traceability
+Per the `traceability-agent` skill, then `python3 scripts/sync_issue.py --auto` once all sub-issues
+are complete.
+
+### Phase 7 — Release loop
+```bash
+./save.sh --auto-merge -m "<type>(<scope>): <imperative summary ≤ 72 chars>"
 ```
-                  ┌─────────────────────────────────────────────────────────────┐
-                  │                    USER REQUEST                             │
-                  │   "Use dev-workflow for Issue #N: <component>"              │
-                  └──────────────────────────────┬──────────────────────────────┘
-                                                 │
-                                                 ▼
-                  ┌─────────────────────────────────────────────────────────────┐
-                  │ Phase 0: Topic Branch Isolation                             │
-                  │ (git checkout -b <type>/<name> from AI/BACKLOG.md)          │
-                  └──────────────────────────────┬──────────────────────────────┘
-                                                 │
-                                                 ▼
-                   ┌─────────────────────────────────────────────────────────────┐
-                   │ Phase 1: Architect Sub-Agent (.agents/skills/architect-agent)│
-                   │ Scaffolds crate, specifies bounded types, traits, errors    │
-                   └──────────────────────────────┬──────────────────────────────┘
-                                                  │
-                                                  ▼
-                   ┌─────────────────────────────────────────────────────────────┐
-                   │ Phase 1.5: Plan Evaluator Sub-Agent (plan-evaluator)        │
-                   │ Audits plan vs AI/ARCHITECTURE.md across 6 pillars          │
-                   │ Self-validates plan (VALIDATION_VERDICT: APPROVED)          │
-                   └──────────────────────────────┬──────────────────────────────┘
-                                                  │
-                                                  ▼
-                  ┌─────────────────────────────────────────────────────────────┐
-                  │ Phase 2: Tester Sub-Agent (.agents/skills/tester-agent)     │
-                  │ Authors unit/property tests, asserts PAM fallback (RED)     │
-                  │ *Strict Test Integrity: tests are an immutable contract*    │
-                  └──────────────────────────────┬──────────────────────────────┘
-                                                 │
-                                                 ▼
-                  ┌─────────────────────────────────────────────────────────────┐
-                  │ Phase 3: Auditor Sub-Agent (.agents/skills/auditor-agent)   │
-                  │ Audits panics, unsafe, stdout pollution, secret leakage     │
-                  └──────────────────────────────┬──────────────────────────────┘
-                                                 │
-                                                 ▼
-                  ┌─────────────────────────────────────────────────────────────┐
-                  │ Phase 4: Developer Sub-Agent (.agents/skills/developer-agent)│
-                  │ Implements minimal production code until tests pass (GREEN) │
-                  │ *Zero Test Weakening: strictly fixes production code only*  │
-                  └──────────────────────────────┬──────────────────────────────┘
-                                                 │
-                                                 ▼
-                  ┌─────────────────────────────────────────────────────────────┐
-                  │ Phase 5: Candid Reviewer Sub-Agent (candid-reviewer)        │
-                  │ Impartial cold diff audit on 5 pillars                      │
-                  │ Generates AI/candid_review_report.md (VERDICT: APPROVED)    │
-                  └──────────────────────────────┬──────────────────────────────┘
-                                                 │
-                                                 ▼
-                  ┌─────────────────────────────────────────────────────────────┐
-                  │ Phase 6: Traceability Sub-Agent (traceability-agent)        │
-                  │ Updates AI/VERIFICATION_MATRIX.md, Docs/, Walkthrough NN    │
-                  └──────────────────────────────┬──────────────────────────────┘
-                                                 │
-                                                 ▼
-                  ┌─────────────────────────────────────────────────────────────┐
-                  │ Phase 7: Autonomous Merge Loop (./save.sh --auto-merge)     │
-                  │ Quality gates, candid check, push, PR, CI wait, auto-merge  │
-                  └─────────────────────────────────────────────────────────────┘
-```
+- `save.sh` runs fmt, clippy, tests, cargo-deny and both candid layers; commits; `scripts/pr_loop.sh`
+  pushes (pre-push hook re-verifies the review fingerprint), opens the PR, watches CI with fail-fast,
+  and squash-merges with `--match-head-commit` so nothing unreviewed can be merged.
+- The PR title becomes the squash commit subject and is validated by CI against
+  `.githooks/commit-msg`.
+- While `save.sh --auto-merge` / `pr_loop.sh` runs, do not switch branches or edit the working tree.
+- If CI fails: read the failing job log (`gh run view --log-failed`), fix on the same branch, re-run
+  Phase 5 (new fingerprint), then re-run `./save.sh --auto-merge`.
 
----
+## 3. Environment Notes
 
-## 1. Single Invocation Model
+- Sandboxed harnesses: branch creation, `cargo fetch` of new dependencies, `gh` and pushes need
+  write access to `.git` and network — request the harness's elevated/unsandboxed execution for
+  those commands only.
+- `gh` may live in `~/.local/bin`; prepend `PATH="$HOME/.local/bin:$PATH"` if not found.
+  Query issues with explicit fields: `gh issue view <id> --json title,body,number,state`.
+- Worktrees share the git stash: never use bare `git stash`/`git stash pop`.
+- Write repository files directly in the working tree, never in an agent-private artifact folder.
 
-The user **only needs to invoke `dev-workflow` with an Issue ID**:
-> Example: *"Use the `dev-workflow` skill to implement Issue #1: policy Crate — Authorization Logic"*
+## 4. Completion
 
-The master workflow automatically handles the rest through its sub-agent ensemble.
-
----
-
-## 2. Mandatory Context Ingestion
-
-Before starting Phase 1, the orchestrator verifies full ingestion of:
-- **`AI/`**: `ARCHITECTURE.md`, `DECISIONS.md`, `BACKLOG.md`, `VERIFICATION_MATRIX.md`, `MOCK_STRATEGY.md`, `ROLES_AND_WORKFLOW.md`
-- **`Docs/`**: `SECURITY_AND_QUALITY_GUIDELINES.md`, `DEVELOPMENT_WORKFLOW.md`, `COMMIT_CONVENTION.md`, `IPC_PROTOCOL.md`, `CI_CD_AND_SECURITY.md`
-
----
-
-## 3. Sub-Agent Execution Pipeline
-
-### Phase 0: Topic Branch Isolation
-- **Issue Disambiguation**: If an issue number could refer to either a Backlog Issue or a GitHub Issue (e.g. user passes `#12`), consult `scripts/sync_issue.py` (`BACKLOG_TO_GITHUB` / `BRANCH_TO_ISSUE`) to resolve the canonical Backlog issue and topic branch.
-- Lookup target branch in `AI/BACKLOG.md` (e.g. `feat/camera-v4l`).
-- Create and switch: `git checkout -b <type>/<name>`.
-- **Sandbox Execution & Tooling Paths**:
-  - `git checkout -b <type>/<name>` modifies `.git` and must be executed with `BypassSandbox: true` if `.git` is read-only in the sandbox.
-  - If adding new external dependencies to `Cargo.toml`, run a single `cargo fetch` with `BypassSandbox: true` to populate the Cargo cache, then resume sandboxed compilation and testing.
-  - `gh` CLI path resolution: Ensure `PATH="$HOME/.local/bin:$PATH"` is prepended when executing commands that invoke `gh`, as user-local installs reside under `~/.local/bin/gh`.
-  - Avoid GraphQL classic project deprecation in `gh issue view` by querying specific fields: `gh issue view <id> --json title,body,number,state`.
-  - Release steps (`./save.sh --push-pr`, `./scripts/pr_loop.sh`) require `BypassSandbox: true` to communicate with GitHub.
-- **Dual Sync Branch Registration**: Verify that the topic branch is registered in `BRANCH_TO_ISSUE` in `scripts/sync_issue.py`. If absent, register it immediately (`"<type>/<name>": <backlog_id>`) so automated issue synchronization (`scripts/sync_issue.py --auto`) functions without manual intervention throughout the lifecycle.
-  - **Execution Timing Guard**: Do NOT execute `python3 scripts/sync_issue.py --auto` during Phase 0, as `--auto` marks all sub-issues of the branch as completed. Branch registration in `scripts/sync_issue.py` is purely declarative in Phase 0; actual synchronization must only run during Phase 6 (Traceability).
-
-### Phase 1: Architect Sub-Agent ([architect-agent](file:///home/hadrien/soos/.agents/skills/architect-agent/SKILL.md))
-- Scaffolds crate in `crates/<name>/` and registers in root `Cargo.toml`.
-- Inherits workspace settings: `publish.workspace = true`, `[lints] workspace = true`.
-- Specifies bounded structs, enums, and `thiserror` error types.
-- Asserts `#![forbid(unsafe_code)]` in business crates.
-- **Lazy Hardware & Inference Scaffolding Invariant**: In administrative and diagnostic crates that interact with both storage and hardware/neural pipelines (e.g. `enrollment-cli`), decouple storage-only service initialization (`build_store_only`) from full perception pipelines (`build_full_service`). Non-biometric maintenance subcommands (`list`, `delete`) must only require master keys and template directories, guaranteeing zero runtime dependency on physical camera devices or neural model files on disk.
-
-### Phase 1.5: Plan Evaluator Sub-Agent ([plan-evaluator](file:///home/hadrien/soos/.agents/skills/plan-evaluator/SKILL.md))
-- Audits implementation plans and technical specifications against `AI/ARCHITECTURE.md`, `AI/DECISIONS.md`, `AI/BACKLOG.md`, and `AI/VERIFICATION_MATRIX.md`.
-- Evaluates across 6 core pillars: Architectural Alignment, PAM Real-Time Deadlines, Panic Safety, Dependency Isolation, Memory/Secret Hygiene, and Test Integrity.
-- Authors formal evaluation report in `AI/plan_evaluator_report.md` with explicit verdict: `VALIDATION_VERDICT: APPROVED` before execution proceeds.
-  - *Tool Constraint*: Target file is in the project workspace; do NOT include `ArtifactMetadata` in `write_to_file`.
-  - **/goal Autonomous Execution Protocol**: When invoked under `/goal` with `plan-evaluator` ("auto-plan verificateur"), generating `AI/plan_evaluator_report.md` with `VALIDATION_VERDICT: APPROVED` serves as the formal gate, allowing the orchestrator to proceed directly to Phase 2 without pausing for interactive human confirmation.
-
-### Phase 2: Tester Sub-Agent ([tester-agent](file:///home/hadrien/soos/.agents/skills/tester-agent/SKILL.md))
-- Authors unit, property (`proptest`), and invariant tests.
-- Verifies tests **FAIL** initially (TDD Red Phase).
-- Systematically writes tests asserting fail-closed `PAM_IGNORE` for PAM pathways.
-- **Contractual Invariant**: Tests written in this phase are immutable. They define the non-negotiable contract of acceptance.
-- **Domain Helper Reuse Invariant**: In higher-level crates (e.g. `daemon`, `enrollment-cli`), author test contracts leveraging verified helper functions and cryptographic utilities already exported by upstream workspace crates (e.g. `ModelManifest::compute_sha256` from `inference-ort`) rather than pulling in duplicate low-level dependencies directly into consumer crates.
-
-### Phase 3: Auditor Sub-Agent ([auditor-agent](file:///home/hadrien/soos/.agents/skills/auditor-agent/SKILL.md))
-- Audits interfaces for panic safety (zero unwrap/expect in production code).
-- Enforces output isolation (zero `println!` or `dbg!` in PAM).
-- Verifies `catch_unwind` on all FFI entry points.
-- Validates memory bounds and zeroization of sensitive buffers.
-
-### Phase 4: Developer Sub-Agent ([developer-agent](file:///home/hadrien/soos/.agents/skills/developer-agent/SKILL.md))
-- Implements minimal production code satisfying pre-written tests.
-- Iterates until 100% of tests pass cleanly (TDD Green Phase).
-- **Strict Anti-Weakening Rule**: Under NO circumstances may the developer modify, weaken, or delete a test. The developer must persevere and fix production code only.
-- Formats code (`cargo fmt`) and ensures zero Clippy warnings (`cargo clippy --all-targets --all-features -- -D warnings`).
-- **Cross-Crate Refactoring Invariant**: When modifying shared pipeline constructors (e.g. `VisionPipeline::new`), immediately update downstream consumers across the workspace (`enrollment-cli`, `daemon` fixtures) to preserve workspace-wide build integrity.
-
-### Phase 5: Candid Reviewer Sub-Agent ([candid-reviewer](file:///home/hadrien/soos/.agents/skills/candid-reviewer/SKILL.md))
-- Executes independent, cold diff review against `origin/main` on 5 pillars:
-  1. Logic & Architecture
-  2. PAM Concurrency & Real-Time Deadlines
-  3. Panic Safety & Fallback
-  4. Test Integrity & Anti-Weakening
-  5. Memory & Secret Bounds
-- Authors formal report in `AI/candid_review_report.md` with `VERDICT: APPROVED`.
-  - *Tool Constraint*: Target file is in the project workspace; do NOT include `ArtifactMetadata` in `write_to_file`.
-
-### Phase 6: Traceability Sub-Agent ([traceability-agent](file:///home/hadrien/soos/.agents/skills/traceability-agent/SKILL.md))
-- Synchronizes issues and sub-issues automatically via `python3 scripts/sync_issue.py`:
-  - Checks off completed sub-issues (`- [x] **#X.Y**`) in `AI/BACKLOG.md`.
-  - Checks off sub-issues directly in the corresponding GitHub Issue body on `github.com`.
-  - Posts automated progress comments on the GitHub Issue.
-- Updates `AI/VERIFICATION_MATRIX.md` with verified status and test evidence.
-- Updates technical documentation in `Docs/` in professional English.
-- Authors sequential walkthrough `AI/walkthroughs/NN_<name>.md`.
-
-### Phase 7: Autonomous Release Loop
-- Executes:
-  ```bash
-  ./save.sh --auto-merge
-  # Or with explicit Conventional Commit message:
-  # ./save.sh --auto-merge -m "<type>(<scope>): <short description>"
-  ```
-- Runs local quality gates + dual-layer candid review (`scripts/candid_subagent.sh`).
-- Pushes topic branch and opens GitHub Pull Request.
-- Monitors GitHub Actions CI checks until 100% green.
-- Auto-merges into `main` via squash merge and synchronizes local `main`.
-- **Working Tree Concurrency Lockdown**: While `./save.sh --auto-merge` or `./scripts/pr_loop.sh` is actively executing in the background, the agent MUST NOT run any `git checkout`, `git switch`, or working tree modifications in parallel. The background release loop relies on working tree branch stability to verify commit SHAs prior to squash merging.
-- **/goal Autonomous Completion**: When running under `/goal`, verify local `main` sync via `git log -1` and include `<!-- GOAL_COMPLETE -->` in the concluding summary to satisfy the goal supervisor stop hook.
-
+Done means: PR squash-merged, local `main` fast-forwarded (`git log -1 origin/main` shows the
+squash commit), issue checkboxes synced, walkthrough NN present. Under an autonomous `/goal` run,
+end the final summary with `<!-- GOAL_COMPLETE -->` after verifying the merge.

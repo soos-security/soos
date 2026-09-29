@@ -7,8 +7,12 @@
 #   2. cargo clippy     — Static analysis, fails on any warning (-D warnings)
 #   3. cargo test       — Runs unit and architectural invariant tests
 #   4. cargo deny check — Audits licenses, security advisories, and bans
-#   5. git add .        — Stages all modifications
-#   6. git commit       — Commits with Conventional Commits 1.0.0 message
+#   5. candid review    — Layer 1 invariants + fingerprint-bound Layer 2 report
+#   6. git add .        — Stages all modifications
+#   7. git commit       — Commits with Conventional Commits 1.0.0 message
+#
+# Clippy/test/deny flags are identical to .github/workflows/ci.yml so that a
+# green local run predicts a green CI run.
 #
 # If any step fails, the script halts immediately (set -euo pipefail).
 # By default, this script only performs local commits and NEVER pushes.
@@ -205,8 +209,8 @@ fi
 # Step 2: Static Analysis (Clippy)
 # ---------------------------------------------------------------------------
 step "2/5: cargo clippy"
-info "Running Clippy linting (--all-targets -- -D warnings)..."
-if cargo clippy --all-targets -- -D warnings; then
+info "Running Clippy linting (--locked --workspace --all-targets --all-features -- -D warnings)..."
+if cargo clippy --locked --workspace --all-targets --all-features -- -D warnings; then
     success "Zero Clippy warnings detected."
 else
     error "Clippy detected warnings or lint errors."
@@ -219,7 +223,7 @@ fi
 # ---------------------------------------------------------------------------
 step "3/5: cargo test"
 info "Running test suite (unit tests and security invariants)..."
-if cargo test --all-targets; then
+if cargo test --locked --workspace --all-targets --all-features; then
     success "All automated tests passed successfully."
 else
     error "Test failures detected."
@@ -233,7 +237,7 @@ fi
 step "4/5: cargo deny check"
 if command -v cargo-deny &> /dev/null; then
     info "Auditing third-party supply chain (licenses, advisories, sources, bans)..."
-    if cargo deny check; then
+    if cargo deny --locked check; then
         success "cargo-deny audit passed."
     else
         error "cargo-deny detected security advisory, license, or ban violations."
@@ -277,6 +281,11 @@ if git diff --cached --quiet; then
     echo ""
     warn "No modified files staged for commit. Repository is clean."
     if [[ "$PUSH_PR" == "true" ]]; then
+        HEAD_SUBJECT=$(git log -1 --pretty=%s)
+        if [[ ${#HEAD_SUBJECT} -gt 72 ]]; then
+            error "HEAD subject is ${#HEAD_SUBJECT} characters; subjects pushed as PRs are limited to 72."
+            exit 1
+        fi
         info "Push requested for current branch..."
         git push -u origin "$CURRENT_BRANCH"
     fi
@@ -377,6 +386,14 @@ ${BODY}"
 [${FILE_COUNT} file(s) modified]"
 fi
 
+# The subject becomes the PR title / squash subject when pushed: GitHub appends
+# " (#NNN)", so CI (pr-title.yml) caps it at 72 characters. Fail before committing.
+SUBJECT_LINE=$(echo "$COMMIT_MSG" | head -n 1)
+if [[ "$PUSH_PR" == "true" && ${#SUBJECT_LINE} -gt 72 ]]; then
+    error "Commit subject is ${#SUBJECT_LINE} characters; subjects pushed as PRs are limited to 72."
+    exit 1
+fi
+
 # ---------------------------------------------------------------------------
 # Commit Execution
 # ---------------------------------------------------------------------------
@@ -432,10 +449,11 @@ $COMMIT_MSG
 $CLOSES_KEYWORD
 
 ## Automated Quality & Security Checks
-- [x] cargo fmt --check (official formatting)
-- [x] cargo clippy --all-targets -- -D warnings (zero warnings)
-- [x] cargo test --all-targets (unit tests + architectural invariants)
-- [x] cargo deny check (licenses, advisories, source integrity, bans)
+- [x] cargo fmt (official formatting)
+- [x] cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+- [x] cargo test --locked --workspace --all-targets --all-features (unit tests + architectural invariants)
+- [x] cargo deny --locked check (licenses, advisories, source integrity, bans)
+- [x] Dual-layer candid review (fingerprint-bound AI/candid_review_report.md)
 - [x] Pre-commit hook validation (anti-commit main + secret scanner)"
 
     PR_CREATED=false

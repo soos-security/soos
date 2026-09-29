@@ -5,12 +5,13 @@
 # Orchestrates branch finalization with local candid review and CI merge:
 #   1. Executes ./save.sh --push-pr:
 #      - Quality gates (fmt, clippy, tests, deny)
-#      - Candid pre-push review (scripts/candid_review.sh)
+#      - Dual-layer candid review (scripts/candid_subagent.sh, fingerprint-bound)
 #      - Conventional commit & push
 #   2. Opens Pull Request if not already created
-#   3. Monitors CI checks (Quality, Security, PAM Docker on GitHub Actions)
-#   4. Once all CI checks are 100% green, squash-merges into 'main'
-#      and synchronizes local 'main' branch without requiring external review.
+#   3. Monitors CI checks of the pushed SHA (watch + fail-fast, 45 min ceiling)
+#   4. Once all CI checks are 100% green, squash-merges into 'main' with
+#      --match-head-commit (atomic: refuses if the PR head moved after CI) and
+#      fast-forwards local 'main' without requiring external review.
 # =============================================================================
 
 set -euo pipefail
@@ -54,7 +55,7 @@ if [[ -d ".githooks" ]]; then
     fi
 fi
 
-step "1/6: Local Quality Gates, Conventional Commit, and Push"
+step "1/4: Local Quality Gates, Conventional Commit, and Push"
 info "Running quality pipeline and pushing branch '$CURRENT_BRANCH'..."
 PASSED_ARGS=()
 for arg in "$@"; do
@@ -67,7 +68,7 @@ done
 TARGET_HEAD_SHA=$(git rev-parse "$CURRENT_BRANCH")
 info "Target HEAD commit SHA: $TARGET_HEAD_SHA"
 
-step "2/6: Pull Request Verification or Creation"
+step "2/4: Pull Request Verification or Creation"
 if ! command -v gh &>/dev/null || ! gh auth status &>/dev/null; then
     warn "GitHub CLI ('gh') is not installed or not authenticated."
     warn "Branch '$CURRENT_BRANCH' has been safely committed and pushed to origin."
@@ -81,13 +82,18 @@ if ! command -v gh &>/dev/null || ! gh auth status &>/dev/null; then
     exit 0
 fi
 
-PR_JSON=$(gh pr list --head "$CURRENT_BRANCH" --json number,url,state --state open 2>/dev/null || echo "[]")
-PR_NUMBER=$(echo "$PR_JSON" | grep -o '"number":[0-9]*' | head -1 | cut -d':' -f2 || true)
+PR_NUMBER=$(gh pr list --head "$CURRENT_BRANCH" --state open --json number --jq '.[0].number // empty' 2>/dev/null || true)
 
 if [[ -z "$PR_NUMBER" ]]; then
     info "Creating new Pull Request for '$CURRENT_BRANCH' targeting 'main'..."
     LAST_COMMIT_MSG=$(git log -1 --pretty=%B)
     FIRST_LINE=$(echo "$LAST_COMMIT_MSG" | head -1)
+    # The PR title becomes the squash subject; GitHub appends " (#NNN)" (pr-title.yml limit).
+    if (( ${#FIRST_LINE} > 72 )); then
+        error "Commit subject is ${#FIRST_LINE} characters; PR titles are limited to 72."
+        error "Amend the commit subject, then re-run the loop."
+        exit 1
+    fi
 
     CLOSES_KEYWORD=""
     if [[ -f "./scripts/sync_issue.py" ]]; then
@@ -114,13 +120,14 @@ $LAST_COMMIT_MSG
 $CLOSES_KEYWORD
 
 ## Automated Quality & Security Checks
-- [x] cargo fmt --check
-- [x] cargo clippy --all-targets -- -D warnings
-- [x] cargo test --all-targets (including architectural invariants)
-- [x] cargo deny check (licenses, advisories, sources, bans)"
+- [x] cargo fmt
+- [x] cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+- [x] cargo test --locked --workspace --all-targets --all-features (including architectural invariants)
+- [x] cargo deny --locked check (licenses, advisories, sources, bans)
+- [x] Dual-layer candid review (fingerprint-bound AI/candid_review_report.md)"
 
     PR_URL=$(gh pr create --title "$FIRST_LINE" --body "$PR_BODY" --base main --head "$CURRENT_BRANCH")
-    PR_NUMBER=$(gh pr view --json number -q .number)
+    PR_NUMBER=$(gh pr view "$CURRENT_BRANCH" --json number -q .number)
     success "Pull Request #$PR_NUMBER created: $PR_URL"
 else
     PR_URL="https://github.com/Mysticaly622/soos/pull/$PR_NUMBER"
@@ -128,65 +135,100 @@ else
 fi
 
 step "3/4: Monitoring CI Workflow Checks (GitHub Actions)"
-info "Monitoring CI jobs for PR #$PR_NUMBER (Quality, Security, PAM Docker)..."
-sleep 5
+info "Monitoring CI jobs for PR #$PR_NUMBER on commit ${TARGET_HEAD_SHA:0:12}..."
 
-CI_PASSED=false
-for attempt in $(seq 1 60); do
-    if gh pr checks "$PR_NUMBER" >/dev/null 2>&1; then
-        CI_PASSED=true
+REPO_SLUG=$(gh repo view --json nameWithOwner --jq '.nameWithOwner')
+
+# The PR head must be exactly the commit validated locally and CI must have
+# started on it; otherwise 'gh pr checks' could report the previous head's
+# green checks right after the push. Jobs without 'needs:' (lint, clippy, ...)
+# get check runs immediately; 'CI Success' only appears once its dependencies
+# finish, so it is awaited separately below.
+SHA_READY=false
+for _ in $(seq 1 36); do
+    PR_HEAD=$(gh pr view "$PR_NUMBER" --json headRefOid --jq '.headRefOid' 2>/dev/null || true)
+    RUNS=$(gh api "repos/${REPO_SLUG}/commits/${TARGET_HEAD_SHA}/check-runs" \
+        --jq '.total_count' 2>/dev/null || echo 0)
+    if [[ "$PR_HEAD" == "$TARGET_HEAD_SHA" && "$RUNS" =~ ^[1-9][0-9]*$ ]]; then
+        SHA_READY=true
         break
     fi
-    STATUS=$(gh pr checks "$PR_NUMBER" 2>&1 || true)
-    if echo "$STATUS" | grep -qiE "(fail|cancelled)"; then
-        error "CI checks failed on GitHub Actions!"
-        echo "$STATUS"
-        exit 1
+    sleep 5
+done
+if [[ "$SHA_READY" != "true" ]]; then
+    error "CI did not start on ${TARGET_HEAD_SHA:0:12} for PR #$PR_NUMBER after 180s."
+    exit 1
+fi
+
+CI_WATCH_TIMEOUT_SECS="${CI_WATCH_TIMEOUT_SECS:-2700}"
+WATCH_START=$(date +%s)
+
+# Watch until completion, aborting on the first failing job (45 min ceiling,
+# above the longest job timeout of 40 min).
+if ! timeout "$CI_WATCH_TIMEOUT_SECS" gh pr checks "$PR_NUMBER" --watch --fail-fast --interval 15; then
+    error "CI checks failed, were cancelled, or timed out on GitHub Actions!"
+    gh pr checks "$PR_NUMBER" || true
+    info "Inspect failures with: gh run view --log-failed"
+    exit 1
+fi
+
+# Authoritative verdict: the aggregate check run of the exact validated commit.
+# It may be created only after the other jobs complete, so poll until it exists
+# and has completed.
+CI_CONCLUSION="missing"
+while true; do
+    CI_CONCLUSION=$(gh api "repos/${REPO_SLUG}/commits/${TARGET_HEAD_SHA}/check-runs?check_name=CI%20Success" \
+        --jq '[.check_runs[]] | if length == 0 then "missing"
+              elif any(.status != "completed") then "pending"
+              elif all(.conclusion == "success") then "success"
+              else "failure" end' 2>/dev/null || echo "unknown")
+    if [[ "$CI_CONCLUSION" == "success" || "$CI_CONCLUSION" == "failure" ]]; then
+        break
     fi
-    echo -ne "  ⏳ CI checks in progress (attempt ${attempt}/60)...\r"
+    if (( $(date +%s) - WATCH_START > CI_WATCH_TIMEOUT_SECS )); then
+        break
+    fi
     sleep 10
 done
-echo ""
-
-if [[ "$CI_PASSED" != "true" ]]; then
-    if ! gh pr checks "$PR_NUMBER"; then
-        error "CI check timeout or verification failure!"
-        exit 1
-    fi
+if [[ "$CI_CONCLUSION" != "success" ]]; then
+    error "'CI Success' for ${TARGET_HEAD_SHA:0:12} is '$CI_CONCLUSION' — refusing to merge."
+    exit 1
 fi
-success "All CI checks passed successfully on GitHub Actions!"
+success "All CI checks passed on ${TARGET_HEAD_SHA:0:12}!"
 
 step "4/4: Streamlined Auto-Merge to Main"
 info "CI green: auto-merging PR #$PR_NUMBER into 'main'..."
 
-IS_ALREADY_MERGED=$(gh api "repos/:owner/:repo/pulls/$PR_NUMBER" --jq '.merged' 2>/dev/null || echo "false")
-CURRENT_PR_HEAD_SHA=$(gh api "repos/:owner/:repo/pulls/$PR_NUMBER" --jq '.head.sha' 2>/dev/null || true)
-if [[ -z "$CURRENT_PR_HEAD_SHA" ]]; then
-    error "Failed to read current PR head SHA before merge."
-    exit 1
-fi
-if [[ "$CURRENT_PR_HEAD_SHA" != "$TARGET_HEAD_SHA" ]]; then
-    error "PR head changed from $TARGET_HEAD_SHA to $CURRENT_PR_HEAD_SHA during review."
-    error "MERGE BLOCKED: restart ping-pong loop on latest commit."
-    exit 2
-fi
-
-if [[ "$IS_ALREADY_MERGED" == "true" ]]; then
+IS_ALREADY_MERGED=$(gh pr view "$PR_NUMBER" --json state --jq '.state' 2>/dev/null || echo "UNKNOWN")
+if [[ "$IS_ALREADY_MERGED" == "MERGED" ]]; then
     success "═════════════════════════════════════════════════════════════"
     success "  Pull Request #$PR_NUMBER already merged into main!"
     success "═════════════════════════════════════════════════════════════"
-elif gh pr merge "$PR_NUMBER" --squash --admin 2>/dev/null || gh pr merge "$PR_NUMBER" --squash; then
+# --match-head-commit makes the merge atomic: GitHub refuses it if the PR head
+# moved after CI validated TARGET_HEAD_SHA. No --admin: branch protection and
+# required checks are never bypassed.
+elif gh pr merge "$PR_NUMBER" --squash --match-head-commit "$TARGET_HEAD_SHA"; then
     success "═════════════════════════════════════════════════════════════"
     success "  Pull Request #$PR_NUMBER approved and merged into main!"
     success "═════════════════════════════════════════════════════════════"
 else
-    error "Failed to merge PR #$PR_NUMBER."
-    exit 1
+    error "Failed to merge PR #$PR_NUMBER (head moved, protection rule, or conflict)."
+    error "MERGE BLOCKED: re-run the review and release loop on the latest commit."
+    exit 2
 fi
 
-info "Switching to local 'main' branch and synchronizing..."
-git stash --include-untracked >/dev/null 2>&1 || true
-git checkout main
-git pull origin main
-git stash pop >/dev/null 2>&1 || true
+info "Synchronizing local 'main' branch..."
+if [[ -n "$(git status --porcelain)" ]]; then
+    # Never stash: the stash stack is shared across worktrees and sessions.
+    warn "Working tree has uncommitted changes; staying on '$CURRENT_BRANCH'."
+    git fetch origin main
+    warn "Run 'git switch main && git pull --ff-only origin main' once the tree is clean."
+elif git worktree list --porcelain | grep -x 'branch refs/heads/main' >/dev/null; then
+    # 'main' is checked out in another worktree; it cannot be switched to here.
+    git fetch origin main
+    warn "'main' is checked out in another worktree; update it there with 'git pull --ff-only'."
+else
+    git checkout main
+    git pull --ff-only origin main
+fi
 success "Local 'main' branch synchronized. Mission accomplished!"

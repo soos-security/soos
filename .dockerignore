@@ -1,0 +1,4 @@
+# The PAM sandbox images (Dockerfile, tests/docker/Dockerfile.*) never COPY
+# sources: the workspace is bind-mounted at runtime. Sending an empty build
+# context avoids uploading target/ (several GB) to the Docker daemon.
+*

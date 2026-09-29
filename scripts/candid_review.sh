@@ -4,11 +4,12 @@
 # =============================================================================
 # Evaluates code changes without historical conversation context or author bias.
 # Runs automated invariant checks on the diff and formats a candid audit report:
-#   1. Zero unsafe in business crates (protocol, policy, vision)
+#   1. Zero unsafe in business crates (all crates declaring #![forbid(unsafe_code)])
+#      and no removal of an existing #![forbid(unsafe_code)] attribute
 #   2. Zero unwrap(), expect(), panic!(), todo!(), unimplemented!() in PAM production code
-#   3. Zero tokio in PAM module
+#   3. Zero async runtime (tokio, async-std, smol) in PAM module
 #   4. Zero opencv or nokhwa across workspace
-#   5. Shell script syntax validation (bash -n)
+#   5. Shell script and git hook syntax validation (bash -n)
 #   6. Zero stdout/stderr prints (println!, eprintln!, dbg!) in PAM production code
 #   7. Language policy check (English only in comments, docs, configs, walkthroughs)
 # =============================================================================
@@ -67,19 +68,39 @@ ERRORS_FOUND=0
 
 # 1. Check for unsafe code in business crates
 step "Audit 1: Checking #![forbid(unsafe_code)] Invariant"
+# Business crates (must match test_business_crates_forbid_unsafe_code in tests/invariants)
+BUSINESS_CRATES=(protocol policy vision inference-ort biometric-store evidence-store enrollment-cli admin-cli gui)
+BUSINESS_PATHS=()
+for crate_name in "${BUSINESS_CRATES[@]}"; do
+    BUSINESS_PATHS+=("crates/${crate_name}")
+done
 UNSAFE_HITS=$(echo "$RAW_DIFF" | grep -E '^\+[^+].*\bunsafe\b' || true)
-if [[ -n "$UNSAFE_HITS" ]]; then
-    # Verify if unsafe is in forbidden crates
-    FORBIDDEN_UNSAFE=$(git diff "$BASE_REF" -- crates/protocol crates/policy crates/vision 2>/dev/null | grep -E '^\+[^+].*\bunsafe\b' || true)
-    if [[ -n "$FORBIDDEN_UNSAFE" ]]; then
-        error "Forbidden 'unsafe' code detected in business crates!"
-        echo "$FORBIDDEN_UNSAFE" | sed 's/^/    /'
-        ERRORS_FOUND=$((ERRORS_FOUND + 1))
-    else
-        info "Unsafe code detected but isolated within permitted adapter crates."
+FORBIDDEN_UNSAFE=$(git diff "$BASE_REF" -- "${BUSINESS_PATHS[@]}" 2>/dev/null | grep -E '^\+[^+].*\bunsafe\b' | grep -vE '^\+\s*//' || true)
+# A removed attribute only counts if the file no longer declares it (moves/reformatting are fine).
+MERGE_BASE=$(git merge-base "$BASE_REF" HEAD 2>/dev/null || echo "$BASE_REF")
+REMOVED_FORBID=""
+while IFS= read -r rs_file; do
+    [[ -z "$rs_file" ]] && continue
+    # Capture first: 'grep -q' closing the pipe early would make pipefail report 141 on large diffs.
+    rs_diff="$(git diff "$MERGE_BASE" -- "$rs_file" 2>/dev/null || true)"
+    if grep -E '^-[^-]*#!\[forbid\(unsafe_code\)\]' <<< "$rs_diff" >/dev/null \
+        && ! grep -qE '^[[:space:]]*#!\[forbid\(unsafe_code\)\]' "$rs_file" 2>/dev/null; then
+        REMOVED_FORBID="${REMOVED_FORBID}${rs_file}"$'\n'
     fi
+done < <(git diff --name-only "$MERGE_BASE" -- '*.rs' 2>/dev/null || true)
+if [[ -n "$FORBIDDEN_UNSAFE" ]]; then
+    error "Forbidden 'unsafe' code detected in business crates!"
+    echo "$FORBIDDEN_UNSAFE" | sed 's/^/    /'
+    ERRORS_FOUND=$((ERRORS_FOUND + 1))
+elif [[ -n "$UNSAFE_HITS" ]]; then
+    info "Unsafe code detected but isolated within permitted adapter crates (pam, camera-v4l, daemon mlock)."
 else
     success "Zero 'unsafe' additions detected across all crates."
+fi
+if [[ -n "$REMOVED_FORBID" ]]; then
+    error "A '#![forbid(unsafe_code)]' attribute was removed!"
+    echo "$REMOVED_FORBID" | sed 's/^/    /'
+    ERRORS_FOUND=$((ERRORS_FOUND + 1))
 fi
 
 # 2. Check for panics, unwraps, and unfinished stubs in PAM production pathways
@@ -95,13 +116,13 @@ fi
 
 # 3. Check for async/Tokio in PAM crate
 step "Audit 3: Checking Asynchronous Runtime Invariant"
-PAM_TOKIO=$(git diff "$BASE_REF" -- crates/pam/Cargo.toml 2>/dev/null | grep -E '^\+[^+].*tokio' || true)
+PAM_TOKIO=$(git diff "$BASE_REF" -- crates/pam/Cargo.toml 2>/dev/null | grep -E '^\+[^+].*\b(tokio|async-std|smol|async-io)\b' || true)
 if [[ -n "$PAM_TOKIO" ]]; then
-    error "Forbidden Tokio dependency added to crates/pam/Cargo.toml!"
+    error "Forbidden asynchronous runtime dependency added to crates/pam/Cargo.toml!"
     echo "$PAM_TOKIO" | sed 's/^/    /'
     ERRORS_FOUND=$((ERRORS_FOUND + 1))
 else
-    success "Zero Tokio dependencies in crates/pam."
+    success "Zero asynchronous runtime dependencies in crates/pam."
 fi
 
 # 4. Check for forbidden OpenCV and Nokhwa dependencies
@@ -117,7 +138,7 @@ fi
 
 # 5. Shell script syntax validation
 step "Audit 5: Validating Shell Scripts Syntax"
-SHELL_FILES=$(git diff --name-only "$BASE_REF" 2>/dev/null | grep -E '\.sh$' || true)
+SHELL_FILES=$(git diff --name-only "$BASE_REF" 2>/dev/null | grep -E '(\.sh$|^\.githooks/)' || true)
 if [[ -n "$SHELL_FILES" ]]; then
     for sh_file in $SHELL_FILES; do
         if [[ -f "$sh_file" ]]; then
