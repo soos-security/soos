@@ -291,6 +291,14 @@ else
     warn "soos-enroll binary not built yet. Skipped."
 fi
 
+GUI_BIN=$(find_artifact "soos-gui" || true)
+if [[ -n "${GUI_BIN}" ]]; then
+    install -m 0755 "${GUI_BIN}" "${TARGET_BIN_DIR}/soos-gui"
+    success "Installed ${TARGET_BIN_DIR}/soos-gui"
+else
+    warn "soos-gui binary not built yet. Skipped."
+fi
+
 PAM_LIB=$(find_artifact "libpam_soos.so" || true)
 if [[ -n "${PAM_LIB}" ]]; then
     install -m 0644 "${PAM_LIB}" "${TARGET_PAM_DIR}/pam_soos.so"

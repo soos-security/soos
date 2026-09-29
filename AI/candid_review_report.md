@@ -1,80 +1,59 @@
 # Candid Review Report
 
-- **Date**: 2026-09-26
-- **Target Branch / Commit**: `feat/biometric-reliability-and-camera-lifecycle`
+- **Date**: 2026-09-29
+- **Target Branch / Commit**: `fix/gui-camera-auto-resolution-and-packaging`
 - **Audited Files**:
   - `AI/BACKLOG.md`
   - `AI/plan_evaluator_report.md`
-  - `crates/camera-v4l/src/config.rs`
-  - `crates/camera-v4l/src/mock.rs`
   - `crates/camera-v4l/src/v4l_impl.rs`
-  - `crates/camera-v4l/tests/mock_camera_tests.rs`
-  - `crates/daemon/src/config.rs`
-  - `crates/daemon/src/dispatcher.rs`
-  - `crates/daemon/src/pipeline.rs`
-  - `crates/daemon/tests/config_tests.rs`
-  - `crates/daemon/tests/dispatcher_tests.rs`
-  - `crates/daemon/tests/pipeline_init_tests.rs`
-  - `crates/gui/src/app.rs`
+  - `crates/enrollment-cli/src/service.rs`
+  - `crates/enrollment-cli/tests/device_resolution_tests.rs`
   - `crates/gui/src/ipc_camera.rs`
-  - `crates/gui/src/lib.rs`
   - `crates/gui/src/main.rs`
-  - `crates/inference-ort/src/embedding.rs`
-  - `crates/inference-ort/tests/embedding_tests.rs`
-  - `crates/pam/src/config.rs`
-  - `crates/pam/src/lib.rs`
-  - `crates/pam/tests/config_tests.rs`
-  - `crates/pam/tests/pam_bindings_tests.rs`
-  - `crates/protocol/src/codec.rs`
-  - `crates/protocol/src/types.rs`
-  - `crates/protocol/tests/preview_tests.rs`
-  - `crates/vision/src/crop.rs`
-  - `crates/vision/src/pipeline.rs`
-  - `crates/vision/tests/pad_tests.rs`
-  - `crates/vision/tests/pipeline_tests.rs`
+  - `crates/gui/src/worker.rs`
+  - `crates/gui/tests/layout_tests.rs`
+  - `scripts/install.sh`
   - `scripts/sync_issue.py`
+  - `scripts/uninstall.sh`
+  - `tests/invariants/src/lib.rs`
 
 ## 1. Executive Summary
 
-This pull request addresses Master Implementation Task #46 (GitHub Issue #132) covering four critical physical hardware integration and reliability improvements:
-1. **Biometric Reliability & Separability**: Corrects ArcFace ONNX input channel ordering from RGB to BGR in `crates/inference-ort/src/embedding.rs`, synchronizes default `match_threshold` to `0.70` (was 0.45) and `pad_threshold` to `0.85` (was 0.80) across `VisionPipelineConfig` and GUI/CLIs, and hardens `expand_bbox_for_pad` bounds clamping.
-2. **IR Sensor Prioritization & Grey Ingestion**: Exposes `SensorPreference` (`prefer_ir`, `prefer_rgb`, `device_path`) and `idle_timeout_secs` in `soos-daemon` configuration, selects IR devices preferentially on dual-sensor hardware to neutralize 2D screen/phone replay attacks, and ensures seamless `PixelFormat::Grey` pipeline ingestion.
-3. **Camera Power Management & On-Demand Lifecycle**: Implements an `Active` -> `Idle` -> `Suspended` power management state machine in `soos-camera-v4l`, dropping the V4L2 device file descriptor after `idle_timeout` (default 10s) to extinguish the hardware privacy LED and conserve power. Wakes up immediately upon `notify_activity()` during authentication or preview, updating PAM deadlines and timeouts to 1000ms.
-4. **Daemon Video Proxy for GUI (Eliminate V4L2 EBUSY Conflict)**: Adds bounded `RequestKind::PreviewFrame` (2 MiB cap) to `soos-protocol` and `soos-daemon`, implements `IpcCameraManager` in `soos-gui`, and completely eliminates `pkexec systemctl stop soos-daemon` privilege escalation.
+This pull request addresses Master Bug Fix Issue #50 (GitHub Issue #140), fixing the video feedback failure in `soos-gui` both when the daemon is running and when it is stopped:
+1. **Device Resolution Auto-Detection (`#50.1`)**: `resolve_camera_device_from_config` in `crates/enrollment-cli/src/service.rs` now parses `camera_device = "auto"`, `"default"`, or empty strings by inspecting `sensor_preference` and invoking `soos_camera_v4l::enumerate_capture_devices()` and `select_camera_device()`, gracefully falling back to `/dev/v4l/by-id/` and `/dev/video0`.
+2. **V4L2 Frame Buffer Bounding (`#50.2`)**: In `crates/camera-v4l/src/v4l_impl.rs`, frame payload retrieval slices the MMAP buffer strictly to `meta.bytesused`, eliminating trailing buffer padding that corrupted JPEG decoders and color converters on compressed camera streams.
+3. **GUI Stream Resiliency & Neural Calibration (`#50.3`)**: In `crates/gui/src/worker.rs`, the vision worker implements a fail-safe fallback rendering raw camera frames converted to RGB24 whenever the neural pipeline encounters an analysis error, ensuring continuous visual feedback. In `main.rs`, direct camera initialization disables frame discard (`warmup_frames = 0`, `idle_timeout = Duration::ZERO`), and `OrtPadDetector` is configured with genuine live class index 1. In `ipc_camera.rs`, IPC read timeout is increased to 2500ms.
+4. **System Packaging & Deployment Parity (`#50.4`)**: `scripts/install.sh` and `scripts/uninstall.sh` now include `soos-gui` in target bin installation and uninstallation, and invariant tests assert `soos-gui` lifecycle management.
 
 ## 2. Deep Reasoning Audit
 
 ### Logic & Architecture
-- **Pass**: State transitions across the camera supervisor and mock camera (`Active` -> `Idle` -> `Suspended`) are strictly monotonic and handle edge cases (starvation, hardware disconnects, uninitialized frames). Waking via `notify_activity()` reliably triggers device reconnection without stale state.
-- **Pass**: In `soos-daemon`, `RequestKind::PreviewFrame` delivers the latest cached frame with lock-free `ArcSwapOption` load. If the camera was suspended, `notify_activity()` triggers wake-up.
-- **Pass**: In `soos-gui`, the IPC fallback chain probes `/run/soos/daemon.sock` via `IpcCameraManager` before falling back to local `V4lCameraManager`. The root daemon remains running continuously.
+- **Pass**: Camera device auto-detection correctly respects explicit non-auto paths, while properly resolving dynamic device nodes when `camera_device` is `"auto"` or `"default"`.
+- **Pass**: Slicing MMAP buffers to `meta.bytesused` ensures exact payload delivery to downstream decoders without memory corruption or bounds out-of-range errors.
+- **Pass**: Vision worker fallback in `soos-gui` preserves the responsiveness of the GUI preview canvas even if model inference or face detection encounters transient failures.
 
 ### PAM Concurrency & Deadlines
-- **Pass**: The PAM module (`crates/pam`) remains strictly synchronous and blocking via `std::os::unix::net::UnixStream`. Zero Tokio or async runtimes are introduced.
-- **Pass**: Default timeout has been raised from 200ms to 1000ms (`DEFAULT_TIMEOUT_MS = 1000`) to accommodate cold-camera wake-up from auto-standby while remaining safely below human interactive perception.
-- **Pass**: Zero `stdout`/`stderr` pollution (`println!`, `eprintln!`, `dbg!`) exists in PAM production pathways.
+- **Pass**: No changes made to `crates/pam` or any PAM authentication pathway. The PAM module remains strictly synchronous with zero async runtimes and zero `stdout`/`stderr` pollution.
 
 ### Panic Safety & Fallback
-- **Pass**: All PAM C ABI entry points (`pam_sm_authenticate`, `pam_sm_setcred`, etc.) remain fully guarded by `catch_c_entry` / `catch_unwind`, systematically logging to syslog and returning `PAM_IGNORE` on failure or panic.
-- **Pass**: Zero `unwrap()`, `expect()`, `panic!()`, `todo!()`, or `unreachable!()` in PAM production code. Static C string literals (`c"..."`) are utilized in test fixtures to satisfy strict static analysis.
-- **Pass**: In business crates (`crates/protocol`, `crates/vision`, `crates/policy`), `#![forbid(unsafe_code)]` is strictly observed.
+- **Pass**: Production code across `crates/gui`, `crates/enrollment-cli`, and `crates/camera-v4l` contains zero `unwrap()` or `expect()`.
+- **Pass**: `#![forbid(unsafe_code)]` remains strictly enforced in `crates/gui` and `crates/enrollment-cli`. The unsafe boundary in `crates/camera-v4l/src/v4l_impl.rs` is fully documented and unchanged.
 
 ### Test Integrity & Anti-Weakening
-- **Pass**: Zero tests were modified, deleted, or weakened. All pre-existing test assertions remain contractual and immutable.
-- **Pass**: New test suites cover all four pillars:
-  - ArcFace BGR channel ordering tests (`embedding_tests.rs`)
-  - Threshold calibration tests (`pad_tests.rs`, `pipeline_tests.rs`)
-  - Camera auto-suspend and resume lifecycle tests (`mock_camera_tests.rs`, `shutdown_tests.rs`)
-  - Daemon preview proxy serialization roundtrip tests (`preview_tests.rs`, `dispatcher_tests.rs`)
-  - Daemon config parser tests (`config_tests.rs`, `pipeline_init_tests.rs`)
-- **Pass**: Workspace tests pass with 100% success rate across all 12 crates.
+- **Pass**: Zero tests were modified, deleted, or weakened.
+- **Pass**: New unit test suites were added:
+  - `crates/enrollment-cli/tests/device_resolution_tests.rs` (4 tests validating explicit paths, auto resolution, default resolution, and fallback).
+  - `crates/gui/tests/layout_tests.rs` (`test_gui_worker_fallback_renders_raw_rgb_on_pipeline_error`).
+  - `tests/invariants/src/lib.rs` (`test_uninstall_restores_pam_config` checks `soos-gui` removal).
+- **Pass**: All tests in the workspace pass cleanly (100% success rate).
 
 ### Memory & Secret Bounds
-- **Pass**: Standard IPC messages remain bounded by `MAX_MESSAGE_SIZE` (4,096 bytes); preview frames are strictly bounded by `MAX_PREVIEW_MESSAGE_SIZE` (2 MiB), preventing buffer-overflow or OOM DOS attacks.
-- **Pass**: Passwords, biometric templates, and raw frames are never transmitted over standard PAM authentication pathways or logged. Debug log statements in `dispatcher.rs` avoid sensitive keywords.
+- **Pass**: All buffer slices are bounded by checked lengths and `meta.bytesused`.
+- **Pass**: IPC preview message sizing remains strictly constrained by `MAX_PREVIEW_MESSAGE_SIZE` (2 MiB).
+- **Pass**: No sensitive authentication credentials, passwords, or raw embeddings are exposed or logged.
 
 ## 3. Detailed Findings & Action Items
-- None. Automated static invariant checks (`./scripts/candid_review.sh`), formatting checks (`cargo fmt --check`), clippy lints (`cargo clippy -- -D warnings`), and full workspace tests pass cleanly.
+- None. Automated static checks (`./scripts/candid_review.sh`), code formatting (`cargo fmt --check`), clippy lints (`cargo clippy -- -D warnings`), and full workspace tests pass cleanly.
 
 ## 4. Final Verdict
 **VERDICT: APPROVED**

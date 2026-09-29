@@ -1926,6 +1926,53 @@ On physical hardware lock screens (GDM):
   - Acceptance: `soos-gui` connects to `soos-daemon`, activates preview immediately, and maintains continuous 30 FPS video feedback.
   - TDD: `test_ipc_camera_persistent_stream_maintains_ready_flag`.
 
+---
+
+### Issue #50: `[gui/camera/install]` Camera Auto-Device Resolution, GUI Video Feed Fallback & Packaging Synchronization
+
+> **Component**: `crates/enrollment-cli`, `crates/camera-v4l`, `crates/gui`, `scripts/`  
+> **Type**: Bugfix / Feature / Hardware Hardening  
+> **Status**: In Progress  
+> **Branch**: `fix/gui-camera-auto-resolution-and-packaging`  
+> **Architecture ref**: §6 Warm Camera Streaming, §8 Monorepo Structure, §11 Implementation Phases  
+> **VERIFICATION_MATRIX**: CAM3, GUI1, GUI2, INST1
+
+#### Problem Statement
+
+1. When `camera_device = "auto"` in `/etc/soos/daemon.toml`, `resolve_camera_device_from_config()` literally returns `PathBuf::from("auto")`. When the daemon is not running, `soos-gui` attempts to open direct V4L2 device node `"auto"` which fails with `No such file or directory`, leaving the GUI permanently stuck on the loading spinner. Furthermore, `soos-enroll` rejects `"auto"` as an invalid path not residing under `/dev/`.
+2. When `camera_device` is `"auto"`, `"default"`, or omitted, `resolve_camera_device_from_config()` must parse `sensor_preference` and invoke hardware enumeration (`enumerate_capture_devices()`) and device selection (`select_camera_device()`) to find the actual physical camera node (prioritizing IR if configured, else RGB).
+3. In `crates/camera-v4l/src/v4l_impl.rs`, `stream.next()` ignored `meta.bytesused` and took `buf.to_vec()`. For formats like `Mjpeg` on `/dev/video0`, the buffer contained trailing uninitialized MMAP bytes beyond `meta.bytesused`, causing corrupt frames or decoder failures. Exact slicing to `&buf[..meta.bytesused as usize]` guarantees valid frame boundaries.
+4. In `crates/gui/src/worker.rs`, the worker thread silently dropped frames if `pipeline.analyze_frame(&frame)` failed. It should provide a resilient fallback: if full pipeline analysis errors, convert the frame to RGB via `convert_to_rgb` and still populate `LatestFrameData` with empty detections, ensuring live video feedback never drops.
+5. In `crates/gui/src/main.rs`, `OrtPadDetector` was initialized with `live_class_index = 2` instead of 1 (`DEFAULT_MINIFASNET_LIVE_CLASS_INDEX`). Direct camera capture in `soos-gui` must configure `warmup_frames: 0` and `idle_timeout: Duration::ZERO` so capture starts immediately and never auto-suspends during GUI inspection.
+6. In `scripts/install.sh` and `scripts/uninstall.sh`, `soos-gui` was omitted from installation targets, leaving an obsolete binary on the system that lacked `IpcCameraManager` and constantly conflicted with the daemon.
+
+#### Sub-issues
+
+- [x] **#50.1** — Implement hardware auto-detection in `resolve_camera_device_from_config()`
+  - Parse `sensor_preference` from `daemon.toml` (defaulting to `SensorPreference::PreferIr`).
+  - When `camera_device` is `"auto"`, `"default"`, or empty, invoke `enumerate_capture_devices()` and `select_camera_device(&candidates, sensor_pref)`.
+  - Fall back to first deterministic entry in `/dev/v4l/by-id/`, then `/dev/video0`, then default sentinel.
+  - Acceptance: `resolve_camera_device_from_config(None, Some("/etc/soos/daemon.toml"))` resolves to an existing physical device node (e.g. `/dev/video2`) instead of literal `"auto"`.
+  - TDD: `test_resolve_camera_device_auto_resolution_with_config`, `test_resolve_camera_device_ignores_literal_auto`.
+
+- [x] **#50.2** — Bound V4L2 frame buffers to exact `meta.bytesused` in `v4l_impl.rs`
+  - In `crates/camera-v4l/src/v4l_impl.rs`: when reading from MMAP stream, slice `&buf[..meta.bytesused as usize]` when `bytesused > 0 && bytesused <= buf.len()`.
+  - Acceptance: Compressed MJPEG frames and raw frames are precisely bounded to declared `bytesused` without MMAP padding.
+  - TDD: `test_v4l_frame_bytesused_slicing`.
+
+- [x] **#50.3** — Resilient GUI video feed fallback and configuration alignment
+  - In `crates/gui/src/worker.rs`: if `pipeline.analyze_frame(&frame)` errors, convert the frame to RGB via `convert_to_rgb` and push `LatestFrameData` with empty detections and `det_latency_ms: 0.0`.
+  - In `crates/gui/src/main.rs`: align `OrtPadDetector` to `DEFAULT_MINIFASNET_LIVE_CLASS_INDEX` (1), configure `warmup_frames: 0` and `idle_timeout: Duration::ZERO` for direct V4L2 capture, and set IPC stream read timeout to 2500ms.
+  - Acceptance: GUI displays continuous live camera feed regardless of pipeline inference errors or daemon presence.
+  - TDD: `test_gui_worker_fallback_renders_raw_rgb_on_pipeline_error`.
+
+- [x] **#50.4** — Synchronize packaging and installer for `soos-gui`
+  - In `scripts/install.sh`: install `soos-gui` to `${TARGET_BIN_DIR}/soos-gui` if built.
+  - In `scripts/uninstall.sh`: clean up `${TARGET_BIN_DIR}/soos-gui`.
+  - Acceptance: Running `install.sh` installs the current `soos-gui` binary to `/usr/bin/soos-gui`.
+  - TDD: `test_install_script_includes_gui_binary`.
+
+
 
 
 

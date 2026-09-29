@@ -51,17 +51,24 @@ pub const REQUIRED_MODEL_IDS: [&str; 3] =
     [MODEL_ID_FACE_DETECTOR, MODEL_ID_PAD, MODEL_ID_EMBEDDING];
 
 /// Resolves the camera device path:
-/// 1. Explicit CLI argument (`cli_device`), if provided.
-/// 2. Active `camera_device` from daemon config, if explicitly provided or default exists.
-/// 3. First deterministic entry in `/dev/v4l/by-id/`.
-/// 4. Fallback `/dev/v4l/by-id/default-camera`.
+/// 1. Explicit CLI argument (`cli_device`), if provided and not "auto"/"default".
+/// 2. Explicit `camera_device` from daemon config, if explicitly provided (e.g. `/dev/video0`).
+/// 3. Hardware auto-detection matching `sensor_preference` (default `PreferIr`).
+/// 4. First deterministic entry in `/dev/v4l/by-id/`.
+/// 5. Standard `/dev/video0` or fallback `/dev/v4l/by-id/default-camera`.
 pub fn resolve_camera_device_from_config(
     cli_device: Option<PathBuf>,
     config_path: Option<&Path>,
 ) -> PathBuf {
     if let Some(device) = cli_device {
-        return device;
+        let dev_str = device.to_string_lossy();
+        if dev_str != "auto" && dev_str != "default" && !dev_str.is_empty() {
+            return device;
+        }
     }
+
+    let mut configured_device: Option<String> = None;
+    let mut sensor_preference = soos_camera_v4l::SensorPreference::PreferIr;
 
     // 1. Check daemon configuration if provided
     if let Some(cfg) = config_path {
@@ -73,10 +80,46 @@ pub fn resolve_camera_device_from_config(
                         .and_then(|p| p.get("camera_device"))
                         .and_then(|d| d.as_str())
                     {
-                        return PathBuf::from(dev_str);
+                        configured_device = Some(dev_str.to_string());
+                    }
+
+                    if let Some(pref_str) = value
+                        .get("pipeline")
+                        .and_then(|p| p.get("sensor_preference"))
+                        .and_then(|s| s.as_str())
+                    {
+                        match pref_str.to_lowercase().as_str() {
+                            "prefer_rgb" | "rgb" => {
+                                sensor_preference = soos_camera_v4l::SensorPreference::PreferRgb;
+                            }
+                            "prefer_ir" | "ir" => {
+                                sensor_preference = soos_camera_v4l::SensorPreference::PreferIr;
+                            }
+                            _ => {}
+                        }
                     }
                 }
             }
+        }
+    }
+
+    if let Some(ref dev_str) = configured_device {
+        if dev_str != "auto"
+            && dev_str != "default"
+            && !dev_str.is_empty()
+            && dev_str.starts_with("/dev")
+        {
+            return PathBuf::from(dev_str);
+        }
+    }
+
+    // If config was provided and configured "auto" / "default", perform hardware auto-detection
+    if configured_device.is_some() {
+        let candidates = soos_camera_v4l::enumerate_capture_devices();
+        if let Some(selected) =
+            soos_camera_v4l::select_camera_device(&candidates, sensor_preference)
+        {
+            return selected.path.clone();
         }
     }
 
@@ -93,6 +136,18 @@ pub fn resolve_camera_device_from_config(
                 return first;
             }
         }
+    }
+
+    // 3. Fallback to hardware auto-detection matching sensor preference
+    let candidates = soos_camera_v4l::enumerate_capture_devices();
+    if let Some(selected) = soos_camera_v4l::select_camera_device(&candidates, sensor_preference) {
+        return selected.path.clone();
+    }
+
+    // 4. Check for standard /dev/video0 fallback
+    let video0 = Path::new("/dev/video0");
+    if video0.exists() {
+        return video0.to_path_buf();
     }
 
     PathBuf::from(DEFAULT_CAMERA_DEVICE)

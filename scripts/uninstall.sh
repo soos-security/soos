@@ -230,6 +230,7 @@ rm -f "${TARGET_LIBEXEC_DIR}/soos-daemon"
 rmdir "${TARGET_LIBEXEC_DIR}" 2>/dev/null || true
 rm -f "${TARGET_BIN_DIR}/soos-admin"
 rm -f "${TARGET_BIN_DIR}/soos-enroll"
+rm -f "${TARGET_BIN_DIR}/soos-gui"
 
 for cand in "${PAM_CANDIDATES[@]}"; do
     if [[ -f "${cand}/pam_soos.so" ]]; then

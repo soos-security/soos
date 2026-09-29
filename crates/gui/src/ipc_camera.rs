@@ -111,7 +111,7 @@ fn run_ipc_camera_worker(
             }
         };
 
-        let _ = stream.set_read_timeout(Some(Duration::from_millis(1000)));
+        let _ = stream.set_read_timeout(Some(Duration::from_millis(2500)));
         let _ = stream.set_write_timeout(Some(Duration::from_millis(500)));
 
         while running.load(Ordering::Acquire) {

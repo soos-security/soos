@@ -329,7 +329,7 @@ fn open_and_stream(
     let mut sequence: u64 = 0;
 
     while running.load(Ordering::Acquire) {
-        let (buf, _meta) = match stream.next() {
+        let (buf, meta) = match stream.next() {
             Ok(val) => val,
             Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {
                 if !running.load(Ordering::Acquire) {
@@ -363,9 +363,18 @@ fn open_and_stream(
             continue;
         }
 
+        let bytesused = meta.bytesused as usize;
+        let data = if bytesused > 0 && bytesused <= buf.len() {
+            buf.get(..bytesused)
+                .map(|s| s.to_vec())
+                .unwrap_or_else(|| buf.to_vec())
+        } else {
+            buf.to_vec()
+        };
+
         let mono_ns = monotonic_nanos();
         let frame = Frame::new(
-            buf.to_vec(),
+            data,
             actual_width,
             actual_height,
             mono_ns,

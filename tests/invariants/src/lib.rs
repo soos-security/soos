@@ -780,6 +780,7 @@ mod tests {
         let _ = fs::remove_dir_all(&tmp_dir);
         let bio_dir = tmp_dir.join("var/lib/soos/biometrics");
         let bin_file = tmp_dir.join("usr/bin/soos-admin");
+        let gui_bin_file = tmp_dir.join("usr/bin/soos-gui");
         let service_file = tmp_dir.join("etc/systemd/system/soos-daemon.service");
         let backup_pam = tmp_dir.join("etc/pam.d/system-auth.soos-backup");
         let active_pam = tmp_dir.join("etc/pam.d/system-auth");
@@ -790,6 +791,7 @@ mod tests {
         fs::create_dir_all(tmp_dir.join("etc/pam.d")).expect("create pam.d dir");
 
         fs::write(&bin_file, b"binary content").expect("write bin");
+        fs::write(&gui_bin_file, b"gui binary content").expect("write gui bin");
         fs::write(&service_file, b"unit content").expect("write service");
         fs::write(
             &backup_pam,
@@ -812,6 +814,7 @@ mod tests {
 
         assert!(status.success(), "uninstall.sh must succeed");
         assert!(!bin_file.exists(), "binary must be removed");
+        assert!(!gui_bin_file.exists(), "gui binary must be removed");
         assert!(!service_file.exists(), "service file must be removed");
         assert!(
             bio_dir.exists(),
