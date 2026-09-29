@@ -3,7 +3,7 @@
 - **Date**: 2026-09-30
 - **Target Branch**: `fix/p0-review-batch`
 - **Base (merge-base)**: `2623805`
-- **Reviewed-Diff-Fingerprint**: `637203568cabb14137834ffaff0c44e5f1f3bc979440ec4a4f9b70383abd7509`
+- **Reviewed-Diff-Fingerprint**: `ab604d5c326a9bfb72e73323f21ec711a5d0bd89054fd5116fa3c40a4ef3172d`
 - **Audited Files**: `.agents/skills/dev-workflow/references/project-facts.md`, `.github/workflows/ci.yml`, `AI/ARCHITECTURE.md`, `AI/BACKLOG.md`, `AI/DECISIONS.md`, `AI/VERIFICATION_MATRIX.md`, `AI/walkthroughs/78_pam_release_panic_unwind.md`, `AI/walkthroughs/79_pad_live_class_index_single_source.md`, `AI/walkthroughs/80_pad_multiframe_consensus.md`, `AI/walkthroughs/81_preview_frame_authorization.md`, `AI/walkthroughs/82_debug_vision_report_safety.md`, `AI/walkthroughs/83_package_master_key_isolation.md`, `AI/walkthroughs/84_fedora_authselect_profile_activation.md`, `Cargo.lock`, `Cargo.toml`, `Docs/CI_CD_AND_SECURITY.md`, `Docs/DEVELOPMENT_WORKFLOW.md`, `Docs/DISTRIBUTION_DEPLOYMENT.md`, `Docs/ENROLLMENT_CLI.md`, `Docs/INFERENCE_ORT_CRATE.md`, `Docs/IPC_PROTOCOL.md`, `Docs/PACKAGING_AND_PROVISIONING.md`, `Docs/PAM_DOCKER_TEST_MATRIX.md`, `Docs/PAM_MODULE.md`, `Docs/POLICY_CRATE.md`, `Docs/SECURITY_AND_QUALITY_GUIDELINES.md`, `crates/daemon/Cargo.toml`, `crates/daemon/src/config.rs`, `crates/daemon/src/dispatcher.rs`, `crates/daemon/src/lib.rs`, `crates/daemon/src/main.rs`, `crates/daemon/src/pipeline.rs`, `crates/daemon/src/preview.rs`, `crates/daemon/tests/dispatcher_tests.rs`, `crates/daemon/tests/pad_wiring_tests.rs`, `crates/daemon/tests/pipeline_integration_tests.rs`, `crates/daemon/tests/preview_authorization_tests.rs`, `crates/enrollment-cli/Cargo.toml`, `crates/enrollment-cli/src/args.rs`, `crates/enrollment-cli/src/error.rs`, `crates/enrollment-cli/src/html_report.rs`, `crates/enrollment-cli/src/lib.rs`, `crates/enrollment-cli/src/main.rs`, `crates/enrollment-cli/src/service.rs`, `crates/enrollment-cli/tests/debug_vision_tests.rs`, `crates/enrollment-cli/tests/pad_wiring_tests.rs`, `crates/gui/Cargo.toml`, `crates/gui/src/ipc_camera.rs`, `crates/gui/src/lib.rs`, `crates/gui/src/main.rs`, `crates/gui/tests/ipc_camera_tests.rs`, `crates/inference-ort/src/lib.rs`, `crates/inference-ort/src/mock.rs`, `crates/inference-ort/src/pad.rs`, `crates/inference-ort/src/registry.rs`, `crates/pam/Cargo.toml`, `crates/pam/src/config.rs`, `crates/pam/src/fault_injection.rs`, `crates/pam/src/lib.rs`, `crates/pam/tests/fault_injection_tests.rs`, `crates/policy/src/decision.rs`, `crates/policy/src/error.rs`, `crates/policy/src/lib.rs`, `crates/policy/src/pad_consensus.rs`, `crates/policy/tests/decision_tests.rs`, `crates/policy/tests/pad_consensus_tests.rs`, `crates/protocol/src/types.rs`, `crates/protocol/tests/preview_tests.rs`, `models/README.md`, `packaging/arch/PKGBUILD`, `packaging/arch/soos.install`, `packaging/debian/postinst`, `packaging/debian/rules`, `packaging/pam/fedora/soos/README`, `packaging/pam/fedora/soos/REQUIREMENTS`, `packaging/pam/fedora/soos/dconf-db`, `packaging/pam/fedora/soos/dconf-locks`, `packaging/pam/fedora/soos/fingerprint-auth`, `packaging/pam/fedora/soos/nsswitch.conf`, `packaging/pam/fedora/soos/password-auth`, `packaging/pam/fedora/soos/postlogin`, `packaging/pam/fedora/soos/smartcard-auth`, `packaging/pam/fedora/soos/system-auth`, `packaging/rpm/soos.spec`, `run_tests.sh`, `scripts/build_arch.sh`, `scripts/build_deb.sh`, `scripts/check_no_key_material.sh`, `scripts/install.sh`, `scripts/provision_master_key.sh`, `scripts/uninstall.sh`, `tests/distro/fedora_rhel_test.sh`, `tests/docker/authselect_profile_test.sh`, `tests/docker/test_packages.sh`, `tests/docker/test_suite.sh`, `tests/fixtures/mod.rs`, `tests/invariants/src/lib.rs`
 
 ## 1. Executive Summary
@@ -135,6 +135,32 @@ Escape hatches: none (the single `tolerance` hit is matrix prose documenting its
 - **[SUGGESTION]** `crates/daemon/src/dispatcher.rs:917-927` — the preview camera wake loop is
   bounded by `connection_timeout` (max 1 s) rather than a request deadline; acceptable for the
   diagnostic stream, but a single shared constant with the auth wake path would avoid drift.
+
+## Delta since 9733d7d (re-review)
+
+The previous fingerprint-bound review (`6372035…d7509`) was APPROVED at `9733d7d`. Exactly one
+code commit was added afterwards, `8880b3d` (`fix(invariants): satisfy clippy map_or_identity on
+rust 1.98`), because the CI stable toolchain moved to Rust 1.98, whose clippy flags
+`clippy::map_or_identity`.
+
+- **Scope check**: `git diff 9733d7d HEAD -- . ':(exclude)AI/candid_review_report.md'` shows a
+  single hunk in `tests/invariants/src/lib.rs` (line 1825, inside `mod tests`, in the TOML section
+  helper), and nothing else changed in the tree:
+  `-        let end = rest.find("\n[").map_or(rest.len(), |i| i);`
+  `+        let end = rest.find("\n[").unwrap_or(rest.len());`
+- **Semantics**: for `Option<usize>`, `map_or(d, |i| i)` returns `i` on `Some(i)` and `d` on
+  `None`, which is exactly what `unwrap_or(d)` does. `rest.len()` is evaluated eagerly in both
+  forms and has no side effects. The section slice `&rest[..end]` is therefore byte-for-byte
+  identical, so every invariant assertion that uses this helper checks the same text as before.
+  No assertion, `#[test]`, `#[ignore]` or tolerance was added, removed or relaxed, so the
+  invariant tests are not weakened. The helper is test-only code, so it has no production, PAM or
+  FFI impact.
+- **Verification (rustc 1.98.1)**:
+  `cargo clippy --locked -p soos-invariants --all-targets --all-features -- -D warnings` → clean
+  (no warnings); `cargo test --locked -p soos-invariants` → `33 passed; 0 failed; 0 ignored`.
+- **New fingerprint**: `ab604d5c326a9bfb72e73323f21ec711a5d0bd89054fd5116fa3c40a4ef3172d`
+  (from `./scripts/candid_subagent.sh --prepare` at `8880b3d`). The findings and verdict of the
+  previous review still apply unchanged.
 
 ## 5. Final Verdict
 
