@@ -8,6 +8,7 @@
     reason = "Mock synthetic frame generation, coordinate interpolation, and mock vector generation"
 )]
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::RwLock;
 
 use crate::detector::{BoundingBox, FaceDetection, FaceDetector};
@@ -313,39 +314,58 @@ impl EmbeddingExtractor for MockEmbeddingExtractor {
 /// Mock presentation attack detector for automated tests and headless environments.
 pub struct MockPadDetector {
     result: RwLock<PadResult>,
+    /// Optional per-call result sequence cycled round-robin (empty = use `result`).
+    sequence: RwLock<Vec<PadResult>>,
+    cursor: AtomicUsize,
+    calls: AtomicUsize,
     fail_next: RwLock<bool>,
 }
 
 impl MockPadDetector {
     /// Creates a mock detector that returns a genuine live face verdict.
     pub fn new_live() -> Self {
-        Self {
-            result: RwLock::new(PadResult::live(0.98)),
-            fail_next: RwLock::new(false),
-        }
+        Self::new_with_result(PadResult::live(0.98))
     }
 
     /// Creates a mock detector that returns a presentation attack (spoof) verdict.
     pub fn new_spoof(attack_type: AttackType, score: f32) -> Self {
-        Self {
-            result: RwLock::new(PadResult::spoof(score, attack_type)),
-            fail_next: RwLock::new(false),
-        }
+        Self::new_with_result(PadResult::spoof(score, attack_type))
     }
 
     /// Creates a mock detector with an explicit initial result.
     pub fn new_with_result(result: PadResult) -> Self {
         Self {
             result: RwLock::new(result),
+            sequence: RwLock::new(Vec::new()),
+            cursor: AtomicUsize::new(0),
+            calls: AtomicUsize::new(0),
             fail_next: RwLock::new(false),
         }
     }
 
-    /// Updates the configured mock result.
+    /// Updates the configured mock result and clears any per-call result sequence.
     pub fn set_result(&self, result: PadResult) {
         if let Ok(mut guard) = self.result.write() {
             *guard = result;
         }
+        if let Ok(mut seq) = self.sequence.write() {
+            seq.clear();
+        }
+        self.cursor.store(0, Ordering::SeqCst);
+    }
+
+    /// Configures a per-call result sequence, cycled round-robin on every evaluation.
+    /// An empty sequence restores the single configured result.
+    pub fn set_result_sequence(&self, results: Vec<PadResult>) {
+        if let Ok(mut seq) = self.sequence.write() {
+            *seq = results;
+        }
+        self.cursor.store(0, Ordering::SeqCst);
+    }
+
+    /// Number of `evaluate_liveness` calls observed so far (including injected failures).
+    pub fn call_count(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
     }
 
     /// Injects a fault on the next evaluation call.
@@ -363,6 +383,7 @@ impl PadDetector for MockPadDetector {
         width: u32,
         height: u32,
     ) -> Result<PadResult, InferenceError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
         if let Ok(mut guard) = self.fail_next.write() {
             if *guard {
                 *guard = false;
@@ -382,6 +403,15 @@ impl PadDetector for MockPadDetector {
                 expected: expected_len,
                 actual: rgb.len(),
             });
+        }
+
+        if let Ok(seq) = self.sequence.read() {
+            if let Some(len) = std::num::NonZeroUsize::new(seq.len()) {
+                let idx = self.cursor.fetch_add(1, Ordering::SeqCst) % len.get();
+                if let Some(next) = seq.get(idx) {
+                    return Ok(next.clone());
+                }
+            }
         }
 
         let guard = self

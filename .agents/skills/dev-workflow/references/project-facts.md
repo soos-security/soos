@@ -46,6 +46,8 @@ ADR entry in `AI/DECISIONS.md`. Re-check every value below with the listed `grep
 | `EVENT_TIMEOUT_MS` | `crates/pam/src/ipc.rs` | 20 ms (password-failed event) |
 | `DECISION_BUDGET_MS` | `crates/daemon/src/pipeline.rs` | 900 ms |
 | `MAX_FRAME_AGE_NS` | `crates/daemon/src/pipeline.rs` | 150 ms |
+| `FRAME_POLL_INTERVAL_MS` | `crates/daemon/src/pipeline.rs` | 10 ms (consensus loop poll) |
+| `DEFAULT_PAD_CONSENSUS_REQUIRED` / `_WINDOW` / `MAX_PAD_CONSENSUS_WINDOW` | `crates/policy/src/pad_consensus.rs` | 3 / 5 / 32 captures (Allow needs 3 consecutive; any spoof vetoes the request) |
 | GDM PAM line | `crates/admin-cli/src/gdm.rs` | `auth sufficient pam_soos.so timeout_ms=2500` |
 | admin-cli `DEFAULT_TIMEOUT_MS` | `crates/admin-cli/src/args.rs` | 250 ms |
 | Match / PAD thresholds | `crates/vision/src/pipeline.rs`, policy | 0.70 / 0.85 |

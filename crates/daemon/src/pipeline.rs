@@ -18,6 +18,12 @@ pub const MAX_FRAME_AGE_NS: u64 = 150_000_000;
 /// Total decision latency budget per PAM authentication request (900ms, within 1000ms PAM deadline).
 pub const DECISION_BUDGET_MS: u64 = 900;
 
+/// Polling interval of the multi-frame consensus loop between camera snapshot checks (10ms).
+///
+/// Short enough to pick up every new capture at 30 fps (33ms interval) so the `k` consecutive
+/// passing captures required by `soos_policy::PadAggregator` are reached with minimal latency.
+pub const FRAME_POLL_INTERVAL_MS: u64 = 10;
+
 /// Composite runtime container holding all operational pipeline components.
 pub struct PipelineComponents {
     /// Warm camera capture manager.

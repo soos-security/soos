@@ -18,10 +18,15 @@
 
 pub mod decision;
 pub mod error;
+pub mod pad_consensus;
 pub mod rate_limit;
 pub mod threshold;
 
 pub use decision::{evaluate_decision, AuthContext, AuthorizationEngine};
 pub use error::PolicyError;
+pub use pad_consensus::{
+    ConsensusDecision, FrameClass, FrameEvaluation, PadAggregator, PadConsensusConfig,
+    DEFAULT_PAD_CONSENSUS_REQUIRED, DEFAULT_PAD_CONSENSUS_WINDOW, MAX_PAD_CONSENSUS_WINDOW,
+};
 pub use rate_limit::{RateLimitConfig, RateLimiter};
 pub use threshold::{ThresholdConfig, ThresholdConfigBuilder};
