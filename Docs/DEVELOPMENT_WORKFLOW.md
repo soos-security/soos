@@ -48,6 +48,11 @@ Before designing or implementing any code, contributors and AI agents **MUST** i
 
 ## 5. Multi-Agent TDD Development Cycle (Phases 0 through 5)
 
+### Agent Role Skills
+
+The role definitions for each phase (`architect-agent`, `tester-agent`, `auditor-agent`, `developer-agent`, `candid-reviewer`, `plan-evaluator`, `traceability-agent`, and the `dev-workflow` orchestrator) live in `.agents/skills/<name>/SKILL.md`. The symbolic link `.claude/skills -> ../.agents/skills` exposes the same files to Claude Code as project skills, so both agent toolchains share a single source of truth. Edit skills only under `.agents/skills/`.
+
+
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │ Phase 0: Branch Creation                                    │
