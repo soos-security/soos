@@ -111,6 +111,10 @@ cargo deny --locked check                      # cargo-deny >= 0.20
 ./run_tests.sh                                 # Dockerized PAM matrix T1–T15 (ubuntu)
 ```
 
+Toolchain: `rust-toolchain.toml` pins Rust `1.98.1` (components `clippy`, `rustfmt`; user decision
+2026-09-30). The sandbox Dockerfiles install the same release (`--default-toolchain 1.98.1`); bump
+both together, never back to a floating `stable` channel.
+
 Omitting `--all-features` locally was the root cause of several CI-only failures [65–75].
 `cargo test --all-targets` does not run doctests; do not rely on doctests as acceptance evidence.
 

@@ -2,7 +2,7 @@
 # Dockerfile — Isolated PAM Sandbox for soos
 # =============================================================================
 # This container provides a complete Ubuntu environment with:
-#   - Rust toolchain (rustup, stable)
+#   - Rust toolchain (rustup, 1.98.1 pinned by rust-toolchain.toml)
 #   - Compilation dependencies for Linux-PAM modules
 #   - python3 for the mock daemon; the PAM host is tests/docker/pam_test_runner.c,
 #     compiled in-container by tests/docker/test_suite.sh
@@ -53,11 +53,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Rust Installation via rustup
 # ---------------------------------------------------------------------------
 # -y                    : non-interactive mode
-# --default-toolchain   : install stable directly
+# --default-toolchain   : install the pinned release of rust-toolchain.toml (1.98.1)
 # --profile minimal     : install rustc, cargo, rust-std
 #                         clippy and rustfmt are added explicitly afterwards
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-    | sh -s -- -y --default-toolchain stable --profile minimal \
+    | sh -s -- -y --default-toolchain 1.98.1 --profile minimal \
     && rustup component add clippy rustfmt \
     && echo "Rust $(rustc --version) installed"
 

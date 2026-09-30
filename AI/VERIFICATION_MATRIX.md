@@ -931,3 +931,13 @@ Complements PA3, PA12 and PFT1: those rows are proven under `[profile.test]` (al
 | QFU6 | The PAM crate depends on no camera crate (`soos-camera-v4l`, `v4l`, `nokhwa`, `opencv`) and its sources never name `/dev/video` | Invariant test (`quality_followups::test_pam_crate_never_opens_camera_devices`) | ✅ Verified |
 | QFU7 | Every `✅ Verified` / `☑ Validated` row and checked global invariant cites at least one resolvable piece of evidence in its evidence columns (P1–P4, PA6–PA8, GEPU4, TFL1, TFL2 and three global invariants were fixed) | Invariant tests (`matrix_citations::test_matrix_claimed_rows_cite_at_least_one_resolvable_evidence`, `matrix_citations::test_matrix_rows_without_resolvable_evidence_are_reported`) | ✅ Verified |
 | QFU8 | Test detection counts only attributes whose path is `test` or ends in `::test` (never `#[cfg(all(test, ...))]`, `#[cfg_attr(test, ...)]`, `#[path = ...]`); a function inside `proptest!` needs its own `#[test]`; `prop_*` citations are resolved like `test_*` citations | Parser self-tests (`matrix_citations::test_matrix_citation_parser_rejects_non_test_attributes_and_proptest_helpers`, `matrix_citations::test_matrix_citation_parser_classifies_proptest_names`) | ✅ Verified |
+
+---
+
+## Component: `toolchain-pin` (User decision 2026-09-30 — pinned Rust toolchain)
+
+| # | Criterion | Test Method | Status |
+|---|---|---|---|
+| TCP1 | `rust-toolchain.toml` pins `channel = "1.98.1"` in `[toolchain]` and keeps the `clippy` and `rustfmt` components | Invariant test (`toolchain_pin_contract::test_rust_toolchain_pins_exact_release_with_components`) | ✅ Verified |
+| TCP2 | `Dockerfile` and `tests/docker/Dockerfile.{ubuntu,fedora,arch}` install Rust with `--default-toolchain 1.98.1`, never a floating channel | Invariant test (`toolchain_pin_contract::test_sandbox_dockerfiles_install_the_pinned_toolchain`) | ✅ Verified |
+| TCP3 | `Docs/CI_CD_AND_SECURITY.md`, the shared project facts and an ADR in `AI/DECISIONS.md` state the pinned release | Invariant test (`toolchain_pin_contract::test_toolchain_pin_is_documented`) | ✅ Verified |

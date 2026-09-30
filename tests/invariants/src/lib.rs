@@ -69,6 +69,10 @@ mod candid_review_contract;
 #[cfg(all(test, unix))]
 mod quality_followups;
 
+/// Pinned Rust toolchain in rust-toolchain.toml and the sandbox Dockerfiles (rows TCP1–TCP3).
+#[cfg(test)]
+mod toolchain_pin_contract;
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,

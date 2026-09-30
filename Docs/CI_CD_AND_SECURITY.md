@@ -88,6 +88,16 @@ retitling a PR re-validates it without re-running the whole pipeline.
 - **Empty Docker build context** (`.dockerignore`): the sandbox Dockerfiles never `COPY` sources,
   so `target/` is never uploaded to the Docker daemon.
 
+### Pinned Rust Toolchain
+`rust-toolchain.toml` pins `channel = "1.98.1"` (components `clippy`, `rustfmt`; user decision
+2026-09-30, see `AI/DECISIONS.md`). Every CI job installs it with
+`rustup toolchain install --profile minimal`, which reads that file, and the sandbox images
+install the same release with `--default-toolchain 1.98.1`. A floating `stable` channel let a new
+compiler release introduce lints or behaviour changes between two runs of the same commit; the
+pin makes local, CI and Docker results reproducible. Moving to a newer release is a deliberate
+change: update `rust-toolchain.toml` and the four Dockerfiles together (enforced by
+`tests/invariants/src/toolchain_pin_contract.rs`), then run the full quality gate.
+
 ### Security Design
 - **Least privilege**: the workflow token is `contents: read`; `actions/checkout` does not persist
   credentials.
@@ -207,9 +217,11 @@ To guarantee that experimental PAM modules never compromise the host operating s
 ```
 
 Before building, `tests/docker/test_suite.sh` runs `rustup toolchain install --profile minimal`
-in `/workspace`, which reads `rust-toolchain.toml` and updates the image's `stable` to the
-release the other CI jobs install (the layer-cached image otherwise keeps the compiler of the
-day it was built). CI passes `SOOS_REQUIRE_TOOLCHAIN_SYNC=1`, so a failed sync fails the job;
+in `/workspace`, which reads `rust-toolchain.toml` and installs the pinned release (`1.98.1`)
+that the other CI jobs install. The sandbox images already install that release as their
+default toolchain (`--default-toolchain 1.98.1` in `Dockerfile` and
+`tests/docker/Dockerfile.{ubuntu,fedora,arch}`), so the sync is normally a no-op; it still
+protects a layer-cached image built before a toolchain bump. CI passes `SOOS_REQUIRE_TOOLCHAIN_SYNC=1`, so a failed sync fails the job;
 a local offline run warns and uses the image toolchain. `rustc --version` is logged. The suite
 then always runs `cargo build --locked --release -p soos-pam` (a no-op when up to date), so a
 stale `target/release/libpam_soos.so` from the bind-mounted host checkout is never deployed
