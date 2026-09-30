@@ -16,6 +16,18 @@ pub struct ManifestHeader {
     pub version: String,
 }
 
+/// Physical memory layout of an image input tensor.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TensorLayout {
+    /// Channels first: `[N, C, H, W]`.
+    #[default]
+    #[serde(rename = "NCHW")]
+    Nchw,
+    /// Channels last: `[N, H, W, C]`.
+    #[serde(rename = "NHWC")]
+    Nhwc,
+}
+
 /// Metadata specification for a single machine learning model.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelMetadata {
@@ -25,9 +37,94 @@ pub struct ModelMetadata {
     pub license: String,
     pub source_url: String,
     pub description: String,
+    /// Logical input shape, always written `[N, C, H, W]` for image models.
     pub input_shape: Vec<usize>,
+    /// Physical layout of the input tensor (`"NCHW"` when omitted).
+    #[serde(default)]
+    pub input_layout: TensorLayout,
     #[serde(default)]
     pub output_shapes: Vec<Vec<usize>>,
+}
+
+impl ModelMetadata {
+    /// Physical input tensor dims implied by the logical `input_shape` and `input_layout`.
+    ///
+    /// `input_shape` is always written as the logical `[N, C, H, W]` shape. For
+    /// [`TensorLayout::Nhwc`] the physical dims are `[N, H, W, C]`, which requires rank 4.
+    pub fn expected_input_dims(&self) -> Result<Vec<usize>, InferenceError> {
+        match self.input_layout {
+            TensorLayout::Nchw => Ok(self.input_shape.clone()),
+            TensorLayout::Nhwc => match self.input_shape.as_slice() {
+                &[n, c, h, w] => Ok(vec![n, h, w, c]),
+                other => Err(self.shape_mismatch(format!(
+                    "NHWC layout requires a rank-4 [N, C, H, W] input_shape, got {other:?}"
+                ))),
+            },
+        }
+    }
+
+    /// Validates the tensor shapes reported by an ONNX Runtime session against this entry.
+    ///
+    /// - The session must expose exactly one input whose physical dims equal
+    ///   [`Self::expected_input_dims`].
+    /// - When `output_shapes` is declared, the session must expose exactly that many outputs,
+    ///   each matching in order.
+    /// - Negative session dims are symbolic (dynamic) and match any declared value; every other
+    ///   dim, including zero, must be equal. Ranks must always be equal.
+    pub fn validate_session_shapes(
+        &self,
+        inputs: &[Vec<i64>],
+        outputs: &[Vec<i64>],
+    ) -> Result<(), InferenceError> {
+        let expected_input = self.expected_input_dims()?;
+        let [actual_input] = inputs else {
+            return Err(self.shape_mismatch(format!(
+                "expected exactly 1 input tensor, session has {}",
+                inputs.len()
+            )));
+        };
+        if !dims_match(&expected_input, actual_input) {
+            return Err(self.shape_mismatch(format!(
+                "input: manifest declares {expected_input:?} ({:?}), session has {actual_input:?}",
+                self.input_layout
+            )));
+        }
+
+        if self.output_shapes.is_empty() {
+            return Ok(());
+        }
+        if outputs.len() != self.output_shapes.len() {
+            return Err(self.shape_mismatch(format!(
+                "expected {} output tensors, session has {}",
+                self.output_shapes.len(),
+                outputs.len()
+            )));
+        }
+        for (index, (declared, actual)) in self.output_shapes.iter().zip(outputs).enumerate() {
+            if !dims_match(declared, actual) {
+                return Err(self.shape_mismatch(format!(
+                    "output {index}: manifest declares {declared:?}, session has {actual:?}"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    fn shape_mismatch(&self, detail: String) -> InferenceError {
+        InferenceError::ModelShapeMismatch {
+            id: self.id.clone(),
+            detail,
+        }
+    }
+}
+
+/// Compares declared dims with session dims; negative session dims are dynamic wildcards.
+fn dims_match(declared: &[usize], actual: &[i64]) -> bool {
+    declared.len() == actual.len()
+        && declared
+            .iter()
+            .zip(actual)
+            .all(|(&d, &a)| a < 0 || usize::try_from(a).is_ok_and(|a| a == d))
 }
 
 /// Parsed model manifest container.

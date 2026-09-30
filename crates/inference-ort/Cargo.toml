@@ -1,6 +1,6 @@
 [package]
 name = "soos-inference-ort"
-description = "Isolated ONNX Runtime CPU inference engine for face detection, 5-point landmarks, and ArcFace w600k 512D embeddings with manifest attestation"
+description = "Isolated ONNX Runtime CPU inference engine for face detection, 5-point landmarks, and ArcFace 512D embeddings with manifest checksum and shape attestation"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
