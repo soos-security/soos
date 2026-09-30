@@ -147,6 +147,10 @@ mod unit_start_guard_contract;
 #[cfg(all(test, unix))]
 mod model_download_size_contract;
 
+/// Camera diagnostics are metadata-only and built on the shared resolver (GitHub #256).
+#[cfg(test)]
+mod camera_diagnostics_contract;
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,

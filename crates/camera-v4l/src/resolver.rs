@@ -7,17 +7,23 @@
 //! 1. An explicit device path (not an auto sentinel, see [`is_auto_camera_device`]) is returned
 //!    verbatim. Callers decide the precedence of their explicit sources (CLI flag before
 //!    `camera_device` in `/etc/soos/daemon.toml`).
-//! 2. Otherwise the enumerated V4L2 *capture* nodes are ranked with the [`SensorPreference`]
-//!    (default `PreferIr`) by [`select_camera_device`]. The stable `/dev/v4l/by-id/` alias of the
+//! 2. Otherwise the enumerated V4L2 *capture* nodes are classified once each (by-id name, card
+//!    name, formats, frame sizes; a by-id name whose stem another capture node shares is not
+//!    used, see [`by_id_stem`]) and ranked with the [`SensorPreference`] (default `PreferIr`)
+//!    in the order of [`select_camera_device`]. The stable `/dev/v4l/by-id/` alias of the
 //!    selected node is returned when one exists (Criterion C4), else the `/dev/videoN` node itself.
 //!    Aliases are only ever matched against capture nodes, so a metadata node
 //!    (`...-video-index1`) can never be selected.
 //! 3. With no capture node, [`AUTO_CAMERA_DEVICE`] is returned (the capture supervisor then
 //!    reports the device as missing and backs off).
+//!
+//! [`explain_camera_resolution`] returns the same decision with the classification rule of every
+//! candidate and the [`SelectionReason`]; `soos-admin camera list` renders it (GitHub #256).
 
 use crate::sensor::{
-    enumerate_capture_devices, frame_sizes_at, select_camera_device_with, CameraDeviceInfo,
-    SensorHints, SensorPreference, SensorType, MAX_FRAME_SIZE_HINTS,
+    enumerate_capture_devices, explain_sensor_classification, frame_sizes_at,
+    select_camera_device_with, CameraDeviceInfo, ClassificationReason, SensorHints,
+    SensorPreference, SensorType, MAX_FRAME_SIZE_HINTS,
 };
 use std::path::{Path, PathBuf};
 
@@ -85,24 +91,241 @@ fn alias_for(device: &CameraDeviceInfo, aliases: &[(PathBuf, PathBuf)]) -> Optio
         .map(|(alias, _)| alias.clone())
 }
 
-/// Builds the classification hints of `device`: its by-id link name and its frame sizes.
-fn sensor_hints_for(
-    device: &CameraDeviceInfo,
-    aliases: &[(PathBuf, PathBuf)],
-    enumerator: &dyn CameraEnumerator,
-) -> SensorHints {
-    let by_id_name = alias_for(device, aliases)
+/// Returns the by-id link name of `device`: the file name of its alias, or of its own path when
+/// that path is itself a by-id link.
+fn by_id_name_for(device: &CameraDeviceInfo, alias: Option<&Path>) -> Option<String> {
+    alias
         .and_then(|alias| {
             alias
                 .file_name()
                 .map(|name| name.to_string_lossy().into_owned())
         })
-        .or_else(|| by_id_name_of_path(&device.path));
-    let mut frame_sizes = enumerator.frame_sizes(device);
-    frame_sizes.truncate(MAX_FRAME_SIZE_HINTS);
-    SensorHints {
-        by_id_name,
-        frame_sizes,
+        .or_else(|| by_id_name_of_path(&device.path))
+}
+
+/// Suffix udev appends to every `/dev/v4l/by-id/` link (`-video-index<N>`).
+const BY_ID_INDEX_SUFFIX: &str = "-video-index";
+
+/// Returns the by-id link name without its trailing `-video-index<N>` suffix (`N` decimal).
+///
+/// udev builds the stem from the USB vendor, product and serial strings, so every interface of
+/// one composite module shares it; names without that exact suffix are returned unchanged.
+pub fn by_id_stem(name: &str) -> &str {
+    let Some(pos) = name.rfind(BY_ID_INDEX_SUFFIX) else {
+        return name;
+    };
+    let digits = pos
+        .checked_add(BY_ID_INDEX_SUFFIX.len())
+        .and_then(|start| name.get(start..))
+        .unwrap_or_default();
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return name;
+    }
+    name.get(..pos).unwrap_or(name)
+}
+
+/// Classification of one enumerated capture node, as used by the resolver.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CandidateClassification {
+    /// The enumerated capture node.
+    pub device: CameraDeviceInfo,
+    /// Its persistent `/dev/v4l/by-id/` alias, when udev created one.
+    pub by_id_alias: Option<PathBuf>,
+    /// The hints the classifier received (by-id name, bounded frame sizes).
+    pub hints: SensorHints,
+    /// The resulting sensor type.
+    pub sensor_type: SensorType,
+    /// The scorer rule that decided `sensor_type`.
+    pub reason: ClassificationReason,
+    /// `true` when the by-id name was withheld from the classifier because another capture node
+    /// shares its stem (composite RGB+IR module: the product string names both interfaces).
+    pub by_id_hint_ignored: bool,
+}
+
+/// Why [`resolve_camera_device`] chose its answer (GitHub #256, CAM-17).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SelectionReason {
+    /// An explicit, non-sentinel device path was supplied.
+    ExplicitDevice,
+    /// A capture node of the preferred sensor type exists (the first one is chosen).
+    PreferredSensorMatched,
+    /// No node of the preferred type; the first node of unknown type is chosen.
+    FallbackUnknownSensor,
+    /// No node of the preferred or unknown type; the first capture node is chosen.
+    FallbackFirstCandidate,
+    /// `SensorPreference::Any`: the first capture node is chosen.
+    AnyPreferenceFirstCandidate,
+    /// No capture node: the auto sentinel is returned.
+    NoCaptureNode,
+}
+
+impl SelectionReason {
+    /// Stable snake_case label used by `soos-admin camera` and in logs.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ExplicitDevice => "explicit_device",
+            Self::PreferredSensorMatched => "preferred_sensor_matched",
+            Self::FallbackUnknownSensor => "fallback_unknown_sensor",
+            Self::FallbackFirstCandidate => "fallback_first_candidate",
+            Self::AnyPreferenceFirstCandidate => "any_preference_first_candidate",
+            Self::NoCaptureNode => "no_capture_node",
+        }
+    }
+}
+
+/// A [`CameraResolution`] together with the classification of every candidate and the reason.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CameraResolutionReport {
+    /// The decision, identical to [`resolve_camera_device`].
+    pub resolution: CameraResolution,
+    /// Every enumerated capture node in enumeration order (empty for an explicit device: the
+    /// inventory is not consulted then).
+    pub candidates: Vec<CandidateClassification>,
+    /// Index of the selected node in `candidates` (`None` unless auto-detected).
+    pub selected: Option<usize>,
+    /// Why this answer was chosen.
+    pub reason: SelectionReason,
+}
+
+/// Classifies every capture node once with its by-id name and frame sizes (GitHub #195).
+///
+/// A by-id name whose stem ([`by_id_stem`]) is shared by another capture node is withheld from
+/// the classifier: on a composite module the USB product string names every interface, so an
+/// `IR` token in it cannot tell the RGB node from the IR node.
+fn classify_candidates(
+    devices: Vec<CameraDeviceInfo>,
+    aliases: &[(PathBuf, PathBuf)],
+    enumerator: &dyn CameraEnumerator,
+) -> Vec<CandidateClassification> {
+    let named: Vec<(CameraDeviceInfo, Option<PathBuf>, Option<String>)> = devices
+        .into_iter()
+        .map(|device| {
+            let alias = alias_for(&device, aliases);
+            let name = by_id_name_for(&device, alias.as_deref());
+            (device, alias, name)
+        })
+        .collect();
+    let stem_count = |stem: &str| {
+        named
+            .iter()
+            .filter_map(|(_, _, name)| name.as_deref())
+            .filter(|other| by_id_stem(other) == stem)
+            .count()
+    };
+    let shared: Vec<bool> = named
+        .iter()
+        .map(|(_, _, name)| {
+            name.as_deref()
+                .is_some_and(|name| stem_count(by_id_stem(name)) > 1)
+        })
+        .collect();
+
+    named
+        .into_iter()
+        .zip(shared)
+        .map(|((device, by_id_alias, name), by_id_hint_ignored)| {
+            let mut frame_sizes = enumerator.frame_sizes(&device);
+            frame_sizes.truncate(MAX_FRAME_SIZE_HINTS);
+            let hints = SensorHints {
+                by_id_name: if by_id_hint_ignored { None } else { name },
+                frame_sizes,
+            };
+            let (sensor_type, reason) =
+                explain_sensor_classification(&device.card_name, &device.supported_formats, &hints);
+            CandidateClassification {
+                device,
+                by_id_alias,
+                hints,
+                sensor_type,
+                reason,
+                by_id_hint_ignored,
+            }
+        })
+        .collect()
+}
+
+/// Selects among classified candidates with the single shared fallback order
+/// ([`select_camera_device_with`]) and names the step that produced the choice.
+fn select_candidate(
+    candidates: &[CandidateClassification],
+    preference: SensorPreference,
+) -> (Option<usize>, SelectionReason) {
+    let devices: Vec<CameraDeviceInfo> = candidates.iter().map(|c| c.device.clone()).collect();
+    let classify = |device: &CameraDeviceInfo| {
+        devices
+            .iter()
+            .position(|d| std::ptr::eq(d, device))
+            .and_then(|i| candidates.get(i))
+            .map_or(SensorType::Unknown, |c| c.sensor_type)
+    };
+    let Some(chosen) = select_camera_device_with(&devices, preference, classify)
+        .and_then(|chosen| devices.iter().position(|d| std::ptr::eq(d, chosen)))
+    else {
+        return (None, SelectionReason::NoCaptureNode);
+    };
+    let sensor = candidates
+        .get(chosen)
+        .map_or(SensorType::Unknown, |c| c.sensor_type);
+    let reason = match preference {
+        SensorPreference::Any => SelectionReason::AnyPreferenceFirstCandidate,
+        SensorPreference::PreferIr if sensor == SensorType::Infrared => {
+            SelectionReason::PreferredSensorMatched
+        }
+        SensorPreference::PreferRgb if sensor == SensorType::Rgb => {
+            SelectionReason::PreferredSensorMatched
+        }
+        _ if sensor == SensorType::Unknown => SelectionReason::FallbackUnknownSensor,
+        _ => SelectionReason::FallbackFirstCandidate,
+    };
+    (Some(chosen), reason)
+}
+
+/// Resolves the camera device like [`resolve_camera_device`] and explains the decision: the
+/// classification (with its rule) of every capture node and the [`SelectionReason`].
+///
+/// [`resolve_camera_device`] is implemented on top of this function, so both always agree.
+/// It does not log; `soos-admin camera list` renders the report.
+pub fn explain_camera_resolution(
+    explicit: Option<&Path>,
+    preference: SensorPreference,
+    enumerator: &dyn CameraEnumerator,
+) -> CameraResolutionReport {
+    if let Some(path) = explicit.filter(|p| !is_auto_camera_device(p)) {
+        return CameraResolutionReport {
+            resolution: CameraResolution {
+                path: path.to_path_buf(),
+                source: CameraResolutionSource::Explicit,
+                sensor_type: None,
+            },
+            candidates: Vec::new(),
+            selected: None,
+            reason: SelectionReason::ExplicitDevice,
+        };
+    }
+
+    let aliases = enumerator.by_id_aliases();
+    let candidates = classify_candidates(enumerator.capture_devices(), &aliases, enumerator);
+    let (selected, reason) = select_candidate(&candidates, preference);
+    let resolution = match selected.and_then(|i| candidates.get(i)) {
+        Some(chosen) => CameraResolution {
+            path: chosen
+                .by_id_alias
+                .clone()
+                .unwrap_or_else(|| chosen.device.path.clone()),
+            source: CameraResolutionSource::AutoDetected,
+            sensor_type: Some(chosen.sensor_type),
+        },
+        None => CameraResolution {
+            path: PathBuf::from(AUTO_CAMERA_DEVICE),
+            source: CameraResolutionSource::Fallback,
+            sensor_type: None,
+        },
+    };
+    CameraResolutionReport {
+        resolution,
+        candidates,
+        selected,
+        reason,
     }
 }
 
@@ -195,50 +418,26 @@ pub fn resolve_camera_device(
     preference: SensorPreference,
     enumerator: &dyn CameraEnumerator,
 ) -> CameraResolution {
-    if let Some(path) = explicit.filter(|p| !is_auto_camera_device(p)) {
-        return CameraResolution {
-            path: path.to_path_buf(),
-            source: CameraResolutionSource::Explicit,
-            sensor_type: None,
-        };
+    let report = explain_camera_resolution(explicit, preference, enumerator);
+    if let Some(chosen) = report.selected.and_then(|i| report.candidates.get(i)) {
+        tracing::info!(
+            selected = %report.resolution.path.display(),
+            node = %chosen.device.path.display(),
+            sensor_type = ?chosen.sensor_type,
+            classification = chosen.reason.as_str(),
+            selection = report.reason.as_str(),
+            preference = ?preference,
+            "Auto-selected camera device matching sensor preference"
+        );
+        if chosen.reason == ClassificationReason::IrFrameSizeSignature {
+            // The frame-size signature is the weakest IR signal (a low-resolution RGB webcam
+            // matches it too); say so when it alone decided (candid review finding 6, #195).
+            tracing::info!(
+                node = %chosen.device.path.display(),
+                "Camera classified Infrared by the frame-size signature only; set camera_device \
+                 or sensor_preference in /etc/soos/daemon.toml if this is the wrong sensor"
+            );
+        }
     }
-
-    let devices = enumerator.capture_devices();
-    let aliases = enumerator.by_id_aliases();
-    // Classify each node once with its by-id name and frame sizes (GitHub #195).
-    let classified: Vec<SensorType> = devices
-        .iter()
-        .map(|d| d.sensor_type_with_hints(&sensor_hints_for(d, &aliases, enumerator)))
-        .collect();
-    let classify = |device: &CameraDeviceInfo| {
-        devices
-            .iter()
-            .position(|d| std::ptr::eq(d, device))
-            .and_then(|i| classified.get(i).copied())
-            .unwrap_or_else(|| device.sensor_type())
-    };
-    let Some(selected) = select_camera_device_with(&devices, preference, classify) else {
-        return CameraResolution {
-            path: PathBuf::from(AUTO_CAMERA_DEVICE),
-            source: CameraResolutionSource::Fallback,
-            sensor_type: None,
-        };
-    };
-
-    let path = alias_for(selected, &aliases).unwrap_or_else(|| selected.path.clone());
-
-    let sensor_type = classify(selected);
-    tracing::info!(
-        selected = %path.display(),
-        node = %selected.path.display(),
-        sensor_type = ?sensor_type,
-        preference = ?preference,
-        "Auto-selected camera device matching sensor preference"
-    );
-
-    CameraResolution {
-        path,
-        source: CameraResolutionSource::AutoDetected,
-        sensor_type: Some(sensor_type),
-    }
+    report.resolution
 }

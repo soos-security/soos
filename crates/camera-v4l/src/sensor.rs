@@ -137,23 +137,69 @@ pub fn classify_sensor_with_hints(
     supported_formats: &[PixelFormat],
     hints: &SensorHints,
 ) -> SensorType {
+    explain_sensor_classification(card_name, supported_formats, hints).0
+}
+
+/// Rule of the ordered scorer that decided a classification (GitHub #256, CAM-17).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ClassificationReason {
+    /// Rule 1: a whole `IR` token or `infrared` in the by-id link name.
+    ByIdIrToken,
+    /// Rule 2: an IR marker in the (possibly truncated) card name.
+    CardNameIrMarker,
+    /// Rule 3: a non-empty format list without any colour format.
+    GreyscaleOnlyFormats,
+    /// Rule 4: the IR frame-size signature ([`is_ir_frame_size_signature`]).
+    IrFrameSizeSignature,
+    /// Rule 5: at least one colour format.
+    ColourFormats,
+    /// No rule applied (no format, no hint): [`SensorType::Unknown`].
+    NoSignal,
+}
+
+impl ClassificationReason {
+    /// Stable snake_case label used by `soos-admin camera` and in logs.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ByIdIrToken => "by_id_ir_token",
+            Self::CardNameIrMarker => "card_name_ir_marker",
+            Self::GreyscaleOnlyFormats => "greyscale_only_formats",
+            Self::IrFrameSizeSignature => "ir_frame_size_signature",
+            Self::ColourFormats => "colour_formats",
+            Self::NoSignal => "no_signal",
+        }
+    }
+}
+
+/// Same ordered scorer as [`classify_sensor_with_hints`], also returning the rule that decided.
+pub fn explain_sensor_classification(
+    card_name: &str,
+    supported_formats: &[PixelFormat],
+    hints: &SensorHints,
+) -> (SensorType, ClassificationReason) {
     if hints.by_id_name.as_deref().is_some_and(has_ir_token) {
-        return SensorType::Infrared;
+        return (SensorType::Infrared, ClassificationReason::ByIdIrToken);
     }
     if card_name_has_ir_marker(card_name) {
-        return SensorType::Infrared;
+        return (SensorType::Infrared, ClassificationReason::CardNameIrMarker);
     }
     let has_colour = has_colour_format(supported_formats);
     if !supported_formats.is_empty() && !has_colour {
-        return SensorType::Infrared;
+        return (
+            SensorType::Infrared,
+            ClassificationReason::GreyscaleOnlyFormats,
+        );
     }
     if is_ir_frame_size_signature(&hints.frame_sizes) {
-        return SensorType::Infrared;
+        return (
+            SensorType::Infrared,
+            ClassificationReason::IrFrameSizeSignature,
+        );
     }
     if has_colour {
-        return SensorType::Rgb;
+        return (SensorType::Rgb, ClassificationReason::ColourFormats);
     }
-    SensorType::Unknown
+    (SensorType::Unknown, ClassificationReason::NoSignal)
 }
 
 /// Selects the best camera device from candidates according to sensor preference.
@@ -321,18 +367,10 @@ fn video_node_index(name: &str) -> Option<u32> {
     digits.parse().ok()
 }
 
-/// Enumerates the video capture nodes listed in `sysfs_dir`, probing `dev_dir/<node>`.
-///
-/// Only `video<N>` entries are considered, in numeric order, at most [`MAX_SYSFS_ENTRIES`]
-/// entries are read and at most [`MAX_VIDEO_NODES`] nodes are probed. A node is listed only
-/// when it advertises `V4L2_CAP_VIDEO_CAPTURE` **and** at least one decodable pixel format, so
-/// uvcvideo metadata nodes and codec nodes are never candidates. A missing or unreadable
-/// `sysfs_dir` yields an empty list.
-pub fn enumerate_capture_devices_with(
-    sysfs_dir: &Path,
-    dev_dir: &Path,
-    probe: &dyn V4lNodeProbe,
-) -> Vec<CameraDeviceInfo> {
+/// Returns the `video<N>` entry names of `sysfs_dir` in numeric order, reading at most
+/// [`MAX_SYSFS_ENTRIES`] entries and returning at most [`MAX_VIDEO_NODES`] names. A missing or
+/// unreadable directory yields an empty list. Shared by the enumeration and the diagnostics.
+pub(crate) fn scan_video_node_names(sysfs_dir: &Path) -> Vec<String> {
     let Ok(entries) = std::fs::read_dir(sysfs_dir) else {
         return Vec::new();
     };
@@ -345,11 +383,28 @@ pub fn enumerate_capture_devices_with(
         })
         .collect();
     nodes.sort();
-
     nodes
         .into_iter()
         .take(MAX_VIDEO_NODES)
-        .filter_map(|(_, name)| {
+        .map(|(_, name)| name)
+        .collect()
+}
+
+/// Enumerates the video capture nodes listed in `sysfs_dir`, probing `dev_dir/<node>`.
+///
+/// Only `video<N>` entries are considered, in numeric order, at most [`MAX_SYSFS_ENTRIES`]
+/// entries are read and at most [`MAX_VIDEO_NODES`] nodes are probed. A node is listed only
+/// when it advertises `V4L2_CAP_VIDEO_CAPTURE` **and** at least one decodable pixel format, so
+/// uvcvideo metadata nodes and codec nodes are never candidates. A missing or unreadable
+/// `sysfs_dir` yields an empty list.
+pub fn enumerate_capture_devices_with(
+    sysfs_dir: &Path,
+    dev_dir: &Path,
+    probe: &dyn V4lNodeProbe,
+) -> Vec<CameraDeviceInfo> {
+    scan_video_node_names(sysfs_dir)
+        .into_iter()
+        .filter_map(|name| {
             let path = dev_dir.join(name);
             let caps = probe.probe(&path)?;
             if !caps.video_capture || caps.supported_formats.is_empty() {

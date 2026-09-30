@@ -3221,6 +3221,7 @@ dependencies = [
  "nix",
  "serde",
  "serde_json",
+ "soos-camera-v4l",
  "soos-protocol",
  "tempfile",
  "thiserror 2.0.20",
