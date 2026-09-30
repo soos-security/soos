@@ -11,9 +11,11 @@
 #   2. clippy          — cargo clippy -D warnings (all targets, all features)
 #   3. test            — cargo test (unit, integration, invariant suites)
 #   4. security        — cargo-deny (advisories, licenses, sources, bans)
-#   5. pam-integration — Dockerized PAM matrix T1–T10 (after lint)
+#   5. pam-integration — Dockerized PAM matrix T1–T11 (after lint)
 #   6. authselect-profile — Fedora authselect profile activation and rollback
 #                        in fedora:40 (after lint)
+#   6b. pam-rollback   — Debian stack order + byte-for-byte PAM rollback
+#                        in ubuntu:24.04 and fedora:40 (after lint)
 #   7. ci-success      — single aggregate status for merge gating
 # The PR title convention is checked by pr-title.yml (it must also re-run when
 # a PR is retitled, which would needlessly re-run this whole pipeline).
@@ -231,12 +233,30 @@ jobs:
         run: ./tests/docker/authselect_profile_test.sh
 
   # ---------------------------------------------------------------------------
+  # Job 6b: PAM activation order and byte-for-byte uninstall rollback on
+  # ubuntu:24.04 and fedora:40 (GitHub #161, #166)
+  # ---------------------------------------------------------------------------
+  pam-rollback:
+    name: "PAM activation & rollback (Docker)"
+    if: github.event_name != 'schedule'
+    needs: lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Validate stack order and rollback on ubuntu:24.04 and fedora:40
+        run: ./tests/docker/pam_rollback_test.sh
+
+  # ---------------------------------------------------------------------------
   # Job 7: Aggregate status (single required check for merge gating)
   # ---------------------------------------------------------------------------
   ci-success:
     name: "CI Success"
     if: always() && github.event_name != 'schedule'
-    needs: [lint, clippy, test, security, pam-integration, authselect-profile]
+    needs: [lint, clippy, test, security, pam-integration, authselect-profile, pam-rollback]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:

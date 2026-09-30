@@ -324,6 +324,14 @@ if [[ -f "${SERVICE_SRC}" ]]; then
     fi
 fi
 
+# 6a. Record the pre-install PAM state (GitHub #166): scripts/uninstall.sh
+#     verifies its rollback against this snapshot. Live installs only; an
+#     existing snapshot is never overwritten (it holds the pristine state).
+if [[ -z "${DESTDIR}" && -f "${WORKSPACE_ROOT}/scripts/pam_snapshot.sh" ]]; then
+    bash "${WORKSPACE_ROOT}/scripts/pam_snapshot.sh" snapshot \
+        --sysconfdir "${SYSCONFDIR}" --localstatedir "${LOCALSTATEDIR}"
+fi
+
 # 6. Install Distribution PAM Config Templates
 info "Installing distribution PAM configuration templates..."
 PAM_PKG_DIR="${WORKSPACE_ROOT}/packaging/pam"

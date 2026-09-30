@@ -21,10 +21,18 @@
 #
 # Invariants:
 #   - PAM stack is restored to a safe state without breaking authentication.
+#   - PAM files are only replaced atomically (temp file + rename); a residual
+#     pam_soos.so line is removed only when provably safe, otherwise the file and
+#     pam_soos.so are kept and the script exits 1 (GitHub #166).
+#   - The rollback is verified against the pre-install snapshot recorded by
+#     scripts/pam_snapshot.sh (/var/lib/soos/state/pam-backup), which is
+#     discarded only once the PAM state is identical.
 #   - Biometric data and master key are preserved unless --purge-data is explicitly specified.
 # =============================================================================
 
 set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Terminal Colors
 if [[ -t 1 ]]; then
@@ -189,12 +197,57 @@ fi
 # 2. Roll Back PAM Configurations
 info "Rolling back PAM configurations..."
 
-# Rollback backups if present
+# Pre-install PAM snapshot recorded by scripts/pam_snapshot.sh (GitHub #166).
+PAM_SNAPSHOT_HELPER="${SCRIPT_DIR}/pam_snapshot.sh"
+PAM_SNAPSHOT_DIR="${TARGET_STATE_DIR}/state/pam-backup"
+PAM_SNAPSHOT_ARGS=(--sysconfdir "${SYSCONFDIR}" --localstatedir "${LOCALSTATEDIR}")
+if [[ -n "${DESTDIR}" ]]; then
+    PAM_SNAPSHOT_ARGS+=(--destdir "${DESTDIR}")
+fi
+# An active (non-comment) PAM line loading pam_soos.so.
+readonly PAM_SOOS_LINE_RE='^[[:space:]]*-?(auth|account|password|session)[[:space:]].*pam_soos\.so'
+# Numeric jump controls ([success=2 ...]): removing a line would shift the target.
+readonly PAM_JUMP_RE='\[[^]]*=[0-9]+'
+PAM_ROLLBACK_INCOMPLETE=false
+
+# Atomically replaces $1 with the content of $2, using the mode and owner of $3:
+# temporary file in the same directory, fsync, rename. Group/world write is never granted.
+atomic_replace() {
+    local target="$1" source="$2" reference="$3" tmp
+    tmp="$(mktemp "$(dirname "${target}")/.soos-rollback.XXXXXX")"
+    if ! cat "${source}" > "${tmp}"; then
+        rm -f "${tmp}"
+        return 1
+    fi
+    chmod --reference="${reference}" "${tmp}" 2>/dev/null || chmod 0644 "${tmp}"
+    chmod go-w "${tmp}"
+    if [[ "$(id -u)" -eq 0 ]]; then
+        chown --reference="${reference}" "${tmp}" 2>/dev/null || true
+    fi
+    sync "${tmp}" 2>/dev/null || true
+    mv -f "${tmp}" "${target}"
+}
+
+# True when files $1 and $2 have identical bytes (sha256; no diffutils dependency).
+same_content() {
+    local a b
+    a="$(sha256sum < "$1")" || return 1
+    b="$(sha256sum < "$2")" || return 1
+    [[ "${a}" == "${b}" ]]
+}
+
+# Restore backups created by soos (e.g. `soos-admin gdm enable`); only regular,
+# non-symlinked backups are trusted.
 for backup in "${TARGET_PAM_D}/"*.soos-backup; do
-    if [[ -f "${backup}" ]]; then
+    if [[ -f "${backup}" && ! -L "${backup}" ]]; then
         orig="${backup%.soos-backup}"
+        if [[ -L "${orig}" ]]; then
+            warn "Not restoring ${backup}: ${orig} is a symlink."
+            PAM_ROLLBACK_INCOMPLETE=true
+            continue
+        fi
         info "Restoring PAM backup: ${backup} -> ${orig}"
-        cp -f "${backup}" "${orig}"
+        atomic_replace "${orig}" "${backup}" "${backup}"
         rm -f "${backup}"
         success "Restored ${orig}"
     fi
@@ -267,6 +320,57 @@ if [[ -f "${TARGET_PAM_D}/soos.snippet" ]]; then
     success "Removed Arch PAM snippet."
 fi
 
+# Residual pam_soos.so lines (Arch system-auth edited by hand, edits made before
+# backups existed, pam-auth-update or authselect unavailable). A line is removed
+# only when that is provably safe:
+#   - the stripped file equals its pre-install snapshot copy (exact restore), or
+#   - the file has no numeric jump control, so removing a line cannot move a jump.
+# Otherwise the file is left untouched, pam_soos.so is KEPT (a present module
+# degrades to PAM_IGNORE, a missing one could fail a 'required' line) and the
+# uninstaller exits non-zero with manual instructions.
+if [[ -d "${TARGET_PAM_D}" ]]; then
+    for pam_file in "${TARGET_PAM_D}"/*; do
+        pam_name="$(basename "${pam_file}")"
+        case "${pam_name}" in
+            *.soos-backup|soos.snippet|.soos-*) continue ;;
+        esac
+        [[ -f "${pam_file}" ]] || continue
+        grep -Eq "${PAM_SOOS_LINE_RE}" "${pam_file}" 2>/dev/null || continue
+        if [[ -L "${pam_file}" ]]; then
+            warn "${pam_file} is a symlink (managed by authselect?) and still loads pam_soos.so."
+            PAM_ROLLBACK_INCOMPLETE=true
+            continue
+        fi
+        stripped="$(mktemp)"
+        grep -Ev "${PAM_SOOS_LINE_RE}" "${pam_file}" > "${stripped}" || true
+        snapshot_copy="${PAM_SNAPSHOT_DIR}/pam.d/${pam_name}"
+        if [[ -f "${snapshot_copy}" ]] && same_content "${stripped}" "${snapshot_copy}"; then
+            atomic_replace "${pam_file}" "${stripped}" "${pam_file}"
+            success "Restored ${pam_file} to its pre-install content."
+        elif ! grep -Eq "${PAM_JUMP_RE}" "${pam_file}"; then
+            atomic_replace "${pam_file}" "${stripped}" "${pam_file}"
+            success "Removed pam_soos.so lines from ${pam_file}."
+        else
+            warn "${pam_file} still loads pam_soos.so and uses numeric jumps (success=N): not edited."
+            PAM_ROLLBACK_INCOMPLETE=true
+        fi
+        rm -f "${stripped}"
+    done
+fi
+
+# Verify the rollback against the pre-install snapshot, then discard it.
+if [[ -f "${PAM_SNAPSHOT_HELPER}" && -f "${PAM_SNAPSHOT_DIR}/SHA256SUMS" ]]; then
+    info "Verifying PAM state against the pre-install snapshot..."
+    snapshot_rc=0
+    bash "${PAM_SNAPSHOT_HELPER}" verify "${PAM_SNAPSHOT_ARGS[@]}" || snapshot_rc=$?
+    if [[ "${snapshot_rc}" -eq 0 && "${PAM_ROLLBACK_INCOMPLETE}" = false ]]; then
+        bash "${PAM_SNAPSHOT_HELPER}" discard "${PAM_SNAPSHOT_ARGS[@]}"
+        success "Discarded the verified pre-install PAM snapshot."
+    else
+        warn "PAM state differs from the pre-install snapshot; copies kept in ${PAM_SNAPSHOT_DIR}/pam.d"
+    fi
+fi
+
 # 3. Remove Binaries and Shared Libraries
 info "Removing binaries and shared libraries..."
 rm -f "${TARGET_LIBEXEC_DIR}/soos-daemon"
@@ -278,6 +382,10 @@ rm -f "${TARGET_BIN_DIR}/soos-gui"
 
 for cand in "${PAM_CANDIDATES[@]}"; do
     if [[ -f "${cand}/pam_soos.so" ]]; then
+        if [[ "${PAM_ROLLBACK_INCOMPLETE}" = true ]]; then
+            warn "Keeping ${cand}/pam_soos.so: PAM files still reference it."
+            continue
+        fi
         rm -f "${cand}/pam_soos.so"
         success "Removed ${cand}/pam_soos.so"
     fi
@@ -298,6 +406,15 @@ if [[ "${PURGE_DATA}" = true ]]; then
     fi
 else
     info "Preserving biometric templates, evidence, and master key at ${TARGET_STATE_DIR}."
+fi
+
+if [[ "${PAM_ROLLBACK_INCOMPLETE}" = true ]]; then
+    echo ""
+    error "PAM rollback is INCOMPLETE: some PAM files still load pam_soos.so (see warnings above)."
+    error "pam_soos.so was kept so that these stacks keep working (it returns PAM_IGNORE)."
+    error "Restore them from ${PAM_SNAPSHOT_DIR}/pam.d (or remove the pam_soos.so lines and"
+    error "fix any success=N jump), then run this script again."
+    exit 1
 fi
 
 echo ""

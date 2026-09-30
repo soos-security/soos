@@ -59,12 +59,27 @@ sudo ./scripts/install.sh
 
 ### 3.2 PAM Stack Integration via `pam-auth-update`
 Debian and Ubuntu dynamically manage `/etc/pam.d/common-auth` using `pam-auth-update`. `soos` provides two profiles in `/usr/share/pam-configs/`:
-1. `/usr/share/pam-configs/soos` (Priority `260`, placed before `unix` at `256`)
-2. `/usr/share/pam-configs/soos-notify` (Priority `128`, placed after `unix`)
+1. `/usr/share/pam-configs/soos` (`Primary`, Priority `260`, placed before `unix` at `256`)
+2. `/usr/share/pam-configs/soos-notify` (`Primary`, Priority `12`, control `[default=ignore]`):
+   placed after every standard primary method (`unix` 256, `sss` 128, ...) and **before**
+   `pam_deny`. `pam-auth-update` rewrites the `success=N` jump of `pam_unix` so that a correct
+   password skips the hook; a wrong one falls through to it, then to `pam_deny`. The hook is
+   ignored whatever it returns. (An `Additional` profile would be emitted after
+   `auth requisite pam_deny.so`, which ends the stack on a wrong password: the event would never fire.)
 
 Enable the profiles non-interactively:
 ```bash
 sudo pam-auth-update --package --enable soos soos-notify
+```
+
+Resulting `/etc/pam.d/common-auth` (Ubuntu 24.04, verified by `tests/docker/pam_rollback_test.sh`
+D3 and the Docker matrix case T11):
+```pam
+auth  [success=done default=ignore]  pam_soos.so timeout_ms=250
+auth  [success=2 default=ignore]     pam_unix.so nullok try_first_pass
+auth  [default=ignore]               pam_soos.so event=password-failed timeout_ms=20
+auth  requisite                      pam_deny.so
+auth  required                       pam_permit.so
 ```
 
 ### 3.3 User Enrollment & Verification
@@ -96,9 +111,13 @@ sudo pamtester common-auth alice authenticate
 # Safe rollback preserving biometric templates
 sudo ./scripts/uninstall.sh --keep-data
 
-# Or remove package via dpkg
+# Or remove package via dpkg (prerm runs pam-auth-update --package --remove soos soos-notify)
 sudo dpkg -r soos
 ```
+
+`scripts/uninstall.sh` deregisters both profiles, restores every `*.soos-backup` (for example the
+`gdm-password` copy made by `soos-admin gdm enable`) and verifies the result against the
+pre-install snapshot `/var/lib/soos/state/pam-backup` (see §7).
 
 ---
 
@@ -213,7 +232,15 @@ sudo pacman -U target/packages/soos-*.pkg.tar.zst
 ```
 
 ### 5.2 `/etc/pam.d/system-auth` Integration
-Arch Linux utilizes a modular `/etc/pam.d/system-auth` stack. The `soos` snippet (`packaging/pam/arch/system-auth.snippet`) is placed immediately prior to `pam_unix.so`:
+Arch Linux utilizes a modular `/etc/pam.d/system-auth` stack. The integration is a manual edit:
+**first keep a backup** that `scripts/uninstall.sh` restores automatically:
+
+```bash
+sudo cp /etc/pam.d/system-auth /etc/pam.d/system-auth.soos-backup
+```
+
+The `soos` snippet (`packaging/pam/arch/system-auth.snippet`) is placed immediately prior to `pam_unix.so`
+(adjust any `success=N` jump that crosses the inserted lines, e.g. the one of `pam_systemd_home.so`):
 
 ```pam
 # Inserted into /etc/pam.d/system-auth:
@@ -244,7 +271,8 @@ account include system-auth
 # Remove pacman package
 sudo pacman -R soos
 
-# Restore system-auth configuration from backup
+# Restore system-auth from the backup made in §5.2 (or run scripts/uninstall.sh,
+# which restores it; without a backup it falls back to the pre-install snapshot)
 sudo cp /etc/pam.d/system-auth.soos-backup /etc/pam.d/system-auth
 ```
 
@@ -270,6 +298,10 @@ bash tests/distro/arch_linux_test.sh --dry-run
 # Fedora authselect profile: activation, generated PAM/NSS files, password
 # fallback and rollback in a stock fedora:40 container (also a CI job)
 ./run_tests.sh authselect        # = tests/docker/authselect_profile_test.sh
+
+# Debian stack order (password-failed hook before pam_deny) and byte-for-byte
+# PAM rollback on ubuntu:24.04 and fedora:40 (also a CI job)
+./run_tests.sh rollback          # = tests/docker/pam_rollback_test.sh
 ```
 
 ---
@@ -280,6 +312,25 @@ If a misconfiguration occurs during manual PAM adjustments:
 1. **Always maintain an open root shell** (`sudo -s`) in a separate terminal before modifying `/etc/pam.d/`.
 2. **Boot with systemd emergency target**: Append `systemd.unit=emergency.target` to the GRUB kernel command line.
 3. **Restore PAM backup**:
-   - Debian: `pam-auth-update --force`
-   - Fedora: `authselect select local --force`
-   - Arch: `cp /etc/pam.d/system-auth.soos-backup /etc/pam.d/system-auth`
+   - Debian: `pam-auth-update --package --remove soos soos-notify` (or `pam-auth-update --force`)
+   - Fedora: `authselect select $(cat /etc/soos/authselect.previous) --force` (or `authselect select local --force`)
+   - Arch: `cp /etc/pam.d/system-auth.soos-backup /etc/pam.d/system-auth` (backup made in §5.2)
+   - GDM: `cp /etc/pam.d/gdm-password.soos-backup /etc/pam.d/gdm-password` (made by `soos-admin gdm enable`)
+   - Any file: the pre-install copies recorded by `scripts/install.sh` live in
+     `/var/lib/soos/state/pam-backup/pam.d/` with a `SHA256SUMS` manifest
+     (`sudo ./scripts/pam_snapshot.sh verify` lists what differs).
+
+### 7.1 Rollback Guarantees (`scripts/uninstall.sh`)
+- `scripts/install.sh` records the pre-install PAM state (`/etc/pam.d/*`, `/etc/nsswitch.conf`,
+  `authselect current --raw`) in `/var/lib/soos/state/pam-backup` (mode `0700`) through
+  `scripts/pam_snapshot.sh`; an existing snapshot is never overwritten.
+- Uninstall order: `pam-auth-update --package --remove`, `authselect select <recorded>`,
+  restore of every `*.soos-backup`, then removal of residual `pam_soos.so` lines **only when safe**
+  (the stripped file equals its snapshot copy, or it has no `success=N` jump). Every write is a
+  temporary file + rename.
+- The result is verified against `SHA256SUMS`; the snapshot is discarded only when identical.
+- If a residual line cannot be removed safely, the file is left untouched, `pam_soos.so` is **kept**
+  (it degrades to `PAM_IGNORE`, so password login keeps working) and the script exits `1`.
+- Validation: `./run_tests.sh rollback` (`tests/docker/pam_rollback_test.sh`, ubuntu:24.04 and
+  fedora:40): `sha256` of every `/etc/pam.d` entry and `authselect current` identical before
+  installation and after uninstallation.

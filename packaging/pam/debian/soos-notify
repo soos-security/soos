@@ -1,9 +1,9 @@
 Name: soos Password Failure Event Notification
 Default: yes
-Priority: 128
+Priority: 12
 Conflicts:
-Auth-Type: Additional
+Auth-Type: Primary
 Auth:
-	optional	pam_soos.so event=password-failed timeout_ms=20
+	[default=ignore]	pam_soos.so event=password-failed timeout_ms=20
 Auth-Initial:
-	optional	pam_soos.so event=password-failed timeout_ms=20
+	[default=ignore]	pam_soos.so event=password-failed timeout_ms=20
