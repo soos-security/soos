@@ -47,6 +47,9 @@ ADR entry in `AI/DECISIONS.md`. Re-check every value below with the listed `grep
 | `DECISION_BUDGET_MS` | `crates/daemon/src/pipeline.rs` | 900 ms |
 | `MAX_FRAME_AGE_NS` | `crates/daemon/src/pipeline.rs` | 150 ms |
 | `FRAME_POLL_INTERVAL_MS` | `crates/daemon/src/pipeline.rs` | 10 ms (consensus loop poll) |
+| `MAX_CONCURRENT_INFERENCES` | `crates/daemon/src/inference.rs` | 1 (blocking-pool inference slots) |
+| `RESPONSE_WRITE_MARGIN_MS` | `crates/daemon/src/inference.rs` | 50 ms (reserved before client and outer deadlines) |
+| `DEFAULT_INFERENCE_ESTIMATE_MS` / `MAX_INFERENCE_ESTIMATE_MS` | `crates/daemon/src/inference.rs` | 80 / 1000 ms (initial / upper bound of the EMA admission estimate) |
 | `DEFAULT_PAD_CONSENSUS_REQUIRED` / `_WINDOW` / `MAX_PAD_CONSENSUS_WINDOW` | `crates/policy/src/pad_consensus.rs` | 3 / 5 / 32 captures (Allow needs 3 consecutive; any spoof vetoes the request) |
 | GDM PAM line | `crates/admin-cli/src/gdm.rs` | `auth sufficient pam_soos.so timeout_ms=2500` |
 | admin-cli `DEFAULT_TIMEOUT_MS` | `crates/admin-cli/src/args.rs` | 250 ms |
