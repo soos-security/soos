@@ -126,6 +126,11 @@ mod vision_threshold_contract;
 #[cfg(test)]
 mod ort_output_zeroize_contract;
 
+/// PAM module hygiene: panic hook chaining, protocol predicates, config warnings
+/// (GitHub #263, #264, #265, rows PHY1–PHY9).
+#[cfg(test)]
+mod pam_hygiene_contract;
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,

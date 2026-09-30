@@ -22,17 +22,13 @@ fn main() {
     ];
 
     // First check if libpam.so already exists in standard search paths
-    let mut pam_so_found = false;
     for dir in &candidate_dirs {
         let p = Path::new(dir).join("libpam.so");
         if p.exists() {
-            pam_so_found = true;
-            break;
+            // Re-run if the development symlink disappears (GitHub #264).
+            println!("cargo:rerun-if-changed={}", p.display());
+            return;
         }
-    }
-
-    if pam_so_found {
-        return;
     }
 
     // If libpam.so is missing (e.g. libpam0g-dev not installed), check for libpam.so.0
@@ -44,6 +40,12 @@ fn main() {
                 let _ = symlink(&soname, &target);
             }
             println!("cargo:rustc-link-search=native={}", out_dir.display());
+            // Re-run when the runtime library changes or when a development `libpam.so`
+            // appears in this directory (e.g. libpam0g-dev installed later), so the
+            // OUT_DIR fallback symlink stops being used (GitHub #264). Cargo tracks the
+            // modification times under a directory path.
+            println!("cargo:rerun-if-changed={}", soname.display());
+            println!("cargo:rerun-if-changed={dir}");
             break;
         }
     }
