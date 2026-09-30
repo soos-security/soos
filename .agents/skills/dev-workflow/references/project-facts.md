@@ -56,7 +56,8 @@ ADR entry in `AI/DECISIONS.md`. Re-check every value below with the listed `grep
 | Match / PAD thresholds | `crates/vision/src/pipeline.rs`, policy | 0.70 / 0.85 |
 | `DEFAULT_MINIFASNET_LIVE_CLASS_INDEX` | `crates/inference-ort/src/pad.rs` | 1 |
 
-Known prose drift: `AGENTS.md`, `AI/ARCHITECTURE.md` and `AI/DECISIONS.md` still say "200–250ms".
+The fixed "200 to 250 ms" PAM deadline wording was removed from the normative documents (ADR 2026-09-30
+"PAM Deadline Derived From Clamped `timeout_ms`", enforced by `tests/invariants/src/pam_deadline_contract.rs`).
 The enforced invariant is **"every blocking PAM operation has an explicit deadline derived from the
 clamped `timeout_ms`; nothing is ever unbounded"**, not the literal 250ms figure. The MiniFASNet live
 class index is 1 everywhere since ADR 2026-09-29 (code, `AI/ARCHITECTURE.md`, matrix ASG1/PLC1–PLC3);

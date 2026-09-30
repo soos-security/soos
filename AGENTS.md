@@ -69,7 +69,7 @@ For every functional feature or modification:
 
 ## Immutable Architectural Decisions
 - **IPC**: Unix Domain Socket only (`SOCK_SEQPACKET` / framed `SOCK_STREAM`).
-- **PAM Module**: NEVER start an asynchronous runtime (Tokio). Blocking `std::os::unix::net::UnixStream` only, strict 200–250ms deadline.
+- **PAM Module**: NEVER start an asynchronous runtime (Tokio). Blocking `std::os::unix::net::UnixStream` only. Every blocking PAM operation has an explicit deadline derived from the clamped `timeout_ms` (default 1000 ms, range 10–5000 ms, `crates/pam/src/config.rs`); nothing is ever unbounded (ADR 2026-09-30 "PAM Deadline Derived From Clamped `timeout_ms`").
 - **Panic Safety**: Mandatory `catch_unwind` wrapping all FFI boundaries, systematically returning `PAM_IGNORE`.
 - **Camera**: Root daemon is the exclusive owner of `/dev/video*`. `v4l` crate in production, not `nokhwa`.
 - **AI**: `ort` (ONNX Runtime) CPU only. Absolute prohibition against OpenCV.

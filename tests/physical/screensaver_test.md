@@ -22,7 +22,7 @@ Across all screen lockers and display managers, `pam_soos.so` is placed **immedi
 # 1. Account Lockout Pre-Authentication (enforces maximum failed attempts)
 auth  required                       pam_faillock.so preauth
 
-# 2. soos Local Biometric Facial Verification (250ms deadline)
+# 2. soos Local Biometric Facial Verification (deadline derived from the clamped timeout_ms)
 auth  [success=done default=ignore]  pam_soos.so timeout_ms=250
 
 # 3. Standard Password Authentication (executed if facial verification returns PAM_IGNORE)
@@ -141,7 +141,7 @@ session    include                       system-local-login
    - **Expected Result**: Login completes immediately to the shell without prompting for `Password:`.
 4. **Test Case 2 (Camera Warmup and Timeout)**:
    - Block the camera lens, enter username.
-   - **Expected Result**: After 250ms deadline, TTY displays standard `Password:` prompt.
+   - **Expected Result**: Once the `timeout_ms` deadline of the installed profile expires, TTY displays the standard `Password:` prompt.
 
 ---
 

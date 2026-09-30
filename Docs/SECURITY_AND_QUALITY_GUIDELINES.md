@@ -32,7 +32,7 @@ Because `soos` develops a biometric Linux PAM module (`pam_soos.so`) that runs d
 1. **Never Panic Across FFI**: An unwinding panic across an `extern "C"` boundary without `catch_unwind` triggers an abort or undefined behavior. Every PAM FFI entry point must catch all panics and systematically return `PAM_IGNORE`.
 2. **Never Return PAM_SUCCESS on Failure**: Any failure (timeout, network glitch, missing socket, protocol error, corrupted buffer) must silently degrade to `PAM_IGNORE` so Linux-PAM can proceed to traditional password authentication (`pam_unix.so`).
 3. **No Terminal/Stream Pollution**: PAM modules share `stdout` and `stderr` descriptors with the host process. Emitting debugging prints (`println!`, `eprintln!`, `dbg!`) can crash graphical display managers (GDM, SDDM) or corrupt scripts calling `sudo`.
-4. **Strict Concurrency & Latency Deadline**: The PAM module must **never** start an asynchronous runtime (Tokio) and must complete its synchronous IPC handshake within 200–250ms.
+4. **Strict Concurrency & Latency Deadline**: The PAM module must **never** start an asynchronous runtime (Tokio) and every blocking PAM operation has an explicit deadline derived from the clamped `timeout_ms` (default 1000 ms, range 10–5000 ms); nothing in the PAM path is ever unbounded.
 
 ---
 

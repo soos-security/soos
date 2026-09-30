@@ -23,6 +23,10 @@ mod distro_matrix;
 #[cfg(test)]
 mod physical_contract;
 
+/// PAM deadline wording in the normative documents (GitHub #185).
+#[cfg(test)]
+mod pam_deadline_contract;
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,

@@ -14,7 +14,7 @@ The IPC protocol provides synchronous, bounded, bidirectional communication betw
 │       pam_soos.so       │  Request (Postcard) │       soos-daemon       │
 │  (unprivileged context) │ ──────────────────> │      (root process)     │
 │                         │ <────────────────── │                         │
-│  hard timeout: 250ms    │  Response (Postcard)│  V4L2 Camera + ONNX IA  │
+│  deadline: timeout_ms   │  Response (Postcard)│  V4L2 Camera + ONNX IA  │
 └─────────────────────────┘                     └─────────────────────────┘
 ```
 
