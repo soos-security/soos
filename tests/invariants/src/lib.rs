@@ -2560,4 +2560,88 @@ mod tests {
             "ci.yml must run the Fedora authselect profile test"
         );
     }
+
+    /// Returns the body of the first `fn <name>(` or `fn <name><` in `source` (brace matched).
+    fn function_body<'a>(source: &'a str, name: &str) -> Option<&'a str> {
+        let start = source
+            .find(&format!("fn {name}("))
+            .or_else(|| source.find(&format!("fn {name}<")))?;
+        let open = start + source[start..].find('{')?;
+        let mut depth = 0usize;
+        for (offset, ch) in source[open..].char_indices() {
+            match ch {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(&source[open..=open + offset]);
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
+    /// Candid review finding 3 (GitHub #152): the daemon's production camera resolution must
+    /// go through `resolve_pipeline_camera`, the function the parity tests exercise, so that the
+    /// tested path and the shipped path cannot drift apart.
+    #[test]
+    fn test_daemon_production_camera_resolution_uses_tested_resolver() {
+        let root = workspace_root();
+        let source = fs::read_to_string(root.join("crates/daemon/src/pipeline.rs"))
+            .expect("read crates/daemon/src/pipeline.rs");
+        let production = extract_production_code(&source);
+
+        let init = function_body(&production, "initialize_pipeline")
+            .expect("initialize_pipeline must exist in crates/daemon/src/pipeline.rs");
+        assert!(
+            init.contains("resolve_pipeline_camera("),
+            "initialize_pipeline must resolve its camera through resolve_pipeline_camera"
+        );
+
+        let resolver = function_body(&production, "resolve_pipeline_camera")
+            .expect("resolve_pipeline_camera must exist in crates/daemon/src/pipeline.rs");
+        assert!(
+            resolver.contains("plan_camera_device("),
+            "resolve_pipeline_camera must be built on plan_camera_device (single daemon path)"
+        );
+        let planner = function_body(&production, "plan_camera_device")
+            .expect("plan_camera_device must exist in crates/daemon/src/pipeline.rs");
+        assert!(
+            !planner.contains("read_dir") && !planner.contains("enumerate_capture_devices"),
+            "plan_camera_device must not enumerate devices on its own"
+        );
+    }
+
+    /// Candid review finding 4 (GitHub #152): exactly one bounded `/dev/v4l/by-id/` scanner.
+    /// `stable_device_path` must delegate to the resolver's enumerator instead of scanning the
+    /// directory with its own, different bound.
+    #[test]
+    fn test_single_bounded_by_id_scanner() {
+        let root = workspace_root();
+        let stable = fs::read_to_string(root.join("crates/camera-v4l/src/stable_path.rs"))
+            .expect("read crates/camera-v4l/src/stable_path.rs");
+        let stable_production = extract_production_code(&stable);
+        assert!(
+            !stable_production.contains("read_dir"),
+            "stable_path.rs must not scan /dev/v4l/by-id itself"
+        );
+        assert!(
+            !stable_production.contains("const MAX_BY_ID_ENTRIES"),
+            "stable_path.rs must not define its own by-id bound"
+        );
+        assert!(
+            stable_production.contains("by_id_aliases"),
+            "stable_device_path must delegate to CameraEnumerator::by_id_aliases"
+        );
+
+        let resolver = fs::read_to_string(root.join("crates/camera-v4l/src/resolver.rs"))
+            .expect("read crates/camera-v4l/src/resolver.rs");
+        assert_eq!(
+            resolver.matches("pub const MAX_BY_ID_ENTRIES").count(),
+            1,
+            "the single by-id bound lives in resolver.rs"
+        );
+    }
 }

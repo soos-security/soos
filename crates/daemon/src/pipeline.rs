@@ -127,20 +127,30 @@ pub fn build_pad_detector(
 /// [`soos_camera_v4l::resolve_camera_device`] (GitHub #152), exactly like `soos-enroll` and
 /// `soos-gui`: an explicit `camera_device` is honored verbatim, the auto sentinel triggers
 /// sensor-preference auto-detection (stable by-id alias). The mock camera never enumerates.
+///
+/// This is the daemon's production resolution path ([`initialize_pipeline`] calls it with the
+/// system enumerator); it is built on [`plan_camera_device`], so the parity tests and the
+/// shipped code exercise the same function.
 pub fn resolve_pipeline_camera(
     config: &crate::config::PipelineConfig,
     enumerator: &dyn soos_camera_v4l::CameraEnumerator,
 ) -> soos_camera_v4l::CameraConfig {
-    let mut camera_cfg = config.camera.clone();
-    if !config.use_mock_camera {
-        let resolution = soos_camera_v4l::resolve_camera_device(
-            camera_cfg.explicit_device(),
-            camera_cfg.sensor_preference,
-            enumerator,
-        );
-        camera_cfg.device_path = resolution.path;
+    if config.use_mock_camera {
+        return config.camera.clone();
     }
-    camera_cfg
+    plan_camera_device(&config.camera, |preference| {
+        auto_detect_with(preference, enumerator)
+    })
+}
+
+/// Runs the shared resolver in auto mode and returns the selected path, if a node was found.
+fn auto_detect_with(
+    preference: soos_camera_v4l::SensorPreference,
+    enumerator: &dyn soos_camera_v4l::CameraEnumerator,
+) -> Option<std::path::PathBuf> {
+    let resolution = soos_camera_v4l::resolve_camera_device(None, preference, enumerator);
+    (resolution.source == soos_camera_v4l::CameraResolutionSource::AutoDetected)
+        .then_some(resolution.path)
 }
 
 /// Sentinel `device_path` meaning "auto-select a camera matching `sensor_preference`".
@@ -160,13 +170,10 @@ fn is_auto_select(camera: &soos_camera_v4l::CameraConfig) -> bool {
 pub fn auto_select_camera_device(
     preference: soos_camera_v4l::SensorPreference,
 ) -> Option<std::path::PathBuf> {
-    let resolution = soos_camera_v4l::resolve_camera_device(
-        None,
+    auto_detect_with(
         preference,
         &soos_camera_v4l::SystemCameraEnumerator::default(),
-    );
-    (resolution.source == soos_camera_v4l::CameraResolutionSource::AutoDetected)
-        .then_some(resolution.path)
+    )
 }
 
 /// Computes the startup camera configuration (GitHub #151).
@@ -230,13 +237,14 @@ pub fn initialize_pipeline(
     config: &crate::config::PipelineConfig,
 ) -> Result<PipelineComponents, crate::error::DaemonError> {
     // 1. Camera Manager
+    // Single resolution path shared with the parity tests (GitHub #152); the mock camera
+    // never enumerates hardware.
+    let camera_cfg =
+        resolve_pipeline_camera(config, &soos_camera_v4l::SystemCameraEnumerator::default());
     let camera: Arc<dyn CameraManager> = if config.use_mock_camera {
         tracing::info!("Initializing mock camera manager for simulation/testing");
-        Arc::new(soos_camera_v4l::MockCameraManager::new(
-            config.camera.clone(),
-        ))
+        Arc::new(soos_camera_v4l::MockCameraManager::new(camera_cfg))
     } else {
-        let camera_cfg = plan_camera_device(&config.camera, auto_select_camera_device);
         tracing::info!(
             device = %camera_cfg.device_path.display(),
             "Spawning production V4L2 camera manager"
