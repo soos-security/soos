@@ -6,6 +6,7 @@ pub mod config;
 pub mod dispatcher;
 pub mod error;
 pub mod health;
+pub mod inference;
 pub mod logging;
 pub mod mlock;
 pub mod peercred;
