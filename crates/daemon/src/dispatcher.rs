@@ -19,6 +19,7 @@ use crate::pipeline::{
 };
 use crate::preview::{authorize_preview, PreviewConfig};
 use crate::session::SessionValidator;
+use crate::session_policy::LocalSessionPolicy;
 use soos_policy::{ConsensusDecision, FrameEvaluation, PadAggregator, RateLimiter};
 use soos_protocol::codec::{encode, encode_preview};
 use soos_protocol::types::{
@@ -51,6 +52,7 @@ pub struct ConnectionDispatcher {
     semaphore: Arc<Semaphore>,
     start_time: Instant,
     session_validator: SessionValidator,
+    session_policy: LocalSessionPolicy,
     clock_fn: fn() -> Result<u64, DaemonError>,
     preview: PreviewConfig,
     preview_limiter: tokio::sync::Mutex<RateLimiter>,
@@ -65,6 +67,7 @@ impl ConnectionDispatcher {
         } else {
             SessionValidator::disabled()
         };
+        let session_policy = LocalSessionPolicy::from_validator(&session_validator);
         let preview = PreviewConfig::default();
         let preview_limiter =
             tokio::sync::Mutex::new(RateLimiter::new(preview.rate_limit_config()));
@@ -75,6 +78,7 @@ impl ConnectionDispatcher {
             semaphore,
             start_time: Instant::now(),
             session_validator,
+            session_policy,
             clock_fn: current_monotonic_nanos,
             preview,
             preview_limiter,
@@ -93,6 +97,7 @@ impl ConnectionDispatcher {
         } else {
             SessionValidator::disabled()
         };
+        let session_policy = LocalSessionPolicy::from_validator(&session_validator);
         let preview = PreviewConfig::default();
         let preview_limiter =
             tokio::sync::Mutex::new(RateLimiter::new(preview.rate_limit_config()));
@@ -103,6 +108,7 @@ impl ConnectionDispatcher {
             semaphore,
             start_time: Instant::now(),
             session_validator,
+            session_policy,
             clock_fn: current_monotonic_nanos,
             preview,
             preview_limiter,
@@ -119,7 +125,15 @@ impl ConnectionDispatcher {
     /// Overrides the session validator (used for custom or mock session directories).
     #[must_use]
     pub fn with_session_validator(mut self, validator: SessionValidator) -> Self {
+        self.session_policy = LocalSessionPolicy::from_validator(&validator);
         self.session_validator = validator;
+        self
+    }
+
+    /// Overrides the local-session policy applied to `Auth` requests (GitHub #160).
+    #[must_use]
+    pub fn with_session_policy(mut self, policy: LocalSessionPolicy) -> Self {
+        self.session_policy = policy;
         self
     }
 
@@ -263,7 +277,7 @@ impl ConnectionDispatcher {
                 // of `event.request_id`. If `req.uid_hint == peer.uid`, it is a valid Request.
                 // Otherwise, it is an Event notification.
                 if req.uid_hint == peer.uid {
-                    let res = self.handle_request(peer.uid, req).await?;
+                    let res = self.handle_request(peer.uid, peer.pid, req).await?;
                     Ok(ProcessedOutput {
                         encoded_response: Some(res.encoded_response),
                         completion_error: res.completion_error,
@@ -277,7 +291,7 @@ impl ConnectionDispatcher {
                 }
             }
             (Some(req), None) => {
-                let res = self.handle_request(peer.uid, req).await?;
+                let res = self.handle_request(peer.uid, peer.pid, req).await?;
                 Ok(ProcessedOutput {
                     encoded_response: Some(res.encoded_response),
                     completion_error: res.completion_error,
@@ -341,6 +355,7 @@ impl ConnectionDispatcher {
     async fn handle_request(
         &self,
         peer_uid: u32,
+        peer_pid: Option<i32>,
         req: Request,
     ) -> Result<ResponseOutput, DaemonError> {
         // Step 5a: Wire protocol validation (version and bounded fields)
@@ -383,7 +398,7 @@ impl ConnectionDispatcher {
         let cred_struct = crate::peercred::PeerCredentials {
             uid: peer_cred.as_raw(),
             gid: 0,
-            pid: None,
+            pid: peer_pid,
         };
         if let Err(err) = verify_peer_credentials(&cred_struct, req.uid_hint) {
             let (verdict, reason_class) = match err {
@@ -407,12 +422,20 @@ impl ConnectionDispatcher {
             });
         }
 
-        // Step 6b: Verify active logind session
-        if req.kind == RequestKind::Auth && !self.session_validator.is_active_session(req.uid_hint)
-        {
+        // Step 6b: Local-session policy (GitHub #160): a root peer must be tied to its own
+        // active, local, seat-attached session of the target UID; fails closed.
+        let session_check = if req.kind == RequestKind::Auth {
+            self.session_policy
+                .authorize_auth(&cred_struct, req.uid_hint)
+        } else {
+            Ok(())
+        };
+        if let Err(denial) = session_check {
             warn!(
-                uid = req.uid_hint,
-                "Target UID has no active logind session; rejecting auth request"
+                peer_uid = peer_uid,
+                target_uid = req.uid_hint,
+                reason = denial.as_str(),
+                "Local-session policy refused auth request; password fallback"
             );
             let encoded = self.build_response(
                 req.request_id,

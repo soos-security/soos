@@ -97,7 +97,7 @@ The daemon verifies `/run/soos` is owned by `root:soos`, is not world-writable, 
 
 On every incoming connection, the daemon queries `getsockopt(..., SO_PEERCRED)`:[^unix7]
 - `peer.uid == uid` of target identity (or documented rule for root PAM caller).
-- Target UID is an authorized local user and owns the active local graphical session.
+- Target UID is an authorized local user and owns the active local graphical session. For a root PAM caller (`su`, `sudo`, `sshd`, display manager) the request is tied to the caller's own logind session through the `SO_PEERCRED` PID; that session must belong to the target UID, be active, local (`REMOTE=0`) and seat-attached (`CLASS=user`). Any lookup failure denies face verification (ADR 2026-09-30 "Local Session Binding", GitHub #160).
 - Bounded payload size and protocol version verified before deserialization.
 - Strict per-UID rate limits and global concurrent connection caps.
 
