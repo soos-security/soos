@@ -1,0 +1,123 @@
+//! PAM client regression contract for GitHub #224 (review PAM-12, matrix row PCX3).
+//!
+//! The strict codec tolerates exactly one remainder: the client message tag trailer after
+//! a `Request` or `Event` (GitHub #204). That tolerance must never reach the PAM client's
+//! `Response` decoder: an `Allow` followed by either tag byte inside the declared length
+//! is rejected (`CodecError::TrailingBytes`) and PAM falls back with `PAM_IGNORE`.
+
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    reason = "Contractual integration tests use assertions, unwrap, and expect"
+)]
+
+use pam_soos::pam_sm_authenticate;
+use soos_protocol::codec::{decode, encode, CodecError};
+use soos_protocol::message::{MESSAGE_TAG_EVENT, MESSAGE_TAG_REQUEST};
+use soos_protocol::types::{ReasonClass, Request, Response, Verdict, CURRENT_VERSION};
+use std::ffi::CString;
+use std::io::{Read, Write};
+use std::os::unix::net::UnixListener;
+use std::path::Path;
+use std::ptr;
+use std::thread;
+use tempfile::tempdir;
+
+const PAM_SUCCESS: i32 = 0;
+const PAM_IGNORE: i32 = 25;
+
+/// Serves one connection: answers `Allow` bound to the request nonce, followed by
+/// `trailing` bytes counted inside the declared payload length.
+fn spawn_allow_daemon_with_trailing_bytes(
+    sock_path: &Path,
+    trailing: &'static [u8],
+) -> thread::JoinHandle<()> {
+    let listener = UnixListener::bind(sock_path).expect("bound test socket");
+    thread::spawn(move || {
+        let Ok((mut stream, _)) = listener.accept() else {
+            return;
+        };
+        let mut len_buf = [0u8; 4];
+        stream.read_exact(&mut len_buf).expect("read length");
+        let size = u32::from_be_bytes(len_buf) as usize;
+        let mut full_req = len_buf.to_vec();
+        let mut body = vec![0u8; size];
+        stream.read_exact(&mut body).expect("read body");
+        full_req.extend_from_slice(&body);
+        let req: Request = decode(&full_req).expect("decoded request");
+
+        let resp = Response {
+            version: CURRENT_VERSION,
+            request_id: req.request_id,
+            verdict: Verdict::Allow,
+            reason_class: ReasonClass::FaceMatch,
+            issued_monotonic_ns: 1000,
+            expires_monotonic_ns: 2000,
+        };
+        let frame = encode(&resp).expect("encoded response");
+        let payload = &frame[4..];
+        let mut tampered = ((payload.len() + trailing.len()) as u32)
+            .to_be_bytes()
+            .to_vec();
+        tampered.extend_from_slice(payload);
+        tampered.extend_from_slice(trailing);
+        let _ = stream.write_all(&tampered);
+    })
+}
+
+#[test]
+fn test_pcx_allow_followed_by_a_client_tag_returns_ignore() {
+    for (name, trailing) in [
+        ("request_tag", &[MESSAGE_TAG_REQUEST][..]),
+        ("event_tag", &[MESSAGE_TAG_EVENT][..]),
+    ] {
+        let tmp = tempdir().expect("tempdir created");
+        let sock_path = tmp.path().join(format!("pcx_{name}.sock"));
+        let server = spawn_allow_daemon_with_trailing_bytes(&sock_path, trailing);
+
+        let args: Vec<CString> = vec![
+            CString::new(format!("socket_path={}", sock_path.display())).expect("cstring"),
+            CString::new("timeout_ms=500").expect("cstring"),
+        ];
+        let ptrs: Vec<*const u8> = args.iter().map(|c| c.as_ptr().cast::<u8>()).collect();
+
+        let code = pam_sm_authenticate(ptr::null_mut(), 0, ptrs.len() as i32, ptrs.as_ptr());
+        assert_ne!(
+            code, PAM_SUCCESS,
+            "{name}: a tagged Allow must never authenticate"
+        );
+        assert_eq!(code, PAM_IGNORE, "{name}");
+        let _ = server.join();
+    }
+}
+
+#[test]
+fn test_pcx_direct_authenticate_rejects_allow_with_a_client_tag() {
+    for trailing in [&[MESSAGE_TAG_REQUEST][..], &[MESSAGE_TAG_EVENT][..]] {
+        let tmp = tempdir().expect("tempdir created");
+        let sock_path = tmp.path().join("pcx_direct.sock");
+        let server = spawn_allow_daemon_with_trailing_bytes(&sock_path, trailing);
+
+        let config = pam_soos::config::PamConfig {
+            timeout_ms: 500,
+            socket_path: sock_path,
+            ..Default::default()
+        };
+        let result = pam_soos::ipc::authenticate(&config, 1000);
+        assert!(
+            matches!(
+                result,
+                Err(pam_soos::ipc::IpcError::Codec(CodecError::TrailingBytes {
+                    unconsumed: 1
+                }))
+            ),
+            "a tagged Allow must be rejected as trailing bytes"
+        );
+        let _ = server.join();
+    }
+}
