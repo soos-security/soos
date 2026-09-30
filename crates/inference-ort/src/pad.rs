@@ -87,6 +87,80 @@ pub trait PadDetector: Send + Sync {
 /// requires a new ADR entry in `AI/DECISIONS.md` backed by a measurement on the real model.
 pub const DEFAULT_MINIFASNET_LIVE_CLASS_INDEX: usize = 1;
 
+/// Number of classes of the MiniFASNetV2 PAD head (`[PrintPhoto, Live, ScreenReplay]`).
+///
+/// The production detector requires exactly this many logits per inference (GitHub #214,
+/// PAD-09): any other length is a wrong model or head and is an error, never a verdict.
+pub const MINIFASNET_CLASS_COUNT: usize = 3;
+
+/// Edge (pixels) of the fixed synthetic fixture used by [`OrtPadDetector::self_test`].
+pub const PAD_SELF_TEST_EDGE: u32 = 80;
+
+/// Grey level of the fixed synthetic (non-biometric) self-test fixture.
+const PAD_SELF_TEST_GREY: u8 = 128;
+
+/// Result of a successful [`OrtPadDetector::self_test`] (safe to log: no biometric data).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PadSelfTestReport {
+    /// Number of logits the loaded model produced for the fixture.
+    pub class_count: usize,
+    /// Live class index the detector reads `p_live` from.
+    pub live_class_index: usize,
+    /// Liveness decision threshold of the detector.
+    pub liveness_threshold: f32,
+}
+
+/// Checks a PAD output vector against the expected class count and the live class index.
+///
+/// Fails closed with [`InferenceError::PadFailed`] when `output_len != expected_classes` or when
+/// `live_class_index` does not address an element of the output.
+pub fn validate_pad_output_contract(
+    output_len: usize,
+    live_class_index: usize,
+    expected_classes: usize,
+) -> Result<(), InferenceError> {
+    if output_len != expected_classes {
+        return Err(InferenceError::PadFailed(format!(
+            "PAD model produced {output_len} output values, the contract requires {expected_classes}"
+        )));
+    }
+    if live_class_index >= output_len {
+        return Err(InferenceError::PadFailed(format!(
+            "PAD live class index {live_class_index} is out of range for {output_len} classes"
+        )));
+    }
+    Ok(())
+}
+
+/// Derives the PAD class count from a manifest entry's `output_shapes`.
+///
+/// - No declared output: [`MINIFASNET_CLASS_COUNT`] (legacy manifests).
+/// - Exactly one declared output: its last dimension, which must equal
+///   [`MINIFASNET_CLASS_COUNT`] (the attack-type mapping is defined for 3 classes only).
+/// - Anything else fails closed with [`InferenceError::PadFailed`].
+pub fn pad_class_count_from_manifest(
+    output_shapes: &[Vec<usize>],
+) -> Result<usize, InferenceError> {
+    let classes = match output_shapes {
+        [] => return Ok(MINIFASNET_CLASS_COUNT),
+        [single] => single.last().copied().ok_or_else(|| {
+            InferenceError::PadFailed("PAD manifest output shape has rank 0".to_string())
+        })?,
+        _ => {
+            return Err(InferenceError::PadFailed(format!(
+                "PAD manifest declares {} outputs, exactly one class vector is required",
+                output_shapes.len()
+            )))
+        }
+    };
+    if classes != MINIFASNET_CLASS_COUNT {
+        return Err(InferenceError::PadFailed(format!(
+            "PAD manifest declares {classes} classes, the detector requires {MINIFASNET_CLASS_COUNT}"
+        )));
+    }
+    Ok(classes)
+}
+
 /// MiniFASNetV2 ONNX Runtime Presentation Attack Detector.
 pub struct OrtPadDetector {
     session: Arc<Mutex<Session>>,
@@ -155,9 +229,16 @@ impl OrtPadDetector {
             ));
         }
 
-        if probs.len() >= 3 {
-            let p_live = probs.get(live_class_index).copied().unwrap_or(0.0);
+        // An index outside the output is a configuration or model error, never a spoof
+        // verdict (GitHub #214, PAD-09).
+        let Some(&p_live) = probs.get(live_class_index) else {
+            return Err(InferenceError::PadFailed(format!(
+                "PAD live class index {live_class_index} is out of range for {} classes",
+                probs.len()
+            )));
+        };
 
+        if probs.len() >= 3 {
             if p_live >= liveness_threshold {
                 Ok(PadResult::live(p_live))
             } else {
@@ -180,23 +261,16 @@ impl OrtPadDetector {
                 Ok(PadResult::spoof(p_live, attack))
             }
         } else if probs.len() == 2 {
-            let p_live = probs.get(live_class_index).copied().unwrap_or(0.0);
             if p_live >= liveness_threshold {
                 Ok(PadResult::live(p_live))
             } else {
                 Ok(PadResult::spoof(p_live, AttackType::UnknownSpoof))
             }
-        } else if let Some(&single) = probs.first() {
-            // Single sigmoid output
-            if single >= liveness_threshold {
-                Ok(PadResult::live(single))
-            } else {
-                Ok(PadResult::spoof(single, AttackType::UnknownSpoof))
-            }
+        } else if p_live >= liveness_threshold {
+            // Single sigmoid output (index 0, checked above)
+            Ok(PadResult::live(p_live))
         } else {
-            Err(InferenceError::PadFailed(
-                "Empty probability distribution returned from PAD model".to_string(),
-            ))
+            Ok(PadResult::spoof(p_live, AttackType::UnknownSpoof))
         }
     }
 
@@ -319,13 +393,10 @@ impl OrtPadDetector {
     }
 }
 
-impl PadDetector for OrtPadDetector {
-    fn evaluate_liveness(
-        &self,
-        rgb: &[u8],
-        width: u32,
-        height: u32,
-    ) -> Result<PadResult, InferenceError> {
+impl OrtPadDetector {
+    /// Runs one inference and returns the raw logits of the first output tensor, after
+    /// checking them against the MiniFASNetV2 output contract.
+    fn run_logits(&self, rgb: &[u8], width: u32, height: u32) -> Result<Vec<f32>, InferenceError> {
         let mut input_data = Self::prepare_input(rgb, width, height)?;
 
         let tensor =
@@ -353,8 +424,45 @@ impl PadDetector for OrtPadDetector {
             .try_extract_tensor::<f32>()
             .map_err(|e| InferenceError::Ort(e.to_string()))?;
         let logits = logits_binding.1;
+        // Per-inference output contract (GitHub #214): a wrong head is an error, never a
+        // verdict. Checked before the copy, so only a 3-element vector is ever materialized.
+        validate_pad_output_contract(logits.len(), self.live_class_index, MINIFASNET_CLASS_COUNT)?;
+        Ok(logits.to_vec())
+    }
 
-        let probs = Self::softmax(logits);
+    /// Startup self-test (GitHub #214, PAD-09): runs one inference on a fixed synthetic
+    /// 80x80 grey fixture and checks that the model emits `expected_classes` logits (derived
+    /// from the manifest with [`pad_class_count_from_manifest`]) and that the live class index
+    /// addresses one of them. Fails closed with [`InferenceError::PadFailed`] otherwise.
+    ///
+    /// The fixture is not a face; its verdict is not asserted, only the output contract.
+    pub fn self_test(&self, expected_classes: usize) -> Result<PadSelfTestReport, InferenceError> {
+        validate_pad_output_contract(
+            MINIFASNET_CLASS_COUNT,
+            self.live_class_index,
+            expected_classes,
+        )?;
+        let edge = PAD_SELF_TEST_EDGE as usize;
+        let fixture = vec![PAD_SELF_TEST_GREY; edge * edge * 3];
+        let logits = self.run_logits(&fixture, PAD_SELF_TEST_EDGE, PAD_SELF_TEST_EDGE)?;
+        validate_pad_output_contract(logits.len(), self.live_class_index, expected_classes)?;
+        Ok(PadSelfTestReport {
+            class_count: logits.len(),
+            live_class_index: self.live_class_index,
+            liveness_threshold: self.liveness_threshold,
+        })
+    }
+}
+
+impl PadDetector for OrtPadDetector {
+    fn evaluate_liveness(
+        &self,
+        rgb: &[u8],
+        width: u32,
+        height: u32,
+    ) -> Result<PadResult, InferenceError> {
+        let logits = self.run_logits(rgb, width, height)?;
+        let probs = Self::softmax(&logits);
         Self::interpret_probabilities(&probs, self.liveness_threshold, self.live_class_index)
     }
 }

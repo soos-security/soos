@@ -31,6 +31,10 @@ mod physical_contract;
 #[cfg(test)]
 mod pam_deadline_contract;
 
+/// PAD startup self-test wiring in the daemon (GitHub #214).
+#[cfg(test)]
+mod pad_startup_contract;
+
 /// Traceability tooling contract for `scripts/sync_issue.py` (GitHub #188).
 #[cfg(all(test, unix))]
 mod sync_issue_contract;

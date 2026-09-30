@@ -137,6 +137,8 @@ Implemented by `OrtPadDetector` (MiniFASNetV2 80×80 BGR) and `MockPadDetector`.
 - `SharedSession` (`Arc<Mutex<ort::session::Session>>`) is the session handle type returned by `ModelRegistry::get_or_load_session` and accepted by every detector constructor.
 - Softmax probability interpretation into `PadResult` with ordinal non-live attack detection (`PrintPhoto` vs `ScreenReplay`).
 - Immediate deterministic post-inference zeroization of input tensors (`Zeroizing<Vec<f32>>`).
+- Output contract (GitHub #214, PAD-09): every inference must produce exactly `MINIFASNET_CLASS_COUNT = 3` logits and `live_class_index` must address one of them (`validate_pad_output_contract`). Any other length, or an out-of-range index in `interpret_probabilities`, is `InferenceError::PadFailed`, never a spoof or live verdict (previously an out-of-range index silently read `p_live = 0.0`, and a single-logit head scored every frame live because softmax over one logit is 1.0).
+- Startup self-test: `OrtPadDetector::self_test(expected_classes)` runs one inference on a fixed synthetic 80×80 grey fixture and returns a `PadSelfTestReport` (`class_count`, `live_class_index`, `liveness_threshold`). `pad_class_count_from_manifest` derives `expected_classes` from the manifest `output_shapes` (`[[1, 3]]`; an omitted entry falls back to 3; any other class count or more than one declared output fails closed). `soos-daemon` runs it through `pipeline::validate_pad_detector` inside `initialize_pipeline`, logs the class index and threshold at info level, and refuses to start on failure.
 
 ### PAD real-model evidence (`tests/pad_real_model_tests.rs`, GitHub #172)
 

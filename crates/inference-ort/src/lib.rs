@@ -30,5 +30,5 @@ pub use error::InferenceError;
 pub use landmarks::{FaceLandmarks, LandmarkDetector, Point2f};
 pub use manifest::{ManifestHeader, ModelManifest, ModelMetadata, TensorLayout};
 pub use mock::{MockEmbeddingExtractor, MockFaceDetector, MockLandmarkDetector, MockPadDetector};
-pub use pad::{AttackType, OrtPadDetector, PadDetector, PadResult};
+pub use pad::{AttackType, OrtPadDetector, PadDetector, PadResult, PadSelfTestReport};
 pub use registry::{ModelRegistry, RegistryConfig, SharedSession};
