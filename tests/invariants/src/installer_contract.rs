@@ -433,7 +433,11 @@ fn test_install_rolls_back_every_change_on_failure() {
         "previous-admin\n",
         "rollback must restore the previous content of overwritten files"
     );
-    assert_eq!(mode_of(&previous_admin), 0o755, "restored file keeps its mode");
+    assert_eq!(
+        mode_of(&previous_admin),
+        0o755,
+        "restored file keeps its mode"
+    );
 
     let _ = fs::remove_dir_all(&stage);
     let _ = fs::remove_dir_all(&artifacts);
@@ -542,7 +546,8 @@ fn test_install_orders_models_before_unit_enable_and_builds_release() {
         fs::read_to_string(root.join("packaging/soos-daemon.service")).expect("read unit file");
     let unit_section = unit.split("[Service]").next().expect("[Unit] section");
     assert!(
-        unit_section.contains("StartLimitIntervalSec=") && unit_section.contains("StartLimitBurst="),
+        unit_section.contains("StartLimitIntervalSec=")
+            && unit_section.contains("StartLimitBurst="),
         "soos-daemon.service must bound restarts in [Unit] (no endless crash loop)"
     );
 }
@@ -555,9 +560,38 @@ fn test_install_orders_models_before_unit_enable_and_builds_release() {
 fn restricted_path(tag: &str) -> PathBuf {
     let bin = scratch_dir(tag);
     let tools = [
-        "bash", "sh", "env", "dirname", "basename", "cat", "cp", "mv", "rm", "mkdir", "chmod",
-        "chown", "id", "sha256sum", "mktemp", "head", "tail", "tr", "cut", "sed", "awk", "grep",
-        "ls", "ln", "stat", "touch", "sort", "wc", "uname", "find", "rmdir", "install",
+        "bash",
+        "sh",
+        "env",
+        "dirname",
+        "basename",
+        "cat",
+        "cp",
+        "mv",
+        "rm",
+        "mkdir",
+        "chmod",
+        "chown",
+        "id",
+        "sha256sum",
+        "mktemp",
+        "head",
+        "tail",
+        "tr",
+        "cut",
+        "sed",
+        "awk",
+        "grep",
+        "ls",
+        "ln",
+        "stat",
+        "touch",
+        "sort",
+        "wc",
+        "uname",
+        "find",
+        "rmdir",
+        "install",
     ];
     let path_var = std::env::var_os("PATH").expect("PATH");
     for tool in tools {
@@ -730,13 +764,33 @@ fn test_download_models_rejects_malformed_or_unsafe_entries() {
     let url = format!("file://{}", src.display());
 
     let cases = [
-        ("path traversal", "../escape.onnx", good_sha.as_str(), url.as_str()),
-        ("absolute path", "/tmp/escape.onnx", good_sha.as_str(), url.as_str()),
-        ("hidden file", ".hidden.onnx", good_sha.as_str(), url.as_str()),
+        (
+            "path traversal",
+            "../escape.onnx",
+            good_sha.as_str(),
+            url.as_str(),
+        ),
+        (
+            "absolute path",
+            "/tmp/escape.onnx",
+            good_sha.as_str(),
+            url.as_str(),
+        ),
+        (
+            "hidden file",
+            ".hidden.onnx",
+            good_sha.as_str(),
+            url.as_str(),
+        ),
         ("short digest", "m.onnx", "abc123", url.as_str()),
         ("non-hex digest", "m.onnx", &"z".repeat(64), url.as_str()),
         ("empty url", "m.onnx", good_sha.as_str(), ""),
-        ("plain http", "m.onnx", good_sha.as_str(), "http://example.invalid/m.onnx"),
+        (
+            "plain http",
+            "m.onnx",
+            good_sha.as_str(),
+            "http://example.invalid/m.onnx",
+        ),
     ];
     for (label, filename, sha, source) in cases {
         let manifest = work.join("manifest.toml");
@@ -967,13 +1021,24 @@ fn test_packaging_and_docs_declare_complete_dependencies() {
         .lines()
         .find(|l| l.starts_with("Build-Depends:"))
         .expect("Build-Depends line");
-    for pkg in ["libssl-dev", "pkg-config", "libclang-dev", "clang", "libpam0g-dev"] {
+    for pkg in [
+        "libssl-dev",
+        "pkg-config",
+        "libclang-dev",
+        "clang",
+        "libpam0g-dev",
+    ] {
         assert!(
             build_depends.contains(pkg),
             "debian/control Build-Depends must contain {pkg}"
         );
     }
-    for pkg in ["openssl-devel", "pkgconf-pkg-config", "clang-devel", "pam-devel"] {
+    for pkg in [
+        "openssl-devel",
+        "pkgconf-pkg-config",
+        "clang-devel",
+        "pam-devel",
+    ] {
         assert!(
             spec.lines()
                 .any(|l| l.starts_with("BuildRequires:") && l.contains(pkg)),

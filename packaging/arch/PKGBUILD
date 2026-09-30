@@ -11,7 +11,7 @@ arch=('x86_64' 'aarch64')
 url="https://github.com/Mysticaly622/soos"
 license=('Apache-2.0' 'MIT')
 depends=('pam' 'systemd')
-makedepends=('cargo' 'rust' 'clang')
+makedepends=('cargo' 'rust' 'clang' 'openssl' 'pkgconf')
 install=soos.install
 source=()
 
