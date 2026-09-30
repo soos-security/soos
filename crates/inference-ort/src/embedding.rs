@@ -143,7 +143,10 @@ use std::sync::{Arc, Mutex};
 /// ResNet34 exported with tf2onnx: NHWC input `input_1` `[N, 112, 112, 3]`, output
 /// `embedding` `[N, 512]`. The layout is detected from the session input; the registry has
 /// already checked it against the manifest `input_layout`. Pixels are fed in B, G, R order
-/// normalized as `(x - 127.5) / 127.5`.
+/// normalized as `(x - 127.5) / 127.5`. The upstream model card of the attested file documents
+/// RGB and `(x - 127.5) / 128.0`; the divisor is template-neutral, the channel order is not, and
+/// switching it is an owner decision tied to re-enrollment (GitHub #278,
+/// `tests/embedding_preprocessing_evaluation_tests.rs`).
 pub struct OrtEmbeddingExtractor {
     session: Arc<Mutex<Session>>,
     is_nhwc: bool,
