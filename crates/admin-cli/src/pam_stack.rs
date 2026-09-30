@@ -17,11 +17,15 @@ pub const MAX_PAM_INCLUDE_DEPTH: usize = 4;
 /// Maximum size of any PAM service file read by `soos-admin gdm`.
 pub const MAX_PAM_FILE_BYTES: u64 = 64 * 1024;
 
-/// Gate modules copied in front of `pam_soos.so` when a delegated stack runs them
-/// before its first credential module (`pam_faillock.so` only with `preauth`).
+/// Gate modules copied in front of `pam_soos.so` when a delegated stack (or the
+/// edited file after a delegation) runs them before its first credential module,
+/// with a plain `required`/`requisite` control (`pam_faillock.so` only with `preauth`).
 const GATE_MODULES: &[&str] = &[
+    "pam_access.so",
     "pam_faillock.so",
+    "pam_listfile.so",
     "pam_nologin.so",
+    "pam_securetty.so",
     "pam_shells.so",
     "pam_succeed_if.so",
 ];
@@ -41,6 +45,21 @@ const PRE_CREDENTIAL_MODULES: &[&str] = &[
     "pam_selinux_permit.so",
     "pam_shells.so",
     "pam_succeed_if.so",
+];
+
+/// Modules that verify a credential (password, Kerberos/LDAP/SSSD/Winbind account,
+/// systemd-homed secret, fingerprint). `pam_soos.so` is inserted immediately before
+/// the first of them (or before the delegation leading to it). Any other auth rule
+/// met before this anchor, outside [`PRE_CREDENTIAL_MODULES`], is unclassified and
+/// makes `gdm enable` refuse (ADR 2026-09-30 "GDM PAM Stack Placement").
+pub const CREDENTIAL_MODULES: &[&str] = &[
+    "pam_unix.so",
+    "pam_sss.so",
+    "pam_ldap.so",
+    "pam_krb5.so",
+    "pam_winbind.so",
+    "pam_systemd_home.so",
+    "pam_fprintd.so",
 ];
 
 /// One active PAM rule of a service file.
@@ -146,6 +165,22 @@ impl<'a> PamLine<'a> {
         PRE_CREDENTIAL_MODULES.contains(&name)
     }
 
+    /// True when the rule is one of the [`CREDENTIAL_MODULES`].
+    pub(crate) fn is_credential(&self) -> bool {
+        self.module_name()
+            .is_some_and(|name| CREDENTIAL_MODULES.contains(&name))
+    }
+
+    /// Operator-facing description of the rule (`<control> <module>`).
+    pub(crate) fn describe(&self) -> String {
+        match self {
+            Self::AtInclude(name) => format!("@include {name}"),
+            Self::Rule {
+                control, module, ..
+            } => format!("'{module}' (control '{control}')"),
+        }
+    }
+
     /// Gate rule to copy in front of `pam_soos.so`, normalized
     /// (`auth  <control>  <module> <args>`), when the control is a plain
     /// `required`/`requisite` keyword.
@@ -180,21 +215,41 @@ impl<'a> PamLine<'a> {
     }
 }
 
-/// Outcome of scanning a delegated stack.
+/// Outcome of scanning an auth stack.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Scan {
-    /// The file ended without reaching a credential module: keep scanning the caller.
+pub(crate) enum Scan {
+    /// The lines ended without reaching a credential module: keep scanning the caller.
     Continue,
-    /// A credential, conditional or unknown rule was reached: gates end here.
+    /// A credential module was reached (or the included file is missing): gates end here.
     Stop,
 }
 
-/// Collects, in evaluation order, the gate rules that the delegated stack `name`
-/// (resolved inside `dir`) runs before its first credential module.
-pub(crate) fn delegated_gates(dir: &Path, name: &str) -> Result<Vec<String>, AdminCliError> {
+/// Collects, in evaluation order, the gate rules run by `lines` (the edited file from
+/// its delegating anchor onward, resolved inside `dir`) before the first credential
+/// module.
+///
+/// # Errors
+///
+/// Refuses (fails closed) when an unclassified rule, a conditional or non-plain gate,
+/// an unresolvable include target, an include chain deeper than
+/// [`MAX_PAM_INCLUDE_DEPTH`] or line continuations are met before the credential
+/// module, and when no credential module is reached at all.
+pub(crate) fn delegated_gates(dir: &Path, lines: &[&str]) -> Result<Vec<String>, AdminCliError> {
     let mut gates = Vec::new();
-    scan_stack(dir, name, 1, &mut gates)?;
-    Ok(gates)
+    match scan_lines(
+        dir,
+        "the edited PAM file",
+        lines.iter().copied(),
+        0,
+        &mut gates,
+    )? {
+        Scan::Stop => Ok(gates),
+        Scan::Continue => Err(AdminCliError::GdmConfig(
+            "the auth stack reaches no known credential module (pam_unix.so, pam_sss.so, ...); \
+             refusing to guess where pam_soos.so belongs"
+                .into(),
+        )),
+    }
 }
 
 fn scan_stack(
@@ -214,8 +269,10 @@ fn scan_stack(
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'));
     if !valid_name {
-        // Absolute or unusual include targets are not resolved: gates end here.
-        return Ok(Scan::Stop);
+        return Err(AdminCliError::GdmConfig(format!(
+            "cannot resolve the included auth stack '{name}' inside the PAM directory; \
+             refusing to guess which gates it runs"
+        )));
     }
     let path = dir.join(name);
     let content = match read_bounded_utf8(&path) {
@@ -224,9 +281,22 @@ fn scan_stack(
         Err(ReadError::NotFound) => return Ok(Scan::Stop),
         Err(ReadError::Other(msg)) => return Err(AdminCliError::GdmConfig(msg)),
     };
-    for raw in content.lines() {
+    let label = format!("the shared auth stack '{name}'");
+    scan_lines(dir, &label, content.lines(), depth, gates)
+}
+
+fn scan_lines<'a>(
+    dir: &Path,
+    label: &str,
+    lines: impl Iterator<Item = &'a str>,
+    depth: usize,
+    gates: &mut Vec<String>,
+) -> Result<Scan, AdminCliError> {
+    for raw in lines {
         if raw.trim_end().ends_with('\\') {
-            return Ok(Scan::Stop);
+            return Err(AdminCliError::GdmConfig(format!(
+                "{label} uses line continuations; refusing to guess the stack order"
+            )));
         }
         let Some(line) = PamLine::parse(raw) else {
             continue;
@@ -241,6 +311,9 @@ fn scan_stack(
             }
             continue;
         }
+        if line.is_credential() {
+            return Ok(Scan::Stop);
+        }
         if let Some(guard) = line.as_guard() {
             if !gates.contains(&guard) {
                 gates.push(guard);
@@ -250,7 +323,12 @@ fn scan_stack(
         if line.is_neutral() {
             continue;
         }
-        return Ok(Scan::Stop);
+        return Err(AdminCliError::GdmConfig(format!(
+            "{label} runs the unclassified auth rule {} before its credential module; \
+             soos cannot tell whether it is a lockout or login gate, so pam_soos.so is not \
+             inserted automatically (see Docs/DISTRIBUTION_DEPLOYMENT.md section 2.1)",
+            line.describe()
+        )));
     }
     Ok(Scan::Continue)
 }

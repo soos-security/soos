@@ -65,20 +65,53 @@ auth        substack      password-auth
 
 Placement rules:
 
-1. The block goes immediately before the first `auth` rule that verifies a credential or
-   delegates to a shared stack (`pam_unix.so`, `include`, `substack`, `@include`), i.e.
-   after `pam_nologin`, `pam_succeed_if`, `pam_shells`, `pam_faillock preauth`,
-   `pam_selinux_permit` and `pam_env` rules of the file. It is never inserted at the top.
+1. The block goes immediately before the **anchor**: the first `auth` rule that verifies a
+   credential or delegates to a shared stack. Credential modules are, exhaustively,
+   `pam_unix.so`, `pam_sss.so`, `pam_ldap.so`, `pam_krb5.so`, `pam_winbind.so`,
+   `pam_systemd_home.so` and `pam_fprintd.so` (`CREDENTIAL_MODULES` in
+   `crates/admin-cli/src/pam_stack.rs`); delegations are `include`, `substack` and
+   `@include`. The only rules allowed before the anchor are the pre-credential ones
+   (`pam_access`, `pam_env`, `pam_faildelay`, `pam_faillock preauth`, `pam_listfile`,
+   `pam_nologin`, `pam_securetty`, `pam_selinux_permit`, `pam_shells`, `pam_succeed_if`);
+   the block goes after them. It is never inserted at the top.
 2. When that anchor delegates (Ubuntu `@include common-auth`, Fedora `substack
    password-auth`, Arch `include system-local-login`), the gates the delegated stack runs
    before its first credential module (`pam_faillock.so preauth`, `pam_nologin.so`,
-   `pam_shells.so`, `pam_succeed_if.so` with a plain `required`/`requisite` control) are
-   copied in front of `pam_soos.so`, following includes up to 4 levels. A locked account
-   therefore fails the auth phase even when the face matches; running `preauth` twice is
-   harmless (it only reads the tally).
-3. `enable` refuses, without changing anything, when `pam_soos.so` is not installed, the
-   file has no anchor, a `[...=N]` jump would change target, the file is not UTF-8, uses
-   line continuations, exceeds 64 KiB or is a symlink.
+   `pam_shells.so`, `pam_succeed_if.so`, `pam_access.so`, `pam_listfile.so`,
+   `pam_securetty.so` with a plain `required`/`requisite` control) are copied in front of
+   `pam_soos.so`, following includes up to 4 levels. If the delegated stack ends without a
+   credential module, the rules after the delegation in `gdm-password` are scanned the
+   same way. A locked account therefore fails the auth phase even when the face matches;
+   running `preauth` twice is harmless (it only reads the tally).
+3. `enable` refuses, without changing anything (no backup, the `gdm.disable` flag stays),
+   when `pam_soos.so` is not installed, the file has no anchor, an **unclassified** auth
+   rule (any module not listed above, e.g. `pam_tally2.so`, `pam_group.so`, a vendor
+   module, or a conditional/`sufficient` gate) runs before the credential module either in
+   `gdm-password` or in a delegated stack, an include target cannot be resolved inside the
+   PAM directory (absolute path), the stack reaches no credential module, a `[...=N]` jump
+   would change target, the file is not UTF-8, uses line continuations, exceeds 64 KiB or
+   is a symlink. soos cannot tell whether an unknown module is a lockout or login gate, so
+   it never guesses.
+
+   **Resolving a refusal.** The error names the rule, e.g. `the PAM file runs the
+   unclassified auth rule 'pam_tally2.so' (control 'required') before its credential
+   module`. Either:
+   - remove or move the rule if it is obsolete (for example migrate `pam_tally2` to
+     `pam_faillock`, which soos recognizes), then run `gdm enable` again; or
+   - write the rule yourself, after every gate the face must not bypass and immediately
+     before the credential module or the `@include`/`substack` line, copying in front of
+     it any `required`/`requisite` gate the shared stack runs before its credential module:
+
+     ```pam
+     auth    required    pam_tally2.so deny=5 onerr=fail
+     auth    required    pam_faillock.so preauth          # copied from common-auth, if present
+     auth    [success=done default=ignore]    pam_soos.so timeout_ms=2500
+     @include common-auth
+     ```
+
+     `gdm enable` never touches a `pam_soos.so` rule you wrote, and `gdm status` reports
+     it as installed. Keep a copy of the original file before editing it by hand
+     (`gdm restore` only knows the `.soos-backup` written by `enable`).
 4. The account phase is never edited: GDM calls `pam_acct_mgmt` after a successful
    `pam_authenticate`, so `pam_nologin`/`pam_faillock`/`pam_unix` account checks always run.
 5. The first `enable` keeps the pristine file as `gdm-password.soos-backup` (restored by

@@ -8,7 +8,7 @@
 
 use serde::Serialize;
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
@@ -172,7 +172,9 @@ fn gdm_error(what: &str, path: &Path, err: &std::io::Error) -> AdminCliError {
 /// pristine pre-soos state), then the new content is written to a temporary file in
 /// the same directory, fsynced and renamed over the original, so a crash never leaves
 /// a truncated PAM file. Symlinks, non-regular, oversized and non-UTF-8 files, stacks
-/// without a credential anchor and stacks whose jumps would change are refused
+/// without a credential anchor, stacks with an unclassified auth rule before that
+/// anchor (in the file or in a delegated stack) and stacks whose jumps would change
+/// are refused
 /// without any modification. A `pam_soos.so` rule written by the administrator is
 /// left untouched.
 fn ensure_gdm_pam_line(pam_file: &Path) -> Result<(), AdminCliError> {
@@ -247,20 +249,32 @@ fn plan_gdm_enable(content: &str, include_dir: &Path) -> Result<Option<EnablePla
         if !rule.is_auth() {
             continue;
         }
-        if rule.delegation().is_none() && rule.is_pre_credential() {
+        if rule.delegation().is_some() || rule.is_credential() {
+            anchor = Some((index, rule));
+            break;
+        }
+        if rule.is_pre_credential() {
             if let Some(jump) = rule.max_jump() {
                 jumps.push((ordinal, jump));
             }
             ordinal = ordinal.saturating_add(1);
             continue;
         }
-        anchor = Some((index, rule));
-        break;
+        // Fail closed: an unclassified rule before the credential anchor may be a
+        // lockout or login gate that a face match must never skip.
+        return Err(AdminCliError::GdmConfig(format!(
+            "the PAM file runs the unclassified auth rule {} before its credential module \
+             or shared auth stack; soos cannot tell whether it is a lockout or login gate, \
+             so pam_soos.so is not inserted automatically \
+             (see Docs/DISTRIBUTION_DEPLOYMENT.md section 2.1)",
+            rule.describe()
+        )));
     }
     let Some((anchor_index, anchor_rule)) = anchor else {
         return Err(AdminCliError::GdmConfig(
-            "no credential module (pam_unix.so) or shared auth stack (include/substack/@include) \
-             found in the PAM file; refusing to guess where pam_soos.so belongs"
+            "no credential module (pam_unix.so, pam_sss.so, ...) or shared auth stack \
+             (include/substack/@include) found in the PAM file; refusing to guess where \
+             pam_soos.so belongs"
                 .into(),
         ));
     };
@@ -282,9 +296,10 @@ fn plan_gdm_enable(content: &str, include_dir: &Path) -> Result<Option<EnablePla
         .filter_map(|raw| PamLine::parse(raw))
         .filter_map(|rule| normalized_rule(&rule))
         .collect();
-    let gates = match anchor_rule.delegation() {
-        Some(target) => delegated_gates(include_dir, target)?,
-        None => Vec::new(),
+    let gates = if anchor_rule.delegation().is_some() {
+        delegated_gates(include_dir, lines.get(anchor_index..).unwrap_or_default())?
+    } else {
+        Vec::new()
     };
 
     let mut updated = String::with_capacity(pristine.len().saturating_add(512));
@@ -393,9 +408,11 @@ fn regular_file_metadata(path: &Path, what: &str) -> Result<fs::Metadata, AdminC
 /// Restores `pam_file` from its [`pam_backup_path`] copy (bytes, mode and owner),
 /// atomically, then removes the backup. Fails without any change when the backup is
 /// missing, a symlink, not a regular file or larger than [`MAX_PAM_FILE_BYTES`].
+/// The backup is checked and read through one `O_NOFOLLOW` descriptor, so the checks
+/// and the bytes restored concern the same file.
 fn restore_gdm_pam_file(pam_file: &Path) -> Result<(), AdminCliError> {
     let backup = pam_backup_path(pam_file);
-    let backup_meta = regular_file_metadata(&backup, "PAM backup")?;
+    let (bytes, backup_meta) = read_backup_bounded(&backup)?;
     match fs::symlink_metadata(pam_file) {
         Ok(meta) if meta.file_type().is_symlink() || !meta.is_file() => {
             return Err(AdminCliError::GdmConfig(format!(
@@ -407,14 +424,6 @@ fn restore_gdm_pam_file(pam_file: &Path) -> Result<(), AdminCliError> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => return Err(gdm_error("Failed to inspect PAM file", pam_file, &e)),
     }
-    if backup_meta.len() > MAX_PAM_FILE_BYTES {
-        return Err(AdminCliError::GdmConfig(format!(
-            "PAM backup '{}' exceeds {MAX_PAM_FILE_BYTES} bytes",
-            backup.display()
-        )));
-    }
-    let bytes =
-        fs::read(&backup).map_err(|e| gdm_error("Failed to read PAM backup", &backup, &e))?;
     let mode = backup_meta.permissions().mode() & 0o7755;
     write_atomic(
         pam_file,
@@ -430,6 +439,59 @@ fn restore_gdm_pam_file(pam_file: &Path) -> Result<(), AdminCliError> {
     fs::File::open(dir)
         .and_then(|d| d.sync_all())
         .map_err(|e| gdm_error("Failed to sync PAM directory", dir, &e))
+}
+
+/// Opens `backup` with `O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC`, checks on the open
+/// descriptor that it is a regular file of at most [`MAX_PAM_FILE_BYTES`], and reads
+/// it through that same descriptor (bounded). Returns the bytes and the descriptor's
+/// metadata (mode and owner to restore).
+fn read_backup_bounded(backup: &Path) -> Result<(Vec<u8>, fs::Metadata), AdminCliError> {
+    let file = match fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
+        .open(backup)
+    {
+        Ok(file) => file,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(AdminCliError::GdmConfig(format!(
+                "PAM backup '{}' does not exist",
+                backup.display()
+            )));
+        }
+        Err(e) if e.raw_os_error() == Some(libc::ELOOP) => {
+            return Err(AdminCliError::GdmConfig(format!(
+                "Refusing to use '{}': not a regular file (symlink or special file)",
+                backup.display()
+            )));
+        }
+        Err(e) => return Err(gdm_error("Failed to open PAM backup", backup, &e)),
+    };
+    let metadata = file
+        .metadata()
+        .map_err(|e| gdm_error("Failed to inspect PAM backup", backup, &e))?;
+    if !metadata.is_file() {
+        return Err(AdminCliError::GdmConfig(format!(
+            "Refusing to use '{}': not a regular file (symlink or special file)",
+            backup.display()
+        )));
+    }
+    if metadata.len() > MAX_PAM_FILE_BYTES {
+        return Err(AdminCliError::GdmConfig(format!(
+            "PAM backup '{}' exceeds {MAX_PAM_FILE_BYTES} bytes",
+            backup.display()
+        )));
+    }
+    let mut bytes = Vec::with_capacity(usize::try_from(metadata.len()).unwrap_or(0));
+    file.take(MAX_PAM_FILE_BYTES.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|e| gdm_error("Failed to read PAM backup", backup, &e))?;
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAX_PAM_FILE_BYTES {
+        return Err(AdminCliError::GdmConfig(format!(
+            "PAM backup '{}' exceeds {MAX_PAM_FILE_BYTES} bytes",
+            backup.display()
+        )));
+    }
+    Ok((bytes, metadata))
 }
 
 /// Writes `bytes` to `target` atomically: exclusive temporary file in the same

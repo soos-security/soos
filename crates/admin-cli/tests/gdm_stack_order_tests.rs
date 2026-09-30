@@ -775,3 +775,215 @@ fn test_soos_admin_gdm_enable_refuses_when_module_is_not_installed() {
         .unwrap()
         .contains(GDM_PAM_LINE));
 }
+
+// ----------------------------------------------------------------------------
+// Anchor classification (candid review 2026-09-30, Finding 1)
+// ----------------------------------------------------------------------------
+
+/// Runs `enable` expecting a refusal; asserts the error names `module`, the PAM file
+/// is byte-for-byte unchanged, no backup exists and the disable flag is kept.
+fn assert_enable_refused(f: &Fixture, original: &str, module: &str) {
+    fs::create_dir_all(f.disable_file.parent().unwrap()).unwrap();
+    fs::write(&f.disable_file, "disabled\n").unwrap();
+    let err = configure_gdm(&GdmAction::Enable, &f.pam_file, &f.disable_file)
+        .expect_err("enable must refuse an unclassified auth rule before the credential anchor");
+    let message = err.to_string();
+    assert!(
+        message.contains(module),
+        "the error must name the offending module {module:?}: {message}"
+    );
+    assert_eq!(fs::read_to_string(&f.pam_file).unwrap(), original);
+    assert!(
+        !pam_backup_path(&f.pam_file).exists(),
+        "no backup on refusal"
+    );
+    assert!(f.disable_file.exists(), "the disable flag stays in place");
+    let leftovers: Vec<String> = fs::read_dir(&f.pam_dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|n| n.starts_with('.'))
+        .collect();
+    assert!(leftovers.is_empty(), "no temporary file: {leftovers:?}");
+}
+
+/// Reviewer scenario (a): a lockout module unknown to soos precedes the shared stack.
+/// The old anchor logic wrote the managed block at index 0, before `pam_tally2`.
+#[test]
+fn test_gdm_enable_refuses_unclassified_lockout_module_before_include() {
+    let original = "\
+#%PAM-1.0
+auth required pam_tally2.so deny=5 onerr=fail
+@include common-auth
+@include common-account
+";
+    let f = fixture(original, &[("common-auth", UBUNTU_COMMON_AUTH)]);
+    assert_enable_refused(&f, original, "pam_tally2.so");
+}
+
+/// Reviewer scenario (b): an unclassified `optional` module sits between the in-file
+/// gates and the shared stack that runs `pam_faillock.so preauth`. The old anchor
+/// logic placed soos before `pam_group` and never copied the faillock gate.
+#[test]
+fn test_gdm_enable_refuses_unclassified_module_before_include_with_faillock() {
+    let original = "\
+#%PAM-1.0
+auth requisite pam_nologin.so
+auth optional pam_group.so
+@include common-auth
+";
+    let f = fixture(
+        original,
+        &[(
+            "common-auth",
+            "auth required pam_faillock.so preauth\nauth [success=1 default=ignore] pam_unix.so nullok\nauth requisite pam_deny.so\nauth required pam_permit.so\n",
+        )],
+    );
+    assert_enable_refused(&f, original, "pam_group.so");
+}
+
+/// An unclassified rule directly in front of `pam_unix.so` is refused as well.
+#[test]
+fn test_gdm_enable_refuses_unclassified_module_before_inline_credential() {
+    let original = "\
+#%PAM-1.0
+auth required pam_env.so
+auth required pam_faildelay.so delay=2000000
+auth required pam_mystery_lockout.so
+auth sufficient pam_unix.so nullok
+auth required pam_deny.so
+";
+    let f = fixture(original, &[]);
+    assert_enable_refused(&f, original, "pam_mystery_lockout.so");
+}
+
+/// An unclassified rule inside the delegated stack, before its credential module,
+/// makes the gates of that stack unknowable: refuse.
+#[test]
+fn test_gdm_enable_refuses_unclassified_module_inside_delegated_stack() {
+    let original = "#%PAM-1.0\nauth requisite pam_nologin.so\n@include common-auth\n";
+    let f = fixture(
+        original,
+        &[(
+            "common-auth",
+            "auth required pam_faillock.so preauth\nauth required pam_tally2.so deny=5\nauth [success=1 default=ignore] pam_unix.so nullok\nauth requisite pam_deny.so\n",
+        )],
+    );
+    assert_enable_refused(&f, original, "pam_tally2.so");
+}
+
+/// A conditional (jump) gate inside the delegated stack cannot be copied in front of
+/// soos without changing its meaning: refuse instead of skipping it.
+#[test]
+fn test_gdm_enable_refuses_conditional_gate_inside_delegated_stack() {
+    let original = "#%PAM-1.0\n@include common-auth\n";
+    let f = fixture(
+        original,
+        &[(
+            "common-auth",
+            "auth [success=1 default=ignore] pam_succeed_if.so user ingroup nopasswdlogin\nauth sufficient pam_unix.so nullok\nauth requisite pam_deny.so\n",
+        )],
+    );
+    assert_enable_refused(&f, original, "pam_succeed_if.so");
+}
+
+/// An include target that cannot be resolved inside the PAM directory (absolute
+/// path) hides its gates: refuse.
+#[test]
+fn test_gdm_enable_refuses_an_unresolvable_include_target() {
+    let original = "#%PAM-1.0\nauth include /etc/pam.d/common-auth\n";
+    let f = fixture(original, &[]);
+    assert_enable_refused(&f, original, "/etc/pam.d/common-auth");
+}
+
+/// When the delegated stack ends without a credential module, the rules following
+/// the delegation in the edited file are scanned too: an unclassified one is refused,
+/// gates are copied and a later credential module ends the scan.
+#[test]
+fn test_gdm_enable_scans_past_a_gate_only_include() {
+    let refused = "\
+#%PAM-1.0
+@include common-gates
+auth required pam_tally2.so deny=5
+auth sufficient pam_unix.so nullok
+";
+    let gates = "auth requisite pam_nologin.so\n";
+    let f = fixture(refused, &[("common-gates", gates)]);
+    assert_enable_refused(&f, refused, "pam_tally2.so");
+
+    let accepted = "\
+#%PAM-1.0
+@include common-gates
+auth required pam_shells.so
+auth sufficient pam_unix.so nullok
+auth required pam_deny.so
+";
+    let f = fixture(accepted, &[("common-gates", gates)]);
+    let content = enable(&f);
+    let soos = line_index(&content, "pam_soos.so");
+    assert!(
+        line_index(&content, "auth  requisite  pam_nologin.so") < soos,
+        "the delegated nologin gate is copied:\n{content}"
+    );
+    assert!(
+        line_index(&content, "auth  required  pam_shells.so") < soos,
+        "the in-file gate after the delegation is copied:\n{content}"
+    );
+    assert!(soos < line_index(&content, "@include common-gates"));
+    assert_soos_after_gates(&f, &["pam_nologin.so", "pam_shells.so"], "pam_unix.so");
+}
+
+/// Every documented credential module is a valid anchor, in the edited file and in a
+/// delegated stack (after a copied faillock gate).
+#[test]
+fn test_gdm_enable_accepts_documented_credential_modules_as_anchor() {
+    for module in [
+        "pam_unix.so",
+        "pam_sss.so",
+        "pam_ldap.so",
+        "pam_krb5.so",
+        "pam_winbind.so",
+        "pam_systemd_home.so",
+        "pam_fprintd.so",
+    ] {
+        let inline = format!(
+            "#%PAM-1.0\nauth requisite pam_nologin.so\nauth sufficient {module}\nauth required pam_deny.so\n"
+        );
+        let f = fixture(&inline, &[]);
+        let content = enable(&f);
+        let soos = line_index(&content, "pam_soos.so");
+        assert!(line_index(&content, "pam_nologin.so") < soos, "{module}");
+        assert!(
+            soos < line_index(&content, &format!("auth sufficient {module}")),
+            "{module}: soos must precede the credential module:\n{content}"
+        );
+
+        let shared = format!(
+            "auth required pam_faillock.so preauth\nauth sufficient {module}\nauth required pam_deny.so\n"
+        );
+        let f = fixture(
+            "#%PAM-1.0\n@include common-auth\n",
+            &[("common-auth", &shared)],
+        );
+        let content = enable(&f);
+        assert_soos_after_gates(&f, &["pam_faillock.so preauth"], module);
+        assert!(content.contains("auth  required  pam_faillock.so preauth"));
+    }
+}
+
+/// `restore` checks the size and type of the backup on the descriptor it reads from:
+/// an oversized backup is refused and nothing changes.
+#[test]
+fn test_gdm_restore_refuses_an_oversized_backup() {
+    let f = fixture(UBUNTU_GDM_PASSWORD, &[]);
+    let backup = pam_backup_path(&f.pam_file);
+    let oversized =
+        vec![b'#'; usize::try_from(soos_admin_cli::gdm::MAX_PAM_FILE_BYTES).unwrap() + 1];
+    fs::write(&backup, &oversized).unwrap();
+    let result = configure_gdm(&GdmAction::Restore, &f.pam_file, &f.disable_file);
+    assert!(result.is_err(), "an oversized backup is never restored");
+    assert_eq!(
+        fs::read_to_string(&f.pam_file).unwrap(),
+        UBUNTU_GDM_PASSWORD
+    );
+    assert_eq!(fs::read(&backup).unwrap(), oversized, "backup kept");
+}
