@@ -4,7 +4,6 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
-use tokio::sync::Semaphore;
 use tokio::time::timeout;
 use tracing::{debug, info, warn};
 use zeroize::Zeroizing;
@@ -12,13 +11,15 @@ use zeroize::Zeroizing;
 use crate::config::DispatcherConfig;
 use crate::error::DaemonError;
 use crate::health::HealthState;
-use crate::peercred::{get_peer_credentials, verify_peer_credentials};
+use crate::inference::{InferenceGate, RequestDeadline};
+use crate::limits::{PeerConnectionLimiter, PeerLimitsConfig};
+use crate::peercred::{get_peer_credentials, verify_peer_credentials, PeerCredentials};
 use crate::pipeline::{
-    current_monotonic_nanos, PipelineComponents, DECISION_BUDGET_MS, FRAME_POLL_INTERVAL_MS,
-    MAX_FRAME_AGE_NS,
+    current_monotonic_nanos, PipelineComponents, FRAME_POLL_INTERVAL_MS, MAX_FRAME_AGE_NS,
 };
 use crate::preview::{authorize_preview, PreviewConfig};
 use crate::session::SessionValidator;
+use crate::session_policy::LocalSessionPolicy;
 use soos_policy::{ConsensusDecision, FrameEvaluation, PadAggregator, RateLimiter};
 use soos_protocol::codec::{encode, encode_preview};
 use soos_protocol::types::{
@@ -34,6 +35,8 @@ struct ProcessedOutput {
     encoded_response: Option<Zeroizing<Vec<u8>>>,
     /// Deferred error to return after response transmission (e.g. wire validation error).
     completion_error: Option<DaemonError>,
+    /// Close the connection after this output (an `Auth` request is one-shot, GitHub #157).
+    one_shot: bool,
 }
 
 /// Internal representation of a request response before transmission.
@@ -43,28 +46,48 @@ struct ResponseOutput {
     completion_error: Option<DaemonError>,
 }
 
+/// Whether a capture taken at `timestamp_ns` is still fresh at `now_ns` (`MAX_FRAME_AGE_NS`).
+///
+/// Captures without a timestamp, or stamped in the future, are accepted as before.
+fn is_frame_fresh(timestamp_ns: u64, now_ns: u64) -> bool {
+    if timestamp_ns > 0 && now_ns > timestamp_ns {
+        now_ns.saturating_sub(timestamp_ns) <= MAX_FRAME_AGE_NS
+    } else {
+        true
+    }
+}
+
 /// Connection dispatcher managing concurrent incoming client requests.
 pub struct ConnectionDispatcher {
     config: DispatcherConfig,
     health: Arc<HealthState>,
     pipeline: Option<PipelineComponents>,
-    semaphore: Arc<Semaphore>,
+    connection_limiter: PeerConnectionLimiter,
     start_time: Instant,
     session_validator: SessionValidator,
+    session_policy: LocalSessionPolicy,
     clock_fn: fn() -> Result<u64, DaemonError>,
     preview: PreviewConfig,
     preview_limiter: tokio::sync::Mutex<RateLimiter>,
+    inference: InferenceGate,
+    peer_limits: PeerLimitsConfig,
+    event_limiter: tokio::sync::Mutex<RateLimiter>,
 }
 
 impl ConnectionDispatcher {
     /// Creates a new connection dispatcher wrapping configuration and health state.
     pub fn new(config: DispatcherConfig, health: Arc<HealthState>) -> Self {
-        let semaphore = Arc::new(Semaphore::new(config.max_concurrent_connections));
+        let peer_limits = PeerLimitsConfig::default();
+        let connection_limiter =
+            PeerConnectionLimiter::new(config.max_concurrent_connections, &peer_limits);
+        let event_limiter =
+            tokio::sync::Mutex::new(RateLimiter::new(peer_limits.event_rate_limit_config()));
         let session_validator = if config.enforce_active_session {
             SessionValidator::with_sessions_dir(config.logind_sessions_dir.clone())
         } else {
             SessionValidator::disabled()
         };
+        let session_policy = LocalSessionPolicy::from_validator(&session_validator);
         let preview = PreviewConfig::default();
         let preview_limiter =
             tokio::sync::Mutex::new(RateLimiter::new(preview.rate_limit_config()));
@@ -72,12 +95,16 @@ impl ConnectionDispatcher {
             config,
             health,
             pipeline: None,
-            semaphore,
+            connection_limiter,
             start_time: Instant::now(),
             session_validator,
+            session_policy,
             clock_fn: current_monotonic_nanos,
             preview,
             preview_limiter,
+            inference: InferenceGate::default(),
+            peer_limits,
+            event_limiter,
         }
     }
 
@@ -87,12 +114,17 @@ impl ConnectionDispatcher {
         health: Arc<HealthState>,
         pipeline: PipelineComponents,
     ) -> Self {
-        let semaphore = Arc::new(Semaphore::new(config.max_concurrent_connections));
+        let peer_limits = PeerLimitsConfig::default();
+        let connection_limiter =
+            PeerConnectionLimiter::new(config.max_concurrent_connections, &peer_limits);
+        let event_limiter =
+            tokio::sync::Mutex::new(RateLimiter::new(peer_limits.event_rate_limit_config()));
         let session_validator = if config.enforce_active_session {
             SessionValidator::with_sessions_dir(config.logind_sessions_dir.clone())
         } else {
             SessionValidator::disabled()
         };
+        let session_policy = LocalSessionPolicy::from_validator(&session_validator);
         let preview = PreviewConfig::default();
         let preview_limiter =
             tokio::sync::Mutex::new(RateLimiter::new(preview.rate_limit_config()));
@@ -100,12 +132,16 @@ impl ConnectionDispatcher {
             config,
             health,
             pipeline: Some(pipeline),
-            semaphore,
+            connection_limiter,
             start_time: Instant::now(),
             session_validator,
+            session_policy,
             clock_fn: current_monotonic_nanos,
             preview,
             preview_limiter,
+            inference: InferenceGate::default(),
+            peer_limits,
+            event_limiter,
         }
     }
 
@@ -119,7 +155,15 @@ impl ConnectionDispatcher {
     /// Overrides the session validator (used for custom or mock session directories).
     #[must_use]
     pub fn with_session_validator(mut self, validator: SessionValidator) -> Self {
+        self.session_policy = LocalSessionPolicy::from_validator(&validator);
         self.session_validator = validator;
+        self
+    }
+
+    /// Overrides the local-session policy applied to `Auth` requests (GitHub #160).
+    #[must_use]
+    pub fn with_session_policy(mut self, policy: LocalSessionPolicy) -> Self {
+        self.session_policy = policy;
         self
     }
 
@@ -135,6 +179,41 @@ impl ConnectionDispatcher {
         self
     }
 
+    /// Overrides the vision inference gate (slot count and initial latency estimate).
+    ///
+    /// Without this call the dispatcher uses [`InferenceGate::default`]
+    /// (`MAX_CONCURRENT_INFERENCES` slots, `DEFAULT_INFERENCE_ESTIMATE_MS` estimate).
+    #[must_use]
+    pub fn with_inference_gate(mut self, gate: InferenceGate) -> Self {
+        self.inference = gate;
+        self
+    }
+
+    /// Returns the vision inference gate (GitHub #158).
+    #[must_use]
+    pub const fn inference_gate(&self) -> &InferenceGate {
+        &self.inference
+    }
+
+    /// Configures the per-peer connection and event limits (`[peer_limits]`, GitHub #157).
+    ///
+    /// Without this call the dispatcher keeps [`PeerLimitsConfig::default`].
+    #[must_use]
+    pub fn with_peer_limits(mut self, limits: PeerLimitsConfig) -> Self {
+        self.connection_limiter =
+            PeerConnectionLimiter::new(self.config.max_concurrent_connections, &limits);
+        self.event_limiter =
+            tokio::sync::Mutex::new(RateLimiter::new(limits.event_rate_limit_config()));
+        self.peer_limits = limits;
+        self
+    }
+
+    /// Returns the active per-peer limits.
+    #[must_use]
+    pub const fn peer_limits(&self) -> &PeerLimitsConfig {
+        &self.peer_limits
+    }
+
     /// Returns the active preview authorization policy.
     #[must_use]
     pub const fn preview_config(&self) -> &PreviewConfig {
@@ -145,24 +224,60 @@ impl ConnectionDispatcher {
         (self.clock_fn)()
     }
 
-    /// Returns the number of currently available concurrency permits.
+    /// Returns the number of currently available concurrency permits (root view: permits
+    /// reserved for root peers included).
     pub fn available_permits(&self) -> usize {
-        self.semaphore.available_permits()
+        self.connection_limiter.available()
     }
 
     /// Processes an incoming Unix domain stream through authentication,
     /// bounded reading, peer verification, and response generation.
+    ///
+    /// Admission is keyed on the kernel `SO_PEERCRED` UID (GitHub #157): a refused peer's
+    /// stream is closed immediately, without reading or answering anything. An admitted
+    /// connection serves at most `max_requests_per_connection` requests, is not read again
+    /// once `max_connection_lifetime` has elapsed, and is closed right after an `Auth`
+    /// response (one-shot).
     pub async fn handle_connection(&self, mut stream: UnixStream) -> Result<(), DaemonError> {
-        let _permit = match self.semaphore.clone().try_acquire_owned() {
+        let peer = match get_peer_credentials(&stream) {
+            Ok(peer) => peer,
+            Err(err) => {
+                warn!(error = %err, "SO_PEERCRED lookup failed; closing connection");
+                return Err(err);
+            }
+        };
+        let _permit = match self.connection_limiter.try_acquire(peer.uid) {
             Ok(permit) => permit,
-            Err(_) => {
-                warn!("Concurrency limit reached; rejecting connection");
+            Err(rejection) => {
+                warn!(
+                    peer_uid = peer.uid,
+                    reason = %rejection,
+                    "Connection limit reached; closing connection"
+                );
                 return Err(DaemonError::ConcurrencyLimitReached);
             }
         };
 
+        let opened_at = Instant::now();
         let mut requests_processed: usize = 0;
         loop {
+            if requests_processed >= self.peer_limits.max_requests_per_connection {
+                info!(
+                    peer_uid = peer.uid,
+                    requests = requests_processed,
+                    "Per-connection request cap reached; closing connection"
+                );
+                break;
+            }
+            if opened_at.elapsed() >= self.peer_limits.max_connection_lifetime {
+                info!(
+                    peer_uid = peer.uid,
+                    requests = requests_processed,
+                    "Connection lifetime cap reached; closing connection"
+                );
+                break;
+            }
+
             // Phase 1: Request Reading & Processing Phase.
             // Bounded by connection_timeout. Strictly performs socket reading and pipeline computation,
             // producing a fully encoded in-memory response buffer (Option<Vec<u8>>).
@@ -170,7 +285,7 @@ impl ConnectionDispatcher {
             // upon timeout will never leave partial response bytes on the wire.
             let res = timeout(
                 self.config.connection_timeout,
-                self.read_and_process(&mut stream),
+                self.read_and_process(&mut stream, peer),
             )
             .await;
 
@@ -208,6 +323,11 @@ impl ConnectionDispatcher {
             if let Some(err) = output.completion_error {
                 return Err(err);
             }
+
+            if output.one_shot {
+                debug!("Auth request served; closing one-shot connection");
+                break;
+            }
         }
 
         Ok(())
@@ -216,9 +336,13 @@ impl ConnectionDispatcher {
     async fn read_and_process(
         &self,
         stream: &mut UnixStream,
+        peer: PeerCredentials,
     ) -> Result<ProcessedOutput, DaemonError> {
-        // Step 1: Extract peer credentials via SO_PEERCRED
-        let peer = get_peer_credentials(stream)?;
+        // Start of the outer `connection_timeout` window for this request: every later budget
+        // (camera wake, consensus loop, inference admission) is measured from here (#159).
+        let request_started = Instant::now();
+
+        // Step 1: Peer credentials were extracted once via SO_PEERCRED at admission.
 
         // Step 2: Read framed length prefix (4 bytes big-endian)
         let mut len_bytes = [0u8; 4];
@@ -263,24 +387,33 @@ impl ConnectionDispatcher {
                 // of `event.request_id`. If `req.uid_hint == peer.uid`, it is a valid Request.
                 // Otherwise, it is an Event notification.
                 if req.uid_hint == peer.uid {
-                    let res = self.handle_request(peer.uid, req).await?;
+                    let one_shot = req.kind == RequestKind::Auth;
+                    let res = self
+                        .handle_request(peer.uid, peer.pid, req, request_started)
+                        .await?;
                     Ok(ProcessedOutput {
                         encoded_response: Some(res.encoded_response),
                         completion_error: res.completion_error,
+                        one_shot,
                     })
                 } else {
                     self.handle_event(peer.uid, event).await?;
                     Ok(ProcessedOutput {
                         encoded_response: None,
                         completion_error: None,
+                        one_shot: false,
                     })
                 }
             }
             (Some(req), None) => {
-                let res = self.handle_request(peer.uid, req).await?;
+                let one_shot = req.kind == RequestKind::Auth;
+                let res = self
+                    .handle_request(peer.uid, peer.pid, req, request_started)
+                    .await?;
                 Ok(ProcessedOutput {
                     encoded_response: Some(res.encoded_response),
                     completion_error: res.completion_error,
+                    one_shot,
                 })
             }
             (None, Some(event)) => {
@@ -288,6 +421,7 @@ impl ConnectionDispatcher {
                 Ok(ProcessedOutput {
                     encoded_response: None,
                     completion_error: None,
+                    one_shot: false,
                 })
             }
             (None, None) => {
@@ -304,6 +438,21 @@ impl ConnectionDispatcher {
         }
 
         if event.kind == EventKind::PasswordFailed {
+            // Per-peer-UID event quota (GitHub #175 hardening): bounds how often any peer,
+            // root included, can make the daemon capture an evidence snapshot.
+            // Trust model (AI/DECISIONS.md, GitHub #175): a root peer (sudo, su, login,
+            // gdm-session-worker) may report for any UID; any other peer only for itself.
+            if peer_uid != 0 && event.uid.is_some_and(|claimed| claimed != peer_uid) {
+                warn!(
+                    peer_uid = peer_uid,
+                    claimed_uid = ?event.uid,
+                    "Unprivileged peer reported an event for another UID; dropping event"
+                );
+                return Ok(());
+            }
+            if !self.event_within_quota(peer_uid).await {
+                return Ok(());
+            }
             let target_uid = event.uid.unwrap_or(peer_uid);
             info!(
                 peer_uid = peer_uid,
@@ -338,10 +487,38 @@ impl ConnectionDispatcher {
         Ok(())
     }
 
+    /// Records one `PasswordFailed` event of `peer_uid` against the per-peer quota.
+    ///
+    /// Returns `false` (event dropped, fail closed) when the quota is exhausted, the
+    /// limiter table is full, or the monotonic clock is unavailable.
+    async fn event_within_quota(&self, peer_uid: u32) -> bool {
+        let now_ns = match self.now_nanos() {
+            Ok(ns) => ns,
+            Err(err) => {
+                warn!(error = %err, "Monotonic clock unavailable; dropping event");
+                return false;
+            }
+        };
+        let mut limiter = self.event_limiter.lock().await;
+        match limiter.check_and_record(peer_uid, now_ns) {
+            Ok(()) => true,
+            Err(err) => {
+                warn!(
+                    peer_uid = peer_uid,
+                    error = %err,
+                    "Event quota exceeded for peer; dropping PasswordFailed event"
+                );
+                false
+            }
+        }
+    }
+
     async fn handle_request(
         &self,
         peer_uid: u32,
+        peer_pid: Option<i32>,
         req: Request,
+        request_started: Instant,
     ) -> Result<ResponseOutput, DaemonError> {
         // Step 5a: Wire protocol validation (version and bounded fields)
         if let Err(val_err) = req.validate() {
@@ -383,7 +560,7 @@ impl ConnectionDispatcher {
         let cred_struct = crate::peercred::PeerCredentials {
             uid: peer_cred.as_raw(),
             gid: 0,
-            pid: None,
+            pid: peer_pid,
         };
         if let Err(err) = verify_peer_credentials(&cred_struct, req.uid_hint) {
             let (verdict, reason_class) = match err {
@@ -407,12 +584,20 @@ impl ConnectionDispatcher {
             });
         }
 
-        // Step 6b: Verify active logind session
-        if req.kind == RequestKind::Auth && !self.session_validator.is_active_session(req.uid_hint)
-        {
+        // Step 6b: Local-session policy (GitHub #160): a root peer must be tied to its own
+        // active, local, seat-attached session of the target UID; fails closed.
+        let session_check = if req.kind == RequestKind::Auth {
+            self.session_policy
+                .authorize_auth(&cred_struct, req.uid_hint)
+        } else {
+            Ok(())
+        };
+        if let Err(denial) = session_check {
             warn!(
-                uid = req.uid_hint,
-                "Target UID has no active logind session; rejecting auth request"
+                peer_uid = peer_uid,
+                target_uid = req.uid_hint,
+                reason = denial.as_str(),
+                "Local-session policy refused auth request; password fallback"
             );
             let encoded = self.build_response(
                 req.request_id,
@@ -473,7 +658,15 @@ impl ConnectionDispatcher {
 
         // Step 8: Full pipeline processing
         if let Some(ref pipe) = self.pipeline {
-            let auth_start = Instant::now();
+            // Single request deadline (GitHub #159), computed once and threaded through the
+            // camera wake wait and the consensus loop: min(client deadline, request start +
+            // connection_timeout), each minus the response write margin.
+            let deadline = RequestDeadline::compute(
+                now_ns,
+                req.deadline_monotonic_ns,
+                request_started,
+                self.config.connection_timeout,
+            );
 
             // 8-pre: Fail-fast rate limiting check (anti-DoS: avoid neural & camera workload if already blocked)
             {
@@ -511,11 +704,13 @@ impl ConnectionDispatcher {
             } else {
                 Duration::from_millis(1000)
             };
-            let max_wake = max_wake.min(
-                self.config
-                    .connection_timeout
-                    .saturating_sub(Duration::from_millis(100)),
-            );
+            let max_wake = max_wake
+                .min(
+                    self.config
+                        .connection_timeout
+                        .saturating_sub(Duration::from_millis(100)),
+                )
+                .min(deadline.remaining(now_ns));
 
             if !pipe.camera.is_ready() {
                 let wake_start = Instant::now();
@@ -576,21 +771,6 @@ impl ConnectionDispatcher {
                 }
             };
 
-            // 8d: Dynamic decision budget from client deadline, strictly bounded by connection_timeout
-            let client_budget = if req.deadline_monotonic_ns > 0
-                && req.deadline_monotonic_ns < u64::MAX
-                && req.deadline_monotonic_ns > now_ns
-            {
-                Duration::from_nanos(req.deadline_monotonic_ns.saturating_sub(now_ns))
-            } else {
-                Duration::from_millis(DECISION_BUDGET_MS)
-            };
-            let max_allowed_budget = self
-                .config
-                .connection_timeout
-                .saturating_sub(Duration::from_millis(50));
-            let total_budget = client_budget.min(max_allowed_budget);
-
             // 8e: Multi-frame PAD consensus loop (GitHub #147 / PAD-02).
             // Allow requires k consecutive passing captures (live at or above the PAD
             // threshold and matching at or above the cosine threshold) inside a bounded
@@ -600,7 +780,7 @@ impl ConnectionDispatcher {
             let mut last_sequence: Option<u64> = None;
             let mut last_capture_stale = false;
 
-            while auth_start.elapsed() < total_budget {
+            loop {
                 let cur_ns = match self.now_nanos() {
                     Ok(ns) => ns,
                     Err(err) => {
@@ -618,7 +798,7 @@ impl ConnectionDispatcher {
                     }
                 };
 
-                if req.deadline_monotonic_ns > 0 && cur_ns >= req.deadline_monotonic_ns {
+                if deadline.remaining(cur_ns).is_zero() {
                     break;
                 }
 
@@ -631,17 +811,63 @@ impl ConnectionDispatcher {
                     if is_new {
                         last_sequence = Some(frame.sequence);
 
-                        let is_fresh =
-                            if frame.timestamp_mono_ns > 0 && cur_ns > frame.timestamp_mono_ns {
-                                let age_ns = cur_ns.saturating_sub(frame.timestamp_mono_ns);
-                                age_ns <= MAX_FRAME_AGE_NS
-                            } else {
-                                true
+                        if is_frame_fresh(frame.timestamp_mono_ns, cur_ns) {
+                            last_capture_stale = false;
+
+                            // 8e-1: Inference admission (GitHub #158 / #159). Never start an
+                            // inference whose estimated duration exceeds the remaining budget,
+                            // and never queue behind a busy inference slot past the last
+                            // feasible start time: finalize with the current consensus instead.
+                            let estimate = self.inference.estimate();
+                            if !deadline.can_start(cur_ns, estimate) {
+                                debug!(
+                                    estimate_ms = estimate.as_millis(),
+                                    "Remaining budget below the inference estimate; finalizing"
+                                );
+                                break;
+                            }
+                            let max_wait = deadline.remaining(cur_ns).saturating_sub(estimate);
+                            let Some(permit) = self.inference.acquire_within(max_wait).await else {
+                                debug!("Inference slot still busy at the last feasible start; finalizing");
+                                break;
+                            };
+                            let start_ns = self.now_nanos().unwrap_or(u64::MAX);
+                            if !deadline.can_start(start_ns, self.inference.estimate()) {
+                                drop(permit);
+                                break;
+                            }
+                            if !is_frame_fresh(frame.timestamp_mono_ns, start_ns) {
+                                // Aged while waiting for the slot: never evaluate it.
+                                drop(permit);
+                                continue;
+                            }
+
+                            // 8e-2: CPU inference on the bounded blocking pool; the async
+                            // worker stays free for the accept loop and Status requests.
+                            let vision = Arc::clone(&pipe.vision);
+                            let job_frame = Arc::clone(&frame);
+                            let result = match self
+                                .inference
+                                .run(permit, move || vision.process_frame(&job_frame))
+                                .await
+                            {
+                                Ok(result) => result,
+                                Err(err) => {
+                                    warn!(error = %err, "Vision inference job failed; failing closed");
+                                    let encoded = self.build_response(
+                                        req.request_id,
+                                        Verdict::Unavailable,
+                                        ReasonClass::InternalError,
+                                        cur_ns,
+                                    )?;
+                                    return Ok(ResponseOutput {
+                                        encoded_response: encoded,
+                                        completion_error: None,
+                                    });
+                                }
                             };
 
-                        if is_fresh {
-                            last_capture_stale = false;
-                            let evaluation = match pipe.vision.process_frame(&frame) {
+                            let evaluation = match result {
                                 Ok(output) => {
                                     let sim = match soos_vision::cosine_similarity(
                                         enrolled_template.embedding.as_slice(),
@@ -744,7 +970,7 @@ impl ConnectionDispatcher {
 
                 // Deadline-aware poll: never sleep past the decision budget so the response
                 // is always rendered before the connection timeout.
-                let remaining = total_budget.saturating_sub(auth_start.elapsed());
+                let remaining = deadline.remaining(self.now_nanos().unwrap_or(u64::MAX));
                 if remaining.is_zero() {
                     break;
                 }

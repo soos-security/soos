@@ -6,7 +6,9 @@
 //! active logind sessions."
 //!
 //! Queries `/run/systemd/sessions/` to confirm that the asserted target UID owns
-//! an active local session (`ACTIVE=1` or `STATE=active`).
+//! an active session (`ACTIVE=1` or `STATE=active`) that logind does not flag as
+//! remote (`REMOTE=1`). Used by the preview path; facial `Auth` requests go through
+//! the stricter [`crate::session_policy::LocalSessionPolicy`] (GitHub #160).
 
 use std::fs;
 use std::io::Read;
@@ -149,7 +151,7 @@ impl SessionValidator {
     }
 
     /// Reads and parses an individual logind session file to determine if it belongs
-    /// to `uid` and is currently active.
+    /// to `uid`, is currently active and is not a remote session.
     fn is_session_file_active_for_uid(&self, path: &Path, uid: u32) -> bool {
         let file = match fs::File::open(path) {
             Ok(f) => f,
@@ -163,24 +165,7 @@ impl SessionValidator {
             return false;
         }
 
-        let mut file_uid = None;
-        let mut is_active = false;
-
-        for line in content.lines() {
-            let trimmed = line.trim();
-            if trimmed.is_empty() || trimmed.starts_with('#') {
-                continue;
-            }
-
-            if let Some(val) = trimmed.strip_prefix("UID=") {
-                if let Ok(parsed) = val.trim().parse::<u32>() {
-                    file_uid = Some(parsed);
-                }
-            } else if trimmed == "ACTIVE=1" || trimmed == "STATE=active" {
-                is_active = true;
-            }
-        }
-
-        file_uid == Some(uid) && is_active
+        // Sessions flagged `REMOTE=1` (SSH, remote X11) never qualify (GitHub #160).
+        crate::session_policy::SessionRecord::parse(&content).is_active_non_remote_of(uid)
     }
 }

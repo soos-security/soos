@@ -224,3 +224,151 @@ fn test_authenticate_with_none_handle_returns_ignore_cleanly() {
         "authenticate_with_config(None) must return PAM_IGNORE without panicking"
     );
 }
+
+// ---------------------------------------------------------------------------
+// GitHub #176 (review PAM-05): the PAM_SERVICE item drives the service name and the
+// administrator disable flags (`gdm.disable`, `<service>.disable`) actually apply.
+// ---------------------------------------------------------------------------
+
+fn config_with_flag_dir(dir: &std::path::Path) -> pam_soos::config::PamConfig {
+    pam_soos::config::PamConfig {
+        flag_dir: dir.to_path_buf(),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn test_default_flag_dir_is_etc_soos() {
+    let config = pam_soos::config::PamConfig::default();
+    assert_eq!(config.flag_dir, PathBuf::from("/etc/soos"));
+    assert!(!config.service_from_args);
+}
+
+#[test]
+fn test_service_argument_marks_service_as_explicit() {
+    let arg = CString::new("service=sudo").unwrap();
+    let args = [arg.as_ptr().cast::<u8>()];
+    // SAFETY: args contains 1 valid C string pointer
+    let config = unsafe { parse_argv(1, args.as_ptr()) };
+    assert_eq!(config.service, "sudo");
+    assert!(config.service_from_args);
+
+    let empty = CString::new("service=").unwrap();
+    let args_empty = [empty.as_ptr().cast::<u8>()];
+    // SAFETY: args_empty contains 1 valid C string pointer
+    let config_empty = unsafe { parse_argv(1, args_empty.as_ptr()) };
+    assert!(
+        !config_empty.service_from_args,
+        "an empty service= argument must not count as an explicit service"
+    );
+}
+
+#[test]
+fn test_pam_service_item_used_when_no_service_argument() {
+    let mut config = pam_soos::config::PamConfig::default();
+    config.apply_pam_service(b"gdm-password");
+    assert_eq!(config.service, "gdm-password");
+}
+
+#[test]
+fn test_explicit_service_argument_wins_over_pam_service_item() {
+    let arg = CString::new("service=sudo").unwrap();
+    let args = [arg.as_ptr().cast::<u8>()];
+    // SAFETY: args contains 1 valid C string pointer
+    let mut config = unsafe { parse_argv(1, args.as_ptr()) };
+    config.apply_pam_service(b"gdm-password");
+    assert_eq!(config.service, "sudo");
+}
+
+#[test]
+fn test_pam_service_item_is_bounded_and_validated() {
+    let mut long = pam_soos::config::PamConfig::default();
+    long.apply_pam_service("s".repeat(200).as_bytes());
+    assert_eq!(long.service.len(), soos_protocol::MAX_SERVICE_LEN);
+
+    // Multi-byte UTF-8 straddling the bound is truncated on a char boundary.
+    let mut multibyte = pam_soos::config::PamConfig::default();
+    let name = format!("{}é", "a".repeat(soos_protocol::MAX_SERVICE_LEN - 1));
+    multibyte.apply_pam_service(name.as_bytes());
+    assert_eq!(
+        multibyte.service,
+        "a".repeat(soos_protocol::MAX_SERVICE_LEN - 1)
+    );
+
+    let mut invalid = pam_soos::config::PamConfig::default();
+    invalid.apply_pam_service(&[0xff, 0xfe, b'x']);
+    assert_eq!(
+        invalid.service, "pam_soos",
+        "non UTF-8 service keeps the default"
+    );
+
+    let mut empty = pam_soos::config::PamConfig::default();
+    empty.apply_pam_service(b"   ");
+    assert_eq!(empty.service, "pam_soos", "blank service keeps the default");
+}
+
+#[test]
+fn test_gdm_disable_flag_in_flag_dir_disables_every_gdm_service() {
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::write(temp.path().join("gdm.disable"), "").unwrap();
+
+    for service in ["gdm-password", "gdm-fingerprint", "gdm-smartcard"] {
+        let mut config = config_with_flag_dir(temp.path());
+        config.apply_pam_service(service.as_bytes());
+        assert!(
+            config.is_disabled(),
+            "{service} must be disabled by <flag_dir>/gdm.disable"
+        );
+    }
+
+    let mut sudo = config_with_flag_dir(temp.path());
+    sudo.apply_pam_service(b"sudo");
+    assert!(
+        !sudo.is_disabled(),
+        "gdm.disable must not disable non-GDM services"
+    );
+}
+
+#[test]
+fn test_global_disabled_flag_in_flag_dir_disables_everything() {
+    let temp = tempfile::tempdir().unwrap();
+    let config = config_with_flag_dir(temp.path());
+    assert!(!config.is_disabled());
+    std::fs::write(temp.path().join("disabled"), "").unwrap();
+    assert!(config.is_disabled());
+}
+
+#[test]
+fn test_per_service_disable_flag_in_flag_dir() {
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::write(temp.path().join("sudo.disable"), "").unwrap();
+
+    let mut sudo = config_with_flag_dir(temp.path());
+    sudo.apply_pam_service(b"sudo");
+    assert!(
+        sudo.is_disabled(),
+        "<flag_dir>/sudo.disable must disable sudo"
+    );
+
+    let mut login = config_with_flag_dir(temp.path());
+    login.apply_pam_service(b"login");
+    assert!(!login.is_disabled());
+}
+
+#[test]
+fn test_per_service_flag_rejects_path_traversal_service_names() {
+    let temp = tempfile::tempdir().unwrap();
+    let flags = temp.path().join("flags");
+    std::fs::create_dir(&flags).unwrap();
+    // A flag outside flag_dir must never be reachable through a crafted service name.
+    std::fs::write(temp.path().join("escape.disable"), "").unwrap();
+
+    for service in ["../escape", "a/../../escape", ".hidden", "/abs"] {
+        let mut config = config_with_flag_dir(&flags);
+        config.apply_pam_service(service.as_bytes());
+        assert!(
+            !config.is_disabled(),
+            "service name {service:?} must not resolve a flag outside flag_dir"
+        );
+    }
+}

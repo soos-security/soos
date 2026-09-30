@@ -51,7 +51,7 @@ Sent by the PAM module to the daemon to request facial verification:
 - `request_id: RequestId`: 256-bit cryptographic random identifier (`[u8; 32]`) sourced via `getrandom`.
 - `uid_hint: u32`: Declared UID from the PAM client (authoritatively cross-checked by the daemon using kernel `SO_PEERCRED`).
 - `service: String`: PAM service name (`"sudo"`, `"su"`, `"gdm-password"`...). Bounded to 64 bytes.
-- `deadline_monotonic_ns: u64`: Absolute monotonic deadline in nanoseconds. If exceeded, daemon immediately returns `Verdict::Unavailable`.
+- `deadline_monotonic_ns: u64`: Absolute monotonic deadline in nanoseconds. If exceeded, daemon immediately returns `Verdict::Unavailable`. `0` or `u64::MAX` means no client deadline (`DECISION_BUDGET_MS` applies). The daemon stops its decision `RESPONSE_WRITE_MARGIN_MS` (50 ms) before the earlier of this deadline and its own `connection_timeout` (measured from the start of request processing), and never starts an inference that would not finish in time; the response is then `Unavailable`/`Timeout` (or the consensus reached so far), never a silent overrun.
 
 ### `Response`
 Returned by the daemon to the PAM module:
@@ -61,7 +61,7 @@ Returned by the daemon to the PAM module:
   - `Deny`: Authentication failed (no face, multiple faces, low score, PAD anti-spoof rejected).
   - `Unavailable`: Hardware offline, model uninitialized, or deadline expired.
   - `ProtocolError`: Malformed message, mismatched UID, rate-limit reached.
-- `reason_class: ReasonClass`: Internal telemetry diagnostic (must not alter PAM fallback semantics).
+- `reason_class: ReasonClass`: Internal telemetry diagnostic (must not alter PAM fallback semantics). It is **never** shown to the user: the PAM module maps every `Deny` to one neutral text and every other failure to one generic text, so a PAD rejection is indistinguishable from a non-match at the lock screen (review PAM-03, GitHub #174; see `Docs/PAM_MODULE.md` §8).
 - `issued_monotonic_ns: u64`: Generation timestamp.
 - `expires_monotonic_ns: u64`: Short expiration timestamp preventing replay.
 
@@ -136,6 +136,7 @@ In `pam_soos.so`, the synchronous IPC client (`crates/pam/src/ipc.rs`) enforces 
 - Both the 4-byte Big-Endian length header and the variable-length body payload are read using a byte-counted stream reader.
 - If the socket connection is severed prematurely before the declared frame is fully received, the client detects the discrepancy and raises `IpcError::TruncatedResponse { expected, received }`.
 - In accordance with fail-closed security invariants, any truncated response degrades safely to `PAM_IGNORE`.
+- The whole exchange shares one cumulative deadline derived from the clamped `timeout_ms`: the socket timeout is re-armed with the remaining budget before every `read()` / `write()` syscall, and a response completed after the deadline is discarded (`IpcError::Timeout`). A peer sending one byte at a time cannot extend the wait (review PAM-02, GitHub #173).
 
 ---
 
@@ -178,7 +179,7 @@ Constants live in `crates/daemon/src/preview.rs`: `MAX_PREVIEW_ALLOWED_UIDS = 64
 |---|---|---|
 | 6 | Kernel `SO_PEERCRED` UID versus `uid_hint` (`verify_peer_credentials`) | `ProtocolError` / `UidMismatch` |
 | 6c-1 | `authorize_preview`: `peer_uid == 0`, or `enabled` and `peer_uid ∈ allowed_uids` and `peer_uid == uid_hint` | `ProtocolError` / `UidMismatch` |
-| 6c-2 | Unprivileged peer owns an active logind session (`SessionValidator`, same as `Auth`) | `ProtocolError` / `UidMismatch` |
+| 6c-2 | Unprivileged peer owns an active logind session not flagged `REMOTE=1` (`SessionValidator`) | `ProtocolError` / `UidMismatch` |
 | 6c-3 | Per-peer-UID rate limit (`soos_policy::RateLimiter`, `check_and_record`) | `ProtocolError` / `RateLimited` |
 | 6c-4 | Monotonic clock available | `Unavailable` / `InternalError` |
 
@@ -191,3 +192,45 @@ Only after these checks does the daemon call `camera.notify_activity()`, wait fo
 - `IpcCameraManager::probe_preview` performs one round-trip at GUI start-up. On refusal the GUI does **not** fall back to direct V4L2 access (GitHub #150): the daemon owns the camera, so the GUI shows an actionable "Camera unavailable" notice (`soos_gui::camera_mode::CameraBlockReason`) instead of fighting the daemon for the device with `EBUSY`.
 - Direct V4L2 access is selected only when the daemon is provably not running: `connect(2)` on the socket fails with `ENOENT`/`ECONNREFUSED` **and** `systemctl is-active soos-daemon.service` is false. `EACCES`/`EPERM` (user not in the `soos` group, `/run/soos` is `0750 root:soos`) is reported as "add the user to the `soos` group, then log out and back in".
 
+---
+
+## 10. Local Session Binding for `RequestKind::Auth` (GitHub #160)
+
+After the `SO_PEERCRED` check (Step 6) the dispatcher runs `LocalSessionPolicy::authorize_auth` (Step 6b, `crates/daemon/src/session_policy.rs`) on every facial `Auth` request. The kernel peer PID captured at `accept` is passed through; it is never taken from the payload.
+
+| Peer | Requirement | Typical caller |
+|---|---|---|
+| `peer_uid == 0`, caller in a session scope | The peer PID maps (`/proc/<pid>/cgroup`, first unit below the slices is `session-<id>.scope`, as `sd_pid_get_session` resolves it) to a logind session whose record in `/run/systemd/sessions/<id>` has `UID == uid_hint`, `ACTIVE=1` or `STATE=active`, `REMOTE=0`, a non-empty `SEAT=` and `CLASS=user` | `sudo` in a TTY or in a terminal started inside the session scope, lock-screen worker in the user's session |
+| `peer_uid == 0`, caller under the user manager | The peer PID is in no session scope and its cgroup (unified `0::` line and/or v1 `name=systemd` line, all agreeing) is `/user.slice/user-<uid>.slice/user@<uid>.service/<child>...` with both `<uid>` strictly decimal (no sign, no leading zero, fits `u32`) and equal to `uid_hint`; the target owns at least one session with the record requirements above; the target owns **no** session with `REMOTE=1` or an unknown remote flag, in any state (a record without `UID=` counts as possibly the target's) | `sudo` in a GNOME ≥ 3.34 / KDE Plasma ≥ 5.25 terminal (`app.slice/.../vte-spawn-*.scope`, `app-org.kde.konsole-*.scope`), polkit agent of `org.gnome.Shell@wayland.service` |
+| `peer_uid == uid_hint` (non-root) | The target owns an active session not flagged `REMOTE=1` | screen lockers running PAM as the user |
+
+Refused (`ProtocolError` / `UidMismatch`, PAM falls back to the password): `sudo` or `su` from an SSH session, `su <victim>` from another user's local session or from another user's desktop terminal (`user@<other>.service`, `user_manager_uid_mismatch`), face `sudo` from the desktop while the same account also has an SSH session (`user_manager_caller_remote_session_active`: that session could reach the user manager through `systemd-run --user`), a malformed user-manager cgroup (`user_manager_cgroup_malformed`), a user-manager caller whose target has no local seat session (`user_manager_no_local_seat_session`), `sshd` logins (sshd is in no session), a remote-only user, a missing or non-positive peer PID, a session that vanished, an unreadable or oversized logind/procfs state. The daemon logs a stable reason code (`SessionDenial::as_str`, e.g. `caller_session_remote`) with the peer and target UIDs only; session contents such as `REMOTE_HOST` are never logged. Session IDs are validated as ASCII alphanumerics of at most 64 bytes before they are joined to the sessions directory, record files are read only if they are regular files (no symlink following) and are bounded to 4 KiB, cgroup files to 16 KiB, and the directory scan to 1024 entries (larger fails closed).
+
+## 11. Per-Peer Connection Limits and Event Quota (GitHub #157, #175)
+
+Since GitHub #157 (review finding DMN-04) connection admission is keyed on the kernel `SO_PEERCRED` UID instead of a single global semaphore, so one `soos`-group account can no longer hold every permit and deny face login to everyone. The PAM module runs inside root processes (`gdm-session-worker`, `sudo`, `su`, `login`, `polkit-agent-helper-1`), which is why root peers get a reserved share of the capacity.
+
+### Daemon configuration (`/etc/soos/daemon.toml`)
+
+```toml
+[peer_limits]
+max_connections_per_uid = 2          # concurrent connections of one unprivileged UID (root exempt)
+reserved_root_connections = 2        # permits of [dispatcher] max_concurrent_connections usable only by root
+max_requests_per_connection = 1024   # requests served on one connection before it is closed
+max_connection_lifetime_ms = 30000   # a connection is not read again after this age
+max_events_per_window = 5            # PasswordFailed events per peer UID (root included); 0 drops all
+event_window_ms = 10000              # sliding window of the event quota
+```
+
+Constants live in `crates/daemon/src/limits.rs` (`DEFAULT_*`, `EVENT_RATE_MAX_TRACKED_UIDS = 256`). `PeerLimitsConfig::validate` rejects at startup (`DaemonError::Config`) a zero capacity, per-UID cap, request cap, lifetime or event window, and a `reserved_root_connections` that is not strictly below `[dispatcher] max_concurrent_connections` (e.g. `max_concurrent_connections = 2` now requires `reserved_root_connections <= 1`). A dispatcher built without `with_peer_limits` uses `PeerLimitsConfig::default()`; the library limiter additionally clamps the reservation so at least one unprivileged permit always remains.
+
+### Admission and connection lifecycle (`ConnectionDispatcher::handle_connection`)
+
+1. `SO_PEERCRED` is read once, before any byte of the stream; failure closes the connection.
+2. `PeerConnectionLimiter::try_acquire(peer_uid)` refuses the peer with `GlobalCapacity` (every permit in use), `ReservedForPrivileged` (unprivileged peer and only root-reserved permits remain) or `PerUidCap` (the unprivileged UID already holds `max_connections_per_uid`). The refusal is logged with `peer_uid` and the reason, and the stream is closed immediately without reading or answering: the PAM client sees EOF and returns `PAM_IGNORE` (password fallback), and nothing ever waits on a permit. The limiter table holds only UIDs with a connection in use, so it is bounded by the capacity.
+3. An admitted connection serves requests until the client closes it, it stays idle past `connection_timeout`, `max_requests_per_connection` requests were served, or `max_connection_lifetime` has elapsed (checked before each read, so the worst-case lifetime is the cap plus one request/response cycle).
+4. An `Auth` request is one-shot: the daemon closes the connection right after writing its `Response` (the PAM client already drops it). `Status`, `PreviewFrame` and events may share one connection within the caps; `soos-gui` reconnects transparently (200 ms) when the daemon closes its preview connection.
+
+### `PasswordFailed` event quota
+
+Every `EventKind::PasswordFailed` event is first counted against a per-peer-UID sliding window (`soos_policy::RateLimiter`, root included, 256 tracked UIDs); an event beyond the quota, a full limiter table or an unavailable monotonic clock drops the event with a `warn` naming `peer_uid`, and no camera snapshot is taken. Before the quota, the target UID is authorized against the kernel peer UID (GitHub #175, ADR in `AI/DECISIONS.md`): a root peer (sudo, su, login, gdm-session-worker, polkit-agent-helper-1) may report for any UID; any other peer only for itself (`uid` absent or equal to its `SO_PEERCRED` UID). Any other event is dropped with a `warn` naming `peer_uid` and the claimed UID, and no snapshot is taken. Events carry no response, so nothing changes on the wire.

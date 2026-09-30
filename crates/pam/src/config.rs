@@ -17,6 +17,10 @@ pub const MAX_TIMEOUT_MS: u64 = 5000;
 /// Default service identifier if not provided.
 pub const DEFAULT_SERVICE: &str = "pam_soos";
 
+/// Default directory holding the administrator disable flag files
+/// (`disabled`, `gdm.disable`, `<service>.disable`).
+pub const DEFAULT_FLAG_DIR: &str = "/etc/soos";
+
 /// Maximum length of a PAM argument string (bytes) to prevent unbounded reads.
 const MAX_ARG_LEN: usize = 256;
 
@@ -55,6 +59,12 @@ pub struct PamConfig {
     pub socket_path: PathBuf,
     /// PAM service name.
     pub service: String,
+    /// True when `service` was set by an explicit `service=` PAM argument. When false,
+    /// [`PamConfig::apply_pam_service`] replaces it with the `PAM_SERVICE` item.
+    pub service_from_args: bool,
+    /// Directory holding the administrator disable flag files ([`DEFAULT_FLAG_DIR`]).
+    /// Not settable from PAM arguments.
+    pub flag_dir: PathBuf,
     /// Optional target UID override specified in PAM arguments.
     pub uid: Option<u32>,
     /// Explicitly disabled via PAM argument.
@@ -67,14 +77,45 @@ pub struct PamConfig {
 }
 
 impl PamConfig {
+    /// Adopts the `PAM_SERVICE` item as the service name unless `service=` was given.
+    ///
+    /// The installed PAM lines (`soos-admin gdm enable`, packaging snippets) pass no
+    /// `service=` argument, so without this the module always reported `pam_soos` and the
+    /// GDM flag never applied (review PAM-05, GitHub #176). The value must be UTF-8, is
+    /// trimmed and bounded to [`soos_protocol::MAX_SERVICE_LEN`] bytes on a char boundary;
+    /// anything else keeps the current value.
+    pub fn apply_pam_service(&mut self, pam_service: &[u8]) {
+        if self.service_from_args {
+            return;
+        }
+        let Ok(name) = std::str::from_utf8(pam_service) else {
+            return;
+        };
+        let name = name.trim();
+        let mut end = name.len().min(soos_protocol::MAX_SERVICE_LEN);
+        while end > 0 && !name.is_char_boundary(end) {
+            end = end.saturating_sub(1);
+        }
+        if let Some(bounded) = name.get(..end) {
+            if !bounded.is_empty() {
+                self.service = bounded.to_string();
+            }
+        }
+    }
+
     /// Returns true if PAM authentication is explicitly disabled for this service or globally.
+    ///
+    /// Checked flags (all under [`PamConfig::flag_dir`], `/etc/soos` by default):
+    /// `disabled` (global), `gdm.disable` (any service whose name contains `gdm`) and
+    /// `<service>.disable` (only for service names made of `[A-Za-z0-9._-]` that do not
+    /// start with `.`, so a crafted name can never reach outside the flag directory).
     pub fn is_disabled(&self) -> bool {
         if self.disabled {
             return true;
         }
 
         // Check global disable flag
-        if std::path::Path::new("/etc/soos/disabled").exists() {
+        if self.flag_dir.join("disabled").exists() {
             return true;
         }
 
@@ -85,15 +126,32 @@ impl PamConfig {
             }
         }
 
-        // Check service-specific disable flag for GDM
-        if (self.service == "gdm-password" || self.service.contains("gdm"))
-            && std::path::Path::new("/etc/soos/gdm.disable").exists()
+        // Check service-specific disable flag for GDM (gdm-password, gdm-fingerprint, ...)
+        if self.service.contains("gdm") && self.flag_dir.join("gdm.disable").exists() {
+            return true;
+        }
+
+        // Check the generic per-service flag
+        if is_flag_safe_service_name(&self.service)
+            && self
+                .flag_dir
+                .join(format!("{}.disable", self.service))
+                .exists()
         {
             return true;
         }
 
         false
     }
+}
+
+/// True when `name` can be used verbatim as a flag file stem inside the flag directory.
+fn is_flag_safe_service_name(name: &str) -> bool {
+    !name.is_empty()
+        && !name.starts_with('.')
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
 }
 
 impl Default for PamConfig {
@@ -103,6 +161,8 @@ impl Default for PamConfig {
             event: None,
             socket_path: PathBuf::from(DEFAULT_SOCKET_PATH),
             service: DEFAULT_SERVICE.to_string(),
+            service_from_args: false,
+            flag_dir: PathBuf::from(DEFAULT_FLAG_DIR),
             uid: None,
             disabled: false,
             disable_file: None,
@@ -156,6 +216,7 @@ fn apply_arg(config: &mut PamConfig, trimmed: &str) {
             let bounded_len = s.len().min(soos_protocol::MAX_SERVICE_LEN);
             if let Some(sub) = s.get(..bounded_len) {
                 config.service = sub.to_string();
+                config.service_from_args = true;
             }
         }
     } else if let Some(val) = trimmed.strip_prefix("uid=") {

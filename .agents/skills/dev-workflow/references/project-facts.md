@@ -47,6 +47,9 @@ ADR entry in `AI/DECISIONS.md`. Re-check every value below with the listed `grep
 | `DECISION_BUDGET_MS` | `crates/daemon/src/pipeline.rs` | 900 ms |
 | `MAX_FRAME_AGE_NS` | `crates/daemon/src/pipeline.rs` | 150 ms |
 | `FRAME_POLL_INTERVAL_MS` | `crates/daemon/src/pipeline.rs` | 10 ms (consensus loop poll) |
+| `MAX_CONCURRENT_INFERENCES` | `crates/daemon/src/inference.rs` | 1 (blocking-pool inference slots) |
+| `RESPONSE_WRITE_MARGIN_MS` | `crates/daemon/src/inference.rs` | 50 ms (reserved before client and outer deadlines) |
+| `DEFAULT_INFERENCE_ESTIMATE_MS` / `MAX_INFERENCE_ESTIMATE_MS` | `crates/daemon/src/inference.rs` | 80 / 1000 ms (initial / upper bound of the EMA admission estimate) |
 | `DEFAULT_PAD_CONSENSUS_REQUIRED` / `_WINDOW` / `MAX_PAD_CONSENSUS_WINDOW` | `crates/policy/src/pad_consensus.rs` | 3 / 5 / 32 captures (Allow needs 3 consecutive; any spoof vetoes the request) |
 | GDM PAM line | `crates/admin-cli/src/gdm.rs` | `auth sufficient pam_soos.so timeout_ms=2500` |
 | admin-cli `DEFAULT_TIMEOUT_MS` | `crates/admin-cli/src/args.rs` | 250 ms |
@@ -70,7 +73,7 @@ production never overrides it — `OrtPadDetector::new` only, enforced by the in
 | `/var/lib/soos/biometrics/`, `/var/lib/soos/evidence/` | 0700 | `root:root` |
 | `/var/lib/soos/models/` | 0755 (files 0644) | `root:root` |
 | `/var/lib/soos/master.key` | 0600 | `root:root` |
-| `/etc/soos/disabled`, `/etc/soos/gdm.disable` | flag files | PAM returns `PAM_IGNORE` immediately |
+| `/etc/soos/disabled`, `/etc/soos/gdm.disable`, `/etc/soos/<service>.disable` | flag files | PAM returns `PAM_IGNORE` immediately; the service is `service=` or else the `PAM_SERVICE` item [94] |
 
 ## 4. Model Contract (manifest `models/manifest.toml` v2.0.0)
 
@@ -93,7 +96,7 @@ cargo deny --locked check                      # cargo-deny >= 0.20
 ./scripts/candid_review.sh                     # Layer 1 deterministic invariants
 ./scripts/candid_subagent.sh --prepare         # Layer 2: diff + fingerprint for the reviewer
 ./scripts/candid_subagent.sh                   # Layer 2 gate (fresh, fingerprint-bound report)
-./run_tests.sh                                 # Dockerized PAM matrix T1–T10 (ubuntu)
+./run_tests.sh                                 # Dockerized PAM matrix T1–T12 (ubuntu)
 ```
 
 Omitting `--all-features` locally was the root cause of several CI-only failures [65–75].

@@ -168,7 +168,17 @@ assert_eq!(aggregator.decision(), ConsensusDecision::SpoofVetoed);
 `crates/daemon/src/dispatcher.rs` (step 8e) records one `FrameEvaluation` per **distinct, fresh**
 camera capture (new sequence number, age `<= MAX_FRAME_AGE_NS`), stops as soon as the decision is
 `Allow` or `SpoofVetoed`, and otherwise polls every `FRAME_POLL_INTERVAL_MS` until the decision
-budget expires (the poll never sleeps past the budget). After the loop the engine records exactly
+budget expires (the poll never sleeps past the budget). The budget is a single
+`soos_daemon::inference::RequestDeadline` computed once per request: the smaller of the client
+deadline and the request start plus `connection_timeout`, each minus `RESPONSE_WRITE_MARGIN_MS`
+(50 ms) reserved for writing the response and the PAM read; `DECISION_BUDGET_MS` applies only when
+the client sends no deadline. Each capture is evaluated on the Tokio blocking pool behind the
+`InferenceGate` semaphore (`MAX_CONCURRENT_INFERENCES` = 1); an inference starts only if the
+measured latency estimate (bounded EMA, initially `DEFAULT_INFERENCE_ESTIMATE_MS` = 80 ms) fits the
+remaining budget and the slot is obtained before the last feasible start. Otherwise the loop
+finalizes with the current consensus (`Unavailable`/`Timeout` when no capture was evaluated); a
+panicking inference job fails closed with `Unavailable`/`InternalError` (GitHub #158, #159).
+After the loop the engine records exactly
 one rate-limit attempt (`AuthorizationEngine::record_attempt`); if that recording is rejected, an
 `Allow` is downgraded to `ProtocolError`/`RateLimited`.
 
