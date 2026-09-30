@@ -277,7 +277,7 @@ impl ConnectionDispatcher {
                 // of `event.request_id`. If `req.uid_hint == peer.uid`, it is a valid Request.
                 // Otherwise, it is an Event notification.
                 if req.uid_hint == peer.uid {
-                    let res = self.handle_request(peer.uid, req).await?;
+                    let res = self.handle_request(peer.uid, peer.pid, req).await?;
                     Ok(ProcessedOutput {
                         encoded_response: Some(res.encoded_response),
                         completion_error: res.completion_error,
@@ -291,7 +291,7 @@ impl ConnectionDispatcher {
                 }
             }
             (Some(req), None) => {
-                let res = self.handle_request(peer.uid, req).await?;
+                let res = self.handle_request(peer.uid, peer.pid, req).await?;
                 Ok(ProcessedOutput {
                     encoded_response: Some(res.encoded_response),
                     completion_error: res.completion_error,
@@ -355,6 +355,7 @@ impl ConnectionDispatcher {
     async fn handle_request(
         &self,
         peer_uid: u32,
+        peer_pid: Option<i32>,
         req: Request,
     ) -> Result<ResponseOutput, DaemonError> {
         // Step 5a: Wire protocol validation (version and bounded fields)
@@ -397,7 +398,7 @@ impl ConnectionDispatcher {
         let cred_struct = crate::peercred::PeerCredentials {
             uid: peer_cred.as_raw(),
             gid: 0,
-            pid: None,
+            pid: peer_pid,
         };
         if let Err(err) = verify_peer_credentials(&cred_struct, req.uid_hint) {
             let (verdict, reason_class) = match err {
@@ -421,12 +422,20 @@ impl ConnectionDispatcher {
             });
         }
 
-        // Step 6b: Verify active logind session
-        if req.kind == RequestKind::Auth && !self.session_validator.is_active_session(req.uid_hint)
-        {
+        // Step 6b: Local-session policy (GitHub #160): a root peer must be tied to its own
+        // active, local, seat-attached session of the target UID; fails closed.
+        let session_check = if req.kind == RequestKind::Auth {
+            self.session_policy
+                .authorize_auth(&cred_struct, req.uid_hint)
+        } else {
+            Ok(())
+        };
+        if let Err(denial) = session_check {
             warn!(
-                uid = req.uid_hint,
-                "Target UID has no active logind session; rejecting auth request"
+                peer_uid = peer_uid,
+                target_uid = req.uid_hint,
+                reason = denial.as_str(),
+                "Local-session policy refused auth request; password fallback"
             );
             let encoded = self.build_response(
                 req.request_id,
