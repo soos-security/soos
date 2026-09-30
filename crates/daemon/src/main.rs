@@ -13,8 +13,8 @@ use soos_daemon::dispatcher::ConnectionDispatcher;
 use soos_daemon::health::HealthState;
 use soos_daemon::logging::init_logging;
 use soos_daemon::pipeline::{initialize_pipeline, warmed_inference_gate, EMBEDDING_MODEL_ID};
-use soos_daemon::shutdown::{accept_until_shutdown, install_panic_hook, ConnectionTasks};
 use soos_daemon::sd_notify::{self, NotifyOutcome};
+use soos_daemon::shutdown::{accept_until_shutdown, install_panic_hook, ConnectionTasks};
 use soos_daemon::socket::bind_socket;
 
 /// Poll interval of the camera health transition logger.
