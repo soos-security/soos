@@ -9,10 +9,7 @@
     reason = "Contractual test suite utilizes direct assertions, unwrap, and indexing"
 )]
 
-use soos_inference_ort::detector::BoundingBox;
-use soos_inference_ort::error::InferenceError;
-use soos_inference_ort::landmarks::{FaceLandmarks, LandmarkDetector, Point2f};
-use soos_inference_ort::mock::MockLandmarkDetector;
+use soos_inference_ort::landmarks::{FaceLandmarks, Point2f};
 
 #[test]
 fn test_point2f_distance() {
@@ -59,36 +56,4 @@ fn test_face_landmarks_roll_angle() {
 
     let expected = std::f32::consts::FRAC_PI_4;
     assert!((lm.roll_angle_rad() - expected).abs() < 1e-5);
-}
-
-#[test]
-fn test_mock_landmark_detector_scaling() {
-    let detector = MockLandmarkDetector::new_canonical();
-    let dummy_rgb = vec![0u8; 320 * 240 * 3];
-
-    // Bounding box with 2x scale (224x224) starting at (50, 50)
-    let bbox = BoundingBox::new(50.0, 50.0, 274.0, 274.0);
-
-    let landmarks = detector
-        .detect_landmarks(&dummy_rgb, 320, 240, &bbox)
-        .expect("landmark detection failed");
-
-    // Left eye in canonical is (38.29, 51.69)
-    // Scaled by 224 / 112 = 2.0 -> (76.58, 103.38)
-    // Offset by +50.0 -> (126.58, 153.38)
-    assert!((landmarks.left_eye.x - 126.58).abs() < 1e-2);
-    assert!((landmarks.left_eye.y - 153.38).abs() < 1e-2);
-
-    // Fault injection
-    detector.set_fail_next(true);
-    let err = detector
-        .detect_landmarks(&dummy_rgb, 320, 240, &bbox)
-        .expect_err("fault injected call must fail");
-
-    match err {
-        InferenceError::LandmarkFailed(msg) => {
-            assert!(msg.contains("Simulated"));
-        }
-        other => panic!("Expected LandmarkFailed, got: {:?}", other),
-    }
 }

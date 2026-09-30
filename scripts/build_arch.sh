@@ -62,7 +62,11 @@ while [[ $# -gt 0 ]]; do
 done
 
 PKG_NAME="soos"
-VERSION="0.1.0"
+# Version and license come from [workspace.package] in Cargo.toml (GitHub #210).
+# shellcheck source=scripts/lib/pkg_meta.sh
+source "${WORKSPACE_ROOT}/scripts/lib/pkg_meta.sh"
+VERSION="$(soos_pkg_version)"
+PKG_LICENSE="$(soos_pkg_license)"
 RELEASE="1"
 ARCH=$(uname -m)
 
@@ -71,6 +75,7 @@ PKG_FILENAME="${PKG_NAME}-${VERSION}-${RELEASE}-${ARCH}.pkg.tar.zst"
 echo "=== soos Arch Linux Package Builder ==="
 echo "Package:    ${PKG_NAME}"
 echo "Version:    ${VERSION}-${RELEASE}"
+echo "License:    ${PKG_LICENSE}"
 echo "Arch:       ${ARCH}"
 echo "Output:     ${OUTPUT_DIR}/${PKG_FILENAME}"
 echo "======================================="
@@ -84,7 +89,7 @@ mkdir -p "${OUTPUT_DIR}"
 
 if [[ "${SKIP_BUILD}" = false ]]; then
     echo "[1/4] Compiling workspace crates in release mode..."
-    cargo build --release --workspace
+    cargo build --locked --release --workspace
 fi
 
 ARCH_STAGE=$(mktemp -d "/tmp/soos_arch_stage.XXXXXX")
@@ -98,6 +103,7 @@ bash "${WORKSPACE_ROOT}/scripts/install.sh" \
     --destdir "${ARCH_STAGE}" \
     --prefix "/usr" \
     --pam-dir "/usr/lib/security" \
+    --distro arch \
     --skip-models \
     --skip-systemd
 
@@ -119,8 +125,7 @@ builddate = ${BUILD_DATE}
 packager = soos developers <dev@soos.local>
 size = ${SIZE}
 arch = ${ARCH}
-license = Apache-2.0
-license = MIT
+license = ${PKG_LICENSE}
 depend = pam
 depend = systemd
 EOF

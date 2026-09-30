@@ -9,6 +9,43 @@ use crate::error::DaemonError;
 use crate::limits::PeerLimitsConfig;
 use crate::preview::PreviewConfig;
 
+/// The only socket permission modes accepted from configuration (GitHub #199, DMN-08).
+///
+/// Neither grants any bit to "other", and neither carries setuid/setgid/sticky bits.
+pub const ALLOWED_SOCKET_MODES: [u32; 2] = [0o660, 0o600];
+
+/// Lower bound of `[dispatcher] connection_timeout_ms` (a zero or near-zero timeout makes
+/// every request time out and leaves the camera wake budget at zero).
+pub const MIN_CONNECTION_TIMEOUT_MS: u64 = 100;
+
+/// Upper bound of `[dispatcher] connection_timeout_ms` (a connection permit must never be
+/// held for an unbounded time).
+pub const MAX_CONNECTION_TIMEOUT_MS: u64 = 10_000;
+
+/// Default `[dispatcher] connection_timeout_ms` (user decision 2026-09-30).
+///
+/// The daemon's request budget is min(client deadline, request start + this timeout) minus
+/// `RESPONSE_WRITE_MARGIN_MS`. 2500 ms matches the GDM line `timeout_ms=2500`, so the greeter
+/// really gets that daemon time; console/sudo stacks stay capped by the 1000 ms PAM module
+/// default (`crates/pam/src/config.rs` `DEFAULT_TIMEOUT_MS`) through their client deadline.
+pub const DEFAULT_CONNECTION_TIMEOUT_MS: u64 = 2500;
+
+/// Maximum length in bytes of the `log_level` filter directive.
+pub const MAX_LOG_LEVEL_LEN: usize = 256;
+
+/// Number of warm-up frames `soos-daemon` discards after a camera (re)start, whatever the
+/// configuration source (GitHub #205, review finding DMN-16).
+///
+/// Applied by [`DaemonConfig::from_toml_str`] (with or without a `[pipeline]` table) and by
+/// [`DaemonConfig::runtime_default`] (no `/etc/soos/daemon.toml`). `0` keeps the documented
+/// instant-wake contract; operators opt into discarding frames with `[pipeline] warmup_frames`.
+/// The camera crate default (`soos_camera_v4l::CameraConfig::default()`, 20) is a library
+/// default and is not what the daemon runs with.
+pub const DAEMON_DEFAULT_WARMUP_FRAMES: usize = 0;
+
+/// System configuration file read by `soos-daemon` when `--config` is not given.
+pub const DEFAULT_CONFIG_PATH: &str = "/etc/soos/daemon.toml";
+
 /// Configuration for the Unix domain socket listener.
 #[derive(Debug, Clone)]
 pub struct SocketConfig {
@@ -22,6 +59,25 @@ pub struct SocketConfig {
     pub enforce_root_owner: bool,
     /// Target system group for socket ownership (defaults to `"soos"`).
     pub socket_group: Option<String>,
+}
+
+impl SocketConfig {
+    /// Validates the socket settings fail-closed.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DaemonError::Config`] when `socket_mode` is not one of
+    /// [`ALLOWED_SOCKET_MODES`].
+    pub fn validate(&self) -> Result<(), DaemonError> {
+        if !ALLOWED_SOCKET_MODES.contains(&self.socket_mode) {
+            return Err(DaemonError::Config(format!(
+                "[socket] socket_mode {:o} is not allowed (accepted: 660, 600; the socket must \
+                 never be accessible to other users)",
+                self.socket_mode
+            )));
+        }
+        Ok(())
+    }
 }
 
 impl Default for SocketConfig {
@@ -49,11 +105,38 @@ pub struct DispatcherConfig {
     pub logind_sessions_dir: PathBuf,
 }
 
+impl DispatcherConfig {
+    /// Validates the dispatcher settings fail-closed.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DaemonError::Config`] when `max_concurrent_connections` is zero or
+    /// `connection_timeout` lies outside
+    /// [`MIN_CONNECTION_TIMEOUT_MS`]..=[`MAX_CONNECTION_TIMEOUT_MS`].
+    pub fn validate(&self) -> Result<(), DaemonError> {
+        if self.max_concurrent_connections == 0 {
+            return Err(DaemonError::Config(
+                "[dispatcher] max_concurrent_connections must be at least 1".into(),
+            ));
+        }
+        let timeout_ms = self.connection_timeout.as_millis();
+        if timeout_ms < u128::from(MIN_CONNECTION_TIMEOUT_MS)
+            || timeout_ms > u128::from(MAX_CONNECTION_TIMEOUT_MS)
+        {
+            return Err(DaemonError::Config(format!(
+                "[dispatcher] connection_timeout_ms {timeout_ms} is outside \
+                 {MIN_CONNECTION_TIMEOUT_MS}..={MAX_CONNECTION_TIMEOUT_MS}"
+            )));
+        }
+        Ok(())
+    }
+}
+
 impl Default for DispatcherConfig {
     fn default() -> Self {
         Self {
             max_concurrent_connections: 8,
-            connection_timeout: Duration::from_millis(1000),
+            connection_timeout: Duration::from_millis(DEFAULT_CONNECTION_TIMEOUT_MS),
             enforce_active_session: true,
             logind_sessions_dir: PathBuf::from(crate::session::DEFAULT_LOGIND_SESSIONS_DIR),
         }
@@ -75,12 +158,78 @@ pub struct PipelineConfig {
     pub master_key_path: PathBuf,
     /// Evidence capture and retention configuration.
     pub evidence: soos_evidence_store::EvidenceConfig,
+    /// Global daily evidence snapshot cap across all UIDs
+    /// (`[pipeline.evidence] daily_cap_total`, GitHub #276).
+    pub evidence_daily_cap_total: u32,
     /// Threshold configuration for authorization decisions.
     pub thresholds: soos_policy::ThresholdConfig,
     /// Rate limit configuration per UID.
     pub rate_limit: soos_policy::RateLimitConfig,
     /// Whether to force mock camera simulation rather than hardware device.
     pub use_mock_camera: bool,
+    /// ONNX Runtime intra-op threads per model session (`[pipeline] inference_intra_threads`,
+    /// GitHub #252). Defaults to `min(4, available_parallelism)`; validated to
+    /// `1..=soos_inference_ort::MAX_INTRA_THREADS` at load.
+    pub inference_intra_threads: usize,
+}
+
+impl PipelineConfig {
+    /// Validates the pipeline settings that can silently disable a security control or
+    /// reject every request.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DaemonError::Config`] when the thresholds fail the policy security floor,
+    /// the vision thresholds differ from the policy thresholds, a rate-limit bound is zero
+    /// (window shorter than one second) or `retention_days` is zero.
+    pub fn validate(&self) -> Result<(), DaemonError> {
+        let match_thresh = self.thresholds.match_threshold();
+        let pad_thresh = self.thresholds.pad_threshold();
+        soos_policy::ThresholdConfig::builder()
+            .match_threshold(match_thresh)
+            .pad_threshold(pad_thresh)
+            .build_with_security_floor()
+            .map_err(|e| DaemonError::Config(format!("Invalid [pipeline.thresholds]: {e}")))?;
+        // Bitwise comparison: NaN never equals itself, and the mirror must be an exact copy.
+        if self.vision.match_threshold.to_bits() != match_thresh.to_bits() {
+            return Err(DaemonError::Config(
+                "[pipeline.thresholds] match_threshold differs between the policy and the \
+                 vision pipeline"
+                    .into(),
+            ));
+        }
+        if self.vision.pad_threshold.to_bits() != pad_thresh.to_bits() {
+            return Err(DaemonError::Config(
+                "[pipeline.thresholds] pad_threshold differs between the policy and the \
+                 vision pipeline"
+                    .into(),
+            ));
+        }
+
+        let rl = &self.rate_limit;
+        if rl.max_attempts == 0 {
+            return Err(DaemonError::Config(
+                "[pipeline.rate_limit] max_attempts must be at least 1".into(),
+            ));
+        }
+        if rl.window_duration_ns < 1_000_000_000 {
+            return Err(DaemonError::Config(
+                "[pipeline.rate_limit] window_duration_secs must be at least 1".into(),
+            ));
+        }
+        if rl.max_tracked_uids == 0 {
+            return Err(DaemonError::Config(
+                "[pipeline.rate_limit] max_tracked_uids must be at least 1".into(),
+            ));
+        }
+
+        if self.evidence.retention_days == 0 {
+            return Err(DaemonError::Config(
+                "[pipeline.evidence] retention_days must be at least 1".into(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 impl Default for PipelineConfig {
@@ -92,9 +241,11 @@ impl Default for PipelineConfig {
             biometrics_dir: PathBuf::from(soos_biometric_store::DEFAULT_BIOMETRICS_DIR),
             master_key_path: PathBuf::from("/var/lib/soos/master.key"),
             evidence: soos_evidence_store::EvidenceConfig::default(),
+            evidence_daily_cap_total: soos_evidence_store::DEFAULT_DAILY_CAP_TOTAL,
             thresholds: soos_policy::ThresholdConfig::default(),
             rate_limit: soos_policy::RateLimitConfig::default(),
             use_mock_camera: false,
+            inference_intra_threads: soos_inference_ort::default_intra_threads(),
         }
     }
 }
@@ -195,6 +346,7 @@ struct PipelineConfigFile {
     thresholds: Option<ThresholdConfigFile>,
     #[serde(default)]
     rate_limit: Option<RateLimitConfigFile>,
+    inference_intra_threads: Option<usize>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -204,6 +356,7 @@ struct EvidenceConfigFile {
     key_path: Option<PathBuf>,
     retention_days: Option<u32>,
     daily_cap_per_uid: Option<u32>,
+    daily_cap_total: Option<u32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -219,13 +372,61 @@ struct RateLimitConfigFile {
     max_tracked_uids: Option<usize>,
 }
 
+/// Validates a `tracing` filter directive without installing it.
+fn validate_log_level(level: &str) -> Result<(), DaemonError> {
+    if level.len() > MAX_LOG_LEVEL_LEN {
+        return Err(DaemonError::Config(format!(
+            "log_level exceeds {MAX_LOG_LEVEL_LEN} bytes"
+        )));
+    }
+    if level.trim().is_empty() {
+        return Err(DaemonError::Config("log_level must not be empty".into()));
+    }
+    tracing_subscriber::EnvFilter::try_new(level)
+        .map(drop)
+        .map_err(|e| DaemonError::Config(format!("log_level is not a valid filter: {e}")))
+}
+
 impl DaemonConfig {
+    /// Validates the complete configuration fail-closed (GitHub #199, DMN-08).
+    ///
+    /// Called by [`DaemonConfig::from_toml_str`] (hence by `load_from_path` and
+    /// `load_or_default`), so the daemon refuses to start on any invalid value.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DaemonError::Config`] naming the first invalid setting.
+    pub fn validate(&self) -> Result<(), DaemonError> {
+        validate_log_level(&self.log_level)?;
+        self.socket.validate()?;
+        self.dispatcher.validate()?;
+        self.pipeline.validate()?;
+        self.preview.validate()?;
+        self.peer_limits
+            .validate(self.dispatcher.max_concurrent_connections)?;
+        Ok(())
+    }
+
+    /// Configuration the running daemon uses when no key overrides a value.
+    ///
+    /// Identical to [`DaemonConfig::default`] except for daemon-specific runtime defaults that
+    /// differ from the library defaults of the component crates (currently
+    /// [`DAEMON_DEFAULT_WARMUP_FRAMES`]). Every load path (`from_toml_str`, `load_from_path`,
+    /// `load_or_default` without a file) starts from it, so the same binary behaves the same
+    /// with or without `/etc/soos/daemon.toml`.
+    #[must_use]
+    pub fn runtime_default() -> Self {
+        let mut config = Self::default();
+        config.pipeline.camera.warmup_frames = DAEMON_DEFAULT_WARMUP_FRAMES;
+        config
+    }
+
     /// Parses a complete daemon configuration from a TOML string.
     pub fn from_toml_str(content: &str) -> Result<Self, DaemonError> {
         let file: DaemonConfigFile = toml::from_str(content)
             .map_err(|e| DaemonError::Config(format!("Failed to parse TOML configuration: {e}")))?;
 
-        let mut config = Self::default();
+        let mut config = Self::runtime_default();
 
         if let Some(log_level) = file.log_level {
             config.log_level = log_level;
@@ -272,7 +473,9 @@ impl DaemonConfig {
                     config.pipeline.camera.device_path = camera_device;
                 }
             }
-            config.pipeline.camera.warmup_frames = pipe.warmup_frames.unwrap_or(0);
+            if let Some(warmup_frames) = pipe.warmup_frames {
+                config.pipeline.camera.warmup_frames = warmup_frames;
+            }
             if let Some(preference) = pipe
                 .sensor_preference
                 .as_deref()
@@ -295,6 +498,15 @@ impl DaemonConfig {
             if let Some(master_key_path) = pipe.master_key_path {
                 config.pipeline.master_key_path = master_key_path;
             }
+            if let Some(threads) = pipe.inference_intra_threads {
+                let max = soos_inference_ort::MAX_INTRA_THREADS;
+                if !(1..=max).contains(&threads) {
+                    return Err(DaemonError::Config(format!(
+                        "Invalid [pipeline] inference_intra_threads = {threads}: expected 1..={max}"
+                    )));
+                }
+                config.pipeline.inference_intra_threads = threads;
+            }
 
             if let Some(ev) = pipe.evidence {
                 if let Some(enabled) = ev.enabled {
@@ -311,6 +523,9 @@ impl DaemonConfig {
                 }
                 if let Some(daily_cap) = ev.daily_cap_per_uid {
                     config.pipeline.evidence.daily_cap_per_uid = daily_cap;
+                }
+                if let Some(daily_cap_total) = ev.daily_cap_total {
+                    config.pipeline.evidence_daily_cap_total = daily_cap_total;
                 }
             }
 
@@ -384,6 +599,7 @@ impl DaemonConfig {
         config
             .peer_limits
             .validate(config.dispatcher.max_concurrent_connections)?;
+        config.validate()?;
 
         Ok(config)
     }
@@ -401,18 +617,29 @@ impl DaemonConfig {
         Self::from_toml_str(&content)
     }
 
-    /// Loads configuration from the specified optional path, falling back to `/etc/soos/daemon.toml`
-    /// if present on disk, or `DaemonConfig::default()`.
+    /// Loads configuration from the specified optional path, falling back to
+    /// [`DEFAULT_CONFIG_PATH`] if present on disk, or [`DaemonConfig::runtime_default`].
     pub fn load_or_default(path_opt: Option<&Path>) -> Result<Self, DaemonError> {
+        Self::load_or_default_with_system_path(path_opt, Path::new(DEFAULT_CONFIG_PATH))
+    }
+
+    /// [`DaemonConfig::load_or_default`] with an injectable system configuration path.
+    ///
+    /// An explicit `path_opt` is always read (a missing file is an error). Otherwise
+    /// `system_path` is read when it is a regular file, and
+    /// [`DaemonConfig::runtime_default`] is returned when it is absent.
+    pub fn load_or_default_with_system_path(
+        path_opt: Option<&Path>,
+        system_path: &Path,
+    ) -> Result<Self, DaemonError> {
         if let Some(path) = path_opt {
             return Self::load_from_path(path);
         }
 
-        let default_system_config = Path::new("/etc/soos/daemon.toml");
-        if default_system_config.is_file() {
-            Self::load_from_path(default_system_config)
+        if system_path.is_file() {
+            Self::load_from_path(system_path)
         } else {
-            Ok(Self::default())
+            Ok(Self::runtime_default())
         }
     }
 }

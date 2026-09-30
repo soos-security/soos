@@ -148,9 +148,11 @@ fn test_config_defaults_when_file_absent() {
     assert!(config.socket.enforce_root_owner);
 
     assert_eq!(config.dispatcher.max_concurrent_connections, 8);
+    // User decision 2026-09-30: the daemon default is raised to 2500 ms so the GDM
+    // `timeout_ms=2500` line really gets daemon time (sudo stays capped at 1000 ms by PAM).
     assert_eq!(
         config.dispatcher.connection_timeout,
-        Duration::from_millis(1000)
+        Duration::from_millis(2500)
     );
 
     assert_eq!(

@@ -9,8 +9,12 @@
 #   4. cargo deny check — Audits licenses, security advisories, and bans
 #   5. candid review    — Layer 1 invariants + fingerprint-bound Layer 2 report
 #   6. sync_issue.py    — Offline mapping self-check + backlog report (no writes)
-#   7. git add .        — Stages all modifications
+#   7. git add -u       — Stages tracked modifications, plus new files under
+#                         crates/ tests/ Docs/ AI/ scripts/ packaging/ only
+#                         (other untracked files are listed, never staged)
 #   8. git commit       — Commits with Conventional Commits 1.0.0 message
+#                         (-m, or a subject inferred from the branch prefix by
+#                         scripts/commit_message.sh; no prefix match = refusal)
 #   (--push-pr: after the push, committed checkboxes are mirrored to GitHub)
 #
 # Clippy/test/deny flags are identical to .github/workflows/ci.yml so that a
@@ -76,6 +80,12 @@ for arg in "$@"; do
 Usage: ./save.sh [OPTIONS] [COMMIT_MESSAGE]
 
 Quality pipeline and automated commit/release script for soos.
+
+Without a message, the subject is inferred from the branch: the type is the
+feat/, fix/, test/ or chore/ prefix, the scope is the single crate touched (if
+any), the description is the branch suffix. Any other branch requires -m.
+Staging: tracked modifications (git add -u) plus new files under crates/,
+tests/, Docs/, AI/, scripts/ and packaging/; git add other new files yourself.
 
 Options:
   --auto-merge, --loop   Run full autonomous PR, review, and merge loop
@@ -155,6 +165,12 @@ Usage: ./save.sh [OPTIONS] [COMMIT_MESSAGE]
 
 Quality pipeline and automated commit/release script for soos.
 
+Without a message, the subject is inferred from the branch: the type is the
+feat/, fix/, test/ or chore/ prefix, the scope is the single crate touched (if
+any), the description is the branch suffix. Any other branch requires -m.
+Staging: tracked modifications (git add -u) plus new files under crates/,
+tests/, Docs/, AI/, scripts/ and packaging/; git add other new files yourself.
+
 Options:
   --auto-merge, --loop   Run full autonomous PR, review, and merge loop
   --push-pr, --pr        Run quality pipeline, commit, and push PR
@@ -193,6 +209,15 @@ fi
 
 if [[ "${PUSH_PR_ENV:-0}" == "1" ]]; then
     PUSH_PR=true
+fi
+
+# Without -m, refuse early (before the long pipeline) when no subject can be
+# inferred from the branch name (GitHub #245).
+# shellcheck source=scripts/commit_message.sh
+source ./scripts/commit_message.sh
+if [[ -z "$CUSTOM_MSG" ]] && ! soos_infer_commit_subject "$CURRENT_BRANCH" < /dev/null > /dev/null; then
+    error "No commit message given and none can be inferred from branch '$CURRENT_BRANCH'."
+    exit 1
 fi
 
 # ---------------------------------------------------------------------------
@@ -292,8 +317,19 @@ fi
 # Stage Changes
 # ---------------------------------------------------------------------------
 echo ""
-info "Staging modified files with git add..."
-git add .
+# Never `git add .`: it staged every untracked scratch file (GitHub #245). Stage
+# tracked modifications, then new files under the source directories only.
+info "Staging tracked modifications and new files under the source directories..."
+git add -u
+git add ./crates ./tests ./Docs ./AI ./scripts ./packaging
+NOT_STAGED=$(git ls-files --others --exclude-standard)
+if [[ -n "$NOT_STAGED" ]]; then
+    warn "Untracked files outside the source directories were NOT staged:"
+    while IFS= read -r untracked; do
+        warn "  ${untracked}"
+    done <<< "$NOT_STAGED"
+    warn "Stage them explicitly with 'git add <path>' before ./save.sh if they belong in the commit."
+fi
 
 # Check if there is anything to commit
 if git diff --cached --quiet; then
@@ -317,92 +353,14 @@ fi
 if [[ -n "$CUSTOM_MSG" ]]; then
     COMMIT_MSG="$CUSTOM_MSG"
 else
-    CHANGED_FILES=$(git diff --cached --name-only)
-
-    CRATES_CHANGED=()
-    DOCS_CHANGED=false
-    TESTS_CHANGED=false
-    CONFIG_CHANGED=false
-    SCRIPTS_CHANGED=false
-    AI_CHANGED=false
-
-    while IFS= read -r file; do
-        [[ -z "$file" ]] && continue
-
-        case "$file" in
-            crates/*/src/*)
-                crate_name=$(echo "$file" | cut -d'/' -f2)
-                if [[ ! " ${CRATES_CHANGED[*]:-} " =~ " ${crate_name} " ]]; then
-                    CRATES_CHANGED+=("$crate_name")
-                fi
-                ;;
-            crates/*/tests/* | tests/*)
-                TESTS_CHANGED=true
-                ;;
-            Docs/* | docs/* | *.md)
-                DOCS_CHANGED=true
-                ;;
-            AI/*)
-                AI_CHANGED=true
-                ;;
-            Cargo.toml | Cargo.lock | rust-toolchain.toml | deny.toml)
-                CONFIG_CHANGED=true
-                ;;
-            *.sh | Dockerfile | .dockerignore | .githooks/*)
-                SCRIPTS_CHANGED=true
-                ;;
-            *)
-                CONFIG_CHANGED=true
-                ;;
-        esac
-    done <<< "$CHANGED_FILES"
-
-    PARTS=()
-
-    if [[ ${#CRATES_CHANGED[@]} -eq 1 ]]; then
-        PARTS+=("feat(${CRATES_CHANGED[0]}): update component implementation")
-    elif [[ ${#CRATES_CHANGED[@]} -gt 1 ]]; then
-        PARTS+=("feat(workspace): update multiple crate implementations")
-        for c in "${CRATES_CHANGED[@]}"; do
-            PARTS+=("feat($c): update component")
-        done
+    # One subject line from the branch prefix and the staged crate (GitHub #245):
+    # no generic feat(...) type, no pseudo-subject body bullets, no file counter.
+    if ! COMMIT_MSG=$(git diff --cached --name-only | soos_infer_commit_subject "$CURRENT_BRANCH"); then
+        error "Could not infer a commit subject; re-run with -m \"<type>(<scope>): <description>\"."
+        exit 1
     fi
-    if [[ "$TESTS_CHANGED" == true ]]; then
-        PARTS+=("test: update test suites and security invariants")
-    fi
-    if [[ "$DOCS_CHANGED" == true ]]; then
-        PARTS+=("docs: update technical documentation")
-    fi
-    if [[ "$AI_CHANGED" == true ]]; then
-        PARTS+=("docs(ai): update AI strategy documents and walkthroughs")
-    fi
-    if [[ "$SCRIPTS_CHANGED" == true ]]; then
-        PARTS+=("chore(infra): update scripts, tooling, and guardrails")
-    fi
-    if [[ "$CONFIG_CHANGED" == true ]]; then
-        PARTS+=("chore(config): update workspace and dependency configuration")
-    fi
-
-    if [[ ${#PARTS[@]} -eq 0 ]]; then
-        COMMIT_MSG="chore: update workspace files"
-    elif [[ ${#PARTS[@]} -eq 1 ]]; then
-        COMMIT_MSG="${PARTS[0]}"
-    else
-        # Enforce empty line between subject line and body bullets
-        SUBJECT="${PARTS[0]}"
-        BODY=""
-        for ((i = 1; i < ${#PARTS[@]}; i++)); do
-            BODY="${BODY}
-- ${PARTS[$i]}"
-        done
-        COMMIT_MSG="${SUBJECT}
-${BODY}"
-    fi
-
-    FILE_COUNT=$(echo "$CHANGED_FILES" | wc -l | tr -d ' ')
-    COMMIT_MSG="${COMMIT_MSG}
-
-[${FILE_COUNT} file(s) modified]"
+    warn "Inferred subject from branch '$CURRENT_BRANCH': $COMMIT_MSG"
+    warn "Pass -m for a precise description (it becomes the squash-merge subject)."
 fi
 
 # The subject becomes the PR title / squash subject when pushed: GitHub appends

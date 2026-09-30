@@ -36,8 +36,11 @@ Every message transmitted over the Unix domain stream socket is framed by a 4-by
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 ```
 
+Client-to-daemon payloads (`Request`, `Event`) additionally end with a one-byte message tag trailer that names the message type (§12, GitHub #204).
+
 ### Security Constants
 - **Maximum Message Size (`MAX_MESSAGE_SIZE`)**: `4,096` bytes (4 KiB). Any message declaring a length exceeding 4 KiB is rejected immediately prior to buffer allocation (`CodecError::MessageTooLarge`), shielding daemon and PAM module from denial-of-service memory exhaustion.
+- **Maximum Preview Message Size (`MAX_PREVIEW_MESSAGE_SIZE`)**: `2 MiB`. Applies only to the outbound `PreviewResponse` frame read by the diagnostic GUI (§9); every inbound message and every PAM-facing response stays bounded by `MAX_MESSAGE_SIZE`.
 - **Maximum Service Name Length (`MAX_SERVICE_LEN`)**: `64` bytes. Rejected with `CodecError::PayloadCorrupted` if exceeded.
 - **Protocol Version (`PROTOCOL_VERSION`)**: `1`.
 
@@ -51,7 +54,7 @@ Sent by the PAM module to the daemon to request facial verification:
 - `request_id: RequestId`: 256-bit cryptographic random identifier (`[u8; 32]`) sourced via `getrandom`.
 - `uid_hint: u32`: Declared UID from the PAM client (authoritatively cross-checked by the daemon using kernel `SO_PEERCRED`).
 - `service: String`: PAM service name (`"sudo"`, `"su"`, `"gdm-password"`...). Bounded to 64 bytes.
-- `deadline_monotonic_ns: u64`: Absolute monotonic deadline in nanoseconds. If exceeded, daemon immediately returns `Verdict::Unavailable`. `0` or `u64::MAX` means no client deadline (`DECISION_BUDGET_MS` applies). The daemon stops its decision `RESPONSE_WRITE_MARGIN_MS` (50 ms) before the earlier of this deadline and its own `connection_timeout` (measured from the start of request processing), and never starts an inference that would not finish in time; the response is then `Unavailable`/`Timeout` (or the consensus reached so far), never a silent overrun.
+- `deadline_monotonic_ns: u64`: Absolute monotonic deadline in nanoseconds. If exceeded, daemon immediately returns `Verdict::Unavailable`. `0` or `u64::MAX` means no client deadline (`DECISION_BUDGET_MS` applies). The daemon stops its decision `RESPONSE_WRITE_MARGIN_MS` (50 ms) before the earlier of this deadline and its own `connection_timeout` (measured from the start of request processing; default `DEFAULT_CONNECTION_TIMEOUT_MS` = 2500 ms, so the GDM line `timeout_ms=2500` gets its full budget while a console/sudo request stays capped by its 1000 ms PAM deadline), and never starts an inference that would not finish in time; the response is then `Unavailable`/`Timeout` (or the consensus reached so far), never a silent overrun.
 
 ### `Response`
 Returned by the daemon to the PAM module:
@@ -73,6 +76,22 @@ Best-effort telemetry notification sent by PAM following password failures:
 - `uid: Option<u32>`: Target POSIX user ID whose authentication failed, if known.
 - `service: String`: PAM service name.
 - `timestamp_monotonic_ns: u64`: Monotonic timestamp.
+
+### Request kinds and their responses
+
+| `RequestKind` (wire value) | Sender | Response |
+|---|---|---|
+| `RequestKind::Auth` (0) | PAM module | `Response` (above); the daemon closes the connection after it |
+| `RequestKind::Status` (1) | `soos-admin status`, any admitted peer | `StatusResponse` |
+| `RequestKind::PreviewFrame` (2) | `soos-gui` preview, authorized peers only (§9) | `PreviewResponse`, or a `Response` with `ProtocolError` on refusal |
+
+### `StatusResponse`
+Non-biometric readiness snapshot returned for `RequestKind::Status`: `version`, `socket_ready`, `camera_ready`, `models_verified`, `is_healthy` (all components ready), `pid` and `uptime_secs`. It carries no frame, template, embedding or UID data.
+
+### `PreviewResponse`
+Camera frame returned for an authorized `RequestKind::PreviewFrame`: `version`, `sequence`, `width`, `height`, `format` (0 = RGB24, 1 = Grey, 2 = YUYV, 3 = NV12, 4 = MJPEG, 255 = no capture available), `timestamp_monotonic_ns` and `data`. The encoded frame is bounded by `MAX_PREVIEW_MESSAGE_SIZE`; the struct zeroizes on drop.
+
+The daemon-side authorization of each kind and every `daemon.toml` key are specified in `Docs/DAEMON.md`.
 
 ### Memory Zeroization (`Zeroize`)
 The `Response` struct implements `Zeroize` and `ZeroizeOnDrop`: sensitive request identifiers and verdict metadata are overwritten in RAM when discarded.
@@ -96,7 +115,7 @@ To ensure that untrusted or malformed inputs can never trigger memory corruption
    - `prop_declared_size_bounds` and `prop_truncated_buffer_bounds` verify zero-allocation fast rejection of oversized ($> 4{,}096$ bytes) or truncated payloads.
    - Executed automatically via standard `cargo test` on every commit and CI run.
 2. **LLVM libFuzzer Integration (`cargo-fuzz`)**:
-   - Targets `decode_request`, `decode_response`, and `decode_event` in `crates/protocol/fuzz/`.
+   - Targets `decode_request`, `decode_response`, `decode_event` and `decode_client_message` (§12) in `crates/protocol/fuzz/`.
    - Supports continuous coverage-guided fuzzing over millions of iterations:
      ```bash
      cargo +nightly fuzz run decode_request -- -runs=1000000
@@ -130,6 +149,9 @@ In `soos-daemon`, the connection lifecycle is explicitly decoupled into two non-
 1. **Request Reading & Verification Phase**: Runs under Tokio `timeout(connection_timeout, ...)`. The daemon reads and decodes the message, performs peer credential verification, and executes the vision verification pipeline. The resulting response is fully encoded into an in-memory byte buffer (`Vec<u8>`). Zero socket write syscalls are performed during this phase.
    - If the request processing times out, the future is cancelled *before* any response bytes are written to the socket. The stream is closed with 0 bytes sent, guaranteeing that partial or corrupted response fragments never reach the PAM client.
 2. **Response Transmission Phase**: Runs *after* the request processing timeout has completed cleanly. The pre-encoded buffer is transmitted atomically via `tokio::io::AsyncWriteExt::write_all` and `flush` under a dedicated write timeout, protecting worker threads from slow-client stalls.
+
+### Persistent connection loop
+The two phases above run once per message, inside a loop (`ConnectionDispatcher::handle_connection`): one connection may carry several `Status`, `PreviewFrame` and `Event` messages, while an `Auth` request is one-shot and the daemon closes the connection after its `Response`. The loop ends when the client closes the stream, when a connection stays idle past `connection_timeout` (an error before the first request, a graceful close afterwards), or when the `[peer_limits]` request or lifetime cap is reached (§11). See `Docs/DAEMON.md` §2.
 
 ### Client-Side Response Completeness Validation
 In `pam_soos.so`, the synchronous IPC client (`crates/pam/src/ipc.rs`) enforces strict byte-counted frame completeness:
@@ -234,3 +256,33 @@ Constants live in `crates/daemon/src/limits.rs` (`DEFAULT_*`, `EVENT_RATE_MAX_TR
 ### `PasswordFailed` event quota
 
 Every `EventKind::PasswordFailed` event is first counted against a per-peer-UID sliding window (`soos_policy::RateLimiter`, root included, 256 tracked UIDs); an event beyond the quota, a full limiter table or an unavailable monotonic clock drops the event with a `warn` naming `peer_uid`, and no camera snapshot is taken. Before the quota, the target UID is authorized against the kernel peer UID (GitHub #175, ADR in `AI/DECISIONS.md`): a root peer (sudo, su, login, gdm-session-worker, polkit-agent-helper-1) may report for any UID; any other peer only for itself (`uid` absent or equal to its `SO_PEERCRED` UID). Any other event is dropped with a `warn` naming `peer_uid` and the claimed UID, and no snapshot is taken. Events carry no response, so nothing changes on the wire.
+
+---
+
+## 12. Client Message Tag and Frame Classification (GitHub #204)
+
+Client-to-daemon frames (`Request`, `Event`) share one socket and codec v1 has no type field, so the daemon used to double-decode every payload and pick a handler by comparing `uid_hint` with the peer UID (review finding DMN-15). Every first-party client now appends a one-byte **message tag trailer** (`soos_protocol::message`):
+
+```
+u32 BE length | postcard(Request | Event) | message_tag:u8
+```
+
+| Tag | Constant | Message |
+|---|---|---|
+| `0xA0` | `MESSAGE_TAG_REQUEST` | `Request` (`Auth`, `Status`, `PreviewFrame`) |
+| `0xA1` | `MESSAGE_TAG_EVENT` | `Event` (`PasswordFailed`) |
+
+`encode_request` / `encode_event` produce tagged frames (bounded by `MAX_MESSAGE_SIZE`, trailer included); `pam_soos.so`, `soos-admin` (`status`, `test-pam`) and `soos-gui` (preview) use them. Responses are unchanged.
+
+`decode_client_message` classifies every payload by protocol rule, never by a heuristic:
+
+1. **Last byte `>= 0x80`: tagged frame.** A complete codec v1 `Request` or `Event` always ends with the terminating byte of the `u64` varint of its last field, whose high bit is clear, so a tag can never be mistaken for a legacy frame. The tag alone selects the type; the body must decode exactly (no trailing byte) as that type. Unknown tags (`MessageError::UnknownTag`) and mismatches (`Malformed`) are rejected.
+2. **Last byte `< 0x80`: legacy untagged v1 frame.** Accepted only when it decodes exactly as one type; a payload decoding as both `Request` and `Event` is rejected (`MessageError::Ambiguous`).
+
+A rejected frame closes the connection without running any handler and without a response (the PAM module then returns `PAM_IGNORE`).
+
+**Compatibility and migration.** `CURRENT_VERSION` stays `1` and the message body is byte-identical to codec v1: a v1 reader (`decode::<Request>`) ignores the trailer, and the daemon keeps serving untagged v1 clients. A tagged client talking to a daemon older than this change is rejected as malformed and fails closed to the password; `pam_soos.so` and `soos-daemon` ship in the same package and must be upgraded together. The fuzz target `decode_client_message` (`crates/protocol/fuzz/`) and the proptest suite `crates/protocol/tests/client_message_tests.rs` cover the classification.
+
+## 13. Atomic `Auth` Rate-Limit Reservation (GitHub #200)
+
+The per-UID `Auth` limit (`soos_policy::RateLimiter` inside the `AuthorizationEngine`) is reserved once per request with `AuthorizationEngine::record_attempt` under the policy **write** lock, after the deadline check and before the camera wake, enrollment lookup and vision work. A rejected reservation answers `ProtocolError` / `RateLimited` immediately. Nothing is recorded after the consensus loop, so concurrent requests can never all pass the last remaining attempt (review finding DMN-10), and requests ending early (not enrolled, camera unavailable, cancelled) still count against the window.

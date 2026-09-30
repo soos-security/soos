@@ -18,10 +18,14 @@ crates/vision/
     ├── error.rs        # VisionError enum using thiserror
     ├── color.rs        # Pure Rust color conversion (YUYV, Grey, RGB24, MJPEG)
     ├── align.rs        # 5-point landmark affine alignment to 112x112
-    ├── crop.rs         # Bounding box 2.7x expansion and crop-and-resize for PAD
-    ├── letterbox.rs    # Aspect-preserving letterbox padding and coordinate projection
+    ├── crop.rs         # Upstream-parity PAD context window, crop-and-resize
+    ├── ir_liveness.rs  # PadInputModality, fail-closed IR gate, DEFAULT_IR_PAD_THRESHOLD
+    ├── pad_fusion.rs   # Multi-scale PAD fusion (mean live probability)
+    ├── quality.rs      # Pre-PAD face quality gate (face size, Laplacian sharpness)
+    ├── letterbox.rs    # Letterbox params/resize (wrappers over soos_inference_ort::letterbox)
     ├── matcher.rs      # Cosine similarity and template verification
-    └── pipeline.rs     # VisionPipeline 3-model orchestrator & single-face invariant
+    ├── pipeline.rs     # VisionPipeline 3-model orchestrator, threshold constants, single-face invariant
+    └── pose.rs         # Head pose estimation (yaw/pitch/roll) from 5-point landmarks (GUI enrollment)
 ```
 
 ### 2.1 Color Conversion (`color.rs`)
@@ -30,9 +34,9 @@ V4L2 capture devices emit frames in various pixel formats. `convert_to_rgb` tran
 
 | Format | Input Layout | Conversion Algorithm | Output |
 |---|---|---|---|
-| `PixelFormat::Rgb24` | 3 bytes/pixel `[R, G, B]` | Length validation, zero-copy passthrough | Standard RGB24 |
+| `PixelFormat::Rgb24` | 3 bytes/pixel `[R, G, B]` | Length validation; `convert_to_rgb_cow` borrows the frame without a copy (`Cow::Borrowed`, used by `process_frame`), `convert_to_rgb` returns an owned copy (GitHub #252) | Standard RGB24 |
 | `PixelFormat::Grey` | 1 byte/pixel `[G]` | Broadcasts grayscale value to 3 channels `[G, G, G]` | Standard RGB24 |
-| `PixelFormat::Yuyv` | 4 bytes/2 pixels `[Y0, U, Y1, V]` | Full-range integer fixed-point BT.601 conversion | Standard RGB24 |
+| `PixelFormat::Yuyv` | 4 bytes/2 pixels `[Y0, U, Y1, V]` | Full-range integer fixed-point BT.601 conversion; an odd width is rejected with `InvalidDimensions` (GitHub #253) | Standard RGB24 |
 | `PixelFormat::Mjpeg` | Compressed JPEG stream | Bounded, header-checked pure-Rust `jpeg-decoder` decompression (§2.1.1) | Standard RGB24 |
 
 #### 2.1.1 Bounded MJPEG Decoding (GitHub #190, review finding VIS-02)
@@ -82,6 +86,15 @@ The alignment computes a closed-form least-squares 2D similarity transform (scal
 3. Compute translation vector $t = \mu_T - M \mu_S$.
 4. Apply the inverse transform with bilinear interpolation to sample each target pixel $(u, v) \in [0, 112) \times [0, 112)$ from source image coordinates $(x_s, y_s)$, padding out-of-boundary regions with zero (black).
 
+#### 2.2.1 Non-Finite Landmark Rejection (GitHub #254, review finding VIS-12)
+
+NaN compares false against the `sum_xx_yy <= 1e-6` and `det <= 1e-12` degeneracy guards and
+against every bilinear bounds check, so a NaN landmark used to produce an all-black 112x112 crop
+that was embedded (and, during enrollment, could be stored). `align_face_112` now returns
+`AlignmentFailed` when any landmark coordinate is non-finite, and when the similarity transform
+coefficients overflow to a non-finite value (finite but extreme coordinates). The SCRFD decoder
+additionally skips non-finite candidates (`Docs/INFERENCE_ORT_CRATE.md`).
+
 ### 2.3 Cosine Similarity Matching (`matcher.rs`)
 
 Biometric feature vectors extracted by the ArcFace embedding model are compared via cosine similarity:
@@ -90,7 +103,7 @@ $$\text{similarity}(a, b) = \frac{a \cdot b}{\|a\|_2 \|b\|_2}$$
 - **Dimension Mismatch Protection**: Verifies `a.len() == b.len()`.
 - **Degenerate Vector Protection**: Rejects zero or near-zero norms ($\le 10^{-12}$).
 - **Output Bounds**: Systematically clamped to the interval $[-1.0, 1.0]$.
-- **Verification Decision**: `match_embeddings` checks `score >= threshold` (default `0.45` per academic ArcFace literature).
+- **Verification Decision**: `match_embeddings` checks `score >= threshold`. The pipeline passes `VisionPipelineConfig::match_threshold`, `DEFAULT_MATCH_THRESHOLD = 0.70` (equal to `soos_policy::ThresholdConfig::DEFAULT_MATCH_THRESHOLD`; conservative literature value not yet recalibrated for the shipped ArcFace ResNet34, GitHub #191).
 
 ### 2.4 Vision Pipeline Orchestrator (`pipeline.rs`)
 
@@ -100,14 +113,38 @@ $$\text{similarity}(a, b) = \frac{a \cdot b}{\|a\|_2 \|b\|_2}$$
 3. **Enforces Single-Face Invariant (Criterion V4)**:
    - 0 faces detected $\implies$ returns `Err(VisionError::NoFaceDetected)`.
    - $> 1$ faces detected $\implies$ returns `Err(VisionError::MultipleFacesDetected { count })`.
-4. Validates face confidence against `min_face_confidence` (default `0.70`).
+4. Validates face confidence against `min_face_confidence` (`DEFAULT_MIN_FACE_CONFIDENCE = 0.70`).
 5. Extracts 5-point facial landmarks directly from `FaceDetection.landmarks` (fails closed with `VisionError::MissingLandmarks` if absent).
-6. Expands bounding box by `pad_bbox_scale` (2.7×) centered on face, shifting it inward at image borders (`expand_bbox_for_pad`, Minivision shifting algorithm).
-7. Crops and resizes the expanded bounding box to 80×80 for Presentation Attack Detection (`crop_and_resize`).
-8. Evaluates Presentation Attack Detection (`PadDetector`, MiniFASNetV2) and short-circuits on spoof (`VisionError::PadFailed`). The decision is **format-aware** (GitHub #169, see §2.4.1): a `PixelFormat::Grey` frame, or any frame from an `Infrared` sensor, must first pass the fail-closed IR gate (`VisionError::IrLivenessGateFailed`) and is scored against the stricter IR threshold.
+6. Computes the PAD context window at `pad_bbox_scale` (2.7×) with the upstream Silent-Face-Anti-Spoofing geometry (`pad_crop_window`, GitHub #213, §2.6).
+7. Resizes that window to 80×80 with the `cv2.resize` `INTER_LINEAR` half-pixel convention (`crop_pad_context`). Each additional multi-scale PAD member (`with_additional_pad_model`, GitHub #212, §2.4.2) gets its own window at its own scale.
+8. Evaluates Presentation Attack Detection (`PadDetector`, MiniFASNetV2; several members are fused by `fuse_pad_results`) and short-circuits on spoof (`VisionError::PadFailed`). The decision is **format-aware** (GitHub #169, see §2.4.1): a `PixelFormat::Grey` frame, or any frame from an `Infrared` sensor, must first pass the fail-closed IR gate (`VisionError::IrLivenessGateFailed`) and is scored against the stricter IR threshold.
 9. Warps face to normalized 112×112 RGB crop using 5-point landmarks (`align_face_112`).
 10. Extracts L2-normalized 512D biometric embedding (`EmbeddingExtractor`, ArcFace ResNet34, NHWC input).
 11. Compares against enrolled template via `match_embeddings`.
+
+#### 2.4.0 Single-Source Thresholds (GitHub #251 VIS-09, #215 PAD-10)
+
+Every detection and liveness threshold of `soos-daemon`, `soos-enroll` and `soos-gui` is a named
+constant of `soos-vision` carried by `VisionPipelineConfig`; no binary passes a literal
+(invariant `vision_threshold_contract::test_binaries_build_detectors_from_pipeline_config`).
+
+| Constant | Value | Used for |
+|---|---|---|
+| `DEFAULT_MIN_FACE_CONFIDENCE` | 0.70 | `OrtScrfdDetector` candidate threshold and pipeline primary-face threshold |
+| `DEFAULT_NMS_IOU_THRESHOLD` | 0.45 | `OrtScrfdDetector` NMS (`VisionPipelineConfig::nms_iou_threshold`) |
+| `DEFAULT_MATCH_THRESHOLD` | 0.70 | cosine match (= `ThresholdConfig::DEFAULT_MATCH_THRESHOLD`) |
+| `DEFAULT_PAD_THRESHOLD` | 0.85 | `OrtPadDetector` threshold and `pad_passes` (= `ThresholdConfig::DEFAULT_PAD_THRESHOLD`) |
+| `DEFAULT_IR_PAD_THRESHOLD` | 0.95 | monochrome frames, `max(pad_threshold, ir_pad_threshold)` |
+
+`VisionPipelineConfig::pad_passes(&PadResult, PadInputModality)` is the single liveness
+decision: live, finite score, `score >= effective_pad_threshold(modality)`. The pipeline uses it
+to short-circuit and the GUI uses it for the LIVE/SPOOF label, box colour and guided-enrollment
+gating (`LatestFrameData::pad_live`), so the preview never shows LIVE for a frame the daemon
+rejects. Enrollment templates are captured under the authentication values. The daemon
+applies the policy copy of the PAD threshold a second time in the request consensus
+(`soos_policy::PadAggregator`); operator overrides in `daemon.toml` are validated once and copied
+into both. Previous per-binary literals (GUI 0.60/0.40/0.80, enrollment 0.70/0.40/0.80) were all
+raised to the authentication values; no threshold was lowered.
 
 #### 2.4.1 Format-Aware PAD Policy for IR / Grey Frames (`ir_liveness.rs`, GitHub #169)
 
@@ -138,16 +175,59 @@ and `Rgb24`, `Yuyv`, `Nv12`, `Mjpeg` ⇒ `Color`. A monochrome frame never takes
 - IR emitter requirements are documented in `Docs/CAMERA_V4L_CRATE.md` ("IR Sensors and Emitter
   Requirements").
 
+#### 2.4.2 Multi-Scale PAD Fusion (`pad_fusion.rs`, GitHub #212)
+
+Upstream Silent-Face-Anti-Spoofing scores a face with two models on two crops (2.7× MiniFASNetV2 and
+4.0× MiniFASNetV1SE) and averages their softmax vectors. `VisionPipeline::with_additional_pad_model(scale, detector)`
+adds such a member (at most `MAX_PAD_ENSEMBLE_MODELS = 4` models including the primary; the scale must
+be finite and positive, otherwise `VisionError::InvalidPadEnsemble`). `pad_scales()` lists the scales,
+primary first.
+
+- Every member runs on its own `crop_pad_context` window; any crop or inference error fails the frame.
+- `fuse_pad_results`: one member is returned unchanged (single-model behaviour, the default); several
+  members give `score = mean(member scores)` (the mean softmax live probability) and
+  `is_live = score.is_finite() && score >= threshold`. A NaN/inf member or NaN threshold rejects.
+- The threshold is the modality-aware one (`pad_threshold`, or the stricter IR threshold). For
+  monochrome frames the IR gate runs on the primary crop before any model is consulted.
+- `analyze_frame` (GUI) reports the fused result.
+- **Current deployment**: the attested model set holds only MiniFASNetV2, so `soos-daemon`,
+  `soos-enroll` and `soos-gui` still build a single-member pipeline. Wiring the 4.0× MiniFASNetV1SE
+  needs its ONNX export attested in `models/manifest.toml` (SHA-256, I/O shapes) and a threshold
+  re-measurement; it is a follow-up of GitHub #212 (ADR 2026-09-30 "Upstream-Parity PAD Crop
+  Geometry and Multi-Scale Fusion").
+
+#### 2.4.3 Pre-PAD Face Quality Gate (`quality.rs`, GitHub #218)
+
+MiniFASNet scores are unreliable on tiny or blurred faces, so `process_frame` checks face quality
+after the confidence check and before the PAD model and the embedding extractor run:
+
+| Check | Config field (default) | Error |
+|---|---|---|
+| Smaller bounding-box side >= floor | `min_face_width_px` (`DEFAULT_MIN_FACE_WIDTH_PX` = 48 px) | `VisionError::FaceTooSmall { width_px, min_width_px }` |
+| Variance of the Laplacian of the 80x80 PAD crop luma >= floor | `min_pad_crop_sharpness` (`DEFAULT_MIN_PAD_CROP_SHARPNESS` = 0.0, disabled) | `VisionError::FaceBlurred { sharpness, min_sharpness }` |
+
+- The 48 px floor is above the no-upsampling limit of the 2.7x context crop (80 / 2.7 ~= 29.6 px).
+- `laplacian_variance(rgb, w, h)` uses integer BT.601 luma and the 4-neighbour kernel; it is 0 on
+  a flat crop and returns `None` for a malformed buffer or an image smaller than 3x3.
+- Every comparison fails closed: a non-finite size, sharpness or threshold rejects the face.
+- The sharpness floor is disabled by default until it is calibrated on real camera captures (ADR
+  2026-09-30 "Pre-PAD Face Quality Gate"). Set a positive value to enable it.
+- `analyze_frame` (GUI) sets `VisionAnalysis::quality_rejection` (`TooSmall` / `Blurred`) and then
+  skips PAD, alignment and embedding, so a rejected face never feeds guided enrollment.
+- `soos-daemon` maps both errors to an unusable capture (`FrameEvaluation::no_face()`): `Deny` /
+  `NoFace` when no frame of the request is usable, never `Allow` and never `InternalError`.
+
 ### 2.5 Letterbox Padding & Coordinate Projection (`letterbox.rs`)
 
 Next-generation face detection (SCRFD) operates on uniform 640×640 square inputs. To accommodate arbitrary camera aspect ratios (e.g. 640×480, 1280×720, 1920×1080) without distortion or stretching:
 
 1. `letterbox_params(img_w, img_h, target_w, target_h) -> Result<LetterboxParams, VisionError>`
    - Computes isotropic scale $s = \min(W_{\text{target}} / W_{\text{orig}}, H_{\text{target}} / H_{\text{orig}})$.
-   - Computes centered padding offsets $\text{pad}_x = (W_{\text{target}} - s \cdot W_{\text{orig}}) / 2$ and $\text{pad}_y = (H_{\text{target}} - s \cdot H_{\text{orig}}) / 2$.
+   - Computes centered **integer** padding offsets $\text{pad}_x = \lfloor (W_{\text{target}} - \text{round}(s \cdot W_{\text{orig}})) / 2 \rfloor$ (same for $\text{pad}_y$); the image is placed at, and un-projected with, exactly these integers (GitHub #248).
 2. `letterbox_resize(rgb, img_w, img_h, target_w, target_h) -> Result<(Vec<u8>, LetterboxParams), VisionError>`
    - Allocates zero-filled black canvas of target dimensions.
    - Bilinear-interpolates the scaled image into the centered region.
+   - Both functions delegate to `soos_inference_ort::letterbox` (`letterbox_geometry`, `letterbox_bilinear`), the implementation the production SCRFD path (`letterbox_pad`) runs; pixel and geometry parity is asserted by `letterbox_parity_tests::test_letterbox_pad_matches_vision_resize_on_gradient` (GitHub #248, VIS-06).
 3. `LetterboxParams` Coordinate Mappings:
    - `project(x, y)`: Transforms source frame coordinates to letterbox canvas space: $(x \cdot s + \text{pad}_x, y \cdot s + \text{pad}_y)$.
    - `unproject(x, y)`: Inversely projects detection coordinates from letterbox space back to original camera frame coordinates: $((x - \text{pad}_x) / s, (y - \text{pad}_y) / s)$.
@@ -155,13 +235,33 @@ Next-generation face detection (SCRFD) operates on uniform 640×640 square input
 
 ### 2.6 Bounding Box Expansion & Cropping (`crop.rs`)
 
-MiniFASNetV2 anti-spoofing requires wider facial context than the aligned 112×112 face crop:
-1. `expand_bbox_for_pad(bbox, scale, img_w, img_h) -> BoundingBox`:
+MiniFASNetV2 anti-spoofing requires wider facial context than the aligned 112×112 face crop.
+The PAD model input is built with the **upstream reference geometry** (GitHub #213):
+
+1. `pad_crop_window(bbox, scale, img_w, img_h) -> Option<PadCropWindow>`: transcription of
+   upstream `CropImage._get_new_box` + `CropImage.crop`. With `(x, y, w, h) = (x1, y1, x2 - x1, y2 - y1)`,
+   the scale is capped by `(H - 1) / h` and `(W - 1) / w`, the scaled box is centred on the face,
+   shifted inward against `0` and the **last pixel index** `W - 1` / `H - 1`, corners are truncated
+   like Python `int()` and the slice is inclusive. The requested `f32` scale is snapped to 6 decimals
+   so `2.7` behaves like the Python float `2.7`. Zero frames, non-finite or empty boxes and a
+   non-finite or non-positive scale give `None`.
+2. `crop_pad_context(rgb, img_w, img_h, bbox, scale, target_w, target_h)`: resizes that window with
+   the `cv2.resize` `INTER_LINEAR` convention: `src = (dst + 0.5) * (window / target) - 0.5`, clamped
+   to the window (replicated border), bilinear, round to nearest. A degenerate box gives an
+   all-black crop (scored as a spoof). Golden fixtures produced by
+   `crates/vision/tests/fixtures/pad_crop/generate_golden.py` (NumPy transcription of the upstream
+   crop; OpenCV is not used) are matched within ±1 LSB.
+
+Continuous-coordinate helpers (display overlays and generic crops):
+
+1. `expand_bbox_for_pad(bbox, scale, img_w, img_h) -> BoundingBox` (GUI overlay only):
    - Scales the bounding box from its center by `scale` factor (typically 2.7×); the effective scale is first bounded so that the expanded box never exceeds the image canvas (`min(scale, W / w, H / h)`).
    - When the expanded box crosses an image border it is **shifted inward** (translated, not clipped), matching Minivision `CropImage._get_new_box`, so the PAD crop keeps its context scale and aspect ratio instead of being distorted by independent per-edge clamping. A final clamp to $[0, W]$ × $[0, H]$ only guards floating-point residue.
 2. `crop_and_resize(rgb, img_w, img_h, bbox, target_w, target_h) -> Result<Vec<u8>, VisionError>`:
-   - Resizes the cropped region to target dimensions (e.g. 80×80) using bilinear interpolation.
-   - Any region extending beyond original image boundaries is padded with black (zero).
+   - Resizes the cropped region to target dimensions (e.g. 80×80) using bilinear interpolation with
+     half-pixel centre sampling `x1 + (u + 0.5) * sx - 0.5` (GitHub #213).
+   - Samples within half a pixel of the image replicate the border; regions further out are padded
+     with black (zero).
 
 ---
 
@@ -174,7 +274,8 @@ Automated benchmark results (`bench_tests.rs`) across 50 iterations on 640×480 
 - **p95**: $28.02\text{ms}$
 - **p99**: $28.87\text{ms}$
 
-These figures use mock backends and measure only the Rust preprocessing path. With the attested
+These figures use **mock backends only** (no ONNX model runs) and measure only the Rust
+preprocessing path; they are not hardware latency evidence. With the attested
 embedding model, one ArcFace ResNet34 embedding alone measures p50 127.5 ms / p95 170.9 ms on one
 ORT intra-op thread (`soos-inference-ort` `embedding_real_model_tests`, GitHub #191), so the
 150 ms per-capture target is **not** met on real models. The enforced bounds are the daemon's

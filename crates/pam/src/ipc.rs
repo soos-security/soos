@@ -17,7 +17,8 @@ use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use soos_protocol::codec::{decode, encode};
+use soos_protocol::codec::decode;
+use soos_protocol::message::{encode_event, encode_request};
 use soos_protocol::types::{
     Event, EventKind, ReasonClass, Request, RequestKind, Response, Verdict, CURRENT_VERSION,
     MAX_MESSAGE_SIZE, REQUEST_ID_LEN,
@@ -355,7 +356,7 @@ pub fn authenticate(config: &PamConfig, uid: u32) -> Result<(Verdict, ReasonClas
         deadline_monotonic_ns,
     };
 
-    let encoded = Zeroizing::new(encode(&req).map_err(IpcError::Codec)?);
+    let encoded = Zeroizing::new(encode_request(&req).map_err(IpcError::Codec)?);
     write_all_before_deadline(&mut stream, &encoded, deadline)?;
     drop(encoded);
 
@@ -445,7 +446,7 @@ pub fn notify_event(config: &PamConfig, uid: u32, event_kind: EventKind) -> Resu
         timestamp_monotonic_ns: monotonic_nanos(),
     };
 
-    let encoded = Zeroizing::new(encode(&event).map_err(IpcError::Codec)?);
+    let encoded = Zeroizing::new(encode_event(&event).map_err(IpcError::Codec)?);
     write_all_before_deadline(&mut stream, &encoded, deadline)?;
 
     // Fire-and-forget: socket closed immediately

@@ -62,7 +62,11 @@ while [[ $# -gt 0 ]]; do
 done
 
 PKG_NAME="soos"
-VERSION="0.1.0"
+# Version and license come from [workspace.package] in Cargo.toml (GitHub #210).
+# shellcheck source=scripts/lib/pkg_meta.sh
+source "${WORKSPACE_ROOT}/scripts/lib/pkg_meta.sh"
+VERSION="$(soos_pkg_version)"
+PKG_LICENSE="$(soos_pkg_license)"
 ARCH=$(dpkg --print-architecture 2>/dev/null || uname -m)
 case "${ARCH}" in
     x86_64) ARCH="amd64" ;;
@@ -74,6 +78,7 @@ DEB_FILENAME="${PKG_NAME}_${VERSION}_${ARCH}.deb"
 echo "=== soos Debian Package Builder ==="
 echo "Package:    ${PKG_NAME}"
 echo "Version:    ${VERSION}"
+echo "License:    ${PKG_LICENSE}"
 echo "Arch:       ${ARCH}"
 echo "Output:     ${OUTPUT_DIR}/${DEB_FILENAME}"
 echo "==================================="
@@ -87,7 +92,7 @@ mkdir -p "${OUTPUT_DIR}"
 
 if [[ "${SKIP_BUILD}" = false ]]; then
     echo "[1/4] Compiling workspace crates in release mode..."
-    cargo build --release --workspace
+    cargo build --locked --release --workspace
 fi
 
 STAGE_DIR=$(mktemp -d "/tmp/soos_deb_stage.XXXXXX")
@@ -110,6 +115,7 @@ bash "${WORKSPACE_ROOT}/scripts/install.sh" \
     --destdir "${STAGE_DIR}" \
     --prefix "/usr" \
     --pam-dir "${DEB_PAM_DIR}" \
+    --distro debian \
     --skip-models \
     --skip-systemd
 
@@ -135,7 +141,7 @@ Recommends: libxkbcommon0, libwayland-client0, libwayland-egl1, libegl1, libgl1,
 Installed-Size: ${INSTALLED_SIZE}
 Description: Local facial biometric authentication PAM module and daemon
  soos is a zero-trust local facial biometric PAM subsystem for Linux.
- It features sub-250ms latency verification, warm camera streaming,
+ It features deadline-bounded verification, warm camera streaming,
  presentation attack detection (PAD), and encrypted biometric vector storage.
  This package installs the privileged background daemon, user administration
  tools, enrollment CLI, systemd service, and Linux-PAM module.

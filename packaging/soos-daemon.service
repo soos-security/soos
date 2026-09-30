@@ -3,11 +3,18 @@ Description=soos Local Facial Biometric Authentication Daemon
 Documentation=https://github.com/Mysticaly622/soos
 After=local-fs.target systemd-udevd.service
 Wants=systemd-udevd.service
+# Listen before the greeter shows its first prompt (GitHub #203, DMN-14).
+Before=display-manager.service
 # Bounded restarts: a daemon that cannot start (e.g. models not deployed yet)
 # must not crash-loop forever (GitHub #167). After 5 failures in 60 s the unit
 # enters the failed state; fix the cause, then 'systemctl reset-failed'.
 StartLimitIntervalSec=60
 StartLimitBurst=5
+# No start before the attested models are deployed (GitHub #211): the daemon
+# fails closed without them, so a fresh install would only crash-loop. The
+# unit is skipped ("condition failed") until scripts/download_models.sh has
+# written the manifest; start it afterwards.
+ConditionPathExists=/var/lib/soos/models/manifest.toml
 
 [Service]
 Type=simple
@@ -31,12 +38,40 @@ PrivateTmp=yes
 ProtectHome=yes
 ProtectSystem=strict
 DevicePolicy=closed
-DeviceAllow=/dev/video* rw
+# systemd does not expand globs in DeviceAllow= device node paths (a
+# /dev/video* entry would match nothing); the char-video4linux device group
+# (major 81 in /proc/devices) allows every V4L2 node.
+DeviceAllow=char-video4linux rw
 RestrictAddressFamilies=AF_UNIX
 LockPersonality=yes
 MemoryDenyWriteExecute=yes
 RestrictSUIDSGID=yes
 SystemCallArchitectures=native
+
+# Least-privilege hardening (GitHub #203, DMN-14; Docs/PACKAGING_AND_PROVISIONING.md §8).
+# Capabilities actually used: CAP_IPC_LOCK (mlockall), CAP_CHOWN / CAP_FOWNER
+# (socket fchownat / fchmodat). CAP_DAC_OVERRIDE is kept so state files whose
+# owner or mode an administrator changed (e.g. models copied as a regular user)
+# stay readable; dropping it needs validation on a real host first.
+CapabilityBoundingSet=CAP_IPC_LOCK CAP_CHOWN CAP_FOWNER CAP_DAC_OVERRIDE
+AmbientCapabilities=
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+# Filesystem AF_UNIX sockets keep working inside a private network namespace.
+PrivateNetwork=yes
+IPAddressDeny=any
+# ProtectProc=invisible / ProcSubset=pid are deliberately NOT set: without
+# CAP_SYS_PTRACE they would hide /proc/<pid>/cgroup of other users' peers,
+# which the session policy reads (session_policy.rs). PrivateDevices=yes is not
+# set either: it would remove /dev/video*.
 
 [Install]
 WantedBy=multi-user.target

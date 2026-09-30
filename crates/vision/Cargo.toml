@@ -17,4 +17,5 @@ jpeg-decoder = { workspace = true }
 zeroize = { workspace = true }
 
 [dev-dependencies]
+soos-test-fixtures = { workspace = true }
 proptest = "1"

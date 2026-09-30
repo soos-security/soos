@@ -10,10 +10,7 @@
     reason = "Contractual test suite utilizes direct assertions, unwrap, and indexing"
 )]
 
-use std::sync::Arc;
-
-use soos_inference_ort::detector::BoundingBox;
-use soos_inference_ort::{FaceLandmarks, LandmarkDetector, MockLandmarkDetector, Point2f};
+use soos_inference_ort::{FaceLandmarks, Point2f};
 
 #[test]
 fn test_point2f_geometry_and_distance() {
@@ -76,20 +73,4 @@ fn test_face_landmarks_array_conversion_and_geometry() {
     );
     let expected_angle = std::f32::consts::FRAC_PI_4; // 45 degrees
     assert!((tilted.roll_angle_rad() - expected_angle).abs() < 1e-5);
-}
-
-#[test]
-fn test_landmark_detector_trait_mock_dispatch() {
-    let mock = MockLandmarkDetector::new_canonical();
-    let detector: Arc<dyn LandmarkDetector> = Arc::new(mock);
-
-    let dummy_rgb = vec![128u8; 100 * 100 * 3];
-    let bbox = BoundingBox::new(10.0, 10.0, 60.0, 60.0);
-
-    let result = detector
-        .detect_landmarks(&dummy_rgb, 100, 100, &bbox)
-        .expect("Mock landmark detector should return landmarks");
-
-    assert!(result.eye_distance() > 0.0);
-    assert_eq!(result.as_array().len(), 5);
 }

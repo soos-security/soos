@@ -13,7 +13,7 @@ Depends: ${shlibs:Depends}, ${misc:Depends}, libpam-runtime (>= 1.1.8-1), adduse
 Recommends: libxkbcommon0, libwayland-client0, libwayland-egl1, libegl1, libgl1, libx11-6, libxcursor1, libxi6, libxrandr2
 Description: Local facial biometric authentication PAM module and daemon
  soos is a zero-trust local facial biometric PAM subsystem for Linux.
- It features sub-250ms latency verification, warm camera streaming,
+ It features deadline-bounded verification, warm camera streaming,
  presentation attack detection (PAD), and encrypted biometric vector storage.
  This package installs the privileged background daemon, user administration
  tools, enrollment CLI, systemd service, and Linux-PAM module.

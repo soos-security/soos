@@ -51,9 +51,20 @@ fn redact_line(line: &str) -> String {
     result
 }
 
+/// Returns an ASCII-only lowercase copy of `input` with exactly the same byte layout.
+///
+/// Every byte offset found in the returned string is a valid offset into `input`
+/// (GitHub #229): only ASCII bytes are changed and a non-ASCII UTF-8 byte (`>= 0x80`) can
+/// never match the ASCII keys searched by this module. `str::to_lowercase` must never be used
+/// here because characters such as `İ` (U+0130) or the KELVIN SIGN (U+212A) change their
+/// UTF-8 length when lowercased, which shifted every later offset and disabled redaction.
+fn ascii_lowered(input: &str) -> String {
+    input.to_ascii_lowercase()
+}
+
 /// Redacts content inside bracket pairs following a key (e.g. `embedding: [0.123, -0.456]`).
 fn redact_brackets(input: &str, key: &str) -> String {
-    let lower = input.to_lowercase();
+    let lower = ascii_lowered(input);
     let mut out = String::with_capacity(input.len());
     let mut cursor = 0;
 
@@ -106,7 +117,7 @@ fn redact_brackets(input: &str, key: &str) -> String {
 
 /// Redacts key-value fields such as `password=secret` or `password: "secret"`.
 fn redact_kv_field(input: &str, key: &str) -> String {
-    let lower = input.to_lowercase();
+    let lower = ascii_lowered(input);
     let mut out = String::with_capacity(input.len());
     let mut cursor = 0;
 
@@ -118,8 +129,9 @@ fn redact_kv_field(input: &str, key: &str) -> String {
             true
         } else {
             input
-                .get(match_idx.saturating_sub(1)..match_idx)
-                .is_some_and(|prev| !prev.chars().any(|c| c.is_alphanumeric() || c == '_'))
+                .get(..match_idx)
+                .and_then(|before| before.chars().next_back())
+                .is_some_and(|prev| !(prev.is_alphanumeric() || prev == '_'))
         };
 
         if !is_boundary {
@@ -212,7 +224,7 @@ fn redact_kv_field(input: &str, key: &str) -> String {
 
 /// Redacts Bearer authorization tokens: `Bearer <token>`.
 fn redact_bearer_token(input: &str) -> String {
-    let lower = input.to_lowercase();
+    let lower = ascii_lowered(input);
     let key = "bearer ";
     if let Some(pos) = lower.find(key) {
         let token_start = pos.saturating_add(key.len());

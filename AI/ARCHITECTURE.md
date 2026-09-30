@@ -15,11 +15,11 @@ The system is not considered a high-assurance biometric factor until robust Pres
 | PAM/Daemon Boundary | Local Unix Domain Socket (UDS), `SOCK_SEQPACKET` if available, otherwise framed `SOCK_STREAM` | Zero network exposure, ultra-low latency, kernel-enforced peer credentials (`SO_PEERCRED`) | HTTP, loopback TCP, world-writable socket without peer verification |
 | PAM Module Execution | Pure synchronous blocking Rust, `std::os::unix::net::UnixStream`; every blocking PAM operation has an explicit deadline derived from the clamped `timeout_ms` (default 1000 ms, range 10–5000 ms) | Critical authentication path must never spawn a persistent async runtime | AI inference, direct camera access, or network downloads inside `.so` |
 | Privileged Daemon | Rust + Tokio root process, sole owner of `/dev/video*` and ONNX sessions | Keeps camera warm and models in memory; central arbitration | Re-opening `/dev/video0` inside PAM on every authentication attempt |
-| Linux Camera Capture | `v4l` 0.14, MMAP buffers on dedicated worker thread; `nokhwa` only as prototype | Deterministic V4L2 control and predictable zero-copy buffer rotation | Depending on OpenCV or allowing competing camera consumers |
+| Linux Camera Capture | `v4l` 0.14, MMAP buffers on dedicated worker thread; `nokhwa` is banned by `deny.toml`[^nokhwa] | Deterministic V4L2 control and predictable zero-copy buffer rotation | Depending on OpenCV or allowing competing camera consumers |
 | Local AI Inference | `ort` (ONNX Runtime) CPU execution provider; **SCRFD 500M KPS** (face detection + 5-point landmarks) + **ArcFace ResNet34** (512D embeddings, manifest id `arcface_w600k_mbf`) + **MiniFASNetV2** (anti-spoofing) | Fast 3-model pipeline with unified detection+landmarks, battle-tested ORT runtime, no OpenCV required | Claiming "pure Rust" (ORT is native C/C++); unverified weight downloads; separate landmark model (absorbed into SCRFD) |
 | Biometric Storage | AES-GCM encrypted embeddings at rest; intrusion snapshots opt-in and isolated | Minimizes attack surface and persistent biometric risk | Storing raw frames or passwords on disk or sending over socket |
 
-Verified crate versions: `pam-bindings` 0.3.0 (target crate), `tokio` 1.53.1, `v4l` 0.14.0, `nokhwa` 0.10.11, `ort` 2.0.0-rc.13, `zeroize` 1.9.0. Versions are pinned in `Cargo.lock` and audited via `cargo-deny`.[^pam-bindings][^tokio][^v4l][^nokhwa][^ort][^zeroize]
+Verified crate versions: `pam-bindings` 0.3.0, `tokio` 1.53.1, `v4l` 0.14.0, `ort` 2.0.0-rc.13, `zeroize` 1.9.0. Versions are pinned in `Cargo.lock` and audited via `cargo-deny`.[^pam-bindings][^tokio][^v4l][^ort][^zeroize]
 
 ---
 
@@ -125,8 +125,7 @@ Event v1:    version | kind=PASSWORD_FAILED | request_id[32] |
 
 ### Crate and ABI
 The module compiles to a `cdylib` (`pam_soos.so`).
-- **Current Skeleton Phase**: Direct C ABI exports (`pam_sm_authenticate`, `pam_sm_setcred`) wrapped in `catch_unwind`, systematically returning `PAM_IGNORE` to test PAM ABI compatibility and non-interference without external dependencies.
-- **Planned Target Integration**: Adoption of `pam-bindings` 0.3.0 (`PamHandle`, `PamHooks`), syslog logging on caught panics, and IPC client integration.
+- **Implemented** (matrix PA11): the module implements the `pam-bindings` 0.3.0 `PamHooks` trait (`PamHandle`); every entry point is wrapped in `catch_unwind`, caught panics are logged to syslog, and every error, timeout or panic returns `PAM_IGNORE`. The synchronous IPC client (`crates/pam/src/ipc.rs`) talks to `soos-daemon`.
 
 ```rust
 // Conceptual authentication flow
@@ -194,7 +193,7 @@ CameraManager thread (blocking): dequeue MMAP -> timestamp CLOCK_MONOTONIC
 The soos vision pipeline uses a **3-model architecture** (manifest version 2.0.0), with SCRFD unifying face detection and landmark regression into a single model:
 
 1. **Face Detection + Landmarks**: SCRFD 500M KPS ONNX (~2.4 MB, MIT) → bounding boxes with confidence scores AND 5-point facial keypoints directly, via multi-stride (8/16/32) distance-to-border box decoding. BGR 640×640 input with letterbox padding and `(pixel - 127.5) / 128.0` normalization. Eliminates the separate landmark model of the legacy pipeline.
-2. **Presentation Attack Detection (PAD)**: MiniFASNetV2 ONNX (~1.8 MB, Apache-2.0) → `[PrintPhoto, Live, ScreenReplay]` 3-class liveness scores. Receives an **80×80 BGR** crop of the 2.7× expanded bounding box (wider context than the aligned face), normalized with `pixel / 255.0`. Live class index 1 = `DEFAULT_MINIFASNET_LIVE_CLASS_INDEX` (single source of truth in `crates/inference-ort/src/pad.rs`; never overridden in production, see ADR 2026-09-29 and GitHub #146). The model is RGB-trained: `PixelFormat::Grey` (IR) frames never take the colour path; they pass a fail-closed IR exposure/contrast/texture gate and a stricter, uncalibrated liveness threshold (`DEFAULT_IR_PAD_THRESHOLD = 0.95`, never looser than `pad_threshold`), see ADR 2026-09-30 and GitHub #169.
+2. **Presentation Attack Detection (PAD)**: MiniFASNetV2 ONNX (~1.8 MB, Apache-2.0) → `[PrintPhoto, Live, ScreenReplay]` 3-class liveness scores. Receives an **80×80 BGR** crop of the 2.7× expanded bounding box (wider context than the aligned face), built with the upstream Silent-Face-Anti-Spoofing window geometry and `INTER_LINEAR` half-pixel resize (`crop_pad_context`, GitHub #213), normalized with `pixel / 255.0`. The pipeline can fuse additional scale/model members by mean live probability (GitHub #212); only the 2.7× MiniFASNetV2 is attested today. Live class index 1 = `DEFAULT_MINIFASNET_LIVE_CLASS_INDEX` (single source of truth in `crates/inference-ort/src/pad.rs`; never overridden in production, see ADR 2026-09-29 and GitHub #146). The model is RGB-trained: `PixelFormat::Grey` (IR) frames never take the colour path; they pass a fail-closed IR exposure/contrast/texture gate and a stricter, uncalibrated liveness threshold (`DEFAULT_IR_PAD_THRESHOLD = 0.95`, never looser than `pad_threshold`), see ADR 2026-09-30 and GitHub #169.
 3. **Feature Extraction**: ArcFace **ResNet34** ONNX (Keras model exported with tf2onnx, ~34.1 M parameters, 136.6 MB, licence recorded as MIT; manifest id `arcface_w600k_mbf` is a historical name — it is **not** an InsightFace w600k MobileFaceNet, see ADR 2026-09-30 / GitHub #191) → **512D** embedding vector, L2-normalized by the extractor. Graph input `input_1` is **NHWC** `[N, 112, 112, 3]` (manifest `input_layout = "NHWC"`); it receives the standard **112×112** aligned face crop produced by affine alignment from the 5-point landmarks, fed in B, G, R order with `(pixel - 127.5) / 127.5` normalization (symmetric `[-1.0, +1.0]`). The channel order and normalization the network was trained with are not verified (follow-up).
 4. **Matching**: Cosine similarity (`cosine = dot(a, b)` for L2-normalized vectors). Authorized only if score ≥ calibrated threshold and a single face is verified with PAD passed.
 
@@ -242,19 +241,22 @@ soos/
 │   ├── biometric-store/          # encrypted embeddings at rest
 │   ├── evidence-store/           # intrusion evidence storage
 │   ├── enrollment-cli/           # root enrollment CLI
-│   └── admin-cli/                # non-biometric status diagnostic CLI
+│   ├── admin-cli/                # non-biometric status diagnostic CLI
+│   └── gui/                      # soos-gui diagnostic and enrollment GUI (eframe)
 ├── models/
 │   ├── manifest.toml             # model IDs, licenses, SHA-256 checksums
 │   └── README.md
 ├── packaging/
 ├── tests/
-│   ├── invariants/               # architectural security invariants
-│   ├── integration-pam/          # ephemeral Docker pamtester harness
-│   └── fixtures/
+│   ├── invariants/               # architectural security invariants (soos-invariants)
+│   ├── fixtures/                 # shared synthetic frames and embeddings (mod.rs)
+│   ├── docker/                   # ephemeral Docker PAM matrix (pam_test_runner)
+│   ├── distro/                   # per-distribution package validation
+│   └── physical/                 # real-hardware validation suite
 └── AI/                           # AI development guidelines and walkthroughs
 ```
 
-`#![forbid(unsafe_code)]` is strictly enforced in all business crates (`protocol`, `policy`, `vision`).
+`#![forbid(unsafe_code)]` is strictly enforced in all business crates; the authoritative list is the invariant test `test_business_crates_forbid_unsafe_code` in `tests/invariants/src/lib.rs` (`protocol`, `policy`, `vision`, `inference-ort`, `biometric-store`, `evidence-store`, `enrollment-cli`, `admin-cli`, `gui`). The adapter crates `pam` and `camera-v4l` confine documented `unsafe`.
 
 ---
 
@@ -287,7 +289,7 @@ ProtectHome=yes
 ProtectSystem=strict
 ReadWritePaths=/var/lib/soos /run/soos
 DevicePolicy=closed
-DeviceAllow=/dev/video* rw
+DeviceAllow=char-video4linux rw
 RestrictAddressFamilies=AF_UNIX
 LockPersonality=yes
 MemoryDenyWriteExecute=yes
@@ -297,7 +299,7 @@ SystemCallArchitectures=native
 
 ### Memory Hygiene
 - **Implemented**: The IPC `Response` struct implements manual `zeroize::Zeroize` and `Drop` to clear nonces and reset verdicts to `Deny` / `InternalError` upon deallocation.
-- **Planned Target**: Key material, decrypted biometric vectors, and raw camera frames in daemon memory will implement zeroization wrappers (`Zeroizing<T>`) and undergo bounds checking to prevent residual copies in heap or swap.
+- **Implemented** (matrix H1, VZF1–VZF3): key material, decrypted biometric vectors, raw camera frames, intermediate RGB crops and inference input tensors are held in zeroizing wrappers (`Zeroizing<T>` or manual `Zeroize` + `Drop`) and wiped on drop and on early error exits; see `Docs/MEMORY_PROTECTION_AND_SWAP.md`.
 
 ---
 
@@ -307,7 +309,7 @@ SystemCallArchitectures=native
 2. **Hardened IPC**: Systemd socket, `SO_PEERCRED`, bounded codec, timeouts, fuzzing.
 3. **Camera Pipeline**: Warm V4L2 MMAP streaming, latest frame atomic buffer, hotplug resilience.
 4. **Vision Engine**: Verified model manifests, pre-processing golden tests, calibrated cosine threshold.
-5. **PAM Validation**: Dockerized `pamtester` validation across failure/success matrix.
+5. **PAM Validation**: Dockerized PAM matrix (`tests/docker/test_suite.sh`, `pam_test_runner`) across the failure/success cases.
 6. **Evidence & Storage**: Encryption at rest, retention rotation, atomic writes.
 7. **PAD & Production**: Presentation attack testing, external security review.
 

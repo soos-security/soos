@@ -14,7 +14,8 @@ use std::sync::{Arc, Mutex};
 use ort::session::Session;
 
 use crate::error::InferenceError;
-use zeroize::{Zeroize, Zeroizing};
+use crate::outputs::ZeroizingOutputs;
+use zeroize::Zeroizing;
 
 /// Classification of detected presentation attack vectors.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -87,6 +88,80 @@ pub trait PadDetector: Send + Sync {
 /// requires a new ADR entry in `AI/DECISIONS.md` backed by a measurement on the real model.
 pub const DEFAULT_MINIFASNET_LIVE_CLASS_INDEX: usize = 1;
 
+/// Number of classes of the MiniFASNetV2 PAD head (`[PrintPhoto, Live, ScreenReplay]`).
+///
+/// The production detector requires exactly this many logits per inference (GitHub #214,
+/// PAD-09): any other length is a wrong model or head and is an error, never a verdict.
+pub const MINIFASNET_CLASS_COUNT: usize = 3;
+
+/// Edge (pixels) of the fixed synthetic fixture used by [`OrtPadDetector::self_test`].
+pub const PAD_SELF_TEST_EDGE: u32 = 80;
+
+/// Grey level of the fixed synthetic (non-biometric) self-test fixture.
+const PAD_SELF_TEST_GREY: u8 = 128;
+
+/// Result of a successful [`OrtPadDetector::self_test`] (safe to log: no biometric data).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PadSelfTestReport {
+    /// Number of logits the loaded model produced for the fixture.
+    pub class_count: usize,
+    /// Live class index the detector reads `p_live` from.
+    pub live_class_index: usize,
+    /// Liveness decision threshold of the detector.
+    pub liveness_threshold: f32,
+}
+
+/// Checks a PAD output vector against the expected class count and the live class index.
+///
+/// Fails closed with [`InferenceError::PadFailed`] when `output_len != expected_classes` or when
+/// `live_class_index` does not address an element of the output.
+pub fn validate_pad_output_contract(
+    output_len: usize,
+    live_class_index: usize,
+    expected_classes: usize,
+) -> Result<(), InferenceError> {
+    if output_len != expected_classes {
+        return Err(InferenceError::PadFailed(format!(
+            "PAD model produced {output_len} output values, the contract requires {expected_classes}"
+        )));
+    }
+    if live_class_index >= output_len {
+        return Err(InferenceError::PadFailed(format!(
+            "PAD live class index {live_class_index} is out of range for {output_len} classes"
+        )));
+    }
+    Ok(())
+}
+
+/// Derives the PAD class count from a manifest entry's `output_shapes`.
+///
+/// - No declared output: [`MINIFASNET_CLASS_COUNT`] (legacy manifests).
+/// - Exactly one declared output: its last dimension, which must equal
+///   [`MINIFASNET_CLASS_COUNT`] (the attack-type mapping is defined for 3 classes only).
+/// - Anything else fails closed with [`InferenceError::PadFailed`].
+pub fn pad_class_count_from_manifest(
+    output_shapes: &[Vec<usize>],
+) -> Result<usize, InferenceError> {
+    let classes = match output_shapes {
+        [] => return Ok(MINIFASNET_CLASS_COUNT),
+        [single] => single.last().copied().ok_or_else(|| {
+            InferenceError::PadFailed("PAD manifest output shape has rank 0".to_string())
+        })?,
+        _ => {
+            return Err(InferenceError::PadFailed(format!(
+                "PAD manifest declares {} outputs, exactly one class vector is required",
+                output_shapes.len()
+            )))
+        }
+    };
+    if classes != MINIFASNET_CLASS_COUNT {
+        return Err(InferenceError::PadFailed(format!(
+            "PAD manifest declares {classes} classes, the detector requires {MINIFASNET_CLASS_COUNT}"
+        )));
+    }
+    Ok(classes)
+}
+
 /// MiniFASNetV2 ONNX Runtime Presentation Attack Detector.
 pub struct OrtPadDetector {
     session: Arc<Mutex<Session>>,
@@ -155,9 +230,16 @@ impl OrtPadDetector {
             ));
         }
 
-        if probs.len() >= 3 {
-            let p_live = probs.get(live_class_index).copied().unwrap_or(0.0);
+        // An index outside the output is a configuration or model error, never a spoof
+        // verdict (GitHub #214, PAD-09).
+        let Some(&p_live) = probs.get(live_class_index) else {
+            return Err(InferenceError::PadFailed(format!(
+                "PAD live class index {live_class_index} is out of range for {} classes",
+                probs.len()
+            )));
+        };
 
+        if probs.len() >= 3 {
             if p_live >= liveness_threshold {
                 Ok(PadResult::live(p_live))
             } else {
@@ -180,23 +262,16 @@ impl OrtPadDetector {
                 Ok(PadResult::spoof(p_live, attack))
             }
         } else if probs.len() == 2 {
-            let p_live = probs.get(live_class_index).copied().unwrap_or(0.0);
             if p_live >= liveness_threshold {
                 Ok(PadResult::live(p_live))
             } else {
                 Ok(PadResult::spoof(p_live, AttackType::UnknownSpoof))
             }
-        } else if let Some(&single) = probs.first() {
-            // Single sigmoid output
-            if single >= liveness_threshold {
-                Ok(PadResult::live(single))
-            } else {
-                Ok(PadResult::spoof(single, AttackType::UnknownSpoof))
-            }
+        } else if p_live >= liveness_threshold {
+            // Single sigmoid output (index 0, checked above)
+            Ok(PadResult::live(p_live))
         } else {
-            Err(InferenceError::PadFailed(
-                "Empty probability distribution returned from PAD model".to_string(),
-            ))
+            Ok(PadResult::spoof(p_live, AttackType::UnknownSpoof))
         }
     }
 
@@ -223,6 +298,9 @@ impl OrtPadDetector {
     }
 
     /// Prepares, resizes, and normalizes an RGB image to 80x80 NCHW BGR format inside a zeroized container.
+    ///
+    /// Crops that are not 80x80 are resampled bilinearly with half-pixel centres (the
+    /// `cv2.resize` `INTER_LINEAR` convention); an 80x80 crop is copied exactly.
     ///
     /// Normalization maps `[0, 255]` pixel bytes to `[0.0, 1.0]` floats via `pixel / 255.0`.
     /// Channel ordering is BGR: channel 0 = Blue, channel 1 = Green, channel 2 = Red.
@@ -254,36 +332,59 @@ impl OrtPadDetector {
         let target_size = 80usize;
         let mut input_data = Zeroizing::new(vec![0.0f32; 3 * target_size * target_size]);
 
+        // Half-pixel centre bilinear sampling (cv2.resize INTER_LINEAR convention, GitHub
+        // #213). An 80x80 crop maps every output pixel exactly onto its source pixel.
         let scale_x = width as f32 / target_size as f32;
         let scale_y = height as f32 / target_size as f32;
+        let max_x = (width - 1) as f32;
+        let max_y = (height - 1) as f32;
+        let stride = width as usize;
+        let last_x = width as usize - 1;
+        let last_y = height as usize - 1;
+        let plane = target_size * target_size;
 
         for y in 0..target_size {
-            let src_y = ((y as f32 * scale_y) as usize).min(height as usize - 1);
+            let fy = ((y as f32 + 0.5) * scale_y - 0.5).clamp(0.0, max_y);
+            let y0 = (fy.floor() as usize).min(last_y);
+            let y1 = (y0 + 1).min(last_y);
+            let dy = fy - y0 as f32;
             for x in 0..target_size {
-                let src_x = ((x as f32 * scale_x) as usize).min(width as usize - 1);
-                let src_idx = (src_y * width as usize + src_x) * 3;
+                let fx = ((x as f32 + 0.5) * scale_x - 0.5).clamp(0.0, max_x);
+                let x0 = (fx.floor() as usize).min(last_x);
+                let x1 = (x0 + 1).min(last_x);
+                let dx = fx - x0 as f32;
 
-                if let (Some(&r), Some(&g), Some(&b)) =
-                    (rgb.get(src_idx), rgb.get(src_idx + 1), rgb.get(src_idx + 2))
-                {
-                    // MiniFASNetV2 normalization: pixel / 255.0 in [0.0, 1.0] range
-                    let norm_b = b as f32 / 255.0;
-                    let norm_g = g as f32 / 255.0;
-                    let norm_r = r as f32 / 255.0;
+                let w00 = (1.0 - dx) * (1.0 - dy);
+                let w10 = dx * (1.0 - dy);
+                let w01 = (1.0 - dx) * dy;
+                let w11 = dx * dy;
 
-                    // Channel ordering: BGR (channel 0 = B, channel 1 = G, channel 2 = R)
-                    let b_idx = y * target_size + x;
-                    let g_idx = target_size * target_size + y * target_size + x;
-                    let r_idx = 2 * target_size * target_size + y * target_size + x;
+                let i00 = (y0 * stride + x0) * 3;
+                let i10 = (y0 * stride + x1) * 3;
+                let i01 = (y1 * stride + x0) * 3;
+                let i11 = (y1 * stride + x1) * 3;
 
-                    if let Some(slot) = input_data.get_mut(b_idx) {
-                        *slot = norm_b;
+                let sample = |c: usize| -> Option<f32> {
+                    Some(
+                        w00 * f32::from(*rgb.get(i00 + c)?)
+                            + w10 * f32::from(*rgb.get(i10 + c)?)
+                            + w01 * f32::from(*rgb.get(i01 + c)?)
+                            + w11 * f32::from(*rgb.get(i11 + c)?),
+                    )
+                };
+
+                if let (Some(r), Some(g), Some(b)) = (sample(0), sample(1), sample(2)) {
+                    // MiniFASNetV2 normalization: pixel / 255.0 in [0.0, 1.0] range.
+                    // Channel ordering: BGR (channel 0 = B, channel 1 = G, channel 2 = R).
+                    let idx = y * target_size + x;
+                    if let Some(slot) = input_data.get_mut(idx) {
+                        *slot = b / 255.0;
                     }
-                    if let Some(slot) = input_data.get_mut(g_idx) {
-                        *slot = norm_g;
+                    if let Some(slot) = input_data.get_mut(plane + idx) {
+                        *slot = g / 255.0;
                     }
-                    if let Some(slot) = input_data.get_mut(r_idx) {
-                        *slot = norm_r;
+                    if let Some(slot) = input_data.get_mut(2 * plane + idx) {
+                        *slot = r / 255.0;
                     }
                 }
             }
@@ -293,14 +394,18 @@ impl OrtPadDetector {
     }
 }
 
-impl PadDetector for OrtPadDetector {
-    fn evaluate_liveness(
+impl OrtPadDetector {
+    /// Runs one inference and returns the raw logits of the first output tensor, after
+    /// checking them against the MiniFASNetV2 output contract.
+    fn run_logits(
         &self,
         rgb: &[u8],
         width: u32,
         height: u32,
-    ) -> Result<PadResult, InferenceError> {
-        let mut input_data = Self::prepare_input(rgb, width, height)?;
+    ) -> Result<Zeroizing<Vec<f32>>, InferenceError> {
+        // `Zeroizing` wipes the input tensor on drop; ORT-owned logits are wiped in place by
+        // `ZeroizingOutputs` (GitHub #255).
+        let input_data = Self::prepare_input(rgb, width, height)?;
 
         let tensor =
             ort::value::TensorRef::from_array_view(([1usize, 3, 80, 80], input_data.as_slice()))
@@ -311,15 +416,13 @@ impl PadDetector for OrtPadDetector {
             .lock()
             .map_err(|_| InferenceError::PadFailed("Session mutex poisoned".to_string()))?;
 
-        let outputs = session
-            .run(ort::inputs![tensor])
-            .map_err(|e| InferenceError::Ort(e.to_string()))?;
+        let outputs = ZeroizingOutputs::new(
+            session
+                .run(ort::inputs![tensor])
+                .map_err(|e| InferenceError::Ort(e.to_string()))?,
+        );
 
-        // Zeroize input buffer immediately post-inference
-        input_data.zeroize();
-
-        let mut out_iter = outputs.into_iter();
-        let (_, pad_tensor) = out_iter.next().ok_or_else(|| {
+        let pad_tensor = outputs.values().next().ok_or_else(|| {
             InferenceError::PadFailed("PAD model returned zero output tensors".to_string())
         })?;
 
@@ -327,8 +430,46 @@ impl PadDetector for OrtPadDetector {
             .try_extract_tensor::<f32>()
             .map_err(|e| InferenceError::Ort(e.to_string()))?;
         let logits = logits_binding.1;
+        // Per-inference output contract (GitHub #214): a wrong head is an error, never a
+        // verdict. Checked before the copy, so only a 3-element vector is ever materialized.
+        validate_pad_output_contract(logits.len(), self.live_class_index, MINIFASNET_CLASS_COUNT)?;
+        // The copy stays inside a wipe-on-drop container (GitHub #255).
+        Ok(Zeroizing::new(logits.to_vec()))
+    }
 
-        let probs = Self::softmax(logits);
+    /// Startup self-test (GitHub #214, PAD-09): runs one inference on a fixed synthetic
+    /// 80x80 grey fixture and checks that the model emits `expected_classes` logits (derived
+    /// from the manifest with [`pad_class_count_from_manifest`]) and that the live class index
+    /// addresses one of them. Fails closed with [`InferenceError::PadFailed`] otherwise.
+    ///
+    /// The fixture is not a face; its verdict is not asserted, only the output contract.
+    pub fn self_test(&self, expected_classes: usize) -> Result<PadSelfTestReport, InferenceError> {
+        validate_pad_output_contract(
+            MINIFASNET_CLASS_COUNT,
+            self.live_class_index,
+            expected_classes,
+        )?;
+        let edge = PAD_SELF_TEST_EDGE as usize;
+        let fixture = vec![PAD_SELF_TEST_GREY; edge * edge * 3];
+        let logits = self.run_logits(&fixture, PAD_SELF_TEST_EDGE, PAD_SELF_TEST_EDGE)?;
+        validate_pad_output_contract(logits.len(), self.live_class_index, expected_classes)?;
+        Ok(PadSelfTestReport {
+            class_count: logits.len(),
+            live_class_index: self.live_class_index,
+            liveness_threshold: self.liveness_threshold,
+        })
+    }
+}
+
+impl PadDetector for OrtPadDetector {
+    fn evaluate_liveness(
+        &self,
+        rgb: &[u8],
+        width: u32,
+        height: u32,
+    ) -> Result<PadResult, InferenceError> {
+        let logits = self.run_logits(rgb, width, height)?;
+        let probs = Self::softmax(&logits);
         Self::interpret_probabilities(&probs, self.liveness_threshold, self.live_class_index)
     }
 }

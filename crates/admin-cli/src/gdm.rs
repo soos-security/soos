@@ -75,15 +75,25 @@ pub struct GdmStatus {
     pub disable_file: PathBuf,
 }
 
+/// True when `content` holds an active (not commented-out) PAM rule whose module
+/// field is `pam_soos.so` (bare name or absolute path). Comments, blank lines and
+/// mentions in module arguments do not count (GitHub #236 / STO-20).
+#[must_use]
+pub fn has_active_pam_soos_rule(content: &str) -> bool {
+    content
+        .lines()
+        .filter_map(PamLine::parse)
+        .any(|line| line.module_name() == Some(PAM_MODULE_FILE))
+}
+
 /// Inspects current GDM integration and disable state.
+///
+/// `installed` requires an active `pam_soos.so` rule ([`has_active_pam_soos_rule`]);
+/// the file is read with the same bound as `gdm enable` ([`MAX_PAM_FILE_BYTES`]), and
+/// an unreadable, oversized or non-UTF-8 file reports `installed: false`.
 pub fn get_gdm_status(pam_file: &Path, disable_file: &Path) -> GdmStatus {
-    let installed = if pam_file.is_file() {
-        fs::read_to_string(pam_file)
-            .map(|content| content.contains("pam_soos.so"))
-            .unwrap_or(false)
-    } else {
-        false
-    };
+    let installed = pam_file.is_file()
+        && read_bounded_utf8(pam_file).is_ok_and(|content| has_active_pam_soos_rule(&content));
 
     let disabled = disable_file.exists() || Path::new("/etc/soos/disabled").exists();
     let enabled = installed && !disabled;
@@ -230,11 +240,7 @@ fn plan_gdm_enable(content: &str, include_dir: &Path) -> Result<Option<EnablePla
         ));
     }
     let pristine = strip_managed_rules(content)?;
-    let admin_rule = pristine
-        .lines()
-        .filter_map(PamLine::parse)
-        .any(|line| line.module_name() == Some(PAM_MODULE_FILE));
-    if admin_rule {
+    if has_active_pam_soos_rule(&pristine) {
         return Ok(None);
     }
 

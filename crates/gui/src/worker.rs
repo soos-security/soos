@@ -17,9 +17,10 @@ use std::time::{Duration, Instant};
 use arc_swap::ArcSwapOption;
 use eframe::egui;
 use soos_camera_v4l::CameraManager;
+use soos_enrollment_cli::guided_enrollment::LivenessPolicy;
 use soos_enrollment_cli::guided_enrollment::{EnrollmentStepFeedback, GuidedEnrollmentSession};
 use soos_vision::matcher::cosine_similarity;
-use soos_vision::VisionPipeline;
+use soos_vision::{PadInputModality, VisionAnalysis, VisionPipeline};
 
 use crate::state::LatestFrameData;
 
@@ -34,6 +35,65 @@ pub struct WorkerSharedInput {
     pub match_reference: Mutex<Option<Vec<f32>>>,
     /// Latest live match score against reference embedding.
     pub live_match_score: Mutex<Option<f32>>,
+}
+
+/// Samples per step of a GUI guided enrollment session.
+pub const GUI_GUIDED_SAMPLES_PER_STEP: usize = 4;
+
+/// Creates the GUI guided enrollment session with the strict session-level liveness
+/// policy (GitHub #217): k consecutive live frames per sample, abort on repeated spoofs.
+pub fn new_guided_enrollment_session() -> GuidedEnrollmentSession {
+    GuidedEnrollmentSession::with_liveness_policy(
+        GUI_GUIDED_SAMPLES_PER_STEP,
+        LivenessPolicy::strict(),
+    )
+}
+
+/// Feeds one analyzed frame to a guided enrollment session.
+///
+/// - No usable face (no pose or embedding, no quality verdict): the live streak is broken
+///   and `None` is returned (nothing new to report).
+/// - Quality-gate rejection (GitHub #218): streak broken, `FaceQualityTooLow`.
+/// - Face without a PAD verdict (crop or PAD failure): streak broken, `PromptHoldStill`;
+///   it is not a spoof event, and no sample is recorded.
+/// - Otherwise the frame is live when the model says live and the score reaches
+///   `pad_threshold` (fail-closed on NaN); spoof frames are counted by the session. The
+///   worker passes `VisionPipelineConfig::effective_pad_threshold` for the frame modality,
+///   so this is the same decision as `VisionPipelineConfig::pad_passes` (GitHub #215).
+pub fn feed_guided_enrollment(
+    session: &mut GuidedEnrollmentSession,
+    analysis: &VisionAnalysis,
+    frame_width: u32,
+    frame_height: u32,
+    pad_threshold: f32,
+) -> Option<EnrollmentStepFeedback> {
+    if analysis.quality_rejection.is_some() {
+        session.interrupt_liveness_streak();
+        return Some(EnrollmentStepFeedback::FaceQualityTooLow);
+    }
+    let (Some(pose), Some(emb)) = (&analysis.pose, &analysis.embedding) else {
+        session.interrupt_liveness_streak();
+        return None;
+    };
+    let Some(pad) = analysis.pad_result.as_ref() else {
+        session.interrupt_liveness_streak();
+        return Some(EnrollmentStepFeedback::PromptHoldStill);
+    };
+    let is_live = pad.is_live && pad.score.is_finite() && pad.score >= pad_threshold;
+
+    let is_centered = analysis
+        .detections
+        .first()
+        .map(|d| {
+            let center_x = (d.box_.x1 + d.box_.x2) * 0.5;
+            let center_y = (d.box_.y1 + d.box_.y2) * 0.5;
+            let w = frame_width as f32;
+            let h = frame_height as f32;
+            (center_x - w * 0.5).abs() < w * 0.25 && (center_y - h * 0.5).abs() < h * 0.25
+        })
+        .unwrap_or(false);
+
+    Some(session.process_sample(pose, emb.as_slice(), is_live, is_centered))
 }
 
 /// Spawns the dedicated vision worker thread that continuously processes camera frames.
@@ -76,41 +136,26 @@ pub fn spawn_vision_worker(
                             Ok(analysis) => {
                                 let total_latency = start_analysis.elapsed().as_secs_f64() * 1000.0;
 
-                                // Handle active guided enrollment if enabled
+                                // Single liveness decision shared with the daemon pipeline
+                                // (GitHub #215): enrollment gating and on-screen label alike.
+                                let modality = PadInputModality::for_frame(&frame);
                                 let is_live = analysis
                                     .pad_result
                                     .as_ref()
-                                    .map(|p| {
-                                        p.is_live && p.score >= pipeline.config().pad_threshold
-                                    })
-                                    .unwrap_or(false);
+                                    .is_some_and(|p| pipeline.config().pad_passes(p, modality));
 
-                                let is_centered = analysis
-                                    .detections
-                                    .first()
-                                    .map(|d| {
-                                        let center_x = (d.box_.x1 + d.box_.x2) * 0.5;
-                                        let center_y = (d.box_.y1 + d.box_.y2) * 0.5;
-                                        let w = frame.width as f32;
-                                        let h = frame.height as f32;
-                                        (center_x - w * 0.5).abs() < w * 0.25
-                                            && (center_y - h * 0.5).abs() < h * 0.25
-                                    })
-                                    .unwrap_or(false);
-
-                                if let (Some(pose), Some(emb)) =
-                                    (&analysis.pose, &analysis.embedding)
+                                // Handle active guided enrollment if enabled
+                                if let Ok(mut session_guard) =
+                                    shared_input.enrollment_session.lock()
                                 {
-                                    if let Ok(mut session_guard) =
-                                        shared_input.enrollment_session.lock()
-                                    {
-                                        if let Some(session) = session_guard.as_mut() {
-                                            let fb = session.process_sample(
-                                                pose,
-                                                emb.as_slice(),
-                                                is_live,
-                                                is_centered,
-                                            );
+                                    if let Some(session) = session_guard.as_mut() {
+                                        if let Some(fb) = feed_guided_enrollment(
+                                            session,
+                                            &analysis,
+                                            frame.width,
+                                            frame.height,
+                                            pipeline.config().effective_pad_threshold(modality),
+                                        ) {
                                             if let Ok(mut fb_guard) =
                                                 shared_input.enrollment_feedback.lock()
                                             {
@@ -143,6 +188,7 @@ pub fn spawn_vision_worker(
                                     height: frame.height,
                                     detections: analysis.detections.clone(),
                                     pad_result: analysis.pad_result.clone(),
+                                    pad_live: is_live,
                                     pose: analysis.pose,
                                     aligned_crop: analysis
                                         .aligned_crop
@@ -177,6 +223,7 @@ pub fn spawn_vision_worker(
                                         height: frame.height,
                                         detections: Vec::new(),
                                         pad_result: None,
+                                        pad_live: false,
                                         pose: None,
                                         aligned_crop: None,
                                         pipeline_latency_ms: 0.0,

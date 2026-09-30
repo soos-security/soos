@@ -39,6 +39,12 @@ pub const DEFAULT_INFERENCE_ESTIMATE_MS: u64 = 80;
 /// suspend, CPU starvation) cannot disable biometric authentication indefinitely.
 pub const MAX_INFERENCE_ESTIMATE_MS: u64 = 1000;
 
+/// Number of warm-up passes run by [`InferenceGate::warm_up`] at daemon start (GitHub #276).
+///
+/// The first pass pays the one-time ONNX Runtime allocations and is discarded; the estimate
+/// is seeded with the last pass, which reflects steady-state latency.
+pub const WARMUP_PASSES: usize = 2;
+
 /// Lower bound of the latency estimate (1ms): an estimate of zero would let an inference start
 /// with no remaining time at all.
 const MIN_INFERENCE_ESTIMATE_MS: u64 = 1;
@@ -160,6 +166,17 @@ impl InferenceEstimator {
     #[must_use]
     pub fn estimate(&self) -> Duration {
         Duration::from_micros(self.estimate_micros.load(Ordering::Relaxed))
+    }
+
+    /// Replaces the estimate with `measured` (clamped to the estimate bounds).
+    ///
+    /// Used once by the start-up warm-up (GitHub #276), so the first request is admitted
+    /// against a measured latency rather than [`DEFAULT_INFERENCE_ESTIMATE_MS`].
+    pub fn seed(&self, measured: Duration) {
+        self.estimate_micros.store(
+            clamp_estimate_micros(duration_to_micros(measured)),
+            Ordering::Relaxed,
+        );
     }
 
     /// Folds one measured inference duration into the estimate.
@@ -288,6 +305,51 @@ impl InferenceGate {
                 InferenceJobError::Cancelled
             }
         })
+    }
+}
+
+impl InferenceGate {
+    /// Runs `job` [`WARMUP_PASSES`] times on the blocking pool while holding an inference
+    /// slot, then seeds the latency estimate with the last pass (GitHub #276).
+    ///
+    /// Called at daemon start, before the socket is bound, so no request competes for the
+    /// slot. Returns the measured duration of the last pass. Job outputs are dropped unseen.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`InferenceJobError`] when a pass panicked or was cancelled; the estimate is
+    /// then left unchanged (the conservative default) and the slot is released.
+    pub async fn warm_up<F, T>(&self, job: F) -> Result<Duration, InferenceJobError>
+    where
+        F: Fn() -> T + Send + 'static,
+        T: Send + 'static,
+    {
+        let permit = self
+            .permits
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| InferenceJobError::Cancelled)?;
+        let measured = tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            let mut last = Duration::ZERO;
+            for _ in 0..WARMUP_PASSES {
+                let started = Instant::now();
+                drop(job());
+                last = started.elapsed();
+            }
+            last
+        })
+        .await
+        .map_err(|err| {
+            if err.is_panic() {
+                InferenceJobError::Panicked
+            } else {
+                InferenceJobError::Cancelled
+            }
+        })?;
+        self.estimator.seed(measured);
+        Ok(measured)
     }
 }
 

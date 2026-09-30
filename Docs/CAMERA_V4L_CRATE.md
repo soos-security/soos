@@ -83,7 +83,7 @@ Configures:
 - `fps`: Full streaming frame rate (default: 30)
 - `idle_fps`: Throttled power-saving rate (default: 5)
 - `idle_timeout`: Duration of inactivity before throttling (default: 60s)
-- `warmup_frames`: Discarded startup frames (default: 20)
+- `warmup_frames`: Discarded startup frames (library default: 20). `soos-daemon` does not use this default: it runs with `DAEMON_DEFAULT_WARMUP_FRAMES` (0, `crates/daemon/src/config.rs`) whether or not `/etc/soos/daemon.toml` exists, unless `[pipeline] warmup_frames` is set (GitHub #205, `Docs/DAEMON.md` §1.4)
 - `min_backoff` & `max_backoff`: Error backoff limits (default: 100ms to 5s)
 
 ### Shared Camera Resolver (`resolver.rs`, GitHub #152)

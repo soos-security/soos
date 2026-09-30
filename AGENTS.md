@@ -104,9 +104,15 @@ soos/
 │   ├── biometric-store/    # encrypted embeddings at rest
 │   ├── evidence-store/     # opt-in intrusion snapshots
 │   ├── enrollment-cli/     # root enrollment CLI
-│   └── admin-cli/          # non-biometric diagnostic CLI
+│   ├── admin-cli/          # non-biometric diagnostic CLI
+│   └── gui/                # soos-gui diagnostic and enrollment GUI
 ├── models/                 # manifest.toml + SHA-256 checksums
-├── tests/                  # invariants, integration, fixtures
+├── tests/
+│   ├── invariants/         # soos-invariants static repository checks
+│   ├── fixtures/           # shared synthetic frames and embeddings (mod.rs)
+│   ├── docker/             # Dockerized PAM matrix (pam_test_runner)
+│   ├── distro/             # per-distribution package validation
+│   └── physical/           # real-hardware validation suite
 └── AI/                     # AI documentation and walkthroughs
 ```
 
@@ -119,6 +125,7 @@ soos/
   - `fix/<name>`: Bug fix or security patch (e.g. `fix/pam-timeout`)
   - `test/<name>`: Tests, benchmarks, or fixtures (e.g. `test/fuzz-codec`)
   - `chore/<name>`: Tooling, CI, dependencies, docs (e.g. `chore/commit-convention`)
+  - No other prefix is allowed (commit types such as `refactor` or `docs` are not branch prefixes). The merged historical branches `refactor/remove-ort-landmark-detector`, `refactor/vision-pipeline-3-model`, `refactor/model-ids-nextgen`, `refactor/mock-backends-nextgen` and `docs/nextgen-model-documentation` stay registered in `scripts/sync_issue.py` as frozen `LEGACY_BRANCHES`; `--check` rejects any new one.
 - **Autonomous Loop to Merge (MANDATORY)**:
   1. **Phase 0 — Topic Branch**: `git checkout -b <type>/<name>`. Pre-commit hook prevents direct commits to `main`.
   2. **Phases 1 to 4 — TDD Cycle**: Architect → Tester → Auditor → Developer.
@@ -131,7 +138,7 @@ soos/
 ---
 
 ## Rust Coding Conventions
-- `#![forbid(unsafe_code)]` in business crates (`protocol`, `policy`, `vision`).
+- `#![forbid(unsafe_code)]` in every business crate (at least `protocol`, `policy`, `vision`; the authoritative list is `test_business_crates_forbid_unsafe_code` in `tests/invariants/src/lib.rs`).
 - `unsafe` isolated, documented with safety invariants, and confined to adapter crates (`pam`, `camera-v4l`).
 - `cargo fmt`, `cargo clippy -- -D warnings`, `cargo test` required before any commit.
 - Use `./save.sh` for quality-checked commits.

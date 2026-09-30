@@ -8,9 +8,6 @@
     reason = "Facial landmark geometry, coordinate scaling, and pixel buffer calculations"
 )]
 
-use crate::detector::BoundingBox;
-use crate::error::InferenceError;
-
 /// 2D floating-point coordinate representing a landmark point on an image plane.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Point2f {
@@ -97,16 +94,4 @@ impl FaceLandmarks {
         let dx = self.right_eye.x - self.left_eye.x;
         dy.atan2(dx)
     }
-}
-
-/// Trait implemented by 5-point facial landmark detector backends.
-pub trait LandmarkDetector: Send + Sync {
-    /// Estimates 5-point landmarks for a detected face bounding box.
-    fn detect_landmarks(
-        &self,
-        rgb: &[u8],
-        width: u32,
-        height: u32,
-        face_box: &BoundingBox,
-    ) -> Result<FaceLandmarks, InferenceError>;
 }
