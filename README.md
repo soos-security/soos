@@ -43,8 +43,9 @@ sudo soos-enroll list                            # templates are stored as /var/
 ### 3. Verify Before Activating PAM
 
 ```bash
-soos-admin status                                # daemon, socket and unit health
+soos-admin status                                # daemon, socket and unit health (incl. swap protection)
 soos-admin test-pam                              # simulated authentication round trip and latency
+sudo soos-admin camera list                      # V4L2 nodes, IR/RGB classification and the selected device
 ```
 
 ### 4. Activate PAM (Explicit Step)
@@ -83,6 +84,9 @@ Detailed guides and specifications are maintained in the [`Docs/`](Docs/) direct
 | [**CI/CD & Security Auditing**](Docs/CI_CD_AND_SECURITY.md) | Quality gates, `cargo-deny` dependency audits, and Docker PAM sandbox testing. |
 | [**Development Workflow & Branching**](Docs/DEVELOPMENT_WORKFLOW.md) | Topic branch rules, multi-agent TDD cycle, PR loop, and automated review. |
 | [**Conventional Commits Specification**](Docs/COMMIT_CONVENTION.md) | Standardized commit message format and git hook enforcement rules. |
+| [**Daemon**](Docs/DAEMON.md) / [**PAM Module**](Docs/PAM_MODULE.md) | Runtime configuration, systemd readiness, graceful shutdown, `PAM_SILENT` and fail-quiet behaviour. |
+| [**Camera (V4L2)**](Docs/CAMERA_V4L_CRATE.md) | Device resolution, IR/RGB classification and `soos-admin camera` diagnostics. |
+| [**Packaging & Provisioning**](Docs/PACKAGING_AND_PROVISIONING.md) / [**Distribution Deployment**](Docs/DISTRIBUTION_DEPLOYMENT.md) | Build dependencies, verified toolchain bootstrap, packages and per-distribution PAM activation. |
 
 ---
 
@@ -94,6 +98,7 @@ Detailed guides and specifications are maintained in the [`Docs/`](Docs/) direct
 - [`AI/ROLES_AND_WORKFLOW.md`](AI/ROLES_AND_WORKFLOW.md): Multi-agent operational rules and quality assurance.
 - [`AI/VERIFICATION_MATRIX.md`](AI/VERIFICATION_MATRIX.md): Traceable component acceptance matrix.
 - [`AI/walkthroughs/`](AI/walkthroughs/): Step-by-step verifiable implementation walkthroughs.
+- [`AI/handover/`](AI/handover/): Session handover notes (current state, open work, how to resume).
 
 ---
 
