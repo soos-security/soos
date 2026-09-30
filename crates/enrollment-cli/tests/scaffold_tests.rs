@@ -12,6 +12,7 @@
 
 use clap::Parser;
 use soos_enrollment_cli::args::{Cli, Commands, OutputFormat};
+use soos_enrollment_cli::{EMBEDDING_MODEL_VERSION, MODEL_ID_EMBEDDING};
 
 #[test]
 fn test_cli_parse_enroll_subcommand_with_uid() {
@@ -31,8 +32,8 @@ fn test_cli_parse_enroll_subcommand_with_uid() {
             assert_eq!(enroll.uid, Some(1000));
             assert_eq!(enroll.frames, 10);
             assert!(enroll.yes);
-            assert_eq!(enroll.model_id, "mobilefacenet");
-            assert_eq!(enroll.model_version, "1.0.0");
+            assert_eq!(enroll.model_id, MODEL_ID_EMBEDDING);
+            assert_eq!(enroll.model_version, EMBEDDING_MODEL_VERSION);
         }
         _ => panic!("Expected Commands::Enroll"),
     }

@@ -49,6 +49,11 @@ pub const MODEL_ID_PAD: &str = "minifasnet_v2_pad";
 /// Attested model registry ID for ArcFace MobileFaceNet w600k 512D feature extractor.
 pub const MODEL_ID_EMBEDDING: &str = "arcface_w600k_mbf";
 
+/// Attested `models/manifest.toml` version of the embedding model recorded in enrolled
+/// template metadata (GitHub #182 / STO-09). Pinned to the manifest by
+/// `test_embedding_model_constants_match_attested_manifest`.
+pub const EMBEDDING_MODEL_VERSION: &str = "2.0.0";
+
 /// Set of all 3 neural model IDs required by the biometric vision pipeline.
 pub const REQUIRED_MODEL_IDS: [&str; 3] =
     [MODEL_ID_FACE_DETECTOR, MODEL_ID_PAD, MODEL_ID_EMBEDDING];
@@ -140,6 +145,10 @@ pub struct EnrollmentSummary {
     pub embedding_dim: usize,
     pub model_id: String,
     pub model_version: String,
+    /// `true` when `--model-id`/`--model-version` differ from the loaded embedding
+    /// model ([`MODEL_ID_EMBEDDING`] / [`EMBEDDING_MODEL_VERSION`]). The daemon refuses
+    /// templates whose model identifier differs from its loaded extractor.
+    pub model_overridden: bool,
 }
 
 /// Outcome of a successfully completed enrollment.
@@ -339,6 +348,8 @@ impl EnrollmentService {
             embedding_dim,
             model_id: args.model_id.clone(),
             model_version: args.model_version.clone(),
+            model_overridden: args.model_id != MODEL_ID_EMBEDDING
+                || args.model_version != EMBEDDING_MODEL_VERSION,
         };
 
         if !args.yes {

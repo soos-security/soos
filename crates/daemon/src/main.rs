@@ -12,7 +12,7 @@ use soos_daemon::config::DaemonConfig;
 use soos_daemon::dispatcher::ConnectionDispatcher;
 use soos_daemon::health::HealthState;
 use soos_daemon::logging::init_logging;
-use soos_daemon::pipeline::initialize_pipeline;
+use soos_daemon::pipeline::{initialize_pipeline, EMBEDDING_MODEL_ID};
 use soos_daemon::socket::bind_socket;
 
 /// Poll interval of the camera health transition logger.
@@ -86,7 +86,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let dispatcher = Arc::new(
         ConnectionDispatcher::with_pipeline(config.dispatcher, health.clone(), components)
             .with_preview_config(config.preview)
-            .with_peer_limits(config.peer_limits),
+            .with_peer_limits(config.peer_limits)
+            .with_expected_embedding_model(EMBEDDING_MODEL_ID),
     );
 
     let (listener, socket_guard) = bind_socket(&config.socket).await?;

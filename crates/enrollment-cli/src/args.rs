@@ -5,6 +5,7 @@ use nix::unistd::User;
 use std::path::{Component, Path, PathBuf};
 
 use crate::error::EnrollmentCliError;
+use crate::service::{EMBEDDING_MODEL_VERSION, MODEL_ID_EMBEDDING};
 
 /// Output formats supported by diagnostic and query subcommands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, ValueEnum)]
@@ -86,7 +87,9 @@ pub struct DebugVisionArgs {
 /// Arguments for `enroll` subcommand.
 #[derive(Args, Debug, Clone)]
 pub struct EnrollArgs {
-    /// Target Linux User ID (UID). If not specified, defaults to caller UID.
+    /// Target Linux User ID (UID). If neither --uid nor --username is given, the
+    /// invoking user behind sudo/pkexec (SUDO_UID, PKEXEC_UID) is the target; root is
+    /// never an implicit target and must be requested explicitly (--uid 0).
     #[arg(short = 'i', long)]
     pub uid: Option<u32>,
 
@@ -102,12 +105,15 @@ pub struct EnrollArgs {
     #[arg(short = 'y', long)]
     pub yes: bool,
 
-    /// Model identifier to record in template metadata (default: "mobilefacenet").
-    #[arg(long, default_value = "mobilefacenet")]
+    /// Override of the embedding model identifier recorded in template metadata.
+    /// Defaults to the loaded embedding extractor (`arcface_w600k_mbf`). The daemon
+    /// refuses templates whose model identifier differs from its loaded extractor.
+    #[arg(long, default_value = MODEL_ID_EMBEDDING)]
     pub model_id: String,
 
-    /// Model version to record in template metadata (default: "1.0.0").
-    #[arg(long, default_value = "1.0.0")]
+    /// Override of the model version recorded in template metadata. Defaults to the
+    /// attested `models/manifest.toml` version.
+    #[arg(long, default_value = EMBEDDING_MODEL_VERSION)]
     pub model_version: String,
 }
 
@@ -173,7 +179,12 @@ pub struct ImportArgs {
     pub model_version: String,
 }
 
-/// Resolves target UID from optional explicit UID, optional username, or defaults to current UID.
+/// Resolves the target UID from an explicit UID, a username, or the invoking user.
+///
+/// Explicit values always win (including `--uid 0` for an intentional root
+/// enrollment). Without either, the target is derived by
+/// [`resolve_default_target_uid`] from the real UID and the `SUDO_UID` /
+/// `PKEXEC_UID` variables set by `sudo` and `pkexec` (GitHub #184 / STO-11).
 pub fn resolve_target_uid(
     uid: Option<u32>,
     username: Option<&str>,
@@ -188,7 +199,61 @@ pub fn resolve_target_uid(
         return Ok(user.uid.as_raw());
     }
 
-    Ok(nix::unistd::getuid().as_raw())
+    // A non-UTF-8 value is mapped to a non-numeric marker so it fails closed below.
+    let sudo_uid = std::env::var_os("SUDO_UID");
+    let pkexec_uid = std::env::var_os("PKEXEC_UID");
+    resolve_default_target_uid(
+        nix::unistd::getuid().as_raw(),
+        sudo_uid
+            .as_deref()
+            .map(|v| v.to_str().unwrap_or("\u{fffd}")),
+        pkexec_uid
+            .as_deref()
+            .map(|v| v.to_str().unwrap_or("\u{fffd}")),
+    )
+}
+
+/// Maximum accepted length of an invoker UID environment value (`u32::MAX` has 10 digits).
+const MAX_INVOKER_UID_LEN: usize = 10;
+
+/// Resolves the implicit enrollment target when neither `--uid` nor `--username` is given.
+///
+/// - A non-root real UID is its own target (environment variables are ignored).
+/// - A root real UID uses `SUDO_UID`, else `PKEXEC_UID`, when it names a non-root user.
+/// - Otherwise the call fails with [`EnrollmentCliError::TargetUserRequired`]: root is
+///   never enrolled implicitly and must be requested with `--uid 0` / `--username root`.
+/// - A present but malformed invoker UID fails closed with
+///   [`EnrollmentCliError::InvalidInvokerUid`].
+pub fn resolve_default_target_uid(
+    real_uid: u32,
+    sudo_uid: Option<&str>,
+    pkexec_uid: Option<&str>,
+) -> Result<u32, EnrollmentCliError> {
+    if real_uid != 0 {
+        return Ok(real_uid);
+    }
+
+    for (name, value) in [("SUDO_UID", sudo_uid), ("PKEXEC_UID", pkexec_uid)] {
+        let Some(raw) = value else {
+            continue;
+        };
+        let invoker = parse_invoker_uid(raw)
+            .ok_or_else(|| EnrollmentCliError::InvalidInvokerUid(name.to_string()))?;
+        if invoker != 0 {
+            return Ok(invoker);
+        }
+    }
+
+    Err(EnrollmentCliError::TargetUserRequired)
+}
+
+/// Parses a decimal UID strictly (ASCII digits only, bounded length, fits in `u32`).
+fn parse_invoker_uid(raw: &str) -> Option<u32> {
+    if raw.is_empty() || raw.len() > MAX_INVOKER_UID_LEN || !raw.bytes().all(|b| b.is_ascii_digit())
+    {
+        return None;
+    }
+    raw.parse::<u32>().ok()
 }
 
 /// Validates and sanitizes a path to ensure it is absolute and contains no traversal (`..`) components.

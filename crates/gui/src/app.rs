@@ -978,6 +978,18 @@ impl SoosApp {
                             "All angles captured! Composite template generated.",
                             Color32::GREEN,
                         ),
+                        EnrollmentStepFeedback::InvalidEmbedding => (
+                            "Sample rejected: invalid face features, hold still.",
+                            Color32::YELLOW,
+                        ),
+                        EnrollmentStepFeedback::IdentityMismatch => (
+                            "Sample rejected: only the enrolling user may face the camera.",
+                            Color32::RED,
+                        ),
+                        EnrollmentStepFeedback::PoseOutOfRange => (
+                            "Too far: rotate your head back slightly.",
+                            Color32::YELLOW,
+                        ),
                     };
 
                     ui.group(|ui| {

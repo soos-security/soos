@@ -21,20 +21,27 @@ In accordance with `AI/ARCHITECTURE.md` (§8 Monorepo Structure, §9 Privacy, Pe
 Enrolls a user with multi-frame quality selection and interactive confirmation:
 
 ```bash
-# Interactive enrollment for current root user or specified UID
+# Interactive enrollment of the user who invoked sudo (SUDO_UID)
+sudo soos-enroll enroll
+
+# Interactive enrollment of a specified UID
 sudo soos-enroll enroll --uid 1000 --frames 5
+
+# Enrolling root is only possible explicitly
+sudo soos-enroll enroll --uid 0
 
 # Enrollment by username with automated non-interactive confirmation
 sudo soos-enroll enroll --username alice --yes
 ```
 
 **Options**:
-- `-i, --uid <UID>`: Target Linux User ID. Defaults to caller UID if unspecified.
+- `-i, --uid <UID>`: Target Linux User ID. Without `--uid` and `--username`, the target is the invoking user: the real UID when it is not root, otherwise `SUDO_UID` (then `PKEXEC_UID`) when it names a non-root user. Root is never an implicit target: with no such variable the command fails before any capture and asks for `--username`/`--uid`; `--uid 0` (or `--username root`) enrolls root explicitly. A malformed `SUDO_UID`/`PKEXEC_UID` fails closed. The resolved target UID is printed before capture (GitHub #184 / STO-11).
 - `-u, --username <NAME>`: Target username (resolved via system user database).
 - `--frames <N>`: Number of candidate frames to capture and evaluate (default: 5, bounded 1–30).
 - `-y, --yes`: Automatically confirm enrollment without interactive confirmation prompt.
-- `--model-id <ID>`: Model identifier stored in template metadata (default: `mobilefacenet`).
-- `--model-version <VER>`: Model version stored in template metadata (default: `1.0.0`).
+- `--model-id <ID>`: Override of the embedding model identifier stored in template metadata. Default: the loaded embedding extractor `MODEL_ID_EMBEDDING` = `arcface_w600k_mbf` (GitHub #182 / STO-09; the former `mobilefacenet` default is retired per ADR 2026-09-20).
+- `--model-version <VER>`: Override of the model version stored in template metadata. Default: `EMBEDDING_MODEL_VERSION` = `2.0.0`, the attested `models/manifest.toml` version (pinned by a test).
+- Any override that differs from the loaded model prints a warning before capture and sets `model_overridden` in the confirmation summary: `soos-daemon` refuses templates whose `model_id` differs from its loaded extractor (`Verdict::Unavailable` / `ReasonClass::ModelUnavailable`, PAM falls back to the next module), so such a template can never authenticate. Migration aid: templates recorded with the retired default, exactly `mobilefacenet` / `1.0.0`, contain ArcFace vectors and are still accepted as a legacy alias with a warning recommending re-enrollment (ADR 2026-09-30 "Embedding Model Binding and Legacy Model Alias"); any other version or id is refused. Re-enroll affected users (`soos-enroll list` shows the recorded model) before the alias is removed.
 
 ### `soos-enroll verify`
 Performs a one-shot diagnostic verification against an enrolled biometric template:
@@ -114,6 +121,26 @@ Filesystem and privacy contract (`crates/enrollment-cli/src/service.rs`):
 - **Detector errors are propagated**: a failing detector aborts the command (`EnrollmentCliError::Inference`) instead of silently producing a report with zero detections, and no file is created.
 
 Verification: `crates/enrollment-cli/tests/debug_vision_tests.rs` (matrix rows EN12–EN14).
+
+---
+
+### Guided multi-angle enrollment (`GuidedEnrollmentSession`, used by `soos-gui`)
+
+`soos_enrollment_cli::guided_enrollment` collects samples over four steps and fuses them (GitHub #183 / STO-10). A sample is recorded only when:
+
+| Check | Rule | Feedback on failure |
+|---|---|---|
+| Liveness / centering | PAD live and face centered | `SpoofDetected` / `PromptCenterFace` |
+| Pose finiteness | yaw, pitch, roll finite | `PromptHoldStill` |
+| Roll (all steps) | `abs(roll) <= 10` degrees | `PromptHoldStill` |
+| Frontal | `abs(yaw) <= 8`, `abs(pitch) <= 10` | `PromptCenterFace` / `PromptHoldStill` |
+| Turn left | yaw in `[-25, -10]`, `abs(pitch) <= 15` | `PromptTurnLeft` (not enough) / `PoseOutOfRange` (too far) |
+| Turn right | yaw in `[10, 25]`, `abs(pitch) <= 15` | `PromptTurnRight` / `PoseOutOfRange` |
+| Tilt up | pitch in `[-25, -8]`, `abs(yaw) <= 15` | `PromptTiltUp` / `PoseOutOfRange` |
+| Embedding validity | non-empty, at most `MAX_GUIDED_EMBEDDING_DIM` (2048) values, same dimension as the first sample, all values finite, L2 norm > 1e-6 | `InvalidEmbedding` |
+| Identity consistency | cosine >= `MIN_SAMPLE_CONSISTENCY_COSINE` (0.5) with every accepted frontal sample and, for off-axis steps, with the frontal mean direction | `IdentityMismatch` |
+
+Each step records at most `MAX_SAMPLES_PER_STEP` (20) samples (`GuidedEnrollmentSession::new` clamps the target to `1..=20`). The composite template is the mean direction of the L2-normalized samples, `t = m / ||m||` with `m = sum_i s_i / ||s_i||`; `compute_composite_embedding` re-validates every sample (dimension, finiteness, consistency with the frontal anchor) and fails closed instead of returning a non-finite or contaminated vector.
 
 ---
 
