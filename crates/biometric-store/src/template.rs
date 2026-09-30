@@ -3,7 +3,7 @@
 use crate::error::BiometricStoreError;
 use serde::{Deserialize, Serialize};
 use std::fmt;
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 /// Biometric template encapsulating user ID, model metadata, and zeroized embedding.
 #[derive(Clone, PartialEq)]
@@ -71,8 +71,13 @@ impl BiometricTemplate {
     }
 
     /// Serializes the template into canonical CBOR binary format.
-    pub fn to_cbor(&self) -> Result<Vec<u8>, BiometricStoreError> {
-        let wire = TemplateWire {
+    ///
+    /// The CBOR bytes contain the embedding in plaintext, so they are returned in a
+    /// [`Zeroizing`] buffer. The buffer is reserved up front so that serialization does not
+    /// reallocate (a reallocation would leave an unscrubbed copy in freed memory), and the
+    /// temporary copy of the embedding held by the wire struct is zeroized before returning.
+    pub fn to_cbor(&self) -> Result<Zeroizing<Vec<u8>>, BiometricStoreError> {
+        let mut wire = TemplateWire {
             uid: self.uid,
             model_id: self.model_id.clone(),
             model_version: self.model_version.clone(),
@@ -81,9 +86,28 @@ impl BiometricTemplate {
             embedding: (*self.embedding).clone(),
         };
 
-        let mut bytes = Vec::new();
-        ciborium::into_writer(&wire, &mut bytes)
-            .map_err(|e| BiometricStoreError::Serialization(e.to_string()))?;
+        let mut bytes = Zeroizing::new(Vec::new());
+        let reserve = self
+            .embedding
+            .len()
+            .checked_mul(CBOR_MAX_BYTES_PER_F32)
+            .and_then(|n| n.checked_add(CBOR_METADATA_OVERHEAD))
+            .and_then(|n| n.checked_add(self.model_id.len()))
+            .and_then(|n| n.checked_add(self.model_version.len()));
+        let reserved = match reserve {
+            Some(n) => bytes.try_reserve_exact(n).map_err(|e| {
+                BiometricStoreError::Serialization(format!("CBOR buffer allocation failed: {e}"))
+            }),
+            None => Err(BiometricStoreError::Serialization(
+                "CBOR buffer size overflow".to_string(),
+            )),
+        };
+        let written = reserved.and_then(|()| {
+            ciborium::into_writer(&wire, &mut *bytes)
+                .map_err(|e| BiometricStoreError::Serialization(e.to_string()))
+        });
+        wire.embedding.zeroize();
+        written?;
         Ok(bytes)
     }
 
@@ -125,6 +149,13 @@ impl fmt::Debug for BiometricTemplate {
             .finish()
     }
 }
+
+/// Upper bound of the CBOR encoding of one `f32` array element (a major-type-7 float is at
+/// most 1 header byte + 8 payload bytes).
+const CBOR_MAX_BYTES_PER_F32: usize = 9;
+
+/// Upper bound of the CBOR encoding of the fixed fields, map keys and length headers.
+const CBOR_METADATA_OVERHEAD: usize = 256;
 
 /// Internal wire format for CBOR serialization.
 #[derive(Serialize, Deserialize)]

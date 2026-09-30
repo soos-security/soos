@@ -3234,6 +3234,7 @@ dependencies = [
  "ciborium",
  "getrandom 0.3.4",
  "libc",
+ "nix",
  "proptest",
  "serde",
  "tempfile",

@@ -86,13 +86,14 @@ fn run() -> Result<(), EnrollmentCliError> {
         Commands::Delete(args) => {
             let service = build_store_only(&cli)?;
             service.delete(args, |uid| {
-                let prompt = format!(
-                    "Are you sure you want to securely shred and delete template for UID {uid}? [y/N]: "
-                );
+                let prompt =
+                    format!("Are you sure you want to delete the template for UID {uid}? [y/N]: ");
                 prompt_stdin(&prompt)
             })?;
 
-            println!("[OK] Biometric template securely shredded and removed.");
+            println!(
+                "[OK] Biometric template overwritten (best effort) and removed; residual copies stay encrypted under the master key."
+            );
         }
 
         Commands::List(args) => {
