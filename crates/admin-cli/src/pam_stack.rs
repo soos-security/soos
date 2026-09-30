@@ -236,7 +236,7 @@ impl<'a> PamLine<'a> {
 pub(crate) enum Scan {
     /// The lines ended without reaching a credential module: keep scanning the caller.
     Continue,
-    /// A credential module was reached (or the included file is missing): gates end here.
+    /// A credential module was reached: gates end here.
     Stop,
 }
 
@@ -293,8 +293,16 @@ fn scan_stack(
     let path = dir.join(name);
     let content = match read_bounded_utf8(&path) {
         Ok(content) => content,
-        // A missing include makes Linux-PAM fail the stack anyway: nothing to guard.
-        Err(ReadError::NotFound) => return Ok(Scan::Stop),
+        // Fail closed: a target missing from the PAM directory may be resolved by
+        // libpam from a vendor directory (never searched here) or make the stack
+        // fail; either way its gates are unknown.
+        Err(ReadError::NotFound) => {
+            return Err(AdminCliError::GdmConfig(format!(
+                "the included auth stack '{name}' was not found inside the PAM directory \
+                 (vendor directories such as /usr/lib/pam.d are not searched); refusing to \
+                 guess which gates it runs (see Docs/DISTRIBUTION_DEPLOYMENT.md section 2.1)"
+            )))
+        }
         Err(ReadError::Other(msg)) => return Err(AdminCliError::GdmConfig(msg)),
     };
     let label = format!("the shared auth stack '{name}'");

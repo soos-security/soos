@@ -53,6 +53,7 @@ fn test_gdm_disable_and_enable_lifecycle() {
         "#%PAM-1.0\nauth requisite pam_nologin.so\n@include common-auth\n",
     )
     .unwrap();
+    write_common_auth(temp.path());
 
     // 1. Enable GDM
     soos_admin_cli::gdm::configure_gdm(&GdmAction::Enable, &pam_file, &disable_file)
@@ -95,6 +96,15 @@ fn test_gdm_disable_and_enable_lifecycle() {
 
 const PRISTINE_GDM: &str = "#%PAM-1.0\nauth requisite pam_nologin.so\n@include common-auth\n";
 
+/// Shared auth stack delegated to by [`PRISTINE_GDM`], written next to the PAM file:
+/// `gdm enable` refuses a delegated stack it cannot read (user-approved setup
+/// migration, 2026-09-30).
+const COMMON_AUTH: &str = "auth required pam_unix.so\n";
+
+fn write_common_auth(dir: &std::path::Path) {
+    fs::write(dir.join("common-auth"), COMMON_AUTH).unwrap();
+}
+
 fn backup_of(pam_file: &std::path::Path) -> std::path::PathBuf {
     let mut name = pam_file.file_name().unwrap().to_os_string();
     name.push(".soos-backup");
@@ -110,6 +120,7 @@ fn test_gdm_enable_creates_byte_exact_backup_with_original_mode() {
     let pam_file = temp.path().join("gdm-password");
     let disable_file = temp.path().join("gdm.disable");
     fs::write(&pam_file, PRISTINE_GDM).unwrap();
+    write_common_auth(temp.path());
     fs::set_permissions(&pam_file, fs::Permissions::from_mode(0o640)).unwrap();
 
     soos_admin_cli::gdm::configure_gdm(&GdmAction::Enable, &pam_file, &disable_file)
@@ -144,6 +155,7 @@ fn test_gdm_enable_never_overwrites_an_existing_backup() {
     let disable_file = temp.path().join("gdm.disable");
     let backup = backup_of(&pam_file);
     fs::write(&pam_file, PRISTINE_GDM).unwrap();
+    write_common_auth(temp.path());
     fs::write(&backup, "# pristine from an earlier enable\n").unwrap();
 
     soos_admin_cli::gdm::configure_gdm(&GdmAction::Enable, &pam_file, &disable_file)
@@ -163,6 +175,7 @@ fn test_gdm_enable_is_atomic_and_idempotent() {
     let pam_file = temp.path().join("gdm-password");
     let disable_file = temp.path().join("gdm.disable");
     fs::write(&pam_file, PRISTINE_GDM).unwrap();
+    write_common_auth(temp.path());
 
     soos_admin_cli::gdm::configure_gdm(&GdmAction::Enable, &pam_file, &disable_file).unwrap();
     let first = fs::read_to_string(&pam_file).unwrap();
@@ -186,6 +199,7 @@ fn test_gdm_enable_is_atomic_and_idempotent() {
     assert_eq!(
         names,
         vec![
+            "common-auth".to_string(),
             "gdm-password".to_string(),
             "gdm-password.soos-backup".to_string()
         ],
@@ -256,6 +270,7 @@ fn test_gdm_status_configured_enabled() {
     let pam_file = temp.path().join("gdm-password");
     let disable_file = temp.path().join("gdm.disable");
     fs::write(&pam_file, PRISTINE_GDM).unwrap();
+    write_common_auth(temp.path());
 
     let status =
         soos_admin_cli::gdm::configure_gdm(&GdmAction::Enable, &pam_file, &disable_file).unwrap();
@@ -269,6 +284,7 @@ fn test_gdm_status_configured_disabled() {
     let pam_file = temp.path().join("gdm-password");
     let disable_file = temp.path().join("gdm.disable");
     fs::write(&pam_file, PRISTINE_GDM).unwrap();
+    write_common_auth(temp.path());
     soos_admin_cli::gdm::configure_gdm(&GdmAction::Enable, &pam_file, &disable_file).unwrap();
     fs::write(&disable_file, "disabled\n").unwrap();
 

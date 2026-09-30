@@ -1118,3 +1118,13 @@ fn test_gdm_enable_does_not_duplicate_an_earlier_enforcing_gate() {
         "an earlier enforcing gate is not duplicated:\n{content}"
     );
 }
+
+/// Round 2 Finding 1: a delegated stack missing from the PAM directory may be resolved
+/// by libpam from a vendor directory (`/usr/lib/pam.d`) or make the stack fail; either
+/// way soos cannot know its gates, so `enable` refuses.
+#[test]
+fn test_gdm_enable_refuses_a_missing_include_target() {
+    let original = "#%PAM-1.0\nauth requisite pam_nologin.so\nauth include common-auth\n";
+    let f = fixture(original, &[]);
+    assert_enable_refused(&f, original, "common-auth");
+}
