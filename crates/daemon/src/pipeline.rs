@@ -310,6 +310,16 @@ pub fn camera_device_resolver(
     Some(Arc::new(move || auto_select_camera_device(preference)))
 }
 
+/// Model registry configuration derived from the pipeline configuration: models directory,
+/// its `manifest.toml`, and the operator-configured ORT intra-op thread count (GitHub #252;
+/// ORT spin-waiting stays disabled).
+pub fn registry_config_for(
+    config: &crate::config::PipelineConfig,
+) -> soos_inference_ort::RegistryConfig {
+    soos_inference_ort::RegistryConfig::new(&config.models_dir)
+        .with_intra_threads(config.inference_intra_threads)
+}
+
 /// Initializes all production pipeline components from a strongly-typed [`PipelineConfig`].
 ///
 /// This includes:
@@ -367,7 +377,7 @@ pub fn initialize_pipeline(
     ));
 
     // 5. Machine Learning Models & Vision Pipeline
-    let reg_config = soos_inference_ort::RegistryConfig::new(&config.models_dir);
+    let reg_config = registry_config_for(config);
     let mut registry = soos_inference_ort::ModelRegistry::new(reg_config)?;
 
     // Cryptographic attestation: hash every model once; the verified in-memory bytes are what

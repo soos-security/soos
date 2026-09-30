@@ -81,6 +81,10 @@ pub struct PipelineConfig {
     pub rate_limit: soos_policy::RateLimitConfig,
     /// Whether to force mock camera simulation rather than hardware device.
     pub use_mock_camera: bool,
+    /// ONNX Runtime intra-op threads per model session (`[pipeline] inference_intra_threads`,
+    /// GitHub #252). Defaults to `min(4, available_parallelism)`; validated to
+    /// `1..=soos_inference_ort::MAX_INTRA_THREADS` at load.
+    pub inference_intra_threads: usize,
 }
 
 impl Default for PipelineConfig {
@@ -95,6 +99,7 @@ impl Default for PipelineConfig {
             thresholds: soos_policy::ThresholdConfig::default(),
             rate_limit: soos_policy::RateLimitConfig::default(),
             use_mock_camera: false,
+            inference_intra_threads: soos_inference_ort::default_intra_threads(),
         }
     }
 }
@@ -195,6 +200,7 @@ struct PipelineConfigFile {
     thresholds: Option<ThresholdConfigFile>,
     #[serde(default)]
     rate_limit: Option<RateLimitConfigFile>,
+    inference_intra_threads: Option<usize>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -294,6 +300,15 @@ impl DaemonConfig {
             }
             if let Some(master_key_path) = pipe.master_key_path {
                 config.pipeline.master_key_path = master_key_path;
+            }
+            if let Some(threads) = pipe.inference_intra_threads {
+                let max = soos_inference_ort::MAX_INTRA_THREADS;
+                if !(1..=max).contains(&threads) {
+                    return Err(DaemonError::Config(format!(
+                        "Invalid [pipeline] inference_intra_threads = {threads}: expected 1..={max}"
+                    )));
+                }
+                config.pipeline.inference_intra_threads = threads;
             }
 
             if let Some(ev) = pipe.evidence {

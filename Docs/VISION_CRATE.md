@@ -34,9 +34,9 @@ V4L2 capture devices emit frames in various pixel formats. `convert_to_rgb` tran
 
 | Format | Input Layout | Conversion Algorithm | Output |
 |---|---|---|---|
-| `PixelFormat::Rgb24` | 3 bytes/pixel `[R, G, B]` | Length validation, zero-copy passthrough | Standard RGB24 |
+| `PixelFormat::Rgb24` | 3 bytes/pixel `[R, G, B]` | Length validation; `convert_to_rgb_cow` borrows the frame without a copy (`Cow::Borrowed`, used by `process_frame`), `convert_to_rgb` returns an owned copy (GitHub #252) | Standard RGB24 |
 | `PixelFormat::Grey` | 1 byte/pixel `[G]` | Broadcasts grayscale value to 3 channels `[G, G, G]` | Standard RGB24 |
-| `PixelFormat::Yuyv` | 4 bytes/2 pixels `[Y0, U, Y1, V]` | Full-range integer fixed-point BT.601 conversion | Standard RGB24 |
+| `PixelFormat::Yuyv` | 4 bytes/2 pixels `[Y0, U, Y1, V]` | Full-range integer fixed-point BT.601 conversion; an odd width is rejected with `InvalidDimensions` (GitHub #253) | Standard RGB24 |
 | `PixelFormat::Mjpeg` | Compressed JPEG stream | Bounded, header-checked pure-Rust `jpeg-decoder` decompression (§2.1.1) | Standard RGB24 |
 
 #### 2.1.1 Bounded MJPEG Decoding (GitHub #190, review finding VIS-02)
@@ -85,6 +85,15 @@ The alignment computes a closed-form least-squares 2D similarity transform (scal
 2. Compute scale-rotation parameters $a = s \cos\theta$ and $b = s \sin\theta$.
 3. Compute translation vector $t = \mu_T - M \mu_S$.
 4. Apply the inverse transform with bilinear interpolation to sample each target pixel $(u, v) \in [0, 112) \times [0, 112)$ from source image coordinates $(x_s, y_s)$, padding out-of-boundary regions with zero (black).
+
+#### 2.2.1 Non-Finite Landmark Rejection (GitHub #254, review finding VIS-12)
+
+NaN compares false against the `sum_xx_yy <= 1e-6` and `det <= 1e-12` degeneracy guards and
+against every bilinear bounds check, so a NaN landmark used to produce an all-black 112x112 crop
+that was embedded (and, during enrollment, could be stored). `align_face_112` now returns
+`AlignmentFailed` when any landmark coordinate is non-finite, and when the similarity transform
+coefficients overflow to a non-finite value (finite but extreme coordinates). The SCRFD decoder
+additionally skips non-finite candidates (`Docs/INFERENCE_ORT_CRATE.md`).
 
 ### 2.3 Cosine Similarity Matching (`matcher.rs`)
 

@@ -9,7 +9,7 @@ The crate encapsulates:
 2. **Face Detection + Landmarks**: SCRFD 500M KPS ONNX model with multi-stride (8/16/32) distance-to-border box decoding, letterbox padding, BGR input normalization, and embedded 5-point facial keypoints. Replaces the legacy UltraFace Slim 320 + separate landmark model architecture.
 3. **Landmark Domain Types**: `FaceLandmarks`, `Point2f`, and `LandmarkDetector` trait for geometric alignment. In the 3-model pipeline, landmark regression is absorbed directly into SCRFD face detection (`OrtScrfdDetector`); `MockLandmarkDetector` provided for deterministic simulation.
 4. **Biometric Feature Extraction**: ArcFace embedding extractor generating L2-normalized 512D vectors with symmetric `[-1.0, +1.0]` normalization `(pixel - 127.5) / 127.5` (Verification Matrix Criteria `V2` and `NGM7`). The attested model (manifest id `arcface_w600k_mbf`, a historical name) is a Keras ArcFace **ResNet34** exported with tf2onnx (~34.1 M parameters, 136.6 MB) whose input `input_1` is **NHWC** `[N, 112, 112, 3]` and output `embedding` `[N, 512]` (GitHub #191, ADR 2026-09-30).
-5. **Presentation Attack Detection (Anti-Spoofing)**: MiniFASNetV2 80×80 BGR anti-spoofing model with `pixel / 255.0` normalization into `[0.0, 1.0]`, live class index fixed by `DEFAULT_MINIFASNET_LIVE_CLASS_INDEX = 1` (`[PrintPhoto, Live, ScreenReplay]`, single source of truth for every binary), and deterministic post-inference buffer zeroization (Verification Matrix Criteria `NGM8`, `NGM9`, `NGM10`, `PLC1`–`PLC3`).
+5. **Presentation Attack Detection (Anti-Spoofing)**: MiniFASNetV2 80×80 BGR anti-spoofing model with `pixel / 255.0` normalization into `[0.0, 1.0]`, live class index fixed by `DEFAULT_MINIFASNET_LIVE_CLASS_INDEX = 1` (`[PrintPhoto, Live, ScreenReplay]`, single source of truth for every binary), input tensors zeroized on drop (`Zeroizing<Vec<f32>>`) and ORT-owned output tensors wiped in place by `ZeroizingOutputs` (GitHub #255; ORT-internal activation buffers are out of reach, see "ORT output wiping" below) (Verification Matrix Criteria `NGM8`, `NGM9`, `NGM10`, `PLC1`–`PLC3`, `VAY6`).
 6. **Hardware-Free Deterministic Simulation**: Mocks (`MockFaceDetector`, `MockLandmarkDetector`, `MockEmbeddingExtractor`, `MockPadDetector`) for seamless headless execution in CI pipelines and developer environments.
 
 ### Module Layout
@@ -25,6 +25,7 @@ crates/inference-ort/src/
 ├── landmarks.rs    # FaceLandmarks, Point2f, LandmarkDetector
 ├── embedding.rs    # ArcFace ResNet34 extractor (NHWC), L2 normalization
 ├── pad.rs          # MiniFASNetV2 OrtPadDetector, DEFAULT_MINIFASNET_LIVE_CLASS_INDEX = 1
+├── outputs.rs      # ZeroizingOutputs: in-place wipe of ORT-owned output tensors, GitHub #255
 └── mock.rs         # Deterministic hardware-free mocks
 ```
 
@@ -137,9 +138,11 @@ an absent model prints `SKIPPED`; `SOOS_REQUIRE_REAL_MODELS=1` makes absence a f
 the committed manifest validates against the session while an NCHW manifest for the same file
 is rejected with `ModelShapeMismatch`; a legacy manifest without `input_layout` still loads it; all three shipped models pass shape validation; the
 production extractor detects NHWC and emits a finite, deterministic, L2-normalized 512D vector on
-a synthetic crop; and a latency report (3 warm-ups + 20 timed runs, one intra-op thread) asserts
+a synthetic crop; and a latency report (3 warm-ups + 20 timed runs) asserts
 p95 below the daemon's `MAX_INFERENCE_ESTIMATE_MS` (1000 ms). Measured on the development host:
-p50 127.5 ms, p95 170.9 ms.
+p50 127.5 ms, p95 170.9 ms with one intra-op thread; p50 27.1 ms, p95 28.4 ms with the
+`default_intra_threads()` default of GitHub #252 (4 threads on that host; the report line still
+prints its historical "1 intra-op thread" label).
 
 ### `PadDetector` Trait
 ```rust
@@ -162,9 +165,40 @@ Implemented by `OrtPadDetector` (MiniFASNetV2 80×80 BGR) and `MockPadDetector`.
 - `SharedSession` (`Arc<Mutex<ort::session::Session>>`) is the session handle type returned by `ModelRegistry::get_or_load_session` and accepted by every detector constructor.
 - Softmax probability interpretation into `PadResult` with non-live attack classification by class index (`PrintPhoto` vs `ScreenReplay`).
 - Liveness threshold: every production binary passes `VisionPipelineConfig::pad_threshold` (`DEFAULT_PAD_THRESHOLD = 0.85`), so the detector's `is_live` and the pipeline decision `VisionPipelineConfig::pad_passes` use one value (GitHub #215, PAD-10).
-- Immediate deterministic post-inference zeroization of input tensors (`Zeroizing<Vec<f32>>`).
+- Input tensors zeroized on drop (`Zeroizing<Vec<f32>>`); ORT-owned logits wiped in place by `ZeroizingOutputs` (GitHub #255).
 - Output contract (GitHub #214, PAD-09): every inference must produce exactly `MINIFASNET_CLASS_COUNT = 3` logits and `live_class_index` must address one of them (`validate_pad_output_contract`). Any other length, or an out-of-range index in `interpret_probabilities`, is `InferenceError::PadFailed`, never a spoof or live verdict (previously an out-of-range index silently read `p_live = 0.0`, and a single-logit head scored every frame live because softmax over one logit is 1.0).
 - Startup self-test: `OrtPadDetector::self_test(expected_classes)` runs one inference on a fixed synthetic 80×80 grey fixture and returns a `PadSelfTestReport` (`class_count`, `live_class_index`, `liveness_threshold`). `pad_class_count_from_manifest` derives `expected_classes` from the manifest `output_shapes` (`[[1, 3]]`; an omitted entry falls back to 3; any other class count or more than one declared output fails closed). `soos-daemon` runs it through `pipeline::validate_pad_detector` inside `initialize_pipeline`, logs the class index and threshold at info level, and refuses to start on failure.
+
+### ORT output wiping, SCRFD hot path and thread configuration (GitHub #252, #254, #255)
+
+- **ORT output wiping (`outputs.rs`, #255)**: every production `Session::run` (`OrtScrfdDetector`,
+  `OrtEmbeddingExtractor`, `OrtPadDetector`) hands its `SessionOutputs` to
+  `ZeroizingOutputs::new`. The guard lends the outputs to the decoder (`Deref`) and, on drop
+  (including early error returns) or explicit `wipe()`, overwrites every `f32` output tensor in
+  place through `try_extract_tensor_mut`. The raw, unnormalized embedding therefore no longer
+  lingers in the ORT allocation after `BiometricEmbedding::new` copies it. **Limitation**:
+  ORT-internal intermediate activation buffers (arena memory) are not reachable through the
+  public `ort` API and are not wiped (ADR 2026-09-30 "ORT Output Tensors Wiped In Place"). The
+  redundant explicit `input_data.zeroize()` calls were removed: the `Zeroizing` wrapper wipes
+  the input tensors on drop. Invariant: `soos-invariants::ort_output_zeroize_contract`.
+- **SCRFD hot path (#252)**: `OrtScrfdDetector` owns one reusable letterbox scratch tensor
+  (`3 * 640 * 640` `f32`, `Mutex<Zeroizing<Vec<f32>>>`) filled by `letterbox_pad_into`, which
+  resets the whole tensor on every call (no stale data between frames) and is wiped right after
+  each inference. The nine outputs are decoded from borrowed ORT slices (no per-frame copy of
+  ~252,000 `f32`). Lock order: scratch, then session.
+- **Non-finite detector output (#254)**: `decode_stride` skips a candidate whose raw score is
+  non-finite, whose decoded box corners are non-finite (checked before clamping, since
+  `BoundingBox::new` drops NaN and `clamp` saturates infinity), or whose decoded keypoints are
+  non-finite (`f32::clamp` propagates NaN).
+- **Threads (#252)**: `RegistryConfig::{new, with_manifest}` default to
+  `default_intra_threads()` = `min(DEFAULT_MAX_INTRA_THREADS = 4, available_parallelism)`,
+  `inter_threads = 1`, and `allow_spinning = false` (ORT intra/inter-op spin-waiting disabled so
+  idle worker threads do not burn CPU). `with_intra_threads(n)` clamps to `1..=MAX_INTRA_THREADS`
+  (16). `soos-daemon` exposes `[pipeline] inference_intra_threads` (validated `1..=16`, fail-closed).
+- **Real-model evidence**: `tests/scrfd_hot_path_real_model_tests.rs` (gated like the other
+  real-model targets) checks scratch reuse determinism across frames of different sizes and prints a
+  latency report. Measured on the development host (debug test profile, 4 intra-op threads,
+  640x480 synthetic frame): SCRFD p50 31.9 ms, p95 34.5 ms.
 
 ### PAD real-model evidence (`tests/pad_real_model_tests.rs`, GitHub #172)
 

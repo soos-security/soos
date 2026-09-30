@@ -11,6 +11,7 @@
 use crate::error::InferenceError;
 use crate::landmarks::{FaceLandmarks, Point2f};
 use crate::letterbox::{letterbox_bilinear, letterbox_geometry};
+use crate::outputs::ZeroizingOutputs;
 use std::cmp::Ordering;
 use zeroize::{Zeroize, Zeroizing};
 
@@ -260,7 +261,8 @@ pub fn unproject(x: f32, y: f32, scale: f32, pad_x: f32, pad_y: f32) -> (f32, f3
 /// Output tensor is in NCHW format with BGR channel ordering and (pixel - 127.5) / 128.0 normalization.
 /// Border padding is filled with 0.0. Resampling is bilinear and the returned `pad_x` / `pad_y`
 /// are the exact integer placement offsets, shared with `soos-vision` through
-/// [`crate::letterbox`] (GitHub #248, VIS-06).
+/// [`crate::letterbox`] (GitHub #248, VIS-06). Allocates a new zeroized tensor; the detector
+/// hot path uses [`letterbox_pad_into`] with a reusable scratch tensor instead.
 pub fn letterbox_pad(
     rgb: &[u8],
     w: u32,
@@ -268,36 +270,65 @@ pub fn letterbox_pad(
     target: usize,
 ) -> (Zeroizing<Vec<f32>>, f32, f32, f32) {
     let mut tensor = Zeroizing::new(vec![0.0f32; 3 * target * target]);
+    let (scale, pad_x, pad_y) =
+        letterbox_pad_into(rgb, w, h, target, tensor.as_mut_slice()).unwrap_or((1.0, 0.0, 0.0));
+    (tensor, scale, pad_x, pad_y)
+}
+
+/// In-place variant of [`letterbox_pad`] writing into a caller-owned scratch tensor
+/// (GitHub #252, review finding VIS-10).
+///
+/// `out` must hold exactly `3 * target * target` values, otherwise
+/// [`InferenceError::InvalidBufferSize`] is returned and `out` is left untouched. The whole
+/// tensor is overwritten (padding reset to 0.0), so stale data from a previous frame can never
+/// leak into the next inference. An invalid frame (zero dimension or wrong buffer length)
+/// yields an all-zero tensor and the identity geometry `(1.0, 0.0, 0.0)`, like
+/// [`letterbox_pad`].
+pub fn letterbox_pad_into(
+    rgb: &[u8],
+    w: u32,
+    h: u32,
+    target: usize,
+    out: &mut [f32],
+) -> Result<(f32, f32, f32), InferenceError> {
+    let plane = target
+        .checked_mul(target)
+        .ok_or_else(|| InferenceError::InvalidInput("Letterbox target overflows".to_string()))?;
+    let expected = plane
+        .checked_mul(3)
+        .ok_or_else(|| InferenceError::InvalidInput("Letterbox target overflows".to_string()))?;
+    if out.len() != expected {
+        return Err(InferenceError::InvalidBufferSize {
+            expected,
+            actual: out.len(),
+        });
+    }
+    out.fill(0.0);
 
     let Ok(target_u32) = u32::try_from(target) else {
-        return (tensor, 1.0, 0.0, 0.0);
+        return Ok((1.0, 0.0, 0.0));
     };
     let Some(geometry) = letterbox_geometry(w, h, target_u32, target_u32) else {
-        return (tensor, 1.0, 0.0, 0.0);
+        return Ok((1.0, 0.0, 0.0));
     };
 
-    let plane = target * target;
     let placed = letterbox_bilinear(rgb, w, h, &geometry, |dst_x, dst_y, [r, g, b]| {
         if dst_x >= target || dst_y >= target {
             return;
         }
         let dst_idx = dst_y * target + dst_x;
         for (offset, value) in [(0, b), (plane, g), (2 * plane, r)] {
-            if let Some(slot) = tensor.get_mut(offset + dst_idx) {
+            if let Some(slot) = out.get_mut(offset + dst_idx) {
                 *slot = (f32::from(value) - 127.5) / 128.0;
             }
         }
     });
     if !placed {
-        return (tensor, 1.0, 0.0, 0.0);
+        out.fill(0.0);
+        return Ok((1.0, 0.0, 0.0));
     }
 
-    (
-        tensor,
-        geometry.scale,
-        geometry.pad_x as f32,
-        geometry.pad_y as f32,
-    )
+    Ok((geometry.scale, geometry.pad_x as f32, geometry.pad_y as f32))
 }
 
 /// How raw SCRFD score-head values map to face confidences (GitHub #247, VIS-05).
@@ -362,6 +393,9 @@ pub struct OrtScrfdDetector {
     pub anchors_per_cell: usize,
     /// Activation of the score heads, fixed at construction (default `Probability`).
     pub score_activation: ScoreActivation,
+    /// Reusable letterbox input tensor (`3 * input_size.0^2` values), wiped after every
+    /// inference and on drop. Avoids a 4.9 MB allocation per frame (GitHub #252).
+    input_scratch: Mutex<Zeroizing<Vec<f32>>>,
 }
 
 impl OrtScrfdDetector {
@@ -506,6 +540,7 @@ impl OrtScrfdDetector {
             strides: [8, 16, 32],
             anchors_per_cell: 2,
             score_activation: ScoreActivation::default(),
+            input_scratch: Mutex::new(Zeroizing::new(vec![0.0f32; 3 * 640 * 640])),
         })
     }
 
@@ -644,6 +679,11 @@ impl OrtScrfdDetector {
                         Some(&val) => val,
                         None => continue,
                     };
+                    // Non-finite model output is never a face (GitHub #254): +inf would
+                    // sigmoid to 1.0 and NaN would propagate into the landmarks.
+                    if !raw_score.is_finite() {
+                        continue;
+                    }
                     let conf = activation.apply(raw_score);
                     if conf > conf_threshold {
                         let bbox_offset = idx * 4;
@@ -665,12 +705,22 @@ impl OrtScrfdDetector {
                         let (orig_x1, orig_y1) = unproject(x1_let, y1_let, scale, pad_x, pad_y);
                         let (orig_x2, orig_y2) = unproject(x2_let, y2_let, scale, pad_x, pad_y);
 
+                        // Checked before clamping: `f32::min`/`max` in `BoundingBox::new` drop
+                        // NaN and `clamp` saturates infinity, hiding corrupted boxes.
+                        if ![orig_x1, orig_y1, orig_x2, orig_y2]
+                            .iter()
+                            .all(|v| v.is_finite())
+                        {
+                            continue;
+                        }
+
                         let bbox = BoundingBox::new(orig_x1, orig_y1, orig_x2, orig_y2)
                             .clamp(orig_w as f32, orig_h as f32);
 
                         let kps_offset = idx * 10;
                         let mut lm_pts = [Point2f::new(0.0, 0.0); 5];
                         let mut kps_valid = true;
+                        let mut kps_non_finite = false;
                         for (i, pt) in lm_pts.iter_mut().enumerate() {
                             let (kx, ky) = match (
                                 kps.get(kps_offset + i * 2),
@@ -686,10 +736,19 @@ impl OrtScrfdDetector {
                             let lm_y_let = (row as f32 + ky) * s;
                             let (orig_lm_x, orig_lm_y) =
                                 unproject(lm_x_let, lm_y_let, scale, pad_x, pad_y);
+                            // `f32::clamp` propagates NaN into the aligned crop (GitHub #254).
+                            if !orig_lm_x.is_finite() || !orig_lm_y.is_finite() {
+                                kps_non_finite = true;
+                                break;
+                            }
                             *pt = Point2f::new(
                                 orig_lm_x.clamp(0.0, orig_w as f32),
                                 orig_lm_y.clamp(0.0, orig_h as f32),
                             );
+                        }
+
+                        if kps_non_finite {
+                            continue;
                         }
 
                         let landmarks = if kps_valid {
@@ -715,31 +774,23 @@ impl OrtScrfdDetector {
     }
 }
 
-impl FaceDetector for OrtScrfdDetector {
-    fn detect(
+impl OrtScrfdDetector {
+    /// Letterboxes `rgb` into the reusable scratch tensor, runs the session and decodes the
+    /// nine SCRFD outputs directly from the ORT-owned buffers (no copy), which are wiped in
+    /// place by [`ZeroizingOutputs`] before the session lock is released (GitHub #252, #255).
+    fn run_and_decode(
         &self,
+        scratch: &mut [f32],
         rgb: &[u8],
         width: u32,
         height: u32,
     ) -> Result<Vec<FaceDetection>, InferenceError> {
-        let expected_len = (width as usize)
-            .checked_mul(height as usize)
-            .and_then(|px| px.checked_mul(3))
-            .ok_or_else(|| InferenceError::InvalidInput("Image dimensions overflow".to_string()))?;
-
-        if rgb.len() != expected_len {
-            return Err(InferenceError::InvalidBufferSize {
-                expected: expected_len,
-                actual: rgb.len(),
-            });
-        }
-
-        let (mut input_data, scale, pad_x, pad_y) =
-            letterbox_pad(rgb, width, height, self.input_size.0);
+        let (scale, pad_x, pad_y) =
+            letterbox_pad_into(rgb, width, height, self.input_size.0, scratch)?;
 
         let tensor = ort::value::TensorRef::from_array_view((
             [1usize, 3, self.input_size.1, self.input_size.0],
-            input_data.as_slice(),
+            &*scratch,
         ))
         .map_err(|e| InferenceError::Ort(e.to_string()))?;
 
@@ -748,21 +799,23 @@ impl FaceDetector for OrtScrfdDetector {
             .lock()
             .map_err(|_| InferenceError::DetectionFailed("Session mutex poisoned".to_string()))?;
 
-        let outputs = session
-            .run(ort::inputs![tensor])
-            .map_err(|e| InferenceError::Ort(e.to_string()))?;
+        let outputs = ZeroizingOutputs::new(
+            session
+                .run(ort::inputs![tensor])
+                .map_err(|e| InferenceError::Ort(e.to_string()))?,
+        );
 
-        // Zeroize input buffer immediately post-inference
-        input_data.zeroize();
-
-        // Extract raw tensor views from outputs
-        let mut extracted = Vec::with_capacity(9);
-        for (_name, val) in outputs {
-            let (shape, slice) = val
+        // Borrowed views into the ORT-owned output tensors (each read exactly once).
+        let mut extracted: Vec<(Vec<usize>, &[f32])> = Vec::with_capacity(9);
+        for name in outputs.keys() {
+            let Some(val) = outputs.get(name) else {
+                continue;
+            };
+            let (shape, data) = val
                 .try_extract_tensor::<f32>()
                 .map_err(|e| InferenceError::Ort(e.to_string()))?;
             let shape_vec: Vec<usize> = shape.as_ref().iter().map(|&d| d as usize).collect();
-            extracted.push((shape_vec, slice.to_vec()));
+            extracted.push((shape_vec, data));
         }
 
         if extracted.len() != 9 {
@@ -772,6 +825,19 @@ impl FaceDetector for OrtScrfdDetector {
             )));
         }
 
+        let find_tensor = |num_anchors: usize, channels: usize| -> Option<&[f32]> {
+            extracted
+                .iter()
+                .find(|(sh, sl)| {
+                    sh.len() == 3
+                        && sh.first() == Some(&1)
+                        && sh.get(1) == Some(&num_anchors)
+                        && sh.get(2) == Some(&channels)
+                        && Some(sl.len()) == num_anchors.checked_mul(channels)
+                })
+                .map(|(_, sl)| *sl)
+        };
+
         let mut candidates = Vec::new();
 
         for &stride in &self.strides {
@@ -779,53 +845,21 @@ impl FaceDetector for OrtScrfdDetector {
             let gh = self.input_size.1 / stride;
             let num_anchors = gw * gh * self.anchors_per_cell;
 
-            let score_data = extracted
-                .iter()
-                .find(|(sh, sl)| {
-                    sh.len() == 3
-                        && sh.first() == Some(&1)
-                        && sh.get(1) == Some(&num_anchors)
-                        && sh.get(2) == Some(&1)
-                        && sl.len() == num_anchors
-                })
-                .map(|(_, sl)| sl.as_slice())
-                .ok_or_else(|| {
-                    InferenceError::TensorError(format!(
-                        "Missing score tensor for stride {stride} (anchors={num_anchors})"
-                    ))
-                })?;
-
-            let bbox_data = extracted
-                .iter()
-                .find(|(sh, sl)| {
-                    sh.len() == 3
-                        && sh.first() == Some(&1)
-                        && sh.get(1) == Some(&num_anchors)
-                        && sh.get(2) == Some(&4)
-                        && sl.len() == num_anchors * 4
-                })
-                .map(|(_, sl)| sl.as_slice())
-                .ok_or_else(|| {
-                    InferenceError::TensorError(format!(
-                        "Missing bbox tensor for stride {stride} (anchors={num_anchors})"
-                    ))
-                })?;
-
-            let kps_data = extracted
-                .iter()
-                .find(|(sh, sl)| {
-                    sh.len() == 3
-                        && sh.first() == Some(&1)
-                        && sh.get(1) == Some(&num_anchors)
-                        && sh.get(2) == Some(&10)
-                        && sl.len() == num_anchors * 10
-                })
-                .map(|(_, sl)| sl.as_slice())
-                .ok_or_else(|| {
-                    InferenceError::TensorError(format!(
-                        "Missing kps tensor for stride {stride} (anchors={num_anchors})"
-                    ))
-                })?;
+            let score_data = find_tensor(num_anchors, 1).ok_or_else(|| {
+                InferenceError::TensorError(format!(
+                    "Missing score tensor for stride {stride} (anchors={num_anchors})"
+                ))
+            })?;
+            let bbox_data = find_tensor(num_anchors, 4).ok_or_else(|| {
+                InferenceError::TensorError(format!(
+                    "Missing bbox tensor for stride {stride} (anchors={num_anchors})"
+                ))
+            })?;
+            let kps_data = find_tensor(num_anchors, 10).ok_or_else(|| {
+                InferenceError::TensorError(format!(
+                    "Missing kps tensor for stride {stride} (anchors={num_anchors})"
+                ))
+            })?;
 
             let detections = Self::decode_stride_checked(
                 stride,
@@ -846,7 +880,51 @@ impl FaceDetector for OrtScrfdDetector {
             candidates.extend(detections);
         }
 
-        let filtered = nms(&candidates, self.iou_threshold);
-        Ok(filtered)
+        Ok(nms(&candidates, self.iou_threshold))
+    }
+}
+
+impl FaceDetector for OrtScrfdDetector {
+    fn detect(
+        &self,
+        rgb: &[u8],
+        width: u32,
+        height: u32,
+    ) -> Result<Vec<FaceDetection>, InferenceError> {
+        let expected_len = (width as usize)
+            .checked_mul(height as usize)
+            .and_then(|px| px.checked_mul(3))
+            .ok_or_else(|| InferenceError::InvalidInput("Image dimensions overflow".to_string()))?;
+
+        if rgb.len() != expected_len {
+            return Err(InferenceError::InvalidBufferSize {
+                expected: expected_len,
+                actual: rgb.len(),
+            });
+        }
+
+        let needed = self
+            .input_size
+            .0
+            .checked_mul(self.input_size.0)
+            .and_then(|plane| plane.checked_mul(3))
+            .ok_or_else(|| InferenceError::InvalidInput("Input size overflows".to_string()))?;
+
+        // The scratch tensor is fully overwritten on every use and wiped after it, so a
+        // poisoned lock (panic in a previous detect) holds no state worth failing over.
+        let mut scratch = self
+            .input_scratch
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if scratch.len() != needed {
+            scratch.zeroize();
+            scratch.resize(needed, 0.0);
+        }
+
+        let result = self.run_and_decode(scratch.as_mut_slice(), rgb, width, height);
+
+        // Wipe the letterboxed frame right after inference; the allocation is kept for reuse.
+        scratch.as_mut_slice().zeroize();
+        result
     }
 }

@@ -62,6 +62,14 @@ pub fn align_face_112(
     let src_pts = landmarks.as_array();
     let dst_pts = TARGET_LANDMARKS_112;
 
+    // NaN compares false against every degeneracy guard below and would yield an all-black
+    // crop that is then embedded (GitHub #254): reject non-finite landmarks up front.
+    if src_pts.iter().any(|p| !p.x.is_finite() || !p.y.is_finite()) {
+        return Err(VisionError::AlignmentFailed(
+            "Non-finite source landmark coordinates".to_string(),
+        ));
+    }
+
     // 1. Compute centroids
     let mut mean_src_x = 0.0_f32;
     let mut mean_src_y = 0.0_f32;
@@ -119,6 +127,16 @@ pub fn align_face_112(
 
     let c1 = a / det;
     let c2 = b / det;
+
+    // Finite but extreme landmarks can overflow the f32 accumulation (inf / inf = NaN).
+    if ![sum_xx_yy, a, b, tx, ty, det, c1, c2]
+        .iter()
+        .all(|v| v.is_finite())
+    {
+        return Err(VisionError::AlignmentFailed(
+            "Non-finite similarity transform".to_string(),
+        ));
+    }
 
     const CROP_SIZE: usize = 112;
     let mut output = Vec::with_capacity(CROP_SIZE * CROP_SIZE * 3);

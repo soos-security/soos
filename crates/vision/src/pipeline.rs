@@ -9,7 +9,7 @@ use soos_inference_ort::{
 };
 
 use crate::align::align_face_112;
-use crate::color::convert_to_rgb;
+use crate::color::{convert_to_rgb, convert_to_rgb_cow};
 use crate::crop::crop_pad_context;
 use crate::error::VisionError;
 use crate::ir_liveness::{evaluate_ir_gate, PadInputModality, DEFAULT_IR_PAD_THRESHOLD};
@@ -469,14 +469,17 @@ impl VisionPipeline {
     /// 6. Warps face to normalized 112x112 RGB crop using landmarks
     /// 7. Extracts L2-normalized biometric embedding
     pub fn process_frame(&self, frame: &Frame) -> Result<PipelineOutput, VisionError> {
-        let rgb = Zeroizing::new(convert_to_rgb(
+        // RGB24 frames are borrowed without a copy (GitHub #252); converted frames are owned
+        // and zeroized on drop.
+        let rgb_frame = RgbFrame::from(convert_to_rgb_cow(
             &frame.data,
             frame.width,
             frame.height,
             frame.format,
         )?);
+        let rgb: &[u8] = rgb_frame.as_slice();
 
-        let mut detections = self.detector.detect(&rgb, frame.width, frame.height)?;
+        let mut detections = self.detector.detect(rgb, frame.width, frame.height)?;
 
         if detections.is_empty() {
             return Err(VisionError::NoFaceDetected);
@@ -506,7 +509,7 @@ impl VisionPipeline {
         // Step 4: Presentation Attack Detection on upstream-geometry context crops (2.7x
         // primary, plus any additional multi-scale members), fused and thresholded.
         let pad_result = self.evaluate_pad(
-            &rgb,
+            rgb,
             frame.width,
             frame.height,
             &detection.box_,
@@ -515,7 +518,7 @@ impl VisionPipeline {
 
         // Step 5: Affine alignment to 112x112 using landmarks for recognition embedding
         let mut aligned_crop_guard = AlignedCropGuard {
-            crop: align_face_112(&rgb, frame.width, frame.height, &landmarks)?,
+            crop: align_face_112(rgb, frame.width, frame.height, &landmarks)?,
             disarmed: false,
         };
 
@@ -662,5 +665,31 @@ impl VisionPipeline {
             output,
             match_result,
         })
+    }
+}
+
+/// RGB24 view of a camera frame used by [`VisionPipeline::process_frame`]: borrowed when the
+/// frame is already RGB24 (the caller owns and wipes the frame buffer), otherwise an owned
+/// conversion that is zeroized on drop.
+enum RgbFrame<'a> {
+    Borrowed(&'a [u8]),
+    Owned(Zeroizing<Vec<u8>>),
+}
+
+impl<'a> From<std::borrow::Cow<'a, [u8]>> for RgbFrame<'a> {
+    fn from(value: std::borrow::Cow<'a, [u8]>) -> Self {
+        match value {
+            std::borrow::Cow::Borrowed(slice) => Self::Borrowed(slice),
+            std::borrow::Cow::Owned(buffer) => Self::Owned(Zeroizing::new(buffer)),
+        }
+    }
+}
+
+impl RgbFrame<'_> {
+    fn as_slice(&self) -> &[u8] {
+        match self {
+            Self::Borrowed(slice) => slice,
+            Self::Owned(buffer) => buffer.as_slice(),
+        }
     }
 }

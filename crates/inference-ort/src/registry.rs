@@ -15,25 +15,40 @@ static LEGACY_LAYOUT_WARNED: AtomicBool = AtomicBool::new(false);
 /// [`ModelRegistry::get_or_load_session`] and consumed by every detector constructor.
 pub type SharedSession = Arc<Mutex<Session>>;
 
+/// Upper bound of the default ORT intra-op thread count (GitHub #252, review finding VIS-10).
+pub const DEFAULT_MAX_INTRA_THREADS: usize = 4;
+
+/// Hard upper bound of any configured ORT intra-op thread count.
+pub const MAX_INTRA_THREADS: usize = 16;
+
+/// Default ORT intra-op thread count: `min(DEFAULT_MAX_INTRA_THREADS, available_parallelism)`,
+/// and 1 when the parallelism cannot be queried.
+pub fn default_intra_threads() -> usize {
+    std::thread::available_parallelism()
+        .map(std::num::NonZeroUsize::get)
+        .unwrap_or(1)
+        .clamp(1, DEFAULT_MAX_INTRA_THREADS)
+}
+
 /// Configuration for ONNX Runtime sessions and model storage paths.
 #[derive(Debug, Clone)]
 pub struct RegistryConfig {
     pub models_dir: PathBuf,
     pub manifest_path: PathBuf,
+    /// ORT intra-op threads per session (default [`default_intra_threads`]).
     pub intra_threads: usize,
+    /// ORT inter-op threads per session (the graphs are sequential: 1).
     pub inter_threads: usize,
+    /// Whether ORT worker threads may spin-wait between runs. Disabled by default so that
+    /// the extra intra-op threads do not burn CPU while the daemon is idle.
+    pub allow_spinning: bool,
 }
 
 impl RegistryConfig {
     pub fn new<P: AsRef<Path>>(models_dir: P) -> Self {
         let dir = models_dir.as_ref().to_path_buf();
         let manifest = dir.join("manifest.toml");
-        Self {
-            models_dir: dir,
-            manifest_path: manifest,
-            intra_threads: 1,
-            inter_threads: 1,
-        }
+        Self::with_manifest(dir, manifest)
     }
 
     pub fn with_manifest<P1: AsRef<Path>, P2: AsRef<Path>>(
@@ -43,9 +58,17 @@ impl RegistryConfig {
         Self {
             models_dir: models_dir.as_ref().to_path_buf(),
             manifest_path: manifest_path.as_ref().to_path_buf(),
-            intra_threads: 1,
+            intra_threads: default_intra_threads(),
             inter_threads: 1,
+            allow_spinning: false,
         }
+    }
+
+    /// Sets the ORT intra-op thread count, clamped to `1..=MAX_INTRA_THREADS`.
+    #[must_use]
+    pub fn with_intra_threads(mut self, intra_threads: usize) -> Self {
+        self.intra_threads = intra_threads.clamp(1, MAX_INTRA_THREADS);
+        self
     }
 }
 
@@ -185,6 +208,10 @@ impl ModelRegistry {
             .with_intra_threads(self.config.intra_threads)
             .map_err(|e| InferenceError::Ort(e.to_string()))?
             .with_inter_threads(self.config.inter_threads)
+            .map_err(|e| InferenceError::Ort(e.to_string()))?
+            .with_intra_op_spinning(self.config.allow_spinning)
+            .map_err(|e| InferenceError::Ort(e.to_string()))?
+            .with_inter_op_spinning(self.config.allow_spinning)
             .map_err(|e| InferenceError::Ort(e.to_string()))?
             .commit_from_memory(&bytes)
             .map_err(|e| InferenceError::Ort(format!("Failed loading session {}: {}", id, e)))?;

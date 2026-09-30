@@ -14,7 +14,8 @@ use std::sync::{Arc, Mutex};
 use ort::session::Session;
 
 use crate::error::InferenceError;
-use zeroize::{Zeroize, Zeroizing};
+use crate::outputs::ZeroizingOutputs;
+use zeroize::Zeroizing;
 
 /// Classification of detected presentation attack vectors.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -396,8 +397,15 @@ impl OrtPadDetector {
 impl OrtPadDetector {
     /// Runs one inference and returns the raw logits of the first output tensor, after
     /// checking them against the MiniFASNetV2 output contract.
-    fn run_logits(&self, rgb: &[u8], width: u32, height: u32) -> Result<Vec<f32>, InferenceError> {
-        let mut input_data = Self::prepare_input(rgb, width, height)?;
+    fn run_logits(
+        &self,
+        rgb: &[u8],
+        width: u32,
+        height: u32,
+    ) -> Result<Zeroizing<Vec<f32>>, InferenceError> {
+        // `Zeroizing` wipes the input tensor on drop; ORT-owned logits are wiped in place by
+        // `ZeroizingOutputs` (GitHub #255).
+        let input_data = Self::prepare_input(rgb, width, height)?;
 
         let tensor =
             ort::value::TensorRef::from_array_view(([1usize, 3, 80, 80], input_data.as_slice()))
@@ -408,15 +416,13 @@ impl OrtPadDetector {
             .lock()
             .map_err(|_| InferenceError::PadFailed("Session mutex poisoned".to_string()))?;
 
-        let outputs = session
-            .run(ort::inputs![tensor])
-            .map_err(|e| InferenceError::Ort(e.to_string()))?;
+        let outputs = ZeroizingOutputs::new(
+            session
+                .run(ort::inputs![tensor])
+                .map_err(|e| InferenceError::Ort(e.to_string()))?,
+        );
 
-        // Zeroize input buffer immediately post-inference
-        input_data.zeroize();
-
-        let mut out_iter = outputs.into_iter();
-        let (_, pad_tensor) = out_iter.next().ok_or_else(|| {
+        let pad_tensor = outputs.values().next().ok_or_else(|| {
             InferenceError::PadFailed("PAD model returned zero output tensors".to_string())
         })?;
 
@@ -427,7 +433,8 @@ impl OrtPadDetector {
         // Per-inference output contract (GitHub #214): a wrong head is an error, never a
         // verdict. Checked before the copy, so only a 3-element vector is ever materialized.
         validate_pad_output_contract(logits.len(), self.live_class_index, MINIFASNET_CLASS_COUNT)?;
-        Ok(logits.to_vec())
+        // The copy stays inside a wipe-on-drop container (GitHub #255).
+        Ok(Zeroizing::new(logits.to_vec()))
     }
 
     /// Startup self-test (GitHub #214, PAD-09): runs one inference on a fixed synthetic

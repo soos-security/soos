@@ -48,6 +48,10 @@ mod vision_attestation_contract;
 #[cfg(test)]
 mod vision_threshold_contract;
 
+/// ORT-owned output tensors are wiped in place (GitHub #255).
+#[cfg(test)]
+mod ort_output_zeroize_contract;
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,

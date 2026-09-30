@@ -24,7 +24,7 @@ pub mod pose;
 pub mod quality;
 
 pub use align::{align_face_112, TARGET_LANDMARKS_112};
-pub use color::convert_to_rgb;
+pub use color::{convert_to_rgb, convert_to_rgb_cow};
 pub use crop::{
     crop_and_resize, crop_pad_context, expand_bbox_for_pad, pad_crop_window, PadCropWindow,
 };

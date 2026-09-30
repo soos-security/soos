@@ -11,6 +11,7 @@
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::error::InferenceError;
+use crate::outputs::ZeroizingOutputs;
 
 /// High-dimensional facial biometric embedding vector (e.g. 512D ArcFace or 128D) with automatic memory zeroization.
 #[derive(Debug, Clone, PartialEq, Zeroize)]
@@ -263,39 +264,30 @@ impl EmbeddingExtractor for OrtEmbeddingExtractor {
         width: u32,
         height: u32,
     ) -> Result<BiometricEmbedding, InferenceError> {
-        let mut input_data =
-            Self::prepare_input_layout(aligned_crop_rgb, width, height, self.is_nhwc)?;
+        // `Zeroizing` wipes the input tensor on drop; the ORT-owned output (the raw,
+        // unnormalized embedding) is wiped in place by `ZeroizingOutputs` (GitHub #255).
+        let input_data = Self::prepare_input_layout(aligned_crop_rgb, width, height, self.is_nhwc)?;
+
+        let shape = if self.is_nhwc {
+            [1usize, 112, 112, 3]
+        } else {
+            [1usize, 3, 112, 112]
+        };
+        let tensor = ort::value::TensorRef::from_array_view((shape, input_data.as_slice()))
+            .map_err(|e| InferenceError::Ort(e.to_string()))?;
 
         let mut session = self
             .session
             .lock()
             .map_err(|_| InferenceError::EmbeddingFailed("Session mutex poisoned".to_string()))?;
 
-        let outputs = if self.is_nhwc {
-            let tensor = ort::value::TensorRef::from_array_view((
-                [1usize, 112, 112, 3],
-                input_data.as_slice(),
-            ))
-            .map_err(|e| InferenceError::Ort(e.to_string()))?;
+        let outputs = ZeroizingOutputs::new(
             session
                 .run(ort::inputs![tensor])
-                .map_err(|e| InferenceError::Ort(e.to_string()))?
-        } else {
-            let tensor = ort::value::TensorRef::from_array_view((
-                [1usize, 3, 112, 112],
-                input_data.as_slice(),
-            ))
-            .map_err(|e| InferenceError::Ort(e.to_string()))?;
-            session
-                .run(ort::inputs![tensor])
-                .map_err(|e| InferenceError::Ort(e.to_string()))?
-        };
+                .map_err(|e| InferenceError::Ort(e.to_string()))?,
+        );
 
-        // Zeroize input buffer immediately post-inference
-        input_data.zeroize();
-
-        let mut out_iter = outputs.into_iter();
-        let (_, emb_tensor) = out_iter.next().ok_or_else(|| {
+        let emb_tensor = outputs.values().next().ok_or_else(|| {
             InferenceError::EmbeddingFailed(
                 "Embedding model returned zero output tensors".to_string(),
             )
