@@ -9,6 +9,10 @@
 //!   `SO_PEERCRED` PID through `/proc/<pid>/cgroup` (`session-<id>.scope`, the same
 //!   mapping `sd_pid_get_session` uses). That session must belong to the target UID,
 //!   be active, have `REMOTE=0`, be attached to a seat and have `CLASS=user`.
+//!   When the caller is in no session scope but runs under the systemd user manager
+//!   `user.slice/user-<uid>.slice/user@<uid>.service/` (GNOME/KDE terminals, the shell's
+//!   polkit agent), `<uid>` must be strictly parsed and equal to the target, the target
+//!   must own such a local seat session, and the target must own no remote session.
 //! - **Unprivileged peer**: `SO_PEERCRED` already proved `peer.uid == target_uid`, so no
 //!   identity is crossed; the target must still own at least one active session that
 //!   logind does not flag as remote.
@@ -230,10 +234,19 @@ fn is_valid_session_id(id: &str) -> bool {
         && id.bytes().all(|b| b.is_ascii_alphanumeric())
 }
 
+/// Returns the first unit component of a cgroup path (the first non-empty component
+/// that is not a `.slice`), as `cg_path_get_unit` does in systemd.
+fn first_unit_component(path: &str) -> Option<&str> {
+    path.split('/')
+        .find(|component| !component.is_empty() && !component.ends_with(".slice"))
+}
+
 /// Extracts the logind session ID from a `/proc/<pid>/cgroup` file.
 ///
-/// Looks for a `session-<id>.scope` path component on every hierarchy line. Returns
-/// `None` when no line carries one, when an ID is malformed, or when lines disagree.
+/// On every hierarchy line, only the first unit below the slices counts (the rule
+/// `sd_pid_get_session` applies): a `session-<id>.scope` nested inside a user manager
+/// or a service is not a session. Returns `None` when no line carries a session scope,
+/// when an ID is malformed, or when lines disagree.
 #[must_use]
 pub fn parse_session_id_from_cgroup(content: &str) -> Option<String> {
     let mut found: Option<&str> = None;
@@ -241,32 +254,105 @@ pub fn parse_session_id_from_cgroup(content: &str) -> Option<String> {
         let Some(path) = line.splitn(3, ':').nth(2) else {
             continue;
         };
-        for component in path.split('/') {
-            let Some(id) = component
-                .strip_prefix("session-")
+        let Some(id) = first_unit_component(path).and_then(|unit| {
+            unit.strip_prefix("session-")
                 .and_then(|rest| rest.strip_suffix(".scope"))
-            else {
-                continue;
-            };
-            if !is_valid_session_id(id) {
-                return None;
-            }
-            match found {
-                Some(previous) if previous != id => return None,
-                _ => found = Some(id),
-            }
+        }) else {
+            continue;
+        };
+        if !is_valid_session_id(id) {
+            return None;
+        }
+        match found {
+            Some(previous) if previous != id => return None,
+            _ => found = Some(id),
         }
     }
     found.map(str::to_string)
 }
 
+/// Maximum number of decimal digits of a UID (`u32::MAX` has 10).
+const MAX_UID_DIGITS: usize = 10;
+
+/// Parses a UID strictly: ASCII decimal digits only, no sign, no leading zero, fits `u32`.
+fn parse_strict_uid(text: &str) -> Option<u32> {
+    if text.is_empty()
+        || text.len() > MAX_UID_DIGITS
+        || !text.bytes().all(|b| b.is_ascii_digit())
+        || (text.len() > 1 && text.starts_with('0'))
+    {
+        return None;
+    }
+    text.parse::<u32>().ok()
+}
+
+/// Classifies one cgroup path: `Ok(Some(uid))` for a process below
+/// `/user.slice/user-<uid>.slice/user@<uid>.service/<unit>`, `Ok(None)` for a path that is
+/// not under a user manager, `Err(())` for a malformed user-manager path.
+fn user_manager_uid_of_path(path: &str) -> Result<Option<u32>, ()> {
+    let mut components = path.split('/');
+    if components.next() != Some("") || components.next() != Some("user.slice") {
+        return Ok(None);
+    }
+    let (Some(slice), Some(service)) = (components.next(), components.next()) else {
+        return Ok(None);
+    };
+    if !service.starts_with("user@") {
+        return Ok(None);
+    }
+    let slice_uid = slice
+        .strip_prefix("user-")
+        .and_then(|rest| rest.strip_suffix(".slice"))
+        .and_then(parse_strict_uid)
+        .ok_or(())?;
+    let service_uid = service
+        .strip_prefix("user@")
+        .and_then(|rest| rest.strip_suffix(".service"))
+        .and_then(parse_strict_uid)
+        .ok_or(())?;
+    if slice_uid != service_uid {
+        return Err(());
+    }
+    match components.next() {
+        Some(child) if !child.is_empty() => Ok(Some(service_uid)),
+        _ => Err(()),
+    }
+}
+
 /// Extracts the UID of the systemd user manager (`user@<uid>.service`) a process runs under.
 ///
+/// Only the hierarchies systemd manages are considered: the unified cgroup v2 line
+/// (`0::`) and the cgroup v1 `name=systemd` line. The path must be
+/// `/user.slice/user-<uid>.slice/user@<uid>.service/<child>...` with both UIDs strictly
+/// decimal and equal. `/user.slice` is root-owned, so an unprivileged process cannot
+/// place itself under another user's manager. Returns `Ok(None)` when the process is
+/// not under a user manager.
+///
 /// # Errors
-/// Returns [`SessionDenial::UserManagerCgroupMalformed`] for a malformed user-manager path.
+/// Returns [`SessionDenial::UserManagerCgroupMalformed`] for a malformed user-manager
+/// path or when the considered hierarchies disagree.
 pub fn parse_user_manager_uid_from_cgroup(content: &str) -> Result<Option<u32>, SessionDenial> {
-    let _ = content;
-    Ok(None)
+    let mut found: Option<Option<u32>> = None;
+    for line in content.lines() {
+        let mut fields = line.splitn(3, ':');
+        let (Some(_hierarchy), Some(controllers), Some(path)) =
+            (fields.next(), fields.next(), fields.next())
+        else {
+            continue;
+        };
+        if !controllers.is_empty() && controllers != "name=systemd" {
+            continue;
+        }
+        let uid = user_manager_uid_of_path(path)
+            .map_err(|()| SessionDenial::UserManagerCgroupMalformed)?;
+        match found {
+            Some(previous) if previous != uid => {
+                return Err(SessionDenial::UserManagerCgroupMalformed);
+            }
+            _ => found = Some(uid),
+        }
+    }
+    Ok(found.flatten())
 }
 
 /// Reads at most `max` bytes of `path` as UTF-8; `Ok(None)` if the file does not exist.
@@ -326,6 +412,14 @@ impl LogindSource for SystemLogind {
         Ok(read_bounded(&path, MAX_CGROUP_FILE_SIZE)?
             .as_deref()
             .and_then(parse_session_id_from_cgroup))
+    }
+
+    fn cgroup_of_pid(&self, pid: i32) -> Result<Option<String>, LogindError> {
+        if pid <= 0 {
+            return Ok(None);
+        }
+        let path = self.proc_root.join(pid.to_string()).join("cgroup");
+        read_bounded(&path, MAX_CGROUP_FILE_SIZE)
     }
 
     fn session(&self, session_id: &str) -> Result<Option<SessionRecord>, LogindError> {
@@ -436,15 +530,55 @@ impl LocalSessionPolicy {
         let pid = pid
             .filter(|p| *p > 0)
             .ok_or(SessionDenial::MissingPeerPid)?;
-        let session_id = source
+        let Some(session_id) = source
             .session_id_of_pid(pid)
             .map_err(|_| SessionDenial::LogindUnavailable)?
-            .ok_or(SessionDenial::CallerSessionUnresolved)?;
+        else {
+            return Self::authorize_user_manager_caller(source, pid, target_uid);
+        };
         let record = source
             .session(&session_id)
             .map_err(|_| SessionDenial::LogindUnavailable)?
             .ok_or(SessionDenial::CallerSessionUnresolved)?;
         record.check_local_seat_session_of(target_uid)
+    }
+
+    /// Root peer outside any session scope: allowed only under the target's own systemd
+    /// user manager, while the target owns a local seat session and no remote session
+    /// (an SSH session of the same account could reach the user manager through
+    /// `systemd-run --user`). A record without UID counts as possibly remote.
+    fn authorize_user_manager_caller(
+        source: &dyn LogindSource,
+        pid: i32,
+        target_uid: u32,
+    ) -> Result<(), SessionDenial> {
+        let content = source
+            .cgroup_of_pid(pid)
+            .map_err(|_| SessionDenial::LogindUnavailable)?
+            .ok_or(SessionDenial::CallerSessionUnresolved)?;
+        let manager_uid = parse_user_manager_uid_from_cgroup(&content)?
+            .ok_or(SessionDenial::CallerSessionUnresolved)?;
+        if manager_uid != target_uid {
+            return Err(SessionDenial::UserManagerUidMismatch);
+        }
+        let records = source
+            .sessions()
+            .map_err(|_| SessionDenial::LogindUnavailable)?;
+        if records
+            .iter()
+            .filter(|r| r.uid.is_none() || r.uid == Some(target_uid))
+            .any(|r| r.remote != Some(false))
+        {
+            return Err(SessionDenial::UserManagerCallerRemoteSessionActive);
+        }
+        if records
+            .iter()
+            .any(|r| r.check_local_seat_session_of(target_uid).is_ok())
+        {
+            Ok(())
+        } else {
+            Err(SessionDenial::UserManagerNoLocalSeatSession)
+        }
     }
 
     fn authorize_same_uid_peer(
