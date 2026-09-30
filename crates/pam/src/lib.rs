@@ -42,12 +42,49 @@ use soos_protocol::types::{EventKind, ReasonClass, Verdict};
 /// Fail-safe: if the client does not provide a conversation handler or if conversation fails,
 /// the message is silently discarded without panicking or affecting authentication flow.
 fn send_pam_info(pamh: &Option<&mut PamHandle>, msg: &str) {
-    if let Some(h) = pamh {
-        let addr = (*h) as *const PamHandle as usize;
-        if addr >= 0x10000 {
-            if let Ok(Some(conv)) = h.get_item::<pam_bindings::conv::Conv<'_>>() {
-                let _ = conv.send(pam_bindings::constants::PAM_TEXT_INFO, msg);
+    if let Some(h) = usable_handle(pamh) {
+        if let Ok(Some(conv)) = h.get_item::<pam_bindings::conv::Conv<'_>>() {
+            let _ = conv.send(pam_bindings::constants::PAM_TEXT_INFO, msg);
+        }
+    }
+}
+
+/// Returns the handle only if it can be passed to libpam: test harnesses use dummy
+/// low addresses (< 0x10000) that must never be dereferenced by `pam_get_item`.
+fn usable_handle<'h>(pamh: &'h Option<&mut PamHandle>) -> Option<&'h PamHandle> {
+    let h: &PamHandle = pamh.as_deref()?;
+    let addr = h as *const PamHandle as usize;
+    (addr >= 0x10000).then_some(h)
+}
+
+/// Returns `config` with the `PAM_SERVICE` item applied (review PAM-05, GitHub #176).
+///
+/// An explicit `service=` argument keeps precedence; a missing or unreadable item keeps
+/// the configured value.
+fn with_pam_service(pamh: &Option<&mut PamHandle>, config: &PamConfig) -> PamConfig {
+    let mut resolved = config.clone();
+    if !resolved.service_from_args {
+        if let Some(h) = usable_handle(pamh) {
+            if let Ok(Some(service)) = h.get_item::<pam_bindings::items::Service<'_>>() {
+                resolved.apply_pam_service(service.0.to_bytes());
             }
+        }
+    }
+    resolved
+}
+
+/// User-facing feedback for an authentication outcome (review PAM-03, GitHub #174).
+///
+/// The text goes to the UNAUTHENTICATED user through `PAM_TEXT_INFO`, so it depends on
+/// the verdict class only and never on [`ReasonClass`]: every denial reads the same
+/// (no presentation-attack oracle distinguishing a PAD rejection from a non-match) and
+/// every other failure reads the same (no camera / model / rate-limit state disclosure).
+fn feedback_message(outcome: &Result<(Verdict, ReasonClass), ipc::IpcError>) -> &'static str {
+    match outcome {
+        Ok((Verdict::Allow, _)) => "[soos] Face recognized. Unlocking...",
+        Ok((Verdict::Deny, _)) => "[soos] Face not recognized.",
+        Ok((Verdict::Unavailable, _)) | Ok((Verdict::ProtocolError, _)) | Err(_) => {
+            "[soos] Face verification unavailable."
         }
     }
 }
@@ -88,6 +125,9 @@ impl SoosPam {
             #[cfg(feature = "fault-injection")]
             fault_injection::trigger(config.fault_inject);
 
+            let resolved = with_pam_service(&pamh, config);
+            let config = &resolved;
+
             if config.is_disabled() {
                 syslog::log_info(&format!(
                     "soos authentication is disabled for service '{}'; ignoring",
@@ -116,31 +156,13 @@ impl SoosPam {
 
             send_pam_info(&pamh, "[soos] Looking for face...");
 
-            match ipc::authenticate(config, uid) {
-                Ok((Verdict::Allow, _)) => {
-                    send_pam_info(&pamh, "[soos] Face recognized. Unlocking...");
-                    PamResultCode::PAM_SUCCESS
-                }
-                Ok((Verdict::Deny, ReasonClass::PadFailed)) => {
-                    send_pam_info(&pamh, "[soos] Biometric spoof detected.");
-                    PamResultCode::PAM_IGNORE
-                }
-                Ok((Verdict::Deny, _)) => {
-                    send_pam_info(&pamh, "[soos] Face not recognized.");
-                    PamResultCode::PAM_IGNORE
-                }
-                Ok((Verdict::Unavailable, ReasonClass::CameraUnavailable)) => {
-                    send_pam_info(&pamh, "[soos] Camera unavailable.");
-                    PamResultCode::PAM_IGNORE
-                }
-                Ok((Verdict::Unavailable, _)) | Ok((Verdict::ProtocolError, _)) => {
-                    send_pam_info(&pamh, "[soos] Face verification timed out.");
-                    PamResultCode::PAM_IGNORE
-                }
-                Err(_) => {
-                    send_pam_info(&pamh, "[soos] Face verification unavailable.");
-                    PamResultCode::PAM_IGNORE
-                }
+            let outcome = ipc::authenticate(config, uid);
+            send_pam_info(&pamh, feedback_message(&outcome));
+
+            // PAM_SUCCESS exclusively on a daemon Allow; every other outcome falls back.
+            match outcome {
+                Ok((Verdict::Allow, _)) => PamResultCode::PAM_SUCCESS,
+                _ => PamResultCode::PAM_IGNORE,
             }
         }));
 

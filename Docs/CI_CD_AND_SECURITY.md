@@ -65,7 +65,7 @@ retitling a PR re-validates it without re-running the whole pipeline.
 | `clippy` | `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings` | Cached `target/` |
 | `test` | `cargo test --locked --workspace --all-targets --all-features` (build step separated from run step) | Cached `target/` |
 | `security` | `cargo deny --locked check` with cargo-deny 0.20.2 | Also runs daily for new RustSec advisories |
-| `pam-integration` | Dockerized PAM matrix T1–T10 (`tests/docker/test_suite.sh`) | Starts after `lint`; Buildx layer cache |
+| `pam-integration` | Dockerized PAM matrix T1–T11 (`tests/docker/test_suite.sh`) | Starts after `lint`; Buildx layer cache |
 | `authselect-profile` | Fedora `authselect` profile activation, `authselect check`, generated stack ordering, `nsswitch.conf` preservation, password fallback and rollback in `fedora:40` (`tests/docker/authselect_profile_test.sh`) | Starts after `lint`; stock image, no build |
 | `ci-success` | Fails unless every job above succeeded | Single check to require in branch protection |
 
@@ -174,7 +174,7 @@ are reviewed like any other and receive their report on the Dependabot branch.
 
 To guarantee that experimental PAM modules never compromise the host operating system, all PAM integration tests run inside an isolated, ephemeral Ubuntu 24.04 Docker container:
 ```bash
-./run_tests.sh             # Ubuntu sandbox, T1–T10
+./run_tests.sh             # Ubuntu sandbox, T1–T11
 ./run_tests.sh --matrix    # Ubuntu, Fedora and Arch Linux
 ./run_tests.sh authselect  # Fedora authselect profile activation and rollback (fedora:40)
 ```

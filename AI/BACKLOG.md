@@ -1854,6 +1854,7 @@ On physical hardware lock screens (GDM):
 - [x] **#48.1** — Implement PAM conversation status messages (`Conv` / `PAM_TEXT_INFO`) in `pam_soos`
   - In `crates/pam/src/lib.rs` and `ipc.rs`: retrieve `Conv` from `pamh.get_item::<Conv>()`.
   - Send non-blocking progress message `"[soos] Looking for face..."` when verification begins.
+  - *(Superseded by review PAM-03 / GitHub #174, walkthrough 94: the texts below leaked `ReasonClass`; every `Deny` now reads `"[soos] Face not recognized."` and every other failure `"[soos] Face verification unavailable."`.)*
   - Return `(Verdict, ReasonClass)` from `ipc::authenticate()` to provide informative completion feedback:
     - `Verdict::Allow` -> `"[soos] Face recognized. Unlocking..."`
     - `Verdict::Deny` (PadFailed) -> `"[soos] Biometric spoof detected."`

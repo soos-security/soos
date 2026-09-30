@@ -3,8 +3,10 @@
 //! # Latency and Concurrency Invariants
 //!
 //! - Strictly uses synchronous `std::os::unix::net::UnixStream`. Zero async runtime.
-//! - Read and write timeouts are configured before socket transactions.
-//! - Total authentication budget: 200–250ms (governed by [`PamConfig::timeout_ms`]).
+//! - One cumulative deadline per exchange: `SO_RCVTIMEO` / `SO_SNDTIMEO` are re-armed with
+//!   the remaining budget before EVERY `read()` / `write()` syscall, and a verdict that
+//!   completes after the deadline is discarded (review PAM-02, GitHub #173).
+//! - Total authentication budget governed by the clamped [`PamConfig::timeout_ms`].
 //! - Telemetry event budget: strict 20ms maximum.
 //! - Sockets are closed immediately upon receiving the verdict.
 
@@ -102,16 +104,39 @@ fn map_io_err(err: std::io::Error) -> IpcError {
     }
 }
 
-/// Reads from a stream into `buf`, returning `IpcError::TruncatedResponse` if EOF
-/// is reached before `buf` is completely filled.
-fn read_exact_counted<R: Read>(
-    stream: &mut R,
+/// Absolute deadline shared by every blocking socket operation of one exchange.
+///
+/// `SO_RCVTIMEO` / `SO_SNDTIMEO` bound a single syscall, not an exchange: a peer that
+/// sends or accepts one byte at a time would otherwise get the full timeout again on
+/// every `read()` / `write()` (review PAM-02, GitHub #173). Every syscall below therefore
+/// re-arms the socket timeout with the budget that is left.
+#[derive(Clone, Copy)]
+struct Deadline {
+    start: Instant,
+    total: Duration,
+}
+
+impl Deadline {
+    fn remaining(self) -> Result<Duration, IpcError> {
+        remaining_budget(self.start, self.total)
+    }
+}
+
+/// Reads exactly `buf.len()` bytes before `deadline`, returning `IpcError::Timeout` once
+/// the cumulative budget is spent and `IpcError::TruncatedResponse` on early EOF.
+fn read_exact_before_deadline(
+    stream: &mut UnixStream,
     buf: &mut [u8],
     expected_total: usize,
     already_received: usize,
+    deadline: Deadline,
 ) -> Result<(), IpcError> {
     let mut offset = 0usize;
     while offset < buf.len() {
+        let remaining = deadline.remaining()?;
+        stream
+            .set_read_timeout(Some(remaining))
+            .map_err(map_io_err)?;
         let remaining_slice = buf.get_mut(offset..).ok_or(IpcError::EmptyResponse)?;
         match stream.read(remaining_slice) {
             Ok(0) => {
@@ -124,6 +149,37 @@ fn read_exact_counted<R: Read>(
             Ok(n) => {
                 offset = offset.saturating_add(n);
             }
+            // Retrying is bounded: the next iteration re-checks the deadline.
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(map_io_err(e)),
+        }
+    }
+    Ok(())
+}
+
+/// Writes all of `bytes` before `deadline` (same per-syscall re-arming as reads).
+fn write_all_before_deadline(
+    stream: &mut UnixStream,
+    bytes: &[u8],
+    deadline: Deadline,
+) -> Result<(), IpcError> {
+    let mut offset = 0usize;
+    while offset < bytes.len() {
+        let remaining = deadline.remaining()?;
+        stream
+            .set_write_timeout(Some(remaining))
+            .map_err(map_io_err)?;
+        let pending = bytes.get(offset..).ok_or(IpcError::EmptyResponse)?;
+        match stream.write(pending) {
+            Ok(0) => {
+                return Err(IpcError::Io(std::io::Error::from(
+                    std::io::ErrorKind::WriteZero,
+                )))
+            }
+            Ok(n) => {
+                offset = offset.saturating_add(n);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
             Err(e) => return Err(map_io_err(e)),
         }
     }
@@ -274,17 +330,13 @@ pub fn connect_with_timeout(path: &Path, timeout: Duration) -> Result<UnixStream
 
 /// Sends an authentication request to the daemon and awaits the verification verdict and reason.
 pub fn authenticate(config: &PamConfig, uid: u32) -> Result<(Verdict, ReasonClass), IpcError> {
-    let start_time = Instant::now();
-    let total_timeout = Duration::from_millis(config.timeout_ms);
+    let deadline = Deadline {
+        start: Instant::now(),
+        total: Duration::from_millis(config.timeout_ms),
+    };
 
-    let connect_timeout = remaining_budget(start_time, total_timeout)?;
+    let connect_timeout = deadline.remaining()?;
     let mut stream = connect_with_timeout(&config.socket_path, connect_timeout)?;
-
-    // Configure write timeout based on remaining latency budget
-    let remaining_write = remaining_budget(start_time, total_timeout)?;
-    stream
-        .set_write_timeout(Some(remaining_write))
-        .map_err(map_io_err)?;
 
     // Generate single-use cryptographic 256-bit nonce
     let mut request_id = Zeroizing::new([0u8; REQUEST_ID_LEN]);
@@ -304,19 +356,13 @@ pub fn authenticate(config: &PamConfig, uid: u32) -> Result<(Verdict, ReasonClas
     };
 
     let encoded = Zeroizing::new(encode(&req).map_err(IpcError::Codec)?);
-    stream.write_all(&encoded).map_err(map_io_err)?;
-    stream.flush().map_err(map_io_err)?;
+    write_all_before_deadline(&mut stream, &encoded, deadline)?;
     drop(encoded);
 
-    // Dynamic latency budget refresh: configure read timeout before reading response length prefix
-    let remaining_for_len = remaining_budget(start_time, total_timeout)?;
-    stream
-        .set_read_timeout(Some(remaining_for_len))
-        .map_err(map_io_err)?;
-
-    // Read 4-byte big-endian length prefix with byte-counted completeness validation
+    // Read 4-byte big-endian length prefix with byte-counted completeness validation;
+    // every read() re-arms SO_RCVTIMEO with the cumulative budget left.
     let mut len_buf = Zeroizing::new([0u8; 4]);
-    read_exact_counted(&mut stream, &mut *len_buf, 4, 0)?;
+    read_exact_before_deadline(&mut stream, &mut *len_buf, 4, 0, deadline)?;
 
     let declared_size =
         usize::try_from(u32::from_be_bytes(*len_buf)).map_err(|_| IpcError::OversizedMessage {
@@ -347,15 +393,8 @@ pub fn authenticate(config: &PamConfig, uid: u32) -> Result<(Verdict, ReasonClas
     let prefix_slice = full_buf.get_mut(..4).ok_or(IpcError::EmptyResponse)?;
     prefix_slice.copy_from_slice(&*len_buf);
 
-    // Dynamic latency budget refresh: recompute remaining budget before reading payload body
-    // to strictly enforce cumulative deadline across multi-part reads
-    let remaining_for_body = remaining_budget(start_time, total_timeout)?;
-    stream
-        .set_read_timeout(Some(remaining_for_body))
-        .map_err(map_io_err)?;
-
     let body_slice = full_buf.get_mut(4..).ok_or(IpcError::EmptyResponse)?;
-    read_exact_counted(&mut stream, body_slice, total_capacity, 4)?;
+    read_exact_before_deadline(&mut stream, body_slice, total_capacity, 4, deadline)?;
 
     // Completeness validation: ensure total received bytes match expected framed size
     let total_received = 4usize.saturating_add(declared_size);
@@ -381,22 +420,21 @@ pub fn authenticate(config: &PamConfig, uid: u32) -> Result<(Verdict, ReasonClas
     // Explicit drop: socket is closed immediately after response receipt
     drop(stream);
 
+    // A verdict that completed after the deadline is never honored (fail closed).
+    deadline.remaining()?;
+
     Ok((resp.verdict, resp.reason_class))
 }
 
 /// Transmits a best-effort telemetry event notification to the daemon within 20ms.
 pub fn notify_event(config: &PamConfig, uid: u32, event_kind: EventKind) -> Result<(), IpcError> {
-    let start_time = Instant::now();
-    let total_timeout = Duration::from_millis(EVENT_TIMEOUT_MS);
+    let deadline = Deadline {
+        start: Instant::now(),
+        total: Duration::from_millis(EVENT_TIMEOUT_MS),
+    };
 
-    let connect_timeout = remaining_budget(start_time, total_timeout)?;
+    let connect_timeout = deadline.remaining()?;
     let mut stream = connect_with_timeout(&config.socket_path, connect_timeout)?;
-
-    let remaining = remaining_budget(start_time, total_timeout)?;
-
-    stream
-        .set_write_timeout(Some(remaining))
-        .map_err(map_io_err)?;
 
     let event = Event {
         version: CURRENT_VERSION,
@@ -408,8 +446,7 @@ pub fn notify_event(config: &PamConfig, uid: u32, event_kind: EventKind) -> Resu
     };
 
     let encoded = Zeroizing::new(encode(&event).map_err(IpcError::Codec)?);
-    stream.write_all(&encoded).map_err(map_io_err)?;
-    stream.flush().map_err(map_io_err)?;
+    write_all_before_deadline(&mut stream, &encoded, deadline)?;
 
     // Fire-and-forget: socket closed immediately
     drop(stream);

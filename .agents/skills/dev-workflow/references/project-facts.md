@@ -70,7 +70,7 @@ production never overrides it — `OrtPadDetector::new` only, enforced by the in
 | `/var/lib/soos/biometrics/`, `/var/lib/soos/evidence/` | 0700 | `root:root` |
 | `/var/lib/soos/models/` | 0755 (files 0644) | `root:root` |
 | `/var/lib/soos/master.key` | 0600 | `root:root` |
-| `/etc/soos/disabled`, `/etc/soos/gdm.disable` | flag files | PAM returns `PAM_IGNORE` immediately |
+| `/etc/soos/disabled`, `/etc/soos/gdm.disable`, `/etc/soos/<service>.disable` | flag files | PAM returns `PAM_IGNORE` immediately; the service is `service=` or else the `PAM_SERVICE` item [94] |
 
 ## 4. Model Contract (manifest `models/manifest.toml` v2.0.0)
 
@@ -93,7 +93,7 @@ cargo deny --locked check                      # cargo-deny >= 0.20
 ./scripts/candid_review.sh                     # Layer 1 deterministic invariants
 ./scripts/candid_subagent.sh --prepare         # Layer 2: diff + fingerprint for the reviewer
 ./scripts/candid_subagent.sh                   # Layer 2 gate (fresh, fingerprint-bound report)
-./run_tests.sh                                 # Dockerized PAM matrix T1–T10 (ubuntu)
+./run_tests.sh                                 # Dockerized PAM matrix T1–T11 (ubuntu)
 ```
 
 Omitting `--all-features` locally was the root cause of several CI-only failures [65–75].
