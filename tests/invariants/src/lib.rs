@@ -126,6 +126,10 @@ mod vision_threshold_contract;
 #[cfg(test)]
 mod ort_output_zeroize_contract;
 
+/// Encrypted stores write only AES-GCM AAD-bound payloads (GitHub #266, rows SAD1–SAD6).
+#[cfg(test)]
+mod storage_aad_contract;
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,

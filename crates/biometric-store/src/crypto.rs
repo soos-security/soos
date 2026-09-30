@@ -1,7 +1,7 @@
 //! Cryptographic primitives for AES-256-GCM encrypted biometric storage.
 
 use crate::error::BiometricStoreError;
-use aes_gcm::aead::{Aead, KeyInit};
+use aes_gcm::aead::{Aead, KeyInit, Payload};
 use aes_gcm::{Aes256Gcm, Key, Nonce};
 use std::fmt;
 use std::fs::OpenOptions;
@@ -26,6 +26,9 @@ pub const NONCE_LEN: usize = 12;
 pub const TAG_LEN: usize = 16;
 
 /// Magic header bytes identifying an encrypted biometric payload (`SOOSBIO1`).
+///
+/// Shared by the legacy unbound envelope and the AAD-bound envelope (GitHub #266); the format
+/// is told apart by [`BOUND_FORMAT_MARKER`].
 pub const MAGIC_HEADER: &[u8; 8] = b"SOOSBIO1";
 
 /// Minimum ciphertext length: 8 bytes magic + 12 bytes nonce + 16 bytes tag = 36 bytes.
@@ -200,80 +203,261 @@ impl fmt::Debug for MasterKey {
     }
 }
 
-/// Encrypts plaintext bytes using AES-256-GCM with a fresh CSPRNG nonce.
+/// Payload format version of AAD-bound templates (GitHub #266, STO-22).
 ///
-/// Output layout: `MAGIC_HEADER` (8 bytes) || `nonce` (12 bytes) || `ciphertext + tag`.
-pub fn encrypt_payload(key: &MasterKey, plaintext: &[u8]) -> Result<Vec<u8>, BiometricStoreError> {
+/// Version 1 is the legacy unbound envelope (no associated data); version 2 binds the
+/// ciphertext to its file role, format version and UID through AES-GCM associated data.
+pub const PAYLOAD_FORMAT_VERSION: u8 = 2;
+
+/// Marker written right after [`MAGIC_HEADER`] by an AAD-bound (version 2) payload.
+///
+/// The 8-byte magic is unchanged so that every reader keeps recognising the file; a legacy
+/// payload has 12 random nonce bytes at this offset instead. A legacy nonce that begins with
+/// the marker by chance (probability 2^-32) is still read correctly because decoding falls
+/// back to the legacy layout when the bound layout does not authenticate.
+pub const BOUND_FORMAT_MARKER: [u8; 4] = [b'A', b'A', b'D', PAYLOAD_FORMAT_VERSION];
+
+/// Domain label of the template associated data (file role: biometric template).
+pub const TEMPLATE_AAD_DOMAIN: &[u8] = b"soos/biometric-template";
+
+/// Clear header of a bound template: magic (8) + format marker (4) + big-endian UID (4).
+pub const BOUND_HEADER_LEN: usize = 16;
+
+/// Length of [`template_aad`]: domain label + separator byte + clear header.
+const TEMPLATE_AAD_LEN: usize = TEMPLATE_AAD_DOMAIN.len() + 1 + BOUND_HEADER_LEN;
+
+/// Minimum length of a bound template payload: clear header + nonce + tag.
+pub const MIN_BOUND_PAYLOAD_LEN: usize = BOUND_HEADER_LEN + NONCE_LEN + TAG_LEN;
+
+/// Envelope format of a decrypted payload.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PayloadFormat {
+    /// Legacy unbound envelope (`MAGIC_HEADER || nonce || ciphertext+tag`, no associated
+    /// data), written by releases before GitHub #266. Still readable; upgraded on the next
+    /// write of the same template.
+    LegacyV1,
+    /// AAD-bound envelope (`MAGIC_HEADER || BOUND_FORMAT_MARKER || uid || nonce ||
+    /// ciphertext+tag`) authenticated with [`template_aad`].
+    BoundV2,
+}
+
+/// Associated data binding a template ciphertext to its UID, file role and format version.
+///
+/// Layout: [`TEMPLATE_AAD_DOMAIN`] `|| 0x00 ||` [`MAGIC_HEADER`] `||` [`BOUND_FORMAT_MARKER`]
+/// `||` big-endian `uid`, i.e. the domain label followed by the exact clear header of the file.
+pub fn template_aad(uid: u32) -> Vec<u8> {
+    let mut aad = Vec::with_capacity(TEMPLATE_AAD_LEN);
+    aad.extend_from_slice(TEMPLATE_AAD_DOMAIN);
+    aad.push(0);
+    aad.extend_from_slice(&bound_header(uid));
+    aad
+}
+
+/// Clear header of a bound template for `uid`.
+fn bound_header(uid: u32) -> [u8; BOUND_HEADER_LEN] {
+    let mut header = [0u8; BOUND_HEADER_LEN];
+    for (dst, src) in header.iter_mut().zip(
+        MAGIC_HEADER
+            .iter()
+            .chain(BOUND_FORMAT_MARKER.iter())
+            .chain(uid.to_be_bytes().iter()),
+    ) {
+        *dst = *src;
+    }
+    header
+}
+
+/// Generates a fresh CSPRNG nonce.
+fn fresh_nonce() -> Result<[u8; NONCE_LEN], BiometricStoreError> {
     let mut nonce_bytes = [0u8; NONCE_LEN];
     getrandom::fill(&mut nonce_bytes)
         .map_err(|e| BiometricStoreError::Crypto(format!("Failed to generate nonce: {e}")))?;
+    Ok(nonce_bytes)
+}
 
+/// AES-256-GCM encryption of `plaintext` with `aad` (empty for the legacy envelope).
+fn aes_seal(
+    key: &MasterKey,
+    nonce_bytes: &[u8; NONCE_LEN],
+    plaintext: &[u8],
+    aad: &[u8],
+) -> Result<Vec<u8>, BiometricStoreError> {
     let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key.as_bytes()));
-    let nonce = Nonce::from_slice(&nonce_bytes);
+    cipher
+        .encrypt(
+            Nonce::from_slice(nonce_bytes),
+            Payload {
+                msg: plaintext,
+                aad,
+            },
+        )
+        .map_err(|e| BiometricStoreError::Crypto(format!("AES-GCM encryption failed: {e}")))
+}
 
-    let ciphertext = cipher
-        .encrypt(nonce, plaintext)
-        .map_err(|e| BiometricStoreError::Crypto(format!("AES-GCM encryption failed: {e}")))?;
+/// AES-256-GCM authenticated decryption with `aad`; `nonce` must be [`NONCE_LEN`] bytes.
+fn aes_open(
+    key: &MasterKey,
+    nonce: &[u8],
+    ciphertext: &[u8],
+    aad: &[u8],
+) -> Result<Zeroizing<Vec<u8>>, BiometricStoreError> {
+    if nonce.len() != NONCE_LEN {
+        return Err(BiometricStoreError::CorruptFile(
+            "Invalid nonce length".to_string(),
+        ));
+    }
+    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key.as_bytes()));
+    cipher
+        .decrypt(
+            Nonce::from_slice(nonce),
+            Payload {
+                msg: ciphertext,
+                aad,
+            },
+        )
+        .map(Zeroizing::new)
+        .map_err(|e| BiometricStoreError::Crypto(format!("Decryption or MAC failure: {e}")))
+}
 
-    let total_len = MAGIC_HEADER
-        .len()
-        .checked_add(NONCE_LEN)
-        .and_then(|l| l.checked_add(ciphertext.len()))
+/// Concatenates envelope parts with an overflow-checked capacity.
+fn assemble(parts: &[&[u8]]) -> Result<Vec<u8>, BiometricStoreError> {
+    let total_len = parts
+        .iter()
+        .try_fold(0usize, |acc, part| acc.checked_add(part.len()))
         .ok_or_else(|| BiometricStoreError::Crypto("Payload length overflow".to_string()))?;
-
     let mut output = Vec::with_capacity(total_len);
-    output.extend_from_slice(MAGIC_HEADER);
-    output.extend_from_slice(&nonce_bytes);
-    output.extend_from_slice(&ciphertext);
-
+    for part in parts {
+        output.extend_from_slice(part);
+    }
     Ok(output)
 }
 
-/// Decrypts an authenticated AES-256-GCM payload and returns a zeroizing memory buffer.
+/// Encrypts plaintext bytes with the **legacy unbound** envelope (format version 1).
 ///
-/// Validates magic header, nonce, and authentication tag.
+/// Output layout: `MAGIC_HEADER` (8 bytes) || `nonce` (12 bytes) || `ciphertext + tag`, with
+/// no associated data. [`crate::BiometricStore`] never writes this format since GitHub #266 (it
+/// uses [`encrypt_template_payload`]); the function is kept for context-free payloads and to
+/// reproduce templates written by earlier releases.
+pub fn encrypt_payload(key: &MasterKey, plaintext: &[u8]) -> Result<Vec<u8>, BiometricStoreError> {
+    let nonce_bytes = fresh_nonce()?;
+    let ciphertext = aes_seal(key, &nonce_bytes, plaintext, &[])?;
+    assemble(&[MAGIC_HEADER, &nonce_bytes, &ciphertext])
+}
+
+/// Decrypts a **legacy unbound** AES-256-GCM payload and returns a zeroizing memory buffer.
+///
+/// Validates magic header, nonce, and authentication tag. An AAD-bound payload written by
+/// [`encrypt_template_payload`] never authenticates here.
 pub fn decrypt_payload(
     key: &MasterKey,
     data: &[u8],
 ) -> Result<Zeroizing<Vec<u8>>, BiometricStoreError> {
+    check_envelope(data)?;
+    let nonce_end = MAGIC_HEADER.len().saturating_add(NONCE_LEN);
+    let nonce_slice = data
+        .get(MAGIC_HEADER.len()..nonce_end)
+        .ok_or_else(|| BiometricStoreError::CorruptFile("Missing nonce".to_string()))?;
+    let ciphertext_slice = data
+        .get(nonce_end..)
+        .ok_or_else(|| BiometricStoreError::CorruptFile("Missing ciphertext".to_string()))?;
+    aes_open(key, nonce_slice, ciphertext_slice, &[])
+}
+
+/// Checks the minimum envelope length and the magic header shared by both formats.
+fn check_envelope(data: &[u8]) -> Result<(), BiometricStoreError> {
     if data.len() < MIN_PAYLOAD_LEN {
         return Err(BiometricStoreError::CorruptFile(format!(
             "Payload length {} is smaller than minimum required length {MIN_PAYLOAD_LEN}",
             data.len()
         )));
     }
-
-    let magic_len = MAGIC_HEADER.len();
     let magic_slice = data
-        .get(0..magic_len)
+        .get(0..MAGIC_HEADER.len())
         .ok_or_else(|| BiometricStoreError::CorruptFile("Missing magic header".to_string()))?;
-
     if magic_slice != MAGIC_HEADER {
         return Err(BiometricStoreError::CorruptFile(
             "Invalid magic header in biometric file".to_string(),
         ));
     }
+    Ok(())
+}
 
-    let nonce_end = magic_len
-        .checked_add(NONCE_LEN)
-        .ok_or_else(|| BiometricStoreError::CorruptFile("Nonce offset overflow".to_string()))?;
+/// Encrypts a template plaintext with the AAD-bound envelope (format version 2, GitHub #266).
+///
+/// Output layout: `MAGIC_HEADER || BOUND_FORMAT_MARKER || uid (big-endian u32) || nonce ||
+/// ciphertext + tag`, authenticated with [`template_aad`]`(uid)`. The clear UID is not secret
+/// (it is also the file name); it is authenticated, so rewriting it breaks the tag.
+pub fn encrypt_template_payload(
+    key: &MasterKey,
+    uid: u32,
+    plaintext: &[u8],
+) -> Result<Vec<u8>, BiometricStoreError> {
+    let nonce_bytes = fresh_nonce()?;
+    let ciphertext = aes_seal(key, &nonce_bytes, plaintext, &template_aad(uid))?;
+    assemble(&[&bound_header(uid), &nonce_bytes, &ciphertext])
+}
 
-    let nonce_slice = data
-        .get(magic_len..nonce_end)
+/// Decrypts a template payload expected to belong to `uid`, in either envelope format.
+///
+/// - Bound (version 2): the ciphertext is authenticated with the AAD of the UID declared in
+///   its clear header; a payload that authenticates but is bound to another UID is refused
+///   with [`BiometricStoreError::CorruptFile`] before any CBOR parsing. A rewritten clear UID
+///   or any other tampering fails authentication ([`BiometricStoreError::Crypto`]).
+/// - Legacy (version 1, no marker): decrypted without associated data and reported as
+///   [`PayloadFormat::LegacyV1`]; the caller must still check the UID inside the plaintext.
+///
+/// When a payload carries the marker but does not authenticate as bound, the legacy layout is
+/// tried as well (a legacy nonce can begin with the marker by chance); if both fail, the bound
+/// authentication error is returned.
+pub fn decrypt_template_payload(
+    key: &MasterKey,
+    uid: u32,
+    data: &[u8],
+) -> Result<(Zeroizing<Vec<u8>>, PayloadFormat), BiometricStoreError> {
+    check_envelope(data)?;
+    let marker_end = MAGIC_HEADER.len().saturating_add(BOUND_FORMAT_MARKER.len());
+    let has_marker = data.get(MAGIC_HEADER.len()..marker_end) == Some(&BOUND_FORMAT_MARKER[..]);
+    if !has_marker || data.len() < MIN_BOUND_PAYLOAD_LEN {
+        return decrypt_payload(key, data).map(|plain| (plain, PayloadFormat::LegacyV1));
+    }
+
+    let bound = decrypt_bound(key, data);
+    match bound {
+        Ok((bound_uid, plain)) => {
+            if bound_uid != uid {
+                return Err(BiometricStoreError::CorruptFile(format!(
+                    "Template is bound to UID {bound_uid}, expected UID {uid}"
+                )));
+            }
+            Ok((plain, PayloadFormat::BoundV2))
+        }
+        Err(bound_err) => match decrypt_payload(key, data) {
+            Ok(plain) => Ok((plain, PayloadFormat::LegacyV1)),
+            Err(_) => Err(bound_err),
+        },
+    }
+}
+
+/// Authenticates a bound payload under the AAD of its declared UID.
+fn decrypt_bound(
+    key: &MasterKey,
+    data: &[u8],
+) -> Result<(u32, Zeroizing<Vec<u8>>), BiometricStoreError> {
+    let uid_start = MAGIC_HEADER.len().saturating_add(BOUND_FORMAT_MARKER.len());
+    let uid_bytes: [u8; 4] = data
+        .get(uid_start..BOUND_HEADER_LEN)
+        .and_then(|s| s.try_into().ok())
+        .ok_or_else(|| BiometricStoreError::CorruptFile("Missing bound UID".to_string()))?;
+    let bound_uid = u32::from_be_bytes(uid_bytes);
+    let nonce_end = BOUND_HEADER_LEN.saturating_add(NONCE_LEN);
+    let nonce = data
+        .get(BOUND_HEADER_LEN..nonce_end)
         .ok_or_else(|| BiometricStoreError::CorruptFile("Missing nonce".to_string()))?;
-
-    let ciphertext_slice = data
+    let ciphertext = data
         .get(nonce_end..)
         .ok_or_else(|| BiometricStoreError::CorruptFile("Missing ciphertext".to_string()))?;
-
-    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key.as_bytes()));
-    let nonce = Nonce::from_slice(nonce_slice);
-
-    let plaintext = cipher
-        .decrypt(nonce, ciphertext_slice)
-        .map_err(|e| BiometricStoreError::Crypto(format!("Decryption or MAC failure: {e}")))?;
-
-    Ok(Zeroizing::new(plaintext))
+    let plain = aes_open(key, nonce, ciphertext, &template_aad(bound_uid))?;
+    Ok((bound_uid, plain))
 }
 
 #[cfg(test)]

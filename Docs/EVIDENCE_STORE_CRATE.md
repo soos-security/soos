@@ -55,14 +55,32 @@ Evidence snapshots are partitioned by calendar date under `/var/lib/soos/evidenc
 
 ### 3.2 Wire Payload Layout
 
-Every encrypted snapshot file follows a strict binary layout:
+Every snapshot written since GitHub #266 uses the AAD-bound envelope (payload format version 2,
+`crypto::PAYLOAD_FORMAT_VERSION`, distinct from the CBOR record version):
 
 | Offset | Length | Field | Description |
 |---|---|---|---|
-| `0..8` | 8 bytes | `MAGIC_HEADER` | ASCII magic constant `b"SOOSEVD1"` |
-| `8..20` | 12 bytes | `Nonce` | Unique CSPRNG 96-bit initialization vector |
-| `20..N-16` | Variable | `Ciphertext` | AES-256-GCM encrypted CBOR payload (`EvidenceRecord`) |
-| `N-16..N` | 16 bytes | `Tag` | Poly1305 / GCM 128-bit authentication tag |
+| `0..8` | 8 bytes | `MAGIC_HEADER` | ASCII magic constant `b"SOOSEVD1"` (unchanged) |
+| `8..12` | 4 bytes | `BOUND_FORMAT_MARKER` | `b"AAD\x02"`: AAD-bound format, version 2 |
+| `12..24` | 12 bytes | `Nonce` | Unique CSPRNG 96-bit initialization vector |
+| `24..N-16` | Variable | `Ciphertext` | AES-256-GCM encrypted CBOR payload (`EvidenceRecord`) |
+| `N-16..N` | 16 bytes | `Tag` | GCM 128-bit authentication tag |
+
+Snapshots written by earlier releases use the legacy unbound envelope (format version 1):
+`MAGIC_HEADER (0..8) || Nonce (8..20) || Ciphertext || Tag`, with no associated data
+(`crypto::encrypt_payload` / `decrypt_payload`; the store never writes it).
+
+**Associated Data (GitHub #266, STO-22)**: `crypto::snapshot_aad(date, snapshot_id)` =
+`b"soos/evidence-snapshot" || 0x00 || MAGIC_HEADER || BOUND_FORMAT_MARKER || len(date) || date ||
+len(id) || id` (lengths as big-endian `u64`). `load_snapshot(path)` derives the date from the
+parent directory name and the id from the file name up to its first `.`, so a snapshot moved to
+another date partition or renamed to another id fails authentication (`Crypto`). The file suffix is
+not bound: the historical `.webp.enc` rename stays readable. Legacy unbound snapshots are still
+decrypted (`PayloadFormat::LegacyV1`) and are never rewritten (evidence is not re-encrypted after
+the fact); they expire with the 7-day retention. Not detected (rollback): restoring an older
+snapshot file at its own path, deleting snapshots or daily counters, restoring a whole partition,
+and moving a legacy (unbound) snapshot. Root attackers are out of scope; ADR 2026-09-30 "AES-GCM
+Associated Data for Stored Templates and Evidence".
 
 File names do not describe an image encoding: the store never encodes WebP or JPEG.
 `FRAME_SNAPSHOT_EXTENSION` (`.frame.enc`) marks self-describing camera frames written by
