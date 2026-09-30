@@ -72,6 +72,21 @@ let config = ThresholdConfig::builder()
 - Range: `[0.0, 1.0]`
 - Rejects `NaN` and `Infinite` values with `PolicyError::InvalidThreshold`
 
+### Security Floor for Operator Configuration (GitHub #170, PAD-04)
+`build()` only checks the mathematical domain, so `pad_threshold = 0.0` is in range yet accepts
+every frame as live. Operator-supplied thresholds (`[pipeline.thresholds]` in
+`/etc/soos/daemon.toml`) are therefore built with `ThresholdConfigBuilder::build_with_security_floor()`,
+which additionally refuses:
+
+| Setting | Floor constant | Value | Rationale |
+|---|---|---|---|
+| `match_threshold` | `ThresholdConfig::MIN_MATCH_THRESHOLD` | `0.40` | Lower cosine thresholds accept unrelated faces |
+| `pad_threshold` | `ThresholdConfig::MIN_PAD_THRESHOLD` | `0.50` | `0.0` / negative values disable anti-spoofing |
+
+`soos-daemon` maps the error to `DaemonError::Config` and refuses to start (fail closed; there is
+no override flag). `ThresholdConfig::new_raw` performs no validation and is never used outside
+`soos-policy` (invariant `pad_contract::test_thresholds_never_built_unvalidated_outside_policy`).
+
 ---
 
 ## 4. Deterministic Per-UID Rate Limiting (`RateLimiter`)

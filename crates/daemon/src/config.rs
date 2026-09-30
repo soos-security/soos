@@ -307,10 +307,18 @@ impl DaemonConfig {
                 let current_pad = config.pipeline.thresholds.pad_threshold();
                 let match_thresh = th.match_threshold.unwrap_or(current_match);
                 let pad_thresh = th.pad_threshold.unwrap_or(current_pad);
-                config.pipeline.thresholds =
-                    soos_policy::ThresholdConfig::new_raw(match_thresh, pad_thresh);
-                config.pipeline.vision.match_threshold = match_thresh;
-                config.pipeline.vision.pad_threshold = pad_thresh;
+                // Operator-editable thresholds are validated and floored (GitHub #170,
+                // PAD-04): `pad_threshold = 0` would otherwise disable anti-spoofing silently.
+                let validated = soos_policy::ThresholdConfig::builder()
+                    .match_threshold(match_thresh)
+                    .pad_threshold(pad_thresh)
+                    .build_with_security_floor()
+                    .map_err(|e| {
+                        DaemonError::Config(format!("Invalid [pipeline.thresholds]: {e}"))
+                    })?;
+                config.pipeline.thresholds = validated;
+                config.pipeline.vision.match_threshold = validated.match_threshold();
+                config.pipeline.vision.pad_threshold = validated.pad_threshold();
             }
 
             if let Some(rl) = pipe.rate_limit {
