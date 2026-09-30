@@ -16,8 +16,21 @@ pub struct ManifestHeader {
     pub version: String,
 }
 
+/// Physical memory layout of an image input tensor.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TensorLayout {
+    /// Channels first: `[N, C, H, W]`.
+    #[default]
+    #[serde(rename = "NCHW")]
+    Nchw,
+    /// Channels last: `[N, H, W, C]`.
+    #[serde(rename = "NHWC")]
+    Nhwc,
+}
+
 /// Metadata specification for a single machine learning model.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "RawModelMetadata", into = "RawModelMetadata")]
 pub struct ModelMetadata {
     pub id: String,
     pub filename: String,
@@ -25,9 +38,167 @@ pub struct ModelMetadata {
     pub license: String,
     pub source_url: String,
     pub description: String,
+    /// Logical input shape, always written `[N, C, H, W]` for image models.
     pub input_shape: Vec<usize>,
-    #[serde(default)]
+    /// Physical layout of the input tensor (`NCHW` when the manifest omits `input_layout`).
+    pub input_layout: TensorLayout,
+    /// Whether the manifest entry declared `input_layout` explicitly. Entries written before
+    /// layout attestation existed omit it; their layout is then not asserted (the SHA-256 still
+    /// binds the exact file), while an explicit layout is always enforced.
+    pub input_layout_declared: bool,
     pub output_shapes: Vec<Vec<usize>>,
+}
+
+/// On-disk TOML form of [`ModelMetadata`], keeping `input_layout` optional.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct RawModelMetadata {
+    id: String,
+    filename: String,
+    sha256: String,
+    license: String,
+    source_url: String,
+    description: String,
+    input_shape: Vec<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    input_layout: Option<TensorLayout>,
+    #[serde(default)]
+    output_shapes: Vec<Vec<usize>>,
+}
+
+impl From<RawModelMetadata> for ModelMetadata {
+    fn from(raw: RawModelMetadata) -> Self {
+        Self {
+            id: raw.id,
+            filename: raw.filename,
+            sha256: raw.sha256,
+            license: raw.license,
+            source_url: raw.source_url,
+            description: raw.description,
+            input_shape: raw.input_shape,
+            input_layout: raw.input_layout.unwrap_or_default(),
+            input_layout_declared: raw.input_layout.is_some(),
+            output_shapes: raw.output_shapes,
+        }
+    }
+}
+
+impl From<ModelMetadata> for RawModelMetadata {
+    fn from(meta: ModelMetadata) -> Self {
+        Self {
+            id: meta.id,
+            filename: meta.filename,
+            sha256: meta.sha256,
+            license: meta.license,
+            source_url: meta.source_url,
+            description: meta.description,
+            input_shape: meta.input_shape,
+            input_layout: meta.input_layout_declared.then_some(meta.input_layout),
+            output_shapes: meta.output_shapes,
+        }
+    }
+}
+
+impl ModelMetadata {
+    /// Physical input tensor dims implied by the logical `input_shape` and `input_layout`.
+    ///
+    /// `input_shape` is always written as the logical `[N, C, H, W]` shape. For
+    /// [`TensorLayout::Nhwc`] the physical dims are `[N, H, W, C]`, which requires rank 4.
+    pub fn expected_input_dims(&self) -> Result<Vec<usize>, InferenceError> {
+        match self.input_layout {
+            TensorLayout::Nchw => Ok(self.input_shape.clone()),
+            TensorLayout::Nhwc => nhwc_dims(&self.input_shape).ok_or_else(|| {
+                self.shape_mismatch(format!(
+                    "NHWC layout requires a rank-4 [N, C, H, W] input_shape, got {:?}",
+                    self.input_shape
+                ))
+            }),
+        }
+    }
+
+    /// Validates the tensor shapes reported by an ONNX Runtime session against this entry.
+    ///
+    /// - The session must expose exactly one input whose physical dims equal
+    ///   [`Self::expected_input_dims`]. When the entry does not declare `input_layout`
+    ///   ([`Self::input_layout_declared`] is false), the layout is not asserted: the input may be
+    ///   the logical shape in NCHW or NHWC order, with rank and dims still enforced.
+    /// - When `output_shapes` is declared, the session must expose exactly that many outputs,
+    ///   each matching in order.
+    /// - Negative session dims are symbolic (dynamic) and match any declared value; every other
+    ///   dim, including zero, must be equal. Ranks must always be equal.
+    pub fn validate_session_shapes(
+        &self,
+        inputs: &[Vec<i64>],
+        outputs: &[Vec<i64>],
+    ) -> Result<(), InferenceError> {
+        let [actual_input] = inputs else {
+            return Err(self.shape_mismatch(format!(
+                "expected exactly 1 input tensor, session has {}",
+                inputs.len()
+            )));
+        };
+        let input_ok = if self.input_layout_declared {
+            dims_match(&self.expected_input_dims()?, actual_input)
+        } else {
+            // Layout unspecified (manifest predates `input_layout`): accept the logical shape in
+            // either NCHW or NHWC order. Rank and every other dim are still enforced.
+            dims_match(&self.input_shape, actual_input)
+                || nhwc_dims(&self.input_shape).is_some_and(|nhwc| dims_match(&nhwc, actual_input))
+        };
+        if !input_ok {
+            let layout = if self.input_layout_declared {
+                format!("{:?}", self.input_layout)
+            } else {
+                "layout unspecified".to_string()
+            };
+            return Err(self.shape_mismatch(format!(
+                "input: manifest declares logical {:?} ({layout}), session has {actual_input:?}",
+                self.input_shape
+            )));
+        }
+
+        if self.output_shapes.is_empty() {
+            return Ok(());
+        }
+        if outputs.len() != self.output_shapes.len() {
+            return Err(self.shape_mismatch(format!(
+                "expected {} output tensors, session has {}",
+                self.output_shapes.len(),
+                outputs.len()
+            )));
+        }
+        for (index, (declared, actual)) in self.output_shapes.iter().zip(outputs).enumerate() {
+            if !dims_match(declared, actual) {
+                return Err(self.shape_mismatch(format!(
+                    "output {index}: manifest declares {declared:?}, session has {actual:?}"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    fn shape_mismatch(&self, detail: String) -> InferenceError {
+        InferenceError::ModelShapeMismatch {
+            id: self.id.clone(),
+            detail,
+        }
+    }
+}
+
+/// Permutes a logical `[N, C, H, W]` shape to `[N, H, W, C]`; `None` unless rank 4.
+fn nhwc_dims(logical: &[usize]) -> Option<Vec<usize>> {
+    match logical {
+        &[n, c, h, w] => Some(vec![n, h, w, c]),
+        _ => None,
+    }
+}
+
+/// Compares declared dims with session dims; negative session dims are dynamic wildcards.
+fn dims_match(declared: &[usize], actual: &[i64]) -> bool {
+    declared.len() == actual.len()
+        && declared
+            .iter()
+            .zip(actual)
+            .all(|(&d, &a)| a < 0 || usize::try_from(a).is_ok_and(|a| a == d))
 }
 
 /// Parsed model manifest container.

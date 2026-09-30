@@ -20,4 +20,4 @@ To validate the AI inference pipeline without a live camera, static image fixtur
 - Unit and integration tests in the `vision` crate ingest these fixtures to validate:
   - Face detection (NMS thresholds)
   - 5-point landmark affine transformation (112x112 alignment)
-  - MobileFaceNet embedding generation and cosine distance matching
+  - ArcFace (512D) embedding generation and cosine distance matching

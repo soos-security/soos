@@ -12,7 +12,7 @@ use zeroize::{Zeroize, Zeroizing};
 
 use crate::error::InferenceError;
 
-/// High-dimensional facial biometric embedding vector (e.g. 512D w600k or 128D) with automatic memory zeroization.
+/// High-dimensional facial biometric embedding vector (e.g. 512D ArcFace or 128D) with automatic memory zeroization.
 #[derive(Debug, Clone, PartialEq, Zeroize)]
 pub struct BiometricEmbedding {
     vector: Zeroizing<Vec<f32>>,
@@ -136,7 +136,13 @@ pub trait EmbeddingExtractor: Send + Sync {
 use ort::session::Session;
 use std::sync::{Arc, Mutex};
 
-/// ArcFace w600k (512D) feature extractor backed by an ONNX Runtime session.
+/// ArcFace 512D feature extractor backed by an ONNX Runtime session.
+///
+/// The attested model (manifest id `arcface_w600k_mbf`, a historical name) is a Keras ArcFace
+/// ResNet34 exported with tf2onnx: NHWC input `input_1` `[N, 112, 112, 3]`, output
+/// `embedding` `[N, 512]`. The layout is detected from the session input; the registry has
+/// already checked it against the manifest `input_layout`. Pixels are fed in B, G, R order
+/// normalized as `(x - 127.5) / 127.5`.
 pub struct OrtEmbeddingExtractor {
     session: Arc<Mutex<Session>>,
     is_nhwc: bool,
@@ -158,6 +164,11 @@ impl OrtEmbeddingExtractor {
         };
 
         Self { session, is_nhwc }
+    }
+
+    /// Whether the attached session takes a channels-last `[N, 112, 112, 3]` input.
+    pub fn is_nhwc(&self) -> bool {
+        self.is_nhwc
     }
 
     /// Prepares, resizes, and normalizes an aligned face crop inside a zeroized container.
@@ -213,7 +224,7 @@ impl OrtEmbeddingExtractor {
                             *slot = norm_r;
                         }
                     } else {
-                        // NCHW format: ArcFace w600k expects BGR channel ordering (B=0, G=1, R=2)
+                        // NCHW format: planes written in B, G, R order (B=0, G=1, R=2)
                         let b_idx = y * target_size + x;
                         let g_idx = target_size * target_size + y * target_size + x;
                         let r_idx = 2 * target_size * target_size + y * target_size + x;

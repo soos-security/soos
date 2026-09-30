@@ -3,7 +3,9 @@
 //! Provides:
 //! - Real-time V4L2 camera streaming with authentic ONNX model overlays (SCRFD, MiniFASNetV2, ArcFace)
 //! - Apple FaceID-style multi-angle guided enrollment flow
-//! - Interactive biometric profile consultation and secure anti-forensic deletion
+//! - Interactive biometric profile consultation and deletion (best-effort in-place
+//!   overwrite; the guarantee against recovery is encryption at rest plus master-key
+//!   destruction, ADR 2026-09-30 "Biometric Template Erasure Model")
 
 #![forbid(unsafe_code)]
 
@@ -17,6 +19,7 @@ pub mod ipc_camera;
 pub mod logging;
 pub mod privileged;
 pub mod state;
+pub mod store_mode;
 pub mod worker;
 
 pub use app::SoosApp;

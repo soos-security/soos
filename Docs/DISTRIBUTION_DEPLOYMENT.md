@@ -31,6 +31,133 @@ auth  optional                       pam_soos.so event=password-failed timeout_m
 2. **Never convert error into `PAM_SUCCESS`**: Any internal panic or unhandled error strictly returns `PAM_IGNORE` via `catch_unwind`.
 3. **No stream pollution**: The PAM module must never write to `stdout` or `stderr` (`println!`, `dbg!`), which would corrupt display manager (GDM, LightDM, SDDM) and screen locker (swaylock, hyprlock) communications.
 
+### 2.1 GDM Login Integration (`soos-admin gdm`)
+
+GDM authenticates through its own service file, `/etc/pam.d/gdm-password`, with a longer
+2500 ms capture budget. `soos-admin` manages it (ADR 2026-09-30 "GDM PAM Stack Placement",
+walkthrough 98):
+
+```bash
+sudo soos-admin gdm status                    # installed in PAM? disable flag present?
+sudo soos-admin gdm enable                    # insert the managed block (below), remove the flag
+sudo soos-admin gdm enable --pam-module-dir /usr/lib64/security   # explicit module directory
+sudo soos-admin gdm disable                   # create /etc/soos/gdm.disable (PAM file untouched)
+sudo soos-admin gdm restore                   # put back gdm-password.soos-backup, remove it
+sudo soos-admin --format json gdm status      # machine-readable status
+```
+
+`--pam-file` (default `/etc/pam.d/gdm-password`) and `--disable-file` (default
+`/etc/soos/gdm.disable`) select other paths. `gdm disable` is the immediate, lockout-free
+switch: `pam_soos.so` reads `PAM_SERVICE` and returns `PAM_IGNORE` for every `gdm*` service
+while the flag exists.
+
+What `gdm enable` writes, e.g. on Fedora 40 (`authselect ... with-faillock`):
+
+```pam
+auth     [success=done ignore=ignore default=bad] pam_selinux_permit.so
+# BEGIN soos-admin gdm enable (managed block, do not edit)
+auth  required  pam_faillock.so preauth silent
+auth  [success=done default=ignore]  pam_soos.so timeout_ms=2500
+# END soos-admin gdm enable
+auth        substack      password-auth
+...
+```
+
+Placement rules:
+
+1. The block goes immediately before the **anchor**: the first `auth` rule that verifies a
+   credential or delegates to a shared stack. Credential modules are, exhaustively,
+   `pam_unix.so`, `pam_sss.so`, `pam_ldap.so`, `pam_krb5.so`, `pam_winbind.so`,
+   `pam_systemd_home.so` and `pam_fprintd.so` (`CREDENTIAL_MODULES` in
+   `crates/admin-cli/src/pam_stack.rs`); delegations are `include`, `substack` and
+   `@include`. The only rules allowed before the anchor are the pre-credential ones
+   (`pam_access`, `pam_env`, `pam_faildelay`, `pam_faillock preauth`, `pam_listfile`,
+   `pam_nologin`, `pam_securetty`, `pam_selinux_permit`, `pam_shells`, `pam_succeed_if`);
+   the block goes after them. It is never inserted at the top.
+2. When that anchor delegates (Ubuntu `@include common-auth`, Fedora `substack
+   password-auth`, Arch `include system-local-login`), the gates the delegated stack runs
+   before its first credential module (`pam_faillock.so preauth`, `pam_nologin.so`,
+   `pam_shells.so`, `pam_succeed_if.so`, `pam_access.so`, `pam_listfile.so`,
+   `pam_securetty.so` with a plain `required`/`requisite` control) are copied in front of
+   `pam_soos.so`, following includes up to 4 levels. If the delegated stack ends without a
+   credential module, the rules after the delegation in `gdm-password` are scanned the
+   same way. A locked account therefore fails the auth phase even when the face matches;
+   running `preauth` twice is harmless (it only reads the tally). A gate already present
+   earlier in `gdm-password` is not copied again only when that earlier rule has a plain
+   `required`/`requisite` control; an `optional` copy of the same module does not enforce
+   anything, so the delegated gate is still copied. As in libpam (`pam.conf(5)`), the type
+   and control keywords (`auth`, `include`, `substack`, `required`, `requisite`,
+   `optional`, `sufficient` and the bracketed `key=value` controls) are read
+   case-insensitively; module paths and arguments are case-sensitive.
+3. `enable` refuses, without changing anything (no backup, the `gdm.disable` flag stays),
+   when `pam_soos.so` is not installed, the file has no anchor, an **unclassified** auth
+   rule (any module not listed above, e.g. `pam_tally2.so`, `pam_group.so`, a vendor
+   module, or a conditional/`sufficient` gate) runs before the credential module either in
+   `gdm-password` or in a delegated stack, an include target cannot be resolved inside the
+   PAM directory (absolute path, file missing from the directory, or unreadable), the stack reaches no credential module, a `[...=N]` jump
+   would change target, the file is not UTF-8, uses line continuations, exceeds 64 KiB or
+   is a symlink. soos cannot tell whether an unknown module is a lockout or login gate, so
+   it never guesses.
+
+   **Resolving a refusal.** The error names the rule, e.g. `the PAM file runs the
+   unclassified auth rule 'pam_tally2.so' (control 'required') before its credential
+   module`. Either:
+   - remove or move the rule if it is obsolete (for example migrate `pam_tally2` to
+     `pam_faillock`, which soos recognizes), then run `gdm enable` again; or
+   - write the rule yourself, after every gate the face must not bypass and immediately
+     before the credential module or the `@include`/`substack` line, copying in front of
+     it any `required`/`requisite` gate the shared stack runs before its credential module:
+
+     ```pam
+     auth    required    pam_tally2.so deny=5 onerr=fail
+     auth    required    pam_faillock.so preauth          # copied from common-auth, if present
+     auth    [success=done default=ignore]    pam_soos.so timeout_ms=2500
+     @include common-auth
+     ```
+
+     `gdm enable` never touches a `pam_soos.so` rule you wrote, and `gdm status` reports
+     it as installed. Keep a copy of the original file before editing it by hand
+     (`gdm restore` only knows the `.soos-backup` written by `enable`).
+4. The account phase is never edited: GDM calls `pam_acct_mgmt` after a successful
+   `pam_authenticate`, so `pam_nologin`/`pam_faillock`/`pam_unix` account checks always run.
+5. The first `enable` keeps the pristine file as `gdm-password.soos-backup` (restored by
+   `gdm restore` and by `scripts/uninstall.sh`); the rewrite is atomic. A misplaced line
+   written by older releases (`auth  sufficient  pam_soos.so timeout_ms=2500`) is moved to
+   the safe position; a `pam_soos.so` rule you wrote yourself is left untouched.
+6. **Known refusals.** These default stacks make `enable` refuse. The refusal is fail-closed
+   and expected, not a bug; use the manual rule from item 3 instead:
+   - **Fedora / RHEL / AlmaLinux / Rocky, authselect `sssd` profile**: `password-auth` runs
+     `auth [default=1 ignore=ignore success=ok] pam_usertype.so isregular` and
+     `auth [default=1 ignore=ignore success=ok] pam_localuser.so` before `pam_unix.so`.
+     Neither module is classified, so the error names `pam_usertype.so`. Only the authselect `local` profile (optionally
+     `with-faillock`) is placed automatically.
+   - **openSUSE `common-auth`**: `auth optional pam_gnome_keyring.so` precedes
+     `pam_unix.so`, so the error names `pam_gnome_keyring.so`.
+   - **Vendor PAM directories** (Linux-PAM built with `--enable-vendordir`, e.g. openSUSE
+     `/usr/lib/pam.d`): `soos-admin` only searches the directory of the edited file
+     (`/etc/pam.d`) and never a vendor directory. An include whose target exists only in
+     the vendor directory is refused (the error names the target and says vendor
+     directories are not searched). Write the rule by hand after checking the vendor
+     stack's gates.
+
+   Manual recipe for these stacks: put the `pam_soos.so` rule in `gdm-password`
+   immediately before the `substack`/`include`/`@include` line, and copy in front of it
+   every `required`/`requisite` gate that the shared stack runs before its first
+   credential module (for example `pam_faillock.so preauth`). A face match then still
+   passes those gates, and the unclassified modules run only when the face check falls
+   through to the password path:
+
+   ```pam
+   auth        required      pam_faillock.so preauth silent   # only if password-auth has it
+   auth        [success=done default=ignore]  pam_soos.so timeout_ms=2500
+   auth        substack      password-auth
+   ```
+
+   A face success then skips `pam_usertype`/`pam_localuser` (in the stock profile they only
+   choose between `pam_unix` and `pam_sss`) or `pam_gnome_keyring`'s auth step (the keyring
+   is not unlocked by a face login). Accept this only if those modules are not login gates
+   on your system.
+
 ---
 
 ## 3. Debian 12 & Ubuntu 24.04 Deployment
@@ -352,7 +479,7 @@ If a misconfiguration occurs during manual PAM adjustments:
    - Debian: `pam-auth-update --package --remove soos soos-notify` (or `pam-auth-update --force`)
    - Fedora: `authselect select $(cat /etc/soos/authselect.previous) --force` (or `authselect select local --force`)
    - Arch: `cp /etc/pam.d/system-auth.soos-backup /etc/pam.d/system-auth` (backup made in §5.2)
-   - GDM: `cp /etc/pam.d/gdm-password.soos-backup /etc/pam.d/gdm-password` (made by `soos-admin gdm enable`)
+   - GDM: `soos-admin gdm restore`, or `cp /etc/pam.d/gdm-password.soos-backup /etc/pam.d/gdm-password` (made by `soos-admin gdm enable`; §2.1)
    - Any file: the pre-install copies recorded by `scripts/install.sh` live in
      `/var/lib/soos/state/pam-backup/pam.d/` with a `SHA256SUMS` manifest
      (`sudo ./scripts/pam_snapshot.sh verify` lists what differs).

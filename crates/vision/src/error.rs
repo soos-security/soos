@@ -22,6 +22,21 @@ pub enum VisionError {
     #[error("Invalid image dimensions: width={width}, height={height}")]
     InvalidDimensions { width: u32, height: u32 },
 
+    /// The compressed MJPEG frame exceeds the decoder input bound (`MAX_MJPEG_COMPRESSED_BYTES`).
+    #[error("MJPEG frame too large: {actual} bytes exceeds the {max}-byte limit")]
+    MjpegInputTooLarge { max: usize, actual: usize },
+
+    /// The MJPEG frame header (SOF) declares dimensions that differ from the negotiated frame.
+    #[error(
+        "MJPEG header declares {actual_width}x{actual_height}, frame is {expected_width}x{expected_height}"
+    )]
+    MjpegFrameMismatch {
+        expected_width: u32,
+        expected_height: u32,
+        actual_width: u32,
+        actual_height: u32,
+    },
+
     /// Buffer size does not match the expected byte count for dimensions and format.
     #[error("Invalid buffer size: expected {expected} bytes, got {actual} bytes")]
     InvalidBufferSize { expected: usize, actual: usize },

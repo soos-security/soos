@@ -47,6 +47,11 @@ pub struct GuiArgs {
     )]
     pub biometrics_dir: PathBuf,
 
+    /// Explicit developer mode: keep the key and templates in DIR (absolute path) instead of
+    /// the system store. Templates saved there are NOT used by PAM; a banner says so.
+    #[arg(long = "dev-store", value_name = "DIR")]
+    pub dev_store: Option<PathBuf>,
+
     /// Run with software mock camera and mock neural models (for testing without physical camera).
     #[arg(long = "mock")]
     pub mock: bool,

@@ -24,6 +24,56 @@ pub const DECISION_BUDGET_MS: u64 = 900;
 /// passing captures required by `soos_policy::PadAggregator` are reached with minimal latency.
 pub const FRAME_POLL_INTERVAL_MS: u64 = 10;
 
+/// Attested manifest identifier of the embedding extractor loaded by the daemon.
+///
+/// Enrolled templates recorded with a different `model_id` are refused
+/// (GitHub #182 / STO-09): their vectors live in another embedding space.
+pub const EMBEDDING_MODEL_ID: &str = "arcface_w600k_mbf";
+
+/// Historical `model_id` accepted as an alias of [`EMBEDDING_MODEL_ID`].
+///
+/// `soos-enroll enroll` recorded `mobilefacenet` / `1.0.0` by default until GitHub #182
+/// although the vectors were produced by the ArcFace extractor. Accepted only together
+/// with [`LEGACY_EMBEDDING_MODEL_ALIAS_VERSION`] (ADR 2026-09-30 "Legacy Embedding Model
+/// Alias"); scheduled for removal once affected users have re-enrolled.
+pub const LEGACY_EMBEDDING_MODEL_ALIAS_ID: &str = "mobilefacenet";
+
+/// Exact `model_version` that must accompany [`LEGACY_EMBEDDING_MODEL_ALIAS_ID`].
+pub const LEGACY_EMBEDDING_MODEL_ALIAS_VERSION: &str = "1.0.0";
+
+/// Compatibility of an enrolled template with the loaded embedding model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TemplateModelBinding {
+    /// The template records the loaded embedding model.
+    Current,
+    /// The template records the historical CLI default aliasing the ArcFace extractor.
+    LegacyAlias,
+    /// The template belongs to another embedding space and must be refused.
+    Foreign,
+}
+
+/// Classifies a template's recorded model against the loaded embedding model.
+///
+/// The legacy alias is honoured only when the loaded model is [`EMBEDDING_MODEL_ID`] and
+/// both the id and the version match exactly (no trimming, no case folding).
+#[must_use]
+pub fn classify_template_model(
+    loaded_model_id: &str,
+    template_model_id: &str,
+    template_model_version: &str,
+) -> TemplateModelBinding {
+    if template_model_id == loaded_model_id {
+        TemplateModelBinding::Current
+    } else if loaded_model_id == EMBEDDING_MODEL_ID
+        && template_model_id == LEGACY_EMBEDDING_MODEL_ALIAS_ID
+        && template_model_version == LEGACY_EMBEDDING_MODEL_ALIAS_VERSION
+    {
+        TemplateModelBinding::LegacyAlias
+    } else {
+        TemplateModelBinding::Foreign
+    }
+}
+
 /// Composite runtime container holding all operational pipeline components.
 pub struct PipelineComponents {
     /// Warm camera capture manager.
@@ -286,7 +336,7 @@ pub fn initialize_pipeline(
 
     let det_session = registry.get_or_load_session("scrfd_500m_kps")?;
     let pad_session = registry.get_or_load_session("minifasnet_v2_pad")?;
-    let ext_session = registry.get_or_load_session("arcface_w600k_mbf")?;
+    let ext_session = registry.get_or_load_session(EMBEDDING_MODEL_ID)?;
 
     let detector = Arc::new(soos_inference_ort::OrtScrfdDetector::new(
         det_session,

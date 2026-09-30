@@ -15,11 +15,14 @@ use crate::inference::{InferenceGate, RequestDeadline};
 use crate::limits::{PeerConnectionLimiter, PeerLimitsConfig};
 use crate::peercred::{get_peer_credentials, verify_peer_credentials, PeerCredentials};
 use crate::pipeline::{
-    current_monotonic_nanos, PipelineComponents, FRAME_POLL_INTERVAL_MS, MAX_FRAME_AGE_NS,
+    classify_template_model, current_monotonic_nanos, PipelineComponents, TemplateModelBinding,
+    FRAME_POLL_INTERVAL_MS, MAX_FRAME_AGE_NS,
 };
 use crate::preview::{authorize_preview, PreviewConfig};
 use crate::session::SessionValidator;
 use crate::session_policy::LocalSessionPolicy;
+use soos_camera_v4l::PixelFormat;
+use soos_evidence_store::{EvidenceFrame, EvidencePixelFormat, FrameMetadata};
 use soos_policy::{ConsensusDecision, FrameEvaluation, PadAggregator, RateLimiter};
 use soos_protocol::codec::{encode, encode_preview};
 use soos_protocol::types::{
@@ -44,6 +47,18 @@ struct ProcessedOutput {
 struct ResponseOutput {
     encoded_response: Zeroizing<Vec<u8>>,
     completion_error: Option<DaemonError>,
+}
+
+/// Maps the camera pixel format to the self-describing evidence format (GitHub #181),
+/// so an intrusion snapshot records how its payload bytes must be decoded.
+fn evidence_pixel_format(format: PixelFormat) -> EvidencePixelFormat {
+    match format {
+        PixelFormat::Yuyv => EvidencePixelFormat::Yuyv,
+        PixelFormat::Rgb24 => EvidencePixelFormat::Rgb24,
+        PixelFormat::Grey => EvidencePixelFormat::Gray8,
+        PixelFormat::Mjpeg => EvidencePixelFormat::Mjpeg,
+        PixelFormat::Nv12 => EvidencePixelFormat::Nv12,
+    }
 }
 
 /// Whether a capture taken at `timestamp_ns` is still fresh at `now_ns` (`MAX_FRAME_AGE_NS`).
@@ -72,6 +87,7 @@ pub struct ConnectionDispatcher {
     inference: InferenceGate,
     peer_limits: PeerLimitsConfig,
     event_limiter: tokio::sync::Mutex<RateLimiter>,
+    expected_embedding_model: Option<String>,
 }
 
 impl ConnectionDispatcher {
@@ -105,6 +121,7 @@ impl ConnectionDispatcher {
             inference: InferenceGate::default(),
             peer_limits,
             event_limiter,
+            expected_embedding_model: None,
         }
     }
 
@@ -142,7 +159,26 @@ impl ConnectionDispatcher {
             inference: InferenceGate::default(),
             peer_limits,
             event_limiter,
+            expected_embedding_model: None,
         }
+    }
+
+    /// Binds enrolled templates to the loaded embedding model (GitHub #182 / STO-09).
+    ///
+    /// When set, an `Auth` request whose enrolled template records a different
+    /// `model_id` is answered `Unavailable` / `ModelUnavailable` without being matched,
+    /// so PAM falls back to the next module. `soos-daemon` always sets it to
+    /// [`crate::pipeline::EMBEDDING_MODEL_ID`]; mock harnesses may leave it unset.
+    #[must_use]
+    pub fn with_expected_embedding_model(mut self, model_id: impl Into<String>) -> Self {
+        self.expected_embedding_model = Some(model_id.into());
+        self
+    }
+
+    /// Returns the embedding model identifier enrolled templates must carry, if bound.
+    #[must_use]
+    pub fn expected_embedding_model(&self) -> Option<&str> {
+        self.expected_embedding_model.as_deref()
     }
 
     /// Overrides the monotonic clock function (used for simulation and test harnesses).
@@ -462,10 +498,22 @@ impl ConnectionDispatcher {
             if let Some(ref pipe) = self.pipeline {
                 if pipe.evidence_store.config().enabled {
                     if let Some(frame) = pipe.camera.latest_frame() {
-                        match pipe.evidence_store.store_snapshot(
+                        // GitHub #181: persist the frame with its dimensions and pixel
+                        // format so the evidence can be decoded later.
+                        let evidence = EvidenceFrame {
+                            metadata: FrameMetadata {
+                                width: frame.width,
+                                height: frame.height,
+                                pixel_format: evidence_pixel_format(frame.format),
+                                captured_at_mono_ns: frame.timestamp_mono_ns,
+                                sequence: frame.sequence,
+                            },
+                            data: &frame.data,
+                        };
+                        match pipe.evidence_store.store_frame_snapshot(
                             target_uid,
                             "PasswordFailed",
-                            &frame.data,
+                            &evidence,
                             None,
                             None,
                         ) {
@@ -770,6 +818,44 @@ impl ConnectionDispatcher {
                     });
                 }
             };
+
+            // 8d: Refuse templates enrolled with another embedding model (GitHub #182).
+            if let Some(expected) = self.expected_embedding_model.as_deref() {
+                let binding = classify_template_model(
+                    expected,
+                    &enrolled_template.model_id,
+                    &enrolled_template.model_version,
+                );
+                if binding == TemplateModelBinding::LegacyAlias {
+                    warn!(
+                        uid = req.uid_hint,
+                        template_model = ?enrolled_template.model_id,
+                        template_version = ?enrolled_template.model_version,
+                        loaded_model = %expected,
+                        "Enrolled template carries the legacy model alias; accepted as the \
+                         loaded embedding model, re-enrollment with soos-enroll is recommended"
+                    );
+                }
+                if binding == TemplateModelBinding::Foreign {
+                    warn!(
+                        uid = req.uid_hint,
+                        template_model = ?enrolled_template.model_id,
+                        loaded_model = %expected,
+                        "Enrolled template was recorded with a different embedding model; \
+                         re-enrollment required, returning Unavailable"
+                    );
+                    let encoded = self.build_response(
+                        req.request_id,
+                        Verdict::Unavailable,
+                        ReasonClass::ModelUnavailable,
+                        now_ns,
+                    )?;
+                    return Ok(ResponseOutput {
+                        encoded_response: encoded,
+                        completion_error: None,
+                    });
+                }
+            }
 
             // 8e: Multi-frame PAD consensus loop (GitHub #147 / PAD-02).
             // Allow requires k consecutive passing captures (live at or above the PAD

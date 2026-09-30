@@ -1,11 +1,15 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use ort::session::Session;
 
 use crate::error::InferenceError;
 use crate::manifest::ModelManifest;
+
+/// Set once the "manifest predates layout attestation" warning has been logged (one-time).
+static LEGACY_LAYOUT_WARNED: AtomicBool = AtomicBool::new(false);
 
 /// Thread-safe, shared ONNX Runtime session handle as returned by
 /// [`ModelRegistry::get_or_load_session`] and consumed by every detector constructor.
@@ -108,6 +112,10 @@ impl ModelRegistry {
     }
 
     /// Validates model integrity and loads (or returns cached) ONNX Runtime session.
+    ///
+    /// Attestation is two-fold: the file SHA-256 must match the manifest before the session is
+    /// built, and the session's I/O tensor shapes must match the manifest's `input_shape`,
+    /// `input_layout` and `output_shapes` before it is cached and returned.
     pub fn get_or_load_session(&mut self, id: &str) -> Result<Arc<Mutex<Session>>, InferenceError> {
         if let Some(session) = self.sessions.get(id) {
             return Ok(Arc::clone(session));
@@ -127,9 +135,52 @@ impl ModelRegistry {
             .commit_from_file(&path)
             .map_err(|e| InferenceError::Ort(format!("Failed loading session {}: {}", id, e)))?;
 
+        // Shape attestation: the manifest's declared I/O shapes must match the graph
+        // (symbolic dims are wildcards). A mismatch fails closed before the session is cached.
+        self.validate_session_shapes(id, &session)?;
+
         let arc_session = Arc::new(Mutex::new(session));
         self.sessions
             .insert(id.to_string(), Arc::clone(&arc_session));
         Ok(arc_session)
+    }
+
+    /// Compares the session's input/output tensor shapes with the manifest entry for `id`.
+    fn validate_session_shapes(&self, id: &str, session: &Session) -> Result<(), InferenceError> {
+        let meta = self
+            .manifest
+            .get_model(id)
+            .ok_or_else(|| InferenceError::ModelNotFound {
+                id: id.to_string(),
+                path: self.config.models_dir.clone(),
+            })?;
+        let shape_of = |name: &str, dtype: &ort::value::ValueType| {
+            dtype
+                .tensor_shape()
+                .map(|shape| shape.to_vec())
+                .ok_or_else(|| InferenceError::ModelShapeMismatch {
+                    id: id.to_string(),
+                    detail: format!("tensor '{name}' is not a dense tensor"),
+                })
+        };
+        let inputs = session
+            .inputs()
+            .iter()
+            .map(|input| shape_of(input.name(), input.dtype()))
+            .collect::<Result<Vec<_>, _>>()?;
+        let outputs = session
+            .outputs()
+            .iter()
+            .map(|output| shape_of(output.name(), output.dtype()))
+            .collect::<Result<Vec<_>, _>>()?;
+        if !meta.input_layout_declared && !LEGACY_LAYOUT_WARNED.swap(true, Ordering::Relaxed) {
+            tracing::warn!(
+                model_id = id,
+                "Model manifest predates input layout attestation (no input_layout); \
+                 input layout is not asserted, SHA-256 and dims are still enforced. \
+                 Reinstall the manifest shipped with this release."
+            );
+        }
+        meta.validate_session_shapes(&inputs, &outputs)
     }
 }

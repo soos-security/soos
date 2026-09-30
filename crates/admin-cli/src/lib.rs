@@ -11,6 +11,7 @@ pub mod args;
 pub mod error;
 pub mod gdm;
 pub mod logs;
+mod pam_stack;
 pub mod redact;
 pub mod status;
 pub mod test_pam;

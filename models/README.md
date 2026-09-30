@@ -8,12 +8,19 @@ In accordance with `AI/ARCHITECTURE.md` §7 and `AI/DECISIONS.md`, `soos` execut
 
 ## 1. Next-Generation Attested Models Overview (Manifest v2.0.0)
 
-Under the modernized 3-model vision architecture (ADR [2026-09-20]), the pipeline unifies face detection and landmark regression into a single forward pass, upgrades biometric embeddings to 512D, and deploys high-accuracy presentation attack detection:
+Under the modernized 3-model vision architecture (ADR [2026-09-20]), the pipeline unifies face detection and landmark regression into a single forward pass, upgrades biometric embeddings to 512D, and deploys high-accuracy presentation attack detection.
+
+> **Model ids are stable identifiers, not descriptions.** `arcface_w600k_mbf` is a historical name:
+> the attested file is a Keras ArcFace ResNet34 exported with tf2onnx, **not** an InsightFace
+> w600k MobileFaceNet (ADR 2026-09-30, GitHub #191). The id and file name are kept because
+> `soos-daemon` and `soos-enroll` reference them.
+
+Shapes below are the ONNX graph metadata of the attested files (`N` is a symbolic batch dim):
 
 | Model Identifier | File Name | Architecture | License | Input Tensor | Output Tensor(s) | Primary Purpose |
 |---|---|---|---|---|---|---|
 | `scrfd_500m_kps` | `scrfd_500m_kps.onnx` | SCRFD 500M KPS | MIT | `[1, 3, 640, 640]` BGR | 9 tensors (scores, bboxes, kps across strides 8, 16, 32) | Unified face bounding box detection + 5-point facial landmark regression |
-| `arcface_w600k_mbf` | `arcface_w600k_mbf.onnx` | ArcFace MobileFaceNet w600k | MIT | `[1, 3, 112, 112]` RGB | `[1, 512]` | 512D L2-normalized biometric feature extractor |
+| `arcface_w600k_mbf` | `arcface_w600k_mbf.onnx` | ArcFace ResNet34 (Keras, tf2onnx export; ~34.1 M params, 136.6 MB) | MIT (as recorded, see §6) | `input_1` `[N, 112, 112, 3]` **NHWC** (manifest: logical `[1, 3, 112, 112]` + `input_layout = "NHWC"`), fed BGR | `embedding` `[N, 512]` | 512D biometric feature extractor (L2-normalized by the extractor) |
 | `minifasnet_v2_pad` | `minifasnet_v2_80x80.onnx` | MiniFASNetV2 | Apache-2.0 | `[1, 3, 80, 80]` BGR | `[1, 3]` | Presentation Attack Detection (anti-spoofing; live vs print vs replay) |
 
 ### Preprocessing & Tensor Normalization Rules
@@ -24,11 +31,13 @@ Under the modernized 3-model vision architecture (ADR [2026-09-20]), the pipelin
    - **Normalization**: `(pixel - 127.5) / 128.0` mapping `[0, 255]` to `[-0.996, +1.0]`.
    - **Output Parsing**: 9 tensors parsed across 3 strides (stride 8: 12,800 anchors; stride 16: 3,200 anchors; stride 32: 800 anchors). Distance-to-border box decoding and grid-offset keypoint regression.
 
-2. **`arcface_w600k_mbf`**:
+2. **`arcface_w600k_mbf`** (ArcFace ResNet34, tf2onnx):
    - **Resolution & Crop**: 112×112 tightly aligned face crop via similarity transformation based on 5-point landmarks.
-   - **Color Format**: RGB channel ordering.
-   - **Normalization**: Exact symmetric `(pixel - 127.5) / 127.5` mapping `[0, 255]` to `[-1.0, +1.0]`.
-   - **Output**: 512-dimensional floating-point embedding vector, L2-normalized.
+   - **Tensor Layout**: **NHWC** — graph input `input_1` is `[N, 112, 112, 3]` (channels last). `OrtEmbeddingExtractor` detects the layout from the session; `ModelRegistry` rejects the session if it disagrees with the manifest `input_layout`.
+   - **Color Format**: fed in B, G, R channel order. The order the network was trained with is **not verified** (the BGR choice of walkthrough 71 assumed an InsightFace model); tracked as a follow-up in ADR 2026-09-30.
+   - **Normalization**: symmetric `(pixel - 127.5) / 127.5` mapping `[0, 255]` to `[-1.0, +1.0]` (also not verified against the upstream training pipeline).
+   - **Output**: graph output `embedding` `[N, 512]`, raw; the extractor L2-normalizes it.
+   - **Cost**: ~34.1 M float32 parameters; one embedding measured at p50 127.5 ms / p95 170.9 ms on one ORT intra-op thread (`embedding_real_model_tests`).
 
 3. **`minifasnet_v2_pad`**:
    - **Resolution & Crop**: 80×80 context crop generated from a 2.7× expanded face bounding box (captures facial margins, bezels, and printed paper boundaries).
@@ -44,6 +53,8 @@ To protect against model tampering, unauthorized substitution, and supply chain 
 - Every model is attested in `manifest.toml` with its exact SHA-256 digest.
 - During daemon startup, `ModelRegistry::verify_integrity()` verifies the SHA-256 digest of each model file on disk against `manifest.toml`.
 - If any model file is missing, modified, corrupted, or tampered with, `soos-daemon` immediately refuses to start (fail-closed), preventing unverified or compromised weights from handling PAM authentication.
+- After each ONNX Runtime session is built, `ModelRegistry::get_or_load_session` compares its input and output tensor shapes with `input_shape` / `input_layout` / `output_shapes` (symbolic graph dims such as `batch_size` or `unk__556` are wildcards; rank and every concrete dim must match). A mismatch fails closed with `InferenceError::ModelShapeMismatch` (GitHub #191), so a model with the right hash but unexpected I/O is never handed to a detector.
+- `input_shape` is always the logical `[N, C, H, W]` shape; `input_layout` (default `"NCHW"`) is the physical layout of the graph input. An entry without `input_layout` (a manifest installed by an earlier release) has its layout *unspecified*: the input may be the logical shape in NCHW or NHWC order, rank and every dim are still enforced, the SHA-256 already binds the exact file, and `ModelRegistry` logs a one-time warning that the manifest predates layout attestation. An explicit `input_layout` is always enforced and a wrong value fails closed. The committed manifest declares `input_layout = "NHWC"` for the embedding model.
 
 ### Expected SHA-256 Checksums (v2.0.0)
 
@@ -86,10 +97,11 @@ Production models and the attestation manifest are deployed to `/var/lib/soos/mo
    - Architecture: Sample and Computation Redistribution for Efficient Face Detection (SCRFD) with 5-point keypoint regression
    - License: MIT
 
-2. **ArcFace MobileFaceNet w600k (`arcface_w600k_mbf`)**:
-   - Upstream: [garavv/arcface-onnx](https://huggingface.co/garavv/arcface-onnx)
-   - Architecture: ArcFace with 512D output space
-   - License: MIT
+2. **ArcFace ResNet34 (`arcface_w600k_mbf`, historical id)**:
+   - Upstream: [garavv/arcface-onnx](https://huggingface.co/garavv/arcface-onnx) (`arc.onnx`)
+   - Architecture: ArcFace-trained ResNet34 (Keras), converted with `tf2onnx` 1.16.1 (opset 15); node names `StatefulPartitionedCall/ResNet34/...`; 164 initializers, 34,138,432 float32 parameters; 136,619,444 bytes; 512D output
+   - Not an InsightFace `w600k_mbf` (MobileFaceNet, WebFace600K); the training dataset of this network is not documented upstream
+   - License: MIT (as recorded in the manifest; not re-verified in GitHub #191)
 
 3. **MiniFASNetV2 (`minifasnet_v2_pad`)**:
    - Upstream: Minivision AI / [QingHeYang/Silent-Face-Anti-Spoofing-onnx](https://github.com/QingHeYang/Silent-Face-Anti-Spoofing-onnx)

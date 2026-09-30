@@ -3,7 +3,9 @@
 //! Provides administrative commands for:
 //! - Multi-frame enrollment with quality selection and interactive confirmation
 //! - Diagnostic one-shot verification with latency and PAD reporting
-//! - Deletion with anti-forensic secure erasure
+//! - Deletion of a template: best-effort in-place overwrite before unlinking; the
+//!   guarantee against recovery is encryption at rest plus master-key destruction
+//!   (ADR 2026-09-30 "Biometric Template Erasure Model")
 //! - Enumeration of enrolled biometric templates
 
 #![forbid(unsafe_code)]
@@ -17,8 +19,9 @@ pub mod service;
 pub mod shred;
 
 pub use args::{
-    sanitize_path, validate_camera_device_path, validate_fhs_path, Cli, Commands, DebugVisionArgs,
-    DeleteArgs, EnrollArgs, ImportArgs, ListArgs, OutputFormat, VerifyArgs, ALLOWED_FHS_PREFIXES,
+    resolve_default_target_uid, sanitize_path, validate_camera_device_path, validate_fhs_path, Cli,
+    Commands, DebugVisionArgs, DeleteArgs, EnrollArgs, ImportArgs, ListArgs, OutputFormat,
+    VerifyArgs, ALLOWED_FHS_PREFIXES,
 };
 pub use error::EnrollmentCliError;
 pub use guided_enrollment::{EnrollmentStep, EnrollmentStepFeedback, GuidedEnrollmentSession};
@@ -30,6 +33,7 @@ pub use service::{
     DiagnosticVerificationReport, EnrolledUserSummary, EnrollmentOutcome, EnrollmentService,
     EnrollmentSummary, LatencyBreakdown, DEBUG_REPORT_DIR_MODE, DEBUG_REPORT_FILE_MODE,
     DEFAULT_CAMERA_DEVICE, DEFAULT_DEBUG_REPORT_DIR, DEFAULT_KEY_PATH, DEFAULT_MODELS_DIR,
-    MODEL_ID_EMBEDDING, MODEL_ID_FACE_DETECTOR, MODEL_ID_PAD, REQUIRED_MODEL_IDS,
+    EMBEDDING_MODEL_VERSION, MODEL_ID_EMBEDDING, MODEL_ID_FACE_DETECTOR, MODEL_ID_PAD,
+    REQUIRED_MODEL_IDS,
 };
 pub use shred::secure_shred_file;

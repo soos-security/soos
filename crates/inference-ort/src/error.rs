@@ -15,6 +15,10 @@ pub enum InferenceError {
     #[error("Failed to parse manifest TOML: {0}")]
     ManifestParse(#[from] toml::de::Error),
 
+    /// The ONNX graph's I/O tensor shapes disagree with the manifest entry (fail closed).
+    #[error("Model '{id}' tensor shapes do not match the manifest: {detail}")]
+    ModelShapeMismatch { id: String, detail: String },
+
     #[error("Model '{id}' not found at path {path:?}")]
     ModelNotFound { id: String, path: PathBuf },
 

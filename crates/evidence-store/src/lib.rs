@@ -8,6 +8,7 @@
 pub mod config;
 pub mod crypto;
 pub mod error;
+pub mod frame;
 pub mod snapshot;
 pub mod store;
 
@@ -17,5 +18,12 @@ pub use config::{
 };
 pub use crypto::MasterKey;
 pub use error::EvidenceStoreError;
+pub use frame::{
+    EvidenceFrame, EvidencePixelFormat, FrameBytes, FrameMetadata, EVIDENCE_RECORD_VERSION,
+    LEGACY_EVIDENCE_RECORD_VERSION, MAX_EVIDENCE_DIMENSION, MAX_EVIDENCE_FILE_BYTES,
+    MAX_EVIDENCE_IMAGE_BYTES,
+};
 pub use snapshot::{EvidenceRecord, RetentionReport, SnapshotResult};
-pub use store::{EvidenceStore, MAX_VALID_UID};
+pub use store::{
+    EvidenceStore, FRAME_SNAPSHOT_EXTENSION, MAX_VALID_UID, OPAQUE_SNAPSHOT_EXTENSION,
+};

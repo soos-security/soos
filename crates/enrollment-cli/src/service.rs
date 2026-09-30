@@ -1,7 +1,7 @@
 //! Core business logic and service orchestration for enrollment CLI.
 
 use std::fs::OpenOptions;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -46,8 +46,14 @@ pub const MODEL_ID_FACE_DETECTOR: &str = "scrfd_500m_kps";
 /// Attested model registry ID for MiniFASNetV2 presentation attack detector.
 pub const MODEL_ID_PAD: &str = "minifasnet_v2_pad";
 
-/// Attested model registry ID for ArcFace MobileFaceNet w600k 512D feature extractor.
+/// Attested model registry ID of the 512D ArcFace embedding extractor (a tf2onnx ResNet34,
+/// NHWC input; see `models/README.md`, GitHub #191).
 pub const MODEL_ID_EMBEDDING: &str = "arcface_w600k_mbf";
+
+/// Attested `models/manifest.toml` version of the embedding model recorded in enrolled
+/// template metadata (GitHub #182 / STO-09). Pinned to the manifest by
+/// `test_embedding_model_constants_match_attested_manifest`.
+pub const EMBEDDING_MODEL_VERSION: &str = "2.0.0";
 
 /// Set of all 3 neural model IDs required by the biometric vision pipeline.
 pub const REQUIRED_MODEL_IDS: [&str; 3] =
@@ -140,6 +146,10 @@ pub struct EnrollmentSummary {
     pub embedding_dim: usize,
     pub model_id: String,
     pub model_version: String,
+    /// `true` when `--model-id`/`--model-version` differ from the loaded embedding
+    /// model ([`MODEL_ID_EMBEDDING`] / [`EMBEDDING_MODEL_VERSION`]). The daemon refuses
+    /// templates whose model identifier differs from its loaded extractor.
+    pub model_overridden: bool,
 }
 
 /// Outcome of a successfully completed enrollment.
@@ -339,6 +349,8 @@ impl EnrollmentService {
             embedding_dim,
             model_id: args.model_id.clone(),
             model_version: args.model_version.clone(),
+            model_overridden: args.model_id != MODEL_ID_EMBEDDING
+                || args.model_version != EMBEDDING_MODEL_VERSION,
         };
 
         if !args.yes {
@@ -542,50 +554,53 @@ impl EnrollmentService {
         Ok(summaries)
     }
 
-    /// Imports and encrypts an existing biometric template (from file) into the biometric store.
+    /// Imports and encrypts an existing biometric template into the biometric store.
+    ///
+    /// `--file -` ([`IMPORT_STDIN_PATH`]) reads the template from standard input (the GUI
+    /// path, GitHub #156); any other value is read through [`read_import_file`], which
+    /// requires the file to be owned by `PKEXEC_UID` when running under `pkexec`.
     pub fn import(&self, args: &ImportArgs) -> Result<EnrollmentOutcome, EnrollmentCliError> {
-        check_privileges(self.require_root)?;
-
-        let uid = resolve_target_uid(args.uid, args.username.as_deref())?;
-
-        let file_bytes = std::fs::read(&args.file)?;
-
-        // Support either JSON array of f32 or CBOR-encoded BiometricTemplate
-        let (embedding, model_id, model_version) =
-            if let Ok(parsed) = serde_json::from_slice::<Vec<f32>>(&file_bytes) {
-                (parsed, args.model_id.clone(), args.model_version.clone())
-            } else if let Ok(template) = BiometricTemplate::from_cbor(&file_bytes) {
-                (
-                    (*template.embedding).clone(),
-                    template.model_id,
-                    template.model_version,
-                )
-            } else {
-                return Err(EnrollmentCliError::Internal(
-                "Input file is neither a valid JSON float array nor a valid CBOR BiometricTemplate"
-                    .to_string(),
-            ));
-            };
-
-        if embedding.len() != 512 {
-            return Err(EnrollmentCliError::Internal(format!(
-                "Invalid embedding dimension: expected 512, found {}",
-                embedding.len()
-            )));
+        if args.file.as_os_str() == IMPORT_STDIN_PATH {
+            return self.import_from_reader(args, std::io::stdin().lock());
         }
+        check_privileges(self.require_root)?;
+        let invoker = parse_pkexec_uid(std::env::var("PKEXEC_UID").ok().as_deref())?;
+        let bytes = read_import_file(&args.file, invoker)?;
+        self.store_imported(args, &bytes)
+    }
+
+    /// Imports a template read from `reader` (at most [`MAX_IMPORT_INPUT_BYTES`] bytes).
+    ///
+    /// # Errors
+    ///
+    /// [`EnrollmentCliError::InvalidImport`] when the input exceeds the bound or is not a
+    /// 512-value array of finite floats (JSON) or a valid CBOR template; I/O and store errors
+    /// otherwise. Nothing is stored on error.
+    pub fn import_from_reader<R: Read>(
+        &self,
+        args: &ImportArgs,
+        reader: R,
+    ) -> Result<EnrollmentOutcome, EnrollmentCliError> {
+        check_privileges(self.require_root)?;
+        let bytes = read_import_input(reader)?;
+        self.store_imported(args, &bytes)
+    }
+
+    fn store_imported(
+        &self,
+        args: &ImportArgs,
+        bytes: &[u8],
+    ) -> Result<EnrollmentOutcome, EnrollmentCliError> {
+        let uid = resolve_target_uid(args.uid, args.username.as_deref())?;
+        let (embedding, model_id, model_version) = parse_import_payload(bytes, args)?;
 
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
 
-        let template = BiometricTemplate::new(
-            uid,
-            model_id.clone(),
-            model_version.clone(),
-            now,
-            Zeroizing::new(embedding),
-        )?;
+        let template =
+            BiometricTemplate::new(uid, model_id.clone(), model_version.clone(), now, embedding)?;
 
         self.store.enroll(&template)?;
 
@@ -648,6 +663,183 @@ impl EnrollmentService {
 
         Ok(out_path)
     }
+}
+
+/// Upper bound on any `import` input, from standard input or from a file (64 KiB).
+///
+/// A 512-value JSON float array or CBOR template is well below 16 KiB.
+pub const MAX_IMPORT_INPUT_BYTES: usize = 64 * 1024;
+
+/// `--file` value selecting standard input for `import` (GitHub #156).
+pub const IMPORT_STDIN_PATH: &str = "-";
+
+/// Embedding dimension accepted by `import` (ArcFace w600k MBF).
+pub const IMPORT_EMBEDDING_DIM: usize = 512;
+
+/// Parses the `PKEXEC_UID` environment value set by `pkexec` for the invoking user.
+///
+/// # Errors
+///
+/// [`EnrollmentCliError::InvalidImport`] when the value is present but not a decimal UID.
+pub fn parse_pkexec_uid(value: Option<&str>) -> Result<Option<u32>, EnrollmentCliError> {
+    match value {
+        None => Ok(None),
+        Some(raw) if !raw.is_empty() && raw.bytes().all(|b| b.is_ascii_digit()) => raw
+            .parse::<u32>()
+            .map(Some)
+            .map_err(|_| EnrollmentCliError::InvalidImport("PKEXEC_UID is out of range".into())),
+        Some(_) => Err(EnrollmentCliError::InvalidImport(
+            "PKEXEC_UID is not a decimal user ID".into(),
+        )),
+    }
+}
+
+/// Reads at most [`MAX_IMPORT_INPUT_BYTES`] from `reader` into a zeroizing buffer.
+///
+/// The bound is enforced while reading (`Read::take`), so an endless input never grows the
+/// buffer beyond the cap plus one byte.
+fn read_import_input<R: Read>(reader: R) -> Result<Zeroizing<Vec<u8>>, EnrollmentCliError> {
+    let cap = u64::try_from(MAX_IMPORT_INPUT_BYTES)
+        .unwrap_or(u64::MAX)
+        .saturating_add(1);
+    let mut buf = Zeroizing::new(Vec::new());
+    reader.take(cap).read_to_end(&mut buf)?;
+    if buf.len() > MAX_IMPORT_INPUT_BYTES {
+        return Err(EnrollmentCliError::InvalidImport(format!(
+            "input exceeds {MAX_IMPORT_INPUT_BYTES} bytes"
+        )));
+    }
+    Ok(buf)
+}
+
+/// Opens an `import` input file safely and reads it into a zeroizing buffer.
+///
+/// The file is opened with `O_NOFOLLOW | O_CLOEXEC` and checked on the open descriptor
+/// (no TOCTOU window): it must be a regular file of at most [`MAX_IMPORT_INPUT_BYTES`]
+/// bytes and, when `expected_owner` is set (the `PKEXEC_UID` of the invoking user), owned
+/// by that user, so a `pkexec` caller cannot make root import someone else's file.
+///
+/// # Errors
+///
+/// [`EnrollmentCliError::InvalidImport`] on a symlink, a non-regular file, an oversized
+/// file or an owner mismatch; [`EnrollmentCliError::Io`] when the file cannot be opened.
+pub fn read_import_file(
+    path: &Path,
+    expected_owner: Option<u32>,
+) -> Result<Zeroizing<Vec<u8>>, EnrollmentCliError> {
+    use std::os::unix::fs::MetadataExt;
+
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
+        .open(path)
+        .map_err(|e| {
+            if e.raw_os_error() == Some(libc::ELOOP) {
+                EnrollmentCliError::InvalidImport("input file is a symbolic link".into())
+            } else {
+                EnrollmentCliError::Io(e)
+            }
+        })?;
+    let meta = file.metadata()?;
+    if !meta.file_type().is_file() {
+        return Err(EnrollmentCliError::InvalidImport(
+            "input is not a regular file".into(),
+        ));
+    }
+    if meta.len() > u64::try_from(MAX_IMPORT_INPUT_BYTES).unwrap_or(u64::MAX) {
+        return Err(EnrollmentCliError::InvalidImport(format!(
+            "input file exceeds {MAX_IMPORT_INPUT_BYTES} bytes"
+        )));
+    }
+    if let Some(owner) = expected_owner {
+        if meta.uid() != owner {
+            return Err(EnrollmentCliError::InvalidImport(
+                "input file is not owned by the invoking user (PKEXEC_UID)".into(),
+            ));
+        }
+    }
+    read_import_input(file)
+}
+
+/// Decodes a JSON float array for `import` into a zeroizing buffer reserved once at
+/// [`IMPORT_EMBEDDING_DIM`] values. The buffer never grows (so no reallocation leaves an
+/// unzeroized copy): values beyond the dimension are counted but not stored. Returns the
+/// stored values and the total number of array elements, or `None` when `bytes` is not
+/// exactly one JSON array of numbers.
+#[must_use]
+pub fn decode_json_embedding(bytes: &[u8]) -> Option<(Zeroizing<Vec<f32>>, usize)> {
+    let mut de = serde_json::Deserializer::from_slice(bytes);
+    let decoded = serde::Deserializer::deserialize_seq(&mut de, BoundedEmbeddingVisitor).ok()?;
+    de.end().ok()?;
+    Some(decoded)
+}
+
+/// Visitor of [`decode_json_embedding`].
+struct BoundedEmbeddingVisitor;
+
+impl<'de> serde::de::Visitor<'de> for BoundedEmbeddingVisitor {
+    type Value = (Zeroizing<Vec<f32>>, usize);
+
+    fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("a JSON array of floats")
+    }
+
+    fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+        let mut values = Zeroizing::new(Vec::new());
+        values
+            .try_reserve_exact(IMPORT_EMBEDDING_DIM)
+            .map_err(|_| <A::Error as serde::de::Error>::custom("embedding allocation failed"))?;
+        let mut count = 0_usize;
+        while let Some(value) = seq.next_element::<f32>()? {
+            if values.len() < IMPORT_EMBEDDING_DIM {
+                values.push(value);
+            }
+            count = count.saturating_add(1);
+        }
+        Ok((values, count))
+    }
+}
+
+/// Decodes an `import` payload: a JSON array of finite floats, or a CBOR template.
+///
+/// Returns the zeroizing embedding with its model identifier and version (from `args` for
+/// JSON, from the template for CBOR). Values are never echoed in errors.
+fn parse_import_payload(
+    bytes: &[u8],
+    args: &ImportArgs,
+) -> Result<(Zeroizing<Vec<f32>>, String, String), EnrollmentCliError> {
+    let (embedding, count, model_id, model_version) =
+        if let Some((parsed, count)) = decode_json_embedding(bytes) {
+            (
+                parsed,
+                count,
+                args.model_id.clone(),
+                args.model_version.clone(),
+            )
+        } else if let Ok(template) = BiometricTemplate::from_cbor(bytes) {
+            (
+                template.embedding.clone(),
+                template.embedding.len(),
+                template.model_id.clone(),
+                template.model_version.clone(),
+            )
+        } else {
+            return Err(EnrollmentCliError::InvalidImport(
+                "input is neither a JSON float array nor a CBOR BiometricTemplate".into(),
+            ));
+        };
+
+    if count != IMPORT_EMBEDDING_DIM || embedding.len() != IMPORT_EMBEDDING_DIM {
+        return Err(EnrollmentCliError::InvalidImport(format!(
+            "invalid embedding dimension: expected {IMPORT_EMBEDDING_DIM}, found {count}"
+        )));
+    }
+    if !embedding.iter().all(|v| v.is_finite()) {
+        return Err(EnrollmentCliError::InvalidImport(
+            "embedding contains non-finite values".into(),
+        ));
+    }
+    Ok((embedding, model_id, model_version))
 }
 
 /// Default root-only directory receiving `debug-vision` reports.

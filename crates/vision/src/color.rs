@@ -15,9 +15,23 @@ use soos_camera_v4l::PixelFormat;
 
 use crate::error::VisionError;
 
+/// Maximum accepted size of one compressed MJPEG frame (16 MiB).
+///
+/// A UVC MJPEG frame is far smaller than its raw RGB24 equivalent; anything larger is a
+/// malformed or hostile buffer and is rejected before the decoder sees it.
+pub const MAX_MJPEG_COMPRESSED_BYTES: usize = 16 * 1024 * 1024;
+
+/// Maximum accepted MJPEG frame width or height, in pixels (covers 4K UHD 3840x2160).
+///
+/// Bounds the decoder working set (at most ~48 MiB of RGB24 output) independently of the
+/// frame header.
+pub const MAX_MJPEG_DIMENSION: u32 = 4096;
+
 /// Converts raw frame buffer from a supported camera `PixelFormat` into an RGB24 buffer.
 ///
-/// Output buffer length will be exactly `width * height * 3` bytes.
+/// Output buffer length will be exactly `width * height * 3` bytes. For
+/// [`PixelFormat::Mjpeg`] the frame header must declare exactly `width` x `height`
+/// (see [`MAX_MJPEG_COMPRESSED_BYTES`] and [`MAX_MJPEG_DIMENSION`] for the input bounds).
 pub fn convert_to_rgb(
     raw_buffer: &[u8],
     width: u32,
@@ -153,70 +167,90 @@ pub fn convert_to_rgb(
             Ok(rgb)
         }
         PixelFormat::Mjpeg => {
-            let mut decoder = jpeg_decoder::Decoder::new(raw_buffer);
-            let decoded_bytes = decoder.decode().map_err(|e| {
-                VisionError::ColorConversionFailed(format!("JPEG decode error: {e}"))
-            })?;
-
-            let info = decoder.info().ok_or_else(|| {
-                VisionError::ColorConversionFailed("Missing JPEG metadata".to_string())
-            })?;
-
-            match info.pixel_format {
-                jpeg_decoder::PixelFormat::RGB24 => {
-                    if decoded_bytes.len() != expected_rgb_len {
-                        return Err(VisionError::InvalidBufferSize {
-                            expected: expected_rgb_len,
-                            actual: decoded_bytes.len(),
-                        });
-                    }
-                    Ok(decoded_bytes)
-                }
-                jpeg_decoder::PixelFormat::L8 => {
-                    if decoded_bytes.len() != pixel_count {
-                        return Err(VisionError::InvalidBufferSize {
-                            expected: pixel_count,
-                            actual: decoded_bytes.len(),
-                        });
-                    }
-                    let mut rgb = Vec::with_capacity(expected_rgb_len);
-                    for &grey in &decoded_bytes {
-                        rgb.push(grey);
-                        rgb.push(grey);
-                        rgb.push(grey);
-                    }
-                    Ok(rgb)
-                }
-                jpeg_decoder::PixelFormat::CMYK32 => {
-                    // CMYK to RGB conversion: R = 255 * (1-C) * (1-K)
-                    let mut rgb = Vec::with_capacity(expected_rgb_len);
-                    for cmyk in decoded_bytes.chunks_exact(4) {
-                        let c = cmyk[0] as f32 / 255.0;
-                        let m = cmyk[1] as f32 / 255.0;
-                        let y = cmyk[2] as f32 / 255.0;
-                        let k = cmyk[3] as f32 / 255.0;
-
-                        let r = (255.0 * (1.0 - c) * (1.0 - k)).clamp(0.0, 255.0) as u8;
-                        let g = (255.0 * (1.0 - m) * (1.0 - k)).clamp(0.0, 255.0) as u8;
-                        let b = (255.0 * (1.0 - y) * (1.0 - k)).clamp(0.0, 255.0) as u8;
-
-                        rgb.push(r);
-                        rgb.push(g);
-                        rgb.push(b);
-                    }
-                    Ok(rgb)
-                }
-                jpeg_decoder::PixelFormat::L16 => {
-                    let mut rgb = Vec::with_capacity(expected_rgb_len);
-                    for chunk in decoded_bytes.chunks_exact(2) {
-                        let high = chunk[0];
-                        rgb.push(high);
-                        rgb.push(high);
-                        rgb.push(high);
-                    }
-                    Ok(rgb)
-                }
-            }
+            decode_mjpeg(raw_buffer, width, height, pixel_count, expected_rgb_len)
         }
     }
+}
+
+/// Decodes one MJPEG frame into RGB24 with bounded allocations (review finding VIS-02).
+///
+/// The SOF header of a device-supplied frame is attacker-controlled, so nothing is allocated
+/// from it before it has been checked:
+/// 1. the compressed input is bounded by [`MAX_MJPEG_COMPRESSED_BYTES`];
+/// 2. the negotiated frame dimensions are bounded by [`MAX_MJPEG_DIMENSION`];
+/// 3. only the headers are parsed (`read_info`), and the SOF width/height must equal the
+///    negotiated frame dimensions (a transposed frame of the same byte count is rejected);
+/// 4. only 8-bit YCbCr/RGB and 8-bit greyscale are accepted (UVC MJPEG is always YCbCr);
+///    CMYK and 16-bit frames fail closed;
+/// 5. the decoder output is capped at the exact expected size, and the decoded length is
+///    re-checked before the buffer is returned.
+fn decode_mjpeg(
+    raw_buffer: &[u8],
+    width: u32,
+    height: u32,
+    pixel_count: usize,
+    expected_rgb_len: usize,
+) -> Result<Vec<u8>, VisionError> {
+    if raw_buffer.len() > MAX_MJPEG_COMPRESSED_BYTES {
+        return Err(VisionError::MjpegInputTooLarge {
+            max: MAX_MJPEG_COMPRESSED_BYTES,
+            actual: raw_buffer.len(),
+        });
+    }
+    if width > MAX_MJPEG_DIMENSION || height > MAX_MJPEG_DIMENSION {
+        return Err(VisionError::InvalidDimensions { width, height });
+    }
+
+    let mut decoder = jpeg_decoder::Decoder::new(raw_buffer);
+    decoder
+        .read_info()
+        .map_err(|e| VisionError::ColorConversionFailed(format!("JPEG header error: {e}")))?;
+    let info = decoder
+        .info()
+        .ok_or_else(|| VisionError::ColorConversionFailed("Missing JPEG metadata".to_string()))?;
+
+    let header_width = u32::from(info.width);
+    let header_height = u32::from(info.height);
+    if header_width != width || header_height != height {
+        return Err(VisionError::MjpegFrameMismatch {
+            expected_width: width,
+            expected_height: height,
+            actual_width: header_width,
+            actual_height: header_height,
+        });
+    }
+
+    let (decoded_len, is_grey) = match info.pixel_format {
+        jpeg_decoder::PixelFormat::RGB24 => (expected_rgb_len, false),
+        jpeg_decoder::PixelFormat::L8 => (pixel_count, true),
+        other => {
+            return Err(VisionError::ColorConversionFailed(format!(
+                "Unsupported JPEG pixel format {other:?}: MJPEG frames must be 8-bit YCbCr or greyscale"
+            )));
+        }
+    };
+
+    decoder.set_max_decoding_buffer_size(decoded_len);
+    let decoded_bytes = decoder
+        .decode()
+        .map_err(|e| VisionError::ColorConversionFailed(format!("JPEG decode error: {e}")))?;
+
+    if decoded_bytes.len() != decoded_len {
+        return Err(VisionError::InvalidBufferSize {
+            expected: decoded_len,
+            actual: decoded_bytes.len(),
+        });
+    }
+
+    if !is_grey {
+        return Ok(decoded_bytes);
+    }
+
+    let mut rgb = Vec::with_capacity(expected_rgb_len);
+    for &grey in &decoded_bytes {
+        rgb.push(grey);
+        rgb.push(grey);
+        rgb.push(grey);
+    }
+    Ok(rgb)
 }

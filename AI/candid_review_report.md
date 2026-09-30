@@ -1,125 +1,203 @@
 # Candid Review Report
 
 - **Date**: 2026-09-30
-- **Target Branch**: `fix/p1-daemon-pam-batch`
-- **Base (merge-base)**: `067c68c`
-- **Reviewed-Diff-Fingerprint**: `c7008aa175d77d2ed6d5d5a8f4f33b87efe386ad9ce287f42cd3b8ccc2b6a70f`
-- **Review Round**: 2. Round 1 (fingerprint `c86aab9e…`) was CHANGES_REQUESTED on finding 1.
-- **Audited Files**: `.agents/skills/dev-workflow/references/project-facts.md`, `.github/workflows/ci.yml`, `AI/ARCHITECTURE.md`, `AI/BACKLOG.md`, `AI/DECISIONS.md`, `AI/VERIFICATION_MATRIX.md`, `AI/walkthroughs/94_pam_deadline_feedback_and_service.md`, `AI/walkthroughs/95_daemon_peer_limits.md`, `AI/walkthroughs/96_daemon_inference_budget.md`, `AI/walkthroughs/97_daemon_local_session_binding.md`, `Docs/CI_CD_AND_SECURITY.md`, `Docs/IPC_PROTOCOL.md`, `Docs/PAM_DOCKER_TEST_MATRIX.md`, `Docs/PAM_MODULE.md`, `Docs/POLICY_CRATE.md`, `crates/daemon/src/{config,dispatcher,inference,lib,limits,main,session,session_policy}.rs`, `crates/daemon/tests/{inference_budget_tests,peer_limits_tests,pipeline_integration_tests,session_policy_tests}.rs`, `crates/pam/src/{config,ipc,lib}.rs`, `crates/pam/tests/{config_tests,ipc_tests,pam_handle_tests}.rs`, `run_tests.sh`, `tests/docker/test_suite.sh`
+- **Target Branch**: `fix/p1-storage-vision-batch`
+- **Base (merge-base)**: `850abc5`
+- **Reviewed-Diff-Fingerprint**: `a4a5e23ad770f66642c5ad2d43cb5879f768838c3d86e5dbd1c5270ff9de19b5`
+- **Review round**: 4 (lockfile-only delta). Round 1 (`27ece66e...`) and round 2 (`d767676d...`)
+  returned CHANGES_REQUESTED. Round 3 (`a290d4da...`, report at `095ae8e`) returned APPROVED.
+- **Claimed issues**: #156, #177, #178, #179, #180, #181, #182, #183, #184, #190, #191
+- **Audited Files**: 80 files (see `target/candid_diff.patch`). This round focuses on the rework
+  commits since round 2 (`d017f96`, `7a58284`, `75be84e`, `9a9b184`), which touch only
+  `crates/admin-cli/src/{gdm.rs,pam_stack.rs}`, `crates/admin-cli/tests/{gdm_stack_order_tests.rs,gdm_tests.rs}`,
+  `AI/DECISIONS.md`, `AI/VERIFICATION_MATRIX.md`, `AI/walkthroughs/98_gdm_enable_stack_order.md`
+  and `Docs/DISTRIBUTION_DEPLOYMENT.md`. The rest of the batch was checked for regressions from
+  these commits only.
+
+## Round 4 — lockfile-only delta
+
+Round 3 approved the full batch at fingerprint `a290d4da...` (commit `095ae8e`). CI then failed
+only on `cargo-deny`, because upstream yanked `yoke-derive 0.8.3`. One commit was added:
+`fd4f8cf chore(deps): update yanked yoke-derive to 0.8.4`.
+
+Verification:
+
+- `git diff --stat 095ae8e fd4f8cf` and `git diff --stat 095ae8e` (working tree, clean status):
+  exactly `Cargo.lock | 4 ++--`. No other file in the batch changed since round 3.
+- The hunk changes only the `yoke-derive` entry: `version` `0.8.3` -> `0.8.4` and its `checksum`.
+  `source` stays `registry+https://github.com/rust-lang/crates.io-index`. The `dependencies` list
+  (`proc-macro2`, `quote`, `syn 3.0.5`, `synstructure`) is unchanged, and no other package entry
+  or dependency edge moved.
+- This is a patch-level bump (0.8.x, semver-compatible with `yoke v0.8.3`'s requirement).
+- `cargo tree -i yoke-derive --locked`: `yoke-derive v0.8.4 (proc-macro)` is a transitive
+  compile-time dependency, reached only through `yoke v0.8.3` via the ICU / `zerovec` / `idna` /
+  `url` chain (`webbrowser` -> `egui-winit` -> `eframe` -> `soos-gui`). No workspace crate depends
+  on it directly, and it is not in `crates/pam`, `protocol`, `policy` or the daemon auth path.
+- `cargo deny --locked check`: `advisories ok, bans ok, licenses ok, sources ok`, exit 0.
+- `./scripts/candid_subagent.sh --prepare`: new fingerprint
+  `a4a5e23ad770f66642c5ad2d43cb5879f768838c3d86e5dbd1c5270ff9de19b5`. In the frozen patch
+  (merge-base `850abc5`), `yoke-derive` is the only new difference from round 3.
+
+Pillars for the delta: Logic, PAM deadlines, panic safety, memory/secrets: no source change, so
+not affected. Test integrity: no test file changed, so section 2 below still holds. Supply chain:
+same registry source, pinned checksum, deny clean. PASS. English-only: commit message is English.
+PASS. The delta has no findings. The two round-3 MINOR findings are unchanged and remain
+follow-ups.
+
+Round 3 content follows unchanged, for reference.
 
 ## 1. Executive Summary
 
-Round 2 re-reviews the whole batch diff (#157, #158, #159, #160, #173, #174, #175, #176). It focuses on the rework in commits `939b724` (tests), `8d26e96` (`session_policy.rs`) and `532ad17` (docs and minors). The rework touched no dispatcher, PAM, inference or limiter code, so the round-1 conclusions for those seams still hold. I re-ran the daemon test suite (all green, `session_policy_tests` 47/47), `cargo clippy -p soos-daemon --all-features --all-targets -D warnings` (clean) and `cargo fmt --check` (clean).
+All four round-2 findings are fixed in code. A missing, dangling, unreadable or non-file include
+target now refuses. The file is left unchanged, no backup is written and `gdm.disable` is kept.
+PAM type and control keywords are now read case-insensitively in gate classification, delegation
+and jump detection. Module paths and arguments stay case-sensitive. De-duplication counts only
+earlier enforcing (`required`/`requisite`) auth rules. The known refusals are documented.
 
-Round-1 finding 1 (MAJOR) is resolved, and the code matches the user decision of 2026-09-30. A root peer with no session scope is allowed only when:
-- its systemd-managed cgroup lines (`0::` and/or `name=systemd`) all agree on `/user.slice/user-<uid>.slice/user@<uid>.service/<non-empty child>...`;
-- both UIDs are strict decimals, equal to each other and to the target;
-- the target owns an active, `REMOTE=0`, seat-attached, `CLASS=user` session;
-- the target owns no session that is remote or has an unknown remote flag, in any state (records without `UID=` count against it).
-
-Every IO or parse error denies. The new `session-<id>.scope` rule (first unit below the slices, as in `sd_pid_get_session`) cannot be bypassed by a user-created transient `session-N.scope` inside `user@.service`. Real TTY, GDM and login scopes still resolve. Minors 2 and 3 are fixed, and suggestions 4 and 5 are recorded as follow-ups in walkthroughs 96 and 95. I found no CRITICAL or MAJOR issue. Two MINOR findings and two SUGGESTIONS remain.
+Adversarial probing ran in a scratch crate, since deleted. The Ubuntu, Fedora and Arch
+`gdm-password` stacks, with their includes present, still enable correctly. It found two new
+MINOR issues: a de-duplication hole that needs a non-default jump, and a FIFO include target that
+hangs the CLI. Both need a root-authored, non-standard `/etc/pam.d`. `cargo fmt --check`,
+workspace `clippy -D warnings` and all `soos-admin-cli` tests pass. There is no CRITICAL or MAJOR
+finding.
 
 ## 2. Test Changes (mechanical listing from step 3)
 
-- Test files touched: `crates/daemon/tests/{inference_budget_tests,peer_limits_tests,session_policy_tests}.rs` (new on this branch), `crates/pam/tests/pam_handle_tests.rs` (new), `crates/pam/tests/{config_tests,ipc_tests}.rs` (additions only), `crates/daemon/tests/pipeline_integration_tests.rs`, `tests/docker/test_suite.sh`, `run_tests.sh` (comments).
-- Removed or changed assertions (`^-.*assert|#[test]|…`): **none** in the frozen patch.
-- New escape hatches (`#[ignore]`, `should_panic`, tolerance, epsilon): **none**.
-- Inline `mod tests` changes: **none**.
-- `pipeline_integration_tests.rs`: the only removed line is `let target_uid = fixture.current_uid.saturating_add(42);`, replaced by `fixture.current_uid`. This is setup only, with no assertion changed. It is the single user-approved #175 contract migration (`test_12_4`).
-- Round-2 rework of `session_policy_tests.rs` (diff `939b724~1..HEAD`):
-  - The only removed lines are the `use soos_daemon::session_policy::{…}` import, rewritten to add `parse_user_manager_uid_from_cgroup`.
-  - The `MockLogind` helper gained a `pid_cgroups` map, a `with_cgroup` builder and a `cgroup_of_pid` override (it honours `fail`). The existing helpers `with_pid`, `with_session`, `failing` and `record` are unchanged.
-  - The test count went from 32 to 47. All 32 original tests are byte-identical, and the 15 new tests are pure additions.
-  - The trait default `cgroup_of_pid → Ok(None)` means that original mocks without cgroups still take the fail-closed path (`CallerSessionUnresolved`), exactly as before.
-- New tests can fail against plausible wrong implementations:
-  - a lax `parse::<u32>` (the `+1000`, `01000` and ` 1000` vectors);
-  - a missing slice/service equality check;
-  - an "anywhere in path" session-scope match (`test_cgroup_session_scope_nested_in_user_manager_is_not_a_session`);
-  - a remote check limited to active sessions (the closing SSH variant);
-  - a missing `UID ==` check (`su alice` from Bob's terminal);
-  - an error mapped to allow (`SessionsFail` mock);
-  - a truncating reader (the oversized cgroup file).
+Frozen patch, `^-[^-].*(assert|#[test]|...)`: exactly two lines (patch 7578-7579):
+`assert_eq!(enroll.model_id, "mobilefacenet")` and `assert_eq!(enroll.model_version, "1.0.0")` in
+`crates/enrollment-cli/tests/scaffold_tests.rs::test_cli_parse_enroll_subcommand_with_uid`,
+replaced by manifest constants. User-approved (a), #182.
+
+Pre-existing test files modified vs `origin/main` (`--diff-filter=M`): `gdm_tests.rs`,
+`scaffold_tests.rs`, `daemon/tests/pipeline_integration_tests.rs`, `tests/invariants/src/lib.rs`.
+The last two only gain lines.
+
+`crates/admin-cli/tests/gdm_tests.rs`, compared line by line with `origin/main` (whose tests are
+`subcommand_parsing`, `disable_and_enable_lifecycle`, `enable_creates_byte_exact_backup_with_original_mode`,
+`enable_never_overwrites_an_existing_backup`, `enable_is_atomic_and_idempotent` and
+`enable_refuses_a_symlinked_pam_file`):
+- The `COMMON_AUTH` constant and the `write_common_auth` helper are new.
+- A `write_common_auth(temp.path())` setup line is added to exactly the four approved tests.
+- One line, `"common-auth".to_string()`, is added to the expected listing in
+  `test_gdm_enable_is_atomic_and_idempotent`. User-approved (b).
+- `test_gdm_status_configured_enabled` and `test_gdm_status_configured_disabled` also get the
+  setup line, but those tests are new on this branch, not on `origin/main`, so this is not a
+  pre-existing change.
+- No other line of a pre-existing test was modified or removed.
+
+New escape hatches (`#[ignore]`, `#[cfg(any())]`, `should_panic`, `tolerance`, `epsilon`): none.
+Inline test modules: only the two new `mod tests` (`pam_stack.rs`, `biometric-store/src/store.rs`).
+The branch-local `gdm_stack_order_tests.rs` gains 8 tests and loses no line in the rework.
+
+Test integrity: PASS.
 
 ## 3. Deep Reasoning Audit
 
 ### Logic & Architecture
 
-**Finding 1 resolution** (`session_policy.rs:239-356`, `:550-582`). Scenarios attempted:
+**Round-2 findings, verified in code.**
 
-- **`su alice` from Bob's GNOME terminal**: cgroup `user@1001.service`, so `manager_uid(1001) != target(1000)` and the request is denied with `user_manager_uid_mismatch`. PASS.
-- **`sudo` from Alice's GNOME terminal, Konsole or gnome-shell polkit agent, Alice seated, no SSH session**: allowed. The real layouts are covered by both the mock and the `SystemLogind` tempdir tests. PASS.
-- **Alice seated and also SSH'd in (active, closing, or `REMOTE` absent)**: denied with `user_manager_caller_remote_session_active`. Bob's SSH session does not affect Alice. PASS.
-- **UID parsing**: `+1000`, `-1000`, ` 1000`, `01000`, the empty string, `1000x`, `4294967296` and mismatched slice/service UIDs all give `UserManagerCgroupMalformed`. `0` is accepted as the single digit, but root is never a user-manager target in practice, and a target of 0 would still need a root seat session. PASS.
-- **Path edge cases**:
-  - A trailing slash (`user@1000.service/`) or the manager with no child is malformed. The manager itself lives in `init.scope`, so real processes always have a child.
-  - `user@1000.service.d` fails `strip_suffix(".service")` and is malformed.
-  - A path not rooted at `/` (for example `/../../user.slice/...` if the daemon ever ran in a private cgroup namespace) gives `Ok(None)` and a deny.
-  - `..` as a component is not produced by the kernel. A `..` below the manager is only a child name and cannot change the resolved UID.
-  - Unicode components are compared by exact prefix/suffix with no indexing, so there is no panic.
-  - `splitn(3, ':')` keeps colons inside the path.
-  - PASS.
-- **Hierarchy selection**:
-  - Only `0::` and `name=systemd` are considered. `cpu,cpuacct` and other v1 controllers are ignored, and elogind's `name=elogind` is ignored (fail closed, since there is no `user@` there).
-  - If the systemd lines disagree (two managers, or session scope vs manager), the result is malformed.
-  - PASS.
-- **Oversized input**: `read_bounded` caps the cgroup file at 16 KiB and a file at the bound is an error, so the result is `LogindUnavailable`. PASS.
-- **Tightened session-scope rule** (`first_unit_component`, `:239-243`):
-  - `user@1000.service/app.slice/session-2.scope`, `user@1000.service/session-2.scope` (both creatable with `systemd-run --user --scope --unit=session-2`) and `system.slice/foo.service/session-2.scope` resolve to no session.
-  - `user.slice/user-1000.slice/session-2.scope` and its sub-cgroups resolve to `2`. TTY `login`, GDM (`session-c1.scope` for the greeter, `session-N.scope` for the user) and `sshd` sessions keep their layout.
-  - An unprivileged user cannot create a `*.slice` above their manager: `/user.slice` and `user-<uid>.slice` are root-owned.
-  - PASS.
-- **Fallthrough safety**: `session_id_of_pid` returns `None` both for "no session scope" and for "malformed or disagreeing session lines", and both now reach the user-manager path. I checked whether this can widen access. It cannot: that path independently requires every systemd line to agree on `user@<target>.service`, and a line with a session-scope first unit is never a `user@` line, so a disagreement becomes `UserManagerCgroupMalformed` or `CallerSessionUnresolved`. A resolved session whose record vanished still gives `CallerSessionUnresolved` and does not fall back. PASS.
-- **Precedence**: a caller inside an SSH session scope keeps the session-scope rules (`test_root_peer_session_scope_takes_precedence_over_user_manager`). PASS.
-- **Root vs unprivileged rules**: `authorize_auth` still branches on `peer.uid == 0`, then `peer.uid == target`, and denies everything else. The unprivileged rule `authorize_same_uid_peer` is unchanged. PASS.
-- **TOCTOU**: the cgroup file is read twice (`session_id_of_pid`, then `cgroup_of_pid`). A migration between the two reads is judged against whichever position is read, and each position is safe on its own. The PID-reuse residual is unchanged and documented. PASS.
-- **Documentation consistency**: `Docs/IPC_PROTOCOL.md` §10 and `Docs/PAM_MODULE.md` item 5 now describe both root rows and the new denial codes. The ADR amendment in `AI/DECISIONS.md` records the user decision and the accepted residual risk ("malware already running as the target user"). Minor 2 is fixed: §10 and §11 are distinct and no numbers are duplicated. Minor 3 is fixed: the comment at `tests/docker/test_suite.sh:185` now reads T12. PASS.
-- The dispatcher, admission, deadline, event-trust, inference and PAM `service=` logic are untouched since round 1. I spot-checked for regressions and found none. PASS.
+1. (MAJOR, missing include) `pam_stack.rs:294-306`: `ReadError::NotFound` now returns
+   `GdmConfig` naming the target and the vendor-directory limitation. `ReadError::Other` also
+   refuses. `plan_gdm_enable` runs before any backup or write (`gdm.rs:197-213`), and
+   `configure_gdm` only removes `gdm.disable` on success. FIXED.
+2. (keyword case) `is_auth`, `delegation` and the new `is_enforcing` use `eq_ignore_ascii_case`.
+   `as_guard` uses `is_enforcing` and writes the copied control in lowercase, and `max_jump` reads
+   every `key=value` pair. The pre-anchor loop in `gdm.rs:245-272` uses the same predicates, so
+   gate classification, delegation and jump detection all agree. `module_name`, `has_arg` and the
+   module lists stay case-sensitive, as in libpam. FIXED.
+3. (dedup) `gdm.rs:295-301` keeps only earlier rules with `is_auth() && is_enforcing()`. The
+   earlier `requisite`/`required` choice is safe: after an earlier `required` failure, a
+   `success=done` still returns the stored failure in libpam. FIXED for the round-2 scenarios (see
+   Finding 1 for a remaining variant).
+4. (docs) `Docs/DISTRIBUTION_DEPLOYMENT.md` §2.1 item 6 lists the authselect `sssd` profile,
+   openSUSE `common-auth` and vendor `/usr/lib/pam.d` stacks, with a manual recipe and its caveat.
+   ADR, matrix rows GSO13-GSO15 and walkthrough 98 §12 are consistent with the code. FIXED.
+
+Scenarios run through `configure_gdm(Enable)` (scratch crate, since deleted):
+
+| Scenario | Result |
+|---|---|
+| Ubuntu 24.04 gdm-password + pam-auth-update `common-auth` (fprintd, unix) + `common-account` | enabled before `@include common-auth`, backup written, flag removed. PASS |
+| Ubuntu, `common-auth` missing | refused, unchanged, no backup, flag kept. PASS |
+| Ubuntu, `common-auth` mode 000 | refused (EACCES), unchanged, no backup, flag kept. PASS |
+| Ubuntu, `common-auth` is a directory | refused (EISDIR). PASS |
+| Ubuntu, `common-auth` is a dangling symlink | refused (not found). PASS |
+| Fedora authselect `local` + `with-faillock` + fprintd (`substack password-auth`, `include postlogin`) | enabled after `pam_selinux_permit`, `faillock preauth silent` copied. PASS |
+| Fedora, `postlogin` missing (after the credential stop) | enabled. Acceptable: scanning stops at the credential, and libpam's must-fail handler still fails the password path as before. PASS |
+| Fedora, `password-auth` missing | refused. PASS |
+| Arch gdm-password -> system-local-login -> system-login -> system-auth | enabled; `pam_shells`, `pam_nologin`, `faillock preauth` copied. PASS |
+| Arch, `system-auth` missing at depth 3 | refused. PASS |
+| `AUTH INCLUDE` + `AUTH REQUISITE pam_nologin.so` + `AUTH SUFFICIENT pam_unix.so` | enabled, gate copied in lowercase. PASS |
+| `-Auth required pam_foo.so` before the include | refused. PASS |
+| `Account include missing-account` (non-auth) | ignored for auth placement. PASS |
+| `auth sufficient Pam_Unix.so` (module case) | not a credential, refused (fail-closed). PASS |
+| in-file `auth Requisite pam_nologin.so` + delegated `requisite pam_nologin.so` | de-duplicated correctly. PASS |
+| **in-file `[success=1 default=ignore] pam_succeed_if.so user ingroup vip`, `requisite pam_nologin.so`, `pam_faildelay.so`, `@include common-auth` (with `requisite pam_nologin.so`)** | **enabled, delegated nologin dropped as duplicate, although the earlier copy can be jumped over. FINDING 1** |
+| **include target is a FIFO** | **`soos-admin` blocks forever in `open()`. FINDING 2** |
+
+Regressions: the rework changes nothing outside `admin-cli` and docs. Refusal now covers every read
+error, and no path that refused in round 2 now accepts. No regression found.
 
 ### PAM Concurrency & Deadlines
-- There is no change in `crates/pam` since round 1: no Tokio or threads, the cumulative `Deadline` re-arms every read and write, and zero budget gives `Timeout`. The new daemon work is two bounded file reads plus one bounded directory scan, all inside the request deadline and as costly as the existing same-UID path. PASS.
+`crates/pam` is untouched by the rework. `admin-cli` runs outside the PAM stack. PASS.
 
 ### Panic Safety & Fail-Closed
-- The new code has no `unwrap`, `expect`, indexing or slicing. `parse_strict_uid` checks the bytes before calling `parse`.
-- Every error in `authorize_user_manager_caller` maps to a `SessionDenial` (`LogindUnavailable`, `CallerSessionUnresolved`, `UserManagerCgroupMalformed`, `UserManagerUidMismatch`, `UserManagerCallerRemoteSessionActive`, `UserManagerNoLocalSeatSession`), and each one becomes `ProtocolError/UidMismatch`, then `PAM_IGNORE`.
-- The trait default `cgroup_of_pid → Ok(None)` fails closed.
-- One residual non-denying error path exists in the shared `sessions()` scan. See Finding 1 below.
+The rework adds no `unwrap`/`expect`/indexing in production. Every read error of a delegated stack
+now fails closed. The only remaining fail-open is Finding 1, which needs a non-default
+administrator-written jump.
 
 ### Test Integrity & Anti-Weakening
-- See §2. No assertion was removed or relaxed. The only setup migration is the approved `test_12_4` change, and the mock extension is purely additive. PASS.
+See section 2. The new tests (capitalized gate/unclassified/jump/`Include`, optional-vs-enforcing
+dedup, missing include) each fail against the round-2 code. The missing-include test checks
+the unchanged file, no backup and the kept flag through `assert_enable_refused`. PASS.
 
 ### Memory, Bounds & Secrets
-- The bounds are unchanged: 16 KiB cgroup file, 4 KiB record and 1024 directory entries.
-- The new denial codes are static strings. Logs carry UIDs and reason codes only, and the cgroup content (which can contain app names) is never logged. PASS.
+Include reads stay bounded at 64 KiB, include depth is bounded at 4, and error messages contain
+only paths and module names. PASS, apart from the unbounded blocking open in Finding 2.
 
 ### Supply Chain & Automation
-- The rework has no `Cargo.*`, `deny.toml` or workflow changes. The `test_suite.sh` change is a comment. PASS.
+The rework does not change `Cargo.*`, CI, scripts or hooks. PASS.
 
 ### English-Only Policy
-- All added code, comments, docs and walkthrough text are in English. PASS.
+Code, comments, tests, ADR, matrix, walkthrough and docs added in the rework are English. PASS.
 
 ## 4. Detailed Findings & Action Items
 
-1. **[MINOR]** `crates/daemon/src/session_policy.rs:440`: the `sessions()` scan skips `read_dir` entries that fail (`let Ok(entry) = entry else { continue; }`).
-   - **Why it matters now**: `authorize_user_manager_caller` (`:566-572`) uses this scan to prove the absence of a remote session for the target. So an I/O error on one entry silently removes that record, and it can remove Alice's SSH session from the check. The user decision requires that "any error denies".
-   - **Failure scenario**: a transient `EIO` or `ENOMEM` during `readdir` on `/run/systemd/sessions` drops the entry of Alice's live SSH session. `sudo` launched from that SSH session through `systemd-run --user` is then face-authorized by whoever sits at the desk.
-   - **Severity**: this is not attacker-triggerable (the directory is a root-owned tmpfs, and per-entry `readdir` errors are practically nonexistent), hence MINOR.
-   - **Correction**: return `Err(LogindError(..))` for a failed entry instead of `continue`. This is also safe for the unprivileged path, where it can only deny more.
-2. **[MINOR]** `AI/DECISIONS.md:29` (ADR amendment) and `Docs/PAM_MODULE.md` item 5: condition (c) ("no remote session") only sees remote footholds that logind registers.
-   - **Gap**: code running as the target through a channel with no logind session also reaches `user@<uid>.service` through the `/run/user/<uid>/bus` socket and bypasses (c). Examples: `sshd` with `UsePAM no` or no `pam_systemd`, a service or daemon running as the user, a container with the user's UID.
-   - **Why it is not covered**: before the amendment such a foothold had no face path at all. The accepted residual is phrased as "malware already running as the target user inside the desktop session", which is narrower than this.
-   - **Correction**: widen that sentence to "any process running as the target user, including remote access not registered as a logind session (e.g. sshd without `pam_systemd`)". This is documentation only. The behavior matches the user decision.
-3. **[SUGGESTION]** `crates/daemon/src/session_policy.rs:251-272`: `parse_session_id_from_cgroup` still considers every hierarchy line, including v1 resource controllers. `parse_user_manager_uid_from_cgroup` restricts itself to `0::` and `name=systemd`.
-   - **Effect**: on a legacy cgroup-v1 host, a `cpu`/`pids` line that names a session scope different from the `name=systemd` line would be used for the session lookup.
-   - **Why it is only a suggestion**: this is not exploitable (the result is still checked against the record's `UID == target`, and v1 controllers are not delegated to users).
-   - **Proposal**: restrict both parsers to the systemd-managed hierarchies for one consistent source of truth.
-4. **[SUGGESTION]** polkit ≥ 126 can run `polkit-agent-helper-1` socket-activated as `system.slice/.../polkit-agent-helper@N.service` instead of as a child of gnome-shell. On such hosts polkit prompts would fail closed to the password (`caller_session_unresolved`). Record this for hardware validation alongside the existing lock-screen note. It is not a security issue.
+1. **[MINOR]** `crates/admin-cli/src/gdm.rs:295-301` (with the jump check at `:256-261`, `:283-291`)
+   — a delegated gate is dropped as a duplicate when the edited file already runs the same gate
+   with `required`/`requisite`, even when a pre-anchor jump can skip that earlier copy. The jump
+   check only refuses jumps that land on or beyond the insertion point.
+   Reproduced with:
 
-Carried from round 1 (resolved in this round):
-- Finding 1 (MAJOR, user-manager callers): **resolved** as specified by the user decision.
-- Finding 2 (MINOR, duplicate `## 10.`): **resolved**.
-- Finding 3 (MINOR, stale T11 comment): **resolved**.
-- Suggestions 4 (inference warm-up) and 5 (evidence-store global cap): **recorded as follow-ups** in `AI/walkthroughs/96_daemon_inference_budget.md` and `AI/walkthroughs/95_daemon_peer_limits.md`.
+   ```
+   auth [success=1 default=ignore] pam_succeed_if.so user ingroup vip
+   auth requisite pam_nologin.so
+   auth required pam_faildelay.so delay=1
+   @include common-auth
+   ```
+
+   `common-auth` runs `auth requisite pam_nologin.so` before `pam_unix`. In the original stack,
+   members of `vip` skip the first nologin but still hit the one in `common-auth`. After `enable`,
+   that one is not copied, so for `vip` members a face match returns `success=done` while
+   `/etc/nologin` exists. This needs a non-default, administrator-written jump over a gate, so it
+   is MINOR, like round-2 Finding 3. Correction: skip de-duplication when any pre-anchor jump
+   exists, or drop de-duplication altogether (running a gate twice is harmless, as the docs
+   already say for `preauth`). Add a contract test.
+2. **[MINOR]** `crates/admin-cli/src/pam_stack.rs:369-372` (called from `scan_stack`, `:294`) —
+   `read_bounded_utf8` opens delegated stacks with a plain `File::open`, with no `O_NONBLOCK` and
+   no regular-file check. An include target that is a FIFO makes `soos-admin gdm enable` block
+   forever: reproduced, killed by `timeout 10`, exit 124. Nothing is written, so this is not
+   fail-open, and only root can create a FIFO in `/etc/pam.d`. Correction: open include targets
+   like `read_backup_bounded` does (`O_NONBLOCK|O_CLOEXEC`, `is_file()` on the descriptor), while
+   still following symlinks as libpam does.
 
 ## 5. Final Verdict
+
+All round-1 and round-2 findings are resolved in code. Test integrity holds: the only changes to
+pre-existing tests are the user-approved ones. The distribution stacks still place `pam_soos.so`
+correctly. The two remaining findings are MINOR, need root-authored non-standard configuration,
+and can be fixed in a follow-up. Round 4 changes only the yanked `yoke-derive` lockfile entry
+(0.8.3 -> 0.8.4), and `cargo deny` passes.
 
 **VERDICT: APPROVED**

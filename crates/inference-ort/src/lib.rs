@@ -2,9 +2,12 @@
 //!
 //! Provides:
 //! - Cryptographic manifest attestation and model SHA-256 verification (`manifest`, `registry`)
-//! - UltraFace Slim 320 face detection and deterministic Rust NMS (`detector`)
-//! - 5-point facial landmark estimation (`landmarks`)
-//! - ArcFace w600k 512D feature extraction with L2-normalized embeddings (`embedding`)
+//! - Manifest I/O shape attestation of every loaded session (`manifest`, `registry`)
+//! - SCRFD 500M KPS face detection with 5-point landmarks and deterministic Rust NMS (`detector`)
+//! - 5-point facial landmark types (`landmarks`)
+//! - ArcFace ResNet34 (NHWC, tf2onnx) 512D feature extraction with L2-normalized embeddings
+//!   (`embedding`; manifest id `arcface_w600k_mbf` is a historical name)
+//! - MiniFASNetV2 presentation attack detection (`pad`)
 //! - Hardware-free deterministic simulation mocks (`mock`)
 
 #![forbid(unsafe_code)]
@@ -25,7 +28,7 @@ pub use detector::{
 pub use embedding::{BiometricEmbedding, EmbeddingExtractor, OrtEmbeddingExtractor};
 pub use error::InferenceError;
 pub use landmarks::{FaceLandmarks, LandmarkDetector, Point2f};
-pub use manifest::{ManifestHeader, ModelManifest, ModelMetadata};
+pub use manifest::{ManifestHeader, ModelManifest, ModelMetadata, TensorLayout};
 pub use mock::{MockEmbeddingExtractor, MockFaceDetector, MockLandmarkDetector, MockPadDetector};
 pub use pad::{AttackType, OrtPadDetector, PadDetector, PadResult};
 pub use registry::{ModelRegistry, RegistryConfig, SharedSession};

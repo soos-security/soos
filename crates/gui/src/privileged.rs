@@ -10,7 +10,6 @@
 
 use std::fmt;
 use std::io::{Read, Write};
-use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
@@ -185,56 +184,102 @@ fn list_profiles() -> Result<Vec<EnrolledUserSummary>, String> {
         .map_err(|_| "soos-enroll returned a malformed profile list".to_string())
 }
 
-/// Removes the temporary import file on every exit path.
-struct TempFileGuard(PathBuf);
+/// Argument vector of the import helper: `soos-enroll import --uid <uid> --file -`.
+///
+/// `--file -` makes `soos-enroll` read the embedding from its standard input, so the
+/// plaintext template never touches the filesystem (GitHub #156).
+pub fn import_helper_args(uid: u32) -> Vec<String> {
+    vec![
+        "soos-enroll".to_string(),
+        "import".to_string(),
+        "--uid".to_string(),
+        uid.to_string(),
+        "--file".to_string(),
+        "-".to_string(),
+    ]
+}
 
-impl Drop for TempFileGuard {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
+/// Serializes `embedding` as a JSON float array into a zeroizing buffer reserved once at
+/// the exact encoded size (measured by a counting pass that stores nothing), so the buffer
+/// never reallocates and no freed intermediate copy of the embedding is left unzeroized.
+///
+/// # Errors
+///
+/// A user-facing message when serialization or the allocation fails (never the values).
+pub fn embedding_json(embedding: &[f32]) -> Result<Zeroizing<Vec<u8>>, String> {
+    let mut counter = ByteCounter(0);
+    serde_json::to_writer(&mut counter, embedding)
+        .map_err(|e| format!("Failed to serialize embedding: {e}"))?;
+    let mut json = Zeroizing::new(Vec::new());
+    json.try_reserve_exact(counter.0)
+        .map_err(|e| format!("Failed to allocate the embedding buffer: {e}"))?;
+    serde_json::to_writer(&mut *json, embedding)
+        .map_err(|e| format!("Failed to serialize embedding: {e}"))?;
+    Ok(json)
+}
+
+/// `Write` sink that only counts the bytes written (nothing is stored).
+struct ByteCounter(usize);
+
+impl Write for ByteCounter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0 = self
+            .0
+            .checked_add(buf.len())
+            .ok_or_else(|| std::io::Error::other("encoded size overflow"))?;
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
     }
 }
 
-/// Writes the embedding to a fresh owner-only (`0600`) file that must not already exist.
-fn write_private_file(path: &Path, contents: &[u8]) -> std::io::Result<()> {
-    use std::os::unix::fs::OpenOptionsExt;
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(path)?;
-    file.write_all(contents)?;
-    file.sync_all()
+/// Runs `command` (production: `pkexec`) with [`import_helper_args`] and pipes the embedding
+/// as JSON to its standard input.
+///
+/// The serialized JSON lives only in a zeroizing buffer and in the pipe; no file is created.
+/// The child is always reaped, even when writing to its stdin fails (it may exit early, e.g.
+/// on a denied Polkit prompt).
+///
+/// # Errors
+///
+/// A user-facing message when the helper cannot be spawned, the embedding cannot be
+/// delivered, or the helper exits unsuccessfully. Embedding values are never included.
+pub fn import_template_with(
+    mut command: Command,
+    uid: u32,
+    embedding: &[f32],
+) -> Result<(), String> {
+    let json = embedding_json(embedding)?;
+    let mut child = command
+        .args(import_helper_args(uid))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| format!("Failed to invoke pkexec: {e}"))?;
+    let delivered = match child.stdin.take() {
+        // Dropping `stdin` at the end of this arm closes the pipe (EOF for the helper).
+        Some(mut stdin) => stdin.write_all(&json).and_then(|()| stdin.flush()),
+        None => Err(std::io::Error::other("helper stdin was not captured")),
+    };
+    drop(json);
+    let status = child
+        .wait()
+        .map_err(|e| format!("Failed to wait for pkexec: {e}"))?;
+    if !status.success() {
+        return Err(format!(
+            "Failed to import the template into the system store (authorization denied or \
+             error, exit code {:?})",
+            status.code()
+        ));
+    }
+    delivered.map_err(|e| format!("Failed to pass the embedding to soos-enroll: {e}"))
 }
 
 fn import_template(uid: u32, embedding: &[f32]) -> Result<(), String> {
-    let mut nonce = [0u8; 8];
-    getrandom::fill(&mut nonce).map_err(|_| "Failed to generate a temporary name".to_string())?;
-    let path = std::env::temp_dir().join(format!(
-        ".soos_gui_import_{uid}_{}_{}.json",
-        std::process::id(),
-        u64::from_le_bytes(nonce)
-    ));
-    let json = Zeroizing::new(
-        serde_json::to_string(embedding)
-            .map_err(|e| format!("Failed to serialize embedding: {e}"))?,
-    );
-    write_private_file(&path, json.as_bytes())
-        .map_err(|e| format!("Failed to write temporary embedding: {e}"))?;
-    let _guard = TempFileGuard(path.clone());
-
-    let uid_arg = uid.to_string();
-    let path_arg = path.to_string_lossy().into_owned();
-    pkexec_status(
-        &[
-            "soos-enroll",
-            "import",
-            "--uid",
-            &uid_arg,
-            "--file",
-            &path_arg,
-        ],
-        "import the template into the system store",
-    )
+    import_template_with(Command::new("pkexec"), uid, embedding)
 }
 
 impl PrivilegedExecutor for PkexecExecutor {

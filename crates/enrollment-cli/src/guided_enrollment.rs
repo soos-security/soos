@@ -3,6 +3,27 @@
 //! Guides the user through Frontal, Turn Left, Turn Right, and Tilt Up poses
 //! while ensuring liveness and face stability. Fuses collected multi-angle embedding samples
 //! into a single normalized composite vector for robust real-time PAM unlock performance.
+//!
+//! # Sample admission (GitHub #183 / STO-10)
+//!
+//! A sample is recorded only if all of the following hold:
+//! - the head pose is finite and inside the documented range of the current step
+//!   ([`EnrollmentStepFeedback::PoseOutOfRange`] beyond the upper bound);
+//! - the embedding is non-empty, at most [`MAX_GUIDED_EMBEDDING_DIM`] components, has the
+//!   same dimension as every previous sample, contains only finite values and has a
+//!   non-zero L2 norm ([`EnrollmentStepFeedback::InvalidEmbedding`] otherwise);
+//! - the embedding is identity-consistent: its cosine similarity is at least
+//!   [`MIN_SAMPLE_CONSISTENCY_COSINE`] with every accepted frontal sample (pairwise
+//!   consistency of the frontal anchor set) and, for off-axis steps, with the frontal
+//!   anchor mean direction ([`EnrollmentStepFeedback::IdentityMismatch`] otherwise).
+//!
+//! Each step records at most [`MAX_SAMPLES_PER_STEP`] samples.
+//!
+//! # Fusion
+//!
+//! The composite template is the mean direction of all accepted samples:
+//! `t = m / ||m||` with `m = sum_i s_i / ||s_i||`. Fusion re-validates every sample
+//! and fails closed on any non-finite value, dimension mismatch or identity inconsistency.
 
 #![forbid(unsafe_code)]
 #![allow(
@@ -16,6 +37,47 @@
 )]
 
 use soos_vision::pose::HeadPose;
+
+/// Minimum cosine similarity between a candidate sample and the frontal identity anchor
+/// (every accepted frontal sample and, for off-axis steps, their mean direction).
+///
+/// Conservative lower bound: ArcFace same-identity pairs within +/-25 degrees of pose
+/// stay well above it, while a different identity is typically near 0.
+pub const MIN_SAMPLE_CONSISTENCY_COSINE: f32 = 0.5;
+
+/// Maximum number of samples recorded per enrollment step.
+pub const MAX_SAMPLES_PER_STEP: usize = 20;
+
+/// Maximum accepted embedding dimension for a guided enrollment sample.
+pub const MAX_GUIDED_EMBEDDING_DIM: usize = 2048;
+
+/// Minimum L2 norm below which an embedding is considered degenerate.
+const MIN_EMBEDDING_NORM: f32 = 1e-6;
+
+/// Maximum absolute roll (degrees) accepted in any step.
+const MAX_ROLL_DEG: f32 = 10.0;
+
+/// Frontal step: maximum absolute yaw (degrees).
+const FRONTAL_MAX_YAW_DEG: f32 = 8.0;
+
+/// Frontal step: maximum absolute pitch (degrees).
+const FRONTAL_MAX_PITCH_DEG: f32 = 10.0;
+
+/// Turn steps: minimum absolute yaw (degrees).
+const TURN_MIN_YAW_DEG: f32 = 10.0;
+
+/// Turn steps: maximum absolute yaw (degrees).
+const TURN_MAX_YAW_DEG: f32 = 25.0;
+
+/// Tilt-up step: lowest accepted pitch (degrees, negative is upward).
+const TILT_MIN_PITCH_DEG: f32 = -25.0;
+
+/// Tilt-up step: highest accepted pitch (degrees, negative is upward).
+const TILT_MAX_PITCH_DEG: f32 = -8.0;
+
+/// Off-axis steps: maximum absolute value (degrees) of the rotation that is not the
+/// target of the step (pitch while turning, yaw while tilting).
+const OFF_AXIS_MAX_SECONDARY_DEG: f32 = 15.0;
 
 /// Steps in the multi-angle guided enrollment lifecycle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -57,6 +119,12 @@ pub enum EnrollmentStepFeedback {
     StepCompleted { next_step: EnrollmentStep },
     /// All enrollment steps finished.
     AllStepsCompleted,
+    /// Embedding rejected: non-finite, zero-norm, oversized or dimension-inconsistent.
+    InvalidEmbedding,
+    /// Sample rejected: not identity-consistent with the frontal anchor samples.
+    IdentityMismatch,
+    /// Head rotation exceeds the documented range of the current step.
+    PoseOutOfRange,
 }
 
 /// State machine coordinating interactive multi-angle enrollment.
@@ -73,7 +141,7 @@ pub struct GuidedEnrollmentSession {
 impl GuidedEnrollmentSession {
     /// Creates a new guided enrollment session with target valid samples per pose step.
     pub fn new(target_samples_per_step: usize) -> Self {
-        let capacity = target_samples_per_step.clamp(1, 20);
+        let capacity = target_samples_per_step.clamp(1, MAX_SAMPLES_PER_STEP);
         Self {
             target_samples_per_step: capacity,
             current_step: EnrollmentStep::Frontal,
@@ -105,6 +173,9 @@ impl GuidedEnrollmentSession {
     }
 
     /// Evaluates a frame analysis and records valid embedding samples.
+    ///
+    /// See the module documentation for the admission rules. Rejected samples are never
+    /// recorded and never contribute to the fused template.
     pub fn process_sample(
         &mut self,
         pose: &HeadPose,
@@ -128,140 +199,231 @@ impl GuidedEnrollmentSession {
             return EnrollmentStepFeedback::PromptHoldStill;
         }
 
-        match self.current_step {
+        if !(pose.yaw.is_finite() && pose.pitch.is_finite() && pose.roll.is_finite()) {
+            return EnrollmentStepFeedback::PromptHoldStill;
+        }
+
+        if let Some(feedback) = Self::pose_feedback(self.current_step, pose) {
+            return feedback;
+        }
+
+        if !self.is_valid_embedding(embedding) {
+            return EnrollmentStepFeedback::InvalidEmbedding;
+        }
+
+        if !self.is_identity_consistent(embedding) {
+            return EnrollmentStepFeedback::IdentityMismatch;
+        }
+
+        let target = self.target_samples_per_step;
+        let step = self.current_step;
+        let (samples, next_step) = match step {
+            EnrollmentStep::Frontal => (&mut self.frontal_samples, EnrollmentStep::TurnLeft),
+            EnrollmentStep::TurnLeft => (&mut self.left_samples, EnrollmentStep::TurnRight),
+            EnrollmentStep::TurnRight => (&mut self.right_samples, EnrollmentStep::TiltUp),
+            EnrollmentStep::TiltUp => (&mut self.tilt_samples, EnrollmentStep::Completed),
+            EnrollmentStep::Completed => return EnrollmentStepFeedback::AllStepsCompleted,
+        };
+        if samples.len() >= target {
+            return EnrollmentStepFeedback::PromptHoldStill;
+        }
+
+        samples.push(embedding.to_vec());
+        let collected = samples.len();
+        if collected >= target {
+            self.current_step = next_step;
+            if next_step == EnrollmentStep::Completed {
+                EnrollmentStepFeedback::AllStepsCompleted
+            } else {
+                EnrollmentStepFeedback::StepCompleted { next_step }
+            }
+        } else {
+            EnrollmentStepFeedback::SampleAccepted {
+                step,
+                collected,
+                target,
+            }
+        }
+    }
+
+    /// Returns the pose feedback for `step`, or `None` when the pose is in range.
+    fn pose_feedback(step: EnrollmentStep, pose: &HeadPose) -> Option<EnrollmentStepFeedback> {
+        if pose.roll.abs() > MAX_ROLL_DEG {
+            return Some(EnrollmentStepFeedback::PromptHoldStill);
+        }
+        match step {
             EnrollmentStep::Frontal => {
-                if pose.roll.abs() > 10.0 {
-                    return EnrollmentStepFeedback::PromptHoldStill;
-                }
-                if pose.yaw.abs() > 8.0 {
-                    return EnrollmentStepFeedback::PromptCenterFace;
-                }
-                if pose.pitch.abs() > 10.0 {
-                    return EnrollmentStepFeedback::PromptHoldStill;
-                }
-
-                self.frontal_samples.push(embedding.to_vec());
-                let collected = self.frontal_samples.len();
-                if collected >= self.target_samples_per_step {
-                    self.current_step = EnrollmentStep::TurnLeft;
-                    EnrollmentStepFeedback::StepCompleted {
-                        next_step: EnrollmentStep::TurnLeft,
-                    }
+                if pose.yaw.abs() > FRONTAL_MAX_YAW_DEG {
+                    Some(EnrollmentStepFeedback::PromptCenterFace)
+                } else if pose.pitch.abs() > FRONTAL_MAX_PITCH_DEG {
+                    Some(EnrollmentStepFeedback::PromptHoldStill)
                 } else {
-                    EnrollmentStepFeedback::SampleAccepted {
-                        step: EnrollmentStep::Frontal,
-                        collected,
-                        target: self.target_samples_per_step,
-                    }
+                    None
                 }
             }
-
             EnrollmentStep::TurnLeft => {
-                if pose.yaw > -10.0 {
-                    return EnrollmentStepFeedback::PromptTurnLeft;
-                }
-
-                self.left_samples.push(embedding.to_vec());
-                let collected = self.left_samples.len();
-                if collected >= self.target_samples_per_step {
-                    self.current_step = EnrollmentStep::TurnRight;
-                    EnrollmentStepFeedback::StepCompleted {
-                        next_step: EnrollmentStep::TurnRight,
-                    }
+                if pose.yaw > -TURN_MIN_YAW_DEG {
+                    Some(EnrollmentStepFeedback::PromptTurnLeft)
+                } else if pose.yaw < -TURN_MAX_YAW_DEG
+                    || pose.pitch.abs() > OFF_AXIS_MAX_SECONDARY_DEG
+                {
+                    Some(EnrollmentStepFeedback::PoseOutOfRange)
                 } else {
-                    EnrollmentStepFeedback::SampleAccepted {
-                        step: EnrollmentStep::TurnLeft,
-                        collected,
-                        target: self.target_samples_per_step,
-                    }
+                    None
                 }
             }
-
             EnrollmentStep::TurnRight => {
-                if pose.yaw < 10.0 {
-                    return EnrollmentStepFeedback::PromptTurnRight;
-                }
-
-                self.right_samples.push(embedding.to_vec());
-                let collected = self.right_samples.len();
-                if collected >= self.target_samples_per_step {
-                    self.current_step = EnrollmentStep::TiltUp;
-                    EnrollmentStepFeedback::StepCompleted {
-                        next_step: EnrollmentStep::TiltUp,
-                    }
+                if pose.yaw < TURN_MIN_YAW_DEG {
+                    Some(EnrollmentStepFeedback::PromptTurnRight)
+                } else if pose.yaw > TURN_MAX_YAW_DEG
+                    || pose.pitch.abs() > OFF_AXIS_MAX_SECONDARY_DEG
+                {
+                    Some(EnrollmentStepFeedback::PoseOutOfRange)
                 } else {
-                    EnrollmentStepFeedback::SampleAccepted {
-                        step: EnrollmentStep::TurnRight,
-                        collected,
-                        target: self.target_samples_per_step,
-                    }
+                    None
                 }
             }
-
             EnrollmentStep::TiltUp => {
-                if pose.pitch > -5.0 {
-                    return EnrollmentStepFeedback::PromptTiltUp;
-                }
-
-                self.tilt_samples.push(embedding.to_vec());
-                let collected = self.tilt_samples.len();
-                if collected >= self.target_samples_per_step {
-                    self.current_step = EnrollmentStep::Completed;
-                    EnrollmentStepFeedback::AllStepsCompleted
+                if pose.pitch > TILT_MAX_PITCH_DEG {
+                    Some(EnrollmentStepFeedback::PromptTiltUp)
+                } else if pose.pitch < TILT_MIN_PITCH_DEG
+                    || pose.yaw.abs() > OFF_AXIS_MAX_SECONDARY_DEG
+                {
+                    Some(EnrollmentStepFeedback::PoseOutOfRange)
                 } else {
-                    EnrollmentStepFeedback::SampleAccepted {
-                        step: EnrollmentStep::TiltUp,
-                        collected,
-                        target: self.target_samples_per_step,
-                    }
+                    None
                 }
             }
+            EnrollmentStep::Completed => Some(EnrollmentStepFeedback::AllStepsCompleted),
+        }
+    }
 
-            EnrollmentStep::Completed => EnrollmentStepFeedback::AllStepsCompleted,
+    /// Iterates over every accepted sample in step order.
+    fn all_samples(&self) -> impl Iterator<Item = &Vec<f32>> {
+        self.frontal_samples
+            .iter()
+            .chain(self.left_samples.iter())
+            .chain(self.right_samples.iter())
+            .chain(self.tilt_samples.iter())
+    }
+
+    /// Checks bounds, dimension consistency, finiteness and non-degenerate norm.
+    fn is_valid_embedding(&self, embedding: &[f32]) -> bool {
+        if embedding.is_empty() || embedding.len() > MAX_GUIDED_EMBEDDING_DIM {
+            return false;
+        }
+        if let Some(first) = self.all_samples().next() {
+            if first.len() != embedding.len() {
+                return false;
+            }
+        }
+        if !embedding.iter().all(|x| x.is_finite()) {
+            return false;
+        }
+        l2_norm(embedding).is_some_and(|n| n > MIN_EMBEDDING_NORM)
+    }
+
+    /// Checks identity consistency against the frontal anchor samples.
+    fn is_identity_consistent(&self, embedding: &[f32]) -> bool {
+        let pairwise_ok = self.frontal_samples.iter().all(|anchor| {
+            cosine(anchor, embedding).is_some_and(|c| c >= MIN_SAMPLE_CONSISTENCY_COSINE)
+        });
+        if !pairwise_ok {
+            return false;
+        }
+        if self.current_step == EnrollmentStep::Frontal {
+            return true;
+        }
+        match mean_direction(self.frontal_samples.iter()) {
+            Some(anchor) => {
+                cosine(&anchor, embedding).is_some_and(|c| c >= MIN_SAMPLE_CONSISTENCY_COSINE)
+            }
+            None => false,
         }
     }
 
     /// Fuses all multi-angle collected embedding vectors into a normalized composite unit vector.
+    ///
+    /// The composite is the mean direction of the L2-normalized samples. Every sample is
+    /// re-validated (dimension, finiteness, identity consistency with the frontal anchor);
+    /// any violation fails closed with an error.
     pub fn compute_composite_embedding(&self) -> Result<Vec<f32>, String> {
-        let total_samples = self.frontal_samples.len()
-            + self.left_samples.len()
-            + self.right_samples.len()
-            + self.tilt_samples.len();
-
-        if total_samples == 0 {
-            return Err("No samples collected to compute template".to_string());
+        let dim = match self.all_samples().next() {
+            Some(first) => first.len(),
+            None => return Err("No samples collected to compute template".to_string()),
+        };
+        if dim == 0 || dim > MAX_GUIDED_EMBEDDING_DIM {
+            return Err("Collected embedding dimension is out of bounds".to_string());
         }
 
-        let dim = self.frontal_samples.first().map(|v| v.len()).unwrap_or(512);
+        let anchor = mean_direction(self.frontal_samples.iter())
+            .ok_or_else(|| "No valid frontal anchor sample collected".to_string())?;
 
-        let mut sum = vec![0.0f32; dim];
-
-        let all_samples = self
-            .frontal_samples
-            .iter()
-            .chain(self.left_samples.iter())
-            .chain(self.right_samples.iter())
-            .chain(self.tilt_samples.iter());
-
-        for sample in all_samples {
+        for sample in self.all_samples() {
             if sample.len() != dim {
                 return Err("Dimension mismatch among collected embedding samples".to_string());
             }
-            for (s_elem, sample_val) in sum.iter_mut().zip(sample.iter()) {
-                *s_elem += *sample_val;
+            if !sample.iter().all(|x| x.is_finite()) {
+                return Err("Non-finite value in collected embedding samples".to_string());
+            }
+            if !cosine(&anchor, sample).is_some_and(|c| c >= MIN_SAMPLE_CONSISTENCY_COSINE) {
+                return Err("Collected samples are not identity-consistent".to_string());
             }
         }
 
-        // L2 normalize composite vector to unit length
-        let norm = sum.iter().map(|x| x * x).sum::<f32>().sqrt();
-        if norm <= 1e-6 {
-            return Err("Composite embedding norm is zero".to_string());
+        let composite = mean_direction(self.all_samples())
+            .ok_or_else(|| "Composite embedding norm is zero".to_string())?;
+        if !composite.iter().all(|x| x.is_finite()) {
+            return Err("Composite embedding is not finite".to_string());
         }
-
-        for x in &mut sum {
-            *x /= norm;
-        }
-
-        Ok(sum)
+        Ok(composite)
     }
+}
+
+/// Returns the L2 norm of `v`, or `None` when it is not finite.
+fn l2_norm(v: &[f32]) -> Option<f32> {
+    let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+    norm.is_finite().then_some(norm)
+}
+
+/// Cosine similarity of two equal-length vectors, or `None` when undefined.
+fn cosine(a: &[f32], b: &[f32]) -> Option<f32> {
+    if a.len() != b.len() {
+        return None;
+    }
+    let na = l2_norm(a)?;
+    let nb = l2_norm(b)?;
+    if na <= MIN_EMBEDDING_NORM || nb <= MIN_EMBEDDING_NORM {
+        return None;
+    }
+    let dot: f32 = a.iter().zip(b).map(|(x, y)| x * y).sum();
+    let c = dot / (na * nb);
+    c.is_finite().then_some(c.clamp(-1.0, 1.0))
+}
+
+/// Mean direction (normalized sum of normalized vectors), or `None` when degenerate.
+fn mean_direction<'a>(samples: impl Iterator<Item = &'a Vec<f32>>) -> Option<Vec<f32>> {
+    let mut sum: Option<Vec<f32>> = None;
+    for sample in samples {
+        let norm = l2_norm(sample)?;
+        if norm <= MIN_EMBEDDING_NORM {
+            return None;
+        }
+        let acc = sum.get_or_insert_with(|| vec![0.0f32; sample.len()]);
+        if acc.len() != sample.len() {
+            return None;
+        }
+        for (a, x) in acc.iter_mut().zip(sample.iter()) {
+            *a += *x / norm;
+        }
+    }
+    let mut sum = sum?;
+    let norm = l2_norm(&sum)?;
+    if norm <= MIN_EMBEDDING_NORM {
+        return None;
+    }
+    for x in &mut sum {
+        *x /= norm;
+    }
+    Some(sum)
 }

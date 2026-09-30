@@ -11,6 +11,15 @@ pub enum EnrollmentCliError {
     #[error("User '{0}' not found in system user database")]
     UserNotFound(String),
 
+    #[error(
+        "No target user given and no non-root invoking user found (SUDO_UID/PKEXEC_UID); \
+         pass --username <NAME> or --uid <UID> (use --uid 0 to enroll root explicitly)"
+    )]
+    TargetUserRequired,
+
+    #[error("Malformed {0} environment variable; pass --username <NAME> or --uid <UID>")]
+    InvalidInvokerUid(String),
+
     #[error("User ID {0} is already enrolled; use --yes or confirm to overwrite")]
     AlreadyEnrolled(u32),
 
@@ -63,6 +72,10 @@ pub enum EnrollmentCliError {
 
     #[error("Nix system error: {0}")]
     Nix(#[from] nix::Error),
+
+    /// Rejected `import` input (size bound, ownership, format or non-finite values).
+    #[error("Invalid import input: {0}")]
+    InvalidImport(String),
 
     #[error("Invalid path or path traversal attempt: {0}")]
     InvalidPath(String),

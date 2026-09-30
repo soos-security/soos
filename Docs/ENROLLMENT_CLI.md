@@ -1,6 +1,6 @@
 # `soos-enrollment-cli` — Root Enrollment and Diagnostics Tool
 
-`soos-enrollment-cli` (`soos-enroll`) is the administrative command-line interface for the `soos` local biometric PAM subsystem. It provides privileged user enrollment, anti-forensic secure template erasure, diagnostic verification, and template inventory enumeration.
+`soos-enrollment-cli` (`soos-enroll`) is the administrative command-line interface for the `soos` local biometric PAM subsystem. It provides privileged user enrollment, template deletion (best-effort overwrite, encryption-backed erasure), diagnostic verification, and template inventory enumeration.
 
 ---
 
@@ -10,7 +10,7 @@ In accordance with `AI/ARCHITECTURE.md` (§8 Monorepo Structure, §9 Privacy, Pe
 - **Root-Only Modification**: State-modifying operations (`enroll`, `delete`) mandate root execution (effective UID 0), preventing unauthorized tampering with biometric credentials.
 - **Single-Face Security Invariant**: The tool strictly enforces that exactly one human face is visible in any frame evaluated for enrollment or verification. Multi-face or zero-face candidate frames are rejected.
 - **Encrypted Persistence**: All biometric templates are serialized to canonical CBOR and encrypted using authenticated AES-256-GCM via `soos-biometric-store` under `/var/lib/soos/biometrics/<uid>.cbor.enc` with POSIX permissions `0600` owned by `root:root`.
-- **Anti-Forensic Secure Erasure**: When deleting an enrolled user template, file blocks on disk are overwritten with cryptographically secure random bytes from the kernel CSPRNG, followed by a zeroization pass and `fsync()`, prior to filesystem unlink.
+- **Template Erasure (honest scope)**: `delete` and re-`enroll` overwrite the discarded template file in place with kernel CSPRNG bytes (3 passes, each followed by `fsync()`) before it is unlinked or replaced, then sync the directory. This is **best effort only**: it does not reach the physical blocks on copy-on-write filesystems (btrfs, ZFS), with data journaling, snapshots or backups, or on SSD/eMMC media with wear levelling. The actual guarantee is that every template is AES-256-GCM ciphertext under `/var/lib/soos/master.key`; residual copies are unreadable without that key, and destroying the key (together with full-disk encryption for the key file itself) is the only complete erasure. See ADR 2026-09-30 "Biometric Template Erasure Model" in `AI/DECISIONS.md` and `Docs/BIOMETRIC_STORE_CRATE.md` §3.4.
 - **Zeroization**: Sensitive biometric vector buffers (`Vec<f32>`) implement `Zeroize` via `zeroize::Zeroizing` and are automatically scrubbed from memory when dropped.
 
 ---
@@ -21,20 +21,27 @@ In accordance with `AI/ARCHITECTURE.md` (§8 Monorepo Structure, §9 Privacy, Pe
 Enrolls a user with multi-frame quality selection and interactive confirmation:
 
 ```bash
-# Interactive enrollment for current root user or specified UID
+# Interactive enrollment of the user who invoked sudo (SUDO_UID)
+sudo soos-enroll enroll
+
+# Interactive enrollment of a specified UID
 sudo soos-enroll enroll --uid 1000 --frames 5
+
+# Enrolling root is only possible explicitly
+sudo soos-enroll enroll --uid 0
 
 # Enrollment by username with automated non-interactive confirmation
 sudo soos-enroll enroll --username alice --yes
 ```
 
 **Options**:
-- `-i, --uid <UID>`: Target Linux User ID. Defaults to caller UID if unspecified.
+- `-i, --uid <UID>`: Target Linux User ID. Without `--uid` and `--username`, the target is the invoking user: the real UID when it is not root, otherwise `SUDO_UID` (then `PKEXEC_UID`) when it names a non-root user. Root is never an implicit target: with no such variable the command fails before any capture and asks for `--username`/`--uid`; `--uid 0` (or `--username root`) enrolls root explicitly. A malformed `SUDO_UID`/`PKEXEC_UID` fails closed. The resolved target UID is printed before capture (GitHub #184 / STO-11).
 - `-u, --username <NAME>`: Target username (resolved via system user database).
 - `--frames <N>`: Number of candidate frames to capture and evaluate (default: 5, bounded 1–30).
 - `-y, --yes`: Automatically confirm enrollment without interactive confirmation prompt.
-- `--model-id <ID>`: Model identifier stored in template metadata (default: `mobilefacenet`).
-- `--model-version <VER>`: Model version stored in template metadata (default: `1.0.0`).
+- `--model-id <ID>`: Override of the embedding model identifier stored in template metadata. Default: the loaded embedding extractor `MODEL_ID_EMBEDDING` = `arcface_w600k_mbf` (GitHub #182 / STO-09; the former `mobilefacenet` default is retired per ADR 2026-09-20).
+- `--model-version <VER>`: Override of the model version stored in template metadata. Default: `EMBEDDING_MODEL_VERSION` = `2.0.0`, the attested `models/manifest.toml` version (pinned by a test).
+- Any override that differs from the loaded model prints a warning before capture and sets `model_overridden` in the confirmation summary: `soos-daemon` refuses templates whose `model_id` differs from its loaded extractor (`Verdict::Unavailable` / `ReasonClass::ModelUnavailable`, PAM falls back to the next module), so such a template can never authenticate. Migration aid: templates recorded with the retired default, exactly `mobilefacenet` / `1.0.0`, contain ArcFace vectors and are still accepted as a legacy alias with a warning recommending re-enrollment (ADR 2026-09-30 "Embedding Model Binding and Legacy Model Alias"); any other version or id is refused. Re-enroll affected users (`soos-enroll list` shows the recorded model) before the alias is removed.
 
 ### `soos-enroll verify`
 Performs a one-shot diagnostic verification against an enrolled biometric template:
@@ -51,7 +58,7 @@ sudo soos-enroll verify --uid 1000
 - Latency breakdown: camera frame capture, neural vision pipeline, cosine matching, total roundtrip.
 
 ### `soos-enroll delete`
-Deletes an enrolled biometric template with anti-forensic secure erasure:
+Deletes an enrolled biometric template (best-effort in-place overwrite before unlink; see "Template Erasure" above for what this can and cannot guarantee):
 
 ```bash
 sudo soos-enroll delete --uid 1000
@@ -68,6 +75,26 @@ sudo soos-enroll list
 # Machine-readable JSON output
 sudo soos-enroll list --format json
 ```
+
+### `soos-enroll import`
+Imports an existing embedding (JSON array of 512 finite floats, or a CBOR `BiometricTemplate`) into the encrypted store. This is the command the GUI runs through `pkexec` (GitHub #156, review findings CAM-08 / STO-12):
+
+```bash
+# From standard input (the GUI path; the plaintext embedding never touches the filesystem)
+sudo soos-enroll import --uid 1000 --file - < embedding.json
+
+# From a file
+sudo soos-enroll import --uid 1000 --file /home/alice/embedding.json
+```
+
+Input contract (`crates/enrollment-cli/src/service.rs`):
+- **Bounded**: every input is capped at `MAX_IMPORT_INPUT_BYTES` (64 KiB) while it is read (`Read::take`); an endless or oversized stdin, or a larger file, is refused with `EnrollmentCliError::InvalidImport`.
+- **Validated**: the embedding must have exactly 512 values, all finite (an overflowing JSON number such as `1e39` becomes infinity and is refused). Values are never echoed in errors.
+- **Zeroized**: the raw input and the parsed embedding live in `Zeroizing` buffers.
+- **File inputs** (`read_import_file`): opened with `O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK` and checked on the open descriptor: regular file only (symlinks, directories and FIFOs are refused), at most 64 KiB, and, under `pkexec`, owned by the invoking user (`PKEXEC_UID`, parsed by `parse_pkexec_uid`), so a Polkit caller cannot make root import another user's file.
+- Nothing is stored when any check fails.
+
+Verification: `crates/enrollment-cli/tests/import_stdin_tests.rs` and `import_tests.rs` (matrix rows ISE5–ISE7).
 
 ### `soos-enroll debug-vision`
 Captures one camera frame, runs the face detector and writes a standalone HTML report drawing the bounding boxes, confidence scores and 5-point landmarks on an HTML5 canvas (GitHub #149 / STO-02 hardening):
@@ -94,6 +121,26 @@ Filesystem and privacy contract (`crates/enrollment-cli/src/service.rs`):
 - **Detector errors are propagated**: a failing detector aborts the command (`EnrollmentCliError::Inference`) instead of silently producing a report with zero detections, and no file is created.
 
 Verification: `crates/enrollment-cli/tests/debug_vision_tests.rs` (matrix rows EN12–EN14).
+
+---
+
+### Guided multi-angle enrollment (`GuidedEnrollmentSession`, used by `soos-gui`)
+
+`soos_enrollment_cli::guided_enrollment` collects samples over four steps and fuses them (GitHub #183 / STO-10). A sample is recorded only when:
+
+| Check | Rule | Feedback on failure |
+|---|---|---|
+| Liveness / centering | PAD live and face centered | `SpoofDetected` / `PromptCenterFace` |
+| Pose finiteness | yaw, pitch, roll finite | `PromptHoldStill` |
+| Roll (all steps) | `abs(roll) <= 10` degrees | `PromptHoldStill` |
+| Frontal | `abs(yaw) <= 8`, `abs(pitch) <= 10` | `PromptCenterFace` / `PromptHoldStill` |
+| Turn left | yaw in `[-25, -10]`, `abs(pitch) <= 15` | `PromptTurnLeft` (not enough) / `PoseOutOfRange` (too far) |
+| Turn right | yaw in `[10, 25]`, `abs(pitch) <= 15` | `PromptTurnRight` / `PoseOutOfRange` |
+| Tilt up | pitch in `[-25, -8]`, `abs(yaw) <= 15` | `PromptTiltUp` / `PoseOutOfRange` |
+| Embedding validity | non-empty, at most `MAX_GUIDED_EMBEDDING_DIM` (2048) values, same dimension as the first sample, all values finite, L2 norm > 1e-6 | `InvalidEmbedding` |
+| Identity consistency | cosine >= `MIN_SAMPLE_CONSISTENCY_COSINE` (0.5) with every accepted frontal sample and, for off-axis steps, with the frontal mean direction | `IdentityMismatch` |
+
+Each step records at most `MAX_SAMPLES_PER_STEP` (20) samples (`GuidedEnrollmentSession::new` clamps the target to `1..=20`). The composite template is the mean direction of the L2-normalized samples, `t = m / ||m||` with `m = sum_i s_i / ||s_i||`; `compute_composite_embedding` re-validates every sample (dimension, finiteness, consistency with the frontal anchor) and fails closed instead of returning a non-finite or contaminated vector.
 
 ---
 

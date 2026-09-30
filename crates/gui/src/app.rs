@@ -16,7 +16,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use arc_swap::ArcSwapOption;
 use eframe::egui::{self, Color32, Pos2, Rect, Stroke, Vec2};
-use soos_biometric_store::{BiometricStore, BiometricTemplate};
+use soos_biometric_store::BiometricTemplate;
 use soos_camera_v4l::{CameraManager, CameraStatus};
 use soos_enrollment_cli::guided_enrollment::{
     EnrollmentStep, EnrollmentStepFeedback, GuidedEnrollmentSession,
@@ -32,6 +32,7 @@ use crate::camera_status::{camera_status_banner, render_status_banner};
 use crate::daemon_control::{DaemonMonitor, DaemonState, SystemctlProbe, DAEMON_POLL_INTERVAL};
 use crate::privileged::{PkexecExecutor, PrivilegedAction, PrivilegedOutcome, TaskRunner};
 use crate::state::{EnrollmentGuiState, LatestFrameData, ProfilesGuiState};
+use crate::store_mode::GuiStore;
 use crate::worker::{spawn_vision_worker, WorkerSharedInput};
 
 /// Application navigation tabs.
@@ -48,8 +49,10 @@ pub enum AppTab {
 /// The primary SOOS GUI application state.
 pub struct SoosApp {
     current_tab: AppTab,
-    store: Arc<BiometricStore>,
-    is_system_store: bool,
+    /// Store backing this session (system, Polkit-only or explicit developer store).
+    store: GuiStore,
+    /// Persistent developer-mode warning shown on every frame (GitHub #156).
+    store_banner: Option<String>,
     camera: Arc<dyn CameraManager>,
     _pipeline: Arc<VisionPipeline>,
     latest_frame_slot: Arc<ArcSwapOption<LatestFrameData>>,
@@ -93,11 +96,11 @@ impl SoosApp {
     /// Creates and initializes a new `SoosApp` with background inference worker.
     pub fn new(
         cc: &eframe::CreationContext<'_>,
-        store: Arc<BiometricStore>,
+        store: GuiStore,
         camera: Arc<dyn CameraManager>,
         pipeline: Arc<VisionPipeline>,
-        is_system_store: bool,
     ) -> Self {
+        let store_banner = store.banner();
         let latest_frame_slot = Arc::new(ArcSwapOption::empty());
         let worker_input = Arc::new(WorkerSharedInput::default());
         let worker_running = Arc::new(AtomicBool::new(true));
@@ -137,7 +140,7 @@ impl SoosApp {
         let mut app = Self {
             current_tab: AppTab::LiveInspection,
             store,
-            is_system_store,
+            store_banner,
             camera,
             _pipeline: pipeline,
             latest_frame_slot,
@@ -240,7 +243,7 @@ impl SoosApp {
     /// Unprivileged sessions query the root-owned system store through `pkexec soos-enroll
     /// list` on a background thread; the result arrives in [`Self::handle_task_outcomes`].
     pub fn refresh_profiles(&mut self) {
-        if !self.is_system_store {
+        if self.store.uses_polkit() {
             if let Err(e) = self.tasks.submit(PrivilegedAction::ListProfiles) {
                 self.profiles.status_message = Some((format!("Cannot load profiles: {e}"), true));
                 self.load_local_profiles();
@@ -252,11 +255,16 @@ impl SoosApp {
 
     /// Lists the templates readable from the GUI's own biometric store.
     fn load_local_profiles(&mut self) {
-        let uids = self.store.list_enrolled().unwrap_or_default();
+        // Polkit mode keeps no local store: nothing to list in-process (GitHub #156).
+        let Some(store) = self.store.local().map(Arc::clone) else {
+            self.profiles.profiles.clear();
+            return;
+        };
+        let uids = store.list_enrolled().unwrap_or_default();
         let mut summaries = Vec::with_capacity(uids.len());
 
         for uid in uids {
-            if let Ok(Some(template)) = self.store.get(uid) {
+            if let Ok(Some(template)) = store.get(uid) {
                 let username = match nix::unistd::User::from_uid(nix::unistd::Uid::from_raw(uid)) {
                     Ok(Some(u)) => u.name,
                     _ => uid.to_string(),
@@ -329,23 +337,21 @@ impl SoosApp {
                         ));
                     }
                 },
-                PrivilegedOutcome::TemplateDeleted { uid, result } => {
-                    match result {
-                        Ok(()) => {
-                            self.profiles.status_message = Some((
-                            format!("Template for UID {uid} shredded and removed from system store."),
+                PrivilegedOutcome::TemplateDeleted { uid, result } => match result {
+                    Ok(()) => {
+                        self.profiles.status_message = Some((
+                            format!("Template for UID {uid} removed from the system store."),
                             false,
                         ));
-                            self.refresh_profiles();
-                        }
-                        Err(e) => {
-                            self.profiles.status_message = Some((
+                        self.refresh_profiles();
+                    }
+                    Err(e) => {
+                        self.profiles.status_message = Some((
                             format!("Failed to delete template for UID {uid} from system store via Polkit: {e}"),
                             true,
                         ));
-                        }
                     }
-                }
+                },
             }
         }
     }
@@ -716,7 +722,11 @@ impl SoosApp {
                                                 .clicked()
                                             {
                                                 self.profiles.selected_uid = Some(p.uid);
-                                                if let Ok(Some(template)) = self.store.get(p.uid) {
+                                                if let Some(template) = self
+                                                    .store
+                                                    .local()
+                                                    .and_then(|s| s.get(p.uid).ok().flatten())
+                                                {
                                                     if let Ok(mut ref_guard) =
                                                         self.worker_input.match_reference.lock()
                                                     {
@@ -966,6 +976,18 @@ impl SoosApp {
                             "All angles captured! Composite template generated.",
                             Color32::GREEN,
                         ),
+                        EnrollmentStepFeedback::InvalidEmbedding => (
+                            "Sample rejected: invalid face features, hold still.",
+                            Color32::YELLOW,
+                        ),
+                        EnrollmentStepFeedback::IdentityMismatch => (
+                            "Sample rejected: only the enrolling user may face the camera.",
+                            Color32::RED,
+                        ),
+                        EnrollmentStepFeedback::PoseOutOfRange => (
+                            "Too far: rotate your head back slightly.",
+                            Color32::YELLOW,
+                        ),
                     };
 
                     ui.group(|ui| {
@@ -1000,14 +1022,24 @@ impl SoosApp {
                             .button("💾 Save & Encrypt Biometric Template")
                             .clicked()
                     {
-                        let fused_opt = if let Ok(session_guard) =
-                            self.worker_input.enrollment_session.lock()
-                        {
-                            session_guard
+                        // A fusion error (inconsistent or invalid samples, GitHub #183) is
+                        // surfaced instead of silently ignoring the Save click.
+                        let fused_opt = match self.worker_input.enrollment_session.lock() {
+                            Ok(session_guard) => match session_guard
                                 .as_ref()
-                                .and_then(|session| session.compute_composite_embedding().ok())
-                        } else {
-                            None
+                                .map(|session| session.compute_composite_embedding())
+                            {
+                                Some(Ok(embedding)) => Some(Zeroizing::new(embedding)),
+                                Some(Err(e)) => {
+                                    self.enrollment.status_message = Some((
+                                        format!("Cannot build the template: {e}"),
+                                        true,
+                                    ));
+                                    None
+                                }
+                                None => None,
+                            },
+                            Err(_) => None,
                         };
 
                         if let Some(fused_embedding) = fused_opt {
@@ -1018,24 +1050,21 @@ impl SoosApp {
 
                             let res = BiometricTemplate::new(
                                 self.enrollment.target_uid,
-                                "arcface_w600k_mbf".to_string(),
-                                "2.0.0".to_string(),
+                                soos_enrollment_cli::service::MODEL_ID_EMBEDDING.to_string(),
+                                soos_enrollment_cli::service::EMBEDDING_MODEL_VERSION.to_string(),
                                 timestamp,
-                                Zeroizing::new(fused_embedding.clone()),
+                                fused_embedding.clone(),
                             );
 
                             match res {
                                 Ok(template) => {
-                                    // Enroll into GUI store for immediate display
-                                    let _ = self.store.enroll(&template);
-
-                                    // If not running as root, import into system store via Polkit
-                                    if !self.is_system_store {
-                                        // Runs off the UI thread; the outcome arrives in
-                                        // `handle_task_outcomes` (GitHub #154).
+                                    if self.store.uses_polkit() {
+                                        // The embedding is piped to `pkexec soos-enroll import
+                                        // --file -` off the UI thread; no local copy and no
+                                        // temporary file (GitHub #154 / #156).
                                         let action = PrivilegedAction::ImportTemplate {
                                             uid: self.enrollment.target_uid,
-                                            embedding: Zeroizing::new(fused_embedding.clone()),
+                                            embedding: fused_embedding.clone(),
                                         };
                                         match self.tasks.submit(action) {
                                             Ok(()) => {
@@ -1052,15 +1081,43 @@ impl SoosApp {
                                             }
                                         }
                                     } else {
-                                        self.enrollment.status_message = Some((
-                                            format!(
-                                                "User {} enrolled successfully with high quality!",
-                                                self.enrollment.target_username
-                                            ),
-                                            false,
-                                        ));
-                                        self.refresh_profiles();
-                                        self.enrollment.is_active = false;
+                                        let saved = self
+                                            .store
+                                            .local()
+                                            .map(|store| store.enroll(&template));
+                                        match saved {
+                                            Some(Ok(())) => {
+                                                let target = if matches!(
+                                                    self.store,
+                                                    GuiStore::Developer { .. }
+                                                ) {
+                                                    "the developer store (not used by PAM)"
+                                                } else {
+                                                    "the system store"
+                                                };
+                                                self.enrollment.status_message = Some((
+                                                    format!(
+                                                        "User {} enrolled successfully into {target}.",
+                                                        self.enrollment.target_username
+                                                    ),
+                                                    false,
+                                                ));
+                                                self.refresh_profiles();
+                                                self.enrollment.is_active = false;
+                                            }
+                                            Some(Err(e)) => {
+                                                self.enrollment.status_message = Some((
+                                                    format!("Failed to save the template: {e}"),
+                                                    true,
+                                                ));
+                                            }
+                                            None => {
+                                                self.enrollment.status_message = Some((
+                                                    "No biometric store is available".to_string(),
+                                                    true,
+                                                ));
+                                            }
+                                        }
                                     }
                                 }
                                 Err(e) => {
@@ -1095,13 +1152,13 @@ impl SoosApp {
         });
         ui.label(
             "Biometric templates stored securely on disk, encrypted with AES-256-GCM. \
-             Deleting a template performs anti-forensic cryptographic shredding.",
+             Deleting a template overwrites and removes it (best effort; see Docs).",
         );
         ui.add_space(10.0);
 
         if self.profiles.profiles.is_empty() {
             ui.label("No biometric templates currently loaded.");
-            if !self.is_system_store {
+            if self.store.uses_polkit() {
                 ui.label(
                     "Click below to query the root-protected system biometric store via Polkit:",
                 );
@@ -1139,7 +1196,7 @@ impl SoosApp {
                         ui.label(format!("{}", p.embedding_dim));
 
                         ui.horizontal(|ui| {
-                            if ui.button("🗑 Delete & Shred").clicked() {
+                            if ui.button("🗑 Delete").clicked() {
                                 uid_to_delete = Some(p.uid);
                             }
                         });
@@ -1158,13 +1215,12 @@ impl SoosApp {
                     .resizable(false)
                     .show(ui.ctx(), |ui| {
                         ui.label(format!(
-                            "Are you sure you want to securely shred and delete the biometric template for UID {uid}?"
+                            "Are you sure you want to delete the biometric template for UID {uid}?"
                         ));
                         ui.label("This operation cannot be undone.");
                         ui.horizontal(|ui| {
-                            if ui.button("Yes, Shred Template").clicked() {
-                                if !self.is_system_store {
-                                    let _ = self.store.delete(uid);
+                            if ui.button("Yes, Delete Template").clicked() {
+                                if self.store.uses_polkit() {
                                     // Runs off the UI thread; the outcome arrives in
                                     // `handle_task_outcomes` (GitHub #154).
                                     if let Err(e) =
@@ -1175,16 +1231,17 @@ impl SoosApp {
                                             true,
                                         ));
                                     }
-                                } else if let Err(e) = self.store.delete(uid) {
-                                    self.profiles.status_message = Some((
-                                        format!("Failed to delete template: {e}"),
-                                        true,
-                                    ));
+                                } else if let Err(e) = self
+                                    .store
+                                    .local()
+                                    .ok_or_else(|| "no biometric store is available".to_string())
+                                    .and_then(|store| store.delete(uid).map_err(|e| e.to_string()))
+                                {
+                                    self.profiles.status_message =
+                                        Some((format!("Failed to delete template: {e}"), true));
                                 } else {
-                                    self.profiles.status_message = Some((
-                                        format!("Template for UID {uid} shredded and removed."),
-                                        false,
-                                    ));
+                                    self.profiles.status_message =
+                                        Some((format!("Template for UID {uid} removed."), false));
                                     self.refresh_profiles();
                                 }
                                 self.profiles.confirm_delete_uid = None;
@@ -1249,6 +1306,13 @@ impl eframe::App for SoosApp {
         let frame_ref = latest.as_deref();
         egui::CentralPanel::default().show(ui, |ui| {
             self.render_header(ui, frame_ref);
+            if let Some(banner) = &self.store_banner {
+                // Developer mode is never silent (GitHub #156).
+                ui.colored_label(
+                    Color32::from_rgb(255, 140, 0),
+                    egui::RichText::new(banner).strong(),
+                );
+            }
 
             if let Some(frame) = frame_ref {
                 match self.current_tab {

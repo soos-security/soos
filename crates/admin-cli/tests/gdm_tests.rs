@@ -53,6 +53,7 @@ fn test_gdm_disable_and_enable_lifecycle() {
         "#%PAM-1.0\nauth requisite pam_nologin.so\n@include common-auth\n",
     )
     .unwrap();
+    write_common_auth(temp.path());
 
     // 1. Enable GDM
     soos_admin_cli::gdm::configure_gdm(&GdmAction::Enable, &pam_file, &disable_file)
@@ -95,6 +96,15 @@ fn test_gdm_disable_and_enable_lifecycle() {
 
 const PRISTINE_GDM: &str = "#%PAM-1.0\nauth requisite pam_nologin.so\n@include common-auth\n";
 
+/// Shared auth stack delegated to by [`PRISTINE_GDM`], written next to the PAM file:
+/// `gdm enable` refuses a delegated stack it cannot read (user-approved setup
+/// migration, 2026-09-30).
+const COMMON_AUTH: &str = "auth required pam_unix.so\n";
+
+fn write_common_auth(dir: &std::path::Path) {
+    fs::write(dir.join("common-auth"), COMMON_AUTH).unwrap();
+}
+
 fn backup_of(pam_file: &std::path::Path) -> std::path::PathBuf {
     let mut name = pam_file.file_name().unwrap().to_os_string();
     name.push(".soos-backup");
@@ -110,6 +120,7 @@ fn test_gdm_enable_creates_byte_exact_backup_with_original_mode() {
     let pam_file = temp.path().join("gdm-password");
     let disable_file = temp.path().join("gdm.disable");
     fs::write(&pam_file, PRISTINE_GDM).unwrap();
+    write_common_auth(temp.path());
     fs::set_permissions(&pam_file, fs::Permissions::from_mode(0o640)).unwrap();
 
     soos_admin_cli::gdm::configure_gdm(&GdmAction::Enable, &pam_file, &disable_file)
@@ -144,6 +155,7 @@ fn test_gdm_enable_never_overwrites_an_existing_backup() {
     let disable_file = temp.path().join("gdm.disable");
     let backup = backup_of(&pam_file);
     fs::write(&pam_file, PRISTINE_GDM).unwrap();
+    write_common_auth(temp.path());
     fs::write(&backup, "# pristine from an earlier enable\n").unwrap();
 
     soos_admin_cli::gdm::configure_gdm(&GdmAction::Enable, &pam_file, &disable_file)
@@ -163,6 +175,7 @@ fn test_gdm_enable_is_atomic_and_idempotent() {
     let pam_file = temp.path().join("gdm-password");
     let disable_file = temp.path().join("gdm.disable");
     fs::write(&pam_file, PRISTINE_GDM).unwrap();
+    write_common_auth(temp.path());
 
     soos_admin_cli::gdm::configure_gdm(&GdmAction::Enable, &pam_file, &disable_file).unwrap();
     let first = fs::read_to_string(&pam_file).unwrap();
@@ -186,6 +199,7 @@ fn test_gdm_enable_is_atomic_and_idempotent() {
     assert_eq!(
         names,
         vec![
+            "common-auth".to_string(),
             "gdm-password".to_string(),
             "gdm-password.soos-backup".to_string()
         ],
@@ -208,4 +222,122 @@ fn test_gdm_enable_refuses_a_symlinked_pam_file() {
     assert!(result.is_err(), "a symlinked PAM file must be refused");
     assert_eq!(fs::read_to_string(&target).unwrap(), PRISTINE_GDM);
     assert!(!backup_of(&pam_file).exists(), "no backup on refusal");
+}
+
+// ----------------------------------------------------------------------------
+// STO-03 / STO-07 (GitHub #177, #180): named contracts cited by the verification
+// matrix (ASG5, LSF1, GSO*).
+// ----------------------------------------------------------------------------
+
+/// The GDM rule keeps the 2500 ms capture budget and uses the explicit
+/// `[success=done default=ignore]` control shared by every packaged soos rule.
+#[test]
+fn test_gdm_pam_line_includes_timeout_ms_2500() {
+    use soos_admin_cli::gdm::GDM_PAM_LINE;
+    assert!(GDM_PAM_LINE.starts_with("auth "));
+    assert!(GDM_PAM_LINE.contains("[success=done default=ignore]"));
+    assert!(GDM_PAM_LINE.contains("pam_soos.so timeout_ms=2500"));
+    assert!(
+        !GDM_PAM_LINE.contains("sufficient"),
+        "the legacy sufficient control is retired (ADR 2026-09-30 GDM stack placement)"
+    );
+    assert!(
+        !GDM_PAM_LINE.contains("service="),
+        "PAM_SERVICE drives gdm.disable"
+    );
+}
+
+#[test]
+fn test_gdm_status_unconfigured() {
+    let temp = tempdir().unwrap();
+    let pam_file = temp.path().join("gdm-password");
+    let disable_file = temp.path().join("gdm.disable");
+
+    let missing = soos_admin_cli::gdm::get_gdm_status(&pam_file, &disable_file);
+    assert!(!missing.installed && !missing.enabled, "missing PAM file");
+
+    fs::write(&pam_file, PRISTINE_GDM).unwrap();
+    let status = soos_admin_cli::gdm::get_gdm_status(&pam_file, &disable_file);
+    assert!(!status.installed, "no pam_soos.so rule");
+    assert!(!status.enabled);
+    assert_eq!(status.pam_file, pam_file);
+    assert_eq!(status.disable_file, disable_file);
+}
+
+#[test]
+fn test_gdm_status_configured_enabled() {
+    let temp = tempdir().unwrap();
+    let pam_file = temp.path().join("gdm-password");
+    let disable_file = temp.path().join("gdm.disable");
+    fs::write(&pam_file, PRISTINE_GDM).unwrap();
+    write_common_auth(temp.path());
+
+    let status =
+        soos_admin_cli::gdm::configure_gdm(&GdmAction::Enable, &pam_file, &disable_file).unwrap();
+    assert!(status.installed);
+    assert!(status.enabled);
+}
+
+#[test]
+fn test_gdm_status_configured_disabled() {
+    let temp = tempdir().unwrap();
+    let pam_file = temp.path().join("gdm-password");
+    let disable_file = temp.path().join("gdm.disable");
+    fs::write(&pam_file, PRISTINE_GDM).unwrap();
+    write_common_auth(temp.path());
+    soos_admin_cli::gdm::configure_gdm(&GdmAction::Enable, &pam_file, &disable_file).unwrap();
+    fs::write(&disable_file, "disabled\n").unwrap();
+
+    let status = soos_admin_cli::gdm::get_gdm_status(&pam_file, &disable_file);
+    assert!(status.installed, "the rule stays in the PAM file");
+    assert!(!status.enabled, "the flag disables it");
+}
+
+#[test]
+fn test_gdm_disable_creates_flag() {
+    let temp = tempdir().unwrap();
+    let pam_file = temp.path().join("gdm-password");
+    let disable_file = temp.path().join("etc-soos").join("gdm.disable");
+    fs::write(&pam_file, PRISTINE_GDM).unwrap();
+
+    soos_admin_cli::gdm::configure_gdm(&GdmAction::Disable, &pam_file, &disable_file).unwrap();
+    assert!(
+        disable_file.is_file(),
+        "flag created with its parent directory"
+    );
+    assert_eq!(
+        fs::read_to_string(&pam_file).unwrap(),
+        PRISTINE_GDM,
+        "disable never edits the PAM file"
+    );
+}
+
+#[test]
+fn test_gdm_restore_and_module_dir_parsing() {
+    let restore = Cli::try_parse_from(["soos-admin", "gdm", "restore"]).unwrap();
+    match restore.command {
+        Commands::Gdm(GdmArgs {
+            action: GdmAction::Restore,
+            pam_module_dir: None,
+            ..
+        }) => {}
+        _ => panic!("Expected Commands::Gdm(Restore)"),
+    }
+
+    let enable = Cli::try_parse_from([
+        "soos-admin",
+        "gdm",
+        "enable",
+        "--pam-module-dir",
+        "/usr/lib64/security",
+    ])
+    .unwrap();
+    match enable.command {
+        Commands::Gdm(GdmArgs {
+            action: GdmAction::Enable,
+            pam_module_dir: Some(dir),
+            ..
+        }) => assert_eq!(dir, std::path::PathBuf::from("/usr/lib64/security")),
+        _ => panic!("Expected Commands::Gdm(Enable) with --pam-module-dir"),
+    }
 }
