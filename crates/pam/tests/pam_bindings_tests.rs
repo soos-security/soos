@@ -9,6 +9,8 @@
     reason = "Test harness assertions"
 )]
 
+mod common;
+
 use pam_bindings::constants::PamResultCode;
 use pam_bindings::module::{PamHandle, PamHooks};
 use pam_soos::config::{parse_cstrs, PamEvent};
@@ -51,10 +53,8 @@ fn test_pam_hooks_unhandled_hooks_return_ignore() {
 /// PA11 / PA1: sm_authenticate returns PAM_IGNORE when daemon socket is unreachable.
 #[test]
 fn test_pam_hooks_authenticate_offline_daemon_returns_ignore() {
-    let dummy_ptr = 0x1000 as *mut PamHandle;
-    // SAFETY: PamHandle is an opaque zero-sized type used only as a reference in trait dispatch.
-    let pamh = unsafe { &mut *dummy_ptr };
-
+    // User-approved 2026-09-30 (GitHub #220): a real `pam_start` handle replaces the
+    // dummy 0x1000 pointer, so production code no longer needs an address heuristic.
     let sock_arg = CString::new("socket=/tmp/nonexistent_daemon_sock_for_test.sock").unwrap();
     let timeout_arg = CString::new("timeout_ms=50").unwrap();
     let uid_arg = CString::new("uid=1000").unwrap();
@@ -64,17 +64,17 @@ fn test_pam_hooks_authenticate_offline_daemon_returns_ignore() {
         uid_arg.as_c_str(),
     ];
 
-    let res = SoosPam::sm_authenticate(pamh, args, 0);
+    let (res, _) = common::with_pam_handle("soos-contract", |pamh| {
+        SoosPam::sm_authenticate(pamh, args, 0)
+    });
     assert_eq!(res, PamResultCode::PAM_IGNORE);
 }
 
 /// PA11 / PA1: sm_authenticate with event=password-failed returns PAM_IGNORE.
 #[test]
 fn test_pam_hooks_authenticate_password_failed_event_returns_ignore() {
-    let dummy_ptr = 0x1000 as *mut PamHandle;
-    // SAFETY: PamHandle is an opaque zero-sized type used only as a reference in trait dispatch.
-    let pamh = unsafe { &mut *dummy_ptr };
-
+    // User-approved 2026-09-30 (GitHub #220): a real `pam_start` handle replaces the
+    // dummy 0x1000 pointer, so production code no longer needs an address heuristic.
     let event_arg = CString::new("event=password-failed").unwrap();
     let timeout_arg = CString::new("timeout_ms=20").unwrap();
     let uid_arg = CString::new("uid=1000").unwrap();
@@ -86,7 +86,9 @@ fn test_pam_hooks_authenticate_password_failed_event_returns_ignore() {
         sock_arg.as_c_str(),
     ];
 
-    let res = SoosPam::sm_authenticate(pamh, args, 0);
+    let (res, _) = common::with_pam_handle("soos-contract", |pamh| {
+        SoosPam::sm_authenticate(pamh, args, 0)
+    });
     assert_eq!(res, PamResultCode::PAM_IGNORE);
 }
 

@@ -55,45 +55,26 @@ pub trait PamFeedback {
     fn service(&mut self) -> Option<Vec<u8>>;
 }
 
-/// Linux-PAM handle adapter.
-///
-/// Transitional guard (GitHub #220): the pre-existing tests in
-/// `crates/pam/tests/pam_bindings_tests.rs` drive `PamHooks::sm_authenticate` with a
-/// dummy `0x1000` handle, so every libpam call below is skipped for addresses in the
-/// first 64 KiB until those tests move to a real `pam_start` handle (proposal recorded in
-/// walkthrough 122). The guard lives only here; the flow itself never inspects pointers.
+/// Linux-PAM handle adapter. The handle comes from libpam (never a synthetic pointer: the
+/// former `addr >= 0x10000` guard was removed once every test used a real `pam_start`
+/// handle, GitHub #220).
 impl PamFeedback for PamHandle {
     fn info(&mut self, msg: &str) {
-        if !is_libpam_handle(self) {
-            return;
-        }
         if let Ok(Some(conv)) = self.get_item::<pam_bindings::conv::Conv<'_>>() {
             let _ = conv.send(pam_bindings::constants::PAM_TEXT_INFO, msg);
         }
     }
 
     fn user(&mut self) -> Option<String> {
-        if !is_libpam_handle(self) {
-            return None;
-        }
         self.get_user(None).ok()
     }
 
     fn service(&mut self) -> Option<Vec<u8>> {
-        if !is_libpam_handle(self) {
-            return None;
-        }
         match self.get_item::<pam_bindings::items::Service<'_>>() {
             Ok(Some(service)) => Some(service.0.to_bytes().to_vec()),
             _ => None,
         }
     }
-}
-
-/// See the transitional guard on `impl PamFeedback for PamHandle`.
-fn is_libpam_handle(h: &PamHandle) -> bool {
-    let addr = h as *const PamHandle as usize;
-    addr >= 0x10000
 }
 
 /// No PAM handle (null `pamh`): no conversation, no user, no service item.
