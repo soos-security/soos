@@ -37,7 +37,7 @@ pub struct CameraConfig {
 impl Default for CameraConfig {
     fn default() -> Self {
         Self {
-            device_path: PathBuf::from("/dev/v4l/by-id/default-camera"),
+            device_path: PathBuf::from(crate::resolver::AUTO_CAMERA_DEVICE),
             width: 640,
             height: 480,
             format: PixelFormat::Yuyv,
@@ -50,6 +50,15 @@ impl Default for CameraConfig {
             min_backoff: Duration::from_millis(100),
             max_backoff: Duration::from_secs(5),
         }
+    }
+}
+
+impl CameraConfig {
+    /// Returns the explicitly configured device, or `None` when `device_path` is an
+    /// auto-detection sentinel (see [`crate::resolver::is_auto_camera_device`]).
+    pub fn explicit_device(&self) -> Option<&Path> {
+        let path = self.device_path.as_path();
+        (!crate::resolver::is_auto_camera_device(path)).then_some(path)
     }
 }
 

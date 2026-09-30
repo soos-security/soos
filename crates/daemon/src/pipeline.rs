@@ -123,6 +123,104 @@ pub fn build_pad_detector(
     soos_inference_ort::OrtPadDetector::new(pad_session, pad_threshold)
 }
 
+/// Returns the camera configuration with its device resolved by the single shared resolver
+/// [`soos_camera_v4l::resolve_camera_device`] (GitHub #152), exactly like `soos-enroll` and
+/// `soos-gui`: an explicit `camera_device` is honored verbatim, the auto sentinel triggers
+/// sensor-preference auto-detection (stable by-id alias). The mock camera never enumerates.
+///
+/// This is the daemon's production resolution path ([`initialize_pipeline`] calls it with the
+/// system enumerator); it is built on [`plan_camera_device`], so the parity tests and the
+/// shipped code exercise the same function.
+pub fn resolve_pipeline_camera(
+    config: &crate::config::PipelineConfig,
+    enumerator: &dyn soos_camera_v4l::CameraEnumerator,
+) -> soos_camera_v4l::CameraConfig {
+    if config.use_mock_camera {
+        return config.camera.clone();
+    }
+    plan_camera_device(&config.camera, |preference| {
+        auto_detect_with(preference, enumerator)
+    })
+}
+
+/// Runs the shared resolver in auto mode and returns the selected path, if a node was found.
+fn auto_detect_with(
+    preference: soos_camera_v4l::SensorPreference,
+    enumerator: &dyn soos_camera_v4l::CameraEnumerator,
+) -> Option<std::path::PathBuf> {
+    let resolution = soos_camera_v4l::resolve_camera_device(None, preference, enumerator);
+    (resolution.source == soos_camera_v4l::CameraResolutionSource::AutoDetected)
+        .then_some(resolution.path)
+}
+
+/// Sentinel `device_path` meaning "auto-select a camera matching `sensor_preference`".
+///
+/// Alias of the shared [`soos_camera_v4l::AUTO_CAMERA_DEVICE`]; any other configured path is
+/// explicit.
+pub const AUTO_SELECT_DEVICE_SENTINEL: &str = soos_camera_v4l::AUTO_CAMERA_DEVICE;
+
+/// Returns whether the camera configuration requests automatic device selection.
+fn is_auto_select(camera: &soos_camera_v4l::CameraConfig) -> bool {
+    camera.explicit_device().is_none()
+}
+
+/// Enumerates capture devices through the shared resolver (GitHub #152) and returns the one
+/// matching `preference`, if any, addressed by its persistent `/dev/v4l/by-id/...` link when
+/// udev provides one (GitHub #151).
+pub fn auto_select_camera_device(
+    preference: soos_camera_v4l::SensorPreference,
+) -> Option<std::path::PathBuf> {
+    auto_detect_with(
+        preference,
+        &soos_camera_v4l::SystemCameraEnumerator::default(),
+    )
+}
+
+/// Computes the startup camera configuration (GitHub #151).
+///
+/// - Auto-selection mode ([`AUTO_SELECT_DEVICE_SENTINEL`]): the device returned by
+///   `auto_select` is used; when none is found the sentinel is kept and the supervisor keeps
+///   re-resolving through [`camera_device_resolver`] until a camera appears.
+/// - Explicit path: kept as-is even when it does not exist yet (by-id link not yet created by
+///   udev at boot). It is never silently replaced by a different camera.
+///
+/// `auto_select` is the enumeration seam (production: [`auto_select_camera_device`]).
+pub fn plan_camera_device<F>(
+    camera: &soos_camera_v4l::CameraConfig,
+    auto_select: F,
+) -> soos_camera_v4l::CameraConfig
+where
+    F: Fn(soos_camera_v4l::SensorPreference) -> Option<std::path::PathBuf>,
+{
+    let mut camera_cfg = camera.clone();
+    if is_auto_select(&camera_cfg) {
+        match auto_select(camera_cfg.sensor_preference) {
+            Some(selected) => camera_cfg.device_path = selected,
+            None => {
+                camera_cfg.device_path = std::path::PathBuf::from(AUTO_SELECT_DEVICE_SENTINEL);
+                tracing::warn!(
+                    preference = ?camera_cfg.sensor_preference,
+                    "No capture device detected at startup; camera reported not ready until one appears"
+                );
+            }
+        }
+    }
+    camera_cfg
+}
+
+/// Returns the device resolver the capture supervisor consults after device loss.
+///
+/// Only auto-selection mode re-enumerates; an explicitly configured device is retried as-is.
+pub fn camera_device_resolver(
+    camera: &soos_camera_v4l::CameraConfig,
+) -> Option<Arc<dyn soos_camera_v4l::DevicePathResolver>> {
+    if !is_auto_select(camera) {
+        return None;
+    }
+    let preference = camera.sensor_preference;
+    Some(Arc::new(move || auto_select_camera_device(preference)))
+}
+
 /// Initializes all production pipeline components from a strongly-typed [`PipelineConfig`].
 ///
 /// This includes:
@@ -139,25 +237,10 @@ pub fn initialize_pipeline(
     config: &crate::config::PipelineConfig,
 ) -> Result<PipelineComponents, crate::error::DaemonError> {
     // 1. Camera Manager
-    let mut camera_cfg = config.camera.clone();
-    if !config.use_mock_camera
-        && (camera_cfg.device_path == std::path::Path::new("/dev/v4l/by-id/default-camera")
-            || !camera_cfg.device_path.exists())
-    {
-        let candidates = soos_camera_v4l::enumerate_capture_devices();
-        if let Some(selected) =
-            soos_camera_v4l::select_camera_device(&candidates, camera_cfg.sensor_preference)
-        {
-            tracing::info!(
-                selected = %selected.path.display(),
-                sensor_type = ?selected.sensor_type(),
-                preference = ?camera_cfg.sensor_preference,
-                "Auto-selected camera device matching sensor preference"
-            );
-            camera_cfg.device_path = selected.path.clone();
-        }
-    }
-
+    // Single resolution path shared with the parity tests (GitHub #152); the mock camera
+    // never enumerates hardware.
+    let camera_cfg =
+        resolve_pipeline_camera(config, &soos_camera_v4l::SystemCameraEnumerator::default());
     let camera: Arc<dyn CameraManager> = if config.use_mock_camera {
         tracing::info!("Initializing mock camera manager for simulation/testing");
         Arc::new(soos_camera_v4l::MockCameraManager::new(camera_cfg))
@@ -166,7 +249,12 @@ pub fn initialize_pipeline(
             device = %camera_cfg.device_path.display(),
             "Spawning production V4L2 camera manager"
         );
-        Arc::new(soos_camera_v4l::V4lCameraManager::spawn(camera_cfg)?)
+        match camera_device_resolver(&config.camera) {
+            Some(resolver) => Arc::new(soos_camera_v4l::V4lCameraManager::spawn_with_resolver(
+                camera_cfg, resolver,
+            )?),
+            None => Arc::new(soos_camera_v4l::V4lCameraManager::spawn(camera_cfg)?),
+        }
     };
 
     // 2. Biometric Store & Master Key

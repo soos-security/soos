@@ -1,5 +1,8 @@
 # Walkthrough 66 — Fix GUI Windowed Layout and MiniFASNetV2 Live Class Index
 
+> **Historical record - class order superseded.** The MiniFASNetV2 live class index stated below is obsolete. The current contract is `[PrintPhoto, Live, ScreenReplay]`, live class index 1 (`DEFAULT_MINIFASNET_LIVE_CLASS_INDEX`), per the 2026-09-29 and 2026-09-30 ADR entries in `AI/DECISIONS.md` (GitHub #146, #171; walkthroughs 79 and 85).
+
+
 ## Context & Objectives
 During real-world camera testing of `soos-gui`, two issues were identified:
 1. **Windowed Layout Positioning**: In windowed mode (e.g. 900×600 to 1120×780), the camera video area disappeared off-screen. It was only visible when maximized or fullscreen.

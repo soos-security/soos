@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use soos_camera_v4l::Frame;
 use soos_inference_ort::{
-    BiometricEmbedding, EmbeddingExtractor, FaceDetection, FaceDetector, FaceLandmarks,
+    AttackType, BiometricEmbedding, EmbeddingExtractor, FaceDetection, FaceDetector, FaceLandmarks,
     PadDetector, PadResult,
 };
 
@@ -12,6 +12,7 @@ use crate::align::align_face_112;
 use crate::color::convert_to_rgb;
 use crate::crop::{crop_and_resize, expand_bbox_for_pad};
 use crate::error::VisionError;
+use crate::ir_liveness::{evaluate_ir_gate, PadInputModality, DEFAULT_IR_PAD_THRESHOLD};
 use crate::matcher::{match_embeddings, MatchResult};
 use zeroize::{Zeroize, Zeroizing};
 
@@ -22,8 +23,14 @@ pub struct VisionPipelineConfig {
     pub min_face_confidence: f32,
     /// Cosine similarity threshold required to grant biometric match.
     pub match_threshold: f32,
-    /// Presentation attack detection (liveness) score threshold (standard 0.80).
+    /// Presentation attack detection (liveness) score threshold for colour frames (standard 0.85).
     pub pad_threshold: f32,
+    /// Liveness score threshold for monochrome (IR, `PixelFormat::Grey`) frames.
+    ///
+    /// The effective IR threshold is `max(pad_threshold, ir_pad_threshold)`, so it is never
+    /// looser than the colour threshold. Default [`DEFAULT_IR_PAD_THRESHOLD`] is an
+    /// uncalibrated conservative floor (GitHub #169; calibration tracked by GitHub #172).
+    pub ir_pad_threshold: f32,
     /// Target aligned face width in pixels (standard 112).
     pub target_width: u32,
     /// Target aligned face height in pixels (standard 112).
@@ -42,11 +49,26 @@ impl Default for VisionPipelineConfig {
             min_face_confidence: 0.70,
             match_threshold: 0.70,
             pad_threshold: 0.85,
+            ir_pad_threshold: DEFAULT_IR_PAD_THRESHOLD,
             target_width: 112,
             target_height: 112,
             pad_target_width: 80,
             pad_target_height: 80,
             pad_bbox_scale: 2.7,
+        }
+    }
+}
+
+impl VisionPipelineConfig {
+    /// Liveness threshold applied to a PAD crop of the given modality.
+    ///
+    /// Colour frames use `pad_threshold`. Monochrome frames use
+    /// `max(pad_threshold, ir_pad_threshold)`; if both values are non-finite the result is
+    /// NaN, which rejects every score (comparisons are written fail-closed).
+    pub fn effective_pad_threshold(&self, modality: PadInputModality) -> f32 {
+        match modality {
+            PadInputModality::Color => self.pad_threshold,
+            PadInputModality::Monochrome => self.pad_threshold.max(self.ir_pad_threshold),
         }
     }
 }
@@ -237,14 +259,8 @@ impl VisionPipeline {
                     self.config.pad_target_height,
                 ) {
                     let pad_crop = Zeroizing::new(crop);
-                    pad_result = self
-                        .pad
-                        .evaluate_liveness(
-                            &pad_crop,
-                            self.config.pad_target_width,
-                            self.config.pad_target_height,
-                        )
-                        .ok();
+                    pad_result =
+                        self.analyze_pad_crop(&pad_crop, PadInputModality::for_frame(frame));
                 }
 
                 if let Ok(aligned) = align_face_112(&rgb, frame.width, frame.height, landmarks) {
@@ -275,7 +291,10 @@ impl VisionPipeline {
     /// 2. Detects faces; enforces single-face security invariant (rejects 0 or >1 faces)
     /// 3. Extracts 5-point facial landmarks from detection
     /// 4. Crops and resizes 2.7x expanded bounding box to 80x80 for PAD
-    /// 5. Evaluates Presentation Attack Detection (PAD) liveness; short-circuits on spoof
+    /// 5. Evaluates Presentation Attack Detection (PAD) liveness; short-circuits on spoof.
+    ///    `Grey` frames and every frame from an `Infrared` sensor (whatever its pixel format)
+    ///    first pass the fail-closed IR gate and are scored against the stricter IR threshold
+    ///    (GitHub #169); they never take the colour PAD path.
     /// 6. Warps face to normalized 112x112 RGB crop using landmarks
     /// 7. Extracts L2-normalized biometric embedding
     pub fn process_frame(&self, frame: &Frame) -> Result<PipelineOutput, VisionError> {
@@ -327,18 +346,7 @@ impl VisionPipeline {
             self.config.pad_target_height,
         )?);
 
-        let pad_result = self.pad.evaluate_liveness(
-            &pad_crop,
-            self.config.pad_target_width,
-            self.config.pad_target_height,
-        )?;
-
-        if !pad_result.is_live || pad_result.score < self.config.pad_threshold {
-            return Err(VisionError::PadFailed {
-                score: pad_result.score,
-                threshold: self.config.pad_threshold,
-            });
-        }
+        let pad_result = self.evaluate_pad_crop(&pad_crop, PadInputModality::for_frame(frame))?;
 
         // Step 5: Affine alignment to 112x112 using landmarks for recognition embedding
         let mut aligned_crop_guard = AlignedCropGuard {
@@ -363,6 +371,74 @@ impl VisionPipeline {
             pad_result,
             embedding,
         })
+    }
+
+    /// Modality-aware PAD decision for a context crop (modality from the frame's pixel format
+    /// and sensor type, see [`PadInputModality::for_frame`]).
+    ///
+    /// Colour frames: model result must be live and `score >= pad_threshold`.
+    /// Monochrome frames: the IR gate must pass (otherwise the model is not consulted), then
+    /// the model result must be live and reach the effective IR threshold. Every comparison
+    /// rejects non-finite scores or thresholds.
+    fn evaluate_pad_crop(
+        &self,
+        pad_crop: &[u8],
+        modality: PadInputModality,
+    ) -> Result<PadResult, VisionError> {
+        if modality.is_monochrome() {
+            evaluate_ir_gate(
+                pad_crop,
+                self.config.pad_target_width,
+                self.config.pad_target_height,
+            )
+            .map_err(|reason| VisionError::IrLivenessGateFailed { reason })?;
+        }
+
+        let pad_result = self.pad.evaluate_liveness(
+            pad_crop,
+            self.config.pad_target_width,
+            self.config.pad_target_height,
+        )?;
+
+        let threshold = self.config.effective_pad_threshold(modality);
+        // Written so that a NaN score or threshold always rejects (fail-closed).
+        let passes =
+            pad_result.is_live && pad_result.score.is_finite() && pad_result.score >= threshold;
+        if !passes {
+            return Err(VisionError::PadFailed {
+                score: pad_result.score,
+                threshold,
+            });
+        }
+        Ok(pad_result)
+    }
+
+    /// Non-short-circuiting PAD evaluation for GUI analysis.
+    ///
+    /// Colour frames report the raw model result. Monochrome frames report a spoof result
+    /// (`is_live = false`) when the IR gate rejects or the score is below the IR threshold,
+    /// so the GUI never shows an IR capture as live when the daemon would reject it.
+    fn analyze_pad_crop(&self, pad_crop: &[u8], modality: PadInputModality) -> Option<PadResult> {
+        if !modality.is_monochrome() {
+            return self
+                .pad
+                .evaluate_liveness(
+                    pad_crop,
+                    self.config.pad_target_width,
+                    self.config.pad_target_height,
+                )
+                .ok();
+        }
+        match self.evaluate_pad_crop(pad_crop, modality) {
+            Ok(result) => Some(result),
+            Err(VisionError::IrLivenessGateFailed { .. }) => {
+                Some(PadResult::spoof(0.0, AttackType::UnknownSpoof))
+            }
+            Err(VisionError::PadFailed { score, .. }) => {
+                Some(PadResult::spoof(score, AttackType::UnknownSpoof))
+            }
+            Err(_) => None,
+        }
     }
 
     /// End-to-end verification against an enrolled biometric template.

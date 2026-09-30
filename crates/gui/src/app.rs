@@ -11,13 +11,13 @@
 )]
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use arc_swap::ArcSwapOption;
 use eframe::egui::{self, Color32, Pos2, Rect, Stroke, Vec2};
 use soos_biometric_store::{BiometricStore, BiometricTemplate};
-use soos_camera_v4l::CameraManager;
+use soos_camera_v4l::{CameraManager, CameraStatus};
 use soos_enrollment_cli::guided_enrollment::{
     EnrollmentStep, EnrollmentStepFeedback, GuidedEnrollmentSession,
 };
@@ -25,6 +25,12 @@ use soos_enrollment_cli::service::EnrolledUserSummary;
 use soos_vision::VisionPipeline;
 use zeroize::Zeroizing;
 
+use crate::camera_source::{
+    CameraSourceBackend, CameraSourceSupervisor, HandoverExecutor, HandoverSlot, SwitchableCamera,
+};
+use crate::camera_status::{camera_status_banner, render_status_banner};
+use crate::daemon_control::{DaemonMonitor, DaemonState, SystemctlProbe, DAEMON_POLL_INTERVAL};
+use crate::privileged::{PkexecExecutor, PrivilegedAction, PrivilegedOutcome, TaskRunner};
 use crate::state::{EnrollmentGuiState, LatestFrameData, ProfilesGuiState};
 use crate::worker::{spawn_vision_worker, WorkerSharedInput};
 
@@ -44,7 +50,7 @@ pub struct SoosApp {
     current_tab: AppTab,
     store: Arc<BiometricStore>,
     is_system_store: bool,
-    _camera: Arc<dyn CameraManager>,
+    camera: Arc<dyn CameraManager>,
     _pipeline: Arc<VisionPipeline>,
     latest_frame_slot: Arc<ArcSwapOption<LatestFrameData>>,
     worker_input: Arc<WorkerSharedInput>,
@@ -66,44 +72,24 @@ pub struct SoosApp {
     // Sub-states
     enrollment: EnrollmentGuiState,
     profiles: ProfilesGuiState,
+
+    /// Camera ownership notice shown instead of the feed (GitHub #150).
+    camera_notice: Option<String>,
+
+    // Background daemon-state polling and privileged (pkexec) operations (GitHub #154)
+    daemon_monitor: Option<DaemonMonitor>,
+    tasks: TaskRunner,
+    daemon_message: Option<(String, bool)>,
+    last_camera_status: Option<CameraStatus>,
+
+    // Runtime camera-source switching driven by the daemon state (GitHub #154 / #150)
+    camera_source: Option<CameraSourceSupervisor>,
+    switchable_camera: Option<Arc<SwitchableCamera>>,
+    handover_slot: HandoverSlot,
+    last_source_generation: u64,
 }
 
 impl SoosApp {
-    /// Checks whether `soos-daemon.service` is actively running.
-    pub fn is_daemon_active() -> bool {
-        std::process::Command::new("systemctl")
-            .args(["is-active", "--quiet", "soos-daemon.service"])
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false)
-    }
-
-    /// Pauses `soos-daemon` via Polkit to release camera hardware for the GUI.
-    pub fn pause_daemon() -> Result<(), String> {
-        let res = std::process::Command::new("pkexec")
-            .args(["systemctl", "stop", "soos-daemon.service"])
-            .status()
-            .map_err(|e| format!("Failed to invoke pkexec: {e}"))?;
-        if res.success() {
-            Ok(())
-        } else {
-            Err("Failed to pause soos-daemon (authorization denied or error)".to_string())
-        }
-    }
-
-    /// Resumes `soos-daemon` via Polkit to restore background PAM unlock readiness.
-    pub fn resume_daemon() -> Result<(), String> {
-        let res = std::process::Command::new("pkexec")
-            .args(["systemctl", "start", "soos-daemon.service"])
-            .status()
-            .map_err(|e| format!("Failed to invoke pkexec: {e}"))?;
-        if res.success() {
-            Ok(())
-        } else {
-            Err("Failed to resume soos-daemon (authorization denied or error)".to_string())
-        }
-    }
-
     /// Creates and initializes a new `SoosApp` with background inference worker.
     pub fn new(
         cc: &eframe::CreationContext<'_>,
@@ -130,11 +116,29 @@ impl SoosApp {
         })
         .ok();
 
+        let daemon_monitor = DaemonMonitor::spawn(Arc::new(SystemctlProbe), DAEMON_POLL_INTERVAL)
+            .map_err(|e| {
+                tracing::error!("Failed to spawn daemon status monitor thread: {e}");
+                e
+            })
+            .ok();
+        let repaint_ctx = cc.egui_ctx.clone();
+        // `ResumeDaemon` first releases any direct V4L2 manager (on the privileged worker
+        // thread) so the starting daemon never meets EBUSY because of the GUI.
+        let handover_slot: HandoverSlot = Arc::new(OnceLock::new());
+        let tasks = TaskRunner::new(
+            Arc::new(HandoverExecutor::new(
+                Arc::new(PkexecExecutor),
+                Arc::clone(&handover_slot),
+            )),
+            Arc::new(move || repaint_ctx.request_repaint()),
+        );
+
         let mut app = Self {
             current_tab: AppTab::LiveInspection,
             store,
             is_system_store,
-            _camera: camera,
+            camera,
             _pipeline: pipeline,
             latest_frame_slot,
             worker_input,
@@ -150,31 +154,104 @@ impl SoosApp {
             show_crop_inset: true,
             enrollment: EnrollmentGuiState::default(),
             profiles: ProfilesGuiState::default(),
+            camera_notice: None,
+            daemon_monitor,
+            tasks,
+            daemon_message: None,
+            last_camera_status: None,
+            camera_source: None,
+            switchable_camera: None,
+            handover_slot,
+            last_source_generation: 0,
         };
 
         app.refresh_profiles();
         app
     }
 
-    /// Reloads the enrolled profiles list from the biometric store.
-    pub fn refresh_profiles(&mut self) {
-        if !self.is_system_store {
-            // When running unprivileged, fetch the enrolled list from soos-enroll CLI via Polkit
-            if let Ok(output) = std::process::Command::new("pkexec")
-                .args(["soos-enroll", "list", "--format", "json"])
-                .output()
-            {
-                if output.status.success() {
-                    if let Ok(summaries) =
-                        serde_json::from_slice::<Vec<EnrolledUserSummary>>(&output.stdout)
-                    {
-                        self.profiles.profiles = summaries;
-                        return;
-                    }
-                }
+    /// Sets the camera ownership notice rendered in place of the camera feed (GitHub #150).
+    pub fn set_camera_notice(&mut self, notice: Option<String>) {
+        self.camera_notice = notice;
+    }
+
+    /// Hands the camera to the runtime source supervisor (GitHub #154 / #150).
+    ///
+    /// `camera` must be the [`SwitchableCamera`] this app was created with. The supervisor
+    /// follows the background `DaemonMonitor`: daemon active => daemon IPC preview (or a
+    /// blocked notice), daemon paused => direct V4L2 through the shared resolver. All probing
+    /// and device release happen on the supervisor thread.
+    pub fn attach_camera_source(
+        &mut self,
+        camera: Arc<SwitchableCamera>,
+        backend: Arc<dyn CameraSourceBackend>,
+    ) {
+        let Some(monitor) = self.daemon_monitor.as_ref() else {
+            tracing::error!("No daemon status monitor: the camera stays disabled (fail-closed)");
+            self.camera_notice = Some(
+                "soos-gui cannot determine whether soos-daemon owns the camera, so it will not \
+                 open the camera. Restart soos-gui."
+                    .to_string(),
+            );
+            return;
+        };
+        match CameraSourceSupervisor::spawn(
+            Arc::clone(&camera),
+            backend,
+            Arc::new(monitor.state_reader()),
+        ) {
+            Ok(supervisor) => {
+                let _ = self.handover_slot.set(supervisor.handover());
+                self.camera_source = Some(supervisor);
+                self.switchable_camera = Some(camera);
+            }
+            Err(e) => {
+                tracing::error!("Failed to spawn camera source supervisor thread: {e}");
+                self.camera_notice =
+                    Some(format!("soos-gui could not start its camera source: {e}"));
             }
         }
+    }
 
+    /// Notice rendered instead of the camera feed, if any.
+    fn current_camera_notice(&self) -> Option<String> {
+        self.switchable_camera
+            .as_ref()
+            .and_then(|camera| camera.notice())
+            .or_else(|| self.camera_notice.clone())
+    }
+
+    /// Drops the displayed frame when the camera source was switched (no stale feed).
+    fn sync_camera_source_generation(&mut self) {
+        let Some(camera) = self.switchable_camera.as_ref() else {
+            return;
+        };
+        let generation = camera.generation();
+        if generation != self.last_source_generation {
+            self.last_source_generation = generation;
+            self.latest_frame_slot.store(None);
+            self.video_texture = None;
+            self.aligned_crop_texture = None;
+            self.last_rendered_seq = u64::MAX;
+        }
+    }
+
+    /// Reloads the enrolled profiles list.
+    ///
+    /// Unprivileged sessions query the root-owned system store through `pkexec soos-enroll
+    /// list` on a background thread; the result arrives in [`Self::handle_task_outcomes`].
+    pub fn refresh_profiles(&mut self) {
+        if !self.is_system_store {
+            if let Err(e) = self.tasks.submit(PrivilegedAction::ListProfiles) {
+                self.profiles.status_message = Some((format!("Cannot load profiles: {e}"), true));
+                self.load_local_profiles();
+            }
+            return;
+        }
+        self.load_local_profiles();
+    }
+
+    /// Lists the templates readable from the GUI's own biometric store.
+    fn load_local_profiles(&mut self) {
         let uids = self.store.list_enrolled().unwrap_or_default();
         let mut summaries = Vec::with_capacity(uids.len());
 
@@ -200,6 +277,92 @@ impl SoosApp {
         self.profiles.profiles = summaries;
     }
 
+    /// Submits a privileged action, reporting a busy runner instead of blocking.
+    fn submit_privileged(&mut self, action: PrivilegedAction) -> bool {
+        match self.tasks.submit(action) {
+            Ok(()) => true,
+            Err(e) => {
+                self.daemon_message = Some((format!("{e}"), true));
+                false
+            }
+        }
+    }
+
+    /// Applies the outcomes of finished background privileged operations (non-blocking).
+    fn handle_task_outcomes(&mut self) {
+        for outcome in self.tasks.poll() {
+            match outcome {
+                PrivilegedOutcome::DaemonPaused(result)
+                | PrivilegedOutcome::DaemonResumed(result) => {
+                    if let Some(monitor) = &self.daemon_monitor {
+                        monitor.request_refresh();
+                    }
+                    self.daemon_message = result.err().map(|e| {
+                        tracing::warn!("soos-daemon service control failed: {e}");
+                        (e, true)
+                    });
+                }
+                PrivilegedOutcome::ProfilesListed(Ok(summaries)) => {
+                    self.profiles.profiles = summaries;
+                }
+                PrivilegedOutcome::ProfilesListed(Err(e)) => {
+                    tracing::warn!("Loading system profiles failed: {e}");
+                    self.profiles.status_message = Some((e, true));
+                    self.load_local_profiles();
+                }
+                PrivilegedOutcome::TemplateImported { uid, result } => match result {
+                    Ok(()) => {
+                        self.enrollment.status_message = Some((
+                            format!(
+                                "User {} (UID {uid}) enrolled successfully into system store! Ready for PAM unlock.",
+                                self.enrollment.target_username
+                            ),
+                            false,
+                        ));
+                        self.enrollment.is_active = false;
+                        self.refresh_profiles();
+                    }
+                    Err(e) => {
+                        self.enrollment.status_message = Some((
+                            format!("System store import failed: {e}. Please grant Polkit authorization."),
+                            true,
+                        ));
+                    }
+                },
+                PrivilegedOutcome::TemplateDeleted { uid, result } => {
+                    match result {
+                        Ok(()) => {
+                            self.profiles.status_message = Some((
+                            format!("Template for UID {uid} shredded and removed from system store."),
+                            false,
+                        ));
+                            self.refresh_profiles();
+                        }
+                        Err(e) => {
+                            self.profiles.status_message = Some((
+                            format!("Failed to delete template for UID {uid} from system store via Polkit: {e}"),
+                            true,
+                        ));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Logs camera status transitions (kind and failure count only, never frame data).
+    fn track_camera_status(&mut self, status: CameraStatus) {
+        if self.last_camera_status == Some(status) {
+            return;
+        }
+        if let CameraStatus::Error { kind, failures } = status {
+            tracing::warn!(%kind, failures, "camera source reported an error");
+        } else {
+            tracing::info!(?status, "camera source status changed");
+        }
+        self.last_camera_status = Some(status);
+    }
+
     /// Renders top navigation bar.
     fn render_header(&mut self, ui: &mut egui::Ui, latest_frame: Option<&LatestFrameData>) {
         ui.horizontal(|ui| {
@@ -223,17 +386,45 @@ impl SoosApp {
             );
             ui.separator();
 
-            let daemon_active = Self::is_daemon_active();
-            if daemon_active {
-                ui.colored_label(Color32::GREEN, "● Daemon Active");
-                if ui.small_button("⏸ Pause").clicked() {
-                    let _ = Self::pause_daemon();
+            // Lock-free read of the state published by the background monitor (GitHub #154).
+            let daemon_state = self
+                .daemon_monitor
+                .as_ref()
+                .map_or(DaemonState::Unknown, DaemonMonitor::state);
+            let busy = self.tasks.is_busy();
+            match daemon_state {
+                DaemonState::Active => {
+                    ui.colored_label(Color32::GREEN, "● Daemon Active");
+                    if ui
+                        .add_enabled(!busy, egui::Button::new("⏸ Pause").small())
+                        .clicked()
+                    {
+                        self.submit_privileged(PrivilegedAction::PauseDaemon);
+                    }
                 }
-            } else {
-                ui.colored_label(Color32::YELLOW, "○ Daemon Paused");
-                if ui.small_button("▶ Resume").clicked() {
-                    let _ = Self::resume_daemon();
+                DaemonState::Inactive => {
+                    ui.colored_label(Color32::YELLOW, "○ Daemon Paused");
+                    if ui
+                        .add_enabled(!busy, egui::Button::new("▶ Resume").small())
+                        .clicked()
+                    {
+                        self.submit_privileged(PrivilegedAction::ResumeDaemon);
+                    }
                 }
+                DaemonState::Unknown => {
+                    ui.colored_label(Color32::GRAY, "… Daemon status unknown");
+                }
+            }
+            if busy {
+                ui.spinner();
+                ui.label("Waiting for authorization...");
+            } else if let Some((msg, is_err)) = &self.daemon_message {
+                let color = if *is_err {
+                    Color32::RED
+                } else {
+                    Color32::GREEN
+                };
+                ui.colored_label(color, msg);
             }
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -244,7 +435,8 @@ impl SoosApp {
                     ui.separator();
                     ui.label(format!("{}×{}", frame.width, frame.height));
                 } else {
-                    ui.label("Waiting for camera feed...");
+                    let banner = camera_status_banner(&self.camera.status());
+                    ui.label(banner.title);
                 }
             });
         });
@@ -839,65 +1031,24 @@ impl SoosApp {
 
                                     // If not running as root, import into system store via Polkit
                                     if !self.is_system_store {
-                                        let tmp_path = std::env::temp_dir().join(format!(
-                                            ".soos_gui_import_{}_{}.json",
-                                            self.enrollment.target_uid,
-                                            std::process::id()
-                                        ));
-
-                                        let write_res = serde_json::to_string(&fused_embedding)
-                                            .map_err(|e| format!("Failed to serialize embedding: {e}"))
-                                            .and_then(|json| {
-                                                std::fs::write(&tmp_path, json)
-                                                    .map_err(|e| format!("Failed to write temporary embedding: {e}"))
-                                            });
-
-                                        match write_res {
+                                        // Runs off the UI thread; the outcome arrives in
+                                        // `handle_task_outcomes` (GitHub #154).
+                                        let action = PrivilegedAction::ImportTemplate {
+                                            uid: self.enrollment.target_uid,
+                                            embedding: Zeroizing::new(fused_embedding.clone()),
+                                        };
+                                        match self.tasks.submit(action) {
                                             Ok(()) => {
-                                                let import_status = std::process::Command::new("pkexec")
-                                                    .args([
-                                                        "soos-enroll",
-                                                        "import",
-                                                        "--uid",
-                                                        &self.enrollment.target_uid.to_string(),
-                                                        "--file",
-                                                        &tmp_path.to_string_lossy(),
-                                                    ])
-                                                    .status();
-
-                                                let _ = std::fs::remove_file(&tmp_path);
-
-                                                match import_status {
-                                                    Ok(status) if status.success() => {
-                                                        self.enrollment.status_message = Some((
-                                                            format!(
-                                                                "User {} enrolled successfully into system store! Ready for PAM unlock.",
-                                                                self.enrollment.target_username
-                                                            ),
-                                                            false,
-                                                        ));
-                                                        self.refresh_profiles();
-                                                        self.enrollment.is_active = false;
-                                                    }
-                                                    Ok(status) => {
-                                                        self.enrollment.status_message = Some((
-                                                            format!(
-                                                                "System store import failed with exit code {:?}. Please grant Polkit authorization.",
-                                                                status.code()
-                                                            ),
-                                                            true,
-                                                        ));
-                                                    }
-                                                    Err(e) => {
-                                                        self.enrollment.status_message = Some((
-                                                            format!("Failed to execute pkexec soos-enroll: {e}"),
-                                                            true,
-                                                        ));
-                                                    }
-                                                }
+                                                self.enrollment.status_message = Some((
+                                                    "Importing template into the system store; \
+                                                     answer the Polkit prompt..."
+                                                        .to_string(),
+                                                    false,
+                                                ));
                                             }
                                             Err(e) => {
-                                                self.enrollment.status_message = Some((e, true));
+                                                self.enrollment.status_message =
+                                                    Some((format!("Cannot import template: {e}"), true));
                                             }
                                         }
                                     } else {
@@ -1013,34 +1164,16 @@ impl SoosApp {
                         ui.horizontal(|ui| {
                             if ui.button("Yes, Shred Template").clicked() {
                                 if !self.is_system_store {
-                                    let del_status = std::process::Command::new("pkexec")
-                                        .args([
-                                            "soos-enroll",
-                                            "delete",
-                                            "--uid",
-                                            &uid.to_string(),
-                                            "--yes",
-                                        ])
-                                        .status();
                                     let _ = self.store.delete(uid);
-                                    match del_status {
-                                        Ok(s) if s.success() => {
-                                            self.profiles.status_message = Some((
-                                                format!(
-                                                    "Template for UID {uid} shredded and removed from system store."
-                                                ),
-                                                false,
-                                            ));
-                                            self.refresh_profiles();
-                                        }
-                                        _ => {
-                                            self.profiles.status_message = Some((
-                                                format!(
-                                                    "Failed to delete template for UID {uid} from system store via Polkit."
-                                                ),
-                                                true,
-                                            ));
-                                        }
+                                    // Runs off the UI thread; the outcome arrives in
+                                    // `handle_task_outcomes` (GitHub #154).
+                                    if let Err(e) =
+                                        self.tasks.submit(PrivilegedAction::DeleteTemplate { uid })
+                                    {
+                                        self.profiles.status_message = Some((
+                                            format!("Cannot delete template for UID {uid}: {e}"),
+                                            true,
+                                        ));
                                     }
                                 } else if let Err(e) = self.store.delete(uid) {
                                     self.profiles.status_message = Some((
@@ -1080,6 +1213,13 @@ impl eframe::App for SoosApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
 
+        // Apply finished background privileged operations without blocking (GitHub #154).
+        self.handle_task_outcomes();
+        self.sync_camera_source_generation();
+        let camera_notice = self.current_camera_notice();
+        let camera_status = self.camera.status();
+        self.track_camera_status(camera_status);
+
         // Read latest video frame from worker
         let latest = self.latest_frame_slot.load();
         if let Some(frame_data) = latest.as_ref() {
@@ -1116,12 +1256,16 @@ impl eframe::App for SoosApp {
                     AppTab::GuidedEnrollment => self.render_guided_enrollment(ui, frame),
                     AppTab::Profiles => self.render_profiles(ui),
                 }
-            } else {
+            } else if let Some(notice) = camera_notice.as_deref() {
                 ui.vertical_centered(|ui| {
                     ui.add_space(100.0);
-                    ui.spinner();
-                    ui.heading("Connecting to camera and initializing models...");
+                    ui.heading("Camera unavailable");
+                    ui.colored_label(Color32::YELLOW, notice);
                 });
+            } else {
+                // Distinct, actionable camera state instead of a generic spinner (GitHub #155).
+                ui.add_space(100.0);
+                render_status_banner(ui, &camera_status_banner(&camera_status));
             }
         });
     }

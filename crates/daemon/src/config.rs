@@ -250,23 +250,19 @@ impl DaemonConfig {
 
         if let Some(pipe) = file.pipeline {
             if let Some(camera_device) = pipe.camera_device {
-                if camera_device.as_os_str() != "auto" && !camera_device.as_os_str().is_empty() {
+                // Shared sentinel vocabulary with soos-enroll / soos-gui (GitHub #152):
+                // "", "auto" and "default" keep the auto-detection sentinel.
+                if !soos_camera_v4l::is_auto_camera_device(&camera_device) {
                     config.pipeline.camera.device_path = camera_device;
                 }
             }
             config.pipeline.camera.warmup_frames = pipe.warmup_frames.unwrap_or(0);
-            if let Some(sensor_pref) = pipe.sensor_preference {
-                match sensor_pref.to_lowercase().as_str() {
-                    "prefer_ir" | "ir" => {
-                        config.pipeline.camera.sensor_preference =
-                            soos_camera_v4l::SensorPreference::PreferIr;
-                    }
-                    "prefer_rgb" | "rgb" => {
-                        config.pipeline.camera.sensor_preference =
-                            soos_camera_v4l::SensorPreference::PreferRgb;
-                    }
-                    _ => {}
-                }
+            if let Some(preference) = pipe
+                .sensor_preference
+                .as_deref()
+                .and_then(soos_camera_v4l::parse_sensor_preference)
+            {
+                config.pipeline.camera.sensor_preference = preference;
             }
             if let Some(idle_secs) = pipe.idle_timeout_secs {
                 config.pipeline.camera.idle_timeout = Duration::from_secs(idle_secs);
@@ -307,10 +303,18 @@ impl DaemonConfig {
                 let current_pad = config.pipeline.thresholds.pad_threshold();
                 let match_thresh = th.match_threshold.unwrap_or(current_match);
                 let pad_thresh = th.pad_threshold.unwrap_or(current_pad);
-                config.pipeline.thresholds =
-                    soos_policy::ThresholdConfig::new_raw(match_thresh, pad_thresh);
-                config.pipeline.vision.match_threshold = match_thresh;
-                config.pipeline.vision.pad_threshold = pad_thresh;
+                // Operator-editable thresholds are validated and floored (GitHub #170,
+                // PAD-04): `pad_threshold = 0` would otherwise disable anti-spoofing silently.
+                let validated = soos_policy::ThresholdConfig::builder()
+                    .match_threshold(match_thresh)
+                    .pad_threshold(pad_thresh)
+                    .build_with_security_floor()
+                    .map_err(|e| {
+                        DaemonError::Config(format!("Invalid [pipeline.thresholds]: {e}"))
+                    })?;
+                config.pipeline.thresholds = validated;
+                config.pipeline.vision.match_threshold = validated.match_threshold();
+                config.pipeline.vision.pad_threshold = validated.pad_threshold();
             }
 
             if let Some(rl) = pipe.rate_limit {

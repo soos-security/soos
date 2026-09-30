@@ -123,4 +123,29 @@ impl CameraError {
             _ => Self::Io { path, source: err },
         }
     }
+
+    /// Maps an ioctl failure (`VIDIOC_S_FMT`, `VIDIOC_REQBUFS`, `VIDIOC_STREAMON`, `VIDIOC_DQBUF`).
+    ///
+    /// A node already streamed by another process opens successfully and only fails at these
+    /// ioctls with `EBUSY` (GitHub #150): `EBUSY`, `ENODEV` and `ENOENT` are therefore classified
+    /// through [`Self::from_io_error`] (keeping the raw OS error), while any other failure keeps
+    /// the contextual variant built by `fallback` from the error description.
+    pub fn from_ioctl_error<F>(path: PathBuf, err: std::io::Error, fallback: F) -> Self
+    where
+        F: FnOnce(String) -> Self,
+    {
+        match err.raw_os_error() {
+            Some(libc::EBUSY | libc::ENODEV | libc::ENOENT) => Self::from_io_error(path, err),
+            _ => fallback(err.to_string()),
+        }
+    }
+
+    /// Returns `true` when the device is held by another process (`EBUSY`).
+    pub fn is_device_busy(&self) -> bool {
+        match self {
+            Self::DeviceBusy { .. } => true,
+            Self::Simulated { code, .. } => *code == libc::EBUSY,
+            _ => false,
+        }
+    }
 }

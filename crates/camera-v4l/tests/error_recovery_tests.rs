@@ -133,3 +133,67 @@ fn test_exponential_backoff_calculation() {
         current = (current.saturating_mul(2)).min(config.max_backoff);
     }
 }
+
+// GitHub #150 (review finding CAM-02): a uvcvideo node already streamed by another process opens
+// fine and only fails at VIDIOC_S_FMT / REQBUFS / STREAMON with EBUSY. Those ioctl failures must be
+// classified as `DeviceBusy` (and ENODEV as `DeviceNotFound`) instead of an opaque string.
+
+fn stream_create_fallback(reason: String) -> CameraError {
+    CameraError::StreamCreate {
+        path: std::path::PathBuf::from("/dev/video0"),
+        reason,
+    }
+}
+
+#[test]
+fn test_set_format_ebusy_maps_to_device_busy() {
+    let path = std::path::PathBuf::from("/dev/video0");
+    let err = CameraError::from_ioctl_error(
+        path.clone(),
+        std::io::Error::from_raw_os_error(libc::EBUSY),
+        stream_create_fallback,
+    );
+    match err {
+        CameraError::DeviceBusy { path: p, source } => {
+            assert_eq!(p, path);
+            assert_eq!(source.raw_os_error(), Some(libc::EBUSY));
+        }
+        other => panic!("EBUSY from an ioctl must map to DeviceBusy, got {other:?}"),
+    }
+}
+
+#[test]
+fn test_ioctl_enodev_maps_to_device_not_found() {
+    let err = CameraError::from_ioctl_error(
+        std::path::PathBuf::from("/dev/video0"),
+        std::io::Error::from_raw_os_error(libc::ENODEV),
+        stream_create_fallback,
+    );
+    assert!(
+        matches!(err, CameraError::DeviceNotFound { .. }),
+        "ENODEV from an ioctl must map to DeviceNotFound, got {err:?}"
+    );
+}
+
+#[test]
+fn test_ioctl_other_errno_uses_contextual_fallback() {
+    let err = CameraError::from_ioctl_error(
+        std::path::PathBuf::from("/dev/video0"),
+        std::io::Error::from_raw_os_error(libc::EINVAL),
+        stream_create_fallback,
+    );
+    assert!(
+        matches!(err, CameraError::StreamCreate { .. }),
+        "Non-busy ioctl errors must keep their contextual variant, got {err:?}"
+    );
+}
+
+#[test]
+fn test_device_busy_is_reported_as_busy() {
+    let busy = CameraError::from_io_error(
+        std::path::PathBuf::from("/dev/video0"),
+        std::io::Error::from_raw_os_error(libc::EBUSY),
+    );
+    assert!(busy.is_device_busy());
+    assert!(!CameraError::Starved.is_device_busy());
+}

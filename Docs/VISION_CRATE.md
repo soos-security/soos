@@ -79,12 +79,41 @@ $$\text{similarity}(a, b) = \frac{a \cdot b}{\|a\|_2 \|b\|_2}$$
    - $> 1$ faces detected $\implies$ returns `Err(VisionError::MultipleFacesDetected { count })`.
 4. Validates face confidence against `min_face_confidence` (default `0.70`).
 5. Extracts 5-point facial landmarks directly from `FaceDetection.landmarks` (fails closed with `VisionError::MissingLandmarks` if absent).
-6. Expands bounding box by `pad_bbox_scale` (2.7×) centered on face and clamps to image bounds (`expand_bbox_for_pad`).
+6. Expands bounding box by `pad_bbox_scale` (2.7×) centered on face, shifting it inward at image borders (`expand_bbox_for_pad`, Minivision shifting algorithm).
 7. Crops and resizes the expanded bounding box to 80×80 for Presentation Attack Detection (`crop_and_resize`).
-8. Evaluates Presentation Attack Detection (`PadDetector`, MiniFASNetV2) and short-circuits on spoof (`VisionError::PadFailed`).
+8. Evaluates Presentation Attack Detection (`PadDetector`, MiniFASNetV2) and short-circuits on spoof (`VisionError::PadFailed`). The decision is **format-aware** (GitHub #169, see §2.4.1): a `PixelFormat::Grey` frame, or any frame from an `Infrared` sensor, must first pass the fail-closed IR gate (`VisionError::IrLivenessGateFailed`) and is scored against the stricter IR threshold.
 9. Warps face to normalized 112×112 RGB crop using 5-point landmarks (`align_face_112`).
 10. Extracts L2-normalized 512D biometric embedding (`EmbeddingExtractor`, ArcFace w600k).
 11. Compares against enrolled template via `match_embeddings`.
+
+#### 2.4.1 Format-Aware PAD Policy for IR / Grey Frames (`ir_liveness.rs`, GitHub #169)
+
+MiniFASNetV2 is trained on colour captures. `convert_to_rgb` replicates a `Grey` byte into three
+identical channels, which is out-of-distribution for the model, and `CameraConfig` prefers the IR
+sensor by default (`SensorPreference::PreferIr`). The pipeline therefore derives a
+`PadInputModality` with `PadInputModality::for_frame` from `frame.format` **and**
+`frame.sensor_type`: any frame from an `Infrared` sensor is `Monochrome` whatever its pixel format
+(an IR node streaming YUYV or MJPEG never takes the colour path); otherwise `Grey` ⇒ `Monochrome`
+and `Rgb24`, `Yuyv`, `Nv12`, `Mjpeg` ⇒ `Color`. A monochrome frame never takes the colour PAD path:
+
+| Step | Monochrome (`Grey`) frame | Colour frame |
+|---|---|---|
+| IR gate on the 80×80 PAD crop (`evaluate_ir_gate`) | mean luma in `[IR_MIN_MEAN_LUMA = 20, IR_MAX_MEAN_LUMA = 235]`, luma std-dev `>= IR_MIN_LUMA_STDDEV = 10`, texture energy (mean abs. horizontal + vertical neighbour difference) `>= IR_MIN_TEXTURE_ENERGY = 2`; failure ⇒ `IrLivenessGateFailed { reason }` and the model is **not** consulted | skipped |
+| MiniFASNetV2 liveness | must be live and `score >= max(pad_threshold, ir_pad_threshold)` (default `DEFAULT_IR_PAD_THRESHOLD = 0.95`) | must be live and `score >= pad_threshold` (0.85) |
+
+- The effective IR threshold is never looser than `pad_threshold`; a NaN score or threshold always
+  rejects (`is_finite()` guard on both paths).
+- The gate constants and `DEFAULT_IR_PAD_THRESHOLD` are **conservative, uncalibrated** values: the
+  gate only rejects clearly degenerate crops (unlit, saturated, flat, texture-less) and never grants
+  liveness on its own. No FAR/FRR figure is claimed for IR. Calibration on captured IR frames is a
+  hardware follow-up (GitHub #172 / PAD-06).
+- `analyze_frame` (GUI) applies the same policy and reports a non-live `PadResult` for a gate
+  failure or a sub-threshold IR score, so the GUI never shows an IR capture as live when the daemon
+  would reject it.
+- `soos-daemon` maps `IrLivenessGateFailed` to a spoof capture (`FrameEvaluation::spoof(0.0)`),
+  which vetoes the request (`Deny` / `PadFailed`, password fallback).
+- IR emitter requirements are documented in `Docs/CAMERA_V4L_CRATE.md` ("IR Sensors and Emitter
+  Requirements").
 
 ### 2.5 Letterbox Padding & Coordinate Projection (`letterbox.rs`)
 
@@ -105,8 +134,8 @@ Next-generation face detection (SCRFD) operates on uniform 640×640 square input
 
 MiniFASNetV2 anti-spoofing requires wider facial context than the aligned 112×112 face crop:
 1. `expand_bbox_for_pad(bbox, scale, img_w, img_h) -> BoundingBox`:
-   - Scales the bounding box from its center by `scale` factor (typically 2.7×).
-   - Clamps the resulting coordinates to valid image dimensions $[0, W]$ and $[0, H]$.
+   - Scales the bounding box from its center by `scale` factor (typically 2.7×); the effective scale is first bounded so that the expanded box never exceeds the image canvas (`min(scale, W / w, H / h)`).
+   - When the expanded box crosses an image border it is **shifted inward** (translated, not clipped), matching Minivision `CropImage._get_new_box`, so the PAD crop keeps its context scale and aspect ratio instead of being distorted by independent per-edge clamping. A final clamp to $[0, W]$ × $[0, H]$ only guards floating-point residue.
 2. `crop_and_resize(rgb, img_w, img_h, bbox, target_w, target_h) -> Result<Vec<u8>, VisionError>`:
    - Resizes the cropped region to target dimensions (e.g. 80×80) using bilinear interpolation.
    - Any region extending beyond original image boundaries is padded with black (zero).
@@ -141,3 +170,4 @@ The 3-model pipeline completes in under 30ms on mock fixtures and estimated ~80m
 | **NGM13** | PAD receives 2.7× expanded crop (80×80); embedding receives aligned 112×112 crop | `pipeline_tests::test_pipeline_pad_receives_expanded_crop`, `test_pipeline_embedding_receives_aligned_crop`, `test_expand_bbox_centered`, `test_expand_bbox_clamped_to_image` | ☑ Validated |
 | **NGM14** | Letterbox padding preserves aspect ratio with correct coordinate un-projection | `letterbox_tests::test_letterbox_unproject_roundtrip`, `letterbox_tests::test_letterbox_640x480_to_640x640`, `letterbox_tests::test_letterbox_1280x720_to_640x640`, `letterbox_tests::test_letterbox_square_no_padding` | ✅ Verified |
 | **NGM14b** | Bounding box crop and resize with bilinear interpolation and out-of-bounds zero (black) padding | `crop_tests::test_crop_and_resize_known_image`, `crop_tests::test_crop_and_resize_out_of_bounds_padding`, `crop_tests::test_crop_and_resize_degenerate_bbox_returns_black`, `crop_tests::test_expand_bbox_for_pad_expansion_and_clamping` | ✅ Verified |
+| **PIR1–PIR5** | Format-aware PAD: `Grey` frames pass the fail-closed IR gate and the stricter IR threshold, colour path unchanged (GitHub #169) | `ir_pad_policy_tests::*`, `pipeline_integration_tests::test_169_*` (see `AI/VERIFICATION_MATRIX.md`) | ✅ Verified |

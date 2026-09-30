@@ -15,6 +15,9 @@ use soos_daemon::logging::init_logging;
 use soos_daemon::pipeline::initialize_pipeline;
 use soos_daemon::socket::bind_socket;
 
+/// Poll interval of the camera health transition logger.
+const CAMERA_HEALTH_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
+
 /// Privileged background daemon for soos local biometric PAM verification.
 #[derive(Parser, Debug)]
 #[command(
@@ -60,7 +63,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("Initializing pipeline components and verifying attested machine learning models");
     let components = match initialize_pipeline(&config.pipeline) {
         Ok(comps) => {
-            health.set_camera_ready(true);
+            // camera_ready is derived live from the capture supervisor state (GitHub #153):
+            // spawning the supervisor does not mean a device was opened.
+            health.attach_camera(comps.camera.clone());
             health.set_models_verified(true);
             comps
         }
@@ -87,6 +92,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     health.set_socket_ready(true);
 
     let mut sigterm = signal(SignalKind::terminate())?;
+
+    // Log camera lifecycle transitions (missing device, recovery, dead capture thread).
+    let monitor_health = health.clone();
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(CAMERA_HEALTH_POLL_INTERVAL);
+        let mut last = None;
+        loop {
+            ticker.tick().await;
+            let current = monitor_health.camera_health();
+            if current != last {
+                match current {
+                    Some(state) if state.is_operational() => {
+                        info!(camera_state = %state, "Camera health changed");
+                    }
+                    Some(state) => {
+                        warn!(camera_state = %state, "Camera health changed; camera not ready");
+                    }
+                    None => {}
+                }
+                last = current;
+            }
+        }
+    });
 
     info!(
         status = %health.snapshot(),

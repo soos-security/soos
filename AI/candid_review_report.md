@@ -1,167 +1,256 @@
 # Candid Review Report
 
 - **Date**: 2026-09-30
-- **Target Branch**: `fix/p0-review-batch`
-- **Base (merge-base)**: `2623805`
-- **Reviewed-Diff-Fingerprint**: `ab604d5c326a9bfb72e73323f21ec711a5d0bd89054fd5116fa3c40a4ef3172d`
-- **Audited Files**: `.agents/skills/dev-workflow/references/project-facts.md`, `.github/workflows/ci.yml`, `AI/ARCHITECTURE.md`, `AI/BACKLOG.md`, `AI/DECISIONS.md`, `AI/VERIFICATION_MATRIX.md`, `AI/walkthroughs/78_pam_release_panic_unwind.md`, `AI/walkthroughs/79_pad_live_class_index_single_source.md`, `AI/walkthroughs/80_pad_multiframe_consensus.md`, `AI/walkthroughs/81_preview_frame_authorization.md`, `AI/walkthroughs/82_debug_vision_report_safety.md`, `AI/walkthroughs/83_package_master_key_isolation.md`, `AI/walkthroughs/84_fedora_authselect_profile_activation.md`, `Cargo.lock`, `Cargo.toml`, `Docs/CI_CD_AND_SECURITY.md`, `Docs/DEVELOPMENT_WORKFLOW.md`, `Docs/DISTRIBUTION_DEPLOYMENT.md`, `Docs/ENROLLMENT_CLI.md`, `Docs/INFERENCE_ORT_CRATE.md`, `Docs/IPC_PROTOCOL.md`, `Docs/PACKAGING_AND_PROVISIONING.md`, `Docs/PAM_DOCKER_TEST_MATRIX.md`, `Docs/PAM_MODULE.md`, `Docs/POLICY_CRATE.md`, `Docs/SECURITY_AND_QUALITY_GUIDELINES.md`, `crates/daemon/Cargo.toml`, `crates/daemon/src/config.rs`, `crates/daemon/src/dispatcher.rs`, `crates/daemon/src/lib.rs`, `crates/daemon/src/main.rs`, `crates/daemon/src/pipeline.rs`, `crates/daemon/src/preview.rs`, `crates/daemon/tests/dispatcher_tests.rs`, `crates/daemon/tests/pad_wiring_tests.rs`, `crates/daemon/tests/pipeline_integration_tests.rs`, `crates/daemon/tests/preview_authorization_tests.rs`, `crates/enrollment-cli/Cargo.toml`, `crates/enrollment-cli/src/args.rs`, `crates/enrollment-cli/src/error.rs`, `crates/enrollment-cli/src/html_report.rs`, `crates/enrollment-cli/src/lib.rs`, `crates/enrollment-cli/src/main.rs`, `crates/enrollment-cli/src/service.rs`, `crates/enrollment-cli/tests/debug_vision_tests.rs`, `crates/enrollment-cli/tests/pad_wiring_tests.rs`, `crates/gui/Cargo.toml`, `crates/gui/src/ipc_camera.rs`, `crates/gui/src/lib.rs`, `crates/gui/src/main.rs`, `crates/gui/tests/ipc_camera_tests.rs`, `crates/inference-ort/src/lib.rs`, `crates/inference-ort/src/mock.rs`, `crates/inference-ort/src/pad.rs`, `crates/inference-ort/src/registry.rs`, `crates/pam/Cargo.toml`, `crates/pam/src/config.rs`, `crates/pam/src/fault_injection.rs`, `crates/pam/src/lib.rs`, `crates/pam/tests/fault_injection_tests.rs`, `crates/policy/src/decision.rs`, `crates/policy/src/error.rs`, `crates/policy/src/lib.rs`, `crates/policy/src/pad_consensus.rs`, `crates/policy/tests/decision_tests.rs`, `crates/policy/tests/pad_consensus_tests.rs`, `crates/protocol/src/types.rs`, `crates/protocol/tests/preview_tests.rs`, `models/README.md`, `packaging/arch/PKGBUILD`, `packaging/arch/soos.install`, `packaging/debian/postinst`, `packaging/debian/rules`, `packaging/pam/fedora/soos/README`, `packaging/pam/fedora/soos/REQUIREMENTS`, `packaging/pam/fedora/soos/dconf-db`, `packaging/pam/fedora/soos/dconf-locks`, `packaging/pam/fedora/soos/fingerprint-auth`, `packaging/pam/fedora/soos/nsswitch.conf`, `packaging/pam/fedora/soos/password-auth`, `packaging/pam/fedora/soos/postlogin`, `packaging/pam/fedora/soos/smartcard-auth`, `packaging/pam/fedora/soos/system-auth`, `packaging/rpm/soos.spec`, `run_tests.sh`, `scripts/build_arch.sh`, `scripts/build_deb.sh`, `scripts/check_no_key_material.sh`, `scripts/install.sh`, `scripts/provision_master_key.sh`, `scripts/uninstall.sh`, `tests/distro/fedora_rhel_test.sh`, `tests/docker/authselect_profile_test.sh`, `tests/docker/test_packages.sh`, `tests/docker/test_suite.sh`, `tests/fixtures/mod.rs`, `tests/invariants/src/lib.rs`
+- **Target Branch**: `fix/p1-pad-camera-batch`
+- **Base (merge-base)**: `2e15447`
+- **Reviewed-Diff-Fingerprint**: `0878fd4aa8d905aeadbc7c6e7df2c17454bf416869dbe15589578ab586758a74`
+- **Review round**: 2. The round-1 report (fingerprint `cfc89676…`) returned CHANGES_REQUESTED.
+- **Issues claimed**: #150, #151, #152, #153, #154, #155, #169, #170, #171, #172
+- **Audited Files** (79): `AI/ARCHITECTURE.md`, `AI/BACKLOG.md`, `AI/DECISIONS.md`, `AI/VERIFICATION_MATRIX.md`,
+  `AI/walkthroughs/{53,58,63,66,85,86,87,88,89,90}_*.md`,
+  `Docs/{CAMERA_V4L_CRATE,ENROLLMENT_CLI,GUI_APPLICATION,INFERENCE_ORT_CRATE,IPC_PROTOCOL,POLICY_CRATE,README,VISION_CRATE}.md`,
+  `crates/camera-v4l/src/{config,error,frame,lib,manager,mock,resolver,stable_path,status,v4l_impl}.rs`,
+  `crates/camera-v4l/tests/{camera_status,error_recovery,ir_capture_plan,resolver,supervision}_tests.rs`,
+  `crates/daemon/src/{config,dispatcher,health,main,pipeline}.rs`,
+  `crates/daemon/tests/{camera_health,camera_resolution,pipeline_integration,threshold_config}_tests.rs`,
+  `crates/enrollment-cli/src/{lib,service}.rs`, `crates/enrollment-cli/tests/camera_resolver_parity_tests.rs`,
+  `crates/gui/src/{app,camera_mode,camera_source,camera_status,daemon_control,ipc_camera,lib,logging,main,privileged,worker}.rs`,
+  `crates/gui/tests/{bounded_output,camera_mode,camera_source,camera_status_retry,camera_status,responsiveness}_tests.rs`,
+  `crates/inference-ort/tests/pad_real_model_tests.rs`, `crates/policy/src/threshold.rs`,
+  `crates/policy/tests/threshold_floor_tests.rs`, `crates/vision/src/{error,ir_liveness,lib,pipeline}.rs`,
+  `crates/vision/tests/{ir_pad_policy,ir_sensor_policy,pad}_tests.rs`, `tests/invariants/src/{lib,pad_contract}.rs`,
+  `tests/physical/adversarial_test.sh`
 
 ## 1. Executive Summary
 
-Integration review of seven individually approved P0 fixes (#148 PAM `panic = "unwind"` + T10,
-#146 PAD live class index single source, #147 multi-frame PAD consensus with spoof veto, #143
-PreviewFrame authorization + rate limit, #149 debug-vision report safety, #144 no master key in
-packages, #145 Fedora authselect profile + rollback + CI job) merged into `fix/p0-review-batch`.
-The review focused on the hand-resolved merge conflicts and on semantic interactions between fixes.
+This round reviews the full diff against `origin/main`. It pays particular attention to the
+six rework commits (`05e4082`, `fcef3a5`, `784551c`, `61df178`, `093d7e9`, `05dac29`), which
+answer the round-1 findings.
 
-Conflict resolution was verified mechanically: for every one of the seven fix commits, every line
-it added (relative to its base `fbb99c4`) is present in the integrated tree, and no line any
-branch removed was revived beyond what another branch legitimately re-added. The only "missing"
-lines are the two single-purpose `use soos_policy::...` imports in `dispatcher.rs`, correctly
-merged into one `use soos_policy::{ConsensusDecision, FrameEvaluation, PadAggregator, RateLimiter};`,
-and the 2026-09-20 ADR line that gained its "(Superseded ...)" suffix. ADRs appear in
-chronological/merge order (Release Panic, Live Class Index, PAD Consensus, Preview Exception);
-all six new matrix components (PRU, PLC, PMC, PFA, PMK, FAP) are complete; `ci-success` needs the
-new `authselect-profile` job; T1–T10 wording is consistent across ci.yml, run_tests.sh,
-Docs/CI_CD_AND_SECURITY.md and Docs/PAM_DOCKER_TEST_MATRIX.md.
+Status of the round-1 findings:
 
-No CRITICAL or MAJOR defect found. Two MINOR items and two SUGGESTIONS are listed in §4.
+| # | Round-1 finding | Status | Evidence in code |
+|---|---|---|---|
+| 1 | MAJOR: #154 runtime source switching missing; GUI Resume re-creates #150 EBUSY | **Resolved** | `crates/gui/src/camera_source.rs` (planner, `SwitchableCamera`, supervisor thread, `HandoverExecutor`); `app.rs` wraps `PkexecExecutor` in `HandoverExecutor`; `main.rs` no longer selects the source once |
+| 2 | MAJOR: IR policy keyed on `Grey` only | **Resolved** | `Frame::sensor_type`; `plan_capture` classifies the opened node, prefers `Grey` on `Infrared` under auto negotiation, and stamps every frame (`v4l_impl.rs`); `PadInputModality::for_frame` is used by both `process_frame` and `analyze_frame` |
+| 3 | MINOR: daemon parity tests hit an unused function | **Resolved** | `initialize_pipeline` calls `resolve_pipeline_camera(config, &SystemCameraEnumerator::default())`, which is built on `plan_camera_device`; invariant `test_daemon_production_camera_resolution_uses_tested_resolver` |
+| 4 | MINOR: two by-id scanners | **Resolved** | `stable_device_path` delegates to `SystemCameraEnumerator::by_id_aliases`; the local 256 cap is deleted; invariant `test_single_bounded_by_id_scanner` |
+| 5 | MINOR: banner always says "retrying" | **Resolved** | `error_is_retried` in `camera_status.rs`; `CameraBlockReason::is_transient` plus a bounded re-probe in the planner; per-reason messages |
+| 6 | MINOR: no IR corpus measurement | **Documented follow-up** | walkthrough 86 §8; walkthrough 90 "Follow-ups" |
+| 7 | MINOR: `Command::output()` unbounded | **Resolved** | `read_bounded` (`Read::take(limit + 1)`); the helper is killed on an oversized or failed read; the pipe is closed before `wait()`, so no deadlock |
+| 8 | MINOR: GEPU3 cites removed helpers | **Resolved** | the GEPU3 row is marked superseded by GRE1/GRE2/GRE7/GRE8; new rows GRE7–GRE10, PIR6, CSR6 |
+| 9 | SUGGESTION: two camera state machines | **Documented follow-up** | walkthrough 89 §7 |
+| 10 | SUGGESTION: unplug during standby | **Documented follow-up** | walkthrough 89 §7 |
 
-## 2. Test Changes (mechanical listing from step 3, with justification per change)
+The rework introduces no CRITICAL or MAJOR defect. I found four new MINOR robustness issues
+(§4). None of them opens the camera while the daemon owns it, and none weakens a PAD decision
+the daemon makes.
 
-Test files touched: `crates/daemon/tests/{dispatcher_tests,pad_wiring_tests,pipeline_integration_tests,preview_authorization_tests}.rs`,
-`crates/enrollment-cli/tests/{debug_vision_tests,pad_wiring_tests}.rs`, `crates/gui/tests/ipc_camera_tests.rs`,
-`crates/pam/tests/fault_injection_tests.rs`, `crates/policy/tests/{decision_tests,pad_consensus_tests}.rs`,
-`crates/protocol/tests/preview_tests.rs`, `run_tests.sh`, `tests/distro/fedora_rhel_test.sh`,
-`tests/docker/{authselect_profile_test,test_packages,test_suite}.sh`, `tests/fixtures/mod.rs`,
-`tests/invariants/src/lib.rs`. No inline `mod tests` added/removed.
+Local verification on this tree:
+- `cargo fmt --all -- --check` is clean.
+- `cargo clippy --locked --workspace --all-targets -- -D warnings` is clean.
+- `cargo test --locked` passes with 0 failures across `soos-gui`, `soos-vision`,
+  `soos-camera-v4l`, `soos-daemon`, `soos-invariants`, `soos-enrollment-cli` and `soos-policy`.
 
-Removed/changed assertions:
-- `tests/invariants/src/lib.rs` (`test_install_script_creates_required_directories`):
-  `assert!(master_key.is_file())` → `assert!(!master_key.exists())`, and the 0600/32-byte checks
-  moved to `test_provision_master_key_helper_generates_0600_key_once`. Justified contract
-  migration: AI/BACKLOG.md #144.1 acceptance ("staged tree contains no `*.key` file") and matrix
-  PMK1/PMK2. The 0600 / 32-byte properties are still asserted, now on the real key generator.
-- `crates/daemon/tests/dispatcher_tests.rs`: two preview tests now build the dispatcher with
-  `with_preview_config(preview_allow(current_uid))`. Justified by #143 (PFA1: preview denied by
-  default); assertions unchanged, only the setup opts the unprivileged test peer in.
-- `tests/distro/fedora_rhel_test.sh` Step 4: the `authselect check || true` tolerance and
-  template-only greps were replaced by real activation, `authselect check` (fatal), generated-file
-  ordering and nsswitch checks plus rollback — strictly stronger (FAP5 / DV2).
-- `tests/docker/test_suite.sh`: `trap cleanup_daemon` → `trap cleanup_all` (adds T10 temp cleanup).
-- `run_tests.sh`: header comments only, plus the new `authselect` mode.
+## 2. Test Changes (mechanical listing from step 3)
 
-Escape hatches: none (the single `tolerance` hit is matrix prose documenting its *removal*).
+- Removed or changed assertion lines (`^-.*assert|#[test]|...`) in the frozen patch: **none**.
+  None in the rework range `16e461e..HEAD` either.
+- New escape hatches (`#[ignore]`, `#[cfg(any())]`, `should_panic`): **none**. The
+  `tolerance` hits are the golden-logit tolerance `1e-3` in the new `pad_real_model_tests.rs`
+  and the docs that describe it. `test_real_pad_golden_logits_detect_channel_order_swap`
+  asserts that this tolerance is tight enough, which justifies it under #172.
+- Inline `mod tests` changes: none.
+- Pre-existing test files modified (unchanged since round 1, all additive or justified):
+  - `crates/vision/tests/pad_tests.rs`: one rename. The body is unchanged, and the new name
+    states the test is not a metric (#172).
+  - `crates/daemon/tests/pipeline_integration_tests.rs`: gains a `new_with_format` fixture
+    and #169 tests. The default path is unchanged.
+  - `crates/camera-v4l/tests/error_recovery_tests.rs`: gains #150 tests.
+  - `tests/physical/adversarial_test.sh`: stops fabricating metrics in mock mode. Guarded
+    by an invariant.
+- New test files in the rework:
+  - `ir_capture_plan_tests.rs`
+  - `ir_sensor_policy_tests.rs`
+  - `camera_source_tests.rs` (19 tests)
+  - `camera_status_retry_tests.rs`
+  - `bounded_output_tests.rs`
+  - two invariants in `tests/invariants/src/lib.rs`
+- `784551c` edits only the new, not-yet-merged `ir_sensor_policy_tests.rs` fixture (a YUYV
+  encoder refactor). It changes no assertion.
+- Verdict on test integrity: **no weakening found**.
 
 ## 3. Deep Reasoning Audit
 
 ### Logic & Architecture
-- Conflict integrity: scripted per-branch line-survival check over all files of all seven
-  commits → PASS (see §1). ADR order and "Superseded" annotation → PASS. Matrix: PRU1–4, PLC1–3,
-  PMC1–5, PFA1–6, PMK1–6, FAP1–5 all present → PASS; one missing `---` separator (MINOR, §4).
-- ci.yml job graph: `authselect-profile` `needs: lint`, same `if` as siblings, checkout pinned
-  by SHA with `persist-credentials: false`; `ci-success` `needs` includes it and fails on any
-  non-success result (skipped included) → PASS.
-- Dispatcher interplay (#147 × #143): PreviewFrame is now dispatched at Step 6c, after kernel
-  peer verification (Step 6) and before the auth-only deadline/pipeline steps, so it never enters
-  the consensus loop nor touches the auth rate limiter; it has its own `preview_limiter` built
-  from `PreviewConfig` and rebuilt in `with_preview_config`; `main.rs` wires
-  `config.preview` → PASS. Tried: foreign `uid_hint` (rejected at Step 6 and again by
-  `authorize_preview`), default config unprivileged peer (Disabled), `max_requests_per_sec = 0`
-  (RateLimiter returns Err for `max_attempts == 0`) → all refuse with zero pixel bytes.
-- Consensus loop: thresholds come from the same `ThresholdConfig` that sets
-  `vision.pad_threshold` (config.rs:307–313), so the aggregator and `OrtPadDetector` agree.
-  Spoof → sticky veto + immediate break; stale last capture → `Unavailable/StaleFrame`; one
-  `record_attempt` per request after the loop, Allow downgraded on rejection; poll sleep clamped
-  to remaining budget → PASS.
-- #146 × #147: `build_pad_detector` (daemon + enroll) uses `OrtPadDetector::new` (index 1) and
-  the consensus path consumes `pad_result.is_live/score` → PASS.
-- #144 × #145 in install.sh/uninstall.sh/soos.spec: key helper installed and invoked on live
-  install only; authselect.previous recorded only when `DESTDIR` empty and current profile is not
-  `custom/soos*`; uninstall restores before deleting the profile and keeps it if restore fails;
-  spec `%files` ghosts both `master.key` and `authselect.previous` → PASS.
-- Latency of consensus vs packaged `timeout_ms=250` → MINOR finding (§4).
+
+- **IR sensor propagation (#169).**
+  - Scenario: IR node `"USB2.0 FHD UVC WebCam: USB2.0 I"` offers `[Yuyv, Grey]`.
+    `plan_capture` classifies it `Infrared` and negotiates `Grey`.
+  - Scenario: the same node offers only YUYV/MJPEG. It streams YUYV but stays tagged
+    `Infrared`, so the frame is `Monochrome`, the IR gate runs, and the 0.95 threshold
+    applies.
+  - Scenario: `auto_format = false` with YUYV on the IR node. The format is honored and the
+    tag is kept.
+  - Every production `Frame::new` site was checked:
+    - The V4L2 capture stamps the tag.
+    - The mock keeps `Unknown`, so the format rule applies.
+    - The GUI IPC reconstruction keeps `Unknown`. See MINOR 3.
+  - The daemon (`dispatcher.rs`) and `soos-enroll` consume the V4L2 frames unchanged.
+  - → PASS.
+- **Runtime source switching (#154/#150).** Scenarios tried:
+  1. Start with the daemon paused (Direct), then press Resume.
+     `HandoverExecutor::execute` → `release_for_daemon`, which sets `Pending`, takes the
+     planner lock, then replaces and releases the direct manager. `release_manager` stops the
+     manager and drops the last reference, and the V4L2 `Drop` joins the capture thread
+     (device closed). pkexec runs only after that. The tests assert that the direct manager
+     is already dropped when Resume executes.
+  2. Resume is cancelled in Polkit. `finish_handover(false)` sets `Idle`, the flag change
+     triggers a re-probe, and the GUI returns to Direct.
+  3. Resume succeeds. `Started{10 s}` keeps Direct disabled until the monitor reports
+     `Active`, then the GUI switches to IPC.
+  4. Pause while in IPC. The monitor reports `Inactive`, the planner probes, gets
+     `NotRunning`, and switches to Direct.
+  5. Unknown daemon state. The planner returns `None` and never touches the device.
+  6. The daemon is started externally while the GUI is Direct. `DirectV4l` plus
+     `daemon_active` is probed on every tick, and the decision can never be Direct.
+  7. A supervisor tick is racing with Resume. Both paths serialize on the planner mutex.
+     `release_for_daemon` checks `camera.mode()` after it takes the lock, so a manager
+     opened by an in-flight tick is still released.
+  - → PASS.
+- **Resolver single path (#152).** `resolve_pipeline_camera` on the mock path returns
+  `config.camera` unchanged, as before. On the explicit path, `plan_camera_device` keeps it
+  verbatim. On the auto path it delegates to the shared resolver. → PASS.
+- **Bounded retry.** Found a case where `DirectOpenFailed` escapes the bound → MINOR 1.
 
 ### PAM Concurrency & Deadlines
-- `crates/pam` diff adds only a cfg-gated synchronous hook inside the existing `catch_unwind`
-  region, before any socket I/O; no threads/async → PASS. Release profile `panic = "unwind"`
-  pinned by invariant; fault-injection feature never referenced by packaging/CI build lines → PASS.
+
+- The diff does not touch `crates/pam`. No threads or Tokio reach the PAM module.
+- The daemon-side EBUSY recovery is the #150 supervisor backoff, which checks `running`
+  every 20 ms.
+- → PASS.
+
+### GUI Threads, Locks & UI-Thread Blocking
+
+- **Lock order.**
+  - `tick`: planner → handover (inside `handover_active`).
+  - `release_for_daemon`: handover (released) → planner.
+  - `finish_handover`: handover only.
+  - No cycle, so no deadlock.
+- **`SwitchableCamera`.** The `RwLock` is held only to clone an `Arc` or for `mem::replace`.
+  `release_manager` runs outside the lock. No thread waits on a manager while holding the
+  lock.
+- **UI thread.** It calls only `status()`, `notice()`, `generation()` and `mode()` (all
+  non-blocking) and spawns the supervisor.
+  - Probes, joins and `pkexec` run on the supervisor and privileged threads.
+  - Blocking there is bounded: IPC socket timeouts, a 3 s release deadline, and capture
+    backoff that checks `running` every 20 ms.
+  - The only UI-thread join is the supervisor `Drop` at application exit. That is
+    acceptable.
+- → PASS (MINOR 2 concerns a panic path).
 
 ### Panic Safety & Fail-Closed
-- Tried: injected panic/overflow via C ABI, PamHooks, `authenticate_with_config` → PAM_IGNORE
-  (tests). Preview refusals return standard `Response` (ProtocolError), never Allow. Consensus:
-  no path from Pending/SpoofVetoed/rate-limited to Allow. Inference/internal errors inside the loop
-  return `Unavailable` (unchanged). `debug_vision` now propagates detector errors → PASS.
+
+- No `unwrap/expect/panic!/todo!/unreachable!` was added in production `src/`. Poisoned
+  locks are recovered with `into_inner`.
+- The IR policy is now fail-closed on the sensor tag as well as the format:
+  - NaN or low scores are rejected.
+  - A gate rejection never consults the model (spy test).
+  - `analyze_frame` reports not-live below the IR threshold.
+- There is still no path from an error to `Allow`.
+- The GUI planner errs toward *not* opening the device: Unknown state, a pending handover,
+  and a failed monitor spawn all leave the camera disabled.
+- → PASS.
 
 ### Test Integrity & Anti-Weakening
-- §2 listing reviewed; the only weakened-looking assertion is a justified #144 contract migration
-  with the invariant re-asserted on the helper. New tests would fail against plausible wrong
-  implementations (e.g. single-frame Allow, non-sticky veto, preview served by default, index 2)
-  as recorded by the per-branch red evidence → PASS.
+
+- See §2.
+- The new tests can fail against plausible wrong implementations:
+  - The format-only modality fails `test_infrared_sensor_is_monochrome_modality_for_every_pixel_format`.
+  - A missing release fails `test_handover_releases_direct_camera_before_resume_executes`.
+  - A single-shot source choice fails `test_supervisor_switches_sources_on_daemon_state_changes`.
+- → PASS.
 
 ### Memory, Bounds & Secrets
-- Preview responses and every encoded daemon response wrapped in `Zeroizing`; `PreviewResponse`
-  zeroizes on drop; GUI reply bounded by `MAX_PREVIEW_MESSAGE_SIZE`, refusal decoded only when
-  `<= MAX_MESSAGE_SIZE` and nonce-bound; `allowed_uids` bounded (64). debug-vision report:
-  `O_CREAT|O_EXCL|O_NOFOLLOW`, 0600, parent symlink refused, frame embedded only on opt-in, RGB
-  buffer and base64 in `Zeroizing`. Master key: umask 077 temp file + hard-link publish, symlink
-  refused, never printed → PASS.
+
+- `read_bounded` caps the buffer at `limit + 1` while reading. The helper stdout is dropped
+  inside `read_bounded`, so `wait()` cannot block on a full pipe, even if `kill` of the
+  setuid child fails.
+- `Frame::sensor_type` holds no pixel data, and `Zeroize` still covers `data`.
+- Logs carry modes, reasons and paths only. No frames or embeddings are logged.
+- → PASS.
 
 ### Supply Chain & Automation
-- `Cargo.lock`/crate manifests: only intra-workspace/workspace deps (`ort` dev-dep for enroll
-  tests, `getrandom`/`zeroize` already in workspace). New CI job pinned by SHA, inherits
-  `permissions: contents: read`, no `${{ github.event.* }}` in `run:` → PASS.
+
+- No changes to `Cargo.*`, `deny.toml`, `.github/` or the hooks. → PASS.
 
 ### English-Only Policy
-- Scanned added lines for non-ASCII Latin diacritics; none. All docs/comments English → PASS.
+
+- All added code, comments, docs, walkthroughs and commit subjects are English. → PASS.
 
 ## 4. Detailed Findings & Action Items
 
-- **[MINOR]** `AI/walkthroughs/80_pad_multiframe_consensus.md:74` / `packaging/pam/fedora/soos/system-auth:9` —
-  the #147 latency analysis ("170–450 ms, inside DECISION_BUDGET_MS = 900 (sudo, PAM timeout_ms=1000)")
-  assumes a 1000 ms PAM deadline, but every packaged stack (Debian pam-configs, Arch, and the Fedora
-  authselect profile newly shipped by #145) passes `timeout_ms=250`. With k = 3 captures, the upper
-  half of that range exceeds the packaged deadline, so face unlock for sudo/login may fall back to the
-  password more often than before (fail-closed, not a security issue). Correct the walkthrough
-  statement and track a hardware measurement of consensus latency at `timeout_ms=250` (or an ADR
-  revisiting the packaged timeout).
-- **[MINOR]** `AI/VERIFICATION_MATRIX.md:457` — merge resolution left no `---` separator between
-  the `pad-live-class-index-single-source` and `pad-multiframe-consensus` components (all other
-  components are separated). Cosmetic; add the separator.
-- **[SUGGESTION]** `crates/daemon/src/dispatcher.rs:684-708` — inference/internal-error early
-  returns inside the consensus loop skip `record_attempt`, so such requests are not counted by the
-  per-UID rate limiter (pre-existing behavior, unchanged by this diff). Consider recording the
-  attempt on every exit path of Step 8.
-- **[SUGGESTION]** `crates/daemon/src/dispatcher.rs:917-927` — the preview camera wake loop is
-  bounded by `connection_timeout` (max 1 s) rather than a request deadline; acceptable for the
-  diagnostic stream, but a single shared constant with the auth wake path would avoid drift.
+No CRITICAL or MAJOR findings.
 
-## Delta since 9733d7d (re-review)
+1. **[MINOR]** `crates/gui/src/camera_source.rs:118-123` with `:454-460`. The
+   `DirectOpenFailed` retry is not bounded, contrary to GRE9 and to the planner documentation.
+   - The retry cycle:
+     1. `step` increments `transient_retries` on the blocked state.
+     2. `step` calls `force(DirectV4l)`, which does not reset the counter because the
+        previous state was `Blocked`.
+     3. `apply` calls `open_direct`, which fails.
+     4. `planner.force(Blocked(DirectOpenFailed))` then *resets* the counter to 0, because
+        the current state is now `DirectV4l`.
+   - Concrete failure: `V4lCameraManager::spawn` fails (thread spawn `EAGAIN` under a
+     process or thread limit). The supervisor then retries every second forever instead of
+     stopping after `MAX_TRANSIENT_PROBE_RETRIES`.
+   - Impact is low: the loop is rate-limited, and `spawn` fails only on thread creation.
+   - Required: keep the counter when `apply` forces a block right after a step-initiated
+     switch. Add a supervisor-level test with a backend whose `open_direct` always fails.
+2. **[MINOR]** `crates/gui/src/camera_source.rs:649-653`. `HandoverExecutor::execute`
+   calls `finish_handover` only when `inner.execute` returns.
+   - Concrete failure: `inner.execute` panics. The privileged thread dies, `TaskRunner::poll`
+     logs "terminated without an outcome", and `Handover` stays `Pending` forever. The GUI
+     then never reopens the direct camera until it restarts.
+   - This fails closed for the device but is a permanent availability loss.
+   - Required: use a drop guard, or `catch_unwind`, that calls `finish_handover(false)`.
+3. **[MINOR]** `crates/gui/src/ipc_camera.rs:324-331` (documented in walkthrough 86 §8).
+   The preview wire carries the format but not the sensor type. In IPC mode, the GUI rebuilds
+   frames as `SensorType::Unknown`.
+   - Concrete failure: a daemon configured with `auto_format = false` and `format = yuyv` on
+     an IR node sends YUYV previews. The GUI's `analyze_frame` then scores them on the colour
+     path at 0.85. The guided-enrollment liveness gate (`worker.rs:80-85`) can accept an IR
+     capture as live that the daemon would reject at 0.95.
+   - The walkthrough says "Production decisions are unaffected". That is too strong: GUI
+     enrollment into the system store is a production write.
+   - Verification is still fail-closed, because the daemon uses its own tagged frames.
+   - Required: track the protocol bump as a follow-up, and reword the walkthrough to name the
+     enrollment-gate exposure.
+4. **[MINOR]** `crates/gui/src/daemon_control.rs:31-40` with
+   `crates/gui/src/camera_source.rs:143-157`. The monitor maps every non-`active` unit state
+   to `Inactive`, and the planner now opens `/dev/video*` on `Inactive`. The unit reports
+   non-`active` states such as `activating`, `activating (auto-restart)` and `deactivating`.
+   - Concrete failure: `soos-daemon` crashes with `Restart=on-failure`. The GUI polls during
+     the auto-restart window and grabs the camera directly. The restarted daemon meets
+     `EBUSY` until the next poll shows `active`, about 2 s later.
+   - The system self-heals through the #150 backoff, but face unlock is unavailable in that
+     window.
+   - Required (follow-up): treat `activating` and `deactivating` as "daemon owns the device",
+     for example by parsing `systemctl is-active` output instead of using only its exit code.
+5. **[SUGGESTION]** The handover has only mock-level coverage. The walkthrough 90
+   follow-up correctly asks for a hardware check on a dual-sensor laptop: start the GUI
+   paused, press Resume, and confirm the daemon logs no `EBUSY`. Run it before closing #150
+   and #154 on real hardware.
 
-The previous fingerprint-bound review (`6372035…d7509`) was APPROVED at `9733d7d`. Exactly one
-code commit was added afterwards, `8880b3d` (`fix(invariants): satisfy clippy map_or_identity on
-rust 1.98`), because the CI stable toolchain moved to Rust 1.98, whose clippy flags
-`clippy::map_or_identity`.
-
-- **Scope check**: `git diff 9733d7d HEAD -- . ':(exclude)AI/candid_review_report.md'` shows a
-  single hunk in `tests/invariants/src/lib.rs` (line 1825, inside `mod tests`, in the TOML section
-  helper), and nothing else changed in the tree:
-  `-        let end = rest.find("\n[").map_or(rest.len(), |i| i);`
-  `+        let end = rest.find("\n[").unwrap_or(rest.len());`
-- **Semantics**: for `Option<usize>`, `map_or(d, |i| i)` returns `i` on `Some(i)` and `d` on
-  `None`, which is exactly what `unwrap_or(d)` does. `rest.len()` is evaluated eagerly in both
-  forms and has no side effects. The section slice `&rest[..end]` is therefore byte-for-byte
-  identical, so every invariant assertion that uses this helper checks the same text as before.
-  No assertion, `#[test]`, `#[ignore]` or tolerance was added, removed or relaxed, so the
-  invariant tests are not weakened. The helper is test-only code, so it has no production, PAM or
-  FFI impact.
-- **Verification (rustc 1.98.1)**:
-  `cargo clippy --locked -p soos-invariants --all-targets --all-features -- -D warnings` → clean
-  (no warnings); `cargo test --locked -p soos-invariants` → `33 passed; 0 failed; 0 ignored`.
-- **New fingerprint**: `ab604d5c326a9bfb72e73323f21ec711a5d0bd89054fd5116fa3c40a4ef3172d`
-  (from `./scripts/candid_subagent.sh --prepare` at `8880b3d`). The findings and verdict of the
-  previous review still apply unchanged.
+Round-1 follow-ups still open (documented, non-blocking): finding 6 (IR corpus through
+`VisionPipeline`), suggestions 9 and 10.
 
 ## 5. Final Verdict
+
+Every blocking round-1 finding (1, 2) is fixed in production code with tests that fail
+against the previous behavior. Findings 3, 4, 5, 7 and 8 are resolved in code or in the
+matrix, and 6, 9 and 10 are recorded as follow-ups. No test was weakened. The new findings
+are MINOR robustness issues that neither open a fail-open path nor re-create the daemon/GUI
+device fight in the reviewed Resume and Pause flows.
 
 **VERDICT: APPROVED**
