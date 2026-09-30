@@ -19,6 +19,10 @@ mod pad_contract;
 #[cfg(test)]
 mod distro_matrix;
 
+/// Physical validation suite versus the `soos-enroll` CLI (GitHub #186).
+#[cfg(test)]
+mod physical_contract;
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,
