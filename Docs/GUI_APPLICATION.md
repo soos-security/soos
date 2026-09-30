@@ -31,10 +31,14 @@ waits on I/O it does not own.
   wakes the UI with `request_repaint`. Only one privileged action runs at a time
   (`TaskRunnerError::Busy`), so the user never faces stacked Polkit dialogs; the Pause/Resume
   buttons are disabled and a spinner is shown meanwhile.
-- **Template import**: the fused embedding is serialized into a fresh `0600` file created with
-  `O_EXCL` under a random name, passed to `pkexec soos-enroll import`, and removed on every exit
-  path (drop guard). `PrivilegedAction`'s `Debug` output prints only the UID and embedding
-  dimension, never embedding values.
+- **Template import (GitHub #156, review findings CAM-08 / STO-12)**: the fused embedding is
+  serialized to JSON in a zeroizing buffer and piped to the standard input of
+  `pkexec soos-enroll import --uid <uid> --file -` (`privileged::import_helper_args`,
+  `import_template_with`). No file is created, under the temporary directory or anywhere else;
+  the child is always reaped, even if it exits before reading its stdin (denied Polkit prompt).
+  The fused embedding is held in `Zeroizing<Vec<f32>>` from the enrollment session to the
+  pipe. `PrivilegedAction`'s `Debug` output prints only the UID and embedding dimension, never
+  embedding values.
 - The `soos-enroll list` output accepted from the helper is bounded by
   `MAX_PROFILE_LIST_BYTES` (1 MiB) while it is read (`read_bounded`, `Read::take`); an oversized
   output kills the helper.
@@ -59,6 +63,30 @@ never meets `EBUSY` because of the GUI; a failed Resume re-enables direct mode. 
 (rate limit, I/O, daemon starting) are re-probed every second, at most
 `MAX_TRANSIENT_PROBE_RETRIES` times; permanent ones (not authorized, not in the `soos` group) only
 when the daemon state changes. The decision logic is the pure `CameraSourcePlanner`.
+
+## 1b. Biometric Store Selection (GitHub #156)
+
+`store_mode::resolve_gui_store` picks the store once at startup; there is no implicit fallback
+location (the former silent `soos-gui-master.key` / `soos-gui-biometrics` store in the system
+temporary directory is gone):
+
+| Mode | When | Templates |
+|---|---|---|
+| `GuiStore::System` | `--key-file` and `--biometrics-dir` are accessible (root session) | written directly to the system store |
+| `GuiStore::Polkit` | the system store is not accessible (unprivileged session) | no local store at all; list / import / delete go through `pkexec soos-enroll` |
+| `GuiStore::Developer` | explicit `--dev-store <DIR>` (absolute path) | `<DIR>/master.key` and `<DIR>/biometrics` (created `0700`); never used by PAM |
+
+The developer mode shows a persistent orange banner under the header ("DEVELOPER STORE:
+templates are saved in `<DIR>` and are NOT used by PAM") and logs it at startup; it never
+imports into the system store. In Polkit mode the Profiles tab lists the system templates but
+the in-process match test needs a readable template (root session or `--dev-store`).
+
+```bash
+soos-gui                              # system store (root) or Polkit mode (user)
+soos-gui --mock --dev-store "$HOME/.local/share/soos-dev"   # hardware-free development
+```
+
+Verification: `crates/gui/tests/import_privacy_tests.rs` (matrix rows ISE1–ISE4).
 
 ## 2. Camera Error States (GitHub #155, review finding CAM-07)
 
@@ -101,6 +129,6 @@ Example: `RUST_LOG=soos_gui=debug,soos_camera_v4l=debug soos-gui`.
 
 ## 4. Verification
 
-Matrix rows GRE1–GRE6 in `AI/VERIFICATION_MATRIX.md`; tests in
-`crates/gui/tests/responsiveness_tests.rs`, `crates/gui/tests/camera_status_tests.rs` and
-`crates/camera-v4l/tests/camera_status_tests.rs`.
+Matrix rows GRE1–GRE6 and ISE1–ISE4 in `AI/VERIFICATION_MATRIX.md`; tests in
+`crates/gui/tests/responsiveness_tests.rs`, `crates/gui/tests/camera_status_tests.rs`,
+`crates/gui/tests/import_privacy_tests.rs` and `crates/camera-v4l/tests/camera_status_tests.rs`.

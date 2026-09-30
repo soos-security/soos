@@ -7,12 +7,12 @@ use std::sync::Arc;
 
 use clap::Parser;
 use eframe::egui;
-use soos_biometric_store::{BiometricStore, MasterKey};
 use soos_camera_v4l::{CameraConfigBuilder, CameraManager, MockCameraManager};
 use soos_enrollment_cli::service::{MODEL_ID_EMBEDDING, MODEL_ID_FACE_DETECTOR, MODEL_ID_PAD};
 use soos_gui::app::SoosApp;
 use soos_gui::args::GuiArgs;
 use soos_gui::camera_source::{CameraSourceBackend, SwitchableCamera, SystemCameraSourceBackend};
+use soos_gui::store_mode::resolve_gui_store;
 use soos_inference_ort::{
     MockEmbeddingExtractor, MockFaceDetector, MockPadDetector, ModelRegistry,
     OrtEmbeddingExtractor, OrtPadDetector, OrtScrfdDetector, RegistryConfig,
@@ -24,24 +24,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     soos_gui::logging::init();
     let args = GuiArgs::parse();
 
-    // 1. Initialize Biometric Store
-    let (key, is_system_key) = match MasterKey::load_or_create(&args.key_file) {
-        Ok(k) => (k, true),
-        Err(_) => {
-            // Fallback for non-root testing if /var/lib/soos/master.key is root-only
-            let fallback_key = std::env::temp_dir().join("soos-gui-master.key");
-            (MasterKey::load_or_create(&fallback_key)?, false)
-        }
-    };
-
-    let (store, is_system_store) = match BiometricStore::new(&args.biometrics_dir, key.clone()) {
-        Ok(s) => (Arc::new(s), is_system_key),
-        Err(_) => {
-            let fallback_bio = std::env::temp_dir().join("soos-gui-biometrics");
-            std::fs::create_dir_all(&fallback_bio)?;
-            (Arc::new(BiometricStore::new(&fallback_bio, key)?), false)
-        }
-    };
+    // 1. Select the biometric store explicitly (GitHub #156): system store, Polkit mode
+    //    (no local store), or the opt-in `--dev-store` developer mode. No implicit fallback.
+    let gui_store = resolve_gui_store(
+        &args.key_file,
+        &args.biometrics_dir,
+        args.dev_store.as_deref(),
+    )?;
+    if let Some(banner) = gui_store.banner() {
+        tracing::warn!("{banner}");
+    }
 
     // 2. Initialize Camera and Neural Models
     let mut camera_source: Option<(Arc<SwitchableCamera>, Arc<dyn CameraSourceBackend>)> = None;
@@ -110,7 +102,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "SOOS — Biometric Management & Live Analysis",
         native_options,
         Box::new(move |cc| {
-            let mut app = SoosApp::new(cc, store, camera, pipeline, is_system_store);
+            let mut app = SoosApp::new(cc, gui_store, camera, pipeline);
             if let Some((switchable, backend)) = camera_source {
                 app.attach_camera_source(switchable, backend);
             }

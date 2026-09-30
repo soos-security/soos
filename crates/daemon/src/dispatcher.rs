@@ -20,6 +20,8 @@ use crate::pipeline::{
 use crate::preview::{authorize_preview, PreviewConfig};
 use crate::session::SessionValidator;
 use crate::session_policy::LocalSessionPolicy;
+use soos_camera_v4l::PixelFormat;
+use soos_evidence_store::{EvidenceFrame, EvidencePixelFormat, FrameMetadata};
 use soos_policy::{ConsensusDecision, FrameEvaluation, PadAggregator, RateLimiter};
 use soos_protocol::codec::{encode, encode_preview};
 use soos_protocol::types::{
@@ -49,6 +51,17 @@ struct ResponseOutput {
 /// Whether a capture taken at `timestamp_ns` is still fresh at `now_ns` (`MAX_FRAME_AGE_NS`).
 ///
 /// Captures without a timestamp, or stamped in the future, are accepted as before.
+/// Maps the camera pixel format to the self-describing evidence format (GitHub #181).
+fn evidence_pixel_format(format: PixelFormat) -> EvidencePixelFormat {
+    match format {
+        PixelFormat::Yuyv => EvidencePixelFormat::Yuyv,
+        PixelFormat::Rgb24 => EvidencePixelFormat::Rgb24,
+        PixelFormat::Grey => EvidencePixelFormat::Gray8,
+        PixelFormat::Mjpeg => EvidencePixelFormat::Mjpeg,
+        PixelFormat::Nv12 => EvidencePixelFormat::Nv12,
+    }
+}
+
 fn is_frame_fresh(timestamp_ns: u64, now_ns: u64) -> bool {
     if timestamp_ns > 0 && now_ns > timestamp_ns {
         now_ns.saturating_sub(timestamp_ns) <= MAX_FRAME_AGE_NS
@@ -462,10 +475,22 @@ impl ConnectionDispatcher {
             if let Some(ref pipe) = self.pipeline {
                 if pipe.evidence_store.config().enabled {
                     if let Some(frame) = pipe.camera.latest_frame() {
-                        match pipe.evidence_store.store_snapshot(
+                        // GitHub #181: persist the frame with its dimensions and pixel
+                        // format so the evidence can be decoded later.
+                        let evidence = EvidenceFrame {
+                            metadata: FrameMetadata {
+                                width: frame.width,
+                                height: frame.height,
+                                pixel_format: evidence_pixel_format(frame.format),
+                                captured_at_mono_ns: frame.timestamp_mono_ns,
+                                sequence: frame.sequence,
+                            },
+                            data: &frame.data,
+                        };
+                        match pipe.evidence_store.store_frame_snapshot(
                             target_uid,
                             "PasswordFailed",
-                            &frame.data,
+                            &evidence,
                             None,
                             None,
                         ) {

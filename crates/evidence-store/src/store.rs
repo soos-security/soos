@@ -3,6 +3,10 @@
 use crate::config::EvidenceConfig;
 use crate::crypto::{decrypt_payload, encrypt_payload, MasterKey};
 use crate::error::EvidenceStoreError;
+use crate::frame::{
+    check_payload_len, EvidenceFrame, FrameBytes, FrameMetadata, EVIDENCE_RECORD_VERSION,
+    MAX_EVIDENCE_FILE_BYTES,
+};
 use crate::snapshot::{
     days_since_epoch, format_date_from_timestamp, generate_uuid_v4, parse_date, EvidenceRecord,
     RetentionReport, SnapshotResult,
@@ -21,6 +25,17 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// Values above this range typically represent negative signed integers cast to unsigned
 /// or reserved POSIX sentinel values like `(uid_t)-1` (4,294,967,295).
 pub const MAX_VALID_UID: u32 = 2_147_483_647;
+
+/// File suffix of self-describing frame snapshots written by
+/// [`EvidenceStore::store_frame_snapshot`] (record version 2 with frame metadata).
+pub const FRAME_SNAPSHOT_EXTENSION: &str = ".frame.enc";
+
+/// File suffix of opaque snapshots written by [`EvidenceStore::store_snapshot`].
+///
+/// Kept for backward compatibility of the opaque-bytes API and its contract tests: the store
+/// never encodes WebP, the payload is whatever the caller passed, and the record carries no
+/// frame metadata. New code must use [`EvidenceStore::store_frame_snapshot`].
+pub const OPAQUE_SNAPSHOT_EXTENSION: &str = ".webp.enc";
 
 /// Primary evidence store engine.
 pub struct EvidenceStore {
@@ -54,14 +69,65 @@ impl EvidenceStore {
         &self.config
     }
 
-    /// Stores an anti-intrusion evidence snapshot to disk with AES-256-GCM encryption.
+    /// Stores an opaque payload (no frame metadata) with AES-256-GCM encryption.
     ///
-    /// The snapshot is written atomically to `/var/lib/soos/evidence/YYYY-MM-DD/<uuid>.webp.enc`
-    /// with mode `0600` and its parent directory with mode `0700`.
+    /// The snapshot is written atomically to
+    /// `/var/lib/soos/evidence/YYYY-MM-DD/<uuid>`[`OPAQUE_SNAPSHOT_EXTENSION`] with mode
+    /// `0600` and its parent directory with mode `0700`. The payload is bounded by
+    /// [`crate::MAX_EVIDENCE_IMAGE_BYTES`] and cannot be rendered without out-of-band
+    /// knowledge; camera frames must go through [`Self::store_frame_snapshot`].
     pub fn store_snapshot(
         &self,
         uid: u32,
         reason: &str,
+        image_data: &[u8],
+        date_override: Option<&str>,
+        timestamp_override: Option<u64>,
+    ) -> Result<SnapshotResult, EvidenceStoreError> {
+        self.store_record(
+            uid,
+            reason,
+            None,
+            image_data,
+            date_override,
+            timestamp_override,
+        )
+    }
+
+    /// Stores a self-describing camera frame snapshot (GitHub #181).
+    ///
+    /// Width, height, pixel format, capture time and sequence are sealed with the pixels in
+    /// a version [`crate::EVIDENCE_RECORD_VERSION`] record, written atomically to
+    /// `/var/lib/soos/evidence/YYYY-MM-DD/<uuid>`[`FRAME_SNAPSHOT_EXTENSION`] (mode `0600`).
+    /// The frame is validated before the daily cap is consumed or anything is written.
+    ///
+    /// # Errors
+    ///
+    /// [`EvidenceStoreError::InvalidFrame`] when the metadata is out of bounds or does not
+    /// match the payload length, plus every error of [`Self::store_snapshot`].
+    pub fn store_frame_snapshot(
+        &self,
+        uid: u32,
+        reason: &str,
+        frame: &EvidenceFrame<'_>,
+        date_override: Option<&str>,
+        timestamp_override: Option<u64>,
+    ) -> Result<SnapshotResult, EvidenceStoreError> {
+        self.store_record(
+            uid,
+            reason,
+            Some(&frame.metadata),
+            frame.data,
+            date_override,
+            timestamp_override,
+        )
+    }
+
+    fn store_record(
+        &self,
+        uid: u32,
+        reason: &str,
+        metadata: Option<&FrameMetadata>,
         image_data: &[u8],
         date_override: Option<&str>,
         timestamp_override: Option<u64>,
@@ -73,6 +139,12 @@ impl EvidenceStore {
         // Validate UID parameter against POSIX bounds (Sub-issue #30.3)
         if uid > MAX_VALID_UID {
             return Err(EvidenceStoreError::InvalidUid(uid));
+        }
+
+        // Bounded, self-consistent payload before any side effect (GitHub #181).
+        match metadata {
+            Some(meta) => meta.validate(image_data.len())?,
+            None => check_payload_len(image_data.len())?,
         }
 
         // Reject symlinks targeting base directory
@@ -152,17 +224,27 @@ impl EvidenceStore {
         }
 
         let record = EvidenceRecord {
+            format_version: EVIDENCE_RECORD_VERSION,
             snapshot_id: snapshot_id.clone(),
             uid,
             timestamp: ts,
             reason: reason.to_string(),
-            image_data: image_data.to_vec(),
+            frame: metadata.cloned(),
+            image_data: FrameBytes::new(image_data.to_vec()),
         };
 
+        // Both the record (FrameBytes) and its CBOR plaintext are zeroized on drop.
         let serialized = record.to_cbor()?;
+        drop(record);
         let ciphertext = encrypt_payload(&self.key, &serialized)?;
+        drop(serialized);
 
-        let filename = format!("{snapshot_id}.webp.enc");
+        let extension = if metadata.is_some() {
+            FRAME_SNAPSHOT_EXTENSION
+        } else {
+            OPAQUE_SNAPSHOT_EXTENSION
+        };
+        let filename = format!("{snapshot_id}{extension}");
         let final_path = target_dir.join(filename);
         let mut rand_bytes = [0u8; 8];
         getrandom::fill(&mut rand_bytes).map_err(|e| {
@@ -205,15 +287,30 @@ impl EvidenceStore {
         })
     }
 
-    /// Loads and decrypts an evidence snapshot from disk.
+    /// Loads, decrypts and validates an evidence snapshot from disk.
+    ///
+    /// Files larger than [`MAX_EVIDENCE_FILE_BYTES`] are refused before being read. Legacy
+    /// records (no version) decode as version 1 without frame metadata.
     pub fn load_snapshot<P: AsRef<Path>>(
         &self,
         path: P,
     ) -> Result<EvidenceRecord, EvidenceStoreError> {
         let path = path.as_ref();
-        let mut file = File::open(path)?;
+        let file = File::open(path)?;
+        let len = file.metadata()?.len();
+        if len > MAX_EVIDENCE_FILE_BYTES {
+            return Err(EvidenceStoreError::CorruptPayload(format!(
+                "evidence file of {len} bytes exceeds {MAX_EVIDENCE_FILE_BYTES} bytes"
+            )));
+        }
         let mut data = Vec::new();
-        file.read_to_end(&mut data)?;
+        file.take(MAX_EVIDENCE_FILE_BYTES.saturating_add(1))
+            .read_to_end(&mut data)?;
+        if u64::try_from(data.len()).unwrap_or(u64::MAX) > MAX_EVIDENCE_FILE_BYTES {
+            return Err(EvidenceStoreError::CorruptPayload(
+                "evidence file grew beyond the read bound".to_string(),
+            ));
+        }
 
         let decrypted = decrypt_payload(&self.key, &data)?;
         EvidenceRecord::from_cbor(&decrypted)

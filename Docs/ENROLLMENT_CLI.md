@@ -69,6 +69,26 @@ sudo soos-enroll list
 sudo soos-enroll list --format json
 ```
 
+### `soos-enroll import`
+Imports an existing embedding (JSON array of 512 finite floats, or a CBOR `BiometricTemplate`) into the encrypted store. This is the command the GUI runs through `pkexec` (GitHub #156, review findings CAM-08 / STO-12):
+
+```bash
+# From standard input (the GUI path; the plaintext embedding never touches the filesystem)
+sudo soos-enroll import --uid 1000 --file - < embedding.json
+
+# From a file
+sudo soos-enroll import --uid 1000 --file /home/alice/embedding.json
+```
+
+Input contract (`crates/enrollment-cli/src/service.rs`):
+- **Bounded**: every input is capped at `MAX_IMPORT_INPUT_BYTES` (64 KiB) while it is read (`Read::take`); an endless or oversized stdin, or a larger file, is refused with `EnrollmentCliError::InvalidImport`.
+- **Validated**: the embedding must have exactly 512 values, all finite (an overflowing JSON number such as `1e39` becomes infinity and is refused). Values are never echoed in errors.
+- **Zeroized**: the raw input and the parsed embedding live in `Zeroizing` buffers.
+- **File inputs** (`read_import_file`): opened with `O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK` and checked on the open descriptor: regular file only (symlinks, directories and FIFOs are refused), at most 64 KiB, and, under `pkexec`, owned by the invoking user (`PKEXEC_UID`, parsed by `parse_pkexec_uid`), so a Polkit caller cannot make root import another user's file.
+- Nothing is stored when any check fails.
+
+Verification: `crates/enrollment-cli/tests/import_stdin_tests.rs` and `import_tests.rs` (matrix rows ISE5–ISE7).
+
 ### `soos-enroll debug-vision`
 Captures one camera frame, runs the face detector and writes a standalone HTML report drawing the bounding boxes, confidence scores and 5-point landmarks on an HTML5 canvas (GitHub #149 / STO-02 hardening):
 

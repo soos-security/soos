@@ -416,6 +416,72 @@ async fn test_12_4_password_failed_event_captures_evidence_snapshot() {
     );
 }
 
+/// GitHub #181 (STO-08): the daemon stores a self-describing frame snapshot (dimensions and
+/// pixel format of the captured V4L2 buffer) under a `.frame.enc` name.
+#[tokio::test]
+async fn test_181_password_failed_snapshot_records_frame_metadata() {
+    let fixture = TestPipelineFixture::new_with_format(true, 5, PixelFormat::Yuyv).await;
+    let listener = fixture.start_listener();
+
+    let disp = fixture.dispatcher.clone();
+    let handle = tokio::spawn(async move {
+        if let Ok((stream, _)) = listener.accept().await {
+            let _ = disp.handle_connection(stream).await;
+        }
+    });
+
+    let mut client = UnixStream::connect(&fixture.sock_path)
+        .await
+        .expect("Connect client failed");
+    let event = Event {
+        version: CURRENT_VERSION,
+        kind: EventKind::PasswordFailed,
+        request_id: Some([9u8; 32]),
+        uid: Some(fixture.current_uid),
+        service: "gdm".into(),
+        timestamp_monotonic_ns: 1_000_000,
+    };
+    let encoded = encode(&event).expect("Encode event");
+    client.write_all(&encoded).await.expect("Write event");
+    client.flush().await.expect("Flush event");
+    drop(client);
+    let _ = handle.await;
+
+    let mut records = Vec::new();
+    for entry in std::fs::read_dir(&fixture.evidence_store.config().base_dir).expect("Read dir") {
+        let entry = entry.expect("Dir entry");
+        if entry.path().is_dir() {
+            let date_str = entry.file_name().to_string_lossy().to_string();
+            for file in fixture
+                .evidence_store
+                .list_snapshots_for_date(&date_str)
+                .expect("List snapshots")
+            {
+                let name = file.file_name().unwrap().to_string_lossy().to_string();
+                assert!(name.ends_with(".frame.enc"), "unexpected name {name}");
+                records.push(fixture.evidence_store.load_snapshot(&file).expect("Load"));
+            }
+        }
+    }
+    assert_eq!(records.len(), 1, "exactly one snapshot expected");
+    let record = &records[0];
+    let meta = record
+        .frame
+        .as_ref()
+        .expect("frame metadata must be stored");
+    assert_eq!((meta.width, meta.height), (320, 240));
+    assert_eq!(
+        meta.pixel_format,
+        soos_evidence_store::EvidencePixelFormat::Yuyv
+    );
+    assert_eq!(record.image_data.len(), 320 * 240 * 2);
+    assert_eq!(
+        record.to_rgb24().expect("decodable").len(),
+        320 * 240 * 3,
+        "the stored frame must be reconstructible as RGB"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Sub-issue #12.5: Policy Engine Integration & Rate Limiting
 // ---------------------------------------------------------------------------

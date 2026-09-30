@@ -64,6 +64,10 @@ pub enum EnrollmentCliError {
     #[error("Nix system error: {0}")]
     Nix(#[from] nix::Error),
 
+    /// Rejected `import` input (size bound, ownership, format or non-finite values).
+    #[error("Invalid import input: {0}")]
+    InvalidImport(String),
+
     #[error("Invalid path or path traversal attempt: {0}")]
     InvalidPath(String),
 

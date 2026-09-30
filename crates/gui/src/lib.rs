@@ -17,6 +17,7 @@ pub mod ipc_camera;
 pub mod logging;
 pub mod privileged;
 pub mod state;
+pub mod store_mode;
 pub mod worker;
 
 pub use app::SoosApp;
