@@ -1,6 +1,6 @@
 //! Main storage engine for encrypted evidence snapshots.
 
-use crate::config::EvidenceConfig;
+use crate::config::{EvidenceConfig, DEFAULT_DAILY_CAP_TOTAL};
 use crate::crypto::{decrypt_payload, encrypt_payload, MasterKey};
 use crate::error::EvidenceStoreError;
 use crate::frame::{
@@ -37,11 +37,52 @@ pub const FRAME_SNAPSHOT_EXTENSION: &str = ".frame.enc";
 /// frame metadata. New code must use [`EvidenceStore::store_frame_snapshot`].
 pub const OPAQUE_SNAPSHOT_EXTENSION: &str = ".webp.enc";
 
+/// In-memory capture counters of the current day (GitHub #276).
+///
+/// Only one day is tracked: when a snapshot is requested for another date the counters are
+/// reset to that date, so the map never holds more than one entry per UID that stored a
+/// snapshot that day, which the global cap bounds.
+#[derive(Debug, Default)]
+struct DailyCounters {
+    date: String,
+    per_uid: HashMap<u32, u32>,
+    total: u32,
+}
+
+impl DailyCounters {
+    /// Switches the counters to `date`, dropping every counter of any other date.
+    fn roll_to(&mut self, date: &str) {
+        if self.date != date {
+            self.date = date.to_string();
+            self.per_uid.clear();
+            self.per_uid.shrink_to_fit();
+            self.total = 0;
+        }
+    }
+
+    fn count(&self, uid: u32, date: &str) -> u32 {
+        if self.date == date {
+            self.per_uid.get(&uid).copied().unwrap_or(0)
+        } else {
+            0
+        }
+    }
+
+    fn total(&self, date: &str) -> u32 {
+        if self.date == date {
+            self.total
+        } else {
+            0
+        }
+    }
+}
+
 /// Primary evidence store engine.
 pub struct EvidenceStore {
     config: EvidenceConfig,
     key: MasterKey,
-    daily_counts: Mutex<HashMap<(u32, String), u32>>,
+    daily_cap_total: u32,
+    daily_counts: Mutex<DailyCounters>,
 }
 
 impl EvidenceStore {
@@ -50,8 +91,22 @@ impl EvidenceStore {
         Self {
             config,
             key,
-            daily_counts: Mutex::new(HashMap::new()),
+            daily_cap_total: DEFAULT_DAILY_CAP_TOTAL,
+            daily_counts: Mutex::new(DailyCounters::default()),
         }
+    }
+
+    /// Overrides the global daily snapshot cap across all UIDs
+    /// (default [`DEFAULT_DAILY_CAP_TOTAL`]).
+    #[must_use]
+    pub fn with_daily_cap_total(mut self, cap: u32) -> Self {
+        self.daily_cap_total = cap;
+        self
+    }
+
+    /// Returns the global daily snapshot cap across all UIDs.
+    pub fn daily_cap_total(&self) -> u32 {
+        self.daily_cap_total
     }
 
     /// Initializes an evidence store by loading or creating the master key.
@@ -176,18 +231,27 @@ impl EvidenceStore {
             None => format_date_from_timestamp(ts),
         };
 
-        // Enforce per-UID daily cap
+        // Enforce the per-UID and the global daily caps (GitHub #276). Counters of any
+        // other day are dropped first, so the map stays bounded by the global cap.
         {
             let mut counts = self.daily_counts.lock().unwrap_or_else(|e| e.into_inner());
-            let entry = counts.entry((uid, date_str.clone())).or_insert(0);
-            if *entry >= self.config.daily_cap_per_uid {
+            counts.roll_to(&date_str);
+            let uid_count = counts.count(uid, &date_str);
+            if uid_count >= self.config.daily_cap_per_uid {
                 return Err(EvidenceStoreError::DailyCapExceeded {
                     uid,
                     cap: self.config.daily_cap_per_uid,
                     date: date_str,
                 });
             }
-            *entry = entry.saturating_add(1);
+            if counts.total >= self.daily_cap_total {
+                return Err(EvidenceStoreError::GlobalDailyCapExceeded {
+                    cap: self.daily_cap_total,
+                    date: date_str,
+                });
+            }
+            counts.per_uid.insert(uid, uid_count.saturating_add(1));
+            counts.total = counts.total.saturating_add(1);
         }
 
         let snapshot_id = generate_uuid_v4()?;
@@ -317,9 +381,23 @@ impl EvidenceStore {
     }
 
     /// Gets current daily snapshot count for a UID and date.
+    ///
+    /// Only the most recent day is tracked; any other date reports `0`.
     pub fn daily_count(&self, uid: u32, date: &str) -> u32 {
         let lock = self.daily_counts.lock().unwrap_or_else(|e| e.into_inner());
-        lock.get(&(uid, date.to_string())).copied().unwrap_or(0)
+        lock.count(uid, date)
+    }
+
+    /// Gets the snapshot count of `date` across all UIDs (`0` for an untracked date).
+    pub fn daily_total(&self, date: &str) -> u32 {
+        let lock = self.daily_counts.lock().unwrap_or_else(|e| e.into_inner());
+        lock.total(date)
+    }
+
+    /// Number of per-UID daily counters currently held in memory (bounded by the global cap).
+    pub fn tracked_daily_counters(&self) -> usize {
+        let lock = self.daily_counts.lock().unwrap_or_else(|e| e.into_inner());
+        lock.per_uid.len()
     }
 
     /// Lists snapshot file paths for a specific date partition.

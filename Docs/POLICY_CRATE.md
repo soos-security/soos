@@ -184,6 +184,12 @@ vision work; GitHub #200 / DMN-10): a rejected reservation answers `ProtocolErro
 at once, concurrent requests cannot overshoot `max_attempts`, and nothing is recorded after the
 loop.
 
+At daemon start (before the socket is bound) `soos_daemon::pipeline::warmed_inference_gate`
+runs every vision stage `WARMUP_PASSES` (2) times on blank synthetic inputs and seeds the
+estimate with the last pass (`InferenceEstimator::seed`), so the first `Auth` request is
+admitted against a measured latency instead of the 80 ms default (GitHub #276). The cold first
+pass is discarded; a failed warm-up keeps the default and never blocks start-up.
+
 Latency: with a 30 fps camera the third distinct capture is available about 67 ms after the first,
 so consensus adds roughly two capture intervals plus two inference passes to the previous
 single-capture latency, well within `DECISION_BUDGET_MS` (900 ms) and the 2500 ms GDM budget.

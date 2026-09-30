@@ -150,6 +150,9 @@ pub struct PipelineConfig {
     pub master_key_path: PathBuf,
     /// Evidence capture and retention configuration.
     pub evidence: soos_evidence_store::EvidenceConfig,
+    /// Global daily evidence snapshot cap across all UIDs
+    /// (`[pipeline.evidence] daily_cap_total`, GitHub #276).
+    pub evidence_daily_cap_total: u32,
     /// Threshold configuration for authorization decisions.
     pub thresholds: soos_policy::ThresholdConfig,
     /// Rate limit configuration per UID.
@@ -226,6 +229,7 @@ impl Default for PipelineConfig {
             biometrics_dir: PathBuf::from(soos_biometric_store::DEFAULT_BIOMETRICS_DIR),
             master_key_path: PathBuf::from("/var/lib/soos/master.key"),
             evidence: soos_evidence_store::EvidenceConfig::default(),
+            evidence_daily_cap_total: soos_evidence_store::DEFAULT_DAILY_CAP_TOTAL,
             thresholds: soos_policy::ThresholdConfig::default(),
             rate_limit: soos_policy::RateLimitConfig::default(),
             use_mock_camera: false,
@@ -338,6 +342,7 @@ struct EvidenceConfigFile {
     key_path: Option<PathBuf>,
     retention_days: Option<u32>,
     daily_cap_per_uid: Option<u32>,
+    daily_cap_total: Option<u32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -495,6 +500,9 @@ impl DaemonConfig {
                 }
                 if let Some(daily_cap) = ev.daily_cap_per_uid {
                     config.pipeline.evidence.daily_cap_per_uid = daily_cap;
+                }
+                if let Some(daily_cap_total) = ev.daily_cap_total {
+                    config.pipeline.evidence_daily_cap_total = daily_cap_total;
                 }
             }
 

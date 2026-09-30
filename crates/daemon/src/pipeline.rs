@@ -271,6 +271,84 @@ pub fn camera_device_resolver(
     Some(Arc::new(move || auto_select_camera_device(preference)))
 }
 
+/// Largest synthetic frame side used by [`warm_up_vision_stages`] (1920 pixels).
+///
+/// Bounds the warm-up allocation (at most 1920 x 1920 x 3 bytes) whatever the configured
+/// camera resolution; SCRFD letterboxes every frame to 640 x 640 anyway.
+pub const MAX_WARMUP_DIMENSION: u32 = 1920;
+
+/// Runs every vision inference stage once on blank (all-zero) synthetic inputs (GitHub #276).
+///
+/// A blank frame contains no face, so [`VisionPipeline::process_frame`] would stop after
+/// detection; the stages are therefore called directly: the face detector on a
+/// `frame_width x frame_height` RGB frame (each side clamped to `1..=`[`MAX_WARMUP_DIMENSION`]),
+/// the PAD model on a blank crop of the configured PAD size and the embedding extractor on a
+/// blank aligned crop of the configured recognition size. Stage results and errors are
+/// discarded unseen: warm-up only measures latency and never influences a decision. The
+/// inputs contain no camera data, so nothing sensitive is ever produced or logged.
+pub fn warm_up_vision_stages(vision: &VisionPipeline, frame_width: u32, frame_height: u32) {
+    let width = frame_width.clamp(1, MAX_WARMUP_DIMENSION);
+    let height = frame_height.clamp(1, MAX_WARMUP_DIMENSION);
+    let _ = vision
+        .detector()
+        .detect(&blank_rgb(width, height), width, height);
+
+    let config = vision.config();
+    let pad_width = config.pad_target_width.clamp(1, MAX_WARMUP_DIMENSION);
+    let pad_height = config.pad_target_height.clamp(1, MAX_WARMUP_DIMENSION);
+    let _ =
+        vision
+            .pad()
+            .evaluate_liveness(&blank_rgb(pad_width, pad_height), pad_width, pad_height);
+
+    let aligned_width = config.target_width.clamp(1, MAX_WARMUP_DIMENSION);
+    let aligned_height = config.target_height.clamp(1, MAX_WARMUP_DIMENSION);
+    let _ = vision.extractor().extract_embedding(
+        &blank_rgb(aligned_width, aligned_height),
+        aligned_width,
+        aligned_height,
+    );
+}
+
+/// Allocates a blank packed RGB888 buffer; both sides are already clamped by the caller.
+fn blank_rgb(width: u32, height: u32) -> Vec<u8> {
+    let len = usize::try_from(width)
+        .unwrap_or(0)
+        .saturating_mul(usize::try_from(height).unwrap_or(0))
+        .saturating_mul(3);
+    vec![0u8; len]
+}
+
+/// Builds the daemon's inference gate with its latency estimate seeded by a warm-up run of
+/// every vision stage (GitHub #276, walkthrough 96 follow-up).
+///
+/// When the warm-up fails (a stage panicked), the gate keeps
+/// [`crate::inference::DEFAULT_INFERENCE_ESTIMATE_MS`] and a warning is logged: warm-up is
+/// best effort and never prevents the daemon from starting.
+pub async fn warmed_inference_gate(
+    vision: Arc<VisionPipeline>,
+    frame_width: u32,
+    frame_height: u32,
+) -> crate::inference::InferenceGate {
+    let gate = crate::inference::InferenceGate::default();
+    match gate
+        .warm_up(move || warm_up_vision_stages(&vision, frame_width, frame_height))
+        .await
+    {
+        Ok(measured) => tracing::info!(
+            measured_ms = measured.as_millis(),
+            estimate_ms = gate.estimate().as_millis(),
+            "Vision inference warm-up complete; latency estimate seeded"
+        ),
+        Err(err) => tracing::warn!(
+            error = %err,
+            estimate_ms = gate.estimate().as_millis(),
+            "Vision inference warm-up failed; keeping the default latency estimate"
+        ),
+    }
+    gate
+}
+
 /// Initializes all production pipeline components from a strongly-typed [`PipelineConfig`].
 ///
 /// This includes:
@@ -316,10 +394,10 @@ pub fn initialize_pipeline(
 
     // 3. Evidence Store & Master Key
     let ev_key = soos_evidence_store::MasterKey::load_or_create(&config.evidence.key_path)?;
-    let evidence_store = Arc::new(soos_evidence_store::EvidenceStore::new(
-        config.evidence.clone(),
-        ev_key,
-    ));
+    let evidence_store = Arc::new(
+        soos_evidence_store::EvidenceStore::new(config.evidence.clone(), ev_key)
+            .with_daily_cap_total(config.evidence_daily_cap_total),
+    );
 
     // 4. Policy Engine & Rate Limiter
     let rate_limiter = soos_policy::RateLimiter::new(config.rate_limit);

@@ -128,6 +128,22 @@ let custom_cfg = EvidenceConfig {
 };
 ```
 
+### 4.1.1 Global Daily Cap and Counter Pruning (GitHub #276)
+
+The per-UID cap alone would let `daily_cap_per_uid` snapshots accumulate for every UID a
+caller names. `EvidenceStore` therefore also enforces a global cap across all UIDs:
+`DEFAULT_DAILY_CAP_TOTAL` (100) snapshots per day, overridable with
+`EvidenceStore::with_daily_cap_total(cap)` and, in the daemon, with
+`[pipeline.evidence] daily_cap_total` in `/etc/soos/daemon.toml`. Exceeding it returns
+`EvidenceStoreError::GlobalDailyCapExceeded { cap, date }` before anything is written, and a
+globally refused snapshot does not consume the per-UID quota.
+
+The in-memory counters track a single day: a snapshot for another date resets them to that
+date, so the map never holds more entries than the global cap (`tracked_daily_counters()`),
+and `daily_count` / `daily_total` report `0` for any date that is not the tracked day. A wall
+clock stepped back across midnight therefore starts a fresh day budget; the on-disk
+retention rotation is unaffected.
+
 ### 4.2 Storing an Anti-Intrusion Snapshot
 
 ```rust

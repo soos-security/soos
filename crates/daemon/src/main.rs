@@ -12,7 +12,7 @@ use soos_daemon::config::DaemonConfig;
 use soos_daemon::dispatcher::ConnectionDispatcher;
 use soos_daemon::health::HealthState;
 use soos_daemon::logging::init_logging;
-use soos_daemon::pipeline::{initialize_pipeline, EMBEDDING_MODEL_ID};
+use soos_daemon::pipeline::{initialize_pipeline, warmed_inference_gate, EMBEDDING_MODEL_ID};
 use soos_daemon::socket::bind_socket;
 
 /// Poll interval of the camera health transition logger.
@@ -80,8 +80,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
+    // Seed the inference latency estimate before the socket opens, so the first Auth
+    // request is admitted against a measured latency (GitHub #276).
+    let inference_gate = warmed_inference_gate(
+        components.vision.clone(),
+        config.pipeline.camera.width,
+        config.pipeline.camera.height,
+    )
+    .await;
+
     let dispatcher = Arc::new(
         ConnectionDispatcher::with_pipeline(config.dispatcher, health.clone(), components)
+            .with_inference_gate(inference_gate)
             .with_preview_config(config.preview)
             .with_peer_limits(config.peer_limits)
             .with_expected_embedding_model(EMBEDDING_MODEL_ID),

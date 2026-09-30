@@ -8,6 +8,13 @@ pub const DEFAULT_RETENTION_DAYS: u32 = 7;
 /// Default maximum snapshot captures per UID per day.
 pub const DEFAULT_DAILY_CAP_PER_UID: u32 = 10;
 
+/// Default maximum snapshot captures per day across all UIDs (GitHub #276, DMN-03 remainder).
+///
+/// Bounds the disk usage of one day whatever the number of distinct UIDs a caller names:
+/// the per-UID cap alone lets `DEFAULT_DAILY_CAP_PER_UID` snapshots per UID accumulate for
+/// every UID in `0..=MAX_VALID_UID`.
+pub const DEFAULT_DAILY_CAP_TOTAL: u32 = 100;
+
 /// Default evidence directory path.
 pub const DEFAULT_EVIDENCE_DIR: &str = "/var/lib/soos/evidence";
 
