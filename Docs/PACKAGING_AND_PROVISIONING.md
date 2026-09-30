@@ -112,8 +112,8 @@ auth  optional                       pam_soos.so event=password-failed timeout_m
 
 #### Debian / Ubuntu (`pam-auth-update`)
 - **Primary Profile**: `packaging/pam/debian/soos` installed to `/usr/share/pam-configs/soos` (Priority `260`, placed before `unix` Priority `256`).
-- **Notification Profile**: `packaging/pam/debian/soos-notify` installed to `/usr/share/pam-configs/soos-notify` (Priority `128`, placed after `unix`).
-- Enable command: `pam-auth-update --enable soos soos-notify`
+- **Notification Profile**: `packaging/pam/debian/soos-notify` installed to `/usr/share/pam-configs/soos-notify` (`Auth-Type: Primary`, Priority `12`, control `[default=ignore]`): emitted after `pam_unix` and every other standard primary method but **before** `auth requisite pam_deny.so`, so it is reached on a wrong password only (an `Additional` profile would sit after `pam_deny` and never fire). The line is ignored whatever it returns.
+- Enable command: `pam-auth-update --package --enable soos soos-notify`
 
 #### Fedora / RHEL (`authselect`)
 - Complete custom `authselect` profile in `packaging/pam/fedora/soos/` (derived from the Fedora 40
@@ -138,7 +138,8 @@ The uninstallation script guarantees that removing `soos` will **never lock an a
 
 ### Capabilities
 - **Systemd Teardown**: Stops and disables `soos-daemon.service`, removes the unit file, and issues `daemon-reload`.
-- **PAM Configuration Rollback**: Restores original PAM configurations from backup (`*.soos-backup`), deregisters profiles from `pam-auth-update`, or — when `custom/soos` is the selected `authselect` profile — re-selects the profile recorded in `/etc/soos/authselect.previous` (fallback `local`, `minimal`, `sssd`) before removing the custom profile; the profile is kept if no restoration succeeds.
+- **Pre-install Snapshot**: `scripts/install.sh` records `/etc/pam.d/*`, `/etc/nsswitch.conf` and `authselect current --raw` in `/var/lib/soos/state/pam-backup` (mode `0700`, `SHA256SUMS` manifest) through `scripts/pam_snapshot.sh` before any PAM template is installed; an existing snapshot is never overwritten.
+- **PAM Configuration Rollback**: Restores original PAM configurations from backup (`*.soos-backup`, e.g. the `gdm-password` copy written by `soos-admin gdm enable`, which edits the file atomically), deregisters profiles from `pam-auth-update`, or — when `custom/soos` is the selected `authselect` profile — re-selects the profile recorded in `/etc/soos/authselect.previous` (fallback `local`, `minimal`, `sssd`) before removing the custom profile; the profile is kept if no restoration succeeds. Residual `pam_soos.so` lines are removed only when provably safe (the stripped file equals its snapshot copy, or it has no `success=N` jump); all writes are temporary file + rename. The final state is verified against the snapshot, which is discarded only when identical. If a residual line cannot be removed safely, the file and `pam_soos.so` are kept (the module degrades to `PAM_IGNORE`, password login keeps working) and the script exits `1`.
 - **Binary Cleanup**: Removes `soos-daemon`, `soos-enroll`, `soos-admin`, and `pam_soos.so`.
 - **Data Protection**:
   - By default (or with `--keep-data`): strictly retains `/var/lib/soos/biometrics`, `/var/lib/soos/evidence`, and `/var/lib/soos/master.key`.

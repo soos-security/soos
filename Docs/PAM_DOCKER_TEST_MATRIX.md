@@ -58,6 +58,7 @@ auth  required                       pam_unix.so try_first_pass nullok
 | **T8** | Missing Module Resilience | `pam_soos.so` missing from disk | `PAM_IGNORE` | PAM stack continues functional operation |
 | **T9** | Model Deployment Integrity | `scripts/download_models.sh --dry-run` against `models/manifest.toml` | n/a | Manifest and checksums validated in-container |
 | **T10** | Release-Build Panic Safety (PAM-01, GitHub #148) | Module rebuilt with the same `[profile.release]` plus the opt-in `fault-injection` feature, loaded as `pam_soos_fault.so` and armed with `fault_inject=panic` then `fault_inject=overflow` | `PAM_IGNORE` (25); host process never killed (exit code < 128, never 134/SIGABRT) | Fallback to `pam_unix`, valid password accepted, invalid password rejected |
+| **T11** | Debian password-failed hook (ONB-03, GitHub #161) | Shipped `soos`/`soos-notify` profiles enabled with the real `pam-auth-update --package --force`; mock daemon in `deny` mode with `--record` | `PAM_IGNORE` (25) from both `pam_soos.so` lines | Hook line before `pam_deny.so`; wrong password rejected with exactly one `PasswordFailed` event; correct password accepted with none. Skipped on non-`pam-auth-update` images, fails on a Debian image without it |
 
 T10 exists because `cargo test` runs under `[profile.test]` (always `panic = "unwind"`) and
 therefore cannot detect a release profile that aborts; only the release-built shared object
@@ -76,7 +77,7 @@ tests/docker/
 ├── Dockerfile.arch           # Arch Linux container image
 ├── pam_test_runner.c        # Native C non-interactive & interactive PAM test harness
 ├── mock_daemon.py           # Socket simulator for allow, timeout, and mid-stream crash
-├── test_suite.sh            # In-container test suite executing T1..T10
+├── test_suite.sh            # In-container test suite executing T1..T11
 ├── run_matrix.sh            # Host driver orchestrating multi-distro builds & runs
 └── authselect_profile_test.sh  # Fedora authselect profile activation/rollback (A1..A7)
 ```

@@ -373,6 +373,7 @@ JOURNAL_BACKUP_COPY=()    # ... and their saved previous version
 GROUP_CREATED=false
 UNIT_INSTALLED=false
 UNIT_ENABLED=false
+PAM_SNAPSHOT_CREATED=false
 COMMITTED=false
 KEEP_BACKUP=false
 BACKUP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/soos-install-backup.XXXXXX")"
@@ -394,6 +395,13 @@ rollback() {
     for ((i = ${#JOURNAL_FILES[@]} - 1; i >= 0; i--)); do
         rm -f -- "${JOURNAL_FILES[i]}"
     done
+    # A PAM snapshot recorded by this run describes a state that is being restored anyway;
+    # remove it (and its state directory if now empty) before the journaled directories.
+    if [[ "${PAM_SNAPSHOT_CREATED}" = true ]]; then
+        bash "${WORKSPACE_ROOT}/scripts/pam_snapshot.sh" discard \
+            --sysconfdir "${SYSCONFDIR}" --localstatedir "${LOCALSTATEDIR}" >/dev/null 2>&1
+        rmdir -- "${LOCALSTATEDIR}/lib/soos/state" 2>/dev/null
+    fi
     for ((i = ${#JOURNAL_DIRS[@]} - 1; i >= 0; i--)); do
         rmdir -- "${JOURNAL_DIRS[i]}" 2>/dev/null
     done
@@ -574,6 +582,22 @@ if [[ -f "${SERVICE_SRC}" ]]; then
     tracked_install 0644 "${SERVICE_SRC}" "${TARGET_SYSTEMD_DIR}/soos-daemon.service"
     UNIT_INSTALLED=true
     success "Installed ${TARGET_SYSTEMD_DIR}/soos-daemon.service"
+fi
+
+# 6a. Record the pre-install PAM state (GitHub #166): scripts/uninstall.sh
+#     verifies its rollback against this snapshot. Live installs only; an
+#     existing snapshot is never overwritten (it holds the pristine state).
+if [[ -z "${DESTDIR}" && -f "${WORKSPACE_ROOT}/scripts/pam_snapshot.sh" ]]; then
+    PAM_SNAPSHOT_EXISTED=false
+    if [[ -f "${LOCALSTATEDIR}/lib/soos/state/pam-backup/SHA256SUMS" ]]; then
+        PAM_SNAPSHOT_EXISTED=true
+    fi
+    bash "${WORKSPACE_ROOT}/scripts/pam_snapshot.sh" snapshot \
+        --sysconfdir "${SYSCONFDIR}" --localstatedir "${LOCALSTATEDIR}"
+    # Journal the snapshot only when this run created it (a pre-existing one is kept).
+    if [[ "${PAM_SNAPSHOT_EXISTED}" = false ]]; then
+        PAM_SNAPSHOT_CREATED=true
+    fi
 fi
 
 # 6. Install Distribution PAM Config Templates

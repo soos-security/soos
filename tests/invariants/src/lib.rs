@@ -2660,4 +2660,564 @@ mod tests {
             "the single by-id bound lives in resolver.rs"
         );
     }
+
+    /// Parses a `pam-auth-update` profile (`/usr/share/pam-configs/*`) into its
+    /// single-valued header fields and the module lines of each multi-line field
+    /// (`Auth`, `Auth-Initial`, ...).
+    fn parse_pam_config_profile(
+        content: &str,
+    ) -> (
+        std::collections::BTreeMap<String, String>,
+        std::collections::BTreeMap<String, Vec<String>>,
+    ) {
+        let mut fields = std::collections::BTreeMap::new();
+        let mut blocks: std::collections::BTreeMap<String, Vec<String>> =
+            std::collections::BTreeMap::new();
+        let mut current: Option<String> = None;
+        for line in content.lines() {
+            if line.starts_with([' ', '\t']) {
+                if let Some(name) = &current {
+                    let trimmed = line.trim();
+                    if !trimmed.is_empty() {
+                        blocks
+                            .entry(name.clone())
+                            .or_default()
+                            .push(trimmed.to_string());
+                    }
+                }
+                continue;
+            }
+            let Some((key, value)) = line.split_once(':') else {
+                current = None;
+                continue;
+            };
+            let value = value.trim();
+            fields.insert(key.trim().to_string(), value.to_string());
+            current = Some(key.trim().to_string());
+        }
+        (fields, blocks)
+    }
+
+    /// Returns the bracketed/keyword control of a profile module line
+    /// (`[success=done default=ignore]` or `optional`) and the module part.
+    fn split_pam_control(line: &str) -> (String, String) {
+        if let Some(rest) = line.strip_prefix('[') {
+            let end = rest.find(']').expect("unterminated PAM control bracket");
+            (
+                format!("[{}]", &rest[..end]),
+                rest[end + 1..].trim().to_string(),
+            )
+        } else {
+            let mut parts = line.splitn(2, char::is_whitespace);
+            let control = parts.next().unwrap_or_default().to_string();
+            (control, parts.next().unwrap_or_default().trim().to_string())
+        }
+    }
+
+    /// Invariant: on Debian/Ubuntu the password-failed notification profile is a
+    /// Primary profile placed after pam_unix and before pam_deny, and can never
+    /// grant or deny authentication by itself (Issue ONB-03 / GitHub #161).
+    ///
+    /// pam-auth-update emits every `Additional` profile after
+    /// `auth requisite pam_deny.so`, which terminates the stack on a wrong password:
+    /// such a hook is only ever reached after a SUCCESSFUL authentication.
+    #[test]
+    fn test_debian_notify_profile_sits_between_pam_unix_and_pam_deny() {
+        const DEBIAN_UNIX_PRIORITY: u32 = 256;
+        let root = workspace_root();
+
+        let notify = fs::read_to_string(root.join("packaging/pam/debian/soos-notify"))
+            .expect("read soos-notify");
+        let (fields, blocks) = parse_pam_config_profile(&notify);
+        assert_eq!(
+            fields.get("Auth-Type").map(String::as_str),
+            Some("Primary"),
+            "soos-notify must be a Primary profile: Additional profiles are emitted after \
+             'auth requisite pam_deny.so' and are never reached on a wrong password"
+        );
+        let priority: u32 = fields
+            .get("Priority")
+            .expect("soos-notify Priority")
+            .parse()
+            .expect("numeric soos-notify Priority");
+        assert!(
+            priority > 0 && priority < DEBIAN_UNIX_PRIORITY,
+            "soos-notify Priority ({priority}) must sort after pam_unix ({DEBIAN_UNIX_PRIORITY})"
+        );
+        for block in ["Auth", "Auth-Initial"] {
+            let lines = blocks
+                .get(block)
+                .unwrap_or_else(|| panic!("soos-notify must define {block}"));
+            assert_eq!(
+                lines.len(),
+                1,
+                "soos-notify {block} must hold one module line"
+            );
+            let (control, module) = split_pam_control(&lines[0]);
+            assert_eq!(
+                control, "[default=ignore]",
+                "soos-notify {block}: the event hook must be ignored whatever it returns \
+                 (never 'success=...', 'optional' or 'sufficient')"
+            );
+            assert_eq!(
+                module, "pam_soos.so event=password-failed timeout_ms=20",
+                "soos-notify {block} module line"
+            );
+        }
+
+        let soos =
+            fs::read_to_string(root.join("packaging/pam/debian/soos")).expect("read soos profile");
+        let (soos_fields, soos_blocks) = parse_pam_config_profile(&soos);
+        assert_eq!(
+            soos_fields.get("Auth-Type").map(String::as_str),
+            Some("Primary")
+        );
+        let soos_priority: u32 = soos_fields
+            .get("Priority")
+            .expect("soos Priority")
+            .parse()
+            .expect("numeric soos Priority");
+        assert!(
+            soos_priority > DEBIAN_UNIX_PRIORITY,
+            "the biometric profile must sort before pam_unix"
+        );
+        for block in ["Auth", "Auth-Initial"] {
+            let lines = soos_blocks.get(block).expect("soos Auth block");
+            let (control, _) = split_pam_control(&lines[0]);
+            assert_eq!(
+                control, "[success=done default=ignore]",
+                "soos {block}: biometric line must keep success=done"
+            );
+        }
+
+        // Package scripts enable/remove both profiles non-interactively.
+        let postinst =
+            fs::read_to_string(root.join("packaging/debian/postinst")).expect("postinst");
+        assert!(postinst.contains("pam-auth-update --package --enable soos soos-notify"));
+        let prerm = fs::read_to_string(root.join("packaging/debian/prerm")).expect("prerm");
+        assert!(prerm.contains("pam-auth-update --package --remove soos soos-notify"));
+
+        // Documentation must not describe the notify profile as an Additional one.
+        for doc in [
+            "Docs/DISTRIBUTION_DEPLOYMENT.md",
+            "Docs/PACKAGING_AND_PROVISIONING.md",
+        ] {
+            let content = fs::read_to_string(root.join(doc)).expect("read doc");
+            assert!(
+                !content.contains("Priority `128`"),
+                "{doc} still documents the former Additional soos-notify profile (Priority 128)"
+            );
+            assert!(
+                content.contains("pam_deny"),
+                "{doc} must explain that the notify line sits before pam_deny"
+            );
+        }
+
+        // The Docker PAM matrix proves the generated position with the real module.
+        let suite = fs::read_to_string(root.join("tests/docker/test_suite.sh")).expect("suite");
+        for needle in [
+            "T11",
+            "pam-auth-update --package --force --enable soos soos-notify",
+            "--record",
+            "password-failed",
+        ] {
+            assert!(
+                suite.contains(needle),
+                "tests/docker/test_suite.sh must cover '{needle}'"
+            );
+        }
+        let mock = fs::read_to_string(root.join("tests/docker/mock_daemon.py")).expect("mock");
+        assert!(
+            mock.contains("--record"),
+            "mock_daemon.py must record received events"
+        );
+    }
+
+    /// Writes `content` to `path`, creating parent directories.
+    fn write_fixture(path: &Path, content: &str) {
+        fs::create_dir_all(path.parent().expect("fixture parent")).expect("create fixture dir");
+        fs::write(path, content).expect("write fixture");
+    }
+
+    /// Runs `scripts/pam_snapshot.sh <cmd> --destdir <dir>` and returns the exit code.
+    fn run_pam_snapshot(root: &Path, cmd: &str, destdir: &Path) -> i32 {
+        std::process::Command::new("bash")
+            .arg(root.join("scripts/pam_snapshot.sh"))
+            .arg(cmd)
+            .arg("--destdir")
+            .arg(destdir)
+            .output()
+            .expect("run pam_snapshot.sh")
+            .status
+            .code()
+            .unwrap_or(-1)
+    }
+
+    /// Runs `scripts/uninstall.sh --destdir <dir> --keep-data --skip-systemd`.
+    fn run_uninstall_destdir(root: &Path, destdir: &Path) -> std::process::Output {
+        std::process::Command::new("bash")
+            .arg(root.join("scripts/uninstall.sh"))
+            .arg("--destdir")
+            .arg(destdir)
+            .arg("--keep-data")
+            .arg("--skip-systemd")
+            .output()
+            .expect("execute uninstall.sh")
+    }
+
+    const PRISTINE_GDM: &str = "#%PAM-1.0\nauth requisite pam_nologin.so\n@include common-auth\n";
+    const PRISTINE_ARCH: &str = "#%PAM-1.0\n-auth [success=2 default=ignore] pam_systemd_home.so\nauth [success=1 default=bad] pam_unix.so try_first_pass nullok\nauth [default=die] pam_faillock.so authfail\nauth optional pam_permit.so\n";
+
+    /// Invariant: the pre-install PAM snapshot helper records every PAM file with a
+    /// sha256 manifest in a root-only directory, never overwrites the first snapshot
+    /// and detects drift (Issue ONB-08 / GitHub #166).
+    #[test]
+    fn test_pam_snapshot_helper_records_and_verifies_pre_install_state() {
+        let root = workspace_root();
+        let helper = root.join("scripts/pam_snapshot.sh");
+        assert!(helper.is_file(), "scripts/pam_snapshot.sh must exist");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(&helper)
+                .expect("helper metadata")
+                .permissions()
+                .mode();
+            assert_ne!(
+                mode & 0o111,
+                0,
+                "scripts/pam_snapshot.sh must be executable"
+            );
+        }
+
+        let tmp = std::env::temp_dir().join(format!("soos_pam_snapshot_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        write_fixture(&tmp.join("etc/pam.d/gdm-password"), PRISTINE_GDM);
+        write_fixture(&tmp.join("etc/pam.d/system-auth"), PRISTINE_ARCH);
+        write_fixture(&tmp.join("etc/nsswitch.conf"), "passwd: files\n");
+
+        assert_eq!(
+            run_pam_snapshot(&root, "verify", &tmp),
+            2,
+            "verify without snapshot"
+        );
+        assert_eq!(run_pam_snapshot(&root, "snapshot", &tmp), 0, "snapshot");
+
+        let snap = tmp.join("var/lib/soos/state/pam-backup");
+        assert_eq!(
+            fs::read_to_string(snap.join("pam.d/gdm-password")).expect("gdm copy"),
+            PRISTINE_GDM
+        );
+        assert_eq!(
+            fs::read_to_string(snap.join("pam.d/system-auth")).expect("system-auth copy"),
+            PRISTINE_ARCH
+        );
+        let manifest = fs::read_to_string(snap.join("SHA256SUMS")).expect("manifest");
+        for rel in ["pam.d/gdm-password", "pam.d/system-auth", "nsswitch.conf"] {
+            assert!(
+                manifest.lines().any(|l| l.ends_with(&format!("  {rel}"))),
+                "SHA256SUMS must list {rel}"
+            );
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            for dir in ["var/lib/soos/state", "var/lib/soos/state/pam-backup"] {
+                let mode = fs::metadata(tmp.join(dir))
+                    .expect("dir")
+                    .permissions()
+                    .mode();
+                assert_eq!(mode & 0o777, 0o700, "{dir} must be 0700");
+            }
+            for entry in walk_files(&snap) {
+                let mode = fs::metadata(&entry).expect("entry").permissions().mode();
+                assert_eq!(
+                    mode & 0o002,
+                    0,
+                    "{} must not be world-writable",
+                    entry.display()
+                );
+            }
+        }
+
+        assert_eq!(
+            run_pam_snapshot(&root, "verify", &tmp),
+            0,
+            "verify identical state"
+        );
+
+        // Drift is detected, and a second snapshot never replaces the pristine one.
+        write_fixture(
+            &tmp.join("etc/pam.d/gdm-password"),
+            &format!("auth  sufficient  pam_soos.so timeout_ms=2500\n{PRISTINE_GDM}"),
+        );
+        assert_eq!(
+            run_pam_snapshot(&root, "verify", &tmp),
+            1,
+            "verify must detect drift"
+        );
+        assert_eq!(
+            run_pam_snapshot(&root, "snapshot", &tmp),
+            0,
+            "second snapshot"
+        );
+        assert_eq!(
+            fs::read_to_string(snap.join("pam.d/gdm-password")).expect("gdm copy"),
+            PRISTINE_GDM,
+            "an existing snapshot must never be overwritten"
+        );
+
+        assert_eq!(run_pam_snapshot(&root, "discard", &tmp), 0, "discard");
+        assert!(!snap.exists(), "discard removes the snapshot");
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    /// Recursively lists the regular files below `dir`.
+    fn walk_files(dir: &Path) -> Vec<PathBuf> {
+        let mut out = Vec::new();
+        let mut stack = vec![dir.to_path_buf()];
+        while let Some(d) = stack.pop() {
+            for entry in fs::read_dir(&d).expect("read_dir").flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else {
+                    out.push(path);
+                }
+            }
+        }
+        out
+    }
+
+    /// Invariant: uninstall removes residual `pam_soos.so` lines (e.g. inserted by
+    /// `soos-admin gdm enable` before backups existed, or an Arch snippet added
+    /// without touching jump counts), restores the exact pre-install bytes and
+    /// discards the snapshot once the PAM state is verified identical
+    /// (Issue ONB-08 / GitHub #166).
+    #[test]
+    fn test_uninstall_restores_pre_install_pam_state_byte_for_byte() {
+        let root = workspace_root();
+        let tmp = std::env::temp_dir().join(format!("soos_pam_rollback_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        let pam_d = tmp.join("etc/pam.d");
+        write_fixture(&pam_d.join("gdm-password"), PRISTINE_GDM);
+        write_fixture(&pam_d.join("system-auth"), PRISTINE_ARCH);
+        write_fixture(&pam_d.join("sudo"), "#%PAM-1.0\nauth include system-auth\n");
+        write_fixture(&tmp.join("etc/nsswitch.conf"), "passwd: files\n");
+        assert_eq!(run_pam_snapshot(&root, "snapshot", &tmp), 0, "snapshot");
+
+        // Post-install modifications performed by soos.
+        let module = tmp.join("usr/lib/security/pam_soos.so");
+        write_fixture(&module, "module");
+        write_fixture(
+            &pam_d.join("gdm-password"),
+            "#%PAM-1.0\nauth requisite pam_nologin.so\nauth  sufficient  pam_soos.so timeout_ms=2500\n@include common-auth\n",
+        );
+        write_fixture(
+            &pam_d.join("system-auth"),
+            "#%PAM-1.0\n-auth [success=2 default=ignore] pam_systemd_home.so\nauth  [success=done default=ignore]  pam_soos.so timeout_ms=250\nauth [success=1 default=bad] pam_unix.so try_first_pass nullok\nauth  optional  pam_soos.so event=password-failed timeout_ms=20\nauth [default=die] pam_faillock.so authfail\nauth optional pam_permit.so\n",
+        );
+        write_fixture(&pam_d.join("soos.snippet"), "auth optional pam_soos.so\n");
+
+        let output = run_uninstall_destdir(&root, &tmp);
+        assert!(
+            output.status.success(),
+            "uninstall.sh must succeed: {}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        assert_eq!(
+            fs::read_to_string(pam_d.join("gdm-password")).expect("gdm"),
+            PRISTINE_GDM,
+            "gdm-password must be restored byte-for-byte"
+        );
+        assert_eq!(
+            fs::read_to_string(pam_d.join("system-auth")).expect("system-auth"),
+            PRISTINE_ARCH,
+            "system-auth must be restored byte-for-byte"
+        );
+        assert!(!pam_d.join("soos.snippet").exists(), "snippet removed");
+        assert!(
+            !module.exists(),
+            "pam_soos.so removed once no PAM file references it"
+        );
+        assert!(
+            !tmp.join("var/lib/soos/state/pam-backup").exists(),
+            "a verified snapshot is discarded"
+        );
+        let leftovers: Vec<_> = fs::read_dir(&pam_d)
+            .expect("pam.d")
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with('.') || n.ends_with(".soos-backup"))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "no temporary or backup file left: {leftovers:?}"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            for name in ["gdm-password", "system-auth"] {
+                let mode = fs::metadata(pam_d.join(name))
+                    .expect("m")
+                    .permissions()
+                    .mode();
+                assert_eq!(
+                    mode & 0o022,
+                    0,
+                    "{name} must not become group/world-writable"
+                );
+            }
+        }
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    /// Invariant: when a residual `pam_soos.so` line cannot be removed safely (the
+    /// file uses numeric `success=N` jumps and no pre-install copy matches), the
+    /// uninstaller leaves the file untouched, KEEPS `pam_soos.so` installed (a
+    /// present module degrades to PAM_IGNORE; a missing one under a `required`
+    /// control would break login), keeps the snapshot for the operator and exits
+    /// non-zero (Issue ONB-08 / GitHub #166).
+    #[test]
+    fn test_uninstall_keeps_module_when_pam_rollback_is_unsafe() {
+        let root = workspace_root();
+        let tmp =
+            std::env::temp_dir().join(format!("soos_pam_rollback_unsafe_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        let pam_d = tmp.join("etc/pam.d");
+        write_fixture(&pam_d.join("common-auth"), PRISTINE_ARCH);
+        assert_eq!(run_pam_snapshot(&root, "snapshot", &tmp), 0, "snapshot");
+
+        // The operator adjusted a jump count while inserting the soos line: stripping
+        // the line would silently change which module the jump lands on.
+        let edited = "#%PAM-1.0\n-auth [success=3 default=ignore] pam_systemd_home.so\nauth [success=done default=ignore] pam_soos.so timeout_ms=250\nauth [success=1 default=bad] pam_unix.so try_first_pass nullok\nauth [default=die] pam_faillock.so authfail\nauth optional pam_permit.so\n";
+        write_fixture(&pam_d.join("common-auth"), edited);
+        let module = tmp.join("usr/lib/security/pam_soos.so");
+        write_fixture(&module, "module");
+
+        let output = run_uninstall_destdir(&root, &tmp);
+        assert!(
+            !output.status.success(),
+            "uninstall.sh must report an incomplete PAM rollback"
+        );
+        assert_eq!(
+            fs::read_to_string(pam_d.join("common-auth")).expect("common-auth"),
+            edited,
+            "an unsafe file must be left untouched"
+        );
+        assert!(
+            module.exists(),
+            "pam_soos.so must be kept while PAM files reference it"
+        );
+        assert!(
+            tmp.join("var/lib/soos/state/pam-backup/pam.d/common-auth")
+                .is_file(),
+            "the snapshot must be kept for manual restoration"
+        );
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    /// Invariant: every PAM edit path records a restorable state and the rescue
+    /// procedures only reference files that are actually created (Issue ONB-08 /
+    /// GitHub #166).
+    #[test]
+    fn test_pam_rollback_is_wired_and_documented() {
+        let root = workspace_root();
+
+        // 1. install.sh snapshots the live PAM state before installing PAM templates.
+        let install = fs::read_to_string(root.join("scripts/install.sh")).expect("install.sh");
+        let snap_pos = offset_of(&install, "pam_snapshot.sh", "install.sh");
+        let templates_pos = offset_of(
+            &install,
+            "Installing distribution PAM configuration templates",
+            "install.sh",
+        );
+        assert!(
+            snap_pos < templates_pos,
+            "install.sh must snapshot PAM state before installing PAM templates"
+        );
+
+        // 2. uninstall.sh verifies the rollback against the snapshot, handles residual
+        //    pam_soos lines and writes PAM files atomically.
+        let uninstall = fs::read_to_string(root.join("scripts/uninstall.sh")).expect("uninstall");
+        for needle in ["pam_snapshot.sh", "verify", "mktemp", "mv -f"] {
+            assert!(
+                uninstall.contains(needle),
+                "scripts/uninstall.sh must use '{needle}'"
+            );
+        }
+        assert!(
+            !uninstall.contains("cp -f \"${backup}\" \"${orig}\""),
+            "backups must be restored atomically (temp file + rename), not with cp -f"
+        );
+
+        // 3. soos-admin gdm enable creates a .soos-backup and writes atomically.
+        let gdm = fs::read_to_string(root.join("crates/admin-cli/src/gdm.rs")).expect("gdm.rs");
+        assert!(
+            gdm.contains(".soos-backup"),
+            "gdm.rs must create a .soos-backup"
+        );
+        assert!(
+            gdm.contains("sync_all"),
+            "gdm.rs must fsync before renaming"
+        );
+        assert!(
+            gdm.contains("fs::rename"),
+            "gdm.rs must replace the file atomically"
+        );
+
+        // 4. Documentation references the real rescue artifacts.
+        for doc in [
+            "Docs/DISTRIBUTION_DEPLOYMENT.md",
+            "Docs/PACKAGING_AND_PROVISIONING.md",
+        ] {
+            let content = fs::read_to_string(root.join(doc)).expect("doc");
+            assert!(
+                content.contains("/var/lib/soos/state/pam-backup"),
+                "{doc} must document the pre-install PAM snapshot"
+            );
+        }
+        let deploy = fs::read_to_string(root.join("Docs/DISTRIBUTION_DEPLOYMENT.md")).expect("doc");
+        assert!(
+            !deploy.contains("sudo cp /etc/pam.d/system-auth.soos-backup /etc/pam.d/system-auth")
+                || deploy
+                    .contains("sudo cp /etc/pam.d/system-auth /etc/pam.d/system-auth.soos-backup"),
+            "the Arch rescue path may only restore a backup the documented procedure creates"
+        );
+
+        // 5. A Dockerized rollback test exists and is wired into run_tests.sh and CI.
+        let docker_test = root.join("tests/docker/pam_rollback_test.sh");
+        assert!(
+            docker_test.is_file(),
+            "tests/docker/pam_rollback_test.sh must exist"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(&docker_test).expect("m").permissions().mode();
+            assert_ne!(mode & 0o111, 0, "pam_rollback_test.sh must be executable");
+        }
+        let docker = fs::read_to_string(&docker_test).expect("docker test");
+        for needle in [
+            "set -euo pipefail",
+            "pam-auth-update --package --enable soos soos-notify",
+            "authselect select custom/soos with-faillock --force",
+            "scripts/pam_snapshot.sh",
+            "scripts/uninstall.sh",
+            "sha256sum",
+            "pamtester",
+        ] {
+            assert!(
+                docker.contains(needle),
+                "pam_rollback_test.sh must cover '{needle}'"
+            );
+        }
+        let run_tests = fs::read_to_string(root.join("run_tests.sh")).expect("run_tests.sh");
+        assert!(run_tests.contains("pam_rollback_test.sh"));
+        let ci = fs::read_to_string(root.join(".github/workflows/ci.yml")).expect("ci.yml");
+        assert!(
+            ci.contains("pam_rollback_test.sh"),
+            "ci.yml must run the rollback test"
+        );
+    }
 }

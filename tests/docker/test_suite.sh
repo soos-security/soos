@@ -14,6 +14,8 @@
 #   - T9: Model deployment script integrity (manifest dry-run)
 #   - T10: Panic inside the RELEASE-built .so returns PAM_IGNORE (never aborts
 #          the PAM host process) — review finding PAM-01 / TCI-01 (GitHub #148)
+#   - T11: pam-auth-update generated common-auth emits one PasswordFailed event
+#          on a wrong password and none on success — review finding ONB-03 (GitHub #161)
 # =============================================================================
 
 set -euo pipefail
@@ -383,6 +385,82 @@ EOF
     success "T10 (${FAULT_MODE}) passed: invalid password still rejected after in-module panic (exit ${T10_RC})."
 done
 cleanup_fault_injection
+
+# ---------------------------------------------------------------------------
+# T11: Debian pam-auth-update Stack Emits PasswordFailed on a Wrong Password
+#      (ONB-03 / GitHub #161)
+# ---------------------------------------------------------------------------
+# The shipped profiles are enabled with the real pam-auth-update, then the
+# generated common-auth is exercised with the real module and a recording mock
+# daemon (Verdict::Deny): a wrong password must reach the password-failed hook
+# (one PasswordFailed event) before pam_deny, a correct password must not.
+echo ""
+info "-------------------------------------------------------------------"
+info "T11: pam-auth-update Stack — PasswordFailed Event on Wrong Password"
+info "-------------------------------------------------------------------"
+if command -v pam-auth-update >/dev/null 2>&1; then
+    cleanup_daemon
+    T11_SAVED_COMMON_AUTH="$(mktemp)"
+    T11_EVENTS="$(mktemp)"
+    cp -p /etc/pam.d/common-auth "${T11_SAVED_COMMON_AUTH}"
+    install -m 0644 packaging/pam/debian/soos /usr/share/pam-configs/soos
+    install -m 0644 packaging/pam/debian/soos-notify /usr/share/pam-configs/soos-notify
+    # --force: the sandbox image ships a hand-written common-auth.
+    DEBIAN_FRONTEND=noninteractive pam-auth-update --package --force --enable soos soos-notify
+    T11_NOTIFY_LINE="$(grep -n 'pam_soos.so event=password-failed' /etc/pam.d/common-auth | head -n 1 | cut -d: -f1)"
+    T11_DENY_LINE="$(grep -n 'pam_deny.so' /etc/pam.d/common-auth | head -n 1 | cut -d: -f1)"
+    if [[ -z "${T11_NOTIFY_LINE}" || -z "${T11_DENY_LINE}" || "${T11_NOTIFY_LINE}" -ge "${T11_DENY_LINE}" ]]; then
+        error "T11 failed: password-failed hook (line ${T11_NOTIFY_LINE:-none}) is not before pam_deny (line ${T11_DENY_LINE:-none})."
+        grep -v '^#' /etc/pam.d/common-auth | sed '/^$/d' >&2
+        exit 1
+    fi
+    success "T11: generated common-auth places the hook (line ${T11_NOTIFY_LINE}) before pam_deny (line ${T11_DENY_LINE})."
+
+    python3 tests/docker/mock_daemon.py --mode deny --record "${T11_EVENTS}" --socket /run/soos/daemon.sock &
+    MOCK_PID=$!
+    sleep 0.2
+
+    set +e
+    /usr/local/bin/pam_test_runner common-auth testuser wrong_password 2>/dev/null
+    T11_RC=$?
+    set -e
+    sleep 0.2
+    if [[ ${T11_RC} -eq 0 ]]; then
+        error "T11 failed: wrong password accepted through the generated common-auth."
+        exit 1
+    fi
+    T11_EVENT_COUNT="$(grep -c '^event kind=password-failed' "${T11_EVENTS}" || true)"
+    if [[ "${T11_EVENT_COUNT}" -ne 1 ]]; then
+        error "T11 failed: expected 1 PasswordFailed event after a wrong password, got ${T11_EVENT_COUNT}."
+        cat "${T11_EVENTS}" >&2
+        exit 1
+    fi
+    success "T11 passed: wrong password rejected and exactly one PasswordFailed event received."
+
+    if ! /usr/local/bin/pam_test_runner common-auth testuser password123; then
+        error "T11 failed: correct password rejected through the generated common-auth."
+        exit 1
+    fi
+    sleep 0.2
+    T11_EVENT_COUNT="$(grep -c '^event kind=password-failed' "${T11_EVENTS}" || true)"
+    if [[ "${T11_EVENT_COUNT}" -ne 1 ]]; then
+        error "T11 failed: a successful password login emitted a PasswordFailed event."
+        cat "${T11_EVENTS}" >&2
+        exit 1
+    fi
+    success "T11 passed: correct password accepted without any PasswordFailed event."
+    cleanup_daemon
+
+    DEBIAN_FRONTEND=noninteractive pam-auth-update --package --remove soos soos-notify
+    rm -f /usr/share/pam-configs/soos /usr/share/pam-configs/soos-notify
+    cp -p "${T11_SAVED_COMMON_AUTH}" /etc/pam.d/common-auth
+    rm -f "${T11_SAVED_COMMON_AUTH}" "${T11_EVENTS}"
+elif [[ -f /etc/debian_version ]]; then
+    error "T11 failed: pam-auth-update is missing on a Debian-based image."
+    exit 1
+else
+    info "T11 skipped: not a pam-auth-update distribution."
+fi
 
 echo ""
 echo "==================================================================="

@@ -34,6 +34,7 @@ and flags run at every level, so a green local run predicts a green CI run.
 │  Level 3: GitHub Actions CI (.github/workflows/ci.yml)      │
 │  parallel: lint │ clippy │ test │ security                  │
 │  after lint: pam-integration │ authselect-profile           │
+│              pam-rollback                                   │
 │  after all:  ci-success (aggregate gate)                    │
 │  separate:   pr-title.yml (PR title convention)             │
 └──────────────────────────────┬──────────────────────────────┘
@@ -65,8 +66,9 @@ retitling a PR re-validates it without re-running the whole pipeline.
 | `clippy` | `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings` | Cached `target/` |
 | `test` | `cargo test --locked --workspace --all-targets --all-features` (build step separated from run step) | Cached `target/` |
 | `security` | `cargo deny --locked check` with cargo-deny 0.20.2 | Also runs daily for new RustSec advisories |
-| `pam-integration` | Dockerized PAM matrix T1–T10 (`tests/docker/test_suite.sh`) | Starts after `lint`; Buildx layer cache |
+| `pam-integration` | Dockerized PAM matrix T1–T11 (`tests/docker/test_suite.sh`) | Starts after `lint`; Buildx layer cache |
 | `authselect-profile` | Fedora `authselect` profile activation, `authselect check`, generated stack ordering, `nsswitch.conf` preservation, password fallback and rollback in `fedora:40` (`tests/docker/authselect_profile_test.sh`) | Starts after `lint`; stock image, no build |
+| `pam-rollback` | Debian `pam-auth-update` stack order (password-failed hook before `pam_deny`) and byte-for-byte PAM rollback by `scripts/uninstall.sh` (sha256 of every `/etc/pam.d` entry, `authselect current`) in `ubuntu:24.04` and `fedora:40` (`tests/docker/pam_rollback_test.sh`) | Starts after `lint`; stock images, no build |
 | `ci-success` | Fails unless every job above succeeded | Single check to require in branch protection |
 
 ### Performance Design
@@ -174,9 +176,10 @@ are reviewed like any other and receive their report on the Dependabot branch.
 
 To guarantee that experimental PAM modules never compromise the host operating system, all PAM integration tests run inside an isolated, ephemeral Ubuntu 24.04 Docker container:
 ```bash
-./run_tests.sh             # Ubuntu sandbox, T1–T10
+./run_tests.sh             # Ubuntu sandbox, T1–T11
 ./run_tests.sh --matrix    # Ubuntu, Fedora and Arch Linux
 ./run_tests.sh authselect  # Fedora authselect profile activation and rollback (fedora:40)
+./run_tests.sh rollback    # Debian stack order + byte-for-byte PAM rollback (ubuntu:24.04, fedora:40)
 ```
 
 The matrix (see [`PAM_DOCKER_TEST_MATRIX.md`](PAM_DOCKER_TEST_MATRIX.md)) covers nominal facial

@@ -42,6 +42,7 @@ post_install() {
 
     echo "==> soos installed successfully."
     echo "==> To enable biometric authentication in Arch PAM, integrate /etc/pam.d/soos.snippet into /etc/pam.d/system-auth."
+    echo "==> Back it up first (restored by scripts/uninstall.sh): cp /etc/pam.d/system-auth /etc/pam.d/system-auth.soos-backup"
     echo "==> Start and enable daemon: systemctl enable --now soos-daemon.service"
 }
 
@@ -50,6 +51,14 @@ post_upgrade() {
 }
 
 pre_remove() {
+    # pacman never edits /etc/pam.d: warn when a manual integration is still active.
+    # The lines are harmless once the module is gone ([success=done default=ignore]
+    # and optional controls), but they should be reverted.
+    if grep -Eqs '^[[:space:]]*-?(auth|account|password|session)[[:space:]].*pam_soos\.so' /etc/pam.d/system-auth; then
+        echo "==> WARNING: /etc/pam.d/system-auth still loads pam_soos.so."
+        echo "==> Restore it: cp /etc/pam.d/system-auth.soos-backup /etc/pam.d/system-auth"
+    fi
+
     # Stop and disable systemd service
     if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
         systemctl stop soos-daemon.service || true
