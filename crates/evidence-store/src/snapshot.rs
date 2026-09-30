@@ -1,12 +1,24 @@
 //! Data structures for evidence snapshot records, serialization, and date arithmetic.
 
 use crate::error::EvidenceStoreError;
+use crate::frame::{
+    to_rgb24, FrameBytes, FrameMetadata, EVIDENCE_RECORD_VERSION, LEGACY_EVIDENCE_RECORD_VERSION,
+};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use zeroize::Zeroizing;
 
-/// Complete evidence record with metadata and raw image payload.
+/// Complete evidence record with metadata and image payload.
+///
+/// The whole record is CBOR-encoded and sealed in the AES-256-GCM envelope, so the version,
+/// the capture metadata and the pixels are all authenticated. `Debug` never prints the
+/// payload ([`FrameBytes`] is redacted) and the payload is zeroized on drop.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EvidenceRecord {
+    /// Record format version ([`EVIDENCE_RECORD_VERSION`]); records written before
+    /// GitHub #181 carry no field and decode as [`LEGACY_EVIDENCE_RECORD_VERSION`].
+    #[serde(default = "legacy_version")]
+    pub format_version: u16,
     /// Unique identifier for the snapshot (UUID v4 format).
     pub snapshot_id: String,
     /// Target Unix user ID.
@@ -15,23 +27,71 @@ pub struct EvidenceRecord {
     pub timestamp: u64,
     /// Event reason (e.g. "auth_failure", "liveness_rejected").
     pub reason: String,
-    /// Binary frame payload (e.g. WebP / JPEG encoded data).
-    pub image_data: Vec<u8>,
+    /// Capture metadata describing `image_data`; `None` for legacy records and for opaque
+    /// payloads stored through [`crate::EvidenceStore::store_snapshot`].
+    #[serde(default)]
+    pub frame: Option<FrameMetadata>,
+    /// Frame payload exactly as captured (raw pixels or MJPEG, see `frame`).
+    pub image_data: FrameBytes,
+}
+
+fn legacy_version() -> u16 {
+    LEGACY_EVIDENCE_RECORD_VERSION
 }
 
 impl EvidenceRecord {
-    /// Serializes the record to CBOR binary format.
-    pub fn to_cbor(&self) -> Result<Vec<u8>, EvidenceStoreError> {
-        let mut buf = Vec::new();
-        ciborium::into_writer(self, &mut buf)
+    /// Serializes the record to CBOR binary format (zeroized on drop).
+    pub fn to_cbor(&self) -> Result<Zeroizing<Vec<u8>>, EvidenceStoreError> {
+        let mut buf = Zeroizing::new(Vec::new());
+        ciborium::into_writer(self, &mut *buf)
             .map_err(|e| EvidenceStoreError::Serialization(format!("CBOR encode failed: {e}")))?;
         Ok(buf)
     }
 
-    /// Deserializes an `EvidenceRecord` from CBOR binary format.
+    /// Deserializes and validates an `EvidenceRecord` from CBOR binary format.
+    ///
+    /// # Errors
+    ///
+    /// [`EvidenceStoreError::Serialization`] on malformed CBOR;
+    /// [`EvidenceStoreError::InvalidFrame`] when [`Self::validate`] fails.
     pub fn from_cbor(slice: &[u8]) -> Result<Self, EvidenceStoreError> {
-        ciborium::from_reader(slice)
-            .map_err(|e| EvidenceStoreError::Serialization(format!("CBOR decode failed: {e}")))
+        let record: Self = ciborium::from_reader(slice)
+            .map_err(|e| EvidenceStoreError::Serialization(format!("CBOR decode failed: {e}")))?;
+        record.validate()?;
+        Ok(record)
+    }
+
+    /// Checks the record version and, when present, the frame metadata against the payload.
+    ///
+    /// # Errors
+    ///
+    /// [`EvidenceStoreError::InvalidFrame`] for an unknown version, a legacy record carrying
+    /// metadata, or metadata inconsistent with the payload.
+    pub fn validate(&self) -> Result<(), EvidenceStoreError> {
+        match (self.format_version, &self.frame) {
+            (LEGACY_EVIDENCE_RECORD_VERSION, None) => Ok(()),
+            (EVIDENCE_RECORD_VERSION, None) => Ok(()),
+            (EVIDENCE_RECORD_VERSION, Some(meta)) => meta.validate(self.image_data.len()),
+            (version, _) => Err(EvidenceStoreError::InvalidFrame(format!(
+                "unsupported evidence record version {version}"
+            ))),
+        }
+    }
+
+    /// Reconstructs the frame as packed RGB 8:8:8 (`width * height * 3` bytes, zeroized on
+    /// drop) using the stored dimensions and pixel format.
+    ///
+    /// # Errors
+    ///
+    /// [`EvidenceStoreError::InvalidFrame`] when the record has no frame metadata (legacy or
+    /// opaque payload), holds a compressed MJPEG frame, or is inconsistent.
+    pub fn to_rgb24(&self) -> Result<Zeroizing<Vec<u8>>, EvidenceStoreError> {
+        let meta = self.frame.as_ref().ok_or_else(|| {
+            EvidenceStoreError::InvalidFrame(
+                "record has no frame metadata (legacy or opaque payload)".to_string(),
+            )
+        })?;
+        to_rgb24(meta, &self.image_data)
     }
 }
 

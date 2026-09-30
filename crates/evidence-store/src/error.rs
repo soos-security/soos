@@ -48,6 +48,11 @@ pub enum EvidenceStoreError {
     #[error("Invalid UID {0}: must be a valid POSIX UID")]
     InvalidUid(u32),
 
+    /// Frame metadata or payload is inconsistent, out of bounds, or of an unsupported
+    /// record version (GitHub #181).
+    #[error("Invalid evidence frame: {0}")]
+    InvalidFrame(String),
+
     /// Invalid storage path, symlink detected, or path traversal attempt.
     #[error("Invalid store path: {0}")]
     InvalidPath(String),

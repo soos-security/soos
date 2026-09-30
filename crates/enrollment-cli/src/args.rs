@@ -158,8 +158,10 @@ pub struct ImportArgs {
     #[arg(short = 'u', long, conflicts_with = "uid")]
     pub username: Option<String>,
 
-    /// Path to input template file (CBOR or JSON float array).
-    #[arg(short = 'f', long)]
+    /// Input template (CBOR or JSON array of 512 finite floats, at most 64 KiB), or `-` to
+    /// read it from standard input. A file must be a regular file (no symlink) and, under
+    /// pkexec, owned by the invoking user (`PKEXEC_UID`).
+    #[arg(short = 'f', long, value_name = "FILE|-")]
     pub file: PathBuf,
 
     /// Facial recognition model identifier.
