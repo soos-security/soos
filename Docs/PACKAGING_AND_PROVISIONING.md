@@ -31,14 +31,42 @@ The `soos` installation script (`scripts/install.sh`) guarantees the following f
 
 ## 3. Installation Script (`scripts/install.sh`)
 
-### Features & Capabilities
-- **System Group Provisioning**: Creates the `soos` system group if absent (`groupadd -r soos` or `addgroup --system soos`).
-- **Cryptographic Master Key Generation (live install only)**: On a live install (no `--destdir`), delegates to `scripts/provision_master_key.sh`, which generates a 32-byte key from `openssl rand 32` or `/dev/urandom` with mode `0600` from inception if `/var/lib/soos/master.key` is absent. In staging mode (`--destdir`) **no key material is ever generated**: the tree is package content, and the key is created on the target host at first install by the shipped helper (see §7.4).
-- **Binary & PAM Shared Library Deployment**: Locates built release artifacts and deploys them to target locations. Auto-detects target architecture and PAM module paths (`/lib/x86_64-linux-gnu/security`, `/usr/lib64/security`, etc.).
-- **Systemd Integration**: Deploys `packaging/soos-daemon.service`, invokes `systemctl daemon-reload`, and enables the service unit.
-- **Model Download & Attestation**: Invokes `scripts/download_models.sh` to download and cryptographically verify all ONNX models cataloged in `models/manifest.toml`.
+### 3.1 Build & Runtime Dependencies (GitHub #165)
 
-### Supported CLI Flags
+`scripts/check_build_deps.sh` is the single source of truth for these lists (`--print-packages <build|gui|models> [--distro <id>]`) and, without arguments, runs a read-only build host preflight (`cargo`, `rustc`, `cc`, `pkg-config`, OpenSSL headers via `pkg-config openssl`, `security/pam_appl.h`, `libclang`). The lists were verified by `cargo build --release --locked --workspace` in bare `ubuntu:24.04`, `fedora:40` and `archlinux` containers with only these packages plus rustup.
+
+| Group | Debian 12 / Ubuntu 24.04 | Fedora 40 / RHEL 9 | Arch Linux |
+|---|---|---|---|
+| **build** | `build-essential pkg-config libpam0g-dev libclang-dev clang libssl-dev` | `gcc gcc-c++ make pkgconf-pkg-config pam-devel clang-devel openssl-devel` | `base-devel clang openssl pkgconf pam` |
+| **gui** (runtime, `soos-gui` only) | `libxkbcommon0 libwayland-client0 libwayland-egl1 libegl1 libgl1 libx11-6 libxcursor1 libxi6 libxrandr2` | `libxkbcommon libwayland-client libwayland-egl mesa-libEGL mesa-libGL libX11 libXcursor libXi libXrandr` | `libxkbcommon wayland libglvnd libx11 libxcursor libxi libxrandr` |
+| **models** (`scripts/download_models.sh`) | `curl ca-certificates coreutils` | `curl ca-certificates coreutils` | `curl ca-certificates coreutils` |
+
+Why each build package is needed (from the locked dependency graph):
+
+- **C/C++ toolchain**: linking; the ONNX Runtime static library pulled by `ort-sys` needs `libstdc++`.
+- **PAM headers**: `pam-bindings` (`crates/pam`).
+- **libclang + clang**: `bindgen`, a build-dependency of `v4l2-sys-mit` (`crates/camera-v4l`).
+- **OpenSSL headers + pkg-config**: `openssl-sys` ← `native-tls` ← `ureq`, used by the `ort-sys` build script. `openssl-src` is not vendored, so the system headers are required at build time only; no shipped binary links OpenSSL.
+- **Rust toolchain**: install rustup from <https://rustup.rs>; `rust-toolchain.toml` selects the channel.
+
+**ONNX Runtime download**: the `ort-sys` build script downloads prebuilt ONNX Runtime binaries during `cargo build` (network required). For offline or air-gapped builds, point `ORT_LIB_LOCATION` at a local ONNX Runtime build before running cargo.
+
+**GUI runtime libraries** are loaded with `dlopen()` by `winit`/`glutin`, so `dpkg-shlibdeps` and friends cannot detect them. The `.deb` (which ships `soos-gui`) declares them as `Recommends:`; `scripts/build_deb.sh` declares the linked runtime libraries (`libc6`, `libgcc-s1`, `libstdc++6`, `libpam0g`) explicitly because it does not run `dpkg-shlibdeps`.
+
+**Model tools**: `scripts/download_models.sh` needs only `bash` (>= 4), `sha256sum` (coreutils) and, for `https://` sources, `curl` with `ca-certificates`. **Python is not required**: the manifest is parsed in bash against its fixed schema (GitHub #167). Packages do not download models; fetch them from a source checkout with `sudo ./scripts/download_models.sh`.
+
+### 3.2 Features & Capabilities
+- **Fail-closed preflight (GitHub #164)**: before any change, `install.sh` checks that a live install (no `--destdir`) runs as root, that every artifact (`soos-daemon`, `soos-admin`, `soos-enroll`, `soos-gui`, `libpam_soos.so`) exists in the artifact directory, that the directory is not a cargo `debug` profile directory, and that the model manifest and tools pass `download_models.sh --preflight`. Any failure exits non-zero (exit `2`) with nothing modified. `target/debug` is never searched implicitly.
+- **Explicit release build**: `install.sh --build` runs `scripts/check_build_deps.sh` and then `cargo build --release --locked --workspace` (as `$SUDO_USER` when run through sudo, never as root in a user's checkout); a failed build exits `40`. Without `--build`, artifacts are taken from `${CARGO_TARGET_DIR:-target}/release` or `--artifact-dir`.
+- **Transactional install with rollback**: every created file and directory and every overwritten file (saved to a private `mktemp -d` backup directory) is journaled. Files are written atomically (temporary file + rename in the target directory). If any later step fails, or the script is interrupted, the journal is replayed backwards: overwritten files are restored, created files and directories are removed, a group created by the run is deleted, the unit is disabled if the run enabled it, and the script reports `Installation FAILED ... all changes were rolled back` with a non-zero exit.
+- **System Group Provisioning**: Creates the `soos` system group if absent (`groupadd -r soos` or `addgroup --system soos`).
+- **Cryptographic Master Key Generation (live install only)**: On a live install (no `--destdir`), delegates to `scripts/provision_master_key.sh`, which generates a 32-byte key from `openssl rand 32` or `/dev/urandom` with mode `0600` from inception if `/var/lib/soos/master.key` is absent. In staging mode (`--destdir`) **no key material is ever generated**: the tree is package content, and the key is created on the target host at first install by the shipped helper (see §7.4). A key created by a run that later fails is removed by the rollback (nothing was encrypted with it yet); an existing key is never touched.
+- **Binary & PAM Shared Library Deployment**: Deploys the release artifacts to their target locations. Auto-detects target architecture and PAM module paths (`/lib/x86_64-linux-gnu/security`, `/usr/lib64/security`, etc.). Pre-existing system directories (`/usr/bin`, the PAM module directory, `/etc/systemd/system`, ...) keep their mode; only directories created by the run, and soos-owned directories (§2), get their mode set.
+- **Model Download & Attestation before enabling the unit**: Invokes `scripts/download_models.sh` to download and verify (SHA-256) all ONNX models cataloged in `models/manifest.toml` (or `--manifest`). A verification failure exits `60` and rolls back; the unit is never enabled without verified models.
+- **Systemd Integration**: Deploys `packaging/soos-daemon.service`, and as the last step invokes `systemctl daemon-reload` and enables the unit. The unit bounds restarts (`StartLimitIntervalSec=60`, `StartLimitBurst=5`) so a daemon that cannot start does not crash-loop forever.
+- `--allow-missing` (developer use only) installs a partial artifact set and ends with an `INCOMPLETE` banner instead of the success message.
+
+### 3.3 Supported CLI Flags
 ```bash
 ./scripts/install.sh [OPTIONS]
 
@@ -49,11 +77,19 @@ Options:
   --localstatedir <DIR>    State directory (default: /var)
   --runstatedir <DIR>      Runtime directory (default: /run)
   --pam-dir <DIR>          Explicit PAM module directory (auto-detected if omitted)
+  --artifact-dir <DIR>     Built artifacts directory (default: target/release)
+  --build                  Check build dependencies, then run
+                           'cargo build --release --locked --workspace'
+  --allow-missing          Install a partial artifact set (developer use only)
+  --allow-debug-artifacts  Accept artifacts from a cargo 'debug' profile directory
+  --manifest <PATH>        Model manifest (default: models/manifest.toml)
   --skip-models            Skip model download and verification
   --skip-systemd           Skip systemctl reload and enable invocations
-  --dry-run                Print plan without modifying filesystem
+  --dry-run                Run the read-only preflight and print the plan
   -h, --help               Display help message and exit
 ```
+
+Exit codes: `0` success, `1` usage error, `2` preflight failure (nothing modified), `40` release build failed (nothing installed), `60` model deployment or verification failed (rolled back); any other non-zero code is the failing step's own status (rolled back).
 
 ---
 
