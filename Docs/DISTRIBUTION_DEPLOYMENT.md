@@ -94,7 +94,7 @@ Placement rules:
    rule (any module not listed above, e.g. `pam_tally2.so`, `pam_group.so`, a vendor
    module, or a conditional/`sufficient` gate) runs before the credential module either in
    `gdm-password` or in a delegated stack, an include target cannot be resolved inside the
-   PAM directory (absolute path), the stack reaches no credential module, a `[...=N]` jump
+   PAM directory (absolute path, file missing from the directory, or unreadable), the stack reaches no credential module, a `[...=N]` jump
    would change target, the file is not UTF-8, uses line continuations, exceeds 64 KiB or
    is a symlink. soos cannot tell whether an unknown module is a lockout or login gate, so
    it never guesses.
@@ -135,8 +135,10 @@ Placement rules:
      `pam_unix.so`, so the error names `pam_gnome_keyring.so`.
    - **Vendor PAM directories** (Linux-PAM built with `--enable-vendordir`, e.g. openSUSE
      `/usr/lib/pam.d`): `soos-admin` only searches the directory of the edited file
-     (`/etc/pam.d`) and never a vendor directory. On such systems, write the rule by hand
-     after checking the vendor stack's gates, and do not rely on `gdm enable`.
+     (`/etc/pam.d`) and never a vendor directory. An include whose target exists only in
+     the vendor directory is refused (the error names the target and says vendor
+     directories are not searched). Write the rule by hand after checking the vendor
+     stack's gates.
 
    Manual recipe for these stacks: put the `pam_soos.so` rule in `gdm-password`
    immediately before the `substack`/`include`/`@include` line, and copy in front of it
