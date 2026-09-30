@@ -10,8 +10,12 @@ Simulates daemon behaviors for the PAM test matrix:
   - crash-partial:   Sends partial length header (2 bytes) and closes stream
   - crash-truncated: Sends length header and truncated body (4 bytes) and closes stream
 
+Every received Event (e.g. PasswordFailed) is recorded with --record and never
+answered; Requests are answered according to --mode.
+
 Usage:
   python3 mock_daemon.py --socket /run/soos/daemon.sock --mode allow [--delay 0.5] [--one-shot]
+                         [--record /tmp/events.log]
 """
 
 import argparse
@@ -51,6 +55,68 @@ def build_response(request_id: bytes, verdict: int, reason: int) -> bytes:
     return length_prefix + bytes(body)
 
 
+def read_varint(buf: bytes, idx: int):
+    """Decodes a postcard (LEB128) unsigned varint starting at idx."""
+    value = 0
+    shift = 0
+    while True:
+        byte = buf[idx]
+        idx += 1
+        value |= (byte & 0x7F) << shift
+        if byte & 0x80 == 0:
+            return value, idx
+        shift += 7
+        if shift > 63:
+            raise ValueError("varint too long")
+
+
+def classify_event(body: bytes):
+    """Returns (kind, uid, service) if body is a complete postcard Event, else None.
+
+    Event wire layout: version (u8), kind (varint), request_id (Option<[u8; 32]>),
+    uid (Option<varint u32>), service (varint length + UTF-8), timestamp (varint).
+    A Request never decodes to exactly its own length under this layout.
+    """
+    try:
+        if len(body) < 6 or body[0] != CURRENT_VERSION:
+            return None
+        kind, idx = read_varint(body, 1)
+        tag = body[idx]
+        idx += 1
+        if tag == 1:
+            idx += 32
+        elif tag != 0:
+            return None
+        tag = body[idx]
+        idx += 1
+        uid = None
+        if tag == 1:
+            uid, idx = read_varint(body, idx)
+        elif tag != 0:
+            return None
+        service_len, idx = read_varint(body, idx)
+        if idx + service_len > len(body):
+            return None
+        service = bytes(body[idx:idx + service_len]).decode("utf-8")
+        idx += service_len
+        _, idx = read_varint(body, idx)
+        if idx != len(body):
+            return None
+        return kind, uid, service
+    except (IndexError, ValueError, UnicodeDecodeError):
+        return None
+
+
+EVENT_KIND_NAMES = {0: "password-failed"}
+
+
+def record_line(path, line: str):
+    """Appends one line (message classification only, never payload bytes)."""
+    if path:
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write(line + "\n")
+
+
 def main():
     parser = argparse.ArgumentParser(description="soos test mock daemon")
     parser.add_argument("--socket", default="/run/soos/daemon.sock", help="Socket path")
@@ -62,6 +128,11 @@ def main():
     )
     parser.add_argument("--delay", type=float, default=0.5, help="Delay in seconds for timeout mode")
     parser.add_argument("--one-shot", action="store_true", help="Exit after handling one connection")
+    parser.add_argument(
+        "--record",
+        default=None,
+        help="Append one line per received message ('event kind=... service=...' or 'request')",
+    )
     args = parser.parse_args()
 
     sock_path = args.socket
@@ -117,6 +188,15 @@ def main():
                     if not chunk:
                         break
                     body.extend(chunk)
+
+                # Events are fire-and-forget: record them and never reply.
+                event = classify_event(bytes(body))
+                if event is not None:
+                    kind, uid, service = event
+                    kind_name = EVENT_KIND_NAMES.get(kind, f"unknown-{kind}")
+                    record_line(args.record, f"event kind={kind_name} uid={uid} service={service}")
+                    continue
+                record_line(args.record, "request")
 
                 # Extract request_id from Request body (bytes 2..34)
                 req_id = bytes(body[2:34]) if len(body) >= 34 else b"\x00" * 32
