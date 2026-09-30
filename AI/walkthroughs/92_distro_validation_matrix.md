@@ -184,9 +184,9 @@ Docker runs (from a scratch copy of the tree, never the worktree):
 | `run_matrix.sh arch` | PAM stack files validated; T1–T10 pass |
 | `run_matrix.sh ubuntu` | T1–T10 pass |
 | Root `Dockerfile` (CI `pam-integration` image) + `test_suite.sh` | T1–T10 pass |
-| `run_distro_validation.sh ubuntu` (`.deb` path) | Package built and installed; **stops at "pam_soos.so module not found"**: product bug P1 (§9) |
+| `run_distro_validation.sh ubuntu` (`.deb` path) | First run: package built and installed, then **stopped at "pam_soos.so module not found"** (product bug P1, §9). **Fixed by `2fbe969`; re-run passes end to end (§8.2)** |
 | `debian_ubuntu_test.sh --install-sh` (ubuntu:24.04 image) | Passes end to end: install, `soos-enroll --mock enroll` → `1001.cbor.enc` `600 root:root`, `verify` OK, socket modes asserted, facial auth, fallback, wrong password rejected, rollback with template preserved |
-| `run_distro_validation.sh arch` (`pacman -U` path) | Package built; **`pacman -U` refuses: `/usr/lib64 exists in filesystem (owned by filesystem)`**: product bug P1 (§9) |
+| `run_distro_validation.sh arch` (`pacman -U` path) | First run: package built, then **`pacman -U` refused: `/usr/lib64 exists in filesystem (owned by filesystem)`** (product bug P1, §9). **Fixed by `2fbe969`; re-run passes end to end (§8.2)** |
 | `arch_linux_test.sh --install-sh` (archlinux image) | Passes end to end (enrollment `1000.cbor.enc` `600 root:root`, swaylock/hyprlock facial unlock and fallback, rollback) |
 | `run_distro_validation.sh fedora` (RPM path) | Passes end to end (§8.1) |
 
@@ -201,12 +201,40 @@ back to password, rollback through `rpm -e soos` with the `local with-silent-las
 restored. Earlier attempts in this change surfaced the sandbox gaps fixed in §6 (missing OpenSSL
 headers, RPM `BuildRequires`/`Requires`, `pkill`, `authselect`) and the debuginfo glob (P2).
 
+### 8.2 Post-fix re-runs and CI wiring (batch `fix/p1-install-batch`)
+
+P1 was fixed by commit `2fbe969` (`fix(packaging): stage pam_soos.so in the distribution pam
+directory`): `build_deb.sh` and `debian/rules` pass `--pam-dir
+/usr/lib/<DEB_HOST_MULTIARCH>/security`, `build_arch.sh` passes `--pam-dir /usr/lib/security`
+(pinned by `test_packaging_passes_explicit_distro_pam_dir`). After that commit, in Docker from a
+scratch clone:
+
+| Run | Result |
+|---|---|
+| `./tests/distro/run_distro_validation.sh ubuntu` | exit 0, end to end; module staged and installed at `/usr/lib/x86_64-linux-gnu/security/pam_soos.so` |
+| `./tests/distro/run_distro_validation.sh arch` | exit 0, end to end; `pacman -U` accepted, module at `/usr/lib/security/pam_soos.so` |
+
+The review round then closed the root cause too: `install.sh --destdir` without `--pam-dir` no
+longer consults the build host (stage-only probe, then `/usr/lib/security` with a warning;
+`test_install_destdir_never_guesses_pam_dir_from_build_host`, walkthrough 93 §8).
+
+CI (GitHub #168): the new `package-deploy` job in `.github/workflows/ci.yml` runs on every pull
+request after `lint` and is part of `CI Success`. It runs `./tests/distro/run_distro_validation.sh
+ubuntu` (release workspace build, `.deb` built and installed with `dpkg -i`, filesystem
+invariants, `soos-enroll --mock enroll`, facial auth, password fallback, rollback), then
+`tests/docker/test_packages.sh` in the same `soos-distro-val-ubuntu` image on the same
+`soos-distro-target-ubuntu` volume (no key material in the `.deb`, `0600` 32-byte key generated
+on the host, key kept after `dpkg -r`, distinct keys across fresh installs). The job and its
+membership in `CI Success` are pinned by `test_ci_runs_ubuntu_package_deployment_on_pull_requests`
+(red before the job existed: "ci.yml must define the package-deploy job"). Both job commands were
+run locally from a scratch clone of the branch head: see the results recorded in walkthrough 93 §8.
+
 ## 9. Known Limitations / Follow-ups
 
-Product bugs revealed by the new tests (reported, not fixed here — owned by the install/packaging
-changes):
+Product bugs revealed by the new tests (reported here; P1 was fixed in the batch integration,
+see §8.2):
 
-- **P1 — packages install `pam_soos.so` into `/usr/lib64/security`.** `scripts/install.sh`
+- **P1 (FIXED by `2fbe969`, §8.2) — packages install `pam_soos.so` into `/usr/lib64/security`.** `scripts/install.sh`
   resolves `PAM_DIR` inside the empty `--destdir` stage, finds nothing and falls back to
   `/usr/lib64/security` because the *build host* has `/usr/lib64`. On Debian/Ubuntu Linux-PAM
   loads modules from `/usr/lib/x86_64-linux-gnu/security`, so the `.deb` ships a module PAM never
@@ -224,12 +252,12 @@ changes):
 
 Other limitations:
 
-- The native-package paths of DV1 (Ubuntu `.deb`) and DV3 (Arch package) stay red until P1 is
-  fixed; the `--install-sh` paths prove the rest of each suite (enrollment, socket invariant, PAM,
-  rollback).
-- The distribution deployment tests are not wired into CI yet (full workspace release build per
-  distribution, ~10–15 min each, and currently red on P1). Once P1 is fixed, add a
-  `distro-validation` job running `tests/distro/run_distro_validation.sh ubuntu` (and fedora/arch
-  on push to `main`) and `tests/docker/test_packages.sh`.
+- The native-package paths of DV1 (Ubuntu `.deb`) and DV3 (Arch package) are green again since
+  `2fbe969` (§8.2).
+- CI coverage (GitHub #168): Ubuntu runs on every pull request in `package-deploy` (§8.2). The
+  Fedora (RPM) and Arch deployment suites and the RPM/Arch branches of
+  `tests/docker/test_packages.sh` are NOT in CI yet (one full release build per distribution);
+  their evidence is the manual Docker runs above, so matrix rows PK6, PK7, DV2 and DV3 stay
+  `⬜ Pending` until a push-to-`main` job (like `distro-pam-matrix`) runs them.
 - Docker volumes `soos-matrix-target-*` and `soos-distro-target-*` persist between runs as a
   build cache; remove them with `docker volume rm` when needed.

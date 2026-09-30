@@ -154,3 +154,74 @@ script wrote `../escape.onnx` outside the target) and `line 132: python3: comman
   file was invalid by definition).
 - `build_deb.sh --skip-build`, `build_arch.sh --skip-build` and `debian/rules` now fail closed on a stale or
   incomplete `target/release`, which is the intended behaviour.
+
+### Follow-ups from the batch candid review (`fix/p1-install-batch`)
+
+- **Finding 5 — models directory is not fully transactional.** `journal_new_files` journals only
+  new files: a pre-existing `models/manifest.toml`, or a pre-existing model with a mismatched
+  digest, is overwritten by `download_models.sh` without a backup and is not restored if a later
+  step fails. Back up pre-existing entries of the models directory before calling the downloader.
+- **Finding 9 — mock daemon message classification.** `tests/docker/mock_daemon.py` classifies
+  messages heuristically: a Request whose random `request_id` happens to parse as a complete Event
+  is never answered and the test times out (fail-closed, but flaky). Classify on an explicit
+  message-kind discriminator if the codec exposes one.
+- **Finding 10 — unit start condition.** `packaging/soos-daemon.service` could also carry
+  `ConditionPathExists=/var/lib/soos/models/manifest.toml` (GitHub #167). Not required now that
+  `install.sh` deploys models before enabling the unit, but useful for package installs where
+  models are fetched later.
+- Fedora/RHEL and Arch package deployments (and the RPM/Arch branches of
+  `tests/docker/test_packages.sh`) are not in CI yet: add a push-to-`main` job like
+  `distro-pam-matrix` (matrix rows PK6, PK7, DV2, DV3 stay `⬜ Pending`).
+
+## 8. Review Round (candid review CHANGES_REQUESTED)
+
+**Finding 7 — `--destdir` without `--pam-dir` guessed from the build host** (root cause of P1,
+walkthrough 92 §9). Two options were weighed: requiring `--pam-dir` in staging mode would break
+`test_install_script_creates_required_directories` and
+`test_install_script_destdir_stages_no_key_material` (they stage without `--pam-dir` and assert
+success), so it was rejected. Chosen: under `--destdir` only directories that already exist
+inside the stage are probed; with no match the deterministic `STAGING_DEFAULT_PAM_DIR`
+(`/usr/lib/security`) is used and two warnings name `--pam-dir` and the per-distribution
+directories. A live install (no `--destdir`) keeps the host-based fallback, since the host is the
+target. Test `installer_contract::test_install_destdir_never_guesses_pam_dir_from_build_host`
+(red on this host: `usr/lib64/security/pam_soos.so` staged; green after the change), including
+the "directory present in the stage is preferred" case. Packaging keeps passing `--pam-dir`
+explicitly (`2fbe969`).
+
+**Finding 1 — CI coverage for #168.** New job `package-deploy` (walkthrough 92 §8.2), pinned by
+`test_ci_runs_ubuntu_package_deployment_on_pull_requests` (red: "ci.yml must define the
+package-deploy job"). Findings 2 and 3 (uninstall purge, snapshot cleanup) are described in
+walkthrough 91 §10.
+
+Verification (2026-09-30):
+
+```bash
+cargo fmt --all -- --check                                                        # clean
+cargo clippy --locked --workspace --all-targets --all-features -- -D warnings     # exit 0
+cargo test --locked --workspace --all-targets --all-features --no-fail-fast       # 780 passed, 0 failed
+./scripts/candid_review.sh                                                        # PASSED
+bash -n  (install.sh, uninstall.sh, pam_snapshot.sh, pam_rollback_test.sh)        # clean
+koalaman/shellcheck:stable --severity=warning (same files)  # only pre-existing SC2034 (BOLD unused)
+rhysd/actionlint .github/workflows/ci.yml                                         # clean
+```
+
+Red → green (new tests, before the production change): 5 of 6 failed
+(`test_ci_runs_ubuntu_package_deployment_on_pull_requests`,
+`test_install_journals_pam_snapshot_before_invoking_helper`,
+`test_pam_snapshot_failure_leaves_no_temporary_directory`,
+`test_uninstall_purge_keeps_snapshot_when_pam_rollback_is_incomplete`,
+`test_install_destdir_never_guesses_pam_dir_from_build_host`); the regression guard
+`test_uninstall_purge_removes_state_after_verified_rollback` passed before and after.
+
+Docker (scratch clone of the branch head, never the worktree):
+
+| Run | Result |
+|---|---|
+| `./tests/docker/pam_rollback_test.sh` | exit 0: D0a, D0b, D1–D5 (ubuntu:24.04), F1–F2 (fedora:40) |
+| same test against the pre-fix scripts (`2fbe969`) | D0b fails: `/var/lib/soos left behind: ... state/.pam-backup.VxFOlT/pam.d` (red evidence) |
+| `./tests/distro/run_distro_validation.sh ubuntu` (job `package-deploy`, step 1) | exit 0; `pam_soos.so` staged at `/usr/lib/x86_64-linux-gnu/security` |
+| `docker run ... soos-distro-val-ubuntu bash /workspace/tests/docker/test_packages.sh` (step 2) | exit 0: no key in the `.deb`, key `0600`/32 bytes, kept on `dpkg -r`, distinct on a fresh reinstall |
+
+Both job steps reused the local `soos-distro-target-ubuntu` volume, so the release binaries were
+already built; in CI the volume is empty and step 1 performs the full release build (hence the
+75-minute ceiling). The first CI run of `package-deploy` happens on the PR.

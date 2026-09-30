@@ -34,7 +34,7 @@ and flags run at every level, so a green local run predicts a green CI run.
 │  Level 3: GitHub Actions CI (.github/workflows/ci.yml)      │
 │  parallel: lint │ clippy │ test │ security                  │
 │  after lint: pam-integration │ authselect-profile           │
-│              pam-rollback                                   │
+│              pam-rollback │ package-deploy                  │
 │  after all:  ci-success (aggregate gate)                    │
 │  separate:   pr-title.yml (PR title convention)             │
 └──────────────────────────────┬──────────────────────────────┘
@@ -68,7 +68,8 @@ retitling a PR re-validates it without re-running the whole pipeline.
 | `security` | `cargo deny --locked check` with cargo-deny 0.20.2 | Also runs daily for new RustSec advisories |
 | `pam-integration` | Dockerized PAM matrix T1–T11 (`tests/docker/test_suite.sh`) | Starts after `lint`; Buildx layer cache |
 | `authselect-profile` | Fedora `authselect` profile activation, `authselect check`, generated stack ordering, `nsswitch.conf` preservation, password fallback and rollback in `fedora:40` (`tests/docker/authselect_profile_test.sh`) | Starts after `lint`; stock image, no build |
-| `pam-rollback` | Debian `pam-auth-update` stack order (password-failed hook before `pam_deny`) and byte-for-byte PAM rollback by `scripts/uninstall.sh` (sha256 of every `/etc/pam.d` entry, `authselect current`) in `ubuntu:24.04` and `fedora:40` (`tests/docker/pam_rollback_test.sh`) | Starts after `lint`; stock images, no build |
+| `pam-rollback` | Failing live `scripts/install.sh` runs roll back completely (D0a/D0b), Debian `pam-auth-update` stack order (password-failed hook before `pam_deny`) and byte-for-byte PAM rollback by `scripts/uninstall.sh` (sha256 of every `/etc/pam.d` entry, `authselect current`) in `ubuntu:24.04` and `fedora:40` (`tests/docker/pam_rollback_test.sh`) | Starts after `lint`; stock images, no build |
+| `package-deploy` | Ubuntu packaging and deployment path (GitHub #168): `tests/distro/run_distro_validation.sh ubuntu` (release workspace build, `.deb` built and installed with `dpkg -i`, filesystem invariants, `soos-enroll --mock enroll`, facial auth against the mock daemon, password fallback, rollback) in the `tests/docker/Dockerfile.ubuntu` image, then `tests/docker/test_packages.sh` on the same target volume (no key material in the `.deb`, `0600` 32-byte key generated on the host, key survives `dpkg -r`, distinct keys across fresh installs) | Starts after `lint`; runs on every pull request; full release build (~15–25 min, 75 min ceiling) |
 | `ci-success` | Fails unless every job above succeeded | Single check to require in branch protection |
 | `distro-pam-matrix` | PAM matrix T1–T10 in the Fedora and Arch sandbox images (`tests/docker/run_matrix.sh fedora\|arch`, GitHub #162) | Push to `main` and manual dispatch only (rebuilds toolchain and module per image); not part of `ci-success` |
 

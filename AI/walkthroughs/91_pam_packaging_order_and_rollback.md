@@ -163,3 +163,55 @@ PAM state byte-identical to the pre-install baseline (21 / 13 entries). The Debi
   hook is emitted after them), a real GDM `gdm-password`, RHEL 9 authselect 1.2.
 - The GDM line control (`sufficient`) still differs from ARCHITECTURE §5 (`[success=done
   default=ignore]`); left unchanged (code is the source of truth, ADR needed to change it).
+
+### Follow-ups from the batch candid review (`fix/p1-install-batch`)
+
+- **Finding 6 — `pam_snapshot.sh snapshot` does not detect an already-activated state.** A
+  reinstall over a host activated by an earlier version (or with a leftover `soos.snippet`)
+  records that state as the "pristine" baseline. Safe (uninstall only restores on byte
+  equality), but every later `verify` reports drift and the snapshot is never discarded. Warn or
+  refuse to record when an entry already references `pam_soos.so`.
+- **Finding 8 — GDM line and backup freshness.** `crates/admin-cli/src/gdm.rs` still uses
+  `auth sufficient` instead of ARCHITECTURE §5 `[success=done default=ignore]` (needs an ADR or an
+  alignment change), and an existing `gdm-password.soos-backup` is always kept, even when it
+  predates a later distribution update of `gdm-password`; consider refreshing a backup whose file
+  no longer contains `pam_soos.so`.
+
+## 10. Batch Integration and Review Round
+
+**P1 packaging fix (`2fbe969`).** Packages staged through `install.sh --destdir` used to receive
+`pam_soos.so` in `/usr/lib64/security` (guessed from the build host). `scripts/build_deb.sh` and
+`packaging/debian/rules` now pass `--pam-dir /usr/lib/<DEB_HOST_MULTIARCH>/security`,
+`scripts/build_arch.sh` passes `--pam-dir /usr/lib/security`, and the RPM spec keeps
+`%{_libdir}/security` (`test_packaging_passes_explicit_distro_pam_dir`). After the fix,
+`./tests/distro/run_distro_validation.sh ubuntu` and `... arch` both passed end to end in Docker
+(exit 0; module at `/usr/lib/x86_64-linux-gnu/security` and `/usr/lib/security`), see
+walkthrough 92 §8.2.
+
+**Finding 2 — `--purge-data` deleted the operator's only pre-install copy.** It removed
+`state/pam-backup` after an incomplete or unverified rollback, although the error message points
+to it. `scripts/uninstall.sh` now keeps `state/pam-backup` whenever it survived step 2 (it is
+discarded only after a verified, complete rollback), purges everything else, and prints
+"Keeping .../state/pam-backup ...". Tests: `test_uninstall_purge_keeps_snapshot_when_pam_rollback_is_incomplete`
+(red: "the snapshot must survive --purge-data: NotFound") and the regression guard
+`test_uninstall_purge_removes_state_after_verified_rollback` (green before and after).
+
+**Finding 3 — snapshot failing part-way.** `scripts/pam_snapshot.sh snapshot` now removes its
+`state/.pam-backup.XXXXXX` temp directory from an `EXIT`/`INT`/`TERM` trap, and `discard` also
+drops stale temp directories. `scripts/install.sh` block 6a marks the snapshot as created
+*before* invoking the helper when none pre-existed, so the rollback discards it even when the
+helper fails midway (a pre-existing snapshot is still never journaled or discarded). Tests:
+
+- `test_pam_snapshot_failure_leaves_no_temporary_directory` (non-root, `cp` shim failing copies
+  into the temp directory; red: `leftovers [".pam-backup.6PTt6T"]`).
+- `test_install_journals_pam_snapshot_before_invoking_helper` (static order in block 6a, and the
+  Docker test drives install.sh; red before the change).
+- `tests/docker/pam_rollback_test.sh` D0a/D0b drive a failing **live** `scripts/install.sh`
+  (stub artifacts) as root in `ubuntu:24.04`: D0a fails after 6a on a model digest mismatch, D0b
+  fails inside the helper (`cp` shim). Both must leave the PAM state byte-identical, no
+  `/var/lib/soos`, no binaries, no module, no `soos` group. Block 6a cannot run in the
+  `cargo test` invariants: it is live-only and a live install requires real root (the preflight
+  refuses non-root, and that check is itself a contract, INS4). Red evidence: the new
+  `pam_rollback_test.sh` against the pre-fix scripts (`2fbe969`) fails with
+  `D0b: /var/lib/soos left behind: ... /var/lib/soos/state/.pam-backup.VxFOlT/pam.d`; green on
+  the fixed branch.

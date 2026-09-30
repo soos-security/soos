@@ -76,7 +76,9 @@ Options:
   --sysconfdir <DIR>       Configuration directory (default: /etc)
   --localstatedir <DIR>    State directory (default: /var)
   --runstatedir <DIR>      Runtime directory (default: /run)
-  --pam-dir <DIR>          Explicit PAM module directory (auto-detected if omitted)
+  --pam-dir <DIR>          Explicit PAM module directory (auto-detected if omitted;
+                           with --destdir only the stage is probed, then
+                           /usr/lib/security is used with a warning)
   --artifact-dir <DIR>     Built artifacts directory (default: target/release)
   --build                  Check build dependencies, then run
                            'cargo build --release --locked --workspace'
@@ -88,6 +90,8 @@ Options:
   --dry-run                Run the read-only preflight and print the plan
   -h, --help               Display help message and exit
 ```
+
+PAM module directory under `--destdir`: only directories that already exist inside the stage are probed; the build host is never consulted (its `/usr/lib64` says nothing about the target). With no match, `/usr/lib/security` is used and a warning asks for `--pam-dir`. Packaging always passes it explicitly: `/usr/lib/<DEB_HOST_MULTIARCH>/security` (Debian/Ubuntu), `/usr/lib/security` (Arch), `%{_libdir}/security` (RPM).
 
 Exit codes: `0` success, `1` usage error, `2` preflight failure (nothing modified), `40` release build failed (nothing installed), `60` model deployment or verification failed (rolled back); any other non-zero code is the failing step's own status (rolled back).
 
@@ -138,12 +142,12 @@ The uninstallation script guarantees that removing `soos` will **never lock an a
 
 ### Capabilities
 - **Systemd Teardown**: Stops and disables `soos-daemon.service`, removes the unit file, and issues `daemon-reload`.
-- **Pre-install Snapshot**: `scripts/install.sh` records `/etc/pam.d/*`, `/etc/nsswitch.conf` and `authselect current --raw` in `/var/lib/soos/state/pam-backup` (mode `0700`, `SHA256SUMS` manifest) through `scripts/pam_snapshot.sh` before any PAM template is installed; an existing snapshot is never overwritten.
+- **Pre-install Snapshot**: `scripts/install.sh` records `/etc/pam.d/*`, `/etc/nsswitch.conf` and `authselect current --raw` in `/var/lib/soos/state/pam-backup` (mode `0700`, `SHA256SUMS` manifest) through `scripts/pam_snapshot.sh` before any PAM template is installed; an existing snapshot is never overwritten. A snapshot that fails part-way leaves no `state/.pam-backup.*` temporary directory, and a failed install discards a snapshot it created (it is journaled before the helper runs), so the rollback can remove `/var/lib/soos`.
 - **PAM Configuration Rollback**: Restores original PAM configurations from backup (`*.soos-backup`, e.g. the `gdm-password` copy written by `soos-admin gdm enable`, which edits the file atomically), deregisters profiles from `pam-auth-update`, or — when `custom/soos` is the selected `authselect` profile — re-selects the profile recorded in `/etc/soos/authselect.previous` (fallback `local`, `minimal`, `sssd`) before removing the custom profile; the profile is kept if no restoration succeeds. Residual `pam_soos.so` lines are removed only when provably safe (the stripped file equals its snapshot copy, or it has no `success=N` jump); all writes are temporary file + rename. The final state is verified against the snapshot, which is discarded only when identical. If a residual line cannot be removed safely, the file and `pam_soos.so` are kept (the module degrades to `PAM_IGNORE`, password login keeps working) and the script exits `1`.
 - **Binary Cleanup**: Removes `soos-daemon`, `soos-enroll`, `soos-admin`, and `pam_soos.so`.
 - **Data Protection**:
   - By default (or with `--keep-data`): strictly retains `/var/lib/soos/biometrics`, `/var/lib/soos/evidence`, and `/var/lib/soos/master.key`.
-  - With `--purge-data`: permanently wipes all biometric data and keys.
+  - With `--purge-data`: permanently wipes all biometric data and keys. If the PAM rollback is incomplete or unverified, `/var/lib/soos/state/pam-backup` (the only pre-install PAM copy) is kept and the script says so; delete it manually once the PAM stack is restored.
 
 ```bash
 ./scripts/uninstall.sh [OPTIONS]
