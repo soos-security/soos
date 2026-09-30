@@ -12,10 +12,10 @@ use zeroize::Zeroizing;
 use crate::config::DispatcherConfig;
 use crate::error::DaemonError;
 use crate::health::HealthState;
+use crate::inference::{InferenceGate, RequestDeadline};
 use crate::peercred::{get_peer_credentials, verify_peer_credentials};
 use crate::pipeline::{
-    current_monotonic_nanos, PipelineComponents, DECISION_BUDGET_MS, FRAME_POLL_INTERVAL_MS,
-    MAX_FRAME_AGE_NS,
+    current_monotonic_nanos, PipelineComponents, FRAME_POLL_INTERVAL_MS, MAX_FRAME_AGE_NS,
 };
 use crate::preview::{authorize_preview, PreviewConfig};
 use crate::session::SessionValidator;
@@ -44,6 +44,17 @@ struct ResponseOutput {
     completion_error: Option<DaemonError>,
 }
 
+/// Whether a capture taken at `timestamp_ns` is still fresh at `now_ns` (`MAX_FRAME_AGE_NS`).
+///
+/// Captures without a timestamp, or stamped in the future, are accepted as before.
+fn is_frame_fresh(timestamp_ns: u64, now_ns: u64) -> bool {
+    if timestamp_ns > 0 && now_ns > timestamp_ns {
+        now_ns.saturating_sub(timestamp_ns) <= MAX_FRAME_AGE_NS
+    } else {
+        true
+    }
+}
+
 /// Connection dispatcher managing concurrent incoming client requests.
 pub struct ConnectionDispatcher {
     config: DispatcherConfig,
@@ -56,6 +67,7 @@ pub struct ConnectionDispatcher {
     clock_fn: fn() -> Result<u64, DaemonError>,
     preview: PreviewConfig,
     preview_limiter: tokio::sync::Mutex<RateLimiter>,
+    inference: InferenceGate,
 }
 
 impl ConnectionDispatcher {
@@ -82,6 +94,7 @@ impl ConnectionDispatcher {
             clock_fn: current_monotonic_nanos,
             preview,
             preview_limiter,
+            inference: InferenceGate::default(),
         }
     }
 
@@ -112,6 +125,7 @@ impl ConnectionDispatcher {
             clock_fn: current_monotonic_nanos,
             preview,
             preview_limiter,
+            inference: InferenceGate::default(),
         }
     }
 
@@ -147,6 +161,22 @@ impl ConnectionDispatcher {
             tokio::sync::Mutex::new(RateLimiter::new(preview.rate_limit_config()));
         self.preview = preview;
         self
+    }
+
+    /// Overrides the vision inference gate (slot count and initial latency estimate).
+    ///
+    /// Without this call the dispatcher uses [`InferenceGate::default`]
+    /// (`MAX_CONCURRENT_INFERENCES` slots, `DEFAULT_INFERENCE_ESTIMATE_MS` estimate).
+    #[must_use]
+    pub fn with_inference_gate(mut self, gate: InferenceGate) -> Self {
+        self.inference = gate;
+        self
+    }
+
+    /// Returns the vision inference gate (GitHub #158).
+    #[must_use]
+    pub const fn inference_gate(&self) -> &InferenceGate {
+        &self.inference
     }
 
     /// Returns the active preview authorization policy.
@@ -231,6 +261,10 @@ impl ConnectionDispatcher {
         &self,
         stream: &mut UnixStream,
     ) -> Result<ProcessedOutput, DaemonError> {
+        // Start of the outer `connection_timeout` window for this request: every later budget
+        // (camera wake, consensus loop, inference admission) is measured from here (#159).
+        let request_started = Instant::now();
+
         // Step 1: Extract peer credentials via SO_PEERCRED
         let peer = get_peer_credentials(stream)?;
 
@@ -277,7 +311,7 @@ impl ConnectionDispatcher {
                 // of `event.request_id`. If `req.uid_hint == peer.uid`, it is a valid Request.
                 // Otherwise, it is an Event notification.
                 if req.uid_hint == peer.uid {
-                    let res = self.handle_request(peer.uid, peer.pid, req).await?;
+                    let res = self.handle_request(peer.uid, peer.pid, req, request_started).await?;
                     Ok(ProcessedOutput {
                         encoded_response: Some(res.encoded_response),
                         completion_error: res.completion_error,
@@ -291,7 +325,7 @@ impl ConnectionDispatcher {
                 }
             }
             (Some(req), None) => {
-                let res = self.handle_request(peer.uid, peer.pid, req).await?;
+                let res = self.handle_request(peer.uid, peer.pid, req, request_started).await?;
                 Ok(ProcessedOutput {
                     encoded_response: Some(res.encoded_response),
                     completion_error: res.completion_error,
@@ -357,6 +391,7 @@ impl ConnectionDispatcher {
         peer_uid: u32,
         peer_pid: Option<i32>,
         req: Request,
+        request_started: Instant,
     ) -> Result<ResponseOutput, DaemonError> {
         // Step 5a: Wire protocol validation (version and bounded fields)
         if let Err(val_err) = req.validate() {
@@ -496,7 +531,15 @@ impl ConnectionDispatcher {
 
         // Step 8: Full pipeline processing
         if let Some(ref pipe) = self.pipeline {
-            let auth_start = Instant::now();
+            // Single request deadline (GitHub #159), computed once and threaded through the
+            // camera wake wait and the consensus loop: min(client deadline, request start +
+            // connection_timeout), each minus the response write margin.
+            let deadline = RequestDeadline::compute(
+                now_ns,
+                req.deadline_monotonic_ns,
+                request_started,
+                self.config.connection_timeout,
+            );
 
             // 8-pre: Fail-fast rate limiting check (anti-DoS: avoid neural & camera workload if already blocked)
             {
@@ -534,11 +577,13 @@ impl ConnectionDispatcher {
             } else {
                 Duration::from_millis(1000)
             };
-            let max_wake = max_wake.min(
-                self.config
-                    .connection_timeout
-                    .saturating_sub(Duration::from_millis(100)),
-            );
+            let max_wake = max_wake
+                .min(
+                    self.config
+                        .connection_timeout
+                        .saturating_sub(Duration::from_millis(100)),
+                )
+                .min(deadline.remaining(now_ns));
 
             if !pipe.camera.is_ready() {
                 let wake_start = Instant::now();
@@ -599,21 +644,6 @@ impl ConnectionDispatcher {
                 }
             };
 
-            // 8d: Dynamic decision budget from client deadline, strictly bounded by connection_timeout
-            let client_budget = if req.deadline_monotonic_ns > 0
-                && req.deadline_monotonic_ns < u64::MAX
-                && req.deadline_monotonic_ns > now_ns
-            {
-                Duration::from_nanos(req.deadline_monotonic_ns.saturating_sub(now_ns))
-            } else {
-                Duration::from_millis(DECISION_BUDGET_MS)
-            };
-            let max_allowed_budget = self
-                .config
-                .connection_timeout
-                .saturating_sub(Duration::from_millis(50));
-            let total_budget = client_budget.min(max_allowed_budget);
-
             // 8e: Multi-frame PAD consensus loop (GitHub #147 / PAD-02).
             // Allow requires k consecutive passing captures (live at or above the PAD
             // threshold and matching at or above the cosine threshold) inside a bounded
@@ -623,7 +653,7 @@ impl ConnectionDispatcher {
             let mut last_sequence: Option<u64> = None;
             let mut last_capture_stale = false;
 
-            while auth_start.elapsed() < total_budget {
+            loop {
                 let cur_ns = match self.now_nanos() {
                     Ok(ns) => ns,
                     Err(err) => {
@@ -641,7 +671,7 @@ impl ConnectionDispatcher {
                     }
                 };
 
-                if req.deadline_monotonic_ns > 0 && cur_ns >= req.deadline_monotonic_ns {
+                if deadline.remaining(cur_ns).is_zero() {
                     break;
                 }
 
@@ -654,17 +684,63 @@ impl ConnectionDispatcher {
                     if is_new {
                         last_sequence = Some(frame.sequence);
 
-                        let is_fresh =
-                            if frame.timestamp_mono_ns > 0 && cur_ns > frame.timestamp_mono_ns {
-                                let age_ns = cur_ns.saturating_sub(frame.timestamp_mono_ns);
-                                age_ns <= MAX_FRAME_AGE_NS
-                            } else {
-                                true
+                        if is_frame_fresh(frame.timestamp_mono_ns, cur_ns) {
+                            last_capture_stale = false;
+
+                            // 8e-1: Inference admission (GitHub #158 / #159). Never start an
+                            // inference whose estimated duration exceeds the remaining budget,
+                            // and never queue behind a busy inference slot past the last
+                            // feasible start time: finalize with the current consensus instead.
+                            let estimate = self.inference.estimate();
+                            if !deadline.can_start(cur_ns, estimate) {
+                                debug!(
+                                    estimate_ms = estimate.as_millis(),
+                                    "Remaining budget below the inference estimate; finalizing"
+                                );
+                                break;
+                            }
+                            let max_wait = deadline.remaining(cur_ns).saturating_sub(estimate);
+                            let Some(permit) = self.inference.acquire_within(max_wait).await else {
+                                debug!("Inference slot still busy at the last feasible start; finalizing");
+                                break;
+                            };
+                            let start_ns = self.now_nanos().unwrap_or(u64::MAX);
+                            if !deadline.can_start(start_ns, self.inference.estimate()) {
+                                drop(permit);
+                                break;
+                            }
+                            if !is_frame_fresh(frame.timestamp_mono_ns, start_ns) {
+                                // Aged while waiting for the slot: never evaluate it.
+                                drop(permit);
+                                continue;
+                            }
+
+                            // 8e-2: CPU inference on the bounded blocking pool; the async
+                            // worker stays free for the accept loop and Status requests.
+                            let vision = Arc::clone(&pipe.vision);
+                            let job_frame = Arc::clone(&frame);
+                            let result = match self
+                                .inference
+                                .run(permit, move || vision.process_frame(&job_frame))
+                                .await
+                            {
+                                Ok(result) => result,
+                                Err(err) => {
+                                    warn!(error = %err, "Vision inference job failed; failing closed");
+                                    let encoded = self.build_response(
+                                        req.request_id,
+                                        Verdict::Unavailable,
+                                        ReasonClass::InternalError,
+                                        cur_ns,
+                                    )?;
+                                    return Ok(ResponseOutput {
+                                        encoded_response: encoded,
+                                        completion_error: None,
+                                    });
+                                }
                             };
 
-                        if is_fresh {
-                            last_capture_stale = false;
-                            let evaluation = match pipe.vision.process_frame(&frame) {
+                            let evaluation = match result {
                                 Ok(output) => {
                                     let sim = match soos_vision::cosine_similarity(
                                         enrolled_template.embedding.as_slice(),
@@ -767,7 +843,7 @@ impl ConnectionDispatcher {
 
                 // Deadline-aware poll: never sleep past the decision budget so the response
                 // is always rendered before the connection timeout.
-                let remaining = total_budget.saturating_sub(auth_start.elapsed());
+                let remaining = deadline.remaining(self.now_nanos().unwrap_or(u64::MAX));
                 if remaining.is_zero() {
                     break;
                 }

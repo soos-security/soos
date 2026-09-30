@@ -116,7 +116,7 @@ Event v1:    version | kind=PASSWORD_FAILED | request_id[32] |
 ```
 
 ### Async Boundaries (Tokio vs. PAM)
-- **Privileged Daemon**: Runs Tokio for IPC connection dispatching. CPU-heavy capture and inference run on dedicated worker threads with semaphore limit 1 to avoid thread exhaustion.
+- **Privileged Daemon**: Runs Tokio for IPC connection dispatching. Capture runs on the dedicated `soos-v4l-capture` thread; vision inference runs on the Tokio blocking pool (`spawn_blocking`) behind the `InferenceGate` semaphore (`MAX_CONCURRENT_INFERENCES` = 1, `crates/daemon/src/inference.rs`), so Tokio workers, the accept loop and Status requests never block on inference (GitHub #158). Each authentication request computes one `RequestDeadline` (client deadline and outer `connection_timeout`, each minus the 50ms `RESPONSE_WRITE_MARGIN_MS`) and never starts an inference whose measured estimate exceeds the remaining budget (GitHub #159).
 - **PAM Module**: **Strictly forbidden from starting Tokio**. Uses `std::os::unix::net::UnixStream` with synchronous read/write timeouts totaling 200–250ms. Immediately closes socket after response.
 
 ---
