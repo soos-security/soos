@@ -165,6 +165,7 @@ To ensure that untrusted or malformed inputs can never trigger memory corruption
    - `prop_request_roundtrip`, `prop_response_roundtrip`, and `prop_event_roundtrip` assert serialization/deserialization idempotency for arbitrary valid messages.
    - `prop_decode_request_never_panics`, `prop_decode_response_never_panics`, and `prop_decode_event_never_panics` feed arbitrary mutated byte streams ($0$ to $8{,}192$ bytes) asserting that `decode` never panics and always returns either `Ok` or a typed `CodecError`.
    - `prop_declared_size_bounds` and `prop_truncated_buffer_bounds` verify zero-allocation fast rejection of oversized ($> 4{,}096$ bytes) or truncated payloads.
+   - Single interpretation (GitHub #224, walkthrough 143): `crates/protocol/tests/wire_exclusivity_tests.rs` asserts that a tagged `Request` or `Event` frame is accepted only by its own decoder (never as the other client type, `Response` or `StatusResponse`), that `Response` and `StatusResponse` frames never decode as each other, and that the `Response` decoder rejects every single trailing byte, client tags included.
    - Executed automatically via standard `cargo test` on every commit and CI run.
 2. **LLVM libFuzzer Integration (`cargo-fuzz`)**:
    - Targets `decode_request`, `decode_response`, `decode_event` and `decode_client_message` (§12) in `crates/protocol/fuzz/`.
