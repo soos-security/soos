@@ -987,6 +987,15 @@ impl ConnectionDispatcher {
                                     debug!("Face detected below confidence threshold");
                                     FrameEvaluation::no_face()
                                 }
+                                // Pre-PAD quality gate (GitHub #218): an unusable capture,
+                                // never a pass and never an internal error.
+                                Err(
+                                    soos_vision::VisionError::FaceTooSmall { .. }
+                                    | soos_vision::VisionError::FaceBlurred { .. },
+                                ) => {
+                                    debug!("Face rejected by the pre-PAD quality gate");
+                                    FrameEvaluation::no_face()
+                                }
                                 Err(soos_vision::VisionError::Inference(err)) => {
                                     warn!(error = %err, "Vision neural inference failure");
                                     let encoded = self.build_response(

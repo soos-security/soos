@@ -54,7 +54,12 @@ sudo soos-enroll verify --uid 1000
 - Match verdict: `Allow` (similarity >= threshold) or `Deny`.
 - Match score: Cosine similarity value `[-1.0, 1.0]`.
 - Face count and detection confidence.
-- Presentation Attack Detection (PAD) status.
+- Presentation Attack Detection (PAD) status (GitHub #216, #236): the report carries the PAD outcome class (`pad_result`), the liveness score returned by the PAD model (`pad_score`) and the effective threshold applied to the frame modality (`pad_threshold`, the IR threshold for monochrome frames). The `PAD Anti-Spoof` line reads, for example:
+  - `PASSED (score=0.930, threshold=0.85)` — live presentation;
+  - `SPOOF(score=0.120, threshold=0.85)` — presentation attack: `Deny` verdict with the PAD score, never a generic error;
+  - `IR_GATE_REJECTED(<reason>)` — the fail-closed IR liveness gate rejected a monochrome crop before the PAD model ran (no score);
+  - `NO_FACE`, `MULTIPLE_FACES`, `LOW_CONFIDENCE(<c>)` — PAD did not run.
+  Every non-`Allow` verdict, including a spoof, makes `soos-enroll verify` exit with status 1 after printing the report. The PAD score is a calibration aid only: it is not a secret, and no frame or embedding is printed.
 - Latency breakdown: camera frame capture, neural vision pipeline, cosine matching, total roundtrip.
 
 ### `soos-enroll delete`
@@ -141,6 +146,22 @@ Verification: `crates/enrollment-cli/tests/debug_vision_tests.rs` (matrix rows E
 | Identity consistency | cosine >= `MIN_SAMPLE_CONSISTENCY_COSINE` (0.5) with every accepted frontal sample and, for off-axis steps, with the frontal mean direction | `IdentityMismatch` |
 
 Each step records at most `MAX_SAMPLES_PER_STEP` (20) samples (`GuidedEnrollmentSession::new` clamps the target to `1..=20`). The composite template is the mean direction of the L2-normalized samples, `t = m / ||m||` with `m = sum_i s_i / ||s_i||`; `compute_composite_embedding` re-validates every sample (dimension, finiteness, consistency with the frontal anchor) and fails closed instead of returning a non-finite or contaminated vector.
+
+**Session-level liveness (GitHub #217 / PAD-12).** Liveness is tracked over the session with a
+`LivenessPolicy`, not per frame:
+
+- a sample is recorded only after `min_consecutive_live_frames` consecutive live frames; a live frame
+  that is not yet sampled returns `PromptHoldStill`;
+- a spoof frame discards every sample of the current step and resets the streak (`SpoofDetected`);
+- the `max_spoof_events`-th spoof frame aborts the session: every sample is discarded,
+  `SessionAborted` is returned from then on and `compute_composite_embedding` fails;
+- `interrupt_liveness_streak()` breaks the streak without counting a spoof event (frames with no
+  PAD verdict or rejected by the quality gate).
+
+`LivenessPolicy::strict()` (3 frames, 3 spoof events; both values clamped to `1..=32`) is the policy
+of the GUI (`soos_gui::worker::new_guided_enrollment_session`). `GuidedEnrollmentSession::new`
+keeps a single-frame gate (`LivenessPolicy::single_frame()`), still with the step reset and the
+spoof abort, for compatibility with its existing contract.
 
 ---
 

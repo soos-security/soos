@@ -11,6 +11,8 @@
     reason = "High-performance pixel format conversions, fixed-point integer arithmetic, and buffer indexing"
 )]
 
+use std::borrow::Cow;
+
 use soos_camera_v4l::PixelFormat;
 
 use crate::error::VisionError;
@@ -77,6 +79,12 @@ pub fn convert_to_rgb(
             Ok(rgb)
         }
         PixelFormat::Yuyv => {
+            // A YUYV macro-pixel [Y0, U, Y1, V] covers two horizontal pixels: an odd width
+            // cannot be represented and would make macro-pixels straddle rows (GitHub #253).
+            if !width.is_multiple_of(2) {
+                return Err(VisionError::InvalidDimensions { width, height });
+            }
+
             let expected_yuyv_len = pixel_count
                 .checked_mul(2)
                 .ok_or(VisionError::InvalidDimensions { width, height })?;
@@ -170,6 +178,38 @@ pub fn convert_to_rgb(
             decode_mjpeg(raw_buffer, width, height, pixel_count, expected_rgb_len)
         }
     }
+}
+
+/// Borrowing variant of [`convert_to_rgb`] (GitHub #252, review finding VIS-10).
+///
+/// A [`PixelFormat::Rgb24`] frame is already in the target layout: after the same
+/// dimension and length validation it is returned as [`Cow::Borrowed`], without copying the
+/// frame (921 KB per 640x480 frame on the multi-frame authentication loop). Every other
+/// format is converted into a new buffer ([`Cow::Owned`]), exactly as [`convert_to_rgb`].
+/// The caller owns the zeroization of an owned buffer.
+pub fn convert_to_rgb_cow(
+    raw_buffer: &[u8],
+    width: u32,
+    height: u32,
+    format: PixelFormat,
+) -> Result<Cow<'_, [u8]>, VisionError> {
+    if format != PixelFormat::Rgb24 {
+        return convert_to_rgb(raw_buffer, width, height, format).map(Cow::Owned);
+    }
+    if width == 0 || height == 0 {
+        return Err(VisionError::InvalidDimensions { width, height });
+    }
+    let expected_rgb_len = (width as usize)
+        .checked_mul(height as usize)
+        .and_then(|px| px.checked_mul(3))
+        .ok_or(VisionError::InvalidDimensions { width, height })?;
+    if raw_buffer.len() != expected_rgb_len {
+        return Err(VisionError::InvalidBufferSize {
+            expected: expected_rgb_len,
+            actual: raw_buffer.len(),
+        });
+    }
+    Ok(Cow::Borrowed(raw_buffer))
 }
 
 /// Decodes one MJPEG frame into RGB24 with bounded allocations (review finding VIS-02).

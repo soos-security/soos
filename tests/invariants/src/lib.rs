@@ -36,6 +36,10 @@ mod pam_deadline_contract;
 #[cfg(all(test, unix))]
 mod dependency_tooling_contract;
 
+/// PAD startup self-test wiring in the daemon (GitHub #214).
+#[cfg(test)]
+mod pad_startup_contract;
+
 /// Traceability tooling contract for `scripts/sync_issue.py` (GitHub #188).
 #[cfg(all(test, unix))]
 mod sync_issue_contract;
@@ -80,6 +84,19 @@ mod toolchain_pin_contract;
 /// Project licence AGPL-3.0-or-later: workspace metadata, LICENSE file, README (rows LIC1–LIC3).
 #[cfg(test)]
 mod licence_contract;
+
+/// Attested inference path: verified in-memory model bytes, explicit SCRFD score activation,
+/// legacy 4-model artefacts removed (GitHub #246, #247, #249).
+#[cfg(test)]
+mod vision_attestation_contract;
+
+/// Vision threshold single-source and vision documentation invariants (GitHub #215, #250, #251).
+#[cfg(test)]
+mod vision_threshold_contract;
+
+/// ORT-owned output tensors are wiped in place (GitHub #255).
+#[cfg(test)]
+mod ort_output_zeroize_contract;
 
 #[cfg(test)]
 #[allow(

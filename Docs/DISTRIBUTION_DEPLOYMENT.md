@@ -58,6 +58,11 @@ sudo soos-admin gdm restore                   # put back gdm-password.soos-backu
 sudo soos-admin --format json gdm status      # machine-readable status
 ```
 
+`gdm status` reports `installed: true` only for an active rule whose module field is
+`pam_soos.so` (bare name or path); commented-out lines (`# auth ... pam_soos.so`), blank lines
+and mentions in module arguments are ignored, and `gdm enable` inserts a real rule next to such
+a comment (GitHub #236). The PAM file is read with the same 64 KiB bound as `gdm enable`.
+
 `--pam-file` (default `/etc/pam.d/gdm-password`) and `--disable-file` (default
 `/etc/soos/gdm.disable`) select other paths. `gdm disable` is the immediate, lockout-free
 switch: `pam_soos.so` reads `PAM_SERVICE` and returns `PAM_IGNORE` for every `gdm*` service

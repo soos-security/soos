@@ -9,7 +9,7 @@
 )]
 
 use soos_inference_ort::{
-    BiometricEmbedding, OrtEmbeddingExtractor, OrtFaceDetector, OrtPadDetector, OrtScrfdDetector,
+    BiometricEmbedding, OrtEmbeddingExtractor, OrtPadDetector, OrtScrfdDetector,
 };
 use zeroize::Zeroize;
 
@@ -31,24 +31,9 @@ fn test_biometric_embedding_zeroize_trait() {
 
 #[test]
 fn test_inference_input_buffers_zeroized() {
-    // 1. OrtFaceDetector input buffer
+    // User-approved 2026-09-30 (GitHub #249): the legacy UltraFace `OrtFaceDetector` block was
+    // removed with that type; the SCRFD block below keeps the detector input coverage.
     let dummy_rgb = vec![200u8; 320 * 240 * 3];
-    let mut detector_buf =
-        OrtFaceDetector::prepare_input(&dummy_rgb, 320, 240).expect("detector input");
-    assert_eq!(detector_buf.len(), 3 * 240 * 320);
-    assert!(
-        detector_buf.iter().any(|&v| v != 0.0),
-        "Detector buffer must contain non-zero normalized pixels"
-    );
-
-    detector_buf.zeroize();
-    for (i, &val) in detector_buf.iter().enumerate() {
-        assert_eq!(
-            val.to_bits(),
-            0,
-            "Detector buffer element at index {i} was not zeroed: {val}"
-        );
-    }
 
     // 2. OrtEmbeddingExtractor input buffer
     let dummy_crop = vec![180u8; 112 * 112 * 3];

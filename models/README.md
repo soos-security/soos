@@ -126,7 +126,7 @@ mobilefacenet_arcface:  66fbe536c4eb827a5e828d11c8cb5f98bb2d7ebec44ec2f35952fdfa
 minifasnet_pad:         65b8e9076c8c4a4a6873523f858203cba21efae9d13e314ad4b87e2dbf77c867
 ```
 
-Manifest v2.0.0 completely supersedes the v1.0.0 models. The unified `scrfd_500m_kps` model eliminates the separate `landmark_5point` inference stage, reducing total verification latency by ~20ms.
+Manifest v2.0.0 completely supersedes the v1.0.0 models. These ids are historical only: `scripts/download_models.sh` no longer resolves any download URL for them (GitHub #249), and no production code loads them. The unified `scrfd_500m_kps` model eliminates the separate `landmark_5point` inference stage, reducing total verification latency by ~20ms.
 
 ---
 

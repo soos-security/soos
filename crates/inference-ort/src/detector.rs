@@ -5,11 +5,13 @@
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss,
     clippy::indexing_slicing,
-    reason = "Geometric coordinate, IoU, UltraFace anchor prior, and pixel tensor calculations"
+    reason = "Geometric coordinate, IoU, stride grid, and pixel tensor calculations"
 )]
 
 use crate::error::InferenceError;
 use crate::landmarks::{FaceLandmarks, Point2f};
+use crate::letterbox::{letterbox_bilinear, letterbox_geometry};
+use crate::outputs::ZeroizingOutputs;
 use std::cmp::Ordering;
 use zeroize::{Zeroize, Zeroizing};
 
@@ -174,201 +176,6 @@ pub trait FaceDetector: Send + Sync {
 use ort::session::Session;
 use std::sync::{Arc, Mutex};
 
-/// UltraFace Slim 320 ONNX Runtime face detector.
-pub struct OrtFaceDetector {
-    session: Arc<Mutex<Session>>,
-    conf_threshold: f32,
-    iou_threshold: f32,
-    priors: Vec<[f32; 4]>,
-}
-
-impl OrtFaceDetector {
-    /// Constructs an UltraFace detector wrapping an active ORT session.
-    pub fn new(session: Arc<Mutex<Session>>, conf_threshold: f32, iou_threshold: f32) -> Self {
-        let priors = Self::generate_priors();
-        Self {
-            session,
-            conf_threshold,
-            iou_threshold,
-            priors,
-        }
-    }
-
-    /// Generates canonical UltraFace 320x240 anchor priors (4,420 anchor boxes).
-    pub fn generate_priors() -> Vec<[f32; 4]> {
-        let feature_map_sizes = [(30, 40), (15, 20), (8, 10), (4, 5)];
-        let min_sizes = [
-            vec![10.0f32, 16.0, 24.0],
-            vec![32.0f32, 48.0],
-            vec![64.0f32, 96.0],
-            vec![128.0f32, 192.0, 256.0],
-        ];
-        let steps = [8.0f32, 16.0, 32.0, 64.0];
-
-        let mut priors = Vec::with_capacity(4420);
-
-        for (k, &(h, w)) in feature_map_sizes.iter().enumerate() {
-            let step = steps.get(k).copied().unwrap_or(8.0);
-            let sizes = min_sizes.get(k).cloned().unwrap_or_default();
-
-            for i in 0..h {
-                for j in 0..w {
-                    for &min_size in &sizes {
-                        let s_kx = min_size / 320.0;
-                        let s_ky = min_size / 240.0;
-                        let cx = ((j as f32) + 0.5) * step / 320.0;
-                        let cy = ((i as f32) + 0.5) * step / 240.0;
-                        priors.push([cx, cy, s_kx, s_ky]);
-                    }
-                }
-            }
-        }
-
-        priors
-    }
-
-    /// Prepares, resizes, and normalizes an RGB frame to 320x240 NCHW format inside a zeroized container.
-    pub fn prepare_input(
-        rgb: &[u8],
-        width: u32,
-        height: u32,
-    ) -> Result<Zeroizing<Vec<f32>>, InferenceError> {
-        let expected_len = (width as usize)
-            .checked_mul(height as usize)
-            .and_then(|px| px.checked_mul(3))
-            .ok_or_else(|| InferenceError::InvalidInput("Image dimensions overflow".to_string()))?;
-
-        if rgb.len() != expected_len {
-            return Err(InferenceError::InvalidBufferSize {
-                expected: expected_len,
-                actual: rgb.len(),
-            });
-        }
-
-        // Resize and normalize RGB buffer to 320x240 NCHW [1, 3, 240, 320]
-        let target_w = 320usize;
-        let target_h = 240usize;
-        let mut input_data = Zeroizing::new(vec![0.0f32; 3 * target_h * target_w]);
-
-        let scale_x = width as f32 / target_w as f32;
-        let scale_y = height as f32 / target_h as f32;
-
-        for y in 0..target_h {
-            let src_y = ((y as f32 * scale_y) as usize).min(height as usize - 1);
-            for x in 0..target_w {
-                let src_x = ((x as f32 * scale_x) as usize).min(width as usize - 1);
-                let src_idx = (src_y * width as usize + src_x) * 3;
-
-                if let (Some(&r), Some(&g), Some(&b)) =
-                    (rgb.get(src_idx), rgb.get(src_idx + 1), rgb.get(src_idx + 2))
-                {
-                    let norm_r = (r as f32 - 127.0) / 128.0;
-                    let norm_g = (g as f32 - 127.0) / 128.0;
-                    let norm_b = (b as f32 - 127.0) / 128.0;
-
-                    let r_idx = y * target_w + x;
-                    let g_idx = target_h * target_w + y * target_w + x;
-                    let b_idx = 2 * target_h * target_w + y * target_w + x;
-
-                    if let Some(slot) = input_data.get_mut(r_idx) {
-                        *slot = norm_r;
-                    }
-                    if let Some(slot) = input_data.get_mut(g_idx) {
-                        *slot = norm_g;
-                    }
-                    if let Some(slot) = input_data.get_mut(b_idx) {
-                        *slot = norm_b;
-                    }
-                }
-            }
-        }
-
-        Ok(input_data)
-    }
-}
-
-impl FaceDetector for OrtFaceDetector {
-    fn detect(
-        &self,
-        rgb: &[u8],
-        width: u32,
-        height: u32,
-    ) -> Result<Vec<FaceDetection>, InferenceError> {
-        let mut input_data = Self::prepare_input(rgb, width, height)?;
-
-        let tensor =
-            ort::value::TensorRef::from_array_view(([1usize, 3, 240, 320], input_data.as_slice()))
-                .map_err(|e| InferenceError::Ort(e.to_string()))?;
-
-        let mut session = self
-            .session
-            .lock()
-            .map_err(|_| InferenceError::DetectionFailed("Session mutex poisoned".to_string()))?;
-
-        let outputs = session
-            .run(ort::inputs![tensor])
-            .map_err(|e| InferenceError::Ort(e.to_string()))?;
-
-        // Zeroize input buffer immediately post-inference
-        input_data.zeroize();
-
-        let mut out_iter = outputs.into_iter();
-        let (_, conf_tensor) = out_iter.next().ok_or_else(|| {
-            InferenceError::DetectionFailed("UltraFace confidence tensor missing".to_string())
-        })?;
-        let (_, loc_tensor) = out_iter.next().ok_or_else(|| {
-            InferenceError::DetectionFailed("UltraFace box regression tensor missing".to_string())
-        })?;
-
-        let conf_data = conf_tensor
-            .try_extract_tensor::<f32>()
-            .map_err(|e| InferenceError::Ort(e.to_string()))?
-            .1;
-        let loc_data = loc_tensor
-            .try_extract_tensor::<f32>()
-            .map_err(|e| InferenceError::Ort(e.to_string()))?
-            .1;
-
-        let mut candidates = Vec::new();
-
-        for (idx, prior) in self.priors.iter().enumerate() {
-            let conf_offset = idx * 2;
-            let loc_offset = idx * 4;
-
-            if let (Some(&_bg_conf), Some(&face_conf)) =
-                (conf_data.get(conf_offset), conf_data.get(conf_offset + 1))
-            {
-                if face_conf > self.conf_threshold {
-                    if let (Some(&loc_cx), Some(&loc_cy), Some(&loc_w), Some(&loc_h)) = (
-                        loc_data.get(loc_offset),
-                        loc_data.get(loc_offset + 1),
-                        loc_data.get(loc_offset + 2),
-                        loc_data.get(loc_offset + 3),
-                    ) {
-                        // Decode center, size from priors
-                        let center_x = prior[0] + loc_cx * 0.1 * prior[2];
-                        let center_y = prior[1] + loc_cy * 0.1 * prior[3];
-                        let w = prior[2] * (loc_w * 0.2).exp();
-                        let h = prior[3] * (loc_h * 0.2).exp();
-
-                        let x1 = (center_x - w / 2.0) * width as f32;
-                        let y1 = (center_y - h / 2.0) * height as f32;
-                        let x2 = (center_x + w / 2.0) * width as f32;
-                        let y2 = (center_y + h / 2.0) * height as f32;
-
-                        let bbox =
-                            BoundingBox::new(x1, y1, x2, y2).clamp(width as f32, height as f32);
-                        candidates.push(FaceDetection::new(bbox, face_conf));
-                    }
-                }
-            }
-        }
-
-        let filtered = nms(&candidates, self.iou_threshold);
-        Ok(filtered)
-    }
-}
-
 /// Unprojects coordinates from letterbox space back to original image space.
 pub fn unproject(x: f32, y: f32, scale: f32, pad_x: f32, pad_y: f32) -> (f32, f32) {
     if scale <= 0.0 {
@@ -382,70 +189,128 @@ pub fn unproject(x: f32, y: f32, scale: f32, pad_x: f32, pad_y: f32) -> (f32, f3
 /// Letterbox pads an RGB image buffer to target x target dimensions, maintaining aspect ratio.
 ///
 /// Output tensor is in NCHW format with BGR channel ordering and (pixel - 127.5) / 128.0 normalization.
-/// Border padding is filled with 0.0.
+/// Border padding is filled with 0.0. Resampling is bilinear and the returned `pad_x` / `pad_y`
+/// are the exact integer placement offsets, shared with `soos-vision` through
+/// [`crate::letterbox`] (GitHub #248, VIS-06). Allocates a new zeroized tensor; the detector
+/// hot path uses [`letterbox_pad_into`] with a reusable scratch tensor instead.
 pub fn letterbox_pad(
     rgb: &[u8],
     w: u32,
     h: u32,
     target: usize,
 ) -> (Zeroizing<Vec<f32>>, f32, f32, f32) {
-    let target_f = target as f32;
     let mut tensor = Zeroizing::new(vec![0.0f32; 3 * target * target]);
-
-    if w == 0 || h == 0 || rgb.len() != (w as usize).saturating_mul(h as usize).saturating_mul(3) {
-        return (tensor, 1.0, 0.0, 0.0);
-    }
-
-    let scale = (target_f / w as f32).min(target_f / h as f32);
-    let new_w = ((w as f32 * scale).round() as usize).min(target);
-    let new_h = ((h as f32 * scale).round() as usize).min(target);
-    let pad_x = ((target_f - new_w as f32) / 2.0).max(0.0);
-    let pad_y = ((target_f - new_h as f32) / 2.0).max(0.0);
-
-    let pad_x_int = pad_x as usize;
-    let pad_y_int = pad_y as usize;
-
-    let b_offset = 0;
-    let g_offset = target * target;
-    let r_offset = 2 * target * target;
-
-    for y in 0..new_h {
-        let src_y = ((y as f32 / scale).floor() as usize).min((h - 1) as usize);
-        let dst_y = y + pad_y_int;
-        if dst_y >= target {
-            continue;
-        }
-
-        for x in 0..new_w {
-            let src_x = ((x as f32 / scale).floor() as usize).min((w - 1) as usize);
-            let dst_x = x + pad_x_int;
-            if dst_x >= target {
-                continue;
-            }
-
-            let src_idx = (src_y * w as usize + src_x) * 3;
-            if let (Some(&r_val), Some(&g_val), Some(&b_val)) =
-                (rgb.get(src_idx), rgb.get(src_idx + 1), rgb.get(src_idx + 2))
-            {
-                let norm_b = (b_val as f32 - 127.5) / 128.0;
-                let norm_g = (g_val as f32 - 127.5) / 128.0;
-                let norm_r = (r_val as f32 - 127.5) / 128.0;
-
-                let dst_idx = dst_y * target + dst_x;
-                if let Some(slot) = tensor.get_mut(b_offset + dst_idx) {
-                    *slot = norm_b;
-                }
-                if let Some(slot) = tensor.get_mut(g_offset + dst_idx) {
-                    *slot = norm_g;
-                }
-                if let Some(slot) = tensor.get_mut(r_offset + dst_idx) {
-                    *slot = norm_r;
-                }
-            }
-        }
-    }
-
+    let (scale, pad_x, pad_y) =
+        letterbox_pad_into(rgb, w, h, target, tensor.as_mut_slice()).unwrap_or((1.0, 0.0, 0.0));
     (tensor, scale, pad_x, pad_y)
+}
+
+/// In-place variant of [`letterbox_pad`] writing into a caller-owned scratch tensor
+/// (GitHub #252, review finding VIS-10).
+///
+/// `out` must hold exactly `3 * target * target` values, otherwise
+/// [`InferenceError::InvalidBufferSize`] is returned and `out` is left untouched. The whole
+/// tensor is overwritten (padding reset to 0.0), so stale data from a previous frame can never
+/// leak into the next inference. An invalid frame (zero dimension or wrong buffer length)
+/// yields an all-zero tensor and the identity geometry `(1.0, 0.0, 0.0)`, like
+/// [`letterbox_pad`].
+pub fn letterbox_pad_into(
+    rgb: &[u8],
+    w: u32,
+    h: u32,
+    target: usize,
+    out: &mut [f32],
+) -> Result<(f32, f32, f32), InferenceError> {
+    let plane = target
+        .checked_mul(target)
+        .ok_or_else(|| InferenceError::InvalidInput("Letterbox target overflows".to_string()))?;
+    let expected = plane
+        .checked_mul(3)
+        .ok_or_else(|| InferenceError::InvalidInput("Letterbox target overflows".to_string()))?;
+    if out.len() != expected {
+        return Err(InferenceError::InvalidBufferSize {
+            expected,
+            actual: out.len(),
+        });
+    }
+    out.fill(0.0);
+
+    let Ok(target_u32) = u32::try_from(target) else {
+        return Ok((1.0, 0.0, 0.0));
+    };
+    let Some(geometry) = letterbox_geometry(w, h, target_u32, target_u32) else {
+        return Ok((1.0, 0.0, 0.0));
+    };
+
+    let placed = letterbox_bilinear(rgb, w, h, &geometry, |dst_x, dst_y, [r, g, b]| {
+        if dst_x >= target || dst_y >= target {
+            return;
+        }
+        let dst_idx = dst_y * target + dst_x;
+        for (offset, value) in [(0, b), (plane, g), (2 * plane, r)] {
+            if let Some(slot) = out.get_mut(offset + dst_idx) {
+                *slot = (f32::from(value) - 127.5) / 128.0;
+            }
+        }
+    });
+    if !placed {
+        out.fill(0.0);
+        return Ok((1.0, 0.0, 0.0));
+    }
+
+    Ok((geometry.scale, geometry.pad_x as f32, geometry.pad_y as f32))
+}
+
+/// How raw SCRFD score-head values map to face confidences (GitHub #247, VIS-05).
+///
+/// The activation is a property of the model, decided once for the detector, never per
+/// element: a per-element "pass through if in `[0, 1]`, else sigmoid" rule is non-monotonic
+/// across the boundary and misranks candidates before NMS.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ScoreActivation {
+    /// Scores are already probabilities (the attested `scrfd_500m_kps` graph ends in
+    /// `Sigmoid`). Any non-finite value or value outside `[0, 1]` fails closed.
+    #[default]
+    Probability,
+    /// Scores are logits; the sigmoid is applied to every value. Non-finite values fail closed.
+    Logit,
+}
+
+impl ScoreActivation {
+    /// Infers one activation for a whole score tensor: `Probability` when every value is a
+    /// finite number in `[0, 1]`, `Logit` otherwise.
+    ///
+    /// Only the historical [`OrtScrfdDetector::decode_stride`] entry point uses this; the
+    /// production detector uses its configured activation and fails closed instead.
+    pub fn infer(scores: &[f32]) -> Self {
+        if scores.iter().all(|s| (0.0..=1.0).contains(s)) {
+            Self::Probability
+        } else {
+            Self::Logit
+        }
+    }
+
+    /// Checks that every raw score is admissible for this activation.
+    pub fn validate(self, scores: &[f32]) -> Result<(), InferenceError> {
+        let bad = match self {
+            Self::Probability => scores.iter().position(|s| !(0.0..=1.0).contains(s)),
+            Self::Logit => scores.iter().position(|s| !s.is_finite()),
+        };
+        match bad {
+            None => Ok(()),
+            Some(index) => Err(InferenceError::TensorError(format!(
+                "SCRFD score {index} is not a valid {self:?} value"
+            ))),
+        }
+    }
+
+    /// Maps one raw score to a confidence (monotonic non-decreasing).
+    pub fn apply(self, raw: f32) -> f32 {
+        match self {
+            Self::Probability => raw,
+            Self::Logit => 1.0 / (1.0 + (-raw).exp()),
+        }
+    }
 }
 
 /// SCRFD 500M KPS ONNX Runtime face detector with multi-stride output parsing and 5-point landmarks.
@@ -456,6 +321,11 @@ pub struct OrtScrfdDetector {
     pub input_size: (usize, usize),
     pub strides: [usize; 3],
     pub anchors_per_cell: usize,
+    /// Activation of the score heads, fixed at construction (default `Probability`).
+    pub score_activation: ScoreActivation,
+    /// Reusable letterbox input tensor (`3 * input_size.0^2` values), wiped after every
+    /// inference and on drop. Avoids a 4.9 MB allocation per frame (GitHub #252).
+    input_scratch: Mutex<Zeroizing<Vec<f32>>>,
 }
 
 impl OrtScrfdDetector {
@@ -503,7 +373,66 @@ impl OrtScrfdDetector {
         Ok(())
     }
 
+    /// Validates session output metadata dims (negative = symbolic) against the SCRFD layout.
+    ///
+    /// The attested graph reports `[-1, -1, k]` (symbolic batch and anchor dims), so the
+    /// metadata cannot prove per-stride anchor counts; those are enforced on every frame by
+    /// [`FaceDetector::detect`]. What the metadata can prove is checked here, failing closed:
+    /// - exactly 9 outputs, each of rank 3;
+    /// - batch dim symbolic or 1;
+    /// - channel dim concrete, with exactly 3 score (1), 3 bbox (4) and 3 keypoint (10) heads;
+    /// - within each head kind, every concrete anchor dim is one of the stride anchor counts
+    ///   (12800, 3200, 800 for a 640x640 input) and no count appears twice.
+    pub fn validate_output_dims(dims: &[Vec<i64>]) -> Result<(), InferenceError> {
+        Self::validate_output_count(dims.len())?;
+        let reject = |shape: &Vec<i64>, why: &str| {
+            InferenceError::TensorError(format!("SCRFD output shape {shape:?}: {why}"))
+        };
+        let expected_anchors: Vec<i64> = [8i64, 16, 32]
+            .iter()
+            .map(|&s| (640 / s) * (640 / s) * 2)
+            .collect();
+        for channels in [1i64, 4, 10] {
+            let mut count = 0usize;
+            let mut seen: Vec<i64> = Vec::with_capacity(3);
+            for shape in dims {
+                let &[batch, anchors, ch] = shape.as_slice() else {
+                    return Err(reject(shape, "expected rank 3 [N, anchors, channels]"));
+                };
+                if ch < 0 {
+                    return Err(reject(shape, "symbolic channel dim"));
+                }
+                if batch >= 0 && batch != 1 {
+                    return Err(reject(shape, "batch dim must be 1 or symbolic"));
+                }
+                if ch != channels {
+                    continue;
+                }
+                count += 1;
+                if anchors >= 0 {
+                    if !expected_anchors.contains(&anchors) {
+                        return Err(reject(shape, "anchor count matches no stride"));
+                    }
+                    if seen.contains(&anchors) {
+                        return Err(reject(shape, "duplicate anchor count for this head kind"));
+                    }
+                    seen.push(anchors);
+                }
+            }
+            if count != 3 {
+                return Err(InferenceError::TensorError(format!(
+                    "SCRFD model must expose 3 output heads with {channels} channel(s), found {count}"
+                )));
+            }
+        }
+        Ok(())
+    }
+
     /// Constructs an SCRFD detector wrapping an active ORT session.
+    ///
+    /// Startup validation: exactly 9 outputs whose metadata shapes match the score/bbox/kps
+    /// pattern of every stride ([`Self::validate_output_dims`]). The score activation defaults
+    /// to [`ScoreActivation::Probability`] (see [`Self::with_score_activation`]).
     pub fn new(
         session: Arc<Mutex<Session>>,
         conf_threshold: f32,
@@ -514,6 +443,23 @@ impl OrtScrfdDetector {
                 InferenceError::DetectionFailed("Session mutex poisoned".to_string())
             })?;
             Self::validate_output_count(s.outputs().len())?;
+            let dims = s
+                .outputs()
+                .iter()
+                .map(|output| {
+                    output
+                        .dtype()
+                        .tensor_shape()
+                        .map(|shape| shape.to_vec())
+                        .ok_or_else(|| {
+                            InferenceError::TensorError(format!(
+                                "SCRFD output '{}' is not a dense tensor",
+                                output.name()
+                            ))
+                        })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            Self::validate_output_dims(&dims)?;
         }
 
         Ok(Self {
@@ -523,22 +469,15 @@ impl OrtScrfdDetector {
             input_size: (640, 640),
             strides: [8, 16, 32],
             anchors_per_cell: 2,
+            score_activation: ScoreActivation::default(),
+            input_scratch: Mutex::new(Zeroizing::new(vec![0.0f32; 3 * 640 * 640])),
         })
     }
 
-    /// Helper for unprojecting coordinates.
-    pub fn unproject(x: f32, y: f32, scale: f32, pad_x: f32, pad_y: f32) -> (f32, f32) {
-        unproject(x, y, scale, pad_x, pad_y)
-    }
-
-    /// Helper for letterbox padding.
-    pub fn letterbox_pad(
-        rgb: &[u8],
-        w: u32,
-        h: u32,
-        target: usize,
-    ) -> (Zeroizing<Vec<f32>>, f32, f32, f32) {
-        letterbox_pad(rgb, w, h, target)
+    /// Returns the detector with an explicit score activation (for a logit-output variant).
+    pub fn with_score_activation(mut self, activation: ScoreActivation) -> Self {
+        self.score_activation = activation;
+        self
     }
 
     /// Prepares, letterbox-pads, and normalizes an RGB frame to 640x640 NCHW BGR format.
@@ -564,6 +503,10 @@ impl OrtScrfdDetector {
     }
 
     /// Decodes grid coordinates, distance-to-border boxes, and landmarks for a specific stride.
+    ///
+    /// Historical entry point: the activation is inferred once for the whole score tensor
+    /// ([`ScoreActivation::infer`]), which keeps the mapping monotonic. Production decoding
+    /// uses [`Self::decode_stride_checked`] with the detector's configured activation.
     #[allow(
         clippy::too_many_arguments,
         reason = "Stride decoding requires explicit tensor slices, coordinates, grid geometry, and threshold parameters"
@@ -583,6 +526,78 @@ impl OrtScrfdDetector {
         orig_w: u32,
         orig_h: u32,
     ) -> Vec<FaceDetection> {
+        Self::decode_stride_with(
+            stride,
+            grid_w,
+            grid_h,
+            anchors_per_cell,
+            scores,
+            bboxes,
+            kps,
+            conf_threshold,
+            (scale, pad_x, pad_y),
+            (orig_w, orig_h),
+            ScoreActivation::infer(scores),
+        )
+    }
+
+    /// Fail-closed stride decoding with an explicit score activation (production path).
+    ///
+    /// Every raw score is validated first ([`ScoreActivation::validate`]); one non-finite or
+    /// out-of-range value rejects the whole frame with `TensorError`.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "Stride decoding requires explicit tensor slices, coordinates, grid geometry, threshold and activation parameters"
+    )]
+    pub fn decode_stride_checked(
+        stride: usize,
+        grid_w: usize,
+        grid_h: usize,
+        anchors_per_cell: usize,
+        scores: &[f32],
+        bboxes: &[f32],
+        kps: &[f32],
+        conf_threshold: f32,
+        scale: f32,
+        pad_x: f32,
+        pad_y: f32,
+        orig_w: u32,
+        orig_h: u32,
+        activation: ScoreActivation,
+    ) -> Result<Vec<FaceDetection>, InferenceError> {
+        activation.validate(scores)?;
+        Ok(Self::decode_stride_with(
+            stride,
+            grid_w,
+            grid_h,
+            anchors_per_cell,
+            scores,
+            bboxes,
+            kps,
+            conf_threshold,
+            (scale, pad_x, pad_y),
+            (orig_w, orig_h),
+            activation,
+        ))
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "Stride decoding requires explicit tensor slices, coordinates, grid geometry, and threshold parameters"
+    )]
+    fn decode_stride_with(
+        stride: usize,
+        grid_w: usize,
+        grid_h: usize,
+        anchors_per_cell: usize,
+        scores: &[f32],
+        bboxes: &[f32],
+        kps: &[f32],
+        conf_threshold: f32,
+        (scale, pad_x, pad_y): (f32, f32, f32),
+        (orig_w, orig_h): (u32, u32),
+        activation: ScoreActivation,
+    ) -> Vec<FaceDetection> {
         let mut detections = Vec::new();
         let s = stride as f32;
 
@@ -594,11 +609,12 @@ impl OrtScrfdDetector {
                         Some(&val) => val,
                         None => continue,
                     };
-                    let conf = if (0.0..=1.0).contains(&raw_score) {
-                        raw_score
-                    } else {
-                        1.0 / (1.0 + (-raw_score).exp())
-                    };
+                    // Non-finite model output is never a face (GitHub #254): +inf would
+                    // sigmoid to 1.0 and NaN would propagate into the landmarks.
+                    if !raw_score.is_finite() {
+                        continue;
+                    }
+                    let conf = activation.apply(raw_score);
                     if conf > conf_threshold {
                         let bbox_offset = idx * 4;
                         let (l, t, r, b) = match (
@@ -619,12 +635,22 @@ impl OrtScrfdDetector {
                         let (orig_x1, orig_y1) = unproject(x1_let, y1_let, scale, pad_x, pad_y);
                         let (orig_x2, orig_y2) = unproject(x2_let, y2_let, scale, pad_x, pad_y);
 
+                        // Checked before clamping: `f32::min`/`max` in `BoundingBox::new` drop
+                        // NaN and `clamp` saturates infinity, hiding corrupted boxes.
+                        if ![orig_x1, orig_y1, orig_x2, orig_y2]
+                            .iter()
+                            .all(|v| v.is_finite())
+                        {
+                            continue;
+                        }
+
                         let bbox = BoundingBox::new(orig_x1, orig_y1, orig_x2, orig_y2)
                             .clamp(orig_w as f32, orig_h as f32);
 
                         let kps_offset = idx * 10;
                         let mut lm_pts = [Point2f::new(0.0, 0.0); 5];
                         let mut kps_valid = true;
+                        let mut kps_non_finite = false;
                         for (i, pt) in lm_pts.iter_mut().enumerate() {
                             let (kx, ky) = match (
                                 kps.get(kps_offset + i * 2),
@@ -640,10 +666,19 @@ impl OrtScrfdDetector {
                             let lm_y_let = (row as f32 + ky) * s;
                             let (orig_lm_x, orig_lm_y) =
                                 unproject(lm_x_let, lm_y_let, scale, pad_x, pad_y);
+                            // `f32::clamp` propagates NaN into the aligned crop (GitHub #254).
+                            if !orig_lm_x.is_finite() || !orig_lm_y.is_finite() {
+                                kps_non_finite = true;
+                                break;
+                            }
                             *pt = Point2f::new(
                                 orig_lm_x.clamp(0.0, orig_w as f32),
                                 orig_lm_y.clamp(0.0, orig_h as f32),
                             );
+                        }
+
+                        if kps_non_finite {
+                            continue;
                         }
 
                         let landmarks = if kps_valid {
@@ -688,12 +723,49 @@ impl FaceDetector for OrtScrfdDetector {
             });
         }
 
-        let (mut input_data, scale, pad_x, pad_y) =
-            letterbox_pad(rgb, width, height, self.input_size.0);
+        let needed = self
+            .input_size
+            .0
+            .checked_mul(self.input_size.0)
+            .and_then(|plane| plane.checked_mul(3))
+            .ok_or_else(|| InferenceError::InvalidInput("Input size overflows".to_string()))?;
+
+        // The scratch tensor is fully overwritten on every use and wiped after it, so a
+        // poisoned lock (panic in a previous detect) holds no state worth failing over.
+        let mut scratch = self
+            .input_scratch
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if scratch.len() != needed {
+            scratch.zeroize();
+            scratch.resize(needed, 0.0);
+        }
+
+        let result = self.run_and_decode(scratch.as_mut_slice(), rgb, width, height);
+
+        // Wipe the letterboxed frame right after inference; the allocation is kept for reuse.
+        scratch.as_mut_slice().zeroize();
+        result
+    }
+}
+
+impl OrtScrfdDetector {
+    /// Letterboxes `rgb` into the reusable scratch tensor, runs the session and decodes the
+    /// nine SCRFD outputs directly from the ORT-owned buffers (no copy), which are wiped in
+    /// place by [`ZeroizingOutputs`] before the session lock is released (GitHub #252, #255).
+    fn run_and_decode(
+        &self,
+        scratch: &mut [f32],
+        rgb: &[u8],
+        width: u32,
+        height: u32,
+    ) -> Result<Vec<FaceDetection>, InferenceError> {
+        let (scale, pad_x, pad_y) =
+            letterbox_pad_into(rgb, width, height, self.input_size.0, scratch)?;
 
         let tensor = ort::value::TensorRef::from_array_view((
             [1usize, 3, self.input_size.1, self.input_size.0],
-            input_data.as_slice(),
+            &*scratch,
         ))
         .map_err(|e| InferenceError::Ort(e.to_string()))?;
 
@@ -702,21 +774,23 @@ impl FaceDetector for OrtScrfdDetector {
             .lock()
             .map_err(|_| InferenceError::DetectionFailed("Session mutex poisoned".to_string()))?;
 
-        let outputs = session
-            .run(ort::inputs![tensor])
-            .map_err(|e| InferenceError::Ort(e.to_string()))?;
+        let outputs = ZeroizingOutputs::new(
+            session
+                .run(ort::inputs![tensor])
+                .map_err(|e| InferenceError::Ort(e.to_string()))?,
+        );
 
-        // Zeroize input buffer immediately post-inference
-        input_data.zeroize();
-
-        // Extract raw tensor views from outputs
-        let mut extracted = Vec::with_capacity(9);
-        for (_name, val) in outputs {
-            let (shape, slice) = val
+        // Borrowed views into the ORT-owned output tensors (each read exactly once).
+        let mut extracted: Vec<(Vec<usize>, &[f32])> = Vec::with_capacity(9);
+        for name in outputs.keys() {
+            let Some(val) = outputs.get(name) else {
+                continue;
+            };
+            let (shape, data) = val
                 .try_extract_tensor::<f32>()
                 .map_err(|e| InferenceError::Ort(e.to_string()))?;
             let shape_vec: Vec<usize> = shape.as_ref().iter().map(|&d| d as usize).collect();
-            extracted.push((shape_vec, slice.to_vec()));
+            extracted.push((shape_vec, data));
         }
 
         if extracted.len() != 9 {
@@ -726,6 +800,19 @@ impl FaceDetector for OrtScrfdDetector {
             )));
         }
 
+        let find_tensor = |num_anchors: usize, channels: usize| -> Option<&[f32]> {
+            extracted
+                .iter()
+                .find(|(sh, sl)| {
+                    sh.len() == 3
+                        && sh.first() == Some(&1)
+                        && sh.get(1) == Some(&num_anchors)
+                        && sh.get(2) == Some(&channels)
+                        && Some(sl.len()) == num_anchors.checked_mul(channels)
+                })
+                .map(|(_, sl)| *sl)
+        };
+
         let mut candidates = Vec::new();
 
         for &stride in &self.strides {
@@ -733,55 +820,23 @@ impl FaceDetector for OrtScrfdDetector {
             let gh = self.input_size.1 / stride;
             let num_anchors = gw * gh * self.anchors_per_cell;
 
-            let score_data = extracted
-                .iter()
-                .find(|(sh, sl)| {
-                    sh.len() == 3
-                        && sh.first() == Some(&1)
-                        && sh.get(1) == Some(&num_anchors)
-                        && sh.get(2) == Some(&1)
-                        && sl.len() == num_anchors
-                })
-                .map(|(_, sl)| sl.as_slice())
-                .ok_or_else(|| {
-                    InferenceError::TensorError(format!(
-                        "Missing score tensor for stride {stride} (anchors={num_anchors})"
-                    ))
-                })?;
+            let score_data = find_tensor(num_anchors, 1).ok_or_else(|| {
+                InferenceError::TensorError(format!(
+                    "Missing score tensor for stride {stride} (anchors={num_anchors})"
+                ))
+            })?;
+            let bbox_data = find_tensor(num_anchors, 4).ok_or_else(|| {
+                InferenceError::TensorError(format!(
+                    "Missing bbox tensor for stride {stride} (anchors={num_anchors})"
+                ))
+            })?;
+            let kps_data = find_tensor(num_anchors, 10).ok_or_else(|| {
+                InferenceError::TensorError(format!(
+                    "Missing kps tensor for stride {stride} (anchors={num_anchors})"
+                ))
+            })?;
 
-            let bbox_data = extracted
-                .iter()
-                .find(|(sh, sl)| {
-                    sh.len() == 3
-                        && sh.first() == Some(&1)
-                        && sh.get(1) == Some(&num_anchors)
-                        && sh.get(2) == Some(&4)
-                        && sl.len() == num_anchors * 4
-                })
-                .map(|(_, sl)| sl.as_slice())
-                .ok_or_else(|| {
-                    InferenceError::TensorError(format!(
-                        "Missing bbox tensor for stride {stride} (anchors={num_anchors})"
-                    ))
-                })?;
-
-            let kps_data = extracted
-                .iter()
-                .find(|(sh, sl)| {
-                    sh.len() == 3
-                        && sh.first() == Some(&1)
-                        && sh.get(1) == Some(&num_anchors)
-                        && sh.get(2) == Some(&10)
-                        && sl.len() == num_anchors * 10
-                })
-                .map(|(_, sl)| sl.as_slice())
-                .ok_or_else(|| {
-                    InferenceError::TensorError(format!(
-                        "Missing kps tensor for stride {stride} (anchors={num_anchors})"
-                    ))
-                })?;
-
-            let detections = Self::decode_stride(
+            let detections = Self::decode_stride_checked(
                 stride,
                 gw,
                 gh,
@@ -795,11 +850,11 @@ impl FaceDetector for OrtScrfdDetector {
                 pad_y,
                 width,
                 height,
-            );
+                self.score_activation,
+            )?;
             candidates.extend(detections);
         }
 
-        let filtered = nms(&candidates, self.iou_threshold);
-        Ok(filtered)
+        Ok(nms(&candidates, self.iou_threshold))
     }
 }

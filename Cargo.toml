@@ -46,7 +46,6 @@ arc-swap = "1"
 # Exact pin: ort 2.0 is still a release candidate and pre-release APIs may change
 # between rc versions. Upgrade deliberately (real-model tests) once 2.0.0 GA ships.
 ort = "=2.0.0-rc.13"
-ndarray = "0.17"
 sha2 = "0.10"
 toml = "0.8"
 

@@ -1,4 +1,4 @@
-//! Hardware-free deterministic mocks for FaceDetector, LandmarkDetector, and EmbeddingExtractor.
+//! Hardware-free deterministic mocks for FaceDetector, PadDetector, and EmbeddingExtractor.
 
 #![allow(
     clippy::arithmetic_side_effects,
@@ -14,7 +14,7 @@ use std::sync::RwLock;
 use crate::detector::{BoundingBox, FaceDetection, FaceDetector};
 use crate::embedding::{BiometricEmbedding, EmbeddingExtractor};
 use crate::error::InferenceError;
-use crate::landmarks::{FaceLandmarks, LandmarkDetector, Point2f};
+use crate::landmarks::{FaceLandmarks, Point2f};
 use crate::pad::{AttackType, PadDetector, PadResult};
 
 /// Mock face detector for automated tests and headless environments.
@@ -136,103 +136,6 @@ impl FaceDetector for MockFaceDetector {
             .map_err(|_| InferenceError::DetectionFailed("Lock poisoned".to_string()))?;
 
         Ok(guard.clone())
-    }
-}
-
-/// Mock 5-point landmark detector.
-pub struct MockLandmarkDetector {
-    landmarks: RwLock<FaceLandmarks>,
-    fail_next: RwLock<bool>,
-}
-
-impl MockLandmarkDetector {
-    /// Creates a mock landmark detector with canonical normalized 5-point layout.
-    pub fn new_canonical() -> Self {
-        let lm = FaceLandmarks::new(
-            Point2f::new(38.29, 51.69),
-            Point2f::new(73.53, 51.50),
-            Point2f::new(56.02, 71.73),
-            Point2f::new(41.54, 92.36),
-            Point2f::new(70.72, 92.20),
-        );
-        Self {
-            landmarks: RwLock::new(lm),
-            fail_next: RwLock::new(false),
-        }
-    }
-
-    pub fn new_with_landmarks(landmarks: FaceLandmarks) -> Self {
-        Self {
-            landmarks: RwLock::new(landmarks),
-            fail_next: RwLock::new(false),
-        }
-    }
-
-    pub fn set_fail_next(&self, fail: bool) {
-        if let Ok(mut guard) = self.fail_next.write() {
-            *guard = fail;
-        }
-    }
-}
-
-impl Default for MockLandmarkDetector {
-    fn default() -> Self {
-        Self::new_canonical()
-    }
-}
-
-impl LandmarkDetector for MockLandmarkDetector {
-    fn detect_landmarks(
-        &self,
-        _rgb: &[u8],
-        _width: u32,
-        _height: u32,
-        face_box: &BoundingBox,
-    ) -> Result<FaceLandmarks, InferenceError> {
-        if let Ok(mut guard) = self.fail_next.write() {
-            if *guard {
-                *guard = false;
-                return Err(InferenceError::LandmarkFailed(
-                    "Simulated landmark detector failure".to_string(),
-                ));
-            }
-        }
-
-        let guard = self
-            .landmarks
-            .read()
-            .map_err(|_| InferenceError::LandmarkFailed("Lock poisoned".to_string()))?;
-
-        // Scale canonical landmarks to the face bounding box
-        let bw = face_box.width();
-        let bh = face_box.height();
-        let scale_x = bw / 112.0;
-        let scale_y = bh / 112.0;
-
-        let scaled = FaceLandmarks::new(
-            Point2f::new(
-                face_box.x1 + guard.left_eye.x * scale_x,
-                face_box.y1 + guard.left_eye.y * scale_y,
-            ),
-            Point2f::new(
-                face_box.x1 + guard.right_eye.x * scale_x,
-                face_box.y1 + guard.right_eye.y * scale_y,
-            ),
-            Point2f::new(
-                face_box.x1 + guard.nose.x * scale_x,
-                face_box.y1 + guard.nose.y * scale_y,
-            ),
-            Point2f::new(
-                face_box.x1 + guard.mouth_left.x * scale_x,
-                face_box.y1 + guard.mouth_left.y * scale_y,
-            ),
-            Point2f::new(
-                face_box.x1 + guard.mouth_right.x * scale_x,
-                face_box.y1 + guard.mouth_right.y * scale_y,
-            ),
-        );
-
-        Ok(scaled)
     }
 }
 

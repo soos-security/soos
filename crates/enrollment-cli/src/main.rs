@@ -84,7 +84,7 @@ fn run() -> Result<(), EnrollmentCliError> {
                 report.match_score, report.match_threshold
             );
             println!("Face Count:          {}", report.face_count);
-            println!("PAD Anti-Spoof:      {}", report.pad_result);
+            println!("PAD Anti-Spoof:      {}", report.pad_status());
             println!("----------------------------------------------------");
             println!("Latency Breakdown:");
             println!("  Camera Capture:    {:.2} ms", report.latency.capture_ms);

@@ -30,6 +30,9 @@ pub const FRAME_POLL_INTERVAL_MS: u64 = 10;
 /// (GitHub #182 / STO-09): their vectors live in another embedding space.
 pub const EMBEDDING_MODEL_ID: &str = "arcface_w600k_mbf";
 
+/// Attested manifest identifier of the Presentation Attack Detection model.
+pub const PAD_MODEL_ID: &str = "minifasnet_v2_pad";
+
 /// Historical `model_id` accepted as an alias of [`EMBEDDING_MODEL_ID`].
 ///
 /// `soos-enroll enroll` recorded `mobilefacenet` / `1.0.0` by default until GitHub #182
@@ -171,6 +174,42 @@ pub fn build_pad_detector(
     pad_threshold: f32,
 ) -> soos_inference_ort::OrtPadDetector {
     soos_inference_ort::OrtPadDetector::new(pad_session, pad_threshold)
+}
+
+/// Startup validation of the daemon's PAD detector (GitHub #214, PAD-09).
+///
+/// Derives the expected class count from the manifest `output_shapes` of [`PAD_MODEL_ID`],
+/// runs [`soos_inference_ort::OrtPadDetector::self_test`] on a fixed synthetic fixture and
+/// logs the live class index and threshold at info level. Any mismatch (missing manifest
+/// entry, wrong output length, out-of-range live class index) fails closed: the daemon does
+/// not start rather than silently denying or accepting every presentation.
+pub fn validate_pad_detector(
+    pad: &soos_inference_ort::OrtPadDetector,
+    manifest: &soos_inference_ort::ModelManifest,
+) -> Result<soos_inference_ort::PadSelfTestReport, DaemonError> {
+    let meta = manifest.get_model(PAD_MODEL_ID).ok_or_else(|| {
+        soos_inference_ort::InferenceError::ModelNotFound {
+            id: PAD_MODEL_ID.to_string(),
+            path: std::path::PathBuf::from("manifest.toml"),
+        }
+    })?;
+    let expected_classes =
+        soos_inference_ort::pad::pad_class_count_from_manifest(&meta.output_shapes)?;
+    let report = pad.self_test(expected_classes).inspect_err(|err| {
+        tracing::error!(
+            model_id = PAD_MODEL_ID,
+            error = %err,
+            "PAD startup self-test failed; refusing to start"
+        );
+    })?;
+    tracing::info!(
+        model_id = PAD_MODEL_ID,
+        class_count = report.class_count,
+        live_class_index = report.live_class_index,
+        liveness_threshold = report.liveness_threshold,
+        "PAD startup self-test passed"
+    );
+    Ok(report)
 }
 
 /// Returns the camera configuration with its device resolved by the single shared resolver
@@ -349,6 +388,16 @@ pub async fn warmed_inference_gate(
     gate
 }
 
+/// Model registry configuration derived from the pipeline configuration: models directory,
+/// its `manifest.toml`, and the operator-configured ORT intra-op thread count (GitHub #252;
+/// ORT spin-waiting stays disabled).
+pub fn registry_config_for(
+    config: &crate::config::PipelineConfig,
+) -> soos_inference_ort::RegistryConfig {
+    soos_inference_ort::RegistryConfig::new(&config.models_dir)
+        .with_intra_threads(config.inference_intra_threads)
+}
+
 /// Initializes all production pipeline components from a strongly-typed [`PipelineConfig`].
 ///
 /// This includes:
@@ -406,22 +455,26 @@ pub fn initialize_pipeline(
     ));
 
     // 5. Machine Learning Models & Vision Pipeline
-    let reg_config = soos_inference_ort::RegistryConfig::new(&config.models_dir);
+    let reg_config = registry_config_for(config);
     let mut registry = soos_inference_ort::ModelRegistry::new(reg_config)?;
 
-    // Cryptographic attestation: verify all models in directory match manifest checksums
+    // Cryptographic attestation: hash every model once; the verified in-memory bytes are what
+    // get_or_load_session hands to ONNX Runtime (no re-open, no second hash, GitHub #246).
     registry.verify_integrity()?;
 
     let det_session = registry.get_or_load_session("scrfd_500m_kps")?;
-    let pad_session = registry.get_or_load_session("minifasnet_v2_pad")?;
+    let pad_session = registry.get_or_load_session(PAD_MODEL_ID)?;
     let ext_session = registry.get_or_load_session(EMBEDDING_MODEL_ID)?;
 
     let detector = Arc::new(soos_inference_ort::OrtScrfdDetector::new(
         det_session,
         config.vision.min_face_confidence,
-        0.45,
+        config.vision.nms_iou_threshold,
     )?);
-    let pad = Arc::new(build_pad_detector(pad_session, config.vision.pad_threshold));
+    let pad = build_pad_detector(pad_session, config.vision.pad_threshold);
+    // PAD output contract self-test (GitHub #214): fail closed before serving any request.
+    validate_pad_detector(&pad, registry.manifest())?;
+    let pad = Arc::new(pad);
     let extractor = Arc::new(soos_inference_ort::OrtEmbeddingExtractor::new(ext_session));
 
     let vision = Arc::new(soos_vision::VisionPipeline::new(
