@@ -77,7 +77,9 @@ fn pipeline(pad_result: PadResult) -> (VisionPipeline, Arc<CountingPad>) {
 
 /// Encodes a luma plane as YUYV 4:2:2 with neutral chroma (U = V = 128).
 fn yuyv_from_luma(luma: &[u8]) -> Vec<u8> {
-    luma.chunks_exact(2)
+    luma.as_chunks::<2>()
+        .0
+        .iter()
         .flat_map(|pair| [pair[0], 128, pair[1], 128])
         .collect()
 }
