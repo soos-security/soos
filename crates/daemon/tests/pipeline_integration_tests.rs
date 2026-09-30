@@ -365,7 +365,8 @@ async fn test_12_4_password_failed_event_captures_evidence_snapshot() {
         .await
         .expect("Connect client failed");
 
-    let target_uid = fixture.current_uid.saturating_add(42);
+    // Contract migration (GitHub #175): an unprivileged peer may only report for itself.
+    let target_uid = fixture.current_uid;
 
     let event = Event {
         version: CURRENT_VERSION,

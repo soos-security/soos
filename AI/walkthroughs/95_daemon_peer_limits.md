@@ -1,9 +1,9 @@
 # Walkthrough 95 — Daemon Per-Peer Connection Limits and Event Quota
 
 - **Date**: 2026-09-30
-- **Issues**: Review finding DMN-04 (GitHub #157); DMN-03 / PAM-04 hardening (GitHub #175, partial)
+- **Issues**: Review finding DMN-04 (GitHub #157); PAM-04 / DMN-03 (GitHub #175)
   — **Branch**: `fix/daemon-peer-limits`
-- **Matrix criteria**: DPL1–DPL5 (new)
+- **Matrix criteria**: DPL1–DPL6 (new)
 
 ---
 
@@ -52,19 +52,22 @@ refusals logged with `peer_uid`, and no unbounded wait for a refused peer.
 The only legitimate emitter is `pam_soos.so event=password-failed`, running inside the process
 that calls `pam_authenticate`. `SO_PEERCRED` reports that process's effective UID: 0 for sudo,
 su, login, gdm-session-worker and polkit-agent-helper-1; the user's own UID for screen lockers
-authenticating their own user. The proposed rule is therefore "`peer_uid == 0`, or `event.uid` is
-`None` / `Some(peer_uid)`", recorded as a **PROPOSED** ADR in `AI/DECISIONS.md`.
+authenticating their own user. The rule is therefore "`peer_uid == 0`, or `event.uid` is
+`None` / `Some(peer_uid)`", recorded as an ADR in `AI/DECISIONS.md` and enforced in
+`handle_event` before the per-peer event quota; a violating event is dropped with a `warn` naming
+`peer_uid` and the claimed UID.
 
-It is **not enforced on this branch**: the existing contract test
-`pipeline_integration_tests::test_12_4_password_failed_event_captures_evidence_snapshot` asserts
-that an unprivileged test peer attributes a snapshot to `current_uid + 42`, i.e. it encodes the
-vulnerable behaviour. Per the test-integrity invariant the test was not modified; its migration
-(target UID = peer UID, plus a negative test) needs an explicit decision. The per-peer event quota,
-which that test does not conflict with, is enforced now.
+Contract migration: the setup of
+`pipeline_integration_tests::test_12_4_password_failed_event_captures_evidence_snapshot` had an
+unprivileged test peer report for `current_uid + 42`, i.e. it encoded the vulnerable behaviour.
+The cross-check was first held back (test-integrity invariant); with explicit user approval
+(2026-09-30) the one-line setup changed to `target_uid = fixture.current_uid`, assertions
+unchanged. The new negative test `test_unprivileged_peer_cannot_report_event_for_foreign_uid`
+covers the refused path (foreign UID and UID 0 claimed by an unprivileged peer).
 
 ## 4. Tester Contract (TDD Red)
 
-`crates/daemon/tests/peer_limits_tests.rs` (15 tests). First run: compile failure on the missing
+`crates/daemon/tests/peer_limits_tests.rs` (16 tests). First run: compile failure on the missing
 API (`soos_daemon::limits`, `with_peer_limits`, `DaemonConfig.peer_limits`). With the API skeleton
 in place and the dispatcher not yet enforcing it, the six behavioural tests failed on assertions:
 `test_same_uid_connection_over_cap_is_closed_without_blocking_others` (a third same-UID connection
@@ -72,6 +75,13 @@ received a payload), `test_idle_polling_peer_cannot_exhaust_global_capacity`,
 `test_auth_request_is_one_shot_per_connection`, `test_connection_closed_after_max_requests`,
 `test_connection_closed_after_max_lifetime`,
 `test_password_failed_events_are_rate_limited_per_peer_uid` (4 snapshots instead of 2).
+
+Cross-check (GitHub #175): without the `handle_event` check,
+`test_unprivileged_peer_cannot_report_event_for_foreign_uid` failed ("Foreign-UID events from an
+unprivileged peer must not create snapshots"). With the check but before the approved setup
+migration, `pipeline_integration_tests::test_12_4_password_failed_event_captures_evidence_snapshot`
+failed ("Evidence store must contain 1 snapshot after PasswordFailed event"), confirming it encoded
+the vulnerable behaviour. Both pass after the migration.
 
 Root reservation cannot be exercised through sockets by an unprivileged test process, so it is
 proven on the pure limiter (`test_limiter_reserves_permits_for_root_peers`: 8 unprivileged
@@ -107,4 +117,4 @@ attempts leave the 9th root connection served) instead of adding a production ho
   -D warnings`, `cargo test --locked --workspace --all-targets --all-features --no-fail-fast`, and
   `./scripts/candid_review.sh` were run; see the branch report for results.
 - Docs: `Docs/IPC_PROTOCOL.md` §10, `AI/DECISIONS.md` (two entries), `AI/VERIFICATION_MATRIX.md`
-  component `daemon-peer-limits`.
+  component `daemon-peer-limits` (DPL1–DPL6).

@@ -710,3 +710,54 @@ async fn test_password_failed_events_are_rate_limited_per_peer_uid() {
         "Only max_events_per_window events per peer UID may trigger a snapshot"
     );
 }
+
+/// GitHub #175: an unprivileged peer reporting a failure for another UID stores nothing.
+#[tokio::test]
+async fn test_unprivileged_peer_cannot_report_event_for_foreign_uid() {
+    let uid = current_uid();
+    if uid == 0 {
+        return;
+    }
+    let dir = tempdir().expect("tempdir");
+    let sock_path = dir.path().join("event_foreign.sock");
+    let (components, evidence_store) = evidence_pipeline(dir.path()).await;
+    let dispatcher = Arc::new(ConnectionDispatcher::with_pipeline(
+        dispatcher_config(4),
+        Arc::new(HealthState::new()),
+        components,
+    ));
+    let listener = UnixListener::bind(&sock_path).expect("Bind");
+    let disp = dispatcher.clone();
+    let server = tokio::spawn(async move {
+        for _ in 0..2 {
+            if let Ok((stream, _)) = listener.accept().await {
+                let _ = disp.handle_connection(stream).await;
+            }
+        }
+    });
+    for claimed in [uid.saturating_add(42), 0] {
+        let mut client = UnixStream::connect(&sock_path).await.expect("Connect");
+        let event = Event {
+            version: CURRENT_VERSION,
+            kind: EventKind::PasswordFailed,
+            request_id: Some([3u8; 32]),
+            uid: Some(claimed),
+            service: "sudo".into(),
+            timestamp_monotonic_ns: 1,
+        };
+        client
+            .write_all(&encode(&event).expect("Encode"))
+            .await
+            .expect("Write");
+        client.flush().await.expect("Flush");
+    }
+    tokio::time::timeout(Duration::from_secs(10), server)
+        .await
+        .expect("Server finished")
+        .expect("Server task");
+    assert_eq!(
+        count_snapshots(&evidence_store),
+        0,
+        "Foreign-UID events from an unprivileged peer must not create snapshots"
+    );
+}

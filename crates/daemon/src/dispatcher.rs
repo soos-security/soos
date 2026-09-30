@@ -388,6 +388,16 @@ impl ConnectionDispatcher {
         if event.kind == EventKind::PasswordFailed {
             // Per-peer-UID event quota (GitHub #175 hardening): bounds how often any peer,
             // root included, can make the daemon capture an evidence snapshot.
+            // Trust model (AI/DECISIONS.md, GitHub #175): a root peer (sudo, su, login,
+            // gdm-session-worker) may report for any UID; any other peer only for itself.
+            if peer_uid != 0 && event.uid.is_some_and(|claimed| claimed != peer_uid) {
+                warn!(
+                    peer_uid = peer_uid,
+                    claimed_uid = ?event.uid,
+                    "Unprivileged peer reported an event for another UID; dropping event"
+                );
+                return Ok(());
+            }
             if !self.event_within_quota(peer_uid).await {
                 return Ok(());
             }

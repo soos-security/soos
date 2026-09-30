@@ -575,7 +575,7 @@ Complements PA3, PA12 and PFT1: those rows are proven under `[profile.test]` (al
 
 ---
 
-## Component: `daemon-peer-limits` (Review finding DMN-04 / GitHub #157; DMN-03 hardening / GitHub #175)
+## Component: `daemon-peer-limits` (Review findings DMN-04 / GitHub #157, PAM-04 / DMN-03 / GitHub #175)
 
 | # | Criterion | Test Method | Status |
 |---|---|---|---|
@@ -584,3 +584,4 @@ Complements PA3, PA12 and PFT1: those rows are proven under `[profile.test]` (al
 | DPL3 | A connection over the per-UID cap is closed within 500 ms without any payload and without consuming a permit, held connections keep working, and one idle-polling UID leaves the remaining capacity to other peers; the PAM client maps the immediate close to `PAM_IGNORE` | Integration tests (`peer_limits_tests::test_same_uid_connection_over_cap_is_closed_without_blocking_others`, `test_idle_polling_peer_cannot_exhaust_global_capacity`; PAM fallback: `crates/pam/tests/ipc_tests.rs::test_ipc_daemon_crash_immediate_disconnect_returns_ignore`) | ✅ Verified |
 | DPL4 | A connection is closed after `max_requests_per_connection` requests, after `max_connection_lifetime` even while the peer keeps polling, and right after an `Auth` response (one-shot) | Integration tests (`peer_limits_tests::test_connection_closed_after_max_requests`, `test_connection_closed_after_max_lifetime`, `test_auth_request_is_one_shot_per_connection`) | ✅ Verified |
 | DPL5 | `PasswordFailed` events are rate limited per peer UID (root included): events beyond the quota are dropped and trigger no evidence snapshot | Integration test (`peer_limits_tests::test_password_failed_events_are_rate_limited_per_peer_uid`) | ✅ Verified |
+| DPL6 | `PasswordFailed` target UID trust model (GitHub #175): an unprivileged peer may report only for itself (`event.uid` `None` or its own `SO_PEERCRED` UID); events claiming another UID (root included) are dropped with no snapshot; a root peer may report for any UID | Integration tests (`peer_limits_tests::test_unprivileged_peer_cannot_report_event_for_foreign_uid`, migrated `pipeline_integration_tests::test_12_4_password_failed_event_captures_evidence_snapshot`) | ✅ Verified |
