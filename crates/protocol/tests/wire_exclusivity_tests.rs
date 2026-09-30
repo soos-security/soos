@@ -91,7 +91,7 @@ fn arb_response() -> impl Strategy<Value = Response> {
 }
 
 fn arb_status() -> impl Strategy<Value = StatusResponse> {
-    (any::<[bool; 4]>(), any::<u32>(), any::<u64>()).prop_map(|(flags, pid, uptime_secs)| {
+    (any::<[bool; 5]>(), any::<u32>(), any::<u64>()).prop_map(|(flags, pid, uptime_secs)| {
         StatusResponse {
             version: CURRENT_VERSION,
             socket_ready: flags[0],
@@ -100,6 +100,7 @@ fn arb_status() -> impl Strategy<Value = StatusResponse> {
             is_healthy: flags[3],
             pid,
             uptime_secs,
+            memory_locked: flags[4],
         }
     })
 }
