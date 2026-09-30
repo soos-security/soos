@@ -1,6 +1,7 @@
 //! Abstract CameraManager trait contract.
 
 use crate::frame::Frame;
+use crate::status::CameraStatus;
 use std::sync::Arc;
 
 /// Core interface for warm camera capture managers.
@@ -19,4 +20,16 @@ pub trait CameraManager: Send + Sync {
 
     /// Requests graceful shutdown of background capture threads.
     fn stop(&self);
+
+    /// Returns the user-presentable lifecycle state, including the classified last error.
+    ///
+    /// The default derives the state from [`CameraManager::is_ready`]; implementations that
+    /// can observe failures override it to report [`CameraStatus::Error`].
+    fn status(&self) -> CameraStatus {
+        if self.is_ready() {
+            CameraStatus::Ready
+        } else {
+            CameraStatus::Starting
+        }
+    }
 }

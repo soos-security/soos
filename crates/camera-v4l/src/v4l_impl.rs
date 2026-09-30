@@ -4,6 +4,7 @@ use crate::config::CameraConfig;
 use crate::error::CameraError;
 use crate::frame::{Frame, PixelFormat};
 use crate::manager::CameraManager;
+use crate::status::{CameraStatus, CameraStatusCell};
 use arc_swap::ArcSwapOption;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
@@ -22,6 +23,7 @@ pub struct V4lCameraManager {
     is_ready: Arc<AtomicBool>,
     running: Arc<AtomicBool>,
     last_activity: Arc<RwLock<Instant>>,
+    status: Arc<CameraStatusCell>,
     worker_handle: Option<JoinHandle<()>>,
 }
 
@@ -33,7 +35,9 @@ impl V4lCameraManager {
         let is_ready = Arc::new(AtomicBool::new(false));
         let running = Arc::new(AtomicBool::new(true));
         let last_activity = Arc::new(RwLock::new(Instant::now()));
+        let status = Arc::new(CameraStatusCell::new());
 
+        let status_clone = Arc::clone(&status);
         let latest_clone = Arc::clone(&latest_frame);
         let ready_clone = Arc::clone(&is_ready);
         let running_clone = Arc::clone(&running);
@@ -49,6 +53,7 @@ impl V4lCameraManager {
                     ready_clone,
                     running_clone,
                     activity_clone,
+                    &status_clone,
                 );
             })
             .map_err(|e| CameraError::Io {
@@ -62,6 +67,7 @@ impl V4lCameraManager {
             is_ready,
             running,
             last_activity,
+            status,
             worker_handle: Some(handle),
         })
     }
@@ -103,6 +109,16 @@ impl CameraManager for V4lCameraManager {
         self.running.store(false, Ordering::Release);
         self.is_ready.store(false, Ordering::Release);
     }
+
+    fn status(&self) -> CameraStatus {
+        if self.is_ready() {
+            return CameraStatus::Ready;
+        }
+        match self.status.get() {
+            CameraStatus::Ready => CameraStatus::Starting,
+            other => other,
+        }
+    }
 }
 
 impl Drop for V4lCameraManager {
@@ -128,6 +144,7 @@ fn run_v4l_supervisor(
     is_ready: Arc<AtomicBool>,
     running: Arc<AtomicBool>,
     last_activity: Arc<RwLock<Instant>>,
+    status: &CameraStatusCell,
 ) {
     let mut current_backoff = config.min_backoff;
 
@@ -139,6 +156,7 @@ fn run_v4l_supervisor(
             }
             Ok(SupervisorAction::Suspend) => {
                 is_ready.store(false, Ordering::Release);
+                status.set(CameraStatus::Suspended);
                 latest_frame.store(None);
                 current_backoff = config.min_backoff;
 
@@ -153,6 +171,7 @@ fn run_v4l_supervisor(
                             "Camera activity requested on '{}'; resuming from auto-standby",
                             config.device_path.display()
                         );
+                        status.set(CameraStatus::Starting);
                         break;
                     }
                     thread::sleep(Duration::from_millis(50));
@@ -160,7 +179,13 @@ fn run_v4l_supervisor(
             }
             Err(err) => {
                 is_ready.store(false, Ordering::Release);
+                // A published frame means this attempt streamed successfully: the failure
+                // count restarts instead of accumulating across healthy sessions.
+                if latest_frame.load().is_some() {
+                    status.set(CameraStatus::Starting);
+                }
                 latest_frame.store(None);
+                status.record_error(err.kind());
 
                 warn!(
                     "Camera error on '{}': {}. Backing off for {:?}",
@@ -184,6 +209,7 @@ fn run_v4l_supervisor(
 
     is_ready.store(false, Ordering::Release);
     latest_frame.store(None);
+    status.set(CameraStatus::Stopped);
 }
 
 /// Priority order for automatic format negotiation:
