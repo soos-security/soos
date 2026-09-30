@@ -211,3 +211,8 @@ renamed PMX1–PMX9 at integration because PDM1–PDM3 were already used by walk
   There is no released RPM yet (0.1.0-1), so only development installs could be affected; an
   `rpm -U` Docker case is a follow-up.
 - `Docs/PACKAGING_AND_PROVISIONING.md` no longer states that the RPM keeps the key as `%ghost`.
+- Round 2 hardening of `%posttrans`: the pre-upgrade copy is restored only if it is a regular
+  32-byte file and the key is missing; it is deleted only when `cmp -s` shows it equals the
+  current key; if the daemon recreated a different key in between, the copy is kept and a
+  warning names both files, so the original key is never lost. Matrix rows PK6, PMK4 and PMX8
+  no longer describe the `%ghost` design.

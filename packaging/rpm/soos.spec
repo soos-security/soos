@@ -144,14 +144,23 @@ fi
 %systemd_postun_with_restart soos-daemon.service
 
 %posttrans
-# Restore the key if the upgrade transaction erased a %ghost-owned copy, never overwrite one.
-if [ -f %{_sharedstatedir}/soos/.master.key.upgrade ]; then
-    if [ ! -e %{_sharedstatedir}/soos/master.key ]; then
-        mv -f %{_sharedstatedir}/soos/.master.key.upgrade %{_sharedstatedir}/soos/master.key || :
-        chmod 0600 %{_sharedstatedir}/soos/master.key || :
-        chown root:root %{_sharedstatedir}/soos/master.key || :
+# Restore the key if the upgrade transaction erased a %ghost-owned copy (walkthrough 106).
+# The copy is only discarded when it equals the current key; if the daemon recreated a
+# different key in between, the original is kept for the administrator (never lost).
+UPGRADE_COPY=%{_sharedstatedir}/soos/.master.key.upgrade
+KEY=%{_sharedstatedir}/soos/master.key
+if [ -f "$UPGRADE_COPY" ] && [ ! -L "$UPGRADE_COPY" ]; then
+    if [ "$(wc -c < "$UPGRADE_COPY")" -ne 32 ]; then
+        echo "soos: WARNING: $UPGRADE_COPY is not a 32-byte key; left in place for inspection." >&2
+    elif [ ! -e "$KEY" ]; then
+        mv -f "$UPGRADE_COPY" "$KEY" || :
+        chmod 0600 "$KEY" || :
+        chown root:root "$KEY" || :
+    elif cmp -s "$UPGRADE_COPY" "$KEY"; then
+        rm -f "$UPGRADE_COPY" || :
     else
-        rm -f %{_sharedstatedir}/soos/.master.key.upgrade || :
+        echo "soos: WARNING: $KEY differs from the pre-upgrade key kept in $UPGRADE_COPY;" >&2
+        echo "soos: WARNING: templates enrolled before the upgrade need the kept key." >&2
     fi
 fi
 
