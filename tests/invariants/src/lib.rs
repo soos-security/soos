@@ -19,6 +19,10 @@ mod pad_contract;
 #[cfg(test)]
 mod distro_matrix;
 
+/// Repository-wide verification-matrix citation invariants (GitHub #187, TCI-04).
+#[cfg(test)]
+mod matrix_citations;
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,
