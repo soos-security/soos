@@ -117,8 +117,7 @@ No existing test was modified, weakened or deleted.
 - No sensitive data: error strings carry dims, byte counts and jpeg-decoder messages, never pixel
   data or embeddings. The real-model tests use synthetic, non-biometric inputs and commit no
   embedding values.
-- Deployment: a `manifest.toml` from an older release (no `input_layout`) now makes the daemon
-  refuse the NHWC embedding model at startup, which fails closed (PAM falls back to the password).
+- Deployment: see §9 for manifests installed by an earlier release (no `input_layout`).
   `scripts/download_models.sh` / `install.sh` always install the manifest shipped with the release.
   Its bash parser ignores unknown keys (`--preflight` passes).
 
@@ -169,3 +168,38 @@ attestation, embedding real-model evidence), `.agents/skills/dev-workflow/refere
 - `cargo test --locked --workspace --all-targets --all-features --no-fail-fast`: all green (see the
   final report for the run).
 - `./scripts/candid_review.sh`: passed.
+
+## 9. Rework: Backward Compatibility With Older Installed Manifests
+
+Orchestrator decision: keep `input_shape` logical (NCHW) with `input_layout`, and leave
+`manifest_tests.rs` untouched. In the first version, a manifest installed by an earlier release
+(no `input_layout`) made the daemon refuse the NHWC embedding model at startup. That no longer
+happens:
+
+- `ModelMetadata` now deserializes through a private `RawModelMetadata` (`#[serde(from, into)]`)
+  whose `input_layout` is an `Option`. The public struct keeps `input_layout: TensorLayout`
+  (`NCHW` when absent) and gains `input_layout_declared: bool`. Serialization writes
+  `input_layout` back only when it was declared.
+- **Absent** layout: the layout is not asserted. The session input may be the logical shape in NCHW
+  or NHWC order, while rank, every concrete dim, the input count and the outputs are still
+  enforced. The SHA-256 already binds the exact file. `ModelRegistry` logs a one-time
+  `tracing::warn!` (process-wide `AtomicBool`) that the manifest predates layout attestation.
+- **Present** layout: enforced exactly as before. A wrong explicit value fails closed with
+  `ModelShapeMismatch`.
+- The committed `models/manifest.toml` keeps `input_layout = "NHWC"` for the embedding model
+  (pinned by the new `test_workspace_manifest_declares_embedding_layout_explicitly`).
+
+Tests first (red against the flag-only stub, where the check was still strict):
+`manifest_shape_tests::test_absent_layout_accepts_either_layout_of_the_logical_shape` and
+`embedding_real_model_tests::test_real_embedding_model_loads_under_manifest_without_input_layout`
+failed (`ModelShapeMismatch` for the NHWC session). The other new tests passed on the stub, as
+negative or declared-layout cases should: `test_input_layout_declared_flag_tracks_the_manifest_field`,
+`test_absent_layout_still_rejects_wrong_dims`, `test_declared_layout_is_enforced_both_ways`,
+`test_layout_declaration_round_trips_through_serde` and
+`test_workspace_manifest_declares_embedding_layout_explicitly`. All are green after the change.
+
+Existing branch test changed (disclosed): `test_validate_layout_mismatch_fails_closed`, written
+earlier on this branch and never merged, built its "manifest declares NCHW" case with an omitted
+layout. Under the new contract, omitted means unspecified, so the case now declares
+`input_layout = "NCHW"` explicitly. Its assertion, which rejects an NHWC session, is unchanged. No
+test merged on `main` was modified. Matrix row EMR7 is new.

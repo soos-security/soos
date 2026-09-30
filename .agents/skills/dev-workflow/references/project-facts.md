@@ -89,7 +89,8 @@ Any change to channel order, layout, class index or normalization MUST be valida
 `input_shape` is the logical `[N, C, H, W]` shape; `input_layout` (default `"NCHW"`, `"NHWC"` for the
 embedding model) is the physical layout. `ModelRegistry::get_or_load_session` validates every
 session's I/O shapes against the manifest (symbolic dims are wildcards) and fails closed with
-`InferenceError::ModelShapeMismatch` [102]. Never rename manifest ids or file names to "fix" a
+`InferenceError::ModelShapeMismatch` [102]; an entry without `input_layout` (older installed manifest)
+leaves the layout unspecified (either order accepted, dims still enforced, one-time warning). Never rename manifest ids or file names to "fix" a
 description: `soos-daemon` and `soos-enroll` reference them. Real-model evidence targets:
 `crates/inference-ort/tests/pad_real_model_tests.rs` [87] and `embedding_real_model_tests.rs` [102]
 (skip cleanly without `/var/lib/soos/models`). MJPEG frames are bounded (`MAX_MJPEG_COMPRESSED_BYTES`

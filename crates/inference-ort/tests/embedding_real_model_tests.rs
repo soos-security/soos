@@ -325,3 +325,40 @@ fn test_real_embedding_latency_report() {
         "embedding p95 {p95:.1} ms exceeds the daemon's maximal inference estimate"
     );
 }
+
+#[test]
+fn test_real_embedding_model_loads_under_manifest_without_input_layout() {
+    if !model_present(
+        EMBEDDING_MODEL_FILE,
+        "test_real_embedding_model_loads_under_manifest_without_input_layout",
+    ) {
+        return;
+    }
+    // A manifest installed by an earlier release has no `input_layout` line. The daemon must
+    // still load the checksum-attested NHWC model (layout unspecified, not asserted).
+    let committed = std::fs::read_to_string(repo_manifest_path()).expect("manifest text");
+    let legacy: String = committed
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("input_layout"))
+        .map(|line| format!("{line}\n"))
+        .collect();
+    assert!(
+        !legacy.contains("input_layout ="),
+        "legacy manifest must omit input_layout"
+    );
+    let manifest = ModelManifest::from_toml_str(&legacy).expect("legacy manifest parses");
+    assert!(
+        !manifest
+            .get_model(EMBEDDING_MODEL_ID)
+            .expect("entry")
+            .input_layout_declared
+    );
+    let mut registry = ModelRegistry::with_manifest(
+        RegistryConfig::with_manifest(models_dir(), repo_manifest_path()),
+        manifest,
+    );
+    let session = registry
+        .get_or_load_session(EMBEDDING_MODEL_ID)
+        .expect("a legacy manifest without input_layout must load the attested NHWC model");
+    assert!(OrtEmbeddingExtractor::new(session).is_nhwc());
+}

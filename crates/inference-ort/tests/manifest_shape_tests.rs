@@ -156,7 +156,7 @@ fn test_validate_dynamic_dims_are_wildcards() {
 #[test]
 fn test_validate_layout_mismatch_fails_closed() {
     // The VIS-03 case: manifest declares NCHW, the attested graph is NHWC.
-    let meta = metadata(&[1, 3, 112, 112], None, &[&[1, 512]]);
+    let meta = metadata(&[1, 3, 112, 112], Some("NCHW"), &[&[1, 512]]);
     assert_mismatch(
         meta.validate_session_shapes(&[vec![-1, 112, 112, 3]], &[vec![-1, 512]]),
         "NCHW manifest vs NHWC session",
@@ -278,4 +278,99 @@ fn test_workspace_manifest_nchw_models_keep_default_layout() {
             "{id} is an NCHW PyTorch export"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// Backward compatibility: entries written before `input_layout` existed
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_input_layout_declared_flag_tracks_the_manifest_field() {
+    assert!(!metadata(&[1, 3, 112, 112], None, &[&[1, 512]]).input_layout_declared);
+    assert!(metadata(&[1, 3, 112, 112], Some("NCHW"), &[&[1, 512]]).input_layout_declared);
+    assert!(metadata(&[1, 3, 112, 112], Some("NHWC"), &[&[1, 512]]).input_layout_declared);
+}
+
+#[test]
+fn test_absent_layout_accepts_either_layout_of_the_logical_shape() {
+    // An older installed manifest (no `input_layout`) must still load the attested NHWC graph:
+    // the layout is unspecified, the SHA-256 already binds the exact file.
+    let meta = metadata(&[1, 3, 112, 112], None, &[&[1, 512]]);
+    meta.validate_session_shapes(&[vec![-1, 112, 112, 3]], &[vec![-1, 512]])
+        .expect("absent layout: NHWC session of the logical shape is accepted");
+    meta.validate_session_shapes(&[vec![-1, 3, 112, 112]], &[vec![-1, 512]])
+        .expect("absent layout: NCHW session of the logical shape is accepted");
+}
+
+#[test]
+fn test_absent_layout_still_rejects_wrong_dims() {
+    let meta = metadata(&[1, 3, 112, 112], None, &[&[1, 512]]);
+    assert_mismatch(
+        meta.validate_session_shapes(&[vec![-1, 112, 112, 4]], &[vec![-1, 512]]),
+        "absent layout, wrong channel count",
+    );
+    assert_mismatch(
+        meta.validate_session_shapes(&[vec![-1, 96, 96, 3]], &[vec![-1, 512]]),
+        "absent layout, wrong spatial dims",
+    );
+    assert_mismatch(
+        meta.validate_session_shapes(&[vec![-1, 112, 3, 112]], &[vec![-1, 512]]),
+        "absent layout, neither NCHW nor NHWC",
+    );
+    assert_mismatch(
+        meta.validate_session_shapes(&[vec![112, 112, 3]], &[vec![-1, 512]]),
+        "absent layout, wrong rank",
+    );
+    assert_mismatch(
+        meta.validate_session_shapes(&[vec![-1, 112, 112, 3]], &[vec![-1, 128]]),
+        "absent layout, wrong output",
+    );
+    assert_mismatch(
+        meta.validate_session_shapes(&[], &[vec![-1, 512]]),
+        "absent layout, no input",
+    );
+}
+
+#[test]
+fn test_declared_layout_is_enforced_both_ways() {
+    let nchw = metadata(&[1, 3, 112, 112], Some("NCHW"), &[&[1, 512]]);
+    nchw.validate_session_shapes(&[vec![-1, 3, 112, 112]], &[vec![-1, 512]])
+        .expect("declared NCHW accepts an NCHW session");
+    assert_mismatch(
+        nchw.validate_session_shapes(&[vec![-1, 112, 112, 3]], &[vec![-1, 512]]),
+        "declared NCHW vs NHWC session",
+    );
+    let nhwc = metadata(&[1, 3, 112, 112], Some("NHWC"), &[&[1, 512]]);
+    nhwc.validate_session_shapes(&[vec![-1, 112, 112, 3]], &[vec![-1, 512]])
+        .expect("declared NHWC accepts an NHWC session");
+    assert_mismatch(
+        nhwc.validate_session_shapes(&[vec![-1, 3, 112, 112]], &[vec![-1, 512]]),
+        "declared NHWC vs NCHW session",
+    );
+}
+
+#[test]
+fn test_layout_declaration_round_trips_through_serde() {
+    let absent = metadata(&[1, 3, 80, 80], None, &[&[1, 3]]);
+    let toml_absent = toml::to_string(&absent).expect("serialize");
+    assert!(
+        !toml_absent.contains("input_layout"),
+        "an undeclared layout must not be written back: {toml_absent}"
+    );
+    let declared = metadata(&[1, 3, 112, 112], Some("NHWC"), &[&[1, 512]]);
+    let toml_declared = toml::to_string(&declared).expect("serialize");
+    let back: ModelMetadata = toml::from_str(&toml_declared).expect("parse back");
+    assert_eq!(back, declared);
+}
+
+#[test]
+fn test_workspace_manifest_declares_embedding_layout_explicitly() {
+    let manifest = workspace_manifest();
+    let arcface = manifest
+        .get_model("arcface_w600k_mbf")
+        .expect("embedding model entry");
+    assert!(
+        arcface.input_layout_declared,
+        "the committed manifest must attest the embedding layout explicitly"
+    );
 }

@@ -1,11 +1,15 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use ort::session::Session;
 
 use crate::error::InferenceError;
 use crate::manifest::ModelManifest;
+
+/// Set once the "manifest predates layout attestation" warning has been logged (one-time).
+static LEGACY_LAYOUT_WARNED: AtomicBool = AtomicBool::new(false);
 
 /// Thread-safe, shared ONNX Runtime session handle as returned by
 /// [`ModelRegistry::get_or_load_session`] and consumed by every detector constructor.
@@ -169,6 +173,14 @@ impl ModelRegistry {
             .iter()
             .map(|output| shape_of(output.name(), output.dtype()))
             .collect::<Result<Vec<_>, _>>()?;
+        if !meta.input_layout_declared && !LEGACY_LAYOUT_WARNED.swap(true, Ordering::Relaxed) {
+            tracing::warn!(
+                model_id = id,
+                "Model manifest predates input layout attestation (no input_layout); \
+                 input layout is not asserted, SHA-256 and dims are still enforced. \
+                 Reinstall the manifest shipped with this release."
+            );
+        }
         meta.validate_session_shapes(&inputs, &outputs)
     }
 }
