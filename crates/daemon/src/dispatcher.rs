@@ -18,13 +18,15 @@ use crate::pipeline::{
     classify_template_model, current_monotonic_nanos, PipelineComponents, TemplateModelBinding,
     FRAME_POLL_INTERVAL_MS, MAX_FRAME_AGE_NS,
 };
-use crate::preview::{authorize_preview, PreviewConfig};
+use crate::preview::{
+    authorize_preview, preview_image_for_frame, PreviewConfig, PREVIEW_FORMAT_EMPTY,
+};
 use crate::session::SessionValidator;
 use crate::session_policy::LocalSessionPolicy;
 use soos_camera_v4l::PixelFormat;
 use soos_evidence_store::{EvidenceFrame, EvidencePixelFormat, FrameMetadata};
 use soos_policy::{ConsensusDecision, FrameEvaluation, PadAggregator, RateLimiter};
-use soos_protocol::codec::{encode, encode_preview};
+use soos_protocol::codec::{encode, encode_preview, CodecError};
 use soos_protocol::message::{decode_client_message, ClientMessage, FrameFormat};
 use soos_protocol::types::{
     Event, EventKind, PreviewResponse, ReasonClass, Request, RequestId, RequestKind, Response,
@@ -1209,7 +1211,7 @@ impl ConnectionDispatcher {
                 sequence: 0,
                 width: 0,
                 height: 0,
-                format: 255,
+                format: PREVIEW_FORMAT_EMPTY,
                 timestamp_monotonic_ns: 0,
                 data: Vec::new(),
             };
@@ -1233,38 +1235,46 @@ impl ConnectionDispatcher {
             }
         }
 
+        let empty_preview = || PreviewResponse {
+            version: CURRENT_VERSION,
+            sequence: 0,
+            width: 0,
+            height: 0,
+            format: PREVIEW_FORMAT_EMPTY,
+            timestamp_monotonic_ns: 0,
+            data: Vec::new(),
+        };
         let preview_resp = if let Some(captured) = pipe.camera.latest_frame() {
-            let fmt_u8 = match captured.format {
-                soos_camera_v4l::PixelFormat::Rgb24 => 0,
-                soos_camera_v4l::PixelFormat::Grey => 1,
-                soos_camera_v4l::PixelFormat::Yuyv => 2,
-                soos_camera_v4l::PixelFormat::Nv12 => 3,
-                soos_camera_v4l::PixelFormat::Mjpeg => 4,
-            };
+            // Frames wider than the preview width or above the 2 MiB preview budget are
+            // downscaled; unconvertible ones become an explicit empty image (GitHub #196).
+            let mut image = preview_image_for_frame(&captured);
             PreviewResponse {
                 version: CURRENT_VERSION,
                 sequence: captured.sequence,
-                width: captured.width,
-                height: captured.height,
-                format: fmt_u8,
+                width: image.width,
+                height: image.height,
+                format: image.format,
                 timestamp_monotonic_ns: captured.timestamp_mono_ns,
-                data: captured.data.clone(),
+                data: std::mem::take(&mut image.data),
             }
         } else {
-            PreviewResponse {
-                version: CURRENT_VERSION,
-                sequence: 0,
-                width: 0,
-                height: 0,
-                format: 255,
-                timestamp_monotonic_ns: 0,
-                data: Vec::new(),
-            }
+            empty_preview()
         };
 
         // `PreviewResponse` zeroizes its pixel buffer on drop; the encoded copy is wrapped
-        // in `Zeroizing` so both copies are erased once written to the peer.
-        let encoded = Zeroizing::new(encode_preview(&preview_resp)?);
+        // in `Zeroizing` so both copies are erased once written to the peer. An oversize
+        // payload is answered with an empty preview instead of closing the connection.
+        let encoded = match encode_preview(&preview_resp) {
+            Ok(bytes) => Zeroizing::new(bytes),
+            Err(CodecError::MessageTooLarge { .. }) => {
+                warn!(
+                    peer_uid = peer_uid,
+                    "Preview frame exceeds the preview message limit; sending an empty preview"
+                );
+                Zeroizing::new(encode_preview(&empty_preview())?)
+            }
+            Err(err) => return Err(err.into()),
+        };
         debug!(
             peer_uid = peer_uid,
             bytes = encoded.len(),

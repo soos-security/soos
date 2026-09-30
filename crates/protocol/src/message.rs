@@ -25,6 +25,8 @@
 //! A trailer (instead of a leading tag) keeps the message body byte-identical to codec v1:
 //! a v1 reader that decodes `postcard::from_bytes::<Request>` still reads the same fields
 //! (postcard ignores trailing bytes), while [`crate::types::CURRENT_VERSION`] stays `1`.
+//! The strict [`crate::codec::decode_payload`] (GitHub #224) tolerates exactly this one
+//! trailer byte, and only the tag matching the decoded type.
 
 use crate::codec::CodecError;
 use crate::types::{Event, Request, MAX_MESSAGE_SIZE};
@@ -129,10 +131,7 @@ fn encode_tagged<T: serde::Serialize>(msg: &T, tag: u8) -> Result<Vec<u8>, Codec
 
 /// Decodes `bytes` as exactly one `T`, rejecting any unconsumed trailing byte.
 fn decode_exact<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Option<T> {
-    match postcard::take_from_bytes::<T>(bytes) {
-        Ok((value, [])) => Some(value),
-        _ => None,
-    }
+    crate::codec::decode_payload_exact(bytes).ok()
 }
 
 /// Classifies and decodes one client payload (the bytes after the 4-byte length prefix).

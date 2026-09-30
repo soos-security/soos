@@ -263,7 +263,7 @@ soos/
 ## 9. Privacy, Persistence, and Anti-Intrusion
 
 - **Biometric Templates**: Stored encrypted at `/var/lib/soos/biometrics/<uid>.cbor.enc` (mode `0600`, owned by `root:root`). Raw enrollment frames are securely deleted immediately after vector extraction.
-- **Evidence Snapshots**: Stored encrypted under `/var/lib/soos/evidence/YYYY-MM-DD/<uuid>.webp.enc` (mode `0600`, owned by `root:root`) with automatic 7-day retention rotation. Strictly opt-in.
+- **Evidence Snapshots**: Stored encrypted under `/var/lib/soos/evidence/YYYY-MM-DD/<uuid>.frame.enc` (camera frames) or `<uuid>.opaque.enc` (opaque payloads) (mode `0600`, owned by `root:root`) with automatic 7-day retention rotation. Legacy `<uuid>.webp.enc` files from older releases are still counted and purged. Strictly opt-in.
 
 ---
 

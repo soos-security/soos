@@ -1,0 +1,70 @@
+# =============================================================================
+# Nightly Fuzzing — libFuzzer targets of soos-protocol (GitHub #227, review PAM-15)
+# =============================================================================
+# Runs every cargo-fuzz target in crates/protocol/fuzz for a fixed wall-clock
+# budget (-max_total_time), nightly and on manual dispatch. A crash fails the job
+# and its reproducer is uploaded as an artifact. Kept out of ci.yml: fuzzing
+# needs the nightly toolchain and a wall-clock budget, so it never gates a PR.
+#
+# Hardening: read-only token, third-party actions pinned to full commit SHAs,
+# no persisted git credentials, per-job timeout, cargo-fuzz installed --locked
+# at a pinned version. The fuzz harness is its own workspace (crates/protocol/
+# fuzz/Cargo.toml) with a committed Cargo.lock.
+# =============================================================================
+
+name: Fuzz
+
+on:
+  schedule:
+    - cron: "41 2 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fuzz-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_NET_RETRY: 10
+  RUSTUP_MAX_RETRIES: 10
+  # Wall-clock budget per target, in seconds.
+  FUZZ_MAX_TOTAL_TIME: 300
+
+jobs:
+  fuzz:
+    name: "Fuzz (${{ matrix.target }})"
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [decode_request, decode_response, decode_event, decode_preview, decode_client_message]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install nightly toolchain and cargo-fuzz
+        run: |
+          rustup toolchain install nightly --profile minimal
+          cargo install --locked cargo-fuzz@0.13.2
+          cargo +nightly --version
+          cargo fuzz --version
+
+      - name: Run fuzz target
+        working-directory: crates/protocol
+        env:
+          FUZZ_TARGET: ${{ matrix.target }}
+        run: cargo +nightly fuzz run "$FUZZ_TARGET" -- -max_total_time="$FUZZ_MAX_TOTAL_TIME"
+
+      - name: Upload crash reproducers
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fuzz-artifacts-${{ matrix.target }}
+          path: crates/protocol/fuzz/artifacts/
+          if-no-files-found: ignore
+          retention-days: 14

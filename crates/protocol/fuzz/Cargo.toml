@@ -9,6 +9,11 @@ license = "AGPL-3.0-or-later"
 [package.metadata]
 cargo-fuzz = true
 
+# Standalone workspace: the harness needs nightly + sanitizer flags and must never join
+# the stable root workspace (without this table cargo refuses to build it at all).
+[workspace]
+members = ["."]
+
 [dependencies]
 libfuzzer-sys = "0.4"
 soos-protocol = { path = ".." }
@@ -28,6 +33,12 @@ doc = false
 [[bin]]
 name = "decode_event"
 path = "fuzz_targets/decode_event.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "decode_preview"
+path = "fuzz_targets/decode_preview.rs"
 test = false
 doc = false
 

@@ -36,28 +36,73 @@ Every message transmitted over the Unix domain stream socket is framed by a 4-by
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 ```
 
+### Payload Encoding (Postcard)
+Postcard writes the struct fields in declaration order with no field tags and no message-type tag. The field widths are **not fixed**:
+- `u8` (`version`, `StatusResponse` booleans, `PreviewResponse::format`) is one raw byte; `[u8; 32]` (`request_id`) is 32 raw bytes.
+- Every other integer (`u32` such as `uid_hint`, `pid`, `width`; `u64` such as `*_monotonic_ns`, `uptime_secs`, `sequence`) is an unsigned LEB128 **varint** (1 to 5 bytes for `u32`, 1 to 10 bytes for `u64`): `uid_hint = 1` takes one byte, `uid_hint = 1000` two.
+- Every enum discriminant (`RequestKind`, `EventKind`, `Verdict`, `ReasonClass`) is a varint of the variant index listed in the table below (one byte for every current variant).
+- A `String` (`service`) and a `Vec<u8>` (`PreviewResponse::data`) are a varint length followed by the bytes; an `Option` is a one-byte tag (`0` = `None`, `1` = `Some`) followed by the value.
+
+### Size Limits and Codec Errors (`crates/protocol/src/codec.rs`)
+- **`MAX_MESSAGE_SIZE`** = `4,096` bytes (4 KiB): bound of every request, event, `Response` and `StatusResponse` payload (`encode` / `decode`).
+- **`MAX_PREVIEW_MESSAGE_SIZE`** = `2 MiB`: bound of the `PreviewResponse` payload only (`encode_preview` / `decode_preview`, §9). No other message may use it.
+- Encoding a payload larger than the limit fails with `CodecError::MessageTooLarge`. The payload size is computed first (`postcard::ser_flavors::Size`), so an oversized message is rejected before the frame buffer is allocated, and the message is then serialized in place into that single buffer (no intermediate copy, GitHub #225).
+- Decoding checks the 4-byte prefix first: fewer than 4 bytes, or fewer bytes than declared, fail with `CodecError::BufferTooSmall`; a declared length above the limit fails with `CodecError::DeclaredSizeTooLarge` before any body allocation. The daemon additionally rejects a zero length.
+- **Strict decoding** (GitHub #224): the declared payload must be consumed exactly. A payload that decodes but leaves bytes inside the declared length fails with `CodecError::TrailingBytes { unconsumed }`; bytes after the end of the declared frame are not part of the frame and are ignored. The only tolerated remainder is the one-byte client message tag of the decoded type (GitHub #204, §12): `codec::decode_payload::<Request>` accepts exactly one trailing `MESSAGE_TAG_REQUEST` (`0xA0`) and `decode_payload::<Event>` exactly one trailing `MESSAGE_TAG_EVENT` (`0xA1`); the other type's tag, any other single byte, two or more bytes, and any byte after a type that is never tagged (`Response`, `PreviewResponse`) still fail with `TrailingBytes`. The daemon dispatcher classifies client payloads with `message::decode_client_message`, which strips the tag and decodes the body through the zero-remainder `codec::decode_payload_exact`, so a doubled tag is `Malformed`. The PAM client (`decode`) and the daemon therefore apply one strictness. Malformed postcard fails with `CodecError::Deserialize`.
+- **`MAX_SERVICE_LEN`** = `64` bytes. `Request::validate` rejects a longer service with `ValidationError::ServiceTooLong` (the daemon answers `ProtocolError` / `MalformedRequest`).
+- **`CURRENT_VERSION`** = `1`. `Request::validate` rejects any other version with `ValidationError::UnsupportedVersion`; `Response::is_allow` is true only for `CURRENT_VERSION` and `Verdict::Allow`.
+
+### Message Discrimination
+Requests and events share the socket and the framing. Since GitHub #204, every client-to-daemon payload ends with a one-byte message tag trailer (`MESSAGE_TAG_REQUEST` = `0xA0`, `MESSAGE_TAG_EVENT` = `0xA1`, `crates/protocol/src/message.rs`); `decode_client_message` strips it and decodes the body strictly as the named type. Untagged legacy frames are still accepted only when they decode strictly as exactly one type, and a legacy payload that decodes as both is refused as ambiguous (fail closed). The former `uid_hint` heuristic is gone; details and compatibility rules are in §12 (ADR 2026-09-30 "Strict Codec v1 Decoding" is superseded in part by the #204 tag trailer).
+
+### Wire Indices of the Enums (`crates/protocol/src/types.rs`)
+
+| Variant | Index |
+|---|---|
+| `RequestKind::Auth` | 0 |
+| `RequestKind::Status` | 1 |
+| `RequestKind::PreviewFrame` | 2 |
+| `EventKind::PasswordFailed` | 0 |
+| `Verdict::Allow` | 0 |
+| `Verdict::Deny` | 1 |
+| `Verdict::Unavailable` | 2 |
+| `Verdict::ProtocolError` | 3 |
+| `ReasonClass::FaceMatch` | 0 |
+| `ReasonClass::NoFace` | 1 |
+| `ReasonClass::MultipleFaces` | 2 |
+| `ReasonClass::ScoreBelowThreshold` | 3 |
+| `ReasonClass::PadFailed` | 4 |
+| `ReasonClass::CameraUnavailable` | 5 |
+| `ReasonClass::ModelUnavailable` | 6 |
+| `ReasonClass::StaleFrame` | 7 |
+| `ReasonClass::Timeout` | 8 |
+| `ReasonClass::RateLimited` | 9 |
+| `ReasonClass::UidMismatch` | 10 |
+| `ReasonClass::MalformedRequest` | 11 |
+| `ReasonClass::InternalError` | 12 |
+
+Hand-written wire encoders (for example the Docker mock daemon `tests/docker/mock_daemon.py`) must use these indices.
+
 Client-to-daemon payloads (`Request`, `Event`) additionally end with a one-byte message tag trailer that names the message type (§12, GitHub #204).
 
-### Security Constants
-- **Maximum Message Size (`MAX_MESSAGE_SIZE`)**: `4,096` bytes (4 KiB). Any message declaring a length exceeding 4 KiB is rejected immediately prior to buffer allocation (`CodecError::MessageTooLarge`), shielding daemon and PAM module from denial-of-service memory exhaustion.
-- **Maximum Preview Message Size (`MAX_PREVIEW_MESSAGE_SIZE`)**: `2 MiB`. Applies only to the outbound `PreviewResponse` frame read by the diagnostic GUI (§9); every inbound message and every PAM-facing response stays bounded by `MAX_MESSAGE_SIZE`.
-- **Maximum Service Name Length (`MAX_SERVICE_LEN`)**: `64` bytes. Rejected with `CodecError::PayloadCorrupted` if exceeded.
-- **Protocol Version (`PROTOCOL_VERSION`)**: `1`.
 
 ---
 
 ## 3. Message Schemas
 
 ### `Request`
-Sent by the PAM module to the daemon to request facial verification:
+Sent by the PAM module to the daemon to request facial verification (and by `soos-admin` / `soos-gui` for `Status` and `PreviewFrame`):
+- `version: u8`: Protocol version (`CURRENT_VERSION`).
 - `kind: RequestKind`: Request operation (`Auth`, `Status`, or `PreviewFrame` — the latter is reserved for the diagnostic GUI and governed by §9).
 - `request_id: RequestId`: 256-bit cryptographic random identifier (`[u8; 32]`) sourced via `getrandom`.
 - `uid_hint: u32`: Declared UID from the PAM client (authoritatively cross-checked by the daemon using kernel `SO_PEERCRED`).
 - `service: String`: PAM service name (`"sudo"`, `"su"`, `"gdm-password"`...). Bounded to 64 bytes.
-- `deadline_monotonic_ns: u64`: Absolute monotonic deadline in nanoseconds. If exceeded, daemon immediately returns `Verdict::Unavailable`. `0` or `u64::MAX` means no client deadline (`DECISION_BUDGET_MS` applies). The daemon stops its decision `RESPONSE_WRITE_MARGIN_MS` (50 ms) before the earlier of this deadline and its own `connection_timeout` (measured from the start of request processing; default `DEFAULT_CONNECTION_TIMEOUT_MS` = 2500 ms, so the GDM line `timeout_ms=2500` gets its full budget while a console/sudo request stays capped by its 1000 ms PAM deadline), and never starts an inference that would not finish in time; the response is then `Unavailable`/`Timeout` (or the consensus reached so far), never a silent overrun.
+- `deadline_monotonic_ns: u64`: Absolute monotonic deadline in nanoseconds. If exceeded, daemon immediately returns `Verdict::Unavailable`. `0` or `u64::MAX` means no client deadline (`DECISION_BUDGET_MS` applies). The daemon stops its decision `RESPONSE_WRITE_MARGIN_MS` (50 ms) before the earlier of this deadline and its own `connection_timeout` (measured from the start of request processing), and never starts an inference that would not finish in time; the response is then `Unavailable`/`Timeout` (or the consensus reached so far), never a silent overrun.
+  Every client reads this value from `CLOCK_MONOTONIC` (never the wall clock): `pam_soos.so` from its clamped `timeout_ms`, and the `soos-admin test-pam` diagnostic from `--timeout-ms` clamped to the same `10..=5000` ms range, so the diagnostic reproduces the budget PAM applies (GitHub #231, ADR 2026-09-30 "Storage CLI Output and Overwrite Hygiene").
 
 ### `Response`
-Returned by the daemon to the PAM module:
+Returned by the daemon to the PAM module (and as the refusal of a `Status` or `PreviewFrame` request):
+- `version: u8`: Protocol version (`CURRENT_VERSION`).
 - `request_id: RequestId`: Must match the initial request's identifier bit-for-bit.
 - `verdict: Verdict`:
   - `Allow`: Single face authenticated successfully (PAD validated, match score >= threshold).
@@ -65,8 +110,15 @@ Returned by the daemon to the PAM module:
   - `Unavailable`: Hardware offline, model uninitialized, or deadline expired.
   - `ProtocolError`: Malformed message, mismatched UID, rate-limit reached.
 - `reason_class: ReasonClass`: Internal telemetry diagnostic (must not alter PAM fallback semantics). It is **never** shown to the user: the PAM module maps every `Deny` to one neutral text and every other failure to one generic text, so a PAD rejection is indistinguishable from a non-match at the lock screen (review PAM-03, GitHub #174; see `Docs/PAM_MODULE.md` §8).
-- `issued_monotonic_ns: u64`: Generation timestamp.
-- `expires_monotonic_ns: u64`: Short expiration timestamp preventing replay.
+- `issued_monotonic_ns: u64`: Generation timestamp (CLOCK_MONOTONIC, informational).
+- `expires_monotonic_ns: u64`: Daemon-side expiry hint (`issued + 2 s`); informational only and not validated by the PAM client. Replay protection is described in "Response Freshness" below.
+
+#### Response Freshness (GitHub #219)
+The PAM client rejects stale or replayed responses through two mechanisms, not through the timestamps:
+1. **Single-use request binding**: every exchange opens a new connection and sends a fresh 256-bit `request_id` from `getrandom`; a response is accepted only when its `request_id` matches bit-for-bit (`IpcError::RequestIdMismatch` otherwise). A response captured from an earlier exchange can never match a later one (`crates/pam/tests/deadline_uid_tests.rs::test_replayed_allow_response_is_rejected_by_request_id_binding`).
+2. **Client deadline**: a verdict whose last byte arrives after the client's cumulative deadline is discarded (`IpcError::Timeout`).
+
+`issued_monotonic_ns` / `expires_monotonic_ns` are kept in the v1 wire format for diagnostics. Enforcing them on the client is a recorded option (ADR 2026-09-30 "Response Timestamps Are Informational"): it would require every test fixture and the Docker mock daemon to emit real CLOCK_MONOTONIC values first.
 
 ### `Event`
 Best-effort telemetry notification sent by PAM following password failures:
@@ -86,15 +138,15 @@ Best-effort telemetry notification sent by PAM following password failures:
 | `RequestKind::PreviewFrame` (2) | `soos-gui` preview, authorized peers only (§9) | `PreviewResponse`, or a `Response` with `ProtocolError` on refusal |
 
 ### `StatusResponse`
-Non-biometric readiness snapshot returned for `RequestKind::Status`: `version`, `socket_ready`, `camera_ready`, `models_verified`, `is_healthy` (all components ready), `pid` and `uptime_secs`. It carries no frame, template, embedding or UID data.
+Non-biometric health snapshot returned for `RequestKind::Status` (bounded by `MAX_MESSAGE_SIZE`): `version: u8`, `socket_ready`, `camera_ready`, `models_verified`, `is_healthy` (`bool`, one byte each), `pid: u32`, `uptime_secs: u64`.
 
 ### `PreviewResponse`
-Camera frame returned for an authorized `RequestKind::PreviewFrame`: `version`, `sequence`, `width`, `height`, `format` (0 = RGB24, 1 = Grey, 2 = YUYV, 3 = NV12, 4 = MJPEG, 255 = no capture available), `timestamp_monotonic_ns` and `data`. The encoded frame is bounded by `MAX_PREVIEW_MESSAGE_SIZE`; the struct zeroizes on drop.
+Camera frame returned for an authorized `RequestKind::PreviewFrame` (bounded by `MAX_PREVIEW_MESSAGE_SIZE`, encoded with `encode_preview`, decoded with `decode_preview`; §9): `version: u8`, `sequence: u64`, `width: u32`, `height: u32`, `format: u8` (0 = RGB24, 1 = Grey, 2 = YUYV, 3 = NV12, 4 = MJPEG, 255 = no capture), `timestamp_monotonic_ns: u64`, `data: Vec<u8>`.
 
 The daemon-side authorization of each kind and every `daemon.toml` key are specified in `Docs/DAEMON.md`.
 
 ### Memory Zeroization (`Zeroize`)
-The `Response` struct implements `Zeroize` and `ZeroizeOnDrop`: sensitive request identifiers and verdict metadata are overwritten in RAM when discarded.
+`Request`, `Event`, `Response` and `PreviewResponse` implement `zeroize::Zeroize` manually and call it from a manual `impl Drop` (no derive macro is used): identifiers, service names, timestamps and pixel data are overwritten when a value is dropped, and an erased `Response` is reset to `Verdict::Deny` / `ReasonClass::InternalError` so it can never read as an authorization. `StatusResponse` carries no secret and is `Copy`.
 
 ---
 
@@ -177,6 +229,7 @@ All sensitive payloads and buffers in the IPC pipeline are scrubbed on drop:
 - `Response` implements `zeroize::Zeroize` and `Drop`, resetting `verdict` to `Deny` and zeroing `request_id` and timestamps.
 - `PreviewResponse` implements `zeroize::Zeroize` and `Drop`, erasing the pixel buffer and metadata; the daemon wraps every encoded response (`ResponseOutput::encoded_response`) in `zeroize::Zeroizing`.
 - Raw message buffers (`encoded`, `len_buf`, `full_buf`) are wrapped in `zeroize::Zeroizing` to ensure cryptographic hygiene.
+- `encode_with_limit` serializes directly into the single frame buffer it returns (sized up front, never reallocated), so the only copy of the encoded request nonce is the `encoded` buffer the caller wraps in `Zeroizing`; on a serialization failure the partially written buffer is zeroized before it is dropped (GitHub #225).
 
 ---
 
@@ -206,6 +259,16 @@ Constants live in `crates/daemon/src/preview.rs`: `MAX_PREVIEW_ALLOWED_UIDS = 64
 | 6c-4 | Monotonic clock available | `Unavailable` / `InternalError` |
 
 Only after these checks does the daemon call `camera.notify_activity()`, wait for readiness and copy the latest capture into a `PreviewResponse` (`format = 255` and empty `data` when no capture is available). The camera is therefore never woken, and the privacy LED never lit, by an unauthorized peer.
+
+#### Preview frame size (GitHub #196, CAM-14)
+
+A raw capture can exceed `MAX_PREVIEW_MESSAGE_SIZE` (2 MiB; a 1920x1080 YUYV frame is 4,147,200 bytes). The daemon therefore prepares every frame with `soos_daemon::preview::preview_image_for_frame` before encoding:
+
+- a frame at most `MAX_PREVIEW_WIDTH` (640) pixels wide, or a compressed MJPEG frame of any width, whose payload fits `MAX_PREVIEW_PIXEL_BYTES` (`MAX_PREVIEW_MESSAGE_SIZE - 1024`) is forwarded unchanged (format, size and bytes);
+- a larger frame is downscaled by integer decimation to at most 640 pixels wide and within the budget: `Grey` stays `Grey` (format `1`), `Rgb24` / `YUYV` / `NV12` / `MJPEG` become RGB24 (format `0`; MJPEG is decoded with the bounded `soos_vision::convert_to_rgb`);
+- a frame that cannot be converted (truncated buffer, undecodable MJPEG, zero dimension) is answered with an explicit empty preview (`format = 255`, no data), and a `CodecError::MessageTooLarge` from `encode_preview` is also mapped to that empty preview.
+
+The connection is never closed because of the frame size, so the GUI keeps polling on the same connection instead of reconnecting every 100 ms. Intermediate buffers are zeroized; no pixel data is logged.
 
 ### Client contract (`soos-gui` `IpcCameraManager`)
 
@@ -281,7 +344,7 @@ u32 BE length | postcard(Request | Event) | message_tag:u8
 
 A rejected frame closes the connection without running any handler and without a response (the PAM module then returns `PAM_IGNORE`).
 
-**Compatibility and migration.** `CURRENT_VERSION` stays `1` and the message body is byte-identical to codec v1: a v1 reader (`decode::<Request>`) ignores the trailer, and the daemon keeps serving untagged v1 clients. A tagged client talking to a daemon older than this change is rejected as malformed and fails closed to the password; `pam_soos.so` and `soos-daemon` ship in the same package and must be upgraded together. The fuzz target `decode_client_message` (`crates/protocol/fuzz/`) and the proptest suite `crates/protocol/tests/client_message_tests.rs` cover the classification.
+**Compatibility and migration.** `CURRENT_VERSION` stays `1` and the message body is byte-identical to codec v1: a lenient v1 reader (`postcard::from_bytes::<Request>`) ignores the trailer and the strict `codec::decode::<Request>` accepts exactly the matching tag (§2), and the daemon keeps serving untagged v1 clients. A tagged client talking to a daemon older than this change is rejected as malformed and fails closed to the password; `pam_soos.so` and `soos-daemon` ship in the same package and must be upgraded together. The fuzz target `decode_client_message` (`crates/protocol/fuzz/`) and the proptest suite `crates/protocol/tests/client_message_tests.rs` cover the classification.
 
 ## 13. Atomic `Auth` Rate-Limit Reservation (GitHub #200)
 

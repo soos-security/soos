@@ -6,6 +6,11 @@ use std::path::PathBuf;
 pub const DEFAULT_SOCKET_PATH: &str = "/run/soos/daemon.sock";
 pub const DEFAULT_SYSTEMD_UNIT: &str = "soos-daemon";
 pub const DEFAULT_TIMEOUT_MS: u64 = 250;
+/// Lower bound of `test-pam --timeout-ms`, equal to the PAM module `MIN_TIMEOUT_MS`
+/// (`crates/pam/src/config.rs`), so the diagnostic applies the same clamp as `pam_soos.so`.
+pub const MIN_TIMEOUT_MS: u64 = 10;
+/// Upper bound of `test-pam --timeout-ms`, equal to the PAM module `MAX_TIMEOUT_MS`.
+pub const MAX_TIMEOUT_MS: u64 = 5000;
 pub const DEFAULT_SERVICE: &str = "soos-admin";
 
 /// Output format for diagnostic summaries.
@@ -118,7 +123,8 @@ pub struct TestPamArgs {
     #[arg(long, default_value = DEFAULT_SERVICE)]
     pub service: String,
 
-    /// Maximum timeout in milliseconds before failing closed.
+    /// Maximum timeout in milliseconds before failing closed, clamped to the PAM module
+    /// range (10 to 5000 ms) exactly like the `timeout_ms=` argument of `pam_soos.so`.
     #[arg(long, default_value_t = DEFAULT_TIMEOUT_MS)]
     pub timeout_ms: u64,
 }

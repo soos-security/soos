@@ -31,6 +31,10 @@ mod physical_contract;
 #[cfg(test)]
 mod pam_deadline_contract;
 
+/// Storage CLI deadline, JSON, dead-code and privilege-order hygiene (GitHub #231-#237).
+#[cfg(test)]
+mod cli_hygiene_contract;
+
 /// Dependency hygiene, Docker sandbox toolchain and `save.sh` commit contract
 /// (GitHub #243, #244, #245; matrix DDS1–DDS8).
 #[cfg(all(test, unix))]
@@ -43,6 +47,30 @@ mod pad_startup_contract;
 /// Traceability tooling contract for `scripts/sync_issue.py` (GitHub #188).
 #[cfg(all(test, unix))]
 mod sync_issue_contract;
+
+/// Camera documentation drift invariants (GitHub #197, CAM-15).
+#[cfg(test)]
+mod camera_docs_contract;
+
+/// Response timestamps are not documented as replay protection (GitHub #219).
+#[cfg(test)]
+mod pam_response_freshness_contract;
+
+/// PAM feedback seam, `PAM_SILENT` and nightly fuzzing (GitHub #220, #221, #227).
+#[cfg(test)]
+mod pam_feedback_contract;
+
+/// Strict protocol codec, single-buffer encoding and IPC documentation (GitHub #224–#226).
+#[cfg(test)]
+mod protocol_codec_contract;
+
+/// Metadata-only template listing in `soos-enroll list` and the GUI (GitHub #235, EFL).
+#[cfg(test)]
+mod enroll_list_metadata_contract;
+
+/// PAM handle-guard removal and fault-injection ordering (GitHub #220, PHS4, PHS11).
+#[cfg(test)]
+mod pam_handle_guard_removal_contract;
 
 /// Daemon documentation versus code (GitHub #201, #205, #206).
 #[cfg(test)]

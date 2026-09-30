@@ -105,22 +105,55 @@ fn map_io_err(err: std::io::Error) -> IpcError {
     }
 }
 
-/// Absolute deadline shared by every blocking socket operation of one exchange.
+/// Absolute deadline shared by every blocking operation of one exchange.
 ///
 /// `SO_RCVTIMEO` / `SO_SNDTIMEO` bound a single syscall, not an exchange: a peer that
 /// sends or accepts one byte at a time would otherwise get the full timeout again on
 /// every `read()` / `write()` (review PAM-02, GitHub #173). Every syscall below therefore
 /// re-arms the socket timeout with the budget that is left.
-#[derive(Clone, Copy)]
-struct Deadline {
+///
+/// The CLOCK_MONOTONIC deadline sent to the daemon is captured once, together with the
+/// `Instant` the client measures its own budget from (review PAM-10, GitHub #222): time
+/// spent before the request is written (connect, NSS lookup) shrinks the daemon's budget
+/// instead of pushing its deadline past the instant the client gives up.
+#[derive(Clone, Copy, Debug)]
+pub struct ExchangeDeadline {
     start: Instant,
     total: Duration,
+    deadline_monotonic_ns: u64,
 }
 
-impl Deadline {
-    fn remaining(self) -> Result<Duration, IpcError> {
+impl ExchangeDeadline {
+    /// Starts a budget of `timeout_ms` milliseconds now.
+    pub fn start(timeout_ms: u64) -> Self {
+        let start = Instant::now();
+        let now_ns = monotonic_nanos();
+        Self {
+            start,
+            total: Duration::from_millis(timeout_ms),
+            deadline_monotonic_ns: now_ns.saturating_add(timeout_ms.saturating_mul(1_000_000)),
+        }
+    }
+
+    /// Budget left, or `IpcError::Timeout` once it is spent (never `Duration::ZERO`).
+    pub fn remaining(&self) -> Result<Duration, IpcError> {
         remaining_budget(self.start, self.total)
     }
+
+    /// Absolute CLOCK_MONOTONIC deadline (nanoseconds) fixed when the budget started.
+    pub fn monotonic_deadline_ns(&self) -> u64 {
+        self.deadline_monotonic_ns
+    }
+}
+
+/// Converts a remaining budget into a `poll()` timeout in milliseconds, rounding UP.
+///
+/// Truncation turned a sub-millisecond budget into `poll(.., 0)`, which returns at once and
+/// produced a spurious `IpcError::Timeout` (review PAM-10, GitHub #222). `Duration::ZERO`
+/// maps to 0 and values above `c_int::MAX` milliseconds saturate.
+pub fn poll_timeout_ms(remaining: Duration) -> libc::c_int {
+    let millis = remaining.as_nanos().div_ceil(1_000_000);
+    libc::c_int::try_from(millis).unwrap_or(libc::c_int::MAX)
 }
 
 /// Reads exactly `buf.len()` bytes before `deadline`, returning `IpcError::Timeout` once
@@ -130,7 +163,7 @@ fn read_exact_before_deadline(
     buf: &mut [u8],
     expected_total: usize,
     already_received: usize,
-    deadline: Deadline,
+    deadline: ExchangeDeadline,
 ) -> Result<(), IpcError> {
     let mut offset = 0usize;
     while offset < buf.len() {
@@ -162,7 +195,7 @@ fn read_exact_before_deadline(
 fn write_all_before_deadline(
     stream: &mut UnixStream,
     bytes: &[u8],
-    deadline: Deadline,
+    deadline: ExchangeDeadline,
 ) -> Result<(), IpcError> {
     let mut offset = 0usize;
     while offset < bytes.len() {
@@ -262,7 +295,7 @@ pub fn connect_with_timeout(path: &Path, timeout: Duration) -> Result<UnixStream
             let start = Instant::now();
             loop {
                 let remaining = remaining_budget(start, timeout)?;
-                let timeout_ms = i32::try_from(remaining.as_millis()).unwrap_or(i32::MAX);
+                let timeout_ms = poll_timeout_ms(remaining);
 
                 let mut pfd = libc::pollfd {
                     fd: guard.0,
@@ -330,22 +363,63 @@ pub fn connect_with_timeout(path: &Path, timeout: Duration) -> Result<UnixStream
 }
 
 /// Sends an authentication request to the daemon and awaits the verification verdict and reason.
+///
+/// The budget is the clamped `timeout_ms`, starting now; see [`authenticate_before`].
 pub fn authenticate(config: &PamConfig, uid: u32) -> Result<(Verdict, ReasonClass), IpcError> {
-    let deadline = Deadline {
-        start: Instant::now(),
-        total: Duration::from_millis(config.timeout_ms),
-    };
+    authenticate_before(config, uid, ExchangeDeadline::start(config.timeout_ms))
+}
 
+/// [`authenticate`], calling `on_connected` once the daemon socket is connected and
+/// before the request is sent (GitHub #221).
+///
+/// `on_connected` is never called when the connection fails (daemon not installed or not
+/// running), so the caller only announces a face lookup that can actually happen. It
+/// runs inside the cumulative deadline: time it spends is deducted from the budget left
+/// for the exchange, which therefore stays bounded by the clamped `timeout_ms`.
+pub fn authenticate_with_progress<F: FnOnce()>(
+    config: &PamConfig,
+    uid: u32,
+    on_connected: F,
+) -> Result<(Verdict, ReasonClass), IpcError> {
+    authenticate_before_with_progress(
+        config,
+        uid,
+        ExchangeDeadline::start(config.timeout_ms),
+        on_connected,
+    )
+}
+
+/// Runs one authentication exchange bounded by an already started `deadline`.
+///
+/// Connect, write and read all consume the same budget, and the request carries exactly
+/// [`ExchangeDeadline::monotonic_deadline_ns`], so the daemon never works past the instant
+/// the client gives up (GitHub #222).
+pub fn authenticate_before(
+    config: &PamConfig,
+    uid: u32,
+    deadline: ExchangeDeadline,
+) -> Result<(Verdict, ReasonClass), IpcError> {
+    authenticate_before_with_progress(config, uid, deadline, || {})
+}
+
+/// [`authenticate_before`], calling `on_connected` once the daemon socket is connected
+/// (see [`authenticate_with_progress`]; GitHub #221 / #222).
+pub fn authenticate_before_with_progress<F: FnOnce()>(
+    config: &PamConfig,
+    uid: u32,
+    deadline: ExchangeDeadline,
+    on_connected: F,
+) -> Result<(Verdict, ReasonClass), IpcError> {
     let connect_timeout = deadline.remaining()?;
     let mut stream = connect_with_timeout(&config.socket_path, connect_timeout)?;
+    on_connected();
 
     // Generate single-use cryptographic 256-bit nonce
     let mut request_id = Zeroizing::new([0u8; REQUEST_ID_LEN]);
     getrandom::fill(&mut *request_id).map_err(IpcError::Random)?;
 
-    let now_ns = monotonic_nanos();
-    let timeout_ns = config.timeout_ms.saturating_mul(1_000_000);
-    let deadline_monotonic_ns = now_ns.saturating_add(timeout_ns);
+    // Captured before connect together with the client's own budget (GitHub #222).
+    let deadline_monotonic_ns = deadline.monotonic_deadline_ns();
 
     let req = Request {
         version: CURRENT_VERSION,
@@ -414,6 +488,9 @@ pub fn authenticate(config: &PamConfig, uid: u32) -> Result<(Verdict, ReasonClas
         });
     }
 
+    // Replay protection: the fresh single-use 256-bit nonce must match bit-for-bit. The
+    // response timestamps are informational and deliberately not validated here (ADR
+    // 2026-09-30 "Response Timestamps Are Informational", GitHub #219).
     if resp.request_id != req.request_id {
         return Err(IpcError::RequestIdMismatch);
     }
@@ -429,10 +506,7 @@ pub fn authenticate(config: &PamConfig, uid: u32) -> Result<(Verdict, ReasonClas
 
 /// Transmits a best-effort telemetry event notification to the daemon within 20ms.
 pub fn notify_event(config: &PamConfig, uid: u32, event_kind: EventKind) -> Result<(), IpcError> {
-    let deadline = Deadline {
-        start: Instant::now(),
-        total: Duration::from_millis(EVENT_TIMEOUT_MS),
-    };
+    let deadline = ExchangeDeadline::start(EVENT_TIMEOUT_MS);
 
     let connect_timeout = deadline.remaining()?;
     let mut stream = connect_with_timeout(&config.socket_path, connect_timeout)?;

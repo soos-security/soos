@@ -20,7 +20,7 @@ This walkthrough covers the implementation of Issue #48 (GitHub Issue #136): res
 
 ### 1. `soos-pam`: Real-Time User Feedback via PAM Conversation
 - Extended `authenticate()` in `crates/pam/src/ipc.rs` to return `Result<(Verdict, ReasonClass), IpcError>`, preserving detailed reason information for user feedback.
-- Implemented `send_pam_info` in `crates/pam/src/lib.rs` using `pam-bindings`' `Conv::send(PAM_TEXT_INFO, ...)` with safe low-address pointer guards (`addr >= 0x10000`).
+- Implemented `send_pam_info` in `crates/pam/src/lib.rs` using `pam-bindings`' `Conv::send(PAM_TEXT_INFO, ...)` with a low-address pointer heuristic (`addr >= 0x10000`). *(Corrected by walkthrough 122, GitHub #220: the heuristic only tolerated the dummy handles of the tests; `send_pam_info` was replaced by the `PamFeedback` trait and the guard is confined to its `PamHandle` adapter.)* *(Further correction, 2026-09-30, commit `4f15282`: the guard was then removed entirely; the `PamHandle` adapter trusts the handle given by libpam and every test uses a real `pam_start` handle, matrix PHS4.)*
 - Emits prompt status updates on the lock screen:
   - Initial: `[soos] Looking for face...`
   - Success: `[soos] Face recognized. Unlocking...`
@@ -49,7 +49,7 @@ This walkthrough covers the implementation of Issue #48 (GitHub Issue #136): res
 
 - **GDM Timeout**: `crates/admin-cli/tests/gdm_tests.rs::test_gdm_pam_line_includes_timeout_ms_2500`.
 - **Configuration Parsing**: `crates/daemon/tests/config_tests.rs::test_pipeline_config_warmup_frames_from_toml` and `test_pipeline_config_camera_device_auto_resolution`.
-- **PAM Conversation Pointer Safety**: `crates/pam/tests/config_tests.rs::test_send_pam_info_low_address_guard` and `test_send_pam_info_null_safe`.
+- **PAM Conversation Pointer Safety**: *(corrected by walkthrough 122, GitHub #220: the two tests originally cited here never existed)* the conversation with no handle is exercised by `crates/pam/tests/config_tests.rs::test_authenticate_with_none_handle_returns_ignore_cleanly`; the real conversation by `crates/pam/tests/pam_handle_tests.rs` and `crates/pam/tests/pam_silent_tests.rs` (real `pam_start` handle) and the message selection by `crates/pam/tests/pam_feedback_tests.rs` (recorder).
 - **Multi-Frame Evaluation Recovery**: `crates/daemon/tests/pipeline_integration_tests.rs::test_48_multi_frame_evaluation_recovers_from_initial_no_face_to_allow` (verifying empty capture followed by face detection successfully yields `Verdict::Allow`).
 - **All Workspace Tests**: Ran `cargo test --workspace` across all crates (100% passing).
 - **Candid Review**: Ran `./scripts/candid_review.sh` confirming zero unsafe additions, zero unwrap/expect in PAM, and strict English-only policy compliance.

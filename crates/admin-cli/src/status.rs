@@ -31,22 +31,13 @@ pub struct DaemonStatusReport {
 }
 
 impl DaemonStatusReport {
-    /// Formats the report as a structured JSON string.
+    /// Formats the report as a pretty-printed JSON document.
+    ///
+    /// Produced by `serde_json`, so the socket path and unit names are escaped (GitHub #232).
     #[must_use]
     pub fn to_json(&self) -> String {
-        format!(
-            "{{\n  \"socket_path\": \"{}\",\n  \"socket_ready\": {},\n  \"camera_ready\": {},\n  \"models_verified\": {},\n  \"is_healthy\": {},\n  \"pid\": {},\n  \"uptime_secs\": {},\n  \"systemd_unit\": \"{}\",\n  \"systemd_active_state\": \"{}\",\n  \"systemd_sub_state\": \"{}\"\n}}",
-            self.socket_path,
-            self.socket_ready,
-            self.camera_ready,
-            self.models_verified,
-            self.is_healthy,
-            self.pid.map_or_else(|| "null".to_string(), |p| p.to_string()),
-            self.uptime_secs.map_or_else(|| "null".to_string(), |u| u.to_string()),
-            self.systemd_unit,
-            self.systemd_active_state,
-            self.systemd_sub_state
-        )
+        serde_json::to_string_pretty(self)
+            .unwrap_or_else(|_| "{\"error\": \"report serialization failed\"}".to_string())
     }
 
     /// Formats the report as an aligned terminal summary table.

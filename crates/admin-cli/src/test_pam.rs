@@ -17,7 +17,24 @@ use soos_protocol::types::{
     REQUEST_ID_LEN,
 };
 
+use crate::args::{MAX_TIMEOUT_MS, MIN_TIMEOUT_MS};
 use crate::error::AdminCliError;
+
+/// Clamps a requested timeout to the PAM module range `MIN_TIMEOUT_MS..=MAX_TIMEOUT_MS`.
+///
+/// `pam_soos.so` clamps its `timeout_ms=` argument the same way, so the diagnostic reproduces
+/// the budget PAM really applies, and a zero timeout never reaches `set_read_timeout`
+/// (which rejects a zero duration with `EINVAL`).
+#[must_use]
+pub const fn effective_timeout_ms(requested_ms: u64) -> u64 {
+    if requested_ms < MIN_TIMEOUT_MS {
+        MIN_TIMEOUT_MS
+    } else if requested_ms > MAX_TIMEOUT_MS {
+        MAX_TIMEOUT_MS
+    } else {
+        requested_ms
+    }
+}
 
 /// Sub-millisecond latency breakdown for simulated authentication.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -48,20 +65,13 @@ pub struct PamTestReport {
 }
 
 impl PamTestReport {
-    /// Formats the report as a structured JSON string.
+    /// Formats the report as a pretty-printed JSON document.
+    ///
+    /// Produced by `serde_json`, so every string field is escaped (GitHub #232).
     #[must_use]
     pub fn to_json(&self) -> String {
-        format!(
-            "{{\n  \"uid\": {},\n  \"service\": \"{}\",\n  \"verdict\": \"{:?}\",\n  \"reason_class\": \"{:?}\",\n  \"pam_result\": \"{}\",\n  \"latency\": {{\n    \"connect_ms\": {:.2},\n    \"response_ms\": {:.2},\n    \"total_ms\": {:.2}\n  }}\n}}",
-            self.uid,
-            self.service,
-            self.verdict,
-            self.reason_class,
-            self.pam_result,
-            self.latency.connect_ms,
-            self.latency.response_ms,
-            self.latency.total_ms
-        )
+        serde_json::to_string_pretty(self)
+            .unwrap_or_else(|_| "{\"error\": \"report serialization failed\"}".to_string())
     }
 
     /// Formats the report as an aligned terminal summary table.
@@ -97,6 +107,9 @@ impl PamTestReport {
 
 /// Simulates a PAM authentication cycle by issuing an IPC verification request.
 ///
+/// `timeout_ms` is clamped with [`effective_timeout_ms`]; the request deadline is expressed
+/// on `CLOCK_MONOTONIC`, the clock `soos-daemon` compares it against (GitHub #231).
+///
 /// # Errors
 ///
 /// Returns `AdminCliError` on socket, codec, timeout, or random number generator failures.
@@ -106,6 +119,7 @@ pub fn simulate_pam_auth(
     service: &str,
     timeout_ms: u64,
 ) -> Result<PamTestReport, AdminCliError> {
+    let timeout_ms = effective_timeout_ms(timeout_ms);
     let connect_start = Instant::now();
     let mut stream =
         UnixStream::connect(socket_path).map_err(|e| AdminCliError::SocketConnect {
@@ -125,7 +139,7 @@ pub fn simulate_pam_auth(
     let mut request_id = [0u8; REQUEST_ID_LEN];
     getrandom::fill(&mut request_id)?;
 
-    let now_monotonic_ns = get_monotonic_ns();
+    let now_monotonic_ns = monotonic_now_ns()?;
     let deadline_monotonic_ns =
         now_monotonic_ns.saturating_add(timeout_ms.saturating_mul(1_000_000));
 
@@ -195,8 +209,18 @@ pub fn simulate_pam_auth(
     })
 }
 
-fn get_monotonic_ns() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX))
+/// Reads `CLOCK_MONOTONIC` in nanoseconds (the clock of `deadline_monotonic_ns`).
+///
+/// # Errors
+///
+/// [`AdminCliError::SocketIo`] when the clock cannot be read or reports a negative value.
+fn monotonic_now_ns() -> Result<u64, AdminCliError> {
+    let ts = nix::time::clock_gettime(nix::time::ClockId::CLOCK_MONOTONIC)
+        .map_err(|e| AdminCliError::SocketIo(e.into()))?;
+    match (u64::try_from(ts.tv_sec()), u64::try_from(ts.tv_nsec())) {
+        (Ok(secs), Ok(nanos)) => Ok(secs.saturating_mul(1_000_000_000).saturating_add(nanos)),
+        _ => Err(AdminCliError::SocketIo(std::io::Error::other(
+            "CLOCK_MONOTONIC returned a negative timestamp",
+        ))),
+    }
 }
