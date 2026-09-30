@@ -629,7 +629,7 @@ graph TD
 | ⚫ P5 | #14 `pam-bindings` migration | Medium | #13 |
 | ⚫ P5 | #15 PAD liveness | High | #6, #7 |
 | ⚫ P5 | #16 Production hardening | Medium | All above |
-| 🟢 P1 | #22 Visual Debugging GUI | Low | #5, #6, #7 |
+| 🟢 P1 | #51 Visual Debugging GUI (formerly a second #22) | Low | #5, #6, #7 |
 
 
 # Phase 9+ Master Implementation Backlog
@@ -1710,10 +1710,11 @@ All project documentation must be updated to reflect the 3-model architecture: A
 
 ---
 
-### Issue #22: `admin-cli` — Visual Debugging GUI (HTML report generation)
+### Issue #51: `admin-cli` — Visual Debugging GUI (HTML report generation)
 
 > **Branch**: `feat/admin-debug-gui`  
-> **Architecture ref**: §8 Monorepo Structure
+> **Architecture ref**: §8 Monorepo Structure  
+> **Numbering**: renumbered from a duplicate `#22` (GitHub #188, TCI-05); no GitHub issue exists for this work.
 
 #### Problem Statement
 
@@ -1721,21 +1722,21 @@ Users experience issues enrolling their face due to environmental factors (light
 
 #### Sub-issues
 
-- [x] **#22.1** — Implement `Base64` and `BMP` encoding in `enrollment-cli`
+- [x] **#51.1** — Implement `Base64` and `BMP` encoding in `enrollment-cli`
   - Zero heavy external dependencies for image encoding.
   - Ability to convert RGB frame to a base64-encoded BMP string.
 
-- [x] **#22.2** — Implement native desktop GUI crate `soos-gui`
+- [x] **#51.2** — Implement native desktop GUI crate `soos-gui`
   - High-performance `eframe` (egui + glow/OpenGL) application supporting X11 and Wayland.
   - Live 30 FPS camera feed with authentic ONNX model overlays (SCRFD bounding boxes, 5-point landmarks, MiniFASNetV2 PAD confidence, ArcFace 112×112 aligned face crop).
   - Decoupled multithreaded worker architecture preventing UI stuttering.
 
-- [x] **#22.3** — Implement Apple FaceID / Samsung-style multi-pose guided enrollment
+- [x] **#51.3** — Implement Apple FaceID / Samsung-style multi-pose guided enrollment
   - Robust state machine (`GuidedEnrollmentSession`) guiding user through Frontal, Turn Left, Turn Right, and Tilt Up poses.
   - Real-time guidance cards, oval reticle, head pose estimation (yaw, pitch, roll), centering, and PAD liveness validation.
   - Composite multi-angle vector fusion yielding robust reference template for lightning-fast PAM unlocking.
 
-- [x] **#22.4** — Profile management and real-time PAM unlock simulator
+- [x] **#51.4** — Profile management and real-time PAM unlock simulator
   - List and inspect enrolled biometric templates with creation timestamps.
   - Live 1-to-1 face verification simulator showing real-time cosine similarity against selected user template and PAM decision verdict.
   - Secure template shredding with multi-pass zeroization before unlinking.

@@ -131,5 +131,8 @@ packaging, install or CI build commands.
   a row without evidence is `⬜ Pending (<reason>)`, a replaced row is `⏹ Superseded (<rows>)`.
 - Branch prefixes allowed by `AGENTS.md`: `feat/`, `fix/`, `test/`, `chore/` (not `refactor/` or `docs/`).
 - Every topic branch that implements a backlog issue must be registered in `BRANCH_TO_ISSUE` in
-  `scripts/sync_issue.py` (tooling-only `chore/` branches without a backlog issue are not).
+  `scripts/sync_issue.py` (tooling-only `chore/` branches and GitHub-only review-finding branches
+  without a backlog issue are not). `python3 scripts/sync_issue.py --check` must pass (enforced by
+  `tests/invariants/src/sync_issue_contract.rs`); the soos-gui backlog work is `#51` (formerly a
+  duplicate `#22`) and has no GitHub issue [105].
 - Use repository-relative paths in all docs and skills (never `/home/<user>/...`).

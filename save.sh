@@ -8,8 +8,10 @@
 #   3. cargo test       — Runs unit and architectural invariant tests
 #   4. cargo deny check — Audits licenses, security advisories, and bans
 #   5. candid review    — Layer 1 invariants + fingerprint-bound Layer 2 report
-#   6. git add .        — Stages all modifications
-#   7. git commit       — Commits with Conventional Commits 1.0.0 message
+#   6. sync_issue.py    — Offline mapping self-check + backlog report (no writes)
+#   7. git add .        — Stages all modifications
+#   8. git commit       — Commits with Conventional Commits 1.0.0 message
+#   (--push-pr: after the push, committed checkboxes are mirrored to GitHub)
 #
 # Clippy/test/deny flags are identical to .github/workflows/ci.yml so that a
 # green local run predicts a green CI run.
@@ -270,6 +272,23 @@ elif [[ -f "./scripts/candid_review.sh" ]]; then
 fi
 
 # ---------------------------------------------------------------------------
+# Backlog / Issue Traceability (before staging, GitHub #188)
+# ---------------------------------------------------------------------------
+# The offline self-check rejects duplicate GitHub targets and unknown backlog ids. The
+# local-only report never writes AI/BACKLOG.md: sub-issues are ticked explicitly with
+# `sync_issue.py --subissue` beforehand, so the backlog edit is staged with this commit.
+if [[ -f "./scripts/sync_issue.py" ]]; then
+    if ! python3 ./scripts/sync_issue.py --check; then
+        error "scripts/sync_issue.py --check failed: fix BACKLOG_TO_GITHUB / BRANCH_TO_ISSUE or AI/BACKLOG.md."
+        exit 1
+    fi
+    if ! python3 ./scripts/sync_issue.py --auto --local-only --branch "$CURRENT_BRANCH"; then
+        error "scripts/sync_issue.py --auto --local-only failed."
+        exit 1
+    fi
+fi
+
+# ---------------------------------------------------------------------------
 # Stage Changes
 # ---------------------------------------------------------------------------
 echo ""
@@ -422,11 +441,16 @@ if [[ "$PUSH_PR" == "true" ]]; then
     echo ""
     info "Preparing Pull Request..."
 
-    # Auto-sync issue checkboxes on GitHub and BACKLOG.md
+    # Mirror the committed AI/BACKLOG.md checkboxes to the GitHub issue (never writes the
+    # backlog, so the tree stays clean after the push). A gh/network failure is reported and
+    # does not abort: the branch is already pushed and the sync can be re-run by hand.
     CLOSES_KEYWORD=""
     if [[ -f "./scripts/sync_issue.py" ]]; then
-        info "Synchronizing task checkboxes with GitHub Issues & AI/BACKLOG.md..."
-        python3 ./scripts/sync_issue.py --auto || true
+        info "Mirroring committed AI/BACKLOG.md checkboxes to the GitHub issue..."
+        if ! python3 ./scripts/sync_issue.py --auto --branch "$CURRENT_BRANCH"; then
+            warn "GitHub issue sync FAILED (see above); nothing local was changed."
+            warn "Re-run: python3 scripts/sync_issue.py --auto --branch $CURRENT_BRANCH"
+        fi
         GITHUB_ISSUE_ID=$(python3 -c "
 import os
 from scripts.sync_issue import BRANCH_TO_ISSUE, BACKLOG_TO_GITHUB, get_current_branch

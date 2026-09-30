@@ -371,7 +371,7 @@ This document translates the critical gating criteria from §11 of `ARCHITECTURE
 
 ---
 
-## Component: `guided-enrollment-production-unlock` (Issue #22 / GitHub #61)
+## Component: `guided-enrollment-production-unlock` (Issue #51, formerly a duplicate #22; no GitHub issue)
 
 | # | Criterion | Test Method | Status |
 |---|---|---|---|
@@ -428,7 +428,7 @@ This document translates the critical gating criteria from §11 of `ARCHITECTURE
 
 ---
 
-## Component: `gui-camera-auto-resolution-and-packaging` (Issue #50 / GitHub #140)
+## Component: `gui-camera-auto-resolution-and-packaging` (Issue #50 / PR #140; no GitHub issue)
 
 | # | Criterion | Test Method | Status |
 |---|---|---|---|
@@ -799,3 +799,15 @@ Complements PA3, PA12 and PFT1: those rows are proven under `[profile.test]` (al
 |---|---|---|---|
 | PDC1 | The normative documents (`AGENTS.md`, `AI/ARCHITECTURE.md`, `AI/DECISIONS.md`, `Docs/SECURITY_AND_QUALITY_GUIDELINES.md`, `Docs/IPC_PROTOCOL.md`, `Docs/PAM_MODULE.md`, `tests/physical/screensaver_test.md`, the dev-workflow project facts) no longer state a fixed PAM deadline; a historical ADR line keeps it only with the `*(Superseded` marker | Architectural invariant test (red with 14 findings before the fix) | ✅ Verified (`test_normative_docs_do_not_restate_a_fixed_pam_deadline`) |
 | PDC2 | `AGENTS.md`, `AI/ARCHITECTURE.md` and `AI/DECISIONS.md` state the enforced invariant "every blocking PAM operation has an explicit deadline derived from the clamped `timeout_ms`" (ADR 2026-09-30) | Architectural invariant test | ✅ Verified (`test_normative_docs_state_the_enforced_pam_deadline_invariant`) |
+
+---
+
+## Component: `sync-issue-traceability` (Review finding TCI-05 — GitHub #188)
+
+| # | Criterion | Test Method | Status |
+|---|---|---|---|
+| SIT1 | `python3 scripts/sync_issue.py --check` is an offline self-check that passes on the repository: backlog headings and sub-issue ids are unique, every `BACKLOG_TO_GITHUB` value is a distinct GitHub issue (backlog #50 and #51 have none) and every table entry names an existing `### Issue #N` heading; the soos-gui work is renumbered `#51` (formerly a duplicate `#22` whose branches ticked GitHub #61) | Invariant (`sync_issue_contract::test_sync_issue_check_passes_on_repository`) | ✅ Verified |
+| SIT2 | The self-check fails with an explicit message on a duplicate GitHub target, on a branch mapped to an unknown backlog id and on a duplicated backlog heading (tampered copies under `target/`) | Invariants (`sync_issue_contract::test_sync_issue_check_rejects_duplicate_github_target`, `test_sync_issue_check_rejects_unknown_backlog_id`, `test_sync_issue_check_rejects_duplicate_backlog_heading`) | ✅ Verified |
+| SIT3 | `--auto` never rewrites `AI/BACKLOG.md` and never ticks an open sub-issue: it only reports open items and mirrors already-committed checkboxes to GitHub; an unregistered (GitHub-only review-finding) branch is an announced no-op | Invariants (`sync_issue_contract::test_sync_issue_auto_local_only_never_rewrites_backlog`, `test_sync_issue_auto_unregistered_branch_is_a_visible_noop`) | ✅ Verified |
+| SIT4 | A failing or unreachable `gh` makes the sync exit 2 with `GitHub sync failed` and leaves the backlog untouched; the body is only PATCHed after a successful read and the comment only posted after a successful PATCH | Invariant with a failing fake `gh` on `PATH` (`sync_issue_contract::test_sync_issue_gh_failure_is_visible_and_non_destructive`) | ✅ Verified |
+| SIT5 | `save.sh` runs `sync_issue.py --check` (fatal) and `--auto --local-only` before `git add .`, so backlog edits are part of the commit; neither `save.sh` nor `scripts/pr_loop.sh` silences a sync failure with `\|\| true` | Invariants (`sync_issue_contract::test_save_sh_runs_sync_check_before_staging`, `test_release_scripts_never_silence_sync_failures`) | ✅ Verified |
