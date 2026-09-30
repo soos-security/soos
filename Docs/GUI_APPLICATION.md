@@ -132,3 +132,6 @@ Example: `RUST_LOG=soos_gui=debug,soos_camera_v4l=debug soos-gui`.
 Matrix rows GRE1–GRE6 and ISE1–ISE4 in `AI/VERIFICATION_MATRIX.md`; tests in
 `crates/gui/tests/responsiveness_tests.rs`, `crates/gui/tests/camera_status_tests.rs`,
 `crates/gui/tests/import_privacy_tests.rs` and `crates/camera-v4l/tests/camera_status_tests.rs`.
+Failure paths without a daemon or camera (oversized, zero-length and truncated preview replies,
+daemon without camera, `EACCES` socket, direct-mode `EACCES` / `EBUSY`) are covered by
+`crates/gui/tests/ipc_camera_failure_tests.rs` (matrix CHT5–CHT6, GitHub #198).

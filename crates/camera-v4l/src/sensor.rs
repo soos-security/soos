@@ -1,7 +1,7 @@
 //! Sensor classification and multi-camera device selection (RGB vs IR).
 
 use crate::frame::PixelFormat;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Camera sensor classification.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -251,54 +251,127 @@ pub(crate) fn frame_sizes_at(path: &std::path::Path) -> Vec<(u32, u32)> {
     device_frame_sizes(&device, &fourccs)
 }
 
-/// Enumerates all physical video capture devices, querying capabilities and supported formats.
-pub fn enumerate_capture_devices() -> Vec<CameraDeviceInfo> {
-    let mut devices = Vec::new();
-    let sys_v4l = std::path::Path::new("/sys/class/video4linux");
-    if sys_v4l.is_dir() {
-        if let Ok(entries) = std::fs::read_dir(sys_v4l) {
-            let mut node_names: Vec<_> = entries
-                .filter_map(|e| {
-                    e.ok()
-                        .map(|ent| ent.file_name().to_string_lossy().into_owned())
-                })
-                .filter(|name| name.starts_with("video"))
-                .collect();
-            // Sort deterministically (video0, video1, video2...)
-            node_names.sort_by_key(|n| {
-                n.strip_prefix("video")
-                    .and_then(|s| s.parse::<u32>().ok())
-                    .unwrap_or(u32::MAX)
-            });
+/// Sysfs directory listing the V4L2 device nodes.
+pub const SYSFS_VIDEO4LINUX_DIR: &str = "/sys/class/video4linux";
 
-            for name in node_names {
-                let dev_path = PathBuf::from(format!("/dev/{name}"));
-                if let Ok(dev) = v4l::Device::with_path(&dev_path) {
-                    if let Ok(caps) = dev.query_caps() {
-                        let has_video_capture = caps
-                            .capabilities
-                            .contains(v4l::capability::Flags::VIDEO_CAPTURE);
-                        let fourccs: Vec<v4l::FourCC> = if has_video_capture {
-                            v4l::video::Capture::enum_formats(&dev)
-                                .unwrap_or_default()
-                                .into_iter()
-                                .map(|desc| desc.fourcc)
-                                .collect()
-                        } else {
-                            Vec::new()
-                        };
-                        if let Some(info) = capture_device_from_probe(
-                            dev_path,
-                            caps.card,
-                            has_video_capture,
-                            &fourccs,
-                        ) {
-                            devices.push(info);
-                        }
-                    }
-                }
-            }
-        }
+/// Upper bound on the sysfs entries read by one enumeration (bounded directory scan).
+pub const MAX_SYSFS_ENTRIES: usize = 256;
+
+/// Upper bound on the `video<N>` nodes opened and queried by one enumeration.
+pub const MAX_VIDEO_NODES: usize = 64;
+
+/// Capabilities reported by one V4L2 node (`VIDIOC_QUERYCAP` + `VIDIOC_ENUM_FMT`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct V4lNodeCapabilities {
+    /// Driver card name (`v4l2_capability.card`, at most 31 characters).
+    pub card_name: String,
+    /// Whether the node advertises `V4L2_CAP_VIDEO_CAPTURE`.
+    pub video_capture: bool,
+    /// Pixel formats the node can deliver (unknown FourCCs removed, deep greyscale as `Grey`).
+    pub supported_formats: Vec<PixelFormat>,
+}
+
+/// Queries the capabilities of one V4L2 node.
+///
+/// Production uses [`SystemV4lNodeProbe`]; tests inject a fixture table so enumeration is
+/// hermetic (GitHub #198, review finding CAM-16).
+pub trait V4lNodeProbe {
+    /// Returns the node capabilities, or `None` when the node cannot be opened or queried
+    /// (`EACCES`, `ENODEV`, vanished node, ioctl failure).
+    fn probe(&self, dev_path: &Path) -> Option<V4lNodeCapabilities>;
+}
+
+/// Probe backed by the real V4L2 ioctls of the `v4l` crate.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SystemV4lNodeProbe;
+
+impl V4lNodeProbe for SystemV4lNodeProbe {
+    fn probe(&self, dev_path: &Path) -> Option<V4lNodeCapabilities> {
+        let dev = v4l::Device::with_path(dev_path).ok()?;
+        let caps = dev.query_caps().ok()?;
+        let video_capture = caps
+            .capabilities
+            .contains(v4l::capability::Flags::VIDEO_CAPTURE);
+        // Deep-greyscale IR formats (Y8I, Y10, Y12, Y16) are delivered as Grey, so Y16-only IR
+        // nodes stay visible (GitHub #195).
+        let supported_formats = if video_capture {
+            let fourccs: Vec<v4l::FourCC> = v4l::video::Capture::enum_formats(&dev)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|desc| desc.fourcc)
+                .collect();
+            crate::deep_grey::delivered_formats(&fourccs)
+        } else {
+            Vec::new()
+        };
+        Some(V4lNodeCapabilities {
+            card_name: caps.card,
+            video_capture,
+            supported_formats,
+        })
     }
-    devices
+}
+
+/// Parses a sysfs entry name `video<decimal>` into its index (`None` for any other entry).
+fn video_node_index(name: &str) -> Option<u32> {
+    let digits = name.strip_prefix("video")?;
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    digits.parse().ok()
+}
+
+/// Enumerates the video capture nodes listed in `sysfs_dir`, probing `dev_dir/<node>`.
+///
+/// Only `video<N>` entries are considered, in numeric order, at most [`MAX_SYSFS_ENTRIES`]
+/// entries are read and at most [`MAX_VIDEO_NODES`] nodes are probed. A node is listed only
+/// when it advertises `V4L2_CAP_VIDEO_CAPTURE` **and** at least one decodable pixel format, so
+/// uvcvideo metadata nodes and codec nodes are never candidates. A missing or unreadable
+/// `sysfs_dir` yields an empty list.
+pub fn enumerate_capture_devices_with(
+    sysfs_dir: &Path,
+    dev_dir: &Path,
+    probe: &dyn V4lNodeProbe,
+) -> Vec<CameraDeviceInfo> {
+    let Ok(entries) = std::fs::read_dir(sysfs_dir) else {
+        return Vec::new();
+    };
+    let mut nodes: Vec<(u32, String)> = entries
+        .take(MAX_SYSFS_ENTRIES)
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let name = entry.file_name().to_str()?.to_owned();
+            video_node_index(&name).map(|idx| (idx, name))
+        })
+        .collect();
+    nodes.sort();
+
+    nodes
+        .into_iter()
+        .take(MAX_VIDEO_NODES)
+        .filter_map(|(_, name)| {
+            let path = dev_dir.join(name);
+            let caps = probe.probe(&path)?;
+            if !caps.video_capture || caps.supported_formats.is_empty() {
+                return None;
+            }
+            Some(CameraDeviceInfo {
+                path,
+                card_name: caps.card_name,
+                supported_formats: caps.supported_formats,
+            })
+        })
+        .collect()
+}
+
+/// Enumerates all physical video capture devices, querying capabilities and supported formats.
+///
+/// Thin wrapper over [`enumerate_capture_devices_with`] reading [`SYSFS_VIDEO4LINUX_DIR`] and
+/// probing `/dev/video<N>` with [`SystemV4lNodeProbe`].
+pub fn enumerate_capture_devices() -> Vec<CameraDeviceInfo> {
+    enumerate_capture_devices_with(
+        Path::new(SYSFS_VIDEO4LINUX_DIR),
+        Path::new("/dev"),
+        &SystemV4lNodeProbe,
+    )
 }

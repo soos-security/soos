@@ -77,19 +77,24 @@ daemon switching to another camera.
 Configures:
 - `device_path`: Path to video device (`/dev/v4l/by-id/...`)
 - `width` & `height`: Frame resolution (default: 640×480)
-- `format`: Pixel format (`PixelFormat::Yuyv`, `Rgb24`, `Grey`, `Mjpeg`, `Nv12`)
+- `format`: Pixel format (`PixelFormat::Yuyv`, `Rgb24`, `Grey`, `Mjpeg`, `Nv12`) (default: `Yuyv`)
 - `auto_format`: Automatic priority-based format negotiation (default: true)
-- `sensor_preference`: Dual-sensor device preference (`SensorPreference::PreferRgb`, `PreferIr`, `Any`)
+- `sensor_preference`: Dual-sensor device preference (`SensorPreference::PreferRgb`, `PreferIr`, `Any`) (default: `PreferIr`)
 - `fps`: Full streaming frame rate (default: 30), requested from the driver with `VIDIOC_S_PARM`
   (GitHub #193); the granted interval is logged and a driver without frame-interval control keeps
   its default rate (warning, never fatal)
-- `idle_fps`: Publication rate once more than half of `idle_timeout` has elapsed without activity
-  (default: 5). It throttles frame publication only (`CameraConfig::publish_fps`, identical in the
-  mock and the V4L2 manager); the hardware keeps streaming at `fps` until auto-standby
+- `idle_fps`: Publication rate once more than half of `idle_timeout` has elapsed (default: 5).
+  It throttles frame publication only (`CameraConfig::publish_fps`, identical in the mock and the
+  V4L2 manager); the hardware keeps streaming at `fps` until auto-standby
 - `idle_timeout`: Inactivity before auto-standby releases the device (default: 10s);
   `Duration::ZERO` disables both auto-standby and the idle throttle
 - `warmup_frames`: Discarded startup frames (default: 20)
 - `min_backoff` & `max_backoff`: Error backoff limits (default: 100ms to 5s)
+
+These are the `CameraConfig::default()` / `CameraConfigBuilder` values. `soos-daemon` builds its
+camera configuration from `/etc/soos/daemon.toml`: a `[pipeline]` section without `warmup_frames`
+discards **0** frames (instant wake, matrix CLP2) and `idle_timeout_secs` overrides `idle_timeout`.
+The page is checked against the code by `soos-invariants::camera_docs_contract` (GitHub #197).
 
 ### Shared Camera Resolver (`resolver.rs`, GitHub #152)
 
@@ -135,6 +140,39 @@ by-id aliases (dangling aliases skipped); tests inject a hermetic `CameraEnumera
   `CameraError::Starved`. After a timeout inside `v4l`'s `next()` (whose re-queued buffer is still
   owned by the driver) the loop dequeues and discards one buffer before calling `next()` again, so
   no buffer is queued twice.
+- **Deep-greyscale buffers (GitHub #195).** A driver-returned `Y8I`/`Y10`/`Y12`/`Y16` format is
+  validated by `validate_deep_grey_format` (2 bytes per pixel, wire stride kept) and every buffer by
+  `validate_deep_grey_buffer`, which applies the same error-flag, `bytesused` and short-buffer
+  checks before `DeepGreyFormat::to_grey8` produces the packed `Grey` payload.
+
+### Hermetic Node Enumeration (`sensor.rs`, GitHub #198)
+
+`enumerate_capture_devices()` is a thin wrapper over
+`enumerate_capture_devices_with(sysfs_dir, dev_dir, &dyn V4lNodeProbe)`:
+
+- only `video<decimal>` entries of `/sys/class/video4linux` (`SYSFS_VIDEO4LINUX_DIR`) are
+  considered, in numeric order (`video2` before `video10`); sub-devices, radio and VBI nodes are
+  never opened;
+- the scan is bounded: at most `MAX_SYSFS_ENTRIES` (256) entries are read and at most
+  `MAX_VIDEO_NODES` (64) nodes are probed;
+- a node is listed only if the probe reports `V4L2_CAP_VIDEO_CAPTURE` **and** at least one
+  decodable pixel format (deep-greyscale IR fourccs count as `Grey`, GitHub #195), so uvcvideo metadata nodes, codec nodes and nodes that cannot be opened
+  (`EACCES`, `ENODEV`) are skipped;
+- `SystemV4lNodeProbe` issues the real `VIDIOC_QUERYCAP` / `VIDIOC_ENUM_FMT` ioctls; tests inject
+  a fixture-table probe (`enumeration_tests.rs`).
+
+When the auto-selected node has no `/dev/v4l/by-id/` alias, the resolver returns the
+`/dev/videoN` node itself (ADR 2026-09-30 "Hermetic V4L2 Enumeration and `/dev/videoN`
+Auto-Selection").
+
+### Opt-in Hardware Smoke Tests
+
+`tests/hardware_smoke_tests.rs` scans, resolves and streams one frame from the real camera. The
+tests are `#[ignore]`d and also return early unless `SOOS_HW_TESTS=1`:
+
+```bash
+SOOS_HW_TESTS=1 cargo test -p soos-camera-v4l --test hardware_smoke_tests -- --ignored
+```
 
 ### Busy-Device Classification (GitHub #150)
 
@@ -214,7 +252,7 @@ while frames are captured.
 | **C2** | Fresh frame available in < 5ms via `ArcSwap` | `bench_latency_tests::test_arcswap_frame_retrieval_latency_under_5ms` | Validated |
 | **C3** | Handles `ENODEV`, `EIO`, `EBUSY` without panic | `error_recovery_tests::test_error_recovery_enodev_without_panic` | Validated |
 | **C4** | Hardware selection by `/dev/v4l/by-id/` rather than index | `config_hardware_tests::test_config_by_id_path_selection` | Validated |
-| **C5** | Drops first 15–30 frames after startup for auto-exposure | `warmup_tests::test_warmup_frames_discard_before_ready` | Validated |
+| **C5** | Drops the first `warmup_frames` frames after startup for auto-exposure (20 in `CameraConfig::default()`; a daemon.toml `[pipeline]` section without the key sets 0, matrix CLP2) | `warmup_tests::test_warmup_frames_discard_before_ready` | Validated |
 | **C6** | Priority format negotiation (`RGB24 -> YUYV -> NV12 -> MJPEG -> Grey`) | `format_negotiation_tests::test_format_negotiation_prefers_rgb24` | Validated |
 | **C7** | Graceful hot-unplug recovery on `ENODEV` | `hotunplug_tests::test_camera_hotunplug_recovery` | Validated |
 | **C8** | Dual-sensor discrimination (RGB vs IR preference) | `dual_sensor_tests::test_dual_sensor_prefers_rgb` | Validated |
@@ -224,3 +262,4 @@ while frames are captured.
 | **CSH1–CSH4** | Re-resolution after `ENODEV`, bounded pacing, no silent substitution, by-id addressing | `supervision_tests::test_supervisor_reresolves_device_after_enodev` (and siblings) | ✅ Verified |
 | **CSH5–CSH6** | Truthful `CameraHealth`, standby vs failure, panic → `Dead` | `supervision_tests::test_supervisor_panic_marks_camera_dead` (and siblings) | ✅ Verified |
 | **GRE5** | `CameraError::kind()` classification and `CameraManager::status()` reporting | `camera_status_tests::*` | ✅ Verified |
+| **CHT1–CHT3** | Hermetic enumeration: capture-only, non-empty formats, numeric order, bounded scan, IR alias or `/dev/videoN` (GitHub #198) | `enumeration_tests::test_enumerate_filters_empty_format_nodes` (and siblings) | ✅ Verified |

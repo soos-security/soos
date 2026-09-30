@@ -30,9 +30,11 @@ pub use resolver::{
 };
 pub use sensor::{
     capture_device_from_probe, classify_sensor, classify_sensor_with_hints,
-    enumerate_capture_devices, is_ir_frame_size_signature, select_camera_device,
-    select_camera_device_with, CameraDeviceInfo, SensorHints, SensorPreference, SensorType,
-    IR_SIGNATURE_MAX_HEIGHT, IR_SIGNATURE_MAX_WIDTH, MAX_FRAME_SIZE_HINTS,
+    enumerate_capture_devices, enumerate_capture_devices_with, is_ir_frame_size_signature,
+    select_camera_device, select_camera_device_with, CameraDeviceInfo, SensorHints,
+    SensorPreference, SensorType, SystemV4lNodeProbe, V4lNodeCapabilities, V4lNodeProbe,
+    IR_SIGNATURE_MAX_HEIGHT, IR_SIGNATURE_MAX_WIDTH, MAX_FRAME_SIZE_HINTS, MAX_SYSFS_ENTRIES,
+    MAX_VIDEO_NODES, SYSFS_VIDEO4LINUX_DIR,
 };
 pub use stable_path::{stable_device_path, DEFAULT_BY_ID_DIR};
 pub use status::{CameraErrorKind, CameraStatus, CameraStatusCell};
