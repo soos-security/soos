@@ -162,12 +162,21 @@ fn run_v4l_supervisor(
                 is_ready.store(false, Ordering::Release);
                 latest_frame.store(None);
 
-                warn!(
-                    "Camera error on '{}': {}. Backing off for {:?}",
-                    config.device_path.display(),
-                    err,
-                    current_backoff
-                );
+                if err.is_device_busy() {
+                    warn!(
+                        "Camera '{}' is held by another process (EBUSY); the root daemon must be \
+                         the only owner of the device. Backing off for {:?}",
+                        config.device_path.display(),
+                        current_backoff
+                    );
+                } else {
+                    warn!(
+                        "Camera error on '{}': {}. Backing off for {:?}",
+                        config.device_path.display(),
+                        err,
+                        current_backoff
+                    );
+                }
 
                 // Sleep backoff with periodic running check
                 let sleep_start = Instant::now();
@@ -290,23 +299,32 @@ fn open_and_stream(
     let fourcc = pixel_format_to_fourcc(target_format);
 
     let req_format = v4l::Format::new(config.width, config.height, fourcc);
-    let actual_format =
-        Capture::set_format(&device, &req_format).map_err(|e| CameraError::SetFormat {
-            path: config.device_path.clone(),
-            width: config.width,
-            height: config.height,
-            format: target_format,
-            reason: e.to_string(),
-        })?;
+    // uvcvideo reports a node streamed by another process (e.g. the daemon) as EBUSY here,
+    // not at open(): classify it as `DeviceBusy` (GitHub #150).
+    let actual_format = Capture::set_format(&device, &req_format).map_err(|e| {
+        CameraError::from_ioctl_error(config.device_path.clone(), e, |reason| {
+            CameraError::SetFormat {
+                path: config.device_path.clone(),
+                width: config.width,
+                height: config.height,
+                format: target_format,
+                reason,
+            }
+        })
+    })?;
 
     let actual_width = actual_format.width;
     let actual_height = actual_format.height;
 
     let mut stream =
         v4l::io::mmap::Stream::with_buffers(&device, v4l::buffer::Type::VideoCapture, 4).map_err(
-            |e| CameraError::StreamCreate {
-                path: config.device_path.clone(),
-                reason: e.to_string(),
+            |e| {
+                CameraError::from_ioctl_error(config.device_path.clone(), e, |reason| {
+                    CameraError::StreamCreate {
+                        path: config.device_path.clone(),
+                        reason,
+                    }
+                })
             },
         )?;
 
@@ -342,17 +360,14 @@ fn open_and_stream(
                 });
             }
             Err(e) => {
-                if let Some(libc::ENODEV) = e.raw_os_error() {
-                    return Err(CameraError::DeviceNotFound {
+                return Err(CameraError::from_ioctl_error(
+                    config.device_path.clone(),
+                    e,
+                    |reason| CameraError::BufferDequeue {
                         path: config.device_path.clone(),
-                        source: e,
-                    });
-                } else {
-                    return Err(CameraError::BufferDequeue {
-                        path: config.device_path.clone(),
-                        reason: e.to_string(),
-                    });
-                }
+                        reason,
+                    },
+                ));
             }
         };
 

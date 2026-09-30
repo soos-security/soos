@@ -102,7 +102,7 @@ Verification: `crates/enrollment-cli/tests/debug_vision_tests.rs` (matrix rows E
 - `--biometrics-dir <PATH>`: Override biometric template storage directory (default: `/var/lib/soos/biometrics`).
 - `--key-file <PATH>`: Override cryptographic master key path (default: `/var/lib/soos/master.key`).
 - `--models-dir <PATH>`: Override ONNX neural models directory (default: `/var/lib/soos/models`).
-- `--camera-device <PATH>`: Override V4L2 camera device node (default: `/dev/v4l/by-id/default-camera` or first detected entry in `/dev/v4l/by-id/`).
+- `--camera-device <PATH>`: Override V4L2 camera device node. Without it (or with `auto`/`default`), the device is resolved exactly like `soos-daemon` through the shared `soos_camera_v4l::resolve_camera_device`: `[pipeline] camera_device` from `/etc/soos/daemon.toml` if explicit, otherwise the capture node matching `[pipeline] sensor_preference` (default IR first), reported through its stable `/dev/v4l/by-id/` alias (GitHub #152).
 
 ---
 

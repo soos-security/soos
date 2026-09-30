@@ -38,7 +38,7 @@ pub const DEFAULT_KEY_PATH: &str = "/var/lib/soos/master.key";
 pub const DEFAULT_MODELS_DIR: &str = "/var/lib/soos/models";
 
 /// Default stable camera device identifier per Criterion C4.
-pub const DEFAULT_CAMERA_DEVICE: &str = "/dev/v4l/by-id/default-camera";
+pub const DEFAULT_CAMERA_DEVICE: &str = soos_camera_v4l::AUTO_CAMERA_DEVICE;
 
 /// Attested model registry ID for SCRFD 500M KPS face detector with 5-point landmarks.
 pub const MODEL_ID_FACE_DETECTOR: &str = "scrfd_500m_kps";
@@ -53,112 +53,71 @@ pub const MODEL_ID_EMBEDDING: &str = "arcface_w600k_mbf";
 pub const REQUIRED_MODEL_IDS: [&str; 3] =
     [MODEL_ID_FACE_DETECTOR, MODEL_ID_PAD, MODEL_ID_EMBEDDING];
 
-/// Resolves the camera device path:
-/// 1. Explicit CLI argument (`cli_device`), if provided and not "auto"/"default".
-/// 2. Explicit `camera_device` from daemon config, if explicitly provided (e.g. `/dev/video0`).
-/// 3. Hardware auto-detection matching `sensor_preference` (default `PreferIr`).
-/// 4. First deterministic entry in `/dev/v4l/by-id/`.
-/// 5. Standard `/dev/video0` or fallback `/dev/v4l/by-id/default-camera`.
+/// Resolves the camera device path exactly like `soos-daemon` (GitHub #152).
+///
+/// Explicit sources are considered in order: the CLI argument (`cli_device`), then
+/// `[pipeline] camera_device` from the daemon configuration at `config_path`. Sentinels
+/// (`""`, `"auto"`, `"default"`, `/dev/v4l/by-id/default-camera`) are ignored. Without an explicit
+/// device the shared resolver [`soos_camera_v4l::resolve_camera_device`] auto-detects the capture
+/// node matching `[pipeline] sensor_preference` (default `PreferIr`) and returns its stable
+/// `/dev/v4l/by-id/` alias (Criterion C4).
 pub fn resolve_camera_device_from_config(
     cli_device: Option<PathBuf>,
     config_path: Option<&Path>,
 ) -> PathBuf {
-    if let Some(device) = cli_device {
-        let dev_str = device.to_string_lossy();
-        if dev_str != "auto" && dev_str != "default" && !dev_str.is_empty() {
-            return device;
-        }
-    }
-
-    let mut configured_device: Option<String> = None;
-    let mut sensor_preference = soos_camera_v4l::SensorPreference::PreferIr;
-
-    // 1. Check daemon configuration if provided
-    if let Some(cfg) = config_path {
-        if cfg.is_file() {
-            if let Ok(content) = std::fs::read_to_string(cfg) {
-                if let Ok(value) = content.parse::<toml::Value>() {
-                    if let Some(dev_str) = value
-                        .get("pipeline")
-                        .and_then(|p| p.get("camera_device"))
-                        .and_then(|d| d.as_str())
-                    {
-                        configured_device = Some(dev_str.to_string());
-                    }
-
-                    if let Some(pref_str) = value
-                        .get("pipeline")
-                        .and_then(|p| p.get("sensor_preference"))
-                        .and_then(|s| s.as_str())
-                    {
-                        match pref_str.to_lowercase().as_str() {
-                            "prefer_rgb" | "rgb" => {
-                                sensor_preference = soos_camera_v4l::SensorPreference::PreferRgb;
-                            }
-                            "prefer_ir" | "ir" => {
-                                sensor_preference = soos_camera_v4l::SensorPreference::PreferIr;
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    if let Some(ref dev_str) = configured_device {
-        if dev_str != "auto"
-            && dev_str != "default"
-            && !dev_str.is_empty()
-            && dev_str.starts_with("/dev")
-        {
-            return PathBuf::from(dev_str);
-        }
-    }
-
-    // If config was provided and configured "auto" / "default", perform hardware auto-detection
-    if configured_device.is_some() {
-        let candidates = soos_camera_v4l::enumerate_capture_devices();
-        if let Some(selected) =
-            soos_camera_v4l::select_camera_device(&candidates, sensor_preference)
-        {
-            return selected.path.clone();
-        }
-    }
-
-    // 2. Deterministic entry in /dev/v4l/by-id/ per Criterion C4
-    let by_id_dir = Path::new("/dev/v4l/by-id");
-    if by_id_dir.is_dir() {
-        if let Ok(entries) = std::fs::read_dir(by_id_dir) {
-            let mut paths: Vec<_> = entries
-                .filter_map(|e| e.ok().map(|entry| entry.path()))
-                .filter(|p| p.is_file() || p.is_symlink())
-                .collect();
-            paths.sort();
-            if let Some(first) = paths.into_iter().next() {
-                return first;
-            }
-        }
-    }
-
-    // 3. Fallback to hardware auto-detection matching sensor preference
-    let candidates = soos_camera_v4l::enumerate_capture_devices();
-    if let Some(selected) = soos_camera_v4l::select_camera_device(&candidates, sensor_preference) {
-        return selected.path.clone();
-    }
-
-    // 4. Check for standard /dev/video0 fallback
-    let video0 = Path::new("/dev/video0");
-    if video0.exists() {
-        return video0.to_path_buf();
-    }
-
-    PathBuf::from(DEFAULT_CAMERA_DEVICE)
+    resolve_camera_device_from_config_with(
+        cli_device,
+        config_path,
+        &soos_camera_v4l::SystemCameraEnumerator::default(),
+    )
 }
 
-/// Resolves the camera device path, preferring an explicit CLI argument if provided,
-/// then the first deterministic entry in `/dev/v4l/by-id/`, and falling back to
-/// `/dev/v4l/by-id/default-camera` per Criterion C4.
+/// Enumerator-injectable form of [`resolve_camera_device_from_config`] (hermetic tests).
+pub fn resolve_camera_device_from_config_with(
+    cli_device: Option<PathBuf>,
+    config_path: Option<&Path>,
+    enumerator: &dyn soos_camera_v4l::CameraEnumerator,
+) -> PathBuf {
+    let (configured_device, sensor_preference) = read_daemon_camera_settings(config_path);
+
+    let explicit = cli_device
+        .filter(|p| !soos_camera_v4l::is_auto_camera_device(p))
+        .or_else(|| configured_device.filter(|p| !soos_camera_v4l::is_auto_camera_device(p)));
+
+    soos_camera_v4l::resolve_camera_device(explicit.as_deref(), sensor_preference, enumerator).path
+}
+
+/// Reads `[pipeline] camera_device` and `[pipeline] sensor_preference` from the daemon
+/// configuration, using the daemon's shared vocabulary. A missing or unreadable file yields
+/// `(None, PreferIr)`, the daemon defaults.
+fn read_daemon_camera_settings(
+    config_path: Option<&Path>,
+) -> (Option<PathBuf>, soos_camera_v4l::SensorPreference) {
+    let default = (None, soos_camera_v4l::SensorPreference::default());
+    let Some(cfg) = config_path.filter(|p| p.is_file()) else {
+        return default;
+    };
+    let Ok(content) = std::fs::read_to_string(cfg) else {
+        return default;
+    };
+    let Ok(value) = content.parse::<toml::Value>() else {
+        return default;
+    };
+    let pipeline = value.get("pipeline");
+    let device = pipeline
+        .and_then(|p| p.get("camera_device"))
+        .and_then(|d| d.as_str())
+        .map(PathBuf::from);
+    let preference = pipeline
+        .and_then(|p| p.get("sensor_preference"))
+        .and_then(|s| s.as_str())
+        .and_then(soos_camera_v4l::parse_sensor_preference)
+        .unwrap_or_default();
+    (device, preference)
+}
+
+/// Resolves the camera device path from an optional CLI argument only (no daemon configuration),
+/// through the shared resolver (see [`resolve_camera_device_from_config`]).
 pub fn resolve_camera_device(cli_device: Option<PathBuf>) -> PathBuf {
     resolve_camera_device_from_config(cli_device, None)
 }
