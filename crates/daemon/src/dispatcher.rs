@@ -26,7 +26,7 @@ use crate::session_policy::LocalSessionPolicy;
 use soos_camera_v4l::PixelFormat;
 use soos_evidence_store::{EvidenceFrame, EvidencePixelFormat, FrameMetadata};
 use soos_policy::{ConsensusDecision, FrameEvaluation, PadAggregator, RateLimiter};
-use soos_protocol::codec::{encode, encode_preview, CodecError};
+use soos_protocol::codec::{decode_payload, encode, encode_preview, CodecError};
 use soos_protocol::types::{
     Event, EventKind, PreviewResponse, ReasonClass, Request, RequestId, RequestKind, Response,
     StatusResponse, Verdict, CURRENT_VERSION, MAX_MESSAGE_SIZE,
@@ -409,14 +409,11 @@ impl ConnectionDispatcher {
         stream.read_exact(&mut body_buffer).await?;
 
         // Step 4: Decode message — may be Request or Event
-        // Uses exact deserialization without unconsumed trailing bytes to reliably differentiate schemas
-        let req_opt = postcard::take_from_bytes::<Request>(&body_buffer)
-            .ok()
-            .and_then(|(r, rest)| if rest.is_empty() { Some(r) } else { None });
+        // Uses the shared strict decoder of soos-protocol (no unconsumed trailing bytes, the
+        // same strictness as the PAM client, GitHub #224) to differentiate schemas.
+        let req_opt = decode_payload::<Request>(&body_buffer).ok();
 
-        let event_opt = postcard::take_from_bytes::<Event>(&body_buffer)
-            .ok()
-            .and_then(|(e, rest)| if rest.is_empty() { Some(e) } else { None });
+        let event_opt = decode_payload::<Event>(&body_buffer).ok();
 
         match (req_opt, event_opt) {
             (Some(req), Some(event)) => {

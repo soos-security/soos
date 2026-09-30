@@ -62,7 +62,7 @@ pub enum Commands {
     /// List all enrolled users and metadata
     List(ListArgs),
     /// Import and encrypt a biometric template from file
-    Import(ImportArgs),
+    Import(ImportCommand),
     /// Capture a frame, run face detection, and write an HTML debug visualization
     DebugVision(DebugVisionArgs),
 }
@@ -177,6 +177,30 @@ pub struct ImportArgs {
     /// Attested model version.
     #[arg(long, default_value = "2.0.0")]
     pub model_version: String,
+}
+
+/// `import` subcommand: the template source ([`ImportArgs`]) plus the overwrite confirmation.
+///
+/// `--yes` lives here rather than in [`ImportArgs`] so that the template-source arguments stay
+/// a stable library type (GitHub #237). The wrapper dereferences to [`ImportArgs`].
+#[derive(Args, Debug, Clone)]
+pub struct ImportCommand {
+    /// Template source and target.
+    #[command(flatten)]
+    pub args: ImportArgs,
+
+    /// Replace an already enrolled template for the target user. Without it, importing onto
+    /// an enrolled user from a file fails with "already enrolled".
+    #[arg(short = 'y', long)]
+    pub yes: bool,
+}
+
+impl std::ops::Deref for ImportCommand {
+    type Target = ImportArgs;
+
+    fn deref(&self) -> &ImportArgs {
+        &self.args
+    }
 }
 
 /// Resolves the target UID from an explicit UID, a username, or the invoking user.

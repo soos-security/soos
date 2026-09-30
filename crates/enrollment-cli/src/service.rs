@@ -55,6 +55,17 @@ pub const MODEL_ID_EMBEDDING: &str = "arcface_w600k_mbf";
 /// `test_embedding_model_constants_match_attested_manifest`.
 pub const EMBEDDING_MODEL_VERSION: &str = "2.0.0";
 
+/// Maximum wait, in milliseconds, for the camera to publish a frame newer than the previous
+/// enrollment candidate (GitHub #228). A camera that stalls longer fails the enrollment
+/// with [`soos_camera_v4l::CameraError::Starved`] instead of re-evaluating a stale frame.
+pub const ENROLL_FRESH_FRAME_TIMEOUT_MS: u64 = 500;
+
+/// Maximum wait, in milliseconds, for the first cached camera frame of an operation.
+const FIRST_FRAME_TIMEOUT_MS: u64 = 2000;
+
+/// Poll interval, in milliseconds, while waiting for a camera frame.
+const FRAME_POLL_INTERVAL_MS: u64 = 10;
+
 /// Set of all 3 neural model IDs required by the biometric vision pipeline.
 pub const REQUIRED_MODEL_IDS: [&str; 3] =
     [MODEL_ID_FACE_DETECTOR, MODEL_ID_PAD, MODEL_ID_EMBEDDING];
@@ -142,6 +153,8 @@ pub struct EnrollmentSummary {
     pub uid: u32,
     pub frames_evaluated: usize,
     pub valid_candidates: usize,
+    /// Candidates rejected by presentation attack detection (counted as invalid, GitHub #228).
+    pub pad_rejections: usize,
     pub best_score: f32,
     pub embedding_dim: usize,
     pub model_id: String,
@@ -150,6 +163,9 @@ pub struct EnrollmentSummary {
     /// model ([`MODEL_ID_EMBEDDING`] / [`EMBEDDING_MODEL_VERSION`]). The daemon refuses
     /// templates whose model identifier differs from its loaded extractor.
     pub model_overridden: bool,
+    /// `true` when the target user already has a template that confirming will replace
+    /// (GitHub #233): the confirmation prompt must say so.
+    pub already_enrolled: bool,
 }
 
 /// Outcome of a successfully completed enrollment.
@@ -161,6 +177,8 @@ pub struct EnrollmentOutcome {
     pub embedding_dim: usize,
     pub model_id: String,
     pub model_version: String,
+    /// `true` when an existing template of the same user was replaced.
+    pub replaced_existing: bool,
 }
 
 /// Latency metrics breakdown measured during diagnostic verification.
@@ -193,6 +211,16 @@ pub struct EnrolledUserSummary {
     pub model_version: String,
     pub enrollment_timestamp: u64,
     pub embedding_dim: usize,
+}
+
+/// Formats `soos-enroll list --format json` output with `serde_json` (GitHub #232).
+///
+/// Every string field (username, model identifier and version) is escaped, so the output is
+/// valid JSON whatever the stored metadata contains.
+#[must_use]
+pub fn format_enrolled_json(summaries: &[EnrolledUserSummary]) -> String {
+    serde_json::to_string_pretty(summaries)
+        .unwrap_or_else(|_| "{\"error\": \"list serialization failed\"}".to_string())
 }
 
 /// Core enrollment service orchestrator.
@@ -236,20 +264,46 @@ impl EnrollmentService {
 
     /// Acquires a fresh, stabilized camera frame.
     fn acquire_frame(&self) -> Result<Arc<Frame>, EnrollmentCliError> {
+        self.acquire_frame_after(None)
+    }
+
+    /// Acquires a camera frame, newer than `previous_sequence` when one is given.
+    ///
+    /// Without a previous sequence the first cached frame is returned (waiting up to 2 s for
+    /// the camera to publish one). With a previous sequence, cached frames whose `sequence`
+    /// is not strictly greater are skipped for at most [`ENROLL_FRESH_FRAME_TIMEOUT_MS`], so
+    /// that every multi-frame enrollment candidate is a distinct capture (GitHub #228).
+    ///
+    /// # Errors
+    ///
+    /// [`soos_camera_v4l::CameraError::Starved`] when no (fresh) frame arrives in time.
+    fn acquire_frame_after(
+        &self,
+        previous_sequence: Option<u64>,
+    ) -> Result<Arc<Frame>, EnrollmentCliError> {
         let camera = self
             .camera
             .as_ref()
             .ok_or(EnrollmentCliError::CameraNotInitialized)?;
         camera.notify_activity();
-        for _ in 0..200 {
+        let budget = match previous_sequence {
+            None => Duration::from_millis(FIRST_FRAME_TIMEOUT_MS),
+            Some(_) => Duration::from_millis(ENROLL_FRESH_FRAME_TIMEOUT_MS),
+        };
+        let start = Instant::now();
+        loop {
             if let Some(frame) = camera.latest_frame() {
-                return Ok(frame);
+                if previous_sequence.is_none_or(|prev| frame.sequence > prev) {
+                    return Ok(frame);
+                }
             }
-            std::thread::sleep(Duration::from_millis(10));
+            if start.elapsed() >= budget {
+                return Err(EnrollmentCliError::Camera(
+                    soos_camera_v4l::CameraError::Starved,
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(FRAME_POLL_INTERVAL_MS));
         }
-        Err(EnrollmentCliError::Camera(
-            soos_camera_v4l::CameraError::Starved,
-        ))
     }
 
     /// Enrolls a user with multi-frame quality selection, interactive confirmation, and encryption.
@@ -272,9 +326,13 @@ impl EnrollmentService {
         let frames_to_capture = args.frames.clamp(1, 30);
         let mut candidates = Vec::with_capacity(frames_to_capture);
         let mut outputs: Vec<Option<PipelineOutput>> = Vec::with_capacity(frames_to_capture);
+        let mut last_sequence: Option<u64> = None;
+        let mut pad_rejections = 0usize;
+        let mut last_pad_error: Option<VisionError> = None;
 
         for idx in 0..frames_to_capture {
-            let frame = self.acquire_frame()?;
+            let frame = self.acquire_frame_after(last_sequence)?;
+            last_sequence = Some(frame.sequence);
             match pipeline.process_frame(&frame) {
                 Ok(output) => {
                     candidates.push(CandidateEvaluation {
@@ -315,11 +373,29 @@ impl EnrollmentService {
                     });
                     outputs.push(None);
                 }
+                Err(
+                    e @ (VisionError::PadFailed { .. } | VisionError::IrLivenessGateFailed { .. }),
+                ) => {
+                    // A presentation-attack rejection is an invalid candidate, not an abort
+                    // (GitHub #228); it can never become the enrolled frame.
+                    pad_rejections = pad_rejections.saturating_add(1);
+                    last_pad_error = Some(e);
+                    candidates.push(CandidateEvaluation {
+                        frame_idx: idx,
+                        detections: vec![],
+                    });
+                    outputs.push(None);
+                }
                 Err(e) => return Err(e.into()),
             }
         }
 
-        let best = select_best_frame(&candidates, pipeline.config().min_face_confidence)?;
+        let best = match select_best_frame(&candidates, pipeline.config().min_face_confidence) {
+            Ok(best) => best,
+            // Every candidate failed and at least one was a presentation attack: report the
+            // PAD rejection rather than a generic quality failure (fail closed, nothing stored).
+            Err(e) => return Err(last_pad_error.map_or(e, EnrollmentCliError::from)),
+        };
         let best_output = outputs
             .get(best.frame_idx)
             .and_then(|opt| opt.as_ref())
@@ -345,20 +421,20 @@ impl EnrollmentService {
             uid,
             frames_evaluated: frames_to_capture,
             valid_candidates,
+            pad_rejections,
             best_score: best.score,
             embedding_dim,
             model_id: args.model_id.clone(),
             model_version: args.model_version.clone(),
             model_overridden: args.model_id != MODEL_ID_EMBEDDING
                 || args.model_version != EMBEDDING_MODEL_VERSION,
+            already_enrolled,
         };
 
-        if !args.yes {
-            if !prompt_confirm(&summary) {
-                return Err(EnrollmentCliError::Cancelled);
-            }
-        } else if already_enrolled {
-            // Overwriting silently allowed when --yes is explicitly passed
+        // `--yes` is the explicit consent to replace an existing template; otherwise the
+        // prompt shows `summary.already_enrolled` before the administrator confirms.
+        if !args.yes && !prompt_confirm(&summary) {
+            return Err(EnrollmentCliError::Cancelled);
         }
 
         let timestamp = SystemTime::now()
@@ -383,6 +459,7 @@ impl EnrollmentService {
             embedding_dim,
             model_id: args.model_id.clone(),
             model_version: args.model_version.clone(),
+            replaced_existing: already_enrolled,
         })
     }
 
@@ -533,7 +610,7 @@ impl EnrollmentService {
         let mut summaries = Vec::with_capacity(uids.len());
 
         for uid in uids {
-            if let Some(template) = self.store.get(uid)? {
+            if let Some(template) = self.store.get_metadata(uid)? {
                 let username = match User::from_uid(Uid::from_raw(uid)) {
                     Ok(Some(u)) => u.name,
                     _ => uid.to_string(),
@@ -556,20 +633,82 @@ impl EnrollmentService {
 
     /// Imports and encrypts an existing biometric template into the biometric store.
     ///
-    /// `--file -` ([`IMPORT_STDIN_PATH`]) reads the template from standard input (the GUI
-    /// path, GitHub #156); any other value is read through [`read_import_file`], which
-    /// requires the file to be owned by `PKEXEC_UID` when running under `pkexec`.
+    /// Equivalent to [`Self::import_with_overwrite`] without `--yes`: a file import onto an
+    /// already enrolled user fails with [`EnrollmentCliError::AlreadyEnrolled`].
     pub fn import(&self, args: &ImportArgs) -> Result<EnrollmentOutcome, EnrollmentCliError> {
+        self.import_with_overwrite(args, false)
+    }
+
+    /// Imports a template, replacing an existing one only when `allow_overwrite` (`--yes`).
+    ///
+    /// `--file -` ([`IMPORT_STDIN_PATH`]) reads the template from standard input (the GUI
+    /// path, GitHub #156) through [`Self::import_with_overwrite_from_reader`]; any other value
+    /// is read through [`read_import_file`], which requires the file to be owned by
+    /// `PKEXEC_UID` when running under `pkexec`.
+    ///
+    /// # Errors
+    ///
+    /// [`EnrollmentCliError::AlreadyEnrolled`] when the import (file or stdin) targets an
+    /// enrolled user and `allow_overwrite` is `false`; the input is not read and nothing is
+    /// replaced (GitHub #237).
+    pub fn import_with_overwrite(
+        &self,
+        args: &ImportArgs,
+        allow_overwrite: bool,
+    ) -> Result<EnrollmentOutcome, EnrollmentCliError> {
         if args.file.as_os_str() == IMPORT_STDIN_PATH {
-            return self.import_from_reader(args, std::io::stdin().lock());
+            return self.import_with_overwrite_from_reader(
+                args,
+                allow_overwrite,
+                std::io::stdin().lock(),
+            );
         }
-        check_privileges(self.require_root)?;
+        self.refuse_unconfirmed_overwrite(args, allow_overwrite)?;
         let invoker = parse_pkexec_uid(std::env::var("PKEXEC_UID").ok().as_deref())?;
         let bytes = read_import_file(&args.file, invoker)?;
         self.store_imported(args, &bytes)
     }
 
+    /// Imports a template read from `reader`, replacing an existing one only when
+    /// `allow_overwrite` (`--yes`).
+    ///
+    /// The overwrite check runs before `reader` is touched, so a refused stdin import never
+    /// consumes its input (GitHub #237).
+    ///
+    /// # Errors
+    ///
+    /// [`EnrollmentCliError::AlreadyEnrolled`] when the target user is enrolled and
+    /// `allow_overwrite` is `false`; otherwise as [`Self::import_from_reader`].
+    pub fn import_with_overwrite_from_reader<R: Read>(
+        &self,
+        args: &ImportArgs,
+        allow_overwrite: bool,
+        reader: R,
+    ) -> Result<EnrollmentOutcome, EnrollmentCliError> {
+        self.refuse_unconfirmed_overwrite(args, allow_overwrite)?;
+        self.import_from_reader(args, reader)
+    }
+
+    /// Checks privileges and refuses to replace an enrolled template without `--yes`.
+    fn refuse_unconfirmed_overwrite(
+        &self,
+        args: &ImportArgs,
+        allow_overwrite: bool,
+    ) -> Result<(), EnrollmentCliError> {
+        check_privileges(self.require_root)?;
+        let uid = resolve_target_uid(args.uid, args.username.as_deref())?;
+        if !allow_overwrite && self.store.exists(uid)? {
+            return Err(EnrollmentCliError::AlreadyEnrolled(uid));
+        }
+        Ok(())
+    }
+
     /// Imports a template read from `reader` (at most [`MAX_IMPORT_INPUT_BYTES`] bytes).
+    ///
+    /// Library entry point without overwrite gating: an existing template is replaced and the
+    /// replacement is reported in [`EnrollmentOutcome::replaced_existing`]. The CLI never calls
+    /// it directly; `soos-enroll import --file -` goes through
+    /// [`Self::import_with_overwrite_from_reader`], which requires `--yes` to replace.
     ///
     /// # Errors
     ///
@@ -602,6 +741,7 @@ impl EnrollmentService {
         let template =
             BiometricTemplate::new(uid, model_id.clone(), model_version.clone(), now, embedding)?;
 
+        let replaced_existing = self.store.exists(uid)?;
         self.store.enroll(&template)?;
 
         Ok(EnrollmentOutcome {
@@ -611,6 +751,7 @@ impl EnrollmentService {
             embedding_dim: 512,
             model_id,
             model_version,
+            replaced_existing,
         })
     }
 
@@ -1084,9 +1225,4 @@ pub fn build_pad_detector(
     liveness_threshold: f32,
 ) -> OrtPadDetector {
     OrtPadDetector::new(pad_session, liveness_threshold)
-}
-
-/// Builds an `EnrollmentService` (full service alias for backward compatibility).
-pub fn build_service(cli: &Cli) -> Result<EnrollmentService, EnrollmentCliError> {
-    build_full_service(cli)
 }

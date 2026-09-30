@@ -278,6 +278,7 @@ fn plan_gdm_enable(content: &str, include_dir: &Path) -> Result<Option<EnablePla
                 .into(),
         ));
     };
+    let has_jump = !jumps.is_empty();
     // A jump from a rule before the insertion point that lands on or beyond it would
     // silently change target once rules are inserted.
     for (from, jump) in jumps {
@@ -292,13 +293,20 @@ fn plan_gdm_enable(content: &str, include_dir: &Path) -> Result<Option<EnablePla
 
     // Only an earlier rule with a plain `required`/`requisite` control enforces the
     // gate; an `optional` (or any other) copy earlier in the file does not count.
-    let already_present: Vec<String> = lines
-        .iter()
-        .take(anchor_index)
-        .filter_map(|raw| PamLine::parse(raw))
-        .filter(|rule| rule.is_auth() && rule.is_enforcing())
-        .filter_map(|rule| normalized_rule(&rule))
-        .collect();
+    // When any `[...=N]` jump precedes the anchor, an earlier copy may be skipped
+    // (e.g. `pam_succeed_if ... ingroup vip` jumping over `requisite pam_nologin.so`),
+    // so nothing is de-duplicated: running a gate twice is harmless (GitHub #278).
+    let already_present: Vec<String> = if has_jump {
+        Vec::new()
+    } else {
+        lines
+            .iter()
+            .take(anchor_index)
+            .filter_map(|raw| PamLine::parse(raw))
+            .filter(|rule| rule.is_auth() && rule.is_enforcing())
+            .filter_map(|rule| normalized_rule(&rule))
+            .collect()
+    };
     let gates = if anchor_rule.delegation().is_some() {
         delegated_gates(include_dir, lines.get(anchor_index..).unwrap_or_default())?
     } else {

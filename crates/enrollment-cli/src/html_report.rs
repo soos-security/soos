@@ -9,49 +9,6 @@
     reason = "Diagnostic tool encoding logic requires integer arithmetic and bounds-checked indexing"
 )]
 
-pub fn encode_bmp(width: u32, height: u32, rgb: &[u8]) -> Vec<u8> {
-    let row_stride = ((width * 3 + 3) & !3) as usize;
-    let file_size = 54 + (row_stride * height as usize) as u32;
-    let mut bmp = Vec::with_capacity(file_size as usize);
-
-    // BMP Header
-    bmp.extend_from_slice(b"BM");
-    bmp.extend_from_slice(&file_size.to_le_bytes());
-    bmp.extend_from_slice(&[0, 0, 0, 0]);
-    bmp.extend_from_slice(&54u32.to_le_bytes());
-
-    // DIB Header (BITMAPINFOHEADER)
-    bmp.extend_from_slice(&40u32.to_le_bytes());
-    bmp.extend_from_slice(&width.to_le_bytes());
-    // Positive height for standard bottom-up bitmap (supported by all browsers)
-    bmp.extend_from_slice(&height.to_le_bytes());
-    bmp.extend_from_slice(&1u16.to_le_bytes()); // planes
-    bmp.extend_from_slice(&24u16.to_le_bytes()); // bpp
-    bmp.extend_from_slice(&0u32.to_le_bytes()); // BI_RGB
-    bmp.extend_from_slice(&((row_stride * height as usize) as u32).to_le_bytes());
-    bmp.extend_from_slice(&2835u32.to_le_bytes());
-    bmp.extend_from_slice(&2835u32.to_le_bytes());
-    bmp.extend_from_slice(&0u32.to_le_bytes());
-    bmp.extend_from_slice(&0u32.to_le_bytes());
-
-    // Pixels (RGB to BGR), bottom-up (reverse y loop)
-    let w3 = (width * 3) as usize;
-    for y in (0..height as usize).rev() {
-        let row_start = y * w3;
-        let row_end = row_start + w3;
-        let row = &rgb[row_start..row_end];
-        for chunk in row.chunks_exact(3) {
-            bmp.push(chunk[2]); // B
-            bmp.push(chunk[1]); // G
-            bmp.push(chunk[0]); // R
-        }
-        for _ in 0..(row_stride - w3) {
-            bmp.push(0);
-        }
-    }
-    bmp
-}
-
 const BASE64_ALPHABET: &[u8; 64] =
     b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 

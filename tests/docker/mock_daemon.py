@@ -46,7 +46,8 @@ VERDICT_ALLOW = 0
 VERDICT_DENY = 1
 VERDICT_UNAVAILABLE = 2
 REASON_FACEMATCH = 0
-REASON_SCORE_BELOW_THRESHOLD = 1
+# ReasonClass wire index 3 (index 1 is NoFace); user-approved fix 2026-09-30, GitHub #226.
+REASON_SCORE_BELOW_THRESHOLD = 3
 
 
 VERDICT_UNDECODABLE = 0x7F  # single-byte varint outside the Verdict enum

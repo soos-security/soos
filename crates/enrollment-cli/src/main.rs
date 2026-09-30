@@ -14,8 +14,8 @@ use clap::Parser;
 use soos_enrollment_cli::args::{resolve_target_uid, Cli, Commands, OutputFormat};
 use soos_enrollment_cli::error::EnrollmentCliError;
 use soos_enrollment_cli::{
-    build_full_service, build_store_only, check_privileges, EMBEDDING_MODEL_VERSION,
-    MODEL_ID_EMBEDDING,
+    build_full_service, build_store_only, check_privileges, format_enrolled_json,
+    EMBEDDING_MODEL_VERSION, MODEL_ID_EMBEDDING,
 };
 use soos_protocol::Verdict;
 
@@ -32,8 +32,10 @@ fn prompt_stdin(prompt: &str) -> bool {
 }
 
 fn run() -> Result<(), EnrollmentCliError> {
-    check_privileges(true)?;
+    // Parse first so that `--help`, `--version` and usage errors work for any user; every
+    // subcommand still requires root (GitHub #237).
     let cli = Cli::parse();
+    check_privileges(true)?;
 
     match &cli.command {
         Commands::Enroll(args) => {
@@ -55,15 +57,28 @@ fn run() -> Result<(), EnrollmentCliError> {
                 println!("Target UID:           {}", summary.uid);
                 println!("Frames evaluated:     {}", summary.frames_evaluated);
                 println!("Valid face frames:    {}", summary.valid_candidates);
+                println!("PAD-rejected frames:  {}", summary.pad_rejections);
                 println!("Selected score:       {:.2}", summary.best_score);
                 println!("Embedding dimension:  {}", summary.embedding_dim);
                 println!("Model ID:             {}", summary.model_id);
                 println!("Model Version:        {}", summary.model_version);
+                if summary.already_enrolled {
+                    println!(
+                        "[WARN] UID {} is already enrolled: saving REPLACES the existing template.",
+                        summary.uid
+                    );
+                }
                 println!("====================================\n");
 
                 prompt_stdin("Save and encrypt this biometric template? [y/N]: ")
             })?;
 
+            if outcome.replaced_existing {
+                println!(
+                    "[WARN] The previous template of UID {} was replaced.",
+                    outcome.uid
+                );
+            }
             println!(
                 "[OK] User {} enrolled successfully ({} frames evaluated, quality score: {:.2}).",
                 outcome.uid, outcome.frames_evaluated, outcome.best_score
@@ -139,26 +154,20 @@ fn run() -> Result<(), EnrollmentCliError> {
                     }
                 }
                 OutputFormat::Json => {
-                    println!("[");
-                    for (i, s) in summaries.iter().enumerate() {
-                        let comma = if i.saturating_add(1) < summaries.len() {
-                            ","
-                        } else {
-                            ""
-                        };
-                        println!(
-                            "  {{\"uid\": {}, \"username\": \"{}\", \"model_id\": \"{}\", \"model_version\": \"{}\", \"enrollment_timestamp\": {}, \"embedding_dim\": {}}}{}",
-                            s.uid, s.username, s.model_id, s.model_version, s.enrollment_timestamp, s.embedding_dim, comma
-                        );
-                    }
-                    println!("]");
+                    println!("{}", format_enrolled_json(&summaries));
                 }
             }
         }
 
-        Commands::Import(args) => {
+        Commands::Import(cmd) => {
             let service = build_store_only(&cli)?;
-            let outcome = service.import(args)?;
+            let outcome = service.import_with_overwrite(&cmd.args, cmd.yes)?;
+            if outcome.replaced_existing {
+                println!(
+                    "[WARN] The previous template of UID {} was replaced.",
+                    outcome.uid
+                );
+            }
             println!(
                 "[OK] Biometric template for UID {} imported successfully (embedding dim: {}).",
                 outcome.uid, outcome.embedding_dim

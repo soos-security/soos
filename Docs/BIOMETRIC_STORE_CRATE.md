@@ -75,6 +75,13 @@ Recorded as ADR 2026-09-30 "Biometric Template Erasure Model" in `AI/DECISIONS.m
 - **What cannot be guaranteed**: in-place overwrite does not reach the physical blocks on copy-on-write filesystems (btrfs, ZFS), with `data=journal`, LVM/filesystem snapshots or backups, or on flash media with wear levelling (SSD, eMMC, NVMe). This is the same limitation documented for GNU `shred`. User-facing messages therefore say "overwritten (best effort)", never "securely shredded" or "unrecoverable".
 - **Rejected alternative**: a per-template data key stored inside the template file adds nothing (deleting the file and deleting the wrapped key are the same operation on the same blocks); a separate per-template key store would move the problem to another file. The master key remains the single crypto-erasure point.
 
+### 3.5 Bounded Reads and Metadata-Only Access (GitHub #235, STO-19)
+
+Recorded as ADR 2026-09-30 "Bounded Template Reads and Metadata-Only Listing".
+
+- `MAX_TEMPLATE_FILE_BYTES` = 64 KiB bounds every template file. `get` and `get_metadata` refuse a larger file with `BiometricStoreError::CorruptFile` from its `fstat` length, before any read, and read through `take(MAX + 1)` so a file that grows after the check is refused too. `enroll` refuses (`InvalidMetadata`) a template whose ciphertext would exceed the bound.
+- `get_metadata(uid) -> Option<TemplateMetadata>` authenticates and decrypts like `get`, then deserializes `TemplateMetadata` (`uid`, `model_id`, `model_version`, `enrollment_timestamp`, `embedding_dim`): the embedding array is walked only to count its elements and check they are finite, never stored. Listing callers (`soos-enroll list`, the GUI profile refresh) use it.
+
 ---
 
 ## 4. Public API & Usage
@@ -113,6 +120,11 @@ store.enroll(&template)?;
 // 2. Read (Get)
 if let Some(loaded) = store.get(1000)? {
     println!("Loaded UID {} with dim {}", loaded.uid, loaded.embedding_dim);
+}
+
+// 2b. Read metadata only (no embedding allocation; used for listing)
+if let Some(meta) = store.get_metadata(1000)? {
+    println!("UID {} enrolled with {} v{}", meta.uid, meta.model_id, meta.model_version);
 }
 
 // 3. Check Existence

@@ -9,9 +9,17 @@
 //! - Declared message size is verified BEFORE any buffer allocation or deserialization.
 //! - Oversized messages are rejected with zero allocation.
 //! - The codec performs zero direct I/O: operations strictly process `&[u8]` slices.
+//! - Decoding is strict: the declared payload must be consumed exactly; unconsumed bytes
+//!   inside the declared length are rejected with [`CodecError::TrailingBytes`] (GitHub #224).
+//!   The daemon decodes unframed payloads through the same strict [`decode_payload`].
+//! - Encoding sizes the frame first (`postcard::ser_flavors::Size`) and serializes in place
+//!   into the single returned buffer: no intermediate allocation holding the request nonce
+//!   is ever freed without zeroization, and oversized messages are rejected before the
+//!   frame is allocated (GitHub #225).
 
 use crate::types::{MAX_MESSAGE_SIZE, MAX_PREVIEW_MESSAGE_SIZE};
 use serde::{de::DeserializeOwned, Serialize};
+use zeroize::Zeroize;
 
 // ---------------------------------------------------------------------------
 // Codec Errors
@@ -30,6 +38,9 @@ pub enum CodecError {
     BufferTooSmall,
     /// Length prefix claims a size exceeding the maximum message size.
     DeclaredSizeTooLarge { declared: usize, max: usize },
+    /// The payload decoded successfully but left `unconsumed` bytes inside the declared
+    /// length. Rejected so that a payload has exactly one interpretation (GitHub #224).
+    TrailingBytes { unconsumed: usize },
 }
 
 impl core::fmt::Display for CodecError {
@@ -46,6 +57,9 @@ impl core::fmt::Display for CodecError {
                     f,
                     "declared message size too large: {declared} bytes (max {max})"
                 )
+            }
+            Self::TrailingBytes { unconsumed } => {
+                write!(f, "payload has {unconsumed} unconsumed trailing bytes")
             }
         }
     }
@@ -86,33 +100,53 @@ pub fn encode_preview<T: Serialize>(msg: &T) -> Result<Vec<u8>, CodecError> {
 /// Returns [`CodecError::Serialize`] if serialization fails, or
 /// [`CodecError::MessageTooLarge`] if the serialized payload exceeds `max_size`.
 pub fn encode_with_limit<T: Serialize>(msg: &T, max_size: usize) -> Result<Vec<u8>, CodecError> {
-    let payload = postcard::to_allocvec(msg).map_err(CodecError::Serialize)?;
+    // Size first so the oversize check happens before any allocation, and the frame is
+    // allocated exactly once at its final size (no reallocation leaving stale copies).
+    let payload_len = postcard::serialize_with_flavor(msg, postcard::ser_flavors::Size::default())
+        .map_err(CodecError::Serialize)?;
 
-    if payload.len() > max_size {
+    if payload_len > max_size {
         return Err(CodecError::MessageTooLarge {
-            size: payload.len(),
+            size: payload_len,
             max: max_size,
         });
     }
 
-    let size_prefix = u32::try_from(payload.len())
+    let size_prefix = u32::try_from(payload_len)
         .map_err(|_| CodecError::MessageTooLarge {
-            size: payload.len(),
+            size: payload_len,
             max: max_size,
         })?
         .to_be_bytes();
 
-    let total_capacity = payload
-        .len()
+    let total_len = payload_len
         .checked_add(4)
         .ok_or(CodecError::MessageTooLarge {
             size: usize::MAX,
             max: max_size,
         })?;
-    let mut buf = Vec::with_capacity(total_capacity);
-    buf.extend_from_slice(&size_prefix);
-    buf.extend_from_slice(&payload);
-    Ok(buf)
+
+    let mut buf = vec![0u8; total_len];
+    let written = match buf.split_at_mut_checked(4) {
+        Some((prefix, body)) => {
+            prefix.copy_from_slice(&size_prefix);
+            postcard::to_slice(msg, body).map(|used| used.len())
+        }
+        None => Err(postcard::Error::SerializeBufferFull),
+    };
+
+    match written {
+        Ok(len) if len == payload_len => Ok(buf),
+        Ok(_) => {
+            // A non-deterministic `Serialize` impl produced a different size: fail closed.
+            buf.zeroize();
+            Err(CodecError::Serialize(postcard::Error::SerializeBufferFull))
+        }
+        Err(e) => {
+            buf.zeroize();
+            Err(CodecError::Serialize(e))
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -125,8 +159,9 @@ pub fn encode_with_limit<T: Serialize>(msg: &T, max_size: usize) -> Result<Vec<u
 /// # Errors
 ///
 /// Returns [`CodecError::BufferTooSmall`] if `buf` is too short,
-/// [`CodecError::DeclaredSizeTooLarge`] if declared size exceeds [`MAX_MESSAGE_SIZE`], or
-/// [`CodecError::Deserialize`] if deserialization fails.
+/// [`CodecError::DeclaredSizeTooLarge`] if declared size exceeds [`MAX_MESSAGE_SIZE`],
+/// [`CodecError::Deserialize`] if deserialization fails, or [`CodecError::TrailingBytes`] if
+/// bytes remain unconsumed inside the declared payload.
 pub fn decode<T: DeserializeOwned>(buf: &[u8]) -> Result<T, CodecError> {
     decode_with_limit(buf, MAX_MESSAGE_SIZE)
 }
@@ -137,8 +172,9 @@ pub fn decode<T: DeserializeOwned>(buf: &[u8]) -> Result<T, CodecError> {
 /// # Errors
 ///
 /// Returns [`CodecError::BufferTooSmall`] if `buf` is too short,
-/// [`CodecError::DeclaredSizeTooLarge`] if declared size exceeds [`MAX_PREVIEW_MESSAGE_SIZE`], or
-/// [`CodecError::Deserialize`] if deserialization fails.
+/// [`CodecError::DeclaredSizeTooLarge`] if declared size exceeds [`MAX_PREVIEW_MESSAGE_SIZE`],
+/// [`CodecError::Deserialize`] if deserialization fails, or [`CodecError::TrailingBytes`] if
+/// bytes remain unconsumed inside the declared payload.
 pub fn decode_preview<T: DeserializeOwned>(buf: &[u8]) -> Result<T, CodecError> {
     decode_with_limit(buf, MAX_PREVIEW_MESSAGE_SIZE)
 }
@@ -148,8 +184,9 @@ pub fn decode_preview<T: DeserializeOwned>(buf: &[u8]) -> Result<T, CodecError> 
 /// # Errors
 ///
 /// Returns [`CodecError::BufferTooSmall`] if `buf` is too short,
-/// [`CodecError::DeclaredSizeTooLarge`] if declared size exceeds `max_size`, or
-/// [`CodecError::Deserialize`] if deserialization fails.
+/// [`CodecError::DeclaredSizeTooLarge`] if declared size exceeds `max_size`,
+/// [`CodecError::Deserialize`] if deserialization fails, or [`CodecError::TrailingBytes`] if
+/// bytes remain unconsumed inside the declared payload.
 pub fn decode_with_limit<T: DeserializeOwned>(
     buf: &[u8],
     max_size: usize,
@@ -176,7 +213,27 @@ pub fn decode_with_limit<T: DeserializeOwned>(
     }
 
     let payload_slice = buf.get(4..payload_end).ok_or(CodecError::BufferTooSmall)?;
-    postcard::from_bytes(payload_slice).map_err(CodecError::Deserialize)
+    decode_payload(payload_slice)
+}
+
+/// Strictly deserializes an unframed payload (the bytes after the 4-byte length prefix).
+///
+/// The payload must be consumed exactly: this is the single decoder shared by the PAM
+/// client (through [`decode`]) and the daemon dispatcher (GitHub #224).
+///
+/// # Errors
+///
+/// Returns [`CodecError::Deserialize`] if deserialization fails, or
+/// [`CodecError::TrailingBytes`] if bytes remain after the decoded message.
+pub fn decode_payload<T: DeserializeOwned>(payload: &[u8]) -> Result<T, CodecError> {
+    let (msg, rest) = postcard::take_from_bytes(payload).map_err(CodecError::Deserialize)?;
+    if rest.is_empty() {
+        Ok(msg)
+    } else {
+        Err(CodecError::TrailingBytes {
+            unconsumed: rest.len(),
+        })
+    }
 }
 
 // ===========================================================================

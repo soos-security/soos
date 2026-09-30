@@ -50,9 +50,9 @@ impl PamHooks for SoosPam {
     fn sm_authenticate(
         pamh: &mut PamHandle,
         args: Vec<&CStr>,
-        _flags: PamFlag,
+        flags: PamFlag,
     ) -> PamResultCode {
-        // Authenticates user via synchronous IPC to daemon
+        // Authenticates user via synchronous IPC to daemon; `flags` carries PAM_SILENT
     }
 
     fn sm_setcred(
@@ -66,6 +66,14 @@ impl PamHooks for SoosPam {
 ```
 
 Standard PAM C ABI entrypoints (`pam_sm_authenticate`, `pam_sm_setcred`, `pam_sm_acct_mgmt`, `pam_sm_chauthtok`, `pam_sm_open_session`, `pam_sm_close_session`) are exported as `extern "C"` functions delegating to `SoosPam`.
+
+Both authentication entry points forward their Linux-PAM `flags` to
+`SoosPam::authenticate_with_feedback(feedback, config, flags)`. The flow reaches libpam only
+through the `PamFeedback` trait (`info` = `PAM_TEXT_INFO` conversation, `user` =
+`pam_get_user`, `service` = `PAM_SERVICE` item; review PAM-07, GitHub #220), implemented for
+`PamHandle` and for a detached no-handle value; tests use a recorder
+(`crates/pam/tests/pam_feedback_tests.rs`). `authenticate_with_config(Option<&mut PamHandle>,
+config)` remains as the flag-less compatibility entry.
 
 ---
 
@@ -101,7 +109,10 @@ auth optional                      pam_soos.so event=password-failed timeout_ms=
 ## 6. Non-Blocking Connect & Memory Zeroization
 
 - **Non-Blocking Connect**: `connect_with_timeout` initializes an `AF_UNIX` socket with `SOCK_NONBLOCK` and calls `libc::connect`. In case of `EINPROGRESS`, `libc::poll` is executed with the remaining time budget (`remaining_budget`), ensuring that unresponsive daemons or full socket listen queues cannot block `pam_soos.so` past its configured `timeout_ms`. Once connected, the socket descriptor is converted into a standard `UnixStream` with non-blocking disabled, so subsequent reads/writes use `SO_RCVTIMEO` / `SO_SNDTIMEO`.
-- **Cumulative Read/Write Deadline** (review PAM-02, GitHub #173): `SO_RCVTIMEO` / `SO_SNDTIMEO` bound a single syscall, not an exchange. `read_exact_before_deadline` and `write_all_before_deadline` therefore re-arm the socket timeout with the budget left (from one `Deadline` created at the start of `authenticate` / `notify_event`) before **every** `read()` / `write()`, retry `EINTR` only while budget remains, and a verdict whose last byte arrives after the deadline is discarded (`IpcError::Timeout` → `PAM_IGNORE`). A daemon that drip-feeds its response can no longer extend the PAM wait beyond `timeout_ms`.
+- **Cumulative Read/Write Deadline** (review PAM-02, GitHub #173): `SO_RCVTIMEO` / `SO_SNDTIMEO` bound a single syscall, not an exchange. `read_exact_before_deadline` and `write_all_before_deadline` therefore re-arm the socket timeout with the budget left (from one `ExchangeDeadline` started before UID resolution for authentication, or at the start of `notify_event`) before **every** `read()` / `write()`, retry `EINTR` only while budget remains, and a verdict whose last byte arrives after the deadline is discarded (`IpcError::Timeout` → `PAM_IGNORE`). A daemon that drip-feeds its response can no longer extend the PAM wait beyond `timeout_ms`.
+- **One Deadline for Client and Daemon** (review PAM-10, GitHub #222): `ipc::ExchangeDeadline` captures the client budget start and the CLOCK_MONOTONIC `deadline_monotonic_ns` sent to the daemon at the same instant, before connect; the request carries exactly that value, so the daemon never keeps the camera busy after the client gave up. `poll()` budgets are rounded up to whole milliseconds (`ipc::poll_timeout_ms`), so a sub-millisecond remainder waits 1 ms instead of timing out immediately.
+- **UID Resolution Inside the Budget** (review PAM-11, GitHub #223): without `uid=`, the module resolves `PAM_USER` through `getpwnam_r`, which can block in NSS (LDAP, SSSD, NIS) and cannot be interrupted. The authentication budget starts before that lookup: a lookup that spends the whole `timeout_ms` returns `PAM_IGNORE` without contacting the daemon and logs its duration at `LOG_INFO` (never the username). On the `event=password-failed` line the event is still sent, with the socket part bounded by 20 ms after the lookup, and a lookup above 20 ms is logged. Pass `uid=` where the stack knows the UID to skip the lookup entirely.
+- **Response Freshness** (review PAM-06, GitHub #219): a response is accepted only if its `request_id` equals the fresh 256-bit nonce of the same connection and it arrives before the deadline. `issued_monotonic_ns` / `expires_monotonic_ns` are informational and not validated (see `Docs/IPC_PROTOCOL.md` §3 "Response Freshness").
 
 ---
 
@@ -126,6 +137,17 @@ Feedback is sent through `PAM_TEXT_INFO` to the **unauthenticated** user and the
 | `Verdict::Allow` | `[soos] Face recognized. Unlocking...` |
 | `Verdict::Deny` (any reason, including a PAD / anti-spoofing rejection) | `[soos] Face not recognized.` |
 | `Verdict::Unavailable`, `Verdict::ProtocolError`, or any IPC error | `[soos] Face verification unavailable.` |
+
+Conversation rules (review PAM-08, GitHub #221):
+
+- **`PAM_SILENT`**: when the bit is set in `flags` (`pam_authenticate(pamh, PAM_SILENT)`, used by
+  cron and some `su` / `sshd` paths), no message of this table is sent; the verdict and the
+  `PAM_IGNORE` fallback are unchanged.
+- **Daemon absent or stopped**: "Looking for face..." is sent only after the daemon socket is
+  connected (`ipc::authenticate_with_progress`), inside the cumulative deadline. When the
+  connection fails (`ENOENT`, `ECONNREFUSED`) at most the single generic
+  "Face verification unavailable." line is shown (see walkthrough 122 for the pending decision
+  on suppressing it too).
 
 Distinguishing a spoof rejection from a non-match would give a presentation attacker an oracle to iterate spoof material; distinguishing camera or model state would disclose device state to whoever sits at the locked machine. The detailed `ReasonClass` stays in the daemon logs only.
 - **Memory Zeroization**: The `soos-protocol` `Request` and `Response` structs implement `zeroize::Zeroize` and `Drop`. In addition, intermediate buffers and cryptographic nonces (`request_id`, `len_buf`, `full_buf`, `encoded`) are wrapped in `Zeroizing` wrappers to guarantee prompt memory erasure when dropped.

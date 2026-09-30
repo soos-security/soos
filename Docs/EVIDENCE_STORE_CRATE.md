@@ -47,7 +47,8 @@ Evidence snapshots are partitioned by calendar date under `/var/lib/soos/evidenc
 │   ├── 4b5f8e32-...-9f8c12a45b67.frame.enc  # Mode 0600, camera frame (record v2 + metadata)
 │   └── d8a1c490-...-01e4b9347892.frame.enc  # Mode 0600 (-rw-------)
 ├── 2026-09-14/                              # Mode 0700 (drwx------)
-│   └── 9c3b12ef-...-38a4d701e56b.webp.enc   # Mode 0600, opaque payload (legacy API / pre-#181)
+│   ├── 9c3b12ef-...-38a4d701e56b.opaque.enc # Mode 0600, opaque payload (store_snapshot API)
+│   └── 1f07aa3c-...-6d2e90b1c4f5.webp.enc   # Mode 0600, legacy opaque file (older releases)
 └── /var/lib/soos/evidence.key               # Mode 0600 (-rw-------)
 ```
 
@@ -64,10 +65,10 @@ Every encrypted snapshot file follows a strict binary layout:
 
 File names do not describe an image encoding: the store never encodes WebP or JPEG.
 `FRAME_SNAPSHOT_EXTENSION` (`.frame.enc`) marks self-describing camera frames written by
-`store_frame_snapshot`; `OPAQUE_SNAPSHOT_EXTENSION` (`.webp.enc`) is kept only for the opaque
-`store_snapshot(&[u8])` API and for files written before GitHub #181 (the historical name is
-retained for backward compatibility of that API and its contract tests; the payload is whatever
-the caller passed, not WebP). `list_snapshots_for_date` returns both.
+`store_frame_snapshot`; `OPAQUE_SNAPSHOT_EXTENSION` (`.opaque.enc`) marks files written by the
+opaque `store_snapshot(&[u8])` API, whose payload is whatever the caller passed. Older releases
+named those files `.webp.enc`; such legacy files are still listed, counted, decrypted and purged
+(every `*.enc` file matches). `list_snapshots_for_date` returns all of them.
 
 ### 3.3 Record Format (CBOR inside the envelope)
 
@@ -99,8 +100,9 @@ Bounds and validation:
   MJPEG frames are returned verbatim in `image_data` for an external decoder; legacy and opaque
   records have no dimensions and return `InvalidFrame`.
 
-Migration: no rewrite is needed. Existing `.webp.enc` files keep decrypting with the same key
-(version 1, `frame == None`); new daemon snapshots are written as `.frame.enc` version 2 records.
+Migration: no rewrite is needed. Existing legacy `.webp.enc` files keep decrypting with the same
+key (version 1, `frame == None`); new daemon snapshots are written as `.frame.enc` version 2
+records and new opaque snapshots as `.opaque.enc`.
 Retention rotation removes both kinds after the retention window.
 ---
 
@@ -160,7 +162,7 @@ let rgb = record.to_rgb24()?; // 640 * 480 * 3 bytes, zeroized on drop
 ```
 
 `store_snapshot(uid, reason, &bytes, ..)` remains available for opaque payloads without
-metadata (`.webp.enc`, version 2 record with `frame == None`).
+metadata (`.opaque.enc`, version 2 record with `frame == None`; legacy files use `.webp.enc`).
 
 ### 4.3 Retention Rotation
 

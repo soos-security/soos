@@ -61,7 +61,16 @@ fn fake_helper(dir: &Path, exit_code: i32) -> PathBuf {
 fn test_import_helper_args_use_stdin() {
     assert_eq!(
         import_helper_args(1000),
-        vec!["soos-enroll", "import", "--uid", "1000", "--file", "-"]
+        // User-approved 2026-09-30 (GitHub #237): the GUI passes explicit overwrite consent.
+        vec![
+            "soos-enroll",
+            "import",
+            "--uid",
+            "1000",
+            "--file",
+            "-",
+            "--yes"
+        ]
     );
 }
 
@@ -77,7 +86,8 @@ fn test_import_finalize_pipes_embedding_without_temp_file() {
     import_template_with(cmd, 1000, &embedding).expect("import must succeed");
 
     let args = std::fs::read_to_string(dir.path().join("args")).unwrap();
-    assert_eq!(args, "soos-enroll\nimport\n--uid\n1000\n--file\n-\n");
+    // User-approved 2026-09-30 (GitHub #237): the GUI passes explicit overwrite consent.
+    assert_eq!(args, "soos-enroll\nimport\n--uid\n1000\n--file\n-\n--yes\n");
     let piped: Vec<f32> =
         serde_json::from_slice(&std::fs::read(dir.path().join("stdin")).unwrap()).unwrap();
     assert_eq!(

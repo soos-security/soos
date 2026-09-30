@@ -85,7 +85,10 @@ Placement rules:
    running `preauth` twice is harmless (it only reads the tally). A gate already present
    earlier in `gdm-password` is not copied again only when that earlier rule has a plain
    `required`/`requisite` control; an `optional` copy of the same module does not enforce
-   anything, so the delegated gate is still copied. As in libpam (`pam.conf(5)`), the type
+   anything, so the delegated gate is still copied. When any `[...=N]` jump precedes the
+   anchor (e.g. `[success=1 default=ignore] pam_succeed_if.so user ingroup vip` jumping
+   over `requisite pam_nologin.so`), the earlier copy may be skipped, so no delegated gate
+   is de-duplicated at all (GitHub #278). As in libpam (`pam.conf(5)`), the type
    and control keywords (`auth`, `include`, `substack`, `required`, `requisite`,
    `optional`, `sufficient` and the bracketed `key=value` controls) are read
    case-insensitively; module paths and arguments are case-sensitive.
@@ -94,7 +97,8 @@ Placement rules:
    rule (any module not listed above, e.g. `pam_tally2.so`, `pam_group.so`, a vendor
    module, or a conditional/`sufficient` gate) runs before the credential module either in
    `gdm-password` or in a delegated stack, an include target cannot be resolved inside the
-   PAM directory (absolute path, file missing from the directory, or unreadable), the stack reaches no credential module, a `[...=N]` jump
+   PAM directory (absolute path, file missing from the directory, unreadable, or not a
+   regular file: a FIFO, device or socket is refused at once, never waited on), the stack reaches no credential module, a `[...=N]` jump
    would change target, the file is not UTF-8, uses line continuations, exceeds 64 KiB or
    is a symlink. soos cannot tell whether an unknown module is a lockout or login gate, so
    it never guesses.

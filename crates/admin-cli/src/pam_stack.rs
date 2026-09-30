@@ -6,6 +6,7 @@
 
 use std::fs;
 use std::io::Read;
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 
 use crate::error::AdminCliError;
@@ -366,8 +367,17 @@ pub(crate) enum ReadError {
 }
 
 /// Reads at most [`MAX_PAM_FILE_BYTES`] of a UTF-8 PAM file.
+///
+/// The file is opened with `O_NONBLOCK | O_CLOEXEC` (a FIFO never blocks the open)
+/// and its type is checked on the open descriptor: anything but a regular file is
+/// refused before a single byte is read (GitHub #278). Symlinks are followed, as
+/// libpam does (authselect ships `system-auth` as a symlink).
 pub(crate) fn read_bounded_utf8(path: &Path) -> Result<String, ReadError> {
-    let file = match fs::File::open(path) {
+    let file = match fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK | libc::O_CLOEXEC)
+        .open(path)
+    {
         Ok(file) => file,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(ReadError::NotFound),
         Err(e) => {
@@ -377,6 +387,18 @@ pub(crate) fn read_bounded_utf8(path: &Path) -> Result<String, ReadError> {
             )))
         }
     };
+    let metadata = file.metadata().map_err(|e| {
+        ReadError::Other(format!(
+            "Failed to inspect PAM file '{}': {e}",
+            path.display()
+        ))
+    })?;
+    if !metadata.is_file() {
+        return Err(ReadError::Other(format!(
+            "Refusing to read PAM file '{}': not a regular file (FIFO, device, socket or directory)",
+            path.display()
+        )));
+    }
     let mut bytes = Vec::new();
     file.take(MAX_PAM_FILE_BYTES.saturating_add(1))
         .read_to_end(&mut bytes)

@@ -189,8 +189,10 @@ pub enum ReasonClass {
 
 /// Daemon response sent to the PAM module.
 ///
-/// Single-use: cryptographically bound to `request_id`, UID, service, and
-/// short expiration. Never cached by the PAM module.
+/// Single-use: bound to the fresh 256-bit `request_id` of one connection, which the PAM
+/// module checks bit-for-bit; that binding (plus the client deadline) is the replay
+/// protection. The timestamps are informational and not validated by the PAM module
+/// (GitHub #219). Never cached by the PAM module.
 ///
 /// Manually implements `Zeroize` because enums `Verdict` and `ReasonClass`
 /// do not support automatic derive. On drop, sensitive fields are zeroed out
@@ -207,7 +209,7 @@ pub struct Response {
     pub reason_class: ReasonClass,
     /// Monotonic issuance timestamp (nanoseconds).
     pub issued_monotonic_ns: u64,
-    /// Monotonic expiration timestamp (nanoseconds, 1-2s after issuance).
+    /// Monotonic expiry hint (nanoseconds, 2 s after issuance); informational only.
     pub expires_monotonic_ns: u64,
 }
 

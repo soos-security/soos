@@ -7,6 +7,7 @@ This directory provides LLVM libFuzzer integration via `cargo-fuzz` for fuzz tes
 - **`decode_request`**: Sub-issue #4.1 — Feeds arbitrary mutated byte sequences into `decode::<Request>` and runs `req.validate()`. Asserts zero panics and memory safety across millions of iterations.
 - **`decode_response`**: Sub-issue #4.2 — Feeds arbitrary mutated byte sequences into `decode::<Response>` and runs `resp.is_allow()`. Asserts zero panics.
 - **`decode_event`**: Feeds arbitrary mutated byte sequences into `decode::<Event>`. Asserts zero panics.
+- **`decode_preview`**: GitHub #227 — Feeds arbitrary bytes into `decode_preview::<PreviewResponse>` (2 MiB preview limit). Asserts zero panics and that a decoded frame never exceeds `MAX_PREVIEW_MESSAGE_SIZE`.
 
 ## Prerequisites
 
@@ -31,6 +32,14 @@ cargo +nightly fuzz run decode_response -- -runs=1000000
 # Fuzz Event decoding
 cargo +nightly fuzz run decode_event -- -runs=1000000
 ```
+
+## Nightly CI
+
+`.github/workflows/fuzz.yml` runs every target nightly (and on manual dispatch) for a fixed
+`-max_total_time` budget and uploads crash reproducers from `fuzz/artifacts/` as workflow
+artifacts. The harness is its own Cargo workspace (`[workspace]` table in `fuzz/Cargo.toml`,
+committed `fuzz/Cargo.lock`): without it cargo refuses to build it inside the root workspace.
+`fuzz/target`, `fuzz/corpus` and `fuzz/artifacts` are git-ignored.
 
 ## Property-Based Fuzzing in CI
 

@@ -15,5 +15,7 @@ pub use crypto::{
     decrypt_payload, encrypt_payload, MasterKey, MAGIC_HEADER, MASTER_KEY_LEN, NONCE_LEN, TAG_LEN,
 };
 pub use error::BiometricStoreError;
-pub use store::{BiometricStore, DEFAULT_BIOMETRICS_DIR, TEMPLATE_EXTENSION};
-pub use template::BiometricTemplate;
+pub use store::{
+    BiometricStore, DEFAULT_BIOMETRICS_DIR, MAX_TEMPLATE_FILE_BYTES, TEMPLATE_EXTENSION,
+};
+pub use template::{BiometricTemplate, TemplateMetadata};
