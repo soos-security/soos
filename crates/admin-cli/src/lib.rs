@@ -4,10 +4,13 @@
 //! - `status`: Query daemon readiness (socket, camera, models), PID, uptime, systemd unit status
 //! - `test-pam`: Simulate PAM authentication cycle with latency breakdown and verdict reporting
 //! - `logs`: Filtered view of daemon journal logs with automatic redaction of sensitive data
+//! - `camera list|probe`: V4L2 node metadata, classification and the shared resolver's
+//!   decision (metadata ioctls only, never frames)
 
 #![forbid(unsafe_code)]
 
 pub mod args;
+pub mod camera;
 pub mod error;
 pub mod gdm;
 pub mod logs;
@@ -18,8 +21,10 @@ pub mod test_pam;
 pub mod user;
 
 pub use args::{
-    AddUserArgs, Cli, Commands, GdmAction, GdmArgs, LogsArgs, OutputFormat, StatusArgs, TestPamArgs,
+    AddUserArgs, CameraAction, CameraArgs, CameraListArgs, CameraProbeArgs, Cli, Commands,
+    GdmAction, GdmArgs, LogsArgs, OutputFormat, StatusArgs, TestPamArgs,
 };
+pub use camera::{CameraEnvironment, CameraListReport, CameraProbeReport};
 pub use error::AdminCliError;
 pub use gdm::{configure_gdm, get_gdm_status, GdmStatus};
 pub use logs::fetch_and_filter_logs;

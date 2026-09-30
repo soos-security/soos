@@ -24,6 +24,7 @@ getrandom = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 soos-protocol = { workspace = true }
+soos-camera-v4l = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

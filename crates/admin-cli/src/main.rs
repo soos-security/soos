@@ -11,13 +11,15 @@ use std::io;
 use std::path::PathBuf;
 
 use clap::Parser;
-use soos_admin_cli::args::{Cli, Commands, OutputFormat, DEFAULT_SOCKET_PATH};
+use soos_admin_cli::args::{CameraAction, Cli, Commands, OutputFormat, DEFAULT_SOCKET_PATH};
+use soos_admin_cli::camera::{collect_list_report, probe_report, CameraEnvironment};
 use soos_admin_cli::error::AdminCliError;
 use soos_admin_cli::logs::fetch_and_filter_logs;
 use soos_admin_cli::redact::DefaultRedactionFilter;
 use soos_admin_cli::status::query_status;
 use soos_admin_cli::test_pam::{effective_timeout_ms, simulate_pam_auth};
 use soos_admin_cli::user::add_user_to_soos_group;
+use soos_camera_v4l::diagnostics::SystemV4lDeviceProbe;
 use soos_protocol::types::Verdict;
 
 fn run() -> Result<(), AdminCliError> {
@@ -80,6 +82,42 @@ fn run() -> Result<(), AdminCliError> {
         Commands::AddUser(args) => {
             add_user_to_soos_group(&args.username)?;
             println!("[OK] User '{}' added to 'soos' group.", args.username);
+        }
+
+        Commands::Camera(args) => {
+            let env = CameraEnvironment::default();
+            let probe = SystemV4lDeviceProbe;
+            let (text, code) = match &args.action {
+                CameraAction::List(list) => {
+                    let report = collect_list_report(
+                        &env,
+                        &probe,
+                        list.sensor_preference,
+                        list.device.as_deref(),
+                    );
+                    let json = list.json || cli.format == OutputFormat::Json;
+                    let text = if json {
+                        report.to_json()
+                    } else {
+                        report.format_table()
+                    };
+                    (text, report.exit_code())
+                }
+                CameraAction::Probe(probe_args) => {
+                    let report = probe_report(&env, &probe, &probe_args.device);
+                    let json = probe_args.json || cli.format == OutputFormat::Json;
+                    let text = if json {
+                        report.to_json()
+                    } else {
+                        report.format_table()
+                    };
+                    (text, report.exit_code())
+                }
+            };
+            println!("{}", text.trim_end());
+            if code != 0 {
+                std::process::exit(code);
+            }
         }
 
         Commands::Gdm(args) => {

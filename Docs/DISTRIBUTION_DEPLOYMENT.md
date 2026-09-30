@@ -196,7 +196,15 @@ sudo dpkg -i target/packages/soos_*.deb
 
 # Verify installation invariants
 sudo soos-admin status
+
+# Check which camera soos will use and why (metadata only, no frames captured)
+sudo soos-admin camera list
 ```
+
+`soos-admin camera list` prints every V4L2 node (capabilities, formats, frame sizes, RGB/IR
+classification and the rule that decided it) followed by the device the shared resolver selects
+and the reason; add `--json` for support tickets and `--sensor-preference` / `--device` to mirror
+`sensor_preference` / `camera_device` of `/etc/soos/daemon.toml` (see `Docs/CAMERA_V4L_CRATE.md`).
 
 The package contains no key material: `postinst` generates `/var/lib/soos/master.key` (mode `0600 root:root`) on this host at first install through `/usr/libexec/soos/provision-master-key`, and package upgrades or removal never touch it (see `Docs/PACKAGING_AND_PROVISIONING.md` §7.4).
 

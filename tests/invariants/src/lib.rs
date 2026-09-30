@@ -126,6 +126,10 @@ mod vision_threshold_contract;
 #[cfg(test)]
 mod ort_output_zeroize_contract;
 
+/// Camera diagnostics are metadata-only and built on the shared resolver (GitHub #256).
+#[cfg(test)]
+mod camera_diagnostics_contract;
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,

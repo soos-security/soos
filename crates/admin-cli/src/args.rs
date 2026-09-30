@@ -1,6 +1,7 @@
 //! Command-line argument structures for `soos-admin`.
 
 use clap::{Parser, Subcommand, ValueEnum};
+use soos_camera_v4l::{parse_sensor_preference, SensorPreference};
 use std::path::PathBuf;
 
 pub const DEFAULT_SOCKET_PATH: &str = "/run/soos/daemon.sock";
@@ -60,6 +61,61 @@ pub enum Commands {
 
     /// Manage GDM login PAM integration and disable flag.
     Gdm(GdmArgs),
+
+    /// Inspect V4L2 camera nodes and the camera soos would select (metadata only, no frames).
+    Camera(CameraArgs),
+}
+
+/// Arguments for the `camera` diagnostics command (GitHub #256).
+#[derive(Parser, Debug, Clone)]
+pub struct CameraArgs {
+    /// Diagnostic to run.
+    #[command(subcommand)]
+    pub action: CameraAction,
+}
+
+/// `camera` diagnostics.
+#[derive(Subcommand, Debug, Clone)]
+pub enum CameraAction {
+    /// List every V4L2 node with its capabilities, formats, frame sizes and classification,
+    /// then the device the shared resolver selects and why.
+    List(CameraListArgs),
+    /// Show the capabilities, formats, frame sizes and classification of one device.
+    Probe(CameraProbeArgs),
+}
+
+/// Parses the `daemon.toml` `sensor_preference` vocabulary for `--sensor-preference`.
+fn parse_sensor_preference_arg(value: &str) -> Result<SensorPreference, String> {
+    parse_sensor_preference(value)
+        .ok_or_else(|| format!("'{value}' is not one of prefer_ir, ir, prefer_rgb, rgb, any"))
+}
+
+/// Arguments for `camera list`.
+#[derive(Parser, Debug, Clone)]
+pub struct CameraListArgs {
+    /// Print machine-readable JSON (same as the global `--format json`).
+    #[arg(long)]
+    pub json: bool,
+
+    /// Sensor preference to resolve with (`sensor_preference` of `/etc/soos/daemon.toml`).
+    #[arg(long, value_parser = parse_sensor_preference_arg, default_value = "prefer_ir")]
+    pub sensor_preference: SensorPreference,
+
+    /// Explicit device (`camera_device` of `/etc/soos/daemon.toml`); overrides auto-detection.
+    #[arg(long)]
+    pub device: Option<PathBuf>,
+}
+
+/// Arguments for `camera probe`.
+#[derive(Parser, Debug, Clone)]
+pub struct CameraProbeArgs {
+    /// Device to probe (`/dev/videoN` or a `/dev/v4l/by-id/` link).
+    #[arg(value_name = "DEVICE")]
+    pub device: PathBuf,
+
+    /// Print machine-readable JSON (same as the global `--format json`).
+    #[arg(long)]
+    pub json: bool,
 }
 
 /// Action to perform for GDM integration.
