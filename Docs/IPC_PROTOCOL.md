@@ -36,6 +36,8 @@ Every message transmitted over the Unix domain stream socket is framed by a 4-by
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 ```
 
+Client-to-daemon payloads (`Request`, `Event`) additionally end with a one-byte message tag trailer that names the message type (§12, GitHub #204).
+
 ### Security Constants
 - **Maximum Message Size (`MAX_MESSAGE_SIZE`)**: `4,096` bytes (4 KiB). Any message declaring a length exceeding 4 KiB is rejected immediately prior to buffer allocation (`CodecError::MessageTooLarge`), shielding daemon and PAM module from denial-of-service memory exhaustion.
 - **Maximum Service Name Length (`MAX_SERVICE_LEN`)**: `64` bytes. Rejected with `CodecError::PayloadCorrupted` if exceeded.
@@ -96,7 +98,7 @@ To ensure that untrusted or malformed inputs can never trigger memory corruption
    - `prop_declared_size_bounds` and `prop_truncated_buffer_bounds` verify zero-allocation fast rejection of oversized ($> 4{,}096$ bytes) or truncated payloads.
    - Executed automatically via standard `cargo test` on every commit and CI run.
 2. **LLVM libFuzzer Integration (`cargo-fuzz`)**:
-   - Targets `decode_request`, `decode_response`, and `decode_event` in `crates/protocol/fuzz/`.
+   - Targets `decode_request`, `decode_response`, `decode_event` and `decode_client_message` (§12) in `crates/protocol/fuzz/`.
    - Supports continuous coverage-guided fuzzing over millions of iterations:
      ```bash
      cargo +nightly fuzz run decode_request -- -runs=1000000
@@ -234,3 +236,33 @@ Constants live in `crates/daemon/src/limits.rs` (`DEFAULT_*`, `EVENT_RATE_MAX_TR
 ### `PasswordFailed` event quota
 
 Every `EventKind::PasswordFailed` event is first counted against a per-peer-UID sliding window (`soos_policy::RateLimiter`, root included, 256 tracked UIDs); an event beyond the quota, a full limiter table or an unavailable monotonic clock drops the event with a `warn` naming `peer_uid`, and no camera snapshot is taken. Before the quota, the target UID is authorized against the kernel peer UID (GitHub #175, ADR in `AI/DECISIONS.md`): a root peer (sudo, su, login, gdm-session-worker, polkit-agent-helper-1) may report for any UID; any other peer only for itself (`uid` absent or equal to its `SO_PEERCRED` UID). Any other event is dropped with a `warn` naming `peer_uid` and the claimed UID, and no snapshot is taken. Events carry no response, so nothing changes on the wire.
+
+---
+
+## 12. Client Message Tag and Frame Classification (GitHub #204)
+
+Client-to-daemon frames (`Request`, `Event`) share one socket and codec v1 has no type field, so the daemon used to double-decode every payload and pick a handler by comparing `uid_hint` with the peer UID (review finding DMN-15). Every first-party client now appends a one-byte **message tag trailer** (`soos_protocol::message`):
+
+```
+u32 BE length | postcard(Request | Event) | message_tag:u8
+```
+
+| Tag | Constant | Message |
+|---|---|---|
+| `0xA0` | `MESSAGE_TAG_REQUEST` | `Request` (`Auth`, `Status`, `PreviewFrame`) |
+| `0xA1` | `MESSAGE_TAG_EVENT` | `Event` (`PasswordFailed`) |
+
+`encode_request` / `encode_event` produce tagged frames (bounded by `MAX_MESSAGE_SIZE`, trailer included); `pam_soos.so`, `soos-admin` (`status`, `test-pam`) and `soos-gui` (preview) use them. Responses are unchanged.
+
+`decode_client_message` classifies every payload by protocol rule, never by a heuristic:
+
+1. **Last byte `>= 0x80`: tagged frame.** A complete codec v1 `Request` or `Event` always ends with the terminating byte of the `u64` varint of its last field, whose high bit is clear, so a tag can never be mistaken for a legacy frame. The tag alone selects the type; the body must decode exactly (no trailing byte) as that type. Unknown tags (`MessageError::UnknownTag`) and mismatches (`Malformed`) are rejected.
+2. **Last byte `< 0x80`: legacy untagged v1 frame.** Accepted only when it decodes exactly as one type; a payload decoding as both `Request` and `Event` is rejected (`MessageError::Ambiguous`).
+
+A rejected frame closes the connection without running any handler and without a response (the PAM module then returns `PAM_IGNORE`).
+
+**Compatibility and migration.** `CURRENT_VERSION` stays `1` and the message body is byte-identical to codec v1: a v1 reader (`decode::<Request>`) ignores the trailer, and the daemon keeps serving untagged v1 clients. A tagged client talking to a daemon older than this change is rejected as malformed and fails closed to the password; `pam_soos.so` and `soos-daemon` ship in the same package and must be upgraded together. The fuzz target `decode_client_message` (`crates/protocol/fuzz/`) and the proptest suite `crates/protocol/tests/client_message_tests.rs` cover the classification.
+
+## 13. Atomic `Auth` Rate-Limit Reservation (GitHub #200)
+
+The per-UID `Auth` limit (`soos_policy::RateLimiter` inside the `AuthorizationEngine`) is reserved once per request with `AuthorizationEngine::record_attempt` under the policy **write** lock, after the deadline check and before the camera wake, enrollment lookup and vision work. A rejected reservation answers `ProtocolError` / `RateLimited` immediately. Nothing is recorded after the consensus loop, so concurrent requests can never all pass the last remaining attempt (review finding DMN-10), and requests ending early (not enrolled, camera unavailable, cancelled) still count against the window.

@@ -178,9 +178,11 @@ measured latency estimate (bounded EMA, initially `DEFAULT_INFERENCE_ESTIMATE_MS
 remaining budget and the slot is obtained before the last feasible start. Otherwise the loop
 finalizes with the current consensus (`Unavailable`/`Timeout` when no capture was evaluated); a
 panicking inference job fails closed with `Unavailable`/`InternalError` (GitHub #158, #159).
-After the loop the engine records exactly
-one rate-limit attempt (`AuthorizationEngine::record_attempt`); if that recording is rejected, an
-`Allow` is downgraded to `ProtocolError`/`RateLimited`.
+Exactly one rate-limit attempt is recorded per request, atomically and before the loop
+(`AuthorizationEngine::record_attempt` under the policy write lock, before the camera wake and any
+vision work; GitHub #200 / DMN-10): a rejected reservation answers `ProtocolError`/`RateLimited`
+at once, concurrent requests cannot overshoot `max_attempts`, and nothing is recorded after the
+loop.
 
 Latency: with a 30 fps camera the third distinct capture is available about 67 ms after the first,
 so consensus adds roughly two capture intervals plus two inference passes to the previous
