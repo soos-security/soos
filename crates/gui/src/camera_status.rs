@@ -87,6 +87,15 @@ fn error_text(kind: CameraErrorKind) -> (&'static str, &'static str) {
     }
 }
 
+/// Returns whether the camera source keeps retrying after an error of `kind`.
+///
+/// The V4L2 supervisor retries every failure with bounded backoff and the IPC preview worker
+/// reconnects after transport, protocol, rate-limit and availability failures, but it stops
+/// for good when the daemon refuses the preview to this user (`SourceUnauthorized`).
+pub fn error_is_retried(kind: CameraErrorKind) -> bool {
+    !matches!(kind, CameraErrorKind::SourceUnauthorized)
+}
+
 /// Builds the banner describing `status`.
 pub fn camera_status_banner(status: &CameraStatus) -> StatusBanner {
     let (severity, title, detail) = match *status {
@@ -112,10 +121,15 @@ pub fn camera_status_banner(status: &CameraStatus) -> StatusBanner {
         ),
         CameraStatus::Error { kind, failures } => {
             let (title, hint) = error_text(kind);
+            let retry = if error_is_retried(kind) {
+                "retrying automatically"
+            } else {
+                "the preview stopped and is not retried until the daemon state changes"
+            };
             (
                 BannerSeverity::Error,
                 title.to_string(),
-                format!("{hint} (failed attempts: {failures}, retrying automatically)"),
+                format!("{hint} (failed attempts: {failures}, {retry})"),
             )
         }
     };

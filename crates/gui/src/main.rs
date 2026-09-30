@@ -2,21 +2,17 @@
 
 #![forbid(unsafe_code)]
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use clap::Parser;
 use eframe::egui;
 use soos_biometric_store::{BiometricStore, MasterKey};
-use soos_camera_v4l::{CameraConfigBuilder, CameraManager, MockCameraManager, V4lCameraManager};
-use soos_enrollment_cli::service::{
-    resolve_camera_device_from_config, MODEL_ID_EMBEDDING, MODEL_ID_FACE_DETECTOR, MODEL_ID_PAD,
-};
+use soos_camera_v4l::{CameraConfigBuilder, CameraManager, MockCameraManager};
+use soos_enrollment_cli::service::{MODEL_ID_EMBEDDING, MODEL_ID_FACE_DETECTOR, MODEL_ID_PAD};
 use soos_gui::app::SoosApp;
 use soos_gui::args::GuiArgs;
-use soos_gui::camera_mode::{
-    decide_camera_mode, probe_daemon_socket, CameraMode, DaemonSocketProbe,
-    UnavailableCameraManager,
-};
+use soos_gui::camera_source::{CameraSourceBackend, SwitchableCamera, SystemCameraSourceBackend};
 use soos_inference_ort::{
     MockEmbeddingExtractor, MockFaceDetector, MockPadDetector, ModelRegistry,
     OrtEmbeddingExtractor, OrtPadDetector, OrtScrfdDetector, RegistryConfig,
@@ -48,7 +44,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     // 2. Initialize Camera and Neural Models
-    let mut camera_notice: Option<String> = None;
+    let mut camera_source: Option<(Arc<SwitchableCamera>, Arc<dyn CameraSourceBackend>)> = None;
     let (camera, pipeline): (Arc<dyn CameraManager>, Arc<VisionPipeline>) = if args.mock {
         let camera_config = CameraConfigBuilder::new().build();
         let cam: Arc<dyn CameraManager> = Arc::new(MockCameraManager::new(camera_config));
@@ -63,51 +59,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ));
         (cam, pipe)
     } else {
-        let daemon_sock = std::path::Path::new("/run/soos/daemon.sock");
-        // GitHub #150: the root daemon is the exclusive owner of /dev/video*. Direct V4L2 access
-        // is only allowed when the daemon is provably not running; otherwise stream through the
-        // daemon IPC (GitHub #143 preview authorization) or show an actionable blocked state.
-        let socket_probe = probe_daemon_socket(daemon_sock);
-        let preview_probe = (socket_probe == DaemonSocketProbe::Reachable)
-            .then(|| soos_gui::IpcCameraManager::probe_preview(daemon_sock));
-        // One-shot probe at startup, before the UI thread exists (GitHub #154 keeps runtime
-        // polling on the background `DaemonMonitor`).
-        let daemon_active = soos_gui::daemon_control::DaemonStatusProbe::is_active(
-            &soos_gui::daemon_control::SystemctlProbe,
+        // GitHub #150 / #154: the root daemon is the exclusive owner of /dev/video*. The camera
+        // source is decided at runtime by the camera-source supervisor (attached below), which
+        // follows the daemon state: IPC preview while the daemon runs, direct V4L2 through the
+        // shared resolver (GitHub #152) only while it is paused, a blocked notice otherwise.
+        let switchable = Arc::new(SwitchableCamera::new());
+        let backend: Arc<dyn CameraSourceBackend> = Arc::new(SystemCameraSourceBackend::new(
+            PathBuf::from("/run/soos/daemon.sock"),
+            args.camera_device.clone(),
+            PathBuf::from("/etc/soos/daemon.toml"),
+        ));
+        tracing::info!(
+            "Camera source follows the soos-daemon state (IPC preview while active, direct V4L2 \
+             while paused)"
         );
-        let mode = decide_camera_mode(socket_probe, preview_probe, daemon_active);
-        let cam: Arc<dyn CameraManager> = match mode {
-            CameraMode::DaemonIpc => {
-                tracing::info!(
-                    "Connected to 'soos-daemon' video proxy at '{}'. Streaming via daemon IPC.",
-                    daemon_sock.display()
-                );
-                Arc::new(soos_gui::IpcCameraManager::spawn(daemon_sock))
-            }
-            CameraMode::Blocked(reason) => {
-                let message = reason.user_message();
-                tracing::warn!(reason = ?reason, "{message}");
-                camera_notice = Some(message);
-                Arc::new(UnavailableCameraManager)
-            }
-            CameraMode::DirectV4l => {
-                // Same shared resolver as soos-daemon and soos-enroll (GitHub #152).
-                let device_path = resolve_camera_device_from_config(
-                    args.camera_device,
-                    Some(std::path::Path::new("/etc/soos/daemon.toml")),
-                );
-                let camera_config = CameraConfigBuilder::new()
-                    .device_path(device_path.clone())
-                    .warmup_frames(0)
-                    .idle_timeout(std::time::Duration::ZERO)
-                    .build();
-                tracing::info!(
-                    "soos-daemon is not running; opening direct V4L2 camera device '{}'",
-                    device_path.display()
-                );
-                Arc::new(V4lCameraManager::spawn(camera_config)?)
-            }
-        };
+        camera_source = Some((Arc::clone(&switchable), backend));
+        let cam: Arc<dyn CameraManager> = switchable;
 
         let mut registry = ModelRegistry::new(RegistryConfig::new(&args.models_dir))?;
         registry.verify_integrity()?;
@@ -144,7 +111,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         native_options,
         Box::new(move |cc| {
             let mut app = SoosApp::new(cc, store, camera, pipeline, is_system_store);
-            app.set_camera_notice(camera_notice);
+            if let Some((switchable, backend)) = camera_source {
+                app.attach_camera_source(switchable, backend);
+            }
             Ok(Box::new(app))
         }),
     )?;

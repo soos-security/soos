@@ -52,6 +52,8 @@ pub fn spawn_vision_worker(
             let mut last_fps_time = Instant::now();
             let mut frames_in_second = 0u32;
             let mut current_fps = 0.0f32;
+            // Whether a frame from the camera is currently published to the UI.
+            let mut published = false;
 
             while running.load(Ordering::Acquire) {
                 camera.notify_activity();
@@ -154,6 +156,7 @@ pub fn spawn_vision_worker(
                                 };
 
                                 latest_frame_slot.store(Some(Arc::new(frame_data)));
+                                published = true;
                                 egui_ctx.request_repaint();
                             }
                             Err(err) => {
@@ -183,11 +186,18 @@ pub fn spawn_vision_worker(
                                         sequence: frame.sequence,
                                     };
                                     latest_frame_slot.store(Some(Arc::new(fallback_frame)));
+                                    published = true;
                                     egui_ctx.request_repaint();
                                 }
                             }
                         }
                     }
+                } else if published && !camera.is_ready() {
+                    // The source failed or was switched: withdraw the frozen frame so the UI
+                    // shows the camera status instead (GitHub #154 / #155).
+                    latest_frame_slot.store(None);
+                    published = false;
+                    egui_ctx.request_repaint();
                 }
 
                 std::thread::sleep(Duration::from_millis(10));

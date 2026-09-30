@@ -11,7 +11,7 @@
 )]
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use arc_swap::ArcSwapOption;
@@ -25,6 +25,9 @@ use soos_enrollment_cli::service::EnrolledUserSummary;
 use soos_vision::VisionPipeline;
 use zeroize::Zeroizing;
 
+use crate::camera_source::{
+    CameraSourceBackend, CameraSourceSupervisor, HandoverExecutor, HandoverSlot, SwitchableCamera,
+};
 use crate::camera_status::{camera_status_banner, render_status_banner};
 use crate::daemon_control::{DaemonMonitor, DaemonState, SystemctlProbe, DAEMON_POLL_INTERVAL};
 use crate::privileged::{PkexecExecutor, PrivilegedAction, PrivilegedOutcome, TaskRunner};
@@ -78,6 +81,12 @@ pub struct SoosApp {
     tasks: TaskRunner,
     daemon_message: Option<(String, bool)>,
     last_camera_status: Option<CameraStatus>,
+
+    // Runtime camera-source switching driven by the daemon state (GitHub #154 / #150)
+    camera_source: Option<CameraSourceSupervisor>,
+    switchable_camera: Option<Arc<SwitchableCamera>>,
+    handover_slot: HandoverSlot,
+    last_source_generation: u64,
 }
 
 impl SoosApp {
@@ -114,8 +123,14 @@ impl SoosApp {
             })
             .ok();
         let repaint_ctx = cc.egui_ctx.clone();
+        // `ResumeDaemon` first releases any direct V4L2 manager (on the privileged worker
+        // thread) so the starting daemon never meets EBUSY because of the GUI.
+        let handover_slot: HandoverSlot = Arc::new(OnceLock::new());
         let tasks = TaskRunner::new(
-            Arc::new(PkexecExecutor),
+            Arc::new(HandoverExecutor::new(
+                Arc::new(PkexecExecutor),
+                Arc::clone(&handover_slot),
+            )),
             Arc::new(move || repaint_ctx.request_repaint()),
         );
 
@@ -144,6 +159,10 @@ impl SoosApp {
             tasks,
             daemon_message: None,
             last_camera_status: None,
+            camera_source: None,
+            switchable_camera: None,
+            handover_slot,
+            last_source_generation: 0,
         };
 
         app.refresh_profiles();
@@ -153,6 +172,67 @@ impl SoosApp {
     /// Sets the camera ownership notice rendered in place of the camera feed (GitHub #150).
     pub fn set_camera_notice(&mut self, notice: Option<String>) {
         self.camera_notice = notice;
+    }
+
+    /// Hands the camera to the runtime source supervisor (GitHub #154 / #150).
+    ///
+    /// `camera` must be the [`SwitchableCamera`] this app was created with. The supervisor
+    /// follows the background `DaemonMonitor`: daemon active => daemon IPC preview (or a
+    /// blocked notice), daemon paused => direct V4L2 through the shared resolver. All probing
+    /// and device release happen on the supervisor thread.
+    pub fn attach_camera_source(
+        &mut self,
+        camera: Arc<SwitchableCamera>,
+        backend: Arc<dyn CameraSourceBackend>,
+    ) {
+        let Some(monitor) = self.daemon_monitor.as_ref() else {
+            tracing::error!("No daemon status monitor: the camera stays disabled (fail-closed)");
+            self.camera_notice = Some(
+                "soos-gui cannot determine whether soos-daemon owns the camera, so it will not \
+                 open the camera. Restart soos-gui."
+                    .to_string(),
+            );
+            return;
+        };
+        match CameraSourceSupervisor::spawn(
+            Arc::clone(&camera),
+            backend,
+            Arc::new(monitor.state_reader()),
+        ) {
+            Ok(supervisor) => {
+                let _ = self.handover_slot.set(supervisor.handover());
+                self.camera_source = Some(supervisor);
+                self.switchable_camera = Some(camera);
+            }
+            Err(e) => {
+                tracing::error!("Failed to spawn camera source supervisor thread: {e}");
+                self.camera_notice =
+                    Some(format!("soos-gui could not start its camera source: {e}"));
+            }
+        }
+    }
+
+    /// Notice rendered instead of the camera feed, if any.
+    fn current_camera_notice(&self) -> Option<String> {
+        self.switchable_camera
+            .as_ref()
+            .and_then(|camera| camera.notice())
+            .or_else(|| self.camera_notice.clone())
+    }
+
+    /// Drops the displayed frame when the camera source was switched (no stale feed).
+    fn sync_camera_source_generation(&mut self) {
+        let Some(camera) = self.switchable_camera.as_ref() else {
+            return;
+        };
+        let generation = camera.generation();
+        if generation != self.last_source_generation {
+            self.last_source_generation = generation;
+            self.latest_frame_slot.store(None);
+            self.video_texture = None;
+            self.aligned_crop_texture = None;
+            self.last_rendered_seq = u64::MAX;
+        }
     }
 
     /// Reloads the enrolled profiles list.
@@ -1135,6 +1215,8 @@ impl eframe::App for SoosApp {
 
         // Apply finished background privileged operations without blocking (GitHub #154).
         self.handle_task_outcomes();
+        self.sync_camera_source_generation();
+        let camera_notice = self.current_camera_notice();
         let camera_status = self.camera.status();
         self.track_camera_status(camera_status);
 
@@ -1174,7 +1256,7 @@ impl eframe::App for SoosApp {
                     AppTab::GuidedEnrollment => self.render_guided_enrollment(ui, frame),
                     AppTab::Profiles => self.render_profiles(ui),
                 }
-            } else if let Some(notice) = self.camera_notice.as_deref() {
+            } else if let Some(notice) = camera_notice.as_deref() {
                 ui.vertical_centered(|ui| {
                     ui.add_space(100.0);
                     ui.heading("Camera unavailable");

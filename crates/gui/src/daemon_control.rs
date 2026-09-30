@@ -93,6 +93,30 @@ const STATE_UNKNOWN: u8 = 0;
 const STATE_ACTIVE: u8 = 1;
 const STATE_INACTIVE: u8 = 2;
 
+fn decode_state(raw: u8) -> DaemonState {
+    match raw {
+        STATE_ACTIVE => DaemonState::Active,
+        STATE_INACTIVE => DaemonState::Inactive,
+        _ => DaemonState::Unknown,
+    }
+}
+
+/// Cloneable, lock-free read handle on the state published by a [`DaemonMonitor`].
+///
+/// Used by background threads (the camera-source supervisor) that must follow the daemon
+/// state without owning the monitor.
+#[derive(Debug, Clone)]
+pub struct DaemonStateReader {
+    state: Arc<AtomicU8>,
+}
+
+impl DaemonStateReader {
+    /// Returns the last published state. Never blocks.
+    pub fn state(&self) -> DaemonState {
+        decode_state(self.state.load(Ordering::Acquire))
+    }
+}
+
 /// Background thread publishing the daemon service state.
 pub struct DaemonMonitor {
     state: Arc<AtomicU8>,
@@ -153,10 +177,13 @@ impl DaemonMonitor {
 
     /// Returns the last published state. Lock-free and never blocks; safe to call every frame.
     pub fn state(&self) -> DaemonState {
-        match self.state.load(Ordering::Acquire) {
-            STATE_ACTIVE => DaemonState::Active,
-            STATE_INACTIVE => DaemonState::Inactive,
-            _ => DaemonState::Unknown,
+        decode_state(self.state.load(Ordering::Acquire))
+    }
+
+    /// Returns a cloneable read handle on the published state.
+    pub fn state_reader(&self) -> DaemonStateReader {
+        DaemonStateReader {
+            state: Arc::clone(&self.state),
         }
     }
 

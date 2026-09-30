@@ -60,9 +60,27 @@ pub enum CameraBlockReason {
     PreviewUnavailable(IpcPreviewError),
     /// `soos-daemon.service` is active but its socket does not accept connections.
     DaemonUnreachable,
+    /// The direct camera was released for a daemon Resume that is still in progress.
+    HandingOver,
+    /// The daemon is not running but the direct V4L2 capture could not be started.
+    DirectOpenFailed,
 }
 
 impl CameraBlockReason {
+    /// Returns whether this state is expected to clear by itself, so the camera-source
+    /// supervisor re-probes it (a bounded number of times) instead of waiting for a daemon
+    /// state change.
+    pub fn is_transient(&self) -> bool {
+        match self {
+            Self::DaemonUnreachable | Self::HandingOver | Self::DirectOpenFailed => true,
+            Self::PreviewUnavailable(err) => matches!(
+                err,
+                IpcPreviewError::RateLimited | IpcPreviewError::Unavailable | IpcPreviewError::Io
+            ),
+            Self::PermissionDenied => false,
+        }
+    }
+
     /// Returns an actionable, English, user-facing explanation (no secrets, no frames).
     pub fn user_message(&self) -> String {
         let tail = "soos-gui will not open the camera directly while soos-daemon owns it.";
@@ -77,20 +95,35 @@ impl CameraBlockReason {
                  `[preview] enabled = true` and add this UID to `allowed_uids` in \
                  /etc/soos/daemon.toml, then restart soos-daemon and soos-gui. {tail}"
             ),
+            Self::PreviewUnavailable(IpcPreviewError::Protocol) => format!(
+                "soos-daemon owns the camera but its live preview replies are malformed. Check \
+                 that soos-gui and soos-daemon versions match. {tail}"
+            ),
             Self::PreviewUnavailable(err) => format!(
                 "soos-daemon owns the camera but its live preview is unavailable ({err}). \
-                 {tail}"
+                 soos-gui retries automatically for a limited time; pause and resume the daemon \
+                 if this persists. {tail}"
             ),
+            Self::HandingOver => format!(
+                "The camera was released for soos-daemon, which is starting. The live preview \
+                 switches to the daemon as soon as it accepts connections; soos-gui retries \
+                 automatically. {tail}"
+            ),
+            Self::DirectOpenFailed => "soos-daemon is not running, but soos-gui could not \
+                 start the direct camera capture. soos-gui retries automatically for a limited \
+                 time; restart soos-gui if this persists."
+                .to_string(),
             Self::DaemonUnreachable => format!(
                 "soos-daemon is active but /run/soos/daemon.sock is not accepting connections. \
-                 Check `systemctl status soos-daemon`, or pause the daemon and restart soos-gui \
-                 to use the camera directly. {tail}"
+                 soos-gui retries automatically for a limited time; check `systemctl status \
+                 soos-daemon`, or pause the daemon to let soos-gui use the camera directly. \
+                 {tail}"
             ),
         }
     }
 }
 
-/// Camera access strategy selected at GUI startup.
+/// Camera access strategy (re-decided at runtime by `camera_source::CameraSourcePlanner`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CameraMode {
     /// Stream preview frames through the daemon IPC socket.
