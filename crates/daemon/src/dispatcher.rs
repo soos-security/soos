@@ -668,6 +668,13 @@ impl ConnectionDispatcher {
                                     );
                                     FrameEvaluation::spoof(score)
                                 }
+                                Err(soos_vision::VisionError::IrLivenessGateFailed { reason }) => {
+                                    debug!(
+                                        reason = %reason,
+                                        "Presentation attack detected (IR liveness gate)"
+                                    );
+                                    FrameEvaluation::spoof(0.0)
+                                }
                                 Err(soos_vision::VisionError::NoFaceDetected) => {
                                     debug!("Zero faces detected in capture");
                                     FrameEvaluation::no_face()
