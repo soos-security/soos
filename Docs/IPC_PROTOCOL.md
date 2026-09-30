@@ -204,3 +204,32 @@ After the `SO_PEERCRED` check (Step 6) the dispatcher runs `LocalSessionPolicy::
 | `peer_uid == uid_hint` (non-root) | The target owns an active session not flagged `REMOTE=1` | screen lockers running PAM as the user |
 
 Refused (`ProtocolError` / `UidMismatch`, PAM falls back to the password): `sudo` or `su` from an SSH session, `su <victim>` from another user's local session, `sshd` logins (sshd is in no session), a remote-only user, a missing or non-positive peer PID, a session that vanished, an unreadable or oversized logind/procfs state. The daemon logs a stable reason code (`SessionDenial::as_str`, e.g. `caller_session_remote`) with the peer and target UIDs only; session contents such as `REMOTE_HOST` are never logged. Session IDs are validated as ASCII alphanumerics of at most 64 bytes before they are joined to the sessions directory, record files are read only if they are regular files (no symlink following) and are bounded to 4 KiB, cgroup files to 16 KiB, and the directory scan to 1024 entries (larger fails closed).
+
+## 10. Per-Peer Connection Limits and Event Quota (GitHub #157, #175)
+
+Since GitHub #157 (review finding DMN-04) connection admission is keyed on the kernel `SO_PEERCRED` UID instead of a single global semaphore, so one `soos`-group account can no longer hold every permit and deny face login to everyone. The PAM module runs inside root processes (`gdm-session-worker`, `sudo`, `su`, `login`, `polkit-agent-helper-1`), which is why root peers get a reserved share of the capacity.
+
+### Daemon configuration (`/etc/soos/daemon.toml`)
+
+```toml
+[peer_limits]
+max_connections_per_uid = 2          # concurrent connections of one unprivileged UID (root exempt)
+reserved_root_connections = 2        # permits of [dispatcher] max_concurrent_connections usable only by root
+max_requests_per_connection = 1024   # requests served on one connection before it is closed
+max_connection_lifetime_ms = 30000   # a connection is not read again after this age
+max_events_per_window = 5            # PasswordFailed events per peer UID (root included); 0 drops all
+event_window_ms = 10000              # sliding window of the event quota
+```
+
+Constants live in `crates/daemon/src/limits.rs` (`DEFAULT_*`, `EVENT_RATE_MAX_TRACKED_UIDS = 256`). `PeerLimitsConfig::validate` rejects at startup (`DaemonError::Config`) a zero capacity, per-UID cap, request cap, lifetime or event window, and a `reserved_root_connections` that is not strictly below `[dispatcher] max_concurrent_connections` (e.g. `max_concurrent_connections = 2` now requires `reserved_root_connections <= 1`). A dispatcher built without `with_peer_limits` uses `PeerLimitsConfig::default()`; the library limiter additionally clamps the reservation so at least one unprivileged permit always remains.
+
+### Admission and connection lifecycle (`ConnectionDispatcher::handle_connection`)
+
+1. `SO_PEERCRED` is read once, before any byte of the stream; failure closes the connection.
+2. `PeerConnectionLimiter::try_acquire(peer_uid)` refuses the peer with `GlobalCapacity` (every permit in use), `ReservedForPrivileged` (unprivileged peer and only root-reserved permits remain) or `PerUidCap` (the unprivileged UID already holds `max_connections_per_uid`). The refusal is logged with `peer_uid` and the reason, and the stream is closed immediately without reading or answering: the PAM client sees EOF and returns `PAM_IGNORE` (password fallback), and nothing ever waits on a permit. The limiter table holds only UIDs with a connection in use, so it is bounded by the capacity.
+3. An admitted connection serves requests until the client closes it, it stays idle past `connection_timeout`, `max_requests_per_connection` requests were served, or `max_connection_lifetime` has elapsed (checked before each read, so the worst-case lifetime is the cap plus one request/response cycle).
+4. An `Auth` request is one-shot: the daemon closes the connection right after writing its `Response` (the PAM client already drops it). `Status`, `PreviewFrame` and events may share one connection within the caps; `soos-gui` reconnects transparently (200 ms) when the daemon closes its preview connection.
+
+### `PasswordFailed` event quota
+
+Every `EventKind::PasswordFailed` event is first counted against a per-peer-UID sliding window (`soos_policy::RateLimiter`, root included, 256 tracked UIDs); an event beyond the quota, a full limiter table or an unavailable monotonic clock drops the event with a `warn` naming `peer_uid`, and no camera snapshot is taken. Before the quota, the target UID is authorized against the kernel peer UID (GitHub #175, ADR in `AI/DECISIONS.md`): a root peer (sudo, su, login, gdm-session-worker, polkit-agent-helper-1) may report for any UID; any other peer only for itself (`uid` absent or equal to its `SO_PEERCRED` UID). Any other event is dropped with a `warn` naming `peer_uid` and the claimed UID, and no snapshot is taken. Events carry no response, so nothing changes on the wire.

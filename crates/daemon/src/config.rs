@@ -6,6 +6,7 @@ use std::time::Duration;
 use serde::Deserialize;
 
 use crate::error::DaemonError;
+use crate::limits::PeerLimitsConfig;
 use crate::preview::PreviewConfig;
 
 /// Configuration for the Unix domain socket listener.
@@ -109,6 +110,8 @@ pub struct DaemonConfig {
     pub pipeline: PipelineConfig,
     /// GUI preview stream authorization (`[preview]`, disabled by default).
     pub preview: PreviewConfig,
+    /// Per-peer connection and event limits (`[peer_limits]`, GitHub #157 / #175).
+    pub peer_limits: PeerLimitsConfig,
     /// Logging filter directive (e.g. "info", "debug").
     pub log_level: String,
 }
@@ -120,6 +123,7 @@ impl Default for DaemonConfig {
             dispatcher: DispatcherConfig::default(),
             pipeline: PipelineConfig::default(),
             preview: PreviewConfig::default(),
+            peer_limits: PeerLimitsConfig::default(),
             log_level: "info".to_string(),
         }
     }
@@ -136,6 +140,8 @@ struct DaemonConfigFile {
     #[serde(default)]
     preview: Option<PreviewConfigFile>,
     #[serde(default)]
+    peer_limits: Option<PeerLimitsConfigFile>,
+    #[serde(default)]
     log_level: Option<String>,
 }
 
@@ -144,6 +150,16 @@ struct PreviewConfigFile {
     enabled: Option<bool>,
     allowed_uids: Option<Vec<u32>>,
     max_requests_per_sec: Option<u32>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PeerLimitsConfigFile {
+    max_connections_per_uid: Option<usize>,
+    reserved_root_connections: Option<usize>,
+    max_requests_per_connection: Option<usize>,
+    max_connection_lifetime_ms: Option<u64>,
+    max_events_per_window: Option<u32>,
+    event_window_ms: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -343,6 +359,31 @@ impl DaemonConfig {
             }
         }
         config.preview.validate()?;
+
+        if let Some(limits) = file.peer_limits {
+            let target = &mut config.peer_limits;
+            if let Some(v) = limits.max_connections_per_uid {
+                target.max_connections_per_uid = v;
+            }
+            if let Some(v) = limits.reserved_root_connections {
+                target.reserved_root_connections = v;
+            }
+            if let Some(v) = limits.max_requests_per_connection {
+                target.max_requests_per_connection = v;
+            }
+            if let Some(v) = limits.max_connection_lifetime_ms {
+                target.max_connection_lifetime = Duration::from_millis(v);
+            }
+            if let Some(v) = limits.max_events_per_window {
+                target.max_events_per_window = v;
+            }
+            if let Some(v) = limits.event_window_ms {
+                target.event_window = Duration::from_millis(v);
+            }
+        }
+        config
+            .peer_limits
+            .validate(config.dispatcher.max_concurrent_connections)?;
 
         Ok(config)
     }

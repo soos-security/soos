@@ -4,7 +4,6 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
-use tokio::sync::Semaphore;
 use tokio::time::timeout;
 use tracing::{debug, info, warn};
 use zeroize::Zeroizing;
@@ -13,7 +12,8 @@ use crate::config::DispatcherConfig;
 use crate::error::DaemonError;
 use crate::health::HealthState;
 use crate::inference::{InferenceGate, RequestDeadline};
-use crate::peercred::{get_peer_credentials, verify_peer_credentials};
+use crate::limits::{PeerConnectionLimiter, PeerLimitsConfig};
+use crate::peercred::{get_peer_credentials, verify_peer_credentials, PeerCredentials};
 use crate::pipeline::{
     current_monotonic_nanos, PipelineComponents, FRAME_POLL_INTERVAL_MS, MAX_FRAME_AGE_NS,
 };
@@ -35,6 +35,8 @@ struct ProcessedOutput {
     encoded_response: Option<Zeroizing<Vec<u8>>>,
     /// Deferred error to return after response transmission (e.g. wire validation error).
     completion_error: Option<DaemonError>,
+    /// Close the connection after this output (an `Auth` request is one-shot, GitHub #157).
+    one_shot: bool,
 }
 
 /// Internal representation of a request response before transmission.
@@ -60,7 +62,7 @@ pub struct ConnectionDispatcher {
     config: DispatcherConfig,
     health: Arc<HealthState>,
     pipeline: Option<PipelineComponents>,
-    semaphore: Arc<Semaphore>,
+    connection_limiter: PeerConnectionLimiter,
     start_time: Instant,
     session_validator: SessionValidator,
     session_policy: LocalSessionPolicy,
@@ -68,12 +70,18 @@ pub struct ConnectionDispatcher {
     preview: PreviewConfig,
     preview_limiter: tokio::sync::Mutex<RateLimiter>,
     inference: InferenceGate,
+    peer_limits: PeerLimitsConfig,
+    event_limiter: tokio::sync::Mutex<RateLimiter>,
 }
 
 impl ConnectionDispatcher {
     /// Creates a new connection dispatcher wrapping configuration and health state.
     pub fn new(config: DispatcherConfig, health: Arc<HealthState>) -> Self {
-        let semaphore = Arc::new(Semaphore::new(config.max_concurrent_connections));
+        let peer_limits = PeerLimitsConfig::default();
+        let connection_limiter =
+            PeerConnectionLimiter::new(config.max_concurrent_connections, &peer_limits);
+        let event_limiter =
+            tokio::sync::Mutex::new(RateLimiter::new(peer_limits.event_rate_limit_config()));
         let session_validator = if config.enforce_active_session {
             SessionValidator::with_sessions_dir(config.logind_sessions_dir.clone())
         } else {
@@ -87,7 +95,7 @@ impl ConnectionDispatcher {
             config,
             health,
             pipeline: None,
-            semaphore,
+            connection_limiter,
             start_time: Instant::now(),
             session_validator,
             session_policy,
@@ -95,6 +103,8 @@ impl ConnectionDispatcher {
             preview,
             preview_limiter,
             inference: InferenceGate::default(),
+            peer_limits,
+            event_limiter,
         }
     }
 
@@ -104,7 +114,11 @@ impl ConnectionDispatcher {
         health: Arc<HealthState>,
         pipeline: PipelineComponents,
     ) -> Self {
-        let semaphore = Arc::new(Semaphore::new(config.max_concurrent_connections));
+        let peer_limits = PeerLimitsConfig::default();
+        let connection_limiter =
+            PeerConnectionLimiter::new(config.max_concurrent_connections, &peer_limits);
+        let event_limiter =
+            tokio::sync::Mutex::new(RateLimiter::new(peer_limits.event_rate_limit_config()));
         let session_validator = if config.enforce_active_session {
             SessionValidator::with_sessions_dir(config.logind_sessions_dir.clone())
         } else {
@@ -118,7 +132,7 @@ impl ConnectionDispatcher {
             config,
             health,
             pipeline: Some(pipeline),
-            semaphore,
+            connection_limiter,
             start_time: Instant::now(),
             session_validator,
             session_policy,
@@ -126,6 +140,8 @@ impl ConnectionDispatcher {
             preview,
             preview_limiter,
             inference: InferenceGate::default(),
+            peer_limits,
+            event_limiter,
         }
     }
 
@@ -179,6 +195,25 @@ impl ConnectionDispatcher {
         &self.inference
     }
 
+    /// Configures the per-peer connection and event limits (`[peer_limits]`, GitHub #157).
+    ///
+    /// Without this call the dispatcher keeps [`PeerLimitsConfig::default`].
+    #[must_use]
+    pub fn with_peer_limits(mut self, limits: PeerLimitsConfig) -> Self {
+        self.connection_limiter =
+            PeerConnectionLimiter::new(self.config.max_concurrent_connections, &limits);
+        self.event_limiter =
+            tokio::sync::Mutex::new(RateLimiter::new(limits.event_rate_limit_config()));
+        self.peer_limits = limits;
+        self
+    }
+
+    /// Returns the active per-peer limits.
+    #[must_use]
+    pub const fn peer_limits(&self) -> &PeerLimitsConfig {
+        &self.peer_limits
+    }
+
     /// Returns the active preview authorization policy.
     #[must_use]
     pub const fn preview_config(&self) -> &PreviewConfig {
@@ -189,24 +224,60 @@ impl ConnectionDispatcher {
         (self.clock_fn)()
     }
 
-    /// Returns the number of currently available concurrency permits.
+    /// Returns the number of currently available concurrency permits (root view: permits
+    /// reserved for root peers included).
     pub fn available_permits(&self) -> usize {
-        self.semaphore.available_permits()
+        self.connection_limiter.available()
     }
 
     /// Processes an incoming Unix domain stream through authentication,
     /// bounded reading, peer verification, and response generation.
+    ///
+    /// Admission is keyed on the kernel `SO_PEERCRED` UID (GitHub #157): a refused peer's
+    /// stream is closed immediately, without reading or answering anything. An admitted
+    /// connection serves at most `max_requests_per_connection` requests, is not read again
+    /// once `max_connection_lifetime` has elapsed, and is closed right after an `Auth`
+    /// response (one-shot).
     pub async fn handle_connection(&self, mut stream: UnixStream) -> Result<(), DaemonError> {
-        let _permit = match self.semaphore.clone().try_acquire_owned() {
+        let peer = match get_peer_credentials(&stream) {
+            Ok(peer) => peer,
+            Err(err) => {
+                warn!(error = %err, "SO_PEERCRED lookup failed; closing connection");
+                return Err(err);
+            }
+        };
+        let _permit = match self.connection_limiter.try_acquire(peer.uid) {
             Ok(permit) => permit,
-            Err(_) => {
-                warn!("Concurrency limit reached; rejecting connection");
+            Err(rejection) => {
+                warn!(
+                    peer_uid = peer.uid,
+                    reason = %rejection,
+                    "Connection limit reached; closing connection"
+                );
                 return Err(DaemonError::ConcurrencyLimitReached);
             }
         };
 
+        let opened_at = Instant::now();
         let mut requests_processed: usize = 0;
         loop {
+            if requests_processed >= self.peer_limits.max_requests_per_connection {
+                info!(
+                    peer_uid = peer.uid,
+                    requests = requests_processed,
+                    "Per-connection request cap reached; closing connection"
+                );
+                break;
+            }
+            if opened_at.elapsed() >= self.peer_limits.max_connection_lifetime {
+                info!(
+                    peer_uid = peer.uid,
+                    requests = requests_processed,
+                    "Connection lifetime cap reached; closing connection"
+                );
+                break;
+            }
+
             // Phase 1: Request Reading & Processing Phase.
             // Bounded by connection_timeout. Strictly performs socket reading and pipeline computation,
             // producing a fully encoded in-memory response buffer (Option<Vec<u8>>).
@@ -214,7 +285,7 @@ impl ConnectionDispatcher {
             // upon timeout will never leave partial response bytes on the wire.
             let res = timeout(
                 self.config.connection_timeout,
-                self.read_and_process(&mut stream),
+                self.read_and_process(&mut stream, peer),
             )
             .await;
 
@@ -252,6 +323,11 @@ impl ConnectionDispatcher {
             if let Some(err) = output.completion_error {
                 return Err(err);
             }
+
+            if output.one_shot {
+                debug!("Auth request served; closing one-shot connection");
+                break;
+            }
         }
 
         Ok(())
@@ -260,13 +336,13 @@ impl ConnectionDispatcher {
     async fn read_and_process(
         &self,
         stream: &mut UnixStream,
+        peer: PeerCredentials,
     ) -> Result<ProcessedOutput, DaemonError> {
         // Start of the outer `connection_timeout` window for this request: every later budget
         // (camera wake, consensus loop, inference admission) is measured from here (#159).
         let request_started = Instant::now();
 
-        // Step 1: Extract peer credentials via SO_PEERCRED
-        let peer = get_peer_credentials(stream)?;
+        // Step 1: Peer credentials were extracted once via SO_PEERCRED at admission.
 
         // Step 2: Read framed length prefix (4 bytes big-endian)
         let mut len_bytes = [0u8; 4];
@@ -311,24 +387,33 @@ impl ConnectionDispatcher {
                 // of `event.request_id`. If `req.uid_hint == peer.uid`, it is a valid Request.
                 // Otherwise, it is an Event notification.
                 if req.uid_hint == peer.uid {
-                    let res = self.handle_request(peer.uid, peer.pid, req, request_started).await?;
+                    let one_shot = req.kind == RequestKind::Auth;
+                    let res = self
+                        .handle_request(peer.uid, peer.pid, req, request_started)
+                        .await?;
                     Ok(ProcessedOutput {
                         encoded_response: Some(res.encoded_response),
                         completion_error: res.completion_error,
+                        one_shot,
                     })
                 } else {
                     self.handle_event(peer.uid, event).await?;
                     Ok(ProcessedOutput {
                         encoded_response: None,
                         completion_error: None,
+                        one_shot: false,
                     })
                 }
             }
             (Some(req), None) => {
-                let res = self.handle_request(peer.uid, peer.pid, req, request_started).await?;
+                let one_shot = req.kind == RequestKind::Auth;
+                let res = self
+                    .handle_request(peer.uid, peer.pid, req, request_started)
+                    .await?;
                 Ok(ProcessedOutput {
                     encoded_response: Some(res.encoded_response),
                     completion_error: res.completion_error,
+                    one_shot,
                 })
             }
             (None, Some(event)) => {
@@ -336,6 +421,7 @@ impl ConnectionDispatcher {
                 Ok(ProcessedOutput {
                     encoded_response: None,
                     completion_error: None,
+                    one_shot: false,
                 })
             }
             (None, None) => {
@@ -352,6 +438,21 @@ impl ConnectionDispatcher {
         }
 
         if event.kind == EventKind::PasswordFailed {
+            // Per-peer-UID event quota (GitHub #175 hardening): bounds how often any peer,
+            // root included, can make the daemon capture an evidence snapshot.
+            // Trust model (AI/DECISIONS.md, GitHub #175): a root peer (sudo, su, login,
+            // gdm-session-worker) may report for any UID; any other peer only for itself.
+            if peer_uid != 0 && event.uid.is_some_and(|claimed| claimed != peer_uid) {
+                warn!(
+                    peer_uid = peer_uid,
+                    claimed_uid = ?event.uid,
+                    "Unprivileged peer reported an event for another UID; dropping event"
+                );
+                return Ok(());
+            }
+            if !self.event_within_quota(peer_uid).await {
+                return Ok(());
+            }
             let target_uid = event.uid.unwrap_or(peer_uid);
             info!(
                 peer_uid = peer_uid,
@@ -384,6 +485,32 @@ impl ConnectionDispatcher {
         }
 
         Ok(())
+    }
+
+    /// Records one `PasswordFailed` event of `peer_uid` against the per-peer quota.
+    ///
+    /// Returns `false` (event dropped, fail closed) when the quota is exhausted, the
+    /// limiter table is full, or the monotonic clock is unavailable.
+    async fn event_within_quota(&self, peer_uid: u32) -> bool {
+        let now_ns = match self.now_nanos() {
+            Ok(ns) => ns,
+            Err(err) => {
+                warn!(error = %err, "Monotonic clock unavailable; dropping event");
+                return false;
+            }
+        };
+        let mut limiter = self.event_limiter.lock().await;
+        match limiter.check_and_record(peer_uid, now_ns) {
+            Ok(()) => true,
+            Err(err) => {
+                warn!(
+                    peer_uid = peer_uid,
+                    error = %err,
+                    "Event quota exceeded for peer; dropping PasswordFailed event"
+                );
+                false
+            }
+        }
     }
 
     async fn handle_request(
