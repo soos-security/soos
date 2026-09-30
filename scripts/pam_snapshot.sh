@@ -47,6 +47,7 @@ EOF
 }
 
 COMMAND=""
+SNAPSHOT_TMP=""
 DESTDIR=""
 SYSCONFDIR="/etc"
 LOCALSTATEDIR="/var"
@@ -148,8 +149,15 @@ cmd_snapshot() {
     umask 077
     mkdir -p "${STATE_DIR}"
     chmod 0700 "${STATE_DIR}"
-    local tmp rel
-    tmp="$(mktemp -d "${STATE_DIR}/.pam-backup.XXXXXX")"
+    local rel
+    # A failure at any point (set -e, signal) removes the partial temp directory:
+    # no state/.pam-backup.* may survive, or a journaled install rollback could
+    # not remove the state directory.
+    SNAPSHOT_TMP="$(mktemp -d "${STATE_DIR}/.pam-backup.XXXXXX")"
+    trap 'rm -rf -- "${SNAPSHOT_TMP}"' EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    local tmp="${SNAPSHOT_TMP}"
     mkdir -p "${tmp}/pam.d"
     while IFS= read -r rel; do
         # -L: store the content a symlinked stack (authselect) resolves to.
@@ -167,6 +175,8 @@ cmd_snapshot() {
     chmod 0700 "${tmp}"
     rm -rf "${SNAPSHOT_DIR}"
     mv "${tmp}" "${SNAPSHOT_DIR}"
+    trap - EXIT INT TERM
+    SNAPSHOT_TMP=""
     echo "[OK]    Recorded pre-install PAM state in ${SNAPSHOT_DIR}"
 }
 
@@ -231,6 +241,12 @@ cmd_verify() {
 cmd_discard() {
     refuse_symlinks
     rm -rf "${SNAPSHOT_DIR}"
+    # Also drop temp directories left by a snapshot killed before its trap ran.
+    local stale
+    for stale in "${STATE_DIR}"/.pam-backup.*; do
+        [[ -d "${stale}" && ! -L "${stale}" ]] || continue
+        rm -rf -- "${stale}"
+    done
 }
 
 case "${COMMAND}" in

@@ -3224,4 +3224,182 @@ mod tests {
             "ci.yml must run the rollback test"
         );
     }
+
+    /// Runs `scripts/uninstall.sh --destdir <dir> --purge-data --skip-systemd`.
+    fn run_uninstall_purge(root: &Path, destdir: &Path) -> std::process::Output {
+        std::process::Command::new("bash")
+            .arg(root.join("scripts/uninstall.sh"))
+            .arg("--destdir")
+            .arg(destdir)
+            .arg("--purge-data")
+            .arg("--skip-systemd")
+            .output()
+            .expect("execute uninstall.sh --purge-data")
+    }
+
+    /// Invariant: `--purge-data` never destroys the pre-install PAM snapshot while the
+    /// PAM rollback is incomplete or unverified: the uninstaller tells the operator to
+    /// restore from `state/pam-backup`, so that directory must survive the purge. All
+    /// other state (templates, key, evidence) is still purged (GitHub #166 review).
+    #[test]
+    fn test_uninstall_purge_keeps_snapshot_when_pam_rollback_is_incomplete() {
+        let root = workspace_root();
+        let tmp = std::env::temp_dir().join(format!("soos_purge_unsafe_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        let pam_d = tmp.join("etc/pam.d");
+        write_fixture(&pam_d.join("common-auth"), PRISTINE_ARCH);
+        assert_eq!(run_pam_snapshot(&root, "snapshot", &tmp), 0, "snapshot");
+
+        let edited = "#%PAM-1.0\n-auth [success=3 default=ignore] pam_systemd_home.so\nauth [success=done default=ignore] pam_soos.so timeout_ms=250\nauth [success=1 default=bad] pam_unix.so try_first_pass nullok\nauth [default=die] pam_faillock.so authfail\nauth optional pam_permit.so\n";
+        write_fixture(&pam_d.join("common-auth"), edited);
+        write_fixture(&tmp.join("usr/lib/security/pam_soos.so"), "module");
+        let state = tmp.join("var/lib/soos");
+        write_fixture(&state.join("master.key"), "k");
+        write_fixture(&state.join("biometrics/1000.cbor.enc"), "t");
+
+        let output = run_uninstall_purge(&root, &tmp);
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            !output.status.success(),
+            "an incomplete PAM rollback must still fail: {text}"
+        );
+        assert_eq!(
+            fs::read_to_string(state.join("state/pam-backup/pam.d/common-auth"))
+                .expect("the snapshot must survive --purge-data"),
+            PRISTINE_ARCH,
+            "the pre-install copy must be kept byte-for-byte"
+        );
+        assert!(
+            state.join("state/pam-backup/SHA256SUMS").is_file(),
+            "the snapshot manifest must be kept"
+        );
+        assert!(
+            !state.join("master.key").exists() && !state.join("biometrics").exists(),
+            "--purge-data must still purge the key and the templates"
+        );
+        assert!(
+            text.contains("Keeping") && text.contains("pam-backup"),
+            "the uninstaller must say that the snapshot is kept: {text}"
+        );
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    /// Invariant: after a verified PAM rollback, `--purge-data` removes the whole state
+    /// directory (the snapshot has been discarded as verified) (GitHub #166 review).
+    #[test]
+    fn test_uninstall_purge_removes_state_after_verified_rollback() {
+        let root = workspace_root();
+        let tmp = std::env::temp_dir().join(format!("soos_purge_safe_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        let pam_d = tmp.join("etc/pam.d");
+        write_fixture(&pam_d.join("gdm-password"), PRISTINE_GDM);
+        assert_eq!(run_pam_snapshot(&root, "snapshot", &tmp), 0, "snapshot");
+        write_fixture(
+            &pam_d.join("gdm-password"),
+            "#%PAM-1.0\nauth requisite pam_nologin.so\nauth  sufficient  pam_soos.so timeout_ms=2500\n@include common-auth\n",
+        );
+        let state = tmp.join("var/lib/soos");
+        write_fixture(&state.join("master.key"), "k");
+
+        let output = run_uninstall_purge(&root, &tmp);
+        assert!(
+            output.status.success(),
+            "uninstall.sh --purge-data must succeed: {}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        assert_eq!(
+            fs::read_to_string(pam_d.join("gdm-password")).expect("gdm"),
+            PRISTINE_GDM
+        );
+        assert!(
+            !state.exists(),
+            "a verified rollback purges the whole state"
+        );
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    /// Invariant: a snapshot that fails part-way (here: a PAM entry cannot be copied)
+    /// leaves no `state/.pam-backup.*` temporary directory and no partial snapshot
+    /// behind, so a journaled install rollback can remove the state directory
+    /// (GitHub #166 review).
+    #[cfg(unix)]
+    #[test]
+    fn test_pam_snapshot_failure_leaves_no_temporary_directory() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = workspace_root();
+        let tmp = std::env::temp_dir().join(format!("soos_snap_fail_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        write_fixture(&tmp.join("etc/pam.d/system-auth"), PRISTINE_ARCH);
+        write_fixture(&tmp.join("etc/pam.d/sudo"), "auth include system-auth\n");
+
+        // `cp` shim: fails for any copy into a snapshot temp directory, else real cp.
+        let shim_dir = tmp.join("shim");
+        let shim = shim_dir.join("cp");
+        write_fixture(
+            &shim,
+            "#!/bin/sh\nfor a in \"$@\"; do\n  case \"$a\" in\n    */.pam-backup.*/pam.d/*) echo 'cp: simulated failure' >&2; exit 1 ;;\n  esac\ndone\nfor d in /usr/bin /bin; do\n  [ -x \"$d/cp\" ] && exec \"$d/cp\" \"$@\"\ndone\nexit 127\n",
+        );
+        fs::set_permissions(&shim, fs::Permissions::from_mode(0o755)).expect("chmod shim");
+        let path = format!(
+            "{}:{}",
+            shim_dir.display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+
+        let out = std::process::Command::new("bash")
+            .arg(root.join("scripts/pam_snapshot.sh"))
+            .arg("snapshot")
+            .arg("--destdir")
+            .arg(&tmp)
+            .env("PATH", &path)
+            .output()
+            .expect("run pam_snapshot.sh");
+        assert!(
+            !out.status.success(),
+            "a failed copy must fail the snapshot"
+        );
+        let state = tmp.join("var/lib/soos/state");
+        let leftovers: Vec<String> = fs::read_dir(&state)
+            .map(|rd| {
+                rd.flatten()
+                    .map(|e| e.file_name().to_string_lossy().into_owned())
+                    .collect()
+            })
+            .unwrap_or_default();
+        assert!(
+            leftovers.is_empty(),
+            "a failed snapshot must leave nothing in {}: {leftovers:?}",
+            state.display()
+        );
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    /// Invariant: install.sh journals the PAM snapshot as created BEFORE invoking the
+    /// helper when none pre-existed, so a helper that fails part-way is still discarded by
+    /// the rollback; and the Docker rollback test drives a failing live install through
+    /// install.sh itself (GitHub #166 review).
+    #[test]
+    fn test_install_journals_pam_snapshot_before_invoking_helper() {
+        let root = workspace_root();
+        let install = fs::read_to_string(root.join("scripts/install.sh")).expect("install.sh");
+        let block = &install[offset_of(&install, "# 6a.", "install.sh")..];
+        let flag = offset_of(block, "PAM_SNAPSHOT_CREATED=true", "install.sh block 6a");
+        let call = offset_of(block, "pam_snapshot.sh\" snapshot", "install.sh block 6a");
+        assert!(
+            flag < call,
+            "install.sh must mark the snapshot as created before running the helper"
+        );
+        let docker =
+            fs::read_to_string(root.join("tests/docker/pam_rollback_test.sh")).expect("docker");
+        for needle in ["scripts/install.sh", ".pam-backup.", "rolled back"] {
+            assert!(
+                docker.contains(needle),
+                "pam_rollback_test.sh must exercise a failing live install ('{needle}')"
+            );
+        }
+    }
 }

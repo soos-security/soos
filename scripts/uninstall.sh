@@ -399,7 +399,16 @@ fi
 
 # 5. Handle State and Biometric Data
 if [[ "${PURGE_DATA}" = true ]]; then
-    if [[ -d "${TARGET_STATE_DIR}" ]]; then
+    if [[ -d "${PAM_SNAPSHOT_DIR}" && ! -L "${TARGET_STATE_DIR}" && ! -L "${TARGET_STATE_DIR}/state" ]]; then
+        # The snapshot survives step 2 only when the PAM rollback is incomplete or
+        # unverified: it is the operator's only pre-install copy, so purge
+        # everything else and keep it.
+        warn "Purging biometric templates, evidence, and master keys at ${TARGET_STATE_DIR}..."
+        find "${TARGET_STATE_DIR}" -mindepth 1 -maxdepth 1 ! -name state -exec rm -rf -- {} +
+        find "${TARGET_STATE_DIR}/state" -mindepth 1 -maxdepth 1 ! -name pam-backup -exec rm -rf -- {} +
+        warn "Keeping ${PAM_SNAPSHOT_DIR}: the PAM rollback is incomplete or unverified and it holds the pre-install PAM copies."
+        warn "Delete it manually once the PAM stack is restored."
+    elif [[ -d "${TARGET_STATE_DIR}" ]]; then
         warn "Purging all biometric templates, evidence, and master keys at ${TARGET_STATE_DIR}..."
         rm -rf "${TARGET_STATE_DIR}"
         success "Purged ${TARGET_STATE_DIR}."

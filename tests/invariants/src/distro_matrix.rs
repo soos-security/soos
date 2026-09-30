@@ -790,3 +790,63 @@ fn test_ci_runs_fedora_and_arch_pam_matrix() {
         "distro-pam-matrix must run tests/docker/run_matrix.sh for each distro"
     );
 }
+
+/// Returns the body of the top-level job `name` in `ci.yml` (up to the next banner comment).
+fn ci_job<'a>(ci: &'a str, name: &str) -> &'a str {
+    let start = ci
+        .find(&format!("\n  {name}:"))
+        .unwrap_or_else(|| panic!("ci.yml must define the {name} job"));
+    let job = &ci[start + 1..];
+    let end = job.find("\n  # ----").unwrap_or(job.len());
+    &job[..end]
+}
+
+/// #168 (ONB-10) — the packaging and distro deployment path runs in CI on every pull request
+/// for Ubuntu (native `.deb` build, `dpkg -i`, enrollment, password fallback, rollback, and the
+/// package content / key-isolation harness), and a failure blocks the `CI Success` gate.
+#[test]
+fn test_ci_runs_ubuntu_package_deployment_on_pull_requests() {
+    let root = workspace_root();
+    let ci = fs::read_to_string(root.join(".github/workflows/ci.yml")).expect("read ci.yml");
+    let job = ci_job(&ci, "package-deploy");
+
+    assert!(
+        job.contains("if: github.event_name != 'schedule'"),
+        "package-deploy must run on pull requests (only the schedule is excluded):\n{job}"
+    );
+    assert!(job.contains("needs: lint"), "package-deploy must need lint");
+    assert!(
+        job.contains("timeout-minutes:"),
+        "package-deploy must set a timeout"
+    );
+    assert!(
+        job.contains("uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1"),
+        "package-deploy must use the SHA-pinned checkout action"
+    );
+    assert!(
+        job.contains("persist-credentials: false"),
+        "package-deploy must not persist git credentials"
+    );
+    assert!(
+        job.contains("./tests/distro/run_distro_validation.sh ubuntu"),
+        "package-deploy must run the Ubuntu deployment validation"
+    );
+    assert!(
+        job.contains("tests/docker/test_packages.sh"),
+        "package-deploy must run the package content harness"
+    );
+    assert!(
+        !job.contains("${{ github.event"),
+        "package-deploy must not interpolate event data into its steps"
+    );
+
+    let gate = ci_job(&ci, "ci-success");
+    let needs = gate
+        .lines()
+        .find(|l| l.trim_start().starts_with("needs:"))
+        .expect("ci-success needs list");
+    assert!(
+        needs.contains("package-deploy"),
+        "package-deploy must be part of the CI Success aggregate: {needs}"
+    );
+}

@@ -27,7 +27,9 @@
 #   --sysconfdir <DIR>       Configuration directory (default: /etc)
 #   --localstatedir <DIR>    State directory (default: /var)
 #   --runstatedir <DIR>      Runtime directory (default: /run)
-#   --pam-dir <DIR>          Explicit PAM module directory (overrides auto-detection)
+#   --pam-dir <DIR>          Explicit PAM module directory (overrides auto-detection;
+#                            under --destdir only the stage is probed, then
+#                            /usr/lib/security is used with a warning)
 #   --artifact-dir <DIR>     Directory holding the built artifacts
 #                            (default: ${CARGO_TARGET_DIR:-target}/release)
 #   --build                  Run the dependency preflight and
@@ -109,7 +111,9 @@ Options:
   --sysconfdir <DIR>       Configuration directory (default: /etc)
   --localstatedir <DIR>    State directory (default: /var)
   --runstatedir <DIR>      Runtime directory (default: /run)
-  --pam-dir <DIR>          Explicit PAM module directory (auto-detected if omitted)
+  --pam-dir <DIR>          Explicit PAM module directory (auto-detected if omitted;
+                           with --destdir only the stage is probed, then
+                           /usr/lib/security is used with a warning)
   --artifact-dir <DIR>     Built artifacts directory (default: target/release)
   --build                  Check build dependencies, then run
                            'cargo build --release --locked --workspace'
@@ -222,7 +226,9 @@ if [[ "${DO_BUILD}" = true && -n "${ARTIFACT_DIR}" ]]; then
 fi
 ARTIFACT_DIR="${ARTIFACT_DIR:-${DEFAULT_ARTIFACT_DIR}}"
 
-# Auto-detect PAM security directory if not specified
+# Auto-detect PAM security directory if not specified. Under --destdir only the
+# stage is probed; with no match the deterministic STAGING_DEFAULT_PAM_DIR is used.
+STAGING_DEFAULT_PAM_DIR="/usr/lib/security"
 if [[ -z "${PAM_DIR}" ]]; then
     for candidate in \
         "/lib/x86_64-linux-gnu/security" \
@@ -236,8 +242,14 @@ if [[ -z "${PAM_DIR}" ]]; then
             break
         fi
     done
-    if [[ -z "${PAM_DIR}" ]]; then
-        # Default fallback
+    if [[ -z "${PAM_DIR}" && -n "${DESTDIR}" ]]; then
+        # Staging: never derive the directory from the BUILD host (its /usr/lib64
+        # says nothing about the target distribution). Deterministic default.
+        PAM_DIR="${STAGING_DEFAULT_PAM_DIR}"
+        warn "No PAM module directory found inside ${DESTDIR}: staging pam_soos.so in ${PAM_DIR}."
+        warn "Pass --pam-dir <DIR> with the target distribution's PAM directory (e.g. /usr/lib/x86_64-linux-gnu/security on Debian/Ubuntu, /usr/lib64/security on Fedora)."
+    elif [[ -z "${PAM_DIR}" ]]; then
+        # Live install: the host IS the target.
         if [[ -d "/usr/lib64" ]]; then
             PAM_DIR="/usr/lib64/security"
         else
@@ -588,16 +600,14 @@ fi
 #     verifies its rollback against this snapshot. Live installs only; an
 #     existing snapshot is never overwritten (it holds the pristine state).
 if [[ -z "${DESTDIR}" && -f "${WORKSPACE_ROOT}/scripts/pam_snapshot.sh" ]]; then
-    PAM_SNAPSHOT_EXISTED=false
-    if [[ -f "${LOCALSTATEDIR}/lib/soos/state/pam-backup/SHA256SUMS" ]]; then
-        PAM_SNAPSHOT_EXISTED=true
+    # Journal the snapshot BEFORE invoking the helper when none pre-existed, so that
+    # a helper failing part-way is discarded by the rollback too (a pre-existing
+    # snapshot is never journaled, hence never discarded).
+    if [[ ! -f "${LOCALSTATEDIR}/lib/soos/state/pam-backup/SHA256SUMS" ]]; then
+        PAM_SNAPSHOT_CREATED=true
     fi
     bash "${WORKSPACE_ROOT}/scripts/pam_snapshot.sh" snapshot \
         --sysconfdir "${SYSCONFDIR}" --localstatedir "${LOCALSTATEDIR}"
-    # Journal the snapshot only when this run created it (a pre-existing one is kept).
-    if [[ "${PAM_SNAPSHOT_EXISTED}" = false ]]; then
-        PAM_SNAPSHOT_CREATED=true
-    fi
 fi
 
 # 6. Install Distribution PAM Config Templates

@@ -1150,3 +1150,75 @@ fn test_packaging_passes_explicit_distro_pam_dir() {
         );
     }
 }
+
+/// Review finding 7 (root cause of P1): with `--destdir` and no `--pam-dir`, install.sh must
+/// never derive the PAM directory from the BUILD host (`/usr/lib64` exists on most hosts).
+/// A directory that already exists inside the stage is used; otherwise the documented,
+/// deterministic `/usr/lib/security` is used and a warning names `--pam-dir`.
+#[test]
+fn test_install_destdir_never_guesses_pam_dir_from_build_host() {
+    let artifacts = scratch_dir("inst_pamdir_artifacts");
+    stage_fixture_artifacts(&artifacts);
+
+    // 1. Empty stage: deterministic fallback, never lib64, explicit warning.
+    let stage = scratch_dir("inst_pamdir_stage");
+    let out = run_script(
+        "scripts/install.sh",
+        [
+            OsStr::new("--destdir"),
+            stage.as_os_str(),
+            OsStr::new("--artifact-dir"),
+            artifacts.as_os_str(),
+            OsStr::new("--skip-models"),
+            OsStr::new("--skip-systemd"),
+        ],
+    );
+    assert!(
+        out.status.success(),
+        "staging without --pam-dir must succeed; output:\n{}",
+        combined(&out)
+    );
+    assert!(
+        stage.join("usr/lib/security/pam_soos.so").is_file(),
+        "an empty stage must receive pam_soos.so in /usr/lib/security; files: {:?}",
+        list_entries(&stage)
+    );
+    assert!(
+        !list_entries(&stage)
+            .iter()
+            .any(|p| p.to_string_lossy().contains("lib64")),
+        "nothing may be staged under lib64 from the build host: {:?}",
+        list_entries(&stage)
+    );
+    assert!(
+        combined(&out).contains("--pam-dir"),
+        "the deterministic fallback must be announced with a --pam-dir hint; output:\n{}",
+        combined(&out)
+    );
+    let _ = fs::remove_dir_all(&stage);
+
+    // 2. A PAM directory that exists inside the stage is preferred.
+    let stage = scratch_dir("inst_pamdir_stage_existing");
+    fs::create_dir_all(stage.join("lib/x86_64-linux-gnu/security")).expect("stage pam dir");
+    let out = run_script(
+        "scripts/install.sh",
+        [
+            OsStr::new("--destdir"),
+            stage.as_os_str(),
+            OsStr::new("--artifact-dir"),
+            artifacts.as_os_str(),
+            OsStr::new("--skip-models"),
+            OsStr::new("--skip-systemd"),
+        ],
+    );
+    assert!(out.status.success(), "output:\n{}", combined(&out));
+    assert!(
+        stage
+            .join("lib/x86_64-linux-gnu/security/pam_soos.so")
+            .is_file(),
+        "a PAM directory present in the stage must be used; files: {:?}",
+        list_entries(&stage)
+    );
+    let _ = fs::remove_dir_all(&stage);
+    let _ = fs::remove_dir_all(&artifacts);
+}

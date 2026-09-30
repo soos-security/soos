@@ -8,6 +8,11 @@
 # state, and that the Debian password-failed hook is reachable on a wrong password.
 #
 # Debian/Ubuntu (ubuntu:24.04):
+#   D0. A live scripts/install.sh (stub artifacts) that fails AFTER block 6a (model
+#       digest mismatch) and one whose PAM snapshot helper fails part-way (cp
+#       shim) both roll back everything: PAM state byte-identical, no
+#       /var/lib/soos (hence no state/.pam-backup.* temp dir), no binaries,
+#       no module, no 'soos' group.
 #   D1. scripts/pam_snapshot.sh snapshot records the pre-install PAM state
 #   D2. `pam-auth-update --package --enable soos soos-notify` succeeds (rc=0)
 #   D3. Generated /etc/pam.d/common-auth order:
@@ -218,6 +223,39 @@ assert_verify_detects_drift() {
     success "${label}: snapshot verification reports the activated files ($*)."
 }
 
+# D0: drives a failing LIVE install through scripts/install.sh itself.
+# Usage: assert_failed_install_rolls_back <label> <baseline> [PATH prefix]
+assert_failed_install_rolls_back() {
+    local label="$1" baseline="$2" path_prefix="${3:-}" stub=/tmp/soos-d0 rc=0 out
+    rm -rf "${stub}"
+    mkdir -p "${stub}/release"
+    local name
+    for name in soos-daemon soos-admin soos-enroll soos-gui libpam_soos.so; do
+        printf 'fixture:%s\n' "${name}" > "${stub}/release/${name}"
+        chmod 0755 "${stub}/release/${name}"
+    done
+    printf 'not-the-attested-model\n' > "${stub}/model.onnx"
+    printf '[manifest]\nversion = "2.0.0"\n\n[models.bad_model]\nid = "bad_model"\nfilename = "bad_model.onnx"\nsha256 = "%s"\nlicense = "MIT"\nsource_url = "file://%s/model.onnx"\n' \
+        "$(printf '%064d' 0)" "${stub}" > "${stub}/manifest.toml"
+    out="$(PATH="${path_prefix:+${path_prefix}:}${PATH}" bash "${WORKSPACE_ROOT}/scripts/install.sh" \
+        --artifact-dir "${stub}/release" --manifest "${stub}/manifest.toml" --skip-systemd 2>&1)" || rc=$?
+    [[ "${rc}" -ne 0 ]] || fail "${label}: the failing install exited 0"
+    grep -q "rolled back" <<< "${out}" || fail "${label}: no rollback reported: ${out}"
+    [[ ! -e /var/lib/soos ]] || fail "${label}: /var/lib/soos left behind: $(find /var/lib/soos -maxdepth 3 | tr '\n' ' ')"
+    local leftover
+    for leftover in /run/soos /usr/libexec/soos /usr/bin/soos-admin /usr/bin/soos-enroll /usr/bin/soos-gui \
+            /etc/systemd/system/soos-daemon.service /usr/share/pam-configs/soos /etc/pam.d/soos.snippet; do
+        [[ ! -e "${leftover}" ]] || fail "${label}: ${leftover} left behind"
+    done
+    if find / -xdev -name pam_soos.so -path '*/security/*' 2>/dev/null | grep -q .; then
+        fail "${label}: pam_soos.so left behind"
+    fi
+    ! getent group soos >/dev/null 2>&1 || fail "${label}: group 'soos' left behind"
+    assert_same_state "${label}" "${baseline}"
+    rm -rf "${stub}"
+    success "${label}: failed live install rolled back completely (no state/.pam-backup.* left)."
+}
+
 run_uninstall() {
     bash "${WORKSPACE_ROOT}/scripts/uninstall.sh" --keep-data --skip-systemd \
         || fail "$1: scripts/uninstall.sh failed"
@@ -259,6 +297,24 @@ EOF
     local baseline
     baseline="$(pam_state_digest)"
     assert_password_auth soos-login
+
+    info "D0a: live scripts/install.sh failing after the PAM snapshot (model digest mismatch)"
+    assert_failed_install_rolls_back D0a "${baseline}"
+    info "D0b: live scripts/install.sh whose PAM snapshot helper fails part-way"
+    local shim=/tmp/soos-d0-shim
+    mkdir -p "${shim}"
+    cat > "${shim}/cp" <<'EOF'
+#!/bin/sh
+for a in "$@"; do
+    case "$a" in
+        */.pam-backup.*/pam.d/*) echo "cp: simulated failure" >&2; exit 1 ;;
+    esac
+done
+exec /usr/bin/cp "$@"
+EOF
+    chmod 0755 "${shim}/cp"
+    assert_failed_install_rolls_back D0b "${baseline}" "${shim}"
+    rm -rf "${shim}"
 
     info "D1: scripts/pam_snapshot.sh snapshot"
     bash "${WORKSPACE_ROOT}/scripts/pam_snapshot.sh" snapshot || fail "D1: snapshot failed"
