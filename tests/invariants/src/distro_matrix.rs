@@ -1213,7 +1213,10 @@ fn test_mock_daemon_malformed_modes_put_one_defect_on_the_wire() {
     );
 
     let truncated = mock_exchange("crash-truncated");
-    assert!(truncated.len() >= 4, "crash-truncated sends a length prefix");
+    assert!(
+        truncated.len() >= 4,
+        "crash-truncated sends a length prefix"
+    );
     let declared = u32::from_be_bytes([truncated[0], truncated[1], truncated[2], truncated[3]]);
     assert!(
         (truncated.len() - 4) < usize::try_from(declared).expect("u32 fits"),
@@ -1268,10 +1271,7 @@ fn test_pam_matrix_rejection_cases_assert_no_authorization() {
         "assert_no_facial_authorization()",
         "assert_password_fallback()",
     ] {
-        assert!(
-            lib.contains(helper),
-            "{PAM_CASE_LIB} must define {helper}"
-        );
+        assert!(lib.contains(helper), "{PAM_CASE_LIB} must define {helper}");
     }
 }
 
@@ -1279,7 +1279,10 @@ fn test_pam_matrix_rejection_cases_assert_no_authorization() {
 #[test]
 fn test_deployment_and_package_tests_build_with_locked() {
     let root = workspace_root();
-    let mut scripts = vec!["tests/docker/test_packages.sh", "tests/docker/test_suite.sh"];
+    let mut scripts = vec![
+        "tests/docker/test_packages.sh",
+        "tests/docker/test_suite.sh",
+    ];
     scripts.extend(DISTRO_SCRIPTS);
     for script in scripts {
         let content = fs::read_to_string(root.join(script)).expect("read script");
@@ -1320,8 +1323,9 @@ fn test_debian_deployment_never_ignores_pam_auth_update() {
         );
     }
     assert!(
-        code.iter().any(|l| l.contains("pam_soos.so event=password-failed")
-            && l.contains("/etc/pam.d/common-auth")),
+        code.iter()
+            .any(|l| l.contains("pam_soos.so event=password-failed")
+                && l.contains("/etc/pam.d/common-auth")),
         "debian_ubuntu_test.sh must assert the generated common-auth contains the hook"
     );
 }
@@ -1340,7 +1344,9 @@ fn test_package_harness_fails_closed() {
         "test_packages.sh may only exit 0 after every check passed"
     );
     assert!(
-        !code.iter().any(|l| l.contains("build_packages.sh --dry-run")),
+        !code
+            .iter()
+            .any(|l| l.contains("build_packages.sh --dry-run")),
         "an unknown distribution must fail, not fall back to a dry run"
     );
     assert!(
@@ -1357,9 +1363,7 @@ fn test_ci_runs_fedora_and_arch_deployment() {
     let ci = fs::read_to_string(root.join(".github/workflows/ci.yml")).expect("read ci.yml");
     let job = ci_job(&ci, "distro-deploy");
     assert!(
-        job.contains(
-            "if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'"
-        ),
+        job.contains("if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'"),
         "distro-deploy must run on push to main and manual dispatch:\n{job}"
     );
     assert!(job.contains("needs: lint"), "distro-deploy must need lint");
