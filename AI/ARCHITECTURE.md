@@ -249,7 +249,7 @@ soos/
 ├── packaging/
 ├── tests/
 │   ├── invariants/               # architectural security invariants (soos-invariants)
-│   ├── fixtures/                 # shared synthetic frames and embeddings (mod.rs)
+│   ├── fixtures/                 # soos-test-fixtures: synthetic frames, PAD presentations, ONNX graphs
 │   ├── docker/                   # ephemeral Docker PAM matrix (pam_test_runner)
 │   ├── distro/                   # per-distribution package validation
 │   └── physical/                 # real-hardware validation suite

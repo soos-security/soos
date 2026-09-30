@@ -564,9 +564,11 @@ fn open_and_stream(
     // Deep-greyscale IR fourccs (Y8I/Y10/Y12/Y16) are delivered as Grey (GitHub #195).
     let supported = delivered_formats(&fourccs);
 
-    // Classify the node with the same hints as the resolver (by-id link name, frame sizes)
-    // and negotiate its format; frames are stamped with the sensor type so an IR node
-    // streaming a colour format still takes the IR PAD policy (GitHub #169, #195).
+    // Classify the node with narrower hints than the resolver (Docs/CAMERA_V4L_CRATE.md):
+    // the by-id name only when the configured path is itself a by-id link, and the frame
+    // sizes of the opened node; then negotiate its format. Frames are stamped with the
+    // sensor type so an IR node streaming a colour format still takes the IR PAD policy
+    // (GitHub #169, #195).
     let hints = SensorHints {
         by_id_name: crate::resolver::by_id_name_of_path(&config.device_path),
         frame_sizes: device_frame_sizes(&device, &fourccs),

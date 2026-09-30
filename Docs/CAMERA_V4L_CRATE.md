@@ -142,7 +142,8 @@ by-id aliases (dangling aliases skipped); tests inject a hermetic `CameraEnumera
   `CameraError::Starved`. After a timeout or a signal interruption (`EINTR`) inside `v4l`'s
   `next()` (whose re-queued buffer is still owned by the driver) the loop dequeues and discards one
   buffer before calling `next()` again, so no buffer is queued twice and the device is not
-  reopened.
+  reopened. Only a timeout spends the stall budget: `EINTR` (in `next()`, `wait_ready` or the
+  resync) never counts toward `Starved` (GitHub #285).
 - **Deep-greyscale buffers (GitHub #195).** A driver-returned `Y8I`/`Y10`/`Y12`/`Y16` format is
   validated by `validate_deep_grey_format` (2 bytes per pixel, wire stride kept) and every buffer by
   `validate_deep_grey_buffer`, which applies the same error-flag, `bytesused` and short-buffer

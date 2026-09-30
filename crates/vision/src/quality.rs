@@ -72,13 +72,15 @@ pub fn laplacian_variance(rgb: &[u8], width: u32, height: u32) -> Option<f32> {
         return None;
     }
 
-    // Integer BT.601 luma keeps the Laplacian exact (a flat image scores exactly 0).
-    let luma: Vec<i32> = rgb
-        .as_chunks::<3>()
-        .0
-        .iter()
-        .map(|p| (77 * i32::from(p[0]) + 150 * i32::from(p[1]) + 29 * i32::from(p[2])) >> 8)
-        .collect();
+    // Integer BT.601 luma keeps the Laplacian exact (a flat image scores exactly 0). The luma
+    // plane is derived from face pixels and is wiped on drop (GitHub #285).
+    let luma: zeroize::Zeroizing<Vec<i32>> = zeroize::Zeroizing::new(
+        rgb.as_chunks::<3>()
+            .0
+            .iter()
+            .map(|p| (77 * i32::from(p[0]) + 150 * i32::from(p[1]) + 29 * i32::from(p[2])) >> 8)
+            .collect(),
+    );
 
     let mut sum = 0.0f64;
     let mut sum_sq = 0.0f64;

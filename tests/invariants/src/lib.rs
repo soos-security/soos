@@ -126,6 +126,10 @@ mod vision_threshold_contract;
 #[cfg(test)]
 mod ort_output_zeroize_contract;
 
+/// Non-blocking follow-ups from the P2 batch reviews (GitHub #285, rows RFX1–RFX12).
+#[cfg(all(test, unix))]
+mod review_followups_contract;
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,

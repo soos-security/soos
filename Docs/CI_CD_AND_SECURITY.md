@@ -176,10 +176,13 @@ Layer 1 lexing rules (GitHub #242, walkthrough 129):
   against the moving tip of `origin/main`, so commits merged after the branch point are not
   audited as reversed branch changes.
 - The PAM panic and print audits compare the *production code* of each changed
-  `crates/pam/src` file at the merge base and in the working tree. An awk filter blanks
-  comments and literal contents and drops exactly the item gated by `#[cfg(test)]` (up to its
-  `;` or its matching `}`); there is no `grep -v tests`, so a production line that merely
-  contains the substring `tests` is still audited.
+  `crates/pam/src` file at the merge base and in the working tree. An awk character lexer,
+  whose state carries across lines, removes line comments and nested block comments and blanks
+  the contents of string, raw strings (`r"..."`, `r#"..."#`, `br#"..."#`) and char literals,
+  then drops exactly the item gated by `#[cfg(test)]` (up to its `;` or its matching `}`);
+  braces inside comments or literals never move that boundary, and a panic written inside a
+  comment or literal is not reported (GitHub #285). There is no `grep -v tests`, so a
+  production line that merely contains the substring `tests` is still audited.
 - `pour` and `attention` are English words and are not French markers.
 - The static invariants add the same hardened extractor (`tests/invariants/src/lexing_contract.rs`),
   the full PAM panic-construct check, and a resolved-graph check that no async runtime is a
