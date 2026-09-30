@@ -155,3 +155,16 @@ left as proposals:
 `cargo fmt --all -- --check`, `cargo clippy --locked --workspace --all-targets --all-features
 -- -D warnings`, `cargo test --locked --workspace --all-targets --all-features --no-fail-fast`,
 `./scripts/candid_review.sh` and `bash -n scripts/candid_review.sh` pass.
+
+## Integration: user-approved fixture migration (2026-09-30)
+
+The user approved the §#241 proposal. `crates/vision/tests/pad_tests.rs`,
+`crates/daemon/tests/pad_wiring_tests.rs` and `crates/enrollment-cli/tests/pad_wiring_tests.rs` now
+use `use soos_test_fixtures as fixtures;` (no fixture call changed), the three crates declare
+`soos-test-fixtures = { workspace = true }` as a dev-dependency (workspace entry with a version, so
+`cargo deny` bans stay green), and `LEGACY_PATH_INCLUDES` in `fixtures_contract.rs` is empty: no
+`#[path]` include of the fixtures remains. #241 is fully fixed. The optional #242 follow-up
+(routing the old `extract_production_code` through the hardened lexer) was NOT applied: the lexer
+blanks string literal contents, so `test_pam_fault_injection_feature_is_opt_in_and_never_packaged`,
+which looks for `#[cfg(feature = "fault-injection")]`, would lose its evidence; the new
+`lexing_contract` invariants keep covering the lexing holes.

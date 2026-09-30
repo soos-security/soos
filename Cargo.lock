@@ -3271,6 +3271,7 @@ dependencies = [
  "soos-inference-ort",
  "soos-policy",
  "soos-protocol",
+ "soos-test-fixtures",
  "soos-vision",
  "tempfile",
  "thiserror 2.0.20",
@@ -3296,6 +3297,7 @@ dependencies = [
  "soos-camera-v4l",
  "soos-inference-ort",
  "soos-protocol",
+ "soos-test-fixtures",
  "soos-vision",
  "tempfile",
  "thiserror 2.0.20",
@@ -3407,6 +3409,7 @@ dependencies = [
  "proptest",
  "soos-camera-v4l",
  "soos-inference-ort",
+ "soos-test-fixtures",
  "thiserror 2.0.20",
  "zeroize",
 ]

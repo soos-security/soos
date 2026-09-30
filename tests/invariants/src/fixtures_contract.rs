@@ -28,11 +28,7 @@ fn workspace_root() -> PathBuf {
 }
 
 /// Test files that still include the fixtures through `#[path]` (frozen; shrink only).
-const LEGACY_PATH_INCLUDES: [&str; 3] = [
-    "crates/daemon/tests/pad_wiring_tests.rs",
-    "crates/enrollment-cli/tests/pad_wiring_tests.rs",
-    "crates/vision/tests/pad_tests.rs",
-];
+const LEGACY_PATH_INCLUDES: [&str; 0] = [];
 
 fn read(rel: &str) -> String {
     let path = workspace_root().join(rel);

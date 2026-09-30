@@ -2,9 +2,9 @@
 //! hand-encoded ONNX models.
 //!
 //! This file is the library root of the dev-only workspace crate `soos-test-fixtures`
-//! (`tests/fixtures/Cargo.toml`); new tests depend on it through `[dev-dependencies]`.
-//! Three legacy test files still include it through `#[path]` (frozen by
-//! `tests/invariants/src/fixtures_contract.rs`). Face embeddings are 512D and no embedding
+//! (`tests/fixtures/Cargo.toml`); every test depends on it through `[dev-dependencies]`
+//! (no `#[path]` include remains, enforced by `tests/invariants/src/fixtures_contract.rs`).
+//! Face embeddings are 512D and no embedding
 //! fixture is provided here.
 
 #![allow(
