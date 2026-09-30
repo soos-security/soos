@@ -3216,7 +3216,7 @@ name = "soos-admin-cli"
 version = "0.1.0"
 dependencies = [
  "clap",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "libc",
  "nix",
  "serde",
@@ -3232,7 +3232,7 @@ version = "0.1.0"
 dependencies = [
  "aes-gcm",
  "ciborium",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "libc",
  "nix",
  "proptest",
@@ -3286,7 +3286,7 @@ name = "soos-enrollment-cli"
 version = "0.1.0"
 dependencies = [
  "clap",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "libc",
  "nix",
  "ort",
@@ -3309,7 +3309,7 @@ version = "0.1.0"
 dependencies = [
  "aes-gcm",
  "ciborium",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "nix",
  "proptest",
  "serde",
@@ -3325,7 +3325,7 @@ dependencies = [
  "arc-swap",
  "clap",
  "eframe",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "nix",
  "serde_json",
  "soos-biometric-store",
@@ -3366,7 +3366,7 @@ version = "0.1.0"
 name = "soos-pam"
 version = "0.1.0"
 dependencies = [
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "libc",
  "pam-bindings",
  "soos-protocol",

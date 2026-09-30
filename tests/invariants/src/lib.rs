@@ -31,6 +31,11 @@ mod physical_contract;
 #[cfg(test)]
 mod pam_deadline_contract;
 
+/// Dependency hygiene, Docker sandbox toolchain and `save.sh` commit contract
+/// (GitHub #243, #244, #245; matrix DDS1–DDS8).
+#[cfg(all(test, unix))]
+mod dependency_tooling_contract;
+
 /// Traceability tooling contract for `scripts/sync_issue.py` (GitHub #188).
 #[cfg(all(test, unix))]
 mod sync_issue_contract;

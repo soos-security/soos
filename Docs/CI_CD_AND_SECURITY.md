@@ -110,12 +110,14 @@ retitling a PR re-validates it without re-running the whole pipeline.
 The [`save.sh`](../save.sh) script is the primary tool for both human contributors and AI agents to validate, stage, and commit changes cleanly:
 - **Sequential Execution**: Strict fail-fast pipeline (`set -euo pipefail`). Any failure immediately halts execution.
 - **CI Parity**: clippy, test and deny use exactly the CI flags (`--locked --workspace --all-targets --all-features`).
-- **Conventional Commits Generation**: Generates standard Conventional Commit headers automatically in English based on the staged files (`feat(...)`, `test:`, `docs:`, `chore:`).
+- **Conventional Commit Subject**: `-m` (or the positional message) is used as is. Without it, [`scripts/commit_message.sh`](../scripts/commit_message.sh) infers exactly one subject line: the type is the branch prefix (`feat/`, `fix/`, `test/`, `chore/` only), the scope is the crate directory when every staged `crates/<dir>/` file belongs to one crate, and the description is the branch suffix (lowercased, other characters turned into spaces). Any other branch, an empty description or a subject above 72 characters is refused before the pipeline runs, and no body bullets or file counters are generated (GitHub #245). Prefer `-m`: the subject becomes the squash-merge subject on `main`.
+- **Staging**: `git add -u` (tracked modifications) plus new files under `crates/`, `tests/`, `Docs/`, `AI/`, `scripts/` and `packaging/`. Other untracked files are listed and never staged; `git add` them explicitly beforehand when they belong in the commit.
 - **Push & PR Automation**: When invoked with `--auto-merge` (or via `scripts/pr_loop.sh`), it pushes, opens the Pull Request, watches CI with fail-fast, and squash-merges into `main` with `--match-head-commit`.
 
 Usage:
 ```bash
-# Local verification and commit with auto-generated message:
+# Local verification and commit, subject inferred from the branch
+# (on fix/pam-timeout touching only crates/pam: "fix(pam): pam timeout"):
 ./save.sh
 
 # Local verification and commit with custom message:
@@ -135,7 +137,9 @@ The [`deny.toml`](../deny.toml) configuration enforces strict third-party depend
 - **Advisories**: Any known unpatched RustSec advisory immediately fails the build (checked on every PR and daily).
 - **Licenses**: Only permissive open-source licenses are permitted for dependencies (MIT, Apache-2.0, BSD-2/3, ISC, ...). Workspace internal crates under AGPL-3.0 are isolated with `publish.workspace = true` and `[licenses.private] ignore = true`.
 - **Sources**: Only the official `crates.io` index is permitted (no unverified git repositories or alternate registries).
-- **Duplicates**: `multiple-versions = "deny"`; every tolerated duplicate is listed in `skip` with a reason.
+- **Duplicates**: `multiple-versions = "deny"`; every tolerated duplicate is listed in `skip` with a reason that names the direct dependents of the skipped version, as printed by `cargo tree --locked -i <crate>@<version> --target all -e normal,build,dev --depth 1`. A version used directly by a workspace crate is never described as transitive, and every version of a crate locked three times is documented in `deny.toml` (enforced by `tests/invariants/src/dependency_tooling_contract.rs`, GitHub #243). Rewrite the reason whenever `cargo update` changes who pulls the old version in.
+- **Pre-release pins**: a pre-release workspace dependency is pinned with `=` (today `ort = "=2.0.0-rc.13"`), so a `cargo update` never adopts the API changes of the next release candidate silently; upgrade it deliberately and rerun the real-model tests. Workspace crates use `getrandom` 0.4 (0.2 and 0.3 remain only through `rand_core` and `ahash`).
+- **Cargo updates**: Dependabot covers GitHub Actions only; crate updates go through the normal dev-workflow (see `.github/dependabot.yml`).
 - **Banned Crates**: `opencv` and `nokhwa` (see [`AI/ARCHITECTURE.md`](../AI/ARCHITECTURE.md)).
 
 To execute the security audit locally (cargo-deny ≥ 0.20):
@@ -201,6 +205,15 @@ To guarantee that experimental PAM modules never compromise the host operating s
 ./run_tests.sh authselect  # Fedora authselect profile activation and rollback (fedora:40)
 ./run_tests.sh rollback    # Debian stack order + byte-for-byte PAM rollback (ubuntu:24.04, fedora:40)
 ```
+
+Before building, `tests/docker/test_suite.sh` runs `rustup toolchain install --profile minimal`
+in `/workspace`, which reads `rust-toolchain.toml` and updates the image's `stable` to the
+release the other CI jobs install (the layer-cached image otherwise keeps the compiler of the
+day it was built). CI passes `SOOS_REQUIRE_TOOLCHAIN_SYNC=1`, so a failed sync fails the job;
+a local offline run warns and uses the image toolchain. `rustc --version` is logged. The suite
+then always runs `cargo build --locked --release -p soos-pam` (a no-op when up to date), so a
+stale `target/release/libpam_soos.so` from the bind-mounted host checkout is never deployed
+(GitHub #244).
 
 The matrix (see [`PAM_DOCKER_TEST_MATRIX.md`](PAM_DOCKER_TEST_MATRIX.md)) covers nominal facial
 authorization, daemon timeout and crash fallbacks with valid and invalid passwords, native
