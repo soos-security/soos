@@ -233,3 +233,48 @@ A package is a distributable artifact: any key inside it would be shared by ever
 | Target-host generation | `/usr/libexec/soos/provision-master-key [--state-dir <DIR>]` | Called by `packaging/debian/postinst` (`configure`), `packaging/arch/soos.install` (`post_install`), `packaging/rpm/soos.spec` (`%post`) and by `install.sh` on a live install. Refuses symlinks and non-regular files, creates the key in a private temporary file under `umask 077` (mode `0600` from inception), verifies it is exactly 32 bytes, publishes it with an atomic hard link (a concurrently created key is never clobbered), tightens an existing key to `0600 root:root`, and prints paths only, never key bytes. |
 | Recipes | `packaging/arch/PKGBUILD`, `packaging/rpm/soos.spec` | Install the helper; the RPM never lists `master.key` in `%files` (the helper enforces mode 0600). `scripts/uninstall.sh` removes the helper and keeps the key unless `--purge-data` is given. |
 | Tests | `tests/invariants/src/lib.rs`, `tests/docker/test_packages.sh` | Invariants PMK1–PMK5 (`AI/VERIFICATION_MATRIX.md`); the Docker package test asserts the archive listing has no `.key` entry, the installed key is `0600` and 32 bytes, it survives removal, and two fresh installs produce distinct keys. |
+
+---
+
+## 8. Daemon Service Sandbox and Configuration Validation (GitHub #199, #202, #203)
+
+### 8.1 Least-privilege systemd unit (`packaging/soos-daemon.service`)
+
+The daemon runs as `root:soos` but inside a bounded sandbox:
+
+| Directive | Why |
+|---|---|
+| `CapabilityBoundingSet=CAP_IPC_LOCK CAP_CHOWN CAP_FOWNER CAP_DAC_OVERRIDE`, `AmbientCapabilities=` | `mlockall` (`CAP_IPC_LOCK`), socket `fchownat` / `fchmodat` (`CAP_CHOWN`, `CAP_FOWNER`); `CAP_DAC_OVERRIDE` is kept until dropping it is validated on a real host |
+| `SystemCallFilter=@system-service`, `SystemCallErrorNumber=EPERM` | `@system-service` includes `@memlock`, `@chown`, `ioctl` (V4L2) and `sched_setaffinity` (ONNX Runtime threads) |
+| `ProtectKernelTunables/Modules/Logs=yes`, `ProtectControlGroups=yes`, `ProtectClock=yes`, `ProtectHostname=yes`, `RestrictNamespaces=yes`, `RestrictRealtime=yes` | No kernel, cgroup, clock, namespace or realtime access is needed |
+| `PrivateNetwork=yes`, `IPAddressDeny=any`, `RestrictAddressFamilies=AF_UNIX` | No network at all; the filesystem socket `/run/soos/daemon.sock` works inside a private network namespace |
+| `DevicePolicy=closed`, `DeviceAllow=char-video4linux rw` | systemd does not expand globs in `DeviceAllow=` node paths, so `/dev/video*` alone matches nothing; the device group allows every V4L2 node |
+| `Before=display-manager.service` | The daemon starts before the greeter shows its first prompt |
+
+Deliberately **not** set: `ProtectProc=invisible` / `ProcSubset=pid` (they would hide
+`/proc/<pid>/cgroup` of other users' peers, which the session policy reads), `PrivateDevices=yes`
+(removes `/dev/video*`). The contract is `crates/daemon/tests/systemd_hardening_tests.rs`.
+`systemd-analyze security --offline=yes` reports an exposure of 1.7 (7.5 before). Check the
+installed unit with `systemd-analyze security soos-daemon` on the target host.
+
+### 8.2 `daemon.toml` is validated fail-closed
+
+`DaemonConfig::validate()` runs whenever `/etc/soos/daemon.toml` (or `--config`) is loaded; any
+invalid value stops the daemon with an error naming the setting:
+
+| Setting | Accepted values |
+|---|---|
+| `[socket] socket_mode` | `432` (0o660) or `384` (0o600) only |
+| `[dispatcher] connection_timeout_ms` | 100 to 10000 |
+| `[dispatcher] max_concurrent_connections` | at least 1 |
+| `[pipeline.thresholds]` | finite, within (0, 1], at or above the policy security floor |
+| `[pipeline.rate_limit] max_attempts`, `max_tracked_uids`, `window_duration_secs` | at least 1 |
+| `[pipeline.evidence] retention_days` | at least 1 |
+| `log_level` | non-blank `tracing` filter directive of at most 256 bytes |
+
+### 8.3 The daemon never creates the `soos` group
+
+The group is provisioned by the packages and `scripts/install.sh` only. If it is missing, the
+daemon fails to bind with `Group 'soos' not found` instead of running `groupadd`. On C libraries
+without `fchmodat(AT_SYMLINK_NOFOLLOW)` support, the socket mode is set through an
+`O_PATH | O_NOFOLLOW` descriptor, never through a path that could follow a symlink.

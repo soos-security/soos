@@ -9,6 +9,22 @@ use crate::error::DaemonError;
 use crate::limits::PeerLimitsConfig;
 use crate::preview::PreviewConfig;
 
+/// The only socket permission modes accepted from configuration (GitHub #199, DMN-08).
+///
+/// Neither grants any bit to "other", and neither carries setuid/setgid/sticky bits.
+pub const ALLOWED_SOCKET_MODES: [u32; 2] = [0o660, 0o600];
+
+/// Lower bound of `[dispatcher] connection_timeout_ms` (a zero or near-zero timeout makes
+/// every request time out and leaves the camera wake budget at zero).
+pub const MIN_CONNECTION_TIMEOUT_MS: u64 = 100;
+
+/// Upper bound of `[dispatcher] connection_timeout_ms` (a connection permit must never be
+/// held for an unbounded time).
+pub const MAX_CONNECTION_TIMEOUT_MS: u64 = 10_000;
+
+/// Maximum length in bytes of the `log_level` filter directive.
+pub const MAX_LOG_LEVEL_LEN: usize = 256;
+
 /// Configuration for the Unix domain socket listener.
 #[derive(Debug, Clone)]
 pub struct SocketConfig {
@@ -22,6 +38,25 @@ pub struct SocketConfig {
     pub enforce_root_owner: bool,
     /// Target system group for socket ownership (defaults to `"soos"`).
     pub socket_group: Option<String>,
+}
+
+impl SocketConfig {
+    /// Validates the socket settings fail-closed.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DaemonError::Config`] when `socket_mode` is not one of
+    /// [`ALLOWED_SOCKET_MODES`].
+    pub fn validate(&self) -> Result<(), DaemonError> {
+        if !ALLOWED_SOCKET_MODES.contains(&self.socket_mode) {
+            return Err(DaemonError::Config(format!(
+                "[socket] socket_mode {:o} is not allowed (accepted: 660, 600; the socket must \
+                 never be accessible to other users)",
+                self.socket_mode
+            )));
+        }
+        Ok(())
+    }
 }
 
 impl Default for SocketConfig {
@@ -47,6 +82,33 @@ pub struct DispatcherConfig {
     pub enforce_active_session: bool,
     /// Directory containing systemd logind runtime session state files.
     pub logind_sessions_dir: PathBuf,
+}
+
+impl DispatcherConfig {
+    /// Validates the dispatcher settings fail-closed.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DaemonError::Config`] when `max_concurrent_connections` is zero or
+    /// `connection_timeout` lies outside
+    /// [`MIN_CONNECTION_TIMEOUT_MS`]..=[`MAX_CONNECTION_TIMEOUT_MS`].
+    pub fn validate(&self) -> Result<(), DaemonError> {
+        if self.max_concurrent_connections == 0 {
+            return Err(DaemonError::Config(
+                "[dispatcher] max_concurrent_connections must be at least 1".into(),
+            ));
+        }
+        let timeout_ms = self.connection_timeout.as_millis();
+        if timeout_ms < u128::from(MIN_CONNECTION_TIMEOUT_MS)
+            || timeout_ms > u128::from(MAX_CONNECTION_TIMEOUT_MS)
+        {
+            return Err(DaemonError::Config(format!(
+                "[dispatcher] connection_timeout_ms {timeout_ms} is outside \
+                 {MIN_CONNECTION_TIMEOUT_MS}..={MAX_CONNECTION_TIMEOUT_MS}"
+            )));
+        }
+        Ok(())
+    }
 }
 
 impl Default for DispatcherConfig {
@@ -81,6 +143,65 @@ pub struct PipelineConfig {
     pub rate_limit: soos_policy::RateLimitConfig,
     /// Whether to force mock camera simulation rather than hardware device.
     pub use_mock_camera: bool,
+}
+
+impl PipelineConfig {
+    /// Validates the pipeline settings that can silently disable a security control or
+    /// reject every request.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DaemonError::Config`] when the thresholds fail the policy security floor,
+    /// the vision thresholds differ from the policy thresholds, a rate-limit bound is zero
+    /// (window shorter than one second) or `retention_days` is zero.
+    pub fn validate(&self) -> Result<(), DaemonError> {
+        let match_thresh = self.thresholds.match_threshold();
+        let pad_thresh = self.thresholds.pad_threshold();
+        soos_policy::ThresholdConfig::builder()
+            .match_threshold(match_thresh)
+            .pad_threshold(pad_thresh)
+            .build_with_security_floor()
+            .map_err(|e| DaemonError::Config(format!("Invalid [pipeline.thresholds]: {e}")))?;
+        // Bitwise comparison: NaN never equals itself, and the mirror must be an exact copy.
+        if self.vision.match_threshold.to_bits() != match_thresh.to_bits() {
+            return Err(DaemonError::Config(
+                "[pipeline.thresholds] match_threshold differs between the policy and the \
+                 vision pipeline"
+                    .into(),
+            ));
+        }
+        if self.vision.pad_threshold.to_bits() != pad_thresh.to_bits() {
+            return Err(DaemonError::Config(
+                "[pipeline.thresholds] pad_threshold differs between the policy and the \
+                 vision pipeline"
+                    .into(),
+            ));
+        }
+
+        let rl = &self.rate_limit;
+        if rl.max_attempts == 0 {
+            return Err(DaemonError::Config(
+                "[pipeline.rate_limit] max_attempts must be at least 1".into(),
+            ));
+        }
+        if rl.window_duration_ns < 1_000_000_000 {
+            return Err(DaemonError::Config(
+                "[pipeline.rate_limit] window_duration_secs must be at least 1".into(),
+            ));
+        }
+        if rl.max_tracked_uids == 0 {
+            return Err(DaemonError::Config(
+                "[pipeline.rate_limit] max_tracked_uids must be at least 1".into(),
+            ));
+        }
+
+        if self.evidence.retention_days == 0 {
+            return Err(DaemonError::Config(
+                "[pipeline.evidence] retention_days must be at least 1".into(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 impl Default for PipelineConfig {
@@ -219,7 +340,41 @@ struct RateLimitConfigFile {
     max_tracked_uids: Option<usize>,
 }
 
+/// Validates a `tracing` filter directive without installing it.
+fn validate_log_level(level: &str) -> Result<(), DaemonError> {
+    if level.len() > MAX_LOG_LEVEL_LEN {
+        return Err(DaemonError::Config(format!(
+            "log_level exceeds {MAX_LOG_LEVEL_LEN} bytes"
+        )));
+    }
+    if level.trim().is_empty() {
+        return Err(DaemonError::Config("log_level must not be empty".into()));
+    }
+    tracing_subscriber::EnvFilter::try_new(level)
+        .map(drop)
+        .map_err(|e| DaemonError::Config(format!("log_level is not a valid filter: {e}")))
+}
+
 impl DaemonConfig {
+    /// Validates the complete configuration fail-closed (GitHub #199, DMN-08).
+    ///
+    /// Called by [`DaemonConfig::from_toml_str`] (hence by `load_from_path` and
+    /// `load_or_default`), so the daemon refuses to start on any invalid value.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DaemonError::Config`] naming the first invalid setting.
+    pub fn validate(&self) -> Result<(), DaemonError> {
+        validate_log_level(&self.log_level)?;
+        self.socket.validate()?;
+        self.dispatcher.validate()?;
+        self.pipeline.validate()?;
+        self.preview.validate()?;
+        self.peer_limits
+            .validate(self.dispatcher.max_concurrent_connections)?;
+        Ok(())
+    }
+
     /// Parses a complete daemon configuration from a TOML string.
     pub fn from_toml_str(content: &str) -> Result<Self, DaemonError> {
         let file: DaemonConfigFile = toml::from_str(content)
@@ -384,6 +539,7 @@ impl DaemonConfig {
         config
             .peer_limits
             .validate(config.dispatcher.max_concurrent_connections)?;
+        config.validate()?;
 
         Ok(config)
     }

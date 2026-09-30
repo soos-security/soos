@@ -94,31 +94,78 @@ pub fn open_and_validate_directory(
 }
 
 /// Resolves the GID for the given group name.
-/// If running as root and the group does not exist, attempts to create it via `groupadd --system`.
+///
+/// The daemon never creates the group itself (GitHub #202, DMN-13): every packaging path
+/// (`packaging/debian/postinst`, `packaging/rpm/soos.spec`, `packaging/arch/soos.install`,
+/// `scripts/install.sh`) provisions it, and under `ProtectSystem=strict` a runtime
+/// `groupadd` could only fail. A missing group is reported as an error.
 pub fn resolve_socket_group(group_name: &str) -> Result<u32, DaemonError> {
-    if let Ok(Some(group)) = nix::unistd::Group::from_name(group_name) {
-        return Ok(group.gid.as_raw());
+    match nix::unistd::Group::from_name(group_name) {
+        Ok(Some(group)) => Ok(group.gid.as_raw()),
+        _ => Err(DaemonError::SocketDirValidation(format!(
+            "Group '{}' not found",
+            group_name
+        ))),
+    }
+}
+
+/// Changes the mode of the socket node `name` inside `dir` without ever following a symlink.
+///
+/// Fallback for C libraries whose `fchmodat(..., AT_SYMLINK_NOFOLLOW)` reports
+/// `EOPNOTSUPP` (glibc < 2.32, musl) (GitHub #202, DMN-13). The node is pinned with
+/// `O_PATH | O_NOFOLLOW` relative to the already-validated directory descriptor, its type
+/// is checked on the pinned descriptor (a symlink or any non-socket is refused), and the
+/// mode is changed through `/proc/self/fd/<n>`, which resolves to the pinned inode itself.
+/// Fails closed when `/proc` is unavailable.
+pub fn chmod_socket_node_nofollow(
+    dir: &fs::File,
+    name: &Path,
+    mode: u32,
+) -> Result<(), DaemonError> {
+    let mut components = name.components();
+    let single_normal = matches!(
+        (components.next(), components.next()),
+        (Some(std::path::Component::Normal(_)), None)
+    );
+    if !single_normal {
+        return Err(DaemonError::SocketDirValidation(format!(
+            "Invalid socket node name: '{}'",
+            name.display()
+        )));
     }
 
-    if nix::unistd::geteuid().is_root() {
-        debug!(group = %group_name, "Attempting to create system group");
-        if let Ok(status) = std::process::Command::new("groupadd")
-            .args(["--system", group_name])
-            .status()
-        {
-            if status.success() {
-                if let Ok(Some(group)) = nix::unistd::Group::from_name(group_name) {
-                    info!(group = %group_name, gid = group.gid.as_raw(), "Created system group");
-                    return Ok(group.gid.as_raw());
-                }
-            }
-        }
+    let dir_proc = PathBuf::from(format!("/proc/self/fd/{}", dir.as_raw_fd()));
+    let node = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(dir_proc.join(name))
+        .map_err(|e| {
+            DaemonError::SocketDirValidation(format!(
+                "Failed to pin socket node '{}': {e}",
+                name.display()
+            ))
+        })?;
+
+    let stat = nix::sys::stat::fstat(node.as_raw_fd()).map_err(|e| {
+        DaemonError::SocketDirValidation(format!(
+            "Failed to stat pinned socket node '{}': {e}",
+            name.display()
+        ))
+    })?;
+    if (stat.st_mode & libc::S_IFMT) != libc::S_IFSOCK {
+        return Err(DaemonError::SocketDirValidation(format!(
+            "Refusing to chmod non-socket node '{}'",
+            name.display()
+        )));
     }
 
-    Err(DaemonError::SocketDirValidation(format!(
-        "Group '{}' not found",
-        group_name
-    )))
+    let pinned = PathBuf::from(format!("/proc/self/fd/{}", node.as_raw_fd()));
+    fs::set_permissions(&pinned, fs::Permissions::from_mode(mode)).map_err(|e| {
+        DaemonError::SocketDirValidation(format!(
+            "Failed to set permissions on pinned socket node '{}': {e}",
+            name.display()
+        ))
+    })
 }
 
 // DirLock removed in favor of nix::fcntl::Flock
@@ -156,6 +203,7 @@ impl Drop for SocketGuard {
 /// Prepares and binds the Unix domain socket according to `SocketConfig`.
 ///
 /// Steps:
+/// 0. Validates `socket_mode` against [`crate::config::ALLOWED_SOCKET_MODES`].
 /// 1. Opens and validates parent directory invariants (`O_DIRECTORY | O_NOFOLLOW`).
 /// 2. Acquires exclusive lock (`flock`) on the parent directory descriptor to serialize binding.
 /// 3. Checks stale socket node via `fstatat` with `AT_SYMLINK_NOFOLLOW`:
@@ -164,12 +212,17 @@ impl Drop for SocketGuard {
 ///    - If socket: unlinks descriptor-relative via `unlinkat`.
 /// 4. Binds the `tokio::net::UnixListener`.
 /// 5. Validates bound node is genuine socket via `fstatat`.
-/// 6. Sets permissions to `socket_mode` (0660) via `fchmodat` with `NoFollowSymlink`.
+/// 6. Sets permissions to `socket_mode` (0660) via `fchmodat` with `NoFollowSymlink`
+///    (or [`chmod_socket_node_nofollow`] where the C library lacks that flag).
 /// 7. Sets group ownership (`root:soos` or configured group) via `fchownat`.
 /// 8. Releases directory lock and returns listener with `SocketGuard`.
 pub async fn bind_socket(
     config: &SocketConfig,
 ) -> Result<(UnixListener, SocketGuard), DaemonError> {
+    // Step 0: refuse a world-accessible or otherwise unexpected mode before touching the
+    // filesystem (GitHub #199, DMN-08).
+    config.validate()?;
+
     let dir_file = open_and_validate_directory(&config.socket_dir, config.enforce_root_owner)?;
     let dir_lock = nix::fcntl::Flock::lock(dir_file, nix::fcntl::FlockArg::LockExclusiveNonblock)
         .map_err(|(_, e)| {
@@ -266,10 +319,7 @@ pub async fn bind_socket(
     );
     if let Err(err) = chmod_res {
         if err == nix::errno::Errno::EOPNOTSUPP {
-            fs::set_permissions(
-                &config.socket_path,
-                fs::Permissions::from_mode(config.socket_mode),
-            )?;
+            chmod_socket_node_nofollow(&dir_lock, socket_name, config.socket_mode)?;
         } else {
             return Err(DaemonError::SocketDirValidation(format!(
                 "Failed to set socket permissions on '{}': {err}",
