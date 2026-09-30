@@ -20,7 +20,7 @@ Shapes below are the ONNX graph metadata of the attested files (`N` is a symboli
 | Model Identifier | File Name | Architecture | License | Input Tensor | Output Tensor(s) | Primary Purpose |
 |---|---|---|---|---|---|---|
 | `scrfd_500m_kps` | `scrfd_500m_kps.onnx` | SCRFD 500M KPS | MIT | `[1, 3, 640, 640]` BGR | 9 tensors (scores, bboxes, kps across strides 8, 16, 32) | Unified face bounding box detection + 5-point facial landmark regression |
-| `arcface_w600k_mbf` | `arcface_w600k_mbf.onnx` | ArcFace ResNet34 (Keras, tf2onnx export; ~34.1 M params, 136.6 MB) | MIT (as recorded, see §6) | `input_1` `[N, 112, 112, 3]` **NHWC** (manifest: logical `[1, 3, 112, 112]` + `input_layout = "NHWC"`), fed BGR | `embedding` `[N, 512]` | 512D biometric feature extractor (L2-normalized by the extractor) |
+| `arcface_w600k_mbf` | `arcface_w600k_mbf.onnx` | ArcFace ResNet34 (Keras, tf2onnx export; ~34.1 M params, 136.6 MB) | NOASSERTION (the source declares no licence, see §6) | `input_1` `[N, 112, 112, 3]` **NHWC** (manifest: logical `[1, 3, 112, 112]` + `input_layout = "NHWC"`), fed BGR | `embedding` `[N, 512]` | 512D biometric feature extractor (L2-normalized by the extractor) |
 | `minifasnet_v2_pad` | `minifasnet_v2_80x80.onnx` | MiniFASNetV2 | Apache-2.0 | `[1, 3, 80, 80]` BGR | `[1, 3]` | Presentation Attack Detection (anti-spoofing; live vs print vs replay) |
 
 ### Preprocessing & Tensor Normalization Rules
@@ -132,6 +132,6 @@ Manifest v2.0.0 completely supersedes the v1.0.0 models. These ids are historica
 
 ## 6. Legal Notice & Redistribution Restrictions
 
-- **Open Source Licensing**: The model architectures and pre-trained weights referenced in `manifest.toml` are authored by their respective upstream creators and licensed under permissive open-source licenses (MIT and Apache License 2.0).
+- **Open Source Licensing**: The model architectures and pre-trained weights referenced in `manifest.toml` are authored by their respective upstream creators and licensed under permissive open-source licenses (MIT and Apache License 2.0), except `arcface_w600k_mbf`: its source repository (`garavv/arcface-onnx`) declares no licence, so the manifest records the SPDX value `NOASSERTION` (GitHub #278). Packagers must clear its redistribution terms with the upstream author or replace the model.
 - **Redistribution Policy**: In strict compliance with zero-trust principles and source repository hygiene, compiled binary weights (`*.onnx`) are **NOT** bundled or tracked in git version control. They are downloaded directly from authenticated upstream sources or local installation packages during setup.
 - **Third-Party Rights**: Users and distribution packagers must comply with the upstream license agreements when acquiring, caching, or distributing model weights for end-user deployments.

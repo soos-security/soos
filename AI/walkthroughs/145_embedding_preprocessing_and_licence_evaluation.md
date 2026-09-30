@@ -109,3 +109,7 @@ model makes them fail.
    pre-processing contract, and migrate or re-enroll templates.
 4. Recalibrate `match_threshold` with FAR/FRR measured on labelled real captures (needs
    hardware and data).
+
+## Follow-up after user decision (2026-10-01)
+
+The user chose to record the licence honestly and keep BGR until real faces are measured: `models/manifest.toml` now records `license = "NOASSERTION"` for `arcface_w600k_mbf`, `models/README.md` explains it, and the pinned assertion in `manifest_tests::test_parse_workspace_manifest_file` changed from `"MIT"` to `"NOASSERTION"` with user approval (matrix row SFX5). The RGB switch, a replacement model and the threshold recalibration stay open (SFX4), so #278 remains open.
