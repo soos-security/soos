@@ -9,6 +9,9 @@
     reason = "Warmup tests use assertions"
 )]
 
+mod common;
+
+use common::{wait_until, SETTLE_TIMEOUT};
 use soos_camera_v4l::{CameraConfigBuilder, CameraManager, MockCameraManager};
 use std::thread;
 use std::time::Duration;
@@ -37,8 +40,10 @@ fn test_warmup_frames_discard_before_ready() {
     thread::sleep(Duration::from_millis(150));
     assert!(!camera.is_ready(), "Must still not be ready mid-warmup");
 
-    // Wait for warmup to finish (total 20 frames = ~330ms, allow margin)
-    thread::sleep(Duration::from_millis(300));
+    // Wait for warmup to finish (total 20 frames = ~330ms)
+    wait_until(SETTLE_TIMEOUT, || {
+        camera.is_ready() && camera.latest_frame().is_some()
+    });
     assert!(camera.is_ready(), "Must be ready after 20 warmup frames");
     assert!(
         camera.latest_frame().is_some(),
@@ -60,8 +65,7 @@ fn test_warmup_frames_configurable_bounds() {
         assert!(!camera.is_ready());
 
         // Wait for warmup_count frames
-        let sleep_duration = Duration::from_millis((warmup_count as u64 * 10) + 100);
-        thread::sleep(sleep_duration);
+        wait_until(SETTLE_TIMEOUT, || camera.is_ready());
 
         assert!(
             camera.is_ready(),

@@ -13,13 +13,17 @@
 use soos_camera_v4l::{CameraConfigBuilder, CameraManager, MockCameraManager};
 use std::sync::Arc;
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Instant;
+
+mod common;
+
+use common::{wait_until, SETTLE_TIMEOUT};
 
 #[test]
 fn test_arcswap_frame_retrieval_latency_under_5ms() {
     let config = CameraConfigBuilder::new().warmup_frames(1).build();
     let camera = Arc::new(MockCameraManager::new(config));
-    thread::sleep(Duration::from_millis(100));
+    wait_until(SETTLE_TIMEOUT, || camera.is_ready());
     assert!(camera.is_ready());
 
     const ITERATIONS: usize = 10_000;
@@ -55,7 +59,7 @@ fn test_arcswap_frame_retrieval_latency_under_5ms() {
 fn test_lock_free_concurrent_access() {
     let config = CameraConfigBuilder::new().warmup_frames(1).build();
     let camera = Arc::new(MockCameraManager::new(config));
-    thread::sleep(Duration::from_millis(100));
+    wait_until(SETTLE_TIMEOUT, || camera.is_ready());
     assert!(camera.is_ready());
 
     let mut handles = Vec::new();

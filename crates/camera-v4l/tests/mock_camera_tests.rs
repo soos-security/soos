@@ -9,6 +9,9 @@
     reason = "Unit tests use assertions, unwrap, and indexing"
 )]
 
+mod common;
+
+use common::{wait_until, SETTLE_TIMEOUT};
 use soos_camera_v4l::{CameraConfigBuilder, CameraManager, MockCameraManager, PixelFormat};
 use std::thread;
 use std::time::Duration;
@@ -31,7 +34,7 @@ fn test_mock_camera_generates_frames_and_readiness() {
     );
 
     // Wait for warmup to complete (approx 5 frames at 30 fps = ~166ms)
-    thread::sleep(Duration::from_millis(250));
+    wait_until(SETTLE_TIMEOUT, || camera.is_ready());
 
     assert!(camera.is_ready(), "Camera should be ready after warmup");
 
@@ -66,7 +69,9 @@ fn test_mock_camera_respects_custom_resolution() {
         .build();
 
     let camera = MockCameraManager::new(config);
-    thread::sleep(Duration::from_millis(100));
+    wait_until(SETTLE_TIMEOUT, || {
+        camera.is_ready() && camera.latest_frame().is_some()
+    });
 
     assert!(camera.is_ready());
     let frame = camera.latest_frame().expect("Frame must exist");
@@ -82,12 +87,17 @@ fn test_mock_camera_respects_custom_resolution() {
 fn test_mock_camera_simulates_starvation() {
     let config = CameraConfigBuilder::new().warmup_frames(1).build();
     let camera = MockCameraManager::new(config);
-    thread::sleep(Duration::from_millis(100));
+    wait_until(SETTLE_TIMEOUT, || camera.is_ready());
     assert!(camera.is_ready());
 
     // Trigger starvation
     camera.set_starved(true);
+    // Minimum dwell so that a worker ignoring starvation would have republished a frame,
+    // then a bounded wait for the worker to settle (GitHub #280).
     thread::sleep(Duration::from_millis(50));
+    wait_until(SETTLE_TIMEOUT, || {
+        !camera.is_ready() && camera.latest_frame().is_none()
+    });
 
     // When starved, is_ready must fail-closed
     assert!(
@@ -101,7 +111,9 @@ fn test_mock_camera_simulates_starvation() {
 
     // Clear starvation
     camera.set_starved(false);
-    thread::sleep(Duration::from_millis(100));
+    wait_until(SETTLE_TIMEOUT, || {
+        camera.is_ready() && camera.latest_frame().is_some()
+    });
     assert!(camera.is_ready());
     assert!(camera.latest_frame().is_some());
 
@@ -118,11 +130,14 @@ fn test_mock_camera_idle_throttling_and_wake() {
         .build();
 
     let camera = MockCameraManager::new(config);
-    thread::sleep(Duration::from_millis(50));
+    wait_until(SETTLE_TIMEOUT, || camera.is_ready());
     assert!(camera.is_ready());
 
     // Wait for idle timeout to expire
     thread::sleep(Duration::from_millis(150));
+    // ... and for the worker to have actually entered the suspended state (it clears the
+    // frame slot there), so the wake below never races a late suspension (GitHub #280).
+    wait_until(SETTLE_TIMEOUT, || camera.latest_frame().is_none());
 
     // Notify activity should immediately wake back to full speed
     camera.notify_activity();
@@ -144,10 +159,7 @@ fn test_mock_camera_auto_suspend_and_resume_lifecycle() {
     let camera = MockCameraManager::new(config);
 
     // Wait for initial warmup
-    let start = std::time::Instant::now();
-    while !camera.is_ready() && start.elapsed() < Duration::from_millis(500) {
-        thread::sleep(Duration::from_millis(10));
-    }
+    wait_until(SETTLE_TIMEOUT, || camera.is_ready());
     assert!(
         camera.is_ready(),
         "Camera must become ready after initial warmup"
@@ -162,10 +174,7 @@ fn test_mock_camera_auto_suspend_and_resume_lifecycle() {
 
     // Notify activity: camera must re-initialize on-demand and become ready
     camera.notify_activity();
-    let wake_start = std::time::Instant::now();
-    while !camera.is_ready() && wake_start.elapsed() < Duration::from_millis(500) {
-        thread::sleep(Duration::from_millis(10));
-    }
+    wait_until(SETTLE_TIMEOUT, || camera.is_ready());
     assert!(
         camera.is_ready(),
         "Camera must resume from Suspended state upon notify_activity()"
@@ -186,10 +195,7 @@ fn test_mock_camera_idle_timeout_zero_disables_auto_standby() {
     let camera = MockCameraManager::new(config);
 
     // Wait for camera to be ready
-    let start = std::time::Instant::now();
-    while !camera.is_ready() && start.elapsed() < Duration::from_millis(500) {
-        thread::sleep(Duration::from_millis(10));
-    }
+    wait_until(SETTLE_TIMEOUT, || camera.is_ready());
     assert!(camera.is_ready(), "Camera must be ready");
 
     // Sleep for 100ms without calling notify_activity()

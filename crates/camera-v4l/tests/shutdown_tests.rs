@@ -20,6 +20,10 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
+mod common;
+
+use common::{wait_until, SETTLE_TIMEOUT};
+
 /// Criterion C9 & Sub-issue #23.1:
 /// Verify that MockCameraManager Drop completes within 500ms even when the camera is idle
 /// with a very low effective frame rate (e.g. 1 FPS = 1000ms frame interval).
@@ -56,7 +60,7 @@ fn test_camera_stop_signals_graceful_shutdown() {
     let config = CameraConfigBuilder::new().fps(30).warmup_frames(1).build();
 
     let camera = MockCameraManager::new(config);
-    thread::sleep(Duration::from_millis(60));
+    wait_until(SETTLE_TIMEOUT, || camera.is_ready());
     assert!(camera.is_ready(), "Camera should be ready after warmup");
 
     camera.stop();
