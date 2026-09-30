@@ -10,7 +10,7 @@
     reason = "Contractual test suite utilizes direct assertions, unwrap, and indexing"
 )]
 
-use soos_evidence_store::{EvidenceConfig, EvidenceStore};
+use soos_evidence_store::{EvidenceConfig, EvidenceStore, OPAQUE_SNAPSHOT_EXTENSION};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use tempfile::TempDir;
@@ -92,11 +92,12 @@ fn test_evidence_filename_format() {
 
     let filename = result.path.file_name().unwrap().to_str().unwrap();
     assert!(
-        filename.ends_with(".webp.enc"),
-        "Filename must end with .webp.enc, got: {filename}"
+        // User-approved 2026-09-30 (GitHub #278): the opaque suffix no longer claims WebP.
+        filename.ends_with(OPAQUE_SNAPSHOT_EXTENSION),
+        "Filename must end with {OPAQUE_SNAPSHOT_EXTENSION}, got: {filename}"
     );
 
-    let uuid_part = &filename[..filename.len() - ".webp.enc".len()];
+    let uuid_part = &filename[..filename.len() - OPAQUE_SNAPSHOT_EXTENSION.len()];
     assert_eq!(
         uuid_part.len(),
         36,

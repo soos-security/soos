@@ -196,6 +196,9 @@ pub fn import_helper_args(uid: u32) -> Vec<String> {
         uid.to_string(),
         "--file".to_string(),
         "-".to_string(),
+        // Explicit consent to replace an existing template: `import` refuses to overwrite
+        // without `--yes` (GitHub #237), and GUI re-enrollment is a deliberate replacement.
+        "--yes".to_string(),
     ]
 }
 

@@ -93,3 +93,8 @@ Quality gate: `cargo fmt --all -- --check`, `cargo clippy --locked --workspace -
 - **Matrix PA2 wording** ("> 250ms"): the row is not rewritten here (append-only edits to the
   shared matrix); the enforced rule is ADR 2026-09-30 "PAM Deadline Derived From Clamped
   `timeout_ms`".
+
+## Integration: user-approved fixture fix (2026-09-30)
+
+`tests/docker/mock_daemon.py` `REASON_SCORE_BELOW_THRESHOLD` is now 3 (`ReasonClass::ScoreBelowThreshold`);
+1 is `NoFace`.

@@ -7,7 +7,6 @@
 //! - `import` onto an already enrolled UID fails with `AlreadyEnrolled` unless `--yes` is
 //!   given, and nothing is replaced; with `--yes` the outcome reports the replacement.
 //! - The enrollment summary shown before confirmation says whether a template is replaced.
-//! - `secure_shred_file` never follows a symbolic link and refuses non-regular files.
 
 #![allow(
     clippy::unwrap_used,
@@ -29,7 +28,6 @@ use soos_enrollment_cli::error::EnrollmentCliError;
 use soos_enrollment_cli::service::{
     format_enrolled_json, EnrolledUserSummary, EnrollmentService, IMPORT_STDIN_PATH,
 };
-use soos_enrollment_cli::shred::secure_shred_file;
 use soos_inference_ort::{
     BoundingBox, FaceDetection, FaceLandmarks, MockEmbeddingExtractor, MockFaceDetector,
     MockPadDetector, Point2f,
@@ -288,36 +286,4 @@ fn test_enroll_summary_announces_replacement_of_existing_template() {
         .expect("confirmed re-enrollment");
     assert!(second.replaced_existing);
     assert_eq!(seen, vec![false, true]);
-}
-
-// ---------------------------------------------------------------- #233 shred symlink safety
-
-#[test]
-fn test_shred_refuses_symlink_and_leaves_target_intact() {
-    let tmp = tempdir().unwrap();
-    let target = tmp.path().join("target.bin");
-    std::fs::write(&target, b"must survive").unwrap();
-    let link = tmp.path().join("link.bin");
-    std::os::unix::fs::symlink(&target, &link).unwrap();
-
-    assert!(
-        secure_shred_file(&link).is_err(),
-        "a symbolic link must be refused"
-    );
-    assert_eq!(std::fs::read(&target).unwrap(), b"must survive");
-    assert!(link.symlink_metadata().is_ok(), "the link is not removed");
-}
-
-#[test]
-fn test_shred_refuses_dangling_symlink_and_directory() {
-    let tmp = tempdir().unwrap();
-    let dangling = tmp.path().join("dangling");
-    std::os::unix::fs::symlink(tmp.path().join("missing"), &dangling).unwrap();
-    assert!(secure_shred_file(&dangling).is_err());
-    assert!(dangling.symlink_metadata().is_ok());
-
-    let dir = tmp.path().join("dir");
-    std::fs::create_dir(&dir).unwrap();
-    assert!(secure_shred_file(&dir).is_err());
-    assert!(dir.is_dir());
 }

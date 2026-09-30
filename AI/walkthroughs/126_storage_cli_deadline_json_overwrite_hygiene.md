@@ -98,3 +98,13 @@ that already derive `Serialize`. The field names are unchanged, so `soos-gui`'s
 `cargo fmt --all -- --check`, `cargo clippy --locked --workspace --all-targets --all-features
 -- -D warnings`, `cargo test --locked --workspace --all-targets --all-features --no-fail-fast`
 and `./scripts/candid_review.sh` pass (see the branch report).
+
+## Integration: user-approved test changes (2026-09-30)
+
+- `--yes` (#237): `import_helper_args` in `crates/gui/src/privileged.rs` passes `--yes`, and the two
+  assertions that pin the GUI helper command (`import_privacy_tests::test_import_helper_args_use_stdin`
+  and the argument check of `test_import_finalize_pipes_embedding_without_temp_file`) expect it.
+- `shred.rs` retired (#233): `crates/enrollment-cli/src/shred.rs`, `tests/shred_tests.rs`, the
+  `secure_shred_file` re-export, the branch-local hygiene tests and invariant that only covered it
+  are removed; the single erasure path is `BiometricStore::delete` (matrix EN4 re-pointed, CDJ5
+  superseded).

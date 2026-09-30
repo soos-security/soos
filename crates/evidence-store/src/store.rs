@@ -35,7 +35,7 @@ pub const FRAME_SNAPSHOT_EXTENSION: &str = ".frame.enc";
 /// Kept for backward compatibility of the opaque-bytes API and its contract tests: the store
 /// never encodes WebP, the payload is whatever the caller passed, and the record carries no
 /// frame metadata. New code must use [`EvidenceStore::store_frame_snapshot`].
-pub const OPAQUE_SNAPSHOT_EXTENSION: &str = ".webp.enc";
+pub const OPAQUE_SNAPSHOT_EXTENSION: &str = ".opaque.enc";
 
 /// Primary evidence store engine.
 pub struct EvidenceStore {

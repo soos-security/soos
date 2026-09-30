@@ -118,17 +118,6 @@ fn test_already_enrolled_is_constructed_in_production_code() {
 }
 
 #[test]
-fn test_shred_never_follows_symlinks() {
-    let shred = read("crates/enrollment-cli/src/shred.rs");
-    assert!(shred.contains("symlink_metadata"));
-    assert!(shred.contains("O_NOFOLLOW"));
-    assert!(
-        !shred.contains("std::fs::metadata("),
-        "metadata() follows symbolic links"
-    );
-}
-
-#[test]
 fn test_enroll_parses_arguments_before_privilege_check() {
     let main = read("crates/enrollment-cli/src/main.rs");
     let parse = main.find("Cli::parse()").expect("Cli::parse in main.rs");

@@ -16,7 +16,6 @@ pub mod guided_enrollment;
 pub mod html_report;
 pub mod quality;
 pub mod service;
-pub mod shred;
 
 pub use args::{
     resolve_default_target_uid, sanitize_path, validate_camera_device_path, validate_fhs_path, Cli,
@@ -36,4 +35,3 @@ pub use service::{
     EMBEDDING_MODEL_VERSION, MODEL_ID_EMBEDDING, MODEL_ID_FACE_DETECTOR, MODEL_ID_PAD,
     REQUIRED_MODEL_IDS,
 };
-pub use shred::secure_shred_file;

@@ -64,3 +64,9 @@ still passes: without a jump, de-duplication is unchanged.
 No `unwrap`/`expect` added to production code; reads remain bounded; nothing sensitive is
 logged; `soos-admin-cli` keeps `#![forbid(unsafe_code)]` (`custom_flags` is safe std API);
 the PAM module is untouched.
+
+## Integration: user-approved suffix migration (2026-09-30)
+
+`OPAQUE_SNAPSHOT_EXTENSION` is now `.opaque.enc`; `permissions_tests::test_evidence_filename_format`
+uses the constant instead of the `.webp.enc` literal. Retention works on dated directories and the
+daily counters count `*.enc`, so existing `.webp.enc` files keep being counted and purged.
