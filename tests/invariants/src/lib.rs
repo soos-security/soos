@@ -19,6 +19,10 @@ mod pad_contract;
 #[cfg(test)]
 mod distro_matrix;
 
+/// Traceability tooling contract for `scripts/sync_issue.py` (GitHub #188).
+#[cfg(all(test, unix))]
+mod sync_issue_contract;
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,

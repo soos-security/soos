@@ -97,8 +97,11 @@ if [[ -z "$PR_NUMBER" ]]; then
 
     CLOSES_KEYWORD=""
     if [[ -f "./scripts/sync_issue.py" ]]; then
-        info "Synchronizing task checkboxes with GitHub Issues & AI/BACKLOG.md..."
-        python3 ./scripts/sync_issue.py --auto || true
+        # save.sh already mirrored the committed checkboxes; this never writes AI/BACKLOG.md.
+        info "Mirroring committed AI/BACKLOG.md checkboxes to the GitHub issue..."
+        if ! python3 ./scripts/sync_issue.py --auto --branch "$CURRENT_BRANCH"; then
+            warn "GitHub issue sync FAILED (see above); nothing local was changed."
+        fi
         GITHUB_ISSUE_ID=$(python3 -c "
 import os
 from scripts.sync_issue import BRANCH_TO_ISSUE, BACKLOG_TO_GITHUB, get_current_branch

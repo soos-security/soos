@@ -137,3 +137,39 @@ For automated AI workflows or contributors desiring end-to-end automation:
 4. **Push & Pull Request**: Pushes the branch to GitHub and opens a Pull Request if not already created.
 5. **CI Monitoring**: Waits until the PR head is the pushed commit and CI has started on it, then watches all GitHub Actions jobs (`lint`, `clippy`, `test`, `security`, `pam-integration`, `authselect-profile`, `pam-rollback`, `PR Title`) with fail-fast and a 45-minute ceiling, and finally polls the `CI Success` aggregate of that commit (created only once its dependencies finish) until it completes.
 6. **Streamlined Auto-Merge**: Only if `CI Success` concluded `success` **on that exact commit**, the PR is squash-merged with `gh pr merge --squash --match-head-commit <validated sha>` (GitHub refuses the merge if the head moved; `--admin` is never used), and local `main` is fast-forwarded. The loop never stashes: if the working tree is dirty it stays on the topic branch.
+
+---
+
+## 8. Backlog and Issue Traceability (`scripts/sync_issue.py`)
+
+`scripts/sync_issue.py` keeps `AI/BACKLOG.md` checkboxes and the GitHub issue bodies in step.
+Its two tables are `BACKLOG_TO_GITHUB` (backlog id → GitHub issue, one distinct GitHub **issue**
+per backlog id, never a pull request) and `BRANCH_TO_ISSUE` (topic branch → backlog id; several
+branches may deliver the same backlog id).
+
+| Command | Writes `AI/BACKLOG.md` | Calls GitHub | When |
+|---|---|---|---|
+| `--check` | no | no | offline self-check; run by `save.sh` before staging and by the invariant suite |
+| `--subissue N.M [--local-only]` | yes (heading `#N` only) | yes unless `--local-only` | Phase 6, once per delivered sub-issue, **before** the commit |
+| `--issue N --complete-all [--local-only]` | yes (heading `#N` only) | yes unless `--local-only` | only when every sub-issue of `#N` is genuinely delivered |
+| `--auto --local-only` | no | no | `save.sh` before staging: reports the branch's still-open sub-issues |
+| `--auto` | no | yes | after the push (`save.sh --push-pr`, `scripts/pr_loop.sh`): mirrors the committed checkboxes |
+| `--print-github-issue` | no | no | prints the branch's GitHub issue number, if any |
+
+- **Self-check** (`--check`): fails on a duplicated `### Issue #N` heading, a duplicated sub-issue
+  id, two backlog ids sharing one GitHub target, or a table entry naming an unknown backlog id.
+  Every syncing mode runs it first and refuses to act on inconsistent tables. It is enforced by
+  `tests/invariants/src/sync_issue_contract.rs`.
+- **Explicit completion**: `--auto` never ticks anything, so a push can no longer report partial
+  work as complete. Backlog edits come only from `--subissue` / `--complete-all`, run before
+  `save.sh`, so they are part of the committed and pushed diff and the tree is clean after a push.
+- **Failures are visible and non-destructive**: every `gh` call has a 30 s timeout; the issue body
+  is only PATCHed after a successful read, only checkbox markers change, and the progress comment
+  is only posted after a successful PATCH. A failed sync exits with status 2 and prints
+  `GitHub sync failed`; `save.sh` and `scripts/pr_loop.sh` print a warning with the re-run command
+  and continue (the branch is already pushed). Neither script silences the script with `|| true`.
+- **GitHub-only branches**: branches that fix a review finding tracked only as a GitHub issue (no
+  backlog id, e.g. the `AI/reviews/FULL_PROJECT_REVIEW_2026-09-29.md` remediation) are
+  intentionally **not** registered in `BRANCH_TO_ISSUE`. `--auto` is a visible no-op for them, and
+  the commit message closes the issue explicitly with `Closes #N`. Register a branch only when it
+  implements a `### Issue #N` heading of `AI/BACKLOG.md`.

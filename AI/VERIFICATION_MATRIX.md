@@ -371,7 +371,7 @@ This document translates the critical gating criteria from §11 of `ARCHITECTURE
 
 ---
 
-## Component: `guided-enrollment-production-unlock` (Issue #22 / GitHub #61)
+## Component: `guided-enrollment-production-unlock` (Issue #51, formerly a duplicate #22; no GitHub issue)
 
 | # | Criterion | Test Method | Status |
 |---|---|---|---|
@@ -428,7 +428,7 @@ This document translates the critical gating criteria from §11 of `ARCHITECTURE
 
 ---
 
-## Component: `gui-camera-auto-resolution-and-packaging` (Issue #50 / GitHub #140)
+## Component: `gui-camera-auto-resolution-and-packaging` (Issue #50 / PR #140; no GitHub issue)
 
 | # | Criterion | Test Method | Status |
 |---|---|---|---|
@@ -769,3 +769,15 @@ Complements PA3, PA12 and PFT1: those rows are proven under `[profile.test]` (al
 | EMR5 | The committed manifest describes the shipped network truthfully (ArcFace ResNet34, tf2onnx, NHWC, 512D, never "MobileFaceNet") and declares `input_layout = "NHWC"` for the embedding model only | Unit tests (`manifest_shape_tests::test_workspace_manifest_embedding_description_is_truthful`, `test_workspace_manifest_declares_embedding_layout_nhwc`, `test_workspace_manifest_nchw_models_keep_default_layout`) | ✅ Verified |
 | EMR6 | The production extractor detects NHWC on the real model and emits a finite, deterministic, L2-normalized 512D embedding on a synthetic crop; the embedding latency is measured (p50 127.5 ms / p95 170.9 ms on one intra-op thread) and p95 stays below `MAX_INFERENCE_ESTIMATE_MS` (1000 ms) | Real-model tests (`embedding_real_model_tests::test_real_embedding_extractor_uses_nhwc_and_emits_normalized_512d`, `test_real_embedding_latency_report`) | ✅ Verified |
 | EMR7 | Backward compatibility: a manifest entry without `input_layout` (earlier installed release) leaves the layout unspecified (`input_layout_declared = false`): the logical shape is accepted in NCHW or NHWC order, while rank, dims, input count and outputs are still enforced and a one-time warning is logged; an explicit layout is always enforced (wrong value fails closed); the real NHWC embedding model loads under such a legacy manifest; the committed manifest declares the embedding layout explicitly | Unit tests (`manifest_shape_tests::test_input_layout_declared_flag_tracks_the_manifest_field`, `test_absent_layout_accepts_either_layout_of_the_logical_shape`, `test_absent_layout_still_rejects_wrong_dims`, `test_declared_layout_is_enforced_both_ways`, `test_layout_declaration_round_trips_through_serde`, `test_workspace_manifest_declares_embedding_layout_explicitly`); real-model test (`embedding_real_model_tests::test_real_embedding_model_loads_under_manifest_without_input_layout`) | ✅ Verified |
+
+---
+
+## Component: `sync-issue-traceability` (Review finding TCI-05 — GitHub #188)
+
+| # | Criterion | Test Method | Status |
+|---|---|---|---|
+| SIT1 | `python3 scripts/sync_issue.py --check` is an offline self-check that passes on the repository: backlog headings and sub-issue ids are unique, every `BACKLOG_TO_GITHUB` value is a distinct GitHub issue (backlog #50 and #51 have none) and every table entry names an existing `### Issue #N` heading; the soos-gui work is renumbered `#51` (formerly a duplicate `#22` whose branches ticked GitHub #61) | Invariant (`sync_issue_contract::test_sync_issue_check_passes_on_repository`) | ✅ Verified |
+| SIT2 | The self-check fails with an explicit message on a duplicate GitHub target, on a branch mapped to an unknown backlog id and on a duplicated backlog heading (tampered copies under `target/`) | Invariants (`sync_issue_contract::test_sync_issue_check_rejects_duplicate_github_target`, `test_sync_issue_check_rejects_unknown_backlog_id`, `test_sync_issue_check_rejects_duplicate_backlog_heading`) | ✅ Verified |
+| SIT3 | `--auto` never rewrites `AI/BACKLOG.md` and never ticks an open sub-issue: it only reports open items and mirrors already-committed checkboxes to GitHub; an unregistered (GitHub-only review-finding) branch is an announced no-op | Invariants (`sync_issue_contract::test_sync_issue_auto_local_only_never_rewrites_backlog`, `test_sync_issue_auto_unregistered_branch_is_a_visible_noop`) | ✅ Verified |
+| SIT4 | A failing or unreachable `gh` makes the sync exit 2 with `GitHub sync failed` and leaves the backlog untouched; the body is only PATCHed after a successful read and the comment only posted after a successful PATCH | Invariant with a failing fake `gh` on `PATH` (`sync_issue_contract::test_sync_issue_gh_failure_is_visible_and_non_destructive`) | ✅ Verified |
+| SIT5 | `save.sh` runs `sync_issue.py --check` (fatal) and `--auto --local-only` before `git add .`, so backlog edits are part of the commit; neither `save.sh` nor `scripts/pr_loop.sh` silences a sync failure with `\|\| true` | Invariants (`sync_issue_contract::test_save_sh_runs_sync_check_before_staging`, `test_release_scripts_never_silence_sync_failures`) | ✅ Verified |

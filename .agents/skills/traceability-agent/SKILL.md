@@ -28,12 +28,14 @@ Every "Verified" claim must point to a test that exists and passes. Shared facts
      next free IDs of the relevant prefix. Do not rewrite older rows' markers (`☑ Validated`).
 3. **Backlog & GitHub sync** (network; requires an authenticated `gh`):
    ```bash
+   python3 scripts/sync_issue.py --check      # offline mapping self-check, must pass
    python3 scripts/sync_issue.py --subissue <X.Y> --comment "Sub-issue #<X.Y> completed and verified."
-   # once every sub-issue of the branch is done:
-   python3 scripts/sync_issue.py --auto
    ```
-   The branch must already be in `BRANCH_TO_ISSUE`; `--auto` checks off **all** sub-issues of the
-   branch, so run it only when they are all genuinely complete.
+   Run `--subissue` once per delivered item **before** the commit so the `AI/BACKLOG.md` edit is
+   committed (`--local-only` skips GitHub). `--auto` never ticks anything: `save.sh` mirrors the
+   committed checkboxes to GitHub after the push. A failed GitHub call exits 2 with
+   `GitHub sync failed` and leaves the backlog as it was; re-run it once `gh` works. Branches for
+   GitHub-only review findings are not in `BRANCH_TO_ISSUE`; they use `Closes #N` in the commit.
 4. **Technical docs** — update the affected `Docs/*.md` page (API signatures, constants with their
    location, behavior, matrix mapping). If a value changed (timeout, threshold, class index), grep
    `Docs/`, `AI/ARCHITECTURE.md` and `README.md` for the old value and fix or flag every occurrence.
