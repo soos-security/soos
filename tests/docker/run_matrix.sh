@@ -51,9 +51,13 @@ run_distro() {
     docker build -f "${dockerfile}" -t "${tag}" .
 
     info "Running container test suite..."
+    # Each image builds into its own Docker volume mounted over target/: a
+    # pam_soos.so linked against another distribution's libc/libpam is never
+    # deployed (GitHub #162), and no root-owned files land in the host target/.
     docker run --rm \
         --name "soos-matrix-${distro}" \
         -v "$(pwd)":/workspace \
+        -v "soos-matrix-target-${distro}":/workspace/target \
         "${tag}" \
         bash /workspace/tests/docker/test_suite.sh
 

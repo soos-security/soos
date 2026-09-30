@@ -10,12 +10,17 @@ ENV CARGO_HOME=/usr/local/cargo
 ENV PATH="/usr/local/cargo/bin:${PATH}"
 
 # System dependencies for PAM compilation, pamtester, and python mock daemon
+# libssl-dev: headers for openssl-sys (ort download path) in full workspace builds.
+# systemd: runtime dependency declared by packaging/debian/control, required by
+# `dpkg -i` in tests/distro/debian_ubuntu_test.sh (not started as init).
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential \
         pkg-config \
         libpam0g-dev \
         libclang-dev \
+        libssl-dev \
         pamtester \
+        systemd \
         python3 \
         curl \
         ca-certificates \
@@ -34,18 +39,25 @@ RUN useradd -m -s /bin/bash testuser \
 # Configure Ubuntu / Debian test PAM stack (/etc/pam.d/test-soos)
 # Validates Invariant 5 of ARCHITECTURE.md:
 # "An absent socket degrades to password, never to authorization."
-RUN echo "# Test PAM service for soos (Ubuntu/Debian)\n\
-auth  [success=done default=ignore]  pam_soos.so timeout_ms=250\n\
-auth  required                       pam_unix.so\n\
-account required pam_unix.so\n\
-session required pam_unix.so" > /etc/pam.d/test-soos
+# printf '%s\n' writes one argument per line on every /bin/sh (dash on Ubuntu,
+# bash on Fedora/Arch). Never use `echo "...\n..."`: bash's builtin echo writes a
+# literal backslash-n and PAM would see a single comment line (GitHub #162).
+RUN printf '%s\n' \
+        '# Test PAM service for soos (Ubuntu/Debian)' \
+        'auth  [success=done default=ignore]  pam_soos.so timeout_ms=250' \
+        'auth  required                       pam_unix.so' \
+        'account required pam_unix.so' \
+        'session required pam_unix.so' \
+    > /etc/pam.d/test-soos
 
 # Configure standard Debian/Ubuntu common-auth integration
-RUN echo "# /etc/pam.d/common-auth integration for soos\n\
-auth  [success=done default=ignore]  pam_soos.so timeout_ms=250\n\
-auth  [success=1 default=ignore]    pam_unix.so nullok\n\
-auth  requisite                      pam_deny.so\n\
-auth  required                       pam_permit.so" > /etc/pam.d/common-auth
+RUN printf '%s\n' \
+        '# /etc/pam.d/common-auth integration for soos' \
+        'auth  [success=done default=ignore]  pam_soos.so timeout_ms=250' \
+        'auth  [success=1 default=ignore]    pam_unix.so nullok' \
+        'auth  requisite                      pam_deny.so' \
+        'auth  required                       pam_permit.so' \
+    > /etc/pam.d/common-auth
 
 # Provision /var/lib/soos/models directory
 RUN mkdir -p /var/lib/soos/models && chmod 755 /var/lib/soos/models

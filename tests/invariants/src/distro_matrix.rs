@@ -352,6 +352,9 @@ fn test_distro_runner_references_only_existing_scripts() {
             rest.to_string()
         } else if let Some(idx) = token.find("tests/distro/") {
             token[idx..].to_string()
+        } else if !token.contains('/') && token.ends_with("_test.sh") {
+            // Bare names of an explicit distro -> script mapping.
+            format!("tests/distro/{}", token)
         } else {
             continue;
         };
@@ -765,4 +768,25 @@ fn test_distro_tests_enroll_through_soos_enroll_mock() {
             script
         );
     }
+}
+
+/// #162 — the Fedora and Arch sandbox images are exercised by CI, not only locally.
+#[test]
+fn test_ci_runs_fedora_and_arch_pam_matrix() {
+    let root = workspace_root();
+    let ci = fs::read_to_string(root.join(".github/workflows/ci.yml")).expect("read ci.yml");
+    let start = ci
+        .find("\n  distro-pam-matrix:")
+        .expect("ci.yml must define the distro-pam-matrix job");
+    let job = &ci[start + 1..];
+    let end = job.find("\n  # ----").unwrap_or(job.len());
+    let job = &job[..end];
+    assert!(
+        job.contains("distro: [fedora, arch]"),
+        "distro-pam-matrix must cover fedora and arch"
+    );
+    assert!(
+        job.contains("./tests/docker/run_matrix.sh \"$DISTRO\""),
+        "distro-pam-matrix must run tests/docker/run_matrix.sh for each distro"
+    );
 }

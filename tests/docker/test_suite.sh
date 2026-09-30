@@ -59,13 +59,51 @@ fi
 info "Detected PAM security modules directory: ${PAM_MOD_DIR}"
 
 # ---------------------------------------------------------------------------
-# 2. Build or Locate pam_soos.so
+# 1b. Validate the Image's PAM Stack Files (GitHub #162)
 # ---------------------------------------------------------------------------
+# A stack written with `echo "...\n..."` under bash (the /bin/sh of fedora and
+# arch) is a single comment line: every case below would then test nothing.
+assert_pam_stack_file() {
+    local file="$1"
+    if [[ ! -f "${file}" ]]; then
+        error "PAM stack file ${file} is missing."
+        exit 1
+    fi
+    if grep -qF '\n' "${file}"; then
+        error "PAM stack file ${file} contains a literal backslash-n (single-line file):"
+        cat "${file}" >&2
+        exit 1
+    fi
+    local modules
+    modules="$(grep -cE '^[[:space:]]*-?(auth|account|password|session)[[:space:]]+' "${file}" || true)"
+    if [[ "${modules}" -lt 2 ]]; then
+        error "PAM stack file ${file} has ${modules} module line(s); expected at least 2."
+        exit 1
+    fi
+    if ! grep -qE '^[[:space:]]*auth[[:space:]].*pam_soos\.so' "${file}" \
+        || ! grep -qE '^[[:space:]]*auth[[:space:]].*pam_unix\.so' "${file}"; then
+        error "PAM stack file ${file} must contain separate pam_soos.so and pam_unix.so auth lines."
+        exit 1
+    fi
+    success "PAM stack file ${file} is valid (${modules} module lines)."
+}
+
+assert_pam_stack_file /etc/pam.d/test-soos
+for stack in /etc/pam.d/common-auth /etc/pam.d/system-auth; do
+    if [[ -f "${stack}" ]] && grep -q 'pam_soos.so' "${stack}"; then
+        assert_pam_stack_file "${stack}"
+    fi
+done
+
+# ---------------------------------------------------------------------------
+# 2. Build pam_soos.so
+# ---------------------------------------------------------------------------
+# Always invoke cargo (a no-op when up to date) so a stale artifact built by
+# another distribution image is never deployed. run_matrix.sh overlays
+# /workspace/target with a per-distribution Docker volume.
 SO_PATH="target/release/libpam_soos.so"
-if [[ ! -f "${SO_PATH}" ]]; then
-    info "Compiling pam_soos in release mode..."
-    cargo build --release -p soos-pam
-fi
+info "Compiling pam_soos in release mode..."
+cargo build --release -p soos-pam
 
 if [[ ! -f "${SO_PATH}" ]]; then
     error "Compiled artifact not found at ${SO_PATH}"
@@ -85,12 +123,50 @@ gcc -O2 tests/docker/pam_test_runner.c -lpam -o /usr/local/bin/pam_test_runner
 chmod 755 /usr/local/bin/pam_test_runner
 success "pam_test_runner compiled."
 
-# Ensure socket directory exists
-mkdir -p /run/soos
-chmod 777 /run/soos
+# Socket directory and group mirror the production invariant (GitHub #168):
+# /run/soos is 0750 root:soos and the daemon socket is 0660 root:soos. The PAM
+# host (pam_test_runner) runs as root, like sudo/login/gdm in production.
+getent group soos >/dev/null 2>&1 || groupadd -r soos
+install -d -m 0750 -o root -g soos /run/soos
+
+# Asserts the socket directory and socket modes after the mock daemon started.
+assert_socket_modes() {
+    local dir_modes sock_modes
+    dir_modes="$(stat -c '%a %U:%G' /run/soos)"
+    if [[ "${dir_modes}" != "750 root:soos" ]]; then
+        error "/run/soos is '${dir_modes}', expected '750 root:soos'."
+        exit 1
+    fi
+    if [[ ! -S /run/soos/daemon.sock ]]; then
+        error "/run/soos/daemon.sock is not a socket."
+        exit 1
+    fi
+    sock_modes="$(stat -c '%a %U:%G' /run/soos/daemon.sock)"
+    if [[ "${sock_modes}" != "660 root:soos" ]]; then
+        error "/run/soos/daemon.sock is '${sock_modes}', expected '660 root:soos'."
+        exit 1
+    fi
+}
+
+# Starts the mock daemon in the given mode and waits (bounded) for its socket.
+start_mock_daemon() {
+    python3 tests/docker/mock_daemon.py --socket /run/soos/daemon.sock "$@" &
+    MOCK_PID=$!
+    for _ in $(seq 1 50); do
+        [[ -S /run/soos/daemon.sock ]] && break
+        sleep 0.1
+    done
+    assert_socket_modes
+}
 
 cleanup_daemon() {
-    pkill -f "mock_daemon.py" || true
+    # Stop the mock by PID first: minimal images (fedora:40) ship without pkill.
+    if [[ -n "${MOCK_PID:-}" ]]; then
+        kill "${MOCK_PID}" 2>/dev/null || true
+        wait "${MOCK_PID}" 2>/dev/null || true
+        MOCK_PID=""
+    fi
+    pkill -f "mock_daemon.py" 2>/dev/null || true
     rm -f /run/soos/daemon.sock
 }
 
@@ -120,9 +196,7 @@ info "-------------------------------------------------------------------"
 info "T1: Nominal Facial Auth — Daemon Running (Verdict::Allow)"
 info "-------------------------------------------------------------------"
 cleanup_daemon
-python3 tests/docker/mock_daemon.py --mode allow --socket /run/soos/daemon.sock &
-MOCK_PID=$!
-sleep 0.2
+start_mock_daemon --mode allow
 
 # pam_test_runner without password argument asserts non-interactive success (0 prompts)
 if /usr/local/bin/pam_test_runner test-soos testuser; then
@@ -141,9 +215,7 @@ info "-------------------------------------------------------------------"
 info "T2: Daemon Timeout > 250ms — Degrades to Password Fallback (PA2)"
 info "-------------------------------------------------------------------"
 cleanup_daemon
-python3 tests/docker/mock_daemon.py --mode timeout --delay 0.5 --socket /run/soos/daemon.sock &
-MOCK_PID=$!
-sleep 0.2
+start_mock_daemon --mode timeout --delay 0.5
 
 START_TS=$(date +%s%N)
 if /usr/local/bin/pam_test_runner test-soos testuser password123; then
@@ -178,9 +250,7 @@ info "-------------------------------------------------------------------"
 info "T4: Daemon Crash Mid-Request — Graceful Fallback (Immediate Disconnect)"
 info "-------------------------------------------------------------------"
 cleanup_daemon
-python3 tests/docker/mock_daemon.py --mode crash-immediate --socket /run/soos/daemon.sock &
-MOCK_PID=$!
-sleep 0.2
+start_mock_daemon --mode crash-immediate
 
 if /usr/local/bin/pam_test_runner test-soos testuser password123; then
     success "T4 passed: Immediate crash mid-request cleanly degraded to password."
@@ -195,9 +265,7 @@ info "-------------------------------------------------------------------"
 info "T4b: Daemon Crash Mid-Request — Partial Header Disconnect"
 info "-------------------------------------------------------------------"
 cleanup_daemon
-python3 tests/docker/mock_daemon.py --mode crash-partial --socket /run/soos/daemon.sock &
-MOCK_PID=$!
-sleep 0.2
+start_mock_daemon --mode crash-partial
 
 if /usr/local/bin/pam_test_runner test-soos testuser password123; then
     success "T4b passed: Partial header crash cleanly degraded to password."
@@ -215,9 +283,7 @@ info "-------------------------------------------------------------------"
 info "T5: Daemon Crash Mid-Request — Invalid Password Must Fail"
 info "-------------------------------------------------------------------"
 cleanup_daemon
-python3 tests/docker/mock_daemon.py --mode crash-immediate --socket /run/soos/daemon.sock &
-MOCK_PID=$!
-sleep 0.2
+start_mock_daemon --mode crash-immediate
 
 if /usr/local/bin/pam_test_runner test-soos testuser wrong_password 2>/dev/null; then
     error "T5 failed: Invalid password was accepted after daemon crash!"
@@ -245,9 +311,7 @@ fi
 if [[ -n "${DISTRO_SERVICE}" ]]; then
     info "Testing native distro stack service: ${DISTRO_SERVICE}"
     # Test nominal auth on distro stack
-    python3 tests/docker/mock_daemon.py --mode allow --socket /run/soos/daemon.sock &
-    MOCK_PID=$!
-    sleep 0.2
+    start_mock_daemon --mode allow
 
     if /usr/local/bin/pam_test_runner "${DISTRO_SERVICE}" testuser; then
         success "T6 passed: Distro stack (${DISTRO_SERVICE}) authenticated via facial verification."

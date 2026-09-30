@@ -84,22 +84,28 @@ RUN useradd -m -s /bin/bash testuser \
 #
 # Validates Invariant 5 of ARCHITECTURE.md:
 #   "An absent socket degrades to password, never to authorization."
-RUN echo "# Test PAM service for soos\n\
-# pam_soos.so: loaded first, returns PAM_IGNORE if daemon is absent\n\
-auth  [success=done default=ignore]  pam_soos.so timeout_ms=250\n\
-# pam_unix.so: standard password verification fallback\n\
-auth  required                       pam_unix.so\n\
-\n\
-# Minimal account and session management\n\
-account required pam_unix.so\n\
-session required pam_unix.so" > /etc/pam.d/test-soos
+# printf '%s\n' writes one argument per line on every /bin/sh (dash on Ubuntu,
+# bash on Fedora/Arch). Never use `echo "...\n..."`: bash's builtin echo writes a
+# literal backslash-n and PAM would see a single comment line (GitHub #162).
+RUN printf '%s\n' \
+        '# Test PAM service for soos' \
+        '# pam_soos.so: loaded first, returns PAM_IGNORE if daemon is absent' \
+        'auth  [success=done default=ignore]  pam_soos.so timeout_ms=250' \
+        '# pam_unix.so: standard password verification fallback' \
+        'auth  required                       pam_unix.so' \
+        '# Minimal account and session management' \
+        'account required pam_unix.so' \
+        'session required pam_unix.so' \
+    > /etc/pam.d/test-soos
 
 # Configure standard Debian/Ubuntu common-auth integration
-RUN echo "# /etc/pam.d/common-auth integration for soos\n\
-auth  [success=done default=ignore]  pam_soos.so timeout_ms=250\n\
-auth  [success=1 default=ignore]    pam_unix.so nullok\n\
-auth  requisite                      pam_deny.so\n\
-auth  required                       pam_permit.so" > /etc/pam.d/common-auth
+RUN printf '%s\n' \
+        '# /etc/pam.d/common-auth integration for soos' \
+        'auth  [success=done default=ignore]  pam_soos.so timeout_ms=250' \
+        'auth  [success=1 default=ignore]    pam_unix.so nullok' \
+        'auth  requisite                      pam_deny.so' \
+        'auth  required                       pam_permit.so' \
+    > /etc/pam.d/common-auth
 
 # ---------------------------------------------------------------------------
 # Biometric & Model Storage Directory
