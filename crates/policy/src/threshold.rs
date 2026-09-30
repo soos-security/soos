@@ -23,7 +23,24 @@ impl ThresholdConfig {
     /// presentation attack mitigation on local sensor inputs.
     pub const DEFAULT_PAD_THRESHOLD: f32 = 0.85;
 
+    /// Security floor for the cosine match threshold of operator-supplied configuration.
+    ///
+    /// Below this value unrelated faces are routinely accepted; configuration loaded from
+    /// `daemon.toml` below this floor is refused at start-up (GitHub #170, PAD-04).
+    pub const MIN_MATCH_THRESHOLD: f32 = 0.40;
+
+    /// Security floor for the PAD liveness threshold of operator-supplied configuration.
+    ///
+    /// `pad_threshold = 0.0` (or any negative value) classifies every frame as live and
+    /// silently disables anti-spoofing; configuration loaded from `daemon.toml` below this
+    /// floor is refused at start-up (GitHub #170, PAD-04).
+    pub const MIN_PAD_THRESHOLD: f32 = 0.50;
+
     /// Creates a new [`ThresholdConfig`] directly without validation (internal/testing).
+    ///
+    /// Production code outside `soos-policy` must never call this (repository invariant
+    /// `test_thresholds_never_built_unvalidated_outside_policy`); operator configuration
+    /// goes through [`ThresholdConfigBuilder::build_with_security_floor`].
     #[must_use]
     pub const fn new_raw(match_threshold: f32, pad_threshold: f32) -> Self {
         Self {
@@ -110,6 +127,35 @@ impl ThresholdConfigBuilder {
             match_threshold: self.match_threshold,
             pad_threshold: self.pad_threshold,
         })
+    }
+
+    /// Validates thresholds against the domain `[0.0, 1.0]` **and** the security floors
+    /// [`ThresholdConfig::MIN_MATCH_THRESHOLD`] / [`ThresholdConfig::MIN_PAD_THRESHOLD`].
+    ///
+    /// This is the constructor required for operator-supplied configuration
+    /// (`[pipeline.thresholds]` in `daemon.toml`), GitHub #170 (PAD-04).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PolicyError::InvalidThreshold`] naming the offending setting if either
+    /// threshold is NaN, infinite, outside `[0.0, 1.0]`, or below its security floor.
+    pub fn build_with_security_floor(self) -> Result<ThresholdConfig, PolicyError> {
+        let config = self.build()?;
+        if config.match_threshold < ThresholdConfig::MIN_MATCH_THRESHOLD {
+            return Err(PolicyError::invalid_threshold(
+                "match_threshold",
+                config.match_threshold,
+                "threshold is below the security floor of 0.4 (would accept unrelated faces)",
+            ));
+        }
+        if config.pad_threshold < ThresholdConfig::MIN_PAD_THRESHOLD {
+            return Err(PolicyError::invalid_threshold(
+                "pad_threshold",
+                config.pad_threshold,
+                "threshold is below the security floor of 0.5 (would weaken or disable anti-spoofing)",
+            ));
+        }
+        Ok(config)
     }
 }
 

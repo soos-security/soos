@@ -1,5 +1,8 @@
 # Walkthrough 58 — Rewrite PAD Detector for MiniFASNetV2
 
+> **Historical record - class order superseded.** The MiniFASNetV2 live class index stated below is obsolete. The current contract is `[PrintPhoto, Live, ScreenReplay]`, live class index 1 (`DEFAULT_MINIFASNET_LIVE_CLASS_INDEX`), per the 2026-09-29 and 2026-09-30 ADR entries in `AI/DECISIONS.md` (GitHub #146, #171; walkthroughs 79 and 85).
+
+
 > **Date**: 2026-09-20  
 > **Issue**: Issue #40 (`feat/pad-minifasnet-v2`, GitHub #106)  
 > **Verification Matrix**: `NGM8`, `NGM9`, `NGM10`  

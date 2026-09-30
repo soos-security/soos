@@ -79,7 +79,7 @@ $$\text{similarity}(a, b) = \frac{a \cdot b}{\|a\|_2 \|b\|_2}$$
    - $> 1$ faces detected $\implies$ returns `Err(VisionError::MultipleFacesDetected { count })`.
 4. Validates face confidence against `min_face_confidence` (default `0.70`).
 5. Extracts 5-point facial landmarks directly from `FaceDetection.landmarks` (fails closed with `VisionError::MissingLandmarks` if absent).
-6. Expands bounding box by `pad_bbox_scale` (2.7×) centered on face and clamps to image bounds (`expand_bbox_for_pad`).
+6. Expands bounding box by `pad_bbox_scale` (2.7×) centered on face, shifting it inward at image borders (`expand_bbox_for_pad`, Minivision shifting algorithm).
 7. Crops and resizes the expanded bounding box to 80×80 for Presentation Attack Detection (`crop_and_resize`).
 8. Evaluates Presentation Attack Detection (`PadDetector`, MiniFASNetV2) and short-circuits on spoof (`VisionError::PadFailed`). The decision is **format-aware** (GitHub #169, see §2.4.1): a `PixelFormat::Grey` (IR) frame must first pass the fail-closed IR gate (`VisionError::IrLivenessGateFailed`) and is scored against the stricter IR threshold.
 9. Warps face to normalized 112×112 RGB crop using 5-point landmarks (`align_face_112`).
@@ -132,8 +132,8 @@ Next-generation face detection (SCRFD) operates on uniform 640×640 square input
 
 MiniFASNetV2 anti-spoofing requires wider facial context than the aligned 112×112 face crop:
 1. `expand_bbox_for_pad(bbox, scale, img_w, img_h) -> BoundingBox`:
-   - Scales the bounding box from its center by `scale` factor (typically 2.7×).
-   - Clamps the resulting coordinates to valid image dimensions $[0, W]$ and $[0, H]$.
+   - Scales the bounding box from its center by `scale` factor (typically 2.7×); the effective scale is first bounded so that the expanded box never exceeds the image canvas (`min(scale, W / w, H / h)`).
+   - When the expanded box crosses an image border it is **shifted inward** (translated, not clipped), matching Minivision `CropImage._get_new_box`, so the PAD crop keeps its context scale and aspect ratio instead of being distorted by independent per-edge clamping. A final clamp to $[0, W]$ × $[0, H]$ only guards floating-point residue.
 2. `crop_and_resize(rgb, img_w, img_h, bbox, target_w, target_h) -> Result<Vec<u8>, VisionError>`:
    - Resizes the cropped region to target dimensions (e.g. 80×80) using bilinear interpolation.
    - Any region extending beyond original image boundaries is padded with black (zero).
