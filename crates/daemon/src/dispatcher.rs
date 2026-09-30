@@ -49,10 +49,8 @@ struct ResponseOutput {
     completion_error: Option<DaemonError>,
 }
 
-/// Whether a capture taken at `timestamp_ns` is still fresh at `now_ns` (`MAX_FRAME_AGE_NS`).
-///
-/// Captures without a timestamp, or stamped in the future, are accepted as before.
-/// Maps the camera pixel format to the self-describing evidence format (GitHub #181).
+/// Maps the camera pixel format to the self-describing evidence format (GitHub #181),
+/// so an intrusion snapshot records how its payload bytes must be decoded.
 fn evidence_pixel_format(format: PixelFormat) -> EvidencePixelFormat {
     match format {
         PixelFormat::Yuyv => EvidencePixelFormat::Yuyv,
@@ -63,6 +61,9 @@ fn evidence_pixel_format(format: PixelFormat) -> EvidencePixelFormat {
     }
 }
 
+/// Whether a capture taken at `timestamp_ns` is still fresh at `now_ns` (`MAX_FRAME_AGE_NS`).
+///
+/// Captures without a timestamp, or stamped in the future, are accepted as before.
 fn is_frame_fresh(timestamp_ns: u64, now_ns: u64) -> bool {
     if timestamp_ns > 0 && now_ns > timestamp_ns {
         now_ns.saturating_sub(timestamp_ns) <= MAX_FRAME_AGE_NS

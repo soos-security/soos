@@ -3,7 +3,9 @@
 //! Provides administrative commands for:
 //! - Multi-frame enrollment with quality selection and interactive confirmation
 //! - Diagnostic one-shot verification with latency and PAD reporting
-//! - Deletion with anti-forensic secure erasure
+//! - Deletion of a template: best-effort in-place overwrite before unlinking; the
+//!   guarantee against recovery is encryption at rest plus master-key destruction
+//!   (ADR 2026-09-30 "Biometric Template Erasure Model")
 //! - Enumeration of enrolled biometric templates
 
 #![forbid(unsafe_code)]
