@@ -372,7 +372,8 @@ Arch Linux utilizes a modular `/etc/pam.d/system-auth` stack. The integration is
 sudo cp /etc/pam.d/system-auth /etc/pam.d/system-auth.soos-backup
 ```
 
-The `soos` snippet (`packaging/pam/arch/system-auth.snippet`) is placed immediately prior to `pam_unix.so`
+The `soos` snippet (`packaging/pam/arch/system-auth.snippet`, installed as `/usr/share/soos/pam/system-auth.snippet`;
+it is never placed in `/etc/pam.d`, where every file is a PAM service) is placed immediately prior to `pam_unix.so`
 (adjust any `success=N` jump that crosses the inserted lines, e.g. the one of `pam_systemd_home.so`):
 
 ```pam

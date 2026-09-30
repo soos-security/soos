@@ -116,6 +116,48 @@ verify_package_has_no_key_material() {
     success "Package ${pkg} contains no *.key entry."
 }
 
+# GitHub #209 (ONB-13): a package ships the PAM template of its own distribution
+# only, and never a file in /etc/pam.d (every file there is a PAM service).
+# $1 = template family (debian|fedora|arch), remaining args = listing command.
+verify_distro_templates() {
+    local family="$1"
+    shift
+    info "Verifying that the package ships only the ${family} PAM template..."
+    local listing
+    # Last field of each entry, without a leading "./" or "/" (dpkg-deb -c, rpm -qlp, bsdtar -tf).
+    listing=$("$@" | awk '{print $NF}' | sed -e 's|^\./||' -e 's|^/||')
+    local -a required=() forbidden=()
+    case "${family}" in
+        debian)
+            required=("usr/share/pam-configs/soos" "usr/share/pam-configs/soos-notify")
+            forbidden=("etc/authselect/" "usr/share/soos/pam/" "etc/pam.d/")
+            ;;
+        fedora)
+            required=("etc/authselect/custom/soos/system-auth")
+            forbidden=("usr/share/pam-configs/" "usr/share/soos/pam/" "etc/pam.d/")
+            ;;
+        arch)
+            required=("usr/share/soos/pam/system-auth.snippet")
+            forbidden=("usr/share/pam-configs/" "etc/authselect/" "etc/pam.d/")
+            ;;
+        *)
+            error "verify_distro_templates: unknown family '${family}'"
+            return 1
+            ;;
+    esac
+    local entry
+    for entry in "${required[@]}"; do
+        grep -Fxq -- "${entry}" <<< "${listing}" || { error "Package lacks ${entry}"; return 1; }
+    done
+    for entry in "${forbidden[@]}"; do
+        if grep -Fq -- "${entry}" <<< "${listing}"; then
+            error "Package ships a foreign PAM template or a /etc/pam.d entry: $(grep -F -- "${entry}" <<< "${listing}" | tr '\n' ' ')"
+            return 1
+        fi
+    done
+    success "Package ships only the ${family} PAM template."
+}
+
 # The key must be generated on the target host: a second fresh install must
 # produce a different key, and package removal must leave the key untouched
 # (it is not package-owned, so enrolled templates survive remove/upgrade).
@@ -145,6 +187,7 @@ case "${DISTRO}" in
 
         DEB_FILE=$(ls -t target/packages/soos_*.deb | head -n 1)
         verify_package_has_no_key_material "${DEB_FILE}" dpkg-deb -c "${DEB_FILE}"
+        verify_distro_templates debian dpkg-deb -c "${DEB_FILE}"
 
         info "Installing ${DEB_FILE} via dpkg -i..."
         dpkg -i "${DEB_FILE}"
@@ -183,6 +226,7 @@ case "${DISTRO}" in
         RPM_FILE=$(ls -t target/packages/soos-[0-9]*.rpm | head -n 1)
         # --noghost: %ghost entries are metadata only and carry no payload.
         verify_package_has_no_key_material "${RPM_FILE}" rpm -qlp --noghost "${RPM_FILE}"
+        verify_distro_templates fedora rpm -qlp --noghost "${RPM_FILE}"
 
         info "Installing ${RPM_FILE} via rpm -i..."
         rpm -i "${RPM_FILE}"
@@ -215,6 +259,7 @@ case "${DISTRO}" in
 
         PKG_FILE=$(ls -t target/packages/soos-*.pkg.tar.* | head -n 1)
         verify_package_has_no_key_material "${PKG_FILE}" bsdtar -tf "${PKG_FILE}"
+        verify_distro_templates arch bsdtar -tf "${PKG_FILE}"
 
         info "Installing ${PKG_FILE} via pacman -U..."
         pacman -U --noconfirm "${PKG_FILE}"

@@ -39,6 +39,11 @@ mod sync_issue_contract;
 #[cfg(all(test, unix))]
 mod onboarding_packaging_contract;
 
+/// Installer distro templates, model download hardening and first-start guards
+/// (GitHub #208, #209, #211).
+#[cfg(all(test, unix))]
+mod installer_templates_contract;
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,

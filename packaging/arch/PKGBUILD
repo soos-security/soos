@@ -53,7 +53,8 @@ package() {
     install -Dm644 "packaging/soos-daemon.service" "${pkgdir}/usr/lib/systemd/system/soos-daemon.service"
 
     # 4. Install PAM configuration snippet
-    install -Dm644 "packaging/pam/arch/system-auth.snippet" "${pkgdir}/etc/pam.d/soos.snippet"
+    # Reference snippet only: a file in /etc/pam.d would be a PAM service (GitHub #209).
+    install -Dm644 "packaging/pam/arch/system-auth.snippet" "${pkgdir}/usr/share/soos/pam/system-auth.snippet"
 
     # 5. Provision persistent and runtime directory structures
     install -dm755 "${pkgdir}/var/lib/soos"

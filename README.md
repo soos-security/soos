@@ -25,7 +25,10 @@ sudo ./scripts/install.sh
 `scripts/install.sh --dry-run` runs the same read-only preflight without touching the system. The installer
 refuses debug-profile artifacts, exits non-zero when an artifact is missing, deploys and verifies the attested
 models (`scripts/download_models.sh`, needs `curl`, no Python) before enabling `soos-daemon.service`, and undoes
-every change it made if any step fails. PAM activation stays a separate, explicit step
+every change it made if any step fails. It installs only the PAM template of the detected distribution
+(`--distro` overrides). `soos-daemon.service` does not start before the models manifest is deployed;
+`sudo ./scripts/install.sh --start` (or `sudo ./scripts/wait_daemon_ready.sh` after `systemctl start soos-daemon`)
+waits at most 30 s for the daemon and prints its JSON status. PAM activation stays a separate, explicit step
 (see [`Docs/DISTRIBUTION_DEPLOYMENT.md`](Docs/DISTRIBUTION_DEPLOYMENT.md)).
 
 ### 2. Start the Daemon and Enroll

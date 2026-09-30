@@ -103,6 +103,7 @@ bash "${WORKSPACE_ROOT}/scripts/install.sh" \
     --destdir "${ARCH_STAGE}" \
     --prefix "/usr" \
     --pam-dir "/usr/lib/security" \
+    --distro arch \
     --skip-models \
     --skip-systemd
 

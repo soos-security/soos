@@ -55,15 +55,19 @@ Why each build package is needed (from the locked dependency graph):
 
 **Model tools**: `scripts/download_models.sh` needs only `bash` (>= 4), `sha256sum` (coreutils) and, for `https://` sources, `curl` with `ca-certificates`. **Python is not required**: the manifest is parsed in bash against its fixed schema (GitHub #167). Packages do not download models; fetch them from a source checkout with `sudo ./scripts/download_models.sh`.
 
+**Download hardening (GitHub #208)**: `models/manifest.toml` is the only source of download URLs (the former per-model fallback table is gone; the dry run prints exactly the manifest `source_url`). `curl` runs with `--proto '=https' --proto-redir '=https' --tlsv1.2 --connect-timeout 15 --max-time 900 --max-filesize`. Each model is staged in an unpredictable `mktemp` file created under `umask 077` in the target directory, its size is checked against `MAX_MODEL_BYTES` (256 MiB; the largest attested model is 136,619,444 bytes) **before** it is hashed, and a failed or interrupted run removes it. `SOOS_MODEL_MAX_BYTES` may only tighten the cap (1..`MAX_MODEL_BYTES`); any other value fails before a write.
+
 ### 3.2 Features & Capabilities
 - **Fail-closed preflight (GitHub #164)**: before any change, `install.sh` checks that a live install (no `--destdir`) runs as root, that every artifact (`soos-daemon`, `soos-admin`, `soos-enroll`, `soos-gui`, `libpam_soos.so`) exists in the artifact directory, that the directory is not a cargo `debug` profile directory, and that the model manifest and tools pass `download_models.sh --preflight`. Any failure exits non-zero (exit `2`) with nothing modified. `target/debug` is never searched implicitly.
 - **Explicit release build**: `install.sh --build` runs `scripts/check_build_deps.sh` and then `cargo build --release --locked --workspace` (as `$SUDO_USER` when run through sudo, never as root in a user's checkout); a failed build exits `40`. Without `--build`, artifacts are taken from `${CARGO_TARGET_DIR:-target}/release` or `--artifact-dir`.
 - **Transactional install with rollback**: every created file and directory and every overwritten file (saved to a private `mktemp -d` backup directory) is journaled. Files are written atomically (temporary file + rename in the target directory). If any later step fails, or the script is interrupted, the journal is replayed backwards: overwritten files are restored, created files and directories are removed, a group created by the run is deleted, the unit is disabled if the run enabled it, and the script reports `Installation FAILED ... all changes were rolled back` with a non-zero exit.
-- **System Group Provisioning**: Creates the `soos` system group if absent (`groupadd -r soos` or `addgroup --system soos`).
+- **System Group Provisioning**: Creates the `soos` system group if absent (`groupadd -r soos` or `addgroup --system soos`). The unit runs with `Group=soos`, so a live install without the group and without either tool fails the preflight (GitHub #211) instead of warning.
 - **Cryptographic Master Key Generation (live install only)**: On a live install (no `--destdir`), delegates to `scripts/provision_master_key.sh`, which generates a 32-byte key from `openssl rand 32` or `/dev/urandom` with mode `0600` from inception if `/var/lib/soos/master.key` is absent. In staging mode (`--destdir`) **no key material is ever generated**: the tree is package content, and the key is created on the target host at first install by the shipped helper (see §7.4). A key created by a run that later fails is removed by the rollback (nothing was encrypted with it yet); an existing key is never touched.
 - **Binary & PAM Shared Library Deployment**: Deploys the release artifacts to their target locations. Auto-detects target architecture and PAM module paths (`/lib/x86_64-linux-gnu/security`, `/usr/lib64/security`, etc.). Pre-existing system directories (`/usr/bin`, the PAM module directory, `/etc/systemd/system`, ...) keep their mode; only directories created by the run, and soos-owned directories (§2), get their mode set.
 - **Model Download & Attestation before enabling the unit**: Invokes `scripts/download_models.sh` to download and verify (SHA-256) all ONNX models cataloged in `models/manifest.toml` (or `--manifest`). A verification failure exits `60` and rolls back; the unit is never enabled without verified models.
-- **Systemd Integration**: Deploys `packaging/soos-daemon.service`, and as the last step invokes `systemctl daemon-reload` and enables the unit. The unit bounds restarts (`StartLimitIntervalSec=60`, `StartLimitBurst=5`) so a daemon that cannot start does not crash-loop forever.
+- **Systemd Integration**: Deploys `packaging/soos-daemon.service`, and as the last step invokes `systemctl daemon-reload` and enables the unit. The unit bounds restarts (`StartLimitIntervalSec=60`, `StartLimitBurst=5`) so a daemon that cannot start does not crash-loop forever, and carries `ConditionPathExists=/var/lib/soos/models/manifest.toml` (GitHub #211): until `download_models.sh` has deployed the manifest, a start is skipped (`condition failed`) instead of failing and restarting.
+- **Distribution PAM template (GitHub #209)**: exactly one template family is installed, chosen by `--distro` (`auto` by default, `debian`, `fedora`, `arch`, `none`). `auto` parses (never sources) `ID` then `ID_LIKE` from the target `os-release` (`debian`/`ubuntu` → Debian `pam-auth-update` profiles, `fedora`/`rhel`/`centos` → authselect profile, `arch` → Arch snippet); under `--destdir` only the stage's `etc/os-release` / `usr/lib/os-release` is read, and with none (or an unsupported distribution) no template is installed and a warning asks for `--distro`. An unknown `--distro` value fails the preflight. `build_deb.sh` / `debian/rules` pass `--distro debian`, `build_arch.sh` passes `--distro arch`; the RPM spec installs only the authselect profile. No file is ever installed in `/etc/pam.d` (every file there is a PAM service): the Arch snippet lives in `/usr/share/soos/pam/system-auth.snippet`.
+- **Start and readiness (GitHub #211)**: `--start` (live install, systemd running) starts the unit after enabling it and runs `scripts/wait_daemon_ready.sh`, which fails immediately when the models manifest is missing, waits at most `--timeout` seconds (default 30, 1..300) for the daemon socket, then prints `soos-admin --format json --socket-path <sock> status`. A daemon that does not become ready exits `70` without rolling back the (committed) install. Operators can run the helper on its own after `systemctl start soos-daemon`.
 - `--allow-missing` (developer use only) installs a partial artifact set and ends with an `INCOMPLETE` banner instead of the success message.
 
 ### 3.3 Supported CLI Flags
@@ -87,13 +91,17 @@ Options:
   --manifest <PATH>        Model manifest (default: models/manifest.toml)
   --skip-models            Skip model download and verification
   --skip-systemd           Skip systemctl reload and enable invocations
+  --distro <FAMILY>        PAM template to install: auto (default), debian,
+                           fedora, arch or none (auto reads the target os-release)
+  --start                  Start the unit after enabling it and wait until the
+                           daemon answers (live install only)
   --dry-run                Run the read-only preflight and print the plan
   -h, --help               Display help message and exit
 ```
 
 PAM module directory under `--destdir`: only directories that already exist inside the stage are probed; the build host is never consulted (its `/usr/lib64` says nothing about the target). With no match, `/usr/lib/security` is used and a warning asks for `--pam-dir`. Packaging always passes it explicitly: `/usr/lib/<DEB_HOST_MULTIARCH>/security` (Debian/Ubuntu), `/usr/lib/security` (Arch), `%{_libdir}/security` (RPM).
 
-Exit codes: `0` success, `1` usage error, `2` preflight failure (nothing modified), `40` release build failed (nothing installed), `60` model deployment or verification failed (rolled back); any other non-zero code is the failing step's own status (rolled back).
+Exit codes: `0` success, `1` usage error, `2` preflight failure (nothing modified), `40` release build failed (nothing installed), `60` model deployment or verification failed (rolled back), `70` installed but `--start` did not reach readiness (not rolled back); any other non-zero code is the failing step's own status (rolled back).
 
 ---
 
@@ -131,7 +139,7 @@ auth  optional                       pam_soos.so event=password-failed timeout_m
 - Validation: `./run_tests.sh authselect` (fedora:40 container, see `Docs/DISTRIBUTION_DEPLOYMENT.md` §4).
 
 #### Arch Linux
-- Universal snippet in `packaging/pam/arch/system-auth.snippet`.
+- Universal snippet in `packaging/pam/arch/system-auth.snippet`, installed as reference material to `/usr/share/soos/pam/system-auth.snippet` (never `/etc/pam.d/soos.snippet`, which Linux-PAM would treat as a service named `soos.snippet`; `uninstall.sh` still removes that legacy file).
 - Full `/etc/pam.d/system-auth` configuration in `packaging/pam/arch/system-auth`.
 
 ---
@@ -187,7 +195,7 @@ sudo soos-admin add-user <username>
 |---|---|---|---|---|
 | **Debian / Ubuntu** | `packaging/debian/control`<br>`packaging/debian/rules`<br>`packaging/debian/postinst`<br>`packaging/debian/prerm`<br>`packaging/debian/postrm` | `soos_<version>_<arch>.deb` | `dpkg -i` / `apt` | `pam-auth-update` profiles in `/usr/share/pam-configs/` |
 | **Fedora / RHEL** | `packaging/rpm/soos.spec` | `soos-<version>-<release>.<arch>.rpm` | `rpm -i` / `dnf` | `authselect` custom profile in `/etc/authselect/custom/soos/` |
-| **Arch Linux** | `packaging/arch/PKGBUILD`<br>`packaging/arch/soos.install` | `soos-<version>-<release>-<arch>.pkg.tar.zst` | `pacman -U` / `makepkg -si` | Snippet in `/etc/pam.d/soos.snippet` |
+| **Arch Linux** | `packaging/arch/PKGBUILD`<br>`packaging/arch/soos.install` | `soos-<version>-<release>-<arch>.pkg.tar.zst` | `pacman -U` / `makepkg -si` | Snippet in `/usr/share/soos/pam/system-auth.snippet` (integrated by hand into `/etc/pam.d/system-auth`) |
 
 ### 7.2 Building Distribution Packages
 
