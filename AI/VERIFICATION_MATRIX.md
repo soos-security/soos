@@ -1306,3 +1306,15 @@ Daemon log anonymization of the request nonce, clock-stamped responses on every 
 | PHY7 | The exported `pam_sm_authenticate` symbol calls `SoosPam::sm_authenticate` for every non-null handle inside its own `catch_c_entry` boundary, so the `PamHooks` implementation is production code (#264) | Invariant (`pam_hygiene_contract::test_exported_authenticate_symbol_delegates_to_pam_hooks`); behaviour (`pam_silent_tests::*`, `pam_bindings_tests::*`) | ✅ Verified |
 | PHY8 | `parse_argv` has no unreachable null check on `argv.add(i)` (only the entry itself is checked) (#264) | Invariant (`pam_hygiene_contract::test_parse_argv_has_no_unreachable_null_check`); unit (`config_warning_tests::test_null_argument_pointer_warns`) | ✅ Verified |
 | PHY9 | `crates/pam/build.rs` emits `rerun-if-changed` for the `libpam.so` it found, or for the `libpam.so.0` fallback and its directory, so installing `libpam0g-dev` later re-runs the script (#264) | Invariant (`pam_hygiene_contract::test_pam_build_script_reruns_on_libpam_changes`) | ✅ Verified |
+
+---
+
+## Component: `pad-spoof-evidence-and-final-reason` (Review findings PAD-14 — GitHub #261, PAD-16 — GitHub #262)
+
+| # | Criterion | Test Method | Status |
+|---|---|---|---|
+| PEV1 | With `[pipeline.evidence] enabled`, an `Auth` request vetoed as a presentation attack answers `Deny` / `PadFailed` and stores exactly one encrypted, self-describing frame snapshot with reason `PAD_FAILED_EVIDENCE_REASON` (`"PadFailed"`) for the target UID | Integration tests (`pad_evidence_tests::test_261_spoof_veto_stores_one_pad_failed_evidence_snapshot`, `test_261_pad_failed_evidence_reason_is_stable`) | ✅ Verified |
+| PEV2 | Spoof evidence is strictly opt-in: with `enabled = false` nothing is written under the evidence directory, and an allowed request never produces evidence | Integration tests (`pad_evidence_tests::test_261_spoof_veto_without_opt_in_stores_no_evidence`, `test_261_allowed_request_stores_no_evidence`) | ✅ Verified |
+| PEV3 | Spoof evidence respects `daily_cap_per_uid`: three spoof-vetoed requests with a cap of 1 store one snapshot | Integration test (`pad_evidence_tests::test_261_spoof_evidence_respects_daily_cap_per_uid`) | ✅ Verified |
+| PEV4 | A detected spoof stays the final reason: spoof then no-face (or any later capture class) reports `Deny` / `PadFailed`, never `NoFace`; no-face without a spoof still reports `NoFace` | Unit and property tests (`pad_final_reason_tests::test_262_spoof_then_no_face_frames_keeps_pad_failed_reason`, `test_262_no_face_without_spoof_still_reports_no_face`, `prop_262_spoof_reason_outranks_every_later_capture`); integration test (`pad_evidence_tests::test_262_spoof_then_no_face_captures_reports_pad_failed`) | ✅ Verified |
+| PEV5 | Spoof evidence captured on real hardware (printed photo or screen replay in front of the physical camera) decodes to a recognizable RGB image through `EvidenceStore::load_snapshot` and `EvidenceRecord::to_rgb24` | Physical validation campaign | ⬜ Pending (needs real camera and PAD model) |

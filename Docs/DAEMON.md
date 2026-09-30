@@ -72,7 +72,7 @@ with a half-applied configuration.
 
 | Key | Type | Default | Notes |
 |---|---|---|---|
-| `enabled` | bool | `false` | Strictly opt-in. |
+| `enabled` | bool | `false` | Strictly opt-in. When set, the daemon seals a snapshot for a `PasswordFailed` event (reason `PasswordFailed`) and for every `Auth` request vetoed as a presentation attack (reason `PadFailed`, the capture that triggered the veto, one per request, written on the blocking pool after the `Deny` / `PadFailed` response is rendered; GitHub #261). |
 | `base_dir` | path | `/var/lib/soos/evidence` | `0700 root:root`. |
 | `key_path` | path | `/var/lib/soos/evidence.key` | Evidence encryption key. |
 | `retention_days` | integer | `7` | Snapshots older than this are purged. |

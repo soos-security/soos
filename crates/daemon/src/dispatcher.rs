@@ -24,9 +24,9 @@ use crate::preview::{
 };
 use crate::session::SessionValidator;
 use crate::session_policy::LocalSessionPolicy;
-use soos_camera_v4l::PixelFormat;
-use soos_evidence_store::{EvidenceFrame, EvidencePixelFormat, FrameMetadata};
-use soos_policy::{ConsensusDecision, FrameEvaluation, PadAggregator, RateLimiter};
+use soos_camera_v4l::{Frame, PixelFormat};
+use soos_evidence_store::{EvidenceFrame, EvidencePixelFormat, EvidenceStore, FrameMetadata};
+use soos_policy::{ConsensusDecision, FrameClass, FrameEvaluation, PadAggregator, RateLimiter};
 use soos_protocol::codec::{encode, encode_preview, CodecError};
 use soos_protocol::message::{decode_client_message, ClientMessage, FrameFormat};
 use soos_protocol::types::{
@@ -38,6 +38,13 @@ use soos_protocol::types::{
 /// (GitHub #258). The PAM client treats both timestamps as informational (ADR
 /// 2026-09-30 "Response Timestamps Are Informational").
 pub const RESPONSE_VALIDITY_NS: u64 = 2_000_000_000;
+
+/// Evidence reason recorded for a `PasswordFailed` event snapshot.
+pub const PASSWORD_FAILED_EVIDENCE_REASON: &str = "PasswordFailed";
+
+/// Evidence reason recorded for the capture that vetoed a request as a presentation
+/// attack (GitHub #261 / PAD-14).
+pub const PAD_FAILED_EVIDENCE_REASON: &str = "PadFailed";
 
 /// Internal representation of processed connection output before socket transmission.
 #[derive(Debug)]
@@ -67,6 +74,44 @@ fn evidence_pixel_format(format: PixelFormat) -> EvidencePixelFormat {
         PixelFormat::Grey => EvidencePixelFormat::Gray8,
         PixelFormat::Mjpeg => EvidencePixelFormat::Mjpeg,
         PixelFormat::Nv12 => EvidencePixelFormat::Nv12,
+    }
+}
+
+/// Seals one camera capture into the evidence store under `reason` (GitHub #181, #261).
+///
+/// The caller checks the opt-in `evidence.enabled` gate; the store itself enforces it again
+/// together with `daily_cap_per_uid`, the global daily cap, AES-256-GCM encryption and the
+/// retention rotation. Failures are logged without any pixel data and never propagate.
+fn store_evidence_capture(store: &EvidenceStore, uid: u32, reason: &str, frame: &Frame) {
+    // GitHub #181: persist the frame with its dimensions and pixel format so the evidence
+    // can be decoded later.
+    let evidence = EvidenceFrame {
+        metadata: FrameMetadata {
+            width: frame.width,
+            height: frame.height,
+            pixel_format: evidence_pixel_format(frame.format),
+            captured_at_mono_ns: frame.timestamp_mono_ns,
+            sequence: frame.sequence,
+        },
+        data: &frame.data,
+    };
+    match store.store_frame_snapshot(uid, reason, &evidence, None, None) {
+        Ok(snap_res) => {
+            info!(
+                uid = uid,
+                reason = reason,
+                "Intrusion evidence snapshot stored"
+            );
+            let _ = store.rotate_retention(&snap_res.date);
+        }
+        Err(err) => {
+            warn!(
+                uid = uid,
+                reason = reason,
+                error = %err,
+                "Failed to store intrusion evidence snapshot"
+            );
+        }
     }
 }
 
@@ -489,33 +534,12 @@ impl ConnectionDispatcher {
             if let Some(ref pipe) = self.pipeline {
                 if pipe.evidence_store.config().enabled {
                     if let Some(frame) = pipe.camera.latest_frame() {
-                        // GitHub #181: persist the frame with its dimensions and pixel
-                        // format so the evidence can be decoded later.
-                        let evidence = EvidenceFrame {
-                            metadata: FrameMetadata {
-                                width: frame.width,
-                                height: frame.height,
-                                pixel_format: evidence_pixel_format(frame.format),
-                                captured_at_mono_ns: frame.timestamp_mono_ns,
-                                sequence: frame.sequence,
-                            },
-                            data: &frame.data,
-                        };
-                        match pipe.evidence_store.store_frame_snapshot(
+                        store_evidence_capture(
+                            &pipe.evidence_store,
                             target_uid,
-                            "PasswordFailed",
-                            &evidence,
-                            None,
-                            None,
-                        ) {
-                            Ok(snap_res) => {
-                                debug!("Intrusion evidence snapshot stored successfully");
-                                let _ = pipe.evidence_store.rotate_retention(&snap_res.date);
-                            }
-                            Err(err) => {
-                                warn!(error = %err, "Failed to store intrusion evidence snapshot");
-                            }
-                        }
+                            PASSWORD_FAILED_EVIDENCE_REASON,
+                            &frame,
+                        );
                     } else {
                         warn!("No camera capture available for evidence snapshot");
                     }
@@ -848,6 +872,9 @@ impl ConnectionDispatcher {
             let mut aggregator = PadAggregator::with_defaults(consensus_thresholds);
             let mut last_sequence: Option<u64> = None;
             let mut last_capture_stale = false;
+            // First capture classified as a presentation attack (GitHub #261 / PAD-14),
+            // kept only to seal it as opt-in evidence once the verdict is rendered.
+            let mut spoof_capture: Option<Arc<Frame>> = None;
 
             loop {
                 let cur_ns = match self.now_nanos() {
@@ -1017,6 +1044,9 @@ impl ConnectionDispatcher {
                             };
 
                             let class = aggregator.record(&evaluation);
+                            if class == FrameClass::Spoof && spoof_capture.is_none() {
+                                spoof_capture = Some(Arc::clone(&frame));
+                            }
                             match aggregator.decision() {
                                 ConsensusDecision::Allow => break,
                                 ConsensusDecision::SpoofVetoed => {
@@ -1075,6 +1105,12 @@ impl ConnectionDispatcher {
                 }
             };
 
+            // 8g: Opt-in spoof evidence (GitHub #261 / PAD-14): one snapshot of the capture
+            // that vetoed the request, sealed off the response path.
+            if decision == ConsensusDecision::SpoofVetoed {
+                self.capture_spoof_evidence(pipe, req.uid_hint, spoof_capture);
+            }
+
             if req.service.contains("gdm")
                 || req.service.contains("lock")
                 || req.service.contains("screen")
@@ -1103,6 +1139,39 @@ impl ConnectionDispatcher {
             encoded_response: encoded,
             completion_error: None,
         })
+    }
+
+    /// Seals the capture that vetoed a request as a presentation attack into the evidence
+    /// store (GitHub #261 / PAD-14).
+    ///
+    /// Opt-in: nothing happens unless `[pipeline.evidence] enabled` is set. The write runs
+    /// on the blocking pool without delaying the `Deny`/`PadFailed` response; the evidence
+    /// store enforces `daily_cap_per_uid`, the global daily cap, encryption and retention.
+    /// At most one snapshot per request: the consensus loop stops at the first spoof.
+    fn capture_spoof_evidence(
+        &self,
+        pipe: &PipelineComponents,
+        target_uid: u32,
+        capture: Option<Arc<Frame>>,
+    ) {
+        if !pipe.evidence_store.config().enabled {
+            return;
+        }
+        let Some(frame) = capture else {
+            warn!(
+                uid = target_uid,
+                "No spoof capture retained for the evidence snapshot"
+            );
+            return;
+        };
+        info!(
+            uid = target_uid,
+            "Presentation attack vetoed the request; capturing evidence snapshot"
+        );
+        let store = Arc::clone(&pipe.evidence_store);
+        drop(tokio::task::spawn_blocking(move || {
+            store_evidence_capture(&store, target_uid, PAD_FAILED_EVIDENCE_REASON, &frame);
+        }));
     }
 
     /// Authorizes and serves one `RequestKind::PreviewFrame` request.

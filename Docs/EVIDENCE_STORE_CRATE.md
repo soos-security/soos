@@ -79,7 +79,7 @@ named those files `.webp.enc`; such legacy files are still listed, counted, decr
 | `snapshot_id` | text | UUID v4 |
 | `uid` | `u32` | target user |
 | `timestamp` | `u64` | wall-clock capture time, Unix seconds |
-| `reason` | text | e.g. `PasswordFailed` |
+| `reason` | text | `PasswordFailed` (password failure event) or `PadFailed` (capture that vetoed an `Auth` request as a presentation attack, GitHub #261) |
 | `frame` | map or absent | `FrameMetadata { width, height, pixel_format, captured_at_mono_ns, sequence }`; absent for opaque and legacy records |
 | `image_data` | byte string | raw payload exactly as captured (legacy records: array of integers, still accepted) |
 
@@ -166,7 +166,8 @@ let frame = EvidenceFrame {
     data: &raw_v4l2_buffer, // 640 * 480 * 2 bytes
 };
 
-// Store snapshot on authentication failure (the daemon does this on `PasswordFailed`)
+// Store snapshot on authentication failure (the daemon does this on `PasswordFailed`,
+// and with reason `PadFailed` for the capture that vetoed a request as a spoof)
 let result = store.store_frame_snapshot(
     1000,                // uid
     "PasswordFailed",    // reason
