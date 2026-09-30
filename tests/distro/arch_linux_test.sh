@@ -178,7 +178,7 @@ cd "${WORKSPACE_ROOT}"
 if [[ "${SKIP_BUILD}" = false ]]; then
     if [[ ! -f "target/release/soos-daemon" || ! -f "target/release/libpam_soos.so" ]]; then
         info "Compiling release artifacts..."
-        cargo build --release --workspace
+        cargo build --locked --release --workspace
     fi
 fi
 

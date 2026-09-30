@@ -850,3 +850,581 @@ fn test_ci_runs_ubuntu_package_deployment_on_pull_requests() {
         "package-deploy must be part of the CI Success aggregate: {needs}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// TCI-06 (#189) and ONB-10b (#274): the Docker PAM matrix asserts real outcomes, the
+// timeout case asserts the deadline, every mock failure mode is exercised, and the
+// Fedora / Arch deployment paths run in CI.
+// ---------------------------------------------------------------------------
+
+/// Shared shell helpers sourced by `tests/docker/test_suite.sh`.
+const PAM_CASE_LIB: &str = "tests/docker/pam_case_lib.sh";
+
+/// Returns the body of the case `id` (e.g. `"T6"`) in `test_suite.sh`: from its
+/// `# T6:` header comment up to the next case header.
+fn suite_case<'a>(suite: &'a str, id: &str) -> &'a str {
+    let header = format!("\n# {id}:");
+    let start = suite
+        .find(&header)
+        .unwrap_or_else(|| panic!("test_suite.sh must contain a '# {id}:' case header"))
+        + 1;
+    let body_start = start + header.len() - 1;
+    let rest = &suite[body_start..];
+    let mut end = rest.len();
+    let mut offset = 0;
+    while let Some(i) = rest[offset..].find("\n# T") {
+        let pos = offset + i;
+        if rest[pos + 4..].starts_with(|c: char| c.is_ascii_digit()) {
+            end = pos;
+            break;
+        }
+        offset = pos + 4;
+    }
+    &suite[start..body_start + end]
+}
+
+/// Lines of `script` that are not comments.
+fn code_lines(script: &str) -> Vec<&str> {
+    script
+        .lines()
+        .filter(|l| !l.trim_start().starts_with('#'))
+        .collect()
+}
+
+/// Runs `snippet` in bash after sourcing the PAM case library; returns (status, stdout).
+fn run_case_lib(snippet: &str) -> (bool, String) {
+    let root = workspace_root();
+    let lib = root.join(PAM_CASE_LIB);
+    let out = Command::new("bash")
+        .arg("-c")
+        .arg(format!("set -euo pipefail; source \"$1\"; {snippet}"))
+        .arg("bash")
+        .arg(&lib)
+        .output()
+        .expect("run bash");
+    (
+        out.status.success(),
+        String::from_utf8_lossy(&out.stdout).trim().to_string(),
+    )
+}
+
+/// #189 — the timeout budget of a case is read from the PAM stack under test (first
+/// `pam_soos.so` auth line that is not the password-failed hook), with the module's own
+/// default (1000 ms) and clamp (10..=5000 ms), never hard-coded.
+#[test]
+fn test_pam_case_lib_reads_timeout_from_the_stack_under_test() {
+    let dir = scratch_dir("stack-timeout");
+    let cases = [
+        (
+            "auth [success=done default=ignore] pam_soos.so timeout_ms=250\nauth required pam_unix.so\n",
+            "250",
+        ),
+        (
+            "auth optional pam_soos.so event=password-failed timeout_ms=20\n\
+             auth  [success=done default=ignore]  pam_soos.so timeout_ms=2500\n",
+            "2500",
+        ),
+        (
+            "auth [success=done default=ignore] pam_soos.so\nauth required pam_unix.so\n",
+            "1000",
+        ),
+        (
+            "auth [success=done default=ignore] pam_soos.so timeout_ms=99999\n",
+            "5000",
+        ),
+        (
+            "auth [success=done default=ignore] pam_soos.so timeout_ms=1\n",
+            "10",
+        ),
+        (
+            "# auth sufficient pam_soos.so timeout_ms=7\n\
+             auth [success=done default=ignore] pam_soos.so service=sudo timeout_ms=300\n",
+            "300",
+        ),
+    ];
+    for (n, (stack, expected)) in cases.iter().enumerate() {
+        let file = dir.join(format!("stack-{n}"));
+        fs::write(&file, stack).expect("write stack");
+        let (ok, out) = run_case_lib(&format!("pam_stack_timeout_ms '{}'", file.display()));
+        assert!(ok, "pam_stack_timeout_ms failed on stack:\n{stack}");
+        assert_eq!(
+            &out, expected,
+            "pam_stack_timeout_ms returned the wrong budget for:\n{stack}"
+        );
+    }
+    let file = dir.join("no-soos");
+    fs::write(&file, "auth required pam_unix.so\n").expect("write stack");
+    let (ok, _) = run_case_lib(&format!("pam_stack_timeout_ms '{}'", file.display()));
+    assert!(
+        !ok,
+        "pam_stack_timeout_ms must fail on a stack without a pam_soos.so auth line"
+    );
+    fs::remove_dir_all(&dir).ok();
+}
+
+/// #189 — the deadline assertion fails once the elapsed time exceeds the budget plus the
+/// documented tolerance, and the injected daemon delay always exceeds that bound.
+#[test]
+fn test_pam_case_lib_deadline_assertion_can_fail() {
+    let (ok, _) = run_case_lib("assert_elapsed_within_deadline T 900 250");
+    assert!(ok, "900 ms is within 250 ms + tolerance");
+    let (ok, _) = run_case_lib("assert_elapsed_within_deadline T 2250 250");
+    assert!(
+        !ok,
+        "2250 ms (a module that waited for the delayed daemon) must fail the deadline"
+    );
+    for timeout in [10u64, 250, 1000, 2500, 5000] {
+        let (ok, bound) = run_case_lib(&format!("deadline_bound_ms {timeout}"));
+        assert!(ok);
+        let (ok, delay) = run_case_lib(&format!("timeout_mock_delay_ms {timeout}"));
+        assert!(ok);
+        let bound: u64 = bound.parse().expect("bound is a number");
+        let delay: u64 = delay.parse().expect("delay is a number");
+        assert!(
+            bound > timeout && delay > bound,
+            "the mock delay ({delay} ms) must exceed the deadline bound ({bound} ms) for \
+             timeout_ms={timeout}, so a module that waits for the daemon is detected"
+        );
+        let (ok, _) = run_case_lib(&format!(
+            "assert_elapsed_within_deadline T {bound} {timeout}"
+        ));
+        assert!(ok, "the bound itself is accepted");
+        let (ok, _) = run_case_lib(&format!(
+            "assert_elapsed_within_deadline T {} {timeout}",
+            bound + 1
+        ));
+        assert!(!ok, "one millisecond over the bound is rejected");
+    }
+}
+
+/// #189 — T2 derives the mock delay and the elapsed bound from the stack's `timeout_ms`
+/// and asserts the bound; a late `Allow` is never honored (T2b).
+#[test]
+fn test_pam_matrix_t2_asserts_the_deadline() {
+    let root = workspace_root();
+    let suite = fs::read_to_string(root.join("tests/docker/test_suite.sh")).expect("read suite");
+    assert!(
+        code_lines(&suite)
+            .iter()
+            .any(|l| l.trim_start().starts_with("source ") && l.contains(PAM_CASE_LIB)),
+        "test_suite.sh must source {PAM_CASE_LIB}"
+    );
+    let t2 = suite_case(&suite, "T2");
+    let code = code_lines(t2).join("\n");
+    assert!(
+        code.contains("pam_stack_timeout_ms /etc/pam.d/test-soos"),
+        "T2 must read timeout_ms from /etc/pam.d/test-soos:\n{t2}"
+    );
+    assert!(
+        code.contains("timeout_mock_delay_ms"),
+        "T2 must derive the mock delay from the stack timeout:\n{t2}"
+    );
+    assert!(
+        code.contains("assert_elapsed_within_deadline"),
+        "T2 must assert the elapsed time against the deadline:\n{t2}"
+    );
+    assert!(
+        !code.contains("--delay 0.5"),
+        "T2 must not hard-code the mock delay:\n{t2}"
+    );
+    let t2b = suite_case(&suite, "T2b");
+    let code = code_lines(t2b).join("\n");
+    assert!(
+        code.contains("assert_no_facial_authorization test-soos"),
+        "T2b must assert that a late Allow never authenticates without a password:\n{t2b}"
+    );
+    assert!(
+        code.contains("assert_elapsed_within_deadline"),
+        "T2b must assert the deadline too:\n{t2b}"
+    );
+}
+
+/// #189 — T6 (distribution stack) and T8 (absent module) assert real outcomes: no `warn`
+/// escape hatch, every failed expectation exits non-zero.
+#[test]
+fn test_pam_matrix_t6_and_t8_can_fail() {
+    let root = workspace_root();
+    let suite = fs::read_to_string(root.join("tests/docker/test_suite.sh")).expect("read suite");
+    for id in ["T6", "T8"] {
+        let case = suite_case(&suite, id);
+        let code = code_lines(case);
+        assert!(
+            !code.iter().any(|l| l.trim_start().starts_with("warn ")),
+            "{id} must not downgrade a failed expectation to a warning:\n{case}"
+        );
+        assert!(
+            code.iter().filter(|l| l.contains("exit 1")).count() >= 3,
+            "{id} must fail on facial, valid-password and wrong-password expectations:\n{case}"
+        );
+        assert!(
+            code.iter().any(|l| l.contains("wrong_password")),
+            "{id} must assert that a wrong password is rejected:\n{case}"
+        );
+    }
+    let t6 = code_lines(suite_case(&suite, "T6")).join("\n");
+    assert!(
+        t6.contains("pam_test_runner \"${DISTRO_SERVICE}\" testuser; then"),
+        "T6 must assert facial authentication (no password) on the distribution stack:\n{t6}"
+    );
+    let t8 = code_lines(suite_case(&suite, "T8")).join("\n");
+    assert!(
+        t8.contains("assert_no_facial_authorization test-soos"),
+        "T8 must assert that the stack never authenticates without the module and a password:\n{t8}"
+    );
+}
+
+/// #189 — every behavior the mock daemon can simulate is exercised by the PAM matrix.
+#[test]
+fn test_pam_matrix_exercises_every_mock_daemon_mode() {
+    let root = workspace_root();
+    let mock = fs::read_to_string(root.join("tests/docker/mock_daemon.py")).expect("read mock");
+    let choices_start = mock
+        .find("choices=[")
+        .expect("mock_daemon.py must declare --mode choices");
+    let choices = &mock[choices_start + "choices=[".len()..];
+    let choices = &choices[..choices.find(']').expect("closing bracket")];
+    let modes: Vec<&str> = choices
+        .split(',')
+        .map(|m| m.trim().trim_matches('"'))
+        .filter(|m| !m.is_empty())
+        .collect();
+    for required in [
+        "allow",
+        "deny",
+        "timeout",
+        "crash-immediate",
+        "crash-partial",
+        "crash-truncated",
+        "malformed",
+        "wrong-request-id",
+        "bad-version",
+        "oversized",
+        "empty",
+    ] {
+        assert!(
+            modes.contains(&required),
+            "mock_daemon.py must support --mode {required} (modes: {modes:?})"
+        );
+    }
+    let suite = fs::read_to_string(root.join("tests/docker/test_suite.sh")).expect("read suite");
+    let code = code_lines(&suite).join("\n");
+    let tokens: Vec<&str> = code
+        .split(|c: char| c.is_whitespace() || c == ';' || c == '"')
+        .collect();
+    for mode in &modes {
+        assert!(
+            code.contains(&format!("--mode {mode}"))
+                || (code.contains("--mode \"${") && tokens.contains(mode)),
+            "tests/docker/test_suite.sh never exercises mock mode '{mode}'"
+        );
+    }
+}
+
+/// Frames a minimal protocol-v1 `Request` whose request_id is `id` (0xAB bytes, so the
+/// mock never classifies it as an `Event`).
+fn framed_test_request(id: &[u8; 32]) -> Vec<u8> {
+    let mut body = vec![1u8, 0u8];
+    body.extend_from_slice(id);
+    body.push(0); // uid_hint = 0 (varint)
+    body.push(4);
+    body.extend_from_slice(b"test");
+    body.push(1); // deadline_monotonic_ns (varint)
+    let mut frame = u32::try_from(body.len())
+        .expect("small body")
+        .to_be_bytes()
+        .to_vec();
+    frame.extend(body);
+    frame
+}
+
+/// Sends one request to a mock daemon in `mode` and returns every byte it answered.
+fn mock_exchange(mode: &str) -> Vec<u8> {
+    use std::io::{Read, Write};
+    use std::os::unix::net::UnixStream;
+    let root = workspace_root();
+    let dir = scratch_dir(&format!("mock-{mode}"));
+    let sock = dir.join("daemon.sock");
+    let mut child = Command::new("python3")
+        .arg(root.join("tests/docker/mock_daemon.py"))
+        .args(["--mode", mode, "--one-shot", "--socket"])
+        .arg(&sock)
+        .args(["--socket-group", &current_group_name()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn mock_daemon.py");
+    let appeared = wait_for_socket(&sock, Duration::from_secs(10));
+    let answer = if appeared {
+        let mut stream = UnixStream::connect(&sock).expect("connect mock");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .expect("read timeout");
+        stream
+            .write_all(&framed_test_request(&[0xAB; 32]))
+            .expect("write request");
+        let mut answer = Vec::new();
+        stream.read_to_end(&mut answer).expect("read answer");
+        Some(answer)
+    } else {
+        None
+    };
+    child.kill().ok();
+    child.wait().ok();
+    fs::remove_dir_all(&dir).ok();
+    answer.unwrap_or_else(|| panic!("mock_daemon.py --mode {mode} never created its socket"))
+}
+
+/// #189 — the malformed-response modes put exactly one defect on the wire, so each Docker
+/// case proves one rejection path of the module (Allow verdicts that must not be honored).
+#[test]
+fn test_mock_daemon_malformed_modes_put_one_defect_on_the_wire() {
+    let id = [0xABu8; 32];
+
+    let allow = mock_exchange("allow");
+    assert_eq!(allow.len(), 41, "allow is a complete 37-byte frame");
+    assert_eq!(&allow[..4], &37u32.to_be_bytes(), "allow frame length");
+    assert_eq!(allow[4], 1, "allow version");
+    assert_eq!(&allow[5..37], &id, "allow echoes the request_id");
+    assert_eq!(allow[37], 0, "allow verdict");
+
+    let deny = mock_exchange("deny");
+    assert_eq!(&deny[5..37], &id, "deny echoes the request_id");
+    assert_eq!(deny[37], 1, "deny verdict is Verdict::Deny");
+
+    let wrong = mock_exchange("wrong-request-id");
+    assert_eq!(wrong.len(), 41, "wrong-request-id is a complete frame");
+    assert_eq!(wrong[4], 1, "wrong-request-id keeps version 1");
+    assert_ne!(&wrong[5..37], &id, "wrong-request-id must not echo the id");
+    assert_eq!(wrong[37], 0, "wrong-request-id carries an Allow verdict");
+
+    let version = mock_exchange("bad-version");
+    assert_eq!(version.len(), 41, "bad-version is a complete frame");
+    assert_ne!(version[4], 1, "bad-version must not be protocol version 1");
+    assert_eq!(&version[5..37], &id, "bad-version echoes the id");
+    assert_eq!(version[37], 0, "bad-version carries an Allow verdict");
+
+    let malformed = mock_exchange("malformed");
+    assert_eq!(malformed.len(), 41, "malformed is a complete frame");
+    assert_eq!(malformed[4], 1, "malformed keeps version 1");
+    assert_eq!(&malformed[5..37], &id, "malformed echoes the id");
+    assert!(
+        malformed[37] > 3 && malformed[37] < 0x80,
+        "malformed must carry a single-byte, undecodable verdict discriminant"
+    );
+
+    let truncated = mock_exchange("crash-truncated");
+    assert!(
+        truncated.len() >= 4,
+        "crash-truncated sends a length prefix"
+    );
+    let declared = u32::from_be_bytes([truncated[0], truncated[1], truncated[2], truncated[3]]);
+    assert!(
+        (truncated.len() - 4) < usize::try_from(declared).expect("u32 fits"),
+        "crash-truncated must send fewer body bytes than it declares"
+    );
+
+    let oversized = mock_exchange("oversized");
+    assert_eq!(oversized.len(), 4, "oversized sends only a length prefix");
+    assert!(
+        u32::from_be_bytes([oversized[0], oversized[1], oversized[2], oversized[3]]) > 4096,
+        "oversized must declare more than MAX_MESSAGE_SIZE (4096) bytes"
+    );
+
+    let empty = mock_exchange("empty");
+    assert_eq!(
+        empty,
+        0u32.to_be_bytes().to_vec(),
+        "empty declares a zero-length body"
+    );
+}
+
+/// #189 — Deny (T13), truncated (T14) and malformed responses (T15) never authenticate
+/// without a password and always leave the password fallback working.
+#[test]
+fn test_pam_matrix_rejection_cases_assert_no_authorization() {
+    let root = workspace_root();
+    let suite = fs::read_to_string(root.join("tests/docker/test_suite.sh")).expect("read suite");
+    for id in ["T13", "T14", "T15"] {
+        let case = suite_case(&suite, id);
+        let code = code_lines(case).join("\n");
+        assert!(
+            code.contains("assert_no_facial_authorization"),
+            "{id} must assert that the verdict never authenticates without a password:\n{case}"
+        );
+        assert!(
+            code.contains("assert_password_fallback"),
+            "{id} must assert the password fallback:\n{case}"
+        );
+    }
+    let t15 = code_lines(suite_case(&suite, "T15")).join("\n");
+    for mode in [
+        "malformed",
+        "wrong-request-id",
+        "bad-version",
+        "oversized",
+        "empty",
+    ] {
+        assert!(t15.contains(mode), "T15 must exercise mock mode '{mode}'");
+    }
+    let lib = fs::read_to_string(root.join(PAM_CASE_LIB)).expect("read case lib");
+    for helper in [
+        "assert_no_facial_authorization()",
+        "assert_password_fallback()",
+    ] {
+        assert!(lib.contains(helper), "{PAM_CASE_LIB} must define {helper}");
+    }
+}
+
+/// #274 — every release build in the deployment and package tests honours Cargo.lock.
+#[test]
+fn test_deployment_and_package_tests_build_with_locked() {
+    let root = workspace_root();
+    let mut scripts = vec![
+        "tests/docker/test_packages.sh",
+        "tests/docker/test_suite.sh",
+    ];
+    scripts.extend(DISTRO_SCRIPTS);
+    for script in scripts {
+        let content = fs::read_to_string(root.join(script)).expect("read script");
+        let builds: Vec<&str> = code_lines(&content)
+            .into_iter()
+            .filter(|l| l.trim_start().starts_with("cargo build"))
+            .collect();
+        assert!(!builds.is_empty(), "{script} must build the workspace");
+        for line in builds {
+            assert!(
+                line.contains("--locked"),
+                "{script} must build with --locked: {line}"
+            );
+        }
+    }
+}
+
+/// #274 — a failing `pam-auth-update` is never ignored by the Debian deployment test, and
+/// the generated common-auth is asserted to contain the soos password-failed hook.
+#[test]
+fn test_debian_deployment_never_ignores_pam_auth_update() {
+    let root = workspace_root();
+    let content = fs::read_to_string(root.join("tests/distro/debian_ubuntu_test.sh"))
+        .expect("read debian test");
+    let code = code_lines(&content);
+    let calls: Vec<&&str> = code
+        .iter()
+        .filter(|l| l.contains("pam-auth-update --package"))
+        .collect();
+    assert!(
+        !calls.is_empty(),
+        "debian_ubuntu_test.sh must run pam-auth-update"
+    );
+    for line in calls {
+        assert!(
+            !line.contains("|| true"),
+            "pam-auth-update failure must fail the deployment test: {line}"
+        );
+    }
+    assert!(
+        code.iter()
+            .any(|l| l.contains("pam_soos.so event=password-failed")
+                && l.contains("/etc/pam.d/common-auth")),
+        "debian_ubuntu_test.sh must assert the generated common-auth contains the hook"
+    );
+}
+
+/// #274 — the package harness fails closed: missing packaging tooling or an unknown
+/// distribution is an error, never a silent success.
+#[test]
+fn test_package_harness_fails_closed() {
+    let root = workspace_root();
+    let content =
+        fs::read_to_string(root.join("tests/docker/test_packages.sh")).expect("read harness");
+    let code = code_lines(&content);
+    assert_eq!(
+        code.iter().filter(|l| l.trim() == "exit 0").count(),
+        1,
+        "test_packages.sh may only exit 0 after every check passed"
+    );
+    assert!(
+        !code
+            .iter()
+            .any(|l| l.contains("build_packages.sh --dry-run")),
+        "an unknown distribution must fail, not fall back to a dry run"
+    );
+    assert!(
+        code.iter().any(|l| l.contains("soos-[0-9]*.rpm")),
+        "the RPM branch must select the main package, never soos-debuginfo"
+    );
+}
+
+/// #274 — the Fedora (RPM, authselect) and Arch (pacman) deployment paths and the RPM /
+/// Arch branches of the package harness run in CI on push to main and manual dispatch.
+#[test]
+fn test_ci_runs_fedora_and_arch_deployment() {
+    let root = workspace_root();
+    let ci = fs::read_to_string(root.join(".github/workflows/ci.yml")).expect("read ci.yml");
+    let job = ci_job(&ci, "distro-deploy");
+    assert!(
+        job.contains("if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'"),
+        "distro-deploy must run on push to main and manual dispatch:\n{job}"
+    );
+    assert!(job.contains("needs: lint"), "distro-deploy must need lint");
+    assert!(
+        job.contains("timeout-minutes:"),
+        "distro-deploy must set a timeout"
+    );
+    assert!(
+        job.contains("distro: [fedora, arch]"),
+        "distro-deploy must cover fedora and arch"
+    );
+    assert!(
+        job.contains("fail-fast: false"),
+        "one distribution failing must not hide the other"
+    );
+    assert!(
+        job.contains("uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1"),
+        "distro-deploy must use the SHA-pinned checkout action"
+    );
+    assert!(
+        job.contains("persist-credentials: false"),
+        "distro-deploy must not persist git credentials"
+    );
+    assert!(
+        job.contains("DISTRO: ${{ matrix.distro }}"),
+        "the distribution must reach the steps through env only"
+    );
+    assert!(
+        job.contains("./tests/distro/run_distro_validation.sh \"$DISTRO\""),
+        "distro-deploy must run the distribution deployment validation"
+    );
+    assert!(
+        job.contains("tests/docker/test_packages.sh")
+            && job.contains("\"soos-distro-target-${DISTRO}\":/workspace/target")
+            && job.contains("\"soos-distro-val-${DISTRO}\""),
+        "distro-deploy must run the package harness in the same image and target volume"
+    );
+    assert!(
+        !job.contains("${{ github.event"),
+        "distro-deploy must not interpolate event data into its steps"
+    );
+    let mut in_run = false;
+    for line in job.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("run:") {
+            in_run = true;
+        } else if trimmed.starts_with("- name:") || trimmed.starts_with("env:") {
+            in_run = false;
+        }
+        assert!(
+            !(in_run && line.contains("${{")),
+            "distro-deploy must not interpolate expressions into run: {line}"
+        );
+    }
+    let gate = ci_job(&ci, "ci-success");
+    let needs = gate
+        .lines()
+        .find(|l| l.trim_start().starts_with("needs:"))
+        .expect("ci-success needs list");
+    assert!(
+        !needs.contains("distro-deploy"),
+        "distro-deploy is skipped on pull requests and must not be a CI Success dependency"
+    );
+}

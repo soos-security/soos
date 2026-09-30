@@ -36,6 +36,7 @@ and flags run at every level, so a green local run predicts a green CI run.
 │  after lint: pam-integration │ authselect-profile           │
 │              pam-rollback │ package-deploy                  │
 │  after all:  ci-success (aggregate gate)                    │
+│  main/dispatch only: distro-pam-matrix │ distro-deploy      │
 │  separate:   pr-title.yml (PR title convention)             │
 └──────────────────────────────┬──────────────────────────────┘
                                │ green "CI Success"
@@ -66,12 +67,13 @@ retitling a PR re-validates it without re-running the whole pipeline.
 | `clippy` | `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings` | Cached `target/` |
 | `test` | `cargo test --locked --workspace --all-targets --all-features` (build step separated from run step) | Cached `target/` |
 | `security` | `cargo deny --locked check` with cargo-deny 0.20.2 | Also runs daily for new RustSec advisories |
-| `pam-integration` | Dockerized PAM matrix T1–T12 (`tests/docker/test_suite.sh`) | Starts after `lint`; Buildx layer cache |
+| `pam-integration` | Dockerized PAM matrix T1–T15 (`tests/docker/test_suite.sh`): every case exits non-zero on a failed expectation; T2/T2b assert the elapsed time against the `timeout_ms` of the stack under test; T13–T15 cover `Deny`, a truncated body and malformed responses (GitHub #189) | Starts after `lint`; Buildx layer cache |
 | `authselect-profile` | Fedora `authselect` profile activation, `authselect check`, generated stack ordering, `nsswitch.conf` preservation, password fallback and rollback in `fedora:40` (`tests/docker/authselect_profile_test.sh`) | Starts after `lint`; stock image, no build |
 | `pam-rollback` | Failing live `scripts/install.sh` runs roll back completely (D0a/D0b), Debian `pam-auth-update` stack order (password-failed hook before `pam_deny`) and byte-for-byte PAM rollback by `scripts/uninstall.sh` (sha256 of every `/etc/pam.d` entry, `authselect current`) in `ubuntu:24.04` and `fedora:40` (`tests/docker/pam_rollback_test.sh`) | Starts after `lint`; stock images, no build |
 | `package-deploy` | Ubuntu packaging and deployment path (GitHub #168): `tests/distro/run_distro_validation.sh ubuntu` (release workspace build, `.deb` built and installed with `dpkg -i`, filesystem invariants, `soos-enroll --mock enroll`, facial auth against the mock daemon, password fallback, rollback) in the `tests/docker/Dockerfile.ubuntu` image, then `tests/docker/test_packages.sh` on the same target volume (no key material in the `.deb`, `0600` 32-byte key generated on the host, key survives `dpkg -r`, distinct keys across fresh installs) | Starts after `lint`; runs on every pull request; full release build (~15–25 min, 75 min ceiling) |
 | `ci-success` | Fails unless every job above succeeded | Single check to require in branch protection |
-| `distro-pam-matrix` | PAM matrix T1–T10 in the Fedora and Arch sandbox images (`tests/docker/run_matrix.sh fedora\|arch`, GitHub #162) | Push to `main` and manual dispatch only (rebuilds toolchain and module per image); not part of `ci-success` |
+| `distro-pam-matrix` | PAM matrix T1–T15 in the Fedora and Arch sandbox images (`tests/docker/run_matrix.sh fedora\|arch`, GitHub #162) | Push to `main` and manual dispatch only (rebuilds toolchain and module per image); not part of `ci-success` |
+| `distro-deploy` | Fedora and Arch packaging and deployment paths (GitHub #274): `tests/distro/run_distro_validation.sh fedora\|arch` (release build with `--locked`; Fedora: RPM built with `rpmbuild`, `rpm -i`, `authselect select custom/soos with-faillock`, `sudo`/`gdm` stacks; Arch: `build_arch.sh`, `pacman -U`, `system-auth`/screen-locker stacks; both: `soos-enroll --mock`, facial auth, password fallback, rollback), then the RPM or Arch branch of `tests/docker/test_packages.sh` in the same image and target volume | Push to `main` and manual dispatch only (full release build per image, 90 min ceiling); `fail-fast: false`; not part of `ci-success` because it is skipped on pull requests |
 
 ### Performance Design
 - **Parallel jobs**: clippy, test, security and lint run concurrently; the critical path is the
@@ -178,7 +180,7 @@ are reviewed like any other and receive their report on the Dependabot branch.
 
 To guarantee that experimental PAM modules never compromise the host operating system, all PAM integration tests run inside an isolated, ephemeral Ubuntu 24.04 Docker container:
 ```bash
-./run_tests.sh             # Ubuntu sandbox, T1–T12
+./run_tests.sh             # Ubuntu sandbox, T1–T15
 ./run_tests.sh --matrix    # Ubuntu, Fedora and Arch Linux
 ./run_tests.sh authselect  # Fedora authselect profile activation and rollback (fedora:40)
 ./run_tests.sh rollback    # Debian stack order + byte-for-byte PAM rollback (ubuntu:24.04, fedora:40)
@@ -186,7 +188,11 @@ To guarantee that experimental PAM modules never compromise the host operating s
 
 The matrix (see [`PAM_DOCKER_TEST_MATRIX.md`](PAM_DOCKER_TEST_MATRIX.md)) covers nominal facial
 authorization, daemon timeout and crash fallbacks with valid and invalid passwords, native
-distribution stack integration, an absent socket, and a missing module.
+distribution stack integration, an absent socket, a missing module, `Verdict::Deny`, a
+truncated response and malformed responses (undecodable verdict, mismatched `request_id`,
+unsupported version, oversized and empty frames). Every case is a hard failure; the timeout
+cases read `timeout_ms` from the PAM stack under test and assert the elapsed time
+(`tests/docker/pam_case_lib.sh`, GitHub #189).
 
 ---
 
