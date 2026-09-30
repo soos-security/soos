@@ -1,5 +1,8 @@
 # Walkthrough 53 — Next-Generation ONNX Model Migration Architecture
 
+> **Historical record - class order superseded.** The MiniFASNetV2 live class index stated below is obsolete. The current contract is `[PrintPhoto, Live, ScreenReplay]`, live class index 1 (`DEFAULT_MINIFASNET_LIVE_CLASS_INDEX`), per the 2026-09-29 and 2026-09-30 ADR entries in `AI/DECISIONS.md` (GitHub #146, #171; walkthroughs 79 and 85).
+
+
 > **Date**: 2026-09-20
 > **Scope**: AI model modernization — replacing 4 obsolete ONNX models with 3 modern ones
 > **Status**: Architecture & reasoning documented — implementation pending via Issues #36–#45

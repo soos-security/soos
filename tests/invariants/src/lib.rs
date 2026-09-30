@@ -10,6 +10,9 @@
 #![forbid(unsafe_code)]
 
 #[cfg(test)]
+mod pad_contract;
+
+#[cfg(test)]
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,

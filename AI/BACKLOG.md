@@ -1479,7 +1479,7 @@ The current `OrtEmbeddingExtractor` uses normalization `(pixel - 127.5) / 128.0`
 
 #### Problem Statement
 
-MiniFASNetV2 has three critical differences from the current MiniFASNet: input size (80×80 vs 112×112), normalization (`pixel/255.0` vs `(pixel-127.5)/128.0`), and channel ordering (BGR vs RGB). Additionally, the class ordering changes (Class 0 = Live instead of Class 1 = Live).
+MiniFASNetV2 has three critical differences from the current MiniFASNet: input size (80×80 vs 112×112), normalization (`pixel/255.0` vs `(pixel-127.5)/128.0`), and channel ordering (BGR vs RGB). Additionally, the class ordering changes (Class 0 = Live instead of Class 1 = Live). *(Superseded by ADR 2026-09-29 "MiniFASNetV2 Live Class Index": the shipped model uses `[PrintPhoto, Live, ScreenReplay]`, live class index 1.)*
 
 #### Sub-issues
 
@@ -1492,7 +1492,7 @@ MiniFASNetV2 has three critical differences from the current MiniFASNet: input s
   - TDD: `test_pad_prepare_input_80x80_bgr`, `test_pad_normalization_0_1_range`
 
 - [x] **#40.2** — Add configurable `live_class_index` to `OrtPadDetector`
-  - Add `live_class_index: usize` field to struct, default `0`
+  - Add `live_class_index: usize` field to struct, default `0` *(Superseded by ADR 2026-09-29: the default is `DEFAULT_MINIFASNET_LIVE_CLASS_INDEX = 1`.)*
   - Update `evaluate_liveness()` to read `p_live` from `probs[live_class_index]`
   - Determine attack type from remaining non-live classes
   - Acceptance: Class ordering is configurable and defaults correctly for MiniFASNetV2
@@ -1698,7 +1698,7 @@ All project documentation must be updated to reflect the 3-model architecture: A
 | NGM6 | `OrtLandmarkDetector` removed; `FaceLandmarks` and `LandmarkDetector` trait preserved | Compilation test | ✅ Verified |
 | NGM7 | Embedding extractor uses `(pixel - 127.5) / 127.5` normalization and produces 512D output | Unit test | ✅ Verified |
 | NGM8 | PAD detector accepts 80×80 BGR input with `pixel / 255.0` normalization | Unit test | ✅ Verified |
-| NGM9 | PAD class ordering: index 0 = Live (configurable `live_class_index`) | Unit test | ✅ Verified |
+| NGM9 | PAD class ordering: live class index 1 (`DEFAULT_MINIFASNET_LIVE_CLASS_INDEX`, `[PrintPhoto, Live, ScreenReplay]`; explicit indices are test-only) | Unit test | ✅ Verified |
 | NGM10 | PAD detector validates class ordering against known fixture at startup | Integration test | ✅ Verified |
 | NGM11 | VisionPipeline constructs with 3 backends (detector, pad, extractor) | Unit test | ✅ Verified |
 | NGM12 | Pipeline extracts landmarks from `FaceDetection`, not a separate detector | Unit test | ✅ Verified |
