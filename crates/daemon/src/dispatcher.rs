@@ -15,7 +15,8 @@ use crate::inference::{InferenceGate, RequestDeadline};
 use crate::limits::{PeerConnectionLimiter, PeerLimitsConfig};
 use crate::peercred::{get_peer_credentials, verify_peer_credentials, PeerCredentials};
 use crate::pipeline::{
-    current_monotonic_nanos, PipelineComponents, FRAME_POLL_INTERVAL_MS, MAX_FRAME_AGE_NS,
+    classify_template_model, current_monotonic_nanos, PipelineComponents, TemplateModelBinding,
+    FRAME_POLL_INTERVAL_MS, MAX_FRAME_AGE_NS,
 };
 use crate::preview::{authorize_preview, PreviewConfig};
 use crate::session::SessionValidator;
@@ -794,7 +795,22 @@ impl ConnectionDispatcher {
 
             // 8d: Refuse templates enrolled with another embedding model (GitHub #182).
             if let Some(expected) = self.expected_embedding_model.as_deref() {
-                if enrolled_template.model_id != expected {
+                let binding = classify_template_model(
+                    expected,
+                    &enrolled_template.model_id,
+                    &enrolled_template.model_version,
+                );
+                if binding == TemplateModelBinding::LegacyAlias {
+                    warn!(
+                        uid = req.uid_hint,
+                        template_model = ?enrolled_template.model_id,
+                        template_version = ?enrolled_template.model_version,
+                        loaded_model = %expected,
+                        "Enrolled template carries the legacy model alias; accepted as the \
+                         loaded embedding model, re-enrollment with soos-enroll is recommended"
+                    );
+                }
+                if binding == TemplateModelBinding::Foreign {
                     warn!(
                         uid = req.uid_hint,
                         template_model = ?enrolled_template.model_id,

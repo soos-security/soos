@@ -27,7 +27,10 @@ use soos_camera_v4l::{CameraConfigBuilder, CameraManager, MockCameraManager, Pix
 use soos_daemon::config::DispatcherConfig;
 use soos_daemon::dispatcher::ConnectionDispatcher;
 use soos_daemon::health::HealthState;
-use soos_daemon::pipeline::{PipelineComponents, EMBEDDING_MODEL_ID};
+use soos_daemon::pipeline::{
+    classify_template_model, PipelineComponents, TemplateModelBinding, EMBEDDING_MODEL_ID,
+    LEGACY_EMBEDDING_MODEL_ALIAS_ID, LEGACY_EMBEDDING_MODEL_ALIAS_VERSION,
+};
 use soos_evidence_store::{EvidenceConfig, EvidenceStore, MasterKey as EvMasterKey};
 use soos_inference_ort::{
     MockEmbeddingExtractor, MockFaceDetector, MockPadDetector, ModelManifest,
@@ -54,6 +57,15 @@ impl Drop for Fixture {
 /// Builds a dispatcher bound to `expected_model` whose store holds a template for the
 /// current UID recorded with `template_model`.
 async fn fixture(template_model: &str, expected_model: Option<&str>) -> Fixture {
+    fixture_with_version(template_model, "2.0.0", expected_model).await
+}
+
+/// Same as [`fixture`] with an explicit recorded `model_version`.
+async fn fixture_with_version(
+    template_model: &str,
+    template_version: &str,
+    expected_model: Option<&str>,
+) -> Fixture {
     let temp = tempdir().unwrap();
     let sock_path = temp.path().join("daemon.sock");
     let bio_store = Arc::new(
@@ -120,7 +132,7 @@ async fn fixture(template_model: &str, expected_model: Option<&str>) -> Fixture 
     let template = BiometricTemplate::new(
         uid,
         template_model.into(),
-        "2.0.0".into(),
+        template_version.into(),
         1,
         zeroize::Zeroizing::new(enrolled),
     )
@@ -229,4 +241,74 @@ fn test_production_wiring_binds_templates_to_loaded_embedding_model() {
         pipeline_rs.contains("get_or_load_session(EMBEDDING_MODEL_ID)"),
         "the embedding session must be loaded through EMBEDDING_MODEL_ID"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Legacy alias (user decision 2026-09-30, ADR "Legacy Embedding Model Alias")
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_legacy_alias_constants_are_exactly_the_retired_cli_default() {
+    assert_eq!(LEGACY_EMBEDDING_MODEL_ALIAS_ID, "mobilefacenet");
+    assert_eq!(LEGACY_EMBEDDING_MODEL_ALIAS_VERSION, "1.0.0");
+}
+
+#[test]
+fn test_classify_template_model_accepts_only_current_or_exact_legacy_alias() {
+    assert_eq!(
+        classify_template_model(EMBEDDING_MODEL_ID, EMBEDDING_MODEL_ID, "2.0.0"),
+        TemplateModelBinding::Current
+    );
+    assert_eq!(
+        classify_template_model(EMBEDDING_MODEL_ID, "mobilefacenet", "1.0.0"),
+        TemplateModelBinding::LegacyAlias
+    );
+    for (id, version) in [
+        ("mobilefacenet", "1.0.1"),
+        ("mobilefacenet", "2.0.0"),
+        ("mobilefacenet", ""),
+        ("MobileFaceNet", "1.0.0"),
+        ("mobilefacenet ", "1.0.0"),
+        ("facenet_512", "1.0.0"),
+    ] {
+        assert_eq!(
+            classify_template_model(EMBEDDING_MODEL_ID, id, version),
+            TemplateModelBinding::Foreign,
+            "{id:?}/{version:?} must be refused"
+        );
+    }
+    // The alias maps only onto the ArcFace extractor, never onto another loaded model.
+    assert_eq!(
+        classify_template_model("another_model", "mobilefacenet", "1.0.0"),
+        TemplateModelBinding::Foreign
+    );
+}
+
+#[tokio::test]
+async fn test_legacy_alias_template_reaches_allow() {
+    let fx = fixture_with_version(
+        LEGACY_EMBEDDING_MODEL_ALIAS_ID,
+        LEGACY_EMBEDDING_MODEL_ALIAS_VERSION,
+        Some(EMBEDDING_MODEL_ID),
+    )
+    .await;
+    let resp = auth(&fx).await;
+    assert_eq!(resp.verdict, Verdict::Allow);
+    assert_eq!(resp.reason_class, ReasonClass::FaceMatch);
+}
+
+#[tokio::test]
+async fn test_legacy_alias_with_other_version_is_refused() {
+    let fx = fixture_with_version("mobilefacenet", "1.0.1", Some(EMBEDDING_MODEL_ID)).await;
+    let resp = auth(&fx).await;
+    assert_eq!(resp.verdict, Verdict::Unavailable);
+    assert_eq!(resp.reason_class, ReasonClass::ModelUnavailable);
+}
+
+#[tokio::test]
+async fn test_unrelated_foreign_model_id_is_refused() {
+    let fx = fixture_with_version("facenet_512", "1.0.0", Some(EMBEDDING_MODEL_ID)).await;
+    let resp = auth(&fx).await;
+    assert_eq!(resp.verdict, Verdict::Unavailable);
+    assert_eq!(resp.reason_class, ReasonClass::ModelUnavailable);
 }

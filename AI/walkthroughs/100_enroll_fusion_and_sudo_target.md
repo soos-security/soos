@@ -1,10 +1,11 @@
 # Walkthrough 100 — Guided Enrollment Fusion Safety and Sudo Enrollment Target
 
 - **Date**: 2026-09-30
-- **Issues**: Review findings STO-10 (GitHub #183) and STO-11 (GitHub #184)
-- **Branch**: `fix/enroll-model-fusion-target`
-- **Matrix criteria**: GEF1–GEF3, ETU1 (✅ Verified)
-- **Deferred**: STO-09 (GitHub #182), see §7
+- **Issues**: Review findings STO-10 (GitHub #183), STO-11 (GitHub #184) and STO-09 (GitHub #182)
+- **Branches**: `fix/enroll-model-fusion-target` (STO-10, STO-11), `fix/enroll-model-provenance`
+  on top of it (STO-09, §7)
+- **Matrix criteria**: GEF1–GEF3, ETU1, EMP1–EMP4 (✅ Verified)
+- **ADR**: 2026-09-30 "Embedding Model Binding and Legacy Model Alias" in `AI/DECISIONS.md`
 
 ---
 
@@ -98,24 +99,47 @@ cargo test --locked --workspace --all-targets --all-features --no-fail-fast
 All four pass. Targeted: `guided_enrollment_consistency_tests` 13/13, `enroll_target_tests` 8/8,
 and the unchanged `guided_enrollment_tests` 1/1, `enroll_tests` 3/3, `scaffold_tests` 6/6.
 
-## 7. Deferred: STO-09 (GitHub #182) — Blocked on a Test-Contract Decision
+## 7. STO-09 (GitHub #182) — Model Provenance and Daemon Binding
 
-Fixing the recorded model provenance requires `soos-enroll enroll` to default to
-`arcface_w600k_mbf` / `2.0.0`. Two existing contract tests pin the retired behaviour:
+### 7.1 Blocker and user decision
 
-- `crates/enrollment-cli/tests/scaffold_tests.rs::test_cli_parse_enroll_subcommand_with_uid`
-  asserts `enroll.model_id == "mobilefacenet"` and `enroll.model_version == "1.0.0"` for the
-  parsed defaults (lines 34-35).
-- `crates/enrollment-cli/tests/enroll_tests.rs` passes `"mobilefacenet"` explicitly and asserts it
-  is recorded verbatim (compatible with an override-only design).
+Recording the loaded model requires `soos-enroll enroll` to default to `arcface_w600k_mbf` /
+`2.0.0`, but `crates/enrollment-cli/tests/scaffold_tests.rs::test_cli_parse_enroll_subcommand_with_uid`
+asserted the parsed defaults `"mobilefacenet"` / `"1.0.0"` (lines 34-35). Under the zero test
+weakening rule the work stopped and was reported. **User decision (2026-09-30)**: (1) approved
+changing exactly those two assertions to `MODEL_ID_EMBEDDING` / `EMBEDDING_MODEL_VERSION`, nothing
+else in the test; (2) migration by a legacy alias rather than forced re-enrollment.
+`enroll_tests.rs` (explicit `mobilefacenet` recorded verbatim) is unchanged: explicit values stay
+overrides.
 
-Under the zero test weakening rule the first assertion cannot be changed without an explicit
-decision. The daemon-side refusal of foreign `model_id` templates is also held back: shipping it
-while the CLI still records `mobilefacenet` would lock out every CLI-enrolled user. The complete
-STO-09 implementation (manifest-derived defaults, `EnrollmentSummary::model_overridden` with a
-warning, `pipeline::EMBEDDING_MODEL_ID` and `ConnectionDispatcher::with_expected_embedding_model`
-answering `Unavailable` / `ModelUnavailable`, plus its tests) is kept on the local branch
-`fix/enroll-model-provenance`, where the only failing test is the `scaffold_tests` assertion above.
+### 7.2 Design
+
+- CLI: clap defaults `MODEL_ID_EMBEDDING` and `EMBEDDING_MODEL_VERSION` (`service.rs`, pinned to
+  `models/manifest.toml` by a test); `EnrollmentSummary::model_overridden` and a warning before
+  capture when an override differs from the loaded model.
+- Daemon: `pipeline::EMBEDDING_MODEL_ID` loads the embedding session and is bound through
+  `ConnectionDispatcher::with_expected_embedding_model` in `main.rs`. Dispatcher step 8d calls
+  `pipeline::classify_template_model(loaded, template_id, template_version)`:
+  `Current` is evaluated; `LegacyAlias` (exactly `mobilefacenet` + `1.0.0`, constants
+  `LEGACY_EMBEDDING_MODEL_ALIAS_ID` / `_VERSION`, only against `arcface_w600k_mbf`) is evaluated and
+  logs a re-enrollment warning (ids and UID only, `Debug`-escaped); `Foreign` is answered
+  `Unavailable` / `ModelUnavailable` before any matching. The binding is opt-in on the dispatcher
+  so mock harnesses using struct-literal `PipelineComponents` are unaffected.
+- The alias removal plan is recorded in the ADR (first release after the one shipping this change).
+
+### 7.3 Tests and red evidence
+
+- `crates/enrollment-cli/tests/enroll_model_provenance_tests.rs` (4 tests): manifest-pinned
+  constants, parsed defaults, persisted model of a default enrollment, override flag. Red evidence:
+  unresolved `EMBEDDING_MODEL_VERSION`, missing field `model_overridden`.
+- `crates/daemon/tests/template_model_binding_tests.rs` (9 tests): foreign `mobilefacenet`/`2.0.0`
+  and `facenet_512` refused, matching template and legacy alias reach `Allow`, `mobilefacenet`/`1.0.1`
+  refused, classifier table (case, whitespace, other loaded model), constants, manifest, production
+  wiring. Red evidence: no method `with_expected_embedding_model`, unresolved
+  `pipeline::EMBEDDING_MODEL_ID`, then (alias round) unresolved `classify_template_model`,
+  `TemplateModelBinding`, `LEGACY_EMBEDDING_MODEL_ALIAS_ID`, `LEGACY_EMBEDDING_MODEL_ALIAS_VERSION`.
+- Before the approved assertion change, `scaffold_tests::test_cli_parse_enroll_subcommand_with_uid`
+  failed at line 34 against the new defaults; after it, `scaffold_tests` 6/6.
 
 ## 8. Residual Risks & Follow-ups
 
