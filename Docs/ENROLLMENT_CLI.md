@@ -54,7 +54,12 @@ sudo soos-enroll verify --uid 1000
 - Match verdict: `Allow` (similarity >= threshold) or `Deny`.
 - Match score: Cosine similarity value `[-1.0, 1.0]`.
 - Face count and detection confidence.
-- Presentation Attack Detection (PAD) status.
+- Presentation Attack Detection (PAD) status (GitHub #216, #236): the report carries the PAD outcome class (`pad_result`), the liveness score returned by the PAD model (`pad_score`) and the effective threshold applied to the frame modality (`pad_threshold`, the IR threshold for monochrome frames). The `PAD Anti-Spoof` line reads, for example:
+  - `PASSED (score=0.930, threshold=0.85)` — live presentation;
+  - `SPOOF(score=0.120, threshold=0.85)` — presentation attack: `Deny` verdict with the PAD score, never a generic error;
+  - `IR_GATE_REJECTED(<reason>)` — the fail-closed IR liveness gate rejected a monochrome crop before the PAD model ran (no score);
+  - `NO_FACE`, `MULTIPLE_FACES`, `LOW_CONFIDENCE(<c>)` — PAD did not run.
+  Every non-`Allow` verdict, including a spoof, makes `soos-enroll verify` exit with status 1 after printing the report. The PAD score is a calibration aid only: it is not a secret, and no frame or embedding is printed.
 - Latency breakdown: camera frame capture, neural vision pipeline, cosine matching, total roundtrip.
 
 ### `soos-enroll delete`
