@@ -10,11 +10,11 @@ pub struct ThresholdConfig {
 }
 
 impl ThresholdConfig {
-    /// Default cosine similarity threshold for `MobileFaceNet` feature embeddings.
+    /// Default cosine similarity threshold for the 512D `ArcFace` embeddings.
     ///
-    /// Sourced from Chen et al. (2018), *`MobileFaceNets`: Efficient CNNs for
-    /// Accurate Real-Time Face Verification on Mobile Devices* (arXiv:1804.07573).
-    /// Calibrated for False Accept Rate (FAR) <= 0.1% on standard LFW evaluation.
+    /// The value comes from `MobileFaceNet` literature (Chen et al. 2018, arXiv:1804.07573);
+    /// it has not been recalibrated for the shipped `ArcFace` `ResNet34` model (GitHub #191),
+    /// so it is a conservative default pending measurement on real captures.
     pub const DEFAULT_MATCH_THRESHOLD: f32 = 0.70;
 
     /// Default presentation attack detection (PAD) confidence threshold.

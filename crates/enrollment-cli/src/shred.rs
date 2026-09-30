@@ -1,4 +1,8 @@
-//! Anti-forensic secure erasure for sensitive biometric templates.
+//! Best-effort in-place overwrite of sensitive biometric files before removal.
+//!
+//! Overwriting cannot guarantee physical erasure on copy-on-write or journaling
+//! filesystems, snapshots or flash storage; the real guarantee is encryption at rest
+//! plus key destruction (ADR 2026-09-30, GitHub #179).
 
 use std::fs::OpenOptions;
 use std::io::{Seek, SeekFrom, Write};
@@ -8,8 +12,8 @@ use crate::error::EnrollmentCliError;
 
 const BUFFER_SIZE: usize = 4096;
 
-/// Overwrites file contents on disk with random bytes and zeros before unlinking
-/// to prevent physical data recovery from block storage.
+/// Overwrites file contents with random bytes and zeros before unlinking (best effort;
+/// see the module documentation for what this cannot guarantee).
 pub fn secure_shred_file<P: AsRef<Path>>(path: P) -> Result<(), EnrollmentCliError> {
     let path = path.as_ref();
     if !path.exists() {

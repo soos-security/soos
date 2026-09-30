@@ -337,23 +337,21 @@ impl SoosApp {
                         ));
                     }
                 },
-                PrivilegedOutcome::TemplateDeleted { uid, result } => {
-                    match result {
-                        Ok(()) => {
-                            self.profiles.status_message = Some((
-                            format!("Template for UID {uid} shredded and removed from system store."),
+                PrivilegedOutcome::TemplateDeleted { uid, result } => match result {
+                    Ok(()) => {
+                        self.profiles.status_message = Some((
+                            format!("Template for UID {uid} removed from the system store."),
                             false,
                         ));
-                            self.refresh_profiles();
-                        }
-                        Err(e) => {
-                            self.profiles.status_message = Some((
+                        self.refresh_profiles();
+                    }
+                    Err(e) => {
+                        self.profiles.status_message = Some((
                             format!("Failed to delete template for UID {uid} from system store via Polkit: {e}"),
                             true,
                         ));
-                        }
                     }
-                }
+                },
             }
         }
     }
@@ -1024,15 +1022,24 @@ impl SoosApp {
                             .button("💾 Save & Encrypt Biometric Template")
                             .clicked()
                     {
-                        let fused_opt = if let Ok(session_guard) =
-                            self.worker_input.enrollment_session.lock()
-                        {
-                            session_guard
+                        // A fusion error (inconsistent or invalid samples, GitHub #183) is
+                        // surfaced instead of silently ignoring the Save click.
+                        let fused_opt = match self.worker_input.enrollment_session.lock() {
+                            Ok(session_guard) => match session_guard
                                 .as_ref()
-                                .and_then(|session| session.compute_composite_embedding().ok())
-                                .map(Zeroizing::new)
-                        } else {
-                            None
+                                .map(|session| session.compute_composite_embedding())
+                            {
+                                Some(Ok(embedding)) => Some(Zeroizing::new(embedding)),
+                                Some(Err(e)) => {
+                                    self.enrollment.status_message = Some((
+                                        format!("Cannot build the template: {e}"),
+                                        true,
+                                    ));
+                                    None
+                                }
+                                None => None,
+                            },
+                            Err(_) => None,
                         };
 
                         if let Some(fused_embedding) = fused_opt {
@@ -1043,8 +1050,8 @@ impl SoosApp {
 
                             let res = BiometricTemplate::new(
                                 self.enrollment.target_uid,
-                                "arcface_w600k_mbf".to_string(),
-                                "2.0.0".to_string(),
+                                soos_enrollment_cli::service::MODEL_ID_EMBEDDING.to_string(),
+                                soos_enrollment_cli::service::EMBEDDING_MODEL_VERSION.to_string(),
                                 timestamp,
                                 fused_embedding.clone(),
                             );
@@ -1145,7 +1152,7 @@ impl SoosApp {
         });
         ui.label(
             "Biometric templates stored securely on disk, encrypted with AES-256-GCM. \
-             Deleting a template performs anti-forensic cryptographic shredding.",
+             Deleting a template overwrites and removes it (best effort; see Docs).",
         );
         ui.add_space(10.0);
 
@@ -1189,7 +1196,7 @@ impl SoosApp {
                         ui.label(format!("{}", p.embedding_dim));
 
                         ui.horizontal(|ui| {
-                            if ui.button("🗑 Delete & Shred").clicked() {
+                            if ui.button("🗑 Delete").clicked() {
                                 uid_to_delete = Some(p.uid);
                             }
                         });
@@ -1208,11 +1215,11 @@ impl SoosApp {
                     .resizable(false)
                     .show(ui.ctx(), |ui| {
                         ui.label(format!(
-                            "Are you sure you want to securely shred and delete the biometric template for UID {uid}?"
+                            "Are you sure you want to delete the biometric template for UID {uid}?"
                         ));
                         ui.label("This operation cannot be undone.");
                         ui.horizontal(|ui| {
-                            if ui.button("Yes, Shred Template").clicked() {
+                            if ui.button("Yes, Delete Template").clicked() {
                                 if self.store.uses_polkit() {
                                     // Runs off the UI thread; the outcome arrives in
                                     // `handle_task_outcomes` (GitHub #154).
@@ -1230,15 +1237,11 @@ impl SoosApp {
                                     .ok_or_else(|| "no biometric store is available".to_string())
                                     .and_then(|store| store.delete(uid).map_err(|e| e.to_string()))
                                 {
-                                    self.profiles.status_message = Some((
-                                        format!("Failed to delete template: {e}"),
-                                        true,
-                                    ));
+                                    self.profiles.status_message =
+                                        Some((format!("Failed to delete template: {e}"), true));
                                 } else {
-                                    self.profiles.status_message = Some((
-                                        format!("Template for UID {uid} shredded and removed."),
-                                        false,
-                                    ));
+                                    self.profiles.status_message =
+                                        Some((format!("Template for UID {uid} removed."), false));
                                     self.refresh_profiles();
                                 }
                                 self.profiles.confirm_delete_uid = None;

@@ -46,7 +46,8 @@ pub const MODEL_ID_FACE_DETECTOR: &str = "scrfd_500m_kps";
 /// Attested model registry ID for MiniFASNetV2 presentation attack detector.
 pub const MODEL_ID_PAD: &str = "minifasnet_v2_pad";
 
-/// Attested model registry ID for ArcFace MobileFaceNet w600k 512D feature extractor.
+/// Attested model registry ID of the 512D ArcFace embedding extractor (a tf2onnx ResNet34,
+/// NHWC input; see `models/README.md`, GitHub #191).
 pub const MODEL_ID_EMBEDDING: &str = "arcface_w600k_mbf";
 
 /// Attested `models/manifest.toml` version of the embedding model recorded in enrolled
