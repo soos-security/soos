@@ -132,6 +132,7 @@ Implemented by `OrtPadDetector` (MiniFASNetV2 80×80 BGR) and `MockPadDetector`.
 `OrtPadDetector` incorporates:
 - BGR channel ordering with `pixel / 255.0` normalization into `[0.0, 1.0]`.
 - 80×80 NCHW tensor layout (`[1, 3, 80, 80]`).
+- A crop that is not already 80×80 is resampled bilinearly with half-pixel centres (the `cv2.resize` `INTER_LINEAR` convention, GitHub #213) instead of top-left nearest-neighbour; an 80×80 crop is copied exactly, so the golden logits of `pad_real_model_tests` are unchanged. Evidence: `pad_resample_tests`.
 - Live class index `DEFAULT_MINIFASNET_LIVE_CLASS_INDEX = 1` (MiniFASNetV2 `[PrintPhoto, Live, ScreenReplay]`, `crates/inference-ort/src/pad.rs`). It is the single source of truth: `soos-daemon` (`pipeline::build_pad_detector`), `soos-enroll` (`service::build_pad_detector`) and `soos-gui` construct the detector with `OrtPadDetector::new`. The explicit-index constructors `new_with_class_index` / `with_live_class_index` are test-only; the repository invariant `test_no_pad_live_class_index_override_outside_tests` rejects them in production code (GitHub #146, ADR 2026-09-29).
 - `SharedSession` (`Arc<Mutex<ort::session::Session>>`) is the session handle type returned by `ModelRegistry::get_or_load_session` and accepted by every detector constructor.
 - Softmax probability interpretation into `PadResult` with ordinal non-live attack detection (`PrintPhoto` vs `ScreenReplay`).
@@ -179,7 +180,8 @@ $SOOS_PAD_CORPUS_DIR/
 - Format: binary PPM (`P6`, maxval 255), RGB byte order, edge at most 1024 px. Use neutral file
   names (`s_001.ppm`), never user names.
 - Content: the PAD crop exactly as the vision pipeline produces it (SCRFD box expanded by
-  `pad_bbox_scale` = 2.7 via `expand_bbox_for_pad`, before the 80×80 resize). Capture on the target
+  `pad_bbox_scale` = 2.7 via `soos_vision::crop::pad_crop_window`, the upstream-parity window of
+  GitHub #213, before the 80×80 resize). Capture on the target
   laptop camera across several sessions, lighting conditions and distances.
 - Run: `SOOS_PAD_CORPUS_DIR=/var/lib/soos/pad-corpus cargo test --locked -p soos-inference-ort --test pad_real_model_tests -- --nocapture`.
 - Hard ceilings at the shipped threshold 0.85: APCER at most 5 % per attack species (print, screen),

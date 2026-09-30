@@ -10,11 +10,16 @@ use soos_inference_ort::{
 
 use crate::align::align_face_112;
 use crate::color::convert_to_rgb;
-use crate::crop::{crop_and_resize, expand_bbox_for_pad};
+use crate::crop::crop_pad_context;
 use crate::error::VisionError;
 use crate::ir_liveness::{evaluate_ir_gate, PadInputModality, DEFAULT_IR_PAD_THRESHOLD};
 use crate::matcher::{match_embeddings, MatchResult};
+use crate::pad_fusion::fuse_pad_results;
 use zeroize::{Zeroize, Zeroizing};
+
+/// Maximum number of PAD models in a multi-scale ensemble, primary model included
+/// (GitHub #212). Bounds the per-frame inference cost and crop allocations.
+pub const MAX_PAD_ENSEMBLE_MODELS: usize = 4;
 
 /// Configuration options for the vision verification pipeline.
 #[derive(Debug, Clone, PartialEq)]
@@ -160,6 +165,9 @@ impl Drop for VisionAnalysis {
 pub struct VisionPipeline {
     detector: Arc<dyn FaceDetector>,
     pad: Arc<dyn PadDetector>,
+    /// Additional `(bbox scale, detector)` PAD members fused with the primary model
+    /// (GitHub #212). Empty by default: single-model behaviour.
+    extra_pads: Vec<(f32, Arc<dyn PadDetector>)>,
     extractor: Arc<dyn EmbeddingExtractor>,
     config: VisionPipelineConfig,
 }
@@ -189,9 +197,42 @@ impl VisionPipeline {
         Self {
             detector,
             pad,
+            extra_pads: Vec::new(),
             extractor,
             config,
         }
+    }
+
+    /// Adds a PAD model run on its own context crop at `scale` and fused with the primary
+    /// model (mean live probability, see [`fuse_pad_results`]; GitHub #212).
+    ///
+    /// Upstream Silent-Face-Anti-Spoofing pairs the 2.7-scale MiniFASNetV2 with a 4.0-scale
+    /// MiniFASNetV1SE. Fails with [`VisionError::InvalidPadEnsemble`] when `scale` is not a
+    /// finite positive number or the ensemble would exceed [`MAX_PAD_ENSEMBLE_MODELS`].
+    pub fn with_additional_pad_model(
+        mut self,
+        scale: f32,
+        detector: Arc<dyn PadDetector>,
+    ) -> Result<Self, VisionError> {
+        if !scale.is_finite() || scale <= 0.0 {
+            return Err(VisionError::InvalidPadEnsemble {
+                reason: "PAD crop scale must be finite and positive",
+            });
+        }
+        if self.extra_pads.len().saturating_add(1) >= MAX_PAD_ENSEMBLE_MODELS {
+            return Err(VisionError::InvalidPadEnsemble {
+                reason: "PAD ensemble exceeds MAX_PAD_ENSEMBLE_MODELS",
+            });
+        }
+        self.extra_pads.push((scale, detector));
+        Ok(self)
+    }
+
+    /// Context crop scales of every PAD member, primary (`config.pad_bbox_scale`) first.
+    pub fn pad_scales(&self) -> Vec<f32> {
+        std::iter::once(self.config.pad_bbox_scale)
+            .chain(self.extra_pads.iter().map(|(scale, _)| *scale))
+            .collect()
     }
 
     /// Access the pipeline configuration.
@@ -243,25 +284,13 @@ impl VisionPipeline {
             if let Some(landmarks) = &det.landmarks {
                 pose = Some(crate::pose::estimate_head_pose(landmarks));
 
-                let expanded_bbox = expand_bbox_for_pad(
-                    &det.box_,
-                    self.config.pad_bbox_scale,
-                    frame.width,
-                    frame.height,
-                );
-
-                if let Ok(crop) = crop_and_resize(
+                pad_result = self.analyze_pad(
                     &rgb,
                     frame.width,
                     frame.height,
-                    &expanded_bbox,
-                    self.config.pad_target_width,
-                    self.config.pad_target_height,
-                ) {
-                    let pad_crop = Zeroizing::new(crop);
-                    pad_result =
-                        self.analyze_pad_crop(&pad_crop, PadInputModality::for_frame(frame));
-                }
+                    &det.box_,
+                    PadInputModality::for_frame(frame),
+                );
 
                 if let Ok(aligned) = align_face_112(&rgb, frame.width, frame.height, landmarks) {
                     if let Ok(emb) = self.extractor.extract_embedding(
@@ -290,7 +319,8 @@ impl VisionPipeline {
     /// 1. Color converts to RGB24
     /// 2. Detects faces; enforces single-face security invariant (rejects 0 or >1 faces)
     /// 3. Extracts 5-point facial landmarks from detection
-    /// 4. Crops and resizes 2.7x expanded bounding box to 80x80 for PAD
+    /// 4. Crops the upstream-geometry 2.7x context window (plus any additional multi-scale
+    ///    PAD member scales) and resizes it to 80x80 for PAD
     /// 5. Evaluates Presentation Attack Detection (PAD) liveness; short-circuits on spoof.
     ///    `Grey` frames and every frame from an `Infrared` sensor (whatever its pixel format)
     ///    first pass the fail-closed IR gate and are scored against the stricter IR threshold
@@ -329,24 +359,15 @@ impl VisionPipeline {
 
         let landmarks = detection.landmarks.ok_or(VisionError::MissingLandmarks)?;
 
-        // Step 4: Presentation Attack Detection using 2.7x expanded bounding box context crop
-        let expanded_bbox = expand_bbox_for_pad(
-            &detection.box_,
-            self.config.pad_bbox_scale,
-            frame.width,
-            frame.height,
-        );
-
-        let pad_crop = Zeroizing::new(crop_and_resize(
+        // Step 4: Presentation Attack Detection on upstream-geometry context crops (2.7x
+        // primary, plus any additional multi-scale members), fused and thresholded.
+        let pad_result = self.evaluate_pad(
             &rgb,
             frame.width,
             frame.height,
-            &expanded_bbox,
-            self.config.pad_target_width,
-            self.config.pad_target_height,
-        )?);
-
-        let pad_result = self.evaluate_pad_crop(&pad_crop, PadInputModality::for_frame(frame))?;
+            &detection.box_,
+            PadInputModality::for_frame(frame),
+        )?;
 
         // Step 5: Affine alignment to 112x112 using landmarks for recognition embedding
         let mut aligned_crop_guard = AlignedCropGuard {
@@ -373,34 +394,61 @@ impl VisionPipeline {
         })
     }
 
-    /// Modality-aware PAD decision for a context crop (modality from the frame's pixel format
-    /// and sensor type, see [`PadInputModality::for_frame`]).
+    /// Scores every PAD member on its own context crop and fuses the results.
     ///
-    /// Colour frames: model result must be live and `score >= pad_threshold`.
-    /// Monochrome frames: the IR gate must pass (otherwise the model is not consulted), then
-    /// the model result must be live and reach the effective IR threshold. Every comparison
-    /// rejects non-finite scores or thresholds.
-    fn evaluate_pad_crop(
+    /// Each member gets [`crop_pad_context`] at its scale (upstream geometry, GitHub #213).
+    /// Monochrome frames: the primary crop must first pass the fail-closed IR gate, otherwise
+    /// no PAD model is consulted. Any crop or inference error fails the whole evaluation.
+    fn fused_pad_result(
         &self,
-        pad_crop: &[u8],
+        rgb: &[u8],
+        width: u32,
+        height: u32,
+        face_box: &soos_inference_ort::BoundingBox,
         modality: PadInputModality,
+        threshold: f32,
     ) -> Result<PadResult, VisionError> {
-        if modality.is_monochrome() {
-            evaluate_ir_gate(
-                pad_crop,
-                self.config.pad_target_width,
-                self.config.pad_target_height,
-            )
-            .map_err(|reason| VisionError::IrLivenessGateFailed { reason })?;
+        let target_w = self.config.pad_target_width;
+        let target_h = self.config.pad_target_height;
+        let members = std::iter::once((self.config.pad_bbox_scale, &self.pad))
+            .chain(self.extra_pads.iter().map(|(scale, pad)| (*scale, pad)));
+
+        let mut results = Vec::with_capacity(self.extra_pads.len().saturating_add(1));
+        for (index, (scale, pad)) in members.enumerate() {
+            let crop = Zeroizing::new(crop_pad_context(
+                rgb, width, height, face_box, scale, target_w, target_h,
+            )?);
+            if index == 0 && modality.is_monochrome() {
+                evaluate_ir_gate(&crop, target_w, target_h)
+                    .map_err(|reason| VisionError::IrLivenessGateFailed { reason })?;
+            }
+            results.push(pad.evaluate_liveness(&crop, target_w, target_h)?);
         }
 
-        let pad_result = self.pad.evaluate_liveness(
-            pad_crop,
-            self.config.pad_target_width,
-            self.config.pad_target_height,
-        )?;
+        fuse_pad_results(&results, threshold).ok_or(VisionError::InvalidPadEnsemble {
+            reason: "PAD ensemble has no model",
+        })
+    }
 
+    /// Modality-aware PAD decision (modality from the frame's pixel format and sensor type,
+    /// see [`PadInputModality::for_frame`]).
+    ///
+    /// Colour frames: the fused result must be live and `score >= pad_threshold`.
+    /// Monochrome frames: the IR gate must pass (otherwise the model is not consulted), then
+    /// the fused result must be live and reach the effective IR threshold. Every comparison
+    /// rejects non-finite scores or thresholds.
+    fn evaluate_pad(
+        &self,
+        rgb: &[u8],
+        width: u32,
+        height: u32,
+        face_box: &soos_inference_ort::BoundingBox,
+        modality: PadInputModality,
+    ) -> Result<PadResult, VisionError> {
         let threshold = self.config.effective_pad_threshold(modality);
+        let pad_result =
+            self.fused_pad_result(rgb, width, height, face_box, modality, threshold)?;
+
         // Written so that a NaN score or threshold always rejects (fail-closed).
         let passes =
             pad_result.is_live && pad_result.score.is_finite() && pad_result.score >= threshold;
@@ -415,21 +463,30 @@ impl VisionPipeline {
 
     /// Non-short-circuiting PAD evaluation for GUI analysis.
     ///
-    /// Colour frames report the raw model result. Monochrome frames report a spoof result
+    /// Colour frames report the (fused) model result. Monochrome frames report a spoof result
     /// (`is_live = false`) when the IR gate rejects or the score is below the IR threshold,
     /// so the GUI never shows an IR capture as live when the daemon would reject it.
-    fn analyze_pad_crop(&self, pad_crop: &[u8], modality: PadInputModality) -> Option<PadResult> {
+    fn analyze_pad(
+        &self,
+        rgb: &[u8],
+        width: u32,
+        height: u32,
+        face_box: &soos_inference_ort::BoundingBox,
+        modality: PadInputModality,
+    ) -> Option<PadResult> {
         if !modality.is_monochrome() {
             return self
-                .pad
-                .evaluate_liveness(
-                    pad_crop,
-                    self.config.pad_target_width,
-                    self.config.pad_target_height,
+                .fused_pad_result(
+                    rgb,
+                    width,
+                    height,
+                    face_box,
+                    modality,
+                    self.config.pad_threshold,
                 )
                 .ok();
         }
-        match self.evaluate_pad_crop(pad_crop, modality) {
+        match self.evaluate_pad(rgb, width, height, face_box, modality) {
             Ok(result) => Some(result),
             Err(VisionError::IrLivenessGateFailed { .. }) => {
                 Some(PadResult::spoof(0.0, AttackType::UnknownSpoof))

@@ -18,7 +18,8 @@ crates/vision/
     ├── error.rs        # VisionError enum using thiserror
     ├── color.rs        # Pure Rust color conversion (YUYV, Grey, RGB24, MJPEG)
     ├── align.rs        # 5-point landmark affine alignment to 112x112
-    ├── crop.rs         # Bounding box 2.7x expansion and crop-and-resize for PAD
+    ├── crop.rs         # Upstream-parity PAD context window, crop-and-resize
+    ├── pad_fusion.rs   # Multi-scale PAD fusion (mean live probability)
     ├── letterbox.rs    # Aspect-preserving letterbox padding and coordinate projection
     ├── matcher.rs      # Cosine similarity and template verification
     └── pipeline.rs     # VisionPipeline 3-model orchestrator & single-face invariant
@@ -102,9 +103,9 @@ $$\text{similarity}(a, b) = \frac{a \cdot b}{\|a\|_2 \|b\|_2}$$
    - $> 1$ faces detected $\implies$ returns `Err(VisionError::MultipleFacesDetected { count })`.
 4. Validates face confidence against `min_face_confidence` (default `0.70`).
 5. Extracts 5-point facial landmarks directly from `FaceDetection.landmarks` (fails closed with `VisionError::MissingLandmarks` if absent).
-6. Expands bounding box by `pad_bbox_scale` (2.7×) centered on face, shifting it inward at image borders (`expand_bbox_for_pad`, Minivision shifting algorithm).
-7. Crops and resizes the expanded bounding box to 80×80 for Presentation Attack Detection (`crop_and_resize`).
-8. Evaluates Presentation Attack Detection (`PadDetector`, MiniFASNetV2) and short-circuits on spoof (`VisionError::PadFailed`). The decision is **format-aware** (GitHub #169, see §2.4.1): a `PixelFormat::Grey` frame, or any frame from an `Infrared` sensor, must first pass the fail-closed IR gate (`VisionError::IrLivenessGateFailed`) and is scored against the stricter IR threshold.
+6. Computes the PAD context window at `pad_bbox_scale` (2.7×) with the upstream Silent-Face-Anti-Spoofing geometry (`pad_crop_window`, GitHub #213, §2.6).
+7. Resizes that window to 80×80 with the `cv2.resize` `INTER_LINEAR` half-pixel convention (`crop_pad_context`). Each additional multi-scale PAD member (`with_additional_pad_model`, GitHub #212, §2.4.2) gets its own window at its own scale.
+8. Evaluates Presentation Attack Detection (`PadDetector`, MiniFASNetV2; several members are fused by `fuse_pad_results`) and short-circuits on spoof (`VisionError::PadFailed`). The decision is **format-aware** (GitHub #169, see §2.4.1): a `PixelFormat::Grey` frame, or any frame from an `Infrared` sensor, must first pass the fail-closed IR gate (`VisionError::IrLivenessGateFailed`) and is scored against the stricter IR threshold.
 9. Warps face to normalized 112×112 RGB crop using 5-point landmarks (`align_face_112`).
 10. Extracts L2-normalized 512D biometric embedding (`EmbeddingExtractor`, ArcFace ResNet34, NHWC input).
 11. Compares against enrolled template via `match_embeddings`.
@@ -138,6 +139,27 @@ and `Rgb24`, `Yuyv`, `Nv12`, `Mjpeg` ⇒ `Color`. A monochrome frame never takes
 - IR emitter requirements are documented in `Docs/CAMERA_V4L_CRATE.md` ("IR Sensors and Emitter
   Requirements").
 
+#### 2.4.2 Multi-Scale PAD Fusion (`pad_fusion.rs`, GitHub #212)
+
+Upstream Silent-Face-Anti-Spoofing scores a face with two models on two crops (2.7× MiniFASNetV2 and
+4.0× MiniFASNetV1SE) and averages their softmax vectors. `VisionPipeline::with_additional_pad_model(scale, detector)`
+adds such a member (at most `MAX_PAD_ENSEMBLE_MODELS = 4` models including the primary; the scale must
+be finite and positive, otherwise `VisionError::InvalidPadEnsemble`). `pad_scales()` lists the scales,
+primary first.
+
+- Every member runs on its own `crop_pad_context` window; any crop or inference error fails the frame.
+- `fuse_pad_results`: one member is returned unchanged (single-model behaviour, the default); several
+  members give `score = mean(member scores)` (the mean softmax live probability) and
+  `is_live = score.is_finite() && score >= threshold`. A NaN/inf member or NaN threshold rejects.
+- The threshold is the modality-aware one (`pad_threshold`, or the stricter IR threshold). For
+  monochrome frames the IR gate runs on the primary crop before any model is consulted.
+- `analyze_frame` (GUI) reports the fused result.
+- **Current deployment**: the attested model set holds only MiniFASNetV2, so `soos-daemon`,
+  `soos-enroll` and `soos-gui` still build a single-member pipeline. Wiring the 4.0× MiniFASNetV1SE
+  needs its ONNX export attested in `models/manifest.toml` (SHA-256, I/O shapes) and a threshold
+  re-measurement; it is a follow-up of GitHub #212 (ADR 2026-09-30 "Upstream-Parity PAD Crop
+  Geometry and Multi-Scale Fusion").
+
 ### 2.5 Letterbox Padding & Coordinate Projection (`letterbox.rs`)
 
 Next-generation face detection (SCRFD) operates on uniform 640×640 square inputs. To accommodate arbitrary camera aspect ratios (e.g. 640×480, 1280×720, 1920×1080) without distortion or stretching:
@@ -155,13 +177,33 @@ Next-generation face detection (SCRFD) operates on uniform 640×640 square input
 
 ### 2.6 Bounding Box Expansion & Cropping (`crop.rs`)
 
-MiniFASNetV2 anti-spoofing requires wider facial context than the aligned 112×112 face crop:
-1. `expand_bbox_for_pad(bbox, scale, img_w, img_h) -> BoundingBox`:
+MiniFASNetV2 anti-spoofing requires wider facial context than the aligned 112×112 face crop.
+The PAD model input is built with the **upstream reference geometry** (GitHub #213):
+
+1. `pad_crop_window(bbox, scale, img_w, img_h) -> Option<PadCropWindow>`: transcription of
+   upstream `CropImage._get_new_box` + `CropImage.crop`. With `(x, y, w, h) = (x1, y1, x2 - x1, y2 - y1)`,
+   the scale is capped by `(H - 1) / h` and `(W - 1) / w`, the scaled box is centred on the face,
+   shifted inward against `0` and the **last pixel index** `W - 1` / `H - 1`, corners are truncated
+   like Python `int()` and the slice is inclusive. The requested `f32` scale is snapped to 6 decimals
+   so `2.7` behaves like the Python float `2.7`. Zero frames, non-finite or empty boxes and a
+   non-finite or non-positive scale give `None`.
+2. `crop_pad_context(rgb, img_w, img_h, bbox, scale, target_w, target_h)`: resizes that window with
+   the `cv2.resize` `INTER_LINEAR` convention: `src = (dst + 0.5) * (window / target) - 0.5`, clamped
+   to the window (replicated border), bilinear, round to nearest. A degenerate box gives an
+   all-black crop (scored as a spoof). Golden fixtures produced by
+   `crates/vision/tests/fixtures/pad_crop/generate_golden.py` (NumPy transcription of the upstream
+   crop; OpenCV is not used) are matched within ±1 LSB.
+
+Continuous-coordinate helpers (display overlays and generic crops):
+
+1. `expand_bbox_for_pad(bbox, scale, img_w, img_h) -> BoundingBox` (GUI overlay only):
    - Scales the bounding box from its center by `scale` factor (typically 2.7×); the effective scale is first bounded so that the expanded box never exceeds the image canvas (`min(scale, W / w, H / h)`).
    - When the expanded box crosses an image border it is **shifted inward** (translated, not clipped), matching Minivision `CropImage._get_new_box`, so the PAD crop keeps its context scale and aspect ratio instead of being distorted by independent per-edge clamping. A final clamp to $[0, W]$ × $[0, H]$ only guards floating-point residue.
 2. `crop_and_resize(rgb, img_w, img_h, bbox, target_w, target_h) -> Result<Vec<u8>, VisionError>`:
-   - Resizes the cropped region to target dimensions (e.g. 80×80) using bilinear interpolation.
-   - Any region extending beyond original image boundaries is padded with black (zero).
+   - Resizes the cropped region to target dimensions (e.g. 80×80) using bilinear interpolation with
+     half-pixel centre sampling `x1 + (u + 0.5) * sx - 0.5` (GitHub #213).
+   - Samples within half a pixel of the image replicate the border; regions further out are padded
+     with black (zero).
 
 ---
 

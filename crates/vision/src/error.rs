@@ -76,6 +76,10 @@ pub enum VisionError {
     #[error("IR liveness gate rejected the PAD crop: {reason}")]
     IrLivenessGateFailed { reason: IrGateRejection },
 
+    /// Invalid multi-scale PAD ensemble configuration (GitHub #212).
+    #[error("Invalid PAD ensemble: {reason}")]
+    InvalidPadEnsemble { reason: &'static str },
+
     /// Embedding dimension mismatch during cosine similarity matching.
     #[error("Embedding dimension mismatch: expected {expected}, actual {actual}")]
     DimensionMismatch { expected: usize, actual: usize },
