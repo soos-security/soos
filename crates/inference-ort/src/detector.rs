@@ -774,6 +774,51 @@ impl OrtScrfdDetector {
     }
 }
 
+impl FaceDetector for OrtScrfdDetector {
+    fn detect(
+        &self,
+        rgb: &[u8],
+        width: u32,
+        height: u32,
+    ) -> Result<Vec<FaceDetection>, InferenceError> {
+        let expected_len = (width as usize)
+            .checked_mul(height as usize)
+            .and_then(|px| px.checked_mul(3))
+            .ok_or_else(|| InferenceError::InvalidInput("Image dimensions overflow".to_string()))?;
+
+        if rgb.len() != expected_len {
+            return Err(InferenceError::InvalidBufferSize {
+                expected: expected_len,
+                actual: rgb.len(),
+            });
+        }
+
+        let needed = self
+            .input_size
+            .0
+            .checked_mul(self.input_size.0)
+            .and_then(|plane| plane.checked_mul(3))
+            .ok_or_else(|| InferenceError::InvalidInput("Input size overflows".to_string()))?;
+
+        // The scratch tensor is fully overwritten on every use and wiped after it, so a
+        // poisoned lock (panic in a previous detect) holds no state worth failing over.
+        let mut scratch = self
+            .input_scratch
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if scratch.len() != needed {
+            scratch.zeroize();
+            scratch.resize(needed, 0.0);
+        }
+
+        let result = self.run_and_decode(scratch.as_mut_slice(), rgb, width, height);
+
+        // Wipe the letterboxed frame right after inference; the allocation is kept for reuse.
+        scratch.as_mut_slice().zeroize();
+        result
+    }
+}
+
 impl OrtScrfdDetector {
     /// Letterboxes `rgb` into the reusable scratch tensor, runs the session and decodes the
     /// nine SCRFD outputs directly from the ORT-owned buffers (no copy), which are wiped in
@@ -881,50 +926,5 @@ impl OrtScrfdDetector {
         }
 
         Ok(nms(&candidates, self.iou_threshold))
-    }
-}
-
-impl FaceDetector for OrtScrfdDetector {
-    fn detect(
-        &self,
-        rgb: &[u8],
-        width: u32,
-        height: u32,
-    ) -> Result<Vec<FaceDetection>, InferenceError> {
-        let expected_len = (width as usize)
-            .checked_mul(height as usize)
-            .and_then(|px| px.checked_mul(3))
-            .ok_or_else(|| InferenceError::InvalidInput("Image dimensions overflow".to_string()))?;
-
-        if rgb.len() != expected_len {
-            return Err(InferenceError::InvalidBufferSize {
-                expected: expected_len,
-                actual: rgb.len(),
-            });
-        }
-
-        let needed = self
-            .input_size
-            .0
-            .checked_mul(self.input_size.0)
-            .and_then(|plane| plane.checked_mul(3))
-            .ok_or_else(|| InferenceError::InvalidInput("Input size overflows".to_string()))?;
-
-        // The scratch tensor is fully overwritten on every use and wiped after it, so a
-        // poisoned lock (panic in a previous detect) holds no state worth failing over.
-        let mut scratch = self
-            .input_scratch
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if scratch.len() != needed {
-            scratch.zeroize();
-            scratch.resize(needed, 0.0);
-        }
-
-        let result = self.run_and_decode(scratch.as_mut_slice(), rgb, width, height);
-
-        // Wipe the letterboxed frame right after inference; the allocation is kept for reuse.
-        scratch.as_mut_slice().zeroize();
-        result
     }
 }
