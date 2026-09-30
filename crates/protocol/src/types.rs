@@ -254,6 +254,9 @@ pub struct StatusResponse {
     pub pid: u32,
     /// Daemon uptime in seconds.
     pub uptime_secs: u64,
+    /// Whether `mlockall` pinned the daemon address space into RAM (swap protection,
+    /// GitHub #201). `false` means biometric material may be paged out to swap.
+    pub memory_locked: bool,
 }
 
 /// Video preview frame response returned by the daemon proxy to GUI or diagnostic clients.

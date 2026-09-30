@@ -52,6 +52,7 @@ fn test_204_admin_status_request_frame_is_tagged() {
             is_healthy: true,
             pid: 1,
             uptime_secs: 1,
+            memory_locked: false,
         };
         stream
             .write_all(&encode(&resp).expect("encode"))

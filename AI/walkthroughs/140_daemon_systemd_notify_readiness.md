@@ -86,3 +86,12 @@ Unit check on the development host, with `ExecStart` replaced by `/usr/bin/true`
 `cargo fmt --all -- --check`, `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`,
 `cargo test --locked --workspace --all-targets --all-features --no-fail-fast` and
 `./scripts/candid_review.sh`.
+
+## 7. Follow-up after user decisions (2026-10-01)
+
+The user approved the two test changes listed in §5:
+
+- **#205 (option A):** `DAEMON_DEFAULT_WARMUP_FRAMES` stays `0`. `PipelineConfig::default()` now uses it, so `DaemonConfig::default()` and `DaemonConfig::runtime_default()` agree. `config_tests::test_pipeline_default_sensor_preference_is_prefer_ir` asserts the constant instead of the camera library default `20`.
+- **#201:** `StatusResponse` gains `memory_locked: bool` (appended last), filled from `HealthState::memory_locked()`. The three existing `StatusResponse` literals in `admin-cli` and `protocol` tests gained one field line each. New tests: `crates/daemon/tests/status_memory_locked_tests.rs`. Displaying the flag in `soos-admin status` would need a new field in `DaemonStatusReport`, whose literals live in existing tests; it is left as a follow-up.
+
+Matrix row DHX5 is now ✅ Verified.

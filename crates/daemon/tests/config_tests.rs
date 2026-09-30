@@ -198,8 +198,10 @@ fn test_pipeline_default_sensor_preference_is_prefer_ir() {
         "Daemon pipeline camera config must default to PreferIr"
     );
     assert_eq!(
-        config.pipeline.camera.warmup_frames, 20,
-        "Camera warmup frames must default to 20 per Criterion C5"
+        // One effective daemon default (GitHub #205, user-approved 2026-10-01).
+        config.pipeline.camera.warmup_frames,
+        soos_daemon::config::DAEMON_DEFAULT_WARMUP_FRAMES,
+        "DaemonConfig::default() must use the single daemon warmup_frames default"
     );
 }
 

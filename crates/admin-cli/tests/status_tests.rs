@@ -48,6 +48,7 @@ fn test_status_query_mock_daemon_healthy() {
             is_healthy: true,
             pid: 12345,
             uptime_secs: 120,
+            memory_locked: true,
         };
 
         let encoded = encode(&resp).expect("encode status response");
@@ -89,6 +90,7 @@ fn test_status_query_mock_daemon_component_unready() {
             is_healthy: false,
             pid: 9999,
             uptime_secs: 5,
+            memory_locked: false,
         };
 
         let encoded = encode(&resp).expect("encode status response");
