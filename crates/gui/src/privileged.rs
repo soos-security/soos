@@ -9,7 +9,7 @@
 #![forbid(unsafe_code)]
 
 use std::fmt;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -113,20 +113,75 @@ fn pkexec_status(args: &[&str], what: &str) -> Result<(), String> {
     }
 }
 
+/// Error returned by [`read_bounded`].
+#[derive(Debug, thiserror::Error)]
+pub enum BoundedReadError {
+    /// The source produced more than the allowed number of bytes.
+    #[error("output exceeds {limit} bytes")]
+    Oversized {
+        /// Maximum accepted size in bytes.
+        limit: usize,
+    },
+    /// Reading the source failed.
+    #[error("failed to read output: {0}")]
+    Io(#[from] std::io::Error),
+}
+
+/// Reads `reader` to its end, consuming at most `limit + 1` bytes.
+///
+/// The bound is enforced while reading (the source is wrapped in [`Read::take`]), so an
+/// oversized or never-ending output cannot grow the buffer beyond `limit + 1` bytes.
+///
+/// # Errors
+///
+/// [`BoundedReadError::Oversized`] when more than `limit` bytes are available;
+/// [`BoundedReadError::Io`] when reading fails.
+pub fn read_bounded<R: Read>(reader: R, limit: usize) -> Result<Vec<u8>, BoundedReadError> {
+    let mut buf = Vec::new();
+    let cap = u64::try_from(limit).unwrap_or(u64::MAX).saturating_add(1);
+    reader.take(cap).read_to_end(&mut buf)?;
+    if buf.len() > limit {
+        return Err(BoundedReadError::Oversized { limit });
+    }
+    Ok(buf)
+}
+
 fn list_profiles() -> Result<Vec<EnrolledUserSummary>, String> {
-    let output = Command::new("pkexec")
+    let mut child = Command::new("pkexec")
         .args(["soos-enroll", "list", "--format", "json"])
         .stdin(Stdio::null())
+        .stdout(Stdio::piped())
         .stderr(Stdio::null())
-        .output()
+        .spawn()
         .map_err(|e| format!("Failed to invoke pkexec: {e}"))?;
-    if !output.status.success() {
+    // The bound is enforced while reading (candid review finding 7): the helper's stdout is
+    // never buffered beyond `MAX_PROFILE_LIST_BYTES + 1` bytes.
+    let read = match child.stdout.take() {
+        Some(stdout) => read_bounded(stdout, MAX_PROFILE_LIST_BYTES),
+        None => Err(BoundedReadError::Io(std::io::Error::other(
+            "helper stdout was not captured",
+        ))),
+    };
+    if read.is_err() {
+        // Do not wait for a helper that may still be writing into a pipe nobody reads.
+        let _ = child.kill();
+    }
+    let status = child
+        .wait()
+        .map_err(|e| format!("Failed to wait for pkexec: {e}"))?;
+    let stdout = match read {
+        Ok(bytes) => bytes,
+        Err(BoundedReadError::Oversized { .. }) => {
+            return Err("soos-enroll returned an oversized profile list".to_string());
+        }
+        Err(BoundedReadError::Io(e)) => {
+            return Err(format!("Failed to read the soos-enroll profile list: {e}"));
+        }
+    };
+    if !status.success() {
         return Err("Loading profiles via Polkit was denied or failed".to_string());
     }
-    if output.stdout.len() > MAX_PROFILE_LIST_BYTES {
-        return Err("soos-enroll returned an oversized profile list".to_string());
-    }
-    serde_json::from_slice(&output.stdout)
+    serde_json::from_slice(&stdout)
         .map_err(|_| "soos-enroll returned a malformed profile list".to_string())
 }
 
