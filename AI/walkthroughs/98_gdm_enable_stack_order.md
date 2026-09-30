@@ -139,3 +139,89 @@ Arch, locked faillock account refused with a matching face) remains a manual har
   should be added once those rows are corrected by their owners.
 - `soos-enroll import` is still missing from `Docs/ENROLLMENT_CLI.md` (`debug-vision` and
   `--mock` are documented); left to the GUI import work (GitHub #156), which changes that command.
+
+## 9. Rework — Candid Review 2026-09-30 (Finding 1, MAJOR; Finding 5, SUGGESTION)
+
+**Defect.** `plan_gdm_enable` took as anchor "the first auth rule not on the pre-credential
+allow-list", whatever it was, and only copied delegated gates when that rule delegated. The
+reviewer reproduced two bypasses: `auth required pam_tally2.so ...` before `@include
+common-auth` put the managed block at index 0, in front of the lockout module; `auth optional
+pam_group.so` between `pam_nologin.so` and `@include common-auth` (whose stack runs
+`pam_faillock.so preauth`) put soos in front of `pam_group` without copying the faillock gate.
+
+**Design (ADR "GDM PAM Stack Placement", rules 1, 2 and 5 updated).**
+
+- `pam_stack::CREDENTIAL_MODULES` (documented allow-list): `pam_unix.so`, `pam_sss.so`,
+  `pam_ldap.so`, `pam_krb5.so`, `pam_winbind.so`, `pam_systemd_home.so`, `pam_fprintd.so`.
+  `pam_gnome_keyring.so` is deliberately absent (it verifies nothing). `pam_systemd_home.so` is
+  required: Arch `system-auth` runs it before `pam_unix.so`.
+- Edited file: each auth rule is a delegation or credential module (anchor), a pre-credential
+  rule (soos goes after it, jump check unchanged) or unclassified → `GdmConfig` error naming
+  `'<module>' (control '<control>')`, returned by the pure planner before any write.
+- Delegated scan (`delegated_gates(dir, &lines[anchor..])`): starts at the anchor so that, when a
+  delegated stack ends without a credential module, the rest of the edited file is classified
+  the same way. Per rule: delegation → recurse (≤ 4 levels); credential → stop; plain
+  `required`/`requisite` gate (now also `pam_access`, `pam_listfile`, `pam_securetty`) → copied;
+  `pam_env`/`pam_faildelay` → skipped; anything else (unknown module, conditional or
+  `sufficient`/`optional` gate) → refuse. An absolute or otherwise unresolvable include target
+  and a line continuation in a delegated file now refuse instead of silently ending the scan; a
+  stack reaching no credential module at all refuses. A missing include file still ends the scan
+  (Linux-PAM fails the whole stack then, so soos never runs).
+- Scenario (b) is refused rather than placing soos after `pam_group` with the faillock gate
+  copied: `pam_group` is unclassified, and the rule is "prefer refusal for unknown modules". The
+  administrator resolves it as documented in `Docs/DISTRIBUTION_DEPLOYMENT.md` §2.1 (migrate
+  the module or write the `pam_soos.so` rule by hand, which `enable` never touches).
+- Finding 5: `restore` now opens the backup once with `O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC`,
+  checks regular-file type and size on that descriptor (`fstat`) and reads it through the same
+  descriptor, bounded by `take(MAX_PAM_FILE_BYTES + 1)`; mode and owner come from the same
+  `fstat`. A swap between check and read is not reproducible deterministically in a test; the
+  oversized-backup refusal is pinned by a new test and the existing symlink test still passes.
+
+**Tests (added to `gdm_stack_order_tests.rs`; no existing test changed).** Red evidence before
+the fix: 7 of the 8 new enable tests failed (`enable` succeeded and rewrote the file):
+
+| Test | Contract | Red |
+|---|---|---|
+| `test_gdm_enable_refuses_unclassified_lockout_module_before_include` | scenario (a) refused, file/backup/flag unchanged | failed |
+| `test_gdm_enable_refuses_unclassified_module_before_include_with_faillock` | scenario (b) refused | failed |
+| `test_gdm_enable_refuses_unclassified_module_before_inline_credential` | unknown module before `pam_unix` | failed |
+| `test_gdm_enable_refuses_unclassified_module_inside_delegated_stack` | unknown module in `common-auth` before `pam_unix` | failed |
+| `test_gdm_enable_refuses_conditional_gate_inside_delegated_stack` | `[success=1 ...] pam_succeed_if` in `common-auth` | failed |
+| `test_gdm_enable_refuses_an_unresolvable_include_target` | `auth include /etc/pam.d/common-auth` | failed |
+| `test_gdm_enable_scans_past_a_gate_only_include` | tail of the file scanned after a gate-only include | failed |
+| `test_gdm_enable_accepts_documented_credential_modules_as_anchor` | every credential module is an anchor, inline and delegated | passed (regression guard) |
+| `test_gdm_restore_refuses_an_oversized_backup` | Finding 5 bound on the read descriptor | passed (regression guard) |
+
+Matrix: new rows GSO11, GSO12 (✅ Verified); GSO2, GSO4 and GSO6 wording updated.
+
+## 10. Rework — Minor Findings 2–4 (same review)
+
+- **Finding 2**: `crates/daemon/src/dispatcher.rs` — `is_frame_fresh` has its doc comment back;
+  `evidence_pixel_format` has its own. No behaviour change.
+- **Finding 3**: the crate docs of `soos-enrollment-cli` and `soos-gui` no longer claim
+  "anti-forensic secure erasure"; they state the erasure ADR (best-effort in-place overwrite,
+  encryption at rest + master-key destruction as the guarantee).
+- **Finding 4**: plaintext buffers are pre-sized so they never reallocate while holding
+  secrets; see the test list in section 11.
+
+## 11. Finding 4 — Pre-Sized Plaintext Buffers
+
+A `Vec` that grows by reallocation frees its previous allocation without zeroizing it, even
+when the final buffer is wrapped in `Zeroizing`. Each plaintext producer now reserves its
+buffer once:
+
+| Producer | Change | Test (red → green) |
+|---|---|---|
+| `EvidenceRecord::to_cbor` (`crates/evidence-store/src/snapshot.rs`) | a first `ciborium` pass into a `ByteCounter` sink (stores nothing) measures the exact size; `try_reserve_exact`, then the real encode | `cbor_presize_tests::test_evidence_to_cbor_reserves_the_exact_size_and_never_reallocates` (red: capacity 268 vs length 135) |
+| GUI import JSON (`crates/gui/src/privileged.rs`) | new `embedding_json`: counting `serde_json::to_writer` pass, exact reservation in `Zeroizing<Vec<u8>>`, second `to_writer`; `import_template_with` uses it | `import_json_presize_tests::test_embedding_json_is_presized_exactly_and_roundtrips` (red: capacity 128 vs length 2) |
+| `soos-enroll import` JSON (`crates/enrollment-cli/src/service.rs`) | new `decode_json_embedding`: a `serde` visitor pushes into a `Zeroizing<Vec<f32>>` reserved once at `IMPORT_EMBEDDING_DIM` (now `pub`), counts but never stores extra values, rejects trailing bytes; the dimension check uses the full count, so the error message is unchanged | `import_json_presize_tests::test_import_json_decodes_into_a_buffer_that_never_grows`, `..._counts_but_never_stores_values_beyond_the_dimension` (red: capacity 0/513 vs 512), `..._rejects_non_float_arrays` |
+
+The observable contract is `capacity == len` (exact reservation, no growth), which a
+reallocating implementation cannot satisfy for the tested sizes. The red runs used stubs that
+kept the previous `to_vec` / `from_slice::<Vec<f32>>` behaviour behind the new function
+names. The counting pass costs one extra serialization walk (no copy of the payload); the
+input to `import` is already bounded to `MAX_IMPORT_INPUT_BYTES` (64 KiB) before parsing.
+
+Gate for the rework: `cargo fmt --all -- --check`, `cargo clippy --locked --workspace
+--all-targets --all-features -- -D warnings`, `cargo test --locked --workspace --all-targets
+--all-features --no-fail-fast` and `./scripts/candid_review.sh` all pass.
