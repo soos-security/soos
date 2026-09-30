@@ -9,6 +9,9 @@
 
 #![forbid(unsafe_code)]
 
+#[cfg(all(test, unix))]
+mod installer_contract;
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,
@@ -698,14 +701,21 @@ mod tests {
         let _ = fs::remove_dir_all(&tmp_dir);
         fs::create_dir_all(&tmp_dir).expect("create tmp_dir");
 
+        // Contract migration (GitHub #164 / ONB-06): install.sh now fails closed when
+        // an artifact is missing, so the staging run is given a complete artifact set.
+        let artifact_dir = crate::installer_contract::scratch_dir("install_dirs_artifacts");
+        crate::installer_contract::stage_fixture_artifacts(&artifact_dir);
         let status = std::process::Command::new("bash")
             .arg(&install_sh)
             .arg("--destdir")
             .arg(&tmp_dir)
+            .arg("--artifact-dir")
+            .arg(&artifact_dir)
             .arg("--skip-models")
             .arg("--skip-systemd")
             .status()
             .expect("execute install.sh");
+        let _ = fs::remove_dir_all(&artifact_dir);
 
         assert!(
             status.success(),
@@ -787,14 +797,20 @@ mod tests {
         let _ = fs::remove_dir_all(&tmp_dir);
         fs::create_dir_all(&tmp_dir).expect("create tmp_dir");
 
+        // Contract migration (GitHub #164 / ONB-06): complete artifact set required.
+        let artifact_dir = crate::installer_contract::scratch_dir("install_nokey_artifacts");
+        crate::installer_contract::stage_fixture_artifacts(&artifact_dir);
         let status = std::process::Command::new("bash")
             .arg(&install_sh)
             .arg("--destdir")
             .arg(&tmp_dir)
+            .arg("--artifact-dir")
+            .arg(&artifact_dir)
             .arg("--skip-models")
             .arg("--skip-systemd")
             .status()
             .expect("execute install.sh");
+        let _ = fs::remove_dir_all(&artifact_dir);
         assert!(status.success(), "install.sh --destdir must succeed");
 
         let mut staged_keys = Vec::new();
