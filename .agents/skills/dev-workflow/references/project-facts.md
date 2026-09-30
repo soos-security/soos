@@ -56,7 +56,8 @@ ADR entry in `AI/DECISIONS.md`. Re-check every value below with the listed `grep
 | Match / PAD thresholds | `crates/vision/src/pipeline.rs`, policy | 0.70 / 0.85 |
 | `DEFAULT_MINIFASNET_LIVE_CLASS_INDEX` | `crates/inference-ort/src/pad.rs` | 1 |
 
-Known prose drift: `AGENTS.md`, `AI/ARCHITECTURE.md` and `AI/DECISIONS.md` still say "200–250ms".
+The fixed "200 to 250 ms" PAM deadline wording was removed from the normative documents (ADR 2026-09-30
+"PAM Deadline Derived From Clamped `timeout_ms`", enforced by `tests/invariants/src/pam_deadline_contract.rs`).
 The enforced invariant is **"every blocking PAM operation has an explicit deadline derived from the
 clamped `timeout_ms`; nothing is ever unbounded"**, not the literal 250ms figure. The MiniFASNet live
 class index is 1 everywhere since ADR 2026-09-29 (code, `AI/ARCHITECTURE.md`, matrix ASG1/PLC1–PLC3);
@@ -123,7 +124,15 @@ packaging, install or CI build commands.
 - Walkthroughs: `AI/walkthroughs/NN_snake_case.md`, next number = highest existing + 1
   (`ls AI/walkthroughs | sort -n | tail -1`). Numbers 11 and 54 are duplicated historically — never reuse a number.
 - Verification matrix status marker for new rows: `✅ Verified` (older rows use `☑ Validated`; do not rewrite them).
+  Every backticked citation of a claimed row (`module::test_*`, `test_prefix_*`, `module::*`, repo
+  paths, bare `*.rs`/`*.sh` names) must resolve — enforced by
+  `soos-invariants::matrix_citations::test_matrix_claimed_rows_cite_only_existing_evidence` [104].
+  Put historical names ("renamed from", "never existed") inside an italic `*( ... )*` annotation;
+  a row without evidence is `⬜ Pending (<reason>)`, a replaced row is `⏹ Superseded (<rows>)`.
 - Branch prefixes allowed by `AGENTS.md`: `feat/`, `fix/`, `test/`, `chore/` (not `refactor/` or `docs/`).
 - Every topic branch that implements a backlog issue must be registered in `BRANCH_TO_ISSUE` in
-  `scripts/sync_issue.py` (tooling-only `chore/` branches without a backlog issue are not).
+  `scripts/sync_issue.py` (tooling-only `chore/` branches and GitHub-only review-finding branches
+  without a backlog issue are not). `python3 scripts/sync_issue.py --check` must pass (enforced by
+  `tests/invariants/src/sync_issue_contract.rs`); the soos-gui backlog work is `#51` (formerly a
+  duplicate `#22`) and has no GitHub issue [105].
 - Use repository-relative paths in all docs and skills (never `/home/<user>/...`).

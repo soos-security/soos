@@ -19,6 +19,22 @@ mod pad_contract;
 #[cfg(test)]
 mod distro_matrix;
 
+/// Repository-wide verification-matrix citation invariants (GitHub #187, TCI-04).
+#[cfg(test)]
+mod matrix_citations;
+
+/// Physical validation suite versus the `soos-enroll` CLI (GitHub #186).
+#[cfg(test)]
+mod physical_contract;
+
+/// PAM deadline wording in the normative documents (GitHub #185).
+#[cfg(test)]
+mod pam_deadline_contract;
+
+/// Traceability tooling contract for `scripts/sync_issue.py` (GitHub #188).
+#[cfg(all(test, unix))]
+mod sync_issue_contract;
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,
@@ -610,7 +626,12 @@ mod tests {
         let deb_soos_content = fs::read_to_string(&debian_soos).expect("read debian soos");
         let deb_notify_content = fs::read_to_string(&debian_notify).expect("read debian notify");
 
-        assert!(deb_soos_content.contains("pam_soos.so timeout_ms=250"));
+        assert!(
+            deb_soos_content
+                .lines()
+                .any(is_default_timeout_primary_soos_rule),
+            "Debian soos profile must carry the primary rule relying on the default timeout"
+        );
         assert!(
             deb_soos_content.contains("Priority: 260") || deb_soos_content.contains("Priority: 26")
         );
@@ -629,9 +650,8 @@ mod tests {
         let fedora_content =
             fs::read_to_string(&fedora_system_auth).expect("read fedora system-auth");
 
-        let soos_pos = fedora_content
-            .find("pam_soos.so timeout_ms=250")
-            .expect("soos auth in fedora");
+        let soos_pos =
+            primary_soos_rule_offset(&fedora_content, "packaging/pam/fedora/soos/system-auth");
         let unix_pos = fedora_content
             .find("pam_unix.so")
             .expect("unix auth in fedora");
@@ -660,9 +680,8 @@ mod tests {
         );
 
         let arch_content = fs::read_to_string(&arch_system_auth).expect("read arch system-auth");
-        let arch_soos_pos = arch_content
-            .find("pam_soos.so timeout_ms=250")
-            .expect("soos auth in arch");
+        let arch_soos_pos =
+            primary_soos_rule_offset(&arch_content, "packaging/pam/arch/system-auth");
         let arch_unix_pos = arch_content.find("pam_unix.so").expect("unix auth in arch");
         let arch_fail_pos = arch_content
             .find("pam_soos.so event=password-failed")
@@ -678,7 +697,8 @@ mod tests {
 
         let snippet_content = fs::read_to_string(&arch_snippet).expect("read arch snippet");
         assert!(snippet_content
-            .contains("auth  [success=done default=ignore]  pam_soos.so timeout_ms=250"));
+            .lines()
+            .any(|l| l.starts_with("auth") && is_default_timeout_primary_soos_rule(l)));
         assert!(snippet_content.contains(
             "auth  optional                       pam_soos.so event=password-failed timeout_ms=20"
         ));
@@ -1069,9 +1089,16 @@ mod tests {
             files_section.contains(helper_path),
             "rpm %files must list {helper_path}"
         );
+        // User-approved assertion change (2026-09-30, walkthrough 106): the key must never be
+        // owned by the RPM package, not even as `%ghost`, because RPM deletes owned `%ghost`
+        // files on `rpm -e` (the key then no longer decrypts enrolled templates).
         assert!(
-            files_section.contains("%ghost") && files_section.contains("master.key"),
-            "rpm %files must keep master.key as %ghost (never packaged)"
+            !files_section
+                .lines()
+                .map(str::trim)
+                .filter(|l| !l.starts_with('#'))
+                .any(|l| l.contains("master.key")),
+            "rpm %files must not list master.key in any form (host state, never packaged or owned)"
         );
         assert!(
             pkgbuild.contains("provision-master-key"),
@@ -1425,9 +1452,18 @@ mod tests {
             spec_content.contains("0700") && spec_content.contains("biometrics"),
             "RPM spec must specify 0700 mode for biometrics"
         );
+        // User-approved assertion change (2026-09-30, walkthrough 106): the 0600 key mode is
+        // enforced by the provisioning helper called from %post, not by a %files entry.
+        let helper = fs::read_to_string(root.join("scripts/provision_master_key.sh"))
+            .expect("read scripts/provision_master_key.sh");
         assert!(
-            spec_content.contains("0600") && spec_content.contains("master.key"),
-            "RPM spec must specify 0600 mode for master key"
+            spec_content.contains("provision-master-key")
+                && helper
+                    .lines()
+                    .map(str::trim)
+                    .filter(|l| !l.starts_with('#'))
+                    .any(|l| l.starts_with("chmod 0600") || l == "umask 077"),
+            "RPM %post must provision the master key through the helper that enforces mode 0600"
         );
         assert!(
             spec_content.contains("0750") && spec_content.contains("soos"),
@@ -2254,6 +2290,58 @@ mod tests {
             .unwrap_or_else(|| panic!("{what}: '{needle}' not found"))
     }
 
+    /// `DEFAULT_TIMEOUT_MS` of the PAM module, read from `crates/pam/src/config.rs`
+    /// (GitHub #185: packaged rules rely on the module default instead of a literal).
+    fn pam_default_timeout_ms() -> u64 {
+        let source = fs::read_to_string(workspace_root().join("crates/pam/src/config.rs"))
+            .expect("read crates/pam/src/config.rs");
+        source
+            .lines()
+            .find_map(|l| {
+                l.trim()
+                    .strip_prefix("pub const DEFAULT_TIMEOUT_MS: u64 = ")
+                    .and_then(|v| v.trim_end_matches(';').trim().parse().ok())
+            })
+            .expect("DEFAULT_TIMEOUT_MS must be defined in crates/pam/src/config.rs")
+    }
+
+    /// Whether `line` is the primary soos rule (`[success=done default=ignore] pam_soos.so`,
+    /// whitespace-insensitive, not the password-failed event rule) and relies on the module
+    /// default deadline: no `timeout_ms=` argument, or `timeout_ms=<DEFAULT_TIMEOUT_MS>`
+    /// (GitHub #185, user-approved assertion change 2026-09-30).
+    fn is_default_timeout_primary_soos_rule(line: &str) -> bool {
+        let normalized = line.split_whitespace().collect::<Vec<_>>().join(" ");
+        let Some(module_at) = normalized.find("pam_soos.so") else {
+            return false;
+        };
+        if !normalized[..module_at].contains("[success=done default=ignore]") {
+            return false;
+        }
+        let default_arg = format!("timeout_ms={}", pam_default_timeout_ms());
+        let args: Vec<&str> = normalized[module_at + "pam_soos.so".len()..]
+            .split_whitespace()
+            .collect();
+        !args.iter().any(|a| a.starts_with("event="))
+            && args
+                .iter()
+                .filter(|a| a.starts_with("timeout_ms="))
+                .all(|a| *a == default_arg)
+    }
+
+    /// Byte offset of `pam_soos.so` on the primary soos rule of `content` (see
+    /// [`is_default_timeout_primary_soos_rule`]); panics with `what` when absent.
+    fn primary_soos_rule_offset(content: &str, what: &str) -> usize {
+        let mut offset = 0;
+        for line in content.split_inclusive('\n') {
+            if is_default_timeout_primary_soos_rule(line) {
+                let module_at = line.find("pam_soos.so").expect("rule names pam_soos.so");
+                return offset + module_at;
+            }
+            offset += line.len();
+        }
+        panic!("{what}: no primary `[success=done default=ignore] pam_soos.so` rule relying on the default timeout");
+    }
+
     /// Collects the feature names referenced by authselect conditionals
     /// (`{include if "x"}`, `{if "x":...}`, `{exclude if "x"}`, `{continue if "x"}`).
     fn referenced_features(template: &str) -> std::collections::BTreeSet<String> {
@@ -2370,7 +2458,7 @@ mod tests {
             let ctx = format!("packaging/pam/fedora/soos/{template}");
 
             let preauth = offset_of(&content, "pam_faillock.so preauth silent", &ctx);
-            let soos = offset_of(&content, "pam_soos.so timeout_ms=250", &ctx);
+            let soos = primary_soos_rule_offset(&content, &ctx);
             let unix = offset_of(&content, "pam_unix.so", &ctx);
             let authfail = offset_of(&content, "pam_faillock.so authfail", &ctx);
             let event = offset_of(&content, "pam_soos.so event=password-failed", &ctx);
@@ -2389,9 +2477,9 @@ mod tests {
                 "{ctx}: password-failed event must follow pam_unix"
             );
             assert!(
-                content.lines().any(|l| l.starts_with("auth")
-                    && l.contains("[success=done default=ignore]")
-                    && l.contains("pam_soos.so timeout_ms=250")),
+                content
+                    .lines()
+                    .any(|l| l.starts_with("auth") && is_default_timeout_primary_soos_rule(l)),
                 "{ctx}: pam_soos primary line must be [success=done default=ignore]"
             );
             assert!(

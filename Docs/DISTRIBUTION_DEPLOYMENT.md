@@ -17,7 +17,7 @@ Regardless of distribution, every PAM integration must preserve the universal 3-
 
 ```pam
 # 1. Primary Biometric Check (runs before pam_unix)
-auth  [success=done default=ignore]  pam_soos.so timeout_ms=250
+auth  [success=done default=ignore]  pam_soos.so
 
 # 2. Standard Password Authentication Fallback
 auth  [success=done default=bad]     pam_unix.so try_first_pass
@@ -207,7 +207,7 @@ sudo pam-auth-update --package --enable soos soos-notify
 Resulting `/etc/pam.d/common-auth` (Ubuntu 24.04, verified by `tests/docker/pam_rollback_test.sh`
 D3 and the Docker matrix case T11):
 ```pam
-auth  [success=done default=ignore]  pam_soos.so timeout_ms=250
+auth  [success=done default=ignore]  pam_soos.so
 auth  [success=2 default=ignore]     pam_unix.so nullok try_first_pass
 auth  [default=ignore]               pam_soos.so event=password-failed timeout_ms=20
 auth  requisite                      pam_deny.so
@@ -287,7 +287,7 @@ only when the profile is selected with `with-faillock`:
 auth        required                      pam_faillock.so preauth silent    {include if "with-faillock"}
 
 # Primary facial biometric authentication
-auth        [success=done default=ignore] pam_soos.so timeout_ms=250
+auth        [success=done default=ignore] pam_soos.so
 
 # Standard password fallback
 auth        sufficient                    pam_unix.so nullok
@@ -377,7 +377,7 @@ The `soos` snippet (`packaging/pam/arch/system-auth.snippet`) is placed immediat
 
 ```pam
 # Inserted into /etc/pam.d/system-auth:
-auth  [success=done default=ignore]  pam_soos.so timeout_ms=250
+auth  [success=done default=ignore]  pam_soos.so
 auth  required                       pam_unix.so try_first_pass nullok
 auth  optional                       pam_soos.so event=password-failed timeout_ms=20
 ```

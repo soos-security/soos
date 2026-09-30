@@ -16,7 +16,7 @@
 #   D1. scripts/pam_snapshot.sh snapshot records the pre-install PAM state
 #   D2. `pam-auth-update --package --enable soos soos-notify` succeeds (rc=0)
 #   D3. Generated /etc/pam.d/common-auth order:
-#         pam_soos.so timeout_ms=250 -> pam_unix.so -> pam_soos.so event=password-failed
+#         pam_soos.so (default timeout) -> pam_unix.so -> pam_soos.so event=password-failed
 #         -> pam_deny.so -> pam_permit.so
 #       and the pam_unix success jump lands exactly on pam_permit.so (skips the hook)
 #   D4. With the hook replaced by a pam_exec probe (same position and control):
@@ -273,6 +273,17 @@ auth_index_of() {
     echo "${n}"
 }
 
+# Primary soos rule relying on the module default deadline (GitHub #185).
+SOOS_PRIMARY_RE='\[success=done default=ignore\][[:space:]]+pam_soos\.so([[:space:]]+timeout_ms=1000)?[[:space:]]*$'
+
+# Index of the primary soos rule among the auth lines of file $1 (fails if absent).
+soos_primary_auth_index_of() {
+    local n
+    n="$(auth_lines "$1" | grep -n -E -- "${SOOS_PRIMARY_RE}" | head -n 1 | cut -d: -f1)"
+    [[ -n "${n}" ]] || fail "$1: expected the primary pam_soos.so auth rule (default timeout)"
+    echo "${n}"
+}
+
 # ---------------------------------------------------------------------------
 # Debian / Ubuntu
 # ---------------------------------------------------------------------------
@@ -335,7 +346,7 @@ EOF
     info "D3: generated ${ca}:"
     auth_lines "${ca}" | sed 's/^/        /'
     local soos unix_idx notify deny permit total jump
-    soos="$(auth_index_of "${ca}" "pam_soos.so timeout_ms=250")"
+    soos="$(soos_primary_auth_index_of "${ca}")"
     unix_idx="$(auth_index_of "${ca}" "pam_unix.so")"
     notify="$(auth_index_of "${ca}" "pam_soos.so event=password-failed timeout_ms=20")"
     deny="$(auth_index_of "${ca}" "pam_deny.so")"
@@ -412,7 +423,7 @@ run_fedora() {
     authselect current --raw > /etc/soos/authselect.previous
     authselect select custom/soos with-faillock --force >/dev/null || fail "F1: activation failed"
     authselect check || fail "F1: authselect check failed"
-    grep -q 'pam_soos.so timeout_ms=250' /etc/pam.d/system-auth || fail "F1: soos line not generated"
+    grep -q -E -- "${SOOS_PRIMARY_RE}" /etc/pam.d/system-auth || fail "F1: soos line not generated"
     simulate_gdm_enable
     assert_verify_detects_drift F1 pam.d/system-auth pam.d/password-auth pam.d/gdm-password
     assert_password_auth system-auth

@@ -4,6 +4,6 @@ Priority: 260
 Conflicts:
 Auth-Type: Primary
 Auth:
-	[success=done default=ignore]	pam_soos.so timeout_ms=250
+	[success=done default=ignore]	pam_soos.so
 Auth-Initial:
-	[success=done default=ignore]	pam_soos.so timeout_ms=250
+	[success=done default=ignore]	pam_soos.so

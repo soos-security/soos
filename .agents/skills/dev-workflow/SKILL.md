@@ -49,8 +49,10 @@ or CI-only change, phases 1–4 may be condensed into one written plan, but 5–
   `BRANCH_TO_ISSUE` in `scripts/sync_issue.py`.
 - Branch name from the issue's `> **Branch**:` line; allowed prefixes `feat/ fix/ test/ chore/`.
   `git switch -c <type>/<name> origin/main`.
-- Register `"<type>/<name>": <backlog_id>` in `BRANCH_TO_ISSUE` if absent. Do **not** run
-  `sync_issue.py --auto` now — it checks off every sub-issue of the branch.
+- Register `"<type>/<name>": <backlog_id>` in `BRANCH_TO_ISSUE` if absent and run
+  `python3 scripts/sync_issue.py --check` (offline; rejects duplicate GitHub targets and unknown
+  ids). A branch fixing a GitHub-only issue (review finding, no backlog id) is **not** registered;
+  its commit message carries `Closes #N` instead.
 
 ### Phases 1–4
 Invoke each skill in order and keep their deliverables in the conversation/plan; they feed the
@@ -65,8 +67,11 @@ Phase 6 edits only docs, but they are part of the diff: run `--prepare` + gate a
 if any file changed (docs are reviewed for accuracy and English policy too).
 
 ### Phase 6 — Traceability
-Per the `traceability-agent` skill, then `python3 scripts/sync_issue.py --auto` once all sub-issues
-are complete.
+Per the `traceability-agent` skill: tick each delivered sub-issue explicitly with
+`python3 scripts/sync_issue.py --subissue <X.Y>` **before** the commit, so the `AI/BACKLOG.md` edit
+is part of the pushed diff. `--auto` never ticks anything; `save.sh` runs `--check` and
+`--auto --local-only` before staging and mirrors the committed checkboxes to GitHub after the push
+(`Docs/DEVELOPMENT_WORKFLOW.md` §8).
 
 ### Phase 7 — Release loop
 ```bash

@@ -23,6 +23,11 @@ use soos_vision::{VisionPipeline, VisionPipelineConfig};
 
 #[test]
 fn test_pipeline_latency_budget_under_150ms_p95() {
+    // Wall-clock benchmark: runs only with SOOS_LATENCY_BENCH=1 (dedicated single-threaded CI
+    // step), never gated on a loaded developer machine (GitHub #280, user-approved 2026-09-30).
+    if !latency_bench_enabled() {
+        return;
+    }
     let width = 640;
     let height = 480;
 
@@ -80,4 +85,9 @@ fn test_pipeline_latency_budget_under_150ms_p95() {
         "ACCEPTANCE CRITERION V5 VIOLATION: p95 latency {:?} exceeds 150ms budget!",
         p95
     );
+}
+
+/// Whether wall-clock latency benchmarks are enabled (`SOOS_LATENCY_BENCH=1`, GitHub #280).
+fn latency_bench_enabled() -> bool {
+    std::env::var("SOOS_LATENCY_BENCH").is_ok_and(|v| v == "1")
 }

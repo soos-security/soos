@@ -11,7 +11,7 @@
 #   2. clippy          — cargo clippy -D warnings (all targets, all features)
 #   3. test            — cargo test (unit, integration, invariant suites)
 #   4. security        — cargo-deny (advisories, licenses, sources, bans)
-#   5. pam-integration — Dockerized PAM matrix T1–T12 (after lint)
+#   5. pam-integration — Dockerized PAM matrix T1–T15 (after lint)
 #   6. authselect-profile — Fedora authselect profile activation and rollback
 #                        in fedora:40 (after lint)
 #   6b. pam-rollback   — Debian stack order + byte-for-byte PAM rollback
@@ -20,8 +20,10 @@
 #                        fallback, rollback and package content checks in
 #                        ubuntu:24.04 (after lint)
 #   7. ci-success      — single aggregate status for merge gating
-#   8. distro-pam-matrix — PAM matrix T1–T10 in the Fedora and Arch sandbox
+#   8. distro-pam-matrix — PAM matrix T1–T15 in the Fedora and Arch sandbox
 #                        images (push to main and manual dispatch only)
+#   9. distro-deploy   — Fedora (.rpm, authselect) and Arch (pacman) deployment
+#                        and package harness (push to main and manual dispatch)
 # The PR title convention is checked by pr-title.yml (it must also re-run when
 # a PR is retitled, which would needlessly re-run this whole pipeline).
 #
@@ -166,6 +168,15 @@ jobs:
       - name: cargo test
         run: cargo test --locked --workspace --all-targets --all-features
 
+      # Wall-clock latency benchmarks are gated behind SOOS_LATENCY_BENCH=1 so a loaded
+      # developer machine never fails them; they run here single-threaded (GitHub #280).
+      - name: Latency benchmarks (single-threaded)
+        env:
+          SOOS_LATENCY_BENCH: "1"
+        run: |
+          cargo test --locked --all-features -p soos-vision --test bench_tests -- --test-threads=1
+          cargo test --locked --all-features -p soos-camera-v4l --test shutdown_tests -- --test-threads=1
+
   # ---------------------------------------------------------------------------
   # Job 4: Dependency supply chain audit (also runs daily on schedule)
   # ---------------------------------------------------------------------------
@@ -212,7 +223,7 @@ jobs:
           cache-from: type=gha,scope=pam-sandbox
           cache-to: ${{ github.ref == 'refs/heads/main' && 'type=gha,mode=max,scope=pam-sandbox' || '' }}
 
-      - name: Run PAM integration tests (T1–T10)
+      - name: Run PAM integration tests (T1–T15)
         run: |
           docker run --rm \
             -v "${GITHUB_WORKSPACE}:/workspace" \
@@ -286,7 +297,7 @@ jobs:
             bash /workspace/tests/docker/test_packages.sh
 
   # ---------------------------------------------------------------------------
-  # Job 8: PAM matrix T1–T10 in the Fedora and Arch sandbox images (GitHub #162).
+  # Job 8: PAM matrix T1–T15 in the Fedora and Arch sandbox images (GitHub #162).
   # Each image rebuilds its toolchain and pam_soos.so, so it runs on push to
   # main and on manual dispatch rather than on every pull request; the static
   # half (PAM stacks rebuilt under bash and parsed) runs on every PR in `test`.
@@ -307,10 +318,52 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Run PAM matrix T1–T10 in the distro sandbox
+      - name: Run PAM matrix T1–T15 in the distro sandbox
         env:
           DISTRO: ${{ matrix.distro }}
         run: ./tests/docker/run_matrix.sh "$DISTRO"
+
+  # ---------------------------------------------------------------------------
+  # Job 9: Fedora and Arch deployment paths (GitHub #274, review ONB-10b).
+  # Fedora: release build, RPM built with rpmbuild and installed with rpm -i,
+  # authselect custom/soos activation with pam_faillock preserved, enrollment
+  # through soos-enroll --mock, facial auth, password fallback and rollback
+  # (tests/distro/fedora_rhel_test.sh). Arch: package built by build_arch.sh and
+  # installed with pacman -U, system-auth / screen-locker stacks, enrollment and
+  # pacman rollback (tests/distro/arch_linux_test.sh). Both then run the RPM or
+  # Arch branch of tests/docker/test_packages.sh in the same image and target
+  # volume. Full release builds per image, so push to main and manual dispatch
+  # only; not part of CI Success because it is skipped on pull requests.
+  # ---------------------------------------------------------------------------
+  distro-deploy:
+    name: "Package deployment (${{ matrix.distro }}, Docker)"
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    needs: lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        distro: [fedora, arch]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Deploy the native package, enroll, fall back to password and roll back
+        env:
+          DISTRO: ${{ matrix.distro }}
+        run: ./tests/distro/run_distro_validation.sh "$DISTRO"
+
+      - name: Package content, key isolation and removal (tests/docker/test_packages.sh)
+        env:
+          DISTRO: ${{ matrix.distro }}
+        run: |
+          docker run --rm \
+            -v "${GITHUB_WORKSPACE}:/workspace" \
+            -v "soos-distro-target-${DISTRO}":/workspace/target \
+            "soos-distro-val-${DISTRO}" \
+            bash /workspace/tests/docker/test_packages.sh
 
   # ---------------------------------------------------------------------------
   # Job 7: Aggregate status (single required check for merge gating)

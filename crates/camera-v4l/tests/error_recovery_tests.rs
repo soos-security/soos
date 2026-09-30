@@ -9,9 +9,16 @@
     reason = "Error recovery tests use assertions and unwrap"
 )]
 
+mod common;
+
+use common::{wait_until, SETTLE_TIMEOUT};
 use soos_camera_v4l::{CameraConfigBuilder, CameraError, CameraManager, MockCameraManager};
 use std::thread;
 use std::time::Duration;
+
+/// Minimum dwell after an error injection so that a worker ignoring the error would have
+/// republished a frame before the negative assertion runs (GitHub #280).
+const NEGATIVE_DWELL: Duration = Duration::from_millis(50);
 
 #[test]
 fn test_error_recovery_enodev_without_panic() {
@@ -21,7 +28,7 @@ fn test_error_recovery_enodev_without_panic() {
         .build();
 
     let camera = MockCameraManager::new(config);
-    thread::sleep(Duration::from_millis(50));
+    wait_until(SETTLE_TIMEOUT, || camera.is_ready());
     assert!(camera.is_ready());
 
     // Inject simulated ENODEV (error code 19)
@@ -30,7 +37,10 @@ fn test_error_recovery_enodev_without_panic() {
         message: "No such device".to_string(),
     }));
 
-    thread::sleep(Duration::from_millis(50));
+    thread::sleep(NEGATIVE_DWELL);
+    wait_until(SETTLE_TIMEOUT, || {
+        !camera.is_ready() && camera.latest_frame().is_none()
+    });
 
     // Must not panic, must report not ready (fail-closed)
     assert!(!camera.is_ready(), "Camera must report not ready on ENODEV");
@@ -41,7 +51,9 @@ fn test_error_recovery_enodev_without_panic() {
 
     // Clear error
     camera.set_error(None);
-    thread::sleep(Duration::from_millis(150));
+    wait_until(SETTLE_TIMEOUT, || {
+        camera.is_ready() && camera.latest_frame().is_some()
+    });
 
     assert!(
         camera.is_ready(),
@@ -60,7 +72,7 @@ fn test_error_recovery_ebusy_without_panic() {
         .build();
 
     let camera = MockCameraManager::new(config);
-    thread::sleep(Duration::from_millis(50));
+    wait_until(SETTLE_TIMEOUT, || camera.is_ready());
     assert!(camera.is_ready());
 
     // Inject simulated EBUSY (error code 16)
@@ -69,13 +81,16 @@ fn test_error_recovery_ebusy_without_panic() {
         message: "Device or resource busy".to_string(),
     }));
 
-    thread::sleep(Duration::from_millis(50));
+    thread::sleep(NEGATIVE_DWELL);
+    wait_until(SETTLE_TIMEOUT, || {
+        !camera.is_ready() && camera.latest_frame().is_none()
+    });
     assert!(!camera.is_ready());
     assert!(camera.latest_frame().is_none());
 
     // Clear error
     camera.set_error(None);
-    thread::sleep(Duration::from_millis(150));
+    wait_until(SETTLE_TIMEOUT, || camera.is_ready());
     assert!(camera.is_ready());
 
     camera.stop();
@@ -89,7 +104,7 @@ fn test_error_recovery_eio_without_panic() {
         .build();
 
     let camera = MockCameraManager::new(config);
-    thread::sleep(Duration::from_millis(50));
+    wait_until(SETTLE_TIMEOUT, || camera.is_ready());
     assert!(camera.is_ready());
 
     // Inject simulated EIO (error code 5)
@@ -98,12 +113,13 @@ fn test_error_recovery_eio_without_panic() {
         message: "Input/output error".to_string(),
     }));
 
-    thread::sleep(Duration::from_millis(50));
+    thread::sleep(NEGATIVE_DWELL);
+    wait_until(SETTLE_TIMEOUT, || !camera.is_ready());
     assert!(!camera.is_ready());
 
     // Clear error
     camera.set_error(None);
-    thread::sleep(Duration::from_millis(150));
+    wait_until(SETTLE_TIMEOUT, || camera.is_ready());
     assert!(camera.is_ready());
 
     camera.stop();

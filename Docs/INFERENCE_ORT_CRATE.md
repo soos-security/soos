@@ -188,7 +188,14 @@ $SOOS_PAD_CORPUS_DIR/
 - There is no crop-export tool yet; crops must currently be produced out of band (follow-up).
 
 `tests/physical/adversarial_test.sh --mock` runs the plumbing and real-model targets and prints
-`SIMULATION – no security metrics`; it never reports APCER / BPCER.
+`SIMULATION – no security metrics`; it never reports APCER / BPCER. Without `--mock`, the physical
+session runs as root (`sudo tests/physical/adversarial_test.sh`, after building `soos-enroll` as
+your user), because `soos-enroll` refuses a non-root caller and has no bypass flag. It verifies
+against the provisioned template store (`-b`/`-k` select another one) and refuses to start when
+the target UID is not enrolled. A `verify` call that fails without printing a verdict (camera,
+model or store error) aborts the session with exit 2, so an error is never counted as a
+rejected attack. `tests/invariants/src/physical_contract.rs` checks every `soos-enroll` flag used
+by the physical scripts against the clap definition (GitHub #186).
 
 ---
 

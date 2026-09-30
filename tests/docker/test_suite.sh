@@ -4,13 +4,17 @@
 # =============================================================================
 # Executes the full PAM test matrix inside any supported distribution container:
 #   - T1: Nominal facial auth (daemon Allow -> PAM_SUCCESS, 0 password prompts)
-#   - T2: Daemon timeout > 250ms (PAM_IGNORE -> password fallback succeeds)
-#   - T3: Daemon timeout > 250ms (wrong password rejected)
+#   - T2: Daemon slower than the stack's timeout_ms (PAM_IGNORE -> password
+#         fallback succeeds within timeout_ms + tolerance; the elapsed time is asserted)
+#   - T2b: Same slow daemon, no password: the late Allow never authenticates
+#   - T3: Daemon slower than timeout_ms (wrong password rejected)
 #   - T4: Daemon crash mid-request (PAM_IGNORE -> password fallback succeeds)
 #   - T5: Daemon crash mid-request (wrong password rejected)
-#   - T6: Distribution stack integration (common-auth or system-auth)
+#   - T6: Distribution stack integration (common-auth or system-auth): facial
+#         Allow with 0 prompts, password fallback, wrong password rejected
 #   - T7: Offline daemon (PAM_IGNORE -> password fallback)
-#   - T8: Absent module resilience (PAM stack remains functional)
+#   - T8: Absent module resilience (password accepted, wrong password and
+#         password-less runs rejected)
 #   - T9: Model deployment script integrity (manifest dry-run)
 #   - T10: Panic inside the RELEASE-built .so returns PAM_IGNORE (never aborts
 #          the PAM host process) — review finding PAM-01 / TCI-01 (GitHub #148)
@@ -18,9 +22,20 @@
 #          on a wrong password and none on success — review finding ONB-03 (GitHub #161)
 #   - T12: /etc/soos/gdm.disable disables a `gdm-password` line without a
 #          service= argument (PAM_SERVICE item) — review PAM-05 (GitHub #176)
+#   - T13: Verdict::Deny -> PAM_IGNORE -> password fallback (ARCHITECTURE §3)
+#   - T14: Truncated response body -> PAM_IGNORE -> password fallback
+#   - T15: Malformed responses (undecodable verdict, mismatched request_id,
+#          unsupported version, oversized and empty frames; three carry Allow)
+#          -> never an authorization, password fallback intact
+# T2, T6, T8 and T13-T15 are review finding TCI-06 (GitHub #189): every case
+# exits non-zero on a failed expectation, none downgrades it to a warning.
 # =============================================================================
 
 set -euo pipefail
+
+# Shared assertions (deadline bound, no-facial-authorization, password fallback).
+# shellcheck source=tests/docker/pam_case_lib.sh
+source "tests/docker/pam_case_lib.sh"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -107,7 +122,7 @@ done
 # /workspace/target with a per-distribution Docker volume.
 SO_PATH="target/release/libpam_soos.so"
 info "Compiling pam_soos in release mode..."
-cargo build --release -p soos-pam
+cargo build --locked --release -p soos-pam
 
 if [[ ! -f "${SO_PATH}" ]]; then
     error "Compiled artifact not found at ${SO_PATH}"
@@ -219,31 +234,67 @@ fi
 cleanup_daemon
 
 # ---------------------------------------------------------------------------
-# T2: Daemon Timeout > 250ms -> Fallback to Password (Sub-issue #13.2)
+# T2: Daemon Slower Than timeout_ms -> Fallback to Password (Sub-issue #13.2, PA2)
 # ---------------------------------------------------------------------------
+# The budget is read from the stack under test, never hard-coded: the mock delay
+# always exceeds timeout_ms + tolerance, so a module that waits for the (late)
+# daemon Allow instead of its own deadline fails the elapsed-time bound.
 echo ""
 info "-------------------------------------------------------------------"
-info "T2: Daemon Timeout > 250ms — Degrades to Password Fallback (PA2)"
+info "T2: Daemon Slower Than timeout_ms — Degrades to Password Within the Deadline (PA2)"
 info "-------------------------------------------------------------------"
 cleanup_daemon
-start_mock_daemon --mode timeout --delay 0.5
+T2_TIMEOUT_MS="$(pam_stack_timeout_ms /etc/pam.d/test-soos)"
+T2_DELAY_MS="$(timeout_mock_delay_ms "${T2_TIMEOUT_MS}")"
+T2_DELAY_S="$(printf '%d.%03d' $((T2_DELAY_MS / 1000)) $((T2_DELAY_MS % 1000)))"
+info "T2: test-soos timeout_ms=${T2_TIMEOUT_MS}; mock daemon answers Allow after ${T2_DELAY_MS} ms."
+start_mock_daemon --mode timeout --delay "${T2_DELAY_S}"
 
-START_TS=$(date +%s%N)
+T2_START_MS="$(now_ms)"
 if /usr/local/bin/pam_test_runner test-soos testuser password123; then
-    END_TS=$(date +%s%N)
-    DIFF_MS=$(( (END_TS - START_TS) / 1000000 ))
-    success "T2 passed: Timeout triggered PAM_IGNORE and password fallback succeeded in ${DIFF_MS}ms."
+    T2_ELAPSED_MS=$(( $(now_ms) - T2_START_MS ))
 else
     error "T2 failed: Valid password was rejected during daemon timeout."
     exit 1
 fi
+if ! assert_elapsed_within_deadline "T2" "${T2_ELAPSED_MS}" "${T2_TIMEOUT_MS}"; then
+    error "T2 failed: the timeout did not bound the PAM run."
+    exit 1
+fi
+success "T2 passed: Timeout triggered PAM_IGNORE and password fallback succeeded in ${T2_ELAPSED_MS}ms."
 
 # ---------------------------------------------------------------------------
-# T3: Daemon Timeout > 250ms with Invalid Password (Rejected)
+# T2b: Late Allow Never Authenticates (no password, same slow daemon)
 # ---------------------------------------------------------------------------
 echo ""
 info "-------------------------------------------------------------------"
-info "T3: Daemon Timeout > 250ms — Invalid Password Must Fail"
+info "T2b: Daemon Slower Than timeout_ms — Late Allow Is Never Honored"
+info "-------------------------------------------------------------------"
+# pam_unix applies a ~2 s failure delay to a refused prompt; T2b runs a copy of
+# test-soos whose pam_unix line carries `nodelay`, so the elapsed time of the
+# failed run measures the module's deadline alone.
+T2B_SERVICE="test-soos-nodelay"
+sed -E 's/^([[:space:]]*auth[[:space:]].*pam_unix\.so)(.*)$/\1\2 nodelay/' \
+    /etc/pam.d/test-soos > "/etc/pam.d/${T2B_SERVICE}"
+T2B_START_MS="$(now_ms)"
+if ! assert_no_facial_authorization test-soos-nodelay "T2b"; then
+    error "T2b failed: a verdict delivered after the deadline authenticated the user!"
+    exit 1
+fi
+T2B_ELAPSED_MS=$(( $(now_ms) - T2B_START_MS ))
+if ! assert_elapsed_within_deadline "T2b" "${T2B_ELAPSED_MS}" "${T2_TIMEOUT_MS}"; then
+    error "T2b failed: the timeout did not bound the password-less PAM run."
+    exit 1
+fi
+rm -f "/etc/pam.d/${T2B_SERVICE}"
+success "T2b passed: the late Allow was ignored (run took ${T2B_ELAPSED_MS}ms)."
+
+# ---------------------------------------------------------------------------
+# T3: Daemon Slower Than timeout_ms with Invalid Password (Rejected)
+# ---------------------------------------------------------------------------
+echo ""
+info "-------------------------------------------------------------------"
+info "T3: Daemon Slower Than timeout_ms — Invalid Password Must Fail"
 info "-------------------------------------------------------------------"
 if /usr/local/bin/pam_test_runner test-soos testuser wrong_password 2>/dev/null; then
     error "T3 failed: Invalid password was unexpectedly accepted during timeout!"
@@ -307,40 +358,49 @@ cleanup_daemon
 # ---------------------------------------------------------------------------
 # T6: Distribution PAM Stack Integration (Sub-issues #13.4, #13.5, #13.6)
 # ---------------------------------------------------------------------------
+# Every supported image ships common-auth (Debian/Ubuntu) or system-auth
+# (Fedora, Arch) with the pam_soos.so line; each expectation is a hard failure
+# (GitHub #189: this case used to end in a warning and could never fail).
 echo ""
 info "-------------------------------------------------------------------"
 info "T6: Distribution Stack Integration (common-auth / system-auth)"
 info "-------------------------------------------------------------------"
-# Determine which distribution stack file exists
 DISTRO_SERVICE=""
-if [[ -f "/etc/pam.d/common-auth" ]]; then
-    DISTRO_SERVICE="common-auth"
-elif [[ -f "/etc/pam.d/system-auth" ]]; then
-    DISTRO_SERVICE="system-auth"
+for candidate in common-auth system-auth; do
+    if [[ -f "/etc/pam.d/${candidate}" ]] && grep -q 'pam_soos.so' "/etc/pam.d/${candidate}"; then
+        DISTRO_SERVICE="${candidate}"
+        break
+    fi
+done
+if [[ -z "${DISTRO_SERVICE}" ]]; then
+    error "T6 failed: no common-auth or system-auth stack with pam_soos.so in this image."
+    exit 1
 fi
+info "Testing native distro stack service: ${DISTRO_SERVICE}"
 
-if [[ -n "${DISTRO_SERVICE}" ]]; then
-    info "Testing native distro stack service: ${DISTRO_SERVICE}"
-    # Test nominal auth on distro stack
-    start_mock_daemon --mode allow
-
-    if /usr/local/bin/pam_test_runner "${DISTRO_SERVICE}" testuser; then
-        success "T6 passed: Distro stack (${DISTRO_SERVICE}) authenticated via facial verification."
-    else
-        warn "T6: Distro stack (${DISTRO_SERVICE}) non-interactive prompt differed; verifying password fallback..."
-    fi
-    cleanup_daemon
-
-    # Test password fallback on distro stack
-    if /usr/local/bin/pam_test_runner "${DISTRO_SERVICE}" testuser password123; then
-        success "T6 passed: Distro stack (${DISTRO_SERVICE}) password fallback verified."
-    else
-        error "T6 failed: Distro stack (${DISTRO_SERVICE}) rejected valid password."
-        exit 1
-    fi
+# Facial Allow on the distribution stack: PAM_SUCCESS with 0 password prompts.
+cleanup_daemon
+start_mock_daemon --mode allow
+if /usr/local/bin/pam_test_runner "${DISTRO_SERVICE}" testuser; then
+    success "T6 passed: Distro stack (${DISTRO_SERVICE}) authenticated via facial verification (0 prompts)."
 else
-    warn "No common-auth or system-auth detected; skipping distro service check."
+    error "T6 failed: Distro stack (${DISTRO_SERVICE}) did not honor the daemon Allow without a password prompt."
+    exit 1
 fi
+cleanup_daemon
+
+# Daemon offline: the valid password is accepted, a wrong password is rejected.
+if /usr/local/bin/pam_test_runner "${DISTRO_SERVICE}" testuser password123; then
+    success "T6 passed: Distro stack (${DISTRO_SERVICE}) password fallback verified."
+else
+    error "T6 failed: Distro stack (${DISTRO_SERVICE}) rejected valid password."
+    exit 1
+fi
+if /usr/local/bin/pam_test_runner "${DISTRO_SERVICE}" testuser wrong_password 2>/dev/null; then
+    error "T6 failed: Distro stack (${DISTRO_SERVICE}) accepted a wrong password!"
+    exit 1
+fi
+success "T6 passed: Distro stack (${DISTRO_SERVICE}) rejected a wrong password."
 
 # ---------------------------------------------------------------------------
 # T7: Offline Daemon / Socket Absent (Invariant 5)
@@ -361,18 +421,43 @@ fi
 # ---------------------------------------------------------------------------
 # T8: Module Absent Resilience
 # ---------------------------------------------------------------------------
+# With pam_soos.so missing from disk, libpam reports the line as an unknown
+# module; `default=ignore` must skip it so the password stack keeps working,
+# and nothing may authenticate without a password. Hard failures (GitHub #189).
 echo ""
 info "-------------------------------------------------------------------"
 info "T8: Absent Module Resilience (PAM Stack Continues to Function)"
 info "-------------------------------------------------------------------"
+cleanup_daemon
+restore_pam_module() {
+    if [[ -f "${PAM_MOD_DIR}/pam_soos.so.bak" ]]; then
+        mv "${PAM_MOD_DIR}/pam_soos.so.bak" "${PAM_MOD_DIR}/pam_soos.so"
+    fi
+}
 mv "${PAM_MOD_DIR}/pam_soos.so" "${PAM_MOD_DIR}/pam_soos.so.bak"
+# A daemon answering Allow proves the missing module is not bypassed somehow.
+start_mock_daemon --mode allow
 
 if /usr/local/bin/pam_test_runner test-soos testuser password123; then
     success "T8 passed: PAM stack remains fully functional with absent module."
 else
-    warn "T8: Stack failed without module."
+    error "T8 failed: valid password rejected while pam_soos.so is absent."
+    restore_pam_module
+    exit 1
 fi
-mv "${PAM_MOD_DIR}/pam_soos.so.bak" "${PAM_MOD_DIR}/pam_soos.so"
+if /usr/local/bin/pam_test_runner test-soos testuser wrong_password 2>/dev/null; then
+    error "T8 failed: wrong password accepted while pam_soos.so is absent!"
+    restore_pam_module
+    exit 1
+fi
+success "T8 passed: wrong password rejected with absent module."
+if ! assert_no_facial_authorization test-soos "T8"; then
+    error "T8 failed: authenticated without a password while pam_soos.so is absent!"
+    restore_pam_module
+    exit 1
+fi
+cleanup_daemon
+restore_pam_module
 
 # ---------------------------------------------------------------------------
 # T9: Model Deployment Script Integrity & Manifest Validation (Sub-issue #18.4)
@@ -408,7 +493,7 @@ cleanup_daemon
 cleanup_fault_injection
 
 info "Compiling fault-injection variant of pam_soos (release profile)..."
-cargo build --release -p soos-pam --features fault-injection --target-dir target/fault-injection
+cargo build --locked --release -p soos-pam --features fault-injection --target-dir target/fault-injection
 if [[ ! -f "${FAULT_SO_PATH}" ]]; then
     error "T10 failed: fault-injection artifact not found at ${FAULT_SO_PATH}"
     exit 1
@@ -589,6 +674,85 @@ fi
 success "T12 passed: invalid password rejected while GDM facial login is disabled."
 cleanup_daemon
 cleanup_gdm_disable
+
+# ---------------------------------------------------------------------------
+# T13: Verdict::Deny -> PAM_IGNORE -> Password Fallback (ARCHITECTURE §3, #189)
+# ---------------------------------------------------------------------------
+# A Deny is a non-match, not a hard failure of the stack: the module returns
+# PAM_IGNORE so the user can still type a password, and Deny never authenticates.
+echo ""
+info "-------------------------------------------------------------------"
+info "T13: Verdict::Deny — No Facial Authorization, Password Fallback"
+info "-------------------------------------------------------------------"
+cleanup_daemon
+start_mock_daemon --mode deny
+if ! assert_no_facial_authorization test-soos "T13"; then
+    error "T13 failed: Verdict::Deny authenticated the user!"
+    exit 1
+fi
+if ! assert_password_fallback test-soos "T13"; then
+    error "T13 failed: password fallback broken after Verdict::Deny."
+    exit 1
+fi
+success "T13 passed: Verdict::Deny degraded to PAM_IGNORE and the password stack."
+cleanup_daemon
+
+# ---------------------------------------------------------------------------
+# T14: Truncated Response Body -> PAM_IGNORE -> Password Fallback (#189)
+# ---------------------------------------------------------------------------
+# The daemon declares a 37-byte response, sends 4 bytes and closes the stream.
+echo ""
+info "-------------------------------------------------------------------"
+info "T14: Truncated Response — No Facial Authorization, Password Fallback"
+info "-------------------------------------------------------------------"
+cleanup_daemon
+start_mock_daemon --mode crash-truncated
+if ! assert_no_facial_authorization test-soos "T14"; then
+    error "T14 failed: a truncated response authenticated the user!"
+    exit 1
+fi
+if ! assert_password_fallback test-soos "T14"; then
+    error "T14 failed: password fallback broken after a truncated response."
+    exit 1
+fi
+success "T14 passed: truncated response degraded to PAM_IGNORE and the password stack."
+cleanup_daemon
+
+# ---------------------------------------------------------------------------
+# T15: Malformed Responses Are Never an Authorization (#189)
+# ---------------------------------------------------------------------------
+# Each mock mode puts one defect on the wire (tests/docker/mock_daemon.py):
+#   malformed         complete frame, undecodable verdict discriminant
+#   wrong-request-id  complete Allow frame answering another request
+#   bad-version       complete Allow frame with protocol version 2
+#   oversized         length prefix above MAX_MESSAGE_SIZE
+#   empty             zero-length frame
+echo ""
+info "-------------------------------------------------------------------"
+info "T15: Malformed Responses — No Facial Authorization, Password Fallback"
+info "-------------------------------------------------------------------"
+for T15_MODE in malformed wrong-request-id bad-version oversized empty; do
+    cleanup_daemon
+    start_mock_daemon --mode "${T15_MODE}"
+    if ! assert_no_facial_authorization test-soos "T15 (${T15_MODE})"; then
+        error "T15 (${T15_MODE}) failed: a malformed response authenticated the user!"
+        exit 1
+    fi
+    if ! /usr/local/bin/pam_test_runner test-soos testuser password123; then
+        error "T15 (${T15_MODE}) failed: valid password rejected after a malformed response."
+        exit 1
+    fi
+    success "T15 (${T15_MODE}) passed: rejected as an authorization, password fallback intact."
+done
+# One wrong-password run is enough to prove the fallback still fails closed after
+# a malformed Allow (each such run costs the ~2 s pam_unix failure delay).
+cleanup_daemon
+start_mock_daemon --mode wrong-request-id
+if ! assert_password_fallback test-soos "T15 (wrong-request-id)"; then
+    error "T15 failed: password fallback broken after a mismatched request_id Allow."
+    exit 1
+fi
+cleanup_daemon
 
 echo ""
 echo "==================================================================="

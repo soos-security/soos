@@ -7,6 +7,11 @@
 #
 # Usage:
 #   bash tests/docker/test_packages.sh
+#
+# CI: job `package-deploy` (ubuntu, every pull request) and job `distro-deploy`
+# (fedora RPM and arch pacman branches, push to main and manual dispatch) run it
+# in the image and target volume of tests/distro/run_distro_validation.sh.
+# Fails closed: missing packaging tools or an unknown distribution is an error.
 # =============================================================================
 
 set -euo pipefail
@@ -41,7 +46,7 @@ info "Detected container distribution: ${DISTRO}"
 # Ensure release binaries exist
 if [[ ! -f "target/release/soos-daemon" || ! -f "target/release/libpam_soos.so" ]]; then
     info "Compiling release binaries..."
-    cargo build --release --workspace
+    cargo build --locked --release --workspace
 fi
 
 verify_installation() {
@@ -169,12 +174,13 @@ case "${DISTRO}" in
     fedora|rhel|centos)
         info "Running Fedora / RHEL (.rpm) package verification..."
         if ! command -v rpmbuild >/dev/null 2>&1; then
-            warn "rpmbuild not available, skipping RPM test in this container."
-            exit 0
+            error "rpmbuild is not available: the RPM branch cannot be verified in this container."
+            exit 1
         fi
         bash scripts/build_rpm.sh --skip-build
 
-        RPM_FILE=$(ls -t target/packages/soos-*.rpm | head -n 1)
+        # soos-[0-9]*: the main package, never soos-debuginfo / soos-debugsource.
+        RPM_FILE=$(ls -t target/packages/soos-[0-9]*.rpm | head -n 1)
         # --noghost: %ghost entries are metadata only and carry no payload.
         verify_package_has_no_key_material "${RPM_FILE}" rpm -qlp --noghost "${RPM_FILE}"
 
@@ -231,8 +237,8 @@ case "${DISTRO}" in
         ;;
 
     *)
-        warn "Unknown distribution '${DISTRO}'. Running generic build_packages dry-run..."
-        bash scripts/build_packages.sh --dry-run
+        error "Unsupported distribution '${DISTRO}': no native package path to verify."
+        exit 1
         ;;
 esac
 
