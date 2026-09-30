@@ -11,7 +11,7 @@ export DH_VERBOSE = 1
 DEB_HOST_MULTIARCH ?= $(shell dpkg-architecture -qDEB_HOST_MULTIARCH)
 
 override_dh_auto_build:
-	cargo build --release --workspace
+	cargo build --locked --release --workspace
 
 override_dh_auto_install:
 	bash scripts/install.sh \
@@ -25,4 +25,4 @@ override_dh_auto_install:
 
 override_dh_auto_test:
 	# Tests are executed via cargo test in CI
-	cargo test --workspace --no-run || true
+	cargo test --locked --workspace --no-run || true

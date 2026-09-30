@@ -62,15 +62,30 @@ while [[ $# -gt 0 ]]; do
 done
 
 PKG_NAME="soos"
-VERSION="0.1.0"
+# Version and license come from [workspace.package] in Cargo.toml (GitHub #210).
+# shellcheck source=scripts/lib/pkg_meta.sh
+source "${WORKSPACE_ROOT}/scripts/lib/pkg_meta.sh"
+VERSION="$(soos_pkg_version)"
+PKG_LICENSE="$(soos_pkg_license)"
 ARCH=$(uname -m)
 
 echo "=== soos RPM Package Builder ==="
 echo "Package:    ${PKG_NAME}"
 echo "Version:    ${VERSION}"
+echo "License:    ${PKG_LICENSE}"
 echo "Arch:       ${ARCH}"
 echo "Output:     ${OUTPUT_DIR}"
 echo "================================"
+
+# The spec carries literal Version/License fields (rpmbuild reads them before any
+# macro can be injected); refuse to package when they drift from Cargo.toml.
+SPEC_FILE="${WORKSPACE_ROOT}/packaging/rpm/soos.spec"
+SPEC_VERSION="$(awk '/^Version:/ {print $2; exit}' "${SPEC_FILE}")"
+SPEC_LICENSE="$(awk '/^License:/ {sub(/^License:[[:space:]]*/, ""); print; exit}' "${SPEC_FILE}")"
+if [[ "${SPEC_VERSION}" != "${VERSION}" || "${SPEC_LICENSE}" != "${PKG_LICENSE}" ]]; then
+    echo "Error: packaging/rpm/soos.spec (Version ${SPEC_VERSION}, License ${SPEC_LICENSE}) differs from Cargo.toml (${VERSION}, ${PKG_LICENSE})." >&2
+    exit 1
+fi
 
 if [[ "${DRY_RUN}" = true ]]; then
     echo "Dry run complete. Exiting."
@@ -87,7 +102,7 @@ mkdir -p "${OUTPUT_DIR}"
 
 if [[ "${SKIP_BUILD}" = false ]]; then
     echo "[1/4] Compiling workspace crates in release mode..."
-    cargo build --release --workspace
+    cargo build --locked --release --workspace
 fi
 
 RPM_ROOT=$(mktemp -d "/tmp/soos_rpmbuild.XXXXXX")

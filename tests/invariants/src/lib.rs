@@ -35,6 +35,10 @@ mod pam_deadline_contract;
 #[cfg(all(test, unix))]
 mod sync_issue_contract;
 
+/// Onboarding commands and packaging metadata (GitHub #207, #210).
+#[cfg(all(test, unix))]
+mod onboarding_packaging_contract;
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,

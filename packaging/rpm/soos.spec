@@ -3,7 +3,7 @@ Version: 0.1.0
 Release: 1%{?dist}
 Summary: Local facial biometric PAM module and daemon for Linux
 
-License:        Apache-2.0 OR MIT
+License:        AGPL-3.0-or-later
 URL:            https://github.com/Mysticaly622/soos
 Source0:        %{name}-%{version}.tar.gz
 
@@ -21,17 +21,20 @@ BuildRequires:  systemd-rpm-macros
 Requires:       pam
 Requires:       shadow-utils
 Requires:       systemd
+# soos-gui loads its windowing and GL libraries with dlopen(): recommended, not required
+# (same list as scripts/check_build_deps.sh --distro fedora --print-packages gui).
+Recommends:     libxkbcommon libwayland-client libwayland-egl mesa-libEGL mesa-libGL libX11 libXcursor libXi libXrandr
 
 %description
 soos is a zero-trust local facial biometric PAM subsystem for Linux.
-It provides sub-250ms verification latency, warm camera streaming via V4L2,
+It provides deadline-bounded verification, warm camera streaming via V4L2,
 presentation attack detection (PAD), and encrypted vector storage at rest.
 
 %prep
 %setup -q
 
 %build
-cargo build --release --workspace
+cargo build --locked --release --workspace
 
 %install
 rm -rf %{buildroot}
@@ -44,6 +47,7 @@ install -m 0755 scripts/provision_master_key.sh %{buildroot}/usr/libexec/soos/pr
 install -d -m 0755 %{buildroot}%{_bindir}
 install -m 0755 target/release/soos-admin %{buildroot}%{_bindir}/soos-admin
 install -m 0755 target/release/soos-enroll %{buildroot}%{_bindir}/soos-enroll
+install -m 0755 target/release/soos-gui %{buildroot}%{_bindir}/soos-gui
 
 # Install PAM module
 install -d -m 0755 %{buildroot}%{_libdir}/security
@@ -169,6 +173,7 @@ fi
 /usr/libexec/soos/provision-master-key
 %{_bindir}/soos-admin
 %{_bindir}/soos-enroll
+%{_bindir}/soos-gui
 %{_libdir}/security/pam_soos.so
 %{_unitdir}/soos-daemon.service
 %{_sysconfdir}/authselect/custom/soos

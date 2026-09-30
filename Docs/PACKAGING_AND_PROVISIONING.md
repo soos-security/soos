@@ -208,6 +208,27 @@ Distribution packages can be built individually or collectively via the master u
 
 Generated packages are placed in `target/packages/`.
 
+### 7.2.1 Package Metadata Source of Truth (GitHub #210)
+
+| Field | Source | Consumers |
+|---|---|---|
+| Version | `version` in `[workspace.package]` of the root `Cargo.toml` | `scripts/build_deb.sh`, `scripts/build_rpm.sh`, `scripts/build_arch.sh` read it through `scripts/lib/pkg_meta.sh` (`soos_pkg_version`); `packaging/rpm/soos.spec` `Version:` and `packaging/arch/PKGBUILD` `pkgver=` are literals that must equal it |
+| License | `license` in `[workspace.package]` (SPDX `AGPL-3.0-or-later`) | `.PKGINFO` of `build_arch.sh` (`soos_pkg_license`); `soos.spec` `License:` and PKGBUILD `license=()` must equal it |
+
+- `scripts/lib/pkg_meta.sh` parses the manifest statically (no cargo, no network, no Python) and fails
+  closed when the table or the key is missing. It can also be run directly:
+  `bash scripts/lib/pkg_meta.sh [--manifest <Cargo.toml>] <version|license>`.
+- `scripts/build_rpm.sh` refuses to package (exit `1`) when the spec `Version:` / `License:` differ
+  from `Cargo.toml`; `tests/invariants/src/onboarding_packaging_contract.rs` enforces the same equality
+  for the spec and the PKGBUILD on every `cargo test`.
+- Every packaging cargo invocation (`packaging/debian/rules`, `soos.spec` `%build`, PKGBUILD `build()`,
+  `scripts/build_*.sh`) uses `--locked`, so a package is always built from the committed `Cargo.lock`.
+- `soos-gui` ships in all three formats (`.deb` through `install.sh`, `%{_bindir}/soos-gui` in the RPM,
+  `/usr/bin/soos-gui` in the PKGBUILD). Its `dlopen()`ed runtime libraries are `Recommends:` in the
+  `.deb` and the RPM and `optdepends` in the PKGBUILD (lists from `check_build_deps.sh --print-packages gui`).
+- The PKGBUILD has no release tarball yet (`source=()`): run `makepkg` from `packaging/arch/` in a
+  checkout, or point `SOOS_SRC_DIR` at one; `build()` and `package()` `cd` into that tree.
+
 ### 7.3 Security and Filesystem Invariants Enforced by Packages
 
 Every distribution package enforces the following invariant properties during post-installation:
