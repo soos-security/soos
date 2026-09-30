@@ -116,6 +116,59 @@ Implemented by `OrtPadDetector` (MiniFASNetV2 80×80 BGR) and `MockPadDetector`.
 - Softmax probability interpretation into `PadResult` with ordinal non-live attack detection (`PrintPhoto` vs `ScreenReplay`).
 - Immediate deterministic post-inference zeroization of input tensors (`Zeroizing<Vec<f32>>`).
 
+### PAD real-model evidence (`tests/pad_real_model_tests.rs`, GitHub #172)
+
+Every other PAD test runs `MockPadDetector` or an in-memory identity graph, so only this target
+observes the shipped MiniFASNetV2 network. It loads `minifasnet_v2_80x80.onnx` through
+`ModelRegistry` attested against the committed `models/manifest.toml` (a present model with a
+wrong SHA-256 is a hard failure, never a skip) and drives the production `OrtPadDetector`.
+
+| Variable | Default | Effect |
+|---|---|---|
+| `SOOS_MODELS_DIR` | `/var/lib/soos/models` | Models directory. Model tests print `SKIPPED` and pass when the PAD model file is absent (CI runners). |
+| `SOOS_REQUIRE_REAL_MODELS` | unset | `1` turns a missing model into a hard failure (use on a provisioned host). |
+| `SOOS_PAD_CORPUS_DIR` | unset | Enables the corpus APCER / BPCER measurement. Unset: `SKIPPED`. |
+
+Model-only checks (no biometric data, run whenever the model is installed):
+- I/O metadata: input `[N, 3, 80, 80]`, output `[N, 3]` (the installed export reports `N = -1`).
+- Determinism: identical input gives bit-identical, finite logits; softmax sums to 1.
+- Golden logits on three synthetic patterns (uniform grey, gradient, 160×160 checkerboard resized by
+  `prepare_input`), tolerance `1e-3`, argmax pinned. A red/blue channel swap moves the logits by about
+  0.12, far above the tolerance, so a preprocessing regression is caught.
+- `OrtPadDetector::evaluate_liveness` score equals `softmax(logits)[DEFAULT_MINIFASNET_LIVE_CLASS_INDEX]`
+  and the synthetic non-face patterns are never accepted as live at the shipped threshold 0.85
+  (recorded `p_live` about 0.005–0.006, argmax class 2 / ScreenReplay).
+
+These checks do **not** establish APCER / BPCER. Only the corpus test does.
+
+#### Capturing a PAD corpus (outside the repository)
+
+Face crops are biometric data at rest: the corpus lives outside the repository in a root-only
+directory (for example `/var/lib/soos/pad-corpus`, mode `0700`) and must never be added to version
+control. Only derived numbers (the `GOLDEN <class>/<file> argmax=… logits=[…]` lines the test prints)
+may be recorded in the repository.
+
+```
+$SOOS_PAD_CORPUS_DIR/
+├── bona_fide/   # >= 20 genuine live crops (RGB and IR, as the pipeline feeds them to PAD)
+├── print/       # >= 20 printed-photo presentation attacks
+└── screen/      # >= 20 screen / video replay presentation attacks
+```
+
+- Format: binary PPM (`P6`, maxval 255), RGB byte order, edge at most 1024 px. Use neutral file
+  names (`s_001.ppm`), never user names.
+- Content: the PAD crop exactly as the vision pipeline produces it (SCRFD box expanded by
+  `pad_bbox_scale` = 2.7 via `expand_bbox_for_pad`, before the 80×80 resize). Capture on the target
+  laptop camera across several sessions, lighting conditions and distances.
+- Run: `SOOS_PAD_CORPUS_DIR=/var/lib/soos/pad-corpus cargo test --locked -p soos-inference-ort --test pad_real_model_tests -- --nocapture`.
+- Hard ceilings at the shipped threshold 0.85: APCER at most 5 % per attack species (print, screen),
+  BPCER at most 10 %. Fewer than 20 crops in a class fails the test; an empty class counts as a
+  100 % error rate, never as 0 %.
+- There is no crop-export tool yet; crops must currently be produced out of band (follow-up).
+
+`tests/physical/adversarial_test.sh --mock` runs the plumbing and real-model targets and prints
+`SIMULATION – no security metrics`; it never reports APCER / BPCER.
+
 ---
 
 ## Model Acquisition & Deployment
