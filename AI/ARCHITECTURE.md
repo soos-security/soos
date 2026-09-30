@@ -13,7 +13,7 @@ The system is not considered a high-assurance biometric factor until robust Pres
 | Domain | Canonical Choice | Rationale | Prohibited Anti-Patterns |
 |---|---|---|---|
 | PAM/Daemon Boundary | Local Unix Domain Socket (UDS), `SOCK_SEQPACKET` if available, otherwise framed `SOCK_STREAM` | Zero network exposure, ultra-low latency, kernel-enforced peer credentials (`SO_PEERCRED`) | HTTP, loopback TCP, world-writable socket without peer verification |
-| PAM Module Execution | Pure synchronous blocking Rust, `std::os::unix::net::UnixStream`, hard 200–250ms deadline | Critical authentication path must never spawn a persistent async runtime | AI inference, direct camera access, or network downloads inside `.so` |
+| PAM Module Execution | Pure synchronous blocking Rust, `std::os::unix::net::UnixStream`; every blocking PAM operation has an explicit deadline derived from the clamped `timeout_ms` (default 1000 ms, range 10–5000 ms) | Critical authentication path must never spawn a persistent async runtime | AI inference, direct camera access, or network downloads inside `.so` |
 | Privileged Daemon | Rust + Tokio root process, sole owner of `/dev/video*` and ONNX sessions | Keeps camera warm and models in memory; central arbitration | Re-opening `/dev/video0` inside PAM on every authentication attempt |
 | Linux Camera Capture | `v4l` 0.14, MMAP buffers on dedicated worker thread; `nokhwa` only as prototype | Deterministic V4L2 control and predictable zero-copy buffer rotation | Depending on OpenCV or allowing competing camera consumers |
 | Local AI Inference | `ort` (ONNX Runtime) CPU execution provider; **SCRFD 500M KPS** (face detection + 5-point landmarks) + **ArcFace ResNet34** (512D embeddings, manifest id `arcface_w600k_mbf`) + **MiniFASNetV2** (anti-spoofing) | Fast 3-model pipeline with unified detection+landmarks, battle-tested ORT runtime, no OpenCV required | Claiming "pure Rust" (ORT is native C/C++); unverified weight downloads; separate landmark model (absorbed into SCRFD) |
@@ -48,7 +48,7 @@ Local unprivileged users, processes running under an attacker UID, rogue IPC soc
 
 ```text
 PAM Caller (gdm, swaylock, hyprlock, sudo, login)
-  │ pam_soos.so — synchronous path, 250ms deadline, zero camera access
+  │ pam_soos.so — synchronous path, deadline from clamped timeout_ms, zero camera access
   │ connect + AuthAttempt request (UID authoritatively checked by SO_PEERCRED)
   ▼
 /run/soos/daemon.sock ── Local UDS ── soos-daemon (root, Tokio)
@@ -117,7 +117,7 @@ Event v1:    version | kind=PASSWORD_FAILED | request_id[32] |
 
 ### Async Boundaries (Tokio vs. PAM)
 - **Privileged Daemon**: Runs Tokio for IPC connection dispatching. Capture runs on the dedicated `soos-v4l-capture` thread; vision inference runs on the Tokio blocking pool (`spawn_blocking`) behind the `InferenceGate` semaphore (`MAX_CONCURRENT_INFERENCES` = 1, `crates/daemon/src/inference.rs`), so Tokio workers, the accept loop and Status requests never block on inference (GitHub #158). Each authentication request computes one `RequestDeadline` (client deadline and outer `connection_timeout`, each minus the 50ms `RESPONSE_WRITE_MARGIN_MS`) and never starts an inference whose measured estimate exceeds the remaining budget (GitHub #159).
-- **PAM Module**: **Strictly forbidden from starting Tokio**. Uses `std::os::unix::net::UnixStream` with synchronous read/write timeouts totaling 200–250ms. Immediately closes socket after response.
+- **PAM Module**: **Strictly forbidden from starting Tokio**. Uses `std::os::unix::net::UnixStream`; every blocking PAM operation has an explicit deadline derived from the clamped `timeout_ms` (`DEFAULT_TIMEOUT_MS` = 1000, clamped to 10–5000 ms): connect, request write and verdict read share one cumulative deadline, and the `event=password-failed` notification uses its own `timeout_ms=20`. Immediately closes socket after response. Packaged console/sudo stacks rely on the module default (ADR 2026-09-30 "PAM Deadline Derived From Clamped `timeout_ms`"); GDM uses `timeout_ms=2500`.
 
 ---
 

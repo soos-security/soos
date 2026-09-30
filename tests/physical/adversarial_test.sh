@@ -17,11 +17,21 @@
 #   tests/physical/adversarial_test.sh [OPTIONS]
 #
 # Options:
-#   -d, --device <PATH>     Camera device node (e.g. /dev/video0 or /dev/v4l/by-id/...)
-#   -m, --models-dir <PATH> Directory containing verified ONNX models and manifest.toml
-#   -u, --uid <UID>         Target enrolled user UID to verify against (default: 10001)
-#   --mock                  Simulation only: PAD plumbing + real-model tests, NO security metrics
-#   -h, --help              Print this help message and exit
+#   -d, --device <PATH>         Camera device node (e.g. /dev/video0 or /dev/v4l/by-id/...)
+#   -b, --biometrics-dir <PATH> Provisioned template store (default: the soos-enroll default,
+#                               /var/lib/soos/biometrics)
+#   -k, --key-file <PATH>       Master key of that store (default: /var/lib/soos/master.key)
+#   -m, --models-dir <PATH>     Directory containing verified ONNX models and manifest.toml
+#                               (default: the soos-enroll default, /var/lib/soos/models)
+#   -u, --uid <UID>             Enrolled user UID to verify against (default: SUDO_UID, else current UID)
+#   --mock                      Simulation only: PAD plumbing + real-model tests, NO security metrics
+#   -h, --help                  Print this help message and exit
+#
+# The physical session verifies against an already enrolled template (enroll it first with
+# `sudo soos-enroll enroll --uid <UID>`). soos-enroll requires root (EUID 0), so run the
+# physical session with sudo after building the CLI as your user:
+#   cargo build --release -p soos-enrollment-cli
+#   sudo tests/physical/adversarial_test.sh [OPTIONS]
 # =============================================================================
 
 set -euo pipefail
@@ -57,12 +67,22 @@ Validates the anti-spoofing machine learning model on physical hardware
 against printed photos, smartphone OLED/LCD screens, and video replays.
 
 Options:
-  -d, --device <PATH>     Camera device node (e.g. /dev/video0 or /dev/v4l/by-id/...)
-  -m, --models-dir <PATH> Directory containing verified ONNX models and manifest.toml
-  -u, --uid <UID>         Target enrolled user UID to verify against (default: 10001)
-  --mock                  Simulation only: runs PAD plumbing and real-model tests,
-                          reports NO security metrics (no APCER / BPCER)
-  -h, --help              Print this help message and exit
+  -d, --device <PATH>         Camera device node (e.g. /dev/video0 or /dev/v4l/by-id/...)
+  -b, --biometrics-dir <PATH> Provisioned template store (default: the soos-enroll default,
+                              /var/lib/soos/biometrics)
+  -k, --key-file <PATH>       Master key of that store (default: /var/lib/soos/master.key)
+  -m, --models-dir <PATH>     Directory containing verified ONNX models and manifest.toml
+                              (default: the soos-enroll default, /var/lib/soos/models)
+  -u, --uid <UID>             Enrolled user UID to verify against (default: SUDO_UID, else current UID)
+  --mock                      Simulation only: runs PAD plumbing and real-model tests,
+                              reports NO security metrics (no APCER / BPCER)
+  -h, --help                  Print this help message and exit
+
+The physical session verifies against an already enrolled template: enroll the subject
+first (sudo soos-enroll enroll --uid <UID>). soos-enroll requires root (EUID 0): build it
+as your user, then run the physical session with sudo:
+  cargo build --release -p soos-enrollment-cli
+  sudo tests/physical/adversarial_test.sh [OPTIONS]
 EOF
 }
 
@@ -70,16 +90,25 @@ EOF
 # Default Configuration
 # ---------------------------------------------------------------------------
 CAMERA_DEVICE=""
-MODELS_DIR="models"
-TARGET_UID="${UID:-10001}"
+BIOMETRICS_DIR=""
+KEY_FILE=""
+MODELS_DIR=""
+TARGET_UID="${SUDO_UID:-${UID}}"
 USE_MOCK=false
-TEMP_TEST_DIR=""
 
 # Parse Command-Line Arguments
 while [[ $# -gt 0 ]]; do
     case "$1" in
         -d|--device)
             CAMERA_DEVICE="$2"
+            shift 2
+            ;;
+        -b|--biometrics-dir)
+            BIOMETRICS_DIR="$2"
+            shift 2
+            ;;
+        -k|--key-file)
+            KEY_FILE="$2"
             shift 2
             ;;
         -m|--models-dir)
@@ -113,19 +142,6 @@ echo "==================================================================="
 echo ""
 
 # ---------------------------------------------------------------------------
-# Cleanup Handler
-# ---------------------------------------------------------------------------
-cleanup() {
-    local exit_code=$?
-    if [[ -n "${TEMP_TEST_DIR}" && -d "${TEMP_TEST_DIR}" ]]; then
-        info "Cleaning up temporary test environment: ${TEMP_TEST_DIR}"
-        rm -rf "${TEMP_TEST_DIR}"
-    fi
-    exit "${exit_code}"
-}
-trap cleanup EXIT INT TERM
-
-# ---------------------------------------------------------------------------
 # 1. Hardware Detection
 # ---------------------------------------------------------------------------
 if [[ "${USE_MOCK}" == "false" ]]; then
@@ -145,18 +161,7 @@ if [[ "${USE_MOCK}" == "false" ]]; then
 fi
 
 # ---------------------------------------------------------------------------
-# 2. Environment Setup
-# ---------------------------------------------------------------------------
-TEMP_TEST_DIR="$(mktemp -d /tmp/soos-phys-adv-XXXXXX)"
-chmod 700 "${TEMP_TEST_DIR}"
-BIOMETRICS_DIR="${TEMP_TEST_DIR}/biometrics"
-mkdir -p "${BIOMETRICS_DIR}"
-chmod 700 "${BIOMETRICS_DIR}"
-KEY_FILE="${TEMP_TEST_DIR}/master.key"
-head -c 32 /dev/urandom > "${KEY_FILE}"
-chmod 600 "${KEY_FILE}"
-
-# Test Counters for Metrics Computation
+# 2. Test Counters for Metrics Computation
 ATTACKS_TESTED=0
 ATTACKS_REJECTED=0
 ATTACKS_ACCEPTED=0
@@ -197,8 +202,75 @@ else
     # -----------------------------------------------------------------------
     # Interactive Physical Hardware Presentation Attack Protocol
     # -----------------------------------------------------------------------
+    # soos-enroll checks for EUID 0 before it parses any argument (there is no bypass flag).
+    if [[ "${EUID}" -ne 0 ]]; then
+        error "soos-enroll requires root privileges (EUID 0)."
+        error "Build it as your user, then re-run: sudo tests/physical/adversarial_test.sh [OPTIONS]"
+        exit 1
+    fi
+
+    SOOS_ENROLL_BIN="target/release/soos-enroll"
+    if [[ ! -f "${SOOS_ENROLL_BIN}" ]]; then
+        if [[ -f "target/debug/soos-enroll" ]]; then
+            SOOS_ENROLL_BIN="target/debug/soos-enroll"
+        elif command -v soos-enroll >/dev/null 2>&1; then
+            SOOS_ENROLL_BIN="$(command -v soos-enroll)"
+        else
+            # Never run cargo as root: it would leave root-owned build outputs in target/.
+            error "soos-enroll binary not found. Build it as your user first:"
+            error "  cargo build --release -p soos-enrollment-cli"
+            exit 1
+        fi
+    fi
+    info "Using enrollment binary: ${SOOS_ENROLL_BIN}"
+
+    # Verify against the provisioned store; soos-enroll accepts only absolute paths.
+    CLI_COMMON_FLAGS=()
+    if [[ -n "${BIOMETRICS_DIR}" ]]; then
+        BIOMETRICS_DIR="$(realpath -m -- "${BIOMETRICS_DIR}")"
+        CLI_COMMON_FLAGS+=("--biometrics-dir" "${BIOMETRICS_DIR}")
+    fi
+    if [[ -n "${KEY_FILE}" ]]; then
+        KEY_FILE="$(realpath -m -- "${KEY_FILE}")"
+        CLI_COMMON_FLAGS+=("--key-file" "${KEY_FILE}")
+    fi
+    if [[ -n "${MODELS_DIR}" ]]; then
+        MODELS_DIR="$(realpath -m -- "${MODELS_DIR}")"
+        CLI_COMMON_FLAGS+=("--models-dir" "${MODELS_DIR}")
+    fi
+    if [[ -n "${CAMERA_DEVICE}" ]]; then
+        CLI_COMMON_FLAGS+=("--camera-device" "${CAMERA_DEVICE}")
+    fi
+
+    # An unenrolled UID would make every presentation fail as "not enrolled", which would
+    # read as a perfect APCER and a 100% BPCER. Refuse to measure anything in that case.
+    ENROLLED="$("${SOOS_ENROLL_BIN}" "${CLI_COMMON_FLAGS[@]}" list --format json)"
+    if ! grep -q "\"uid\": ${TARGET_UID}," <<< "${ENROLLED}"; then
+        error "UID ${TARGET_UID} has no enrolled template in the selected store."
+        error "Enroll the subject first: sudo soos-enroll enroll --uid ${TARGET_UID}"
+        exit 1
+    fi
+
+    # Returns 0 for Verdict::Allow and 1 for any other verdict. A CLI failure that prints no
+    # verdict (camera, model or store error) aborts the session, so an operational failure is
+    # never counted as a rejected attack.
+    verify_presentation() {
+        local output
+        local status=0
+        output="$("${SOOS_ENROLL_BIN}" "${CLI_COMMON_FLAGS[@]}" verify --uid "${TARGET_UID}" 2>&1)" || status=$?
+        if [[ "${status}" -eq 0 ]]; then
+            return 0
+        fi
+        if grep -q '^Verdict:' <<< "${output}"; then
+            return 1
+        fi
+        error "soos-enroll verify failed without a verdict (exit ${status}); aborting the session:"
+        echo "${output}" >&2
+        exit 2
+    }
+
     info "Beginning physical presentation attack testing protocol."
-    info "Ensure the enrolled subject's template is provisioned."
+    info "Verifying against the enrolled template of UID ${TARGET_UID}."
 
     # Baseline: Bona Fide (Genuine) Presentation
     echo ""
@@ -208,14 +280,7 @@ else
     echo -n "Please present the genuine enrolled live subject to the camera and press Enter... "
     read -r
     BONA_FIDE_TESTED=$(( BONA_FIDE_TESTED + 1 ))
-    # Verification call
-    if target/release/soos-enroll \
-        --biometrics-dir "${BIOMETRICS_DIR}" \
-        --key-file "${KEY_FILE}" \
-        --models-dir "${MODELS_DIR}" \
-        --camera-device "${CAMERA_DEVICE}" \
-        --skip-root-check \
-        verify --uid "${TARGET_UID}" 2>/dev/null; then
+    if verify_presentation; then
         success "Bona fide presentation recognized as genuine (Verdict::Allow)."
         BONA_FIDE_ACCEPTED=$(( BONA_FIDE_ACCEPTED + 1 ))
     else
@@ -231,13 +296,7 @@ else
     echo -n "Hold a printed high-resolution photo of the subject before the lens and press Enter... "
     read -r
     ATTACKS_TESTED=$(( ATTACKS_TESTED + 1 ))
-    if target/release/soos-enroll \
-        --biometrics-dir "${BIOMETRICS_DIR}" \
-        --key-file "${KEY_FILE}" \
-        --models-dir "${MODELS_DIR}" \
-        --camera-device "${CAMERA_DEVICE}" \
-        --skip-root-check \
-        verify --uid "${TARGET_UID}" 2>/dev/null; then
+    if verify_presentation; then
         error "VULNERABILITY: Printed photo spoof was accepted as genuine!"
         ATTACKS_ACCEPTED=$(( ATTACKS_ACCEPTED + 1 ))
     else
@@ -253,13 +312,7 @@ else
     echo -n "Display a full-screen still photo on a smartphone before the lens and press Enter... "
     read -r
     ATTACKS_TESTED=$(( ATTACKS_TESTED + 1 ))
-    if target/release/soos-enroll \
-        --biometrics-dir "${BIOMETRICS_DIR}" \
-        --key-file "${KEY_FILE}" \
-        --models-dir "${MODELS_DIR}" \
-        --camera-device "${CAMERA_DEVICE}" \
-        --skip-root-check \
-        verify --uid "${TARGET_UID}" 2>/dev/null; then
+    if verify_presentation; then
         error "VULNERABILITY: Smartphone screen spoof was accepted as genuine!"
         ATTACKS_ACCEPTED=$(( ATTACKS_ACCEPTED + 1 ))
     else
@@ -275,13 +328,7 @@ else
     echo -n "Play a recorded video clip of the subject's face on a screen before the lens and press Enter... "
     read -r
     ATTACKS_TESTED=$(( ATTACKS_TESTED + 1 ))
-    if target/release/soos-enroll \
-        --biometrics-dir "${BIOMETRICS_DIR}" \
-        --key-file "${KEY_FILE}" \
-        --models-dir "${MODELS_DIR}" \
-        --camera-device "${CAMERA_DEVICE}" \
-        --skip-root-check \
-        verify --uid "${TARGET_UID}" 2>/dev/null; then
+    if verify_presentation; then
         error "VULNERABILITY: Video replay spoof was accepted as genuine!"
         ATTACKS_ACCEPTED=$(( ATTACKS_ACCEPTED + 1 ))
     else

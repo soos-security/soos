@@ -16,9 +16,15 @@
 #   -b, --biometrics-dir <PATH> Directory for encrypted biometric templates (default: temporary directory)
 #   -k, --key-file <PATH>       Master encryption key path (default: temporary key file)
 #   -m, --models-dir <PATH>     Directory containing verified ONNX models and manifest.toml
-#   -u, --uid <UID>             Target User ID for enrollment testing (default: current UID or 10001)
+#                               (default: the soos-enroll default, /var/lib/soos/models)
+#   -u, --uid <UID>             Target User ID for enrollment testing (default: SUDO_UID, else current UID)
 #   --mock                      Force mock camera simulation mode (for headless/automated CI runs)
 #   -h, --help                  Print this help message and exit
+#
+# soos-enroll refuses to run without root (EUID 0) and accepts only absolute paths, so run
+# this suite with sudo after building the CLI as your user:
+#   cargo build --release -p soos-enrollment-cli
+#   sudo tests/physical/enrollment_test.sh [OPTIONS]
 # =============================================================================
 
 set -euo pipefail
@@ -58,9 +64,14 @@ Options:
   -b, --biometrics-dir <PATH> Directory for encrypted biometric templates (default: temporary directory)
   -k, --key-file <PATH>       Master encryption key path (default: temporary key file)
   -m, --models-dir <PATH>     Directory containing verified ONNX models and manifest.toml
-  -u, --uid <UID>             Target User ID for enrollment testing (default: current UID or 10001)
+                              (default: the soos-enroll default, /var/lib/soos/models)
+  -u, --uid <UID>             Target User ID for enrollment testing (default: SUDO_UID, else current UID)
   --mock                      Force mock camera simulation mode (for headless/automated CI runs)
   -h, --help                  Print this help message and exit
+
+soos-enroll requires root (EUID 0): build it as your user, then run this suite with sudo:
+  cargo build --release -p soos-enrollment-cli
+  sudo tests/physical/enrollment_test.sh [OPTIONS]
 EOF
 }
 
@@ -70,8 +81,8 @@ EOF
 CAMERA_DEVICE=""
 BIOMETRICS_DIR=""
 KEY_FILE=""
-MODELS_DIR="models"
-TARGET_UID="${UID:-10001}"
+MODELS_DIR=""
+TARGET_UID="${SUDO_UID:-${UID}}"
 USE_MOCK=false
 TEMP_TEST_DIR=""
 
@@ -120,6 +131,13 @@ echo "  SOOS — Physical Hardware Enrollment Validation Suite (#31.1)"
 echo "==================================================================="
 echo ""
 
+# soos-enroll checks for EUID 0 before it parses any argument (there is no bypass flag).
+if [[ "${EUID}" -ne 0 ]]; then
+    error "soos-enroll requires root privileges (EUID 0)."
+    error "Build it as your user, then re-run: sudo tests/physical/enrollment_test.sh [OPTIONS]"
+    exit 1
+fi
+
 # ---------------------------------------------------------------------------
 # Cleanup Handler
 # ---------------------------------------------------------------------------
@@ -143,9 +161,10 @@ if [[ ! -f "${SOOS_ENROLL_BIN}" ]]; then
     elif command -v soos-enroll >/dev/null 2>&1; then
         SOOS_ENROLL_BIN="$(command -v soos-enroll)"
     else
-        info "Building soos-enrollment-cli binary in release mode..."
-        cargo build --release -p soos-enrollment-cli
-        SOOS_ENROLL_BIN="target/release/soos-enroll"
+        # Never run cargo as root: it would leave root-owned build outputs in target/.
+        error "soos-enroll binary not found. Build it as your user first:"
+        error "  cargo build --release -p soos-enrollment-cli"
+        exit 1
     fi
 fi
 info "Using enrollment binary: ${SOOS_ENROLL_BIN}"
@@ -203,18 +222,26 @@ if [[ -z "${BIOMETRICS_DIR}" || -z "${KEY_FILE}" ]]; then
     fi
 fi
 
+# soos-enroll validates every path as absolute (no relative components).
+BIOMETRICS_DIR="$(realpath -m -- "${BIOMETRICS_DIR}")"
+KEY_FILE="$(realpath -m -- "${KEY_FILE}")"
+if [[ -n "${MODELS_DIR}" ]]; then
+    MODELS_DIR="$(realpath -m -- "${MODELS_DIR}")"
+fi
+
 info "Biometrics directory: ${BIOMETRICS_DIR}"
 info "Master key file:      ${KEY_FILE}"
-info "Models directory:     ${MODELS_DIR}"
+info "Models directory:     ${MODELS_DIR:-soos-enroll default}"
 info "Target test UID:      ${TARGET_UID}"
 
 # Base flags for soos-enroll invocations
 CLI_COMMON_FLAGS=(
     "--biometrics-dir" "${BIOMETRICS_DIR}"
     "--key-file" "${KEY_FILE}"
-    "--models-dir" "${MODELS_DIR}"
-    "--skip-root-check"
 )
+if [[ -n "${MODELS_DIR}" ]]; then
+    CLI_COMMON_FLAGS+=("--models-dir" "${MODELS_DIR}")
+fi
 
 if [[ "${USE_MOCK}" == "true" ]]; then
     CLI_COMMON_FLAGS+=("--mock")
@@ -230,7 +257,7 @@ info "-------------------------------------------------------------------"
 info "Step 1: Asserting initial clean state (zero enrolled templates)"
 info "-------------------------------------------------------------------"
 INITIAL_LIST="$("${SOOS_ENROLL_BIN}" "${CLI_COMMON_FLAGS[@]}" list --format json 2>&1 || true)"
-if echo "${INITIAL_LIST}" | grep -q "\"uid\": ${TARGET_UID}"; then
+if echo "${INITIAL_LIST}" | grep -q "\"uid\": ${TARGET_UID},"; then
     warn "UID ${TARGET_UID} was previously enrolled. Purging existing template..."
     "${SOOS_ENROLL_BIN}" "${CLI_COMMON_FLAGS[@]}" delete --uid "${TARGET_UID}" --yes
 fi
@@ -314,7 +341,7 @@ info "-------------------------------------------------------------------"
 info "Step 6: Confirming clean slate after deletion"
 info "-------------------------------------------------------------------"
 FINAL_LIST="$("${SOOS_ENROLL_BIN}" "${CLI_COMMON_FLAGS[@]}" list --format json 2>&1 || true)"
-if echo "${FINAL_LIST}" | grep -q "\"uid\": ${TARGET_UID}"; then
+if echo "${FINAL_LIST}" | grep -q "\"uid\": ${TARGET_UID},"; then
     error "UID ${TARGET_UID} still reported in template list after deletion!"
     exit 1
 fi
