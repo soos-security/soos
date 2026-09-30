@@ -187,7 +187,8 @@ impl SoosPam {
     /// `flags` are the Linux-PAM flags of the call: with `PAM_SILENT` no conversation
     /// message is ever sent (GitHub #221). "Looking for face..." is only sent once the
     /// daemon socket is connected, so an absent or stopped daemon never announces a
-    /// lookup it cannot perform.
+    /// lookup it cannot perform, and without a connection no outcome text is sent either
+    /// (fail quiet, GitHub #221).
     ///
     /// # Panic Safety Guarantee
     ///
@@ -270,13 +271,18 @@ impl SoosPam {
                 return PamResultCode::PAM_IGNORE;
             }
 
+            let mut connected = false;
             let outcome =
                 ipc::authenticate_before_with_progress(config, uid, auth_deadline, || {
+                    connected = true;
                     if !silent {
                         feedback.info("[soos] Looking for face...");
                     }
                 });
-            if !silent {
+            // Fail quiet (GitHub #221, user decision 2026-10-01): when the daemon socket
+            // cannot be connected (not installed or stopped) nothing is shown; the next
+            // module prompts as if soos were absent.
+            if !silent && connected {
                 feedback.info(feedback_message(&outcome));
             }
 

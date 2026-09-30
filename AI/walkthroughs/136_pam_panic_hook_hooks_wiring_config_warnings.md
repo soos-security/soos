@@ -91,3 +91,7 @@ and a new T-number coordinated with the parallel matrix work.
 
 - User decision on PHS7 (fail-quiet on `IpcError::Connect`) and the matching test change.
 - PHS10 Docker case.
+
+## Follow-up: fail quiet when the daemon is absent (#221, 2026-10-01)
+
+The user chose the fail-quiet option. `authenticate_flow` records whether the connect callback fired; without a connection (`IpcError::Connect`: daemon not installed or stopped) no outcome text is sent, so the next module prompts as if soos were absent. A connected daemon still produces "Looking for face..." and one outcome line. The offline case of `pam_handle_tests::test_unavailable_feedback_is_a_single_generic_text` now asserts an empty conversation (user-approved change); new tests: `crates/pam/tests/pam_fail_quiet_tests.rs`. Matrix row PHS7 is ✅ Verified.
