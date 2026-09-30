@@ -5,7 +5,10 @@
 //! replicated into three identical channels by `convert_to_rgb`, which is out-of-distribution
 //! for the model: its scores on such input are uncalibrated. Until an IR-calibrated threshold
 //! (measured on captured frames, GitHub #172 / PAD-06) or an IR-trained PAD model exists, a
-//! monochrome frame is handled by a conservative, fail-closed short-term policy:
+//! monochrome frame is handled by a conservative, fail-closed short-term policy. A frame is
+//! monochrome when its format is `Grey` **or** when it was captured from a node classified
+//! `SensorType::Infrared`, whatever pixel format that node streams (candid review of #169: an
+//! IR node advertising YUYV must not bypass the policy):
 //!
 //! 1. **IR gate** on the PAD context crop (exposure, contrast, local texture). Under active
 //!    NIR illumination a live face is well exposed and textured; LCD/OLED screens emit almost
@@ -27,7 +30,7 @@
 
 use std::fmt;
 
-use soos_camera_v4l::PixelFormat;
+use soos_camera_v4l::{Frame, PixelFormat, SensorType};
 
 use crate::error::VisionError;
 
@@ -53,12 +56,14 @@ pub const IR_MIN_LUMA_STDDEV: f32 = 10.0;
 /// below it the crop has no local texture (flat surface, single edge, or smooth gradient).
 pub const IR_MIN_TEXTURE_ENERGY: f32 = 2.0;
 
-/// Colour modality of the pixels handed to the PAD stage, derived from the source format.
+/// Colour modality of the pixels handed to the PAD stage, derived from the source pixel format
+/// and the sensor classification (see [`PadInputModality::for_source`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PadInputModality {
     /// Colour source (`Rgb24`, `Yuyv`, `Nv12`, `Mjpeg`): the RGB-trained PAD path applies.
     Color,
-    /// Single-channel source (`Grey`, typically an IR sensor): the IR policy applies.
+    /// Single-channel or infrared source (`Grey`, or any format from an `Infrared` sensor):
+    /// the IR policy applies.
     Monochrome,
 }
 
@@ -71,6 +76,24 @@ impl PadInputModality {
                 Self::Color
             }
         }
+    }
+
+    /// Maps a frame source (pixel format and sensor classification) to the PAD input modality.
+    ///
+    /// Fail-closed (GitHub #169): a frame from an [`SensorType::Infrared`] sensor is always
+    /// [`PadInputModality::Monochrome`], whatever pixel format the node streams (an IR node
+    /// that advertises YUYV or MJPEG must never take the RGB PAD path). RGB and unknown
+    /// sensors fall back to [`PadInputModality::from_pixel_format`].
+    pub const fn for_source(format: PixelFormat, sensor_type: SensorType) -> Self {
+        match sensor_type {
+            SensorType::Infrared => Self::Monochrome,
+            SensorType::Rgb | SensorType::Unknown => Self::from_pixel_format(format),
+        }
+    }
+
+    /// Maps a captured frame to its PAD input modality (see [`PadInputModality::for_source`]).
+    pub const fn for_frame(frame: &Frame) -> Self {
+        Self::for_source(frame.format, frame.sensor_type)
     }
 
     /// True for single-channel (IR) sources.

@@ -30,6 +30,6 @@ pub use sensor::{
 pub use stable_path::{stable_device_path, DEFAULT_BY_ID_DIR};
 pub use status::{CameraErrorKind, CameraStatus, CameraStatusCell};
 pub use v4l_impl::{
-    fourcc_to_pixel_format, negotiate_format, pixel_format_to_fourcc, DevicePathResolver,
-    V4lCameraManager, FORMAT_PRIORITY,
+    fourcc_to_pixel_format, negotiate_format, pixel_format_to_fourcc, plan_capture, CapturePlan,
+    DevicePathResolver, V4lCameraManager, FORMAT_PRIORITY,
 };

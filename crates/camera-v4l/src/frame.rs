@@ -1,5 +1,6 @@
 //! Frame structures and pixel formats for camera capture.
 
+use crate::sensor::SensorType;
 use zeroize::Zeroize;
 
 /// Supported pixel formats for camera capture.
@@ -58,6 +59,13 @@ pub struct Frame {
     pub format: PixelFormat,
     /// Sequential frame counter.
     pub sequence: u64,
+    /// Classification of the sensor that produced the frame (GitHub #169).
+    ///
+    /// The PAD policy keys on it in addition to the pixel format: a frame from an
+    /// [`SensorType::Infrared`] node is handled by the IR policy even when the node streams a
+    /// colour format (YUYV, MJPEG). [`Frame::new`] sets [`SensorType::Unknown`]; capture
+    /// backends that classify their device stamp it with [`Frame::with_sensor_type`].
+    pub sensor_type: SensorType,
 }
 
 impl Frame {
@@ -77,7 +85,15 @@ impl Frame {
             timestamp_mono_ns,
             format,
             sequence,
+            sensor_type: SensorType::Unknown,
         }
+    }
+
+    /// Returns this frame tagged with the classification of the sensor that produced it.
+    #[must_use]
+    pub fn with_sensor_type(mut self, sensor_type: SensorType) -> Self {
+        self.sensor_type = sensor_type;
+        self
     }
 
     /// Computes the age of the frame in milliseconds relative to a given monotonic timestamp.

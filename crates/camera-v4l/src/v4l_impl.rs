@@ -4,6 +4,7 @@ use crate::config::CameraConfig;
 use crate::error::CameraError;
 use crate::frame::{Frame, PixelFormat};
 use crate::manager::{CameraHealth, CameraManager};
+use crate::sensor::{classify_sensor, SensorType};
 use crate::status::{CameraStatus, CameraStatusCell};
 use arc_swap::ArcSwapOption;
 use std::panic::{self, AssertUnwindSafe};
@@ -441,6 +442,50 @@ pub fn negotiate_format(
     })
 }
 
+/// Capture format and sensor classification chosen for an opened device (GitHub #169).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CapturePlan {
+    /// Pixel format requested with `VIDIOC_S_FMT`.
+    pub format: PixelFormat,
+    /// Classification of the opened node, stamped on every captured [`Frame`].
+    pub sensor_type: SensorType,
+}
+
+/// Classifies the opened node and negotiates its capture format.
+///
+/// The sensor is classified with the same [`classify_sensor`] rule the resolver uses for
+/// selection. On an [`SensorType::Infrared`] node with automatic negotiation, `Grey` is
+/// preferred when offered so that the IR sensor delivers its native single-channel data; an
+/// explicitly configured format is still honored. With no enumerated format, the configured
+/// format is used as-is.
+///
+/// # Errors
+///
+/// Returns the [`negotiate_format`] error when no supported format is compatible.
+pub fn plan_capture(
+    card_name: &str,
+    supported: &[PixelFormat],
+    config: &CameraConfig,
+) -> Result<CapturePlan, CameraError> {
+    let sensor_type = classify_sensor(card_name, supported);
+    let format = if supported.is_empty() {
+        config.format
+    } else {
+        let preferred = if !config.auto_format {
+            Some(config.format)
+        } else if sensor_type == SensorType::Infrared {
+            Some(PixelFormat::Grey)
+        } else {
+            None
+        };
+        negotiate_format(supported, preferred)?
+    };
+    Ok(CapturePlan {
+        format,
+        sensor_type,
+    })
+}
+
 /// Maps a V4L2 FourCC to a known `PixelFormat`.
 pub fn fourcc_to_pixel_format(fourcc: FourCC) -> Option<PixelFormat> {
     match &fourcc.repr {
@@ -496,16 +541,10 @@ fn open_and_stream(
         .filter_map(|desc| fourcc_to_pixel_format(desc.fourcc))
         .collect();
 
-    let target_format = if supported.is_empty() {
-        config.format
-    } else {
-        let preferred = if config.auto_format {
-            None
-        } else {
-            Some(config.format)
-        };
-        negotiate_format(&supported, preferred)?
-    };
+    // Classify the node and negotiate its format; frames are stamped with the sensor type so
+    // an IR node streaming a colour format still takes the IR PAD policy (GitHub #169).
+    let plan = plan_capture(&caps.card, &supported, config)?;
+    let target_format = plan.format;
 
     let fourcc = pixel_format_to_fourcc(target_format);
 
@@ -546,11 +585,12 @@ fn open_and_stream(
     stream.set_timeout(Duration::from_millis(stream_timeout_ms));
 
     info!(
-        "Camera stream initialized on '{}' ({}x{}, {:?})",
+        "Camera stream initialized on '{}' ({}x{}, {:?}, sensor {:?})",
         config.device_path.display(),
         actual_width,
         actual_height,
-        target_format
+        target_format,
+        plan.sensor_type
     );
 
     let _start_time = Instant::now();
@@ -606,7 +646,8 @@ fn open_and_stream(
             mono_ns,
             target_format,
             sequence,
-        );
+        )
+        .with_sensor_type(plan.sensor_type);
 
         latest_frame.store(Some(Arc::new(frame)));
         // Camera is now stabilized and ready: publish ready flag with Release after storing frame

@@ -259,7 +259,8 @@ impl VisionPipeline {
                     self.config.pad_target_height,
                 ) {
                     let pad_crop = Zeroizing::new(crop);
-                    pad_result = self.analyze_pad_crop(&pad_crop, frame.format);
+                    pad_result =
+                        self.analyze_pad_crop(&pad_crop, PadInputModality::for_frame(frame));
                 }
 
                 if let Ok(aligned) = align_face_112(&rgb, frame.width, frame.height, landmarks) {
@@ -291,8 +292,9 @@ impl VisionPipeline {
     /// 3. Extracts 5-point facial landmarks from detection
     /// 4. Crops and resizes 2.7x expanded bounding box to 80x80 for PAD
     /// 5. Evaluates Presentation Attack Detection (PAD) liveness; short-circuits on spoof.
-    ///    `Grey` (IR) frames first pass the fail-closed IR gate and are scored against the
-    ///    stricter IR threshold (GitHub #169); they never take the colour PAD path.
+    ///    `Grey` frames and every frame from an `Infrared` sensor (whatever its pixel format)
+    ///    first pass the fail-closed IR gate and are scored against the stricter IR threshold
+    ///    (GitHub #169); they never take the colour PAD path.
     /// 6. Warps face to normalized 112x112 RGB crop using landmarks
     /// 7. Extracts L2-normalized biometric embedding
     pub fn process_frame(&self, frame: &Frame) -> Result<PipelineOutput, VisionError> {
@@ -344,7 +346,7 @@ impl VisionPipeline {
             self.config.pad_target_height,
         )?);
 
-        let pad_result = self.evaluate_pad_crop(&pad_crop, frame.format)?;
+        let pad_result = self.evaluate_pad_crop(&pad_crop, PadInputModality::for_frame(frame))?;
 
         // Step 5: Affine alignment to 112x112 using landmarks for recognition embedding
         let mut aligned_crop_guard = AlignedCropGuard {
@@ -371,7 +373,8 @@ impl VisionPipeline {
         })
     }
 
-    /// Format-aware PAD decision for a context crop taken from a frame in `format`.
+    /// Modality-aware PAD decision for a context crop (modality from the frame's pixel format
+    /// and sensor type, see [`PadInputModality::for_frame`]).
     ///
     /// Colour frames: model result must be live and `score >= pad_threshold`.
     /// Monochrome frames: the IR gate must pass (otherwise the model is not consulted), then
@@ -380,9 +383,8 @@ impl VisionPipeline {
     fn evaluate_pad_crop(
         &self,
         pad_crop: &[u8],
-        format: soos_camera_v4l::PixelFormat,
+        modality: PadInputModality,
     ) -> Result<PadResult, VisionError> {
-        let modality = PadInputModality::from_pixel_format(format);
         if modality.is_monochrome() {
             evaluate_ir_gate(
                 pad_crop,
@@ -416,12 +418,8 @@ impl VisionPipeline {
     /// Colour frames report the raw model result. Monochrome frames report a spoof result
     /// (`is_live = false`) when the IR gate rejects or the score is below the IR threshold,
     /// so the GUI never shows an IR capture as live when the daemon would reject it.
-    fn analyze_pad_crop(
-        &self,
-        pad_crop: &[u8],
-        format: soos_camera_v4l::PixelFormat,
-    ) -> Option<PadResult> {
-        if !PadInputModality::from_pixel_format(format).is_monochrome() {
+    fn analyze_pad_crop(&self, pad_crop: &[u8], modality: PadInputModality) -> Option<PadResult> {
+        if !modality.is_monochrome() {
             return self
                 .pad
                 .evaluate_liveness(
@@ -431,7 +429,7 @@ impl VisionPipeline {
                 )
                 .ok();
         }
-        match self.evaluate_pad_crop(pad_crop, format) {
+        match self.evaluate_pad_crop(pad_crop, modality) {
             Ok(result) => Some(result),
             Err(VisionError::IrLivenessGateFailed { .. }) => {
                 Some(PadResult::spoof(0.0, AttackType::UnknownSpoof))
