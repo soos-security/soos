@@ -47,7 +47,7 @@ Why each build package is needed (from the locked dependency graph):
 - **PAM headers**: `pam-bindings` (`crates/pam`).
 - **libclang + clang**: `bindgen`, a build-dependency of `v4l2-sys-mit` (`crates/camera-v4l`).
 - **OpenSSL headers + pkg-config**: `openssl-sys` ← `native-tls` ← `ureq`, used by the `ort-sys` build script. `openssl-src` is not vendored, so the system headers are required at build time only; no shipped binary links OpenSSL.
-- **Rust toolchain**: install rustup from <https://rustup.rs>; `rust-toolchain.toml` selects the channel.
+- **Rust toolchain**: `./scripts/install_rustup.sh` downloads `rustup-init`, verifies its pinned SHA-256 before executing it and installs the exact release of `rust-toolchain.toml` (1.98.1); see `Docs/CI_CD_AND_SECURITY.md` "Verified rustup Bootstrap". Never pipe `sh.rustup.rs` into a shell.
 
 **ONNX Runtime download**: the `ort-sys` build script downloads prebuilt ONNX Runtime binaries during `cargo build` (network required). For offline or air-gapped builds, point `ORT_LIB_LOCATION` at a local ONNX Runtime build before running cargo.
 

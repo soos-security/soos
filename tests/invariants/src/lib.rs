@@ -126,6 +126,14 @@ mod vision_threshold_contract;
 #[cfg(test)]
 mod ort_output_zeroize_contract;
 
+/// Verified, pinned rustup bootstrap for hosts and sandbox images (GitHub #260, rows IRP1–IRP5).
+#[cfg(all(test, unix))]
+mod rustup_bootstrap_contract;
+
+/// `soos-daemon.service` start conditions evaluated by systemd (GitHub #211, rows IRP6–IRP7).
+#[cfg(all(test, unix))]
+mod unit_start_guard_contract;
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,

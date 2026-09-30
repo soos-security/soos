@@ -86,7 +86,8 @@ retitling a PR re-validates it without re-running the whole pipeline.
 - **Docker layer cache**: the PAM sandbox image is built with Buildx and the GitHub Actions cache
   backend, so an unchanged `Dockerfile` costs seconds instead of a full `apt-get` + `rustup` install.
 - **Empty Docker build context** (`.dockerignore`): the sandbox Dockerfiles never `COPY` sources,
-  so `target/` is never uploaded to the Docker daemon.
+  so `target/` is never uploaded to the Docker daemon. The only file sent is
+  `scripts/install_rustup.sh` (verified rustup bootstrap, below).
 
 ### Pinned Rust Toolchain
 `rust-toolchain.toml` pins `channel = "1.98.1"` (components `clippy`, `rustfmt`; user decision
@@ -97,6 +98,23 @@ compiler release introduce lints or behaviour changes between two runs of the sa
 pin makes local, CI and Docker results reproducible. Moving to a newer release is a deliberate
 change: update `rust-toolchain.toml` and the four Dockerfiles together (enforced by
 `tests/invariants/src/toolchain_pin_contract.rs`), then run the full quality gate.
+
+### Verified rustup Bootstrap (GitHub #260)
+Neither the sandbox images nor the onboarding documentation pipe `https://sh.rustup.rs` into a
+shell. `scripts/install_rustup.sh` downloads `rustup-init` of a pinned rustup release
+(`RUSTUP_VERSION`, currently 1.29.1) for the host triple (`x86_64` or `aarch64`
+`unknown-linux-gnu`) from `https://static.rust-lang.org/rustup/archive/<version>/<triple>/`,
+over HTTPS / TLS 1.2+ only, into a private `mktemp -d` directory. It compares the SHA-256 of the
+download with the digest committed in the script **before** the file is made executable; a
+mismatch aborts with exit 1 and nothing is executed. It then runs `rustup-init -y --profile
+minimal --default-toolchain <x.y.z>`, where the toolchain defaults to the release of
+`rust-toolchain.toml` and must be an exact `x.y.z` (a floating `stable` / `beta` / `nightly`
+channel is a usage error, exit 2). Each Dockerfile `COPY`s the script and runs it with
+`--default-toolchain 1.98.1`. On a fresh host, run `./scripts/install_rustup.sh` from a checkout
+instead of the rustup.rs one-liner. Bumping rustup means changing `RUSTUP_VERSION` and both
+digests together (from the archive's `rustup-init.sha256`, cross-checked with a local
+`sha256sum`); `tests/invariants/src/rustup_bootstrap_contract.rs` enforces the pins, the
+Dockerfile usage and the fail-closed checksum path.
 
 ### Security Design
 - **Least privilege**: the workflow token is `contents: read`; `actions/checkout` does not persist

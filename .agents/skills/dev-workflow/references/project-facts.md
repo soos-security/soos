@@ -116,6 +116,8 @@ cargo deny --locked check                      # cargo-deny >= 0.20
 Toolchain: `rust-toolchain.toml` pins Rust `1.98.1` (components `clippy`, `rustfmt`; user decision
 2026-09-30). The sandbox Dockerfiles install the same release (`--default-toolchain 1.98.1`); bump
 both together, never back to a floating `stable` channel.
+The images install rustup only through `scripts/install_rustup.sh` (pinned rustup release, committed
+`rustup-init` SHA-256 digests, never `curl | sh`) [139]; a rustup bump changes the version and both digests.
 
 Omitting `--all-features` locally was the root cause of several CI-only failures [65–75].
 `cargo test --all-targets` does not run doctests; do not rely on doctests as acceptance evidence.
