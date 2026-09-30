@@ -1089,9 +1089,16 @@ mod tests {
             files_section.contains(helper_path),
             "rpm %files must list {helper_path}"
         );
+        // User-approved assertion change (2026-09-30, walkthrough 106): the key must never be
+        // owned by the RPM package, not even as `%ghost`, because RPM deletes owned `%ghost`
+        // files on `rpm -e` (the key then no longer decrypts enrolled templates).
         assert!(
-            files_section.contains("%ghost") && files_section.contains("master.key"),
-            "rpm %files must keep master.key as %ghost (never packaged)"
+            !files_section
+                .lines()
+                .map(str::trim)
+                .filter(|l| !l.starts_with('#'))
+                .any(|l| l.contains("master.key")),
+            "rpm %files must not list master.key in any form (host state, never packaged or owned)"
         );
         assert!(
             pkgbuild.contains("provision-master-key"),
@@ -1445,9 +1452,18 @@ mod tests {
             spec_content.contains("0700") && spec_content.contains("biometrics"),
             "RPM spec must specify 0700 mode for biometrics"
         );
+        // User-approved assertion change (2026-09-30, walkthrough 106): the 0600 key mode is
+        // enforced by the provisioning helper called from %post, not by a %files entry.
+        let helper = fs::read_to_string(root.join("scripts/provision_master_key.sh"))
+            .expect("read scripts/provision_master_key.sh");
         assert!(
-            spec_content.contains("0600") && spec_content.contains("master.key"),
-            "RPM spec must specify 0600 mode for master key"
+            spec_content.contains("provision-master-key")
+                && helper
+                    .lines()
+                    .map(str::trim)
+                    .filter(|l| !l.starts_with('#'))
+                    .any(|l| l.starts_with("chmod 0600") || l == "umask 077"),
+            "RPM %post must provision the master key through the helper that enforces mode 0600"
         );
         assert!(
             spec_content.contains("0750") && spec_content.contains("soos"),

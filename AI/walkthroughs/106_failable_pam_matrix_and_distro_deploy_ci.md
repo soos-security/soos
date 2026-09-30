@@ -194,3 +194,20 @@ package, so `rpm -e soos` keeps it, matching the .deb and Arch packages. Re-run 
 target volume): both exit 0, with "master.key preserved across package removal" and "Fresh install
 generated a distinct master key". PK6 is now `✅ Verified`. The matrix rows added by this branch were
 renamed PMX1–PMX9 at integration because PDM1–PDM3 were already used by walkthrough 94.
+
+### Candid review round 1 follow-ups (2026-09-30)
+
+- **User-approved assertion changes** (`tests/invariants/src/lib.rs`):
+  `test_package_scriptlets_provision_key_via_shared_helper` now requires that no non-comment line
+  of the RPM `%files` section names `master.key` (it previously required `%ghost` + `master.key`,
+  the opposite of the fix, and only passed thanks to a comment); the 0600 check of
+  `test_rpm_packaging_specification` now requires that `%post` calls `provision-master-key` and
+  that the helper applies `chmod 0600` / `umask 077` in code (not in a comment). Red evidence:
+  re-adding `%ghost %attr(0600, root, root) %{_sharedstatedir}/soos/master.key` fails with
+  "rpm %files must not list master.key in any form".
+- **Upgrade path**: `rpm -U` from a build that owned the key as `%ghost` would erase it after the
+  new `%post`. `%pre` (upgrade only) keeps a private `0600` copy `.master.key.upgrade`, and
+  `%posttrans` restores it only when the key is missing, never overwriting an existing key.
+  There is no released RPM yet (0.1.0-1), so only development installs could be affected; an
+  `rpm -U` Docker case is a follow-up.
+- `Docs/PACKAGING_AND_PROVISIONING.md` no longer states that the RPM keeps the key as `%ghost`.

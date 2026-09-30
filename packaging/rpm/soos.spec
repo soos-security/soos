@@ -72,6 +72,12 @@ if ! getent group soos >/dev/null 2>&1; then
     groupadd -r soos || :
 fi
 
+# Upgrade from a build that still owned master.key as %ghost (walkthrough 106): RPM would
+# erase that file after this package's %post. Keep a private copy; %posttrans restores it.
+if [ "$1" -gt 1 ] && [ -f %{_sharedstatedir}/soos/master.key ] && [ ! -L %{_sharedstatedir}/soos/master.key ]; then
+    (umask 077 && cp -p %{_sharedstatedir}/soos/master.key %{_sharedstatedir}/soos/.master.key.upgrade) || :
+fi
+
 %post
 %systemd_post soos-daemon.service
 
@@ -136,6 +142,18 @@ fi
 
 %postun
 %systemd_postun_with_restart soos-daemon.service
+
+%posttrans
+# Restore the key if the upgrade transaction erased a %ghost-owned copy, never overwrite one.
+if [ -f %{_sharedstatedir}/soos/.master.key.upgrade ]; then
+    if [ ! -e %{_sharedstatedir}/soos/master.key ]; then
+        mv -f %{_sharedstatedir}/soos/.master.key.upgrade %{_sharedstatedir}/soos/master.key || :
+        chmod 0600 %{_sharedstatedir}/soos/master.key || :
+        chown root:root %{_sharedstatedir}/soos/master.key || :
+    else
+        rm -f %{_sharedstatedir}/soos/.master.key.upgrade || :
+    fi
+fi
 
 %files
 /usr/libexec/soos/soos-daemon
