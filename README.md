@@ -94,3 +94,13 @@ Detailed guides and specifications are maintained in the [`Docs/`](Docs/) direct
 - [`AI/ROLES_AND_WORKFLOW.md`](AI/ROLES_AND_WORKFLOW.md): Multi-agent operational rules and quality assurance.
 - [`AI/VERIFICATION_MATRIX.md`](AI/VERIFICATION_MATRIX.md): Traceable component acceptance matrix.
 - [`AI/walkthroughs/`](AI/walkthroughs/): Step-by-step verifiable implementation walkthroughs.
+
+---
+
+## License
+
+soos is free software licensed under the **GNU Affero General Public License v3.0 or later**
+(SPDX `AGPL-3.0-or-later`); the full text is in [`LICENSE`](LICENSE). The `license` key of
+`[workspace.package]` in the root `Cargo.toml` is the single source of truth: every crate inherits
+it (`license.workspace = true`) and the RPM spec and Arch PKGBUILD declare the same expression.
+Third-party dependencies are restricted to permissive licenses by `deny.toml`.

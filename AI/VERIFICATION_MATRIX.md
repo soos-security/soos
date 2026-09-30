@@ -941,3 +941,13 @@ Complements PA3, PA12 and PFT1: those rows are proven under `[profile.test]` (al
 | TCP1 | `rust-toolchain.toml` pins `channel = "1.98.1"` in `[toolchain]` and keeps the `clippy` and `rustfmt` components | Invariant test (`toolchain_pin_contract::test_rust_toolchain_pins_exact_release_with_components`) | ✅ Verified |
 | TCP2 | `Dockerfile` and `tests/docker/Dockerfile.{ubuntu,fedora,arch}` install Rust with `--default-toolchain 1.98.1`, never a floating channel | Invariant test (`toolchain_pin_contract::test_sandbox_dockerfiles_install_the_pinned_toolchain`) | ✅ Verified |
 | TCP3 | `Docs/CI_CD_AND_SECURITY.md`, the shared project facts and an ADR in `AI/DECISIONS.md` state the pinned release | Invariant test (`toolchain_pin_contract::test_toolchain_pin_is_documented`) | ✅ Verified |
+
+---
+
+## Component: `project-licence` (User decision 2026-09-30 — AGPL-3.0-or-later)
+
+| # | Criterion | Test Method | Status |
+|---|---|---|---|
+| LIC1 | `[workspace.package]` of the root `Cargo.toml` declares `license = "AGPL-3.0-or-later"` and every workspace member inherits it with `license.workspace = true`, never overriding it | Invariant test (`licence_contract::test_workspace_license_is_agpl_and_inherited_by_every_member`) | ✅ Verified |
+| LIC2 | The top-level `LICENSE` file carries the GNU AGPL version 3 text (copied from the SPDX licence list shipped by the Arch `licenses` package) | Invariant test (`licence_contract::test_top_level_license_file_carries_the_agpl_v3_text`) | ✅ Verified |
+| LIC3 | `README.md` has a License section naming `AGPL-3.0-or-later`; the RPM spec `License:` and the PKGBUILD `license=()` carry the same expression | Invariant test (`licence_contract::test_readme_and_packages_state_the_project_license`) | ✅ Verified |

@@ -73,6 +73,10 @@ mod quality_followups;
 #[cfg(test)]
 mod toolchain_pin_contract;
 
+/// Project licence AGPL-3.0-or-later: workspace metadata, LICENSE file, README (rows LIC1–LIC3).
+#[cfg(test)]
+mod licence_contract;
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,
