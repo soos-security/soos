@@ -31,6 +31,61 @@ auth  optional                       pam_soos.so event=password-failed timeout_m
 2. **Never convert error into `PAM_SUCCESS`**: Any internal panic or unhandled error strictly returns `PAM_IGNORE` via `catch_unwind`.
 3. **No stream pollution**: The PAM module must never write to `stdout` or `stderr` (`println!`, `dbg!`), which would corrupt display manager (GDM, LightDM, SDDM) and screen locker (swaylock, hyprlock) communications.
 
+### 2.1 GDM Login Integration (`soos-admin gdm`)
+
+GDM authenticates through its own service file, `/etc/pam.d/gdm-password`, with a longer
+2500 ms capture budget. `soos-admin` manages it (ADR 2026-09-30 "GDM PAM Stack Placement",
+walkthrough 98):
+
+```bash
+sudo soos-admin gdm status                    # installed in PAM? disable flag present?
+sudo soos-admin gdm enable                    # insert the managed block (below), remove the flag
+sudo soos-admin gdm enable --pam-module-dir /usr/lib64/security   # explicit module directory
+sudo soos-admin gdm disable                   # create /etc/soos/gdm.disable (PAM file untouched)
+sudo soos-admin gdm restore                   # put back gdm-password.soos-backup, remove it
+sudo soos-admin --format json gdm status      # machine-readable status
+```
+
+`--pam-file` (default `/etc/pam.d/gdm-password`) and `--disable-file` (default
+`/etc/soos/gdm.disable`) select other paths. `gdm disable` is the immediate, lockout-free
+switch: `pam_soos.so` reads `PAM_SERVICE` and returns `PAM_IGNORE` for every `gdm*` service
+while the flag exists.
+
+What `gdm enable` writes, e.g. on Fedora 40 (`authselect ... with-faillock`):
+
+```pam
+auth     [success=done ignore=ignore default=bad] pam_selinux_permit.so
+# BEGIN soos-admin gdm enable (managed block, do not edit)
+auth  required  pam_faillock.so preauth silent
+auth  [success=done default=ignore]  pam_soos.so timeout_ms=2500
+# END soos-admin gdm enable
+auth        substack      password-auth
+...
+```
+
+Placement rules:
+
+1. The block goes immediately before the first `auth` rule that verifies a credential or
+   delegates to a shared stack (`pam_unix.so`, `include`, `substack`, `@include`), i.e.
+   after `pam_nologin`, `pam_succeed_if`, `pam_shells`, `pam_faillock preauth`,
+   `pam_selinux_permit` and `pam_env` rules of the file. It is never inserted at the top.
+2. When that anchor delegates (Ubuntu `@include common-auth`, Fedora `substack
+   password-auth`, Arch `include system-local-login`), the gates the delegated stack runs
+   before its first credential module (`pam_faillock.so preauth`, `pam_nologin.so`,
+   `pam_shells.so`, `pam_succeed_if.so` with a plain `required`/`requisite` control) are
+   copied in front of `pam_soos.so`, following includes up to 4 levels. A locked account
+   therefore fails the auth phase even when the face matches; running `preauth` twice is
+   harmless (it only reads the tally).
+3. `enable` refuses, without changing anything, when `pam_soos.so` is not installed, the
+   file has no anchor, a `[...=N]` jump would change target, the file is not UTF-8, uses
+   line continuations, exceeds 64 KiB or is a symlink.
+4. The account phase is never edited: GDM calls `pam_acct_mgmt` after a successful
+   `pam_authenticate`, so `pam_nologin`/`pam_faillock`/`pam_unix` account checks always run.
+5. The first `enable` keeps the pristine file as `gdm-password.soos-backup` (restored by
+   `gdm restore` and by `scripts/uninstall.sh`); the rewrite is atomic. A misplaced line
+   written by older releases (`auth  sufficient  pam_soos.so timeout_ms=2500`) is moved to
+   the safe position; a `pam_soos.so` rule you wrote yourself is left untouched.
+
 ---
 
 ## 3. Debian 12 & Ubuntu 24.04 Deployment
@@ -352,7 +407,7 @@ If a misconfiguration occurs during manual PAM adjustments:
    - Debian: `pam-auth-update --package --remove soos soos-notify` (or `pam-auth-update --force`)
    - Fedora: `authselect select $(cat /etc/soos/authselect.previous) --force` (or `authselect select local --force`)
    - Arch: `cp /etc/pam.d/system-auth.soos-backup /etc/pam.d/system-auth` (backup made in §5.2)
-   - GDM: `cp /etc/pam.d/gdm-password.soos-backup /etc/pam.d/gdm-password` (made by `soos-admin gdm enable`)
+   - GDM: `soos-admin gdm restore`, or `cp /etc/pam.d/gdm-password.soos-backup /etc/pam.d/gdm-password` (made by `soos-admin gdm enable`; §2.1)
    - Any file: the pre-install copies recorded by `scripts/install.sh` live in
      `/var/lib/soos/state/pam-backup/pam.d/` with a `SHA256SUMS` manifest
      (`sudo ./scripts/pam_snapshot.sh verify` lists what differs).
