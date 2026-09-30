@@ -98,3 +98,12 @@ Quality gate: `cargo fmt --all -- --check`, `cargo clippy --locked --workspace -
 
 `tests/docker/mock_daemon.py` `REASON_SCORE_BELOW_THRESHOLD` is now 3 (`ReasonClass::ScoreBelowThreshold`);
 1 is `NoFace`.
+
+## Correction (2026-09-30, candid review findings 2 and 7)
+
+PCZ5 is split. The mock fixture part (#226) is `✅ Verified` by the new invariant
+`protocol_codec_contract::test_mock_daemon_wire_indices_match_protocol_enums`, which checks every
+`REASON_*` / `VERDICT_*` constant of `tests/docker/mock_daemon.py` against the protocol enums (red
+with the former value 1). The tagged envelope (#224) moves to PCZ6 and stays pending. Matrix PA2
+now states the clamped-`timeout_ms` deadline instead of "> 250ms", so the #226 recommendation is
+complete.

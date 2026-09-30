@@ -98,9 +98,9 @@ Input contract (`crates/enrollment-cli/src/service.rs`):
 - **Zeroized**: the raw input and the parsed embedding live in `Zeroizing` buffers.
 - **File inputs** (`read_import_file`): opened with `O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK` and checked on the open descriptor: regular file only (symlinks, directories and FIFOs are refused), at most 64 KiB, and, under `pkexec`, owned by the invoking user (`PKEXEC_UID`, parsed by `parse_pkexec_uid`), so a Polkit caller cannot make root import another user's file.
 - Nothing is stored when any check fails.
-- **No silent overwrite** (GitHub #237): a file import onto a user who already has a template fails with `EnrollmentCliError::AlreadyEnrolled` before the file is read; pass `-y, --yes` to replace it. The standard-input channel (`--file -`) is the GUI's non-interactive path, whose enrollment flow is the confirmation; it replaces an existing template and reports it (`EnrollmentOutcome::replaced_existing`), and the CLI prints a warning whenever a template was replaced.
+- **No silent overwrite** (GitHub #237): a file import onto a user who already has a template fails with `EnrollmentCliError::AlreadyEnrolled` before the file is read; pass `-y, --yes` to replace it. The same rule applies to the standard-input channel (`--file -`): the check runs before stdin is read, so a refused import never consumes its input. The GUI confirms the enrollment itself and therefore passes `--yes`. A replacement is reported (`EnrollmentOutcome::replaced_existing`), and the CLI prints a warning whenever a template was replaced.
 
-Verification: `crates/enrollment-cli/tests/import_stdin_tests.rs`, `import_tests.rs` (matrix rows ISE5–ISE7) and `cli_hygiene_tests.rs` (rows CDJ5–CDJ7).
+Verification: `crates/enrollment-cli/tests/import_stdin_tests.rs`, `import_tests.rs` (matrix rows ISE5–ISE7), `cli_hygiene_tests.rs` (rows CDJ5–CDJ7) and `import_stdin_overwrite_tests.rs` (rows CDJ7, CDJ9).
 
 ### `soos-enroll debug-vision`
 Captures one camera frame, runs the face detector and writes a standalone HTML report drawing the bounding boxes, confidence scores and 5-point landmarks on an HTML5 canvas (GitHub #149 / STO-02 hardening):

@@ -642,37 +642,73 @@ impl EnrollmentService {
     /// Imports a template, replacing an existing one only when `allow_overwrite` (`--yes`).
     ///
     /// `--file -` ([`IMPORT_STDIN_PATH`]) reads the template from standard input (the GUI
-    /// path, GitHub #156) through [`Self::import_from_reader`]; any other value is read through
-    /// [`read_import_file`], which requires the file to be owned by `PKEXEC_UID` when running
-    /// under `pkexec`.
+    /// path, GitHub #156) through [`Self::import_with_overwrite_from_reader`]; any other value
+    /// is read through [`read_import_file`], which requires the file to be owned by
+    /// `PKEXEC_UID` when running under `pkexec`.
     ///
     /// # Errors
     ///
-    /// [`EnrollmentCliError::AlreadyEnrolled`] when a file import targets an enrolled user and
-    /// `allow_overwrite` is `false`; the input is not read and nothing is replaced (GitHub #237).
+    /// [`EnrollmentCliError::AlreadyEnrolled`] when the import (file or stdin) targets an
+    /// enrolled user and `allow_overwrite` is `false`; the input is not read and nothing is
+    /// replaced (GitHub #237).
     pub fn import_with_overwrite(
         &self,
         args: &ImportArgs,
         allow_overwrite: bool,
     ) -> Result<EnrollmentOutcome, EnrollmentCliError> {
         if args.file.as_os_str() == IMPORT_STDIN_PATH {
-            return self.import_from_reader(args, std::io::stdin().lock());
+            return self.import_with_overwrite_from_reader(
+                args,
+                allow_overwrite,
+                std::io::stdin().lock(),
+            );
         }
-        check_privileges(self.require_root)?;
-        let uid = resolve_target_uid(args.uid, args.username.as_deref())?;
-        if !allow_overwrite && self.store.exists(uid)? {
-            return Err(EnrollmentCliError::AlreadyEnrolled(uid));
-        }
+        self.refuse_unconfirmed_overwrite(args, allow_overwrite)?;
         let invoker = parse_pkexec_uid(std::env::var("PKEXEC_UID").ok().as_deref())?;
         let bytes = read_import_file(&args.file, invoker)?;
         self.store_imported(args, &bytes)
     }
 
+    /// Imports a template read from `reader`, replacing an existing one only when
+    /// `allow_overwrite` (`--yes`).
+    ///
+    /// The overwrite check runs before `reader` is touched, so a refused stdin import never
+    /// consumes its input (GitHub #237).
+    ///
+    /// # Errors
+    ///
+    /// [`EnrollmentCliError::AlreadyEnrolled`] when the target user is enrolled and
+    /// `allow_overwrite` is `false`; otherwise as [`Self::import_from_reader`].
+    pub fn import_with_overwrite_from_reader<R: Read>(
+        &self,
+        args: &ImportArgs,
+        allow_overwrite: bool,
+        reader: R,
+    ) -> Result<EnrollmentOutcome, EnrollmentCliError> {
+        self.refuse_unconfirmed_overwrite(args, allow_overwrite)?;
+        self.import_from_reader(args, reader)
+    }
+
+    /// Checks privileges and refuses to replace an enrolled template without `--yes`.
+    fn refuse_unconfirmed_overwrite(
+        &self,
+        args: &ImportArgs,
+        allow_overwrite: bool,
+    ) -> Result<(), EnrollmentCliError> {
+        check_privileges(self.require_root)?;
+        let uid = resolve_target_uid(args.uid, args.username.as_deref())?;
+        if !allow_overwrite && self.store.exists(uid)? {
+            return Err(EnrollmentCliError::AlreadyEnrolled(uid));
+        }
+        Ok(())
+    }
+
     /// Imports a template read from `reader` (at most [`MAX_IMPORT_INPUT_BYTES`] bytes).
     ///
-    /// This is the non-interactive `--file -` channel of the GUI, which confirms the
-    /// enrollment itself before calling the helper; an existing template is replaced and the
-    /// replacement is reported in [`EnrollmentOutcome::replaced_existing`].
+    /// Library entry point without overwrite gating: an existing template is replaced and the
+    /// replacement is reported in [`EnrollmentOutcome::replaced_existing`]. The CLI never calls
+    /// it directly; `soos-enroll import --file -` goes through
+    /// [`Self::import_with_overwrite_from_reader`], which requires `--yes` to replace.
     ///
     /// # Errors
     ///

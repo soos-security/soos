@@ -20,7 +20,7 @@ This walkthrough covers the implementation of Issue #48 (GitHub Issue #136): res
 
 ### 1. `soos-pam`: Real-Time User Feedback via PAM Conversation
 - Extended `authenticate()` in `crates/pam/src/ipc.rs` to return `Result<(Verdict, ReasonClass), IpcError>`, preserving detailed reason information for user feedback.
-- Implemented `send_pam_info` in `crates/pam/src/lib.rs` using `pam-bindings`' `Conv::send(PAM_TEXT_INFO, ...)` with a low-address pointer heuristic (`addr >= 0x10000`). *(Corrected by walkthrough 122, GitHub #220: the heuristic only tolerated the dummy handles of the tests; `send_pam_info` was replaced by the `PamFeedback` trait and the guard is confined to its `PamHandle` adapter.)*
+- Implemented `send_pam_info` in `crates/pam/src/lib.rs` using `pam-bindings`' `Conv::send(PAM_TEXT_INFO, ...)` with a low-address pointer heuristic (`addr >= 0x10000`). *(Corrected by walkthrough 122, GitHub #220: the heuristic only tolerated the dummy handles of the tests; `send_pam_info` was replaced by the `PamFeedback` trait and the guard is confined to its `PamHandle` adapter.)* *(Further correction, 2026-09-30, commit `4f15282`: the guard was then removed entirely; the `PamHandle` adapter trusts the handle given by libpam and every test uses a real `pam_start` handle, matrix PHS4.)*
 - Emits prompt status updates on the lock screen:
   - Initial: `[soos] Looking for face...`
   - Success: `[soos] Face recognized. Unlocking...`

@@ -55,6 +55,10 @@ mod protocol_codec_contract;
 #[cfg(test)]
 mod enroll_list_metadata_contract;
 
+/// PAM handle-guard removal and fault-injection ordering (GitHub #220, PHS4, PHS11).
+#[cfg(test)]
+mod pam_handle_guard_removal_contract;
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,

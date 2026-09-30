@@ -108,3 +108,16 @@ The binding test-integrity rule forbids editing pre-existing tests, so two parts
   flags option and a T-number coordinated with the parallel matrix work.
 - `arb_request_kind` in `crates/protocol/tests/property_tests.rs` still omits `PreviewFrame`
   (pre-existing test); `preview_property_tests.rs` covers it with its own strategy.
+
+## Correction (2026-09-30, candid review finding 2)
+
+Proposal 1 above was approved and applied in commit `4f15282`: both `pam_bindings_tests` cases use
+`common::with_pam_handle`, and `is_libpam_handle` is gone, so the guard is no longer "confined to
+the adapter": it does not exist. Matrix PHS3 is superseded and PHS4 is `✅ Verified`, backed by the
+new invariant `pam_handle_guard_removal_contract::test_pam_handle_address_heuristic_is_absent_from_pam_sources`.
+The pre-existing `fault_injection_tests::test_fault_inject_via_pam_hooks_returns_pam_ignore` still
+passes a synthetic `0x1000` handle (its SAFETY comment is now outdated, and the test is not edited
+under the test-integrity rule). It is safe because `fault_injection::trigger` panics before any
+libpam call. `crates/pam/src/lib.rs` documents this ordering next to the trigger, and the new
+invariant `pam_handle_guard_removal_contract::test_fault_injection_trigger_runs_before_any_libpam_call`
+(matrix PHS11) pins it. Proposal 2 (PHS7) is still pending.

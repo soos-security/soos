@@ -108,3 +108,18 @@ and `./scripts/candid_review.sh` pass (see the branch report).
   `secure_shred_file` re-export, the branch-local hygiene tests and invariant that only covered it
   are removed; the single erasure path is `BiometricStore::delete` (matrix EN4 re-pointed, CDJ5
   superseded).
+
+## Correction (2026-09-30, candid review finding 1)
+
+The integration above did not complete #237: `import_with_overwrite` sent `--file -` to
+`import_from_reader` before it checked `--yes`, so a stdin import still replaced an enrolled
+template silently. Since the GUI now passes `--yes`, the stdin exception is withdrawn. The new
+`import_with_overwrite_from_reader` resolves the UID and refuses with `AlreadyEnrolled` when
+`!allow_overwrite && store.exists(uid)`, before the reader is touched. `import_with_overwrite`
+uses it for stdin. `import_from_reader` stays the ungated library entry point, and the CLI no
+longer calls it directly. Red → green: `crates/enrollment-cli/tests/import_stdin_overwrite_tests.rs`
+(4 tests) first failed to compile (no gated reader entry point), then passed. It proves that the
+refused stdin import reads zero bytes and leaves the template byte-identical, and that `--yes`
+replaces it. Matrix CDJ7 / CDJ9 are `✅ Verified`, and ADR "Storage CLI Output and Overwrite
+Hygiene" is amended. Follow-ups (the NSS stall on the password-failed path and the
+`test-pam` connect-before-deadline order) are recorded in walkthrough 121 §7.

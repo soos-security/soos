@@ -89,3 +89,17 @@ a small change in `ipc::authenticate_before` (matrix row PDR5).
   hermetic suite); the resolver injection simulates it.
 - Sending the username instead of the UID on the event path would remove the lookup from that
   path but changes the v1 `Event` schema; not adopted.
+
+## 7. Follow-ups from the candid review (2026-09-30)
+
+- **NSS on the password-failed path** (review finding 5, MINOR): on `event=password-failed`,
+  UID resolution is not charged to any budget; it is only logged when it exceeds
+  `EVENT_TIMEOUT_MS`. An unreachable LDAP / SSSD directory can therefore still stall the
+  password-failure path for the NSS timeout. This matches the ADR "PAM Budget Starts Before UID
+  Resolution". Options for a follow-up: skip the event when resolution exceeded
+  `EVENT_TIMEOUT_MS`, or ship `uid=` in the packaged password-failed lines.
+- **`soos-admin test-pam` deadline** (review finding 6, MINOR): `crates/admin-cli/src/test_pam.rs`
+  still reads `now_monotonic_ns` after a blocking `UnixStream::connect`, and that connect has no
+  timeout, so the daemon deadline starts later than the CLI's own start (the PAM-10 pattern fixed
+  in `pam_soos.so`). It is a diagnostic tool only; a follow-up should capture the deadline before
+  connect and bound the connect.

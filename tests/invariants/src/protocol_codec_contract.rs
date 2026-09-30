@@ -293,3 +293,62 @@ fn test_pam_crate_docs_state_no_fixed_deadline_figure() {
         }
     }
 }
+
+/// Converts a `CamelCase` enum variant into the `UPPER_SNAKE` form used by `mock_daemon.py`.
+fn upper_snake(variant: &str) -> String {
+    let mut out = String::new();
+    for (i, c) in variant.chars().enumerate() {
+        if c.is_ascii_uppercase() && i > 0 {
+            out.push('_');
+        }
+        out.push(c.to_ascii_uppercase());
+    }
+    out
+}
+
+/// #226: every `REASON_*` / `VERDICT_*` constant of the Docker mock daemon carries the wire
+/// index of the protocol enum variant it names (`REASON_SCORE_BELOW_THRESHOLD` = 3, never
+/// `NoFace` = 1). `VERDICT_UNDECODABLE` is a deliberate out-of-range value.
+#[test]
+fn test_mock_daemon_wire_indices_match_protocol_enums() {
+    let types = read("crates/protocol/src/types.rs");
+    let mock = read("tests/docker/mock_daemon.py");
+    let mut checked = 0;
+    for (prefix, enum_name) in [("REASON_", "ReasonClass"), ("VERDICT_", "Verdict")] {
+        let variants = enum_variants(&types, enum_name);
+        for line in mock.lines() {
+            let Some((name, value)) = line.split_once('=') else {
+                continue;
+            };
+            let name = name.trim();
+            if !name.starts_with(prefix) || name.contains(' ') || name == "VERDICT_UNDECODABLE" {
+                continue;
+            }
+            let value: u32 = value
+                .split('#')
+                .next()
+                .unwrap()
+                .trim()
+                .parse()
+                .unwrap_or_else(|_| panic!("mock_daemon.py {name} must be a decimal index"));
+            let wanted = &name[prefix.len()..];
+            let (variant, index) = variants
+                .iter()
+                .find(|(v, _)| upper_snake(v).replace('_', "") == wanted.replace('_', ""))
+                .unwrap_or_else(|| panic!("mock_daemon.py {name} names no {enum_name} variant"));
+            assert_eq!(
+                value, *index,
+                "mock_daemon.py {name} = {value} but {enum_name}::{variant} = {index} (#226)"
+            );
+            checked += 1;
+        }
+    }
+    assert!(
+        mock.contains("REASON_SCORE_BELOW_THRESHOLD = 3"),
+        "the Docker deny mode must use ReasonClass::ScoreBelowThreshold (#226)"
+    );
+    assert!(
+        checked >= 5,
+        "expected the mock daemon verdict/reason constants, found {checked}"
+    );
+}

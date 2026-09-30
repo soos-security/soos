@@ -56,7 +56,7 @@ pub trait PamFeedback {
 }
 
 /// Linux-PAM handle adapter. The handle comes from libpam (never a synthetic pointer: the
-/// former `addr >= 0x10000` guard was removed once every test used a real `pam_start`
+/// former pointer-address guard was removed once every test used a real `pam_start`
 /// handle, GitHub #220).
 impl PamFeedback for PamHandle {
     fn info(&mut self, msg: &str) {
@@ -218,6 +218,12 @@ impl SoosPam {
 
         let result = catch_unwind(AssertUnwindSafe(|| {
             // Test-only hook (Docker T10): panics here when armed, before any socket activity.
+            // Ordering invariant: this `trigger` call must run before any libpam call
+            // (`with_pam_service` reads `PAM_SERVICE`, UID resolution calls `pam_get_user`).
+            // `fault_injection_tests::test_fault_inject_via_pam_hooks_returns_pam_ignore`
+            // passes a synthetic handle and stays safe only because the armed panic fires
+            // first; moving this call below a libpam access would dereference that pointer.
+            // Pinned by `tests/invariants` (PHS11).
             #[cfg(feature = "fault-injection")]
             fault_injection::trigger(config.fault_inject);
 
