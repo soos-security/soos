@@ -44,7 +44,9 @@ id = "arcface_w600k_mbf"
 filename = "arcface_w600k_mbf.onnx"
 sha256 = "ffe014a45c9488506719d37fd578ece6661bb385535b36e8039975fa5d4683db"
 size_bytes = 136619444
-license = "MIT"
+# The source repository (garavv/arcface-onnx, revision 224c23c) declares no licence, so the
+# licence is recorded as the SPDX "NOASSERTION" value (GitHub #278, AI/DECISIONS.md).
+license = "NOASSERTION"
 source_url = "https://huggingface.co/garavv/arcface-onnx/resolve/main/arc.onnx"
 description = "ArcFace ResNet34 (Keras, tf2onnx export, ~34.1M params, 136.6 MB) 512D face embedding extractor; NHWC input_1 [N,112,112,3]"
 input_shape = [1, 3, 112, 112]
