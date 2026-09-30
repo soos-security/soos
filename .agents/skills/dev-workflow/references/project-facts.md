@@ -81,10 +81,19 @@ production never overrides it — `OrtPadDetector::new` only, enforced by the in
 |---|---|---|---|---|
 | `scrfd_500m_kps` | `scrfd_500m_kps.onnx` | 640×640 BGR, letterbox | `(x-127.5)/128` | 9 outputs (3 strides × score/bbox/kps); **scores are already sigmoided** [65] |
 | `minifasnet_v2_pad` | `minifasnet_v2_80x80.onnx` | 80×80 BGR, 2.7× expanded bbox | `x/255` | live class index **1** [72, 79]; `[PrintPhoto, Live, ScreenReplay]`, never overridden in production |
-| `arcface_w600k_mbf` | `arcface_w600k_mbf.onnx` | 112×112 aligned, **NHWC**, **BGR** [68, 71] | `(x-127.5)/127.5` | 512D, L2-normalized |
+| `arcface_w600k_mbf` | `arcface_w600k_mbf.onnx` | 112×112 aligned, **NHWC** `input_1` `[N,112,112,3]`, fed **BGR** [68, 71] | `(x-127.5)/127.5` | **ArcFace ResNet34** (tf2onnx, 34.1 M params, 136.6 MB), **not** MobileFaceNet — the id is historical [102]; output `embedding` `[N,512]`, L2-normalized by the extractor; trained channel order / normalization unverified |
 
 Any change to channel order, layout, class index or normalization MUST be validated against the real
 `.onnx` metadata (input/output shapes) — mocks alone hid four shipped bugs [65, 66, 68, 71].
+
+`input_shape` is the logical `[N, C, H, W]` shape; `input_layout` (default `"NCHW"`, `"NHWC"` for the
+embedding model) is the physical layout. `ModelRegistry::get_or_load_session` validates every
+session's I/O shapes against the manifest (symbolic dims are wildcards) and fails closed with
+`InferenceError::ModelShapeMismatch` [102]. Never rename manifest ids or file names to "fix" a
+description: `soos-daemon` and `soos-enroll` reference them. Real-model evidence targets:
+`crates/inference-ort/tests/pad_real_model_tests.rs` [87] and `embedding_real_model_tests.rs` [102]
+(skip cleanly without `/var/lib/soos/models`). MJPEG frames are bounded (`MAX_MJPEG_COMPRESSED_BYTES`
+16 MiB, `MAX_MJPEG_DIMENSION` 4096) and the SOF header must equal the negotiated frame size [102].
 
 ## 5. Quality Commands (identical locally and in CI)
 
