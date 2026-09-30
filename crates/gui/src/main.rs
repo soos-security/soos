@@ -13,6 +13,10 @@ use soos_enrollment_cli::service::{
 };
 use soos_gui::app::SoosApp;
 use soos_gui::args::GuiArgs;
+use soos_gui::camera_mode::{
+    decide_camera_mode, probe_daemon_socket, CameraMode, DaemonSocketProbe,
+    UnavailableCameraManager,
+};
 use soos_inference_ort::{
     MockEmbeddingExtractor, MockFaceDetector, MockPadDetector, ModelRegistry,
     OrtEmbeddingExtractor, OrtPadDetector, OrtScrfdDetector, RegistryConfig,
@@ -42,6 +46,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     // 2. Initialize Camera and Neural Models
+    let mut camera_notice: Option<String> = None;
     let (camera, pipeline): (Arc<dyn CameraManager>, Arc<VisionPipeline>) = if args.mock {
         let camera_config = CameraConfigBuilder::new().build();
         let cam: Arc<dyn CameraManager> = Arc::new(MockCameraManager::new(camera_config));
@@ -57,30 +62,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         (cam, pipe)
     } else {
         let daemon_sock = std::path::Path::new("/run/soos/daemon.sock");
-        // GitHub #143: the daemon serves preview frames only to root or to UIDs listed in its
-        // `[preview]` configuration; probe the authorization once before committing to IPC.
-        let preview_probe = if daemon_sock.exists() {
-            soos_gui::IpcCameraManager::probe_preview(daemon_sock)
-        } else {
-            Err(soos_gui::IpcPreviewError::Io)
-        };
-        let cam: Arc<dyn CameraManager> = match preview_probe {
-            Ok(()) => {
+        // GitHub #150: the root daemon is the exclusive owner of /dev/video*. Direct V4L2 access
+        // is only allowed when the daemon is provably not running; otherwise stream through the
+        // daemon IPC (GitHub #143 preview authorization) or show an actionable blocked state.
+        let socket_probe = probe_daemon_socket(daemon_sock);
+        let preview_probe = (socket_probe == DaemonSocketProbe::Reachable)
+            .then(|| soos_gui::IpcCameraManager::probe_preview(daemon_sock));
+        let mode = decide_camera_mode(socket_probe, preview_probe, SoosApp::is_daemon_active());
+        let cam: Arc<dyn CameraManager> = match mode {
+            CameraMode::DaemonIpc => {
                 tracing::info!(
                     "Connected to 'soos-daemon' video proxy at '{}'. Streaming via daemon IPC.",
                     daemon_sock.display()
                 );
-                Arc::new(soos_gui::IpcCameraManager::spawn_default())
+                Arc::new(soos_gui::IpcCameraManager::spawn(daemon_sock))
             }
-            Err(err) => {
-                if daemon_sock.exists() {
-                    tracing::warn!(
-                        error = %err,
-                        "soos-daemon video proxy is not usable for this user (enable it with \
-                         `[preview] enabled = true` and `allowed_uids` in /etc/soos/daemon.toml); \
-                         falling back to direct V4L2 access"
-                    );
-                }
+            CameraMode::Blocked(reason) => {
+                let message = reason.user_message();
+                tracing::warn!(reason = ?reason, "{message}");
+                camera_notice = Some(message);
+                Arc::new(UnavailableCameraManager)
+            }
+            CameraMode::DirectV4l => {
+                // Same shared resolver as soos-daemon and soos-enroll (GitHub #152).
                 let device_path = resolve_camera_device_from_config(
                     args.camera_device,
                     Some(std::path::Path::new("/etc/soos/daemon.toml")),
@@ -91,7 +95,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .idle_timeout(std::time::Duration::ZERO)
                     .build();
                 tracing::info!(
-                    "Opening direct V4L2 camera device '{}'",
+                    "soos-daemon is not running; opening direct V4L2 camera device '{}'",
                     device_path.display()
                 );
                 Arc::new(V4lCameraManager::spawn(camera_config)?)
@@ -132,13 +136,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "SOOS — Biometric Management & Live Analysis",
         native_options,
         Box::new(move |cc| {
-            Ok(Box::new(SoosApp::new(
-                cc,
-                store,
-                camera,
-                pipeline,
-                is_system_store,
-            )))
+            let mut app = SoosApp::new(cc, store, camera, pipeline, is_system_store);
+            app.set_camera_notice(camera_notice);
+            Ok(Box::new(app))
         }),
     )?;
 

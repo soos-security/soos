@@ -66,6 +66,9 @@ pub struct SoosApp {
     // Sub-states
     enrollment: EnrollmentGuiState,
     profiles: ProfilesGuiState,
+
+    /// Camera ownership notice shown instead of the feed (GitHub #150).
+    camera_notice: Option<String>,
 }
 
 impl SoosApp {
@@ -150,10 +153,16 @@ impl SoosApp {
             show_crop_inset: true,
             enrollment: EnrollmentGuiState::default(),
             profiles: ProfilesGuiState::default(),
+            camera_notice: None,
         };
 
         app.refresh_profiles();
         app
+    }
+
+    /// Sets the camera ownership notice rendered in place of the camera feed (GitHub #150).
+    pub fn set_camera_notice(&mut self, notice: Option<String>) {
+        self.camera_notice = notice;
     }
 
     /// Reloads the enrolled profiles list from the biometric store.
@@ -1116,6 +1125,12 @@ impl eframe::App for SoosApp {
                     AppTab::GuidedEnrollment => self.render_guided_enrollment(ui, frame),
                     AppTab::Profiles => self.render_profiles(ui),
                 }
+            } else if let Some(notice) = self.camera_notice.as_deref() {
+                ui.vertical_centered(|ui| {
+                    ui.add_space(100.0);
+                    ui.heading("Camera unavailable");
+                    ui.colored_label(Color32::YELLOW, notice);
+                });
             } else {
                 ui.vertical_centered(|ui| {
                     ui.add_space(100.0);

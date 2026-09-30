@@ -123,6 +123,26 @@ pub fn build_pad_detector(
     soos_inference_ort::OrtPadDetector::new(pad_session, pad_threshold)
 }
 
+/// Returns the camera configuration with its device resolved by the single shared resolver
+/// [`soos_camera_v4l::resolve_camera_device`] (GitHub #152), exactly like `soos-enroll` and
+/// `soos-gui`: an explicit `camera_device` is honored verbatim, the auto sentinel triggers
+/// sensor-preference auto-detection (stable by-id alias). The mock camera never enumerates.
+pub fn resolve_pipeline_camera(
+    config: &crate::config::PipelineConfig,
+    enumerator: &dyn soos_camera_v4l::CameraEnumerator,
+) -> soos_camera_v4l::CameraConfig {
+    let mut camera_cfg = config.camera.clone();
+    if !config.use_mock_camera {
+        let resolution = soos_camera_v4l::resolve_camera_device(
+            camera_cfg.explicit_device(),
+            camera_cfg.sensor_preference,
+            enumerator,
+        );
+        camera_cfg.device_path = resolution.path;
+    }
+    camera_cfg
+}
+
 /// Initializes all production pipeline components from a strongly-typed [`PipelineConfig`].
 ///
 /// This includes:
@@ -139,24 +159,8 @@ pub fn initialize_pipeline(
     config: &crate::config::PipelineConfig,
 ) -> Result<PipelineComponents, crate::error::DaemonError> {
     // 1. Camera Manager
-    let mut camera_cfg = config.camera.clone();
-    if !config.use_mock_camera
-        && (camera_cfg.device_path == std::path::Path::new("/dev/v4l/by-id/default-camera")
-            || !camera_cfg.device_path.exists())
-    {
-        let candidates = soos_camera_v4l::enumerate_capture_devices();
-        if let Some(selected) =
-            soos_camera_v4l::select_camera_device(&candidates, camera_cfg.sensor_preference)
-        {
-            tracing::info!(
-                selected = %selected.path.display(),
-                sensor_type = ?selected.sensor_type(),
-                preference = ?camera_cfg.sensor_preference,
-                "Auto-selected camera device matching sensor preference"
-            );
-            camera_cfg.device_path = selected.path.clone();
-        }
-    }
+    let camera_cfg =
+        resolve_pipeline_camera(config, &soos_camera_v4l::SystemCameraEnumerator::default());
 
     let camera: Arc<dyn CameraManager> = if config.use_mock_camera {
         tracing::info!("Initializing mock camera manager for simulation/testing");

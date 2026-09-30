@@ -250,23 +250,19 @@ impl DaemonConfig {
 
         if let Some(pipe) = file.pipeline {
             if let Some(camera_device) = pipe.camera_device {
-                if camera_device.as_os_str() != "auto" && !camera_device.as_os_str().is_empty() {
+                // Shared sentinel vocabulary with soos-enroll / soos-gui (GitHub #152):
+                // "", "auto" and "default" keep the auto-detection sentinel.
+                if !soos_camera_v4l::is_auto_camera_device(&camera_device) {
                     config.pipeline.camera.device_path = camera_device;
                 }
             }
             config.pipeline.camera.warmup_frames = pipe.warmup_frames.unwrap_or(0);
-            if let Some(sensor_pref) = pipe.sensor_preference {
-                match sensor_pref.to_lowercase().as_str() {
-                    "prefer_ir" | "ir" => {
-                        config.pipeline.camera.sensor_preference =
-                            soos_camera_v4l::SensorPreference::PreferIr;
-                    }
-                    "prefer_rgb" | "rgb" => {
-                        config.pipeline.camera.sensor_preference =
-                            soos_camera_v4l::SensorPreference::PreferRgb;
-                    }
-                    _ => {}
-                }
+            if let Some(preference) = pipe
+                .sensor_preference
+                .as_deref()
+                .and_then(soos_camera_v4l::parse_sensor_preference)
+            {
+                config.pipeline.camera.sensor_preference = preference;
             }
             if let Some(idle_secs) = pipe.idle_timeout_secs {
                 config.pipeline.camera.idle_timeout = Duration::from_secs(idle_secs);

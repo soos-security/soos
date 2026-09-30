@@ -8,6 +8,7 @@ pub mod error;
 pub mod frame;
 pub mod manager;
 pub mod mock;
+pub mod resolver;
 pub mod sensor;
 pub mod v4l_impl;
 
@@ -16,6 +17,10 @@ pub use error::CameraError;
 pub use frame::{Frame, PixelFormat};
 pub use manager::CameraManager;
 pub use mock::MockCameraManager;
+pub use resolver::{
+    is_auto_camera_device, parse_sensor_preference, resolve_camera_device, CameraEnumerator,
+    CameraResolution, CameraResolutionSource, SystemCameraEnumerator, AUTO_CAMERA_DEVICE,
+};
 pub use sensor::{
     classify_sensor, enumerate_capture_devices, select_camera_device, CameraDeviceInfo,
     SensorPreference, SensorType,
