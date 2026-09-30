@@ -88,9 +88,10 @@ fn test_daemon_reports_ready_only_after_socket_bind() {
     let ready = main
         .find("sd_notify::notify_ready()")
         .expect("main.rs must send READY=1 (Type=notify)");
+    // The accept loop lives in `shutdown::accept_until_shutdown` (GitHub #259).
     let accept = main
-        .find("listener.accept()")
-        .expect("main.rs accepts connections");
+        .find("accept_until_shutdown(")
+        .expect("main.rs runs the accept loop");
     assert!(
         bind < ready && ready < accept,
         "READY=1 must be sent after the socket is bound and before the accept loop"
