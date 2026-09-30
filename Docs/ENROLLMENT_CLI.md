@@ -7,7 +7,7 @@
 ## 1. Architectural Role & Security Invariants
 
 In accordance with `AI/ARCHITECTURE.md` (§8 Monorepo Structure, §9 Privacy, Persistence, and Anti-Intrusion):
-- **Root-Only Modification**: State-modifying operations (`enroll`, `delete`) mandate root execution (effective UID 0), preventing unauthorized tampering with biometric credentials.
+- **Root-Only Modification**: State-modifying operations (`enroll`, `delete`) mandate root execution (effective UID 0), preventing unauthorized tampering with biometric credentials. Arguments are parsed before the privilege check, so `--help`, `--version` and usage errors work for any user; every subcommand still requires root (GitHub #237).
 - **Single-Face Security Invariant**: The tool strictly enforces that exactly one human face is visible in any frame evaluated for enrollment or verification. Multi-face or zero-face candidate frames are rejected.
 - **Encrypted Persistence**: All biometric templates are serialized to canonical CBOR and encrypted using authenticated AES-256-GCM via `soos-biometric-store` under `/var/lib/soos/biometrics/<uid>.cbor.enc` with POSIX permissions `0600` owned by `root:root`.
 - **Template Erasure (honest scope)**: `delete` and re-`enroll` overwrite the discarded template file in place with kernel CSPRNG bytes (3 passes, each followed by `fsync()`) before it is unlinked or replaced, then sync the directory. This is **best effort only**: it does not reach the physical blocks on copy-on-write filesystems (btrfs, ZFS), with data journaling, snapshots or backups, or on SSD/eMMC media with wear levelling. The actual guarantee is that every template is AES-256-GCM ciphertext under `/var/lib/soos/master.key`; residual copies are unreadable without that key, and destroying the key (together with full-disk encryption for the key file itself) is the only complete erasure. See ADR 2026-09-30 "Biometric Template Erasure Model" in `AI/DECISIONS.md` and `Docs/BIOMETRIC_STORE_CRATE.md` §3.4.
@@ -39,7 +39,7 @@ sudo soos-enroll enroll --username alice --yes
 - `-u, --username <NAME>`: Target username (resolved via system user database).
 - `--frames <N>`: Number of candidate frames to capture and evaluate (default: 5, bounded 1–30).
   Each candidate after the first is a distinct capture: the CLI waits up to `ENROLL_FRESH_FRAME_TIMEOUT_MS` = 500 ms for a frame whose `sequence` is greater than the previous candidate's and fails with a starved-camera error otherwise (nothing stored). A frame rejected by presentation attack detection is an invalid candidate, shown as `PAD-rejected frames` in the confirmation summary, and does not abort the enrollment; if no candidate is valid and at least one was PAD-rejected, the PAD error is reported (GitHub #228 / STO-05).
-- `-y, --yes`: Automatically confirm enrollment without interactive confirmation prompt.
+- `-y, --yes`: Automatically confirm enrollment without interactive confirmation prompt. Without it, the confirmation summary warns when the user is already enrolled and saving replaces the existing template (`EnrollmentSummary::already_enrolled`, GitHub #233).
 - `--model-id <ID>`: Override of the embedding model identifier stored in template metadata. Default: the loaded embedding extractor `MODEL_ID_EMBEDDING` = `arcface_w600k_mbf` (GitHub #182 / STO-09; the former `mobilefacenet` default is retired per ADR 2026-09-20).
 - `--model-version <VER>`: Override of the model version stored in template metadata. Default: `EMBEDDING_MODEL_VERSION` = `2.0.0`, the attested `models/manifest.toml` version (pinned by a test).
 - Any override that differs from the loaded model prints a warning before capture and sets `model_overridden` in the confirmation summary: `soos-daemon` refuses templates whose `model_id` differs from its loaded extractor (`Verdict::Unavailable` / `ReasonClass::ModelUnavailable`, PAM falls back to the next module), so such a template can never authenticate. Migration aid: templates recorded with the retired default, exactly `mobilefacenet` / `1.0.0`, contain ArcFace vectors and are still accepted as a legacy alias with a warning recommending re-enrollment (ADR 2026-09-30 "Embedding Model Binding and Legacy Model Alias"); any other version or id is refused. Re-enroll affected users (`soos-enroll list` shows the recorded model) before the alias is removed.
@@ -79,6 +79,8 @@ sudo soos-enroll list --format json
 
 `list` reads each template through `BiometricStore::get_metadata`: the file is authenticated and decrypted, but the embedding vector is never materialised, and a template file larger than `MAX_TEMPLATE_FILE_BYTES` (64 KiB) is refused as corrupt before it is read (GitHub #235 / STO-19).
 
+The JSON array is produced by `serde_json` (`format_enrolled_json`), so usernames and model identifiers containing quotes or backslashes are escaped (GitHub #232).
+
 ### `soos-enroll import`
 Imports an existing embedding (JSON array of 512 finite floats, or a CBOR `BiometricTemplate`) into the encrypted store. This is the command the GUI runs through `pkexec` (GitHub #156, review findings CAM-08 / STO-12):
 
@@ -96,8 +98,9 @@ Input contract (`crates/enrollment-cli/src/service.rs`):
 - **Zeroized**: the raw input and the parsed embedding live in `Zeroizing` buffers.
 - **File inputs** (`read_import_file`): opened with `O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK` and checked on the open descriptor: regular file only (symlinks, directories and FIFOs are refused), at most 64 KiB, and, under `pkexec`, owned by the invoking user (`PKEXEC_UID`, parsed by `parse_pkexec_uid`), so a Polkit caller cannot make root import another user's file.
 - Nothing is stored when any check fails.
+- **No silent overwrite** (GitHub #237): a file import onto a user who already has a template fails with `EnrollmentCliError::AlreadyEnrolled` before the file is read; pass `-y, --yes` to replace it. The standard-input channel (`--file -`) is the GUI's non-interactive path, whose enrollment flow is the confirmation; it replaces an existing template and reports it (`EnrollmentOutcome::replaced_existing`), and the CLI prints a warning whenever a template was replaced.
 
-Verification: `crates/enrollment-cli/tests/import_stdin_tests.rs` and `import_tests.rs` (matrix rows ISE5–ISE7).
+Verification: `crates/enrollment-cli/tests/import_stdin_tests.rs`, `import_tests.rs` (matrix rows ISE5–ISE7) and `cli_hygiene_tests.rs` (rows CDJ5–CDJ7).
 
 ### `soos-enroll debug-vision`
 Captures one camera frame, runs the face detector and writes a standalone HTML report drawing the bounding boxes, confidence scores and 5-point landmarks on an HTML5 canvas (GitHub #149 / STO-02 hardening):

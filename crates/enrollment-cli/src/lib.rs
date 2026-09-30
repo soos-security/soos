@@ -20,15 +20,15 @@ pub mod shred;
 
 pub use args::{
     resolve_default_target_uid, sanitize_path, validate_camera_device_path, validate_fhs_path, Cli,
-    Commands, DebugVisionArgs, DeleteArgs, EnrollArgs, ImportArgs, ListArgs, OutputFormat,
-    VerifyArgs, ALLOWED_FHS_PREFIXES,
+    Commands, DebugVisionArgs, DeleteArgs, EnrollArgs, ImportArgs, ImportCommand, ListArgs,
+    OutputFormat, VerifyArgs, ALLOWED_FHS_PREFIXES,
 };
 pub use error::EnrollmentCliError;
 pub use guided_enrollment::{EnrollmentStep, EnrollmentStepFeedback, GuidedEnrollmentSession};
 pub use quality::{select_best_frame, BestCandidate, CandidateEvaluation};
 pub use service::{
-    build_full_service, build_service, build_store_only, check_privileges, ensure_debug_report_dir,
-    resolve_camera_device, resolve_camera_device_from_config,
+    build_full_service, build_store_only, check_privileges, ensure_debug_report_dir,
+    format_enrolled_json, resolve_camera_device, resolve_camera_device_from_config,
     resolve_camera_device_from_config_with, resolve_debug_report_path, write_debug_report,
     DiagnosticVerificationReport, EnrolledUserSummary, EnrollmentOutcome, EnrollmentService,
     EnrollmentSummary, LatencyBreakdown, DEBUG_REPORT_DIR_MODE, DEBUG_REPORT_FILE_MODE,

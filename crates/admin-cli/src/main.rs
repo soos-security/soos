@@ -16,7 +16,7 @@ use soos_admin_cli::error::AdminCliError;
 use soos_admin_cli::logs::fetch_and_filter_logs;
 use soos_admin_cli::redact::DefaultRedactionFilter;
 use soos_admin_cli::status::query_status;
-use soos_admin_cli::test_pam::simulate_pam_auth;
+use soos_admin_cli::test_pam::{effective_timeout_ms, simulate_pam_auth};
 use soos_admin_cli::user::add_user_to_soos_group;
 use soos_protocol::types::Verdict;
 
@@ -47,6 +47,14 @@ fn run() -> Result<(), AdminCliError> {
 
         Commands::TestPam(args) => {
             let uid = args.uid.unwrap_or_else(|| nix::unistd::getuid().as_raw());
+            let effective_ms = effective_timeout_ms(args.timeout_ms);
+            if effective_ms != args.timeout_ms {
+                eprintln!(
+                    "[WARN] --timeout-ms {} is outside the PAM range; using {effective_ms} ms \
+                     (pam_soos.so clamps timeout_ms the same way).",
+                    args.timeout_ms
+                );
+            }
             let report = simulate_pam_auth(&socket_path, uid, &args.service, args.timeout_ms)?;
 
             match cli.format {

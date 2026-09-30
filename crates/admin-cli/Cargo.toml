@@ -18,7 +18,7 @@ path = "src/lib.rs"
 [dependencies]
 clap = { workspace = true }
 thiserror = { workspace = true }
-nix = { workspace = true }
+nix = { workspace = true, features = ["time"] }
 libc = { workspace = true }
 getrandom = { workspace = true }
 serde = { workspace = true }

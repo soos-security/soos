@@ -163,6 +163,9 @@ pub struct EnrollmentSummary {
     /// model ([`MODEL_ID_EMBEDDING`] / [`EMBEDDING_MODEL_VERSION`]). The daemon refuses
     /// templates whose model identifier differs from its loaded extractor.
     pub model_overridden: bool,
+    /// `true` when the target user already has a template that confirming will replace
+    /// (GitHub #233): the confirmation prompt must say so.
+    pub already_enrolled: bool,
 }
 
 /// Outcome of a successfully completed enrollment.
@@ -174,6 +177,8 @@ pub struct EnrollmentOutcome {
     pub embedding_dim: usize,
     pub model_id: String,
     pub model_version: String,
+    /// `true` when an existing template of the same user was replaced.
+    pub replaced_existing: bool,
 }
 
 /// Latency metrics breakdown measured during diagnostic verification.
@@ -206,6 +211,16 @@ pub struct EnrolledUserSummary {
     pub model_version: String,
     pub enrollment_timestamp: u64,
     pub embedding_dim: usize,
+}
+
+/// Formats `soos-enroll list --format json` output with `serde_json` (GitHub #232).
+///
+/// Every string field (username, model identifier and version) is escaped, so the output is
+/// valid JSON whatever the stored metadata contains.
+#[must_use]
+pub fn format_enrolled_json(summaries: &[EnrolledUserSummary]) -> String {
+    serde_json::to_string_pretty(summaries)
+        .unwrap_or_else(|_| "{\"error\": \"list serialization failed\"}".to_string())
 }
 
 /// Core enrollment service orchestrator.
@@ -413,14 +428,13 @@ impl EnrollmentService {
             model_version: args.model_version.clone(),
             model_overridden: args.model_id != MODEL_ID_EMBEDDING
                 || args.model_version != EMBEDDING_MODEL_VERSION,
+            already_enrolled,
         };
 
-        if !args.yes {
-            if !prompt_confirm(&summary) {
-                return Err(EnrollmentCliError::Cancelled);
-            }
-        } else if already_enrolled {
-            // Overwriting silently allowed when --yes is explicitly passed
+        // `--yes` is the explicit consent to replace an existing template; otherwise the
+        // prompt shows `summary.already_enrolled` before the administrator confirms.
+        if !args.yes && !prompt_confirm(&summary) {
+            return Err(EnrollmentCliError::Cancelled);
         }
 
         let timestamp = SystemTime::now()
@@ -445,6 +459,7 @@ impl EnrollmentService {
             embedding_dim,
             model_id: args.model_id.clone(),
             model_version: args.model_version.clone(),
+            replaced_existing: already_enrolled,
         })
     }
 
@@ -618,20 +633,46 @@ impl EnrollmentService {
 
     /// Imports and encrypts an existing biometric template into the biometric store.
     ///
-    /// `--file -` ([`IMPORT_STDIN_PATH`]) reads the template from standard input (the GUI
-    /// path, GitHub #156); any other value is read through [`read_import_file`], which
-    /// requires the file to be owned by `PKEXEC_UID` when running under `pkexec`.
+    /// Equivalent to [`Self::import_with_overwrite`] without `--yes`: a file import onto an
+    /// already enrolled user fails with [`EnrollmentCliError::AlreadyEnrolled`].
     pub fn import(&self, args: &ImportArgs) -> Result<EnrollmentOutcome, EnrollmentCliError> {
+        self.import_with_overwrite(args, false)
+    }
+
+    /// Imports a template, replacing an existing one only when `allow_overwrite` (`--yes`).
+    ///
+    /// `--file -` ([`IMPORT_STDIN_PATH`]) reads the template from standard input (the GUI
+    /// path, GitHub #156) through [`Self::import_from_reader`]; any other value is read through
+    /// [`read_import_file`], which requires the file to be owned by `PKEXEC_UID` when running
+    /// under `pkexec`.
+    ///
+    /// # Errors
+    ///
+    /// [`EnrollmentCliError::AlreadyEnrolled`] when a file import targets an enrolled user and
+    /// `allow_overwrite` is `false`; the input is not read and nothing is replaced (GitHub #237).
+    pub fn import_with_overwrite(
+        &self,
+        args: &ImportArgs,
+        allow_overwrite: bool,
+    ) -> Result<EnrollmentOutcome, EnrollmentCliError> {
         if args.file.as_os_str() == IMPORT_STDIN_PATH {
             return self.import_from_reader(args, std::io::stdin().lock());
         }
         check_privileges(self.require_root)?;
+        let uid = resolve_target_uid(args.uid, args.username.as_deref())?;
+        if !allow_overwrite && self.store.exists(uid)? {
+            return Err(EnrollmentCliError::AlreadyEnrolled(uid));
+        }
         let invoker = parse_pkexec_uid(std::env::var("PKEXEC_UID").ok().as_deref())?;
         let bytes = read_import_file(&args.file, invoker)?;
         self.store_imported(args, &bytes)
     }
 
     /// Imports a template read from `reader` (at most [`MAX_IMPORT_INPUT_BYTES`] bytes).
+    ///
+    /// This is the non-interactive `--file -` channel of the GUI, which confirms the
+    /// enrollment itself before calling the helper; an existing template is replaced and the
+    /// replacement is reported in [`EnrollmentOutcome::replaced_existing`].
     ///
     /// # Errors
     ///
@@ -664,6 +705,7 @@ impl EnrollmentService {
         let template =
             BiometricTemplate::new(uid, model_id.clone(), model_version.clone(), now, embedding)?;
 
+        let replaced_existing = self.store.exists(uid)?;
         self.store.enroll(&template)?;
 
         Ok(EnrollmentOutcome {
@@ -673,6 +715,7 @@ impl EnrollmentService {
             embedding_dim: 512,
             model_id,
             model_version,
+            replaced_existing,
         })
     }
 
@@ -1146,9 +1189,4 @@ pub fn build_pad_detector(
     liveness_threshold: f32,
 ) -> OrtPadDetector {
     OrtPadDetector::new(pad_session, liveness_threshold)
-}
-
-/// Builds an `EnrollmentService` (full service alias for backward compatibility).
-pub fn build_service(cli: &Cli) -> Result<EnrollmentService, EnrollmentCliError> {
-    build_full_service(cli)
 }

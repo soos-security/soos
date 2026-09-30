@@ -31,6 +31,10 @@ mod physical_contract;
 #[cfg(test)]
 mod pam_deadline_contract;
 
+/// Storage CLI deadline, JSON, dead-code and privilege-order hygiene (GitHub #231-#237).
+#[cfg(test)]
+mod cli_hygiene_contract;
+
 /// Traceability tooling contract for `scripts/sync_issue.py` (GitHub #188).
 #[cfg(all(test, unix))]
 mod sync_issue_contract;

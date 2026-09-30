@@ -95,6 +95,7 @@ Sent by the PAM module to the daemon to request facial verification (and by `soo
 - `uid_hint: u32`: Declared UID from the PAM client (authoritatively cross-checked by the daemon using kernel `SO_PEERCRED`).
 - `service: String`: PAM service name (`"sudo"`, `"su"`, `"gdm-password"`...). Bounded to 64 bytes.
 - `deadline_monotonic_ns: u64`: Absolute monotonic deadline in nanoseconds. If exceeded, daemon immediately returns `Verdict::Unavailable`. `0` or `u64::MAX` means no client deadline (`DECISION_BUDGET_MS` applies). The daemon stops its decision `RESPONSE_WRITE_MARGIN_MS` (50 ms) before the earlier of this deadline and its own `connection_timeout` (measured from the start of request processing), and never starts an inference that would not finish in time; the response is then `Unavailable`/`Timeout` (or the consensus reached so far), never a silent overrun.
+  Every client reads this value from `CLOCK_MONOTONIC` (never the wall clock): `pam_soos.so` from its clamped `timeout_ms`, and the `soos-admin test-pam` diagnostic from `--timeout-ms` clamped to the same `10..=5000` ms range, so the diagnostic reproduces the budget PAM applies (GitHub #231, ADR 2026-09-30 "Storage CLI Output and Overwrite Hygiene").
 
 ### `Response`
 Returned by the daemon to the PAM module (and as the refusal of a `Status` or `PreviewFrame` request):
