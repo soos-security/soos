@@ -286,11 +286,12 @@ impl SoosPam {
                 return PamResultCode::PAM_IGNORE;
             }
 
-            let outcome = ipc::authenticate_before_with_progress(config, uid, auth_deadline, || {
-                if !silent {
-                    feedback.info("[soos] Looking for face...");
-                }
-            });
+            let outcome =
+                ipc::authenticate_before_with_progress(config, uid, auth_deadline, || {
+                    if !silent {
+                        feedback.info("[soos] Looking for face...");
+                    }
+                });
             if !silent {
                 feedback.info(feedback_message(&outcome));
             }
