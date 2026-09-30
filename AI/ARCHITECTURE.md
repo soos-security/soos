@@ -158,6 +158,13 @@ auth  optional                       pam_soos.so event=password-failed timeout_m
 | Arch Linux | `/etc/pam.d/system-auth` | Inserted into include chain; preserve `.pacnew` files during system updates. |
 | openSUSE | `/etc/pam.d/common-auth` | Managed via `pam-config`; inspect resulting stack before deployment. |
 
+**GDM (`/etc/pam.d/gdm-password`)**: managed by `soos-admin gdm enable` with
+`auth  [success=done default=ignore]  pam_soos.so timeout_ms=2500` inside a marked block placed
+before the first credential or shared-stack rule, after every in-file `pam_nologin`,
+`pam_succeed_if`, `pam_shells` and `pam_faillock preauth` rule; the gates of a delegated stack
+that run before its credential module are copied in front of it (ADR 2026-09-30 "GDM PAM Stack
+Placement", `Docs/DISTRIBUTION_DEPLOYMENT.md` section 2.1).
+
 Before deployment, always maintain an active root rescue shell, verify fallback to password in a VM, and test screensavers (`swaylock`, `hyprlock`), TTY, SSH, and `sudo`.
 
 ---

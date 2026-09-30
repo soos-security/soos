@@ -1,4 +1,10 @@
 //! Management functions for GDM login PAM integration and disable flag toggling.
+//!
+//! `gdm enable` places `pam_soos.so` after every pre-credential gate of the
+//! `gdm-password` auth stack (`pam_nologin`, `pam_succeed_if`, `pam_shells`,
+//! `pam_faillock preauth`), copying the gates of a delegated stack in front of it,
+//! so that a facial success never bypasses lockout or login restrictions
+//! (review finding STO-03, GitHub #177; ADR 2026-09-30 "GDM PAM Stack Placement").
 
 use serde::Serialize;
 use std::fs;
@@ -8,13 +14,53 @@ use std::path::{Path, PathBuf};
 
 use crate::args::GdmAction;
 use crate::error::AdminCliError;
+use crate::pam_stack::{delegated_gates, read_bounded_utf8, PamLine, ReadError};
 
-/// PAM line inserted into the GDM service file by `gdm enable`.
-pub const GDM_PAM_LINE: &str = "auth  sufficient  pam_soos.so timeout_ms=2500";
+pub use crate::pam_stack::{MAX_PAM_FILE_BYTES, MAX_PAM_INCLUDE_DEPTH};
+
+/// PAM rule inserted into the GDM service file by `gdm enable`. The explicit
+/// `[success=done default=ignore]` control is the one used by every packaged soos
+/// rule: a face match ends the auth phase with the accumulated result (so a failed
+/// `required` gate before it still fails the login), anything else is ignored. No
+/// `service=` argument: the module reads `PAM_SERVICE`, which drives `gdm.disable`.
+pub const GDM_PAM_LINE: &str = "auth  [success=done default=ignore]  pam_soos.so timeout_ms=2500";
+
+/// Rule written by releases before GitHub #177 (often at the top of the stack).
+/// `gdm enable` removes it and re-inserts [`GDM_PAM_LINE`] at the safe position.
+pub const LEGACY_GDM_PAM_LINE: &str = "auth  sufficient  pam_soos.so timeout_ms=2500";
+
+/// First line of the block managed by `gdm enable`.
+pub const GDM_BLOCK_BEGIN: &str = "# BEGIN soos-admin gdm enable (managed block, do not edit)";
+
+/// Last line of the block managed by `gdm enable`.
+pub const GDM_BLOCK_END: &str = "# END soos-admin gdm enable";
+
+/// File name of the PAM module that must be installed before `gdm enable`.
+pub const PAM_MODULE_FILE: &str = "pam_soos.so";
+
+/// PAM module directories probed by `soos-admin gdm enable` (same list as `scripts/install.sh`).
+pub const DEFAULT_PAM_MODULE_DIRS: &[&str] = &[
+    "/lib/x86_64-linux-gnu/security",
+    "/usr/lib/x86_64-linux-gnu/security",
+    "/lib/aarch64-linux-gnu/security",
+    "/usr/lib/aarch64-linux-gnu/security",
+    "/usr/lib64/security",
+    "/lib64/security",
+    "/usr/lib/security",
+    "/lib/security",
+];
 
 /// Suffix of the pristine copy kept next to an edited PAM file. `scripts/uninstall.sh`
 /// restores every `*.soos-backup` found in `/etc/pam.d` (GitHub #166).
 pub const PAM_BACKUP_SUFFIX: &str = ".soos-backup";
+
+/// Returns the first `<dir>/pam_soos.so` that is a regular file (symlinks resolved).
+#[must_use]
+pub fn find_pam_module(dirs: &[PathBuf]) -> Option<PathBuf> {
+    dirs.iter()
+        .map(|dir| dir.join(PAM_MODULE_FILE))
+        .find(|path| fs::metadata(path).is_ok_and(|m| m.is_file()))
+}
 
 /// Status summary of GDM PAM integration and disable flag.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -50,7 +96,10 @@ pub fn get_gdm_status(pam_file: &Path, disable_file: &Path) -> GdmStatus {
     }
 }
 
-/// Executes GDM configuration action (Status, Enable, Disable).
+/// Executes GDM configuration action (Status, Enable, Disable, Restore).
+///
+/// `Enable` does not check that the module is installed: the `soos-admin` binary
+/// calls [`find_pam_module`] first (tests run against temporary directories).
 pub fn configure_gdm(
     action: &GdmAction,
     pam_file: &Path,
@@ -77,7 +126,15 @@ pub fn configure_gdm(
             })?;
             Ok(get_gdm_status(pam_file, disable_file))
         }
+        GdmAction::Restore => {
+            restore_gdm_pam_file(pam_file)?;
+            Ok(get_gdm_status(pam_file, disable_file))
+        }
         GdmAction::Enable => {
+            // Place pam_soos.so first (backup + atomic replacement): if the stack is
+            // refused, the disable flag stays in place.
+            ensure_gdm_pam_line(pam_file)?;
+
             // Remove disable flag if present
             if disable_file.exists() {
                 fs::remove_file(disable_file).map_err(|e| {
@@ -87,9 +144,6 @@ pub fn configure_gdm(
                     ))
                 })?;
             }
-
-            // Ensure pam_soos.so is in the PAM file (backup + atomic replacement).
-            ensure_gdm_pam_line(pam_file)?;
 
             Ok(get_gdm_status(pam_file, disable_file))
         }
@@ -111,37 +165,36 @@ fn gdm_error(what: &str, path: &Path, err: &std::io::Error) -> AdminCliError {
     AdminCliError::GdmConfig(format!("{what} '{}': {err}", path.display()))
 }
 
-/// Inserts [`GDM_PAM_LINE`] into `pam_file` unless a `pam_soos.so` line is present.
+/// Inserts the managed block (gates + [`GDM_PAM_LINE`]) into `pam_file`.
 ///
-/// The original bytes are first saved to [`pam_backup_path`] (never overwritten when a
-/// backup already exists: it holds the pristine pre-soos state), then the new content
-/// is written to a temporary file in the same directory, fsynced and renamed over the
-/// original, so a crash never leaves a truncated PAM file. Symlinks and non-regular
-/// files are refused without any modification.
+/// The pristine content (without any soos rule) is first saved to
+/// [`pam_backup_path`] (never overwritten when a backup already exists: it holds the
+/// pristine pre-soos state), then the new content is written to a temporary file in
+/// the same directory, fsynced and renamed over the original, so a crash never leaves
+/// a truncated PAM file. Symlinks, non-regular, oversized and non-UTF-8 files, stacks
+/// without a credential anchor and stacks whose jumps would change are refused
+/// without any modification. A `pam_soos.so` rule written by the administrator is
+/// left untouched.
 fn ensure_gdm_pam_line(pam_file: &Path) -> Result<(), AdminCliError> {
-    let metadata = match fs::symlink_metadata(pam_file) {
-        Ok(metadata) => metadata,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+    let metadata = regular_file_metadata(pam_file, "PAM file")?;
+    let content = match read_bounded_utf8(pam_file) {
+        Ok(content) => content,
+        Err(ReadError::NotFound) => {
             return Err(AdminCliError::GdmConfig(format!(
                 "PAM file '{}' does not exist",
                 pam_file.display()
-            )));
+            )))
         }
-        Err(e) => return Err(gdm_error("Failed to inspect PAM file", pam_file, &e)),
+        Err(ReadError::Other(msg)) => return Err(AdminCliError::GdmConfig(msg)),
     };
-    if metadata.file_type().is_symlink() || !metadata.is_file() {
-        return Err(AdminCliError::GdmConfig(format!(
-            "Refusing to edit '{}': not a regular file (symlink or special file)",
-            pam_file.display()
-        )));
-    }
+    let include_dir = pam_file
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
 
-    let original =
-        fs::read(pam_file).map_err(|e| gdm_error("Failed to read PAM file", pam_file, &e))?;
-    let content = String::from_utf8_lossy(&original);
-    if content.contains("pam_soos.so") {
+    let Some(plan) = plan_gdm_enable(&content, include_dir)? else {
         return Ok(());
-    }
+    };
 
     // Never propagate group/world write permission to the rewritten file or its backup.
     let mode = metadata.permissions().mode() & 0o7755;
@@ -151,25 +204,232 @@ fn ensure_gdm_pam_line(pam_file: &Path) -> Result<(), AdminCliError> {
     match fs::symlink_metadata(&backup) {
         Ok(_) => {}
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            write_atomic(&backup, &original, mode, owner)?;
+            write_atomic(&backup, plan.pristine.as_bytes(), mode, owner)?;
         }
         Err(e) => return Err(gdm_error("Failed to inspect PAM backup", &backup, &e)),
     }
+    write_atomic(pam_file, plan.updated.as_bytes(), mode, owner)
+}
 
-    let mut new_lines = Vec::new();
-    let mut inserted = false;
-    for line in content.lines() {
-        if !inserted && line.contains("@include common-auth") {
-            new_lines.push(GDM_PAM_LINE.to_string());
-            inserted = true;
+/// Result of [`plan_gdm_enable`] when the file must be rewritten.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct EnablePlan {
+    /// Content without any soos rule (what the backup must hold).
+    pristine: String,
+    /// Content with the managed block at the safe position.
+    updated: String,
+}
+
+/// Computes the rewritten GDM service file, or `None` when nothing must change.
+fn plan_gdm_enable(content: &str, include_dir: &Path) -> Result<Option<EnablePlan>, AdminCliError> {
+    if content.lines().any(|l| l.trim_end().ends_with('\\')) {
+        return Err(AdminCliError::GdmConfig(
+            "PAM file uses line continuations; refusing to edit it automatically".into(),
+        ));
+    }
+    let pristine = strip_managed_rules(content)?;
+    let admin_rule = pristine
+        .lines()
+        .filter_map(PamLine::parse)
+        .any(|line| line.module_name() == Some(PAM_MODULE_FILE));
+    if admin_rule {
+        return Ok(None);
+    }
+
+    let lines: Vec<&str> = pristine.split_inclusive('\n').collect();
+    let mut anchor = None;
+    let mut ordinal = 0_usize;
+    let mut jumps = Vec::new();
+    for (index, raw) in lines.iter().enumerate() {
+        let Some(rule) = PamLine::parse(raw) else {
+            continue;
+        };
+        if !rule.is_auth() {
+            continue;
         }
-        new_lines.push(line.to_string());
+        if rule.delegation().is_none() && rule.is_pre_credential() {
+            if let Some(jump) = rule.max_jump() {
+                jumps.push((ordinal, jump));
+            }
+            ordinal = ordinal.saturating_add(1);
+            continue;
+        }
+        anchor = Some((index, rule));
+        break;
     }
-    if !inserted {
-        new_lines.insert(0, GDM_PAM_LINE.to_string());
+    let Some((anchor_index, anchor_rule)) = anchor else {
+        return Err(AdminCliError::GdmConfig(
+            "no credential module (pam_unix.so) or shared auth stack (include/substack/@include) \
+             found in the PAM file; refusing to guess where pam_soos.so belongs"
+                .into(),
+        ));
+    };
+    // A jump from a rule before the insertion point that lands on or beyond it would
+    // silently change target once rules are inserted.
+    for (from, jump) in jumps {
+        if from.saturating_add(jump).saturating_add(1) >= ordinal {
+            return Err(AdminCliError::GdmConfig(
+                "a [...=N] jump before the insertion point would change target; \
+                 refusing to edit the PAM file automatically"
+                    .into(),
+            ));
+        }
     }
-    new_lines.push(String::new());
-    write_atomic(pam_file, new_lines.join("\n").as_bytes(), mode, owner)
+
+    let already_present: Vec<String> = lines
+        .iter()
+        .take(anchor_index)
+        .filter_map(|raw| PamLine::parse(raw))
+        .filter_map(|rule| normalized_rule(&rule))
+        .collect();
+    let gates = match anchor_rule.delegation() {
+        Some(target) => delegated_gates(include_dir, target)?,
+        None => Vec::new(),
+    };
+
+    let mut updated = String::with_capacity(pristine.len().saturating_add(512));
+    for raw in lines.iter().take(anchor_index) {
+        updated.push_str(raw);
+    }
+    updated.push_str(GDM_BLOCK_BEGIN);
+    updated.push('\n');
+    for gate in gates {
+        let duplicate = PamLine::parse(&gate)
+            .and_then(|rule| normalized_rule(&rule))
+            .is_some_and(|norm| already_present.contains(&norm));
+        if !duplicate {
+            updated.push_str(&gate);
+            updated.push('\n');
+        }
+    }
+    updated.push_str(GDM_PAM_LINE);
+    updated.push('\n');
+    updated.push_str(GDM_BLOCK_END);
+    updated.push('\n');
+    for raw in lines.iter().skip(anchor_index) {
+        updated.push_str(raw);
+    }
+
+    if updated == content {
+        return Ok(None);
+    }
+    Ok(Some(EnablePlan { pristine, updated }))
+}
+
+/// `"<module basename> <args>"` of a non-delegating rule, for duplicate detection.
+fn normalized_rule(rule: &PamLine<'_>) -> Option<String> {
+    let name = rule.module_name()?;
+    let PamLine::Rule { args, .. } = rule else {
+        return None;
+    };
+    Some(
+        std::iter::once(name)
+            .chain(args.iter().copied())
+            .collect::<Vec<_>>()
+            .join(" "),
+    )
+}
+
+/// Removes the managed block and any [`LEGACY_GDM_PAM_LINE`] / bare
+/// [`GDM_PAM_LINE`] rule, preserving every other byte.
+fn strip_managed_rules(content: &str) -> Result<String, AdminCliError> {
+    let squash = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
+    let legacy = squash(LEGACY_GDM_PAM_LINE);
+    let current = squash(GDM_PAM_LINE);
+    let mut out = String::with_capacity(content.len());
+    let mut in_block = false;
+    for raw in content.split_inclusive('\n') {
+        let trimmed = raw.trim();
+        if in_block {
+            if trimmed == GDM_BLOCK_END {
+                in_block = false;
+            }
+            continue;
+        }
+        if trimmed == GDM_BLOCK_BEGIN {
+            in_block = true;
+            continue;
+        }
+        if trimmed == GDM_BLOCK_END {
+            return Err(AdminCliError::GdmConfig(
+                "unbalanced soos managed block in the PAM file; restore it first".into(),
+            ));
+        }
+        let squashed = squash(trimmed);
+        if squashed == legacy || squashed == current {
+            continue;
+        }
+        out.push_str(raw);
+    }
+    if in_block {
+        return Err(AdminCliError::GdmConfig(
+            "unterminated soos managed block in the PAM file; restore it first".into(),
+        ));
+    }
+    Ok(out)
+}
+
+/// Metadata of `path`, refusing symlinks and non-regular files.
+fn regular_file_metadata(path: &Path, what: &str) -> Result<fs::Metadata, AdminCliError> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(AdminCliError::GdmConfig(format!(
+                "{what} '{}' does not exist",
+                path.display()
+            )));
+        }
+        Err(e) => return Err(gdm_error(&format!("Failed to inspect {what}"), path, &e)),
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(AdminCliError::GdmConfig(format!(
+            "Refusing to use '{}': not a regular file (symlink or special file)",
+            path.display()
+        )));
+    }
+    Ok(metadata)
+}
+
+/// Restores `pam_file` from its [`pam_backup_path`] copy (bytes, mode and owner),
+/// atomically, then removes the backup. Fails without any change when the backup is
+/// missing, a symlink, not a regular file or larger than [`MAX_PAM_FILE_BYTES`].
+fn restore_gdm_pam_file(pam_file: &Path) -> Result<(), AdminCliError> {
+    let backup = pam_backup_path(pam_file);
+    let backup_meta = regular_file_metadata(&backup, "PAM backup")?;
+    match fs::symlink_metadata(pam_file) {
+        Ok(meta) if meta.file_type().is_symlink() || !meta.is_file() => {
+            return Err(AdminCliError::GdmConfig(format!(
+                "Refusing to replace '{}': not a regular file (symlink or special file)",
+                pam_file.display()
+            )));
+        }
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(gdm_error("Failed to inspect PAM file", pam_file, &e)),
+    }
+    if backup_meta.len() > MAX_PAM_FILE_BYTES {
+        return Err(AdminCliError::GdmConfig(format!(
+            "PAM backup '{}' exceeds {MAX_PAM_FILE_BYTES} bytes",
+            backup.display()
+        )));
+    }
+    let bytes =
+        fs::read(&backup).map_err(|e| gdm_error("Failed to read PAM backup", &backup, &e))?;
+    let mode = backup_meta.permissions().mode() & 0o7755;
+    write_atomic(
+        pam_file,
+        &bytes,
+        mode,
+        (backup_meta.uid(), backup_meta.gid()),
+    )?;
+    fs::remove_file(&backup).map_err(|e| gdm_error("Failed to remove PAM backup", &backup, &e))?;
+    let dir = pam_file
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    fs::File::open(dir)
+        .and_then(|d| d.sync_all())
+        .map_err(|e| gdm_error("Failed to sync PAM directory", dir, &e))
 }
 
 /// Writes `bytes` to `target` atomically: exclusive temporary file in the same

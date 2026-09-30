@@ -75,6 +75,26 @@ fn run() -> Result<(), AdminCliError> {
         }
 
         Commands::Gdm(args) => {
+            if args.action == soos_admin_cli::GdmAction::Enable {
+                // Never point GDM at a module that is not installed (GitHub #177).
+                let dirs: Vec<std::path::PathBuf> = match &args.pam_module_dir {
+                    Some(dir) => vec![dir.clone()],
+                    None => soos_admin_cli::gdm::DEFAULT_PAM_MODULE_DIRS
+                        .iter()
+                        .map(std::path::PathBuf::from)
+                        .collect(),
+                };
+                if soos_admin_cli::gdm::find_pam_module(&dirs).is_none() {
+                    return Err(AdminCliError::GdmConfig(format!(
+                        "{} not found in {}; install soos first or pass --pam-module-dir",
+                        soos_admin_cli::gdm::PAM_MODULE_FILE,
+                        dirs.iter()
+                            .map(|d| d.display().to_string())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )));
+                }
+            }
             let status = soos_admin_cli::gdm::configure_gdm(
                 &args.action,
                 &args.pam_file,

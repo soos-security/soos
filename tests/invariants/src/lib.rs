@@ -3402,4 +3402,40 @@ mod tests {
             );
         }
     }
+
+    /// Invariant (STO-07, GitHub #180): every `gdm_tests::test_*` /
+    /// `gdm_stack_order_tests::test_*` reference in the verification matrix names an
+    /// existing test function, and `GDM_PAM_LINE` exists in the admin CLI.
+    #[test]
+    fn test_matrix_gdm_references_resolve_to_real_tests() {
+        let root = workspace_root();
+        let matrix = fs::read_to_string(root.join("AI/VERIFICATION_MATRIX.md")).expect("matrix");
+        let mut checked = 0_usize;
+        for suite in ["gdm_tests", "gdm_stack_order_tests"] {
+            let source =
+                fs::read_to_string(root.join(format!("crates/admin-cli/tests/{suite}.rs")))
+                    .expect("gdm test suite");
+            let prefix = format!("`{suite}::");
+            for (start, _) in matrix.match_indices(&prefix) {
+                let rest = &matrix[start + prefix.len()..];
+                let name: String = rest
+                    .chars()
+                    .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                    .collect();
+                assert!(
+                    source.contains(&format!("fn {name}(")),
+                    "AI/VERIFICATION_MATRIX.md cites {suite}::{name}, which does not exist"
+                );
+                checked += 1;
+            }
+        }
+        assert!(
+            checked >= 10,
+            "the GDM rows must cite their tests ({checked} found)"
+        );
+        let gdm = fs::read_to_string(root.join("crates/admin-cli/src/gdm.rs")).expect("gdm.rs");
+        if matrix.contains("`GDM_PAM_LINE`") {
+            assert!(gdm.contains("pub const GDM_PAM_LINE"));
+        }
+    }
 }

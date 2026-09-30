@@ -66,6 +66,8 @@ pub enum GdmAction {
     Enable,
     /// Disable GDM facial authentication (creates /etc/soos/gdm.disable).
     Disable,
+    /// Restore the pristine PAM file from its `.soos-backup` copy and remove the backup.
+    Restore,
 }
 
 /// Arguments for `gdm` management command.
@@ -82,6 +84,11 @@ pub struct GdmArgs {
     /// Path to disable flag file (defaults to /etc/soos/gdm.disable).
     #[arg(long, default_value = "/etc/soos/gdm.disable")]
     pub disable_file: PathBuf,
+
+    /// PAM module directory that must contain `pam_soos.so` before `enable` edits the
+    /// PAM file (defaults to probing the distribution security directories).
+    #[arg(long)]
+    pub pam_module_dir: Option<PathBuf>,
 }
 
 /// Arguments for `add-user` subcommand.

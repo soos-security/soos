@@ -209,3 +209,119 @@ fn test_gdm_enable_refuses_a_symlinked_pam_file() {
     assert_eq!(fs::read_to_string(&target).unwrap(), PRISTINE_GDM);
     assert!(!backup_of(&pam_file).exists(), "no backup on refusal");
 }
+
+// ----------------------------------------------------------------------------
+// STO-03 / STO-07 (GitHub #177, #180): named contracts cited by the verification
+// matrix (ASG5, LSF1, GSO*).
+// ----------------------------------------------------------------------------
+
+/// The GDM rule keeps the 2500 ms capture budget and uses the explicit
+/// `[success=done default=ignore]` control shared by every packaged soos rule.
+#[test]
+fn test_gdm_pam_line_includes_timeout_ms_2500() {
+    use soos_admin_cli::gdm::GDM_PAM_LINE;
+    assert!(GDM_PAM_LINE.starts_with("auth "));
+    assert!(GDM_PAM_LINE.contains("[success=done default=ignore]"));
+    assert!(GDM_PAM_LINE.contains("pam_soos.so timeout_ms=2500"));
+    assert!(
+        !GDM_PAM_LINE.contains("sufficient"),
+        "the legacy sufficient control is retired (ADR 2026-09-30 GDM stack placement)"
+    );
+    assert!(
+        !GDM_PAM_LINE.contains("service="),
+        "PAM_SERVICE drives gdm.disable"
+    );
+}
+
+#[test]
+fn test_gdm_status_unconfigured() {
+    let temp = tempdir().unwrap();
+    let pam_file = temp.path().join("gdm-password");
+    let disable_file = temp.path().join("gdm.disable");
+
+    let missing = soos_admin_cli::gdm::get_gdm_status(&pam_file, &disable_file);
+    assert!(!missing.installed && !missing.enabled, "missing PAM file");
+
+    fs::write(&pam_file, PRISTINE_GDM).unwrap();
+    let status = soos_admin_cli::gdm::get_gdm_status(&pam_file, &disable_file);
+    assert!(!status.installed, "no pam_soos.so rule");
+    assert!(!status.enabled);
+    assert_eq!(status.pam_file, pam_file);
+    assert_eq!(status.disable_file, disable_file);
+}
+
+#[test]
+fn test_gdm_status_configured_enabled() {
+    let temp = tempdir().unwrap();
+    let pam_file = temp.path().join("gdm-password");
+    let disable_file = temp.path().join("gdm.disable");
+    fs::write(&pam_file, PRISTINE_GDM).unwrap();
+
+    let status =
+        soos_admin_cli::gdm::configure_gdm(&GdmAction::Enable, &pam_file, &disable_file).unwrap();
+    assert!(status.installed);
+    assert!(status.enabled);
+}
+
+#[test]
+fn test_gdm_status_configured_disabled() {
+    let temp = tempdir().unwrap();
+    let pam_file = temp.path().join("gdm-password");
+    let disable_file = temp.path().join("gdm.disable");
+    fs::write(&pam_file, PRISTINE_GDM).unwrap();
+    soos_admin_cli::gdm::configure_gdm(&GdmAction::Enable, &pam_file, &disable_file).unwrap();
+    fs::write(&disable_file, "disabled\n").unwrap();
+
+    let status = soos_admin_cli::gdm::get_gdm_status(&pam_file, &disable_file);
+    assert!(status.installed, "the rule stays in the PAM file");
+    assert!(!status.enabled, "the flag disables it");
+}
+
+#[test]
+fn test_gdm_disable_creates_flag() {
+    let temp = tempdir().unwrap();
+    let pam_file = temp.path().join("gdm-password");
+    let disable_file = temp.path().join("etc-soos").join("gdm.disable");
+    fs::write(&pam_file, PRISTINE_GDM).unwrap();
+
+    soos_admin_cli::gdm::configure_gdm(&GdmAction::Disable, &pam_file, &disable_file).unwrap();
+    assert!(
+        disable_file.is_file(),
+        "flag created with its parent directory"
+    );
+    assert_eq!(
+        fs::read_to_string(&pam_file).unwrap(),
+        PRISTINE_GDM,
+        "disable never edits the PAM file"
+    );
+}
+
+#[test]
+fn test_gdm_restore_and_module_dir_parsing() {
+    let restore = Cli::try_parse_from(["soos-admin", "gdm", "restore"]).unwrap();
+    match restore.command {
+        Commands::Gdm(GdmArgs {
+            action: GdmAction::Restore,
+            pam_module_dir: None,
+            ..
+        }) => {}
+        _ => panic!("Expected Commands::Gdm(Restore)"),
+    }
+
+    let enable = Cli::try_parse_from([
+        "soos-admin",
+        "gdm",
+        "enable",
+        "--pam-module-dir",
+        "/usr/lib64/security",
+    ])
+    .unwrap();
+    match enable.command {
+        Commands::Gdm(GdmArgs {
+            action: GdmAction::Enable,
+            pam_module_dir: Some(dir),
+            ..
+        }) => assert_eq!(dir, std::path::PathBuf::from("/usr/lib64/security")),
+        _ => panic!("Expected Commands::Gdm(Enable) with --pam-module-dir"),
+    }
+}

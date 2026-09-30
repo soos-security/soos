@@ -51,7 +51,7 @@ ADR entry in `AI/DECISIONS.md`. Re-check every value below with the listed `grep
 | `RESPONSE_WRITE_MARGIN_MS` | `crates/daemon/src/inference.rs` | 50 ms (reserved before client and outer deadlines) |
 | `DEFAULT_INFERENCE_ESTIMATE_MS` / `MAX_INFERENCE_ESTIMATE_MS` | `crates/daemon/src/inference.rs` | 80 / 1000 ms (initial / upper bound of the EMA admission estimate) |
 | `DEFAULT_PAD_CONSENSUS_REQUIRED` / `_WINDOW` / `MAX_PAD_CONSENSUS_WINDOW` | `crates/policy/src/pad_consensus.rs` | 3 / 5 / 32 captures (Allow needs 3 consecutive; any spoof vetoes the request) |
-| GDM PAM line | `crates/admin-cli/src/gdm.rs` | `auth sufficient pam_soos.so timeout_ms=2500` |
+| `GDM_PAM_LINE` | `crates/admin-cli/src/gdm.rs` | `auth  [success=done default=ignore]  pam_soos.so timeout_ms=2500`, inside a managed block after every pre-credential gate [98] |
 | admin-cli `DEFAULT_TIMEOUT_MS` | `crates/admin-cli/src/args.rs` | 250 ms |
 | Match / PAD thresholds | `crates/vision/src/pipeline.rs`, policy | 0.70 / 0.85 |
 | `DEFAULT_MINIFASNET_LIVE_CLASS_INDEX` | `crates/inference-ort/src/pad.rs` | 1 |
