@@ -19,6 +19,8 @@ When an authentication request arrives, consumer vision pipelines query `latest_
 7. **Hardware-Free Mocking (Criterion C1)**: Provides `MockCameraManager` behind the `mock-camera` feature flag for testing in headless CI and Docker environments.
 8. **Automatic Format Negotiation (Criterion C6)**: Discovers device capabilities via `VIDIOC_ENUM_FMT` and automatically negotiates capture format across preference priority `RGB24 -> YUYV -> NV12 -> MJPEG -> Grey` with graceful fallback.
 9. **Dual-Sensor Device Discrimination (Criterion C8)**: Distinguishes RGB color sensors from Infrared sensors (e.g. on ThinkPad dual-camera laptops) and selects RGB by default, while supporting explicit configuration overrides.
+10. **Device Re-Resolution (CSH1–CSH4, GitHub #151)**: `V4lCameraManager::spawn_with_resolver` takes a `DevicePathResolver` (any `Fn() -> Option<PathBuf> + Send + Sync`) that the supervisor consults once per backoff period after `DeviceNotFound` / `UnsupportedCapability`, so a camera re-enumerated under a new `/dev/videoN` (suspend, replug, boot race) is reopened without a restart. `V4lCameraManager::spawn` never substitutes the configured path. `stable_device_path` maps an enumerated node to its `/dev/v4l/by-id/...` link.
+11. **Truthful Lifecycle Health (CSH5–CSH6, GitHub #153)**: `CameraManager::health()` returns a `CameraHealth` (`Starting`, `Streaming`, `Standby`, `Recovering`, `Dead`). Unlike `is_ready()`, it distinguishes an idle auto-standby (healthy, `is_operational() == true`) from a missing/busy device. The supervisor runs inside `catch_unwind`; a panic marks the camera `Dead`, withdraws frames and is never restarted (fail-closed).
 
 ---
 
@@ -38,8 +40,20 @@ pub trait CameraManager: Send + Sync {
 
     /// Requests shutdown of background capture threads.
     fn stop(&self);
+
+    /// Lifecycle state for health reporting (default derived from `is_ready()`).
+    fn health(&self) -> CameraHealth;
 }
 ```
+
+### Daemon Health Integration
+`soos-daemon` attaches its camera manager to `HealthState` (`HealthState::attach_camera`);
+`camera_ready` in every `StatusResponse` / `soos-admin status` is then
+`camera.health().is_operational()`, evaluated at snapshot time. The daemon also logs every camera
+state transition (500 ms poll). In auto-selection mode (`device_path` left at the
+`/dev/v4l/by-id/default-camera` sentinel) the supervisor re-enumerates on device loss; an explicit
+`device_path` is retried as-is, so a by-id link that udev creates late is picked up without the
+daemon switching to another camera.
 
 ### `CameraConfig` & `CameraConfigBuilder`
 Configures:
@@ -68,3 +82,5 @@ Configures:
 | **C6** | Priority format negotiation (`RGB24 -> YUYV -> NV12 -> MJPEG -> Grey`) | `format_negotiation_tests::test_format_negotiation_prefers_rgb24` | Validated |
 | **C7** | Graceful hot-unplug recovery on `ENODEV` | `hotunplug_tests::test_camera_hotunplug_recovery` | Validated |
 | **C8** | Dual-sensor discrimination (RGB vs IR preference) | `dual_sensor_tests::test_dual_sensor_prefers_rgb` | Validated |
+| **CSH1–CSH4** | Re-resolution after `ENODEV`, bounded pacing, no silent substitution, by-id addressing | `supervision_tests::test_supervisor_reresolves_device_after_enodev` (and siblings) | ✅ Verified |
+| **CSH5–CSH6** | Truthful `CameraHealth`, standby vs failure, panic → `Dead` | `supervision_tests::test_supervisor_panic_marks_camera_dead` (and siblings) | ✅ Verified |

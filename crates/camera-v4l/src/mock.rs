@@ -3,7 +3,7 @@
 use crate::config::CameraConfig;
 use crate::error::CameraError;
 use crate::frame::{Frame, PixelFormat};
-use crate::manager::CameraManager;
+use crate::manager::{CameraHealth, CameraManager};
 use arc_swap::ArcSwapOption;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
@@ -324,6 +324,29 @@ impl CameraManager for MockCameraManager {
     fn stop(&self) {
         self.running.store(false, Ordering::Release);
         self.is_ready.store(false, Ordering::Release);
+    }
+
+    fn health(&self) -> CameraHealth {
+        let has_error = self
+            .active_error
+            .read()
+            .map(|g| g.is_some())
+            .unwrap_or(true);
+        if has_error || self.starved.load(Ordering::Acquire) {
+            return CameraHealth::Recovering;
+        }
+        let idle_expired = {
+            let last = self.last_activity.read().unwrap_or_else(|e| e.into_inner());
+            !self.config.idle_timeout.is_zero() && last.elapsed() > self.config.idle_timeout
+        };
+        if idle_expired {
+            return CameraHealth::Standby;
+        }
+        if self.is_ready.load(Ordering::Acquire) {
+            CameraHealth::Streaming
+        } else {
+            CameraHealth::Starting
+        }
     }
 }
 
