@@ -97,6 +97,25 @@ tests/docker/
   ```bash
   ./tests/docker/run_matrix.sh fedora
   ```
+  Each distribution builds into its own Docker volume mounted over `/workspace/target`
+  (`soos-matrix-target-<distro>`), so a `pam_soos.so` linked on one distribution is never
+  loaded on another. The Fedora and Arch images run in CI in the `distro-pam-matrix` job
+  (push to `main` and manual dispatch).
+
+### Sandbox Invariants (GitHub #162, #168)
+
+- **Multi-line PAM stacks.** The Dockerfiles write `/etc/pam.d/test-soos` and the distro
+  stack with `printf '%s\n' 'line' ...`, never `echo "...\n..."`: on `fedora:40` and
+  `archlinux:latest` `/bin/sh` is bash, whose builtin `echo` writes a literal `\n`, which
+  produced single-line files with no module at all. The invariant test
+  `test_sandbox_dockerfiles_produce_multiline_pam_stacks` rebuilds every stack with bash and
+  parses it, and `test_suite.sh` (`assert_pam_stack_file`) refuses to run T1–T10 on a
+  malformed stack.
+- **Production socket modes.** `test_suite.sh` creates the `soos` group and
+  `/run/soos` with `install -d -m 0750 -o root -g soos`; `mock_daemon.py` binds its socket
+  under a restrictive umask, sets it `0660` and group `soos` (`--socket-group`,
+  `--socket-mode`; any "other" bit is refused), and every case asserts `750 root:soos` /
+  `660 root:soos` (`assert_socket_modes`) before calling PAM.
 - Validate the Fedora `authselect` custom profile (activation with `with-faillock`,
   `authselect check`, generated `system-auth`/`password-auth` ordering, `/etc/nsswitch.conf`
   preserved, password fallback via `pamtester`, rollback through `scripts/uninstall.sh`):
