@@ -99,3 +99,7 @@ direct argument of the wrapper, and the same mutation fails it.
 3. `crates/admin-cli/tests/test_pam_tests.rs`: the 250 ms client timeout in
    `test_simulate_pam_auth_allow` and `test_simulate_pam_auth_deny_yields_pam_ignore` is
    load-sensitive; proposed `MAX_TIMEOUT_MS` (5000 ms).
+
+## Follow-up after user approval (2026-10-01)
+
+The user approved both pre-existing test edits: the SAFETY comment of `fault_injection_tests::test_fault_inject_via_pam_hooks_returns_pam_ignore` now cites the PHS11 trigger ordering, and the two verdict tests of `crates/admin-cli/tests/test_pam_tests.rs` use a 5000 ms client timeout (the offline-socket test keeps 250 ms). `EnrollmentService::import_from_reader` stays public; its documentation already names `import_with_overwrite_from_reader` as the `--yes`-gated CLI path. Matrix row RFX13 is ✅ Verified.
