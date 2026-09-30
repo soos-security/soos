@@ -12,6 +12,7 @@ pub mod peercred;
 pub mod pipeline;
 pub mod preview;
 pub mod session;
+pub mod session_policy;
 pub mod socket;
 
 pub use config::{DaemonConfig, DispatcherConfig, PipelineConfig, SocketConfig};
@@ -20,4 +21,5 @@ pub use health::{HealthState, HealthStatus};
 pub use pipeline::{initialize_pipeline, PipelineComponents};
 pub use preview::{authorize_preview, PreviewConfig, PreviewDenied};
 pub use session::SessionValidator;
+pub use session_policy::{LocalSessionPolicy, LogindSource, SessionDenial};
 pub use socket::{bind_socket, validate_directory, SocketGuard};
