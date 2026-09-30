@@ -95,3 +95,12 @@ drop the no-op line from the unit.
 `cargo fmt --all -- --check`, `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`,
 `cargo test --locked --workspace --all-targets --all-features --no-fail-fast` (1110 passed, 0 failed)
 and `./scripts/candid_review.sh` pass.
+
+## Integration: user-approved test migrations (2026-09-30)
+
+- `crates/daemon/tests/systemd_test.rs::test_systemd_unit_file_sandboxing_directives` and
+  `crates/daemon/tests/hardening_tests.rs::test_systemd_hardening_directives_complete` now assert
+  `DeviceAllow=char-video4linux rw` instead of the no-op glob `DeviceAllow=/dev/video* rw`, which was
+  removed from `packaging/soos-daemon.service`.
+- `crates/daemon/tests/config_tests.rs::test_config_defaults_when_file_absent` now expects the
+  2500 ms default `connection_timeout` (user decision: GDM `timeout_ms=2500` must get daemon time).

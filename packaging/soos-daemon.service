@@ -33,10 +33,9 @@ PrivateTmp=yes
 ProtectHome=yes
 ProtectSystem=strict
 DevicePolicy=closed
-# systemd does not expand globs in DeviceAllow= device node paths, so the
-# /dev/video* line alone matches nothing; the char-video4linux device group
-# (major 81 in /proc/devices) is what actually allows every V4L2 node.
-DeviceAllow=/dev/video* rw
+# systemd does not expand globs in DeviceAllow= device node paths (a
+# /dev/video* entry would match nothing); the char-video4linux device group
+# (major 81 in /proc/devices) allows every V4L2 node.
 DeviceAllow=char-video4linux rw
 RestrictAddressFamilies=AF_UNIX
 LockPersonality=yes

@@ -51,7 +51,9 @@ fn test_systemd_unit_file_sandboxing_directives() {
         "ProtectHome=yes",
         "ProtectSystem=strict",
         "DevicePolicy=closed",
-        "DeviceAllow=/dev/video* rw",
+        // User-approved 2026-09-30 (GitHub #203): systemd does not expand globs in
+        // DeviceAllow= paths, so only the device-group form grants camera access.
+        "DeviceAllow=char-video4linux rw",
         "RestrictAddressFamilies=AF_UNIX", // Core Acceptance D3
         "LockPersonality=yes",
         "MemoryDenyWriteExecute=yes",
