@@ -103,7 +103,7 @@ As mandated by `AI/ARCHITECTURE.md` §5, all distribution configurations enforce
 
 ```pam
 # 1. Primary biometric check: called before pam_unix
-auth  [success=done default=ignore]  pam_soos.so timeout_ms=250
+auth  [success=done default=ignore]  pam_soos.so
 
 # 2. Standard password verification fallback
 auth  [success=done default=bad]     pam_unix.so try_first_pass

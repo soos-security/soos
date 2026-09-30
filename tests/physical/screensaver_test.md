@@ -23,7 +23,7 @@ Across all screen lockers and display managers, `pam_soos.so` is placed **immedi
 auth  required                       pam_faillock.so preauth
 
 # 2. soos Local Biometric Facial Verification (deadline derived from the clamped timeout_ms)
-auth  [success=done default=ignore]  pam_soos.so timeout_ms=250
+auth  [success=done default=ignore]  pam_soos.so
 
 # 3. Standard Password Authentication (executed if facial verification returns PAM_IGNORE)
 auth  [success=done default=bad]     pam_unix.so try_first_pass nullok
@@ -74,7 +74,7 @@ account     include     system-auth
 #### PAM Configuration: `/etc/pam.d/hyprlock`
 ```pam
 #%PAM-1.0
-auth        [success=done default=ignore]  pam_soos.so timeout_ms=250
+auth        [success=done default=ignore]  pam_soos.so
 auth        include                        system-auth
 account     include                        system-auth
 ```
@@ -100,7 +100,7 @@ GDM manages graphical session logins and greeter screen unlocks for GNOME deskto
 ```pam
 #%PAM-1.0
 auth     requisite                      pam_nologin.so
-auth     [success=done default=ignore]  pam_soos.so timeout_ms=250
+auth     [success=done default=ignore]  pam_soos.so
 auth     include                        common-auth
 account  include                        common-account
 password include                        common-password
@@ -126,7 +126,7 @@ Text-mode virtual terminal authentication (`/dev/tty1` through `/dev/tty6`).
 #### PAM Configuration: `/etc/pam.d/login`
 ```pam
 #%PAM-1.0
-auth       [success=done default=ignore] pam_soos.so timeout_ms=250
+auth       [success=done default=ignore] pam_soos.so
 auth       include                       system-local-login
 account    include                       system-local-login
 password   include                       system-local-login
@@ -152,7 +152,7 @@ Administrative privilege elevation from terminal sessions.
 #### PAM Configuration: `/etc/pam.d/sudo`
 ```pam
 #%PAM-1.0
-auth       [success=done default=ignore] pam_soos.so timeout_ms=250
+auth       [success=done default=ignore] pam_soos.so
 auth       include                       system-auth
 account    include                       system-auth
 session    include                       system-auth

@@ -155,3 +155,38 @@ GDM budget or the daemon default must change.
 `cargo fmt --all -- --check`, `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`,
 `cargo test --locked --workspace --all-targets --all-features --no-fail-fast`,
 `./scripts/candid_review.sh`, and `bash -n` on the four physical scripts.
+
+## Packaging change applied at integration (user-approved, 2026-09-30)
+
+The user approved the #185 packaging change and the exact assertion change below. Because the
+auto-mode classifier refuses relayed approvals for sub-agents, the orchestrator applied it
+directly on the integration branch `fix/p1-quality-ci-batch`.
+
+- Packaged primary rules no longer pass `timeout_ms=`: `packaging/pam/debian/soos` (Auth and
+  Auth-Initial), `packaging/pam/fedora/soos/{system-auth,password-auth}`,
+  `packaging/pam/arch/{system-auth,system-auth.snippet}`. The module default
+  (`DEFAULT_TIMEOUT_MS` = 1000 ms) applies. The GDM line keeps `timeout_ms=2500`; the
+  password-failed hook keeps `timeout_ms=20`.
+- Approved assertion changes in `tests/invariants/src/lib.rs` (ordering assertions unchanged):
+  - `test_pam_config_ordering_matches_spec`: the four `pam_soos.so timeout_ms=250` literals
+    (Debian, Fedora, Arch, Arch snippet) now locate the primary rule with
+    `is_default_timeout_primary_soos_rule` / `primary_soos_rule_offset`
+    (`[success=done default=ignore] pam_soos.so`, no `event=`, no `timeout_ms=` or
+    `timeout_ms=<DEFAULT_TIMEOUT_MS>`, the default read from `crates/pam/src/config.rs`).
+  - `test_fedora_authselect_profile_preserves_faillock_ordering`: the `offset_of(...,
+    "pam_soos.so timeout_ms=250")` anchor and the `[success=done default=ignore]` line check use
+    the same helpers.
+- Red evidence: re-adding `timeout_ms=250` to `packaging/pam/fedora/soos/system-auth` makes
+  `test_fedora_authselect_profile_preserves_faillock_ordering` fail with
+  "no primary `[success=done default=ignore] pam_soos.so` rule relying on the default timeout".
+- Scripts that inspect the packaged/generated stacks match the primary rule instead of the
+  literal: `tests/docker/authselect_profile_test.sh` (A3–A6), `tests/docker/pam_rollback_test.sh`
+  (D-cases, F1), `tests/distro/fedora_rhel_test.sh`. Sandbox matrix fixtures
+  (`tests/docker/Dockerfile.*`, `Docs/PAM_DOCKER_TEST_MATRIX.md`) keep their own
+  `timeout_ms=250`, which T2 relies on.
+- Docs updated: `AI/ARCHITECTURE.md` §5, `Docs/DISTRIBUTION_DEPLOYMENT.md`, `Docs/PAM_MODULE.md`,
+  `packaging/pam/fedora/soos/README`, `tests/physical/screensaver_test.md`, matrix rows FAP2 and
+  DNP2 wording.
+
+Follow-up: the daemon `[dispatcher] connection_timeout_ms` (default 1000 ms) also caps each
+request, so the GDM `timeout_ms=2500` gains no extra daemon time unless that value is raised.

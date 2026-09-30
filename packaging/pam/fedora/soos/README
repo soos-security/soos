@@ -7,7 +7,8 @@ Fedora 40) and inserts the soos facial biometric PAM module into the
 system-auth and password-auth stacks, in the order mandated by
 AI/ARCHITECTURE.md section 5:
 
-1. pam_soos.so [success=done default=ignore] timeout_ms=250 runs before the
+1. pam_soos.so [success=done default=ignore] (module default deadline,
+   DEFAULT_TIMEOUT_MS = 1000 ms, GitHub #185) runs before the
    password module: a successful facial verification completes authentication,
    every other outcome (deny, timeout, daemon unavailable) is ignored.
 2. pam_unix.so performs standard password verification.

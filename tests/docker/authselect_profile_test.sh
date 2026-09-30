@@ -124,6 +124,18 @@ line_of() {
     echo "${n}"
 }
 
+# Primary soos rule relying on the module default deadline (GitHub #185): no
+# timeout_ms= argument, or timeout_ms=1000 (DEFAULT_TIMEOUT_MS).
+SOOS_PRIMARY_RE='\[success=done default=ignore\][[:space:]]+pam_soos\.so([[:space:]]+timeout_ms=1000)?[[:space:]]*$'
+
+# Prints the 1-based line number of the primary soos rule in file $1 (fails if absent).
+soos_primary_line_of() {
+    local n
+    n="$(grep -n -E -- "${SOOS_PRIMARY_RE}" "$1" | head -n 1 | cut -d: -f1)"
+    [[ -n "${n}" ]] || fail "$1: expected the primary pam_soos.so rule (default timeout)"
+    echo "${n}"
+}
+
 # Asserts correct password accepted and wrong password rejected for service $1.
 # The faillock tally is reset first: pamtester runs only the auth phase, so the
 # deliberate wrong-password attempts would otherwise lock the user (deny=3).
@@ -179,7 +191,7 @@ for stack in system-auth password-auth; do
         fail "A3: ${file} contains unresolved template syntax: $(grep -n '{' "${file}" | head -n 3)"
     fi
     preauth="$(line_of "${file}" "pam_faillock.so preauth")"
-    soos="$(line_of "${file}" "pam_soos.so timeout_ms=250")"
+    soos="$(soos_primary_line_of "${file}")"
     unix_line="$(line_of "${file}" "pam_unix.so")"
     authfail="$(line_of "${file}" "pam_faillock.so authfail")"
     event="$(line_of "${file}" "pam_soos.so event=password-failed timeout_ms=20")"
@@ -224,7 +236,7 @@ authselect check || fail "A6: authselect check failed without features"
 if grep -q 'pam_faillock.so' /etc/pam.d/system-auth; then
     fail "A6: pam_faillock emitted although with-faillock was not selected"
 fi
-grep -q 'pam_soos.so timeout_ms=250' /etc/pam.d/system-auth || fail "A6: pam_soos line missing"
+grep -q -E -- "${SOOS_PRIMARY_RE}" /etc/pam.d/system-auth || fail "A6: pam_soos line missing"
 assert_password_auth system-auth
 success "A6: profile valid without optional features."
 

@@ -279,7 +279,7 @@ for stack in system-auth password-auth; do
         error "INVARIANT VIOLATION: unresolved template syntax in ${STACK_FILE}"; exit 1
     fi
     PREAUTH_LINE="$(grep -n 'pam_faillock.so preauth' "${STACK_FILE}" | head -n 1 | cut -d: -f1)"
-    SOOS_LINE="$(grep -n 'pam_soos.so timeout_ms=250' "${STACK_FILE}" | head -n 1 | cut -d: -f1)"
+    SOOS_LINE="$(grep -n -E '\[success=done default=ignore\][[:space:]]+pam_soos\.so([[:space:]]+timeout_ms=1000)?[[:space:]]*$' "${STACK_FILE}" | head -n 1 | cut -d: -f1)"
     UNIX_LINE="$(grep -n 'pam_unix.so' "${STACK_FILE}" | head -n 1 | cut -d: -f1)"
     AUTHFAIL_LINE="$(grep -n 'pam_faillock.so authfail' "${STACK_FILE}" | head -n 1 | cut -d: -f1)"
     if [[ -z "${PREAUTH_LINE}" || -z "${SOOS_LINE}" || -z "${UNIX_LINE}" || -z "${AUTHFAIL_LINE}" ]]; then

@@ -140,7 +140,7 @@ match ipc_auth(uid, service, deadline) {
 
 ```pam
 # Placed AFTER mandatory faillock preauth, BEFORE pam_unix.
-auth  [success=done default=ignore]  pam_soos.so timeout_ms=250
+auth  [success=done default=ignore]  pam_soos.so
 
 # Standard password verification. On failure: marks stack failed but continues.
 auth  [success=done default=bad]     pam_unix.so try_first_pass

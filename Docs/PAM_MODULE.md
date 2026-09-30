@@ -87,7 +87,7 @@ soos-pam: authentication panic caught at crates/pam/src/lib.rs:92:9: <panic payl
 
 ```pam
 # Placed AFTER faillock preauth, BEFORE pam_unix
-auth [success=done default=ignore] pam_soos.so timeout_ms=250
+auth [success=done default=ignore] pam_soos.so
 
 # Fallback to standard password authentication
 auth [success=done default=bad]    pam_unix.so try_first_pass
