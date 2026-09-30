@@ -228,7 +228,7 @@ This document translates the critical gating criteria from §11 of `ARCHITECTURE
 |---|---|---|---|
 | VZF1 | Memory zeroization of RGB intermediate frame buffers: `VisionPipeline::process_frame` wraps RGB conversion from `convert_to_rgb` in `Zeroizing<Vec<u8>>` and guards intermediate aligned crops via `AlignedCropGuard`, guaranteeing heap face pixel wiping upon pipeline completion and early error exits | Unit tests (`zeroize_tests::test_rgb_buffer_zeroized_after_pipeline`, `test_pipeline_zeroizes_intermediate_buffers_on_error`) | ✅ Verified |
 | VZF2 | `Zeroize` and `Drop` implementation on `VerificationOutcome`: `VerificationOutcome` implements `zeroize::Zeroize` and `Drop`, delegating to `self.output.zeroize()`, ensuring both primary and cloned outcomes deterministically clear the underlying embedding and crop | Unit test (`zeroize_tests::test_verification_outcome_zeroize_on_drop`) | ✅ Verified |
-| VZF3 | Memory zeroization of neural inference input tensors: `OrtFaceDetector`, `OrtEmbeddingExtractor` and `OrtPadDetector` *(the landmark detector was dropped from this list: it was deleted, see NGM6; TCI-04, GitHub #187)* prepare inputs in `Zeroizing<Vec<f32>>` buffers, pass zero-copy slice views (`TensorRef`) to ONNX Runtime, and deterministically zeroize all normalized face pixels post-inference and on drop | Unit test (`zeroize_tests::test_inference_input_buffers_zeroized`) | ✅ Verified |
+| VZF3 | Memory zeroization of neural inference input tensors: `OrtScrfdDetector` *(the legacy `OrtFaceDetector` was removed, VTS8)*, `OrtEmbeddingExtractor` and `OrtPadDetector` *(the landmark detector was dropped from this list: it was deleted, see NGM6; TCI-04, GitHub #187)* prepare inputs in `Zeroizing<Vec<f32>>` buffers, pass zero-copy slice views (`TensorRef`) to ONNX Runtime, and deterministically zeroize all normalized face pixels post-inference and on drop | Unit test (`zeroize_tests::test_inference_input_buffers_zeroized`) | ✅ Verified |
 
 ---
 
@@ -306,7 +306,7 @@ This document translates the critical gating criteria from §11 of `ARCHITECTURE
 
 | # | Criterion | Test Method | Status |
 |---|---|---|---|
-| NGM6 | `OrtLandmarkDetector` removed from `soos-inference-ort`; `FaceLandmarks`, `Point2f`, and `LandmarkDetector` trait preserved | Unit tests (`landmarks_tests::test_point2f_geometry_and_distance`, `landmarks_tests::test_face_landmarks_array_conversion_and_geometry`, `landmarks_tests::test_landmark_detector_trait_mock_dispatch`) | ✅ Verified |
+| NGM6 | `OrtLandmarkDetector` removed from `soos-inference-ort`; `FaceLandmarks` and `Point2f` preserved *(the `LandmarkDetector` trait and its mock were removed later, VTS8, GitHub #249)* | Unit tests (`landmarks_tests::test_point2f_geometry_and_distance`, `landmarks_tests::test_face_landmarks_array_conversion_and_geometry`) | ✅ Verified |
 
 ---
 
@@ -904,7 +904,7 @@ Complements PA3, PA12 and PFT1: those rows are proven under `[profile.test]` (al
 | VTS5 | The historical `decode_stride` entry point infers one activation per tensor, so its mapping is monotonic across the `[0, 1]` boundary | `scrfd_contract_tests::test_scrfd_decode_stride_is_monotonic_across_unit_boundary`, `scrfd_contract_tests::test_scrfd_score_activation_infer_is_tensor_wide` | ✅ Verified |
 | VTS6 | `OrtScrfdDetector::new` validates the session output metadata (`validate_output_dims`): 9 rank-3 outputs, batch 1 or symbolic, 3 heads each of 1/4/10 channels, concrete anchor dims in {12800, 3200, 800} without duplicates; the attested graph (`[-1, -1, k]`) passes and its scores are probabilities | `scrfd_contract_tests::test_scrfd_validate_output_dims_accepts_symbolic_and_rejects_wrong_layouts`, `scrfd_contract_tests::test_scrfd_new_rejects_nine_outputs_with_wrong_shapes`, `scrfd_contract_tests::test_scrfd_new_accepts_scrfd_output_shapes`, `scrfd_real_model_tests::test_real_scrfd_session_passes_startup_shape_validation`, `scrfd_real_model_tests::test_real_scrfd_scores_are_probabilities` | ✅ Verified |
 | VTS7 | The UltraFace inference path (`OrtFaceDetector` session, priors, decoding) and the `OrtScrfdDetector::unproject` / `letterbox_pad` wrappers are removed, `soos-inference-ort` no longer depends on `ndarray`, and `scripts/download_models.sh` resolves no legacy model URL | `vision_attestation_contract::test_legacy_four_model_pipeline_artefacts_are_removed` | ✅ Verified |
-| VTS8 | Complete removal of `OrtFaceDetector::prepare_input`, `LandmarkDetector` and `MockLandmarkDetector` | None yet: the pre-existing tests that use them must be re-pointed or removed first (proposal in walkthrough 132 §4) | ⬜ Pending (awaiting user approval of the test change proposal) |
+| VTS8 | Complete removal of `OrtFaceDetector::prepare_input`, `LandmarkDetector` and `MockLandmarkDetector`; the pre-existing tests that only exercised them were removed with user approval (2026-09-30), the SCRFD zeroization block keeps the detector input coverage | Invariant test (`vision_attestation_contract::test_vts8_legacy_detector_types_removed`); unit test (`zeroize_tests::test_inference_input_buffers_zeroized`) | ✅ Verified |
 
 ---
 

@@ -125,3 +125,13 @@ the zero-test-weakening rule forbids without approval:
   API listing, `OrtFaceDetector` status, SCRFD startup validation and score activation.
 - `models/README.md` §5: legacy ids are historical only and no longer resolvable.
 - `AI/DECISIONS.md`: ADR 2026-09-30; `AI/VERIFICATION_MATRIX.md`: VTS1–VTS8.
+
+## Integration: user-approved legacy test removal (2026-09-30)
+
+The user approved the §4 proposal. Removed: the `OrtFaceDetector` block of
+`zeroize_tests::test_inference_input_buffers_zeroized` (the SCRFD block keeps the detector input
+coverage; its `dummy_rgb` setup line was kept), `landmark_tests::test_mock_landmark_detector_scaling`
+and `landmarks_tests::test_landmark_detector_trait_mock_dispatch`. Then `OrtFaceDetector`,
+the `LandmarkDetector` trait and `MockLandmarkDetector` were deleted with their re-exports, and
+`vision_attestation_contract::test_vts8_legacy_detector_types_removed` pins their absence. #249 is
+now fully fixed (VTS8 ✅).

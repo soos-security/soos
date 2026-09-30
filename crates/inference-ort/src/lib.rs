@@ -27,14 +27,14 @@ pub mod registry;
 
 pub use detector::{
     letterbox_pad, letterbox_pad_into, nms, unproject, BoundingBox, FaceDetection, FaceDetector,
-    OrtFaceDetector, OrtScrfdDetector, ScoreActivation,
+    OrtScrfdDetector, ScoreActivation,
 };
 pub use embedding::{BiometricEmbedding, EmbeddingExtractor, OrtEmbeddingExtractor};
 pub use error::InferenceError;
-pub use landmarks::{FaceLandmarks, LandmarkDetector, Point2f};
+pub use landmarks::{FaceLandmarks, Point2f};
 pub use letterbox::{letterbox_bilinear, letterbox_geometry, LetterboxGeometry};
 pub use manifest::{ManifestHeader, ModelManifest, ModelMetadata, TensorLayout};
-pub use mock::{MockEmbeddingExtractor, MockFaceDetector, MockLandmarkDetector, MockPadDetector};
+pub use mock::{MockEmbeddingExtractor, MockFaceDetector, MockPadDetector};
 pub use outputs::ZeroizingOutputs;
 pub use pad::{AttackType, OrtPadDetector, PadDetector, PadResult, PadSelfTestReport};
 pub use registry::{

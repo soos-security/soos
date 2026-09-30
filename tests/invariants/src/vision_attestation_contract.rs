@@ -106,3 +106,40 @@ fn test_legacy_four_model_pipeline_artefacts_are_removed() {
         );
     }
 }
+
+/// VTS8 (GitHub #249, user-approved test removal 2026-09-30): the legacy UltraFace detector
+/// input helper and the legacy landmark detector trait and mock are gone for good.
+#[test]
+fn test_vts8_legacy_detector_types_removed() {
+    for (file, needle) in [
+        (
+            "crates/inference-ort/src/detector.rs",
+            "pub struct OrtFaceDetector",
+        ),
+        (
+            "crates/inference-ort/src/landmarks.rs",
+            "pub trait LandmarkDetector",
+        ),
+        (
+            "crates/inference-ort/src/mock.rs",
+            "pub struct MockLandmarkDetector",
+        ),
+    ] {
+        assert!(
+            !read(file).contains(needle),
+            "{file} must not reintroduce `{needle}` (removed with the 3-model pipeline, VTS8)"
+        );
+    }
+    let lib = read("crates/inference-ort/src/lib.rs");
+    for name in [
+        "OrtFaceDetector",
+        "LandmarkDetector",
+        "MockLandmarkDetector",
+    ] {
+        assert!(
+            !lib.split(|c: char| !c.is_alphanumeric() && c != '_')
+                .any(|t| t == name),
+            "crates/inference-ort/src/lib.rs must not re-export `{name}`"
+        );
+    }
+}
