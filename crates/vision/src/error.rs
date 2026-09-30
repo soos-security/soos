@@ -5,6 +5,8 @@ use thiserror::Error;
 use soos_camera_v4l::PixelFormat;
 use soos_inference_ort::InferenceError;
 
+use crate::ir_liveness::IrGateRejection;
+
 /// Errors that can occur during image preprocessing, alignment, and facial matching.
 #[derive(Debug, Error)]
 pub enum VisionError {
@@ -52,6 +54,12 @@ pub enum VisionError {
         "Presentation attack detected: liveness score {score:.3} is below threshold {threshold:.3}"
     )]
     PadFailed { score: f32, threshold: f32 },
+
+    /// Monochrome (IR) PAD crop rejected by the fail-closed IR liveness gate (GitHub #169).
+    ///
+    /// Treated as a presentation attack: the RGB-trained PAD model is never consulted.
+    #[error("IR liveness gate rejected the PAD crop: {reason}")]
+    IrLivenessGateFailed { reason: IrGateRejection },
 
     /// Embedding dimension mismatch during cosine similarity matching.
     #[error("Embedding dimension mismatch: expected {expected}, actual {actual}")]

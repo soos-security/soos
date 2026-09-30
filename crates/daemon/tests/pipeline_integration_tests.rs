@@ -66,6 +66,15 @@ struct TestPipelineFixture {
 
 impl TestPipelineFixture {
     pub async fn new(enroll_current_user: bool, rate_limit_max: u32) -> Self {
+        Self::new_with_format(enroll_current_user, rate_limit_max, PixelFormat::Rgb24).await
+    }
+
+    /// Builds the fixture with a mock camera emitting frames in `format`.
+    pub async fn new_with_format(
+        enroll_current_user: bool,
+        rate_limit_max: u32,
+        format: PixelFormat,
+    ) -> Self {
         let _ = tracing_subscriber::fmt().with_test_writer().try_init();
 
         let temp_dir = tempdir().expect("Failed to create tempdir");
@@ -92,7 +101,7 @@ impl TestPipelineFixture {
             .resolution(320, 240)
             .fps(30)
             .idle_timeout(Duration::from_secs(60))
-            .format(PixelFormat::Rgb24)
+            .format(format)
             .warmup_frames(0)
             .build();
 
@@ -807,6 +816,47 @@ async fn test_147_live_frame_below_pad_threshold_vetoes_request() {
 
     assert_eq!(resp.verdict, Verdict::Deny);
     assert_eq!(resp.reason_class, ReasonClass::PadFailed);
+}
+
+/// GitHub #169 (PAD-03): a Grey (IR) capture scored live above the RGB threshold but below
+/// the stricter IR threshold must never take the RGB path: the request is vetoed as a spoof.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_169_grey_frames_use_stricter_ir_pad_threshold() {
+    let fixture = TestPipelineFixture::new_with_format(true, 5, PixelFormat::Grey).await;
+
+    // 0.90 >= vision pad_threshold (0.80) and >= policy pad_threshold (0.85),
+    // but below the IR liveness threshold.
+    fixture.pad.set_result(PadResult::live(0.90));
+
+    spawn_single_connection_server(&fixture);
+    let resp = send_req(&fixture.sock_path, auth_request(fixture.current_uid, 169)).await;
+
+    assert_eq!(
+        resp.verdict,
+        Verdict::Deny,
+        "Grey frames must be scored against the IR threshold: reason={:?}",
+        resp.reason_class
+    );
+    assert_eq!(resp.reason_class, ReasonClass::PadFailed);
+}
+
+/// GitHub #169 (PAD-03): Grey captures that pass the IR gate and the IR threshold still
+/// authorize, so the IR sensor stays usable under the conservative policy.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_169_grey_frames_above_ir_threshold_allow() {
+    let fixture = TestPipelineFixture::new_with_format(true, 5, PixelFormat::Grey).await;
+    fixture.pad.set_result(PadResult::live(0.99));
+
+    spawn_single_connection_server(&fixture);
+    let resp = send_req(&fixture.sock_path, auth_request(fixture.current_uid, 170)).await;
+
+    assert_eq!(
+        resp.verdict,
+        Verdict::Allow,
+        "reason={:?}",
+        resp.reason_class
+    );
+    assert_eq!(resp.reason_class, ReasonClass::FaceMatch);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
