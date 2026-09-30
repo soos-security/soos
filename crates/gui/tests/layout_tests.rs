@@ -11,6 +11,9 @@
     reason = "Contractual integration tests use assertions, unwrap, and expect"
 )]
 
+mod common;
+
+use common::{wait_until, SETTLE_TIMEOUT};
 use eframe::egui::{self, Vec2};
 
 #[test]
@@ -250,10 +253,7 @@ fn test_ipc_camera_manager_receives_persistent_frames() {
     let manager = soos_gui::IpcCameraManager::spawn(&sock_path);
 
     // Wait for manager to receive frames and become ready
-    let start = std::time::Instant::now();
-    while !manager.is_ready() && start.elapsed() < std::time::Duration::from_millis(1000) {
-        std::thread::sleep(std::time::Duration::from_millis(15));
-    }
+    wait_until(SETTLE_TIMEOUT, || manager.is_ready());
 
     assert!(manager.is_ready(), "IPC Camera Manager must become ready");
     let frame = manager.latest_frame().expect("Frame must exist");
@@ -320,13 +320,8 @@ fn test_gui_worker_fallback_renders_raw_rgb_on_pipeline_error() {
         egui_ctx,
     );
 
-    // Wait up to 600ms for worker to process frame
-    let start = std::time::Instant::now();
-    while latest_frame_slot.load().is_none()
-        && start.elapsed() < std::time::Duration::from_millis(600)
-    {
-        std::thread::sleep(std::time::Duration::from_millis(20));
-    }
+    // Wait for the worker to process a frame
+    wait_until(SETTLE_TIMEOUT, || latest_frame_slot.load().is_some());
 
     running.store(false, Ordering::Release);
     camera.stop();

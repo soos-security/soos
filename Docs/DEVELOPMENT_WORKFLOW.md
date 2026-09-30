@@ -44,6 +44,29 @@ Before designing or implementing any code, contributors and AI agents **MUST** i
 > - If a test fails: **The engineer or AI must persevere, debug, and fix the production implementation** until it satisfies the test contract.
 > - Weakening tests to make them artificially green is considered an architectural invariant violation.
 
+### 4.1 Timing-Sensitive Tests: No Fixed Sleep Before an Assertion
+
+A fixed `thread::sleep` (or a tight poll bound) that guesses how long a background thread needs
+before an assertion fails on a loaded host or a busy CI runner (GitHub #280).
+
+- **Positive state** (camera ready, frame published, worker output present): poll the observable
+  condition with a bounded helper such as `wait_until(SETTLE_TIMEOUT, || condition)` from the
+  crate's `tests/common/mod.rs` (`SETTLE_TIMEOUT` = 5 s), then keep the original assertion
+  unchanged. The poll returns as soon as the condition holds; a condition that never becomes true
+  still fails the assertion after the bound.
+- **Negative state** (camera NOT ready after an injected error): keep a short minimum dwell so that
+  an implementation ignoring the fault would have time to misbehave, then poll for the expected
+  state with the same bounded helper, then assert. A faulty implementation keeps the wrong state
+  and fails after the bound; a correct one is never failed by scheduling delay.
+- A sleep that only establishes a **lower bound** of elapsed time (for example "let the idle
+  timeout expire") is allowed.
+- Wall-clock latency assertions (benchmarks, "drop completes within N ms", idle windows of tens of
+  milliseconds) cannot be fixed by polling. Their threshold, tolerance or gating is an assertion
+  change and requires explicit user approval; propose it, never apply it silently.
+- Migrating an existing test from a sleep to a bounded poll is a setup-only change: every
+  assertion, threshold and tolerance stays identical, and each migrated test is listed in the PR
+  and in the walkthrough.
+
 ---
 
 ## 5. Multi-Agent TDD Development Cycle (Phases 0 through 5)

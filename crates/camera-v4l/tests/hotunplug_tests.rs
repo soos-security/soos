@@ -7,6 +7,9 @@
     reason = "Contractual test suite utilizes direct assertions and unwrap"
 )]
 
+mod common;
+
+use common::{wait_until, SETTLE_TIMEOUT};
 use soos_camera_v4l::{CameraConfigBuilder, CameraError, CameraManager, MockCameraManager};
 use std::thread;
 use std::time::Duration;
@@ -20,7 +23,9 @@ fn test_camera_hotunplug_recovery() {
 
     let camera = MockCameraManager::new(config);
     // Allow warmup convergence
-    thread::sleep(Duration::from_millis(100));
+    wait_until(SETTLE_TIMEOUT, || {
+        camera.is_ready() && camera.latest_frame().is_some()
+    });
     assert!(camera.is_ready(), "Camera should be ready initially");
     assert!(
         camera.latest_frame().is_some(),
@@ -33,7 +38,12 @@ fn test_camera_hotunplug_recovery() {
         message: "No such device: camera unplugged".to_string(),
     }));
 
+    // Minimum dwell so that a worker ignoring the unplug would have republished a frame,
+    // then a bounded wait for the worker to settle (GitHub #280).
     thread::sleep(Duration::from_millis(50));
+    wait_until(SETTLE_TIMEOUT, || {
+        !camera.is_ready() && camera.latest_frame().is_none()
+    });
 
     // Must report not ready and clear latest frame
     assert!(
@@ -49,7 +59,9 @@ fn test_camera_hotunplug_recovery() {
     camera.set_error(None);
 
     // Wait for reconnection and warmup convergence
-    thread::sleep(Duration::from_millis(200));
+    wait_until(SETTLE_TIMEOUT, || {
+        camera.is_ready() && camera.latest_frame().is_some()
+    });
 
     assert!(
         camera.is_ready(),
