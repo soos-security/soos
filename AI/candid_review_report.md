@@ -3,8 +3,9 @@
 - **Date**: 2026-09-30
 - **Target Branch**: `fix/p1-storage-vision-batch`
 - **Base (merge-base)**: `850abc5`
-- **Reviewed-Diff-Fingerprint**: `a290d4dab8b66f77f8cc22f5b340eb360f00e95e91abc5b45f2905733382e279`
-- **Review round**: 3. Round 1 (`27ece66e...`) and round 2 (`d767676d...`) returned CHANGES_REQUESTED.
+- **Reviewed-Diff-Fingerprint**: `a4a5e23ad770f66642c5ad2d43cb5879f768838c3d86e5dbd1c5270ff9de19b5`
+- **Review round**: 4 (lockfile-only delta). Round 1 (`27ece66e...`) and round 2 (`d767676d...`)
+  returned CHANGES_REQUESTED. Round 3 (`a290d4da...`, report at `095ae8e`) returned APPROVED.
 - **Claimed issues**: #156, #177, #178, #179, #180, #181, #182, #183, #184, #190, #191
 - **Audited Files**: 80 files (see `target/candid_diff.patch`). This round focuses on the rework
   commits since round 2 (`d017f96`, `7a58284`, `75be84e`, `9a9b184`), which touch only
@@ -12,6 +13,38 @@
   `AI/DECISIONS.md`, `AI/VERIFICATION_MATRIX.md`, `AI/walkthroughs/98_gdm_enable_stack_order.md`
   and `Docs/DISTRIBUTION_DEPLOYMENT.md`. The rest of the batch was checked for regressions from
   these commits only.
+
+## Round 4 — lockfile-only delta
+
+Round 3 approved the full batch at fingerprint `a290d4da...` (commit `095ae8e`). CI then failed
+only on `cargo-deny`, because upstream yanked `yoke-derive 0.8.3`. One commit was added:
+`fd4f8cf chore(deps): update yanked yoke-derive to 0.8.4`.
+
+Verification:
+
+- `git diff --stat 095ae8e fd4f8cf` and `git diff --stat 095ae8e` (working tree, clean status):
+  exactly `Cargo.lock | 4 ++--`. No other file in the batch changed since round 3.
+- The hunk changes only the `yoke-derive` entry: `version` `0.8.3` -> `0.8.4` and its `checksum`.
+  `source` stays `registry+https://github.com/rust-lang/crates.io-index`. The `dependencies` list
+  (`proc-macro2`, `quote`, `syn 3.0.5`, `synstructure`) is unchanged, and no other package entry
+  or dependency edge moved.
+- This is a patch-level bump (0.8.x, semver-compatible with `yoke v0.8.3`'s requirement).
+- `cargo tree -i yoke-derive --locked`: `yoke-derive v0.8.4 (proc-macro)` is a transitive
+  compile-time dependency, reached only through `yoke v0.8.3` via the ICU / `zerovec` / `idna` /
+  `url` chain (`webbrowser` -> `egui-winit` -> `eframe` -> `soos-gui`). No workspace crate depends
+  on it directly, and it is not in `crates/pam`, `protocol`, `policy` or the daemon auth path.
+- `cargo deny --locked check`: `advisories ok, bans ok, licenses ok, sources ok`, exit 0.
+- `./scripts/candid_subagent.sh --prepare`: new fingerprint
+  `a4a5e23ad770f66642c5ad2d43cb5879f768838c3d86e5dbd1c5270ff9de19b5`. In the frozen patch
+  (merge-base `850abc5`), `yoke-derive` is the only new difference from round 3.
+
+Pillars for the delta: Logic, PAM deadlines, panic safety, memory/secrets: no source change, so
+not affected. Test integrity: no test file changed, so section 2 below still holds. Supply chain:
+same registry source, pinned checksum, deny clean. PASS. English-only: commit message is English.
+PASS. The delta has no findings. The two round-3 MINOR findings are unchanged and remain
+follow-ups.
+
+Round 3 content follows unchanged, for reference.
 
 ## 1. Executive Summary
 
@@ -164,6 +197,7 @@ Code, comments, tests, ADR, matrix, walkthrough and docs added in the rework are
 All round-1 and round-2 findings are resolved in code. Test integrity holds: the only changes to
 pre-existing tests are the user-approved ones. The distribution stacks still place `pam_soos.so`
 correctly. The two remaining findings are MINOR, need root-authored non-standard configuration,
-and can be fixed in a follow-up.
+and can be fixed in a follow-up. Round 4 changes only the yanked `yoke-derive` lockfile entry
+(0.8.3 -> 0.8.4), and `cargo deny` passes.
 
 **VERDICT: APPROVED**
