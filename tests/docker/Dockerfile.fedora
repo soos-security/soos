@@ -14,6 +14,8 @@ ENV PATH="/usr/local/cargo/bin:${PATH}"
 # so tests/distro/fedora_rhel_test.sh exercises the RPM path (the rustup toolchain
 # below stays first in PATH and performs the actual build).
 # procps-ng: pkill, used by the test cleanup handlers.
+# systemd: runtime Requires of the RPM (not started as init); authselect: activated
+# for real by fedora_rhel_test.sh (not part of the fedora:40 base image).
 RUN dnf install -y --setopt=install_weak_deps=False \
         gcc \
         gcc-c++ \
@@ -33,12 +35,16 @@ RUN dnf install -y --setopt=install_weak_deps=False \
         util-linux \
         shadow-utils \
         procps-ng \
+        systemd \
+        authselect \
     && dnf clean all
 
-# Install Rust toolchain
+# Install Rust toolchain (RUSTUP_INIT_SKIP_PATH_CHECK: rustup coexists with the
+# distribution cargo/rust packages installed above for the RPM BuildRequires)
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-    | sh -s -- -y --default-toolchain stable --profile minimal \
-    && rustup component add clippy rustfmt
+    | RUSTUP_INIT_SKIP_PATH_CHECK=yes sh -s -- -y --default-toolchain stable --profile minimal \
+    && rustup component add clippy rustfmt \
+    && command -v cargo | grep -qx /usr/local/cargo/bin/cargo
 
 # Create testuser with known password
 RUN useradd -m -s /bin/bash testuser \

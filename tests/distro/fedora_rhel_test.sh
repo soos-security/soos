@@ -190,7 +190,8 @@ if [[ "${INSTALL_MODE}" = "auto" || "${INSTALL_MODE}" = "rpm" ]]; then
     if command -v rpmbuild >/dev/null 2>&1 && command -v rpm >/dev/null 2>&1; then
         info "Building Fedora / RHEL RPM package..."
         bash scripts/build_rpm.sh --skip-build
-        RPM_PKG=$(ls -t target/packages/soos-*.rpm | head -n 1)
+        # soos-[0-9]*: the main package, never soos-debuginfo / soos-debugsource.
+        RPM_PKG=$(ls -t target/packages/soos-[0-9]*.rpm | head -n 1)
         info "Installing RPM package: ${RPM_PKG}..."
         rpm -i "${RPM_PKG}"
         INSTALL_MODE="rpm"
