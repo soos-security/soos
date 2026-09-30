@@ -166,6 +166,15 @@ jobs:
       - name: cargo test
         run: cargo test --locked --workspace --all-targets --all-features
 
+      # Wall-clock latency benchmarks are gated behind SOOS_LATENCY_BENCH=1 so a loaded
+      # developer machine never fails them; they run here single-threaded (GitHub #280).
+      - name: Latency benchmarks (single-threaded)
+        env:
+          SOOS_LATENCY_BENCH: "1"
+        run: |
+          cargo test --locked --all-features -p soos-vision --test bench_tests -- --test-threads=1
+          cargo test --locked --all-features -p soos-camera-v4l --test shutdown_tests -- --test-threads=1
+
   # ---------------------------------------------------------------------------
   # Job 4: Dependency supply chain audit (also runs daily on schedule)
   # ---------------------------------------------------------------------------

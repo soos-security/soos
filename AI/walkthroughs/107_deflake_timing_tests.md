@@ -121,3 +121,25 @@ cannot fix them, and any threshold, tolerance or gating change needs explicit us
 - `Docs/DEVELOPMENT_WORKFLOW.md` §4.1: no fixed sleep before an assertion; positive and negative
   polling patterns; wall-clock assertions need approval.
 - `AI/VERIFICATION_MATRIX.md`: component `timing-test-polling`, criteria TFL1–TFL4.
+
+## User-approved follow-ups applied at integration (2026-09-30)
+
+The user approved three of the proposals above; the orchestrator applied them on the
+integration branch `fix/p1-quality-ci-batch` (assertions and thresholds unchanged):
+
+1. **Wall-clock benchmarks gated behind `SOOS_LATENCY_BENCH=1`**:
+   `soos-vision::bench_tests::test_pipeline_latency_budget_under_150ms_p95`,
+   `soos-camera-v4l::shutdown_tests::test_camera_drop_completes_within_timeout` and
+   `test_camera_stop_signals_graceful_shutdown` return early with a `skipped:` message unless the
+   variable is `1`. The CI `test` job (part of `CI Success`) runs them in a dedicated step,
+   single-threaded (`--test-threads=1`), with the same 150 ms / 500 ms / 100 ms bounds.
+2. **Camera idle windows** (test configuration only): `mock_camera_tests::
+   test_mock_camera_idle_throttling_and_wake` idle_timeout 100 ms → 1000 ms and its idle wait
+   150 ms → 1500 ms; `test_mock_camera_auto_suspend_and_resume_lifecycle` idle_timeout 60 ms →
+   1000 ms and its idle wait 150 ms → 1500 ms. The asserted behaviour (standby, then wake) is
+   unchanged.
+3. **Daemon fixture `connection_timeout`** 500 ms → 5 s in `pipeline_integration_tests` and
+   `template_model_binding_tests`; the decision stays capped by `DECISION_BUDGET_MS` (900 ms) and
+   the explicit ≤ 900 ms assertions are unchanged.
+
+Proposals 5 (preview rate-limit clock) and 6 (warm-up margin) never failed and stay as they are.

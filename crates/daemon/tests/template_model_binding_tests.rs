@@ -154,7 +154,9 @@ async fn fixture_with_version(
     let mut dispatcher = ConnectionDispatcher::with_pipeline(
         DispatcherConfig {
             max_concurrent_connections: 8,
-            connection_timeout: Duration::from_millis(500),
+            // Fixture timing only: the decision stays capped by DECISION_BUDGET_MS (900 ms);
+            // 500 ms starved the 3-capture consensus on a loaded host (GitHub #280, user-approved).
+            connection_timeout: Duration::from_secs(5),
             enforce_active_session: false,
             logind_sessions_dir: PathBuf::from("/run/systemd/sessions"),
         },

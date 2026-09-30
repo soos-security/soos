@@ -29,6 +29,12 @@ use common::{wait_until, SETTLE_TIMEOUT};
 /// with a very low effective frame rate (e.g. 1 FPS = 1000ms frame interval).
 #[test]
 fn test_camera_drop_completes_within_timeout() {
+    // Wall-clock benchmark: runs only with SOOS_LATENCY_BENCH=1 (dedicated single-threaded CI
+    // step), never gated on a loaded developer machine (GitHub #280, user-approved 2026-09-30).
+    if !latency_bench_enabled() {
+        eprintln!("skipped: wall-clock benchmark, set SOOS_LATENCY_BENCH=1 to run it");
+        return;
+    }
     let config = CameraConfigBuilder::new()
         .fps(30)
         .idle_fps(1) // 1 FPS = 1000ms frame interval in idle mode
@@ -57,6 +63,12 @@ fn test_camera_drop_completes_within_timeout() {
 /// Verify that calling stop() signals graceful shutdown and flips is_ready to false immediately.
 #[test]
 fn test_camera_stop_signals_graceful_shutdown() {
+    // Wall-clock benchmark: runs only with SOOS_LATENCY_BENCH=1 (dedicated single-threaded CI
+    // step), never gated on a loaded developer machine (GitHub #280, user-approved 2026-09-30).
+    if !latency_bench_enabled() {
+        eprintln!("skipped: wall-clock benchmark, set SOOS_LATENCY_BENCH=1 to run it");
+        return;
+    }
     let config = CameraConfigBuilder::new().fps(30).warmup_frames(1).build();
 
     let camera = MockCameraManager::new(config);
@@ -182,4 +194,9 @@ fn test_is_ready_memory_visibility_acquire_release() {
     }
 
     camera.stop();
+}
+
+/// Whether wall-clock latency benchmarks are enabled (`SOOS_LATENCY_BENCH=1`, GitHub #280).
+fn latency_bench_enabled() -> bool {
+    std::env::var("SOOS_LATENCY_BENCH").is_ok_and(|v| v == "1")
 }

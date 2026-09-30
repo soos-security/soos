@@ -125,7 +125,9 @@ fn test_mock_camera_idle_throttling_and_wake() {
     let config = CameraConfigBuilder::new()
         .fps(30)
         .idle_fps(5)
-        .idle_timeout(Duration::from_millis(100)) // short idle timeout
+        // Idle window long enough that a loaded host never idles before the first frame
+        // (test timing only, user-approved 2026-09-30, GitHub #280).
+        .idle_timeout(Duration::from_millis(1000))
         .warmup_frames(1)
         .build();
 
@@ -134,7 +136,7 @@ fn test_mock_camera_idle_throttling_and_wake() {
     assert!(camera.is_ready());
 
     // Wait for idle timeout to expire
-    thread::sleep(Duration::from_millis(150));
+    thread::sleep(Duration::from_millis(1500));
     // ... and for the worker to have actually entered the suspended state (it clears the
     // frame slot there), so the wake below never races a late suspension (GitHub #280).
     wait_until(SETTLE_TIMEOUT, || camera.latest_frame().is_none());
@@ -152,7 +154,8 @@ fn test_mock_camera_auto_suspend_and_resume_lifecycle() {
     let config = CameraConfigBuilder::new()
         .fps(30)
         .idle_fps(5)
-        .idle_timeout(Duration::from_millis(60))
+        // Test timing only (user-approved 2026-09-30, GitHub #280).
+        .idle_timeout(Duration::from_millis(1000))
         .warmup_frames(2)
         .build();
 
@@ -166,7 +169,7 @@ fn test_mock_camera_auto_suspend_and_resume_lifecycle() {
     );
 
     // Wait for idle_timeout to expire without activity
-    thread::sleep(Duration::from_millis(150));
+    thread::sleep(Duration::from_millis(1500));
     assert!(
         !camera.is_ready(),
         "Camera must transition to Suspended (!is_ready) after idle_timeout to turn off LED"
