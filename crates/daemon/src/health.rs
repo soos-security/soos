@@ -2,6 +2,9 @@
 
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, OnceLock};
+
+use soos_camera_v4l::{CameraHealth, CameraManager};
 
 /// Snapshot representation of daemon component health.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -27,21 +30,34 @@ impl fmt::Display for HealthStatus {
 }
 
 /// Internal health state tracking daemon components atomically.
-#[derive(Debug, Default)]
+///
+/// Once a camera manager is attached with [`HealthState::attach_camera`], `camera_ready` is
+/// derived live from its [`CameraHealth`] on every snapshot (GitHub #153): streaming and idle
+/// auto-standby are ready; starting, recovering (missing/busy device) and dead (panicked
+/// capture thread) are not. Before attachment the explicit flag is reported.
+#[derive(Default)]
 pub struct HealthState {
     socket_ready: AtomicBool,
     camera_ready: AtomicBool,
     models_verified: AtomicBool,
+    camera: OnceLock<Arc<dyn CameraManager>>,
+}
+
+impl fmt::Debug for HealthState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("HealthState")
+            .field("socket_ready", &self.socket_ready)
+            .field("camera_ready", &self.camera_ready)
+            .field("models_verified", &self.models_verified)
+            .field("camera", &self.camera_health())
+            .finish()
+    }
 }
 
 impl HealthState {
     /// Creates a new health state with all components initially unready.
     pub fn new() -> Self {
-        Self {
-            socket_ready: AtomicBool::new(false),
-            camera_ready: AtomicBool::new(false),
-            models_verified: AtomicBool::new(false),
-        }
+        Self::default()
     }
 
     /// Sets the socket listener readiness status.
@@ -49,7 +65,7 @@ impl HealthState {
         self.socket_ready.store(ready, Ordering::Release);
     }
 
-    /// Sets the camera capture manager readiness status.
+    /// Sets the camera readiness flag used while no camera manager is attached.
     pub fn set_camera_ready(&self, ready: bool) {
         self.camera_ready.store(ready, Ordering::Release);
     }
@@ -59,10 +75,25 @@ impl HealthState {
         self.models_verified.store(verified, Ordering::Release);
     }
 
+    /// Attaches the live camera manager whose lifecycle state drives `camera_ready`.
+    ///
+    /// Only the first attachment is kept; later calls are ignored.
+    pub fn attach_camera(&self, camera: Arc<dyn CameraManager>) {
+        let _ = self.camera.set(camera);
+    }
+
+    /// Returns the lifecycle state of the attached camera, if any.
+    pub fn camera_health(&self) -> Option<CameraHealth> {
+        self.camera.get().map(|camera| camera.health())
+    }
+
     /// Captures a point-in-time snapshot of the daemon component health.
     pub fn snapshot(&self) -> HealthStatus {
         let socket_ready = self.socket_ready.load(Ordering::Acquire);
-        let camera_ready = self.camera_ready.load(Ordering::Acquire);
+        let camera_ready = match self.camera_health() {
+            Some(state) => state.is_operational(),
+            None => self.camera_ready.load(Ordering::Acquire),
+        };
         let models_verified = self.models_verified.load(Ordering::Acquire);
         let is_healthy = socket_ready && camera_ready && models_verified;
 

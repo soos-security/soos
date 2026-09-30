@@ -10,12 +10,13 @@ pub mod manager;
 pub mod mock;
 pub mod resolver;
 pub mod sensor;
+pub mod stable_path;
 pub mod v4l_impl;
 
 pub use config::{CameraConfig, CameraConfigBuilder};
 pub use error::CameraError;
 pub use frame::{Frame, PixelFormat};
-pub use manager::CameraManager;
+pub use manager::{CameraHealth, CameraManager};
 pub use mock::MockCameraManager;
 pub use resolver::{
     is_auto_camera_device, parse_sensor_preference, resolve_camera_device, CameraEnumerator,
@@ -25,7 +26,8 @@ pub use sensor::{
     classify_sensor, enumerate_capture_devices, select_camera_device, CameraDeviceInfo,
     SensorPreference, SensorType,
 };
+pub use stable_path::{stable_device_path, DEFAULT_BY_ID_DIR};
 pub use v4l_impl::{
-    fourcc_to_pixel_format, negotiate_format, pixel_format_to_fourcc, V4lCameraManager,
-    FORMAT_PRIORITY,
+    fourcc_to_pixel_format, negotiate_format, pixel_format_to_fourcc, DevicePathResolver,
+    V4lCameraManager, FORMAT_PRIORITY,
 };

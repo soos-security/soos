@@ -3,17 +3,98 @@
 use crate::config::CameraConfig;
 use crate::error::CameraError;
 use crate::frame::{Frame, PixelFormat};
-use crate::manager::CameraManager;
+use crate::manager::{CameraHealth, CameraManager};
 use arc_swap::ArcSwapOption;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::panic::{self, AssertUnwindSafe};
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, RwLock};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 use v4l::capability::Flags;
 use v4l::format::fourcc::FourCC;
 use v4l::io::traits::CaptureStream;
 use v4l::video::Capture;
+
+/// Source of the device path the capture supervisor should (re)open.
+///
+/// Consulted by the supervisor after the current device was reported missing or unsuitable
+/// (`DeviceNotFound`, `UnsupportedCapability`), so that a camera re-enumerated under a new
+/// `/dev/videoN` index after suspend, replug or a boot race is picked up without a restart
+/// (GitHub #151). Returning `None` keeps retrying the current path with bounded backoff.
+pub trait DevicePathResolver: Send + Sync {
+    /// Returns the device path that should currently be used, if any candidate exists.
+    fn resolve(&self) -> Option<PathBuf>;
+}
+
+impl<F> DevicePathResolver for F
+where
+    F: Fn() -> Option<PathBuf> + Send + Sync,
+{
+    fn resolve(&self) -> Option<PathBuf> {
+        self()
+    }
+}
+
+/// Encoded [`CameraHealth`] values shared lock-free between the manager and its supervisor.
+const HEALTH_STARTING: u8 = 0;
+const HEALTH_STREAMING: u8 = 1;
+const HEALTH_STANDBY: u8 = 2;
+const HEALTH_RECOVERING: u8 = 3;
+const HEALTH_DEAD: u8 = 4;
+
+fn encode_health(health: CameraHealth) -> u8 {
+    match health {
+        CameraHealth::Starting => HEALTH_STARTING,
+        CameraHealth::Streaming => HEALTH_STREAMING,
+        CameraHealth::Standby => HEALTH_STANDBY,
+        CameraHealth::Recovering => HEALTH_RECOVERING,
+        CameraHealth::Dead => HEALTH_DEAD,
+    }
+}
+
+/// Decodes a stored health value; any unknown encoding is treated as `Dead` (fail-closed).
+fn decode_health(raw: u8) -> CameraHealth {
+    match raw {
+        HEALTH_STARTING => CameraHealth::Starting,
+        HEALTH_STREAMING => CameraHealth::Streaming,
+        HEALTH_STANDBY => CameraHealth::Standby,
+        HEALTH_RECOVERING => CameraHealth::Recovering,
+        _ => CameraHealth::Dead,
+    }
+}
+
+/// Returns whether a capture error means the current path no longer designates a usable
+/// capture device, so the resolver should be consulted (GitHub #151).
+fn warrants_reresolution(err: &CameraError) -> bool {
+    matches!(
+        err,
+        CameraError::DeviceNotFound { .. } | CameraError::UnsupportedCapability { .. }
+    )
+}
+
+/// State shared between the manager handle and the `soos-v4l-capture` supervisor thread.
+struct SupervisorShared {
+    latest_frame: Arc<ArcSwapOption<Frame>>,
+    is_ready: Arc<AtomicBool>,
+    running: Arc<AtomicBool>,
+    last_activity: Arc<RwLock<Instant>>,
+    health: Arc<AtomicU8>,
+    device_path: Arc<RwLock<PathBuf>>,
+}
+
+impl SupervisorShared {
+    fn set_health(&self, health: CameraHealth) {
+        self.health.store(encode_health(health), Ordering::Release);
+    }
+
+    /// Withdraws readiness and the published frame (fail-closed).
+    fn withdraw_frames(&self) {
+        self.is_ready.store(false, Ordering::Release);
+        self.latest_frame.store(None);
+    }
+}
 
 /// Hardware-backed camera manager utilizing Linux V4L2 MMAP streaming.
 pub struct V4lCameraManager {
@@ -22,34 +103,57 @@ pub struct V4lCameraManager {
     is_ready: Arc<AtomicBool>,
     running: Arc<AtomicBool>,
     last_activity: Arc<RwLock<Instant>>,
+    health: Arc<AtomicU8>,
+    device_path: Arc<RwLock<PathBuf>>,
     worker_handle: Option<JoinHandle<()>>,
 }
 
 impl V4lCameraManager {
     /// Spawns the background capture worker managing device lifecycle,
     /// warmup auto-exposure discard, lock-free frame swapping, and exponential backoff.
+    ///
+    /// The configured `device_path` is retried as-is forever (bounded backoff); it is never
+    /// substituted by another device. Use [`V4lCameraManager::spawn_with_resolver`] for
+    /// auto-selection that follows re-enumeration.
     pub fn spawn(config: CameraConfig) -> Result<Self, CameraError> {
+        Self::spawn_inner(config, None)
+    }
+
+    /// Spawns the capture supervisor with a [`DevicePathResolver`] consulted after every
+    /// `DeviceNotFound` / `UnsupportedCapability` backoff, so a camera that re-enumerates
+    /// under a new node (suspend, replug, boot race) is reopened without a daemon restart.
+    pub fn spawn_with_resolver(
+        config: CameraConfig,
+        resolver: Arc<dyn DevicePathResolver>,
+    ) -> Result<Self, CameraError> {
+        Self::spawn_inner(config, Some(resolver))
+    }
+
+    fn spawn_inner(
+        config: CameraConfig,
+        resolver: Option<Arc<dyn DevicePathResolver>>,
+    ) -> Result<Self, CameraError> {
         let latest_frame = Arc::new(ArcSwapOption::empty());
         let is_ready = Arc::new(AtomicBool::new(false));
         let running = Arc::new(AtomicBool::new(true));
         let last_activity = Arc::new(RwLock::new(Instant::now()));
+        let health = Arc::new(AtomicU8::new(HEALTH_STARTING));
+        let device_path = Arc::new(RwLock::new(config.device_path.clone()));
 
-        let latest_clone = Arc::clone(&latest_frame);
-        let ready_clone = Arc::clone(&is_ready);
-        let running_clone = Arc::clone(&running);
-        let activity_clone = Arc::clone(&last_activity);
+        let shared = SupervisorShared {
+            latest_frame: Arc::clone(&latest_frame),
+            is_ready: Arc::clone(&is_ready),
+            running: Arc::clone(&running),
+            last_activity: Arc::clone(&last_activity),
+            health: Arc::clone(&health),
+            device_path: Arc::clone(&device_path),
+        };
         let cfg = config.clone();
 
         let handle = thread::Builder::new()
             .name("soos-v4l-capture".into())
             .spawn(move || {
-                run_v4l_supervisor(
-                    cfg,
-                    latest_clone,
-                    ready_clone,
-                    running_clone,
-                    activity_clone,
-                );
+                run_v4l_supervisor(cfg, resolver, shared);
             })
             .map_err(|e| CameraError::Io {
                 path: config.device_path.clone(),
@@ -62,13 +166,32 @@ impl V4lCameraManager {
             is_ready,
             running,
             last_activity,
+            health,
+            device_path,
             worker_handle: Some(handle),
         })
+    }
+
+    /// Returns the device path the supervisor currently targets (it changes only when a
+    /// resolver re-resolves the camera after device loss).
+    pub fn current_device_path(&self) -> PathBuf {
+        self.device_path
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     /// Returns the configuration used by this camera manager.
     pub fn config(&self) -> &CameraConfig {
         &self.config
+    }
+
+    fn idle_expired(&self) -> bool {
+        let elapsed = {
+            let last = self.last_activity.read().unwrap_or_else(|e| e.into_inner());
+            last.elapsed()
+        };
+        !self.config.idle_timeout.is_zero() && elapsed > self.config.idle_timeout
     }
 }
 
@@ -81,11 +204,7 @@ impl CameraManager for V4lCameraManager {
     }
 
     fn is_ready(&self) -> bool {
-        let elapsed = {
-            let last = self.last_activity.read().unwrap_or_else(|e| e.into_inner());
-            last.elapsed()
-        };
-        if !self.config.idle_timeout.is_zero() && elapsed > self.config.idle_timeout {
+        if self.idle_expired() {
             return false;
         }
         self.is_ready.load(Ordering::Acquire)
@@ -102,6 +221,16 @@ impl CameraManager for V4lCameraManager {
     fn stop(&self) {
         self.running.store(false, Ordering::Release);
         self.is_ready.store(false, Ordering::Release);
+    }
+
+    fn health(&self) -> CameraHealth {
+        let state = decode_health(self.health.load(Ordering::Acquire));
+        // A streaming camera past its idle timeout is about to release the device for
+        // auto-standby; report the idle state rather than a failure.
+        if state == CameraHealth::Streaming && self.idle_expired() {
+            return CameraHealth::Standby;
+        }
+        state
     }
 }
 
@@ -121,58 +250,92 @@ enum SupervisorAction {
     Suspend,
 }
 
-/// Supervisor loop handling device reconnection, streaming, exponential backoff, and auto-standby.
+/// Capture thread entry point: runs the supervisor loop inside `catch_unwind`.
+///
+/// Under `panic = "unwind"` a panic in the capture thread would otherwise end the thread
+/// silently while the daemon keeps running with a stale readiness state. A caught panic
+/// marks the camera `Dead`, withdraws readiness and frames, and never restarts (fail-closed).
 fn run_v4l_supervisor(
     config: CameraConfig,
-    latest_frame: Arc<ArcSwapOption<Frame>>,
-    is_ready: Arc<AtomicBool>,
-    running: Arc<AtomicBool>,
-    last_activity: Arc<RwLock<Instant>>,
+    resolver: Option<Arc<dyn DevicePathResolver>>,
+    shared: SupervisorShared,
 ) {
+    let outcome = panic::catch_unwind(AssertUnwindSafe(|| {
+        supervise(&config, resolver.as_deref(), &shared);
+    }));
+
+    shared.withdraw_frames();
+    if outcome.is_err() {
+        shared.set_health(CameraHealth::Dead);
+        error!(
+            "Camera capture supervisor panicked; camera marked dead and unavailable until daemon restart (fail-closed)"
+        );
+    }
+}
+
+/// Supervisor loop handling device reconnection, re-resolution, streaming, exponential
+/// backoff, and auto-standby.
+fn supervise(
+    config: &CameraConfig,
+    resolver: Option<&dyn DevicePathResolver>,
+    shared: &SupervisorShared,
+) {
+    let mut active = config.clone();
     let mut current_backoff = config.min_backoff;
 
-    while running.load(Ordering::Acquire) {
-        match open_and_stream(&config, &latest_frame, &is_ready, &running, &last_activity) {
+    while shared.running.load(Ordering::Acquire) {
+        match open_and_stream(
+            &active,
+            &shared.latest_frame,
+            &shared.is_ready,
+            &shared.running,
+            &shared.last_activity,
+            &shared.health,
+        ) {
             Ok(SupervisorAction::Shutdown) => {
                 // Clean shutdown requested
                 break;
             }
             Ok(SupervisorAction::Suspend) => {
-                is_ready.store(false, Ordering::Release);
-                latest_frame.store(None);
+                shared.withdraw_frames();
+                shared.set_health(CameraHealth::Standby);
                 current_backoff = config.min_backoff;
 
                 // Suspended state: wait for notify_activity() or shutdown
-                while running.load(Ordering::Acquire) {
+                while shared.running.load(Ordering::Acquire) {
                     let recent_activity = {
-                        let last = last_activity.read().unwrap_or_else(|e| e.into_inner());
+                        let last = shared
+                            .last_activity
+                            .read()
+                            .unwrap_or_else(|e| e.into_inner());
                         config.idle_timeout.is_zero() || last.elapsed() < config.idle_timeout
                     };
                     if recent_activity {
                         info!(
                             "Camera activity requested on '{}'; resuming from auto-standby",
-                            config.device_path.display()
+                            active.device_path.display()
                         );
+                        shared.set_health(CameraHealth::Starting);
                         break;
                     }
                     thread::sleep(Duration::from_millis(50));
                 }
             }
             Err(err) => {
-                is_ready.store(false, Ordering::Release);
-                latest_frame.store(None);
+                shared.withdraw_frames();
+                shared.set_health(CameraHealth::Recovering);
 
                 if err.is_device_busy() {
                     warn!(
                         "Camera '{}' is held by another process (EBUSY); the root daemon must be \
                          the only owner of the device. Backing off for {:?}",
-                        config.device_path.display(),
+                        active.device_path.display(),
                         current_backoff
                     );
                 } else {
                     warn!(
                         "Camera error on '{}': {}. Backing off for {:?}",
-                        config.device_path.display(),
+                        active.device_path.display(),
                         err,
                         current_backoff
                     );
@@ -180,19 +343,41 @@ fn run_v4l_supervisor(
 
                 // Sleep backoff with periodic running check
                 let sleep_start = Instant::now();
-                while running.load(Ordering::Acquire) && sleep_start.elapsed() < current_backoff {
+                while shared.running.load(Ordering::Acquire)
+                    && sleep_start.elapsed() < current_backoff
+                {
                     let rem = current_backoff.saturating_sub(sleep_start.elapsed());
                     thread::sleep(Duration::from_millis(20).min(rem));
                 }
 
                 // Exponential backoff doubling up to max_backoff
                 current_backoff = (current_backoff.saturating_mul(2)).min(config.max_backoff);
+
+                // Re-resolve the device at most once per backoff period when the current path
+                // no longer designates a usable capture device (GitHub #151).
+                if shared.running.load(Ordering::Acquire) && warrants_reresolution(&err) {
+                    if let Some(new_path) = resolver.and_then(DevicePathResolver::resolve) {
+                        if new_path != active.device_path {
+                            info!(
+                                "Camera re-resolved from '{}' to '{}'; reopening",
+                                active.device_path.display(),
+                                new_path.display()
+                            );
+                            {
+                                let mut guard = shared
+                                    .device_path
+                                    .write()
+                                    .unwrap_or_else(|e| e.into_inner());
+                                guard.clone_from(&new_path);
+                            }
+                            active.device_path = new_path;
+                            current_backoff = config.min_backoff;
+                        }
+                    }
+                }
             }
         }
     }
-
-    is_ready.store(false, Ordering::Release);
-    latest_frame.store(None);
 }
 
 /// Priority order for automatic format negotiation:
@@ -261,6 +446,7 @@ fn open_and_stream(
     is_ready: &Arc<AtomicBool>,
     running: &Arc<AtomicBool>,
     last_activity: &Arc<RwLock<Instant>>,
+    health: &AtomicU8,
 ) -> Result<SupervisorAction, CameraError> {
     let device = v4l::Device::with_path(&config.device_path)
         .map_err(|e| CameraError::from_io_error(config.device_path.clone(), e))?;
@@ -400,6 +586,7 @@ fn open_and_stream(
         latest_frame.store(Some(Arc::new(frame)));
         // Camera is now stabilized and ready: publish ready flag with Release after storing frame
         is_ready.store(true, Ordering::Release);
+        health.store(HEALTH_STREAMING, Ordering::Release);
         sequence = sequence.saturating_add(1);
 
         // Check for idle auto-standby: if idle for more than idle_timeout,
