@@ -13,6 +13,7 @@ use crate::error::DaemonError;
 use crate::health::HealthState;
 use crate::inference::{InferenceGate, RequestDeadline};
 use crate::limits::{PeerConnectionLimiter, PeerLimitsConfig};
+use crate::logging::short_request_id;
 use crate::peercred::{get_peer_credentials, verify_peer_credentials, PeerCredentials};
 use crate::pipeline::{
     classify_template_model, current_monotonic_nanos, PipelineComponents, TemplateModelBinding,
@@ -32,6 +33,11 @@ use soos_protocol::types::{
     Event, EventKind, PreviewResponse, ReasonClass, Request, RequestId, RequestKind, Response,
     StatusResponse, Verdict, CURRENT_VERSION, MAX_MESSAGE_SIZE,
 };
+
+/// Validity window of a rendered `Response`: `expires = issued + RESPONSE_VALIDITY_NS`
+/// (GitHub #258). The PAM client treats both timestamps as informational (ADR
+/// 2026-09-30 "Response Timestamps Are Informational").
+pub const RESPONSE_VALIDITY_NS: u64 = 2_000_000_000;
 
 /// Internal representation of processed connection output before socket transmission.
 #[derive(Debug)]
@@ -560,7 +566,6 @@ impl ConnectionDispatcher {
                 req.request_id,
                 Verdict::ProtocolError,
                 ReasonClass::MalformedRequest,
-                0,
             )?;
             return Ok(ResponseOutput {
                 encoded_response: encoded,
@@ -610,7 +615,7 @@ impl ConnectionDispatcher {
                 }
                 _ => (Verdict::ProtocolError, ReasonClass::MalformedRequest),
             };
-            let encoded = self.build_response(req.request_id, verdict, reason_class, 0)?;
+            let encoded = self.build_response(req.request_id, verdict, reason_class)?;
             return Ok(ResponseOutput {
                 encoded_response: encoded,
                 completion_error: None,
@@ -636,7 +641,6 @@ impl ConnectionDispatcher {
                 req.request_id,
                 Verdict::ProtocolError,
                 ReasonClass::UidMismatch,
-                0,
             )?;
             return Ok(ResponseOutput {
                 encoded_response: encoded,
@@ -662,7 +666,6 @@ impl ConnectionDispatcher {
                     req.request_id,
                     Verdict::Unavailable,
                     ReasonClass::InternalError,
-                    0,
                 )?;
                 return Ok(ResponseOutput {
                     encoded_response: encoded,
@@ -677,12 +680,8 @@ impl ConnectionDispatcher {
                 deadline = req.deadline_monotonic_ns,
                 "Request exceeded monotonic deadline before processing"
             );
-            let encoded = self.build_response(
-                req.request_id,
-                Verdict::Unavailable,
-                ReasonClass::Timeout,
-                now_ns,
-            )?;
+            let encoded =
+                self.build_response(req.request_id, Verdict::Unavailable, ReasonClass::Timeout)?;
             return Ok(ResponseOutput {
                 encoded_response: encoded,
                 completion_error: None,
@@ -718,7 +717,6 @@ impl ConnectionDispatcher {
                         req.request_id,
                         Verdict::ProtocolError,
                         ReasonClass::RateLimited,
-                        now_ns,
                     )?;
                     return Ok(ResponseOutput {
                         encoded_response: encoded,
@@ -762,7 +760,6 @@ impl ConnectionDispatcher {
                     req.request_id,
                     Verdict::Unavailable,
                     ReasonClass::CameraUnavailable,
-                    now_ns,
                 )?;
                 return Ok(ResponseOutput {
                     encoded_response: encoded,
@@ -782,7 +779,6 @@ impl ConnectionDispatcher {
                         req.request_id,
                         Verdict::Unavailable,
                         ReasonClass::InternalError,
-                        now_ns,
                     )?;
                     return Ok(ResponseOutput {
                         encoded_response: encoded,
@@ -799,7 +795,6 @@ impl ConnectionDispatcher {
                         req.request_id,
                         Verdict::Unavailable,
                         ReasonClass::InternalError,
-                        now_ns,
                     )?;
                     return Ok(ResponseOutput {
                         encoded_response: encoded,
@@ -837,7 +832,6 @@ impl ConnectionDispatcher {
                         req.request_id,
                         Verdict::Unavailable,
                         ReasonClass::ModelUnavailable,
-                        now_ns,
                     )?;
                     return Ok(ResponseOutput {
                         encoded_response: encoded,
@@ -864,7 +858,6 @@ impl ConnectionDispatcher {
                             req.request_id,
                             Verdict::Unavailable,
                             ReasonClass::InternalError,
-                            0,
                         )?;
                         return Ok(ResponseOutput {
                             encoded_response: encoded,
@@ -933,7 +926,6 @@ impl ConnectionDispatcher {
                                         req.request_id,
                                         Verdict::Unavailable,
                                         ReasonClass::InternalError,
-                                        cur_ns,
                                     )?;
                                     return Ok(ResponseOutput {
                                         encoded_response: encoded,
@@ -1004,7 +996,6 @@ impl ConnectionDispatcher {
                                         req.request_id,
                                         Verdict::Unavailable,
                                         ReasonClass::ModelUnavailable,
-                                        cur_ns,
                                     )?;
                                     return Ok(ResponseOutput {
                                         encoded_response: encoded,
@@ -1017,7 +1008,6 @@ impl ConnectionDispatcher {
                                         req.request_id,
                                         Verdict::Unavailable,
                                         ReasonClass::InternalError,
-                                        cur_ns,
                                     )?;
                                     return Ok(ResponseOutput {
                                         encoded_response: encoded,
@@ -1066,7 +1056,6 @@ impl ConnectionDispatcher {
 
             // 8f: Render the aggregate verdict. The attempt was already recorded by the
             // reservation in 8-pre (exactly one per request), so nothing is recorded here.
-            let cur_ns = self.now_nanos().unwrap_or(0);
             let decision = aggregator.decision();
             let (final_verdict, final_reason) = match decision {
                 ConsensusDecision::Allow => {
@@ -1093,8 +1082,7 @@ impl ConnectionDispatcher {
                 pipe.camera.notify_activity();
             }
 
-            let encoded =
-                self.build_response(req.request_id, final_verdict, final_reason, cur_ns)?;
+            let encoded = self.build_response(req.request_id, final_verdict, final_reason)?;
             return Ok(ResponseOutput {
                 encoded_response: encoded,
                 completion_error: None,
@@ -1103,14 +1091,13 @@ impl ConnectionDispatcher {
 
         // Fail-closed fallback: never authorize authentication without an initialized pipeline
         warn!(
-            request_id = ?req.request_id,
+            request_id = %short_request_id(&req.request_id),
             "Rejecting authentication request: daemon pipeline is not initialized"
         );
         let encoded = self.build_response(
             req.request_id,
             Verdict::Unavailable,
             ReasonClass::InternalError,
-            now_ns,
         )?;
         Ok(ResponseOutput {
             encoded_response: encoded,
@@ -1142,7 +1129,6 @@ impl ConnectionDispatcher {
                 req.request_id,
                 Verdict::ProtocolError,
                 ReasonClass::UidMismatch,
-                0,
             )?;
             return Ok(ResponseOutput {
                 encoded_response: encoded,
@@ -1159,7 +1145,6 @@ impl ConnectionDispatcher {
                 req.request_id,
                 Verdict::ProtocolError,
                 ReasonClass::UidMismatch,
-                0,
             )?;
             return Ok(ResponseOutput {
                 encoded_response: encoded,
@@ -1175,7 +1160,6 @@ impl ConnectionDispatcher {
                     req.request_id,
                     Verdict::Unavailable,
                     ReasonClass::InternalError,
-                    0,
                 )?;
                 return Ok(ResponseOutput {
                     encoded_response: encoded,
@@ -1196,7 +1180,6 @@ impl ConnectionDispatcher {
                     req.request_id,
                     Verdict::ProtocolError,
                     ReasonClass::RateLimited,
-                    now_ns,
                 )?;
                 return Ok(ResponseOutput {
                     encoded_response: encoded,
@@ -1286,20 +1269,46 @@ impl ConnectionDispatcher {
         })
     }
 
+    /// Encodes one `Response`, stamping it from the dispatcher's monotonic clock.
+    ///
+    /// GitHub #258: every verdict path gets `issued_monotonic_ns > 0` and
+    /// `expires_monotonic_ns = issued + RESPONSE_VALIDITY_NS`. When the clock fails (or
+    /// reads zero) the response carries `issued == expires == 0`, i.e. already expired,
+    /// and an `Allow` verdict is downgraded to `Unavailable` / `InternalError`: an
+    /// authorization is never rendered without a clock (fail-closed).
     fn build_response(
         &self,
         request_id: RequestId,
         verdict: Verdict,
         reason_class: ReasonClass,
-        now_ns: u64,
     ) -> Result<Zeroizing<Vec<u8>>, DaemonError> {
+        let (verdict, reason_class, issued_monotonic_ns, expires_monotonic_ns) =
+            match self.now_nanos() {
+                Ok(now_ns) if now_ns > 0 => (
+                    verdict,
+                    reason_class,
+                    now_ns,
+                    now_ns.saturating_add(RESPONSE_VALIDITY_NS),
+                ),
+                Ok(_) | Err(_) => {
+                    if verdict == Verdict::Allow {
+                        warn!(
+                            "Monotonic clock unavailable while rendering an Allow verdict; \
+                             downgrading to Unavailable (fail-closed)"
+                        );
+                        (Verdict::Unavailable, ReasonClass::InternalError, 0, 0)
+                    } else {
+                        (verdict, reason_class, 0, 0)
+                    }
+                }
+            };
         let resp = Response {
             version: CURRENT_VERSION,
             request_id,
             verdict,
             reason_class,
-            issued_monotonic_ns: now_ns,
-            expires_monotonic_ns: now_ns.saturating_add(2_000_000_000),
+            issued_monotonic_ns,
+            expires_monotonic_ns,
         };
 
         info!(

@@ -110,7 +110,7 @@ Returned by the daemon to the PAM module (and as the refusal of a `Status` or `P
   - `Unavailable`: Hardware offline, model uninitialized, or deadline expired.
   - `ProtocolError`: Malformed message, mismatched UID, rate-limit reached.
 - `reason_class: ReasonClass`: Internal telemetry diagnostic (must not alter PAM fallback semantics). It is **never** shown to the user: the PAM module maps every `Deny` to one neutral text and every other failure to one generic text, so a PAD rejection is indistinguishable from a non-match at the lock screen (review PAM-03, GitHub #174; see `Docs/PAM_MODULE.md` §8).
-- `issued_monotonic_ns: u64`: Generation timestamp (CLOCK_MONOTONIC, informational).
+- `issued_monotonic_ns: u64`: Generation timestamp (CLOCK_MONOTONIC, informational). `soos-daemon` stamps it from its monotonic clock on every verdict path (always `> 0`); when the clock fails it sends `0` with `expires_monotonic_ns = 0` and never `Allow` (GitHub #258).
 - `expires_monotonic_ns: u64`: Daemon-side expiry hint (`issued + 2 s`); informational only and not validated by the PAM client. Replay protection is described in "Response Freshness" below.
 
 #### Response Freshness (GitHub #219)

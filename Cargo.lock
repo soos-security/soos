@@ -3265,6 +3265,7 @@ dependencies = [
  "ort",
  "postcard",
  "serde",
+ "sha2",
  "soos-biometric-store",
  "soos-camera-v4l",
  "soos-evidence-store",

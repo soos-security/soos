@@ -135,7 +135,8 @@ pad_threshold = 0.85
 
 ## 2. Connection Model
 
-- One Tokio task per accepted connection. `SO_PEERCRED` is read once, before any byte, and the
+- One Tokio task per accepted connection, tracked in `soos_daemon::shutdown::ConnectionTasks`
+  (never detached; finished handlers are reaped while the accept loop runs, see §5). `SO_PEERCRED` is read once, before any byte, and the
   connection is admitted by `PeerConnectionLimiter` (global permits, root reservation, per-UID cap);
   a refused peer is closed without being read (the PAM client sees EOF and returns `PAM_IGNORE`).
 - **Persistent loop**: an admitted connection serves framed messages until the client closes it, it
@@ -171,3 +172,25 @@ pad_threshold = 0.85
 3. The pipeline (models, camera supervisor, stores) is initialized fail-closed; any error stops the
    daemon before the socket exists.
 4. The socket is bound (§1.2) and the accept loop starts.
+
+## 5. Shutdown, Panic Reporting and Log Anonymization (GitHub #257, #258, #259)
+
+- **Graceful shutdown**: on SIGINT or SIGTERM `accept_until_shutdown` returns, the listener is
+  dropped (no new connection is accepted), `socket_ready` is cleared and the socket file is
+  unlinked (`SocketGuard`). The remaining handlers are then drained by
+  `ConnectionTasks::drain(connection_timeout)`; handlers still running when that budget expires are
+  aborted (the PAM client sees EOF and returns `PAM_IGNORE`). The drain logs its start
+  (`in_flight`, `budget_ms`) and its outcome (`completed`, `panicked`, `aborted`).
+- **Panics**: a panicking connection handler is reported at `error` level ("Connection handler
+  panicked") when its task is joined; the `JoinError` is never formatted because its `Display`
+  carries the panic payload. `install_panic_hook` replaces the default stderr hook with a `tracing`
+  `error` event that records only the source file, line and thread name, never the panic message.
+- **Request nonce in logs**: the 256-bit `request_id` is never logged. A log line that needs to
+  correlate a request uses `request_id = %short_request_id(&req.request_id)`: the first 4 bytes of
+  `SHA-256("soos.request-id.log.v1" || request_id)` as 8 hex digits, which reveals no nonce bit
+  (enforced by `crates/daemon/tests/request_id_logging_tests.rs`).
+- **Response timestamps**: `build_response` stamps every `Response` from the dispatcher clock:
+  `issued_monotonic_ns > 0` and `expires_monotonic_ns = issued + RESPONSE_VALIDITY_NS` (2 s) on every
+  verdict path. If the clock fails, the response carries `issued = expires = 0` (already expired)
+  and an `Allow` verdict is downgraded to `Unavailable` / `InternalError`. The PAM client still
+  treats both fields as informational (see `Docs/IPC_PROTOCOL.md`, "Response Freshness").
