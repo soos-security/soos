@@ -17,8 +17,9 @@ pub mod service;
 pub mod shred;
 
 pub use args::{
-    sanitize_path, validate_camera_device_path, validate_fhs_path, Cli, Commands, DebugVisionArgs,
-    DeleteArgs, EnrollArgs, ImportArgs, ListArgs, OutputFormat, VerifyArgs, ALLOWED_FHS_PREFIXES,
+    resolve_default_target_uid, sanitize_path, validate_camera_device_path, validate_fhs_path, Cli,
+    Commands, DebugVisionArgs, DeleteArgs, EnrollArgs, ImportArgs, ListArgs, OutputFormat,
+    VerifyArgs, ALLOWED_FHS_PREFIXES,
 };
 pub use error::EnrollmentCliError;
 pub use guided_enrollment::{EnrollmentStep, EnrollmentStepFeedback, GuidedEnrollmentSession};

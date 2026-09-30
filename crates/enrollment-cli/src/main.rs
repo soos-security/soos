@@ -11,7 +11,7 @@ use std::io::{self, Write};
 
 use clap::Parser;
 
-use soos_enrollment_cli::args::{Cli, Commands, OutputFormat};
+use soos_enrollment_cli::args::{resolve_target_uid, Cli, Commands, OutputFormat};
 use soos_enrollment_cli::error::EnrollmentCliError;
 use soos_enrollment_cli::{build_full_service, build_store_only, check_privileges};
 use soos_protocol::Verdict;
@@ -34,6 +34,9 @@ fn run() -> Result<(), EnrollmentCliError> {
 
     match &cli.command {
         Commands::Enroll(args) => {
+            // Show the resolved target before any frame is captured (GitHub #184).
+            let target_uid = resolve_target_uid(args.uid, args.username.as_deref())?;
+            println!("Enrollment target UID: {target_uid}");
             let service = build_full_service(&cli)?;
             let outcome = service.enroll(args, |summary| {
                 println!("\n=== Biometric Enrollment Summary ===");
