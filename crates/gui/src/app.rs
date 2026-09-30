@@ -18,9 +18,7 @@ use arc_swap::ArcSwapOption;
 use eframe::egui::{self, Color32, Pos2, Rect, Stroke, Vec2};
 use soos_biometric_store::BiometricTemplate;
 use soos_camera_v4l::{CameraManager, CameraStatus};
-use soos_enrollment_cli::guided_enrollment::{
-    EnrollmentStep, EnrollmentStepFeedback, GuidedEnrollmentSession,
-};
+use soos_enrollment_cli::guided_enrollment::{EnrollmentStep, EnrollmentStepFeedback};
 use soos_enrollment_cli::service::EnrolledUserSummary;
 use soos_vision::VisionPipeline;
 use zeroize::Zeroizing;
@@ -988,6 +986,14 @@ impl SoosApp {
                             "Too far: rotate your head back slightly.",
                             Color32::YELLOW,
                         ),
+                        EnrollmentStepFeedback::SessionAborted => (
+                            "Enrollment aborted: repeated spoof detections. Cancel and restart.",
+                            Color32::RED,
+                        ),
+                        EnrollmentStepFeedback::FaceQualityTooLow => (
+                            "Face too small or blurred: move closer and hold still.",
+                            Color32::YELLOW,
+                        ),
                     };
 
                     ui.group(|ui| {
@@ -1005,7 +1011,7 @@ impl SoosApp {
                             if let Ok(mut session_guard) =
                                 self.worker_input.enrollment_session.lock()
                             {
-                                *session_guard = Some(GuidedEnrollmentSession::new(4));
+                                *session_guard = Some(crate::worker::new_guided_enrollment_session());
                             }
                         }
                     } else if ui.button("⏹ Cancel").clicked() {

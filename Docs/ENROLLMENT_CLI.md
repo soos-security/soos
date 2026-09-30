@@ -147,6 +147,22 @@ Verification: `crates/enrollment-cli/tests/debug_vision_tests.rs` (matrix rows E
 
 Each step records at most `MAX_SAMPLES_PER_STEP` (20) samples (`GuidedEnrollmentSession::new` clamps the target to `1..=20`). The composite template is the mean direction of the L2-normalized samples, `t = m / ||m||` with `m = sum_i s_i / ||s_i||`; `compute_composite_embedding` re-validates every sample (dimension, finiteness, consistency with the frontal anchor) and fails closed instead of returning a non-finite or contaminated vector.
 
+**Session-level liveness (GitHub #217 / PAD-12).** Liveness is tracked over the session with a
+`LivenessPolicy`, not per frame:
+
+- a sample is recorded only after `min_consecutive_live_frames` consecutive live frames; a live frame
+  that is not yet sampled returns `PromptHoldStill`;
+- a spoof frame discards every sample of the current step and resets the streak (`SpoofDetected`);
+- the `max_spoof_events`-th spoof frame aborts the session: every sample is discarded,
+  `SessionAborted` is returned from then on and `compute_composite_embedding` fails;
+- `interrupt_liveness_streak()` breaks the streak without counting a spoof event (frames with no
+  PAD verdict or rejected by the quality gate).
+
+`LivenessPolicy::strict()` (3 frames, 3 spoof events; both values clamped to `1..=32`) is the policy
+of the GUI (`soos_gui::worker::new_guided_enrollment_session`). `GuidedEnrollmentSession::new`
+keeps a single-frame gate (`LivenessPolicy::single_frame()`), still with the step reset and the
+spoof abort, for compatibility with its existing contract.
+
 ---
 
 ## 3. Global Options

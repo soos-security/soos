@@ -15,6 +15,10 @@ use crate::error::VisionError;
 use crate::ir_liveness::{evaluate_ir_gate, PadInputModality, DEFAULT_IR_PAD_THRESHOLD};
 use crate::matcher::{match_embeddings, MatchResult};
 use crate::pad_fusion::fuse_pad_results;
+use crate::quality::{
+    face_size_px, laplacian_variance, passes_min, FaceQualityRejection, DEFAULT_MIN_FACE_WIDTH_PX,
+    DEFAULT_MIN_PAD_CROP_SHARPNESS,
+};
 use zeroize::{Zeroize, Zeroizing};
 
 /// Maximum number of PAD models in a multi-scale ensemble, primary model included
@@ -46,6 +50,14 @@ pub struct VisionPipelineConfig {
     pub pad_target_height: u32,
     /// Bounding box expansion scale factor for PAD context crop (standard 2.7).
     pub pad_bbox_scale: f32,
+    /// Minimum face size in pixels (smaller bounding-box side) accepted before PAD
+    /// (default [`DEFAULT_MIN_FACE_WIDTH_PX`], GitHub #218). Smaller faces are rejected
+    /// with [`VisionError::FaceTooSmall`]; a non-finite value rejects every face.
+    pub min_face_width_px: f32,
+    /// Minimum PAD crop sharpness (variance of the Laplacian of the 80x80 crop luma)
+    /// accepted before PAD (default [`DEFAULT_MIN_PAD_CROP_SHARPNESS`] = disabled,
+    /// GitHub #218). Blurrier crops are rejected with [`VisionError::FaceBlurred`].
+    pub min_pad_crop_sharpness: f32,
 }
 
 impl Default for VisionPipelineConfig {
@@ -60,6 +72,8 @@ impl Default for VisionPipelineConfig {
             pad_target_width: 80,
             pad_target_height: 80,
             pad_bbox_scale: 2.7,
+            min_face_width_px: DEFAULT_MIN_FACE_WIDTH_PX,
+            min_pad_crop_sharpness: DEFAULT_MIN_PAD_CROP_SHARPNESS,
         }
     }
 }
@@ -142,6 +156,9 @@ pub struct VisionAnalysis {
     pub aligned_crop: Option<Zeroizing<Vec<u8>>>,
     /// 512D biometric embedding if feature extraction succeeded.
     pub embedding: Option<Zeroizing<Vec<f32>>>,
+    /// Set when the primary face failed the pre-PAD quality gate (GitHub #218); PAD,
+    /// alignment and embedding are then skipped (`pad_result` and `embedding` are `None`).
+    pub quality_rejection: Option<FaceQualityRejection>,
 }
 
 impl zeroize::Zeroize for VisionAnalysis {
@@ -279,29 +296,20 @@ impl VisionPipeline {
         let mut pose = None;
         let mut aligned_crop = None;
         let mut embedding = None;
+        let mut quality_rejection = None;
 
         if let Some(det) = primary {
             if let Some(landmarks) = &det.landmarks {
                 pose = Some(crate::pose::estimate_head_pose(landmarks));
-
-                pad_result = self.analyze_pad(
+                quality_rejection = self.analyze_primary_face(
+                    frame,
                     &rgb,
-                    frame.width,
-                    frame.height,
-                    &det.box_,
-                    PadInputModality::for_frame(frame),
+                    det,
+                    landmarks,
+                    &mut pad_result,
+                    &mut aligned_crop,
+                    &mut embedding,
                 );
-
-                if let Ok(aligned) = align_face_112(&rgb, frame.width, frame.height, landmarks) {
-                    if let Ok(emb) = self.extractor.extract_embedding(
-                        &aligned,
-                        self.config.target_width,
-                        self.config.target_height,
-                    ) {
-                        embedding = Some(Zeroizing::new(emb.as_slice().to_vec()));
-                    }
-                    aligned_crop = Some(Zeroizing::new(aligned));
-                }
             }
         }
 
@@ -312,15 +320,113 @@ impl VisionPipeline {
             pose,
             aligned_crop,
             embedding,
+            quality_rejection,
         })
+    }
+
+    /// Quality gate, PAD, alignment and embedding for the primary face of `analyze_frame`.
+    ///
+    /// Returns the quality-gate rejection, if any; a rejected face is never scored by PAD
+    /// and never produces an aligned crop or an embedding (GitHub #218).
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "Out-parameters of the non-short-circuiting GUI analysis"
+    )]
+    fn analyze_primary_face(
+        &self,
+        frame: &Frame,
+        rgb: &[u8],
+        det: &FaceDetection,
+        landmarks: &FaceLandmarks,
+        pad_result: &mut Option<PadResult>,
+        aligned_crop: &mut Option<Zeroizing<Vec<u8>>>,
+        embedding: &mut Option<Zeroizing<Vec<f32>>>,
+    ) -> Option<FaceQualityRejection> {
+        if self.check_face_size(det).is_err() {
+            return Some(FaceQualityRejection::TooSmall);
+        }
+
+        // The sharpness gate measures the primary PAD crop (upstream geometry, GitHub #213)
+        // that the PAD model would score.
+        if let Ok(crop) = crop_pad_context(
+            rgb,
+            frame.width,
+            frame.height,
+            &det.box_,
+            self.config.pad_bbox_scale,
+            self.config.pad_target_width,
+            self.config.pad_target_height,
+        ) {
+            let pad_crop = Zeroizing::new(crop);
+            if self.check_pad_crop_sharpness(&pad_crop).is_err() {
+                return Some(FaceQualityRejection::Blurred);
+            }
+        }
+        *pad_result = self.analyze_pad(
+            rgb,
+            frame.width,
+            frame.height,
+            &det.box_,
+            PadInputModality::for_frame(frame),
+        );
+
+        if let Ok(aligned) = align_face_112(rgb, frame.width, frame.height, landmarks) {
+            if let Ok(emb) = self.extractor.extract_embedding(
+                &aligned,
+                self.config.target_width,
+                self.config.target_height,
+            ) {
+                *embedding = Some(Zeroizing::new(emb.as_slice().to_vec()));
+            }
+            *aligned_crop = Some(Zeroizing::new(aligned));
+        }
+        None
+    }
+
+    /// Pre-PAD face size gate (GitHub #218): the smaller bounding-box side must reach
+    /// `min_face_width_px`. Fail-closed on non-finite sizes or thresholds.
+    fn check_face_size(&self, detection: &FaceDetection) -> Result<(), VisionError> {
+        let b = &detection.box_;
+        let size = face_size_px(b.x1, b.y1, b.x2, b.y2);
+        let min = self.config.min_face_width_px;
+        if passes_min(size, min) {
+            Ok(())
+        } else {
+            Err(VisionError::FaceTooSmall {
+                width_px: size,
+                min_width_px: min,
+            })
+        }
+    }
+
+    /// Pre-PAD sharpness gate (GitHub #218): the PAD crop's variance of the Laplacian must
+    /// reach `min_pad_crop_sharpness`. Fail-closed on invalid buffers or non-finite values.
+    fn check_pad_crop_sharpness(&self, pad_crop: &[u8]) -> Result<(), VisionError> {
+        let sharpness = laplacian_variance(
+            pad_crop,
+            self.config.pad_target_width,
+            self.config.pad_target_height,
+        )
+        .unwrap_or(f32::NAN);
+        let min = self.config.min_pad_crop_sharpness;
+        if passes_min(sharpness, min) {
+            Ok(())
+        } else {
+            Err(VisionError::FaceBlurred {
+                sharpness,
+                min_sharpness: min,
+            })
+        }
     }
 
     /// Processes a single camera frame:
     /// 1. Color converts to RGB24
     /// 2. Detects faces; enforces single-face security invariant (rejects 0 or >1 faces)
     /// 3. Extracts 5-point facial landmarks from detection
-    /// 4. Crops the upstream-geometry 2.7x context window (plus any additional multi-scale
-    ///    PAD member scales) and resizes it to 80x80 for PAD
+    /// 4. Rejects faces smaller than `min_face_width_px` ([`VisionError::FaceTooSmall`]),
+    ///    crops the upstream-geometry 2.7x context window (plus any additional multi-scale
+    ///    PAD member scales), resizes it to 80x80 for PAD and rejects a primary crop below
+    ///    `min_pad_crop_sharpness` ([`VisionError::FaceBlurred`]) (GitHub #218)
     /// 5. Evaluates Presentation Attack Detection (PAD) liveness; short-circuits on spoof.
     ///    `Grey` frames and every frame from an `Infrared` sensor (whatever its pixel format)
     ///    first pass the fail-closed IR gate and are scored against the stricter IR threshold
@@ -356,6 +462,9 @@ impl VisionPipeline {
                 min_confidence: self.config.min_face_confidence,
             });
         }
+
+        // Pre-PAD quality gate (GitHub #218): tiny faces give unreliable PAD scores.
+        self.check_face_size(&detection)?;
 
         let landmarks = detection.landmarks.ok_or(VisionError::MissingLandmarks)?;
 
@@ -418,9 +527,14 @@ impl VisionPipeline {
             let crop = Zeroizing::new(crop_pad_context(
                 rgb, width, height, face_box, scale, target_w, target_h,
             )?);
-            if index == 0 && modality.is_monochrome() {
-                evaluate_ir_gate(&crop, target_w, target_h)
-                    .map_err(|reason| VisionError::IrLivenessGateFailed { reason })?;
+            if index == 0 {
+                // Pre-PAD sharpness gate on the primary crop (GitHub #218), before the IR
+                // gate and before any PAD model is consulted.
+                self.check_pad_crop_sharpness(&crop)?;
+                if modality.is_monochrome() {
+                    evaluate_ir_gate(&crop, target_w, target_h)
+                        .map_err(|reason| VisionError::IrLivenessGateFailed { reason })?;
+                }
             }
             results.push(pad.evaluate_liveness(&crop, target_w, target_h)?);
         }

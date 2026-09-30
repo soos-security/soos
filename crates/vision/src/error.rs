@@ -56,6 +56,17 @@ pub enum VisionError {
         min_confidence: f32,
     },
 
+    /// Face bounding box (smaller side) is below the minimum face size (GitHub #218).
+    ///
+    /// The PAD crop would be upsampled and its liveness score is unreliable; the capture
+    /// is treated as unusable (no usable face), never as a pass.
+    #[error("Face size {width_px:.1} px is below the required minimum {min_width_px:.1} px")]
+    FaceTooSmall { width_px: f32, min_width_px: f32 },
+
+    /// PAD crop sharpness (variance of the Laplacian) is below the minimum (GitHub #218).
+    #[error("PAD crop sharpness {sharpness:.2} is below the required minimum {min_sharpness:.2}")]
+    FaceBlurred { sharpness: f32, min_sharpness: f32 },
+
     /// Face detection is missing required 5-point facial landmarks.
     #[error("Face detection is missing required 5-point landmarks")]
     MissingLandmarks,

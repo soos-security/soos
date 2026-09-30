@@ -7,6 +7,7 @@
 //! - Cosine similarity matcher with zero-norm and dimension protections
 //! - `VisionPipeline` orchestrator enforcing the single-face security invariant
 //! - Format-aware PAD policy: fail-closed IR gate and stricter threshold for `Grey` frames
+//! - Pre-PAD face quality gate: minimum face size and optional PAD crop sharpness floor
 
 #![forbid(unsafe_code)]
 
@@ -20,6 +21,7 @@ pub mod matcher;
 pub mod pad_fusion;
 pub mod pipeline;
 pub mod pose;
+pub mod quality;
 
 pub use align::{align_face_112, TARGET_LANDMARKS_112};
 pub use color::convert_to_rgb;
@@ -40,3 +42,7 @@ pub use pipeline::{
     MAX_PAD_ENSEMBLE_MODELS,
 };
 pub use pose::{compute_face_geometry, estimate_head_pose, FaceGeometry, HeadPose};
+pub use quality::{
+    laplacian_variance, FaceQualityRejection, DEFAULT_MIN_FACE_WIDTH_PX,
+    DEFAULT_MIN_PAD_CROP_SHARPNESS,
+};

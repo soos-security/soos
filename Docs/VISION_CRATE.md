@@ -160,6 +160,27 @@ primary first.
   re-measurement; it is a follow-up of GitHub #212 (ADR 2026-09-30 "Upstream-Parity PAD Crop
   Geometry and Multi-Scale Fusion").
 
+#### 2.4.3 Pre-PAD Face Quality Gate (`quality.rs`, GitHub #218)
+
+MiniFASNet scores are unreliable on tiny or blurred faces, so `process_frame` checks face quality
+after the confidence check and before the PAD model and the embedding extractor run:
+
+| Check | Config field (default) | Error |
+|---|---|---|
+| Smaller bounding-box side >= floor | `min_face_width_px` (`DEFAULT_MIN_FACE_WIDTH_PX` = 48 px) | `VisionError::FaceTooSmall { width_px, min_width_px }` |
+| Variance of the Laplacian of the 80x80 PAD crop luma >= floor | `min_pad_crop_sharpness` (`DEFAULT_MIN_PAD_CROP_SHARPNESS` = 0.0, disabled) | `VisionError::FaceBlurred { sharpness, min_sharpness }` |
+
+- The 48 px floor is above the no-upsampling limit of the 2.7x context crop (80 / 2.7 ~= 29.6 px).
+- `laplacian_variance(rgb, w, h)` uses integer BT.601 luma and the 4-neighbour kernel; it is 0 on
+  a flat crop and returns `None` for a malformed buffer or an image smaller than 3x3.
+- Every comparison fails closed: a non-finite size, sharpness or threshold rejects the face.
+- The sharpness floor is disabled by default until it is calibrated on real camera captures (ADR
+  2026-09-30 "Pre-PAD Face Quality Gate"). Set a positive value to enable it.
+- `analyze_frame` (GUI) sets `VisionAnalysis::quality_rejection` (`TooSmall` / `Blurred`) and then
+  skips PAD, alignment and embedding, so a rejected face never feeds guided enrollment.
+- `soos-daemon` maps both errors to an unusable capture (`FrameEvaluation::no_face()`): `Deny` /
+  `NoFace` when no frame of the request is usable, never `Allow` and never `InternalError`.
+
 ### 2.5 Letterbox Padding & Coordinate Projection (`letterbox.rs`)
 
 Next-generation face detection (SCRFD) operates on uniform 640×640 square inputs. To accommodate arbitrary camera aspect ratios (e.g. 640×480, 1280×720, 1920×1080) without distortion or stretching:
