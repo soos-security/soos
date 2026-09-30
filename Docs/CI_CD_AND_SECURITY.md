@@ -216,8 +216,12 @@ Layer 2 binds the review to the exact code reviewed:
 ```
 
 The fingerprint is the SHA-256 of the diff between the merge-base with `origin/main` and the
-reviewed tree (untracked files included, the report itself excluded). It is identical before and
-after committing, and any later change to the code invalidates it. A missing report, a report
+reviewed tree (untracked files included). The two review-report singletons are excluded:
+the report itself and `AI/plan_evaluator_report.md`, the per-issue plan evaluation that every
+issue rewrites (GitHub #267), so rewriting either report never changes the reviewed diff. It is
+identical before and after committing, and any later change to the code invalidates it. Both
+reports are overwritten per branch: on `main` they record the last merged pull request, not an
+open one. A missing report, a report
 without `VERDICT: APPROVED`, a `CHANGES_REQUESTED` report, or a report written for another diff
 fails the gate. There is no bot exemption (actor checks are spoofable): Dependabot pull requests
 are reviewed like any other and receive their report on the Dependabot branch.
@@ -243,7 +247,10 @@ protects a layer-cached image built before a toolchain bump. CI passes `SOOS_REQ
 a local offline run warns and uses the image toolchain. `rustc --version` is logged. The suite
 then always runs `cargo build --locked --release -p soos-pam` (a no-op when up to date), so a
 stale `target/release/libpam_soos.so` from the bind-mounted host checkout is never deployed
-(GitHub #244).
+(GitHub #244). The package and distribution harnesses (`tests/docker/test_packages.sh`,
+`tests/distro/{debian_ubuntu,fedora_rhel,arch_linux}_test.sh`) likewise always run
+`cargo build --locked --release --workspace` before packaging, unless the caller passes
+`--skip-build` on purpose; an existing release binary is never a reason to skip the build.
 
 The matrix (see [`PAM_DOCKER_TEST_MATRIX.md`](PAM_DOCKER_TEST_MATRIX.md)) covers nominal facial
 authorization, daemon timeout and crash fallbacks with valid and invalid passwords, native

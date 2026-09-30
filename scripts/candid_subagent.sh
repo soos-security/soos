@@ -9,7 +9,9 @@
 # Layer 2 is bound to the exact diff under review: the report MUST contain
 #   - **Reviewed-Diff-Fingerprint**: `<sha256>`
 # where <sha256> is the fingerprint of the diff between the merge-base with the
-# base branch and the reviewed tree (the report file itself is excluded).
+# base branch and the reviewed tree. The review-report singletons are excluded:
+# the report file itself and AI/plan_evaluator_report.md (a per-issue process
+# artifact that is rewritten for every issue, GitHub #267).
 # Any code change after the review changes the fingerprint and fails the gate,
 # so a stale, copied, or template report can never satisfy it.
 #
@@ -55,6 +57,9 @@ REPO_ROOT="$(git rev-parse --show-toplevel)"
 cd "$REPO_ROOT"
 
 readonly REPORT_FILE="AI/candid_review_report.md"
+readonly PLAN_REPORT_FILE="AI/plan_evaluator_report.md"
+# Pathspecs excluded from every review diff (fingerprint, file list, zero-change check).
+readonly REVIEW_EXCLUDES=(":(exclude)${REPORT_FILE}" ":(exclude)${PLAN_REPORT_FILE}")
 readonly PATCH_FILE="target/candid_diff.patch"
 
 MODE="verify-worktree"
@@ -73,7 +78,7 @@ while [[ $# -gt 0 ]]; do
             MODE="verify-rev"; TARGET_REV="$2"; shift 2 ;;
         --skip-layer1) SKIP_LAYER1=true; shift ;;
         -h|--help)
-            sed -n '2,27p' "$0" | sed 's/^# \{0,1\}//'
+            sed -n '2,29p' "$0" | sed 's/^# \{0,1\}//'
             exit 0
             ;;
         *)
@@ -116,7 +121,7 @@ worktree_tree() {
     echo "$tree"
 }
 
-# Diff between merge-base and a tree, excluding the review report itself.
+# Diff between merge-base and a tree, excluding the review-report singletons.
 # Every option that user/system git config could alter is pinned so that the
 # fingerprint is identical on every machine and in CI.
 review_diff() {
@@ -126,7 +131,7 @@ review_diff() {
         -c diff.relative=false -c diff.suppressBlankEmpty=false \
         diff --binary --no-color --no-ext-diff --no-textconv --full-index --no-renames \
         --diff-algorithm=myers --indent-heuristic --src-prefix=a/ --dst-prefix=b/ \
-        -O/dev/null --unified=3 --inter-hunk-context=0 "$merge_base" "$tree" -- . ":(exclude)${REPORT_FILE}"
+        -O/dev/null --unified=3 --inter-hunk-context=0 "$merge_base" "$tree" -- . "${REVIEW_EXCLUDES[@]}"
 }
 
 fingerprint_of() {
@@ -163,7 +168,7 @@ if [[ "$MODE" == "prepare" ]]; then
     info "Base reference:  $BASE_REF (merge-base $(git rev-parse --short "$MERGE_BASE"))"
     info "Review patch:    $PATCH_FILE ($(wc -l < "$PATCH_FILE" | tr -d ' ') lines)"
     info "Files in diff:"
-    git diff --name-only "$MERGE_BASE" "$TREE" -- . ":(exclude)${REPORT_FILE}" | sed 's/^/  • /'
+    git diff --name-only "$MERGE_BASE" "$TREE" -- . "${REVIEW_EXCLUDES[@]}" | sed 's/^/  • /'
     echo ""
     echo "Reviewed-Diff-Fingerprint: $FP"
     echo ""
@@ -207,7 +212,7 @@ else
 fi
 
 MERGE_BASE="$(git merge-base "$BASE_REF" "$ANCHOR")"
-if git diff --quiet "$MERGE_BASE" "$TREE" -- . ":(exclude)${REPORT_FILE}"; then
+if git diff --quiet "$MERGE_BASE" "$TREE" -- . "${REVIEW_EXCLUDES[@]}"; then
     success "Zero changes relative to $BASE_REF ($TARGET_LABEL). AI Sub-Agent review not required."
     exit 0
 fi

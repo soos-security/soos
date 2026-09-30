@@ -32,8 +32,8 @@ Shared facts: [`../dev-workflow/references/project-facts.md`](../dev-workflow/re
    ./scripts/candid_subagent.sh --prepare
    ```
    This writes `target/candid_diff.patch` (merge-base with `origin/main` → current working tree,
-   untracked files included, the report itself excluded) and prints the **diff fingerprint**
-   (SHA-256). Any later code change invalidates the fingerprint and therefore your report.
+   untracked files included, the report itself and `AI/plan_evaluator_report.md` excluded) and
+   prints the **diff fingerprint** (SHA-256). Any later code change invalidates the fingerprint and therefore your report.
 2. **Read the whole patch**, then open the surrounding code of every hunk (callers, callees,
    tests). Read `AI/ARCHITECTURE.md` §2 invariants, `Docs/SECURITY_AND_QUALITY_GUIDELINES.md`, and
    the issue's acceptance lines in `AI/BACKLOG.md` / `AI/VERIFICATION_MATRIX.md`.

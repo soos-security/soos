@@ -151,6 +151,11 @@ mod model_download_size_contract;
 #[cfg(test)]
 mod camera_diagnostics_contract;
 
+/// Release artifacts are always rebuilt by the Docker/distro harnesses and the candid
+/// fingerprint ignores both review-report singletons (GitHub #244, #267; rows QFX1–QFX5).
+#[cfg(all(test, unix))]
+mod artifact_freshness_contract;
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,
