@@ -16,6 +16,7 @@ pub mod preview;
 pub mod preview_image;
 pub mod session;
 pub mod session_policy;
+pub mod shutdown;
 pub mod socket;
 
 pub use config::{DaemonConfig, DispatcherConfig, PipelineConfig, SocketConfig};
