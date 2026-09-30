@@ -64,6 +64,7 @@ with a half-applied configuration.
 | `warmup_frames` | integer | `0` (`DAEMON_DEFAULT_WARMUP_FRAMES`) | Frames discarded after each camera (re)start. The daemon default is the same with and without a config file (GitHub #205); the camera crate's library default of 20 does not apply to the daemon. |
 | `use_mock_camera` | bool | `false` | Simulated camera (development only). |
 | `models_dir` | path | `/var/lib/soos/models` | Directory holding `manifest.toml` and the attested ONNX models; checksums are verified before the socket opens (fail-closed). |
+| `inference_intra_threads` | integer | ONNX Runtime default (`soos_inference_ort::default_intra_threads()`) | ONNX Runtime intra-op threads per model session (GitHub #252); spin-waiting stays disabled. |
 | `biometrics_dir` | path | `/var/lib/soos/biometrics` | Encrypted templates (`0700 root:root`). |
 | `master_key_path` | path | `/var/lib/soos/master.key` | Template master key (`0600 root:root`). |
 

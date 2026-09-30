@@ -10,6 +10,7 @@ Welcome to the technical documentation for **soos** (local zero-trust facial ver
 |---|---|---|
 | [**IPC Protocol Specification**](IPC_PROTOCOL.md) | Specification of binary protocol v1 between `pam_soos.so` and `soos-daemon` (types, bounds, codec, invariants). | PAM Developers, Daemon Developers |
 | [**PAM Module Specification**](PAM_MODULE.md) | PAM module `pam_soos.so`, `pam-bindings` 0.3.0 architecture, latency budgets, and panic safety. | PAM Developers, Contributors |
+| [**Daemon Reference**](DAEMON.md) | `soos-daemon` configuration (`daemon.toml` keys and defaults), runtime behaviour and status/preview requests. | Administrators, Daemon Developers |
 | [**CI/CD & Security Auditing**](CI_CD_AND_SECURITY.md) | Multi-level quality gates, `cargo-deny` dependency audits, and Docker PAM sandbox tests. | All Contributors, DevOps |
 | [**Development Workflow & Branching**](DEVELOPMENT_WORKFLOW.md) | Branch strategy, multi-agent TDD cycle, PR loop, and automated Copilot review. | Contributors, AI Agents |
 | [**Conventional Commits Specification**](COMMIT_CONVENTION.md) | Standardized commit message format, allowed types and scopes, and hook validation. | Contributors, AI Agents |

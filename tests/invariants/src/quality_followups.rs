@@ -307,13 +307,13 @@ fn test_debian_postinst_surfaces_skipped_pam_integration() {
     );
 }
 
-/// QFU5 (GitHub #281): the GDM documentation states that `timeout_ms=2500` gains no daemon
-/// time beyond `[dispatcher] connection_timeout_ms` (default 1000 ms), and the ADR records it.
+/// QFU5 (GitHub #281): the GDM documentation explains how `timeout_ms=2500` relates to the daemon
+/// `[dispatcher] connection_timeout_ms` (default raised to 2500 ms by user decision 2026-09-30).
 #[test]
 fn test_gdm_timeout_documents_daemon_connection_timeout_cap() {
     let config = read("crates/daemon/src/config.rs");
     assert!(
-        config.contains("connection_timeout: Duration::from_millis(1000)"),
+        config.contains("pub const DEFAULT_CONNECTION_TIMEOUT_MS: u64 = 2500;"),
         "daemon default connection_timeout changed: update the GDM documentation"
     );
     let deploy = read("Docs/DISTRIBUTION_DEPLOYMENT.md");
@@ -322,7 +322,7 @@ fn test_gdm_timeout_documents_daemon_connection_timeout_cap() {
         .nth(1)
         .and_then(|rest| rest.split("\n## ").next())
         .expect("Docs/DISTRIBUTION_DEPLOYMENT.md §2.1");
-    for needle in ["timeout_ms=2500", "connection_timeout_ms", "1000 ms"] {
+    for needle in ["timeout_ms=2500", "connection_timeout_ms", "2500 ms"] {
         assert!(
             gdm.contains(needle),
             "Docs/DISTRIBUTION_DEPLOYMENT.md §2.1 must mention '{needle}'"

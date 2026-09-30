@@ -40,14 +40,15 @@ walkthrough 98).
 **Daemon budget cap (GitHub #281).** `timeout_ms=2500` bounds only the PAM module's own wait
 (connect, request write, verdict read). The daemon decides every request within
 min(client deadline, request start + `[dispatcher] connection_timeout_ms`), each minus the
-50 ms response write margin, and `connection_timeout_ms` defaults to 1000 ms
-(`crates/daemon/src/config.rs`). With the default daemon configuration a GDM attempt therefore
-gets the same ~950 ms of daemon time (camera wake, consensus loop, inference) as a console or
-`sudo` attempt; the extra PAM time is never used by the daemon. To give GDM more capture time,
-raise `connection_timeout_ms` in `/etc/soos/daemon.toml`; the value is daemon-wide, so it also
-lengthens how long an idle or slow client may hold one of the bounded connection slots, while
-`sudo`/console stacks stay capped by their own 1000 ms module default (ADR 2026-09-30
-"GDM `timeout_ms=2500` Versus Daemon `connection_timeout_ms`").
+50 ms response write margin, and `connection_timeout_ms` defaults to 2500 ms
+(`DEFAULT_CONNECTION_TIMEOUT_MS` in `crates/daemon/src/config.rs`, raised from 1000 ms by user
+decision on 2026-09-30). A GDM attempt therefore gets about 2450 ms of daemon time (camera wake,
+consensus loop, inference), while console and `sudo` stacks stay capped by their own 1000 ms
+module default. The value is daemon-wide: it also bounds how long an idle or slow client may
+hold one of the bounded connection slots (per-UID caps still apply). Lower it in
+`/etc/soos/daemon.toml` if that trade-off does not suit the host (ADR 2026-09-30
+"GDM `timeout_ms=2500` Versus Daemon `connection_timeout_ms`" and "Daemon Default Connection
+Timeout Raised to 2500 ms").
 
 ```bash
 sudo soos-admin gdm status                    # installed in PAM? disable flag present?
