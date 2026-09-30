@@ -16,6 +16,7 @@ ENV PATH="/usr/local/cargo/bin:${PATH}"
 # procps-ng: pkill, used by the test cleanup handlers.
 # systemd: runtime Requires of the RPM (not started as init); authselect: activated
 # for real by fedora_rhel_test.sh (not part of the fedora:40 base image).
+# diffutils: Requires(posttrans) of the RPM (cmp in the master-key upgrade guard, #281).
 RUN dnf install -y --setopt=install_weak_deps=False \
         gcc \
         gcc-c++ \
@@ -37,6 +38,7 @@ RUN dnf install -y --setopt=install_weak_deps=False \
         procps-ng \
         systemd \
         authselect \
+        diffutils \
     && dnf clean all
 
 # Install Rust toolchain (RUSTUP_INIT_SKIP_PATH_CHECK: rustup coexists with the

@@ -65,6 +65,10 @@ mod lexing_contract;
 #[cfg(all(test, unix))]
 mod candid_review_contract;
 
+/// Packaging, GDM timeout and PAM camera follow-ups (GitHub #281, rows QFU1–QFU8).
+#[cfg(all(test, unix))]
+mod quality_followups;
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,
