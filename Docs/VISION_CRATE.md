@@ -33,7 +33,30 @@ V4L2 capture devices emit frames in various pixel formats. `convert_to_rgb` tran
 | `PixelFormat::Rgb24` | 3 bytes/pixel `[R, G, B]` | Length validation, zero-copy passthrough | Standard RGB24 |
 | `PixelFormat::Grey` | 1 byte/pixel `[G]` | Broadcasts grayscale value to 3 channels `[G, G, G]` | Standard RGB24 |
 | `PixelFormat::Yuyv` | 4 bytes/2 pixels `[Y0, U, Y1, V]` | Full-range integer fixed-point BT.601 conversion | Standard RGB24 |
-| `PixelFormat::Mjpeg` | Compressed JPEG stream | Pure-Rust `jpeg-decoder` stream decompression | Standard RGB24 |
+| `PixelFormat::Mjpeg` | Compressed JPEG stream | Bounded, header-checked pure-Rust `jpeg-decoder` decompression (§2.1.1) | Standard RGB24 |
+
+#### 2.1.1 Bounded MJPEG Decoding (GitHub #190, review finding VIS-02)
+
+The SOF header of a device-supplied MJPEG frame is attacker-controlled (faulty firmware, BadUSB),
+so `convert_to_rgb` never allocates from it before checking it:
+
+1. The compressed buffer must not exceed `MAX_MJPEG_COMPRESSED_BYTES` (16 MiB), else
+   `VisionError::MjpegInputTooLarge { max, actual }`.
+2. The negotiated frame must not exceed `MAX_MJPEG_DIMENSION` (4096 px per side, covers 4K UHD),
+   else `VisionError::InvalidDimensions`.
+3. Only the headers are parsed (`Decoder::read_info`); the SOF width and height must equal the
+   negotiated frame dimensions, else `VisionError::MjpegFrameMismatch { expected_width,
+   expected_height, actual_width, actual_height }`. A transposed frame with the same byte count
+   and a 65535×65535 header are both rejected here, before any pixel is decoded.
+4. Only 8-bit YCbCr/RGB and 8-bit greyscale JPEGs are accepted (UVC MJPEG is YCbCr); CMYK and
+   16-bit frames fail closed with `VisionError::ColorConversionFailed`.
+5. `Decoder::set_max_decoding_buffer_size` caps the output at the exact expected size and the
+   decoded length is re-checked (`InvalidBufferSize`) before the RGB24 buffer is returned.
+
+Every failure is a typed error, never a panic; error strings never contain pixel data. Contract:
+`tests/mjpeg_bounds_tests.rs` (synthetic 16×8 fixtures plus three proptest properties on the
+decoder entry point: arbitrary bytes, mutated real frames with arbitrary SOF dimensions, and
+header geometry that must match).
 
 #### YUYV Conversion Formula (Fixed-Point BT.601 Full Range)
 $$R = \text{clamp}\left(Y + \frac{1436 \cdot (V - 128) + 512}{1024}, 0, 255\right)$$
@@ -42,7 +65,7 @@ $$B = \text{clamp}\left(Y + \frac{1815 \cdot (U - 128) + 512}{1024}, 0, 255\righ
 
 ### 2.2 5-Point Landmark Affine Alignment (`align.rs`)
 
-ArcFace w600k MBF requires facial images to be aligned to canonical reference facial coordinates on a 112×112 canvas:
+The ArcFace embedding model (an ArcFace ResNet34 attested as `arcface_w600k_mbf`, see `models/README.md`) requires facial images to be aligned to canonical reference facial coordinates on a 112×112 canvas:
 
 ```text
 Canonical Target Reference Coordinates (TARGET_LANDMARKS_112):
@@ -61,7 +84,7 @@ The alignment computes a closed-form least-squares 2D similarity transform (scal
 
 ### 2.3 Cosine Similarity Matching (`matcher.rs`)
 
-Biometric feature vectors extracted from ArcFace w600k are compared via cosine similarity:
+Biometric feature vectors extracted by the ArcFace embedding model are compared via cosine similarity:
 $$\text{similarity}(a, b) = \frac{a \cdot b}{\|a\|_2 \|b\|_2}$$
 
 - **Dimension Mismatch Protection**: Verifies `a.len() == b.len()`.
@@ -83,7 +106,7 @@ $$\text{similarity}(a, b) = \frac{a \cdot b}{\|a\|_2 \|b\|_2}$$
 7. Crops and resizes the expanded bounding box to 80×80 for Presentation Attack Detection (`crop_and_resize`).
 8. Evaluates Presentation Attack Detection (`PadDetector`, MiniFASNetV2) and short-circuits on spoof (`VisionError::PadFailed`). The decision is **format-aware** (GitHub #169, see §2.4.1): a `PixelFormat::Grey` frame, or any frame from an `Infrared` sensor, must first pass the fail-closed IR gate (`VisionError::IrLivenessGateFailed`) and is scored against the stricter IR threshold.
 9. Warps face to normalized 112×112 RGB crop using 5-point landmarks (`align_face_112`).
-10. Extracts L2-normalized 512D biometric embedding (`EmbeddingExtractor`, ArcFace w600k).
+10. Extracts L2-normalized 512D biometric embedding (`EmbeddingExtractor`, ArcFace ResNet34, NHWC input).
 11. Compares against enrolled template via `match_embeddings`.
 
 #### 2.4.1 Format-Aware PAD Policy for IR / Grey Frames (`ir_liveness.rs`, GitHub #169)
@@ -151,7 +174,13 @@ Automated benchmark results (`bench_tests.rs`) across 50 iterations on 640×480 
 - **p95**: $28.02\text{ms}$
 - **p99**: $28.87\text{ms}$
 
-The 3-model pipeline completes in under 30ms on mock fixtures and estimated ~80ms on hardware, leaving ample headroom for PAM deadline compliance.
+These figures use mock backends and measure only the Rust preprocessing path. With the attested
+embedding model, one ArcFace ResNet34 embedding alone measures p50 127.5 ms / p95 170.9 ms on one
+ORT intra-op thread (`soos-inference-ort` `embedding_real_model_tests`, GitHub #191), so the
+150 ms per-capture target is **not** met on real models. The enforced bounds are the daemon's
+`DECISION_BUDGET_MS = 900` and its inference admission estimate; see ADR 2026-09-30 (Face
+Embedding Model Identity & Retention) for the decision to keep this model and the scheduled
+evaluation of a lighter one.
 
 ---
 
@@ -170,4 +199,5 @@ The 3-model pipeline completes in under 30ms on mock fixtures and estimated ~80m
 | **NGM13** | PAD receives 2.7× expanded crop (80×80); embedding receives aligned 112×112 crop | `pipeline_tests::test_pipeline_pad_receives_expanded_crop`, `test_pipeline_embedding_receives_aligned_crop`, `test_expand_bbox_centered`, `test_expand_bbox_clamped_to_image` | ☑ Validated |
 | **NGM14** | Letterbox padding preserves aspect ratio with correct coordinate un-projection | `letterbox_tests::test_letterbox_unproject_roundtrip`, `letterbox_tests::test_letterbox_640x480_to_640x640`, `letterbox_tests::test_letterbox_1280x720_to_640x640`, `letterbox_tests::test_letterbox_square_no_padding` | ✅ Verified |
 | **NGM14b** | Bounding box crop and resize with bilinear interpolation and out-of-bounds zero (black) padding | `crop_tests::test_crop_and_resize_known_image`, `crop_tests::test_crop_and_resize_out_of_bounds_padding`, `crop_tests::test_crop_and_resize_degenerate_bbox_returns_black`, `crop_tests::test_expand_bbox_for_pad_expansion_and_clamping` | ✅ Verified |
+| **MJB1–MJB6** | Bounded, header-checked MJPEG decoding (GitHub #190) | `mjpeg_bounds_tests::*` (see `AI/VERIFICATION_MATRIX.md`) | ✅ Verified |
 | **PIR1–PIR5** | Format-aware PAD: `Grey` frames pass the fail-closed IR gate and the stricter IR threshold, colour path unchanged (GitHub #169) | `ir_pad_policy_tests::*`, `pipeline_integration_tests::test_169_*` (see `AI/VERIFICATION_MATRIX.md`) | ✅ Verified |

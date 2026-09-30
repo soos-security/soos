@@ -16,7 +16,7 @@ The system is not considered a high-assurance biometric factor until robust Pres
 | PAM Module Execution | Pure synchronous blocking Rust, `std::os::unix::net::UnixStream`, hard 200–250ms deadline | Critical authentication path must never spawn a persistent async runtime | AI inference, direct camera access, or network downloads inside `.so` |
 | Privileged Daemon | Rust + Tokio root process, sole owner of `/dev/video*` and ONNX sessions | Keeps camera warm and models in memory; central arbitration | Re-opening `/dev/video0` inside PAM on every authentication attempt |
 | Linux Camera Capture | `v4l` 0.14, MMAP buffers on dedicated worker thread; `nokhwa` only as prototype | Deterministic V4L2 control and predictable zero-copy buffer rotation | Depending on OpenCV or allowing competing camera consumers |
-| Local AI Inference | `ort` (ONNX Runtime) CPU execution provider; **SCRFD 500M KPS** (face detection + 5-point landmarks) + **ArcFace w600k MBF** (512D embeddings) + **MiniFASNetV2** (anti-spoofing) | Fast 3-model pipeline with unified detection+landmarks, battle-tested ORT runtime, no OpenCV required | Claiming "pure Rust" (ORT is native C/C++); unverified weight downloads; separate landmark model (absorbed into SCRFD) |
+| Local AI Inference | `ort` (ONNX Runtime) CPU execution provider; **SCRFD 500M KPS** (face detection + 5-point landmarks) + **ArcFace ResNet34** (512D embeddings, manifest id `arcface_w600k_mbf`) + **MiniFASNetV2** (anti-spoofing) | Fast 3-model pipeline with unified detection+landmarks, battle-tested ORT runtime, no OpenCV required | Claiming "pure Rust" (ORT is native C/C++); unverified weight downloads; separate landmark model (absorbed into SCRFD) |
 | Biometric Storage | AES-GCM encrypted embeddings at rest; intrusion snapshots opt-in and isolated | Minimizes attack surface and persistent biometric risk | Storing raw frames or passwords on disk or sending over socket |
 
 Verified crate versions: `pam-bindings` 0.3.0 (target crate), `tokio` 1.53.1, `v4l` 0.14.0, `nokhwa` 0.10.11, `ort` 2.0.0-rc.13, `zeroize` 1.9.0. Versions are pinned in `Cargo.lock` and audited via `cargo-deny`.[^pam-bindings][^tokio][^v4l][^nokhwa][^ort][^zeroize]
@@ -195,10 +195,10 @@ The soos vision pipeline uses a **3-model architecture** (manifest version 2.0.0
 
 1. **Face Detection + Landmarks**: SCRFD 500M KPS ONNX (~2.4 MB, MIT) → bounding boxes with confidence scores AND 5-point facial keypoints directly, via multi-stride (8/16/32) distance-to-border box decoding. BGR 640×640 input with letterbox padding and `(pixel - 127.5) / 128.0` normalization. Eliminates the separate landmark model of the legacy pipeline.
 2. **Presentation Attack Detection (PAD)**: MiniFASNetV2 ONNX (~1.8 MB, Apache-2.0) → `[PrintPhoto, Live, ScreenReplay]` 3-class liveness scores. Receives an **80×80 BGR** crop of the 2.7× expanded bounding box (wider context than the aligned face), normalized with `pixel / 255.0`. Live class index 1 = `DEFAULT_MINIFASNET_LIVE_CLASS_INDEX` (single source of truth in `crates/inference-ort/src/pad.rs`; never overridden in production, see ADR 2026-09-29 and GitHub #146). The model is RGB-trained: `PixelFormat::Grey` (IR) frames never take the colour path; they pass a fail-closed IR exposure/contrast/texture gate and a stricter, uncalibrated liveness threshold (`DEFAULT_IR_PAD_THRESHOLD = 0.95`, never looser than `pad_threshold`), see ADR 2026-09-30 and GitHub #169.
-3. **Feature Extraction**: ArcFace w600k MobileFaceNet ONNX (~3.6 MB, MIT) → **512D** L2-normalized embedding vector. Receives the standard **112×112** aligned face crop produced by affine alignment from the 5-point landmarks. Normalization: `(pixel - 127.5) / 127.5` for exact symmetric `[-1.0, +1.0]` range.
+3. **Feature Extraction**: ArcFace **ResNet34** ONNX (Keras model exported with tf2onnx, ~34.1 M parameters, 136.6 MB, licence recorded as MIT; manifest id `arcface_w600k_mbf` is a historical name — it is **not** an InsightFace w600k MobileFaceNet, see ADR 2026-09-30 / GitHub #191) → **512D** embedding vector, L2-normalized by the extractor. Graph input `input_1` is **NHWC** `[N, 112, 112, 3]` (manifest `input_layout = "NHWC"`); it receives the standard **112×112** aligned face crop produced by affine alignment from the 5-point landmarks, fed in B, G, R order with `(pixel - 127.5) / 127.5` normalization (symmetric `[-1.0, +1.0]`). The channel order and normalization the network was trained with are not verified (follow-up).
 4. **Matching**: Cosine similarity (`cosine = dot(a, b)` for L2-normalized vectors). Authorized only if score ≥ calibrated threshold and a single face is verified with PAD passed.
 
-Every model file is tracked in `models/manifest.toml` v2.0.0 with license, source URL, SHA-256 checksum, and tensor shape specifications.
+Every model file is tracked in `models/manifest.toml` v2.0.0 with license, source URL, SHA-256 checksum, and tensor shape specifications. `ModelRegistry` enforces both: the SHA-256 before the ONNX Runtime session is built, and the declared input/output shapes (`input_shape`, `input_layout`, `output_shapes`; symbolic graph dims are wildcards) before the session is used.
 
 ### 150ms Latency Budget (p95 Target)
 
@@ -207,10 +207,19 @@ Every model file is tracked in `models/manifest.toml` v2.0.0 with license, sourc
 | IPC dispatch and RAM snapshot | 5 ms |
 | Color conversion & SCRFD face detection + landmarks (640×640 BGR, letterbox) | 40 ms |
 | 2.7× bbox expansion + crop-resize to 80×80 + MiniFASNetV2 PAD | 30 ms |
-| Affine alignment (112×112) + ArcFace w600k embedding (512D) | 30 ms |
+| Affine alignment (112×112) + ArcFace ResNet34 embedding (512D) | 30 ms (target, **not met**: embedding alone measured p50 127.5 ms / p95 170.9 ms, see below) |
 | OS scheduler margin | 20 ms |
 | Cosine matching + policy verdict | 5 ms |
 | **Total Decision Budget** | **<= 150 ms** |
+
+Measured on the attested embedding model (GitHub #191,
+`embedding_real_model_tests::test_real_embedding_latency_report`, one ORT intra-op thread,
+development host under concurrent build load): one 112×112 embedding takes p50 127.5 ms,
+p95 170.9 ms. The 150 ms per-capture target is therefore not met by the shipped ResNet34; the
+bounds actually enforced are the daemon's `DECISION_BUDGET_MS = 900` per request and its EMA
+inference admission estimate (`MAX_INFERENCE_ESTIMATE_MS = 1000`). Keeping this model and the
+scheduled evaluation of a lighter one are recorded in ADR 2026-09-30 (Face Embedding Model
+Identity & Retention).
 
 ---
 
@@ -331,7 +340,7 @@ SystemCallArchitectures=native
 [^ort]: `ort`, [ort 2.0.0-rc.13 documentation](https://docs.rs/ort/latest/ort/).
 [^zeroize]: RustCrypto, [zeroize 1.9.0 documentation](https://docs.rs/zeroize/latest/zeroize/).
 [^scrfd]: Guo et al., [*Sample and Computation Redistribution for Efficient Face Detection*](https://arxiv.org/abs/2105.04714), ICLR 2022. Model: SCRFD 500M KPS ONNX (RuteNL fork, MIT license).
-[^arcface-w600k]: Deng et al., [*ArcFace: Additive Angular Margin Loss for Deep Face Recognition*](https://arxiv.org/abs/1801.07698), CVPR 2019. Model: ArcFace w600k MobileFaceNet ONNX, 512D embeddings.
+[^arcface-w600k]: Deng et al., [*ArcFace: Additive Angular Margin Loss for Deep Face Recognition*](https://arxiv.org/abs/1801.07698), CVPR 2019. Model shipped: Keras ArcFace ResNet34 exported to ONNX with tf2onnx (`garavv/arcface-onnx`), 512D embeddings.
 [^minifasnetv2]: Zhang et al., [*A Dataset and Benchmark for Large-Scale Multi-Modal Face Anti-Spoofing*](https://arxiv.org/abs/1812.00408), CVPR 2019. Model: MiniFASNetV2 ONNX fork by QingHeYang (Apache-2.0).
 [^nist-63b]: NIST, [SP 800-63B Digital Identity Guidelines](https://pages.nist.gov/800-63-4/sp800-63b.html).
 [^nist-blog]: NIST, [Facing the Facts to Keep Our Biometrics Secure](https://www.nist.gov/blogs/taking-measure/facing-facts-keep-our-biometrics-secure), 2024.

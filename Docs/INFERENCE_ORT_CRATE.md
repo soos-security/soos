@@ -8,7 +8,7 @@ The crate encapsulates:
 1. **Cryptographic Model Attestation**: Enforcing that all ONNX models match expected SHA-256 checksums cataloged in `models/manifest.toml` v2.0.0 before any execution session is instantiated.
 2. **Face Detection + Landmarks**: SCRFD 500M KPS ONNX model with multi-stride (8/16/32) distance-to-border box decoding, letterbox padding, BGR input normalization, and embedded 5-point facial keypoints. Replaces the legacy UltraFace Slim 320 + separate landmark model architecture.
 3. **Landmark Domain Types**: `FaceLandmarks`, `Point2f`, and `LandmarkDetector` trait for geometric alignment. In the 3-model pipeline, landmark regression is absorbed directly into SCRFD face detection (`OrtScrfdDetector`); `MockLandmarkDetector` provided for deterministic simulation.
-4. **Biometric Feature Extraction**: ArcFace w600k embedding extractor generating L2-normalized 512D vectors with symmetric `[-1.0, +1.0]` normalization `(pixel - 127.5) / 127.5` (Verification Matrix Criteria `V2` and `NGM7`).
+4. **Biometric Feature Extraction**: ArcFace embedding extractor generating L2-normalized 512D vectors with symmetric `[-1.0, +1.0]` normalization `(pixel - 127.5) / 127.5` (Verification Matrix Criteria `V2` and `NGM7`). The attested model (manifest id `arcface_w600k_mbf`, a historical name) is a Keras ArcFace **ResNet34** exported with tf2onnx (~34.1 M parameters, 136.6 MB) whose input `input_1` is **NHWC** `[N, 112, 112, 3]` and output `embedding` `[N, 512]` (GitHub #191, ADR 2026-09-30).
 5. **Presentation Attack Detection (Anti-Spoofing)**: MiniFASNetV2 80×80 BGR anti-spoofing model with `pixel / 255.0` normalization into `[0.0, 1.0]`, live class index fixed by `DEFAULT_MINIFASNET_LIVE_CLASS_INDEX = 1` (`[PrintPhoto, Live, ScreenReplay]`, single source of truth for every binary), and deterministic post-inference buffer zeroization (Verification Matrix Criteria `NGM8`, `NGM9`, `NGM10`, `PLC1`–`PLC3`).
 6. **Hardware-Free Deterministic Simulation**: Mocks (`MockFaceDetector`, `MockLandmarkDetector`, `MockEmbeddingExtractor`, `MockPadDetector`) for seamless headless execution in CI pipelines and developer environments.
 
@@ -19,6 +19,7 @@ The crate encapsulates:
 1. **Daemon-Isolated Execution**: Only `soos-daemon` executes model inference. The PAM module (`pam_soos.so`) never links or loads ONNX Runtime.
 2. **Absolute Prohibition of OpenCV**: Computer vision routines (color conversion, normalization, NMS, tensor preparation) are implemented in pure, safe Rust without OpenCV.
 3. **Cryptographic Attestation (Global Security Invariant)**: Every model file is verified against its manifest SHA-256 hash prior to ONNX Runtime session creation. Tampered or corrupted model weights are rejected fail-closed.
+3b. **Shape Attestation (GitHub #191)**: After the session is built, `ModelRegistry::get_or_load_session` validates its I/O tensor shapes with `ModelMetadata::validate_session_shapes`: exactly one input whose physical dims equal `expected_input_dims()` (the logical `[N, C, H, W]` `input_shape` permuted by `input_layout`, `NCHW` by default or `NHWC`), and, when `output_shapes` is declared, the same number of outputs matching in order. Negative (symbolic) session dims are wildcards; ranks and every other dim, including zero, must be equal. Any mismatch returns `InferenceError::ModelShapeMismatch { id, detail }` and the session is not cached. `ModelMetadata::input_layout_declared` records whether the entry declared `input_layout`. An entry without `input_layout` (a manifest installed by an earlier release) has its layout *unspecified*: the input may be the logical shape in NCHW or NHWC order, rank and every dim are still enforced, the SHA-256 already binds the exact file, and `ModelRegistry` logs a one-time warning that the manifest predates layout attestation. An explicit `input_layout` is always enforced and a wrong value fails closed.
 4. **Strict Panic Denial**: Zero `unwrap()` or `expect()` in production pathways; `#![deny(clippy::unwrap_used, clippy::expect_used)]` is strictly enforced.
 5. **Deterministic NMS**: Secondary coordinate sort tie-breaking eliminates floating point ambiguity, ensuring identical suppression decisions across platforms.
 6. **L2 Normalization (Criterion V2)**: All output embedding vectors satisfy Euclidean norm $\approx 1.0$ within a margin of $10^{-5}$.
@@ -49,6 +50,13 @@ impl ModelRegistry {
     pub fn new(config: RegistryConfig) -> Result<Self, InferenceError>;
     pub fn verify_integrity(&self) -> Result<(), InferenceError>;
     pub fn get_or_load_session(&mut self, id: &str) -> Result<Arc<Mutex<Session>>, InferenceError>;
+}
+
+pub enum TensorLayout { Nchw /* "NCHW", default */, Nhwc /* "NHWC" */ }
+
+impl ModelMetadata {
+    pub fn expected_input_dims(&self) -> Result<Vec<usize>, InferenceError>;
+    pub fn validate_session_shapes(&self, inputs: &[Vec<i64>], outputs: &[Vec<i64>]) -> Result<(), InferenceError>;
 }
 ```
 
@@ -93,7 +101,20 @@ pub trait EmbeddingExtractor: Send + Sync {
     ) -> Result<BiometricEmbedding, InferenceError>;
 }
 ```
-Implemented by `OrtEmbeddingExtractor` (ArcFace w600k 512D) and `MockEmbeddingExtractor` (defaulting to 512D).
+Implemented by `OrtEmbeddingExtractor` (ArcFace ResNet34 512D; `is_nhwc()` reports the layout detected from the session input) and `MockEmbeddingExtractor` (defaulting to 512D).
+
+### Embedding real-model evidence (`tests/embedding_real_model_tests.rs`, GitHub #191)
+
+Gated exactly like the PAD real-model target (`SOOS_MODELS_DIR`, default `/var/lib/soos/models`;
+an absent model prints `SKIPPED`; `SOOS_REQUIRE_REAL_MODELS=1` makes absence a failure). It loads
+`arcface_w600k_mbf.onnx` through `ModelRegistry` with the committed manifest and pins: file size
+136,619,444 bytes, one input `input_1` `[-1, 112, 112, 3]`, one output `embedding` `[-1, 512]`;
+the committed manifest validates against the session while an NCHW manifest for the same file
+is rejected with `ModelShapeMismatch`; a legacy manifest without `input_layout` still loads it; all three shipped models pass shape validation; the
+production extractor detects NHWC and emits a finite, deterministic, L2-normalized 512D vector on
+a synthetic crop; and a latency report (3 warm-ups + 20 timed runs, one intra-op thread) asserts
+p95 below the daemon's `MAX_INFERENCE_ESTIMATE_MS` (1000 ms). Measured on the development host:
+p50 127.5 ms, p95 170.9 ms.
 
 ### `PadDetector` Trait
 ```rust
@@ -196,11 +217,12 @@ sudo ./scripts/download_models.sh
 | **Global** | Each ONNX model is attested by manifest + SHA-256 checksum | `manifest_tests::test_parse_workspace_manifest_file`, `manifest_tests::test_verify_model_checksum_success_and_tamper_detection`, `registry_tests::test_registry_verify_integrity_missing_files_fails_closed` | Validated |
 | **D14** | ONNX model download, SHA-256 verification, and fail-fast startup attestation | `model_deployment_tests::test_download_script_verifies_checksums`, `model_deployment_tests::test_daemon_refuses_start_with_missing_models`, `model_deployment_tests::test_daemon_refuses_start_with_tampered_models` | Validated |
 | **V2** | L2-normalized embeddings (norm ≈ 1.0) | `embedding_tests::test_l2_norm_and_normalization_criterion_v2`, `proptest_suite::prop_embedding_normalization_criterion_v2` | Validated |
-| **NGM7** | ArcFace w600k 512D embeddings and symmetric `[-1.0, +1.0]` normalization | `embedding_tests::test_embedding_normalization_symmetric_range`, `embedding_tests::test_mock_embedding_default_512d` | Validated |
+| **NGM7** | ArcFace 512D embeddings and symmetric `[-1.0, +1.0]` normalization | `embedding_tests::test_embedding_normalization_symmetric_range`, `embedding_tests::test_mock_embedding_default_512d` | Validated |
 | **NGM8** | MiniFASNetV2 80×80 BGR tensor preparation, `[0.0, 1.0]` normalization, and buffer zeroization | `pad_tests::test_pad_prepare_input_80x80_bgr`, `pad_tests::test_pad_normalization_0_1_range`, `pad_tests::test_pad_invalid_dimensions_message_80x80`, `zeroize_tests::test_inference_input_buffers_zeroized` | Validated |
 | **NGM9** | `live_class_index` defaults to `DEFAULT_MINIFASNET_LIVE_CLASS_INDEX` (1) with ordinal spoof attack classification | `pad_tests::test_pad_default_live_class_index_is_one`, `pad_tests::test_pad_class_ordering_live_index_0`, `pad_tests::test_pad_class_ordering_configurable` | Validated |
 | **NGM10** | Fail-closed empty probability handling, panic safety, and numerical softmax stability | `pad_tests::test_softmax_numerical_stability`, `pad_tests::test_mock_pad_detector_*` | Validated |
 | **ASG1** | Class 1 = live, class 2 = screen replay is a spoof with the default index | `pad_tests::test_screen_replay_detected_as_spoof_with_default_index` | Validated |
 | **PLC1–PLC3** | Production wiring never overrides the live class index (daemon, enrollment CLI, repository invariant) | `pad_wiring_tests::test_pipeline_pad_detector_uses_default_live_class_index` (daemon), `pad_wiring_tests::test_enrollment_pad_detector_uses_default_live_class_index` (enrollment CLI), `soos-invariants::tests::test_no_pad_live_class_index_override_outside_tests` | Verified |
+| **EMR1–EMR7** | Manifest shape attestation and truthful embedding model metadata (GitHub #191) | `manifest_shape_tests::*`, `embedding_real_model_tests::*` (see `AI/VERIFICATION_MATRIX.md`) | ✅ Verified |
 | **Invariant** | `#![forbid(unsafe_code)]` enabled | Invariant test & compile-time crate declaration | Validated |
 | **Invariant** | Zero OpenCV across workspace | `tests/invariants::test_no_opencv_in_any_cargo_toml` | Validated |
