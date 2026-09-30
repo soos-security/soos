@@ -7,15 +7,19 @@
 #   2. Runs ephemeral container with workspace bind-mounted
 #   3. Compiles PAM module in release mode
 #   4. Deploys .so into container PAM directory
-#   5. Runs the PAM matrix T1–T11 (ABI loading, refusal, password fallback,
-#      release-build panic safety)
+#   5. Runs the PAM matrix T1–T12 (ABI loading, refusal, password fallback,
+#      release-build panic safety, pam-auth-update password-failed event,
+#      gdm.disable via PAM_SERVICE)
 #   6. Automatically removes ephemeral container
 #
 # Usage:
-#   ./run_tests.sh [--matrix|--all|ubuntu|fedora|arch|authselect]
+#   ./run_tests.sh [--matrix|--all|ubuntu|fedora|arch|authselect|rollback]
 #
 #   authselect: activates, validates and rolls back the Fedora authselect
 #               profile in a fedora:40 container (tests/docker/authselect_profile_test.sh)
+#   rollback:   Debian pam-auth-update stack order and byte-for-byte PAM rollback by
+#               scripts/uninstall.sh on ubuntu:24.04 and fedora:40
+#               (tests/docker/pam_rollback_test.sh)
 # =============================================================================
 
 set -euo pipefail
@@ -28,6 +32,8 @@ elif [[ "${MODE}" == "ubuntu" || "${MODE}" == "fedora" || "${MODE}" == "arch" ]]
     exec ./tests/docker/run_matrix.sh "${MODE}"
 elif [[ "${MODE}" == "authselect" ]]; then
     exec ./tests/docker/authselect_profile_test.sh
+elif [[ "${MODE}" == "rollback" ]]; then
+    exec ./tests/docker/pam_rollback_test.sh
 fi
 
 # ---------------------------------------------------------------------------

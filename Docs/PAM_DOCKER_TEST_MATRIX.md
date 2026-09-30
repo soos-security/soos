@@ -58,7 +58,8 @@ auth  required                       pam_unix.so try_first_pass nullok
 | **T8** | Missing Module Resilience | `pam_soos.so` missing from disk | `PAM_IGNORE` | PAM stack continues functional operation |
 | **T9** | Model Deployment Integrity | `scripts/download_models.sh --dry-run` against `models/manifest.toml` | n/a | Manifest and checksums validated in-container |
 | **T10** | Release-Build Panic Safety (PAM-01, GitHub #148) | Module rebuilt with the same `[profile.release]` plus the opt-in `fault-injection` feature, loaded as `pam_soos_fault.so` and armed with `fault_inject=panic` then `fault_inject=overflow` | `PAM_IGNORE` (25); host process never killed (exit code < 128, never 134/SIGABRT) | Fallback to `pam_unix`, valid password accepted, invalid password rejected |
-| **T11** | `gdm.disable` via `PAM_SERVICE` (PAM-05, GitHub #176) | PAM service `gdm-password` with the `soos-admin` GDM arguments (no `service=`), mock daemon answering `Allow`; control run without the flag, then `/etc/soos/gdm.disable` created | Control: `PAM_SUCCESS` with 0 prompts; with the flag: `PAM_IGNORE` (25) | With the flag the password prompt is reached: no-password run fails, valid password accepted, invalid password rejected |
+| **T11** | Debian password-failed hook (ONB-03, GitHub #161) | Shipped `soos`/`soos-notify` profiles enabled with the real `pam-auth-update --package --force`; mock daemon in `deny` mode with `--record` | `PAM_IGNORE` (25) from both `pam_soos.so` lines | Hook line before `pam_deny.so`; wrong password rejected with exactly one `PasswordFailed` event; correct password accepted with none. Skipped on non-`pam-auth-update` images, fails on a Debian image without it |
+| **T12** | `gdm.disable` via `PAM_SERVICE` (PAM-05, GitHub #176) | PAM service `gdm-password` with the `soos-admin` GDM arguments (no `service=`), mock daemon answering `Allow`; control run without the flag, then `/etc/soos/gdm.disable` created | Control: `PAM_SUCCESS` with 0 prompts; with the flag: `PAM_IGNORE` (25) | With the flag the password prompt is reached: no-password run fails, valid password accepted, invalid password rejected |
 
 T10 exists because `cargo test` runs under `[profile.test]` (always `panic = "unwind"`) and
 therefore cannot detect a release profile that aborts; only the release-built shared object
@@ -77,7 +78,7 @@ tests/docker/
 ├── Dockerfile.arch           # Arch Linux container image
 ├── pam_test_runner.c        # Native C non-interactive & interactive PAM test harness
 ├── mock_daemon.py           # Socket simulator for allow, timeout, and mid-stream crash
-├── test_suite.sh            # In-container test suite executing T1..T11
+├── test_suite.sh            # In-container test suite executing T1..T12
 ├── run_matrix.sh            # Host driver orchestrating multi-distro builds & runs
 └── authselect_profile_test.sh  # Fedora authselect profile activation/rollback (A1..A7)
 ```
@@ -98,6 +99,25 @@ tests/docker/
   ```bash
   ./tests/docker/run_matrix.sh fedora
   ```
+  Each distribution builds into its own Docker volume mounted over `/workspace/target`
+  (`soos-matrix-target-<distro>`), so a `pam_soos.so` linked on one distribution is never
+  loaded on another. The Fedora and Arch images run in CI in the `distro-pam-matrix` job
+  (push to `main` and manual dispatch).
+
+### Sandbox Invariants (GitHub #162, #168)
+
+- **Multi-line PAM stacks.** The Dockerfiles write `/etc/pam.d/test-soos` and the distro
+  stack with `printf '%s\n' 'line' ...`, never `echo "...\n..."`: on `fedora:40` and
+  `archlinux:latest` `/bin/sh` is bash, whose builtin `echo` writes a literal `\n`, which
+  produced single-line files with no module at all. The invariant test
+  `test_sandbox_dockerfiles_produce_multiline_pam_stacks` rebuilds every stack with bash and
+  parses it, and `test_suite.sh` (`assert_pam_stack_file`) refuses to run T1–T10 on a
+  malformed stack.
+- **Production socket modes.** `test_suite.sh` creates the `soos` group and
+  `/run/soos` with `install -d -m 0750 -o root -g soos`; `mock_daemon.py` binds its socket
+  under a restrictive umask, sets it `0660` and group `soos` (`--socket-group`,
+  `--socket-mode`; any "other" bit is refused), and every case asserts `750 root:soos` /
+  `660 root:soos` (`assert_socket_modes`) before calling PAM.
 - Validate the Fedora `authselect` custom profile (activation with `with-faillock`,
   `authselect check`, generated `system-auth`/`password-auth` ordering, `/etc/nsswitch.conf`
   preserved, password fallback via `pamtester`, rollback through `scripts/uninstall.sh`):

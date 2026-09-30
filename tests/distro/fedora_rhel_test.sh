@@ -17,6 +17,10 @@
 #   --install-sh             Test installation via scripts/install.sh
 #   --skip-build             Do not recompile binaries if artifacts exist
 #   --dry-run                Simulate execution plan without modifying root filesystem
+#   --allow-host-changes     Required for a live run: this script installs packages,
+#                            rewrites PAM files and creates users on the host it runs
+#                            on (run_distro_validation.sh passes it only inside a
+#                            disposable Docker container, GitHub #163)
 #   -h, --help               Display this help message and exit
 # =============================================================================
 
@@ -50,6 +54,7 @@ WORKSPACE_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 INSTALL_MODE="auto" # auto, rpm, install-sh
 SKIP_BUILD=false
 DRY_RUN=false
+ALLOW_HOST_CHANGES=false
 TEST_USER="testuser"
 TEST_PASS="password123"
 
@@ -65,6 +70,8 @@ Options:
   --install-sh             Install via scripts/install.sh
   --skip-build             Skip cargo build if binaries are already present
   --dry-run                Print execution plan without making root changes
+  --allow-host-changes     Consent to a live run that modifies this host (packages,
+                           PAM files, users); use it only in a disposable container
   -h, --help               Display this help message and exit
 
 Security Invariants Tested:
@@ -94,6 +101,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --dry-run)
             DRY_RUN=true
+            shift
+            ;;
+        --allow-host-changes)
+            ALLOW_HOST_CHANGES=true
             shift
             ;;
         -h|--help)
@@ -132,6 +143,15 @@ if [[ "${DRY_RUN}" = true ]]; then
     exit 0
 fi
 
+# Explicit consent for live execution (GitHub #163): refuse before any command,
+# trap or file operation so that an accidental run never touches the host.
+if [[ "${ALLOW_HOST_CHANGES}" != true ]]; then
+    error "Refusing a live run without --allow-host-changes: this suite installs packages,"
+    error "rewrites PAM files and creates users. Run it through"
+    error "tests/distro/run_distro_validation.sh (disposable Docker container) or use --dry-run."
+    exit 2
+fi
+
 # Root check for live execution
 if [[ "$(id -u)" -ne 0 ]]; then
     error "Live deployment testing requires root privileges (or use --dry-run)."
@@ -140,7 +160,13 @@ fi
 
 cleanup() {
     info "Executing test cleanup..."
-    pkill -f "mock_daemon.py" || true
+    # Stop the mock by PID first: minimal images (fedora:40) ship without pkill.
+    if [[ -n "${MOCK_PID:-}" ]]; then
+        kill "${MOCK_PID}" 2>/dev/null || true
+        wait "${MOCK_PID}" 2>/dev/null || true
+        MOCK_PID=""
+    fi
+    pkill -f "mock_daemon.py" 2>/dev/null || true
     rm -f /run/soos/daemon.sock
 }
 trap cleanup EXIT INT TERM
@@ -164,9 +190,11 @@ if [[ "${INSTALL_MODE}" = "auto" || "${INSTALL_MODE}" = "rpm" ]]; then
     if command -v rpmbuild >/dev/null 2>&1 && command -v rpm >/dev/null 2>&1; then
         info "Building Fedora / RHEL RPM package..."
         bash scripts/build_rpm.sh --skip-build
-        RPM_PKG=$(ls -t target/packages/soos-*.rpm | head -n 1)
+        # soos-[0-9]*: the main package, never soos-debuginfo / soos-debugsource.
+        RPM_PKG=$(ls -t target/packages/soos-[0-9]*.rpm | head -n 1)
         info "Installing RPM package: ${RPM_PKG}..."
         rpm -i "${RPM_PKG}"
+        INSTALL_MODE="rpm"
         success "RPM package installed successfully."
     else
         warn "rpmbuild not found, falling back to scripts/install.sh..."
@@ -332,11 +360,20 @@ fi
 # Add user to soos system group
 soos-admin add-user "${TEST_USER}" || usermod -aG soos "${TEST_USER}"
 
-# Ensure test template exists
-ENROLLED_TEMPLATE="/var/lib/soos/biometrics/${TEST_USER}.bin"
-head -c 512 /dev/urandom > "${ENROLLED_TEMPLATE}"
-chmod 0600 "${ENROLLED_TEMPLATE}"
-chown root:root "${ENROLLED_TEMPLATE}"
+# Enroll through the real CLI with the mock camera and synthetic inference
+# (GitHub #168). soos-biometric-store writes <uid>.cbor.enc, encrypted with
+# /var/lib/soos/master.key; a hand-made file would prove nothing.
+TEST_UID="$(id -u "${TEST_USER}")"
+ENROLLED_TEMPLATE="/var/lib/soos/biometrics/${TEST_UID}.cbor.enc"
+soos-enroll --mock enroll --username "${TEST_USER}" --yes \
+    || { error "soos-enroll --mock enroll failed for '${TEST_USER}'"; exit 1; }
+test -f "${ENROLLED_TEMPLATE}" || { error "Enrollment did not create ${ENROLLED_TEMPLATE}"; exit 1; }
+TEMPLATE_MODES="$(stat -c '%a %U:%G' "${ENROLLED_TEMPLATE}")"
+[[ "${TEMPLATE_MODES}" == "600 root:root" ]] \
+    || { error "${ENROLLED_TEMPLATE} is '${TEMPLATE_MODES}', expected '600 root:root'"; exit 1; }
+soos-enroll --mock verify --username "${TEST_USER}" \
+    || { error "soos-enroll --mock verify rejected the freshly enrolled template"; exit 1; }
+success "User '${TEST_USER}' enrolled via soos-enroll --mock: ${ENROLLED_TEMPLATE} (600 root:root)."
 
 # Compile pam_test_runner if needed
 if [[ ! -x "/usr/local/bin/pam_test_runner" ]]; then
@@ -344,17 +381,38 @@ if [[ ! -x "/usr/local/bin/pam_test_runner" ]]; then
     chmod 755 /usr/local/bin/pam_test_runner
 fi
 
-mkdir -p /run/soos
-chmod 777 /run/soos
+# Socket directory invariant (GitHub #168): /run/soos is 0750 root:soos and the
+# socket 0660 root:soos, exactly as the daemon and the packages create them.
+# The PAM host (pam_test_runner) runs as root, like sudo/login/gdm.
+install -d -m 0750 -o root -g soos /run/soos
+
+assert_socket_modes() {
+    local dir_modes sock_modes
+    dir_modes="$(stat -c '%a %U:%G' /run/soos)"
+    [[ "${dir_modes}" == "750 root:soos" ]] \
+        || { error "/run/soos is '${dir_modes}', expected '750 root:soos'"; exit 1; }
+    [[ -S /run/soos/daemon.sock ]] || { error "/run/soos/daemon.sock is not a socket"; exit 1; }
+    sock_modes="$(stat -c '%a %U:%G' /run/soos/daemon.sock)"
+    [[ "${sock_modes}" == "660 root:soos" ]] \
+        || { error "/run/soos/daemon.sock is '${sock_modes}', expected '660 root:soos'"; exit 1; }
+}
+
+start_mock_daemon() {
+    python3 tests/docker/mock_daemon.py --socket /run/soos/daemon.sock "$@" &
+    MOCK_PID=$!
+    for _ in $(seq 1 50); do
+        [[ -S /run/soos/daemon.sock ]] && break
+        sleep 0.1
+    done
+    assert_socket_modes
+}
 
 # ---------------------------------------------------------------------------
 # Step 6: Execute PAM Auth & Password Fallback on sudo and gdm
 # ---------------------------------------------------------------------------
 # 6a. Nominal Facial Auth for sudo
 info "Testing nominal facial auth on sudo service stack..."
-python3 tests/docker/mock_daemon.py --mode allow --socket /run/soos/daemon.sock &
-MOCK_PID=$!
-sleep 0.2
+start_mock_daemon --mode allow
 
 if /usr/local/bin/pam_test_runner test-sudo-fedora "${TEST_USER}"; then
     success "sudo service stack authenticated via facial auth without password prompts."
@@ -366,9 +424,7 @@ cleanup
 
 # 6b. Nominal Facial Auth for gdm
 info "Testing nominal facial auth on gdm service stack..."
-python3 tests/docker/mock_daemon.py --mode allow --socket /run/soos/daemon.sock &
-MOCK_PID=$!
-sleep 0.2
+start_mock_daemon --mode allow
 
 if /usr/local/bin/pam_test_runner test-gdm-fedora "${TEST_USER}"; then
     success "gdm service stack authenticated via facial auth without password prompts."

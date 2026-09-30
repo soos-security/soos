@@ -11,10 +11,17 @@
 #   2. clippy          — cargo clippy -D warnings (all targets, all features)
 #   3. test            — cargo test (unit, integration, invariant suites)
 #   4. security        — cargo-deny (advisories, licenses, sources, bans)
-#   5. pam-integration — Dockerized PAM matrix T1–T10 (after lint)
+#   5. pam-integration — Dockerized PAM matrix T1–T12 (after lint)
 #   6. authselect-profile — Fedora authselect profile activation and rollback
 #                        in fedora:40 (after lint)
+#   6b. pam-rollback   — Debian stack order + byte-for-byte PAM rollback
+#                        in ubuntu:24.04 and fedora:40 (after lint)
+#   6c. package-deploy — Ubuntu .deb build, dpkg install, enrollment, password
+#                        fallback, rollback and package content checks in
+#                        ubuntu:24.04 (after lint)
 #   7. ci-success      — single aggregate status for merge gating
+#   8. distro-pam-matrix — PAM matrix T1–T10 in the Fedora and Arch sandbox
+#                        images (push to main and manual dispatch only)
 # The PR title convention is checked by pr-title.yml (it must also re-run when
 # a PR is retitled, which would needlessly re-run this whole pipeline).
 #
@@ -231,12 +238,87 @@ jobs:
         run: ./tests/docker/authselect_profile_test.sh
 
   # ---------------------------------------------------------------------------
+  # Job 6b: PAM activation order and byte-for-byte uninstall rollback on
+  # ubuntu:24.04 and fedora:40 (GitHub #161, #166)
+  # ---------------------------------------------------------------------------
+  pam-rollback:
+    name: "PAM activation & rollback (Docker)"
+    if: github.event_name != 'schedule'
+    needs: lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Validate stack order and rollback on ubuntu:24.04 and fedora:40
+        run: ./tests/docker/pam_rollback_test.sh
+
+  # ---------------------------------------------------------------------------
+  # Job 6c: Ubuntu packaging and deployment path (GitHub #168). Builds the
+  # release workspace and the .deb in ubuntu:24.04, installs it with dpkg,
+  # enrolls through soos-enroll --mock, checks facial auth, password fallback
+  # and rollback (tests/distro/debian_ubuntu_test.sh), then re-uses the same
+  # per-distro target volume for the package content, key isolation and
+  # removal harness (tests/docker/test_packages.sh).
+  # ---------------------------------------------------------------------------
+  package-deploy:
+    name: "Package deployment (ubuntu, Docker)"
+    if: github.event_name != 'schedule'
+    needs: lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Deploy the .deb, enroll, fall back to password and roll back (ubuntu:24.04)
+        run: ./tests/distro/run_distro_validation.sh ubuntu
+
+      - name: Package content, key isolation and removal (tests/docker/test_packages.sh)
+        run: |
+          docker run --rm \
+            -v "${GITHUB_WORKSPACE}:/workspace" \
+            -v soos-distro-target-ubuntu:/workspace/target \
+            soos-distro-val-ubuntu \
+            bash /workspace/tests/docker/test_packages.sh
+
+  # ---------------------------------------------------------------------------
+  # Job 8: PAM matrix T1–T10 in the Fedora and Arch sandbox images (GitHub #162).
+  # Each image rebuilds its toolchain and pam_soos.so, so it runs on push to
+  # main and on manual dispatch rather than on every pull request; the static
+  # half (PAM stacks rebuilt under bash and parsed) runs on every PR in `test`.
+  # Not part of CI Success because it is skipped on pull requests.
+  # ---------------------------------------------------------------------------
+  distro-pam-matrix:
+    name: "PAM Matrix (${{ matrix.distro }})"
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    needs: lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        distro: [fedora, arch]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Run PAM matrix T1–T10 in the distro sandbox
+        env:
+          DISTRO: ${{ matrix.distro }}
+        run: ./tests/docker/run_matrix.sh "$DISTRO"
+
+  # ---------------------------------------------------------------------------
   # Job 7: Aggregate status (single required check for merge gating)
   # ---------------------------------------------------------------------------
   ci-success:
     name: "CI Success"
     if: always() && github.event_name != 'schedule'
-    needs: [lint, clippy, test, security, pam-integration, authselect-profile]
+    needs: [lint, clippy, test, security, pam-integration, authselect-profile, pam-rollback, package-deploy]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:

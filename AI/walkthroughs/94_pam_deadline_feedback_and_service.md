@@ -86,7 +86,7 @@ failed on an assertion, not on compilation.
 conversation function, which is the conversation mock the review asked for (PAM-15). Every
 failure pathway asserts `PAM_IGNORE`.
 
-Docker matrix **T11** (`tests/docker/test_suite.sh`): PAM service `gdm-password` with the
+Docker matrix **T12** (numbered T11 on the topic branch; renumbered at integration because the install batch, PR #275, took T11 for the Debian password-failed hook) (`tests/docker/test_suite.sh`): PAM service `gdm-password` with the
 `soos-admin` arguments (no `service=`), mock daemon in `allow` mode. Control run without the flag
 must authenticate with 0 prompts; with `/etc/soos/gdm.disable` a no-password run must fail (prompt
 reached), a valid password must pass and an invalid one must fail.
@@ -118,7 +118,7 @@ See §2. `send_pam_info` now uses `usable_handle`; the `match` on the IPC outcom
   flags, new §8 user-facing messages table.
 - `Docs/IPC_PROTOCOL.md`: `reason_class` never shown to users; cumulative client deadline.
 - `Docs/PAM_DOCKER_TEST_MATRIX.md`, `Docs/CI_CD_AND_SECURITY.md`, `run_tests.sh`,
-  `.agents/skills/dev-workflow/references/project-facts.md`: T1–T11, flag files row.
+  `.agents/skills/dev-workflow/references/project-facts.md`: T1–T12, flag files row.
 - `AI/BACKLOG.md` (#48 feedback spec) and matrix LSF3 annotated as superseded.
 
 ## 8. Verification Results
@@ -129,13 +129,13 @@ See §2. `send_pam_info` now uses `usable_handle`; the `match` on the IPC outcom
 | `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings` | pass |
 | `cargo test --locked --workspace --all-targets --all-features --no-fail-fast` | all green except `soos-vision::bench_tests::test_pipeline_latency_budget_under_150ms_p95` (p95 217 ms at host load average ~40 from parallel agents; untouched crate, passes when re-run alone in 1.95 s) |
 | `./scripts/candid_review.sh` | PASSED (7 audits) |
-| `./run_tests.sh` (Ubuntu Docker matrix, scratch clone of the branch) | T1–T11 all passed |
-| Docker red check: `origin/main` sources + new `test_suite.sh` | T11 FAILED as expected: "gdm.disable present but gdm-password still authenticated facially!" |
+| `./run_tests.sh` (Ubuntu Docker matrix, scratch clone of the branch) | T1–T11 all passed (branch numbering; T12 after integration) |
+| Docker red check: `origin/main` sources + new `test_suite.sh` | T11 (now T12) FAILED as expected: "gdm.disable present but gdm-password still authenticated facially!" |
 
 ## 9. Known Limitations / Follow-ups
 
 - The `PAM_SILENT` flag is still ignored for `PAM_TEXT_INFO` messages (separate review finding).
-- Fedora / Arch Docker variants (`./run_tests.sh --matrix`) were not run locally; T11 is
+- Fedora / Arch Docker variants (`./run_tests.sh --matrix`) were not run locally; T12 is
   distribution-agnostic and runs there through `tests/docker/test_suite.sh` in CI.
 - `soos-admin gdm status` still reports the flag purely from file existence; with this change the
   report is now accurate because the module honors the flag.

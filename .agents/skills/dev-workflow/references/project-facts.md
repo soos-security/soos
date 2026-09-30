@@ -96,7 +96,7 @@ cargo deny --locked check                      # cargo-deny >= 0.20
 ./scripts/candid_review.sh                     # Layer 1 deterministic invariants
 ./scripts/candid_subagent.sh --prepare         # Layer 2: diff + fingerprint for the reviewer
 ./scripts/candid_subagent.sh                   # Layer 2 gate (fresh, fingerprint-bound report)
-./run_tests.sh                                 # Dockerized PAM matrix T1–T11 (ubuntu)
+./run_tests.sh                                 # Dockerized PAM matrix T1–T12 (ubuntu)
 ```
 
 Omitting `--all-features` locally was the root cause of several CI-only failures [65–75].
