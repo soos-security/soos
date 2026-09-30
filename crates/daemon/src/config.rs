@@ -25,6 +25,19 @@ pub const MAX_CONNECTION_TIMEOUT_MS: u64 = 10_000;
 /// Maximum length in bytes of the `log_level` filter directive.
 pub const MAX_LOG_LEVEL_LEN: usize = 256;
 
+/// Number of warm-up frames `soos-daemon` discards after a camera (re)start, whatever the
+/// configuration source (GitHub #205, review finding DMN-16).
+///
+/// Applied by [`DaemonConfig::from_toml_str`] (with or without a `[pipeline]` table) and by
+/// [`DaemonConfig::runtime_default`] (no `/etc/soos/daemon.toml`). `0` keeps the documented
+/// instant-wake contract; operators opt into discarding frames with `[pipeline] warmup_frames`.
+/// The camera crate default (`soos_camera_v4l::CameraConfig::default()`, 20) is a library
+/// default and is not what the daemon runs with.
+pub const DAEMON_DEFAULT_WARMUP_FRAMES: usize = 0;
+
+/// System configuration file read by `soos-daemon` when `--config` is not given.
+pub const DEFAULT_CONFIG_PATH: &str = "/etc/soos/daemon.toml";
+
 /// Configuration for the Unix domain socket listener.
 #[derive(Debug, Clone)]
 pub struct SocketConfig {
@@ -375,12 +388,26 @@ impl DaemonConfig {
         Ok(())
     }
 
+    /// Configuration the running daemon uses when no key overrides a value.
+    ///
+    /// Identical to [`DaemonConfig::default`] except for daemon-specific runtime defaults that
+    /// differ from the library defaults of the component crates (currently
+    /// [`DAEMON_DEFAULT_WARMUP_FRAMES`]). Every load path (`from_toml_str`, `load_from_path`,
+    /// `load_or_default` without a file) starts from it, so the same binary behaves the same
+    /// with or without `/etc/soos/daemon.toml`.
+    #[must_use]
+    pub fn runtime_default() -> Self {
+        let mut config = Self::default();
+        config.pipeline.camera.warmup_frames = DAEMON_DEFAULT_WARMUP_FRAMES;
+        config
+    }
+
     /// Parses a complete daemon configuration from a TOML string.
     pub fn from_toml_str(content: &str) -> Result<Self, DaemonError> {
         let file: DaemonConfigFile = toml::from_str(content)
             .map_err(|e| DaemonError::Config(format!("Failed to parse TOML configuration: {e}")))?;
 
-        let mut config = Self::default();
+        let mut config = Self::runtime_default();
 
         if let Some(log_level) = file.log_level {
             config.log_level = log_level;
@@ -427,7 +454,9 @@ impl DaemonConfig {
                     config.pipeline.camera.device_path = camera_device;
                 }
             }
-            config.pipeline.camera.warmup_frames = pipe.warmup_frames.unwrap_or(0);
+            if let Some(warmup_frames) = pipe.warmup_frames {
+                config.pipeline.camera.warmup_frames = warmup_frames;
+            }
             if let Some(preference) = pipe
                 .sensor_preference
                 .as_deref()
@@ -557,18 +586,29 @@ impl DaemonConfig {
         Self::from_toml_str(&content)
     }
 
-    /// Loads configuration from the specified optional path, falling back to `/etc/soos/daemon.toml`
-    /// if present on disk, or `DaemonConfig::default()`.
+    /// Loads configuration from the specified optional path, falling back to
+    /// [`DEFAULT_CONFIG_PATH`] if present on disk, or [`DaemonConfig::runtime_default`].
     pub fn load_or_default(path_opt: Option<&Path>) -> Result<Self, DaemonError> {
+        Self::load_or_default_with_system_path(path_opt, Path::new(DEFAULT_CONFIG_PATH))
+    }
+
+    /// [`DaemonConfig::load_or_default`] with an injectable system configuration path.
+    ///
+    /// An explicit `path_opt` is always read (a missing file is an error). Otherwise
+    /// `system_path` is read when it is a regular file, and
+    /// [`DaemonConfig::runtime_default`] is returned when it is absent.
+    pub fn load_or_default_with_system_path(
+        path_opt: Option<&Path>,
+        system_path: &Path,
+    ) -> Result<Self, DaemonError> {
         if let Some(path) = path_opt {
             return Self::load_from_path(path);
         }
 
-        let default_system_config = Path::new("/etc/soos/daemon.toml");
-        if default_system_config.is_file() {
-            Self::load_from_path(default_system_config)
+        if system_path.is_file() {
+            Self::load_from_path(system_path)
         } else {
-            Ok(Self::default())
+            Ok(Self::runtime_default())
         }
     }
 }

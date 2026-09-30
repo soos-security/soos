@@ -35,6 +35,10 @@ mod pam_deadline_contract;
 #[cfg(all(test, unix))]
 mod sync_issue_contract;
 
+/// Daemon documentation versus code (GitHub #201, #205, #206).
+#[cfg(test)]
+mod daemon_docs_contract;
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,
