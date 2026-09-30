@@ -50,7 +50,7 @@ with a half-applied configuration.
 | Key | Type | Default | Validation / notes |
 |---|---|---|---|
 | `max_concurrent_connections` | integer | `8` | Global connection permits; must be at least 1 and strictly above `[peer_limits] reserved_root_connections`. |
-| `connection_timeout_ms` | integer (ms) | `1000` | Budget of one request (read, verification, encoding) and idle timeout of a persistent connection (§2). |
+| `connection_timeout_ms` | integer (ms) | `2500` (`DEFAULT_CONNECTION_TIMEOUT_MS`) | Budget of one request (read, verification, encoding) and idle timeout of a persistent connection (§2). Must lie in 100..=10000. The default matches the GDM line `timeout_ms=2500` (user decision 2026-09-30); console/sudo requests stay capped by their 1000 ms PAM client deadline. |
 | `enforce_active_session` | bool | `true` | Local-session policy for `Auth` and the session check of `PreviewFrame` (§3). `false` is for test harnesses only. |
 | `logind_sessions_dir` | path | `/run/systemd/sessions` | logind runtime session records read by the session policy. |
 
@@ -117,7 +117,7 @@ with a half-applied configuration.
 log_level = "info"
 
 [dispatcher]
-connection_timeout_ms = 1000
+connection_timeout_ms = 2500
 
 [pipeline]
 camera_device = "auto"

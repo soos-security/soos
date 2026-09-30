@@ -22,6 +22,14 @@ pub const MIN_CONNECTION_TIMEOUT_MS: u64 = 100;
 /// held for an unbounded time).
 pub const MAX_CONNECTION_TIMEOUT_MS: u64 = 10_000;
 
+/// Default `[dispatcher] connection_timeout_ms` (user decision 2026-09-30).
+///
+/// The daemon's request budget is min(client deadline, request start + this timeout) minus
+/// `RESPONSE_WRITE_MARGIN_MS`. 2500 ms matches the GDM line `timeout_ms=2500`, so the greeter
+/// really gets that daemon time; console/sudo stacks stay capped by the 1000 ms PAM module
+/// default (`crates/pam/src/config.rs` `DEFAULT_TIMEOUT_MS`) through their client deadline.
+pub const DEFAULT_CONNECTION_TIMEOUT_MS: u64 = 2500;
+
 /// Maximum length in bytes of the `log_level` filter directive.
 pub const MAX_LOG_LEVEL_LEN: usize = 256;
 
@@ -128,7 +136,7 @@ impl Default for DispatcherConfig {
     fn default() -> Self {
         Self {
             max_concurrent_connections: 8,
-            connection_timeout: Duration::from_millis(1000),
+            connection_timeout: Duration::from_millis(DEFAULT_CONNECTION_TIMEOUT_MS),
             enforce_active_session: true,
             logind_sessions_dir: PathBuf::from(crate::session::DEFAULT_LOGIND_SESSIONS_DIR),
         }

@@ -924,3 +924,13 @@ Complements PA3, PA12 and PFT1: those rows are proven under `[profile.test]` (al
 | EDC1 | The global daily total of a date is derived from the `*.enc` snapshot files of its partition when the store switches to it, so the global cap holds across a store restart | Integration test (`daily_cap_combined_tests::test_global_daily_cap_survives_store_restart`) | ✅ Verified |
 | EDC2 | A wall clock stepped back to a day whose partition still exists does not reopen either budget: the per-UID cap is read from the persisted counter and the global total from the stored files | Integration test (`daily_cap_combined_tests::test_clock_stepped_back_does_not_reopen_a_stored_day`) | ✅ Verified |
 | EDC3 | A per-UID refusal consumes neither the per-UID nor the global quota; both are consumed only after the snapshot and its counter are persisted | Integration tests (`daily_cap_combined_tests::test_per_uid_refusal_does_not_consume_the_global_quota`, `global_daily_cap_tests::test_global_daily_cap_spans_all_uids`, `daily_cap_persistence_tests::test_234_failed_write_does_not_consume_a_slot`) | ✅ Verified |
+
+---
+
+## Component: `daemon-connection-timeout-default` (User decision 2026-09-30, GDM deadline)
+
+| # | Criterion | Test Method | Status |
+|---|---|---|---|
+| CTD1 | `DEFAULT_CONNECTION_TIMEOUT_MS` = 2500 lies within the validation bounds and is the `DispatcherConfig::default()` value | Integration test (`connection_timeout_default_tests::test_default_connection_timeout_is_2500_ms`) | ✅ Verified |
+| CTD2 | `runtime_default()` and every `daemon.toml` without `connection_timeout_ms` use the default; an explicit value is honored | Integration test (`connection_timeout_default_tests::test_every_load_path_uses_the_default_connection_timeout`) | ✅ Verified |
+| CTD3 | The default covers the GDM line `timeout_ms=2500` and stays above the 1000 ms PAM module default that caps console/sudo | Integration test (`connection_timeout_default_tests::test_default_connection_timeout_covers_the_gdm_line_and_exceeds_the_pam_default`) | ✅ Verified |

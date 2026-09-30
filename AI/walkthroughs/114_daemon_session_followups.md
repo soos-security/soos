@@ -103,3 +103,16 @@ See the branch report: `cargo fmt --all -- --check`, `cargo clippy --locked --wo
 - **Warm-up on real models**: the seeded estimate has only been measured with mocks; the first
   real measurement is logged at start-up (`Vision inference warm-up complete`).
 - A clock stepped back across midnight resets the evidence day budget (root-only control).
+
+## 7. Note: Default Connection Timeout Raised to 2500 ms (User Decision 2026-09-30)
+
+The inference warm-up above seeds the admission estimate, but the daemon request budget was
+still capped by the 1000 ms default `connection_timeout`, so the GDM line `timeout_ms=2500`
+never received more than about 950 ms of daemon time. `DispatcherConfig::default()` now uses
+`DEFAULT_CONNECTION_TIMEOUT_MS` = 2500 (`crates/daemon/src/config.rs`); `Docs/DAEMON.md`,
+`Docs/IPC_PROTOCOL.md` and the ADR "Daemon Default Connection Timeout Raised to 2500 ms for
+the GDM Deadline" record it. Console/sudo stacks keep the 1000 ms PAM module default, whose
+client deadline still caps the daemon. New contract: `connection_timeout_default_tests`
+(default value, every load path, GDM line coverage, PAM default below it). The pre-existing
+assertion of `config_tests::test_config_defaults_when_file_absent` (1000 ms) is left for a
+user-approved test change.

@@ -54,7 +54,7 @@ Sent by the PAM module to the daemon to request facial verification:
 - `request_id: RequestId`: 256-bit cryptographic random identifier (`[u8; 32]`) sourced via `getrandom`.
 - `uid_hint: u32`: Declared UID from the PAM client (authoritatively cross-checked by the daemon using kernel `SO_PEERCRED`).
 - `service: String`: PAM service name (`"sudo"`, `"su"`, `"gdm-password"`...). Bounded to 64 bytes.
-- `deadline_monotonic_ns: u64`: Absolute monotonic deadline in nanoseconds. If exceeded, daemon immediately returns `Verdict::Unavailable`. `0` or `u64::MAX` means no client deadline (`DECISION_BUDGET_MS` applies). The daemon stops its decision `RESPONSE_WRITE_MARGIN_MS` (50 ms) before the earlier of this deadline and its own `connection_timeout` (measured from the start of request processing), and never starts an inference that would not finish in time; the response is then `Unavailable`/`Timeout` (or the consensus reached so far), never a silent overrun.
+- `deadline_monotonic_ns: u64`: Absolute monotonic deadline in nanoseconds. If exceeded, daemon immediately returns `Verdict::Unavailable`. `0` or `u64::MAX` means no client deadline (`DECISION_BUDGET_MS` applies). The daemon stops its decision `RESPONSE_WRITE_MARGIN_MS` (50 ms) before the earlier of this deadline and its own `connection_timeout` (measured from the start of request processing; default `DEFAULT_CONNECTION_TIMEOUT_MS` = 2500 ms, so the GDM line `timeout_ms=2500` gets its full budget while a console/sudo request stays capped by its 1000 ms PAM deadline), and never starts an inference that would not finish in time; the response is then `Unavailable`/`Timeout` (or the consensus reached so far), never a silent overrun.
 
 ### `Response`
 Returned by the daemon to the PAM module:
