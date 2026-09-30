@@ -156,6 +156,22 @@ Layer 1 checks the diff for `unsafe` in the nine business crates, removal of
 `#![forbid(unsafe_code)]`, panics/prints in PAM production code, async runtimes in `crates/pam`,
 banned crates, shell syntax and the English-only policy.
 
+Layer 1 lexing rules (GitHub #242, walkthrough 129):
+
+- Every audit diffs against `git merge-base origin/main HEAD` (plus the working tree), never
+  against the moving tip of `origin/main`, so commits merged after the branch point are not
+  audited as reversed branch changes.
+- The PAM panic and print audits compare the *production code* of each changed
+  `crates/pam/src` file at the merge base and in the working tree. An awk filter blanks
+  comments and literal contents and drops exactly the item gated by `#[cfg(test)]` (up to its
+  `;` or its matching `}`); there is no `grep -v tests`, so a production line that merely
+  contains the substring `tests` is still audited.
+- `pour` and `attention` are English words and are not French markers.
+- The static invariants add the same hardened extractor (`tests/invariants/src/lexing_contract.rs`),
+  the full PAM panic-construct check, and a resolved-graph check that no async runtime is a
+  normal dependency of `soos-pam` (`cargo tree -e normal --target all --all-features`),
+  transitive dependencies included.
+
 Layer 2 binds the review to the exact code reviewed:
 
 ```bash

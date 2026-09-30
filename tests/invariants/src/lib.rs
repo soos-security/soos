@@ -48,6 +48,18 @@ mod installer_templates_contract;
 #[cfg(all(test, unix))]
 mod maintainer_hygiene_contract;
 
+/// Shared test-fixture crate contract (GitHub #241, TCI-10).
+#[cfg(test)]
+mod fixtures_contract;
+
+/// Hardened production-code lexing and PAM panic / async-runtime checks (GitHub #242, TCI-11).
+#[cfg(test)]
+mod lexing_contract;
+
+/// End-to-end contract of `scripts/candid_review.sh` (GitHub #242, TCI-11).
+#[cfg(all(test, unix))]
+mod candid_review_contract;
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,

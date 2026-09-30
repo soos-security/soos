@@ -3393,6 +3393,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "soos-test-fixtures"
+version = "0.1.0"
+dependencies = [
+ "soos-camera-v4l",
+]
+
+[[package]]
 name = "soos-vision"
 version = "0.1.0"
 dependencies = [

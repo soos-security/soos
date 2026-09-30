@@ -15,12 +15,20 @@ When the `mock-camera` feature is enabled:
   - Can simulate device disconnections, frame corruption, or starvation.
 
 ## 3. Vision Test Fixtures
-No image or tensor files are committed. The shared fixture module `tests/fixtures/mod.rs` (included by
-`#[path]` from the `vision`, `daemon` and `enrollment-cli` tests) generates everything in code:
-- `synthetic`: solid RGB24, YUYV and Grey frames built from `soos_camera_v4l::Frame`.
-- `embeddings`: small pre-computed unit vectors for two subjects, used for cosine matching logic.
-- `pad`: synthetic live, printed-photo and screen-replay frames for the PAD wiring tests.
-- `onnx`: a deterministic minimal `Identity` ONNX model so ORT session factories run in CI.
+Shared, generated (never recorded) fixtures live in the dev-only workspace crate
+`soos-test-fixtures` (`tests/fixtures/Cargo.toml`, library root `tests/fixtures/mod.rs`,
+GitHub #241). It contains no facial image, no serialized tensor and no embedding:
+- `synthetic`: solid RGB24, YUYV and Grey frames of any size;
+- `pad`: synthetic live-face, printed-photo and screen-replay presentations for the PAD tests;
+- `onnx`: `minimal_identity_model()`, a hand-encoded ONNX `Identity` graph so the ORT wiring
+  of the daemon and enrollment CLI runs in CI without a model file.
+
+New tests add `soos-test-fixtures` to `[dev-dependencies]`; it is never a normal dependency.
+Three legacy test files (`crates/vision/tests/pad_tests.rs`, `crates/daemon/tests/pad_wiring_tests.rs`,
+`crates/enrollment-cli/tests/pad_wiring_tests.rs`) still include `mod.rs` through `#[path]`;
+`tests/invariants/src/fixtures_contract.rs` freezes that list. Face embeddings are 512D
+(ArcFace, `AI/DECISIONS.md`); embedding tests build their vectors locally. Real face captures
+(detection, alignment, matching accuracy) are covered only by the physical suite (`tests/physical/`).
 
 Face detection (SCRFD), 112x112 alignment, MiniFASNetV2 PAD and ArcFace 512D embeddings are exercised
 through the mock backends above. Real-model evidence lives in

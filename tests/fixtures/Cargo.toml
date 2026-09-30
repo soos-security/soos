@@ -1,0 +1,17 @@
+[package]
+name = "soos-test-fixtures"
+description = "Dev-only shared test fixtures for soos: synthetic frames, synthetic PAD presentations and minimal ONNX models"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lib]
+path = "mod.rs"
+
+[dependencies]
+soos-camera-v4l = { workspace = true }
+
+[lints]
+workspace = true
