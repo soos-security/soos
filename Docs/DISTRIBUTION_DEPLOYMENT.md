@@ -93,10 +93,11 @@ auth  required                       pam_permit.so
 sudo soos-admin add-user alice
 
 # 2. Enroll facial biometric vector
-sudo soos-enroll alice
+sudo soos-enroll enroll --username alice
 
-# 3. Verify encrypted biometric template permissions
-sudo stat -c "%a %U:%G" /var/lib/soos/biometrics/alice.bin
+# 3. Verify encrypted biometric template permissions (the store names the
+#    template after the numeric UID: <uid>.cbor.enc)
+sudo stat -c "%a %U:%G" "/var/lib/soos/biometrics/$(id -u alice).cbor.enc"
 # Expected: 600 root:root
 ```
 
@@ -288,8 +289,11 @@ sudo cp /etc/pam.d/system-auth.soos-backup /etc/pam.d/system-auth
 To execute the automated distribution validation suite:
 
 ```bash
-# Run multi-distribution test runner (auto-detects environment or uses Docker)
-bash tests/distro/run_distro_validation.sh --help
+# Live validation of one distribution (or all) in a disposable Docker container
+bash tests/distro/run_distro_validation.sh ubuntu      # fedora | arch | all
+
+# Print every distribution's plan; executes nothing privileged (no Docker needed)
+bash tests/distro/run_distro_validation.sh --dry-run all
 
 # Run Debian 12 / Ubuntu 24.04 test harness
 bash tests/distro/debian_ubuntu_test.sh --dry-run
@@ -308,6 +312,34 @@ bash tests/distro/arch_linux_test.sh --dry-run
 # PAM rollback on ubuntu:24.04 and fedora:40 (also a CI job)
 ./run_tests.sh rollback          # = tests/docker/pam_rollback_test.sh
 ```
+
+Safety rules of the harness (GitHub #163, #168):
+
+- **Docker is the only live path.** `run_distro_validation.sh` maps each distribution to
+  its script explicitly (`debian_ubuntu_test.sh`, `fedora_rhel_test.sh`,
+  `arch_linux_test.sh`) and runs it in a disposable container built from
+  `tests/docker/Dockerfile.<distro>`. Without Docker it fails and executes nothing; it
+  never falls back to a live run on the host.
+- **Explicit consent for host changes.** A live run of a distro script installs packages,
+  rewrites PAM files and creates users, so each script refuses (exit code 2) unless given
+  `--allow-host-changes`. The runner passes that flag only inside the container;
+  `--skip-docker` requires the operator to pass `--allow-host-changes` to the runner.
+- **Per-distribution artifacts.** Each container mounts a Docker volume
+  (`soos-distro-target-<distro>`) over `/workspace/target`, so binaries built on one
+  distribution are never installed on another, and no root-owned build output is written
+  to the host's `target/` directory. Remove the volumes with
+  `docker volume rm soos-distro-target-ubuntu soos-distro-target-fedora soos-distro-target-arch`.
+- **Production socket modes.** The scripts create `/run/soos` with
+  `install -d -m 0750 -o root -g soos` and assert `750 root:soos` for the directory and
+  `660 root:soos` for the mock daemon socket (`tests/docker/mock_daemon.py` refuses any
+  mode that grants a permission to "other").
+- **Real enrollment.** Templates are created by `soos-enroll --mock enroll --username
+  testuser --yes` (mock camera, synthetic inference, real encrypted store); the scripts
+  assert `/var/lib/soos/biometrics/<uid>.cbor.enc` is `600 root:root` and that
+  `soos-enroll --mock verify` accepts it.
+- **Rollback matches the install.** After a native package install the scripts record the
+  install mode (`deb`, `rpm`, `pkgbuild`), so rollback removes the package through the
+  package manager instead of deleting its files behind its back.
 
 ---
 

@@ -70,6 +70,7 @@ retitling a PR re-validates it without re-running the whole pipeline.
 | `authselect-profile` | Fedora `authselect` profile activation, `authselect check`, generated stack ordering, `nsswitch.conf` preservation, password fallback and rollback in `fedora:40` (`tests/docker/authselect_profile_test.sh`) | Starts after `lint`; stock image, no build |
 | `pam-rollback` | Debian `pam-auth-update` stack order (password-failed hook before `pam_deny`) and byte-for-byte PAM rollback by `scripts/uninstall.sh` (sha256 of every `/etc/pam.d` entry, `authselect current`) in `ubuntu:24.04` and `fedora:40` (`tests/docker/pam_rollback_test.sh`) | Starts after `lint`; stock images, no build |
 | `ci-success` | Fails unless every job above succeeded | Single check to require in branch protection |
+| `distro-pam-matrix` | PAM matrix T1–T10 in the Fedora and Arch sandbox images (`tests/docker/run_matrix.sh fedora\|arch`, GitHub #162) | Push to `main` and manual dispatch only (rebuilds toolchain and module per image); not part of `ci-success` |
 
 ### Performance Design
 - **Parallel jobs**: clippy, test, security and lint run concurrently; the critical path is the

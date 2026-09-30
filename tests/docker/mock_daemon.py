@@ -16,9 +16,16 @@ answered; Requests are answered according to --mode.
 Usage:
   python3 mock_daemon.py --socket /run/soos/daemon.sock --mode allow [--delay 0.5] [--one-shot]
                          [--record /tmp/events.log]
+                         [--socket-group soos] [--socket-mode 0660]
+
+The socket mirrors the production invariant (ARCHITECTURE.md, GitHub #168): it is
+created with mode 0660 and group-owned by --socket-group (default: soos). Modes that
+grant any permission to "other" are refused, and a missing group is a hard error
+(fail closed, never a silent fallback to a world-accessible socket).
 """
 
 import argparse
+import grp
 import os
 import signal
 import socket
@@ -133,7 +140,27 @@ def main():
         default=None,
         help="Append one line per received message ('event kind=... service=...' or 'request')",
     )
+    parser.add_argument("--socket-group", default="soos", help="Group owning the socket (default: soos)")
+    parser.add_argument(
+        "--socket-mode",
+        default="0660",
+        help="Octal socket mode (default: 0660); any 'other' permission bit is refused",
+    )
     args = parser.parse_args()
+
+    try:
+        socket_mode = int(args.socket_mode, 8)
+    except ValueError:
+        parser.error(f"--socket-mode must be an octal mode, got '{args.socket_mode}'")
+    if socket_mode & 0o007 or socket_mode & ~0o770:
+        parser.error(
+            f"--socket-mode {args.socket_mode} is refused: the daemon socket must never be "
+            "accessible to 'other' (production invariant: 0660 root:soos)"
+        )
+    try:
+        socket_gid = grp.getgrnam(args.socket_group).gr_gid
+    except KeyError:
+        parser.error(f"--socket-group '{args.socket_group}' does not exist (create it with groupadd -r)")
 
     sock_path = args.socket
     os.makedirs(os.path.dirname(sock_path), exist_ok=True)
@@ -160,8 +187,16 @@ def main():
     signal.signal(signal.SIGINT, cleanup)
     signal.signal(signal.SIGTERM, cleanup)
 
-    server.bind(sock_path)
-    os.chmod(sock_path, 0o666)  # allow testuser and root access in test container
+    # Bind under a restrictive umask so the socket is never briefly world-accessible,
+    # then apply the exact mode and group (the owner stays the invoking user: root in
+    # the containers, matching the production root:soos ownership).
+    previous_umask = os.umask(0o117)
+    try:
+        server.bind(sock_path)
+    finally:
+        os.umask(previous_umask)
+    os.chown(sock_path, -1, socket_gid)
+    os.chmod(sock_path, socket_mode)
     server.listen(16)
     print(f"[mock_daemon] Listening on {sock_path} in mode '{args.mode}'", flush=True)
 

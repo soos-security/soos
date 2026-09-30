@@ -29,18 +29,25 @@ RUN useradd -m -s /bin/bash testuser \
     && echo "testuser:password123" | chpasswd
 
 # Configure Arch Linux test PAM stack (/etc/pam.d/test-soos)
-RUN echo "# Test PAM service for soos (Arch Linux)\n\
-auth  [success=done default=ignore]  pam_soos.so timeout_ms=250\n\
-auth  required                       pam_unix.so\n\
-account required pam_unix.so\n\
-session required pam_unix.so" > /etc/pam.d/test-soos
+# printf '%s\n' writes one argument per line on every /bin/sh (dash on Ubuntu,
+# bash on Fedora/Arch). Never use `echo "...\n..."`: bash's builtin echo writes a
+# literal backslash-n and PAM would see a single comment line (GitHub #162).
+RUN printf '%s\n' \
+        '# Test PAM service for soos (Arch Linux)' \
+        'auth  [success=done default=ignore]  pam_soos.so timeout_ms=250' \
+        'auth  required                       pam_unix.so' \
+        'account required pam_unix.so' \
+        'session required pam_unix.so' \
+    > /etc/pam.d/test-soos
 
 # Configure Arch Linux system-auth integration
-RUN echo "# /etc/pam.d/system-auth integration for soos\n\
-auth  [success=done default=ignore]  pam_soos.so timeout_ms=250\n\
-auth  required                       pam_unix.so try_first_pass nullok\n\
-account required pam_unix.so\n\
-session required pam_unix.so" > /etc/pam.d/system-auth
+RUN printf '%s\n' \
+        '# /etc/pam.d/system-auth integration for soos' \
+        'auth  [success=done default=ignore]  pam_soos.so timeout_ms=250' \
+        'auth  required                       pam_unix.so try_first_pass nullok' \
+        'account required pam_unix.so' \
+        'session required pam_unix.so' \
+    > /etc/pam.d/system-auth
 
 # Provision /var/lib/soos/models directory
 RUN mkdir -p /var/lib/soos/models && chmod 755 /var/lib/soos/models

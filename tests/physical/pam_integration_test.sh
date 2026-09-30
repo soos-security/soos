@@ -205,7 +205,8 @@ chmod 700 "${TEMP_TEST_DIR}"
 
 SOCKET_DIR="${TEMP_TEST_DIR}/run_soos"
 mkdir -p "${SOCKET_DIR}"
-chmod 777 "${SOCKET_DIR}"
+# 0750 like the production /run/soos (GitHub #168); the mock socket is 0660.
+chmod 0750 "${SOCKET_DIR}"
 SOCKET_PATH="${SOCKET_DIR}/daemon.sock"
 
 TEST_PAM_SERVICE="test-soos-physical"
@@ -252,7 +253,7 @@ info "Step 1: Nominal Authentication — Genuine Face (PAM_SUCCESS)"
 info "-------------------------------------------------------------------"
 if [[ "${PAM_CONFIG_INSTALLED}" == "true" && -n "${TEST_RUNNER_BIN}" ]]; then
     # Start mock daemon in allow mode for deterministic PAM testing
-    python3 tests/docker/mock_daemon.py --mode allow --socket "${SOCKET_PATH}" &
+    python3 tests/docker/mock_daemon.py --mode allow --socket "${SOCKET_PATH}" --socket-group "$(id -gn)" &
     DAEMON_PID=$!
     sleep 0.3
 
@@ -280,7 +281,7 @@ info "Step 2: Absent/Wrong Face — Falls back to Password (PAM_IGNORE)"
 info "-------------------------------------------------------------------"
 if [[ "${PAM_CONFIG_INSTALLED}" == "true" && -n "${TEST_RUNNER_BIN}" ]]; then
     # Start mock daemon in deny mode
-    python3 tests/docker/mock_daemon.py --mode deny --socket "${SOCKET_PATH}" &
+    python3 tests/docker/mock_daemon.py --mode deny --socket "${SOCKET_PATH}" --socket-group "$(id -gn)" &
     DAEMON_PID=$!
     sleep 0.3
 
@@ -307,7 +308,7 @@ info "-------------------------------------------------------------------"
 info "Step 3: Password Fallback with Invalid Password (Rejection Check)"
 info "-------------------------------------------------------------------"
 if [[ "${PAM_CONFIG_INSTALLED}" == "true" && -n "${TEST_RUNNER_BIN}" ]]; then
-    python3 tests/docker/mock_daemon.py --mode deny --socket "${SOCKET_PATH}" &
+    python3 tests/docker/mock_daemon.py --mode deny --socket "${SOCKET_PATH}" --socket-group "$(id -gn)" &
     DAEMON_PID=$!
     sleep 0.3
 

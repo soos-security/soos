@@ -17,6 +17,8 @@
 #   6b. pam-rollback   — Debian stack order + byte-for-byte PAM rollback
 #                        in ubuntu:24.04 and fedora:40 (after lint)
 #   7. ci-success      — single aggregate status for merge gating
+#   8. distro-pam-matrix — PAM matrix T1–T10 in the Fedora and Arch sandbox
+#                        images (push to main and manual dispatch only)
 # The PR title convention is checked by pr-title.yml (it must also re-run when
 # a PR is retitled, which would needlessly re-run this whole pipeline).
 #
@@ -249,6 +251,33 @@ jobs:
 
       - name: Validate stack order and rollback on ubuntu:24.04 and fedora:40
         run: ./tests/docker/pam_rollback_test.sh
+
+  # ---------------------------------------------------------------------------
+  # Job 8: PAM matrix T1–T10 in the Fedora and Arch sandbox images (GitHub #162).
+  # Each image rebuilds its toolchain and pam_soos.so, so it runs on push to
+  # main and on manual dispatch rather than on every pull request; the static
+  # half (PAM stacks rebuilt under bash and parsed) runs on every PR in `test`.
+  # Not part of CI Success because it is skipped on pull requests.
+  # ---------------------------------------------------------------------------
+  distro-pam-matrix:
+    name: "PAM Matrix (${{ matrix.distro }})"
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    needs: lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        distro: [fedora, arch]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Run PAM matrix T1–T10 in the distro sandbox
+        env:
+          DISTRO: ${{ matrix.distro }}
+        run: ./tests/docker/run_matrix.sh "$DISTRO"
 
   # ---------------------------------------------------------------------------
   # Job 7: Aggregate status (single required check for merge gating)

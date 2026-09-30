@@ -15,6 +15,10 @@ mod installer_contract;
 #[cfg(test)]
 mod pad_contract;
 
+/// Multi-distribution test infrastructure invariants (GitHub #162, #163, #168).
+#[cfg(test)]
+mod distro_matrix;
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,
