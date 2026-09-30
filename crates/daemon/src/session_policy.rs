@@ -21,6 +21,7 @@
 //!
 //! All logind access goes through [`LogindSource`] so tests stay systemd-free.
 
+use std::ffi::OsString;
 use std::fmt::Debug;
 use std::fs;
 use std::io::Read;
@@ -241,17 +242,33 @@ fn first_unit_component(path: &str) -> Option<&str> {
         .find(|component| !component.is_empty() && !component.ends_with(".slice"))
 }
 
+/// Returns the path of a `/proc/<pid>/cgroup` line when it belongs to a hierarchy systemd
+/// manages: the unified cgroup v2 hierarchy (empty controller list) or the cgroup v1
+/// `name=systemd` hierarchy. Every other line yields `None`.
+fn systemd_hierarchy_path(line: &str) -> Option<&str> {
+    let mut fields = line.splitn(3, ':');
+    let (Some(_hierarchy), Some(controllers), Some(path)) =
+        (fields.next(), fields.next(), fields.next())
+    else {
+        return None;
+    };
+    (controllers.is_empty() || controllers == "name=systemd").then_some(path)
+}
+
 /// Extracts the logind session ID from a `/proc/<pid>/cgroup` file.
 ///
-/// On every hierarchy line, only the first unit below the slices counts (the rule
-/// `sd_pid_get_session` applies): a `session-<id>.scope` nested inside a user manager
-/// or a service is not a session. Returns `None` when no line carries a session scope,
-/// when an ID is malformed, or when lines disagree.
+/// Only the hierarchies systemd manages are read (GitHub #276): the unified cgroup v2 line
+/// (`0::`, empty controller list) and the cgroup v1 `name=systemd` line, exactly like
+/// [`parse_user_manager_uid_from_cgroup`]. Other cgroup v1 controller hierarchies do not
+/// define the logind session and are ignored. On each considered line, only the first unit
+/// below the slices counts (the rule `sd_pid_get_session` applies): a `session-<id>.scope`
+/// nested inside a user manager or a service is not a session. Returns `None` when no
+/// considered line carries a session scope, when an ID is malformed, or when lines disagree.
 #[must_use]
 pub fn parse_session_id_from_cgroup(content: &str) -> Option<String> {
     let mut found: Option<&str> = None;
     for line in content.lines() {
-        let Some(path) = line.splitn(3, ':').nth(2) else {
+        let Some(path) = systemd_hierarchy_path(line) else {
             continue;
         };
         let Some(id) = first_unit_component(path).and_then(|unit| {
@@ -334,15 +351,9 @@ fn user_manager_uid_of_path(path: &str) -> Result<Option<u32>, ()> {
 pub fn parse_user_manager_uid_from_cgroup(content: &str) -> Result<Option<u32>, SessionDenial> {
     let mut found: Option<Option<u32>> = None;
     for line in content.lines() {
-        let mut fields = line.splitn(3, ':');
-        let (Some(_hierarchy), Some(controllers), Some(path)) =
-            (fields.next(), fields.next(), fields.next())
-        else {
+        let Some(path) = systemd_hierarchy_path(line) else {
             continue;
         };
-        if !controllers.is_empty() && controllers != "name=systemd" {
-            continue;
-        }
         let uid = user_manager_uid_of_path(path)
             .map_err(|()| SessionDenial::UserManagerCgroupMalformed)?;
         match found {
@@ -432,28 +443,45 @@ impl LogindSource for SystemLogind {
     fn sessions(&self) -> Result<Vec<SessionRecord>, LogindError> {
         let entries = fs::read_dir(&self.sessions_dir)
             .map_err(|err| LogindError(format!("sessions directory unreadable: {err}")))?;
-        let mut records = Vec::new();
-        for (index, entry) in entries.enumerate() {
-            if index >= MAX_SCANNED_SESSIONS {
-                return Err(LogindError("too many session entries".into()));
-            }
-            let Ok(entry) = entry else {
-                continue;
-            };
-            let name = entry.file_name();
-            let Some(name) = name.to_str() else {
-                continue;
-            };
-            if !is_valid_session_id(name) {
-                // Skips `*.ref` FIFOs and any non-session entry.
-                continue;
-            }
-            if let Some(record) = Self::read_record(&entry.path())? {
-                records.push(record);
-            }
-        }
-        Ok(records)
+        collect_session_records(
+            entries.map(|entry| entry.map(|entry| (entry.file_name(), entry.path()))),
+        )
     }
+}
+
+/// Reads the session records of a sessions-directory listing given as `(name, path)` pairs.
+///
+/// Fails closed (GitHub #276): the user-manager path relies on this scan to prove that the
+/// target owns no remote session, so an entry that cannot be read is an error, never a skip.
+/// Names that are not valid session IDs (`*.ref` FIFOs, non-UTF-8 names) and entries that
+/// vanished or are not regular files are skipped. More than [`MAX_SCANNED_SESSIONS`]
+/// entries is an error.
+///
+/// # Errors
+/// Returns [`LogindError`] when an entry or a record cannot be read, or the listing is too long.
+pub fn collect_session_records<I>(entries: I) -> Result<Vec<SessionRecord>, LogindError>
+where
+    I: IntoIterator<Item = std::io::Result<(OsString, PathBuf)>>,
+{
+    let mut records = Vec::new();
+    for (index, entry) in entries.into_iter().enumerate() {
+        if index >= MAX_SCANNED_SESSIONS {
+            return Err(LogindError("too many session entries".into()));
+        }
+        let (name, path) =
+            entry.map_err(|err| LogindError(format!("session entry unreadable: {err}")))?;
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if !is_valid_session_id(name) {
+            // Skips `*.ref` FIFOs and any non-session entry.
+            continue;
+        }
+        if let Some(record) = SystemLogind::read_record(&path)? {
+            records.push(record);
+        }
+    }
+    Ok(records)
 }
 
 /// Local-session policy applied to every facial `Auth` request.

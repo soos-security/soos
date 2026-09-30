@@ -50,6 +50,8 @@ ADR entry in `AI/DECISIONS.md`. Re-check every value below with the listed `grep
 | `MAX_CONCURRENT_INFERENCES` | `crates/daemon/src/inference.rs` | 1 (blocking-pool inference slots) |
 | `RESPONSE_WRITE_MARGIN_MS` | `crates/daemon/src/inference.rs` | 50 ms (reserved before client and outer deadlines) |
 | `DEFAULT_INFERENCE_ESTIMATE_MS` / `MAX_INFERENCE_ESTIMATE_MS` | `crates/daemon/src/inference.rs` | 80 / 1000 ms (initial / upper bound of the EMA admission estimate) |
+| `WARMUP_PASSES` | `crates/daemon/src/inference.rs` | 2 (start-up warm-up passes; the estimate is seeded with the last one) |
+| `DEFAULT_DAILY_CAP_TOTAL` | `crates/evidence-store/src/config.rs` | 100 evidence snapshots per day across all UIDs (`[pipeline.evidence] daily_cap_total`) |
 | `DEFAULT_PAD_CONSENSUS_REQUIRED` / `_WINDOW` / `MAX_PAD_CONSENSUS_WINDOW` | `crates/policy/src/pad_consensus.rs` | 3 / 5 / 32 captures (Allow needs 3 consecutive; any spoof vetoes the request) |
 | `GDM_PAM_LINE` | `crates/admin-cli/src/gdm.rs` | `auth  [success=done default=ignore]  pam_soos.so timeout_ms=2500`, inside a managed block after every pre-credential gate [98] |
 | admin-cli `DEFAULT_TIMEOUT_MS` | `crates/admin-cli/src/args.rs` | 250 ms |

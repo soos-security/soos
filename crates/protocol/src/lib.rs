@@ -18,6 +18,9 @@
 //! Response v1: version | request_id[32] | verdict:u8 | reason_class:u8 |
 //!              issued_monotonic_ns:u64 | expires_monotonic_ns:u64
 //! ```
+//!
+//! Client-to-daemon frames (`Request`, `Event`) carry a one-byte message tag trailer
+//! (GitHub #204); see [`message`].
 
 #![forbid(unsafe_code)]
 #![deny(clippy::all, clippy::pedantic)]
@@ -27,9 +30,14 @@
 )]
 
 pub mod codec;
+pub mod message;
 pub mod types;
 
 pub use codec::{decode, encode};
+pub use message::{
+    decode_client_message, encode_event, encode_request, ClientMessage, FrameFormat, MessageError,
+    MESSAGE_TAG_EVENT, MESSAGE_TAG_REQUEST,
+};
 pub use types::{
     Event, EventKind, ReasonClass, Request, RequestKind, Response, StatusResponse, Verdict,
     CURRENT_VERSION, MAX_MESSAGE_SIZE, MAX_SERVICE_LEN, REQUEST_ID_LEN,

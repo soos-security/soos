@@ -40,6 +40,7 @@ pub struct HealthState {
     socket_ready: AtomicBool,
     camera_ready: AtomicBool,
     models_verified: AtomicBool,
+    memory_locked: AtomicBool,
     camera: OnceLock<Arc<dyn CameraManager>>,
 }
 
@@ -49,6 +50,7 @@ impl fmt::Debug for HealthState {
             .field("socket_ready", &self.socket_ready)
             .field("camera_ready", &self.camera_ready)
             .field("models_verified", &self.models_verified)
+            .field("memory_locked", &self.memory_locked)
             .field("camera", &self.camera_health())
             .finish()
     }
@@ -73,6 +75,19 @@ impl HealthState {
     /// Sets the ONNX model verification status.
     pub fn set_models_verified(&self, verified: bool) {
         self.models_verified.store(verified, Ordering::Release);
+    }
+
+    /// Records whether `mlockall` pinned the daemon address space into RAM (GitHub #201).
+    ///
+    /// Informational only: it does not change [`HealthStatus::is_healthy`], because the daemon
+    /// still authenticates when the kernel refuses the lock (the refusal is logged at `warn`).
+    pub fn set_memory_locked(&self, locked: bool) {
+        self.memory_locked.store(locked, Ordering::Release);
+    }
+
+    /// Returns `true` only after `mlockall` succeeded; `false` by default (fail-closed report).
+    pub fn memory_locked(&self) -> bool {
+        self.memory_locked.load(Ordering::Acquire)
     }
 
     /// Attaches the live camera manager whose lifecycle state drives `camera_ready`.

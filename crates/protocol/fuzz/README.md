@@ -7,6 +7,7 @@ This directory provides LLVM libFuzzer integration via `cargo-fuzz` for fuzz tes
 - **`decode_request`**: Sub-issue #4.1 — Feeds arbitrary mutated byte sequences into `decode::<Request>` and runs `req.validate()`. Asserts zero panics and memory safety across millions of iterations.
 - **`decode_response`**: Sub-issue #4.2 — Feeds arbitrary mutated byte sequences into `decode::<Response>` and runs `resp.is_allow()`. Asserts zero panics.
 - **`decode_event`**: Feeds arbitrary mutated byte sequences into `decode::<Event>`. Asserts zero panics.
+- **`decode_client_message`**: GitHub #204 — Feeds arbitrary payloads into `message::decode_client_message`. Asserts zero panics and that a tagged classification always comes from a reserved trailer byte (`>= 0x80`) while a legacy one never does.
 
 ## Prerequisites
 

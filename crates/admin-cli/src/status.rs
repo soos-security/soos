@@ -7,7 +7,8 @@ use std::process::Command;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-use soos_protocol::codec::{decode, encode};
+use soos_protocol::codec::decode;
+use soos_protocol::message::encode_request;
 use soos_protocol::types::{
     Request, RequestKind, StatusResponse, CURRENT_VERSION, MAX_MESSAGE_SIZE, REQUEST_ID_LEN,
 };
@@ -195,7 +196,7 @@ fn query_daemon_socket(socket_path: &Path) -> Result<StatusResponse, AdminCliErr
         deadline_monotonic_ns: 0,
     };
 
-    let encoded_req = encode(&req)?;
+    let encoded_req = encode_request(&req)?;
     stream
         .write_all(&encoded_req)
         .map_err(AdminCliError::SocketIo)?;

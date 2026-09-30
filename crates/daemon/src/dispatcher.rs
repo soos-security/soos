@@ -25,6 +25,7 @@ use soos_camera_v4l::PixelFormat;
 use soos_evidence_store::{EvidenceFrame, EvidencePixelFormat, FrameMetadata};
 use soos_policy::{ConsensusDecision, FrameEvaluation, PadAggregator, RateLimiter};
 use soos_protocol::codec::{encode, encode_preview};
+use soos_protocol::message::{decode_client_message, ClientMessage, FrameFormat};
 use soos_protocol::types::{
     Event, EventKind, PreviewResponse, ReasonClass, Request, RequestId, RequestKind, Response,
     StatusResponse, Verdict, CURRENT_VERSION, MAX_MESSAGE_SIZE,
@@ -406,42 +407,28 @@ impl ConnectionDispatcher {
         let mut body_buffer = vec![0u8; declared_size];
         stream.read_exact(&mut body_buffer).await?;
 
-        // Step 4: Decode message — may be Request or Event
-        // Uses exact deserialization without unconsumed trailing bytes to reliably differentiate schemas
-        let req_opt = postcard::take_from_bytes::<Request>(&body_buffer)
-            .ok()
-            .and_then(|(r, rest)| if rest.is_empty() { Some(r) } else { None });
-
-        let event_opt = postcard::take_from_bytes::<Event>(&body_buffer)
-            .ok()
-            .and_then(|(e, rest)| if rest.is_empty() { Some(e) } else { None });
-
-        match (req_opt, event_opt) {
-            (Some(req), Some(event)) => {
-                // Disambiguate when wire payload matches both Request and Event schemas.
-                // An Event decoded as Request will have `req.uid_hint` equal to the 32nd byte
-                // of `event.request_id`. If `req.uid_hint == peer.uid`, it is a valid Request.
-                // Otherwise, it is an Event notification.
-                if req.uid_hint == peer.uid {
-                    let one_shot = req.kind == RequestKind::Auth;
-                    let res = self
-                        .handle_request(peer.uid, peer.pid, req, request_started)
-                        .await?;
-                    Ok(ProcessedOutput {
-                        encoded_response: Some(res.encoded_response),
-                        completion_error: res.completion_error,
-                        one_shot,
-                    })
-                } else {
-                    self.handle_event(peer.uid, event).await?;
-                    Ok(ProcessedOutput {
-                        encoded_response: None,
-                        completion_error: None,
-                        one_shot: false,
-                    })
+        // Step 4: Classify the frame by protocol rule (GitHub #204 / DMN-15): the message tag
+        // trailer selects the type; a legacy untagged frame is accepted only when it decodes
+        // exactly as one type. A frame decoding as both is rejected, never guessed.
+        let classified = decode_client_message(&body_buffer);
+        drop(body_buffer);
+        let message = match classified {
+            Ok((message, format)) => {
+                if format == FrameFormat::Legacy {
+                    debug!("Accepted legacy untagged client message");
                 }
+                message
             }
-            (Some(req), None) => {
+            Err(err) => {
+                warn!(error = %err, "Rejected client message; closing connection");
+                return Err(DaemonError::Protocol(format!(
+                    "Rejected client frame: {err}"
+                )));
+            }
+        };
+
+        match message {
+            ClientMessage::Request(req) => {
                 let one_shot = req.kind == RequestKind::Auth;
                 let res = self
                     .handle_request(peer.uid, peer.pid, req, request_started)
@@ -452,17 +439,13 @@ impl ConnectionDispatcher {
                     one_shot,
                 })
             }
-            (None, Some(event)) => {
+            ClientMessage::Event(event) => {
                 self.handle_event(peer.uid, event).await?;
                 Ok(ProcessedOutput {
                     encoded_response: None,
                     completion_error: None,
                     one_shot: false,
                 })
-            }
-            (None, None) => {
-                warn!("Failed to decode payload as Request or Event");
-                Err(DaemonError::Protocol("Malformed wire payload".into()))
             }
         }
     }
@@ -716,10 +699,14 @@ impl ConnectionDispatcher {
                 self.config.connection_timeout,
             );
 
-            // 8-pre: Fail-fast rate limiting check (anti-DoS: avoid neural & camera workload if already blocked)
+            // 8-pre: Atomic attempt reservation (GitHub #200 / DMN-10). The per-UID limit is
+            // checked AND recorded under one write-lock acquisition, before any camera or
+            // vision work: concurrent requests cannot all pass the same remaining attempt,
+            // and a request that ends early (not enrolled, camera down, cancelled) still
+            // counts. A rejected reservation fails fast without waking the camera.
             {
-                let engine = pipe.policy.read().await;
-                if let Err(err) = engine.check_allowed(req.uid_hint, now_ns) {
+                let mut engine = pipe.policy.write().await;
+                if let Err(err) = engine.record_attempt(req.uid_hint, now_ns) {
                     warn!(
                         uid = req.uid_hint,
                         error = %err,
@@ -1066,23 +1053,11 @@ impl ConnectionDispatcher {
 
             drop(enrolled_template);
 
-            // 8f: Record exactly one attempt per request, then render the aggregate verdict.
-            // A rate-limit rejection at this point downgrades Allow (fail closed).
+            // 8f: Render the aggregate verdict. The attempt was already recorded by the
+            // reservation in 8-pre (exactly one per request), so nothing is recorded here.
             let cur_ns = self.now_nanos().unwrap_or(0);
-            let rate_limited = {
-                let mut engine_write = pipe.policy.write().await;
-                engine_write.record_attempt(req.uid_hint, cur_ns).is_err()
-            };
-
             let decision = aggregator.decision();
             let (final_verdict, final_reason) = match decision {
-                ConsensusDecision::Allow if rate_limited => {
-                    warn!(
-                        uid = req.uid_hint,
-                        "Rate limit reached while recording attempt; withholding authorization"
-                    );
-                    (Verdict::ProtocolError, ReasonClass::RateLimited)
-                }
                 ConsensusDecision::Allow => {
                     info!(
                         uid = req.uid_hint,

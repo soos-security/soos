@@ -4,14 +4,20 @@ use crate::error::EvidenceStoreError;
 use aes_gcm::aead::{Aead, KeyInit};
 use aes_gcm::{Aes256Gcm, Key, Nonce};
 use std::fmt;
-use std::fs::File;
+use std::fs::OpenOptions;
 use std::io::{Read, Write};
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 /// Length of the AES-256 master key in bytes (32 bytes = 256 bits).
 pub const MASTER_KEY_LEN: usize = 32;
+
+/// Mode applied to every key parent directory created by [`MasterKey::load_or_create`].
+///
+/// Matches the `/var/lib/soos` contract (`0755`, root-owned): the models directory below it
+/// must stay traversable by non-root users. The key file itself is always `0600` (GitHub #230).
+pub const KEY_PARENT_DIR_MODE: u32 = 0o755;
 
 /// Length of standard 96-bit AES-GCM nonce.
 pub const NONCE_LEN: usize = 12;
@@ -76,18 +82,10 @@ impl MasterKey {
         }
 
         if path.exists() {
-            let mut file = File::open(path)?;
-            let mut key_bytes = Vec::new();
-            file.read_to_end(&mut key_bytes)?;
-            let key = Self::from_slice(&key_bytes)?;
-            key_bytes.zeroize();
-            Ok(key)
+            read_existing_key(path)
         } else {
             if let Some(parent) = path.parent() {
-                if !parent.exists() {
-                    std::fs::create_dir_all(parent)?;
-                    std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))?;
-                }
+                create_missing_key_parents(parent)?;
             }
 
             let key = Self::generate()?;
@@ -102,8 +100,7 @@ impl MasterKey {
                 u64::from_ne_bytes(rand_bytes)
             );
             {
-                use std::os::unix::fs::OpenOptionsExt;
-                let mut tmp_file = std::fs::OpenOptions::new()
+                let mut tmp_file = OpenOptions::new()
                     .write(true)
                     .create_new(true)
                     .mode(0o600)
@@ -115,6 +112,90 @@ impl MasterKey {
             Ok(key)
         }
     }
+}
+
+/// Opens and validates an existing master key file (GitHub #230).
+///
+/// The file is opened with `O_NOFOLLOW | O_NONBLOCK` (a symlink swapped in after the
+/// `symlink_metadata` pre-check fails with `ELOOP`, a FIFO never blocks) and validated on the
+/// open descriptor: regular file, owned by root or by the effective UID, no group or world
+/// permission bit, exactly [`MASTER_KEY_LEN`] bytes. At most `MASTER_KEY_LEN + 1` bytes are read.
+fn read_existing_key(path: &Path) -> Result<MasterKey, EvidenceStoreError> {
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_NONBLOCK)
+        .open(path)?;
+    let meta = file.metadata()?;
+    if !meta.file_type().is_file() {
+        return Err(EvidenceStoreError::KeyError(format!(
+            "Evidence key '{}' is not a regular file",
+            path.display()
+        )));
+    }
+    let euid = nix::unistd::geteuid().as_raw();
+    if meta.uid() != 0 && meta.uid() != euid {
+        return Err(EvidenceStoreError::KeyError(format!(
+            "Evidence key '{}' is owned by UID {}; only root or UID {euid} is trusted",
+            path.display(),
+            meta.uid()
+        )));
+    }
+    if meta.mode() & 0o077 != 0 {
+        return Err(EvidenceStoreError::KeyError(format!(
+            "Evidence key '{}' has mode {:o}; group or world permission bits are forbidden (expected 0600)",
+            path.display(),
+            meta.mode() & 0o7777
+        )));
+    }
+    if meta.len() != MASTER_KEY_LEN as u64 {
+        return Err(EvidenceStoreError::KeyError(format!(
+            "Invalid key length: expected {MASTER_KEY_LEN} bytes, got {}",
+            meta.len()
+        )));
+    }
+    let mut key_bytes = Zeroizing::new(Vec::with_capacity(MASTER_KEY_LEN.saturating_add(1)));
+    file.take(MASTER_KEY_LEN.saturating_add(1) as u64)
+        .read_to_end(&mut key_bytes)?;
+    MasterKey::from_slice(&key_bytes)
+}
+
+/// Creates the missing ancestors of a key parent directory with [`KEY_PARENT_DIR_MODE`].
+///
+/// Directories that already exist are never modified (GitHub #230): forcing `0700` on a
+/// pre-existing or shared parent such as `/var/lib/soos` broke non-root access to models.
+fn create_missing_key_parents(parent: &Path) -> Result<(), EvidenceStoreError> {
+    if parent.as_os_str().is_empty() || std::fs::symlink_metadata(parent).is_ok() {
+        return Ok(());
+    }
+    let mut missing = Vec::new();
+    let mut cursor = Some(parent);
+    while let Some(dir) = cursor {
+        if dir.as_os_str().is_empty() || std::fs::symlink_metadata(dir).is_ok() {
+            break;
+        }
+        missing.push(dir.to_path_buf());
+        cursor = dir.parent();
+    }
+    for dir in missing.iter().rev() {
+        match std::fs::DirBuilder::new()
+            .mode(KEY_PARENT_DIR_MODE)
+            .create(dir)
+        {
+            Ok(()) => {
+                // Deterministic mode independent of the process umask, applied through a
+                // descriptor opened without following symlinks, and only to the directory
+                // this call has just created.
+                let handle = OpenOptions::new()
+                    .read(true)
+                    .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_DIRECTORY)
+                    .open(dir)?;
+                handle.set_permissions(std::fs::Permissions::from_mode(KEY_PARENT_DIR_MODE))?;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(EvidenceStoreError::Io(e)),
+        }
+    }
+    Ok(())
 }
 
 impl fmt::Debug for MasterKey {
@@ -195,4 +276,30 @@ pub fn decrypt_payload(
         .map_err(|e| EvidenceStoreError::Crypto(format!("Decryption or MAC failure: {e}")))?;
 
     Ok(Zeroizing::new(plaintext))
+}
+
+#[cfg(test)]
+mod key_open_tests {
+    #![allow(clippy::unwrap_used, reason = "unit tests")]
+
+    use super::{read_existing_key, MASTER_KEY_LEN};
+    use std::os::unix::fs::PermissionsExt;
+
+    /// GitHub #230: the open itself refuses a symlink, independently of the
+    /// `symlink_metadata` pre-check (a swap between the check and the open is a TOCTOU).
+    #[test]
+    fn test_230_key_open_does_not_follow_symlinks() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let target = tmp.path().join("target.key");
+        std::fs::write(&target, [5u8; MASTER_KEY_LEN]).unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let link = tmp.path().join("link.key");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        assert!(read_existing_key(&target).is_ok());
+        assert!(
+            read_existing_key(&link).is_err(),
+            "the key open must use O_NOFOLLOW"
+        );
+    }
 }
