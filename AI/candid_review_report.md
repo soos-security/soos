@@ -1,203 +1,240 @@
 # Candid Review Report
 
 - **Date**: 2026-09-30
-- **Target Branch**: `fix/p1-storage-vision-batch`
-- **Base (merge-base)**: `850abc5`
-- **Reviewed-Diff-Fingerprint**: `a4a5e23ad770f66642c5ad2d43cb5879f768838c3d86e5dbd1c5270ff9de19b5`
-- **Review round**: 4 (lockfile-only delta). Round 1 (`27ece66e...`) and round 2 (`d767676d...`)
-  returned CHANGES_REQUESTED. Round 3 (`a290d4da...`, report at `095ae8e`) returned APPROVED.
-- **Claimed issues**: #156, #177, #178, #179, #180, #181, #182, #183, #184, #190, #191
-- **Audited Files**: 80 files (see `target/candid_diff.patch`). This round focuses on the rework
-  commits since round 2 (`d017f96`, `7a58284`, `75be84e`, `9a9b184`), which touch only
-  `crates/admin-cli/src/{gdm.rs,pam_stack.rs}`, `crates/admin-cli/tests/{gdm_stack_order_tests.rs,gdm_tests.rs}`,
-  `AI/DECISIONS.md`, `AI/VERIFICATION_MATRIX.md`, `AI/walkthroughs/98_gdm_enable_stack_order.md`
-  and `Docs/DISTRIBUTION_DEPLOYMENT.md`. The rest of the batch was checked for regressions from
-  these commits only.
-
-## Round 4 — lockfile-only delta
-
-Round 3 approved the full batch at fingerprint `a290d4da...` (commit `095ae8e`). CI then failed
-only on `cargo-deny`, because upstream yanked `yoke-derive 0.8.3`. One commit was added:
-`fd4f8cf chore(deps): update yanked yoke-derive to 0.8.4`.
-
-Verification:
-
-- `git diff --stat 095ae8e fd4f8cf` and `git diff --stat 095ae8e` (working tree, clean status):
-  exactly `Cargo.lock | 4 ++--`. No other file in the batch changed since round 3.
-- The hunk changes only the `yoke-derive` entry: `version` `0.8.3` -> `0.8.4` and its `checksum`.
-  `source` stays `registry+https://github.com/rust-lang/crates.io-index`. The `dependencies` list
-  (`proc-macro2`, `quote`, `syn 3.0.5`, `synstructure`) is unchanged, and no other package entry
-  or dependency edge moved.
-- This is a patch-level bump (0.8.x, semver-compatible with `yoke v0.8.3`'s requirement).
-- `cargo tree -i yoke-derive --locked`: `yoke-derive v0.8.4 (proc-macro)` is a transitive
-  compile-time dependency, reached only through `yoke v0.8.3` via the ICU / `zerovec` / `idna` /
-  `url` chain (`webbrowser` -> `egui-winit` -> `eframe` -> `soos-gui`). No workspace crate depends
-  on it directly, and it is not in `crates/pam`, `protocol`, `policy` or the daemon auth path.
-- `cargo deny --locked check`: `advisories ok, bans ok, licenses ok, sources ok`, exit 0.
-- `./scripts/candid_subagent.sh --prepare`: new fingerprint
-  `a4a5e23ad770f66642c5ad2d43cb5879f768838c3d86e5dbd1c5270ff9de19b5`. In the frozen patch
-  (merge-base `850abc5`), `yoke-derive` is the only new difference from round 3.
-
-Pillars for the delta: Logic, PAM deadlines, panic safety, memory/secrets: no source change, so
-not affected. Test integrity: no test file changed, so section 2 below still holds. Supply chain:
-same registry source, pinned checksum, deny clean. PASS. English-only: commit message is English.
-PASS. The delta has no findings. The two round-3 MINOR findings are unchanged and remain
-follow-ups.
-
-Round 3 content follows unchanged, for reference.
+- **Target Branch**: `fix/p1-quality-ci-batch`
+- **Base (merge-base)**: `83ad42203`
+- **Reviewed-Diff-Fingerprint**: `e2298b4c94ed73eb4b02da909dbc061edc2f363cb55a3d33c563934ff3c03389`
+- **Review round**: 3 (round 1: CHANGES_REQUESTED, fingerprint `b387dcbf…`; round 2: APPROVED, fingerprint `bbde79da…`)
+- **Claimed issues**: #185, #186, #187, #188, #189, #274, #168, #280
+- **Audited Files**: .agents/skills/dev-workflow/SKILL.md, .agents/skills/dev-workflow/references/project-facts.md, .agents/skills/traceability-agent/SKILL.md, .github/workflows/ci.yml, AGENTS.md, AI/ARCHITECTURE.md, AI/BACKLOG.md, AI/DECISIONS.md, AI/VERIFICATION_MATRIX.md, AI/walkthroughs/103_packaged_timeout_and_physical_scripts.md, AI/walkthroughs/104_verification_matrix_citations.md, AI/walkthroughs/105_sync_issue_mapping_and_explicit_completion.md, AI/walkthroughs/106_failable_pam_matrix_and_distro_deploy_ci.md, AI/walkthroughs/107_deflake_timing_tests.md, Docs/CI_CD_AND_SECURITY.md, Docs/DEVELOPMENT_WORKFLOW.md, Docs/DISTRIBUTION_DEPLOYMENT.md, Docs/INFERENCE_ORT_CRATE.md, Docs/IPC_PROTOCOL.md, Docs/PACKAGING_AND_PROVISIONING.md, Docs/PAM_DOCKER_TEST_MATRIX.md, Docs/PAM_MODULE.md, Docs/SECURITY_AND_QUALITY_GUIDELINES.md, crates/camera-v4l/tests/bench_latency_tests.rs, crates/camera-v4l/tests/common/mod.rs, crates/camera-v4l/tests/error_recovery_tests.rs, crates/camera-v4l/tests/hotunplug_tests.rs, crates/camera-v4l/tests/mock_camera_tests.rs, crates/camera-v4l/tests/shutdown_tests.rs, crates/camera-v4l/tests/warmup_tests.rs, crates/daemon/tests/pipeline_integration_tests.rs, crates/daemon/tests/template_model_binding_tests.rs, crates/gui/tests/common/mod.rs, crates/gui/tests/layout_tests.rs, crates/vision/tests/bench_tests.rs, packaging/pam/arch/system-auth, packaging/pam/arch/system-auth.snippet, packaging/pam/debian/soos, packaging/pam/fedora/soos/README, packaging/pam/fedora/soos/password-auth, packaging/pam/fedora/soos/system-auth, packaging/rpm/soos.spec, save.sh, scripts/pr_loop.sh, scripts/sync_issue.py, tests/distro/arch_linux_test.sh, tests/distro/debian_ubuntu_test.sh, tests/distro/fedora_rhel_test.sh, tests/docker/authselect_profile_test.sh, tests/docker/mock_daemon.py, tests/docker/pam_case_lib.sh, tests/docker/pam_rollback_test.sh, tests/docker/test_packages.sh, tests/docker/test_suite.sh, tests/invariants/src/distro_matrix.rs, tests/invariants/src/lib.rs, tests/invariants/src/matrix_citations.rs, tests/invariants/src/pam_deadline_contract.rs, tests/invariants/src/physical_contract.rs, tests/invariants/src/sync_issue_contract.rs, tests/physical/adversarial_test.sh, tests/physical/enrollment_test.sh, tests/physical/multi_user_test.sh, tests/physical/screensaver_test.md
 
 ## 1. Executive Summary
 
-All four round-2 findings are fixed in code. A missing, dangling, unreadable or non-file include
-target now refuses. The file is left unchanged, no backup is written and `gdm.disable` is kept.
-PAM type and control keywords are now read case-insensitively in gate classification, delegation
-and jump detection. Module paths and arguments stay case-sensitive. De-duplication counts only
-earlier enforcing (`required`/`requisite`) auth rules. The known refusals are documented.
+Round 2 reviews the full frozen diff against `origin/main`. It focuses on the round-1 rework: commit
+`e869cea`, plus `3c6e329` and `f7a225d` after `7fbab62`. The rework touches only `packaging/rpm/soos.spec`,
+`tests/invariants/src/lib.rs`, `Docs/PACKAGING_AND_PROVISIONING.md`, the matrix, walkthroughs 106/107, and it
+removes the `eprintln!` from the three gated benchmarks. No production Rust source changed.
 
-Adversarial probing ran in a scratch crate, since deleted. The Ubuntu, Fedora and Arch
-`gdm-password` stacks, with their includes present, still enable correctly. It found two new
-MINOR issues: a de-duplication hole that needs a non-default jump, and a FIFO include target that
-hangs the CLI. Both need a root-authored, non-standard `/etc/pam.d`. `cargo fmt --check`,
-workspace `clippy -D warnings` and all `soos-admin-cli` tests pass. There is no CRITICAL or MAJOR
-finding.
+Checks run by this reviewer:
+- `cargo fmt --all -- --check`: clean.
+- `cargo test -p soos-invariants`: 114 passed.
 
-## 2. Test Changes (mechanical listing from step 3)
+Docker was not run (out of scope).
 
-Frozen patch, `^-[^-].*(assert|#[test]|...)`: exactly two lines (patch 7578-7579):
-`assert_eq!(enroll.model_id, "mobilefacenet")` and `assert_eq!(enroll.model_version, "1.0.0")` in
-`crates/enrollment-cli/tests/scaffold_tests.rs::test_cli_parse_enroll_subcommand_with_uid`,
-replaced by manifest constants. User-approved (a), #182.
+The round-1 MAJOR finding is resolved. The `%files` guard now fails on the exact defect: the line
+`%ghost %attr(0600, root, root) %{_sharedstatedir}/soos/master.key` is not a comment and contains `master.key`.
+Round-1 findings 2 and 3 are resolved in substance. Two new MINOR issues remain in the upgrade guard and in
+stale matrix wording. Round-1 findings 4 and 5 are tracked (issue #281, PR listing). Neither is a security
+invariant or a CI failure. Verdict: APPROVED.
 
-Pre-existing test files modified vs `origin/main` (`--diff-filter=M`): `gdm_tests.rs`,
-`scaffold_tests.rs`, `daemon/tests/pipeline_integration_tests.rs`, `tests/invariants/src/lib.rs`.
-The last two only gain lines.
+## 2. Test Changes (mechanical listing from step 3, with justification per change)
 
-`crates/admin-cli/tests/gdm_tests.rs`, compared line by line with `origin/main` (whose tests are
-`subcommand_parsing`, `disable_and_enable_lifecycle`, `enable_creates_byte_exact_backup_with_original_mode`,
-`enable_never_overwrites_an_existing_backup`, `enable_is_atomic_and_idempotent` and
-`enable_refuses_a_symlinked_pam_file`):
-- The `COMMON_AUTH` constant and the `write_common_auth` helper are new.
-- A `write_common_auth(temp.path())` setup line is added to exactly the four approved tests.
-- One line, `"common-auth".to_string()`, is added to the expected listing in
-  `test_gdm_enable_is_atomic_and_idempotent`. User-approved (b).
-- `test_gdm_status_configured_enabled` and `test_gdm_status_configured_disabled` also get the
-  setup line, but those tests are new on this branch, not on `origin/main`, so this is not a
-  pre-existing change.
-- No other line of a pre-existing test was modified or removed.
+Removed or changed assertion lines (`^-.*assert`):
+- patch L358 is a matrix row (PAD5), which is documentation.
+- patch L4440, `test_pam_config_ordering_matches_spec`: `contains("pam_soos.so timeout_ms=250")` becomes
+  `any(is_default_timeout_primary_soos_rule)`. The Fedora/Arch/authselect hunks swap the literal for
+  `primary_soos_rule_offset`, and the ordering asserts are byte-identical. **User-approved (a).**
 
-New escape hatches (`#[ignore]`, `#[cfg(any())]`, `should_panic`, `tolerance`, `epsilon`): none.
-Inline test modules: only the two new `mod tests` (`pam_stack.rs`, `biometric-store/src/store.rs`).
-The branch-local `gdm_stack_order_tests.rs` gains 8 tests and loses no line in the rework.
+Multi-line assertions missed by the grep, found by reading every `tests/invariants/src/lib.rs` hunk:
+- `lib.rs:1092-1102`, `test_package_scriptlets_provision_key_via_shared_helper`. The old assertion,
+  `%ghost` + `master.key` present, becomes: no non-comment `%files` line contains `master.key`.
+  **User-approved (c), 2026-09-30.** It is stricter and non-vacuous: a reintroduced `%ghost` key line fails it,
+  and the explanatory comment no longer satisfies it.
+- `lib.rs:1455-1467`, `test_rpm_packaging_specification`. The old check, `0600` + `master.key` anywhere,
+  becomes: the spec contains `provision-master-key` and the helper has a non-comment `chmod 0600` or
+  `umask 077` line. **User-approved (c).**
+  - The `%post` call itself is asserted separately at `lib.rs:1075-1079`: the `%post` section must contain
+    the helper path.
+  - `lib.rs:896` independently requires `umask 077` in the helper, so the combination is not weaker than
+    intended.
 
-Test integrity: PASS.
+Other test changes:
+- Camera, GUI and daemon test files: the polling migrations, env-gated benchmarks (`SOOS_LATENCY_BENCH=1`,
+  run by the CI step "Latency benchmarks (single-threaded)" in job `test`, `ci.yml:171-178`), widened idle
+  windows and the 5 s `connection_timeout`. **User-approved (b).**
+  - The only change since round 1 is removing the `eprintln!` from the gated early returns
+    (`shutdown_tests.rs` ×2, `vision/bench_tests.rs`). Thresholds are unchanged.
+- New escape hatches: none. The `should_panic`/`tolerance` hits are string fixtures, docs or shell messages.
+- Shell harness changes are equal or stricter (see round 1). None were changed since round 1.
+
+No other assertion is weakened.
 
 ## 3. Deep Reasoning Audit
 
 ### Logic & Architecture
 
-**Round-2 findings, verified in code.**
+**Finding 1 (round 1).** `soos.spec:158-174` `%files` lists no `master.key`, only a comment.
+- `%post` (`soos.spec:94`) calls the helper.
+- The helper refuses symlinks, creates the key under `umask 077`, checks 32 bytes and publishes it with a hard
+  link. It never overwrites an existing key.
+- PASS.
 
-1. (MAJOR, missing include) `pam_stack.rs:294-306`: `ReadError::NotFound` now returns
-   `GdmConfig` naming the target and the vendor-directory limitation. `ReadError::Other` also
-   refuses. `plan_gdm_enable` runs before any backup or write (`gdm.rs:197-213`), and
-   `configure_gdm` only removes `gdm.disable` on success. FIXED.
-2. (keyword case) `is_auth`, `delegation` and the new `is_enforcing` use `eq_ignore_ascii_case`.
-   `as_guard` uses `is_enforcing` and writes the copied control in lowercase, and `max_jump` reads
-   every `key=value` pair. The pre-anchor loop in `gdm.rs:245-272` uses the same predicates, so
-   gate classification, delegation and jump detection all agree. `module_name`, `has_arg` and the
-   module lists stay case-sensitive, as in libpam. FIXED.
-3. (dedup) `gdm.rs:295-301` keeps only earlier rules with `is_auth() && is_enforcing()`. The
-   earlier `requisite`/`required` choice is safe: after an earlier `required` failure, a
-   `success=done` still returns the stored failure in libpam. FIXED for the round-2 scenarios (see
-   Finding 1 for a remaining variant).
-4. (docs) `Docs/DISTRIBUTION_DEPLOYMENT.md` §2.1 item 6 lists the authselect `sssd` profile,
-   openSUSE `common-auth` and vendor `/usr/lib/pam.d` stacks, with a manual recipe and its caveat.
-   ADR, matrix rows GSO13-GSO15 and walkthrough 98 §12 are consistent with the code. FIXED.
+**Finding 2 (round 1), `%pre`/`%posttrans` upgrade guard.** Scenarios attempted:
+- **Fresh install** (`$1 = 1`): `%pre` skips the copy. `%posttrans` finds no `.master.key.upgrade` and does
+  nothing. Unaffected. PASS.
+- **Upgrade from a `%ghost` build.** RPM order is new `%pre` (copy), new files, new `%post` (key present, helper
+  no-op), old `%preun`, old-file erase (key deleted), old `%postun`, then `%posttrans`. `%posttrans` sees the key
+  missing and moves the copy back, then applies 0600 and root:root. Correct under the normal ordering. PASS.
+- **Upgrade from this build to a later one**: the copy is made, the key survives, and `%posttrans` removes the
+  copy. PASS.
+- **Symlink or TOCTOU.** `/var/lib/soos` is `%dir %attr(0755, root, root)`, so only root can place entries.
+  - `%pre` skips a symlinked key (`! -L`).
+  - `mv -f` renames over a dangling symlink rather than following it.
+  - `MasterKey::load_or_create` rejects a symlinked key (`O_NOFOLLOW`).
+  - No unprivileged race exists. PASS.
+- **Copy mode.** `cp -p` copies the source mode. The source is 0600, which the helper tightens on every
+  `%post`, and the subshell `umask 077` covers creation. The copy is root-only. PASS.
+- **Aborted transaction** (`%posttrans` never runs): a stale root-only 0600 copy of the same key remains in a
+  root-only-writable directory. A later `%posttrans` removes it. Not a secret exposure. Acceptable.
+- **Key recreated before `%posttrans`**: this path fails. See finding 1 below.
 
-Scenarios run through `configure_gdm(Enable)` (scratch crate, since deleted):
+**Finding 3 (round 1).** `Docs/PACKAGING_AND_PROVISIONING.md:221,234` no longer say `%ghost` ownership. PASS.
+Stale matrix wording remains (finding 2 below).
 
-| Scenario | Result |
-|---|---|
-| Ubuntu 24.04 gdm-password + pam-auth-update `common-auth` (fprintd, unix) + `common-account` | enabled before `@include common-auth`, backup written, flag removed. PASS |
-| Ubuntu, `common-auth` missing | refused, unchanged, no backup, flag kept. PASS |
-| Ubuntu, `common-auth` mode 000 | refused (EACCES), unchanged, no backup, flag kept. PASS |
-| Ubuntu, `common-auth` is a directory | refused (EISDIR). PASS |
-| Ubuntu, `common-auth` is a dangling symlink | refused (not found). PASS |
-| Fedora authselect `local` + `with-faillock` + fprintd (`substack password-auth`, `include postlogin`) | enabled after `pam_selinux_permit`, `faillock preauth silent` copied. PASS |
-| Fedora, `postlogin` missing (after the credential stop) | enabled. Acceptable: scanning stops at the credential, and libpam's must-fail handler still fails the password path as before. PASS |
-| Fedora, `password-auth` missing | refused. PASS |
-| Arch gdm-password -> system-local-login -> system-login -> system-auth | enabled; `pam_shells`, `pam_nologin`, `faillock preauth` copied. PASS |
-| Arch, `system-auth` missing at depth 3 | refused. PASS |
-| `AUTH INCLUDE` + `AUTH REQUISITE pam_nologin.so` + `AUTH SUFFICIENT pam_unix.so` | enabled, gate copied in lowercase. PASS |
-| `-Auth required pam_foo.so` before the include | refused. PASS |
-| `Account include missing-account` (non-auth) | ignored for auth placement. PASS |
-| `auth sufficient Pam_Unix.so` (module case) | not a credential, refused (fail-closed). PASS |
-| in-file `auth Requisite pam_nologin.so` + delegated `requisite pam_nologin.so` | de-duplicated correctly. PASS |
-| **in-file `[success=1 default=ignore] pam_succeed_if.so user ingroup vip`, `requisite pam_nologin.so`, `pam_faildelay.so`, `@include common-auth` (with `requisite pam_nologin.so`)** | **enabled, delegated nologin dropped as duplicate, although the earlier copy can be jumped over. FINDING 1** |
-| **include target is a FIFO** | **`soos-admin` blocks forever in `open()`. FINDING 2** |
-
-Regressions: the rework changes nothing outside `admin-cli` and docs. Refusal now covers every read
-error, and no path that refused in round 2 now accepts. No regression found.
+**Rest of the batch.** Re-read for regressions: #185 packaged stacks, #186 physical scripts, #188
+`sync_issue.py`/`save.sh`, #189 matrix, #274 `distro-deploy`. Nothing changed since round 1. PASS.
 
 ### PAM Concurrency & Deadlines
-`crates/pam` is untouched by the rework. `admin-cli` runs outside the PAM stack. PASS.
+No change to `crates/pam`. T2/T2b deadline assertions are unchanged since round 1. PASS.
 
 ### Panic Safety & Fail-Closed
-The rework adds no `unwrap`/`expect`/indexing in production. Every read error of a delegated stack
-now fails closed. The only remaining fail-open is Finding 1, which needs a non-default
-administrator-written jump.
+No production code changed. A missing or wrong key makes the daemon fail to decrypt, which is fail-closed and
+never reaches `Allow`. PASS.
 
 ### Test Integrity & Anti-Weakening
-See section 2. The new tests (capitalized gate/unclassified/jump/`Include`, optional-vs-enforcing
-dedup, missing include) each fail against the round-2 code. The missing-include test checks
-the unchanged file, no backup and the kept flag through `assert_enable_refused`. PASS.
+Only approved changes (a), (b) and (c) were found. The new `%files` guard was checked by reasoning against the
+exact defect line. PASS.
 
 ### Memory, Bounds & Secrets
-Include reads stay bounded at 64 KiB, include depth is bounded at 4, and error messages contain
-only paths and module names. PASS, apart from the unbounded blocking open in Finding 2.
+- No key bytes are printed by the scriptlets. `cp`, `mv`, `chmod` and `rm` handle paths only.
+- `verify_package_has_no_key_material` still covers RPM with `--noghost`. With no `master.key` entry, the
+  package can neither ship nor own the key.
+- PASS, with finding 1 below.
 
 ### Supply Chain & Automation
-The rework does not change `Cargo.*`, CI, scripts or hooks. PASS.
+Unchanged since round 1:
+- Actions are pinned by SHA.
+- `distro-deploy` uses `persist-credentials: false` and inherits `contents: read`.
+- `${{ matrix.* }}` reaches scripts only through `env:`.
+
+PASS.
 
 ### English-Only Policy
-Code, comments, tests, ADR, matrix, walkthrough and docs added in the rework are English. PASS.
+The rework lines (spec comments, docs, walkthrough, test messages) are English. PASS.
 
 ## 4. Detailed Findings & Action Items
 
-1. **[MINOR]** `crates/admin-cli/src/gdm.rs:295-301` (with the jump check at `:256-261`, `:283-291`)
-   — a delegated gate is dropped as a duplicate when the edited file already runs the same gate
-   with `required`/`requisite`, even when a pre-anchor jump can skip that earlier copy. The jump
-   check only refuses jumps that land on or beyond the insertion point.
-   Reproduced with:
+1. **[MINOR]** `packaging/rpm/soos.spec:152-155`: `%posttrans` deletes the only surviving key copy without
+   comparing it.
+   - Failure scenario:
+     - The upgrade starts from a build that owned the key as `%ghost`.
+     - Something recreates `master.key` between the old-file erase and `%posttrans`. One case is an immediate
+       `systemctl try-restart` in the old `%postun`: EL8-style `%systemd_postun_with_restart`, or any macro
+       set that restarts before `%posttrans` runs. Another is a crash-restart (`Restart=on-failure`).
+     - The daemon then calls `MasterKey::load_or_create` (`crates/daemon/src/pipeline.rs:311`,
+       `crates/biometric-store/src/crypto.rs:90-98`), which silently generates a new key.
+     - `%posttrans` takes the `else` branch and runs `rm -f .master.key.upgrade`.
+     - Result: the original key is gone for good and every enrolled template is undecryptable.
+   - A partially written copy (ENOSPC during `cp -p`) would also be restored without a 32-byte check.
+   - Impact is limited: no RPM has been released (0.1.0-1), and the restart timing depends on the macros.
+   - Suggested correction: remove the copy only when `cmp -s` shows it equals the current key. Otherwise keep
+     it, for example renamed `.master.key.upgrade.<epoch>`, and print a path-only warning to stderr. Restore
+     only a regular 32-byte copy.
+   - Add this to the `rpm -U` Docker follow-up already tracked in #281.
+2. **[MINOR]** `AI/VERIFICATION_MATRIX.md`: three rows still contradict the implemented design.
+   - PMK4 (L530), a pre-existing row, says the RPM `%files` has "`master.key` kept `%ghost`".
+   - PK6 (L244) still lists "`%files` strict attributes (… `0600` master.key)".
+   - PMX8 (L839) says the RPM branch "fails on the real `%ghost` master-key defect", which is now fixed and
+     verified in PK6.
+   - Scenario: a reader or a future agent trusts the matrix and reintroduces `%ghost`. The invariant would then
+     fail, but the traceability record is wrong.
+   - Correction: reword the three rows to "not listed in `%files` (not even `%ghost`); 0600 enforced by the
+     helper".
+3. **[MINOR, tracked, non-blocking]** Round-1 finding 4: `tests/invariants/src/matrix_citations.rs` blind spots.
+   - Rows with no code span are not checked.
+   - `fn` in a `proptest!` file counts as a test.
+   - `#[cfg(all(test, …))]` is accepted as a test attribute.
+   - All three are listed in issue #281 (first checkbox). The invariant still catches unresolved citations. It
+     only over-accepts, so it does not block this batch.
+4. **[SUGGESTION, tracked, non-blocking]** Round-1 finding 5: after the 50 ms dwell in the negative polling
+   checks, the reaction window is bounded by the `wait_until` loop rather than a fixed sleep. The caller says it
+   is listed in the PR description. Approved migration (b), assertions unchanged.
+5. **[SUGGESTION]** `tests/invariants/src/lib.rs:1461`: `spec_content.contains("provision-master-key")` is
+   already satisfied by the `%install`/`%files` lines, so it does not by itself prove the `%post` call. The
+   `%post` call is independently pinned at `lib.rs:1075-1079`, so no gap exists today. Scoping the check to the
+   `%post` section would make the test self-contained.
 
-   ```
-   auth [success=1 default=ignore] pam_succeed_if.so user ingroup vip
-   auth requisite pam_nologin.so
-   auth required pam_faildelay.so delay=1
-   @include common-auth
-   ```
+## Round 3 — posttrans hardening delta
 
-   `common-auth` runs `auth requisite pam_nologin.so` before `pam_unix`. In the original stack,
-   members of `vip` skip the first nologin but still hit the one in `common-auth`. After `enable`,
-   that one is not copied, so for `vip` members a face match returns `success=done` while
-   `/etc/nologin` exists. This needs a non-default, administrator-written jump over a gate, so it
-   is MINOR, like round-2 Finding 3. Correction: skip de-duplication when any pre-anchor jump
-   exists, or drop de-duplication altogether (running a gate twice is harmless, as the docs
-   already say for `preauth`). Add a contract test.
-2. **[MINOR]** `crates/admin-cli/src/pam_stack.rs:369-372` (called from `scan_stack`, `:294`) —
-   `read_bounded_utf8` opens delegated stacks with a plain `File::open`, with no `O_NONBLOCK` and
-   no regular-file check. An include target that is a FIFO makes `soos-admin gdm enable` block
-   forever: reproduced, killed by `timeout 10`, exit 124. Nothing is written, so this is not
-   fail-open, and only root can create a FIFO in `/etc/pam.d`. Correction: open include targets
-   like `read_backup_bounded` does (`O_NONBLOCK|O_CLOEXEC`, `is_file()` on the descriptor), while
-   still following symlinks as libpam does.
+Scope: the only change since round 2 is commit `dfdcfb0 fix(packaging): never discard a differing
+pre-upgrade rpm master key`. Checked with `git log` (HEAD = `dfdcfb0`, parent `e869cea` is the round-2 head)
+and `git status` (only this report is modified). `git diff e869cea dfdcfb0` touches three files:
+`packaging/rpm/soos.spec` (`%posttrans`), `AI/VERIFICATION_MATRIX.md` (PK6, PMK4, PMX8) and
+`AI/walkthroughs/106_failable_pam_matrix_and_distro_deploy_ci.md` (one appended bullet). No Rust source or
+test changed, so the step-3 mechanical listing is unchanged from round 2.
+
+### Round-2 finding 1 (`packaging/rpm/soos.spec:146-166`) — RESOLVED
+- The copy is only acted on when it is `-f` and `! -L`. Anything else (symlink, directory, absent) is a no-op.
+- A copy whose size is not 32 bytes (`wc -c`) is left in place with a path-only warning. This covers
+  the ENOSPC partial copy.
+- If `master.key` is missing, the copy is restored (`mv -f`, `0600`, `root:root`).
+- If `cmp -s` shows it equals the current key, the copy is deleted.
+- Otherwise the copy is kept and a two-line warning names both paths. No key bytes are printed.
+- Tested in a scratch shell harness that runs the scriptlet body verbatim, under `/bin/sh`:
+  - missing key: restored, mode `600`, copy gone.
+  - equal key: copy removed.
+  - different key: both kept, warning printed.
+  - 5-byte and 0-byte copy: kept, "not a 32-byte key" warning.
+  - copy is a symlink: untouched.
+  - no copy: no-op.
+  - dangling symlink at `master.key`: `[ ! -e ]` is true, and `mv -f` renames over the link itself
+    (rename(2), no write-through), leaving a regular `0600` file.
+  - `cmp` removed from `PATH`: `command not found` (status 127) falls to the `else` branch, so the copy is
+    **kept** and the warning printed. Fail-safe.
+  - Every run's scriptlet exit status was 0.
+- Shell adversarial notes:
+  - `$(wc -c < "$UPGRADE_COPY")` on a vanished file: the redirect fails and yields `""`, so
+    `[ "" -ne 32 ]` errors with status 2. That is false, so control goes to the `elif` branches, where
+    `mv` fails harmlessly under `|| :` or `cmp` fails and the copy is kept. It is only reachable through a
+    race inside a root-only `0755` directory while RPM holds the transaction lock. Acceptable.
+  - GNU `wc -c` prints a bare integer, and `-ne` tolerates surrounding blanks.
+  - Macros expand to fixed `/var/lib/soos` paths without spaces. The variables are quoted throughout.
+  - RPM runs scriptlets with `/bin/sh` without `-e`. Every mutating command has `|| :`, and the
+    `if` compound ends on an `echo` or a guarded command, so the scriptlet returns 0. A `%posttrans`
+    failure cannot abort the transaction in any case.
+  - `%pre` makes a copy on every upgrade, including builds that never owned the key. On those upgrades the
+    key survives and `cmp -s` removes the copy. The copy is `0600 root` (`umask 077`, `cp -p`), so a
+    leftover never widens exposure.
+  - `cmp` comes from `diffutils`. The spec has no `Requires(posttrans): diffutils`. `diffutils` is in
+    normal Fedora and RHEL installs and in the `fedora` container image, but it is not guaranteed on
+    minimal/UBI-minimal images. Without it the outcome is safe (copy kept), but the warning wrongly says the
+    keys differ and it repeats on every upgrade. See finding R3-1.
+
+### Round-2 finding 2 (`AI/VERIFICATION_MATRIX.md`) — RESOLVED
+- PK6 now reads "`master.key` is never listed, the `%post` helper creates it `0600`". Its remaining
+  `%ghost` wording is only the history of the fix.
+- PMK4 now reads "`master.key` is never listed, not even `%ghost`".
+- PMX8 now says the RPM branch passes since the `%ghost` fix.
+- None of the three describes the `%ghost` design as current.
+
+### Checks
+- `cargo test --locked -p soos-invariants --all-features`: 114 passed, 0 failed.
+- Docker / `rpm -U` not run (out of scope; the `rpm -U` case stays tracked in #281).
+- The logic, panic-safety, secrets and English-only pillars were re-run on the delta.
+  - Warnings print paths only.
+  - No PAM or Rust code changed.
+  - The text is English.
+  - Result: PASS.
+
+### Round-3 findings
+- **R3-1 [SUGGESTION]** `packaging/rpm/soos.spec:159` (the `cmp -s` call; the dependency itself belongs in the preamble): add `Requires(posttrans): diffutils`. The other
+  option is to tell `cmp` status 2/127 apart and warn "could not compare". Today a missing `cmp` is
+  fail-safe, but the message is misleading. Non-blocking; can go into #281.
 
 ## 5. Final Verdict
 
-All round-1 and round-2 findings are resolved in code. Test integrity holds: the only changes to
-pre-existing tests are the user-approved ones. The distribution stacks still place `pam_soos.so`
-correctly. The two remaining findings are MINOR, need root-authored non-standard configuration,
-and can be fixed in a follow-up. Round 4 changes only the yanked `yoke-derive` lockfile entry
-(0.8.3 -> 0.8.4), and `cargo deny` passes.
+No CRITICAL or MAJOR finding remains. The round-1 MAJOR finding is resolved, and the test changes are limited
+to the user-approved set (a), (b) and (c). Round 3: round-2 MINOR findings 1 and 2 are resolved by `dfdcfb0`.
+Only one non-blocking SUGGESTION remains (R3-1, `diffutils` dependency).
 
 **VERDICT: APPROVED**
