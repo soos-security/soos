@@ -76,7 +76,11 @@ missing-toolchain hint.
 
 Green: `cargo test --locked -p soos-invariants --all-features` → 253 passed. A real run of
 `scripts/install_rustup.sh --default-toolchain 1.98.1` with scratch `CARGO_HOME` / `RUSTUP_HOME`
-verified the x86_64 digest against the live archive and installed `rustc 1.98.1`.
+verified the x86_64 digest against the live archive and installed `rustc 1.98.1`. A
+`docker build -f tests/docker/Dockerfile.ubuntu .` from a scratch export of the branch (context
+limited by the new `.dockerignore`) succeeded and the image reported `rustc 1.98.1` and
+`clippy 0.1.98`; the Fedora and Arch images use the same two lines and are exercised by the
+`distro-pam-matrix` CI job.
 
 ## 6. Remaining Work
 
