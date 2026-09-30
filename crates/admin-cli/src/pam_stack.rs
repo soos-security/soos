@@ -108,23 +108,37 @@ impl<'a> PamLine<'a> {
         })
     }
 
-    /// True for rules evaluated by `pam_authenticate`.
+    /// True for rules evaluated by `pam_authenticate`. The type keyword is
+    /// case-insensitive, as in libpam (pam.conf(5)).
     pub(crate) fn is_auth(&self) -> bool {
         match self {
             Self::AtInclude(_) => true,
-            Self::Rule { kind, .. } => *kind == "auth",
+            Self::Rule { kind, .. } => kind.eq_ignore_ascii_case("auth"),
         }
     }
 
-    /// Name of the delegated stack for `@include`, `include` and `substack`.
+    /// Name of the delegated stack for `@include`, `include` and `substack`
+    /// (control keyword compared case-insensitively; the target name is not).
     pub(crate) fn delegation(&self) -> Option<&'a str> {
         match self {
             Self::AtInclude(name) => Some(name),
             Self::Rule {
                 control, module, ..
-            } if *control == "include" || *control == "substack" => Some(module),
+            } if control.eq_ignore_ascii_case("include")
+                || control.eq_ignore_ascii_case("substack") =>
+            {
+                Some(module)
+            }
             Self::Rule { .. } => None,
         }
+    }
+
+    /// True when the control is a plain `required` or `requisite` keyword
+    /// (case-insensitive): the rule enforces its verdict on the whole stack.
+    pub(crate) fn is_enforcing(&self) -> bool {
+        matches!(self, Self::Rule { control, .. }
+            if control.eq_ignore_ascii_case("required")
+                || control.eq_ignore_ascii_case("requisite"))
     }
 
     /// Basename of the module (`/lib/security/pam_unix.so` -> `pam_unix.so`).
@@ -137,7 +151,8 @@ impl<'a> PamLine<'a> {
         }
     }
 
-    /// Largest numeric jump (`[success=2 ...]`) of the control, if any.
+    /// Largest numeric jump (`[success=2 ...]`) of the control, if any. Every
+    /// `key=value` pair is inspected whatever the case of its key.
     pub(crate) fn max_jump(&self) -> Option<usize> {
         let Self::Rule { control, .. } = self else {
             return None;
@@ -182,8 +197,8 @@ impl<'a> PamLine<'a> {
     }
 
     /// Gate rule to copy in front of `pam_soos.so`, normalized
-    /// (`auth  <control>  <module> <args>`), when the control is a plain
-    /// `required`/`requisite` keyword.
+    /// (`auth  <control>  <module> <args>`, keywords in lowercase), when the control
+    /// is a plain `required`/`requisite` keyword.
     fn as_guard(&self) -> Option<String> {
         let Self::Rule {
             control,
@@ -195,12 +210,13 @@ impl<'a> PamLine<'a> {
             return None;
         };
         let name = self.module_name()?;
-        if !GATE_MODULES.contains(&name) || !matches!(*control, "required" | "requisite") {
+        if !GATE_MODULES.contains(&name) || !self.is_enforcing() {
             return None;
         }
         if name == "pam_faillock.so" && !self.has_arg("preauth") {
             return None;
         }
+        let control = control.to_ascii_lowercase();
         let mut guard = format!("auth  {control}  {module}");
         for arg in args {
             guard.push(' ');

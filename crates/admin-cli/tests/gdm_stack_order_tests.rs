@@ -987,3 +987,134 @@ fn test_gdm_restore_refuses_an_oversized_backup() {
     );
     assert_eq!(fs::read(&backup).unwrap(), oversized, "backup kept");
 }
+
+// ----------------------------------------------------------------------------
+// Candid review round 2 (2026-09-30)
+// ----------------------------------------------------------------------------
+
+/// Finding 2 (a): PAM type and control keywords are case-insensitive (pam.conf(5)).
+/// A capitalized `Auth requisite pam_faillock.so preauth` in the delegated stack is a
+/// gate that must be copied in front of soos.
+#[test]
+fn test_gdm_enable_copies_a_capitalized_delegated_gate() {
+    let original = "#%PAM-1.0\n@include common-auth\n";
+    let f = fixture(
+        original,
+        &[(
+            "common-auth",
+            "Auth Requisite pam_faillock.so preauth\nAUTH [success=1 default=ignore] pam_unix.so nullok\nauth requisite pam_deny.so\nauth required pam_permit.so\n",
+        )],
+    );
+    let content = enable(&f);
+    let soos = line_index(&content, "pam_soos.so");
+    let gate = line_index(&content, "pam_faillock.so preauth");
+    assert!(
+        line_index(&content, GDM_BLOCK_BEGIN) < gate && gate < soos,
+        "the capitalized preauth gate is copied before soos:\n{content}"
+    );
+    assert!(soos < line_index(&content, "@include common-auth"));
+}
+
+/// Finding 2 (b): a capitalized unclassified rule inside the delegated stack is still
+/// an unclassified rule before the credential module: refuse.
+#[test]
+fn test_gdm_enable_refuses_a_capitalized_unclassified_delegated_rule() {
+    let original = "#%PAM-1.0\nauth requisite pam_nologin.so\n@include common-auth\n";
+    let f = fixture(
+        original,
+        &[(
+            "common-auth",
+            "Auth required pam_tally2.so deny=5\nauth [success=1 default=ignore] pam_unix.so nullok\nauth requisite pam_deny.so\n",
+        )],
+    );
+    assert_enable_refused(&f, original, "pam_tally2.so");
+}
+
+/// Finding 2 (c): a capitalized `Auth [success=N ...]` jump in the edited file is part
+/// of the jump check.
+#[test]
+fn test_gdm_enable_detects_a_capitalized_jump_before_the_insertion_point() {
+    let original = "\
+#%PAM-1.0
+Auth [success=1 default=ignore] pam_succeed_if.so user ingroup nopasswdlogin
+auth sufficient pam_unix.so nullok
+auth required pam_deny.so
+";
+    let f = fixture(original, &[]);
+    assert_enable_refused(&f, original, "jump");
+}
+
+/// Finding 2 (d): a capitalized `Include` delegates too; its unclassified rule refuses.
+#[test]
+fn test_gdm_enable_follows_a_capitalized_include_control() {
+    let original = "#%PAM-1.0\nauth Include common-auth\n";
+    let f = fixture(
+        original,
+        &[(
+            "common-auth",
+            "auth required pam_tally2.so deny=5\nauth sufficient pam_unix.so nullok\n",
+        )],
+    );
+    assert_enable_refused(&f, original, "pam_tally2.so");
+}
+
+/// Finding 3 (a): an `optional pam_nologin.so` earlier in the file does not enforce
+/// anything, so the delegated `requisite pam_nologin.so` gate is still copied.
+#[test]
+fn test_gdm_enable_copies_requisite_nologin_despite_an_earlier_optional_one() {
+    let original = "#%PAM-1.0\nauth optional pam_nologin.so\n@include common-auth\n";
+    let f = fixture(
+        original,
+        &[(
+            "common-auth",
+            "auth requisite pam_nologin.so\nauth [success=1 default=ignore] pam_unix.so nullok\nauth requisite pam_deny.so\nauth required pam_permit.so\n",
+        )],
+    );
+    let content = enable(&f);
+    let soos = line_index(&content, "pam_soos.so");
+    let gate = line_index(&content, "auth  requisite  pam_nologin.so");
+    assert!(
+        line_index(&content, GDM_BLOCK_BEGIN) < gate && gate < soos,
+        "the enforcing nologin gate is copied before soos:\n{content}"
+    );
+}
+
+/// Finding 3 (b): the same for `optional` versus `required pam_faillock.so preauth`.
+#[test]
+fn test_gdm_enable_copies_required_preauth_despite_an_earlier_optional_one() {
+    let original = "#%PAM-1.0\nauth optional pam_faillock.so preauth\n@include common-auth\n";
+    let f = fixture(
+        original,
+        &[(
+            "common-auth",
+            "auth required pam_faillock.so preauth\nauth [success=1 default=ignore] pam_unix.so nullok\nauth requisite pam_deny.so\nauth required pam_permit.so\n",
+        )],
+    );
+    let content = enable(&f);
+    let soos = line_index(&content, "pam_soos.so");
+    let gate = line_index(&content, "auth  required  pam_faillock.so preauth");
+    assert!(
+        line_index(&content, GDM_BLOCK_BEGIN) < gate && gate < soos,
+        "the enforcing preauth gate is copied before soos:\n{content}"
+    );
+}
+
+/// Finding 3 (c): an earlier plain `requisite` gate still counts as present, so it is
+/// not copied twice.
+#[test]
+fn test_gdm_enable_does_not_duplicate_an_earlier_enforcing_gate() {
+    let original = "#%PAM-1.0\nauth requisite pam_nologin.so\n@include common-auth\n";
+    let f = fixture(
+        original,
+        &[(
+            "common-auth",
+            "auth requisite pam_nologin.so\nauth [success=1 default=ignore] pam_unix.so nullok\nauth requisite pam_deny.so\n",
+        )],
+    );
+    let content = enable(&f);
+    assert_eq!(
+        content.matches("pam_nologin.so").count(),
+        1,
+        "an earlier enforcing gate is not duplicated:\n{content}"
+    );
+}

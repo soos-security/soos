@@ -290,10 +290,13 @@ fn plan_gdm_enable(content: &str, include_dir: &Path) -> Result<Option<EnablePla
         }
     }
 
+    // Only an earlier rule with a plain `required`/`requisite` control enforces the
+    // gate; an `optional` (or any other) copy earlier in the file does not count.
     let already_present: Vec<String> = lines
         .iter()
         .take(anchor_index)
         .filter_map(|raw| PamLine::parse(raw))
+        .filter(|rule| rule.is_auth() && rule.is_enforcing())
         .filter_map(|rule| normalized_rule(&rule))
         .collect();
     let gates = if anchor_rule.delegation().is_some() {
