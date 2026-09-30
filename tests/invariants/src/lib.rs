@@ -44,6 +44,10 @@ mod onboarding_packaging_contract;
 #[cfg(all(test, unix))]
 mod installer_templates_contract;
 
+/// Repository hygiene and documentation-drift contract (GitHub #238, #239, #240).
+#[cfg(all(test, unix))]
+mod maintainer_hygiene_contract;
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,

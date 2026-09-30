@@ -69,7 +69,7 @@ let locked_key = LockedBuffer::new(master_key_bytes);
 
 ### Automatic Zeroization on Deallocation
 All sensitive data structures implement `zeroize::Zeroize` and wipe their internal byte or float representations on drop:
-- `BiometricEmbedding`: wraps `Zeroizing<Vec<f32>>`, scrubbing 128D/512D float arrays.
+- `BiometricEmbedding`: wraps `Zeroizing<Vec<f32>>`, scrubbing the 512D ArcFace float arrays.
 - `Frame`: implements `Zeroize` and `Drop`, scrubbing raw camera capture pixels.
 - `PipelineOutput`: implements `Zeroize` and `Drop`, scrubbing intermediate 112x112 RGB crops.
 - `MasterKey`: implements `Zeroize` and `ZeroizeOnDrop`, scrubbing 256-bit encryption keys.

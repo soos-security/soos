@@ -9,7 +9,8 @@ ENV RUSTUP_HOME=/usr/local/rustup
 ENV CARGO_HOME=/usr/local/cargo
 ENV PATH="/usr/local/cargo/bin:${PATH}"
 
-# System dependencies for PAM compilation, pamtester, and python mock daemon
+# System dependencies for PAM compilation and the python mock daemon (the PAM host is
+# tests/docker/pam_test_runner.c, compiled in-container by test_suite.sh).
 # libssl-dev: headers for openssl-sys (ort download path) in full workspace builds.
 # systemd: runtime dependency declared by packaging/debian/control, required by
 # `dpkg -i` in tests/distro/debian_ubuntu_test.sh (not started as init).
@@ -19,7 +20,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libpam0g-dev \
         libclang-dev \
         libssl-dev \
-        pamtester \
         systemd \
         python3 \
         curl \

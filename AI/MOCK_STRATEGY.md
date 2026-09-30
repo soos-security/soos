@@ -15,9 +15,14 @@ When the `mock-camera` feature is enabled:
   - Can simulate device disconnections, frame corruption, or starvation.
 
 ## 3. Vision Test Fixtures
-To validate the AI inference pipeline without a live camera, static image fixtures are placed under `tests/fixtures/`:
-- Contains sample facial images (JPEG / serialized tensor arrays) of known and unknown subjects.
-- Unit and integration tests in the `vision` crate ingest these fixtures to validate:
-  - Face detection (NMS thresholds)
-  - 5-point landmark affine transformation (112x112 alignment)
-  - ArcFace (512D) embedding generation and cosine distance matching
+No image or tensor files are committed. The shared fixture module `tests/fixtures/mod.rs` (included by
+`#[path]` from the `vision`, `daemon` and `enrollment-cli` tests) generates everything in code:
+- `synthetic`: solid RGB24, YUYV and Grey frames built from `soos_camera_v4l::Frame`.
+- `embeddings`: small pre-computed unit vectors for two subjects, used for cosine matching logic.
+- `pad`: synthetic live, printed-photo and screen-replay frames for the PAD wiring tests.
+- `onnx`: a deterministic minimal `Identity` ONNX model so ORT session factories run in CI.
+
+Face detection (SCRFD), 112x112 alignment, MiniFASNetV2 PAD and ArcFace 512D embeddings are exercised
+through the mock backends above. Real-model evidence lives in
+`crates/inference-ort/tests/pad_real_model_tests.rs` and `embedding_real_model_tests.rs`, which skip
+cleanly when `/var/lib/soos/models` is absent.

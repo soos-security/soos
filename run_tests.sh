@@ -7,9 +7,10 @@
 #   2. Runs ephemeral container with workspace bind-mounted
 #   3. Compiles PAM module in release mode
 #   4. Deploys .so into container PAM directory
-#   5. Runs the PAM matrix T1–T12 (ABI loading, refusal, password fallback,
-#      release-build panic safety, pam-auth-update password-failed event,
-#      gdm.disable via PAM_SERVICE)
+#   5. Runs the PAM matrix T1–T15 through tests/docker/pam_test_runner.c (ABI
+#      loading, refusal, password fallback, release-build panic safety,
+#      pam-auth-update password-failed event, gdm.disable via PAM_SERVICE,
+#      Deny / truncated / malformed daemon responses)
 #   6. Automatically removes ephemeral container
 #
 # Usage:
@@ -41,8 +42,6 @@ fi
 # ---------------------------------------------------------------------------
 readonly IMAGE_NAME="soos-sandbox"
 readonly CONTAINER_NAME="soos-test-run"
-readonly PAM_MODULE_NAME="libpam_soos.so"
-readonly PAM_MODULES_DIR="/lib/x86_64-linux-gnu/security"
 
 # ---------------------------------------------------------------------------
 # Terminal Colors

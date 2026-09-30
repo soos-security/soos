@@ -159,6 +159,21 @@ BRANCH_TO_ISSUE = {
     "fix/gui-camera-auto-resolution-and-packaging": 50,
 }
 
+# Branch prefixes allowed by AGENTS.md / Docs/DEVELOPMENT_WORKFLOW.md (GitHub #239).
+ALLOWED_BRANCH_PREFIXES = ("feat/", "fix/", "test/", "chore/")
+
+# Merged historical branches registered before the prefix rule was enforced. The set is
+# frozen: --check rejects any new BRANCH_TO_ISSUE entry with another prefix.
+LEGACY_BRANCHES = frozenset(
+    {
+        "refactor/remove-ort-landmark-detector",
+        "refactor/vision-pipeline-3-model",
+        "refactor/model-ids-nextgen",
+        "refactor/mock-backends-nextgen",
+        "docs/nextgen-model-documentation",
+    }
+)
+
 HEADING_RE = re.compile(r"^### Issue #(\d+)\b", re.MULTILINE)
 SECTION_END_RE = re.compile(r"^#{1,3} ", re.MULTILINE)
 SUBISSUE_RE = re.compile(r"^\s*- (?:\[([ x])\] )?\*\*#(\d+)\.(\d+)\*\*", re.MULTILINE)
@@ -256,6 +271,12 @@ def check_mappings(content, backlog_to_github=None, branch_to_issue=None):
     for branch, backlog_id in sorted(branch_to_issue.items()):
         if backlog_id not in sections:
             errors.append(f"branch '{branch}' maps to unknown backlog issue #{backlog_id}")
+        if not branch.startswith(ALLOWED_BRANCH_PREFIXES) and branch not in LEGACY_BRANCHES:
+            allowed = ", ".join(ALLOWED_BRANCH_PREFIXES)
+            errors.append(
+                f"branch '{branch}' uses a non-approved prefix (allowed: {allowed}; "
+                "only the frozen LEGACY_BRANCHES are exempt)"
+            )
 
     return errors
 

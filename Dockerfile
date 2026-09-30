@@ -4,7 +4,8 @@
 # This container provides a complete Ubuntu environment with:
 #   - Rust toolchain (rustup, stable)
 #   - Compilation dependencies for Linux-PAM modules
-#   - pamtester utility to simulate PAM authentication calls
+#   - python3 for the mock daemon; the PAM host is tests/docker/pam_test_runner.c,
+#     compiled in-container by tests/docker/test_suite.sh
 #   - Dummy test user (testuser) for authentication testing
 #
 # Usage:
@@ -35,7 +36,6 @@ ENV PATH="/usr/local/cargo/bin:${PATH}"
 # pkg-config       : library search path resolution (.pc files)
 # libpam0g-dev     : PAM headers (pam_appl.h, pam_modules.h) — required for pam bindings
 # libclang-dev     : required by bindgen (used by pam-bindings to generate FFI)
-# pamtester        : CLI tool to test PAM modules without active user session
 # curl             : rustup installer download
 # git              : potentially required by Cargo git dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -43,7 +43,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         pkg-config \
         libpam0g-dev \
         libclang-dev \
-        pamtester \
         python3 \
         curl \
         ca-certificates \

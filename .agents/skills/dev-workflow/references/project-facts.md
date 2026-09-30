@@ -107,7 +107,7 @@ cargo deny --locked check                      # cargo-deny >= 0.20
 ./scripts/candid_review.sh                     # Layer 1 deterministic invariants
 ./scripts/candid_subagent.sh --prepare         # Layer 2: diff + fingerprint for the reviewer
 ./scripts/candid_subagent.sh                   # Layer 2 gate (fresh, fingerprint-bound report)
-./run_tests.sh                                 # Dockerized PAM matrix T1–T12 (ubuntu)
+./run_tests.sh                                 # Dockerized PAM matrix T1–T15 (ubuntu)
 ```
 
 Omitting `--all-features` locally was the root cause of several CI-only failures [65–75].
@@ -130,6 +130,10 @@ packaging, install or CI build commands.
   Put historical names ("renamed from", "never existed") inside an italic `*( ... )*` annotation;
   a row without evidence is `⬜ Pending (<reason>)`, a replaced row is `⏹ Superseded (<rows>)`.
 - Branch prefixes allowed by `AGENTS.md`: `feat/`, `fix/`, `test/`, `chore/` (not `refactor/` or `docs/`).
+  `python3 scripts/sync_issue.py --check` rejects any other prefix in `BRANCH_TO_ISSUE` except the frozen,
+  merged `LEGACY_BRANCHES` `refactor/remove-ort-landmark-detector`, `refactor/vision-pipeline-3-model`,
+  `refactor/model-ids-nextgen`, `refactor/mock-backends-nextgen` and `docs/nextgen-model-documentation` [128].
+- Root-level `*.py` and `temp_*.md` files are ignored by `.gitignore`: durable tooling lives under `scripts/` [128].
 - Every topic branch that implements a backlog issue must be registered in `BRANCH_TO_ISSUE` in
   `scripts/sync_issue.py` (tooling-only `chore/` branches and GitHub-only review-finding branches
   without a backlog issue are not). `python3 scripts/sync_issue.py --check` must pass (enforced by
