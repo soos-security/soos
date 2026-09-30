@@ -178,7 +178,7 @@ Constants live in `crates/daemon/src/preview.rs`: `MAX_PREVIEW_ALLOWED_UIDS = 64
 |---|---|---|
 | 6 | Kernel `SO_PEERCRED` UID versus `uid_hint` (`verify_peer_credentials`) | `ProtocolError` / `UidMismatch` |
 | 6c-1 | `authorize_preview`: `peer_uid == 0`, or `enabled` and `peer_uid ∈ allowed_uids` and `peer_uid == uid_hint` | `ProtocolError` / `UidMismatch` |
-| 6c-2 | Unprivileged peer owns an active logind session (`SessionValidator`, same as `Auth`) | `ProtocolError` / `UidMismatch` |
+| 6c-2 | Unprivileged peer owns an active logind session not flagged `REMOTE=1` (`SessionValidator`) | `ProtocolError` / `UidMismatch` |
 | 6c-3 | Per-peer-UID rate limit (`soos_policy::RateLimiter`, `check_and_record`) | `ProtocolError` / `RateLimited` |
 | 6c-4 | Monotonic clock available | `Unavailable` / `InternalError` |
 
@@ -191,3 +191,15 @@ Only after these checks does the daemon call `camera.notify_activity()`, wait fo
 - `IpcCameraManager::probe_preview` performs one round-trip at GUI start-up. On refusal the GUI does **not** fall back to direct V4L2 access (GitHub #150): the daemon owns the camera, so the GUI shows an actionable "Camera unavailable" notice (`soos_gui::camera_mode::CameraBlockReason`) instead of fighting the daemon for the device with `EBUSY`.
 - Direct V4L2 access is selected only when the daemon is provably not running: `connect(2)` on the socket fails with `ENOENT`/`ECONNREFUSED` **and** `systemctl is-active soos-daemon.service` is false. `EACCES`/`EPERM` (user not in the `soos` group, `/run/soos` is `0750 root:soos`) is reported as "add the user to the `soos` group, then log out and back in".
 
+---
+
+## 10. Local Session Binding for `RequestKind::Auth` (GitHub #160)
+
+After the `SO_PEERCRED` check (Step 6) the dispatcher runs `LocalSessionPolicy::authorize_auth` (Step 6b, `crates/daemon/src/session_policy.rs`) on every facial `Auth` request. The kernel peer PID captured at `accept` is passed through; it is never taken from the payload.
+
+| Peer | Requirement | Typical caller |
+|---|---|---|
+| `peer_uid == 0` | The peer PID maps (`/proc/<pid>/cgroup`, `session-<id>.scope`) to a logind session whose record in `/run/systemd/sessions/<id>` has `UID == uid_hint`, `ACTIVE=1` or `STATE=active`, `REMOTE=0`, a non-empty `SEAT=` and `CLASS=user` | `sudo` in a local terminal, polkit helper, lock-screen worker in the user's session |
+| `peer_uid == uid_hint` (non-root) | The target owns an active session not flagged `REMOTE=1` | screen lockers running PAM as the user |
+
+Refused (`ProtocolError` / `UidMismatch`, PAM falls back to the password): `sudo` or `su` from an SSH session, `su <victim>` from another user's local session, `sshd` logins (sshd is in no session), a remote-only user, a missing or non-positive peer PID, a session that vanished, an unreadable or oversized logind/procfs state. The daemon logs a stable reason code (`SessionDenial::as_str`, e.g. `caller_session_remote`) with the peer and target UIDs only; session contents such as `REMOTE_HOST` are never logged. Session IDs are validated as ASCII alphanumerics of at most 64 bytes before they are joined to the sessions directory, record files are read only if they are regular files (no symlink following) and are bounded to 4 KiB, cgroup files to 16 KiB, and the directory scan to 1024 entries (larger fails closed).
