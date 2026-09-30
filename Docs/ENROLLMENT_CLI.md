@@ -38,6 +38,7 @@ sudo soos-enroll enroll --username alice --yes
 - `-i, --uid <UID>`: Target Linux User ID. Without `--uid` and `--username`, the target is the invoking user: the real UID when it is not root, otherwise `SUDO_UID` (then `PKEXEC_UID`) when it names a non-root user. Root is never an implicit target: with no such variable the command fails before any capture and asks for `--username`/`--uid`; `--uid 0` (or `--username root`) enrolls root explicitly. A malformed `SUDO_UID`/`PKEXEC_UID` fails closed. The resolved target UID is printed before capture (GitHub #184 / STO-11).
 - `-u, --username <NAME>`: Target username (resolved via system user database).
 - `--frames <N>`: Number of candidate frames to capture and evaluate (default: 5, bounded 1–30).
+  Each candidate after the first is a distinct capture: the CLI waits up to `ENROLL_FRESH_FRAME_TIMEOUT_MS` = 500 ms for a frame whose `sequence` is greater than the previous candidate's and fails with a starved-camera error otherwise (nothing stored). A frame rejected by presentation attack detection is an invalid candidate, shown as `PAD-rejected frames` in the confirmation summary, and does not abort the enrollment; if no candidate is valid and at least one was PAD-rejected, the PAD error is reported (GitHub #228 / STO-05).
 - `-y, --yes`: Automatically confirm enrollment without interactive confirmation prompt.
 - `--model-id <ID>`: Override of the embedding model identifier stored in template metadata. Default: the loaded embedding extractor `MODEL_ID_EMBEDDING` = `arcface_w600k_mbf` (GitHub #182 / STO-09; the former `mobilefacenet` default is retired per ADR 2026-09-20).
 - `--model-version <VER>`: Override of the model version stored in template metadata. Default: `EMBEDDING_MODEL_VERSION` = `2.0.0`, the attested `models/manifest.toml` version (pinned by a test).
@@ -75,6 +76,8 @@ sudo soos-enroll list
 # Machine-readable JSON output
 sudo soos-enroll list --format json
 ```
+
+`list` reads each template through `BiometricStore::get_metadata`: the file is authenticated and decrypted, but the embedding vector is never materialised, and a template file larger than `MAX_TEMPLATE_FILE_BYTES` (64 KiB) is refused as corrupt before it is read (GitHub #235 / STO-19).
 
 ### `soos-enroll import`
 Imports an existing embedding (JSON array of 512 finite floats, or a CBOR `BiometricTemplate`) into the encrypted store. This is the command the GUI runs through `pkexec` (GitHub #156, review findings CAM-08 / STO-12):

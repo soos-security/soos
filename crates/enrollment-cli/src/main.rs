@@ -55,6 +55,7 @@ fn run() -> Result<(), EnrollmentCliError> {
                 println!("Target UID:           {}", summary.uid);
                 println!("Frames evaluated:     {}", summary.frames_evaluated);
                 println!("Valid face frames:    {}", summary.valid_candidates);
+                println!("PAD-rejected frames:  {}", summary.pad_rejections);
                 println!("Selected score:       {:.2}", summary.best_score);
                 println!("Embedding dimension:  {}", summary.embedding_dim);
                 println!("Model ID:             {}", summary.model_id);

@@ -47,6 +47,10 @@ mod pam_feedback_contract;
 #[cfg(test)]
 mod protocol_codec_contract;
 
+/// Metadata-only template listing in `soos-enroll list` and the GUI (GitHub #235, EFL).
+#[cfg(test)]
+mod enroll_list_metadata_contract;
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,

@@ -12,17 +12,27 @@
 
 use crate::crypto::{decrypt_payload, encrypt_payload, MasterKey};
 use crate::error::BiometricStoreError;
-use crate::template::BiometricTemplate;
+use crate::template::{BiometricTemplate, TemplateMetadata};
 use std::fs::{DirBuilder, File, Metadata, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use zeroize::Zeroizing;
 
 /// Default system storage path for biometric template files.
 pub const DEFAULT_BIOMETRICS_DIR: &str = "/var/lib/soos/biometrics";
 
 /// File extension for encrypted CBOR biometric templates.
 pub const TEMPLATE_EXTENSION: &str = ".cbor.enc";
+
+/// Maximum size in bytes of an encrypted template file (GitHub #235, STO-19).
+///
+/// A 512-dimension template is about 4.7 KiB of CBOR plus the 36-byte envelope; 64 KiB
+/// leaves room for larger embeddings (up to about 7000 dimensions) while bounding the memory a
+/// corrupted or planted file can make a root process allocate. Larger files are refused with
+/// [`BiometricStoreError::CorruptFile`] before any read, and [`BiometricStore::enroll`] refuses
+/// to write a template that could never be read back.
+pub const MAX_TEMPLATE_FILE_BYTES: u64 = 64 * 1024;
 
 /// Mode of a store directory created by [`BiometricStore::new`] (`drwx------`).
 pub const STORE_DIR_MODE: u32 = 0o700;
@@ -119,6 +129,13 @@ impl BiometricStore {
     pub fn enroll(&self, template: &BiometricTemplate) -> Result<(), BiometricStoreError> {
         let cbor_bytes = template.to_cbor()?;
         let encrypted_bytes = encrypt_payload(&self.key, &cbor_bytes)?;
+        let encrypted_len = u64::try_from(encrypted_bytes.len()).unwrap_or(u64::MAX);
+        if encrypted_len > MAX_TEMPLATE_FILE_BYTES {
+            return Err(BiometricStoreError::InvalidMetadata(format!(
+                "encrypted template of {encrypted_len} bytes exceeds the \
+                 {MAX_TEMPLATE_FILE_BYTES}-byte template file limit"
+            )));
+        }
 
         let dest_path = self.template_path(template.uid)?;
         let previous = open_existing_template_for_overwrite(&dest_path)?;
@@ -162,31 +179,63 @@ impl BiometricStore {
 
     /// Reads, decrypts, and deserializes a user's biometric template from disk.
     ///
-    /// Returns `Ok(None)` if no template exists for the given user ID.
+    /// Returns `Ok(None)` if no template exists for the given user ID. A file larger than
+    /// [`MAX_TEMPLATE_FILE_BYTES`] is refused with [`BiometricStoreError::CorruptFile`] before
+    /// it is read.
     pub fn get(&self, uid: u32) -> Result<Option<BiometricTemplate>, BiometricStoreError> {
+        let Some(decrypted_bytes) = self.read_decrypted(uid)? else {
+            return Ok(None);
+        };
+        let template = BiometricTemplate::from_cbor(&decrypted_bytes)?;
+        check_uid(uid, template.uid)?;
+        Ok(Some(template))
+    }
+
+    /// Reads a user's template metadata without materialising the embedding vector
+    /// (GitHub #235, STO-19).
+    ///
+    /// The file is size-bounded and authenticated exactly like [`BiometricStore::get`]; the
+    /// decrypted CBOR (held in a zeroizing buffer) is validated by
+    /// [`TemplateMetadata::from_cbor`], which checks the embedding array shape and values
+    /// without allocating it. Returns `Ok(None)` if no template exists.
+    pub fn get_metadata(&self, uid: u32) -> Result<Option<TemplateMetadata>, BiometricStoreError> {
+        let Some(decrypted_bytes) = self.read_decrypted(uid)? else {
+            return Ok(None);
+        };
+        let metadata = TemplateMetadata::from_cbor(&decrypted_bytes)?;
+        check_uid(uid, metadata.uid)?;
+        Ok(Some(metadata))
+    }
+
+    /// Reads (at most [`MAX_TEMPLATE_FILE_BYTES`]) and decrypts a user's template file.
+    fn read_decrypted(&self, uid: u32) -> Result<Option<Zeroizing<Vec<u8>>>, BiometricStoreError> {
         let path = self.template_path(uid)?;
         if !path.exists() {
             return Ok(None);
         }
 
-        let mut file = OpenOptions::new()
+        let file = OpenOptions::new()
             .read(true)
             .custom_flags(libc::O_NOFOLLOW)
             .open(&path)?;
-        let mut encrypted_bytes = Vec::new();
-        file.read_to_end(&mut encrypted_bytes)?;
-
-        let decrypted_bytes = decrypt_payload(&self.key, &encrypted_bytes)?;
-        let template = BiometricTemplate::from_cbor(&decrypted_bytes)?;
-
-        if template.uid != uid {
+        let len = file.metadata()?.len();
+        if len > MAX_TEMPLATE_FILE_BYTES {
             return Err(BiometricStoreError::CorruptFile(format!(
-                "Mismatched UID in template: expected {uid}, found {}",
-                template.uid
+                "template file of {len} bytes exceeds {MAX_TEMPLATE_FILE_BYTES} bytes"
+            )));
+        }
+        // The file may grow after the length check: read at most one byte past the bound.
+        let capacity = usize::try_from(len).unwrap_or(0);
+        let mut encrypted_bytes = Vec::with_capacity(capacity);
+        file.take(MAX_TEMPLATE_FILE_BYTES.saturating_add(1))
+            .read_to_end(&mut encrypted_bytes)?;
+        if u64::try_from(encrypted_bytes.len()).unwrap_or(u64::MAX) > MAX_TEMPLATE_FILE_BYTES {
+            return Err(BiometricStoreError::CorruptFile(format!(
+                "template file exceeds {MAX_TEMPLATE_FILE_BYTES} bytes"
             )));
         }
 
-        Ok(Some(template))
+        decrypt_payload(&self.key, &encrypted_bytes).map(Some)
     }
 
     /// Deletes a user's enrolled biometric template file if it exists.
@@ -230,6 +279,16 @@ impl BiometricStore {
         uids.sort_unstable();
         Ok(uids)
     }
+}
+
+/// Refuses a template whose embedded UID differs from the UID of its file name.
+fn check_uid(expected: u32, found: u32) -> Result<(), BiometricStoreError> {
+    if found != expected {
+        return Err(BiometricStoreError::CorruptFile(format!(
+            "Mismatched UID in template: expected {expected}, found {found}"
+        )));
+    }
+    Ok(())
 }
 
 /// Security-relevant facts about an existing store directory, decoupled from

@@ -264,7 +264,7 @@ impl SoosApp {
         let mut summaries = Vec::with_capacity(uids.len());
 
         for uid in uids {
-            if let Ok(Some(template)) = store.get(uid) {
+            if let Ok(Some(template)) = store.get_metadata(uid) {
                 let username = match nix::unistd::User::from_uid(nix::unistd::Uid::from_raw(uid)) {
                     Ok(Some(u)) => u.name,
                     _ => uid.to_string(),
