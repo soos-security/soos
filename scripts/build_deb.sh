@@ -96,10 +96,20 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
+# Debian/Ubuntu PAM loads modules from the multiarch directory only; never let
+# install.sh guess from the build host (it would pick /usr/lib64/security).
+DEB_HOST_MULTIARCH="$(dpkg-architecture -qDEB_HOST_MULTIARCH 2>/dev/null || gcc -print-multiarch 2>/dev/null || true)"
+if [[ -z "${DEB_HOST_MULTIARCH}" ]]; then
+    echo "[ERROR] Cannot determine the Debian multiarch triplet (install dpkg-dev)." >&2
+    exit 1
+fi
+DEB_PAM_DIR="/usr/lib/${DEB_HOST_MULTIARCH}/security"
+
 echo "[2/4] Staging package filesystem..."
 bash "${WORKSPACE_ROOT}/scripts/install.sh" \
     --destdir "${STAGE_DIR}" \
     --prefix "/usr" \
+    --pam-dir "${DEB_PAM_DIR}" \
     --skip-models \
     --skip-systemd
 

@@ -1100,3 +1100,53 @@ fn test_packaging_and_docs_declare_complete_dependencies() {
         );
     }
 }
+
+/// Returns the `install.sh` invocation (backslash-continued lines) found in `source`.
+fn install_sh_invocation(source: &str) -> Option<String> {
+    let mut lines = source.lines();
+    while let Some(line) = lines.next() {
+        if line.contains("scripts/install.sh") && line.trim_end().ends_with('\\') {
+            let mut block = String::from(line);
+            for next in lines.by_ref() {
+                block.push('\n');
+                block.push_str(next);
+                if !next.trim_end().ends_with('\\') {
+                    break;
+                }
+            }
+            return Some(block);
+        }
+    }
+    None
+}
+
+/// Distro validation (walkthrough 92) found packages staging `pam_soos.so` under
+/// `/usr/lib64/security`: `install.sh --destdir` probes the empty stage, then falls back to the
+/// build host's `/usr/lib64`. Debian/Ubuntu PAM never loads that directory and `pacman -U`
+/// refuses it (`/usr/lib64` belongs to `filesystem`). Every packaging path must therefore pass
+/// an explicit, distribution-correct `--pam-dir`.
+#[test]
+fn test_packaging_passes_explicit_distro_pam_dir() {
+    let root = workspace_root();
+    for (path, derivation) in [
+        ("scripts/build_deb.sh", "DEB_HOST_MULTIARCH"),
+        ("packaging/debian/rules", "DEB_HOST_MULTIARCH"),
+        ("scripts/build_arch.sh", "/usr/lib/security"),
+    ] {
+        let source = fs::read_to_string(root.join(path)).expect("read packaging script");
+        let invocation = install_sh_invocation(&source)
+            .unwrap_or_else(|| panic!("{path} must stage the package through scripts/install.sh"));
+        assert!(
+            invocation.contains("--pam-dir"),
+            "{path} must pass an explicit --pam-dir to install.sh:\n{invocation}"
+        );
+        assert!(
+            !invocation.contains("lib64"),
+            "{path} must never stage pam_soos.so under lib64:\n{invocation}"
+        );
+        assert!(
+            source.contains(derivation),
+            "{path} must derive the PAM directory from {derivation}"
+        );
+    }
+}
