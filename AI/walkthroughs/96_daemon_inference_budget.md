@@ -121,3 +121,9 @@ behavior of #159; the tests were not modified.
   here and should be settled by an ADR on the packaged `timeout_ms`.
 - The per-inference estimate is shared by all requests of one dispatcher; a per-sensor estimate
   could be considered if IR and RGB pipelines diverge in latency.
+- **First-inference warm-up (candid review suggestion 4, follow-up)**: the admission gate uses
+  `DEFAULT_INFERENCE_ESTIMATE_MS = 80` until the first measurement. ORT's first `Session::run`
+  (graph optimization, allocator warm-up) is often several times slower, so the first `Auth` after
+  daemon start can still overrun the PAM deadline. This fails closed (`PAM_IGNORE`, password
+  prompt). Proposed follow-up: run one warm-up inference on a synthetic frame during pipeline
+  initialization, and seed the estimator from its measured latency.

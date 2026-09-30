@@ -116,5 +116,13 @@ attempts leave the 9th root connection served) instead of adding a production ho
 - `cargo fmt --all -- --check`, `cargo clippy --locked --workspace --all-targets --all-features --
   -D warnings`, `cargo test --locked --workspace --all-targets --all-features --no-fail-fast`, and
   `./scripts/candid_review.sh` were run; see the branch report for results.
-- Docs: `Docs/IPC_PROTOCOL.md` §10, `AI/DECISIONS.md` (two entries), `AI/VERIFICATION_MATRIX.md`
+- Docs: `Docs/IPC_PROTOCOL.md` §11, `AI/DECISIONS.md` (two entries), `AI/VERIFICATION_MATRIX.md`
   component `daemon-peer-limits` (DPL1–DPL6).
+
+## 8. Follow-ups
+
+- **Evidence-store global cap (candid review suggestion 5, #175 / DMN-03)**: the review also
+  recommended a global daily cap on intrusion snapshots and pruning of the `daily_counts` map in
+  `crates/evidence-store`. Both are outside this diff. The new trust rule (only root peers may
+  report for another UID) and the per-peer event quota remove the unprivileged exploitation path,
+  so they are tracked as a follow-up issue rather than implemented here.

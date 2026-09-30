@@ -182,7 +182,7 @@ cleanup_fault_injection() {
     rm -f /etc/pam.d/test-soos-fault-panic /etc/pam.d/test-soos-fault-overflow
 }
 
-# T11 artifacts: GDM-named PAM service and the gdm.disable flag.
+# T12 artifacts: GDM-named PAM service and the gdm.disable flag.
 T12_SERVICE="gdm-password"
 cleanup_gdm_disable() {
     rm -f /etc/soos/gdm.disable "/etc/pam.d/${T12_SERVICE}"
