@@ -191,3 +191,32 @@ Only after these checks does the daemon call `camera.notify_activity()`, wait fo
 - `IpcCameraManager::probe_preview` performs one round-trip at GUI start-up. On refusal the GUI does **not** fall back to direct V4L2 access (GitHub #150): the daemon owns the camera, so the GUI shows an actionable "Camera unavailable" notice (`soos_gui::camera_mode::CameraBlockReason`) instead of fighting the daemon for the device with `EBUSY`.
 - Direct V4L2 access is selected only when the daemon is provably not running: `connect(2)` on the socket fails with `ENOENT`/`ECONNREFUSED` **and** `systemctl is-active soos-daemon.service` is false. `EACCES`/`EPERM` (user not in the `soos` group, `/run/soos` is `0750 root:soos`) is reported as "add the user to the `soos` group, then log out and back in".
 
+
+## 10. Per-Peer Connection Limits and Event Quota (GitHub #157, #175)
+
+Since GitHub #157 (review finding DMN-04) connection admission is keyed on the kernel `SO_PEERCRED` UID instead of a single global semaphore, so one `soos`-group account can no longer hold every permit and deny face login to everyone. The PAM module runs inside root processes (`gdm-session-worker`, `sudo`, `su`, `login`, `polkit-agent-helper-1`), which is why root peers get a reserved share of the capacity.
+
+### Daemon configuration (`/etc/soos/daemon.toml`)
+
+```toml
+[peer_limits]
+max_connections_per_uid = 2          # concurrent connections of one unprivileged UID (root exempt)
+reserved_root_connections = 2        # permits of [dispatcher] max_concurrent_connections usable only by root
+max_requests_per_connection = 1024   # requests served on one connection before it is closed
+max_connection_lifetime_ms = 30000   # a connection is not read again after this age
+max_events_per_window = 5            # PasswordFailed events per peer UID (root included); 0 drops all
+event_window_ms = 10000              # sliding window of the event quota
+```
+
+Constants live in `crates/daemon/src/limits.rs` (`DEFAULT_*`, `EVENT_RATE_MAX_TRACKED_UIDS = 256`). `PeerLimitsConfig::validate` rejects at startup (`DaemonError::Config`) a zero capacity, per-UID cap, request cap, lifetime or event window, and a `reserved_root_connections` that is not strictly below `[dispatcher] max_concurrent_connections` (e.g. `max_concurrent_connections = 2` now requires `reserved_root_connections <= 1`). A dispatcher built without `with_peer_limits` uses `PeerLimitsConfig::default()`; the library limiter additionally clamps the reservation so at least one unprivileged permit always remains.
+
+### Admission and connection lifecycle (`ConnectionDispatcher::handle_connection`)
+
+1. `SO_PEERCRED` is read once, before any byte of the stream; failure closes the connection.
+2. `PeerConnectionLimiter::try_acquire(peer_uid)` refuses the peer with `GlobalCapacity` (every permit in use), `ReservedForPrivileged` (unprivileged peer and only root-reserved permits remain) or `PerUidCap` (the unprivileged UID already holds `max_connections_per_uid`). The refusal is logged with `peer_uid` and the reason, and the stream is closed immediately without reading or answering: the PAM client sees EOF and returns `PAM_IGNORE` (password fallback), and nothing ever waits on a permit. The limiter table holds only UIDs with a connection in use, so it is bounded by the capacity.
+3. An admitted connection serves requests until the client closes it, it stays idle past `connection_timeout`, `max_requests_per_connection` requests were served, or `max_connection_lifetime` has elapsed (checked before each read, so the worst-case lifetime is the cap plus one request/response cycle).
+4. An `Auth` request is one-shot: the daemon closes the connection right after writing its `Response` (the PAM client already drops it). `Status`, `PreviewFrame` and events may share one connection within the caps; `soos-gui` reconnects transparently (200 ms) when the daemon closes its preview connection.
+
+### `PasswordFailed` event quota
+
+Every `EventKind::PasswordFailed` event is first counted against a per-peer-UID sliding window (`soos_policy::RateLimiter`, root included, 256 tracked UIDs); an event beyond the quota, a full limiter table or an unavailable monotonic clock drops the event with a `warn` naming `peer_uid`, and no camera snapshot is taken. Events carry no response, so nothing changes on the wire. The authorization rule for the event target UID (which peer may report a failure for which UID) is recorded as a proposed ADR in `AI/DECISIONS.md` (GitHub #175) and is not enforced yet.

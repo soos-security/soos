@@ -85,7 +85,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let dispatcher = Arc::new(
         ConnectionDispatcher::with_pipeline(config.dispatcher, health.clone(), components)
-            .with_preview_config(config.preview),
+            .with_preview_config(config.preview)
+            .with_peer_limits(config.peer_limits),
     );
 
     let (listener, socket_guard) = bind_socket(&config.socket).await?;
