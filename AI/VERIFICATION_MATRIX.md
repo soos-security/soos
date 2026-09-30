@@ -909,3 +909,15 @@ Complements PA3, PA12 and PFT1: those rows are proven under `[profile.test]` (al
 | CDJ7 | A file `import` onto an enrolled user fails with `AlreadyEnrolled` and keeps the template unless `--yes`; with `--yes`, and on the stdin channel, the replacement is reported | Service and CLI parse tests | ✅ Verified (`cli_hygiene_tests::test_import_onto_enrolled_uid_without_yes_is_refused`, `cli_hygiene_tests::test_import_onto_enrolled_uid_with_yes_replaces_and_reports_it`, `cli_hygiene_tests::test_import_yes_flag_parses`, `cli_hygiene_tests::test_stdin_import_reports_replacement`) |
 | CDJ8 | The `enroll` confirmation summary announces that an existing template will be replaced | Service test | ✅ Verified (`cli_hygiene_tests::test_enroll_summary_announces_replacement_of_existing_template`) |
 | CDJ9 | The GUI stdin import channel also requires explicit overwrite consent | Needs `--yes` in `import_helper_args`, whose exact vector is fixed by `test_import_helper_args_use_stdin` | ⬜ Pending (test change proposal, walkthrough 126) |
+
+---
+
+## Component: `gdm-enable-storage-followups` (Candid review round 3 follow-ups — GitHub #278)
+
+| # | Criterion | Test Method | Status |
+|---|---|---|---|
+| SFU1 | `soos-admin gdm enable` never drops a delegated gate as a duplicate when any `[...=N]` jump of the edited file precedes the anchor (the jump may skip the earlier copy, e.g. `pam_succeed_if ... ingroup vip` over `requisite pam_nologin.so`); without a jump the earlier enforcing copy still de-duplicates (GSO rows) | Integration test (`gdm_followup_tests::test_gdm_enable_keeps_a_duplicate_gate_when_a_jump_can_skip_the_earlier_copy`; regression `gdm_stack_order_tests::test_gdm_enable_does_not_duplicate_an_earlier_enforcing_gate`) | ✅ Verified |
+| SFU2 | Every PAM file read by `gdm enable` (edited file and include targets) is opened with `O_NONBLOCK \| O_CLOEXEC` and type-checked on the descriptor: a FIFO/device/socket include target is refused at once with an error naming it, nothing written, no backup | Integration test with a real FIFO and a 10 s deadline (`gdm_followup_tests::test_gdm_enable_refuses_a_fifo_include_target_without_blocking`) | ✅ Verified |
+| SFU3 | A symlinked regular include target (authselect `system-auth` layout) is still followed and its gates copied | Integration test (`gdm_followup_tests::test_gdm_enable_still_follows_a_symlinked_regular_include_target`) | ✅ Verified |
+| SFU4 | Legacy `EvidenceStore::store_snapshot` suffix `.webp.enc` renamed to a non-misleading suffix | Blocked: the pre-existing contract `permissions_tests::test_evidence_filename_format` pins `.webp.enc`; a migration proposal awaits user approval (walkthrough 127 §4) | ⏳ Pending |
+| SFU5 | A licence-compatible lighter embedding model is evaluated and `match_threshold` / BGR order / normalization recalibrated for the shipped ArcFace ResNet34 | Requires real model files and a labelled face dataset (hardware/data dependent); tracked as a follow-up | ⏳ Pending |
