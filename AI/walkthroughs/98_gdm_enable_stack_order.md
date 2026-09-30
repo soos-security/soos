@@ -225,3 +225,15 @@ input to `import` is already bounded to `MAX_IMPORT_INPUT_BYTES` (64 KiB) before
 Gate for the rework: `cargo fmt --all -- --check`, `cargo clippy --locked --workspace
 --all-targets --all-features -- -D warnings`, `cargo test --locked --workspace --all-targets
 --all-features --no-fail-fast` and `./scripts/candid_review.sh` all pass.
+
+## 12. Rework — Candid Review Round 2
+
+| Finding | Change | Tests (red → green) |
+|---|---|---|
+| 2 (MINOR) keyword case | `PamLine::is_auth` and `PamLine::delegation` compare the type and `include`/`substack` with `eq_ignore_ascii_case`; the new `PamLine::is_enforcing` does the same for `required`/`requisite` and is used by `as_guard`, which writes the copied control in lowercase. `max_jump` already reads every `key=value` pair regardless of key case. Module paths and arguments are untouched. | `test_gdm_enable_copies_a_capitalized_delegated_gate`, `test_gdm_enable_refuses_a_capitalized_unclassified_delegated_rule`, `test_gdm_enable_detects_a_capitalized_jump_before_the_insertion_point`, `test_gdm_enable_follows_a_capitalized_include_control` (all red before) |
+| 3 (MINOR) de-duplication | `plan_gdm_enable` builds `already_present` only from earlier `auth` rules with a plain `required`/`requisite` control | `test_gdm_enable_copies_requisite_nologin_despite_an_earlier_optional_one`, `test_gdm_enable_copies_required_preauth_despite_an_earlier_optional_one` (red before); `test_gdm_enable_does_not_duplicate_an_earlier_enforcing_gate` (regression guard, green before and after) |
+| 4 (MINOR) known refusals | `Docs/DISTRIBUTION_DEPLOYMENT.md` §2.1 item 6 lists the authselect `sssd` profile, openSUSE `common-auth` and vendor `/usr/lib/pam.d` stacks with the manual-rule recipe; ADR consequences updated | documentation |
+| 1 (MAJOR) missing include target | **Not changed; open.** Mapping `ReadError::NotFound` to a refusal turns `test_gdm_enable_refuses_a_missing_include_target` green but breaks six existing contracts in `crates/admin-cli/tests/gdm_tests.rs` (`test_gdm_disable_and_enable_lifecycle`, `test_gdm_enable_creates_byte_exact_backup_with_original_mode`, `test_gdm_enable_never_overwrites_an_existing_backup`, `test_gdm_enable_is_atomic_and_idempotent` from `main`; `test_gdm_status_configured_enabled`, `test_gdm_status_configured_disabled` from this batch). They enable `auth requisite pam_nologin.so` + `@include common-auth` without any `common-auth` file and expect success. Existing tests are immutable, so the fix and its test were reverted pending a decision (for example, approval to add the `common-auth` fixture to those tests). The ADR records it as an open item. | red evidence recorded, not committed |
+
+Matrix: new rows GSO13 and GSO14 (✅ Verified).
+

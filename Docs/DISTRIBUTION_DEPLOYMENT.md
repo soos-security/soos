@@ -82,7 +82,13 @@ Placement rules:
    `pam_soos.so`, following includes up to 4 levels. If the delegated stack ends without a
    credential module, the rules after the delegation in `gdm-password` are scanned the
    same way. A locked account therefore fails the auth phase even when the face matches;
-   running `preauth` twice is harmless (it only reads the tally).
+   running `preauth` twice is harmless (it only reads the tally). A gate already present
+   earlier in `gdm-password` is not copied again only when that earlier rule has a plain
+   `required`/`requisite` control; an `optional` copy of the same module does not enforce
+   anything, so the delegated gate is still copied. As in libpam (`pam.conf(5)`), the type
+   and control keywords (`auth`, `include`, `substack`, `required`, `requisite`,
+   `optional`, `sufficient` and the bracketed `key=value` controls) are read
+   case-insensitively; module paths and arguments are case-sensitive.
 3. `enable` refuses, without changing anything (no backup, the `gdm.disable` flag stays),
    when `pam_soos.so` is not installed, the file has no anchor, an **unclassified** auth
    rule (any module not listed above, e.g. `pam_tally2.so`, `pam_group.so`, a vendor
@@ -118,6 +124,37 @@ Placement rules:
    `gdm restore` and by `scripts/uninstall.sh`); the rewrite is atomic. A misplaced line
    written by older releases (`auth  sufficient  pam_soos.so timeout_ms=2500`) is moved to
    the safe position; a `pam_soos.so` rule you wrote yourself is left untouched.
+6. **Known refusals.** These default stacks make `enable` refuse. The refusal is fail-closed
+   and expected, not a bug; use the manual rule from item 3 instead:
+   - **Fedora / RHEL / AlmaLinux / Rocky, authselect `sssd` profile**: `password-auth` runs
+     `auth [default=1 ignore=ignore success=ok] pam_usertype.so isregular` and
+     `auth [default=1 ignore=ignore success=ok] pam_localuser.so` before `pam_unix.so`.
+     Neither module is classified, so the error names `pam_usertype.so`. Only the authselect `local` profile (optionally
+     `with-faillock`) is placed automatically.
+   - **openSUSE `common-auth`**: `auth optional pam_gnome_keyring.so` precedes
+     `pam_unix.so`, so the error names `pam_gnome_keyring.so`.
+   - **Vendor PAM directories** (Linux-PAM built with `--enable-vendordir`, e.g. openSUSE
+     `/usr/lib/pam.d`): `soos-admin` only searches the directory of the edited file
+     (`/etc/pam.d`) and never a vendor directory. On such systems, write the rule by hand
+     after checking the vendor stack's gates, and do not rely on `gdm enable`.
+
+   Manual recipe for these stacks: put the `pam_soos.so` rule in `gdm-password`
+   immediately before the `substack`/`include`/`@include` line, and copy in front of it
+   every `required`/`requisite` gate that the shared stack runs before its first
+   credential module (for example `pam_faillock.so preauth`). A face match then still
+   passes those gates, and the unclassified modules run only when the face check falls
+   through to the password path:
+
+   ```pam
+   auth        required      pam_faillock.so preauth silent   # only if password-auth has it
+   auth        [success=done default=ignore]  pam_soos.so timeout_ms=2500
+   auth        substack      password-auth
+   ```
+
+   A face success then skips `pam_usertype`/`pam_localuser` (in the stock profile they only
+   choose between `pam_unix` and `pam_sss`) or `pam_gnome_keyring`'s auth step (the keyring
+   is not unlocked by a face login). Accept this only if those modules are not login gates
+   on your system.
 
 ---
 
