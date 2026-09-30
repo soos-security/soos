@@ -10,6 +10,11 @@ Before=display-manager.service
 # enters the failed state; fix the cause, then 'systemctl reset-failed'.
 StartLimitIntervalSec=60
 StartLimitBurst=5
+# No start before the attested models are deployed (GitHub #211): the daemon
+# fails closed without them, so a fresh install would only crash-loop. The
+# unit is skipped ("condition failed") until scripts/download_models.sh has
+# written the manifest; start it afterwards.
+ConditionPathExists=/var/lib/soos/models/manifest.toml
 
 [Service]
 Type=simple

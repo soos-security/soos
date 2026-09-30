@@ -36,6 +36,7 @@ toml = { workspace = true }
 clap = { workspace = true }
 
 [dev-dependencies]
+soos-test-fixtures = { workspace = true }
 tempfile = { workspace = true }
 zeroize = { workspace = true }
 ort = { workspace = true }

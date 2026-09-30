@@ -1,8 +1,15 @@
-//! Test fixtures for facial verification, synthetic frames, and pre-computed embeddings.
+//! Shared test fixtures: synthetic camera frames, synthetic PAD presentations and minimal
+//! hand-encoded ONNX models.
+//!
+//! This file is the library root of the dev-only workspace crate `soos-test-fixtures`
+//! (`tests/fixtures/Cargo.toml`); every test depends on it through `[dev-dependencies]`
+//! (no `#[path]` include remains, enforced by `tests/invariants/src/fixtures_contract.rs`).
+//! Face embeddings are 512D and no embedding
+//! fixture is provided here.
 
 #![allow(
     dead_code,
-    reason = "Shared test fixtures library used conditionally across test modules"
+    reason = "Legacy #[path] includes each compile only the fixtures they use; the soos-test-fixtures crate itself needs no allowance"
 )]
 
 pub mod synthetic {
@@ -33,34 +40,6 @@ pub mod synthetic {
         let pixel_count = (width as usize).saturating_mul(height as usize);
         let data = vec![value; pixel_count];
         Frame::new(data, width, height, 1_000_000, PixelFormat::Grey, 1)
-    }
-}
-
-pub mod embeddings {
-    /// Pre-computed 128D unit embedding vector for Subject A (Enrollment).
-    pub fn subject_a_embedding() -> Vec<f32> {
-        let mut vec = vec![0.08838834; 128]; // norm = sqrt(128 * (1/128)) = 1.0
-        vec[0] = 0.15;
-        // Re-normalize to exact unit length
-        let norm: f32 = vec.iter().map(|x| x * x).sum::<f32>().sqrt();
-        vec.iter().map(|x| x / norm).collect()
-    }
-
-    /// Pre-computed 128D unit embedding vector for Subject A (Second capture, slight variation).
-    pub fn subject_a_variant_embedding() -> Vec<f32> {
-        let mut vec = subject_a_embedding();
-        vec[1] += 0.05;
-        vec[2] -= 0.03;
-        let norm: f32 = vec.iter().map(|x| x * x).sum::<f32>().sqrt();
-        vec.iter().map(|x| x / norm).collect()
-    }
-
-    /// Pre-computed 128D unit embedding vector for Subject B (Different subject, orthogonal-ish).
-    pub fn subject_b_embedding() -> Vec<f32> {
-        let mut vec = vec![-0.08838834; 128];
-        vec[64] = 0.50;
-        let norm: f32 = vec.iter().map(|x| x * x).sum::<f32>().sqrt();
-        vec.iter().map(|x| x / norm).collect()
     }
 }
 

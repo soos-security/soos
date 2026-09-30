@@ -25,6 +25,10 @@
 #   - Directory is created with mode 0755 (root:root if executed as root).
 #   - manifest.toml is copied to <target-dir>/manifest.toml upon completion.
 #   - Mismatched or corrupted downloads fail loudly and are removed immediately.
+#   - Download URLs come from the manifest only (no fallback table, GitHub #208);
+#     curl is HTTPS-only, TLS >= 1.2, time- and size-bounded (--max-filesize).
+#   - Every model file is bounded by MAX_MODEL_BYTES before it is hashed, and is
+#     staged in an unpredictable mktemp file (umask 077) next to its destination.
 # =============================================================================
 
 set -euo pipefail
@@ -64,6 +68,12 @@ CHECK_ONLY=false
 DRY_RUN=false
 PREFLIGHT=false
 
+# Upper bound for one model file (GitHub #208). The largest attested model
+# (arcface_w600k_mbf.onnx) is 136,619,444 bytes; 256 MiB leaves headroom while
+# bounding disk use. SOOS_MODEL_MAX_BYTES may only tighten this cap.
+readonly MAX_MODEL_BYTES=268435456
+MODEL_MAX_BYTES="${MAX_MODEL_BYTES}"
+
 usage() {
     cat <<EOF
 Usage: $(basename "$0") [OPTIONS]
@@ -81,6 +91,7 @@ Options:
 Environment Variables:
   SOOS_MODELS_DIR          Override default target directory
   SOOS_MANIFEST_PATH       Override default manifest.toml path
+  SOOS_MODEL_MAX_BYTES     Tighten the per-model size cap (1..${MAX_MODEL_BYTES} bytes)
 EOF
 }
 
@@ -122,6 +133,16 @@ done
 if [[ ! -f "${MANIFEST_PATH}" ]]; then
     error "Manifest file not found at: ${MANIFEST_PATH}"
     exit 1
+fi
+
+if [[ -n "${SOOS_MODEL_MAX_BYTES+set}" ]]; then
+    # Digits only, at most 10 of them (no arithmetic overflow), 1..MAX_MODEL_BYTES.
+    if [[ ! "${SOOS_MODEL_MAX_BYTES}" =~ ^[0-9]{1,10}$ ]] \
+            || (( 10#${SOOS_MODEL_MAX_BYTES} < 1 || 10#${SOOS_MODEL_MAX_BYTES} > MAX_MODEL_BYTES )); then
+        error "SOOS_MODEL_MAX_BYTES must be an integer between 1 and ${MAX_MODEL_BYTES}: '${SOOS_MODEL_MAX_BYTES}'"
+        exit 1
+    fi
+    MODEL_MAX_BYTES=$((10#${SOOS_MODEL_MAX_BYTES}))
 fi
 
 info "Using manifest: ${MANIFEST_PATH}"
@@ -243,49 +264,6 @@ parse_manifest() {
     return 0
 }
 
-# Fallback direct download URLs for standard model repositories
-resolve_download_url() {
-    local model_id="$1"
-    local source_url="$2"
-    local filename="$3"
-
-    # If source_url already points directly to a file (.onnx or file://)
-    if [[ "${source_url}" =~ \.onnx$ || "${source_url}" =~ ^file:// ]]; then
-        echo "${source_url}"
-        return
-    fi
-
-    # Known upstream direct download locations
-    case "${model_id}" in
-        scrfd_500m_kps)
-            echo "https://huggingface.co/ykk648/face_lib/resolve/main/face_detect/scrfd_onnx/scrfd_500m_bnkps.onnx"
-            ;;
-        arcface_w600k_mbf)
-            echo "https://huggingface.co/garavv/arcface-onnx/resolve/main/arc.onnx"
-            ;;
-        minifasnet_v2_pad)
-            echo "https://github.com/QingHeYang/Silent-Face-Anti-Spoofing-onnx/raw/main/onnx/2.7_80x80_MiniFASNetV2.onnx"
-            ;;
-        ultraface_slim_320)
-            echo "https://raw.githubusercontent.com/Linzaer/Ultra-Light-Fast-Generic-Face-Detector-1MB/master/models/onnx/version-slim-320.onnx"
-            ;;
-        landmark_5point)
-            echo "https://raw.githubusercontent.com/deepinsight/insightface/master/alignment/coordinate_regress/model/landmark_5point.onnx"
-            ;;
-        mobilefacenet_arcface)
-            echo "https://raw.githubusercontent.com/sirius-ai/MobileFaceNet_TF/master/arch/mobilefacenet_arcface.onnx"
-            ;;
-        minifasnet_pad)
-            echo "https://raw.githubusercontent.com/minivision-ai/Silent-Face-Anti-Spoofing/master/resources/anti_spoof_models/minifasnet_pad.onnx"
-            ;;
-        *)
-            # Fallback to source_url joined with filename if applicable
-            echo "${source_url}/${filename}"
-            ;;
-    esac
-}
-
-
 # -----------------------------------------------------------------------------
 # 1. Validate the manifest and resolve every download URL (read-only)
 # -----------------------------------------------------------------------------
@@ -298,7 +276,9 @@ TOTAL_MODELS=${#M_IDS[@]}
 M_DOWNLOAD_URLS=()
 NEEDS_CURL=false
 for ((idx = 0; idx < TOTAL_MODELS; idx++)); do
-    url="$(resolve_download_url "${M_IDS[idx]}" "${M_URLS[idx]}" "${M_FILES[idx]}")"
+    # The manifest is the single source of download URLs (GitHub #208): no
+    # fallback table, no URL rewriting.
+    url="${M_URLS[idx]}"
     case "${url}" in
         file://*) ;;
         https://*) NEEDS_CURL=true ;;
@@ -343,6 +323,13 @@ if [[ "${DRY_RUN}" = false && "${CHECK_ONLY}" = false ]]; then
 fi
 
 VERIFIED_MODELS=0
+
+# A temporary model file never survives an interrupted or failed run.
+tmp_dest=""
+cleanup_tmp() { if [[ -n "${tmp_dest}" ]]; then rm -f -- "${tmp_dest}"; fi; }
+trap cleanup_tmp EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 for ((idx = 0; idx < TOTAL_MODELS; idx++)); do
     model_id="${M_IDS[idx]}"
@@ -391,24 +378,41 @@ for ((idx = 0; idx < TOTAL_MODELS; idx++)); do
     fi
 
     info "Acquiring model '${model_id}' (${filename})..."
-    tmp_dest="${dest_path}.tmp.$$"
+    # Unpredictable temporary name, created 0600 in the target directory so the
+    # final rename stays atomic (GitHub #208).
+    tmp_dest="$(umask 077 && mktemp "${TARGET_DIR}/.${filename}.XXXXXXXX")"
 
     if [[ "${download_url}" =~ ^file:// ]]; then
         local_src_path="${download_url#file://}"
         if [[ ! -f "${local_src_path}" ]]; then
             error "Local source file not found: ${local_src_path}"
+            rm -f "${tmp_dest}"
             exit 1
         fi
-        cp "${local_src_path}" "${tmp_dest}"
+        cp "${local_src_path}" "${tmp_dest}" || {
+            error "Failed to copy model from ${local_src_path}"
+            rm -f "${tmp_dest}"
+            exit 1
+        }
     else
         info "Downloading from: ${download_url}"
         curl -fSL --proto '=https' --proto-redir '=https' --tlsv1.2 \
             --retry 3 --connect-timeout 15 --max-time 900 \
+            --max-filesize "${MODEL_MAX_BYTES}" \
             -o "${tmp_dest}" "${download_url}" || {
             error "Failed to download model from ${download_url}"
             rm -f "${tmp_dest}"
             exit 1
         }
+    fi
+
+    # Size bound BEFORE hashing: never hash (or keep) an unbounded file.
+    actual_size=$(wc -c < "${tmp_dest}")
+    actual_size="${actual_size//[[:space:]]/}"
+    if [[ ! "${actual_size}" =~ ^[0-9]+$ ]] || (( actual_size > MODEL_MAX_BYTES )); then
+        rm -f "${tmp_dest}"
+        error "Model '${model_id}' (${filename}) exceeds the size cap of ${MODEL_MAX_BYTES} bytes (${actual_size} bytes); discarded."
+        exit 1
     fi
 
     actual_sha=$(compute_sha256 "${tmp_dest}")
@@ -429,6 +433,7 @@ for ((idx = 0; idx < TOTAL_MODELS; idx++)); do
         chown root:root "${tmp_dest}"
     fi
     mv -f "${tmp_dest}" "${dest_path}"
+    tmp_dest=""
 
     success "Verified and deployed: ${filename} (SHA-256 match)"
     VERIFIED_MODELS=$((VERIFIED_MODELS + 1))

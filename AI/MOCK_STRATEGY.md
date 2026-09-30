@@ -15,9 +15,22 @@ When the `mock-camera` feature is enabled:
   - Can simulate device disconnections, frame corruption, or starvation.
 
 ## 3. Vision Test Fixtures
-To validate the AI inference pipeline without a live camera, static image fixtures are placed under `tests/fixtures/`:
-- Contains sample facial images (JPEG / serialized tensor arrays) of known and unknown subjects.
-- Unit and integration tests in the `vision` crate ingest these fixtures to validate:
-  - Face detection (NMS thresholds)
-  - 5-point landmark affine transformation (112x112 alignment)
-  - ArcFace (512D) embedding generation and cosine distance matching
+Shared, generated (never recorded) fixtures live in the dev-only workspace crate
+`soos-test-fixtures` (`tests/fixtures/Cargo.toml`, library root `tests/fixtures/mod.rs`,
+GitHub #241). It contains no facial image, no serialized tensor and no embedding:
+- `synthetic`: solid RGB24, YUYV and Grey frames of any size;
+- `pad`: synthetic live-face, printed-photo and screen-replay presentations for the PAD tests;
+- `onnx`: `minimal_identity_model()`, a hand-encoded ONNX `Identity` graph so the ORT wiring
+  of the daemon and enrollment CLI runs in CI without a model file.
+
+New tests add `soos-test-fixtures` to `[dev-dependencies]`; it is never a normal dependency.
+Three legacy test files (`crates/vision/tests/pad_tests.rs`, `crates/daemon/tests/pad_wiring_tests.rs`,
+`crates/enrollment-cli/tests/pad_wiring_tests.rs`) still include `mod.rs` through `#[path]`;
+`tests/invariants/src/fixtures_contract.rs` freezes that list. Face embeddings are 512D
+(ArcFace, `AI/DECISIONS.md`); embedding tests build their vectors locally. Real face captures
+(detection, alignment, matching accuracy) are covered only by the physical suite (`tests/physical/`).
+
+Face detection (SCRFD), 112x112 alignment, MiniFASNetV2 PAD and ArcFace 512D embeddings are exercised
+through the mock backends above. Real-model evidence lives in
+`crates/inference-ort/tests/pad_real_model_tests.rs` and `embedding_real_model_tests.rs`, which skip
+cleanly when `/var/lib/soos/models` is absent.

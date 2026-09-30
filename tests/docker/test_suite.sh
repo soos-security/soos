@@ -115,6 +115,26 @@ for stack in /etc/pam.d/common-auth /etc/pam.d/system-auth; do
 done
 
 # ---------------------------------------------------------------------------
+# 1c. Synchronize the Rust Toolchain With rust-toolchain.toml (GitHub #244)
+# ---------------------------------------------------------------------------
+# The image installs `stable` when it is built, and the CI layer cache can keep
+# that image (and its toolchain) for a long time. `rustup toolchain install`
+# without arguments reads /workspace/rust-toolchain.toml and brings the channel
+# up to the release the other CI jobs install, so this suite never builds with a
+# stale compiler. SOOS_REQUIRE_TOOLCHAIN_SYNC=1 (set by CI) makes a failed sync
+# fatal; a local offline run warns and continues with the image toolchain.
+info "Synchronizing the Rust toolchain with rust-toolchain.toml..."
+if rustup toolchain install --profile minimal; then
+    success "Rust toolchain synchronized with rust-toolchain.toml."
+elif [[ "${SOOS_REQUIRE_TOOLCHAIN_SYNC:-0}" == "1" ]]; then
+    error "Could not synchronize the Rust toolchain with rust-toolchain.toml."
+    exit 1
+else
+    warn "Could not synchronize the Rust toolchain (offline?); using the image toolchain."
+fi
+info "Toolchain in use: $(rustc --version)"
+
+# ---------------------------------------------------------------------------
 # 2. Build pam_soos.so
 # ---------------------------------------------------------------------------
 # Always invoke cargo (a no-op when up to date) so a stale artifact built by

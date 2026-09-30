@@ -109,7 +109,7 @@ fi
 # 1. Compile workspace crates once upfront if not skipped
 if [[ "${SKIP_BUILD}" = false ]]; then
     echo "[Build] Compiling workspace crates in release mode..."
-    cargo build --release --workspace
+    cargo build --locked --release --workspace
     # Subsequent target builders can reuse the compiled artifacts
     PASSTHROUGH_ARGS+=("--skip-build")
 fi

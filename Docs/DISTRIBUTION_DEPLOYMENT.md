@@ -34,8 +34,20 @@ auth  optional                       pam_soos.so event=password-failed timeout_m
 ### 2.1 GDM Login Integration (`soos-admin gdm`)
 
 GDM authenticates through its own service file, `/etc/pam.d/gdm-password`, with a longer
-2500 ms capture budget. `soos-admin` manages it (ADR 2026-09-30 "GDM PAM Stack Placement",
-walkthrough 98):
+PAM-side deadline (`timeout_ms=2500`). `soos-admin` manages it (ADR 2026-09-30 "GDM PAM Stack Placement",
+walkthrough 98).
+
+**Daemon budget cap (GitHub #281).** `timeout_ms=2500` bounds only the PAM module's own wait
+(connect, request write, verdict read). The daemon decides every request within
+min(client deadline, request start + `[dispatcher] connection_timeout_ms`), each minus the
+50 ms response write margin, and `connection_timeout_ms` defaults to 1000 ms
+(`crates/daemon/src/config.rs`). With the default daemon configuration a GDM attempt therefore
+gets the same ~950 ms of daemon time (camera wake, consensus loop, inference) as a console or
+`sudo` attempt; the extra PAM time is never used by the daemon. To give GDM more capture time,
+raise `connection_timeout_ms` in `/etc/soos/daemon.toml`; the value is daemon-wide, so it also
+lengthens how long an idle or slow client may hold one of the bounded connection slots, while
+`sudo`/console stacks stay capped by their own 1000 ms module default (ADR 2026-09-30
+"GDM `timeout_ms=2500` Versus Daemon `connection_timeout_ms`").
 
 ```bash
 sudo soos-admin gdm status                    # installed in PAM? disable flag present?
@@ -203,6 +215,15 @@ Enable the profiles non-interactively:
 ```bash
 sudo pam-auth-update --package --enable soos soos-notify
 ```
+
+The `.deb` `postinst` runs exactly this command, without `--force`. On a locally modified
+`common-*` stack, `pam-auth-update --package` prints "Local modifications to
+/etc/pam.d/common-*, not updating." and changes nothing, so the package installs but
+facial authentication stays inactive. The postinst never overwrites the administrator's
+edits; instead it prints a `soos: WARNING:` when `pam-auth-update` fails or when
+`/etc/pam.d/common-auth` does not call `pam_soos.so` afterwards (GitHub #281). Review the
+local changes, then run `sudo pam-auth-update --enable soos soos-notify` (interactive, offers
+to override local changes) or add the two rules by hand.
 
 Resulting `/etc/pam.d/common-auth` (Ubuntu 24.04, verified by `tests/docker/pam_rollback_test.sh`
 D3 and the Docker matrix case T11):
@@ -372,7 +393,8 @@ Arch Linux utilizes a modular `/etc/pam.d/system-auth` stack. The integration is
 sudo cp /etc/pam.d/system-auth /etc/pam.d/system-auth.soos-backup
 ```
 
-The `soos` snippet (`packaging/pam/arch/system-auth.snippet`) is placed immediately prior to `pam_unix.so`
+The `soos` snippet (`packaging/pam/arch/system-auth.snippet`, installed as `/usr/share/soos/pam/system-auth.snippet`;
+it is never placed in `/etc/pam.d`, where every file is a PAM service) is placed immediately prior to `pam_unix.so`
 (adjust any `success=N` jump that crosses the inserted lines, e.g. the one of `pam_systemd_home.so`):
 
 ```pam

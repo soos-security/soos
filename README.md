@@ -4,7 +4,9 @@
 
 ---
 
-## Installation from Source
+## Quick Start
+
+### 1. Install from Source
 
 Supported hosts: Debian 12, Ubuntu 24.04, Fedora 40 / RHEL 9 and Arch Linux (x86_64, aarch64), with systemd.
 
@@ -23,8 +25,51 @@ sudo ./scripts/install.sh
 `scripts/install.sh --dry-run` runs the same read-only preflight without touching the system. The installer
 refuses debug-profile artifacts, exits non-zero when an artifact is missing, deploys and verifies the attested
 models (`scripts/download_models.sh`, needs `curl`, no Python) before enabling `soos-daemon.service`, and undoes
-every change it made if any step fails. PAM activation stays a separate, explicit step
+every change it made if any step fails. It installs only the PAM template of the detected distribution
+(`--distro` overrides). `soos-daemon.service` does not start before the models manifest is deployed;
+`sudo ./scripts/install.sh --start` (or `sudo ./scripts/wait_daemon_ready.sh` after `systemctl start soos-daemon`)
+waits at most 30 s for the daemon and prints its JSON status. PAM activation stays a separate, explicit step
 (see [`Docs/DISTRIBUTION_DEPLOYMENT.md`](Docs/DISTRIBUTION_DEPLOYMENT.md)).
+
+### 2. Start the Daemon and Enroll
+
+```bash
+sudo systemctl start soos-daemon                 # install.sh enables the unit but does not start it
+sudo soos-admin add-user alice                   # adds alice to the 'soos' group (socket access)
+sudo soos-enroll enroll --username alice         # captures and encrypts the template
+sudo soos-enroll list                            # templates are stored as /var/lib/soos/biometrics/<uid>.cbor.enc
+```
+
+### 3. Verify Before Activating PAM
+
+```bash
+soos-admin status                                # daemon, socket and unit health
+soos-admin test-pam                              # simulated authentication round trip and latency
+```
+
+### 4. Activate PAM (Explicit Step)
+
+PAM is never modified by `install.sh`. Activate the profile for your distribution, keeping a root
+shell open until a password login has been tested:
+
+```bash
+sudo pam-auth-update --package --enable soos soos-notify      # Debian / Ubuntu
+sudo authselect select custom/soos with-faillock --force      # Fedora / RHEL
+```
+
+Arch Linux, GDM (`soos-admin gdm enable`) and the full per-distribution procedure are described in
+[`Docs/DISTRIBUTION_DEPLOYMENT.md`](Docs/DISTRIBUTION_DEPLOYMENT.md). The password prompt always
+remains available: when the daemon is stopped or the face does not match, `pam_soos.so` returns
+`PAM_IGNORE` and the stack falls through to `pam_unix.so`.
+
+### 5. Rescue and Uninstall
+
+```bash
+sudo touch /etc/soos/disabled                    # immediate kill switch: pam_soos.so returns PAM_IGNORE
+sudo touch /etc/soos/gdm.disable                 # disable facial login for GDM only
+sudo ./scripts/uninstall.sh --keep-data          # restores the PAM stack, keeps templates and master key
+sudo ./scripts/uninstall.sh --purge-data         # also erases templates, master key and evidence
+```
 
 ---
 
@@ -49,3 +94,13 @@ Detailed guides and specifications are maintained in the [`Docs/`](Docs/) direct
 - [`AI/ROLES_AND_WORKFLOW.md`](AI/ROLES_AND_WORKFLOW.md): Multi-agent operational rules and quality assurance.
 - [`AI/VERIFICATION_MATRIX.md`](AI/VERIFICATION_MATRIX.md): Traceable component acceptance matrix.
 - [`AI/walkthroughs/`](AI/walkthroughs/): Step-by-step verifiable implementation walkthroughs.
+
+---
+
+## License
+
+soos is free software licensed under the **GNU Affero General Public License v3.0 or later**
+(SPDX `AGPL-3.0-or-later`); the full text is in [`LICENSE`](LICENSE). The `license` key of
+`[workspace.package]` in the root `Cargo.toml` is the single source of truth: every crate inherits
+it (`license.workspace = true`) and the RPM spec and Arch PKGBUILD declare the same expression.
+Third-party dependencies are restricted to permissive licenses by `deny.toml`.

@@ -20,6 +20,11 @@ The `main` branch is protected. All development (new features, bug fixes, tests,
 | `test/<name>` | Test suite additions, fuzzing harness, or fixtures | `test/fuzz-codec-v1`, `test/docker-pamtester` |
 | `chore/<name>` | Maintenance, tooling, CI/CD, documentation, deps | `chore/cargo-deny-rules`, `chore/commit-convention` |
 
+No other prefix is allowed: Conventional Commit types such as `refactor` or `docs` are commit types, not
+branch prefixes. `python3 scripts/sync_issue.py --check` rejects a `BRANCH_TO_ISSUE` entry with any
+other prefix; the five merged historical `refactor/*` and `docs/*` branches are kept as the frozen
+`LEGACY_BRANCHES` set (ADR 2026-09-30 "Branch Prefixes and Root-Level Scratch Files").
+
 ---
 
 ## 3. Mandatory Context Ingestion (AI/ and Docs/ Mandate)

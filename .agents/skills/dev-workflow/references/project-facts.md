@@ -28,6 +28,7 @@ ADR entry in `AI/DECISIONS.md`. Re-check every value below with the listed `grep
 | `crates/camera-v4l` | `soos-camera-v4l` | lib, `mock-camera` feature | adapter: `unsafe` allowed, `// SAFETY:` mandatory |
 | `crates/daemon` | `soos-daemon` | lib + bin (Tokio) | `main.rs` forbids; `lib.rs` only denies undocumented unsafe (`mlock.rs`) |
 | `tests/invariants` | `soos-invariants` | static repo checks | — |
+| `tests/fixtures` | `soos-test-fixtures` | dev-only fixture lib (`[lib] path = "mod.rs"`), never a normal dependency [129] | — |
 
 - The authoritative forbid list is `test_business_crates_forbid_unsafe_code` in
   `tests/invariants/src/lib.rs` (9 crates). `AGENTS.md` lists only 3 — that is a minimum, not the full set.
@@ -109,8 +110,12 @@ cargo deny --locked check                      # cargo-deny >= 0.20
 ./scripts/candid_review.sh                     # Layer 1 deterministic invariants
 ./scripts/candid_subagent.sh --prepare         # Layer 2: diff + fingerprint for the reviewer
 ./scripts/candid_subagent.sh                   # Layer 2 gate (fresh, fingerprint-bound report)
-./run_tests.sh                                 # Dockerized PAM matrix T1–T12 (ubuntu)
+./run_tests.sh                                 # Dockerized PAM matrix T1–T15 (ubuntu)
 ```
+
+Toolchain: `rust-toolchain.toml` pins Rust `1.98.1` (components `clippy`, `rustfmt`; user decision
+2026-09-30). The sandbox Dockerfiles install the same release (`--default-toolchain 1.98.1`); bump
+both together, never back to a floating `stable` channel.
 
 Omitting `--all-features` locally was the root cause of several CI-only failures [65–75].
 `cargo test --all-targets` does not run doctests; do not rely on doctests as acceptance evidence.
@@ -132,6 +137,10 @@ packaging, install or CI build commands.
   Put historical names ("renamed from", "never existed") inside an italic `*( ... )*` annotation;
   a row without evidence is `⬜ Pending (<reason>)`, a replaced row is `⏹ Superseded (<rows>)`.
 - Branch prefixes allowed by `AGENTS.md`: `feat/`, `fix/`, `test/`, `chore/` (not `refactor/` or `docs/`).
+  `python3 scripts/sync_issue.py --check` rejects any other prefix in `BRANCH_TO_ISSUE` except the frozen,
+  merged `LEGACY_BRANCHES` `refactor/remove-ort-landmark-detector`, `refactor/vision-pipeline-3-model`,
+  `refactor/model-ids-nextgen`, `refactor/mock-backends-nextgen` and `docs/nextgen-model-documentation` [128].
+- Root-level `*.py` and `temp_*.md` files are ignored by `.gitignore`: durable tooling lives under `scripts/` [128].
 - Every topic branch that implements a backlog issue must be registered in `BRANCH_TO_ISSUE` in
   `scripts/sync_issue.py` (tooling-only `chore/` branches and GitHub-only review-finding branches
   without a backlog issue are not). `python3 scripts/sync_issue.py --check` must pass (enforced by

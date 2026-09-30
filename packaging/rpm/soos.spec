@@ -3,7 +3,7 @@ Version: 0.1.0
 Release: 1%{?dist}
 Summary: Local facial biometric PAM module and daemon for Linux
 
-License:        Apache-2.0 OR MIT
+License:        AGPL-3.0-or-later
 URL:            https://github.com/Mysticaly622/soos
 Source0:        %{name}-%{version}.tar.gz
 
@@ -21,17 +21,22 @@ BuildRequires:  systemd-rpm-macros
 Requires:       pam
 Requires:       shadow-utils
 Requires:       systemd
+# soos-gui loads its windowing and GL libraries with dlopen(): recommended, not required
+# (same list as scripts/check_build_deps.sh --distro fedora --print-packages gui).
+Recommends:     libxkbcommon libwayland-client libwayland-egl mesa-libEGL mesa-libGL libX11 libXcursor libXi libXrandr
+# %posttrans compares the pre-upgrade master key copy with cmp (GitHub #281).
+Requires(posttrans): diffutils
 
 %description
 soos is a zero-trust local facial biometric PAM subsystem for Linux.
-It provides sub-250ms verification latency, warm camera streaming via V4L2,
+It provides deadline-bounded verification, warm camera streaming via V4L2,
 presentation attack detection (PAD), and encrypted vector storage at rest.
 
 %prep
 %setup -q
 
 %build
-cargo build --release --workspace
+cargo build --locked --release --workspace
 
 %install
 rm -rf %{buildroot}
@@ -44,6 +49,7 @@ install -m 0755 scripts/provision_master_key.sh %{buildroot}/usr/libexec/soos/pr
 install -d -m 0755 %{buildroot}%{_bindir}
 install -m 0755 target/release/soos-admin %{buildroot}%{_bindir}/soos-admin
 install -m 0755 target/release/soos-enroll %{buildroot}%{_bindir}/soos-enroll
+install -m 0755 target/release/soos-gui %{buildroot}%{_bindir}/soos-gui
 
 # Install PAM module
 install -d -m 0755 %{buildroot}%{_libdir}/security
@@ -156,11 +162,20 @@ if [ -f "$UPGRADE_COPY" ] && [ ! -L "$UPGRADE_COPY" ]; then
         mv -f "$UPGRADE_COPY" "$KEY" || :
         chmod 0600 "$KEY" || :
         chown root:root "$KEY" || :
-    elif cmp -s "$UPGRADE_COPY" "$KEY"; then
-        rm -f "$UPGRADE_COPY" || :
     else
-        echo "soos: WARNING: $KEY differs from the pre-upgrade key kept in $UPGRADE_COPY;" >&2
-        echo "soos: WARNING: templates enrolled before the upgrade need the kept key." >&2
+        # cmp exits 0 (equal), 1 (different) or >1 (could not compare, e.g. 2 on a read
+        # error, 127 when missing): only a proven-equal copy is discarded (GitHub #281).
+        cmp_status=0
+        cmp -s "$UPGRADE_COPY" "$KEY" || cmp_status=$?
+        if [ "$cmp_status" -eq 0 ]; then
+            rm -f "$UPGRADE_COPY" || :
+        elif [ "$cmp_status" -eq 1 ]; then
+            echo "soos: WARNING: $KEY differs from the pre-upgrade key kept in $UPGRADE_COPY;" >&2
+            echo "soos: WARNING: templates enrolled before the upgrade need the kept key." >&2
+        else
+            echo "soos: WARNING: could not compare $KEY with the pre-upgrade key kept in $UPGRADE_COPY (cmp exit status $cmp_status);" >&2
+            echo "soos: WARNING: both files were left in place; compare them before deleting $UPGRADE_COPY." >&2
+        fi
     fi
 fi
 
@@ -169,6 +184,7 @@ fi
 /usr/libexec/soos/provision-master-key
 %{_bindir}/soos-admin
 %{_bindir}/soos-enroll
+%{_bindir}/soos-gui
 %{_libdir}/security/pam_soos.so
 %{_unitdir}/soos-daemon.service
 %{_sysconfdir}/authselect/custom/soos

@@ -3216,7 +3216,7 @@ name = "soos-admin-cli"
 version = "0.1.0"
 dependencies = [
  "clap",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "libc",
  "nix",
  "serde",
@@ -3232,7 +3232,7 @@ version = "0.1.0"
 dependencies = [
  "aes-gcm",
  "ciborium",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "libc",
  "nix",
  "proptest",
@@ -3271,6 +3271,7 @@ dependencies = [
  "soos-inference-ort",
  "soos-policy",
  "soos-protocol",
+ "soos-test-fixtures",
  "soos-vision",
  "tempfile",
  "thiserror 2.0.20",
@@ -3286,7 +3287,7 @@ name = "soos-enrollment-cli"
 version = "0.1.0"
 dependencies = [
  "clap",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "libc",
  "nix",
  "ort",
@@ -3296,6 +3297,7 @@ dependencies = [
  "soos-camera-v4l",
  "soos-inference-ort",
  "soos-protocol",
+ "soos-test-fixtures",
  "soos-vision",
  "tempfile",
  "thiserror 2.0.20",
@@ -3309,7 +3311,7 @@ version = "0.1.0"
 dependencies = [
  "aes-gcm",
  "ciborium",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "nix",
  "proptest",
  "serde",
@@ -3325,7 +3327,7 @@ dependencies = [
  "arc-swap",
  "clap",
  "eframe",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "nix",
  "serde_json",
  "soos-biometric-store",
@@ -3366,7 +3368,7 @@ version = "0.1.0"
 name = "soos-pam"
 version = "0.1.0"
 dependencies = [
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "libc",
  "pam-bindings",
  "soos-protocol",
@@ -3393,6 +3395,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "soos-test-fixtures"
+version = "0.1.0"
+dependencies = [
+ "soos-camera-v4l",
+]
+
+[[package]]
 name = "soos-vision"
 version = "0.1.0"
 dependencies = [
@@ -3400,6 +3409,7 @@ dependencies = [
  "proptest",
  "soos-camera-v4l",
  "soos-inference-ort",
+ "soos-test-fixtures",
  "thiserror 2.0.20",
  "zeroize",
 ]

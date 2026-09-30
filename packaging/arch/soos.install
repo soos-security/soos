@@ -41,9 +41,10 @@ post_install() {
     fi
 
     echo "==> soos installed successfully."
-    echo "==> To enable biometric authentication in Arch PAM, integrate /etc/pam.d/soos.snippet into /etc/pam.d/system-auth."
+    echo "==> To enable biometric authentication in Arch PAM, integrate /usr/share/soos/pam/system-auth.snippet into /etc/pam.d/system-auth."
     echo "==> Back it up first (restored by scripts/uninstall.sh): cp /etc/pam.d/system-auth /etc/pam.d/system-auth.soos-backup"
-    echo "==> Start and enable daemon: systemctl enable --now soos-daemon.service"
+    echo "==> Deploy the attested models first (the unit does not start without /var/lib/soos/models/manifest.toml),"
+    echo "==> then start and enable the daemon: systemctl enable --now soos-daemon.service"
 }
 
 post_upgrade() {

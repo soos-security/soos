@@ -44,9 +44,21 @@ case "$1" in
         #    decryptable).
         /usr/libexec/soos/provision-master-key --state-dir /var/lib/soos
 
-        # 4. Integrate PAM configuration via pam-auth-update if present
+        # 4. Integrate PAM configuration via pam-auth-update if present.
+        #    Without --force, pam-auth-update never rewrites a locally modified
+        #    stack ("Local modifications to /etc/pam.d/common-*, not updating.")
+        #    and still exits 0. The administrator's edits are kept, but the skip
+        #    (or a failure) is reported instead of being silent (GitHub #281);
+        #    the package installation itself never fails because of it.
         if command -v pam-auth-update >/dev/null 2>&1; then
-            pam-auth-update --package --enable soos soos-notify || true
+            if ! pam-auth-update --package --enable soos soos-notify; then
+                echo "soos: WARNING: pam-auth-update failed; facial authentication is not enabled in the PAM stack." >&2
+            fi
+            if [ -f /etc/pam.d/common-auth ] && ! grep -q 'pam_soos\.so' /etc/pam.d/common-auth; then
+                echo "soos: WARNING: /etc/pam.d/common-auth does not call pam_soos.so (locally modified PAM stack?);" >&2
+                echo "soos: WARNING: facial authentication is inactive. Review the stack, then run" >&2
+                echo "soos: WARNING: 'pam-auth-update --enable soos soos-notify' (interactive) or add the rules by hand." >&2
+            fi
         fi
 
         # 5. Reload and enable systemd service if systemd is active
