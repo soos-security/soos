@@ -3,6 +3,7 @@
 
 #![deny(clippy::undocumented_unsafe_blocks)]
 
+pub mod capture;
 pub mod config;
 pub mod error;
 pub mod frame;

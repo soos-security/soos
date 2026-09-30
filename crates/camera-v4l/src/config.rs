@@ -20,11 +20,15 @@ pub struct CameraConfig {
     pub auto_format: bool,
     /// Sensor selection preference on multi-camera hardware (RGB vs IR).
     pub sensor_preference: SensorPreference,
-    /// Active capture rate in frames per second.
+    /// Active capture rate in frames per second, requested from the driver with
+    /// `VIDIOC_S_PARM` (the driver may grant a different rate, which is logged).
     pub fps: u32,
-    /// Throttled idle rate in frames per second during prolonged inactivity.
+    /// Publication rate in frames per second once more than half of `idle_timeout` has elapsed
+    /// without activity (see [`CameraConfig::publish_fps`]). It throttles frame publication
+    /// only; the hardware keeps streaming at `fps` until auto-standby.
     pub idle_fps: u32,
-    /// Inactivity threshold before dropping capture rate to `idle_fps`.
+    /// Inactivity threshold before auto-standby (the device is released); `idle_fps` applies
+    /// after half of it. `Duration::ZERO` disables both.
     pub idle_timeout: Duration,
     /// Number of initial frames discarded after device startup for auto-exposure stabilization.
     pub warmup_frames: usize,
@@ -59,6 +63,26 @@ impl CameraConfig {
     pub fn explicit_device(&self) -> Option<&Path> {
         let path = self.device_path.as_path();
         (!crate::resolver::is_auto_camera_device(path)).then_some(path)
+    }
+
+    /// Frame rate at which captured frames are published after `idle_elapsed` without
+    /// activity: `idle_fps` once more than half of `idle_timeout` has elapsed, `fps` otherwise.
+    ///
+    /// Shared by [`crate::MockCameraManager`] and [`crate::V4lCameraManager`] (GitHub #193). A
+    /// zero `idle_timeout` disables auto-standby and therefore also the idle throttle.
+    pub fn publish_fps(&self, idle_elapsed: Duration) -> u32 {
+        if self.idle_timeout.is_zero() {
+            return self.fps;
+        }
+        let half_timeout = self
+            .idle_timeout
+            .checked_div(2)
+            .unwrap_or(self.idle_timeout);
+        if idle_elapsed > half_timeout {
+            self.idle_fps
+        } else {
+            self.fps
+        }
     }
 }
 

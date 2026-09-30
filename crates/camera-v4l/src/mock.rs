@@ -139,9 +139,8 @@ impl MockCameraManager {
                     }
 
                     // Idle throttled state: when idle for more than half idle_timeout
-                    let half_timeout = cfg.idle_timeout.checked_div(2).unwrap_or(cfg.idle_timeout);
-                    let is_throttled = elapsed_idle > half_timeout;
-                    let effective_fps = if is_throttled { cfg.idle_fps } else { cfg.fps };
+                    // Same rule as the V4L2 manager (GitHub #193).
+                    let effective_fps = cfg.publish_fps(elapsed_idle);
                     let frame_interval = Duration::from_micros(
                         1_000_000u64
                             .checked_div(effective_fps as u64)

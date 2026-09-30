@@ -78,11 +78,16 @@ Configures:
 - `device_path`: Path to video device (`/dev/v4l/by-id/...`)
 - `width` & `height`: Frame resolution (default: 640×480)
 - `format`: Pixel format (`PixelFormat::Yuyv`, `Rgb24`, `Grey`, `Mjpeg`, `Nv12`)
-- `auto_format`: Automatic priority-based format negotiation (default: false)
+- `auto_format`: Automatic priority-based format negotiation (default: true)
 - `sensor_preference`: Dual-sensor device preference (`SensorPreference::PreferRgb`, `PreferIr`, `Any`)
-- `fps`: Full streaming frame rate (default: 30)
-- `idle_fps`: Throttled power-saving rate (default: 5)
-- `idle_timeout`: Duration of inactivity before throttling (default: 60s)
+- `fps`: Full streaming frame rate (default: 30), requested from the driver with `VIDIOC_S_PARM`
+  (GitHub #193); the granted interval is logged and a driver without frame-interval control keeps
+  its default rate (warning, never fatal)
+- `idle_fps`: Publication rate once more than half of `idle_timeout` has elapsed without activity
+  (default: 5). It throttles frame publication only (`CameraConfig::publish_fps`, identical in the
+  mock and the V4L2 manager); the hardware keeps streaming at `fps` until auto-standby
+- `idle_timeout`: Inactivity before auto-standby releases the device (default: 10s);
+  `Duration::ZERO` disables both auto-standby and the idle throttle
 - `warmup_frames`: Discarded startup frames (default: 20)
 - `min_backoff` & `max_backoff`: Error backoff limits (default: 100ms to 5s)
 
@@ -106,6 +111,30 @@ enrollment and authentication always use the same sensor:
 `SystemCameraEnumerator` reads `/sys/class/video4linux` and at most `MAX_BY_ID_ENTRIES` (64)
 by-id aliases (dangling aliases skipped); tests inject a hermetic `CameraEnumerator`.
 `CameraConfig::explicit_device()` returns `None` for a sentinel `device_path`.
+
+### Capture-Path Validation (`capture.rs`, GitHub #192, #193, #194)
+
+- **Driver-returned format.** After `VIDIOC_S_FMT`, `validate_negotiated_format` reads the
+  returned fourcc, width, height and `bytesperline`. A substituted fourcc is adopted (warning, and
+  frames are labelled with it) only when its layout is known: `RGB3`, `YUYV`, `NV12`, `MJPG`,
+  `GREY`/`Y800`/`Y8  `. `BGR3`, `RGB4` or any other fourcc fails as `CameraError::SetFormat`
+  (`UnsupportedDevice`). A stride below one row, zero dimensions and odd NV12 dimensions are
+  rejected; `bytesperline == 0` means tight rows.
+- **Captured buffers.** `validate_captured_buffer` skips `V4L2_BUF_FLAG_ERROR` buffers, rejects a
+  `bytesused` larger than the mapping, rejects uncompressed buffers shorter than
+  `(rows - 1) * stride + row_bytes` and removes row padding, so every published frame has exactly
+  `PixelFormat::expected_buffer_size` bytes; an MJPEG frame is its `bytesused` prefix and an empty
+  one is rejected. `MAX_CONSECUTIVE_REJECTED_FRAMES` (30) consecutive rejections end the stream
+  with `BufferDequeue`, so the supervisor backs off and reopens the device instead of silently
+  dropping frames.
+- **Bounded DQBUF wait (Criterion C9).** `dqbuf_poll_timeout(fps)` is three frame intervals
+  clamped to `MIN_DQBUF_POLL_TIMEOUT`..`MAX_DQBUF_POLL_TIMEOUT` (150-250 ms), computed from the
+  granted rate. The capture thread polls the device with it and re-checks its shutdown flag after
+  every poll, so `Drop` waits for at most one poll (< `C9_SHUTDOWN_BUDGET`, 500 ms). Consecutive
+  timeouts covering `MAX_STREAM_STALL` (2 s, the previous single-poll tolerance) report
+  `CameraError::Starved`. After a timeout inside `v4l`'s `next()` (whose re-queued buffer is still
+  owned by the driver) the loop dequeues and discards one buffer before calling `next()` again, so
+  no buffer is queued twice.
 
 ### Busy-Device Classification (GitHub #150)
 

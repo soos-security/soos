@@ -1,5 +1,10 @@
 //! Production V4L2 MMAP camera manager implementation.
 
+use crate::capture::{
+    dqbuf_poll_timeout, granted_fps, requested_frame_interval, run_capture_loop,
+    validate_negotiated_format, BufferMeta, CaptureSource, StreamExit, StreamSettings,
+    StreamTargets,
+};
 use crate::config::CameraConfig;
 use crate::error::CameraError;
 use crate::frame::{Frame, PixelFormat};
@@ -563,8 +568,62 @@ fn open_and_stream(
         })
     })?;
 
-    let actual_width = actual_format.width;
-    let actual_height = actual_format.height;
+    // Honour what the driver granted, not what was requested (GitHub #192): the fourcc may be
+    // substituted (e.g. when VIDIOC_ENUM_FMT failed and the configured format was requested
+    // blindly) and rows may be padded.
+    let layout = validate_negotiated_format(
+        target_format,
+        actual_format.fourcc.repr,
+        actual_format.width,
+        actual_format.height,
+        actual_format.stride,
+    )
+    .map_err(|e| CameraError::SetFormat {
+        path: config.device_path.clone(),
+        width: config.width,
+        height: config.height,
+        format: target_format,
+        reason: e.to_string(),
+    })?;
+    if layout.substituted {
+        warn!(
+            "Camera '{}' substituted {:?} for the requested {:?}; frames are labelled {:?}",
+            config.device_path.display(),
+            layout.format,
+            target_format,
+            layout.format
+        );
+    }
+
+    // Request the configured frame rate (VIDIOC_S_PARM, GitHub #193). Drivers without
+    // frame-interval control keep their default rate: best-effort, logged, never fatal.
+    let (numerator, denominator) = requested_frame_interval(config.fps);
+    let granted = match Capture::set_params(
+        &device,
+        &v4l::video::capture::Parameters::new(v4l::fraction::Fraction::new(numerator, denominator)),
+    ) {
+        Ok(params) => {
+            let granted = granted_fps(params.interval.numerator, params.interval.denominator);
+            info!(
+                "Camera '{}' frame rate: requested {} fps, driver granted {}/{} s ({:?} fps)",
+                config.device_path.display(),
+                denominator,
+                params.interval.numerator,
+                params.interval.denominator,
+                granted
+            );
+            granted
+        }
+        Err(e) => {
+            warn!(
+                "Camera '{}' did not accept a {} fps frame interval ({}); streaming at the driver default",
+                config.device_path.display(),
+                denominator,
+                e
+            );
+            None
+        }
+    };
 
     let mut stream =
         v4l::io::mmap::Stream::with_buffers(&device, v4l::buffer::Type::VideoCapture, 4).map_err(
@@ -578,100 +637,83 @@ fn open_and_stream(
             },
         )?;
 
-    // Set a non-infinite timeout on the MMAP stream handle so DQBUF does not block indefinitely.
-    // Timeout is computed adaptively from the configured FPS (e.g. 3x frame interval, clamped to 150-250ms),
-    // ensuring Drop completes in < 500ms (Criterion C9) even if the hardware is idle or stalled.
-    let stream_timeout_ms = 2000;
-    stream.set_timeout(Duration::from_millis(stream_timeout_ms));
+    // Bounded DQBUF wait (GitHub #194): three frame intervals clamped to 150-250 ms, so the
+    // capture thread re-checks `running` at least every 250 ms and Drop completes within the
+    // 500 ms Criterion C9 budget even on a stalled camera. Consecutive timeouts escalate to
+    // `Starved` after MAX_STREAM_STALL.
+    let poll_timeout = dqbuf_poll_timeout(granted.unwrap_or(config.fps));
+    stream.set_timeout(poll_timeout);
 
     info!(
-        "Camera stream initialized on '{}' ({}x{}, {:?}, sensor {:?})",
+        "Camera stream initialized on '{}' ({}x{}, {:?}, stride {}, sensor {:?}, poll {:?})",
         config.device_path.display(),
-        actual_width,
-        actual_height,
-        target_format,
-        plan.sensor_type
+        layout.width,
+        layout.height,
+        layout.format,
+        layout.bytes_per_line,
+        plan.sensor_type,
+        poll_timeout
     );
 
-    let _start_time = Instant::now();
-    let mut warmup_discarded: usize = 0;
-    let mut sequence: u64 = 0;
-
-    while running.load(Ordering::Acquire) {
-        let (buf, meta) = match stream.next() {
-            Ok(val) => val,
-            Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {
-                if !running.load(Ordering::Acquire) {
-                    // Graceful shutdown requested while waiting for DQBUF
-                    return Ok(SupervisorAction::Shutdown);
-                }
-                return Err(CameraError::BufferDequeue {
-                    path: config.device_path.clone(),
-                    reason: "Frame capture timed out waiting for hardware buffer".to_string(),
-                });
-            }
-            Err(e) => {
-                return Err(CameraError::from_ioctl_error(
-                    config.device_path.clone(),
-                    e,
-                    |reason| CameraError::BufferDequeue {
-                        path: config.device_path.clone(),
-                        reason,
-                    },
-                ));
-            }
-        };
-
-        // Discard initial frames for auto-exposure convergence
-        if warmup_discarded < config.warmup_frames {
-            warmup_discarded = warmup_discarded.saturating_add(1);
-            is_ready.store(false, Ordering::Release);
-            continue;
-        }
-
-        let bytesused = meta.bytesused as usize;
-        let data = if bytesused > 0 && bytesused <= buf.len() {
-            buf.get(..bytesused)
-                .map(|s| s.to_vec())
-                .unwrap_or_else(|| buf.to_vec())
-        } else {
-            buf.to_vec()
-        };
-
-        let mono_ns = monotonic_nanos();
-        let frame = Frame::new(
-            data,
-            actual_width,
-            actual_height,
-            mono_ns,
-            target_format,
-            sequence,
-        )
-        .with_sensor_type(plan.sensor_type);
-
-        latest_frame.store(Some(Arc::new(frame)));
-        // Camera is now stabilized and ready: publish ready flag with Release after storing frame
-        is_ready.store(true, Ordering::Release);
-        health.store(HEALTH_STREAMING, Ordering::Release);
-        sequence = sequence.saturating_add(1);
-
-        // Check for idle auto-standby: if idle for more than idle_timeout,
-        // suspend capture and release hardware device handle to extinguish privacy LED
-        let is_idle = !config.idle_timeout.is_zero() && {
-            let last = last_activity.read().unwrap_or_else(|e| e.into_inner());
-            Instant::now().duration_since(*last) > config.idle_timeout
-        };
-
-        if is_idle {
+    let mut source = V4lCaptureSource {
+        handle: stream.handle(),
+        stream,
+    };
+    let settings = StreamSettings {
+        config,
+        device_path: &config.device_path,
+        layout,
+        sensor_type: plan.sensor_type,
+        poll_timeout,
+    };
+    let targets = StreamTargets {
+        latest_frame,
+        is_ready,
+        running,
+        last_activity,
+        health,
+        streaming_health: HEALTH_STREAMING,
+    };
+    match run_capture_loop(&mut source, &settings, &targets, &monotonic_nanos)? {
+        StreamExit::Shutdown => Ok(SupervisorAction::Shutdown),
+        StreamExit::Suspend => {
             info!(
                 "Camera idle timeout reached on '{}'; releasing device handle for auto-standby",
                 config.device_path.display()
             );
-            return Ok(SupervisorAction::Suspend);
+            Ok(SupervisorAction::Suspend)
         }
     }
+}
 
-    Ok(SupervisorAction::Shutdown)
+/// [`CaptureSource`] over a V4L2 MMAP stream.
+struct V4lCaptureSource<'a> {
+    stream: v4l::io::mmap::Stream<'a>,
+    handle: Arc<v4l::device::Handle>,
+}
+
+impl CaptureSource for V4lCaptureSource<'_> {
+    fn wait_ready(&mut self, timeout: Duration) -> std::io::Result<bool> {
+        let timeout_ms = i32::try_from(timeout.as_millis()).unwrap_or(i32::MAX);
+        self.handle
+            .poll(libc::POLLIN, timeout_ms)
+            .map(|ready| ready > 0)
+    }
+
+    fn next_buffer(&mut self) -> std::io::Result<(&[u8], BufferMeta)> {
+        let (buf, meta) = CaptureStream::next(&mut self.stream)?;
+        Ok((
+            buf,
+            BufferMeta {
+                bytesused: meta.bytesused,
+                error_flag: meta.flags.contains(v4l::buffer::Flags::ERROR),
+            },
+        ))
+    }
+
+    fn resync(&mut self) -> std::io::Result<()> {
+        CaptureStream::dequeue(&mut self.stream).map(|_| ())
+    }
 }
 
 /// Returns the current monotonic clock timestamp in nanoseconds.
