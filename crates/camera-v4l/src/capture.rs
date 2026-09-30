@@ -15,6 +15,7 @@
 //!   timeouts escalate to [`CameraError::Starved`] after [`MAX_STREAM_STALL`].
 
 use crate::config::CameraConfig;
+use crate::deep_grey::DeepGreyFormat;
 use crate::error::CameraError;
 use crate::frame::{Frame, PixelFormat};
 use crate::sensor::SensorType;
@@ -287,6 +288,106 @@ pub fn validate_negotiated_format(
     })
 }
 
+/// Validates a deep-greyscale (`Y8I`, `Y10`, `Y12`, `Y16`) format returned by `VIDIOC_S_FMT`
+/// (GitHub #192 applied to the #195 deep-greyscale path).
+///
+/// The returned layout describes the *delivered* frames ([`PixelFormat::Grey`], `width` x
+/// `height`), while `bytes_per_line` keeps the driver's wire stride (2 bytes per pixel, `0`
+/// meaning tight rows) consumed by [`validate_deep_grey_buffer`]. `substituted` is set when
+/// `requested` was not greyscale.
+///
+/// # Errors
+///
+/// [`FormatValidationError`] when a dimension is zero, the frame size overflows, or the stride
+/// cannot hold one 16-bit row.
+pub fn validate_deep_grey_format(
+    requested: PixelFormat,
+    width: u32,
+    height: u32,
+    bytes_per_line: u32,
+) -> Result<NegotiatedFormat, FormatValidationError> {
+    let invalid = FormatValidationError::InvalidDimensions {
+        format: PixelFormat::Grey,
+        width,
+        height,
+    };
+    if width == 0 || height == 0 {
+        return Err(invalid);
+    }
+    let row = width.checked_mul(2).ok_or_else(|| invalid.clone())?;
+    let stride = if bytes_per_line == 0 {
+        row
+    } else if bytes_per_line < row {
+        return Err(FormatValidationError::StrideTooSmall {
+            format: PixelFormat::Grey,
+            bytes_per_line,
+            row_bytes: usize::try_from(row).unwrap_or(usize::MAX),
+        });
+    } else {
+        bytes_per_line
+    };
+    usize::try_from(stride)
+        .ok()
+        .zip(usize::try_from(height).ok())
+        .and_then(|(s, h)| s.checked_mul(h))
+        .ok_or(invalid)?;
+    Ok(NegotiatedFormat {
+        format: PixelFormat::Grey,
+        width,
+        height,
+        bytes_per_line: stride,
+        substituted: requested != PixelFormat::Grey,
+    })
+}
+
+/// Validates one deep-greyscale buffer and normalises it to packed 8-bit greyscale.
+///
+/// Applies the same error-flag and `bytesused` checks as [`validate_captured_buffer`], then
+/// [`DeepGreyFormat::to_grey8`] with the wire stride recorded in `layout.bytes_per_line`; the
+/// result is exactly `width * height` bytes.
+///
+/// # Errors
+///
+/// [`FrameRejection`] when the buffer is error-flagged, `bytesused` exceeds the mapping, or
+/// the buffer is shorter than the negotiated frame.
+pub fn validate_deep_grey_buffer(
+    buf: &[u8],
+    meta: BufferMeta,
+    layout: &NegotiatedFormat,
+    deep: DeepGreyFormat,
+) -> Result<Vec<u8>, FrameRejection> {
+    if meta.error_flag {
+        return Err(FrameRejection::ErrorFlag);
+    }
+    let used = usize::try_from(meta.bytesused).unwrap_or(usize::MAX);
+    if used > buf.len() {
+        return Err(FrameRejection::BytesUsedExceedsBuffer {
+            bytesused: meta.bytesused,
+            capacity: buf.len(),
+        });
+    }
+    let payload = if used == 0 {
+        buf
+    } else {
+        buf.get(..used).unwrap_or(buf)
+    };
+    deep.to_grey8(payload, layout.width, layout.height, layout.bytes_per_line)
+        .ok_or_else(|| {
+            let rows = usize::try_from(layout.height).unwrap_or(usize::MAX);
+            let stride = usize::try_from(layout.bytes_per_line).unwrap_or(usize::MAX);
+            let row = usize::try_from(layout.width)
+                .unwrap_or(usize::MAX)
+                .saturating_mul(2);
+            FrameRejection::ShortBuffer {
+                expected: rows
+                    .saturating_sub(1)
+                    .saturating_mul(stride)
+                    .saturating_add(row),
+                actual: payload.len(),
+            }
+        })
+}
+
 /// Metadata of one dequeued buffer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BufferMeta {
@@ -403,6 +504,9 @@ pub(crate) struct StreamSettings<'a> {
     pub(crate) layout: NegotiatedFormat,
     pub(crate) sensor_type: SensorType,
     pub(crate) poll_timeout: Duration,
+    /// Deep-greyscale wire format normalised to 8-bit greyscale (GitHub #195), `None` when the
+    /// negotiated format is streamed natively.
+    pub(crate) deep_grey: Option<DeepGreyFormat>,
 }
 
 fn dequeue_error(path: &Path, err: io::Error) -> CameraError {
@@ -515,7 +619,11 @@ pub(crate) fn run_capture_loop<S: CaptureSource + ?Sized>(
             continue;
         }
 
-        let data = match validate_captured_buffer(buf, meta, &settings.layout) {
+        let validated = match settings.deep_grey {
+            Some(deep) => validate_deep_grey_buffer(buf, meta, &settings.layout, deep),
+            None => validate_captured_buffer(buf, meta, &settings.layout),
+        };
+        let data = match validated {
             Ok(data) => {
                 if rejected > 0 {
                     debug!(
@@ -721,6 +829,7 @@ mod tests {
                 layout,
                 sensor_type: SensorType::Rgb,
                 poll_timeout: MAX_DQBUF_POLL_TIMEOUT,
+                deep_grey: None,
             };
             let targets = StreamTargets {
                 latest_frame: &self.latest,
@@ -962,5 +1071,99 @@ mod tests {
             "back-to-back frames inside one idle interval are not published"
         );
         assert_eq!(frame.sequence, 0);
+    }
+
+    #[test]
+    fn test_deep_grey_format_validation() {
+        let layout = validate_deep_grey_format(PixelFormat::Grey, 4, 2, 0).unwrap();
+        assert_eq!(layout.format, PixelFormat::Grey);
+        assert_eq!(
+            layout.bytes_per_line, 8,
+            "zero stride means tight 16-bit rows"
+        );
+        assert!(!layout.substituted);
+        assert!(
+            validate_deep_grey_format(PixelFormat::Yuyv, 4, 2, 10)
+                .unwrap()
+                .substituted
+        );
+        assert!(matches!(
+            validate_deep_grey_format(PixelFormat::Grey, 4, 2, 7),
+            Err(FormatValidationError::StrideTooSmall { .. })
+        ));
+        assert!(matches!(
+            validate_deep_grey_format(PixelFormat::Grey, 0, 2, 0),
+            Err(FormatValidationError::InvalidDimensions { .. })
+        ));
+    }
+
+    #[test]
+    fn test_deep_grey_buffer_validation() {
+        let layout = validate_deep_grey_format(PixelFormat::Grey, 2, 2, 6).unwrap();
+        let meta = |bytesused| BufferMeta {
+            bytesused,
+            error_flag: false,
+        };
+        // Y16 little-endian, 2 px per row, 2 bytes of padding per row: keeps the high byte.
+        let buf = [0x00, 0x10, 0x00, 0x20, 0xEE, 0xEE, 0x00, 0x30, 0x00, 0x40];
+        let grey = validate_deep_grey_buffer(&buf, meta(10), &layout, DeepGreyFormat::Y16);
+        assert_eq!(grey.unwrap(), vec![0x10, 0x20, 0x30, 0x40]);
+        assert!(matches!(
+            validate_deep_grey_buffer(&buf, meta(9), &layout, DeepGreyFormat::Y16),
+            Err(FrameRejection::ShortBuffer { .. })
+        ));
+        assert_eq!(
+            validate_deep_grey_buffer(
+                &buf,
+                BufferMeta {
+                    bytesused: 10,
+                    error_flag: true
+                },
+                &layout,
+                DeepGreyFormat::Y16
+            ),
+            Err(FrameRejection::ErrorFlag)
+        );
+        assert!(matches!(
+            validate_deep_grey_buffer(&buf, meta(11), &layout, DeepGreyFormat::Y16),
+            Err(FrameRejection::BytesUsedExceedsBuffer { .. })
+        ));
+    }
+
+    #[test]
+    fn test_deep_grey_stream_publishes_grey8_frames() {
+        let h = Harness::new();
+        let layout = validate_deep_grey_format(PixelFormat::Grey, 2, 1, 0).unwrap();
+        let mut source = ScriptedSource::new(
+            vec![Step::Frame(
+                vec![0x00, 0x7F, 0x00, 0x80],
+                BufferMeta {
+                    bytesused: 4,
+                    error_flag: false,
+                },
+            )],
+            Arc::clone(&h.running),
+        );
+        let settings = StreamSettings {
+            config: &h.config,
+            device_path: &h.path,
+            layout,
+            sensor_type: SensorType::Infrared,
+            poll_timeout: MAX_DQBUF_POLL_TIMEOUT,
+            deep_grey: Some(DeepGreyFormat::Y16),
+        };
+        let targets = StreamTargets {
+            latest_frame: &h.latest,
+            is_ready: &h.ready,
+            running: &h.running,
+            last_activity: &h.activity,
+            health: &h.health,
+            streaming_health: STREAMING,
+        };
+        let result = run_capture_loop(&mut source, &settings, &targets, &|| 42);
+        assert_eq!(result.unwrap(), StreamExit::Shutdown);
+        let frame = h.latest.load_full().unwrap();
+        assert_eq!(frame.format, PixelFormat::Grey);
+        assert_eq!(frame.data, vec![0x7F, 0x80]);
     }
 }

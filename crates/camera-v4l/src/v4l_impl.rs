@@ -2,14 +2,15 @@
 
 use crate::capture::{
     dqbuf_poll_timeout, granted_fps, requested_frame_interval, run_capture_loop,
-    validate_negotiated_format, BufferMeta, CaptureSource, StreamExit, StreamSettings,
-    StreamTargets,
+    validate_deep_grey_format, validate_negotiated_format, BufferMeta, CaptureSource, StreamExit,
+    StreamSettings, StreamTargets,
 };
 use crate::config::CameraConfig;
+use crate::deep_grey::{delivered_formats, select_wire_format, DeepGreyFormat};
 use crate::error::CameraError;
 use crate::frame::{Frame, PixelFormat};
 use crate::manager::{CameraHealth, CameraManager};
-use crate::sensor::{classify_sensor, SensorType};
+use crate::sensor::{classify_sensor_with_hints, device_frame_sizes, SensorHints, SensorType};
 use crate::status::{CameraStatus, CameraStatusCell};
 use arc_swap::ArcSwapOption;
 use std::panic::{self, AssertUnwindSafe};
@@ -458,7 +459,7 @@ pub struct CapturePlan {
 
 /// Classifies the opened node and negotiates its capture format.
 ///
-/// The sensor is classified with the same [`classify_sensor`] rule the resolver uses for
+/// The sensor is classified with the same [`crate::classify_sensor`] rule the resolver uses for
 /// selection. On an [`SensorType::Infrared`] node with automatic negotiation, `Grey` is
 /// preferred when offered so that the IR sensor delivers its native single-channel data; an
 /// explicitly configured format is still honored. With no enumerated format, the configured
@@ -472,7 +473,22 @@ pub fn plan_capture(
     supported: &[PixelFormat],
     config: &CameraConfig,
 ) -> Result<CapturePlan, CameraError> {
-    let sensor_type = classify_sensor(card_name, supported);
+    plan_capture_with_hints(card_name, supported, &SensorHints::default(), config)
+}
+
+/// [`plan_capture`] with [`SensorHints`] (by-id link name, frame sizes), classified with
+/// [`classify_sensor_with_hints`] exactly as the resolver does (GitHub #195).
+///
+/// # Errors
+///
+/// Returns the [`negotiate_format`] error when no supported format is compatible.
+pub fn plan_capture_with_hints(
+    card_name: &str,
+    supported: &[PixelFormat],
+    hints: &SensorHints,
+    config: &CameraConfig,
+) -> Result<CapturePlan, CameraError> {
+    let sensor_type = classify_sensor_with_hints(card_name, supported, hints);
     let format = if supported.is_empty() {
         config.format
     } else {
@@ -540,18 +556,26 @@ fn open_and_stream(
     }
 
     // Query hardware-supported formats via VIDIOC_ENUM_FMT
-    let enum_fmts = Capture::enum_formats(&device).unwrap_or_default();
-    let supported: Vec<PixelFormat> = enum_fmts
+    let fourccs: Vec<FourCC> = Capture::enum_formats(&device)
+        .unwrap_or_default()
         .into_iter()
-        .filter_map(|desc| fourcc_to_pixel_format(desc.fourcc))
+        .map(|desc| desc.fourcc)
         .collect();
+    // Deep-greyscale IR fourccs (Y8I/Y10/Y12/Y16) are delivered as Grey (GitHub #195).
+    let supported = delivered_formats(&fourccs);
 
-    // Classify the node and negotiate its format; frames are stamped with the sensor type so
-    // an IR node streaming a colour format still takes the IR PAD policy (GitHub #169).
-    let plan = plan_capture(&caps.card, &supported, config)?;
+    // Classify the node with the same hints as the resolver (by-id link name, frame sizes)
+    // and negotiate its format; frames are stamped with the sensor type so an IR node
+    // streaming a colour format still takes the IR PAD policy (GitHub #169, #195).
+    let hints = SensorHints {
+        by_id_name: crate::resolver::by_id_name_of_path(&config.device_path),
+        frame_sizes: device_frame_sizes(&device, &fourccs),
+    };
+    let plan = plan_capture_with_hints(&caps.card, &supported, &hints, config)?;
     let target_format = plan.format;
 
-    let fourcc = pixel_format_to_fourcc(target_format);
+    let wire_format = select_wire_format(target_format, &fourccs);
+    let fourcc = wire_format.fourcc();
 
     let req_format = v4l::Format::new(config.width, config.height, fourcc);
     // uvcvideo reports a node streamed by another process (e.g. the daemon) as EBUSY here,
@@ -571,14 +595,25 @@ fn open_and_stream(
     // Honour what the driver granted, not what was requested (GitHub #192): the fourcc may be
     // substituted (e.g. when VIDIOC_ENUM_FMT failed and the configured format was requested
     // blindly) and rows may be padded.
-    let layout = validate_negotiated_format(
-        target_format,
-        actual_format.fourcc.repr,
-        actual_format.width,
-        actual_format.height,
-        actual_format.stride,
-    )
-    .map_err(|e| CameraError::SetFormat {
+    // A deep-greyscale fourcc (Y8I/Y10/Y12/Y16, GitHub #195) has a known 16-bit layout: it is
+    // validated with its wire stride and normalised to Grey in the capture loop.
+    let deep_grey = DeepGreyFormat::from_fourcc(actual_format.fourcc);
+    let negotiated = match deep_grey {
+        Some(_) => validate_deep_grey_format(
+            target_format,
+            actual_format.width,
+            actual_format.height,
+            actual_format.stride,
+        ),
+        None => validate_negotiated_format(
+            target_format,
+            actual_format.fourcc.repr,
+            actual_format.width,
+            actual_format.height,
+            actual_format.stride,
+        ),
+    };
+    let layout = negotiated.map_err(|e| CameraError::SetFormat {
         path: config.device_path.clone(),
         width: config.width,
         height: config.height,
@@ -665,6 +700,7 @@ fn open_and_stream(
         layout,
         sensor_type: plan.sensor_type,
         poll_timeout,
+        deep_grey,
     };
     let targets = StreamTargets {
         latest_frame,

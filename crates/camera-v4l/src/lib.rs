@@ -5,6 +5,7 @@
 
 pub mod capture;
 pub mod config;
+pub mod deep_grey;
 pub mod error;
 pub mod frame;
 pub mod manager;
@@ -16,6 +17,9 @@ pub mod status;
 pub mod v4l_impl;
 
 pub use config::{CameraConfig, CameraConfigBuilder};
+pub use deep_grey::{
+    delivered_formats, select_wire_format, CaptureWireFormat, DeepGreyFormat, DEEP_GREY_PRIORITY,
+};
 pub use error::CameraError;
 pub use frame::{Frame, PixelFormat};
 pub use manager::{CameraHealth, CameraManager};
@@ -25,12 +29,14 @@ pub use resolver::{
     CameraResolution, CameraResolutionSource, SystemCameraEnumerator, AUTO_CAMERA_DEVICE,
 };
 pub use sensor::{
-    classify_sensor, enumerate_capture_devices, select_camera_device, CameraDeviceInfo,
-    SensorPreference, SensorType,
+    capture_device_from_probe, classify_sensor, classify_sensor_with_hints,
+    enumerate_capture_devices, is_ir_frame_size_signature, select_camera_device,
+    select_camera_device_with, CameraDeviceInfo, SensorHints, SensorPreference, SensorType,
+    IR_SIGNATURE_MAX_HEIGHT, IR_SIGNATURE_MAX_WIDTH, MAX_FRAME_SIZE_HINTS,
 };
 pub use stable_path::{stable_device_path, DEFAULT_BY_ID_DIR};
 pub use status::{CameraErrorKind, CameraStatus, CameraStatusCell};
 pub use v4l_impl::{
-    fourcc_to_pixel_format, negotiate_format, pixel_format_to_fourcc, plan_capture, CapturePlan,
-    DevicePathResolver, V4lCameraManager, FORMAT_PRIORITY,
+    fourcc_to_pixel_format, negotiate_format, pixel_format_to_fourcc, plan_capture,
+    plan_capture_with_hints, CapturePlan, DevicePathResolver, V4lCameraManager, FORMAT_PRIORITY,
 };

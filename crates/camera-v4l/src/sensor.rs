@@ -42,43 +42,117 @@ impl CameraDeviceInfo {
     pub fn sensor_type(&self) -> SensorType {
         classify_sensor(&self.card_name, &self.supported_formats)
     }
+
+    /// Classifies the sensor type of this device with additional [`SensorHints`]
+    /// (by-id link name, frame sizes), see [`classify_sensor_with_hints`].
+    pub fn sensor_type_with_hints(&self, hints: &SensorHints) -> SensorType {
+        classify_sensor_with_hints(&self.card_name, &self.supported_formats, hints)
+    }
 }
 
-/// Classifies a camera sensor as RGB, Infrared, or Unknown.
-pub fn classify_sensor(card_name: &str, supported_formats: &[PixelFormat]) -> SensorType {
-    let lower = card_name.to_ascii_lowercase();
+/// Upper bound on the number of frame sizes kept in [`SensorHints::frame_sizes`].
+pub const MAX_FRAME_SIZE_HINTS: usize = 64;
 
-    // Check known infrared markers in V4L2 device names.
+/// Largest frame width of the IR frame-size signature (see [`is_ir_frame_size_signature`]).
+pub const IR_SIGNATURE_MAX_WIDTH: u32 = 640;
+
+/// Largest frame height of the IR frame-size signature (see [`is_ir_frame_size_signature`]).
+pub const IR_SIGNATURE_MAX_HEIGHT: u32 = 400;
+
+/// Classification signals beyond the (31-byte, often identical) V4L2 card name
+/// (review finding CAM-13, GitHub #195).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SensorHints {
+    /// File name of the persistent `/dev/v4l/by-id/` link of the node, when one exists. It is
+    /// built by udev from the untruncated USB product string (e.g. `..._Integrated_IR_Camera_...`).
+    pub by_id_name: Option<String>,
+    /// Frame sizes (`width`, `height`) enumerated with `VIDIOC_ENUM_FRAMESIZES`, bounded by
+    /// [`MAX_FRAME_SIZE_HINTS`]. Empty when unknown.
+    pub frame_sizes: Vec<(u32, u32)>,
+}
+
+/// Returns `true` when `name` contains a whole `IR` token or the word `infrared`.
+///
+/// Tokens are separated by any non-alphanumeric character, so `Integrated_IR_Camera`,
+/// `IR Camera` and `usb-Cam_IR-video-index0` match while `Chicony` or `Firmware` do not.
+fn has_ir_token(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    lower.contains("infrared")
+        || lower
+            .split(|c: char| !c.is_ascii_alphanumeric())
+            .any(|token| token == "ir")
+}
+
+/// Card-name IR markers, including the 31-byte truncation of `" IR"` to `" I"`.
+fn card_name_has_ir_marker(card_name: &str) -> bool {
+    let lower = card_name.to_ascii_lowercase();
     // Note: V4L2 caps.card is capped at 31 characters, so device names like
     // "USB2.0 FHD UVC WebCam: USB2.0 IR" are truncated to "USB2.0 FHD UVC WebCam: USB2.0 I".
-    if lower.contains("infrared")
+    lower.contains("infrared")
         || lower.contains("ir camera")
         || lower.contains("ir-camera")
         || lower.contains(": ir")
         || lower.contains(" ir ")
         || lower.ends_with(": ir")
         || lower.ends_with(" i")
-    {
-        return SensorType::Infrared;
-    }
+        || has_ir_token(card_name)
+}
 
-    // Check format capabilities: if it supports color formats, classify as RGB
-    let has_color_format = supported_formats.iter().any(|f| {
+/// Returns `true` when every enumerated frame size is at most
+/// [`IR_SIGNATURE_MAX_WIDTH`] x [`IR_SIGNATURE_MAX_HEIGHT`] (e.g. 340x340, 400x400, 640x360),
+/// the typical signature of a Windows-Hello IR module. An empty list is not a signature, and
+/// any VGA (640x480) or larger size rules it out.
+pub fn is_ir_frame_size_signature(frame_sizes: &[(u32, u32)]) -> bool {
+    !frame_sizes.is_empty()
+        && frame_sizes
+            .iter()
+            .all(|&(w, h)| w <= IR_SIGNATURE_MAX_WIDTH && h <= IR_SIGNATURE_MAX_HEIGHT)
+}
+
+fn has_colour_format(supported_formats: &[PixelFormat]) -> bool {
+    supported_formats.iter().any(|f| {
         matches!(
             f,
             PixelFormat::Rgb24 | PixelFormat::Yuyv | PixelFormat::Nv12 | PixelFormat::Mjpeg
         )
-    });
+    })
+}
 
-    if has_color_format {
-        return SensorType::Rgb;
-    }
+/// Classifies a camera sensor as RGB, Infrared, or Unknown from its card name and formats.
+///
+/// Equivalent to [`classify_sensor_with_hints`] with empty [`SensorHints`].
+pub fn classify_sensor(card_name: &str, supported_formats: &[PixelFormat]) -> SensorType {
+    classify_sensor_with_hints(card_name, supported_formats, &SensorHints::default())
+}
 
-    // If formats are non-empty but lack color (e.g. Grey only), classify as Infrared
-    if !supported_formats.is_empty() {
+/// Classifies a camera sensor with an ordered scorer (strongest signal first):
+///
+/// 1. an `IR` token in the by-id link name,
+/// 2. an IR marker in the card name,
+/// 3. a non-empty format list without any colour format (greyscale only),
+/// 4. the IR frame-size signature ([`is_ir_frame_size_signature`]),
+/// 5. any colour format means [`SensorType::Rgb`]; nothing at all means [`SensorType::Unknown`].
+pub fn classify_sensor_with_hints(
+    card_name: &str,
+    supported_formats: &[PixelFormat],
+    hints: &SensorHints,
+) -> SensorType {
+    if hints.by_id_name.as_deref().is_some_and(has_ir_token) {
         return SensorType::Infrared;
     }
-
+    if card_name_has_ir_marker(card_name) {
+        return SensorType::Infrared;
+    }
+    let has_colour = has_colour_format(supported_formats);
+    if !supported_formats.is_empty() && !has_colour {
+        return SensorType::Infrared;
+    }
+    if is_ir_frame_size_signature(&hints.frame_sizes) {
+        return SensorType::Infrared;
+    }
+    if has_colour {
+        return SensorType::Rgb;
+    }
     SensorType::Unknown
 }
 
@@ -87,31 +161,94 @@ pub fn select_camera_device(
     devices: &[CameraDeviceInfo],
     preference: SensorPreference,
 ) -> Option<&CameraDeviceInfo> {
-    if devices.is_empty() {
+    select_camera_device_with(devices, preference, CameraDeviceInfo::sensor_type)
+}
+
+/// Selects the best camera device using a caller-supplied classifier (e.g. one that applies
+/// [`SensorHints`]); the fallback order is the one of [`select_camera_device`].
+pub fn select_camera_device_with<F>(
+    devices: &[CameraDeviceInfo],
+    preference: SensorPreference,
+    classify: F,
+) -> Option<&CameraDeviceInfo>
+where
+    F: Fn(&CameraDeviceInfo) -> SensorType,
+{
+    let wanted = match preference {
+        SensorPreference::Any => return devices.first(),
+        SensorPreference::PreferRgb => SensorType::Rgb,
+        SensorPreference::PreferIr => SensorType::Infrared,
+    };
+    devices
+        .iter()
+        .find(|d| classify(d) == wanted)
+        .or_else(|| devices.iter().find(|d| classify(d) == SensorType::Unknown))
+        .or_else(|| devices.first())
+}
+
+/// Builds the enumeration entry of one probed node, or `None` when it must be skipped.
+///
+/// A node is kept only when it has the `VIDEO_CAPTURE` capability and delivers at least one
+/// pixel format ([`crate::delivered_formats`]); deep-greyscale IR formats (Y8I, Y10, Y12, Y16)
+/// count as [`PixelFormat::Grey`], so Y16-only IR nodes are no longer invisible (GitHub #195).
+pub fn capture_device_from_probe(
+    path: PathBuf,
+    card_name: String,
+    has_video_capture: bool,
+    fourccs: &[v4l::FourCC],
+) -> Option<CameraDeviceInfo> {
+    if !has_video_capture {
         return None;
     }
-
-    match preference {
-        SensorPreference::Any => devices.first(),
-        SensorPreference::PreferRgb => devices
-            .iter()
-            .find(|d| d.sensor_type() == SensorType::Rgb)
-            .or_else(|| {
-                devices
-                    .iter()
-                    .find(|d| d.sensor_type() == SensorType::Unknown)
-            })
-            .or_else(|| devices.first()),
-        SensorPreference::PreferIr => devices
-            .iter()
-            .find(|d| d.sensor_type() == SensorType::Infrared)
-            .or_else(|| {
-                devices
-                    .iter()
-                    .find(|d| d.sensor_type() == SensorType::Unknown)
-            })
-            .or_else(|| devices.first()),
+    let supported_formats = crate::deep_grey::delivered_formats(fourccs);
+    if supported_formats.is_empty() {
+        return None;
     }
+    Some(CameraDeviceInfo {
+        path,
+        card_name,
+        supported_formats,
+    })
+}
+
+/// Enumerates the frame sizes of an open device for every fourcc, bounded by
+/// [`MAX_FRAME_SIZE_HINTS`]. Stepwise ranges contribute their maximum size only.
+pub(crate) fn device_frame_sizes(device: &v4l::Device, fourccs: &[v4l::FourCC]) -> Vec<(u32, u32)> {
+    use v4l::framesize::FrameSizeEnum;
+    use v4l::video::Capture;
+
+    let mut sizes: Vec<(u32, u32)> = Vec::new();
+    for &fourcc in fourccs {
+        let Ok(found) = Capture::enum_framesizes(device, fourcc) else {
+            continue;
+        };
+        for frame_size in found {
+            let size = match frame_size.size {
+                FrameSizeEnum::Discrete(d) => (d.width, d.height),
+                FrameSizeEnum::Stepwise(s) => (s.max_width, s.max_height),
+            };
+            if !sizes.contains(&size) {
+                if sizes.len() >= MAX_FRAME_SIZE_HINTS {
+                    return sizes;
+                }
+                sizes.push(size);
+            }
+        }
+    }
+    sizes
+}
+
+/// Opens `path` and enumerates its frame sizes (empty on any error).
+pub(crate) fn frame_sizes_at(path: &std::path::Path) -> Vec<(u32, u32)> {
+    let Ok(device) = v4l::Device::with_path(path) else {
+        return Vec::new();
+    };
+    let fourccs: Vec<v4l::FourCC> = v4l::video::Capture::enum_formats(&device)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|desc| desc.fourcc)
+        .collect();
+    device_frame_sizes(&device, &fourccs)
 }
 
 /// Enumerates all physical video capture devices, querying capabilities and supported formats.
@@ -138,26 +275,25 @@ pub fn enumerate_capture_devices() -> Vec<CameraDeviceInfo> {
                 let dev_path = PathBuf::from(format!("/dev/{name}"));
                 if let Ok(dev) = v4l::Device::with_path(&dev_path) {
                     if let Ok(caps) = dev.query_caps() {
-                        if caps
+                        let has_video_capture = caps
                             .capabilities
-                            .contains(v4l::capability::Flags::VIDEO_CAPTURE)
-                        {
-                            let enum_fmts =
-                                v4l::video::Capture::enum_formats(&dev).unwrap_or_default();
-                            let supported_formats: Vec<PixelFormat> = enum_fmts
+                            .contains(v4l::capability::Flags::VIDEO_CAPTURE);
+                        let fourccs: Vec<v4l::FourCC> = if has_video_capture {
+                            v4l::video::Capture::enum_formats(&dev)
+                                .unwrap_or_default()
                                 .into_iter()
-                                .filter_map(|desc| {
-                                    crate::v4l_impl::fourcc_to_pixel_format(desc.fourcc)
-                                })
-                                .collect();
-
-                            if !supported_formats.is_empty() {
-                                devices.push(CameraDeviceInfo {
-                                    path: dev_path,
-                                    card_name: caps.card,
-                                    supported_formats,
-                                });
-                            }
+                                .map(|desc| desc.fourcc)
+                                .collect()
+                        } else {
+                            Vec::new()
+                        };
+                        if let Some(info) = capture_device_from_probe(
+                            dev_path,
+                            caps.card,
+                            has_video_capture,
+                            &fourccs,
+                        ) {
+                            devices.push(info);
                         }
                     }
                 }

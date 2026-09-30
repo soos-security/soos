@@ -185,6 +185,16 @@ Constants live in `crates/daemon/src/preview.rs`: `MAX_PREVIEW_ALLOWED_UIDS = 64
 
 Only after these checks does the daemon call `camera.notify_activity()`, wait for readiness and copy the latest capture into a `PreviewResponse` (`format = 255` and empty `data` when no capture is available). The camera is therefore never woken, and the privacy LED never lit, by an unauthorized peer.
 
+#### Preview frame size (GitHub #196, CAM-14)
+
+A raw capture can exceed `MAX_PREVIEW_MESSAGE_SIZE` (2 MiB; a 1920x1080 YUYV frame is 4,147,200 bytes). The daemon therefore prepares every frame with `soos_daemon::preview::preview_image_for_frame` before encoding:
+
+- a frame at most `MAX_PREVIEW_WIDTH` (640) pixels wide, or a compressed MJPEG frame of any width, whose payload fits `MAX_PREVIEW_PIXEL_BYTES` (`MAX_PREVIEW_MESSAGE_SIZE - 1024`) is forwarded unchanged (format, size and bytes);
+- a larger frame is downscaled by integer decimation to at most 640 pixels wide and within the budget: `Grey` stays `Grey` (format `1`), `Rgb24` / `YUYV` / `NV12` / `MJPEG` become RGB24 (format `0`; MJPEG is decoded with the bounded `soos_vision::convert_to_rgb`);
+- a frame that cannot be converted (truncated buffer, undecodable MJPEG, zero dimension) is answered with an explicit empty preview (`format = 255`, no data), and a `CodecError::MessageTooLarge` from `encode_preview` is also mapped to that empty preview.
+
+The connection is never closed because of the frame size, so the GUI keeps polling on the same connection instead of reconnecting every 100 ms. Intermediate buffers are zeroized; no pixel data is logged.
+
 ### Client contract (`soos-gui` `IpcCameraManager`)
 
 - Each request carries a fresh 256-bit `request_id` (`getrandom`) and the caller's real UID as `uid_hint`; a refusal is recognised as a `Response` bounded by `MAX_MESSAGE_SIZE` whose `request_id` matches the nonce.

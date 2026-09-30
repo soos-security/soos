@@ -143,6 +143,43 @@ A uvcvideo node streamed by another process opens successfully and only fails at
 classifies `EBUSY` as `DeviceBusy` and `ENODEV`/`ENOENT` as `DeviceNotFound` (raw OS error kept);
 the supervisor logs a dedicated "held by another process" warning (`CameraError::is_device_busy`).
 
+### Sensor Classification Hints and Deep-Greyscale IR Formats (GitHub #195, CAM-13)
+
+The V4L2 card name is capped at 31 bytes, and the RGB and IR nodes of one laptop camera often
+report the **same** truncated name (for example `Integrated Camera: Integrated C`). IR modules that
+also advertise YUYV used to be classified RGB, and IR modules exposing only deep-greyscale
+fourccs were dropped from enumeration. Classification now uses an ordered scorer,
+`classify_sensor_with_hints(card_name, formats, &SensorHints)` (strongest signal first):
+
+1. a whole `IR` token (or `infrared`) in the `/dev/v4l/by-id/` link name
+   (`SensorHints::by_id_name`), which udev builds from the untruncated USB product string;
+2. an IR marker in the card name (the historic markers, the truncated `" I"` suffix, or an `IR`
+   token such as `Integrated_IR_Camera`);
+3. a non-empty format list without any colour format (greyscale only);
+4. the IR frame-size signature `is_ir_frame_size_signature`: every enumerated size is at most
+   `IR_SIGNATURE_MAX_WIDTH` x `IR_SIGNATURE_MAX_HEIGHT` (640x400, e.g. 340x340, 400x400,
+   640x360); any VGA or larger size rules it out;
+5. otherwise any colour format means `Rgb`, and nothing at all means `Unknown`.
+
+`classify_sensor(card, formats)` is the same scorer with empty hints (unchanged results).
+`resolve_camera_device` builds the hints of every node (by-id alias name, and
+`CameraEnumerator::frame_sizes`, a provided trait method that returns no sizes by default;
+`SystemCameraEnumerator` enumerates `VIDIOC_ENUM_FRAMESIZES`, bounded by `MAX_FRAME_SIZE_HINTS`
+= 64, stepwise ranges contribute their maximum only) and selects with
+`select_camera_device_with`. The capture supervisor computes the same hints for the opened node
+(`plan_capture_with_hints`), so a node selected as IR is also stamped `SensorType::Infrared`.
+
+Deep-greyscale fourccs (`deep_grey.rs`): `Y8I` (interleaved stereo, left sensor kept), `Y10`,
+`Y12` and `Y16` (little-endian 16-bit containers) are mapped by `delivered_formats` to
+`PixelFormat::Grey`, so such a node is enumerated (`capture_device_from_probe`) and classified
+Infrared. When `Grey` is negotiated and the node has no native 8-bit greyscale fourcc,
+`select_wire_format` requests the deep format (priority `Y16 > Y12 > Y10 > Y8I`) and every buffer
+is normalised to packed 8-bit greyscale by `DeepGreyFormat::to_grey8` (honours `bytesperline`,
+drops a truncated buffer) before a `Frame` is published. `PixelFormat` itself is unchanged.
+
+Not covered hermetically: `bus_info`, `driver` and `device_caps` are not used, because both nodes
+of one USB camera share them; real-hardware validation of the frame-size signature is a follow-up.
+
 ---
 
 ## IR Sensors and Emitter Requirements (GitHub #169)
@@ -182,6 +219,7 @@ while frames are captured.
 | **C7** | Graceful hot-unplug recovery on `ENODEV` | `hotunplug_tests::test_camera_hotunplug_recovery` | Validated |
 | **C8** | Dual-sensor discrimination (RGB vs IR preference) | `dual_sensor_tests::test_dual_sensor_prefers_rgb` | Validated |
 | **CSR1–CSR2** | Single shared camera resolver (GitHub #152) | `resolver_tests::*` | Verified |
+| **CCP1–CCP4** | Ordered sensor scorer and deep-greyscale IR formats (GitHub #195) | `sensor_hint_classification_tests::*` | Verified |
 | **CSR5** | `EBUSY`/`ENODEV` from capture ioctls classified (GitHub #150) | `error_recovery_tests::test_set_format_ebusy_maps_to_device_busy` | Verified |
 | **CSH1–CSH4** | Re-resolution after `ENODEV`, bounded pacing, no silent substitution, by-id addressing | `supervision_tests::test_supervisor_reresolves_device_after_enodev` (and siblings) | ✅ Verified |
 | **CSH5–CSH6** | Truthful `CameraHealth`, standby vs failure, panic → `Dead` | `supervision_tests::test_supervisor_panic_marks_camera_dead` (and siblings) | ✅ Verified |
