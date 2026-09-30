@@ -4,7 +4,7 @@
 //! [`Event`] on the daemon socket. Codec v1 serialized both without a type tag, so the
 //! daemon had to double-decode every frame and pick a handler with a UID heuristic.
 //!
-//! # Tagged frame (protocol v1, backward compatible extension)
+//! # Tagged frame (protocol v1 trailer, not readable by pre-#204 daemons)
 //!
 //! ```text
 //! u32 BE length | postcard(Request | Event) | message_tag:u8
@@ -22,11 +22,15 @@
 //!   accepted only when it decodes as exactly one type ([`MessageError::Ambiguous`]
 //!   otherwise, fail closed).
 //!
-//! A trailer (instead of a leading tag) keeps the message body byte-identical to codec v1:
-//! a v1 reader that decodes `postcard::from_bytes::<Request>` still reads the same fields
-//! (postcard ignores trailing bytes), while [`crate::types::CURRENT_VERSION`] stays `1`.
-//! The strict [`crate::codec::decode_payload`] (GitHub #224) tolerates exactly this one
-//! trailer byte, and only the tag matching the decoded type.
+//! A trailer (instead of a leading tag) keeps the message body byte-identical to codec v1
+//! and [`crate::types::CURRENT_VERSION`] stays `1`, but tagged frames are **not** backward
+//! compatible with older readers: only a lenient `postcard::from_bytes::<Request>` would
+//! ignore the extra byte, and no shipped reader is lenient. A daemon built before this change
+//! (strict codec, GitHub #224) rejects a tagged frame as malformed, so `pam_soos.so` fails
+//! closed to the password and must be upgraded together with `soos-daemon`
+//! (`Docs/IPC_PROTOCOL.md` §12). In the other direction, this daemon keeps accepting untagged
+//! v1 frames. The strict [`crate::codec::decode_payload`] tolerates exactly this one trailer
+//! byte, and only the tag matching the decoded type.
 
 use crate::codec::CodecError;
 use crate::types::{Event, Request, MAX_MESSAGE_SIZE};

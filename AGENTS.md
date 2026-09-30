@@ -109,7 +109,7 @@ soos/
 ├── models/                 # manifest.toml + SHA-256 checksums
 ├── tests/
 │   ├── invariants/         # soos-invariants static repository checks
-│   ├── fixtures/           # shared synthetic frames and embeddings (mod.rs)
+│   ├── fixtures/           # soos-test-fixtures: synthetic frames, PAD presentations, ONNX graphs
 │   ├── docker/             # Dockerized PAM matrix (pam_test_runner)
 │   ├── distro/             # per-distribution package validation
 │   └── physical/           # real-hardware validation suite

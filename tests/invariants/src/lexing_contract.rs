@@ -12,8 +12,9 @@
 //!   that ends with `;` (`mod tests;`, `use ...;`, `const ...;`) is removed up to that `;`,
 //!   an item with a body (`mod tests { ... }`, `fn`, `impl`) up to its matching `}`.
 //!
-//! `scripts/candid_review.sh` embeds the same item rule in awk (single-line literals only) to
-//! filter the PAM diff; the end-to-end behaviour is covered by `candid_review_contract`.
+//! `scripts/candid_review.sh` embeds the same lexer and item rule in awk (block comments and
+//! raw strings included since GitHub #285) to filter the PAM diff; the end-to-end behaviour
+//! is covered by `candid_review_contract`.
 //!
 //! On top of the extractor, this module adds the PAM checks the text greps missed: the full
 //! set of panicking constructs in production code (not only `.unwrap()` / `.expect(`), and

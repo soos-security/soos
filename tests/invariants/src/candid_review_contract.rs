@@ -271,3 +271,92 @@ fn test_fil_candid_ignores_upstream_commits_after_branch_point() {
         "upstream changes after the branch point must not be audited as branch changes:\n{output}"
     );
 }
+
+// GitHub #285 (row RFX8): the awk filter lexes block comments and raw strings across lines,
+// so neither a brace inside them nor a commented-out panic changes what is audited.
+
+/// A test module whose block comment or raw string holds an unbalanced `{`, followed by a
+/// production function whose body is `production`.
+fn pam_lib_with_test_literal(literal_line: &str, production: &str) -> String {
+    format!(
+        "#[cfg(test)]\nmod tests {{\n{literal_line}\n    #[test]\n    fn test_ok() {{}}\n}}\n\n\
+         pub fn authenticate() -> i32 {{\n    {production}\n}}\n"
+    )
+}
+
+#[test]
+fn test_rfx_candid_block_comment_brace_does_not_hide_production() {
+    let base = pam_lib_with_test_literal("    /* opening { brace */", "0");
+    let repo = ScratchRepo::new("block_comment_brace", &[("crates/pam/src/lib.rs", &base)]);
+    repo.git(&["switch", "-q", "-c", "topic"]);
+    repo.write(
+        "crates/pam/src/lib.rs",
+        &pam_lib_with_test_literal("    /* opening { brace */", "lookup().unwrap()"),
+    );
+    repo.commit("feat(pam): add lookup");
+
+    let (ok, output) = repo.candid_review();
+    assert!(
+        !ok,
+        "a `{{` inside a block comment of a test module must not hide later production code:\n{output}"
+    );
+    assert!(output.contains("lookup().unwrap()"), "{output}");
+}
+
+#[test]
+fn test_rfx_candid_raw_string_brace_does_not_hide_production() {
+    let literal = "    const S: &str = r#\"a\"{\"#;";
+    let base = pam_lib_with_test_literal(literal, "0");
+    let repo = ScratchRepo::new("raw_string_brace", &[("crates/pam/src/lib.rs", &base)]);
+    repo.git(&["switch", "-q", "-c", "topic"]);
+    repo.write(
+        "crates/pam/src/lib.rs",
+        &pam_lib_with_test_literal(literal, "lookup().expect(\"present\")"),
+    );
+    repo.commit("feat(pam): add lookup");
+
+    let (ok, output) = repo.candid_review();
+    assert!(
+        !ok,
+        "a `{{` inside a raw string of a test module must not hide later production code:\n{output}"
+    );
+    assert!(output.contains("expect("), "{output}");
+}
+
+#[test]
+fn test_rfx_candid_multiline_block_comment_brace_does_not_hide_production() {
+    let comment = "    /*\n     * nested /* { */ still a comment {\n     */";
+    let base = pam_lib_with_test_literal(comment, "0");
+    let repo = ScratchRepo::new("multiline_comment", &[("crates/pam/src/lib.rs", &base)]);
+    repo.git(&["switch", "-q", "-c", "topic"]);
+    repo.write(
+        "crates/pam/src/lib.rs",
+        &pam_lib_with_test_literal(comment, "lookup().unwrap()"),
+    );
+    repo.commit("feat(pam): add lookup");
+
+    let (ok, output) = repo.candid_review();
+    assert!(
+        !ok,
+        "a multi-line nested block comment must be skipped as a whole:\n{output}"
+    );
+}
+
+#[test]
+fn test_rfx_candid_ignores_panics_inside_block_comments_and_raw_strings() {
+    let repo = ScratchRepo::new("commented_panic", &[("crates/pam/src/lib.rs", PAM_LIB)]);
+    repo.git(&["switch", "-q", "-c", "topic"]);
+    let changed = PAM_LIB.replace(
+        "pub fn authenticate() -> i32 {\n    0\n}",
+        "/* Never call lookup().unwrap() here:\n   it could panic!(\"x\") across the FFI. */\n\
+         pub fn authenticate() -> i32 {\n    let _doc = r#\"lookup().unwrap()\"#;\n    0\n}",
+    );
+    repo.write("crates/pam/src/lib.rs", &changed);
+    repo.commit("docs(pam): document the panic rule");
+
+    let (ok, output) = repo.candid_review();
+    assert!(
+        ok,
+        "panics inside block comments and raw strings are not production code:\n{output}"
+    );
+}

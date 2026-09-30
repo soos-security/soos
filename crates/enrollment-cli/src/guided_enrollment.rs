@@ -266,6 +266,19 @@ impl GuidedEnrollmentSession {
         self.live_streak = 0;
     }
 
+    /// Counts a spoof frame that carries no usable sample (no pose or no embedding, e.g. an
+    /// alignment failure after the PAD verdict), exactly as [`Self::process_sample`] counts a
+    /// non-live sample: an aborted or completed session is left unchanged (GitHub #285).
+    pub fn record_presentation_attack(&mut self) -> EnrollmentStepFeedback {
+        if self.aborted {
+            return EnrollmentStepFeedback::SessionAborted;
+        }
+        if self.current_step == EnrollmentStep::Completed {
+            return EnrollmentStepFeedback::AllStepsCompleted;
+        }
+        self.record_spoof()
+    }
+
     /// Handles a spoof frame: resets the streak and the current step, aborts the session
     /// once `max_spoof_events` is reached.
     fn record_spoof(&mut self) -> EnrollmentStepFeedback {

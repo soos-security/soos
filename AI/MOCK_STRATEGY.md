@@ -23,10 +23,10 @@ GitHub #241). It contains no facial image, no serialized tensor and no embedding
 - `onnx`: `minimal_identity_model()`, a hand-encoded ONNX `Identity` graph so the ORT wiring
   of the daemon and enrollment CLI runs in CI without a model file.
 
-New tests add `soos-test-fixtures` to `[dev-dependencies]`; it is never a normal dependency.
-Three legacy test files (`crates/vision/tests/pad_tests.rs`, `crates/daemon/tests/pad_wiring_tests.rs`,
-`crates/enrollment-cli/tests/pad_wiring_tests.rs`) still include `mod.rs` through `#[path]`;
-`tests/invariants/src/fixtures_contract.rs` freezes that list. Face embeddings are 512D
+Every test consumes `soos-test-fixtures` through `[dev-dependencies]`; it is never a normal
+dependency. No `#[path]` include of `tests/fixtures/mod.rs` remains: the legacy list
+`LEGACY_PATH_INCLUDES` in `tests/invariants/src/fixtures_contract.rs` is empty and any new
+include fails that invariant. Face embeddings are 512D
 (ArcFace, `AI/DECISIONS.md`); embedding tests build their vectors locally. Real face captures
 (detection, alignment, matching accuracy) are covered only by the physical suite (`tests/physical/`).
 
