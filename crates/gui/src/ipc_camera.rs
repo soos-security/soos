@@ -6,7 +6,9 @@
 //! as [`IpcPreviewError::Unauthorized`] and stops polling instead of hammering the daemon.
 
 use arc_swap::ArcSwapOption;
-use soos_camera_v4l::{CameraManager, Frame, PixelFormat};
+use soos_camera_v4l::{
+    CameraErrorKind, CameraManager, CameraStatus, CameraStatusCell, Frame, PixelFormat,
+};
 use soos_protocol::codec::{decode, decode_preview, encode};
 use soos_protocol::types::{
     PreviewResponse, ReasonClass, Request, RequestId, RequestKind, Response, Verdict,
@@ -53,6 +55,19 @@ pub enum IpcPreviewError {
     Io,
 }
 
+impl IpcPreviewError {
+    /// Classifies this failure for the user-visible camera status (CAM-07).
+    pub fn kind(self) -> CameraErrorKind {
+        match self {
+            Self::Unauthorized => CameraErrorKind::SourceUnauthorized,
+            Self::RateLimited => CameraErrorKind::SourceRateLimited,
+            Self::Unavailable => CameraErrorKind::SourceUnavailable,
+            Self::Protocol => CameraErrorKind::SourceProtocol,
+            Self::Io => CameraErrorKind::SourceUnreachable,
+        }
+    }
+}
+
 /// Camera manager implementation querying real-time video frames from `soos-daemon`
 /// via the `/run/soos/daemon.sock` IPC socket.
 pub struct IpcCameraManager {
@@ -60,6 +75,7 @@ pub struct IpcCameraManager {
     is_ready: Arc<AtomicBool>,
     running: Arc<AtomicBool>,
     last_error: Arc<Mutex<Option<IpcPreviewError>>>,
+    status: Arc<CameraStatusCell>,
     worker_handle: Option<JoinHandle<()>>,
 }
 
@@ -71,12 +87,14 @@ impl IpcCameraManager {
         let is_ready = Arc::new(AtomicBool::new(false));
         let running = Arc::new(AtomicBool::new(true));
         let last_error = Arc::new(Mutex::new(None));
+        let status = Arc::new(CameraStatusCell::new());
 
         let worker = WorkerState {
             latest_frame: Arc::clone(&latest_frame),
             is_ready: Arc::clone(&is_ready),
             running: Arc::clone(&running),
             last_error: Arc::clone(&last_error),
+            status: Arc::clone(&status),
         };
 
         let handle = thread::Builder::new()
@@ -91,6 +109,7 @@ impl IpcCameraManager {
             is_ready,
             running,
             last_error,
+            status,
             worker_handle: handle,
         }
     }
@@ -146,6 +165,16 @@ impl CameraManager for IpcCameraManager {
         self.running.store(false, Ordering::Release);
         self.is_ready.store(false, Ordering::Release);
     }
+
+    fn status(&self) -> CameraStatus {
+        if self.is_ready() {
+            return CameraStatus::Ready;
+        }
+        match self.status.get() {
+            CameraStatus::Ready => CameraStatus::Starting,
+            other => other,
+        }
+    }
 }
 
 impl Drop for IpcCameraManager {
@@ -163,11 +192,29 @@ struct WorkerState {
     is_ready: Arc<AtomicBool>,
     running: Arc<AtomicBool>,
     last_error: Arc<Mutex<Option<IpcPreviewError>>>,
+    status: Arc<CameraStatusCell>,
 }
 
 impl WorkerState {
     fn set_error(&self, error: Option<IpcPreviewError>) {
-        *self.last_error.lock().unwrap_or_else(|e| e.into_inner()) = error;
+        let previous = std::mem::replace(
+            &mut *self.last_error.lock().unwrap_or_else(|e| e.into_inner()),
+            error,
+        );
+        match error {
+            Some(err) => {
+                self.status.record_error(err.kind());
+                if previous != Some(err) {
+                    tracing::warn!(error = %err, "soos-daemon camera preview failure");
+                }
+            }
+            None => {
+                self.status.set(CameraStatus::Ready);
+                if previous.is_some() {
+                    tracing::info!("soos-daemon camera preview recovered");
+                }
+            }
+        }
     }
 
     fn not_ready(&self) {

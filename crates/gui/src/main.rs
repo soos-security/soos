@@ -20,6 +20,8 @@ use soos_inference_ort::{
 use soos_vision::{VisionPipeline, VisionPipelineConfig};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // GitHub #155: install the stderr subscriber before anything logs (RUST_LOG honored).
+    soos_gui::logging::init();
     let args = GuiArgs::parse();
 
     // 1. Initialize Biometric Store

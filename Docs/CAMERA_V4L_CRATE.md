@@ -38,8 +38,26 @@ pub trait CameraManager: Send + Sync {
 
     /// Requests shutdown of background capture threads.
     fn stop(&self);
+
+    /// User-presentable lifecycle state (default: derived from `is_ready()`).
+    fn status(&self) -> CameraStatus { /* Ready or Starting */ }
 }
 ```
+
+### `CameraStatus`, `CameraErrorKind` & `CameraStatusCell` (GitHub #155, CAM-07)
+- `CameraError::kind()` classifies every error into a stable, detail-free `CameraErrorKind`:
+  `DeviceNotFound` (`ENOENT`/`ENODEV`/`ENXIO`), `DeviceBusy` (`EBUSY`), `PermissionDenied`
+  (`EACCES`/`EPERM`, including when wrapped in the generic `Io` variant), `UnsupportedDevice`
+  (capabilities or format negotiation), `Starved`, `Io`, plus `Source*` kinds for remote frame
+  sources such as the `soos-daemon` preview proxy (`SourceUnreachable`, `SourceUnauthorized`,
+  `SourceRateLimited`, `SourceUnavailable`, `SourceProtocol`).
+- `CameraStatus` is `Starting | Ready | Suspended | Stopped | Error { kind, failures }`, where
+  `failures` counts consecutive failed attempts of the same kind (saturating) and restarts after
+  a successful streaming session.
+- `V4lCameraManager` records every supervisor failure in a `CameraStatusCell` (the existing
+  `warn!` log is kept), reports `Suspended` during auto-standby and `Stopped` after shutdown.
+  `MockCameraManager::status()` reports injected faults (`set_error`, `set_starved`).
+- The status carries no frame data, device contents or biometric material.
 
 ### `CameraConfig` & `CameraConfigBuilder`
 Configures:
@@ -68,3 +86,4 @@ Configures:
 | **C6** | Priority format negotiation (`RGB24 -> YUYV -> NV12 -> MJPEG -> Grey`) | `format_negotiation_tests::test_format_negotiation_prefers_rgb24` | Validated |
 | **C7** | Graceful hot-unplug recovery on `ENODEV` | `hotunplug_tests::test_camera_hotunplug_recovery` | Validated |
 | **C8** | Dual-sensor discrimination (RGB vs IR preference) | `dual_sensor_tests::test_dual_sensor_prefers_rgb` | Validated |
+| **GRE5** | `CameraError::kind()` classification and `CameraManager::status()` reporting | `camera_status_tests::*` | ✅ Verified |
