@@ -188,5 +188,6 @@ Only after these checks does the daemon call `camera.notify_activity()`, wait fo
 
 - Each request carries a fresh 256-bit `request_id` (`getrandom`) and the caller's real UID as `uid_hint`; a refusal is recognised as a `Response` bounded by `MAX_MESSAGE_SIZE` whose `request_id` matches the nonce.
 - `IpcPreviewError::Unauthorized` stops the polling worker (no reconnect storm); `RateLimited` backs off 250 ms; `Unavailable` backs off 100 ms; `Protocol` / `Io` reconnect after 200 ms.
-- `IpcCameraManager::probe_preview` performs one round-trip at GUI start-up; on refusal the GUI logs the reason and falls back to direct V4L2 access.
+- `IpcCameraManager::probe_preview` performs one round-trip at GUI start-up. On refusal the GUI does **not** fall back to direct V4L2 access (GitHub #150): the daemon owns the camera, so the GUI shows an actionable "Camera unavailable" notice (`soos_gui::camera_mode::CameraBlockReason`) instead of fighting the daemon for the device with `EBUSY`.
+- Direct V4L2 access is selected only when the daemon is provably not running: `connect(2)` on the socket fails with `ENOENT`/`ECONNREFUSED` **and** `systemctl is-active soos-daemon.service` is false. `EACCES`/`EPERM` (user not in the `soos` group, `/run/soos` is `0750 root:soos`) is reported as "add the user to the `soos` group, then log out and back in".
 

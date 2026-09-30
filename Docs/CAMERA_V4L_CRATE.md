@@ -18,7 +18,7 @@ When an authentication request arrives, consumer vision pipelines query `latest_
 6. **Error Recovery with Bounded Backoff (Criterion C3 & C7)**: Handles `ENODEV`, `EBUSY`, and `EIO` without crashing. Uses exponential backoff (100ms → 200ms → 400ms → cap at 5,000ms) with fail-closed availability reporting. Seamlessly re-initializes and warms up when a hot-unplugged device is reconnected.
 7. **Hardware-Free Mocking (Criterion C1)**: Provides `MockCameraManager` behind the `mock-camera` feature flag for testing in headless CI and Docker environments.
 8. **Automatic Format Negotiation (Criterion C6)**: Discovers device capabilities via `VIDIOC_ENUM_FMT` and automatically negotiates capture format across preference priority `RGB24 -> YUYV -> NV12 -> MJPEG -> Grey` with graceful fallback.
-9. **Dual-Sensor Device Discrimination (Criterion C8)**: Distinguishes RGB color sensors from Infrared sensors (e.g. on ThinkPad dual-camera laptops) and selects RGB by default, while supporting explicit configuration overrides.
+9. **Dual-Sensor Device Discrimination (Criterion C8)**: Distinguishes RGB color sensors from Infrared sensors (e.g. on ThinkPad dual-camera laptops) and selects IR by default (`SensorPreference::PreferIr`), while supporting explicit configuration overrides.
 
 ---
 
@@ -54,6 +54,34 @@ Configures:
 - `warmup_frames`: Discarded startup frames (default: 20)
 - `min_backoff` & `max_backoff`: Error backoff limits (default: 100ms to 5s)
 
+### Shared Camera Resolver (`resolver.rs`, GitHub #152)
+
+`soos-daemon`, `soos-enroll` and `soos-gui` (direct mode) all resolve the device through
+`resolve_camera_device(explicit, preference, &dyn CameraEnumerator) -> CameraResolution`, so that
+enrollment and authentication always use the same sensor:
+
+1. An explicit path (anything but the sentinels `""`, `auto`, `default` and
+   `AUTO_CAMERA_DEVICE` = `/dev/v4l/by-id/default-camera`, see `is_auto_camera_device`) is returned
+   verbatim (`CameraResolutionSource::Explicit`). Callers order their explicit sources
+   (CLI flag, then `[pipeline] camera_device`).
+2. Otherwise the enumerated V4L2 capture nodes are ranked by `select_camera_device` with the
+   `SensorPreference` (default `PreferIr`; `parse_sensor_preference` accepts
+   `prefer_ir`/`ir`, `prefer_rgb`/`rgb`, `any`). The selected node is reported through its
+   `/dev/v4l/by-id/` alias when one exists (Criterion C4). Aliases are only matched against capture
+   nodes, so a metadata node (`...-video-index1`) is never selected (`AutoDetected`).
+3. Without any capture node the sentinel is returned (`Fallback`).
+
+`SystemCameraEnumerator` reads `/sys/class/video4linux` and at most `MAX_BY_ID_ENTRIES` (64)
+by-id aliases (dangling aliases skipped); tests inject a hermetic `CameraEnumerator`.
+`CameraConfig::explicit_device()` returns `None` for a sentinel `device_path`.
+
+### Busy-Device Classification (GitHub #150)
+
+A uvcvideo node streamed by another process opens successfully and only fails at
+`VIDIOC_S_FMT` / `VIDIOC_REQBUFS` / `VIDIOC_DQBUF` with `EBUSY`. `CameraError::from_ioctl_error`
+classifies `EBUSY` as `DeviceBusy` and `ENODEV`/`ENOENT` as `DeviceNotFound` (raw OS error kept);
+the supervisor logs a dedicated "held by another process" warning (`CameraError::is_device_busy`).
+
 ---
 
 ## Verification Matrix Mapping
@@ -68,3 +96,5 @@ Configures:
 | **C6** | Priority format negotiation (`RGB24 -> YUYV -> NV12 -> MJPEG -> Grey`) | `format_negotiation_tests::test_format_negotiation_prefers_rgb24` | Validated |
 | **C7** | Graceful hot-unplug recovery on `ENODEV` | `hotunplug_tests::test_camera_hotunplug_recovery` | Validated |
 | **C8** | Dual-sensor discrimination (RGB vs IR preference) | `dual_sensor_tests::test_dual_sensor_prefers_rgb` | Validated |
+| **CSR1–CSR2** | Single shared camera resolver (GitHub #152) | `resolver_tests::*` | Verified |
+| **CSR5** | `EBUSY`/`ENODEV` from capture ioctls classified (GitHub #150) | `error_recovery_tests::test_set_format_ebusy_maps_to_device_busy` | Verified |
