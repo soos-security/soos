@@ -45,7 +45,7 @@ For every code feature or modification, development is executed in 4 sequential 
 - **`scripts/secret_scan.sh`:** Secret and sensitive-artifact scanner shared by git hooks and CI.
 - **`scripts/pr_loop.sh`:** Autonomous loop orchestrating branch push, PR creation, fail-fast CI monitoring, and `--match-head-commit` squash merge to `main`.
 - **Agent skills:** `.agents/skills/*/SKILL.md` (shared facts in `.agents/skills/dev-workflow/references/project-facts.md`).
-- **`run_tests.sh`:** Isolated ephemeral Docker container executing `pamtester` validation without risking host lockout.
+- **`run_tests.sh`:** Isolated ephemeral Docker container running the PAM matrix (`tests/docker/test_suite.sh` with the `pam_test_runner` host) without risking host lockout.
 
 ---
 

@@ -39,6 +39,12 @@
 #   --manifest <PATH>        Model manifest (default: models/manifest.toml)
 #   --skip-models            Skip machine learning model downloading/verification
 #   --skip-systemd           Skip systemctl reload/enable operations
+#   --distro <FAMILY>        PAM template family: auto (default), debian, fedora,
+#                            arch or none. auto reads ID / ID_LIKE from the
+#                            target's os-release (under --destdir only the stage
+#                            is read; nothing is guessed from the build host)
+#   --start                  Live install: start the unit after enabling it and
+#                            wait for readiness (scripts/wait_daemon_ready.sh)
 #   --dry-run                Run the read-only preflight and print the plan
 #   -h, --help               Display this help message
 #
@@ -94,6 +100,8 @@ ALLOW_DEBUG=false
 SKIP_MODELS=false
 SKIP_SYSTEMD=false
 DRY_RUN=false
+DISTRO="auto"
+START_UNIT=false
 
 # Artifacts produced by 'cargo build --release --workspace'.
 REQUIRED_ARTIFACTS=(soos-daemon soos-admin soos-enroll soos-gui libpam_soos.so)
@@ -122,6 +130,10 @@ Options:
   --manifest <PATH>        Model manifest (default: models/manifest.toml)
   --skip-models            Skip model download and verification
   --skip-systemd           Skip systemctl reload and enable invocations
+  --distro <FAMILY>        PAM template to install: auto (default), debian,
+                           fedora, arch or none (auto reads the target os-release)
+  --start                  Start the unit after enabling it and wait until the
+                           daemon answers (live install only)
   --dry-run                Run the read-only preflight and print the plan
   -h, --help               Display this help message and exit
 
@@ -204,6 +216,15 @@ while [[ $# -gt 0 ]]; do
             DRY_RUN=true
             shift
             ;;
+        --distro)
+            require_value "$@"
+            DISTRO="$2"
+            shift 2
+            ;;
+        --start)
+            START_UNIT=true
+            shift
+            ;;
         -h|--help)
             usage
             exit 0
@@ -268,6 +289,57 @@ TARGET_RUN_DIR="${DESTDIR}${RUNSTATEDIR}/soos"
 LIVE_INSTALL=false
 [[ -z "${DESTDIR}" ]] && LIVE_INSTALL=true
 
+# PAM template family (GitHub #209): exactly one distribution's template is
+# installed. os-release is parsed, never sourced. Under --destdir only the stage
+# is read: the build host says nothing about the target distribution.
+detect_pam_family() {
+    local file="$1" line id="" id_like="" token
+    while IFS= read -r line || [[ -n "${line}" ]]; do
+        case "${line}" in
+            ID=*) id="${line#ID=}" ;;
+            ID_LIKE=*) id_like="${line#ID_LIKE=}" ;;
+        esac
+    done < "${file}"
+    id=${id//[\"\']/}
+    id_like=${id_like//[\"\']/}
+    local -a tokens=()
+    read -r -a tokens <<< "${id} ${id_like}"
+    for token in "${tokens[@]}"; do
+        case "${token}" in
+            debian|ubuntu) echo debian; return 0 ;;
+            fedora|rhel|centos) echo fedora; return 0 ;;
+            arch) echo arch; return 0 ;;
+        esac
+    done
+    echo none
+}
+
+PAM_FAMILY=""
+PAM_FAMILY_NOTE=""
+case "${DISTRO}" in
+    debian|fedora|arch|none)
+        PAM_FAMILY="${DISTRO}"
+        ;;
+    auto)
+        OS_RELEASE_FILE=""
+        for candidate in "${DESTDIR}/etc/os-release" "${DESTDIR}/usr/lib/os-release"; do
+            if [[ -f "${candidate}" ]]; then
+                OS_RELEASE_FILE="${candidate}"
+                break
+            fi
+        done
+        if [[ -n "${OS_RELEASE_FILE}" ]]; then
+            PAM_FAMILY="$(detect_pam_family "${OS_RELEASE_FILE}")"
+            if [[ "${PAM_FAMILY}" == "none" ]]; then
+                PAM_FAMILY_NOTE="Unsupported distribution in ${OS_RELEASE_FILE}: no PAM template is installed (pass --distro debian|fedora|arch to choose one)."
+            fi
+        else
+            PAM_FAMILY="none"
+            PAM_FAMILY_NOTE="No os-release found under ${DESTDIR:-/}: no PAM template is installed (pass --distro debian|fedora|arch to choose one)."
+        fi
+        ;;
+esac
+
 info "=== soos Installation Plan ==="
 info "Destination root:   ${DESTDIR:-/}"
 info "Artifacts:          ${ARTIFACT_DIR}"
@@ -277,6 +349,7 @@ info "PAM Module:         ${TARGET_PAM_DIR}/pam_soos.so"
 info "Systemd Unit:       ${TARGET_SYSTEMD_DIR}/soos-daemon.service"
 info "State Directory:    ${TARGET_STATE_DIR}"
 info "Runtime Directory:  ${TARGET_RUN_DIR}"
+info "PAM Templates:      ${PAM_FAMILY:-invalid} (--distro ${DISTRO})"
 info "==============================="
 
 # =============================================================================
@@ -291,6 +364,25 @@ preflight_fail() {
 # A.1 Root is required for a live install.
 if [[ "${LIVE_INSTALL}" = true && "${DRY_RUN}" = false && "$(id -u)" -ne 0 ]]; then
     preflight_fail "A live installation (no --destdir) must run as root: re-run with sudo, or stage with --destdir <DIR>."
+fi
+
+# A.1b PAM template family (GitHub #209).
+if [[ -z "${PAM_FAMILY}" ]]; then
+    preflight_fail "Unknown --distro value '${DISTRO}': expected auto, debian, fedora, arch or none."
+elif [[ -n "${PAM_FAMILY_NOTE}" ]]; then
+    warn "${PAM_FAMILY_NOTE}"
+fi
+
+# A.1c The unit runs with Group=soos (GitHub #211): a live install must be able
+# to create the group, otherwise the daemon could never start.
+if [[ "${LIVE_INSTALL}" = true ]] && ! getent group soos >/dev/null 2>&1 \
+        && ! command -v groupadd >/dev/null 2>&1 && ! command -v addgroup >/dev/null 2>&1; then
+    preflight_fail "Cannot create the 'soos' system group: neither groupadd nor addgroup is available (soos-daemon.service runs with Group=soos)."
+fi
+
+# A.1d --start is a live-install operation that needs systemd.
+if [[ "${START_UNIT}" = true && ( "${LIVE_INSTALL}" = false || "${SKIP_SYSTEMD}" = true ) ]]; then
+    preflight_fail "--start requires a live install (no --destdir) without --skip-systemd."
 fi
 
 # A.2 Required tools.
@@ -527,7 +619,8 @@ if [[ "${LIVE_INSTALL}" = true ]]; then
             GROUP_CREATED=true
             success "Created system group 'soos'."
         else
-            warn "Neither groupadd nor addgroup found. Please ensure 'soos' group is created."
+            error "Cannot create the 'soos' system group: neither groupadd nor addgroup is available."
+            exit 1
         fi
     fi
 fi
@@ -610,12 +703,14 @@ if [[ -z "${DESTDIR}" && -f "${WORKSPACE_ROOT}/scripts/pam_snapshot.sh" ]]; then
         --sysconfdir "${SYSCONFDIR}" --localstatedir "${LOCALSTATEDIR}"
 fi
 
-# 6. Install Distribution PAM Config Templates
-info "Installing distribution PAM configuration templates..."
+# 6. Install the PAM Config Template of the selected distribution only
+#    (GitHub #209): a Debian package never ships the authselect profile, and no
+#    file is ever placed in /etc/pam.d (every file there is a PAM service).
+info "Installing distribution PAM configuration templates (selected family: ${PAM_FAMILY})..."
 PAM_PKG_DIR="${WORKSPACE_ROOT}/packaging/pam"
 
 # Debian pam-auth-update profiles
-if [[ -f "${PAM_PKG_DIR}/debian/soos" ]]; then
+if [[ "${PAM_FAMILY}" == "debian" && -f "${PAM_PKG_DIR}/debian/soos" ]]; then
     DEBIAN_PAM_DIR="${DESTDIR}/usr/share/pam-configs"
     ensure_dir "${DEBIAN_PAM_DIR}" 0755
     tracked_install 0644 "${PAM_PKG_DIR}/debian/soos" "${DEBIAN_PAM_DIR}/soos"
@@ -624,7 +719,7 @@ if [[ -f "${PAM_PKG_DIR}/debian/soos" ]]; then
 fi
 
 # Fedora authselect profile
-if [[ -d "${PAM_PKG_DIR}/fedora/soos" ]]; then
+if [[ "${PAM_FAMILY}" == "fedora" && -d "${PAM_PKG_DIR}/fedora/soos" ]]; then
     FEDORA_AUTH_DIR="${DESTDIR}${SYSCONFDIR}/authselect/custom/soos"
     ensure_dir "${FEDORA_AUTH_DIR}" 0755
     for profile_file in "${PAM_PKG_DIR}/fedora/soos/"*; do
@@ -650,12 +745,13 @@ if [[ -d "${PAM_PKG_DIR}/fedora/soos" ]]; then
     fi
 fi
 
-# Arch snippet
-if [[ -f "${PAM_PKG_DIR}/arch/system-auth.snippet" ]]; then
-    ARCH_PAM_DIR="${DESTDIR}${SYSCONFDIR}/pam.d"
-    ensure_dir "${ARCH_PAM_DIR}" 0755
-    tracked_install 0644 "${PAM_PKG_DIR}/arch/system-auth.snippet" "${ARCH_PAM_DIR}/soos.snippet"
-    success "Installed Arch Linux PAM snippet."
+# Arch snippet: reference material under /usr/share/soos/pam, integrated by
+# hand into /etc/pam.d/system-auth (never a file of its own in /etc/pam.d).
+if [[ "${PAM_FAMILY}" == "arch" && -f "${PAM_PKG_DIR}/arch/system-auth.snippet" ]]; then
+    ARCH_SNIPPET_DIR="${DESTDIR}${PREFIX}/share/soos/pam"
+    ensure_dir "${ARCH_SNIPPET_DIR}" 0755
+    tracked_install 0644 "${PAM_PKG_DIR}/arch/system-auth.snippet" "${ARCH_SNIPPET_DIR}/system-auth.snippet"
+    success "Installed Arch Linux PAM snippet: ${PREFIX}/share/soos/pam/system-auth.snippet"
 fi
 
 # 7. Download and Verify Neural Models (BEFORE the unit is enabled)
@@ -686,6 +782,28 @@ fi
 
 COMMITTED=true
 
+# 9. Optional start and bounded readiness wait (GitHub #211). The install itself
+#    is committed: a daemon that does not become ready is reported, not rolled back.
+if [[ "${START_UNIT}" = true ]]; then
+    if [[ "${UNIT_ENABLED}" != true ]]; then
+        error "--start: the unit was not enabled (systemd not running?); start it manually."
+        exit 70
+    fi
+    info "Starting soos-daemon.service..."
+    if ! systemctl start soos-daemon.service; then
+        error "systemctl start soos-daemon.service failed; see: journalctl -u soos-daemon.service"
+        exit 70
+    fi
+    if ! bash "${WORKSPACE_ROOT}/scripts/wait_daemon_ready.sh" \
+            --socket "${RUNSTATEDIR}/soos/daemon.sock" \
+            --manifest "${LOCALSTATEDIR}/lib/soos/models/manifest.toml" \
+            --admin "${PREFIX}/bin/soos-admin"; then
+        error "soos was installed, but the daemon is not ready (see above)."
+        exit 70
+    fi
+    success "soos-daemon is running and answering on ${RUNSTATEDIR}/soos/daemon.sock."
+fi
+
 echo ""
 if [[ ${#MISSING_ARTIFACTS[@]} -gt 0 ]]; then
     warn "==================================================================="
@@ -698,8 +816,10 @@ success "==================================================================="
 success "  soos installation and provisioning completed successfully!      "
 success "==================================================================="
 info "Next steps:"
-info "  1. Add authorized users: soos-admin add-user <username>"
-info "  2. Enroll facial vectors: sudo soos-enroll <username>"
-info "  3. Start the daemon:     sudo systemctl start soos-daemon"
-info "  4. Test authentication:  soos-admin test-pam"
+info "  1. Add authorized users:  sudo soos-admin add-user <username>"
+info "  2. Enroll a face:         sudo soos-enroll enroll --username <username>"
+info "  3. Start the daemon:      sudo systemctl start soos-daemon"
+info "     then wait for it:      sudo scripts/wait_daemon_ready.sh"
+info "  4. Check the daemon:      soos-admin status && soos-admin test-pam"
+info "  5. Activate PAM (explicit, per distribution): see Docs/DISTRIBUTION_DEPLOYMENT.md"
 exit 0

@@ -10,7 +10,8 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
-use soos_protocol::codec::{decode, encode};
+use soos_protocol::codec::decode;
+use soos_protocol::message::encode_request;
 use soos_protocol::types::{
     ReasonClass, Request, RequestKind, Response, Verdict, CURRENT_VERSION, MAX_MESSAGE_SIZE,
     REQUEST_ID_LEN,
@@ -152,7 +153,7 @@ pub fn simulate_pam_auth(
     };
 
     let req_start = Instant::now();
-    let encoded_req = encode(&req)?;
+    let encoded_req = encode_request(&req)?;
     stream
         .write_all(&encoded_req)
         .map_err(AdminCliError::SocketIo)?;

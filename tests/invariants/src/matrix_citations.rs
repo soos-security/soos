@@ -350,7 +350,8 @@ fn classify(token: &str, top_level: &BTreeSet<String>) -> Option<Citation> {
     }
     let segments: Vec<&str> = token.split("::").collect();
     let name = *segments.last()?;
-    let is_test = name.starts_with("test_") && is_ident_glob(name);
+    // `prop_*` names are `proptest!` tests (GitHub #281); they resolve like `test_*` names.
+    let is_test = (name.starts_with("test_") || name.starts_with("prop_")) && is_ident_glob(name);
     let is_module_glob = name == "*" && segments.len() > 1;
     if !(is_test || is_module_glob) || PLACEHOLDER_NAMES.contains(&name) {
         return None;
@@ -396,7 +397,8 @@ fn test_functions(file: &SourceFile) -> Vec<String> {
     let mut names = Vec::new();
     match file.ext.as_str() {
         "rs" => {
-            let in_proptest = file.text.contains("proptest!");
+            // A function inside `proptest!` is a test only with its own `#[test]` attribute,
+            // exactly like any other function (GitHub #281).
             for (idx, line) in lines.iter().enumerate() {
                 let trimmed = line.trim_start();
                 let Some(pos) = trimmed.find("fn ") else {
@@ -416,7 +418,7 @@ fn test_functions(file: &SourceFile) -> Vec<String> {
                 if name.is_empty() {
                     continue;
                 }
-                if in_proptest || has_test_attribute(&lines, idx) {
+                if has_test_attribute(&lines, idx) {
                     names.push(name);
                 }
             }
@@ -462,7 +464,7 @@ fn has_test_attribute(lines: &[&str], idx: usize) -> bool {
         }
         if t.starts_with("#[") || t.starts_with(")]") || t.starts_with("reason") || t.ends_with(',')
         {
-            if t.starts_with("#[") && t.contains("test") && !t.starts_with("#[cfg(test)]") {
+            if is_test_attribute(t) {
                 return true;
             }
             continue;
@@ -470,6 +472,37 @@ fn has_test_attribute(lines: &[&str], idx: usize) -> bool {
         return false;
     }
     false
+}
+
+/// True when `t` is an attribute whose path is `test` or ends in `::test` (`#[test]`,
+/// `#[tokio::test]`, `#[tokio::test(flavor = ...)]`). A `cfg`/`cfg_attr` gate, `#[path]` or
+/// any other attribute that merely mentions `test` is not a test attribute (GitHub #281).
+fn is_test_attribute(t: &str) -> bool {
+    let Some(body) = t.strip_prefix("#[") else {
+        return false;
+    };
+    let path: String = body
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == ':')
+        .collect();
+    path == "test" || path.ends_with("::test")
+}
+
+/// Claimed rows whose evidence columns hold no citation that resolves (GitHub #281): such a
+/// row is never checked by `test_matrix_claimed_rows_cite_only_existing_evidence`.
+fn rows_without_resolvable_evidence<'a>(
+    repo: &Repo,
+    rows: &'a [ClaimedRow],
+) -> Vec<&'a ClaimedRow> {
+    rows.iter()
+        .filter(|row| {
+            !citations(row, &repo.top_level)
+                .iter()
+                .any(|(citation, is_evidence)| {
+                    *is_evidence && resolve(repo, citation, true).is_ok()
+                })
+        })
+        .collect()
 }
 
 /// Module names declared in a Rust source (`mod name {` or `mod name;`).
@@ -823,4 +856,105 @@ fn test_matrix_citation_parser_detects_test_functions_only() {
         mods: BTreeSet::new(),
     };
     assert_eq!(test_functions(&sh), ["test_one", "test_two", "verify_x"]);
+}
+
+/// Self-test (GitHub #281): only real test attributes mark a test function. A `cfg` gate that
+/// merely mentions `test` (`#[cfg(all(test, unix))]`), a `#[path = "../tests/..."]` attribute
+/// and a helper inside a file that uses `proptest!` are never test evidence.
+#[test]
+fn test_matrix_citation_parser_rejects_non_test_attributes_and_proptest_helpers() {
+    let rs = SourceFile {
+        rel: "crates/x/tests/p_tests.rs".into(),
+        stem: "p_tests".into(),
+        parent: "tests".into(),
+        ext: "rs".into(),
+        text: "use proptest::prelude::*;\n\nfn test_strategy_helper() -> u8 { 1 }\n\n#[cfg(all(test, unix))]\nfn test_cfg_gated_helper() {}\n\n#[path = \"../../../tests/fixtures/mod.rs\"]\nmod fixtures;\nfn test_after_path_attribute() {}\n\n#[cfg_attr(test, derive(Debug))]\nfn test_cfg_attr_helper() {}\n\nproptest! {\n    #![proptest_config(ProptestConfig::with_cases(8))]\n\n    /// doc\n    #[test]\n    fn test_prop_roundtrip(x in 0_u8..4) {}\n\n    fn test_prop_helper_without_attribute(x in 0_u8..4) {}\n}\n\n#[tokio::test(flavor = \"multi_thread\", worker_threads = 2)]\nasync fn test_tokio_flavored() {}\n".into(),
+        tests: Vec::new(),
+        mods: BTreeSet::new(),
+    };
+    assert_eq!(
+        test_functions(&rs),
+        ["test_prop_roundtrip", "test_tokio_flavored"]
+    );
+    assert!(is_test_attribute("#[test]"));
+    assert!(is_test_attribute("#[tokio::test]"));
+    assert!(is_test_attribute(
+        "#[tokio::test(flavor = \"multi_thread\")]"
+    ));
+    assert!(!is_test_attribute("#[cfg(test)]"));
+    assert!(!is_test_attribute("#[cfg(all(test, unix))]"));
+    assert!(!is_test_attribute("#[path = \"../tests/fixtures/mod.rs\"]"));
+    assert!(!is_test_attribute("#[test_helper]"));
+}
+
+/// Self-test (GitHub #281): a claimed row with no code span at all, or whose only citations
+/// sit in the criterion column, is reported as lacking evidence.
+#[test]
+fn test_matrix_rows_without_resolvable_evidence_are_reported() {
+    let root = workspace_root();
+    let repo = Repo::load(&root);
+    let matrix = "\
+| # | Criterion | Test Method | Status |
+|---|---|---|---|
+| Y1 | round trip | Round-trip tests | ☑ Validated |
+| Y2 | uses `crates/protocol/src/codec.rs` | Unit test | ✅ Verified |
+| Y3 | cites | `matrix_citations::test_matrix_rows_without_resolvable_evidence_are_reported` | ✅ Verified |
+| Y4 | pending | nothing | ⬜ Pending (no evidence yet) |
+- [x] global without citation
+- [x] global (`crates/protocol/src/codec.rs`)
+";
+    let rows = claimed_rows(matrix);
+    let lacking: Vec<String> = rows_without_resolvable_evidence(&repo, &rows)
+        .into_iter()
+        .map(|r| r.id.clone())
+        .collect();
+    assert_eq!(lacking, ["Y1", "Y2", "global-invariant@L7"]);
+}
+
+/// Invariant (GitHub #281): every `✅ Verified` / `☑ Validated` row and every checked global
+/// invariant cites at least one resolvable piece of evidence in its evidence columns; a row
+/// that cites nothing cannot be checked and must be downgraded to `⬜ Pending (<reason>)`.
+#[test]
+fn test_matrix_claimed_rows_cite_at_least_one_resolvable_evidence() {
+    let root = workspace_root();
+    let matrix = fs::read_to_string(root.join(MATRIX)).expect("read AI/VERIFICATION_MATRIX.md");
+    let repo = Repo::load(&root);
+    let rows = claimed_rows(&matrix);
+    assert!(rows.len() >= 300, "only {} claimed rows parsed", rows.len());
+    let lacking: Vec<String> = rows_without_resolvable_evidence(&repo, &rows)
+        .into_iter()
+        .map(|r| format!("{MATRIX}:{} {}", r.line_no, r.id))
+        .collect();
+    assert!(
+        lacking.is_empty(),
+        "{} claimed rows cite no resolvable evidence (cite the real test `file::test_name` or \
+         path, or downgrade the row to `⬜ Pending` with a reason):\n{}",
+        lacking.len(),
+        lacking.join("\n")
+    );
+}
+
+/// Self-test (GitHub #281): `prop_*` citations are classified as test citations, so a row
+/// citing only property tests is checked instead of silently passing.
+#[test]
+fn test_matrix_citation_parser_classifies_proptest_names() {
+    let top: BTreeSet<String> = ["crates"].iter().map(|s| s.to_string()).collect();
+    assert_eq!(
+        classify(
+            "mjpeg_bounds_tests::prop_mjpeg_arbitrary_bytes_never_panic",
+            &top
+        ),
+        Some(Citation::Test {
+            qualifiers: vec!["mjpeg_bounds_tests".into()],
+            name: "prop_mjpeg_arbitrary_bytes_never_panic".into(),
+        })
+    );
+    assert_eq!(
+        classify("prop_decode_request_never_panics", &top),
+        Some(Citation::Test {
+            qualifiers: Vec::new(),
+            name: "prop_decode_request_never_panics".into(),
+        })
+    );
+    assert_eq!(classify("proptest", &top), None);
 }

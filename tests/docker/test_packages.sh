@@ -116,6 +116,48 @@ verify_package_has_no_key_material() {
     success "Package ${pkg} contains no *.key entry."
 }
 
+# GitHub #209 (ONB-13): a package ships the PAM template of its own distribution
+# only, and never a file in /etc/pam.d (every file there is a PAM service).
+# $1 = template family (debian|fedora|arch), remaining args = listing command.
+verify_distro_templates() {
+    local family="$1"
+    shift
+    info "Verifying that the package ships only the ${family} PAM template..."
+    local listing
+    # Last field of each entry, without a leading "./" or "/" (dpkg-deb -c, rpm -qlp, bsdtar -tf).
+    listing=$("$@" | awk '{print $NF}' | sed -e 's|^\./||' -e 's|^/||')
+    local -a required=() forbidden=()
+    case "${family}" in
+        debian)
+            required=("usr/share/pam-configs/soos" "usr/share/pam-configs/soos-notify")
+            forbidden=("etc/authselect/" "usr/share/soos/pam/" "etc/pam.d/")
+            ;;
+        fedora)
+            required=("etc/authselect/custom/soos/system-auth")
+            forbidden=("usr/share/pam-configs/" "usr/share/soos/pam/" "etc/pam.d/")
+            ;;
+        arch)
+            required=("usr/share/soos/pam/system-auth.snippet")
+            forbidden=("usr/share/pam-configs/" "etc/authselect/" "etc/pam.d/")
+            ;;
+        *)
+            error "verify_distro_templates: unknown family '${family}'"
+            return 1
+            ;;
+    esac
+    local entry
+    for entry in "${required[@]}"; do
+        grep -Fxq -- "${entry}" <<< "${listing}" || { error "Package lacks ${entry}"; return 1; }
+    done
+    for entry in "${forbidden[@]}"; do
+        if grep -Fq -- "${entry}" <<< "${listing}"; then
+            error "Package ships a foreign PAM template or a /etc/pam.d entry: $(grep -F -- "${entry}" <<< "${listing}" | tr '\n' ' ')"
+            return 1
+        fi
+    done
+    success "Package ships only the ${family} PAM template."
+}
+
 # The key must be generated on the target host: a second fresh install must
 # produce a different key, and package removal must leave the key untouched
 # (it is not package-owned, so enrolled templates survive remove/upgrade).
@@ -138,6 +180,77 @@ verify_fresh_install_generates_distinct_key() {
     success "Fresh install generated a distinct master key (not shipped in the package)."
 }
 
+# GitHub #281: upgrade with `rpm -U` from a legacy build that still owned master.key as
+# %ghost (walkthrough 106). RPM erases the old package's %ghost file after the new
+# package's %post; the %pre/%posttrans guard of packaging/rpm/soos.spec must restore the
+# exact pre-upgrade key and discard its temporary copy.
+# $1 = the current soos RPM (the upgrade target).
+verify_rpm_upgrade_keeps_ghost_owned_key() {
+    local new_rpm="$1"
+    local topdir
+    topdir=$(mktemp -d "/tmp/soos_legacy_rpm.XXXXXX")
+    mkdir -p "${topdir}"/{BUILD,RPMS,SOURCES,SPECS,SRPMS}
+
+    # Minimal legacy fixture: same name and version, lower release, owns the key as
+    # %ghost and generates it in %post like the builds before walkthrough 106.
+    cat > "${topdir}/SPECS/soos-legacy.spec" <<'SPEC'
+Name: soos
+Version: 0.1.0
+Release: 0.legacy
+Summary: Legacy soos fixture owning master.key as ghost (test only)
+License: Apache-2.0 OR MIT
+%global debug_package %{nil}
+
+%description
+Test fixture for the rpm -U master key upgrade guard (GitHub #281).
+
+%install
+install -d -m 0755 %{buildroot}/var/lib/soos
+
+%post
+if [ ! -e /var/lib/soos/master.key ]; then
+    (umask 077 && head -c 32 /dev/urandom > /var/lib/soos/master.key)
+fi
+
+%files
+%dir /var/lib/soos
+%ghost %attr(0600, root, root) /var/lib/soos/master.key
+SPEC
+
+    info "Building the legacy %ghost-key fixture RPM..."
+    rpmbuild -bb --define "_topdir ${topdir}" "${topdir}/SPECS/soos-legacy.spec" >/dev/null
+    local legacy_rpm
+    legacy_rpm=$(ls "${topdir}"/RPMS/*/soos-0.1.0-0.legacy.*.rpm | head -n 1)
+
+    rm -f /var/lib/soos/master.key /var/lib/soos/.master.key.upgrade
+    info "Installing the legacy fixture ${legacy_rpm} via rpm -i..."
+    rpm -i "${legacy_rpm}"
+    rpm -qf /var/lib/soos/master.key >/dev/null 2>&1 \
+        || { error "legacy fixture does not own master.key"; return 1; }
+    local legacy_fp
+    legacy_fp=$(key_fingerprint)
+
+    info "Upgrading the legacy fixture to ${new_rpm} via rpm -U..."
+    rpm -U "${new_rpm}"
+    rm -rf "${topdir}"
+
+    test -f /var/lib/soos/master.key \
+        || { error "master.key was erased by rpm -U from a %ghost-owning build"; return 1; }
+    if [[ "$(key_fingerprint)" != "${legacy_fp}" ]]; then
+        error "master.key changed across rpm -U: templates enrolled before the upgrade are lost"
+        return 1
+    fi
+    if [[ -e /var/lib/soos/.master.key.upgrade ]]; then
+        error "/var/lib/soos/.master.key.upgrade was left behind although the keys are equal"
+        return 1
+    fi
+    if rpm -qf /var/lib/soos/master.key >/dev/null 2>&1; then
+        error "master.key is still owned by a package after the upgrade"
+        return 1
+    fi
+    success "rpm -U from a %ghost-owning build kept the exact master key (no leftover copy)."
+}
+
 case "${DISTRO}" in
     ubuntu|debian)
         info "Running Debian (.deb) package verification..."
@@ -145,6 +258,7 @@ case "${DISTRO}" in
 
         DEB_FILE=$(ls -t target/packages/soos_*.deb | head -n 1)
         verify_package_has_no_key_material "${DEB_FILE}" dpkg-deb -c "${DEB_FILE}"
+        verify_distro_templates debian dpkg-deb -c "${DEB_FILE}"
 
         info "Installing ${DEB_FILE} via dpkg -i..."
         dpkg -i "${DEB_FILE}"
@@ -183,6 +297,7 @@ case "${DISTRO}" in
         RPM_FILE=$(ls -t target/packages/soos-[0-9]*.rpm | head -n 1)
         # --noghost: %ghost entries are metadata only and carry no payload.
         verify_package_has_no_key_material "${RPM_FILE}" rpm -qlp --noghost "${RPM_FILE}"
+        verify_distro_templates fedora rpm -qlp --noghost "${RPM_FILE}"
 
         info "Installing ${RPM_FILE} via rpm -i..."
         rpm -i "${RPM_FILE}"
@@ -206,6 +321,11 @@ case "${DISTRO}" in
         verify_installation "${PAM_DIR}"
         verify_fresh_install_generates_distinct_key "${FIRST_KEY_FP}" "$(key_fingerprint)"
         rpm -e soos
+
+        verify_rpm_upgrade_keeps_ghost_owned_key "${RPM_FILE}"
+        verify_installation "${PAM_DIR}"
+        rpm -e soos
+        verify_key_survives_removal
         success "RPM package test passed cleanly."
         ;;
 
@@ -215,6 +335,7 @@ case "${DISTRO}" in
 
         PKG_FILE=$(ls -t target/packages/soos-*.pkg.tar.* | head -n 1)
         verify_package_has_no_key_material "${PKG_FILE}" bsdtar -tf "${PKG_FILE}"
+        verify_distro_templates arch bsdtar -tf "${PKG_FILE}"
 
         info "Installing ${PKG_FILE} via pacman -U..."
         pacman -U --noconfirm "${PKG_FILE}"

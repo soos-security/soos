@@ -13,8 +13,8 @@ pub mod snapshot;
 pub mod store;
 
 pub use config::{
-    EvidenceConfig, DEFAULT_DAILY_CAP_PER_UID, DEFAULT_EVIDENCE_DIR, DEFAULT_KEY_PATH,
-    DEFAULT_RETENTION_DAYS,
+    EvidenceConfig, DEFAULT_DAILY_CAP_PER_UID, DEFAULT_DAILY_CAP_TOTAL, DEFAULT_EVIDENCE_DIR,
+    DEFAULT_KEY_PATH, DEFAULT_RETENTION_DAYS,
 };
 pub use crypto::MasterKey;
 pub use error::EvidenceStoreError;
@@ -25,5 +25,6 @@ pub use frame::{
 };
 pub use snapshot::{EvidenceRecord, RetentionReport, SnapshotResult};
 pub use store::{
-    EvidenceStore, FRAME_SNAPSHOT_EXTENSION, MAX_VALID_UID, OPAQUE_SNAPSHOT_EXTENSION,
+    EvidenceStore, DAILY_COUNT_FILE_PREFIX, FRAME_SNAPSHOT_EXTENSION, MAX_VALID_UID,
+    OPAQUE_SNAPSHOT_EXTENSION,
 };

@@ -314,10 +314,18 @@ else
     warn "Run 'authselect select <profile> [features] --force' and remove it manually."
 fi
 
-# Clean up Arch snippet
+# Clean up the Arch snippet: current location (GitHub #209) and the legacy
+# /etc/pam.d/soos.snippet shipped by older releases.
+ARCH_SNIPPET_DIR="${DESTDIR}${PREFIX}/share/soos/pam"
+if [[ -f "${ARCH_SNIPPET_DIR}/system-auth.snippet" ]]; then
+    rm -f "${ARCH_SNIPPET_DIR}/system-auth.snippet"
+    rmdir "${ARCH_SNIPPET_DIR}" 2>/dev/null || true
+    rmdir "${DESTDIR}${PREFIX}/share/soos" 2>/dev/null || true
+    success "Removed Arch PAM snippet."
+fi
 if [[ -f "${TARGET_PAM_D}/soos.snippet" ]]; then
     rm -f "${TARGET_PAM_D}/soos.snippet"
-    success "Removed Arch PAM snippet."
+    success "Removed legacy Arch PAM snippet from ${TARGET_PAM_D}."
 fi
 
 # Residual pam_soos.so lines (Arch system-auth edited by hand, edits made before

@@ -21,7 +21,7 @@ RUN pacman -Syu --noconfirm \
 
 # Install Rust toolchain
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-    | sh -s -- -y --default-toolchain stable --profile minimal \
+    | sh -s -- -y --default-toolchain 1.98.1 --profile minimal \
     && rustup component add clippy rustfmt
 
 # Create testuser with known password

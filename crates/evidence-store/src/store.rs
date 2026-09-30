@@ -1,6 +1,6 @@
 //! Main storage engine for encrypted evidence snapshots.
 
-use crate::config::EvidenceConfig;
+use crate::config::{EvidenceConfig, DEFAULT_DAILY_CAP_TOTAL};
 use crate::crypto::{decrypt_payload, encrypt_payload, MasterKey};
 use crate::error::EvidenceStoreError;
 use crate::frame::{
@@ -37,11 +37,68 @@ pub const FRAME_SNAPSHOT_EXTENSION: &str = ".frame.enc";
 /// frame metadata. New code must use [`EvidenceStore::store_frame_snapshot`].
 pub const OPAQUE_SNAPSHOT_EXTENSION: &str = ".opaque.enc";
 
+/// File name prefix of the persisted per-UID daily capture counter inside a date partition
+/// (`YYYY-MM-DD/.daily_count.<uid>`, GitHub #234). It never ends in `.enc`, so it is never
+/// listed as a snapshot, and it is removed with its partition by retention.
+pub const DAILY_COUNT_FILE_PREFIX: &str = ".daily_count.";
+
+/// Upper bound of a persisted daily counter file (a decimal `u32` plus an optional newline).
+const MAX_DAILY_COUNT_FILE_BYTES: u64 = 16;
+
+/// In-memory view of the day the store currently writes to (GitHub #276, #234).
+///
+/// The persisted per-UID counters (`YYYY-MM-DD/.daily_count.<uid>`) stay the source of truth
+/// for the per-UID cap. This view only tracks one day: the global total of that day (derived
+/// from the snapshot files of its partition when the store switches to it, then kept up to
+/// date after every successful write) and the per-UID counts written by this process that
+/// day. Switching to another date drops every entry of the previous one, so the map never
+/// holds more entries than the global cap.
+#[derive(Debug, Default)]
+struct DailyCounters {
+    /// Tracked date (`YYYY-MM-DD`), `None` before the first write of this process.
+    date: Option<String>,
+    /// Per-UID counts of the tracked date written by this process.
+    per_uid: HashMap<u32, u32>,
+    /// Snapshots stored on the tracked date across all UIDs (persisted files included).
+    total: u32,
+}
+
+impl DailyCounters {
+    fn tracks(&self, date: &str) -> bool {
+        self.date.as_deref() == Some(date)
+    }
+
+    /// `true` when another date is tracked, so `date` must report `0`.
+    fn tracks_other_than(&self, date: &str) -> bool {
+        self.date.as_deref().is_some_and(|d| d != date)
+    }
+
+    /// Switches the view to `date` with the persisted `total`, dropping the previous day.
+    fn roll_to(&mut self, date: &str, total: u32) {
+        self.date = Some(date.to_string());
+        self.per_uid.clear();
+        self.per_uid.shrink_to_fit();
+        self.total = total;
+    }
+
+    fn reset(&mut self) {
+        self.date = None;
+        self.per_uid.clear();
+        self.per_uid.shrink_to_fit();
+        self.total = 0;
+    }
+}
+
 /// Primary evidence store engine.
 pub struct EvidenceStore {
     config: EvidenceConfig,
     key: MasterKey,
-    daily_counts: Mutex<HashMap<(u32, String), u32>>,
+    /// Global daily snapshot cap across all UIDs (GitHub #276).
+    daily_cap_total: u32,
+    /// Serializes the "check caps, write snapshot, persist counter" critical section so that
+    /// concurrent writers of this process can never exceed either cap (GitHub #234, #276).
+    /// The per-UID counts live on disk; the in-memory view is bounded by the global cap.
+    daily_counts: Mutex<DailyCounters>,
 }
 
 impl EvidenceStore {
@@ -50,8 +107,22 @@ impl EvidenceStore {
         Self {
             config,
             key,
-            daily_counts: Mutex::new(HashMap::new()),
+            daily_cap_total: DEFAULT_DAILY_CAP_TOTAL,
+            daily_counts: Mutex::new(DailyCounters::default()),
         }
+    }
+
+    /// Overrides the global daily snapshot cap across all UIDs
+    /// (default [`DEFAULT_DAILY_CAP_TOTAL`]).
+    #[must_use]
+    pub fn with_daily_cap_total(mut self, cap: u32) -> Self {
+        self.daily_cap_total = cap;
+        self
+    }
+
+    /// Returns the global daily snapshot cap across all UIDs.
+    pub fn daily_cap_total(&self) -> u32 {
+        self.daily_cap_total
     }
 
     /// Initializes an evidence store by loading or creating the master key.
@@ -176,25 +247,14 @@ impl EvidenceStore {
             None => format_date_from_timestamp(ts),
         };
 
-        // Enforce per-UID daily cap
-        {
-            let mut counts = self.daily_counts.lock().unwrap_or_else(|e| e.into_inner());
-            let entry = counts.entry((uid, date_str.clone())).or_insert(0);
-            if *entry >= self.config.daily_cap_per_uid {
-                return Err(EvidenceStoreError::DailyCapExceeded {
-                    uid,
-                    cap: self.config.daily_cap_per_uid,
-                    date: date_str,
-                });
-            }
-            *entry = entry.saturating_add(1);
-        }
+        // One writer at a time: the cap checks, the snapshot write and the counter updates are
+        // a single critical section (GitHub #234, #276).
+        let mut counts = self.daily_counts.lock().unwrap_or_else(|e| e.into_inner());
 
-        let snapshot_id = generate_uuid_v4()?;
         let target_dir = self.config.base_dir.join(&date_str);
 
         // Pre-creation symlink check on date directory (Sub-issue #30.1)
-        match fs::symlink_metadata(&target_dir) {
+        let dir_exists = match fs::symlink_metadata(&target_dir) {
             Ok(meta) => {
                 if meta.file_type().is_symlink() {
                     return Err(EvidenceStoreError::InvalidPath(format!(
@@ -208,19 +268,58 @@ impl EvidenceStore {
                         target_dir.display()
                     )));
                 }
+                true
             }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                fs::create_dir_all(&target_dir)?;
-                fs::set_permissions(&target_dir, fs::Permissions::from_mode(0o700))?;
-                let meta = fs::symlink_metadata(&target_dir)?;
-                if meta.file_type().is_symlink() {
-                    return Err(EvidenceStoreError::InvalidPath(format!(
-                        "Date directory '{}' was created as a symlink; symlinks are forbidden",
-                        target_dir.display()
-                    )));
-                }
-            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
             Err(e) => return Err(EvidenceStoreError::Io(e)),
+        };
+
+        // Switch the in-memory view to this date; its global total starts from the snapshot
+        // files already in the partition, so it survives a restart too (GitHub #276).
+        if !counts.tracks(&date_str) {
+            let persisted_total = if dir_exists {
+                count_snapshot_files(&target_dir)?
+            } else {
+                0
+            };
+            counts.roll_to(&date_str, persisted_total);
+        }
+
+        // Enforce the per-UID daily cap from the persisted counter (survives restarts).
+        let used = if dir_exists {
+            read_daily_count(&target_dir, uid)?
+        } else {
+            0
+        };
+        if used >= self.config.daily_cap_per_uid {
+            return Err(EvidenceStoreError::DailyCapExceeded {
+                uid,
+                cap: self.config.daily_cap_per_uid,
+                date: date_str,
+            });
+        }
+
+        // Enforce the global daily cap across all UIDs before any write; a refusal consumes
+        // neither the per-UID nor the global quota (GitHub #276).
+        if counts.total >= self.daily_cap_total {
+            return Err(EvidenceStoreError::GlobalDailyCapExceeded {
+                cap: self.daily_cap_total,
+                date: date_str,
+            });
+        }
+
+        let snapshot_id = generate_uuid_v4()?;
+
+        if !dir_exists {
+            fs::create_dir_all(&target_dir)?;
+            fs::set_permissions(&target_dir, fs::Permissions::from_mode(0o700))?;
+            let meta = fs::symlink_metadata(&target_dir)?;
+            if meta.file_type().is_symlink() {
+                return Err(EvidenceStoreError::InvalidPath(format!(
+                    "Date directory '{}' was created as a symlink; symlinks are forbidden",
+                    target_dir.display()
+                )));
+            }
         }
 
         let record = EvidenceRecord {
@@ -256,14 +355,9 @@ impl EvidenceStore {
             u64::from_ne_bytes(rand_bytes)
         ));
 
-        {
-            let mut file = OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .mode(0o600)
-                .open(&tmp_path)?;
-            file.write_all(&ciphertext)?;
-            file.sync_all()?;
+        if let Err(e) = write_new_file(&tmp_path, &ciphertext) {
+            let _ = fs::remove_file(&tmp_path);
+            return Err(e);
         }
 
         // Verify final path is not a symlink before renaming
@@ -277,7 +371,21 @@ impl EvidenceStore {
             }
         }
 
-        fs::rename(&tmp_path, &final_path)?;
+        if let Err(e) = fs::rename(&tmp_path, &final_path) {
+            let _ = fs::remove_file(&tmp_path);
+            return Err(EvidenceStoreError::Io(e));
+        }
+
+        // The slot is consumed only once the snapshot is in place; if the counter cannot be
+        // persisted the snapshot is rolled back so that disk usage never escapes the cap.
+        let new_count = used.saturating_add(1);
+        if let Err(e) = write_daily_count(&target_dir, uid, new_count) {
+            let _ = fs::remove_file(&final_path);
+            return Err(e);
+        }
+        counts.per_uid.insert(uid, new_count);
+        counts.total = counts.total.saturating_add(1);
+        drop(counts);
 
         Ok(SnapshotResult {
             snapshot_id,
@@ -316,10 +424,63 @@ impl EvidenceStore {
         EvidenceRecord::from_cbor(&decrypted)
     }
 
-    /// Gets current daily snapshot count for a UID and date.
+    /// Gets the persisted daily snapshot count for a UID and date.
+    ///
+    /// The count is read from the date partition, so it survives a restart and disappears
+    /// with the partition when retention prunes it. Once this store has written a snapshot,
+    /// only the day it currently tracks is reported and any other date reports `0` (GitHub
+    /// #276); the cap enforcement of [`Self::store_snapshot`] always reads the persisted
+    /// counter of the target date. An invalid date, a missing partition or an unreadable
+    /// counter reports `0`; [`Self::store_snapshot`] fails closed instead.
     pub fn daily_count(&self, uid: u32, date: &str) -> u32 {
-        let lock = self.daily_counts.lock().unwrap_or_else(|e| e.into_inner());
-        lock.get(&(uid, date.to_string())).copied().unwrap_or(0)
+        if parse_date(date).is_err() {
+            return 0;
+        }
+        let counts = self.daily_counts.lock().unwrap_or_else(|e| e.into_inner());
+        if counts.tracks_other_than(date) {
+            return 0;
+        }
+        match self.existing_date_dir(date) {
+            Some(date_dir) => read_daily_count(&date_dir, uid).unwrap_or(0),
+            None => 0,
+        }
+    }
+
+    /// Gets the snapshot count of `date` across all UIDs.
+    ///
+    /// Reports the tracked day from memory; before the first write of this store it counts
+    /// the snapshot files of the partition. Any other date, an invalid date or an unreadable
+    /// partition reports `0`.
+    pub fn daily_total(&self, date: &str) -> u32 {
+        if parse_date(date).is_err() {
+            return 0;
+        }
+        let counts = self.daily_counts.lock().unwrap_or_else(|e| e.into_inner());
+        if counts.tracks(date) {
+            return counts.total;
+        }
+        if counts.tracks_other_than(date) {
+            return 0;
+        }
+        match self.existing_date_dir(date) {
+            Some(date_dir) => count_snapshot_files(&date_dir).unwrap_or(0),
+            None => 0,
+        }
+    }
+
+    /// Number of per-UID daily counters currently held in memory (bounded by the global cap).
+    pub fn tracked_daily_counters(&self) -> usize {
+        let counts = self.daily_counts.lock().unwrap_or_else(|e| e.into_inner());
+        counts.per_uid.len()
+    }
+
+    /// Returns the partition directory of `date` when it exists as a real directory.
+    fn existing_date_dir(&self, date: &str) -> Option<PathBuf> {
+        let date_dir = self.config.base_dir.join(date);
+        match fs::symlink_metadata(&date_dir) {
+            Ok(meta) if meta.is_dir() => Some(date_dir),
+            _ => None,
+        }
     }
 
     /// Lists snapshot file paths for a specific date partition.
@@ -414,9 +575,114 @@ impl EvidenceStore {
         pruned_dates.sort();
         let directories_pruned = pruned_dates.len();
 
+        // A pruned tracked day must not keep counters in memory.
+        {
+            let mut counts = self.daily_counts.lock().unwrap_or_else(|e| e.into_inner());
+            if counts
+                .date
+                .as_ref()
+                .is_some_and(|d| pruned_dates.iter().any(|p| p == d))
+            {
+                counts.reset();
+            }
+        }
+
         Ok(RetentionReport {
             directories_pruned,
             pruned_dates,
         })
     }
+}
+
+/// Counts the snapshot files (regular, non-symlink `*.enc` entries) of a date partition.
+///
+/// Temporary files and counter files never end in `.enc` and are not counted.
+fn count_snapshot_files(date_dir: &Path) -> Result<u32, EvidenceStoreError> {
+    let mut count: u32 = 0;
+    for entry in fs::read_dir(date_dir)? {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        if file_type.is_file() && entry.path().extension().and_then(|e| e.to_str()) == Some("enc") {
+            count = count.saturating_add(1);
+        }
+    }
+    Ok(count)
+}
+
+/// Path of the persisted per-UID daily counter inside a date partition.
+fn daily_count_path(date_dir: &Path, uid: u32) -> PathBuf {
+    date_dir.join(format!("{DAILY_COUNT_FILE_PREFIX}{uid}"))
+}
+
+/// Reads the persisted daily counter of `uid` in `date_dir` (missing file: `0`).
+///
+/// The file is opened with `O_NOFOLLOW | O_NONBLOCK`, must be a regular file of at most
+/// [`MAX_DAILY_COUNT_FILE_BYTES`] bytes and hold a decimal `u32`; anything else fails closed.
+fn read_daily_count(date_dir: &Path, uid: u32) -> Result<u32, EvidenceStoreError> {
+    let path = daily_count_path(date_dir, uid);
+    let file = match OpenOptions::new()
+        .read(true)
+        .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_NONBLOCK)
+        .open(&path)
+    {
+        Ok(file) => file,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(e) => return Err(EvidenceStoreError::Io(e)),
+    };
+    let meta = file.metadata()?;
+    if !meta.is_file() || meta.len() > MAX_DAILY_COUNT_FILE_BYTES {
+        return Err(EvidenceStoreError::CorruptPayload(format!(
+            "daily counter '{}' is not a small regular file",
+            path.display()
+        )));
+    }
+    let mut text = String::new();
+    file.take(MAX_DAILY_COUNT_FILE_BYTES)
+        .read_to_string(&mut text)
+        .map_err(|_| {
+            EvidenceStoreError::CorruptPayload(format!(
+                "daily counter '{}' is not UTF-8",
+                path.display()
+            ))
+        })?;
+    text.trim_end_matches('\n').parse::<u32>().map_err(|_| {
+        EvidenceStoreError::CorruptPayload(format!(
+            "daily counter '{}' does not hold a decimal count",
+            path.display()
+        ))
+    })
+}
+
+/// Atomically replaces the persisted daily counter of `uid` in `date_dir` (mode `0600`).
+fn write_daily_count(date_dir: &Path, uid: u32, count: u32) -> Result<(), EvidenceStoreError> {
+    let mut rand_bytes = [0u8; 8];
+    getrandom::fill(&mut rand_bytes)
+        .map_err(|e| EvidenceStoreError::Crypto(format!("Failed to generate random salt: {e}")))?;
+    let tmp_path = date_dir.join(format!(
+        ".tmp{DAILY_COUNT_FILE_PREFIX}{uid}.{}.{:016x}",
+        std::process::id(),
+        u64::from_ne_bytes(rand_bytes)
+    ));
+    if let Err(e) = write_new_file(&tmp_path, format!("{count}\n").as_bytes()) {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(e);
+    }
+    // rename(2) replaces a planted symlink itself and never follows it.
+    if let Err(e) = fs::rename(&tmp_path, daily_count_path(date_dir, uid)) {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(EvidenceStoreError::Io(e));
+    }
+    Ok(())
+}
+
+/// Creates `path` exclusively with mode `0600`, writes `bytes` and syncs it to disk.
+fn write_new_file(path: &Path, bytes: &[u8]) -> Result<(), EvidenceStoreError> {
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)?;
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    Ok(())
 }

@@ -47,8 +47,12 @@ fi
 
 step "Candid Pre-Push Review: Analyzing Changes vs $BASE_REF"
 
+# Every audit diffs against the merge base, never against the moving tip of BASE_REF: once
+# main advances past the branch point, a two-dot diff would contain reversed upstream hunks.
+MERGE_BASE=$(git merge-base "$BASE_REF" HEAD 2>/dev/null || echo "$BASE_REF")
+
 # Determine diff targets
-CHANGED_FILES=$(git diff --name-only "$BASE_REF"...HEAD 2>/dev/null || true)
+CHANGED_FILES=$(git diff --name-only "$MERGE_BASE" HEAD 2>/dev/null || true)
 WORKING_CHANGED=$(git status --porcelain 2>/dev/null || true)
 
 if [[ -z "$CHANGED_FILES" && -z "$WORKING_CHANGED" ]]; then
@@ -62,7 +66,69 @@ if [[ -n "$CHANGED_FILES" ]]; then
 fi
 
 # Obtain complete raw diff (committed on branch + unstaged/staged working tree)
-RAW_DIFF=$(git diff "$BASE_REF" 2>/dev/null || git diff HEAD 2>/dev/null || true)
+RAW_DIFF=$(git diff "$MERGE_BASE" 2>/dev/null || git diff HEAD 2>/dev/null || true)
+
+# Rust production-code filter for the PAM audits (mirrors `production_code` in
+# tests/invariants/src/lexing_contract.rs, single-line literals only). It blanks line
+# comments and the contents of string and char literals, then drops exactly the item gated
+# by `#[cfg(test)]` / `#[cfg(all(test, ...))]`: up to its `;` (`mod tests;`, `use ...;`) or up
+# to the `}` matching its body (`mod tests { ... }`, `fn`, `impl`).
+RUST_PRODUCTION_FILTER=$(cat <<'AWK'
+function sanitize(s) {
+    gsub(/\\\\/, "", s)
+    gsub(/'\\.[^']*'/, "''", s)
+    gsub(/'[^'\\]'/, "''", s)
+    gsub(/\\"/, "", s)
+    gsub(/"[^"]*"/, "\"\"", s)
+    sub(/\/\/.*/, "", s)
+    return s
+}
+function skip_item(text,    i, n, ch) {
+    n = length(text)
+    for (i = 1; i <= n; i++) {
+        ch = substr(text, i, 1)
+        if (in_body) {
+            if (ch == "{") depth++
+            else if (ch == "}") { depth--; if (depth == 0) { state = 0; return } }
+        } else if (ch == "[") square++
+        else if (ch == "]") { if (square > 0) square-- }
+        else if (ch == "(") paren++
+        else if (ch == ")") { if (paren > 0) paren-- }
+        else if (ch == "{" && square == 0 && paren == 0) { in_body = 1; depth = 1 }
+        else if (ch == ";" && square == 0 && paren == 0) { state = 0; return }
+    }
+}
+{
+    code = sanitize($0)
+    if (state == 0) {
+        if (code ~ /^[ \t]*#\[[ \t]*cfg[ \t]*\([ \t]*(test[ \t]*\)|all[ \t]*\([ \t]*test[ \t]*,)/) {
+            state = 1; in_body = 0; depth = 0; square = 0; paren = 0
+            skip_item(code)
+            next
+        }
+        print code
+        next
+    }
+    skip_item(code)
+}
+AWK
+)
+
+# Prints the PAM production lines (comment- and test-free, see RUST_PRODUCTION_FILTER)
+# added since the merge base that match the ERE "$1", as "<file>: <code>".
+pam_production_additions() {
+    local pattern="$1" file base_code head_code
+    while IFS= read -r file; do
+        [[ "$file" == *.rs ]] || continue
+        base_code="$(git show "${MERGE_BASE}:${file}" 2>/dev/null | awk "$RUST_PRODUCTION_FILTER" || true)"
+        head_code=""
+        if [[ -f "$file" ]]; then
+            head_code="$(awk "$RUST_PRODUCTION_FILTER" "$file" || true)"
+        fi
+        diff <(printf '%s\n' "$base_code") <(printf '%s\n' "$head_code") 2>/dev/null \
+            | grep -E '^>' | grep -E "$pattern" | sed "s|^> |${file}: |" || true
+    done < <(git diff --name-only "$MERGE_BASE" -- 'crates/pam/src' 2>/dev/null || true)
+}
 
 ERRORS_FOUND=0
 
@@ -75,9 +141,8 @@ for crate_name in "${BUSINESS_CRATES[@]}"; do
     BUSINESS_PATHS+=("crates/${crate_name}")
 done
 UNSAFE_HITS=$(echo "$RAW_DIFF" | grep -E '^\+[^+].*\bunsafe\b' || true)
-FORBIDDEN_UNSAFE=$(git diff "$BASE_REF" -- "${BUSINESS_PATHS[@]}" 2>/dev/null | grep -E '^\+[^+].*\bunsafe\b' | grep -vE '^\+\s*//' || true)
+FORBIDDEN_UNSAFE=$(git diff "$MERGE_BASE" -- "${BUSINESS_PATHS[@]}" 2>/dev/null | grep -E '^\+[^+].*\bunsafe\b' | grep -vE '^\+\s*//' || true)
 # A removed attribute only counts if the file no longer declares it (moves/reformatting are fine).
-MERGE_BASE=$(git merge-base "$BASE_REF" HEAD 2>/dev/null || echo "$BASE_REF")
 REMOVED_FORBID=""
 while IFS= read -r rs_file; do
     [[ -z "$rs_file" ]] && continue
@@ -105,7 +170,8 @@ fi
 
 # 2. Check for panics, unwraps, and unfinished stubs in PAM production pathways
 step "Audit 2: Checking Panic Safety & Robustness Invariant in PAM Module"
-PAM_PANICS=$(git diff "$BASE_REF" -- 'crates/pam/src/**/*.rs' 'crates/pam/src/*.rs' 2>/dev/null | grep -E '^\+[^+].*(\.unwrap\(|\.expect\(|panic!|todo!|unimplemented!|unreachable!)' | grep -v 'tests' || true)
+# Production lines only: #[cfg(test)] items are filtered out lexically (no `grep -v tests`).
+PAM_PANICS=$(pam_production_additions '(\.unwrap\(|\.expect\(|panic!|panic_any\(|todo!|unimplemented!|unreachable!)')
 if [[ -n "$PAM_PANICS" ]]; then
     error "Forbidden panic, unwrap, or unfinished stub added in PAM production code!"
     echo "$PAM_PANICS" | sed 's/^/    /'
@@ -116,7 +182,7 @@ fi
 
 # 3. Check for async/Tokio in PAM crate
 step "Audit 3: Checking Asynchronous Runtime Invariant"
-PAM_TOKIO=$(git diff "$BASE_REF" -- crates/pam/Cargo.toml 2>/dev/null | grep -E '^\+[^+].*\b(tokio|async-std|smol|async-io)\b' || true)
+PAM_TOKIO=$(git diff "$MERGE_BASE" -- crates/pam/Cargo.toml 2>/dev/null | grep -E '^\+[^+].*\b(tokio|async-std|smol|async-io)\b' || true)
 if [[ -n "$PAM_TOKIO" ]]; then
     error "Forbidden asynchronous runtime dependency added to crates/pam/Cargo.toml!"
     echo "$PAM_TOKIO" | sed 's/^/    /'
@@ -127,7 +193,7 @@ fi
 
 # 4. Check for forbidden OpenCV and Nokhwa dependencies
 step "Audit 4: Checking Forbidden Third-Party Dependencies (OpenCV & Nokhwa)"
-FORBIDDEN_DEPS=$(git diff "$BASE_REF" -- '**/Cargo.toml' 'Cargo.toml' 2>/dev/null | grep -E '^\+[^+].*(opencv|nokhwa)' || true)
+FORBIDDEN_DEPS=$(git diff "$MERGE_BASE" -- '**/Cargo.toml' 'Cargo.toml' 2>/dev/null | grep -E '^\+[^+].*(opencv|nokhwa)' || true)
 if [[ -n "$FORBIDDEN_DEPS" ]]; then
     error "Forbidden OpenCV or Nokhwa dependency detected in Cargo.toml!"
     echo "$FORBIDDEN_DEPS" | sed 's/^/    /'
@@ -138,7 +204,7 @@ fi
 
 # 5. Shell script syntax validation
 step "Audit 5: Validating Shell Scripts Syntax"
-SHELL_FILES=$(git diff --name-only "$BASE_REF" 2>/dev/null | grep -E '(\.sh$|^\.githooks/)' || true)
+SHELL_FILES=$(git diff --name-only "$MERGE_BASE" 2>/dev/null | grep -E '(\.sh$|^\.githooks/)' || true)
 if [[ -n "$SHELL_FILES" ]]; then
     for sh_file in $SHELL_FILES; do
         if [[ -f "$sh_file" ]]; then
@@ -156,7 +222,7 @@ fi
 
 # 6. PAM output isolation check (no stdout/stderr pollution)
 step "Audit 6: Checking PAM Module Output Isolation (No stdout/stderr prints)"
-PAM_PRINTS=$(git diff "$BASE_REF" -- 'crates/pam/src/**/*.rs' 'crates/pam/src/*.rs' 2>/dev/null | grep -E '^\+[^+].*(println!|eprintln!|print!|eprint!|dbg!)' | grep -v 'tests' || true)
+PAM_PRINTS=$(pam_production_additions '(println!|eprintln!|print!|eprint!|dbg!)')
 if [[ -n "$PAM_PRINTS" ]]; then
     error "Forbidden stdout/stderr print (println!, eprintln!, dbg!) in PAM production code!"
     echo "$PAM_PRINTS" | sed 's/^/    /'
@@ -168,7 +234,9 @@ fi
 # 7. English-Only Deliverables Audit
 step "Audit 7: Checking Strict English-Only Deliverable Policy"
 # Scan all added lines in modified files for common non-English keywords
-FRENCH_MARKERS=$(git diff "$BASE_REF" -- '*.rs' '*.md' '*.sh' '*.yml' '*.yaml' '*.toml' 'Dockerfile' '.gitignore' ':!scripts/candid_review.sh' 2>/dev/null | grep -E '^\+[^+]*(//|/\*|#|<!--|").*(\b(pour|avec|dans|faire|ajouter|vérifier|fonction|problème|étape|fichier|modifié|remarque|attention|défaut|sécurité|exécution|gestion)\b)' || true)
+# 'pour' and 'attention' are also English words ("pour the buffer", "Attention: ...") and are
+# deliberately not markers.
+FRENCH_MARKERS=$(git diff "$MERGE_BASE" -- '*.rs' '*.md' '*.sh' '*.yml' '*.yaml' '*.toml' 'Dockerfile' '.gitignore' ':!scripts/candid_review.sh' 2>/dev/null | grep -E '^\+[^+]*(//|/\*|#|<!--|").*(\b(avec|dans|faire|ajouter|vérifier|fonction|problème|étape|fichier|modifié|remarque|défaut|sécurité|exécution|gestion)\b)' || true)
 if [[ -n "$FRENCH_MARKERS" ]]; then
     error "Non-English comment or text detected in modified files:"
     echo "$FRENCH_MARKERS" | head -15 | sed 's/^/    /'

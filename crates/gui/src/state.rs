@@ -28,6 +28,9 @@ pub struct LatestFrameData {
     pub detections: Vec<FaceDetection>,
     /// Presentation attack detection result.
     pub pad_result: Option<PadResult>,
+    /// Pipeline liveness decision (`VisionPipelineConfig::pad_passes`) for `pad_result`; the
+    /// only value the GUI displays as LIVE (GitHub #215, never a GUI-local threshold).
+    pub pad_live: bool,
     /// Estimated 3D head rotation pose.
     pub pose: Option<HeadPose>,
     /// 112x112 aligned face crop for preview.

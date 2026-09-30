@@ -130,6 +130,11 @@ def classify_event(body: bytes):
 
 EVENT_KIND_NAMES = {0: "password-failed"}
 
+# Client frame tag trailers (crates/protocol/src/message.rs, GitHub #204).
+MESSAGE_TAG_REQUEST = 0xA0
+MESSAGE_TAG_EVENT = 0xA1
+MESSAGE_TAG_MIN = 0x80
+
 
 def record_line(path, line: str):
     """Appends one line (message classification only, never payload bytes)."""
@@ -250,8 +255,16 @@ def main():
                         break
                     body.extend(chunk)
 
+                # Codec v1 client frames carry a one-byte message tag trailer (GitHub #204,
+                # crates/protocol/src/message.rs): 0xA0 = Request, 0xA1 = Event. Strip it so
+                # the body decodes as before; untagged legacy frames are still classified.
+                frame_tag = None
+                if body and body[-1] >= MESSAGE_TAG_MIN:
+                    frame_tag = body[-1]
+                    body = body[:-1]
+
                 # Events are fire-and-forget: record them and never reply.
-                event = classify_event(bytes(body))
+                event = classify_event(bytes(body)) if frame_tag != MESSAGE_TAG_REQUEST else None
                 if event is not None:
                     kind, uid, service = event
                     kind_name = EVENT_KIND_NAMES.get(kind, f"unknown-{kind}")

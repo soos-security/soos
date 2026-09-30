@@ -88,6 +88,20 @@ soos-gui --mock --dev-store "$HOME/.local/share/soos-dev"   # hardware-free deve
 
 Verification: `crates/gui/tests/import_privacy_tests.rs` (matrix rows ISE1–ISE4).
 
+## 1c. Guided Enrollment Liveness (GitHub #217 / #218)
+
+The worker feeds every analyzed frame to the guided enrollment session through
+`worker::feed_guided_enrollment`, and the session is created by
+`worker::new_guided_enrollment_session` with `LivenessPolicy::strict()`:
+
+- a sample needs 3 consecutive live frames (PAD live and score >= `pad_threshold`, NaN rejects);
+- a spoof or below-threshold frame discards the current step; the third one aborts the session
+  ("Enrollment aborted: repeated spoof detections. Cancel and restart.");
+- a frame rejected by the pre-PAD quality gate (`VisionAnalysis::quality_rejection`) shows
+  "Face too small or blurred: move closer and hold still." and is never sampled;
+- a frame with a face but no PAD verdict, or with no face, breaks the live streak without counting
+  as a spoof.
+
 ## 2. Camera Error States (GitHub #155, review finding CAM-07)
 
 Every `CameraManager` exposes `status() -> CameraStatus` (see `Docs/CAMERA_V4L_CRATE.md`). When no

@@ -24,8 +24,8 @@ use soos_inference_ort::pad::{AttackType, PadDetector, PadResult};
 use soos_inference_ort::{BiometricEmbedding, EmbeddingExtractor};
 use soos_vision::{VisionError, VisionPipeline, VisionPipelineConfig};
 
-#[path = "../../../tests/fixtures/mod.rs"]
-mod fixtures;
+// User-approved 2026-09-30 (GitHub #241): the shared fixtures are a dev-dependency crate.
+use soos_test_fixtures as fixtures;
 
 /// Spy embedding extractor to verify whether embedding extraction was invoked.
 struct SpyEmbeddingExtractor {

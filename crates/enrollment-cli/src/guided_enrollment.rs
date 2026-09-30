@@ -19,6 +19,23 @@
 //!
 //! Each step records at most [`MAX_SAMPLES_PER_STEP`] samples.
 //!
+//! # Session-level liveness (GitHub #217 / PAD-12)
+//!
+//! Liveness is tracked over the session, not per frame, according to a [`LivenessPolicy`]:
+//! - a sample is recorded only after `min_consecutive_live_frames` consecutive live frames
+//!   (the streak is broken by a spoof frame or by
+//!   [`GuidedEnrollmentSession::interrupt_liveness_streak`]); a live frame that is not yet
+//!   sampled yields [`EnrollmentStepFeedback::PromptHoldStill`];
+//! - a spoof frame discards every sample of the current step and resets the streak
+//!   ([`EnrollmentStepFeedback::SpoofDetected`]);
+//! - the `max_spoof_events`-th spoof frame aborts the session: every sample of every step
+//!   is discarded, [`EnrollmentStepFeedback::SessionAborted`] is returned from then on and
+//!   the composite template can no longer be computed.
+//!
+//! [`GuidedEnrollmentSession::new`] keeps a single-frame gate
+//! ([`LivenessPolicy::single_frame`]) for API compatibility; production callers (the GUI)
+//! use [`LivenessPolicy::strict`] through [`GuidedEnrollmentSession::with_liveness_policy`].
+//!
 //! # Fusion
 //!
 //! The composite template is the mean direction of all accepted samples:
@@ -50,6 +67,62 @@ pub const MAX_SAMPLES_PER_STEP: usize = 20;
 
 /// Maximum accepted embedding dimension for a guided enrollment sample.
 pub const MAX_GUIDED_EMBEDDING_DIM: usize = 2048;
+
+/// Default number of consecutive live frames required before a sample is recorded.
+///
+/// Mirrors the daemon PAD consensus (`DEFAULT_PAD_CONSENSUS_REQUIRED` = 3).
+pub const DEFAULT_MIN_CONSECUTIVE_LIVE_FRAMES: usize = 3;
+
+/// Default number of spoof frames that aborts a guided enrollment session.
+pub const DEFAULT_MAX_SPOOF_EVENTS: usize = 3;
+
+/// Upper bound applied to both [`LivenessPolicy`] values (they are clamped to `1..=32`).
+pub const MAX_LIVENESS_POLICY_BOUND: usize = 32;
+
+/// Session-level liveness policy of a guided enrollment session (GitHub #217).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LivenessPolicy {
+    /// Consecutive live frames required before a sample is recorded (clamped to `1..=32`).
+    pub min_consecutive_live_frames: usize,
+    /// Spoof frames that abort the session (clamped to `1..=32`).
+    pub max_spoof_events: usize,
+}
+
+impl LivenessPolicy {
+    /// Production policy: [`DEFAULT_MIN_CONSECUTIVE_LIVE_FRAMES`] consecutive live frames
+    /// per sample, abort after [`DEFAULT_MAX_SPOOF_EVENTS`] spoof frames.
+    pub const fn strict() -> Self {
+        Self {
+            min_consecutive_live_frames: DEFAULT_MIN_CONSECUTIVE_LIVE_FRAMES,
+            max_spoof_events: DEFAULT_MAX_SPOOF_EVENTS,
+        }
+    }
+
+    /// Legacy single-frame gate (used by [`GuidedEnrollmentSession::new`]); spoof frames
+    /// still reset the current step and abort after [`DEFAULT_MAX_SPOOF_EVENTS`].
+    pub const fn single_frame() -> Self {
+        Self {
+            min_consecutive_live_frames: 1,
+            max_spoof_events: DEFAULT_MAX_SPOOF_EVENTS,
+        }
+    }
+
+    /// Returns the policy with both values clamped to `1..=MAX_LIVENESS_POLICY_BOUND`.
+    fn clamped(self) -> Self {
+        Self {
+            min_consecutive_live_frames: self
+                .min_consecutive_live_frames
+                .clamp(1, MAX_LIVENESS_POLICY_BOUND),
+            max_spoof_events: self.max_spoof_events.clamp(1, MAX_LIVENESS_POLICY_BOUND),
+        }
+    }
+}
+
+impl Default for LivenessPolicy {
+    fn default() -> Self {
+        Self::strict()
+    }
+}
 
 /// Minimum L2 norm below which an embedding is considered degenerate.
 const MIN_EMBEDDING_NORM: f32 = 1e-6;
@@ -125,6 +198,12 @@ pub enum EnrollmentStepFeedback {
     IdentityMismatch,
     /// Head rotation exceeds the documented range of the current step.
     PoseOutOfRange,
+    /// Session aborted after repeated spoof frames; every sample was discarded and a new
+    /// session must be started (GitHub #217).
+    SessionAborted,
+    /// Frame rejected by the pre-PAD face quality gate (face too small or blurred,
+    /// GitHub #218); reported by the caller, never produced by `process_sample`.
+    FaceQualityTooLow,
 }
 
 /// State machine coordinating interactive multi-angle enrollment.
@@ -136,11 +215,24 @@ pub struct GuidedEnrollmentSession {
     left_samples: Vec<Vec<f32>>,
     right_samples: Vec<Vec<f32>>,
     tilt_samples: Vec<Vec<f32>>,
+    liveness: LivenessPolicy,
+    live_streak: usize,
+    spoof_events: usize,
+    aborted: bool,
 }
 
 impl GuidedEnrollmentSession {
     /// Creates a new guided enrollment session with target valid samples per pose step.
+    ///
+    /// Uses [`LivenessPolicy::single_frame`]; production callers should use
+    /// [`Self::with_liveness_policy`] with [`LivenessPolicy::strict`].
     pub fn new(target_samples_per_step: usize) -> Self {
+        Self::with_liveness_policy(target_samples_per_step, LivenessPolicy::single_frame())
+    }
+
+    /// Creates a new guided enrollment session with an explicit session-level liveness
+    /// policy (values clamped to `1..=MAX_LIVENESS_POLICY_BOUND`).
+    pub fn with_liveness_policy(target_samples_per_step: usize, policy: LivenessPolicy) -> Self {
         let capacity = target_samples_per_step.clamp(1, MAX_SAMPLES_PER_STEP);
         Self {
             target_samples_per_step: capacity,
@@ -149,7 +241,52 @@ impl GuidedEnrollmentSession {
             left_samples: Vec::with_capacity(capacity),
             right_samples: Vec::with_capacity(capacity),
             tilt_samples: Vec::with_capacity(capacity),
+            liveness: policy.clamped(),
+            live_streak: 0,
+            spoof_events: 0,
+            aborted: false,
         }
+    }
+
+    /// Returns `true` once repeated spoof frames aborted the session.
+    pub fn is_aborted(&self) -> bool {
+        self.aborted
+    }
+
+    /// Number of spoof frames observed in this session.
+    pub fn spoof_events(&self) -> usize {
+        self.spoof_events
+    }
+
+    /// Breaks the consecutive-live streak without counting a spoof event.
+    ///
+    /// Callers invoke it for frames that carry no PAD verdict (no face, failed crop,
+    /// quality-gate rejection), so a sample always follows an uninterrupted live run.
+    pub fn interrupt_liveness_streak(&mut self) {
+        self.live_streak = 0;
+    }
+
+    /// Handles a spoof frame: resets the streak and the current step, aborts the session
+    /// once `max_spoof_events` is reached.
+    fn record_spoof(&mut self) -> EnrollmentStepFeedback {
+        self.live_streak = 0;
+        self.spoof_events = self.spoof_events.saturating_add(1);
+        if self.spoof_events >= self.liveness.max_spoof_events {
+            self.aborted = true;
+            self.frontal_samples.clear();
+            self.left_samples.clear();
+            self.right_samples.clear();
+            self.tilt_samples.clear();
+            return EnrollmentStepFeedback::SessionAborted;
+        }
+        match self.current_step {
+            EnrollmentStep::Frontal => self.frontal_samples.clear(),
+            EnrollmentStep::TurnLeft => self.left_samples.clear(),
+            EnrollmentStep::TurnRight => self.right_samples.clear(),
+            EnrollmentStep::TiltUp => self.tilt_samples.clear(),
+            EnrollmentStep::Completed => {}
+        }
+        EnrollmentStepFeedback::SpoofDetected
     }
 
     /// Returns the currently active step.
@@ -159,6 +296,9 @@ impl GuidedEnrollmentSession {
 
     /// Returns overall completion progress as a percentage in [0.0, 100.0].
     pub fn progress_percent(&self) -> f32 {
+        if self.aborted {
+            return 0.0;
+        }
         let total_target = (self.target_samples_per_step * 4) as f32;
         if total_target == 0.0 {
             return 0.0;
@@ -183,13 +323,21 @@ impl GuidedEnrollmentSession {
         is_live: bool,
         is_centered: bool,
     ) -> EnrollmentStepFeedback {
+        if self.aborted {
+            return EnrollmentStepFeedback::SessionAborted;
+        }
+
         if self.current_step == EnrollmentStep::Completed {
             return EnrollmentStepFeedback::AllStepsCompleted;
         }
 
         if !is_live {
-            return EnrollmentStepFeedback::SpoofDetected;
+            return self.record_spoof();
         }
+        self.live_streak = self
+            .live_streak
+            .saturating_add(1)
+            .min(MAX_LIVENESS_POLICY_BOUND);
 
         if !is_centered {
             return EnrollmentStepFeedback::PromptCenterFace;
@@ -224,7 +372,7 @@ impl GuidedEnrollmentSession {
             EnrollmentStep::TiltUp => (&mut self.tilt_samples, EnrollmentStep::Completed),
             EnrollmentStep::Completed => return EnrollmentStepFeedback::AllStepsCompleted,
         };
-        if samples.len() >= target {
+        if samples.len() >= target || self.live_streak < self.liveness.min_consecutive_live_frames {
             return EnrollmentStepFeedback::PromptHoldStill;
         }
 
@@ -348,6 +496,9 @@ impl GuidedEnrollmentSession {
     /// re-validated (dimension, finiteness, identity consistency with the frontal anchor);
     /// any violation fails closed with an error.
     pub fn compute_composite_embedding(&self) -> Result<Vec<f32>, String> {
+        if self.aborted {
+            return Err("Enrollment session aborted after repeated spoof detections".to_string());
+        }
         let dim = match self.all_samples().next() {
             Some(first) => first.len(),
             None => return Err("No samples collected to compute template".to_string()),

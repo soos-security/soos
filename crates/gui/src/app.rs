@@ -18,9 +18,7 @@ use arc_swap::ArcSwapOption;
 use eframe::egui::{self, Color32, Pos2, Rect, Stroke, Vec2};
 use soos_biometric_store::BiometricTemplate;
 use soos_camera_v4l::{CameraManager, CameraStatus};
-use soos_enrollment_cli::guided_enrollment::{
-    EnrollmentStep, EnrollmentStepFeedback, GuidedEnrollmentSession,
-};
+use soos_enrollment_cli::guided_enrollment::{EnrollmentStep, EnrollmentStepFeedback};
 use soos_enrollment_cli::service::EnrolledUserSummary;
 use soos_vision::VisionPipeline;
 use zeroize::Zeroizing;
@@ -499,11 +497,7 @@ impl SoosApp {
 
                         // 2. Paint authentic ONNX detections
                         for det in &frame.detections {
-                            let is_live = frame
-                                .pad_result
-                                .as_ref()
-                                .map(|p| p.is_live && p.score >= 0.80)
-                                .unwrap_or(false);
+                            let is_live = frame.pad_live;
 
                             let box_color = if is_live {
                                 Color32::from_rgb(0, 230, 118) // Bright Green (Live)
@@ -657,12 +651,12 @@ impl SoosApp {
 
                                     ui.label("Anti-Spoof (PAD):");
                                     if let Some(pad) = &frame.pad_result {
-                                        let status = if pad.is_live && pad.score >= 0.80 {
+                                        let status = if frame.pad_live {
                                             "LIVE ✓"
                                         } else {
                                             "SPOOF ✗"
                                         };
-                                        let color = if pad.is_live {
+                                        let color = if frame.pad_live {
                                             Color32::GREEN
                                         } else {
                                             Color32::RED
@@ -988,6 +982,14 @@ impl SoosApp {
                             "Too far: rotate your head back slightly.",
                             Color32::YELLOW,
                         ),
+                        EnrollmentStepFeedback::SessionAborted => (
+                            "Enrollment aborted: repeated spoof detections. Cancel and restart.",
+                            Color32::RED,
+                        ),
+                        EnrollmentStepFeedback::FaceQualityTooLow => (
+                            "Face too small or blurred: move closer and hold still.",
+                            Color32::YELLOW,
+                        ),
                     };
 
                     ui.group(|ui| {
@@ -1005,7 +1007,7 @@ impl SoosApp {
                             if let Ok(mut session_guard) =
                                 self.worker_input.enrollment_session.lock()
                             {
-                                *session_guard = Some(GuidedEnrollmentSession::new(4));
+                                *session_guard = Some(crate::worker::new_guided_enrollment_session());
                             }
                         }
                     } else if ui.button("⏹ Cancel").clicked() {

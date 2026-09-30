@@ -3,9 +3,43 @@
 //! Provides primitives to lock sensitive process memory pages and cryptographic/biometric
 //! buffers into RAM via `mlock(2)` / `mlockall(2)`, preventing plaintext key material
 //! or biometric vectors from being paged to unencrypted swap space on disk.
+//!
+//! Production wiring (GitHub #201, ADR 2026-09-30 "Swap Protection Is `mlockall` Only"):
+//! `soos-daemon` calls [`enable_swap_protection`] once at startup. `mlockall` is the only
+//! page-locking layer in use; [`LockedBuffer`] and [`mlock_slice`] are tested primitives that
+//! are **not wired** around any production buffer. A refused `mlockall` is logged at `warn`
+//! level and recorded in [`HealthState::memory_locked`].
 
 use std::ops::{Deref, DerefMut};
+use tracing::{info, warn};
 use zeroize::Zeroize;
+
+use crate::health::HealthState;
+
+/// Locks the daemon address space with `mlockall` and records the outcome (GitHub #201).
+///
+/// Returns the `mlockall` result. See [`record_swap_protection`] for logging and health.
+pub fn enable_swap_protection(health: &HealthState) -> bool {
+    let locked = mlock_process_address_space();
+    record_swap_protection(locked, health);
+    locked
+}
+
+/// Records the swap-protection outcome in `health` and logs it.
+///
+/// Success is logged at `info`; a refusal at `warn`, because keys, templates and frames are
+/// then swappable and no other page-locking layer compensates for it.
+pub fn record_swap_protection(locked: bool, health: &HealthState) {
+    health.set_memory_locked(locked);
+    if locked {
+        info!("Swap protection active: process memory pages locked into RAM via mlockall");
+    } else {
+        warn!(
+            "Swap protection disabled: mlockall refused (requires CAP_IPC_LOCK and a sufficient RLIMIT_MEMLOCK); \
+             key material and biometric buffers may be written to swap"
+        );
+    }
+}
 
 /// Attempts to lock the virtual memory pages backing the specified byte slice into RAM.
 ///

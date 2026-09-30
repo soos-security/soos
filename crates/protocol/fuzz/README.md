@@ -8,6 +8,7 @@ This directory provides LLVM libFuzzer integration via `cargo-fuzz` for fuzz tes
 - **`decode_response`**: Sub-issue #4.2 — Feeds arbitrary mutated byte sequences into `decode::<Response>` and runs `resp.is_allow()`. Asserts zero panics.
 - **`decode_event`**: Feeds arbitrary mutated byte sequences into `decode::<Event>`. Asserts zero panics.
 - **`decode_preview`**: GitHub #227 — Feeds arbitrary bytes into `decode_preview::<PreviewResponse>` (2 MiB preview limit). Asserts zero panics and that a decoded frame never exceeds `MAX_PREVIEW_MESSAGE_SIZE`.
+- **`decode_client_message`**: GitHub #204 — Feeds arbitrary payloads into `message::decode_client_message`. Asserts zero panics and that a tagged classification always comes from a reserved trailer byte (`>= 0x80`) while a legacy one never does.
 
 ## Prerequisites
 

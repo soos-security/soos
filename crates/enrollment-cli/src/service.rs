@@ -20,7 +20,8 @@ use soos_inference_ort::{
 };
 use soos_protocol::Verdict;
 use soos_vision::{
-    cosine_similarity, PipelineOutput, VisionError, VisionPipeline, VisionPipelineConfig,
+    cosine_similarity, PadInputModality, PipelineOutput, VisionError, VisionPipeline,
+    VisionPipelineConfig,
 };
 
 use crate::args::{
@@ -198,8 +199,30 @@ pub struct DiagnosticVerificationReport {
     pub match_score: f32,
     pub match_threshold: f32,
     pub face_count: usize,
+    /// PAD outcome class: `PASSED`, `SPOOF(score=.., threshold=..)`,
+    /// `IR_GATE_REJECTED(..)`, `NO_FACE`, `MULTIPLE_FACES` or `LOW_CONFIDENCE(..)`.
     pub pad_result: String,
+    /// Liveness score returned by the PAD model, when PAD scored the frame (GitHub #236).
+    pub pad_score: Option<f32>,
+    /// Effective PAD threshold applied to the frame modality, when PAD ran (GitHub #236).
+    pub pad_threshold: Option<f32>,
     pub latency: LatencyBreakdown,
+}
+
+impl DiagnosticVerificationReport {
+    /// Operator-facing PAD line: the outcome class followed by the PAD score and
+    /// threshold when the PAD model scored the frame and the class does not already
+    /// carry them (GitHub #216, #236).
+    #[must_use]
+    pub fn pad_status(&self) -> String {
+        match (self.pad_score, self.pad_threshold) {
+            (Some(score), Some(threshold)) if !self.pad_result.contains("score=") => format!(
+                "{} (score={score:.3}, threshold={threshold:.2})",
+                self.pad_result
+            ),
+            _ => self.pad_result.clone(),
+        }
+    }
 }
 
 /// Metadata summary of an enrolled user.
@@ -495,6 +518,9 @@ impl EnrollmentService {
         let pipeline_ms = start_pipe.elapsed().as_secs_f64() * 1000.0;
 
         let threshold = pipeline.config().match_threshold;
+        let pad_threshold = pipeline
+            .config()
+            .effective_pad_threshold(PadInputModality::for_frame(&frame));
 
         match process_res {
             Ok(output) => {
@@ -517,6 +543,8 @@ impl EnrollmentService {
                     match_threshold: threshold,
                     face_count: 1,
                     pad_result: "PASSED".to_string(),
+                    pad_score: Some(output.pad_result.score),
+                    pad_threshold: Some(pad_threshold),
                     latency: LatencyBreakdown {
                         capture_ms,
                         pipeline_ms,
@@ -534,6 +562,8 @@ impl EnrollmentService {
                     match_threshold: threshold,
                     face_count: 0,
                     pad_result: "NO_FACE".to_string(),
+                    pad_score: None,
+                    pad_threshold: None,
                     latency: LatencyBreakdown {
                         capture_ms,
                         pipeline_ms,
@@ -551,6 +581,8 @@ impl EnrollmentService {
                     match_threshold: threshold,
                     face_count: count,
                     pad_result: "MULTIPLE_FACES".to_string(),
+                    pad_score: None,
+                    pad_threshold: None,
                     latency: LatencyBreakdown {
                         capture_ms,
                         pipeline_ms,
@@ -568,6 +600,52 @@ impl EnrollmentService {
                     match_threshold: threshold,
                     face_count: 1,
                     pad_result: format!("LOW_CONFIDENCE({confidence:.2})"),
+                    pad_score: None,
+                    pad_threshold: None,
+                    latency: LatencyBreakdown {
+                        capture_ms,
+                        pipeline_ms,
+                        matching_ms: 0.0,
+                        total_ms,
+                    },
+                })
+            }
+            // A presentation attack is a diagnostic Deny verdict with its PAD score,
+            // never a generic error (GitHub #216 / PAD-11).
+            Err(VisionError::PadFailed {
+                score,
+                threshold: applied,
+            }) => {
+                let total_ms = start_total.elapsed().as_secs_f64() * 1000.0;
+                Ok(DiagnosticVerificationReport {
+                    uid,
+                    verdict: Verdict::Deny,
+                    match_score: 0.0,
+                    match_threshold: threshold,
+                    face_count: 1,
+                    pad_result: format!("SPOOF(score={score:.3}, threshold={applied:.2})"),
+                    pad_score: Some(score),
+                    pad_threshold: Some(applied),
+                    latency: LatencyBreakdown {
+                        capture_ms,
+                        pipeline_ms,
+                        matching_ms: 0.0,
+                        total_ms,
+                    },
+                })
+            }
+            // The fail-closed IR gate rejected the crop before the PAD model ran.
+            Err(VisionError::IrLivenessGateFailed { reason }) => {
+                let total_ms = start_total.elapsed().as_secs_f64() * 1000.0;
+                Ok(DiagnosticVerificationReport {
+                    uid,
+                    verdict: Verdict::Deny,
+                    match_score: 0.0,
+                    match_threshold: threshold,
+                    face_count: 1,
+                    pad_result: format!("IR_GATE_REJECTED({reason})"),
+                    pad_score: None,
+                    pad_threshold: Some(pad_threshold),
                     latency: LatencyBreakdown {
                         capture_ms,
                         pipeline_ms,
@@ -1199,11 +1277,20 @@ pub fn build_full_service(cli: &Cli) -> Result<EnrollmentService, EnrollmentCliE
     let pad_session = registry.get_or_load_session(MODEL_ID_PAD)?;
     let emb_session = registry.get_or_load_session(MODEL_ID_EMBEDDING)?;
 
-    let detector = Arc::new(OrtScrfdDetector::new(det_session, 0.70, 0.40)?);
-    let pad = Arc::new(build_pad_detector(pad_session, 0.80));
+    // Enrollment captures templates under exactly the authentication thresholds
+    // (GitHub #251, #215): every value comes from the shared `VisionPipelineConfig`.
+    let pipeline_config = VisionPipelineConfig::default();
+    let detector = Arc::new(OrtScrfdDetector::new(
+        det_session,
+        pipeline_config.min_face_confidence,
+        pipeline_config.nms_iou_threshold,
+    )?);
+    let pad = Arc::new(build_pad_detector(
+        pad_session,
+        pipeline_config.pad_threshold,
+    ));
     let extractor = Arc::new(OrtEmbeddingExtractor::new(emb_session));
 
-    let pipeline_config = VisionPipelineConfig::default();
     let pipeline = Arc::new(VisionPipeline::new(
         detector,
         pad,

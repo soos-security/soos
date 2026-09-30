@@ -19,8 +19,8 @@ use soos_enrollment_cli::service::build_pad_detector;
 use soos_inference_ort::pad::DEFAULT_MINIFASNET_LIVE_CLASS_INDEX;
 use soos_inference_ort::SharedSession;
 
-#[path = "../../../tests/fixtures/mod.rs"]
-mod fixtures;
+// User-approved 2026-09-30 (GitHub #241): the shared fixtures are a dev-dependency crate.
+use soos_test_fixtures as fixtures;
 
 fn in_memory_session() -> SharedSession {
     let model = fixtures::onnx::minimal_identity_model();

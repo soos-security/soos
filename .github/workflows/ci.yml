@@ -226,6 +226,7 @@ jobs:
       - name: Run PAM integration tests (T1–T15)
         run: |
           docker run --rm \
+            -e SOOS_REQUIRE_TOOLCHAIN_SYNC=1 \
             -v "${GITHUB_WORKSPACE}:/workspace" \
             soos-sandbox:ci \
             bash /workspace/tests/docker/test_suite.sh

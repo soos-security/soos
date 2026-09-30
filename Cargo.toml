@@ -14,6 +14,7 @@ members = [
     "crates/admin-cli",
     "crates/gui",
     "tests/invariants",
+    "tests/fixtures",
 ]
 
 # Centralized versions across workspace
@@ -42,8 +43,9 @@ v4l = "0.14"
 arc-swap = "1"
 
 # ONNX Runtime & Machine Learning
-ort = "2.0.0-rc.13"
-ndarray = "0.17"
+# Exact pin: ort 2.0 is still a release candidate and pre-release APIs may change
+# between rc versions. Upgrade deliberately (real-model tests) once 2.0.0 GA ships.
+ort = "=2.0.0-rc.13"
 sha2 = "0.10"
 toml = "0.8"
 
@@ -58,7 +60,7 @@ thiserror = "2"
 tempfile = "3"
 
 # Low-level primitives & random generation
-getrandom = "0.3"
+getrandom = "0.4"
 libc = "0.2"
 pam_bindings = { package = "pam-bindings", version = "0.3.0" }
 
@@ -76,6 +78,7 @@ soos-protocol = { path = "crates/protocol", version = "0.1.0" }
 soos-policy = { path = "crates/policy", version = "0.1.0" }
 soos-daemon = { path = "crates/daemon", version = "0.1.0" }
 soos-camera-v4l = { path = "crates/camera-v4l", version = "0.1.0" }
+soos-test-fixtures = { path = "tests/fixtures", version = "0.1.0" }
 soos-inference-ort = { path = "crates/inference-ort", version = "0.1.0" }
 soos-vision = { path = "crates/vision", version = "0.1.0" }
 soos-biometric-store = { path = "crates/biometric-store", version = "0.1.0" }

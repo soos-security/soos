@@ -98,6 +98,16 @@ let key = MasterKey::generate()?;
 let key = MasterKey::load_or_create("/var/lib/soos/master.key")?;
 ```
 
+Key file validation (GitHub #230): an existing key is opened with `O_NOFOLLOW | O_NONBLOCK`
+and accepted only when the open descriptor is a regular file owned by root or by the effective
+UID, with no group or world permission bit (`mode & 0o077 == 0`), and exactly
+`MASTER_KEY_LEN` (32) bytes; at most 33 bytes are read. Anything else is
+`BiometricStoreError::KeyError` (a symlink is `InvalidPath` or `Io`) and the file is not
+modified: a key leaked to `0644` stops the daemon instead of being used silently. When the key
+is created, missing parent directories are created with `KEY_PARENT_DIR_MODE` (`0755`, the
+`/var/lib/soos` contract that keeps `/var/lib/soos/models` traversable); an existing parent is
+never chmod-ed. The key file itself is created `0600` with `O_EXCL` and renamed into place.
+
 ### 4.2 Biometric Store Operations (CRUD)
 
 ```rust
@@ -150,3 +160,5 @@ assert!(store.delete(1000)?);
 | **B8** | Existing store directory validated, never chmod-ed; created directory `0700` | `tests/directory_validation_tests.rs`, `store::tests::test_validate_store_dir_*` | ✅ Verified |
 | **B9** | Re-enrollment overwrites the replaced template inode (best effort) after an atomic commit | `tests/erasure_tests.rs` | ✅ Verified |
 | **B10** | CBOR plaintext returned in a zeroizing buffer | `tests/cbor_zeroize_tests.rs` | ✅ Verified |
+| **SRK2** | Existing master key validated on the open descriptor (regular, trusted owner, no group/world bit, 32 bytes, bounded read, `O_NOFOLLOW`) | `tests/master_key_hardening_tests.rs`, `crypto::key_open_tests::test_230_key_open_does_not_follow_symlinks` | ✅ Verified |
+| **SRK3** | Missing key parents created `0755`, existing parents never chmod-ed | `tests/master_key_hardening_tests.rs` | ✅ Verified |

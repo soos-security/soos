@@ -75,16 +75,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let pad_session = registry.get_or_load_session(MODEL_ID_PAD)?;
         let emb_session = registry.get_or_load_session(MODEL_ID_EMBEDDING)?;
 
-        let detector = Arc::new(OrtScrfdDetector::new(det_session, 0.60, 0.40)?);
-        let pad = Arc::new(OrtPadDetector::new(pad_session, 0.80));
+        // The preview shows exactly what the daemon decides (GitHub #251, #215): every
+        // detector and PAD threshold comes from the shared `VisionPipelineConfig`.
+        let vision_config = VisionPipelineConfig::default();
+        let detector = Arc::new(OrtScrfdDetector::new(
+            det_session,
+            vision_config.min_face_confidence,
+            vision_config.nms_iou_threshold,
+        )?);
+        let pad = Arc::new(OrtPadDetector::new(
+            pad_session,
+            vision_config.pad_threshold,
+        ));
         let extractor = Arc::new(OrtEmbeddingExtractor::new(emb_session));
 
-        let pipe = Arc::new(VisionPipeline::new(
-            detector,
-            pad,
-            extractor,
-            VisionPipelineConfig::default(),
-        ));
+        let pipe = Arc::new(VisionPipeline::new(detector, pad, extractor, vision_config));
         (cam, pipe)
     };
 

@@ -35,6 +35,15 @@ mod pam_deadline_contract;
 #[cfg(test)]
 mod cli_hygiene_contract;
 
+/// Dependency hygiene, Docker sandbox toolchain and `save.sh` commit contract
+/// (GitHub #243, #244, #245; matrix DDS1–DDS8).
+#[cfg(all(test, unix))]
+mod dependency_tooling_contract;
+
+/// PAD startup self-test wiring in the daemon (GitHub #214).
+#[cfg(test)]
+mod pad_startup_contract;
+
 /// Traceability tooling contract for `scripts/sync_issue.py` (GitHub #188).
 #[cfg(all(test, unix))]
 mod sync_issue_contract;
@@ -62,6 +71,60 @@ mod enroll_list_metadata_contract;
 /// PAM handle-guard removal and fault-injection ordering (GitHub #220, PHS4, PHS11).
 #[cfg(test)]
 mod pam_handle_guard_removal_contract;
+
+/// Daemon documentation versus code (GitHub #201, #205, #206).
+#[cfg(test)]
+mod daemon_docs_contract;
+
+/// Onboarding commands and packaging metadata (GitHub #207, #210).
+#[cfg(all(test, unix))]
+mod onboarding_packaging_contract;
+
+/// Installer distro templates, model download hardening and first-start guards
+/// (GitHub #208, #209, #211).
+#[cfg(all(test, unix))]
+mod installer_templates_contract;
+
+/// Repository hygiene and documentation-drift contract (GitHub #238, #239, #240).
+#[cfg(all(test, unix))]
+mod maintainer_hygiene_contract;
+
+/// Shared test-fixture crate contract (GitHub #241, TCI-10).
+#[cfg(test)]
+mod fixtures_contract;
+
+/// Hardened production-code lexing and PAM panic / async-runtime checks (GitHub #242, TCI-11).
+#[cfg(test)]
+mod lexing_contract;
+
+/// End-to-end contract of `scripts/candid_review.sh` (GitHub #242, TCI-11).
+#[cfg(all(test, unix))]
+mod candid_review_contract;
+
+/// Packaging, GDM timeout and PAM camera follow-ups (GitHub #281, rows QFU1–QFU8).
+#[cfg(all(test, unix))]
+mod quality_followups;
+
+/// Pinned Rust toolchain in rust-toolchain.toml and the sandbox Dockerfiles (rows TCP1–TCP3).
+#[cfg(test)]
+mod toolchain_pin_contract;
+
+/// Project licence AGPL-3.0-or-later: workspace metadata, LICENSE file, README (rows LIC1–LIC3).
+#[cfg(test)]
+mod licence_contract;
+
+/// Attested inference path: verified in-memory model bytes, explicit SCRFD score activation,
+/// legacy 4-model artefacts removed (GitHub #246, #247, #249).
+#[cfg(test)]
+mod vision_attestation_contract;
+
+/// Vision threshold single-source and vision documentation invariants (GitHub #215, #250, #251).
+#[cfg(test)]
+mod vision_threshold_contract;
+
+/// ORT-owned output tensors are wiped in place (GitHub #255).
+#[cfg(test)]
+mod ort_output_zeroize_contract;
 
 #[cfg(test)]
 #[allow(

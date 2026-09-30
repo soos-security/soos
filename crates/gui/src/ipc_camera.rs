@@ -9,7 +9,8 @@ use arc_swap::ArcSwapOption;
 use soos_camera_v4l::{
     CameraErrorKind, CameraManager, CameraStatus, CameraStatusCell, Frame, PixelFormat,
 };
-use soos_protocol::codec::{decode, decode_preview, encode};
+use soos_protocol::codec::{decode, decode_preview};
+use soos_protocol::message::encode_request;
 use soos_protocol::types::{
     PreviewResponse, ReasonClass, Request, RequestId, RequestKind, Response, Verdict,
     CURRENT_VERSION, MAX_MESSAGE_SIZE, MAX_PREVIEW_MESSAGE_SIZE,
@@ -248,7 +249,7 @@ fn request_preview(stream: &mut UnixStream, uid: u32) -> Result<PreviewResponse,
         service: "soos-gui".to_string(),
         deadline_monotonic_ns: u64::MAX,
     };
-    let encoded_req = encode(&req).map_err(|_| IpcPreviewError::Protocol)?;
+    let encoded_req = encode_request(&req).map_err(|_| IpcPreviewError::Protocol)?;
     stream
         .write_all(&encoded_req)
         .and_then(|()| stream.flush())

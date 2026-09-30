@@ -68,8 +68,8 @@ auth  required                       pam_unix.so try_first_pass nullok
 T10 exists because `cargo test` runs under `[profile.test]` (always `panic = "unwind"`) and
 therefore cannot detect a release profile that aborts; only the release-built shared object
 loaded by a real PAM host proves that `catch_unwind` is effective in production. The
-fault-injection variant is built into `target/fault-injection/` so the artifact used by T1–T9
-stays the exact production configuration.
+fault-injection variant is built into `target/fault-injection/` so the artifact used by every
+other case (T1–T9, T11–T15) stays the exact production configuration.
 
 ---
 

@@ -30,8 +30,9 @@
 //! ```
 //!
 //! Decoding is strict: the declared payload must be consumed exactly
-//! ([`codec::CodecError::TrailingBytes`] otherwise). The v1 wire format carries no
-//! message-type discriminator; see `Docs/IPC_PROTOCOL.md` section 2.
+//! ([`codec::CodecError::TrailingBytes`] otherwise). Client-to-daemon frames (`Request`,
+//! `Event`) carry a one-byte message tag trailer (GitHub #204); see [`message`] and
+//! `Docs/IPC_PROTOCOL.md`.
 
 #![forbid(unsafe_code)]
 #![deny(clippy::all, clippy::pedantic)]
@@ -41,9 +42,14 @@
 )]
 
 pub mod codec;
+pub mod message;
 pub mod types;
 
 pub use codec::{decode, encode};
+pub use message::{
+    decode_client_message, encode_event, encode_request, ClientMessage, FrameFormat, MessageError,
+    MESSAGE_TAG_EVENT, MESSAGE_TAG_REQUEST,
+};
 pub use types::{
     Event, EventKind, ReasonClass, Request, RequestKind, Response, StatusResponse, Verdict,
     CURRENT_VERSION, MAX_MESSAGE_SIZE, MAX_SERVICE_LEN, REQUEST_ID_LEN,

@@ -20,6 +20,15 @@ pub enum EvidenceStoreError {
         date: String,
     },
 
+    /// Global daily capture limit across all UIDs exceeded (GitHub #276).
+    #[error("Global daily capture cap exceeded on {date}: reached limit of {cap}")]
+    GlobalDailyCapExceeded {
+        /// Configured global daily cap.
+        cap: u32,
+        /// Date string in `YYYY-MM-DD` format.
+        date: String,
+    },
+
     /// Cryptographic encryption or decryption failure.
     #[error("Cryptographic operation failed: {0}")]
     Crypto(String),

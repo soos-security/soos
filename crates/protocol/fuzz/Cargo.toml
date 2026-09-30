@@ -41,3 +41,9 @@ name = "decode_preview"
 path = "fuzz_targets/decode_preview.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "decode_client_message"
+path = "fuzz_targets/decode_client_message.rs"
+test = false
+doc = false

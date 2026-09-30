@@ -115,7 +115,7 @@ Automated via `cargo-deny`:
   - `opencv`: Strictly prohibited (threat of native C++ vulnerabilities, memory footprint).
   - `nokhwa`: Strictly prohibited (root daemon directly owns `/dev/video*` via `v4l` crate).
 - **Advisories**: `yanked = "deny"`, zero unreviewed security advisories.
-- **Licenses**: Only permissive open source licenses (`MIT`, `Apache-2.0`, `BSD-3-Clause`, `ISC`).
+- **Licenses**: Only permissive open source licenses (`MIT`, `Apache-2.0`, `BSD-3-Clause`, `ISC`) for third-party dependencies. The project itself is `AGPL-3.0-or-later` (root `LICENSE`, `[workspace.package]` of `Cargo.toml`); workspace crates are private and exempt from the dependency allow-list (`[licenses.private]`).
 - **Sources**: Only official `crates.io` registry is permitted; arbitrary git dependencies are blocked.
 
 ---

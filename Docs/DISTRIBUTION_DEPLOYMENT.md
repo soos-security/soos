@@ -34,8 +34,21 @@ auth  optional                       pam_soos.so event=password-failed timeout_m
 ### 2.1 GDM Login Integration (`soos-admin gdm`)
 
 GDM authenticates through its own service file, `/etc/pam.d/gdm-password`, with a longer
-2500 ms capture budget. `soos-admin` manages it (ADR 2026-09-30 "GDM PAM Stack Placement",
-walkthrough 98):
+PAM-side deadline (`timeout_ms=2500`). `soos-admin` manages it (ADR 2026-09-30 "GDM PAM Stack Placement",
+walkthrough 98).
+
+**Daemon budget cap (GitHub #281).** `timeout_ms=2500` bounds only the PAM module's own wait
+(connect, request write, verdict read). The daemon decides every request within
+min(client deadline, request start + `[dispatcher] connection_timeout_ms`), each minus the
+50 ms response write margin, and `connection_timeout_ms` defaults to 2500 ms
+(`DEFAULT_CONNECTION_TIMEOUT_MS` in `crates/daemon/src/config.rs`, raised from 1000 ms by user
+decision on 2026-09-30). A GDM attempt therefore gets about 2450 ms of daemon time (camera wake,
+consensus loop, inference), while console and `sudo` stacks stay capped by their own 1000 ms
+module default. The value is daemon-wide: it also bounds how long an idle or slow client may
+hold one of the bounded connection slots (per-UID caps still apply). Lower it in
+`/etc/soos/daemon.toml` if that trade-off does not suit the host (ADR 2026-09-30
+"GDM `timeout_ms=2500` Versus Daemon `connection_timeout_ms`" and "Daemon Default Connection
+Timeout Raised to 2500 ms").
 
 ```bash
 sudo soos-admin gdm status                    # installed in PAM? disable flag present?
@@ -45,6 +58,11 @@ sudo soos-admin gdm disable                   # create /etc/soos/gdm.disable (PA
 sudo soos-admin gdm restore                   # put back gdm-password.soos-backup, remove it
 sudo soos-admin --format json gdm status      # machine-readable status
 ```
+
+`gdm status` reports `installed: true` only for an active rule whose module field is
+`pam_soos.so` (bare name or path); commented-out lines (`# auth ... pam_soos.so`), blank lines
+and mentions in module arguments are ignored, and `gdm enable` inserts a real rule next to such
+a comment (GitHub #236). The PAM file is read with the same 64 KiB bound as `gdm enable`.
 
 `--pam-file` (default `/etc/pam.d/gdm-password`) and `--disable-file` (default
 `/etc/soos/gdm.disable`) select other paths. `gdm disable` is the immediate, lockout-free
@@ -207,6 +225,15 @@ Enable the profiles non-interactively:
 ```bash
 sudo pam-auth-update --package --enable soos soos-notify
 ```
+
+The `.deb` `postinst` runs exactly this command, without `--force`. On a locally modified
+`common-*` stack, `pam-auth-update --package` prints "Local modifications to
+/etc/pam.d/common-*, not updating." and changes nothing, so the package installs but
+facial authentication stays inactive. The postinst never overwrites the administrator's
+edits; instead it prints a `soos: WARNING:` when `pam-auth-update` fails or when
+`/etc/pam.d/common-auth` does not call `pam_soos.so` afterwards (GitHub #281). Review the
+local changes, then run `sudo pam-auth-update --enable soos soos-notify` (interactive, offers
+to override local changes) or add the two rules by hand.
 
 Resulting `/etc/pam.d/common-auth` (Ubuntu 24.04, verified by `tests/docker/pam_rollback_test.sh`
 D3 and the Docker matrix case T11):
@@ -376,7 +403,8 @@ Arch Linux utilizes a modular `/etc/pam.d/system-auth` stack. The integration is
 sudo cp /etc/pam.d/system-auth /etc/pam.d/system-auth.soos-backup
 ```
 
-The `soos` snippet (`packaging/pam/arch/system-auth.snippet`) is placed immediately prior to `pam_unix.so`
+The `soos` snippet (`packaging/pam/arch/system-auth.snippet`, installed as `/usr/share/soos/pam/system-auth.snippet`;
+it is never placed in `/etc/pam.d`, where every file is a PAM service) is placed immediately prior to `pam_unix.so`
 (adjust any `success=N` jump that crosses the inserted lines, e.g. the one of `pam_systemd_home.so`):
 
 ```pam

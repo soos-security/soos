@@ -122,8 +122,9 @@ fn test_systemd_hardening_directives_complete() {
         "Missing DevicePolicy=closed"
     );
     assert!(
-        content.contains("DeviceAllow=/dev/video* rw"),
-        "Missing DeviceAllow=/dev/video* rw"
+        // User-approved 2026-09-30 (GitHub #203): the glob form is a systemd no-op.
+        content.contains("DeviceAllow=char-video4linux rw"),
+        "Missing DeviceAllow=char-video4linux rw"
     );
     assert!(
         content.contains("RestrictAddressFamilies=AF_UNIX"),

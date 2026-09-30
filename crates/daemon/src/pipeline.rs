@@ -30,6 +30,9 @@ pub const FRAME_POLL_INTERVAL_MS: u64 = 10;
 /// (GitHub #182 / STO-09): their vectors live in another embedding space.
 pub const EMBEDDING_MODEL_ID: &str = "arcface_w600k_mbf";
 
+/// Attested manifest identifier of the Presentation Attack Detection model.
+pub const PAD_MODEL_ID: &str = "minifasnet_v2_pad";
+
 /// Historical `model_id` accepted as an alias of [`EMBEDDING_MODEL_ID`].
 ///
 /// `soos-enroll enroll` recorded `mobilefacenet` / `1.0.0` by default until GitHub #182
@@ -173,6 +176,42 @@ pub fn build_pad_detector(
     soos_inference_ort::OrtPadDetector::new(pad_session, pad_threshold)
 }
 
+/// Startup validation of the daemon's PAD detector (GitHub #214, PAD-09).
+///
+/// Derives the expected class count from the manifest `output_shapes` of [`PAD_MODEL_ID`],
+/// runs [`soos_inference_ort::OrtPadDetector::self_test`] on a fixed synthetic fixture and
+/// logs the live class index and threshold at info level. Any mismatch (missing manifest
+/// entry, wrong output length, out-of-range live class index) fails closed: the daemon does
+/// not start rather than silently denying or accepting every presentation.
+pub fn validate_pad_detector(
+    pad: &soos_inference_ort::OrtPadDetector,
+    manifest: &soos_inference_ort::ModelManifest,
+) -> Result<soos_inference_ort::PadSelfTestReport, DaemonError> {
+    let meta = manifest.get_model(PAD_MODEL_ID).ok_or_else(|| {
+        soos_inference_ort::InferenceError::ModelNotFound {
+            id: PAD_MODEL_ID.to_string(),
+            path: std::path::PathBuf::from("manifest.toml"),
+        }
+    })?;
+    let expected_classes =
+        soos_inference_ort::pad::pad_class_count_from_manifest(&meta.output_shapes)?;
+    let report = pad.self_test(expected_classes).inspect_err(|err| {
+        tracing::error!(
+            model_id = PAD_MODEL_ID,
+            error = %err,
+            "PAD startup self-test failed; refusing to start"
+        );
+    })?;
+    tracing::info!(
+        model_id = PAD_MODEL_ID,
+        class_count = report.class_count,
+        live_class_index = report.live_class_index,
+        liveness_threshold = report.liveness_threshold,
+        "PAD startup self-test passed"
+    );
+    Ok(report)
+}
+
 /// Returns the camera configuration with its device resolved by the single shared resolver
 /// [`soos_camera_v4l::resolve_camera_device`] (GitHub #152), exactly like `soos-enroll` and
 /// `soos-gui`: an explicit `camera_device` is honored verbatim, the auto sentinel triggers
@@ -271,6 +310,94 @@ pub fn camera_device_resolver(
     Some(Arc::new(move || auto_select_camera_device(preference)))
 }
 
+/// Largest synthetic frame side used by [`warm_up_vision_stages`] (1920 pixels).
+///
+/// Bounds the warm-up allocation (at most 1920 x 1920 x 3 bytes) whatever the configured
+/// camera resolution; SCRFD letterboxes every frame to 640 x 640 anyway.
+pub const MAX_WARMUP_DIMENSION: u32 = 1920;
+
+/// Runs every vision inference stage once on blank (all-zero) synthetic inputs (GitHub #276).
+///
+/// A blank frame contains no face, so [`VisionPipeline::process_frame`] would stop after
+/// detection; the stages are therefore called directly: the face detector on a
+/// `frame_width x frame_height` RGB frame (each side clamped to `1..=`[`MAX_WARMUP_DIMENSION`]),
+/// the PAD model on a blank crop of the configured PAD size and the embedding extractor on a
+/// blank aligned crop of the configured recognition size. Stage results and errors are
+/// discarded unseen: warm-up only measures latency and never influences a decision. The
+/// inputs contain no camera data, so nothing sensitive is ever produced or logged.
+pub fn warm_up_vision_stages(vision: &VisionPipeline, frame_width: u32, frame_height: u32) {
+    let width = frame_width.clamp(1, MAX_WARMUP_DIMENSION);
+    let height = frame_height.clamp(1, MAX_WARMUP_DIMENSION);
+    let _ = vision
+        .detector()
+        .detect(&blank_rgb(width, height), width, height);
+
+    let config = vision.config();
+    let pad_width = config.pad_target_width.clamp(1, MAX_WARMUP_DIMENSION);
+    let pad_height = config.pad_target_height.clamp(1, MAX_WARMUP_DIMENSION);
+    let _ =
+        vision
+            .pad()
+            .evaluate_liveness(&blank_rgb(pad_width, pad_height), pad_width, pad_height);
+
+    let aligned_width = config.target_width.clamp(1, MAX_WARMUP_DIMENSION);
+    let aligned_height = config.target_height.clamp(1, MAX_WARMUP_DIMENSION);
+    let _ = vision.extractor().extract_embedding(
+        &blank_rgb(aligned_width, aligned_height),
+        aligned_width,
+        aligned_height,
+    );
+}
+
+/// Allocates a blank packed RGB888 buffer; both sides are already clamped by the caller.
+fn blank_rgb(width: u32, height: u32) -> Vec<u8> {
+    let len = usize::try_from(width)
+        .unwrap_or(0)
+        .saturating_mul(usize::try_from(height).unwrap_or(0))
+        .saturating_mul(3);
+    vec![0u8; len]
+}
+
+/// Builds the daemon's inference gate with its latency estimate seeded by a warm-up run of
+/// every vision stage (GitHub #276, walkthrough 96 follow-up).
+///
+/// When the warm-up fails (a stage panicked), the gate keeps
+/// [`crate::inference::DEFAULT_INFERENCE_ESTIMATE_MS`] and a warning is logged: warm-up is
+/// best effort and never prevents the daemon from starting.
+pub async fn warmed_inference_gate(
+    vision: Arc<VisionPipeline>,
+    frame_width: u32,
+    frame_height: u32,
+) -> crate::inference::InferenceGate {
+    let gate = crate::inference::InferenceGate::default();
+    match gate
+        .warm_up(move || warm_up_vision_stages(&vision, frame_width, frame_height))
+        .await
+    {
+        Ok(measured) => tracing::info!(
+            measured_ms = measured.as_millis(),
+            estimate_ms = gate.estimate().as_millis(),
+            "Vision inference warm-up complete; latency estimate seeded"
+        ),
+        Err(err) => tracing::warn!(
+            error = %err,
+            estimate_ms = gate.estimate().as_millis(),
+            "Vision inference warm-up failed; keeping the default latency estimate"
+        ),
+    }
+    gate
+}
+
+/// Model registry configuration derived from the pipeline configuration: models directory,
+/// its `manifest.toml`, and the operator-configured ORT intra-op thread count (GitHub #252;
+/// ORT spin-waiting stays disabled).
+pub fn registry_config_for(
+    config: &crate::config::PipelineConfig,
+) -> soos_inference_ort::RegistryConfig {
+    soos_inference_ort::RegistryConfig::new(&config.models_dir)
+        .with_intra_threads(config.inference_intra_threads)
+}
+
 /// Initializes all production pipeline components from a strongly-typed [`PipelineConfig`].
 ///
 /// This includes:
@@ -316,10 +443,10 @@ pub fn initialize_pipeline(
 
     // 3. Evidence Store & Master Key
     let ev_key = soos_evidence_store::MasterKey::load_or_create(&config.evidence.key_path)?;
-    let evidence_store = Arc::new(soos_evidence_store::EvidenceStore::new(
-        config.evidence.clone(),
-        ev_key,
-    ));
+    let evidence_store = Arc::new(
+        soos_evidence_store::EvidenceStore::new(config.evidence.clone(), ev_key)
+            .with_daily_cap_total(config.evidence_daily_cap_total),
+    );
 
     // 4. Policy Engine & Rate Limiter
     let rate_limiter = soos_policy::RateLimiter::new(config.rate_limit);
@@ -328,22 +455,26 @@ pub fn initialize_pipeline(
     ));
 
     // 5. Machine Learning Models & Vision Pipeline
-    let reg_config = soos_inference_ort::RegistryConfig::new(&config.models_dir);
+    let reg_config = registry_config_for(config);
     let mut registry = soos_inference_ort::ModelRegistry::new(reg_config)?;
 
-    // Cryptographic attestation: verify all models in directory match manifest checksums
+    // Cryptographic attestation: hash every model once; the verified in-memory bytes are what
+    // get_or_load_session hands to ONNX Runtime (no re-open, no second hash, GitHub #246).
     registry.verify_integrity()?;
 
     let det_session = registry.get_or_load_session("scrfd_500m_kps")?;
-    let pad_session = registry.get_or_load_session("minifasnet_v2_pad")?;
+    let pad_session = registry.get_or_load_session(PAD_MODEL_ID)?;
     let ext_session = registry.get_or_load_session(EMBEDDING_MODEL_ID)?;
 
     let detector = Arc::new(soos_inference_ort::OrtScrfdDetector::new(
         det_session,
         config.vision.min_face_confidence,
-        0.45,
+        config.vision.nms_iou_threshold,
     )?);
-    let pad = Arc::new(build_pad_detector(pad_session, config.vision.pad_threshold));
+    let pad = build_pad_detector(pad_session, config.vision.pad_threshold);
+    // PAD output contract self-test (GitHub #214): fail closed before serving any request.
+    validate_pad_detector(&pad, registry.manifest())?;
+    let pad = Arc::new(pad);
     let extractor = Arc::new(soos_inference_ort::OrtEmbeddingExtractor::new(ext_session));
 
     let vision = Arc::new(soos_vision::VisionPipeline::new(

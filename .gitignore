@@ -49,3 +49,11 @@ __pycache__/
 *.py[cod]
 *$py.class
 
+
+# ---------------------------------------------------------------------------
+# Root-level scratch files (GitHub #238)
+# ---------------------------------------------------------------------------
+# save.sh stages with `git add .`; one-off maintainer scripts and scratch bodies at the
+# repository root must never be committed. Durable tooling belongs under scripts/.
+/*.py
+/temp_*.md
