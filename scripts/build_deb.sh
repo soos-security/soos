@@ -120,7 +120,8 @@ Section: admin
 Priority: optional
 Architecture: ${ARCH}
 Maintainer: soos developers <dev@soos.local>
-Depends: libpam-runtime (>= 1.1.8-1), adduser | passwd, systemd
+Depends: libc6, libgcc-s1, libstdc++6, libpam0g, libpam-runtime (>= 1.1.8-1), adduser | passwd, systemd
+Recommends: libxkbcommon0, libwayland-client0, libwayland-egl1, libegl1, libgl1, libx11-6, libxcursor1, libxi6, libxrandr2
 Installed-Size: ${INSTALLED_SIZE}
 Description: Local facial biometric authentication PAM module and daemon
  soos is a zero-trust local facial biometric PAM subsystem for Linux.

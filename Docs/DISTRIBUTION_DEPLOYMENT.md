@@ -53,9 +53,14 @@ The package contains no key material: `postinst` generates `/var/lib/soos/master
 
 #### Option B: Universal Installer
 ```bash
-# Install binaries, unit files, and provision invariant directories
-sudo ./scripts/install.sh
+# Build dependencies (see Docs/PACKAGING_AND_PROVISIONING.md §3.1)
+./scripts/check_build_deps.sh --print-packages build
+# Build release artifacts, then install binaries, unit files, models and invariant directories
+sudo ./scripts/install.sh --build
 ```
+
+The installer fails closed (non-zero exit, nothing modified) when an artifact is missing or comes from a
+debug build, and rolls back every change if a later step such as model verification fails.
 
 ### 3.2 PAM Stack Integration via `pam-auth-update`
 Debian and Ubuntu dynamically manage `/etc/pam.d/common-auth` using `pam-auth-update`. `soos` provides two profiles in `/usr/share/pam-configs/`:

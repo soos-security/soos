@@ -2,7 +2,7 @@ Source: soos
 Section: admin
 Priority: optional
 Maintainer: soos developers <dev@soos.local>
-Build-Depends: debhelper-compat (= 13), cargo, rustc, libpam0g-dev, pkg-config, clang
+Build-Depends: debhelper-compat (= 13), cargo, rustc, libpam0g-dev, pkg-config, clang, libclang-dev, libssl-dev
 Standards-Version: 4.6.2
 Homepage: https://github.com/Mysticaly622/soos
 Vcs-Git: https://github.com/Mysticaly622/soos.git
@@ -10,6 +10,7 @@ Vcs-Git: https://github.com/Mysticaly622/soos.git
 Package: soos
 Architecture: any
 Depends: ${shlibs:Depends}, ${misc:Depends}, libpam-runtime (>= 1.1.8-1), adduser | passwd, systemd
+Recommends: libxkbcommon0, libwayland-client0, libwayland-egl1, libegl1, libgl1, libx11-6, libxcursor1, libxi6, libxrandr2
 Description: Local facial biometric authentication PAM module and daemon
  soos is a zero-trust local facial biometric PAM subsystem for Linux.
  It features sub-250ms latency verification, warm camera streaming,
