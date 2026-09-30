@@ -497,11 +497,7 @@ impl SoosApp {
 
                         // 2. Paint authentic ONNX detections
                         for det in &frame.detections {
-                            let is_live = frame
-                                .pad_result
-                                .as_ref()
-                                .map(|p| p.is_live && p.score >= 0.80)
-                                .unwrap_or(false);
+                            let is_live = frame.pad_live;
 
                             let box_color = if is_live {
                                 Color32::from_rgb(0, 230, 118) // Bright Green (Live)
@@ -655,12 +651,12 @@ impl SoosApp {
 
                                     ui.label("Anti-Spoof (PAD):");
                                     if let Some(pad) = &frame.pad_result {
-                                        let status = if pad.is_live && pad.score >= 0.80 {
+                                        let status = if frame.pad_live {
                                             "LIVE ✓"
                                         } else {
                                             "SPOOF ✗"
                                         };
-                                        let color = if pad.is_live {
+                                        let color = if frame.pad_live {
                                             Color32::GREEN
                                         } else {
                                             Color32::RED

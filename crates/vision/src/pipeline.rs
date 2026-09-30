@@ -25,11 +25,36 @@ use zeroize::{Zeroize, Zeroizing};
 /// (GitHub #212). Bounds the per-frame inference cost and crop allocations.
 pub const MAX_PAD_ENSEMBLE_MODELS: usize = 4;
 
+/// Minimum SCRFD detection confidence (GitHub #251, VIS-09).
+///
+/// Single value for authentication (`soos-daemon`), enrollment (`soos-enroll`) and the GUI
+/// preview (`soos-gui`): it is both the detector's candidate threshold and the pipeline's
+/// primary-face threshold.
+pub const DEFAULT_MIN_FACE_CONFIDENCE: f32 = 0.70;
+
+/// Default cosine similarity threshold; equals `soos_policy::ThresholdConfig::DEFAULT_MATCH_THRESHOLD`
+/// (asserted by `crates/daemon/tests/vision_threshold_parity_tests.rs`).
+pub const DEFAULT_MATCH_THRESHOLD: f32 = 0.70;
+
+/// Default colour PAD liveness threshold (GitHub #215, PAD-10); equals
+/// `soos_policy::ThresholdConfig::DEFAULT_PAD_THRESHOLD`. It is the only colour liveness
+/// threshold of the workspace: every `OrtPadDetector` is built with the configured
+/// `pad_threshold`, and the GUI displays [`VisionPipelineConfig::pad_passes`].
+pub const DEFAULT_PAD_THRESHOLD: f32 = 0.85;
+
+/// Default SCRFD non-maximum-suppression IoU threshold (GitHub #251, VIS-09).
+///
+/// The authentication value; a lower IoU would merge more overlapping boxes and could hide a
+/// second face from the single-face invariant, so enrollment and the GUI use the same value.
+pub const DEFAULT_NMS_IOU_THRESHOLD: f32 = 0.45;
+
 /// Configuration options for the vision verification pipeline.
 #[derive(Debug, Clone, PartialEq)]
 pub struct VisionPipelineConfig {
     /// Minimum detection confidence required to accept a face candidate.
     pub min_face_confidence: f32,
+    /// SCRFD non-maximum-suppression IoU threshold passed to `OrtScrfdDetector::new`.
+    pub nms_iou_threshold: f32,
     /// Cosine similarity threshold required to grant biometric match.
     pub match_threshold: f32,
     /// Presentation attack detection (liveness) score threshold for colour frames (standard 0.85).
@@ -63,9 +88,10 @@ pub struct VisionPipelineConfig {
 impl Default for VisionPipelineConfig {
     fn default() -> Self {
         Self {
-            min_face_confidence: 0.70,
-            match_threshold: 0.70,
-            pad_threshold: 0.85,
+            min_face_confidence: DEFAULT_MIN_FACE_CONFIDENCE,
+            nms_iou_threshold: DEFAULT_NMS_IOU_THRESHOLD,
+            match_threshold: DEFAULT_MATCH_THRESHOLD,
+            pad_threshold: DEFAULT_PAD_THRESHOLD,
             ir_pad_threshold: DEFAULT_IR_PAD_THRESHOLD,
             target_width: 112,
             target_height: 112,
@@ -89,6 +115,15 @@ impl VisionPipelineConfig {
             PadInputModality::Color => self.pad_threshold,
             PadInputModality::Monochrome => self.pad_threshold.max(self.ir_pad_threshold),
         }
+    }
+
+    /// The single liveness decision of the workspace (GitHub #215, PAD-10).
+    ///
+    /// True only when the model result is live, the score is finite and
+    /// `score >= effective_pad_threshold(modality)`. Written so that a NaN score or threshold
+    /// always rejects. Used by the pipeline itself and by the GUI liveness display.
+    pub fn pad_passes(&self, pad: &PadResult, modality: PadInputModality) -> bool {
+        pad.is_live && pad.score.is_finite() && pad.score >= self.effective_pad_threshold(modality)
     }
 }
 
@@ -563,10 +598,8 @@ impl VisionPipeline {
         let pad_result =
             self.fused_pad_result(rgb, width, height, face_box, modality, threshold)?;
 
-        // Written so that a NaN score or threshold always rejects (fail-closed).
-        let passes =
-            pad_result.is_live && pad_result.score.is_finite() && pad_result.score >= threshold;
-        if !passes {
+        // Single fail-closed liveness decision (NaN score or threshold always rejects).
+        if !self.config.pad_passes(&pad_result, modality) {
             return Err(VisionError::PadFailed {
                 score: pad_result.score,
                 threshold,

@@ -381,7 +381,7 @@ pub fn initialize_pipeline(
     let detector = Arc::new(soos_inference_ort::OrtScrfdDetector::new(
         det_session,
         config.vision.min_face_confidence,
-        0.45,
+        config.vision.nms_iou_threshold,
     )?);
     let pad = build_pad_detector(pad_session, config.vision.pad_threshold);
     // PAD output contract self-test (GitHub #214): fail closed before serving any request.

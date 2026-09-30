@@ -10,6 +10,7 @@
 
 use crate::error::InferenceError;
 use crate::landmarks::{FaceLandmarks, Point2f};
+use crate::letterbox::{letterbox_bilinear, letterbox_geometry};
 use std::cmp::Ordering;
 use zeroize::{Zeroize, Zeroizing};
 
@@ -257,70 +258,46 @@ pub fn unproject(x: f32, y: f32, scale: f32, pad_x: f32, pad_y: f32) -> (f32, f3
 /// Letterbox pads an RGB image buffer to target x target dimensions, maintaining aspect ratio.
 ///
 /// Output tensor is in NCHW format with BGR channel ordering and (pixel - 127.5) / 128.0 normalization.
-/// Border padding is filled with 0.0.
+/// Border padding is filled with 0.0. Resampling is bilinear and the returned `pad_x` / `pad_y`
+/// are the exact integer placement offsets, shared with `soos-vision` through
+/// [`crate::letterbox`] (GitHub #248, VIS-06).
 pub fn letterbox_pad(
     rgb: &[u8],
     w: u32,
     h: u32,
     target: usize,
 ) -> (Zeroizing<Vec<f32>>, f32, f32, f32) {
-    let target_f = target as f32;
     let mut tensor = Zeroizing::new(vec![0.0f32; 3 * target * target]);
 
-    if w == 0 || h == 0 || rgb.len() != (w as usize).saturating_mul(h as usize).saturating_mul(3) {
+    let Ok(target_u32) = u32::try_from(target) else {
+        return (tensor, 1.0, 0.0, 0.0);
+    };
+    let Some(geometry) = letterbox_geometry(w, h, target_u32, target_u32) else {
+        return (tensor, 1.0, 0.0, 0.0);
+    };
+
+    let plane = target * target;
+    let placed = letterbox_bilinear(rgb, w, h, &geometry, |dst_x, dst_y, [r, g, b]| {
+        if dst_x >= target || dst_y >= target {
+            return;
+        }
+        let dst_idx = dst_y * target + dst_x;
+        for (offset, value) in [(0, b), (plane, g), (2 * plane, r)] {
+            if let Some(slot) = tensor.get_mut(offset + dst_idx) {
+                *slot = (f32::from(value) - 127.5) / 128.0;
+            }
+        }
+    });
+    if !placed {
         return (tensor, 1.0, 0.0, 0.0);
     }
 
-    let scale = (target_f / w as f32).min(target_f / h as f32);
-    let new_w = ((w as f32 * scale).round() as usize).min(target);
-    let new_h = ((h as f32 * scale).round() as usize).min(target);
-    let pad_x = ((target_f - new_w as f32) / 2.0).max(0.0);
-    let pad_y = ((target_f - new_h as f32) / 2.0).max(0.0);
-
-    let pad_x_int = pad_x as usize;
-    let pad_y_int = pad_y as usize;
-
-    let b_offset = 0;
-    let g_offset = target * target;
-    let r_offset = 2 * target * target;
-
-    for y in 0..new_h {
-        let src_y = ((y as f32 / scale).floor() as usize).min((h - 1) as usize);
-        let dst_y = y + pad_y_int;
-        if dst_y >= target {
-            continue;
-        }
-
-        for x in 0..new_w {
-            let src_x = ((x as f32 / scale).floor() as usize).min((w - 1) as usize);
-            let dst_x = x + pad_x_int;
-            if dst_x >= target {
-                continue;
-            }
-
-            let src_idx = (src_y * w as usize + src_x) * 3;
-            if let (Some(&r_val), Some(&g_val), Some(&b_val)) =
-                (rgb.get(src_idx), rgb.get(src_idx + 1), rgb.get(src_idx + 2))
-            {
-                let norm_b = (b_val as f32 - 127.5) / 128.0;
-                let norm_g = (g_val as f32 - 127.5) / 128.0;
-                let norm_r = (r_val as f32 - 127.5) / 128.0;
-
-                let dst_idx = dst_y * target + dst_x;
-                if let Some(slot) = tensor.get_mut(b_offset + dst_idx) {
-                    *slot = norm_b;
-                }
-                if let Some(slot) = tensor.get_mut(g_offset + dst_idx) {
-                    *slot = norm_g;
-                }
-                if let Some(slot) = tensor.get_mut(r_offset + dst_idx) {
-                    *slot = norm_r;
-                }
-            }
-        }
-    }
-
-    (tensor, scale, pad_x, pad_y)
+    (
+        tensor,
+        geometry.scale,
+        geometry.pad_x as f32,
+        geometry.pad_y as f32,
+    )
 }
 
 /// How raw SCRFD score-head values map to face confidences (GitHub #247, VIS-05).

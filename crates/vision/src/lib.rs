@@ -39,7 +39,8 @@ pub use matcher::{cosine_similarity, match_embeddings, MatchResult};
 pub use pad_fusion::fuse_pad_results;
 pub use pipeline::{
     PipelineOutput, VerificationOutcome, VisionAnalysis, VisionPipeline, VisionPipelineConfig,
-    MAX_PAD_ENSEMBLE_MODELS,
+    DEFAULT_MATCH_THRESHOLD, DEFAULT_MIN_FACE_CONFIDENCE, DEFAULT_NMS_IOU_THRESHOLD,
+    DEFAULT_PAD_THRESHOLD, MAX_PAD_ENSEMBLE_MODELS,
 };
 pub use pose::{compute_face_geometry, estimate_head_pose, FaceGeometry, HeadPose};
 pub use quality::{

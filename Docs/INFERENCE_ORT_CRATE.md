@@ -12,6 +12,22 @@ The crate encapsulates:
 5. **Presentation Attack Detection (Anti-Spoofing)**: MiniFASNetV2 80×80 BGR anti-spoofing model with `pixel / 255.0` normalization into `[0.0, 1.0]`, live class index fixed by `DEFAULT_MINIFASNET_LIVE_CLASS_INDEX = 1` (`[PrintPhoto, Live, ScreenReplay]`, single source of truth for every binary), and deterministic post-inference buffer zeroization (Verification Matrix Criteria `NGM8`, `NGM9`, `NGM10`, `PLC1`–`PLC3`).
 6. **Hardware-Free Deterministic Simulation**: Mocks (`MockFaceDetector`, `MockLandmarkDetector`, `MockEmbeddingExtractor`, `MockPadDetector`) for seamless headless execution in CI pipelines and developer environments.
 
+### Module Layout
+
+```text
+crates/inference-ort/src/
+├── lib.rs          # #![forbid(unsafe_code)], public re-exports
+├── error.rs        # InferenceError
+├── manifest.rs     # models/manifest.toml parsing, SHA-256 and I/O shape attestation
+├── registry.rs     # ModelRegistry: verified ORT session cache (SharedSession)
+├── detector.rs     # SCRFD / UltraFace detectors, NMS, letterbox_pad tensor packing, unproject
+├── letterbox.rs    # Single bilinear letterbox implementation (integer offsets), GitHub #248
+├── landmarks.rs    # FaceLandmarks, Point2f, LandmarkDetector
+├── embedding.rs    # ArcFace ResNet34 extractor (NHWC), L2 normalization
+├── pad.rs          # MiniFASNetV2 OrtPadDetector, DEFAULT_MINIFASNET_LIVE_CLASS_INDEX = 1
+└── mock.rs         # Deterministic hardware-free mocks
+```
+
 ---
 
 ## Architectural Invariants
@@ -77,8 +93,9 @@ Implemented by `OrtScrfdDetector` (production: SCRFD 500M KPS with multi-stride 
 
 `OrtScrfdDetector` incorporates:
 - BGR channel ordering and `(pixel - 127.5) / 128.0` normalization.
-- Aspect ratio-preserving letterbox padding to 640×640 with zero-padded borders.
-- 9-output multi-stride tensor decoding (strides 8, 16, 32) using distance-to-border box regression.
+- Aspect ratio-preserving letterbox padding to 640×640 with zero-padded borders. `letterbox_pad` is a thin tensor-packing wrapper over `letterbox::letterbox_geometry` + `letterbox::letterbox_bilinear`, the single letterbox implementation of the workspace (also used by `soos-vision`'s `letterbox_params` / `letterbox_resize`): bilinear resampling (interpolated value rounded to `u8` before normalization) and **integer** offsets `floor((640 - scaled) / 2)` that are both the placement offsets and the un-projection offsets, so an odd padding (e.g. 640×479, 161 rows) introduces no half-pixel landmark shift (GitHub #248, VIS-06).
+- 9-output multi-stride tensor decoding (strides 8, 16, 32) using distance-to-border box regression. The score / bbox / kps tensors of each stride are matched **by shape** (`[1, anchors, 1|4|10]`), not by output ordinal.
+- Thresholds: production binaries construct it with `VisionPipelineConfig::min_face_confidence` (`DEFAULT_MIN_FACE_CONFIDENCE = 0.70`) and `VisionPipelineConfig::nms_iou_threshold` (`DEFAULT_NMS_IOU_THRESHOLD = 0.45`), never literals (GitHub #251, invariant `vision_threshold_contract::test_binaries_build_detectors_from_pipeline_config`).
 - 5-point facial keypoints integration directly into `FaceDetection.landmarks`.
 - Coordinate un-projection mapping detections back to original camera resolution.
 - Startup validation in `OrtScrfdDetector::new` (`validate_output_dims`, GitHub #249): exactly 9 rank-3 outputs, batch dim 1 or symbolic, concrete channel dims with exactly 3 score (1), 3 bbox (4) and 3 keypoint (10) heads, and every concrete anchor dim one of 12800/3200/800 without duplicates. The attested graph reports `[-1, -1, k]`, so per-stride anchor counts are enforced on every frame by `detect` (missing tensor -> `TensorError`).
@@ -143,7 +160,8 @@ Implemented by `OrtPadDetector` (MiniFASNetV2 80×80 BGR) and `MockPadDetector`.
 - A crop that is not already 80×80 is resampled bilinearly with half-pixel centres (the `cv2.resize` `INTER_LINEAR` convention, GitHub #213) instead of top-left nearest-neighbour; an 80×80 crop is copied exactly, so the golden logits of `pad_real_model_tests` are unchanged. Evidence: `pad_resample_tests`.
 - Live class index `DEFAULT_MINIFASNET_LIVE_CLASS_INDEX = 1` (MiniFASNetV2 `[PrintPhoto, Live, ScreenReplay]`, `crates/inference-ort/src/pad.rs`). It is the single source of truth: `soos-daemon` (`pipeline::build_pad_detector`), `soos-enroll` (`service::build_pad_detector`) and `soos-gui` construct the detector with `OrtPadDetector::new`. The explicit-index constructors `new_with_class_index` / `with_live_class_index` are test-only; the repository invariant `test_no_pad_live_class_index_override_outside_tests` rejects them in production code (GitHub #146, ADR 2026-09-29).
 - `SharedSession` (`Arc<Mutex<ort::session::Session>>`) is the session handle type returned by `ModelRegistry::get_or_load_session` and accepted by every detector constructor.
-- Softmax probability interpretation into `PadResult` with ordinal non-live attack detection (`PrintPhoto` vs `ScreenReplay`).
+- Softmax probability interpretation into `PadResult` with non-live attack classification by class index (`PrintPhoto` vs `ScreenReplay`).
+- Liveness threshold: every production binary passes `VisionPipelineConfig::pad_threshold` (`DEFAULT_PAD_THRESHOLD = 0.85`), so the detector's `is_live` and the pipeline decision `VisionPipelineConfig::pad_passes` use one value (GitHub #215, PAD-10).
 - Immediate deterministic post-inference zeroization of input tensors (`Zeroizing<Vec<f32>>`).
 - Output contract (GitHub #214, PAD-09): every inference must produce exactly `MINIFASNET_CLASS_COUNT = 3` logits and `live_class_index` must address one of them (`validate_pad_output_contract`). Any other length, or an out-of-range index in `interpret_probabilities`, is `InferenceError::PadFailed`, never a spoof or live verdict (previously an out-of-range index silently read `p_live = 0.0`, and a single-logit head scored every frame live because softmax over one logit is 1.0).
 - Startup self-test: `OrtPadDetector::self_test(expected_classes)` runs one inference on a fixed synthetic 80×80 grey fixture and returns a `PadSelfTestReport` (`class_count`, `live_class_index`, `liveness_threshold`). `pad_class_count_from_manifest` derives `expected_classes` from the manifest `output_shapes` (`[[1, 3]]`; an omitted entry falls back to 3; any other class count or more than one declared output fails closed). `soos-daemon` runs it through `pipeline::validate_pad_detector` inside `initialize_pipeline`, logs the class index and threshold at info level, and refuses to start on failure.

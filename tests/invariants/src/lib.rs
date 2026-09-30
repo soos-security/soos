@@ -44,6 +44,10 @@ mod sync_issue_contract;
 #[cfg(test)]
 mod vision_attestation_contract;
 
+/// Vision threshold single-source and vision documentation invariants (GitHub #215, #250, #251).
+#[cfg(test)]
+mod vision_threshold_contract;
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,

@@ -19,10 +19,13 @@ crates/vision/
     ├── color.rs        # Pure Rust color conversion (YUYV, Grey, RGB24, MJPEG)
     ├── align.rs        # 5-point landmark affine alignment to 112x112
     ├── crop.rs         # Upstream-parity PAD context window, crop-and-resize
+    ├── ir_liveness.rs  # PadInputModality, fail-closed IR gate, DEFAULT_IR_PAD_THRESHOLD
     ├── pad_fusion.rs   # Multi-scale PAD fusion (mean live probability)
-    ├── letterbox.rs    # Aspect-preserving letterbox padding and coordinate projection
+    ├── quality.rs      # Pre-PAD face quality gate (face size, Laplacian sharpness)
+    ├── letterbox.rs    # Letterbox params/resize (wrappers over soos_inference_ort::letterbox)
     ├── matcher.rs      # Cosine similarity and template verification
-    └── pipeline.rs     # VisionPipeline 3-model orchestrator & single-face invariant
+    ├── pipeline.rs     # VisionPipeline 3-model orchestrator, threshold constants, single-face invariant
+    └── pose.rs         # Head pose estimation (yaw/pitch/roll) from 5-point landmarks (GUI enrollment)
 ```
 
 ### 2.1 Color Conversion (`color.rs`)
@@ -91,7 +94,7 @@ $$\text{similarity}(a, b) = \frac{a \cdot b}{\|a\|_2 \|b\|_2}$$
 - **Dimension Mismatch Protection**: Verifies `a.len() == b.len()`.
 - **Degenerate Vector Protection**: Rejects zero or near-zero norms ($\le 10^{-12}$).
 - **Output Bounds**: Systematically clamped to the interval $[-1.0, 1.0]$.
-- **Verification Decision**: `match_embeddings` checks `score >= threshold` (default `0.45` per academic ArcFace literature).
+- **Verification Decision**: `match_embeddings` checks `score >= threshold`. The pipeline passes `VisionPipelineConfig::match_threshold`, `DEFAULT_MATCH_THRESHOLD = 0.70` (equal to `soos_policy::ThresholdConfig::DEFAULT_MATCH_THRESHOLD`; conservative literature value not yet recalibrated for the shipped ArcFace ResNet34, GitHub #191).
 
 ### 2.4 Vision Pipeline Orchestrator (`pipeline.rs`)
 
@@ -101,7 +104,7 @@ $$\text{similarity}(a, b) = \frac{a \cdot b}{\|a\|_2 \|b\|_2}$$
 3. **Enforces Single-Face Invariant (Criterion V4)**:
    - 0 faces detected $\implies$ returns `Err(VisionError::NoFaceDetected)`.
    - $> 1$ faces detected $\implies$ returns `Err(VisionError::MultipleFacesDetected { count })`.
-4. Validates face confidence against `min_face_confidence` (default `0.70`).
+4. Validates face confidence against `min_face_confidence` (`DEFAULT_MIN_FACE_CONFIDENCE = 0.70`).
 5. Extracts 5-point facial landmarks directly from `FaceDetection.landmarks` (fails closed with `VisionError::MissingLandmarks` if absent).
 6. Computes the PAD context window at `pad_bbox_scale` (2.7×) with the upstream Silent-Face-Anti-Spoofing geometry (`pad_crop_window`, GitHub #213, §2.6).
 7. Resizes that window to 80×80 with the `cv2.resize` `INTER_LINEAR` half-pixel convention (`crop_pad_context`). Each additional multi-scale PAD member (`with_additional_pad_model`, GitHub #212, §2.4.2) gets its own window at its own scale.
@@ -109,6 +112,30 @@ $$\text{similarity}(a, b) = \frac{a \cdot b}{\|a\|_2 \|b\|_2}$$
 9. Warps face to normalized 112×112 RGB crop using 5-point landmarks (`align_face_112`).
 10. Extracts L2-normalized 512D biometric embedding (`EmbeddingExtractor`, ArcFace ResNet34, NHWC input).
 11. Compares against enrolled template via `match_embeddings`.
+
+#### 2.4.0 Single-Source Thresholds (GitHub #251 VIS-09, #215 PAD-10)
+
+Every detection and liveness threshold of `soos-daemon`, `soos-enroll` and `soos-gui` is a named
+constant of `soos-vision` carried by `VisionPipelineConfig`; no binary passes a literal
+(invariant `vision_threshold_contract::test_binaries_build_detectors_from_pipeline_config`).
+
+| Constant | Value | Used for |
+|---|---|---|
+| `DEFAULT_MIN_FACE_CONFIDENCE` | 0.70 | `OrtScrfdDetector` candidate threshold and pipeline primary-face threshold |
+| `DEFAULT_NMS_IOU_THRESHOLD` | 0.45 | `OrtScrfdDetector` NMS (`VisionPipelineConfig::nms_iou_threshold`) |
+| `DEFAULT_MATCH_THRESHOLD` | 0.70 | cosine match (= `ThresholdConfig::DEFAULT_MATCH_THRESHOLD`) |
+| `DEFAULT_PAD_THRESHOLD` | 0.85 | `OrtPadDetector` threshold and `pad_passes` (= `ThresholdConfig::DEFAULT_PAD_THRESHOLD`) |
+| `DEFAULT_IR_PAD_THRESHOLD` | 0.95 | monochrome frames, `max(pad_threshold, ir_pad_threshold)` |
+
+`VisionPipelineConfig::pad_passes(&PadResult, PadInputModality)` is the single liveness
+decision: live, finite score, `score >= effective_pad_threshold(modality)`. The pipeline uses it
+to short-circuit and the GUI uses it for the LIVE/SPOOF label, box colour and guided-enrollment
+gating (`LatestFrameData::pad_live`), so the preview never shows LIVE for a frame the daemon
+rejects. Enrollment templates are captured under the authentication values. The daemon
+applies the policy copy of the PAD threshold a second time in the request consensus
+(`soos_policy::PadAggregator`); operator overrides in `daemon.toml` are validated once and copied
+into both. Previous per-binary literals (GUI 0.60/0.40/0.80, enrollment 0.70/0.40/0.80) were all
+raised to the authentication values; no threshold was lowered.
 
 #### 2.4.1 Format-Aware PAD Policy for IR / Grey Frames (`ir_liveness.rs`, GitHub #169)
 
@@ -187,10 +214,11 @@ Next-generation face detection (SCRFD) operates on uniform 640×640 square input
 
 1. `letterbox_params(img_w, img_h, target_w, target_h) -> Result<LetterboxParams, VisionError>`
    - Computes isotropic scale $s = \min(W_{\text{target}} / W_{\text{orig}}, H_{\text{target}} / H_{\text{orig}})$.
-   - Computes centered padding offsets $\text{pad}_x = (W_{\text{target}} - s \cdot W_{\text{orig}}) / 2$ and $\text{pad}_y = (H_{\text{target}} - s \cdot H_{\text{orig}}) / 2$.
+   - Computes centered **integer** padding offsets $\text{pad}_x = \lfloor (W_{\text{target}} - \text{round}(s \cdot W_{\text{orig}})) / 2 \rfloor$ (same for $\text{pad}_y$); the image is placed at, and un-projected with, exactly these integers (GitHub #248).
 2. `letterbox_resize(rgb, img_w, img_h, target_w, target_h) -> Result<(Vec<u8>, LetterboxParams), VisionError>`
    - Allocates zero-filled black canvas of target dimensions.
    - Bilinear-interpolates the scaled image into the centered region.
+   - Both functions delegate to `soos_inference_ort::letterbox` (`letterbox_geometry`, `letterbox_bilinear`), the implementation the production SCRFD path (`letterbox_pad`) runs; pixel and geometry parity is asserted by `letterbox_parity_tests::test_letterbox_pad_matches_vision_resize_on_gradient` (GitHub #248, VIS-06).
 3. `LetterboxParams` Coordinate Mappings:
    - `project(x, y)`: Transforms source frame coordinates to letterbox canvas space: $(x \cdot s + \text{pad}_x, y \cdot s + \text{pad}_y)$.
    - `unproject(x, y)`: Inversely projects detection coordinates from letterbox space back to original camera frame coordinates: $((x - \text{pad}_x) / s, (y - \text{pad}_y) / s)$.
@@ -237,7 +265,8 @@ Automated benchmark results (`bench_tests.rs`) across 50 iterations on 640×480 
 - **p95**: $28.02\text{ms}$
 - **p99**: $28.87\text{ms}$
 
-These figures use mock backends and measure only the Rust preprocessing path. With the attested
+These figures use **mock backends only** (no ONNX model runs) and measure only the Rust
+preprocessing path; they are not hardware latency evidence. With the attested
 embedding model, one ArcFace ResNet34 embedding alone measures p50 127.5 ms / p95 170.9 ms on one
 ORT intra-op thread (`soos-inference-ort` `embedding_real_model_tests`, GitHub #191), so the
 150 ms per-capture target is **not** met on real models. The enforced bounds are the daemon's

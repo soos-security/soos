@@ -1136,11 +1136,20 @@ pub fn build_full_service(cli: &Cli) -> Result<EnrollmentService, EnrollmentCliE
     let pad_session = registry.get_or_load_session(MODEL_ID_PAD)?;
     let emb_session = registry.get_or_load_session(MODEL_ID_EMBEDDING)?;
 
-    let detector = Arc::new(OrtScrfdDetector::new(det_session, 0.70, 0.40)?);
-    let pad = Arc::new(build_pad_detector(pad_session, 0.80));
+    // Enrollment captures templates under exactly the authentication thresholds
+    // (GitHub #251, #215): every value comes from the shared `VisionPipelineConfig`.
+    let pipeline_config = VisionPipelineConfig::default();
+    let detector = Arc::new(OrtScrfdDetector::new(
+        det_session,
+        pipeline_config.min_face_confidence,
+        pipeline_config.nms_iou_threshold,
+    )?);
+    let pad = Arc::new(build_pad_detector(
+        pad_session,
+        pipeline_config.pad_threshold,
+    ));
     let extractor = Arc::new(OrtEmbeddingExtractor::new(emb_session));
 
-    let pipeline_config = VisionPipelineConfig::default();
     let pipeline = Arc::new(VisionPipeline::new(
         detector,
         pad,

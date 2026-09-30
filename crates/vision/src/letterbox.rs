@@ -5,11 +5,10 @@
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss,
     clippy::cast_precision_loss,
-    clippy::indexing_slicing,
-    reason = "Bilinear interpolation coordinates, scale math, and pixel buffer indexing"
+    reason = "Letterbox geometry conversions and bounded canvas offsets"
 )]
 
-use soos_inference_ort::BoundingBox;
+use soos_inference_ort::{letterbox_bilinear, letterbox_geometry, BoundingBox, LetterboxGeometry};
 
 use crate::error::VisionError;
 
@@ -67,40 +66,46 @@ impl LetterboxParams {
 /// Computes the uniform scaling factor and symmetric padding offsets to fit an image
 /// of dimensions `(img_w, img_h)` into a canvas of dimensions `(target_w, target_h)`
 /// while preserving the aspect ratio.
+///
+/// Delegates to [`soos_inference_ort::letterbox_geometry`], the single implementation shared
+/// with the production SCRFD input packing: the offsets are exact integers (GitHub #248).
 pub fn letterbox_params(
     img_w: u32,
     img_h: u32,
     target_w: u32,
     target_h: u32,
 ) -> Result<LetterboxParams, VisionError> {
+    geometry(img_w, img_h, target_w, target_h).map(|g| params_of(&g))
+}
+
+fn geometry(
+    img_w: u32,
+    img_h: u32,
+    target_w: u32,
+    target_h: u32,
+) -> Result<LetterboxGeometry, VisionError> {
     if img_w == 0 || img_h == 0 {
         return Err(VisionError::InvalidDimensions {
             width: img_w,
             height: img_h,
         });
     }
-    if target_w == 0 || target_h == 0 {
-        return Err(VisionError::InvalidDimensions {
-            width: target_w,
-            height: target_h,
-        });
-    }
+    letterbox_geometry(img_w, img_h, target_w, target_h).ok_or(VisionError::InvalidDimensions {
+        width: target_w,
+        height: target_h,
+    })
+}
 
-    let scale = (target_w as f32 / img_w as f32).min(target_h as f32 / img_h as f32);
-    let scaled_w = ((img_w as f32 * scale).round() as u32).min(target_w);
-    let scaled_h = ((img_h as f32 * scale).round() as u32).min(target_h);
-
-    let pad_x = ((target_w as f32 - scaled_w as f32) / 2.0).max(0.0);
-    let pad_y = ((target_h as f32 - scaled_h as f32) / 2.0).max(0.0);
-
-    Ok(LetterboxParams::new(scale, pad_x, pad_y))
+fn params_of(g: &LetterboxGeometry) -> LetterboxParams {
+    LetterboxParams::new(g.scale, g.pad_x as f32, g.pad_y as f32)
 }
 
 /// Resizes an RGB24 image buffer to target dimensions `(target_w, target_h)` preserving
 /// the aspect ratio using letterbox padding and bilinear interpolation.
 ///
 /// Returns the padded RGB24 byte vector alongside `LetterboxParams` for coordinate un-projection.
-/// Any padded canvas border area is filled with black (RGB 0, 0, 0).
+/// Any padded canvas border area is filled with black (RGB 0, 0, 0). The pixels are produced by
+/// [`soos_inference_ort::letterbox_bilinear`], the same resampler that packs the SCRFD tensor.
 pub fn letterbox_resize(
     rgb: &[u8],
     img_w: u32,
@@ -108,7 +113,7 @@ pub fn letterbox_resize(
     target_w: u32,
     target_h: u32,
 ) -> Result<(Vec<u8>, LetterboxParams), VisionError> {
-    let params = letterbox_params(img_w, img_h, target_w, target_h)?;
+    let geometry = geometry(img_w, img_h, target_w, target_h)?;
 
     let expected_len = (img_w as usize)
         .checked_mul(img_h as usize)
@@ -134,70 +139,18 @@ pub fn letterbox_resize(
         })?;
 
     let mut output = vec![0u8; out_len];
-
-    let scaled_w = ((img_w as f32 * params.scale).round() as u32).min(target_w);
-    let scaled_h = ((img_h as f32 * params.scale).round() as u32).min(target_h);
-
-    let pad_x_int = params.pad_x.round() as u32;
-    let pad_y_int = params.pad_y.round() as u32;
-
-    let max_src_x = (img_w - 1) as f32;
-    let max_src_y = (img_h - 1) as f32;
-    let src_stride = (img_w as usize) * 3;
     let dst_stride = (target_w as usize) * 3;
+    let (tw, th) = (target_w as usize, target_h as usize);
 
-    for dy in 0..scaled_h {
-        let dst_y = dy + pad_y_int;
-        if dst_y >= target_h {
-            break;
+    letterbox_bilinear(rgb, img_w, img_h, &geometry, |dst_x, dst_y, px| {
+        if dst_x >= tw || dst_y >= th {
+            return;
         }
-
-        let ys = (dy as f32 / params.scale).clamp(0.0, max_src_y);
-        let y0 = ys.floor() as usize;
-        let y1 = (y0 + 1).min(img_h as usize - 1);
-        let dy_weight = ys - (y0 as f32);
-
-        let row0_offset = y0 * src_stride;
-        let row1_offset = y1 * src_stride;
-        let dst_row_offset = (dst_y as usize) * dst_stride;
-
-        for dx in 0..scaled_w {
-            let dst_x = dx + pad_x_int;
-            if dst_x >= target_w {
-                break;
-            }
-
-            let xs = (dx as f32 / params.scale).clamp(0.0, max_src_x);
-            let x0 = xs.floor() as usize;
-            let x1 = (x0 + 1).min(img_w as usize - 1);
-            let dx_weight = xs - (x0 as f32);
-
-            let w00 = (1.0 - dx_weight) * (1.0 - dy_weight);
-            let w10 = dx_weight * (1.0 - dy_weight);
-            let w01 = (1.0 - dx_weight) * dy_weight;
-            let w11 = dx_weight * dy_weight;
-
-            let idx00 = row0_offset + x0 * 3;
-            let idx10 = row0_offset + x1 * 3;
-            let idx01 = row1_offset + x0 * 3;
-            let idx11 = row1_offset + x1 * 3;
-
-            let dst_pixel_idx = dst_row_offset + (dst_x as usize) * 3;
-
-            for c in 0..3 {
-                let p00 = rgb[idx00 + c] as f32;
-                let p10 = rgb[idx10 + c] as f32;
-                let p01 = rgb[idx01 + c] as f32;
-                let p11 = rgb[idx11 + c] as f32;
-
-                let val = (w00 * p00 + w10 * p10 + w01 * p01 + w11 * p11)
-                    .round()
-                    .clamp(0.0, 255.0) as u8;
-
-                output[dst_pixel_idx + c] = val;
-            }
+        let idx = dst_y * dst_stride + dst_x * 3;
+        if let Some(slot) = output.get_mut(idx..idx + 3) {
+            slot.copy_from_slice(&px);
         }
-    }
+    });
 
-    Ok((output, params))
+    Ok((output, params_of(&geometry)))
 }
