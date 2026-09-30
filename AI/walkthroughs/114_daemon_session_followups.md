@@ -102,7 +102,7 @@ See the branch report: `cargo fmt --all -- --check`, `cargo clippy --locked --wo
   and documented. `SO_PEERPIDFD` and a logind D-Bus query remain the long-term options.
 - **Warm-up on real models**: the seeded estimate has only been measured with mocks; the first
   real measurement is logged at start-up (`Vision inference warm-up complete`).
-- A clock stepped back across midnight resets the evidence day budget (root-only control).
+- A clock stepped back across midnight resets the evidence day budget only for a partition already removed by retention: after the batch integration with GitHub #234 both caps are re-read from disk (ADR "Combined Evidence Daily Caps").
 
 ## 7. Note: Default Connection Timeout Raised to 2500 ms (User Decision 2026-09-30)
 

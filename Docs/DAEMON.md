@@ -76,6 +76,7 @@ with a half-applied configuration.
 | `key_path` | path | `/var/lib/soos/evidence.key` | Evidence encryption key. |
 | `retention_days` | integer | `7` | Snapshots older than this are purged. |
 | `daily_cap_per_uid` | integer | `10` | Maximum snapshots per UID and day. |
+| `daily_cap_total` | integer | `100` (`DEFAULT_DAILY_CAP_TOTAL`) | Maximum snapshots per day across all UIDs (GitHub #276); refused before any write without consuming the per-UID quota. The day's total is derived from the snapshot files already stored, so it survives a restart. |
 
 #### `[pipeline.thresholds]`
 
