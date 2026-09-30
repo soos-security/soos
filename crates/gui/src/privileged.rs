@@ -199,6 +199,42 @@ pub fn import_helper_args(uid: u32) -> Vec<String> {
     ]
 }
 
+/// Serializes `embedding` as a JSON float array into a zeroizing buffer reserved once at
+/// the exact encoded size (measured by a counting pass that stores nothing), so the buffer
+/// never reallocates and no freed intermediate copy of the embedding is left unzeroized.
+///
+/// # Errors
+///
+/// A user-facing message when serialization or the allocation fails (never the values).
+pub fn embedding_json(embedding: &[f32]) -> Result<Zeroizing<Vec<u8>>, String> {
+    let mut counter = ByteCounter(0);
+    serde_json::to_writer(&mut counter, embedding)
+        .map_err(|e| format!("Failed to serialize embedding: {e}"))?;
+    let mut json = Zeroizing::new(Vec::new());
+    json.try_reserve_exact(counter.0)
+        .map_err(|e| format!("Failed to allocate the embedding buffer: {e}"))?;
+    serde_json::to_writer(&mut *json, embedding)
+        .map_err(|e| format!("Failed to serialize embedding: {e}"))?;
+    Ok(json)
+}
+
+/// `Write` sink that only counts the bytes written (nothing is stored).
+struct ByteCounter(usize);
+
+impl Write for ByteCounter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0 = self
+            .0
+            .checked_add(buf.len())
+            .ok_or_else(|| std::io::Error::other("encoded size overflow"))?;
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 /// Runs `command` (production: `pkexec`) with [`import_helper_args`] and pipes the embedding
 /// as JSON to its standard input.
 ///
@@ -215,9 +251,7 @@ pub fn import_template_with(
     uid: u32,
     embedding: &[f32],
 ) -> Result<(), String> {
-    let json = Zeroizing::new(
-        serde_json::to_vec(embedding).map_err(|e| format!("Failed to serialize embedding: {e}"))?,
-    );
+    let json = embedding_json(embedding)?;
     let mut child = command
         .args(import_helper_args(uid))
         .stdin(Stdio::piped())

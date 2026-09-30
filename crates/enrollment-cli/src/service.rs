@@ -674,7 +674,7 @@ pub const MAX_IMPORT_INPUT_BYTES: usize = 64 * 1024;
 pub const IMPORT_STDIN_PATH: &str = "-";
 
 /// Embedding dimension accepted by `import` (ArcFace w600k MBF).
-const IMPORT_EMBEDDING_DIM: usize = 512;
+pub const IMPORT_EMBEDDING_DIM: usize = 512;
 
 /// Parses the `PKEXEC_UID` environment value set by `pkexec` for the invoking user.
 ///
@@ -761,6 +761,45 @@ pub fn read_import_file(
     read_import_input(file)
 }
 
+/// Decodes a JSON float array for `import` into a zeroizing buffer reserved once at
+/// [`IMPORT_EMBEDDING_DIM`] values. The buffer never grows (so no reallocation leaves an
+/// unzeroized copy): values beyond the dimension are counted but not stored. Returns the
+/// stored values and the total number of array elements, or `None` when `bytes` is not
+/// exactly one JSON array of numbers.
+#[must_use]
+pub fn decode_json_embedding(bytes: &[u8]) -> Option<(Zeroizing<Vec<f32>>, usize)> {
+    let mut de = serde_json::Deserializer::from_slice(bytes);
+    let decoded = serde::Deserializer::deserialize_seq(&mut de, BoundedEmbeddingVisitor).ok()?;
+    de.end().ok()?;
+    Some(decoded)
+}
+
+/// Visitor of [`decode_json_embedding`].
+struct BoundedEmbeddingVisitor;
+
+impl<'de> serde::de::Visitor<'de> for BoundedEmbeddingVisitor {
+    type Value = (Zeroizing<Vec<f32>>, usize);
+
+    fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("a JSON array of floats")
+    }
+
+    fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+        let mut values = Zeroizing::new(Vec::new());
+        values
+            .try_reserve_exact(IMPORT_EMBEDDING_DIM)
+            .map_err(|_| <A::Error as serde::de::Error>::custom("embedding allocation failed"))?;
+        let mut count = 0_usize;
+        while let Some(value) = seq.next_element::<f32>()? {
+            if values.len() < IMPORT_EMBEDDING_DIM {
+                values.push(value);
+            }
+            count = count.saturating_add(1);
+        }
+        Ok((values, count))
+    }
+}
+
 /// Decodes an `import` payload: a JSON array of finite floats, or a CBOR template.
 ///
 /// Returns the zeroizing embedding with its model identifier and version (from `args` for
@@ -769,16 +808,18 @@ fn parse_import_payload(
     bytes: &[u8],
     args: &ImportArgs,
 ) -> Result<(Zeroizing<Vec<f32>>, String, String), EnrollmentCliError> {
-    let (embedding, model_id, model_version) =
-        if let Ok(parsed) = serde_json::from_slice::<Vec<f32>>(bytes) {
+    let (embedding, count, model_id, model_version) =
+        if let Some((parsed, count)) = decode_json_embedding(bytes) {
             (
-                Zeroizing::new(parsed),
+                parsed,
+                count,
                 args.model_id.clone(),
                 args.model_version.clone(),
             )
         } else if let Ok(template) = BiometricTemplate::from_cbor(bytes) {
             (
                 template.embedding.clone(),
+                template.embedding.len(),
                 template.model_id.clone(),
                 template.model_version.clone(),
             )
@@ -788,10 +829,9 @@ fn parse_import_payload(
             ));
         };
 
-    if embedding.len() != IMPORT_EMBEDDING_DIM {
+    if count != IMPORT_EMBEDDING_DIM || embedding.len() != IMPORT_EMBEDDING_DIM {
         return Err(EnrollmentCliError::InvalidImport(format!(
-            "invalid embedding dimension: expected {IMPORT_EMBEDDING_DIM}, found {}",
-            embedding.len()
+            "invalid embedding dimension: expected {IMPORT_EMBEDDING_DIM}, found {count}"
         )));
     }
     if !embedding.iter().all(|v| v.is_finite()) {

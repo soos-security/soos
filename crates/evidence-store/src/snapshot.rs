@@ -35,14 +35,41 @@ pub struct EvidenceRecord {
     pub image_data: FrameBytes,
 }
 
+/// `std::io::Write` sink that only counts the bytes written (nothing is stored).
+struct ByteCounter(usize);
+
+impl std::io::Write for ByteCounter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0 = self
+            .0
+            .checked_add(buf.len())
+            .ok_or_else(|| std::io::Error::other("encoded size overflow"))?;
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 fn legacy_version() -> u16 {
     LEGACY_EVIDENCE_RECORD_VERSION
 }
 
 impl EvidenceRecord {
     /// Serializes the record to CBOR binary format (zeroized on drop).
+    ///
+    /// The exact encoded size is measured first by a pass through a byte counter that
+    /// stores nothing; the buffer is then reserved once at that size, so it never
+    /// reallocates while holding pixels (a reallocation would free an unzeroized copy).
     pub fn to_cbor(&self) -> Result<Zeroizing<Vec<u8>>, EvidenceStoreError> {
+        let mut counter = ByteCounter(0);
+        ciborium::into_writer(self, &mut counter)
+            .map_err(|e| EvidenceStoreError::Serialization(format!("CBOR encode failed: {e}")))?;
         let mut buf = Zeroizing::new(Vec::new());
+        buf.try_reserve_exact(counter.0).map_err(|e| {
+            EvidenceStoreError::Serialization(format!("CBOR buffer allocation failed: {e}"))
+        })?;
         ciborium::into_writer(self, &mut *buf)
             .map_err(|e| EvidenceStoreError::Serialization(format!("CBOR encode failed: {e}")))?;
         Ok(buf)
