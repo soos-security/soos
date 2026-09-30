@@ -4,6 +4,7 @@ use crate::config::CameraConfig;
 use crate::error::CameraError;
 use crate::frame::{Frame, PixelFormat};
 use crate::manager::{CameraHealth, CameraManager};
+use crate::status::{CameraErrorKind, CameraStatus};
 use arc_swap::ArcSwapOption;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
@@ -346,6 +347,30 @@ impl CameraManager for MockCameraManager {
             CameraHealth::Streaming
         } else {
             CameraHealth::Starting
+        }
+    }
+
+    fn status(&self) -> CameraStatus {
+        let injected = {
+            let guard = self.active_error.read().unwrap_or_else(|e| e.into_inner());
+            guard.as_ref().map(CameraError::kind)
+        };
+        if let Some(kind) = injected {
+            return CameraStatus::Error { kind, failures: 1 };
+        }
+        if self.starved.load(Ordering::Acquire) {
+            return CameraStatus::Error {
+                kind: CameraErrorKind::Starved,
+                failures: 1,
+            };
+        }
+        if !self.running.load(Ordering::Acquire) {
+            return CameraStatus::Stopped;
+        }
+        if self.is_ready() {
+            CameraStatus::Ready
+        } else {
+            CameraStatus::Starting
         }
     }
 }

@@ -24,6 +24,8 @@ use soos_inference_ort::{
 use soos_vision::{VisionPipeline, VisionPipelineConfig};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // GitHub #155: install the stderr subscriber before anything logs (RUST_LOG honored).
+    soos_gui::logging::init();
     let args = GuiArgs::parse();
 
     // 1. Initialize Biometric Store
@@ -68,7 +70,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let socket_probe = probe_daemon_socket(daemon_sock);
         let preview_probe = (socket_probe == DaemonSocketProbe::Reachable)
             .then(|| soos_gui::IpcCameraManager::probe_preview(daemon_sock));
-        let mode = decide_camera_mode(socket_probe, preview_probe, SoosApp::is_daemon_active());
+        // One-shot probe at startup, before the UI thread exists (GitHub #154 keeps runtime
+        // polling on the background `DaemonMonitor`).
+        let daemon_active = soos_gui::daemon_control::DaemonStatusProbe::is_active(
+            &soos_gui::daemon_control::SystemctlProbe,
+        );
+        let mode = decide_camera_mode(socket_probe, preview_probe, daemon_active);
         let cam: Arc<dyn CameraManager> = match mode {
             CameraMode::DaemonIpc => {
                 tracing::info!(

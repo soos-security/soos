@@ -4,6 +4,7 @@ use crate::config::CameraConfig;
 use crate::error::CameraError;
 use crate::frame::{Frame, PixelFormat};
 use crate::manager::{CameraHealth, CameraManager};
+use crate::status::{CameraStatus, CameraStatusCell};
 use arc_swap::ArcSwapOption;
 use std::panic::{self, AssertUnwindSafe};
 use std::path::PathBuf;
@@ -82,6 +83,7 @@ struct SupervisorShared {
     last_activity: Arc<RwLock<Instant>>,
     health: Arc<AtomicU8>,
     device_path: Arc<RwLock<PathBuf>>,
+    status: Arc<CameraStatusCell>,
 }
 
 impl SupervisorShared {
@@ -105,6 +107,7 @@ pub struct V4lCameraManager {
     last_activity: Arc<RwLock<Instant>>,
     health: Arc<AtomicU8>,
     device_path: Arc<RwLock<PathBuf>>,
+    status: Arc<CameraStatusCell>,
     worker_handle: Option<JoinHandle<()>>,
 }
 
@@ -139,6 +142,7 @@ impl V4lCameraManager {
         let last_activity = Arc::new(RwLock::new(Instant::now()));
         let health = Arc::new(AtomicU8::new(HEALTH_STARTING));
         let device_path = Arc::new(RwLock::new(config.device_path.clone()));
+        let status = Arc::new(CameraStatusCell::new());
 
         let shared = SupervisorShared {
             latest_frame: Arc::clone(&latest_frame),
@@ -147,6 +151,7 @@ impl V4lCameraManager {
             last_activity: Arc::clone(&last_activity),
             health: Arc::clone(&health),
             device_path: Arc::clone(&device_path),
+            status: Arc::clone(&status),
         };
         let cfg = config.clone();
 
@@ -168,6 +173,7 @@ impl V4lCameraManager {
             last_activity,
             health,
             device_path,
+            status,
             worker_handle: Some(handle),
         })
     }
@@ -232,6 +238,16 @@ impl CameraManager for V4lCameraManager {
         }
         state
     }
+
+    fn status(&self) -> CameraStatus {
+        if self.is_ready() {
+            return CameraStatus::Ready;
+        }
+        match self.status.get() {
+            CameraStatus::Ready => CameraStatus::Starting,
+            other => other,
+        }
+    }
 }
 
 impl Drop for V4lCameraManager {
@@ -265,6 +281,7 @@ fn run_v4l_supervisor(
     }));
 
     shared.withdraw_frames();
+    shared.status.set(CameraStatus::Stopped);
     if outcome.is_err() {
         shared.set_health(CameraHealth::Dead);
         error!(
@@ -299,6 +316,7 @@ fn supervise(
             Ok(SupervisorAction::Suspend) => {
                 shared.withdraw_frames();
                 shared.set_health(CameraHealth::Standby);
+                shared.status.set(CameraStatus::Suspended);
                 current_backoff = config.min_backoff;
 
                 // Suspended state: wait for notify_activity() or shutdown
@@ -316,14 +334,21 @@ fn supervise(
                             active.device_path.display()
                         );
                         shared.set_health(CameraHealth::Starting);
+                        shared.status.set(CameraStatus::Starting);
                         break;
                     }
                     thread::sleep(Duration::from_millis(50));
                 }
             }
             Err(err) => {
+                // A published frame means this attempt streamed successfully: the failure
+                // count restarts instead of accumulating across healthy sessions.
+                if shared.latest_frame.load().is_some() {
+                    shared.status.set(CameraStatus::Starting);
+                }
                 shared.withdraw_frames();
                 shared.set_health(CameraHealth::Recovering);
+                shared.status.record_error(err.kind());
 
                 if err.is_device_busy() {
                     warn!(

@@ -13,6 +13,7 @@ Welcome to the technical documentation for **soos** (local zero-trust facial ver
 | [**CI/CD & Security Auditing**](CI_CD_AND_SECURITY.md) | Multi-level quality gates, `cargo-deny` dependency audits, and Docker PAM sandbox tests. | All Contributors, DevOps |
 | [**Development Workflow & Branching**](DEVELOPMENT_WORKFLOW.md) | Branch strategy, multi-agent TDD cycle, PR loop, and automated Copilot review. | Contributors, AI Agents |
 | [**Conventional Commits Specification**](COMMIT_CONVENTION.md) | Standardized commit message format, allowed types and scopes, and hook validation. | Contributors, AI Agents |
+| [**GUI Application**](GUI_APPLICATION.md) | `soos-gui` threading model (background daemon polling, off-UI-thread `pkexec`), camera error banners and stderr logging. | GUI Developers, Support |
 
 ---
 

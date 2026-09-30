@@ -1,6 +1,7 @@
 //! Abstract CameraManager trait contract.
 
 use crate::frame::Frame;
+use crate::status::CameraStatus;
 use std::sync::Arc;
 
 /// Lifecycle state of a camera capture manager, used by daemon health reporting.
@@ -74,6 +75,18 @@ pub trait CameraManager: Send + Sync {
             CameraHealth::Streaming
         } else {
             CameraHealth::Starting
+        }
+    }
+
+    /// Returns the user-presentable lifecycle state, including the classified last error.
+    ///
+    /// The default derives the state from [`CameraManager::is_ready`]; implementations that
+    /// can observe failures override it to report [`CameraStatus::Error`].
+    fn status(&self) -> CameraStatus {
+        if self.is_ready() {
+            CameraStatus::Ready
+        } else {
+            CameraStatus::Starting
         }
     }
 }

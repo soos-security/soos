@@ -11,6 +11,7 @@ pub mod mock;
 pub mod resolver;
 pub mod sensor;
 pub mod stable_path;
+pub mod status;
 pub mod v4l_impl;
 
 pub use config::{CameraConfig, CameraConfigBuilder};
@@ -27,6 +28,7 @@ pub use sensor::{
     SensorPreference, SensorType,
 };
 pub use stable_path::{stable_device_path, DEFAULT_BY_ID_DIR};
+pub use status::{CameraErrorKind, CameraStatus, CameraStatusCell};
 pub use v4l_impl::{
     fourcc_to_pixel_format, negotiate_format, pixel_format_to_fourcc, DevicePathResolver,
     V4lCameraManager, FORMAT_PRIORITY,

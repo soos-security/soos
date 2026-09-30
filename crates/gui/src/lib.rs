@@ -10,7 +10,11 @@
 pub mod app;
 pub mod args;
 pub mod camera_mode;
+pub mod camera_status;
+pub mod daemon_control;
 pub mod ipc_camera;
+pub mod logging;
+pub mod privileged;
 pub mod state;
 pub mod worker;
 
