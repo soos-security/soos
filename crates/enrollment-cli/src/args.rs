@@ -5,6 +5,7 @@ use nix::unistd::User;
 use std::path::{Component, Path, PathBuf};
 
 use crate::error::EnrollmentCliError;
+use crate::service::{EMBEDDING_MODEL_VERSION, MODEL_ID_EMBEDDING};
 
 /// Output formats supported by diagnostic and query subcommands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, ValueEnum)]
@@ -104,12 +105,15 @@ pub struct EnrollArgs {
     #[arg(short = 'y', long)]
     pub yes: bool,
 
-    /// Model identifier to record in template metadata (default: "mobilefacenet").
-    #[arg(long, default_value = "mobilefacenet")]
+    /// Override of the embedding model identifier recorded in template metadata.
+    /// Defaults to the loaded embedding extractor (`arcface_w600k_mbf`). The daemon
+    /// refuses templates whose model identifier differs from its loaded extractor.
+    #[arg(long, default_value = MODEL_ID_EMBEDDING)]
     pub model_id: String,
 
-    /// Model version to record in template metadata (default: "1.0.0").
-    #[arg(long, default_value = "1.0.0")]
+    /// Override of the model version recorded in template metadata. Defaults to the
+    /// attested `models/manifest.toml` version.
+    #[arg(long, default_value = EMBEDDING_MODEL_VERSION)]
     pub model_version: String,
 }
 

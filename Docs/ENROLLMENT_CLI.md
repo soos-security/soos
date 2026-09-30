@@ -39,8 +39,9 @@ sudo soos-enroll enroll --username alice --yes
 - `-u, --username <NAME>`: Target username (resolved via system user database).
 - `--frames <N>`: Number of candidate frames to capture and evaluate (default: 5, bounded 1–30).
 - `-y, --yes`: Automatically confirm enrollment without interactive confirmation prompt.
-- `--model-id <ID>`: Model identifier stored in template metadata (default: `mobilefacenet`).
-- `--model-version <VER>`: Model version stored in template metadata (default: `1.0.0`).
+- `--model-id <ID>`: Override of the embedding model identifier stored in template metadata. Default: the loaded embedding extractor `MODEL_ID_EMBEDDING` = `arcface_w600k_mbf` (GitHub #182 / STO-09; the former `mobilefacenet` default is retired per ADR 2026-09-20).
+- `--model-version <VER>`: Override of the model version stored in template metadata. Default: `EMBEDDING_MODEL_VERSION` = `2.0.0`, the attested `models/manifest.toml` version (pinned by a test).
+- Any override that differs from the loaded model prints a warning before capture and sets `model_overridden` in the confirmation summary: `soos-daemon` refuses templates whose `model_id` differs from its loaded extractor (`Verdict::Unavailable` / `ReasonClass::ModelUnavailable`, PAM falls back to the next module), so such a template can never authenticate.
 
 ### `soos-enroll verify`
 Performs a one-shot diagnostic verification against an enrolled biometric template:

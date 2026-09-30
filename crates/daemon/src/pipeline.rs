@@ -24,6 +24,12 @@ pub const DECISION_BUDGET_MS: u64 = 900;
 /// passing captures required by `soos_policy::PadAggregator` are reached with minimal latency.
 pub const FRAME_POLL_INTERVAL_MS: u64 = 10;
 
+/// Attested manifest identifier of the embedding extractor loaded by the daemon.
+///
+/// Enrolled templates recorded with a different `model_id` are refused
+/// (GitHub #182 / STO-09): their vectors live in another embedding space.
+pub const EMBEDDING_MODEL_ID: &str = "arcface_w600k_mbf";
+
 /// Composite runtime container holding all operational pipeline components.
 pub struct PipelineComponents {
     /// Warm camera capture manager.
@@ -286,7 +292,7 @@ pub fn initialize_pipeline(
 
     let det_session = registry.get_or_load_session("scrfd_500m_kps")?;
     let pad_session = registry.get_or_load_session("minifasnet_v2_pad")?;
-    let ext_session = registry.get_or_load_session("arcface_w600k_mbf")?;
+    let ext_session = registry.get_or_load_session(EMBEDDING_MODEL_ID)?;
 
     let detector = Arc::new(soos_inference_ort::OrtScrfdDetector::new(
         det_session,

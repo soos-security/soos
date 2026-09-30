@@ -72,6 +72,7 @@ pub struct ConnectionDispatcher {
     inference: InferenceGate,
     peer_limits: PeerLimitsConfig,
     event_limiter: tokio::sync::Mutex<RateLimiter>,
+    expected_embedding_model: Option<String>,
 }
 
 impl ConnectionDispatcher {
@@ -105,6 +106,7 @@ impl ConnectionDispatcher {
             inference: InferenceGate::default(),
             peer_limits,
             event_limiter,
+            expected_embedding_model: None,
         }
     }
 
@@ -142,7 +144,26 @@ impl ConnectionDispatcher {
             inference: InferenceGate::default(),
             peer_limits,
             event_limiter,
+            expected_embedding_model: None,
         }
+    }
+
+    /// Binds enrolled templates to the loaded embedding model (GitHub #182 / STO-09).
+    ///
+    /// When set, an `Auth` request whose enrolled template records a different
+    /// `model_id` is answered `Unavailable` / `ModelUnavailable` without being matched,
+    /// so PAM falls back to the next module. `soos-daemon` always sets it to
+    /// [`crate::pipeline::EMBEDDING_MODEL_ID`]; mock harnesses may leave it unset.
+    #[must_use]
+    pub fn with_expected_embedding_model(mut self, model_id: impl Into<String>) -> Self {
+        self.expected_embedding_model = Some(model_id.into());
+        self
+    }
+
+    /// Returns the embedding model identifier enrolled templates must carry, if bound.
+    #[must_use]
+    pub fn expected_embedding_model(&self) -> Option<&str> {
+        self.expected_embedding_model.as_deref()
     }
 
     /// Overrides the monotonic clock function (used for simulation and test harnesses).
@@ -770,6 +791,29 @@ impl ConnectionDispatcher {
                     });
                 }
             };
+
+            // 8d: Refuse templates enrolled with another embedding model (GitHub #182).
+            if let Some(expected) = self.expected_embedding_model.as_deref() {
+                if enrolled_template.model_id != expected {
+                    warn!(
+                        uid = req.uid_hint,
+                        template_model = ?enrolled_template.model_id,
+                        loaded_model = %expected,
+                        "Enrolled template was recorded with a different embedding model; \
+                         re-enrollment required, returning Unavailable"
+                    );
+                    let encoded = self.build_response(
+                        req.request_id,
+                        Verdict::Unavailable,
+                        ReasonClass::ModelUnavailable,
+                        now_ns,
+                    )?;
+                    return Ok(ResponseOutput {
+                        encoded_response: encoded,
+                        completion_error: None,
+                    });
+                }
+            }
 
             // 8e: Multi-frame PAD consensus loop (GitHub #147 / PAD-02).
             // Allow requires k consecutive passing captures (live at or above the PAD

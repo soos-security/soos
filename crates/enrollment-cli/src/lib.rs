@@ -31,6 +31,7 @@ pub use service::{
     DiagnosticVerificationReport, EnrolledUserSummary, EnrollmentOutcome, EnrollmentService,
     EnrollmentSummary, LatencyBreakdown, DEBUG_REPORT_DIR_MODE, DEBUG_REPORT_FILE_MODE,
     DEFAULT_CAMERA_DEVICE, DEFAULT_DEBUG_REPORT_DIR, DEFAULT_KEY_PATH, DEFAULT_MODELS_DIR,
-    MODEL_ID_EMBEDDING, MODEL_ID_FACE_DETECTOR, MODEL_ID_PAD, REQUIRED_MODEL_IDS,
+    EMBEDDING_MODEL_VERSION, MODEL_ID_EMBEDDING, MODEL_ID_FACE_DETECTOR, MODEL_ID_PAD,
+    REQUIRED_MODEL_IDS,
 };
 pub use shred::secure_shred_file;
