@@ -10,7 +10,7 @@
 //! (btrfs, ZFS), with data journaling, snapshots or backups, and on flash media with wear
 //! levelling (SSD, eMMC).
 
-use crate::crypto::{decrypt_payload, encrypt_payload, MasterKey};
+use crate::crypto::{decrypt_template_payload, encrypt_template_payload, MasterKey, PayloadFormat};
 use crate::error::BiometricStoreError;
 use crate::template::{BiometricTemplate, TemplateMetadata};
 use std::fs::{DirBuilder, File, Metadata, OpenOptions};
@@ -46,6 +46,9 @@ const SHRED_PASSES: usize = 3;
 
 /// Overwrite buffer size in bytes.
 const SHRED_BUFFER_SIZE: usize = 4096;
+
+/// Decrypted template plaintext (zeroized on drop) and the envelope format it was read from.
+type DecryptedTemplate = (Zeroizing<Vec<u8>>, PayloadFormat);
 
 /// Biometric store responsible for managing encrypted biometric templates on disk.
 #[derive(Debug)]
@@ -119,8 +122,9 @@ impl BiometricStore {
     /// Enrolls or updates a user's biometric template using atomic write semantics.
     ///
     /// The template is serialized to CBOR (in a zeroizing buffer), encrypted with AES-256-GCM
-    /// using a unique nonce, written to a temporary file created atomically with mode `0600`,
-    /// synced to disk, atomically renamed over the destination, and the directory is synced.
+    /// using a unique nonce and the AAD-bound envelope (UID, file role and format version as
+    /// associated data, GitHub #266; a legacy unbound template is thereby upgraded), written
+    /// to a temporary file created atomically with mode `0600`, synced to disk, atomically renamed over the destination, and the directory is synced.
     ///
     /// When a previous template is replaced, a handle on its inode is kept across the rename
     /// and its content is overwritten (best effort, see the module-level erasure model) once the
@@ -128,7 +132,7 @@ impl BiometricStore {
     /// new template is already in place.
     pub fn enroll(&self, template: &BiometricTemplate) -> Result<(), BiometricStoreError> {
         let cbor_bytes = template.to_cbor()?;
-        let encrypted_bytes = encrypt_payload(&self.key, &cbor_bytes)?;
+        let encrypted_bytes = encrypt_template_payload(&self.key, template.uid, &cbor_bytes)?;
         let encrypted_len = u64::try_from(encrypted_bytes.len()).unwrap_or(u64::MAX);
         if encrypted_len > MAX_TEMPLATE_FILE_BYTES {
             return Err(BiometricStoreError::InvalidMetadata(format!(
@@ -183,7 +187,7 @@ impl BiometricStore {
     /// [`MAX_TEMPLATE_FILE_BYTES`] is refused with [`BiometricStoreError::CorruptFile`] before
     /// it is read.
     pub fn get(&self, uid: u32) -> Result<Option<BiometricTemplate>, BiometricStoreError> {
-        let Some(decrypted_bytes) = self.read_decrypted(uid)? else {
+        let Some((decrypted_bytes, _format)) = self.read_decrypted(uid)? else {
             return Ok(None);
         };
         let template = BiometricTemplate::from_cbor(&decrypted_bytes)?;
@@ -199,7 +203,7 @@ impl BiometricStore {
     /// [`TemplateMetadata::from_cbor`], which checks the embedding array shape and values
     /// without allocating it. Returns `Ok(None)` if no template exists.
     pub fn get_metadata(&self, uid: u32) -> Result<Option<TemplateMetadata>, BiometricStoreError> {
-        let Some(decrypted_bytes) = self.read_decrypted(uid)? else {
+        let Some((decrypted_bytes, _format)) = self.read_decrypted(uid)? else {
             return Ok(None);
         };
         let metadata = TemplateMetadata::from_cbor(&decrypted_bytes)?;
@@ -207,8 +211,47 @@ impl BiometricStore {
         Ok(Some(metadata))
     }
 
-    /// Reads (at most [`MAX_TEMPLATE_FILE_BYTES`]) and decrypts a user's template file.
-    fn read_decrypted(&self, uid: u32) -> Result<Option<Zeroizing<Vec<u8>>>, BiometricStoreError> {
+    /// Reports the envelope format of a user's template (GitHub #266, STO-22).
+    ///
+    /// The file is size-bounded, authenticated and its metadata validated (including the UID
+    /// check) exactly like [`BiometricStore::get_metadata`]. Returns `Ok(None)` if no template
+    /// exists, [`PayloadFormat::LegacyV1`] for a template written before AAD binding and
+    /// [`PayloadFormat::BoundV2`] otherwise.
+    pub fn template_format(&self, uid: u32) -> Result<Option<PayloadFormat>, BiometricStoreError> {
+        let Some((decrypted_bytes, format)) = self.read_decrypted(uid)? else {
+            return Ok(None);
+        };
+        let metadata = TemplateMetadata::from_cbor(&decrypted_bytes)?;
+        check_uid(uid, metadata.uid)?;
+        Ok(Some(format))
+    }
+
+    /// Re-encrypts a legacy unbound template with the AAD-bound envelope (GitHub #266, STO-22).
+    ///
+    /// Returns `Ok(false)` when no template exists or it is already bound, `Ok(true)` once a
+    /// legacy template has been rewritten through [`BiometricStore::enroll`] (atomic replace,
+    /// best-effort overwrite of the legacy inode). A legacy template whose embedded UID does not
+    /// match its file name is refused with [`BiometricStoreError::CorruptFile`] and left
+    /// untouched. Like two concurrent [`BiometricStore::enroll`] calls, a migration racing a
+    /// re-enrollment of the same UID is not serialized by the store; callers must not run both
+    /// at once for one UID.
+    pub fn migrate_legacy_template(&self, uid: u32) -> Result<bool, BiometricStoreError> {
+        let Some((decrypted_bytes, format)) = self.read_decrypted(uid)? else {
+            return Ok(false);
+        };
+        if format == PayloadFormat::BoundV2 {
+            return Ok(false);
+        }
+        let template = BiometricTemplate::from_cbor(&decrypted_bytes)?;
+        drop(decrypted_bytes);
+        check_uid(uid, template.uid)?;
+        self.enroll(&template)?;
+        Ok(true)
+    }
+
+    /// Reads (at most [`MAX_TEMPLATE_FILE_BYTES`]) and decrypts a user's template file,
+    /// reporting its envelope format. A bound template must be bound to `uid`.
+    fn read_decrypted(&self, uid: u32) -> Result<Option<DecryptedTemplate>, BiometricStoreError> {
         let path = self.template_path(uid)?;
         if !path.exists() {
             return Ok(None);
@@ -235,7 +278,7 @@ impl BiometricStore {
             )));
         }
 
-        decrypt_payload(&self.key, &encrypted_bytes).map(Some)
+        decrypt_template_payload(&self.key, uid, &encrypted_bytes).map(Some)
     }
 
     /// Deletes a user's enrolled biometric template file if it exists.

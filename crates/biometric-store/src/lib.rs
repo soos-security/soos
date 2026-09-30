@@ -12,7 +12,9 @@ pub mod store;
 pub mod template;
 
 pub use crypto::{
-    decrypt_payload, encrypt_payload, MasterKey, MAGIC_HEADER, MASTER_KEY_LEN, NONCE_LEN, TAG_LEN,
+    decrypt_payload, decrypt_template_payload, encrypt_payload, encrypt_template_payload,
+    template_aad, MasterKey, PayloadFormat, BOUND_FORMAT_MARKER, MAGIC_HEADER, MASTER_KEY_LEN,
+    NONCE_LEN, PAYLOAD_FORMAT_VERSION, TAG_LEN, TEMPLATE_AAD_DOMAIN,
 };
 pub use error::BiometricStoreError;
 pub use store::{
