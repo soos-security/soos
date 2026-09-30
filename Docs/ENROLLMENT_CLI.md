@@ -1,6 +1,6 @@
 # `soos-enrollment-cli` — Root Enrollment and Diagnostics Tool
 
-`soos-enrollment-cli` (`soos-enroll`) is the administrative command-line interface for the `soos` local biometric PAM subsystem. It provides privileged user enrollment, anti-forensic secure template erasure, diagnostic verification, and template inventory enumeration.
+`soos-enrollment-cli` (`soos-enroll`) is the administrative command-line interface for the `soos` local biometric PAM subsystem. It provides privileged user enrollment, template deletion (best-effort overwrite, encryption-backed erasure), diagnostic verification, and template inventory enumeration.
 
 ---
 
@@ -10,7 +10,7 @@ In accordance with `AI/ARCHITECTURE.md` (§8 Monorepo Structure, §9 Privacy, Pe
 - **Root-Only Modification**: State-modifying operations (`enroll`, `delete`) mandate root execution (effective UID 0), preventing unauthorized tampering with biometric credentials.
 - **Single-Face Security Invariant**: The tool strictly enforces that exactly one human face is visible in any frame evaluated for enrollment or verification. Multi-face or zero-face candidate frames are rejected.
 - **Encrypted Persistence**: All biometric templates are serialized to canonical CBOR and encrypted using authenticated AES-256-GCM via `soos-biometric-store` under `/var/lib/soos/biometrics/<uid>.cbor.enc` with POSIX permissions `0600` owned by `root:root`.
-- **Anti-Forensic Secure Erasure**: When deleting an enrolled user template, file blocks on disk are overwritten with cryptographically secure random bytes from the kernel CSPRNG, followed by a zeroization pass and `fsync()`, prior to filesystem unlink.
+- **Template Erasure (honest scope)**: `delete` and re-`enroll` overwrite the discarded template file in place with kernel CSPRNG bytes (3 passes, each followed by `fsync()`) before it is unlinked or replaced, then sync the directory. This is **best effort only**: it does not reach the physical blocks on copy-on-write filesystems (btrfs, ZFS), with data journaling, snapshots or backups, or on SSD/eMMC media with wear levelling. The actual guarantee is that every template is AES-256-GCM ciphertext under `/var/lib/soos/master.key`; residual copies are unreadable without that key, and destroying the key (together with full-disk encryption for the key file itself) is the only complete erasure. See ADR 2026-09-30 "Biometric Template Erasure Model" in `AI/DECISIONS.md` and `Docs/BIOMETRIC_STORE_CRATE.md` §3.4.
 - **Zeroization**: Sensitive biometric vector buffers (`Vec<f32>`) implement `Zeroize` via `zeroize::Zeroizing` and are automatically scrubbed from memory when dropped.
 
 ---
@@ -51,7 +51,7 @@ sudo soos-enroll verify --uid 1000
 - Latency breakdown: camera frame capture, neural vision pipeline, cosine matching, total roundtrip.
 
 ### `soos-enroll delete`
-Deletes an enrolled biometric template with anti-forensic secure erasure:
+Deletes an enrolled biometric template (best-effort in-place overwrite before unlink; see "Template Erasure" above for what this can and cannot guarantee):
 
 ```bash
 sudo soos-enroll delete --uid 1000
