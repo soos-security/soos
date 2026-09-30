@@ -32,7 +32,6 @@ fn test_camera_drop_completes_within_timeout() {
     // Wall-clock benchmark: runs only with SOOS_LATENCY_BENCH=1 (dedicated single-threaded CI
     // step), never gated on a loaded developer machine (GitHub #280, user-approved 2026-09-30).
     if !latency_bench_enabled() {
-        eprintln!("skipped: wall-clock benchmark, set SOOS_LATENCY_BENCH=1 to run it");
         return;
     }
     let config = CameraConfigBuilder::new()
@@ -66,7 +65,6 @@ fn test_camera_stop_signals_graceful_shutdown() {
     // Wall-clock benchmark: runs only with SOOS_LATENCY_BENCH=1 (dedicated single-threaded CI
     // step), never gated on a loaded developer machine (GitHub #280, user-approved 2026-09-30).
     if !latency_bench_enabled() {
-        eprintln!("skipped: wall-clock benchmark, set SOOS_LATENCY_BENCH=1 to run it");
         return;
     }
     let config = CameraConfigBuilder::new().fps(30).warmup_frames(1).build();

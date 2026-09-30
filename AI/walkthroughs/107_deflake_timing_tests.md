@@ -131,7 +131,7 @@ integration branch `fix/p1-quality-ci-batch` (assertions and thresholds unchange
    `soos-vision::bench_tests::test_pipeline_latency_budget_under_150ms_p95`,
    `soos-camera-v4l::shutdown_tests::test_camera_drop_completes_within_timeout` and
    `test_camera_stop_signals_graceful_shutdown` return early with a `skipped:` message unless the
-   variable is `1`. The CI `test` job (part of `CI Success`) runs them in a dedicated step,
+   variable is `1` (silent early return: the workspace lints forbid `eprintln!` in tests). The CI `test` job (part of `CI Success`) runs them in a dedicated step,
    single-threaded (`--test-threads=1`), with the same 150 ms / 500 ms / 100 ms bounds.
 2. **Camera idle windows** (test configuration only): `mock_camera_tests::
    test_mock_camera_idle_throttling_and_wake` idle_timeout 100 ms → 1000 ms and its idle wait

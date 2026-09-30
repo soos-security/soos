@@ -26,7 +26,6 @@ fn test_pipeline_latency_budget_under_150ms_p95() {
     // Wall-clock benchmark: runs only with SOOS_LATENCY_BENCH=1 (dedicated single-threaded CI
     // step), never gated on a loaded developer machine (GitHub #280, user-approved 2026-09-30).
     if !latency_bench_enabled() {
-        eprintln!("skipped: wall-clock benchmark, set SOOS_LATENCY_BENCH=1 to run it");
         return;
     }
     let width = 640;
