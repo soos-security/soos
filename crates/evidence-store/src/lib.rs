@@ -25,5 +25,6 @@ pub use frame::{
 };
 pub use snapshot::{EvidenceRecord, RetentionReport, SnapshotResult};
 pub use store::{
-    EvidenceStore, FRAME_SNAPSHOT_EXTENSION, MAX_VALID_UID, OPAQUE_SNAPSHOT_EXTENSION,
+    EvidenceStore, DAILY_COUNT_FILE_PREFIX, FRAME_SNAPSHOT_EXTENSION, MAX_VALID_UID,
+    OPAQUE_SNAPSHOT_EXTENSION,
 };

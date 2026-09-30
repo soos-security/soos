@@ -47,7 +47,8 @@ Evidence snapshots are partitioned by calendar date under `/var/lib/soos/evidenc
 │   ├── 4b5f8e32-...-9f8c12a45b67.frame.enc  # Mode 0600, camera frame (record v2 + metadata)
 │   └── d8a1c490-...-01e4b9347892.frame.enc  # Mode 0600 (-rw-------)
 ├── 2026-09-14/                              # Mode 0700 (drwx------)
-│   └── 9c3b12ef-...-38a4d701e56b.webp.enc   # Mode 0600, opaque payload (legacy API / pre-#181)
+│   ├── 9c3b12ef-...-38a4d701e56b.webp.enc   # Mode 0600, opaque payload (legacy API / pre-#181)
+│   └── .daily_count.1000                    # Mode 0600, persisted daily cap counter (GitHub #234)
 └── /var/lib/soos/evidence.key               # Mode 0600 (-rw-------)
 ```
 
@@ -140,9 +141,11 @@ globally refused snapshot does not consume the per-UID quota.
 
 The in-memory counters track a single day: a snapshot for another date resets them to that
 date, so the map never holds more entries than the global cap (`tracked_daily_counters()`),
-and `daily_count` / `daily_total` report `0` for any date that is not the tracked day. A wall
-clock stepped back across midnight therefore starts a fresh day budget; the on-disk
-retention rotation is unaffected.
+and `daily_count` / `daily_total` report `0` for any date that is not the tracked day. When
+the store switches to a date, the global total is re-derived from the snapshot files already
+in that partition and the per-UID cap is always read from the persisted counter (§4.3), so a
+wall clock stepped back across midnight does **not** reopen a budget whose partition still
+exists (see §4.3.1); the on-disk retention rotation is unaffected.
 
 ### 4.2 Storing an Anti-Intrusion Snapshot
 
@@ -178,7 +181,54 @@ let rgb = record.to_rgb24()?; // 640 * 480 * 3 bytes, zeroized on drop
 `store_snapshot(uid, reason, &bytes, ..)` remains available for opaque payloads without
 metadata (`.webp.enc`, version 2 record with `frame == None`).
 
-### 4.3 Retention Rotation
+### 4.3 Daily Cap Persistence (GitHub #234)
+
+The per-UID daily cap is enforced from a counter persisted in the date partition,
+`YYYY-MM-DD/.daily_count.<uid>` (`DAILY_COUNT_FILE_PREFIX`, decimal `u32`, mode `0600`,
+written with an exclusive temporary file, `fsync` and `rename`). Consequences:
+
+- The cap holds across a daemon restart: a new `EvidenceStore` on the same directory reads
+  the consumed quota back (`daily_count` reads the same file).
+- Nothing grows with the daemon lifetime: the only in-memory counters are those of the
+  tracked day (bounded by the global cap, §4.1.1). The counter file disappears with its
+  partition when `rotate_retention` prunes it, and pruning the tracked day also resets the
+  in-memory view.
+- A slot is consumed only after the snapshot is renamed into place. A failed write or rename
+  removes the temporary file and leaves the counter unchanged; if the counter itself cannot
+  be persisted, the new snapshot is removed and the error is returned.
+- The cap checks, the snapshot write and the counter updates form one critical section per
+  store (the `daily_counts` mutex), so concurrent writers never exceed either cap.
+- The counter is opened with `O_NOFOLLOW | O_NONBLOCK`, must be a regular file of at most
+  16 bytes and hold a decimal count. A symlinked, oversized or unparseable counter fails
+  closed (`Io` / `CorruptPayload`) and nothing is written. The file never ends in `.enc`, so
+  `list_snapshots_for_date` never lists it.
+
+### 4.3.1 Combined Per-UID and Global Caps (GitHub #234 and #276)
+
+Both caps are enforced in one critical section, in this order, before anything is written:
+
+1. The in-memory view switches to the target date if needed; its global total starts from
+   the number of `*.enc` snapshot files already in the partition (persisted, survives a
+   restart, counts only stored files).
+2. The per-UID count is read from `YYYY-MM-DD/.daily_count.<uid>`; `>= daily_cap_per_uid`
+   returns `DailyCapExceeded`.
+3. The global total `>= daily_cap_total` returns `GlobalDailyCapExceeded` without touching
+   the per-UID counter.
+4. The snapshot is written and renamed, then the per-UID counter is persisted; only then are
+   the per-UID entry and the global total of the in-memory view incremented. Any failure
+   leaves both quotas unconsumed.
+
+### 4.4 Evidence Key File (GitHub #230)
+
+`MasterKey::load_or_create` opens an existing key with `O_NOFOLLOW | O_NONBLOCK` (the
+`symlink_metadata` pre-check is no longer the only symlink defense) and validates the open
+descriptor: regular file, owned by root or by the effective UID, no group or world bit
+(`mode & 0o077 == 0`), exactly 32 bytes; at most 33 bytes are read. Any violation is
+`EvidenceStoreError::KeyError` and the file is left unchanged. Missing parent directories are
+created with `KEY_PARENT_DIR_MODE` (`0755`, the `/var/lib/soos` contract); an existing parent
+is never chmod-ed.
+
+### 4.5 Retention Rotation
 
 ```rust
 // Runs periodically (e.g. daily daemon task):
@@ -193,6 +243,8 @@ println!("Pruned {} expired date directories", report.directories_pruned);
 - **Criterion E1 (Opt-in)**: Verified by `tests/opt_in_tests.rs`.
 - **Criterion E2 (Retention Rotation)**: Verified by `tests/retention_tests.rs`.
 - **Criterion E3 (Daily Cap)**: Verified by `tests/daily_cap_tests.rs`.
+- **Criteria SRK4–SRK6 (Persisted Daily Cap, GitHub #234)**: Verified by `tests/daily_cap_persistence_tests.rs`.
+- **Criteria SRK2–SRK3 (Key File Validation, GitHub #230)**: Verified by `tests/key_hardening_tests.rs` and `crypto::key_open_tests::test_230_key_open_does_not_follow_symlinks`.
 - **Criterion E4 (Permissions & Encryption)**: Verified by `tests/permissions_tests.rs` and `tests/encryption_tests.rs`.
 - **Criterion E5 (Zero Network Transmission)**: Verified by `tests/zero_network_tests.rs` and workspace invariant test `test_evidence_store_has_no_network_dependencies`.
 - **Criterion E6 (Symlink Traversal Prevention)**: Verified by `tests/safety_hardening_tests.rs::test_evidence_store_rejects_symlink_date_directory`.
