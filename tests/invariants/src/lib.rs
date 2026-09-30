@@ -143,6 +143,10 @@ mod rustup_bootstrap_contract;
 #[cfg(all(test, unix))]
 mod unit_start_guard_contract;
 
+/// `download_models.sh` expected model sizes from the manifest (GitHub #269, rows VMX1–VMX3).
+#[cfg(all(test, unix))]
+mod model_download_size_contract;
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,

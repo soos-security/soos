@@ -129,6 +129,8 @@ pub trait EmbeddingExtractor: Send + Sync {
 ```
 Implemented by `OrtEmbeddingExtractor` (ArcFace ResNet34 512D; `is_nhwc()` reports the layout detected from the session input) and `MockEmbeddingExtractor` (defaulting to 512D).
 
+**Embedding I/O contract (GitHub #268, VIS-14)**: `OrtEmbeddingExtractor::new` infers the physical input layout from the session input: `[N, H, W, 3]` is NHWC, `[N, 3, H, W]` is NCHW. `input_layout()` returns `None` when it cannot be inferred (poisoned session lock, no input, non-tensor input, rank other than 4, no size-3 channel axis); `extract_embedding` then fails closed with `InferenceError::TensorError` instead of silently assuming NCHW. The model output must hold exactly `embedding::EMBEDDING_DIMENSION` (512) values, otherwise `InferenceError::DimensionMismatch { expected: 512, actual }` is returned before normalization (previously a wrong-length vector reached the matcher). Contract tests: `embedding_io_contract_tests` (hand-encoded graphs in `tests/fixtures/embedding_onnx.rs`).
+
 ### Embedding real-model evidence (`tests/embedding_real_model_tests.rs`, GitHub #191)
 
 Gated exactly like the PAD real-model target (`SOOS_MODELS_DIR`, default `/var/lib/soos/models`;

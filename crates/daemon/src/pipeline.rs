@@ -33,6 +33,20 @@ pub const EMBEDDING_MODEL_ID: &str = "arcface_w600k_mbf";
 /// Attested manifest identifier of the Presentation Attack Detection model.
 pub const PAD_MODEL_ID: &str = "minifasnet_v2_pad";
 
+/// Manifest identifier of the optional second PAD ensemble member (GitHub #212, PAD-07):
+/// upstream Silent-Face-Anti-Spoofing's 4.0-scale MiniFASNetV1SE.
+///
+/// The repository manifest does not attest this model yet, so the daemon is single-model by
+/// default; the member is wired only when the deployed manifest declares this id
+/// (ADR 2026-09-30 "Optional Manifest-Gated Second PAD Member").
+pub const SECONDARY_PAD_MODEL_ID: &str = "minifasnet_v1se_pad";
+
+/// Context crop scale of [`SECONDARY_PAD_MODEL_ID`] (upstream `4_0_0_80x80_MiniFASNetV1SE`).
+pub const SECONDARY_PAD_BBOX_SCALE: f32 = 4.0;
+
+/// Optional PAD ensemble members `(manifest id, crop scale)`, in fusion order.
+const OPTIONAL_PAD_MEMBERS: [(&str, f32); 1] = [(SECONDARY_PAD_MODEL_ID, SECONDARY_PAD_BBOX_SCALE)];
+
 /// Historical `model_id` accepted as an alias of [`EMBEDDING_MODEL_ID`].
 ///
 /// `soos-enroll enroll` recorded `mobilefacenet` / `1.0.0` by default until GitHub #182
@@ -187,29 +201,102 @@ pub fn validate_pad_detector(
     pad: &soos_inference_ort::OrtPadDetector,
     manifest: &soos_inference_ort::ModelManifest,
 ) -> Result<soos_inference_ort::PadSelfTestReport, DaemonError> {
-    let meta = manifest.get_model(PAD_MODEL_ID).ok_or_else(|| {
-        soos_inference_ort::InferenceError::ModelNotFound {
-            id: PAD_MODEL_ID.to_string(),
-            path: std::path::PathBuf::from("manifest.toml"),
-        }
-    })?;
+    let meta = pad_model_metadata(manifest, PAD_MODEL_ID)?;
     let expected_classes =
         soos_inference_ort::pad::pad_class_count_from_manifest(&meta.output_shapes)?;
-    let report = pad.self_test(expected_classes).inspect_err(|err| {
-        tracing::error!(
-            model_id = PAD_MODEL_ID,
-            error = %err,
-            "PAD startup self-test failed; refusing to start"
-        );
-    })?;
+    let report = pad
+        .self_test(expected_classes)
+        .inspect_err(|err| log_pad_self_test_failure(PAD_MODEL_ID, err))?;
+    log_pad_self_test_success(PAD_MODEL_ID, &report);
+    Ok(report)
+}
+
+/// [`validate_pad_detector`] for the PAD model attested under `model_id` (primary or optional
+/// ensemble member, GitHub #212). Same fail-closed contract.
+pub fn validate_pad_detector_for(
+    pad: &soos_inference_ort::OrtPadDetector,
+    manifest: &soos_inference_ort::ModelManifest,
+    model_id: &str,
+) -> Result<soos_inference_ort::PadSelfTestReport, DaemonError> {
+    let meta = pad_model_metadata(manifest, model_id)?;
+    let expected_classes =
+        soos_inference_ort::pad::pad_class_count_from_manifest(&meta.output_shapes)?;
+    let report = pad
+        .self_test(expected_classes)
+        .inspect_err(|err| log_pad_self_test_failure(model_id, err))?;
+    log_pad_self_test_success(model_id, &report);
+    Ok(report)
+}
+
+/// Manifest entry of the PAD model `model_id`; a missing entry fails closed.
+fn pad_model_metadata<'a>(
+    manifest: &'a soos_inference_ort::ModelManifest,
+    model_id: &str,
+) -> Result<&'a soos_inference_ort::ModelMetadata, DaemonError> {
+    manifest.get_model(model_id).ok_or_else(|| {
+        soos_inference_ort::InferenceError::ModelNotFound {
+            id: model_id.to_string(),
+            path: std::path::PathBuf::from("manifest.toml"),
+        }
+        .into()
+    })
+}
+
+fn log_pad_self_test_failure(model_id: &str, err: &soos_inference_ort::InferenceError) {
+    tracing::error!(
+        model_id,
+        error = %err,
+        "PAD startup self-test failed; refusing to start"
+    );
+}
+
+fn log_pad_self_test_success(model_id: &str, report: &soos_inference_ort::PadSelfTestReport) {
     tracing::info!(
-        model_id = PAD_MODEL_ID,
+        model_id,
         class_count = report.class_count,
         live_class_index = report.live_class_index,
         liveness_threshold = report.liveness_threshold,
         "PAD startup self-test passed"
     );
-    Ok(report)
+}
+
+/// Optional PAD ensemble members attested by `manifest`, as `(manifest id, crop scale)`
+/// (GitHub #212). Empty for the repository manifest: single-model PAD by default.
+pub fn optional_pad_members(
+    manifest: &soos_inference_ort::ModelManifest,
+) -> Vec<(&'static str, f32)> {
+    OPTIONAL_PAD_MEMBERS
+        .iter()
+        .copied()
+        .filter(|(id, _)| manifest.get_model(id).is_some())
+        .collect()
+}
+
+/// Adds every optional PAD ensemble member attested by the registry's manifest to `vision`
+/// (GitHub #212, PAD-07).
+///
+/// Each member is loaded through the attested registry (SHA-256 and I/O shape checks), built by
+/// [`build_pad_detector`] with `pad_threshold` (default live class index, never overridden),
+/// self-tested by [`validate_pad_detector_for`] and added at its upstream crop scale. Any
+/// failure is returned: the daemon refuses to start rather than silently dropping a member the
+/// deployed manifest attests. Without an optional entry `vision` is returned unchanged.
+pub fn attach_optional_pad_members(
+    mut vision: VisionPipeline,
+    registry: &mut soos_inference_ort::ModelRegistry,
+    pad_threshold: f32,
+) -> Result<VisionPipeline, DaemonError> {
+    for (model_id, scale) in optional_pad_members(registry.manifest()) {
+        let session = registry.get_or_load_session(model_id)?;
+        let member = build_pad_detector(session, pad_threshold);
+        validate_pad_detector_for(&member, registry.manifest(), model_id)?;
+        vision = vision.with_additional_pad_model(scale, Arc::new(member))?;
+        tracing::info!(
+            model_id,
+            bbox_scale = scale,
+            "Optional PAD ensemble member attached"
+        );
+    }
+    Ok(vision)
 }
 
 /// Returns the camera configuration with its device resolved by the single shared resolver
@@ -477,12 +564,13 @@ pub fn initialize_pipeline(
     let pad = Arc::new(pad);
     let extractor = Arc::new(soos_inference_ort::OrtEmbeddingExtractor::new(ext_session));
 
-    let vision = Arc::new(soos_vision::VisionPipeline::new(
-        detector,
-        pad,
-        extractor,
-        config.vision.clone(),
-    ));
+    let vision = soos_vision::VisionPipeline::new(detector, pad, extractor, config.vision.clone());
+    // Optional multi-scale PAD member (GitHub #212): only when the deployed manifest attests it.
+    let vision = Arc::new(attach_optional_pad_members(
+        vision,
+        &mut registry,
+        config.vision.pad_threshold,
+    )?);
 
     Ok(PipelineComponents::new(
         camera,
