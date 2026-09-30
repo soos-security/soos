@@ -90,7 +90,7 @@ Configures:
   V4L2 manager); the hardware keeps streaming at `fps` until auto-standby
 - `idle_timeout`: Inactivity before auto-standby releases the device (default: 10s);
   `Duration::ZERO` disables both auto-standby and the idle throttle
-- `warmup_frames`: Discarded startup frames (library default: 20). `soos-daemon` does not use this default: it runs with `DAEMON_DEFAULT_WARMUP_FRAMES` (0, `crates/daemon/src/config.rs`) whether or not `/etc/soos/daemon.toml` exists, unless `[pipeline] warmup_frames` is set (GitHub #205, `Docs/DAEMON.md` §1.4)
+- `warmup_frames`: Discarded startup frames (default: 20). This is the library default: `soos-daemon` does not use this default: it runs with `DAEMON_DEFAULT_WARMUP_FRAMES` (0, `crates/daemon/src/config.rs`) whether or not `/etc/soos/daemon.toml` exists, unless `[pipeline] warmup_frames` is set (GitHub #205, `Docs/DAEMON.md` §1.4)
 - `min_backoff` & `max_backoff`: Error backoff limits (default: 100ms to 5s)
 
 These are the `CameraConfig::default()` / `CameraConfigBuilder` values. `soos-daemon` builds its

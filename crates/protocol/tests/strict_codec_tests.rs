@@ -3,6 +3,7 @@
 //! - `decode` / `decode_preview` / `decode_with_limit` must consume the declared payload
 //!   exactly: bytes left over INSIDE the declared length are a protocol error
 //!   (`CodecError::TrailingBytes`), so the PAM client and the daemon apply one strictness.
+//!   The only exception is the one-byte client message tag of the decoded type (#204).
 //! - `decode_payload` is the shared strict decoder of an unframed payload used by the daemon.
 //! - Bytes after the end of the declared frame are not part of the frame and stay ignored.
 //! - `encode` produces exactly `u32 BE length || postcard payload` (wire compatibility with
@@ -22,6 +23,7 @@ use proptest::prelude::*;
 use soos_protocol::codec::{
     decode, decode_payload, decode_preview, encode, encode_preview, CodecError,
 };
+use soos_protocol::message::MESSAGE_TAG_REQUEST;
 use soos_protocol::types::{
     Event, EventKind, PreviewResponse, ReasonClass, Request, RequestKind, Response, Verdict,
     CURRENT_VERSION, REQUEST_ID_LEN,
@@ -223,12 +225,15 @@ proptest! {
     }
 
     /// Any valid Request with extra bytes inside the declared length is rejected, and the
-    /// exact frame still round-trips.
+    /// exact frame still round-trips. The single `MESSAGE_TAG_REQUEST` trailer of a tagged
+    /// client frame (#204) is the one accepted remainder, pinned by
+    /// `tag_trailer_codec_tests.rs` (matrix BBX1-BBX3).
     #[test]
     fn prop_request_strict_roundtrip(
         req in arb_request(),
         extra in proptest::collection::vec(any::<u8>(), 1..=64),
     ) {
+        prop_assume!(extra != [MESSAGE_TAG_REQUEST]);
         let frame = encode(&req).expect("encode");
         let decoded: Request = decode(&frame).expect("exact frame decodes");
         prop_assert_eq!(&decoded, &req);

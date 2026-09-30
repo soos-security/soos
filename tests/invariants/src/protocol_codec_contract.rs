@@ -1,8 +1,8 @@
 //! Protocol codec and IPC documentation contract (GitHub #224, #225, #226).
 //!
-//! - #224: the daemon decodes payloads through the shared strict decoder of `soos-protocol`
-//!   (`codec::decode_payload`), never through `postcard` directly, so the PAM client and the
-//!   daemon apply one strictness.
+//! - #224: the daemon decodes payloads through the shared strict decoders of `soos-protocol`
+//!   (`message::decode_client_message` over `codec::decode_payload_exact`, #204), never
+//!   through `postcard` directly, so the PAM client and the daemon apply one strictness.
 //! - #225: `encode_with_limit` serializes straight into the final frame buffer; no
 //!   intermediate `postcard` allocation holding the request nonce is freed un-zeroized.
 //! - #226: `Docs/IPC_PROTOCOL.md`, the protocol crate frame diagram and the PAM crate docs
@@ -162,9 +162,19 @@ fn test_no_crate_decodes_wire_payloads_with_postcard_directly() {
         "wire payloads must be decoded through soos_protocol::codec (strict), not postcard \
          directly (#224): {violations:?}"
     );
+    // #204 superseded the dispatcher's direct `decode_payload` call: the daemon classifies
+    // every client payload with `message::decode_client_message`, whose body decoding goes
+    // through the strict zero-remainder `codec::decode_payload_exact` (matrix BBX4).
     assert!(
-        read("crates/daemon/src/dispatcher.rs").contains("decode_payload"),
-        "the daemon dispatcher must use soos_protocol::codec::decode_payload (#224)"
+        read("crates/daemon/src/dispatcher.rs").contains("decode_client_message"),
+        "the daemon dispatcher must classify payloads with soos_protocol::message::decode_client_message (#204)"
+    );
+    let message = read("crates/protocol/src/message.rs");
+    let message_prod = production_part(&message);
+    assert!(
+        message_prod.contains("decode_payload_exact")
+            && !message_prod.contains("postcard::take_from_bytes"),
+        "decode_client_message must decode bodies through the strict codec::decode_payload_exact (#224)"
     );
 }
 

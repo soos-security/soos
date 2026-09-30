@@ -107,3 +107,24 @@ PCZ5 is split. The mock fixture part (#226) is `✅ Verified` by the new invaria
 with the former value 1). The tagged envelope (#224) moves to PCZ6 and stays pending. Matrix PA2
 now states the clamped-`timeout_ms` deadline instead of "> 250ms", so the #226 recommendation is
 complete.
+
+## Integration with #204 (2026-09-30, `fix/p2-batch-b`)
+
+Merging `origin/main` (#204, client message tag trailer) into the strict codec made every strict
+reader of a tagged client frame fail with `TrailingBytes { unconsumed: 1 }` (43 failing tests:
+admin-cli, gui and PAM mock daemons, `client_message_tests::test_tagged_frame_stays_readable_by_v1_decoders`).
+
+- `codec::decode_payload::<T>` now tolerates exactly one remainder byte, and only the tag of `T`
+  (`Request` -> `0xA0`, `Event` -> `0xA1`, selected by `TypeId`, hence the new `'static` bound on
+  the `decode*` functions). Every other remainder, and any byte after `Response` /
+  `PreviewResponse`, is still `TrailingBytes`.
+- New `pub(crate) codec::decode_payload_exact` (zero remainder) backs
+  `message::decode_client_message`, so a doubled tag is `Malformed`.
+- Red -> green: `crates/protocol/tests/tag_trailer_codec_tests.rs` (3 acceptance tests red
+  before the change; the rejection tests are regression guards), matrix BBX1-BBX4.
+- Branch-new artefacts adapted to the #204 design: `strict_codec_tests::prop_request_strict_roundtrip`
+  skips the single matching tag; `protocol_codec_contract` requires `decode_client_message` in the
+  dispatcher; `.github/workflows/fuzz.yml` runs the fifth target `decode_client_message`
+  (PHS9 "every target"); `Docs/CAMERA_V4L_CRATE.md` restores the parsable `(default: 20)` of
+  `warmup_frames` (CHT7).
+- ADR 2026-09-30 "Strict Codec Accepts Only the Matching Client Message Tag Trailer".

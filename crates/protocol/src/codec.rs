@@ -11,13 +11,21 @@
 //! - The codec performs zero direct I/O: operations strictly process `&[u8]` slices.
 //! - Decoding is strict: the declared payload must be consumed exactly; unconsumed bytes
 //!   inside the declared length are rejected with [`CodecError::TrailingBytes`] (GitHub #224).
-//!   The daemon decodes unframed payloads through the same strict [`decode_payload`].
+//!   The single tolerated remainder is the one-byte client message tag trailer of the decoded
+//!   type (GitHub #204): a [`Request`] may be followed by exactly
+//!   [`MESSAGE_TAG_REQUEST`](crate::message::MESSAGE_TAG_REQUEST) and an [`Event`] by exactly
+//!   [`MESSAGE_TAG_EVENT`](crate::message::MESSAGE_TAG_EVENT); any other remainder, and any
+//!   remainder after any other type, is rejected. The daemon classifies client payloads with
+//!   [`crate::message::decode_client_message`], which strips the tag and decodes the body
+//!   through the zero-remainder [`decode_payload_exact`].
 //! - Encoding sizes the frame first (`postcard::ser_flavors::Size`) and serializes in place
 //!   into the single returned buffer: no intermediate allocation holding the request nonce
 //!   is ever freed without zeroization, and oversized messages are rejected before the
 //!   frame is allocated (GitHub #225).
 
-use crate::types::{MAX_MESSAGE_SIZE, MAX_PREVIEW_MESSAGE_SIZE};
+use crate::message::{MESSAGE_TAG_EVENT, MESSAGE_TAG_REQUEST};
+use crate::types::{Event, Request, MAX_MESSAGE_SIZE, MAX_PREVIEW_MESSAGE_SIZE};
+use core::any::TypeId;
 use serde::{de::DeserializeOwned, Serialize};
 use zeroize::Zeroize;
 
@@ -162,7 +170,7 @@ pub fn encode_with_limit<T: Serialize>(msg: &T, max_size: usize) -> Result<Vec<u
 /// [`CodecError::DeclaredSizeTooLarge`] if declared size exceeds [`MAX_MESSAGE_SIZE`],
 /// [`CodecError::Deserialize`] if deserialization fails, or [`CodecError::TrailingBytes`] if
 /// bytes remain unconsumed inside the declared payload.
-pub fn decode<T: DeserializeOwned>(buf: &[u8]) -> Result<T, CodecError> {
+pub fn decode<T: DeserializeOwned + 'static>(buf: &[u8]) -> Result<T, CodecError> {
     decode_with_limit(buf, MAX_MESSAGE_SIZE)
 }
 
@@ -175,7 +183,7 @@ pub fn decode<T: DeserializeOwned>(buf: &[u8]) -> Result<T, CodecError> {
 /// [`CodecError::DeclaredSizeTooLarge`] if declared size exceeds [`MAX_PREVIEW_MESSAGE_SIZE`],
 /// [`CodecError::Deserialize`] if deserialization fails, or [`CodecError::TrailingBytes`] if
 /// bytes remain unconsumed inside the declared payload.
-pub fn decode_preview<T: DeserializeOwned>(buf: &[u8]) -> Result<T, CodecError> {
+pub fn decode_preview<T: DeserializeOwned + 'static>(buf: &[u8]) -> Result<T, CodecError> {
     decode_with_limit(buf, MAX_PREVIEW_MESSAGE_SIZE)
 }
 
@@ -187,7 +195,7 @@ pub fn decode_preview<T: DeserializeOwned>(buf: &[u8]) -> Result<T, CodecError> 
 /// [`CodecError::DeclaredSizeTooLarge`] if declared size exceeds `max_size`,
 /// [`CodecError::Deserialize`] if deserialization fails, or [`CodecError::TrailingBytes`] if
 /// bytes remain unconsumed inside the declared payload.
-pub fn decode_with_limit<T: DeserializeOwned>(
+pub fn decode_with_limit<T: DeserializeOwned + 'static>(
     buf: &[u8],
     max_size: usize,
 ) -> Result<T, CodecError> {
@@ -219,13 +227,38 @@ pub fn decode_with_limit<T: DeserializeOwned>(
 /// Strictly deserializes an unframed payload (the bytes after the 4-byte length prefix).
 ///
 /// The payload must be consumed exactly: this is the single decoder shared by the PAM
-/// client (through [`decode`]) and the daemon dispatcher (GitHub #224).
+/// client (through [`decode`]) and the daemon-side mock servers (GitHub #224). The only
+/// tolerated remainder is ONE byte equal to the client message tag of `T` (GitHub #204):
+/// [`MESSAGE_TAG_REQUEST`] after a [`Request`], [`MESSAGE_TAG_EVENT`] after an [`Event`].
+/// Every other remainder (another byte, the other type's tag, two or more bytes, or any
+/// byte after a type that is never tagged, such as `Response`) is rejected.
 ///
 /// # Errors
 ///
 /// Returns [`CodecError::Deserialize`] if deserialization fails, or
-/// [`CodecError::TrailingBytes`] if bytes remain after the decoded message.
-pub fn decode_payload<T: DeserializeOwned>(payload: &[u8]) -> Result<T, CodecError> {
+/// [`CodecError::TrailingBytes`] if bytes remain after the decoded message other than the
+/// single matching message tag.
+pub fn decode_payload<T: DeserializeOwned + 'static>(payload: &[u8]) -> Result<T, CodecError> {
+    let (msg, rest) = postcard::take_from_bytes(payload).map_err(CodecError::Deserialize)?;
+    match rest {
+        [] => Ok(msg),
+        [tag] if Some(*tag) == client_message_tag::<T>() => Ok(msg),
+        _ => Err(CodecError::TrailingBytes {
+            unconsumed: rest.len(),
+        }),
+    }
+}
+
+/// Deserializes an unframed payload that must be consumed exactly, with no tag tolerance.
+///
+/// Used by [`crate::message::decode_client_message`] on a body whose tag was already
+/// stripped, so a doubled tag is never accepted.
+///
+/// # Errors
+///
+/// Returns [`CodecError::Deserialize`] if deserialization fails, or
+/// [`CodecError::TrailingBytes`] if any byte remains after the decoded message.
+pub(crate) fn decode_payload_exact<T: DeserializeOwned>(payload: &[u8]) -> Result<T, CodecError> {
     let (msg, rest) = postcard::take_from_bytes(payload).map_err(CodecError::Deserialize)?;
     if rest.is_empty() {
         Ok(msg)
@@ -233,6 +266,18 @@ pub fn decode_payload<T: DeserializeOwned>(payload: &[u8]) -> Result<T, CodecErr
         Err(CodecError::TrailingBytes {
             unconsumed: rest.len(),
         })
+    }
+}
+
+/// Client message tag trailer that may follow a `T` payload, if `T` is a client message.
+fn client_message_tag<T: 'static>() -> Option<u8> {
+    let id = TypeId::of::<T>();
+    if id == TypeId::of::<Request>() {
+        Some(MESSAGE_TAG_REQUEST)
+    } else if id == TypeId::of::<Event>() {
+        Some(MESSAGE_TAG_EVENT)
+    } else {
+        None
     }
 }
 
