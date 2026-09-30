@@ -109,3 +109,9 @@ All four passed. The new suites pass 9/9 and 7/7, and the pre-existing `health_t
 - Expose a `camera_state` string / last-frame age in a v2 `StatusResponse` (protocol change, out of
   scope here).
 - Plug the shared resolver from #150/#152 into `camera_device_resolver` once it lands.
+- **Single camera state machine** (candid review suggestion 9): the manager tracks `CameraHealth`
+  (daemon) and `CameraStatus` (GUI) in parallel with different vocabularies (`Dead` vs `Stopped`,
+  `Standby` vs `Suspended`). They agree today; derive one from the other to prevent skew.
+- **Unplug during standby** (candid review suggestion 10): `Standby` counts as operational, so a
+  camera unplugged during standby reports `camera_ready = true` until the next activity. Consider a
+  cheap existence check of the device path in `health()` while in standby.

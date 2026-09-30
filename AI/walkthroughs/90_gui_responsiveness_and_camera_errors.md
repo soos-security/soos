@@ -131,9 +131,64 @@ dependencies, English-only additions. Layer 2 (`candid_subagent.sh`) is run by t
 
 ## 9. Known Limitations / Follow-ups
 
-- The IPC-vs-direct camera source swap after Pause/Resume (CAM-06 recommendation) is left to the
-  #150/#152 camera-resolver work; the GUI now at least reports "Daemon preview unreachable".
+- ~~The IPC-vs-direct camera source swap after Pause/Resume~~: implemented in section 10.
 - The negotiated capture format is not yet shown in the header (only resolution, FPS and latency
   once frames arrive).
-- Matrix row GEPU3 still cites the removed `SoosApp::is_daemon_active/pause_daemon/resume_daemon`
-  helpers; GRE1/GRE2 supersede that evidence.
+- ~~Matrix row GEPU3 cites removed helpers~~: marked superseded by GRE1, GRE2, GRE7 and GRE8.
+
+## 10. Candid Review Rework (2026-09-30, findings 1, 5, 7, 8)
+
+### Finding 1 — runtime camera-source switching (#154 / #150)
+The source was chosen once in `main.rs`. Starting the GUI with the daemon paused and pressing
+**Resume** made the daemon hit `EBUSY` on `VIDIOC_S_FMT` (the GUI kept streaming); pressing
+**Pause** in IPC mode left the feed blank until restart.
+
+- `camera_source::CameraSourcePlanner` (pure, injected clock, lazy probe): an unknown daemon state
+  never selects a source; a direct source is left as soon as the daemon is active or a Resume
+  handover is pending (the decision can then never be `DirectV4l`); IPC is re-evaluated only while
+  the daemon is not active; steady sources are never re-probed.
+- `SwitchableCamera` is the `CameraManager` handed to the vision worker. `CameraSourceSupervisor`
+  (own thread, 100 ms tick) applies decisions and always stops and drops the previous source
+  (`release_manager` waits for the last transient reference, then the drop joins the capture
+  thread) **before** opening the next one. The UI drops the displayed frame when the source
+  generation changes, and the worker withdraws a frozen frame when the source stops being ready.
+- `HandoverExecutor` wraps `PkexecExecutor`: for `ResumeDaemon` it releases the direct V4L2 manager
+  on the privileged worker thread before `pkexec systemctl start`, keeps direct mode disabled while
+  the Resume is pending and until the daemon is seen active (10 s grace), and re-enables it at once
+  when the Resume fails. `main.rs` no longer runs a one-shot startup decision.
+
+### Finding 5 — accurate retry messaging
+`CameraBlockReason::is_transient` (rate limit, I/O, unavailable, daemon unreachable or starting,
+direct open failure) drives bounded re-probes (`MAX_TRANSIENT_PROBE_RETRIES` = 60, every 1 s);
+permanent reasons are re-evaluated only on a daemon state change. `camera_status::error_is_retried`
+removes the "retrying automatically" claim for `SourceUnauthorized` (the IPC worker stops for good).
+
+### Finding 7 — bounded helper output
+`list_profiles` pipes the helper stdout through `privileged::read_bounded`
+(`Read::take(MAX_PROFILE_LIST_BYTES + 1)`) instead of `Command::output()`, and kills the helper on an
+oversized or failed read.
+
+### Finding 8 — matrix
+GEPU3 is marked superseded (its history is kept); new rows GRE7–GRE10, PIR6 and CSR6.
+
+### Red evidence
+- `crates/gui/tests/camera_source_tests.rs` (19 tests) against a stubbed module: 17 failed on
+  assertions (planner never switching, `SwitchableCamera::replace` not installing,
+  `release_manager` not dropping, `HandoverExecutor` not releasing; e.g.
+  `test_handover_releases_direct_camera_before_resume_executes`: "the direct V4L2 manager must be
+  dropped before pkexec starts the daemon"). The two that passed assert fail-closed defaults.
+- `crates/gui/tests/camera_status_retry_tests.rs`: 2/2 failed with `error_is_retried` stubbed to
+  `true`.
+- `crates/gui/tests/bounded_output_tests.rs`: 2/4 failed (a 4 MiB reader was consumed whole;
+  `list_profiles` still used `.output()`).
+- The pre-existing contract `camera_status_tests::test_gui_main_installs_tracing_subscriber_first`
+  requires `main.rs` to log after installing the subscriber; `main.rs` keeps a startup log line for
+  the camera-source policy (the test is unchanged).
+- The threaded supervisor tests were run 10 times in a row: 10/10 green.
+
+### Follow-ups (not addressed in this rework)
+- Finding 6 (IR corpus through `VisionPipeline`): walkthrough 86, section 8.
+- Suggestions 9 (single camera state machine) and 10 (unplug during standby): walkthrough 89,
+  section 7.
+- Hardware validation of the handover on a dual-sensor laptop: start the GUI with the daemon
+  paused, press **Resume**; the daemon log must show the stream opening without `EBUSY`.

@@ -110,5 +110,22 @@ were kept unchanged and pass.
   keeps authenticating while the GUI is open.
 - Not in scope: provisioning `/etc/soos/daemon.toml` from the installer (no longer needed for
   convergence, since the missing file and `camera_device = "auto"` now resolve identically);
-  switching the GUI to direct mode at runtime after "Pause daemon" (a restart is still needed);
-  daemon re-enumeration after hot-plug (#151/#153).
+  daemon re-enumeration after hot-plug (#151/#153). Runtime switching of the GUI source after
+  Pause/Resume is now implemented (walkthrough 90, section 10).
+
+## 8. Candid Review Rework (2026-09-30, findings 3 and 4)
+
+- **Finding 3**: `resolve_pipeline_camera` was exercised only by the parity tests while production
+  called `plan_camera_device(.., auto_select_camera_device)`. `initialize_pipeline` now calls
+  `resolve_pipeline_camera(config, &SystemCameraEnumerator::default())`, which is built on
+  `plan_camera_device` (mock camera: no enumeration). All existing `camera_resolution_tests` and
+  `camera_health_tests` pass unchanged.
+- **Finding 4**: `stable_device_path` scanned `/dev/v4l/by-id` itself (bound 256) next to the
+  resolver's `by_id_aliases` (bound 64). It now delegates to
+  `SystemCameraEnumerator::with_by_id_dir(dir).by_id_aliases()`; the single bound is
+  `MAX_BY_ID_ENTRIES` (64) in `resolver.rs`. The existing `test_stable_device_path_*` tests pass
+  unchanged (sorted aliases keep the lexicographically-first choice).
+- **Red evidence**: the new invariants `test_daemon_production_camera_resolution_uses_tested_resolver`
+  ("initialize_pipeline must resolve its camera through resolve_pipeline_camera") and
+  `test_single_bounded_by_id_scanner` ("stable_path.rs must not scan /dev/v4l/by-id itself") failed
+  before the change. Matrix row CSR6.

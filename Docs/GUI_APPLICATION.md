@@ -17,6 +17,7 @@ waits on I/O it does not own.
 | Face detection, PAD, embedding | `soos-gui-worker` | `worker` |
 | `systemctl is-active soos-daemon.service` | `soos-gui-daemon-monitor` | `daemon_control` |
 | `pkexec` (pause/resume daemon, list/import/delete templates) | `soos-gui-privileged` | `privileged` |
+| Camera-source probing, switching and device release | `soos-gui-camera-source` | `camera_source` |
 
 - **Daemon state polling**: `DaemonMonitor` probes through the `DaemonStatusProbe` trait
   (production: `SystemctlProbe`) at most once per `DAEMON_POLL_INTERVAL` (2 s), gated by the
@@ -35,14 +36,38 @@ waits on I/O it does not own.
   path (drop guard). `PrivilegedAction`'s `Debug` output prints only the UID and embedding
   dimension, never embedding values.
 - The `soos-enroll list` output accepted from the helper is bounded by
-  `MAX_PROFILE_LIST_BYTES` (1 MiB).
+  `MAX_PROFILE_LIST_BYTES` (1 MiB) while it is read (`read_bounded`, `Read::take`); an oversized
+  output kills the helper.
+
+## 1a. Runtime Camera Source (GitHub #154 / #150)
+
+The camera source is not chosen once at startup. `camera_source::CameraSourceSupervisor` follows
+the `DaemonMonitor` state and installs the source in the `SwitchableCamera` read by the vision
+worker:
+
+| Daemon state | Source |
+|---|---|
+| Unknown (no probe yet) | none: the device is never opened (fail-closed) |
+| Active, preview authorized | daemon IPC preview (`IpcCameraManager`) |
+| Active, preview refused / socket unreachable | blocked notice (`CameraBlockReason`) |
+| Inactive (paused) | direct V4L2 through the shared resolver (`resolve_camera_device_from_config`) |
+
+The previous source is always stopped and dropped (device closed) before the next one is opened.
+**Resume** first releases a direct V4L2 manager on the privileged worker thread
+(`HandoverExecutor`) and keeps direct mode disabled until the daemon is seen active, so the daemon
+never meets `EBUSY` because of the GUI; a failed Resume re-enables direct mode. Transient blocks
+(rate limit, I/O, daemon starting) are re-probed every second, at most
+`MAX_TRANSIENT_PROBE_RETRIES` times; permanent ones (not authorized, not in the `soos` group) only
+when the daemon state changes. The decision logic is the pure `CameraSourcePlanner`.
 
 ## 2. Camera Error States (GitHub #155, review finding CAM-07)
 
 Every `CameraManager` exposes `status() -> CameraStatus` (see `Docs/CAMERA_V4L_CRATE.md`). When no
 analyzed frame is available, the central panel renders `camera_status::camera_status_banner`
 instead of a generic spinner, and the header shows the banner title. Each `CameraErrorKind` has a
-distinct title and an actionable hint, plus the consecutive failure count:
+distinct title and an actionable hint, plus the consecutive failure count and whether the source
+retries automatically (`error_is_retried`: every kind except `SourceUnauthorized`, where the IPC
+preview worker stops):
 
 | Kind | Title | Typical cause |
 |---|---|---|

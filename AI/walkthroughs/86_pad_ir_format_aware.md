@@ -155,7 +155,40 @@ crate untouched by this change, 50 ms readiness sleep at load average ~60) passe
   the gate bounds with measured values (new ADR). No FAR/FRR figure is claimed until then.
 - **Medium term**: run PAD on the RGB sibling sensor while matching on IR, or ship an IR-trained PAD
   model.
-- **Sensor-type flag**: modality is derived from the pixel format only; an IR node delivering a colour
-  format (e.g. YUYV) stays on the colour path until `Frame` carries the sensor type.
+- ~~**Sensor-type flag**~~: resolved in the candid-review rework (section 9): `Frame` now carries
+  the sensor type.
+- **IR corpus measurement** (candid review finding 6): `test_real_pad_corpus_apcer_bpcer_under_ceilings`
+  drives only `OrtPadDetector` at 0.85. Add an IR bona fide / attack corpus class evaluated through
+  `VisionPipeline`'s PAD decision (IR gate + 0.95) before any IR APCER/BPCER is reported (#172).
+- **Preview wire**: the daemon preview (`PreviewResponse`) carries the pixel format but not the
+  sensor type, so `soos-gui` in IPC mode classifies IR frames by format only. Production decisions
+  are unaffected (the daemon analyzes its own tagged frames) and IR nodes now negotiate `Grey`;
+  carrying the sensor type on the wire needs a protocol version bump.
 - **Configuration**: `ir_pad_threshold` is not exposed in the daemon TOML (it can only be stricter
   than `pad_threshold`); exposing it is deferred until the #170 threshold validation lands.
+
+## 9. Candid Review Rework (2026-09-30, finding 2)
+
+The review found that the IR policy keyed on `PixelFormat::Grey` only: with the default
+`PreferIr`, an IR node is selected by its card name (for example `USB2.0 FHD UVC WebCam: USB2.0 I`),
+but `negotiate_format` preferred YUYV/MJPEG over GREY, so such a node took the RGB PAD path at the
+RGB threshold.
+
+- **Architect**: `Frame` gains `sensor_type: SensorType` (default `Unknown` in `Frame::new`, set with
+  `Frame::with_sensor_type`; no other constructor exists). `soos_camera_v4l::plan_capture(card,
+  formats, config) -> CapturePlan { format, sensor_type }` classifies the opened node with the
+  resolver's `classify_sensor`, prefers `Grey` on `Infrared` nodes under auto negotiation (an
+  explicit format is still honored), and the capture loop stamps every frame.
+  `PadInputModality::for_source(format, sensor)` returns `Monochrome` for any `Infrared` sensor and
+  falls back to `from_pixel_format` otherwise; the pipeline uses `for_frame`.
+- **Tester (red evidence)**: `crates/vision/tests/ir_sensor_policy_tests.rs` (8 tests) and
+  `crates/camera-v4l/tests/ir_capture_plan_tests.rs` (6 tests) were run against signature stubs:
+  6/8 and 5/6 failed on assertions, e.g. `test_ir_sensor_streaming_yuyv_flat_frame_is_rejected_by_ir_gate`
+  (the flat YUYV IR frame was accepted on the colour path),
+  `test_ir_sensor_streaming_yuyv_uses_stricter_ir_threshold` (`process_frame` returned `Ok` at 0.90),
+  `test_infrared_sensor_is_monochrome_modality_for_every_pixel_format` (`left: Color`,
+  `right: Monochrome`) and `test_ir_node_advertising_yuyv_and_grey_is_planned_as_grey_infrared`.
+- **Auditor**: fail-closed only. `Unknown` keeps the previous format-based behavior (mock and IPC
+  frames); an `Infrared` tag can only move a frame to the stricter policy. No new allocation, no
+  panic path, no frame data logged (the sensor type is logged once at stream start).
+- **Developer**: all tests green; the existing PIR1–PIR5 tests are unchanged. Matrix row PIR6.

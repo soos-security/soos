@@ -81,7 +81,7 @@ $$\text{similarity}(a, b) = \frac{a \cdot b}{\|a\|_2 \|b\|_2}$$
 5. Extracts 5-point facial landmarks directly from `FaceDetection.landmarks` (fails closed with `VisionError::MissingLandmarks` if absent).
 6. Expands bounding box by `pad_bbox_scale` (2.7×) centered on face, shifting it inward at image borders (`expand_bbox_for_pad`, Minivision shifting algorithm).
 7. Crops and resizes the expanded bounding box to 80×80 for Presentation Attack Detection (`crop_and_resize`).
-8. Evaluates Presentation Attack Detection (`PadDetector`, MiniFASNetV2) and short-circuits on spoof (`VisionError::PadFailed`). The decision is **format-aware** (GitHub #169, see §2.4.1): a `PixelFormat::Grey` (IR) frame must first pass the fail-closed IR gate (`VisionError::IrLivenessGateFailed`) and is scored against the stricter IR threshold.
+8. Evaluates Presentation Attack Detection (`PadDetector`, MiniFASNetV2) and short-circuits on spoof (`VisionError::PadFailed`). The decision is **format-aware** (GitHub #169, see §2.4.1): a `PixelFormat::Grey` frame, or any frame from an `Infrared` sensor, must first pass the fail-closed IR gate (`VisionError::IrLivenessGateFailed`) and is scored against the stricter IR threshold.
 9. Warps face to normalized 112×112 RGB crop using 5-point landmarks (`align_face_112`).
 10. Extracts L2-normalized 512D biometric embedding (`EmbeddingExtractor`, ArcFace w600k).
 11. Compares against enrolled template via `match_embeddings`.
@@ -91,8 +91,10 @@ $$\text{similarity}(a, b) = \frac{a \cdot b}{\|a\|_2 \|b\|_2}$$
 MiniFASNetV2 is trained on colour captures. `convert_to_rgb` replicates a `Grey` byte into three
 identical channels, which is out-of-distribution for the model, and `CameraConfig` prefers the IR
 sensor by default (`SensorPreference::PreferIr`). The pipeline therefore derives a
-`PadInputModality` from `frame.format` (`Grey` ⇒ `Monochrome`; `Rgb24`, `Yuyv`, `Nv12`, `Mjpeg` ⇒
-`Color`) and never lets a monochrome frame take the colour PAD path:
+`PadInputModality` with `PadInputModality::for_frame` from `frame.format` **and**
+`frame.sensor_type`: any frame from an `Infrared` sensor is `Monochrome` whatever its pixel format
+(an IR node streaming YUYV or MJPEG never takes the colour path); otherwise `Grey` ⇒ `Monochrome`
+and `Rgb24`, `Yuyv`, `Nv12`, `Mjpeg` ⇒ `Color`. A monochrome frame never takes the colour PAD path:
 
 | Step | Monochrome (`Grey`) frame | Colour frame |
 |---|---|---|
