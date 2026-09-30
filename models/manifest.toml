@@ -7,6 +7,10 @@
 # `input_shape` is always the logical [N, C, H, W] shape. `input_layout` (default "NCHW")
 # is the physical layout of the graph input; "NHWC" means the tensor is [N, H, W, C].
 #
+# `size_bytes` (optional) is the exact byte size of the attested file. scripts/download_models.sh
+# prints it, bounds the download with it and discards a file of any other size before hashing
+# (GitHub #269). The SHA-256 remains the attestation; the size is an early, fail-closed check.
+#
 # Model ids and file names are stable identifiers, not descriptions: `arcface_w600k_mbf` is a
 # historical name and the attested file is NOT an InsightFace w600k MobileFaceNet (see the
 # entry description and ADR 2026-09-30 in AI/DECISIONS.md).
@@ -18,6 +22,7 @@ version = "2.0.0"
 id = "scrfd_500m_kps"
 filename = "scrfd_500m_kps.onnx"
 sha256 = "a3562ef62592bf387f6ef19151282ac127518e51c77696e62e0661bee95ba1ad"
+size_bytes = 2524155
 license = "MIT"
 source_url = "https://huggingface.co/ykk648/face_lib/resolve/main/face_detect/scrfd_onnx/scrfd_500m_bnkps.onnx"
 description = "SCRFD 500M KPS unified face detection and 5-point facial landmarks"
@@ -38,6 +43,7 @@ output_shapes = [
 id = "arcface_w600k_mbf"
 filename = "arcface_w600k_mbf.onnx"
 sha256 = "ffe014a45c9488506719d37fd578ece6661bb385535b36e8039975fa5d4683db"
+size_bytes = 136619444
 license = "MIT"
 source_url = "https://huggingface.co/garavv/arcface-onnx/resolve/main/arc.onnx"
 description = "ArcFace ResNet34 (Keras, tf2onnx export, ~34.1M params, 136.6 MB) 512D face embedding extractor; NHWC input_1 [N,112,112,3]"
@@ -49,6 +55,7 @@ output_shapes = [[1, 512]]
 id = "minifasnet_v2_pad"
 filename = "minifasnet_v2_80x80.onnx"
 sha256 = "0cbe5caec95c31de9d2ef845cb85407d76aecd1b6a2c0e343f7d35306bfbccb8"
+size_bytes = 1744126
 license = "Apache-2.0"
 source_url = "https://github.com/QingHeYang/Silent-Face-Anti-Spoofing-onnx/raw/main/onnx/2.7_80x80_MiniFASNetV2.onnx"
 description = "MiniFASNetV2 80x80 presentation attack detection (anti-spoofing)"

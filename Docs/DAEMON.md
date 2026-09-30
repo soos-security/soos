@@ -170,4 +170,9 @@ pad_threshold = 0.85
    not change `is_healthy`.
 3. The pipeline (models, camera supervisor, stores) is initialized fail-closed; any error stops the
    daemon before the socket exists.
+   The PAD model `minifasnet_v2_pad` is always loaded and self-tested. The optional second PAD
+   ensemble member `minifasnet_v1se_pad` (`SECONDARY_PAD_MODEL_ID`, crop scale 4.0, GitHub #212)
+   is wired by `attach_optional_pad_members` only when the deployed `manifest.toml` attests it;
+   the repository manifest does not, so the daemon is single-model by default. When the entry is
+   present, a load, shape or self-test failure of the member stops the daemon (fail closed).
 4. The socket is bound (§1.2) and the accept loop starts.
