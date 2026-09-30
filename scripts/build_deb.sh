@@ -96,10 +96,20 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
+# Debian/Ubuntu PAM loads modules from the multiarch directory only; never let
+# install.sh guess from the build host (it would pick /usr/lib64/security).
+DEB_HOST_MULTIARCH="$(dpkg-architecture -qDEB_HOST_MULTIARCH 2>/dev/null || gcc -print-multiarch 2>/dev/null || true)"
+if [[ -z "${DEB_HOST_MULTIARCH}" ]]; then
+    echo "[ERROR] Cannot determine the Debian multiarch triplet (install dpkg-dev)." >&2
+    exit 1
+fi
+DEB_PAM_DIR="/usr/lib/${DEB_HOST_MULTIARCH}/security"
+
 echo "[2/4] Staging package filesystem..."
 bash "${WORKSPACE_ROOT}/scripts/install.sh" \
     --destdir "${STAGE_DIR}" \
     --prefix "/usr" \
+    --pam-dir "${DEB_PAM_DIR}" \
     --skip-models \
     --skip-systemd
 
@@ -120,7 +130,8 @@ Section: admin
 Priority: optional
 Architecture: ${ARCH}
 Maintainer: soos developers <dev@soos.local>
-Depends: libpam-runtime (>= 1.1.8-1), adduser | passwd, systemd
+Depends: libc6, libgcc-s1, libstdc++6, libpam0g, libpam-runtime (>= 1.1.8-1), adduser | passwd, systemd
+Recommends: libxkbcommon0, libwayland-client0, libwayland-egl1, libegl1, libgl1, libx11-6, libxcursor1, libxi6, libxrandr2
 Installed-Size: ${INSTALLED_SIZE}
 Description: Local facial biometric authentication PAM module and daemon
  soos is a zero-trust local facial biometric PAM subsystem for Linux.

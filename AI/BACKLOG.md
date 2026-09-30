@@ -2005,3 +2005,35 @@ On physical hardware lock screens (GDM):
   - `scripts/check_no_key_material.sh` run by `build_deb.sh`, `build_arch.sh`, `debian/rules`; `tests/docker/test_packages.sh` asserts no key entry in the archive, key survival on removal and distinct keys across fresh installs
   - Acceptance: a staged key aborts the build; two fresh installs of one artifact yield different keys
   - TDD: `test_package_builders_refuse_staged_key_material`, `tests/docker/test_packages.sh`
+
+### GitHub #164 / #165 / #167 — fix(install): fail-closed transactional installer, complete dependency lists, Python-free model download (ONB-06, ONB-07, ONB-09)
+
+> **Branch**: `fix/installer-preflight-and-deps`  
+> **Architecture ref**: §5 Distribution Adaptation, §7 Models & Pipeline, §9 Privacy & Persistence  
+> **VERIFICATION_MATRIX**: INS1–INS9 (PK1 staging tests migrated)
+
+#### Problem Statement
+
+`scripts/install.sh` searched `target/release` then `target/debug`, only warned about missing artifacts and still exited 0 ("completed successfully"), never built, had no root check for live installs, re-moded pre-existing system directories, enabled the unit before models were fetched and left a half-installed system on failure. The build and runtime dependency lists omitted OpenSSL headers, libclang, curl and the dlopen'ed GUI libraries. `scripts/download_models.sh` required Python >= 3.11 (`tomllib`, with a nonexistent fallback module), had no tool preflight, and accepted manifest file names such as `../escape.onnx` (writing outside the target directory).
+
+#### Sub-issues
+
+- [x] **#164.1** — Fail-closed preflight and explicit release build
+  - Every artifact required unless `--allow-missing`; `--artifact-dir` (default `target/release`), `target/debug` never searched, debug profile directories refused unless `--allow-debug-artifacts`; `--build` runs `scripts/check_build_deps.sh` and `cargo build --release --locked --workspace`; root required for a live install; `--dry-run` runs the same read-only preflight
+  - Acceptance: missing or debug artifacts exit non-zero with nothing written (contract migration of `test_install_script_creates_required_directories` and `test_install_script_destdir_stages_no_key_material`, which now stage a complete fixture artifact set)
+  - TDD: `test_install_fails_closed_when_artifact_dir_is_empty`, `test_install_fails_closed_when_one_artifact_is_missing`, `test_install_refuses_debug_profile_artifacts`, `test_install_live_mode_requires_root`, `test_install_dry_run_runs_preflight_without_mutation`
+
+- [x] **#164.2** — Transactional install with rollback
+  - Journal of created files/directories and saved copies of overwritten files; atomic writes; replay on any failure or signal; models verified before `systemctl enable`; pre-existing system directories never re-moded; unit restarts bounded
+  - Acceptance: a late failure (model checksum mismatch) restores the destination exactly, exit `60`
+  - TDD: `test_install_rolls_back_every_change_on_failure`, `test_install_never_chmods_preexisting_system_dirs`, `test_install_stages_every_artifact_with_expected_modes`, `test_install_orders_models_before_unit_enable_and_builds_release`
+
+- [x] **#165.1** — Complete, single-sourced dependency lists
+  - `scripts/check_build_deps.sh` (lists + read-only preflight); `debian/control`, `build_deb.sh`, `soos.spec`, `PKGBUILD` updated; GUI runtime libraries as Debian `Recommends:`; `Docs/PACKAGING_AND_PROVISIONING.md` §3.1 and `README.md` document the lists and the `ort-sys` ONNX Runtime download (`ORT_LIB_LOCATION`)
+  - Acceptance: the documented build lists build the whole workspace in bare `ubuntu:24.04`, `fedora:40` and `archlinux`
+  - TDD: `test_check_build_deps_lists_required_packages`, `test_packaging_and_docs_declare_complete_dependencies`
+
+- [x] **#167.1** — Python-free, preflighted model download
+  - Bash parser for the fixed manifest schema with strict validation (bare file names, 64-hex digests, `https://`/`file://` sources); `sha256sum`/`curl` preflight and `--preflight` mode before any write; `https`-only downloads
+  - Acceptance: deploy, `--check-only` and tamper detection work with neither `python3` nor `curl` on PATH; malformed entries rejected before the target directory exists
+  - TDD: `test_download_models_deploys_and_verifies_without_python`, `test_download_models_parses_repository_manifest_without_python`, `test_download_models_rejects_malformed_or_unsafe_entries`, `test_download_models_preflight_requires_curl_for_remote_sources`

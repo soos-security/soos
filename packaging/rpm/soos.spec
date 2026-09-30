@@ -12,7 +12,10 @@ BuildRequires:  rust
 BuildRequires:  pam-devel
 BuildRequires:  clang-devel
 BuildRequires:  gcc
+BuildRequires:  gcc-c++
 BuildRequires:  make
+BuildRequires:  openssl-devel
+BuildRequires:  pkgconf-pkg-config
 BuildRequires:  systemd-rpm-macros
 
 Requires:       pam

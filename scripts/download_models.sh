@@ -10,9 +10,16 @@
 #   -m, --manifest <PATH>     Path to manifest.toml (default: models/manifest.toml)
 #   --check-only              Verify integrity of existing deployed models without downloading
 #   --dry-run                 Parse manifest and display download actions without modifying disk
+#   --preflight               Validate the manifest and required tools, then exit (no disk writes)
 #   -h, --help                Display this help message
 #
+# Requirements: bash >= 4, coreutils (sha256sum), and curl + ca-certificates for
+# https:// sources. No Python: the manifest is parsed in bash (GitHub #167).
+#
 # Invariants:
+#   - The manifest is validated and the tool preflight passes BEFORE any write.
+#   - Model filenames must be bare names (no '/', no leading '.'), SHA-256
+#     digests exactly 64 hex characters, sources https:// or file:// only.
 #   - Every model file must strictly match its attested SHA-256 checksum.
 #   - Files are installed with permissions mode 0644 (root:root if executed as root).
 #   - Directory is created with mode 0755 (root:root if executed as root).
@@ -55,6 +62,7 @@ TARGET_DIR="${DEFAULT_TARGET_DIR}"
 MANIFEST_PATH="${DEFAULT_MANIFEST}"
 CHECK_ONLY=false
 DRY_RUN=false
+PREFLIGHT=false
 
 usage() {
     cat <<EOF
@@ -67,6 +75,7 @@ Options:
   -m, --manifest <PATH>    Path to models manifest.toml (default: ${DEFAULT_MANIFEST})
   --check-only             Verify integrity of existing deployed models
   --dry-run                Show download plan and checksums without downloading
+  --preflight              Validate manifest and required tools only (no writes)
   -h, --help               Show this help message and exit
 
 Environment Variables:
@@ -94,6 +103,10 @@ while [[ $# -gt 0 ]]; do
             DRY_RUN=true
             shift
             ;;
+        --preflight)
+            PREFLIGHT=true
+            shift
+            ;;
         -h|--help)
             usage
             exit 0
@@ -114,40 +127,120 @@ fi
 info "Using manifest: ${MANIFEST_PATH}"
 info "Target directory: ${TARGET_DIR}"
 
-# Compute SHA-256 helper
+# -----------------------------------------------------------------------------
+# Tool preflight and SHA-256 helper (no Python dependency, GitHub #167)
+# -----------------------------------------------------------------------------
+SHA256_TOOL=""
+if command -v sha256sum >/dev/null 2>&1; then
+    SHA256_TOOL="sha256sum"
+elif command -v shasum >/dev/null 2>&1; then
+    SHA256_TOOL="shasum"
+fi
+
 compute_sha256() {
-    local file_path="$1"
-    if command -v sha256sum >/dev/null 2>&1; then
-        sha256sum "${file_path}" | awk '{print $1}'
-    elif command -v shasum >/dev/null 2>&1; then
-        shasum -a 256 "${file_path}" | awk '{print $1}'
+    local file_path="$1" digest _rest
+    if [[ "${SHA256_TOOL}" == "sha256sum" ]]; then
+        read -r digest _rest < <(sha256sum -- "${file_path}")
     else
-        python3 -c "import hashlib, sys; print(hashlib.sha256(open(sys.argv[1], 'rb').read()).hexdigest())" "${file_path}"
+        read -r digest _rest < <(shasum -a 256 -- "${file_path}")
     fi
+    printf '%s\n' "${digest}"
 }
 
-# Python helper to parse TOML manifest into tab-delimited records:
-# <id>\t<filename>\t<sha256>\t<source_url>\t<license>
+# -----------------------------------------------------------------------------
+# Manifest parser for the fixed models/manifest.toml schema (pure bash)
+# -----------------------------------------------------------------------------
+# Supported subset: '[models.<id>]' tables whose 'filename', 'sha256',
+# 'source_url' and 'license' keys hold single-line, double-quoted strings
+# without escapes. Every other table, key and multi-line array is skipped.
+# Anything ambiguous for the four keys above fails closed.
+M_IDS=()
+M_FILES=()
+M_SHAS=()
+M_URLS=()
+M_LICENSES=()
+
 parse_manifest() {
-    python3 -c "
-import sys
-try:
-    import tomllib
-except ImportError:
-    try:
-        import tomli as tomllib
-    except ImportError:
-        import tomllib_fallback
-with open(sys.argv[1], 'rb') as f:
-    data = tomllib.load(f)
-models = data.get('models', {})
-for model_id, meta in models.items():
-    filename = meta.get('filename', '')
-    sha256 = meta.get('sha256', '')
-    source_url = meta.get('source_url', '')
-    license_ = meta.get('license', '')
-    print(f'{model_id}\t{filename}\t{sha256}\t{source_url}\t{license_}')
-" "${MANIFEST_PATH}"
+    local manifest="$1"
+    local re_model_table='^\[models\.([A-Za-z0-9_-]+)\][[:space:]]*(#.*)?$'
+    local re_other_table='^\[\[?[A-Za-z_"]'
+    local re_key='^(filename|sha256|source_url|license)[[:space:]]*='
+    local re_string='^[a-z0-9_]+[[:space:]]*=[[:space:]]*"([^"\\]*)"[[:space:]]*(#.*)?$'
+    local line trimmed key value lineno=0 cur=-1 in_model=false i
+    declare -A seen_keys=()
+
+    while IFS= read -r line || [[ -n "${line}" ]]; do
+        lineno=$((lineno + 1))
+        line="${line%$'\r'}"
+        trimmed="${line#"${line%%[![:space:]]*}"}"
+        [[ -z "${trimmed}" || "${trimmed}" == \#* ]] && continue
+
+        if [[ "${trimmed}" =~ ${re_model_table} ]]; then
+            local id="${BASH_REMATCH[1]}"
+            for ((i = 0; i < ${#M_IDS[@]}; i++)); do
+                if [[ "${M_IDS[i]}" == "${id}" ]]; then
+                    error "Manifest line ${lineno}: duplicate model table [models.${id}]"
+                    return 1
+                fi
+            done
+            M_IDS+=("${id}")
+            M_FILES+=("")
+            M_SHAS+=("")
+            M_URLS+=("")
+            M_LICENSES+=("")
+            cur=$((${#M_IDS[@]} - 1))
+            in_model=true
+            seen_keys=()
+            continue
+        fi
+        if [[ "${trimmed}" =~ ${re_other_table} ]]; then
+            in_model=false
+            continue
+        fi
+        [[ "${in_model}" == true ]] || continue
+        [[ "${trimmed}" =~ ${re_key} ]] || continue
+
+        key="${BASH_REMATCH[1]}"
+        if [[ ! "${trimmed}" =~ ${re_string} ]]; then
+            error "Manifest line ${lineno}: '${key}' must be a single-line double-quoted string"
+            return 1
+        fi
+        value="${BASH_REMATCH[1]}"
+        if [[ -n "${seen_keys[${key}]:-}" ]]; then
+            error "Manifest line ${lineno}: duplicate key '${key}' in [models.${M_IDS[cur]}]"
+            return 1
+        fi
+        seen_keys[${key}]=1
+        case "${key}" in
+            filename)   M_FILES[cur]="${value}" ;;
+            sha256)     M_SHAS[cur]="${value}" ;;
+            source_url) M_URLS[cur]="${value}" ;;
+            license)    M_LICENSES[cur]="${value}" ;;
+        esac
+    done < "${manifest}"
+
+    if [[ ${#M_IDS[@]} -eq 0 ]]; then
+        error "Manifest declares no [models.<id>] table: ${manifest}"
+        return 1
+    fi
+
+    for ((i = 0; i < ${#M_IDS[@]}; i++)); do
+        local mid="${M_IDS[i]}"
+        # A bare file name only: no path separator, no leading dot (no traversal).
+        if [[ ! "${M_FILES[i]}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+            error "Model '${mid}': invalid or missing filename '${M_FILES[i]}' (bare file name required)"
+            return 1
+        fi
+        if [[ ! "${M_SHAS[i]}" =~ ^[0-9A-Fa-f]{64}$ ]]; then
+            error "Model '${mid}': invalid or missing sha256 (64 hexadecimal characters required)"
+            return 1
+        fi
+        if [[ -z "${M_URLS[i]}" ]]; then
+            error "Model '${mid}': missing source_url"
+            return 1
+        fi
+    done
+    return 0
 }
 
 # Fallback direct download URLs for standard model repositories
@@ -192,7 +285,55 @@ resolve_download_url() {
     esac
 }
 
-# Verify target directory creation
+
+# -----------------------------------------------------------------------------
+# 1. Validate the manifest and resolve every download URL (read-only)
+# -----------------------------------------------------------------------------
+if ! parse_manifest "${MANIFEST_PATH}"; then
+    error "Manifest validation failed: ${MANIFEST_PATH}"
+    exit 1
+fi
+TOTAL_MODELS=${#M_IDS[@]}
+
+M_DOWNLOAD_URLS=()
+NEEDS_CURL=false
+for ((idx = 0; idx < TOTAL_MODELS; idx++)); do
+    url="$(resolve_download_url "${M_IDS[idx]}" "${M_URLS[idx]}" "${M_FILES[idx]}")"
+    case "${url}" in
+        file://*) ;;
+        https://*) NEEDS_CURL=true ;;
+        *)
+            error "Model '${M_IDS[idx]}': unsupported source URL scheme (https:// or file:// required): ${url}"
+            exit 1
+            ;;
+    esac
+    M_DOWNLOAD_URLS+=("${url}")
+done
+
+# -----------------------------------------------------------------------------
+# 2. Tool preflight (before any filesystem mutation)
+# -----------------------------------------------------------------------------
+if [[ "${DRY_RUN}" = false ]]; then
+    MISSING_TOOLS=()
+    [[ -n "${SHA256_TOOL}" ]] || MISSING_TOOLS+=("sha256sum (coreutils)")
+    if [[ "${CHECK_ONLY}" = false && "${NEEDS_CURL}" = true ]] && ! command -v curl >/dev/null 2>&1; then
+        MISSING_TOOLS+=("curl")
+    fi
+    if [[ ${#MISSING_TOOLS[@]} -gt 0 ]]; then
+        error "Missing required tools: ${MISSING_TOOLS[*]}"
+        error "Install them first (see scripts/check_build_deps.sh --print-packages models)."
+        exit 1
+    fi
+fi
+
+if [[ "${PREFLIGHT}" = true ]]; then
+    success "Preflight passed: ${TOTAL_MODELS} models attested, required tools present."
+    exit 0
+fi
+
+# -----------------------------------------------------------------------------
+# 3. Deploy / verify
+# -----------------------------------------------------------------------------
 if [[ "${DRY_RUN}" = false && "${CHECK_ONLY}" = false ]]; then
     mkdir -p "${TARGET_DIR}"
     chmod 755 "${TARGET_DIR}"
@@ -201,16 +342,15 @@ if [[ "${DRY_RUN}" = false && "${CHECK_ONLY}" = false ]]; then
     fi
 fi
 
-PARSED_MODELS=$(parse_manifest)
-TOTAL_MODELS=0
 VERIFIED_MODELS=0
 
-while IFS=$'\t' read -r model_id filename expected_sha source_url license_name; do
-    [[ -z "${model_id}" ]] && continue
-    TOTAL_MODELS=$((TOTAL_MODELS + 1))
-
+for ((idx = 0; idx < TOTAL_MODELS; idx++)); do
+    model_id="${M_IDS[idx]}"
+    filename="${M_FILES[idx]}"
+    expected_sha="${M_SHAS[idx]}"
+    license_name="${M_LICENSES[idx]}"
+    download_url="${M_DOWNLOAD_URLS[idx]}"
     dest_path="${TARGET_DIR}/${filename}"
-    download_url=$(resolve_download_url "${model_id}" "${source_url}" "${filename}")
 
     if [[ "${DRY_RUN}" = true ]]; then
         info "[DRY-RUN] Model '${model_id}':"
@@ -262,7 +402,9 @@ while IFS=$'\t' read -r model_id filename expected_sha source_url license_name; 
         cp "${local_src_path}" "${tmp_dest}"
     else
         info "Downloading from: ${download_url}"
-        curl -fSL --retry 3 --connect-timeout 15 -o "${tmp_dest}" "${download_url}" || {
+        curl -fSL --proto '=https' --proto-redir '=https' --tlsv1.2 \
+            --retry 3 --connect-timeout 15 --max-time 900 \
+            -o "${tmp_dest}" "${download_url}" || {
             error "Failed to download model from ${download_url}"
             rm -f "${tmp_dest}"
             exit 1
@@ -282,15 +424,15 @@ while IFS=$'\t' read -r model_id filename expected_sha source_url license_name; 
         exit 1
     fi
 
-    mv "${tmp_dest}" "${dest_path}"
-    chmod 0644 "${dest_path}"
+    chmod 0644 "${tmp_dest}"
     if [[ "$(id -u)" -eq 0 ]]; then
-        chown root:root "${dest_path}"
+        chown root:root "${tmp_dest}"
     fi
+    mv -f "${tmp_dest}" "${dest_path}"
 
     success "Verified and deployed: ${filename} (SHA-256 match)"
     VERIFIED_MODELS=$((VERIFIED_MODELS + 1))
-done <<< "${PARSED_MODELS}"
+done
 
 if [[ "${DRY_RUN}" = true ]]; then
     success "Dry run complete. ${TOTAL_MODELS} models cataloged."
