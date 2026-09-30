@@ -170,6 +170,7 @@ mod tests {
                         is_healthy,
                         pid,
                         uptime_secs,
+                        memory_locked: is_healthy,
                     }
                 },
             )

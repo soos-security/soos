@@ -194,3 +194,7 @@ pad_threshold = 0.85
   verdict path. If the clock fails, the response carries `issued = expires = 0` (already expired)
   and an `Allow` verdict is downgraded to `Unavailable` / `InternalError`. The PAM client still
   treats both fields as informational (see `Docs/IPC_PROTOCOL.md`, "Response Freshness").
+4. The socket is bound (§1.2). When started by systemd (`Type=notify`, `NOTIFY_SOCKET` set) the daemon
+   then sends `READY=1` through `soos_daemon::sd_notify`; only then does systemd start units ordered
+   after it (`display-manager.service`). A notification failure is logged at `warn`. The accept loop
+   starts, and `STOPPING=1` is sent on SIGTERM / SIGINT (GitHub #203).

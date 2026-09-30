@@ -235,7 +235,10 @@ impl PipelineConfig {
 impl Default for PipelineConfig {
     fn default() -> Self {
         Self {
-            camera: soos_camera_v4l::CameraConfig::default(),
+            camera: soos_camera_v4l::CameraConfig {
+                warmup_frames: DAEMON_DEFAULT_WARMUP_FRAMES,
+                ..soos_camera_v4l::CameraConfig::default()
+            },
             vision: soos_vision::VisionPipelineConfig::default(),
             models_dir: PathBuf::from("/var/lib/soos/models"),
             biometrics_dir: PathBuf::from(soos_biometric_store::DEFAULT_BIOMETRICS_DIR),
@@ -409,9 +412,8 @@ impl DaemonConfig {
 
     /// Configuration the running daemon uses when no key overrides a value.
     ///
-    /// Identical to [`DaemonConfig::default`] except for daemon-specific runtime defaults that
-    /// differ from the library defaults of the component crates (currently
-    /// [`DAEMON_DEFAULT_WARMUP_FRAMES`]). Every load path (`from_toml_str`, `load_from_path`,
+    /// Identical to [`DaemonConfig::default`], which already applies the daemon-specific
+    /// runtime defaults (currently [`DAEMON_DEFAULT_WARMUP_FRAMES`], GitHub #205). Every load path (`from_toml_str`, `load_from_path`,
     /// `load_or_default` without a file) starts from it, so the same binary behaves the same
     /// with or without `/etc/soos/daemon.toml`.
     #[must_use]

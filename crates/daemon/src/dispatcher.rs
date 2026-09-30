@@ -608,6 +608,7 @@ impl ConnectionDispatcher {
                 is_healthy: status.is_healthy,
                 pid: std::process::id(),
                 uptime_secs: self.start_time.elapsed().as_secs(),
+                memory_locked: self.health.memory_locked(),
             };
             let encoded = Zeroizing::new(encode(&status_resp)?);
             debug!("Generated diagnostic status response");

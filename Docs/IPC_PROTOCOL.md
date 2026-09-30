@@ -138,7 +138,7 @@ Best-effort telemetry notification sent by PAM following password failures:
 | `RequestKind::PreviewFrame` (2) | `soos-gui` preview, authorized peers only (§9) | `PreviewResponse`, or a `Response` with `ProtocolError` on refusal |
 
 ### `StatusResponse`
-Non-biometric health snapshot returned for `RequestKind::Status` (bounded by `MAX_MESSAGE_SIZE`): `version: u8`, `socket_ready`, `camera_ready`, `models_verified`, `is_healthy` (`bool`, one byte each), `pid: u32`, `uptime_secs: u64`.
+Non-biometric health snapshot returned for `RequestKind::Status` (bounded by `MAX_MESSAGE_SIZE`): `version: u8`, `socket_ready`, `camera_ready`, `models_verified`, `is_healthy` (`bool`, one byte each), `pid: u32`, `uptime_secs: u64`, `memory_locked: bool` (whether `mlockall` swap protection is active, GitHub #201; appended last, so the daemon and `soos-admin` / `soos-gui` must be upgraded together).
 
 ### `PreviewResponse`
 Camera frame returned for an authorized `RequestKind::PreviewFrame` (bounded by `MAX_PREVIEW_MESSAGE_SIZE`, encoded with `encode_preview`, decoded with `decode_preview`; §9): `version: u8`, `sequence: u64`, `width: u32`, `height: u32`, `format: u8` (0 = RGB24, 1 = Grey, 2 = YUYV, 3 = NV12, 4 = MJPEG, 255 = no capture), `timestamp_monotonic_ns: u64`, `data: Vec<u8>`.
