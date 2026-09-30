@@ -36,17 +36,60 @@ Every message transmitted over the Unix domain stream socket is framed by a 4-by
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 ```
 
-### Security Constants
-- **Maximum Message Size (`MAX_MESSAGE_SIZE`)**: `4,096` bytes (4 KiB). Any message declaring a length exceeding 4 KiB is rejected immediately prior to buffer allocation (`CodecError::MessageTooLarge`), shielding daemon and PAM module from denial-of-service memory exhaustion.
-- **Maximum Service Name Length (`MAX_SERVICE_LEN`)**: `64` bytes. Rejected with `CodecError::PayloadCorrupted` if exceeded.
-- **Protocol Version (`PROTOCOL_VERSION`)**: `1`.
+### Payload Encoding (Postcard)
+Postcard writes the struct fields in declaration order with no field tags and no message-type tag. The field widths are **not fixed**:
+- `u8` (`version`, `StatusResponse` booleans, `PreviewResponse::format`) is one raw byte; `[u8; 32]` (`request_id`) is 32 raw bytes.
+- Every other integer (`u32` such as `uid_hint`, `pid`, `width`; `u64` such as `*_monotonic_ns`, `uptime_secs`, `sequence`) is an unsigned LEB128 **varint** (1 to 5 bytes for `u32`, 1 to 10 bytes for `u64`): `uid_hint = 1` takes one byte, `uid_hint = 1000` two.
+- Every enum discriminant (`RequestKind`, `EventKind`, `Verdict`, `ReasonClass`) is a varint of the variant index listed in the table below (one byte for every current variant).
+- A `String` (`service`) and a `Vec<u8>` (`PreviewResponse::data`) are a varint length followed by the bytes; an `Option` is a one-byte tag (`0` = `None`, `1` = `Some`) followed by the value.
+
+### Size Limits and Codec Errors (`crates/protocol/src/codec.rs`)
+- **`MAX_MESSAGE_SIZE`** = `4,096` bytes (4 KiB): bound of every request, event, `Response` and `StatusResponse` payload (`encode` / `decode`).
+- **`MAX_PREVIEW_MESSAGE_SIZE`** = `2 MiB`: bound of the `PreviewResponse` payload only (`encode_preview` / `decode_preview`, §9). No other message may use it.
+- Encoding a payload larger than the limit fails with `CodecError::MessageTooLarge`. The payload size is computed first (`postcard::ser_flavors::Size`), so an oversized message is rejected before the frame buffer is allocated, and the message is then serialized in place into that single buffer (no intermediate copy, GitHub #225).
+- Decoding checks the 4-byte prefix first: fewer than 4 bytes, or fewer bytes than declared, fail with `CodecError::BufferTooSmall`; a declared length above the limit fails with `CodecError::DeclaredSizeTooLarge` before any body allocation. The daemon additionally rejects a zero length.
+- **Strict decoding** (GitHub #224): the declared payload must be consumed exactly. A payload that decodes but leaves bytes inside the declared length fails with `CodecError::TrailingBytes { unconsumed }`; bytes after the end of the declared frame are not part of the frame and are ignored. The PAM client (`decode`) and the daemon dispatcher (`codec::decode_payload`) use the same strict decoder. Malformed postcard fails with `CodecError::Deserialize`.
+- **`MAX_SERVICE_LEN`** = `64` bytes. `Request::validate` rejects a longer service with `ValidationError::ServiceTooLong` (the daemon answers `ProtocolError` / `MalformedRequest`).
+- **`CURRENT_VERSION`** = `1`. `Request::validate` rejects any other version with `ValidationError::UnsupportedVersion`; `Response::is_allow` is true only for `CURRENT_VERSION` and `Verdict::Allow`.
+
+### Message Discrimination (v1 limitation)
+Requests and events share the socket and the framing, and the v1 payload carries no message-type discriminator. The daemon decodes each payload strictly as both `Request` and `Event`; when both decodings succeed it treats the payload as a `Request` only if `uid_hint` equals the kernel `SO_PEERCRED` UID, otherwise as an `Event` (`ConnectionDispatcher::read_and_process`). The client knows which reply it expects (`Response`, `StatusResponse` or `PreviewResponse`). A tagged `Message` envelope requires a wire-incompatible protocol version and is deferred (ADR 2026-09-30 "Strict Codec v1 Decoding; Message Discriminator Deferred to Protocol v2" in `AI/DECISIONS.md`).
+
+### Wire Indices of the Enums (`crates/protocol/src/types.rs`)
+
+| Variant | Index |
+|---|---|
+| `RequestKind::Auth` | 0 |
+| `RequestKind::Status` | 1 |
+| `RequestKind::PreviewFrame` | 2 |
+| `EventKind::PasswordFailed` | 0 |
+| `Verdict::Allow` | 0 |
+| `Verdict::Deny` | 1 |
+| `Verdict::Unavailable` | 2 |
+| `Verdict::ProtocolError` | 3 |
+| `ReasonClass::FaceMatch` | 0 |
+| `ReasonClass::NoFace` | 1 |
+| `ReasonClass::MultipleFaces` | 2 |
+| `ReasonClass::ScoreBelowThreshold` | 3 |
+| `ReasonClass::PadFailed` | 4 |
+| `ReasonClass::CameraUnavailable` | 5 |
+| `ReasonClass::ModelUnavailable` | 6 |
+| `ReasonClass::StaleFrame` | 7 |
+| `ReasonClass::Timeout` | 8 |
+| `ReasonClass::RateLimited` | 9 |
+| `ReasonClass::UidMismatch` | 10 |
+| `ReasonClass::MalformedRequest` | 11 |
+| `ReasonClass::InternalError` | 12 |
+
+Hand-written wire encoders (for example the Docker mock daemon `tests/docker/mock_daemon.py`) must use these indices.
 
 ---
 
 ## 3. Message Schemas
 
 ### `Request`
-Sent by the PAM module to the daemon to request facial verification:
+Sent by the PAM module to the daemon to request facial verification (and by `soos-admin` / `soos-gui` for `Status` and `PreviewFrame`):
+- `version: u8`: Protocol version (`CURRENT_VERSION`).
 - `kind: RequestKind`: Request operation (`Auth`, `Status`, or `PreviewFrame` — the latter is reserved for the diagnostic GUI and governed by §9).
 - `request_id: RequestId`: 256-bit cryptographic random identifier (`[u8; 32]`) sourced via `getrandom`.
 - `uid_hint: u32`: Declared UID from the PAM client (authoritatively cross-checked by the daemon using kernel `SO_PEERCRED`).
@@ -54,7 +97,8 @@ Sent by the PAM module to the daemon to request facial verification:
 - `deadline_monotonic_ns: u64`: Absolute monotonic deadline in nanoseconds. If exceeded, daemon immediately returns `Verdict::Unavailable`. `0` or `u64::MAX` means no client deadline (`DECISION_BUDGET_MS` applies). The daemon stops its decision `RESPONSE_WRITE_MARGIN_MS` (50 ms) before the earlier of this deadline and its own `connection_timeout` (measured from the start of request processing), and never starts an inference that would not finish in time; the response is then `Unavailable`/`Timeout` (or the consensus reached so far), never a silent overrun.
 
 ### `Response`
-Returned by the daemon to the PAM module:
+Returned by the daemon to the PAM module (and as the refusal of a `Status` or `PreviewFrame` request):
+- `version: u8`: Protocol version (`CURRENT_VERSION`).
 - `request_id: RequestId`: Must match the initial request's identifier bit-for-bit.
 - `verdict: Verdict`:
   - `Allow`: Single face authenticated successfully (PAD validated, match score >= threshold).
@@ -81,8 +125,14 @@ Best-effort telemetry notification sent by PAM following password failures:
 - `service: String`: PAM service name.
 - `timestamp_monotonic_ns: u64`: Monotonic timestamp.
 
+### `StatusResponse`
+Non-biometric health snapshot returned for `RequestKind::Status` (bounded by `MAX_MESSAGE_SIZE`): `version: u8`, `socket_ready`, `camera_ready`, `models_verified`, `is_healthy` (`bool`, one byte each), `pid: u32`, `uptime_secs: u64`.
+
+### `PreviewResponse`
+Camera frame returned for an authorized `RequestKind::PreviewFrame` (bounded by `MAX_PREVIEW_MESSAGE_SIZE`, encoded with `encode_preview`, decoded with `decode_preview`; §9): `version: u8`, `sequence: u64`, `width: u32`, `height: u32`, `format: u8` (0 = RGB24, 1 = Grey, 2 = YUYV, 3 = NV12, 4 = MJPEG, 255 = no capture), `timestamp_monotonic_ns: u64`, `data: Vec<u8>`.
+
 ### Memory Zeroization (`Zeroize`)
-The `Response` struct implements `Zeroize` and `ZeroizeOnDrop`: sensitive request identifiers and verdict metadata are overwritten in RAM when discarded.
+`Request`, `Event`, `Response` and `PreviewResponse` implement `zeroize::Zeroize` manually and call it from a manual `impl Drop` (no derive macro is used): identifiers, service names, timestamps and pixel data are overwritten when a value is dropped, and an erased `Response` is reset to `Verdict::Deny` / `ReasonClass::InternalError` so it can never read as an authorization. `StatusResponse` carries no secret and is `Copy`.
 
 ---
 
@@ -162,6 +212,7 @@ All sensitive payloads and buffers in the IPC pipeline are scrubbed on drop:
 - `Response` implements `zeroize::Zeroize` and `Drop`, resetting `verdict` to `Deny` and zeroing `request_id` and timestamps.
 - `PreviewResponse` implements `zeroize::Zeroize` and `Drop`, erasing the pixel buffer and metadata; the daemon wraps every encoded response (`ResponseOutput::encoded_response`) in `zeroize::Zeroizing`.
 - Raw message buffers (`encoded`, `len_buf`, `full_buf`) are wrapped in `zeroize::Zeroizing` to ensure cryptographic hygiene.
+- `encode_with_limit` serializes directly into the single frame buffer it returns (sized up front, never reallocated), so the only copy of the encoded request nonce is the `encoded` buffer the caller wraps in `Zeroizing`; on a serialization failure the partially written buffer is zeroized before it is dropped (GitHub #225).
 
 ---
 

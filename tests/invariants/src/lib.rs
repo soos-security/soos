@@ -43,6 +43,10 @@ mod pam_response_freshness_contract;
 #[cfg(test)]
 mod pam_feedback_contract;
 
+/// Strict protocol codec, single-buffer encoding and IPC documentation (GitHub #224–#226).
+#[cfg(test)]
+mod protocol_codec_contract;
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,

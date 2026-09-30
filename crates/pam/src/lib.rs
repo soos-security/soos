@@ -7,7 +7,7 @@
 //! ## Core Security Principles
 //!
 //! 1. **Zero Async Runtime**: Strictly uses synchronous blocking primitives (`std::os::unix::net::UnixStream`).
-//! 2. **Strict Latency Budget**: one explicit deadline derived from the clamped `timeout_ms`, started before UID resolution and covering connect + request + response.
+//! 2. **Strict Latency Budget**: One explicit deadline derived from the clamped `timeout_ms` (default 1000 ms, range 10–5000 ms), started before UID resolution, covers connect + request + response; nothing is ever unbounded.
 //! 3. **Panic Resilience**: `catch_unwind` wraps every entry point, logging caught panics to syslog and systematically returning `PAM_IGNORE`.
 //! 4. **Zero Secrets on Wire**: Never inspects, processes, or transmits passwords over IPC.
 //! 5. **Safe Fallback**: Any error or timeout degrades silently to `PAM_IGNORE` for password fallback.
