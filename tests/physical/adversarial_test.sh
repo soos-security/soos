@@ -20,7 +20,7 @@
 #   -d, --device <PATH>     Camera device node (e.g. /dev/video0 or /dev/v4l/by-id/...)
 #   -m, --models-dir <PATH> Directory containing verified ONNX models and manifest.toml
 #   -u, --uid <UID>         Target enrolled user UID to verify against (default: 10001)
-#   --mock                  Force mock simulation mode using synthetic attack vectors
+#   --mock                  Simulation only: PAD plumbing + real-model tests, NO security metrics
 #   -h, --help              Print this help message and exit
 # =============================================================================
 
@@ -60,7 +60,8 @@ Options:
   -d, --device <PATH>     Camera device node (e.g. /dev/video0 or /dev/v4l/by-id/...)
   -m, --models-dir <PATH> Directory containing verified ONNX models and manifest.toml
   -u, --uid <UID>         Target enrolled user UID to verify against (default: 10001)
-  --mock                  Force mock simulation mode using synthetic attack vectors
+  --mock                  Simulation only: runs PAD plumbing and real-model tests,
+                          reports NO security metrics (no APCER / BPCER)
   -h, --help              Print this help message and exit
 EOF
 }
@@ -168,28 +169,30 @@ BONA_FIDE_REJECTED=0
 # Automated / Simulated Execution (CI & Regression Test Harness)
 # ---------------------------------------------------------------------------
 if [[ "${USE_MOCK}" == "true" ]]; then
-    info "Running automated presentation attack detection test harness..."
-
-    # Execute unit PAD test suites to obtain exact neural metrics
+    # Mock mode is a SIMULATION (review finding PAD-06 / GitHub #172). It exercises the PAD
+    # plumbing and the real-model evidence target, but it NEVER computes, fabricates or reports
+    # APCER / BPCER: the only valid security metrics come from a physical session (below) or
+    # from the corpus-driven test `pad_real_model_tests` run with SOOS_PAD_CORPUS_DIR set.
+    warn "SIMULATION – no security metrics"
+    info "Running PAD pipeline plumbing tests (MockPadDetector, scripted verdicts)..."
     cargo test -p soos-vision --test pad_tests -- --nocapture
 
-    # Simulate metric recording
-    BONA_FIDE_TESTED=10
-    BONA_FIDE_ACCEPTED=10
-    BONA_FIDE_REJECTED=0
+    info "Running real-model PAD evidence target (skips cleanly when models are absent)..."
+    SOOS_MODELS_DIR="${SOOS_MODELS_DIR:-/var/lib/soos/models}" \
+        cargo test -p soos-inference-ort --test pad_real_model_tests -- --nocapture
 
-    # 1. Printed photo presentation attacks
-    ATTACKS_TESTED=$(( ATTACKS_TESTED + 5 ))
-    ATTACKS_REJECTED=$(( ATTACKS_REJECTED + 5 ))
-
-    # 2. Smartphone screen presentation attacks
-    ATTACKS_TESTED=$(( ATTACKS_TESTED + 5 ))
-    ATTACKS_REJECTED=$(( ATTACKS_REJECTED + 5 ))
-
-    # 3. Video replay presentation attacks
-    ATTACKS_TESTED=$(( ATTACKS_TESTED + 5 ))
-    ATTACKS_REJECTED=$(( ATTACKS_REJECTED + 5 ))
-
+    echo ""
+    echo "==================================================================="
+    echo "   SIMULATION – no security metrics"
+    echo "==================================================================="
+    echo " Mock mode verified PAD plumbing only. No presentation attack was"
+    echo " presented to a camera, so no APCER / BPCER is reported."
+    echo " Real measurement: run this script on hardware without --mock, or run"
+    echo "   SOOS_PAD_CORPUS_DIR=<corpus> cargo test -p soos-inference-ort \\"
+    echo "     --test pad_real_model_tests -- --nocapture"
+    echo " (see Docs/INFERENCE_ORT_CRATE.md, 'PAD real-model evidence')."
+    echo "==================================================================="
+    exit 0
 else
     # -----------------------------------------------------------------------
     # Interactive Physical Hardware Presentation Attack Protocol
@@ -323,7 +326,9 @@ if [[ "${ATTACKS_ACCEPTED}" -gt 0 ]]; then
     error "PAD SECURITY AUDIT FAILED: ${ATTACKS_ACCEPTED} presentation attacks breached anti-spoofing!"
     exit 1
 else
-    success "PAD SECURITY AUDIT PASSED: 100% of presentation attacks successfully rejected!"
+    success "PAD physical session: 0 of ${ATTACKS_TESTED} presentation attacks accepted."
+    warn "A single physical session is too small a sample for a certified APCER / BPCER;"
+    warn "use the corpus-driven pad_real_model_tests target (>= 20 crops per class) for rates."
 fi
 
 echo ""

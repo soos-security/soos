@@ -1673,6 +1673,55 @@ mod tests {
         }
     }
 
+    /// Invariant: `adversarial_test.sh --mock` is a simulation and never fabricates PAD metrics
+    /// (review finding PAD-06 / GitHub #172). The mock branch must not assign attack or bona fide
+    /// counters, must announce itself as a simulation and must exit before the APCER / BPCER
+    /// report; no mode may claim a "100%" rejection rate.
+    #[test]
+    fn test_adversarial_mock_mode_never_fabricates_pad_metrics() {
+        let script = workspace_root().join("tests/physical/adversarial_test.sh");
+        let content = fs::read_to_string(&script).expect("read adversarial_test.sh");
+
+        assert!(
+            content.contains("SIMULATION \u{2013} no security metrics"),
+            "adversarial_test.sh --mock must print 'SIMULATION \u{2013} no security metrics'"
+        );
+        assert!(
+            !content.contains("100% of presentation attacks"),
+            "adversarial_test.sh must never claim a 100% presentation attack rejection rate"
+        );
+        assert!(
+            content.contains("pad_real_model_tests"),
+            "adversarial_test.sh --mock must point at the real-model PAD evidence target"
+        );
+
+        let start = content
+            .find("if [[ \"${USE_MOCK}\" == \"true\" ]]; then")
+            .expect("adversarial_test.sh must have an explicit mock branch");
+        let rest = &content[start..];
+        let end = rest
+            .find("\nelse\n")
+            .expect("mock branch must be followed by the physical branch");
+        let mock_branch = &rest[..end];
+        for counter in [
+            "ATTACKS_TESTED=",
+            "ATTACKS_REJECTED=",
+            "ATTACKS_ACCEPTED=",
+            "BONA_FIDE_TESTED=",
+            "BONA_FIDE_ACCEPTED=",
+            "BONA_FIDE_REJECTED=",
+        ] {
+            assert!(
+                !mock_branch.contains(counter),
+                "adversarial_test.sh mock branch must not fabricate counter '{counter}'"
+            );
+        }
+        assert!(
+            mock_branch.contains("exit 0"),
+            "adversarial_test.sh mock branch must exit before the APCER / BPCER report"
+        );
+    }
+
     /// Invariant: Distribution-Specific Deployment Validation Suite (Issue #32 / GitHub #71)
     #[test]
     fn test_distro_validation_suite_spec() {

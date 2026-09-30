@@ -181,8 +181,12 @@ fn test_pad_threshold_calibration() {
 }
 
 #[test]
-fn test_pad_far_frr_benchmark() {
-    // Evaluate across a population of 50 live presentations, 25 printed photos, and 25 screen replays.
+fn test_pad_pipeline_plumbing_routes_mock_verdicts_without_leaks() {
+    // Pipeline plumbing test, NOT a model benchmark (review finding PAD-06 / GitHub #172):
+    // the scripted `MockPadDetector` verdicts are routed through the vision pipeline 100 times
+    // (50 live, 25 printed photos, 25 screen replays) to prove that every live verdict yields an
+    // embedding and every spoof verdict is rejected. The resulting "FAR/FRR" only measures the
+    // plumbing; real-model evidence lives in `soos-inference-ort` `pad_real_model_tests`.
     let pad = Arc::new(MockPadDetector::new_live());
     let config = VisionPipelineConfig::default();
     let (pipeline, _, _) = create_test_pipeline(pad.clone(), config);
