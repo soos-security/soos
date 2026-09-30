@@ -1,9 +1,9 @@
 //! Production V4L2 MMAP camera manager implementation.
 
 use crate::capture::{
-    dqbuf_poll_timeout, granted_fps, requested_frame_interval, run_capture_loop,
-    validate_deep_grey_format, validate_negotiated_format, BufferMeta, CaptureSource, StreamExit,
-    StreamSettings, StreamTargets,
+    apply_frame_rate, dqbuf_poll_timeout, run_capture_loop, validate_deep_grey_format,
+    validate_negotiated_format, BufferMeta, CaptureSource, StreamExit, StreamSettings,
+    StreamTargets,
 };
 use crate::config::CameraConfig;
 use crate::deep_grey::{delivered_formats, select_wire_format, DeepGreyFormat};
@@ -632,33 +632,17 @@ fn open_and_stream(
 
     // Request the configured frame rate (VIDIOC_S_PARM, GitHub #193). Drivers without
     // frame-interval control keep their default rate: best-effort, logged, never fatal.
-    let (numerator, denominator) = requested_frame_interval(config.fps);
-    let granted = match Capture::set_params(
-        &device,
-        &v4l::video::capture::Parameters::new(v4l::fraction::Fraction::new(numerator, denominator)),
-    ) {
-        Ok(params) => {
-            let granted = granted_fps(params.interval.numerator, params.interval.denominator);
-            info!(
-                "Camera '{}' frame rate: requested {} fps, driver granted {}/{} s ({:?} fps)",
-                config.device_path.display(),
+    let granted = apply_frame_rate(&config.device_path, config.fps, |numerator, denominator| {
+        Capture::set_params(
+            &device,
+            &v4l::video::capture::Parameters::new(v4l::fraction::Fraction::new(
+                numerator,
                 denominator,
-                params.interval.numerator,
-                params.interval.denominator,
-                granted
-            );
-            granted
-        }
-        Err(e) => {
-            warn!(
-                "Camera '{}' did not accept a {} fps frame interval ({}); streaming at the driver default",
-                config.device_path.display(),
-                denominator,
-                e
-            );
-            None
-        }
-    };
+            )),
+        )
+        .map(|params| (params.interval.numerator, params.interval.denominator))
+    })
+    .granted_fps();
 
     let mut stream =
         v4l::io::mmap::Stream::with_buffers(&device, v4l::buffer::Type::VideoCapture, 4).map_err(

@@ -31,6 +31,9 @@ Pure, hermetically testable functions:
   returned payload always equals `PixelFormat::expected_buffer_size`. Nothing is copied for a
   rejected buffer.
 - `requested_frame_interval(fps)`, `granted_fps(num, den)`: `VIDIOC_S_PARM` request and logging.
+- `apply_frame_rate(path, fps, set_interval) -> FrameRateOutcome` (rework): the only path
+  `open_and_stream` uses for `VIDIOC_S_PARM`; the ioctl is a closure, so accepted, adjusted and
+  refused requests are tested hermetically and a refusal cannot become fatal.
 - `CameraConfig::publish_fps(idle_elapsed)` and `publish_due(...)`: the `idle_fps` publication
   throttle, now shared by the mock (refactored to call it) and the V4L2 loop.
 - `dqbuf_poll_timeout(fps)` (3 frame intervals, clamped 150-250 ms) and
@@ -79,10 +82,24 @@ error-flagged frame, or blocks longer than one poll after a stop request.
 
 - `cargo test --locked -p soos-camera-v4l --all-features --all-targets`: all suites pass,
   including 25 `capture_validation_tests` and 11 `capture::tests` unit tests.
-- Hardware (opt-in): `SOOS_HARDWARE_CAMERA=/dev/video0 cargo test -p soos-camera-v4l
-  --all-features --test capture_validation_tests test_v4l_streaming_drop` passed on an
-  "Integrated Camera" (uvcvideo): the production manager became ready through the new
-  validation, `VIDIOC_S_PARM` and bounded-poll path, and `Drop` completed within 500 ms.
+- Manual hardware evidence (not CI, not reproducible from the repository): the `#[ignore]`d
+  `test_v4l_streaming_drop_completes_within_budget_on_hardware` (gate `SOOS_HW_TESTS=1`, as in
+  `hardware_smoke_tests.rs`; `SOOS_HW_TESTS=1 cargo test -p soos-camera-v4l --all-features --test
+  capture_validation_tests test_v4l_streaming_drop -- --ignored`) passed on an "Integrated
+  Camera" (uvcvideo) on 2026-09-30; it asserts `Drop` latency only and is not evidence for
+  `VIDIOC_S_PARM`.
+
+### Rework after candid review
+
+- CFP4 evidence: `VIDIOC_S_PARM` moved behind `capture::apply_frame_rate`; new hermetic tests
+  `capture_validation_tests::test_apply_frame_rate_accepted_request`,
+  `test_apply_frame_rate_adjusted_request`, `test_apply_frame_rate_unusable_granted_interval`,
+  `test_apply_frame_rate_refusal_is_non_fatal` and `test_apply_frame_rate_zero_fps_requests_default`
+  (red: unresolved import before the seam existed).
+- The hardware drop test is `#[ignore]`d and gated on `SOOS_HW_TESTS=1` (ADR "Hermetic V4L2
+  Enumeration" (3)) instead of silently passing in CI.
+- `EINTR` from `next_buffer` now resyncs like a timeout instead of reopening the device
+  (`capture::test_dequeue_interrupted_resyncs_instead_of_reopening`, red: `BufferDequeue`).
 
 ## 5. Security and Robustness Audit
 

@@ -81,8 +81,10 @@ Configures:
 - `auto_format`: Automatic priority-based format negotiation (default: true)
 - `sensor_preference`: Dual-sensor device preference (`SensorPreference::PreferRgb`, `PreferIr`, `Any`) (default: `PreferIr`)
 - `fps`: Full streaming frame rate (default: 30), requested from the driver with `VIDIOC_S_PARM`
-  (GitHub #193); the granted interval is logged and a driver without frame-interval control keeps
-  its default rate (warning, never fatal)
+  (GitHub #193) through `capture::apply_frame_rate`, which takes the ioctl as a closure; the
+  granted interval is logged, the poll timeout follows the granted rate, and a driver without
+  frame-interval control keeps its default rate (`FrameRateOutcome::Refused`, a warning, never
+  fatal)
 - `idle_fps`: Publication rate once more than half of `idle_timeout` has elapsed (default: 5).
   It throttles frame publication only (`CameraConfig::publish_fps`, identical in the mock and the
   V4L2 manager); the hardware keeps streaming at `fps` until auto-standby
@@ -137,9 +139,10 @@ by-id aliases (dangling aliases skipped); tests inject a hermetic `CameraEnumera
   granted rate. The capture thread polls the device with it and re-checks its shutdown flag after
   every poll, so `Drop` waits for at most one poll (< `C9_SHUTDOWN_BUDGET`, 500 ms). Consecutive
   timeouts covering `MAX_STREAM_STALL` (2 s, the previous single-poll tolerance) report
-  `CameraError::Starved`. After a timeout inside `v4l`'s `next()` (whose re-queued buffer is still
-  owned by the driver) the loop dequeues and discards one buffer before calling `next()` again, so
-  no buffer is queued twice.
+  `CameraError::Starved`. After a timeout or a signal interruption (`EINTR`) inside `v4l`'s
+  `next()` (whose re-queued buffer is still owned by the driver) the loop dequeues and discards one
+  buffer before calling `next()` again, so no buffer is queued twice and the device is not
+  reopened.
 - **Deep-greyscale buffers (GitHub #195).** A driver-returned `Y8I`/`Y10`/`Y12`/`Y16` format is
   validated by `validate_deep_grey_format` (2 bytes per pixel, wire stride kept) and every buffer by
   `validate_deep_grey_buffer`, which applies the same error-flag, `bytesused` and short-buffer
@@ -204,8 +207,14 @@ fourccs were dropped from enumeration. Classification now uses an ordered scorer
 `CameraEnumerator::frame_sizes`, a provided trait method that returns no sizes by default;
 `SystemCameraEnumerator` enumerates `VIDIOC_ENUM_FRAMESIZES`, bounded by `MAX_FRAME_SIZE_HINTS`
 = 64, stepwise ranges contribute their maximum only) and selects with
-`select_camera_device_with`. The capture supervisor computes the same hints for the opened node
-(`plan_capture_with_hints`), so a node selected as IR is also stamped `SensorType::Infrared`.
+`select_camera_device_with`. The capture supervisor classifies the opened node with
+`plan_capture_with_hints`, but its hints are narrower than the resolver's: the by-id name is
+taken only when the configured `device_path` is itself a `/dev/v4l/by-id/` link (always the case
+for an auto-resolved node that udev aliased), and the frame sizes are enumerated from the opened
+node. When the configured path is a `/dev/videoN` node, no by-id alias is looked up, so the
+classification rests on the card name, the formats and the frame sizes only; an IR node that
+streams a colour format under an ordinary card name can then be stamped `SensorType::Rgb`. Use the
+by-id path (or leave `camera_device` unset) for such modules.
 
 Deep-greyscale fourccs (`deep_grey.rs`): `Y8I` (interleaved stereo, left sensor kept), `Y10`,
 `Y12` and `Y16` (little-endian 16-bit containers) are mapped by `delivered_formats` to

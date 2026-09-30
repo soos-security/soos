@@ -18,13 +18,19 @@
 )]
 
 use soos_camera_v4l::capture::{
-    dqbuf_poll_timeout, granted_fps, max_consecutive_poll_timeouts, publish_due,
+    apply_frame_rate, dqbuf_poll_timeout, granted_fps, max_consecutive_poll_timeouts, publish_due,
     requested_frame_interval, validate_captured_buffer, validate_negotiated_format, BufferMeta,
-    FormatValidationError, FrameRejection, NegotiatedFormat, C9_SHUTDOWN_BUDGET,
+    FormatValidationError, FrameRateOutcome, FrameRejection, NegotiatedFormat, C9_SHUTDOWN_BUDGET,
     MAX_CONSECUTIVE_REJECTED_FRAMES, MAX_DQBUF_POLL_TIMEOUT, MAX_STREAM_STALL,
     MIN_DQBUF_POLL_TIMEOUT,
 };
-use soos_camera_v4l::{CameraConfigBuilder, CameraManager, PixelFormat, V4lCameraManager};
+use soos_camera_v4l::{
+    resolve_camera_device, CameraConfigBuilder, CameraManager, CameraResolutionSource, PixelFormat,
+    SensorPreference, SystemCameraEnumerator, V4lCameraManager,
+};
+use std::cell::Cell;
+use std::io;
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 mod common;
@@ -381,6 +387,97 @@ fn test_granted_fps_from_driver_interval() {
     assert_eq!(granted_fps(1, 0), None);
 }
 
+// ---------------------------------------------------------------------------------------------
+// VIDIOC_S_PARM seam (GitHub #193): `apply_frame_rate` is the only code path open_and_stream uses
+// to request the frame rate; the ioctl is injected as a closure.
+// ---------------------------------------------------------------------------------------------
+
+const SPARM_PATH: &str = "/dev/video-sparm";
+
+#[test]
+fn test_apply_frame_rate_accepted_request() {
+    let seen = Cell::new(None);
+    let outcome = apply_frame_rate(Path::new(SPARM_PATH), 30, |num, den| {
+        seen.set(Some((num, den)));
+        Ok((num, den))
+    });
+    assert_eq!(
+        seen.get(),
+        Some((1, 30)),
+        "the ioctl must receive a 1/fps interval"
+    );
+    assert_eq!(
+        outcome,
+        FrameRateOutcome::Granted {
+            requested_fps: 30,
+            numerator: 1,
+            denominator: 30,
+        }
+    );
+    assert_eq!(outcome.granted_fps(), Some(30));
+}
+
+#[test]
+fn test_apply_frame_rate_adjusted_request() {
+    // The driver rounds a 60 fps request to its closest supported 1/15 s interval.
+    let seen = Cell::new(None);
+    let outcome = apply_frame_rate(Path::new(SPARM_PATH), 60, |num, den| {
+        seen.set(Some((num, den)));
+        Ok((1, 15))
+    });
+    assert_eq!(seen.get(), Some((1, 60)));
+    assert_eq!(
+        outcome,
+        FrameRateOutcome::Granted {
+            requested_fps: 60,
+            numerator: 1,
+            denominator: 15,
+        }
+    );
+    assert_eq!(
+        outcome.granted_fps(),
+        Some(15),
+        "the granted rate, not the requested one, drives the DQBUF poll"
+    );
+}
+
+#[test]
+fn test_apply_frame_rate_unusable_granted_interval() {
+    // A driver answering with a 0/0 interval keeps the configured rate for the poll timeout.
+    let outcome = apply_frame_rate(Path::new(SPARM_PATH), 30, |_, _| Ok((0, 0)));
+    assert!(matches!(outcome, FrameRateOutcome::Granted { .. }));
+    assert_eq!(outcome.granted_fps(), None);
+}
+
+#[test]
+fn test_apply_frame_rate_refusal_is_non_fatal() {
+    // A driver without frame-interval control refuses VIDIOC_S_PARM: the refusal is reported as
+    // an outcome (a warning is logged), never as an error that would abort stream setup.
+    let calls = Cell::new(0u32);
+    let outcome = apply_frame_rate(Path::new(SPARM_PATH), 30, |_, _| {
+        calls.set(calls.get() + 1);
+        Err(io::Error::from_raw_os_error(25)) // ENOTTY
+    });
+    assert_eq!(calls.get(), 1, "the ioctl is attempted exactly once");
+    assert_eq!(outcome, FrameRateOutcome::Refused { requested_fps: 30 });
+    assert_eq!(outcome.granted_fps(), None);
+}
+
+#[test]
+fn test_apply_frame_rate_zero_fps_requests_default() {
+    let seen = Cell::new(None);
+    let outcome = apply_frame_rate(Path::new(SPARM_PATH), 0, |num, den| {
+        seen.set(Some((num, den)));
+        Err(io::Error::from_raw_os_error(16)) // EBUSY
+    });
+    assert_eq!(
+        seen.get(),
+        Some((1, 30)),
+        "a zero rate never requests a 1/0 interval"
+    );
+    assert_eq!(outcome, FrameRateOutcome::Refused { requested_fps: 30 });
+}
+
 #[test]
 fn test_publish_fps_idle_throttle_parity() {
     let config = CameraConfigBuilder::new()
@@ -419,15 +516,31 @@ fn test_publish_due_throttles_only_below_full_rate() {
 // Hardware evidence (opt-in): production Drop latency while streaming a real camera.
 // ---------------------------------------------------------------------------------------------
 
-/// Runs only with `SOOS_HARDWARE_CAMERA=/dev/videoN` (never in CI): measures the production
-/// `V4lCameraManager` Drop latency while it streams a real device (Criterion C9, GitHub #194).
+/// Environment switch enabling hardware tests (same gate as `hardware_smoke_tests.rs`, ADR
+/// "Hermetic V4L2 Enumeration" (3)).
+const HW_TESTS_ENV: &str = "SOOS_HW_TESTS";
+
+/// Measures the production `V4lCameraManager` Drop latency while it streams the auto-resolved
+/// camera (Criterion C9, GitHub #194). Never runs in CI: `#[ignore]`d and gated by
+/// `SOOS_HW_TESTS=1`. Manual evidence only; it does not verify `VIDIOC_S_PARM`.
 #[test]
+#[ignore = "requires a V4L2 camera; run with SOOS_HW_TESTS=1 and --ignored"]
 fn test_v4l_streaming_drop_completes_within_budget_on_hardware() {
-    let Some(device) = std::env::var_os("SOOS_HARDWARE_CAMERA") else {
+    if !std::env::var(HW_TESTS_ENV).is_ok_and(|v| v == "1") {
         return;
-    };
+    }
+    let resolution = resolve_camera_device(
+        None,
+        SensorPreference::default(),
+        &SystemCameraEnumerator::default(),
+    );
+    assert_eq!(
+        resolution.source,
+        CameraResolutionSource::AutoDetected,
+        "auto-detection found no capture node"
+    );
     let config = CameraConfigBuilder::new()
-        .device_path(device)
+        .device_path(&resolution.path)
         .warmup_frames(2)
         .idle_timeout(Duration::ZERO)
         .build();

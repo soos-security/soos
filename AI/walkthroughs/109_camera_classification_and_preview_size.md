@@ -116,3 +116,16 @@ New files: `crates/camera-v4l/tests/sensor_hint_classification_tests.rs` (17 tes
 - `bus_info`, `driver` and `device_caps` were not added: both nodes of one USB camera share them,
   so they do not separate RGB from IR; revisit if a vendor-specific signal is found.
 - Packed deep-greyscale variants (`Y10P`, `Y10B`, `Y12P`) are not mapped.
+- Candid review finding 3 (open): udev builds `/dev/v4l/by-id/` names from the USB device
+  product string, so every interface of a composite RGB+IR module shares the by-id stem. If that
+  product string carries an `IR` token, both nodes are classified Infrared and `PreferIr` may pick
+  the RGB node (fail-closed: stricter IR PAD policy, but the wrong camera). Planned fix: when
+  several capture nodes share a by-id stem apart from `-index<N>`, do not treat the by-id token as
+  decisive and fall through to the next rule, with a fixture row for this case.
+- Candid review finding 6 (open): the IR frame-size signature (every size at most 640x400) is
+  checked before the colour-format rule, so a low-resolution RGB webcam without VGA is classified
+  IR (fail-closed). Log at `info` when this rule alone decides the classification, and validate
+  the signature on real hardware.
+- Capture-side hints (candid review finding 4, documented, not changed): the capture supervisor
+  looks up no by-id alias for an explicit `/dev/videoN` `device_path`; see
+  `Docs/CAMERA_V4L_CRATE.md`.

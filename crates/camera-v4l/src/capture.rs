@@ -7,7 +7,8 @@
 //!   `V4L2_BUF_FLAG_ERROR` buffers, bounds `bytesused`, rejects short uncompressed buffers and
 //!   de-strides padded rows, so every published [`Frame`] matches
 //!   [`PixelFormat::expected_buffer_size`] exactly.
-//! - **Frame rate** (#193): [`requested_frame_interval`] is sent with `VIDIOC_S_PARM`;
+//! - **Frame rate** (#193): [`apply_frame_rate`] sends [`requested_frame_interval`] with
+//!   `VIDIOC_S_PARM` (a refusal is a non-fatal warning);
 //!   `idle_fps` is a publication throttle shared with the mock ([`publish_due`],
 //!   [`CameraConfig::publish_fps`]).
 //! - **Bounded DQBUF wait** (#194): [`dqbuf_poll_timeout`] is clamped to 150-250 ms so that the
@@ -26,7 +27,7 @@ use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 use thiserror::Error;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 /// Lower bound of the DQBUF poll timeout.
 pub const MIN_DQBUF_POLL_TIMEOUT: Duration = Duration::from_millis(150);
@@ -82,6 +83,83 @@ pub fn requested_frame_interval(fps: u32) -> (u32, u32) {
 /// or `None` when the driver reported no usable interval.
 pub fn granted_fps(numerator: u32, denominator: u32) -> Option<u32> {
     denominator.checked_div(numerator).filter(|fps| *fps > 0)
+}
+
+/// Result of the best-effort `VIDIOC_S_PARM` frame-rate request made by [`apply_frame_rate`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FrameRateOutcome {
+    /// The driver accepted the request and reported the interval it actually applied, which may
+    /// differ from the requested one (drivers round to their closest supported interval).
+    Granted {
+        /// Frame rate that was requested (after the zero-rate fallback).
+        requested_fps: u32,
+        /// Granted frame-interval numerator in seconds.
+        numerator: u32,
+        /// Granted frame-interval denominator in seconds.
+        denominator: u32,
+    },
+    /// The driver refused the request; streaming continues at the driver default rate.
+    Refused {
+        /// Frame rate that was requested (after the zero-rate fallback).
+        requested_fps: u32,
+    },
+}
+
+impl FrameRateOutcome {
+    /// Integer frame rate granted by the driver, or `None` when it was refused or the granted
+    /// interval is unusable (the caller then keeps the configured rate).
+    pub fn granted_fps(&self) -> Option<u32> {
+        match *self {
+            Self::Granted {
+                numerator,
+                denominator,
+                ..
+            } => granted_fps(numerator, denominator),
+            Self::Refused { .. } => None,
+        }
+    }
+}
+
+/// Requests the configured frame rate through `set_interval` (the `VIDIOC_S_PARM` ioctl in
+/// production, a closure in tests) and logs the outcome (GitHub #193).
+///
+/// `set_interval(numerator, denominator)` receives the [`requested_frame_interval`] and returns
+/// the interval the driver granted. A refusal is logged as a warning and never propagated: a
+/// driver without frame-interval control simply streams at its default rate.
+pub fn apply_frame_rate<F>(device_path: &Path, fps: u32, set_interval: F) -> FrameRateOutcome
+where
+    F: FnOnce(u32, u32) -> io::Result<(u32, u32)>,
+{
+    let (numerator, denominator) = requested_frame_interval(fps);
+    match set_interval(numerator, denominator) {
+        Ok((granted_num, granted_den)) => {
+            let outcome = FrameRateOutcome::Granted {
+                requested_fps: denominator,
+                numerator: granted_num,
+                denominator: granted_den,
+            };
+            info!(
+                "Camera '{}' frame rate: requested {} fps, driver granted {}/{} s ({:?} fps)",
+                device_path.display(),
+                denominator,
+                granted_num,
+                granted_den,
+                outcome.granted_fps()
+            );
+            outcome
+        }
+        Err(e) => {
+            warn!(
+                "Camera '{}' did not accept a {} fps frame interval ({}); streaming at the driver default",
+                device_path.display(),
+                denominator,
+                e
+            );
+            FrameRateOutcome::Refused {
+                requested_fps: denominator,
+            }
+        }
+    }
 }
 
 /// Returns whether a frame should be published given the time since the last published frame.
@@ -582,7 +660,14 @@ pub(crate) fn run_capture_loop<S: CaptureSource + ?Sized>(
         started = true;
         let (buf, meta) = match next {
             Ok(val) => val,
-            Err(e) if e.kind() == io::ErrorKind::TimedOut => {
+            // `next()` may already have re-queued the last buffer before its poll timed out or
+            // was interrupted by a signal: resync (dequeue one buffer) instead of reopening.
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    io::ErrorKind::TimedOut | io::ErrorKind::Interrupted
+                ) =>
+            {
                 resync_pending = true;
                 if let Some(exit) = on_timeout(&mut stalls) {
                     return exit;
@@ -704,6 +789,8 @@ mod tests {
         Frame(Vec<u8>, BufferMeta),
         /// `next_buffer` (or `resync`) times out inside the driver poll.
         DequeueTimeout,
+        /// `next_buffer` is interrupted by a signal (`EINTR`) inside the driver poll.
+        DequeueInterrupted,
         /// `wait_ready` times out.
         PollTimeout,
         /// `resync` succeeds.
@@ -768,6 +855,9 @@ mod tests {
                 }
                 Some(Step::DequeueTimeout) => {
                     Err(io::Error::new(io::ErrorKind::TimedOut, "VIDIOC_DQBUF"))
+                }
+                Some(Step::DequeueInterrupted) => {
+                    Err(io::Error::new(io::ErrorKind::Interrupted, "VIDIOC_DQBUF"))
                 }
                 _ => {
                     self.stop();
@@ -1034,6 +1124,35 @@ mod tests {
             "after a dequeue timeout next_buffer must not be called before a resync"
         );
         assert_eq!(h.latest.load_full().unwrap().data, vec![5; 16]);
+    }
+
+    #[test]
+    fn test_dequeue_interrupted_resyncs_instead_of_reopening() {
+        let h = Harness::new();
+        let steps = vec![
+            // A signal interrupts the poll inside `next()` after it re-queued the last buffer.
+            Step::DequeueInterrupted,
+            // The pending buffer is dequeued (and discarded) without a second QBUF.
+            Step::Resynced,
+            good(7),
+        ];
+        let (result, source) = h.run(steps, yuyv_4x2());
+        assert_eq!(
+            result.unwrap(),
+            StreamExit::Shutdown,
+            "EINTR must not end the stream (no device reopen)"
+        );
+        assert_eq!(
+            source.calls[..4],
+            [
+                Call::Next,
+                Call::Resync,
+                Call::Wait(MAX_DQBUF_POLL_TIMEOUT),
+                Call::Next,
+            ],
+            "after an interrupted dequeue next_buffer must not be called before a resync"
+        );
+        assert_eq!(h.latest.load_full().unwrap().data, vec![7; 16]);
     }
 
     #[test]
