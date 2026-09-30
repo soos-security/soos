@@ -170,4 +170,7 @@ pad_threshold = 0.85
    not change `is_healthy`.
 3. The pipeline (models, camera supervisor, stores) is initialized fail-closed; any error stops the
    daemon before the socket exists.
-4. The socket is bound (§1.2) and the accept loop starts.
+4. The socket is bound (§1.2). When started by systemd (`Type=notify`, `NOTIFY_SOCKET` set) the daemon
+   then sends `READY=1` through `soos_daemon::sd_notify`; only then does systemd start units ordered
+   after it (`display-manager.service`). A notification failure is logged at `warn`. The accept loop
+   starts, and `STOPPING=1` is sent on SIGTERM / SIGINT (GitHub #203).

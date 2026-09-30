@@ -279,7 +279,7 @@ The daemon runs as `root:soos` but inside a bounded sandbox:
 | `ProtectKernelTunables/Modules/Logs=yes`, `ProtectControlGroups=yes`, `ProtectClock=yes`, `ProtectHostname=yes`, `RestrictNamespaces=yes`, `RestrictRealtime=yes` | No kernel, cgroup, clock, namespace or realtime access is needed |
 | `PrivateNetwork=yes`, `IPAddressDeny=any`, `RestrictAddressFamilies=AF_UNIX` | No network at all; the filesystem socket `/run/soos/daemon.sock` works inside a private network namespace |
 | `DevicePolicy=closed`, `DeviceAllow=char-video4linux rw` | systemd does not expand globs in `DeviceAllow=` node paths, so `/dev/video*` alone matches nothing; the device group allows every V4L2 node |
-| `Before=display-manager.service` | The daemon starts before the greeter shows its first prompt |
+| `Before=display-manager.service`, `Type=notify`, `NotifyAccess=main`, `TimeoutStartSec=60` | The daemon sends `READY=1` (`soos_daemon::sd_notify`) only after `/run/soos/daemon.sock` is bound, so the greeter waits until PAM requests can be served; a start that never reports readiness fails after 60 s (GitHub #203) |
 
 Deliberately **not** set: `ProtectProc=invisible` / `ProcSubset=pid` (they would hide
 `/proc/<pid>/cgroup` of other users' peers, which the session policy reads), `PrivateDevices=yes`

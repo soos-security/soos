@@ -13,6 +13,7 @@ use soos_daemon::dispatcher::ConnectionDispatcher;
 use soos_daemon::health::HealthState;
 use soos_daemon::logging::init_logging;
 use soos_daemon::pipeline::{initialize_pipeline, warmed_inference_gate, EMBEDDING_MODEL_ID};
+use soos_daemon::sd_notify::{self, NotifyOutcome};
 use soos_daemon::socket::bind_socket;
 
 /// Poll interval of the camera health transition logger.
@@ -130,6 +131,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "soos-daemon initialized and listening for PAM requests"
     );
 
+    // Type=notify (GitHub #203): report readiness only now that the socket is bound, so
+    // Before=display-manager.service holds the greeter until PAM requests can be served.
+    match sd_notify::notify_ready() {
+        Ok(NotifyOutcome::Sent) => info!("Reported readiness to systemd"),
+        Ok(NotifyOutcome::NotSupervised) => {}
+        Err(err) => warn!(error = %err, "Failed to report readiness to systemd"),
+    }
+
     loop {
         tokio::select! {
             accept_result = listener.accept() => {
@@ -158,6 +167,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    if let Err(err) = sd_notify::notify_stopping() {
+        warn!(error = %err, "Failed to report shutdown to systemd");
+    }
     health.set_socket_ready(false);
     drop(socket_guard);
     info!("soos-daemon terminated cleanly");

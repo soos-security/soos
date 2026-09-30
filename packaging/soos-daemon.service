@@ -17,7 +17,13 @@ StartLimitBurst=5
 ConditionPathExists=/var/lib/soos/models/manifest.toml
 
 [Service]
-Type=simple
+# Readiness (GitHub #203): the daemon sends READY=1 only after /run/soos/daemon.sock
+# is bound, so Before=display-manager.service really holds the greeter until PAM
+# requests can be served. Model verification and the inference warm-up run before
+# that point; the bounded start timeout fails the start instead of hanging.
+Type=notify
+NotifyAccess=main
+TimeoutStartSec=60
 User=root
 Group=soos
 ExecStart=/usr/libexec/soos/soos-daemon
