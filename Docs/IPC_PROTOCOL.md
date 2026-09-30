@@ -62,8 +62,15 @@ Returned by the daemon to the PAM module:
   - `Unavailable`: Hardware offline, model uninitialized, or deadline expired.
   - `ProtocolError`: Malformed message, mismatched UID, rate-limit reached.
 - `reason_class: ReasonClass`: Internal telemetry diagnostic (must not alter PAM fallback semantics). It is **never** shown to the user: the PAM module maps every `Deny` to one neutral text and every other failure to one generic text, so a PAD rejection is indistinguishable from a non-match at the lock screen (review PAM-03, GitHub #174; see `Docs/PAM_MODULE.md` §8).
-- `issued_monotonic_ns: u64`: Generation timestamp.
-- `expires_monotonic_ns: u64`: Short expiration timestamp preventing replay.
+- `issued_monotonic_ns: u64`: Generation timestamp (CLOCK_MONOTONIC, informational).
+- `expires_monotonic_ns: u64`: Daemon-side expiry hint (`issued + 2 s`); informational only and not validated by the PAM client. Replay protection is described in "Response Freshness" below.
+
+#### Response Freshness (GitHub #219)
+The PAM client rejects stale or replayed responses through two mechanisms, not through the timestamps:
+1. **Single-use request binding**: every exchange opens a new connection and sends a fresh 256-bit `request_id` from `getrandom`; a response is accepted only when its `request_id` matches bit-for-bit (`IpcError::RequestIdMismatch` otherwise). A response captured from an earlier exchange can never match a later one (`crates/pam/tests/deadline_uid_tests.rs::test_replayed_allow_response_is_rejected_by_request_id_binding`).
+2. **Client deadline**: a verdict whose last byte arrives after the client's cumulative deadline is discarded (`IpcError::Timeout`).
+
+`issued_monotonic_ns` / `expires_monotonic_ns` are kept in the v1 wire format for diagnostics. Enforcing them on the client is a recorded option (ADR 2026-09-30 "Response Timestamps Are Informational"): it would require every test fixture and the Docker mock daemon to emit real CLOCK_MONOTONIC values first.
 
 ### `Event`
 Best-effort telemetry notification sent by PAM following password failures:

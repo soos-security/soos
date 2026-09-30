@@ -35,6 +35,10 @@ mod pam_deadline_contract;
 #[cfg(all(test, unix))]
 mod sync_issue_contract;
 
+/// Response timestamps are not documented as replay protection (GitHub #219).
+#[cfg(test)]
+mod pam_response_freshness_contract;
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,

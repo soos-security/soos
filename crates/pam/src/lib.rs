@@ -7,7 +7,7 @@
 //! ## Core Security Principles
 //!
 //! 1. **Zero Async Runtime**: Strictly uses synchronous blocking primitives (`std::os::unix::net::UnixStream`).
-//! 2. **Strict Latency Budget**: Maximum 200–250ms total execution time (connect + request + response).
+//! 2. **Strict Latency Budget**: one explicit deadline derived from the clamped `timeout_ms`, started before UID resolution and covering connect + request + response.
 //! 3. **Panic Resilience**: `catch_unwind` wraps every entry point, logging caught panics to syslog and systematically returning `PAM_IGNORE`.
 //! 4. **Zero Secrets on Wire**: Never inspects, processes, or transmits passwords over IPC.
 //! 5. **Safe Fallback**: Any error or timeout degrades silently to `PAM_IGNORE` for password fallback.
@@ -17,6 +17,7 @@
 //! Linux-PAM invokes `pam_sm_authenticate`:
 //! 1. Arguments are parsed into a bounded [`config::PamConfig`].
 //! 2. Target UID is determined via explicit PAM argument override, `pamh.get_user(None)` lookup, or `libc::getuid()` fallback.
+//!    A lookup that spends the whole authentication budget returns `PAM_IGNORE` without contacting the daemon (GitHub #223).
 //! 3. If configured with `event=password-failed`: sends telemetry to daemon within 20ms and returns `PAM_IGNORE`.
 //! 4. Otherwise: performs synchronous IPC authentication handshake with `soos-daemon`.
 //! 5. Renders `PAM_SUCCESS` exclusively upon receiving `Verdict::Allow`. All other outcomes return `PAM_IGNORE`.
@@ -115,9 +116,31 @@ impl SoosPam {
     /// alert with source location and backtrace summary, and systematically returns
     /// [`PamResultCode::PAM_IGNORE`].
     pub fn authenticate_with_config(
-        mut pamh: Option<&mut PamHandle>,
+        pamh: Option<&mut PamHandle>,
         config: &PamConfig,
     ) -> PamResultCode {
+        Self::authenticate_with_uid_resolver(pamh, config, default_uid_resolver)
+    }
+
+    /// [`Self::authenticate_with_config`] with an injectable username -> UID resolver.
+    ///
+    /// `resolve_uid` runs only when no `uid=` argument is configured. It stands for
+    /// `pam_get_user` + `getpwnam_r`, which can block in NSS (LDAP / SSSD / NIS) and cannot
+    /// be interrupted, so the module bounds what it controls (review PAM-11, GitHub #223):
+    /// - the authentication budget (`timeout_ms`) starts BEFORE resolution, so a slow lookup
+    ///   is charged to it; a lookup that spends the whole budget returns `PAM_IGNORE`
+    ///   without contacting the daemon;
+    /// - the `event=password-failed` path still delivers the event, bounded by
+    ///   `EVENT_TIMEOUT_MS` after resolution;
+    /// - either overrun is logged at `LOG_INFO` (duration only, never the username).
+    pub fn authenticate_with_uid_resolver<R>(
+        mut pamh: Option<&mut PamHandle>,
+        config: &PamConfig,
+        resolve_uid: R,
+    ) -> PamResultCode
+    where
+        R: FnOnce(Option<&mut PamHandle>) -> u32,
+    {
         syslog::init_panic_hook();
 
         let result = catch_unwind(AssertUnwindSafe(|| {
@@ -136,27 +159,43 @@ impl SoosPam {
                 return PamResultCode::PAM_IGNORE;
             }
 
-            let uid = config.uid.unwrap_or_else(|| {
-                if let Some(ref mut h) = pamh {
-                    if let Ok(username) = h.get_user(None) {
-                        if let Some(resolved_uid) = resolve_username_to_uid(&username) {
-                            return resolved_uid;
-                        }
-                    }
-                }
-                // SAFETY: getuid is a safe, non-allocating libc syscall returning caller process UID.
-                unsafe { libc::getuid() }
-            });
+            // The authentication budget starts before UID resolution (GitHub #223) and the
+            // deadline sent to the daemon is fixed here, before connect (GitHub #222).
+            let auth_deadline = ipc::ExchangeDeadline::start(config.timeout_ms);
+            let resolution_start = std::time::Instant::now();
+            let uid = match config.uid {
+                Some(uid) => uid,
+                None => resolve_uid(pamh.as_deref_mut()),
+            };
+            let resolution_elapsed = resolution_start.elapsed();
 
             if config.event == Some(PamEvent::PasswordFailed) {
+                if resolution_elapsed > std::time::Duration::from_millis(ipc::EVENT_TIMEOUT_MS) {
+                    syslog::log_info(&format!(
+                        "soos user lookup took {} ms, above the {} ms event budget; \
+                         configure uid= to avoid the NSS lookup",
+                        resolution_elapsed.as_millis(),
+                        ipc::EVENT_TIMEOUT_MS
+                    ));
+                }
                 // Best-effort telemetry notification bounded by 20ms ceiling
                 let _ = ipc::notify_event(config, uid, EventKind::PasswordFailed);
                 return PamResultCode::PAM_IGNORE;
             }
 
+            if auth_deadline.remaining().is_err() {
+                syslog::log_info(&format!(
+                    "soos user lookup took {} ms and spent the {} ms authentication budget; \
+                     falling back to the next module",
+                    resolution_elapsed.as_millis(),
+                    config.timeout_ms
+                ));
+                return PamResultCode::PAM_IGNORE;
+            }
+
             send_pam_info(&pamh, "[soos] Looking for face...");
 
-            let outcome = ipc::authenticate(config, uid);
+            let outcome = ipc::authenticate_before(config, uid, auth_deadline);
             send_pam_info(&pamh, feedback_message(&outcome));
 
             // PAM_SUCCESS exclusively on a daemon Allow; every other outcome falls back.
@@ -218,6 +257,20 @@ impl PamHooks for SoosPam {
     fn sm_setcred(_pamh: &mut PamHandle, _args: Vec<&CStr>, _flags: PamFlag) -> PamResultCode {
         PamResultCode::PAM_IGNORE
     }
+}
+
+/// Production username -> UID resolver: `pam_get_user` + `getpwnam_r`, falling back to the
+/// caller's real UID when the handle, the username or the passwd entry is unavailable.
+fn default_uid_resolver(pamh: Option<&mut PamHandle>) -> u32 {
+    if let Some(h) = pamh {
+        if let Ok(username) = h.get_user(None) {
+            if let Some(resolved_uid) = resolve_username_to_uid(&username) {
+                return resolved_uid;
+            }
+        }
+    }
+    // SAFETY: getuid is a safe, non-allocating libc syscall returning caller process UID.
+    unsafe { libc::getuid() }
 }
 
 /// Initial allocation buffer size for `getpwnam_r` lookups (1 KB).
