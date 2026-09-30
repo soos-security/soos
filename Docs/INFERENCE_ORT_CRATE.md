@@ -19,6 +19,7 @@ The crate encapsulates:
 1. **Daemon-Isolated Execution**: Only `soos-daemon` executes model inference. The PAM module (`pam_soos.so`) never links or loads ONNX Runtime.
 2. **Absolute Prohibition of OpenCV**: Computer vision routines (color conversion, normalization, NMS, tensor preparation) are implemented in pure, safe Rust without OpenCV.
 3. **Cryptographic Attestation (Global Security Invariant)**: Every model file is verified against its manifest SHA-256 hash prior to ONNX Runtime session creation. Tampered or corrupted model weights are rejected fail-closed.
+3a. **Hashed Bytes Are Loaded Bytes (GitHub #246, VIS-04)**: `ModelManifest::read_verified_model` opens a model file once, checks type and size on the opened handle, reads at most `MAX_MODEL_FILE_BYTES` (512 MiB) into memory and hashes exactly those bytes; `ModelRegistry::get_or_load_session` builds the session with `commit_from_memory` from them and never re-opens the path (`commit_from_file` is banned from the crate by the `vision_attestation_contract` invariant). `ModelRegistry::verify_integrity` retains the verified bytes of every manifest model until the next `get_or_load_session` for that id consumes them, so each model is hashed once at startup (previously twice); on any integrity failure nothing is retained. `pending_verified_models()` reports the retained count. Peak memory during startup is the sum of the attested model sizes (about 141 MB) plus ONNX Runtime's own copy of the model being built.
 3b. **Shape Attestation (GitHub #191)**: After the session is built, `ModelRegistry::get_or_load_session` validates its I/O tensor shapes with `ModelMetadata::validate_session_shapes`: exactly one input whose physical dims equal `expected_input_dims()` (the logical `[N, C, H, W]` `input_shape` permuted by `input_layout`, `NCHW` by default or `NHWC`), and, when `output_shapes` is declared, the same number of outputs matching in order. Negative (symbolic) session dims are wildcards; ranks and every other dim, including zero, must be equal. Any mismatch returns `InferenceError::ModelShapeMismatch { id, detail }` and the session is not cached. `ModelMetadata::input_layout_declared` records whether the entry declared `input_layout`. An entry without `input_layout` (a manifest installed by an earlier release) has its layout *unspecified*: the input may be the logical shape in NCHW or NHWC order, rank and every dim are still enforced, the SHA-256 already binds the exact file, and `ModelRegistry` logs a one-time warning that the manifest predates layout attestation. An explicit `input_layout` is always enforced and a wrong value fails closed.
 4. **Strict Panic Denial**: Zero `unwrap()` or `expect()` in production pathways; `#![deny(clippy::unwrap_used, clippy::expect_used)]` is strictly enforced.
 5. **Deterministic NMS**: Secondary coordinate sort tie-breaking eliminates floating point ambiguity, ensuring identical suppression decisions across platforms.
@@ -40,7 +41,12 @@ impl ModelManifest {
     pub fn compute_sha256<P: AsRef<Path>>(file_path: P) -> Result<String, std::io::Error>;
     pub fn verify_model_checksum<P: AsRef<Path>>(&self, id: &str, file_path: P) -> Result<(), InferenceError>;
     pub fn verify_directory<P: AsRef<Path>>(&self, dir: P) -> Result<(), InferenceError>;
+    pub fn sha256_hex(bytes: &[u8]) -> String;
+    pub fn read_verified_model<P: AsRef<Path>>(&self, id: &str, file_path: P) -> Result<Vec<u8>, InferenceError>;
+    pub fn read_verified_model_with_limit<P: AsRef<Path>>(&self, id: &str, file_path: P, max_bytes: u64) -> Result<Vec<u8>, InferenceError>;
 }
+
+pub const MAX_MODEL_FILE_BYTES: u64 = 512 * 1024 * 1024;
 
 pub struct ModelRegistry {
     // Config, manifest, and cached sessions
@@ -50,6 +56,7 @@ impl ModelRegistry {
     pub fn new(config: RegistryConfig) -> Result<Self, InferenceError>;
     pub fn verify_integrity(&self) -> Result<(), InferenceError>;
     pub fn get_or_load_session(&mut self, id: &str) -> Result<Arc<Mutex<Session>>, InferenceError>;
+    pub fn pending_verified_models(&self) -> usize;
 }
 
 pub enum TensorLayout { Nchw /* "NCHW", default */, Nhwc /* "NHWC" */ }
@@ -66,7 +73,7 @@ pub trait FaceDetector: Send + Sync {
     fn detect(&self, rgb: &[u8], width: u32, height: u32) -> Result<Vec<FaceDetection>, InferenceError>;
 }
 ```
-Implemented by `OrtScrfdDetector` (production: SCRFD 500M KPS with multi-stride output parsing, 5-point landmark integration, letterbox padding, and BGR normalization), `OrtFaceDetector` (legacy UltraFace Slim 320 — retained for reference), and `MockFaceDetector`.
+Implemented by `OrtScrfdDetector` (production: SCRFD 500M KPS with multi-stride output parsing, 5-point landmark integration, letterbox padding, and BGR normalization) and `MockFaceDetector`. `OrtFaceDetector` is no longer a detector: its UltraFace inference path was removed (GitHub #249); only the legacy `prepare_input` helper remains because the acceptance test `zeroize_tests::test_inference_input_buffers_zeroized` still calls it, pending that test being re-pointed to the SCRFD input path.
 
 `OrtScrfdDetector` incorporates:
 - BGR channel ordering and `(pixel - 127.5) / 128.0` normalization.
@@ -74,7 +81,8 @@ Implemented by `OrtScrfdDetector` (production: SCRFD 500M KPS with multi-stride 
 - 9-output multi-stride tensor decoding (strides 8, 16, 32) using distance-to-border box regression.
 - 5-point facial keypoints integration directly into `FaceDetection.landmarks`.
 - Coordinate un-projection mapping detections back to original camera resolution.
-- Startup validation verifying session output count (9) and shape patterns.
+- Startup validation in `OrtScrfdDetector::new` (`validate_output_dims`, GitHub #249): exactly 9 rank-3 outputs, batch dim 1 or symbolic, concrete channel dims with exactly 3 score (1), 3 bbox (4) and 3 keypoint (10) heads, and every concrete anchor dim one of 12800/3200/800 without duplicates. The attested graph reports `[-1, -1, k]`, so per-stride anchor counts are enforced on every frame by `detect` (missing tensor -> `TensorError`).
+- Explicit score activation (GitHub #247, VIS-05): `ScoreActivation::Probability` (default; the attested graph ends in `Sigmoid`) or `ScoreActivation::Logit`, chosen once with `with_score_activation`, never per element. `detect` decodes with `decode_stride_checked`, which rejects the frame with `TensorError` on any non-finite or out-of-range score. The historical `decode_stride` entry point infers one activation per tensor (`ScoreActivation::infer`), which keeps its mapping monotonic.
 
 ### `LandmarkDetector` Trait
 ```rust

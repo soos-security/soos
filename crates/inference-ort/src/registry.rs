@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use ort::session::Session;
 
@@ -55,6 +55,10 @@ pub struct ModelRegistry {
     config: RegistryConfig,
     manifest: ModelManifest,
     sessions: HashMap<String, Arc<Mutex<Session>>>,
+    /// Model bytes verified by [`Self::verify_integrity`] and not yet turned into a session.
+    /// Each entry is consumed (removed) by the next [`Self::get_or_load_session`] for that id,
+    /// so a model is hashed once and ORT loads exactly the hashed bytes (GitHub #246).
+    verified_bytes: Mutex<HashMap<String, Vec<u8>>>,
 }
 
 impl ModelRegistry {
@@ -65,6 +69,7 @@ impl ModelRegistry {
             config,
             manifest,
             sessions: HashMap::new(),
+            verified_bytes: Mutex::new(HashMap::new()),
         })
     }
 
@@ -74,6 +79,7 @@ impl ModelRegistry {
             config,
             manifest,
             sessions: HashMap::new(),
+            verified_bytes: Mutex::new(HashMap::new()),
         }
     }
 
@@ -88,8 +94,47 @@ impl ModelRegistry {
     }
 
     /// Verifies the SHA-256 integrity of all models registered in the manifest.
+    ///
+    /// Each model file is read once into memory (bounded by
+    /// [`crate::manifest::MAX_MODEL_FILE_BYTES`]) and hashed; the verified bytes are retained
+    /// until [`Self::get_or_load_session`] consumes them, so the session is built from exactly
+    /// the bytes attested here and the file is neither re-opened nor re-hashed. On any failure
+    /// every retained buffer is dropped and nothing is cached.
     pub fn verify_integrity(&self) -> Result<(), InferenceError> {
-        self.manifest.verify_directory(&self.config.models_dir)
+        let mut verified = HashMap::with_capacity(self.manifest.models.len());
+        let mut ids: Vec<&String> = self.manifest.models.keys().collect();
+        ids.sort();
+        for id in ids {
+            let path = self.model_path(id)?;
+            let bytes = self.manifest.read_verified_model(id, &path)?;
+            verified.insert(id.clone(), bytes);
+        }
+        *self.lock_verified_bytes() = verified;
+        Ok(())
+    }
+
+    /// Number of models whose verified bytes are retained, awaiting a session load.
+    pub fn pending_verified_models(&self) -> usize {
+        self.lock_verified_bytes().len()
+    }
+
+    /// The retained-bytes map is plain data: a poisoned lock still holds a consistent map.
+    fn lock_verified_bytes(&self) -> MutexGuard<'_, HashMap<String, Vec<u8>>> {
+        self.verified_bytes
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Joins the manifest filename of `id` to the models directory (no filesystem access).
+    fn model_path(&self, id: &str) -> Result<PathBuf, InferenceError> {
+        let meta = self
+            .manifest
+            .get_model(id)
+            .ok_or_else(|| InferenceError::ModelNotFound {
+                id: id.to_string(),
+                path: self.config.models_dir.clone(),
+            })?;
+        Ok(self.config.models_dir.join(&meta.filename))
     }
 
     /// Resolves the absolute path for a registered model ID.
@@ -113,18 +158,27 @@ impl ModelRegistry {
 
     /// Validates model integrity and loads (or returns cached) ONNX Runtime session.
     ///
-    /// Attestation is two-fold: the file SHA-256 must match the manifest before the session is
-    /// built, and the session's I/O tensor shapes must match the manifest's `input_shape`,
-    /// `input_layout` and `output_shapes` before it is cached and returned.
+    /// Attestation is two-fold: the SHA-256 of the model bytes must match the manifest before
+    /// the session is built, and the session's I/O tensor shapes must match the manifest's
+    /// `input_shape`, `input_layout` and `output_shapes` before it is cached and returned.
+    ///
+    /// The session is built with `commit_from_memory` from the very bytes that were hashed:
+    /// those retained by a prior [`Self::verify_integrity`], otherwise a single bounded read of
+    /// the file (GitHub #246). The file is never re-opened by path after hashing.
     pub fn get_or_load_session(&mut self, id: &str) -> Result<Arc<Mutex<Session>>, InferenceError> {
         if let Some(session) = self.sessions.get(id) {
             return Ok(Arc::clone(session));
         }
 
-        let path = self.resolve_model_path(id)?;
-
-        // Cryptographic attestation: verify SHA-256 before session instantiation
-        self.manifest.verify_model_checksum(id, &path)?;
+        // Cryptographic attestation: the bytes handed to ORT are the bytes that were hashed.
+        let retained = self.lock_verified_bytes().remove(id);
+        let bytes = match retained {
+            Some(bytes) => bytes,
+            None => {
+                let path = self.model_path(id)?;
+                self.manifest.read_verified_model(id, &path)?
+            }
+        };
 
         let session = Session::builder()
             .map_err(|e| InferenceError::Ort(e.to_string()))?
@@ -132,8 +186,10 @@ impl ModelRegistry {
             .map_err(|e| InferenceError::Ort(e.to_string()))?
             .with_inter_threads(self.config.inter_threads)
             .map_err(|e| InferenceError::Ort(e.to_string()))?
-            .commit_from_file(&path)
+            .commit_from_memory(&bytes)
             .map_err(|e| InferenceError::Ort(format!("Failed loading session {}: {}", id, e)))?;
+        // ORT keeps its own copy of the graph; release the attested buffer immediately.
+        drop(bytes);
 
         // Shape attestation: the manifest's declared I/O shapes must match the graph
         // (symbolic dims are wildcards). A mismatch fails closed before the session is cached.

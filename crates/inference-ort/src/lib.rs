@@ -23,7 +23,7 @@ pub mod registry;
 
 pub use detector::{
     letterbox_pad, nms, unproject, BoundingBox, FaceDetection, FaceDetector, OrtFaceDetector,
-    OrtScrfdDetector,
+    OrtScrfdDetector, ScoreActivation,
 };
 pub use embedding::{BiometricEmbedding, EmbeddingExtractor, OrtEmbeddingExtractor};
 pub use error::InferenceError;

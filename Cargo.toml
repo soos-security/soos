@@ -43,7 +43,6 @@ arc-swap = "1"
 
 # ONNX Runtime & Machine Learning
 ort = "2.0.0-rc.13"
-ndarray = "0.17"
 sha2 = "0.10"
 toml = "0.8"
 

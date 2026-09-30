@@ -266,18 +266,6 @@ resolve_download_url() {
         minifasnet_v2_pad)
             echo "https://github.com/QingHeYang/Silent-Face-Anti-Spoofing-onnx/raw/main/onnx/2.7_80x80_MiniFASNetV2.onnx"
             ;;
-        ultraface_slim_320)
-            echo "https://raw.githubusercontent.com/Linzaer/Ultra-Light-Fast-Generic-Face-Detector-1MB/master/models/onnx/version-slim-320.onnx"
-            ;;
-        landmark_5point)
-            echo "https://raw.githubusercontent.com/deepinsight/insightface/master/alignment/coordinate_regress/model/landmark_5point.onnx"
-            ;;
-        mobilefacenet_arcface)
-            echo "https://raw.githubusercontent.com/sirius-ai/MobileFaceNet_TF/master/arch/mobilefacenet_arcface.onnx"
-            ;;
-        minifasnet_pad)
-            echo "https://raw.githubusercontent.com/minivision-ai/Silent-Face-Anti-Spoofing/master/resources/anti_spoof_models/minifasnet_pad.onnx"
-            ;;
         *)
             # Fallback to source_url joined with filename if applicable
             echo "${source_url}/${filename}"

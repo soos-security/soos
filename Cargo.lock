@@ -3346,7 +3346,6 @@ dependencies = [
 name = "soos-inference-ort"
 version = "0.1.0"
 dependencies = [
- "ndarray",
  "ort",
  "proptest",
  "serde",

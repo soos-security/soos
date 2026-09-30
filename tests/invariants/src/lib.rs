@@ -39,6 +39,11 @@ mod pad_startup_contract;
 #[cfg(all(test, unix))]
 mod sync_issue_contract;
 
+/// Attested inference path: verified in-memory model bytes, explicit SCRFD score activation,
+/// legacy 4-model artefacts removed (GitHub #246, #247, #249).
+#[cfg(test)]
+mod vision_attestation_contract;
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,

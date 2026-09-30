@@ -370,7 +370,8 @@ pub fn initialize_pipeline(
     let reg_config = soos_inference_ort::RegistryConfig::new(&config.models_dir);
     let mut registry = soos_inference_ort::ModelRegistry::new(reg_config)?;
 
-    // Cryptographic attestation: verify all models in directory match manifest checksums
+    // Cryptographic attestation: hash every model once; the verified in-memory bytes are what
+    // get_or_load_session hands to ONNX Runtime (no re-open, no second hash, GitHub #246).
     registry.verify_integrity()?;
 
     let det_session = registry.get_or_load_session("scrfd_500m_kps")?;

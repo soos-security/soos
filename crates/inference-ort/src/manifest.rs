@@ -10,6 +10,12 @@ use sha2::{Digest, Sha256};
 
 use crate::error::InferenceError;
 
+/// Upper bound on the size of a model file read into memory for attestation (512 MiB).
+///
+/// The largest attested model (ArcFace ResNet34) is 136.6 MB; the bound leaves headroom for a
+/// future model while keeping the verified in-memory read bounded (GitHub #246).
+pub const MAX_MODEL_FILE_BYTES: u64 = 512 * 1024 * 1024;
+
 /// Manifest file metadata header.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ManifestHeader {
@@ -248,6 +254,94 @@ impl ModelManifest {
 
         let result = hasher.finalize();
         Ok(format!("{:x}", result))
+    }
+
+    /// Computes the hexadecimal lowercase SHA-256 digest of an in-memory buffer.
+    pub fn sha256_hex(bytes: &[u8]) -> String {
+        format!("{:x}", Sha256::digest(bytes))
+    }
+
+    /// Reads a model file once into memory and verifies its SHA-256 against this manifest.
+    ///
+    /// The returned bytes are exactly the bytes that were hashed, so a session built from them
+    /// (`commit_from_memory`) runs the attested graph even if the file changes afterwards
+    /// (no check-then-reopen window, GitHub #246). The read is bounded by
+    /// [`MAX_MODEL_FILE_BYTES`].
+    pub fn read_verified_model<P: AsRef<Path>>(
+        &self,
+        id: &str,
+        file_path: P,
+    ) -> Result<Vec<u8>, InferenceError> {
+        self.read_verified_model_with_limit(id, file_path, MAX_MODEL_FILE_BYTES)
+    }
+
+    /// [`Self::read_verified_model`] with an explicit size bound in bytes.
+    ///
+    /// Errors: unknown id or a path that is not a regular file -> `ModelNotFound`; a file
+    /// larger than `max_bytes` or any read failure -> `ModelIo`; a digest mismatch ->
+    /// `ChecksumMismatch`. No bytes are returned on error.
+    pub fn read_verified_model_with_limit<P: AsRef<Path>>(
+        &self,
+        id: &str,
+        file_path: P,
+        max_bytes: u64,
+    ) -> Result<Vec<u8>, InferenceError> {
+        let p = file_path.as_ref();
+        let metadata = self
+            .get_model(id)
+            .ok_or_else(|| InferenceError::ModelNotFound {
+                id: id.to_string(),
+                path: p.to_path_buf(),
+            })?;
+        let not_found = || InferenceError::ModelNotFound {
+            id: id.to_string(),
+            path: p.to_path_buf(),
+        };
+        let io_error = |source: std::io::Error| InferenceError::ModelIo {
+            id: id.to_string(),
+            path: p.to_path_buf(),
+            source,
+        };
+
+        let file = match File::open(p) {
+            Ok(file) => file,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(not_found()),
+            Err(e) => return Err(io_error(e)),
+        };
+        // Type and size are checked on the opened handle, not on the path.
+        let file_meta = file.metadata().map_err(io_error)?;
+        if !file_meta.is_file() {
+            return Err(not_found());
+        }
+        let too_large = || {
+            io_error(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("model file exceeds the {max_bytes}-byte attestation bound"),
+            ))
+        };
+        if file_meta.len() > max_bytes {
+            return Err(too_large());
+        }
+
+        // The file may grow after `metadata()`: read at most `max_bytes + 1` bytes.
+        let capacity = usize::try_from(file_meta.len()).map_err(|_| too_large())?;
+        let mut bytes = Vec::with_capacity(capacity);
+        file.take(max_bytes.saturating_add(1))
+            .read_to_end(&mut bytes)
+            .map_err(io_error)?;
+        if u64::try_from(bytes.len()).map_or(true, |len| len > max_bytes) {
+            return Err(too_large());
+        }
+
+        let computed = Self::sha256_hex(&bytes);
+        if !computed.eq_ignore_ascii_case(&metadata.sha256) {
+            return Err(InferenceError::ChecksumMismatch {
+                id: id.to_string(),
+                expected: metadata.sha256.clone(),
+                actual: computed,
+            });
+        }
+        Ok(bytes)
     }
 
     /// Verifies that a specific model file matches the SHA-256 hash registered in this manifest.
