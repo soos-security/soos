@@ -3,32 +3,92 @@
 //! Provides bounded, secret-free panic logging to the system authentication log
 //! (`LOG_AUTHPRIV | LOG_ERR`) and captures panic source locations without stderr pollution.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::ffi::CString;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::Once;
 
 thread_local! {
     static LAST_PANIC_LOC: RefCell<Option<String>> = const { RefCell::new(None) };
+    /// Number of soos entry points ([`catch_entry`]) active on this thread.
+    static ENTRY_DEPTH: Cell<u32> = const { Cell::new(0) };
 }
 
 static INIT_HOOK: Once = Once::new();
 
-/// Initializes the process-local panic hook if not already registered.
+/// Installs the pam_soos panic hook once per loaded image, chained to the prior hook.
 ///
-/// The registered hook intercepts panics originating in `pam_soos`, records their
-/// file/line/column location in thread-local storage, and suppresses stderr printing
-/// to avoid corrupting graphical display manager output streams.
+/// The hook only acts on panics raised while a soos entry point runs on the current
+/// thread ([`catch_entry`]): it records the file/line/column location for the syslog
+/// line and prints nothing, so a display manager's stderr stays clean. Every other panic
+/// is forwarded to the hook that was installed before, so the module never takes the
+/// process panic output over (review PAM-09, GitHub #263). The hook is installed once
+/// and never swapped per call, which is race-free when several threads run PAM
+/// concurrently. `pam_soos.so` statically links its own libstd, so the hook lives in the
+/// module's own image and nothing outside it refers to it after `dlclose`.
 pub fn init_panic_hook() {
     INIT_HOOK.call_once(|| {
-        std::panic::set_hook(Box::new(|info| {
-            if let Some(loc) = info.location() {
-                let location_str = format!("{}:{}:{}", loc.file(), loc.line(), loc.column());
-                LAST_PANIC_LOC.with(|cell| {
-                    *cell.borrow_mut() = Some(location_str);
-                });
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            if in_entry_point() {
+                if let Some(loc) = info.location() {
+                    let location_str = format!("{}:{}:{}", loc.file(), loc.line(), loc.column());
+                    let _ = LAST_PANIC_LOC.try_with(|cell| {
+                        if let Ok(mut slot) = cell.try_borrow_mut() {
+                            *slot = Some(location_str);
+                        }
+                    });
+                }
+            } else {
+                previous(info);
             }
         }));
     });
+}
+
+/// True while a soos entry point runs on the current thread.
+fn in_entry_point() -> bool {
+    ENTRY_DEPTH
+        .try_with(|depth| depth.get() > 0)
+        .unwrap_or(false)
+}
+
+/// Marks the current thread as running a soos entry point until dropped.
+struct EntryGuard;
+
+impl EntryGuard {
+    fn enter() -> Self {
+        let _ = ENTRY_DEPTH.try_with(|depth| depth.set(depth.get().saturating_add(1)));
+        Self
+    }
+}
+
+impl Drop for EntryGuard {
+    fn drop(&mut self) {
+        let _ = ENTRY_DEPTH.try_with(|depth| depth.set(depth.get().saturating_sub(1)));
+    }
+}
+
+/// Runs `f` as a soos entry point: installs the chained hook if needed and catches any
+/// panic, whose location is then available through [`take_panic_location`].
+///
+/// Nested calls are supported; the entry-point marker is restored even when `f` panics.
+pub fn catch_entry<F: FnOnce() -> R, R>(f: F) -> std::thread::Result<R> {
+    init_panic_hook();
+    let _guard = EntryGuard::enter();
+    catch_unwind(AssertUnwindSafe(f))
+}
+
+/// Returns the panic payload as text, or `fallback` for a non-string payload.
+#[must_use]
+pub fn panic_summary<'a>(payload: &'a (dyn std::any::Any + Send), fallback: &'a str) -> &'a str {
+    if let Some(s) = payload.downcast_ref::<&str>() {
+        s
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.as_str()
+    } else {
+        fallback
+    }
 }
 
 /// Retrieves and clears the most recently recorded panic location for the current thread.
@@ -88,8 +148,21 @@ pub fn log_panic(summary: &str, location: Option<&str>) {
     }
 }
 
+/// Dispatches a warning to the system authentication log (`LOG_AUTHPRIV | LOG_WARNING`).
+///
+/// Used for rejected PAM arguments (GitHub #265); callers pass key names only, never a
+/// rejected value.
+pub fn log_warning(message: &str) {
+    log_with_priority(libc::LOG_AUTHPRIV | libc::LOG_WARNING, message);
+}
+
 /// Dispatches an informational message to the system authentication log facility (`LOG_AUTHPRIV | LOG_INFO`).
 pub fn log_info(message: &str) {
+    log_with_priority(libc::LOG_AUTHPRIV | libc::LOG_INFO, message);
+}
+
+/// Sends `soos-pam: <message>` (NUL bytes replaced) to syslog at `priority`.
+fn log_with_priority(priority: libc::c_int, message: &str) {
     let sanitized: String = message
         .chars()
         .map(|c| if c == '\0' { ' ' } else { c })
@@ -100,12 +173,9 @@ pub fn log_info(message: &str) {
     };
 
     let fmt = b"%s\0";
-    // SAFETY: fmt and c_str are valid null-terminated C strings. LOG_AUTHPRIV | LOG_INFO are standard syslog flags.
+    // SAFETY: fmt and c_str are valid null-terminated C strings; `priority` combines
+    // standard syslog facility and level flags.
     unsafe {
-        libc::syslog(
-            libc::LOG_AUTHPRIV | libc::LOG_INFO,
-            fmt.as_ptr().cast(),
-            c_str.as_ptr(),
-        );
+        libc::syslog(priority, fmt.as_ptr().cast(), c_str.as_ptr());
     }
 }

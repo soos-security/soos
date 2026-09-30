@@ -342,7 +342,12 @@ fn test_unavailable_feedback_is_a_single_generic_text() {
         SoosPam::authenticate_with_config(Some(h), &offline)
     });
     assert_eq!(code, PamResultCode::PAM_IGNORE);
-    unavailable.insert(final_message(&messages));
+    // Fail quiet when the daemon is not installed or stopped (GitHub #221, user-approved
+    // 2026-10-01).
+    assert!(
+        messages.is_empty(),
+        "an unreachable daemon must stay silent, got {messages:?}"
+    );
 
     assert_eq!(
         unavailable.len(),

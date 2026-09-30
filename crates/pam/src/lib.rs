@@ -33,7 +33,6 @@ pub mod ipc;
 pub mod syslog;
 
 use std::ffi::CStr;
-use std::panic::{catch_unwind, AssertUnwindSafe};
 
 use config::{parse_cstrs, PamConfig, PamEvent};
 pub use pam_bindings::constants::{PamFlag, PamResultCode};
@@ -188,7 +187,8 @@ impl SoosPam {
     /// `flags` are the Linux-PAM flags of the call: with `PAM_SILENT` no conversation
     /// message is ever sent (GitHub #221). "Looking for face..." is only sent once the
     /// daemon socket is connected, so an absent or stopped daemon never announces a
-    /// lookup it cannot perform.
+    /// lookup it cannot perform, and without a connection no outcome text is sent either
+    /// (fail quiet, GitHub #221).
     ///
     /// # Panic Safety Guarantee
     ///
@@ -214,9 +214,7 @@ impl SoosPam {
     where
         R: FnOnce(&mut dyn PamFeedback) -> u32,
     {
-        syslog::init_panic_hook();
-
-        let result = catch_unwind(AssertUnwindSafe(|| {
+        let result = syslog::catch_entry(|| {
             // Test-only hook (Docker T10): panics here when armed, before any socket activity.
             // Ordering invariant: this `trigger` call must run before any libpam call
             // (`with_pam_service` reads `PAM_SERVICE`, UID resolution calls `pam_get_user`).
@@ -273,35 +271,34 @@ impl SoosPam {
                 return PamResultCode::PAM_IGNORE;
             }
 
+            let mut connected = false;
             let outcome =
                 ipc::authenticate_before_with_progress(config, uid, auth_deadline, || {
+                    connected = true;
                     if !silent {
                         feedback.info("[soos] Looking for face...");
                     }
                 });
-            if !silent {
+            // Fail quiet (GitHub #221, user decision 2026-10-01): when the daemon socket
+            // cannot be connected (not installed or stopped) nothing is shown; the next
+            // module prompts as if soos were absent.
+            if !silent && connected {
                 feedback.info(feedback_message(&outcome));
             }
 
             // PAM_SUCCESS exclusively on a daemon Allow; every other outcome falls back.
+            // The protocol crate owns the predicate (`Verdict::should_ignore`, GitHub #264).
             match outcome {
-                Ok((Verdict::Allow, _)) => PamResultCode::PAM_SUCCESS,
+                Ok((verdict, _)) if !verdict.should_ignore() => PamResultCode::PAM_SUCCESS,
                 _ => PamResultCode::PAM_IGNORE,
             }
-        }));
+        });
 
         match result {
             Ok(code) => code,
             Err(payload) => {
                 let location = syslog::take_panic_location();
-                let summary = if let Some(s) = payload.downcast_ref::<&str>() {
-                    *s
-                } else if let Some(s) = payload.downcast_ref::<String>() {
-                    s.as_str()
-                } else {
-                    "unspecified panic payload"
-                };
-
+                let summary = syslog::panic_summary(&*payload, "unspecified panic payload");
                 syslog::log_panic(summary, location.as_deref());
 
                 // Invariant 5 of ARCHITECTURE.md:
@@ -326,26 +323,22 @@ fn default_uid_resolver(feedback: &mut dyn PamFeedback) -> u32 {
 }
 
 impl PamHooks for SoosPam {
+    /// Production authentication hook: the exported `pam_sm_authenticate` symbol calls it
+    /// for every non-null handle (GitHub #264).
     fn sm_authenticate(pamh: &mut PamHandle, args: Vec<&CStr>, flags: PamFlag) -> PamResultCode {
-        syslog::init_panic_hook();
-
-        let result = catch_unwind(AssertUnwindSafe(|| {
+        let result = syslog::catch_entry(|| {
             let config = parse_cstrs(args);
             Self::authenticate_with_feedback(pamh, &config, flags)
-        }));
+        });
 
         match result {
             Ok(code) => code,
             Err(payload) => {
                 let location = syslog::take_panic_location();
-                let summary = if let Some(s) = payload.downcast_ref::<&str>() {
-                    *s
-                } else if let Some(s) = payload.downcast_ref::<String>() {
-                    s.as_str()
-                } else {
-                    "unspecified panic payload in sm_authenticate"
-                };
-
+                let summary = syslog::panic_summary(
+                    &*payload,
+                    "unspecified panic payload in sm_authenticate",
+                );
                 syslog::log_panic(summary, location.as_deref());
                 PamResultCode::PAM_IGNORE
             }
@@ -451,21 +444,14 @@ pub fn resolve_username_to_uid_with_bounds(
 ///
 /// Any caught panic is logged to syslog with panic location and payload, systematically returning `PAM_IGNORE`.
 fn catch_c_entry<F: FnOnce() -> i32>(f: F) -> i32 {
-    syslog::init_panic_hook();
-
-    let result = catch_unwind(AssertUnwindSafe(f));
+    let result = syslog::catch_entry(f);
 
     match result {
         Ok(code) => code,
         Err(payload) => {
             let location = syslog::take_panic_location();
-            let summary = if let Some(s) = payload.downcast_ref::<&str>() {
-                *s
-            } else if let Some(s) = payload.downcast_ref::<String>() {
-                s.as_str()
-            } else {
-                "unspecified panic payload in PAM C entry point"
-            };
+            let summary =
+                syslog::panic_summary(&*payload, "unspecified panic payload in PAM C entry point");
 
             syslog::log_panic(summary, location.as_deref());
             PAM_IGNORE
@@ -492,22 +478,23 @@ pub extern "C" fn pam_sm_authenticate(
     argv: *const *const u8,
 ) -> i32 {
     catch_c_entry(|| {
-        let pamh_opt = if pamh.is_null() {
-            None
-        } else {
-            // SAFETY: pamh was verified non-null and is a valid PAM handle.
-            unsafe { pamh.as_mut() }
-        };
-
-        // SAFETY: argv points to argc pointers passed across the C ABI; wrapped in catch_unwind to prevent unwinding across FFI.
-        let config = unsafe { config::parse_argv(argc, argv) };
+        // SAFETY: argv points to argc pointers passed across the C ABI (Linux-PAM keeps
+        // them alive for the whole call); every string is read with the MAX_ARG_LEN bound.
+        // Rejected arguments are logged at LOG_WARNING (GitHub #265).
+        let args = unsafe { config::collect_argv_logged(argc, argv) };
 
         // Linux-PAM passes `unsigned int flags`; the C ABI signature declares `int`, so
         // reinterpret the bits unchanged.
         let pam_flags = PamFlag::from_ne_bytes(flags.to_ne_bytes());
-        let code = match pamh_opt {
-            Some(h) => SoosPam::authenticate_with_feedback(h, &config, pam_flags),
-            None => SoosPam::authenticate_with_feedback(&mut Detached, &config, pam_flags),
+
+        // SAFETY: `as_mut` returns None for a null pointer; a non-null pamh is the valid
+        // handle Linux-PAM passed to this call.
+        let code = match unsafe { pamh.as_mut() } {
+            // The exported symbol runs the `PamHooks` implementation (GitHub #264).
+            Some(h) => SoosPam::sm_authenticate(h, args, pam_flags),
+            None => {
+                SoosPam::authenticate_with_feedback(&mut Detached, &parse_cstrs(args), pam_flags)
+            }
         };
 
         match code {
@@ -587,6 +574,7 @@ pub extern "C" fn pam_sm_close_session(
 )]
 mod tests {
     use super::*;
+    use std::panic::{catch_unwind, AssertUnwindSafe};
     use std::ptr;
 
     /// PA1: Module returns PAM_IGNORE when daemon is unreachable.
