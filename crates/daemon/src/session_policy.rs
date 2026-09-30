@@ -153,6 +153,14 @@ pub enum SessionDenial {
     CallerSessionClass,
     /// The target UID owns no active, non-remote session.
     TargetNoLocalActiveSession,
+    /// The caller's cgroup names a systemd user manager with a malformed or inconsistent UID.
+    UserManagerCgroupMalformed,
+    /// The caller runs under the systemd user manager of a UID other than the target.
+    UserManagerUidMismatch,
+    /// The caller runs under the target's user manager while the target owns a remote session.
+    UserManagerCallerRemoteSessionActive,
+    /// The caller runs under the target's user manager but the target owns no local seat session.
+    UserManagerNoLocalSeatSession,
 }
 
 impl SessionDenial {
@@ -169,6 +177,12 @@ impl SessionDenial {
             Self::CallerSessionSeatless => "caller_session_seatless",
             Self::CallerSessionClass => "caller_session_class",
             Self::TargetNoLocalActiveSession => "target_no_local_active_session",
+            Self::UserManagerCgroupMalformed => "user_manager_cgroup_malformed",
+            Self::UserManagerUidMismatch => "user_manager_uid_mismatch",
+            Self::UserManagerCallerRemoteSessionActive => {
+                "user_manager_caller_remote_session_active"
+            }
+            Self::UserManagerNoLocalSeatSession => "user_manager_no_local_seat_session",
         }
     }
 }
@@ -196,6 +210,17 @@ pub trait LogindSource: Send + Sync + Debug {
     /// # Errors
     /// Returns [`LogindError`] when the state cannot be read.
     fn sessions(&self) -> Result<Vec<SessionRecord>, LogindError>;
+
+    /// Returns the raw `/proc/<pid>/cgroup` content of `pid`, if the process exists.
+    ///
+    /// The default returns `Ok(None)`, which denies the user-manager path (fail closed).
+    ///
+    /// # Errors
+    /// Returns [`LogindError`] when the state cannot be read.
+    fn cgroup_of_pid(&self, pid: i32) -> Result<Option<String>, LogindError> {
+        let _ = pid;
+        Ok(None)
+    }
 }
 
 /// Returns whether `id` is a syntactically valid logind session ID (ASCII alphanumeric).
@@ -233,6 +258,15 @@ pub fn parse_session_id_from_cgroup(content: &str) -> Option<String> {
         }
     }
     found.map(str::to_string)
+}
+
+/// Extracts the UID of the systemd user manager (`user@<uid>.service`) a process runs under.
+///
+/// # Errors
+/// Returns [`SessionDenial::UserManagerCgroupMalformed`] for a malformed user-manager path.
+pub fn parse_user_manager_uid_from_cgroup(content: &str) -> Result<Option<u32>, SessionDenial> {
+    let _ = content;
+    Ok(None)
 }
 
 /// Reads at most `max` bytes of `path` as UTF-8; `Ok(None)` if the file does not exist.

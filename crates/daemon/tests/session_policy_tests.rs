@@ -28,8 +28,8 @@ use soos_daemon::health::HealthState;
 use soos_daemon::peercred::PeerCredentials;
 use soos_daemon::session::SessionValidator;
 use soos_daemon::session_policy::{
-    parse_session_id_from_cgroup, LocalSessionPolicy, LogindError, LogindSource, SessionDenial,
-    SessionRecord, SystemLogind,
+    parse_session_id_from_cgroup, parse_user_manager_uid_from_cgroup, LocalSessionPolicy,
+    LogindError, LogindSource, SessionDenial, SessionRecord, SystemLogind,
 };
 use soos_protocol::codec::{decode, encode};
 use soos_protocol::types::{ReasonClass, Request, RequestKind, Response, Verdict, CURRENT_VERSION};
@@ -44,6 +44,7 @@ const BOB: u32 = 1001;
 #[derive(Debug, Default)]
 struct MockLogind {
     pid_sessions: HashMap<i32, String>,
+    pid_cgroups: HashMap<i32, String>,
     records: HashMap<String, SessionRecord>,
     fail: bool,
 }
@@ -56,6 +57,11 @@ impl MockLogind {
 
     fn with_pid(mut self, pid: i32, id: &str) -> Self {
         self.pid_sessions.insert(pid, id.to_string());
+        self
+    }
+
+    fn with_cgroup(mut self, pid: i32, content: &str) -> Self {
+        self.pid_cgroups.insert(pid, content.to_string());
         self
     }
 
@@ -87,6 +93,13 @@ impl LogindSource for MockLogind {
             return Err(LogindError("mock logind unavailable".into()));
         }
         Ok(self.records.values().cloned().collect())
+    }
+
+    fn cgroup_of_pid(&self, pid: i32) -> Result<Option<String>, LogindError> {
+        if self.fail {
+            return Err(LogindError("mock logind unavailable".into()));
+        }
+        Ok(self.pid_cgroups.get(&pid).cloned())
     }
 }
 
@@ -663,4 +676,374 @@ async fn test_dispatcher_applies_injected_session_policy() {
     );
     let resp = exchange_auth(allowed, &dir.path().join("allowed.sock"), uid).await;
     assert_eq!(resp.verdict, Verdict::Unavailable);
+}
+
+// ---------------------------------------------------------------------------
+// Root peer under the target's systemd user manager (user decision 2026-09-30)
+//
+// GNOME >= 3.34 and KDE Plasma >= 5.25 run terminals and the shell's polkit agent
+// under `user.slice/user-<uid>.slice/user@<uid>.service/...`, not in a
+// `session-<id>.scope`. A root peer there is allowed only if the strictly parsed
+// `<uid>` equals the target, the target owns a local seat session, and the target
+// owns no remote session.
+// ---------------------------------------------------------------------------
+
+const GNOME_TERMINAL_CGROUP: &str = "0::/user.slice/user-1000.slice/user@1000.service/app.slice/\
+     app-org.gnome.Terminal.slice/vte-spawn-1234.scope\n";
+const GNOME_SHELL_CGROUP: &str =
+    "0::/user.slice/user-1000.slice/user@1000.service/session.slice/org.gnome.Shell@wayland.service\n";
+const KONSOLE_CGROUP: &str = "0::/user.slice/user-1000.slice/user@1000.service/app.slice/\
+     app-org.kde.konsole-5678.scope\n";
+const BOB_TERMINAL_CGROUP: &str = "0::/user.slice/user-1001.slice/user@1001.service/app.slice/\
+     app-org.gnome.Terminal.slice/vte-spawn-4321.scope\n";
+
+#[test]
+fn test_user_manager_cgroup_real_desktop_layouts_are_resolved() {
+    for content in [
+        GNOME_TERMINAL_CGROUP,
+        GNOME_SHELL_CGROUP,
+        KONSOLE_CGROUP,
+        // cgroup v1 / hybrid: the named systemd hierarchy carries the unit path.
+        "12:cpu,cpuacct:/user.slice\n1:name=systemd:/user.slice/user-1000.slice/user@1000.service/app.slice/app-foot.scope\n",
+        // Hybrid with both hierarchies agreeing.
+        "1:name=systemd:/user.slice/user-1000.slice/user@1000.service/app.slice/a.scope\n0::/user.slice/user-1000.slice/user@1000.service/app.slice/a.scope\n",
+    ] {
+        assert_eq!(
+            parse_user_manager_uid_from_cgroup(content),
+            Ok(Some(ALICE)),
+            "{content:?}"
+        );
+    }
+    assert_eq!(
+        parse_user_manager_uid_from_cgroup(BOB_TERMINAL_CGROUP),
+        Ok(Some(BOB))
+    );
+}
+
+#[test]
+fn test_user_manager_cgroup_outside_user_manager_is_none() {
+    for content in [
+        "0::/user.slice/user-1000.slice/session-3.scope\n",
+        "0::/system.slice/sshd.service\n",
+        "0::/system.slice/polkit.service\n",
+        "0::/user.slice/user-1000.slice/user-runtime-dir@1000.service\n",
+        "0::/user.slice/user-1000.slice\n",
+        "0::/\n",
+        "",
+    ] {
+        assert_eq!(
+            parse_user_manager_uid_from_cgroup(content),
+            Ok(None),
+            "{content:?}"
+        );
+    }
+}
+
+#[test]
+fn test_user_manager_cgroup_malformed_uid_fails_closed() {
+    for content in [
+        "0::/user.slice/user-1000.slice/user@+1000.service/app.slice/a.scope\n",
+        "0::/user.slice/user-1000.slice/user@1000x.service/app.slice/a.scope\n",
+        "0::/user.slice/user-1000.slice/user@-1000.service/app.slice/a.scope\n",
+        "0::/user.slice/user-1000.slice/user@ 1000.service/app.slice/a.scope\n",
+        "0::/user.slice/user-1000.slice/user@01000.service/app.slice/a.scope\n",
+        "0::/user.slice/user-1000.slice/user@.service/app.slice/a.scope\n",
+        "0::/user.slice/user-1000.slice/user@4294967296.service/app.slice/a.scope\n",
+        "0::/user.slice/user-+1000.slice/user@1000.service/app.slice/a.scope\n",
+        "0::/user.slice/user-1000x.slice/user@1000.service/app.slice/a.scope\n",
+        // Mismatched slice and service UIDs.
+        "0::/user.slice/user-1000.slice/user@1001.service/app.slice/a.scope\n",
+        "0::/user.slice/user-1001.slice/user@1000.service/app.slice/a.scope\n",
+        // Nothing under the user manager (the manager itself lives in init.scope).
+        "0::/user.slice/user-1000.slice/user@1000.service\n",
+        "0::/user.slice/user-1000.slice/user@1000.service/\n",
+        // Hierarchies disagreeing on the user manager.
+        "1:name=systemd:/user.slice/user-1000.slice/user@1000.service/app.slice/a.scope\n0::/user.slice/user-1001.slice/user@1001.service/app.slice/a.scope\n",
+        "1:name=systemd:/user.slice/user-1000.slice/session-3.scope\n0::/user.slice/user-1000.slice/user@1000.service/app.slice/a.scope\n",
+    ] {
+        assert_eq!(
+            parse_user_manager_uid_from_cgroup(content),
+            Err(SessionDenial::UserManagerCgroupMalformed),
+            "{content:?}"
+        );
+    }
+}
+
+#[test]
+fn test_cgroup_session_scope_nested_in_user_manager_is_not_a_session() {
+    // A user can name a transient unit `session-2.scope` inside its own user manager;
+    // like `sd_pid_get_session`, only the first unit below the user slice counts.
+    for content in [
+        "0::/user.slice/user-1000.slice/user@1000.service/app.slice/session-2.scope\n",
+        "0::/user.slice/user-1000.slice/user@1000.service/session-2.scope\n",
+        "0::/system.slice/foo.service/session-2.scope\n",
+    ] {
+        assert_eq!(parse_session_id_from_cgroup(content), None, "{content:?}");
+    }
+    // Sub-cgroups below a genuine session scope still resolve to that session.
+    assert_eq!(
+        parse_session_id_from_cgroup("0::/user.slice/user-1000.slice/session-2.scope/sub\n"),
+        Some("2".to_string())
+    );
+}
+
+#[test]
+fn test_root_peer_sudo_in_gnome_terminal_user_manager_is_allowed() {
+    let p = policy(
+        MockLogind::default()
+            .with_session("2", local_seat_session(ALICE))
+            .with_cgroup(4242, GNOME_TERMINAL_CGROUP),
+    );
+    assert_eq!(p.authorize_auth(&root_peer(Some(4242)), ALICE), Ok(()));
+}
+
+#[test]
+fn test_root_peer_polkit_from_gnome_shell_user_manager_is_allowed() {
+    let p = policy(
+        MockLogind::default()
+            .with_session("2", local_seat_session(ALICE))
+            .with_session("3", local_seat_session(BOB))
+            .with_cgroup(4300, GNOME_SHELL_CGROUP)
+            .with_cgroup(4301, KONSOLE_CGROUP),
+    );
+    assert_eq!(p.authorize_auth(&root_peer(Some(4300)), ALICE), Ok(()));
+    assert_eq!(p.authorize_auth(&root_peer(Some(4301)), ALICE), Ok(()));
+}
+
+#[test]
+fn test_root_peer_user_manager_denied_when_target_has_remote_session() {
+    // An SSH session of the same account could reach the user manager through
+    // `systemd-run --user sudo ...` and borrow the face of the person at the desk.
+    let remote_variants = [
+        ssh_session(ALICE),
+        // Closing SSH session (lingering tmux) is still a live remote foothold.
+        record(ALICE, false, Some(true), None, Some("user")),
+        // Unknown remote flag fails closed.
+        record(ALICE, true, None, None, Some("user")),
+    ];
+    for remote in remote_variants {
+        let p = policy(
+            MockLogind::default()
+                .with_session("2", local_seat_session(ALICE))
+                .with_session("7", remote.clone())
+                .with_cgroup(4242, GNOME_TERMINAL_CGROUP),
+        );
+        assert_eq!(
+            p.authorize_auth(&root_peer(Some(4242)), ALICE),
+            Err(SessionDenial::UserManagerCallerRemoteSessionActive),
+            "{remote:?}"
+        );
+    }
+    // Another user's SSH session does not affect the target.
+    let p = policy(
+        MockLogind::default()
+            .with_session("2", local_seat_session(ALICE))
+            .with_session("9", ssh_session(BOB))
+            .with_cgroup(4242, GNOME_TERMINAL_CGROUP),
+    );
+    assert_eq!(p.authorize_auth(&root_peer(Some(4242)), ALICE), Ok(()));
+}
+
+#[test]
+fn test_root_peer_su_other_user_from_user_manager_terminal_is_denied() {
+    // `su alice` typed in Bob's GNOME terminal while Alice is at the camera.
+    let p = policy(
+        MockLogind::default()
+            .with_session("2", local_seat_session(ALICE))
+            .with_session("3", local_seat_session(BOB))
+            .with_cgroup(6000, BOB_TERMINAL_CGROUP),
+    );
+    assert_eq!(
+        p.authorize_auth(&root_peer(Some(6000)), ALICE),
+        Err(SessionDenial::UserManagerUidMismatch)
+    );
+}
+
+#[test]
+fn test_root_peer_user_manager_malformed_uid_is_denied() {
+    for content in [
+        "0::/user.slice/user-1000.slice/user@+1000.service/app.slice/a.scope\n",
+        "0::/user.slice/user-1000.slice/user@1000x.service/app.slice/a.scope\n",
+        "0::/user.slice/user-1001.slice/user@1000.service/app.slice/a.scope\n",
+    ] {
+        let p = policy(
+            MockLogind::default()
+                .with_session("2", local_seat_session(ALICE))
+                .with_cgroup(4242, content),
+        );
+        assert_eq!(
+            p.authorize_auth(&root_peer(Some(4242)), ALICE),
+            Err(SessionDenial::UserManagerCgroupMalformed),
+            "{content:?}"
+        );
+    }
+}
+
+#[test]
+fn test_root_peer_user_manager_without_local_seat_session_is_denied() {
+    let non_qualifying = [
+        None,
+        Some(record(
+            ALICE,
+            false,
+            Some(false),
+            Some("seat0"),
+            Some("user"),
+        )),
+        Some(record(ALICE, true, Some(false), None, Some("user"))),
+        Some(record(
+            ALICE,
+            true,
+            Some(false),
+            Some("seat0"),
+            Some("greeter"),
+        )),
+        Some(record(
+            ALICE,
+            true,
+            Some(false),
+            Some("seat0"),
+            Some("manager"),
+        )),
+    ];
+    for rec in non_qualifying {
+        let mut mock = MockLogind::default()
+            .with_session("3", local_seat_session(BOB))
+            .with_cgroup(4242, GNOME_TERMINAL_CGROUP);
+        if let Some(rec) = rec.clone() {
+            mock = mock.with_session("2", rec);
+        }
+        assert_eq!(
+            policy(mock).authorize_auth(&root_peer(Some(4242)), ALICE),
+            Err(SessionDenial::UserManagerNoLocalSeatSession),
+            "{rec:?}"
+        );
+    }
+}
+
+#[test]
+fn test_root_peer_session_scope_takes_precedence_over_user_manager() {
+    // A caller resolved to an SSH session scope keeps the session-scope rules.
+    let p = policy(
+        MockLogind::default()
+            .with_session("2", local_seat_session(ALICE))
+            .with_session("7", ssh_session(ALICE))
+            .with_pid(5000, "7")
+            .with_cgroup(5000, GNOME_TERMINAL_CGROUP),
+    );
+    assert_eq!(
+        p.authorize_auth(&root_peer(Some(5000)), ALICE),
+        Err(SessionDenial::CallerSessionRemote)
+    );
+}
+
+#[test]
+fn test_root_peer_user_manager_logind_unavailable_fails_closed() {
+    #[derive(Debug)]
+    struct SessionsFail;
+    impl LogindSource for SessionsFail {
+        fn session_id_of_pid(&self, _pid: i32) -> Result<Option<String>, LogindError> {
+            Ok(None)
+        }
+        fn session(&self, _id: &str) -> Result<Option<SessionRecord>, LogindError> {
+            Ok(None)
+        }
+        fn sessions(&self) -> Result<Vec<SessionRecord>, LogindError> {
+            Err(LogindError("sessions unreadable".into()))
+        }
+        fn cgroup_of_pid(&self, _pid: i32) -> Result<Option<String>, LogindError> {
+            Ok(Some(GNOME_TERMINAL_CGROUP.to_string()))
+        }
+    }
+    let p = LocalSessionPolicy::new(Arc::new(SessionsFail));
+    assert_eq!(
+        p.authorize_auth(&root_peer(Some(4242)), ALICE),
+        Err(SessionDenial::LogindUnavailable)
+    );
+}
+
+#[test]
+fn test_denial_reason_codes_cover_user_manager_variants() {
+    let all = [
+        SessionDenial::MissingPeerPid,
+        SessionDenial::CallerSessionUnresolved,
+        SessionDenial::LogindUnavailable,
+        SessionDenial::CallerSessionForeign,
+        SessionDenial::CallerSessionInactive,
+        SessionDenial::CallerSessionRemote,
+        SessionDenial::CallerSessionSeatless,
+        SessionDenial::CallerSessionClass,
+        SessionDenial::TargetNoLocalActiveSession,
+        SessionDenial::UserManagerCgroupMalformed,
+        SessionDenial::UserManagerUidMismatch,
+        SessionDenial::UserManagerCallerRemoteSessionActive,
+        SessionDenial::UserManagerNoLocalSeatSession,
+    ];
+    let mut codes: Vec<&str> = all.iter().map(SessionDenial::as_str).collect();
+    assert!(codes.iter().all(|c| !c.is_empty()));
+    codes.sort_unstable();
+    codes.dedup();
+    assert_eq!(codes.len(), all.len());
+}
+
+#[test]
+fn test_system_logind_user_manager_caller_real_layout() {
+    let dir = tempdir().expect("tempdir");
+    let sessions = dir.path().join("sessions");
+    let proc_root = dir.path().join("proc");
+    fs::create_dir_all(&sessions).expect("sessions dir");
+    fs::write(sessions.join("2"), ALICE_LOCAL_FILE).expect("local session");
+    write_proc_cgroup(&proc_root, 100, GNOME_TERMINAL_CGROUP);
+    write_proc_cgroup(&proc_root, 101, GNOME_SHELL_CGROUP);
+    write_proc_cgroup(&proc_root, 102, BOB_TERMINAL_CGROUP);
+    write_proc_cgroup(
+        &proc_root,
+        103,
+        "0::/user.slice/user-1000.slice/user@+1000.service/app.slice/a.scope\n",
+    );
+
+    let source = SystemLogind::with_paths(sessions.clone(), proc_root.clone());
+    assert_eq!(
+        source.cgroup_of_pid(100),
+        Ok(Some(GNOME_TERMINAL_CGROUP.to_string()))
+    );
+    assert_eq!(source.cgroup_of_pid(999), Ok(None), "Vanished PID");
+    assert_eq!(source.cgroup_of_pid(0), Ok(None));
+    let p = LocalSessionPolicy::new(Arc::new(source));
+    assert_eq!(p.authorize_auth(&root_peer(Some(100)), ALICE), Ok(()));
+    assert_eq!(p.authorize_auth(&root_peer(Some(101)), ALICE), Ok(()));
+    assert_eq!(
+        p.authorize_auth(&root_peer(Some(102)), ALICE),
+        Err(SessionDenial::UserManagerUidMismatch)
+    );
+    assert_eq!(
+        p.authorize_auth(&root_peer(Some(103)), ALICE),
+        Err(SessionDenial::UserManagerCgroupMalformed)
+    );
+    assert_eq!(
+        p.authorize_auth(&root_peer(Some(999)), ALICE),
+        Err(SessionDenial::CallerSessionUnresolved)
+    );
+
+    // Alice also logs in over SSH: the desktop terminal path is refused.
+    fs::write(sessions.join("7"), ALICE_SSH_FILE).expect("ssh session");
+    let p = LocalSessionPolicy::new(Arc::new(SystemLogind::with_paths(sessions, proc_root)));
+    assert_eq!(
+        p.authorize_auth(&root_peer(Some(100)), ALICE),
+        Err(SessionDenial::UserManagerCallerRemoteSessionActive)
+    );
+}
+
+#[test]
+fn test_system_logind_user_manager_oversized_cgroup_fails_closed() {
+    let dir = tempdir().expect("tempdir");
+    let sessions = dir.path().join("sessions");
+    let proc_root = dir.path().join("proc");
+    fs::create_dir_all(&sessions).expect("sessions dir");
+    fs::write(sessions.join("2"), ALICE_LOCAL_FILE).expect("local session");
+    let mut huge = "9:blkio:/\n".repeat(4096);
+    huge.push_str(GNOME_TERMINAL_CGROUP);
+    write_proc_cgroup(&proc_root, 100, &huge);
+    let p = LocalSessionPolicy::new(Arc::new(SystemLogind::with_paths(sessions, proc_root)));
+    assert!(p.authorize_auth(&root_peer(Some(100)), ALICE).is_err());
 }
