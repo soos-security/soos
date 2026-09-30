@@ -9,6 +9,14 @@ Simulates daemon behaviors for the PAM test matrix:
   - crash-immediate: Closes stream immediately after accept
   - crash-partial:   Sends partial length header (2 bytes) and closes stream
   - crash-truncated: Sends length header and truncated body (4 bytes) and closes stream
+  - malformed:       Complete frame, echoed request_id, undecodable verdict discriminant
+  - wrong-request-id: Complete Allow frame whose request_id does not match the request
+  - bad-version:     Complete Allow frame with protocol version 2
+  - oversized:       Length prefix above MAX_MESSAGE_SIZE (4096), no body, then close
+  - empty:           Zero length prefix, then close
+
+The malformed modes (GitHub #189) each put exactly one defect on the wire; three of
+them carry an Allow verdict that the PAM module must never honor.
 
 Every received Event (e.g. PasswordFailed) is recorded with --record and never
 answered; Requests are answered according to --mode.
@@ -41,7 +49,12 @@ REASON_FACEMATCH = 0
 REASON_SCORE_BELOW_THRESHOLD = 1
 
 
-def build_response(request_id: bytes, verdict: int, reason: int) -> bytes:
+VERDICT_UNDECODABLE = 0x7F  # single-byte varint outside the Verdict enum
+UNSUPPORTED_VERSION = 2
+MAX_MESSAGE_SIZE = 4096
+
+
+def build_response(request_id: bytes, verdict: int, reason: int, version: int = CURRENT_VERSION) -> bytes:
     """Builds a framed postcard-compatible Response wire payload."""
     # Wire layout:
     # version (u8) = 1
@@ -51,7 +64,7 @@ def build_response(request_id: bytes, verdict: int, reason: int) -> bytes:
     # issued_monotonic_ns (varint = 0)
     # expires_monotonic_ns (varint = 0)
     body = bytearray()
-    body.append(CURRENT_VERSION)
+    body.append(version)
     body.extend(request_id)
     body.append(verdict)
     body.append(reason)
@@ -129,7 +142,19 @@ def main():
     parser.add_argument("--socket", default="/run/soos/daemon.sock", help="Socket path")
     parser.add_argument(
         "--mode",
-        choices=["allow", "deny", "timeout", "crash-immediate", "crash-partial", "crash-truncated"],
+        choices=[
+            "allow",
+            "deny",
+            "timeout",
+            "crash-immediate",
+            "crash-partial",
+            "crash-truncated",
+            "malformed",
+            "wrong-request-id",
+            "bad-version",
+            "oversized",
+            "empty",
+        ],
         default="allow",
         help="Simulation behavior mode",
     )
@@ -247,6 +272,20 @@ def main():
                 elif args.mode == "crash-truncated":
                     # Send length prefix claiming 37 bytes, but send only 4 bytes of body
                     client.sendall(struct.pack(">I", 37) + b"\x01\xAA\xBB\xCC")
+                elif args.mode == "malformed":
+                    resp = build_response(req_id, VERDICT_UNDECODABLE, REASON_FACEMATCH)
+                    client.sendall(resp)
+                elif args.mode == "wrong-request-id":
+                    other_id = bytes(b ^ 0xFF for b in req_id)
+                    resp = build_response(other_id, VERDICT_ALLOW, REASON_FACEMATCH)
+                    client.sendall(resp)
+                elif args.mode == "bad-version":
+                    resp = build_response(req_id, VERDICT_ALLOW, REASON_FACEMATCH, UNSUPPORTED_VERSION)
+                    client.sendall(resp)
+                elif args.mode == "oversized":
+                    client.sendall(struct.pack(">I", MAX_MESSAGE_SIZE + 1))
+                elif args.mode == "empty":
+                    client.sendall(struct.pack(">I", 0))
                 elif args.mode == "deny":
                     resp = build_response(req_id, VERDICT_DENY, REASON_SCORE_BELOW_THRESHOLD)
                     client.sendall(resp)

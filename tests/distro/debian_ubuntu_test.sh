@@ -175,7 +175,7 @@ cd "${WORKSPACE_ROOT}"
 if [[ "${SKIP_BUILD}" = false ]]; then
     if [[ ! -f "target/release/soos-daemon" || ! -f "target/release/libpam_soos.so" ]]; then
         info "Compiling release artifacts..."
-        cargo build --release --workspace
+        cargo build --locked --release --workspace
     fi
 fi
 
@@ -249,11 +249,25 @@ info "Validating Debian PAM configuration templates..."
 test -f "/usr/share/pam-configs/soos" || { error "/usr/share/pam-configs/soos missing"; exit 1; }
 test -f "/usr/share/pam-configs/soos-notify" || { error "/usr/share/pam-configs/soos-notify missing"; exit 1; }
 
-# If pam-auth-update exists, test enabling profile; otherwise configure test service
-if command -v pam-auth-update >/dev/null 2>&1; then
-    info "Applying pam-auth-update configuration..."
-    pam-auth-update --package --enable soos soos-notify || true
+# pam-auth-update is part of libpam-runtime on every Debian/Ubuntu system: a
+# failure to enable the profiles is a deployment failure (GitHub #274), never
+# ignored. --force: the sandbox image ships a hand-written common-auth, which
+# pam-auth-update otherwise refuses to regenerate. Stack order and rollback of
+# the generated file are asserted by tests/docker/pam_rollback_test.sh (D2/D3).
+if ! command -v pam-auth-update >/dev/null 2>&1; then
+    error "pam-auth-update is missing on a Debian-based system."
+    exit 1
 fi
+info "Applying pam-auth-update configuration..."
+if ! DEBIAN_FRONTEND=noninteractive pam-auth-update --package --force --enable soos soos-notify; then
+    error "pam-auth-update --package --force --enable soos soos-notify failed."
+    exit 1
+fi
+if ! grep -q 'pam_soos.so event=password-failed' /etc/pam.d/common-auth; then
+    error "Generated /etc/pam.d/common-auth lacks the soos-notify password-failed hook."
+    exit 1
+fi
+success "pam-auth-update enabled the soos and soos-notify profiles in /etc/pam.d/common-auth."
 
 # Ensure test service definition exists
 cat << 'EOF' > /etc/pam.d/test-soos-debian
