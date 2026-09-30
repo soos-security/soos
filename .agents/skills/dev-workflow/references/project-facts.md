@@ -123,6 +123,11 @@ packaging, install or CI build commands.
 - Walkthroughs: `AI/walkthroughs/NN_snake_case.md`, next number = highest existing + 1
   (`ls AI/walkthroughs | sort -n | tail -1`). Numbers 11 and 54 are duplicated historically — never reuse a number.
 - Verification matrix status marker for new rows: `✅ Verified` (older rows use `☑ Validated`; do not rewrite them).
+  Every backticked citation of a claimed row (`module::test_*`, `test_prefix_*`, `module::*`, repo
+  paths, bare `*.rs`/`*.sh` names) must resolve — enforced by
+  `soos-invariants::matrix_citations::test_matrix_claimed_rows_cite_only_existing_evidence` [104].
+  Put historical names ("renamed from", "never existed") inside an italic `*( ... )*` annotation;
+  a row without evidence is `⬜ Pending (<reason>)`, a replaced row is `⏹ Superseded (<rows>)`.
 - Branch prefixes allowed by `AGENTS.md`: `feat/`, `fix/`, `test/`, `chore/` (not `refactor/` or `docs/`).
 - Every topic branch that implements a backlog issue must be registered in `BRANCH_TO_ISSUE` in
   `scripts/sync_issue.py` (tooling-only `chore/` branches without a backlog issue are not).

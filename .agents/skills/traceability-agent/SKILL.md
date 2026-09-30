@@ -23,7 +23,9 @@ Every "Verified" claim must point to a test that exists and passes. Shared facts
    Use the output as evidence; never cite a test that does not exist.
 2. **Verification matrix** (`AI/VERIFICATION_MATRIX.md`):
    - Update the rows named by the issue (e.g. `CLP1`, `NGM13`) to `✅ Verified`, citing
-     `file::test_name` evidence.
+     `file::test_name` evidence. Every citation of a claimed row must resolve (invariant
+     `test_matrix_claimed_rows_cite_only_existing_evidence`, walkthrough 104); put historical
+     names inside an italic `*( ... )*` annotation.
    - For a new component, add a section `## Component: \`<name>\` (Issue #N / GitHub #M)` using the
      next free IDs of the relevant prefix. Do not rewrite older rows' markers (`☑ Validated`).
 3. **Backlog & GitHub sync** (network; requires an authenticated `gh`):
