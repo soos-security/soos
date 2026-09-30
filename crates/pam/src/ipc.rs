@@ -368,6 +368,26 @@ pub fn authenticate(config: &PamConfig, uid: u32) -> Result<(Verdict, ReasonClas
     authenticate_before(config, uid, ExchangeDeadline::start(config.timeout_ms))
 }
 
+/// [`authenticate`], calling `on_connected` once the daemon socket is connected and
+/// before the request is sent (GitHub #221).
+///
+/// `on_connected` is never called when the connection fails (daemon not installed or not
+/// running), so the caller only announces a face lookup that can actually happen. It
+/// runs inside the cumulative deadline: time it spends is deducted from the budget left
+/// for the exchange, which therefore stays bounded by the clamped `timeout_ms`.
+pub fn authenticate_with_progress<F: FnOnce()>(
+    config: &PamConfig,
+    uid: u32,
+    on_connected: F,
+) -> Result<(Verdict, ReasonClass), IpcError> {
+    authenticate_before_with_progress(
+        config,
+        uid,
+        ExchangeDeadline::start(config.timeout_ms),
+        on_connected,
+    )
+}
+
 /// Runs one authentication exchange bounded by an already started `deadline`.
 ///
 /// Connect, write and read all consume the same budget, and the request carries exactly
@@ -378,8 +398,20 @@ pub fn authenticate_before(
     uid: u32,
     deadline: ExchangeDeadline,
 ) -> Result<(Verdict, ReasonClass), IpcError> {
+    authenticate_before_with_progress(config, uid, deadline, || {})
+}
+
+/// [`authenticate_before`], calling `on_connected` once the daemon socket is connected
+/// (see [`authenticate_with_progress`]; GitHub #221 / #222).
+pub fn authenticate_before_with_progress<F: FnOnce()>(
+    config: &PamConfig,
+    uid: u32,
+    deadline: ExchangeDeadline,
+    on_connected: F,
+) -> Result<(Verdict, ReasonClass), IpcError> {
     let connect_timeout = deadline.remaining()?;
     let mut stream = connect_with_timeout(&config.socket_path, connect_timeout)?;
+    on_connected();
 
     // Generate single-use cryptographic 256-bit nonce
     let mut request_id = Zeroizing::new([0u8; REQUEST_ID_LEN]);

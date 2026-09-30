@@ -39,6 +39,10 @@ mod sync_issue_contract;
 #[cfg(test)]
 mod pam_response_freshness_contract;
 
+/// PAM feedback seam, `PAM_SILENT` and nightly fuzzing (GitHub #220, #221, #227).
+#[cfg(test)]
+mod pam_feedback_contract;
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,

@@ -16,11 +16,13 @@
 //!
 //! Linux-PAM invokes `pam_sm_authenticate`:
 //! 1. Arguments are parsed into a bounded [`config::PamConfig`].
-//! 2. Target UID is determined via explicit PAM argument override, `pamh.get_user(None)` lookup, or `libc::getuid()` fallback.
+//! 2. Target UID is determined via explicit PAM argument override, [`PamFeedback::user`] lookup (`pam_get_user`), or `libc::getuid()` fallback.
 //!    A lookup that spends the whole authentication budget returns `PAM_IGNORE` without contacting the daemon (GitHub #223).
 //! 3. If configured with `event=password-failed`: sends telemetry to daemon within 20ms and returns `PAM_IGNORE`.
 //! 4. Otherwise: performs synchronous IPC authentication handshake with `soos-daemon`.
 //! 5. Renders `PAM_SUCCESS` exclusively upon receiving `Verdict::Allow`. All other outcomes return `PAM_IGNORE`.
+//! 6. `PAM_TEXT_INFO` feedback goes through [`PamFeedback`]; none is sent under `PAM_SILENT`, and
+//!    "Looking for face..." only once the daemon socket is connected.
 
 #![deny(clippy::all)]
 
@@ -38,40 +40,94 @@ pub use pam_bindings::constants::{PamFlag, PamResultCode};
 pub use pam_bindings::module::{PamHandle, PamHooks};
 use soos_protocol::types::{EventKind, ReasonClass, Verdict};
 
-/// Sends an informational message to the PAM client (display manager / lock screen) via PAM conversation.
+/// The PAM environment seen by the authentication flow (review PAM-07, GitHub #220).
 ///
-/// Fail-safe: if the client does not provide a conversation handler or if conversation fails,
-/// the message is silently discarded without panicking or affecting authentication flow.
-fn send_pam_info(pamh: &Option<&mut PamHandle>, msg: &str) {
-    if let Some(h) = usable_handle(pamh) {
-        if let Ok(Some(conv)) = h.get_item::<pam_bindings::conv::Conv<'_>>() {
+/// [`SoosPam::authenticate_with_feedback`] reaches the PAM conversation, the user lookup
+/// and the `PAM_SERVICE` item ONLY through this trait, so the flow is unit-testable with
+/// a recorder instead of a fake libpam pointer. Implementations must never panic and
+/// must discard conversation failures: feedback never influences the verdict.
+pub trait PamFeedback {
+    /// Shows `msg` to the user as `PAM_TEXT_INFO`; failures are silently discarded.
+    fn info(&mut self, msg: &str);
+    /// Returns the PAM user name (`pam_get_user`), or `None` when unavailable.
+    fn user(&mut self) -> Option<String>;
+    /// Returns the raw `PAM_SERVICE` item, or `None` when unset or unreadable.
+    fn service(&mut self) -> Option<Vec<u8>>;
+}
+
+/// Linux-PAM handle adapter.
+///
+/// Transitional guard (GitHub #220): the pre-existing tests in
+/// `crates/pam/tests/pam_bindings_tests.rs` drive `PamHooks::sm_authenticate` with a
+/// dummy `0x1000` handle, so every libpam call below is skipped for addresses in the
+/// first 64 KiB until those tests move to a real `pam_start` handle (proposal recorded in
+/// walkthrough 122). The guard lives only here; the flow itself never inspects pointers.
+impl PamFeedback for PamHandle {
+    fn info(&mut self, msg: &str) {
+        if !is_libpam_handle(self) {
+            return;
+        }
+        if let Ok(Some(conv)) = self.get_item::<pam_bindings::conv::Conv<'_>>() {
             let _ = conv.send(pam_bindings::constants::PAM_TEXT_INFO, msg);
+        }
+    }
+
+    fn user(&mut self) -> Option<String> {
+        if !is_libpam_handle(self) {
+            return None;
+        }
+        self.get_user(None).ok()
+    }
+
+    fn service(&mut self) -> Option<Vec<u8>> {
+        if !is_libpam_handle(self) {
+            return None;
+        }
+        match self.get_item::<pam_bindings::items::Service<'_>>() {
+            Ok(Some(service)) => Some(service.0.to_bytes().to_vec()),
+            _ => None,
         }
     }
 }
 
-/// Returns the handle only if it can be passed to libpam: test harnesses use dummy
-/// low addresses (< 0x10000) that must never be dereferenced by `pam_get_item`.
-fn usable_handle<'h>(pamh: &'h Option<&mut PamHandle>) -> Option<&'h PamHandle> {
-    let h: &PamHandle = pamh.as_deref()?;
+/// See the transitional guard on `impl PamFeedback for PamHandle`.
+fn is_libpam_handle(h: &PamHandle) -> bool {
     let addr = h as *const PamHandle as usize;
-    (addr >= 0x10000).then_some(h)
+    addr >= 0x10000
+}
+
+/// No PAM handle (null `pamh`): no conversation, no user, no service item.
+struct Detached;
+
+impl PamFeedback for Detached {
+    fn info(&mut self, _msg: &str) {}
+
+    fn user(&mut self) -> Option<String> {
+        None
+    }
+
+    fn service(&mut self) -> Option<Vec<u8>> {
+        None
+    }
 }
 
 /// Returns `config` with the `PAM_SERVICE` item applied (review PAM-05, GitHub #176).
 ///
 /// An explicit `service=` argument keeps precedence; a missing or unreadable item keeps
 /// the configured value.
-fn with_pam_service(pamh: &Option<&mut PamHandle>, config: &PamConfig) -> PamConfig {
+fn with_pam_service(feedback: &mut dyn PamFeedback, config: &PamConfig) -> PamConfig {
     let mut resolved = config.clone();
     if !resolved.service_from_args {
-        if let Some(h) = usable_handle(pamh) {
-            if let Ok(Some(service)) = h.get_item::<pam_bindings::items::Service<'_>>() {
-                resolved.apply_pam_service(service.0.to_bytes());
-            }
+        if let Some(service) = feedback.service() {
+            resolved.apply_pam_service(&service);
         }
     }
     resolved
+}
+
+/// Returns true when the caller asked for no conversation (`PAM_SILENT`, GitHub #221).
+fn is_silent(flags: PamFlag) -> bool {
+    flags & pam_bindings::constants::PAM_SILENT != 0
 }
 
 /// User-facing feedback for an authentication outcome (review PAM-03, GitHub #174).
@@ -108,18 +164,17 @@ pub const PAM_IGNORE: i32 = 25;
 pub struct SoosPam;
 
 impl SoosPam {
-    /// Internal authentication logic shared between `PamHooks` and C ABI exports.
+    /// Authenticates with no PAM flags (compatibility entry for callers without flags).
     ///
-    /// # Panic Safety Guarantee
-    ///
-    /// All internal execution is wrapped in `catch_unwind`. Any panic triggers a syslog
-    /// alert with source location and backtrace summary, and systematically returns
-    /// [`PamResultCode::PAM_IGNORE`].
+    /// `None` means no PAM handle: no conversation, no user lookup, no service item.
     pub fn authenticate_with_config(
         pamh: Option<&mut PamHandle>,
         config: &PamConfig,
     ) -> PamResultCode {
-        Self::authenticate_with_uid_resolver(pamh, config, default_uid_resolver)
+        match pamh {
+            Some(h) => Self::authenticate_with_feedback(h, config, 0),
+            None => Self::authenticate_with_feedback(&mut Detached, config, 0),
+        }
     }
 
     /// [`Self::authenticate_with_config`] with an injectable username -> UID resolver.
@@ -134,12 +189,49 @@ impl SoosPam {
     ///   `EVENT_TIMEOUT_MS` after resolution;
     /// - either overrun is logged at `LOG_INFO` (duration only, never the username).
     pub fn authenticate_with_uid_resolver<R>(
-        mut pamh: Option<&mut PamHandle>,
+        pamh: Option<&mut PamHandle>,
         config: &PamConfig,
         resolve_uid: R,
     ) -> PamResultCode
     where
-        R: FnOnce(Option<&mut PamHandle>) -> u32,
+        R: FnOnce(&mut dyn PamFeedback) -> u32,
+    {
+        match pamh {
+            Some(h) => Self::authenticate_flow(h, config, 0, resolve_uid),
+            None => Self::authenticate_flow(&mut Detached, config, 0, resolve_uid),
+        }
+    }
+
+    /// Internal authentication logic shared between `PamHooks` and C ABI exports.
+    ///
+    /// `flags` are the Linux-PAM flags of the call: with `PAM_SILENT` no conversation
+    /// message is ever sent (GitHub #221). "Looking for face..." is only sent once the
+    /// daemon socket is connected, so an absent or stopped daemon never announces a
+    /// lookup it cannot perform.
+    ///
+    /// # Panic Safety Guarantee
+    ///
+    /// All internal execution is wrapped in `catch_unwind`. Any panic triggers a syslog
+    /// alert with source location and backtrace summary, and systematically returns
+    /// [`PamResultCode::PAM_IGNORE`].
+    pub fn authenticate_with_feedback(
+        feedback: &mut dyn PamFeedback,
+        config: &PamConfig,
+        flags: PamFlag,
+    ) -> PamResultCode {
+        Self::authenticate_flow(feedback, config, flags, default_uid_resolver)
+    }
+
+    /// The authentication flow: [`Self::authenticate_with_feedback`] with an injectable
+    /// username -> UID resolver (see [`Self::authenticate_with_uid_resolver`]).
+    fn authenticate_flow<R>(
+        feedback: &mut dyn PamFeedback,
+        config: &PamConfig,
+        flags: PamFlag,
+        resolve_uid: R,
+    ) -> PamResultCode
+    where
+        R: FnOnce(&mut dyn PamFeedback) -> u32,
     {
         syslog::init_panic_hook();
 
@@ -148,7 +240,8 @@ impl SoosPam {
             #[cfg(feature = "fault-injection")]
             fault_injection::trigger(config.fault_inject);
 
-            let resolved = with_pam_service(&pamh, config);
+            let silent = is_silent(flags);
+            let resolved = with_pam_service(feedback, config);
             let config = &resolved;
 
             if config.is_disabled() {
@@ -165,7 +258,7 @@ impl SoosPam {
             let resolution_start = std::time::Instant::now();
             let uid = match config.uid {
                 Some(uid) => uid,
-                None => resolve_uid(pamh.as_deref_mut()),
+                None => resolve_uid(&mut *feedback),
             };
             let resolution_elapsed = resolution_start.elapsed();
 
@@ -193,10 +286,14 @@ impl SoosPam {
                 return PamResultCode::PAM_IGNORE;
             }
 
-            send_pam_info(&pamh, "[soos] Looking for face...");
-
-            let outcome = ipc::authenticate_before(config, uid, auth_deadline);
-            send_pam_info(&pamh, feedback_message(&outcome));
+            let outcome = ipc::authenticate_before_with_progress(config, uid, auth_deadline, || {
+                if !silent {
+                    feedback.info("[soos] Looking for face...");
+                }
+            });
+            if !silent {
+                feedback.info(feedback_message(&outcome));
+            }
 
             // PAM_SUCCESS exclusively on a daemon Allow; every other outcome falls back.
             match outcome {
@@ -227,13 +324,26 @@ impl SoosPam {
     }
 }
 
+/// Production username -> UID resolver: `pam_get_user` (through [`PamFeedback::user`]) +
+/// `getpwnam_r`, falling back to the caller's real UID when the handle, the username or
+/// the passwd entry is unavailable.
+fn default_uid_resolver(feedback: &mut dyn PamFeedback) -> u32 {
+    if let Some(username) = feedback.user() {
+        if let Some(resolved_uid) = resolve_username_to_uid(&username) {
+            return resolved_uid;
+        }
+    }
+    // SAFETY: getuid is a safe, non-allocating libc syscall returning caller process UID.
+    unsafe { libc::getuid() }
+}
+
 impl PamHooks for SoosPam {
-    fn sm_authenticate(pamh: &mut PamHandle, args: Vec<&CStr>, _flags: PamFlag) -> PamResultCode {
+    fn sm_authenticate(pamh: &mut PamHandle, args: Vec<&CStr>, flags: PamFlag) -> PamResultCode {
         syslog::init_panic_hook();
 
         let result = catch_unwind(AssertUnwindSafe(|| {
             let config = parse_cstrs(args);
-            Self::authenticate_with_config(Some(pamh), &config)
+            Self::authenticate_with_feedback(pamh, &config, flags)
         }));
 
         match result {
@@ -257,20 +367,6 @@ impl PamHooks for SoosPam {
     fn sm_setcred(_pamh: &mut PamHandle, _args: Vec<&CStr>, _flags: PamFlag) -> PamResultCode {
         PamResultCode::PAM_IGNORE
     }
-}
-
-/// Production username -> UID resolver: `pam_get_user` + `getpwnam_r`, falling back to the
-/// caller's real UID when the handle, the username or the passwd entry is unavailable.
-fn default_uid_resolver(pamh: Option<&mut PamHandle>) -> u32 {
-    if let Some(h) = pamh {
-        if let Ok(username) = h.get_user(None) {
-            if let Some(resolved_uid) = resolve_username_to_uid(&username) {
-                return resolved_uid;
-            }
-        }
-    }
-    // SAFETY: getuid is a safe, non-allocating libc syscall returning caller process UID.
-    unsafe { libc::getuid() }
 }
 
 /// Initial allocation buffer size for `getpwnam_r` lookups (1 KB).
@@ -403,7 +499,7 @@ fn catch_c_entry<F: FnOnce() -> i32>(f: F) -> i32 {
 #[no_mangle]
 pub extern "C" fn pam_sm_authenticate(
     pamh: *mut PamHandle,
-    _flags: i32,
+    flags: i32,
     argc: i32,
     argv: *const *const u8,
 ) -> i32 {
@@ -418,7 +514,15 @@ pub extern "C" fn pam_sm_authenticate(
         // SAFETY: argv points to argc pointers passed across the C ABI; wrapped in catch_unwind to prevent unwinding across FFI.
         let config = unsafe { config::parse_argv(argc, argv) };
 
-        match SoosPam::authenticate_with_config(pamh_opt, &config) {
+        // Linux-PAM passes `unsigned int flags`; the C ABI signature declares `int`, so
+        // reinterpret the bits unchanged.
+        let pam_flags = PamFlag::from_ne_bytes(flags.to_ne_bytes());
+        let code = match pamh_opt {
+            Some(h) => SoosPam::authenticate_with_feedback(h, &config, pam_flags),
+            None => SoosPam::authenticate_with_feedback(&mut Detached, &config, pam_flags),
+        };
+
+        match code {
             PamResultCode::PAM_SUCCESS => PAM_SUCCESS,
             _ => PAM_IGNORE,
         }

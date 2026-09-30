@@ -50,9 +50,9 @@ impl PamHooks for SoosPam {
     fn sm_authenticate(
         pamh: &mut PamHandle,
         args: Vec<&CStr>,
-        _flags: PamFlag,
+        flags: PamFlag,
     ) -> PamResultCode {
-        // Authenticates user via synchronous IPC to daemon
+        // Authenticates user via synchronous IPC to daemon; `flags` carries PAM_SILENT
     }
 
     fn sm_setcred(
@@ -66,6 +66,14 @@ impl PamHooks for SoosPam {
 ```
 
 Standard PAM C ABI entrypoints (`pam_sm_authenticate`, `pam_sm_setcred`, `pam_sm_acct_mgmt`, `pam_sm_chauthtok`, `pam_sm_open_session`, `pam_sm_close_session`) are exported as `extern "C"` functions delegating to `SoosPam`.
+
+Both authentication entry points forward their Linux-PAM `flags` to
+`SoosPam::authenticate_with_feedback(feedback, config, flags)`. The flow reaches libpam only
+through the `PamFeedback` trait (`info` = `PAM_TEXT_INFO` conversation, `user` =
+`pam_get_user`, `service` = `PAM_SERVICE` item; review PAM-07, GitHub #220), implemented for
+`PamHandle` and for a detached no-handle value; tests use a recorder
+(`crates/pam/tests/pam_feedback_tests.rs`). `authenticate_with_config(Option<&mut PamHandle>,
+config)` remains as the flag-less compatibility entry.
 
 ---
 
@@ -129,6 +137,17 @@ Feedback is sent through `PAM_TEXT_INFO` to the **unauthenticated** user and the
 | `Verdict::Allow` | `[soos] Face recognized. Unlocking...` |
 | `Verdict::Deny` (any reason, including a PAD / anti-spoofing rejection) | `[soos] Face not recognized.` |
 | `Verdict::Unavailable`, `Verdict::ProtocolError`, or any IPC error | `[soos] Face verification unavailable.` |
+
+Conversation rules (review PAM-08, GitHub #221):
+
+- **`PAM_SILENT`**: when the bit is set in `flags` (`pam_authenticate(pamh, PAM_SILENT)`, used by
+  cron and some `su` / `sshd` paths), no message of this table is sent; the verdict and the
+  `PAM_IGNORE` fallback are unchanged.
+- **Daemon absent or stopped**: "Looking for face..." is sent only after the daemon socket is
+  connected (`ipc::authenticate_with_progress`), inside the cumulative deadline. When the
+  connection fails (`ENOENT`, `ECONNREFUSED`) at most the single generic
+  "Face verification unavailable." line is shown (see walkthrough 122 for the pending decision
+  on suppressing it too).
 
 Distinguishing a spoof rejection from a non-match would give a presentation attacker an oracle to iterate spoof material; distinguishing camera or model state would disclose device state to whoever sits at the locked machine. The detailed `ReasonClass` stays in the daemon logs only.
 - **Memory Zeroization**: The `soos-protocol` `Request` and `Response` structs implement `zeroize::Zeroize` and `Drop`. In addition, intermediate buffers and cryptographic nonces (`request_id`, `len_buf`, `full_buf`, `encoded`) are wrapped in `Zeroizing` wrappers to guarantee prompt memory erasure when dropped.
