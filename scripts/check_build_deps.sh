@@ -208,7 +208,7 @@ else
 fi
 case " ${MISSING[*]} " in
     *" cargo "*|*" rustc "*)
-        echo "Rust toolchain: install rustup from https://rustup.rs (rust-toolchain.toml selects the channel)." >&2
+        echo "Rust toolchain: run ./scripts/install_rustup.sh (verified rustup-init, installs the release pinned by rust-toolchain.toml)." >&2
         ;;
 esac
 exit 1

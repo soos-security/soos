@@ -27,9 +27,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         git \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Rust toolchain
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-    | sh -s -- -y --default-toolchain 1.98.1 --profile minimal \
+# Install Rust toolchain: verified rustup-init (pinned SHA-256, no curl | sh, GitHub #260)
+COPY scripts/install_rustup.sh /usr/local/lib/soos/install_rustup.sh
+RUN bash /usr/local/lib/soos/install_rustup.sh --default-toolchain 1.98.1 \
     && rustup component add clippy rustfmt
 
 # Create testuser with known password

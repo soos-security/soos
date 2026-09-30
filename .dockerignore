@@ -1,4 +1,7 @@
 # The PAM sandbox images (Dockerfile, tests/docker/Dockerfile.*) never COPY
 # sources: the workspace is bind-mounted at runtime. Sending an empty build
-# context avoids uploading target/ (several GB) to the Docker daemon.
+# context avoids uploading target/ (several GB) to the Docker daemon. The only
+# exception is the verified rustup bootstrap (GitHub #260), copied into every
+# image before the toolchain install.
 *
+!scripts/install_rustup.sh
