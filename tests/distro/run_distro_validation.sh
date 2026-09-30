@@ -83,7 +83,7 @@ Options:
   --skip-docker            Execute the native distro script on THIS host (no container);
                            requires --allow-host-changes
   --allow-host-changes     Consent to install packages and rewrite PAM files on this host
-  --skip-build             Skip cargo build if release binaries are present
+  --skip-build             Skip cargo build and use the existing release binaries
   -h, --help               Display this help message and exit
 
 Without --dry-run and --skip-docker, every distribution runs in a disposable
