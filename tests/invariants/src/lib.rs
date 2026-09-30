@@ -35,6 +35,10 @@ mod pam_deadline_contract;
 #[cfg(all(test, unix))]
 mod sync_issue_contract;
 
+/// Camera documentation drift invariants (GitHub #197, CAM-15).
+#[cfg(test)]
+mod camera_docs_contract;
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,

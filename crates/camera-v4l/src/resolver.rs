@@ -16,7 +16,8 @@
 //!    reports the device as missing and backs off).
 
 use crate::sensor::{
-    enumerate_capture_devices, select_camera_device, CameraDeviceInfo, SensorPreference, SensorType,
+    enumerate_capture_devices, frame_sizes_at, select_camera_device_with, CameraDeviceInfo,
+    SensorHints, SensorPreference, SensorType, MAX_FRAME_SIZE_HINTS,
 };
 use std::path::{Path, PathBuf};
 
@@ -66,6 +67,53 @@ pub trait CameraEnumerator {
 
     /// Returns `(alias, canonical target)` pairs for the persistent by-id aliases.
     fn by_id_aliases(&self) -> Vec<(PathBuf, PathBuf)>;
+
+    /// Returns the frame sizes (`width`, `height`) the node advertises, used as a sensor
+    /// classification hint (GitHub #195). The default reports none (no hint).
+    fn frame_sizes(&self, _device: &CameraDeviceInfo) -> Vec<(u32, u32)> {
+        Vec::new()
+    }
+}
+
+/// Returns the by-id alias of `device` among `aliases` (matched on the canonical node path or
+/// the raw path), if any.
+fn alias_for(device: &CameraDeviceInfo, aliases: &[(PathBuf, PathBuf)]) -> Option<PathBuf> {
+    let node = std::fs::canonicalize(&device.path).unwrap_or_else(|_| device.path.clone());
+    aliases
+        .iter()
+        .find(|(_, target)| *target == node || *target == device.path)
+        .map(|(alias, _)| alias.clone())
+}
+
+/// Builds the classification hints of `device`: its by-id link name and its frame sizes.
+fn sensor_hints_for(
+    device: &CameraDeviceInfo,
+    aliases: &[(PathBuf, PathBuf)],
+    enumerator: &dyn CameraEnumerator,
+) -> SensorHints {
+    let by_id_name = alias_for(device, aliases)
+        .and_then(|alias| {
+            alias
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+        })
+        .or_else(|| by_id_name_of_path(&device.path));
+    let mut frame_sizes = enumerator.frame_sizes(device);
+    frame_sizes.truncate(MAX_FRAME_SIZE_HINTS);
+    SensorHints {
+        by_id_name,
+        frame_sizes,
+    }
+}
+
+/// Returns the file name of `path` when it is itself a `/dev/v4l/by-id/` link.
+pub(crate) fn by_id_name_of_path(path: &Path) -> Option<String> {
+    let parent = path.parent()?;
+    if parent.file_name()? != "by-id" {
+        return None;
+    }
+    path.file_name()
+        .map(|name| name.to_string_lossy().into_owned())
 }
 
 /// Enumerator backed by `/sys/class/video4linux` and `/dev/v4l/by-id/`.
@@ -94,6 +142,10 @@ impl SystemCameraEnumerator {
 impl CameraEnumerator for SystemCameraEnumerator {
     fn capture_devices(&self) -> Vec<CameraDeviceInfo> {
         enumerate_capture_devices()
+    }
+
+    fn frame_sizes(&self, device: &CameraDeviceInfo) -> Vec<(u32, u32)> {
+        frame_sizes_at(&device.path)
     }
 
     fn by_id_aliases(&self) -> Vec<(PathBuf, PathBuf)> {
@@ -152,7 +204,20 @@ pub fn resolve_camera_device(
     }
 
     let devices = enumerator.capture_devices();
-    let Some(selected) = select_camera_device(&devices, preference) else {
+    let aliases = enumerator.by_id_aliases();
+    // Classify each node once with its by-id name and frame sizes (GitHub #195).
+    let classified: Vec<SensorType> = devices
+        .iter()
+        .map(|d| d.sensor_type_with_hints(&sensor_hints_for(d, &aliases, enumerator)))
+        .collect();
+    let classify = |device: &CameraDeviceInfo| {
+        devices
+            .iter()
+            .position(|d| std::ptr::eq(d, device))
+            .and_then(|i| classified.get(i).copied())
+            .unwrap_or_else(|| device.sensor_type())
+    };
+    let Some(selected) = select_camera_device_with(&devices, preference, classify) else {
         return CameraResolution {
             path: PathBuf::from(AUTO_CAMERA_DEVICE),
             source: CameraResolutionSource::Fallback,
@@ -160,14 +225,9 @@ pub fn resolve_camera_device(
         };
     };
 
-    let node = std::fs::canonicalize(&selected.path).unwrap_or_else(|_| selected.path.clone());
-    let path = enumerator
-        .by_id_aliases()
-        .into_iter()
-        .find(|(_, target)| *target == node || *target == selected.path)
-        .map_or_else(|| selected.path.clone(), |(alias, _)| alias);
+    let path = alias_for(selected, &aliases).unwrap_or_else(|| selected.path.clone());
 
-    let sensor_type = selected.sensor_type();
+    let sensor_type = classify(selected);
     tracing::info!(
         selected = %path.display(),
         node = %selected.path.display(),

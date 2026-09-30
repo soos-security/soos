@@ -149,7 +149,7 @@ Each step records at most `MAX_SAMPLES_PER_STEP` (20) samples (`GuidedEnrollment
 - `--biometrics-dir <PATH>`: Override biometric template storage directory (default: `/var/lib/soos/biometrics`).
 - `--key-file <PATH>`: Override cryptographic master key path (default: `/var/lib/soos/master.key`).
 - `--models-dir <PATH>`: Override ONNX neural models directory (default: `/var/lib/soos/models`).
-- `--camera-device <PATH>`: Override V4L2 camera device node. Without it (or with `auto`/`default`), the device is resolved exactly like `soos-daemon` through the shared `soos_camera_v4l::resolve_camera_device`: `[pipeline] camera_device` from `/etc/soos/daemon.toml` if explicit, otherwise the capture node matching `[pipeline] sensor_preference` (default IR first), reported through its stable `/dev/v4l/by-id/` alias (GitHub #152).
+- `--camera-device <PATH>`: Override V4L2 camera device node. Without it (or with `auto`/`default`), the device is resolved exactly like `soos-daemon` through the shared `soos_camera_v4l::resolve_camera_device`: `[pipeline] camera_device` from `/etc/soos/daemon.toml` if explicit, otherwise the capture node matching `[pipeline] sensor_preference` (default IR first), reported through its stable `/dev/v4l/by-id/` alias when udev created one, otherwise as the `/dev/videoN` node itself; with no capture node at all the `/dev/v4l/by-id/default-camera` sentinel is returned and opening it fails as "device not found" (GitHub #152, #197). The selection is pinned by the hermetic fixture table in `crates/enrollment-cli/tests/device_resolution_hermetic_tests.rs`.
 
 ---
 

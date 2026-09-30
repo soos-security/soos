@@ -11,6 +11,11 @@ use thiserror::Error;
 
 use crate::error::DaemonError;
 
+pub use crate::preview_image::{
+    preview_image_for_frame, wire_format_code, PreviewImage, MAX_PREVIEW_PIXEL_BYTES,
+    MAX_PREVIEW_WIDTH, PREVIEW_FORMAT_EMPTY, PREVIEW_HEADER_RESERVE,
+};
+
 /// Maximum number of entries accepted in `[preview] allowed_uids` (bounded configuration).
 pub const MAX_PREVIEW_ALLOWED_UIDS: usize = 64;
 
