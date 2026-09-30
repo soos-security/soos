@@ -870,3 +870,130 @@ fn test_c_abi_all_entry_points_panic_safe() {
         PAM_IGNORE
     );
 }
+
+// ---------------------------------------------------------------------------
+// GitHub #173 (review PAM-02): the read deadline is cumulative across every read()
+// syscall, so a daemon that drip-feeds its response cannot extend the PAM wait.
+// ---------------------------------------------------------------------------
+
+/// Spawns a daemon that answers `Verdict::Allow` bound to the request, sending the
+/// 4-byte header at once and then the body one byte every `byte_interval`.
+fn spawn_drip_feeding_allow_daemon(
+    listener: UnixListener,
+    byte_interval: Duration,
+) -> thread::JoinHandle<()> {
+    thread::spawn(move || {
+        let Ok((mut stream, _)) = listener.accept() else {
+            return;
+        };
+        let mut len_buf = [0u8; 4];
+        if stream.read_exact(&mut len_buf).is_err() {
+            return;
+        }
+        let size = u32::from_be_bytes(len_buf) as usize;
+        let mut full_req = len_buf.to_vec();
+        let mut body = vec![0u8; size];
+        if stream.read_exact(&mut body).is_err() {
+            return;
+        }
+        full_req.extend_from_slice(&body);
+        let req: Request = decode(&full_req).expect("decoded request");
+
+        let resp = Response {
+            version: CURRENT_VERSION,
+            request_id: req.request_id,
+            verdict: Verdict::Allow,
+            reason_class: ReasonClass::FaceMatch,
+            issued_monotonic_ns: 1000,
+            expires_monotonic_ns: 2000,
+        };
+        let encoded = encode(&resp).expect("encoded response");
+        let (header, payload) = encoded.split_at(4);
+        if stream.write_all(header).is_err() {
+            return;
+        }
+        for byte in payload {
+            thread::sleep(byte_interval);
+            // The client hangs up once its deadline expires: stop dripping.
+            if stream.write_all(std::slice::from_ref(byte)).is_err() {
+                return;
+            }
+        }
+    })
+}
+
+/// PAM-02 contract: 1 body byte per 70 ms with timeout_ms=100 must fail closed to
+/// PAM_IGNORE within the budget (previously Allow was honored after ~2.6 s).
+#[test]
+fn test_ipc_drip_fed_body_respects_cumulative_deadline() {
+    let tmp = tempdir().expect("tempdir created");
+    let sock_path = tmp.path().join("drip_body.sock");
+    let listener = UnixListener::bind(&sock_path).expect("bound test socket");
+    let server_handle = spawn_drip_feeding_allow_daemon(listener, Duration::from_millis(70));
+
+    let sock_arg = format!("socket_path={}", sock_path.display());
+    let (_storage, ptrs) = make_pam_args(&[&sock_arg, "timeout_ms=100"]);
+
+    let start = Instant::now();
+    let code = pam_sm_authenticate(ptr::null_mut(), 0, ptrs.len() as i32, ptrs.as_ptr());
+    let elapsed = start.elapsed();
+
+    assert_eq!(
+        code, PAM_IGNORE,
+        "a verdict completed after the deadline must never authorize"
+    );
+    assert!(
+        elapsed < Duration::from_millis(250),
+        "drip-fed body extended the PAM wait to {elapsed:?} (timeout_ms=100)"
+    );
+
+    let _ = server_handle.join();
+}
+
+/// PAM-02 contract at the IPC layer: the drip-fed body maps to `IpcError::Timeout`.
+#[test]
+fn test_ipc_direct_drip_fed_body_returns_timeout() {
+    let tmp = tempdir().expect("tempdir created");
+    let sock_path = tmp.path().join("drip_direct.sock");
+    let listener = UnixListener::bind(&sock_path).expect("bound test socket");
+    let server_handle = spawn_drip_feeding_allow_daemon(listener, Duration::from_millis(70));
+
+    let config = pam_soos::config::PamConfig {
+        timeout_ms: 100,
+        socket_path: sock_path,
+        ..Default::default()
+    };
+
+    let start = Instant::now();
+    let result = pam_soos::ipc::authenticate(&config, 1000);
+    let elapsed = start.elapsed();
+
+    assert!(
+        matches!(result, Err(pam_soos::ipc::IpcError::Timeout)),
+        "Expected IpcError::Timeout but got: {result:?}"
+    );
+    assert!(
+        elapsed < Duration::from_millis(250),
+        "drip-fed body extended authenticate() to {elapsed:?} (timeout_ms=100)"
+    );
+
+    let _ = server_handle.join();
+}
+
+/// Regression guard for PAM-02: a fragmented response that completes inside the
+/// budget is still accepted (the cumulative deadline does not break partial reads).
+#[test]
+fn test_ipc_fragmented_body_within_budget_is_accepted() {
+    let tmp = tempdir().expect("tempdir created");
+    let sock_path = tmp.path().join("fragmented_ok.sock");
+    let listener = UnixListener::bind(&sock_path).expect("bound test socket");
+    let server_handle = spawn_drip_feeding_allow_daemon(listener, Duration::from_millis(2));
+
+    let sock_arg = format!("socket_path={}", sock_path.display());
+    let (_storage, ptrs) = make_pam_args(&[&sock_arg, "timeout_ms=1000"]);
+
+    let code = pam_sm_authenticate(ptr::null_mut(), 0, ptrs.len() as i32, ptrs.as_ptr());
+    assert_eq!(code, PAM_SUCCESS);
+
+    let _ = server_handle.join();
+}

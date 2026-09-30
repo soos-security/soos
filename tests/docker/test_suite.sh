@@ -14,6 +14,8 @@
 #   - T9: Model deployment script integrity (manifest dry-run)
 #   - T10: Panic inside the RELEASE-built .so returns PAM_IGNORE (never aborts
 #          the PAM host process) — review finding PAM-01 / TCI-01 (GitHub #148)
+#   - T11: /etc/soos/gdm.disable disables a `gdm-password` line without a
+#          service= argument (PAM_SERVICE item) — review PAM-05 (GitHub #176)
 # =============================================================================
 
 set -euo pipefail
@@ -102,9 +104,16 @@ cleanup_fault_injection() {
     rm -f /etc/pam.d/test-soos-fault-panic /etc/pam.d/test-soos-fault-overflow
 }
 
+# T11 artifacts: GDM-named PAM service and the gdm.disable flag.
+T11_SERVICE="gdm-password"
+cleanup_gdm_disable() {
+    rm -f /etc/soos/gdm.disable "/etc/pam.d/${T11_SERVICE}"
+}
+
 cleanup_all() {
     cleanup_daemon
     cleanup_fault_injection
+    cleanup_gdm_disable
 }
 trap cleanup_all EXIT INT TERM
 
@@ -383,6 +392,61 @@ EOF
     success "T10 (${FAULT_MODE}) passed: invalid password still rejected after in-module panic (exit ${T10_RC})."
 done
 cleanup_fault_injection
+
+# ---------------------------------------------------------------------------
+# T11: gdm.disable honored through the PAM_SERVICE item (PAM-05 / GitHub #176)
+# ---------------------------------------------------------------------------
+# The line installed by `soos-admin gdm enable` carries no `service=` argument.
+# The module must read PAM_SERVICE ("gdm-password") so that the flag written by
+# `soos-admin gdm disable` (/etc/soos/gdm.disable) really disables facial login.
+echo ""
+info "-------------------------------------------------------------------"
+info "T11: /etc/soos/gdm.disable Disables the GDM Line via PAM_SERVICE"
+info "-------------------------------------------------------------------"
+cleanup_daemon
+cleanup_gdm_disable
+mkdir -p /etc/soos
+cat > "/etc/pam.d/${T11_SERVICE}" <<EOF
+# T11 PAM service: same arguments as the soos-admin GDM line (no service= argument)
+auth  [success=done default=ignore]  pam_soos.so timeout_ms=250
+auth  required                       pam_unix.so
+account required pam_unix.so
+session required pam_unix.so
+EOF
+python3 tests/docker/mock_daemon.py --mode allow --socket /run/soos/daemon.sock &
+MOCK_PID=$!
+sleep 0.2
+
+# Control: without the flag the Allow verdict authenticates with zero prompts.
+if /usr/local/bin/pam_test_runner "${T11_SERVICE}" testuser; then
+    success "T11 control passed: ${T11_SERVICE} authenticated facially without the flag."
+else
+    error "T11 control failed: ${T11_SERVICE} did not authenticate facially without the flag."
+    exit 1
+fi
+
+touch /etc/soos/gdm.disable
+# With the flag the module must return PAM_IGNORE: the password prompt is reached,
+# so a run without password must fail even though the daemon answers Allow.
+if /usr/local/bin/pam_test_runner "${T11_SERVICE}" testuser 2>/dev/null; then
+    error "T11 failed: gdm.disable present but ${T11_SERVICE} still authenticated facially!"
+    exit 1
+fi
+success "T11 passed: gdm.disable made ${T11_SERVICE} fall back to the password prompt."
+
+if /usr/local/bin/pam_test_runner "${T11_SERVICE}" testuser password123; then
+    success "T11 passed: valid password accepted while GDM facial login is disabled."
+else
+    error "T11 failed: valid password rejected while GDM facial login is disabled."
+    exit 1
+fi
+if /usr/local/bin/pam_test_runner "${T11_SERVICE}" testuser wrong_password 2>/dev/null; then
+    error "T11 failed: invalid password accepted while GDM facial login is disabled!"
+    exit 1
+fi
+success "T11 passed: invalid password rejected while GDM facial login is disabled."
+cleanup_daemon
+cleanup_gdm_disable
 
 echo ""
 echo "==================================================================="

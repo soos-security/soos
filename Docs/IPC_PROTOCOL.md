@@ -61,7 +61,7 @@ Returned by the daemon to the PAM module:
   - `Deny`: Authentication failed (no face, multiple faces, low score, PAD anti-spoof rejected).
   - `Unavailable`: Hardware offline, model uninitialized, or deadline expired.
   - `ProtocolError`: Malformed message, mismatched UID, rate-limit reached.
-- `reason_class: ReasonClass`: Internal telemetry diagnostic (must not alter PAM fallback semantics).
+- `reason_class: ReasonClass`: Internal telemetry diagnostic (must not alter PAM fallback semantics). It is **never** shown to the user: the PAM module maps every `Deny` to one neutral text and every other failure to one generic text, so a PAD rejection is indistinguishable from a non-match at the lock screen (review PAM-03, GitHub #174; see `Docs/PAM_MODULE.md` §8).
 - `issued_monotonic_ns: u64`: Generation timestamp.
 - `expires_monotonic_ns: u64`: Short expiration timestamp preventing replay.
 
@@ -136,6 +136,7 @@ In `pam_soos.so`, the synchronous IPC client (`crates/pam/src/ipc.rs`) enforces 
 - Both the 4-byte Big-Endian length header and the variable-length body payload are read using a byte-counted stream reader.
 - If the socket connection is severed prematurely before the declared frame is fully received, the client detects the discrepancy and raises `IpcError::TruncatedResponse { expected, received }`.
 - In accordance with fail-closed security invariants, any truncated response degrades safely to `PAM_IGNORE`.
+- The whole exchange shares one cumulative deadline derived from the clamped `timeout_ms`: the socket timeout is re-armed with the remaining budget before every `read()` / `write()` syscall, and a response completed after the deadline is discarded (`IpcError::Timeout`). A peer sending one byte at a time cannot extend the wait (review PAM-02, GitHub #173).
 
 ---
 
