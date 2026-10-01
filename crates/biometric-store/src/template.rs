@@ -10,7 +10,7 @@ use zeroize::{Zeroize, Zeroizing};
 pub struct BiometricTemplate {
     /// Linux User ID (UID) owning this template.
     pub uid: u32,
-    /// Identifier of the model that generated the embedding (e.g. "arcface_w600k_mbf").
+    /// Identifier of the model that generated the embedding (e.g. "sface_2021dec").
     pub model_id: String,
     /// Semantic version of the biometric model.
     pub model_version: String,

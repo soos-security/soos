@@ -67,7 +67,11 @@ fn test_import_stdin_marker_is_accepted_by_the_cli() {
 fn test_import_reads_embedding_from_stdin() {
     let tmp = tempdir().unwrap();
     let (service, store) = service(&tmp);
-    let json = serde_json::to_string(&vec![0.042f32; soos_enrollment_cli::service::IMPORT_EMBEDDING_DIM]).unwrap();
+    let json = serde_json::to_string(&vec![
+        0.042f32;
+        soos_enrollment_cli::service::IMPORT_EMBEDDING_DIM
+    ])
+    .unwrap();
 
     let outcome = service
         .import_from_reader(&stdin_args(1000), Cursor::new(json.into_bytes()))
@@ -98,9 +102,12 @@ fn test_import_stdin_rejects_oversized_input_while_reading() {
     let (service, store) = service(&tmp);
 
     // A valid array followed by whitespace padding is valid JSON: only the cap rejects it.
-    let mut padded = serde_json::to_string(&vec![0.042f32; soos_enrollment_cli::service::IMPORT_EMBEDDING_DIM])
-        .unwrap()
-        .into_bytes();
+    let mut padded = serde_json::to_string(&vec![
+        0.042f32;
+        soos_enrollment_cli::service::IMPORT_EMBEDDING_DIM
+    ])
+    .unwrap()
+    .into_bytes();
     padded.resize(MAX_IMPORT_INPUT_BYTES + 1, b' ');
     assert!(service
         .import_from_reader(&stdin_args(1000), Cursor::new(padded))
@@ -123,16 +130,20 @@ fn test_import_rejects_malformed_or_non_finite_embeddings() {
     let tmp = tempdir().unwrap();
     let (service, store) = service(&tmp);
 
-    let mut overflowing: Vec<String> = vec!["0.1".to_string(); soos_enrollment_cli::service::IMPORT_EMBEDDING_DIM];
+    let mut overflowing: Vec<String> =
+        vec!["0.1".to_string(); soos_enrollment_cli::service::IMPORT_EMBEDDING_DIM];
     overflowing[7] = "1e39".to_string(); // overflows f32 to +inf
     let payloads: Vec<Vec<u8>> = vec![
         format!("[{}]", overflowing.join(",")).into_bytes(),
         b"[0.1, 0.2".to_vec(),
         b"{\"embedding\": []}".to_vec(),
         b"".to_vec(),
-        serde_json::to_string(&vec![0.1f32; soos_enrollment_cli::service::IMPORT_EMBEDDING_DIM - 1])
-            .unwrap()
-            .into_bytes(),
+        serde_json::to_string(&vec![
+            0.1f32;
+            soos_enrollment_cli::service::IMPORT_EMBEDDING_DIM - 1
+        ])
+        .unwrap()
+        .into_bytes(),
     ];
     for payload in payloads {
         assert!(
@@ -150,9 +161,12 @@ fn test_import_file_rejects_oversized_file() {
     let tmp = tempdir().unwrap();
     let (service, store) = service(&tmp);
     let path = tmp.path().join("big.json");
-    let mut padded = serde_json::to_string(&vec![0.042f32; soos_enrollment_cli::service::IMPORT_EMBEDDING_DIM])
-        .unwrap()
-        .into_bytes();
+    let mut padded = serde_json::to_string(&vec![
+        0.042f32;
+        soos_enrollment_cli::service::IMPORT_EMBEDDING_DIM
+    ])
+    .unwrap()
+    .into_bytes();
     padded.resize(MAX_IMPORT_INPUT_BYTES + 1, b' ');
     std::fs::write(&path, padded).unwrap();
 
@@ -172,7 +186,15 @@ fn test_import_file_rejects_oversized_file() {
 fn test_import_file_owner_must_match_pkexec_uid() {
     let tmp = tempdir().unwrap();
     let path = tmp.path().join("embedding.json");
-    std::fs::write(&path, serde_json::to_string(&vec![0.042f32; soos_enrollment_cli::service::IMPORT_EMBEDDING_DIM]).unwrap()).unwrap();
+    std::fs::write(
+        &path,
+        serde_json::to_string(&vec![
+            0.042f32;
+            soos_enrollment_cli::service::IMPORT_EMBEDDING_DIM
+        ])
+        .unwrap(),
+    )
+    .unwrap();
     let me = nix::unistd::getuid().as_raw();
 
     assert!(read_import_file(&path, None).is_ok());
@@ -189,7 +211,11 @@ fn test_import_file_refuses_symlinks_and_non_regular_files() {
     let target = tmp.path().join("embedding.json");
     std::fs::write(
         &target,
-        serde_json::to_string(&vec![0.042f32; soos_enrollment_cli::service::IMPORT_EMBEDDING_DIM]).unwrap(),
+        serde_json::to_string(&vec![
+            0.042f32;
+            soos_enrollment_cli::service::IMPORT_EMBEDDING_DIM
+        ])
+        .unwrap(),
     )
     .unwrap();
     let link = tmp.path().join("link.json");

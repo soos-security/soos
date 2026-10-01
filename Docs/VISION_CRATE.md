@@ -69,7 +69,7 @@ $$B = \text{clamp}\left(Y + \frac{1815 \cdot (U - 128) + 512}{1024}, 0, 255\righ
 
 ### 2.2 5-Point Landmark Affine Alignment (`align.rs`)
 
-The ArcFace embedding model (an ArcFace ResNet34 attested as `arcface_w600k_mbf`, see `models/README.md`) requires facial images to be aligned to canonical reference facial coordinates on a 112×112 canvas:
+The SFace embedding model (OpenCV Zoo SFace 2021dec, attested as `sface_2021dec`, see `models/README.md`) requires facial images to be aligned to canonical reference facial coordinates on a 112×112 canvas (the same 5-point template as OpenCV `FaceRecognizerSF::alignCrop`):
 
 ```text
 Canonical Target Reference Coordinates (TARGET_LANDMARKS_112):
@@ -97,13 +97,13 @@ additionally skips non-finite candidates (`Docs/INFERENCE_ORT_CRATE.md`).
 
 ### 2.3 Cosine Similarity Matching (`matcher.rs`)
 
-Biometric feature vectors extracted by the ArcFace embedding model are compared via cosine similarity:
+Biometric feature vectors (128D) extracted by the SFace embedding model are compared via cosine similarity:
 $$\text{similarity}(a, b) = \frac{a \cdot b}{\|a\|_2 \|b\|_2}$$
 
 - **Dimension Mismatch Protection**: Verifies `a.len() == b.len()`.
 - **Degenerate Vector Protection**: Rejects zero or near-zero norms ($\le 10^{-12}$).
 - **Output Bounds**: Systematically clamped to the interval $[-1.0, 1.0]$.
-- **Verification Decision**: `match_embeddings` checks `score >= threshold`. The pipeline passes `VisionPipelineConfig::match_threshold`, `DEFAULT_MATCH_THRESHOLD = 0.70` (equal to `soos_policy::ThresholdConfig::DEFAULT_MATCH_THRESHOLD`; conservative literature value not yet recalibrated for the shipped ArcFace ResNet34, GitHub #191).
+- **Verification Decision**: `match_embeddings` checks `score >= threshold`. The pipeline passes `VisionPipelineConfig::match_threshold`, `DEFAULT_MATCH_THRESHOLD = 0.50` (equal to `soos_policy::ThresholdConfig::DEFAULT_MATCH_THRESHOLD`; calibrated for SFace on LFW: FAR 3.9e-6, TAR 0.957, owner decision 2026-10-01, GitHub #278; the retired ArcFace default was 0.70).
 
 ### 2.4 Vision Pipeline Orchestrator (`pipeline.rs`)
 
@@ -119,7 +119,7 @@ $$\text{similarity}(a, b) = \frac{a \cdot b}{\|a\|_2 \|b\|_2}$$
 7. Resizes that window to 80×80 with the `cv2.resize` `INTER_LINEAR` half-pixel convention (`crop_pad_context`). Each additional multi-scale PAD member (`with_additional_pad_model`, GitHub #212, §2.4.2) gets its own window at its own scale.
 8. Evaluates Presentation Attack Detection (`PadDetector`, MiniFASNetV2; several members are fused by `fuse_pad_results`) and short-circuits on spoof (`VisionError::PadFailed`). The decision is **format-aware** (GitHub #169, see §2.4.1): a `PixelFormat::Grey` frame, or any frame from an `Infrared` sensor, must first pass the fail-closed IR gate (`VisionError::IrLivenessGateFailed`) and is scored against the stricter IR threshold.
 9. Warps face to normalized 112×112 RGB crop using 5-point landmarks (`align_face_112`).
-10. Extracts L2-normalized 512D biometric embedding (`EmbeddingExtractor`, ArcFace ResNet34, NHWC input).
+10. Extracts L2-normalized 128D biometric embedding (`EmbeddingExtractor`, SFace 2021dec, NCHW RGB raw input); `VisionPipeline::embedding_dimension()` reports the extractor's dimension so callers bind templates by length (GitHub #278).
 11. Compares against enrolled template via `match_embeddings`.
 
 #### 2.4.0 Single-Source Thresholds (GitHub #251 VIS-09, #215 PAD-10)
@@ -132,7 +132,7 @@ constant of `soos-vision` carried by `VisionPipelineConfig`; no binary passes a 
 |---|---|---|
 | `DEFAULT_MIN_FACE_CONFIDENCE` | 0.70 | `OrtScrfdDetector` candidate threshold and pipeline primary-face threshold |
 | `DEFAULT_NMS_IOU_THRESHOLD` | 0.45 | `OrtScrfdDetector` NMS (`VisionPipelineConfig::nms_iou_threshold`) |
-| `DEFAULT_MATCH_THRESHOLD` | 0.70 | cosine match (= `ThresholdConfig::DEFAULT_MATCH_THRESHOLD`) |
+| `DEFAULT_MATCH_THRESHOLD` | 0.50 | cosine match (= `ThresholdConfig::DEFAULT_MATCH_THRESHOLD`; SFace, GitHub #278) |
 | `DEFAULT_PAD_THRESHOLD` | 0.85 | `OrtPadDetector` threshold and `pad_passes` (= `ThresholdConfig::DEFAULT_PAD_THRESHOLD`) |
 | `DEFAULT_IR_PAD_THRESHOLD` | 0.95 | monochrome frames, `max(pad_threshold, ir_pad_threshold)` |
 
@@ -144,7 +144,9 @@ rejects. Enrollment templates are captured under the authentication values. The 
 applies the policy copy of the PAD threshold a second time in the request consensus
 (`soos_policy::PadAggregator`); operator overrides in `daemon.toml` are validated once and copied
 into both. Previous per-binary literals (GUI 0.60/0.40/0.80, enrollment 0.70/0.40/0.80) were all
-raised to the authentication values; no threshold was lowered.
+raised to the authentication values. The GUI live-match verdict also reads
+`VisionPipelineConfig::match_threshold` (its former `0.70` literal was removed, GitHub #278;
+invariant `vision_threshold_contract::test_no_match_threshold_literal_outside_the_constants`).
 
 #### 2.4.1 Format-Aware PAD Policy for IR / Grey Frames (`ir_liveness.rs`, GitHub #169)
 
@@ -226,10 +228,12 @@ after the confidence check and before the PAD model and the embedding extractor 
 An ignored test, `test_lfw_real_face_evaluation_report`, measures the shipped verification path
 on the public LFW benchmark. It uses the production MJPEG decode, `OrtScrfdDetector` with
 `DEFAULT_MIN_FACE_CONFIDENCE` / `DEFAULT_NMS_IOU_THRESHOLD`, `align_face_112` and
-`OrtEmbeddingExtractor`. It reports 10-fold accuracy, TAR and the cosine threshold at FAR 1e-2
+`OrtEmbeddingExtractor` on the shipped SFace model. It reports 10-fold accuracy, TAR and the cosine threshold at FAR 1e-2
 to 1e-5, FAR and TAR at fixed thresholds (0.40 to 0.70), score distributions,
-failure-to-detect counts and per-stage latency. It covers each pre-processing variant (BGR or
-RGB, `/127.5` or `/128`) and an optional attested candidate model (`SOOS_EVAL_CANDIDATE_DIR`).
+failure-to-detect counts and per-stage latency. It covers SFace (production RGB raw, and BGR
+raw), the retired ArcFace variants (BGR or RGB, `/127.5` or `/128`) when its file is installed,
+loaded through `models/retired_models.toml`, and an optional attested candidate model
+(`SOOS_EVAL_CANDIDATE_DIR`).
 `scripts/fetch_lfw_eval.sh` fetches the data into `~/.cache/soos-eval`. The download is
 bounded and SHA-256 verified, and the script refuses a cache inside the repository.
 
@@ -237,7 +241,8 @@ The harness refuses to run unless `SOOS_EVAL_LFW_DIR`, `SOOS_EVAL_LFW_PAIRS` and
 `SOOS_MODELS_DIR` are set. Images, crops, embeddings and per-pair scores never leave memory,
 and only aggregates are printed. Results and the reproducible command are in walkthrough 160.
 The recalibration proposal built on them is ADR 2026-10-01 "Real-Face Embedding Evaluation and
-Recalibration Proposal" (Proposed). The production defaults are unchanged.
+Recalibration Proposal", accepted on 2026-10-01: SFace (`sface_2021dec`) with
+`DEFAULT_MATCH_THRESHOLD = 0.50` (walkthrough 162).
 
 ### 2.5 Letterbox Padding & Coordinate Projection (`letterbox.rs`)
 
@@ -298,9 +303,10 @@ Automated benchmark results (`bench_tests.rs`) across 50 iterations on 640×480 
 
 These figures use **mock backends only** (no ONNX model runs) and measure only the Rust
 preprocessing path; they are not hardware latency evidence. With the attested
-embedding model, one ArcFace ResNet34 embedding alone measures p50 127.5 ms / p95 170.9 ms on one
-ORT intra-op thread (`soos-inference-ort` `embedding_real_model_tests`, GitHub #191), so the
-150 ms per-capture target is **not** met on real models. The enforced bounds are the daemon's
+embedding model, one SFace embedding measures p50 9.8 ms / p95 11.0 ms on one ORT intra-op
+thread (`soos-inference-ort` `embedding_real_model_tests`, GitHub #278; the retired ArcFace
+ResNet34 measured p50 127.5 ms / p95 170.9 ms), so the embedding stage is no longer the
+bottleneck; the full per-capture cost on real models is bounded by the daemon budget below. The enforced bounds are the daemon's
 `DECISION_BUDGET_MS = 900` and its inference admission estimate; see ADR 2026-09-30 (Face
 Embedding Model Identity & Retention) for the decision to keep this model and the scheduled
 evaluation of a lighter one.

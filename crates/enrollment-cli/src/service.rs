@@ -52,9 +52,9 @@ pub const MODEL_ID_FACE_DETECTOR: &str = "scrfd_500m_kps";
 /// Attested model registry ID for MiniFASNetV2 presentation attack detector.
 pub const MODEL_ID_PAD: &str = "minifasnet_v2_pad";
 
-/// Attested model registry ID of the 512D ArcFace embedding extractor (a tf2onnx ResNet34,
-/// NHWC input; see `models/README.md`, GitHub #191).
-pub const MODEL_ID_EMBEDDING: &str = "arcface_w600k_mbf";
+/// Attested model registry ID of the 128-D SFace embedding extractor (OpenCV Zoo SFace
+/// 2021dec, NCHW RGB raw input; `soos_inference_ort::SHIPPED_EMBEDDING_MODEL`, GitHub #278).
+pub const MODEL_ID_EMBEDDING: &str = soos_inference_ort::SHIPPED_EMBEDDING_MODEL.model_id;
 
 /// Attested `models/manifest.toml` version of the embedding model recorded in enrolled
 /// template metadata (GitHub #182 / STO-09). Pinned to the manifest by
@@ -399,6 +399,10 @@ pub struct MigrationSummary {
     pub templates: StoreMigrationSummary,
     /// Evidence snapshots.
     pub evidence: StoreMigrationSummary,
+    /// UIDs whose template belongs to another embedding model than [`MODEL_ID_EMBEDDING`]
+    /// (for example the retired ArcFace model): `migrate` never converts them, the daemon
+    /// refuses them, the user must re-enroll (GitHub #278). Ascending, metadata only.
+    pub reenrollment_required: Vec<u32>,
 }
 
 impl MigrationSummary {
@@ -531,12 +535,15 @@ pub fn run_migration_with_reasons(
 ) -> Result<MigrationSummary, EnrollmentCliError> {
     check_privileges(require_root)?;
 
-    let templates = match templates {
-        Ok(store) => match store.migrate_legacy_templates(args.dry_run) {
-            Ok(report) => StoreMigrationSummary::from(report),
-            Err(e) => StoreMigrationSummary::store_failed("biometric store", e.to_string()),
-        },
-        Err(reason) => StoreMigrationSummary::skipped(reason),
+    let (templates, reenrollment_required) = match templates {
+        Ok(store) => {
+            let summary = match store.migrate_legacy_templates(args.dry_run) {
+                Ok(report) => StoreMigrationSummary::from(report),
+                Err(e) => StoreMigrationSummary::store_failed("biometric store", e.to_string()),
+            };
+            (summary, foreign_template_uids(store))
+        }
+        Err(reason) => (StoreMigrationSummary::skipped(reason), Vec::new()),
     };
     let evidence = match evidence {
         Some(store) => match store.migrate_legacy_snapshots(args.dry_run) {
@@ -550,7 +557,31 @@ pub fn run_migration_with_reasons(
         dry_run: args.dry_run,
         templates,
         evidence,
+        reenrollment_required,
     })
+}
+
+/// UIDs (ascending) whose readable template records another embedding model than
+/// [`MODEL_ID_EMBEDDING`] or another length than [`IMPORT_EMBEDDING_DIM`] (GitHub #278).
+/// Unreadable templates are skipped here: `migrate` already reports them as failures.
+pub fn foreign_template_uids(store: &BiometricStore) -> Vec<u32> {
+    let Ok(uids) = store.list_enrolled() else {
+        return Vec::new();
+    };
+    let mut foreign: Vec<u32> = uids
+        .into_iter()
+        .filter(|uid| {
+            matches!(store.get_metadata(*uid), Ok(Some(meta))
+            if !soos_inference_ort::template_matches_model(
+                MODEL_ID_EMBEDDING,
+                Some(IMPORT_EMBEDDING_DIM),
+                &meta.model_id,
+                meta.embedding_dim,
+            ))
+        })
+        .collect();
+    foreign.sort_unstable();
+    foreign
 }
 
 /// Resolves the evidence paths of `soos-enroll migrate` (defaults
@@ -839,6 +870,21 @@ impl EnrollmentService {
             .store
             .get(uid)?
             .ok_or(EnrollmentCliError::NotEnrolled(uid))?;
+
+        // Refuse a template of another embedding model or length before any capture
+        // (GitHub #278): embeddings of two models are never compared.
+        if !soos_inference_ort::template_matches_model(
+            MODEL_ID_EMBEDDING,
+            pipeline.embedding_dimension(),
+            &template.model_id,
+            template.embedding.len(),
+        ) {
+            return Err(EnrollmentCliError::TemplateModelMismatch {
+                uid,
+                template_model_id: template.model_id.clone(),
+                template_dimension: template.embedding.len(),
+            });
+        }
 
         let start_total = Instant::now();
 
@@ -1195,8 +1241,9 @@ impl EnrollmentService {
     ///
     /// # Errors
     ///
-    /// [`EnrollmentCliError::InvalidImport`] when the input exceeds the bound or is not a
-    /// 512-value array of finite floats (JSON) or a valid CBOR template; I/O and store errors
+    /// [`EnrollmentCliError::InvalidImport`] when the input exceeds the bound, is not an
+    /// [`IMPORT_EMBEDDING_DIM`]-value array of finite floats (JSON) or a valid CBOR template, or
+    /// belongs to another embedding model than [`MODEL_ID_EMBEDDING`]; I/O and store errors
     /// otherwise. Nothing is stored on error.
     pub fn import_from_reader<R: Read>(
         &self,
@@ -1248,7 +1295,7 @@ impl EnrollmentService {
             uid,
             frames_evaluated: 1,
             best_score: 1.0,
-            embedding_dim: 512,
+            embedding_dim: IMPORT_EMBEDDING_DIM,
             model_id,
             model_version,
             replaced_existing,
@@ -1308,14 +1355,14 @@ impl EnrollmentService {
 
 /// Upper bound on any `import` input, from standard input or from a file (64 KiB).
 ///
-/// A 512-value JSON float array or CBOR template is well below 16 KiB.
+/// A 128-value JSON float array or CBOR template is well below 16 KiB.
 pub const MAX_IMPORT_INPUT_BYTES: usize = 64 * 1024;
 
 /// `--file` value selecting standard input for `import` (GitHub #156).
 pub const IMPORT_STDIN_PATH: &str = "-";
 
-/// Embedding dimension accepted by `import` (ArcFace w600k MBF).
-pub const IMPORT_EMBEDDING_DIM: usize = 512;
+/// Embedding dimension accepted by `import`: the shipped model's (128, SFace, GitHub #278).
+pub const IMPORT_EMBEDDING_DIM: usize = soos_inference_ort::EMBEDDING_DIMENSION;
 
 /// Parses the `PKEXEC_UID` environment value set by `pkexec` for the invoking user.
 ///
@@ -1470,6 +1517,14 @@ fn parse_import_payload(
             ));
         };
 
+    // Only templates of the loaded embedding model are importable (owner decision
+    // 2026-10-01, GitHub #278): embeddings of two models are not convertible.
+    if model_id != MODEL_ID_EMBEDDING {
+        return Err(EnrollmentCliError::InvalidImport(format!(
+            "template model '{model_id}' is not the loaded embedding model \
+             '{MODEL_ID_EMBEDDING}'; re-enroll with `soos-enroll enroll` instead"
+        )));
+    }
     if count != IMPORT_EMBEDDING_DIM || embedding.len() != IMPORT_EMBEDDING_DIM {
         return Err(EnrollmentCliError::InvalidImport(format!(
             "invalid embedding dimension: expected {IMPORT_EMBEDDING_DIM}, found {count}"
@@ -1701,7 +1756,7 @@ pub fn build_full_service_with_notes(
         let camera: Arc<dyn CameraManager> = Arc::new(MockCameraManager::new(camera_config));
         let detector = Arc::new(MockFaceDetector::new_centered_face(640, 480, 0.95));
         let pad = Arc::new(MockPadDetector::new_live());
-        let extractor = Arc::new(MockEmbeddingExtractor::new(512));
+        let extractor = Arc::new(MockEmbeddingExtractor::new(IMPORT_EMBEDDING_DIM));
         let pipeline_config = VisionPipelineConfig::default();
         let pipeline = Arc::new(VisionPipeline::new(
             detector,

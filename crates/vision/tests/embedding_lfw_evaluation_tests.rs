@@ -829,7 +829,11 @@ fn test_lfw_real_face_evaluation_report() {
         reg.verify_integrity()
             .expect("candidate model matches its SHA-256 attestation");
         let ids: Vec<String> = reg.manifest().models.keys().cloned().collect();
-        assert_eq!(ids.len(), 1, "the candidate manifest holds exactly one model");
+        assert_eq!(
+            ids.len(),
+            1,
+            "the candidate manifest holds exactly one model"
+        );
         load_session(&mut reg, &ids[0])
     });
     let active: Vec<&Variant> = VARIANTS

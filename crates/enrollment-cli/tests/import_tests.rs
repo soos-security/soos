@@ -121,7 +121,10 @@ fn test_import_embedding_dimension_mismatch_fails() {
         };
 
         let res = service.import(&args);
-        assert!(res.is_err(), "Must reject embedding with dimension {dim} != 128");
+        assert!(
+            res.is_err(),
+            "Must reject embedding with dimension {dim} != 128"
+        );
     }
 }
 
@@ -181,7 +184,10 @@ fn test_import_refuses_a_template_of_another_model() {
         model_id: "arcface_w600k_mbf".to_string(),
         model_version: "2.0.0".to_string(),
     };
-    assert!(service.import(&args).is_err(), "a retired-model JSON import must be refused");
+    assert!(
+        service.import(&args).is_err(),
+        "a retired-model JSON import must be refused"
+    );
 
     // CBOR template recorded with the retired model (its own id wins over the arguments).
     let template = soos_biometric_store::BiometricTemplate::new(
@@ -199,6 +205,9 @@ fn test_import_refuses_a_template_of_another_model() {
         model_id: MODEL_ID_EMBEDDING.to_string(),
         ..args
     };
-    assert!(service.import(&args).is_err(), "a retired-model CBOR import must be refused");
+    assert!(
+        service.import(&args).is_err(),
+        "a retired-model CBOR import must be refused"
+    );
     assert!(store.get(1000).unwrap().is_none(), "nothing may be stored");
 }

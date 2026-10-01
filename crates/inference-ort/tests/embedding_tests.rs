@@ -162,7 +162,11 @@ fn test_embedding_input_is_raw_0_255() {
     let plane = (width * height) as usize;
     let last = plane - 1;
     // Pixel 0: R=0 on plane 0, G=127 on plane 1, B=255 on plane 2.
-    assert!(input_tensor[0].abs() < 1e-6, "R=0 must stay 0.0, got {}", input_tensor[0]);
+    assert!(
+        input_tensor[0].abs() < 1e-6,
+        "R=0 must stay 0.0, got {}",
+        input_tensor[0]
+    );
     assert!(
         (input_tensor[plane] - 127.0).abs() < 1e-6,
         "G=127 must stay 127.0, got {}",
@@ -242,7 +246,10 @@ fn test_prepare_input_writes_rgb_nchw_planes() {
     let last = 112 * 112 - 1;
     assert!((nchw[last] - 10.0).abs() < 1e-6, "last pixel R");
     assert!((nchw[112 * 112 + last] - 20.0).abs() < 1e-6, "last pixel G");
-    assert!((nchw[2 * 112 * 112 + last] - 30.0).abs() < 1e-6, "last pixel B");
+    assert!(
+        (nchw[2 * 112 * 112 + last] - 30.0).abs() < 1e-6,
+        "last pixel B"
+    );
 }
 
 #[test]

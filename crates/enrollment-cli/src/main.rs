@@ -59,6 +59,19 @@ fn print_migration_summary(summary: &MigrationSummary) {
             println!("  [FAILED] {}: {}", failure.item, failure.error);
         }
     }
+    print_reenrollment_notice(&summary.reenrollment_required);
+}
+
+/// Prints one line per UID whose template belongs to another embedding model than the
+/// loaded one (GitHub #278): `migrate` never converts embeddings, the user must re-enroll.
+fn print_reenrollment_notice(uids: &[u32]) {
+    for uid in uids {
+        println!(
+            "[WARN] UID {uid}: template not enrolled with the loaded embedding model \
+             '{MODEL_ID_EMBEDDING}'; face authentication falls back to the password until \
+             re-enrollment (sudo soos-enroll enroll -i {uid})."
+        );
+    }
 }
 
 /// Builds the camera service, printing on stderr the notes of the very `daemon.toml` read the
@@ -185,7 +198,7 @@ fn run() -> Result<(), EnrollmentCliError> {
                             "UID", "USERNAME", "MODEL", "VERSION", "TIMESTAMP", "DIM"
                         );
                         println!("{:-<72}", "");
-                        for s in summaries {
+                        for s in &summaries {
                             println!(
                                 "{:<8} {:<16} {:<16} {:<10} {:<12} {:<6}",
                                 s.uid,
@@ -200,6 +213,22 @@ fn run() -> Result<(), EnrollmentCliError> {
                 }
                 OutputFormat::Json => {
                     println!("{}", format_enrolled_json(&summaries));
+                }
+            }
+            // Re-enrollment notice on stderr, so the JSON on stdout stays machine-readable
+            // (GitHub #278).
+            for s in &summaries {
+                if !soos_inference_ort::template_matches_model(
+                    MODEL_ID_EMBEDDING,
+                    Some(soos_inference_ort::EMBEDDING_DIMENSION),
+                    &s.model_id,
+                    s.embedding_dim,
+                ) {
+                    eprintln!(
+                        "[WARN] UID {}: template model '{}' ({}-D) is not the loaded embedding \
+                         model '{MODEL_ID_EMBEDDING}'; re-enroll with: sudo soos-enroll enroll -i {}",
+                        s.uid, s.model_id, s.embedding_dim, s.uid
+                    );
                 }
             }
         }

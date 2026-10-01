@@ -173,8 +173,8 @@ session    include                       system-auth
 
 | Scenario | Daemon State | Camera State | Face Alignment / Match | PAM Result | UI Response |
 |---|---|---|---|---|---|
-| **Nominal Unlock** | Active | Streaming MMAP | Single face, Score >= 0.70, PAD Pass | `PAM_SUCCESS` | Unlocks session instantly (<= 150ms) |
-| **Unknown Person** | Active | Streaming MMAP | Single face, Score < 0.70 | `PAM_IGNORE` | Prompts for password |
+| **Nominal Unlock** | Active | Streaming MMAP | Single face, Score >= 0.50, PAD Pass | `PAM_SUCCESS` | Unlocks session instantly (<= 150ms) |
+| **Unknown Person** | Active | Streaming MMAP | Single face, Score < 0.50 | `PAM_IGNORE` | Prompts for password |
 | **Presentation Attack** | Active | Streaming MMAP | Photo / Phone Screen / Video | `PAM_IGNORE` | Prompts for password (rejection logged) |
 | **Multiple Faces** | Active | Streaming MMAP | >= 2 faces detected in frame | `PAM_IGNORE` | Prompts for password |
 | **Lens Covered** | Active | Streaming MMAP | Zero faces detected | `PAM_IGNORE` | Prompts for password |

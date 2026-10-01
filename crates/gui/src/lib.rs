@@ -1,7 +1,7 @@
 //! `soos-gui` — Native Linux Biometric PAM live camera visualizer and guided enrollment manager.
 //!
 //! Provides:
-//! - Real-time V4L2 camera streaming with authentic ONNX model overlays (SCRFD, MiniFASNetV2, ArcFace)
+//! - Real-time V4L2 camera streaming with authentic ONNX model overlays (SCRFD, MiniFASNetV2, SFace)
 //! - Apple FaceID-style multi-angle guided enrollment flow
 //! - Interactive biometric profile consultation and deletion (best-effort in-place
 //!   overwrite; the guarantee against recovery is encryption at rest plus master-key

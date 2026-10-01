@@ -96,7 +96,12 @@ fn test_retired_models_file_is_read_by_no_runtime_crate_or_script() {
     for file in files {
         let source = fs::read_to_string(&file).expect("read source");
         if source.contains("retired_models") {
-            offenders.push(file.strip_prefix(&root).unwrap_or(&file).display().to_string());
+            offenders.push(
+                file.strip_prefix(&root)
+                    .unwrap_or(&file)
+                    .display()
+                    .to_string(),
+            );
         }
     }
     for script in [
@@ -181,7 +186,10 @@ fn test_docs_state_the_sface_model_and_the_050_default() {
         ".agents/skills/dev-workflow/references/project-facts.md",
     ] {
         let text = read_repo(rel);
-        assert!(text.contains("sface_2021dec"), "{rel} must name sface_2021dec");
+        assert!(
+            text.contains("sface_2021dec"),
+            "{rel} must name sface_2021dec"
+        );
     }
     for rel in [
         "Docs/VISION_CRATE.md",
@@ -202,7 +210,10 @@ fn test_docs_state_the_sface_model_and_the_050_default() {
             stale.is_empty(),
             "{rel} states a stale 0.70 match default (code: 0.50): {stale:?}"
         );
-        assert!(text.contains("0.50"), "{rel} must state the 0.50 match default");
+        assert!(
+            text.contains("0.50"),
+            "{rel} must state the 0.50 match default"
+        );
     }
     assert!(
         !read_repo("Docs/POLICY_CRATE.md").contains("MobileFaceNet literature"),
@@ -211,7 +222,11 @@ fn test_docs_state_the_sface_model_and_the_050_default() {
     let decisions = read_repo("AI/DECISIONS.md");
     let proposal = decisions
         .lines()
-        .find(|l| l.contains("Real-Face Embedding Evaluation and Recalibration Proposal"))
+        .find(|l| {
+            l.starts_with(
+                "* **[2026-10-01] Real-Face Embedding Evaluation and Recalibration Proposal",
+            )
+        })
         .expect("evaluation ADR");
     assert!(
         proposal.contains("Status: Accepted"),
@@ -219,7 +234,7 @@ fn test_docs_state_the_sface_model_and_the_050_default() {
     );
     let adr = decisions
         .lines()
-        .find(|l| l.contains("SFace Embedding Model Replaces ArcFace ResNet34"))
+        .find(|l| l.starts_with("* **[2026-10-01] SFace Embedding Model Replaces ArcFace ResNet34"))
         .expect("SFace ADR");
     for needle in ["Apache-2.0", "owner-accepted", "MS1MV2", "0.50"] {
         assert!(adr.contains(needle), "the SFace ADR must state '{needle}'");

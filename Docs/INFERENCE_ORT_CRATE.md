@@ -8,7 +8,7 @@ The crate encapsulates:
 1. **Cryptographic Model Attestation**: Enforcing that all ONNX models match expected SHA-256 checksums cataloged in `models/manifest.toml` v2.0.0 before any execution session is instantiated.
 2. **Face Detection + Landmarks**: SCRFD 500M KPS ONNX model with multi-stride (8/16/32) distance-to-border box decoding, letterbox padding, BGR input normalization, and embedded 5-point facial keypoints. Replaces the legacy UltraFace Slim 320 + separate landmark model architecture.
 3. **Landmark Domain Types**: `FaceLandmarks`, `Point2f`, and `LandmarkDetector` trait for geometric alignment. In the 3-model pipeline, landmark regression is absorbed directly into SCRFD face detection (`OrtScrfdDetector`); `MockLandmarkDetector` provided for deterministic simulation.
-4. **Biometric Feature Extraction**: ArcFace embedding extractor generating L2-normalized 512D vectors with symmetric `[-1.0, +1.0]` normalization `(pixel - 127.5) / 127.5` (Verification Matrix Criteria `V2` and `NGM7`). The attested model (manifest id `arcface_w600k_mbf`, a historical name) is a Keras ArcFace **ResNet34** exported with tf2onnx (~34.1 M parameters, 136.6 MB) whose input `input_1` is **NHWC** `[N, 112, 112, 3]` and output `embedding` `[N, 512]` (GitHub #191, ADR 2026-09-30).
+4. **Biometric Feature Extraction**: model-aware embedding extractor generating L2-normalized vectors (Verification Matrix Criteria `V2`, `SFC2`–`SFC6`). The shipped model is OpenCV Zoo **SFace 2021dec** (`SHIPPED_EMBEDDING_MODEL = SFACE_2021DEC`, manifest id `sface_2021dec`, Apache-2.0, 38.7 MB): NCHW input `data` `[1, 3, 112, 112]` fed as R, G, B planes of raw `[0, 255]` values (the graph applies `(x - 127.5) / 128` itself), output `fc1` `[1, 128]` (owner decision 2026-10-01, GitHub #278, walkthrough 162). It replaced the ArcFace ResNet34 `arcface_w600k_mbf` (NHWC, BGR `(x - 127.5) / 127.5`, 512D), now attested only in `models/retired_models.toml`.
 5. **Presentation Attack Detection (Anti-Spoofing)**: MiniFASNetV2 80×80 BGR anti-spoofing model fed raw `[0, 255]` values like upstream (no division by 255, ADR 2026-10-01 "PAD Input Range Matches Upstream (0-255)"), live class index fixed by `DEFAULT_MINIFASNET_LIVE_CLASS_INDEX = 1` (`[PrintPhoto, Live, ScreenReplay]`, single source of truth for every binary), input tensors zeroized on drop (`Zeroizing<Vec<f32>>`) and ORT-owned output tensors wiped in place by `ZeroizingOutputs` (GitHub #255; ORT-internal activation buffers are out of reach, see "ORT output wiping" below) (Verification Matrix Criteria `NGM8`, `NGM9`, `NGM10`, `PLC1`–`PLC3`, `VAY6`).
 6. **Hardware-Free Deterministic Simulation**: Mocks (`MockFaceDetector`, `MockLandmarkDetector`, `MockEmbeddingExtractor`, `MockPadDetector`) for seamless headless execution in CI pipelines and developer environments.
 
@@ -23,7 +23,7 @@ crates/inference-ort/src/
 ├── detector.rs     # SCRFD / UltraFace detectors, NMS, letterbox_pad tensor packing, unproject
 ├── letterbox.rs    # Single bilinear letterbox implementation (integer offsets), GitHub #248
 ├── landmarks.rs    # FaceLandmarks, Point2f, LandmarkDetector
-├── embedding.rs    # ArcFace ResNet34 extractor (NHWC), L2 normalization
+├── embedding.rs    # EmbeddingModelSpec (SFACE_2021DEC), model-aware extractor (NCHW RGB raw), L2 normalization
 ├── pad.rs          # MiniFASNetV2 OrtPadDetector, DEFAULT_MINIFASNET_LIVE_CLASS_INDEX = 1
 ├── outputs.rs      # ZeroizingOutputs: in-place wipe of ORT-owned output tensors, GitHub #255
 └── mock.rs         # Deterministic hardware-free mocks
@@ -127,28 +127,36 @@ pub trait EmbeddingExtractor: Send + Sync {
     ) -> Result<BiometricEmbedding, InferenceError>;
 }
 ```
-Implemented by `OrtEmbeddingExtractor` (ArcFace ResNet34 512D; `is_nhwc()` reports the layout detected from the session input) and `MockEmbeddingExtractor` (defaulting to 512D).
+The trait also provides `fn output_dimension(&self) -> Option<usize>` (default `None`): the exact embedding length, used to bind templates by dimension (GitHub #278). Implemented by `OrtEmbeddingExtractor` (`Some(spec.dimension)`, 128 for SFace; `input_layout()` reports the accepted session layout) and `MockEmbeddingExtractor` (`Some(dim)`, `DEFAULT_DIM = EMBEDDING_DIMENSION` = 128).
 
-**Embedding I/O contract (GitHub #268, VIS-14)**: `OrtEmbeddingExtractor::new` infers the physical input layout from the session input: `[N, H, W, 3]` is NHWC, `[N, 3, H, W]` is NCHW. `input_layout()` returns `None` when it cannot be inferred (poisoned session lock, no input, non-tensor input, rank other than 4, no size-3 channel axis); `extract_embedding` then fails closed with `InferenceError::TensorError` instead of silently assuming NCHW. The model output must hold exactly `embedding::EMBEDDING_DIMENSION` (512) values, otherwise `InferenceError::DimensionMismatch { expected: 512, actual }` is returned before normalization (previously a wrong-length vector reached the matcher). Contract tests: `embedding_io_contract_tests` (hand-encoded graphs in `tests/fixtures/embedding_onnx.rs`).
+**Embedding model spec (GitHub #278)**: `EmbeddingModelSpec { model_id, dimension, input_layout }`; `SFACE_2021DEC` (`"sface_2021dec"`, 128, NCHW) is `SHIPPED_EMBEDDING_MODEL`, the single source of `soos_daemon::pipeline::EMBEDDING_MODEL_ID`, `soos_enrollment_cli::service::MODEL_ID_EMBEDDING` and `EMBEDDING_DIMENSION`. `OrtEmbeddingExtractor::new(session)` = `with_spec(session, SHIPPED_EMBEDDING_MODEL)`; `prepare_input` writes NCHW planes R, G, B as raw `f32` (no mean, no divisor). `template_matches_model(loaded_id, loaded_dim, template_id, template_dim)` is the shared binding rule: same id (no alias) and, when the extractor reports one, the same length.
 
-### Embedding real-model evidence (`tests/embedding_real_model_tests.rs`, GitHub #191)
+**Embedding I/O contract (GitHub #268, VIS-14; GitHub #278)**: `OrtEmbeddingExtractor::with_spec` infers the physical input layout from the session input (`[N, H, W, 3]` is NHWC, `[N, 3, H, W]` is NCHW) and keeps it only when it equals `spec.input_layout`. `input_layout()` returns `None` when it cannot be inferred (poisoned session lock, no input, non-tensor input, rank other than 4, no size-3 channel axis) or differs from the spec (an NHWC session for SFace); `extract_embedding` then fails closed with `InferenceError::TensorError`. The model output must hold exactly `spec.dimension` (128) values, otherwise `InferenceError::DimensionMismatch { expected: 128, actual }` is returned before normalization. Contract tests: `embedding_io_contract_tests` (hand-encoded graphs in `tests/fixtures/embedding_onnx.rs`).
+
+### Embedding real-model evidence (`tests/embedding_real_model_tests.rs`, GitHub #191, #278)
 
 Gated exactly like the PAD real-model target (`SOOS_MODELS_DIR`, default `/var/lib/soos/models`;
 an absent model prints `SKIPPED`; `SOOS_REQUIRE_REAL_MODELS=1` makes absence a failure). It loads
-`arcface_w600k_mbf.onnx` through `ModelRegistry` with the committed manifest and pins: file size
-136,619,444 bytes, one input `input_1` `[-1, 112, 112, 3]`, one output `embedding` `[-1, 512]`;
-the committed manifest validates against the session while an NCHW manifest for the same file
-is rejected with `ModelShapeMismatch`; a legacy manifest without `input_layout` still loads it; all three shipped models pass shape validation; the
-production extractor detects NHWC and emits a finite, deterministic, L2-normalized 512D vector on
-a synthetic crop; and a latency report (3 warm-ups + 20 timed runs) asserts
-p95 below the daemon's `MAX_INFERENCE_ESTIMATE_MS` (1000 ms). Measured on the development host:
-p50 127.5 ms, p95 170.9 ms with one intra-op thread; p50 27.1 ms, p95 28.4 ms with the
-`default_intra_threads()` default of GitHub #252 (4 threads on that host; the report line still
-prints its historical "1 intra-op thread" label).
+`sface_2021dec.onnx` through `ModelRegistry` with the committed manifest and pins: file size
+38,696,353 bytes, one input `data` `[1, 3, 112, 112]`, one output `fc1` `[1, 128]`; the committed
+manifest validates against the session while an NHWC manifest for the same file is rejected with
+`ModelShapeMismatch`; a legacy manifest without `input_layout` still loads it; all three shipped
+models pass shape validation; the graph normalizes its input itself (`data` → `Sub(127.5)` →
+`Mul(1/128)`, bounded protobuf walk); the production extractor equals the OpenCV
+`FaceRecognizerSF::feature` recipe (RGB raw NCHW, cos > 0.9999) and emits a finite,
+deterministic, L2-normalized 128D vector; the registry session of SFace emits none of the 174
+"initializer appears in graph inputs" warnings that a default session emits
+(`ERROR_ONLY_LOG_MODELS`, ORT session log level `Error` for that model only); and a latency report
+(3 warm-ups + 20 timed runs) asserts p95 below the daemon's `MAX_INFERENCE_ESTIMATE_MS` (1000 ms).
+Measured on the development host: p50 9.8 ms, p95 11.0 ms with one intra-op thread (the retired
+ArcFace measured p50 127.5 ms, p95 170.9 ms).
 
 ### Embedding pre-processing evaluation (`tests/embedding_preprocessing_evaluation_tests.rs`, GitHub #278)
 
-The attested file is `arc.onnx` of the Hugging Face repository `garavv/arcface-onnx` (revision
+Since the SFace switch these tests evaluate the **retired** ArcFace ResNet34, loaded through
+`models/retired_models.toml` (read by no binary); the arm that compared it with the production
+extractor was superseded by `embedding_real_model_tests::test_raw_opencv_recipe_matches_the_production_extractor`.
+The retired file is `arc.onnx` of the Hugging Face repository `garavv/arcface-onnx` (revision
 `224c23c`; its LFS object has the attested SHA-256). The upstream model card documents **RGB**
 input normalized as `(x - 127.5) / 128.0`; the production extractor feeds **B, G, R** normalized
 as `(x - 127.5) / 127.5`. The evaluation target (same gating as above) records on the real network,
@@ -156,28 +164,26 @@ with synthetic non-biometric patterns only:
 
 - the graph has no in-graph normalization: `input_1` feeds only a `Transpose`, which feeds only
   the first `Conv` (a bounded protobuf walk of the attested file, 162 nodes);
-- a raw BGR / 127.5 arm reproduces the production extractor (cos > 0.9999);
+- a raw BGR / 127.5 arm reproduced the former production extractor (cos > 0.9999; superseded);
 - the divisor is template-neutral (cos(BGR/127.5, BGR/128) >= 0.99998 on every pattern);
 - the channel order is not template-neutral (cos(BGR/127.5, RGB/127.5) between 0.970 and 0.998
   on the synthetic patterns), so switching to the documented RGB order is a template-format
   change to be decided with re-enrollment and threshold recalibration.
 
-The production order is unchanged: it is pinned by the pre-existing contract tests
-`embedding_tests::test_arcface_input_bgr_ordering`, `embedding_tests::test_prepare_input_layout_nhwc_and_nchw` and `embedding_tests::test_embedding_normalization_symmetric_range`, and the
-decision (switch to RGB, re-enroll, recalibrate `match_threshold` on labelled real captures) is
-left to the project owner (ADR 2026-09-30 "Embedding Pre-processing Evaluation"). The upstream
-repository declares **no licence**, so the manifest `license = "MIT"` of this entry is not
-substantiated by the source.
+These findings fed the owner decision of 2026-10-01 (ADR "SFace Embedding Model Replaces ArcFace
+ResNet34"): the ArcFace BGR pins were migrated to the SFace RGB raw contract and the model was
+replaced rather than switched to RGB.
 
 **Real-face follow-up (walkthrough 160).** The ignored LFW harness
 `crates/vision/tests/embedding_lfw_evaluation_tests.rs` runs SCRFD, alignment and this
 extractor on 7701 LFW images. On real faces, RGB beats the production BGR order: 10-fold
 accuracy is 0.9738 against 0.9668, and TAR at FAR 1e-3 is 0.886 against 0.836. The divisor
-makes no measurable difference. `match_threshold = 0.70` sits at an impostor rate of about
-1e-6, while FAR 1e-3 falls at a cosine of about 0.40. The OpenCV Zoo SFace ONNX (Apache-2.0
-file, 128-D, NCHW, raw RGB 0..255) scores higher on the same harness (0.9848). The production
-defaults are unchanged pending the owner decision (ADR 2026-10-01 "Real-Face Embedding
-Evaluation and Recalibration Proposal", Proposed).
+makes no measurable difference. The former `match_threshold = 0.70` sat at an impostor rate of
+about 1e-6, while FAR 1e-3 falls at a cosine of about 0.40. The OpenCV Zoo SFace ONNX (Apache-2.0
+file, 128-D, NCHW, raw RGB 0..255) scored higher on the same harness (0.9848) and is the shipped
+model since 2026-10-01, with `match_threshold = 0.50` (LFW FAR 3.9e-6, TAR 0.957; ADR
+"Real-Face Embedding Evaluation and Recalibration Proposal", Accepted). The harness now runs SFace
+as the production arm and the retired ArcFace variants from `models/retired_models.toml`.
 
 ### `PadDetector` Trait
 ```rust
@@ -334,7 +340,8 @@ proof that the shipped and optional PAD ONNX files equal the upstream checkpoint
 | **Global** | Each ONNX model is attested by manifest + SHA-256 checksum | `manifest_tests::test_parse_workspace_manifest_file`, `manifest_tests::test_verify_model_checksum_success_and_tamper_detection`, `registry_tests::test_registry_verify_integrity_missing_files_fails_closed` | Validated |
 | **D14** | ONNX model download, SHA-256 verification, and fail-fast startup attestation | `model_deployment_tests::test_download_script_verifies_checksums`, `model_deployment_tests::test_daemon_refuses_start_with_missing_models`, `model_deployment_tests::test_daemon_refuses_start_with_tampered_models` | Validated |
 | **V2** | L2-normalized embeddings (norm ≈ 1.0) | `embedding_tests::test_l2_norm_and_normalization_criterion_v2`, `proptest_suite::prop_embedding_normalization_criterion_v2` | Validated |
-| **NGM7** | ArcFace 512D embeddings and symmetric `[-1.0, +1.0]` normalization | `embedding_tests::test_embedding_normalization_symmetric_range`, `embedding_tests::test_mock_embedding_default_512d` | Validated |
+| **NGM7** | *(Superseded by SFC3 / SFC5: ArcFace 512D, symmetric normalization)* | — | Superseded |
+| **SFC1–SFC18** | SFace embedding model, RGB raw NCHW input, 128-D binding by id and dimension, 0.50 default (GitHub #278) | `embedding_io_contract_tests::*`, `embedding_tests::test_sface_input_rgb_ordering`, `embedding_real_model_tests::*`, `manifest_tests::test_workspace_manifest_attests_sface_from_pinned_revision` (see `AI/VERIFICATION_MATRIX.md`) | ✅ Verified |
 | **NGM8** | MiniFASNetV2 80×80 BGR tensor preparation, raw `[0.0, 255.0]` input range (upstream `to_tensor`, ADR 2026-10-01 "PAD Input Range Matches Upstream (0-255)"; the test name `test_pad_normalization_0_1_range` is historical), and buffer zeroization | `pad_tests::test_pad_prepare_input_80x80_bgr`, `pad_tests::test_pad_normalization_0_1_range`, `pad_tests::test_pad_invalid_dimensions_message_80x80`, `zeroize_tests::test_inference_input_buffers_zeroized` | Validated |
 | **NGM9** | `live_class_index` defaults to `DEFAULT_MINIFASNET_LIVE_CLASS_INDEX` (1) with ordinal spoof attack classification | `pad_tests::test_pad_default_live_class_index_is_one`, `pad_tests::test_pad_class_ordering_live_index_0`, `pad_tests::test_pad_class_ordering_configurable` | Validated |
 | **NGM10** | Fail-closed empty probability handling, panic safety, and numerical softmax stability | `pad_tests::test_softmax_numerical_stability`, `pad_tests::test_mock_pad_detector_*` | Validated |

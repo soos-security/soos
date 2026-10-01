@@ -21,6 +21,26 @@ pub const DEFAULT_MAX_INTRA_THREADS: usize = 4;
 /// Hard upper bound of any configured ORT intra-op thread count.
 pub const MAX_INTRA_THREADS: usize = 16;
 
+/// Attested models whose ORT sessions log at `Error` level only (GitHub #278, owner decision
+/// 2026-10-01).
+///
+/// The SFace 2021dec file is an IR 6 export that lists 174 initializers as graph inputs; ONNX
+/// Runtime warns once per initializer ("Initializer ... appears in graph inputs") when the
+/// session is created, which would flood the daemon journal at every start. Its file cannot be
+/// re-exported (the SHA-256 is the attestation), so only that session's warnings are dropped;
+/// its errors stay visible and every other model keeps the default `Warning` level.
+pub const ERROR_ONLY_LOG_MODELS: [&str; 1] = [crate::embedding::SFACE_2021DEC.model_id];
+
+/// ORT session log level of the attested model `id` (see [`ERROR_ONLY_LOG_MODELS`]).
+#[must_use]
+pub fn ort_session_log_level(id: &str) -> ort::logging::LogLevel {
+    if ERROR_ONLY_LOG_MODELS.contains(&id) {
+        ort::logging::LogLevel::Error
+    } else {
+        ort::logging::LogLevel::Warning
+    }
+}
+
 /// Default ORT intra-op thread count: `min(DEFAULT_MAX_INTRA_THREADS, available_parallelism)`,
 /// and 1 when the parallelism cannot be queried.
 pub fn default_intra_threads() -> usize {
@@ -204,6 +224,8 @@ impl ModelRegistry {
         };
 
         let session = Session::builder()
+            .map_err(|e| InferenceError::Ort(e.to_string()))?
+            .with_log_level(ort_session_log_level(id))
             .map_err(|e| InferenceError::Ort(e.to_string()))?
             .with_intra_threads(self.config.intra_threads)
             .map_err(|e| InferenceError::Ort(e.to_string()))?

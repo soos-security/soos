@@ -1,6 +1,6 @@
 //! Bounded CPU inference execution and per-request decision deadlines (GitHub #158, #159).
 //!
-//! - [`InferenceGate`]: CPU-heavy vision inference (SCRFD + PAD + ArcFace) never runs on a
+//! - [`InferenceGate`]: CPU-heavy vision inference (SCRFD + PAD + SFace) never runs on a
 //!   Tokio worker thread. Each inference is executed with `tokio::task::spawn_blocking` while
 //!   holding one of [`MAX_CONCURRENT_INFERENCES`] semaphore permits, so the accept loop, Status
 //!   requests and timers stay responsive and at most that many blocking jobs ever exist.
@@ -31,7 +31,7 @@ pub const RESPONSE_WRITE_MARGIN_MS: u64 = 50;
 
 /// Initial per-inference latency estimate used before any inference was measured (80ms).
 ///
-/// SCRFD-500M + MiniFASNetV2 + ArcFace-MBF on a desktop CPU; replaced by the measured moving
+/// SCRFD-500M + MiniFASNetV2 + SFace on a desktop CPU; replaced by the measured moving
 /// average after the first inference.
 pub const DEFAULT_INFERENCE_ESTIMATE_MS: u64 = 80;
 

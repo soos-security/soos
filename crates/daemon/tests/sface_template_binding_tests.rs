@@ -59,7 +59,8 @@ impl EmbeddingExtractor for CountingExtractor {
         height: u32,
     ) -> Result<BiometricEmbedding, InferenceError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
-        self.inner.extract_embedding(aligned_crop_rgb, width, height)
+        self.inner
+            .extract_embedding(aligned_crop_rgb, width, height)
     }
 
     fn output_dimension(&self) -> Option<usize> {

@@ -6,8 +6,8 @@
 //! - SCRFD 500M KPS face detection with 5-point landmarks and deterministic Rust NMS (`detector`)
 //! - 5-point facial landmark types (`landmarks`)
 //! - Single bilinear letterbox implementation with integer offsets (`letterbox`)
-//! - ArcFace ResNet34 (NHWC, tf2onnx) 512D feature extraction with L2-normalized embeddings
-//!   (`embedding`; manifest id `arcface_w600k_mbf` is a historical name)
+//! - Model-aware face embedding extraction with L2-normalized embeddings (`embedding`): the
+//!   shipped model is OpenCV Zoo SFace 2021dec (`sface_2021dec`, NCHW RGB raw input, 128-D)
 //! - MiniFASNetV2 presentation attack detection (`pad`)
 //! - Hardware-free deterministic simulation mocks (`mock`)
 //! - In-place wiping of ORT-owned output tensors (`outputs`)
@@ -29,7 +29,10 @@ pub use detector::{
     letterbox_pad, letterbox_pad_into, nms, unproject, BoundingBox, FaceDetection, FaceDetector,
     OrtScrfdDetector, ScoreActivation,
 };
-pub use embedding::{BiometricEmbedding, EmbeddingExtractor, OrtEmbeddingExtractor};
+pub use embedding::{
+    template_matches_model, BiometricEmbedding, EmbeddingExtractor, EmbeddingModelSpec,
+    OrtEmbeddingExtractor, EMBEDDING_DIMENSION, SFACE_2021DEC, SHIPPED_EMBEDDING_MODEL,
+};
 pub use error::InferenceError;
 pub use landmarks::{FaceLandmarks, Point2f};
 pub use letterbox::{letterbox_bilinear, letterbox_geometry, LetterboxGeometry};

@@ -63,7 +63,7 @@ Biometric and Presentation Attack Detection (PAD) thresholds are configured via 
 use soos_policy::ThresholdConfig;
 
 let config = ThresholdConfig::builder()
-    .match_threshold(0.70) // Sourced from MobileFaceNet literature (FAR <= 0.1%)
+    .match_threshold(0.50) // SFace on LFW: FAR 3.9e-6, TAR 0.957 (target FAR <= 0.1%, GitHub #278)
     .pad_threshold(0.85)   // Sourced from NIST SP 800-63B guidelines
     .build()?;
 ```

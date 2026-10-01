@@ -47,9 +47,12 @@ fn stdin_args(uid: u32) -> ImportArgs {
 }
 
 fn embedding_json(value: f32) -> Vec<u8> {
-    serde_json::to_string(&vec![value; soos_enrollment_cli::service::IMPORT_EMBEDDING_DIM])
-        .unwrap()
-        .into_bytes()
+    serde_json::to_string(&vec![
+        value;
+        soos_enrollment_cli::service::IMPORT_EMBEDDING_DIM
+    ])
+    .unwrap()
+    .into_bytes()
 }
 
 /// Reader that counts every `read` call, proving whether the input was consumed.

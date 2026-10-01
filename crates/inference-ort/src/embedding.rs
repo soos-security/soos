@@ -13,15 +13,57 @@ use zeroize::{Zeroize, Zeroizing};
 use crate::error::InferenceError;
 use crate::manifest::TensorLayout;
 
-/// Dimensionality of the attested embedding model output (`arcface_w600k_mbf`, `[N, 512]`).
+use crate::outputs::ZeroizingOutputs;
+
+/// Static contract of an attested embedding model: what the extractor feeds and expects
+/// (GitHub #278). Templates are bound to `model_id` and `dimension`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EmbeddingModelSpec {
+    /// Manifest id recorded in every template produced with this model.
+    pub model_id: &'static str,
+    /// Exact length of the output vector (`[1, dimension]`).
+    pub dimension: usize,
+    /// Physical layout of the graph input; a session with another layout fails closed.
+    pub input_layout: TensorLayout,
+}
+
+/// OpenCV Zoo SFace 2021dec (`face_recognition_sface_2021dec.onnx`, Apache-2.0): NCHW input
+/// `data` `[1, 3, 112, 112]` fed as R, G, B planes of raw `0..255` values (the graph applies
+/// `(x - 127.5) / 128` itself, exactly like OpenCV `FaceRecognizerSF::feature`), output `fc1`
+/// `[1, 128]`, L2-normalized by the extractor.
+pub const SFACE_2021DEC: EmbeddingModelSpec = EmbeddingModelSpec {
+    model_id: "sface_2021dec",
+    dimension: 128,
+    input_layout: TensorLayout::Nchw,
+};
+
+/// The embedding model shipped by soos: the single source of the model id and dimension used
+/// by `soos-daemon`, `soos-enroll` and `soos-gui` (owner decision 2026-10-01, GitHub #278).
+pub const SHIPPED_EMBEDDING_MODEL: EmbeddingModelSpec = SFACE_2021DEC;
+
+/// Output length of the shipped embedding model (`[1, 128]`).
 ///
 /// [`OrtEmbeddingExtractor`] rejects any other output length with
 /// [`InferenceError::DimensionMismatch`] (GitHub #268, VIS-14) instead of emitting a vector
 /// that would only fail later in the matcher.
-pub const EMBEDDING_DIMENSION: usize = 512;
-use crate::outputs::ZeroizingOutputs;
+pub const EMBEDDING_DIMENSION: usize = SHIPPED_EMBEDDING_MODEL.dimension;
 
-/// High-dimensional facial biometric embedding vector (e.g. 512D ArcFace or 128D) with automatic memory zeroization.
+/// Whether a stored template (`template_model_id`, `template_dimension`) belongs to the
+/// embedding space of the loaded model (`loaded_model_id`, `loaded_dimension`).
+///
+/// The ids must be equal (no alias) and, when the loaded extractor reports a dimension, the
+/// vector length must equal it. Embeddings of two models are never comparable.
+#[must_use]
+pub fn template_matches_model(
+    loaded_model_id: &str,
+    loaded_dimension: Option<usize>,
+    template_model_id: &str,
+    template_dimension: usize,
+) -> bool {
+    template_model_id == loaded_model_id && loaded_dimension.is_none_or(|d| d == template_dimension)
+}
+
+/// Facial biometric embedding vector (128-D for the shipped SFace model) with automatic memory zeroization.
 #[derive(Debug, Clone, PartialEq, Zeroize)]
 pub struct BiometricEmbedding {
     vector: Zeroizing<Vec<f32>>,
@@ -141,26 +183,35 @@ pub trait EmbeddingExtractor: Send + Sync {
         width: u32,
         height: u32,
     ) -> Result<BiometricEmbedding, InferenceError>;
+
+    /// Exact length of every embedding this extractor emits, when known.
+    ///
+    /// Templates of another length are refused before matching (GitHub #278). `None` (the
+    /// default) binds templates by model id only.
+    fn output_dimension(&self) -> Option<usize> {
+        None
+    }
 }
 
 use ort::session::Session;
 use std::sync::{Arc, Mutex};
 
-/// ArcFace 512D feature extractor backed by an ONNX Runtime session.
+/// Model-aware feature extractor backed by an ONNX Runtime session (GitHub #278).
 ///
-/// The attested model (manifest id `arcface_w600k_mbf`, a historical name) is a Keras ArcFace
-/// ResNet34 exported with tf2onnx: NHWC input `input_1` `[N, 112, 112, 3]`, output
-/// `embedding` `[N, 512]`. The layout is detected from the session input; the registry has
-/// already checked it against the manifest `input_layout`. Pixels are fed in B, G, R order
-/// normalized as `(x - 127.5) / 127.5`. The upstream model card of the attested file documents
-/// RGB and `(x - 127.5) / 128.0`; the divisor is template-neutral, the channel order is not, and
-/// switching it is an owner decision tied to re-enrollment (GitHub #278,
-/// `tests/embedding_preprocessing_evaluation_tests.rs`).
+/// [`OrtEmbeddingExtractor::new`] binds the session to [`SHIPPED_EMBEDDING_MODEL`] (OpenCV Zoo
+/// SFace 2021dec: NCHW input `data` `[1, 3, 112, 112]`, output `fc1` `[1, 128]`). Pixels are fed
+/// as R, G, B planes of raw `0..255` values (the graph normalizes them itself, OpenCV
+/// `blobFromImage(aligned, 1, Size(112, 112), Scalar(0, 0, 0), swapRB = true)`); the output is
+/// L2-normalized. The layout is detected from the session input and must equal the spec's
+/// layout; the registry has already checked it against the manifest `input_layout`.
 pub struct OrtEmbeddingExtractor {
     session: Arc<Mutex<Session>>,
-    /// Physical input layout inferred from the session, `None` when it cannot be inferred
-    /// (poisoned lock, no input, non-tensor input, rank other than 4, no size-3 channel axis).
-    /// Extraction fails closed on `None` (GitHub #268, VIS-14).
+    /// Contract of the model the session was attested as.
+    spec: EmbeddingModelSpec,
+    /// Physical input layout inferred from the session when it equals `spec.input_layout`;
+    /// `None` when it cannot be inferred (poisoned lock, no input, non-tensor input, rank other
+    /// than 4, no size-3 channel axis) or differs from the spec. Extraction fails closed on
+    /// `None` (GitHub #268, VIS-14; GitHub #278).
     layout: Option<TensorLayout>,
 }
 
@@ -175,38 +226,59 @@ fn infer_input_layout(shape: &[i64]) -> Option<TensorLayout> {
 }
 
 impl OrtEmbeddingExtractor {
+    /// Binds `session` to the shipped embedding model ([`SHIPPED_EMBEDDING_MODEL`]).
     pub fn new(session: Arc<Mutex<Session>>) -> Self {
-        let layout = session.lock().ok().and_then(|guard| {
-            guard
-                .inputs()
-                .first()
-                .and_then(|input| match input.dtype() {
-                    ort::value::ValueType::Tensor { shape, .. } => infer_input_layout(shape),
-                    _ => None,
-                })
-        });
-
-        Self { session, layout }
+        Self::with_spec(session, SHIPPED_EMBEDDING_MODEL)
     }
 
-    /// Whether the attached session takes a channels-last `[N, 112, 112, 3]` input.
+    /// Binds `session` to the embedding model described by `spec`.
+    pub fn with_spec(session: Arc<Mutex<Session>>, spec: EmbeddingModelSpec) -> Self {
+        let layout = session
+            .lock()
+            .ok()
+            .and_then(|guard| {
+                guard
+                    .inputs()
+                    .first()
+                    .and_then(|input| match input.dtype() {
+                        ort::value::ValueType::Tensor { shape, .. } => infer_input_layout(shape),
+                        _ => None,
+                    })
+            })
+            .filter(|layout| *layout == spec.input_layout);
+
+        Self {
+            session,
+            spec,
+            layout,
+        }
+    }
+
+    /// Contract of the model this extractor feeds.
+    pub fn spec(&self) -> EmbeddingModelSpec {
+        self.spec
+    }
+
+    /// Whether the attached session takes a channels-last `[N, 112, 112, 3]` input (never the
+    /// case for an accepted SFace session).
     pub fn is_nhwc(&self) -> bool {
         self.layout == Some(TensorLayout::Nhwc)
     }
 
-    /// Input layout inferred from the session, or `None` when it could not be inferred (every
-    /// extraction then fails closed with [`InferenceError::TensorError`]).
+    /// Input layout inferred from the session, or `None` when it could not be inferred or
+    /// differs from the spec (every extraction then fails closed with
+    /// [`InferenceError::TensorError`]).
     pub fn input_layout(&self) -> Option<TensorLayout> {
         self.layout
     }
 
-    /// Prepares, resizes, and normalizes an aligned face crop inside a zeroized container.
-    /// If `is_nhwc` is true, formats as `[1, 112, 112, 3]` (NHWC); otherwise `[1, 3, 112, 112]` (NCHW).
-    pub fn prepare_input_layout(
+    /// Prepares and resizes an aligned face crop to the SFace input inside a zeroized
+    /// container: NCHW `[1, 3, 112, 112]`, planes 0, 1, 2 = R, G, B, raw `f32` values in
+    /// `[0.0, 255.0]` (no mean, no divisor: the graph normalizes its input itself).
+    pub fn prepare_input(
         aligned_crop_rgb: &[u8],
         width: u32,
         height: u32,
-        is_nhwc: bool,
     ) -> Result<Zeroizing<Vec<f32>>, InferenceError> {
         let expected_len = (width as usize)
             .checked_mul(height as usize)
@@ -237,35 +309,12 @@ impl OrtEmbeddingExtractor {
                     aligned_crop_rgb.get(src_idx + 1),
                     aligned_crop_rgb.get(src_idx + 2),
                 ) {
-                    let norm_r = (r as f32 - 127.5) / 127.5;
-                    let norm_g = (g as f32 - 127.5) / 127.5;
-                    let norm_b = (b as f32 - 127.5) / 127.5;
-
-                    if is_nhwc {
-                        let idx = (y * target_size + x) * 3;
-                        if let Some(slot) = input_data.get_mut(idx) {
-                            *slot = norm_b;
-                        }
-                        if let Some(slot) = input_data.get_mut(idx + 1) {
-                            *slot = norm_g;
-                        }
-                        if let Some(slot) = input_data.get_mut(idx + 2) {
-                            *slot = norm_r;
-                        }
-                    } else {
-                        // NCHW format: planes written in B, G, R order (B=0, G=1, R=2)
-                        let b_idx = y * target_size + x;
-                        let g_idx = target_size * target_size + y * target_size + x;
-                        let r_idx = 2 * target_size * target_size + y * target_size + x;
-
-                        if let Some(slot) = input_data.get_mut(b_idx) {
-                            *slot = norm_b;
-                        }
-                        if let Some(slot) = input_data.get_mut(g_idx) {
-                            *slot = norm_g;
-                        }
-                        if let Some(slot) = input_data.get_mut(r_idx) {
-                            *slot = norm_r;
+                    // NCHW planes in R, G, B order (R=0, G=1, B=2), raw values.
+                    let plane = target_size * target_size;
+                    let idx = y * target_size + x;
+                    for (offset, value) in [(0, r), (plane, g), (2 * plane, b)] {
+                        if let Some(slot) = input_data.get_mut(offset + idx) {
+                            *slot = f32::from(value);
                         }
                     }
                 }
@@ -273,15 +322,6 @@ impl OrtEmbeddingExtractor {
         }
 
         Ok(input_data)
-    }
-
-    /// Prepares, resizes, and normalizes an aligned face crop to 112x112 NCHW format inside a zeroized container.
-    pub fn prepare_input(
-        aligned_crop_rgb: &[u8],
-        width: u32,
-        height: u32,
-    ) -> Result<Zeroizing<Vec<f32>>, InferenceError> {
-        Self::prepare_input_layout(aligned_crop_rgb, width, height, false)
     }
 }
 
@@ -294,21 +334,16 @@ impl EmbeddingExtractor for OrtEmbeddingExtractor {
     ) -> Result<BiometricEmbedding, InferenceError> {
         // `Zeroizing` wipes the input tensor on drop; the ORT-owned output (the raw,
         // unnormalized embedding) is wiped in place by `ZeroizingOutputs` (GitHub #255).
-        let layout = self.layout.ok_or_else(|| {
-            InferenceError::TensorError(
-                "embedding model input layout could not be inferred (expected a rank-4 \
-                 [N, 112, 112, 3] or [N, 3, 112, 112] input)"
-                    .to_string(),
-            )
-        })?;
-        let is_nhwc = layout == TensorLayout::Nhwc;
-        let input_data = Self::prepare_input_layout(aligned_crop_rgb, width, height, is_nhwc)?;
+        if self.layout.is_none() {
+            return Err(InferenceError::TensorError(format!(
+                "embedding model input layout is not the {:?} layout of '{}' (expected a \
+                 rank-4 [N, 3, 112, 112] input)",
+                self.spec.input_layout, self.spec.model_id
+            )));
+        }
+        let input_data = Self::prepare_input(aligned_crop_rgb, width, height)?;
 
-        let shape = if is_nhwc {
-            [1usize, 112, 112, 3]
-        } else {
-            [1usize, 3, 112, 112]
-        };
+        let shape = [1usize, 3, 112, 112];
         let tensor = ort::value::TensorRef::from_array_view((shape, input_data.as_slice()))
             .map_err(|e| InferenceError::Ort(e.to_string()))?;
 
@@ -334,9 +369,9 @@ impl EmbeddingExtractor for OrtEmbeddingExtractor {
             .map_err(|e| InferenceError::Ort(e.to_string()))?
             .1;
 
-        if emb_data.len() != EMBEDDING_DIMENSION {
+        if emb_data.len() != self.spec.dimension {
             return Err(InferenceError::DimensionMismatch {
-                expected: EMBEDDING_DIMENSION,
+                expected: self.spec.dimension,
                 actual: emb_data.len(),
             });
         }
@@ -345,5 +380,9 @@ impl EmbeddingExtractor for OrtEmbeddingExtractor {
         embedding.normalize()?;
 
         Ok(embedding)
+    }
+
+    fn output_dimension(&self) -> Option<usize> {
+        Some(self.spec.dimension)
     }
 }

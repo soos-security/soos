@@ -560,7 +560,10 @@ fn test_raw_opencv_recipe_matches_the_production_extractor() {
     };
     assert_eq!(raw.len(), EMBEDDING_DIM);
     let norm = raw.iter().map(|v| v * v).sum::<f32>().sqrt();
-    assert!(norm.is_finite() && norm > 0.0, "raw output norm must be positive");
+    assert!(
+        norm.is_finite() && norm > 0.0,
+        "raw output norm must be positive"
+    );
     let cos: f32 = raw
         .iter()
         .zip(production.as_slice())
@@ -570,4 +573,90 @@ fn test_raw_opencv_recipe_matches_the_production_extractor() {
         cos > 0.9999,
         "the OpenCV RGB raw NCHW recipe must reproduce the production extractor (cos = {cos})"
     );
+}
+
+/// Minimal `tracing` subscriber recording the messages of WARN-or-higher events.
+struct WarningRecorder(std::sync::Mutex<Vec<String>>);
+
+struct MessageVisitor<'a>(&'a mut String);
+
+impl tracing::field::Visit for MessageVisitor<'_> {
+    fn record_debug(&mut self, _field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        self.0.push_str(&format!("{value:?}"));
+    }
+}
+
+impl tracing::Subscriber for WarningRecorder {
+    fn enabled(&self, _metadata: &tracing::Metadata<'_>) -> bool {
+        true
+    }
+    fn new_span(&self, _span: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        tracing::span::Id::from_u64(1)
+    }
+    fn record(&self, _span: &tracing::span::Id, _values: &tracing::span::Record<'_>) {}
+    fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
+    fn event(&self, event: &tracing::Event<'_>) {
+        if *event.metadata().level() <= tracing::Level::WARN {
+            let mut message = String::new();
+            event.record(&mut MessageVisitor(&mut message));
+            self.0.lock().expect("recorder").push(message);
+        }
+    }
+    fn enter(&self, _span: &tracing::span::Id) {}
+    fn exit(&self, _span: &tracing::span::Id) {}
+}
+
+/// Counts the "initializer appears in graph inputs" warnings emitted while `load` runs.
+fn initializer_warnings(load: impl FnOnce()) -> usize {
+    let recorder = std::sync::Arc::new(WarningRecorder(std::sync::Mutex::new(Vec::new())));
+    tracing::subscriber::with_default(std::sync::Arc::clone(&recorder), load);
+    let messages = recorder.0.lock().expect("recorder");
+    messages
+        .iter()
+        .filter(|m| m.contains("appears in graph inputs"))
+        .count()
+}
+
+/// SFC18 (GitHub #278, owner decision 2026-10-01): the registry session of SFace logs at
+/// `Error` level, so its 174 "initializer appears in graph inputs" warnings do not reach the
+/// journal; a default session of the same file emits them (the filter is what removes them).
+#[test]
+fn test_registry_silences_sface_initializer_warnings_only() {
+    if !model_present(
+        EMBEDDING_MODEL_FILE,
+        "test_registry_silences_sface_initializer_warnings_only",
+    ) {
+        return;
+    }
+    assert_eq!(
+        soos_inference_ort::registry::ort_session_log_level(EMBEDDING_MODEL_ID),
+        ort::logging::LogLevel::Error
+    );
+    for other in ["scrfd_500m_kps", "minifasnet_v2_pad"] {
+        assert_eq!(
+            soos_inference_ort::registry::ort_session_log_level(other),
+            ort::logging::LogLevel::Warning,
+            "{other} keeps ORT warnings"
+        );
+    }
+
+    let bytes = std::fs::read(models_dir().join(EMBEDDING_MODEL_FILE)).expect("read model");
+    let noisy = initializer_warnings(|| {
+        let _session = ort::session::Session::builder()
+            .expect("builder")
+            .commit_from_memory(&bytes)
+            .expect("default session");
+    });
+    println!("SFACE initializer warnings: default session {noisy}");
+    assert!(
+        noisy > 0,
+        "a default session of the SFace file emits the warnings"
+    );
+
+    let quiet = initializer_warnings(|| {
+        repo_registry()
+            .get_or_load_session(EMBEDDING_MODEL_ID)
+            .expect("registry session");
+    });
+    assert_eq!(quiet, 0, "the registry session of SFace must not emit them");
 }

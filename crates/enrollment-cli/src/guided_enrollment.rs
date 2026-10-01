@@ -58,7 +58,7 @@ use soos_vision::pose::HeadPose;
 /// Minimum cosine similarity between a candidate sample and the frontal identity anchor
 /// (every accepted frontal sample and, for off-axis steps, their mean direction).
 ///
-/// Conservative lower bound: ArcFace same-identity pairs within +/-25 degrees of pose
+/// Conservative lower bound: same-identity pairs of the embedding model within +/-25 degrees of pose
 /// stay well above it, while a different identity is typically near 0.
 pub const MIN_SAMPLE_CONSISTENCY_COSINE: f32 = 0.5;
 

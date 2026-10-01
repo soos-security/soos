@@ -42,7 +42,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let cam: Arc<dyn CameraManager> = Arc::new(MockCameraManager::new(camera_config));
         let detector = Arc::new(MockFaceDetector::new_centered_face(640, 480, 0.95));
         let pad = Arc::new(MockPadDetector::new_live());
-        let extractor = Arc::new(MockEmbeddingExtractor::new(512));
+        let extractor = Arc::new(MockEmbeddingExtractor::new(
+            soos_inference_ort::EMBEDDING_DIMENSION,
+        ));
         let pipe = Arc::new(VisionPipeline::new(
             detector,
             pad,

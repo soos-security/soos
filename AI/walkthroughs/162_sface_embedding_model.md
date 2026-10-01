@@ -6,11 +6,17 @@
   not registered in `BRANCH_TO_ISSUE`; commits carry `Refs #278`.
 - **Branch**: `feat/sface-embedding-model`
 - **Base commit**: `11c967e`
-- **Matrix criteria**: SFC1–SFC16 (new section planned right after the EVR section of
-  walkthrough 160)
-- **Status of this draft**: Phase 1 (architect spec) and impact analysis only. No production
-  code and no test has been changed yet. Section 4 lists every pre-existing test that the switch
-  invalidates; it goes to the owner for approval before Phase 2.
+- **Matrix criteria**: SFC1–SFC18 (new section `sface-embedding-model` right after the EVR
+  section of walkthrough 160); EVR7 now `✅ Verified`; NGM7 and SFX2 `⏹ Superseded`; BIO1, NGM16,
+  EMP4, EMR3, EMR5, EMR6 and VMX4 updated to the migrated test names
+- **ADR**: 2026-10-01 "SFace Embedding Model Replaces ArcFace ResNet34" (new); "Real-Face
+  Embedding Evaluation and Recalibration Proposal" marked Accepted; the alias part of
+  2026-09-30 "Embedding Model Binding and Legacy Model Alias" superseded
+- **Status**: phases 1, 1.5, 2, 3, 4 and 6 done. Section 4 was approved by the owner on
+  2026-10-01 (Q1) together with the recommended answers Q2–Q9 and Q11 (section 8). One further
+  pre-existing test that the switch breaks was found during Phase 4 and was **not** edited
+  (section 11, F6): it awaits owner approval. Phases 5 (candid review) and 7 (release) are not
+  run in this batch.
 
 ---
 
@@ -212,10 +218,11 @@ one). Anything else is `Foreign`. There is no alias any more.
   when it is `Current`; otherwise the panel shows "Re-enrollment required (template model X)"
   and no score.
 
-`classify_template` is duplicated as a two-line check in enrollment-cli and gui (they do not
-depend on `soos-daemon`); to keep one source of truth the pure function lives in
-`soos_inference_ort::embedding` (`template_matches(spec_id, dimension, template_id, template_dim)
--> bool`) and the daemon wraps it in its enum.
+One source of truth for the rule: the pure function
+`soos_inference_ort::template_matches_model(loaded_id, loaded_dim, template_id, template_dim)`;
+the daemon wraps it in `pipeline::classify_template` (its enum), `soos-enroll verify`, `list`,
+`migrate` and the GUI call it directly (they do not depend on `soos-daemon`). The implemented
+error variant is `TemplateModelMismatch { uid, template_model_id, template_dimension }`.
 
 ### 3.5 Threshold Default 0.50
 
@@ -344,7 +351,29 @@ start-up.
   `tests/fixtures/mod.rs` doc ("Face embeddings are 512D", reworded without a literal dimension
   so that `fixtures_contract` keeps passing), project facts §2 and §4.
 
-## 4. Pre-existing Tests Invalidated by the Switch (for owner approval)
+## 4. Pre-existing Tests Migrated (approved by the owner on 2026-10-01)
+
+**Approval**: the owner approved this 55-item list exactly as written (35 class a, 15 class b,
+5 class c) on 2026-10-01 (Q1), with Q2 = retired manifest, Q5 = id check before capture
+(items 48–50) and Q7 = mock default 128 (item 8). Every item below was executed as written and
+nothing else was changed in these tests; the "After the switch" column is the new state
+(old → new). Execution notes:
+
+- #2 also keeps the `!extractor.is_nhwc()` assertion of the old test.
+- #9 the SFace graph has a concrete batch of 1, so the shape pins are `[1, 3, 112, 112]` /
+  `[1, 128]` (the old "batch dim is symbolic" checks do not apply to this file).
+- #16, #18 changed only their manifest source (`retired_manifest_path()`); #17 was deleted and
+  replaced by `embedding_real_model_tests::test_raw_opencv_recipe_matches_the_production_extractor`.
+- #29 the `LEGACY_*` imports were dropped; #26 became `test_retired_cli_default_alias_is_foreign`.
+- #33 also updates its comment `// match: 0.70` (class c); #34's comment "Never lower" was
+  reworded to cite the owner decision; `pad_consensus_tests` doc comment `0.70 match` → `0.50
+  match` (class c, §4.3).
+- #43–#47 use `soos_enrollment_cli::service::IMPORT_EMBEDDING_DIM` /
+  `MODEL_ID_EMBEDDING` instead of the literals; #48–#50 record `MODEL_ID_EMBEDDING`
+  (version strings untouched).
+- #51 updated; #52–#55 left as they are (their assertions still hold; `tests/fixtures/mod.rs`
+  was reworded without a literal dimension).
+- `cargo fmt` reformatted some of the migrated lines (layout only).
 
 Classification: **(a)** the test pins the replaced model or default and must migrate (assertion
 values change; the strength of each assertion is kept or increased); **(b)** setup-only (fixture
@@ -473,34 +502,34 @@ only if Q5 chooses the id check), and **5 cosmetic (c)**. No assertion is weaken
 with the equivalent SFace or 0.50 pin, and #2, #26–#28 become stricter (refusals instead of
 acceptances).
 
-## 5. New Contract Tests Planned for Phase 2 (Red) and Matrix Rows
+## 5. Tester Contract (Phase 2) and Red Evidence
 
-| Row | Contract | Planned test (red today because) |
+New tests (rows of the new matrix section `sface-embedding-model`):
+
+| Row | Test (path::name) | Red evidence on the unchanged code (commit `c1717d7`) |
 |---|---|---|
-| SFC1 | The committed manifest attests `sface_2021dec` (file, SHA-256, size, Apache-2.0, pinned revision URL, NCHW `[1, 3, 112, 112]`, `[[1, 128]]`) and no longer `arcface_w600k_mbf` | migrated #22 + `manifest_tests::test_workspace_manifest_attests_sface_from_pinned_revision` (entry absent) |
-| SFC2 | `SHIPPED_EMBEDDING_MODEL == SFACE_2021DEC` (id, 128, NCHW) and the daemon, enroll and GUI ids derive from it | `embedding_io_contract_tests::test_shipped_embedding_spec_is_sface` (item missing), migrated #25, #38, #39 |
-| SFC3 | Input is RGB raw 0..255 NCHW (exact floats at known pixels; a BGR or `/127.5` implementation fails) | migrated #5–#7 |
-| SFC4 | The extractor refuses an NHWC session and any output length other than 128 | migrated #2–#4 |
-| SFC5 | Real file: `data` / `fc1` shapes, in-graph `Sub(127.5)` → `Mul(1/128)`, 38,696,353 bytes | migrated #9 + `embedding_real_model_tests::test_real_sface_graph_normalizes_in_graph` (skips without the file; run here with `SOOS_MODELS_DIR`) |
-| SFC6 | The production extractor equals the OpenCV recipe on the real file (cos > 0.9999) and emits a deterministic normalized 128-D vector | `embedding_real_model_tests::test_raw_opencv_recipe_matches_the_production_extractor`, migrated #13 |
-| SFC7 | An ArcFace template (`arcface_w600k_mbf` / `2.0.0`, 512-D) gets `Unavailable` / `ModelUnavailable` and no embedding inference runs | `template_model_binding_tests::test_arcface_template_is_refused_after_the_sface_switch` (spy on extractor calls) |
-| SFC8 | The legacy alias is gone (`mobilefacenet` / `1.0.0` → `Foreign`, `Unavailable`) | migrated #26–#28 |
-| SFC9 | A current-id template with a wrong vector length is `Unavailable` / `ModelUnavailable`, not `Deny` | `template_model_binding_tests::test_template_with_wrong_dimension_is_refused` (today: cosine error, score 0, `Deny`) |
-| SFC10 | `Unavailable` maps to `PAM_IGNORE` (existing PAM evidence cited; no PAM code change) | existing `ipc_tests::test_ipc_unavailable_returns_ignore` (`crates/pam/tests/ipc_tests.rs`), cited |
-| SFC11 | Default match threshold 0.50 in policy and vision; parity kept; floor 0.40 kept | migrated #32–#36 |
-| SFC12 | No match-threshold literal in GUI or enrollment sources | `vision_threshold_contract::test_no_match_threshold_literal_outside_the_constants` (fails on `crates/gui/src/app.rs:807`) |
-| SFC13 | `import` defaults to the loaded model and refuses another model id or a length other than 128 | migrated #40–#42 + `import_tests::test_import_refuses_a_template_of_another_model` |
-| SFC14 | `migrate` keeps an ArcFace template's id and vector (it stays `Foreign`) and reports it as needing re-enrollment | `migrate_tests::test_migrate_never_rebinds_a_template_to_the_loaded_model` |
-| SFC15 | `soos-enroll verify` refuses a `Foreign` template before any capture (camera spy) | `verify_tests::test_verify_refuses_a_template_of_another_model` (if Q5) |
-| SFC16 | Docs and skills state SFace, 128-D, RGB raw, 0.50 (no stale ArcFace / 0.70 default claim) | invariant `embedding_model_docs_contract` (new file) |
+| SFC1 | `manifest_tests::test_workspace_manifest_attests_sface_from_pinned_revision` (+ migrated #19, #21–#23) | FAILED: `sface_2021dec` entry absent (TOML index panic) |
+| SFC2 | `embedding_io_contract_tests::test_shipped_embedding_spec_is_sface` (+ #1, #25, #38, #39) | compile error: `SHIPPED_EMBEDDING_MODEL`, `SFACE_2021DEC`, `EmbeddingModelSpec` not found (the specified API); #38/#39 FAILED on the id |
+| SFC3 | migrated #5–#7 | FAILED: plane 0 = `-1.0` / `+1.0` instead of the raw `0.0` / `255.0` |
+| SFC4 | migrated #2–#4, #8 | #8 FAILED `left: 512, right: 128`; #2–#4 compile error with the missing spec items |
+| SFC5 | `embedding_real_model_tests::test_real_sface_graph_normalizes_in_graph` (+ #9–#15) | red by construction: the SFace file is not attested by the old manifest |
+| SFC6 | `embedding_real_model_tests::test_raw_opencv_recipe_matches_the_production_extractor` | red by construction like SFC5 (session load fails: the old manifest does not attest the file); against the old BGR `/127.5` extractor the recipe comparison could not hold either |
+| SFC7 | `sface_template_binding_tests::test_arcface_template_is_refused_after_the_sface_switch`, `::test_current_sface_template_is_evaluated` | compile error: `classify_template`, `EmbeddingExtractor::output_dimension` (specified API) |
+| SFC8 | migrated #26–#28 | compile error (`SHIPPED_EMBEDDING_MODEL`); on the old code the alias tests expected `LegacyAlias` / `Allow` |
+| SFC9 | `sface_template_binding_tests::test_template_with_wrong_dimension_is_refused`, `::test_classify_template_binds_model_id_and_dimension` | compile error (specified API); behaviourally the old daemon answered `Deny` (score 0.0) |
+| SFC10 | existing `ipc_tests::test_ipc_unavailable_returns_ignore` | — (cited, unchanged) |
+| SFC11 | migrated #32–#36 | FAILED on 0.70 vs 0.50 (#32, #34–#36). #33 (0.4999 → `Deny`) passes on both: its power is that the old literal 0.6999 would be `Allow` under 0.50 |
+| SFC12 | `vision_threshold_contract::test_no_match_threshold_literal_outside_the_constants` | FAILED: `crates/gui/src/app.rs: let match_threshold = 0.70f32;` |
+| SFC13 | `import_tests::test_import_refuses_a_template_of_another_model` (+ #40–#42) | FAILED: the CLI default was `arcface_w600k_mbf`, a 512-value import succeeded |
+| SFC14 | `migrate_tests::test_migrate_never_rebinds_a_template_to_the_loaded_model` | compile error: `MigrationSummary::reenrollment_required` (specified API) |
+| SFC15 | `verify_tests::test_verify_refuses_a_template_of_another_model` | compile error: `EnrollmentCliError::TemplateModelMismatch` (specified API) |
+| SFC16 | `embedding_model_docs_contract::test_docs_state_the_sface_model_and_the_050_default` | FAILED: docs name no `sface_2021dec`, ADR still Proposed |
+| SFC17 | `embedding_model_docs_contract::test_retired_models_file_is_read_by_no_runtime_crate_or_script`, `::test_download_models_reports_unattested_model_files_without_deleting_them` | FAILED: `models/retired_models.toml` absent; no "not attested" notice |
+| SFC18 | `embedding_real_model_tests::test_registry_silences_sface_initializer_warnings_only` (added in Phase 4 with the Q11 answer) | a default session of the file emits **174** "initializer appears in graph inputs" warnings (measured by the test's control arm); without the registry log level the registry session emits the same 174 |
 
-Superseded rows (Phase 6): BIO1 (BGR clause), VMX4, NGM7 (512D / symmetric clauses), NGM16,
-EMR3–EMR7, EMP3, EMP4, SFX1–SFX3 (retired model), VTD4 (value), D14 / NGM15 (needle), EVR7
-(owner decision now recorded: `✅ Verified` with the ADR).
-
-Red proof: each new or migrated test is run against the unchanged production code and must fail
-on its assertion (for example `assert_eq!(EMBEDDING_DIMENSION, 128)` → `left: 512`), or on the
-specified missing item (`SHIPPED_EMBEDDING_MODEL`, `classify_template`, `output_dimension`).
+Flakiness: the new daemon integration tests (`sface_template_binding_tests`) use the
+5 s fixture connection timeout of `template_model_binding_tests` and passed in every run of the
+batch (full workspace runs and package runs).
 
 ## 6. Risks and Re-enrollment Impact
 
@@ -513,7 +542,7 @@ specified missing item (`SHIPPED_EMBEDDING_MODEL`, `classify_template`, `output_
 |---|---|
 | New binaries installed, models not redeployed | the installed manifest has no `sface_2021dec`: `soos-daemon` refuses to start, PAM falls back to the password (fail closed) |
 | `sudo ./scripts/install.sh` (or `sudo ./scripts/download_models.sh`) | downloads `sface_2021dec.onnx` (38.7 MB, SHA-256 and size verified), overwrites the deployed manifest; the ArcFace file stays on disk, unattested and unused (and any operator-appended optional PAD entry is overwritten, as today) |
-| Daemon restarted | every `Auth` → `Unavailable` / `ModelUnavailable` (warning "re-enrollment required") → `PAM_IGNORE` → password; no attempt is counted against the rate limit |
+| Daemon restarted | every `Auth` → `Unavailable` / `ModelUnavailable` (warning "re-enrollment required") → `PAM_IGNORE` → password; like every request, each attempt still reserves one slot of the per-UID rate limit (8-pre runs before the template check) |
 | Each user: `sudo soos-enroll enroll -u <user>` (confirms the replacement) or the GUI guided enrollment | new `sface_2021dec` / 128-D template; face unlock works again |
 | Optional: `sudo rm /var/lib/soos/models/arcface_w600k_mbf.onnx` | frees 136.6 MB |
 | Rollback to the ArcFace release | SFace templates become `Foreign` for the old daemon (id mismatch) → password fallback; users would re-enroll again |
@@ -545,55 +574,122 @@ models are not convertible.
 8. **Contract churn**: 35 assertion migrations and 15 setup-only items (section 4); every one is
    listed for approval, none relaxes an assertion.
 
-## 7. Plan Evaluation (self-check, Phase 1.5 preview)
+## 7. Plan Evaluation (Phase 1.5)
 
-- Coverage: each owner decision maps to spec elements (decision 1 → 3.2–3.4, 3.6–3.9; decision 2
-  → 3.5) and to SFC rows (section 5).
-- Facts verified against code: `EMBEDDING_MODEL_ID` (`crates/daemon/src/pipeline.rs:31`),
-  `MODEL_ID_EMBEDDING` (`crates/enrollment-cli/src/service.rs:57`), import default literal
-  (`crates/enrollment-cli/src/args.rs:200`), `IMPORT_EMBEDDING_DIM = 512` (`service.rs:1318`),
-  `EMBEDDING_DIMENSION = 512` (`crates/inference-ort/src/embedding.rs`), alias in
-  `classify_template_model`, cosine error → score 0.0 (`crates/daemon/src/dispatcher.rs`, match
-  arm of the consensus loop), GUI literal 0.70 (`crates/gui/src/app.rs:807`), both threshold
-  constants 0.70, `MIN_MATCH_THRESHOLD = 0.40`, mock extractors `new(512)` in
-  `crates/enrollment-cli/src/service.rs:1704` and `crates/gui/src/main.rs:45`, alignment template
-  equal to OpenCV's.
-- Failure scenarios considered: (1) keeping the alias with SFace loaded compares ArcFace vectors
-  with SFace probes → removed; (2) id-only binding lets a 512-D vector labelled `sface_2021dec`
-  (old import, mock mode) reach the cosine → dimension binding; (3) GUI import default would label
-  SFace vectors ArcFace → import default from the constant; (4) a BGR or `/127.5` implementation
-  passes a dimension-only test → exact-float tests at known pixels and the real-file OpenCV-recipe
-  comparison; (5) a test using 0.6999 as "below default" silently flips to `Allow` → migrated #33;
-  (6) the old manifest with a new binary → daemon refuses to start (fail closed).
-- Test power: every SFC test fails on today's code (section 5).
-- Formal `AI/plan_evaluator_report.md` is written in Phase 1.5 after the owner's answers.
+`AI/plan_evaluator_report.md`: **VALIDATION_VERDICT: APPROVED**. Findings: F1 (critical) the
+legacy alias would compare ArcFace vectors with SFace probes — removed; F2 (major) the `import`
+model default literal would label every GUI enrollment ArcFace — derived from
+`MODEL_ID_EMBEDDING`; F3 (minor) `store_imported` reported a hard-coded 512 — fixed; F4 (major)
+GUI threshold literal 0.70 — removed and pinned; F5 (major) id-only binding scored a wrong-length
+vector as `Deny` — dimension binding; F6 (minor) one more pre-existing test breaks (section 11).
+Correction to §6.1: every request reserves a rate-limit slot before the template check, so a
+refused ArcFace template still counts one attempt (unchanged behaviour).
 
-## 8. Open Questions for the Owner
+## 8. Owner Decisions (2026-10-01)
 
-- **Q1** Approve the test migrations of section 4 (35 class a, 15 class b).
-- **Q2** Retired ArcFace attestation: keep it in a new `models/retired_models.toml` (never read
-  at runtime or by `download_models.sh`) so the ArcFace evaluation tests stay reproducible with a
-  setup-only change (#16, #18, #37), or delete those tests?
-- **Q3** Remove the legacy alias `mobilefacenet` / `1.0.0` (recommended; it is ArcFace-only).
-- **Q4** `soos-enroll import` refuses any template that is not `sface_2021dec` / 128-D
-  (recommended), and `migrate` / `list` print a re-enrollment notice for `Foreign` templates?
-- **Q5** `soos-enroll verify` (and the GUI live verification) refuse a `Foreign` template before
-  capture (recommended; costs the setup-only items #48–#50), or check only the vector length?
-- **Q6** Keep `[manifest] version = "2.0.0"` (recommended) or bump to `"3.0.0"` (changes
-  `EMBEDDING_MODEL_VERSION`, `model_id_tests` and docs)?
-- **Q7** `MockEmbeddingExtractor::DEFAULT_DIM` follows `EMBEDDING_DIMENSION` (128) (recommended,
-  migrates #8)?
-- **Q8** `download_models.sh`: print a notice listing unattested `*.onnx` files left in the
-  target directory (no automatic deletion), or leave the ArcFace file alone silently?
-- **Q9** Keep `MIN_MATCH_THRESHOLD = 0.40` (SFace LFW FAR 2.8e-4 there) or raise it to 0.45?
-- **Q10** Before release, confirm on your own camera that genuine `soos-enroll verify` scores
-  clear 0.50 with margin (RGB and, if used, IR).
-- **Q11** ORT warning noise (risk 3): accept, or set the registry sessions' ORT log level to
-  `Error`?
+Q1 approved (section 4). Q2 retired ArcFace attestation in `models/retired_models.toml`, never
+read at runtime. Q3 legacy alias removed. Q4 `import` refuses any non-SFace / non-128-D template;
+`migrate` and `list` print a re-enrollment notice. Q5 `verify` and the GUI check the template
+model before capture. Q6 manifest version stays `2.0.0`. Q7 mock default dimension 128. Q8
+`download_models.sh` reports unattested `.onnx` files, no deletion. Q9 `MIN_MATCH_THRESHOLD`
+stays 0.40. Q10 deferred to the owner's face session (GitHub #296, section 11). Q11 the SFace
+session logs at ORT `Error` only (that model only; errors stay visible). Training data: the
+owner accepts that the SFace training data is undocumented (possibly MS1MV2 / MS-Celeb-1M
+derived); recorded in the new ADR with the file licence (Apache-2.0) and the sources.
 
-## 9. Remaining Phases
+## 9. Auditor Constraints (Phase 3)
 
-Phases 1.5 (formal plan evaluation), 2 (red tests and approved migrations), 3 (audit), 4
-(implementation), 5 (candid review), 6 (traceability: matrix SFC rows after EVR, ADRs, docs) and
-7 (release) run after the owner's answers. Sections 4 and 5 of this walkthrough are then updated
-with the red evidence, the audit constraints and the verification results.
+| # | Constraint | Applies to | Verified by |
+|---|---|---|---|
+| 1 | No `unwrap` / `expect` / `panic!` / indexing in the new production code | `embedding.rs`, `registry.rs`, `pipeline.rs`, `dispatcher.rs`, enrollment `service.rs` / `main.rs`, GUI `app.rs` | clippy `-D warnings` (workspace lints deny them); `prepare_input` writes through `get_mut` |
+| 2 | Every new refusal ends in `Unavailable` / an error, never `Allow` | dispatcher 8d, `verify`, import, GUI reference | SFC7, SFC9, SFC13, SFC15; GUI shows no score for a foreign template |
+| 3 | No embedding value in logs, errors or JSON | dispatcher warning (ids and dimensions), `TemplateModelMismatch`, `InvalidImport`, migrate `reenrollment_required` (UIDs only), list warning | SFC14 asserts no vector value in the JSON; code review |
+| 4 | Input and ORT output buffers stay wipe-on-drop | `OrtEmbeddingExtractor::prepare_input` (`Zeroizing`), `ZeroizingOutputs` | unchanged containers; `ort_output_zeroize_contract` invariant green |
+| 5 | Single source of the model id, dimension and threshold | `SHIPPED_EMBEDDING_MODEL`, `DEFAULT_MATCH_THRESHOLD` | SFC2, SFC11, SFC12 |
+| 6 | The retired attestation never reaches a runtime path | `models/retired_models.toml` | SFC17 |
+| 7 | `download_models.sh` never deletes, only reports; stays manifest-driven and HTTPS / file only | `scripts/download_models.sh` | SFC17, existing `model_download_size_contract` and `installer_templates_contract` |
+| 8 | ORT warnings are silenced only for the SFace session, errors stay visible | `registry::ERROR_ONLY_LOG_MODELS`, `ort_session_log_level` | SFC18 (other models keep `Warning`) |
+| 9 | Fail closed on a partial upgrade (new binary, old manifest) | daemon start | `get_or_load_session` error → refuse to start (existing `model_deployment_tests`) |
+| 10 | No new dependency | Cargo manifests | `Cargo.lock` unchanged; `ort::logging::LogLevel` is in the pinned `ort` |
+
+Clearance: **CLEARED**.
+
+## 10. Implementation (Phase 4)
+
+| File | Change |
+|---|---|
+| `models/manifest.toml` | `[models.sface_2021dec]` replaces the ArcFace entry; header comment |
+| `models/retired_models.toml` (new) | unchanged ArcFace attestation, evaluation only |
+| `models/README.md` | SFace contract, lineage, retired section, licence notice |
+| `crates/inference-ort/src/embedding.rs` | `EmbeddingModelSpec`, `SFACE_2021DEC`, `SHIPPED_EMBEDDING_MODEL`, `EMBEDDING_DIMENSION = 128`, `template_matches_model`, `EmbeddingExtractor::output_dimension`, `OrtEmbeddingExtractor::with_spec` / `spec`, RGB raw NCHW `prepare_input`; `prepare_input_layout` removed |
+| `crates/inference-ort/src/registry.rs` | `ERROR_ONLY_LOG_MODELS`, `ort_session_log_level`, session `with_log_level` |
+| `crates/inference-ort/src/mock.rs`, `src/lib.rs`, `Cargo.toml` | mock default and `output_dimension`; re-exports; description |
+| `crates/vision/src/pipeline.rs` | `DEFAULT_MATCH_THRESHOLD = 0.50`, `VisionPipeline::embedding_dimension` |
+| `crates/policy/src/threshold.rs` | `DEFAULT_MATCH_THRESHOLD = 0.50` with the LFW source |
+| `crates/daemon/src/pipeline.rs`, `src/dispatcher.rs`, `src/inference.rs` | id from the spec, alias removed, `classify_template` by id and dimension in step 8d, comments |
+| `crates/enrollment-cli/src/service.rs`, `args.rs`, `error.rs`, `main.rs`, `guided_enrollment.rs` | ids from the spec, import bound to the loaded model (and the 512 outcome fixed), `verify` refusal, `foreign_template_uids` / `reenrollment_required`, list and migrate notices, mock dimension, `TemplateModelMismatch` |
+| `crates/gui/src/app.rs`, `src/main.rs`, `src/lib.rs` | threshold from the pipeline config, reference binding with a re-enrollment note, mock dimension, labels |
+| `crates/biometric-store/src/template.rs` | doc example id |
+| `scripts/download_models.sh` | unattested `.onnx` notice; size comment |
+| Docs | `Docs/INFERENCE_ORT_CRATE.md`, `Docs/VISION_CRATE.md`, `Docs/POLICY_CRATE.md`, `Docs/DAEMON.md`, `Docs/ENROLLMENT_CLI.md`, `Docs/MEMORY_PROTECTION_AND_SWAP.md`, `AI/ARCHITECTURE.md`, `AI/MOCK_STRATEGY.md`, `AI/DECISIONS.md`, `AI/VERIFICATION_MATRIX.md`, `AI/plan_evaluator_report.md`, `.agents/skills/dev-workflow/references/project-facts.md`, `tests/fixtures/mod.rs`, `tests/physical/screensaver_test.md` |
+
+Deviation from the spec: none in behaviour. `classify_template_model` keeps its three-argument
+signature (version ignored) as specified; the GUI field `_pipeline` was renamed `pipeline` to read
+its configuration.
+
+## 11. Verification Results and Follow-ups
+
+All on this host (2026-10-01, `CARGO_BUILD_JOBS=8`). The scratch models directory holds
+SCRFD and MiniFASNet copied from `/var/lib/soos/models`, the retired ArcFace file (for the
+evaluation tests) and SFace from the evaluation cache (SHA-256 verified).
+
+| Gate | Result |
+|---|---|
+| `cargo fmt --all -- --check` | pass |
+| `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings` | pass |
+| `SOOS_MODELS_DIR=<scratch> cargo test --locked --workspace --all-targets --all-features` | 2165 passed, **1 failed** (F6 below, not edited), 6 ignored |
+| `SOOS_MODELS_DIR=<scratch> SOOS_REQUIRE_REAL_MODELS=1 cargo test -p soos-inference-ort -p soos-daemon -p soos-vision --all-targets --all-features -- --include-ignored` | 723 passed, 0 failed (SFace real-model suite incl. SFC5, SFC6, SFC18; retired ArcFace evaluation; PVA12 real pipeline) |
+| `cargo test -p soos-invariants` (after the docs) | 344 passed |
+| `ORT_SKIP_DOWNLOAD=1 cargo check --locked --workspace --all-targets --all-features --target i686-unknown-linux-gnu` | pass |
+| `./scripts/candid_review.sh` (layer 1) | PASSED |
+| `./tests/docker/systemd_unit_acceptance_test.sh --models download` | passed: `download_models.sh` fetched and verified `sface_2021dec.onnx` from the pinned revision, the release daemon reached READY=1 in 227 ms and `soos-admin status` reported `models_verified`; host sysctls unchanged |
+
+LFW smoke run of the re-targeted harness (600 official pairs, 807 images, debug build,
+`SOOS_EVAL_MAX_PAIRS=600`, four ORT threads), aggregates only:
+
+| Variant | 10-fold acc. (600 pairs) | Extended TAR @ FAR 1e-4 | Extended FAR / TAR at 0.50 | Embed p50 |
+|---|---|---|---|---|
+| SFace RGB raw (production) | 0.9917 | 0.986 (thr 0.435) | 6.2e-6 / 0.965 | 10.9 ms |
+| SFace BGR raw | 0.9917 | 0.979 (thr 0.430) | 1.2e-5 / 0.935 | 10.1 ms |
+| Retired ArcFace BGR /127.5 | 0.9867 | 0.693 (thr 0.492) | — | 29.7 ms |
+
+The subset agrees with the full run of walkthrough 160 (SFace RGB TAR 0.984 at FAR 1e-4, FAR
+3.9e-6 / TAR 0.957 at 0.50) and confirms that the production arm is now SFace.
+
+
+### Known limitations / follow-ups
+
+- **F6 — additional pre-existing test, not edited (awaits owner approval)**:
+  `crates/enrollment-cli/tests/import_json_presize_tests.rs::test_import_json_decodes_into_a_buffer_that_never_grows`
+  iterates over `[0, 1, 3, 257, IMPORT_EMBEDDING_DIM - 1, IMPORT_EMBEDDING_DIM]` and asserts that
+  every length is stored entirely; `257` assumed a 512-value import buffer. With
+  `IMPORT_EMBEDDING_DIM = 128` the 257-value case is (correctly) truncated to 128 and the
+  assertion `embedding == values` fails. Proposed setup-only migration: replace the literal 257
+  with a length below the dimension (for example `IMPORT_EMBEDDING_DIM / 2 + 1`, i.e. 65); no
+  assertion changes. Until approved, this is the only failing test of the workspace.
+- **Host deployment**: `/var/lib/soos/models` on this host still holds the ArcFace deployment
+  (root-owned). Without `SOOS_MODELS_DIR`, `scrfd_real_model_tests` (which runs
+  `verify_integrity` over the whole committed manifest) fails on this host because
+  `sface_2021dec.onnx` is not installed there; it passes with the scratch models directory and
+  skips on CI runners. Fix: `sudo ./scripts/download_models.sh` (or `sudo ./scripts/install.sh`),
+  then re-enroll every user (`sudo soos-enroll enroll -i <uid>` or the GUI). The old
+  `arcface_w600k_mbf.onnx` is then reported as not attested and can be deleted.
+- **Issue #296 checklist text (owner face session), Q10**: "- [ ] After deploying SFace
+  (`sudo ./scripts/download_models.sh`) and re-enrolling, run `sudo soos-enroll verify -u <user>`
+  at least 10 times per capture mode (RGB and, if used, IR) at the usual distance and lighting,
+  record the genuine `match_score` values, and confirm they clear `match_threshold = 0.50` with
+  margin (lowest score >= 0.55); also check that another person's face stays below 0.50.
+  Report min / median / max only (no embedding or frame)."
+- The ArcFace evaluation tests and the ArcFace arms of the LFW harness run only when the retired
+  file is present next to the models (they skip otherwise).
+- Phases 5 (candid review) and 7 (push, PR, merge) are not run in this batch.
