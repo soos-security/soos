@@ -48,13 +48,13 @@ Earlier gates stay in front of the template read: wire validation (5a), peer UID
 `uid_hint` (6), local-session policy (6b), preview routing (6c) and the deadline check (7).
 The template is read exactly once and the request keeps that snapshot for the match, as before.
 
-Error taxonomy (unchanged verdicts, all → `PAM_IGNORE`):
+Error taxonomy (each condition keeps its verdict and reason; all → `PAM_IGNORE`). Precedence changed: the template outcome now wins over camera availability, so a missing template or a store error with a camera that cannot wake answers `Unavailable` / `InternalError` (was `CameraUnavailable`), and a foreign template with a cold camera answers `ModelUnavailable` (was `CameraUnavailable`):
 
 | Condition | Verdict / reason | Attempt charged | Camera woken |
 |---|---|---|---|
 | `Foreign` template | `Unavailable` / `ModelUnavailable` | no (was yes) | no (was yes) |
 | no template | `Unavailable` / `InternalError` | yes | no (was yes) |
-| store error | `Unavailable` / `InternalError` | yes | no (was yes) |
+| store error | `Unavailable` / `InternalError` | yes | no (was yes) — pinned by TCO9 |
 | current template, limit exhausted | `ProtocolError` / `RateLimited` | rejected reservation | no |
 | current template | consensus verdict | yes, before wake and capture | yes |
 

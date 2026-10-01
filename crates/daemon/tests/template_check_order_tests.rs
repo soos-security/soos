@@ -154,6 +154,9 @@ enum Enrolled {
     WrongDimension,
     /// The embedding of the mock camera frame under the loaded model id: `Current`.
     CurrentLiveIdentity,
+    /// A current template whose encrypted file is then overwritten with garbage: the store
+    /// read fails (authentication of the envelope), the step-8d store-error branch.
+    CorruptFile,
 }
 
 struct Fixture {
@@ -260,7 +263,7 @@ async fn fixture(enrolled: Enrolled, max_attempts: u32, never_ready: bool) -> Fi
         Enrolled::Nothing => None,
         Enrolled::RetiredArcFace => Some(("arcface_w600k_mbf", unit_vector(512))),
         Enrolled::WrongDimension => Some((EMBEDDING_MODEL_ID, unit_vector(512))),
-        Enrolled::CurrentLiveIdentity => Some((
+        Enrolled::CurrentLiveIdentity | Enrolled::CorruptFile => Some((
             EMBEDDING_MODEL_ID,
             vision
                 .process_frame(&frame)
@@ -280,6 +283,12 @@ async fn fixture(enrolled: Enrolled, max_attempts: u32, never_ready: bool) -> Fi
         )
         .unwrap();
         bio_store.enroll(&template).unwrap();
+    }
+    if matches!(enrolled, Enrolled::CorruptFile) {
+        let path = bio_store.template_path(uid).unwrap();
+        let len = std::fs::metadata(&path).unwrap().len();
+        let garbage = vec![0x5A_u8; usize::try_from(len).unwrap()];
+        std::fs::write(&path, garbage).unwrap();
     }
     inferences.store(0, Ordering::SeqCst);
 
@@ -450,6 +459,23 @@ async fn test_missing_template_is_refused_before_the_camera_wake_and_still_count
     );
     assert_eq!(fx.camera.wakes.load(Ordering::SeqCst), 0);
     assert_eq!(fx.camera.captures.load(Ordering::SeqCst), 0);
+    assert_eq!(fx.remaining_attempts(), 4, "the attempt is still recorded");
+}
+
+/// TCO9: a store error (unreadable / tampered template file) is still answered before the
+/// camera wake, as `Unavailable` / `InternalError`, and still consumes the attempt (only a
+/// foreign template is free).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_store_error_is_refused_before_the_camera_wake_and_still_counts() {
+    let fx = fixture(Enrolled::CorruptFile, 5, false).await;
+    let resp = auth(&fx, 6).await;
+    assert_eq!(
+        verdict(&resp),
+        (Verdict::Unavailable, ReasonClass::InternalError)
+    );
+    assert_eq!(fx.camera.wakes.load(Ordering::SeqCst), 0);
+    assert_eq!(fx.camera.captures.load(Ordering::SeqCst), 0);
+    assert_eq!(fx.inferences.load(Ordering::SeqCst), 0);
     assert_eq!(fx.remaining_attempts(), 4, "the attempt is still recorded");
 }
 
