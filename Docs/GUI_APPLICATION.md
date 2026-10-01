@@ -117,6 +117,21 @@ The worker feeds every analyzed frame to the guided enrollment session through
 - a spoof PAD verdict is counted even when the frame yields no pose or no embedding
   (`GuidedEnrollmentSession::record_presentation_attack`, GitHub #285).
 
+## 1d. Live Verification Reference (GitHub #278 / #298)
+
+Selecting a profile in the live-verification panel calls `worker::select_match_reference` with
+the stored template (or `None` when the store lookup fails or finds nothing):
+
+- only a template of the loaded embedding model (`template_matches_model`: same id, same
+  dimension) becomes the match reference;
+- a foreign template (for example a pre-SFace `arcface_w600k_mbf` 512-D one) clears the reference
+  and shows "Re-enrollment required: this template was enrolled with model '<id>' (<n>-D)";
+- a failed or empty lookup clears the reference and the note;
+- in every case the score computed against the previous reference is withdrawn in the same
+  critical section that installs the new reference. The worker publishes scores through
+  `worker::update_live_match_score`, which holds the reference lock while it writes the score,
+  so no stale score is ever displayed for the new selection.
+
 ## 2. Camera Error States (GitHub #155, review finding CAM-07)
 
 Every `CameraManager` exposes `status() -> CameraStatus` (see `Docs/CAMERA_V4L_CRATE.md`). When no
@@ -168,6 +183,7 @@ Matrix rows GRE1–GRE6 and ISE1–ISE4 in `AI/VERIFICATION_MATRIX.md`; tests in
 `crates/gui/tests/responsiveness_tests.rs`, `crates/gui/tests/camera_status_tests.rs`,
 `crates/gui/tests/import_privacy_tests.rs` and `crates/camera-v4l/tests/camera_status_tests.rs`.
 Direct-mode store mutations off the UI thread: rows SGU1–SGU2, `crates/gui/tests/store_task_tests.rs`.
+Live verification reference selection: rows SGF1–SGF2, `crates/gui/tests/match_reference_selection_tests.rs`.
 Failure paths without a daemon or camera (oversized, zero-length and truncated preview replies,
 daemon without camera, `EACCES` socket, direct-mode `EACCES` / `EBUSY`) are covered by
 `crates/gui/tests/ipc_camera_failure_tests.rs` (matrix CHT5–CHT6, GitHub #198).
