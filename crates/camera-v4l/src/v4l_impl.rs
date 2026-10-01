@@ -84,8 +84,9 @@ trait CaptureDevice {
 
     /// `VIDIOC_QUERYCAP`.
     fn capabilities(&self) -> std::io::Result<NodeCapabilities>;
-    /// `VIDIOC_ENUM_FMT` fourccs (empty on error).
-    fn pixel_formats(&self) -> Vec<FourCC>;
+    /// `VIDIOC_ENUM_FMT` fourccs (guarded and bounded, empty on error); `path` is used for
+    /// logging only.
+    fn pixel_formats(&self, path: &Path) -> Vec<FourCC>;
     /// Frame sizes of `fourccs` (guarded, bounded `VIDIOC_ENUM_FRAMESIZES`, empty on error);
     /// `path` is used for logging only.
     fn frame_sizes(&self, path: &Path, fourccs: &[FourCC]) -> Vec<(u32, u32)>;
@@ -127,8 +128,8 @@ impl CaptureDevice for v4l::Device {
         })
     }
 
-    fn pixel_formats(&self) -> Vec<FourCC> {
-        enum_formats_guarded(self)
+    fn pixel_formats(&self, path: &Path) -> Vec<FourCC> {
+        enum_formats_guarded(self, path)
     }
 
     fn frame_sizes(&self, path: &Path, fourccs: &[FourCC]) -> Vec<(u32, u32)> {
@@ -776,7 +777,7 @@ fn open_and_stream<B: CaptureBackend>(
     }
 
     // Query hardware-supported formats via VIDIOC_ENUM_FMT
-    let fourccs: Vec<FourCC> = device.pixel_formats();
+    let fourccs: Vec<FourCC> = device.pixel_formats(&config.device_path);
     // Deep-greyscale IR fourccs (Y8I/Y10/Y12/Y16) are delivered as Grey (GitHub #195).
     let supported = delivered_formats(&fourccs);
 

@@ -5,6 +5,7 @@
 //!   opens a `v4l::Device`, and the fake backend exists only under `#[cfg(test)]`.
 //! - CCB12: the decision is recorded as an ADR.
 //! - CCB14: frame-size enumeration goes through the guarded, bounded wrapper only.
+//! - CCB15: format enumeration goes through the guarded, bounded wrapper only.
 
 #![allow(
     clippy::unwrap_used,
@@ -141,4 +142,42 @@ fn test_ccb_frame_size_enumeration_is_guarded_and_bounded() {
         sensor.contains("enum_framesizes_guarded(") && sensor.contains("MAX_FRAME_SIZE_HINTS"),
         "device_frame_sizes must use the guarded wrapper with the MAX_FRAME_SIZE_HINTS bound"
     );
+}
+
+/// CCB15: `VIDIOC_ENUM_FMT` is issued only by the guarded, bounded `enum_formats_guarded`
+/// (adds to CVF4, which keeps its checks): `v4l`'s `enum_formats` loops until the driver
+/// returns an error and unwraps the description, so it is called nowhere in the crate, the
+/// guard included.
+#[test]
+fn test_ccb_format_enumeration_is_guarded_and_bounded() {
+    const GUARD_RS: &str = "crates/camera-v4l/src/v4l_guard.rs";
+    let dir = workspace_root().join("crates/camera-v4l/src");
+    let mut violations = Vec::new();
+    for entry in fs::read_dir(&dir).expect("read crates/camera-v4l/src") {
+        let path = entry.expect("dir entry").path();
+        if path.extension().is_none_or(|x| x != "rs") {
+            continue;
+        }
+        let rel = format!(
+            "crates/camera-v4l/src/{}",
+            path.file_name().unwrap().to_string_lossy()
+        );
+        if production_code(&read(&rel)).contains("enum_formats(") {
+            violations.push(rel);
+        }
+    }
+    assert!(
+        violations.is_empty(),
+        "unbounded v4l enum_formats called in: {violations:?}"
+    );
+    let guard = production_code(&read(GUARD_RS));
+    for needle in [
+        "pub(crate) fn enum_formats_guarded(device: &v4l::Device, device_path: &Path)",
+        "fn bounded_format_fourccs",
+        "VIDIOC_ENUM_FMT",
+        "MAX_ENUMERATED_FORMATS",
+        "enumerate_indexed_bounded(MAX_ENUMERATED_FORMATS",
+    ] {
+        assert!(guard.contains(needle), "{GUARD_RS} must contain `{needle}`");
+    }
 }

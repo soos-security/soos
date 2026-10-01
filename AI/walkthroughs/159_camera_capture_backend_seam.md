@@ -3,7 +3,7 @@
 - **Date**: 2026-10-01
 - **Issue**: GitHub #198 (review finding CAM-16; no backlog id, so the branch is not registered
   in `BRANCH_TO_ISSUE`) — **Branch**: `test/camera-capture-backend`
-- **Matrix criteria**: CCB1–CCB14 (component `camera-capture-backend`); CHT8 promoted (RGB run)
+- **Matrix criteria**: CCB1–CCB15 (component `camera-capture-backend`); CHT8 promoted (RGB run)
 - **ADR**: 2026-10-01 "Capture Backend Seam Below the V4L2 Supervisor" (`AI/DECISIONS.md`)
 
 ---
@@ -238,9 +238,8 @@ Sweep Lists Partitions Through Their Descriptor; v4l Double Teardown Panic Left 
 The IR emitter activation itself (`Docs/CAMERA_V4L_CRATE.md`, "IR Sensors and Emitter
 Requirements") is adjacent to, not part of, #198.
 
-Still open: `enum_formats_guarded` delegates to `v4l`'s `enum_formats`, whose
-`VIDIOC_ENUM_FMT` loop has the same "until the driver errors" shape as the frame-size loop fixed
-in §10; it can be bounded the same way with `enumerate_indexed_bounded` in a follow-up.
+The `VIDIOC_ENUM_FMT` loop that had the same "until the driver errors" shape as the
+frame-size loop is bounded too (§11).
 
 ## 10. Addendum — Guarded, Bounded `VIDIOC_ENUM_FRAMESIZES`
 
@@ -277,3 +276,41 @@ Coordinator request after the first hand-off: close the §5 finding on this bran
   -p soos-invariants` (1029 passed, 0 failed, 3 ignored hardware tests); the i686 check;
   `./scripts/candid_review.sh` (unsafe additions reported as confined to the adapter crate). All
   green.
+
+## 11. Addendum — Guarded, Bounded `VIDIOC_ENUM_FMT`
+
+Second coordinator request: the same treatment for format enumeration.
+
+- **Design**: `v4l_guard::enum_formats_guarded(device, device_path)` (name kept: CVF4 requires
+  it) no longer calls `v4l::video::Capture::enum_formats`. It issues `VIDIOC_ENUM_FMT`
+  (`V4L2_BUF_TYPE_VIDEO_CAPTURE`) itself inside `guard_v4l_call`, reading only `pixelformat`, so
+  the UTF-8 description `v4l` unwraps is never decoded. The private
+  `bounded_format_fourccs(device_path, query)` runs it through
+  `enumerate_indexed_bounded(MAX_ENUMERATED_FORMATS, ..)`: index-0 error → empty list (as `v4l`
+  0.14 and the previous wrapper), first later error → end, at most `MAX_ENUMERATED_FORMATS` (64,
+  a new named constant equal to `MAX_DIAGNOSTIC_FOURCCS`, so the diagnostics truncation is
+  unchanged) indices, the first ones kept, truncation logged at debug level with the node path
+  only. Two new `unsafe` blocks (zeroed POD `v4l2_fmtdesc`, ioctl on the device's own
+  descriptor) carry `// SAFETY:` comments. The `CaptureDevice::pixel_formats` seam method gained
+  the path argument (logging only); every caller in `sensor.rs` (`SystemV4lNodeProbe`,
+  `frame_sizes_at`), `diagnostics.rs` and `v4l_impl.rs` passes it. No `enum_formats(` call is left
+  in `crates/camera-v4l/src`.
+- **Red**: two new tests in `v4l_guard::bounded_enumeration_tests`
+  (`test_ccb_endless_format_enumeration_is_truncated_at_the_bound`,
+  `test_ccb_format_enumeration_end_error_and_panic_semantics`) failed to compile (`cannot find
+  function bounded_format_fourccs`, `cannot find value MAX_ENUMERATED_FORMATS`); the new
+  invariant `capture_backend_contract::test_ccb_format_enumeration_is_guarded_and_bounded`
+  (CCB15, added, CVF4 untouched) failed with `unbounded v4l enum_formats called in:
+  ["crates/camera-v4l/src/v4l_guard.rs"]`. All green after the change.
+- **Setup-only edits**: the fake `pixel_formats` in `v4l_impl/supervisor_tests.rs` takes the
+  new, ignored path argument; `clippy::indexing_slicing` and `clippy::arithmetic_side_effects`
+  were added to the `#[allow]` of the branch's own `bounded_enumeration_tests` module for the two
+  new tests. No assertion changed.
+- **Hardware** (`/dev/video0`, RGB-only): `soos-admin camera --format json probe /dev/video0`
+  reports fourccs `MJPG`, `YUYV` (identical to `v4l2-ctl --list-formats`), the same six frame
+  sizes, sensor `rgb`; `/dev/video1` (metadata node) stays `not_video_capture` with no format;
+  the three `SOOS_HW_TESTS` tests pass.
+- **Gates**: fmt, clippy (`-p soos-camera-v4l -p soos-daemon -p soos-admin-cli -p
+  soos-invariants`, `-D warnings`), `cargo test --locked --all-features` on the same four packages
+  (1032 passed, 0 failed, 3 ignored hardware tests), the i686 check and
+  `./scripts/candid_review.sh` (unsafe additions confined to the adapter crate): all green.

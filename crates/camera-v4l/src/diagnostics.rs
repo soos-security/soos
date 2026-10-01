@@ -218,7 +218,7 @@ fn system_details(dev_path: &Path) -> Result<V4lNodeDetails, ProbeFailure> {
     let device = v4l::Device::with_path(dev_path).map_err(|e| ProbeFailure::from_io_error(&e))?;
     let caps = crate::v4l_guard::query_caps_guarded(&device)
         .map_err(|e| ProbeFailure::from_io_error(&e))?;
-    let mut fourccs: Vec<v4l::FourCC> = crate::v4l_guard::enum_formats_guarded(&device);
+    let mut fourccs: Vec<v4l::FourCC> = crate::v4l_guard::enum_formats_guarded(&device, dev_path);
     fourccs.truncate(MAX_DIAGNOSTIC_FOURCCS);
     let frame_sizes = device_frame_sizes(&device, dev_path, &fourccs);
     Ok(V4lNodeDetails {

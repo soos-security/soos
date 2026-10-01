@@ -308,7 +308,7 @@ pub(crate) fn frame_sizes_at(path: &std::path::Path) -> Vec<(u32, u32)> {
     let Ok(device) = v4l::Device::with_path(path) else {
         return Vec::new();
     };
-    let fourccs = crate::v4l_guard::enum_formats_guarded(&device);
+    let fourccs = crate::v4l_guard::enum_formats_guarded(&device, path);
     device_frame_sizes(&device, path, &fourccs)
 }
 
@@ -358,7 +358,7 @@ impl V4lNodeProbe for SystemV4lNodeProbe {
         // Deep-greyscale IR formats (Y8I, Y10, Y12, Y16) are delivered as Grey, so Y16-only IR
         // nodes stay visible (GitHub #195).
         let supported_formats = if video_capture {
-            let fourccs = crate::v4l_guard::enum_formats_guarded(&dev);
+            let fourccs = crate::v4l_guard::enum_formats_guarded(&dev, dev_path);
             crate::deep_grey::delivered_formats(&fourccs)
         } else {
             Vec::new()

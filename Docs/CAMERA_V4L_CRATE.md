@@ -206,7 +206,11 @@ Frame-size hints (`device_frame_sizes`) are read through `enum_framesizes_guarde
 issues `VIDIOC_ENUM_FRAMESIZES` itself inside the panic guard and stops after
 `MAX_FRAME_SIZE_HINTS` indices per fourcc (`enumerate_indexed_bounded`), because `v4l`'s own
 `enum_framesizes` loops until the driver returns an error. A truncated list keeps its first
-entries and is logged at debug level with the node path only (matrix CCB13, CCB14). The fake's device paths live
+entries and is logged at debug level with the node path only (matrix CCB13, CCB14).
+Format lists (`enum_formats_guarded`) are read the same way: `VIDIOC_ENUM_FMT` is issued
+inside the guard, only `pixelformat` is read (the description `v4l` unwraps is never decoded),
+and at most `MAX_ENUMERATED_FORMATS` (64) indices are queried per node; an index-0 error is an
+empty list, as before (matrix CCB15). The fake's device paths live
 under a directory that never exists, so nothing under `/dev` is touched.
 
 ### Busy-Device Classification (GitHub #150)
@@ -529,4 +533,4 @@ while frames are captured.
 | **CAG1–CAG2** | A plain `/dev/videoN` capture path takes its by-id alias name, bounded, never downgrading Infrared (GitHub #289) | `supervisor_alias_hint_tests::*` | ✅ Verified |
 | **CAG3** | Panics caught by the `v4l` guard stay out of the process panic hook; other panics still reach it (GitHub #289) | `v4l_panic_hook_filter_tests::*` | ✅ Verified |
 | **CAG4** | Stream creation / teardown panics become recoverable errors (GitHub #289) | `v4l_teardown_guard_tests::*` | ✅ Verified |
-| **CCB1–CCB14** | Hermetic supervisor state machine through the capture-backend seam: backoff, busy, sensor stamps, `Starved`, `ENODEV` re-resolution, idle suspend, teardown panic, shutdown; bounded frame-size enumeration (GitHub #198) | `supervisor_tests::*`, `v4l_guard::test_ccb_endless_enumeration_is_truncated_at_the_bound` (and siblings) | ✅ Verified |
+| **CCB1–CCB15** | Hermetic supervisor state machine through the capture-backend seam: backoff, busy, sensor stamps, `Starved`, `ENODEV` re-resolution, idle suspend, teardown panic, shutdown; bounded frame-size and format enumeration (GitHub #198) | `supervisor_tests::*`, `v4l_guard::test_ccb_endless_enumeration_is_truncated_at_the_bound` (and siblings) | ✅ Verified |

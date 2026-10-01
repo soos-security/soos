@@ -236,7 +236,7 @@ impl CaptureDevice for FakeDevice {
         .ok_or_else(Self::gone)
     }
 
-    fn pixel_formats(&self) -> Vec<FourCC> {
+    fn pixel_formats(&self, _path: &Path) -> Vec<FourCC> {
         self.node(|node| node.fourccs.clone()).unwrap_or_default()
     }
 

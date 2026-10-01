@@ -28,6 +28,7 @@
 
 use std::cell::Cell;
 use std::panic::{self, AssertUnwindSafe};
+use std::path::Path;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Mutex, Once, PoisonError};
 
@@ -212,14 +213,66 @@ pub(crate) fn query_caps_guarded(
     guard_v4l_call(|| device.query_caps()).and_then(|result| result)
 }
 
-/// `VIDIOC_ENUM_FMT` fourccs through the guard (empty on error or panic, as before).
-pub(crate) fn enum_formats_guarded(device: &v4l::Device) -> Vec<v4l::FourCC> {
-    guard_v4l_call(|| v4l::video::Capture::enum_formats(device))
-        .and_then(|result| result)
-        .unwrap_or_default()
-        .into_iter()
-        .map(|desc| desc.fourcc)
-        .collect()
+/// Upper bound on the `VIDIOC_ENUM_FMT` indices queried per node (equal to
+/// [`crate::diagnostics::MAX_DIAGNOSTIC_FOURCCS`], so the diagnostics truncation is unchanged).
+pub(crate) const MAX_ENUMERATED_FORMATS: u32 = 64;
+
+/// Collects the capture fourccs reported by `query(index)` (the `pixelformat` of one
+/// `VIDIOC_ENUM_FMT` entry), at most [`MAX_ENUMERATED_FORMATS`] indices.
+///
+/// An error at index 0 means no format (empty list, as `v4l` 0.14 and the previous wrapper
+/// returned); a later error ends the list. A driver that never reports the end is cut at the
+/// bound (the first indices are kept) and the truncation is logged at debug level with the node
+/// path only.
+fn bounded_format_fourccs<F>(device_path: &Path, query: F) -> Vec<v4l::FourCC>
+where
+    F: FnMut(u32) -> std::io::Result<u32>,
+{
+    let mut query = query;
+    let Ok(found) = enumerate_indexed_bounded(MAX_ENUMERATED_FORMATS, |index| {
+        query(index).map(|code| Some(v4l::FourCC::from(code)))
+    }) else {
+        return Vec::new();
+    };
+    if found.truncated {
+        tracing::debug!(
+            "Format enumeration on '{}' stopped at the bound of {} entries",
+            device_path.display(),
+            MAX_ENUMERATED_FORMATS
+        );
+    }
+    found.items
+}
+
+/// `VIDIOC_ENUM_FMT` capture fourccs, at most [`MAX_ENUMERATED_FORMATS`], through the guard
+/// (empty on error or panic, as before).
+///
+/// Replaces `v4l::video::Capture::enum_formats`, whose loop only ends when the driver returns an
+/// error and which unwraps the UTF-8 description: only the `pixelformat` field is read, so the
+/// description is never decoded. `device_path` is used for logging only.
+pub(crate) fn enum_formats_guarded(device: &v4l::Device, device_path: &Path) -> Vec<v4l::FourCC> {
+    let fd = device.handle().fd();
+    guard_v4l_call(|| {
+        bounded_format_fourccs(device_path, |index| {
+            // SAFETY: `v4l2_fmtdesc` is a plain C struct (integers and a byte array) for which
+            // the all-zero bit pattern is valid.
+            let mut raw: v4l::v4l_sys::v4l2_fmtdesc = unsafe { std::mem::zeroed() };
+            raw.index = index;
+            raw.type_ = v4l::buffer::Type::VideoCapture as u32;
+            // SAFETY: `fd` is the open descriptor owned by `device`, which outlives this call;
+            // `raw` is a valid, exclusively borrowed `v4l2_fmtdesc`, the argument type of
+            // `VIDIOC_ENUM_FMT`, and the kernel writes only within it.
+            unsafe {
+                v4l::v4l2::ioctl(
+                    fd,
+                    v4l::v4l2::vidioc::VIDIOC_ENUM_FMT,
+                    std::ptr::from_mut(&mut raw).cast::<std::os::raw::c_void>(),
+                )
+            }?;
+            Ok(raw.pixelformat)
+        })
+    })
+    .unwrap_or_default()
 }
 
 /// `VIDIOC_S_FMT` through the guard.
@@ -318,6 +371,8 @@ pub(crate) fn enum_framesizes_guarded(
 #[allow(
     clippy::unwrap_used,
     clippy::panic,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
     reason = "Unit tests use direct assertions on the bounded enumeration"
 )]
 mod bounded_enumeration_tests {
@@ -384,5 +439,64 @@ mod bounded_enumeration_tests {
         let none = enumerate_indexed_bounded::<u32, _>(0, |_| panic!("queried with a zero bound"))
             .unwrap();
         assert!(none.items.is_empty() && none.truncated);
+    }
+
+    fn fourcc_code(index: u32) -> u32 {
+        u32::from(v4l::FourCC::new(&[
+            b'A',
+            b'A',
+            b'A',
+            b'0' + u8::try_from(index % 10).unwrap(),
+        ]))
+    }
+
+    /// A driver whose `VIDIOC_ENUM_FMT` never reports the end yields exactly
+    /// `MAX_ENUMERATED_FORMATS` fourccs, the first indices, in order.
+    #[test]
+    fn test_ccb_endless_format_enumeration_is_truncated_at_the_bound() {
+        let mut calls = 0u32;
+        let fourccs = bounded_format_fourccs(Path::new("/dev/video-endless"), |index| {
+            calls += 1;
+            Ok(fourcc_code(index))
+        });
+        assert_eq!(calls, MAX_ENUMERATED_FORMATS);
+        assert_eq!(
+            fourccs.len(),
+            usize::try_from(MAX_ENUMERATED_FORMATS).unwrap()
+        );
+        assert_eq!(fourccs[0].repr, *b"AAA0");
+        assert_eq!(fourccs[11].repr, *b"AAA1");
+        assert!(
+            usize::try_from(MAX_ENUMERATED_FORMATS).unwrap()
+                >= crate::diagnostics::MAX_DIAGNOSTIC_FOURCCS,
+            "the diagnostics truncation stays reachable"
+        );
+    }
+
+    /// The end of the list ends the enumeration; an error at index 0 means no format (empty,
+    /// as before); a panicking conversion inside the guard is an empty list too.
+    #[test]
+    fn test_ccb_format_enumeration_end_error_and_panic_semantics() {
+        let path = Path::new("/dev/video-fake");
+        let two = bounded_format_fourccs(path, |index| {
+            if index < 2 {
+                Ok(fourcc_code(index))
+            } else {
+                Err(io::Error::from_raw_os_error(libc::EINVAL))
+            }
+        });
+        assert_eq!(two.len(), 2);
+        let none =
+            bounded_format_fourccs(path, |_| Err(io::Error::from_raw_os_error(libc::ENOTTY)));
+        assert!(none.is_empty());
+        let guarded = guard_v4l_call(|| {
+            bounded_format_fourccs(path, |index| {
+                if index == 1 {
+                    panic!("malformed format description");
+                }
+                Ok(fourcc_code(index))
+            })
+        });
+        assert!(guarded.is_err(), "the panic is caught by the guard");
     }
 }
