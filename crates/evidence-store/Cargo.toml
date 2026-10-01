@@ -16,7 +16,7 @@ serde = { workspace = true, features = ["derive"] }
 zeroize = { workspace = true, features = ["derive"] }
 thiserror.workspace = true
 getrandom.workspace = true
-nix = { workspace = true }
+nix = { workspace = true, features = ["dir"] }
 
 [dev-dependencies]
 tempfile.workspace = true
