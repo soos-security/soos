@@ -186,19 +186,39 @@ pad_threshold = 0.85
   `ConnectionTasks::drain(connection_timeout)`; handlers still running when that budget expires are
   aborted (the PAM client sees EOF and returns `PAM_IGNORE`). The drain logs its start
   (`in_flight`, `budget_ms`) and its outcome (`completed`, `panicked`, `aborted`).
+- **Evidence writes at shutdown** (GitHub #287): the opt-in spoof evidence snapshot is written on
+  the blocking pool without delaying the `Deny` response, but it is tracked in
+  `ConnectionDispatcher::evidence_writes()` (`soos_daemon::shutdown::BlockingTasks`) instead of
+  being detached. After the connection drain, `soos-daemon` waits for the tracked writes with what
+  is left of the same one-`connection_timeout` budget (`drain_budget.saturating_sub(elapsed)`); a
+  write still running at the deadline is reported as abandoned (a blocking write cannot be
+  cancelled). Finished writes are reaped on every spawn, so the set stays bounded.
+- **Accept errors** (GitHub #287): a failed `accept()` (`EMFILE`, `ENFILE`, `ENOBUFS`, `ENOMEM`,
+  ...) is logged at `error` level with `retry_in_ms` and retried after a bounded exponential
+  `AcceptBackoff`: `ACCEPT_BACKOFF_INITIAL` (5 ms), doubled after each consecutive error, capped at
+  `ACCEPT_BACKOFF_MAX` (1 s), reset by the next successful accept. The loop never stops; the
+  shutdown signal interrupts a backoff sleep, and finished handlers keep being reaped during it.
 - **Panics**: a panicking connection handler is reported at `error` level ("Connection handler
   panicked") when its task is joined; the `JoinError` is never formatted because its `Display`
   carries the panic payload. `install_panic_hook` replaces the default stderr hook with a `tracing`
   `error` event that records only the source file, line and thread name, never the panic message.
+  `main.rs` selects the hook with `PanicMessagePolicy::for_build()` (GitHub #287, owner decision
+  2026-10-01): a release build (no `debug_assertions`) installs exactly that payload-free hook; a
+  debug build installs `install_panic_hook_with(PanicMessagePolicy::LogMessage)`, which also logs
+  the panic message as `panic_message`, truncated to `MAX_DEBUG_PANIC_MESSAGE_CHARS` (512)
+  characters. Debug builds are developer builds only; every packaging path builds release.
 - **Request nonce in logs**: the 256-bit `request_id` is never logged. A log line that needs to
   correlate a request uses `request_id = %short_request_id(&req.request_id)`: the first 4 bytes of
   `SHA-256("soos.request-id.log.v1" || request_id)` as 8 hex digits, which reveals no nonce bit
   (enforced by `crates/daemon/tests/request_id_logging_tests.rs`).
-- **Response timestamps**: `build_response` stamps every `Response` from the dispatcher clock:
+- **Response timestamps**: `build_response` stamps every `Response` from the dispatcher clock
+  through the pure function `soos_daemon::dispatcher::stamp_response` (GitHub #287):
   `issued_monotonic_ns > 0` and `expires_monotonic_ns = issued + RESPONSE_VALIDITY_NS` (2 s) on every
   verdict path. If the clock fails, the response carries `issued = expires = 0` (already expired)
-  and an `Allow` verdict is downgraded to `Unavailable` / `InternalError`. The PAM client still
-  treats both fields as informational (see `Docs/IPC_PROTOCOL.md`, "Response Freshness").
+  and an `Allow` verdict is downgraded to `Unavailable` / `InternalError`. Since GitHub #287 the
+  PAM client enforces both fields against its own CLOCK_MONOTONIC reading and returns
+  `PAM_IGNORE` for an unstamped, inverted, future-dated or expired response (see
+  `Docs/IPC_PROTOCOL.md`, "Response Freshness").
 4. The socket is bound (§1.2). When started by systemd (`Type=notify`, `NOTIFY_SOCKET` set) the daemon
    then sends `READY=1` through `soos_daemon::sd_notify`; only then does systemd start units ordered
    after it (`display-manager.service`). A notification failure is logged at `warn`. The accept loop

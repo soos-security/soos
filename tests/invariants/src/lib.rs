@@ -156,9 +156,23 @@ mod camera_diagnostics_contract;
 #[cfg(all(test, unix))]
 mod artifact_freshness_contract;
 
+/// The rustup bootstrap never edits shell profiles and documents its digest bump procedure
+/// (GitHub #287, rows SMI7–SMI9).
+#[cfg(all(test, unix))]
+mod rustup_path_contract;
+
 /// Non-blocking follow-ups from the P2 batch reviews (GitHub #285, rows RFX1–RFX12).
 #[cfg(all(test, unix))]
 mod review_followups_contract;
+
+/// Camera / vision follow-ups: v4l panic guard, supervisor hints, zeroizing embedding copy,
+/// informational install-time camera report (GitHub #287, rows CVF1–CVF8).
+#[cfg(all(test, unix))]
+mod camera_vision_followups_contract;
+
+/// PAM response expiry enforcement and protocol follow-ups (GitHub #287, rows PRE6–PRE9).
+#[cfg(all(test, unix))]
+mod pam_response_expiry_contract;
 
 #[cfg(test)]
 #[allow(

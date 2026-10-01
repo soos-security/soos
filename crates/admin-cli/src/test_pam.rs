@@ -14,7 +14,7 @@ use soos_protocol::codec::decode;
 use soos_protocol::message::encode_request;
 use soos_protocol::types::{
     ReasonClass, Request, RequestKind, Response, Verdict, CURRENT_VERSION, MAX_MESSAGE_SIZE,
-    REQUEST_ID_LEN,
+    MAX_RESPONSE_FUTURE_SKEW_NS, REQUEST_ID_LEN,
 };
 
 use crate::args::{MAX_TIMEOUT_MS, MIN_TIMEOUT_MS};
@@ -186,7 +186,20 @@ pub fn simulate_pam_auth(
 
     let resp: Response = decode(&full)?;
 
-    let pam_result = if resp.verdict == Verdict::Allow {
+    // Same staleness guard as pam_soos.so (GitHub #287): the stamps are checked against
+    // CLOCK_MONOTONIC read after the response arrived, with the shared skew bound. A stale
+    // response is interpreted as the PAM fallback whatever its verdict; a clock read failure
+    // passes 0 and is reported as stale too (fail closed).
+    let freshness =
+        resp.check_freshness(monotonic_now_ns().unwrap_or(0), MAX_RESPONSE_FUTURE_SKEW_NS);
+
+    let pam_result = if let Err(stale) = freshness {
+        format!(
+            "PAM_IGNORE (stale daemon response: {stale}; the PAM module falls back to the \
+             password whatever the {:?} verdict)",
+            resp.verdict
+        )
+    } else if resp.verdict == Verdict::Allow {
         "PAM_SUCCESS (Authentication authorized)".to_string()
     } else {
         format!(

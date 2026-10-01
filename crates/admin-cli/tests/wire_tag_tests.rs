@@ -8,6 +8,9 @@
     reason = "Contract tests use assertions, unwrap and expect"
 )]
 
+#[path = "../../pam/tests/common/stamps.rs"]
+mod stamps;
+
 use std::io::{Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::thread;
@@ -76,13 +79,14 @@ fn test_204_admin_test_pam_request_frame_is_tagged() {
     let server = thread::spawn(move || {
         let (mut stream, _) = listener.accept().expect("accept");
         let (req, format, last) = read_tagged_request(&mut stream);
+        let (issued, expires) = stamps::fresh_stamps();
         let resp = Response {
             version: CURRENT_VERSION,
             request_id: req.request_id,
             verdict: Verdict::Deny,
             reason_class: ReasonClass::NoFace,
-            issued_monotonic_ns: 0,
-            expires_monotonic_ns: 0,
+            issued_monotonic_ns: issued,
+            expires_monotonic_ns: expires,
         };
         stream
             .write_all(&encode(&resp).expect("encode"))

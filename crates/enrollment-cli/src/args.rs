@@ -65,6 +65,32 @@ pub enum Commands {
     Import(ImportCommand),
     /// Capture a frame, run face detection, and write an HTML debug visualization
     DebugVision(DebugVisionArgs),
+    /// Re-encrypt every legacy (v1) template and evidence snapshot to the AAD-bound v2 format
+    Migrate(MigrateArgs),
+}
+
+/// Arguments for `migrate` subcommand (GitHub #287).
+///
+/// Legacy (version 1) files stay readable without migration; the command only re-encrypts
+/// them with the AAD-bound version 2 envelope. Files already in version 2 are never rewritten.
+#[derive(Args, Debug, Clone, Default)]
+pub struct MigrateArgs {
+    /// Report what would be migrated without writing anything.
+    #[arg(long)]
+    pub dry_run: bool,
+
+    /// Output format of the summary (table or json).
+    #[arg(short = 'f', long, default_value = "table")]
+    pub format: OutputFormat,
+
+    /// Evidence snapshot directory (defaults to /var/lib/soos/evidence).
+    #[arg(long)]
+    pub evidence_dir: Option<PathBuf>,
+
+    /// Evidence key file (defaults to /var/lib/soos/evidence.key). A missing key means
+    /// evidence was never enabled: evidence is skipped and no key is created.
+    #[arg(long)]
+    pub evidence_key_file: Option<PathBuf>,
 }
 
 /// Arguments for `debug-vision` subcommand.

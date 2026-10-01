@@ -113,6 +113,25 @@ impl MasterKey {
     }
 }
 
+impl MasterKey {
+    /// Loads an existing master key and never creates one, nor any directory (GitHub #287).
+    ///
+    /// Used by `soos-enroll migrate`, which must not mint a master key on a host without one.
+    /// A symlinked path is refused and the file is validated exactly like
+    /// [`MasterKey::load_or_create`] validates an existing key; a missing file is an
+    /// [`BiometricStoreError::Io`] error of kind `NotFound`.
+    pub fn load_existing<P: AsRef<Path>>(path: P) -> Result<Self, BiometricStoreError> {
+        let path = path.as_ref();
+        if std::fs::symlink_metadata(path)?.file_type().is_symlink() {
+            return Err(BiometricStoreError::InvalidPath(format!(
+                "Master key path '{}' is a symlink; symlinks are forbidden for key files",
+                path.display()
+            )));
+        }
+        read_existing_key(path)
+    }
+}
+
 /// Opens and validates an existing master key file (GitHub #230).
 ///
 /// The file is opened with `O_NOFOLLOW | O_NONBLOCK` (a symlink swapped in after the

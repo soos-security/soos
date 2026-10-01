@@ -24,9 +24,14 @@ use soos_vision::{
     VisionPipelineConfig,
 };
 
+use soos_evidence_store::{
+    EvidenceConfig, EvidenceStore, EvidenceStoreError, DEFAULT_EVIDENCE_DIR,
+    DEFAULT_KEY_PATH as DEFAULT_EVIDENCE_KEY_PATH,
+};
+
 use crate::args::{
     resolve_target_uid, validate_camera_device_path, validate_fhs_path, Cli, DebugVisionArgs,
-    DeleteArgs, EnrollArgs, ImportArgs, ListArgs, VerifyArgs,
+    DeleteArgs, EnrollArgs, ImportArgs, ListArgs, MigrateArgs, VerifyArgs,
 };
 use crate::error::EnrollmentCliError;
 use crate::html_report::{base64_encode, generate_html_report};
@@ -244,6 +249,270 @@ pub struct EnrolledUserSummary {
 pub fn format_enrolled_json(summaries: &[EnrolledUserSummary]) -> String {
     serde_json::to_string_pretty(summaries)
         .unwrap_or_else(|_| "{\"error\": \"list serialization failed\"}".to_string())
+}
+
+/// Reason reported when no evidence key exists (evidence was never enabled on the host).
+const EVIDENCE_SKIPPED_NO_KEY: &str =
+    "no evidence key found: evidence storage was never enabled, nothing to migrate";
+
+/// A file (or a whole store) the migration could not process; it was left untouched.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct MigrationFailureSummary {
+    /// Template UID, snapshot path, or the store name when the store itself failed.
+    pub item: String,
+    /// Error message (UIDs and paths only, never embedding values, frames or key material).
+    pub error: String,
+}
+
+/// Migration counts of one store for `soos-enroll migrate` (GitHub #287).
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
+pub struct StoreMigrationSummary {
+    /// Why the store was not examined (`None` when it was).
+    pub skipped: Option<String>,
+    /// Legacy files re-encrypted (in a dry run: that would be re-encrypted).
+    pub migrated: usize,
+    /// Files already in the AAD-bound v2 envelope, left untouched.
+    pub already_current: usize,
+    /// Number of files (or stores) that could not be processed.
+    pub failed: usize,
+    /// One entry per failure.
+    pub failures: Vec<MigrationFailureSummary>,
+}
+
+impl StoreMigrationSummary {
+    fn skipped(reason: &str) -> Self {
+        Self {
+            skipped: Some(reason.to_string()),
+            ..Self::default()
+        }
+    }
+
+    fn store_failed(item: &str, error: String) -> Self {
+        Self {
+            failed: 1,
+            failures: vec![MigrationFailureSummary {
+                item: item.to_string(),
+                error,
+            }],
+            ..Self::default()
+        }
+    }
+}
+
+impl From<soos_biometric_store::TemplateMigrationReport> for StoreMigrationSummary {
+    fn from(report: soos_biometric_store::TemplateMigrationReport) -> Self {
+        let failures: Vec<MigrationFailureSummary> = report
+            .failed
+            .into_iter()
+            .map(|f| MigrationFailureSummary {
+                item: f.uid.to_string(),
+                error: f.error,
+            })
+            .collect();
+        Self {
+            skipped: None,
+            migrated: report.migrated.len(),
+            already_current: report.already_current.len(),
+            failed: failures.len(),
+            failures,
+        }
+    }
+}
+
+impl From<soos_evidence_store::SnapshotMigrationReport> for StoreMigrationSummary {
+    fn from(report: soos_evidence_store::SnapshotMigrationReport) -> Self {
+        let failures: Vec<MigrationFailureSummary> = report
+            .failed
+            .into_iter()
+            .map(|f| MigrationFailureSummary {
+                item: f.path.display().to_string(),
+                error: f.error,
+            })
+            .collect();
+        Self {
+            skipped: None,
+            migrated: report.migrated.len(),
+            already_current: report.already_current.len(),
+            failed: failures.len(),
+            failures,
+        }
+    }
+}
+
+/// Summary of `soos-enroll migrate` over both encrypted stores (GitHub #287).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct MigrationSummary {
+    /// `true` when nothing was written (`--dry-run`).
+    pub dry_run: bool,
+    /// Biometric templates.
+    pub templates: StoreMigrationSummary,
+    /// Evidence snapshots.
+    pub evidence: StoreMigrationSummary,
+}
+
+impl MigrationSummary {
+    /// `true` when at least one file or store could not be processed.
+    #[must_use]
+    pub fn has_failures(&self) -> bool {
+        self.templates.failed > 0 || self.evidence.failed > 0
+    }
+}
+
+/// Formats `soos-enroll migrate --format json` output with `serde_json`.
+#[must_use]
+pub fn format_migration_json(summary: &MigrationSummary) -> String {
+    serde_json::to_string_pretty(summary)
+        .unwrap_or_else(|_| "{\"error\": \"migration summary serialization failed\"}".to_string())
+}
+
+/// Opens the evidence store for `soos-enroll migrate` without ever creating a key.
+///
+/// Returns `Ok(None)` when `key_path` does not exist (evidence was never enabled on this
+/// host). An existing key is validated like the daemon validates it (regular file, no
+/// symlink, owned by root or the effective UID, mode `0600`, 32 bytes).
+pub fn open_evidence_store_for_migration(
+    evidence_dir: &Path,
+    key_path: &Path,
+) -> Result<Option<EvidenceStore>, EnrollmentCliError> {
+    match soos_evidence_store::MasterKey::load_existing(key_path) {
+        Ok(key) => Ok(Some(EvidenceStore::new(
+            EvidenceConfig::enabled_with_dir(evidence_dir.to_path_buf(), key_path.to_path_buf()),
+            key,
+        ))),
+        Err(EvidenceStoreError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// Reason reported when the template store cannot hold anything to migrate.
+const TEMPLATES_SKIPPED_NO_KEY: &str =
+    "no master key found: no template can exist, nothing to migrate (no key is created)";
+
+/// Reason reported when the biometrics directory does not exist.
+const TEMPLATES_SKIPPED_NO_DIR: &str =
+    "no biometrics directory found: nothing to migrate (no directory is created)";
+
+/// Opens the template store for `soos-enroll migrate` without ever creating the master key
+/// or the biometrics directory (GitHub #287).
+///
+/// Returns `Ok(None)` when `key_path` or `bio_dir` does not exist: nothing can be migrated
+/// and nothing is created (unlike `list` / `delete`, which open the key with
+/// `load_or_create`). An existing key is validated by
+/// [`soos_biometric_store::MasterKey::load_existing`] and an existing directory by
+/// [`BiometricStore::new`].
+pub fn open_template_store_for_migration(
+    bio_dir: &Path,
+    key_path: &Path,
+) -> Result<Option<BiometricStore>, EnrollmentCliError> {
+    Ok(open_template_store_checked(bio_dir, key_path)?.ok())
+}
+
+/// Like [`open_template_store_for_migration`], reporting why no store was opened.
+fn open_template_store_checked(
+    bio_dir: &Path,
+    key_path: &Path,
+) -> Result<Result<BiometricStore, &'static str>, EnrollmentCliError> {
+    let key = match MasterKey::load_existing(key_path) {
+        Ok(key) => key,
+        Err(soos_biometric_store::BiometricStoreError::Io(e))
+            if e.kind() == std::io::ErrorKind::NotFound =>
+        {
+            return Ok(Err(TEMPLATES_SKIPPED_NO_KEY));
+        }
+        Err(e) => return Err(e.into()),
+    };
+    match std::fs::symlink_metadata(bio_dir) {
+        Ok(_) => Ok(Ok(BiometricStore::new(bio_dir, key)?)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Err(TEMPLATES_SKIPPED_NO_DIR)),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// Resolves the template paths of `soos-enroll migrate` (`--biometrics-dir`, `--key-file`,
+/// FHS-validated) and opens the store through [`open_template_store_for_migration`]; the
+/// error side carries the skip reason. Never creates a key or a directory.
+pub fn build_templates_for_migration(
+    cli: &Cli,
+) -> Result<Result<BiometricStore, &'static str>, EnrollmentCliError> {
+    let raw_key_path = cli
+        .key_file
+        .clone()
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_KEY_PATH));
+    let key_path = validate_fhs_path(&raw_key_path)?;
+    let raw_bio_dir = cli
+        .biometrics_dir
+        .clone()
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_BIOMETRICS_DIR));
+    let bio_dir = validate_fhs_path(&raw_bio_dir)?;
+    open_template_store_checked(&bio_dir, &key_path)
+}
+
+/// Runs `soos-enroll migrate` over the template store and the evidence store (GitHub #287).
+///
+/// Requires root when `require_root` is set. A `None` store is reported as skipped (no key
+/// or no directory: nothing exists to migrate). See [`EnrollmentService::migrate`].
+pub fn run_migration(
+    args: &MigrateArgs,
+    templates: Option<&BiometricStore>,
+    evidence: Option<&EvidenceStore>,
+    require_root: bool,
+) -> Result<MigrationSummary, EnrollmentCliError> {
+    run_migration_with_reasons(
+        args,
+        templates.ok_or(TEMPLATES_SKIPPED_NO_KEY),
+        evidence,
+        require_root,
+    )
+}
+
+/// [`run_migration`] with an explicit skip reason for the template store.
+pub fn run_migration_with_reasons(
+    args: &MigrateArgs,
+    templates: Result<&BiometricStore, &str>,
+    evidence: Option<&EvidenceStore>,
+    require_root: bool,
+) -> Result<MigrationSummary, EnrollmentCliError> {
+    check_privileges(require_root)?;
+
+    let templates = match templates {
+        Ok(store) => match store.migrate_legacy_templates(args.dry_run) {
+            Ok(report) => StoreMigrationSummary::from(report),
+            Err(e) => StoreMigrationSummary::store_failed("biometric store", e.to_string()),
+        },
+        Err(reason) => StoreMigrationSummary::skipped(reason),
+    };
+    let evidence = match evidence {
+        Some(store) => match store.migrate_legacy_snapshots(args.dry_run) {
+            Ok(report) => StoreMigrationSummary::from(report),
+            Err(e) => StoreMigrationSummary::store_failed("evidence store", e.to_string()),
+        },
+        None => StoreMigrationSummary::skipped(EVIDENCE_SKIPPED_NO_KEY),
+    };
+
+    Ok(MigrationSummary {
+        dry_run: args.dry_run,
+        templates,
+        evidence,
+    })
+}
+
+/// Resolves the evidence paths of `soos-enroll migrate` (defaults
+/// `/var/lib/soos/evidence` and `/var/lib/soos/evidence.key`, FHS-validated) and opens the
+/// evidence store through [`open_evidence_store_for_migration`].
+pub fn build_evidence_for_migration(
+    args: &MigrateArgs,
+) -> Result<Option<EvidenceStore>, EnrollmentCliError> {
+    let raw_dir = args
+        .evidence_dir
+        .clone()
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_EVIDENCE_DIR));
+    let raw_key = args
+        .evidence_key_file
+        .clone()
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_EVIDENCE_KEY_PATH));
+    let dir = validate_fhs_path(&raw_dir)?;
+    let key = validate_fhs_path(&raw_key)?;
+    open_evidence_store_for_migration(&dir, &key)
 }
 
 /// Core enrollment service orchestrator.
@@ -766,6 +1035,25 @@ impl EnrollmentService {
 
         summaries.sort_by_key(|s| s.uid);
         Ok(summaries)
+    }
+
+    /// Re-encrypts every legacy (v1) template and, when `evidence` is given, every legacy
+    /// evidence snapshot with the AAD-bound v2 envelope (GitHub #287, owner decision
+    /// 2026-10-01). With `--dry-run` nothing is written and the counts report what would be
+    /// migrated.
+    ///
+    /// Requires root. The writes go through the stores' own atomic write paths; v2 files are
+    /// never rewritten, so a second run reports zero migrated files. A per-file failure is
+    /// counted and listed, never aborts the other files and leaves the file untouched; a
+    /// failure of a whole store (for example an unlistable or symlinked directory) is reported
+    /// the same way so the other store is still migrated. The summary carries counts, UIDs,
+    /// paths and error messages only.
+    pub fn migrate(
+        &self,
+        args: &MigrateArgs,
+        evidence: Option<&EvidenceStore>,
+    ) -> Result<MigrationSummary, EnrollmentCliError> {
+        run_migration(args, Some(&self.store), evidence, self.require_root)
     }
 
     /// Imports and encrypts an existing biometric template into the biometric store.

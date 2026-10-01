@@ -63,7 +63,7 @@ auth  required                       pam_unix.so try_first_pass nullok
 | **T12** | `gdm.disable` via `PAM_SERVICE` (PAM-05, GitHub #176) | PAM service `gdm-password` with the `soos-admin` GDM arguments (no `service=`), mock daemon answering `Allow`; control run without the flag, then `/etc/soos/gdm.disable` created | Control: `PAM_SUCCESS` with 0 prompts; with the flag: `PAM_IGNORE` (25) | With the flag the password prompt is reached: no-password run fails, valid password accepted, invalid password rejected |
 | **T13** | `Verdict::Deny` (ARCHITECTURE §3, GitHub #189) | Mock `deny` mode | `PAM_IGNORE` (25) | No authentication without a password; valid password accepted, wrong password rejected |
 | **T14** | Truncated response (GitHub #189) | Mock `crash-truncated`: length prefix declares 37 bytes, 4 are sent, stream closed | `PAM_IGNORE` (25) | No authentication without a password; valid password accepted, wrong password rejected |
-| **T15** | Malformed responses (GitHub #189) | Mock `malformed` (undecodable verdict discriminant), `wrong-request-id` (`Allow` for another request), `bad-version` (`Allow` with version 2), `oversized` (prefix above `MAX_MESSAGE_SIZE`), `empty` (zero-length frame) | `PAM_IGNORE` (25) | For each mode: no authentication without a password and valid password accepted; wrong password rejected after the `wrong-request-id` `Allow` |
+| **T15** | Malformed and stale responses (GitHub #189, #287) | Mock `malformed` (undecodable verdict discriminant), `wrong-request-id` (`Allow` for another request), `bad-version` (`Allow` with version 2), `oversized` (prefix above `MAX_MESSAGE_SIZE`), `empty` (zero-length frame), `expired` (`Allow` whose issued/expires window closed 1 s ago) and an unstamped `Allow` (`--stamps zero`, issued = expires = 0); every other mode runs with `--stamps monotonic` so it carries exactly one defect | `PAM_IGNORE` (25) | For each mode: no authentication without a password and valid password accepted; wrong password rejected after the `wrong-request-id` `Allow` |
 
 T10 exists because `cargo test` runs under `[profile.test]` (always `panic = "unwind"`) and
 therefore cannot detect a release profile that aborts; only the release-built shared object
@@ -81,7 +81,7 @@ tests/docker/
 ├── Dockerfile.fedora         # RHEL/Fedora container image
 ├── Dockerfile.arch           # Arch Linux container image
 ├── pam_test_runner.c        # Native C non-interactive & interactive PAM test harness
-├── mock_daemon.py           # Socket simulator: allow, deny, timeout, crashes, malformed frames
+├── mock_daemon.py           # Socket simulator: allow, deny, timeout, crashes, malformed and expired frames; `--stamps monotonic` stamps like soos-daemon
 ├── pam_case_lib.sh          # Shared assertions: stack timeout_ms, deadline bound, no-facial-auth, fallback
 ├── test_suite.sh            # In-container test suite executing T1..T15
 ├── run_matrix.sh            # Host driver orchestrating multi-distro builds & runs

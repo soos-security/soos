@@ -11,13 +11,23 @@
 //!   remaining handlers for at most `connection_timeout`; stragglers are aborted.
 //!
 //! [`install_panic_hook`] replaces the default stderr panic hook with a `tracing` report
-//! that records the source location only.
+//! that records the source location only. [`install_panic_hook_with`] selects the message
+//! policy: debug builds may log the (bounded) panic message, release builds never do
+//! (GitHub #287, owner decision 2026-10-01).
+//!
+//! GitHub #287 follow-ups:
+//! - a failed `accept()` (`EMFILE`, `ENFILE`, `ENOBUFS`, `ENOMEM`, ...) is retried after a
+//!   bounded exponential [`AcceptBackoff`] instead of a hot loop; the shutdown signal
+//!   interrupts the backoff sleep;
+//! - blocking side-effect jobs (spoof evidence writes) run in [`BlockingTasks`] and are
+//!   drained at shutdown within what is left of the drain budget.
 
 use std::future::Future;
+use std::io;
 use std::panic::Location;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
-use tokio::net::UnixListener;
+use tokio::net::{UnixListener, UnixStream};
 use tokio::task::{JoinError, JoinSet};
 use tracing::{error, info, warn};
 
@@ -161,7 +171,8 @@ impl ConnectionTasks {
 ///
 /// Finished handlers are reaped as they complete (panics are reported via `tracing`).
 /// Returns as soon as `shutdown` resolves; the caller then drops the listener, unlinks
-/// the socket and calls [`ConnectionTasks::drain`].
+/// the socket and calls [`ConnectionTasks::drain`]. A failed `accept()` is retried after
+/// the default [`AcceptBackoff`] (GitHub #287).
 pub async fn accept_until_shutdown<S>(
     listener: &UnixListener,
     dispatcher: Arc<ConnectionDispatcher>,
@@ -170,17 +181,115 @@ pub async fn accept_until_shutdown<S>(
 ) where
     S: Future,
 {
+    let accept = move || async move { listener.accept().await.map(|(stream, _addr)| stream) };
+    accept_with_backoff(
+        accept,
+        dispatcher,
+        tasks,
+        AcceptBackoff::default(),
+        shutdown,
+    )
+    .await;
+}
+
+/// First delay after a failed `accept()` (GitHub #287).
+pub const ACCEPT_BACKOFF_INITIAL: Duration = Duration::from_millis(5);
+
+/// Upper bound of the `accept()` backoff delay (GitHub #287).
+pub const ACCEPT_BACKOFF_MAX: Duration = Duration::from_secs(1);
+
+/// Smallest delay ever applied, so a zero configuration cannot become a busy loop.
+const ACCEPT_BACKOFF_FLOOR: Duration = Duration::from_millis(1);
+
+/// Bounded exponential backoff applied after a failed `accept()` (GitHub #287).
+///
+/// Resource exhaustion errors (`EMFILE`, `ENFILE`, `ENOBUFS`, `ENOMEM`) make `accept()`
+/// fail immediately and repeatedly; retrying at once would spin a core and flood the logs.
+/// The delay starts at `initial`, doubles after each consecutive error, is capped at `max`,
+/// and is reset by a successful accept. It never stops the accept loop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AcceptBackoff {
+    initial: Duration,
+    max: Duration,
+    next: Duration,
+}
+
+impl AcceptBackoff {
+    /// Creates a backoff; `initial` is raised to 1 ms, and `max` to `initial` if lower.
+    #[must_use]
+    pub fn new(initial: Duration, max: Duration) -> Self {
+        let initial = initial.max(ACCEPT_BACKOFF_FLOOR);
+        let max = max.max(initial);
+        Self {
+            initial,
+            max,
+            next: initial,
+        }
+    }
+
+    /// Records a failed accept and returns the delay to wait before the next attempt.
+    pub fn on_error(&mut self) -> Duration {
+        let delay = self.next;
+        self.next = self.next.saturating_mul(2).min(self.max);
+        delay
+    }
+
+    /// Records a successful accept: the next error starts again from `initial`.
+    pub fn on_success(&mut self) {
+        self.next = self.initial;
+    }
+}
+
+impl Default for AcceptBackoff {
+    fn default() -> Self {
+        Self::new(ACCEPT_BACKOFF_INITIAL, ACCEPT_BACKOFF_MAX)
+    }
+}
+
+/// Accept loop behind [`accept_until_shutdown`], with an injectable `accept` source.
+///
+/// After a failed `accept`, the loop waits for the delay returned by
+/// [`AcceptBackoff::on_error`] before the next attempt; `shutdown` interrupts that wait,
+/// and finished handlers keep being reaped during it. The loop only returns when
+/// `shutdown` resolves.
+pub async fn accept_with_backoff<A, F, S>(
+    mut accept: A,
+    dispatcher: Arc<ConnectionDispatcher>,
+    tasks: &mut ConnectionTasks,
+    mut backoff: AcceptBackoff,
+    shutdown: S,
+) where
+    A: FnMut() -> F,
+    F: Future<Output = io::Result<UnixStream>>,
+    S: Future,
+{
     tokio::pin!(shutdown);
+    let mut pause: Option<Duration> = None;
     loop {
+        if let Some(delay) = pause.take() {
+            let sleep = tokio::time::sleep(delay);
+            tokio::pin!(sleep);
+            loop {
+                tokio::select! {
+                    biased;
+                    _ = &mut shutdown => return,
+                    Some(result) = tasks.set.join_next(), if !tasks.set.is_empty() => {
+                        let _ = classify(result);
+                    }
+                    () = &mut sleep => break,
+                }
+            }
+        }
         tokio::select! {
             biased;
             _ = &mut shutdown => return,
             Some(result) = tasks.set.join_next(), if !tasks.set.is_empty() => {
                 let _ = classify(result);
             }
-            accept_result = listener.accept() => {
+            accept_result = accept() => {
                 match accept_result {
-                    Ok((stream, _addr)) => {
+                    Ok(stream) => {
+                        backoff.on_success();
                         let disp = Arc::clone(&dispatcher);
                         tasks.spawn(async move {
                             if let Err(err) = disp.handle_connection(stream).await {
@@ -189,11 +298,110 @@ pub async fn accept_until_shutdown<S>(
                         });
                     }
                     Err(err) => {
-                        error!(error = %err, "Accept failed");
+                        let delay = backoff.on_error();
+                        error!(
+                            error = %err,
+                            retry_in_ms = u64::try_from(delay.as_millis()).unwrap_or(u64::MAX),
+                            "Accept failed; backing off before the next attempt"
+                        );
+                        pause = Some(delay);
                     }
                 }
             }
         }
+    }
+}
+
+/// Classifies a joined blocking job; a panic is reported without its payload.
+fn classify_blocking(result: Result<(), JoinError>) -> TaskOutcome {
+    match result {
+        Ok(()) => TaskOutcome::Completed,
+        Err(err) if err.is_panic() => {
+            error!("Blocking background job panicked; panic message withheld from logs");
+            TaskOutcome::Panicked
+        }
+        Err(_) => TaskOutcome::Aborted,
+    }
+}
+
+/// Tracked set of blocking side-effect jobs, such as spoof evidence writes (GitHub #287).
+///
+/// A job runs on the Tokio blocking pool like a detached `spawn_blocking`, but stays
+/// tracked so that shutdown can wait for it. Finished jobs are reaped on every spawn, so
+/// the set is bounded by the number of jobs actually running. A blocking job cannot be
+/// cancelled: [`BlockingTasks::drain`] waits at most its budget and reports the jobs still
+/// running at the deadline as `aborted` (abandoned).
+#[derive(Default)]
+pub struct BlockingTasks {
+    set: Mutex<JoinSet<()>>,
+}
+
+impl BlockingTasks {
+    /// Creates an empty job set.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, JoinSet<()>> {
+        // The guarded set holds no invariant that a panicking holder could break.
+        self.set.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Runs `job` on the blocking pool and tracks it. Must be called inside a Tokio runtime.
+    pub fn spawn_blocking<F>(&self, job: F)
+    where
+        F: FnOnce() + Send + 'static,
+    {
+        let mut set = self.lock();
+        while let Some(result) = set.try_join_next() {
+            let _ = classify_blocking(result);
+        }
+        set.spawn_blocking(job);
+    }
+
+    /// Number of tracked jobs not yet reaped.
+    #[must_use]
+    pub fn in_flight(&self) -> usize {
+        self.lock().len()
+    }
+
+    /// Waits at most `budget` for every tracked job.
+    ///
+    /// Jobs spawned after the call starts are tracked in a fresh set and not awaited.
+    pub async fn drain(&self, budget: Duration) -> DrainReport {
+        let mut set = std::mem::take(&mut *self.lock());
+        let mut report = DrainReport::default();
+        if set.is_empty() {
+            return report;
+        }
+        info!(
+            in_flight = set.len(),
+            budget_ms = u64::try_from(budget.as_millis()).unwrap_or(u64::MAX),
+            "Waiting for in-flight background writes before shutdown"
+        );
+        let drained = tokio::time::timeout(budget, async {
+            while let Some(result) = set.join_next().await {
+                report.record(classify_blocking(result));
+            }
+        })
+        .await;
+        if drained.is_err() {
+            report.aborted = report.aborted.saturating_add(set.len());
+            warn!(
+                remaining = set.len(),
+                "Background write drain budget expired; abandoning the remaining writes"
+            );
+            // A running blocking job cannot be cancelled: detach it instead.
+            set.detach_all();
+        }
+        info!(
+            completed = report.completed,
+            panicked = report.panicked,
+            abandoned = report.aborted,
+            "Background write drain finished"
+        );
+        report
     }
 }
 
@@ -215,7 +423,88 @@ fn log_panic(location: Option<&Location<'_>>) {
     }
 }
 
+/// Upper bound, in characters, of a panic message logged by a debug build (GitHub #287).
+pub const MAX_DEBUG_PANIC_MESSAGE_CHARS: usize = 512;
+
+/// What the process panic hook logs besides the location (GitHub #287).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PanicMessagePolicy {
+    /// Location and thread only; the panic message is withheld (release builds, GitHub #259).
+    Withhold,
+    /// Location, thread and the panic message truncated to
+    /// [`MAX_DEBUG_PANIC_MESSAGE_CHARS`] characters (debug builds only).
+    LogMessage,
+}
+
+impl PanicMessagePolicy {
+    /// Policy for a build with or without `debug_assertions`.
+    #[must_use]
+    pub const fn for_debug_assertions(debug_assertions: bool) -> Self {
+        if debug_assertions {
+            Self::LogMessage
+        } else {
+            Self::Withhold
+        }
+    }
+
+    /// Policy of the current build: always [`PanicMessagePolicy::Withhold`] in release.
+    #[must_use]
+    pub const fn for_build() -> Self {
+        Self::for_debug_assertions(cfg!(debug_assertions))
+    }
+}
+
+/// Returns the panic message truncated to [`MAX_DEBUG_PANIC_MESSAGE_CHARS`] characters.
+fn bounded_panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+    let message = payload
+        .downcast_ref::<&str>()
+        .copied()
+        .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+        .unwrap_or("<non-string panic payload>");
+    message
+        .chars()
+        .take(MAX_DEBUG_PANIC_MESSAGE_CHARS)
+        .collect()
+}
+
+/// Debug-build panic report: location, thread and the bounded panic message.
+fn log_panic_with_message(location: Option<&Location<'_>>, message: &str) {
+    let thread = std::thread::current();
+    let thread_name = thread.name().unwrap_or("unnamed");
+    match location {
+        Some(loc) => error!(
+            file = loc.file(),
+            line = loc.line(),
+            thread = thread_name,
+            panic_message = message,
+            "soos-daemon panicked (debug build: panic message included)"
+        ),
+        None => error!(
+            thread = thread_name,
+            panic_message = message,
+            "soos-daemon panicked (debug build: panic message included)"
+        ),
+    }
+}
+
 /// Replaces the default panic hook with a `tracing` report that never logs the payload.
+///
+/// This is the release behaviour of GitHub #259, unchanged.
 pub fn install_panic_hook() {
-    std::panic::set_hook(Box::new(|info| log_panic(info.location())));
+    install_panic_hook_with(PanicMessagePolicy::Withhold);
+}
+
+/// Replaces the default panic hook with a `tracing` report following `policy`.
+pub fn install_panic_hook_with(policy: PanicMessagePolicy) {
+    match policy {
+        PanicMessagePolicy::Withhold => {
+            std::panic::set_hook(Box::new(|info| log_panic(info.location())));
+        }
+        PanicMessagePolicy::LogMessage => {
+            std::panic::set_hook(Box::new(|info| {
+                let message = bounded_panic_message(info.payload());
+                log_panic_with_message(info.location(), &message);
+            }));
+        }
+    }
 }

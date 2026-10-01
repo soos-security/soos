@@ -629,7 +629,7 @@ fn test_daemon_unit_requires_deployed_models_and_bounds_restarts() {
     assert!(
         unit_section
             .lines()
-            .any(|l| l.trim() == "StartLimitIntervalSec=60")
+            .any(|l| l.trim() == "StartLimitIntervalSec=320")
             && unit_section
                 .lines()
                 .any(|l| l.trim() == "StartLimitBurst=5"),
@@ -640,6 +640,55 @@ fn test_daemon_unit_requires_deployed_models_and_bounds_restarts() {
         dm.contains("DEFAULT_TARGET_DIR=\"${SOOS_MODELS_DIR:-/var/lib/soos/models}\"")
             && dm.contains("target_manifest=\"${TARGET_DIR}/manifest.toml\""),
         "the unit condition must match the manifest path deployed by download_models.sh"
+    );
+}
+
+/// Returns the single active `key=` value of `section` in a systemd unit, as seconds.
+///
+/// Comments are skipped; a `s` suffix is accepted. Panics when the key is missing, set more
+/// than once, or not a plain number of seconds.
+fn unit_seconds(unit: &str, section: &str, key: &str) -> u64 {
+    let mut current = "";
+    let mut values = Vec::new();
+    for raw in unit.lines() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
+            continue;
+        }
+        if line.starts_with('[') && line.ends_with(']') {
+            current = line;
+            continue;
+        }
+        if let Some((k, v)) = line.split_once('=') {
+            if current == section && k.trim() == key {
+                values.push(v.trim().to_string());
+            }
+        }
+    }
+    assert_eq!(values.len(), 1, "{section} {key}= must be set exactly once");
+    values[0]
+        .trim_end_matches('s')
+        .parse()
+        .unwrap_or_else(|_| panic!("{key}= must be a plain number of seconds"))
+}
+
+/// GitHub #287: a start that always fails takes `TimeoutStartSec + RestartSec` per attempt, so
+/// the start limit is only reachable when `StartLimitBurst` such attempts fit inside
+/// `StartLimitIntervalSec`; otherwise the unit retries forever.
+#[test]
+fn test_daemon_unit_start_limit_interval_covers_burst_of_timed_out_starts() {
+    let unit = read_repo("packaging/soos-daemon.service");
+    let interval = unit_seconds(&unit, "[Unit]", "StartLimitIntervalSec");
+    let burst = unit_seconds(&unit, "[Unit]", "StartLimitBurst");
+    let timeout = unit_seconds(&unit, "[Service]", "TimeoutStartSec");
+    let restart = unit_seconds(&unit, "[Service]", "RestartSec");
+    assert!(burst > 0, "StartLimitBurst must be positive");
+    let needed = burst * (timeout + restart);
+    assert!(
+        interval >= needed,
+        "StartLimitIntervalSec={interval} must be >= StartLimitBurst * (TimeoutStartSec + \
+         RestartSec) = {burst} * ({timeout} + {restart}) = {needed}, or the start limit is \
+         never reached"
     );
 }
 

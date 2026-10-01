@@ -17,6 +17,9 @@
     reason = "Contractual test suites use assertions, unwrap, and expect"
 )]
 
+#[path = "../../pam/tests/common/stamps.rs"]
+mod stamps;
+
 use std::io::{Read, Write};
 use std::os::unix::net::UnixListener;
 use std::sync::mpsc;
@@ -56,13 +59,14 @@ fn capture_deadline(timeout_ms: u64) -> (u64, u64, u64) {
         full.extend_from_slice(&body);
         let req: Request = decode(&full).expect("decode request");
         tx.send(req.deadline_monotonic_ns).expect("send deadline");
+        let (issued, expires) = stamps::fresh_stamps();
         let resp = Response {
             version: CURRENT_VERSION,
             request_id: req.request_id,
             verdict: Verdict::Deny,
             reason_class: ReasonClass::NoFace,
-            issued_monotonic_ns: 0,
-            expires_monotonic_ns: 0,
+            issued_monotonic_ns: issued,
+            expires_monotonic_ns: expires,
         };
         stream
             .write_all(&encode(&resp).expect("encode"))
@@ -150,6 +154,7 @@ fn test_status_report_json_escapes_socket_path_and_unit() {
         is_healthy: false,
         pid: None,
         uptime_secs: Some(42),
+        memory_locked: None,
         systemd_unit: "soos\"-daemon.service".to_string(),
         systemd_active_state: "act\\ive".to_string(),
         systemd_sub_state: "run\"ning".to_string(),

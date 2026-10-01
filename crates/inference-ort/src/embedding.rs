@@ -90,9 +90,10 @@ impl BiometricEmbedding {
         self.vector
     }
 
-    /// Clones the inner floats into a raw vector.
-    pub fn to_vec(&self) -> Vec<f32> {
-        self.vector.to_vec()
+    /// Copies the inner floats into a new wipe-on-drop vector (GitHub #287): the copy of the
+    /// biometric template is zeroized when the caller drops it, like the original.
+    pub fn to_vec(&self) -> Zeroizing<Vec<f32>> {
+        Zeroizing::new(self.vector.to_vec())
     }
 
     /// Checks whether the embedding vector satisfies the L2-normalization criterion `V2` (norm ≈ 1.0).

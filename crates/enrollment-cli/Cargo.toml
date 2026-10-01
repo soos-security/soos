@@ -24,6 +24,7 @@ getrandom = { workspace = true }
 libc = { workspace = true }
 soos-protocol = { workspace = true }
 soos-biometric-store = { workspace = true }
+soos-evidence-store = { workspace = true }
 soos-camera-v4l = { workspace = true }
 soos-inference-ort = { workspace = true }
 soos-vision = { workspace = true }

@@ -144,6 +144,29 @@ pub struct RetentionReport {
     pub pruned_dates: Vec<String>,
 }
 
+/// A snapshot the legacy migration could not process; its file was left untouched.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SnapshotMigrationFailure {
+    /// Snapshot file (or date partition) that could not be processed.
+    pub path: PathBuf,
+    /// Error message (paths and ids only, never frame bytes or key material).
+    pub error: String,
+}
+
+/// Result of [`crate::EvidenceStore::migrate_legacy_snapshots`] (GitHub #287), paths sorted
+/// by date partition then file name.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SnapshotMigrationReport {
+    /// `true` when nothing was written.
+    pub dry_run: bool,
+    /// Legacy snapshots re-encrypted (in a dry run: that would be re-encrypted).
+    pub migrated: Vec<PathBuf>,
+    /// Snapshots already in the AAD-bound envelope, left untouched.
+    pub already_current: Vec<PathBuf>,
+    /// Snapshots or partitions that could not be processed, left untouched.
+    pub failed: Vec<SnapshotMigrationFailure>,
+}
+
 /// Generates a cryptographically secure UUID v4 string.
 pub fn generate_uuid_v4() -> Result<String, EvidenceStoreError> {
     let mut bytes = [0u8; 16];

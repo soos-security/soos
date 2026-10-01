@@ -24,6 +24,7 @@ use crate::preview::{
 };
 use crate::session::SessionValidator;
 use crate::session_policy::LocalSessionPolicy;
+use crate::shutdown::BlockingTasks;
 use soos_camera_v4l::{Frame, PixelFormat};
 use soos_evidence_store::{EvidenceFrame, EvidencePixelFormat, EvidenceStore, FrameMetadata};
 use soos_policy::{ConsensusDecision, FrameClass, FrameEvaluation, PadAggregator, RateLimiter};
@@ -35,9 +36,53 @@ use soos_protocol::types::{
 };
 
 /// Validity window of a rendered `Response`: `expires = issued + RESPONSE_VALIDITY_NS`
-/// (GitHub #258). The PAM client treats both timestamps as informational (ADR
-/// 2026-09-30 "Response Timestamps Are Informational").
+/// (GitHub #258). The PAM client rejects a response whose window is unset, inverted or
+/// closed when it reads it (ADR 2026-10-01 "PAM Client Enforces Response Expiry").
 pub const RESPONSE_VALIDITY_NS: u64 = 2_000_000_000;
+
+/// Builds the `Response` for `verdict` from one monotonic clock reading (GitHub #258).
+///
+/// A working clock (`Ok(now)` with `now > 0`) gives `issued_monotonic_ns = now` and
+/// `expires_monotonic_ns = now + RESPONSE_VALIDITY_NS` (saturating). When the clock fails
+/// or reads zero, the response carries `issued == expires == 0`, i.e. already expired, and
+/// an `Allow` verdict is downgraded to `Unavailable` / `InternalError`: an authorization
+/// is never rendered without a clock (fail-closed). Other verdicts are kept unchanged.
+/// This is the only stamping path of `ConnectionDispatcher::build_response` (GitHub #287).
+#[must_use]
+pub fn stamp_response(
+    request_id: RequestId,
+    verdict: Verdict,
+    reason_class: ReasonClass,
+    clock_reading: Result<u64, DaemonError>,
+) -> Response {
+    let (verdict, reason_class, issued_monotonic_ns, expires_monotonic_ns) = match clock_reading {
+        Ok(now_ns) if now_ns > 0 => (
+            verdict,
+            reason_class,
+            now_ns,
+            now_ns.saturating_add(RESPONSE_VALIDITY_NS),
+        ),
+        Ok(_) | Err(_) => {
+            if verdict == Verdict::Allow {
+                warn!(
+                    "Monotonic clock unavailable while rendering an Allow verdict; \
+                     downgrading to Unavailable (fail-closed)"
+                );
+                (Verdict::Unavailable, ReasonClass::InternalError, 0, 0)
+            } else {
+                (verdict, reason_class, 0, 0)
+            }
+        }
+    };
+    Response {
+        version: CURRENT_VERSION,
+        request_id,
+        verdict,
+        reason_class,
+        issued_monotonic_ns,
+        expires_monotonic_ns,
+    }
+}
 
 /// Evidence reason recorded for a `PasswordFailed` event snapshot.
 pub const PASSWORD_FAILED_EVIDENCE_REASON: &str = "PasswordFailed";
@@ -142,6 +187,8 @@ pub struct ConnectionDispatcher {
     peer_limits: PeerLimitsConfig,
     event_limiter: tokio::sync::Mutex<RateLimiter>,
     expected_embedding_model: Option<String>,
+    /// Tracked spoof evidence writes, drained at shutdown (GitHub #287).
+    evidence_writes: BlockingTasks,
 }
 
 impl ConnectionDispatcher {
@@ -176,6 +223,7 @@ impl ConnectionDispatcher {
             peer_limits,
             event_limiter,
             expected_embedding_model: None,
+            evidence_writes: BlockingTasks::new(),
         }
     }
 
@@ -214,6 +262,7 @@ impl ConnectionDispatcher {
             peer_limits,
             event_limiter,
             expected_embedding_model: None,
+            evidence_writes: BlockingTasks::new(),
         }
     }
 
@@ -233,6 +282,13 @@ impl ConnectionDispatcher {
     #[must_use]
     pub fn expected_embedding_model(&self) -> Option<&str> {
         self.expected_embedding_model.as_deref()
+    }
+
+    /// Returns the tracked spoof evidence writes; `soos-daemon` drains them at shutdown
+    /// within what is left of the connection drain budget (GitHub #287).
+    #[must_use]
+    pub const fn evidence_writes(&self) -> &BlockingTasks {
+        &self.evidence_writes
     }
 
     /// Overrides the monotonic clock function (used for simulation and test harnesses).
@@ -1146,9 +1202,11 @@ impl ConnectionDispatcher {
     /// store (GitHub #261 / PAD-14).
     ///
     /// Opt-in: nothing happens unless `[pipeline.evidence] enabled` is set. The write runs
-    /// on the blocking pool without delaying the `Deny`/`PadFailed` response; the evidence
-    /// store enforces `daily_cap_per_uid`, the global daily cap, encryption and retention.
-    /// At most one snapshot per request: the consensus loop stops at the first spoof.
+    /// on the blocking pool without delaying the `Deny`/`PadFailed` response, tracked in
+    /// [`ConnectionDispatcher::evidence_writes`] so that shutdown can drain it (GitHub
+    /// #287); the evidence store enforces `daily_cap_per_uid`, the global daily cap,
+    /// encryption and retention. At most one snapshot per request: the consensus loop stops
+    /// at the first spoof.
     fn capture_spoof_evidence(
         &self,
         pipe: &PipelineComponents,
@@ -1170,9 +1228,9 @@ impl ConnectionDispatcher {
             "Presentation attack vetoed the request; capturing evidence snapshot"
         );
         let store = Arc::clone(&pipe.evidence_store);
-        drop(tokio::task::spawn_blocking(move || {
+        self.evidence_writes.spawn_blocking(move || {
             store_evidence_capture(&store, target_uid, PAD_FAILED_EVIDENCE_REASON, &frame);
-        }));
+        });
     }
 
     /// Authorizes and serves one `RequestKind::PreviewFrame` request.
@@ -1339,51 +1397,19 @@ impl ConnectionDispatcher {
         })
     }
 
-    /// Encodes one `Response`, stamping it from the dispatcher's monotonic clock.
-    ///
-    /// GitHub #258: every verdict path gets `issued_monotonic_ns > 0` and
-    /// `expires_monotonic_ns = issued + RESPONSE_VALIDITY_NS`. When the clock fails (or
-    /// reads zero) the response carries `issued == expires == 0`, i.e. already expired,
-    /// and an `Allow` verdict is downgraded to `Unavailable` / `InternalError`: an
-    /// authorization is never rendered without a clock (fail-closed).
+    /// Encodes one `Response`, stamping it from the dispatcher's monotonic clock through
+    /// [`stamp_response`] (GitHub #258).
     fn build_response(
         &self,
         request_id: RequestId,
         verdict: Verdict,
         reason_class: ReasonClass,
     ) -> Result<Zeroizing<Vec<u8>>, DaemonError> {
-        let (verdict, reason_class, issued_monotonic_ns, expires_monotonic_ns) =
-            match self.now_nanos() {
-                Ok(now_ns) if now_ns > 0 => (
-                    verdict,
-                    reason_class,
-                    now_ns,
-                    now_ns.saturating_add(RESPONSE_VALIDITY_NS),
-                ),
-                Ok(_) | Err(_) => {
-                    if verdict == Verdict::Allow {
-                        warn!(
-                            "Monotonic clock unavailable while rendering an Allow verdict; \
-                             downgrading to Unavailable (fail-closed)"
-                        );
-                        (Verdict::Unavailable, ReasonClass::InternalError, 0, 0)
-                    } else {
-                        (verdict, reason_class, 0, 0)
-                    }
-                }
-            };
-        let resp = Response {
-            version: CURRENT_VERSION,
-            request_id,
-            verdict,
-            reason_class,
-            issued_monotonic_ns,
-            expires_monotonic_ns,
-        };
+        let resp = stamp_response(request_id, verdict, reason_class, self.now_nanos());
 
         info!(
-            verdict = ?verdict,
-            reason = ?reason_class,
+            verdict = ?resp.verdict,
+            reason = ?resp.reason_class,
             "Rendered authentication response"
         );
 
