@@ -150,6 +150,7 @@ fn test_status_report_json_escapes_socket_path_and_unit() {
         is_healthy: false,
         pid: None,
         uptime_secs: Some(42),
+        memory_locked: None,
         systemd_unit: "soos\"-daemon.service".to_string(),
         systemd_active_state: "act\\ive".to_string(),
         systemd_sub_state: "run\"ning".to_string(),

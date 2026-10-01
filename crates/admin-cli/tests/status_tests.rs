@@ -134,6 +134,7 @@ fn test_status_report_json_serialization() {
         is_healthy: true,
         pid: Some(1234),
         uptime_secs: Some(3600),
+        memory_locked: Some(true),
         systemd_unit: "soos-daemon".to_string(),
         systemd_active_state: "active".to_string(),
         systemd_sub_state: "running".to_string(),
