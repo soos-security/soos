@@ -72,6 +72,29 @@ before an assertion fails on a loaded host or a busy CI runner (GitHub #280).
   assertion, threshold and tolerance stays identical, and each migrated test is listed in the PR
   and in the walkthrough.
 
+### 4.2 32-bit Type Check (i686 / armv7)
+
+Code selected by `#[cfg(target_arch = "x86")]` / `"arm"` (for example the `SYS_setresuid32`
+branch of `crates/daemon/tests/pcx_wire_routing_tests.rs`) and every `libc::timespec` conversion
+(`time_t` and `c_long` are 32-bit there) are only type-checked by a 32-bit target. No native
+linker is needed for a `cargo check`, but the 32-bit libc headers are: `v4l2-sys-mit` (a build
+dependency of `v4l`) runs bindgen (libclang) on `<linux/videodev2.h>` for the target. Install
+`gcc-multilib` on Debian/Ubuntu or `lib32-glibc` on Arch. `ORT_SKIP_DOWNLOAD=1` stops the `ort-sys` build script
+from looking for prebuilt ONNX Runtime binaries, which do not exist for these targets (nothing is
+linked by `cargo check`):
+
+```bash
+rustup target add i686-unknown-linux-gnu armv7-unknown-linux-gnueabihf
+ORT_SKIP_DOWNLOAD=1 cargo check --locked --workspace --all-targets --all-features --target i686-unknown-linux-gnu
+ORT_SKIP_DOWNLOAD=1 cargo check --locked --tests --target armv7-unknown-linux-gnueabihf -p soos-daemon --test pcx_wire_routing_tests
+```
+
+CI runs the i686 workspace check on every PR in the Clippy job (step "32-bit type check
+(i686)", pinned by `config_open_diagnostics_contract::test_cdf_ci_type_checks_a_32_bit_target`);
+the armv7 PCX check stays manual. `timespec` and `stat` time fields are converted with
+`u64::try_from` from `libc::time_t`, never `cast_unsigned` or an `i64` parameter (invariant
+`config_open_diagnostics_contract::test_cdf_timespec_fields_are_not_cast_unsigned`).
+
 ---
 
 ## 5. Multi-Agent TDD Development Cycle (Phases 0 through 5)

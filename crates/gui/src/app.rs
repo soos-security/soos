@@ -31,6 +31,7 @@ use crate::daemon_control::{DaemonMonitor, DaemonState, SystemctlProbe, DAEMON_P
 use crate::privileged::{PkexecExecutor, PrivilegedAction, PrivilegedOutcome, TaskRunner};
 use crate::state::{EnrollmentGuiState, LatestFrameData, ProfilesGuiState};
 use crate::store_mode::GuiStore;
+use crate::store_tasks::{StoreTask, StoreTaskOutcome, StoreTaskRunner};
 use crate::worker::{spawn_vision_worker, WorkerSharedInput};
 
 /// Application navigation tabs.
@@ -80,6 +81,12 @@ pub struct SoosApp {
     // Background daemon-state polling and privileged (pkexec) operations (GitHub #154)
     daemon_monitor: Option<DaemonMonitor>,
     tasks: TaskRunner,
+    /// Direct-mode template store mutations, off the UI thread (GitHub #291); `None` in
+    /// Polkit mode.
+    store_tasks: Option<StoreTaskRunner>,
+    /// Username shown in the success message of the store enrollment in flight, captured when
+    /// the task is submitted (the username field may be edited while the save runs).
+    pending_store_username: Option<String>,
     daemon_message: Option<(String, bool)>,
     last_camera_status: Option<CameraStatus>,
 
@@ -123,6 +130,13 @@ impl SoosApp {
                 e
             })
             .ok();
+        let store_repaint_ctx = cc.egui_ctx.clone();
+        let store_tasks = store.local().map(|local| {
+            StoreTaskRunner::new(
+                Arc::clone(local),
+                Arc::new(move || store_repaint_ctx.request_repaint()),
+            )
+        });
         let repaint_ctx = cc.egui_ctx.clone();
         // `ResumeDaemon` first releases any direct V4L2 manager (on the privileged worker
         // thread) so the starting daemon never meets EBUSY because of the GUI.
@@ -158,6 +172,8 @@ impl SoosApp {
             camera_notice: None,
             daemon_monitor,
             tasks,
+            store_tasks,
+            pending_store_username: None,
             daemon_message: None,
             last_camera_status: None,
             camera_source: None,
@@ -351,6 +367,59 @@ impl SoosApp {
                     }
                 },
             }
+        }
+    }
+
+    /// Applies the outcomes of finished direct-mode store mutations (non-blocking, GitHub #291).
+    fn handle_store_task_outcomes(&mut self) {
+        let Some(runner) = self.store_tasks.as_mut() else {
+            return;
+        };
+        for outcome in runner.poll() {
+            match outcome {
+                StoreTaskOutcome::Enrolled { uid, result } => match result {
+                    Ok(()) => {
+                        let target = if matches!(self.store, GuiStore::Developer { .. }) {
+                            "the developer store (not used by PAM)"
+                        } else {
+                            "the system store"
+                        };
+                        let message = match self.pending_store_username.take() {
+                            Some(username) => format!(
+                                "User {username} (UID {uid}) enrolled successfully into {target}."
+                            ),
+                            None => format!("UID {uid} enrolled successfully into {target}."),
+                        };
+                        self.enrollment.status_message = Some((message, false));
+                        self.enrollment.is_active = false;
+                        self.refresh_profiles();
+                    }
+                    Err(e) => {
+                        self.pending_store_username = None;
+                        self.enrollment.status_message =
+                            Some((format!("Failed to save the template: {e}"), true));
+                    }
+                },
+                StoreTaskOutcome::Deleted { uid, result } => match result {
+                    Ok(_) => {
+                        self.profiles.status_message =
+                            Some((format!("Template for UID {uid} removed."), false));
+                        self.refresh_profiles();
+                    }
+                    Err(e) => {
+                        self.profiles.status_message =
+                            Some((format!("Failed to delete template: {e}"), true));
+                    }
+                },
+            }
+        }
+    }
+
+    /// Submits a direct-mode store mutation to the background store worker (GitHub #291).
+    fn submit_store_task(&mut self, task: StoreTask) -> Result<(), String> {
+        match self.store_tasks.as_mut() {
+            Some(runner) => runner.submit(task).map_err(|e| e.to_string()),
+            None => Err("no biometric store is available".to_string()),
         }
     }
 
@@ -1083,39 +1152,23 @@ impl SoosApp {
                                             }
                                         }
                                     } else {
-                                        let saved = self
-                                            .store
-                                            .local()
-                                            .map(|store| store.enroll(&template));
-                                        match saved {
-                                            Some(Ok(())) => {
-                                                let target = if matches!(
-                                                    self.store,
-                                                    GuiStore::Developer { .. }
-                                                ) {
-                                                    "the developer store (not used by PAM)"
-                                                } else {
-                                                    "the system store"
-                                                };
+                                        // The store write may wait for the store lock held
+                                        // by `soos-enroll`: it runs on the store worker and
+                                        // its outcome arrives in
+                                        // `handle_store_task_outcomes` (GitHub #291).
+                                        let username =
+                                            self.enrollment.target_username.clone();
+                                        match self.submit_store_task(StoreTask::Enroll(template)) {
+                                            Ok(()) => {
+                                                self.pending_store_username = Some(username);
                                                 self.enrollment.status_message = Some((
-                                                    format!(
-                                                        "User {} enrolled successfully into {target}.",
-                                                        self.enrollment.target_username
-                                                    ),
+                                                    "Saving the template...".to_string(),
                                                     false,
                                                 ));
-                                                self.refresh_profiles();
-                                                self.enrollment.is_active = false;
                                             }
-                                            Some(Err(e)) => {
+                                            Err(e) => {
                                                 self.enrollment.status_message = Some((
-                                                    format!("Failed to save the template: {e}"),
-                                                    true,
-                                                ));
-                                            }
-                                            None => {
-                                                self.enrollment.status_message = Some((
-                                                    "No biometric store is available".to_string(),
+                                                    format!("Cannot save the template: {e}"),
                                                     true,
                                                 ));
                                             }
@@ -1233,18 +1286,13 @@ impl SoosApp {
                                             true,
                                         ));
                                     }
-                                } else if let Err(e) = self
-                                    .store
-                                    .local()
-                                    .ok_or_else(|| "no biometric store is available".to_string())
-                                    .and_then(|store| store.delete(uid).map_err(|e| e.to_string()))
+                                } else if let Err(e) =
+                                    self.submit_store_task(StoreTask::Delete { uid })
                                 {
+                                    // The deletion runs on the store worker; its outcome
+                                    // arrives in `handle_store_task_outcomes` (GitHub #291).
                                     self.profiles.status_message =
-                                        Some((format!("Failed to delete template: {e}"), true));
-                                } else {
-                                    self.profiles.status_message =
-                                        Some((format!("Template for UID {uid} removed."), false));
-                                    self.refresh_profiles();
+                                        Some((format!("Cannot delete template: {e}"), true));
                                 }
                                 self.profiles.confirm_delete_uid = None;
                             }
@@ -1274,6 +1322,7 @@ impl eframe::App for SoosApp {
 
         // Apply finished background privileged operations without blocking (GitHub #154).
         self.handle_task_outcomes();
+        self.handle_store_task_outcomes();
         self.sync_camera_source_generation();
         let camera_notice = self.current_camera_notice();
         let camera_status = self.camera.status();

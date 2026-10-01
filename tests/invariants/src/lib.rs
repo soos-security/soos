@@ -175,6 +175,11 @@ mod camera_vision_followups_contract;
 #[cfg(all(test, unix))]
 mod camera_alias_guard_contract;
 
+/// `daemon.toml` `O_PATH` open, `v4l` hook filter re-installation and 32-bit clock conversions
+/// (GitHub #291, rows CDF1, CDF3–CDF5).
+#[cfg(all(test, unix))]
+mod config_open_diagnostics_contract;
+
 /// Diagnostics parity (`test-pam` nonce binding, GUI response freshness) and the shared
 /// `daemon.toml` camera reader (GitHub #289, rows DGP1–DGP9).
 #[cfg(all(test, unix))]

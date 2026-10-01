@@ -485,6 +485,69 @@ pub fn registry_config_for(
         .with_intra_threads(config.inference_intra_threads)
 }
 
+/// Sweeps the temporary files an interrupted store write left behind (GitHub #291), once at
+/// startup: a blocking evidence write abandoned at the previous shutdown is never awaited, and
+/// an interrupted `soos-enroll` can leave a template temporary file.
+///
+/// Runs `BiometricStore::sweep_orphaned_temp_files` and
+/// `EvidenceStore::sweep_orphaned_temp_files`, which remove only the stores' own temporary
+/// file names (regular, single-link files owned by root, older than one minute, bounded per
+/// call) and never follow a symlink. The sweep is housekeeping: a failure is logged and never
+/// prevents the startup. Only counts are logged, never file content.
+pub fn sweep_orphaned_store_temp_files(
+    biometric: &soos_biometric_store::BiometricStore,
+    evidence: &soos_evidence_store::EvidenceStore,
+) {
+    match biometric.sweep_orphaned_temp_files() {
+        Ok(report) => log_temp_sweep(
+            "templates",
+            report.removed,
+            report.kept_recent,
+            report.limit_reached,
+            report.lock_busy,
+        ),
+        Err(err) => {
+            tracing::warn!(error = %err, store = "templates", "Orphaned temporary file sweep failed");
+        }
+    }
+    match evidence.sweep_orphaned_temp_files() {
+        Ok(report) => log_temp_sweep(
+            "evidence",
+            report.removed,
+            report.kept_recent,
+            report.limit_reached,
+            report.lock_busy,
+        ),
+        Err(err) => {
+            tracing::warn!(error = %err, store = "evidence", "Orphaned temporary file sweep failed");
+        }
+    }
+}
+
+/// Logs the counts of one store sweep (only when something happened).
+fn log_temp_sweep(
+    store: &'static str,
+    removed: usize,
+    kept_recent: usize,
+    limit_reached: bool,
+    lock_busy: bool,
+) {
+    if lock_busy {
+        tracing::info!(
+            store,
+            "Store busy at startup; orphaned temporary file sweep skipped"
+        );
+    } else if removed > 0 || kept_recent > 0 || limit_reached {
+        tracing::info!(
+            store,
+            removed,
+            kept_recent,
+            limit_reached,
+            "Swept orphaned temporary files of an interrupted store write"
+        );
+    }
+}
+
 /// Initializes all production pipeline components from a strongly-typed [`PipelineConfig`].
 ///
 /// This includes:
@@ -534,6 +597,7 @@ pub fn initialize_pipeline(
         soos_evidence_store::EvidenceStore::new(config.evidence.clone(), ev_key)
             .with_daily_cap_total(config.evidence_daily_cap_total),
     );
+    sweep_orphaned_store_temp_files(&biometric_store, &evidence_store);
 
     // 4. Policy Engine & Rate Limiter
     let rate_limiter = soos_policy::RateLimiter::new(config.rate_limit);

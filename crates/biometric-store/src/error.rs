@@ -42,4 +42,9 @@ pub enum BiometricStoreError {
     /// the newer state is kept and the migration of that file is refused.
     #[error("Template changed concurrently: {0}")]
     ChangedConcurrently(String),
+
+    /// [`crate::BiometricStore::enroll_if_absent`] found a template for this UID under the
+    /// store lock (GitHub #291): nothing was written and the enrolled template is unchanged.
+    #[error("UID {0} is already enrolled; the existing template was left unchanged")]
+    AlreadyEnrolled(u32),
 }

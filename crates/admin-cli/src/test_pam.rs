@@ -47,6 +47,31 @@ pub struct LatencyMetrics {
     pub total_ms: f64,
 }
 
+/// Why `pam_soos.so` would reject the daemon response whatever its verdict (GitHub #291).
+///
+/// Serialized as a stable snake_case string (`request_id_mismatch`, `stale_response`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PamTestRejection {
+    /// The response does not echo the request nonce (`Response::matches_request`); checked
+    /// first, like `IpcError::RequestIdMismatch` in the PAM module.
+    RequestIdMismatch,
+    /// The response stamps are outside their `CLOCK_MONOTONIC` validity window
+    /// (`Response::check_freshness`), or the clock could not be read.
+    StaleResponse,
+}
+
+impl PamTestRejection {
+    /// The stable snake_case name, as serialized in the JSON report.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::RequestIdMismatch => "request_id_mismatch",
+            Self::StaleResponse => "stale_response",
+        }
+    }
+}
+
 /// Simulated PAM authentication cycle report.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PamTestReport {
@@ -54,8 +79,15 @@ pub struct PamTestReport {
     pub uid: u32,
     /// Declared PAM service name.
     pub service: String,
-    /// Verdict rendered by daemon.
+    /// Raw verdict rendered by the daemon, shown even when the response is not accepted (see
+    /// [`Self::accepted`]).
     pub verdict: Verdict,
+    /// `true` when the response passed the nonce binding and the freshness check, so that
+    /// `verdict` is what `pam_soos.so` acts on; `false` means the PAM fallback whatever the
+    /// verdict (GitHub #291).
+    pub accepted: bool,
+    /// The first check the response failed, `None` when it is accepted.
+    pub rejected_reason: Option<PamTestRejection>,
     /// Diagnostic classification reason.
     pub reason_class: ReasonClass,
     /// Latency breakdown.
@@ -84,6 +116,13 @@ impl PamTestReport {
         out.push_str(&format!("Target UID:          {}\n", self.uid));
         out.push_str(&format!("Service:             {}\n", self.service));
         out.push_str(&format!("Daemon Verdict:      {:?}\n", self.verdict));
+        match self.rejected_reason {
+            Some(reason) => {
+                out.push_str(&format!("Response Accepted:   no ({})\n", reason.as_str()))
+            }
+            None if self.accepted => out.push_str("Response Accepted:   yes\n"),
+            None => out.push_str("Response Accepted:   no\n"),
+        }
         out.push_str(&format!("Reason Class:        {:?}\n", self.reason_class));
         out.push_str(&format!("PAM Action:          {}\n", self.pam_result));
         out.push_str("----------------------------------------------------\n");
@@ -199,6 +238,14 @@ pub fn simulate_pam_auth(
     let freshness =
         resp.check_freshness(monotonic_now_ns().unwrap_or(0), MAX_RESPONSE_FUTURE_SKEW_NS);
 
+    let rejected_reason = if !bound_to_request {
+        Some(PamTestRejection::RequestIdMismatch)
+    } else if freshness.is_err() {
+        Some(PamTestRejection::StaleResponse)
+    } else {
+        None
+    };
+
     let pam_result = if !bound_to_request {
         format!(
             "PAM_IGNORE (response request_id does not match the request nonce; the PAM module \
@@ -224,6 +271,8 @@ pub fn simulate_pam_auth(
         uid,
         service: service.to_string(),
         verdict: resp.verdict,
+        accepted: rejected_reason.is_none(),
+        rejected_reason,
         reason_class: resp.reason_class,
         latency: LatencyMetrics {
             connect_ms,

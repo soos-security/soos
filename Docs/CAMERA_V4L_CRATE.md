@@ -325,12 +325,19 @@ camera_device` and `[pipeline] sensor_preference` through one implementation,
 it, it owns the vocabulary (`parse_sensor_preference`, `is_auto_camera_device`), and it pulls in
 neither Tokio nor ONNX Runtime (only `toml`, already locked by `soos-daemon`).
 
-- **Open, then check the handle.** The file is opened with `O_RDONLY | O_NONBLOCK | O_CLOEXEC`
-  (`OpenOptionsExt::custom_flags`); `fstat` on the open handle must report a regular file; the
-  read is bounded by `MAX_DAEMON_CONFIG_BYTES` (checked from `fstat` and again on the bytes read).
-  A FIFO swapped in place of the file returns at once (`NotARegularFile`) instead of blocking
-  `open()`. There is no path-based `metadata()` before the open, so nothing can be swapped
-  between check and use.
+- **Pin with `O_PATH`, check the handle, then reopen it (GitHub #291).** The path is first opened
+  with `O_PATH | O_CLOEXEC` (`OpenOptionsExt::custom_flags`): the name is resolved and the inode
+  pinned, but no driver `open` runs and nothing can block. `fstat` on that handle must report a
+  regular file of at most `MAX_DAEMON_CONFIG_BYTES`; only then is the pinned inode reopened for
+  reading through `/proc/self/fd/<n>` with `O_RDONLY | O_NONBLOCK | O_CLOEXEC`, and the reopened
+  handle must have the same device and inode numbers and still be a regular file. The read is
+  bounded by `MAX_DAEMON_CONFIG_BYTES` (checked from `fstat` and again on the bytes read). A FIFO
+  or a character device swapped in place of the file is refused at once (`NotARegularFile`)
+  without being opened, so its driver's `open` side effects (controlling terminal, camera power-up,
+  tape rewind) never happen. When `/proc` is not mounted, or the reopen fails for any other
+  reason, the file is `Unreadable` (never `NotFound`): the callers apply the defaults with a note.
+  There is no path-based `metadata()` before the open, so nothing can be swapped between check and
+  use.
 - **Symbolic links are followed**, exactly like `soos-daemon` follows them, so the clients resolve
   the camera from the very file the daemon reads when `/etc` is symlink-managed (stow, NixOS,
   ostree): otherwise `soos-enroll` could enroll with a different camera than the one the daemon
@@ -395,13 +402,22 @@ silent while the current thread is inside a guarded call (a thread-local depth c
 nesting works and other threads are unaffected) and forwards every other panic to the hook
 installed before it (the daemon's `tracing` hook, Rust's default hook in the CLIs). The wrapper is
 never swapped per call nor removed; a host hook installed later replaces it, which only restores
-the report. `soos-daemon` installs its hook at start-up, before the camera is opened.
+the report. Such a host calls `install_v4l_panic_hook_filter()` right after its own `set_hook`
+(GitHub #291): when the current hook is not the live filter, it is wrapped again (it keeps
+reporting every other panic); when it already is, it is put back unchanged, so repeated calls never
+stack filters (`v4l_panic_hook_filter_installations()` counts the wraps). The live filter is
+recognized by the heap address of its closure, compared only while a liveness token owned by that
+closure is alive, so a later allocation at the same address is never mistaken for it.
+`soos-daemon` installs its `tracing` hook at start-up and calls `install_v4l_panic_hook_filter()`
+right after, before the camera is opened; `soos-admin`, `soos-enroll` and `soos-gui` install no
+hook of their own.
 
 The invariants `tests/invariants/src/camera_vision_followups_contract.rs` and
 `tests/invariants/src/camera_alias_guard_contract.rs` forbid direct calls elsewhere in the
 crate. Tests: `v4l_panic_guard_tests::*` (injected panic and the real non-UTF-8
 `Capabilities::from` panic), `v4l_panic_hook_filter_tests::*` (silent guarded panics, reported
-unguarded panics on any thread) and `v4l_teardown_guard_tests::*`.
+unguarded panics on any thread), `v4l_panic_hook_reinstall_tests::*` (re-installation on top of
+a later host hook, no double wrapping) and `v4l_teardown_guard_tests::*`.
 
 ---
 

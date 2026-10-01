@@ -31,6 +31,19 @@ waits on I/O it does not own.
   wakes the UI with `request_repaint`. Only one privileged action runs at a time
   (`TaskRunnerError::Busy`), so the user never faces stacked Polkit dialogs; the Pause/Resume
   buttons are disabled and a spinner is shown meanwhile.
+- **Direct-mode store mutations (GitHub #291)**: with a local store (`GuiStore::System` or
+  `GuiStore::Developer`) the UI never calls `BiometricStore::enroll` / `delete` itself: both
+  take the store lock and may wait up to `STORE_LOCK_TIMEOUT` (5 s) while `soos-enroll` holds
+  it. The UI submits a `store_tasks::StoreTask` (`Enroll(template)` or `Delete { uid }`) to
+  `StoreTaskRunner`, which runs it on the `soos-gui-store` thread and returns immediately; the
+  `StoreTaskOutcome` is drained each frame by `SoosApp::handle_store_task_outcomes` and the
+  worker wakes the UI with `request_repaint`. One store task runs at a time
+  (`StoreTaskSubmitError::Busy`). A lock timeout is shown as `StoreTaskError::Busy`, whose
+  message is `STORE_BUSY_MESSAGE` ("another soos operation is using the template store; try
+  again"); nothing is written or removed. `StoreTask`'s `Debug` output prints only the UID and
+  embedding dimension. A separate runner (rather than new `PrivilegedAction` variants) keeps
+  local saves independent of a pending Polkit dialog (Pause/Resume) and leaves the
+  `PrivilegedExecutor` contract unchanged.
 - **Template import (GitHub #156, review findings CAM-08 / STO-12)**: the fused embedding is
   serialized to JSON in a zeroizing buffer and piped to the standard input of
   `pkexec soos-enroll import --uid <uid> --file -` (`privileged::import_helper_args`,
@@ -154,6 +167,7 @@ Example: `RUST_LOG=soos_gui=debug,soos_camera_v4l=debug soos-gui`.
 Matrix rows GRE1–GRE6 and ISE1–ISE4 in `AI/VERIFICATION_MATRIX.md`; tests in
 `crates/gui/tests/responsiveness_tests.rs`, `crates/gui/tests/camera_status_tests.rs`,
 `crates/gui/tests/import_privacy_tests.rs` and `crates/camera-v4l/tests/camera_status_tests.rs`.
+Direct-mode store mutations off the UI thread: rows SGU1–SGU2, `crates/gui/tests/store_task_tests.rs`.
 Failure paths without a daemon or camera (oversized, zero-length and truncated preview replies,
 daemon without camera, `EACCES` socket, direct-mode `EACCES` / `EBUSY`) are covered by
 `crates/gui/tests/ipc_camera_failure_tests.rs` (matrix CHT5–CHT6, GitHub #198).
