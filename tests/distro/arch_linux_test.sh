@@ -14,7 +14,7 @@
 # Options:
 #   --pkgbuild               Test installation via Arch PKGBUILD (.pkg.tar.zst)
 #   --install-sh             Test installation via scripts/install.sh
-#   --skip-build             Do not recompile binaries if artifacts exist
+#   --skip-build             Do not recompile; package the existing release artifacts
 #   --dry-run                Simulate execution plan without modifying root filesystem
 #   --allow-host-changes     Required for a live run: this script installs packages,
 #                            rewrites PAM files and creates users on the host it runs
@@ -67,7 +67,7 @@ swaylock and hyprlock screen locker testing, and rollback validation suite.
 Options:
   --pkgbuild               Install via Arch Linux PKGBUILD package
   --install-sh             Install via scripts/install.sh
-  --skip-build             Skip cargo build if binaries are already present
+  --skip-build             Skip cargo build and use the existing release binaries
   --dry-run                Print execution plan without making root changes
   --allow-host-changes     Consent to a live run that modifies this host (packages,
                            PAM files, users); use it only in a disposable container
@@ -175,11 +175,11 @@ trap cleanup EXIT INT TERM
 # ---------------------------------------------------------------------------
 cd "${WORKSPACE_ROOT}"
 
+# Without --skip-build, always invoke cargo (a no-op when up to date) so a stale
+# release artifact from the bind-mounted target/ is never packaged (GitHub #244).
 if [[ "${SKIP_BUILD}" = false ]]; then
-    if [[ ! -f "target/release/soos-daemon" || ! -f "target/release/libpam_soos.so" ]]; then
-        info "Compiling release artifacts..."
-        cargo build --locked --release --workspace
-    fi
+    info "Building release artifacts (no-op when up to date)..."
+    cargo build --locked --release --workspace
 fi
 
 # ---------------------------------------------------------------------------

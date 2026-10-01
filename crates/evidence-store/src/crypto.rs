@@ -1,7 +1,7 @@
 //! Cryptographic primitives for AES-256-GCM evidence snapshot encryption.
 
 use crate::error::EvidenceStoreError;
-use aes_gcm::aead::{Aead, KeyInit};
+use aes_gcm::aead::{Aead, KeyInit, Payload};
 use aes_gcm::{Aes256Gcm, Key, Nonce};
 use std::fmt;
 use std::fs::OpenOptions;
@@ -26,6 +26,9 @@ pub const NONCE_LEN: usize = 12;
 pub const TAG_LEN: usize = 16;
 
 /// Magic header bytes identifying an encrypted evidence payload (`SOOSEVD1`).
+///
+/// Shared by the legacy unbound envelope and the AAD-bound envelope (GitHub #266); the format
+/// is told apart by [`BOUND_FORMAT_MARKER`].
 pub const MAGIC_HEADER: &[u8; 8] = b"SOOSEVD1";
 
 /// Minimum ciphertext length: 8 bytes magic + 12 bytes nonce + 16 bytes tag = 36 bytes.
@@ -204,78 +207,240 @@ impl fmt::Debug for MasterKey {
     }
 }
 
-/// Encrypts plaintext bytes using AES-256-GCM with a fresh CSPRNG nonce.
+/// Payload format version of AAD-bound evidence snapshots (GitHub #266, STO-22).
 ///
-/// Output layout: `MAGIC_HEADER` (8 bytes) || `nonce` (12 bytes) || `ciphertext + tag`.
-pub fn encrypt_payload(key: &MasterKey, plaintext: &[u8]) -> Result<Vec<u8>, EvidenceStoreError> {
+/// Version 1 is the legacy unbound envelope (no associated data); version 2 binds the
+/// ciphertext to its file role, format version, date partition and snapshot id through AES-GCM
+/// associated data. This is the envelope version, distinct from the CBOR record version
+/// `EVIDENCE_RECORD_VERSION`.
+pub const PAYLOAD_FORMAT_VERSION: u8 = 2;
+
+/// Marker written right after [`MAGIC_HEADER`] by an AAD-bound (version 2) payload.
+///
+/// The 8-byte magic is unchanged; a legacy payload has random nonce bytes at this offset. A
+/// legacy nonce that begins with the marker by chance (probability 2^-32) is still read
+/// correctly because decoding falls back to the legacy layout when the bound layout does not
+/// authenticate.
+pub const BOUND_FORMAT_MARKER: [u8; 4] = [b'A', b'A', b'D', PAYLOAD_FORMAT_VERSION];
+
+/// Domain label of the evidence associated data (file role: evidence snapshot).
+pub const SNAPSHOT_AAD_DOMAIN: &[u8] = b"soos/evidence-snapshot";
+
+/// Clear header of a bound snapshot: magic (8) + format marker (4).
+pub const BOUND_HEADER_LEN: usize = 12;
+
+/// Minimum length of a bound snapshot payload: clear header + nonce + tag.
+pub const MIN_BOUND_PAYLOAD_LEN: usize = BOUND_HEADER_LEN + NONCE_LEN + TAG_LEN;
+
+/// Envelope format of a decrypted payload.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PayloadFormat {
+    /// Legacy unbound envelope (`MAGIC_HEADER || nonce || ciphertext+tag`, no associated
+    /// data), written by releases before GitHub #266. Still readable; expires with retention.
+    LegacyV1,
+    /// AAD-bound envelope (`MAGIC_HEADER || BOUND_FORMAT_MARKER || nonce || ciphertext+tag`)
+    /// authenticated with [`snapshot_aad`].
+    BoundV2,
+}
+
+/// Associated data binding a snapshot ciphertext to its date partition and snapshot id.
+///
+/// Layout: [`SNAPSHOT_AAD_DOMAIN`] `|| 0x00 ||` [`MAGIC_HEADER`] `||` [`BOUND_FORMAT_MARKER`]
+/// `||` len(date) (big-endian u64) `||` date `||` len(id) (big-endian u64) `||` id. The length
+/// prefixes keep the field boundaries unambiguous. The file suffix is deliberately not bound:
+/// renaming `<id>.opaque.enc` to the historical `<id>.webp.enc` keeps the snapshot readable.
+pub fn snapshot_aad(date: &str, snapshot_id: &str) -> Vec<u8> {
+    let mut aad = Vec::with_capacity(
+        SNAPSHOT_AAD_DOMAIN
+            .len()
+            .saturating_add(1 + BOUND_HEADER_LEN + 16)
+            .saturating_add(date.len())
+            .saturating_add(snapshot_id.len()),
+    );
+    aad.extend_from_slice(SNAPSHOT_AAD_DOMAIN);
+    aad.push(0);
+    aad.extend_from_slice(MAGIC_HEADER);
+    aad.extend_from_slice(&BOUND_FORMAT_MARKER);
+    for field in [date.as_bytes(), snapshot_id.as_bytes()] {
+        aad.extend_from_slice(&u64::try_from(field.len()).unwrap_or(u64::MAX).to_be_bytes());
+        aad.extend_from_slice(field);
+    }
+    aad
+}
+
+/// Generates a fresh CSPRNG nonce.
+fn fresh_nonce() -> Result<[u8; NONCE_LEN], EvidenceStoreError> {
     let mut nonce_bytes = [0u8; NONCE_LEN];
     getrandom::fill(&mut nonce_bytes)
         .map_err(|e| EvidenceStoreError::Crypto(format!("Failed to generate nonce: {e}")))?;
+    Ok(nonce_bytes)
+}
 
+/// AES-256-GCM encryption of `plaintext` with `aad` (empty for the legacy envelope).
+fn aes_seal(
+    key: &MasterKey,
+    nonce_bytes: &[u8; NONCE_LEN],
+    plaintext: &[u8],
+    aad: &[u8],
+) -> Result<Vec<u8>, EvidenceStoreError> {
     let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key.as_bytes()));
-    let nonce = Nonce::from_slice(&nonce_bytes);
+    cipher
+        .encrypt(
+            Nonce::from_slice(nonce_bytes),
+            Payload {
+                msg: plaintext,
+                aad,
+            },
+        )
+        .map_err(|e| EvidenceStoreError::Crypto(format!("AES-GCM encryption failed: {e}")))
+}
 
-    let ciphertext = cipher
-        .encrypt(nonce, plaintext)
-        .map_err(|e| EvidenceStoreError::Crypto(format!("AES-GCM encryption failed: {e}")))?;
+/// AES-256-GCM authenticated decryption with `aad`; `nonce` must be [`NONCE_LEN`] bytes.
+fn aes_open(
+    key: &MasterKey,
+    nonce: &[u8],
+    ciphertext: &[u8],
+    aad: &[u8],
+) -> Result<Zeroizing<Vec<u8>>, EvidenceStoreError> {
+    if nonce.len() != NONCE_LEN {
+        return Err(EvidenceStoreError::CorruptPayload(
+            "Invalid nonce length".to_string(),
+        ));
+    }
+    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key.as_bytes()));
+    cipher
+        .decrypt(
+            Nonce::from_slice(nonce),
+            Payload {
+                msg: ciphertext,
+                aad,
+            },
+        )
+        .map(Zeroizing::new)
+        .map_err(|e| EvidenceStoreError::Crypto(format!("Decryption or MAC failure: {e}")))
+}
 
-    let total_len = MAGIC_HEADER
-        .len()
-        .checked_add(NONCE_LEN)
-        .and_then(|l| l.checked_add(ciphertext.len()))
+/// Concatenates envelope parts with an overflow-checked capacity.
+fn assemble(parts: &[&[u8]]) -> Result<Vec<u8>, EvidenceStoreError> {
+    let total_len = parts
+        .iter()
+        .try_fold(0usize, |acc, part| acc.checked_add(part.len()))
         .ok_or_else(|| EvidenceStoreError::Crypto("Payload length overflow".to_string()))?;
-
     let mut output = Vec::with_capacity(total_len);
-    output.extend_from_slice(MAGIC_HEADER);
-    output.extend_from_slice(&nonce_bytes);
-    output.extend_from_slice(&ciphertext);
-
+    for part in parts {
+        output.extend_from_slice(part);
+    }
     Ok(output)
 }
 
-/// Decrypts an authenticated AES-256-GCM payload and returns a zeroizing buffer.
+/// Encrypts plaintext bytes with the **legacy unbound** envelope (format version 1).
+///
+/// Output layout: `MAGIC_HEADER` (8 bytes) || `nonce` (12 bytes) || `ciphertext + tag`, with
+/// no associated data. [`crate::EvidenceStore`] never writes this format since GitHub #266 (it
+/// uses [`encrypt_snapshot_payload`]); the function is kept for context-free payloads and to
+/// reproduce snapshots written by earlier releases.
+pub fn encrypt_payload(key: &MasterKey, plaintext: &[u8]) -> Result<Vec<u8>, EvidenceStoreError> {
+    let nonce_bytes = fresh_nonce()?;
+    let ciphertext = aes_seal(key, &nonce_bytes, plaintext, &[])?;
+    assemble(&[MAGIC_HEADER, &nonce_bytes, &ciphertext])
+}
+
+/// Decrypts a **legacy unbound** AES-256-GCM payload and returns a zeroizing buffer.
+///
+/// An AAD-bound payload written by [`encrypt_snapshot_payload`] never authenticates here.
 pub fn decrypt_payload(
     key: &MasterKey,
     data: &[u8],
 ) -> Result<Zeroizing<Vec<u8>>, EvidenceStoreError> {
+    check_envelope(data)?;
+    let nonce_end = MAGIC_HEADER.len().saturating_add(NONCE_LEN);
+    let nonce_slice = data
+        .get(MAGIC_HEADER.len()..nonce_end)
+        .ok_or_else(|| EvidenceStoreError::CorruptPayload("Missing nonce".to_string()))?;
+    let ciphertext_slice = data
+        .get(nonce_end..)
+        .ok_or_else(|| EvidenceStoreError::CorruptPayload("Missing ciphertext".to_string()))?;
+    aes_open(key, nonce_slice, ciphertext_slice, &[])
+}
+
+/// Checks the minimum envelope length and the magic header shared by both formats.
+fn check_envelope(data: &[u8]) -> Result<(), EvidenceStoreError> {
     if data.len() < MIN_PAYLOAD_LEN {
         return Err(EvidenceStoreError::CorruptPayload(format!(
             "Payload length {} is smaller than minimum required length {MIN_PAYLOAD_LEN}",
             data.len()
         )));
     }
-
-    let magic_len = MAGIC_HEADER.len();
     let magic_slice = data
-        .get(0..magic_len)
+        .get(0..MAGIC_HEADER.len())
         .ok_or_else(|| EvidenceStoreError::CorruptPayload("Missing magic header".to_string()))?;
-
     if magic_slice != MAGIC_HEADER {
         return Err(EvidenceStoreError::CorruptPayload(
             "Invalid magic header in evidence file".to_string(),
         ));
     }
+    Ok(())
+}
 
-    let nonce_end = magic_len
-        .checked_add(NONCE_LEN)
-        .ok_or_else(|| EvidenceStoreError::CorruptPayload("Nonce offset overflow".to_string()))?;
+/// Encrypts a snapshot record with the AAD-bound envelope (format version 2, GitHub #266).
+///
+/// Output layout: `MAGIC_HEADER || BOUND_FORMAT_MARKER || nonce || ciphertext + tag`,
+/// authenticated with [`snapshot_aad`]`(date, snapshot_id)`.
+pub fn encrypt_snapshot_payload(
+    key: &MasterKey,
+    date: &str,
+    snapshot_id: &str,
+    plaintext: &[u8],
+) -> Result<Vec<u8>, EvidenceStoreError> {
+    let nonce_bytes = fresh_nonce()?;
+    let ciphertext = aes_seal(
+        key,
+        &nonce_bytes,
+        plaintext,
+        &snapshot_aad(date, snapshot_id),
+    )?;
+    assemble(&[
+        MAGIC_HEADER,
+        &BOUND_FORMAT_MARKER,
+        &nonce_bytes,
+        &ciphertext,
+    ])
+}
 
-    let nonce_slice = data
-        .get(magic_len..nonce_end)
+/// Decrypts a snapshot payload expected at `date` / `snapshot_id`, in either envelope format.
+///
+/// A bound payload must authenticate with [`snapshot_aad`]`(date, snapshot_id)`: a snapshot
+/// moved to another date partition, renamed to another snapshot id or tampered with fails with
+/// [`EvidenceStoreError::Crypto`]. A legacy payload (no marker) is decrypted without associated
+/// data and reported as [`PayloadFormat::LegacyV1`]. When a payload carries the marker but does
+/// not authenticate as bound, the legacy layout is tried as well (a legacy nonce can begin with
+/// the marker by chance); if both fail, the bound authentication error is returned.
+pub fn decrypt_snapshot_payload(
+    key: &MasterKey,
+    date: &str,
+    snapshot_id: &str,
+    data: &[u8],
+) -> Result<(Zeroizing<Vec<u8>>, PayloadFormat), EvidenceStoreError> {
+    check_envelope(data)?;
+    let has_marker =
+        data.get(MAGIC_HEADER.len()..BOUND_HEADER_LEN) == Some(&BOUND_FORMAT_MARKER[..]);
+    if !has_marker || data.len() < MIN_BOUND_PAYLOAD_LEN {
+        return decrypt_payload(key, data).map(|plain| (plain, PayloadFormat::LegacyV1));
+    }
+    let nonce_end = BOUND_HEADER_LEN.saturating_add(NONCE_LEN);
+    let nonce = data
+        .get(BOUND_HEADER_LEN..nonce_end)
         .ok_or_else(|| EvidenceStoreError::CorruptPayload("Missing nonce".to_string()))?;
-
-    let ciphertext_slice = data
+    let ciphertext = data
         .get(nonce_end..)
         .ok_or_else(|| EvidenceStoreError::CorruptPayload("Missing ciphertext".to_string()))?;
-
-    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key.as_bytes()));
-    let nonce = Nonce::from_slice(nonce_slice);
-
-    let plaintext = cipher
-        .decrypt(nonce, ciphertext_slice)
-        .map_err(|e| EvidenceStoreError::Crypto(format!("Decryption or MAC failure: {e}")))?;
-
-    Ok(Zeroizing::new(plaintext))
+    match aes_open(key, nonce, ciphertext, &snapshot_aad(date, snapshot_id)) {
+        Ok(plain) => Ok((plain, PayloadFormat::BoundV2)),
+        Err(bound_err) => match decrypt_payload(key, data) {
+            Ok(plain) => Ok((plain, PayloadFormat::LegacyV1)),
+            Err(_) => Err(bound_err),
+        },
+    }
 }
 
 #[cfg(test)]

@@ -1,7 +1,7 @@
 //! Main storage engine for encrypted evidence snapshots.
 
 use crate::config::{EvidenceConfig, DEFAULT_DAILY_CAP_TOTAL};
-use crate::crypto::{decrypt_payload, encrypt_payload, MasterKey};
+use crate::crypto::{decrypt_snapshot_payload, encrypt_snapshot_payload, MasterKey};
 use crate::error::EvidenceStoreError;
 use crate::frame::{
     check_payload_len, EvidenceFrame, FrameBytes, FrameMetadata, EVIDENCE_RECORD_VERSION,
@@ -335,7 +335,7 @@ impl EvidenceStore {
         // Both the record (FrameBytes) and its CBOR plaintext are zeroized on drop.
         let serialized = record.to_cbor()?;
         drop(record);
-        let ciphertext = encrypt_payload(&self.key, &serialized)?;
+        let ciphertext = encrypt_snapshot_payload(&self.key, &date_str, &snapshot_id, &serialized)?;
         drop(serialized);
 
         let extension = if metadata.is_some() {
@@ -399,6 +399,11 @@ impl EvidenceStore {
     ///
     /// Files larger than [`MAX_EVIDENCE_FILE_BYTES`] are refused before being read. Legacy
     /// records (no version) decode as version 1 without frame metadata.
+    ///
+    /// The ciphertext is authenticated against the date partition (parent directory name) and
+    /// the snapshot id (file name up to its first `.`) of `path` (GitHub #266): a snapshot moved
+    /// to another partition or renamed to another id fails with [`EvidenceStoreError::Crypto`].
+    /// Snapshots written before AAD binding (legacy unbound envelope) remain readable.
     pub fn load_snapshot<P: AsRef<Path>>(
         &self,
         path: P,
@@ -420,7 +425,8 @@ impl EvidenceStore {
             ));
         }
 
-        let decrypted = decrypt_payload(&self.key, &data)?;
+        let (date, snapshot_id) = snapshot_binding(path);
+        let (decrypted, _format) = decrypt_snapshot_payload(&self.key, date, snapshot_id, &data)?;
         EvidenceRecord::from_cbor(&decrypted)
     }
 
@@ -673,6 +679,25 @@ fn write_daily_count(date_dir: &Path, uid: u32, count: u32) -> Result<(), Eviden
         return Err(EvidenceStoreError::Io(e));
     }
     Ok(())
+}
+
+/// Date partition and snapshot id a snapshot file is bound to (GitHub #266).
+///
+/// The date is the parent directory name and the id is the file name up to its first `.`.
+/// A component that is missing or not UTF-8 yields an empty string, which never matches the
+/// binding of a stored snapshot (only a legacy unbound payload can then be read).
+fn snapshot_binding(path: &Path) -> (&str, &str) {
+    let date = path
+        .parent()
+        .and_then(Path::file_name)
+        .and_then(|n| n.to_str())
+        .unwrap_or("");
+    let snapshot_id = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .and_then(|n| n.split('.').next())
+        .unwrap_or("");
+    (date, snapshot_id)
 }
 
 /// Creates `path` exclusively with mode `0600`, writes `bytes` and syncs it to disk.

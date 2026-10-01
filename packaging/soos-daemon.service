@@ -3,7 +3,8 @@ Description=soos Local Facial Biometric Authentication Daemon
 Documentation=https://github.com/Mysticaly622/soos
 After=local-fs.target systemd-udevd.service
 Wants=systemd-udevd.service
-# Listen before the greeter shows its first prompt (GitHub #203, DMN-14).
+# Start before the display manager (GitHub #203, DMN-14). With Type=notify the
+# greeter waits for READY=1, sent once the socket is bound (see Type= below).
 Before=display-manager.service
 # Bounded restarts: a daemon that cannot start (e.g. models not deployed yet)
 # must not crash-loop forever (GitHub #167). After 5 failures in 60 s the unit
@@ -17,7 +18,13 @@ StartLimitBurst=5
 ConditionPathExists=/var/lib/soos/models/manifest.toml
 
 [Service]
-Type=simple
+# Readiness (GitHub #203): the daemon sends READY=1 only after /run/soos/daemon.sock
+# is bound, so Before=display-manager.service really holds the greeter until PAM
+# requests can be served. Model verification and the inference warm-up run before
+# that point; the bounded start timeout fails the start instead of hanging.
+Type=notify
+NotifyAccess=main
+TimeoutStartSec=60
 User=root
 Group=soos
 ExecStart=/usr/libexec/soos/soos-daemon

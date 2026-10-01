@@ -262,6 +262,11 @@ def main():
                 if body and body[-1] >= MESSAGE_TAG_MIN:
                     frame_tag = body[-1]
                     body = body[:-1]
+                    # Parity with decode_client_message (MessageError::UnknownTag, GitHub #285):
+                    # an unknown tag runs no handler and gets no response.
+                    if frame_tag not in (MESSAGE_TAG_REQUEST, MESSAGE_TAG_EVENT):
+                        record_line(args.record, "rejected unknown-tag")
+                        continue
 
                 # Events are fire-and-forget: record them and never reply.
                 event = classify_event(bytes(body)) if frame_tag != MESSAGE_TAG_REQUEST else None

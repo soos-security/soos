@@ -52,7 +52,8 @@ pub fn new_guided_enrollment_session() -> GuidedEnrollmentSession {
 /// Feeds one analyzed frame to a guided enrollment session.
 ///
 /// - No usable face (no pose or embedding, no quality verdict): the live streak is broken
-///   and `None` is returned (nothing new to report).
+///   and `None` is returned (nothing new to report), unless the frame carries a spoof PAD
+///   verdict, which is counted by the session (GitHub #285).
 /// - Quality-gate rejection (GitHub #218): streak broken, `FaceQualityTooLow`.
 /// - Face without a PAD verdict (crop or PAD failure): streak broken, `PromptHoldStill`;
 ///   it is not a spoof event, and no sample is recorded.
@@ -71,15 +72,23 @@ pub fn feed_guided_enrollment(
         session.interrupt_liveness_streak();
         return Some(EnrollmentStepFeedback::FaceQualityTooLow);
     }
+    let is_live = analysis
+        .pad_result
+        .as_ref()
+        .map(|pad| pad.is_live && pad.score.is_finite() && pad.score >= pad_threshold);
     let (Some(pose), Some(emb)) = (&analysis.pose, &analysis.embedding) else {
+        // A spoof verdict counts even when no sample can be taken (GitHub #285), so
+        // repeated attacks still abort the session.
+        if is_live == Some(false) {
+            return Some(session.record_presentation_attack());
+        }
         session.interrupt_liveness_streak();
         return None;
     };
-    let Some(pad) = analysis.pad_result.as_ref() else {
+    let Some(is_live) = is_live else {
         session.interrupt_liveness_streak();
         return Some(EnrollmentStepFeedback::PromptHoldStill);
     };
-    let is_live = pad.is_live && pad.score.is_finite() && pad.score >= pad_threshold;
 
     let is_centered = analysis
         .detections

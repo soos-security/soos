@@ -50,14 +50,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # ---------------------------------------------------------------------------
-# Rust Installation via rustup
+# Rust Installation via rustup (verified bootstrap, GitHub #260)
 # ---------------------------------------------------------------------------
-# -y                    : non-interactive mode
+# scripts/install_rustup.sh downloads rustup-init of a pinned rustup release,
+# verifies its committed SHA-256 digest before executing it (no curl | sh) and
+# installs with --profile minimal (rustc, cargo, rust-std).
 # --default-toolchain   : install the pinned release of rust-toolchain.toml (1.98.1)
-# --profile minimal     : install rustc, cargo, rust-std
-#                         clippy and rustfmt are added explicitly afterwards
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-    | sh -s -- -y --default-toolchain 1.98.1 --profile minimal \
+# clippy and rustfmt are added explicitly afterwards
+COPY scripts/install_rustup.sh /usr/local/lib/soos/install_rustup.sh
+RUN bash /usr/local/lib/soos/install_rustup.sh --default-toolchain 1.98.1 \
     && rustup component add clippy rustfmt \
     && echo "Rust $(rustc --version) installed"
 

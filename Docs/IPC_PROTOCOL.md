@@ -97,7 +97,7 @@ Sent by the PAM module to the daemon to request facial verification (and by `soo
 - `request_id: RequestId`: 256-bit cryptographic random identifier (`[u8; 32]`) sourced via `getrandom`.
 - `uid_hint: u32`: Declared UID from the PAM client (authoritatively cross-checked by the daemon using kernel `SO_PEERCRED`).
 - `service: String`: PAM service name (`"sudo"`, `"su"`, `"gdm-password"`...). Bounded to 64 bytes.
-- `deadline_monotonic_ns: u64`: Absolute monotonic deadline in nanoseconds. If exceeded, daemon immediately returns `Verdict::Unavailable`. `0` or `u64::MAX` means no client deadline (`DECISION_BUDGET_MS` applies). The daemon stops its decision `RESPONSE_WRITE_MARGIN_MS` (50 ms) before the earlier of this deadline and its own `connection_timeout` (measured from the start of request processing), and never starts an inference that would not finish in time; the response is then `Unavailable`/`Timeout` (or the consensus reached so far), never a silent overrun.
+- `deadline_monotonic_ns: u64`: Absolute monotonic deadline in nanoseconds. If exceeded, daemon immediately returns `Verdict::Unavailable`. `0` or `u64::MAX` means no client deadline (`DECISION_BUDGET_MS` applies). The daemon stops its decision `RESPONSE_WRITE_MARGIN_MS` (50 ms) before the earlier of this deadline and its own `connection_timeout` (`DEFAULT_CONNECTION_TIMEOUT_MS` = 2500 ms, `crates/daemon/src/config.rs`; measured from the start of request processing), and never starts an inference that would not finish in time; the response is then `Unavailable`/`Timeout` (or the consensus reached so far), never a silent overrun.
   Every client reads this value from `CLOCK_MONOTONIC` (never the wall clock): `pam_soos.so` from its clamped `timeout_ms`, and the `soos-admin test-pam` diagnostic from `--timeout-ms` clamped to the same `10..=5000` ms range, so the diagnostic reproduces the budget PAM applies (GitHub #231, ADR 2026-09-30 "Storage CLI Output and Overwrite Hygiene").
 
 ### `Response`
@@ -110,7 +110,7 @@ Returned by the daemon to the PAM module (and as the refusal of a `Status` or `P
   - `Unavailable`: Hardware offline, model uninitialized, or deadline expired.
   - `ProtocolError`: Malformed message, mismatched UID, rate-limit reached.
 - `reason_class: ReasonClass`: Internal telemetry diagnostic (must not alter PAM fallback semantics). It is **never** shown to the user: the PAM module maps every `Deny` to one neutral text and every other failure to one generic text, so a PAD rejection is indistinguishable from a non-match at the lock screen (review PAM-03, GitHub #174; see `Docs/PAM_MODULE.md` §8).
-- `issued_monotonic_ns: u64`: Generation timestamp (CLOCK_MONOTONIC, informational).
+- `issued_monotonic_ns: u64`: Generation timestamp (CLOCK_MONOTONIC, informational). `soos-daemon` stamps it from its monotonic clock on every verdict path (always `> 0`); when the clock fails it sends `0` with `expires_monotonic_ns = 0` and never `Allow` (GitHub #258).
 - `expires_monotonic_ns: u64`: Daemon-side expiry hint (`issued + 2 s`); informational only and not validated by the PAM client. Replay protection is described in "Response Freshness" below.
 
 #### Response Freshness (GitHub #219)
@@ -138,10 +138,11 @@ Best-effort telemetry notification sent by PAM following password failures:
 | `RequestKind::PreviewFrame` (2) | `soos-gui` preview, authorized peers only (§9) | `PreviewResponse`, or a `Response` with `ProtocolError` on refusal |
 
 ### `StatusResponse`
-Non-biometric health snapshot returned for `RequestKind::Status` (bounded by `MAX_MESSAGE_SIZE`): `version: u8`, `socket_ready`, `camera_ready`, `models_verified`, `is_healthy` (`bool`, one byte each), `pid: u32`, `uptime_secs: u64`.
+Non-biometric health snapshot returned for `RequestKind::Status` (bounded by `MAX_MESSAGE_SIZE`): `version: u8`, `socket_ready`, `camera_ready`, `models_verified`, `is_healthy` (`bool`, one byte each), `pid: u32`, `uptime_secs: u64`, `memory_locked: bool` (whether `mlockall` swap protection is active, GitHub #201; appended last, so the daemon and `soos-admin` / `soos-gui` must be upgraded together).
+Non-biometric health snapshot returned for `RequestKind::Status` (bounded by `MAX_MESSAGE_SIZE`): `version: u8`, `socket_ready`, `camera_ready`, `models_verified`, `is_healthy` (`bool`, one byte each), `pid: u32`, `uptime_secs: u64`. It carries no frame, template, embedding or UID data.
 
 ### `PreviewResponse`
-Camera frame returned for an authorized `RequestKind::PreviewFrame` (bounded by `MAX_PREVIEW_MESSAGE_SIZE`, encoded with `encode_preview`, decoded with `decode_preview`; §9): `version: u8`, `sequence: u64`, `width: u32`, `height: u32`, `format: u8` (0 = RGB24, 1 = Grey, 2 = YUYV, 3 = NV12, 4 = MJPEG, 255 = no capture), `timestamp_monotonic_ns: u64`, `data: Vec<u8>`.
+Camera frame returned for an authorized `RequestKind::PreviewFrame` (bounded by `MAX_PREVIEW_MESSAGE_SIZE`, encoded with `encode_preview`, decoded with `decode_preview`; §9): `version: u8`, `sequence: u64`, `width: u32`, `height: u32`, `format: u8` (0 = RGB24, 1 = Grey, 2 = YUYV, 3 = NV12, 4 = MJPEG, 255 = no capture), `timestamp_monotonic_ns: u64`, `data: Vec<u8>`. The pixel buffer is biometric data: the struct zeroizes on drop (§ Memory Zeroization).
 
 The daemon-side authorization of each kind and every `daemon.toml` key are specified in `Docs/DAEMON.md`.
 
@@ -165,6 +166,7 @@ To ensure that untrusted or malformed inputs can never trigger memory corruption
    - `prop_request_roundtrip`, `prop_response_roundtrip`, and `prop_event_roundtrip` assert serialization/deserialization idempotency for arbitrary valid messages.
    - `prop_decode_request_never_panics`, `prop_decode_response_never_panics`, and `prop_decode_event_never_panics` feed arbitrary mutated byte streams ($0$ to $8{,}192$ bytes) asserting that `decode` never panics and always returns either `Ok` or a typed `CodecError`.
    - `prop_declared_size_bounds` and `prop_truncated_buffer_bounds` verify zero-allocation fast rejection of oversized ($> 4{,}096$ bytes) or truncated payloads.
+   - Single interpretation (GitHub #224, walkthrough 143): `crates/protocol/tests/wire_exclusivity_tests.rs` asserts that a tagged `Request` or `Event` frame is accepted only by its own decoder (never as the other client type, `Response` or `StatusResponse`), that `Response` and `StatusResponse` frames never decode as each other, and that the `Response` decoder rejects every single trailing byte, client tags included.
    - Executed automatically via standard `cargo test` on every commit and CI run.
 2. **LLVM libFuzzer Integration (`cargo-fuzz`)**:
    - Targets `decode_request`, `decode_response`, `decode_event` and `decode_client_message` (§12) in `crates/protocol/fuzz/`.
@@ -339,7 +341,7 @@ u32 BE length | postcard(Request | Event) | message_tag:u8
 
 `decode_client_message` classifies every payload by protocol rule, never by a heuristic:
 
-1. **Last byte `>= 0x80`: tagged frame.** A complete codec v1 `Request` or `Event` always ends with the terminating byte of the `u64` varint of its last field, whose high bit is clear, so a tag can never be mistaken for a legacy frame. The tag alone selects the type; the body must decode exactly (no trailing byte) as that type. Unknown tags (`MessageError::UnknownTag`) and mismatches (`Malformed`) are rejected.
+1. **Last byte `>= 0x80`: tagged frame.** A complete codec v1 `Request` or `Event` always ends with the terminating byte of the `u64` varint of its last field, whose high bit is clear, so a tag can never be mistaken for a legacy frame. The tag alone selects the type; the body must decode exactly (no trailing byte) as that type. Unknown tags (`MessageError::UnknownTag`) and mismatches (`Malformed`) are rejected. The Docker mock daemon (`tests/docker/mock_daemon.py`) drops an unknown-tag frame the same way, without a response (GitHub #285).
 2. **Last byte `< 0x80`: legacy untagged v1 frame.** Accepted only when it decodes exactly as one type; a payload decoding as both `Request` and `Event` is rejected (`MessageError::Ambiguous`).
 
 A rejected frame closes the connection without running any handler and without a response (the PAM module then returns `PAM_IGNORE`).

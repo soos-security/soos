@@ -469,16 +469,9 @@ pub fn authenticate_before_with_progress<F: FnOnce()>(
     prefix_slice.copy_from_slice(&*len_buf);
 
     let body_slice = full_buf.get_mut(4..).ok_or(IpcError::EmptyResponse)?;
+    // Completeness: the counted read returns `TruncatedResponse` on any early EOF, so a
+    // successful read always holds the whole declared frame (GitHub #264).
     read_exact_before_deadline(&mut stream, body_slice, total_capacity, 4, deadline)?;
-
-    // Completeness validation: ensure total received bytes match expected framed size
-    let total_received = 4usize.saturating_add(declared_size);
-    if total_received != total_capacity {
-        return Err(IpcError::TruncatedResponse {
-            expected: total_capacity,
-            received: total_received,
-        });
-    }
 
     let resp: Response = decode(&full_buf).map_err(IpcError::Codec)?;
 
@@ -490,8 +483,9 @@ pub fn authenticate_before_with_progress<F: FnOnce()>(
 
     // Replay protection: the fresh single-use 256-bit nonce must match bit-for-bit. The
     // response timestamps are informational and deliberately not validated here (ADR
-    // 2026-09-30 "Response Timestamps Are Informational", GitHub #219).
-    if resp.request_id != req.request_id {
+    // 2026-09-30 "Response Timestamps Are Informational", GitHub #219). The predicate is
+    // owned by the protocol crate (`Response::matches_request`, GitHub #264).
+    if !resp.matches_request(&req.request_id) {
         return Err(IpcError::RequestIdMismatch);
     }
 

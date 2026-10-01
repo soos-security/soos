@@ -396,6 +396,15 @@ impl EnrollmentService {
                     });
                     outputs.push(None);
                 }
+                // Pre-PAD quality gate (GitHub #218): an unusable capture is an invalid
+                // candidate, like a frame without a face, never an abort (GitHub #285).
+                Err(VisionError::FaceTooSmall { .. } | VisionError::FaceBlurred { .. }) => {
+                    candidates.push(CandidateEvaluation {
+                        frame_idx: idx,
+                        detections: vec![],
+                    });
+                    outputs.push(None);
+                }
                 Err(
                     e @ (VisionError::PadFailed { .. } | VisionError::IrLivenessGateFailed { .. }),
                 ) => {
@@ -646,6 +655,56 @@ impl EnrollmentService {
                     pad_result: format!("IR_GATE_REJECTED({reason})"),
                     pad_score: None,
                     pad_threshold: Some(pad_threshold),
+                    latency: LatencyBreakdown {
+                        capture_ms,
+                        pipeline_ms,
+                        matching_ms: 0.0,
+                        total_ms,
+                    },
+                })
+            }
+            // The pre-PAD quality gate (GitHub #218) rejected the face before PAD ran: a
+            // diagnostic Deny naming the gate, never a generic error (GitHub #285).
+            Err(VisionError::FaceTooSmall {
+                width_px,
+                min_width_px,
+            }) => {
+                let total_ms = start_total.elapsed().as_secs_f64() * 1000.0;
+                Ok(DiagnosticVerificationReport {
+                    uid,
+                    verdict: Verdict::Deny,
+                    match_score: 0.0,
+                    match_threshold: threshold,
+                    face_count: 1,
+                    pad_result: format!(
+                        "FACE_TOO_SMALL(width={width_px:.1}px, min={min_width_px:.1}px)"
+                    ),
+                    pad_score: None,
+                    pad_threshold: None,
+                    latency: LatencyBreakdown {
+                        capture_ms,
+                        pipeline_ms,
+                        matching_ms: 0.0,
+                        total_ms,
+                    },
+                })
+            }
+            Err(VisionError::FaceBlurred {
+                sharpness,
+                min_sharpness,
+            }) => {
+                let total_ms = start_total.elapsed().as_secs_f64() * 1000.0;
+                Ok(DiagnosticVerificationReport {
+                    uid,
+                    verdict: Verdict::Deny,
+                    match_score: 0.0,
+                    match_threshold: threshold,
+                    face_count: 1,
+                    pad_result: format!(
+                        "FACE_BLURRED(sharpness={sharpness:.1}, min={min_sharpness:.1})"
+                    ),
+                    pad_score: None,
+                    pad_threshold: None,
                     latency: LatencyBreakdown {
                         capture_ms,
                         pipeline_ms,

@@ -67,7 +67,7 @@ impl PamHooks for SoosPam {
 }
 ```
 
-Standard PAM C ABI entrypoints (`pam_sm_authenticate`, `pam_sm_setcred`, `pam_sm_acct_mgmt`, `pam_sm_chauthtok`, `pam_sm_open_session`, `pam_sm_close_session`) are exported as `extern "C"` functions delegating to `SoosPam`.
+Standard PAM C ABI entrypoints (`pam_sm_authenticate`, `pam_sm_setcred`, `pam_sm_acct_mgmt`, `pam_sm_chauthtok`, `pam_sm_open_session`, `pam_sm_close_session`) are exported as `extern "C"` functions delegating to `SoosPam`. The `pam_hooks!` macro of `pam-bindings` is not used (its generated symbols are `unsafe`, read arguments with an unbounded `CStr::from_ptr` and have no `catch_unwind`); instead `pam_sm_authenticate` reads `argv` with the `MAX_ARG_LEN` bound (`config::collect_argv_logged`) and calls `SoosPam::sm_authenticate` for every non-null handle, so the `PamHooks` implementation is the production path (review PAM-16, GitHub #264). A null handle goes to the detached flow.
 
 Both authentication entry points forward their Linux-PAM `flags` to
 `SoosPam::authenticate_with_feedback(feedback, config, flags)`. The flow reaches libpam only
@@ -87,7 +87,13 @@ Caught panics are dispatched to syslog via POSIX `libc::syslog(LOG_AUTHPRIV | LO
 soos-pam: authentication panic caught at crates/pam/src/lib.rs:92:9: <panic payload>
 ```
 
-- Location (file, line, column) is captured via a thread-local panic hook.
+- Location (file, line, column) is captured by a panic hook installed once per loaded image (`syslog::init_panic_hook`). The hook acts only while a soos entry point runs on the current thread (`syslog::catch_entry`, a thread-local depth counter): it records the location and prints nothing. Every other panic is forwarded to the hook that was installed before, so the module never takes over the host's panic output; the hook is never swapped per call, which stays race-free under concurrent PAM calls (review PAM-09, GitHub #263). `pam_soos.so` links its own libstd statically, so the hook lives in the module image.
+
+Rejected PAM arguments are logged once each at `LOG_AUTHPRIV | LOG_WARNING` (`config::ConfigWarning`, review PAM-17, GitHub #265) and keep the safe default: unparsable `timeout_ms=` / `uid=`, a clamped `timeout_ms=`, an unknown `event=` value, an empty `socket_path=` / `socket=` / `service=` / `disable_if_file=`, an argument of 256 bytes or more, a null `argv` entry, more than 64 arguments, a non-UTF-8 argument, a `service=` longer than 64 bytes (now cut on a UTF-8 character boundary instead of falling back to `pam_soos`) and unknown arguments. A warning names the key only, never the rejected value; an unknown key is echoed only when it has at most 32 bytes of `[A-Za-z0-9_-]`:
+
+```text
+soos-pam: configuration: invalid value for PAM argument 'timeout_ms'; the default was kept
+```
 - All embedded nul characters (`\0`) are replaced to prevent C string truncations.
 - Format specifier `"%s"` is used to eliminate format string injection attacks.
 

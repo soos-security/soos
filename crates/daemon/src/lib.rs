@@ -14,8 +14,10 @@ pub mod peercred;
 pub mod pipeline;
 pub mod preview;
 pub mod preview_image;
+pub mod sd_notify;
 pub mod session;
 pub mod session_policy;
+pub mod shutdown;
 pub mod socket;
 
 pub use config::{DaemonConfig, DispatcherConfig, PipelineConfig, SocketConfig};

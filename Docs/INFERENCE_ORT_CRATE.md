@@ -129,6 +129,8 @@ pub trait EmbeddingExtractor: Send + Sync {
 ```
 Implemented by `OrtEmbeddingExtractor` (ArcFace ResNet34 512D; `is_nhwc()` reports the layout detected from the session input) and `MockEmbeddingExtractor` (defaulting to 512D).
 
+**Embedding I/O contract (GitHub #268, VIS-14)**: `OrtEmbeddingExtractor::new` infers the physical input layout from the session input: `[N, H, W, 3]` is NHWC, `[N, 3, H, W]` is NCHW. `input_layout()` returns `None` when it cannot be inferred (poisoned session lock, no input, non-tensor input, rank other than 4, no size-3 channel axis); `extract_embedding` then fails closed with `InferenceError::TensorError` instead of silently assuming NCHW. The model output must hold exactly `embedding::EMBEDDING_DIMENSION` (512) values, otherwise `InferenceError::DimensionMismatch { expected: 512, actual }` is returned before normalization (previously a wrong-length vector reached the matcher). Contract tests: `embedding_io_contract_tests` (hand-encoded graphs in `tests/fixtures/embedding_onnx.rs`).
+
 ### Embedding real-model evidence (`tests/embedding_real_model_tests.rs`, GitHub #191)
 
 Gated exactly like the PAD real-model target (`SOOS_MODELS_DIR`, default `/var/lib/soos/models`;
@@ -143,6 +145,29 @@ p95 below the daemon's `MAX_INFERENCE_ESTIMATE_MS` (1000 ms). Measured on the de
 p50 127.5 ms, p95 170.9 ms with one intra-op thread; p50 27.1 ms, p95 28.4 ms with the
 `default_intra_threads()` default of GitHub #252 (4 threads on that host; the report line still
 prints its historical "1 intra-op thread" label).
+
+### Embedding pre-processing evaluation (`tests/embedding_preprocessing_evaluation_tests.rs`, GitHub #278)
+
+The attested file is `arc.onnx` of the Hugging Face repository `garavv/arcface-onnx` (revision
+`224c23c`; its LFS object has the attested SHA-256). The upstream model card documents **RGB**
+input normalized as `(x - 127.5) / 128.0`; the production extractor feeds **B, G, R** normalized
+as `(x - 127.5) / 127.5`. The evaluation target (same gating as above) records on the real network,
+with synthetic non-biometric patterns only:
+
+- the graph has no in-graph normalization: `input_1` feeds only a `Transpose`, which feeds only
+  the first `Conv` (a bounded protobuf walk of the attested file, 162 nodes);
+- a raw BGR / 127.5 arm reproduces the production extractor (cos > 0.9999);
+- the divisor is template-neutral (cos(BGR/127.5, BGR/128) >= 0.99998 on every pattern);
+- the channel order is not template-neutral (cos(BGR/127.5, RGB/127.5) between 0.970 and 0.998
+  on the synthetic patterns), so switching to the documented RGB order is a template-format
+  change to be decided with re-enrollment and threshold recalibration.
+
+The production order is unchanged: it is pinned by the pre-existing contract tests
+`embedding_tests::test_arcface_input_bgr_ordering`, `embedding_tests::test_prepare_input_layout_nhwc_and_nchw` and `embedding_tests::test_embedding_normalization_symmetric_range`, and the
+decision (switch to RGB, re-enroll, recalibrate `match_threshold` on labelled real captures) is
+left to the project owner (ADR 2026-09-30 "Embedding Pre-processing Evaluation"). The upstream
+repository declares **no licence**, so the manifest `license = "MIT"` of this entry is not
+substantiated by the source.
 
 ### `PadDetector` Trait
 ```rust

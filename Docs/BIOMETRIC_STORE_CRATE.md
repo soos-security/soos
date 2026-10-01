@@ -43,14 +43,51 @@ Biometric templates are stored in a dedicated system directory, defaulting to `/
 
 ### 3.2 Wire Payload Layout
 
-Every encrypted template file on disk follows a strict binary layout:
+Every template written since GitHub #266 uses the AAD-bound envelope (payload format version 2,
+`PAYLOAD_FORMAT_VERSION`):
 
 | Offset | Length | Field | Description |
 |---|---|---|---|
-| `0..8` | 8 bytes | `MAGIC_HEADER` | ASCII magic constant `b"SOOSBIO1"` |
-| `8..20` | 12 bytes | `Nonce` | Unique CSPRNG 96-bit initialization vector |
-| `20..N-16` | Variable | `Ciphertext` | AES-256-GCM encrypted CBOR payload |
-| `N-16..N` | 16 bytes | `Tag` | Poly1305 / GCM 128-bit authentication tag |
+| `0..8` | 8 bytes | `MAGIC_HEADER` | ASCII magic constant `b"SOOSBIO1"` (unchanged) |
+| `8..12` | 4 bytes | `BOUND_FORMAT_MARKER` | `b"AAD\x02"`: AAD-bound format, version 2 |
+| `12..16` | 4 bytes | `uid` | Big-endian UID the ciphertext is bound to (clear, authenticated) |
+| `16..28` | 12 bytes | `Nonce` | Unique CSPRNG 96-bit initialization vector |
+| `28..N-16` | Variable | `Ciphertext` | AES-256-GCM encrypted CBOR payload |
+| `N-16..N` | 16 bytes | `Tag` | GCM 128-bit authentication tag |
+
+Templates written by earlier releases use the legacy unbound envelope (format version 1):
+`MAGIC_HEADER (0..8) || Nonce (8..20) || Ciphertext || Tag`, with no associated data. The legacy
+codec is still exposed as `encrypt_payload` / `decrypt_payload`; the store never writes it.
+
+### 3.2.1 Associated Data Binding and Migration (GitHub #266, STO-22)
+
+Recorded as ADR 2026-09-30 "AES-GCM Associated Data for Stored Templates and Evidence".
+
+- **Associated Data**: `template_aad(uid)` = `b"soos/biometric-template" || 0x00 || MAGIC_HEADER ||
+  BOUND_FORMAT_MARKER || uid (big-endian)`. It binds the file role (template), the payload format
+  version and the UID. `encrypt_template_payload` / `decrypt_template_payload` implement the codec.
+- **Cross-UID swap**: a bound template copied or renamed to another UID's file authenticates under
+  the UID in its own header and is then refused with `CorruptFile` by the codec, before any CBOR
+  parsing. Rewriting the clear UID breaks the tag (`Crypto`). The plaintext UID check of `get` /
+  `get_metadata` is kept as a second layer.
+- **Legacy templates are never lost**: a file without the marker is decrypted with the legacy
+  codec (`PayloadFormat::LegacyV1`) and the plaintext UID check applies as before. A legacy nonce
+  that happens to start with the marker (probability 2^-32) is still read, because decoding falls
+  back to the legacy layout when the bound layout does not authenticate.
+- **Re-encryption**: the next `enroll` of the UID writes the bound format (atomic replace plus the
+  best-effort overwrite of the legacy inode). `BiometricStore::template_format(uid)` reports the
+  format, and `BiometricStore::migrate_legacy_template(uid)` re-encrypts a legacy template in place
+  without changing its content (it refuses a legacy file whose embedded UID does not match and
+  leaves it untouched; it must not run concurrently with an `enroll` of the same UID).
+- **What is detected**: moving a ciphertext between UIDs, editing the clear header, any bit flip,
+  a wrong key.
+- **What is not detected (rollback)**: restoring an older, still-valid bound template of the
+  **same** UID (same associated data), restoring a legacy template of the same UID, deleting a
+  template, or restoring a whole older copy of the directory. Detecting rollback would need a
+  monotonic counter kept outside the attacker's reach (TPM NV index or similar); a counter stored
+  next to the templates is rolled back with them. Only root can write `/var/lib/soos/biometrics`,
+  and root attackers are out of scope (`AI/ARCHITECTURE.md` threat model), so no counter is
+  added: the binding is defense in depth.
 
 ### 3.3 Store Directory Validation (GitHub #178, STO-04)
 

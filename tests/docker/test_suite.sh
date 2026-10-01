@@ -117,8 +117,8 @@ done
 # ---------------------------------------------------------------------------
 # 1c. Synchronize the Rust Toolchain With rust-toolchain.toml (GitHub #244)
 # ---------------------------------------------------------------------------
-# The image installs `stable` when it is built, and the CI layer cache can keep
-# that image (and its toolchain) for a long time. `rustup toolchain install`
+# The image installs the pinned release (1.98.1) when it is built, and the CI layer
+# cache can keep that image (and its toolchain) after rust-toolchain.toml moves on. `rustup toolchain install`
 # without arguments reads /workspace/rust-toolchain.toml and brings the channel
 # up to the release the other CI jobs install, so this suite never builds with a
 # stale compiler. SOOS_REQUIRE_TOOLCHAIN_SYNC=1 (set by CI) makes a failed sync

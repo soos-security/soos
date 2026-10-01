@@ -85,7 +85,7 @@ production never overrides it — `OrtPadDetector::new` only, enforced by the in
 |---|---|---|---|---|
 | `scrfd_500m_kps` | `scrfd_500m_kps.onnx` | 640×640 BGR, letterbox | `(x-127.5)/128` | 9 outputs (3 strides × score/bbox/kps); **scores are already sigmoided** [65] |
 | `minifasnet_v2_pad` | `minifasnet_v2_80x80.onnx` | 80×80 BGR, 2.7× expanded bbox | `x/255` | live class index **1** [72, 79]; `[PrintPhoto, Live, ScreenReplay]`, never overridden in production |
-| `arcface_w600k_mbf` | `arcface_w600k_mbf.onnx` | 112×112 aligned, **NHWC** `input_1` `[N,112,112,3]`, fed **BGR** [68, 71] | `(x-127.5)/127.5` | **ArcFace ResNet34** (tf2onnx, 34.1 M params, 136.6 MB), **not** MobileFaceNet — the id is historical [102]; output `embedding` `[N,512]`, L2-normalized by the extractor; trained channel order / normalization unverified |
+| `arcface_w600k_mbf` | `arcface_w600k_mbf.onnx` | 112×112 aligned, **NHWC** `input_1` `[N,112,112,3]`, fed **BGR** [68, 71] | `(x-127.5)/127.5` | **ArcFace ResNet34** (tf2onnx, 34.1 M params, 136.6 MB), **not** MobileFaceNet — the id is historical [102]; output `embedding` `[N,512]`, L2-normalized by the extractor; the upstream model card (`garavv/arcface-onnx`) documents RGB and `(x-127.5)/128`: the divisor is template-neutral, the channel order is not and stays BGR pending an owner decision; no in-graph normalization; upstream declares no licence [145] |
 
 Any change to channel order, layout, class index or normalization MUST be validated against the real
 `.onnx` metadata (input/output shapes) — mocks alone hid four shipped bugs [65, 66, 68, 71].
@@ -116,6 +116,8 @@ cargo deny --locked check                      # cargo-deny >= 0.20
 Toolchain: `rust-toolchain.toml` pins Rust `1.98.1` (components `clippy`, `rustfmt`; user decision
 2026-09-30). The sandbox Dockerfiles install the same release (`--default-toolchain 1.98.1`); bump
 both together, never back to a floating `stable` channel.
+The images install rustup only through `scripts/install_rustup.sh` (pinned rustup release, committed
+`rustup-init` SHA-256 digests, never `curl | sh`) [139]; a rustup bump changes the version and both digests.
 
 Omitting `--all-features` locally was the root cause of several CI-only failures [65–75].
 `cargo test --all-targets` does not run doctests; do not rely on doctests as acceptance evidence.

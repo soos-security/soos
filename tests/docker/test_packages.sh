@@ -43,11 +43,10 @@ fi
 
 info "Detected container distribution: ${DISTRO}"
 
-# Ensure release binaries exist
-if [[ ! -f "target/release/soos-daemon" || ! -f "target/release/libpam_soos.so" ]]; then
-    info "Compiling release binaries..."
-    cargo build --locked --release --workspace
-fi
+# Always invoke cargo (a no-op when up to date) so a stale release artifact built
+# by the host into the bind-mounted target/ is never packaged (GitHub #244).
+info "Building release binaries (no-op when up to date)..."
+cargo build --locked --release --workspace
 
 verify_installation() {
     local pam_dir="$1"

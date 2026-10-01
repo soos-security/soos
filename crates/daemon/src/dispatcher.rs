@@ -13,6 +13,7 @@ use crate::error::DaemonError;
 use crate::health::HealthState;
 use crate::inference::{InferenceGate, RequestDeadline};
 use crate::limits::{PeerConnectionLimiter, PeerLimitsConfig};
+use crate::logging::short_request_id;
 use crate::peercred::{get_peer_credentials, verify_peer_credentials, PeerCredentials};
 use crate::pipeline::{
     classify_template_model, current_monotonic_nanos, PipelineComponents, TemplateModelBinding,
@@ -23,15 +24,27 @@ use crate::preview::{
 };
 use crate::session::SessionValidator;
 use crate::session_policy::LocalSessionPolicy;
-use soos_camera_v4l::PixelFormat;
-use soos_evidence_store::{EvidenceFrame, EvidencePixelFormat, FrameMetadata};
-use soos_policy::{ConsensusDecision, FrameEvaluation, PadAggregator, RateLimiter};
+use soos_camera_v4l::{Frame, PixelFormat};
+use soos_evidence_store::{EvidenceFrame, EvidencePixelFormat, EvidenceStore, FrameMetadata};
+use soos_policy::{ConsensusDecision, FrameClass, FrameEvaluation, PadAggregator, RateLimiter};
 use soos_protocol::codec::{encode, encode_preview, CodecError};
 use soos_protocol::message::{decode_client_message, ClientMessage, FrameFormat};
 use soos_protocol::types::{
     Event, EventKind, PreviewResponse, ReasonClass, Request, RequestId, RequestKind, Response,
     StatusResponse, Verdict, CURRENT_VERSION, MAX_MESSAGE_SIZE,
 };
+
+/// Validity window of a rendered `Response`: `expires = issued + RESPONSE_VALIDITY_NS`
+/// (GitHub #258). The PAM client treats both timestamps as informational (ADR
+/// 2026-09-30 "Response Timestamps Are Informational").
+pub const RESPONSE_VALIDITY_NS: u64 = 2_000_000_000;
+
+/// Evidence reason recorded for a `PasswordFailed` event snapshot.
+pub const PASSWORD_FAILED_EVIDENCE_REASON: &str = "PasswordFailed";
+
+/// Evidence reason recorded for the capture that vetoed a request as a presentation
+/// attack (GitHub #261 / PAD-14).
+pub const PAD_FAILED_EVIDENCE_REASON: &str = "PadFailed";
 
 /// Internal representation of processed connection output before socket transmission.
 #[derive(Debug)]
@@ -61,6 +74,44 @@ fn evidence_pixel_format(format: PixelFormat) -> EvidencePixelFormat {
         PixelFormat::Grey => EvidencePixelFormat::Gray8,
         PixelFormat::Mjpeg => EvidencePixelFormat::Mjpeg,
         PixelFormat::Nv12 => EvidencePixelFormat::Nv12,
+    }
+}
+
+/// Seals one camera capture into the evidence store under `reason` (GitHub #181, #261).
+///
+/// The caller checks the opt-in `evidence.enabled` gate; the store itself enforces it again
+/// together with `daily_cap_per_uid`, the global daily cap, AES-256-GCM encryption and the
+/// retention rotation. Failures are logged without any pixel data and never propagate.
+fn store_evidence_capture(store: &EvidenceStore, uid: u32, reason: &str, frame: &Frame) {
+    // GitHub #181: persist the frame with its dimensions and pixel format so the evidence
+    // can be decoded later.
+    let evidence = EvidenceFrame {
+        metadata: FrameMetadata {
+            width: frame.width,
+            height: frame.height,
+            pixel_format: evidence_pixel_format(frame.format),
+            captured_at_mono_ns: frame.timestamp_mono_ns,
+            sequence: frame.sequence,
+        },
+        data: &frame.data,
+    };
+    match store.store_frame_snapshot(uid, reason, &evidence, None, None) {
+        Ok(snap_res) => {
+            info!(
+                uid = uid,
+                reason = reason,
+                "Intrusion evidence snapshot stored"
+            );
+            let _ = store.rotate_retention(&snap_res.date);
+        }
+        Err(err) => {
+            warn!(
+                uid = uid,
+                reason = reason,
+                error = %err,
+                "Failed to store intrusion evidence snapshot"
+            );
+        }
     }
 }
 
@@ -483,33 +534,12 @@ impl ConnectionDispatcher {
             if let Some(ref pipe) = self.pipeline {
                 if pipe.evidence_store.config().enabled {
                     if let Some(frame) = pipe.camera.latest_frame() {
-                        // GitHub #181: persist the frame with its dimensions and pixel
-                        // format so the evidence can be decoded later.
-                        let evidence = EvidenceFrame {
-                            metadata: FrameMetadata {
-                                width: frame.width,
-                                height: frame.height,
-                                pixel_format: evidence_pixel_format(frame.format),
-                                captured_at_mono_ns: frame.timestamp_mono_ns,
-                                sequence: frame.sequence,
-                            },
-                            data: &frame.data,
-                        };
-                        match pipe.evidence_store.store_frame_snapshot(
+                        store_evidence_capture(
+                            &pipe.evidence_store,
                             target_uid,
-                            "PasswordFailed",
-                            &evidence,
-                            None,
-                            None,
-                        ) {
-                            Ok(snap_res) => {
-                                debug!("Intrusion evidence snapshot stored successfully");
-                                let _ = pipe.evidence_store.rotate_retention(&snap_res.date);
-                            }
-                            Err(err) => {
-                                warn!(error = %err, "Failed to store intrusion evidence snapshot");
-                            }
-                        }
+                            PASSWORD_FAILED_EVIDENCE_REASON,
+                            &frame,
+                        );
                     } else {
                         warn!("No camera capture available for evidence snapshot");
                     }
@@ -560,7 +590,6 @@ impl ConnectionDispatcher {
                 req.request_id,
                 Verdict::ProtocolError,
                 ReasonClass::MalformedRequest,
-                0,
             )?;
             return Ok(ResponseOutput {
                 encoded_response: encoded,
@@ -579,6 +608,7 @@ impl ConnectionDispatcher {
                 is_healthy: status.is_healthy,
                 pid: std::process::id(),
                 uptime_secs: self.start_time.elapsed().as_secs(),
+                memory_locked: self.health.memory_locked(),
             };
             let encoded = Zeroizing::new(encode(&status_resp)?);
             debug!("Generated diagnostic status response");
@@ -610,7 +640,7 @@ impl ConnectionDispatcher {
                 }
                 _ => (Verdict::ProtocolError, ReasonClass::MalformedRequest),
             };
-            let encoded = self.build_response(req.request_id, verdict, reason_class, 0)?;
+            let encoded = self.build_response(req.request_id, verdict, reason_class)?;
             return Ok(ResponseOutput {
                 encoded_response: encoded,
                 completion_error: None,
@@ -636,7 +666,6 @@ impl ConnectionDispatcher {
                 req.request_id,
                 Verdict::ProtocolError,
                 ReasonClass::UidMismatch,
-                0,
             )?;
             return Ok(ResponseOutput {
                 encoded_response: encoded,
@@ -662,7 +691,6 @@ impl ConnectionDispatcher {
                     req.request_id,
                     Verdict::Unavailable,
                     ReasonClass::InternalError,
-                    0,
                 )?;
                 return Ok(ResponseOutput {
                     encoded_response: encoded,
@@ -677,12 +705,8 @@ impl ConnectionDispatcher {
                 deadline = req.deadline_monotonic_ns,
                 "Request exceeded monotonic deadline before processing"
             );
-            let encoded = self.build_response(
-                req.request_id,
-                Verdict::Unavailable,
-                ReasonClass::Timeout,
-                now_ns,
-            )?;
+            let encoded =
+                self.build_response(req.request_id, Verdict::Unavailable, ReasonClass::Timeout)?;
             return Ok(ResponseOutput {
                 encoded_response: encoded,
                 completion_error: None,
@@ -718,7 +742,6 @@ impl ConnectionDispatcher {
                         req.request_id,
                         Verdict::ProtocolError,
                         ReasonClass::RateLimited,
-                        now_ns,
                     )?;
                     return Ok(ResponseOutput {
                         encoded_response: encoded,
@@ -762,7 +785,6 @@ impl ConnectionDispatcher {
                     req.request_id,
                     Verdict::Unavailable,
                     ReasonClass::CameraUnavailable,
-                    now_ns,
                 )?;
                 return Ok(ResponseOutput {
                     encoded_response: encoded,
@@ -782,7 +804,6 @@ impl ConnectionDispatcher {
                         req.request_id,
                         Verdict::Unavailable,
                         ReasonClass::InternalError,
-                        now_ns,
                     )?;
                     return Ok(ResponseOutput {
                         encoded_response: encoded,
@@ -799,7 +820,6 @@ impl ConnectionDispatcher {
                         req.request_id,
                         Verdict::Unavailable,
                         ReasonClass::InternalError,
-                        now_ns,
                     )?;
                     return Ok(ResponseOutput {
                         encoded_response: encoded,
@@ -837,7 +857,6 @@ impl ConnectionDispatcher {
                         req.request_id,
                         Verdict::Unavailable,
                         ReasonClass::ModelUnavailable,
-                        now_ns,
                     )?;
                     return Ok(ResponseOutput {
                         encoded_response: encoded,
@@ -854,6 +873,9 @@ impl ConnectionDispatcher {
             let mut aggregator = PadAggregator::with_defaults(consensus_thresholds);
             let mut last_sequence: Option<u64> = None;
             let mut last_capture_stale = false;
+            // First capture classified as a presentation attack (GitHub #261 / PAD-14),
+            // kept only to seal it as opt-in evidence once the verdict is rendered.
+            let mut spoof_capture: Option<Arc<Frame>> = None;
 
             loop {
                 let cur_ns = match self.now_nanos() {
@@ -864,7 +886,6 @@ impl ConnectionDispatcher {
                             req.request_id,
                             Verdict::Unavailable,
                             ReasonClass::InternalError,
-                            0,
                         )?;
                         return Ok(ResponseOutput {
                             encoded_response: encoded,
@@ -933,7 +954,6 @@ impl ConnectionDispatcher {
                                         req.request_id,
                                         Verdict::Unavailable,
                                         ReasonClass::InternalError,
-                                        cur_ns,
                                     )?;
                                     return Ok(ResponseOutput {
                                         encoded_response: encoded,
@@ -1004,7 +1024,6 @@ impl ConnectionDispatcher {
                                         req.request_id,
                                         Verdict::Unavailable,
                                         ReasonClass::ModelUnavailable,
-                                        cur_ns,
                                     )?;
                                     return Ok(ResponseOutput {
                                         encoded_response: encoded,
@@ -1017,7 +1036,6 @@ impl ConnectionDispatcher {
                                         req.request_id,
                                         Verdict::Unavailable,
                                         ReasonClass::InternalError,
-                                        cur_ns,
                                     )?;
                                     return Ok(ResponseOutput {
                                         encoded_response: encoded,
@@ -1027,6 +1045,9 @@ impl ConnectionDispatcher {
                             };
 
                             let class = aggregator.record(&evaluation);
+                            if class == FrameClass::Spoof && spoof_capture.is_none() {
+                                spoof_capture = Some(Arc::clone(&frame));
+                            }
                             match aggregator.decision() {
                                 ConsensusDecision::Allow => break,
                                 ConsensusDecision::SpoofVetoed => {
@@ -1066,7 +1087,6 @@ impl ConnectionDispatcher {
 
             // 8f: Render the aggregate verdict. The attempt was already recorded by the
             // reservation in 8-pre (exactly one per request), so nothing is recorded here.
-            let cur_ns = self.now_nanos().unwrap_or(0);
             let decision = aggregator.decision();
             let (final_verdict, final_reason) = match decision {
                 ConsensusDecision::Allow => {
@@ -1086,6 +1106,12 @@ impl ConnectionDispatcher {
                 }
             };
 
+            // 8g: Opt-in spoof evidence (GitHub #261 / PAD-14): one snapshot of the capture
+            // that vetoed the request, sealed off the response path.
+            if decision == ConsensusDecision::SpoofVetoed {
+                self.capture_spoof_evidence(pipe, req.uid_hint, spoof_capture);
+            }
+
             if req.service.contains("gdm")
                 || req.service.contains("lock")
                 || req.service.contains("screen")
@@ -1093,8 +1119,7 @@ impl ConnectionDispatcher {
                 pipe.camera.notify_activity();
             }
 
-            let encoded =
-                self.build_response(req.request_id, final_verdict, final_reason, cur_ns)?;
+            let encoded = self.build_response(req.request_id, final_verdict, final_reason)?;
             return Ok(ResponseOutput {
                 encoded_response: encoded,
                 completion_error: None,
@@ -1103,19 +1128,51 @@ impl ConnectionDispatcher {
 
         // Fail-closed fallback: never authorize authentication without an initialized pipeline
         warn!(
-            request_id = ?req.request_id,
+            request_id = %short_request_id(&req.request_id),
             "Rejecting authentication request: daemon pipeline is not initialized"
         );
         let encoded = self.build_response(
             req.request_id,
             Verdict::Unavailable,
             ReasonClass::InternalError,
-            now_ns,
         )?;
         Ok(ResponseOutput {
             encoded_response: encoded,
             completion_error: None,
         })
+    }
+
+    /// Seals the capture that vetoed a request as a presentation attack into the evidence
+    /// store (GitHub #261 / PAD-14).
+    ///
+    /// Opt-in: nothing happens unless `[pipeline.evidence] enabled` is set. The write runs
+    /// on the blocking pool without delaying the `Deny`/`PadFailed` response; the evidence
+    /// store enforces `daily_cap_per_uid`, the global daily cap, encryption and retention.
+    /// At most one snapshot per request: the consensus loop stops at the first spoof.
+    fn capture_spoof_evidence(
+        &self,
+        pipe: &PipelineComponents,
+        target_uid: u32,
+        capture: Option<Arc<Frame>>,
+    ) {
+        if !pipe.evidence_store.config().enabled {
+            return;
+        }
+        let Some(frame) = capture else {
+            warn!(
+                uid = target_uid,
+                "No spoof capture retained for the evidence snapshot"
+            );
+            return;
+        };
+        info!(
+            uid = target_uid,
+            "Presentation attack vetoed the request; capturing evidence snapshot"
+        );
+        let store = Arc::clone(&pipe.evidence_store);
+        drop(tokio::task::spawn_blocking(move || {
+            store_evidence_capture(&store, target_uid, PAD_FAILED_EVIDENCE_REASON, &frame);
+        }));
     }
 
     /// Authorizes and serves one `RequestKind::PreviewFrame` request.
@@ -1142,7 +1199,6 @@ impl ConnectionDispatcher {
                 req.request_id,
                 Verdict::ProtocolError,
                 ReasonClass::UidMismatch,
-                0,
             )?;
             return Ok(ResponseOutput {
                 encoded_response: encoded,
@@ -1159,7 +1215,6 @@ impl ConnectionDispatcher {
                 req.request_id,
                 Verdict::ProtocolError,
                 ReasonClass::UidMismatch,
-                0,
             )?;
             return Ok(ResponseOutput {
                 encoded_response: encoded,
@@ -1175,7 +1230,6 @@ impl ConnectionDispatcher {
                     req.request_id,
                     Verdict::Unavailable,
                     ReasonClass::InternalError,
-                    0,
                 )?;
                 return Ok(ResponseOutput {
                     encoded_response: encoded,
@@ -1196,7 +1250,6 @@ impl ConnectionDispatcher {
                     req.request_id,
                     Verdict::ProtocolError,
                     ReasonClass::RateLimited,
-                    now_ns,
                 )?;
                 return Ok(ResponseOutput {
                     encoded_response: encoded,
@@ -1286,20 +1339,46 @@ impl ConnectionDispatcher {
         })
     }
 
+    /// Encodes one `Response`, stamping it from the dispatcher's monotonic clock.
+    ///
+    /// GitHub #258: every verdict path gets `issued_monotonic_ns > 0` and
+    /// `expires_monotonic_ns = issued + RESPONSE_VALIDITY_NS`. When the clock fails (or
+    /// reads zero) the response carries `issued == expires == 0`, i.e. already expired,
+    /// and an `Allow` verdict is downgraded to `Unavailable` / `InternalError`: an
+    /// authorization is never rendered without a clock (fail-closed).
     fn build_response(
         &self,
         request_id: RequestId,
         verdict: Verdict,
         reason_class: ReasonClass,
-        now_ns: u64,
     ) -> Result<Zeroizing<Vec<u8>>, DaemonError> {
+        let (verdict, reason_class, issued_monotonic_ns, expires_monotonic_ns) =
+            match self.now_nanos() {
+                Ok(now_ns) if now_ns > 0 => (
+                    verdict,
+                    reason_class,
+                    now_ns,
+                    now_ns.saturating_add(RESPONSE_VALIDITY_NS),
+                ),
+                Ok(_) | Err(_) => {
+                    if verdict == Verdict::Allow {
+                        warn!(
+                            "Monotonic clock unavailable while rendering an Allow verdict; \
+                             downgrading to Unavailable (fail-closed)"
+                        );
+                        (Verdict::Unavailable, ReasonClass::InternalError, 0, 0)
+                    } else {
+                        (verdict, reason_class, 0, 0)
+                    }
+                }
+            };
         let resp = Response {
             version: CURRENT_VERSION,
             request_id,
             verdict,
             reason_class,
-            issued_monotonic_ns: now_ns,
-            expires_monotonic_ns: now_ns.saturating_add(2_000_000_000),
+            issued_monotonic_ns,
+            expires_monotonic_ns,
         };
 
         info!(

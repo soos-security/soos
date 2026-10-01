@@ -4,9 +4,9 @@
 //!   instead of a loose `mod.rs` reachable only through `#[path]` includes;
 //! - it carries no stale 128-dimension embedding fixtures (embeddings are 512D);
 //! - it is never a normal (runtime) dependency of any crate;
-//! - no new `#[path = ".../tests/fixtures/mod.rs"]` include may appear: the three legacy
-//!   includes are frozen (they live in pre-existing test files that this change may not edit)
-//!   and new tests must use `soos-test-fixtures` as a dev-dependency.
+//! - no `#[path = ".../tests/fixtures/mod.rs"]` include may appear: the legacy list
+//!   `LEGACY_PATH_INCLUDES` is empty (the last three includes were migrated) and every test
+//!   uses `soos-test-fixtures` as a dev-dependency.
 
 #![allow(
     clippy::unwrap_used,

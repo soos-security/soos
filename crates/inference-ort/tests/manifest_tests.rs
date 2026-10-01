@@ -74,7 +74,8 @@ fn test_parse_workspace_manifest_file() {
         .get_model("arcface_w600k_mbf")
         .expect("arcface_w600k_mbf missing from manifest");
     assert_eq!(arcface.filename, "arcface_w600k_mbf.onnx");
-    assert_eq!(arcface.license, "MIT");
+    // The source repository declares no licence (GitHub #278, user-approved 2026-10-01).
+    assert_eq!(arcface.license, "NOASSERTION");
     assert_eq!(arcface.input_shape, vec![1, 3, 112, 112]);
     assert_eq!(arcface.output_shapes, vec![vec![1, 512]]);
     assert_eq!(

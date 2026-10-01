@@ -72,7 +72,7 @@ with a half-applied configuration.
 
 | Key | Type | Default | Notes |
 |---|---|---|---|
-| `enabled` | bool | `false` | Strictly opt-in. |
+| `enabled` | bool | `false` | Strictly opt-in. When set, the daemon seals a snapshot for a `PasswordFailed` event (reason `PasswordFailed`) and for every `Auth` request vetoed as a presentation attack (reason `PadFailed`, the capture that triggered the veto, one per request, written on the blocking pool after the `Deny` / `PadFailed` response is rendered; GitHub #261). |
 | `base_dir` | path | `/var/lib/soos/evidence` | `0700 root:root`. |
 | `key_path` | path | `/var/lib/soos/evidence.key` | Evidence encryption key. |
 | `retention_days` | integer | `7` | Snapshots older than this are purged. |
@@ -135,7 +135,8 @@ pad_threshold = 0.85
 
 ## 2. Connection Model
 
-- One Tokio task per accepted connection. `SO_PEERCRED` is read once, before any byte, and the
+- One Tokio task per accepted connection, tracked in `soos_daemon::shutdown::ConnectionTasks`
+  (never detached; finished handlers are reaped while the accept loop runs, see §5). `SO_PEERCRED` is read once, before any byte, and the
   connection is admitted by `PeerConnectionLimiter` (global permits, root reservation, per-UID cap);
   a refused peer is closed without being read (the PAM client sees EOF and returns `PAM_IGNORE`).
 - **Persistent loop**: an admitted connection serves framed messages until the client closes it, it
@@ -170,4 +171,35 @@ pad_threshold = 0.85
    not change `is_healthy`.
 3. The pipeline (models, camera supervisor, stores) is initialized fail-closed; any error stops the
    daemon before the socket exists.
+   The PAD model `minifasnet_v2_pad` is always loaded and self-tested. The optional second PAD
+   ensemble member `minifasnet_v1se_pad` (`SECONDARY_PAD_MODEL_ID`, crop scale 4.0, GitHub #212)
+   is wired by `attach_optional_pad_members` only when the deployed `manifest.toml` attests it;
+   the repository manifest does not, so the daemon is single-model by default. When the entry is
+   present, a load, shape or self-test failure of the member stops the daemon (fail closed).
 4. The socket is bound (§1.2) and the accept loop starts.
+
+## 5. Shutdown, Panic Reporting and Log Anonymization (GitHub #257, #258, #259)
+
+- **Graceful shutdown**: on SIGINT or SIGTERM `accept_until_shutdown` returns, the listener is
+  dropped (no new connection is accepted), `socket_ready` is cleared and the socket file is
+  unlinked (`SocketGuard`). The remaining handlers are then drained by
+  `ConnectionTasks::drain(connection_timeout)`; handlers still running when that budget expires are
+  aborted (the PAM client sees EOF and returns `PAM_IGNORE`). The drain logs its start
+  (`in_flight`, `budget_ms`) and its outcome (`completed`, `panicked`, `aborted`).
+- **Panics**: a panicking connection handler is reported at `error` level ("Connection handler
+  panicked") when its task is joined; the `JoinError` is never formatted because its `Display`
+  carries the panic payload. `install_panic_hook` replaces the default stderr hook with a `tracing`
+  `error` event that records only the source file, line and thread name, never the panic message.
+- **Request nonce in logs**: the 256-bit `request_id` is never logged. A log line that needs to
+  correlate a request uses `request_id = %short_request_id(&req.request_id)`: the first 4 bytes of
+  `SHA-256("soos.request-id.log.v1" || request_id)` as 8 hex digits, which reveals no nonce bit
+  (enforced by `crates/daemon/tests/request_id_logging_tests.rs`).
+- **Response timestamps**: `build_response` stamps every `Response` from the dispatcher clock:
+  `issued_monotonic_ns > 0` and `expires_monotonic_ns = issued + RESPONSE_VALIDITY_NS` (2 s) on every
+  verdict path. If the clock fails, the response carries `issued = expires = 0` (already expired)
+  and an `Allow` verdict is downgraded to `Unavailable` / `InternalError`. The PAM client still
+  treats both fields as informational (see `Docs/IPC_PROTOCOL.md`, "Response Freshness").
+4. The socket is bound (§1.2). When started by systemd (`Type=notify`, `NOTIFY_SOCKET` set) the daemon
+   then sends `READY=1` through `soos_daemon::sd_notify`; only then does systemd start units ordered
+   after it (`display-manager.service`). A notification failure is logged at `warn`. The accept loop
+   starts, and `STOPPING=1` is sent on SIGTERM / SIGINT (GitHub #203).

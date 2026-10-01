@@ -208,7 +208,8 @@ after the confidence check and before the PAD model and the embedding extractor 
 
 - The 48 px floor is above the no-upsampling limit of the 2.7x context crop (80 / 2.7 ~= 29.6 px).
 - `laplacian_variance(rgb, w, h)` uses integer BT.601 luma and the 4-neighbour kernel; it is 0 on
-  a flat crop and returns `None` for a malformed buffer or an image smaller than 3x3.
+  a flat crop and returns `None` for a malformed buffer or an image smaller than 3x3. Its luma
+  plane (derived from face pixels) is held in `zeroize::Zeroizing` and wiped on drop (GitHub #285).
 - Every comparison fails closed: a non-finite size, sharpness or threshold rejects the face.
 - The sharpness floor is disabled by default until it is calibrated on real camera captures (ADR
   2026-09-30 "Pre-PAD Face Quality Gate"). Set a positive value to enable it.

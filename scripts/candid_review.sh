@@ -69,19 +69,84 @@ fi
 RAW_DIFF=$(git diff "$MERGE_BASE" 2>/dev/null || git diff HEAD 2>/dev/null || true)
 
 # Rust production-code filter for the PAM audits (mirrors `production_code` in
-# tests/invariants/src/lexing_contract.rs, single-line literals only). It blanks line
-# comments and the contents of string and char literals, then drops exactly the item gated
-# by `#[cfg(test)]` / `#[cfg(all(test, ...))]`: up to its `;` (`mod tests;`, `use ...;`) or up
-# to the `}` matching its body (`mod tests { ... }`, `fn`, `impl`).
+# tests/invariants/src/lexing_contract.rs). A small character lexer, whose state carries
+# across lines, removes line comments and nested, multi-line block comments and blanks the
+# contents of string, byte-string, raw strings (`r"..."`, `r#"..."#`, `br#"..."#`) and
+# char literals (lifetimes are kept); one output line is printed per input line. It then
+# drops exactly the item gated by `#[cfg(test)]` / `#[cfg(all(test, ...))]`: up to its `;`
+# (`mod tests;`, `use ...;`) or up to the `}` matching its body (`mod tests { ... }`, `fn`,
+# `impl`). Braces inside comments and literals never shift the item boundary (GitHub #285).
 RUST_PRODUCTION_FILTER=$(cat <<'AWK'
-function sanitize(s) {
-    gsub(/\\\\/, "", s)
-    gsub(/'\\.[^']*'/, "''", s)
-    gsub(/'[^'\\]'/, "''", s)
-    gsub(/\\"/, "", s)
-    gsub(/"[^"]*"/, "\"\"", s)
-    sub(/\/\/.*/, "", s)
-    return s
+function is_ident(c) {
+    return c ~ /^[A-Za-z0-9_]$/
+}
+# Lexer state persists across lines: blk (block comment depth), in_str (inside "..."),
+# in_raw (inside a raw string closed by `"` followed by the hashes in rawh).
+function sanitize(s,    out, i, n, c, nx, j, h, closer, before) {
+    out = ""
+    n = length(s)
+    i = 1
+    while (i <= n) {
+        c = substr(s, i, 1)
+        nx = substr(s, i + 1, 1)
+        if (blk > 0) {
+            if (c == "*" && nx == "/") { blk--; i += 2; continue }
+            if (c == "/" && nx == "*") { blk++; i += 2; continue }
+            i++
+            continue
+        }
+        if (in_raw) {
+            closer = "\"" rawh
+            if (substr(s, i, length(closer)) == closer) {
+                out = out closer
+                in_raw = 0
+                i += length(closer)
+                continue
+            }
+            i++
+            continue
+        }
+        if (in_str) {
+            if (c == "\\") { i += 2; continue }
+            if (c == "\"") { out = out c; in_str = 0 }
+            i++
+            continue
+        }
+        if (c == "/" && nx == "/") break
+        if (c == "/" && nx == "*") { blk = 1; out = out " "; i += 2; continue }
+        if (c == "\"") { out = out c; in_str = 1; i++; continue }
+        if (c == "r") {
+            # Raw string prefix: `r` (or `br`) not preceded by another identifier character.
+            before = (i > 1) ? substr(s, i - 1, 1) : ""
+            if (before == "b" && (i == 2 || !is_ident(substr(s, i - 2, 1)))) before = ""
+            if (!is_ident(before)) {
+                j = i + 1
+                h = ""
+                while (substr(s, j, 1) == "#") { h = h "#"; j++ }
+                if (substr(s, j, 1) == "\"") {
+                    out = out "r" h "\""
+                    rawh = h
+                    in_raw = 1
+                    i = j + 1
+                    continue
+                }
+            }
+        }
+        if (c == "'") {
+            if (nx == "\\") {
+                # Escaped char literal: skip the escaped character, then find the closing quote.
+                j = index(substr(s, i + 3), "'")
+                if (j > 0) { out = out "''"; i = i + 3 + j; continue }
+            } else if (nx != "" && substr(s, i + 2, 1) == "'") {
+                out = out "''"
+                i += 3
+                continue
+            }
+        }
+        out = out c
+        i++
+    }
+    return out
 }
 function skip_item(text,    i, n, ch) {
     n = length(text)

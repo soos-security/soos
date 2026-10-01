@@ -11,6 +11,14 @@
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::error::InferenceError;
+use crate::manifest::TensorLayout;
+
+/// Dimensionality of the attested embedding model output (`arcface_w600k_mbf`, `[N, 512]`).
+///
+/// [`OrtEmbeddingExtractor`] rejects any other output length with
+/// [`InferenceError::DimensionMismatch`] (GitHub #268, VIS-14) instead of emitting a vector
+/// that would only fail later in the matcher.
+pub const EMBEDDING_DIMENSION: usize = 512;
 use crate::outputs::ZeroizingOutputs;
 
 /// High-dimensional facial biometric embedding vector (e.g. 512D ArcFace or 128D) with automatic memory zeroization.
@@ -143,33 +151,52 @@ use std::sync::{Arc, Mutex};
 /// ResNet34 exported with tf2onnx: NHWC input `input_1` `[N, 112, 112, 3]`, output
 /// `embedding` `[N, 512]`. The layout is detected from the session input; the registry has
 /// already checked it against the manifest `input_layout`. Pixels are fed in B, G, R order
-/// normalized as `(x - 127.5) / 127.5`.
+/// normalized as `(x - 127.5) / 127.5`. The upstream model card of the attested file documents
+/// RGB and `(x - 127.5) / 128.0`; the divisor is template-neutral, the channel order is not, and
+/// switching it is an owner decision tied to re-enrollment (GitHub #278,
+/// `tests/embedding_preprocessing_evaluation_tests.rs`).
 pub struct OrtEmbeddingExtractor {
     session: Arc<Mutex<Session>>,
-    is_nhwc: bool,
+    /// Physical input layout inferred from the session, `None` when it cannot be inferred
+    /// (poisoned lock, no input, non-tensor input, rank other than 4, no size-3 channel axis).
+    /// Extraction fails closed on `None` (GitHub #268, VIS-14).
+    layout: Option<TensorLayout>,
+}
+
+/// Infers the physical layout of a rank-4 image input: channels last (`[N, H, W, 3]`) or
+/// channels first (`[N, 3, H, W]`). Anything else is not inferable.
+fn infer_input_layout(shape: &[i64]) -> Option<TensorLayout> {
+    match shape {
+        [_, _, _, 3] => Some(TensorLayout::Nhwc),
+        [_, 3, _, _] => Some(TensorLayout::Nchw),
+        _ => None,
+    }
 }
 
 impl OrtEmbeddingExtractor {
     pub fn new(session: Arc<Mutex<Session>>) -> Self {
-        let is_nhwc = if let Ok(guard) = session.lock() {
-            if let Some(input) = guard.inputs().first() {
-                match input.dtype() {
-                    ort::value::ValueType::Tensor { shape, .. } => shape.last().copied() == Some(3),
-                    _ => false,
-                }
-            } else {
-                false
-            }
-        } else {
-            false
-        };
+        let layout = session.lock().ok().and_then(|guard| {
+            guard
+                .inputs()
+                .first()
+                .and_then(|input| match input.dtype() {
+                    ort::value::ValueType::Tensor { shape, .. } => infer_input_layout(shape),
+                    _ => None,
+                })
+        });
 
-        Self { session, is_nhwc }
+        Self { session, layout }
     }
 
     /// Whether the attached session takes a channels-last `[N, 112, 112, 3]` input.
     pub fn is_nhwc(&self) -> bool {
-        self.is_nhwc
+        self.layout == Some(TensorLayout::Nhwc)
+    }
+
+    /// Input layout inferred from the session, or `None` when it could not be inferred (every
+    /// extraction then fails closed with [`InferenceError::TensorError`]).
+    pub fn input_layout(&self) -> Option<TensorLayout> {
+        self.layout
     }
 
     /// Prepares, resizes, and normalizes an aligned face crop inside a zeroized container.
@@ -266,9 +293,17 @@ impl EmbeddingExtractor for OrtEmbeddingExtractor {
     ) -> Result<BiometricEmbedding, InferenceError> {
         // `Zeroizing` wipes the input tensor on drop; the ORT-owned output (the raw,
         // unnormalized embedding) is wiped in place by `ZeroizingOutputs` (GitHub #255).
-        let input_data = Self::prepare_input_layout(aligned_crop_rgb, width, height, self.is_nhwc)?;
+        let layout = self.layout.ok_or_else(|| {
+            InferenceError::TensorError(
+                "embedding model input layout could not be inferred (expected a rank-4 \
+                 [N, 112, 112, 3] or [N, 3, 112, 112] input)"
+                    .to_string(),
+            )
+        })?;
+        let is_nhwc = layout == TensorLayout::Nhwc;
+        let input_data = Self::prepare_input_layout(aligned_crop_rgb, width, height, is_nhwc)?;
 
-        let shape = if self.is_nhwc {
+        let shape = if is_nhwc {
             [1usize, 112, 112, 3]
         } else {
             [1usize, 3, 112, 112]
@@ -297,6 +332,13 @@ impl EmbeddingExtractor for OrtEmbeddingExtractor {
             .try_extract_tensor::<f32>()
             .map_err(|e| InferenceError::Ort(e.to_string()))?
             .1;
+
+        if emb_data.len() != EMBEDDING_DIMENSION {
+            return Err(InferenceError::DimensionMismatch {
+                expected: EMBEDDING_DIMENSION,
+                actual: emb_data.len(),
+            });
+        }
 
         let mut embedding = BiometricEmbedding::new(emb_data.to_vec());
         embedding.normalize()?;

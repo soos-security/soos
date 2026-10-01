@@ -100,7 +100,9 @@ The worker feeds every analyzed frame to the guided enrollment session through
 - a frame rejected by the pre-PAD quality gate (`VisionAnalysis::quality_rejection`) shows
   "Face too small or blurred: move closer and hold still." and is never sampled;
 - a frame with a face but no PAD verdict, or with no face, breaks the live streak without counting
-  as a spoof.
+  as a spoof;
+- a spoof PAD verdict is counted even when the frame yields no pose or no embedding
+  (`GuidedEnrollmentSession::record_presentation_attack`, GitHub #285).
 
 ## 2. Camera Error States (GitHub #155, review finding CAM-07)
 

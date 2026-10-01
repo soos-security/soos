@@ -662,16 +662,17 @@ pub(crate) fn run_capture_loop<S: CaptureSource + ?Sized>(
             Ok(val) => val,
             // `next()` may already have re-queued the last buffer before its poll timed out or
             // was interrupted by a signal: resync (dequeue one buffer) instead of reopening.
-            Err(e)
-                if matches!(
-                    e.kind(),
-                    io::ErrorKind::TimedOut | io::ErrorKind::Interrupted
-                ) =>
-            {
+            Err(e) if e.kind() == io::ErrorKind::TimedOut => {
                 resync_pending = true;
                 if let Some(exit) = on_timeout(&mut stalls) {
                     return exit;
                 }
+                continue;
+            }
+            // A signal is not a poll timeout: it never spends the stall budget, like EINTR
+            // in `wait_ready` and `resync` (GitHub #285). The loop re-checks `running`.
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {
+                resync_pending = true;
                 continue;
             }
             Err(e) => return Err(dequeue_error(settings.device_path, e)),
@@ -1153,6 +1154,28 @@ mod tests {
             "after an interrupted dequeue next_buffer must not be called before a resync"
         );
         assert_eq!(h.latest.load_full().unwrap().data, vec![7; 16]);
+    }
+
+    /// GitHub #285 (row RFX11): a signal-interrupted dequeue is not a poll timeout and never
+    /// spends the stall budget, so it cannot tip a stream that is still delivering into
+    /// `Starved`.
+    #[test]
+    fn test_rfx_dequeue_interrupted_does_not_count_as_stall() {
+        let h = Harness::new();
+        let limit = max_consecutive_poll_timeouts(MAX_DQBUF_POLL_TIMEOUT);
+        let mut steps = vec![good(1)];
+        // One poll timeout short of the stall budget.
+        steps.extend((1..limit).map(|_| Step::PollTimeout));
+        steps.push(Step::DequeueInterrupted);
+        steps.push(Step::Resynced);
+        steps.push(good(2));
+        let (result, _) = h.run(steps, yuyv_4x2());
+        assert_eq!(
+            result.unwrap(),
+            StreamExit::Shutdown,
+            "EINTR must not be counted as a full poll timeout toward Starved"
+        );
+        assert_eq!(h.latest.load_full().unwrap().data, vec![2; 16]);
     }
 
     #[test]

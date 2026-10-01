@@ -29,6 +29,9 @@
 #     curl is HTTPS-only, TLS >= 1.2, time- and size-bounded (--max-filesize).
 #   - Every model file is bounded by MAX_MODEL_BYTES before it is hashed, and is
 #     staged in an unpredictable mktemp file (umask 077) next to its destination.
+#   - An optional per-model 'size_bytes' (bare integer, 1..size cap) is printed,
+#     bounds curl --max-filesize for that model and must match the staged file
+#     exactly before hashing; a mismatch discards the file (GitHub #269).
 # =============================================================================
 
 set -euo pipefail
@@ -173,20 +176,23 @@ compute_sha256() {
 # -----------------------------------------------------------------------------
 # Supported subset: '[models.<id>]' tables whose 'filename', 'sha256',
 # 'source_url' and 'license' keys hold single-line, double-quoted strings
-# without escapes. Every other table, key and multi-line array is skipped.
-# Anything ambiguous for the four keys above fails closed.
+# without escapes, plus an optional 'size_bytes' bare decimal integer.
+# Every other table, key and multi-line array is skipped.
+# Anything ambiguous for the five keys above fails closed.
 M_IDS=()
 M_FILES=()
 M_SHAS=()
 M_URLS=()
 M_LICENSES=()
+M_SIZES=()
 
 parse_manifest() {
     local manifest="$1"
     local re_model_table='^\[models\.([A-Za-z0-9_-]+)\][[:space:]]*(#.*)?$'
     local re_other_table='^\[\[?[A-Za-z_"]'
-    local re_key='^(filename|sha256|source_url|license)[[:space:]]*='
+    local re_key='^(filename|sha256|source_url|license|size_bytes)[[:space:]]*='
     local re_string='^[a-z0-9_]+[[:space:]]*=[[:space:]]*"([^"\\]*)"[[:space:]]*(#.*)?$'
+    local re_integer='^size_bytes[[:space:]]*=[[:space:]]*([0-9]{1,10})[[:space:]]*(#.*)?$'
     local line trimmed key value lineno=0 cur=-1 in_model=false i
     declare -A seen_keys=()
 
@@ -209,6 +215,7 @@ parse_manifest() {
             M_SHAS+=("")
             M_URLS+=("")
             M_LICENSES+=("")
+            M_SIZES+=("")
             cur=$((${#M_IDS[@]} - 1))
             in_model=true
             seen_keys=()
@@ -222,7 +229,12 @@ parse_manifest() {
         [[ "${trimmed}" =~ ${re_key} ]] || continue
 
         key="${BASH_REMATCH[1]}"
-        if [[ ! "${trimmed}" =~ ${re_string} ]]; then
+        if [[ "${key}" == "size_bytes" ]]; then
+            if [[ ! "${trimmed}" =~ ${re_integer} ]]; then
+                error "Manifest line ${lineno}: 'size_bytes' must be a bare decimal integer"
+                return 1
+            fi
+        elif [[ ! "${trimmed}" =~ ${re_string} ]]; then
             error "Manifest line ${lineno}: '${key}' must be a single-line double-quoted string"
             return 1
         fi
@@ -237,6 +249,7 @@ parse_manifest() {
             sha256)     M_SHAS[cur]="${value}" ;;
             source_url) M_URLS[cur]="${value}" ;;
             license)    M_LICENSES[cur]="${value}" ;;
+            size_bytes) M_SIZES[cur]="$((10#${value}))" ;;
         esac
     done < "${manifest}"
 
@@ -258,6 +271,10 @@ parse_manifest() {
         fi
         if [[ -z "${M_URLS[i]}" ]]; then
             error "Model '${mid}': missing source_url"
+            return 1
+        fi
+        if [[ -n "${M_SIZES[i]}" ]] && (( M_SIZES[i] < 1 || M_SIZES[i] > MODEL_MAX_BYTES )); then
+            error "Model '${mid}': size_bytes ${M_SIZES[i]} is outside 1..${MODEL_MAX_BYTES} (size cap)"
             return 1
         fi
     done
@@ -337,13 +354,22 @@ for ((idx = 0; idx < TOTAL_MODELS; idx++)); do
     expected_sha="${M_SHAS[idx]}"
     license_name="${M_LICENSES[idx]}"
     download_url="${M_DOWNLOAD_URLS[idx]}"
+    expected_size="${M_SIZES[idx]}"
     dest_path="${TARGET_DIR}/${filename}"
+    if [[ -n "${expected_size}" ]]; then
+        size_label="${expected_size} bytes"
+        curl_max_bytes="${expected_size}"
+    else
+        size_label="unspecified (cap ${MODEL_MAX_BYTES} bytes)"
+        curl_max_bytes="${MODEL_MAX_BYTES}"
+    fi
 
     if [[ "${DRY_RUN}" = true ]]; then
         info "[DRY-RUN] Model '${model_id}':"
         info "          File:        ${filename}"
         info "          SHA-256:     ${expected_sha}"
         info "          License:     ${license_name}"
+        info "          Size:        ${size_label}"
         info "          Source:      ${download_url}"
         continue
     fi
@@ -377,7 +403,7 @@ for ((idx = 0; idx < TOTAL_MODELS; idx++)); do
         fi
     fi
 
-    info "Acquiring model '${model_id}' (${filename})..."
+    info "Acquiring model '${model_id}' (${filename}, expected size ${size_label})..."
     # Unpredictable temporary name, created 0600 in the target directory so the
     # final rename stays atomic (GitHub #208).
     tmp_dest="$(umask 077 && mktemp "${TARGET_DIR}/.${filename}.XXXXXXXX")"
@@ -398,7 +424,7 @@ for ((idx = 0; idx < TOTAL_MODELS; idx++)); do
         info "Downloading from: ${download_url}"
         curl -fSL --proto '=https' --proto-redir '=https' --tlsv1.2 \
             --retry 3 --connect-timeout 15 --max-time 900 \
-            --max-filesize "${MODEL_MAX_BYTES}" \
+            --max-filesize "${curl_max_bytes}" \
             -o "${tmp_dest}" "${download_url}" || {
             error "Failed to download model from ${download_url}"
             rm -f "${tmp_dest}"
@@ -412,6 +438,11 @@ for ((idx = 0; idx < TOTAL_MODELS; idx++)); do
     if [[ ! "${actual_size}" =~ ^[0-9]+$ ]] || (( actual_size > MODEL_MAX_BYTES )); then
         rm -f "${tmp_dest}"
         error "Model '${model_id}' (${filename}) exceeds the size cap of ${MODEL_MAX_BYTES} bytes (${actual_size} bytes); discarded."
+        exit 1
+    fi
+    if [[ -n "${expected_size}" ]] && (( actual_size != expected_size )); then
+        rm -f "${tmp_dest}"
+        error "Size mismatch for '${model_id}' (${filename}): expected ${expected_size} bytes, got ${actual_size} bytes; discarded."
         exit 1
     fi
 

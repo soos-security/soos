@@ -47,7 +47,7 @@ Why each build package is needed (from the locked dependency graph):
 - **PAM headers**: `pam-bindings` (`crates/pam`).
 - **libclang + clang**: `bindgen`, a build-dependency of `v4l2-sys-mit` (`crates/camera-v4l`).
 - **OpenSSL headers + pkg-config**: `openssl-sys` ← `native-tls` ← `ureq`, used by the `ort-sys` build script. `openssl-src` is not vendored, so the system headers are required at build time only; no shipped binary links OpenSSL.
-- **Rust toolchain**: install rustup from <https://rustup.rs>; `rust-toolchain.toml` selects the channel.
+- **Rust toolchain**: `./scripts/install_rustup.sh` downloads `rustup-init`, verifies its pinned SHA-256 before executing it and installs the exact release of `rust-toolchain.toml` (1.98.1); see `Docs/CI_CD_AND_SECURITY.md` "Verified rustup Bootstrap". Never pipe `sh.rustup.rs` into a shell.
 
 **ONNX Runtime download**: the `ort-sys` build script downloads prebuilt ONNX Runtime binaries during `cargo build` (network required). For offline or air-gapped builds, point `ORT_LIB_LOCATION` at a local ONNX Runtime build before running cargo.
 
@@ -56,6 +56,8 @@ Why each build package is needed (from the locked dependency graph):
 **Model tools**: `scripts/download_models.sh` needs only `bash` (>= 4), `sha256sum` (coreutils) and, for `https://` sources, `curl` with `ca-certificates`. **Python is not required**: the manifest is parsed in bash against its fixed schema (GitHub #167). Packages do not download models; fetch them from a source checkout with `sudo ./scripts/download_models.sh`.
 
 **Download hardening (GitHub #208)**: `models/manifest.toml` is the only source of download URLs (the former per-model fallback table is gone; the dry run prints exactly the manifest `source_url`). `curl` runs with `--proto '=https' --proto-redir '=https' --tlsv1.2 --connect-timeout 15 --max-time 900 --max-filesize`. Each model is staged in an unpredictable `mktemp` file created under `umask 077` in the target directory, its size is checked against `MAX_MODEL_BYTES` (256 MiB; the largest attested model is 136,619,444 bytes) **before** it is hashed, and a failed or interrupted run removes it. `SOOS_MODEL_MAX_BYTES` may only tighten the cap (1..`MAX_MODEL_BYTES`); any other value fails before a write.
+
+**Expected model sizes (GitHub #269)**: every `models/manifest.toml` entry declares an optional `size_bytes` (bare decimal integer, 1..size cap; quoted, negative, zero, over-cap or duplicate values fail the manifest validation before a write). The script prints it in the dry-run plan and before each download, passes it to `curl --max-filesize` for that model (the global cap applies when it is absent), and discards a staged file whose size differs **before** hashing it (`Size mismatch ...`, exit 1). The SHA-256 remains the attestation. The Rust `ModelManifest` ignores the key.
 
 ### 3.2 Features & Capabilities
 - **Fail-closed preflight (GitHub #164)**: before any change, `install.sh` checks that a live install (no `--destdir`) runs as root, that every artifact (`soos-daemon`, `soos-admin`, `soos-enroll`, `soos-gui`, `libpam_soos.so`) exists in the artifact directory, that the directory is not a cargo `debug` profile directory, and that the model manifest and tools pass `download_models.sh --preflight`. Any failure exits non-zero (exit `2`) with nothing modified. `target/debug` is never searched implicitly.
@@ -279,7 +281,7 @@ The daemon runs as `root:soos` but inside a bounded sandbox:
 | `ProtectKernelTunables/Modules/Logs=yes`, `ProtectControlGroups=yes`, `ProtectClock=yes`, `ProtectHostname=yes`, `RestrictNamespaces=yes`, `RestrictRealtime=yes` | No kernel, cgroup, clock, namespace or realtime access is needed |
 | `PrivateNetwork=yes`, `IPAddressDeny=any`, `RestrictAddressFamilies=AF_UNIX` | No network at all; the filesystem socket `/run/soos/daemon.sock` works inside a private network namespace |
 | `DevicePolicy=closed`, `DeviceAllow=char-video4linux rw` | systemd does not expand globs in `DeviceAllow=` node paths, so `/dev/video*` alone matches nothing; the device group allows every V4L2 node |
-| `Before=display-manager.service` | The daemon starts before the greeter shows its first prompt |
+| `Before=display-manager.service`, `Type=notify`, `NotifyAccess=main`, `TimeoutStartSec=60` | The daemon sends `READY=1` (`soos_daemon::sd_notify`) only after `/run/soos/daemon.sock` is bound, so the greeter waits until PAM requests can be served; a start that never reports readiness fails after 60 s (GitHub #203) |
 
 Deliberately **not** set: `ProtectProc=invisible` / `ProcSubset=pid` (they would hide
 `/proc/<pid>/cgroup` of other users' peers, which the session policy reads), `PrivateDevices=yes`

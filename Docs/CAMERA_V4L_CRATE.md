@@ -142,7 +142,8 @@ by-id aliases (dangling aliases skipped); tests inject a hermetic `CameraEnumera
   `CameraError::Starved`. After a timeout or a signal interruption (`EINTR`) inside `v4l`'s
   `next()` (whose re-queued buffer is still owned by the driver) the loop dequeues and discards one
   buffer before calling `next()` again, so no buffer is queued twice and the device is not
-  reopened.
+  reopened. Only a timeout spends the stall budget: `EINTR` (in `next()`, `wait_ready` or the
+  resync) never counts toward `Starved` (GitHub #285).
 - **Deep-greyscale buffers (GitHub #195).** A driver-returned `Y8I`/`Y10`/`Y12`/`Y16` format is
   validated by `validate_deep_grey_format` (2 bytes per pixel, wire stride kept) and every buffer by
   `validate_deep_grey_buffer`, which applies the same error-flag, `bytesused` and short-buffer
@@ -224,8 +225,67 @@ Infrared. When `Grey` is negotiated and the node has no native 8-bit greyscale f
 is normalised to packed 8-bit greyscale by `DeepGreyFormat::to_grey8` (honours `bytesperline`,
 drops a truncated buffer) before a `Frame` is published. `PixelFormat` itself is unchanged.
 
-Not covered hermetically: `bus_info`, `driver` and `device_caps` are not used, because both nodes
-of one USB camera share them; real-hardware validation of the frame-size signature is a follow-up.
+Not covered hermetically: `bus_info`, `driver` and `device_caps` are not used for classification,
+because both nodes of one USB camera share them (they are shown by `soos-admin camera`, see
+below); real-hardware validation of the frame-size signature is a follow-up.
+
+**Shared by-id stems (GitHub #195, candid review finding 3 of walkthrough 109).** udev builds the
+by-id name from the USB vendor, product and serial strings, so every interface of a composite
+RGB+IR module shares the stem (`by_id_stem` strips the trailing `-video-index<N>`). When the
+product string carries an `IR` token, both nodes used to be classified Infrared and `PreferIr`
+picked the first one, often the RGB node. The resolver now withholds a by-id name from the
+classifier when another *capture* node shares its stem
+(`CandidateClassification::by_id_hint_ignored`), so the next rules (card name, greyscale-only
+formats, frame-size signature, colour formats) decide. Metadata nodes are not candidates and never
+make a stem "shared". The capture supervisor classifies only the opened node and cannot see its
+siblings, so it still uses the by-id name (fail-closed: at worst the stricter IR PAD policy).
+
+**Explained resolution.** `explain_camera_resolution` returns a `CameraResolutionReport`: the
+classification of every candidate with the scorer rule that decided it
+(`explain_sensor_classification`, `ClassificationReason`: `by_id_ir_token`,
+`card_name_ir_marker`, `greyscale_only_formats`, `ir_frame_size_signature`, `colour_formats`,
+`no_signal`) and the `SelectionReason` of the answer (`explicit_device`,
+`preferred_sensor_matched`, `fallback_unknown_sensor`, `fallback_first_candidate`,
+`any_preference_first_candidate`, `no_capture_node`). `resolve_camera_device` is implemented on
+top of it, so the report and the daemon's decision cannot diverge; it logs the classification and
+selection labels, plus an extra `info` line when the frame-size signature alone classified the
+selected node as Infrared (the weakest rule, candid review finding 6 of walkthrough 109).
+
+### Camera Diagnostics (`diagnostics.rs`, GitHub #256, CAM-17)
+
+`soos-admin camera list` and `soos-admin camera probe <device>` render
+`collect_camera_diagnostics(sysfs_dir, dev_dir, aliases, &dyn V4lDeviceProbe, preference,
+explicit)` and `probe_camera_node(path, aliases, &dyn V4lDeviceProbe)`:
+
+- `V4lDeviceProbe::details` returns `V4lNodeDetails` (driver, card, bus_info, `device_caps`, every
+  fourcc, frame sizes) or a `ProbeFailure` (`permission_denied` for `EACCES`/`EPERM`, `busy` for
+  `EBUSY`, `not_found` for `ENOENT`/`ENODEV`/`ENXIO`, `io_error` otherwise). Production uses
+  `SystemV4lDeviceProbe`, which issues only `VIDIOC_QUERYCAP`, `VIDIOC_ENUM_FMT` and
+  `VIDIOC_ENUM_FRAMESIZES`: no format is set, no buffer is mapped, no frame is read (enforced by
+  the invariant `tests/invariants/src/camera_diagnostics_contract.rs`).
+- Every `video<N>` node listed in sysfs is reported (same bounded scan as the enumeration), each
+  with a `NodeStatus`: `candidate`, `not_video_capture`, `no_decodable_format` or `probe_failed`.
+  At most `MAX_DIAGNOSTIC_FOURCCS` (64) fourccs and `MAX_FRAME_SIZE_HINTS` frame sizes are kept;
+  driver-supplied strings are cut to `MAX_V4L_TEXT_CHARS` (32) and control characters or
+  bidirectional overrides are replaced (`sanitize_v4l_text`, `sanitize_display_text`), because a
+  USB device chooses its own product string.
+- The decision is the shared resolver's: the probed candidates are handed to
+  `explain_camera_resolution` as a `CameraEnumerator`, with the aliases of
+  `SystemCameraEnumerator::by_id_aliases` (the single bounded by-id scanner).
+
+```bash
+sudo soos-admin camera list                        # every node, then selected + reason
+sudo soos-admin camera list --sensor-preference rgb --json
+sudo soos-admin camera probe /dev/v4l/by-id/usb-Vendor_Cam-video-index0
+```
+
+`camera list` exits with status 1 when no device would be selected, `camera probe` when the node
+is not a usable capture candidate. `--sensor-preference` takes the `daemon.toml` vocabulary
+(`prefer_ir`/`ir`, `prefer_rgb`/`rgb`, `any`, default `prefer_ir`) and `--device` plays the role
+of `camera_device`; the command does not read `/etc/soos/daemon.toml` itself. Run it as root (or
+a member of the `video` group), otherwise nodes show `probe_failed: permission_denied`. Tests:
+`camera_diagnostics_tests::*` (fixture probe, no camera) and `camera_command_tests::*` (table and
+JSON snapshots).
 
 ---
 
@@ -272,3 +332,5 @@ while frames are captured.
 | **CSH5–CSH6** | Truthful `CameraHealth`, standby vs failure, panic → `Dead` | `supervision_tests::test_supervisor_panic_marks_camera_dead` (and siblings) | ✅ Verified |
 | **GRE5** | `CameraError::kind()` classification and `CameraManager::status()` reporting | `camera_status_tests::*` | ✅ Verified |
 | **CHT1–CHT3** | Hermetic enumeration: capture-only, non-empty formats, numeric order, bounded scan, IR alias or `/dev/videoN` (GitHub #198) | `enumeration_tests::test_enumerate_filters_empty_format_nodes` (and siblings) | ✅ Verified |
+| **CDX1–CDX6** | Explained classification and selection, shared by-id stems, metadata-only diagnostics with fixture probe (GitHub #256, #195, #198) | `camera_diagnostics_tests::*` | ✅ Verified |
+| **CDX7–CDX10** | `soos-admin camera list\|probe` arguments, snapshots, exit status, sanitizing, metadata-only invariant (GitHub #256) | `camera_command_tests::*`, `tests/invariants/src/camera_diagnostics_contract.rs` | ✅ Verified |

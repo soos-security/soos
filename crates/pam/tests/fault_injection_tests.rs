@@ -94,8 +94,9 @@ mod with_feature {
     #[test]
     fn test_fault_inject_via_pam_hooks_returns_pam_ignore() {
         let dummy_ptr = 0x1000 as *mut PamHandle;
-        // SAFETY: PamHandle is an opaque type; the module never dereferences a handle whose
-        // address is below 0x10000, so this dummy pointer is only carried, never read.
+        // SAFETY: PamHandle is an opaque type; fault_injection::trigger runs before any libpam
+        // access in authenticate_flow (ordering pinned by PHS11), so this dummy pointer is only
+        // carried, never read.
         let pamh = unsafe { &mut *dummy_ptr };
         let args: Vec<&CStr> = vec![c"fault_inject=panic"];
         let code = SoosPam::sm_authenticate(pamh, args, 0);

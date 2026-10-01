@@ -86,7 +86,8 @@ retitling a PR re-validates it without re-running the whole pipeline.
 - **Docker layer cache**: the PAM sandbox image is built with Buildx and the GitHub Actions cache
   backend, so an unchanged `Dockerfile` costs seconds instead of a full `apt-get` + `rustup` install.
 - **Empty Docker build context** (`.dockerignore`): the sandbox Dockerfiles never `COPY` sources,
-  so `target/` is never uploaded to the Docker daemon.
+  so `target/` is never uploaded to the Docker daemon. The only file sent is
+  `scripts/install_rustup.sh` (verified rustup bootstrap, below).
 
 ### Pinned Rust Toolchain
 `rust-toolchain.toml` pins `channel = "1.98.1"` (components `clippy`, `rustfmt`; user decision
@@ -97,6 +98,23 @@ compiler release introduce lints or behaviour changes between two runs of the sa
 pin makes local, CI and Docker results reproducible. Moving to a newer release is a deliberate
 change: update `rust-toolchain.toml` and the four Dockerfiles together (enforced by
 `tests/invariants/src/toolchain_pin_contract.rs`), then run the full quality gate.
+
+### Verified rustup Bootstrap (GitHub #260)
+Neither the sandbox images nor the onboarding documentation pipe `https://sh.rustup.rs` into a
+shell. `scripts/install_rustup.sh` downloads `rustup-init` of a pinned rustup release
+(`RUSTUP_VERSION`, currently 1.29.1) for the host triple (`x86_64` or `aarch64`
+`unknown-linux-gnu`) from `https://static.rust-lang.org/rustup/archive/<version>/<triple>/`,
+over HTTPS / TLS 1.2+ only, into a private `mktemp -d` directory. It compares the SHA-256 of the
+download with the digest committed in the script **before** the file is made executable; a
+mismatch aborts with exit 1 and nothing is executed. It then runs `rustup-init -y --profile
+minimal --default-toolchain <x.y.z>`, where the toolchain defaults to the release of
+`rust-toolchain.toml` and must be an exact `x.y.z` (a floating `stable` / `beta` / `nightly`
+channel is a usage error, exit 2). Each Dockerfile `COPY`s the script and runs it with
+`--default-toolchain 1.98.1`. On a fresh host, run `./scripts/install_rustup.sh` from a checkout
+instead of the rustup.rs one-liner. Bumping rustup means changing `RUSTUP_VERSION` and both
+digests together (from the archive's `rustup-init.sha256`, cross-checked with a local
+`sha256sum`); `tests/invariants/src/rustup_bootstrap_contract.rs` enforces the pins, the
+Dockerfile usage and the fail-closed checksum path.
 
 ### Security Design
 - **Least privilege**: the workflow token is `contents: read`; `actions/checkout` does not persist
@@ -176,10 +194,13 @@ Layer 1 lexing rules (GitHub #242, walkthrough 129):
   against the moving tip of `origin/main`, so commits merged after the branch point are not
   audited as reversed branch changes.
 - The PAM panic and print audits compare the *production code* of each changed
-  `crates/pam/src` file at the merge base and in the working tree. An awk filter blanks
-  comments and literal contents and drops exactly the item gated by `#[cfg(test)]` (up to its
-  `;` or its matching `}`); there is no `grep -v tests`, so a production line that merely
-  contains the substring `tests` is still audited.
+  `crates/pam/src` file at the merge base and in the working tree. An awk character lexer,
+  whose state carries across lines, removes line comments and nested block comments and blanks
+  the contents of string, raw strings (`r"..."`, `r#"..."#`, `br#"..."#`) and char literals,
+  then drops exactly the item gated by `#[cfg(test)]` (up to its `;` or its matching `}`);
+  braces inside comments or literals never move that boundary, and a panic written inside a
+  comment or literal is not reported (GitHub #285). There is no `grep -v tests`, so a
+  production line that merely contains the substring `tests` is still audited.
 - `pour` and `attention` are English words and are not French markers.
 - The static invariants add the same hardened extractor (`tests/invariants/src/lexing_contract.rs`),
   the full PAM panic-construct check, and a resolved-graph check that no async runtime is a
@@ -198,8 +219,12 @@ Layer 2 binds the review to the exact code reviewed:
 ```
 
 The fingerprint is the SHA-256 of the diff between the merge-base with `origin/main` and the
-reviewed tree (untracked files included, the report itself excluded). It is identical before and
-after committing, and any later change to the code invalidates it. A missing report, a report
+reviewed tree (untracked files included). The two review-report singletons are excluded:
+the report itself and `AI/plan_evaluator_report.md`, the per-issue plan evaluation that every
+issue rewrites (GitHub #267), so rewriting either report never changes the reviewed diff. It is
+identical before and after committing, and any later change to the code invalidates it. Both
+reports are overwritten per branch: on `main` they record the last merged pull request, not an
+open one. A missing report, a report
 without `VERDICT: APPROVED`, a `CHANGES_REQUESTED` report, or a report written for another diff
 fails the gate. There is no bot exemption (actor checks are spoofable): Dependabot pull requests
 are reviewed like any other and receive their report on the Dependabot branch.
@@ -225,7 +250,10 @@ protects a layer-cached image built before a toolchain bump. CI passes `SOOS_REQ
 a local offline run warns and uses the image toolchain. `rustc --version` is logged. The suite
 then always runs `cargo build --locked --release -p soos-pam` (a no-op when up to date), so a
 stale `target/release/libpam_soos.so` from the bind-mounted host checkout is never deployed
-(GitHub #244).
+(GitHub #244). The package and distribution harnesses (`tests/docker/test_packages.sh`,
+`tests/distro/{debian_ubuntu,fedora_rhel,arch_linux}_test.sh`) likewise always run
+`cargo build --locked --release --workspace` before packaging, unless the caller passes
+`--skip-build` on purpose; an existing release binary is never a reason to skip the build.
 
 The matrix (see [`PAM_DOCKER_TEST_MATRIX.md`](PAM_DOCKER_TEST_MATRIX.md)) covers nominal facial
 authorization, daemon timeout and crash fallbacks with valid and invalid passwords, native

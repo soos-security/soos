@@ -126,6 +126,40 @@ mod vision_threshold_contract;
 #[cfg(test)]
 mod ort_output_zeroize_contract;
 
+/// PAM module hygiene: panic hook chaining, protocol predicates, config warnings
+/// (GitHub #263, #264, #265, rows PHY1–PHY9).
+#[cfg(test)]
+mod pam_hygiene_contract;
+
+/// Encrypted stores write only AES-GCM AAD-bound payloads (GitHub #266, rows SAD1–SAD6).
+#[cfg(test)]
+mod storage_aad_contract;
+
+/// Verified, pinned rustup bootstrap for hosts and sandbox images (GitHub #260, rows IRP1–IRP5).
+#[cfg(all(test, unix))]
+mod rustup_bootstrap_contract;
+
+/// `soos-daemon.service` start conditions evaluated by systemd (GitHub #211, rows IRP6–IRP7).
+#[cfg(all(test, unix))]
+mod unit_start_guard_contract;
+
+/// `download_models.sh` expected model sizes from the manifest (GitHub #269, rows VMX1–VMX3).
+#[cfg(all(test, unix))]
+mod model_download_size_contract;
+
+/// Camera diagnostics are metadata-only and built on the shared resolver (GitHub #256).
+#[cfg(test)]
+mod camera_diagnostics_contract;
+
+/// Release artifacts are always rebuilt by the Docker/distro harnesses and the candid
+/// fingerprint ignores both review-report singletons (GitHub #244, #267; rows QFX1–QFX5).
+#[cfg(all(test, unix))]
+mod artifact_freshness_contract;
+
+/// Non-blocking follow-ups from the P2 batch reviews (GitHub #285, rows RFX1–RFX12).
+#[cfg(all(test, unix))]
+mod review_followups_contract;
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,

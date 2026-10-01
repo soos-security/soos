@@ -57,7 +57,9 @@ fn test_simulate_pam_auth_allow() {
         stream.write_all(&encoded).expect("write response");
     });
 
-    let report = simulate_pam_auth(&socket_path, 1000, "soos-admin", 250)
+    // Maximum PAM timeout: the assertions check the verdict, not the timing (user-approved
+    // 2026-10-01, GitHub #285).
+    let report = simulate_pam_auth(&socket_path, 1000, "soos-admin", 5000)
         .expect("simulated PAM auth must succeed");
     server_handle.join().expect("join server");
 
@@ -105,7 +107,9 @@ fn test_simulate_pam_auth_deny_yields_pam_ignore() {
         stream.write_all(&encoded).expect("write response");
     });
 
-    let report = simulate_pam_auth(&socket_path, 1000, "soos-admin", 250)
+    // Maximum PAM timeout: the assertions check the verdict, not the timing (user-approved
+    // 2026-10-01, GitHub #285).
+    let report = simulate_pam_auth(&socket_path, 1000, "soos-admin", 5000)
         .expect("simulated PAM auth must complete");
     server_handle.join().expect("join server");
 

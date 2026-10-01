@@ -14,7 +14,7 @@ Supported hosts: Debian 12, Ubuntu 24.04, Fedora 40 / RHEL 9 and Arch Linux (x86
 # 1. Build dependencies (per-distribution lists: Docs/PACKAGING_AND_PROVISIONING.md §3.1)
 ./scripts/check_build_deps.sh --print-packages build     # e.g. then: sudo apt-get install ...
 ./scripts/check_build_deps.sh                            # read-only preflight
-#    Rust toolchain: https://rustup.rs (rust-toolchain.toml selects the channel)
+./scripts/install_rustup.sh                              # verified rustup-init, installs the pinned Rust 1.98.1
 
 # 2. Build release artifacts and install (fails closed, rolls back on any error)
 sudo ./scripts/install.sh --build                         # runs the preflight and the release build first
