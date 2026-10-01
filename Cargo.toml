@@ -28,7 +28,9 @@ publish = false
 [workspace.dependencies]
 # IPC binary serialization (compact, bounded)
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# float_roundtrip: diagnostic JSON (soos-admin test-pam latencies) must parse back to the
+# exact f64 that was printed (GitHub #291, CDF2).
+serde_json = { version = "1", features = ["float_roundtrip"] }
 postcard = { version = "1", default-features = false, features = ["alloc"] }
 
 # Memory zeroization

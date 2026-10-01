@@ -174,3 +174,13 @@ defaults" (the link target is refused before any open).
 - A host hook that chains to the filter (`take_hook` then calls it) stays in the chain after a
   re-installation, so the chain grows by one filter per such host hook; harmless (each filter only
   forwards), and no current binary does it.
+
+## Integration note (batch merge)
+
+The full workspace gate on the combined `fix/p3fu3-batch` branch caught an intermittent failure
+of `test_cdf_rejection_reasons_are_stable_snake_case`: the `PamTestReport` latencies (`f64`) did
+not always parse back from JSON to the identical value (`0.010166` vs `0.010166000000000001`),
+because `serde_json` parses floats with its fast, not exactly round-tripping, algorithm by default.
+The production fix enables the `float_roundtrip` feature of `serde_json` in the workspace
+`Cargo.toml`, so every soos JSON output parses back to the exact value it printed. The test is
+unchanged; eight consecutive runs pass. No new crate is pulled in (`Cargo.lock` is unchanged).
