@@ -125,10 +125,16 @@ preview worker stops):
 | `SourceUnauthorized` | Daemon preview not authorized | UID not in `[preview] allowed_uids` |
 | `SourceRateLimited` | Daemon preview rate-limited | `[preview] max_requests_per_sec` |
 | `SourceUnavailable` | Daemon camera unavailable | Daemon has no camera frame to serve |
-| `SourceProtocol` | Daemon preview protocol error | GUI/daemon version mismatch |
+| `SourceProtocol` | Daemon preview protocol error | GUI/daemon version mismatch, stale or unstamped daemon `Response` |
 
 `IpcCameraManager` maps each `IpcPreviewError` to the matching `Source*` kind
-(`IpcPreviewError::kind`). Non-error states render as "Connecting to camera" (`Starting`),
+(`IpcPreviewError::kind`). A daemon refusal (`Response` echoing the request nonce) is trusted
+only after `Response::check_freshness` with the shared `MAX_RESPONSE_FUTURE_SKEW_NS` against
+CLOCK_MONOTONIC, exactly like `pam_soos.so` and `soos-admin test-pam`: a stale, unstamped or
+future-dated `Response` is `IpcPreviewError::Protocol`, and no `Response` is ever an authorized
+preview (GitHub #289, `Docs/IPC_PROTOCOL.md` §9). In direct mode the device comes from the shared
+`daemon.toml` reader (`Docs/CAMERA_V4L_CRATE.md`); its notes (unusable file, ignored key, never a
+value) are logged as warnings. Non-error states render as "Connecting to camera" (`Starting`),
 "Camera ready" (`Ready`), "Camera in standby" (`Suspended`) and "Camera stopped" (`Stopped`).
 
 ## 3. Logging

@@ -170,6 +170,11 @@ mod review_followups_contract;
 #[cfg(all(test, unix))]
 mod camera_vision_followups_contract;
 
+/// Diagnostics parity (`test-pam` nonce binding, GUI response freshness) and the shared
+/// `daemon.toml` camera reader (GitHub #289, rows DGP1–DGP9).
+#[cfg(all(test, unix))]
+mod diagnostics_parity_contract;
+
 /// PAM response expiry enforcement and protocol follow-ups (GitHub #287, rows PRE6–PRE9).
 #[cfg(all(test, unix))]
 mod pam_response_expiry_contract;

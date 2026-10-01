@@ -186,6 +186,12 @@ pub fn simulate_pam_auth(
 
     let resp: Response = decode(&full)?;
 
+    // Same replay protection as pam_soos.so (GitHub #289): the response must echo the fresh
+    // nonce bit for bit (`Response::matches_request`, checked before the stamps exactly like
+    // `IpcError::RequestIdMismatch`). A mismatch is the PAM fallback whatever the verdict; the
+    // nonce itself is never printed.
+    let bound_to_request = resp.matches_request(&request_id);
+
     // Same staleness guard as pam_soos.so (GitHub #287): the stamps are checked against
     // CLOCK_MONOTONIC read after the response arrived, with the shared skew bound. A stale
     // response is interpreted as the PAM fallback whatever its verdict; a clock read failure
@@ -193,7 +199,13 @@ pub fn simulate_pam_auth(
     let freshness =
         resp.check_freshness(monotonic_now_ns().unwrap_or(0), MAX_RESPONSE_FUTURE_SKEW_NS);
 
-    let pam_result = if let Err(stale) = freshness {
+    let pam_result = if !bound_to_request {
+        format!(
+            "PAM_IGNORE (response request_id does not match the request nonce; the PAM module \
+             falls back to the password whatever the {:?} verdict)",
+            resp.verdict
+        )
+    } else if let Err(stale) = freshness {
         format!(
             "PAM_IGNORE (stale daemon response: {stale}; the PAM module falls back to the \
              password whatever the {:?} verdict)",

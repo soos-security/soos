@@ -295,9 +295,10 @@ no camera) and `camera_command_tests::*` (table and JSON snapshots).
 `[pipeline] sensor_preference` of `/etc/soos/daemon.toml` (`DEFAULT_DAEMON_CONFIG_PATH`,
 `--config <PATH>` reads another file). The daemon's loader lives in the `soos-daemon` binary crate
 (Tokio, ONNX Runtime), which the non-biometric CLI does not link, so
-`soos_admin_cli::daemon_config::read_daemon_camera_settings` reads only these two keys, with the
-daemon's field types and the shared vocabulary (`parse_sensor_preference`,
-`is_auto_camera_device`), at most `MAX_DAEMON_CONFIG_BYTES` (1 MiB). Precedence for each setting:
+`soos_admin_cli::daemon_config::read_daemon_camera_settings` reads only these two keys through
+the shared reader `soos_camera_v4l::daemon_config` (below), with the daemon's field types and the
+shared vocabulary (`parse_sensor_preference`, `is_auto_camera_device`), at most
+`MAX_DAEMON_CONFIG_BYTES` (1 MiB). Precedence for each setting:
 `--device` / `--sensor-preference` (`--sensor-preference` counts only when typed, never the clap
 default), then the file, then the soos-daemon default (auto-detection, `prefer_ir`). A sentinel
 device (`auto`, `default`, empty, `/dev/v4l/by-id/default-camera`) means auto-detection wherever it
@@ -308,6 +309,38 @@ refuses too) falls back to the defaults. The settings used and their origin are 
 (the daemon ignores it). Tests: `camera_config_tests::*`. `scripts/install.sh` runs the command
 through `scripts/camera_report.sh` at the end of a live install (informational, bounded, never
 fatal; `Docs/PACKAGING_AND_PROVISIONING.md` §3.2).
+
+### Shared `daemon.toml` Camera Reader (`daemon_config.rs`, GitHub #289)
+
+`soos-admin camera list`, `soos-enroll` and `soos-gui` (direct mode) read `[pipeline]
+camera_device` and `[pipeline] sensor_preference` through one implementation,
+`soos_camera_v4l::daemon_config::read_daemon_camera_config(path)` (ADR 2026-10-01 "One Shared
+`daemon.toml` Camera Reader"). It lives in this crate because all three clients already depend on
+it, it owns the vocabulary (`parse_sensor_preference`, `is_auto_camera_device`), and it pulls in
+neither Tokio nor ONNX Runtime (only `toml`, already locked by `soos-daemon`).
+
+- **Open, then check the handle.** The file is opened with `O_RDONLY | O_NONBLOCK | O_NOFOLLOW |
+  O_CLOEXEC` (`OpenOptionsExt::custom_flags`); `fstat` on the open handle must report a regular
+  file; the read is bounded by `MAX_DAEMON_CONFIG_BYTES` (checked from `fstat` and again on the
+  bytes read). A FIFO swapped in place of the file returns at once (`NotARegularFile`) instead of
+  blocking `open()`; a symbolic link is refused (`SymbolicLink`, `ELOOP`), never followed. There
+  is no path-based `metadata()` before the open, so nothing can be swapped between check and use.
+- **File-level failures** (`DaemonConfigError`: `NotFound`, `NotARegularFile`, `SymbolicLink`,
+  `Unreadable`, `TooLarge`, `Malformed` for a TOML / UTF-8 error or a `[pipeline]` that is not a
+  table) are returned to the caller, which uses the soos-daemon defaults (auto-detection,
+  `prefer_ir`) and prints a note.
+- **A key of the wrong type** (`camera_device = 5`, `sensor_preference = [..]`) falls back to its
+  own default and is listed in `DaemonCameraConfig::mistyped_keys`; the other key still applies.
+  `DaemonCameraConfig::warnings()` names the key, never its value (the same holds for an
+  unrecognized `sensor_preference` string). `soos-enroll` prints the notes on stderr
+  (`[WARN] camera settings: <path>: ...`); `soos-gui` logs them with `tracing::warn!`
+  (`soos_enrollment_cli::service::resolve_camera_device_from_config_reported`).
+- **`soos-admin camera list` keeps its contract** (matrix CVF3): a mistyped camera key is reported
+  as `Malformed` (soos-daemon refuses to start with such a file) and the defaults are shown.
+
+Tests: `daemon_config_reader_tests::*` (this crate), `camera_config_shared_reader_tests::*`
+(admin), `daemon_config_shared_reader_tests::*` (enrollment), invariant
+`tests/invariants/src/diagnostics_parity_contract.rs` (matrix DGP4–DGP7).
 
 ### `v4l` 0.14 Panic Guard (`v4l_guard.rs`, GitHub #287)
 
@@ -382,5 +415,6 @@ while frames are captured.
 | **CDX1–CDX6** | Explained classification and selection, shared by-id stems, metadata-only diagnostics with fixture probe (GitHub #256, #195, #198) | `camera_diagnostics_tests::*` | ✅ Verified |
 | **CDX7–CDX10** | `soos-admin camera list\|probe` arguments, snapshots, exit status, sanitizing, metadata-only invariant (GitHub #256) | `camera_command_tests::*`, `tests/invariants/src/camera_diagnostics_contract.rs` | ✅ Verified |
 | **CVF1–CVF3** | `camera list` reads `camera_device` / `sensor_preference` of `daemon.toml`, flags override, bounded read and fallback with a note (GitHub #287) | `camera_config_tests::*` | ✅ Verified |
+| **DGP4–DGP7** | One shared `daemon.toml` reader: open-then-`fstat`, no FIFO hang, symbolic links refused, per-key fallback for a wrongly typed key (GitHub #289) | `daemon_config_reader_tests::*` | ✅ Verified |
 | **CVF4** | `v4l` 0.14 panics become probe / open errors (GitHub #287) | `v4l_panic_guard_tests::*` | ✅ Verified |
 | **CVF5** | The supervisor keeps the shared by-id IR token, never downgrading Infrared (GitHub #287) | `supervisor_classification_tests::*` | ✅ Verified |

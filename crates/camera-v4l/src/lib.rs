@@ -5,6 +5,7 @@
 
 pub mod capture;
 pub mod config;
+pub mod daemon_config;
 pub mod deep_grey;
 pub mod diagnostics;
 pub mod error;

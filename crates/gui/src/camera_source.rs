@@ -344,11 +344,17 @@ impl CameraSourceBackend for SystemCameraSourceBackend {
     }
 
     fn open_direct(&self) -> Result<Arc<dyn CameraManager>, String> {
-        // Same shared resolver as soos-daemon and soos-enroll (GitHub #152).
-        let device_path = soos_enrollment_cli::service::resolve_camera_device_from_config(
+        // Same shared resolver and daemon.toml reader as soos-daemon, soos-enroll and
+        // soos-admin (GitHub #152, #289); the reader's notes name keys, never values.
+        let choice = soos_enrollment_cli::service::resolve_camera_device_from_config_reported(
             self.cli_device.clone(),
             Some(self.daemon_config.as_path()),
+            &soos_camera_v4l::SystemCameraEnumerator::default(),
         );
+        for note in &choice.notes {
+            tracing::warn!("{note}");
+        }
+        let device_path = choice.path;
         let config = CameraConfigBuilder::new()
             .device_path(device_path.clone())
             .warmup_frames(0)

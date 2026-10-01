@@ -21,6 +21,9 @@
     reason = "Contractual test suite utilizes direct assertions, unwrap, and indexing"
 )]
 
+#[path = "common/stamps.rs"]
+mod stamps;
+
 use soos_camera_v4l::{
     CameraError, CameraErrorKind, CameraManager, CameraStatus, MockCameraManager,
 };
@@ -52,13 +55,14 @@ fn read_request(stream: &mut UnixStream) -> Option<Request> {
 }
 
 fn unavailable(request_id: [u8; 32]) -> Vec<u8> {
+    let (issued, expires) = stamps::fresh_stamps();
     encode(&Response {
         version: CURRENT_VERSION,
         request_id,
         verdict: Verdict::Unavailable,
         reason_class: ReasonClass::CameraUnavailable,
-        issued_monotonic_ns: 1,
-        expires_monotonic_ns: 2,
+        issued_monotonic_ns: issued,
+        expires_monotonic_ns: expires,
     })
     .unwrap()
 }

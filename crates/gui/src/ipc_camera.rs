@@ -13,7 +13,7 @@ use soos_protocol::codec::{decode, decode_preview};
 use soos_protocol::message::encode_request;
 use soos_protocol::types::{
     PreviewResponse, ReasonClass, Request, RequestId, RequestKind, Response, Verdict,
-    CURRENT_VERSION, MAX_MESSAGE_SIZE, MAX_PREVIEW_MESSAGE_SIZE,
+    CURRENT_VERSION, MAX_MESSAGE_SIZE, MAX_PREVIEW_MESSAGE_SIZE, MAX_RESPONSE_FUTURE_SKEW_NS,
 };
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
@@ -275,16 +275,38 @@ fn request_preview(stream: &mut UnixStream, uid: u32) -> Result<PreviewResponse,
         .read_exact(payload_slot)
         .map_err(|_| IpcPreviewError::Io)?;
 
-    // A refusal is a small standard `Response` echoing our nonce.
+    // A refusal is a small standard `Response` echoing our nonce. Like pam_soos.so and
+    // soos-admin test-pam (GitHub #289), its CLOCK_MONOTONIC stamps are checked with the shared
+    // skew bound: a stale, unstamped or future-dated `Response` is a protocol error, never a
+    // verdict (a clock read failure passes 0 and is rejected too, fail closed).
     if declared_size <= MAX_MESSAGE_SIZE {
         if let Ok(resp) = decode::<Response>(&buf) {
             if resp.matches_request(&request_id) {
+                if resp
+                    .check_freshness(monotonic_now_ns(), MAX_RESPONSE_FUTURE_SKEW_NS)
+                    .is_err()
+                {
+                    return Err(IpcPreviewError::Protocol);
+                }
                 return Err(map_refusal(&resp));
             }
         }
     }
 
     decode_preview::<PreviewResponse>(&buf).map_err(|_| IpcPreviewError::Protocol)
+}
+
+/// Reads `CLOCK_MONOTONIC` in nanoseconds, the clock `soos-daemon` stamps responses with.
+/// Returns 0 (rejected by `Response::check_freshness`) when the clock cannot be read.
+fn monotonic_now_ns() -> u64 {
+    nix::time::clock_gettime(nix::time::ClockId::CLOCK_MONOTONIC)
+        .ok()
+        .and_then(|ts| {
+            let secs = u64::try_from(ts.tv_sec()).ok()?;
+            let nanos = u64::try_from(ts.tv_nsec()).ok()?;
+            Some(secs.saturating_mul(1_000_000_000).saturating_add(nanos))
+        })
+        .unwrap_or(0)
 }
 
 fn map_refusal(resp: &Response) -> IpcPreviewError {

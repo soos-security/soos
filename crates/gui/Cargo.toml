@@ -21,7 +21,7 @@ tracing-subscriber = { workspace = true }
 thiserror = { workspace = true }
 zeroize = { workspace = true }
 arc-swap = { workspace = true }
-nix = { workspace = true }
+nix = { workspace = true, features = ["time"] }
 serde_json = { workspace = true }
 getrandom = { workspace = true }
 
