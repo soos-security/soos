@@ -229,3 +229,160 @@ pub(crate) fn set_format_guarded(
 ) -> std::io::Result<v4l::Format> {
     guard_v4l_call(|| v4l::video::Capture::set_format(device, format)).and_then(|result| result)
 }
+
+/// Result of an index-based V4L2 enumeration stopped at a fixed bound.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct BoundedEnumeration<T> {
+    /// Converted entries, in index order.
+    pub(crate) items: Vec<T>,
+    /// `true` when the bound stopped the enumeration (the driver had not signalled the end).
+    pub(crate) truncated: bool,
+}
+
+/// Queries indices `0..max_indices` with `query`, the way V4L2 `VIDIOC_ENUM_*` lists are walked.
+///
+/// `Ok(Some(item))` is an entry, `Ok(None)` an entry that could not be converted (skipped, but
+/// it still counts toward the bound), and an error ends the list (the driver reports `EINVAL`
+/// past the last index). As in `v4l` 0.14, an error at index 0 is returned. Unlike `v4l`, at
+/// most `max_indices` queries are issued, so a driver that never reports the end cannot keep
+/// the caller looping; truncation is deterministic (always the first `max_indices` indices).
+///
+/// # Errors
+///
+/// The error of the index-0 query.
+pub(crate) fn enumerate_indexed_bounded<T, F>(
+    max_indices: u32,
+    mut query: F,
+) -> std::io::Result<BoundedEnumeration<T>>
+where
+    F: FnMut(u32) -> std::io::Result<Option<T>>,
+{
+    let mut items = Vec::new();
+    for index in 0..max_indices {
+        match query(index) {
+            Ok(Some(item)) => items.push(item),
+            Ok(None) => {}
+            Err(e) if index == 0 => return Err(e),
+            Err(_) => {
+                return Ok(BoundedEnumeration {
+                    items,
+                    truncated: false,
+                })
+            }
+        }
+    }
+    Ok(BoundedEnumeration {
+        items,
+        truncated: true,
+    })
+}
+
+/// `VIDIOC_ENUM_FRAMESIZES` for `fourcc`, at most `max_indices` entries, through the guard.
+///
+/// Replaces `v4l::video::Capture::enum_framesizes`, whose loop only ends when the driver
+/// returns an error. Entries of an unknown size type are skipped, as in `v4l` 0.14.
+///
+/// # Errors
+///
+/// The index-0 ioctl error, or [`V4L_PANIC_MESSAGE`] if the conversion panics.
+pub(crate) fn enum_framesizes_guarded(
+    device: &v4l::Device,
+    fourcc: v4l::FourCC,
+    max_indices: u32,
+) -> std::io::Result<BoundedEnumeration<v4l::framesize::FrameSizeEnum>> {
+    let fd = device.handle().fd();
+    guard_v4l_call(|| {
+        enumerate_indexed_bounded(max_indices, |index| {
+            // SAFETY: `v4l2_frmsizeenum` is a plain C struct (integers and a union of integer
+            // structs) for which the all-zero bit pattern is valid.
+            let mut raw: v4l::v4l_sys::v4l2_frmsizeenum = unsafe { std::mem::zeroed() };
+            raw.index = index;
+            raw.pixel_format = fourcc.into();
+            // SAFETY: `fd` is the open descriptor owned by `device`, which outlives this call;
+            // `raw` is a valid, exclusively borrowed `v4l2_frmsizeenum`, the argument type of
+            // `VIDIOC_ENUM_FRAMESIZES`, and the kernel writes only within it.
+            unsafe {
+                v4l::v4l2::ioctl(
+                    fd,
+                    v4l::v4l2::vidioc::VIDIOC_ENUM_FRAMESIZES,
+                    std::ptr::from_mut(&mut raw).cast::<std::os::raw::c_void>(),
+                )
+            }?;
+            Ok(v4l::framesize::FrameSizeEnum::try_from(raw).ok())
+        })
+    })
+    .and_then(|result| result)
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::panic,
+    reason = "Unit tests use direct assertions on the bounded enumeration"
+)]
+mod bounded_enumeration_tests {
+    use super::*;
+    use std::io;
+
+    /// A driver that never reports the end of its list is cut at the bound, deterministically.
+    #[test]
+    fn test_ccb_endless_enumeration_is_truncated_at_the_bound() {
+        for _ in 0..2 {
+            let mut calls = Vec::new();
+            let out = enumerate_indexed_bounded(5, |index| {
+                calls.push(index);
+                Ok(Some(index))
+            })
+            .unwrap();
+            assert_eq!(out.items, vec![0, 1, 2, 3, 4]);
+            assert!(out.truncated, "stopped by the bound, not by the driver");
+            assert_eq!(calls, vec![0, 1, 2, 3, 4], "never queries past the bound");
+        }
+    }
+
+    /// The end of the list (`EINVAL` after index 0) ends the enumeration without truncation.
+    #[test]
+    fn test_ccb_enumeration_ends_at_the_first_error_after_index_zero() {
+        let mut calls = 0u32;
+        let out = enumerate_indexed_bounded(64, |index| {
+            calls += 1;
+            if index < 3 {
+                Ok(Some(index))
+            } else {
+                Err(io::Error::from_raw_os_error(libc::EINVAL))
+            }
+        })
+        .unwrap();
+        assert_eq!(out.items, vec![0, 1, 2]);
+        assert!(!out.truncated);
+        assert_eq!(calls, 4);
+    }
+
+    /// An error at index 0 is reported (no entry at all), like `v4l` 0.14.
+    #[test]
+    fn test_ccb_enumeration_error_at_index_zero_is_an_error() {
+        let out = enumerate_indexed_bounded::<u32, _>(64, |_| {
+            Err(io::Error::from_raw_os_error(libc::ENOTTY))
+        });
+        assert_eq!(out.unwrap_err().raw_os_error(), Some(libc::ENOTTY));
+    }
+
+    /// Unconvertible entries are skipped but still count toward the bound, and a zero bound
+    /// queries nothing.
+    #[test]
+    fn test_ccb_skipped_entries_count_toward_the_bound() {
+        let mut calls = 0u32;
+        let out = enumerate_indexed_bounded(6, |index| {
+            calls += 1;
+            Ok(index.is_multiple_of(2).then_some(index))
+        })
+        .unwrap();
+        assert_eq!(out.items, vec![0, 2, 4]);
+        assert!(out.truncated);
+        assert_eq!(calls, 6);
+
+        let none = enumerate_indexed_bounded::<u32, _>(0, |_| panic!("queried with a zero bound"))
+            .unwrap();
+        assert!(none.items.is_empty() && none.truncated);
+    }
+}

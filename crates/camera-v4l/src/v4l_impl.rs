@@ -86,8 +86,9 @@ trait CaptureDevice {
     fn capabilities(&self) -> std::io::Result<NodeCapabilities>;
     /// `VIDIOC_ENUM_FMT` fourccs (empty on error).
     fn pixel_formats(&self) -> Vec<FourCC>;
-    /// Frame sizes of `fourccs` (`VIDIOC_ENUM_FRAMESIZES`, bounded, empty on error).
-    fn frame_sizes(&self, fourccs: &[FourCC]) -> Vec<(u32, u32)>;
+    /// Frame sizes of `fourccs` (guarded, bounded `VIDIOC_ENUM_FRAMESIZES`, empty on error);
+    /// `path` is used for logging only.
+    fn frame_sizes(&self, path: &Path, fourccs: &[FourCC]) -> Vec<(u32, u32)>;
     /// `VIDIOC_S_FMT`: returns the format the driver granted.
     fn apply_format(&self, requested: &v4l::Format) -> std::io::Result<v4l::Format>;
     /// `VIDIOC_S_PARM`: returns the granted frame interval `(numerator, denominator)`.
@@ -130,8 +131,8 @@ impl CaptureDevice for v4l::Device {
         enum_formats_guarded(self)
     }
 
-    fn frame_sizes(&self, fourccs: &[FourCC]) -> Vec<(u32, u32)> {
-        device_frame_sizes(self, fourccs)
+    fn frame_sizes(&self, path: &Path, fourccs: &[FourCC]) -> Vec<(u32, u32)> {
+        device_frame_sizes(self, path, fourccs)
     }
 
     fn apply_format(&self, requested: &v4l::Format) -> std::io::Result<v4l::Format> {
@@ -782,7 +783,10 @@ fn open_and_stream<B: CaptureBackend>(
     // Classify the opened node on its own hints (`supervisor_sensor_hints`), then negotiate
     // its format. Frames are stamped with the sensor type so an IR node streaming a colour
     // format still takes the IR PAD policy (GitHub #169, #195).
-    let hints = supervisor_sensor_hints(&config.device_path, device.frame_sizes(&fourccs));
+    let hints = supervisor_sensor_hints(
+        &config.device_path,
+        device.frame_sizes(&config.device_path, &fourccs),
+    );
     // A plain `/dev/videoN` path carries no by-id name: look up its alias (GitHub #289). It can
     // only add an IR stamp, never remove one (`supervisor_alias_hints`).
     let hints = supervisor_alias_hints(hints, &config.device_path, Path::new(DEFAULT_BY_ID_DIR));

@@ -258,18 +258,37 @@ pub fn capture_device_from_probe(
 }
 
 /// Enumerates the frame sizes of an open device for every fourcc, bounded by
-/// [`MAX_FRAME_SIZE_HINTS`]. Stepwise ranges contribute their maximum size only.
-pub(crate) fn device_frame_sizes(device: &v4l::Device, fourccs: &[v4l::FourCC]) -> Vec<(u32, u32)> {
+/// [`MAX_FRAME_SIZE_HINTS`] distinct sizes in total. Stepwise ranges contribute their maximum
+/// size only.
+///
+/// Each fourcc is walked through the guarded, bounded `VIDIOC_ENUM_FRAMESIZES` wrapper: at most
+/// [`MAX_FRAME_SIZE_HINTS`] indices per fourcc (a fourcc cannot contribute more distinct sizes
+/// than the total bound), so a driver that never reports the end of its list cannot loop
+/// forever. A truncated list keeps its first indices and is logged at debug level with the
+/// node path only.
+pub(crate) fn device_frame_sizes(
+    device: &v4l::Device,
+    device_path: &Path,
+    fourccs: &[v4l::FourCC],
+) -> Vec<(u32, u32)> {
     use v4l::framesize::FrameSizeEnum;
-    use v4l::video::Capture;
 
+    let max_indices = u32::try_from(MAX_FRAME_SIZE_HINTS).unwrap_or(u32::MAX);
     let mut sizes: Vec<(u32, u32)> = Vec::new();
     for &fourcc in fourccs {
-        let Ok(found) = Capture::enum_framesizes(device, fourcc) else {
+        let Ok(found) = crate::v4l_guard::enum_framesizes_guarded(device, fourcc, max_indices)
+        else {
             continue;
         };
-        for frame_size in found {
-            let size = match frame_size.size {
+        if found.truncated {
+            tracing::debug!(
+                "Size enumeration on '{}' stopped at the bound of {} entries for one pixel format",
+                device_path.display(),
+                max_indices
+            );
+        }
+        for frame_size in found.items {
+            let size = match frame_size {
                 FrameSizeEnum::Discrete(d) => (d.width, d.height),
                 FrameSizeEnum::Stepwise(s) => (s.max_width, s.max_height),
             };
@@ -290,7 +309,7 @@ pub(crate) fn frame_sizes_at(path: &std::path::Path) -> Vec<(u32, u32)> {
         return Vec::new();
     };
     let fourccs = crate::v4l_guard::enum_formats_guarded(&device);
-    device_frame_sizes(&device, &fourccs)
+    device_frame_sizes(&device, path, &fourccs)
 }
 
 /// Sysfs directory listing the V4L2 device nodes.

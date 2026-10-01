@@ -4,6 +4,7 @@
 //!   both public spawn functions use the production `V4lBackend`, which is the only place that
 //!   opens a `v4l::Device`, and the fake backend exists only under `#[cfg(test)]`.
 //! - CCB12: the decision is recorded as an ADR.
+//! - CCB14: frame-size enumeration goes through the guarded, bounded wrapper only.
 
 #![allow(
     clippy::unwrap_used,
@@ -91,5 +92,53 @@ fn test_ccb_decision_recorded() {
     assert!(
         decisions.contains("Capture Backend Seam Below the V4L2 Supervisor"),
         "AI/DECISIONS.md must record the capture-backend seam decision"
+    );
+}
+
+/// CCB14: `VIDIOC_ENUM_FRAMESIZES` is issued only through the guarded, bounded wrapper (extends
+/// CVF4, whose list of raw calls is unchanged): `v4l`'s own `enum_framesizes` loops until the
+/// driver returns an error, so it is never called anywhere in the crate.
+#[test]
+fn test_ccb_frame_size_enumeration_is_guarded_and_bounded() {
+    const GUARD_RS: &str = "crates/camera-v4l/src/v4l_guard.rs";
+    let dir = workspace_root().join("crates/camera-v4l/src");
+    let mut scanned = 0usize;
+    let mut violations = Vec::new();
+    for entry in fs::read_dir(&dir).expect("read crates/camera-v4l/src") {
+        let path = entry.expect("dir entry").path();
+        if path.extension().is_none_or(|x| x != "rs") {
+            continue;
+        }
+        let rel = format!(
+            "crates/camera-v4l/src/{}",
+            path.file_name().unwrap().to_string_lossy()
+        );
+        scanned += 1;
+        if production_code(&read(&rel)).contains("enum_framesizes(") {
+            violations.push(rel);
+        }
+    }
+    assert!(
+        scanned >= 10,
+        "the source scan is vacuous ({scanned} files)"
+    );
+    assert!(
+        violations.is_empty(),
+        "unbounded v4l enum_framesizes called in: {violations:?}"
+    );
+
+    let guard = production_code(&read(GUARD_RS));
+    for needle in [
+        "pub(crate) fn enumerate_indexed_bounded",
+        "pub(crate) fn enum_framesizes_guarded",
+        "VIDIOC_ENUM_FRAMESIZES",
+        "guard_v4l_call(",
+    ] {
+        assert!(guard.contains(needle), "{GUARD_RS} must contain `{needle}`");
+    }
+    let sensor = production_code(&read("crates/camera-v4l/src/sensor.rs"));
+    assert!(
+        sensor.contains("enum_framesizes_guarded(") && sensor.contains("MAX_FRAME_SIZE_HINTS"),
+        "device_frame_sizes must use the guarded wrapper with the MAX_FRAME_SIZE_HINTS bound"
     );
 }

@@ -3,7 +3,7 @@
 - **Date**: 2026-10-01
 - **Issue**: GitHub #198 (review finding CAM-16; no backlog id, so the branch is not registered
   in `BRANCH_TO_ISSUE`) — **Branch**: `test/camera-capture-backend`
-- **Matrix criteria**: CCB1–CCB12 (component `camera-capture-backend`); CHT8 promoted (RGB run)
+- **Matrix criteria**: CCB1–CCB14 (component `camera-capture-backend`); CHT8 promoted (RGB run)
 - **ADR**: 2026-10-01 "Capture Backend Seam Below the V4L2 Supervisor" (`AI/DECISIONS.md`)
 
 ---
@@ -153,10 +153,10 @@ measurement.
 | 9 | Fail-closed unchanged: frames withdrawn on every error, teardown failure `Recovering` not `Dead`, supervisor panic still `Dead` | `supervise` | CCB4–CCB10, `supervision_tests::test_supervisor_panic_marks_camera_dead` |
 | 10 | No new dependency | `Cargo.toml` | diff |
 
-Pre-existing observation (not introduced here, unchanged): `device_frame_sizes` calls
-`Capture::enum_framesizes` outside the guard; in `v4l` 0.14 it converts with `TryFrom` and does
-not panic, but its loop runs until the driver returns an error (our collection is bounded by
-`MAX_FRAME_SIZE_HINTS`, the driver loop is not). Clearance: CLEARED.
+Pre-existing finding: `device_frame_sizes` called `Capture::enum_framesizes` outside the guard;
+in `v4l` 0.14 it converts with `TryFrom` and does not panic, but its loop runs until the driver
+returns an error (our collection was bounded by `MAX_FRAME_SIZE_HINTS`, the driver loop was
+not). Fixed on this branch at the coordinator's request, see §10. Clearance: CLEARED.
 
 ## 6. Implementation (Phase 4)
 
@@ -237,3 +237,43 @@ panic, CCB9 / CAG4) and the double stream + arena teardown panic (abort, ADR 202
 Sweep Lists Partitions Through Their Descriptor; v4l Double Teardown Panic Left Upstream").
 The IR emitter activation itself (`Docs/CAMERA_V4L_CRATE.md`, "IR Sensors and Emitter
 Requirements") is adjacent to, not part of, #198.
+
+Still open: `enum_formats_guarded` delegates to `v4l`'s `enum_formats`, whose
+`VIDIOC_ENUM_FMT` loop has the same "until the driver errors" shape as the frame-size loop fixed
+in §10; it can be bounded the same way with `enumerate_indexed_bounded` in a follow-up.
+
+## 10. Addendum — Guarded, Bounded `VIDIOC_ENUM_FRAMESIZES`
+
+Coordinator request after the first hand-off: close the §5 finding on this branch.
+
+- **Design**: `v4l_guard::enumerate_indexed_bounded(max_indices, query)` walks a V4L2
+  `VIDIOC_ENUM_*` index list: `Ok(Some)` entry, `Ok(None)` skipped entry (still counted), an
+  error ends the list (returned only at index 0, as in `v4l` 0.14), and at most `max_indices`
+  queries are issued (`truncated = true` when the bound, not the driver, stopped it; always the
+  first indices, so deterministic). `v4l_guard::enum_framesizes_guarded(device, fourcc,
+  max_indices)` issues `VIDIOC_ENUM_FRAMESIZES` itself through `v4l::v4l2::ioctl` (two
+  `unsafe` blocks with `// SAFETY:` comments: zeroed POD `v4l2_frmsizeenum`, descriptor owned by
+  the device) inside `guard_v4l_call`, converting with `FrameSizeEnum::try_from`.
+  `sensor::device_frame_sizes(device, device_path, fourccs)` uses it with the existing
+  `MAX_FRAME_SIZE_HINTS` (64) as per-fourcc index bound (a fourcc cannot contribute more distinct
+  sizes than the total bound) and logs a truncation at debug level with the node path only. The
+  `CaptureDevice::frame_sizes` seam method gained the path argument (logging only); callers in
+  `sensor.rs`, `diagnostics.rs` and `v4l_impl.rs` pass it.
+- **Red**: `v4l_guard::bounded_enumeration_tests` (4 tests) failed to compile (`cannot find
+  function enumerate_indexed_bounded`); the new invariant
+  `capture_backend_contract::test_ccb_frame_size_enumeration_is_guarded_and_bounded` failed with
+  `unbounded v4l enum_framesizes called in: ["crates/camera-v4l/src/sensor.rs"]`. Both green
+  after the change. The invariant **adds** a check next to CVF4 (whose raw-call list is not
+  edited): no `enum_framesizes(` call in any `crates/camera-v4l/src` file, the guard defines the
+  bounded wrapper, `sensor.rs` uses it with `MAX_FRAME_SIZE_HINTS`.
+- **Setup-only edit of a test written on this branch**: the fake `frame_sizes` in
+  `v4l_impl/supervisor_tests.rs` takes the new, ignored path argument. No assertion changed.
+- **Hardware**: `soos-admin camera --format json probe /dev/video0` lists `1280x720, 960x540,
+  640x480, 640x360, 320x240, 320x180`, identical to `v4l2-ctl --list-framesizes` for `MJPG` and
+  `YUYV`; the three `SOOS_HW_TESTS` tests pass again.
+- **Gates**: `cargo fmt --all -- --check`; `cargo clippy --locked --all-targets --all-features
+  -p soos-camera-v4l -p soos-daemon -p soos-admin-cli -p soos-invariants -- -D warnings`;
+  `cargo test --locked --all-features -p soos-camera-v4l -p soos-daemon -p soos-admin-cli
+  -p soos-invariants` (1029 passed, 0 failed, 3 ignored hardware tests); the i686 check;
+  `./scripts/candid_review.sh` (unsafe additions reported as confined to the adapter crate). All
+  green.

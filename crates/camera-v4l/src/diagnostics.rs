@@ -220,7 +220,7 @@ fn system_details(dev_path: &Path) -> Result<V4lNodeDetails, ProbeFailure> {
         .map_err(|e| ProbeFailure::from_io_error(&e))?;
     let mut fourccs: Vec<v4l::FourCC> = crate::v4l_guard::enum_formats_guarded(&device);
     fourccs.truncate(MAX_DIAGNOSTIC_FOURCCS);
-    let frame_sizes = device_frame_sizes(&device, &fourccs);
+    let frame_sizes = device_frame_sizes(&device, dev_path, &fourccs);
     Ok(V4lNodeDetails {
         driver: caps.driver,
         card_name: caps.card,

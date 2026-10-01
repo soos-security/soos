@@ -240,7 +240,7 @@ impl CaptureDevice for FakeDevice {
         self.node(|node| node.fourccs.clone()).unwrap_or_default()
     }
 
-    fn frame_sizes(&self, _fourccs: &[FourCC]) -> Vec<(u32, u32)> {
+    fn frame_sizes(&self, _path: &Path, _fourccs: &[FourCC]) -> Vec<(u32, u32)> {
         Vec::new()
     }
 
