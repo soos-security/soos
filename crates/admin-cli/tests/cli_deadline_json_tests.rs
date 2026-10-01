@@ -131,6 +131,8 @@ fn test_pam_test_report_json_escapes_special_characters() {
         uid: 1000,
         service: "svc\"with\\quote\nand newline".to_string(),
         verdict: Verdict::Deny,
+        accepted: true,
+        rejected_reason: None,
         reason_class: ReasonClass::ScoreBelowThreshold,
         latency: LatencyMetrics {
             connect_ms: 0.25,

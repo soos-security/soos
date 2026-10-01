@@ -21,12 +21,15 @@
 //! stderr): the first guarded call installs, once, a wrapper hook that stays silent while the
 //! current thread is inside a guarded call and forwards every other panic to the hook that was
 //! installed before. The hook is never swapped per call (race-free across threads) and never
-//! removed; a hook installed later by the host replaces the filter, which only brings the
-//! report back.
+//! removed. A hook installed later by the host replaces the filter (which only brings the report
+//! back); the host then calls [`install_v4l_panic_hook_filter`] right after installing its hook
+//! (GitHub #291), which wraps the current hook again unless it already is the live filter, so
+//! the filter is never wrapped around itself and no hook is ever dropped.
 
 use std::cell::Cell;
 use std::panic::{self, AssertUnwindSafe};
-use std::sync::Once;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Mutex, Once, PoisonError};
 
 /// Error message of a `v4l` call that panicked. The panic payload is never propagated: it may
 /// quote bytes chosen by the device.
@@ -37,7 +40,41 @@ thread_local! {
     static GUARD_DEPTH: Cell<u32> = const { Cell::new(0) };
 }
 
+/// The first guarded call places the filter once; later calls never touch the hook.
 static HOOK_FILTER: Once = Once::new();
+
+/// Serializes the filter placements of this crate (explicit calls and the first guarded call).
+static PLACEMENT: Mutex<()> = Mutex::new(());
+
+/// Number of times a hook was wrapped by the filter (diagnostics; the generation of the latest
+/// filter).
+static WRAPS: AtomicU64 = AtomicU64::new(0);
+
+/// Generation of the latest filter while it is alive (still installed or chained by a host
+/// hook), `0` once it was dropped.
+static LIVE_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+/// Heap address of the latest filter hook (compared only while it is alive, so a later
+/// allocation at the same address cannot be mistaken for it).
+static LIVE_ADDRESS: AtomicUsize = AtomicUsize::new(0);
+
+/// The process panic hook type of `std::panic::set_hook`.
+type PanicHook = Box<dyn Fn(&panic::PanicHookInfo<'_>) + Sync + Send + 'static>;
+
+/// Owned by a filter hook: clears [`LIVE_GENERATION`] when that filter is dropped (a host
+/// `set_hook` replacing it), before its memory can be reused.
+struct FilterLiveness(u64);
+
+impl Drop for FilterLiveness {
+    fn drop(&mut self) {
+        let _ = LIVE_GENERATION.compare_exchange(self.0, 0, Ordering::SeqCst, Ordering::SeqCst);
+    }
+}
+
+/// Address of the closure behind `hook` (never dereferenced).
+fn hook_address(hook: &PanicHook) -> usize {
+    std::ptr::from_ref(&**hook).cast::<()>().addr()
+}
 
 /// Returns whether the current thread is inside a guarded `v4l` call. Never panics: during
 /// thread-local destruction the answer is `false` (the panic is reported).
@@ -47,23 +84,63 @@ fn inside_guarded_call() -> bool {
         .unwrap_or(false)
 }
 
-/// Installs, once per process, the panic-hook filter described in the module documentation.
+/// Puts the filter on top of the current process hook, unless the current hook already is the
+/// live filter (then it is put back unchanged). The current hook is always kept: it becomes the
+/// filter's `previous` hook or is reinstalled itself.
+fn place_filter_on_top() {
+    let _placement = PLACEMENT.lock().unwrap_or_else(PoisonError::into_inner);
+    let current = panic::take_hook();
+    let is_live_filter = LIVE_GENERATION.load(Ordering::SeqCst) != 0
+        && LIVE_ADDRESS.load(Ordering::SeqCst) == hook_address(&current);
+    let hook = if is_live_filter {
+        current
+    } else {
+        let generation = WRAPS.fetch_add(1, Ordering::SeqCst).saturating_add(1);
+        let liveness = FilterLiveness(generation);
+        let previous = current;
+        let filter: PanicHook = Box::new(move |info| {
+            let _alive = &liveness;
+            if !inside_guarded_call() {
+                previous(info);
+            }
+        });
+        LIVE_ADDRESS.store(hook_address(&filter), Ordering::SeqCst);
+        LIVE_GENERATION.store(generation, Ordering::SeqCst);
+        filter
+    };
+    panic::set_hook(hook);
+}
+
+/// Installs the panic-hook filter described in the module documentation on top of the current
+/// process hook.
 ///
-/// Idempotent and thread-safe; called by the first guarded call. Hosts that install their own
-/// panic hook should do so before (the daemon does, at start-up), so that the filter chains
-/// to it. Does nothing while the current thread is panicking (`set_hook` would panic).
+/// Called once by the first guarded call. A host that installs its own panic hook after that
+/// (or at any time) calls it right after its `set_hook`, so that caught `v4l` panics stay
+/// silent: if the current hook is not the live filter it is wrapped again (and keeps reporting
+/// every other panic), otherwise nothing changes, so repeated calls never stack filters.
+/// Thread-safe. Does nothing while the current thread is panicking (`set_hook` would panic).
 pub fn install_v4l_panic_hook_filter() {
     if std::thread::panicking() {
         return;
     }
-    HOOK_FILTER.call_once(|| {
-        let previous = panic::take_hook();
-        panic::set_hook(Box::new(move |info| {
-            if !inside_guarded_call() {
-                previous(info);
-            }
-        }));
-    });
+    place_filter_on_top();
+    // The filter is in place: the first guarded call must not place it again.
+    HOOK_FILTER.call_once(|| {});
+}
+
+/// Places the filter on the first guarded call of the process only.
+fn install_filter_once() {
+    if std::thread::panicking() {
+        return;
+    }
+    HOOK_FILTER.call_once(place_filter_on_top);
+}
+
+/// Number of times the filter wrapped a process hook since start-up (one per placement that
+/// found another hook on top; diagnostics and tests).
+#[must_use]
+pub fn v4l_panic_hook_filter_installations() -> u64 {
+    WRAPS.load(Ordering::SeqCst)
 }
 
 /// Marks the current thread as inside a guarded call for its lifetime.
@@ -94,7 +171,7 @@ pub fn guard_v4l_call<T, F>(call: F) -> std::io::Result<T>
 where
     F: FnOnce() -> T,
 {
-    install_v4l_panic_hook_filter();
+    install_filter_once();
     let depth = DepthGuard::enter();
     // `AssertUnwindSafe`: the closures only borrow a `v4l::Device` (a file descriptor) and
     // plain values, or own the stream being dropped; a panic leaves nothing half-updated that
