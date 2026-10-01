@@ -841,11 +841,14 @@ fn monotonic_nanos() -> u64 {
     };
     // SAFETY: Stack-allocated timespec pointer is valid and non-null for clock_gettime.
     let ret = unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) };
-    if ret == 0 && ts.tv_sec >= 0 && ts.tv_nsec >= 0 {
-        let sec = ts.tv_sec.cast_unsigned().saturating_mul(1_000_000_000);
-        sec.saturating_add(ts.tv_nsec.cast_unsigned())
-    } else {
-        0
+    if ret != 0 {
+        return 0;
+    }
+    // `try_from` instead of `cast_unsigned`: `time_t` and `c_long` are 32-bit on i686 and
+    // armv7, where the unsigned cast is a `u32` and the product would saturate (GitHub #291).
+    match (u64::try_from(ts.tv_sec), u64::try_from(ts.tv_nsec)) {
+        (Ok(sec), Ok(nsec)) => sec.saturating_mul(1_000_000_000).saturating_add(nsec),
+        _ => 0,
     }
 }
 

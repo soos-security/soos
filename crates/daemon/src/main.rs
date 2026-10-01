@@ -62,6 +62,8 @@ async fn run() -> Result<Duration, Box<dyn std::error::Error>> {
         }
         policy @ PanicMessagePolicy::LogMessage => install_panic_hook_with(policy),
     }
+    // Keep caught v4l panics out of that hook, whatever ran before (GitHub #291).
+    soos_camera_v4l::v4l_guard::install_v4l_panic_hook_filter();
 
     info!("Starting soos-daemon (Linux Local Biometric PAM Daemon)");
 

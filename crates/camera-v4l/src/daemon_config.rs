@@ -7,10 +7,13 @@
 //! types and the vocabulary of [`crate::resolver`] (`parse_sensor_preference`).
 //!
 //! Rules (ADR 2026-10-01 "One Shared `daemon.toml` Camera Reader"):
-//! - the file is opened first with `O_NONBLOCK | O_CLOEXEC`, then the open handle is checked
-//!   (`fstat`, regular file only) and read with the [`MAX_DAEMON_CONFIG_BYTES`] bound, so a FIFO
-//!   or a device node swapped in place of the file (directly or behind a symbolic link) cannot
-//!   block the read. Symbolic links are followed exactly like `soos-daemon` follows them, so the
+//! - the path is first opened with `O_PATH | O_CLOEXEC` (no driver `open`, nothing read), that
+//!   handle is checked (`fstat`, regular file of at most [`MAX_DAEMON_CONFIG_BYTES`]), and only
+//!   then is the pinned inode reopened for reading through `/proc/self/fd/<n>` with
+//!   `O_RDONLY | O_NONBLOCK | O_CLOEXEC`, re-checked (same device and inode, still regular) and
+//!   read with the bound (GitHub #291). A FIFO or a device node swapped in place of the file
+//!   (directly or behind a symbolic link) can neither block the read nor run its driver's
+//!   `open`; without `/proc` the file is reported unreadable (fail closed). Symbolic links are followed exactly like `soos-daemon` follows them, so the
 //!   clients resolve the camera from the very file the daemon reads (symlink-managed `/etc`:
 //!   stow, NixOS, ostree);
 //! - a missing, unreadable, oversized, malformed or non-regular file is a
@@ -20,7 +23,8 @@
 
 use std::fs::OpenOptions;
 use std::io::Read as _;
-use std::os::unix::fs::OpenOptionsExt as _;
+use std::os::fd::{AsRawFd as _, RawFd};
+use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
 use std::path::{Path, PathBuf};
 
 use crate::resolver::parse_sensor_preference;
@@ -171,21 +175,36 @@ pub fn read_daemon_camera_config(path: &Path) -> Result<DaemonCameraConfig, Daem
     Ok(config)
 }
 
-/// Opens `path` without blocking (following symbolic links like `soos-daemon`), checks the open
-/// handle is a regular file, and reads at most [`MAX_DAEMON_CONFIG_BYTES`] of UTF-8 text.
+/// Opens `path` without side effects (following symbolic links like `soos-daemon`), checks the
+/// handle is a regular file, then reopens it for reading and reads at most
+/// [`MAX_DAEMON_CONFIG_BYTES`] of UTF-8 text.
 fn read_bounded_regular_file(path: &Path) -> Result<String, DaemonConfigError> {
-    // O_NONBLOCK: opening a FIFO without a writer returns at once instead of waiting (regular
-    // files ignore the flag), also when a symbolic link points at it. The handle, not the path,
-    // is then checked, so nothing can be swapped between check and read.
-    let file = OpenOptions::new()
+    read_bounded_regular_file_via(path, proc_self_fd_path)
+}
+
+/// The `/proc` magic link that reopens descriptor `fd` of this process.
+fn proc_self_fd_path(fd: RawFd) -> PathBuf {
+    PathBuf::from(format!("/proc/self/fd/{fd}"))
+}
+
+/// [`read_bounded_regular_file`] with the reopen path supplied by `reopen_path` (a test seam:
+/// production always passes [`proc_self_fd_path`]).
+fn read_bounded_regular_file_via(
+    path: &Path,
+    reopen_path: impl Fn(RawFd) -> PathBuf,
+) -> Result<String, DaemonConfigError> {
+    // O_PATH: the path is resolved (symbolic links followed) and pinned without opening the
+    // file itself, so a device node behind the link never runs its driver's `open` (GitHub
+    // #291), and a FIFO without a writer cannot block. The handle, not the path, is checked.
+    let pinned = OpenOptions::new()
         .read(true)
-        .custom_flags(libc::O_NONBLOCK | libc::O_CLOEXEC)
+        .custom_flags(libc::O_PATH | libc::O_CLOEXEC)
         .open(path)
         .map_err(|e| match e.kind() {
             std::io::ErrorKind::NotFound => DaemonConfigError::NotFound,
             kind => DaemonConfigError::Unreadable(kind),
         })?;
-    let metadata = file
+    let metadata = pinned
         .metadata()
         .map_err(|e| DaemonConfigError::Unreadable(e.kind()))?;
     if !metadata.is_file() {
@@ -197,6 +216,27 @@ fn read_bounded_regular_file(path: &Path) -> Result<String, DaemonConfigError> {
     if metadata.len() > MAX_DAEMON_CONFIG_BYTES {
         return Err(too_large);
     }
+    // Reopen the pinned inode (never the path again) for reading; O_NONBLOCK stays as a second
+    // line of defence. Any failure, `/proc` not being mounted included, is reported as
+    // unreadable (the callers then apply the defaults with a note), never as "not found".
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK | libc::O_CLOEXEC)
+        .open(reopen_path(pinned.as_raw_fd()))
+        .map_err(|e| DaemonConfigError::Unreadable(e.kind()))?;
+    let reopened = file
+        .metadata()
+        .map_err(|e| DaemonConfigError::Unreadable(e.kind()))?;
+    if !reopened.is_file() {
+        return Err(DaemonConfigError::NotARegularFile);
+    }
+    if reopened.dev() != metadata.dev() || reopened.ino() != metadata.ino() {
+        return Err(DaemonConfigError::Unreadable(std::io::ErrorKind::Other));
+    }
+    drop(pinned);
+    if reopened.len() > MAX_DAEMON_CONFIG_BYTES {
+        return Err(too_large);
+    }
     let mut bytes = Vec::new();
     file.take(MAX_DAEMON_CONFIG_BYTES.saturating_add(1))
         .read_to_end(&mut bytes)
@@ -206,4 +246,65 @@ fn read_bounded_regular_file(path: &Path) -> Result<String, DaemonConfigError> {
         return Err(too_large);
     }
     String::from_utf8(bytes).map_err(|_| DaemonConfigError::Malformed)
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    reason = "Unit tests of the reopen seam use direct assertions"
+)]
+mod tests {
+    use super::*;
+
+    fn config_file(dir: &Path, name: &str) -> PathBuf {
+        let path = dir.join(name);
+        std::fs::write(&path, "[pipeline]\ncamera_device = \"/dev/video8\"\n").unwrap();
+        path
+    }
+
+    /// CDF1: the production seam reads through `/proc/self/fd`.
+    #[test]
+    fn test_cdf_reopen_through_proc_reads_the_pinned_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = config_file(dir.path(), "daemon.toml");
+        let text = read_bounded_regular_file_via(&path, proc_self_fd_path).unwrap();
+        assert!(text.contains("/dev/video8"));
+        assert_eq!(proc_self_fd_path(7), PathBuf::from("/proc/self/fd/7"));
+    }
+
+    /// CDF1: without `/proc`, the reader fails closed as unreadable (never "not found").
+    #[test]
+    fn test_cdf_missing_proc_is_unreadable_not_not_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = config_file(dir.path(), "daemon.toml");
+        let absent = dir.path().join("no-proc");
+        let err =
+            read_bounded_regular_file_via(&path, |fd| absent.join(fd.to_string())).unwrap_err();
+        assert_eq!(
+            err,
+            DaemonConfigError::Unreadable(std::io::ErrorKind::NotFound)
+        );
+    }
+
+    /// CDF1: a reopened handle naming another inode is refused.
+    #[test]
+    fn test_cdf_reopened_handle_must_be_the_pinned_inode() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = config_file(dir.path(), "daemon.toml");
+        let other = config_file(dir.path(), "other.toml");
+        let err = read_bounded_regular_file_via(&path, |_| other.clone()).unwrap_err();
+        assert_eq!(
+            err,
+            DaemonConfigError::Unreadable(std::io::ErrorKind::Other)
+        );
+    }
+
+    /// CDF1: a reopened handle that is not a regular file is refused.
+    #[test]
+    fn test_cdf_reopened_handle_must_stay_regular() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = config_file(dir.path(), "daemon.toml");
+        let err = read_bounded_regular_file_via(&path, |_| PathBuf::from("/dev/null")).unwrap_err();
+        assert_eq!(err, DaemonConfigError::NotARegularFile);
+    }
 }
