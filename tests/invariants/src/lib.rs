@@ -147,6 +147,11 @@ mod unit_start_guard_contract;
 #[cfg(all(test, unix))]
 mod model_download_size_contract;
 
+/// The real-face LFW evaluation harness is ignored, env-gated and keeps its data outside the
+/// repository (GitHub #278, row EVR6).
+#[cfg(all(test, unix))]
+mod embedding_evaluation_contract;
+
 /// Camera diagnostics are metadata-only and built on the shared resolver (GitHub #256).
 #[cfg(test)]
 mod camera_diagnostics_contract;

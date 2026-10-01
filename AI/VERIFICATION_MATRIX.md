@@ -1443,6 +1443,20 @@ Every PAM-12 point was already fixed on `main` (strict codec, PCZ1-PCZ2; tagged 
 
 ---
 
+## Component: `embedding-real-face-evaluation` (GitHub #278 fourth item — real-face LFW evaluation of the shipped pipeline, walkthrough 160)
+
+| # | Criterion | Test Method | Status |
+|---|---|---|---|
+| EVR1 | The LFW evaluation harness runs the production path (MJPEG decode, `OrtScrfdDetector` with the production confidence / NMS defaults, `align_face_112`, `OrtEmbeddingExtractor`), loads every model through `ModelRegistry` + `verify_integrity`, and refuses to run without `SOOS_EVAL_LFW_DIR` / `SOOS_EVAL_LFW_PAIRS` / `SOOS_MODELS_DIR` or with data inside the repository | Vision tests (`embedding_lfw_evaluation_tests::test_lfw_harness_refuses_to_run_without_env_vars`, `embedding_lfw_evaluation_tests::test_lfw_harness_refuses_data_inside_the_repository`) | ✅ Verified |
+| EVR2 | The official `pairs.txt` parser is bounded and rejects traversal names, zero image numbers, truncated files and unbounded headers; the FAR threshold, 10-fold accuracy and summary arithmetic are exact on synthetic scores | Vision tests (`embedding_lfw_evaluation_tests::test_lfw_pairs_parser_reads_the_official_layout_and_rejects_traversal`, `embedding_lfw_evaluation_tests::test_lfw_metrics_threshold_at_far_and_ten_fold_accuracy`) | ✅ Verified |
+| EVR3 | Real faces (LFW, 6000 official pairs and 29.2 M extended impostor pairs, 55 of 7701 images failed to detect): RGB input beats the production BGR order (10-fold accuracy 0.9738 vs 0.9668, TAR@FAR 1e-3 0.886 vs 0.836, TAR@FAR 1e-4 0.746 vs 0.666) and the `/127.5` versus `/128` divisor changes no metric by more than 0.001 | Ignored real-face evaluation (`embedding_lfw_evaluation_tests::test_lfw_real_face_evaluation_report`, run 2026-10-01, aggregates in walkthrough 160 §3) | ✅ Verified |
+| EVR4 | `match_threshold = 0.70` is measured at an impostor rate of about 1e-6 (BGR) / 1e-7 (RGB) with TAR 0.117 / 0.152 on LFW; the documented target FAR <= 1e-3 is reached at a cosine of 0.402 (BGR) / 0.394 (RGB) | Ignored real-face evaluation (`embedding_lfw_evaluation_tests::test_lfw_real_face_evaluation_report`, walkthrough 160 §3) | ✅ Verified |
+| EVR5 | Licence survey of lighter embedding models with sources (walkthrough 160 §4); the only permissively licensed, directly downloadable ONNX candidate (OpenCV Zoo SFace, Apache-2.0 files, undocumented training data) is attested by SHA-256 and measured with the same harness: 10-fold accuracy 0.9848, TAR@FAR 1e-4 0.984, embedding p50 10.3 ms vs 35.3 ms for ArcFace | Ignored real-face evaluation with `SOOS_EVAL_CANDIDATE_DIR` (`embedding_lfw_evaluation_tests::test_lfw_real_face_evaluation_report`) | ✅ Verified |
+| EVR6 | The evaluation stays `#[ignore]`d and env-gated, its downloader `scripts/fetch_lfw_eval.sh` is HTTPS-only, size-bounded, SHA-256 verified and refuses (without creating) a cache inside the repository, and no LFW artefact exists in the source tree | Invariant tests (`embedding_evaluation_contract::test_lfw_evaluation_harness_is_ignored_and_env_gated`, `embedding_evaluation_contract::test_lfw_fetch_script_refuses_a_cache_inside_the_repository`, `embedding_evaluation_contract::test_no_lfw_data_is_in_the_source_tree`) | ✅ Verified |
+| EVR7 | Owner decision on the ADR proposal "Real-Face Embedding Evaluation and Recalibration Proposal": RGB switch with a new template binding and re-enrollment, recalibrated `match_threshold`, and/or SFace adoption under a new manifest id | Requires the owner decision, approved changes of the pinned contract tests and a check on real enrollment captures | ⏳ Pending |
+
+---
+
 ## Component: `p2-review-followups` (GitHub #285, non-blocking findings of the P2 batch reviews)
 
 | ID | Criterion | Evidence | Status |

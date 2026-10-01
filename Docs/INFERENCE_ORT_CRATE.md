@@ -169,6 +169,16 @@ left to the project owner (ADR 2026-09-30 "Embedding Pre-processing Evaluation")
 repository declares **no licence**, so the manifest `license = "MIT"` of this entry is not
 substantiated by the source.
 
+**Real-face follow-up (walkthrough 160).** The ignored LFW harness
+`crates/vision/tests/embedding_lfw_evaluation_tests.rs` runs SCRFD, alignment and this
+extractor on 7701 LFW images. On real faces, RGB beats the production BGR order: 10-fold
+accuracy is 0.9738 against 0.9668, and TAR at FAR 1e-3 is 0.886 against 0.836. The divisor
+makes no measurable difference. `match_threshold = 0.70` sits at an impostor rate of about
+1e-6, while FAR 1e-3 falls at a cosine of about 0.40. The OpenCV Zoo SFace ONNX (Apache-2.0
+file, 128-D, NCHW, raw RGB 0..255) scores higher on the same harness (0.9848). The production
+defaults are unchanged pending the owner decision (ADR 2026-10-01 "Real-Face Embedding
+Evaluation and Recalibration Proposal", Proposed).
+
 ### `PadDetector` Trait
 ```rust
 pub trait PadDetector: Send + Sync {

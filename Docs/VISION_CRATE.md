@@ -218,6 +218,24 @@ after the confidence check and before the PAD model and the embedding extractor 
 - `soos-daemon` maps both errors to an unusable capture (`FrameEvaluation::no_face()`): `Deny` /
   `NoFace` when no frame of the request is usable, never `Allow` and never `InternalError`.
 
+#### 2.4.4 Real-Face LFW Evaluation Harness (`tests/embedding_lfw_evaluation_tests.rs`, GitHub #278)
+
+An ignored test, `test_lfw_real_face_evaluation_report`, measures the shipped verification path
+on the public LFW benchmark. It uses the production MJPEG decode, `OrtScrfdDetector` with
+`DEFAULT_MIN_FACE_CONFIDENCE` / `DEFAULT_NMS_IOU_THRESHOLD`, `align_face_112` and
+`OrtEmbeddingExtractor`. It reports 10-fold accuracy, TAR and the cosine threshold at FAR 1e-2
+to 1e-5, FAR and TAR at fixed thresholds (0.40 to 0.70), score distributions,
+failure-to-detect counts and per-stage latency. It covers each pre-processing variant (BGR or
+RGB, `/127.5` or `/128`) and an optional attested candidate model (`SOOS_EVAL_CANDIDATE_DIR`).
+`scripts/fetch_lfw_eval.sh` fetches the data into `~/.cache/soos-eval`. The download is
+bounded and SHA-256 verified, and the script refuses a cache inside the repository.
+
+The harness refuses to run unless `SOOS_EVAL_LFW_DIR`, `SOOS_EVAL_LFW_PAIRS` and
+`SOOS_MODELS_DIR` are set. Images, crops, embeddings and per-pair scores never leave memory,
+and only aggregates are printed. Results and the reproducible command are in walkthrough 160.
+The recalibration proposal built on them is ADR 2026-10-01 "Real-Face Embedding Evaluation and
+Recalibration Proposal" (Proposed). The production defaults are unchanged.
+
 ### 2.5 Letterbox Padding & Coordinate Projection (`letterbox.rs`)
 
 Next-generation face detection (SCRFD) operates on uniform 640×640 square inputs. To accommodate arbitrary camera aspect ratios (e.g. 640×480, 1280×720, 1920×1080) without distortion or stretching:

@@ -3408,10 +3408,12 @@ name = "soos-vision"
 version = "0.1.0"
 dependencies = [
  "jpeg-decoder",
+ "ort",
  "proptest",
  "soos-camera-v4l",
  "soos-inference-ort",
  "soos-test-fixtures",
+ "tempfile",
  "thiserror 2.0.20",
  "zeroize",
 ]
