@@ -124,7 +124,10 @@ tests/docker/
   `/run/soos` with `install -d -m 0750 -o root -g soos`; `mock_daemon.py` binds its socket
   under a restrictive umask, sets it `0660` and group `soos` (`--socket-group`,
   `--socket-mode`; any "other" bit is refused), and every case asserts `750 root:soos` /
-  `660 root:soos` (`assert_socket_modes`) before calling PAM.
+  `660 root:soos` (`assert_socket_modes`) before calling PAM. The socket is bound,
+  configured and listening under a private staging name before it is renamed to the
+  `--socket` path, so a caller that connects as soon as the path exists is never refused
+  (GitHub #293). The `expired` mode closes its window 60 s before the send-time clock read.
 - Validate the Fedora `authselect` custom profile (activation with `with-faillock`,
   `authselect check`, generated `system-auth`/`password-auth` ordering, `/etc/nsswitch.conf`
   preserved, password fallback via `pamtester`, rollback through `scripts/uninstall.sh`):
