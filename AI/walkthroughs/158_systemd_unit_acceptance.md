@@ -113,3 +113,41 @@ GitHub), comparable to the apt, crates.io and rustup downloads of the other Dock
 - SUA7: measure start-to-ready on the slowest supported target CPU with the real camera (the
   CI runner measurement appears in the job log).
 - DHX4 (GDM waiting for the socket on a real host) stays pending.
+
+## Candid review fix: host isolation of the privileged container
+
+The candid review of the combined batch found that the first version of
+`tests/docker/Dockerfile.systemd` did not mask `systemd-sysctl.service`. Under `--privileged`,
+`/proc/sys` is writable, so each container boot applied the image's `sysctl.d` files to the
+**host** kernel: on the development host `kernel.sysrq` went from the host's 16 to the image's
+176 and `fs.protected_regular` from 1 to 2 (all other `kernel.*`/`vm.*`/`fs.*` values matched;
+network sysctls are per network namespace). The owner restores them with `sudo sysctl --system`
+(or a reboot); the harness itself never had root on the host and could not undo it.
+
+Fix:
+
+- The image masks every boot unit that would write host kernel or firmware state through the
+  writable `/proc/sys` and `/sys` (`systemd-sysctl`, `systemd-modules-load`, `systemd-binfmt` and
+  the binfmt_misc mount/automount, rfkill, backlight, random seed, TPM/PCR and TPM2 setup units),
+  with `ln -sf /dev/null ... || exit 1` so a failure breaks the image build, and removes the TPM
+  and rfkill nodes before `exec /sbin/init` (`udev` is not installed in the image).
+- The install stage asserts each unit is `masked` right after boot.
+- The host `kernel.*`, `vm.*` and `fs.*` sysctls readable without root are snapshotted before
+  the container boots and compared after the run; any difference fails the test.
+- The isolation claims in the script header, its usage text and
+  `Docs/PACKAGING_AND_PROVISIONING.md` §8.1.1 now describe these mitigations (and that
+  `--privileged` keeps `CAP_MKNOD`, so the image must never run untrusted code) instead of
+  "the host is never modified". The Docker volumes and images are kept on purpose as caches.
+- New invariant `test_systemd_acceptance_container_never_writes_host_state` (matrix SUA8).
+
+Evidence (`--models host`, after the fix): "Host-state boot units are masked (13 units ...)",
+"Host kernel.*, vm.* and fs.* sysctls are unchanged after the privileged container ran", all
+parts green, start-to-ready 444 ms. The red case of the host comparison was not re-run on
+purpose (it would modify the host kernel again; the host still carries the values of the first
+run until the owner restores them).
+
+Also from that review: the SCRFD and ArcFace `source_url`s in `models/manifest.toml` are pinned
+to Hugging Face revisions (`ykk648/face_lib@10005fec…`, `garavv/arcface-onnx@224c23cb…`; both
+downloads verified against the manifest SHA-256), so an upstream re-upload cannot turn the
+required `systemd-unit` CI check red; `Docs/INFERENCE_ORT_CRATE.md` NGM8 now states the raw
+`[0, 255]` PAD range.

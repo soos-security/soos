@@ -44,12 +44,21 @@
 #             (HTTPS, size-bounded, SHA-256 verified); used by CI
 #   none      parts 2 and 5 are skipped with an explicit SKIPPED notice
 #
-# Isolation: the host is never modified. The release build runs in the
-# tests/docker/Dockerfile.ubuntu image with Docker volumes for the target
-# directory and the cargo registry (nothing is written into the workspace,
-# which is mounted read-only). The systemd container runs --privileged with a
-# private cgroup namespace and tmpfs /run; its V4L2 nodes are deleted before
-# systemd starts and the daemon only uses the mock camera.
+# Isolation: the release build runs in the tests/docker/Dockerfile.ubuntu image
+# with Docker volumes for the target directory and the cargo registry (nothing
+# is written into the workspace, which is mounted read-only). The systemd
+# container runs --privileged with a private cgroup namespace and tmpfs /run.
+# --privileged makes /proc/sys, /sys and the host device nodes writable, so the
+# image masks every boot unit that would write host kernel or firmware state
+# (sysctl.d, modules-load.d, binfmt_misc, rfkill, backlight, TPM/PCR, random
+# seed; asserted below with `systemctl is-enabled` = masked) and deletes the
+# V4L2, media, TPM and rfkill nodes before systemd starts; the daemon only uses
+# the mock camera. As a final guard the host kernel.*, vm.* and fs.* sysctls
+# are snapshotted before the container boots and compared after the run: any
+# difference fails the test. --privileged still grants CAP_MKNOD, so these are
+# mitigations, not a hard barrier: the image must never run untrusted code.
+# The Docker volumes soos-sua-target and soos-sua-cargo-registry and the two
+# images are kept on purpose as build caches.
 #
 # Usage:
 #   bash tests/docker/systemd_unit_acceptance_test.sh [--models auto|host|download|none]
@@ -104,7 +113,8 @@ Boots ubuntu:24.04 with systemd as PID 1 in Docker, installs the freshly built
 release soos-daemon and packaging/soos-daemon.service with scripts/install.sh,
 and asserts the unit's behaviour under the real systemd manager (condition
 failed without models, bounded restarts, Type=notify readiness, clean stop,
-systemd-analyze verify). The host system is never modified.
+systemd-analyze verify). Host kernel sysctls are snapshotted and compared
+after the run; boot units that would write host state are masked.
 
 Options:
   --models <mode>          Model source for the readiness and stop parts:
@@ -199,6 +209,29 @@ if [[ "${MODE}" = "host" ]]; then
     if [[ "${MODELS}" = "host" ]]; then
         run_args+=(-v "${HOST_MODELS_DIR}:${IN_CONTAINER_HOST_MODELS}:ro")
     fi
+    # Host isolation guard: kernel-global sysctls readable without root, before
+    # and after the privileged container ran (compared in host_sysctls_unchanged).
+    # `sysctl -a` exits non-zero for keys a non-root user may not read: keep what
+    # it printed (pipefail would otherwise abort the run under set -e).
+    host_sysctl_snapshot() {
+        { sysctl -a 2>/dev/null || true; } | grep -E '^(kernel|vm|fs)\.' \
+            | { grep -vE '^(kernel\.(random\.|ns_last_pid|pty\.nr|sched_domain)|fs\.(dentry-state|inode-nr|inode-state|file-nr|quota\.)|vm\.stat_refresh)' || true; } \
+            | sort
+    }
+    HOST_SYSCTL_BEFORE="$(host_sysctl_snapshot)"
+    [[ -n "${HOST_SYSCTL_BEFORE}" ]] || fail "could not snapshot the host sysctls (sysctl -a)"
+    # shellcheck disable=SC2329 # invoked below and by the EXIT trap path
+    host_sysctls_unchanged() {
+        local after changed
+        after="$(host_sysctl_snapshot)"
+        changed="$(diff <(echo "${HOST_SYSCTL_BEFORE}") <(echo "${after}") || true)"
+        if [[ -n "${changed}" ]]; then
+            error "the privileged container changed host sysctls:"
+            echo "${changed}" >&2
+            return 1
+        fi
+    }
+
     info "Booting systemd as PID 1 in ${RUNTIME_IMAGE} (container ${CONTAINER})..."
     "${DOCKER}" run "${run_args[@]}" "${RUNTIME_IMAGE}" >/dev/null
 
@@ -213,6 +246,8 @@ if [[ "${MODE}" = "host" ]]; then
     "${DOCKER}" restart --time 30 "${CONTAINER}" >/dev/null
     stage after-reboot
 
+    host_sysctls_unchanged || fail "host isolation broken: kernel sysctls differ after the run"
+    success "Host kernel.*, vm.* and fs.* sysctls are unchanged after the privileged container ran."
     success "systemd unit acceptance passed (models: ${MODELS})."
     exit 0
 fi
@@ -236,6 +271,37 @@ expect_prop() {
 }
 
 now_ms() { echo $(( $(date +%s%N) / 1000000 )); }
+
+# Boot units that would write host kernel or firmware state from a --privileged
+# container; tests/docker/Dockerfile.systemd masks them (host isolation).
+readonly HOST_STATE_UNITS=(
+    systemd-sysctl.service
+    systemd-modules-load.service
+    systemd-binfmt.service
+    proc-sys-fs-binfmt_misc.automount
+    proc-sys-fs-binfmt_misc.mount
+    systemd-rfkill.service
+    systemd-rfkill.socket
+    systemd-random-seed.service
+    systemd-pcrphase.service
+    systemd-pcrphase-sysinit.service
+    systemd-pcrmachine.service
+    systemd-tpm2-setup-early.service
+    systemd-tpm2-setup.service
+)
+
+assert_host_state_units_masked() {
+    local unit state
+    for unit in "${HOST_STATE_UNITS[@]}"; do
+        state="$(systemctl is-enabled "${unit}" 2>/dev/null || true)"
+        [[ "${state}" = "masked" || "${state}" = "masked-runtime" ]] \
+            || fail "${unit} must be masked in the privileged container (is-enabled: '${state:-unknown}')"
+    done
+    if systemctl is-active --quiet systemd-sysctl.service; then
+        fail "systemd-sysctl.service ran in the privileged container"
+    fi
+    success "Host-state boot units are masked (${#HOST_STATE_UNITS[@]} units: sysctl, modules-load, binfmt, rfkill, random seed, TPM/PCR)."
+}
 
 journal_cursor() {
     journalctl --show-cursor -n 0 --no-pager 2>/dev/null | sed -n 's/^-- cursor: //p'
@@ -537,6 +603,7 @@ part5_clean_stop() {
 case "${STAGE}" in
     install)
         wait_for_boot
+        assert_host_state_units_masked
         info "Live install with scripts/install.sh (fresh release artifacts, no models yet)..."
         bash /workspace/scripts/install.sh --artifact-dir /target/release --allow-missing \
             --skip-models --distro none

@@ -365,3 +365,77 @@ fn test_ci_runs_systemd_acceptance_and_gates_on_it() {
         "systemd-unit must be part of the CI Success aggregate: {needs}"
     );
 }
+
+/// SUA8: the privileged systemd container never writes host kernel or firmware state. The
+/// image masks every boot unit that would apply settings to the host through the writable
+/// `/proc/sys` and `/sys` of a `--privileged` container (an unmasked `systemd-sysctl.service`
+/// once loosened the host `kernel.sysrq` to the image's 176), removes the TPM and rfkill nodes
+/// before init, the harness asserts the masks at run time, and it fails when the host
+/// `kernel.*` / `vm.*` / `fs.*` sysctls differ after the run.
+#[test]
+fn test_systemd_acceptance_container_never_writes_host_state() {
+    let dockerfile = read(DOCKERFILE);
+    let harness = read(HARNESS);
+    for unit in [
+        "systemd-sysctl.service",
+        "systemd-modules-load.service",
+        "systemd-binfmt.service",
+        "proc-sys-fs-binfmt_misc.automount",
+        "proc-sys-fs-binfmt_misc.mount",
+        "systemd-rfkill.service",
+        "systemd-rfkill.socket",
+        "systemd-backlight@.service",
+        "systemd-random-seed.service",
+        "systemd-pcrphase.service",
+        "systemd-pcrmachine.service",
+        "systemd-tpm2-setup-early.service",
+        "systemd-tpm2-setup.service",
+    ] {
+        assert!(
+            dockerfile.contains(unit),
+            "Dockerfile.systemd must mask {unit} (host isolation under --privileged)"
+        );
+    }
+    assert!(
+        dockerfile.contains("ln -sf /dev/null \"/etc/systemd/system/${unit}\" || exit 1"),
+        "the host-state units must be masked without `|| true`, so a failure breaks the build"
+    );
+    assert!(
+        dockerfile.contains("/dev/tpm*") && dockerfile.contains("/dev/rfkill"),
+        "the TPM and rfkill nodes must be removed before systemd starts"
+    );
+    let install = harness
+        .split("    install)\n")
+        .nth(1)
+        .expect("the install stage exists");
+    let wait = position(install, "wait_for_boot", "install stage boot wait");
+    let masked = position(
+        install,
+        "assert_host_state_units_masked",
+        "install stage mask check",
+    );
+    assert!(
+        wait < masked,
+        "the install stage must assert the masks right after boot"
+    );
+    for needle in [
+        "HOST_SYSCTL_BEFORE=\"$(host_sysctl_snapshot)\"",
+        "host_sysctls_unchanged || fail",
+        "grep -E '^(kernel|vm|fs)\\.'",
+    ] {
+        assert!(
+            harness.contains(needle),
+            "the harness must snapshot and compare the host sysctls ({needle})"
+        );
+    }
+    let snapshot = position(&harness, "HOST_SYSCTL_BEFORE=", "sysctl snapshot");
+    let boot = position(
+        &harness,
+        "\"${DOCKER}\" run \"${run_args[@]}\"",
+        "container boot",
+    );
+    assert!(
+        snapshot < boot,
+        "the host sysctls must be snapshotted before the privileged container boots"
+    );
+}

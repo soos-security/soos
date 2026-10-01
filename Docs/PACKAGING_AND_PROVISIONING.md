@@ -293,8 +293,13 @@ installed unit with `systemd-analyze security soos-daemon` on the target host.
 ### 8.1.1 Acceptance under a real systemd (GitHub #211)
 
 `tests/docker/systemd_unit_acceptance_test.sh` proves the unit's behaviour under systemd as
-PID 1 (privileged `ubuntu:24.04` container, `tests/docker/Dockerfile.systemd`; the host is
-never modified and the container's V4L2 nodes are removed before systemd starts). It rebuilds
+PID 1 (privileged `ubuntu:24.04` container, `tests/docker/Dockerfile.systemd`). Because
+`--privileged` makes `/proc/sys`, `/sys` and the host device nodes writable, the image masks every
+boot unit that would write host state (`systemd-sysctl`, `systemd-modules-load`,
+`systemd-binfmt` and binfmt_misc, rfkill, backlight, random seed, TPM/PCR units), removes the
+V4L2, media, TPM and rfkill nodes before systemd starts, and the script fails if the host
+`kernel.*`, `vm.*` or `fs.*` sysctls differ after the run (`--privileged` keeps `CAP_MKNOD`, so
+these are mitigations: the image never runs untrusted code). It rebuilds
 `soos-daemon` and `soos-admin` (`cargo build --locked --release`), installs them with
 `scripts/install.sh --allow-missing --skip-models --distro none`, and asserts:
 

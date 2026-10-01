@@ -42,10 +42,41 @@ RUN systemctl mask \
         motd-news.timer \
     || true
 
+# Host isolation (candid review of #211): --privileged makes /proc/sys, /sys and
+# the host device nodes writable from the container, and several boot units
+# would apply container settings to the HOST kernel and firmware (sysctl.d,
+# modules-load.d, binfmt_misc, rfkill/backlight state, TPM PCR extends and
+# TPM2 setup, the random seed). Mask every one of them; `systemctl mask` with
+# no `|| true` so a renamed unit fails the image build instead of silently
+# running. The acceptance script also asserts they are masked at run time.
+RUN for unit in \
+        systemd-sysctl.service \
+        systemd-modules-load.service \
+        systemd-binfmt.service \
+        proc-sys-fs-binfmt_misc.automount \
+        proc-sys-fs-binfmt_misc.mount \
+        systemd-rfkill.service \
+        systemd-rfkill.socket \
+        systemd-backlight@.service \
+        systemd-random-seed.service \
+        systemd-pcrphase.service \
+        systemd-pcrphase-sysinit.service \
+        systemd-pcrphase-initrd.service \
+        systemd-pcrmachine.service \
+        systemd-pcrfs-root.service \
+        systemd-pcrfs@.service \
+        systemd-pcrextend@.service \
+        systemd-tpm2-setup-early.service \
+        systemd-tpm2-setup.service; do \
+        ln -sf /dev/null "/etc/systemd/system/${unit}" || exit 1; \
+    done
+
 STOPSIGNAL SIGRTMIN+3
 
 # The container runs --privileged (systemd and the unit sandbox need mount,
 # network and cgroup namespaces), which copies every host device node into
-# /dev. Remove the V4L2 and media nodes before systemd starts, so nothing in
-# the container can ever open a host camera; the daemon uses the mock camera.
-CMD ["/bin/bash", "-c", "rm -rf /dev/video* /dev/media* /dev/v4l && exec /sbin/init"]
+# /dev. Remove the V4L2, media, TPM and rfkill nodes before systemd starts, so
+# nothing in the container opens a host camera or TPM; the daemon uses the mock
+# camera. This is a mitigation, not a hard barrier: --privileged keeps
+# CAP_MKNOD, so the image must never run untrusted code.
+CMD ["/bin/bash", "-c", "rm -rf /dev/tpm* /dev/rfkill && rm -rf /dev/video* /dev/media* /dev/v4l && exec /sbin/init"]
