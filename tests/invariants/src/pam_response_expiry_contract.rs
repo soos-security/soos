@@ -1,4 +1,4 @@
-//! PAM response expiry and protocol follow-ups (GitHub #287, rows PRE6-PRE10).
+//! PAM response expiry and protocol follow-ups (GitHub #287, rows PRE6-PRE9 and PRE11).
 //!
 //! - PRE6: the Docker mock daemon can stamp responses from CLOCK_MONOTONIC exactly like
 //!   `soos-daemon`, and every PAM matrix / distro / physical invocation asks for it.
@@ -238,12 +238,16 @@ fn test_pre_every_mock_invocation_requests_monotonic_stamps() {
     );
 }
 
-/// PRE7: PAM test fixtures never hard-code a response stamp (a literal is either zero or
-/// long past on any booted machine, so the enforcing client would reject it).
+/// PRE7: PAM and `soos-admin test-pam` test fixtures never hard-code a response stamp (a
+/// literal is either zero or long past on any booted machine, so the enforcing client
+/// would reject it).
 #[test]
 fn test_pre_pam_fixtures_never_send_literal_response_stamps() {
     let mut violations = Vec::new();
-    let mut stack = vec![workspace_root().join("crates/pam/tests")];
+    let mut stack = vec![
+        workspace_root().join("crates/pam/tests"),
+        workspace_root().join("crates/admin-cli/tests"),
+    ];
     while let Some(dir) = stack.pop() {
         for entry in fs::read_dir(&dir).expect("read dir") {
             let path = entry.expect("entry").path();
@@ -272,6 +276,32 @@ fn test_pre_pam_fixtures_never_send_literal_response_stamps() {
         "PAM fixtures must stamp responses from CLOCK_MONOTONIC (common/stamps.rs):\n{}",
         violations.join("\n")
     );
+}
+
+/// PRE11: `soos-admin test-pam` and `pam_soos.so` apply the same staleness guard with the
+/// single skew constant owned by the protocol crate (no local copy of the bound).
+#[test]
+fn test_pre_test_pam_and_pam_share_the_freshness_rule() {
+    let protocol = read("crates/protocol/src/types.rs");
+    assert!(
+        protocol.contains("pub const MAX_RESPONSE_FUTURE_SKEW_NS: u64 = 10_000_000;"),
+        "the skew bound lives in crates/protocol/src/types.rs"
+    );
+    for rel in ["crates/pam/src/ipc.rs", "crates/admin-cli/src/test_pam.rs"] {
+        let src = read(rel);
+        assert!(
+            src.contains("check_freshness("),
+            "{rel} must call Response::check_freshness"
+        );
+        assert!(
+            src.contains("MAX_RESPONSE_FUTURE_SKEW_NS"),
+            "{rel} must pass the shared MAX_RESPONSE_FUTURE_SKEW_NS"
+        );
+        assert!(
+            !src.contains("const MAX_RESPONSE_FUTURE_SKEW_NS"),
+            "{rel} must not redefine the skew bound"
+        );
+    }
 }
 
 /// PRE8: the expiry enforcement is recorded in the ADR register and the protocol docs.

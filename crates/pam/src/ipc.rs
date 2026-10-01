@@ -30,13 +30,11 @@ use crate::config::PamConfig;
 /// Maximum timeout budget dedicated to telemetry event notification (milliseconds).
 pub const EVENT_TIMEOUT_MS: u64 = 20;
 
-/// Largest amount (nanoseconds, 10 ms) by which a `Response::issued_monotonic_ns` may lead
-/// the client's CLOCK_MONOTONIC reading taken after the response arrived (GitHub #287).
-///
-/// `soos-daemon` and `pam_soos.so` read the same system-wide CLOCK_MONOTONIC, so a
-/// legitimate response is never dated in the future; the bound only absorbs clock read
-/// granularity. Anything later is rejected as `IpcError::StaleResponse(FutureDated)`.
-pub const MAX_RESPONSE_FUTURE_SKEW_NS: u64 = 10_000_000;
+/// Future-skew bound of the response staleness guard (10 ms, GitHub #287), owned by the
+/// protocol crate so `soos-admin test-pam` applies exactly the same rule. A response
+/// issued later than that after the client's clock reading is
+/// `IpcError::StaleResponse(FutureDated)`.
+pub use soos_protocol::types::MAX_RESPONSE_FUTURE_SKEW_NS;
 
 /// IPC communication error types. All variants fail closed into `PAM_IGNORE`.
 #[derive(Debug)]

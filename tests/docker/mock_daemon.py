@@ -20,17 +20,17 @@ The malformed modes (GitHub #189) each put exactly one defect on the wire; three
 them carry an Allow verdict that the PAM module must never honor.
 
 Response stamps (GitHub #287): pam_soos.so rejects a Response whose CLOCK_MONOTONIC
-issued/expires stamps are unset, inconsistent, future-dated or expired. Pass
-`--stamps monotonic` to stamp like soos-daemon (issued = now, expires = now + 2 s, read
-when the response is sent); every PAM matrix, distro and physical script does, so each
-malformed mode keeps exactly one defect. The default `--stamps zero` sends 0/0 (the
-byte-stable frames pinned by the wire-shape invariant), which the module rejects.
+issued/expires stamps are unset, inconsistent, future-dated or expired. By default
+(`--stamps monotonic`) every response is stamped like soos-daemon (issued = now,
+expires = now + 2 s, read when the response is sent), so each malformed mode keeps
+exactly one defect; the scripts also pass the flag explicitly. `--stamps zero` sends
+the unstamped form 0/0, which the module rejects (Docker case T15).
 
 Every received Event (e.g. PasswordFailed) is recorded with --record and never
 answered; Requests are answered according to --mode.
 
 Usage:
-  python3 mock_daemon.py --socket /run/soos/daemon.sock --mode allow [--stamps monotonic]
+  python3 mock_daemon.py --socket /run/soos/daemon.sock --mode allow [--stamps monotonic|zero]
                          [--delay 0.5] [--one-shot]
                          [--record /tmp/events.log]
                          [--socket-group soos] [--socket-mode 0660]
@@ -222,11 +222,10 @@ def main():
     parser.add_argument(
         "--stamps",
         choices=["zero", "monotonic"],
-        default="zero",
+        default="monotonic",
         help=(
-            "Response issued/expires stamps: 'monotonic' stamps like soos-daemon (required for "
-            "any Allow the PAM module should honor); 'zero' (default, byte-stable frames) sends "
-            "the unstamped form the module rejects"
+            "Response issued/expires stamps: 'monotonic' (default) stamps like soos-daemon; "
+            "'zero' sends the unstamped form (0, 0) that the PAM module rejects"
         ),
     )
     parser.add_argument("--delay", type=float, default=0.5, help="Delay in seconds for timeout mode")

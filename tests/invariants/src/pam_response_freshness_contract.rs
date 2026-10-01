@@ -1,11 +1,13 @@
-//! Response freshness documentation contract (GitHub #219, review finding PAM-06).
+//! Response freshness documentation contract (GitHub #219 review finding PAM-06, GitHub #287).
 //!
-//! The PAM client does not validate `Response::issued_monotonic_ns` /
-//! `Response::expires_monotonic_ns`: replay protection is the fresh, single-use 256-bit
-//! `request_id` that the client generates per connection and checks bit-for-bit, plus the
-//! client's own cumulative deadline (ADR 2026-09-30 "Response Timestamps Are Informational").
-//! The normative protocol documents must therefore not claim that the expiration timestamp
-//! prevents replay, and must name the mechanism that actually does.
+//! Replay protection is the fresh, single-use 256-bit `request_id` that the client generates
+//! per connection and checks bit-for-bit, plus the client's own cumulative deadline. Since
+//! GitHub #287 the PAM client also enforces `Response::issued_monotonic_ns` /
+//! `Response::expires_monotonic_ns` as a staleness guard: an expired or unstamped response
+//! yields `PAM_IGNORE` (ADR 2026-10-01 "PAM Client Enforces Response Expiry", superseding in
+//! part ADR 2026-09-30 "Response Timestamps Are Informational"). The normative protocol
+//! documents must therefore not claim that the expiration timestamp prevents replay, must
+//! name the mechanism that actually does, and must state the enforced expiry rule.
 
 #![allow(
     clippy::unwrap_used,
@@ -71,10 +73,37 @@ fn test_ipc_protocol_documents_the_real_replay_protection() {
         .lines()
         .find(|l| l.contains("`expires_monotonic_ns: u64`"))
         .expect("Docs/IPC_PROTOCOL.md documents expires_monotonic_ns");
+    // GitHub #287 (owner-approved migration 2026-10-01): the entry must state the enforced
+    // rule instead of "informational" / "not validated".
     assert!(
-        expires_line.contains("informational") && expires_line.contains("not validated"),
-        "the expires_monotonic_ns entry must say it is informational and not validated by the \
-         PAM client, got: {expires_line}"
+        expires_line.contains("Enforced by the PAM client")
+            && expires_line.contains("IpcError::StaleResponse")
+            && expires_line.contains("PAM_IGNORE"),
+        "the expires_monotonic_ns entry must say the PAM client enforces it and that a stale \
+         response yields PAM_IGNORE, got: {expires_line}"
+    );
+    let freshness = &doc[doc
+        .find("Response Freshness")
+        .expect("Response Freshness section")..];
+    for (rule, error) in [
+        ("`now >= expires`", "`Expired`"),
+        (
+            "`issued_monotonic_ns == 0` or `expires_monotonic_ns == 0`",
+            "`Unstamped`",
+        ),
+    ] {
+        let row = freshness
+            .lines()
+            .find(|l| l.contains(rule))
+            .unwrap_or_else(|| panic!("Response Freshness must list the rule {rule}"));
+        assert!(
+            row.contains(error),
+            "rule {rule} must map to {error}: {row}"
+        );
+    }
+    assert!(
+        freshness.contains("`IpcError::StaleResponse` and therefore `PAM_IGNORE`"),
+        "Response Freshness must state that a stale response yields PAM_IGNORE"
     );
     assert!(
         doc.contains("Response Freshness"),

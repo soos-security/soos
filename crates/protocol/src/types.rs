@@ -367,6 +367,14 @@ impl Response {
     }
 }
 
+/// Largest amount (nanoseconds, 10 ms) by which `Response::issued_monotonic_ns` may lead the
+/// client's `CLOCK_MONOTONIC` reading taken after the response arrived (GitHub #287).
+///
+/// `soos-daemon` and its clients read the same system-wide `CLOCK_MONOTONIC`, so a legitimate
+/// response is never dated in the future; the bound only absorbs clock read granularity.
+/// Used by `pam_soos.so` and `soos-admin test-pam` with [`Response::check_freshness`].
+pub const MAX_RESPONSE_FUTURE_SKEW_NS: u64 = 10_000_000;
+
 /// Why a `Response`'s `CLOCK_MONOTONIC` stamps are not acceptable (GitHub #287).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResponseFreshnessError {

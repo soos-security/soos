@@ -111,7 +111,7 @@ Returned by the daemon to the PAM module (and as the refusal of a `Status` or `P
   - `ProtocolError`: Malformed message, mismatched UID, rate-limit reached.
 - `reason_class: ReasonClass`: Internal telemetry diagnostic (must not alter PAM fallback semantics). It is **never** shown to the user: the PAM module maps every `Deny` to one neutral text and every other failure to one generic text, so a PAD rejection is indistinguishable from a non-match at the lock screen (review PAM-03, GitHub #174; see `Docs/PAM_MODULE.md` §8).
 - `issued_monotonic_ns: u64`: Generation timestamp (CLOCK_MONOTONIC). `soos-daemon` stamps it from its monotonic clock on every verdict path (always `> 0`); when the clock fails it sends `0` with `expires_monotonic_ns = 0` and never `Allow` (GitHub #258). The PAM client rejects a response issued more than `MAX_RESPONSE_FUTURE_SKEW_NS` (10 ms) after its own clock reading.
-- `expires_monotonic_ns: u64`: Daemon-side expiry (`issued + 2 s`, `RESPONSE_VALIDITY_NS`). Enforced by the PAM client since GitHub #287 (until then it was informational and not validated by the PAM client): a response read at or after this instant is `IpcError::StaleResponse` and yields `PAM_IGNORE`. Replay protection itself is described in "Response Freshness" below.
+- `expires_monotonic_ns: u64`: Daemon-side expiry (`issued + 2 s`, `RESPONSE_VALIDITY_NS`). Enforced by the PAM client since GitHub #287: a response read at or after this instant, or an unstamped one, is `IpcError::StaleResponse` and yields `PAM_IGNORE`. Replay protection itself is described in "Response Freshness" below.
 
 #### Response Freshness (GitHub #219, #287)
 The PAM client rejects replayed responses through two mechanisms:
@@ -125,10 +125,10 @@ On top of these, a **staleness guard** (GitHub #287, ADR 2026-10-01 "PAM Client 
 | client clock read failed (`now == 0`) | `ClockUnavailable` |
 | `issued_monotonic_ns == 0` or `expires_monotonic_ns == 0` | `Unstamped` |
 | `expires < issued` | `Inverted` |
-| `issued > now + MAX_RESPONSE_FUTURE_SKEW_NS` (10 ms, `crates/pam/src/ipc.rs`) | `FutureDated` |
+| `issued > now + MAX_RESPONSE_FUTURE_SKEW_NS` (10 ms, `crates/protocol/src/types.rs`, shared by `pam_soos.so` and `soos-admin test-pam`) | `FutureDated` |
 | `now >= expires` | `Expired` |
 
-The guard applies to every verdict (an expired `Deny` also degrades to the generic unavailable text). The client and the daemon must share CLOCK_MONOTONIC (same host, same time namespace), which the `deadline_monotonic_ns` contract already assumes. Test daemons must stamp real values: the PAM fixtures use `crates/pam/tests/common/stamps.rs` and the Docker mock daemon is started with `--stamps monotonic` (§2 note on hand-written encoders).
+The guard applies to every verdict (an expired `Deny` also degrades to the generic unavailable text). The client and the daemon must share CLOCK_MONOTONIC (same host, same time namespace), which the `deadline_monotonic_ns` contract already assumes. Test daemons must stamp real values: the PAM fixtures use `crates/pam/tests/common/stamps.rs` and the Docker mock daemon stamps from CLOCK_MONOTONIC by default (`--stamps monotonic`; `--stamps zero` sends the unstamped form for Docker case T15). `soos-admin test-pam` runs the same `check_freshness` with the same constant and reports a stale response as `PAM_IGNORE (stale daemon response: <rule>; ...)`.
 
 ### `Event`
 Best-effort telemetry notification sent by PAM following password failures:

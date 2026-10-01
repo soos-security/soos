@@ -7,6 +7,9 @@
     reason = "Contractual test suites use assertions, unwrap, and expect"
 )]
 
+#[path = "../../pam/tests/common/stamps.rs"]
+mod stamps;
+
 use std::io::{Read, Write};
 use std::os::unix::net::UnixListener;
 use std::thread;
@@ -44,13 +47,14 @@ fn test_simulate_pam_auth_allow() {
         // Artificial delay for latency measurement
         thread::sleep(Duration::from_millis(5));
 
+        let (issued, expires) = stamps::fresh_stamps();
         let resp = Response {
             version: CURRENT_VERSION,
             request_id: req.request_id,
             verdict: Verdict::Allow,
             reason_class: ReasonClass::FaceMatch,
-            issued_monotonic_ns: 0,
-            expires_monotonic_ns: 0,
+            issued_monotonic_ns: issued,
+            expires_monotonic_ns: expires,
         };
 
         let encoded = encode(&resp).expect("encode response");
@@ -94,13 +98,14 @@ fn test_simulate_pam_auth_deny_yields_pam_ignore() {
 
         let req: Request = decode(&full).expect("decode request");
 
+        let (issued, expires) = stamps::fresh_stamps();
         let resp = Response {
             version: CURRENT_VERSION,
             request_id: req.request_id,
             verdict: Verdict::Deny,
             reason_class: ReasonClass::ScoreBelowThreshold,
-            issued_monotonic_ns: 0,
-            expires_monotonic_ns: 0,
+            issued_monotonic_ns: issued,
+            expires_monotonic_ns: expires,
         };
 
         let encoded = encode(&resp).expect("encode response");

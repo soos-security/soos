@@ -52,5 +52,6 @@ pub use message::{
 };
 pub use types::{
     Event, EventKind, ReasonClass, Request, RequestKind, Response, ResponseFreshnessError,
-    StatusResponse, Verdict, CURRENT_VERSION, MAX_MESSAGE_SIZE, MAX_SERVICE_LEN, REQUEST_ID_LEN,
+    StatusResponse, Verdict, CURRENT_VERSION, MAX_MESSAGE_SIZE, MAX_RESPONSE_FUTURE_SKEW_NS,
+    MAX_SERVICE_LEN, REQUEST_ID_LEN,
 };
