@@ -83,7 +83,8 @@ pub const REQUIRED_MODEL_IDS: [&str; 3] =
 /// (`""`, `"auto"`, `"default"`, `/dev/v4l/by-id/default-camera`) are ignored. Without an explicit
 /// device the shared resolver [`soos_camera_v4l::resolve_camera_device`] auto-detects the capture
 /// node matching `[pipeline] sensor_preference` (default `PreferIr`) and returns its stable
-/// `/dev/v4l/by-id/` alias (Criterion C4).
+/// `/dev/v4l/by-id/` alias (Criterion C4). The notes about the configuration are dropped here;
+/// use [`resolve_camera_device_from_config_reported`] to obtain them.
 pub fn resolve_camera_device_from_config(
     cli_device: Option<PathBuf>,
     config_path: Option<&Path>,
@@ -101,42 +102,92 @@ pub fn resolve_camera_device_from_config_with(
     config_path: Option<&Path>,
     enumerator: &dyn soos_camera_v4l::CameraEnumerator,
 ) -> PathBuf {
-    let (configured_device, sensor_preference) = read_daemon_camera_settings(config_path);
+    resolve_camera_device_from_config_reported(cli_device, config_path, enumerator).path
+}
+
+/// Camera device chosen by [`resolve_camera_device_from_config_reported`] and the notes about
+/// the daemon configuration it was read from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CameraDeviceChoice {
+    /// The resolved device path.
+    pub path: PathBuf,
+    /// Why some or all of `daemon.toml` was not applied (unusable file, or a key ignored
+    /// because of its type or value). Names keys, never their values. Empty when the
+    /// configuration was applied as written or no configuration path was given.
+    pub notes: Vec<String>,
+}
+
+/// Resolves the camera device like [`resolve_camera_device_from_config_with`] and also returns
+/// the notes about the configuration (`soos-gui` logs them; `soos-enroll` prints
+/// [`camera_config_notes`] before it opens the camera).
+///
+/// `daemon.toml` is read by the shared reader [`soos_camera_v4l::daemon_config`] (GitHub #289):
+/// symbolic links are followed like `soos-daemon` follows them; a missing, unreadable, oversized,
+/// malformed or non-regular file yields the soos-daemon defaults with one note; a key of the wrong type falls back to its own default
+/// with a note naming it, and the other key still applies.
+pub fn resolve_camera_device_from_config_reported(
+    cli_device: Option<PathBuf>,
+    config_path: Option<&Path>,
+    enumerator: &dyn soos_camera_v4l::CameraEnumerator,
+) -> CameraDeviceChoice {
+    let (settings, notes) = config_path
+        .map(read_camera_settings_with_notes)
+        .unwrap_or_default();
 
     let explicit = cli_device
         .filter(|p| !soos_camera_v4l::is_auto_camera_device(p))
-        .or_else(|| configured_device.filter(|p| !soos_camera_v4l::is_auto_camera_device(p)));
+        .or_else(|| {
+            settings
+                .camera_device
+                .filter(|p| !soos_camera_v4l::is_auto_camera_device(p))
+        });
+    let sensor_preference = settings.sensor_preference.unwrap_or_default();
 
-    soos_camera_v4l::resolve_camera_device(explicit.as_deref(), sensor_preference, enumerator).path
+    CameraDeviceChoice {
+        path: soos_camera_v4l::resolve_camera_device(
+            explicit.as_deref(),
+            sensor_preference,
+            enumerator,
+        )
+        .path,
+        notes,
+    }
 }
 
-/// Reads `[pipeline] camera_device` and `[pipeline] sensor_preference` from the daemon
-/// configuration, using the daemon's shared vocabulary. A missing or unreadable file yields
-/// `(None, PreferIr)`, the daemon defaults.
-fn read_daemon_camera_settings(
-    config_path: Option<&Path>,
-) -> (Option<PathBuf>, soos_camera_v4l::SensorPreference) {
-    let default = (None, soos_camera_v4l::SensorPreference::default());
-    let Some(cfg) = config_path.filter(|p| p.is_file()) else {
-        return default;
-    };
-    let Ok(content) = std::fs::read_to_string(cfg) else {
-        return default;
-    };
-    let Ok(value) = content.parse::<toml::Value>() else {
-        return default;
-    };
-    let pipeline = value.get("pipeline");
-    let device = pipeline
-        .and_then(|p| p.get("camera_device"))
-        .and_then(|d| d.as_str())
-        .map(PathBuf::from);
-    let preference = pipeline
-        .and_then(|p| p.get("sensor_preference"))
-        .and_then(|s| s.as_str())
-        .and_then(soos_camera_v4l::parse_sensor_preference)
-        .unwrap_or_default();
-    (device, preference)
+/// Notes about the daemon configuration at `config_path`, as
+/// [`resolve_camera_device_from_config_reported`] reports them: empty when the file applies as
+/// written, otherwise one line per problem naming the file (sanitized for display) and the key,
+/// never a value.
+pub fn camera_config_notes(config_path: &Path) -> Vec<String> {
+    read_camera_settings_with_notes(config_path).1
+}
+
+/// Reads the camera settings through the shared reader and turns its outcome into notes.
+fn read_camera_settings_with_notes(
+    path: &Path,
+) -> (
+    soos_camera_v4l::daemon_config::DaemonCameraSettings,
+    Vec<String>,
+) {
+    // Same sanitizer as the `soos-admin camera list` note: control characters and
+    // bidirectional overrides in the operator-supplied path become `?` (GitHub #289).
+    let shown = soos_camera_v4l::diagnostics::sanitize_display_text(&path.to_string_lossy());
+    match soos_camera_v4l::daemon_config::read_daemon_camera_config(path) {
+        Ok(config) => {
+            let notes = config
+                .warnings()
+                .into_iter()
+                .map(|warning| format!("camera settings: {shown}: {warning}"))
+                .collect();
+            (config.settings, notes)
+        }
+        Err(err) => (
+            soos_camera_v4l::daemon_config::DaemonCameraSettings::default(),
+            vec![format!(
+                "camera settings: {shown} {err}; using the soos-daemon defaults"
+            )],
+        ),
+    }
 }
 
 /// Resolves the camera device path from an optional CLI argument only (no daemon configuration),
@@ -1591,7 +1642,9 @@ pub fn build_full_service(cli: &Cli) -> Result<EnrollmentService, EnrollmentCliE
 
     let raw_camera = resolve_camera_device_from_config(
         cli.camera_device.clone(),
-        Some(Path::new("/etc/soos/daemon.toml")),
+        Some(Path::new(
+            soos_camera_v4l::daemon_config::DEFAULT_DAEMON_CONFIG_PATH,
+        )),
     );
     let device_path = validate_camera_device_path(&raw_camera)?;
 

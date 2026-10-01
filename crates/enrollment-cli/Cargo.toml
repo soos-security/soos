@@ -30,7 +30,6 @@ soos-inference-ort = { workspace = true }
 soos-vision = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-toml = { workspace = true }
 
 [dev-dependencies]
 soos-test-fixtures = { workspace = true }

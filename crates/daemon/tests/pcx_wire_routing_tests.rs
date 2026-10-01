@@ -96,6 +96,16 @@ async fn read_frame(client: &mut UnixStream) -> Option<Vec<u8>> {
 /// Unprivileged UID the test thread switches to when the suite is started as root.
 const UNPRIVILEGED_TEST_UID: libc::uid_t = 65_534;
 
+/// Per-thread `setresuid` syscall number taking 32-bit UIDs.
+///
+/// On legacy 32-bit x86 (and 32-bit ARM) `SYS_setresuid` is the historical 16-bit-UID call;
+/// the 32-bit-UID variant is `SYS_setresuid32` (GitHub #289). The 64-bit targets (`x86_64`,
+/// `aarch64`, ...) have a single 32-bit-UID `SYS_setresuid`.
+#[cfg(any(target_arch = "x86", target_arch = "arm"))]
+const SETRESUID_SYSCALL: libc::c_long = libc::SYS_setresuid32;
+#[cfg(not(any(target_arch = "x86", target_arch = "arm")))]
+const SETRESUID_SYSCALL: libc::c_long = libc::SYS_setresuid;
+
 /// Sets the real, effective and saved UID of the CALLING THREAD only.
 ///
 /// The raw syscall is used on purpose: glibc's `setresuid` wrapper (and `nix`) broadcast the
@@ -104,9 +114,10 @@ const UNPRIVILEGED_TEST_UID: libc::uid_t = 65_534;
 /// The kernel keeps credentials per thread, so the raw call changes only this test's thread
 /// (and threads it creates afterwards).
 fn set_thread_uids(ruid: libc::uid_t, euid: libc::uid_t, suid: libc::uid_t) -> std::io::Result<()> {
-    // SAFETY: SYS_setresuid takes three uid_t values and reads or writes no memory of this
-    // process; the return value is checked below.
-    let ret = unsafe { libc::syscall(libc::SYS_setresuid, ruid, euid, suid) };
+    // SAFETY: SETRESUID_SYSCALL (SYS_setresuid, or SYS_setresuid32 on 32-bit x86 / ARM) takes three
+    // 32-bit uid_t values and reads or writes no memory of this process; the return value is
+    // checked below.
+    let ret = unsafe { libc::syscall(SETRESUID_SYSCALL, ruid, euid, suid) };
     if ret == 0 {
         Ok(())
     } else {

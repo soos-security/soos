@@ -17,6 +17,9 @@
     reason = "Contractual test suite utilizes direct assertions, unwrap, and indexing"
 )]
 
+#[path = "common/stamps.rs"]
+mod stamps;
+
 use std::io::{Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
@@ -46,13 +49,14 @@ fn read_request(stream: &mut UnixStream) -> Option<Request> {
 }
 
 fn denial(request_id: [u8; 32], reason: ReasonClass) -> Vec<u8> {
+    let (issued, expires) = stamps::fresh_stamps();
     let resp = Response {
         version: CURRENT_VERSION,
         request_id,
         verdict: Verdict::ProtocolError,
         reason_class: reason,
-        issued_monotonic_ns: 1,
-        expires_monotonic_ns: 2,
+        issued_monotonic_ns: issued,
+        expires_monotonic_ns: expires,
     };
     encode(&resp).unwrap()
 }
