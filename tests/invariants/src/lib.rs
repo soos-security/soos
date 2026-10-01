@@ -189,6 +189,12 @@ mod diagnostics_parity_contract;
 #[cfg(all(test, unix))]
 mod pam_response_expiry_contract;
 
+/// `soos-daemon.service` driven by a real systemd PID 1 in Docker: the harness exists, is
+/// wired in CI and asserts condition failed, start-limit-hit and READY ordering (GitHub #211,
+/// rows IRP8, SUA1–SUA6).
+#[cfg(all(test, unix))]
+mod systemd_unit_acceptance_contract;
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,

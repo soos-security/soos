@@ -19,6 +19,8 @@
 #   6c. package-deploy — Ubuntu .deb build, dpkg install, enrollment, password
 #                        fallback, rollback and package content checks in
 #                        ubuntu:24.04 (after lint)
+#   6d. systemd-unit   — soos-daemon.service driven by a real systemd (PID 1)
+#                        in ubuntu:24.04 (after lint)
 #   7. ci-success      — single aggregate status for merge gating
 #   8. distro-pam-matrix — PAM matrix T1–T15 in the Fedora and Arch sandbox
 #                        images (push to main and manual dispatch only)
@@ -281,6 +283,28 @@ jobs:
         run: ./tests/docker/pam_rollback_test.sh
 
   # ---------------------------------------------------------------------------
+  # Job 6d: packaging/soos-daemon.service under a real systemd (PID 1) in a
+  # privileged ubuntu:24.04 container (GitHub #211): fresh release daemon
+  # installed by scripts/install.sh, systemd-analyze verify, condition failed
+  # without models (also at boot), start-limit-hit after 5 failed starts,
+  # Type=notify readiness with the attested models (downloaded and SHA-256
+  # verified by scripts/download_models.sh) and a clean stop.
+  # ---------------------------------------------------------------------------
+  systemd-unit:
+    name: "systemd unit acceptance (Docker)"
+    if: github.event_name != 'schedule'
+    needs: lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Drive soos-daemon.service with systemd as PID 1 (ubuntu:24.04)
+        run: ./tests/docker/systemd_unit_acceptance_test.sh --models download
+
+  # ---------------------------------------------------------------------------
   # Job 6c: Ubuntu packaging and deployment path (GitHub #168). Builds the
   # release workspace and the .deb in ubuntu:24.04, installs it with dpkg,
   # enrolls through soos-enroll --mock, checks facial auth, password fallback
@@ -385,7 +409,7 @@ jobs:
   ci-success:
     name: "CI Success"
     if: always() && github.event_name != 'schedule'
-    needs: [lint, clippy, test, security, pam-integration, authselect-profile, pam-rollback, package-deploy]
+    needs: [lint, clippy, test, security, pam-integration, authselect-profile, pam-rollback, package-deploy, systemd-unit]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:

@@ -290,6 +290,26 @@ Deliberately **not** set: `ProtectProc=invisible` / `ProcSubset=pid` (they would
 `systemd-analyze security --offline=yes` reports an exposure of 1.7 (7.5 before). Check the
 installed unit with `systemd-analyze security soos-daemon` on the target host.
 
+### 8.1.1 Acceptance under a real systemd (GitHub #211)
+
+`tests/docker/systemd_unit_acceptance_test.sh` proves the unit's behaviour under systemd as
+PID 1 (privileged `ubuntu:24.04` container, `tests/docker/Dockerfile.systemd`; the host is
+never modified and the container's V4L2 nodes are removed before systemd starts). It rebuilds
+`soos-daemon` and `soos-admin` (`cargo build --locked --release`), installs them with
+`scripts/install.sh --allow-missing --skip-models --distro none`, and asserts:
+
+| Part | Behaviour observed with `systemctl` |
+|---|---|
+| 4 | `systemd-analyze verify` exits 0 with no unknown or ignored directive; every hardening option and the shipped timing values are what systemd loaded |
+| 1 | Without `/var/lib/soos/models/manifest.toml`: `systemctl start` exits 0, the unit stays `inactive` with `ConditionResult=no`, the daemon never runs, no restart; the same at boot after a container reboot |
+| 3 | Manifest present, corrupt models: 5 runs, then "Start request repeated too quickly" (about 11 s, inside `StartLimitIntervalSec=320`); a later start is refused. systemd 255 reports `Result=exit-code`, the first failure of the run |
+| 2 | Models deployed by `scripts/download_models.sh`, `[pipeline] use_mock_camera = true`: `systemctl start` returns after `READY=1` with the socket already bound (`0660 root:soos`); start-to-ready about 0.7–0.8 s on a 16-thread laptop CPU; `scripts/wait_daemon_ready.sh` reports healthy |
+| 5 | `systemctl stop`: graceful drain, exit 0, socket removed, no SIGKILL |
+
+`--models auto` (default) copies the host's `/var/lib/soos/models` read-only when present,
+otherwise parts 2 and 5 are reported as SKIPPED; `--models download` (CI job `systemd-unit`)
+downloads and verifies them inside the container.
+
 ### 8.2 `daemon.toml` is validated fail-closed
 
 `DaemonConfig::validate()` runs whenever `/etc/soos/daemon.toml` (or `--config`) is loaded; any
