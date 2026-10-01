@@ -1,152 +1,126 @@
 # Candid Review Report
 
-- **Date**: 2026-09-30
-- **Target Branch**: `fix/p2-batch-b`
-- **Base (merge-base)**: `41d933d` (`origin/main`, PR #283)
-- **Reviewed-Diff-Fingerprint**: `9c21946e9d649d1a05056bd6f5c3a0e82257507d60d90d25e3ee4d620acd4b43`
-- **Audited Files**: `.github/workflows/fuzz.yml`, `AI/{ARCHITECTURE,DECISIONS,VERIFICATION_MATRIX}.md`, `AI/walkthroughs/{73,108,109,110,121,122,123,124,126,127}_*.md`, `Docs/{BIOMETRIC_STORE_CRATE,CAMERA_V4L_CRATE,DISTRIBUTION_DEPLOYMENT,ENROLLMENT_CLI,EVIDENCE_STORE_CRATE,GUI_APPLICATION,IPC_PROTOCOL,PAM_MODULE}.md`, `crates/admin-cli/{Cargo.toml,src/{args,gdm,main,pam_stack,status,test_pam}.rs,tests/{cli_deadline_json_tests,gdm_followup_tests}.rs}`, `crates/biometric-store/{src/{lib,store,template}.rs,tests/bounded_read_tests.rs}`, `crates/camera-v4l/{src/{capture,config,deep_grey,lib,mock,resolver,sensor,v4l_impl}.rs,tests/{capture_validation_tests,enumeration_tests,hardware_smoke_tests,sensor_hint_classification_tests}.rs}`, `crates/daemon/{src/{dispatcher,lib,preview,preview_image}.rs,tests/preview_downscale_tests.rs}`, `crates/enrollment-cli/{src/{args,html_report,lib,main,service,shred}.rs,tests/{cli_hygiene_tests,device_resolution_hermetic_tests,enroll_fresh_frames_tests,import_stdin_overwrite_tests,list_bounded_tests,shred_tests}.rs}`, `crates/evidence-store/{src/store.rs,tests/{opaque_suffix_tests,permissions_tests}.rs}`, `crates/gui/{src/{app,privileged}.rs,tests/{import_privacy_tests,ipc_camera_failure_tests}.rs}`, `crates/pam/{src/{ipc,lib}.rs,tests/{common/mod,deadline_uid_tests,pam_bindings_tests,pam_feedback_tests,pam_silent_tests,strict_decode_tests}.rs}`, `crates/protocol/fuzz/{.gitignore,Cargo.lock,Cargo.toml,README.md,fuzz_targets/decode_preview.rs}`, `crates/protocol/src/{codec,lib,message,types}.rs`, `crates/protocol/tests/{preview_property_tests,strict_codec_tests,tag_trailer_codec_tests}.rs`, `tests/docker/mock_daemon.py`, `tests/invariants/src/{camera_docs_contract,cli_hygiene_contract,enroll_list_metadata_contract,lib,pam_feedback_contract,pam_handle_guard_removal_contract,pam_response_freshness_contract,protocol_codec_contract}.rs`
+- **Date**: 2026-10-01
+- **Target Branch**: `fix/p3-p2-remaining-batch`
+- **Base (merge-base)**: `abd6016` (`origin/main`)
+- **Reviewed-Diff-Fingerprint**: `1a6b44856a3d2514ae11519a6e0397699b87c5fd4c788f2a2fb021a8e324009b`
+- **Audited Files**: `.agents/skills/{candid-reviewer/SKILL.md,dev-workflow/references/project-facts.md}`, `.dockerignore`, `AGENTS.md`, `AI/{ARCHITECTURE,DECISIONS,MOCK_STRATEGY,VERIFICATION_MATRIX}.md`, `AI/plan_evaluation_report.md` (deleted), `AI/walkthroughs/{135..146}_*.md`, `Cargo.lock`, `Dockerfile`, `Docs/{BIOMETRIC_STORE_CRATE,CAMERA_V4L_CRATE,CI_CD_AND_SECURITY,DAEMON,DISTRIBUTION_DEPLOYMENT,ENROLLMENT_CLI,EVIDENCE_STORE_CRATE,GUI_APPLICATION,INFERENCE_ORT_CRATE,IPC_PROTOCOL,PACKAGING_AND_PROVISIONING,PAM_MODULE,VISION_CRATE}.md`, `README.md`, `crates/admin-cli/{Cargo.toml,src/{args,camera,lib,main}.rs,tests/{camera_command_tests,status_tests,test_pam_tests,wire_tag_tests}.rs}`, `crates/biometric-store/{src/{crypto,lib,store}.rs,tests/{aad_binding_tests,aad_migration_tests}.rs}`, `crates/camera-v4l/{src/{capture,diagnostics,lib,resolver,sensor,v4l_impl}.rs,tests/camera_diagnostics_tests.rs}`, `crates/daemon/{Cargo.toml,src/{config,dispatcher,lib,logging,main,pipeline,sd_notify,shutdown}.rs,tests/{config_tests,graceful_shutdown_tests,pad_ensemble_wiring_tests,pad_evidence_tests,panic_hook_tests,pcx_wire_routing_tests,request_id_logging_tests,response_timestamp_tests,sd_notify_tests,status_memory_locked_tests,systemd_readiness_tests}.rs}`, `crates/enrollment-cli/{src/{guided_enrollment,service}.rs,tests/quality_gate_report_tests.rs}`, `crates/evidence-store/{src/{crypto,store}.rs,tests/{aad_binding_tests,aad_codec_tests}.rs}`, `crates/gui/{src/worker.rs,tests/guided_spoof_without_embedding_tests.rs}`, `crates/inference-ort/{src/embedding.rs,tests/{embedding_io_contract_tests,embedding_preprocessing_evaluation_tests,manifest_tests}.rs}`, `crates/pam/{build.rs,src/{config,ipc,lib,syslog}.rs,tests/{config_service_boundary_tests,config_warning_tests,fault_injection_tests,pam_fail_quiet_tests,pam_handle_tests,panic_hook_capture_tests,panic_hook_chain_tests,pcx_client_tag_tolerance_tests}.rs}`, `crates/policy/tests/pad_final_reason_tests.rs`, `crates/protocol/{src/{message,types}.rs,tests/{property_tests,wire_exclusivity_tests}.rs}`, `crates/vision/src/quality.rs`, `models/{README.md,manifest.toml}`, `packaging/soos-daemon.service`, `scripts/{candid_review,candid_subagent,check_build_deps,download_models,install_rustup}.sh`, `tests/distro/{arch_linux_test,debian_ubuntu_test,fedora_rhel_test,run_distro_validation}.sh`, `tests/docker/{Dockerfile.arch,Dockerfile.fedora,Dockerfile.ubuntu,mock_daemon.py,test_packages.sh,test_suite.sh}`, `tests/fixtures/embedding_onnx.rs`, `tests/invariants/src/{artifact_freshness_contract,camera_diagnostics_contract,candid_review_contract,fixtures_contract,lexing_contract,lib,model_download_size_contract,pam_hygiene_contract,review_followups_contract,rustup_bootstrap_contract,storage_aad_contract,unit_start_guard_contract}.rs`
 
 ## 1. Executive Summary
 
-`fix/p2-batch-b` combines two branches that each passed a full candid review:
+This is a re-review. The previous review (fingerprint `16c88469…a282`, CHANGES_REQUESTED) of the
+same 12-branch merge found one MAJOR process defect and two MINOR defects, all now fixed:
 
-| Branch | Tip | Report | Fingerprint | Verdict |
-|---|---|---|---|---|
-| `fix/p2-camera-batch` | `8dcbd55` | `wf_73c3a8b4-111-1/AI/candid_review_report.md` | `35ecf354c9a52684fccec4beae601e5d5d6498b8af82c3569b40cd53e7197366` | APPROVED |
-| `fix/p2-pam-cli-batch` | `7a7cd72` | `wf_73c3a8b4-111-5/AI/candid_review_report.md` | `311a7cd8507ca11f5a2456af403eea7fd6062ad4c9b920a53f6814515987d81f` | APPROVED |
+- MAJOR 1 (untracked `.claude/worktrees/*` gitlinks in the review target): the worktrees were
+  removed. `target/candid_diff.patch` has 0 `new file mode 160000` entries, `git status` is clean,
+  and the working-tree fingerprint equals the committed-tree fingerprint
+  (`HEAD^{tree}` → `1a6b4485…009b`), so the pre-push and CI `--rev` gates will see the same diff.
+- MINOR 2 (stale `Type=simple` text): fixed in `packaging/soos-daemon.service` and
+  `Docs/PACKAGING_AND_PROVISIONING.md`.
+- MINOR 3 (`camera probe` opening arbitrary paths): fixed by `ensure_v4l2_char_device`.
+- Suggestion on the `v4l_impl.rs` comment: applied. The `StartLimitIntervalSec` suggestion is
+  deferred to a follow-up issue, which is acceptable for a SUGGESTION.
 
-Both tips are ancestors of `HEAD` (`git branch --contains`). They were merged (`aefb23d`, `fe166cc`),
-then approved `origin/main` `41d933d` (PR #283) was merged in (`0104c24`), and `83c02fd` resolves the
-interaction of the strict codec (#224, from the pam-cli batch) with the client message tag trailer
-(#204, from main). This review covers only that combination delta. The two approved per-branch
-diffs were not re-reviewed.
+The only change since the previous review is commit `2dc63a6` (7 files, +75/-9:
+`AI/VERIFICATION_MATRIX.md`, `AI/walkthroughs/142_camera_diagnostics_command.md`,
+`Docs/PACKAGING_AND_PROVISIONING.md`, `crates/camera-v4l/src/{diagnostics,v4l_impl}.rs`,
+`crates/camera-v4l/tests/camera_diagnostics_tests.rs`, `packaging/soos-daemon.service`), checked
+with `git diff --stat 71d161e HEAD`; the rest of the diff is byte-identical to the previously
+reviewed tree. The full-pillar analysis of the previous review still applies to it and is
+summarised in §3.
 
-Outcome: no CRITICAL or MAJOR finding. Every conflict resolution keeps the fixes from both sides.
-`83c02fd` keeps PAM and CLI response decoding fully strict and accepts exactly one trailing byte,
-only the tag of the decoded client type. One MINOR documentation finding: three facts from main
-were lost in the hand-merge of `Docs/IPC_PROTOCOL.md`.
+Local evidence: `./scripts/candid_review.sh` (Layer 1) PASSED. Tests passed with 0 failures:
+`cargo test --locked --all-features` for `soos-camera-v4l`, `soos-admin-cli` and `soos-invariants`
+(this pass), and for `soos-pam`, `soos-biometric-store`, `soos-evidence-store` and `soos-protocol`
+(previous pass, code unchanged). `cargo clippy -p soos-camera-v4l --all-targets --all-features --
+-D warnings` is clean.
 
 ## 2. Test Changes (mechanical listing from step 3, with justification per change)
 
-- `grep '^-… assert|#[test]…'` on the frozen patch lists only `crates/enrollment-cli/tests/shred_tests.rs`
-  (deleted with `src/shred.rs`, user-approved item (d) in the pam-cli report) and the args-string
-  assertion of `crates/gui/tests/import_privacy_tests.rs` (approved item (c) in the same report).
-  No other assertion was removed.
-- New escape hatches: `#[ignore]` + `SOOS_HW_TESTS=1` on the camera hardware tests (approved in the
-  camera report), and one `prop_assume!` added by `83c02fd` (see below). No `#[cfg(any())]`,
-  `should_panic`, tolerance or epsilon was added.
-- **Tests that exist on `origin/main` (41d933d)**: for every file in `41d933d..HEAD`, I rebuilt the
-  three-way merge with `git merge-file` (base `e2f602c` = merge-base of the batches and main, ours
-  `fe166cc`, theirs `41d933d`) and compared it with `0104c24` and then with `HEAD`. Every test file
-  that exists on main merged without conflict and is byte-identical to the automatic merge, and `83c02fd`
-  did not touch any of them. Their delta against main is therefore exactly the approved batch delta
-  (for example, `tests/docker/mock_daemon.py`: only the approved `REASON_SCORE_BELOW_THRESHOLD = 3`).
-  The only conflicted test file is `tests/invariants/src/lib.rs`, a union of module declarations.
-  The `--union` re-merge matches it line for line, apart from blank lines.
-  The pre-existing main test `client_message_tests::test_tagged_frame_stays_readable_by_v1_decoders`
-  is unchanged. It failed after the combination and passes now because of a production fix, not a test edit.
-- **Branch-new tests changed by `83c02fd`** (introduced by the approved pam-cli batch, absent from main):
-  - `crates/protocol/tests/strict_codec_tests.rs::prop_request_strict_roundtrip`: adds
-    `prop_assume!(extra != [MESSAGE_TAG_REQUEST])`. This excludes exactly one input, and that input
-    is now specified as accepted by #204 on main ("a v1 reader `decode::<Request>` ignores the
-    trailer"). Rejection of every other suffix still holds: 1..=64 random bytes, and `[0xA0, x]`
-    passes the assumption because it is two bytes. The excluded case is pinned positively by
-    `tag_trailer_codec_tests` and its neighbours negatively (BBX1–BBX3). Justified. Not a weakening of the #224 intent.
-  - `tests/invariants/src/protocol_codec_contract.rs`: `dispatcher.rs contains "decode_payload"` becomes
-    `dispatcher.rs contains "decode_client_message"`, plus a new assertion that production
-    `message.rs` uses `decode_payload_exact` and not `postcard::take_from_bytes`. The old assertion
-    could not survive the kept #204 dispatcher path. The replacement still binds the daemon to the
-    strict protocol decoders and adds a check on the classifier body. Justified. Equivalent or stronger.
-- **New test file** `crates/protocol/tests/tag_trailer_codec_tests.rs` has 10 tests and 1 proptest. They would fail on
-  plausible wrong implementations: "accept any single byte" fails BBX2 (all 255 non-tag bytes, cross-type tags);
-  "accept any tag after any type" fails `test_response_never_accepts_a_client_message_tag`;
-  "strip up to one tag, then lenient" fails BBX3 and the doubled-tag test.
+Delta since the previous review: one test **added**
+(`camera_diagnostics_tests::test_cdx_system_probe_refuses_non_v4l2_nodes_before_open`), none
+removed or modified. Full-branch listing, unchanged from the previous review:
+
+| Location | Change | Justification |
+|---|---|---|
+| `crates/pam/tests/pam_handle_tests.rs:342-350` | offline case asserts `messages.is_empty()` | Owner pre-approved (#221); stricter than before |
+| `crates/daemon/tests/config_tests.rs:200-205` | `20` → `DAEMON_DEFAULT_WARMUP_FRAMES` | Owner pre-approved (#205) |
+| `crates/admin-cli/tests/{status_tests,wire_tag_tests}.rs` + third literal | `memory_locked: false` added | Owner pre-approved (#201); additions only |
+| `crates/admin-cli/tests/test_pam_tests.rs:60,110` | timeout 250 → 5000 ms | Owner pre-approved (#285) |
+| `crates/pam/tests/fault_injection_tests.rs:97-99` | SAFETY comment reworded | Owner pre-approved |
+| `crates/inference-ort/tests/manifest_tests.rs:77` | licence `MIT` → `NOASSERTION` | Owner pre-approved (#278); still exact equality |
+| `tests/distro/*.sh`, `tests/docker/test_packages.sh` | skip-build guard removed (always build) | Owner pre-approved (#244); stronger |
+| `tests/docker/Dockerfile.*`, `test_suite.sh`, `mock_daemon.py` | verified rustup bootstrap, comment, unknown-tag parity | Harness hardening; no check removed |
+| `tests/invariants/src/{fixtures_contract,lexing_contract}.rs` | doc-comment rewording | Owner pre-approved |
+
+No new `#[ignore]`, `#[cfg(any())]`, `should_panic`, `tolerance` or `epsilon` in tests; the only
+new inline test is the additive `capture.rs::test_rfx_dequeue_interrupted_does_not_count_as_stall`.
+**No unapproved weakening.**
 
 ## 3. Deep Reasoning Audit
 
 ### Logic & Architecture
-- **Dispatcher conflict (`0104c24`)**: main's `decode_client_message` classification (#204 / DMN-15) is kept.
-  The batch's `uid_hint == peer.uid` double-decode heuristic is removed. `CodecError` stays imported and is still
-  used (`dispatcher.rs:1269`). The batch's other #224 dispatcher hunks merged cleanly. The earlier
-  camera × pam-cli conflict (`fe166cc`) was only the `use` line, resolved as the union. PASS.
-- **`crates/protocol/src/lib.rs`**: the doc comment merges both sides (strict decoding + tag trailer). PASS.
-- **Fuzz** `Cargo.toml` / `README.md` / `fuzz.yml`: both the `decode_preview` (#227) and `decode_client_message`
-  (#204) bins are declared and both target files exist, and the nightly matrix now runs all five targets. PASS.
-- **Docs**: the `CAMERA_V4L_CRATE.md` resolution keeps the batch's corrected defaults (`idle_timeout` 10s,
-  `auto_format` true, `PreferIr`, S_PARM text) over main's stale list. The camera docs invariant
-  parses `warmup_frames` (default: 20). `EVIDENCE_STORE_CRATE.md` keeps the batch's `.opaque.enc`
-  layout plus legacy `.webp.enc`. The `IPC_PROTOCOL.md` hand-merge keeps main's "Request kinds" table,
-  persistent-connection loop, §12 tag trailer, §13 rate-limit reservation, the fuzz-target line and the
-  §2 tag sentence. It keeps the batch's #226 rewrite (constants in §2, `ValidationError::ServiceTooLong`,
-  typed `StatusResponse`/`PreviewResponse`). The stale "v1 limitation / uid_hint" discrimination text is
-  correctly replaced. Three facts from main were lost, see Finding 1. `DECISIONS.md` and the matrix
-  match the `--union` re-merge, apart from the corrected QFU5 wording (default 2500 ms, consistent with main's
-  `DEFAULT_CONNECTION_TIMEOUT_MS`).
-- **`83c02fd` `decode_payload`**: `match rest { [] => Ok, [tag] if Some(*tag) == client_message_tag::<T>() => Ok, _ => TrailingBytes }`.
-  - Can a `Response` ever accept a trailing byte? No. `client_message_tag::<Response>()` is `None`, so
-    `Some(b) == None` never holds. The same applies to `StatusResponse` and `PreviewResponse`, and to any wrapper type (the
-    `TypeId` differs), which fails closed. PASS.
-  - Can arbitrary trailing bytes slip through? Only a remainder of exactly length 1 equal to the `T`'s
-    tag is accepted. Cross-type attempt: a tagged `Event` decoded as `Request` always leaves a remainder ending in
-    `0xA1`, never `[0xA0]`. The remainder cannot be empty either: postcard would have to consume `0xA1` as a
-    varint continuation byte (high bit set) and would then need more input. PASS.
-  - `decode_client_message` → `decode_exact` → `decode_payload_exact` with zero remainder, so
-    `body || A0 || A0` strips one tag and fails on the second: `Malformed` (`test_client_message_with_a_doubled_tag_is_rejected`).
-    Legacy frames also go through the exact decoder. PASS.
-  - **PAM client strictness**: production callers of `codec::decode` are `pam/src/ipc.rs:483`
-    (`Response`), `admin-cli/src/test_pam.rs:187` (`Response`), `admin-cli/src/status.rs:219`
-    (`StatusResponse`) and `gui/src/ipc_camera.rs` (`Response`, `PreviewResponse`). They are all never-tagged types, so
-    they stay fully strict. No production code decodes a `Request`/`Event` through `decode_payload`. The relaxation
-    serves only mock servers, fuzz targets and v1 compatibility. PASS.
-  - **`T: 'static` bound** on `decode`/`decode_preview`/`decode_with_limit`/`decode_payload`: every wire
-    type is owned. `DeserializeOwned` already rules out borrowed deserialization. The workspace compiles and
-    clippy passes. It is a public API tightening with no in-tree breakage. PASS.
-  - Tag constants have a single source (`message::MESSAGE_TAG_*`, imported by `codec`). PASS.
+
+- Delta: `ensure_v4l2_char_device` runs first in `system_details`, uses `std::fs::metadata`
+  (follows symlinks, so a `/dev/v4l/by-id/` link is checked on its target), and accepts only
+  `is_char_device()` with `libc::major(rdev) == 81`. Scenarios tried: regular file, `/dev/null`
+  (char device, major 1), missing path (still `NotFound` through `from_io_error`), by-id symlink
+  to a video node (accepted). PASS.
+- Remaining stat → open window (path swapped between `stat` and `open`): only reachable by
+  someone who can already rewrite the operator-supplied path; the tool is a non-setuid operator
+  CLI. Acceptable.
+- The unit comment now matches `Type=notify`; the contradictory doc row is gone. PASS.
+- Rest of the branch, unchanged: PAM argv warnings and `pam_sm_authenticate` → `sm_authenticate`
+  routing; AAD binding (copied, UID-rewritten, legacy cross-UID and moved-evidence scenarios all
+  refused; rollback documented as out of scope, SAD7); `build_response` fail-closed clock handling;
+  spoof evidence opt-in; optional PAD member manifest-gated; resolver on top of
+  `explain_camera_resolution`. PASS.
 
 ### PAM Concurrency & Deadlines
-Not touched by the delta. `pam/src/ipc.rs` only merged cleanly. No new blocking call. PASS.
+
+- The delta does not touch `crates/pam`. Unchanged: no async/threads, cumulative deadline on every
+  read/write, the removed completeness check was dead code (`read_exact_before_deadline` returns
+  `TruncatedResponse` on EOF), fail-quiet keeps `PAM_IGNORE`. PASS.
 
 ### Panic Safety & Fail-Closed
-`client_message_tag` and the new match contain no `unwrap`, indexing or panics. A slice pattern is not
-indexing. Every rejection is a `CodecError` / `MessageError`, and the daemon closes the connection without a
-handler. No new path leads to `Allow`/`PAM_SUCCESS`. PASS.
+
+- Delta: no `unwrap`/`expect`; `ensure_v4l2_char_device` runs inside the existing `catch_unwind`
+  of `SystemV4lDeviceProbe::details`. Unchanged: every PAM entry point goes through
+  `syslog::catch_entry`; `PAM_SUCCESS` only for `!verdict.should_ignore()` (= `Allow`). PASS.
 
 ### Test Integrity & Anti-Weakening
-See §2. The two branch-new test edits are forced by an acceptance criterion from main (#204) and are
-compensated by stricter pinned tests. No test that exists on main was modified beyond the approved batch sets. PASS.
+
+- The new CDX11 test would fail against the previous implementation: a `0o000` regular file
+  gives `PermissionDenied` (non-root) or an ioctl error, not the expected
+  `Other(Some(ENOTTY))`, and `/dev/null` would be opened and give `ENOTTY` only after `open(2)`.
+  The regular-file assertion therefore pins "refused before open". When run as root (Docker CI) the
+  assertions still hold because the guard runs before `open`. PASS.
 
 ### Memory, Bounds & Secrets
-There are no new allocations in the decode path (`take_from_bytes` on the bounded payload slice). `encode_tagged`
-is unchanged (`Zeroizing` payload, trailer counted in `MAX_MESSAGE_SIZE`). Nothing is logged. PASS.
+
+- Delta adds no allocation and no logging. Unchanged: nonce logged only as `short_request_id`,
+  daemon panic hook logs the location only, luma plane zeroized, embedding length checked, model
+  download size-bounded and SHA-256-attested. PASS.
 
 ### Supply Chain & Automation
-`fuzz.yml` only adds a matrix entry: no new action, no interpolation in `run:`, permissions unchanged.
-The fuzz `Cargo.lock` comes from the approved batch. PASS.
+
+- Delta: `libc` is already a `soos-camera-v4l` dependency; no `Cargo.*`, workflow or hook change.
+  Review target hygiene: no gitlinks; working-tree and `HEAD^{tree}` fingerprints identical. PASS.
+- Unchanged: `install_rustup.sh` verifies the digest before chmod/exec, HTTPS/TLS 1.2+, refuses
+  floating channels; Docker contexts are the repository root; systemd sandbox keeps
+  `/dev/video*`, `/var/lib/soos`, `/run/soos` access. PASS.
 
 ### English-Only Policy
-All code, comments, docs, ADR and matrix text in the delta are English. PASS.
 
-**Execution evidence** (this review):
-- `cargo test --locked -p soos-protocol -p soos-invariants --all-features`: all suites green (0 failed).
-- `cargo test --locked -p soos-pam -p soos-daemon -p soos-admin-cli`: all suites green. These suites held
-  most of the 43 combination failures.
-- `cargo clippy --locked -p soos-protocol --all-targets --all-features -- -D warnings`: clean.
-- Docker was not run (per instructions).
+- Delta (code, comments, matrix row CDX11, walkthrough 142 §7a, commit message) is English. PASS.
 
 ## 4. Detailed Findings & Action Items
 
-1. **[MINOR]** `Docs/IPC_PROTOCOL.md:100`, §`StatusResponse` / §`PreviewResponse`: the hand-merge
-   dropped three facts that main (#283) had added:
-   - the `connection_timeout` default (`DEFAULT_CONNECTION_TIMEOUT_MS` = 2500 ms, "so the GDM line
-     `timeout_ms=2500` gets its full budget while console/sudo stays capped by its 1000 ms PAM deadline");
-   - "It carries no frame, template, embedding or UID data" (`StatusResponse`);
-   - "the struct zeroizes on drop" (`PreviewResponse`).
-
-   The first fact is still documented in `Docs/DAEMON.md` and `Docs/DISTRIBUTION_DEPLOYMENT.md`, and no invariant
-   depends on these sentences, so this does not block. Suggested follow-up: re-add them to the batch-side
-   typed field descriptions.
-
-No CRITICAL or MAJOR findings.
+- No CRITICAL, MAJOR or MINOR findings remain.
+- **[SUGGESTION]** `packaging/soos-daemon.service:12-13,27` — with `TimeoutStartSec=60`,
+  `RestartSec=2` and `StartLimitBurst=5` within `StartLimitIntervalSec=60`, a start that always
+  times out never trips the start limit. Deferred by the owner to a follow-up issue; consider
+  `StartLimitIntervalSec=` ≥ 5 × (`TimeoutStartSec` + `RestartSec`).
 
 ## 5. Final Verdict
 
