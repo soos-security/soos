@@ -160,6 +160,11 @@ mod artifact_freshness_contract;
 #[cfg(all(test, unix))]
 mod review_followups_contract;
 
+/// Camera / vision follow-ups: v4l panic guard, supervisor hints, zeroizing embedding copy,
+/// informational install-time camera report (GitHub #287, rows CVF1–CVF8).
+#[cfg(all(test, unix))]
+mod camera_vision_followups_contract;
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,

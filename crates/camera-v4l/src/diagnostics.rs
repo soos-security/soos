@@ -185,7 +185,9 @@ impl V4lDeviceProbe for SystemV4lDeviceProbe {
     fn details(&self, dev_path: &Path) -> Result<V4lNodeDetails, ProbeFailure> {
         // `v4l` 0.14 unwraps `str::from_utf8` on the capability strings, so a device reporting
         // a non-UTF-8 card name would panic inside the crate: report it as a probe failure.
-        std::panic::catch_unwind(|| system_details(dev_path))
+        // The individual ioctls are guarded as well; this outer guard also covers the
+        // frame-size enumeration (shared `crate::v4l_guard`, GitHub #287).
+        crate::v4l_guard::guard_v4l_call(|| system_details(dev_path))
             .unwrap_or(Err(ProbeFailure::Other(None)))
     }
 }
@@ -214,15 +216,10 @@ fn ensure_v4l2_char_device(dev_path: &Path) -> Result<(), ProbeFailure> {
 fn system_details(dev_path: &Path) -> Result<V4lNodeDetails, ProbeFailure> {
     ensure_v4l2_char_device(dev_path)?;
     let device = v4l::Device::with_path(dev_path).map_err(|e| ProbeFailure::from_io_error(&e))?;
-    let caps = device
-        .query_caps()
+    let caps = crate::v4l_guard::query_caps_guarded(&device)
         .map_err(|e| ProbeFailure::from_io_error(&e))?;
-    let fourccs: Vec<v4l::FourCC> = v4l::video::Capture::enum_formats(&device)
-        .unwrap_or_default()
-        .into_iter()
-        .take(MAX_DIAGNOSTIC_FOURCCS)
-        .map(|desc| desc.fourcc)
-        .collect();
+    let mut fourccs: Vec<v4l::FourCC> = crate::v4l_guard::enum_formats_guarded(&device);
+    fourccs.truncate(MAX_DIAGNOSTIC_FOURCCS);
     let frame_sizes = device_frame_sizes(&device, &fourccs);
     Ok(V4lNodeDetails {
         driver: caps.driver,

@@ -289,11 +289,7 @@ pub(crate) fn frame_sizes_at(path: &std::path::Path) -> Vec<(u32, u32)> {
     let Ok(device) = v4l::Device::with_path(path) else {
         return Vec::new();
     };
-    let fourccs: Vec<v4l::FourCC> = v4l::video::Capture::enum_formats(&device)
-        .unwrap_or_default()
-        .into_iter()
-        .map(|desc| desc.fourcc)
-        .collect();
+    let fourccs = crate::v4l_guard::enum_formats_guarded(&device);
     device_frame_sizes(&device, &fourccs)
 }
 
@@ -334,18 +330,16 @@ pub struct SystemV4lNodeProbe;
 impl V4lNodeProbe for SystemV4lNodeProbe {
     fn probe(&self, dev_path: &Path) -> Option<V4lNodeCapabilities> {
         let dev = v4l::Device::with_path(dev_path).ok()?;
-        let caps = dev.query_caps().ok()?;
+        // `v4l` 0.14 panics on non-UTF-8 capability strings: such a node is skipped like any
+        // node whose ioctls fail, instead of unwinding through the daemon (GitHub #287).
+        let caps = crate::v4l_guard::query_caps_guarded(&dev).ok()?;
         let video_capture = caps
             .capabilities
             .contains(v4l::capability::Flags::VIDEO_CAPTURE);
         // Deep-greyscale IR formats (Y8I, Y10, Y12, Y16) are delivered as Grey, so Y16-only IR
         // nodes stay visible (GitHub #195).
         let supported_formats = if video_capture {
-            let fourccs: Vec<v4l::FourCC> = v4l::video::Capture::enum_formats(&dev)
-                .unwrap_or_default()
-                .into_iter()
-                .map(|desc| desc.fourcc)
-                .collect();
+            let fourccs = crate::v4l_guard::enum_formats_guarded(&dev);
             crate::deep_grey::delivered_formats(&fourccs)
         } else {
             Vec::new()

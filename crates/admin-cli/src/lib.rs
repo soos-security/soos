@@ -5,12 +5,14 @@
 //! - `test-pam`: Simulate PAM authentication cycle with latency breakdown and verdict reporting
 //! - `logs`: Filtered view of daemon journal logs with automatic redaction of sensitive data
 //! - `camera list|probe`: V4L2 node metadata, classification and the shared resolver's
-//!   decision (metadata ioctls only, never frames)
+//!   decision (metadata ioctls only, never frames); `camera list` resolves with the
+//!   `camera_device` / `sensor_preference` of `/etc/soos/daemon.toml`
 
 #![forbid(unsafe_code)]
 
 pub mod args;
 pub mod camera;
+pub mod daemon_config;
 pub mod error;
 pub mod gdm;
 pub mod logs;

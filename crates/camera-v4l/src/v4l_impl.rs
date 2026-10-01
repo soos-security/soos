@@ -12,9 +12,10 @@ use crate::frame::{Frame, PixelFormat};
 use crate::manager::{CameraHealth, CameraManager};
 use crate::sensor::{classify_sensor_with_hints, device_frame_sizes, SensorHints, SensorType};
 use crate::status::{CameraStatus, CameraStatusCell};
+use crate::v4l_guard::{enum_formats_guarded, query_caps_guarded, set_format_guarded};
 use arc_swap::ArcSwapOption;
 use std::panic::{self, AssertUnwindSafe};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, RwLock};
 use std::thread::{self, JoinHandle};
@@ -530,6 +531,22 @@ pub fn pixel_format_to_fourcc(format: PixelFormat) -> FourCC {
     }
 }
 
+/// Classification hints of the node the capture supervisor opens.
+///
+/// The by-id name is taken when `device_path` is itself a `/dev/v4l/by-id/` link (always the
+/// case for an auto-resolved node that udev aliased); a `/dev/videoN` path has none. Unlike the
+/// resolver, the shared by-id stem rule is deliberately **not** applied: the supervisor sees
+/// only the opened node, and keeping the name makes its hints a superset of the resolver's, so
+/// it can only classify a node Infrared (stricter IR PAD policy) where the resolver said RGB,
+/// never the reverse (ADR 2026-10-01 "Capture Supervisor Keeps the By-Id IR Token on Shared
+/// Stems", GitHub #287).
+pub fn supervisor_sensor_hints(device_path: &Path, frame_sizes: Vec<(u32, u32)>) -> SensorHints {
+    SensorHints {
+        by_id_name: crate::resolver::by_id_name_of_path(device_path),
+        frame_sizes,
+    }
+}
+
 /// Opens device, allocates MMAP queue, discards warmup frames, and streams frames into RAM snapshot.
 fn open_and_stream(
     config: &CameraConfig,
@@ -542,12 +559,13 @@ fn open_and_stream(
     let device = v4l::Device::with_path(&config.device_path)
         .map_err(|e| CameraError::from_io_error(config.device_path.clone(), e))?;
 
-    let caps = device
-        .query_caps()
-        .map_err(|e| CameraError::QueryCapabilities {
-            path: config.device_path.clone(),
-            reason: e.to_string(),
-        })?;
+    // `v4l` 0.14 panics on non-UTF-8 capability strings and on unknown format enums: the
+    // guarded calls turn that into an error the supervisor backs off from, instead of a
+    // supervisor panic that marks the camera Dead until restart (GitHub #287).
+    let caps = query_caps_guarded(&device).map_err(|e| CameraError::QueryCapabilities {
+        path: config.device_path.clone(),
+        reason: e.to_string(),
+    })?;
 
     if !caps.capabilities.contains(Flags::VIDEO_CAPTURE) {
         return Err(CameraError::UnsupportedCapability {
@@ -556,25 +574,14 @@ fn open_and_stream(
     }
 
     // Query hardware-supported formats via VIDIOC_ENUM_FMT
-    let fourccs: Vec<FourCC> = Capture::enum_formats(&device)
-        .unwrap_or_default()
-        .into_iter()
-        .map(|desc| desc.fourcc)
-        .collect();
+    let fourccs: Vec<FourCC> = enum_formats_guarded(&device);
     // Deep-greyscale IR fourccs (Y8I/Y10/Y12/Y16) are delivered as Grey (GitHub #195).
     let supported = delivered_formats(&fourccs);
 
-    // Classify the opened node on its own hints (Docs/CAMERA_V4L_CRATE.md): the by-id name
-    // only when the configured path is itself a by-id link, and the frame sizes of the opened
-    // node; then negotiate its format. Unlike the resolver, this ignores the shared by-id stem
-    // rule, so an IR token the resolver discarded can still mark the node IR here (the
-    // stricter IR liveness policy, never a weaker one). Frames are stamped with the
-    // sensor type so an IR node streaming a colour format still takes the IR PAD policy
-    // (GitHub #169, #195).
-    let hints = SensorHints {
-        by_id_name: crate::resolver::by_id_name_of_path(&config.device_path),
-        frame_sizes: device_frame_sizes(&device, &fourccs),
-    };
+    // Classify the opened node on its own hints (`supervisor_sensor_hints`), then negotiate
+    // its format. Frames are stamped with the sensor type so an IR node streaming a colour
+    // format still takes the IR PAD policy (GitHub #169, #195).
+    let hints = supervisor_sensor_hints(&config.device_path, device_frame_sizes(&device, &fourccs));
     let plan = plan_capture_with_hints(&caps.card, &supported, &hints, config)?;
     let target_format = plan.format;
 
@@ -584,7 +591,7 @@ fn open_and_stream(
     let req_format = v4l::Format::new(config.width, config.height, fourcc);
     // uvcvideo reports a node streamed by another process (e.g. the daemon) as EBUSY here,
     // not at open(): classify it as `DeviceBusy` (GitHub #150).
-    let actual_format = Capture::set_format(&device, &req_format).map_err(|e| {
+    let actual_format = set_format_guarded(&device, &req_format).map_err(|e| {
         CameraError::from_ioctl_error(config.device_path.clone(), e, |reason| {
             CameraError::SetFormat {
                 path: config.device_path.clone(),
