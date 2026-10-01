@@ -66,8 +66,12 @@ MAX_MESSAGE_SIZE = 4096
 
 # soos-daemon RESPONSE_VALIDITY_NS (crates/daemon/src/dispatcher.rs): expires = issued + 2 s.
 RESPONSE_VALIDITY_NS = 2_000_000_000
-# How far in the past the window of an `expired` response closed.
-EXPIRED_AGE_NS = 1_000_000_000
+# How far in the past the window of an `expired` response closed. The stamp is read at
+# send time, so the age must exceed every delay a caller can see between building its
+# request and receiving the answer (interpreter start-up and socket readiness under CPU
+# load took more than 1 s, GitHub #293); 60 s is above the 10 s socket wait plus the 10 s
+# read timeout of the invariant harnesses.
+EXPIRED_AGE_NS = 60_000_000_000
 
 
 def monotonic_ns() -> int:
@@ -269,6 +273,13 @@ def main():
         except OSError:
             pass
 
+    # The socket is bound and configured under a private staging name and only renamed to
+    # sock_path once it listens, so callers that poll for the path never connect to a
+    # socket that is bound but not yet listening (ECONNREFUSED, GitHub #293).
+    staging_path = os.path.join(os.path.dirname(sock_path), f".mock-{os.getpid()}")
+    if os.path.lexists(staging_path):
+        os.unlink(staging_path)
+
     server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
 
     def cleanup(*_):
@@ -276,11 +287,12 @@ def main():
             server.close()
         except Exception:
             pass
-        if os.path.exists(sock_path):
-            try:
-                os.unlink(sock_path)
-            except OSError:
-                pass
+        for path in (staging_path, sock_path):
+            if os.path.exists(path):
+                try:
+                    os.unlink(path)
+                except OSError:
+                    pass
         sys.exit(0)
 
     signal.signal(signal.SIGINT, cleanup)
@@ -291,12 +303,13 @@ def main():
     # the containers, matching the production root:soos ownership).
     previous_umask = os.umask(0o117)
     try:
-        server.bind(sock_path)
+        server.bind(staging_path)
     finally:
         os.umask(previous_umask)
-    os.chown(sock_path, -1, socket_gid)
-    os.chmod(sock_path, socket_mode)
+    os.chown(staging_path, -1, socket_gid)
+    os.chmod(staging_path, socket_mode)
     server.listen(16)
+    os.rename(staging_path, sock_path)
     print(f"[mock_daemon] Listening on {sock_path} in mode '{args.mode}'", flush=True)
 
     try:

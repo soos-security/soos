@@ -320,6 +320,86 @@ mod worker_failure_tests {
         }
     }
 
+    /// Runner over a temporary store whose in-flight worker is a thread that drops its
+    /// outcome sender without sending anything (a worker lost without an outcome).
+    fn runner_with_lost_worker(pending: PendingTask) -> (tempfile::TempDir, StoreTaskRunner) {
+        let temp = tempfile::TempDir::new().unwrap();
+        let store = Arc::new(
+            BiometricStore::new(
+                temp.path().join("bio"),
+                soos_biometric_store::MasterKey::generate().unwrap(),
+            )
+            .unwrap(),
+        );
+        let notify: Notify = Arc::new(|| {});
+        let mut runner = StoreTaskRunner::new(store, notify);
+        let tx = runner.tx.clone();
+        let handle = thread::Builder::new()
+            .name("soos-gui-store".to_string())
+            .spawn(move || drop(tx))
+            .unwrap();
+        runner.in_flight = Some((handle, pending));
+        (temp, runner)
+    }
+
+    /// Polls like the UI does once per frame until `poll` returns something.
+    fn poll_until_outcome(runner: &mut StoreTaskRunner) -> Vec<StoreTaskOutcome> {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let outcomes = runner.poll();
+            if !outcomes.is_empty() {
+                return outcomes;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "poll never reported the lost worker"
+            );
+            assert!(runner.is_busy(), "the runner stays busy until it reports");
+            thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    /// GitHub #293 (FGP3): `poll` itself turns a finished worker that delivered nothing into
+    /// exactly one failed outcome of the submitted kind and UID, and frees the runner.
+    #[test]
+    fn test_fgp_poll_reports_a_lost_delete_worker_as_one_failure() {
+        let (_temp, mut runner) = runner_with_lost_worker(PendingTask::delete(42));
+        assert!(runner.is_busy());
+        let mut outcomes = poll_until_outcome(&mut runner);
+        assert_eq!(outcomes.len(), 1, "exactly one outcome: {outcomes:?}");
+        match outcomes.pop().unwrap() {
+            StoreTaskOutcome::Deleted { uid, result } => {
+                assert_eq!(uid, 42);
+                assert_eq!(
+                    result,
+                    Err(StoreTaskError::Failed(WORKER_LOST_MESSAGE.to_string()))
+                );
+            }
+            other => panic!("unexpected outcome {other:?}"),
+        }
+        assert!(!runner.is_busy(), "the runner is free after the report");
+        assert!(runner.poll().is_empty(), "the failure is reported once");
+    }
+
+    #[test]
+    fn test_fgp_poll_reports_a_lost_enroll_worker_as_one_failure() {
+        let (_temp, mut runner) = runner_with_lost_worker(PendingTask::enroll(1234));
+        let mut outcomes = poll_until_outcome(&mut runner);
+        assert_eq!(outcomes.len(), 1, "exactly one outcome: {outcomes:?}");
+        match outcomes.pop().unwrap() {
+            StoreTaskOutcome::Enrolled { uid, result } => {
+                assert_eq!(uid, 1234);
+                assert_eq!(
+                    result,
+                    Err(StoreTaskError::Failed(WORKER_LOST_MESSAGE.to_string()))
+                );
+            }
+            other => panic!("unexpected outcome {other:?}"),
+        }
+        assert!(!runner.is_busy(), "the runner is free after the report");
+        assert!(runner.poll().is_empty(), "the failure is reported once");
+    }
+
     /// A worker that ends without sending anything still yields a failed outcome from `poll`.
     #[test]
     fn test_sgu_missing_outcome_is_synthesized_as_failure() {

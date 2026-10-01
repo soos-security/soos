@@ -1560,6 +1560,18 @@ The GUI never waits for the template store lock on its UI thread; `soos-enroll i
 
 ---
 
+## Component: `mock-daemon-flake-and-store-poll-test` (GitHub #293 "Tests" items, `test/p3fu4-flaky-and-gui-poll`)
+
+The Docker mock daemon is race-free for callers that poll for its socket path, its `expired` window closes long before any request a harness can build, and `StoreTaskRunner::poll` is tested through its lost-outcome branch. No existing assertion changed. Walkthrough 156.
+
+| ID | Criterion | Evidence | Status |
+|----|-----------|----------|--------|
+| FGP1 | `tests/docker/mock_daemon.py` binds, sets the mode and group of, and listens on its socket under a private staging name and only then renames it to `--socket`, so a caller that connects as soon as the path exists is never refused (`ECONNREFUSED`); the socket path is never bound directly | Invariant test (`distro_matrix::test_mock_daemon_publishes_its_socket_only_once_listening`); stress loop under 16 busy loops on 16 CPUs, 4 runs in parallel: `distro_matrix::test_mock_daemon_malformed_modes_put_one_defect_on_the_wire` failed 6 times in 600 runs before (5 `ConnectionRefused`, 1 `expired` window) and 0 times in 600 runs after; the full `soos-invariants` binary failed 2 of 40 stressed runs before and 0 of 40 after (walkthrough 156 §8) | ✅ Verified |
+| FGP2 | The `expired` mode closes its window `EXPIRED_AGE_NS` = 60 s before the send-time clock read, above the 10 s socket wait plus the 10 s read timeout of the invariant harnesses, so `expires < before` holds under load; the one-defect and stamp assertions of `distro_matrix::test_mock_daemon_malformed_modes_put_one_defect_on_the_wire` and `pam_response_expiry_contract::test_pre_mock_daemon_stamps_from_the_monotonic_clock` are unchanged | Invariant tests (`distro_matrix::test_mock_daemon_publishes_its_socket_only_once_listening`, `distro_matrix::test_mock_daemon_malformed_modes_put_one_defect_on_the_wire`, `pam_response_expiry_contract::test_pre_mock_daemon_stamps_from_the_monotonic_clock`) | ✅ Verified |
+| FGP3 | `StoreTaskRunner::poll` turns a finished worker that delivered no outcome into exactly one failed outcome of the submitted kind and UID (`StoreTaskError::Failed` with the lost-worker message), the runner stays busy until then and is free afterwards, and the failure is reported once | Unit tests (`worker_failure_tests::test_fgp_poll_reports_a_lost_delete_worker_as_one_failure`, `worker_failure_tests::test_fgp_poll_reports_a_lost_enroll_worker_as_one_failure`) | ✅ Verified |
+
+---
+
 ## Component: `pam-response-expiry-protocol-followups` (GitHub #287 "Protocol / PAM" items and owner decisions of 2026-10-01, `fix/p3fu-pam-expiry`)
 
 The PAM client enforces the daemon `Response` expiry against CLOCK_MONOTONIC, the clock `soos-daemon` stamps with (ADR 2026-10-01 "PAM Client Enforces Response Expiry"); untagged legacy client frames stay accepted (ADR 2026-10-01 "Untagged Legacy Client Frames Stay Accepted"); rows backed by the QFX5 Docker evidence are closed; `pcx_wire_routing_tests` is root-safe. Walkthrough 148.
