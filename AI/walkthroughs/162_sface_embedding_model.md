@@ -502,6 +502,14 @@ only if Q5 chooses the id check), and **5 cosmetic (c)**. No assertion is weaken
 with the equivalent SFace or 0.50 pin, and #2, #26–#28 become stricter (refusals instead of
 acceptances).
 
+
+**Item 56 (approved by the owner on 2026-10-01, found during Phase 4):**
+`crates/enrollment-cli/tests/import_json_presize_tests.rs::test_import_json_decodes_into_a_buffer_that_never_grows`
+— setup only: the in-range input length `257` (which assumed the old 512-value import
+dimension) → `IMPORT_EMBEDDING_DIM / 2 + 1` (65 with SFace). Every assertion (count, content,
+capacity reserved once) is unchanged; with 128 a 257-value array is now correctly truncated,
+which the sibling test `..._truncates_...` already covers.
+
 ## 5. Tester Contract (Phase 2) and Red Evidence
 
 New tests (rows of the new matrix section `sface-embedding-model`):
