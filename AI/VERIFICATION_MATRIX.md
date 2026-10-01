@@ -1293,6 +1293,21 @@ Daemon log anonymization of the request nonce, clock-stamped responses on every 
 
 ---
 
+## Component: `daemon-followups` (GitHub #287 "Daemon" section, `fix/p3fu-daemon`, walkthrough 147)
+
+Follow-ups of the daemon logging/shutdown work (DLX rows) and of the systemd readiness work (DHX rows) (ADR 2026-10-01 "Debug-Only Panic Messages, Accept Backoff and Tracked Evidence Writes").
+
+| ID | Criterion | Evidence | Status |
+|----|-----------|----------|--------|
+| DFU1 | The process panic hook logs the bounded panic message (`MAX_DEBUG_PANIC_MESSAGE_CHARS` = 512) only under `PanicMessagePolicy::LogMessage`, selected by `PanicMessagePolicy::for_build()` in debug builds; a release build installs the unchanged payload-free `install_panic_hook()` and never logs the message (owner decision 2026-10-01) | Contract tests (`panic_hook_build_policy_tests::test_panic_message_policy_follows_debug_assertions`, `test_debug_policy_logs_message_and_release_policy_withholds_it`, `test_production_main_selects_panic_policy_from_build_profile`); pre-existing `panic_hook_tests::test_panic_hook_logs_location_via_tracing_without_payload` | ✅ Verified |
+| DFU2 | A failed `accept()` is retried after a bounded exponential `AcceptBackoff` (5 ms doubling, capped at 1 s, reset on success, never zero); the loop never stops, keeps serving after the errors, and the shutdown signal interrupts a backoff sleep | Contract tests (`daemon_followups_tests::test_accept_backoff_doubles_from_initial_and_caps_at_max`, `test_accept_backoff_defaults_and_degenerate_bounds`, `test_accept_errors_back_off_without_stopping_the_loop`, `test_shutdown_interrupts_accept_backoff_promptly`, `test_accept_until_shutdown_still_serves_a_real_listener`) | ✅ Verified |
+| DFU3 | Spoof evidence writes run in the tracked `BlockingTasks` set (`ConnectionDispatcher::evidence_writes`), never detached; finished writes are reaped on spawn; `soos-daemon` drains them after the connection drain with what is left of the one-`connection_timeout` budget, a write still running at the deadline being reported as abandoned | Contract tests (`daemon_followups_tests::test_blocking_tasks_drain_waits_for_in_flight_write`, `test_blocking_tasks_drain_is_bounded_by_budget`, `test_blocking_tasks_reap_finished_jobs_on_spawn`, `test_blocking_task_panic_is_counted_not_propagated`, `test_spoof_evidence_write_is_tracked_and_drained_at_shutdown`, `test_production_main_drains_evidence_writes_within_the_shutdown_budget`) | ✅ Verified |
+| DFU4 | The defensive downgrade branch is exercised: `stamp_response` (the only stamping path of `build_response`) turns `Allow` into `Unavailable` / `InternalError` with `issued = expires = 0` on a clock error or a zero reading, keeps every other verdict, and never yields `Allow` without a clock | Contract tests (`daemon_followups_tests::test_clock_failure_downgrades_allow_to_unavailable_internal_error`, `test_zero_clock_reading_downgrades_allow`, `test_clock_failure_never_yields_allow_for_any_verdict`, `test_working_clock_keeps_verdict_and_stamps_validity_window`, `test_build_response_renders_through_stamp_response`) | ✅ Verified |
+| DFU5 | `soos-admin status` shows `StatusResponse::memory_locked` as `DaemonStatusReport::memory_locked` (`Some(true)` LOCKED, `Some(false)` NOT LOCKED, `None` / JSON `null` / `N/A` when the daemon is unreachable, never claimed locked); two existing report literals gained the field as a setup-only change | Contract tests (`status_memory_locked_tests::test_status_reports_memory_locked_from_daemon`, `test_status_reports_memory_unlocked_from_daemon`, `test_offline_status_never_claims_memory_locked`) | ✅ Verified |
+| DFU6 | `packaging/soos-daemon.service` satisfies `StartLimitIntervalSec >= StartLimitBurst * (TimeoutStartSec + RestartSec)` so the start limit is reachable | Pending owner decision: the pre-existing assertion `installer_templates_contract::test_daemon_unit_requires_deployed_models_and_bounds_restarts` pins the literal `StartLimitIntervalSec=60`, and existing tests may not be modified on this branch | ⬜ Pending (blocked by an existing literal assertion) |
+
+---
+
 ## Component: `pam-hygiene` (Review findings PAM-09 / PAM-16 / PAM-17 — GitHub #263, #264, #265)
 
 | # | Criterion | Test Method | Status |
