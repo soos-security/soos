@@ -327,7 +327,7 @@ assert_socket_modes() {
 }
 
 start_mock_daemon() {
-    python3 tests/docker/mock_daemon.py --socket /run/soos/daemon.sock "$@" &
+    python3 tests/docker/mock_daemon.py --stamps monotonic --socket /run/soos/daemon.sock "$@" &
     MOCK_PID=$!
     for _ in $(seq 1 50); do
         [[ -S /run/soos/daemon.sock ]] && break

@@ -45,6 +45,8 @@ ADR entry in `AI/DECISIONS.md`. Re-check every value below with the listed `grep
 | `MAX_SERVICE_LEN` | `crates/protocol/src/types.rs` | 64 bytes |
 | `DEFAULT_TIMEOUT_MS` / `MIN_` / `MAX_` | `crates/pam/src/config.rs` | 1000 / 10 / 5000 ms (`timeout_ms=` is clamped) |
 | `EVENT_TIMEOUT_MS` | `crates/pam/src/ipc.rs` | 20 ms (password-failed event) |
+| `MAX_RESPONSE_FUTURE_SKEW_NS` | `crates/protocol/src/types.rs` (re-exported by `crates/pam/src/ipc.rs`) | 10 ms (tolerated lead of `Response::issued_monotonic_ns`; the PAM client enforces the response expiry, test daemons must stamp from CLOCK_MONOTONIC [148]) |
+| `RESPONSE_VALIDITY_NS` | `crates/daemon/src/dispatcher.rs` | 2 s (`expires = issued + 2 s`) |
 | `DECISION_BUDGET_MS` | `crates/daemon/src/pipeline.rs` | 900 ms |
 | `MAX_FRAME_AGE_NS` | `crates/daemon/src/pipeline.rs` | 150 ms |
 | `FRAME_POLL_INTERVAL_MS` | `crates/daemon/src/pipeline.rs` | 10 ms (consensus loop poll) |

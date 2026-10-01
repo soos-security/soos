@@ -20,8 +20,8 @@ use std::time::{Duration, Instant};
 use soos_protocol::codec::decode;
 use soos_protocol::message::{encode_event, encode_request};
 use soos_protocol::types::{
-    Event, EventKind, ReasonClass, Request, RequestKind, Response, Verdict, CURRENT_VERSION,
-    MAX_MESSAGE_SIZE, REQUEST_ID_LEN,
+    Event, EventKind, ReasonClass, Request, RequestKind, Response, ResponseFreshnessError, Verdict,
+    CURRENT_VERSION, MAX_MESSAGE_SIZE, REQUEST_ID_LEN,
 };
 use zeroize::Zeroizing;
 
@@ -29,6 +29,12 @@ use crate::config::PamConfig;
 
 /// Maximum timeout budget dedicated to telemetry event notification (milliseconds).
 pub const EVENT_TIMEOUT_MS: u64 = 20;
+
+/// Future-skew bound of the response staleness guard (10 ms, GitHub #287), owned by the
+/// protocol crate so `soos-admin test-pam` applies exactly the same rule. A response
+/// issued later than that after the client's clock reading is
+/// `IpcError::StaleResponse(FutureDated)`.
+pub use soos_protocol::types::MAX_RESPONSE_FUTURE_SKEW_NS;
 
 /// IPC communication error types. All variants fail closed into `PAM_IGNORE`.
 #[derive(Debug)]
@@ -53,6 +59,8 @@ pub enum IpcError {
     RequestIdMismatch,
     /// Received response version does not match supported protocol version.
     UnsupportedVersion { version: u8 },
+    /// Response stamps are unset, inconsistent, future-dated or expired (GitHub #287).
+    StaleResponse(ResponseFreshnessError),
 }
 
 impl core::fmt::Display for IpcError {
@@ -79,6 +87,7 @@ impl core::fmt::Display for IpcError {
             Self::UnsupportedVersion { version } => {
                 write!(f, "unsupported response version {version}")
             }
+            Self::StaleResponse(reason) => write!(f, "stale daemon response: {reason}"),
         }
     }
 }
@@ -482,9 +491,7 @@ pub fn authenticate_before_with_progress<F: FnOnce()>(
     }
 
     // Replay protection: the fresh single-use 256-bit nonce must match bit-for-bit. The
-    // response timestamps are informational and deliberately not validated here (ADR
-    // 2026-09-30 "Response Timestamps Are Informational", GitHub #219). The predicate is
-    // owned by the protocol crate (`Response::matches_request`, GitHub #264).
+    // predicate is owned by the protocol crate (`Response::matches_request`, GitHub #264).
     if !resp.matches_request(&req.request_id) {
         return Err(IpcError::RequestIdMismatch);
     }
@@ -494,6 +501,13 @@ pub fn authenticate_before_with_progress<F: FnOnce()>(
 
     // A verdict that completed after the deadline is never honored (fail closed).
     deadline.remaining()?;
+
+    // Staleness guard (GitHub #287, ADR 2026-10-01 "PAM Client Enforces Response
+    // Expiry"): the daemon stamps from CLOCK_MONOTONIC, the clock read here after the
+    // last byte arrived. Unset, inverted, future-dated or expired stamps fail closed;
+    // a clock read failure yields 0 and is rejected as well.
+    resp.check_freshness(monotonic_nanos(), MAX_RESPONSE_FUTURE_SKEW_NS)
+        .map_err(IpcError::StaleResponse)?;
 
     Ok((resp.verdict, resp.reason_class))
 }

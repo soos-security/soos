@@ -14,15 +14,24 @@ Simulates daemon behaviors for the PAM test matrix:
   - bad-version:     Complete Allow frame with protocol version 2
   - oversized:       Length prefix above MAX_MESSAGE_SIZE (4096), no body, then close
   - empty:           Zero length prefix, then close
+  - expired:         Complete Allow frame whose issued/expires window already closed
 
 The malformed modes (GitHub #189) each put exactly one defect on the wire; three of
 them carry an Allow verdict that the PAM module must never honor.
+
+Response stamps (GitHub #287): pam_soos.so rejects a Response whose CLOCK_MONOTONIC
+issued/expires stamps are unset, inconsistent, future-dated or expired. By default
+(`--stamps monotonic`) every response is stamped like soos-daemon (issued = now,
+expires = now + 2 s, read when the response is sent), so each malformed mode keeps
+exactly one defect; the scripts also pass the flag explicitly. `--stamps zero` sends
+the unstamped form 0/0, which the module rejects (Docker case T15).
 
 Every received Event (e.g. PasswordFailed) is recorded with --record and never
 answered; Requests are answered according to --mode.
 
 Usage:
-  python3 mock_daemon.py --socket /run/soos/daemon.sock --mode allow [--delay 0.5] [--one-shot]
+  python3 mock_daemon.py --socket /run/soos/daemon.sock --mode allow [--stamps monotonic|zero]
+                         [--delay 0.5] [--one-shot]
                          [--record /tmp/events.log]
                          [--socket-group soos] [--socket-mode 0660]
 
@@ -55,22 +64,67 @@ UNSUPPORTED_VERSION = 2
 MAX_MESSAGE_SIZE = 4096
 
 
-def build_response(request_id: bytes, verdict: int, reason: int, version: int = CURRENT_VERSION) -> bytes:
+# soos-daemon RESPONSE_VALIDITY_NS (crates/daemon/src/dispatcher.rs): expires = issued + 2 s.
+RESPONSE_VALIDITY_NS = 2_000_000_000
+# How far in the past the window of an `expired` response closed.
+EXPIRED_AGE_NS = 1_000_000_000
+
+
+def monotonic_ns() -> int:
+    """CLOCK_MONOTONIC in nanoseconds: the clock soos-daemon stamps with and pam_soos.so reads."""
+    return time.clock_gettime_ns(time.CLOCK_MONOTONIC)
+
+
+def write_varint(out: bytearray, value: int):
+    """Appends a postcard (LEB128) unsigned varint; value must fit a u64."""
+    if value < 0 or value >= 1 << 64:
+        raise ValueError("varint out of u64 range")
+    while True:
+        byte = value & 0x7F
+        value >>= 7
+        if value:
+            out.append(byte | 0x80)
+        else:
+            out.append(byte)
+            return
+
+
+def response_stamps(stamps: str, mode: str):
+    """Returns (issued_monotonic_ns, expires_monotonic_ns) for one response, read at send time.
+
+    `monotonic` stamps exactly like soos-daemon (issued = now, expires = issued + 2 s), which
+    the PAM client enforces since GitHub #287. `zero` sends the unstamped form (0, 0) that a
+    daemon without a clock would send; the PAM client rejects it. The `expired` mode always
+    sends a consistent window that closed EXPIRED_AGE_NS before now.
+    """
+    if mode == "expired":
+        expires = max(monotonic_ns() - EXPIRED_AGE_NS, 2)
+        return max(expires - RESPONSE_VALIDITY_NS, 1), expires
+    if stamps == "monotonic":
+        issued = monotonic_ns()
+        return issued, issued + RESPONSE_VALIDITY_NS
+    return 0, 0
+
+
+def build_response(
+    request_id: bytes, verdict: int, reason: int, version: int = CURRENT_VERSION, stamps=(0, 0)
+) -> bytes:
     """Builds a framed postcard-compatible Response wire payload."""
     # Wire layout:
     # version (u8) = 1
     # request_id ([u8; 32])
     # verdict (varint u8)
     # reason_class (varint u8)
-    # issued_monotonic_ns (varint = 0)
-    # expires_monotonic_ns (varint = 0)
+    # issued_monotonic_ns (varint u64)
+    # expires_monotonic_ns (varint u64)
+    issued, expires = stamps
     body = bytearray()
     body.append(version)
     body.extend(request_id)
     body.append(verdict)
     body.append(reason)
-    body.append(0)  # issued_monotonic_ns = 0
-    body.append(0)  # expires_monotonic_ns = 0
+    write_varint(body, issued)
+    write_varint(body, expires)
 
     length_prefix = struct.pack(">I", len(body))
     return length_prefix + bytes(body)
@@ -160,9 +214,19 @@ def main():
             "bad-version",
             "oversized",
             "empty",
+            "expired",
         ],
         default="allow",
         help="Simulation behavior mode",
+    )
+    parser.add_argument(
+        "--stamps",
+        choices=["zero", "monotonic"],
+        default="monotonic",
+        help=(
+            "Response issued/expires stamps: 'monotonic' (default) stamps like soos-daemon; "
+            "'zero' sends the unstamped form (0, 0) that the PAM module rejects"
+        ),
     )
     parser.add_argument("--delay", type=float, default=0.5, help="Delay in seconds for timeout mode")
     parser.add_argument("--one-shot", action="store_true", help="Exit after handling one connection")
@@ -178,6 +242,10 @@ def main():
         help="Octal socket mode (default: 0660); any 'other' permission bit is refused",
     )
     args = parser.parse_args()
+
+    def send_stamps():
+        """Stamps read when the response is built (after any `timeout` delay)."""
+        return response_stamps(args.stamps, args.mode)
 
     try:
         socket_mode = int(args.socket_mode, 8)
@@ -283,7 +351,7 @@ def main():
                 if args.mode == "timeout":
                     time.sleep(args.delay)
                     # After sleeping beyond timeout, send allow
-                    resp = build_response(req_id, VERDICT_ALLOW, REASON_FACEMATCH)
+                    resp = build_response(req_id, VERDICT_ALLOW, REASON_FACEMATCH, stamps=send_stamps())
                     client.sendall(resp)
                 elif args.mode == "crash-partial":
                     # Send partial 2 bytes of length prefix then close abruptly
@@ -292,24 +360,27 @@ def main():
                     # Send length prefix claiming 37 bytes, but send only 4 bytes of body
                     client.sendall(struct.pack(">I", 37) + b"\x01\xAA\xBB\xCC")
                 elif args.mode == "malformed":
-                    resp = build_response(req_id, VERDICT_UNDECODABLE, REASON_FACEMATCH)
+                    resp = build_response(req_id, VERDICT_UNDECODABLE, REASON_FACEMATCH, stamps=send_stamps())
                     client.sendall(resp)
                 elif args.mode == "wrong-request-id":
                     other_id = bytes(b ^ 0xFF for b in req_id)
-                    resp = build_response(other_id, VERDICT_ALLOW, REASON_FACEMATCH)
+                    resp = build_response(other_id, VERDICT_ALLOW, REASON_FACEMATCH, stamps=send_stamps())
                     client.sendall(resp)
                 elif args.mode == "bad-version":
-                    resp = build_response(req_id, VERDICT_ALLOW, REASON_FACEMATCH, UNSUPPORTED_VERSION)
+                    resp = build_response(
+                        req_id, VERDICT_ALLOW, REASON_FACEMATCH, UNSUPPORTED_VERSION,
+                        stamps=send_stamps(),
+                    )
                     client.sendall(resp)
                 elif args.mode == "oversized":
                     client.sendall(struct.pack(">I", MAX_MESSAGE_SIZE + 1))
                 elif args.mode == "empty":
                     client.sendall(struct.pack(">I", 0))
                 elif args.mode == "deny":
-                    resp = build_response(req_id, VERDICT_DENY, REASON_SCORE_BELOW_THRESHOLD)
+                    resp = build_response(req_id, VERDICT_DENY, REASON_SCORE_BELOW_THRESHOLD, stamps=send_stamps())
                     client.sendall(resp)
-                else:  # allow
-                    resp = build_response(req_id, VERDICT_ALLOW, REASON_FACEMATCH)
+                else:  # allow, expired
+                    resp = build_response(req_id, VERDICT_ALLOW, REASON_FACEMATCH, stamps=send_stamps())
                     client.sendall(resp)
             except Exception as e:
                 print(f"[mock_daemon] Connection handling error: {e}", file=sys.stderr, flush=True)

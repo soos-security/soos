@@ -25,7 +25,8 @@
 #   - T13: Verdict::Deny -> PAM_IGNORE -> password fallback (ARCHITECTURE §3)
 #   - T14: Truncated response body -> PAM_IGNORE -> password fallback
 #   - T15: Malformed responses (undecodable verdict, mismatched request_id,
-#          unsupported version, oversized and empty frames; three carry Allow)
+#          unsupported version, oversized and empty frames; three carry Allow;
+#          plus an expired and an unstamped Allow, GitHub #287)
 #          -> never an authorization, password fallback intact
 # T2, T6, T8 and T13-T15 are review finding TCI-06 (GitHub #189): every case
 # exits non-zero on a failed expectation, none downgrades it to a warning.
@@ -189,7 +190,7 @@ assert_socket_modes() {
 
 # Starts the mock daemon in the given mode and waits (bounded) for its socket.
 start_mock_daemon() {
-    python3 tests/docker/mock_daemon.py --socket /run/soos/daemon.sock "$@" &
+    python3 tests/docker/mock_daemon.py --stamps monotonic --socket /run/soos/daemon.sock "$@" &
     MOCK_PID=$!
     for _ in $(seq 1 50); do
         [[ -S /run/soos/daemon.sock ]] && break
@@ -594,7 +595,7 @@ if command -v pam-auth-update >/dev/null 2>&1; then
     fi
     success "T11: generated common-auth places the hook (line ${T11_NOTIFY_LINE}) before pam_deny (line ${T11_DENY_LINE})."
 
-    python3 tests/docker/mock_daemon.py --mode deny --record "${T11_EVENTS}" --socket /run/soos/daemon.sock &
+    python3 tests/docker/mock_daemon.py --stamps monotonic --mode deny --record "${T11_EVENTS}" --socket /run/soos/daemon.sock &
     MOCK_PID=$!
     sleep 0.2
 
@@ -660,7 +661,7 @@ auth  required                       pam_unix.so
 account required pam_unix.so
 session required pam_unix.so
 EOF
-python3 tests/docker/mock_daemon.py --mode allow --socket /run/soos/daemon.sock &
+python3 tests/docker/mock_daemon.py --stamps monotonic --mode allow --socket /run/soos/daemon.sock &
 MOCK_PID=$!
 sleep 0.2
 
@@ -747,11 +748,24 @@ cleanup_daemon
 #   bad-version       complete Allow frame with protocol version 2
 #   oversized         length prefix above MAX_MESSAGE_SIZE
 #   empty             zero-length frame
+#   expired           complete Allow frame whose issued/expires window closed (#287)
+# plus an unstamped Allow (`--stamps zero`, issued = expires = 0, #287).
 echo ""
 info "-------------------------------------------------------------------"
 info "T15: Malformed Responses — No Facial Authorization, Password Fallback"
 info "-------------------------------------------------------------------"
-for T15_MODE in malformed wrong-request-id bad-version oversized empty; do
+cleanup_daemon
+start_mock_daemon --mode allow --stamps zero
+if ! assert_no_facial_authorization test-soos "T15 (unstamped)"; then
+    error "T15 (unstamped) failed: an Allow without response stamps authenticated the user!"
+    exit 1
+fi
+if ! /usr/local/bin/pam_test_runner test-soos testuser password123; then
+    error "T15 (unstamped) failed: valid password rejected after an unstamped response."
+    exit 1
+fi
+success "T15 (unstamped) passed: rejected as an authorization, password fallback intact."
+for T15_MODE in malformed wrong-request-id bad-version oversized empty expired; do
     cleanup_daemon
     start_mock_daemon --mode "${T15_MODE}"
     if ! assert_no_facial_authorization test-soos "T15 (${T15_MODE})"; then

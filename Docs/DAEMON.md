@@ -215,8 +215,10 @@ pad_threshold = 0.85
   through the pure function `soos_daemon::dispatcher::stamp_response` (GitHub #287):
   `issued_monotonic_ns > 0` and `expires_monotonic_ns = issued + RESPONSE_VALIDITY_NS` (2 s) on every
   verdict path. If the clock fails, the response carries `issued = expires = 0` (already expired)
-  and an `Allow` verdict is downgraded to `Unavailable` / `InternalError`. The PAM client still
-  treats both fields as informational (see `Docs/IPC_PROTOCOL.md`, "Response Freshness").
+  and an `Allow` verdict is downgraded to `Unavailable` / `InternalError`. Since GitHub #287 the
+  PAM client enforces both fields against its own CLOCK_MONOTONIC reading and returns
+  `PAM_IGNORE` for an unstamped, inverted, future-dated or expired response (see
+  `Docs/IPC_PROTOCOL.md`, "Response Freshness").
 4. The socket is bound (§1.2). When started by systemd (`Type=notify`, `NOTIFY_SOCKET` set) the daemon
    then sends `READY=1` through `soos_daemon::sd_notify`; only then does systemd start units ordered
    after it (`display-manager.service`). A notification failure is logged at `warn`. The accept loop

@@ -1174,42 +1174,156 @@ fn mock_exchange(mode: &str) -> Vec<u8> {
     answer.unwrap_or_else(|| panic!("mock_daemon.py --mode {mode} never created its socket"))
 }
 
+/// CLOCK_MONOTONIC as seen by another process (the clock the mock daemon stamps with).
+fn monotonic_ns_via_python() -> u64 {
+    let out = Command::new("python3")
+        .args([
+            "-c",
+            "import time; print(time.clock_gettime_ns(time.CLOCK_MONOTONIC))",
+        ])
+        .output()
+        .expect("run python3");
+    String::from_utf8_lossy(&out.stdout)
+        .trim()
+        .parse()
+        .expect("monotonic nanoseconds")
+}
+
+/// One decoded mock `Response` frame (codec v1, hand-decoded: the invariants crate has no
+/// dependency on `soos-protocol`).
+struct MockResponse {
+    version: u8,
+    request_id: [u8; 32],
+    /// First byte of the verdict varint (single-byte for every mode).
+    verdict: u8,
+    issued: u64,
+    expires: u64,
+}
+
+fn read_varint(buf: &[u8], idx: &mut usize) -> u64 {
+    let mut value = 0u64;
+    let mut shift = 0u32;
+    loop {
+        let byte = buf[*idx];
+        *idx += 1;
+        value |= u64::from(byte & 0x7F) << shift;
+        if byte & 0x80 == 0 {
+            return value;
+        }
+        shift += 7;
+        assert!(shift < 64, "varint too long");
+    }
+}
+
+/// Decodes a complete mock `Response` frame and asserts it is exactly one frame: the
+/// declared length matches the bytes sent and the body is consumed exactly (no trailing
+/// byte after the two varint stamps).
+fn decode_mock_response(mode: &str, frame: &[u8]) -> MockResponse {
+    assert!(frame.len() > 4, "{mode} sends a length prefix and a body");
+    let declared = u32::from_be_bytes([frame[0], frame[1], frame[2], frame[3]]) as usize;
+    assert_eq!(frame.len(), 4 + declared, "{mode} is one complete frame");
+    let mut request_id = [0u8; 32];
+    request_id.copy_from_slice(&frame[5..37]);
+    let verdict = frame[37];
+    assert!(
+        verdict < 0x80,
+        "{mode} verdict discriminant is a single byte"
+    );
+    let mut idx = 38;
+    let reason = read_varint(frame, &mut idx);
+    assert!(reason < 0x80, "{mode} reason class is a single byte");
+    let issued = read_varint(frame, &mut idx);
+    let expires = read_varint(frame, &mut idx);
+    assert_eq!(idx, frame.len(), "{mode} body is consumed exactly");
+    MockResponse {
+        version: frame[4],
+        request_id,
+        verdict,
+        issued,
+        expires,
+    }
+}
+
+/// Sends one request in `mode` and asserts the response carries valid daemon-like stamps
+/// read during the exchange (`issued` from CLOCK_MONOTONIC, `expires = issued + 2 s`), so
+/// the stamps are never a second defect.
+fn mock_response_with_fresh_stamps(mode: &str) -> MockResponse {
+    let before = monotonic_ns_via_python();
+    let frame = mock_exchange(mode);
+    let after = monotonic_ns_via_python();
+    let resp = decode_mock_response(mode, &frame);
+    assert!(
+        (before..=after).contains(&resp.issued),
+        "{mode}: issued {} must be read from CLOCK_MONOTONIC between {before} and {after}",
+        resp.issued
+    );
+    assert_eq!(
+        resp.expires,
+        resp.issued + 2_000_000_000,
+        "{mode}: expires = issued + 2 s"
+    );
+    resp
+}
+
 /// #189 — the malformed-response modes put exactly one defect on the wire, so each Docker
 /// case proves one rejection path of the module (Allow verdicts that must not be honored).
+/// GitHub #287 (owner-approved migration 2026-10-01): the mock stamps from CLOCK_MONOTONIC
+/// by default, so frames are no longer a fixed 41 bytes; each frame is decoded and its
+/// stamps must be valid, which keeps "exactly one defect" true now that the PAM client
+/// enforces the expiry.
 #[test]
 fn test_mock_daemon_malformed_modes_put_one_defect_on_the_wire() {
     let id = [0xABu8; 32];
 
-    let allow = mock_exchange("allow");
-    assert_eq!(allow.len(), 41, "allow is a complete 37-byte frame");
-    assert_eq!(&allow[..4], &37u32.to_be_bytes(), "allow frame length");
-    assert_eq!(allow[4], 1, "allow version");
-    assert_eq!(&allow[5..37], &id, "allow echoes the request_id");
-    assert_eq!(allow[37], 0, "allow verdict");
+    let allow = mock_response_with_fresh_stamps("allow");
+    assert_eq!(allow.version, 1, "allow version");
+    assert_eq!(allow.request_id, id, "allow echoes the request_id");
+    assert_eq!(allow.verdict, 0, "allow verdict");
 
-    let deny = mock_exchange("deny");
-    assert_eq!(&deny[5..37], &id, "deny echoes the request_id");
-    assert_eq!(deny[37], 1, "deny verdict is Verdict::Deny");
+    let deny = mock_response_with_fresh_stamps("deny");
+    assert_eq!(deny.request_id, id, "deny echoes the request_id");
+    assert_eq!(deny.verdict, 1, "deny verdict is Verdict::Deny");
 
-    let wrong = mock_exchange("wrong-request-id");
-    assert_eq!(wrong.len(), 41, "wrong-request-id is a complete frame");
-    assert_eq!(wrong[4], 1, "wrong-request-id keeps version 1");
-    assert_ne!(&wrong[5..37], &id, "wrong-request-id must not echo the id");
-    assert_eq!(wrong[37], 0, "wrong-request-id carries an Allow verdict");
+    let wrong = mock_response_with_fresh_stamps("wrong-request-id");
+    assert_eq!(wrong.version, 1, "wrong-request-id keeps version 1");
+    assert_ne!(
+        wrong.request_id, id,
+        "wrong-request-id must not echo the id"
+    );
+    assert_eq!(
+        wrong.verdict, 0,
+        "wrong-request-id carries an Allow verdict"
+    );
 
-    let version = mock_exchange("bad-version");
-    assert_eq!(version.len(), 41, "bad-version is a complete frame");
-    assert_ne!(version[4], 1, "bad-version must not be protocol version 1");
-    assert_eq!(&version[5..37], &id, "bad-version echoes the id");
-    assert_eq!(version[37], 0, "bad-version carries an Allow verdict");
+    let version = mock_response_with_fresh_stamps("bad-version");
+    assert_ne!(
+        version.version, 1,
+        "bad-version must not be protocol version 1"
+    );
+    assert_eq!(version.request_id, id, "bad-version echoes the id");
+    assert_eq!(version.verdict, 0, "bad-version carries an Allow verdict");
 
-    let malformed = mock_exchange("malformed");
-    assert_eq!(malformed.len(), 41, "malformed is a complete frame");
-    assert_eq!(malformed[4], 1, "malformed keeps version 1");
-    assert_eq!(&malformed[5..37], &id, "malformed echoes the id");
+    let malformed = mock_response_with_fresh_stamps("malformed");
+    assert_eq!(malformed.version, 1, "malformed keeps version 1");
+    assert_eq!(malformed.request_id, id, "malformed echoes the id");
     assert!(
-        malformed[37] > 3 && malformed[37] < 0x80,
+        malformed.verdict > 3 && malformed.verdict < 0x80,
         "malformed must carry a single-byte, undecodable verdict discriminant"
+    );
+
+    // GitHub #287: the only defect of `expired` is its closed issued/expires window.
+    let before = monotonic_ns_via_python();
+    let expired = decode_mock_response("expired", &mock_exchange("expired"));
+    assert_eq!(expired.version, 1, "expired keeps version 1");
+    assert_eq!(expired.request_id, id, "expired echoes the id");
+    assert_eq!(expired.verdict, 0, "expired carries an Allow verdict");
+    assert!(
+        expired.issued > 0 && expired.issued <= expired.expires,
+        "expired keeps a consistent, stamped window"
+    );
+    assert!(
+        expired.expires < before,
+        "expired must send a window that closed before the request"
     );
 
     let truncated = mock_exchange("crash-truncated");

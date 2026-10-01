@@ -19,6 +19,9 @@
     reason = "Contractual integration tests use assertions, unwrap, and expect"
 )]
 
+#[path = "common/stamps.rs"]
+mod stamps;
+
 use pam_soos::{pam_sm_authenticate, pam_sm_setcred};
 use soos_protocol::codec::{decode, encode};
 use soos_protocol::types::{
@@ -122,13 +125,14 @@ fn test_ipc_nominal_allow_returns_success() {
         let req: Request = decode(&full_req).expect("decoded request");
 
         // Reply with Verdict::Allow bound to req.request_id
+        let (issued, expires) = stamps::fresh_stamps();
         let resp = Response {
             version: CURRENT_VERSION,
             request_id: req.request_id,
             verdict: Verdict::Allow,
             reason_class: ReasonClass::FaceMatch,
-            issued_monotonic_ns: 1000,
-            expires_monotonic_ns: 2000,
+            issued_monotonic_ns: issued,
+            expires_monotonic_ns: expires,
         };
         let encoded = encode(&resp).expect("encoded response");
         stream.write_all(&encoded).expect("wrote response");
@@ -165,13 +169,14 @@ fn test_ipc_deny_returns_ignore() {
 
         let req: Request = decode(&full_req).expect("decoded request");
 
+        let (issued, expires) = stamps::fresh_stamps();
         let resp = Response {
             version: CURRENT_VERSION,
             request_id: req.request_id,
             verdict: Verdict::Deny,
             reason_class: ReasonClass::ScoreBelowThreshold,
-            issued_monotonic_ns: 1000,
-            expires_monotonic_ns: 2000,
+            issued_monotonic_ns: issued,
+            expires_monotonic_ns: expires,
         };
         let encoded = encode(&resp).expect("encoded response");
         stream.write_all(&encoded).expect("wrote response");
@@ -208,13 +213,14 @@ fn test_ipc_unavailable_returns_ignore() {
 
         let req: Request = decode(&full_req).expect("decoded request");
 
+        let (issued, expires) = stamps::fresh_stamps();
         let resp = Response {
             version: CURRENT_VERSION,
             request_id: req.request_id,
             verdict: Verdict::Unavailable,
             reason_class: ReasonClass::CameraUnavailable,
-            issued_monotonic_ns: 1000,
-            expires_monotonic_ns: 2000,
+            issued_monotonic_ns: issued,
+            expires_monotonic_ns: expires,
         };
         let encoded = encode(&resp).expect("encoded response");
         stream.write_all(&encoded).expect("wrote response");
@@ -247,13 +253,14 @@ fn test_ipc_request_id_mismatch_returns_ignore() {
 
         // Use arbitrary mismatched nonce
         let mismatched_id = [0xAAu8; 32];
+        let (issued, expires) = stamps::fresh_stamps();
         let resp = Response {
             version: CURRENT_VERSION,
             request_id: mismatched_id,
             verdict: Verdict::Allow, // Even if Allow, nonce mismatch must reject!
             reason_class: ReasonClass::FaceMatch,
-            issued_monotonic_ns: 1000,
-            expires_monotonic_ns: 2000,
+            issued_monotonic_ns: issued,
+            expires_monotonic_ns: expires,
         };
         let encoded = encode(&resp).expect("encoded response");
         stream.write_all(&encoded).expect("wrote response");
@@ -899,13 +906,14 @@ fn spawn_drip_feeding_allow_daemon(
         full_req.extend_from_slice(&body);
         let req: Request = decode(&full_req).expect("decoded request");
 
+        let (issued, expires) = stamps::fresh_stamps();
         let resp = Response {
             version: CURRENT_VERSION,
             request_id: req.request_id,
             verdict: Verdict::Allow,
             reason_class: ReasonClass::FaceMatch,
-            issued_monotonic_ns: 1000,
-            expires_monotonic_ns: 2000,
+            issued_monotonic_ns: issued,
+            expires_monotonic_ns: expires,
         };
         let encoded = encode(&resp).expect("encoded response");
         let (header, payload) = encoded.split_at(4);
