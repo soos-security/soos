@@ -60,12 +60,17 @@ const MAX_SAMPLES_PER_CLASS: usize = 10_000;
 const GOLDEN_LOGIT_TOLERANCE: f32 = 1e-3;
 
 /// Golden raw logits of the real model for the synthetic inputs below, in class order
-/// `[PrintPhoto, Live, ScreenReplay]`. Recorded on 2026-09-30 with the attested model installed
-/// at `/var/lib/soos/models` (ORT CPU). All three synthetic patterns land on class 2
-/// (ScreenReplay) with `p_live` around 0.005-0.006: a non-face is never scored live.
-const GOLDEN_UNIFORM_GREY_LOGITS: [f32; 3] = [-3.709_296_7, -0.748_328, 4.458_604_3];
-const GOLDEN_GRADIENT_LOGITS: [f32; 3] = [-3.634_143_4, -0.763_562_4, 4.398_681];
-const GOLDEN_CHECKERBOARD_160_LOGITS: [f32; 3] = [-3.600_257_9, -0.737_216_3, 4.338_425_6];
+/// `[PrintPhoto, Live, ScreenReplay]`. Re-recorded on 2026-10-01 (owner approval, walkthrough
+/// 161) with the raw `[0, 255]` input range of upstream Silent-Face-Anti-Spoofing (ADR
+/// 2026-10-01 "PAD Input Range Matches Upstream (0-255)") and the attested model installed at
+/// `/var/lib/soos/models` (ORT CPU); the same values come out of the upstream preprocessing in
+/// Python. Uniform grey and the gradient land on class 2 (ScreenReplay, `p_live` 0.248 and
+/// 0.022); the 160x160 checkerboard lands on class 1 (`p_live` 0.995): MiniFASNet alone does
+/// not reject non-faces, the face detector does. The 2026-09-30 values were recorded with the
+/// former `pixel / 255.0` input and are listed in walkthrough 161.
+const GOLDEN_UNIFORM_GREY_LOGITS: [f32; 3] = [-1.892_888_1, 0.407_292_2, 1.485_569_5];
+const GOLDEN_GRADIENT_LOGITS: [f32; 3] = [-4.305_515, 0.249_781_67, 4.055_547];
+const GOLDEN_CHECKERBOARD_160_LOGITS: [f32; 3] = [-2.284_479_6, 4.028_476, -1.746_661_3];
 
 // ---------------------------------------------------------------------------
 // Gating helpers
@@ -362,10 +367,23 @@ fn test_real_ort_pad_detector_score_matches_live_class_softmax() {
             p_live >= SHIPPED_PAD_THRESHOLD,
             "{name}: live decision must follow the shipped threshold"
         );
-        assert!(
-            !result.is_live,
-            "{name}: a synthetic non-face pattern must never be accepted as live"
-        );
+        if name == "checkerboard_160" {
+            // Owner decision 2026-10-01 (walkthrough 161, option A): with the upstream [0, 255]
+            // input range MiniFASNet scores this checkerboard live (p_live 0.995). MiniFASNet
+            // alone does not reject non-faces; the face detector does (pipeline-level test
+            // `pad_nonface_pipeline_real_model_tests`). The former `!result.is_live` pass relied
+            // on the `pixel / 255.0` bug, so only the threshold rule is checked here.
+            assert_eq!(
+                result.is_live,
+                p_live >= SHIPPED_PAD_THRESHOLD,
+                "{name}: live decision must follow the shipped threshold"
+            );
+        } else {
+            assert!(
+                !result.is_live,
+                "{name}: a synthetic non-face pattern must never be accepted as live"
+            );
+        }
     }
 }
 

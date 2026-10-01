@@ -162,24 +162,23 @@ fn test_pad_prepare_input_80x80_bgr() {
         "Tensor length must be 3 * 80 * 80 = 19200"
     );
 
-    // Channel 0 = Blue: 64 / 255.0 ≈ 0.25098
-    // Channel 1 = Green: 128 / 255.0 ≈ 0.50196
-    // Channel 2 = Red: 255 / 255.0 = 1.0
+    // Raw upstream range (ADR 2026-10-01 "PAD Input Range Matches Upstream (0-255)"):
+    // Channel 0 = Blue: 64.0, Channel 1 = Green: 128.0, Channel 2 = Red: 255.0
     let b_val = input_tensor[0];
     let g_val = input_tensor[80 * 80];
     let r_val = input_tensor[2 * 80 * 80];
 
     assert!(
-        (b_val - (64.0 / 255.0)).abs() < 1e-4,
-        "Channel 0 must be Blue normalized to [0, 1], got {b_val}"
+        (b_val - 64.0).abs() < 1e-4,
+        "Channel 0 must be Blue in the raw [0, 255] range, got {b_val}"
     );
     assert!(
-        (g_val - (128.0 / 255.0)).abs() < 1e-4,
-        "Channel 1 must be Green normalized to [0, 1], got {g_val}"
+        (g_val - 128.0).abs() < 1e-4,
+        "Channel 1 must be Green in the raw [0, 255] range, got {g_val}"
     );
     assert!(
-        (r_val - 1.0).abs() < 1e-4,
-        "Channel 2 must be Red normalized to [0, 1], got {r_val}"
+        (r_val - 255.0).abs() < 1e-4,
+        "Channel 2 must be Red in the raw [0, 255] range, got {r_val}"
     );
 }
 
@@ -200,17 +199,17 @@ fn test_pad_normalization_0_1_range() {
 
     for (i, &val) in tensor.iter().enumerate() {
         assert!(
-            (0.0..=1.0).contains(&val),
-            "Pixel at index {i} must be normalized in [0.0, 1.0], got {val}"
+            (0.0..=255.0).contains(&val),
+            "Pixel at index {i} must stay in the raw range [0.0, 255.0], got {val}"
         );
     }
 
     // Min value should be 0.0 (pixel 2 is 0)
     assert_eq!(tensor[2], 0.0, "Black pixel must normalize to 0.0");
-    // Max value should be 1.0 (pixel 0 is 255)
+    // Max value should be 255.0 (pixel 0 is 255)
     assert!(
-        (tensor[2 * 80 * 80] - 1.0).abs() < 1e-4,
-        "White pixel must normalize to 1.0"
+        (tensor[2 * 80 * 80] - 255.0).abs() < 1e-4,
+        "White pixel must map to 255.0"
     );
 }
 

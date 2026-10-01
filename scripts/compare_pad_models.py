@@ -5,8 +5,8 @@
 # Runs a reference and a candidate MiniFASNet ONNX graph with onnxruntime on
 # the same inputs and reports the max |softmax difference|, the argmax
 # agreement and the argmax histogram, under both input conventions:
-#   raw    pixel values in [0, 255] (upstream Silent-Face-Anti-Spoofing ToTensor)
-#   scaled pixel / 255.0 in [0, 1]  (soos OrtPadDetector::prepare_input today)
+#   raw    pixel values in [0, 255] (upstream ToTensor, and soos since walkthrough 161)
+#   scaled pixel / 255.0 in [0, 1]  (former soos convention, before walkthrough 161)
 # It also compares the weight initializers of both graphs value by value.
 # Used to attest that a shipped or fork ONNX equals the conversion of the
 # upstream .pth by scripts/convert_pad_models.py (GitHub #212, walkthrough 161).
@@ -120,6 +120,12 @@ def main():
     parser.add_argument("--reference", required=True)
     parser.add_argument("--candidate", required=True)
     parser.add_argument("--images-dir", default=None)
+    parser.add_argument(
+        "--threshold",
+        type=float,
+        default=0.85,
+        help="live threshold for the pass fractions (soos pad_threshold default 0.85)",
+    )
     args = parser.parse_args()
 
     import numpy
@@ -147,6 +153,7 @@ def main():
                 continue
             worst, agree, hist = 0.0, 0, [0, 0, 0]
             live_max = 0.0
+            passes = [0, 0, 0]  # reference, candidate, mean of both (fusion)
             for bgr in images.values():
                 ref = run(numpy, sessions[0], bgr, scale)
                 cand = run(numpy, sessions[1], bgr, scale)
@@ -154,11 +161,14 @@ def main():
                 agree += int(ref.argmax() == cand.argmax())
                 hist[int(ref.argmax())] += 1
                 live_max = max(live_max, float(ref[1]))
+                for i, p_live in enumerate((ref[1], cand[1], (ref[1] + cand[1]) / 2.0)):
+                    passes[i] += int(p_live >= args.threshold)
             histogram = ", ".join(f"{n}={c}" for n, c in zip(CLASS_NAMES, hist))
             print(
                 f"[{convention}] {group}: n={len(images)} max|dsoftmax| {worst:.3e} "
                 f"argmax agreement {agree}/{len(images)} reference argmax {{{histogram}}} "
-                f"max p(index 1) {live_max:.4f}"
+                f"max p(index 1) {live_max:.4f}; p(index 1) >= {args.threshold}: "
+                f"reference {passes[0]}, candidate {passes[1]}, mean {passes[2]}"
             )
     return 0
 

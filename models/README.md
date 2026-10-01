@@ -42,12 +42,10 @@ Shapes below are the ONNX graph metadata of the attested files (`N` is a symboli
 3. **`minifasnet_v2_pad`**:
    - **Resolution & Crop**: 80×80 context crop generated from a 2.7× expanded face bounding box (captures facial margins, bezels, and printed paper boundaries).
    - **Color Format**: BGR channel ordering.
-   - **Normalization**: Standard scaling `pixel / 255.0` mapping `[0, 255]` to `[0.0, 1.0]`.
-     **Known mismatch (walkthrough 161, owner decision pending)**: upstream Silent-Face-Anti-Spoofing
-     trains and runs both MiniFASNet checkpoints on raw `[0, 255]` floats (its `ToTensor` does not divide
-     by 255) and the ONNX fork's own demo feeds `[0, 255]`; with `/ 255` every synthetic or natural
-     input tested scores replay with MiniFASNetV2 (`p_live < 0.012`). Not changed here: it moves the PAD operating point
-     and needs the real-camera corpus.
+   - **Value range**: raw pixel values as floats in `[0, 255]`, **not** divided by 255, exactly like
+     upstream Silent-Face-Anti-Spoofing (`to_tensor` returns `img.float()`; both MiniFASNet checkpoints
+     were trained on that range; ADR 2026-10-01 "PAD Input Range Matches Upstream (0-255)", walkthrough 161). Until 2026-10-01 soos fed
+     `pixel / 255.0`, on which every input tested scored replay (`p_live < 0.012`).
    - **Class Ordering**: Softmax logits with Class 0 = Print Spoof, Class 1 = Live, Class 2 = Replay Spoof (`DEFAULT_MINIFASNET_LIVE_CLASS_INDEX = 1` in `crates/inference-ort/src/pad.rs`, ADR 2026-09-29; never overridden in production).
 
 ---
