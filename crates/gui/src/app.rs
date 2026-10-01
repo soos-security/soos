@@ -84,6 +84,9 @@ pub struct SoosApp {
     /// Direct-mode template store mutations, off the UI thread (GitHub #291); `None` in
     /// Polkit mode.
     store_tasks: Option<StoreTaskRunner>,
+    /// Username shown in the success message of the store enrollment in flight, captured when
+    /// the task is submitted (the username field may be edited while the save runs).
+    pending_store_username: Option<String>,
     daemon_message: Option<(String, bool)>,
     last_camera_status: Option<CameraStatus>,
 
@@ -170,6 +173,7 @@ impl SoosApp {
             daemon_monitor,
             tasks,
             store_tasks,
+            pending_store_username: None,
             daemon_message: None,
             last_camera_status: None,
             camera_source: None,
@@ -380,17 +384,18 @@ impl SoosApp {
                         } else {
                             "the system store"
                         };
-                        self.enrollment.status_message = Some((
-                            format!(
-                                "User {} (UID {uid}) enrolled successfully into {target}.",
-                                self.enrollment.target_username
+                        let message = match self.pending_store_username.take() {
+                            Some(username) => format!(
+                                "User {username} (UID {uid}) enrolled successfully into {target}."
                             ),
-                            false,
-                        ));
+                            None => format!("UID {uid} enrolled successfully into {target}."),
+                        };
+                        self.enrollment.status_message = Some((message, false));
                         self.enrollment.is_active = false;
                         self.refresh_profiles();
                     }
                     Err(e) => {
+                        self.pending_store_username = None;
                         self.enrollment.status_message =
                             Some((format!("Failed to save the template: {e}"), true));
                     }
@@ -1151,8 +1156,11 @@ impl SoosApp {
                                         // by `soos-enroll`: it runs on the store worker and
                                         // its outcome arrives in
                                         // `handle_store_task_outcomes` (GitHub #291).
+                                        let username =
+                                            self.enrollment.target_username.clone();
                                         match self.submit_store_task(StoreTask::Enroll(template)) {
                                             Ok(()) => {
+                                                self.pending_store_username = Some(username);
                                                 self.enrollment.status_message = Some((
                                                     "Saving the template...".to_string(),
                                                     false,

@@ -141,3 +141,30 @@ fn test_cdf_decision_recorded() {
         assert!(entry.contains(needle), "the ADR must mention `{needle}`");
     }
 }
+
+/// CDF4: CI type-checks the whole workspace for a 32-bit target on every PR, so a
+/// `time_t` / `tv_sec` width assumption (for example passing `stat.st_mtime` where an `i64` is
+/// expected) cannot reach `main` again.
+#[test]
+fn test_cdf_ci_type_checks_a_32_bit_target() {
+    let ci = read(".github/workflows/ci.yml");
+    let clippy_job = ci
+        .split("\n  clippy:\n")
+        .nth(1)
+        .and_then(|rest| rest.split("\n  test:\n").next())
+        .expect("ci.yml must define the clippy job before the test job");
+    assert!(
+        clippy_job.contains("rustup target add i686-unknown-linux-gnu"),
+        "the clippy job must install the i686 target"
+    );
+    assert!(
+        clippy_job.contains(
+            "cargo check --locked --workspace --all-targets --all-features --target i686-unknown-linux-gnu"
+        ),
+        "the clippy job must type-check the whole workspace for i686"
+    );
+    assert!(
+        clippy_job.contains("ORT_SKIP_DOWNLOAD: \"1\""),
+        "the i686 check must skip the ONNX Runtime download (no i686 binaries)"
+    );
+}

@@ -87,8 +87,10 @@ ORT_SKIP_DOWNLOAD=1 cargo check --locked --workspace --all-targets --all-feature
 ORT_SKIP_DOWNLOAD=1 cargo check --locked --tests --target armv7-unknown-linux-gnueabihf -p soos-daemon --test pcx_wire_routing_tests
 ```
 
-This is a manual check (GitHub #291), not a CI job; `timespec` fields are converted with
-`u64::try_from`, never `cast_unsigned` (invariant
+CI runs the i686 workspace check on every PR in the Clippy job (step "32-bit type check
+(i686)", pinned by `config_open_diagnostics_contract::test_cdf_ci_type_checks_a_32_bit_target`);
+the armv7 PCX check stays manual. `timespec` and `stat` time fields are converted with
+`u64::try_from` from `libc::time_t`, never `cast_unsigned` or an `i64` parameter (invariant
 `config_open_diagnostics_contract::test_cdf_timespec_fields_are_not_cast_unsigned`).
 
 ---

@@ -928,9 +928,6 @@ impl EvidenceStore {
     }
 }
 
-/// Counts the snapshot files (regular, non-symlink `*.enc` entries) of a date partition.
-///
-/// Temporary files and counter files never end in `.enc` and are not counted.
 /// Opens a directory for descriptor-relative work, refusing a symlink as its last component.
 fn open_dir_no_follow(path: &Path) -> Result<File, EvidenceStoreError> {
     Ok(OpenOptions::new()
@@ -1032,7 +1029,7 @@ fn sweep_candidate(
 
 /// Whether a modification time (seconds since the epoch) is at least [`TEMP_SWEEP_MIN_AGE`]
 /// before `now`. A time in the future is never old; one before the epoch always is.
-fn old_enough(mtime_secs: i64, now: SystemTime) -> bool {
+fn old_enough(mtime_secs: nix::libc::time_t, now: SystemTime) -> bool {
     let modified = match u64::try_from(mtime_secs) {
         Ok(secs) => UNIX_EPOCH.checked_add(std::time::Duration::from_secs(secs)),
         Err(_) => Some(UNIX_EPOCH),
@@ -1042,6 +1039,9 @@ fn old_enough(mtime_secs: i64, now: SystemTime) -> bool {
         .is_some_and(|age| age >= TEMP_SWEEP_MIN_AGE)
 }
 
+/// Counts the snapshot files (regular, non-symlink `*.enc` entries) of a date partition.
+///
+/// Temporary files and counter files never end in `.enc` and are not counted.
 fn count_snapshot_files(date_dir: &Path) -> Result<u32, EvidenceStoreError> {
     let mut count: u32 = 0;
     for entry in fs::read_dir(date_dir)? {

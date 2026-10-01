@@ -808,7 +808,7 @@ fn sweep_candidate(
 
 /// Whether a modification time (seconds since the epoch) is at least [`TEMP_SWEEP_MIN_AGE`]
 /// before `now`. A time in the future is never old; one before the epoch always is.
-fn old_enough(mtime_secs: i64, now: std::time::SystemTime) -> bool {
+fn old_enough(mtime_secs: libc::time_t, now: std::time::SystemTime) -> bool {
     let modified = match u64::try_from(mtime_secs) {
         Ok(secs) => std::time::UNIX_EPOCH.checked_add(Duration::from_secs(secs)),
         Err(_) => Some(std::time::UNIX_EPOCH),

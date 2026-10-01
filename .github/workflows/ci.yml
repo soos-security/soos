@@ -142,6 +142,16 @@ jobs:
       - name: cargo clippy
         run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 
+      # 32-bit type check (GitHub #291): `time_t` / `tv_sec` are 32-bit on i686, so width
+      # assumptions in the 64-bit build compile here or fail. Nothing is linked, so the ONNX
+      # Runtime download (no i686 binaries) is skipped.
+      - name: 32-bit type check (i686)
+        env:
+          ORT_SKIP_DOWNLOAD: "1"
+        run: |
+          rustup target add i686-unknown-linux-gnu
+          cargo check --locked --workspace --all-targets --all-features --target i686-unknown-linux-gnu
+
   # ---------------------------------------------------------------------------
   # Job 3: Tests (unit, integration, property, architectural invariants)
   # ---------------------------------------------------------------------------

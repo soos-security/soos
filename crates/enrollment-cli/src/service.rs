@@ -118,8 +118,8 @@ pub struct CameraDeviceChoice {
 }
 
 /// Resolves the camera device like [`resolve_camera_device_from_config_with`] and also returns
-/// the notes about the configuration (`soos-gui` logs them; `soos-enroll` prints
-/// [`camera_config_notes`] before it opens the camera).
+/// the notes about the configuration (`soos-gui` logs them; `soos-enroll` prints the notes of
+/// this same read through [`build_full_service_with_notes`] before it opens the camera).
 ///
 /// `daemon.toml` is read by the shared reader [`soos_camera_v4l::daemon_config`] (GitHub #289):
 /// symbolic links are followed like `soos-daemon` follows them; a missing, unreadable, oversized,

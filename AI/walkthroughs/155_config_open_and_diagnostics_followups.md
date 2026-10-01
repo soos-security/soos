@@ -184,3 +184,31 @@ because `serde_json` parses floats with its fast, not exactly round-tripping, al
 The production fix enables the `float_roundtrip` feature of `serde_json` in the workspace
 `Cargo.toml`, so every soos JSON output parses back to the exact value it printed. The test is
 unchanged; eight consecutive runs pass. No new crate is pulled in (`Cargo.lock` is unchanged).
+
+## Candid review fixes (batch `fix/p3fu3-batch`)
+
+The first candid review of the combined #291 batch returned CHANGES_REQUESTED:
+
+- **MAJOR — 32-bit build broken.** The orphaned temp-file sweep of both stores
+  (`crates/biometric-store/src/store.rs`, `crates/evidence-store/src/store.rs`) passed
+  `stat.st_mtime` (`libc::time_t`, `i32` on i686/armv7) to `old_enough(mtime_secs: i64, ..)`
+  (E0308), although row CDF4 claimed the i686 check passed: the check had been run before the
+  storage branch was merged. Red: `ORT_SKIP_DOWNLOAD=1 cargo check --target
+  i686-unknown-linux-gnu -p soos-biometric-store -p soos-evidence-store` failed with two E0308.
+  Fix: `old_enough` takes `libc::time_t` and keeps `u64::try_from`; the workspace i686 check is
+  green. To keep it green, CI now runs that check in the Clippy job (step "32-bit type check
+  (i686)"), pinned by the new invariant `test_cdf_ci_type_checks_a_32_bit_target` (red without
+  the step, green with it). No crate compiles C (`cc`/`bindgen` absent), so no multilib is needed.
+- **MINOR — GUI stuck on "Saving the template..." when the store worker dies.** The worker
+  (`crates/gui/src/store_tasks.rs`) now runs the mutation under `catch_unwind` and keeps the
+  kind and UID of the task in flight: a panic is delivered as a failed outcome, and `poll`
+  synthesizes a failed outcome if the worker ever ends without one. New unit tests
+  `worker_failure_tests` (red: missing `spawn_worker` / `PendingTask`).
+- **MINOR — success message used the username at outcome time.** `app.rs` captures the username
+  when the enrollment task is submitted (`pending_store_username`) and uses it in the success
+  message.
+- **MINOR — doc comments.** `count_snapshot_files` got its doc comment back (it had been
+  attached to `open_dir_no_follow`); the `resolve_camera_device_from_config_reported` doc now
+  names `build_full_service_with_notes`.
+
+No existing test was modified.

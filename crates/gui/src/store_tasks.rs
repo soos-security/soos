@@ -107,7 +107,81 @@ pub struct StoreTaskRunner {
     notify: Notify,
     tx: Sender<StoreTaskOutcome>,
     rx: Receiver<StoreTaskOutcome>,
-    in_flight: Option<JoinHandle<()>>,
+    in_flight: Option<(JoinHandle<()>, PendingTask)>,
+}
+
+/// Kind and target of the task in flight, kept so that a worker that panics or ends without
+/// an outcome still reports a failure for the right operation and UID.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PendingTask {
+    uid: u32,
+    is_enroll: bool,
+}
+
+impl PendingTask {
+    const fn enroll(uid: u32) -> Self {
+        Self {
+            uid,
+            is_enroll: true,
+        }
+    }
+
+    const fn delete(uid: u32) -> Self {
+        Self {
+            uid,
+            is_enroll: false,
+        }
+    }
+
+    fn of(task: &StoreTask) -> Self {
+        match task {
+            StoreTask::Enroll(template) => Self::enroll(template.uid),
+            StoreTask::Delete { uid } => Self::delete(*uid),
+        }
+    }
+
+    /// The failed outcome of this task, with `reason` as its message.
+    fn failed(self, reason: &str) -> StoreTaskOutcome {
+        let error = StoreTaskError::Failed(reason.to_string());
+        if self.is_enroll {
+            StoreTaskOutcome::Enrolled {
+                uid: self.uid,
+                result: Err(error),
+            }
+        } else {
+            StoreTaskOutcome::Deleted {
+                uid: self.uid,
+                result: Err(error),
+            }
+        }
+    }
+}
+
+/// Message of the outcome delivered when the store mutation panicked.
+const WORKER_PANIC_MESSAGE: &str = "the template store operation failed unexpectedly";
+
+/// Message of the outcome synthesized when the worker ended without delivering one.
+const WORKER_LOST_MESSAGE: &str = "template store worker terminated without an outcome";
+
+/// Spawns the worker thread running `job`; a panic in `job` is delivered as a failed outcome
+/// of `pending` instead of leaving the UI waiting.
+fn spawn_worker(
+    pending: PendingTask,
+    tx: Sender<StoreTaskOutcome>,
+    notify: Notify,
+    job: impl FnOnce() -> StoreTaskOutcome + Send + 'static,
+) -> std::io::Result<JoinHandle<()>> {
+    thread::Builder::new()
+        .name("soos-gui-store".to_string())
+        .spawn(move || {
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(job))
+                .unwrap_or_else(|_| {
+                    tracing::error!("template store worker panicked");
+                    pending.failed(WORKER_PANIC_MESSAGE)
+                });
+            let _ = tx.send(outcome);
+            notify();
+        })
 }
 
 impl StoreTaskRunner {
@@ -135,16 +209,14 @@ impl StoreTaskRunner {
             return Err(StoreTaskSubmitError::Busy);
         }
         let store = Arc::clone(&self.store);
-        let notify = Arc::clone(&self.notify);
-        let tx = self.tx.clone();
-        let handle = thread::Builder::new()
-            .name("soos-gui-store".to_string())
-            .spawn(move || {
-                let outcome = run_task(&store, task);
-                let _ = tx.send(outcome);
-                notify();
-            })?;
-        self.in_flight = Some(handle);
+        let pending = PendingTask::of(&task);
+        let handle = spawn_worker(
+            pending,
+            self.tx.clone(),
+            Arc::clone(&self.notify),
+            move || run_task(&store, task),
+        )?;
+        self.in_flight = Some((handle, pending));
         Ok(())
     }
 
@@ -155,13 +227,18 @@ impl StoreTaskRunner {
 
     /// Drains delivered outcomes without blocking. Call once per frame from the UI thread.
     pub fn poll(&mut self) -> Vec<StoreTaskOutcome> {
-        let finished = self.in_flight.as_ref().is_some_and(JoinHandle::is_finished);
-        let outcomes: Vec<StoreTaskOutcome> = self.rx.try_iter().collect();
+        let finished = self
+            .in_flight
+            .as_ref()
+            .is_some_and(|(handle, _)| handle.is_finished());
+        let mut outcomes: Vec<StoreTaskOutcome> = self.rx.try_iter().collect();
         if !outcomes.is_empty() || finished {
-            if finished && outcomes.is_empty() {
-                tracing::error!("template store worker terminated without an outcome");
+            if let Some((_, pending)) = self.in_flight.take() {
+                if outcomes.is_empty() {
+                    tracing::error!("{WORKER_LOST_MESSAGE}");
+                    outcomes.push(pending.failed(WORKER_LOST_MESSAGE));
+                }
             }
-            self.in_flight = None;
         }
         outcomes
     }
@@ -180,5 +257,79 @@ fn run_task(store: &BiometricStore, task: StoreTask) -> StoreTaskOutcome {
             uid,
             result: store.delete(uid).map_err(|e| StoreTaskError::from(&e)),
         },
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::panic,
+    clippy::arithmetic_side_effects,
+    reason = "Unit tests of the worker failure path use direct assertions"
+)]
+mod worker_failure_tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    fn wait_outcome(rx: &Receiver<StoreTaskOutcome>) -> StoreTaskOutcome {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Ok(outcome) = rx.try_recv() {
+                return outcome;
+            }
+            assert!(Instant::now() < deadline, "the worker delivered no outcome");
+            thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    /// A panic inside the store mutation is delivered as a failed outcome of the submitted
+    /// kind and UID, so the UI leaves its "Saving the template..." state.
+    #[test]
+    fn test_sgu_worker_panic_yields_failed_enroll_outcome() {
+        let (tx, rx) = mpsc::channel();
+        let notify: Notify = Arc::new(|| {});
+        let handle = spawn_worker(PendingTask::enroll(1234), tx, notify, || {
+            panic!("simulated store panic")
+        })
+        .unwrap();
+        handle.join().unwrap();
+        match wait_outcome(&rx) {
+            StoreTaskOutcome::Enrolled { uid, result } => {
+                assert_eq!(uid, 1234);
+                assert!(matches!(result, Err(StoreTaskError::Failed(_))));
+            }
+            other => panic!("unexpected outcome {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_sgu_worker_panic_yields_failed_delete_outcome() {
+        let (tx, rx) = mpsc::channel();
+        let notify: Notify = Arc::new(|| {});
+        let handle = spawn_worker(PendingTask::delete(42), tx, notify, || {
+            panic!("simulated store panic")
+        })
+        .unwrap();
+        handle.join().unwrap();
+        match wait_outcome(&rx) {
+            StoreTaskOutcome::Deleted { uid, result } => {
+                assert_eq!(uid, 42);
+                assert!(matches!(result, Err(StoreTaskError::Failed(_))));
+            }
+            other => panic!("unexpected outcome {other:?}"),
+        }
+    }
+
+    /// A worker that ends without sending anything still yields a failed outcome from `poll`.
+    #[test]
+    fn test_sgu_missing_outcome_is_synthesized_as_failure() {
+        let pending = PendingTask::enroll(7);
+        match pending.failed("template store worker terminated without an outcome") {
+            StoreTaskOutcome::Enrolled { uid, result } => {
+                assert_eq!(uid, 7);
+                assert!(matches!(result, Err(StoreTaskError::Failed(_))));
+            }
+            other => panic!("unexpected outcome {other:?}"),
+        }
     }
 }
