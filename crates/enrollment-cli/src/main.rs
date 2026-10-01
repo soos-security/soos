@@ -14,9 +14,9 @@ use clap::Parser;
 use soos_enrollment_cli::args::{resolve_target_uid, Cli, Commands, OutputFormat};
 use soos_enrollment_cli::error::EnrollmentCliError;
 use soos_enrollment_cli::{
-    build_evidence_for_migration, build_full_service, build_store_only, check_privileges,
-    format_enrolled_json, format_migration_json, MigrationSummary, EMBEDDING_MODEL_VERSION,
-    MODEL_ID_EMBEDDING,
+    build_evidence_for_migration, build_full_service, build_store_only,
+    build_templates_for_migration, check_privileges, format_enrolled_json, format_migration_json,
+    run_migration_with_reasons, MigrationSummary, EMBEDDING_MODEL_VERSION, MODEL_ID_EMBEDDING,
 };
 use soos_protocol::Verdict;
 
@@ -204,9 +204,16 @@ fn run() -> Result<(), EnrollmentCliError> {
         }
 
         Commands::Migrate(args) => {
-            let service = build_store_only(&cli)?;
+            // Never creates the master key, the evidence key or a store directory (GitHub #287).
+            check_privileges(true)?;
+            let templates = build_templates_for_migration(&cli)?;
             let evidence = build_evidence_for_migration(args)?;
-            let summary = service.migrate(args, evidence.as_ref())?;
+            let summary = run_migration_with_reasons(
+                args,
+                templates.as_ref().map_err(|r| *r),
+                evidence.as_ref(),
+                true,
+            )?;
 
             match args.format {
                 OutputFormat::Table => print_migration_summary(&summary),

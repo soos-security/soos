@@ -90,7 +90,9 @@ Recorded as ADR 2026-09-30 "AES-GCM Associated Data for Stored Templates and Evi
   I/O error) is recorded and left untouched while the other templates are still processed. A
   second run reports every template as already current. The report never carries embedding values
   or key material. The operator entry point is `soos-enroll migrate [--dry-run]`
-  (`Docs/ENROLLMENT_CLI.md`); v1 stays readable without it (no cut-off).
+  (`Docs/ENROLLMENT_CLI.md`); v1 stays readable without it (no cut-off). `MasterKey::load_existing(path)`
+  loads an existing master key with the validation of `load_or_create` and never creates a key or a
+  directory; `migrate` uses it so that a host without a key is never given one.
 - **What is detected**: moving a ciphertext between UIDs, editing the clear header, any bit flip,
   a wrong key.
 - **What is not detected (rollback)**: restoring an older, still-valid bound template of the

@@ -187,14 +187,14 @@ sudo soos-enroll migrate --format json --evidence-dir /var/lib/soos/evidence --e
 ```
 
 - **Root only**, like every other subcommand (arguments are parsed first, so `--help` works for any user).
-- **Templates**: `BiometricStore::migrate_legacy_templates` over `--biometrics-dir` / `--key-file` (store opened like `list` and `delete`). **Evidence**: `EvidenceStore::migrate_legacy_snapshots` over `--evidence-dir` (default `/var/lib/soos/evidence`) with the key `--evidence-key-file` (default `/var/lib/soos/evidence.key`). A missing evidence key means evidence was never enabled: evidence is reported as skipped and **no key is created**. An existing key is validated like the daemon validates it.
+- **Templates**: `BiometricStore::migrate_legacy_templates` over `--biometrics-dir` / `--key-file`. Unlike `list` and `delete`, `migrate` (with or without `--dry-run`) **never creates the master key or the biometrics directory**: the key is loaded with `MasterKey::load_existing`, and a missing key or directory reports the template store as skipped (nothing can exist to migrate) while evidence is still processed. **Evidence**: `EvidenceStore::migrate_legacy_snapshots` over `--evidence-dir` (default `/var/lib/soos/evidence`) with the key `--evidence-key-file` (default `/var/lib/soos/evidence.key`). A missing evidence key means evidence was never enabled: evidence is reported as skipped and **no key is created**. An existing key is validated like the daemon validates it.
 - **Atomic and symlink-safe**: every rewrite goes through the store's own write path (temporary file created `0600`, `fsync`, `rename`, directory `fsync`); no cryptography is duplicated in the CLI. Symlinks are refused or skipped, never followed.
 - **Idempotent**: v2 files are never rewritten; a second run reports `0` migrated.
 - **Per-file failures** (tampered or foreign file, symlink, I/O error) are counted and listed with their UID or path and reason; they never abort the other files and leave the file untouched. A failure of a whole store (unlistable or symlinked directory) is reported the same way and the other store is still migrated. The command exits with status `1` when anything failed, `0` otherwise.
 - **Summary**: per store `migrated` (with `--dry-run`: would migrate), `already_current`, `failed`, `failures[]` (`item`, `error`), plus `skipped` when the store was not examined. Neither output contains embedding values, frame bytes or key material.
 - Do not run it while `soos-enroll enroll` / `import` writes the same UID; the daemon may keep running (it only reads templates, and new evidence is always written as v2).
 
-Verification: `crates/enrollment-cli/tests/migrate_tests.rs`, `crates/biometric-store/tests/bulk_migration_tests.rs`, `crates/evidence-store/tests/legacy_migration_tests.rs` (matrix rows SMI1–SMI6).
+Verification: `crates/enrollment-cli/tests/migrate_tests.rs`, `crates/biometric-store/tests/bulk_migration_tests.rs`, `crates/evidence-store/tests/legacy_migration_tests.rs` (matrix rows SMI1–SMI6, SMI10–SMI11).
 
 ## 3. Global Options
 

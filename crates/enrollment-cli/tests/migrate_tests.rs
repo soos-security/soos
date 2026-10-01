@@ -24,7 +24,8 @@ use soos_biometric_store::{
 use soos_enrollment_cli::args::{Cli, Commands, MigrateArgs, OutputFormat};
 use soos_enrollment_cli::error::EnrollmentCliError;
 use soos_enrollment_cli::service::{
-    format_migration_json, open_evidence_store_for_migration, EnrollmentService,
+    format_migration_json, open_evidence_store_for_migration, open_template_store_for_migration,
+    run_migration, EnrollmentService,
 };
 use soos_evidence_store::{EvidenceConfig, EvidenceStore};
 use tempfile::TempDir;
@@ -300,4 +301,75 @@ fn test_smi_cli_binary_refuses_migrate_without_root() {
         .expect("spawn soos-enroll");
     assert!(!out.status.success());
     assert!(String::from_utf8_lossy(&out.stderr).contains("Root privileges"));
+}
+
+#[test]
+fn test_smi_cli_without_master_key_skips_templates_and_creates_nothing() {
+    let temp = TempDir::new().unwrap();
+    let bio_dir = temp.path().join("biometrics");
+    let key_path = temp.path().join("soos").join("master.key");
+
+    let opened = open_template_store_for_migration(&bio_dir, &key_path).unwrap();
+    assert!(opened.is_none(), "a missing master key means no templates");
+    assert!(!key_path.exists(), "the master key is never created");
+    assert!(
+        !temp.path().join("soos").exists(),
+        "no key directory created"
+    );
+    assert!(!bio_dir.exists(), "no biometrics directory created");
+
+    let summary = run_migration(&MigrateArgs::default(), None, None, false).unwrap();
+    assert!(summary.templates.skipped.is_some());
+    assert_eq!(summary.templates.migrated, 0);
+    assert!(summary.evidence.skipped.is_some());
+    assert!(!summary.has_failures());
+}
+
+#[test]
+fn test_smi_cli_without_biometrics_dir_skips_templates_and_creates_nothing() {
+    let temp = TempDir::new().unwrap();
+    let bio_dir = temp.path().join("biometrics");
+    let key_path = temp.path().join("master.key");
+    MasterKey::load_or_create(&key_path).unwrap();
+
+    let opened = open_template_store_for_migration(&bio_dir, &key_path).unwrap();
+    assert!(
+        opened.is_none(),
+        "no biometrics directory means no templates"
+    );
+    assert!(
+        !bio_dir.exists(),
+        "the biometrics directory is never created"
+    );
+}
+
+#[test]
+fn test_smi_cli_opens_existing_template_store_and_migrates() {
+    let env = env();
+    write_legacy_template(&env, 1000);
+    let key_path = env.evidence_dir.with_file_name("master.key");
+    fs::write(&key_path, env.key.as_bytes()).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(&key_path, fs::Permissions::from_mode(0o600)).unwrap();
+    let bio_dir = env.evidence_dir.with_file_name("bio");
+
+    let store = open_template_store_for_migration(&bio_dir, &key_path)
+        .unwrap()
+        .expect("existing key and directory open the store");
+    let summary = run_migration(&MigrateArgs::default(), Some(&store), None, false).unwrap();
+    assert_eq!(summary.templates.migrated, 1);
+    assert_eq!(
+        env.store.template_format(1000).unwrap(),
+        Some(PayloadFormat::BoundV2)
+    );
+}
+
+#[test]
+fn test_smi_cli_run_migration_requires_root() {
+    let res = run_migration(&MigrateArgs::default(), None, None, true);
+    if nix::unistd::geteuid().is_root() {
+        assert!(res.is_ok());
+    } else {
+        assert!(matches!(res, Err(EnrollmentCliError::RootRequired)));
+    }
 }

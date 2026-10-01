@@ -14,7 +14,7 @@ use crate::snapshot::{
 use nix::fcntl::{Flock, FlockArg};
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -537,6 +537,23 @@ impl EvidenceStore {
             return Ok(true);
         }
 
+        // Keep a write handle on the legacy inode across the rename so that its ciphertext can
+        // be overwritten once the bound file is committed (best effort, like templates).
+        let previous = OpenOptions::new()
+            .write(true)
+            .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_NONBLOCK)
+            .open(path)?;
+        let previous_meta = previous.metadata()?;
+        if !previous_meta.is_file()
+            || previous_meta.ino() != opened.ino()
+            || previous_meta.dev() != opened.dev()
+        {
+            return Err(EvidenceStoreError::InvalidPath(format!(
+                "Snapshot path '{}' changed during migration",
+                path.display()
+            )));
+        }
+
         // The decrypted CBOR is re-sealed byte for byte: the record content cannot change.
         let sealed = encrypt_snapshot_payload(&self.key, date, snapshot_id, &plaintext)?;
         drop(plaintext);
@@ -584,6 +601,14 @@ impl EvidenceStore {
             return Err(EvidenceStoreError::Io(e));
         }
         File::open(dir)?.sync_all()?;
+        // The bound file is committed; an error here is reported although the snapshot is
+        // already migrated (a later run reports it as already current).
+        overwrite_file_contents(&previous).map_err(|e| {
+            EvidenceStoreError::Io(std::io::Error::other(format!(
+                "snapshot '{}' migrated, but the best-effort overwrite of its legacy ciphertext failed: {e}",
+                path.display()
+            )))
+        })?;
         Ok(true)
     }
 
@@ -855,6 +880,46 @@ fn snapshot_binding(path: &Path) -> (&str, &str) {
         .and_then(|n| n.split('.').next())
         .unwrap_or("");
     (date, snapshot_id)
+}
+
+/// Number of CSPRNG overwrite passes applied to a superseded legacy snapshot inode.
+const SHRED_PASSES: usize = 3;
+
+/// Overwrite buffer size in bytes.
+const SHRED_BUFFER_SIZE: usize = 4096;
+
+/// Overwrites the whole content of `file` in place with CSPRNG bytes, [`SHRED_PASSES`] times,
+/// flushing each pass with `fsync` (same scheme as the biometric store, GitHub #179).
+///
+/// Best effort only: it does not reach the physical blocks on copy-on-write or
+/// data-journaling filesystems, snapshots, backups or flash media with wear levelling; the
+/// guarantee is the encryption at rest under the evidence key.
+fn overwrite_file_contents(file: &File) -> Result<(), EvidenceStoreError> {
+    let file_len = file.metadata()?.len();
+    if file_len == 0 {
+        return Ok(());
+    }
+    let mut writer = file;
+    let mut buffer = [0u8; SHRED_BUFFER_SIZE];
+    for _ in 0..SHRED_PASSES {
+        writer.seek(SeekFrom::Start(0))?;
+        let mut written: u64 = 0;
+        while written < file_len {
+            let remaining = file_len.saturating_sub(written);
+            let to_write_u64 = remaining.min(SHRED_BUFFER_SIZE as u64);
+            let to_write = usize::try_from(to_write_u64).unwrap_or(SHRED_BUFFER_SIZE);
+            let slice = buffer.get_mut(..to_write).ok_or_else(|| {
+                EvidenceStoreError::Crypto("Buffer slice out of bounds".to_string())
+            })?;
+            getrandom::fill(slice).map_err(|e| {
+                EvidenceStoreError::Crypto(format!("CSPRNG failure during overwrite: {e}"))
+            })?;
+            writer.write_all(slice)?;
+            written = written.saturating_add(to_write_u64);
+        }
+        writer.sync_all()?;
+    }
+    Ok(())
 }
 
 /// Reads at most [`MAX_EVIDENCE_FILE_BYTES`] bytes of an opened evidence file.

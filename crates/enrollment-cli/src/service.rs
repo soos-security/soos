@@ -384,6 +384,118 @@ pub fn open_evidence_store_for_migration(
     }
 }
 
+/// Reason reported when the template store cannot hold anything to migrate.
+const TEMPLATES_SKIPPED_NO_KEY: &str =
+    "no master key found: no template can exist, nothing to migrate (no key is created)";
+
+/// Reason reported when the biometrics directory does not exist.
+const TEMPLATES_SKIPPED_NO_DIR: &str =
+    "no biometrics directory found: nothing to migrate (no directory is created)";
+
+/// Opens the template store for `soos-enroll migrate` without ever creating the master key
+/// or the biometrics directory (GitHub #287).
+///
+/// Returns `Ok(None)` when `key_path` or `bio_dir` does not exist: nothing can be migrated
+/// and nothing is created (unlike `list` / `delete`, which open the key with
+/// `load_or_create`). An existing key is validated by
+/// [`soos_biometric_store::MasterKey::load_existing`] and an existing directory by
+/// [`BiometricStore::new`].
+pub fn open_template_store_for_migration(
+    bio_dir: &Path,
+    key_path: &Path,
+) -> Result<Option<BiometricStore>, EnrollmentCliError> {
+    Ok(open_template_store_checked(bio_dir, key_path)?.ok())
+}
+
+/// Like [`open_template_store_for_migration`], reporting why no store was opened.
+fn open_template_store_checked(
+    bio_dir: &Path,
+    key_path: &Path,
+) -> Result<Result<BiometricStore, &'static str>, EnrollmentCliError> {
+    let key = match MasterKey::load_existing(key_path) {
+        Ok(key) => key,
+        Err(soos_biometric_store::BiometricStoreError::Io(e))
+            if e.kind() == std::io::ErrorKind::NotFound =>
+        {
+            return Ok(Err(TEMPLATES_SKIPPED_NO_KEY));
+        }
+        Err(e) => return Err(e.into()),
+    };
+    match std::fs::symlink_metadata(bio_dir) {
+        Ok(_) => Ok(Ok(BiometricStore::new(bio_dir, key)?)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Err(TEMPLATES_SKIPPED_NO_DIR)),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// Resolves the template paths of `soos-enroll migrate` (`--biometrics-dir`, `--key-file`,
+/// FHS-validated) and opens the store through [`open_template_store_for_migration`]; the
+/// error side carries the skip reason. Never creates a key or a directory.
+pub fn build_templates_for_migration(
+    cli: &Cli,
+) -> Result<Result<BiometricStore, &'static str>, EnrollmentCliError> {
+    let raw_key_path = cli
+        .key_file
+        .clone()
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_KEY_PATH));
+    let key_path = validate_fhs_path(&raw_key_path)?;
+    let raw_bio_dir = cli
+        .biometrics_dir
+        .clone()
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_BIOMETRICS_DIR));
+    let bio_dir = validate_fhs_path(&raw_bio_dir)?;
+    open_template_store_checked(&bio_dir, &key_path)
+}
+
+/// Runs `soos-enroll migrate` over the template store and the evidence store (GitHub #287).
+///
+/// Requires root when `require_root` is set. A `None` store is reported as skipped (no key
+/// or no directory: nothing exists to migrate). See [`EnrollmentService::migrate`].
+pub fn run_migration(
+    args: &MigrateArgs,
+    templates: Option<&BiometricStore>,
+    evidence: Option<&EvidenceStore>,
+    require_root: bool,
+) -> Result<MigrationSummary, EnrollmentCliError> {
+    run_migration_with_reasons(
+        args,
+        templates.ok_or(TEMPLATES_SKIPPED_NO_KEY),
+        evidence,
+        require_root,
+    )
+}
+
+/// [`run_migration`] with an explicit skip reason for the template store.
+pub fn run_migration_with_reasons(
+    args: &MigrateArgs,
+    templates: Result<&BiometricStore, &str>,
+    evidence: Option<&EvidenceStore>,
+    require_root: bool,
+) -> Result<MigrationSummary, EnrollmentCliError> {
+    check_privileges(require_root)?;
+
+    let templates = match templates {
+        Ok(store) => match store.migrate_legacy_templates(args.dry_run) {
+            Ok(report) => StoreMigrationSummary::from(report),
+            Err(e) => StoreMigrationSummary::store_failed("biometric store", e.to_string()),
+        },
+        Err(reason) => StoreMigrationSummary::skipped(reason),
+    };
+    let evidence = match evidence {
+        Some(store) => match store.migrate_legacy_snapshots(args.dry_run) {
+            Ok(report) => StoreMigrationSummary::from(report),
+            Err(e) => StoreMigrationSummary::store_failed("evidence store", e.to_string()),
+        },
+        None => StoreMigrationSummary::skipped(EVIDENCE_SKIPPED_NO_KEY),
+    };
+
+    Ok(MigrationSummary {
+        dry_run: args.dry_run,
+        templates,
+        evidence,
+    })
+}
+
 /// Resolves the evidence paths of `soos-enroll migrate` (defaults
 /// `/var/lib/soos/evidence` and `/var/lib/soos/evidence.key`, FHS-validated) and opens the
 /// evidence store through [`open_evidence_store_for_migration`].
@@ -941,25 +1053,7 @@ impl EnrollmentService {
         args: &MigrateArgs,
         evidence: Option<&EvidenceStore>,
     ) -> Result<MigrationSummary, EnrollmentCliError> {
-        check_privileges(self.require_root)?;
-
-        let templates = match self.store.migrate_legacy_templates(args.dry_run) {
-            Ok(report) => StoreMigrationSummary::from(report),
-            Err(e) => StoreMigrationSummary::store_failed("biometric store", e.to_string()),
-        };
-        let evidence = match evidence {
-            Some(store) => match store.migrate_legacy_snapshots(args.dry_run) {
-                Ok(report) => StoreMigrationSummary::from(report),
-                Err(e) => StoreMigrationSummary::store_failed("evidence store", e.to_string()),
-            },
-            None => StoreMigrationSummary::skipped(EVIDENCE_SKIPPED_NO_KEY),
-        };
-
-        Ok(MigrationSummary {
-            dry_run: args.dry_run,
-            templates,
-            evidence,
-        })
+        run_migration(args, Some(&self.store), evidence, self.require_root)
     }
 
     /// Imports and encrypts an existing biometric template into the biometric store.

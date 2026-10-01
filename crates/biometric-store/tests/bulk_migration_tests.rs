@@ -256,3 +256,23 @@ fn test_smi_failure_reasons_never_contain_embedding_values() {
         "reports carry UIDs and reasons only: {rendered}"
     );
 }
+
+#[test]
+fn test_smi_load_existing_master_key_never_creates_a_key() {
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("keys").join("master.key");
+    assert!(MasterKey::load_existing(&path).is_err());
+    assert!(!path.exists(), "a missing key is never created");
+    assert!(
+        !temp.path().join("keys").exists(),
+        "no parent directory is created"
+    );
+
+    let created = MasterKey::load_or_create(&path).unwrap();
+    let loaded = MasterKey::load_existing(&path).unwrap();
+    assert_eq!(created.as_bytes(), loaded.as_bytes());
+
+    let link = temp.path().join("link.key");
+    std::os::unix::fs::symlink(&path, &link).unwrap();
+    assert!(MasterKey::load_existing(&link).is_err(), "symlinks refused");
+}

@@ -234,3 +234,38 @@ fn dir_names(dir: &Path) -> Vec<String> {
     names.sort();
     names
 }
+
+#[test]
+fn test_smi_snapshot_migration_overwrites_legacy_ciphertext_best_effort() {
+    let temp = TempDir::new().unwrap();
+    let (store, key) = open_store(&temp);
+    let path = store_one(&store, "2026-09-14", 1);
+    let legacy = make_legacy(&store, &key, &path);
+    // A second name for the legacy inode, outside the store, observes its content after the
+    // migration replaced the path with a new file.
+    let old_inode = temp.path().join("legacy-inode");
+    fs::hard_link(&path, &old_inode).unwrap();
+
+    let report = store.migrate_legacy_snapshots(false).unwrap();
+    assert_eq!(report.migrated, vec![path.clone()]);
+    assert!(report.failed.is_empty(), "{:?}", report.failed);
+
+    let residue = fs::read(&old_inode).unwrap();
+    assert_eq!(residue.len(), legacy.len(), "overwritten in place");
+    assert_ne!(residue, legacy, "the legacy ciphertext is overwritten");
+    assert_eq!(format_of(&key, &path), PayloadFormat::BoundV2);
+}
+
+#[test]
+fn test_smi_snapshot_dry_run_never_overwrites_legacy_ciphertext() {
+    let temp = TempDir::new().unwrap();
+    let (store, key) = open_store(&temp);
+    let path = store_one(&store, "2026-09-14", 1);
+    let legacy = make_legacy(&store, &key, &path);
+    let old_inode = temp.path().join("legacy-inode");
+    fs::hard_link(&path, &old_inode).unwrap();
+
+    store.migrate_legacy_snapshots(true).unwrap();
+    assert_eq!(fs::read(&old_inode).unwrap(), legacy);
+    assert_eq!(fs::read(&path).unwrap(), legacy);
+}

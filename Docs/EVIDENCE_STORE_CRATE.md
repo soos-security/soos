@@ -97,8 +97,13 @@ partition is then synced. Bound files are never rewritten, daily counters are no
 per-file failure is recorded in `SnapshotMigrationReport::failed` (path and error message) and
 leaves the file untouched while the other files are still processed. A missing base directory
 yields an empty report and nothing is created; a symlinked base directory is refused
-(`InvalidPath`). The superseded legacy ciphertext is not overwritten in place (unlike templates):
-it stays encrypted under the evidence key. `MasterKey::load_existing(path)` loads an existing
+(`InvalidPath`). Like a replaced template, the superseded legacy inode is overwritten in place
+(best effort: 3 CSPRNG passes, each `fsync`-ed, through a write handle opened on the same inode
+before the rename) once the bound file is committed; a dry run never overwrites anything. If that
+overwrite fails the snapshot is already migrated and the error is reported for that file (a later
+run reports it as already current). The overwrite does not reach the physical blocks on
+copy-on-write or journaling filesystems, snapshots, backups or flash media; the guarantee remains
+the encryption at rest under the evidence key. `MasterKey::load_existing(path)` loads an existing
 evidence key with the same validation as `load_or_create` and never creates one.
 
 File names do not describe an image encoding: the store never encodes WebP or JPEG.

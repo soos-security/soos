@@ -3,7 +3,7 @@
 - **Date**: 2026-10-01
 - **Issue**: GitHub #287 ("Storage" and "Install" items; owner decisions of 2026-10-01)
 - **Branch**: `fix/p3fu-storage-install`
-- **Matrix criteria**: SMI1–SMI9 (new component `storage-migration-and-rustup-followups`)
+- **Matrix criteria**: SMI1–SMI11 (new component `storage-migration-and-rustup-followups`)
 - **ADRs**: 2026-10-01 "Operator-Run Migration of Legacy v1 Storage Envelopes", 2026-10-01
   "rustup Bootstrap Leaves Shell Profiles Untouched"
 - **Context**: walkthrough 138 (AES-GCM AAD, legacy v1 envelopes), walkthrough 139 (pinned rustup)
@@ -113,8 +113,8 @@ never touched.
 5. Symlinks: template paths are refused by `template_path`; symlinked partitions and snapshot files
    are skipped; snapshot files are opened `O_NOFOLLOW`; the rename happens only over the inode
    that was read.
-6. The evidence key is never created by the migration; the biometric key is opened exactly like
-   `list` / `delete`.
+6. The evidence key is never created by the migration; the biometric master key is never
+   created either (second iteration, section 8).
 7. Root check in the service (`check_privileges`) after argument parsing, like every subcommand.
 8. `#![forbid(unsafe_code)]` kept in the three crates; no new external dependency
    (`soos-enrollment-cli` gains the workspace crate `soos-evidence-store`).
@@ -155,10 +155,34 @@ All green; every pre-existing test is unchanged and passes.
 
 - A legacy snapshot carries no date-partition binding: a legacy file moved to another partition
   before the migration is bound to the partition where it is found (its id is checked).
-- The superseded legacy evidence ciphertext is not overwritten in place (templates keep the
-  best-effort overwrite through `enroll`); it stays encrypted under the evidence key.
-- `soos-enroll migrate` opens the biometric master key like `list` and `delete`
-  (`load_or_create`), so on a host without a master key one is created, as those commands
-  already do.
 - The migration is not serialized against a concurrent `soos-enroll enroll` / `import` of the same
   UID (documented); the daemon may keep running.
+
+## 8. Second Iteration — Orchestrator Decisions (2026-10-01)
+
+Answers to the open questions of the first iteration:
+
+1. `migrate` (with or without `--dry-run`) must never create a master key. New
+   `biometric_store::MasterKey::load_existing` (no key, no parent directory created, symlinks
+   refused); `soos-enroll` opens the template store for migration through
+   `open_template_store_for_migration` / `build_templates_for_migration`, which return no store
+   when the key or the biometrics directory is missing, and `run_migration` /
+   `run_migration_with_reasons` report the template store as skipped with the reason.
+   `EnrollmentService::migrate` delegates to `run_migration`. `main` no longer calls
+   `build_store_only` for `migrate`.
+2. The legacy snapshot id check (record id equals file name) is the accepted rule; the partition
+   of a legacy snapshot is not checked. Stated in the ADR and `Docs/EVIDENCE_STORE_CRATE.md`.
+3. The superseded legacy evidence inode now gets the same best-effort overwrite as a replaced
+   template: a write handle is opened on the path before the rename and checked against the inode
+   that was read; after the rename and the partition `fsync`, 3 CSPRNG passes are written, each
+   `fsync`-ed. The biometric helper is private to its crate and the store crates do not depend on
+   each other, so the same scheme is a private `overwrite_file_contents` in `soos-evidence-store`.
+   A dry run never opens the write handle.
+4. No lock against a concurrent `enroll` / `import` of the same UID; documented.
+
+Red, before the change: `bulk_migration_tests` and `migrate_tests` failed to compile
+(`MasterKey::load_existing`, `open_template_store_for_migration`, `run_migration` missing);
+`legacy_migration_tests::test_smi_snapshot_migration_overwrites_legacy_ciphertext_best_effort`
+failed at runtime (`the legacy ciphertext is overwritten`). Green after: 603 tests pass in the
+four packages; the new tests are matrix rows SMI10–SMI11. Only tests were added to this branch's
+own new test files; no assertion of an existing test changed.
