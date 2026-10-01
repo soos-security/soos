@@ -299,6 +299,13 @@ the startup).
   least `TEMP_SWEEP_MIN_AGE` (60 s) ago (a future time is never old). `fstatat` /
   `unlinkat` run relative to the partition descriptor (`O_DIRECTORY | O_NOFOLLOW`) with
   `AT_SYMLINK_NOFOLLOW`; snapshots, counters and every other name are never touched.
+- **One view per directory (GitHub #293)**: after the base directory's `flock` and its
+  device/inode re-check, no path is resolved again. The base directory is listed through
+  `openat(<locked descriptor>, ".")`, each partition is opened with `openat` relative to the
+  locked descriptor (`O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC`), and the partition is listed
+  (`nix::dir::Dir`), examined, unlinked from and `fsync`ed through that one descriptor. A
+  partition renamed and replaced after it was opened is therefore never consulted: the names
+  examined and the directory they are removed from are always the same directory.
 - **Bounds**: at most `MAX_TEMP_SWEEP_REMOVALS` (256) removals and 65 536 examined entries per
   call (`TempSweepReport::limit_reached`; the next start continues).
 - **Exclusion**: writers of this process by the daily-counter mutex; retention and migration by
@@ -322,3 +329,4 @@ the startup).
 - **Criterion E8 (POSIX UID Bounds Validation)**: Verified by `tests/safety_hardening_tests.rs::test_evidence_store_rejects_path_traversal_uid`.
 - **Criteria ESF1–ESF5 (Self-Describing Frames, GitHub #181)**: Verified by `tests/frame_format_tests.rs` and `crates/daemon/tests/pipeline_integration_tests.rs::test_181_password_failed_snapshot_records_frame_metadata`.
 - **Criterion SGU5 (Orphaned Temporary File Sweep, GitHub #291)**: Verified by `tests/temp_sweep_tests.rs`.
+- **Criterion ESL1 (Sweep Listing Through the Partition Descriptor, GitHub #293)**: Verified by the unit tests `store::temp_sweep_fd_tests`.

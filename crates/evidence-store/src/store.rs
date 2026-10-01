@@ -169,9 +169,11 @@ impl EvidenceStore {
     /// `.tmp.daily_count.<uid>.<pid>.<16 hex>` (daily counter), with a lowercase hyphenated
     /// UUID, canonical decimal numbers and lowercase hex. A candidate is removed only if it is
     /// a regular file with a single link, owned by root or the effective UID and last
-    /// modified at least [`TEMP_SWEEP_MIN_AGE`] ago (a future time is never old); the checks
-    /// and the unlink are relative to a descriptor of the partition opened
-    /// `O_DIRECTORY | O_NOFOLLOW`. At most [`MAX_TEMP_SWEEP_REMOVALS`] files are removed and a
+    /// modified at least [`TEMP_SWEEP_MIN_AGE`] ago (a future time is never old). The
+    /// partition is opened `O_DIRECTORY | O_NOFOLLOW` relative to the locked base-directory
+    /// descriptor, and its listing, the checks and the unlink all go through that one
+    /// descriptor: no path is resolved again after the base directory's identity check
+    /// (GitHub #293). At most [`MAX_TEMP_SWEEP_REMOVALS`] files are removed and a
     /// bounded number of entries examined per call ([`TempSweepReport::limit_reached`]).
     ///
     /// Writers of this process are excluded by the daily-counter mutex; retention and
@@ -184,6 +186,16 @@ impl EvidenceStore {
     /// [`EvidenceStoreError::InvalidPath`] for a symlinked or non-directory base directory;
     /// [`EvidenceStoreError::Io`] when it cannot be opened, listed or unlinked from.
     pub fn sweep_orphaned_temp_files(&self) -> Result<TempSweepReport, EvidenceStoreError> {
+        self.sweep_orphaned_temp_files_with(&mut |_| {})
+    }
+
+    /// [`Self::sweep_orphaned_temp_files`] with a test seam: `after_partition_open` runs with
+    /// the partition name right after its descriptor is opened, before it is listed
+    /// (GitHub #293).
+    fn sweep_orphaned_temp_files_with(
+        &self,
+        after_partition_open: &mut dyn FnMut(&str),
+    ) -> Result<TempSweepReport, EvidenceStoreError> {
         let mut report = TempSweepReport::default();
         if !self.config.enabled {
             return Ok(report);
@@ -224,31 +236,46 @@ impl EvidenceStore {
         let now = SystemTime::now();
         let mut scanned: usize = 0;
         let mut partitions = Vec::new();
-        for entry in fs::read_dir(base)? {
+        // The base directory is listed and its partitions are opened through the locked,
+        // identity-checked descriptor: the path is never resolved again (GitHub #293).
+        let base_fd = lock.as_raw_fd();
+        let mut base_dir = open_dir_at_no_follow(base_fd, c".")?;
+        for entry in base_dir.iter() {
+            let entry = entry.map_err(errno_to_io)?;
+            let name = entry.file_name();
+            if is_dot_entry(name) {
+                continue;
+            }
             if scanned >= MAX_TEMP_SWEEP_SCANNED_ENTRIES {
                 report.limit_reached = true;
                 return Ok(report);
             }
             scanned = scanned.saturating_add(1);
-            let entry = entry?;
-            // `DirEntry::file_type` does not follow symlinks: a symlinked partition is skipped.
-            if !entry.file_type()?.is_dir() {
+            // The partition is opened `O_NOFOLLOW` below as well: a symlink is never followed.
+            if !is_directory_entry(base_fd, &entry) {
                 continue;
             }
-            if let Some(name) = entry.file_name().to_str() {
-                if parse_date(name).is_ok() {
-                    partitions.push(name.to_string());
-                }
+            if name.to_str().is_ok_and(|date| parse_date(date).is_ok()) {
+                partitions.push(name.to_owned());
             }
         }
+        drop(base_dir);
 
         for date in partitions {
-            let path = base.join(&date);
-            let Ok(partition) = open_dir_no_follow(&path) else {
+            let Ok(mut partition) = open_dir_at_no_follow(base_fd, &date) else {
                 continue;
             };
+            after_partition_open(date.to_str().unwrap_or_default());
+            // Listed, examined and unlinked from through the same descriptor: a partition
+            // swapped after the open is never consulted (GitHub #293).
+            let partition_fd = partition.as_raw_fd();
             let mut sync_needed = false;
-            for entry in fs::read_dir(&path)? {
+            for entry in partition.iter() {
+                let entry = entry.map_err(errno_to_io)?;
+                let name = entry.file_name();
+                if is_dot_entry(name) {
+                    continue;
+                }
                 if report.removed >= MAX_TEMP_SWEEP_REMOVALS
                     || scanned >= MAX_TEMP_SWEEP_SCANNED_ENTRIES
                 {
@@ -256,11 +283,10 @@ impl EvidenceStore {
                     break;
                 }
                 scanned = scanned.saturating_add(1);
-                let name = entry?.file_name();
-                if !name.to_str().is_some_and(is_evidence_temp_name) {
+                if !name.to_str().is_ok_and(is_evidence_temp_name) {
                     continue;
                 }
-                match sweep_candidate(partition.as_raw_fd(), name.as_os_str(), euid, now)? {
+                match sweep_candidate(partition_fd, name, euid, now)? {
                     SweepVerdict::Removed => {
                         report.removed = report.removed.saturating_add(1);
                         sync_needed = true;
@@ -272,7 +298,7 @@ impl EvidenceStore {
                 }
             }
             if sync_needed {
-                partition.sync_all()?;
+                nix::unistd::fsync(partition_fd).map_err(errno_to_io)?;
             }
             if report.limit_reached {
                 break;
@@ -936,6 +962,46 @@ fn open_dir_no_follow(path: &Path) -> Result<File, EvidenceStoreError> {
         .open(path)?)
 }
 
+/// Opens `name` relative to `dir_fd` as a directory stream, refusing a symlink as its last
+/// component (`O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC`).
+fn open_dir_at_no_follow(
+    dir_fd: std::os::fd::RawFd,
+    name: &std::ffi::CStr,
+) -> Result<nix::dir::Dir, EvidenceStoreError> {
+    use nix::fcntl::OFlag;
+    nix::dir::Dir::openat(
+        Some(dir_fd),
+        name,
+        OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
+        nix::sys::stat::Mode::empty(),
+    )
+    .map_err(errno_to_io)
+}
+
+/// Converts a `nix` error into the store's I/O error.
+fn errno_to_io(errno: nix::errno::Errno) -> EvidenceStoreError {
+    EvidenceStoreError::Io(std::io::Error::from(errno))
+}
+
+/// Whether a directory stream entry is `.` or `..` (never listed by `fs::read_dir`).
+fn is_dot_entry(name: &std::ffi::CStr) -> bool {
+    matches!(name.to_bytes(), b"." | b"..")
+}
+
+/// Whether a directory stream entry of `dir_fd` is a directory, without following a symlink
+/// (`fstatat` with `AT_SYMLINK_NOFOLLOW` when the stream does not report the type).
+fn is_directory_entry(dir_fd: std::os::fd::RawFd, entry: &nix::dir::Entry) -> bool {
+    match entry.file_type() {
+        Some(kind) => kind == nix::dir::Type::Directory,
+        None => nix::sys::stat::fstatat(
+            Some(dir_fd),
+            entry.file_name(),
+            nix::fcntl::AtFlags::AT_SYMLINK_NOFOLLOW,
+        )
+        .is_ok_and(|stat| stat.st_mode & nix::libc::S_IFMT == nix::libc::S_IFDIR),
+    }
+}
+
 /// Whether `name` is exactly a temporary file name this store creates inside a date
 /// partition (GitHub #291): `.tmp.<uuid>.<pid>.<16 hex>`, `.tmp.migrate.<uuid>.<pid>.<16 hex>`
 /// or `.tmp.daily_count.<uid>.<pid>.<16 hex>`.
@@ -1004,7 +1070,7 @@ enum SweepVerdict {
 /// is an orphaned temporary file (regular, one link, owned by root or `euid`, old enough).
 fn sweep_candidate(
     dir_fd: std::os::fd::RawFd,
-    name: &std::ffi::OsStr,
+    name: &std::ffi::CStr,
     euid: u32,
     now: SystemTime,
 ) -> Result<SweepVerdict, EvidenceStoreError> {
@@ -1211,4 +1277,99 @@ fn write_new_file(path: &Path, bytes: &[u8]) -> Result<(), EvidenceStoreError> {
     file.write_all(bytes)?;
     file.sync_all()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod temp_sweep_fd_tests {
+    #![allow(
+        clippy::unwrap_used,
+        clippy::arithmetic_side_effects,
+        reason = "unit tests"
+    )]
+
+    //! GitHub #293 (ESL1): the sweep lists a date partition through the descriptor it opened,
+    //! so the names it examines and the directory it unlinks from are always the same
+    //! directory, even when the partition path is swapped between the open and the listing.
+
+    use super::{EvidenceStore, TEMP_SWEEP_MIN_AGE};
+    use crate::config::EvidenceConfig;
+    use crate::crypto::MasterKey;
+    use std::path::Path;
+    use std::time::{Duration, SystemTime};
+
+    const DATE: &str = "2026-09-30";
+    const OPENED_TEMP: &str = ".tmp.0f8c2a4e-1b3d-4c5e-8f60-718293a4b5c6.4242.0123456789abcdef";
+    const SWAPPED_TEMP: &str =
+        ".tmp.migrate.1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d.4243.fedcba9876543210";
+
+    fn plant_old(dir: &Path, name: &str) {
+        let path = dir.join(name);
+        std::fs::write(&path, b"orphaned ciphertext").unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(SystemTime::now() - TEMP_SWEEP_MIN_AGE - Duration::from_secs(60))
+            .unwrap();
+    }
+
+    fn store(base: &Path, key: &Path) -> EvidenceStore {
+        EvidenceStore::new(
+            EvidenceConfig::enabled_with_dir(base.to_path_buf(), key.to_path_buf()),
+            MasterKey::generate().unwrap(),
+        )
+    }
+
+    /// The partition is renamed away and replaced by another directory holding a matching
+    /// temporary name after it was opened: the replacement is left intact and the orphan of
+    /// the opened directory is the one removed.
+    #[test]
+    fn test_esl_swapped_partition_is_listed_through_the_opened_descriptor() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let base = temp.path().join("evidence");
+        let opened = base.join(DATE);
+        std::fs::create_dir_all(&opened).unwrap();
+        plant_old(&opened, OPENED_TEMP);
+        let moved = base.join("moved-away");
+        let store = store(&base, &temp.path().join("ev.key"));
+
+        let mut swaps = 0;
+        let report = store
+            .sweep_orphaned_temp_files_with(&mut |date| {
+                assert_eq!(date, DATE);
+                std::fs::rename(base.join(date), &moved).unwrap();
+                std::fs::create_dir(base.join(date)).unwrap();
+                plant_old(&base.join(date), SWAPPED_TEMP);
+                swaps += 1;
+            })
+            .unwrap();
+
+        assert_eq!(swaps, 1);
+        assert!(
+            base.join(DATE).join(SWAPPED_TEMP).exists(),
+            "a name of the replacement directory must never be examined or removed"
+        );
+        assert!(
+            !moved.join(OPENED_TEMP).exists(),
+            "the orphan of the opened partition must be removed through its descriptor"
+        );
+        assert_eq!(report.removed, 1);
+        assert_eq!(report.kept_recent, 0);
+        assert!(!report.limit_reached);
+    }
+
+    /// The seam is a no-op in production: the public sweep still removes an orphan.
+    #[test]
+    fn test_esl_unswapped_partition_is_still_swept() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let base = temp.path().join("evidence");
+        let partition = base.join(DATE);
+        std::fs::create_dir_all(&partition).unwrap();
+        plant_old(&partition, OPENED_TEMP);
+        let report = store(&base, &temp.path().join("ev.key"))
+            .sweep_orphaned_temp_files()
+            .unwrap();
+        assert_eq!(report.removed, 1);
+        assert!(!partition.join(OPENED_TEMP).exists());
+    }
 }
