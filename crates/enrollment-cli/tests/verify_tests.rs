@@ -43,7 +43,7 @@ fn setup_verify_env(
     // Enroll template for UID 2000
     let template = BiometricTemplate::new(
         2000,
-        "mobilefacenet".to_string(),
+        soos_enrollment_cli::service::MODEL_ID_EMBEDDING.to_string(),
         "1.0.0".to_string(),
         1700000000,
         Zeroizing::new(enrolled_embedding.as_slice().to_vec()),
@@ -144,4 +144,42 @@ fn test_verify_non_matching_user_reports_deny() {
     assert_eq!(report.uid, 2000);
     assert_eq!(report.verdict, Verdict::Deny);
     assert!(report.match_score < 0.50);
+}
+
+/// SFC15 (GitHub #278, owner decision 2026-10-01): `verify` refuses, before any capture, a
+/// template recorded with another embedding model (retired ArcFace) or whose vector length is
+/// not the loaded extractor's dimension; embeddings of two models are never compared.
+#[test]
+fn test_verify_refuses_a_template_of_another_model() {
+    let temp = TempDir::new().unwrap();
+    let extractor = Arc::new(MockEmbeddingExtractor::new(512));
+    let (service, store) = setup_verify_env(&temp, extractor);
+    let arcface = BiometricTemplate::new(
+        2001,
+        "arcface_w600k_mbf".to_string(),
+        "2.0.0".to_string(),
+        1_700_000_000,
+        Zeroizing::new(vec![0.1f32; 512]),
+    )
+    .unwrap();
+    store.enroll(&arcface).unwrap();
+    match service.verify(&VerifyArgs {
+        uid: Some(2001),
+        username: None,
+    }) {
+        Err(EnrollmentCliError::TemplateModelMismatch { uid: 2001, .. }) => {}
+        other => panic!("a retired-model template must be refused, got {other:?}"),
+    }
+
+    // Same (current) model id, but a 512-D vector against a 128-D extractor.
+    let temp = TempDir::new().unwrap();
+    let extractor = Arc::new(MockEmbeddingExtractor::new(128));
+    let (service, _) = setup_verify_env(&temp, extractor);
+    match service.verify(&VerifyArgs {
+        uid: Some(2000),
+        username: None,
+    }) {
+        Err(EnrollmentCliError::TemplateModelMismatch { uid: 2000, .. }) => {}
+        other => panic!("a template of another dimension must be refused, got {other:?}"),
+    }
 }

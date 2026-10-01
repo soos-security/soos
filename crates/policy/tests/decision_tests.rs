@@ -18,7 +18,7 @@ use soos_protocol::{ReasonClass, Verdict};
 
 #[test]
 fn test_decision_allow_nominal() {
-    let thresholds = ThresholdConfig::default(); // match: 0.70, pad: 0.85
+    let thresholds = ThresholdConfig::default(); // match: 0.50, pad: 0.85
     let ctx = AuthContext::new(0.85, true, 1, 1000, true);
 
     let (verdict, reason) = evaluate_decision(&thresholds, &ctx);
@@ -40,7 +40,7 @@ fn test_decision_allow_exact_threshold() {
 #[test]
 fn test_decision_deny_score_below_threshold() {
     let thresholds = ThresholdConfig::default();
-    let ctx = AuthContext::new(0.6999, true, 1, 1000, true);
+    let ctx = AuthContext::new(0.4999, true, 1, 1000, true);
 
     let (verdict, reason) = evaluate_decision(&thresholds, &ctx);
     assert_eq!(verdict, Verdict::Deny);

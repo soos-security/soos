@@ -453,8 +453,8 @@ fn test_pipeline_config_defaults_3_model() {
     assert_eq!(config.target_width, 112);
     assert_eq!(config.target_height, 112);
     assert!(
-        (config.match_threshold - 0.70).abs() < 1e-6,
-        "VisionPipelineConfig default match_threshold must be 0.70 to eliminate false accepts"
+        (config.match_threshold - 0.50).abs() < 1e-6,
+        "VisionPipelineConfig default match_threshold must be 0.50 (SFace, LFW FAR 3.9e-6)"
     );
     assert!(
         (config.pad_threshold - 0.85).abs() < 1e-6,
@@ -467,8 +467,8 @@ fn test_vision_pipeline_default_thresholds_calibrated() {
     let vision_cfg = VisionPipelineConfig::default();
 
     assert!(
-        (vision_cfg.match_threshold - 0.70).abs() < 1e-6,
-        "Vision match_threshold ({}) must be 0.70 to eliminate false accepts",
+        (vision_cfg.match_threshold - 0.50).abs() < 1e-6,
+        "Vision match_threshold ({}) must be 0.50 (SFace, LFW FAR 3.9e-6)",
         vision_cfg.match_threshold
     );
     assert!(

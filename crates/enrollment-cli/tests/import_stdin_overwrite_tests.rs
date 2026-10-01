@@ -41,13 +41,13 @@ fn stdin_args(uid: u32) -> ImportArgs {
         uid: Some(uid),
         username: None,
         file: PathBuf::from(IMPORT_STDIN_PATH),
-        model_id: "arcface_w600k_mbf".to_string(),
+        model_id: soos_enrollment_cli::service::MODEL_ID_EMBEDDING.to_string(),
         model_version: "2.0.0".to_string(),
     }
 }
 
 fn embedding_json(value: f32) -> Vec<u8> {
-    serde_json::to_string(&vec![value; 512])
+    serde_json::to_string(&vec![value; soos_enrollment_cli::service::IMPORT_EMBEDDING_DIM])
         .unwrap()
         .into_bytes()
 }

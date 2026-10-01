@@ -156,6 +156,12 @@ mod embedding_evaluation_contract;
 #[cfg(test)]
 mod camera_diagnostics_contract;
 
+/// The SFace embedding switch: the retired ArcFace attestation is read by no runtime crate,
+/// `download_models.sh` reports unattested model files, and the docs state the shipped model
+/// and threshold (GitHub #278, rows SFC12, SFC16, SFC17).
+#[cfg(all(test, unix))]
+mod embedding_model_docs_contract;
+
 /// Release artifacts are always rebuilt by the Docker/distro harnesses and the candid
 /// fingerprint ignores both review-report singletons (GitHub #244, #267; rows QFX1–QFX5).
 #[cfg(all(test, unix))]

@@ -24,7 +24,7 @@ use soos_policy::{
 use soos_protocol::{ReasonClass, Verdict};
 
 /// A frame that is live above the default PAD threshold and matches above the default
-/// cosine threshold (`0.85` PAD, `0.70` match).
+/// cosine threshold (`0.85` PAD, `0.50` match).
 fn passing() -> FrameEvaluation {
     FrameEvaluation::live(0.97, 0.90)
 }

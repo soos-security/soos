@@ -69,18 +69,22 @@ fn test_parse_workspace_manifest_file() {
         "a3562ef62592bf387f6ef19151282ac127518e51c77696e62e0661bee95ba1ad"
     );
 
-    // 2. ArcFace w600k MBF
-    let arcface = manifest
-        .get_model("arcface_w600k_mbf")
-        .expect("arcface_w600k_mbf missing from manifest");
-    assert_eq!(arcface.filename, "arcface_w600k_mbf.onnx");
-    // The source repository declares no licence (GitHub #278, user-approved 2026-10-01).
-    assert_eq!(arcface.license, "NOASSERTION");
-    assert_eq!(arcface.input_shape, vec![1, 3, 112, 112]);
-    assert_eq!(arcface.output_shapes, vec![vec![1, 512]]);
+    // 2. SFace 2021dec embedding (replaces the retired ArcFace ResNet34, GitHub #278,
+    //    owner decision 2026-10-01)
+    let sface = manifest
+        .get_model("sface_2021dec")
+        .expect("sface_2021dec missing from manifest");
+    assert_eq!(sface.filename, "sface_2021dec.onnx");
+    assert_eq!(sface.license, "Apache-2.0");
+    assert_eq!(sface.input_shape, vec![1, 3, 112, 112]);
+    assert_eq!(sface.output_shapes, vec![vec![1, 128]]);
     assert_eq!(
-        arcface.sha256,
-        "ffe014a45c9488506719d37fd578ece6661bb385535b36e8039975fa5d4683db"
+        sface.sha256,
+        "0ba9fbfa01b5270c96627c4ef784da859931e02f04419c829e83484087c34e79"
+    );
+    assert!(
+        manifest.get_model("arcface_w600k_mbf").is_none(),
+        "the retired ArcFace entry must not be attested by the shipped manifest"
     );
 
     // 3. MiniFASNetV2 PAD
@@ -276,4 +280,38 @@ fn test_invalid_toml_fails_closed() {
         InferenceError::ManifestParse(_) => {}
         other => panic!("Expected ManifestParse error, got: {:?}", other),
     }
+}
+
+/// SFC1 (GitHub #278): the shipped manifest attests the SFace file from a pinned Hugging Face
+/// revision (never a branch), with its exact size, NCHW layout and Apache-2.0 licence, and the
+/// retired ArcFace attestation lives only in `models/retired_models.toml`.
+#[test]
+fn test_workspace_manifest_attests_sface_from_pinned_revision() {
+    let text = std::fs::read_to_string(workspace_models_dir().join("manifest.toml"))
+        .expect("read manifest.toml");
+    let raw: toml::Value = toml::from_str(&text).expect("manifest is TOML");
+    let entry = &raw["models"]["sface_2021dec"];
+    assert_eq!(entry["size_bytes"].as_integer(), Some(38_696_353));
+    assert_eq!(entry["input_layout"].as_str(), Some("NCHW"));
+    assert_eq!(entry["license"].as_str(), Some("Apache-2.0"));
+    assert_eq!(
+        entry["source_url"].as_str(),
+        Some(
+            "https://huggingface.co/opencv/face_recognition_sface/resolve/\
+             3d7082438a6e4551e840c9b2bb60b71e8da4b524/face_recognition_sface_2021dec.onnx"
+        )
+    );
+    assert!(raw["models"].get("arcface_w600k_mbf").is_none());
+
+    let retired = ModelManifest::from_file(workspace_models_dir().join("retired_models.toml"))
+        .expect("models/retired_models.toml parses with the manifest schema");
+    let arcface = retired
+        .get_model("arcface_w600k_mbf")
+        .expect("retired ArcFace attestation");
+    assert_eq!(
+        arcface.sha256,
+        "ffe014a45c9488506719d37fd578ece6661bb385535b36e8039975fa5d4683db"
+    );
+    assert_eq!(arcface.license, "NOASSERTION");
+    assert!(retired.get_model("sface_2021dec").is_none());
 }

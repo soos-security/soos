@@ -1,7 +1,12 @@
 //! Real-model evaluation of the embedding pre-processing contract (GitHub #278, fourth item,
 //! follow-up of ADR 2026-09-30 "Face Embedding Model Identity & Retention", matrix SFX1-SFX3).
 //!
-//! The attested `arcface_w600k_mbf.onnx` (SHA-256 `ffe014a4...683db`) is `arc.onnx` from the
+//! Since GitHub #278 (SFace switch, walkthrough 162) the ArcFace ResNet34 is retired: its unchanged
+//! attestation lives in `models/retired_models.toml` (read by no runtime crate) and these
+//! evaluation tests load it from there. The test that compared it with the production extractor
+//! is superseded by `embedding_real_model_tests::test_raw_opencv_recipe_matches_the_production_extractor`.
+//!
+//! The retired `arcface_w600k_mbf.onnx` (SHA-256 `ffe014a4...683db`) is `arc.onnx` from the
 //! Hugging Face repository `garavv/arcface-onnx` (revision `224c23c`, whose LFS object carries
 //! the same SHA-256). Its model card documents RGB input normalized as `(x - 127.5) / 128.0`,
 //! while the production extractor feeds B, G, R normalized as `(x - 127.5) / 127.5`. These tests
@@ -36,7 +41,6 @@
 
 use std::path::{Path, PathBuf};
 
-use soos_inference_ort::embedding::{EmbeddingExtractor, OrtEmbeddingExtractor};
 use soos_inference_ort::registry::{ModelRegistry, RegistryConfig, SharedSession};
 
 /// Manifest identifier of the embedding model (historical name, kept for compatibility).
@@ -69,8 +73,9 @@ fn models_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(DEFAULT_MODELS_DIR))
 }
 
-fn repo_manifest_path() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../models/manifest.toml")
+/// Retired-model attestation (GitHub #278): the ArcFace entry removed from the shipped manifest.
+fn retired_manifest_path() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../models/retired_models.toml")
 }
 
 fn model_present(test_name: &str) -> bool {
@@ -97,13 +102,13 @@ fn load_session(test_name: &str) -> Option<SharedSession> {
     }
     let mut registry = ModelRegistry::new(RegistryConfig::with_manifest(
         models_dir(),
-        repo_manifest_path(),
+        retired_manifest_path(),
     ))
-    .expect("committed models/manifest.toml must parse");
+    .expect("committed models/retired_models.toml must parse");
     Some(
         registry
             .get_or_load_session(EMBEDDING_MODEL_ID)
-            .expect("installed embedding model must match the committed manifest"),
+            .expect("installed retired embedding model must match models/retired_models.toml"),
     )
 }
 
@@ -322,26 +327,6 @@ fn test_real_embedding_graph_has_no_in_graph_normalization() {
         "REAL EMBEDDING GRAPH: {GRAPH_INPUT} -> {} -> {}; normalization is entirely external",
         first[0].op_type, second[0].op_type
     );
-}
-
-#[test]
-fn test_raw_production_arm_matches_the_production_extractor() {
-    let Some(session) = load_session("test_raw_production_arm_matches_the_production_extractor")
-    else {
-        return;
-    };
-    let extractor = OrtEmbeddingExtractor::new(session.clone());
-    for (name, crop) in synthetic_crops() {
-        let production = extractor
-            .extract_embedding(&crop, SIDE as u32, SIDE as u32)
-            .expect("production extractor");
-        let raw = embed_raw(&session, &crop, ChannelOrder::Bgr, PRODUCTION_STD);
-        let cos = cosine(production.as_slice(), &raw);
-        assert!(
-            cos > 0.9999,
-            "{name}: the BGR / 127.5 arm must reproduce the production extractor (cos = {cos})"
-        );
-    }
 }
 
 #[test]

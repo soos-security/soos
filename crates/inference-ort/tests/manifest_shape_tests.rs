@@ -232,19 +232,19 @@ fn test_validate_zero_session_dim_is_not_a_wildcard() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn test_workspace_manifest_declares_embedding_layout_nhwc() {
+fn test_workspace_manifest_declares_embedding_layout_nchw() {
     let manifest = workspace_manifest();
-    let arcface = manifest
-        .get_model("arcface_w600k_mbf")
+    let sface = manifest
+        .get_model("sface_2021dec")
         .expect("embedding model entry");
     assert_eq!(
-        arcface.input_layout,
-        TensorLayout::Nhwc,
-        "the attested tf2onnx ArcFace graph takes input_1 as [N, 112, 112, 3]"
+        sface.input_layout,
+        TensorLayout::Nchw,
+        "the attested SFace graph takes data as [1, 3, 112, 112]"
     );
     assert_eq!(
-        arcface.expected_input_dims().expect("rank 4"),
-        vec![1, 112, 112, 3]
+        sface.expected_input_dims().expect("rank 4"),
+        vec![1, 3, 112, 112]
     );
 }
 
@@ -252,19 +252,21 @@ fn test_workspace_manifest_declares_embedding_layout_nhwc() {
 fn test_workspace_manifest_embedding_description_is_truthful() {
     let manifest = workspace_manifest();
     let description = &manifest
-        .get_model("arcface_w600k_mbf")
+        .get_model("sface_2021dec")
         .expect("embedding model entry")
         .description;
-    for needle in ["ResNet34", "NHWC", "tf2onnx", "512"] {
+    for needle in ["SFace", "NCHW", "128", "RGB"] {
         assert!(
             description.contains(needle),
             "embedding description must state '{needle}': {description}"
         );
     }
-    assert!(
-        !description.contains("MobileFaceNet"),
-        "the attested embedding model is not a MobileFaceNet: {description}"
-    );
+    for stale in ["ArcFace", "ResNet34"] {
+        assert!(
+            !description.contains(stale),
+            "the attested embedding model is not the retired ArcFace ResNet34 ('{stale}'): {description}"
+        );
+    }
 }
 
 #[test]
@@ -366,11 +368,11 @@ fn test_layout_declaration_round_trips_through_serde() {
 #[test]
 fn test_workspace_manifest_declares_embedding_layout_explicitly() {
     let manifest = workspace_manifest();
-    let arcface = manifest
-        .get_model("arcface_w600k_mbf")
+    let sface = manifest
+        .get_model("sface_2021dec")
         .expect("embedding model entry");
     assert!(
-        arcface.input_layout_declared,
+        sface.input_layout_declared,
         "the committed manifest must attest the embedding layout explicitly"
     );
 }

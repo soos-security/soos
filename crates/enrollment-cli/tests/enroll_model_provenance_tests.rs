@@ -73,7 +73,7 @@ fn test_embedding_model_constants_match_attested_manifest() {
     let manifest_path =
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../models/manifest.toml");
     let manifest = ModelManifest::from_file(&manifest_path).expect("manifest must load");
-    assert_eq!(MODEL_ID_EMBEDDING, "arcface_w600k_mbf");
+    assert_eq!(MODEL_ID_EMBEDDING, "sface_2021dec");
     assert!(
         manifest.get_model(MODEL_ID_EMBEDDING).is_some(),
         "the recorded embedding model id must be attested by models/manifest.toml"

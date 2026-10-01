@@ -36,7 +36,7 @@ fn stdin_args() -> ImportArgs {
         uid: Some(UID),
         username: None,
         file: PathBuf::from(IMPORT_STDIN_PATH),
-        model_id: "arcface_w600k_mbf".to_string(),
+        model_id: soos_enrollment_cli::service::MODEL_ID_EMBEDDING.to_string(),
         model_version: "2.0.0".to_string(),
     }
 }
@@ -85,7 +85,7 @@ fn test_sgu_import_without_yes_never_replaces_a_concurrent_enrollment() {
         .unwrap();
     let (tx, rx) = mpsc::channel();
     let reader = SignallingReader {
-        inner: Cursor::new(serde_json::to_vec(&vec![0.25_f32; 512]).unwrap()),
+        inner: Cursor::new(serde_json::to_vec(&vec![0.25_f32; soos_enrollment_cli::service::IMPORT_EMBEDDING_DIM]).unwrap()),
         signal: Some(tx),
     };
     let importer = std::thread::spawn(move || {
@@ -117,7 +117,7 @@ fn test_sgu_import_with_yes_still_replaces_and_reports_it() {
     let key = MasterKey::load_or_create(tmp.path().join("master.key")).unwrap();
     let store = Arc::new(BiometricStore::new(tmp.path().join("biometrics"), key).unwrap());
     let service = EnrollmentService::new_store_only(Arc::clone(&store), false);
-    let json = || Cursor::new(serde_json::to_vec(&vec![0.5_f32; 512]).unwrap());
+    let json = || Cursor::new(serde_json::to_vec(&vec![0.5_f32; soos_enrollment_cli::service::IMPORT_EMBEDDING_DIM]).unwrap());
 
     let first = service
         .import_with_overwrite_from_reader(&stdin_args(), false, json())

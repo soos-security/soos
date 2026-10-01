@@ -437,7 +437,7 @@ part3_start_limit_hit() {
     install -d -m 0755 "${MODELS_DIR}"
     install -m 0644 /workspace/models/manifest.toml "${MANIFEST}"
     local f
-    for f in scrfd_500m_kps.onnx minifasnet_v2_80x80.onnx arcface_w600k_mbf.onnx; do
+    for f in scrfd_500m_kps.onnx minifasnet_v2_80x80.onnx sface_2021dec.onnx; do
         printf 'corrupt model for the start-limit test\n' > "${MODELS_DIR}/${f}"
         chmod 0644 "${MODELS_DIR}/${f}"
     done

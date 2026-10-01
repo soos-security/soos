@@ -104,7 +104,7 @@ fn service(
             .unwrap();
         let template = BiometricTemplate::new(
             UID,
-            "mobilefacenet".to_string(),
+            soos_enrollment_cli::service::MODEL_ID_EMBEDDING.to_string(),
             "1.0.0".to_string(),
             1_700_000_000,
             Zeroizing::new(reference.as_slice().to_vec()),

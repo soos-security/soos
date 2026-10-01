@@ -22,12 +22,12 @@ fn test_enrollment_cli_model_ids_match_manifest() {
     // 1. Assert exact required model IDs for 3-model architecture (Issue #43)
     assert_eq!(MODEL_ID_FACE_DETECTOR, "scrfd_500m_kps");
     assert_eq!(MODEL_ID_PAD, "minifasnet_v2_pad");
-    assert_eq!(MODEL_ID_EMBEDDING, "arcface_w600k_mbf");
+    assert_eq!(MODEL_ID_EMBEDDING, "sface_2021dec");
 
     assert_eq!(REQUIRED_MODEL_IDS.len(), 3);
     assert_eq!(REQUIRED_MODEL_IDS[0], "scrfd_500m_kps");
     assert_eq!(REQUIRED_MODEL_IDS[1], "minifasnet_v2_pad");
-    assert_eq!(REQUIRED_MODEL_IDS[2], "arcface_w600k_mbf");
+    assert_eq!(REQUIRED_MODEL_IDS[2], "sface_2021dec");
 
     // 2. Assert against official models/manifest.toml v2.0.0
     let manifest_path =

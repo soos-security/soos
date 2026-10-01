@@ -154,7 +154,7 @@ fn test_models_readme_complete_and_accurate() {
 
     // Must document all 3 next-gen models
     assert!(content.contains("scrfd_500m_kps"));
-    assert!(content.contains("arcface_w600k_mbf"));
+    assert!(content.contains("sface_2021dec"));
     assert!(content.contains("minifasnet_v2_pad"));
 
     // Must document licenses

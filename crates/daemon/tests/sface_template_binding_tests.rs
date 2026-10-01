@@ -1,7 +1,11 @@
-//! Contractual tests binding enrolled templates to the loaded embedding model
-//! (GitHub #182 / STO-09): the daemon must refuse a template whose recorded
-//! `model_id` differs from the embedding extractor it loaded, returning a
-//! non-`Allow` verdict so that PAM falls back (`PAM_IGNORE`).
+//! Contractual tests of the SFace template binding (GitHub #278, owner decision 2026-10-01,
+//! matrix SFC7 / SFC9).
+//!
+//! Once `sface_2021dec` (128-D) is the loaded embedding model, a template recorded with the
+//! retired ArcFace model (`arcface_w600k_mbf`, 512-D) or a current-id template whose vector has
+//! another length is refused with `Unavailable` / `ModelUnavailable` before any embedding
+//! inference runs, so PAM returns `PAM_IGNORE` and the password module runs. Embeddings of two
+//! models are never compared.
 
 #![allow(
     clippy::unwrap_used,
@@ -14,6 +18,7 @@
 )]
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -28,20 +33,44 @@ use soos_daemon::config::DispatcherConfig;
 use soos_daemon::dispatcher::ConnectionDispatcher;
 use soos_daemon::health::HealthState;
 use soos_daemon::pipeline::{
-    classify_template_model, PipelineComponents, TemplateModelBinding, EMBEDDING_MODEL_ID,
+    classify_template, PipelineComponents, TemplateModelBinding, EMBEDDING_MODEL_ID,
 };
 use soos_evidence_store::{EvidenceConfig, EvidenceStore, MasterKey as EvMasterKey};
 use soos_inference_ort::{
-    MockEmbeddingExtractor, MockFaceDetector, MockPadDetector, ModelManifest,
+    BiometricEmbedding, EmbeddingExtractor, InferenceError, MockEmbeddingExtractor,
+    MockFaceDetector, MockPadDetector, EMBEDDING_DIMENSION,
 };
 use soos_policy::{AuthorizationEngine, RateLimitConfig, RateLimiter, ThresholdConfig};
 use soos_protocol::codec::{decode, encode};
 use soos_protocol::types::{ReasonClass, Request, RequestKind, Response, Verdict, CURRENT_VERSION};
 use soos_vision::{VisionPipeline, VisionPipelineConfig};
 
+/// Mock extractor of the shipped dimension that counts its inferences (spy).
+struct CountingExtractor {
+    inner: MockEmbeddingExtractor,
+    calls: Arc<AtomicUsize>,
+}
+
+impl EmbeddingExtractor for CountingExtractor {
+    fn extract_embedding(
+        &self,
+        aligned_crop_rgb: &[u8],
+        width: u32,
+        height: u32,
+    ) -> Result<BiometricEmbedding, InferenceError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        self.inner.extract_embedding(aligned_crop_rgb, width, height)
+    }
+
+    fn output_dimension(&self) -> Option<usize> {
+        self.inner.output_dimension()
+    }
+}
+
 struct Fixture {
     dispatcher: Arc<ConnectionDispatcher>,
     camera: Arc<MockCameraManager>,
+    calls: Arc<AtomicUsize>,
     sock_path: PathBuf,
     uid: u32,
     _temp: tempfile::TempDir,
@@ -53,18 +82,15 @@ impl Drop for Fixture {
     }
 }
 
-/// Builds a dispatcher bound to `expected_model` whose store holds a template for the
-/// current UID recorded with `template_model`.
-async fn fixture(template_model: &str, expected_model: Option<&str>) -> Fixture {
-    fixture_with_version(template_model, "2.0.0", expected_model).await
+/// What the stored template holds.
+enum Enrolled {
+    /// The embedding of the mock camera frame (same identity, shipped dimension).
+    LiveIdentity,
+    /// An arbitrary unit vector of the given length.
+    Vector(usize),
 }
 
-/// Same as [`fixture`] with an explicit recorded `model_version`.
-async fn fixture_with_version(
-    template_model: &str,
-    template_version: &str,
-    expected_model: Option<&str>,
-) -> Fixture {
+async fn fixture(template_model: &str, template_version: &str, enrolled: Enrolled) -> Fixture {
     let temp = tempdir().unwrap();
     let sock_path = temp.path().join("daemon.sock");
     let bio_store = Arc::new(
@@ -107,10 +133,14 @@ async fn fixture_with_version(
     }
     let frame = frame.expect("mock camera frame");
 
+    let calls = Arc::new(AtomicUsize::new(0));
     let vision = Arc::new(VisionPipeline::new(
         Arc::new(MockFaceDetector::new_centered_face(640, 480, 0.95)),
         Arc::new(MockPadDetector::new_live()),
-        Arc::new(MockEmbeddingExtractor::new(512)),
+        Arc::new(CountingExtractor {
+            inner: MockEmbeddingExtractor::new(EMBEDDING_DIMENSION),
+            calls: Arc::clone(&calls),
+        }),
         VisionPipelineConfig {
             min_face_confidence: 0.70,
             match_threshold: 0.45,
@@ -120,12 +150,20 @@ async fn fixture_with_version(
             ..Default::default()
         },
     ));
-    let enrolled = vision
-        .process_frame(&frame)
-        .unwrap()
-        .embedding
-        .as_slice()
-        .to_vec();
+    let vector = match enrolled {
+        Enrolled::LiveIdentity => vision
+            .process_frame(&frame)
+            .unwrap()
+            .embedding
+            .as_slice()
+            .to_vec(),
+        Enrolled::Vector(len) => {
+            let mut v = vec![0.0f32; len];
+            v[0] = 1.0;
+            v
+        }
+    };
+    calls.store(0, Ordering::SeqCst);
 
     let uid = nix::unistd::getuid().as_raw();
     let template = BiometricTemplate::new(
@@ -133,7 +171,7 @@ async fn fixture_with_version(
         template_model.into(),
         template_version.into(),
         1,
-        zeroize::Zeroizing::new(enrolled),
+        zeroize::Zeroizing::new(vector),
     )
     .unwrap();
     bio_store.enroll(&template).unwrap();
@@ -150,25 +188,22 @@ async fn fixture_with_version(
     health.set_camera_ready(camera.is_ready());
     health.set_models_verified(true);
 
-    let mut dispatcher = ConnectionDispatcher::with_pipeline(
+    let dispatcher = ConnectionDispatcher::with_pipeline(
         DispatcherConfig {
             max_concurrent_connections: 8,
-            // Fixture timing only: the decision stays capped by DECISION_BUDGET_MS (900 ms);
-            // 500 ms starved the 3-capture consensus on a loaded host (GitHub #280, user-approved).
             connection_timeout: Duration::from_secs(5),
             enforce_active_session: false,
             logind_sessions_dir: PathBuf::from("/run/systemd/sessions"),
         },
         health,
         components,
-    );
-    if let Some(model) = expected_model {
-        dispatcher = dispatcher.with_expected_embedding_model(model);
-    }
+    )
+    .with_expected_embedding_model(EMBEDDING_MODEL_ID);
 
     Fixture {
         dispatcher: Arc::new(dispatcher),
         camera,
+        calls,
         sock_path,
         uid,
         _temp: temp,
@@ -187,7 +222,7 @@ async fn auth(fx: &Fixture) -> Response {
     let req = Request {
         version: CURRENT_VERSION,
         kind: RequestKind::Auth,
-        request_id: [7u8; 32],
+        request_id: [9u8; 32],
         uid_hint: fx.uid,
         service: "sudo".into(),
         deadline_monotonic_ns: u64::MAX,
@@ -205,117 +240,61 @@ async fn auth(fx: &Fixture) -> Response {
 }
 
 #[test]
-fn test_embedding_model_id_is_attested_by_manifest() {
-    assert_eq!(EMBEDDING_MODEL_ID, "sface_2021dec");
+fn test_classify_template_binds_model_id_and_dimension() {
     assert_eq!(
-        EMBEDDING_MODEL_ID,
-        soos_inference_ort::SHIPPED_EMBEDDING_MODEL.model_id
-    );
-    let manifest = ModelManifest::from_file(
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../models/manifest.toml"),
-    )
-    .unwrap();
-    assert!(manifest.get_model(EMBEDDING_MODEL_ID).is_some());
-}
-
-#[tokio::test]
-async fn test_template_with_foreign_model_id_is_refused() {
-    let fx = fixture("mobilefacenet", Some(EMBEDDING_MODEL_ID)).await;
-    let resp = auth(&fx).await;
-    assert_eq!(resp.verdict, Verdict::Unavailable);
-    assert_eq!(resp.reason_class, ReasonClass::ModelUnavailable);
-}
-
-#[tokio::test]
-async fn test_template_with_matching_model_id_is_evaluated() {
-    let fx = fixture(EMBEDDING_MODEL_ID, Some(EMBEDDING_MODEL_ID)).await;
-    let resp = auth(&fx).await;
-    assert_eq!(resp.verdict, Verdict::Allow);
-    assert_eq!(resp.reason_class, ReasonClass::FaceMatch);
-}
-
-#[test]
-fn test_production_wiring_binds_templates_to_loaded_embedding_model() {
-    let main_rs = include_str!("../src/main.rs");
-    assert!(
-        main_rs.contains(".with_expected_embedding_model(EMBEDDING_MODEL_ID)"),
-        "soos-daemon main must bind template model ids to the loaded embedding model"
-    );
-    let pipeline_rs = include_str!("../src/pipeline.rs");
-    assert!(
-        pipeline_rs.contains("get_or_load_session(EMBEDDING_MODEL_ID)"),
-        "the embedding session must be loaded through EMBEDDING_MODEL_ID"
-    );
-}
-
-// ---------------------------------------------------------------------------
-// Legacy alias removed (owner decision 2026-10-01, GitHub #278): the retired CLI default
-// `mobilefacenet` / `1.0.0` labelled ArcFace vectors and is Foreign once SFace is loaded.
-// ---------------------------------------------------------------------------
-
-#[test]
-fn test_retired_cli_default_alias_is_foreign() {
-    assert_eq!(
-        classify_template_model(EMBEDDING_MODEL_ID, "mobilefacenet", "1.0.0"),
-        TemplateModelBinding::Foreign
-    );
-}
-
-#[test]
-fn test_classify_template_model_accepts_only_the_loaded_model() {
-    assert_eq!(
-        classify_template_model(EMBEDDING_MODEL_ID, EMBEDDING_MODEL_ID, "2.0.0"),
+        classify_template(EMBEDDING_MODEL_ID, Some(128), EMBEDDING_MODEL_ID, 128),
         TemplateModelBinding::Current
     );
     assert_eq!(
-        classify_template_model(EMBEDDING_MODEL_ID, "mobilefacenet", "1.0.0"),
+        classify_template(EMBEDDING_MODEL_ID, Some(128), EMBEDDING_MODEL_ID, 512),
         TemplateModelBinding::Foreign
     );
     assert_eq!(
-        classify_template_model(EMBEDDING_MODEL_ID, "arcface_w600k_mbf", "2.0.0"),
+        classify_template(EMBEDDING_MODEL_ID, Some(128), "arcface_w600k_mbf", 128),
         TemplateModelBinding::Foreign
     );
-    for (id, version) in [
-        ("mobilefacenet", "1.0.1"),
-        ("mobilefacenet", "2.0.0"),
-        ("mobilefacenet", ""),
-        ("MobileFaceNet", "1.0.0"),
-        ("mobilefacenet ", "1.0.0"),
-        ("facenet_512", "1.0.0"),
-    ] {
-        assert_eq!(
-            classify_template_model(EMBEDDING_MODEL_ID, id, version),
-            TemplateModelBinding::Foreign,
-            "{id:?}/{version:?} must be refused"
-        );
-    }
-    // No alias maps onto any loaded model.
     assert_eq!(
-        classify_template_model("another_model", "mobilefacenet", "1.0.0"),
+        classify_template(EMBEDDING_MODEL_ID, Some(128), "arcface_w600k_mbf", 512),
         TemplateModelBinding::Foreign
+    );
+    // An extractor that reports no dimension binds by id only.
+    assert_eq!(
+        classify_template(EMBEDDING_MODEL_ID, None, EMBEDDING_MODEL_ID, 512),
+        TemplateModelBinding::Current
     );
 }
 
+/// SFC7: a retired ArcFace template is refused before any inference.
 #[tokio::test]
-async fn test_legacy_alias_template_is_refused() {
-    let fx = fixture_with_version("mobilefacenet", "1.0.0", Some(EMBEDDING_MODEL_ID)).await;
+async fn test_arcface_template_is_refused_after_the_sface_switch() {
+    let fx = fixture("arcface_w600k_mbf", "2.0.0", Enrolled::Vector(512)).await;
     let resp = auth(&fx).await;
     assert_eq!(resp.verdict, Verdict::Unavailable);
     assert_eq!(resp.reason_class, ReasonClass::ModelUnavailable);
+    assert_eq!(
+        fx.calls.load(Ordering::SeqCst),
+        0,
+        "no embedding inference may run for a foreign template"
+    );
 }
 
+/// SFC9: a current-id template whose vector length is not the loaded dimension is refused as
+/// `Unavailable` (not scored as a `Deny`), before any inference.
 #[tokio::test]
-async fn test_legacy_alias_with_other_version_is_refused() {
-    let fx = fixture_with_version("mobilefacenet", "1.0.1", Some(EMBEDDING_MODEL_ID)).await;
+async fn test_template_with_wrong_dimension_is_refused() {
+    let fx = fixture(EMBEDDING_MODEL_ID, "2.0.0", Enrolled::Vector(512)).await;
     let resp = auth(&fx).await;
     assert_eq!(resp.verdict, Verdict::Unavailable);
     assert_eq!(resp.reason_class, ReasonClass::ModelUnavailable);
+    assert_eq!(fx.calls.load(Ordering::SeqCst), 0);
 }
 
+/// Control: a current SFace template of the shipped dimension is matched and authorized.
 #[tokio::test]
-async fn test_unrelated_foreign_model_id_is_refused() {
-    let fx = fixture_with_version("facenet_512", "1.0.0", Some(EMBEDDING_MODEL_ID)).await;
+async fn test_current_sface_template_is_evaluated() {
+    let fx = fixture(EMBEDDING_MODEL_ID, "2.0.0", Enrolled::LiveIdentity).await;
     let resp = auth(&fx).await;
-    assert_eq!(resp.verdict, Verdict::Unavailable);
-    assert_eq!(resp.reason_class, ReasonClass::ModelUnavailable);
+    assert_eq!(resp.verdict, Verdict::Allow);
+    assert_eq!(resp.reason_class, ReasonClass::FaceMatch);
+    assert!(fx.calls.load(Ordering::SeqCst) > 0);
 }
