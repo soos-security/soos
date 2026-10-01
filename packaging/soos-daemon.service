@@ -7,9 +7,12 @@ Wants=systemd-udevd.service
 # greeter waits for READY=1, sent once the socket is bound (see Type= below).
 Before=display-manager.service
 # Bounded restarts: a daemon that cannot start (e.g. models not deployed yet)
-# must not crash-loop forever (GitHub #167). After 5 failures in 60 s the unit
+# must not crash-loop forever (GitHub #167). After 5 failures in 320 s the unit
 # enters the failed state; fix the cause, then 'systemctl reset-failed'.
-StartLimitIntervalSec=60
+# The interval must cover 5 starts that each time out: 5 x (TimeoutStartSec 60 +
+# RestartSec 2) = 310 s <= 320 s (GitHub #287); a shorter interval would never
+# be reached and the unit would retry forever.
+StartLimitIntervalSec=320
 StartLimitBurst=5
 # No start before the attested models are deployed (GitHub #211): the daemon
 # fails closed without them, so a fresh install would only crash-loop. The

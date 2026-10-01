@@ -25,6 +25,9 @@ pub struct DaemonStatusReport {
     pub is_healthy: bool,
     pub pid: Option<u32>,
     pub uptime_secs: Option<u64>,
+    /// Whether the daemon pinned its memory with `mlockall` (`StatusResponse::memory_locked`,
+    /// GitHub #201 / #287); `None` when the daemon cannot be contacted (unknown).
+    pub memory_locked: Option<bool>,
     pub systemd_unit: String,
     pub systemd_active_state: String,
     pub systemd_sub_state: String,
@@ -89,6 +92,14 @@ impl DaemonStatusReport {
                 "UNVERIFIED"
             }
         ));
+        out.push_str(&format!(
+            "  Swap Protection:   {}\n",
+            match self.memory_locked {
+                Some(true) => "LOCKED",
+                Some(false) => "NOT LOCKED (memory may be swapped out)",
+                None => "N/A",
+            }
+        ));
         out.push_str("----------------------------------------------------\n");
         out.push_str(&format!(
             "Overall Health:      {}\n",
@@ -139,6 +150,7 @@ pub fn query_status(
                 is_healthy: status_resp.is_healthy,
                 pid: Some(status_resp.pid),
                 uptime_secs: Some(status_resp.uptime_secs),
+                memory_locked: Some(status_resp.memory_locked),
                 systemd_unit: unit_name.to_string(),
                 systemd_active_state: active,
                 systemd_sub_state: sub,
@@ -152,6 +164,7 @@ pub fn query_status(
             is_healthy: false,
             pid: sys_pid,
             uptime_secs: None,
+            memory_locked: None,
             systemd_unit: unit_name.to_string(),
             systemd_active_state: active_state,
             systemd_sub_state: sub_state,
