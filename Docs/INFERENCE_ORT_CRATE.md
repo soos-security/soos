@@ -9,7 +9,7 @@ The crate encapsulates:
 2. **Face Detection + Landmarks**: SCRFD 500M KPS ONNX model with multi-stride (8/16/32) distance-to-border box decoding, letterbox padding, BGR input normalization, and embedded 5-point facial keypoints. Replaces the legacy UltraFace Slim 320 + separate landmark model architecture.
 3. **Landmark Domain Types**: `FaceLandmarks`, `Point2f`, and `LandmarkDetector` trait for geometric alignment. In the 3-model pipeline, landmark regression is absorbed directly into SCRFD face detection (`OrtScrfdDetector`); `MockLandmarkDetector` provided for deterministic simulation.
 4. **Biometric Feature Extraction**: ArcFace embedding extractor generating L2-normalized 512D vectors with symmetric `[-1.0, +1.0]` normalization `(pixel - 127.5) / 127.5` (Verification Matrix Criteria `V2` and `NGM7`). The attested model (manifest id `arcface_w600k_mbf`, a historical name) is a Keras ArcFace **ResNet34** exported with tf2onnx (~34.1 M parameters, 136.6 MB) whose input `input_1` is **NHWC** `[N, 112, 112, 3]` and output `embedding` `[N, 512]` (GitHub #191, ADR 2026-09-30).
-5. **Presentation Attack Detection (Anti-Spoofing)**: MiniFASNetV2 80×80 BGR anti-spoofing model with `pixel / 255.0` normalization into `[0.0, 1.0]`, live class index fixed by `DEFAULT_MINIFASNET_LIVE_CLASS_INDEX = 1` (`[PrintPhoto, Live, ScreenReplay]`, single source of truth for every binary), input tensors zeroized on drop (`Zeroizing<Vec<f32>>`) and ORT-owned output tensors wiped in place by `ZeroizingOutputs` (GitHub #255; ORT-internal activation buffers are out of reach, see "ORT output wiping" below) (Verification Matrix Criteria `NGM8`, `NGM9`, `NGM10`, `PLC1`–`PLC3`, `VAY6`).
+5. **Presentation Attack Detection (Anti-Spoofing)**: MiniFASNetV2 80×80 BGR anti-spoofing model fed raw `[0, 255]` values like upstream (no division by 255, ADR 2026-10-01 "PAD Input Range Matches Upstream (0-255)"), live class index fixed by `DEFAULT_MINIFASNET_LIVE_CLASS_INDEX = 1` (`[PrintPhoto, Live, ScreenReplay]`, single source of truth for every binary), input tensors zeroized on drop (`Zeroizing<Vec<f32>>`) and ORT-owned output tensors wiped in place by `ZeroizingOutputs` (GitHub #255; ORT-internal activation buffers are out of reach, see "ORT output wiping" below) (Verification Matrix Criteria `NGM8`, `NGM9`, `NGM10`, `PLC1`–`PLC3`, `VAY6`).
 6. **Hardware-Free Deterministic Simulation**: Mocks (`MockFaceDetector`, `MockLandmarkDetector`, `MockEmbeddingExtractor`, `MockPadDetector`) for seamless headless execution in CI pipelines and developer environments.
 
 ### Module Layout
@@ -183,9 +183,9 @@ pub trait PadDetector: Send + Sync {
 Implemented by `OrtPadDetector` (MiniFASNetV2 80×80 BGR) and `MockPadDetector`.
 
 `OrtPadDetector` incorporates:
-- BGR channel ordering with `pixel / 255.0` normalization into `[0.0, 1.0]`.
+- BGR channel ordering with raw `[0.0, 255.0]` values (upstream `to_tensor` without `div(255)`; ADR 2026-10-01 "PAD Input Range Matches Upstream (0-255)"; formerly `pixel / 255.0`, which made every input look nearly black). Evidence: `pad_input_range_tests`.
 - 80×80 NCHW tensor layout (`[1, 3, 80, 80]`).
-- A crop that is not already 80×80 is resampled bilinearly with half-pixel centres (the `cv2.resize` `INTER_LINEAR` convention, GitHub #213) instead of top-left nearest-neighbour; an 80×80 crop is copied exactly, so the golden logits of `pad_real_model_tests` are unchanged. Evidence: `pad_resample_tests`.
+- A crop that is not already 80×80 is resampled bilinearly with half-pixel centres (the `cv2.resize` `INTER_LINEAR` convention, GitHub #213) instead of top-left nearest-neighbour; an 80×80 crop is copied exactly (the golden logits of `pad_real_model_tests` were re-recorded once, for the input range change of walkthrough 161). Evidence: `pad_resample_tests`.
 - Live class index `DEFAULT_MINIFASNET_LIVE_CLASS_INDEX = 1` (MiniFASNetV2 `[PrintPhoto, Live, ScreenReplay]`, `crates/inference-ort/src/pad.rs`). It is the single source of truth: `soos-daemon` (`pipeline::build_pad_detector`), `soos-enroll` (`service::build_pad_detector`) and `soos-gui` construct the detector with `OrtPadDetector::new`. The explicit-index constructors `new_with_class_index` / `with_live_class_index` are test-only; the repository invariant `test_no_pad_live_class_index_override_outside_tests` rejects them in production code (GitHub #146, ADR 2026-09-29).
 - `SharedSession` (`Arc<Mutex<ort::session::Session>>`) is the session handle type returned by `ModelRegistry::get_or_load_session` and accepted by every detector constructor.
 - Softmax probability interpretation into `PadResult` with non-live attack classification by class index (`PrintPhoto` vs `ScreenReplay`).
@@ -304,7 +304,16 @@ sudo ./scripts/download_models.sh
 
 # Validation of installed models
 ./scripts/download_models.sh --check-only
+
+# Also fetch the attested but disabled optional models (models/optional_models.toml)
+sudo ./scripts/download_models.sh --with-optional
 ```
+
+`models/optional_models.toml` (same schema, read by no runtime crate) attests the 4.0x
+MiniFASNetV1SE PAD member, disabled by default (GitHub #212, walkthrough 161). Its provenance and the
+proof that the shipped and optional PAD ONNX files equal the upstream checkpoints come from
+`scripts/convert_pad_models.py` (reproducible `.pth` to ONNX export) and
+`scripts/compare_pad_models.py` (bit-identical initializers, zero softmax difference).
 
 ---
 

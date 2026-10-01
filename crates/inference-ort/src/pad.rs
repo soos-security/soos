@@ -297,12 +297,15 @@ impl OrtPadDetector {
         exps.iter().map(|&v| v / sum).collect()
     }
 
-    /// Prepares, resizes, and normalizes an RGB image to 80x80 NCHW BGR format inside a zeroized container.
+    /// Prepares and resizes an RGB image to an 80x80 NCHW BGR tensor inside a zeroized container.
     ///
     /// Crops that are not 80x80 are resampled bilinearly with half-pixel centres (the
     /// `cv2.resize` `INTER_LINEAR` convention); an 80x80 crop is copied exactly.
     ///
-    /// Normalization maps `[0, 255]` pixel bytes to `[0.0, 1.0]` floats via `pixel / 255.0`.
+    /// Value range: raw pixel values as `f32` in `[0.0, 255.0]`, **not** divided by 255.
+    /// Upstream Silent-Face-Anti-Spoofing `to_tensor` returns `img.float()` without `div(255)`,
+    /// and both MiniFASNet checkpoints were trained on that range (ADR 2026-10-01 "PAD Input
+    /// Range Matches Upstream (0-255)", GitHub #212). Every PAD member uses this function.
     /// Channel ordering is BGR: channel 0 = Blue, channel 1 = Green, channel 2 = Red.
     pub fn prepare_input(
         rgb: &[u8],
@@ -374,17 +377,17 @@ impl OrtPadDetector {
                 };
 
                 if let (Some(r), Some(g), Some(b)) = (sample(0), sample(1), sample(2)) {
-                    // MiniFASNetV2 normalization: pixel / 255.0 in [0.0, 1.0] range.
+                    // Upstream MiniFASNet range: raw values in [0, 255] (no division).
                     // Channel ordering: BGR (channel 0 = B, channel 1 = G, channel 2 = R).
                     let idx = y * target_size + x;
                     if let Some(slot) = input_data.get_mut(idx) {
-                        *slot = b / 255.0;
+                        *slot = b;
                     }
                     if let Some(slot) = input_data.get_mut(plane + idx) {
-                        *slot = g / 255.0;
+                        *slot = g;
                     }
                     if let Some(slot) = input_data.get_mut(2 * plane + idx) {
-                        *slot = r / 255.0;
+                        *slot = r;
                     }
                 }
             }

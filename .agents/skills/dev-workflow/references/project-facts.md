@@ -86,7 +86,7 @@ production never overrides it — `OrtPadDetector::new` only, enforced by the in
 | ID | File | Input | Normalization | Notes |
 |---|---|---|---|---|
 | `scrfd_500m_kps` | `scrfd_500m_kps.onnx` | 640×640 BGR, letterbox | `(x-127.5)/128` | 9 outputs (3 strides × score/bbox/kps); **scores are already sigmoided** [65] |
-| `minifasnet_v2_pad` | `minifasnet_v2_80x80.onnx` | 80×80 BGR, 2.7× expanded bbox | `x/255` | live class index **1** [72, 79]; `[PrintPhoto, Live, ScreenReplay]`, never overridden in production |
+| `minifasnet_v2_pad` | `minifasnet_v2_80x80.onnx` | 80×80 BGR, 2.7× expanded bbox | raw `x` in `[0, 255]` (no `/255`, upstream `to_tensor`; ADR 2026-10-01 "PAD Input Range Matches Upstream (0-255)" [161]) | live class index **1** [72, 79]; `[PrintPhoto, Live, ScreenReplay]`, never overridden in production |
 | `arcface_w600k_mbf` | `arcface_w600k_mbf.onnx` | 112×112 aligned, **NHWC** `input_1` `[N,112,112,3]`, fed **BGR** [68, 71] | `(x-127.5)/127.5` | **ArcFace ResNet34** (tf2onnx, 34.1 M params, 136.6 MB), **not** MobileFaceNet — the id is historical [102]; output `embedding` `[N,512]`, L2-normalized by the extractor; the upstream model card (`garavv/arcface-onnx`) documents RGB and `(x-127.5)/128`: the divisor is template-neutral, the channel order is not and stays BGR pending an owner decision; no in-graph normalization; upstream declares no licence [145] |
 
 Any change to channel order, layout, class index or normalization MUST be validated against the real
