@@ -789,42 +789,21 @@ impl SoosApp {
                                                 .clicked()
                                             {
                                                 self.profiles.selected_uid = Some(p.uid);
-                                                if let Some(template) = self
+                                                let template = self
                                                     .store
                                                     .local()
-                                                    .and_then(|s| s.get(p.uid).ok().flatten())
-                                                {
-                                                    // Only a template of the loaded embedding
-                                                    // model is a match reference (GitHub #278).
-                                                    let current =
-                                                        soos_inference_ort::template_matches_model(
-                                                            soos_enrollment_cli::service::MODEL_ID_EMBEDDING,
-                                                            self.pipeline.embedding_dimension(),
-                                                            &template.model_id,
-                                                            template.embedding.len(),
-                                                        );
-                                                    self.match_reference_note = (!current).then(|| {
-                                                        format!(
-                                                            "Re-enrollment required: this template was enrolled with model '{}' ({}-D)",
-                                                            template.model_id,
-                                                            template.embedding.len()
-                                                        )
-                                                    });
-                                                    if let Ok(mut ref_guard) =
-                                                        self.worker_input.match_reference.lock()
-                                                    {
-                                                        *ref_guard = current.then(|| {
-                                                            template.embedding.as_slice().to_vec()
-                                                        });
-                                                    }
-                                                    if !current {
-                                                        if let Ok(mut score_guard) =
-                                                            self.worker_input.live_match_score.lock()
-                                                        {
-                                                            *score_guard = None;
-                                                        }
-                                                    }
-                                                }
+                                                    .and_then(|s| s.get(p.uid).ok().flatten());
+                                                // Only a template of the loaded embedding model
+                                                // is a match reference (GitHub #278); a foreign
+                                                // or missing template clears the reference, the
+                                                // score and the note at once (GitHub #298).
+                                                self.match_reference_note =
+                                                    crate::worker::select_match_reference(
+                                                        &self.worker_input,
+                                                        template.as_ref(),
+                                                        soos_enrollment_cli::service::MODEL_ID_EMBEDDING,
+                                                        self.pipeline.embedding_dimension(),
+                                                    );
                                             }
                                         }
                                     });

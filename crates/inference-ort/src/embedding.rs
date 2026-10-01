@@ -41,6 +41,13 @@ pub const SFACE_2021DEC: EmbeddingModelSpec = EmbeddingModelSpec {
 /// by `soos-daemon`, `soos-enroll` and `soos-gui` (owner decision 2026-10-01, GitHub #278).
 pub const SHIPPED_EMBEDDING_MODEL: EmbeddingModelSpec = SFACE_2021DEC;
 
+// `OrtEmbeddingExtractor::new` binds the shipped spec without the runtime layout check of
+// `with_spec`; this compile-time check keeps that sound (GitHub #298).
+const _: () = assert!(
+    matches!(SHIPPED_EMBEDDING_MODEL.input_layout, TensorLayout::Nchw),
+    "the shipped embedding model must take an NCHW input"
+);
+
 /// Output length of the shipped embedding model (`[1, 128]`).
 ///
 /// [`OrtEmbeddingExtractor`] rejects any other output length with
@@ -226,13 +233,35 @@ fn infer_input_layout(shape: &[i64]) -> Option<TensorLayout> {
 }
 
 impl OrtEmbeddingExtractor {
-    /// Binds `session` to the shipped embedding model ([`SHIPPED_EMBEDDING_MODEL`]).
+    /// Binds `session` to the shipped embedding model ([`SHIPPED_EMBEDDING_MODEL`]), whose
+    /// NCHW layout is checked at compile time, so this constructor cannot fail.
     pub fn new(session: Arc<Mutex<Session>>) -> Self {
-        Self::with_spec(session, SHIPPED_EMBEDDING_MODEL)
+        Self::bind(session, SHIPPED_EMBEDDING_MODEL)
     }
 
     /// Binds `session` to the embedding model described by `spec`.
-    pub fn with_spec(session: Arc<Mutex<Session>>, spec: EmbeddingModelSpec) -> Self {
+    ///
+    /// Fails closed with [`InferenceError::InvalidInput`] when `spec.input_layout` is not
+    /// [`TensorLayout::Nchw`]: [`EmbeddingExtractor::extract_embedding`] always feeds an NCHW
+    /// `[1, 3, 112, 112]` tensor, so any other layout could only fail at run time
+    /// (GitHub #298). A session whose own layout differs from the spec is still accepted here
+    /// and fails closed at extraction ([`Self::input_layout`] is `None`).
+    pub fn with_spec(
+        session: Arc<Mutex<Session>>,
+        spec: EmbeddingModelSpec,
+    ) -> Result<Self, InferenceError> {
+        if spec.input_layout != TensorLayout::Nchw {
+            return Err(InferenceError::InvalidInput(format!(
+                "embedding model '{}' declares a {:?} input layout; the extractor only feeds \
+                 NCHW [1, 3, 112, 112] tensors",
+                spec.model_id, spec.input_layout
+            )));
+        }
+        Ok(Self::bind(session, spec))
+    }
+
+    /// Shared constructor; callers guarantee that `spec.input_layout` is NCHW.
+    fn bind(session: Arc<Mutex<Session>>, spec: EmbeddingModelSpec) -> Self {
         let layout = session
             .lock()
             .ok()

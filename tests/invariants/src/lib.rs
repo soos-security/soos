@@ -162,6 +162,11 @@ mod camera_diagnostics_contract;
 #[cfg(all(test, unix))]
 mod embedding_model_docs_contract;
 
+/// SFace switch follow-ups: the biometric-store CRUD example builds a template of the shipped
+/// model (GitHub #298, row SGF4).
+#[cfg(test)]
+mod sface_followups_contract;
+
 /// Release artifacts are always rebuilt by the Docker/distro harnesses and the candid
 /// fingerprint ignores both review-report singletons (GitHub #244, #267; rows QFX1–QFX5).
 #[cfg(all(test, unix))]

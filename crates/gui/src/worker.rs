@@ -16,11 +16,13 @@ use std::time::{Duration, Instant};
 
 use arc_swap::ArcSwapOption;
 use eframe::egui;
+use soos_biometric_store::BiometricTemplate;
 use soos_camera_v4l::CameraManager;
 use soos_enrollment_cli::guided_enrollment::LivenessPolicy;
 use soos_enrollment_cli::guided_enrollment::{EnrollmentStepFeedback, GuidedEnrollmentSession};
 use soos_vision::matcher::cosine_similarity;
 use soos_vision::{PadInputModality, VisionAnalysis, VisionPipeline};
+use zeroize::Zeroizing;
 
 use crate::state::LatestFrameData;
 
@@ -31,10 +33,83 @@ pub struct WorkerSharedInput {
     pub enrollment_session: Mutex<Option<GuidedEnrollmentSession>>,
     /// Last feedback produced by the enrollment session.
     pub enrollment_feedback: Mutex<Option<EnrollmentStepFeedback>>,
-    /// Active reference embedding for live 1-to-1 verification testing.
-    pub match_reference: Mutex<Option<Vec<f32>>>,
+    /// Active reference embedding for live 1-to-1 verification testing: a copy of the enrolled
+    /// template embedding, wiped when it is replaced, cleared or dropped (GitHub #298).
+    pub match_reference: Mutex<Option<Zeroizing<Vec<f32>>>>,
     /// Latest live match score against reference embedding.
     pub live_match_score: Mutex<Option<f32>>,
+}
+
+/// Replaces the live-verification match reference after a profile selection (GitHub #298).
+///
+/// `template` is the stored template of the selected profile, or `None` when the lookup
+/// failed or found nothing. Only a template of the loaded embedding model (same id, same
+/// dimension, [`soos_inference_ort::template_matches_model`]) becomes the reference; a
+/// foreign or missing template clears it (GitHub #278).
+///
+/// The score computed against the previous reference is withdrawn in the same critical
+/// section that installs the new reference: the worker writes scores while it holds the
+/// reference lock ([`update_live_match_score`]), so no stale score can be displayed for the
+/// new selection. A poisoned lock is recovered so that the reference and score are cleared
+/// in every case (display-only state, no invariant to protect).
+///
+/// Returns the re-enrollment note to display for a foreign template, `None` otherwise (the
+/// note of a previous selection is therefore always replaced).
+pub fn select_match_reference(
+    shared: &WorkerSharedInput,
+    template: Option<&BiometricTemplate>,
+    loaded_model_id: &str,
+    loaded_dimension: Option<usize>,
+) -> Option<String> {
+    let current = template.filter(|t| {
+        soos_inference_ort::template_matches_model(
+            loaded_model_id,
+            loaded_dimension,
+            &t.model_id,
+            t.embedding.len(),
+        )
+    });
+    let note = match (template, current) {
+        (Some(t), None) => Some(format!(
+            "Re-enrollment required: this template was enrolled with model '{}' ({}-D)",
+            t.model_id,
+            t.embedding.len()
+        )),
+        _ => None,
+    };
+
+    let mut ref_guard = shared
+        .match_reference
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    // The template is cloned straight into a new `Zeroizing` container (no plain `Vec`
+    // intermediate); assigning drops, and therefore wipes, the previous reference.
+    *ref_guard = current.map(|t| t.embedding.clone());
+    let mut score_guard = shared
+        .live_match_score
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    *score_guard = None;
+    drop(score_guard);
+    drop(ref_guard);
+
+    note
+}
+
+/// Publishes the cosine score of `live` against the current match reference, if any.
+///
+/// The reference lock is held while the score is written, so a score is always computed
+/// against the reference that is current when it becomes visible (GitHub #298).
+pub fn update_live_match_score(shared: &WorkerSharedInput, live: &[f32]) {
+    if let Ok(ref_guard) = shared.match_reference.lock() {
+        if let Some(ref_emb) = ref_guard.as_ref() {
+            if let Ok(score) = cosine_similarity(ref_emb, live) {
+                if let Ok(mut score_guard) = shared.live_match_score.lock() {
+                    *score_guard = Some(score);
+                }
+            }
+        }
+    }
 }
 
 /// Samples per step of a GUI guided enrollment session.
@@ -176,19 +251,7 @@ pub fn spawn_vision_worker(
 
                                 // Handle live 1-to-1 verification matching if reference is set
                                 if let Some(emb) = &analysis.embedding {
-                                    if let Ok(ref_guard) = shared_input.match_reference.lock() {
-                                        if let Some(ref_emb) = ref_guard.as_ref() {
-                                            if let Ok(score) =
-                                                cosine_similarity(ref_emb, emb.as_slice())
-                                            {
-                                                if let Ok(mut score_guard) =
-                                                    shared_input.live_match_score.lock()
-                                                {
-                                                    *score_guard = Some(score);
-                                                }
-                                            }
-                                        }
-                                    }
+                                    update_live_match_score(&shared_input, emb.as_slice());
                                 }
 
                                 let frame_data = LatestFrameData {
