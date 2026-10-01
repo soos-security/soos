@@ -16,6 +16,9 @@
     reason = "Contractual integration tests use assertions, unwrap, and expect"
 )]
 
+#[path = "common/stamps.rs"]
+mod stamps;
+
 use pam_soos::pam_sm_authenticate;
 use soos_protocol::codec::{decode, encode, CodecError};
 use soos_protocol::message::{MESSAGE_TAG_EVENT, MESSAGE_TAG_REQUEST};
@@ -51,13 +54,14 @@ fn spawn_allow_daemon_with_trailing_bytes(
         full_req.extend_from_slice(&body);
         let req: Request = decode(&full_req).expect("decoded request");
 
+        let (issued, expires) = stamps::fresh_stamps();
         let resp = Response {
             version: CURRENT_VERSION,
             request_id: req.request_id,
             verdict: Verdict::Allow,
             reason_class: ReasonClass::FaceMatch,
-            issued_monotonic_ns: 1000,
-            expires_monotonic_ns: 2000,
+            issued_monotonic_ns: issued,
+            expires_monotonic_ns: expires,
         };
         let frame = encode(&resp).expect("encoded response");
         let payload = &frame[4..];

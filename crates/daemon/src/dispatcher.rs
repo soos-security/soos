@@ -35,8 +35,8 @@ use soos_protocol::types::{
 };
 
 /// Validity window of a rendered `Response`: `expires = issued + RESPONSE_VALIDITY_NS`
-/// (GitHub #258). The PAM client treats both timestamps as informational (ADR
-/// 2026-09-30 "Response Timestamps Are Informational").
+/// (GitHub #258). The PAM client rejects a response whose window is unset, inverted or
+/// closed when it reads it (ADR 2026-10-01 "PAM Client Enforces Response Expiry").
 pub const RESPONSE_VALIDITY_NS: u64 = 2_000_000_000;
 
 /// Evidence reason recorded for a `PasswordFailed` event snapshot.

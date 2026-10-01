@@ -81,7 +81,7 @@ Requests and events share the socket and the framing. Since GitHub #204, every c
 | `ReasonClass::MalformedRequest` | 11 |
 | `ReasonClass::InternalError` | 12 |
 
-Hand-written wire encoders (for example the Docker mock daemon `tests/docker/mock_daemon.py`) must use these indices.
+Hand-written wire encoders (for example the Docker mock daemon `tests/docker/mock_daemon.py`) must use these indices, and must encode `issued_monotonic_ns` / `expires_monotonic_ns` as real CLOCK_MONOTONIC varints for any response the PAM client should honor (`mock_daemon.py --stamps monotonic`, GitHub #287).
 
 Client-to-daemon payloads (`Request`, `Event`) additionally end with a one-byte message tag trailer that names the message type (§12, GitHub #204).
 
@@ -110,15 +110,25 @@ Returned by the daemon to the PAM module (and as the refusal of a `Status` or `P
   - `Unavailable`: Hardware offline, model uninitialized, or deadline expired.
   - `ProtocolError`: Malformed message, mismatched UID, rate-limit reached.
 - `reason_class: ReasonClass`: Internal telemetry diagnostic (must not alter PAM fallback semantics). It is **never** shown to the user: the PAM module maps every `Deny` to one neutral text and every other failure to one generic text, so a PAD rejection is indistinguishable from a non-match at the lock screen (review PAM-03, GitHub #174; see `Docs/PAM_MODULE.md` §8).
-- `issued_monotonic_ns: u64`: Generation timestamp (CLOCK_MONOTONIC, informational). `soos-daemon` stamps it from its monotonic clock on every verdict path (always `> 0`); when the clock fails it sends `0` with `expires_monotonic_ns = 0` and never `Allow` (GitHub #258).
-- `expires_monotonic_ns: u64`: Daemon-side expiry hint (`issued + 2 s`); informational only and not validated by the PAM client. Replay protection is described in "Response Freshness" below.
+- `issued_monotonic_ns: u64`: Generation timestamp (CLOCK_MONOTONIC). `soos-daemon` stamps it from its monotonic clock on every verdict path (always `> 0`); when the clock fails it sends `0` with `expires_monotonic_ns = 0` and never `Allow` (GitHub #258). The PAM client rejects a response issued more than `MAX_RESPONSE_FUTURE_SKEW_NS` (10 ms) after its own clock reading.
+- `expires_monotonic_ns: u64`: Daemon-side expiry (`issued + 2 s`, `RESPONSE_VALIDITY_NS`). Enforced by the PAM client since GitHub #287 (until then it was informational and not validated by the PAM client): a response read at or after this instant is `IpcError::StaleResponse` and yields `PAM_IGNORE`. Replay protection itself is described in "Response Freshness" below.
 
-#### Response Freshness (GitHub #219)
-The PAM client rejects stale or replayed responses through two mechanisms, not through the timestamps:
+#### Response Freshness (GitHub #219, #287)
+The PAM client rejects replayed responses through two mechanisms:
 1. **Single-use request binding**: every exchange opens a new connection and sends a fresh 256-bit `request_id` from `getrandom`; a response is accepted only when its `request_id` matches bit-for-bit (`IpcError::RequestIdMismatch` otherwise). A response captured from an earlier exchange can never match a later one (`crates/pam/tests/deadline_uid_tests.rs::test_replayed_allow_response_is_rejected_by_request_id_binding`).
 2. **Client deadline**: a verdict whose last byte arrives after the client's cumulative deadline is discarded (`IpcError::Timeout`).
 
-`issued_monotonic_ns` / `expires_monotonic_ns` are kept in the v1 wire format for diagnostics. Enforcing them on the client is a recorded option (ADR 2026-09-30 "Response Timestamps Are Informational"): it would require every test fixture and the Docker mock daemon to emit real CLOCK_MONOTONIC values first.
+On top of these, a **staleness guard** (GitHub #287, ADR 2026-10-01 "PAM Client Enforces Response Expiry") checks the stamps after the binding and the deadline: `Response::check_freshness(now, MAX_RESPONSE_FUTURE_SKEW_NS)` (`crates/protocol/src/types.rs`), with `now` read from CLOCK_MONOTONIC right after the last byte, the clock the daemon stamps with. It returns the first violated rule as a `ResponseFreshnessError`, mapped to `IpcError::StaleResponse` and therefore `PAM_IGNORE`:
+
+| Rule | Error |
+|---|---|
+| client clock read failed (`now == 0`) | `ClockUnavailable` |
+| `issued_monotonic_ns == 0` or `expires_monotonic_ns == 0` | `Unstamped` |
+| `expires < issued` | `Inverted` |
+| `issued > now + MAX_RESPONSE_FUTURE_SKEW_NS` (10 ms, `crates/pam/src/ipc.rs`) | `FutureDated` |
+| `now >= expires` | `Expired` |
+
+The guard applies to every verdict (an expired `Deny` also degrades to the generic unavailable text). The client and the daemon must share CLOCK_MONOTONIC (same host, same time namespace), which the `deadline_monotonic_ns` contract already assumes. Test daemons must stamp real values: the PAM fixtures use `crates/pam/tests/common/stamps.rs` and the Docker mock daemon is started with `--stamps monotonic` (§2 note on hand-written encoders).
 
 ### `Event`
 Best-effort telemetry notification sent by PAM following password failures:
@@ -138,8 +148,7 @@ Best-effort telemetry notification sent by PAM following password failures:
 | `RequestKind::PreviewFrame` (2) | `soos-gui` preview, authorized peers only (§9) | `PreviewResponse`, or a `Response` with `ProtocolError` on refusal |
 
 ### `StatusResponse`
-Non-biometric health snapshot returned for `RequestKind::Status` (bounded by `MAX_MESSAGE_SIZE`): `version: u8`, `socket_ready`, `camera_ready`, `models_verified`, `is_healthy` (`bool`, one byte each), `pid: u32`, `uptime_secs: u64`, `memory_locked: bool` (whether `mlockall` swap protection is active, GitHub #201; appended last, so the daemon and `soos-admin` / `soos-gui` must be upgraded together).
-Non-biometric health snapshot returned for `RequestKind::Status` (bounded by `MAX_MESSAGE_SIZE`): `version: u8`, `socket_ready`, `camera_ready`, `models_verified`, `is_healthy` (`bool`, one byte each), `pid: u32`, `uptime_secs: u64`. It carries no frame, template, embedding or UID data.
+Non-biometric health snapshot returned for `RequestKind::Status` (bounded by `MAX_MESSAGE_SIZE`): `version: u8`, `socket_ready`, `camera_ready`, `models_verified`, `is_healthy` (`bool`, one byte each), `pid: u32`, `uptime_secs: u64`, `memory_locked: bool` (whether `mlockall` swap protection is active, GitHub #201; appended last, so the daemon and `soos-admin` / `soos-gui` must be upgraded together). It carries no frame, template, embedding or UID data.
 
 ### `PreviewResponse`
 Camera frame returned for an authorized `RequestKind::PreviewFrame` (bounded by `MAX_PREVIEW_MESSAGE_SIZE`, encoded with `encode_preview`, decoded with `decode_preview`; §9): `version: u8`, `sequence: u64`, `width: u32`, `height: u32`, `format: u8` (0 = RGB24, 1 = Grey, 2 = YUYV, 3 = NV12, 4 = MJPEG, 255 = no capture), `timestamp_monotonic_ns: u64`, `data: Vec<u8>`. The pixel buffer is biometric data: the struct zeroizes on drop (§ Memory Zeroization).
@@ -342,7 +351,7 @@ u32 BE length | postcard(Request | Event) | message_tag:u8
 `decode_client_message` classifies every payload by protocol rule, never by a heuristic:
 
 1. **Last byte `>= 0x80`: tagged frame.** A complete codec v1 `Request` or `Event` always ends with the terminating byte of the `u64` varint of its last field, whose high bit is clear, so a tag can never be mistaken for a legacy frame. The tag alone selects the type; the body must decode exactly (no trailing byte) as that type. Unknown tags (`MessageError::UnknownTag`) and mismatches (`Malformed`) are rejected. The Docker mock daemon (`tests/docker/mock_daemon.py`) drops an unknown-tag frame the same way, without a response (GitHub #285).
-2. **Last byte `< 0x80`: legacy untagged v1 frame.** Accepted only when it decodes exactly as one type; a payload decoding as both `Request` and `Event` is rejected (`MessageError::Ambiguous`).
+2. **Last byte `< 0x80`: legacy untagged v1 frame.** Accepted only when it decodes exactly as one type; a payload decoding as both `Request` and `Event` is rejected (`MessageError::Ambiguous`). Keeping this path is an owner decision (ADR 2026-10-01 "Untagged Legacy Client Frames Stay Accepted", GitHub #287), pinned by `crates/daemon/tests/wire_discriminator_tests.rs::test_204_legacy_untagged_status_request_still_served`; removing it requires a new ADR and a change to that test.
 
 A rejected frame closes the connection without running any handler and without a response (the PAM module then returns `PAM_IGNORE`).
 

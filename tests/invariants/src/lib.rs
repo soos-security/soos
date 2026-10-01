@@ -160,6 +160,10 @@ mod artifact_freshness_contract;
 #[cfg(all(test, unix))]
 mod review_followups_contract;
 
+/// PAM response expiry enforcement and protocol follow-ups (GitHub #287, rows PRE6–PRE9).
+#[cfg(all(test, unix))]
+mod pam_response_expiry_contract;
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,

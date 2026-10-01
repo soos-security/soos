@@ -191,8 +191,10 @@ pub enum ReasonClass {
 ///
 /// Single-use: bound to the fresh 256-bit `request_id` of one connection, which the PAM
 /// module checks bit-for-bit; that binding (plus the client deadline) is the replay
-/// protection. The timestamps are informational and not validated by the PAM module
-/// (GitHub #219). Never cached by the PAM module.
+/// protection (GitHub #219). Since GitHub #287 the PAM module also rejects a response
+/// whose `CLOCK_MONOTONIC` stamps are unset, inconsistent, future-dated or expired
+/// ([`Response::check_freshness`]); that is a staleness guard, not the replay defence.
+/// Never cached by the PAM module.
 ///
 /// Manually implements `Zeroize` because enums `Verdict` and `ReasonClass`
 /// do not support automatic derive. On drop, sensitive fields are zeroed out
@@ -209,7 +211,7 @@ pub struct Response {
     pub reason_class: ReasonClass,
     /// Monotonic issuance timestamp (nanoseconds).
     pub issued_monotonic_ns: u64,
-    /// Monotonic expiry hint (nanoseconds, 2 s after issuance); informational only.
+    /// Monotonic expiry (nanoseconds, 2 s after issuance); enforced by the PAM client.
     pub expires_monotonic_ns: u64,
 }
 
@@ -362,6 +364,73 @@ impl Response {
     #[must_use]
     pub fn matches_request(&self, request_id: &RequestId) -> bool {
         self.request_id == *request_id
+    }
+}
+
+/// Why a `Response`'s `CLOCK_MONOTONIC` stamps are not acceptable (GitHub #287).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResponseFreshnessError {
+    /// The client clock could not be read (it reported `0`).
+    ClockUnavailable,
+    /// `issued_monotonic_ns` or `expires_monotonic_ns` is `0` (unset).
+    Unstamped,
+    /// `expires_monotonic_ns < issued_monotonic_ns`.
+    Inverted,
+    /// `issued_monotonic_ns` is later than the client clock plus the skew bound.
+    FutureDated,
+    /// The client clock reached `expires_monotonic_ns`.
+    Expired,
+}
+
+impl core::fmt::Display for ResponseFreshnessError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        // Value-free on purpose: the stamps are never rendered into PAM or daemon logs.
+        f.write_str(match self {
+            Self::ClockUnavailable => "client monotonic clock unavailable",
+            Self::Unstamped => "response timestamps are unset",
+            Self::Inverted => "response expires before it was issued",
+            Self::FutureDated => "response issued in the future beyond the skew bound",
+            Self::Expired => "response expired",
+        })
+    }
+}
+
+impl std::error::Error for ResponseFreshnessError {}
+
+impl Response {
+    /// Checks the daemon's `CLOCK_MONOTONIC` stamps against the client clock (GitHub #287).
+    ///
+    /// `now_monotonic_ns` must be read from `CLOCK_MONOTONIC`, the clock `soos-daemon`
+    /// stamps with (`0` means the read failed). The response is fresh only when both
+    /// stamps are set, `issued <= expires`, `issued <= now + max_future_skew_ns` and
+    /// `now < expires`. The crate stays clockless: the caller supplies `now`.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first violated rule, in the order of [`ResponseFreshnessError`].
+    pub fn check_freshness(
+        &self,
+        now_monotonic_ns: u64,
+        max_future_skew_ns: u64,
+    ) -> Result<(), ResponseFreshnessError> {
+        let issued = self.issued_monotonic_ns;
+        let expires = self.expires_monotonic_ns;
+        if now_monotonic_ns == 0 {
+            return Err(ResponseFreshnessError::ClockUnavailable);
+        }
+        if issued == 0 || expires == 0 {
+            return Err(ResponseFreshnessError::Unstamped);
+        }
+        if expires < issued {
+            return Err(ResponseFreshnessError::Inverted);
+        }
+        if issued > now_monotonic_ns.saturating_add(max_future_skew_ns) {
+            return Err(ResponseFreshnessError::FutureDated);
+        }
+        if now_monotonic_ns >= expires {
+            return Err(ResponseFreshnessError::Expired);
+        }
+        Ok(())
     }
 }
 

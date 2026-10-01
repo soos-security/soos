@@ -7,6 +7,8 @@
     reason = "Each integration test binary uses a different subset of the shared harness"
 )]
 
+pub mod stamps;
+
 use std::ffi::{c_char, c_int, c_void, CStr, CString};
 use std::io::{Read, Write};
 use std::os::unix::net::UnixListener;
@@ -126,13 +128,14 @@ pub fn spawn_daemon(
         stream.read_exact(&mut body).ok()?;
         full_req.extend_from_slice(&body);
         let req: Request = decode(&full_req).ok()?;
+        let (issued, expires) = stamps::fresh_stamps();
         let resp = Response {
             version: CURRENT_VERSION,
             request_id: req.request_id,
             verdict,
             reason_class: reason,
-            issued_monotonic_ns: 1000,
-            expires_monotonic_ns: 2000,
+            issued_monotonic_ns: issued,
+            expires_monotonic_ns: expires,
         };
         stream.write_all(&encode(&resp).ok()?).ok()?;
         Some(SeenRequest {
