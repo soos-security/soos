@@ -77,7 +77,9 @@ before an assertion fails on a loaded host or a busy CI runner (GitHub #280).
 Code selected by `#[cfg(target_arch = "x86")]` / `"arm"` (for example the `SYS_setresuid32`
 branch of `crates/daemon/tests/pcx_wire_routing_tests.rs`) and every `libc::timespec` conversion
 (`time_t` and `c_long` are 32-bit there) are only type-checked by a 32-bit target. No native
-toolchain is needed for a `cargo check`; `ORT_SKIP_DOWNLOAD=1` stops the `ort-sys` build script
+linker is needed for a `cargo check`, but the 32-bit libc headers are: `v4l2-sys-mit` (a build
+dependency of `v4l`) runs bindgen (libclang) on `<linux/videodev2.h>` for the target. Install
+`gcc-multilib` on Debian/Ubuntu or `lib32-glibc` on Arch. `ORT_SKIP_DOWNLOAD=1` stops the `ort-sys` build script
 from looking for prebuilt ONNX Runtime binaries, which do not exist for these targets (nothing is
 linked by `cargo check`):
 

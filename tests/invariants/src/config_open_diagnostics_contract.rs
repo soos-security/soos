@@ -164,6 +164,10 @@ fn test_cdf_ci_type_checks_a_32_bit_target() {
         "the clippy job must type-check the whole workspace for i686"
     );
     assert!(
+        clippy_job.contains("apt-get install -y --no-install-recommends gcc-multilib"),
+        "the i686 check needs the 32-bit libc headers for the v4l2-sys-mit bindgen run"
+    );
+    assert!(
         clippy_job.contains("ORT_SKIP_DOWNLOAD: \"1\""),
         "the i686 check must skip the ONNX Runtime download (no i686 binaries)"
     );

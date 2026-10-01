@@ -212,3 +212,17 @@ The first candid review of the combined #291 batch returned CHANGES_REQUESTED:
   names `build_full_service_with_notes`.
 
 No existing test was modified.
+
+### Second review round: 32-bit headers on the CI runner
+
+The second candid review found that the new CI step would fail on `ubuntu-latest`:
+`v4l2-sys-mit` (build dependency of `v4l`) runs bindgen on `<linux/videodev2.h>` for the i686
+target, which needs the 32-bit libc headers; the Arch development host has them through
+`lib32-glibc`. The step now installs `gcc-multilib` first, the invariant
+`test_cdf_ci_type_checks_a_32_bit_target` requires that install, and
+`Docs/DEVELOPMENT_WORKFLOW.md` §4.2 lists the header packages. Verified in a clean
+`ubuntu:24.04` container (clang, libclang-dev, libssl-dev, Rust 1.98.1 + i686 target): without
+`gcc-multilib` the check fails in the `v4l2-sys-mit` build script; with it,
+`ORT_SKIP_DOWNLOAD=1 cargo check --locked --workspace --all-targets --all-features --target
+i686-unknown-linux-gnu` exits 0. (`openssl-sys` is a host build dependency of `ort-sys`, so only
+the host `libssl-dev` the regular build already needs is required.)
