@@ -633,7 +633,7 @@ fn test_daemon_unit_requires_deployed_models_and_bounds_restarts() {
             && unit_section
                 .lines()
                 .any(|l| l.trim() == "StartLimitBurst=5"),
-        "[Unit] must bound restarts to 5 in 60 s"
+        "[Unit] must bound restarts to 5 in 320 s"
     );
     let dm = read_repo("scripts/download_models.sh");
     assert!(

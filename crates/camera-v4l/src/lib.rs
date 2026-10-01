@@ -5,6 +5,7 @@
 
 pub mod capture;
 pub mod config;
+pub mod daemon_config;
 pub mod deep_grey;
 pub mod diagnostics;
 pub mod error;
@@ -44,6 +45,6 @@ pub use stable_path::{stable_device_path, DEFAULT_BY_ID_DIR};
 pub use status::{CameraErrorKind, CameraStatus, CameraStatusCell};
 pub use v4l_impl::{
     fourcc_to_pixel_format, negotiate_format, pixel_format_to_fourcc, plan_capture,
-    plan_capture_with_hints, supervisor_sensor_hints, CapturePlan, DevicePathResolver,
-    V4lCameraManager, FORMAT_PRIORITY,
+    plan_capture_with_hints, supervisor_alias_hints, supervisor_sensor_hints, CapturePlan,
+    DevicePathResolver, V4lCameraManager, FORMAT_PRIORITY,
 };

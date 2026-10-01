@@ -3225,7 +3225,6 @@ dependencies = [
  "soos-protocol",
  "tempfile",
  "thiserror 2.0.20",
- "toml",
 ]
 
 [[package]]
@@ -3252,6 +3251,7 @@ dependencies = [
  "libc",
  "tempfile",
  "thiserror 2.0.20",
+ "toml",
  "tracing",
  "v4l",
  "zeroize",
@@ -3305,7 +3305,6 @@ dependencies = [
  "soos-vision",
  "tempfile",
  "thiserror 2.0.20",
- "toml",
  "zeroize",
 ]
 

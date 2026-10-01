@@ -75,7 +75,7 @@ pub struct SensorHints {
 ///
 /// Tokens are separated by any non-alphanumeric character, so `Integrated_IR_Camera`,
 /// `IR Camera` and `usb-Cam_IR-video-index0` match while `Chicony` or `Firmware` do not.
-fn has_ir_token(name: &str) -> bool {
+pub(crate) fn has_ir_token(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
     lower.contains("infrared")
         || lower

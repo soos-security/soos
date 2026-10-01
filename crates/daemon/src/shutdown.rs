@@ -20,14 +20,17 @@
 //!   bounded exponential [`AcceptBackoff`] instead of a hot loop; the shutdown signal
 //!   interrupts the backoff sleep;
 //! - blocking side-effect jobs (spoof evidence writes) run in [`BlockingTasks`] and are
-//!   drained at shutdown within what is left of the drain budget.
+//!   drained at shutdown within what is left of the drain budget;
+//! - GitHub #289: the runtime is shut down with [`shutdown_runtime`] (`Runtime::shutdown_timeout`)
+//!   with what is still left of that budget, so an abandoned blocking job no longer delays exit.
 
 use std::future::Future;
 use std::io;
 use std::panic::Location;
 use std::sync::{Arc, Mutex, PoisonError};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::net::{UnixListener, UnixStream};
+use tokio::runtime::Runtime;
 use tokio::task::{JoinError, JoinSet};
 use tracing::{error, info, warn};
 
@@ -330,7 +333,8 @@ fn classify_blocking(result: Result<(), JoinError>) -> TaskOutcome {
 /// tracked so that shutdown can wait for it. Finished jobs are reaped on every spawn, so
 /// the set is bounded by the number of jobs actually running. A blocking job cannot be
 /// cancelled: [`BlockingTasks::drain`] waits at most its budget and reports the jobs still
-/// running at the deadline as `aborted` (abandoned).
+/// running at the deadline as `aborted` (abandoned: no longer awaited, and not awaited by
+/// [`shutdown_runtime`] either once its budget is spent, GitHub #289).
 #[derive(Default)]
 pub struct BlockingTasks {
     set: Mutex<JoinSet<()>>,
@@ -403,6 +407,31 @@ impl BlockingTasks {
         );
         report
     }
+}
+
+/// What is left at `now` of a shutdown `budget` that started at `started` (GitHub #289).
+///
+/// Saturates at zero once the budget is spent and never exceeds `budget` (a `now` earlier
+/// than `started` counts as no time elapsed).
+#[must_use]
+pub fn remaining_budget(started: Instant, budget: Duration, now: Instant) -> Duration {
+    budget.saturating_sub(now.saturating_duration_since(started))
+}
+
+/// Shuts the Tokio runtime down, waiting at most `remaining` for its blocking jobs
+/// (GitHub #289).
+///
+/// Dropping a runtime waits for every `spawn_blocking` job without bound, so a blocking
+/// write abandoned by [`BlockingTasks::drain`] (or an inference left running by an aborted
+/// handler) would still delay process exit. [`Runtime::shutdown_timeout`] cancels the async
+/// tasks and leaves the blocking jobs still running after `remaining` behind: they are not
+/// awaited and end with the process. This is what bounds exit by the drain budget.
+pub fn shutdown_runtime(runtime: Runtime, remaining: Duration) {
+    info!(
+        budget_ms = u64::try_from(remaining.as_millis()).unwrap_or(u64::MAX),
+        "Shutting down the runtime; blocking jobs still running after the budget are not awaited"
+    );
+    runtime.shutdown_timeout(remaining);
 }
 
 /// Reports a panic through `tracing` with its location only (GitHub #259).

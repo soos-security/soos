@@ -210,13 +210,19 @@ fourccs were dropped from enumeration. Classification now uses an ordered scorer
 = 64, stepwise ranges contribute their maximum only) and selects with
 `select_camera_device_with`. The capture supervisor classifies the opened node with
 `plan_capture_with_hints` and the hints of `supervisor_sensor_hints(device_path, frame_sizes)`
-(the single builder of the open path), but those hints are narrower than the resolver's: the by-id name is
-taken only when the configured `device_path` is itself a `/dev/v4l/by-id/` link (always the case
-for an auto-resolved node that udev aliased), and the frame sizes are enumerated from the opened
-node. When the configured path is a `/dev/videoN` node, no by-id alias is looked up, so the
-classification rests on the card name, the formats and the frame sizes only; an IR node that
-streams a colour format under an ordinary card name can then be stamped `SensorType::Rgb`. Use the
-by-id path (or leave `camera_device` unset) for such modules.
+(the single builder of the open path): the by-id name is taken when the configured `device_path`
+is itself a `/dev/v4l/by-id/` link (always the case for an auto-resolved node that udev aliased),
+and the frame sizes are enumerated from the opened node. When the configured path is a
+`/dev/videoN` node (GitHub #289), the open path then completes the hints with
+`supervisor_alias_hints(hints, device_path, by_id_dir)` (`by_id_dir` = `DEFAULT_BY_ID_DIR`): the
+node's persistent alias is looked up through the single bounded scanner
+`SystemCameraEnumerator::by_id_aliases` (`MAX_BY_ID_ENTRIES` = 64, dangling links skipped) and its
+name is filled in (an alias carrying an IR token is preferred when several resolve to the node).
+A name already present is never replaced, so the lookup only adds a by-id hint: an IR node that
+streams a colour format under an ordinary card name but whose USB product string carries `IR` is
+now stamped `SensorType::Infrared`, and no node is ever moved from `Infrared` to `Rgb`
+(`supervisor_alias_hint_tests::*`). A node without an alias keeps the card name, format and frame
+size classification.
 
 Deep-greyscale fourccs (`deep_grey.rs`): `Y8I` (interleaved stereo, left sensor kept), `Y10`,
 `Y12` and `Y16` (little-endian 16-bit containers) are mapped by `delivered_formats` to
@@ -295,9 +301,10 @@ no camera) and `camera_command_tests::*` (table and JSON snapshots).
 `[pipeline] sensor_preference` of `/etc/soos/daemon.toml` (`DEFAULT_DAEMON_CONFIG_PATH`,
 `--config <PATH>` reads another file). The daemon's loader lives in the `soos-daemon` binary crate
 (Tokio, ONNX Runtime), which the non-biometric CLI does not link, so
-`soos_admin_cli::daemon_config::read_daemon_camera_settings` reads only these two keys, with the
-daemon's field types and the shared vocabulary (`parse_sensor_preference`,
-`is_auto_camera_device`), at most `MAX_DAEMON_CONFIG_BYTES` (1 MiB). Precedence for each setting:
+`soos_admin_cli::daemon_config::read_daemon_camera_settings` reads only these two keys through
+the shared reader `soos_camera_v4l::daemon_config` (below), with the daemon's field types and the
+shared vocabulary (`parse_sensor_preference`, `is_auto_camera_device`), at most
+`MAX_DAEMON_CONFIG_BYTES` (1 MiB). Precedence for each setting:
 `--device` / `--sensor-preference` (`--sensor-preference` counts only when typed, never the clap
 default), then the file, then the soos-daemon default (auto-detection, `prefer_ir`). A sentinel
 device (`auto`, `default`, empty, `/dev/v4l/by-id/default-camera`) means auto-detection wherever it
@@ -308,6 +315,46 @@ refuses too) falls back to the defaults. The settings used and their origin are 
 (the daemon ignores it). Tests: `camera_config_tests::*`. `scripts/install.sh` runs the command
 through `scripts/camera_report.sh` at the end of a live install (informational, bounded, never
 fatal; `Docs/PACKAGING_AND_PROVISIONING.md` §3.2).
+
+### Shared `daemon.toml` Camera Reader (`daemon_config.rs`, GitHub #289)
+
+`soos-admin camera list`, `soos-enroll` and `soos-gui` (direct mode) read `[pipeline]
+camera_device` and `[pipeline] sensor_preference` through one implementation,
+`soos_camera_v4l::daemon_config::read_daemon_camera_config(path)` (ADR 2026-10-01 "One Shared
+`daemon.toml` Camera Reader"). It lives in this crate because all three clients already depend on
+it, it owns the vocabulary (`parse_sensor_preference`, `is_auto_camera_device`), and it pulls in
+neither Tokio nor ONNX Runtime (only `toml`, already locked by `soos-daemon`).
+
+- **Open, then check the handle.** The file is opened with `O_RDONLY | O_NONBLOCK | O_CLOEXEC`
+  (`OpenOptionsExt::custom_flags`); `fstat` on the open handle must report a regular file; the
+  read is bounded by `MAX_DAEMON_CONFIG_BYTES` (checked from `fstat` and again on the bytes read).
+  A FIFO swapped in place of the file returns at once (`NotARegularFile`) instead of blocking
+  `open()`. There is no path-based `metadata()` before the open, so nothing can be swapped
+  between check and use.
+- **Symbolic links are followed**, exactly like `soos-daemon` follows them, so the clients resolve
+  the camera from the very file the daemon reads when `/etc` is symlink-managed (stow, NixOS,
+  ostree): otherwise `soos-enroll` could enroll with a different camera than the one the daemon
+  authenticates with. A link to a FIFO or a device node still ends at the `fstat` check
+  (`NotARegularFile`, promptly); a dangling link is `NotFound`.
+- **File-level failures** (`DaemonConfigError`: `NotFound`, `NotARegularFile`, `Unreadable`, `TooLarge`, `Malformed` for a TOML / UTF-8 error or a `[pipeline]` that is not a
+  table) are returned to the caller, which uses the soos-daemon defaults (auto-detection,
+  `prefer_ir`) and prints a note.
+- **A key of the wrong type** (`camera_device = 5`, `sensor_preference = [..]`) falls back to its
+  own default and is listed in `DaemonCameraConfig::mistyped_keys`; the other key still applies.
+  `DaemonCameraConfig::warnings()` names the key, never its value (the same holds for an
+  unrecognized `sensor_preference` string). The configuration path in a note goes through the
+  same sanitizer as the `soos-admin` note (`diagnostics::sanitize_display_text`: control
+  characters and bidirectional overrides become `?`). `soos-enroll` prints the notes on stderr
+  (`[WARN] camera settings: <path>: ...`); `soos-gui` logs them with `tracing::warn!`
+  (`soos_enrollment_cli::service::resolve_camera_device_from_config_reported`).
+- **`soos-admin camera list` mirrors the daemon** (matrix CVF3): a mistyped camera key is reported
+  as `Malformed` and the defaults are shown, because soos-daemon refuses to start with such a
+  file and the diagnostic must say the configuration is broken. `soos-enroll` and `soos-gui`
+  degrade per key instead, so they keep working with the rest of the configuration.
+
+Tests: `daemon_config_reader_tests::*` (this crate), `camera_config_shared_reader_tests::*`
+(admin), `daemon_config_shared_reader_tests::*` (enrollment), invariant
+`tests/invariants/src/diagnostics_parity_contract.rs` (matrix DGP4–DGP7).
 
 ### `v4l` 0.14 Panic Guard (`v4l_guard.rs`, GitHub #287)
 
@@ -328,11 +375,33 @@ USB device chooses its own product string, so a non-UTF-8 card name panics insid
   (`UnsupportedDevice`), so the supervisor backs off and retries instead of the supervisor panic
   that marks the camera `Dead` until the daemon restarts.
 
-A panic later in a streaming session (for example in `v4l`'s `Stream` drop on a failing
-`VIDIOC_STREAMOFF`) is still caught by the supervisor's own `catch_unwind` (camera `Dead`,
-fail-closed). The invariant `tests/invariants/src/camera_vision_followups_contract.rs` forbids
-direct calls elsewhere in the crate. Tests: `v4l_panic_guard_tests::*` (injected panic and
-the real non-UTF-8 `Capabilities::from` panic).
+Stream creation and teardown are guarded as well (GitHub #289): `mmap_stream_guarded` wraps
+`Stream::with_buffers` (a half-built buffer arena is released inside `v4l`, which panics when
+`munmap` or `VIDIOC_REQBUFS(0)` fails), and `open_and_stream` drops the capture source with
+`guarded_v4l_drop` (`Drop for mmap::Stream` panics on a failing `VIDIOC_STREAMOFF` other than
+`ENODEV`) before the device handle closes. A teardown panic after an idle suspend becomes
+`CameraError::StreamTeardown` (`CameraErrorKind::Io`): the supervisor backs off and reopens
+(`Recovering`, not `Dead`); after a shutdown it is logged and the shutdown proceeds; after a
+streaming error that error is kept. Frames are withdrawn on every one of these paths, so
+authentication stays fail-closed. Not guardable: when `Drop for Stream` panics, Rust still drops
+its `Arena` field while unwinding, and a second panic there aborts the process; avoiding it would
+require leaking the mappings (`ManuallyDrop`), rejected (ADR 2026-10-01 "By-Id Alias Lookup for
+Plain Capture Nodes; Silent, Guarded v4l Teardown"). Any other panic of a streaming session is
+still caught by the supervisor's own `catch_unwind` (camera `Dead`, fail-closed).
+
+Panic hook: a panic the guard catches never reaches the process panic hook. The first guarded
+call installs once (`install_v4l_panic_hook_filter`, idempotent, public) a wrapper hook that is
+silent while the current thread is inside a guarded call (a thread-local depth counter, so
+nesting works and other threads are unaffected) and forwards every other panic to the hook
+installed before it (the daemon's `tracing` hook, Rust's default hook in the CLIs). The wrapper is
+never swapped per call nor removed; a host hook installed later replaces it, which only restores
+the report. `soos-daemon` installs its hook at start-up, before the camera is opened.
+
+The invariants `tests/invariants/src/camera_vision_followups_contract.rs` and
+`tests/invariants/src/camera_alias_guard_contract.rs` forbid direct calls elsewhere in the
+crate. Tests: `v4l_panic_guard_tests::*` (injected panic and the real non-UTF-8
+`Capabilities::from` panic), `v4l_panic_hook_filter_tests::*` (silent guarded panics, reported
+unguarded panics on any thread) and `v4l_teardown_guard_tests::*`.
 
 ---
 
@@ -382,5 +451,9 @@ while frames are captured.
 | **CDX1–CDX6** | Explained classification and selection, shared by-id stems, metadata-only diagnostics with fixture probe (GitHub #256, #195, #198) | `camera_diagnostics_tests::*` | ✅ Verified |
 | **CDX7–CDX10** | `soos-admin camera list\|probe` arguments, snapshots, exit status, sanitizing, metadata-only invariant (GitHub #256) | `camera_command_tests::*`, `tests/invariants/src/camera_diagnostics_contract.rs` | ✅ Verified |
 | **CVF1–CVF3** | `camera list` reads `camera_device` / `sensor_preference` of `daemon.toml`, flags override, bounded read and fallback with a note (GitHub #287) | `camera_config_tests::*` | ✅ Verified |
+| **DGP4–DGP7** | One shared `daemon.toml` reader: open-then-`fstat`, no FIFO hang, symbolic links followed like the daemon, per-key fallback for a wrongly typed key (GitHub #289) | `daemon_config_reader_tests::*` | ✅ Verified |
 | **CVF4** | `v4l` 0.14 panics become probe / open errors (GitHub #287) | `v4l_panic_guard_tests::*` | ✅ Verified |
 | **CVF5** | The supervisor keeps the shared by-id IR token, never downgrading Infrared (GitHub #287) | `supervisor_classification_tests::*` | ✅ Verified |
+| **CAG1–CAG2** | A plain `/dev/videoN` capture path takes its by-id alias name, bounded, never downgrading Infrared (GitHub #289) | `supervisor_alias_hint_tests::*` | ✅ Verified |
+| **CAG3** | Panics caught by the `v4l` guard stay out of the process panic hook; other panics still reach it (GitHub #289) | `v4l_panic_hook_filter_tests::*` | ✅ Verified |
+| **CAG4** | Stream creation / teardown panics become recoverable errors (GitHub #289) | `v4l_teardown_guard_tests::*` | ✅ Verified |

@@ -5,6 +5,7 @@
 use clap::Parser;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::signal::unix::{signal, SignalKind};
 use tracing::{error, info, warn};
 
@@ -15,13 +16,13 @@ use soos_daemon::logging::init_logging;
 use soos_daemon::pipeline::{initialize_pipeline, warmed_inference_gate, EMBEDDING_MODEL_ID};
 use soos_daemon::sd_notify::{self, NotifyOutcome};
 use soos_daemon::shutdown::{
-    accept_until_shutdown, install_panic_hook, install_panic_hook_with, ConnectionTasks,
-    PanicMessagePolicy,
+    accept_until_shutdown, install_panic_hook, install_panic_hook_with, remaining_budget,
+    shutdown_runtime, ConnectionTasks, PanicMessagePolicy,
 };
 use soos_daemon::socket::bind_socket;
 
 /// Poll interval of the camera health transition logger.
-const CAMERA_HEALTH_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
+const CAMERA_HEALTH_POLL_INTERVAL: Duration = Duration::from_millis(500);
 
 /// Privileged background daemon for soos local biometric PAM verification.
 #[derive(Parser, Debug)]
@@ -41,8 +42,9 @@ struct Cli {
     mock_camera: bool,
 }
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// Runs the daemon until SIGINT/SIGTERM and the bounded drain; returns what is left of the
+/// one-`connection_timeout` shutdown budget for the runtime shutdown (GitHub #289).
+async fn run() -> Result<Duration, Box<dyn std::error::Error>> {
     let cli = Cli::parse();
     let mut config = DaemonConfig::load_or_default(cli.config.as_deref())?;
 
@@ -182,7 +184,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     health.set_socket_ready(false);
     drop(socket_guard);
 
-    let drain_started = std::time::Instant::now();
+    let drain_started = Instant::now();
     let report = tasks.drain(drain_budget).await;
     if !report.is_clean() {
         warn!(
@@ -203,5 +205,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
     info!("soos-daemon terminated cleanly");
-    Ok(())
+    Ok(remaining_budget(
+        drain_started,
+        drain_budget,
+        Instant::now(),
+    ))
+}
+
+/// Builds the Tokio runtime explicitly instead of the `tokio::main` attribute, whose runtime drop waits
+/// without bound for every blocking job (GitHub #289): `shutdown_runtime` gives the blocking
+/// pool what is left of the shutdown budget, then exits without awaiting abandoned jobs.
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    match runtime.block_on(run()) {
+        Ok(remaining) => {
+            shutdown_runtime(runtime, remaining);
+            Ok(())
+        }
+        Err(err) => {
+            // Startup failed before any connection was served: no tracked work to wait for.
+            shutdown_runtime(runtime, Duration::ZERO);
+            Err(err)
+        }
+    }
 }

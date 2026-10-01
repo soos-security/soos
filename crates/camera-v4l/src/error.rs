@@ -76,6 +76,16 @@ pub enum CameraError {
         reason: String,
     },
 
+    /// Tearing the MMAP stream down (`VIDIOC_STREAMOFF`, buffer release) failed; the guarded
+    /// `v4l` drop caught a panic (GitHub #289). The supervisor backs off and reopens.
+    #[error("Failed to tear down MMAP stream on '{path}': {reason}")]
+    StreamTeardown {
+        /// Target device path.
+        path: PathBuf,
+        /// Description of failure (never the panic payload).
+        reason: String,
+    },
+
     /// Failed to dequeue a capture buffer from kernel MMAP queue.
     #[error("Failed to dequeue buffer on '{path}': {reason}")]
     BufferDequeue {
