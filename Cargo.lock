@@ -3298,6 +3298,7 @@ dependencies = [
  "serde_json",
  "soos-biometric-store",
  "soos-camera-v4l",
+ "soos-evidence-store",
  "soos-inference-ort",
  "soos-protocol",
  "soos-test-fixtures",

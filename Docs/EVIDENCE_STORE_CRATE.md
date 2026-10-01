@@ -76,11 +76,35 @@ len(id) || id` (lengths as big-endian `u64`). `load_snapshot(path)` derives the 
 parent directory name and the id from the file name up to its first `.`, so a snapshot moved to
 another date partition or renamed to another id fails authentication (`Crypto`). The file suffix is
 not bound: the historical `.webp.enc` rename stays readable. Legacy unbound snapshots are still
-decrypted (`PayloadFormat::LegacyV1`) and are never rewritten (evidence is not re-encrypted after
-the fact); they expire with the 7-day retention. Not detected (rollback): restoring an older
+decrypted (`PayloadFormat::LegacyV1`); the capture and read paths never rewrite them, and they
+expire with the 7-day retention unless an operator migrates them first (below). Not detected (rollback): restoring an older
 snapshot file at its own path, deleting snapshots or daily counters, restoring a whole partition,
 and moving a legacy (unbound) snapshot. Root attackers are out of scope; ADR 2026-09-30 "AES-GCM
 Associated Data for Stored Templates and Evidence".
+
+**Legacy migration (GitHub #287, owner decision 2026-10-01)**:
+`EvidenceStore::migrate_legacy_snapshots(dry_run)` re-encrypts every legacy snapshot with the bound
+envelope, run by the operator through `soos-enroll migrate [--dry-run]` (`Docs/ENROLLMENT_CLI.md`).
+It holds the same exclusive `flock` on the base directory as `rotate_retention`, walks the real
+`YYYY-MM-DD` partitions and their `*.enc` files (symlinked partitions and files are skipped, never
+followed), opens each file with `O_NOFOLLOW`, bounds it by `MAX_EVIDENCE_FILE_BYTES`,
+authenticates it against its path binding and decodes its record. A legacy record must carry the
+snapshot id of its file name (a renamed legacy file is refused rather than bound to a new id); the
+date partition of a legacy file cannot be checked and is bound as found. The decrypted CBOR is
+re-sealed byte for byte into a temporary file created exclusively with mode `0600` and synced,
+which replaces the original by `rename` only if the path still holds the inode that was read; the
+partition is then synced. Bound files are never rewritten, daily counters are not touched, and a
+per-file failure is recorded in `SnapshotMigrationReport::failed` (path and error message) and
+leaves the file untouched while the other files are still processed. A missing base directory
+yields an empty report and nothing is created; a symlinked base directory is refused
+(`InvalidPath`). Like a replaced template, the superseded legacy inode is overwritten in place
+(best effort: 3 CSPRNG passes, each `fsync`-ed, through a write handle opened on the same inode
+before the rename) once the bound file is committed; a dry run never overwrites anything. If that
+overwrite fails the snapshot is already migrated and the error is reported for that file (a later
+run reports it as already current). The overwrite does not reach the physical blocks on
+copy-on-write or journaling filesystems, snapshots, backups or flash media; the guarantee remains
+the encryption at rest under the evidence key. `MasterKey::load_existing(path)` loads an existing
+evidence key with the same validation as `load_or_create` and never creates one.
 
 File names do not describe an image encoding: the store never encodes WebP or JPEG.
 `FRAME_SNAPSHOT_EXTENSION` (`.frame.enc`) marks self-describing camera frames written by

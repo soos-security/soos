@@ -117,6 +117,25 @@ impl MasterKey {
     }
 }
 
+impl MasterKey {
+    /// Loads an existing master key and never creates one (GitHub #287).
+    ///
+    /// Used by operator tools such as `soos-enroll migrate`, which must not mint an evidence
+    /// key on a host where evidence was never enabled. A symlinked path is refused and the
+    /// file is validated exactly like [`MasterKey::load_or_create`] validates an existing key;
+    /// a missing file is an [`EvidenceStoreError::Io`] error of kind `NotFound`.
+    pub fn load_existing<P: AsRef<Path>>(path: P) -> Result<Self, EvidenceStoreError> {
+        let path = path.as_ref();
+        if std::fs::symlink_metadata(path)?.file_type().is_symlink() {
+            return Err(EvidenceStoreError::InvalidPath(format!(
+                "Master key path '{}' is a symlink; symlinks are forbidden for key files",
+                path.display()
+            )));
+        }
+        read_existing_key(path)
+    }
+}
+
 /// Opens and validates an existing master key file (GitHub #230).
 ///
 /// The file is opened with `O_NOFOLLOW | O_NONBLOCK` (a symlink swapped in after the

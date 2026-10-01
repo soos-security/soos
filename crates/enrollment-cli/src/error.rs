@@ -67,6 +67,9 @@ pub enum EnrollmentCliError {
     #[error("Biometric store error: {0}")]
     BiometricStore(#[from] soos_biometric_store::BiometricStoreError),
 
+    #[error("Evidence store error: {0}")]
+    EvidenceStore(#[from] soos_evidence_store::EvidenceStoreError),
+
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 

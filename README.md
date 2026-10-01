@@ -15,6 +15,7 @@ Supported hosts: Debian 12, Ubuntu 24.04, Fedora 40 / RHEL 9 and Arch Linux (x86
 ./scripts/check_build_deps.sh --print-packages build     # e.g. then: sudo apt-get install ...
 ./scripts/check_build_deps.sh                            # read-only preflight
 ./scripts/install_rustup.sh                              # verified rustup-init, installs the pinned Rust 1.98.1
+export PATH="$HOME/.cargo/bin:$PATH"                     # printed by the script; shell profiles are never edited
 
 # 2. Build release artifacts and install (fails closed, rolls back on any error)
 sudo ./scripts/install.sh --build                         # runs the preflight and the release build first

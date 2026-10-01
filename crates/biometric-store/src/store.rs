@@ -50,6 +50,41 @@ const SHRED_BUFFER_SIZE: usize = 4096;
 /// Decrypted template plaintext (zeroized on drop) and the envelope format it was read from.
 type DecryptedTemplate = (Zeroizing<Vec<u8>>, PayloadFormat);
 
+/// Outcome of [`BiometricStore::migrate_template`] for one UID (GitHub #287).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TemplateMigration {
+    /// No template file exists at the canonical path of the UID.
+    Missing,
+    /// The template already uses the AAD-bound envelope; it was not rewritten.
+    AlreadyCurrent,
+    /// The legacy template was re-encrypted with the AAD-bound envelope.
+    Migrated,
+    /// Dry run: the legacy template is valid and would be re-encrypted.
+    WouldMigrate,
+}
+
+/// A template the bulk migration could not process; its file was left untouched.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TemplateMigrationFailure {
+    /// UID of the template file.
+    pub uid: u32,
+    /// Error message (UIDs and paths only, never embedding values or key material).
+    pub error: String,
+}
+
+/// Result of [`BiometricStore::migrate_legacy_templates`] (UIDs in ascending order).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TemplateMigrationReport {
+    /// `true` when nothing was written.
+    pub dry_run: bool,
+    /// Legacy templates re-encrypted (in a dry run: that would be re-encrypted).
+    pub migrated: Vec<u32>,
+    /// Templates already in the AAD-bound envelope, left untouched.
+    pub already_current: Vec<u32>,
+    /// Templates that could not be processed, left untouched.
+    pub failed: Vec<TemplateMigrationFailure>,
+}
+
 /// Biometric store responsible for managing encrypted biometric templates on disk.
 #[derive(Debug)]
 pub struct BiometricStore {
@@ -236,17 +271,78 @@ impl BiometricStore {
     /// re-enrollment of the same UID is not serialized by the store; callers must not run both
     /// at once for one UID.
     pub fn migrate_legacy_template(&self, uid: u32) -> Result<bool, BiometricStoreError> {
+        Ok(self.migrate_template(uid, false)? == TemplateMigration::Migrated)
+    }
+
+    /// Migrates one template to the AAD-bound envelope, or only reports what would happen
+    /// when `dry_run` is set (GitHub #287).
+    ///
+    /// The file is size-bounded, authenticated and fully validated (CBOR template and UID
+    /// check) in both modes, so a dry run reports exactly the files a real run would refuse.
+    /// A legacy template is rewritten through [`BiometricStore::enroll`] (temporary file
+    /// created `0600` with `O_NOFOLLOW`, `fsync`, atomic rename, directory `fsync`,
+    /// best-effort overwrite of the legacy inode); a bound template is never rewritten. A
+    /// refused file is left untouched.
+    pub fn migrate_template(
+        &self,
+        uid: u32,
+        dry_run: bool,
+    ) -> Result<TemplateMigration, BiometricStoreError> {
         let Some((decrypted_bytes, format)) = self.read_decrypted(uid)? else {
-            return Ok(false);
+            return Ok(TemplateMigration::Missing);
         };
         if format == PayloadFormat::BoundV2 {
-            return Ok(false);
+            let metadata = TemplateMetadata::from_cbor(&decrypted_bytes)?;
+            check_uid(uid, metadata.uid)?;
+            return Ok(TemplateMigration::AlreadyCurrent);
         }
         let template = BiometricTemplate::from_cbor(&decrypted_bytes)?;
         drop(decrypted_bytes);
         check_uid(uid, template.uid)?;
+        if dry_run {
+            return Ok(TemplateMigration::WouldMigrate);
+        }
         self.enroll(&template)?;
-        Ok(true)
+        Ok(TemplateMigration::Migrated)
+    }
+
+    /// Migrates every legacy unbound template of the store to the AAD-bound envelope, or
+    /// only reports what would happen when `dry_run` is set (GitHub #287, owner decision
+    /// 2026-10-01: an operator-run migration; legacy templates stay readable without it).
+    ///
+    /// Each UID of [`BiometricStore::list_enrolled`] goes through
+    /// [`BiometricStore::migrate_template`]. A per-file error (unreadable, tampered, foreign
+    /// UID, symlink, I/O failure) is recorded in [`TemplateMigrationReport::failed`] and the
+    /// remaining templates are still processed; a refused file is never rewritten. Running the
+    /// migration again reports every template as already current. Only listing the store
+    /// directory can fail the whole call. The report carries UIDs and error messages only,
+    /// never embedding values or key material.
+    pub fn migrate_legacy_templates(
+        &self,
+        dry_run: bool,
+    ) -> Result<TemplateMigrationReport, BiometricStoreError> {
+        let mut uids = self.list_enrolled()?;
+        uids.dedup();
+        let mut report = TemplateMigrationReport {
+            dry_run,
+            ..TemplateMigrationReport::default()
+        };
+        for uid in uids {
+            match self.migrate_template(uid, dry_run) {
+                Ok(TemplateMigration::Migrated | TemplateMigration::WouldMigrate) => {
+                    report.migrated.push(uid);
+                }
+                Ok(TemplateMigration::AlreadyCurrent) => report.already_current.push(uid),
+                // Listed under a non-canonical name (for example a leading zero) or removed
+                // concurrently: no template is read at the canonical path of this UID.
+                Ok(TemplateMigration::Missing) => {}
+                Err(e) => report.failed.push(TemplateMigrationFailure {
+                    uid,
+                    error: e.to_string(),
+                }),
+            }
+        }
+        Ok(report)
     }
 
     /// Reads (at most [`MAX_TEMPLATE_FILE_BYTES`]) and decrypts a user's template file,
