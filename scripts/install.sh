@@ -804,6 +804,17 @@ if [[ "${START_UNIT}" = true ]]; then
     success "soos-daemon is running and answering on ${RUNSTATEDIR}/soos/daemon.sock."
 fi
 
+# 10. Informational camera report (GitHub #287): which V4L2 node soos-daemon would
+#     open with the installed daemon.toml, and why. Metadata only, live installs
+#     only, bounded, and never fatal: the install is already committed.
+if [[ "${LIVE_INSTALL}" = true && -x "${TARGET_BIN_DIR}/soos-admin" ]]; then
+    info "Camera selection (informational, metadata only):"
+    bash "${WORKSPACE_ROOT}/scripts/camera_report.sh" \
+        --admin "${TARGET_BIN_DIR}/soos-admin" \
+        --config "${SYSCONFDIR}/soos/daemon.toml" \
+        || warn "Camera report unavailable; run: sudo soos-admin camera list"
+fi
+
 echo ""
 if [[ ${#MISSING_ARTIFACTS[@]} -gt 0 ]]; then
     warn "==================================================================="

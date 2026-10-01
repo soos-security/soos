@@ -209,7 +209,8 @@ fourccs were dropped from enumeration. Classification now uses an ordered scorer
 `SystemCameraEnumerator` enumerates `VIDIOC_ENUM_FRAMESIZES`, bounded by `MAX_FRAME_SIZE_HINTS`
 = 64, stepwise ranges contribute their maximum only) and selects with
 `select_camera_device_with`. The capture supervisor classifies the opened node with
-`plan_capture_with_hints`, but its hints are narrower than the resolver's: the by-id name is
+`plan_capture_with_hints` and the hints of `supervisor_sensor_hints(device_path, frame_sizes)`
+(the single builder of the open path), but those hints are narrower than the resolver's: the by-id name is
 taken only when the configured `device_path` is itself a `/dev/v4l/by-id/` link (always the case
 for an auto-resolved node that udev aliased), and the frame sizes are enumerated from the opened
 node. When the configured path is a `/dev/videoN` node, no by-id alias is looked up, so the
@@ -238,7 +239,13 @@ classifier when another *capture* node shares its stem
 (`CandidateClassification::by_id_hint_ignored`), so the next rules (card name, greyscale-only
 formats, frame-size signature, colour formats) decide. Metadata nodes are not candidates and never
 make a stem "shared". The capture supervisor classifies only the opened node and cannot see its
-siblings, so it still uses the by-id name (fail-closed: at worst the stricter IR PAD policy).
+siblings, so it still uses the by-id name (fail-closed: at worst the stricter IR PAD policy). This
+is deliberate (ADR 2026-10-01 "Capture Supervisor Keeps the By-Id IR Token on Shared Stems",
+GitHub #287): the supervisor's hints are a superset of the resolver's and the scorer is monotonic
+in the by-id hint, so the supervisor can stamp a node `Infrared` where the resolver said `Rgb`,
+never the reverse (`supervisor_classification_tests::*`). Applying the resolver's rule there would
+turn exactly those nodes from `Infrared` into `Rgb` and weaken their PAD policy. Cost: the RGB node
+of such a composite module streams under the IR PAD policy (more `Deny`, password fallback).
 
 **Explained resolution.** `explain_camera_resolution` returns a `CameraResolutionReport`: the
 classification of every candidate with the scorer rule that decided it
@@ -280,12 +287,52 @@ sudo soos-admin camera probe /dev/v4l/by-id/usb-Vendor_Cam-video-index0
 ```
 
 `camera list` exits with status 1 when no device would be selected, `camera probe` when the node
-is not a usable capture candidate. `--sensor-preference` takes the `daemon.toml` vocabulary
-(`prefer_ir`/`ir`, `prefer_rgb`/`rgb`, `any`, default `prefer_ir`) and `--device` plays the role
-of `camera_device`; the command does not read `/etc/soos/daemon.toml` itself. Run it as root (or
-a member of the `video` group), otherwise nodes show `probe_failed: permission_denied`. Tests:
-`camera_diagnostics_tests::*` (fixture probe, no camera) and `camera_command_tests::*` (table and
-JSON snapshots).
+is not a usable capture candidate. Run it as root (or a member of the `video` group), otherwise
+nodes show `probe_failed: permission_denied`. Tests: `camera_diagnostics_tests::*` (fixture probe,
+no camera) and `camera_command_tests::*` (table and JSON snapshots).
+
+**Daemon configuration (GitHub #287).** `camera list` resolves with `[pipeline] camera_device` and
+`[pipeline] sensor_preference` of `/etc/soos/daemon.toml` (`DEFAULT_DAEMON_CONFIG_PATH`,
+`--config <PATH>` reads another file). The daemon's loader lives in the `soos-daemon` binary crate
+(Tokio, ONNX Runtime), which the non-biometric CLI does not link, so
+`soos_admin_cli::daemon_config::read_daemon_camera_settings` reads only these two keys, with the
+daemon's field types and the shared vocabulary (`parse_sensor_preference`,
+`is_auto_camera_device`), at most `MAX_DAEMON_CONFIG_BYTES` (1 MiB). Precedence for each setting:
+`--device` / `--sensor-preference` (`--sensor-preference` counts only when typed, never the clap
+default), then the file, then the soos-daemon default (auto-detection, `prefer_ir`). A sentinel
+device (`auto`, `default`, empty, `/dev/v4l/by-id/default-camera`) means auto-detection wherever it
+comes from, so `--device auto` overrides a configured device. A missing, non-regular, unreadable,
+oversized or malformed file (TOML error or a camera key of the wrong type, which the daemon
+refuses too) falls back to the defaults. The settings used and their origin are printed on stderr
+(the JSON on stdout keeps its schema), including a note when `sensor_preference` is not recognized
+(the daemon ignores it). Tests: `camera_config_tests::*`. `scripts/install.sh` runs the command
+through `scripts/camera_report.sh` at the end of a live install (informational, bounded, never
+fatal; `Docs/PACKAGING_AND_PROVISIONING.md` §3.2).
+
+### `v4l` 0.14 Panic Guard (`v4l_guard.rs`, GitHub #287)
+
+`v4l` 0.14 converts kernel structures with `unwrap`/`expect`: `Capabilities::from` unwraps
+`str::from_utf8` on the driver, card and bus strings, the `VIDIOC_ENUM_FMT` description is
+unwrapped the same way, and `Format::from` expects known field-order and colour-space values. A
+USB device chooses its own product string, so a non-UTF-8 card name panics inside the crate.
+`guard_v4l_call` runs one call under `catch_unwind` and returns `io::Error` (`ErrorKind::Other`,
+`V4L_PANIC_MESSAGE`; the panic payload is dropped because it may quote device bytes). Every
+`VIDIOC_QUERYCAP`, `VIDIOC_ENUM_FMT` and `VIDIOC_S_FMT` of the crate goes through
+`query_caps_guarded`, `enum_formats_guarded` and `set_format_guarded`:
+
+- daemon enumeration (`SystemV4lNodeProbe`, frame-size hints): the node is skipped like a node
+  whose ioctls fail;
+- `soos-admin` diagnostics (`SystemV4lDeviceProbe`): `probe_failed: io_error` (the whole probe also
+  keeps its outer guard);
+- capture open path (`open_and_stream`): `CameraError::QueryCapabilities` or `SetFormat`
+  (`UnsupportedDevice`), so the supervisor backs off and retries instead of the supervisor panic
+  that marks the camera `Dead` until the daemon restarts.
+
+A panic later in a streaming session (for example in `v4l`'s `Stream` drop on a failing
+`VIDIOC_STREAMOFF`) is still caught by the supervisor's own `catch_unwind` (camera `Dead`,
+fail-closed). The invariant `tests/invariants/src/camera_vision_followups_contract.rs` forbids
+direct calls elsewhere in the crate. Tests: `v4l_panic_guard_tests::*` (injected panic and
+the real non-UTF-8 `Capabilities::from` panic).
 
 ---
 
@@ -334,3 +381,6 @@ while frames are captured.
 | **CHT1–CHT3** | Hermetic enumeration: capture-only, non-empty formats, numeric order, bounded scan, IR alias or `/dev/videoN` (GitHub #198) | `enumeration_tests::test_enumerate_filters_empty_format_nodes` (and siblings) | ✅ Verified |
 | **CDX1–CDX6** | Explained classification and selection, shared by-id stems, metadata-only diagnostics with fixture probe (GitHub #256, #195, #198) | `camera_diagnostics_tests::*` | ✅ Verified |
 | **CDX7–CDX10** | `soos-admin camera list\|probe` arguments, snapshots, exit status, sanitizing, metadata-only invariant (GitHub #256) | `camera_command_tests::*`, `tests/invariants/src/camera_diagnostics_contract.rs` | ✅ Verified |
+| **CVF1–CVF3** | `camera list` reads `camera_device` / `sensor_preference` of `daemon.toml`, flags override, bounded read and fallback with a note (GitHub #287) | `camera_config_tests::*` | ✅ Verified |
+| **CVF4** | `v4l` 0.14 panics become probe / open errors (GitHub #287) | `v4l_panic_guard_tests::*` | ✅ Verified |
+| **CVF5** | The supervisor keeps the shared by-id IR token, never downgrading Infrared (GitHub #287) | `supervisor_classification_tests::*` | ✅ Verified |

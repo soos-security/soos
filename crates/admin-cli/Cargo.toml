@@ -23,6 +23,7 @@ libc = { workspace = true }
 getrandom = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+toml = { workspace = true }
 soos-protocol = { workspace = true }
 soos-camera-v4l = { workspace = true }
 

@@ -10,9 +10,14 @@
 use std::io;
 use std::path::PathBuf;
 
-use clap::Parser;
-use soos_admin_cli::args::{CameraAction, Cli, Commands, OutputFormat, DEFAULT_SOCKET_PATH};
-use soos_admin_cli::camera::{collect_list_report, probe_report, CameraEnvironment};
+use clap::{CommandFactory, FromArgMatches};
+use soos_admin_cli::args::{
+    camera_list_sensor_preference_given, CameraAction, Cli, Commands, OutputFormat,
+    DEFAULT_SOCKET_PATH,
+};
+use soos_admin_cli::camera::{
+    collect_list_report, probe_report, resolve_list_settings, CameraEnvironment,
+};
 use soos_admin_cli::error::AdminCliError;
 use soos_admin_cli::logs::fetch_and_filter_logs;
 use soos_admin_cli::redact::DefaultRedactionFilter;
@@ -23,7 +28,10 @@ use soos_camera_v4l::diagnostics::SystemV4lDeviceProbe;
 use soos_protocol::types::Verdict;
 
 fn run() -> Result<(), AdminCliError> {
-    let cli = Cli::parse();
+    // Parsed through `ArgMatches` so `camera list` can tell an explicit `--sensor-preference`
+    // from the clap default (the daemon configuration applies only to the latter).
+    let matches = Cli::command().get_matches();
+    let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
     let socket_path: PathBuf = cli
         .socket_path
         .clone()
@@ -89,11 +97,17 @@ fn run() -> Result<(), AdminCliError> {
             let probe = SystemV4lDeviceProbe;
             let (text, code) = match &args.action {
                 CameraAction::List(list) => {
+                    let cli_preference = camera_list_sensor_preference_given(&matches)
+                        .then_some(list.sensor_preference);
+                    let settings =
+                        resolve_list_settings(list.device.as_deref(), cli_preference, &list.config);
+                    // On stderr, so the JSON on stdout keeps its schema.
+                    eprint!("{}", settings.note());
                     let report = collect_list_report(
                         &env,
                         &probe,
-                        list.sensor_preference,
-                        list.device.as_deref(),
+                        settings.sensor_preference,
+                        settings.explicit_device.as_deref(),
                     );
                     let json = list.json || cli.format == OutputFormat::Json;
                     let text = if json {

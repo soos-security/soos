@@ -1,7 +1,10 @@
 //! Command-line argument structures for `soos-admin`.
 
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::parser::ValueSource;
+use clap::{ArgMatches, Parser, Subcommand, ValueEnum};
 use soos_camera_v4l::{parse_sensor_preference, SensorPreference};
+
+use crate::daemon_config::DEFAULT_DAEMON_CONFIG_PATH;
 use std::path::PathBuf;
 
 pub const DEFAULT_SOCKET_PATH: &str = "/run/soos/daemon.sock";
@@ -104,6 +107,22 @@ pub struct CameraListArgs {
     /// Explicit device (`camera_device` of `/etc/soos/daemon.toml`); overrides auto-detection.
     #[arg(long)]
     pub device: Option<PathBuf>,
+
+    /// Daemon configuration whose `[pipeline] camera_device` and `sensor_preference` are used
+    /// when `--device` / `--sensor-preference` are not given.
+    #[arg(long, value_name = "PATH", default_value = DEFAULT_DAEMON_CONFIG_PATH)]
+    pub config: PathBuf,
+}
+
+/// Whether `camera list --sensor-preference` was given on the command line (the clap default
+/// `prefer_ir` must not override `sensor_preference` of the daemon configuration).
+#[must_use]
+pub fn camera_list_sensor_preference_given(matches: &ArgMatches) -> bool {
+    matches
+        .subcommand_matches("camera")
+        .and_then(|camera| camera.subcommand_matches("list"))
+        .and_then(|list| list.value_source("sensor_preference"))
+        == Some(ValueSource::CommandLine)
 }
 
 /// Arguments for `camera probe`.

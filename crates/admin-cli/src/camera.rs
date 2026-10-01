@@ -14,9 +14,11 @@ use soos_camera_v4l::diagnostics::{
     sanitize_display_text, CameraDiagnostics, NodeDiagnostics, NodeStatus, V4lDeviceProbe,
 };
 use soos_camera_v4l::{
-    CameraEnumerator, CameraResolutionSource, PixelFormat, SensorPreference, SensorType,
-    SystemCameraEnumerator, DEFAULT_BY_ID_DIR, SYSFS_VIDEO4LINUX_DIR,
+    is_auto_camera_device, CameraEnumerator, CameraResolutionSource, PixelFormat, SensorPreference,
+    SensorType, SystemCameraEnumerator, DEFAULT_BY_ID_DIR, SYSFS_VIDEO4LINUX_DIR,
 };
+
+use crate::daemon_config::{read_daemon_camera_settings, DaemonCameraSettings, DaemonConfigError};
 
 /// Directories the camera diagnostics read (overridable for tests and chroots).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -62,6 +64,132 @@ pub fn collect_list_report(
         explicit,
     );
     CameraListReport::from_diagnostics(&diagnostics)
+}
+
+/// Where a `camera list` setting came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettingOrigin {
+    /// `--device` or `--sensor-preference`.
+    CommandLine,
+    /// `[pipeline]` of the daemon configuration.
+    DaemonConfig,
+    /// The soos-daemon default (auto-detection, `prefer_ir`).
+    Default,
+}
+
+/// The device and sensor preference `camera list` resolves with, and where they came from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CameraListSettings {
+    /// The daemon configuration that was consulted.
+    pub config_path: PathBuf,
+    /// What reading it produced.
+    pub config: Result<DaemonCameraSettings, DaemonConfigError>,
+    /// Explicit device handed to the resolver (`None`: auto-detection).
+    pub explicit_device: Option<PathBuf>,
+    /// Origin of [`Self::explicit_device`].
+    pub device_origin: SettingOrigin,
+    /// Sensor preference handed to the resolver.
+    pub sensor_preference: SensorPreference,
+    /// Origin of [`Self::sensor_preference`].
+    pub preference_origin: SettingOrigin,
+}
+
+/// Combines the command-line overrides with the daemon configuration at `config_path`.
+///
+/// Precedence, for each setting: the flag, then `[pipeline]` of the daemon configuration, then
+/// the soos-daemon default. A sentinel device (`auto`, `default`, empty,
+/// `/dev/v4l/by-id/default-camera`) means auto-detection wherever it comes from, so
+/// `--device auto` overrides a configured device. A missing, unreadable, oversized or malformed
+/// configuration falls back to the defaults; [`CameraListSettings::note`] says so.
+pub fn resolve_list_settings(
+    cli_device: Option<&Path>,
+    cli_preference: Option<SensorPreference>,
+    config_path: &Path,
+) -> CameraListSettings {
+    let config = read_daemon_camera_settings(config_path);
+    let loaded = config.as_ref().ok();
+
+    let (explicit_device, device_origin) =
+        match (cli_device, loaded.and_then(|c| c.camera_device.as_deref())) {
+            (Some(device), _) => (Some(device), SettingOrigin::CommandLine),
+            (None, Some(device)) => (Some(device), SettingOrigin::DaemonConfig),
+            (None, None) => (None, SettingOrigin::Default),
+        };
+    let explicit_device = explicit_device
+        .filter(|device| !is_auto_camera_device(device))
+        .map(Path::to_path_buf);
+
+    let (sensor_preference, preference_origin) =
+        match (cli_preference, loaded.and_then(|c| c.sensor_preference)) {
+            (Some(preference), _) => (preference, SettingOrigin::CommandLine),
+            (None, Some(preference)) => (preference, SettingOrigin::DaemonConfig),
+            (None, None) => (SensorPreference::default(), SettingOrigin::Default),
+        };
+
+    CameraListSettings {
+        config_path: config_path.to_path_buf(),
+        config,
+        explicit_device,
+        device_origin,
+        sensor_preference,
+        preference_origin,
+    }
+}
+
+impl CameraListSettings {
+    /// Human-readable note: which configuration was used and where each setting came from.
+    #[must_use]
+    pub fn note(&self) -> String {
+        let mut out = String::new();
+        let config = path_text(&self.config_path);
+        match &self.config {
+            Ok(_) => {
+                let _ = writeln!(out, "camera settings: {config} (loaded)");
+            }
+            Err(err) => {
+                let _ = writeln!(
+                    out,
+                    "camera settings: {config} {err}; using the soos-daemon defaults"
+                );
+            }
+        }
+        let device = self
+            .explicit_device
+            .as_deref()
+            .map_or_else(|| "auto".to_string(), path_text);
+        let _ = writeln!(
+            out,
+            "  camera_device:      {device} ({})",
+            origin_label(self.device_origin, "--device")
+        );
+        let _ = writeln!(
+            out,
+            "  sensor_preference:  {} ({})",
+            preference_label(self.sensor_preference),
+            origin_label(self.preference_origin, "--sensor-preference")
+        );
+        let unrecognized = self
+            .config
+            .as_ref()
+            .is_ok_and(|c| c.sensor_preference_unrecognized);
+        if unrecognized && self.preference_origin != SettingOrigin::CommandLine {
+            let _ = writeln!(
+                out,
+                "  note: sensor_preference in daemon.toml is not recognized; soos-daemon ignores \
+                 it and uses {}",
+                preference_label(SensorPreference::default())
+            );
+        }
+        out
+    }
+}
+
+const fn origin_label(origin: SettingOrigin, flag: &'static str) -> &'static str {
+    match origin {
+        SettingOrigin::CommandLine => flag,
+        SettingOrigin::DaemonConfig => "daemon.toml",
+        SettingOrigin::Default => "default",
+    }
 }
 
 /// Collects the `camera probe <device>` report for `env`.
