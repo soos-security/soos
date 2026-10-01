@@ -401,6 +401,21 @@ fn test_systemd_acceptance_container_never_writes_host_state() {
         "the host-state units must be masked without `|| true`, so a failure breaks the build"
     );
     assert!(
+        dockerfile.contains("[ -e \"/usr/lib/systemd/system/${unit}\" ]")
+            && dockerfile.contains(
+                "for unit in systemd-sysctl.service systemd-modules-load.service systemd-binfmt.service"
+            ),
+        "a mask succeeds for any name: the build must fail when the sysctl, modules-load or \
+         binfmt unit is no longer shipped under its masked name"
+    );
+    for volatile in ["perf_event_max_sample_rate", "tainted", "aio-nr"] {
+        assert!(
+            harness.contains(volatile),
+            "the host sysctl comparison must exclude {volatile}, which the host kernel changes on \
+             its own (a required CI check must not fail without a real isolation break)"
+        );
+    }
+    assert!(
         dockerfile.contains("/dev/tpm*") && dockerfile.contains("/dev/rfkill"),
         "the TPM and rfkill nodes must be removed before systemd starts"
     );

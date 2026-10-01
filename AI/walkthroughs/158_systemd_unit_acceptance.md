@@ -129,7 +129,7 @@ Fix:
 - The image masks every boot unit that would write host kernel or firmware state through the
   writable `/proc/sys` and `/sys` (`systemd-sysctl`, `systemd-modules-load`, `systemd-binfmt` and
   the binfmt_misc mount/automount, rfkill, backlight, random seed, TPM/PCR and TPM2 setup units),
-  with `ln -sf /dev/null ... || exit 1` so a failure breaks the image build, and removes the TPM
+  with `ln -sf /dev/null`; the build fails if the sysctl, modules-load or binfmt unit is no longer shipped under that name (a mask alone succeeds for any name, so the host sysctl comparison is the backstop), and removes the TPM
   and rfkill nodes before `exec /sbin/init` (`udev` is not installed in the image).
 - The install stage asserts each unit is `masked` right after boot.
 - The host `kernel.*`, `vm.*` and `fs.*` sysctls readable without root are snapshotted before
@@ -151,3 +151,18 @@ to Hugging Face revisions (`ykk648/face_lib@10005fec…`, `garavv/arcface-onnx@2
 downloads verified against the manifest SHA-256), so an upstream re-upload cannot turn the
 required `systemd-unit` CI check red; `Docs/INFERENCE_ORT_CRATE.md` NGM8 now states the raw
 `[0, 255]` PAD range.
+
+### Second review round
+
+- A mask (`ln -sf /dev/null`) succeeds for any unit name, so the image build now also fails when
+  `systemd-sysctl.service`, `systemd-modules-load.service` or `systemd-binfmt.service` is no
+  longer shipped under that name; the host sysctl comparison stays the final backstop.
+- The host sysctl comparison excludes values the host kernel changes on its own during a run
+  (`kernel.perf_event_max_sample_rate`, `kernel.tainted`, `fs.aio-nr`, next to the counters
+  already excluded), so the required `systemd-unit` check cannot fail without a real isolation
+  break.
+- Proof after the owner restored the host (`sudo sysctl --system`: `kernel.sysrq = 16`,
+  `fs.protected_regular = 1`): a full `--models host` run passed with "Host kernel.*, vm.* and
+  fs.* sysctls are unchanged after the privileged container ran", and the host still reads
+  `kernel.sysrq = 16` / `fs.protected_regular = 1` afterwards (before the fix, the same run moved
+  them to the image's 176 / 2).

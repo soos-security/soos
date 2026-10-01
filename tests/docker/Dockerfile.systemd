@@ -46,9 +46,11 @@ RUN systemctl mask \
 # the host device nodes writable from the container, and several boot units
 # would apply container settings to the HOST kernel and firmware (sysctl.d,
 # modules-load.d, binfmt_misc, rfkill/backlight state, TPM PCR extends and
-# TPM2 setup, the random seed). Mask every one of them; `systemctl mask` with
-# no `|| true` so a renamed unit fails the image build instead of silently
-# running. The acceptance script also asserts they are masked at run time.
+# TPM2 setup, the random seed). Mask every one of them. A mask always succeeds,
+# even for a unit name that does not exist, so the build also fails when one of
+# the three units that write host kernel state (sysctl, modules-load, binfmt) is
+# no longer shipped under that name; the acceptance script asserts the masks at
+# run time and its host sysctl comparison is the final backstop.
 RUN for unit in \
         systemd-sysctl.service \
         systemd-modules-load.service \
@@ -69,6 +71,10 @@ RUN for unit in \
         systemd-tpm2-setup-early.service \
         systemd-tpm2-setup.service; do \
         ln -sf /dev/null "/etc/systemd/system/${unit}" || exit 1; \
+    done \
+    && for unit in systemd-sysctl.service systemd-modules-load.service systemd-binfmt.service; do \
+        [ -e "/usr/lib/systemd/system/${unit}" ] \
+            || { echo "host-state unit ${unit} not found: update the mask list" >&2; exit 1; }; \
     done
 
 STOPSIGNAL SIGRTMIN+3

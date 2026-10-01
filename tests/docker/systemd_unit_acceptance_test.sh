@@ -212,10 +212,14 @@ if [[ "${MODE}" = "host" ]]; then
     # Host isolation guard: kernel-global sysctls readable without root, before
     # and after the privileged container ran (compared in host_sysctls_unchanged).
     # `sysctl -a` exits non-zero for keys a non-root user may not read: keep what
-    # it printed (pipefail would otherwise abort the run under set -e).
+    # it printed (pipefail would otherwise abort the run under set -e). Counters
+    # and values the host kernel changes on its own during a run are excluded
+    # (random state, PID/pty/inode/file/aio counters, the perf sample rate the
+    # kernel lowers under load, and kernel.tainted, which any module load on the
+    # host sets); none of them is written by sysctl.d.
     host_sysctl_snapshot() {
         { sysctl -a 2>/dev/null || true; } | grep -E '^(kernel|vm|fs)\.' \
-            | { grep -vE '^(kernel\.(random\.|ns_last_pid|pty\.nr|sched_domain)|fs\.(dentry-state|inode-nr|inode-state|file-nr|quota\.)|vm\.stat_refresh)' || true; } \
+            | { grep -vE '^(kernel\.(random\.|ns_last_pid|pty\.nr|sched_domain|perf_event_max_sample_rate|tainted)|fs\.(dentry-state|inode-nr|inode-state|file-nr|aio-nr|quota\.)|vm\.stat_refresh)' || true; } \
             | sort
     }
     HOST_SYSCTL_BEFORE="$(host_sysctl_snapshot)"
