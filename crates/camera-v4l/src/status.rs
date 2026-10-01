@@ -97,9 +97,10 @@ impl CameraError {
             | Self::SetFormat { .. }
             | Self::NoSupportedFormats
             | Self::NoCompatibleFormat { .. } => CameraErrorKind::UnsupportedDevice,
-            Self::StreamCreate { .. } | Self::BufferDequeue { .. } | Self::Stopped => {
-                CameraErrorKind::Io
-            }
+            Self::StreamCreate { .. }
+            | Self::StreamTeardown { .. }
+            | Self::BufferDequeue { .. }
+            | Self::Stopped => CameraErrorKind::Io,
             Self::Starved => CameraErrorKind::Starved,
             Self::Simulated { code, .. } => CameraErrorKind::from_os_code(*code),
         }

@@ -170,6 +170,11 @@ mod review_followups_contract;
 #[cfg(all(test, unix))]
 mod camera_vision_followups_contract;
 
+/// Camera alias lookup of plain capture nodes, silent caught `v4l` panics and guarded stream
+/// teardown (GitHub #289, rows CAG1–CAG5).
+#[cfg(all(test, unix))]
+mod camera_alias_guard_contract;
+
 /// PAM response expiry enforcement and protocol follow-ups (GitHub #287, rows PRE6–PRE9).
 #[cfg(all(test, unix))]
 mod pam_response_expiry_contract;

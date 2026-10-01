@@ -210,13 +210,19 @@ fourccs were dropped from enumeration. Classification now uses an ordered scorer
 = 64, stepwise ranges contribute their maximum only) and selects with
 `select_camera_device_with`. The capture supervisor classifies the opened node with
 `plan_capture_with_hints` and the hints of `supervisor_sensor_hints(device_path, frame_sizes)`
-(the single builder of the open path), but those hints are narrower than the resolver's: the by-id name is
-taken only when the configured `device_path` is itself a `/dev/v4l/by-id/` link (always the case
-for an auto-resolved node that udev aliased), and the frame sizes are enumerated from the opened
-node. When the configured path is a `/dev/videoN` node, no by-id alias is looked up, so the
-classification rests on the card name, the formats and the frame sizes only; an IR node that
-streams a colour format under an ordinary card name can then be stamped `SensorType::Rgb`. Use the
-by-id path (or leave `camera_device` unset) for such modules.
+(the single builder of the open path): the by-id name is taken when the configured `device_path`
+is itself a `/dev/v4l/by-id/` link (always the case for an auto-resolved node that udev aliased),
+and the frame sizes are enumerated from the opened node. When the configured path is a
+`/dev/videoN` node (GitHub #289), the open path then completes the hints with
+`supervisor_alias_hints(hints, device_path, by_id_dir)` (`by_id_dir` = `DEFAULT_BY_ID_DIR`): the
+node's persistent alias is looked up through the single bounded scanner
+`SystemCameraEnumerator::by_id_aliases` (`MAX_BY_ID_ENTRIES` = 64, dangling links skipped) and its
+name is filled in (an alias carrying an IR token is preferred when several resolve to the node).
+A name already present is never replaced, so the lookup only adds a by-id hint: an IR node that
+streams a colour format under an ordinary card name but whose USB product string carries `IR` is
+now stamped `SensorType::Infrared`, and no node is ever moved from `Infrared` to `Rgb`
+(`supervisor_alias_hint_tests::*`). A node without an alias keeps the card name, format and frame
+size classification.
 
 Deep-greyscale fourccs (`deep_grey.rs`): `Y8I` (interleaved stereo, left sensor kept), `Y10`,
 `Y12` and `Y16` (little-endian 16-bit containers) are mapped by `delivered_formats` to
@@ -328,11 +334,33 @@ USB device chooses its own product string, so a non-UTF-8 card name panics insid
   (`UnsupportedDevice`), so the supervisor backs off and retries instead of the supervisor panic
   that marks the camera `Dead` until the daemon restarts.
 
-A panic later in a streaming session (for example in `v4l`'s `Stream` drop on a failing
-`VIDIOC_STREAMOFF`) is still caught by the supervisor's own `catch_unwind` (camera `Dead`,
-fail-closed). The invariant `tests/invariants/src/camera_vision_followups_contract.rs` forbids
-direct calls elsewhere in the crate. Tests: `v4l_panic_guard_tests::*` (injected panic and
-the real non-UTF-8 `Capabilities::from` panic).
+Stream creation and teardown are guarded as well (GitHub #289): `mmap_stream_guarded` wraps
+`Stream::with_buffers` (a half-built buffer arena is released inside `v4l`, which panics when
+`munmap` or `VIDIOC_REQBUFS(0)` fails), and `open_and_stream` drops the capture source with
+`guarded_v4l_drop` (`Drop for mmap::Stream` panics on a failing `VIDIOC_STREAMOFF` other than
+`ENODEV`) before the device handle closes. A teardown panic after an idle suspend becomes
+`CameraError::StreamTeardown` (`CameraErrorKind::Io`): the supervisor backs off and reopens
+(`Recovering`, not `Dead`); after a shutdown it is logged and the shutdown proceeds; after a
+streaming error that error is kept. Frames are withdrawn on every one of these paths, so
+authentication stays fail-closed. Not guardable: when `Drop for Stream` panics, Rust still drops
+its `Arena` field while unwinding, and a second panic there aborts the process; avoiding it would
+require leaking the mappings (`ManuallyDrop`), rejected (ADR 2026-10-01 "By-Id Alias Lookup for
+Plain Capture Nodes; Silent, Guarded v4l Teardown"). Any other panic of a streaming session is
+still caught by the supervisor's own `catch_unwind` (camera `Dead`, fail-closed).
+
+Panic hook: a panic the guard catches never reaches the process panic hook. The first guarded
+call installs once (`install_v4l_panic_hook_filter`, idempotent, public) a wrapper hook that is
+silent while the current thread is inside a guarded call (a thread-local depth counter, so
+nesting works and other threads are unaffected) and forwards every other panic to the hook
+installed before it (the daemon's `tracing` hook, Rust's default hook in the CLIs). The wrapper is
+never swapped per call nor removed; a host hook installed later replaces it, which only restores
+the report. `soos-daemon` installs its hook at start-up, before the camera is opened.
+
+The invariants `tests/invariants/src/camera_vision_followups_contract.rs` and
+`tests/invariants/src/camera_alias_guard_contract.rs` forbid direct calls elsewhere in the
+crate. Tests: `v4l_panic_guard_tests::*` (injected panic and the real non-UTF-8
+`Capabilities::from` panic), `v4l_panic_hook_filter_tests::*` (silent guarded panics, reported
+unguarded panics on any thread) and `v4l_teardown_guard_tests::*`.
 
 ---
 
@@ -384,3 +412,6 @@ while frames are captured.
 | **CVF1–CVF3** | `camera list` reads `camera_device` / `sensor_preference` of `daemon.toml`, flags override, bounded read and fallback with a note (GitHub #287) | `camera_config_tests::*` | ✅ Verified |
 | **CVF4** | `v4l` 0.14 panics become probe / open errors (GitHub #287) | `v4l_panic_guard_tests::*` | ✅ Verified |
 | **CVF5** | The supervisor keeps the shared by-id IR token, never downgrading Infrared (GitHub #287) | `supervisor_classification_tests::*` | ✅ Verified |
+| **CAG1–CAG2** | A plain `/dev/videoN` capture path takes its by-id alias name, bounded, never downgrading Infrared (GitHub #289) | `supervisor_alias_hint_tests::*` | ✅ Verified |
+| **CAG3** | Panics caught by the `v4l` guard stay out of the process panic hook; other panics still reach it (GitHub #289) | `v4l_panic_hook_filter_tests::*` | ✅ Verified |
+| **CAG4** | Stream creation / teardown panics become recoverable errors (GitHub #289) | `v4l_teardown_guard_tests::*` | ✅ Verified |
