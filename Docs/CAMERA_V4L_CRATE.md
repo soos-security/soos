@@ -178,6 +178,31 @@ tests are `#[ignore]`d and also return early unless `SOOS_HW_TESTS=1`:
 SOOS_HW_TESTS=1 cargo test -p soos-camera-v4l --test hardware_smoke_tests -- --ignored
 ```
 
+### Hermetic Supervisor Tests (Capture Backend Seam, GitHub #198)
+
+The capture supervisor (`supervise`, `open_and_stream` and the streaming loop in `v4l_impl.rs`)
+is generic over two crate-private traits, so its state machine is tested without a camera:
+
+| Trait | Operation | Production (`V4lBackend`) |
+|---|---|---|
+| `CaptureBackend` | `open_device` | `v4l::Device::with_path` |
+| `CaptureDevice` | `capabilities` | `query_caps_guarded` (`card`, `VIDEO_CAPTURE` flag) |
+| | `pixel_formats` | `enum_formats_guarded` |
+| | `frame_sizes` | `device_frame_sizes` (bounded `VIDIOC_ENUM_FRAMESIZES`) |
+| | `apply_format` | `set_format_guarded` (`VIDIOC_S_FMT`) |
+| | `apply_frame_interval` | `VIDIOC_S_PARM` |
+| | `start_stream` | `mmap_stream_guarded` + DQBUF poll timeout; the stream is a `CaptureSource` borrowing the device |
+
+Error classification, sensor hints and the by-id alias lookup, format validation, deep-greyscale
+normalisation, the guarded teardown (`guarded_v4l_drop`), idle suspend, stall escalation and the
+backoff / re-resolution loop all stay in the shared supervisor code, so production behaviour is
+unchanged; `V4lCameraManager::spawn` and `spawn_with_resolver` always use `V4lBackend` and the
+public API is unchanged. The `#[cfg(test)]` module `v4l_impl::supervisor_tests` drives the real
+supervisor thread through a scripted fake (open errors, `EBUSY` at `VIDIOC_S_FMT`, RGB / IR /
+`Y16 ` nodes, stalled streams, `ENODEV` mid-stream, missing `VIDEO_CAPTURE`, teardown panics)
+and observes it only through `CameraManager` (matrix CCB1–CCB12). The fake's device paths live
+under a directory that never exists, so nothing under `/dev` is touched.
+
 ### Busy-Device Classification (GitHub #150)
 
 A uvcvideo node streamed by another process opens successfully and only fails at
@@ -498,3 +523,4 @@ while frames are captured.
 | **CAG1–CAG2** | A plain `/dev/videoN` capture path takes its by-id alias name, bounded, never downgrading Infrared (GitHub #289) | `supervisor_alias_hint_tests::*` | ✅ Verified |
 | **CAG3** | Panics caught by the `v4l` guard stay out of the process panic hook; other panics still reach it (GitHub #289) | `v4l_panic_hook_filter_tests::*` | ✅ Verified |
 | **CAG4** | Stream creation / teardown panics become recoverable errors (GitHub #289) | `v4l_teardown_guard_tests::*` | ✅ Verified |
+| **CCB1–CCB12** | Hermetic supervisor state machine through the capture-backend seam: backoff, busy, sensor stamps, `Starved`, `ENODEV` re-resolution, idle suspend, teardown panic, shutdown (GitHub #198) | `supervisor_tests::*` | ✅ Verified |
