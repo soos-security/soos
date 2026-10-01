@@ -13,10 +13,13 @@
 use crate::crypto::{decrypt_template_payload, encrypt_template_payload, MasterKey, PayloadFormat};
 use crate::error::BiometricStoreError;
 use crate::template::{BiometricTemplate, TemplateMetadata};
+use nix::errno::Errno;
+use nix::fcntl::{Flock, FlockArg};
 use std::fs::{DirBuilder, File, Metadata, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 use zeroize::Zeroizing;
 
 /// Default system storage path for biometric template files.
@@ -41,6 +44,9 @@ pub const STORE_DIR_MODE: u32 = 0o700;
 /// world-writable (`0o022`). The directory is never chmod-ed to clear them.
 pub const FORBIDDEN_STORE_DIR_BITS: u32 = 0o022;
 
+/// Default bound on the wait for the advisory store lock (GitHub #289).
+pub const STORE_LOCK_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// Number of CSPRNG overwrite passes applied before a template inode is released.
 const SHRED_PASSES: usize = 3;
 
@@ -49,6 +55,12 @@ const SHRED_BUFFER_SIZE: usize = 4096;
 
 /// Decrypted template plaintext (zeroized on drop) and the envelope format it was read from.
 type DecryptedTemplate = (Zeroizing<Vec<u8>>, PayloadFormat);
+
+/// A [`DecryptedTemplate`] with the identity of the file it was read from.
+type IdentifiedTemplate = (Zeroizing<Vec<u8>>, PayloadFormat, FileIdentity);
+
+/// Poll interval of a contended store lock (GitHub #289).
+const STORE_LOCK_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 /// Outcome of [`BiometricStore::migrate_template`] for one UID (GitHub #287).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -90,6 +102,7 @@ pub struct TemplateMigrationReport {
 pub struct BiometricStore {
     base_dir: PathBuf,
     key: MasterKey,
+    lock_timeout: Duration,
 }
 
 impl BiometricStore {
@@ -112,14 +125,54 @@ impl BiometricStore {
             }
             Err(e) => return Err(BiometricStoreError::Io(e)),
         };
+        Self::from_validated(base_dir, &meta, key)
+    }
 
+    /// Opens an existing store directory and never creates anything (GitHub #289).
+    ///
+    /// The directory is validated exactly like an existing directory in
+    /// [`BiometricStore::new`] (real directory, owned by root or the effective UID, neither
+    /// group- nor world-writable, permissions never modified). A missing directory is reported
+    /// as [`BiometricStoreError::Io`] with [`std::io::ErrorKind::NotFound`]: neither the
+    /// directory nor any parent is created. `soos-enroll migrate` uses it, so a directory that
+    /// vanishes after its existence check is never recreated.
+    pub fn open_existing<P: AsRef<Path>>(
+        base_dir: P,
+        key: MasterKey,
+    ) -> Result<Self, BiometricStoreError> {
+        let base_dir = base_dir.as_ref().to_path_buf();
+        let meta = std::fs::symlink_metadata(&base_dir)?;
+        Self::from_validated(base_dir, &meta, key)
+    }
+
+    /// Validates the metadata of an existing store directory and builds the store.
+    fn from_validated(
+        base_dir: PathBuf,
+        meta: &Metadata,
+        key: MasterKey,
+    ) -> Result<Self, BiometricStoreError> {
         validate_store_dir(
             &base_dir,
-            &StoreDirFacts::from_metadata(&meta),
+            &StoreDirFacts::from_metadata(meta),
             nix::unistd::geteuid().as_raw(),
         )?;
+        Ok(Self {
+            base_dir,
+            key,
+            lock_timeout: STORE_LOCK_TIMEOUT,
+        })
+    }
 
-        Ok(Self { base_dir, key })
+    /// Sets the bound on the wait for the advisory store lock (GitHub #289).
+    ///
+    /// `enroll`, `delete` and a real (not dry-run) `migrate_template` take an exclusive
+    /// `flock` on the store directory; a call that cannot take it within `timeout` fails with
+    /// [`BiometricStoreError::LockTimeout`] and changes nothing. `Duration::ZERO` means a
+    /// single attempt without waiting. The default is [`STORE_LOCK_TIMEOUT`].
+    #[must_use]
+    pub fn with_lock_timeout(mut self, timeout: Duration) -> Self {
+        self.lock_timeout = timeout;
+        self
     }
 
     /// Initializes a `BiometricStore` at the default path (`/var/lib/soos/biometrics`).
@@ -165,7 +218,25 @@ impl BiometricStore {
     /// and its content is overwritten (best effort, see the module-level erasure model) once the
     /// new template is committed. If that overwrite fails, an error is returned although the
     /// new template is already in place.
+    ///
+    /// The whole write runs under the exclusive store lock (GitHub #289, see
+    /// [`BiometricStore::with_lock_timeout`]), so it never interleaves with another `enroll`,
+    /// `delete` or migration of this store; [`BiometricStoreError::LockTimeout`] is returned,
+    /// and nothing is written, when the lock cannot be taken in time.
     pub fn enroll(&self, template: &BiometricTemplate) -> Result<(), BiometricStoreError> {
+        let _lock = self.lock_store()?;
+        self.write_template(template, None)
+    }
+
+    /// Writes `template` (the body of [`BiometricStore::enroll`]); the caller holds the store
+    /// lock. With `expected`, the destination must still be the file a migration read: a
+    /// missing, replaced or rewritten file is refused with
+    /// [`BiometricStoreError::ChangedConcurrently`] before the rename and left as found.
+    fn write_template(
+        &self,
+        template: &BiometricTemplate,
+        expected: Option<&FileIdentity>,
+    ) -> Result<(), BiometricStoreError> {
         let cbor_bytes = template.to_cbor()?;
         let encrypted_bytes = encrypt_template_payload(&self.key, template.uid, &cbor_bytes)?;
         let encrypted_len = u64::try_from(encrypted_bytes.len()).unwrap_or(u64::MAX);
@@ -178,6 +249,15 @@ impl BiometricStore {
 
         let dest_path = self.template_path(template.uid)?;
         let previous = open_existing_template_for_overwrite(&dest_path)?;
+        if let Some(expected) = expected {
+            let unchanged = match previous.as_ref() {
+                Some(file) => expected.matches(&file.metadata()?),
+                None => false,
+            };
+            if !unchanged {
+                return Err(changed_concurrently(template.uid));
+            }
+        }
 
         let mut rand_suffix = [0u8; 8];
         getrandom::fill(&mut rand_suffix).map_err(|e| {
@@ -198,15 +278,24 @@ impl BiometricStore {
             .mode(0o600)
             .custom_flags(libc::O_NOFOLLOW)
             .open(&tmp_path)?;
-        let committed = tmp_file
+        let written = tmp_file
             .write_all(&encrypted_bytes)
-            .and_then(|()| tmp_file.sync_all())
-            .and_then(|()| std::fs::rename(&tmp_path, &dest_path));
+            .and_then(|()| tmp_file.sync_all());
         drop(tmp_file);
+        let committed = written.map_err(BiometricStoreError::Io).and_then(|()| {
+            // Rename only over the file that was read: a path swapped meanwhile by a writer
+            // that bypasses the store lock is left as it is.
+            if let Some(expected) = expected {
+                if !expected.still_at(&dest_path) {
+                    return Err(changed_concurrently(template.uid));
+                }
+            }
+            std::fs::rename(&tmp_path, &dest_path).map_err(BiometricStoreError::Io)
+        });
         if let Err(e) = committed {
             // Best-effort cleanup of the uncommitted ciphertext; the original error is reported.
             let _ = std::fs::remove_file(&tmp_path);
-            return Err(BiometricStoreError::Io(e));
+            return Err(e);
         }
         sync_dir(&self.base_dir)?;
 
@@ -267,9 +356,9 @@ impl BiometricStore {
     /// legacy template has been rewritten through [`BiometricStore::enroll`] (atomic replace,
     /// best-effort overwrite of the legacy inode). A legacy template whose embedded UID does not
     /// match its file name is refused with [`BiometricStoreError::CorruptFile`] and left
-    /// untouched. Like two concurrent [`BiometricStore::enroll`] calls, a migration racing a
-    /// re-enrollment of the same UID is not serialized by the store; callers must not run both
-    /// at once for one UID.
+    /// untouched. The migration is serialized with `enroll` and `delete` by the store lock and
+    /// never rewrites a file that changed after it was read (see
+    /// [`BiometricStore::migrate_template`]).
     pub fn migrate_legacy_template(&self, uid: u32) -> Result<bool, BiometricStoreError> {
         Ok(self.migrate_template(uid, false)? == TemplateMigration::Migrated)
     }
@@ -283,12 +372,37 @@ impl BiometricStore {
     /// created `0600` with `O_NOFOLLOW`, `fsync`, atomic rename, directory `fsync`,
     /// best-effort overwrite of the legacy inode); a bound template is never rewritten. A
     /// refused file is left untouched.
+    ///
+    /// Concurrency (GitHub #289): a real run holds the exclusive store lock from the read to
+    /// the rewrite, so a concurrent `enroll`, `delete` or `import` of the same UID either
+    /// completes first (and is read) or waits (and wins afterwards); a deleted template is
+    /// never resurrected and a newer one never overwritten. As a second layer, the device,
+    /// inode, size and modification time of the file read are recorded and the rename is
+    /// refused with [`BiometricStoreError::ChangedConcurrently`] when the path no longer holds
+    /// that file (a writer that bypasses the lock); the file is then left as found. A dry run
+    /// only reads and never takes the lock.
     pub fn migrate_template(
         &self,
         uid: u32,
         dry_run: bool,
     ) -> Result<TemplateMigration, BiometricStoreError> {
-        let Some((decrypted_bytes, format)) = self.read_decrypted(uid)? else {
+        self.migrate_template_with_hook(uid, dry_run, &mut || {})
+    }
+
+    /// [`Self::migrate_template`] with a hook run between the read and the rewrite.
+    fn migrate_template_with_hook(
+        &self,
+        uid: u32,
+        dry_run: bool,
+        before_rewrite: &mut dyn FnMut(),
+    ) -> Result<TemplateMigration, BiometricStoreError> {
+        let _lock = if dry_run {
+            None
+        } else {
+            Some(self.lock_store()?)
+        };
+        let Some((decrypted_bytes, format, identity)) = self.read_decrypted_with_identity(uid)?
+        else {
             return Ok(TemplateMigration::Missing);
         };
         if format == PayloadFormat::BoundV2 {
@@ -302,7 +416,8 @@ impl BiometricStore {
         if dry_run {
             return Ok(TemplateMigration::WouldMigrate);
         }
-        self.enroll(&template)?;
+        before_rewrite();
+        self.write_template(&template, Some(&identity))?;
         Ok(TemplateMigration::Migrated)
     }
 
@@ -348,6 +463,16 @@ impl BiometricStore {
     /// Reads (at most [`MAX_TEMPLATE_FILE_BYTES`]) and decrypts a user's template file,
     /// reporting its envelope format. A bound template must be bound to `uid`.
     fn read_decrypted(&self, uid: u32) -> Result<Option<DecryptedTemplate>, BiometricStoreError> {
+        Ok(self
+            .read_decrypted_with_identity(uid)?
+            .map(|(bytes, format, _identity)| (bytes, format)))
+    }
+
+    /// [`Self::read_decrypted`], also reporting the identity of the file that was read.
+    fn read_decrypted_with_identity(
+        &self,
+        uid: u32,
+    ) -> Result<Option<IdentifiedTemplate>, BiometricStoreError> {
         let path = self.template_path(uid)?;
         if !path.exists() {
             return Ok(None);
@@ -357,7 +482,9 @@ impl BiometricStore {
             .read(true)
             .custom_flags(libc::O_NOFOLLOW)
             .open(&path)?;
-        let len = file.metadata()?.len();
+        let opened = file.metadata()?;
+        let identity = FileIdentity::of(&opened);
+        let len = opened.len();
         if len > MAX_TEMPLATE_FILE_BYTES {
             return Err(BiometricStoreError::CorruptFile(format!(
                 "template file of {len} bytes exceeds {MAX_TEMPLATE_FILE_BYTES} bytes"
@@ -374,7 +501,8 @@ impl BiometricStore {
             )));
         }
 
-        decrypt_template_payload(&self.key, uid, &encrypted_bytes).map(Some)
+        let (plaintext, format) = decrypt_template_payload(&self.key, uid, &encrypted_bytes)?;
+        Ok(Some((plaintext, format, identity)))
     }
 
     /// Deletes a user's enrolled biometric template file if it exists.
@@ -387,8 +515,10 @@ impl BiometricStore {
     /// the master key renders every residual copy undecryptable.
     ///
     /// Returns `Ok(true)` if a template was overwritten and deleted, or `Ok(false)` if it did
-    /// not exist.
+    /// not exist. Runs under the exclusive store lock like [`BiometricStore::enroll`]
+    /// (GitHub #289); [`BiometricStoreError::LockTimeout`] leaves the template in place.
     pub fn delete(&self, uid: u32) -> Result<bool, BiometricStoreError> {
+        let _lock = self.lock_store()?;
         let path = self.template_path(uid)?;
         let Some(file) = open_existing_template_for_overwrite(&path)? else {
             return Ok(false);
@@ -418,6 +548,86 @@ impl BiometricStore {
         uids.sort_unstable();
         Ok(uids)
     }
+}
+
+impl BiometricStore {
+    /// Takes the exclusive advisory store lock (GitHub #289): a `flock` on the store
+    /// directory itself, opened `O_RDONLY | O_DIRECTORY | O_NOFOLLOW`, so no lock file is
+    /// ever created. Released when the returned guard is dropped (also on error paths).
+    ///
+    /// A contended lock is retried every [`STORE_LOCK_POLL_INTERVAL`] until the lock timeout;
+    /// past it, [`BiometricStoreError::LockTimeout`] is returned.
+    fn lock_store(&self) -> Result<Flock<File>, BiometricStoreError> {
+        let mut dir = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
+            .open(&self.base_dir)?;
+        let started = Instant::now();
+        loop {
+            match Flock::lock(dir, FlockArg::LockExclusiveNonblock) {
+                Ok(lock) => return Ok(lock),
+                Err((returned, Errno::EAGAIN | Errno::EINTR)) => {
+                    let waited = started.elapsed();
+                    if waited >= self.lock_timeout {
+                        return Err(BiometricStoreError::LockTimeout(format!(
+                            "biometric store '{}' is locked by another enroll, delete, import or \
+                             migrate operation; gave up after {} ms",
+                            self.base_dir.display(),
+                            u64::try_from(waited.as_millis()).unwrap_or(u64::MAX)
+                        )));
+                    }
+                    std::thread::sleep(
+                        STORE_LOCK_POLL_INTERVAL.min(self.lock_timeout.saturating_sub(waited)),
+                    );
+                    dir = returned;
+                }
+                Err((_, errno)) => {
+                    return Err(BiometricStoreError::Io(std::io::Error::from(errno)))
+                }
+            }
+        }
+    }
+}
+
+/// Identity of a template file at read time: device, inode, size and modification time
+/// (GitHub #289). A writer that replaces the file (rename) changes the device or inode; one
+/// that rewrites it in place changes the size or the modification time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FileIdentity {
+    dev: u64,
+    ino: u64,
+    len: u64,
+    mtime: i64,
+    mtime_nsec: i64,
+}
+
+impl FileIdentity {
+    fn of(meta: &Metadata) -> Self {
+        Self {
+            dev: meta.dev(),
+            ino: meta.ino(),
+            len: meta.len(),
+            mtime: meta.mtime(),
+            mtime_nsec: meta.mtime_nsec(),
+        }
+    }
+
+    /// Whether `meta` describes the same, unmodified regular file.
+    fn matches(&self, meta: &Metadata) -> bool {
+        meta.file_type().is_file() && Self::of(meta) == *self
+    }
+
+    /// Whether `path` (not followed if it is a symlink) still holds this file.
+    fn still_at(&self, path: &Path) -> bool {
+        std::fs::symlink_metadata(path).is_ok_and(|meta| self.matches(&meta))
+    }
+}
+
+/// The per-file migration error for a template that changed after it was read.
+fn changed_concurrently(uid: u32) -> BiometricStoreError {
+    BiometricStoreError::ChangedConcurrently(format!(
+        "template of UID {uid} changed concurrently during migration; left as found"
+    ))
 }
 
 /// Refuses a template whose embedded UID differs from the UID of its file name.
@@ -669,5 +879,204 @@ mod tests {
         let mut file = facts(0, 0o600);
         file.is_dir = false;
         assert!(is_invalid_path(validate_store_dir(p, &file, EUID)));
+    }
+}
+
+/// GitHub #289: a migration racing a `delete` or a re-enrollment of the same UID (matrix
+/// MLS1, MLS2). The private hook runs between the migration read and its rewrite, which is
+/// exactly the window of the race.
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    reason = "Unit tests utilize direct assertions"
+)]
+mod concurrency_tests {
+    use super::{BiometricStore, TemplateMigration};
+    use crate::crypto::{encrypt_payload, MasterKey, PayloadFormat};
+    use crate::error::BiometricStoreError;
+    use crate::template::BiometricTemplate;
+    use std::path::Path;
+    use std::thread::JoinHandle;
+    use std::time::Duration;
+    use tempfile::TempDir;
+    use zeroize::Zeroizing;
+
+    /// Long enough for the racing thread to reach the store in the window.
+    const RACE_WINDOW: Duration = Duration::from_millis(300);
+
+    const UID: u32 = 1000;
+
+    fn template(value: f32, timestamp: u64) -> BiometricTemplate {
+        BiometricTemplate::new(
+            UID,
+            "arcface_w600k_mbf".to_string(),
+            "2.0.0".to_string(),
+            timestamp,
+            Zeroizing::new(vec![value; 512]),
+        )
+        .unwrap()
+    }
+
+    fn store_at(dir: &Path, key: &MasterKey) -> BiometricStore {
+        BiometricStore::new(dir, key.clone()).unwrap()
+    }
+
+    /// A store holding one legacy (v1) template of `UID` with value 0.25.
+    fn legacy_store(temp: &TempDir) -> (BiometricStore, MasterKey) {
+        let key = MasterKey::generate().unwrap();
+        let store = store_at(&temp.path().join("bio"), &key);
+        let cbor = template(0.25, 1).to_cbor().unwrap();
+        std::fs::write(
+            store.template_path(UID).unwrap(),
+            encrypt_payload(&key, &cbor).unwrap(),
+        )
+        .unwrap();
+        (store, key)
+    }
+
+    fn dir_entries(dir: &Path) -> Vec<String> {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect()
+    }
+
+    #[test]
+    fn test_mls_concurrent_delete_during_migrate_does_not_resurrect() {
+        let temp = TempDir::new().unwrap();
+        let (store, key) = legacy_store(&temp);
+        let dir = temp.path().join("bio");
+        let mut racer: Option<JoinHandle<Result<bool, BiometricStoreError>>> = None;
+
+        let outcome = store
+            .migrate_template_with_hook(UID, false, &mut || {
+                let other = store_at(&dir, &key);
+                racer = Some(std::thread::spawn(move || other.delete(UID)));
+                std::thread::sleep(RACE_WINDOW);
+            })
+            .unwrap();
+        let deleted = racer.unwrap().join().unwrap().unwrap();
+
+        assert_eq!(outcome, TemplateMigration::Migrated);
+        assert!(
+            deleted,
+            "the delete runs once the migration released the lock"
+        );
+        assert!(
+            !store.exists(UID).unwrap(),
+            "a deleted template must never be resurrected by a migration"
+        );
+        assert!(dir_entries(&dir).is_empty());
+    }
+
+    #[test]
+    fn test_mls_concurrent_enroll_during_migrate_is_not_overwritten() {
+        let temp = TempDir::new().unwrap();
+        let (store, key) = legacy_store(&temp);
+        let dir = temp.path().join("bio");
+        let mut racer: Option<JoinHandle<Result<(), BiometricStoreError>>> = None;
+
+        let outcome = store
+            .migrate_template_with_hook(UID, false, &mut || {
+                let other = store_at(&dir, &key);
+                racer = Some(std::thread::spawn(move || other.enroll(&template(0.75, 2))));
+                std::thread::sleep(RACE_WINDOW);
+            })
+            .unwrap();
+        racer.unwrap().join().unwrap().unwrap();
+
+        assert_eq!(outcome, TemplateMigration::Migrated);
+        let kept = store.get(UID).unwrap().unwrap();
+        assert_eq!(
+            kept.enrollment_timestamp, 2,
+            "the newer enrollment must never be overwritten by the migrated legacy template"
+        );
+        assert!(kept
+            .embedding
+            .iter()
+            .all(|v| (*v - 0.75).abs() < f32::EPSILON));
+        assert_eq!(
+            store.template_format(UID).unwrap(),
+            Some(PayloadFormat::BoundV2)
+        );
+        assert_eq!(dir_entries(&dir), vec!["1000.cbor.enc".to_string()]);
+    }
+
+    #[test]
+    fn test_mls_unlocked_removal_during_migrate_is_refused_not_resurrected() {
+        let temp = TempDir::new().unwrap();
+        let (store, _key) = legacy_store(&temp);
+        let dir = temp.path().join("bio");
+        let path = store.template_path(UID).unwrap();
+
+        // A writer that bypasses the store lock removes the file inside the window.
+        let result = store.migrate_template_with_hook(UID, false, &mut || {
+            std::fs::remove_file(&path).unwrap();
+        });
+
+        match result {
+            Err(BiometricStoreError::ChangedConcurrently(msg)) => {
+                assert!(msg.contains("changed concurrently"), "{msg}");
+                assert!(msg.contains(&UID.to_string()), "{msg}");
+            }
+            other => panic!("expected ChangedConcurrently, got {other:?}"),
+        }
+        assert!(!path.exists(), "the removed template is not resurrected");
+        assert!(dir_entries(&dir).is_empty(), "no temporary file left");
+    }
+
+    #[test]
+    fn test_mls_unlocked_replace_during_migrate_is_refused_and_newer_file_kept() {
+        let temp = TempDir::new().unwrap();
+        let (store, key) = legacy_store(&temp);
+        let dir = temp.path().join("bio");
+        let path = store.template_path(UID).unwrap();
+
+        // The newer template is produced by a second store with the same key.
+        let staging = store_at(&temp.path().join("staging"), &key);
+        staging.enroll(&template(0.75, 2)).unwrap();
+        let newer = std::fs::read(staging.template_path(UID).unwrap()).unwrap();
+
+        // A writer that bypasses the store lock replaces the file inside the window.
+        let result = store.migrate_template_with_hook(UID, false, &mut || {
+            let tmp = dir.join("racer.tmp");
+            std::fs::write(&tmp, &newer).unwrap();
+            std::fs::rename(&tmp, &path).unwrap();
+        });
+
+        assert!(
+            matches!(result, Err(BiometricStoreError::ChangedConcurrently(_))),
+            "got {result:?}"
+        );
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            newer,
+            "the newer template is kept byte for byte"
+        );
+        assert_eq!(dir_entries(&dir), vec!["1000.cbor.enc".to_string()]);
+    }
+
+    #[test]
+    fn test_mls_unlocked_in_place_rewrite_during_migrate_is_refused() {
+        let temp = TempDir::new().unwrap();
+        let (store, key) = legacy_store(&temp);
+        let path = store.template_path(UID).unwrap();
+        let mut rewritten = encrypt_payload(&key, &template(0.5, 3).to_cbor().unwrap()).unwrap();
+        // One more byte than the legacy file: the size differs even on a coarse clock.
+        rewritten.push(0);
+
+        // Same inode, new content: refused on the size and modification time.
+        let result = store.migrate_template_with_hook(UID, false, &mut || {
+            std::fs::write(&path, &rewritten).unwrap();
+        });
+
+        assert!(
+            matches!(result, Err(BiometricStoreError::ChangedConcurrently(_))),
+            "got {result:?}"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), rewritten);
     }
 }

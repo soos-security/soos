@@ -32,4 +32,14 @@ pub enum BiometricStoreError {
     /// Master key generation, derivation, or loading error.
     #[error("Key error: {0}")]
     KeyError(String),
+
+    /// The advisory store lock could not be acquired within the lock timeout (GitHub #289):
+    /// another `enroll`, `delete`, `import` or `migrate` holds it. Nothing was changed.
+    #[error("Biometric store is busy: {0}")]
+    LockTimeout(String),
+
+    /// The template file changed between the migration read and its rewrite (GitHub #289):
+    /// the newer state is kept and the migration of that file is refused.
+    #[error("Template changed concurrently: {0}")]
+    ChangedConcurrently(String),
 }
