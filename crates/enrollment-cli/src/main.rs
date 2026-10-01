@@ -14,9 +14,9 @@ use clap::Parser;
 use soos_enrollment_cli::args::{resolve_target_uid, Cli, Commands, OutputFormat};
 use soos_enrollment_cli::error::EnrollmentCliError;
 use soos_enrollment_cli::{
-    build_evidence_for_migration, build_full_service, build_store_only,
-    build_templates_for_migration, camera_config_notes, check_privileges, format_enrolled_json,
-    format_migration_json, run_migration_with_reasons, MigrationSummary, EMBEDDING_MODEL_VERSION,
+    build_evidence_for_migration, build_full_service_with_notes, build_store_only,
+    build_templates_for_migration, check_privileges, format_enrolled_json, format_migration_json,
+    run_migration_with_reasons, EnrollmentService, MigrationSummary, EMBEDDING_MODEL_VERSION,
     MODEL_ID_EMBEDDING,
 };
 use soos_protocol::Verdict;
@@ -61,13 +61,19 @@ fn print_migration_summary(summary: &MigrationSummary) {
     }
 }
 
-/// Prints the notes of the shared `daemon.toml` reader on stderr before the camera is opened
-/// (GitHub #289): an unusable file or an ignored key, named but never quoted.
-fn warn_camera_config_notes() {
-    let path = std::path::Path::new(soos_camera_v4l::daemon_config::DEFAULT_DAEMON_CONFIG_PATH);
-    for note in camera_config_notes(path) {
-        eprintln!("[WARN] {note}");
-    }
+/// Builds the camera service, printing on stderr the notes of the very `daemon.toml` read the
+/// build applies (GitHub #289, #291), before the camera is opened: an unusable file or an
+/// ignored key, named but never quoted.
+fn build_camera_service(cli: &Cli) -> Result<EnrollmentService, EnrollmentCliError> {
+    build_full_service_with_notes(
+        cli,
+        std::path::Path::new(soos_camera_v4l::daemon_config::DEFAULT_DAEMON_CONFIG_PATH),
+        &mut |notes| {
+            for note in notes {
+                eprintln!("[WARN] {note}");
+            }
+        },
+    )
 }
 
 fn run() -> Result<(), EnrollmentCliError> {
@@ -90,8 +96,7 @@ fn run() -> Result<(), EnrollmentCliError> {
                     args.model_id, args.model_version
                 );
             }
-            warn_camera_config_notes();
-            let service = build_full_service(&cli)?;
+            let service = build_camera_service(&cli)?;
             let outcome = service.enroll(args, |summary| {
                 println!("\n=== Biometric Enrollment Summary ===");
                 println!("Target UID:           {}", summary.uid);
@@ -126,8 +131,7 @@ fn run() -> Result<(), EnrollmentCliError> {
         }
 
         Commands::Verify(args) => {
-            warn_camera_config_notes();
-            let service = build_full_service(&cli)?;
+            let service = build_camera_service(&cli)?;
             let report = service.verify(args)?;
 
             println!("\n====================================================");
@@ -237,8 +241,7 @@ fn run() -> Result<(), EnrollmentCliError> {
         }
 
         Commands::DebugVision(args) => {
-            warn_camera_config_notes();
-            let service = build_full_service(&cli)?;
+            let service = build_camera_service(&cli)?;
             let path = service.debug_vision(args)?;
             println!("\n[OK] Visual debugging report generated successfully (mode 0600).");
             if args.embed_frame {

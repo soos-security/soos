@@ -15,6 +15,7 @@ use nix::fcntl::{Flock, FlockArg};
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
+use std::os::fd::AsRawFd;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -41,6 +42,28 @@ pub const OPAQUE_SNAPSHOT_EXTENSION: &str = ".opaque.enc";
 /// (`YYYY-MM-DD/.daily_count.<uid>`, GitHub #234). It never ends in `.enc`, so it is never
 /// listed as a snapshot, and it is removed with its partition by retention.
 pub const DAILY_COUNT_FILE_PREFIX: &str = ".daily_count.";
+
+/// Minimum age of an orphaned temporary file before the startup sweep removes it (GitHub #291).
+pub const TEMP_SWEEP_MIN_AGE: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Maximum number of orphaned temporary files one sweep removes (GitHub #291).
+pub const MAX_TEMP_SWEEP_REMOVALS: usize = 256;
+
+/// Maximum number of directory entries one sweep examines, partitions included (GitHub #291).
+const MAX_TEMP_SWEEP_SCANNED_ENTRIES: usize = 65_536;
+
+/// Outcome of [`EvidenceStore::sweep_orphaned_temp_files`] (GitHub #291).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TempSweepReport {
+    /// Orphaned temporary files removed.
+    pub removed: usize,
+    /// Matching temporary files kept because they are younger than [`TEMP_SWEEP_MIN_AGE`].
+    pub kept_recent: usize,
+    /// The removal or scan bound was reached; a later sweep continues.
+    pub limit_reached: bool,
+    /// Retention or migration held the base-directory lock: nothing was examined or removed.
+    pub lock_busy: bool,
+}
 
 /// Upper bound of a persisted daily counter file (a decimal `u32` plus an optional newline).
 const MAX_DAILY_COUNT_FILE_BYTES: u64 = 16;
@@ -133,6 +156,129 @@ impl EvidenceStore {
         }
         let key = MasterKey::load_or_create(&config.key_path)?;
         Ok(Self::new(config, key))
+    }
+
+    /// Removes the temporary files an interrupted write left in the date partitions
+    /// (GitHub #291): a blocking evidence write abandoned at daemon shutdown is never awaited,
+    /// so its `.tmp.*` file can survive the process. `soos-daemon` calls it once at startup.
+    ///
+    /// Only real `YYYY-MM-DD` partition directories of the base directory are examined
+    /// (symlinked or misnamed entries are skipped, never followed), and inside them only the
+    /// exact names this store creates: `.tmp.<uuid>.<pid>.<16 hex>` (snapshot),
+    /// `.tmp.migrate.<uuid>.<pid>.<16 hex>` (migration) and
+    /// `.tmp.daily_count.<uid>.<pid>.<16 hex>` (daily counter), with a lowercase hyphenated
+    /// UUID, canonical decimal numbers and lowercase hex. A candidate is removed only if it is
+    /// a regular file with a single link, owned by root or the effective UID and last
+    /// modified at least [`TEMP_SWEEP_MIN_AGE`] ago (a future time is never old); the checks
+    /// and the unlink are relative to a descriptor of the partition opened
+    /// `O_DIRECTORY | O_NOFOLLOW`. At most [`MAX_TEMP_SWEEP_REMOVALS`] files are removed and a
+    /// bounded number of entries examined per call ([`TempSweepReport::limit_reached`]).
+    ///
+    /// Writers of this process are excluded by the daily-counter mutex; retention and
+    /// migration by the base-directory `flock`, which is tried once and never waited for
+    /// ([`TempSweepReport::lock_busy`]). A disabled store or a missing base directory is not
+    /// touched (nothing is created).
+    ///
+    /// # Errors
+    ///
+    /// [`EvidenceStoreError::InvalidPath`] for a symlinked or non-directory base directory;
+    /// [`EvidenceStoreError::Io`] when it cannot be opened, listed or unlinked from.
+    pub fn sweep_orphaned_temp_files(&self) -> Result<TempSweepReport, EvidenceStoreError> {
+        let mut report = TempSweepReport::default();
+        if !self.config.enabled {
+            return Ok(report);
+        }
+        let base = &self.config.base_dir;
+        match fs::symlink_metadata(base) {
+            Ok(meta) if meta.file_type().is_symlink() || !meta.is_dir() => {
+                return Err(EvidenceStoreError::InvalidPath(format!(
+                    "Evidence base directory '{}' is a symlink or not a directory",
+                    base.display()
+                )));
+            }
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(report),
+            Err(e) => return Err(EvidenceStoreError::Io(e)),
+        }
+
+        let _writers = self.daily_counts.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = open_dir_no_follow(base)?;
+        let lock = match Flock::lock(dir, FlockArg::LockExclusiveNonblock) {
+            Ok(lock) => lock,
+            Err((_, nix::errno::Errno::EAGAIN | nix::errno::Errno::EINTR)) => {
+                report.lock_busy = true;
+                return Ok(report);
+            }
+            Err((_, errno)) => return Err(EvidenceStoreError::Io(std::io::Error::from(errno))),
+        };
+        let opened = lock.metadata()?;
+        let listed = fs::symlink_metadata(base)?;
+        if listed.dev() != opened.dev() || listed.ino() != opened.ino() {
+            return Err(EvidenceStoreError::InvalidPath(format!(
+                "Evidence base directory '{}' changed while it was being swept",
+                base.display()
+            )));
+        }
+
+        let euid = nix::unistd::geteuid().as_raw();
+        let now = SystemTime::now();
+        let mut scanned: usize = 0;
+        let mut partitions = Vec::new();
+        for entry in fs::read_dir(base)? {
+            if scanned >= MAX_TEMP_SWEEP_SCANNED_ENTRIES {
+                report.limit_reached = true;
+                return Ok(report);
+            }
+            scanned = scanned.saturating_add(1);
+            let entry = entry?;
+            // `DirEntry::file_type` does not follow symlinks: a symlinked partition is skipped.
+            if !entry.file_type()?.is_dir() {
+                continue;
+            }
+            if let Some(name) = entry.file_name().to_str() {
+                if parse_date(name).is_ok() {
+                    partitions.push(name.to_string());
+                }
+            }
+        }
+
+        for date in partitions {
+            let path = base.join(&date);
+            let Ok(partition) = open_dir_no_follow(&path) else {
+                continue;
+            };
+            let mut sync_needed = false;
+            for entry in fs::read_dir(&path)? {
+                if report.removed >= MAX_TEMP_SWEEP_REMOVALS
+                    || scanned >= MAX_TEMP_SWEEP_SCANNED_ENTRIES
+                {
+                    report.limit_reached = true;
+                    break;
+                }
+                scanned = scanned.saturating_add(1);
+                let name = entry?.file_name();
+                if !name.to_str().is_some_and(is_evidence_temp_name) {
+                    continue;
+                }
+                match sweep_candidate(partition.as_raw_fd(), name.as_os_str(), euid, now)? {
+                    SweepVerdict::Removed => {
+                        report.removed = report.removed.saturating_add(1);
+                        sync_needed = true;
+                    }
+                    SweepVerdict::Recent => {
+                        report.kept_recent = report.kept_recent.saturating_add(1);
+                    }
+                    SweepVerdict::Kept => {}
+                }
+            }
+            if sync_needed {
+                partition.sync_all()?;
+            }
+            if report.limit_reached {
+                break;
+            }
+        }
+        Ok(report)
     }
 
     /// Returns a reference to the active configuration.
@@ -785,6 +931,117 @@ impl EvidenceStore {
 /// Counts the snapshot files (regular, non-symlink `*.enc` entries) of a date partition.
 ///
 /// Temporary files and counter files never end in `.enc` and are not counted.
+/// Opens a directory for descriptor-relative work, refusing a symlink as its last component.
+fn open_dir_no_follow(path: &Path) -> Result<File, EvidenceStoreError> {
+    Ok(OpenOptions::new()
+        .read(true)
+        .custom_flags(nix::libc::O_DIRECTORY | nix::libc::O_NOFOLLOW)
+        .open(path)?)
+}
+
+/// Whether `name` is exactly a temporary file name this store creates inside a date
+/// partition (GitHub #291): `.tmp.<uuid>.<pid>.<16 hex>`, `.tmp.migrate.<uuid>.<pid>.<16 hex>`
+/// or `.tmp.daily_count.<uid>.<pid>.<16 hex>`.
+fn is_evidence_temp_name(name: &str) -> bool {
+    let Some(rest) = name.strip_prefix(".tmp.") else {
+        return false;
+    };
+    let counter_prefix = DAILY_COUNT_FILE_PREFIX.trim_start_matches('.');
+    let (id_ok, tail) = if let Some(tail) = rest.strip_prefix(counter_prefix) {
+        match tail.split_once('.') {
+            Some((uid, tail)) => (
+                canonical_decimal::<u32>(uid)
+                    && uid.parse::<u32>().is_ok_and(|u| u <= MAX_VALID_UID),
+                tail,
+            ),
+            None => return false,
+        }
+    } else {
+        let rest = rest.strip_prefix("migrate.").unwrap_or(rest);
+        match rest.split_once('.') {
+            Some((id, tail)) => (is_lowercase_uuid(id), tail),
+            None => return false,
+        }
+    };
+    match tail.split_once('.') {
+        Some((pid, salt)) => id_ok && canonical_decimal::<u32>(pid) && is_lowercase_hex16(salt),
+        None => false,
+    }
+}
+
+/// Whether `text` is the canonical decimal form of a `T` (no sign, no leading zero).
+fn canonical_decimal<T: std::str::FromStr + ToString>(text: &str) -> bool {
+    text.parse::<T>()
+        .is_ok_and(|value| value.to_string() == text)
+}
+
+/// Whether `text` is a lowercase hyphenated UUID (`8-4-4-4-12` hex digits).
+fn is_lowercase_uuid(text: &str) -> bool {
+    text.len() == 36
+        && text.char_indices().all(|(i, c)| match i {
+            8 | 13 | 18 | 23 => c == '-',
+            _ => c.is_ascii_digit() || ('a'..='f').contains(&c),
+        })
+}
+
+/// Whether `text` is exactly 16 lowercase hex digits.
+fn is_lowercase_hex16(text: &str) -> bool {
+    text.len() == 16
+        && text
+            .chars()
+            .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c))
+}
+
+/// What the sweep did with one candidate name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SweepVerdict {
+    /// The orphaned file was unlinked.
+    Removed,
+    /// A matching regular file younger than [`TEMP_SWEEP_MIN_AGE`]: kept.
+    Recent,
+    /// Not a removable file (gone, not regular, linked, foreign owner): kept.
+    Kept,
+}
+
+/// Examines `name` inside the directory `dir_fd` without following it and unlinks it when it
+/// is an orphaned temporary file (regular, one link, owned by root or `euid`, old enough).
+fn sweep_candidate(
+    dir_fd: std::os::fd::RawFd,
+    name: &std::ffi::OsStr,
+    euid: u32,
+    now: SystemTime,
+) -> Result<SweepVerdict, EvidenceStoreError> {
+    let Ok(stat) =
+        nix::sys::stat::fstatat(Some(dir_fd), name, nix::fcntl::AtFlags::AT_SYMLINK_NOFOLLOW)
+    else {
+        return Ok(SweepVerdict::Kept);
+    };
+    let regular = stat.st_mode & nix::libc::S_IFMT == nix::libc::S_IFREG;
+    if !regular || stat.st_nlink != 1 || (stat.st_uid != 0 && stat.st_uid != euid) {
+        return Ok(SweepVerdict::Kept);
+    }
+    if !old_enough(stat.st_mtime, now) {
+        return Ok(SweepVerdict::Recent);
+    }
+    match nix::unistd::unlinkat(Some(dir_fd), name, nix::unistd::UnlinkatFlags::NoRemoveDir) {
+        Ok(()) => Ok(SweepVerdict::Removed),
+        Err(nix::errno::Errno::ENOENT) => Ok(SweepVerdict::Kept),
+        Err(errno) => Err(EvidenceStoreError::Io(std::io::Error::from(errno))),
+    }
+}
+
+/// Whether a modification time (seconds since the epoch) is at least [`TEMP_SWEEP_MIN_AGE`]
+/// before `now`. A time in the future is never old; one before the epoch always is.
+fn old_enough(mtime_secs: i64, now: SystemTime) -> bool {
+    let modified = match u64::try_from(mtime_secs) {
+        Ok(secs) => UNIX_EPOCH.checked_add(std::time::Duration::from_secs(secs)),
+        Err(_) => Some(UNIX_EPOCH),
+    };
+    modified
+        .and_then(|modified| now.duration_since(modified).ok())
+        .is_some_and(|age| age >= TEMP_SWEEP_MIN_AGE)
+}
+
 fn count_snapshot_files(date_dir: &Path) -> Result<u32, EvidenceStoreError> {
     let mut count: u32 = 0;
     for entry in fs::read_dir(date_dir)? {

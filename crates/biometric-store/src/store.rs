@@ -17,6 +17,7 @@ use nix::errno::Errno;
 use nix::fcntl::{Flock, FlockArg};
 use std::fs::{DirBuilder, File, Metadata, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
+use std::os::fd::AsRawFd;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -46,6 +47,28 @@ pub const FORBIDDEN_STORE_DIR_BITS: u32 = 0o022;
 
 /// Default bound on the wait for the advisory store lock (GitHub #289).
 pub const STORE_LOCK_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Minimum age of an orphaned temporary file before the startup sweep removes it (GitHub #291).
+pub const TEMP_SWEEP_MIN_AGE: Duration = Duration::from_secs(60);
+
+/// Maximum number of orphaned temporary files one sweep removes (GitHub #291).
+pub const MAX_TEMP_SWEEP_REMOVALS: usize = 256;
+
+/// Maximum number of directory entries one sweep examines (GitHub #291).
+const MAX_TEMP_SWEEP_SCANNED_ENTRIES: usize = 65_536;
+
+/// Outcome of [`BiometricStore::sweep_orphaned_temp_files`] (GitHub #291).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TempSweepReport {
+    /// Orphaned temporary files removed.
+    pub removed: usize,
+    /// Matching temporary files kept because they are younger than [`TEMP_SWEEP_MIN_AGE`].
+    pub kept_recent: usize,
+    /// The removal or scan bound was reached; a later sweep continues.
+    pub limit_reached: bool,
+    /// Another operation held the store lock: nothing was examined or removed.
+    pub lock_busy: bool,
+}
 
 /// Number of CSPRNG overwrite passes applied before a template inode is released.
 const SHRED_PASSES: usize = 3;
@@ -226,6 +249,101 @@ impl BiometricStore {
     pub fn enroll(&self, template: &BiometricTemplate) -> Result<(), BiometricStoreError> {
         let _lock = self.lock_store()?;
         self.write_template(template, None)
+    }
+
+    /// Enrolls `template` only if its UID has no template yet (GitHub #291).
+    ///
+    /// The existence check and the write run under the same exclusive store lock, so a
+    /// template enrolled by another `enroll`, `import` or GUI save after an earlier check of the
+    /// caller is never replaced: any entry at the template path makes the call fail with
+    /// [`BiometricStoreError::AlreadyEnrolled`] and nothing is written. A symlinked template
+    /// path is refused with [`BiometricStoreError::InvalidPath`] as in
+    /// [`BiometricStore::template_path`]; [`BiometricStoreError::LockTimeout`] is returned,
+    /// and nothing is written, when the lock cannot be taken in time. The write itself is the
+    /// atomic write of [`BiometricStore::enroll`].
+    pub fn enroll_if_absent(
+        &self,
+        template: &BiometricTemplate,
+    ) -> Result<(), BiometricStoreError> {
+        let _lock = self.lock_store()?;
+        let path = self.template_path(template.uid)?;
+        match std::fs::symlink_metadata(&path) {
+            Ok(_) => return Err(BiometricStoreError::AlreadyEnrolled(template.uid)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(BiometricStoreError::Io(e)),
+        }
+        self.write_template(template, None)
+    }
+
+    /// Removes the temporary files an interrupted template write left in the store directory
+    /// (GitHub #291); `soos-daemon` calls it once at startup.
+    ///
+    /// Only names of the exact form [`BiometricStore::enroll`] creates are candidates:
+    /// `<uid>.tmp.<pid>.<suffix>` with canonical decimal numbers (`u32`, `u32`, `u64`). A
+    /// candidate is removed only if it is a regular file (never a symlink, directory or FIFO;
+    /// nothing is followed) with a single link, owned by root or the effective UID, and last
+    /// modified at least [`TEMP_SWEEP_MIN_AGE`] ago (a future modification time is never
+    /// old). Every check and the unlink are relative to a descriptor of the store directory
+    /// opened `O_DIRECTORY | O_NOFOLLOW`. At most [`MAX_TEMP_SWEEP_REMOVALS`] files are removed
+    /// and at most `MAX_TEMP_SWEEP_SCANNED_ENTRIES` entries examined per call
+    /// ([`TempSweepReport::limit_reached`]). The store lock is tried once, never waited for:
+    /// while another operation holds it nothing is examined ([`TempSweepReport::lock_busy`]).
+    ///
+    /// # Errors
+    ///
+    /// [`BiometricStoreError::Io`] when the store directory cannot be opened, listed or
+    /// unlinked from, [`BiometricStoreError::InvalidPath`] when its path no longer names the
+    /// opened directory.
+    pub fn sweep_orphaned_temp_files(&self) -> Result<TempSweepReport, BiometricStoreError> {
+        let dir = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
+            .open(&self.base_dir)?;
+        let lock = match Flock::lock(dir, FlockArg::LockExclusiveNonblock) {
+            Ok(lock) => lock,
+            Err((_, Errno::EAGAIN | Errno::EINTR)) => {
+                return Ok(TempSweepReport {
+                    lock_busy: true,
+                    ..TempSweepReport::default()
+                })
+            }
+            Err((_, errno)) => return Err(BiometricStoreError::Io(std::io::Error::from(errno))),
+        };
+        let opened = lock.metadata()?;
+        let listed = std::fs::symlink_metadata(&self.base_dir)?;
+        if listed.dev() != opened.dev() || listed.ino() != opened.ino() {
+            return Err(BiometricStoreError::InvalidPath(format!(
+                "Biometrics directory '{}' changed while it was being swept",
+                self.base_dir.display()
+            )));
+        }
+
+        let euid = nix::unistd::geteuid().as_raw();
+        let now = std::time::SystemTime::now();
+        let mut report = TempSweepReport::default();
+        let mut scanned: usize = 0;
+        for entry in std::fs::read_dir(&self.base_dir)? {
+            if report.removed >= MAX_TEMP_SWEEP_REMOVALS
+                || scanned >= MAX_TEMP_SWEEP_SCANNED_ENTRIES
+            {
+                report.limit_reached = true;
+                break;
+            }
+            scanned = scanned.saturating_add(1);
+            let name = entry?.file_name();
+            if !name.to_str().is_some_and(is_template_temp_name) {
+                continue;
+            }
+            match sweep_candidate(lock.as_raw_fd(), name.as_os_str(), euid, now)? {
+                SweepVerdict::Removed => report.removed = report.removed.saturating_add(1),
+                SweepVerdict::Recent => report.kept_recent = report.kept_recent.saturating_add(1),
+                SweepVerdict::Kept => {}
+            }
+        }
+        if report.removed > 0 {
+            lock.sync_all()?;
+        }
+        Ok(report)
     }
 
     /// Writes `template` (the body of [`BiometricStore::enroll`]); the caller holds the store
@@ -621,6 +739,83 @@ impl FileIdentity {
     fn still_at(&self, path: &Path) -> bool {
         std::fs::symlink_metadata(path).is_ok_and(|meta| self.matches(&meta))
     }
+}
+
+/// Whether `name` is exactly a temporary file name of [`BiometricStore::enroll`]:
+/// `<uid>.tmp.<pid>.<suffix>` with canonical decimal `u32`, `u32` and `u64`.
+fn is_template_temp_name(name: &str) -> bool {
+    let mut parts = name.split('.');
+    match (
+        parts.next(),
+        parts.next(),
+        parts.next(),
+        parts.next(),
+        parts.next(),
+    ) {
+        (Some(uid), Some("tmp"), Some(pid), Some(suffix), None) => {
+            canonical_decimal::<u32>(uid)
+                && canonical_decimal::<u32>(pid)
+                && canonical_decimal::<u64>(suffix)
+        }
+        _ => false,
+    }
+}
+
+/// Whether `text` is the canonical decimal form of a `T` (no sign, no leading zero).
+fn canonical_decimal<T: std::str::FromStr + ToString>(text: &str) -> bool {
+    text.parse::<T>()
+        .is_ok_and(|value| value.to_string() == text)
+}
+
+/// What the sweep did with one candidate name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SweepVerdict {
+    /// The orphaned file was unlinked.
+    Removed,
+    /// A matching regular file younger than [`TEMP_SWEEP_MIN_AGE`]: possibly a write in
+    /// progress, kept.
+    Recent,
+    /// Not a removable file (gone, not regular, linked, foreign owner): kept.
+    Kept,
+}
+
+/// Examines `name` inside the directory `dir_fd` without following it and unlinks it when it
+/// is an orphaned temporary file (regular, one link, owned by root or `euid`, old enough).
+fn sweep_candidate(
+    dir_fd: std::os::fd::RawFd,
+    name: &std::ffi::OsStr,
+    euid: u32,
+    now: std::time::SystemTime,
+) -> Result<SweepVerdict, BiometricStoreError> {
+    let Ok(stat) =
+        nix::sys::stat::fstatat(Some(dir_fd), name, nix::fcntl::AtFlags::AT_SYMLINK_NOFOLLOW)
+    else {
+        return Ok(SweepVerdict::Kept);
+    };
+    let regular = stat.st_mode & libc::S_IFMT == libc::S_IFREG;
+    if !regular || stat.st_nlink != 1 || (stat.st_uid != 0 && stat.st_uid != euid) {
+        return Ok(SweepVerdict::Kept);
+    }
+    if !old_enough(stat.st_mtime, now) {
+        return Ok(SweepVerdict::Recent);
+    }
+    match nix::unistd::unlinkat(Some(dir_fd), name, nix::unistd::UnlinkatFlags::NoRemoveDir) {
+        Ok(()) => Ok(SweepVerdict::Removed),
+        Err(Errno::ENOENT) => Ok(SweepVerdict::Kept),
+        Err(errno) => Err(BiometricStoreError::Io(std::io::Error::from(errno))),
+    }
+}
+
+/// Whether a modification time (seconds since the epoch) is at least [`TEMP_SWEEP_MIN_AGE`]
+/// before `now`. A time in the future is never old; one before the epoch always is.
+fn old_enough(mtime_secs: i64, now: std::time::SystemTime) -> bool {
+    let modified = match u64::try_from(mtime_secs) {
+        Ok(secs) => std::time::UNIX_EPOCH.checked_add(Duration::from_secs(secs)),
+        Err(_) => Some(std::time::UNIX_EPOCH),
+    };
+    modified
+        .and_then(|modified| now.duration_since(modified).ok())
+        .is_some_and(|age| age >= TEMP_SWEEP_MIN_AGE)
 }
 
 /// The per-file migration error for a template that changed after it was read.
