@@ -14,9 +14,9 @@
   2026-09-30 "Embedding Model Binding and Legacy Model Alias" superseded
 - **Status**: phases 1, 1.5, 2, 3, 4 and 6 done. Section 4 was approved by the owner on
   2026-10-01 (Q1) together with the recommended answers Q2–Q9 and Q11 (section 8). One further
-  pre-existing test that the switch breaks was found during Phase 4 and was **not** edited
-  (section 11, F6): it awaits owner approval. Phases 5 (candid review) and 7 (release) are not
-  run in this batch.
+  pre-existing test that the switch breaks was found during Phase 4 (section 11, F6); the owner
+  approved its setup-only migration on 2026-10-01 (item 56, applied in `5963958`). Phase 5
+  (candid review) APPROVED; phase 7 (release) follows.
 
 ---
 
@@ -503,6 +503,13 @@ with the equivalent SFace or 0.50 pin, and #2, #26–#28 become stricter (refusa
 acceptances).
 
 
+**Execution note for item #37 (`embedding_lfw_evaluation_tests`, ignored harness):** besides
+moving the production arm to SFace and the ArcFace arms to `models/retired_models.toml`, the
+candidate slot now accepts any single-entry candidate manifest (the `CANDIDATE_MODEL_ID` constant
+is gone, since SFace is no longer a candidate) and the R/B-swapped production arm (`swap_rb`) was
+dropped (SFace is evaluated in its production RGB order only). No assertion was weakened; the
+harness prints aggregate metrics only.
+
 **Item 56 (approved by the owner on 2026-10-01, found during Phase 4):**
 `crates/enrollment-cli/tests/import_json_presize_tests.rs::test_import_json_decodes_into_a_buffer_that_never_grows`
 — setup only: the in-range input length `257` (which assumed the old 512-value import
@@ -655,7 +662,7 @@ evaluation tests) and SFace from the evaluation cache (SHA-256 verified).
 |---|---|
 | `cargo fmt --all -- --check` | pass |
 | `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings` | pass |
-| `SOOS_MODELS_DIR=<scratch> cargo test --locked --workspace --all-targets --all-features` | 2165 passed, **1 failed** (F6 below, not edited), 6 ignored |
+| `SOOS_MODELS_DIR=<scratch> cargo test --locked --workspace --all-targets --all-features` | 2165 passed, 1 failed before item 56 (F6); after the approved item 56: 2166 passed, 0 failed, 6 ignored |
 | `SOOS_MODELS_DIR=<scratch> SOOS_REQUIRE_REAL_MODELS=1 cargo test -p soos-inference-ort -p soos-daemon -p soos-vision --all-targets --all-features -- --include-ignored` | 723 passed, 0 failed (SFace real-model suite incl. SFC5, SFC6, SFC18; retired ArcFace evaluation; PVA12 real pipeline) |
 | `cargo test -p soos-invariants` (after the docs) | 344 passed |
 | `ORT_SKIP_DOWNLOAD=1 cargo check --locked --workspace --all-targets --all-features --target i686-unknown-linux-gnu` | pass |
@@ -677,14 +684,15 @@ The subset agrees with the full run of walkthrough 160 (SFace RGB TAR 0.984 at F
 
 ### Known limitations / follow-ups
 
-- **F6 — additional pre-existing test, not edited (awaits owner approval)**:
+- **F6 — additional pre-existing test (resolved: owner-approved item 56, applied in `5963958`)**:
   `crates/enrollment-cli/tests/import_json_presize_tests.rs::test_import_json_decodes_into_a_buffer_that_never_grows`
   iterates over `[0, 1, 3, 257, IMPORT_EMBEDDING_DIM - 1, IMPORT_EMBEDDING_DIM]` and asserts that
   every length is stored entirely; `257` assumed a 512-value import buffer. With
   `IMPORT_EMBEDDING_DIM = 128` the 257-value case is (correctly) truncated to 128 and the
   assertion `embedding == values` fails. Proposed setup-only migration: replace the literal 257
   with a length below the dimension (for example `IMPORT_EMBEDDING_DIM / 2 + 1`, i.e. 65); no
-  assertion changes. Until approved, this is the only failing test of the workspace.
+  assertion changes. Approved on 2026-10-01 and applied (`IMPORT_EMBEDDING_DIM / 2 + 1`); the
+  workspace is green (2166 passed, 0 failed).
 - **Host deployment**: `/var/lib/soos/models` on this host still holds the ArcFace deployment
   (root-owned). Without `SOOS_MODELS_DIR`, `scrfd_real_model_tests` (which runs
   `verify_integrity` over the whole committed manifest) fails on this host because

@@ -548,7 +548,7 @@ for present in "${TARGET_DIR}"/*.onnx; do
         fi
     done
     if [[ "${attested}" = false ]]; then
-        warn "${present_name} is not attested by ${MANIFEST_PATH} and is unused; it was left in place (remove it manually if it is a retired model)."
+        warn "${present_name} is not attested by ${MANIFEST_PATH}; it was left in place. If it is a retired model (for example the former ArcFace) remove it manually; if you enabled it in the deployed manifest (an optional model), keep it."
     fi
 done
 shopt -u nullglob
