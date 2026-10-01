@@ -58,9 +58,10 @@ existing contracts were found while checking the plan against the tests:
   `install_panic_hook_with` on the debug branch. Both tests pass unchanged.
 - Item 4 (start limit): `installer_templates_contract::test_daemon_unit_requires_deployed_models_and_bounds_restarts`
   asserts the literal line `StartLimitIntervalSec=60`. Setting it to 320 breaks that assertion,
-  and existing assertions may not be modified on this branch. Lowering `TimeoutStartSec` to fit
-  60 s instead (10 s + 2 s) would change start behaviour on slow hardware, which is the owner's
-  out-of-scope check. Item 4 is therefore **not delivered** (DFU6 Pending); see §9.
+  and existing assertions could not be modified without approval. Lowering `TimeoutStartSec` to
+  fit 60 s instead (10 s + 2 s) would change start behaviour on slow hardware, which is the
+  owner's out-of-scope check. Item 4 was first held back (DFU6 Pending). **The owner approved the
+  assertion change on 2026-10-01** (only that literal, 60 → 320), and item 4 was then delivered.
 
 ## 4. Tester Contract
 
@@ -76,18 +77,20 @@ existing contracts were found while checking the plan against the tests:
 | `daemon_followups_tests::test_production_main_drains_evidence_writes_within_the_shutdown_budget` | DFU3 | compile failure (file-level); asserts no `drop(tokio::task::spawn_blocking` remains |
 | `daemon_followups_tests::test_clock_failure_downgrades_allow_to_unavailable_internal_error`, `test_zero_clock_reading_downgrades_allow`, `test_clock_failure_never_yields_allow_for_any_verdict`, `test_working_clock_keeps_verdict_and_stamps_validity_window`, `test_build_response_renders_through_stamp_response` | DFU4 | E0432 unresolved `stamp_response` |
 | `status_memory_locked_tests::test_status_reports_memory_locked_from_daemon`, `test_status_reports_memory_unlocked_from_daemon`, `test_offline_status_never_claims_memory_locked` | DFU5 | E0609 no field `memory_locked` on `DaemonStatusReport` |
+| `installer_templates_contract::test_daemon_unit_start_limit_interval_covers_burst_of_timed_out_starts` | DFU6 | assertion failure on the unchanged unit: `StartLimitIntervalSec=60 must be >= StartLimitBurst * (TimeoutStartSec + RestartSec) = 5 * (60 + 2) = 310` |
 
-Every Red failure was on exactly the specified API.
+Every Red failure was on exactly the specified API or the asserted unit value.
 
 ### Migrated existing tests
 
-No assertion was changed. Setup-only edits allowed for item 5 (a new struct field makes the
-existing literals fail to compile):
+Setup-only edits allowed for item 5 (a new struct field makes the existing literals fail to
+compile), and one owner-approved literal migration for item 4:
 
 | File | Edit |
 |---|---|
 | `crates/admin-cli/tests/status_tests.rs` (`test_status_report_json_serialization`) | added `memory_locked: Some(true),` to the `DaemonStatusReport` literal |
 | `crates/admin-cli/tests/cli_deadline_json_tests.rs` (`test_status_report_json_escapes_socket_path_and_unit`) | added `memory_locked: None,` to the `DaemonStatusReport` literal |
+| `tests/invariants/src/installer_templates_contract.rs` (`test_daemon_unit_requires_deployed_models_and_bounds_restarts`) | literal `StartLimitIntervalSec=60` → `StartLimitIntervalSec=320`, owner approval 2026-10-01; nothing else in the test changed (its message still reads "5 in 60 s") |
 
 `test_clock_failure_yields_expired_non_allow_response` is untouched; the new DFU4 tests are added
 next to it in a separate file.
@@ -124,6 +127,9 @@ No new dependency (`tokio::task::JoinSet` is already in use). Clearance: CLEARED
 - `crates/daemon/src/main.rs`: build-dependent hook; `Arc::clone(&dispatcher)` passed to the
   accept loop so the dispatcher stays available for the evidence drain.
 - `crates/admin-cli/src/status.rs`: `memory_locked` field, "Swap Protection" table line.
+- `packaging/soos-daemon.service`: `StartLimitIntervalSec=320` (5 × (60 + 2) = 310 ≤ 320) with
+  the comment explaining the bound; `Docs/PACKAGING_AND_PROVISIONING.md` updated; matrix IDT6
+  criterion text updated to 320 s.
 - Note: a running blocking write cannot be cancelled; a write past the budget is detached and
   reported as abandoned, so the bound holds even with a stuck filesystem.
 
@@ -138,20 +144,16 @@ Not run on this branch: the sub-agent review is run later on the combined #287 b
 export CARGO_BUILD_JOBS=4
 cargo fmt --all -- --check                                                   # clean
 cargo clippy --locked --all-targets --all-features -p soos-daemon -p soos-admin-cli -p soos-invariants -- -D warnings   # clean
-cargo test --locked --all-features -p soos-daemon -p soos-admin-cli -p soos-invariants  # 762 passed, 0 failed
+cargo test --locked --all-features -p soos-daemon -p soos-admin-cli -p soos-invariants  # 763 passed, 0 failed
 ./scripts/candid_review.sh                                                   # layer 1 passed
 ```
 
 ## 9. Known Limitations / Follow-ups
 
-- **Item 4 (DFU6) needs an owner decision.** Proposed change, ready to apply once the literal
-  assertion may be migrated: `StartLimitIntervalSec=320` in `packaging/soos-daemon.service`
-  (5 × (60 + 2) = 310 ≤ 320), the comment above it updated, the assertion
-  `StartLimitIntervalSec=60` in
-  `installer_templates_contract::test_daemon_unit_requires_deployed_models_and_bounds_restarts`
-  migrated to the new value, a new invariant parsing the unit and asserting
-  `StartLimitIntervalSec >= StartLimitBurst * (TimeoutStartSec + RestartSec)`, and
-  the systemd integration bullet of `Docs/PACKAGING_AND_PROVISIONING.md` updated.
+- Item 4 (DFU6) was delivered after the owner approved the literal migration on 2026-10-01.
+  The failure message of `test_daemon_unit_requires_deployed_models_and_bounds_restarts` still
+  says "5 in 60 s" because only the literal was allowed to change; it can be reworded later.
+  A real-systemd check of the start-limit state still needs a systemd container.
 - The `PasswordFailed` event snapshot is still written inline on the event path (not detached,
   so not lost at shutdown); it blocks that connection task during the write, as before.
 - Debug builds now log panic messages, which may contain request data; debug builds are
