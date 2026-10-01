@@ -17,8 +17,8 @@
 | `soos-admin test-pam` does not compare the response `request_id` with its nonce | Done: `Response::matches_request` before the freshness check; a mismatch is `PAM_IGNORE (response request_id does not match the request nonce; ...)` | DGP1 |
 | `soos-gui` does not apply `Response::check_freshness` | Done for the only `Response` the GUI consumes (the `PreviewFrame` refusal); a stale refusal is `IpcPreviewError::Protocol` | DGP2, DGP3 |
 | `pcx_wire_routing_tests` uses `SYS_setresuid` on 32-bit x86 | Done (setup only): `SYS_setresuid32` on `x86` and `arm` | DGP8 |
-| One shared `daemon.toml` reader for `soos-admin`, `soos-enroll`, `soos-gui` | Done: `soos_camera_v4l::daemon_config`; per-key fallback for enroll / GUI; **admin keeps `Malformed` for a mistyped key** (existing CVF3 assertion, owner decision pending) | DGP4–DGP6, DGP9 |
-| TOCTOU: `metadata()` then blocking `File::open()` (FIFO hang) | Done: open with `O_NONBLOCK \| O_NOFOLLOW \| O_CLOEXEC`, `fstat` the handle, bounded read | DGP7 |
+| One shared `daemon.toml` reader for `soos-admin`, `soos-enroll`, `soos-gui` | Done: `soos_camera_v4l::daemon_config`; per-key fallback for enroll / GUI; admin mirrors the daemon and keeps `Malformed` for a mistyped key (orchestrator decision, CVF3 unchanged) | DGP4–DGP6, DGP9 |
+| TOCTOU: `metadata()` then blocking `File::open()` (FIFO hang) | Done: open with `O_NONBLOCK \| O_CLOEXEC` (symbolic links followed like the daemon), `fstat` the handle, bounded read | DGP7 |
 
 ## 2. Architect Design (Phase 1)
 
@@ -35,7 +35,7 @@ pub const DEFAULT_DAEMON_CONFIG_PATH: &str = "/etc/soos/daemon.toml";
 pub const MAX_DAEMON_CONFIG_BYTES: u64 = 1024 * 1024;
 pub struct DaemonCameraSettings { camera_device, sensor_preference, sensor_preference_unrecognized } // unchanged fields
 pub enum DaemonConfigKey { CameraDevice, SensorPreference }            // name(): "camera_device", ...
-pub enum DaemonConfigError { NotFound, NotARegularFile, SymbolicLink /* new */, Unreadable(ErrorKind), TooLarge { limit }, Malformed }
+pub enum DaemonConfigError { NotFound, NotARegularFile, Unreadable(ErrorKind), TooLarge { limit }, Malformed }
 pub struct DaemonCameraConfig { settings: DaemonCameraSettings, mistyped_keys: Vec<DaemonConfigKey> }
 impl DaemonCameraConfig { pub fn warnings(&self) -> Vec<String> }  // key names only
 pub fn read_daemon_camera_config(path: &Path) -> Result<DaemonCameraConfig, DaemonConfigError>;
@@ -119,7 +119,7 @@ and `test_ipc_camera_manager_reports_unavailable_and_keeps_polling` would see th
 |---|---|---|---|
 | 1 | No `unwrap` / `expect` / `panic!` / indexing in new production code | `daemon_config.rs`, `service.rs`, `test_pam.rs`, `ipc_camera.rs` | clippy `-D warnings` (workspace lints) |
 | 2 | Open first, `fstat` the handle, bounded read (fstat size and bytes read); no `metadata()` / `is_file()` on the path | shared reader | DGP7 tests and invariant |
-| 3 | A symbolic link is never followed (`O_NOFOLLOW` → `ELOOP` → `SymbolicLink`) | shared reader | `test_dgp_symbolic_link_is_not_followed` |
+| 3 | Symbolic links are followed like `soos-daemon` (same file); a link to a FIFO or device still fails the handle check promptly (second round, §10) | shared reader | `test_dgp_symbolic_link_is_followed_like_the_daemon`, `test_dgp_symbolic_link_to_a_fifo_or_device_returns_promptly` |
 | 4 | Warnings and notes name the key and the file, never a value; no nonce in `test-pam` output | `warnings()`, enrollment notes, `pam_result` | DGP1, DGP5 tests |
 | 5 | Fail closed: a nonce mismatch is never `PAM_SUCCESS`; a stale GUI `Response` is never a verdict or an authorized preview; a clock failure is stale | `test_pam.rs`, `ipc_camera.rs` | DGP1–DGP3 |
 | 6 | Libraries do not print (`print_stderr` lint); only `main.rs` prints notes | enrollment-cli | clippy |
@@ -137,7 +137,7 @@ Clearance: CLEARED.
   `Cargo.toml` (`toml`).
 - `crates/admin-cli/src/daemon_config.rs`: re-exports the shared constants and types;
   `read_daemon_camera_settings` = shared reader + strict mistyped-key rule. `Cargo.toml`: `toml`
-  removed. `camera.rs` unchanged (the new `SymbolicLink` error renders through the existing note).
+  removed. `camera.rs` unchanged.
 - `crates/admin-cli/src/test_pam.rs`: nonce binding before the freshness check.
 - `crates/enrollment-cli/src/service.rs`: private loose reader removed; `CameraDeviceChoice`,
   `resolve_camera_device_from_config_reported`, `camera_config_notes`; `build_full_service` uses
@@ -169,15 +169,41 @@ integrated branch. Layer 1 (`./scripts/candid_review.sh`) passed (§8).
 - No `i686` / `armv7` toolchain on the host: the 32-bit branch of `SETRESUID_SYSCALL` was not
   compiled (the constants exist in `libc` 0.2.186 for gnu and musl on both architectures).
 
-## 9. Known Limitations / Open Questions
+## 9. Known Limitations
 
-- **Owner decision needed**: should `soos-admin camera list` adopt the per-key fallback too? It
-  requires changing the `Err(Malformed)` assertion for `camera_device = 5` in
-  `camera_config_tests::test_cvf_missing_or_invalid_daemon_config_falls_back_with_note` (CVF3).
-  Today the admin rule matches what `soos-daemon` does (refuses to start); the enroll / GUI rule
-  follows the orchestrator decision.
-- A symlinked `/etc/soos/daemon.toml` (config management) is now refused by the three clients
-  with a note, while `soos-daemon` follows it. If symlinked configurations must be supported, the
-  reader would need a root-owned-target check instead of `O_NOFOLLOW`.
-- The GUI notes path display is not sanitized for control characters (the admin note is); the
-  path is operator-supplied (`/etc/soos/daemon.toml` in production).
+- No `i686` / `armv7` toolchain on the host: the 32-bit branch of the `pcx_wire_routing_tests`
+  syscall selection was not compiled.
+
+## 10. Second Round — Orchestrator Decisions (2026-10-01)
+
+The first round raised three questions; the orchestrator answered:
+
+1. **Admin keeps `Malformed` for a mistyped key** — it mirrors `soos-daemon`, which refuses to
+   start with such a file; no test change. The ADR now states why admin mirrors the daemon while
+   `soos-enroll` / `soos-gui` degrade per key (operational tools that must keep working with the
+   rest of the configuration).
+2. **Follow symbolic links like the daemon.** The first round refused them (`O_NOFOLLOW`,
+   `DaemonConfigError::SymbolicLink`), which on a symlink-managed `/etc` (stow, NixOS, ostree)
+   would let `soos-enroll` enroll with a different camera than the one the daemon authenticates
+   with. `O_NOFOLLOW` and the `SymbolicLink` variant are removed; `O_NONBLOCK | O_CLOEXEC`, the
+   `fstat` of the open handle (regular file, ≤ 1 MiB) and the bounded read stay, so a link to a
+   FIFO or a device node still returns promptly with `NotARegularFile`. The new tests of this
+   branch were updated (they were not pre-existing contracts): symlink → regular file is read
+   (`test_dgp_symbolic_link_is_followed_like_the_daemon`, also a chain of links), symlink → FIFO
+   or `/dev/zero` returns promptly (`test_dgp_symbolic_link_to_a_fifo_or_device_returns_promptly`),
+   dangling symlink → `NotFound` (`test_dgp_dangling_symbolic_link_is_not_found`); the admin and
+   enrollment variants (`test_dgp_camera_list_follows_a_symlinked_config_like_the_daemon`,
+   `test_dgp_enroll_follows_symlinked_config_like_the_daemon`, dangling link in
+   `test_dgp_enroll_unusable_config_falls_back_with_note`). The invariant now forbids
+   `O_NOFOLLOW` in the reader.
+3. **Sanitize the path in the enroll / GUI notes** with the admin sanitizer
+   (`soos_camera_v4l::diagnostics::sanitize_display_text`, used by `camera.rs::path_text`). The GUI
+   logs the notes built by `resolve_camera_device_from_config_reported`, so one code path covers
+   both. Test: `test_dgp_enroll_notes_sanitize_the_config_path` (ESC, U+202E and BEL in the path
+   become `?`, for the file-level note and for a mistyped-key warning); the invariant checks the
+   sanitizer call.
+
+Second-round verification (`CARGO_BUILD_JOBS=5`): see the commit report; `cargo test --locked
+--all-features -p soos-camera-v4l -p soos-admin-cli -p soos-enrollment-cli -p soos-gui -p
+soos-invariants`, clippy `-D warnings` on the same packages, `cargo fmt --all -- --check` and
+`./scripts/candid_review.sh` all green.

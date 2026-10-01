@@ -5,8 +5,9 @@
 //!   with the shared `MAX_RESPONSE_FUTURE_SKEW_NS`).
 //! - DGP4: one `daemon.toml` camera-settings reader (`soos_camera_v4l::daemon_config`); the
 //!   admin, enrollment and GUI crates do not parse the file themselves.
-//! - DGP7: the reader opens first (`O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC`) and checks the
-//!   handle, never a path-based `metadata()` before a blocking `open()`.
+//! - DGP7: the reader opens first (`O_NONBLOCK | O_CLOEXEC`, following symbolic links like
+//!   `soos-daemon`) and checks the handle, never a path-based `metadata()` before a blocking
+//!   `open()`; the notes print the configuration path through the admin sanitizer.
 //! - DGP8: the root helper of `pcx_wire_routing_tests` selects `SYS_setresuid32` on 32-bit x86.
 //! - DGP9: the decision is recorded in the ADR register and the user documentation.
 
@@ -132,7 +133,6 @@ fn test_dgp_reader_opens_first_then_checks_the_handle() {
     for needle in [
         "custom_flags(",
         "libc::O_NONBLOCK",
-        "libc::O_NOFOLLOW",
         "libc::O_CLOEXEC",
         ".metadata()",
         "is_file()",
@@ -147,6 +147,7 @@ fn test_dgp_reader_opens_first_then_checks_the_handle() {
         "read_to_string(",
         "fs::read(",
         "path.is_file()",
+        "O_NOFOLLOW",
         "path.exists()",
     ] {
         assert!(
@@ -154,6 +155,14 @@ fn test_dgp_reader_opens_first_then_checks_the_handle() {
             "{SHARED_READER} must not use {forbidden} (path-based check or unbounded read)"
         );
     }
+    // The notes of soos-enroll / soos-gui print the path like the admin note does.
+    let enroll = production_code(&read("crates/enrollment-cli/src/service.rs"));
+    assert!(
+        enroll.contains("sanitize_display_text(&path.to_string_lossy())"),
+        "the enrollment notes must sanitize the configuration path"
+    );
+    let admin = production_code(&read("crates/admin-cli/src/camera.rs"));
+    assert!(admin.contains("sanitize_display_text(&path.to_string_lossy())"));
     let open = shared.find("custom_flags(").expect("open call");
     let fstat = shared.find(".metadata()").expect("fstat on the handle");
     assert!(open < fstat, "the handle is opened before it is checked");
@@ -184,7 +193,12 @@ fn test_dgp_shared_reader_decision_is_documented() {
         "AI/DECISIONS.md must record the shared reader ADR"
     );
     let docs = read("Docs/CAMERA_V4L_CRATE.md");
-    for needle in ["read_daemon_camera_config", "O_NOFOLLOW", "wrong type"] {
+    for needle in [
+        "read_daemon_camera_config",
+        "O_NONBLOCK",
+        "wrong type",
+        "symbolic links",
+    ] {
         assert!(
             docs.contains(needle),
             "Docs/CAMERA_V4L_CRATE.md must mention {needle}"

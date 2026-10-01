@@ -7,10 +7,12 @@
 //! types and the vocabulary of [`crate::resolver`] (`parse_sensor_preference`).
 //!
 //! Rules (ADR 2026-10-01 "One Shared `daemon.toml` Camera Reader"):
-//! - the file is opened first with `O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC`, then the open handle
-//!   is checked (`fstat`, regular file only) and read with the [`MAX_DAEMON_CONFIG_BYTES`]
-//!   bound, so a FIFO, a device node or a symbolic link swapped in place of the file can
-//!   neither block nor redirect the read;
+//! - the file is opened first with `O_NONBLOCK | O_CLOEXEC`, then the open handle is checked
+//!   (`fstat`, regular file only) and read with the [`MAX_DAEMON_CONFIG_BYTES`] bound, so a FIFO
+//!   or a device node swapped in place of the file (directly or behind a symbolic link) cannot
+//!   block the read. Symbolic links are followed exactly like `soos-daemon` follows them, so the
+//!   clients resolve the camera from the very file the daemon reads (symlink-managed `/etc`:
+//!   stow, NixOS, ostree);
 //! - a missing, unreadable, oversized, malformed or non-regular file is a
 //!   [`DaemonConfigError`]; callers then use the soos-daemon defaults and say so;
 //! - a single key of the wrong type falls back to its own default and is reported by name in
@@ -76,12 +78,10 @@ pub enum DaemonConfigError {
     /// The file does not exist (soos-daemon then runs with its defaults too).
     #[error("not found")]
     NotFound,
-    /// The path is not a regular file (directory, FIFO, socket or device node).
+    /// The path (after following symbolic links) is not a regular file (directory, FIFO,
+    /// socket or device node).
     #[error("is not a regular file")]
     NotARegularFile,
-    /// The path is a symbolic link, which is not followed (`O_NOFOLLOW`).
-    #[error("is a symbolic link (not followed)")]
-    SymbolicLink,
     /// The file exists but cannot be read (for example permission denied).
     #[error("cannot be read ({0})")]
     Unreadable(std::io::ErrorKind),
@@ -139,8 +139,8 @@ impl DaemonCameraConfig {
 ///
 /// # Errors
 ///
-/// Returns a [`DaemonConfigError`] when the file is missing, a symbolic link, not a regular
-/// file, unreadable, larger than [`MAX_DAEMON_CONFIG_BYTES`] or malformed. A key of the wrong
+/// Returns a [`DaemonConfigError`] when the file is missing (a dangling symbolic link
+/// included), not a regular file, unreadable, larger than [`MAX_DAEMON_CONFIG_BYTES`] or malformed. A key of the wrong
 /// type is not an error: it is listed in [`DaemonCameraConfig::mistyped_keys`].
 pub fn read_daemon_camera_config(path: &Path) -> Result<DaemonCameraConfig, DaemonConfigError> {
     let text = read_bounded_regular_file(path)?;
@@ -171,20 +171,19 @@ pub fn read_daemon_camera_config(path: &Path) -> Result<DaemonCameraConfig, Daem
     Ok(config)
 }
 
-/// Opens `path` without blocking and without following a final symbolic link, checks the open
+/// Opens `path` without blocking (following symbolic links like `soos-daemon`), checks the open
 /// handle is a regular file, and reads at most [`MAX_DAEMON_CONFIG_BYTES`] of UTF-8 text.
 fn read_bounded_regular_file(path: &Path) -> Result<String, DaemonConfigError> {
     // O_NONBLOCK: opening a FIFO without a writer returns at once instead of waiting (regular
-    // files ignore the flag). O_NOFOLLOW: a final symbolic link fails with ELOOP. The handle,
-    // not the path, is then checked, so nothing can be swapped between check and read.
+    // files ignore the flag), also when a symbolic link points at it. The handle, not the path,
+    // is then checked, so nothing can be swapped between check and read.
     let file = OpenOptions::new()
         .read(true)
-        .custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .custom_flags(libc::O_NONBLOCK | libc::O_CLOEXEC)
         .open(path)
-        .map_err(|e| match (e.kind(), e.raw_os_error()) {
-            (std::io::ErrorKind::NotFound, _) => DaemonConfigError::NotFound,
-            (_, Some(libc::ELOOP)) => DaemonConfigError::SymbolicLink,
-            (kind, _) => DaemonConfigError::Unreadable(kind),
+        .map_err(|e| match e.kind() {
+            std::io::ErrorKind::NotFound => DaemonConfigError::NotFound,
+            kind => DaemonConfigError::Unreadable(kind),
         })?;
     let metadata = file
         .metadata()

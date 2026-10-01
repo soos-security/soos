@@ -1,8 +1,9 @@
 //! `soos-admin camera list` uses the shared `daemon.toml` reader of `soos-camera-v4l`
 //! (GitHub #289, rows DGP4 and DGP7).
 //!
-//! The admin types are the shared types (one implementation), and a FIFO or a symbolic link in
-//! place of the configuration falls back to the soos-daemon defaults with a note, promptly.
+//! The admin types are the shared types (one implementation); a symbolic link is followed like
+//! soos-daemon follows it, and a FIFO in place of the configuration falls back to the
+//! soos-daemon defaults with a note, promptly.
 
 #![allow(
     clippy::unwrap_used,
@@ -69,16 +70,18 @@ fn test_dgp_camera_list_fifo_config_falls_back_with_note() {
 }
 
 #[test]
-fn test_dgp_camera_list_symlinked_config_falls_back_with_note() {
+fn test_dgp_camera_list_follows_a_symlinked_config_like_the_daemon() {
     let dir = tempfile::tempdir().unwrap();
     let target = dir.path().join("real.toml");
     std::fs::write(&target, "[pipeline]\ncamera_device = \"/dev/video4\"\n").unwrap();
     let link: PathBuf = dir.path().join("daemon.toml");
     std::os::unix::fs::symlink(&target, &link).unwrap();
     let resolved = resolve_with_deadline(&link);
-    assert_eq!(resolved.explicit_device, None, "the link is not followed");
-    assert_eq!(resolved.device_origin, SettingOrigin::Default);
-    let note = resolved.note();
-    assert!(note.contains("symbolic link"), "{note}");
-    assert!(note.contains("soos-daemon defaults"), "{note}");
+    assert_eq!(
+        resolved.explicit_device,
+        Some(PathBuf::from("/dev/video4")),
+        "the link is followed: camera list reads the file soos-daemon reads"
+    );
+    assert_eq!(resolved.device_origin, SettingOrigin::DaemonConfig);
+    assert!(resolved.note().contains("(loaded)"), "{}", resolved.note());
 }

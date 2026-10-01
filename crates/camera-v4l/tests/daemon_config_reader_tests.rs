@@ -7,8 +7,9 @@
 //!   turn into the soos-daemon defaults with a note;
 //! - a single wrongly typed key falls back to its own default and is reported by name (never
 //!   by value) while the other key still applies;
-//! - the file is opened first (`O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC`) and the handle is then
-//!   checked, so a FIFO or a symbolic link swapped in place of the file never blocks the read.
+//! - the file is opened first (`O_NONBLOCK | O_CLOEXEC`) and the handle is then checked, so a
+//!   FIFO or a device swapped in place of the file (directly or behind a symbolic link) never
+//!   blocks the read; symbolic links are followed like `soos-daemon` follows them.
 //!
 //! Every test uses a temporary directory, never `/etc`.
 
@@ -249,7 +250,7 @@ fn test_dgp_file_level_failures_are_errors() {
 }
 
 // ---------------------------------------------------------------------------
-// DGP7: open-then-fstat; a FIFO or a symbolic link never blocks or redirects the read
+// DGP7: open-then-fstat; symbolic links are followed, a FIFO or a device never blocks the read
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -265,27 +266,60 @@ fn test_dgp_fifo_in_place_of_the_file_returns_promptly() {
 }
 
 #[test]
-fn test_dgp_symbolic_link_is_not_followed() {
+fn test_dgp_symbolic_link_is_followed_like_the_daemon() {
     let dir = tempfile::tempdir().unwrap();
     let target = write_config(
         dir.path(),
         "real.toml",
-        "[pipeline]\ncamera_device = \"/dev/video4\"\n",
+        "[pipeline]\ncamera_device = \"/dev/video4\"\nsensor_preference = \"rgb\"\n",
     );
+    // Symlink-managed /etc (stow, NixOS, ostree): the clients read the file the daemon reads.
     let link = dir.path().join("daemon.toml");
     std::os::unix::fs::symlink(&target, &link).unwrap();
-    let err = read_with_deadline(&link).unwrap_err();
-    assert_eq!(err, DaemonConfigError::SymbolicLink);
-    assert!(err.to_string().contains("symbolic link"), "{err}");
+    let config = read_with_deadline(&link).unwrap();
+    assert_eq!(
+        config.settings.camera_device,
+        Some(PathBuf::from("/dev/video4"))
+    );
+    assert_eq!(
+        config.settings.sensor_preference,
+        Some(SensorPreference::PreferRgb)
+    );
+    // A chain of links is followed too.
+    let chain = dir.path().join("chain.toml");
+    std::os::unix::fs::symlink(&link, &chain).unwrap();
+    assert_eq!(read_with_deadline(&chain).unwrap(), config);
+}
 
-    // A symbolic link to a FIFO is refused as a link before anything is opened.
+#[test]
+fn test_dgp_symbolic_link_to_a_fifo_or_device_returns_promptly() {
+    let dir = tempfile::tempdir().unwrap();
+    // The FIFO has no writer: a blocking open() through the link would wait forever.
     let fifo = dir.path().join("pipe");
     make_fifo(&fifo);
     let fifo_link = dir.path().join("fifo-link.toml");
     std::os::unix::fs::symlink(&fifo, &fifo_link).unwrap();
     assert_eq!(
         read_with_deadline(&fifo_link).unwrap_err(),
-        DaemonConfigError::SymbolicLink
+        DaemonConfigError::NotARegularFile
+    );
+    // A character device (endless or not) is never read either.
+    let device_link = dir.path().join("device-link.toml");
+    std::os::unix::fs::symlink("/dev/zero", &device_link).unwrap();
+    assert_eq!(
+        read_with_deadline(&device_link).unwrap_err(),
+        DaemonConfigError::NotARegularFile
+    );
+}
+
+#[test]
+fn test_dgp_dangling_symbolic_link_is_not_found() {
+    let dir = tempfile::tempdir().unwrap();
+    let link = dir.path().join("daemon.toml");
+    std::os::unix::fs::symlink(dir.path().join("absent.toml"), &link).unwrap();
+    assert_eq!(
+        read_with_deadline(&link).unwrap_err(),
+        DaemonConfigError::NotFound
     );
 }
 

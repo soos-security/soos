@@ -160,18 +160,66 @@ fn test_dgp_enroll_unusable_config_falls_back_with_note() {
         choice.notes
     );
 
-    // A symbolic link is not followed.
+    // A dangling symbolic link is a missing file.
+    let dangling = tmp.path().join("dangling.toml");
+    std::os::unix::fs::symlink(tmp.path().join("nowhere.toml"), &dangling).unwrap();
+    let choice = resolve_with_deadline(&dangling);
+    assert_eq!(choice.path, PathBuf::from(IR_ALIAS));
+    assert!(choice.notes[0].contains("not found"), "{:?}", choice.notes);
+}
+
+/// A symbolic link is followed like soos-daemon follows it (symlink-managed `/etc`), so
+/// soos-enroll captures with the camera the daemon authenticates with; a link to a FIFO
+/// returns promptly with the fallback note.
+#[test]
+fn test_dgp_enroll_follows_symlinked_config_like_the_daemon() {
+    let tmp = tempfile::tempdir().unwrap();
     let real = tmp.path().join("real.toml");
     std::fs::write(&real, "[pipeline]\ncamera_device = \"/dev/video42\"\n").unwrap();
     let link = tmp.path().join("link.toml");
     std::os::unix::fs::symlink(&real, &link).unwrap();
     let choice = resolve_with_deadline(&link);
+    assert_eq!(choice.path, PathBuf::from("/dev/video42"));
+    assert!(choice.notes.is_empty(), "{:?}", choice.notes);
+
+    let fifo = tmp.path().join("pipe");
+    let status = std::process::Command::new("mkfifo")
+        .arg(&fifo)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let fifo_link = tmp.path().join("fifo-link.toml");
+    std::os::unix::fs::symlink(&fifo, &fifo_link).unwrap();
+    let choice = resolve_with_deadline(&fifo_link);
     assert_eq!(choice.path, PathBuf::from(IR_ALIAS));
     assert!(
-        choice.notes[0].contains("symbolic link"),
+        choice.notes[0].contains("is not a regular file"),
         "{:?}",
         choice.notes
     );
+}
+
+/// The configuration path is printed sanitized in the notes, exactly like the admin note
+/// (`sanitize_display_text`): control characters and bidirectional overrides become `?`.
+#[test]
+fn test_dgp_enroll_notes_sanitize_the_config_path() {
+    let tmp = tempfile::tempdir().unwrap();
+    let hostile = tmp.path().join("evil\u{1b}[31m\u{202e}daemon.toml");
+    let choice = resolve_with_deadline(&hostile);
+    assert_eq!(choice.notes.len(), 1, "{:?}", choice.notes);
+    let note = &choice.notes[0];
+    assert!(
+        !note.contains('\u{1b}') && !note.contains('\u{202e}'),
+        "{note:?}"
+    );
+    assert!(note.contains("evil?[31m?daemon.toml"), "{note:?}");
+
+    let mistyped = tmp.path().join("bad\u{7}name.toml");
+    std::fs::write(&mistyped, "[pipeline]\ncamera_device = 3\n").unwrap();
+    let notes = soos_enrollment_cli::service::camera_config_notes(&mistyped);
+    assert_eq!(notes.len(), 1, "{notes:?}");
+    assert!(notes[0].contains("bad?name.toml"), "{notes:?}");
+    assert!(!notes[0].contains('\u{7}'), "{notes:?}");
 }
 
 #[test]

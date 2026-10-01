@@ -122,8 +122,8 @@ pub struct CameraDeviceChoice {
 /// [`camera_config_notes`] before it opens the camera).
 ///
 /// `daemon.toml` is read by the shared reader [`soos_camera_v4l::daemon_config`] (GitHub #289):
-/// a missing, unreadable, oversized, malformed, non-regular or symbolic-link file yields the
-/// soos-daemon defaults with one note; a key of the wrong type falls back to its own default
+/// symbolic links are followed like `soos-daemon` follows them; a missing, unreadable, oversized,
+/// malformed or non-regular file yields the soos-daemon defaults with one note; a key of the wrong type falls back to its own default
 /// with a note naming it, and the other key still applies.
 pub fn resolve_camera_device_from_config_reported(
     cli_device: Option<PathBuf>,
@@ -156,7 +156,8 @@ pub fn resolve_camera_device_from_config_reported(
 
 /// Notes about the daemon configuration at `config_path`, as
 /// [`resolve_camera_device_from_config_reported`] reports them: empty when the file applies as
-/// written, otherwise one line per problem naming the file and the key, never a value.
+/// written, otherwise one line per problem naming the file (sanitized for display) and the key,
+/// never a value.
 pub fn camera_config_notes(config_path: &Path) -> Vec<String> {
     read_camera_settings_with_notes(config_path).1
 }
@@ -168,20 +169,22 @@ fn read_camera_settings_with_notes(
     soos_camera_v4l::daemon_config::DaemonCameraSettings,
     Vec<String>,
 ) {
+    // Same sanitizer as the `soos-admin camera list` note: control characters and
+    // bidirectional overrides in the operator-supplied path become `?` (GitHub #289).
+    let shown = soos_camera_v4l::diagnostics::sanitize_display_text(&path.to_string_lossy());
     match soos_camera_v4l::daemon_config::read_daemon_camera_config(path) {
         Ok(config) => {
             let notes = config
                 .warnings()
                 .into_iter()
-                .map(|warning| format!("camera settings: {}: {warning}", path.display()))
+                .map(|warning| format!("camera settings: {shown}: {warning}"))
                 .collect();
             (config.settings, notes)
         }
         Err(err) => (
             soos_camera_v4l::daemon_config::DaemonCameraSettings::default(),
             vec![format!(
-                "camera settings: {} {err}; using the soos-daemon defaults",
-                path.display()
+                "camera settings: {shown} {err}; using the soos-daemon defaults"
             )],
         ),
     }
