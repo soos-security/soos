@@ -175,6 +175,10 @@ mod camera_vision_followups_contract;
 #[cfg(all(test, unix))]
 mod camera_alias_guard_contract;
 
+/// Capture-backend seam below the V4L2 supervisor (GitHub #198, rows CCB11–CCB12).
+#[cfg(all(test, unix))]
+mod capture_backend_contract;
+
 /// `daemon.toml` `O_PATH` open, `v4l` hook filter re-installation and 32-bit clock conversions
 /// (GitHub #291, rows CDF1, CDF3–CDF5).
 #[cfg(all(test, unix))]
