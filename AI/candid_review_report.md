@@ -1,67 +1,122 @@
 # Candid Review Report
 
 - **Date**: 2026-10-01
-- **Target Branch**: `fix/p3fu4-batch`
-- **Base (merge-base)**: `ccf37c1`
-- **Reviewed-Diff-Fingerprint**: `42d7c189a379cc4b85eb85a0727612d8137c37de95857c788855d56044f51da0`
-- **Audited Files**: `AI/DECISIONS.md`, `AI/VERIFICATION_MATRIX.md`, `AI/walkthroughs/156_mock_daemon_flake_and_store_poll_test.md`, `AI/walkthroughs/157_evidence_sweep_fd_listing.md`, `Docs/CAMERA_V4L_CRATE.md`, `Docs/EVIDENCE_STORE_CRATE.md`, `Docs/PAM_DOCKER_TEST_MATRIX.md`, `crates/evidence-store/Cargo.toml`, `crates/evidence-store/src/store.rs`, `crates/gui/src/store_tasks.rs`, `tests/docker/mock_daemon.py`, `tests/invariants/src/distro_matrix.rs`
+- **Target Branch**: `fix/hw-remainder-batch`
+- **Base (merge-base)**: `043d250`
+- **Reviewed-Diff-Fingerprint**: `3f4c4ff44f6c6509827583b8dd6c199e2d5d61ad4c36619587ad954ae9757890`
+- **Audited Files**: `.agents/skills/dev-workflow/references/project-facts.md`, `.github/workflows/ci.yml`, `.gitignore`, `AI/ARCHITECTURE.md`, `AI/DECISIONS.md`, `AI/VERIFICATION_MATRIX.md`, `AI/walkthroughs/158_systemd_unit_acceptance.md`, `AI/walkthroughs/159_camera_capture_backend_seam.md`, `AI/walkthroughs/160_embedding_real_face_evaluation.md`, `AI/walkthroughs/161_pad_second_model_attestation.md`, `Cargo.lock`, `Docs/CAMERA_V4L_CRATE.md`, `Docs/CI_CD_AND_SECURITY.md`, `Docs/INFERENCE_ORT_CRATE.md`, `Docs/PACKAGING_AND_PROVISIONING.md`, `Docs/VISION_CRATE.md`, `crates/camera-v4l/src/diagnostics.rs`, `crates/camera-v4l/src/sensor.rs`, `crates/camera-v4l/src/v4l_guard.rs`, `crates/camera-v4l/src/v4l_impl.rs`, `crates/camera-v4l/src/v4l_impl/supervisor_tests.rs`, `crates/daemon/tests/pad_live_camera_check_tests.rs`, `crates/daemon/tests/pad_nonface_pipeline_real_model_tests.rs`, `crates/daemon/tests/pad_v1se_real_model_tests.rs`, `crates/inference-ort/src/pad.rs`, `crates/inference-ort/tests/pad_input_range_tests.rs`, `crates/inference-ort/tests/pad_real_model_tests.rs`, `crates/inference-ort/tests/pad_resample_tests.rs`, `crates/inference-ort/tests/pad_tests.rs`, `crates/vision/Cargo.toml`, `crates/vision/tests/embedding_lfw_evaluation_tests.rs`, `models/README.md`, `models/manifest.toml`, `models/optional_models.toml`, `scripts/compare_pad_models.py`, `scripts/convert_pad_models.py`, `scripts/download_models.sh`, `scripts/fetch_lfw_eval.sh`, `tests/docker/Dockerfile.systemd`, `tests/docker/systemd_unit_acceptance_test.sh`, `tests/invariants/src/capture_backend_contract.rs`, `tests/invariants/src/embedding_evaluation_contract.rs`, `tests/invariants/src/lib.rs`, `tests/invariants/src/pad_second_model_attestation_contract.rs`, `tests/invariants/src/systemd_unit_acceptance_contract.rs` (45 files)
+
+Fingerprint check: `--prepare` on the clean working tree (HEAD `966cb06`) printed the
+fingerprint above. The `--rev` recipe on `HEAD^{tree}` (same pinned `git diff` options and
+excludes) gives the same SHA-256.
+
+This is a third-round review. Round 1 (`0e4b953e…`, CHANGES_REQUESTED) covered the whole batch up
+to `e1d4dce`. Round 2 (`55e5de47…`, APPROVED with two MINOR findings) covered
+`e1d4dce..ed25e8d`. This round checks the delta `git diff ed25e8d HEAD` (commit `966cb06`): 5
+files, +47 / -7. That commit touches only:
+
+- `tests/docker/Dockerfile.systemd`
+- `tests/docker/systemd_unit_acceptance_test.sh`
+- `tests/invariants/src/systemd_unit_acceptance_contract.rs` (additions only)
+- `AI/VERIFICATION_MATRIX.md` (SUA8 row)
+- `AI/walkthroughs/158_systemd_unit_acceptance.md`
+
+Nothing else changed. The analysis of the earlier rounds carries over.
 
 ## 1. Executive Summary
 
-The diff merges two GitHub #293 branches. (A) The Docker mock daemon binds, configures and listens on a private staging name and then renames it to the published `--socket` path, and `EXPIRED_AGE_NS` goes from 1 s to 60 s; a static invariant pins both, and two GUI unit tests drive `StoreTaskRunner::poll` through its lost-outcome branch. (B) The evidence temp-file sweep now lists the base directory and every date partition through descriptors (`openat` relative to the locked, identity-checked base fd, `nix::dir::Dir`, `fstatat`/`unlinkat`/`fsync` on the partition fd), with a private test seam and two new unit tests.
+Both round-2 MINOR findings are fixed. There are no new findings.
 
-The fingerprint was confirmed twice: `--prepare` on the clean working tree, and a manual `review_diff` of `HEAD^{tree}` against merge-base `ccf37c1` (the computation the `--rev` gate runs). Both gave `42d7c189…51da0`. No test assertion was removed or changed. The production changes keep every earlier safety rule and close the path re-resolution window. I found no CRITICAL or MAJOR defect. Three robustness/documentation suggestions are listed.
+1. **Mask existence check.** After the mask loop, the image build now fails if
+   `systemd-sysctl.service`, `systemd-modules-load.service` or `systemd-binfmt.service` is
+   missing under `/usr/lib/systemd/system`.
+   - The check looks at the shipped unit file, not the `/etc` mask symlink, so a renamed unit
+     can no longer go unnoticed at build time.
+   - Round 1 confirmed that all three units exist in the current `soos-sua-runtime` image.
+   - The Dockerfile comment, the SUA8 row and walkthrough 158 now describe the masks correctly:
+     a mask succeeds for any name, and the host sysctl comparison is the backstop.
+2. **Volatile sysctls.** The host sysctl comparison now also excludes
+   `kernel.perf_event_max_sample_rate`, `kernel.tainted` and `fs.aio-nr`. No `sysctl.d` file
+   sets any of them, so dropping them does not weaken the isolation check. It only removes the
+   risk of a false failure on the required check.
 
-Independently re-run by the reviewer: `cargo test -p soos-evidence-store --all-features` (all suites green, including SGU5 `tests/temp_sweep_tests.rs` and the new `temp_sweep_fd_tests`); `cargo test -p soos-invariants mock_daemon` (7 passed, including the new test and `test_mock_daemon_socket_is_group_restricted`, `test_pre_mock_daemon_stamps_from_the_monotonic_clock`, `test_mock_daemon_malformed_modes_put_one_defect_on_the_wire`); `cargo test -p soos-gui test_fgp` (2 passed); `cargo clippy -D warnings` on the three touched crates; `cargo fmt --check`; `ORT_SKIP_DOWNLOAD=1 cargo check -p soos-evidence-store --all-targets --all-features --target i686-unknown-linux-gnu` (OK). I did not re-run the owner's full workspace, the Docker matrix or the 600-run stress loop, so those results are taken from the owner.
+Host evidence observed in this session: `kernel.sysrq = 16` and `fs.protected_regular = 1`.
+These are the host's own values, restored after the owner's `sudo sysctl --system`, and they are
+unchanged after the post-fix harness run the coordinator reported. Before the fix, the same run
+had moved them to 176 and 2.
 
 ## 2. Test Changes (mechanical listing from step 3, with justification per change)
 
-- Test files touched: `tests/docker/mock_daemon.py` (harness, production-of-test code), `tests/invariants/src/distro_matrix.rs` (additions only: one new `#[test]`), plus inline test modules in `crates/gui/src/store_tasks.rs` (additions only, inside the existing `worker_failure_tests`) and `crates/evidence-store/src/store.rs` (new `#[cfg(test)] mod temp_sweep_fd_tests`).
-- `grep '^-[^-].*(assert|#[test]|…)'`: one hit, patch line 435. It is prose in `Docs/PAM_DOCKER_TEST_MATRIX.md` (`assert_socket_modes`) that was re-wrapped and extended, not code. **No assertion removed or changed.**
-- `grep '^+.*(#[ignore|cfg(any())|should_panic|tolerance|epsilon)'`: no hits.
-- `grep '^[-+].*mod tests'`: no hits (the new module is `temp_sweep_fd_tests`).
-- All 36 removed non-header lines were checked by hand: they are production code (`store.rs` sweep body, `sweep_candidate` signature, Cargo feature line, `mock_daemon.py` bind/chown/chmod/cleanup/constant) or docs prose. None is a test.
-- Pinned constants: no harness, script or workflow pins `EXPIRED_AGE_NS` or the old `bind(sock_path)`/`chmod(sock_path)` text. Checked by grepping `tests/`, `scripts/`, `.github/` and `run_tests.sh`. The existing expiry checks (`expired.expires < before`, `issued > 0 && issued <= expires`) keep their exact assertions and still hold at 60 s.
+- Delta: no `-` line contains an assertion. The invariant
+  `test_systemd_acceptance_container_never_writes_host_state` gains two checks:
+  - the unit existence check and its exact unit list;
+  - the three excluded volatile keys.
+
+  These are additions only.
+- Batch level: unchanged from round 1. All removed or changed assertions match the owner
+  approval of 2026-10-01 (golden logits, five `/ 255.0` range tests, the `checkerboard_160`
+  threshold rule with the compensating `pad_nonface_pipeline_real_model_tests`).
 
 ## 3. Deep Reasoning Audit
 
 ### Logic & Architecture
-- *Mock rename-publish*: `os.rename(staging, sock_path)` runs only after `bind`, `chown`, `chmod` and `listen(16)`. It is a single `rename(2)` in the same directory, so the published path either does not exist or is a socket that is already listening. Pollers (`[[ -S … ]]` loops in `tests/docker/test_suite.sh` and `tests/distro/*.sh`, `sock.exists()`/`wait_for_socket` in the invariant harnesses) can no longer see a bound socket that is not yet listening. The staging name is in the same directory as `--socket`, so the rename cannot cross devices and needs the same directory write permission that `bind` needed. → PASS.
-- *Expired at 60 s*: `expires = max(now − 60 s, 2)`, `issued = max(expires − 2 s, 1)`. The PAM client rejects when `expires < now`, and that holds at once. A host with less than 60 s of CLOCK_MONOTONIC uptime gets the clamp (2, 1): still stamped, still consistent (`issued ≤ expires`), still expired. T15 keeps rejecting the expired Allow, and `issued` is never in the future, so the future-skew branch is not hit. → PASS.
-- *Descriptor sweep*: after `Flock` and the dev/ino re-check, no path is resolved again. The base is listed through `openat(lock_fd, ".")`, which is a new open file description, so it has its own offset and leaves the lock fd untouched. Partitions are opened `openat(base_fd, name, O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC)`, and listing, `fstatat`, `unlinkat` and `fsync` all use that fd. `.`/`..` are skipped before `scanned` is incremented, so the bound counts the same entries as `fs::read_dir` did, and `MAX_TEMP_SWEEP_SCANNED_ENTRIES` / `MAX_TEMP_SWEEP_REMOVALS` checks keep their positions. If `d_type` is `DT_UNKNOWN`, the code falls back to `fstatat(AT_SYMLINK_NOFOLLOW)`, and an error there skips the entry, which fails safe (nothing is deleted). Symlinked partitions are refused twice: by `d_type`/lstat and by `O_NOFOLLOW`. Name grammar, regular file / single link / owner / age checks are unchanged in `sweep_candidate`. → PASS.
-- *Scenario tried*: a partition renamed and replaced after the open. The new test proves the replacement's matching name is untouched and the opened directory's orphan is removed (`removed == 1`). The old implementation would have listed the replacement, failed `fstatat` with ENOENT on the old fd and removed nothing, so the test fails against the pre-fix code. → PASS.
-- *GUI tests*: `poll` uses `handle.is_finished()` plus an empty `try_iter`, which leads to exactly one `pending.failed(WORKER_LOST_MESSAGE)` and `in_flight.take()`. The tests check the kind, the UID, busy until the report, free after it, and a single report. A wrong implementation (no synthesis, double report, wrong kind or UID) would fail. → PASS.
+
+- **Build check.**
+  - `[ -e ... ] || { ...; exit 1; }` runs inside a `RUN` under `/bin/sh`, chained with `&&`
+    after the mask loop, so any failure fails the build.
+  - The mask loop still has `|| exit 1`.
+  - Scenario: a unit is renamed upstream. The build stops with "host-state unit ... not found"
+    → PASS.
+- **Snapshot filter.** The regex adds alternatives only. The `kernel.`, `vm.` and `fs.`
+  tunables that `sysctl.d` writes stay in the comparison (`sysrq`, `kptr_restrict`, `printk`,
+  `yama.ptrace_scope`, `mmap_min_addr`, `max_map_count`, `protected_*`). Scenario: the
+  `systemd-sysctl` mask is removed. The `sysrq` and `protected_regular` differences would still
+  fail the run → PASS.
+- **Wording.** The comment says `kernel.tainted` is set by "any module load". Strictly, only
+  some loads set it (out-of-tree, unsigned or forced modules) and kernel warnings also set it.
+  This is cosmetic and is not raised as a finding.
 
 ### PAM Concurrency & Deadlines
-- `crates/pam` is not touched. The mock change makes the harness more deterministic and does not change any PAM deadline. → PASS (not applicable).
+
+The delta does not touch `crates/pam` → PASS (N/A).
 
 ### Panic Safety & Fail-Closed
-- `store.rs` production code adds no `unwrap`/`expect`/indexing. `date.to_str().unwrap_or_default()` cannot panic, and it only feeds the test seam (names were already filtered as UTF-8). Every nix error is mapped through `errno_to_io` into `EvidenceStoreError::Io`. The sweep only removes files, so no path can authorize anything. → PASS.
+
+The delta has no Rust production code. The harness still fails closed on a missing unit, an
+unmasked unit, an empty snapshot or any remaining sysctl difference → PASS.
 
 ### Test Integrity & Anti-Weakening
-- See §2: additions only. The new invariant checks the order bind < chmod < listen < rename and that `bind(sock_path)` is absent, and it parses `EXPIRED_AGE_NS ≥ 20 s`. It would catch a revert of either fix. The GUI tests set the private `in_flight` field from an inner test module, which is legitimate white-box access and does not mock a real-model contract. → PASS.
+
+The new invariant assertions would fail if the existence loop or any of the three exclusions
+were removed. No existing assertion changed → PASS.
 
 ### Memory, Bounds & Secrets
-- *Socket mode window*: the socket is bound under umask `0117` (0660, process group), then `chown` to `soos`, then `chmod` to `socket_mode` (other bits refused by argument validation). At no instant does it get an "other" bit. The intermediate states exist only on the unpublished staging name inside the 0750 `/run/soos`, and before `listen` they refuse connections. This is strictly better than the previous in-place sequence. → PASS.
-- *Staging cleanup*: a stale `.mock-<pid>` from an earlier instance with the same PID is removed with `lexists` + `unlink` (`bind` would otherwise fail with EADDRINUSE). The SIGINT/SIGTERM cleanup removes both names, so a signal before the rename removes the staging socket and a signal after it removes the published path. → PASS, with the residual cases listed in §4 S1/S2.
-- *fd leaks*: `base_dir` is dropped explicitly or on the early `return`. Each `partition` `Dir` is dropped at the end of its loop iteration, including on `?` and `break`. The lock is held until the function returns. The partition-name `Vec<CString>` is bounded by the scan limit. → PASS.
-- *i686*: `st_mode & S_IFMT` uses `mode_t` on both sides. The reviewer's i686 `cargo check` of the crate passed. → PASS.
-- `#![forbid(unsafe_code)]` stays in `soos-evidence-store`, and the nix APIs used are safe. No secrets, frames or embeddings are logged. → PASS.
+
+Nothing in the delta handles secrets or biometric data → PASS.
 
 ### Supply Chain & Automation
-- Only the `dir` feature of the already-locked `nix 0.29.0` is enabled, and only for `soos-evidence-store`. There is no new crate and no `Cargo.lock` source change, and no `.github/`, `scripts/` or hooks change. → PASS.
+
+The CI workflow is unchanged since round 2: SHA-pinned checkout, `contents: read`, gated by
+`CI Success`, model URLs pinned to revisions → PASS.
 
 ### English-Only Policy
-- All code, comments, docs, matrix rows, the ADR and walkthroughs 156/157 are in English. The walkthrough numbers are new and unique (latest is 157). → PASS.
+
+All added comments, the matrix row and the walkthrough text are in English → PASS.
 
 ## 4. Detailed Findings & Action Items
 
-No CRITICAL, MAJOR or MINOR findings.
+There are no CRITICAL, MAJOR or MINOR findings.
 
-- **[SUGGESTION]** `tests/docker/mock_daemon.py:312`: if `chown`, `chmod`, `listen` or `os.rename` raises (for example, `--socket` names an existing directory), the bound staging socket is left behind, because the `try/finally: cleanup()` only starts after the rename. Wrapping bind…rename in a `try` that unlinks `staging_path` on exception would make cleanup complete. This is test-harness only, with no security impact.
-- **[SUGGESTION]** `tests/docker/mock_daemon.py` (staging name): a staging socket left by a SIGKILLed instance (the invariant harnesses use `child.kill()`) is only removed when a later instance gets the same PID. The harnesses use temporary directories and the Docker suite uses SIGTERM, so this is harmless today. A glob cleanup of `.mock-*` would remove the residual case.
-- **[SUGGESTION]** `Docs/CAMERA_V4L_CRATE.md:413`: the continuation line "that finds it at least …" lost its two-space list indentation. Markdown renders it as a lazy continuation, but it is inconsistent with the surrounding item.
+- **[SUGGESTION]** (carried over) `tests/docker/systemd_unit_acceptance_test.sh` (`cleanup`
+  trap): also run `host_sysctls_unchanged` in report-only mode on the failure path.
+- **[SUGGESTION]** (carried over) `.github/workflows/ci.yml` (`systemd-unit` job): cache the
+  verified models with a SHA-pinned `actions/cache`, keyed on the manifest hash.
+- **[SUGGESTION]** (carried over) `scripts/download_models.sh:293-312`: reject a `filename` that
+  appears in both the main and the optional manifests.
 
 ## 5. Final Verdict
+
+All findings from rounds 1 and 2 are resolved. The delta is limited to test tooling,
+invariants and docs, and it adds checks without weakening any existing one.
 
 **VERDICT: APPROVED**
