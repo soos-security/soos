@@ -10,9 +10,15 @@ use crate::deep_grey::{delivered_formats, select_wire_format, DeepGreyFormat};
 use crate::error::CameraError;
 use crate::frame::{Frame, PixelFormat};
 use crate::manager::{CameraHealth, CameraManager};
-use crate::sensor::{classify_sensor_with_hints, device_frame_sizes, SensorHints, SensorType};
+use crate::resolver::{CameraEnumerator, SystemCameraEnumerator, DEFAULT_BY_ID_DIR};
+use crate::sensor::{
+    classify_sensor_with_hints, device_frame_sizes, has_ir_token, SensorHints, SensorType,
+};
 use crate::status::{CameraStatus, CameraStatusCell};
-use crate::v4l_guard::{enum_formats_guarded, query_caps_guarded, set_format_guarded};
+use crate::v4l_guard::{
+    enum_formats_guarded, guarded_v4l_drop, mmap_stream_guarded, query_caps_guarded,
+    set_format_guarded,
+};
 use arc_swap::ArcSwapOption;
 use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
@@ -534,7 +540,9 @@ pub fn pixel_format_to_fourcc(format: PixelFormat) -> FourCC {
 /// Classification hints of the node the capture supervisor opens.
 ///
 /// The by-id name is taken when `device_path` is itself a `/dev/v4l/by-id/` link (always the
-/// case for an auto-resolved node that udev aliased); a `/dev/videoN` path has none. Unlike the
+/// case for an auto-resolved node that udev aliased); a `/dev/videoN` path has none here, and
+/// the open path then fills it from the node's by-id alias with [`supervisor_alias_hints`]
+/// (GitHub #289). Unlike the
 /// resolver, the shared by-id stem rule is deliberately **not** applied: the supervisor sees
 /// only the opened node, and keeping the name makes its hints a superset of the resolver's, so
 /// it can only classify a node Infrared (stricter IR PAD policy) where the resolver said RGB,
@@ -544,6 +552,77 @@ pub fn supervisor_sensor_hints(device_path: &Path, frame_sizes: Vec<(u32, u32)>)
     SensorHints {
         by_id_name: crate::resolver::by_id_name_of_path(device_path),
         frame_sizes,
+    }
+}
+
+/// Completes supervisor hints with the by-id alias of a plain `/dev/videoN` path (GitHub #289).
+///
+/// When `hints` carries no by-id name (the opened path is not itself a by-id link), the
+/// persistent aliases of `by_id_dir` are read through the single bounded scanner
+/// ([`SystemCameraEnumerator::by_id_aliases`], at most [`crate::resolver::MAX_BY_ID_ENTRIES`]
+/// entries, dangling links skipped) and the name of an alias resolving to the same node is
+/// filled in; among several, one carrying an IR token is preferred, otherwise the smallest name.
+/// A name already present is never replaced and the frame sizes are kept, so the classifier's
+/// input only gains a by-id hint: the scorer is monotonic in it, and a node can only move from
+/// `Rgb` to `Infrared` (stricter IR PAD policy), never the reverse. Any I/O failure (missing
+/// node or directory) leaves `hints` unchanged.
+pub fn supervisor_alias_hints(
+    hints: SensorHints,
+    device_path: &Path,
+    by_id_dir: &Path,
+) -> SensorHints {
+    if hints.by_id_name.is_some() {
+        return hints;
+    }
+    let Ok(node) = std::fs::canonicalize(device_path) else {
+        return hints;
+    };
+    let names: Vec<String> = SystemCameraEnumerator::with_by_id_dir(by_id_dir)
+        .by_id_aliases()
+        .into_iter()
+        .filter(|(_, target)| *target == node)
+        .filter_map(|(alias, _)| {
+            alias
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+        })
+        .collect();
+    let chosen = names
+        .iter()
+        .find(|name| has_ir_token(name))
+        .or_else(|| names.first())
+        .cloned();
+    SensorHints {
+        by_id_name: chosen,
+        ..hints
+    }
+}
+
+/// Combines the end of a streaming session with the outcome of the guarded stream teardown.
+///
+/// A streaming error wins (the teardown failure is only logged). After a clean shutdown the
+/// teardown failure is logged and the shutdown proceeds. After an idle suspend it becomes a
+/// [`CameraError::StreamTeardown`] (an `Io` error): the supervisor backs off and reopens,
+/// instead of a supervisor panic that marks the camera `Dead` (GitHub #289).
+fn settle_stream_teardown(
+    device_path: &Path,
+    session: Result<SupervisorAction, CameraError>,
+    teardown: std::io::Result<()>,
+) -> Result<SupervisorAction, CameraError> {
+    let Err(teardown_err) = teardown else {
+        return session;
+    };
+    warn!(
+        "Camera stream teardown failed on '{}': {}",
+        device_path.display(),
+        teardown_err
+    );
+    match session {
+        Ok(SupervisorAction::Suspend) => Err(CameraError::StreamTeardown {
+            path: device_path.to_path_buf(),
+            reason: teardown_err.to_string(),
+        }),
+        other => other,
     }
 }
 
@@ -582,6 +661,9 @@ fn open_and_stream(
     // its format. Frames are stamped with the sensor type so an IR node streaming a colour
     // format still takes the IR PAD policy (GitHub #169, #195).
     let hints = supervisor_sensor_hints(&config.device_path, device_frame_sizes(&device, &fourccs));
+    // A plain `/dev/videoN` path carries no by-id name: look up its alias (GitHub #289). It can
+    // only add an IR stamp, never remove one (`supervisor_alias_hints`).
+    let hints = supervisor_alias_hints(hints, &config.device_path, Path::new(DEFAULT_BY_ID_DIR));
     let plan = plan_capture_with_hints(&caps.card, &supported, &hints, config)?;
     let target_format = plan.format;
 
@@ -655,17 +737,15 @@ fn open_and_stream(
     })
     .granted_fps();
 
-    let mut stream =
-        v4l::io::mmap::Stream::with_buffers(&device, v4l::buffer::Type::VideoCapture, 4).map_err(
-            |e| {
-                CameraError::from_ioctl_error(config.device_path.clone(), e, |reason| {
-                    CameraError::StreamCreate {
-                        path: config.device_path.clone(),
-                        reason,
-                    }
-                })
-            },
-        )?;
+    // Guarded: a half-built buffer arena is released inside `v4l`, which panics on failure.
+    let mut stream = mmap_stream_guarded(&device, 4).map_err(|e| {
+        CameraError::from_ioctl_error(config.device_path.clone(), e, |reason| {
+            CameraError::StreamCreate {
+                path: config.device_path.clone(),
+                reason,
+            }
+        })
+    })?;
 
     // Bounded DQBUF wait (GitHub #194): three frame intervals clamped to 150-250 ms, so the
     // capture thread re-checks `running` at least every 250 ms and Drop completes within the
@@ -705,16 +785,22 @@ fn open_and_stream(
         health,
         streaming_health: HEALTH_STREAMING,
     };
-    match run_capture_loop(&mut source, &settings, &targets, &monotonic_nanos)? {
-        StreamExit::Shutdown => Ok(SupervisorAction::Shutdown),
-        StreamExit::Suspend => {
+    let session = match run_capture_loop(&mut source, &settings, &targets, &monotonic_nanos) {
+        Ok(StreamExit::Shutdown) => Ok(SupervisorAction::Shutdown),
+        Ok(StreamExit::Suspend) => {
             info!(
                 "Camera idle timeout reached on '{}'; releasing device handle for auto-standby",
                 config.device_path.display()
             );
             Ok(SupervisorAction::Suspend)
         }
-    }
+        Err(err) => Err(err),
+    };
+    // `Drop for mmap::Stream` issues VIDIOC_STREAMOFF and panics on any failure but ENODEV;
+    // dropping through the guard turns that into a recoverable error (GitHub #289). The stream
+    // borrows `device`, so it is torn down here, before the device handle closes.
+    let teardown = guarded_v4l_drop(source);
+    settle_stream_teardown(&config.device_path, session, teardown)
 }
 
 /// [`CaptureSource`] over a V4L2 MMAP stream.
@@ -760,5 +846,55 @@ fn monotonic_nanos() -> u64 {
         sec.saturating_add(ts.tv_nsec.cast_unsigned())
     } else {
         0
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::panic,
+    reason = "Unit tests use direct assertions on the teardown outcome"
+)]
+mod tests {
+    use super::*;
+
+    fn panic_error() -> std::io::Error {
+        std::io::Error::other(crate::v4l_guard::V4L_PANIC_MESSAGE)
+    }
+
+    #[test]
+    fn test_cag_teardown_failure_after_suspend_backs_off() {
+        let path = Path::new("/dev/video0");
+        let settled =
+            settle_stream_teardown(path, Ok(SupervisorAction::Suspend), Err(panic_error()));
+        match settled {
+            Err(err @ CameraError::StreamTeardown { .. }) => {
+                assert_eq!(err.kind(), crate::status::CameraErrorKind::Io);
+                assert!(!warrants_reresolution(&err), "same device, plain backoff");
+            }
+            other => panic!("expected StreamTeardown, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_cag_teardown_failure_keeps_shutdown_and_streaming_errors() {
+        let path = Path::new("/dev/video0");
+        assert!(matches!(
+            settle_stream_teardown(path, Ok(SupervisorAction::Shutdown), Err(panic_error())),
+            Ok(SupervisorAction::Shutdown)
+        ));
+        assert!(matches!(
+            settle_stream_teardown(path, Err(CameraError::Starved), Err(panic_error())),
+            Err(CameraError::Starved)
+        ));
+        for action in [SupervisorAction::Shutdown, SupervisorAction::Suspend] {
+            assert_eq!(
+                settle_stream_teardown(path, Ok(action), Ok(())).ok(),
+                Some(action)
+            );
+        }
+        assert!(matches!(
+            settle_stream_teardown(path, Err(CameraError::Starved), Ok(())),
+            Err(CameraError::Starved)
+        ));
     }
 }
