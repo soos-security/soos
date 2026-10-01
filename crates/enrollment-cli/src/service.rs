@@ -399,7 +399,7 @@ const TEMPLATES_SKIPPED_NO_DIR: &str =
 /// and nothing is created (unlike `list` / `delete`, which open the key with
 /// `load_or_create`). An existing key is validated by
 /// [`soos_biometric_store::MasterKey::load_existing`] and an existing directory by
-/// [`BiometricStore::new`].
+/// [`BiometricStore::open_existing`], which never creates it (GitHub #289).
 pub fn open_template_store_for_migration(
     bio_dir: &Path,
     key_path: &Path,
@@ -421,9 +421,15 @@ fn open_template_store_checked(
         }
         Err(e) => return Err(e.into()),
     };
-    match std::fs::symlink_metadata(bio_dir) {
-        Ok(_) => Ok(Ok(BiometricStore::new(bio_dir, key)?)),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Err(TEMPLATES_SKIPPED_NO_DIR)),
+    // Never `BiometricStore::new`, which would create a directory that vanished after a
+    // separate existence check (GitHub #289): `open_existing` checks and opens in one step.
+    match BiometricStore::open_existing(bio_dir, key) {
+        Ok(store) => Ok(Ok(store)),
+        Err(soos_biometric_store::BiometricStoreError::Io(e))
+            if e.kind() == std::io::ErrorKind::NotFound =>
+        {
+            Ok(Err(TEMPLATES_SKIPPED_NO_DIR))
+        }
         Err(e) => Err(e.into()),
     }
 }
