@@ -781,11 +781,52 @@ impl ConnectionDispatcher {
                 self.config.connection_timeout,
             );
 
-            // 8-pre: Atomic attempt reservation (GitHub #200 / DMN-10). The per-UID limit is
+            // 8a: Fetch the enrolled template once, BEFORE the attempt reservation and the
+            // camera wake (GitHub #298). The lookup result is kept as-is and answered below,
+            // after the reservation, so a missing template or a store error keeps counting
+            // as an attempt exactly as before (GitHub #200 / DMN-10).
+            let template_lookup = pipe.biometric_store.get(req.uid_hint);
+
+            // 8b: Refuse a template enrolled with another embedding model or of another
+            // vector length (GitHub #182, #278) before the reservation, the camera wake and
+            // any capture (GitHub #298). Such a template can never authenticate (no
+            // inference runs), so it consumes no attempt and never turns the camera on.
+            if let (Some(expected), Ok(Some(enrolled_template))) =
+                (self.expected_embedding_model.as_deref(), &template_lookup)
+            {
+                let binding = classify_template(
+                    expected,
+                    pipe.vision.embedding_dimension(),
+                    &enrolled_template.model_id,
+                    enrolled_template.embedding.len(),
+                );
+                if binding == TemplateModelBinding::Foreign {
+                    warn!(
+                        uid = req.uid_hint,
+                        template_model = ?enrolled_template.model_id,
+                        template_dimension = enrolled_template.embedding.len(),
+                        loaded_model = %expected,
+                        "Enrolled template was recorded with a different embedding model; \
+                         re-enrollment required, returning Unavailable"
+                    );
+                    let encoded = self.build_response(
+                        req.request_id,
+                        Verdict::Unavailable,
+                        ReasonClass::ModelUnavailable,
+                    )?;
+                    return Ok(ResponseOutput {
+                        encoded_response: encoded,
+                        completion_error: None,
+                    });
+                }
+            }
+
+            // 8c: Atomic attempt reservation (GitHub #200 / DMN-10). The per-UID limit is
             // checked AND recorded under one write-lock acquisition, before any camera or
             // vision work: concurrent requests cannot all pass the same remaining attempt,
-            // and a request that ends early (not enrolled, camera down, cancelled) still
-            // counts. A rejected reservation fails fast without waking the camera.
+            // and a request that ends early (not enrolled, store error, camera down,
+            // cancelled) still counts. Only a foreign template (8b) is answered before it.
+            // A rejected reservation fails fast without waking the camera.
             {
                 let mut engine = pipe.policy.write().await;
                 if let Err(err) = engine.record_attempt(req.uid_hint, now_ns) {
@@ -806,10 +847,47 @@ impl ConnectionDispatcher {
                 }
             }
 
-            // 8a: Notify activity to wake camera from auto-standby
+            // 8d: Answer a missing template or a store error (attempt already recorded),
+            // still before the camera wake.
+            let enrolled_template = match template_lookup {
+                Ok(Some(tmpl)) => tmpl,
+                Ok(None) => {
+                    info!(
+                        uid = req.uid_hint,
+                        "Target UID is not enrolled; returning Unavailable"
+                    );
+                    let encoded = self.build_response(
+                        req.request_id,
+                        Verdict::Unavailable,
+                        ReasonClass::InternalError,
+                    )?;
+                    return Ok(ResponseOutput {
+                        encoded_response: encoded,
+                        completion_error: None,
+                    });
+                }
+                Err(err) => {
+                    warn!(
+                        error = %err,
+                        uid = req.uid_hint,
+                        "Biometric store error retrieving template"
+                    );
+                    let encoded = self.build_response(
+                        req.request_id,
+                        Verdict::Unavailable,
+                        ReasonClass::InternalError,
+                    )?;
+                    return Ok(ResponseOutput {
+                        encoded_response: encoded,
+                        completion_error: None,
+                    });
+                }
+            };
+
+            // 8d-1: Notify activity to wake camera from auto-standby (current template only)
             pipe.camera.notify_activity();
 
-            // 8b: If camera is resuming from auto-standby, wait up to 1000-1200ms for it to become ready
+            // 8d-2: If camera is resuming from auto-standby, wait up to 1000-1200ms for it to become ready
             let max_wake = if req.deadline_monotonic_ns > 0
                 && req.deadline_monotonic_ns < u64::MAX
                 && req.deadline_monotonic_ns > now_ns
@@ -846,72 +924,6 @@ impl ConnectionDispatcher {
                     encoded_response: encoded,
                     completion_error: None,
                 });
-            }
-
-            // 8c: Retrieve enrolled biometric template once
-            let enrolled_template = match pipe.biometric_store.get(req.uid_hint) {
-                Ok(Some(tmpl)) => tmpl,
-                Ok(None) => {
-                    info!(
-                        uid = req.uid_hint,
-                        "Target UID is not enrolled; returning Unavailable"
-                    );
-                    let encoded = self.build_response(
-                        req.request_id,
-                        Verdict::Unavailable,
-                        ReasonClass::InternalError,
-                    )?;
-                    return Ok(ResponseOutput {
-                        encoded_response: encoded,
-                        completion_error: None,
-                    });
-                }
-                Err(err) => {
-                    warn!(
-                        error = %err,
-                        uid = req.uid_hint,
-                        "Biometric store error retrieving template"
-                    );
-                    let encoded = self.build_response(
-                        req.request_id,
-                        Verdict::Unavailable,
-                        ReasonClass::InternalError,
-                    )?;
-                    return Ok(ResponseOutput {
-                        encoded_response: encoded,
-                        completion_error: None,
-                    });
-                }
-            };
-
-            // 8d: Refuse templates enrolled with another embedding model or of another
-            // vector length (GitHub #182, #278), before any capture is evaluated.
-            if let Some(expected) = self.expected_embedding_model.as_deref() {
-                let binding = classify_template(
-                    expected,
-                    pipe.vision.embedding_dimension(),
-                    &enrolled_template.model_id,
-                    enrolled_template.embedding.len(),
-                );
-                if binding == TemplateModelBinding::Foreign {
-                    warn!(
-                        uid = req.uid_hint,
-                        template_model = ?enrolled_template.model_id,
-                        template_dimension = enrolled_template.embedding.len(),
-                        loaded_model = %expected,
-                        "Enrolled template was recorded with a different embedding model; \
-                         re-enrollment required, returning Unavailable"
-                    );
-                    let encoded = self.build_response(
-                        req.request_id,
-                        Verdict::Unavailable,
-                        ReasonClass::ModelUnavailable,
-                    )?;
-                    return Ok(ResponseOutput {
-                        encoded_response: encoded,
-                        completion_error: None,
-                    });
-                }
             }
 
             // 8e: Multi-frame PAD consensus loop (GitHub #147 / PAD-02).
@@ -1135,7 +1147,7 @@ impl ConnectionDispatcher {
             drop(enrolled_template);
 
             // 8f: Render the aggregate verdict. The attempt was already recorded by the
-            // reservation in 8-pre (exactly one per request), so nothing is recorded here.
+            // reservation in 8c (exactly one per request), so nothing is recorded here.
             let decision = aggregator.decision();
             let (final_verdict, final_reason) = match decision {
                 ConsensusDecision::Allow => {

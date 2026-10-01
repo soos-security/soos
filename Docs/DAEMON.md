@@ -157,7 +157,7 @@ pad_threshold = 0.85
 | Message | Who may send it | Checks, in order | Refusal |
 |---|---|---|---|
 | `RequestKind::Status` | any peer admitted to the socket | wire validation only; returns `StatusResponse` (readiness booleans, PID, uptime; no biometric data) | `ProtocolError` on malformed request |
-| `RequestKind::Auth` | root peer for any UID, or an unprivileged peer for its own UID | wire validation, `SO_PEERCRED` UID versus `uid_hint`, local-session policy (ADR 2026-09-30 "Local Session Binding"), deadline, rate limit, camera + PAD consensus + match | `ProtocolError`/`UidMismatch`, `Unavailable`, or `Deny`; never `Allow` on an error path |
+| `RequestKind::Auth` | root peer for any UID, or an unprivileged peer for its own UID | wire validation, `SO_PEERCRED` UID versus `uid_hint`, local-session policy (ADR 2026-09-30 "Local Session Binding"), deadline, template model binding (a `Foreign` template is answered `Unavailable`/`ModelUnavailable` here, without an attempt or a camera wake; GitHub #298), rate limit, missing template, camera wake + PAD consensus + match | `ProtocolError`/`UidMismatch`, `Unavailable`, or `Deny`; never `Allow` on an error path |
 | `RequestKind::PreviewFrame` | root peer, or an allow-listed UID with `[preview] enabled = true` and an active local session | wire validation, `SO_PEERCRED` UID versus `uid_hint`, `authorize_preview`, session check, per-UID rate limit | standard `Response` with `ProtocolError`, zero pixel bytes |
 | `Event` (`PasswordFailed`) | root peer for any UID, any other peer for itself | target UID versus peer UID, per-peer event quota | dropped with a `warn`; events never get a response |
 
