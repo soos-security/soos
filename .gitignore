@@ -35,6 +35,7 @@ Desktop.ini
 # They are fetched and verified via SHA-256 hashes in models/manifest.toml.
 models/*.onnx
 models/*.ort
+models/*.pth
 
 # ---------------------------------------------------------------------------
 # Evidence and Biometric Data (Must NEVER be committed)

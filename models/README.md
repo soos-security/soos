@@ -43,6 +43,11 @@ Shapes below are the ONNX graph metadata of the attested files (`N` is a symboli
    - **Resolution & Crop**: 80×80 context crop generated from a 2.7× expanded face bounding box (captures facial margins, bezels, and printed paper boundaries).
    - **Color Format**: BGR channel ordering.
    - **Normalization**: Standard scaling `pixel / 255.0` mapping `[0, 255]` to `[0.0, 1.0]`.
+     **Known mismatch (walkthrough 161, owner decision pending)**: upstream Silent-Face-Anti-Spoofing
+     trains and runs both MiniFASNet checkpoints on raw `[0, 255]` floats (its `ToTensor` does not divide
+     by 255) and the ONNX fork's own demo feeds `[0, 255]`; with `/ 255` every synthetic or natural
+     input tested scores replay with MiniFASNetV2 (`p_live < 0.012`). Not changed here: it moves the PAD operating point
+     and needs the real-camera corpus.
    - **Class Ordering**: Softmax logits with Class 0 = Print Spoof, Class 1 = Live, Class 2 = Replay Spoof (`DEFAULT_MINIFASNET_LIVE_CLASS_INDEX = 1` in `crates/inference-ort/src/pad.rs`, ADR 2026-09-29; never overridden in production).
 
 ---
@@ -63,6 +68,22 @@ scrfd_500m_kps:     a3562ef62592bf387f6ef19151282ac127518e51c77696e62e0661bee95b
 arcface_w600k_mbf:  ffe014a45c9488506719d37fd578ece6661bb385535b36e8039975fa5d4683db
 minifasnet_v2_pad:  0cbe5caec95c31de9d2ef845cb85407d76aecd1b6a2c0e343f7d35306bfbccb8
 ```
+
+### Optional, Disabled Models (`models/optional_models.toml`)
+
+`models/optional_models.toml` uses the same schema but is read by no runtime crate. It attests the
+second upstream PAD model, which stays **disabled** until the fused PAD threshold is calibrated on a
+print / screen-replay corpus (GitHub #212, walkthrough 161):
+
+```text
+minifasnet_v1se_pad: a25886a85cdcfa2c4ea23edb71de35f250c17827b4cadd253a972b28c80fdf1e  (1,743,294 bytes)
+```
+
+- `./scripts/download_models.sh --with-optional` fetches and verifies it next to the attested models;
+  the deployed `manifest.toml` is still the main manifest, so nothing is enabled.
+- Enabling (operator decision): append its `[models.minifasnet_v1se_pad]` table (not the `[manifest]`
+  header) to `/var/lib/soos/models/manifest.toml` and restart `soos-daemon`, which then fuses it at
+  the 4.0x scale (`attach_optional_pad_members`) or refuses to start if the file does not match.
 
 ---
 
@@ -103,10 +124,21 @@ Production models and the attestation manifest are deployed to `/var/lib/soos/mo
    - Not an InsightFace `w600k_mbf` (MobileFaceNet, WebFace600K); the training dataset of this network is not documented upstream
    - License: MIT (as recorded in the manifest; not re-verified in GitHub #191)
 
-3. **MiniFASNetV2 (`minifasnet_v2_pad`)**:
-   - Upstream: Minivision AI / [QingHeYang/Silent-Face-Anti-Spoofing-onnx](https://github.com/QingHeYang/Silent-Face-Anti-Spoofing-onnx)
-   - Architecture: MiniFASNetV2 with 80×80 context crop
-   - License: Apache-2.0
+3. **MiniFASNetV2 (`minifasnet_v2_pad`)** and **MiniFASNetV1SE (`minifasnet_v1se_pad`, optional, disabled)**:
+   - Upstream weights: [minivision-ai/Silent-Face-Anti-Spoofing](https://github.com/minivision-ai/Silent-Face-Anti-Spoofing)
+     (Apache-2.0) at commit `b6d5f04ad78778917853b25c778acef6d5626d15`:
+     `resources/anti_spoof_models/2.7_80x80_MiniFASNetV2.pth`
+     (`a5eb02e1843f19b5386b953cc4c9f011c3f985d0ee2bb9819eea9a142099bec0`) and
+     `4_0_0_80x80_MiniFASNetV1SE.pth` (`84ee1d37d96894d5e82de5a57df044ef80a58be2b218b5ed7cdfd875ec2f5990`).
+   - ONNX files: [QingHeYang/Silent-Face-Anti-Spoofing-onnx](https://github.com/QingHeYang/Silent-Face-Anti-Spoofing-onnx)
+     (Apache-2.0) at commit `584d4421d7ac42c59e640796f46e886b0095367a`, `onnx/2.7_80x80_MiniFASNetV2.onnx`
+     (the shipped file, same SHA-256) and `onnx/4_0_0_80x80_MiniFASNetV1SE.onnx`.
+   - Equivalence: `scripts/convert_pad_models.py` re-exports both checkpoints with the upstream
+     `src/model_lib/MiniFASNet.py` (pinned torch / onnx versions); `scripts/compare_pad_models.py` shows
+     every initializer bit-identical to the fork files and a softmax difference of exactly 0 on 156
+     inputs per convention (walkthrough 161). The fork ONNX files are therefore the upstream models.
+   - Architecture: MiniFASNet 80×80, input `input` `[N, 3, 80, 80]` NCHW BGR, output `output` `[N, 3]`
+     logits; classes `[print, live, replay]` (upstream `test.py`: `label == 1` is a real face).
 
 ---
 

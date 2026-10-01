@@ -11,6 +11,10 @@
 #   --check-only              Verify integrity of existing deployed models without downloading
 #   --dry-run                 Parse manifest and display download actions without modifying disk
 #   --preflight               Validate the manifest and required tools, then exit (no disk writes)
+#   --with-optional           Also fetch/verify the attested, disabled optional models of
+#                             models/optional_models.toml (they stay disabled: the deployed
+#                             manifest.toml is still the main manifest; GitHub #212)
+#   --optional-manifest <P>   Path to the optional models file (default: models/optional_models.toml)
 #   -h, --help                Display this help message
 #
 # Requirements: bash >= 4, coreutils (sha256sum), and curl + ca-certificates for
@@ -32,6 +36,9 @@
 #   - An optional per-model 'size_bytes' (bare integer, 1..size cap) is printed,
 #     bounds curl --max-filesize for that model and must match the staged file
 #     exactly before hashing; a mismatch discards the file (GitHub #269).
+#   - Optional models are fetched only with --with-optional, through the same
+#     validation, size bound and SHA-256 check, and are never written into the
+#     deployed manifest.toml: enabling one is a separate operator step (GitHub #212).
 # =============================================================================
 
 set -euo pipefail
@@ -64,12 +71,15 @@ WORKSPACE_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 DEFAULT_TARGET_DIR="${SOOS_MODELS_DIR:-/var/lib/soos/models}"
 DEFAULT_MANIFEST="${SOOS_MANIFEST_PATH:-${WORKSPACE_ROOT}/models/manifest.toml}"
+DEFAULT_OPTIONAL_MANIFEST="${SOOS_OPTIONAL_MANIFEST_PATH:-${WORKSPACE_ROOT}/models/optional_models.toml}"
 
 TARGET_DIR="${DEFAULT_TARGET_DIR}"
 MANIFEST_PATH="${DEFAULT_MANIFEST}"
 CHECK_ONLY=false
 DRY_RUN=false
 PREFLIGHT=false
+WITH_OPTIONAL=false
+OPTIONAL_MANIFEST_PATH="${DEFAULT_OPTIONAL_MANIFEST}"
 
 # Upper bound for one model file (GitHub #208). The largest attested model
 # (arcface_w600k_mbf.onnx) is 136,619,444 bytes; 256 MiB leaves headroom while
@@ -89,11 +99,14 @@ Options:
   --check-only             Verify integrity of existing deployed models
   --dry-run                Show download plan and checksums without downloading
   --preflight              Validate manifest and required tools only (no writes)
+  --with-optional          Also fetch/verify the disabled optional models (they stay disabled)
+  --optional-manifest <P>  Optional models file (default: ${DEFAULT_OPTIONAL_MANIFEST})
   -h, --help               Show this help message and exit
 
 Environment Variables:
   SOOS_MODELS_DIR          Override default target directory
   SOOS_MANIFEST_PATH       Override default manifest.toml path
+  SOOS_OPTIONAL_MANIFEST_PATH  Override default optional_models.toml path
   SOOS_MODEL_MAX_BYTES     Tighten the per-model size cap (1..${MAX_MODEL_BYTES} bytes)
 EOF
 }
@@ -121,6 +134,14 @@ while [[ $# -gt 0 ]]; do
             PREFLIGHT=true
             shift
             ;;
+        --with-optional)
+            WITH_OPTIONAL=true
+            shift
+            ;;
+        --optional-manifest)
+            OPTIONAL_MANIFEST_PATH="$2"
+            shift 2
+            ;;
         -h|--help)
             usage
             exit 0
@@ -135,6 +156,11 @@ done
 
 if [[ ! -f "${MANIFEST_PATH}" ]]; then
     error "Manifest file not found at: ${MANIFEST_PATH}"
+    exit 1
+fi
+
+if [[ "${WITH_OPTIONAL}" = true && ! -f "${OPTIONAL_MANIFEST_PATH}" ]]; then
+    error "Optional models file not found at: ${OPTIONAL_MANIFEST_PATH}"
     exit 1
 fi
 
@@ -185,9 +211,14 @@ M_SHAS=()
 M_URLS=()
 M_LICENSES=()
 M_SIZES=()
+M_OPTIONAL=()
 
+# parse_manifest <file> <optional:true|false>: appends the file's model tables to the M_*
+# arrays (ids must stay unique across files) and validates every entry parsed so far.
 parse_manifest() {
     local manifest="$1"
+    local optional="${2:-false}"
+    local first_new=${#M_IDS[@]}
     local re_model_table='^\[models\.([A-Za-z0-9_-]+)\][[:space:]]*(#.*)?$'
     local re_other_table='^\[\[?[A-Za-z_"]'
     local re_key='^(filename|sha256|source_url|license|size_bytes)[[:space:]]*='
@@ -216,6 +247,7 @@ parse_manifest() {
             M_URLS+=("")
             M_LICENSES+=("")
             M_SIZES+=("")
+            M_OPTIONAL+=("${optional}")
             cur=$((${#M_IDS[@]} - 1))
             in_model=true
             seen_keys=()
@@ -253,7 +285,7 @@ parse_manifest() {
         esac
     done < "${manifest}"
 
-    if [[ ${#M_IDS[@]} -eq 0 ]]; then
+    if [[ ${#M_IDS[@]} -eq ${first_new} ]]; then
         error "Manifest declares no [models.<id>] table: ${manifest}"
         return 1
     fi
@@ -284,9 +316,16 @@ parse_manifest() {
 # -----------------------------------------------------------------------------
 # 1. Validate the manifest and resolve every download URL (read-only)
 # -----------------------------------------------------------------------------
-if ! parse_manifest "${MANIFEST_PATH}"; then
+if ! parse_manifest "${MANIFEST_PATH}" false; then
     error "Manifest validation failed: ${MANIFEST_PATH}"
     exit 1
+fi
+if [[ "${WITH_OPTIONAL}" = true ]]; then
+    if ! parse_manifest "${OPTIONAL_MANIFEST_PATH}" true; then
+        error "Optional models validation failed: ${OPTIONAL_MANIFEST_PATH}"
+        exit 1
+    fi
+    info "Optional models: ${OPTIONAL_MANIFEST_PATH} (fetched and verified, NOT enabled)"
 fi
 TOTAL_MODELS=${#M_IDS[@]}
 
@@ -356,6 +395,11 @@ for ((idx = 0; idx < TOTAL_MODELS; idx++)); do
     download_url="${M_DOWNLOAD_URLS[idx]}"
     expected_size="${M_SIZES[idx]}"
     dest_path="${TARGET_DIR}/${filename}"
+    if [[ "${M_OPTIONAL[idx]}" = true ]]; then
+        model_label="optional model '${model_id}' (disabled)"
+    else
+        model_label="model '${model_id}'"
+    fi
     if [[ -n "${expected_size}" ]]; then
         size_label="${expected_size} bytes"
         curl_max_bytes="${expected_size}"
@@ -365,7 +409,7 @@ for ((idx = 0; idx < TOTAL_MODELS; idx++)); do
     fi
 
     if [[ "${DRY_RUN}" = true ]]; then
-        info "[DRY-RUN] Model '${model_id}':"
+        info "[DRY-RUN] ${model_label^}:"
         info "          File:        ${filename}"
         info "          SHA-256:     ${expected_sha}"
         info "          License:     ${license_name}"
@@ -403,7 +447,7 @@ for ((idx = 0; idx < TOTAL_MODELS; idx++)); do
         fi
     fi
 
-    info "Acquiring model '${model_id}' (${filename}, expected size ${size_label})..."
+    info "Acquiring ${model_label} (${filename}, expected size ${size_label})..."
     # Unpredictable temporary name, created 0600 in the target directory so the
     # final rename stays atomic (GitHub #208).
     tmp_dest="$(umask 077 && mktemp "${TARGET_DIR}/.${filename}.XXXXXXXX")"
@@ -484,6 +528,10 @@ if [[ "${CHECK_ONLY}" = false ]]; then
         chown root:root "${target_manifest}"
     fi
     success "Attestation manifest deployed to: ${target_manifest}"
+    if [[ "${WITH_OPTIONAL}" = true ]]; then
+        warn "Optional models were verified but stay DISABLED: ${target_manifest} does not declare them."
+        warn "Enabling one is an operator decision after PAD calibration (see ${OPTIONAL_MANIFEST_PATH})."
+    fi
 fi
 
 echo ""

@@ -189,6 +189,11 @@ mod diagnostics_parity_contract;
 #[cfg(all(test, unix))]
 mod pam_response_expiry_contract;
 
+/// Second PAD model (4.0x MiniFASNetV1SE) attested in `models/optional_models.toml` but
+/// disabled by default; `download_models.sh --with-optional` (GitHub #212, rows PVA1–PVA4).
+#[cfg(all(test, unix))]
+mod pad_second_model_attestation_contract;
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,

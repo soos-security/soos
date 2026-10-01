@@ -190,11 +190,14 @@ primary first.
 - The threshold is the modality-aware one (`pad_threshold`, or the stricter IR threshold). For
   monochrome frames the IR gate runs on the primary crop before any model is consulted.
 - `analyze_frame` (GUI) reports the fused result.
-- **Current deployment**: the attested model set holds only MiniFASNetV2, so `soos-daemon`,
-  `soos-enroll` and `soos-gui` still build a single-member pipeline. Wiring the 4.0× MiniFASNetV1SE
-  needs its ONNX export attested in `models/manifest.toml` (SHA-256, I/O shapes) and a threshold
-  re-measurement; it is a follow-up of GitHub #212 (ADR 2026-09-30 "Upstream-Parity PAD Crop
-  Geometry and Multi-Scale Fusion").
+- **Current deployment**: the 4.0× MiniFASNetV1SE is attested in `models/optional_models.toml`
+  (walkthrough 161) but disabled: `models/manifest.toml` does not declare it, so `soos-daemon`,
+  `soos-enroll` and `soos-gui` build a single-member pipeline. Appending its table to the deployed
+  manifest makes `soos-daemon` fuse it (`attach_optional_pad_members`); `soos-enroll` and `soos-gui`
+  do not wire it yet. Measured with the real files (release build, i7-13620H, 640x480 frame,
+  `pad_v1se_real_model_tests`): the second member adds about 3 ms per frame (median 2.6-2.8 ms single,
+  5.8-6.0 ms fused). The fused threshold is not calibrated (no print / replay corpus), which is why it
+  stays disabled (ADR 2026-10-01 "Second PAD Model Attested, Disabled Until Calibrated").
 
 #### 2.4.3 Pre-PAD Face Quality Gate (`quality.rs`, GitHub #218)
 

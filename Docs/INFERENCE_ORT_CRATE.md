@@ -304,7 +304,16 @@ sudo ./scripts/download_models.sh
 
 # Validation of installed models
 ./scripts/download_models.sh --check-only
+
+# Also fetch the attested but disabled optional models (models/optional_models.toml)
+sudo ./scripts/download_models.sh --with-optional
 ```
+
+`models/optional_models.toml` (same schema, read by no runtime crate) attests the 4.0x
+MiniFASNetV1SE PAD member, disabled by default (GitHub #212, walkthrough 161). Its provenance and the
+proof that the shipped and optional PAD ONNX files equal the upstream checkpoints come from
+`scripts/convert_pad_models.py` (reproducible `.pth` to ONNX export) and
+`scripts/compare_pad_models.py` (bit-identical initializers, zero softmax difference).
 
 ---
 
