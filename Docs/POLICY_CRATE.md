@@ -182,7 +182,11 @@ Exactly one rate-limit attempt is recorded per request, atomically and before th
 (`AuthorizationEngine::record_attempt` under the policy write lock, before the camera wake and any
 vision work; GitHub #200 / DMN-10): a rejected reservation answers `ProtocolError`/`RateLimited`
 at once, concurrent requests cannot overshoot `max_attempts`, and nothing is recorded after the
-loop.
+loop. Since GitHub #298 the enrolled template is read and bound to the loaded embedding model
+(`classify_template`) just before that reservation: a `Foreign` template (other model id or
+vector length) is answered `Unavailable`/`ModelUnavailable` without consuming an attempt and
+without waking the camera, because it can never reach inference. A missing template or a store
+error still consumes the attempt (answered after the reservation, before the camera wake).
 
 At daemon start (before the socket is bound) `soos_daemon::pipeline::warmed_inference_gate`
 runs every vision stage `WARMUP_PASSES` (2) times on blank synthetic inputs and seeds the

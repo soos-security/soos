@@ -1515,6 +1515,21 @@ Every PAM-12 point was already fixed on `main` (strict codec, PCZ1-PCZ2; tagged 
 
 ---
 
+## Component: `daemon-template-check-order` (GitHub #298 first and fifth items, `fix/daemon-template-check-order`, walkthrough 163)
+
+| ID | Criterion | Verification Method | Status |
+|---|---|---|---|
+| TCO1 | A foreign template (retired ArcFace id, or current id with another vector length) is answered `Unavailable` / `ModelUnavailable` without waking the camera (`notify_activity`) or reading a capture (`latest_frame`), and no inference runs (spy camera + spy extractor) | Integration tests (`template_check_order_tests::test_foreign_template_never_wakes_the_camera`, `template_check_order_tests::test_wrong_dimension_template_never_wakes_the_camera`) | ✅ Verified |
+| TCO2 | With a cold camera that never becomes ready, a foreign template is answered `ModelUnavailable` at once (no wake wait, not `CameraUnavailable`) | Integration test (`template_check_order_tests::test_foreign_template_does_not_wait_for_a_cold_camera`) | ✅ Verified |
+| TCO3 | A current SFace template still wakes the camera, reads captures, runs inference and authorizes (`Allow` / `FaceMatch`) | Integration tests (`template_check_order_tests::test_current_template_still_wakes_the_camera_and_authenticates`, `sface_template_binding_tests::test_current_sface_template_is_evaluated`) | ✅ Verified |
+| TCO4 | A UID without a template keeps its verdict (`Unavailable` / `InternalError`), is answered before the camera wake and still consumes one attempt (GitHub #200 contract kept) | Integration tests (`template_check_order_tests::test_missing_template_is_refused_before_the_camera_wake_and_still_counts`, `rate_limit_reservation_tests::test_200_attempt_ending_before_vision_work_is_recorded`) | ✅ Verified |
+| TCO5 | A foreign template consumes no rate-limit attempt, sequentially or concurrently (limiter tracks nothing; never `RateLimited`) | Integration tests (`template_check_order_tests::test_foreign_template_consumes_no_rate_limit_attempt`, `template_check_order_tests::test_concurrent_foreign_template_requests_reserve_nothing`) | ✅ Verified |
+| TCO6 | For a current template the attempt is already reserved (one attempt, under the policy write lock) when the camera is woken and when the first capture is read | Integration tests (`template_check_order_tests::test_current_template_reserves_the_attempt_before_wake_and_capture`, `rate_limit_reservation_tests::test_200_attempt_is_reserved_before_vision_work`) | ✅ Verified |
+| TCO7 | A rate-limited request with a current template is refused `ProtocolError` / `RateLimited` without waking the camera | Integration tests (`template_check_order_tests::test_rate_limited_current_template_never_wakes_the_camera`, `rate_limit_reservation_tests::test_200_allow_then_rate_limited_with_one_attempt`) | ✅ Verified |
+| TCO8 | Concurrent current-template requests still share the limit atomically (one attempt: exactly one `RateLimited`, at most one `Allow`) | Integration tests (`template_check_order_tests::test_concurrent_current_template_reservations_stay_atomic`, `rate_limit_reservation_tests::test_200_concurrent_matching_auths_with_one_attempt_allow_at_most_once`, `rate_limit_reservation_tests::test_200_concurrent_denied_auths_with_one_attempt_yield_one_evaluation`) | ✅ Verified |
+
+---
+
 ## Component: `p2-review-followups` (GitHub #285, non-blocking findings of the P2 batch reviews)
 
 | ID | Criterion | Evidence | Status |
