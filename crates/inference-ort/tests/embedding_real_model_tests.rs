@@ -1,10 +1,12 @@
-//! Real-model evidence for the attested face embedding network (review finding VIS-03, GitHub #191).
+//! Real-model evidence for the attested face embedding network (review finding VIS-03, GitHub #191;
+//! SFace switch, GitHub #278).
 //!
-//! The manifest id `arcface_w600k_mbf` historically claimed an InsightFace "MobileFaceNet w600k"
-//! (~3.6 MB, NCHW). The attested file is in fact a 136,619,444-byte tf2onnx export of a Keras
-//! ArcFace **ResNet34** (graph input `input_1` = `[N, 112, 112, 3]`, NHWC; output `embedding` =
-//! `[N, 512]`). Every other embedding test runs against mocks or synthetic graphs, so this target
-//! pins the real metadata and exercises the production registry + extractor on it.
+//! Since GitHub #278 the attested embedding model is OpenCV Zoo SFace 2021dec (`sface_2021dec`,
+//! 38,696,353 bytes): graph input `data` = `[1, 3, 112, 112]` (NCHW, RGB, raw 0..255, the graph
+//! applies `(x - 127.5) / 128` itself), output `fc1` = `[1, 128]`. Every other embedding test runs
+//! against mocks or synthetic graphs, so this target pins the real metadata and exercises the
+//! production registry + extractor on it (the retired ArcFace ResNet34 is covered by
+//! `embedding_preprocessing_evaluation_tests` against `models/retired_models.toml`).
 //!
 //! Gating (CI stays green on runners without models), identical to `pad_real_model_tests`:
 //! models directory `SOOS_MODELS_DIR`, falling back to `/var/lib/soos/models`; an absent model
@@ -31,16 +33,16 @@ use soos_inference_ort::error::InferenceError;
 use soos_inference_ort::manifest::{ModelManifest, TensorLayout};
 use soos_inference_ort::registry::{ModelRegistry, RegistryConfig, SharedSession};
 
-/// Manifest identifier of the embedding model (historical name, kept for compatibility).
-const EMBEDDING_MODEL_ID: &str = "arcface_w600k_mbf";
+/// Manifest identifier of the embedding model.
+const EMBEDDING_MODEL_ID: &str = "sface_2021dec";
 /// File name of the embedding model inside the models directory.
-const EMBEDDING_MODEL_FILE: &str = "arcface_w600k_mbf.onnx";
+const EMBEDDING_MODEL_FILE: &str = "sface_2021dec.onnx";
 /// Exact size of the attested embedding model file.
-const EMBEDDING_MODEL_BYTES: u64 = 136_619_444;
+const EMBEDDING_MODEL_BYTES: u64 = 38_696_353;
 /// Default installation directory of the models.
 const DEFAULT_MODELS_DIR: &str = "/var/lib/soos/models";
 /// Embedding dimensionality produced by the attested network.
-const EMBEDDING_DIM: usize = 512;
+const EMBEDDING_DIM: usize = 128;
 /// Upper bound of the daemon's inference admission estimate
 /// (`soos_daemon::inference::MAX_INFERENCE_ESTIMATE_MS`). A single embedding step slower than
 /// this can never fit a decision budget.
@@ -170,29 +172,27 @@ fn test_real_embedding_model_io_metadata_is_pinned() {
 
     assert_eq!(
         size, EMBEDDING_MODEL_BYTES,
-        "attested file is the 136.6 MB tf2onnx ResNet34 export"
+        "attested file is the 38.7 MB OpenCV Zoo SFace 2021dec export"
     );
     assert_eq!(inputs.len(), 1, "exactly one graph input");
     assert_eq!(outputs.len(), 1, "exactly one graph output");
 
     let (in_name, in_shape) = &inputs[0];
-    assert_eq!(in_name, "input_1", "Keras/tf2onnx input name");
+    assert_eq!(in_name, "data", "SFace input name");
     assert_eq!(in_shape.len(), 4, "input is a rank-4 image tensor");
-    assert!(in_shape[0] < 0, "batch dim is symbolic: {in_shape:?}");
     assert_eq!(
-        &in_shape[1..],
-        &[112, 112, 3],
-        "input is NHWC [N, 112, 112, 3]"
+        in_shape.as_slice(),
+        &[1, 3, 112, 112],
+        "input is NCHW [1, 3, 112, 112] (batch fixed to 1)"
     );
 
     let (out_name, out_shape) = &outputs[0];
-    assert_eq!(out_name, "embedding");
+    assert_eq!(out_name, "fc1");
     assert_eq!(out_shape.len(), 2);
-    assert!(out_shape[0] < 0, "batch dim is symbolic: {out_shape:?}");
     assert_eq!(
-        out_shape[1],
-        i64::try_from(EMBEDDING_DIM).expect("dim fits i64"),
-        "output is [N, 512]"
+        out_shape.as_slice(),
+        &[1, i64::try_from(EMBEDDING_DIM).expect("dim fits i64")],
+        "output is [1, 128]"
     );
 }
 
@@ -204,7 +204,7 @@ fn test_real_embedding_committed_manifest_matches_session() {
     };
     let manifest = ModelManifest::from_file(repo_manifest_path()).expect("manifest");
     let meta = manifest.get_model(EMBEDDING_MODEL_ID).expect("entry");
-    assert_eq!(meta.input_layout, TensorLayout::Nhwc);
+    assert_eq!(meta.input_layout, TensorLayout::Nchw);
     let (inputs, outputs) = session_shapes(&session);
     let inputs: Vec<Vec<i64>> = inputs.into_iter().map(|(_, s)| s).collect();
     let outputs: Vec<Vec<i64>> = outputs.into_iter().map(|(_, s)| s).collect();
@@ -213,21 +213,21 @@ fn test_real_embedding_committed_manifest_matches_session() {
 }
 
 #[test]
-fn test_registry_rejects_real_embedding_model_under_nchw_manifest() {
+fn test_registry_rejects_real_embedding_model_under_nhwc_manifest() {
     if !model_present(
         EMBEDDING_MODEL_FILE,
-        "test_registry_rejects_real_embedding_model_under_nchw_manifest",
+        "test_registry_rejects_real_embedding_model_under_nhwc_manifest",
     ) {
         return;
     }
-    // Same checksum, but a manifest claiming the historical NCHW layout: the registry must fail
-    // closed instead of handing out a session the extractor would mis-feed.
+    // Same checksum, but a manifest claiming the retired ArcFace NHWC layout: the registry must
+    // fail closed instead of handing out a session the extractor would mis-feed.
     let mut manifest = ModelManifest::from_file(repo_manifest_path()).expect("manifest");
     manifest
         .models
         .get_mut(EMBEDDING_MODEL_ID)
         .expect("entry")
-        .input_layout = TensorLayout::Nchw;
+        .input_layout = TensorLayout::Nhwc;
     let mut registry = ModelRegistry::with_manifest(
         RegistryConfig::with_manifest(models_dir(), repo_manifest_path()),
         manifest,
@@ -235,7 +235,7 @@ fn test_registry_rejects_real_embedding_model_under_nchw_manifest() {
     match registry.get_or_load_session(EMBEDDING_MODEL_ID) {
         Err(InferenceError::ModelShapeMismatch { id, .. }) => assert_eq!(id, EMBEDDING_MODEL_ID),
         Err(other) => panic!("expected ModelShapeMismatch, got {other:?}"),
-        Ok(_) => panic!("an NCHW manifest must not attest the NHWC embedding graph"),
+        Ok(_) => panic!("an NHWC manifest must not attest the NCHW embedding graph"),
     }
 }
 
@@ -263,14 +263,15 @@ fn test_real_models_all_pass_committed_manifest_shape_validation() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn test_real_embedding_extractor_uses_nhwc_and_emits_normalized_512d() {
+fn test_real_embedding_extractor_uses_nchw_and_emits_normalized_128d() {
     let Some(session) = load_real_embedding_session("test_real_embedding_extractor") else {
         return;
     };
     let extractor = OrtEmbeddingExtractor::new(session);
-    assert!(
-        extractor.is_nhwc(),
-        "the extractor must detect the NHWC layout of the attested graph"
+    assert_eq!(
+        extractor.input_layout(),
+        Some(TensorLayout::Nchw),
+        "the extractor must detect the NCHW layout of the attested graph"
     );
 
     let crop = gradient_112();
@@ -335,7 +336,7 @@ fn test_real_embedding_model_loads_under_manifest_without_input_layout() {
         return;
     }
     // A manifest installed by an earlier release has no `input_layout` line. The daemon must
-    // still load the checksum-attested NHWC model (layout unspecified, not asserted).
+    // still load the checksum-attested NCHW model (layout unspecified, not asserted).
     let committed = std::fs::read_to_string(repo_manifest_path()).expect("manifest text");
     let legacy: String = committed
         .lines()
@@ -359,6 +360,303 @@ fn test_real_embedding_model_loads_under_manifest_without_input_layout() {
     );
     let session = registry
         .get_or_load_session(EMBEDDING_MODEL_ID)
-        .expect("a legacy manifest without input_layout must load the attested NHWC model");
-    assert!(OrtEmbeddingExtractor::new(session).is_nhwc());
+        .expect("a legacy manifest without input_layout must load the attested NCHW model");
+    assert_eq!(
+        OrtEmbeddingExtractor::new(session).input_layout(),
+        Some(TensorLayout::Nchw)
+    );
+}
+
+// ---------------------------------------------------------------------------
+// SFace pre-processing contract on the real graph (GitHub #278, SFC5 / SFC6)
+// ---------------------------------------------------------------------------
+
+fn read_varint(buf: &[u8], pos: &mut usize) -> u64 {
+    let mut value = 0u64;
+    for shift in (0..64).step_by(7) {
+        let byte = buf[*pos];
+        *pos += 1;
+        value |= u64::from(byte & 0x7f) << shift;
+        if byte < 0x80 {
+            return value;
+        }
+    }
+    panic!("varint longer than 10 bytes");
+}
+
+/// Length-delimited fields (`wire type 2`) of one protobuf message, as `(field, payload)`.
+fn length_delimited_fields(buf: &[u8]) -> Vec<(u64, &[u8])> {
+    let mut out = Vec::new();
+    let mut pos = 0usize;
+    while pos < buf.len() {
+        let key = read_varint(buf, &mut pos);
+        match key & 7 {
+            0 => {
+                read_varint(buf, &mut pos);
+            }
+            1 => pos += 8,
+            5 => pos += 4,
+            2 => {
+                let len = usize::try_from(read_varint(buf, &mut pos)).expect("length fits usize");
+                let end = pos.checked_add(len).expect("length overflow");
+                assert!(end <= buf.len(), "truncated protobuf field");
+                out.push((key >> 3, &buf[pos..end]));
+                pos = end;
+            }
+            other => panic!("unsupported protobuf wire type {other}"),
+        }
+    }
+    out
+}
+
+fn utf8(bytes: &[u8]) -> String {
+    String::from_utf8(bytes.to_vec()).expect("ONNX strings are UTF-8")
+}
+
+/// `(op_type, inputs, outputs)` of one graph node.
+type GraphNode = (String, Vec<String>, Vec<String>);
+
+/// Nodes and scalar float initializers (`name -> value`) of the ONNX graph.
+fn graph_nodes_and_scalars(model: &[u8]) -> (Vec<GraphNode>, Vec<(String, f32)>) {
+    // ModelProto 7 = graph; GraphProto 1 = node, 5 = initializer; NodeProto 1/2/4 =
+    // input/output/op_type; TensorProto 8 = name, 4 = float_data (packed), 9 = raw_data.
+    let graph = length_delimited_fields(model)
+        .into_iter()
+        .find(|(field, _)| *field == 7)
+        .map(|(_, payload)| payload)
+        .expect("ModelProto has a graph");
+    let mut nodes = Vec::new();
+    let mut scalars = Vec::new();
+    for (field, payload) in length_delimited_fields(graph) {
+        match field {
+            1 => {
+                let mut node: GraphNode = (String::new(), Vec::new(), Vec::new());
+                for (f, p) in length_delimited_fields(payload) {
+                    match f {
+                        1 => node.1.push(utf8(p)),
+                        2 => node.2.push(utf8(p)),
+                        4 => node.0 = utf8(p),
+                        _ => {}
+                    }
+                }
+                nodes.push(node);
+            }
+            5 => {
+                let mut name = None;
+                let mut value = None;
+                for (f, p) in length_delimited_fields(payload) {
+                    match f {
+                        8 => name = Some(utf8(p)),
+                        4 | 9 if p.len() == 4 => {
+                            value = Some(f32::from_le_bytes([p[0], p[1], p[2], p[3]]));
+                        }
+                        _ => {}
+                    }
+                }
+                if let (Some(name), Some(value)) = (name, value) {
+                    scalars.push((name, value));
+                }
+            }
+            _ => {}
+        }
+    }
+    (nodes, scalars)
+}
+
+/// SFC5: the real SFace graph normalizes its raw input itself: `data` feeds only a `Sub` by
+/// 127.5 whose output feeds a `Mul` by 1/128. The extractor must therefore feed raw 0..255.
+#[test]
+fn test_real_sface_graph_normalizes_in_graph() {
+    if !model_present(
+        EMBEDDING_MODEL_FILE,
+        "test_real_sface_graph_normalizes_in_graph",
+    ) {
+        return;
+    }
+    let path = models_dir().join(EMBEDDING_MODEL_FILE);
+    let size = std::fs::metadata(&path).expect("model metadata").len();
+    assert_eq!(
+        size, EMBEDDING_MODEL_BYTES,
+        "only the attested file is parsed"
+    );
+    let model = std::fs::read(&path).expect("read model");
+    let (nodes, scalars) = graph_nodes_and_scalars(&model);
+    let scalar = |name: &str| {
+        scalars
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, v)| *v)
+            .unwrap_or_else(|| panic!("scalar initializer {name} missing"))
+    };
+
+    let consumers: Vec<&GraphNode> = nodes
+        .iter()
+        .filter(|n| n.1.iter().any(|i| i == "data"))
+        .collect();
+    assert_eq!(consumers.len(), 1, "exactly one operator consumes data");
+    let sub = consumers[0];
+    assert_eq!(sub.0, "Sub", "data first goes through a Sub");
+    assert_eq!(sub.1[0], "data");
+    assert!(
+        (scalar(&sub.1[1]) - 127.5).abs() < 1e-6,
+        "the Sub subtracts 127.5"
+    );
+
+    let sub_out = &sub.2[0];
+    let muls: Vec<&GraphNode> = nodes
+        .iter()
+        .filter(|n| n.1.iter().any(|i| i == sub_out))
+        .collect();
+    assert_eq!(muls.len(), 1, "exactly one operator consumes the Sub");
+    assert_eq!(muls[0].0, "Mul", "the Sub feeds a Mul");
+    let factor = muls[0]
+        .1
+        .iter()
+        .find(|i| *i != sub_out)
+        .expect("Mul factor");
+    assert!(
+        (scalar(factor) - 1.0 / 128.0).abs() < 1e-9,
+        "the Mul scales by 1/128"
+    );
+    println!("REAL SFACE GRAPH: data -> Sub(127.5) -> Mul(1/128); the extractor feeds raw 0..255");
+}
+
+/// SFC6: the production extractor reproduces the OpenCV `FaceRecognizerSF::feature` recipe
+/// (`blobFromImage(aligned, 1, Size(112, 112), Scalar(0, 0, 0), swapRB = true)`: RGB planes, raw
+/// 0..255, NCHW) on the real session, then L2-normalizes.
+#[test]
+fn test_raw_opencv_recipe_matches_the_production_extractor() {
+    let Some(session) =
+        load_real_embedding_session("test_raw_opencv_recipe_matches_the_production_extractor")
+    else {
+        return;
+    };
+    let extractor = OrtEmbeddingExtractor::new(session.clone());
+    let crop = gradient_112();
+    let production = extractor
+        .extract_embedding(&crop, 112, 112)
+        .expect("production extractor");
+
+    let plane = 112 * 112;
+    let mut input = vec![0.0f32; 3 * plane];
+    for (i, px) in crop.as_chunks::<3>().0.iter().enumerate() {
+        input[i] = f32::from(px[0]);
+        input[plane + i] = f32::from(px[1]);
+        input[2 * plane + i] = f32::from(px[2]);
+    }
+    let tensor = ort::value::TensorRef::from_array_view(([1usize, 3, 112, 112], input.as_slice()))
+        .expect("input tensor");
+    let raw = {
+        let mut guard = session.lock().expect("session mutex");
+        let outputs = guard.run(ort::inputs![tensor]).expect("inference");
+        outputs
+            .values()
+            .next()
+            .expect("one output")
+            .try_extract_tensor::<f32>()
+            .expect("f32 output")
+            .1
+            .to_vec()
+    };
+    assert_eq!(raw.len(), EMBEDDING_DIM);
+    let norm = raw.iter().map(|v| v * v).sum::<f32>().sqrt();
+    assert!(
+        norm.is_finite() && norm > 0.0,
+        "raw output norm must be positive"
+    );
+    let cos: f32 = raw
+        .iter()
+        .zip(production.as_slice())
+        .map(|(r, p)| r / norm * p)
+        .sum();
+    assert!(
+        cos > 0.9999,
+        "the OpenCV RGB raw NCHW recipe must reproduce the production extractor (cos = {cos})"
+    );
+}
+
+/// Minimal `tracing` subscriber recording the messages of WARN-or-higher events.
+struct WarningRecorder(std::sync::Mutex<Vec<String>>);
+
+struct MessageVisitor<'a>(&'a mut String);
+
+impl tracing::field::Visit for MessageVisitor<'_> {
+    fn record_debug(&mut self, _field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        self.0.push_str(&format!("{value:?}"));
+    }
+}
+
+impl tracing::Subscriber for WarningRecorder {
+    fn enabled(&self, _metadata: &tracing::Metadata<'_>) -> bool {
+        true
+    }
+    fn new_span(&self, _span: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        tracing::span::Id::from_u64(1)
+    }
+    fn record(&self, _span: &tracing::span::Id, _values: &tracing::span::Record<'_>) {}
+    fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
+    fn event(&self, event: &tracing::Event<'_>) {
+        if *event.metadata().level() <= tracing::Level::WARN {
+            let mut message = String::new();
+            event.record(&mut MessageVisitor(&mut message));
+            self.0.lock().expect("recorder").push(message);
+        }
+    }
+    fn enter(&self, _span: &tracing::span::Id) {}
+    fn exit(&self, _span: &tracing::span::Id) {}
+}
+
+/// Counts the "initializer appears in graph inputs" warnings emitted while `load` runs.
+fn initializer_warnings(load: impl FnOnce()) -> usize {
+    let recorder = std::sync::Arc::new(WarningRecorder(std::sync::Mutex::new(Vec::new())));
+    tracing::subscriber::with_default(std::sync::Arc::clone(&recorder), load);
+    let messages = recorder.0.lock().expect("recorder");
+    messages
+        .iter()
+        .filter(|m| m.contains("appears in graph inputs"))
+        .count()
+}
+
+/// SFC18 (GitHub #278, owner decision 2026-10-01): the registry session of SFace logs at
+/// `Error` level, so its 174 "initializer appears in graph inputs" warnings do not reach the
+/// journal; a default session of the same file emits them (the filter is what removes them).
+#[test]
+fn test_registry_silences_sface_initializer_warnings_only() {
+    if !model_present(
+        EMBEDDING_MODEL_FILE,
+        "test_registry_silences_sface_initializer_warnings_only",
+    ) {
+        return;
+    }
+    assert_eq!(
+        soos_inference_ort::registry::ort_session_log_level(EMBEDDING_MODEL_ID),
+        ort::logging::LogLevel::Error
+    );
+    for other in ["scrfd_500m_kps", "minifasnet_v2_pad"] {
+        assert_eq!(
+            soos_inference_ort::registry::ort_session_log_level(other),
+            ort::logging::LogLevel::Warning,
+            "{other} keeps ORT warnings"
+        );
+    }
+
+    let bytes = std::fs::read(models_dir().join(EMBEDDING_MODEL_FILE)).expect("read model");
+    let noisy = initializer_warnings(|| {
+        let _session = ort::session::Session::builder()
+            .expect("builder")
+            .commit_from_memory(&bytes)
+            .expect("default session");
+    });
+    println!("SFACE initializer warnings: default session {noisy}");
+    assert!(
+        noisy > 0,
+        "a default session of the SFace file emits the warnings"
+    );
+
+    let quiet = initializer_warnings(|| {
+        repo_registry()
+            .get_or_load_session(EMBEDDING_MODEL_ID)
+            .expect("registry session");
+    });
+    assert_eq!(quiet, 0, "the registry session of SFace must not emit them");
 }

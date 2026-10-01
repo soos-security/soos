@@ -26,11 +26,12 @@ GitHub #241). It contains no facial image, no serialized tensor and no embedding
 Every test consumes `soos-test-fixtures` through `[dev-dependencies]`; it is never a normal
 dependency. No `#[path]` include of `tests/fixtures/mod.rs` remains: the legacy list
 `LEGACY_PATH_INCLUDES` in `tests/invariants/src/fixtures_contract.rs` is empty and any new
-include fails that invariant. Face embeddings are 512D
-(ArcFace, `AI/DECISIONS.md`); embedding tests build their vectors locally. Real face captures
+include fails that invariant. Face embeddings have the dimension of the shipped model
+(`soos_inference_ort::EMBEDDING_DIMENSION`, SFace, `AI/DECISIONS.md`; `MockEmbeddingExtractor`
+defaults to it); embedding tests build their vectors locally. Real face captures
 (detection, alignment, matching accuracy) are covered only by the physical suite (`tests/physical/`).
 
-Face detection (SCRFD), 112x112 alignment, MiniFASNetV2 PAD and ArcFace 512D embeddings are exercised
+Face detection (SCRFD), 112x112 alignment, MiniFASNetV2 PAD and SFace embeddings are exercised
 through the mock backends above. Real-model evidence lives in
 `crates/inference-ort/tests/pad_real_model_tests.rs` and `embedding_real_model_tests.rs`, which skip
 cleanly when `/var/lib/soos/models` is absent.

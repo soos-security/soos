@@ -24,11 +24,12 @@ pub const DECISION_BUDGET_MS: u64 = 900;
 /// passing captures required by `soos_policy::PadAggregator` are reached with minimal latency.
 pub const FRAME_POLL_INTERVAL_MS: u64 = 10;
 
-/// Attested manifest identifier of the embedding extractor loaded by the daemon.
+/// Attested manifest identifier of the embedding extractor loaded by the daemon
+/// (`sface_2021dec`, derived from `soos_inference_ort::SHIPPED_EMBEDDING_MODEL`, GitHub #278).
 ///
 /// Enrolled templates recorded with a different `model_id` are refused
 /// (GitHub #182 / STO-09): their vectors live in another embedding space.
-pub const EMBEDDING_MODEL_ID: &str = "arcface_w600k_mbf";
+pub const EMBEDDING_MODEL_ID: &str = soos_inference_ort::SHIPPED_EMBEDDING_MODEL.model_id;
 
 /// Attested manifest identifier of the Presentation Attack Detection model.
 pub const PAD_MODEL_ID: &str = "minifasnet_v2_pad";
@@ -47,45 +48,51 @@ pub const SECONDARY_PAD_BBOX_SCALE: f32 = 4.0;
 /// Optional PAD ensemble members `(manifest id, crop scale)`, in fusion order.
 const OPTIONAL_PAD_MEMBERS: [(&str, f32); 1] = [(SECONDARY_PAD_MODEL_ID, SECONDARY_PAD_BBOX_SCALE)];
 
-/// Historical `model_id` accepted as an alias of [`EMBEDDING_MODEL_ID`].
-///
-/// `soos-enroll enroll` recorded `mobilefacenet` / `1.0.0` by default until GitHub #182
-/// although the vectors were produced by the ArcFace extractor. Accepted only together
-/// with [`LEGACY_EMBEDDING_MODEL_ALIAS_VERSION`] (ADR 2026-09-30 "Legacy Embedding Model
-/// Alias"); scheduled for removal once affected users have re-enrolled.
-pub const LEGACY_EMBEDDING_MODEL_ALIAS_ID: &str = "mobilefacenet";
-
-/// Exact `model_version` that must accompany [`LEGACY_EMBEDDING_MODEL_ALIAS_ID`].
-pub const LEGACY_EMBEDDING_MODEL_ALIAS_VERSION: &str = "1.0.0";
-
 /// Compatibility of an enrolled template with the loaded embedding model.
+///
+/// The legacy `mobilefacenet` / `1.0.0` alias of the retired ArcFace extractor was removed with
+/// the SFace switch (owner decision 2026-10-01, GitHub #278): such templates are `Foreign`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TemplateModelBinding {
     /// The template records the loaded embedding model.
     Current,
-    /// The template records the historical CLI default aliasing the ArcFace extractor.
-    LegacyAlias,
     /// The template belongs to another embedding space and must be refused.
     Foreign,
 }
 
-/// Classifies a template's recorded model against the loaded embedding model.
-///
-/// The legacy alias is honoured only when the loaded model is [`EMBEDDING_MODEL_ID`] and
-/// both the id and the version match exactly (no trimming, no case folding).
+/// Classifies a template's recorded model id against the loaded embedding model: `Current`
+/// only for the exact id (no alias, no trimming, no case folding). `template_model_version` is
+/// ignored: the binding is by model id (and by dimension in [`classify_template`]).
 #[must_use]
 pub fn classify_template_model(
     loaded_model_id: &str,
     template_model_id: &str,
     template_model_version: &str,
 ) -> TemplateModelBinding {
+    let _ = template_model_version;
     if template_model_id == loaded_model_id {
         TemplateModelBinding::Current
-    } else if loaded_model_id == EMBEDDING_MODEL_ID
-        && template_model_id == LEGACY_EMBEDDING_MODEL_ALIAS_ID
-        && template_model_version == LEGACY_EMBEDDING_MODEL_ALIAS_VERSION
-    {
-        TemplateModelBinding::LegacyAlias
+    } else {
+        TemplateModelBinding::Foreign
+    }
+}
+
+/// Classifies a template by model id **and** vector length (GitHub #278): `Foreign` when the
+/// ids differ or when the loaded extractor reports a dimension the template does not have.
+#[must_use]
+pub fn classify_template(
+    loaded_model_id: &str,
+    loaded_dimension: Option<usize>,
+    template_model_id: &str,
+    template_dimension: usize,
+) -> TemplateModelBinding {
+    if soos_inference_ort::template_matches_model(
+        loaded_model_id,
+        loaded_dimension,
+        template_model_id,
+        template_dimension,
+    ) {
+        TemplateModelBinding::Current
     } else {
         TemplateModelBinding::Foreign
     }

@@ -5,7 +5,7 @@
 //! - `--file -` (`IMPORT_STDIN_PATH`) reads the embedding from standard input, so the GUI never
 //!   writes the plaintext template to disk; `import_from_reader` is the testable entry point.
 //! - Every input (stdin or file) is capped at `MAX_IMPORT_INPUT_BYTES` (64 KiB) while reading.
-//! - The embedding must be a 512-value array of finite floats; anything else is refused and
+//! - The embedding must be an `IMPORT_EMBEDDING_DIM`-value (128, SFace) array of finite floats; anything else is refused and
 //!   nothing is stored.
 //! - A file input is opened without following symlinks, must be a regular file within the cap
 //!   and, under `pkexec`, must be owned by `PKEXEC_UID`.
@@ -47,7 +47,7 @@ fn stdin_args(uid: u32) -> ImportArgs {
         uid: Some(uid),
         username: None,
         file: PathBuf::from(IMPORT_STDIN_PATH),
-        model_id: "arcface_w600k_mbf".to_string(),
+        model_id: soos_enrollment_cli::service::MODEL_ID_EMBEDDING.to_string(),
         model_version: "2.0.0".to_string(),
     }
 }
@@ -67,16 +67,20 @@ fn test_import_stdin_marker_is_accepted_by_the_cli() {
 fn test_import_reads_embedding_from_stdin() {
     let tmp = tempdir().unwrap();
     let (service, store) = service(&tmp);
-    let json = serde_json::to_string(&vec![0.042f32; 512]).unwrap();
+    let json = serde_json::to_string(&vec![
+        0.042f32;
+        soos_enrollment_cli::service::IMPORT_EMBEDDING_DIM
+    ])
+    .unwrap();
 
     let outcome = service
         .import_from_reader(&stdin_args(1000), Cursor::new(json.into_bytes()))
         .expect("stdin import must succeed");
     assert_eq!(outcome.uid, 1000);
-    assert_eq!(outcome.embedding_dim, 512);
+    assert_eq!(outcome.embedding_dim, 128);
 
     let loaded = store.get(1000).unwrap().expect("template stored");
-    assert_eq!(loaded.embedding.len(), 512);
+    assert_eq!(loaded.embedding.len(), 128);
     assert!((loaded.embedding[0] - 0.042).abs() < 1e-5);
 }
 
@@ -98,9 +102,12 @@ fn test_import_stdin_rejects_oversized_input_while_reading() {
     let (service, store) = service(&tmp);
 
     // A valid array followed by whitespace padding is valid JSON: only the cap rejects it.
-    let mut padded = serde_json::to_string(&vec![0.042f32; 512])
-        .unwrap()
-        .into_bytes();
+    let mut padded = serde_json::to_string(&vec![
+        0.042f32;
+        soos_enrollment_cli::service::IMPORT_EMBEDDING_DIM
+    ])
+    .unwrap()
+    .into_bytes();
     padded.resize(MAX_IMPORT_INPUT_BYTES + 1, b' ');
     assert!(service
         .import_from_reader(&stdin_args(1000), Cursor::new(padded))
@@ -123,16 +130,20 @@ fn test_import_rejects_malformed_or_non_finite_embeddings() {
     let tmp = tempdir().unwrap();
     let (service, store) = service(&tmp);
 
-    let mut overflowing: Vec<String> = vec!["0.1".to_string(); 512];
+    let mut overflowing: Vec<String> =
+        vec!["0.1".to_string(); soos_enrollment_cli::service::IMPORT_EMBEDDING_DIM];
     overflowing[7] = "1e39".to_string(); // overflows f32 to +inf
     let payloads: Vec<Vec<u8>> = vec![
         format!("[{}]", overflowing.join(",")).into_bytes(),
         b"[0.1, 0.2".to_vec(),
         b"{\"embedding\": []}".to_vec(),
         b"".to_vec(),
-        serde_json::to_string(&vec![0.1f32; 511])
-            .unwrap()
-            .into_bytes(),
+        serde_json::to_string(&vec![
+            0.1f32;
+            soos_enrollment_cli::service::IMPORT_EMBEDDING_DIM - 1
+        ])
+        .unwrap()
+        .into_bytes(),
     ];
     for payload in payloads {
         assert!(
@@ -150,9 +161,12 @@ fn test_import_file_rejects_oversized_file() {
     let tmp = tempdir().unwrap();
     let (service, store) = service(&tmp);
     let path = tmp.path().join("big.json");
-    let mut padded = serde_json::to_string(&vec![0.042f32; 512])
-        .unwrap()
-        .into_bytes();
+    let mut padded = serde_json::to_string(&vec![
+        0.042f32;
+        soos_enrollment_cli::service::IMPORT_EMBEDDING_DIM
+    ])
+    .unwrap()
+    .into_bytes();
     padded.resize(MAX_IMPORT_INPUT_BYTES + 1, b' ');
     std::fs::write(&path, padded).unwrap();
 
@@ -172,7 +186,15 @@ fn test_import_file_rejects_oversized_file() {
 fn test_import_file_owner_must_match_pkexec_uid() {
     let tmp = tempdir().unwrap();
     let path = tmp.path().join("embedding.json");
-    std::fs::write(&path, serde_json::to_string(&vec![0.042f32; 512]).unwrap()).unwrap();
+    std::fs::write(
+        &path,
+        serde_json::to_string(&vec![
+            0.042f32;
+            soos_enrollment_cli::service::IMPORT_EMBEDDING_DIM
+        ])
+        .unwrap(),
+    )
+    .unwrap();
     let me = nix::unistd::getuid().as_raw();
 
     assert!(read_import_file(&path, None).is_ok());
@@ -189,7 +211,11 @@ fn test_import_file_refuses_symlinks_and_non_regular_files() {
     let target = tmp.path().join("embedding.json");
     std::fs::write(
         &target,
-        serde_json::to_string(&vec![0.042f32; 512]).unwrap(),
+        serde_json::to_string(&vec![
+            0.042f32;
+            soos_enrollment_cli::service::IMPORT_EMBEDDING_DIM
+        ])
+        .unwrap(),
     )
     .unwrap();
     let link = tmp.path().join("link.json");

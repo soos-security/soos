@@ -80,6 +80,23 @@ pub enum EnrollmentCliError {
     #[error("Invalid import input: {0}")]
     InvalidImport(String),
 
+    /// The stored template belongs to another embedding model or has another vector length
+    /// than the loaded model (for example the retired ArcFace): re-enrollment is required
+    /// (GitHub #278). Carries metadata only, never vector values.
+    #[error(
+        "template of UID {uid} was enrolled with model '{template_model_id}' \
+         ({template_dimension}-D), not the loaded embedding model: re-enroll with \
+         `soos-enroll enroll`"
+    )]
+    TemplateModelMismatch {
+        /// Target UID.
+        uid: u32,
+        /// Model id recorded in the template.
+        template_model_id: String,
+        /// Length of the stored vector.
+        template_dimension: usize,
+    },
+
     #[error("Invalid path or path traversal attempt: {0}")]
     InvalidPath(String),
 

@@ -26,7 +26,7 @@ fn test_import_json_decodes_into_a_buffer_that_never_grows() {
         0_usize,
         1,
         3,
-        257,
+        IMPORT_EMBEDDING_DIM / 2 + 1,
         IMPORT_EMBEDDING_DIM - 1,
         IMPORT_EMBEDDING_DIM,
     ] {

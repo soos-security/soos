@@ -12,7 +12,7 @@
 )]
 
 use soos_inference_ort::embedding::{
-    BiometricEmbedding, EmbeddingExtractor, OrtEmbeddingExtractor,
+    BiometricEmbedding, EmbeddingExtractor, OrtEmbeddingExtractor, EMBEDDING_DIMENSION,
 };
 use soos_inference_ort::error::InferenceError;
 use soos_inference_ort::mock::MockEmbeddingExtractor;
@@ -139,7 +139,7 @@ fn test_mock_embedding_extractor_criterion_v2() {
 }
 
 #[test]
-fn test_embedding_normalization_symmetric_range() {
+fn test_embedding_input_is_raw_0_255() {
     // Test input with pixel values 0, 127, 128, and 255
     let width = 112u32;
     let height = 112u32;
@@ -158,36 +158,36 @@ fn test_embedding_normalization_symmetric_range() {
     let input_tensor = OrtEmbeddingExtractor::prepare_input(&pixels, width, height)
         .expect("prepare_input must succeed");
 
-    // Under BGR NCHW layout:
-    // Pixel 0 has R=0, G=127, B=255.
-    // Channel 0 is B (value 255): (255.0 - 127.5) / 127.5 == +1.0
-    let norm_255 = input_tensor[0];
+    // SFace RGB NCHW layout, raw values (the graph applies (x - 127.5) / 128 itself).
+    let plane = (width * height) as usize;
+    let last = plane - 1;
+    // Pixel 0: R=0 on plane 0, G=127 on plane 1, B=255 on plane 2.
     assert!(
-        (norm_255 - 1.0).abs() < 1e-6,
-        "Pixel value 255 must normalize to +1.0, got: {norm_255}"
+        input_tensor[0].abs() < 1e-6,
+        "R=0 must stay 0.0, got {}",
+        input_tensor[0]
     );
-
-    // Channel 2 is R (value 0): (0.0 - 127.5) / 127.5 == -1.0
-    let norm_0 = input_tensor[2 * (width * height) as usize];
     assert!(
-        (norm_0 - (-1.0)).abs() < 1e-6,
-        "Pixel value 0 must normalize to -1.0, got: {norm_0}"
+        (input_tensor[plane] - 127.0).abs() < 1e-6,
+        "G=127 must stay 127.0, got {}",
+        input_tensor[plane]
     );
-
-    // Pixel value 127: (127.0 - 127.5) / 127.5 = -0.5 / 127.5
-    // Pixel value 128: (128.0 - 127.5) / 127.5 = +0.5 / 127.5
-    let norm_127 = input_tensor[(width * height) as usize]; // G channel for pixel 0
-    let norm_128 = input_tensor[(width * height) as usize + (width * height - 1) as usize]; // G channel for last pixel
     assert!(
-        (norm_127 + norm_128).abs() < 1e-6,
-        "Values around 127.5 must be anti-symmetric, got norm_127={norm_127}, norm_128={norm_128}"
+        (input_tensor[2 * plane] - 255.0).abs() < 1e-6,
+        "B=255 must stay 255.0, got {}",
+        input_tensor[2 * plane]
     );
+    // Last pixel: R=255, G=128, B=0.
+    assert!((input_tensor[last] - 255.0).abs() < 1e-6);
+    assert!((input_tensor[plane + last] - 128.0).abs() < 1e-6);
+    assert!(input_tensor[2 * plane + last].abs() < 1e-6);
 }
 
 #[test]
-fn test_mock_embedding_default_512d() {
+fn test_mock_embedding_default_matches_embedding_dimension() {
     let mock_default = MockEmbeddingExtractor::default();
-    assert_eq!(mock_default.dim(), 512);
+    assert_eq!(mock_default.dim(), EMBEDDING_DIMENSION);
+    assert_eq!(EMBEDDING_DIMENSION, 128);
 
     let dummy_112x112 = vec![120u8; 112 * 112 * 3];
     let emb = mock_default
@@ -196,8 +196,8 @@ fn test_mock_embedding_default_512d() {
 
     assert_eq!(
         emb.len(),
-        512,
-        "Mock embedding extractor must produce 512D vectors by default for ArcFace w600k"
+        128,
+        "Mock embedding extractor must produce 128D vectors by default like the shipped SFace model"
     );
 
     let norm = emb.l2_norm();
@@ -208,15 +208,15 @@ fn test_mock_embedding_default_512d() {
     );
 
     let mock_new_default = MockEmbeddingExtractor::new_default();
-    assert_eq!(mock_new_default.dim(), 512);
+    assert_eq!(mock_new_default.dim(), 128);
     let emb_new_default = mock_new_default
         .extract_embedding(&dummy_112x112, 112, 112)
         .expect("extraction failed");
-    assert_eq!(emb_new_default.len(), 512);
+    assert_eq!(emb_new_default.len(), 128);
 }
 
 #[test]
-fn test_prepare_input_layout_nhwc_and_nchw() {
+fn test_prepare_input_writes_rgb_nchw_planes() {
     let width = 112u32;
     let height = 112u32;
     let mut pixels = vec![0u8; (width * height * 3) as usize];
@@ -224,66 +224,56 @@ fn test_prepare_input_layout_nhwc_and_nchw() {
     pixels[0] = 0;
     pixels[1] = 127;
     pixels[2] = 255;
+    // Last pixel: R=10, G=20, B=30
+    let last_idx = ((width * height * 3) - 3) as usize;
+    pixels[last_idx] = 10;
+    pixels[last_idx + 1] = 20;
+    pixels[last_idx + 2] = 30;
 
-    // Test NCHW layout: ArcFace w600k expects BGR channel ordering (B=0, G=1, R=2)
-    let nchw = OrtEmbeddingExtractor::prepare_input_layout(&pixels, width, height, false)
-        .expect("prepare_input_layout NCHW must succeed");
+    // SFace: NCHW planes in R, G, B order (R=0, G=1, B=2), raw values.
+    let nchw = OrtEmbeddingExtractor::prepare_input(&pixels, width, height)
+        .expect("prepare_input must succeed");
     assert_eq!(nchw.len(), 3 * 112 * 112);
+    assert!(nchw[0].abs() < 1e-6, "Plane 0 must be R (value 0.0)");
     assert!(
-        (nchw[0] - 1.0).abs() < 1e-6,
-        "Channel 0 must be B (value 1.0)"
+        (nchw[112 * 112] - 127.0).abs() < 1e-6,
+        "Plane 1 must be G (value 127.0)"
     );
     assert!(
-        (nchw[112 * 112] - ((127.0 - 127.5) / 127.5)).abs() < 1e-6,
-        "Channel 1 must be G"
+        (nchw[2 * 112 * 112] - 255.0).abs() < 1e-6,
+        "Plane 2 must be B (value 255.0)"
     );
+    let last = 112 * 112 - 1;
+    assert!((nchw[last] - 10.0).abs() < 1e-6, "last pixel R");
+    assert!((nchw[112 * 112 + last] - 20.0).abs() < 1e-6, "last pixel G");
     assert!(
-        (nchw[2 * 112 * 112] - (-1.0)).abs() < 1e-6,
-        "Channel 2 must be R (value -1.0)"
-    );
-
-    // Test NHWC layout: Pixel layout must be [B, G, R]
-    let nhwc = OrtEmbeddingExtractor::prepare_input_layout(&pixels, width, height, true)
-        .expect("prepare_input_layout NHWC must succeed");
-    assert_eq!(nhwc.len(), 3 * 112 * 112);
-    assert!(
-        (nhwc[0] - 1.0).abs() < 1e-6,
-        "Index 0 must be B (value 1.0)"
-    );
-    assert!(
-        (nhwc[1] - ((127.0 - 127.5) / 127.5)).abs() < 1e-6,
-        "Index 1 must be G"
-    );
-    assert!(
-        (nhwc[2] - (-1.0)).abs() < 1e-6,
-        "Index 2 must be R (value -1.0)"
+        (nchw[2 * 112 * 112 + last] - 30.0).abs() < 1e-6,
+        "last pixel B"
     );
 }
 
 #[test]
-fn test_arcface_input_bgr_ordering() {
+fn test_sface_input_rgb_ordering() {
     let width = 112u32;
     let height = 112u32;
     // Pure Red image (R=255, G=0, B=0)
     let red_pixels = [255, 0, 0].repeat(112 * 112);
 
-    let tensor = OrtEmbeddingExtractor::prepare_input_layout(&red_pixels, width, height, false)
-        .expect("prepare_input_layout must succeed");
+    let tensor = OrtEmbeddingExtractor::prepare_input(&red_pixels, width, height)
+        .expect("prepare_input must succeed");
 
-    // In BGR NCHW layout:
-    // Channel 0 (B) should be -1.0 ((0 - 127.5)/127.5)
-    // Channel 1 (G) should be -1.0 ((0 - 127.5)/127.5)
-    // Channel 2 (R) should be +1.0 ((255 - 127.5)/127.5)
+    // In RGB NCHW raw layout:
+    // Plane 0 (R) should be 255.0, planes 1 (G) and 2 (B) should be 0.0
     assert!(
-        (tensor[0] - (-1.0)).abs() < 1e-5,
-        "BGR Channel 0 (B) must be normalized from 0 to -1.0"
+        (tensor[0] - 255.0).abs() < 1e-5,
+        "RGB plane 0 (R) must carry the raw red value 255.0"
     );
     assert!(
-        (tensor[112 * 112] - (-1.0)).abs() < 1e-5,
-        "BGR Channel 1 (G) must be normalized from 0 to -1.0"
+        tensor[112 * 112].abs() < 1e-5,
+        "RGB plane 1 (G) must be 0.0"
     );
     assert!(
-        (tensor[2 * 112 * 112] - 1.0).abs() < 1e-5,
-        "BGR Channel 2 (R) must be normalized from 255 to +1.0"
+        tensor[2 * 112 * 112].abs() < 1e-5,
+        "RGB plane 2 (B) must be 0.0"
     );
 }

@@ -44,7 +44,7 @@ const H: u32 = 480;
 const REQUIRED_FILES: [&str; 3] = [
     "scrfd_500m_kps.onnx",
     "minifasnet_v2_80x80.onnx",
-    "arcface_w600k_mbf.onnx",
+    "sface_2021dec.onnx",
 ];
 
 fn models_dir(test: &str) -> Option<PathBuf> {

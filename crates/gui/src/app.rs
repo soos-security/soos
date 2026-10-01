@@ -53,7 +53,10 @@ pub struct SoosApp {
     /// Persistent developer-mode warning shown on every frame (GitHub #156).
     store_banner: Option<String>,
     camera: Arc<dyn CameraManager>,
-    _pipeline: Arc<VisionPipeline>,
+    pipeline: Arc<VisionPipeline>,
+    /// Why the selected profile cannot be live-matched (template of another embedding model,
+    /// GitHub #278), shown instead of a score.
+    match_reference_note: Option<String>,
     latest_frame_slot: Arc<ArcSwapOption<LatestFrameData>>,
     worker_input: Arc<WorkerSharedInput>,
     worker_running: Arc<AtomicBool>,
@@ -154,7 +157,8 @@ impl SoosApp {
             store,
             store_banner,
             camera,
-            _pipeline: pipeline,
+            pipeline,
+            match_reference_note: None,
             latest_frame_slot,
             worker_input,
             worker_running,
@@ -670,7 +674,7 @@ impl SoosApp {
                                 painter.text(
                                     Pos2::new(inset_rect.min.x + 2.0, inset_rect.min.y - 4.0),
                                     egui::Align2::LEFT_BOTTOM,
-                                    "ArcFace (112×112)",
+                                    "SFace (112×112)",
                                     egui::FontId::proportional(11.0),
                                     Color32::LIGHT_GRAY,
                                 );
@@ -790,21 +794,48 @@ impl SoosApp {
                                                     .local()
                                                     .and_then(|s| s.get(p.uid).ok().flatten())
                                                 {
+                                                    // Only a template of the loaded embedding
+                                                    // model is a match reference (GitHub #278).
+                                                    let current =
+                                                        soos_inference_ort::template_matches_model(
+                                                            soos_enrollment_cli::service::MODEL_ID_EMBEDDING,
+                                                            self.pipeline.embedding_dimension(),
+                                                            &template.model_id,
+                                                            template.embedding.len(),
+                                                        );
+                                                    self.match_reference_note = (!current).then(|| {
+                                                        format!(
+                                                            "Re-enrollment required: this template was enrolled with model '{}' ({}-D)",
+                                                            template.model_id,
+                                                            template.embedding.len()
+                                                        )
+                                                    });
                                                     if let Ok(mut ref_guard) =
                                                         self.worker_input.match_reference.lock()
                                                     {
-                                                        *ref_guard = Some(
-                                                            template.embedding.as_slice().to_vec(),
-                                                        );
+                                                        *ref_guard = current.then(|| {
+                                                            template.embedding.as_slice().to_vec()
+                                                        });
+                                                    }
+                                                    if !current {
+                                                        if let Ok(mut score_guard) =
+                                                            self.worker_input.live_match_score.lock()
+                                                        {
+                                                            *score_guard = None;
+                                                        }
                                                     }
                                                 }
                                             }
                                         }
                                     });
 
+                                if let Some(note) = &self.match_reference_note {
+                                    ui.add_space(8.0);
+                                    ui.colored_label(Color32::YELLOW, note);
+                                }
                                 if let Ok(score_guard) = self.worker_input.live_match_score.lock() {
                                     if let Some(score) = *score_guard {
-                                        let match_threshold = 0.70f32;
+                                        let match_threshold = self.pipeline.config().match_threshold;
                                         let is_match = score >= match_threshold;
                                         ui.add_space(8.0);
                                         ui.label(format!("Cosine Match Score: {:.4}", score));

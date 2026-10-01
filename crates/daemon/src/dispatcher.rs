@@ -16,7 +16,7 @@ use crate::limits::{PeerConnectionLimiter, PeerLimitsConfig};
 use crate::logging::short_request_id;
 use crate::peercred::{get_peer_credentials, verify_peer_credentials, PeerCredentials};
 use crate::pipeline::{
-    classify_template_model, current_monotonic_nanos, PipelineComponents, TemplateModelBinding,
+    classify_template, current_monotonic_nanos, PipelineComponents, TemplateModelBinding,
     FRAME_POLL_INTERVAL_MS, MAX_FRAME_AGE_NS,
 };
 use crate::preview::{
@@ -884,27 +884,20 @@ impl ConnectionDispatcher {
                 }
             };
 
-            // 8d: Refuse templates enrolled with another embedding model (GitHub #182).
+            // 8d: Refuse templates enrolled with another embedding model or of another
+            // vector length (GitHub #182, #278), before any capture is evaluated.
             if let Some(expected) = self.expected_embedding_model.as_deref() {
-                let binding = classify_template_model(
+                let binding = classify_template(
                     expected,
+                    pipe.vision.embedding_dimension(),
                     &enrolled_template.model_id,
-                    &enrolled_template.model_version,
+                    enrolled_template.embedding.len(),
                 );
-                if binding == TemplateModelBinding::LegacyAlias {
-                    warn!(
-                        uid = req.uid_hint,
-                        template_model = ?enrolled_template.model_id,
-                        template_version = ?enrolled_template.model_version,
-                        loaded_model = %expected,
-                        "Enrolled template carries the legacy model alias; accepted as the \
-                         loaded embedding model, re-enrollment with soos-enroll is recommended"
-                    );
-                }
                 if binding == TemplateModelBinding::Foreign {
                     warn!(
                         uid = req.uid_hint,
                         template_model = ?enrolled_template.model_id,
+                        template_dimension = enrolled_template.embedding.len(),
                         loaded_model = %expected,
                         "Enrolled template was recorded with a different embedding model; \
                          re-enrollment required, returning Unavailable"

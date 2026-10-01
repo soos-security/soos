@@ -66,7 +66,7 @@ fn setup_with_camera(
     let enrolled = extractor.extract_embedding(&sample_crop, 112, 112).unwrap();
     let template = BiometricTemplate::new(
         2000,
-        "mobilefacenet".to_string(),
+        soos_enrollment_cli::service::MODEL_ID_EMBEDDING.to_string(),
         "1.0.0".to_string(),
         1_700_000_000,
         Zeroizing::new(enrolled.as_slice().to_vec()),
@@ -184,7 +184,7 @@ fn test_verify_no_face_reports_no_pad_score() {
         .enroll(
             &BiometricTemplate::new(
                 2000,
-                "mobilefacenet".to_string(),
+                soos_enrollment_cli::service::MODEL_ID_EMBEDDING.to_string(),
                 "1.0.0".to_string(),
                 1_700_000_000,
                 Zeroizing::new(enrolled.as_slice().to_vec()),

@@ -22,9 +22,10 @@ use soos_vision::{
 
 #[test]
 fn test_vision_threshold_constants_values() {
-    // Never lower: these are the daemon (authentication) values.
+    // Daemon (authentication) values; the match default is 0.50 since the SFace switch
+    // (owner decision 2026-10-01, GitHub #278).
     assert_eq!(DEFAULT_MIN_FACE_CONFIDENCE, 0.70);
-    assert_eq!(DEFAULT_MATCH_THRESHOLD, 0.70);
+    assert_eq!(DEFAULT_MATCH_THRESHOLD, 0.50);
     assert_eq!(DEFAULT_PAD_THRESHOLD, 0.85);
     assert_eq!(DEFAULT_NMS_IOU_THRESHOLD, 0.45);
 }

@@ -14,8 +14,8 @@ use soos_policy::{PolicyError, ThresholdConfig};
 #[test]
 fn test_threshold_defaults_match_literature() {
     let config = ThresholdConfig::default();
-    // Chen et al. (2018) MobileFaceNet cosine threshold for FAR <= 0.1%
-    assert!((config.match_threshold() - 0.70).abs() < f32::EPSILON);
+    // SFace on LFW (walkthrough 160): FAR 3.9e-6 / TAR 0.957 at 0.50, target FAR <= 0.1%
+    assert!((config.match_threshold() - 0.50).abs() < f32::EPSILON);
     // NIST SP 800-63B / IR 8491 guidance for PAD
     assert!((config.pad_threshold() - 0.85).abs() < f32::EPSILON);
 }

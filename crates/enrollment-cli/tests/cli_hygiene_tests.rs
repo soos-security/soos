@@ -77,7 +77,15 @@ fn full_service(tmp: &TempDir) -> (EnrollmentService, Arc<BiometricStore>) {
 
 fn write_embedding(dir: &Path, name: &str, value: f32) -> PathBuf {
     let path = dir.join(name);
-    std::fs::write(&path, serde_json::to_string(&vec![value; 512]).unwrap()).unwrap();
+    std::fs::write(
+        &path,
+        serde_json::to_string(&vec![
+            value;
+            soos_enrollment_cli::service::IMPORT_EMBEDDING_DIM
+        ])
+        .unwrap(),
+    )
+    .unwrap();
     path
 }
 
@@ -86,7 +94,7 @@ fn file_args(uid: u32, file: PathBuf) -> ImportArgs {
         uid: Some(uid),
         username: None,
         file,
-        model_id: "arcface_w600k_mbf".to_string(),
+        model_id: soos_enrollment_cli::service::MODEL_ID_EMBEDDING.to_string(),
         model_version: "2.0.0".to_string(),
     }
 }
@@ -238,7 +246,11 @@ fn test_import_onto_enrolled_uid_with_yes_replaces_and_reports_it() {
 fn test_stdin_import_reports_replacement() {
     let tmp = tempdir().unwrap();
     let (service, _store) = store_only(&tmp);
-    let json = serde_json::to_string(&vec![0.042f32; 512]).unwrap();
+    let json = serde_json::to_string(&vec![
+        0.042f32;
+        soos_enrollment_cli::service::IMPORT_EMBEDDING_DIM
+    ])
+    .unwrap();
     let args = file_args(1000, PathBuf::from(IMPORT_STDIN_PATH));
 
     let first = service

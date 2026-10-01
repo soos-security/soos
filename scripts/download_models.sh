@@ -82,7 +82,7 @@ WITH_OPTIONAL=false
 OPTIONAL_MANIFEST_PATH="${DEFAULT_OPTIONAL_MANIFEST}"
 
 # Upper bound for one model file (GitHub #208). The largest attested model
-# (arcface_w600k_mbf.onnx) is 136,619,444 bytes; 256 MiB leaves headroom while
+# (sface_2021dec.onnx) is 38,696,353 bytes; 256 MiB leaves ample headroom while
 # bounding disk use. SOOS_MODEL_MAX_BYTES may only tighten this cap.
 readonly MAX_MODEL_BYTES=268435456
 MODEL_MAX_BYTES="${MAX_MODEL_BYTES}"
@@ -533,6 +533,25 @@ if [[ "${CHECK_ONLY}" = false ]]; then
         warn "Enabling one is an operator decision after PAD calibration (see ${OPTIONAL_MANIFEST_PATH})."
     fi
 fi
+
+# Report .onnx files left in the target directory that no attested entry names (for example
+# the retired arcface_w600k_mbf.onnx after the SFace switch, GitHub #278). Nothing is deleted:
+# removing a file from a root-owned directory stays an operator decision.
+shopt -s nullglob
+for present in "${TARGET_DIR}"/*.onnx; do
+    present_name="${present##*/}"
+    attested=false
+    for i in "${!M_FILES[@]}"; do
+        if [[ "${M_FILES[i]}" == "${present_name}" ]]; then
+            attested=true
+            break
+        fi
+    done
+    if [[ "${attested}" = false ]]; then
+        warn "${present_name} is not attested by ${MANIFEST_PATH}; it was left in place. If it is a retired model (for example the former ArcFace) remove it manually; if you enabled it in the deployed manifest (an optional model), keep it."
+    fi
+done
+shopt -u nullglob
 
 echo ""
 success "==================================================================="

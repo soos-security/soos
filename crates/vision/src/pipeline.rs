@@ -34,7 +34,9 @@ pub const DEFAULT_MIN_FACE_CONFIDENCE: f32 = 0.70;
 
 /// Default cosine similarity threshold; equals `soos_policy::ThresholdConfig::DEFAULT_MATCH_THRESHOLD`
 /// (asserted by `crates/daemon/tests/vision_threshold_parity_tests.rs`).
-pub const DEFAULT_MATCH_THRESHOLD: f32 = 0.70;
+///
+/// 0.50 since the SFace switch (owner decision 2026-10-01, GitHub #278; LFW FAR 3.9e-6).
+pub const DEFAULT_MATCH_THRESHOLD: f32 = 0.50;
 
 /// Default colour PAD liveness threshold (GitHub #215, PAD-10); equals
 /// `soos_policy::ThresholdConfig::DEFAULT_PAD_THRESHOLD`. It is the only colour liveness
@@ -189,7 +191,7 @@ pub struct VisionAnalysis {
     pub pose: Option<crate::pose::HeadPose>,
     /// 112x112 normalized aligned face crop for visual preview.
     pub aligned_crop: Option<Zeroizing<Vec<u8>>>,
-    /// 512D biometric embedding if feature extraction succeeded.
+    /// Biometric embedding (128-D SFace) if feature extraction succeeded.
     pub embedding: Option<Zeroizing<Vec<f32>>>,
     /// Set when the primary face failed the pre-PAD quality gate (GitHub #218); PAD,
     /// alignment and embedding are then skipped (`pad_result` and `embedding` are `None`).
@@ -305,6 +307,12 @@ impl VisionPipeline {
     /// Access the feature embedding extractor.
     pub fn extractor(&self) -> &Arc<dyn EmbeddingExtractor> {
         &self.extractor
+    }
+
+    /// Exact length of the embeddings this pipeline emits, when the extractor reports it:
+    /// templates of another length belong to another embedding space (GitHub #278).
+    pub fn embedding_dimension(&self) -> Option<usize> {
+        self.extractor.output_dimension()
     }
 
     /// Analyzes a camera frame without fail-closed short circuiting for GUI live inspection.

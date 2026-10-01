@@ -58,7 +58,7 @@ ADR entry in `AI/DECISIONS.md`. Re-check every value below with the listed `grep
 | `DEFAULT_PAD_CONSENSUS_REQUIRED` / `_WINDOW` / `MAX_PAD_CONSENSUS_WINDOW` | `crates/policy/src/pad_consensus.rs` | 3 / 5 / 32 captures (Allow needs 3 consecutive; any spoof vetoes the request) |
 | `GDM_PAM_LINE` | `crates/admin-cli/src/gdm.rs` | `auth  [success=done default=ignore]  pam_soos.so timeout_ms=2500`, inside a managed block after every pre-credential gate [98] |
 | admin-cli `DEFAULT_TIMEOUT_MS` | `crates/admin-cli/src/args.rs` | 250 ms |
-| Match / PAD thresholds | `crates/vision/src/pipeline.rs`, policy | 0.70 / 0.85 |
+| Match / PAD thresholds | `crates/vision/src/pipeline.rs`, policy | 0.50 / 0.85 (match default 0.50 since the SFace switch, GitHub #278 [162]; floor `MIN_MATCH_THRESHOLD` 0.40) |
 | `DEFAULT_MINIFASNET_LIVE_CLASS_INDEX` | `crates/inference-ort/src/pad.rs` | 1 |
 
 The fixed "200 to 250 ms" PAM deadline wording was removed from the normative documents (ADR 2026-09-30
@@ -87,13 +87,13 @@ production never overrides it — `OrtPadDetector::new` only, enforced by the in
 |---|---|---|---|---|
 | `scrfd_500m_kps` | `scrfd_500m_kps.onnx` | 640×640 BGR, letterbox | `(x-127.5)/128` | 9 outputs (3 strides × score/bbox/kps); **scores are already sigmoided** [65] |
 | `minifasnet_v2_pad` | `minifasnet_v2_80x80.onnx` | 80×80 BGR, 2.7× expanded bbox | raw `x` in `[0, 255]` (no `/255`, upstream `to_tensor`; ADR 2026-10-01 "PAD Input Range Matches Upstream (0-255)" [161]) | live class index **1** [72, 79]; `[PrintPhoto, Live, ScreenReplay]`, never overridden in production |
-| `arcface_w600k_mbf` | `arcface_w600k_mbf.onnx` | 112×112 aligned, **NHWC** `input_1` `[N,112,112,3]`, fed **BGR** [68, 71] | `(x-127.5)/127.5` | **ArcFace ResNet34** (tf2onnx, 34.1 M params, 136.6 MB), **not** MobileFaceNet — the id is historical [102]; output `embedding` `[N,512]`, L2-normalized by the extractor; the upstream model card (`garavv/arcface-onnx`) documents RGB and `(x-127.5)/128`: the divisor is template-neutral, the channel order is not and stays BGR pending an owner decision; no in-graph normalization; upstream declares no licence [145]; on real faces (LFW) RGB beats BGR and `match_threshold = 0.70` sits at FAR ~1e-6, proposal pending the owner [160] |
+| `sface_2021dec` | `sface_2021dec.onnx` | 112×112 aligned, **NCHW** `data` `[1,3,112,112]`, fed **RGB** [162] | raw `x` in `[0, 255]` (the graph applies `(x-127.5)/128`; OpenCV `FaceRecognizerSF` recipe) | OpenCV Zoo **SFace 2021dec**, Apache-2.0, 38.7 MB, training data undocumented (owner-accepted); output `fc1` `[1,128]`, L2-normalized by the extractor; `SHIPPED_EMBEDDING_MODEL` (`crates/inference-ort/src/embedding.rs`) is the single source of the id and dimension; templates bind by id **and** dimension, no alias (`mobilefacenet` is Foreign); its ORT session logs at `Error` (`ERROR_ONLY_LOG_MODELS`, 174 initializer-as-input warnings); replaced the ArcFace ResNet34 `arcface_w600k_mbf` (NHWC, BGR `/127.5`, 512D, NOASSERTION), now only in `models/retired_models.toml` (evaluation only) [102, 145, 160, 162] |
 
 Any change to channel order, layout, class index or normalization MUST be validated against the real
 `.onnx` metadata (input/output shapes) — mocks alone hid four shipped bugs [65, 66, 68, 71].
 
-`input_shape` is the logical `[N, C, H, W]` shape; `input_layout` (default `"NCHW"`, `"NHWC"` for the
-embedding model) is the physical layout. `ModelRegistry::get_or_load_session` validates every
+`input_shape` is the logical `[N, C, H, W]` shape; `input_layout` (default `"NCHW"`; `"NHWC"` only for the
+retired ArcFace entry) is the physical layout. `ModelRegistry::get_or_load_session` validates every
 session's I/O shapes against the manifest (symbolic dims are wildcards) and fails closed with
 `InferenceError::ModelShapeMismatch` [102]; an entry without `input_layout` (older installed manifest)
 leaves the layout unspecified (either order accepted, dims still enforced, one-time warning). Never rename manifest ids or file names to "fix" a

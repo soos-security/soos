@@ -373,3 +373,34 @@ fn test_smi_cli_run_migration_requires_root() {
         assert!(matches!(res, Err(EnrollmentCliError::RootRequired)));
     }
 }
+
+/// SFC14 (GitHub #278): `migrate` only re-encrypts envelopes; it never rebinds a retired
+/// ArcFace template to the loaded SFace model (embeddings are not convertible). The template
+/// keeps its model id and vector, and the summary lists its UID as needing re-enrollment.
+#[test]
+fn test_migrate_never_rebinds_a_template_to_the_loaded_model() {
+    let env = env();
+    write_legacy_template(&env, 1000);
+    let current = BiometricTemplate::new(
+        1001,
+        soos_enrollment_cli::service::MODEL_ID_EMBEDDING.to_string(),
+        soos_enrollment_cli::service::EMBEDDING_MODEL_VERSION.to_string(),
+        1_700_000_000,
+        Zeroizing::new(vec![0.5; soos_inference_ort::EMBEDDING_DIMENSION]),
+    )
+    .unwrap();
+    env.store.enroll(&current).unwrap();
+
+    let summary = service(&env)
+        .migrate(&MigrateArgs::default(), None)
+        .unwrap();
+    assert_eq!(summary.templates.migrated, 1);
+    assert_eq!(summary.reenrollment_required, vec![1000]);
+
+    let migrated = env.store.get(1000).unwrap().expect("template kept");
+    assert_eq!(migrated.model_id, "arcface_w600k_mbf");
+    assert_eq!(migrated.embedding.len(), 512);
+    assert!((migrated.embedding[0] - 0.25).abs() < 1e-6);
+    let json = format_migration_json(&summary);
+    assert!(!json.contains("0.25"), "no embedding value: {json}");
+}

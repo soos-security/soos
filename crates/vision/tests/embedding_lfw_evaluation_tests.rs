@@ -9,11 +9,12 @@
 //! 2. SCRFD detection through `OrtScrfdDetector` with the production confidence and NMS
 //!    defaults (`DEFAULT_MIN_FACE_CONFIDENCE`, `DEFAULT_NMS_IOU_THRESHOLD`);
 //! 3. 5-point alignment through `align_face_112`;
-//! 4. one embedding per pre-processing variant: the production `OrtEmbeddingExtractor`
-//!    (B, G, R, `(x - 127.5) / 127.5`), the same extractor fed an R/B-swapped crop (R, G, B,
-//!    `(x - 127.5) / 127.5`, the InsightFace `arcface_onnx.py` convention), and raw session runs
-//!    for the `/ 128` divisor of the upstream model card in both channel orders. An optional,
-//!    separately attested candidate model is evaluated with the same harness.
+//! 4. one embedding per pre-processing variant: the production `OrtEmbeddingExtractor` on the
+//!    shipped SFace model (R, G, B planes, raw 0..255, the OpenCV `FaceRecognizerSF` recipe) and
+//!    a raw BGR run of the same session; when the retired ArcFace ResNet34 file is installed
+//!    next to the models, its four variants (B, G, R or R, G, B with `(x - 127.5) / 127.5` or
+//!    `/ 128`) are loaded through `models/retired_models.toml` (GitHub #278, walkthrough 162).
+//!    An optional, separately attested candidate model is evaluated with the SFace recipe.
 //!
 //! Every model is loaded through `ModelRegistry` (SHA-256 and I/O shape attestation). Images,
 //! crops, embeddings and per-image or per-pair scores stay in memory and are never written or
@@ -33,7 +34,7 @@
 //! ```
 //!
 //! Optional: `SOOS_EVAL_CANDIDATE_DIR` (a directory holding a candidate `manifest.toml` with
-//! the entry [`CANDIDATE_MODEL_ID`] and its ONNX file) and `SOOS_EVAL_MAX_PAIRS` (smoke runs).
+//! exactly one entry and its ONNX file) and `SOOS_EVAL_MAX_PAIRS` (smoke runs).
 //! Without its variables the harness refuses to run; the non-ignored tests of this file pin
 //! that refusal and the metric arithmetic, without network or data.
 
@@ -66,14 +67,15 @@ use soos_vision::{
     align_face_112, convert_to_rgb, DEFAULT_MATCH_THRESHOLD, DEFAULT_MIN_FACE_CONFIDENCE,
     DEFAULT_MIN_FACE_WIDTH_PX, DEFAULT_NMS_IOU_THRESHOLD,
 };
+
+/// Manifest id of the retired ArcFace ResNet34 (`models/retired_models.toml`).
+const RETIRED_MODEL_ID: &str = "arcface_w600k_mbf";
 use zeroize::Zeroizing;
 
 /// Manifest id of the production detector.
 const DETECTOR_MODEL_ID: &str = "scrfd_500m_kps";
-/// Manifest id of the production embedding model (historical name).
-const EMBEDDING_MODEL_ID: &str = "arcface_w600k_mbf";
-/// Manifest id expected in the optional candidate manifest (OpenCV Zoo SFace).
-const CANDIDATE_MODEL_ID: &str = "sface_2021dec";
+/// Manifest id of the production embedding model (OpenCV Zoo SFace, GitHub #278).
+const EMBEDDING_MODEL_ID: &str = "sface_2021dec";
 
 /// Upper bound of `pairs.txt` (the official file is about 160 KiB).
 const MAX_PAIRS_FILE_BYTES: u64 = 1024 * 1024;
@@ -96,9 +98,9 @@ const FAILED_PAIR_SCORE: f32 = -1.0;
 const TARGET_FARS: [f64; 4] = [1e-2, 1e-3, 1e-4, 1e-5];
 
 /// Fixed thresholds reported with their FAR / TAR: the policy floor
-/// (`ThresholdConfig::MIN_MATCH_THRESHOLD = 0.40`), candidate defaults and the production
-/// default `DEFAULT_MATCH_THRESHOLD = 0.70`.
-const REPORTED_THRESHOLDS: [f32; 7] = [0.40, 0.45, 0.50, 0.55, 0.60, 0.65, DEFAULT_MATCH_THRESHOLD];
+/// (`ThresholdConfig::MIN_MATCH_THRESHOLD = 0.40`), the production default
+/// `DEFAULT_MATCH_THRESHOLD = 0.50` and the retired default 0.70.
+const REPORTED_THRESHOLDS: [f32; 7] = [0.40, 0.45, 0.50, 0.55, 0.60, 0.65, 0.70];
 
 // ---------------------------------------------------------------------------
 // Configuration: the harness refuses to run without its environment
@@ -505,13 +507,22 @@ enum Layout {
     Nchw,
 }
 
+/// Which attested session a variant runs on.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Source {
+    /// The shipped embedding model (committed manifest).
+    Production,
+    /// The retired ArcFace ResNet34 (`models/retired_models.toml`), when installed.
+    Retired,
+    /// The optional out-of-repository candidate.
+    Candidate,
+}
+
 /// How a variant turns an aligned 112x112 RGB crop into an embedding.
 #[derive(Clone, Copy)]
 enum Arm {
     /// The production `OrtEmbeddingExtractor` on the crop as produced by `align_face_112`.
     Production,
-    /// The production extractor on an R/B-swapped crop: the network receives R, G, B.
-    ProductionSwapped,
     /// A raw session run with explicit channel order and `(x - mean) / std`.
     Raw {
         order: ChannelOrder,
@@ -523,70 +534,77 @@ enum Arm {
 
 struct Variant {
     label: &'static str,
-    candidate: bool,
+    source: Source,
     arm: Arm,
 }
 
-const VARIANTS: [Variant; 6] = [
+const VARIANTS: [Variant; 7] = [
     Variant {
-        label: "arcface BGR (x-127.5)/127.5 [production]",
-        candidate: false,
+        label: "sface RGB x (0..255) [production, OpenCV FaceRecognizerSF]",
+        source: Source::Production,
         arm: Arm::Production,
     },
     Variant {
-        label: "arcface RGB (x-127.5)/127.5 [insightface arcface_onnx.py]",
-        candidate: false,
-        arm: Arm::ProductionSwapped,
-    },
-    Variant {
-        label: "arcface RGB (x-127.5)/128 [model card]",
-        candidate: false,
-        arm: Arm::Raw {
-            order: ChannelOrder::Rgb,
-            mean: 127.5,
-            std: 128.0,
-            layout: Layout::Nhwc,
-        },
-    },
-    Variant {
-        label: "arcface BGR (x-127.5)/128",
-        candidate: false,
+        label: "sface BGR x (0..255)",
+        source: Source::Production,
         arm: Arm::Raw {
             order: ChannelOrder::Bgr,
-            mean: 127.5,
-            std: 128.0,
-            layout: Layout::Nhwc,
-        },
-    },
-    Variant {
-        label: "candidate sface RGB x (0..255) [OpenCV FaceRecognizerSF]",
-        candidate: true,
-        arm: Arm::Raw {
-            order: ChannelOrder::Rgb,
             mean: 0.0,
             std: 1.0,
             layout: Layout::Nchw,
         },
     },
     Variant {
-        label: "candidate sface BGR x (0..255)",
-        candidate: true,
+        label: "retired arcface BGR (x-127.5)/127.5 [former production]",
+        source: Source::Retired,
         arm: Arm::Raw {
             order: ChannelOrder::Bgr,
+            mean: 127.5,
+            std: 127.5,
+            layout: Layout::Nhwc,
+        },
+    },
+    Variant {
+        label: "retired arcface RGB (x-127.5)/127.5 [insightface arcface_onnx.py]",
+        source: Source::Retired,
+        arm: Arm::Raw {
+            order: ChannelOrder::Rgb,
+            mean: 127.5,
+            std: 127.5,
+            layout: Layout::Nhwc,
+        },
+    },
+    Variant {
+        label: "retired arcface RGB (x-127.5)/128 [model card]",
+        source: Source::Retired,
+        arm: Arm::Raw {
+            order: ChannelOrder::Rgb,
+            mean: 127.5,
+            std: 128.0,
+            layout: Layout::Nhwc,
+        },
+    },
+    Variant {
+        label: "retired arcface BGR (x-127.5)/128",
+        source: Source::Retired,
+        arm: Arm::Raw {
+            order: ChannelOrder::Bgr,
+            mean: 127.5,
+            std: 128.0,
+            layout: Layout::Nhwc,
+        },
+    },
+    Variant {
+        label: "candidate RGB x (0..255) NCHW [OpenCV FaceRecognizerSF recipe]",
+        source: Source::Candidate,
+        arm: Arm::Raw {
+            order: ChannelOrder::Rgb,
             mean: 0.0,
             std: 1.0,
             layout: Layout::Nchw,
         },
     },
 ];
-
-fn swap_rb(crop: &[u8]) -> Zeroizing<Vec<u8>> {
-    let mut out = Zeroizing::new(crop.to_vec());
-    for px in out.as_chunks_mut::<3>().0 {
-        px.swap(0, 2);
-    }
-    out
-}
 
 fn l2_normalized(raw: &[f32]) -> Option<Zeroizing<Vec<f32>>> {
     let norm = raw.iter().map(|v| v * v).sum::<f32>().sqrt();
@@ -639,10 +657,6 @@ fn embed(
     match arm {
         Arm::Production => extractor
             .extract_embedding(crop, SIDE as u32, SIDE as u32)
-            .ok()
-            .map(|e| e.to_vec()),
-        Arm::ProductionSwapped => extractor
-            .extract_embedding(&swap_rb(crop), SIDE as u32, SIDE as u32)
             .ok()
             .map(|e| e.to_vec()),
         Arm::Raw {
@@ -781,8 +795,32 @@ fn test_lfw_real_face_evaluation_report() {
         )
         .expect("production SCRFD detector"),
     );
-    let arcface = load_session(&mut registry, EMBEDDING_MODEL_ID);
-    let extractor = OrtEmbeddingExtractor::new(arcface.clone());
+    let production = load_session(&mut registry, EMBEDDING_MODEL_ID);
+    let extractor = OrtEmbeddingExtractor::new(production.clone());
+
+    // The retired ArcFace ResNet34, attested by models/retired_models.toml, when installed.
+    let mut retired_registry = ModelRegistry::new(
+        RegistryConfig::with_manifest(
+            &config.models_dir,
+            workspace_root().join("models/retired_models.toml"),
+        )
+        .with_intra_threads(config.ort_threads),
+    )
+    .expect("committed retired manifest parses");
+    let retired_file = retired_registry
+        .manifest()
+        .get_model(RETIRED_MODEL_ID)
+        .expect("retired ArcFace entry")
+        .filename
+        .clone();
+    let retired = config
+        .models_dir
+        .join(&retired_file)
+        .is_file()
+        .then(|| load_session(&mut retired_registry, RETIRED_MODEL_ID));
+    if retired.is_none() {
+        println!("LFW: retired {retired_file} not installed; its variants are skipped");
+    }
 
     let candidate = config.candidate_dir.as_ref().map(|dir| {
         let mut reg =
@@ -790,11 +828,21 @@ fn test_lfw_real_face_evaluation_report() {
                 .expect("candidate manifest parses");
         reg.verify_integrity()
             .expect("candidate model matches its SHA-256 attestation");
-        load_session(&mut reg, CANDIDATE_MODEL_ID)
+        let ids: Vec<String> = reg.manifest().models.keys().cloned().collect();
+        assert_eq!(
+            ids.len(),
+            1,
+            "the candidate manifest holds exactly one model"
+        );
+        load_session(&mut reg, &ids[0])
     });
     let active: Vec<&Variant> = VARIANTS
         .iter()
-        .filter(|v| !v.candidate || candidate.is_some())
+        .filter(|v| match v.source {
+            Source::Production => true,
+            Source::Retired => retired.is_some(),
+            Source::Candidate => candidate.is_some(),
+        })
         .collect();
 
     // Per variant: flat embeddings and a validity mask, in wipe-on-drop containers.
@@ -874,10 +922,10 @@ fn test_lfw_real_face_evaluation_report() {
         t_align.push(t2.elapsed());
 
         for (v, variant) in active.iter().enumerate() {
-            let session = if variant.candidate {
-                candidate.as_ref().expect("candidate session is loaded")
-            } else {
-                &arcface
+            let session = match variant.source {
+                Source::Production => &production,
+                Source::Retired => retired.as_ref().expect("retired session is loaded"),
+                Source::Candidate => candidate.as_ref().expect("candidate session is loaded"),
             };
             let t3 = Instant::now();
             let emb = embed(variant.arm, &extractor, session, &crop);

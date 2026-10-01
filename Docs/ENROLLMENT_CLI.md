@@ -40,12 +40,12 @@ sudo soos-enroll enroll --username alice --yes
 - `--frames <N>`: Number of candidate frames to capture and evaluate (default: 5, bounded 1–30).
   Each candidate after the first is a distinct capture: the CLI waits up to `ENROLL_FRESH_FRAME_TIMEOUT_MS` = 500 ms for a frame whose `sequence` is greater than the previous candidate's and fails with a starved-camera error otherwise (nothing stored). A frame rejected by presentation attack detection is an invalid candidate, shown as `PAD-rejected frames` in the confirmation summary, and does not abort the enrollment; if no candidate is valid and at least one was PAD-rejected, the PAD error is reported (GitHub #228 / STO-05). A face rejected by the pre-PAD quality gate (too small or too blurred, GitHub #218) is also an invalid candidate, never an abort; when no candidate is usable the enrollment ends with the low-quality error and nothing is stored (GitHub #285).
 - `-y, --yes`: Automatically confirm enrollment without interactive confirmation prompt. Without it, the confirmation summary warns when the user is already enrolled and saving replaces the existing template (`EnrollmentSummary::already_enrolled`, GitHub #233).
-- `--model-id <ID>`: Override of the embedding model identifier stored in template metadata. Default: the loaded embedding extractor `MODEL_ID_EMBEDDING` = `arcface_w600k_mbf` (GitHub #182 / STO-09; the former `mobilefacenet` default is retired per ADR 2026-09-20).
+- `--model-id <ID>`: Override of the embedding model identifier stored in template metadata. Default: the loaded embedding extractor `MODEL_ID_EMBEDDING` = `sface_2021dec` (GitHub #182 / STO-09, #278; the former `mobilefacenet` alias and the retired `arcface_w600k_mbf` are refused by the daemon).
 - `--model-version <VER>`: Override of the model version stored in template metadata. Default: `EMBEDDING_MODEL_VERSION` = `2.0.0`, the attested `models/manifest.toml` version (pinned by a test).
-- Any override that differs from the loaded model prints a warning before capture and sets `model_overridden` in the confirmation summary: `soos-daemon` refuses templates whose `model_id` differs from its loaded extractor (`Verdict::Unavailable` / `ReasonClass::ModelUnavailable`, PAM falls back to the next module), so such a template can never authenticate. Migration aid: templates recorded with the retired default, exactly `mobilefacenet` / `1.0.0`, contain ArcFace vectors and are still accepted as a legacy alias with a warning recommending re-enrollment (ADR 2026-09-30 "Embedding Model Binding and Legacy Model Alias"); any other version or id is refused. Re-enroll affected users (`soos-enroll list` shows the recorded model) before the alias is removed.
+- Any override that differs from the loaded model prints a warning before capture and sets `model_overridden` in the confirmation summary: `soos-daemon` refuses templates whose `model_id` differs from its loaded extractor (`Verdict::Unavailable` / `ReasonClass::ModelUnavailable`, PAM falls back to the next module), so such a template can never authenticate. Since the SFace switch (GitHub #278) a template is current only when its `model_id` is `sface_2021dec` and its vector has 128 values: any other id (including the former `mobilefacenet` / `1.0.0` alias and the retired `arcface_w600k_mbf`) or any other length is refused with `Verdict::Unavailable` / `ReasonClass::ModelUnavailable` before inference, so login falls back to the password. Embeddings are not convertible between models: re-enroll affected users (`soos-enroll list` warns about foreign templates; `soos-enroll migrate` lists them and never rebinds them).
 
 ### `soos-enroll verify`
-Performs a one-shot diagnostic verification against an enrolled biometric template:
+Performs a one-shot diagnostic verification against an enrolled biometric template. A template of another embedding model or vector length (for example the retired ArcFace `arcface_w600k_mbf`, 512D) is refused before any capture with `EnrollmentCliError::TemplateModelMismatch` ("re-enroll with `soos-enroll enroll`"), so two embedding spaces are never compared (GitHub #278):
 
 ```bash
 sudo soos-enroll verify --uid 1000
@@ -73,7 +73,7 @@ sudo soos-enroll delete --username alice --yes
 ```
 
 ### `soos-enroll list`
-Lists all enrolled biometric templates with identity and model metadata:
+Lists all enrolled biometric templates with identity and model metadata. Every template whose model id or dimension is not the loaded embedding model's adds a `[WARN] UID N: ... re-enroll` line on stderr (the JSON on stdout is unchanged, GitHub #278):
 
 ```bash
 # Human-readable table output
@@ -88,7 +88,7 @@ sudo soos-enroll list --format json
 The JSON array is produced by `serde_json` (`format_enrolled_json`), so usernames and model identifiers containing quotes or backslashes are escaped (GitHub #232).
 
 ### `soos-enroll import`
-Imports an existing embedding (JSON array of 512 finite floats, or a CBOR `BiometricTemplate`) into the encrypted store. This is the command the GUI runs through `pkexec` (GitHub #156, review findings CAM-08 / STO-12):
+Imports an existing embedding (JSON array of 128 finite floats, or a CBOR `BiometricTemplate`) into the encrypted store. This is the command the GUI runs through `pkexec` (GitHub #156, review findings CAM-08 / STO-12):
 
 ```bash
 # From standard input (the GUI path; the plaintext embedding never touches the filesystem)
@@ -100,7 +100,7 @@ sudo soos-enroll import --uid 1000 --file /home/alice/embedding.json
 
 Input contract (`crates/enrollment-cli/src/service.rs`):
 - **Bounded**: every input is capped at `MAX_IMPORT_INPUT_BYTES` (64 KiB) while it is read (`Read::take`); an endless or oversized stdin, or a larger file, is refused with `EnrollmentCliError::InvalidImport`.
-- **Validated**: the embedding must have exactly 512 values, all finite (an overflowing JSON number such as `1e39` becomes infinity and is refused). Values are never echoed in errors.
+- **Validated**: the template must belong to the loaded embedding model (`--model-id` defaults to `MODEL_ID_EMBEDDING` = `sface_2021dec`; a JSON or CBOR template of any other model, such as the retired `arcface_w600k_mbf`, is refused with `InvalidImport` because embeddings of two models are not convertible, GitHub #278), and the embedding must have exactly `IMPORT_EMBEDDING_DIM` (128) values, all finite (an overflowing JSON number such as `1e39` becomes infinity and is refused). Values are never echoed in errors.
 - **Zeroized**: the raw input and the parsed embedding live in `Zeroizing` buffers.
 - **File inputs** (`read_import_file`): opened with `O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK` and checked on the open descriptor: regular file only (symlinks, directories and FIFOs are refused), at most 64 KiB, and, under `pkexec`, owned by the invoking user (`PKEXEC_UID`, parsed by `parse_pkexec_uid`), so a Polkit caller cannot make root import another user's file.
 - Nothing is stored when any check fails.
@@ -173,7 +173,7 @@ spoof abort, for compatibility with its existing contract.
 ---
 
 ### `soos-enroll migrate`
-Re-encrypts every legacy (payload format v1, unbound) biometric template and evidence snapshot with the AES-GCM associated-data bound v2 envelope (GitHub #287, owner decision 2026-10-01; ADR 2026-10-01 "Operator-Run Migration of Legacy v1 Storage Envelopes"). Legacy files stay readable without it: there is no cut-off, the command only removes the remaining unbound files.
+Re-encrypts every legacy (payload format v1, unbound) biometric template and evidence snapshot with the AES-GCM associated-data bound v2 envelope (GitHub #287, owner decision 2026-10-01; ADR 2026-10-01 "Operator-Run Migration of Legacy v1 Storage Envelopes"). Legacy files stay readable without it: there is no cut-off, the command only removes the remaining unbound files. It never converts embeddings: a template of the retired ArcFace model keeps its model id and vector and stays refused by the daemon; the summary lists such UIDs in `reenrollment_required` (JSON) and prints a `[WARN] UID N: ... re-enrollment` line for each (GitHub #278).
 
 ```bash
 # Report what would be migrated, write nothing
@@ -211,6 +211,6 @@ Verification: `crates/enrollment-cli/tests/migrate_tests.rs`, `crates/biometric-
 - **Model Registry Attestation**: Biometric capture operations (`enroll`, `verify`) attest against official neural models defined in `models/manifest.toml`:
   - Face Detection & 5-Point Landmarks: `scrfd_500m_kps` (`scrfd_500m_kps.onnx`)
   - Presentation Attack Detection: `minifasnet_v2_pad` (`minifasnet_v2_80x80.onnx`), constructed by `service::build_pad_detector` with `OrtPadDetector::new`, i.e. the crate default live class index `DEFAULT_MINIFASNET_LIVE_CLASS_INDEX = 1` shared with `soos-daemon` and `soos-gui` (never overridden; matrix PLC2, GitHub #146)
-  - Feature Embedding (512D): `arcface_w600k_mbf` (`arcface_w600k_mbf.onnx`)
+  - Feature Embedding (128D): `sface_2021dec` (`sface_2021dec.onnx`)
 - **Deterministic Camera Addressing**: Satisfies Criterion C4 by resolving camera device paths via `/dev/v4l/by-id/`, eliminating enumeration races across kernel restarts.
 

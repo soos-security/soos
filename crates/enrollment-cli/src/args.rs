@@ -132,7 +132,7 @@ pub struct EnrollArgs {
     pub yes: bool,
 
     /// Override of the embedding model identifier recorded in template metadata.
-    /// Defaults to the loaded embedding extractor (`arcface_w600k_mbf`). The daemon
+    /// Defaults to the loaded embedding extractor (`sface_2021dec`). The daemon
     /// refuses templates whose model identifier differs from its loaded extractor.
     #[arg(long, default_value = MODEL_ID_EMBEDDING)]
     pub model_id: String,
@@ -190,18 +190,19 @@ pub struct ImportArgs {
     #[arg(short = 'u', long, conflicts_with = "uid")]
     pub username: Option<String>,
 
-    /// Input template (CBOR or JSON array of 512 finite floats, at most 64 KiB), or `-` to
+    /// Input template (CBOR or JSON array of 128 finite floats, at most 64 KiB), or `-` to
     /// read it from standard input. A file must be a regular file (no symlink) and, under
     /// pkexec, owned by the invoking user (`PKEXEC_UID`).
     #[arg(short = 'f', long, value_name = "FILE|-")]
     pub file: PathBuf,
 
-    /// Facial recognition model identifier.
-    #[arg(long, default_value = "arcface_w600k_mbf")]
+    /// Facial recognition model identifier. Only the loaded embedding model
+    /// (`sface_2021dec`) is importable; any other model is refused (GitHub #278).
+    #[arg(long, default_value = MODEL_ID_EMBEDDING)]
     pub model_id: String,
 
     /// Attested model version.
-    #[arg(long, default_value = "2.0.0")]
+    #[arg(long, default_value = EMBEDDING_MODEL_VERSION)]
     pub model_version: String,
 }
 

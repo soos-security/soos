@@ -139,15 +139,16 @@ impl FaceDetector for MockFaceDetector {
     }
 }
 
-/// Mock embedding extractor generating deterministic L2-normalized vectors (defaults to 512D for ArcFace w600k).
+/// Mock embedding extractor generating deterministic L2-normalized vectors (defaults to the
+/// shipped 128-D SFace dimension, `EMBEDDING_DIMENSION`).
 pub struct MockEmbeddingExtractor {
     dim: usize,
     base_seed: f32,
 }
 
 impl MockEmbeddingExtractor {
-    /// Default embedding dimensionality matching ArcFace w600k (512 dimensions).
-    pub const DEFAULT_DIM: usize = 512;
+    /// Default embedding dimensionality: the shipped model's (`EMBEDDING_DIMENSION`, 128).
+    pub const DEFAULT_DIM: usize = crate::embedding::EMBEDDING_DIMENSION;
 
     /// Creates a mock extractor that produces L2-normalized vectors of length `dim`.
     pub fn new(dim: usize) -> Self {
@@ -157,7 +158,7 @@ impl MockEmbeddingExtractor {
         }
     }
 
-    /// Creates a mock extractor with default 512-dimensional output for ArcFace w600k.
+    /// Creates a mock extractor with the default (shipped model) output dimension.
     pub fn new_default() -> Self {
         Self::new(Self::DEFAULT_DIM)
     }
@@ -174,7 +175,7 @@ impl MockEmbeddingExtractor {
 }
 
 impl Default for MockEmbeddingExtractor {
-    /// Default constructor returning a 512D mock embedding extractor.
+    /// Default constructor returning a mock extractor of the shipped dimension.
     fn default() -> Self {
         Self::new_default()
     }
@@ -211,6 +212,10 @@ impl EmbeddingExtractor for MockEmbeddingExtractor {
         let mut embedding = BiometricEmbedding::new(vec);
         embedding.normalize()?;
         Ok(embedding)
+    }
+
+    fn output_dimension(&self) -> Option<usize> {
+        Some(self.dim)
     }
 }
 

@@ -138,6 +138,36 @@ fn test_binaries_build_detectors_from_pipeline_config() {
     );
 }
 
+/// Invariant (GitHub #278, SFC12): no production source of the three binaries re-types the
+/// cosine match threshold as a literal (the GUI used `0.70f32` while the default moved);
+/// every value comes from `VisionPipelineConfig::match_threshold` / `DEFAULT_MATCH_THRESHOLD`.
+#[test]
+fn test_no_match_threshold_literal_outside_the_constants() {
+    let root = workspace_root();
+    let mut violations = Vec::new();
+    for dir in BINARY_CRATES {
+        let mut files = Vec::new();
+        rust_files(&root.join(dir), &mut files);
+        for file in files {
+            let source = fs::read_to_string(&file).expect("read source");
+            for line in production_part(&source).lines() {
+                if line.contains("match_threshold") && contains_float_literal(line) {
+                    violations.push(format!(
+                        "{}: {}",
+                        file.strip_prefix(&root).unwrap_or(&file).display(),
+                        line.trim()
+                    ));
+                }
+            }
+        }
+    }
+    assert!(
+        violations.is_empty(),
+        "match threshold literals outside the constants (GitHub #278):\n{}",
+        violations.join("\n")
+    );
+}
+
 /// Invariant (GitHub #215): the GUI liveness label and box colour use the pipeline decision,
 /// never a hardcoded `score >= <literal>` comparison.
 #[test]

@@ -83,7 +83,7 @@ with a half-applied configuration.
 
 | Key | Type | Default | Validation |
 |---|---|---|---|
-| `match_threshold` | float | `0.70` | Must lie in `[0, 1]` and be at least `ThresholdConfig::MIN_MATCH_THRESHOLD` (0.40). |
+| `match_threshold` | float | `0.50` | Must lie in `[0, 1]` and be at least `ThresholdConfig::MIN_MATCH_THRESHOLD` (0.40). Default calibrated for SFace (GitHub #278); a host that still sets the retired `0.70` keeps it. |
 | `pad_threshold` | float | `0.85` | Must lie in `[0, 1]` and be at least `ThresholdConfig::MIN_PAD_THRESHOLD` (0.50); PAD can never be disabled from the file (GitHub #170). |
 
 #### `[pipeline.rate_limit]` (authentication attempts per target UID)
@@ -127,7 +127,7 @@ sensor_preference = "prefer_ir"
 warmup_frames = 0
 
 [pipeline.thresholds]
-match_threshold = 0.70
+match_threshold = 0.50
 pad_threshold = 0.85
 ```
 
