@@ -720,8 +720,17 @@ fn load_session(registry: &mut ModelRegistry, id: &str) -> SharedSession {
 #[test]
 #[ignore = "real-face LFW evaluation: needs SOOS_EVAL_LFW_DIR, SOOS_EVAL_LFW_PAIRS, SOOS_MODELS_DIR"]
 fn test_lfw_real_face_evaluation_report() {
-    let config = EvalConfig::from_lookup(&|k| std::env::var(k).ok())
-        .unwrap_or_else(|e| panic!("refusing to run the LFW evaluation: {e:?}"));
+    // Unset variables skip the report (like the other env-gated real-hardware tests, so a plain
+    // `--include-ignored` run stays green); a set but unusable variable (for example data
+    // inside the repository) is still a hard refusal.
+    let config = match EvalConfig::from_lookup(&|k| std::env::var(k).ok()) {
+        Ok(config) => config,
+        Err(EvalConfigError::Missing(var)) => {
+            println!("SKIPPED test_lfw_real_face_evaluation_report: {var} not set");
+            return;
+        }
+        Err(e) => panic!("refusing to run the LFW evaluation: {e:?}"),
+    };
 
     let pairs_text = String::from_utf8(
         read_bounded(&config.pairs_path, MAX_PAIRS_FILE_BYTES).expect("read pairs.txt"),

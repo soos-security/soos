@@ -233,3 +233,12 @@ evaluation passed on this host in 2095 s (`1 passed`).
    own enrollment captures?
 3. Replace the model with SFace (Apache-2.0 file, undocumented training data) under a new
    manifest id, or keep the `NOASSERTION` ArcFace?
+
+## Integration note (batch merge)
+
+On the combined batch, `cargo test -- --include-ignored` (without the LFW variables) failed on
+`test_lfw_real_face_evaluation_report`, which panicked on missing variables while every other
+env-gated real-hardware test skips. The report now prints `SKIPPED ...: <VAR> not set` and returns
+when a variable is unset, and still refuses (panics) when a variable is set but unusable (for
+example data inside the repository); `test_lfw_harness_refuses_to_run_without_env_vars` and
+`test_lfw_harness_refuses_data_inside_the_repository` keep pinning the configuration refusal.
