@@ -18,6 +18,7 @@ pub use crypto::{
 };
 pub use error::BiometricStoreError;
 pub use store::{
-    BiometricStore, DEFAULT_BIOMETRICS_DIR, MAX_TEMPLATE_FILE_BYTES, TEMPLATE_EXTENSION,
+    BiometricStore, TemplateMigration, TemplateMigrationFailure, TemplateMigrationReport,
+    DEFAULT_BIOMETRICS_DIR, MAX_TEMPLATE_FILE_BYTES, TEMPLATE_EXTENSION,
 };
 pub use template::{BiometricTemplate, TemplateMetadata};

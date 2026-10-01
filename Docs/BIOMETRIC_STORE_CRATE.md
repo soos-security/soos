@@ -79,6 +79,18 @@ Recorded as ADR 2026-09-30 "AES-GCM Associated Data for Stored Templates and Evi
   format, and `BiometricStore::migrate_legacy_template(uid)` re-encrypts a legacy template in place
   without changing its content (it refuses a legacy file whose embedded UID does not match and
   leaves it untouched; it must not run concurrently with an `enroll` of the same UID).
+- **Bulk migration (GitHub #287, owner decision 2026-10-01)**: `BiometricStore::migrate_legacy_templates(dry_run)`
+  runs `migrate_template(uid, dry_run)` (outcome `TemplateMigration::{Missing, AlreadyCurrent,
+  Migrated, WouldMigrate}`) for every UID of `list_enrolled` and returns a
+  `TemplateMigrationReport` (`migrated`, `already_current`, `failed` with UID and error message).
+  Every file is size-bounded, authenticated and fully validated (CBOR template, UID check) in both
+  modes; a legacy template is rewritten only through `enroll` (temporary file `0600` with
+  `O_NOFOLLOW`, `fsync`, atomic rename, directory `fsync`, best-effort overwrite of the legacy
+  inode), a bound template is never rewritten, and a refused file (tampered, foreign UID, symlink,
+  I/O error) is recorded and left untouched while the other templates are still processed. A
+  second run reports every template as already current. The report never carries embedding values
+  or key material. The operator entry point is `soos-enroll migrate [--dry-run]`
+  (`Docs/ENROLLMENT_CLI.md`); v1 stays readable without it (no cut-off).
 - **What is detected**: moving a ciphertext between UIDs, editing the clear header, any bit flip,
   a wrong key.
 - **What is not detected (rollback)**: restoring an older, still-valid bound template of the

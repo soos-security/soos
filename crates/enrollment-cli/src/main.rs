@@ -14,8 +14,9 @@ use clap::Parser;
 use soos_enrollment_cli::args::{resolve_target_uid, Cli, Commands, OutputFormat};
 use soos_enrollment_cli::error::EnrollmentCliError;
 use soos_enrollment_cli::{
-    build_full_service, build_store_only, check_privileges, format_enrolled_json,
-    EMBEDDING_MODEL_VERSION, MODEL_ID_EMBEDDING,
+    build_evidence_for_migration, build_full_service, build_store_only, check_privileges,
+    format_enrolled_json, format_migration_json, MigrationSummary, EMBEDDING_MODEL_VERSION,
+    MODEL_ID_EMBEDDING,
 };
 use soos_protocol::Verdict;
 
@@ -28,6 +29,34 @@ fn prompt_stdin(prompt: &str) -> bool {
         trimmed == "y" || trimmed == "yes"
     } else {
         false
+    }
+}
+
+/// Prints the human-readable `migrate` summary: counts, UIDs, paths and reasons only.
+fn print_migration_summary(summary: &MigrationSummary) {
+    let migrated_label = if summary.dry_run {
+        "Would migrate:  "
+    } else {
+        "Migrated:       "
+    };
+    if summary.dry_run {
+        println!("[DRY RUN] No file is written.");
+    }
+    for (name, store) in [
+        ("Biometric templates", &summary.templates),
+        ("Evidence snapshots", &summary.evidence),
+    ] {
+        println!("{name}:");
+        if let Some(reason) = &store.skipped {
+            println!("  Skipped:        {reason}");
+            continue;
+        }
+        println!("  {migrated_label}{}", store.migrated);
+        println!("  Already current: {}", store.already_current);
+        println!("  Failed:         {}", store.failed);
+        for failure in &store.failures {
+            println!("  [FAILED] {}: {}", failure.item, failure.error);
+        }
     }
 }
 
@@ -172,6 +201,20 @@ fn run() -> Result<(), EnrollmentCliError> {
                 "[OK] Biometric template for UID {} imported successfully (embedding dim: {}).",
                 outcome.uid, outcome.embedding_dim
             );
+        }
+
+        Commands::Migrate(args) => {
+            let service = build_store_only(&cli)?;
+            let evidence = build_evidence_for_migration(args)?;
+            let summary = service.migrate(args, evidence.as_ref())?;
+
+            match args.format {
+                OutputFormat::Table => print_migration_summary(&summary),
+                OutputFormat::Json => println!("{}", format_migration_json(&summary)),
+            }
+            if summary.has_failures() {
+                std::process::exit(1);
+            }
         }
 
         Commands::DebugVision(args) => {

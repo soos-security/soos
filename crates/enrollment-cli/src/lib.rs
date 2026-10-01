@@ -7,6 +7,8 @@
 //!   guarantee against recovery is encryption at rest plus master-key destruction
 //!   (ADR 2026-09-30 "Biometric Template Erasure Model")
 //! - Enumeration of enrolled biometric templates
+//! - Operator-run migration of legacy (v1) templates and evidence snapshots to the
+//!   AAD-bound v2 envelope (`migrate`, GitHub #287)
 
 #![forbid(unsafe_code)]
 
@@ -20,18 +22,19 @@ pub mod service;
 pub use args::{
     resolve_default_target_uid, sanitize_path, validate_camera_device_path, validate_fhs_path, Cli,
     Commands, DebugVisionArgs, DeleteArgs, EnrollArgs, ImportArgs, ImportCommand, ListArgs,
-    OutputFormat, VerifyArgs, ALLOWED_FHS_PREFIXES,
+    MigrateArgs, OutputFormat, VerifyArgs, ALLOWED_FHS_PREFIXES,
 };
 pub use error::EnrollmentCliError;
 pub use guided_enrollment::{EnrollmentStep, EnrollmentStepFeedback, GuidedEnrollmentSession};
 pub use quality::{select_best_frame, BestCandidate, CandidateEvaluation};
 pub use service::{
-    build_full_service, build_store_only, check_privileges, ensure_debug_report_dir,
-    format_enrolled_json, resolve_camera_device, resolve_camera_device_from_config,
+    build_evidence_for_migration, build_full_service, build_store_only, check_privileges,
+    ensure_debug_report_dir, format_enrolled_json, format_migration_json,
+    open_evidence_store_for_migration, resolve_camera_device, resolve_camera_device_from_config,
     resolve_camera_device_from_config_with, resolve_debug_report_path, write_debug_report,
     DiagnosticVerificationReport, EnrolledUserSummary, EnrollmentOutcome, EnrollmentService,
-    EnrollmentSummary, LatencyBreakdown, DEBUG_REPORT_DIR_MODE, DEBUG_REPORT_FILE_MODE,
-    DEFAULT_CAMERA_DEVICE, DEFAULT_DEBUG_REPORT_DIR, DEFAULT_KEY_PATH, DEFAULT_MODELS_DIR,
-    EMBEDDING_MODEL_VERSION, MODEL_ID_EMBEDDING, MODEL_ID_FACE_DETECTOR, MODEL_ID_PAD,
-    REQUIRED_MODEL_IDS,
+    EnrollmentSummary, LatencyBreakdown, MigrationFailureSummary, MigrationSummary,
+    StoreMigrationSummary, DEBUG_REPORT_DIR_MODE, DEBUG_REPORT_FILE_MODE, DEFAULT_CAMERA_DEVICE,
+    DEFAULT_DEBUG_REPORT_DIR, DEFAULT_KEY_PATH, DEFAULT_MODELS_DIR, EMBEDDING_MODEL_VERSION,
+    MODEL_ID_EMBEDDING, MODEL_ID_FACE_DETECTOR, MODEL_ID_PAD, REQUIRED_MODEL_IDS,
 };

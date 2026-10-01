@@ -1,7 +1,7 @@
 //! Main storage engine for encrypted evidence snapshots.
 
 use crate::config::{EvidenceConfig, DEFAULT_DAILY_CAP_TOTAL};
-use crate::crypto::{decrypt_snapshot_payload, encrypt_snapshot_payload, MasterKey};
+use crate::crypto::{decrypt_snapshot_payload, encrypt_snapshot_payload, MasterKey, PayloadFormat};
 use crate::error::EvidenceStoreError;
 use crate::frame::{
     check_payload_len, EvidenceFrame, FrameBytes, FrameMetadata, EVIDENCE_RECORD_VERSION,
@@ -9,13 +9,13 @@ use crate::frame::{
 };
 use crate::snapshot::{
     days_since_epoch, format_date_from_timestamp, generate_uuid_v4, parse_date, EvidenceRecord,
-    RetentionReport, SnapshotResult,
+    RetentionReport, SnapshotMigrationFailure, SnapshotMigrationReport, SnapshotResult,
 };
 use nix::fcntl::{Flock, FlockArg};
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -409,25 +409,182 @@ impl EvidenceStore {
         path: P,
     ) -> Result<EvidenceRecord, EvidenceStoreError> {
         let path = path.as_ref();
-        let file = File::open(path)?;
-        let len = file.metadata()?.len();
-        if len > MAX_EVIDENCE_FILE_BYTES {
-            return Err(EvidenceStoreError::CorruptPayload(format!(
-                "evidence file of {len} bytes exceeds {MAX_EVIDENCE_FILE_BYTES} bytes"
-            )));
-        }
-        let mut data = Vec::new();
-        file.take(MAX_EVIDENCE_FILE_BYTES.saturating_add(1))
-            .read_to_end(&mut data)?;
-        if u64::try_from(data.len()).unwrap_or(u64::MAX) > MAX_EVIDENCE_FILE_BYTES {
-            return Err(EvidenceStoreError::CorruptPayload(
-                "evidence file grew beyond the read bound".to_string(),
-            ));
-        }
+        let data = read_bounded_evidence(File::open(path)?)?;
 
         let (date, snapshot_id) = snapshot_binding(path);
         let (decrypted, _format) = decrypt_snapshot_payload(&self.key, date, snapshot_id, &data)?;
         EvidenceRecord::from_cbor(&decrypted)
+    }
+
+    /// Re-encrypts every legacy unbound snapshot with the AAD-bound envelope, or only reports
+    /// what would happen when `dry_run` is set (GitHub #287, owner decision 2026-10-01: an
+    /// operator-run migration; legacy snapshots stay readable without it).
+    ///
+    /// Walks the date partitions (`YYYY-MM-DD`, real directories only) of the base directory
+    /// under the same exclusive `flock` as [`Self::rotate_retention`], and every snapshot file
+    /// of [`Self::list_snapshots_for_date`] (symlinks are skipped, never followed). Each file
+    /// is opened with `O_NOFOLLOW`, size-bounded, authenticated against its path binding and
+    /// its record decoded; a legacy record must carry the snapshot id of its file name. A
+    /// legacy file is rewritten through a temporary file created exclusively with mode
+    /// `0600`, synced, renamed over the original only if the path still holds the inode that
+    /// was read, then the partition is synced. A bound file is never rewritten. A per-file
+    /// error is recorded in [`SnapshotMigrationReport::failed`], the file is left untouched
+    /// and the other files are still processed. Daily counters are not changed. A missing
+    /// base directory yields an empty report (nothing is created); a symlinked base
+    /// directory is refused with [`EvidenceStoreError::InvalidPath`].
+    pub fn migrate_legacy_snapshots(
+        &self,
+        dry_run: bool,
+    ) -> Result<SnapshotMigrationReport, EvidenceStoreError> {
+        let base = &self.config.base_dir;
+        let mut report = SnapshotMigrationReport {
+            dry_run,
+            ..SnapshotMigrationReport::default()
+        };
+        match fs::symlink_metadata(base) {
+            Ok(meta) if meta.file_type().is_symlink() || !meta.is_dir() => {
+                return Err(EvidenceStoreError::InvalidPath(format!(
+                    "Evidence base directory '{}' is a symlink or not a directory",
+                    base.display()
+                )));
+            }
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(report),
+            Err(e) => return Err(EvidenceStoreError::Io(e)),
+        }
+
+        let dir_file = File::open(base)?;
+        let _lock = Flock::lock(dir_file, FlockArg::LockExclusive).map_err(|(_, e)| {
+            EvidenceStoreError::Io(std::io::Error::from_raw_os_error(e as i32))
+        })?;
+
+        let mut dates = Vec::new();
+        for entry in fs::read_dir(base)? {
+            let entry = entry?;
+            // `DirEntry::file_type` does not follow symlinks: a symlinked partition is skipped.
+            if !entry.file_type()?.is_dir() {
+                continue;
+            }
+            if let Some(name) = entry.file_name().to_str() {
+                if parse_date(name).is_ok() {
+                    dates.push(name.to_string());
+                }
+            }
+        }
+        dates.sort();
+
+        for date in dates {
+            let files = match self.list_snapshots_for_date(&date) {
+                Ok(files) => files,
+                Err(e) => {
+                    report.failed.push(SnapshotMigrationFailure {
+                        path: base.join(&date),
+                        error: e.to_string(),
+                    });
+                    continue;
+                }
+            };
+            for path in files {
+                match self.migrate_snapshot_file(&path, dry_run) {
+                    Ok(true) => report.migrated.push(path),
+                    Ok(false) => report.already_current.push(path),
+                    Err(e) => report.failed.push(SnapshotMigrationFailure {
+                        path,
+                        error: e.to_string(),
+                    }),
+                }
+            }
+        }
+        Ok(report)
+    }
+
+    /// Migrates one snapshot file: `Ok(true)` when it is (or, in a dry run, would be)
+    /// re-encrypted, `Ok(false)` when it is already bound. On error the file is untouched.
+    fn migrate_snapshot_file(
+        &self,
+        path: &Path,
+        dry_run: bool,
+    ) -> Result<bool, EvidenceStoreError> {
+        let file = OpenOptions::new()
+            .read(true)
+            .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_NONBLOCK)
+            .open(path)?;
+        let opened = file.metadata()?;
+        if !opened.is_file() {
+            return Err(EvidenceStoreError::InvalidPath(format!(
+                "Snapshot path '{}' is not a regular file",
+                path.display()
+            )));
+        }
+        let data = read_bounded_evidence(file)?;
+
+        let (date, snapshot_id) = snapshot_binding(path);
+        let (plaintext, format) = decrypt_snapshot_payload(&self.key, date, snapshot_id, &data)?;
+        drop(data);
+        let record = EvidenceRecord::from_cbor(&plaintext)?;
+        if format == PayloadFormat::BoundV2 {
+            return Ok(false);
+        }
+        if record.snapshot_id != snapshot_id {
+            return Err(EvidenceStoreError::CorruptPayload(format!(
+                "legacy snapshot '{}' records id '{}'; refusing to bind it to another id",
+                path.display(),
+                record.snapshot_id
+            )));
+        }
+        drop(record);
+        if dry_run {
+            return Ok(true);
+        }
+
+        // The decrypted CBOR is re-sealed byte for byte: the record content cannot change.
+        let sealed = encrypt_snapshot_payload(&self.key, date, snapshot_id, &plaintext)?;
+        drop(plaintext);
+        if u64::try_from(sealed.len()).unwrap_or(u64::MAX) > MAX_EVIDENCE_FILE_BYTES {
+            return Err(EvidenceStoreError::CorruptPayload(format!(
+                "re-encrypted snapshot '{}' would exceed {MAX_EVIDENCE_FILE_BYTES} bytes",
+                path.display()
+            )));
+        }
+
+        let dir = path.parent().ok_or_else(|| {
+            EvidenceStoreError::InvalidPath(format!(
+                "Snapshot path '{}' has no parent directory",
+                path.display()
+            ))
+        })?;
+        let mut rand_bytes = [0u8; 8];
+        getrandom::fill(&mut rand_bytes).map_err(|e| {
+            EvidenceStoreError::Crypto(format!("Failed to generate random salt: {e}"))
+        })?;
+        let tmp_path = dir.join(format!(
+            ".tmp.migrate.{snapshot_id}.{}.{:016x}",
+            std::process::id(),
+            u64::from_ne_bytes(rand_bytes)
+        ));
+        if let Err(e) = write_new_file(&tmp_path, &sealed) {
+            let _ = fs::remove_file(&tmp_path);
+            return Err(e);
+        }
+
+        // Replace only the file that was read: a path swapped meanwhile (another inode, a
+        // symlink) is refused and left as it is.
+        let unchanged = fs::symlink_metadata(path).is_ok_and(|now| {
+            now.file_type().is_file() && now.ino() == opened.ino() && now.dev() == opened.dev()
+        });
+        if !unchanged {
+            let _ = fs::remove_file(&tmp_path);
+            return Err(EvidenceStoreError::InvalidPath(format!(
+                "Snapshot path '{}' changed during migration",
+                path.display()
+            )));
+        }
+        if let Err(e) = fs::rename(&tmp_path, path) {
+            let _ = fs::remove_file(&tmp_path);
+            return Err(EvidenceStoreError::Io(e));
+        }
+        File::open(dir)?.sync_all()?;
+        Ok(true)
     }
 
     /// Gets the persisted daily snapshot count for a UID and date.
@@ -698,6 +855,28 @@ fn snapshot_binding(path: &Path) -> (&str, &str) {
         .and_then(|n| n.split('.').next())
         .unwrap_or("");
     (date, snapshot_id)
+}
+
+/// Reads at most [`MAX_EVIDENCE_FILE_BYTES`] bytes of an opened evidence file.
+///
+/// A file larger than the bound is refused before it is read, and a file that grows past the
+/// bound while it is read is refused too.
+fn read_bounded_evidence(file: File) -> Result<Vec<u8>, EvidenceStoreError> {
+    let len = file.metadata()?.len();
+    if len > MAX_EVIDENCE_FILE_BYTES {
+        return Err(EvidenceStoreError::CorruptPayload(format!(
+            "evidence file of {len} bytes exceeds {MAX_EVIDENCE_FILE_BYTES} bytes"
+        )));
+    }
+    let mut data = Vec::new();
+    file.take(MAX_EVIDENCE_FILE_BYTES.saturating_add(1))
+        .read_to_end(&mut data)?;
+    if u64::try_from(data.len()).unwrap_or(u64::MAX) > MAX_EVIDENCE_FILE_BYTES {
+        return Err(EvidenceStoreError::CorruptPayload(
+            "evidence file grew beyond the read bound".to_string(),
+        ));
+    }
+    Ok(data)
 }
 
 /// Creates `path` exclusively with mode `0600`, writes `bytes` and syncs it to disk.
