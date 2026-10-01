@@ -1,151 +1,186 @@
 # Candid Review Report
 
 - **Date**: 2026-10-01
-- **Target Branch**: `feat/sface-embedding-model`
-- **Base (merge-base)**: `11c967e`
-- **Reviewed-Diff-Fingerprint**: `262e6aa29023848ca390e82463ef08a47838e144a89a6841282bba3a91e1135e`
-- **Fingerprint cross-check**: `./scripts/candid_subagent.sh --prepare` on the clean working tree and the `--rev HEAD` gate computation over `HEAD^{tree}` (commit `0011039`) both yield the fingerprint above.
-- **Review round**: second review. The first review (fingerprint `29d417d8…d595656`, HEAD `5963958`) was APPROVED with four MINOR findings; commit `0011039` addresses them. This report covers the full diff `11c967e..0011039`; the first-round audit of the 71 files still applies because `0011039` changes only three documentation/script files (verified with `git diff --stat 5963958 0011039`).
-- **Audited Files**: `.agents/skills/dev-workflow/references/project-facts.md`, `AI/ARCHITECTURE.md`, `AI/DECISIONS.md`, `AI/MOCK_STRATEGY.md`, `AI/VERIFICATION_MATRIX.md`, `AI/walkthroughs/162_sface_embedding_model.md`, `Docs/DAEMON.md`, `Docs/ENROLLMENT_CLI.md`, `Docs/INFERENCE_ORT_CRATE.md`, `Docs/MEMORY_PROTECTION_AND_SWAP.md`, `Docs/POLICY_CRATE.md`, `Docs/VISION_CRATE.md`, `crates/biometric-store/src/template.rs`, `crates/daemon/src/dispatcher.rs`, `crates/daemon/src/inference.rs`, `crates/daemon/src/pipeline.rs`, `crates/daemon/tests/model_deployment_tests.rs`, `crates/daemon/tests/pad_nonface_pipeline_real_model_tests.rs`, `crates/daemon/tests/sface_template_binding_tests.rs` (new), `crates/daemon/tests/template_model_binding_tests.rs`, `crates/enrollment-cli/src/args.rs`, `crates/enrollment-cli/src/error.rs`, `crates/enrollment-cli/src/guided_enrollment.rs`, `crates/enrollment-cli/src/main.rs`, `crates/enrollment-cli/src/service.rs`, `crates/enrollment-cli/tests/cli_hygiene_tests.rs`, `crates/enrollment-cli/tests/enroll_model_provenance_tests.rs`, `crates/enrollment-cli/tests/import_enroll_if_absent_tests.rs`, `crates/enrollment-cli/tests/import_json_presize_tests.rs`, `crates/enrollment-cli/tests/import_stdin_overwrite_tests.rs`, `crates/enrollment-cli/tests/import_stdin_tests.rs`, `crates/enrollment-cli/tests/import_tests.rs`, `crates/enrollment-cli/tests/migrate_tests.rs`, `crates/enrollment-cli/tests/model_id_tests.rs`, `crates/enrollment-cli/tests/quality_gate_report_tests.rs`, `crates/enrollment-cli/tests/verify_pad_report_tests.rs`, `crates/enrollment-cli/tests/verify_tests.rs`, `crates/gui/src/app.rs`, `crates/gui/src/lib.rs`, `crates/gui/src/main.rs`, `crates/inference-ort/Cargo.toml`, `crates/inference-ort/src/embedding.rs`, `crates/inference-ort/src/lib.rs`, `crates/inference-ort/src/mock.rs`, `crates/inference-ort/src/registry.rs`, `crates/inference-ort/tests/embedding_io_contract_tests.rs`, `crates/inference-ort/tests/embedding_preprocessing_evaluation_tests.rs`, `crates/inference-ort/tests/embedding_real_model_tests.rs`, `crates/inference-ort/tests/embedding_tests.rs`, `crates/inference-ort/tests/manifest_shape_tests.rs`, `crates/inference-ort/tests/manifest_tests.rs`, `crates/inference-ort/tests/registry_tests.rs`, `crates/policy/src/threshold.rs`, `crates/policy/tests/decision_tests.rs`, `crates/policy/tests/pad_consensus_tests.rs`, `crates/policy/tests/threshold_tests.rs`, `crates/vision/src/pipeline.rs`, `crates/vision/tests/embedding_lfw_evaluation_tests.rs`, `crates/vision/tests/pipeline_tests.rs`, `crates/vision/tests/threshold_constants_tests.rs`, `models/README.md`, `models/manifest.toml`, `models/retired_models.toml` (new), `scripts/download_models.sh`, `tests/docker/systemd_unit_acceptance_test.sh`, `tests/fixtures/mod.rs`, `tests/invariants/src/embedding_model_docs_contract.rs` (new), `tests/invariants/src/lib.rs`, `tests/invariants/src/vision_threshold_contract.rs`, `tests/physical/screensaver_test.md` (71 files)
+- **Target Branch**: `fix/p3fu5-batch`
+- **Base (merge-base)**: `9347449`
+- **Reviewed-Diff-Fingerprint**: `4b3821766631c44bb830e7bbe9de738da0a9cb108964d3ed4c669544d7427744`
+- **Fingerprint cross-check**: `./scripts/candid_subagent.sh --prepare` on the clean working tree
+  and the same pinned `review_diff` command over `HEAD^{tree}` (commit `3a1dfb3`, the input of the
+  `--rev` gate) both yield the fingerprint above.
+- **Audited Files**: `AI/DECISIONS.md`, `AI/VERIFICATION_MATRIX.md`,
+  `AI/walkthroughs/163_daemon_template_check_before_wake.md`,
+  `AI/walkthroughs/164_sface_gui_spec_doc_followups.md`, `Docs/BIOMETRIC_STORE_CRATE.md`,
+  `Docs/DAEMON.md`, `Docs/GUI_APPLICATION.md`, `Docs/INFERENCE_ORT_CRATE.md`, `Docs/POLICY_CRATE.md`,
+  `crates/daemon/src/dispatcher.rs`, `crates/daemon/tests/template_check_order_tests.rs`,
+  `crates/gui/src/app.rs`, `crates/gui/src/worker.rs`,
+  `crates/gui/tests/match_reference_selection_tests.rs`,
+  `crates/gui/tests/match_reference_zeroize_tests.rs`, `crates/inference-ort/src/embedding.rs`,
+  `crates/inference-ort/tests/embedding_spec_layout_tests.rs`, `tests/invariants/src/lib.rs`,
+  `tests/invariants/src/sface_followups_contract.rs` (19 files)
 
 ## 1. Executive Summary
 
-The diff implements the owner decision of 2026-10-01 (GitHub #278): OpenCV Zoo SFace 2021dec
-(`sface_2021dec`, 128-D, NCHW, RGB raw 0..255) replaces the ArcFace ResNet34
-(`arcface_w600k_mbf`, 512-D, NHWC, BGR `/127.5`). The default `match_threshold` moves from 0.70
-to 0.50 (floor 0.40 unchanged). Templates are bound by model id **and** vector length through
-one pure function (`soos_inference_ort::template_matches_model`), and the legacy `mobilefacenet`
-alias is removed. `import` only accepts SFace/128, which also fixes the literal ArcFace default
-used by the GUI pkexec import. `verify` and the GUI refuse foreign templates before capture or
-matching, and `migrate`/`list` print re-enrollment notices. The ArcFace attestation moves to
-`models/retired_models.toml`, and only the SFace ORT session logs at `Error`.
+This is the second review of GitHub #298. It covers the same diff as the review bound to
+`e76646e6…`, plus commit `3a1dfb3`, which addresses that review's two MINOR findings.
+`git diff 683d5e4 3a1dfb3 --stat` shows that the commit touches only four files:
 
-Round 2 delta (`0011039`): the four MINOR findings of round 1 are fixed exactly as requested,
-with no code change outside `scripts/download_models.sh` (one warning string). No new finding.
+- `AI/DECISIONS.md`: matrix range TCO1–TCO9, plus a precedence sentence.
+- `AI/VERIFICATION_MATRIX.md`: new row TCO9.
+- Walkthrough 163: the taxonomy now states the precedence, and the store-error row cites TCO9.
+- `crates/daemon/tests/template_check_order_tests.rs`: new `Enrolled::CorruptFile` fixture case
+  and the TCO9 test.
 
-## 2. Test Changes (mechanical listing from step 3, with justification per change)
+No production code changed after the first review. Both previous MINOR findings are resolved, and
+no new defect was found.
 
-Round 2: `0011039` touches no test file (diff stat: walkthrough 162, `Docs/ENROLLMENT_CLI.md`,
-`scripts/download_models.sh`). The mechanical listing of step 3 on the new patch is identical
-to round 1:
+**Part A (daemon).** Step 8 of `handle_request` now reads the enrolled template once and runs
+`classify_template` before the atomic rate-limit reservation and the camera wake. A `Foreign`
+template is answered `Unavailable`/`ModelUnavailable` without consuming an attempt or waking the
+camera. Every other outcome still reserves exactly one attempt under the policy write lock before
+any camera or vision work.
 
-- Escape hatches (`#[ignore]`, `#[cfg(any())]`, `should_panic`, `tolerance`, `epsilon`) added: **none**.
-- Inline `mod tests` added/removed: **none**.
-- Removed/changed assertions: all map onto the owner-approved items 1–56 of walkthrough 162 §4,
-  changed exactly as described. #2 and #26–#28 are stricter, and #56 is setup only
-  (`257` → `IMPORT_EMBEDDING_DIM / 2 + 1`). The vector-length setup of the oversized/owner/symlink
-  tests in `import_stdin_tests` falls under #44. The undocumented candidate-slot change of the
-  ignored LFW harness (#37) is now recorded in an execution note (round-1 MINOR-4). Items #24 and
-  #52–#55 are "left as they are" and are absent from the patch.
+**Part B (GUI and embedding).**
+- The live-match reference is held in a `Zeroizing` container.
+- One helper swaps the reference and clears the score, with a consistent lock order.
+- A failed lookup clears stale state.
+- `OrtEmbeddingExtractor::with_spec` refuses non-NCHW specs.
 
-| Area | Approved items | Verdict |
-|---|---|---|
-| `embedding_io_contract_tests`, `embedding_tests` | #1–#8 (+ SFC2) | exact, strength kept or increased |
-| `embedding_real_model_tests`, `embedding_preprocessing_evaluation_tests` | #9–#18 (+ SFC5, SFC6, SFC18) | exact (#17 deleted and replaced by SFC6) |
-| `manifest_shape_tests`, `manifest_tests`, `registry_tests` | #19–#23 (+ SFC1) | exact |
-| `template_model_binding_tests`, `model_deployment_tests`, `pad_nonface_pipeline_real_model_tests` | #25–#31 | exact, stricter |
-| policy and vision threshold tests, LFW harness | #32–#37 | exact |
-| enrollment-cli tests | #38–#50, #56 (+ SFC13–SFC15) | exact / setup only |
-| `systemd_unit_acceptance_test.sh`, `tests/fixtures/mod.rs` | #51, #52 (c) | exact / doc only |
-| invariants | SFC12, SFC16, SFC17 | additive |
+## 2. Test Changes (mechanical listing from step 3)
 
-Reviewer re-runs:
-- Round 1: targeted `soos-enrollment-cli`, `soos-daemon` and `soos-inference-ort` targets were green.
-- Round 2: `cargo test -p soos-invariants embedding_model_docs_contract` (SFC16/SFC17, which
-  executes `download_models.sh` and checks the reworded "not attested" notice) gave 3 passed / 0 failed.
+- Test files touched (all new on this branch relative to the merge-base):
+  - `crates/daemon/tests/template_check_order_tests.rs`
+  - `crates/gui/tests/match_reference_selection_tests.rs`
+  - `crates/gui/tests/match_reference_zeroize_tests.rs`
+  - `crates/inference-ort/tests/embedding_spec_layout_tests.rs`
+  - `tests/invariants/src/sface_followups_contract.rs`
+  - `tests/invariants/src/lib.rs` is not new: 5 added lines that register the module, nothing removed.
+- Removed or changed `assert` / `#[test]` / `#[tokio::test]` / `proptest!` / `#[should_panic]`
+  lines in the frozen patch: **none**.
+- New escape hatches (`#[ignore]`, `#[cfg(any())]`, `should_panic`, `tolerance`, `epsilon`): **none**.
+- Inline `mod tests` added or removed: **none**.
+- Commit `3a1dfb3` only adds lines to a test file that is new on this branch:
+  - one enum variant;
+  - a match arm widened to `CurrentLiveIdentity | CorruptFile`, which builds the same template;
+  - a post-enroll file overwrite gated on `CorruptFile`;
+  - one new test.
+
+  No pre-existing assertion of any test was touched.
+- Rerun locally:
+  - `template_check_order_tests`: 11/11 pass.
+  - From the first review: `rate_limit_reservation_tests`, `sface_template_binding_tests`,
+    `template_model_binding_tests`, the GUI selection and zeroize tests, and
+    `embedding_spec_layout_tests` all pass.
 
 ## 3. Deep Reasoning Audit
 
 ### Logic & Architecture
 
-- Round 1 scenarios, all **PASS**:
-  - **Daemon 8d:** id + dimension binding runs before inference, and the spy extractor proves zero inferences.
-  - **`verify`:** refuses before capture.
-  - **GUI:** installs no reference for a foreign template.
-  - **`import`:** CBOR and JSON are both checked against `MODEL_ID_EMBEDDING`.
-  - **`migrate`:** never rebinds.
-  - **`list`:** warns on stderr, so the JSON is unchanged.
-  - **Single source:** `SHIPPED_EMBEDDING_MODEL`.
-  - **Grep of `crates/*/src`:** no remaining 512/0.70/ArcFace/alias assumption.
-  - **RGB raw NCHW:** equals OpenCV `blobFromImage(bgr, swapRB=true)` because the soos aligned crop is RGB24. There is no double swap, and SFC6 uses a channel-asymmetric gradient.
-- Round 2: `Docs/ENROLLMENT_CLI.md:45` now states the implemented rule. A template is current only
-  for `sface_2021dec` with 128 values. Any other id (including `mobilefacenet`/`1.0.0` and
-  `arcface_w600k_mbf`) or any other length gets `Unavailable`/`ModelUnavailable` before inference,
-  which means a password fallback, and the user must re-enroll. This is consistent with
-  `pipeline::classify_template` and with lines 43 and 48. The walkthrough status, gate row and F6
-  now agree with §4 item 56 and commit `5963958`. **PASS**.
+- **Reservation bypass.** Only the `TemplateModelBinding::Foreign` branch returns before
+  `record_attempt`, and it returns before any wake, capture or inference.
+  - `Ok(None)`, `Err` and a current template all reach the unchanged write-locked reservation.
+  - A rejected reservation returns `RateLimited`.
+  - The consensus loop is reachable only with `Ok(Some(tmpl))` after the reservation.
+  - → PASS.
+- **TOCTOU with a concurrent root re-enrollment.** There is a single `biometric_store.get`, and its
+  result is moved into `enrolled_template` and matched. No second read exists, so a re-enrollment
+  cannot turn an uncharged request into an evaluated one. There is one template per UID. → PASS.
+- **`expected_embedding_model == None`.** Classification is skipped as before. → PASS.
+- **Earlier gates.** All of the following still return before step 8:
+  - 5a wire validation;
+  - 6 `SO_PEERCRED` versus `uid_hint`;
+  - 6b local-session policy;
+  - 6c preview routing;
+  - 7 clock and deadline check.
+
+  → PASS.
+- **Oracle and attempt budget.** An unprivileged peer can only target its own UID. "Enrolled or not"
+  enumeration is still charged (TCO4, TCO9). The single new observable is documented in the ADR: a
+  rate-limited foreign-template requester gets `ModelUnavailable` instead of `RateLimited`, which
+  concerns its own UID and repeats its first answer. Nothing that can produce a score bypasses the
+  budget. → PASS.
+- **Verdict precedence.** The ADR #298 bullet and the walkthrough 163 taxonomy now state that the
+  template outcome wins over camera availability:
+  - missing template or store error with a camera that cannot wake → `InternalError`;
+  - foreign template with a cold camera → `ModelUnavailable`;
+  - both were formerly `CameraUnavailable`, and all map to `PAM_IGNORE`.
+
+  This matches the code. → PASS (previous MINOR-1 resolved).
+- **NCHW refusal.** `with_spec` returns `InvalidInput` for a non-NCHW spec. The infallible `new`
+  is guarded by a `const` assertion on `SHIPPED_EMBEDDING_MODEL.input_layout`. → PASS.
 
 ### PAM Concurrency & Deadlines
 
-- `crates/pam` is untouched, and `Unavailable` already maps to `PAM_IGNORE`. The 8d refusal comes
-  before inference, so no new blocking path appears. Round 2 changes no code path. **PASS**.
+- `crates/pam` is untouched, and the PAM client deadline from the clamped `timeout_ms` still
+  bounds the caller.
+- On the daemon side the template read is the same size-bounded, authenticated `get`, moved
+  earlier; `RequestDeadline` is threaded unchanged.
+- The foreign, missing and store-error paths now skip the wake wait, so their latency only
+  decreases.
+- → PASS.
 
 ### Panic Safety & Fail-Closed
 
-- **No panics:** the new production code has no `unwrap`/`expect`/`panic!`/indexing.
-- **Wrong session:** an NHWC session fails extraction with `TensorError`, and a wrong output length gives `DimensionMismatch`.
-- **Partial upgrade:** in either direction the daemon refuses to start, so PAM returns `PAM_IGNORE`.
-- **ORT log level:** `Error` applies to the SFace session only (SFC18), and errors stay visible.
-- **Rate limit:** semantics are unchanged; a refusal never reaches `Allow`.
-- **Round 2:** the warning-string change is output only; the loop still never deletes and still uses an exact name comparison.
-- **PASS**.
+- No `unwrap`, `expect`, `panic!` or indexing was added in production code.
+- The GUI recovers poisoned locks in `select_match_reference`. `update_live_match_score` skips
+  publishing on a poisoned lock.
+- Every refusal branch returns `Unavailable` or `ProtocolError`, never `Allow`.
+- → PASS.
 
 ### Test Integrity & Anti-Weakening
 
-- See section 2. There is no test change in round 2. **PASS**.
+- **TCO9 discriminates ordering.** It would fail if:
+  - the store-error branch answered before the reservation (remaining attempts 5, not 4);
+  - the branch were placed after the wake (wakes or captures 1);
+  - inference ran (inferences 0).
+
+  The corrupt file is written with the same length as the real file, so the envelope size bound
+  passes. Envelope parsing or authentication then fails, which exercises the `Err` branch rather
+  than `Ok(None)`: the file exists, so `Ok(None)` cannot occur. Both answer `InternalError`, but the attempt-count and wake assertions pin the
+  ordering either way. The fixture resets the inference counter after enrollment, so
+  `inferences == 0` is meaningful.
+- → PASS (previous MINOR-2 resolved).
 
 ### Memory, Bounds & Secrets
 
-- `Zeroizing` and `ZeroizingOutputs` are unchanged. The bounded import is unchanged. New messages
-  carry only UIDs, model ids and dimensions. Round 2 adds no logging of data. **PASS**.
+- The reference is `Mutex<Option<Zeroizing<Vec<f32>>>>`, cloned from the
+  `Zeroizing<Vec<f32>>` template embedding with no plain intermediate. The old `to_vec` copy is
+  gone.
+- Lock order is reference then score in both helpers; `app.rs:815` takes the score lock alone. No
+  inversion is possible.
+- Daemon logs carry the UID, model id and dimension only. No embedding, frame or credential is
+  logged.
+- → PASS.
 
 ### Supply Chain & Automation
 
-- No dependency change. The manifest pins the HF revision `3d70824…`, the SHA-256 `0ba9fbfa…4c34e79`
-  and `size_bytes = 38696353` over HTTPS. `retired_models.toml` is never read at runtime (SFC17).
-- Round 2: the `download_models.sh:551` notice no longer claims an untracked file is unused. It
-  tells the operator to keep a file enabled as an optional model in the deployed manifest and to
-  remove a retired one manually. This resolves the misleading `--check-only` case without changing
-  behaviour. **PASS**.
+- No `Cargo.*`, `deny.toml`, `.github/`, `scripts/` or `.githooks/` change. → PASS.
 
 ### English-Only Policy
 
-- Round-2 text (doc sentence, walkthrough notes, warning string, commit message) is English.
-  Commit `0011039` follows Conventional Commits (`docs(embedding): …`, `Refs #278`). **PASS**.
+- Non-ASCII characters on added lines are only dashes, arrows and status markers. All content is
+  in English. → PASS.
 
 ## 4. Detailed Findings & Action Items
 
-Round-1 findings, all resolved in `0011039`:
+No CRITICAL, MAJOR or MINOR findings.
 
-- ~~**[MINOR]** `Docs/ENROLLMENT_CLI.md:45` stale legacy-alias sentence~~ — fixed (current rule
-  stated: `sface_2021dec` + 128 only, everything else `Unavailable`/`ModelUnavailable`, re-enroll).
-- ~~**[MINOR]** walkthrough 162 status / gate row / F6 showed item 56 as pending~~ — fixed (approved
-  and applied in `5963958`; 2166 passed / 0 failed).
-- ~~**[MINOR]** `scripts/download_models.sh:551` "and is unused" claim~~ — fixed (keep the file if
-  enabled as an optional model in the deployed manifest, remove a retired one manually).
-- ~~**[MINOR]** LFW harness candidate-slot change undocumented under §4 #37~~ — fixed (execution
-  note added).
+Previous findings (review bound to `e76646e6…`):
+- **MINOR-1** (verdict precedence undocumented): resolved in `AI/DECISIONS.md` (#298 bullet) and
+  walkthrough 163.
+- **MINOR-2** (no store-error ordering test): resolved by
+  `template_check_order_tests::test_store_error_is_refused_before_the_camera_wake_and_still_counts`
+  (matrix TCO9).
 
-New findings in round 2: **none**.
+Suggestions (optional):
+- **[SUGGESTION]** `crates/daemon/src/dispatcher.rs` step 8a: if the template read ever becomes
+  expensive, a read-locked pre-check of the remaining attempts could spare rate-limited requests
+  that read. It must not replace the atomic reservation.
+- **[SUGGESTION]** `crates/inference-ort/src/embedding.rs:294`: `is_nhwc()` can no longer return
+  `true` now that non-NCHW specs are refused. A later cleanup could deprecate it; that would need a
+  test migration, so it is out of scope here.
+- **[SUGGESTION]** `AI/VERIFICATION_MATRIX.md`: row TCO9 cites a `path.rs::test_name` form, while
+  sibling rows use `module::test_name`. The citation resolves either way; the form is cosmetic.
 
-Suggestions carried to a follow-up issue by the coordinator (not this PR):
-- In `dispatcher.rs`, run steps 8c/8d before the camera wake.
-- Fix the GUI stale-score race (`app.rs:813-827`).
-- Make `with_spec` reject a non-NCHW spec (`embedding.rs:235/346`).
-- Update the 512-D example in `Docs/BIOMETRIC_STORE_CRATE.md:225`.
-
-Note (informational): the walkthrough status line already reads "Phase 5 (candid review)
-APPROVED". This report confirms it for fingerprint `262e6aa2…1135e`.
-
-## 5. Gate Result
-
-`./scripts/candid_subagent.sh` (Layer 1 deterministic invariants + Layer 2 fingerprint/verdict)
-on the working tree with this report: **PASSED** (Layer 1 all invariants verified; Layer 2
-APPROVED report bound to fingerprint 262e6aa29023…).
-
-## 6. Final Verdict
-
-No CRITICAL or MAJOR finding. Every round-1 MINOR finding is resolved, and nothing outside the
-three declared files changed.
+## 5. Final Verdict
 
 **VERDICT: APPROVED**

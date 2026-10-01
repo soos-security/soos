@@ -1515,6 +1515,22 @@ Every PAM-12 point was already fixed on `main` (strict codec, PCZ1-PCZ2; tagged 
 
 ---
 
+## Component: `daemon-template-check-order` (GitHub #298 first and fifth items, `fix/daemon-template-check-order`, walkthrough 163)
+
+| ID | Criterion | Verification Method | Status |
+|---|---|---|---|
+| TCO1 | A foreign template (retired ArcFace id, or current id with another vector length) is answered `Unavailable` / `ModelUnavailable` without waking the camera (`notify_activity`) or reading a capture (`latest_frame`), and no inference runs (spy camera + spy extractor) | Integration tests (`template_check_order_tests::test_foreign_template_never_wakes_the_camera`, `template_check_order_tests::test_wrong_dimension_template_never_wakes_the_camera`) | ✅ Verified |
+| TCO2 | With a cold camera that never becomes ready, a foreign template is answered `ModelUnavailable` at once (no wake wait, not `CameraUnavailable`) | Integration test (`template_check_order_tests::test_foreign_template_does_not_wait_for_a_cold_camera`) | ✅ Verified |
+| TCO3 | A current SFace template still wakes the camera, reads captures, runs inference and authorizes (`Allow` / `FaceMatch`) | Integration tests (`template_check_order_tests::test_current_template_still_wakes_the_camera_and_authenticates`, `sface_template_binding_tests::test_current_sface_template_is_evaluated`) | ✅ Verified |
+| TCO4 | A UID without a template keeps its verdict (`Unavailable` / `InternalError`), is answered before the camera wake and still consumes one attempt (GitHub #200 contract kept) | Integration tests (`template_check_order_tests::test_missing_template_is_refused_before_the_camera_wake_and_still_counts`, `rate_limit_reservation_tests::test_200_attempt_ending_before_vision_work_is_recorded`) | ✅ Verified |
+| TCO5 | A foreign template consumes no rate-limit attempt, sequentially or concurrently (limiter tracks nothing; never `RateLimited`) | Integration tests (`template_check_order_tests::test_foreign_template_consumes_no_rate_limit_attempt`, `template_check_order_tests::test_concurrent_foreign_template_requests_reserve_nothing`) | ✅ Verified |
+| TCO6 | For a current template the attempt is already reserved (one attempt, under the policy write lock) when the camera is woken and when the first capture is read | Integration tests (`template_check_order_tests::test_current_template_reserves_the_attempt_before_wake_and_capture`, `rate_limit_reservation_tests::test_200_attempt_is_reserved_before_vision_work`) | ✅ Verified |
+| TCO7 | A rate-limited request with a current template is refused `ProtocolError` / `RateLimited` without waking the camera | Integration tests (`template_check_order_tests::test_rate_limited_current_template_never_wakes_the_camera`, `rate_limit_reservation_tests::test_200_allow_then_rate_limited_with_one_attempt`) | ✅ Verified |
+| TCO8 | Concurrent current-template requests still share the limit atomically (one attempt: exactly one `RateLimited`, at most one `Allow`) | Integration tests (`template_check_order_tests::test_concurrent_current_template_reservations_stay_atomic`, `rate_limit_reservation_tests::test_200_concurrent_matching_auths_with_one_attempt_allow_at_most_once`, `rate_limit_reservation_tests::test_200_concurrent_denied_auths_with_one_attempt_yield_one_evaluation`) | ✅ Verified |
+| TCO9 | A store error (tampered or unreadable template file) is answered before the camera wake as `Unavailable` / `InternalError`, runs no inference and still consumes the rate-limit attempt | `crates/daemon/tests/template_check_order_tests.rs::test_store_error_is_refused_before_the_camera_wake_and_still_counts` | ✅ Verified |
+
+---
+
 ## Component: `p2-review-followups` (GitHub #285, non-blocking findings of the P2 batch reviews)
 
 | ID | Criterion | Evidence | Status |
@@ -1532,6 +1548,16 @@ Every PAM-12 point was already fixed on `main` (strict codec, PCZ1-PCZ2; tagged 
 | RFX11 | A signal-interrupted dequeue (`EINTR`) never spends the V4L2 stall budget toward `CameraError::Starved` | `capture::tests::test_rfx_dequeue_interrupted_does_not_count_as_stall` | ✅ Verified |
 | RFX12 | `tests/docker/mock_daemon.py` drops a frame with an unknown tag trailer (no handler, no response), matching `decode_client_message` | `review_followups_contract::test_rfx_mock_daemon_drops_unknown_tag_frames` | ✅ Verified |
 | RFX13 | The stale SAFETY comment of the synthetic-handle fault-injection test now cites the PHS11 trigger ordering, and the admin CLI PAM simulation verdict tests use the maximum 5000 ms client timeout (both pre-existing test edits user-approved 2026-10-01); `import_from_reader` stays public, its doc states that the `--yes` overwrite gate belongs to `import_with_overwrite_from_reader` (the CLI path) | Admin CLI tests (`test_pam_tests::test_simulate_pam_auth_allow`, `test_pam_tests::test_simulate_pam_auth_deny_yields_pam_ignore`) and PAM test (`fault_injection_tests::test_fault_inject_via_pam_hooks_returns_pam_ignore`) | ✅ Verified |
+
+## Component: `sface-gui-spec-doc-followups` (GitHub #298, GUI, extractor and docs follow-ups of the SFace switch, `fix/sface-gui-and-spec-followups`, walkthrough 164)
+
+| ID | Criterion | Verification Method | Status |
+|---|---|---|---|
+| SGF1 | Selecting a profile replaces the GUI match reference and withdraws the previous score in one critical section: a current template becomes the reference, a foreign template clears reference and score and sets the re-enrollment note, and a concurrently publishing worker leaves no score visible after a foreign selection | GUI tests (`match_reference_selection_tests::test_selecting_current_template_sets_reference_and_withdraws_previous_score`, `match_reference_selection_tests::test_switching_to_foreign_profile_shows_no_stale_score`, `match_reference_selection_tests::test_concurrent_worker_leaves_no_score_after_foreign_selection`) | ✅ Verified |
+| SGF2 | A failed or empty template lookup clears the match reference note, the reference and the score | GUI test (`match_reference_selection_tests::test_failed_template_lookup_clears_note_reference_and_score`) | ✅ Verified |
+| SGF5 | The GUI match reference (`WorkerSharedInput::match_reference`, the copy of the enrolled template embedding) is a `Zeroizing<Vec<f32>>` cloned straight from the template's `Zeroizing` vector, so it is wiped when replaced, cleared or dropped; scoring borrows it without copying | GUI test (`match_reference_zeroize_tests::test_match_reference_is_a_zeroizing_container`, compile-time type check plus unchanged selection and scoring behavior) | ✅ Verified |
+| SGF3 | `OrtEmbeddingExtractor::with_spec` rejects a non-NCHW spec at construction with `InferenceError::InvalidInput` (NCHW or NHWC session alike); the NCHW shipped spec is accepted | Contract tests (`embedding_spec_layout_tests::test_with_spec_rejects_nhwc_spec_for_nchw_session`, `embedding_spec_layout_tests::test_with_spec_rejects_nhwc_spec_for_nhwc_session`, `embedding_spec_layout_tests::test_with_spec_accepts_nchw_shipped_spec`) | ✅ Verified |
+| SGF4 | The `Docs/BIOMETRIC_STORE_CRATE.md` CRUD example builds an `sface_2021dec` template of 128 values (no `glintr100`, no 512-D vector) | Invariant (`sface_followups_contract::test_biometric_store_doc_example_uses_shipped_sface_template`) | ✅ Verified |
 
 ## Component: `camera-vision-followups` (GitHub #287, camera / vision follow-ups of the P3 batch)
 

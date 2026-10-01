@@ -219,10 +219,10 @@ let store = BiometricStore::new("/var/lib/soos/biometrics", key)?;
 // 1. Create (Enroll)
 let template = BiometricTemplate::new(
     1000,
-    "glintr100".to_string(),
-    "1.0.0".to_string(),
+    "sface_2021dec".to_string(), // SHIPPED_EMBEDDING_MODEL.model_id
+    "2.0.0".to_string(),
     1726000000,
-    Zeroizing::new(vec![0.05_f32; 512]),
+    Zeroizing::new(vec![0.05_f32; 128]), // SHIPPED_EMBEDDING_MODEL.dimension
 )?;
 store.enroll(&template)?;
 
