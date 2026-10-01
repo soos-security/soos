@@ -116,6 +116,28 @@ digests together (from the archive's `rustup-init.sha256`, cross-checked with a 
 `sha256sum`); `tests/invariants/src/rustup_bootstrap_contract.rs` enforces the pins, the
 Dockerfile usage and the fail-closed checksum path.
 
+**Shell profiles are never edited (GitHub #287).** `rustup-init` runs with `--no-modify-path`, so
+it never appends to `~/.profile`, `~/.bashrc`, `~/.bash_profile`, `~/.zshenv` or the fish
+`conf.d` (an earlier test run on a developer host had appended such lines). The script instead
+exports `${CARGO_HOME:-$HOME/.cargo}/bin` in `PATH` for its own post-install `rustc --version`
+check and prints the `export PATH="<cargo_home>/bin:$PATH"` line for the operator to add where
+wanted. The sandbox Dockerfiles already set `PATH` with an `ENV` instruction.
+`tests/invariants/src/rustup_path_contract.rs` runs the installer hermetically (stub `curl`,
+`sha256sum` and `uname`; scratch `HOME`, `CARGO_HOME` and `RUSTUP_HOME` under `target/`) and checks
+the flag, untouched profiles and the printed `PATH` line.
+
+**Digest bump procedure** (manual, one commit, also in the script header):
+1. Pick the new rustup release `<version>`.
+2. For each triple (`x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`), fetch
+   `https://static.rust-lang.org/rustup/archive/<version>/<triple>/rustup-init.sha256` and the
+   `rustup-init` binary next to it with `curl --proto '=https' --tlsv1.2`.
+3. Run `sha256sum rustup-init` on each download and check it equals the published `.sha256`
+   value. Never take a digest from a mirror or a third party.
+4. Update `RUSTUP_VERSION`, `RUSTUP_INIT_SHA256_X86_64`, `RUSTUP_INIT_SHA256_AARCH64` in
+   `scripts/install_rustup.sh` and the version quoted above.
+5. Run `cargo test -p soos-invariants rustup` and rebuild a sandbox image (for example
+   `./run_tests.sh`) so a real download is checked against the new digests.
+
 ### Security Design
 - **Least privilege**: the workflow token is `contents: read`; `actions/checkout` does not persist
   credentials.
