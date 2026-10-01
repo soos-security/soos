@@ -190,8 +190,29 @@ impl V4lDeviceProbe for SystemV4lDeviceProbe {
     }
 }
 
+/// Character-device major number of every V4L2 node (`Documentation/admin-guide/devices.txt`).
+const V4L2_CHAR_MAJOR: u32 = 81;
+
+/// Refuses any path that is not a V4L2 character device before `open(2)`.
+///
+/// `soos-admin camera probe <DEVICE>` often runs as root and accepts an arbitrary path;
+/// opening some other device nodes has side effects (a tape drive rewinds on close, a tty
+/// changes its modem lines). A refused path reports `ENOTTY`, the errno the V4L2 ioctls would
+/// return on it.
+fn ensure_v4l2_char_device(dev_path: &Path) -> Result<(), ProbeFailure> {
+    use std::os::unix::fs::{FileTypeExt, MetadataExt};
+
+    let metadata = std::fs::metadata(dev_path).map_err(|e| ProbeFailure::from_io_error(&e))?;
+    if metadata.file_type().is_char_device() && libc::major(metadata.rdev()) == V4L2_CHAR_MAJOR {
+        Ok(())
+    } else {
+        Err(ProbeFailure::Other(Some(libc::ENOTTY)))
+    }
+}
+
 /// Body of [`SystemV4lDeviceProbe::details`] (metadata ioctls only).
 fn system_details(dev_path: &Path) -> Result<V4lNodeDetails, ProbeFailure> {
+    ensure_v4l2_char_device(dev_path)?;
     let device = v4l::Device::with_path(dev_path).map_err(|e| ProbeFailure::from_io_error(&e))?;
     let caps = device
         .query_caps()

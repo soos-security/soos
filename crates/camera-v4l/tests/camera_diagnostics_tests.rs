@@ -962,3 +962,39 @@ fn test_cdx_collect_sanitizes_device_strings() {
         assert!(!text.chars().any(char::is_control), "{text:?}");
     }
 }
+
+// ---------------------------------------------------------------------------
+// Real probe: only V4L2 character devices are opened (candid review, CDX11)
+// ---------------------------------------------------------------------------
+
+/// `soos-admin camera probe <DEVICE>` often runs as root: the real probe must refuse any path
+/// that is not a V4L2 character device (major 81) before `open(2)`, so probing a tape drive,
+/// tty or regular file has no side effect. A refused path reports `ENOTTY`.
+#[test]
+fn test_cdx_system_probe_refuses_non_v4l2_nodes_before_open() {
+    use soos_camera_v4l::diagnostics::SystemV4lDeviceProbe;
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let regular = dir.path().join("not-a-camera");
+    std::fs::write(&regular, b"x").unwrap();
+    // Unreadable: an open(2) attempt would fail with EACCES (non-root), the guard with ENOTTY.
+    std::fs::set_permissions(&regular, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+    let probe = SystemV4lDeviceProbe;
+    assert_eq!(
+        probe.details(&regular).unwrap_err(),
+        ProbeFailure::Other(Some(libc::ENOTTY)),
+        "a regular file must be refused before open"
+    );
+    assert_eq!(
+        probe.details(Path::new("/dev/null")).unwrap_err(),
+        ProbeFailure::Other(Some(libc::ENOTTY)),
+        "a character device with a non-V4L2 major must be refused"
+    );
+    assert_eq!(
+        probe.details(&dir.path().join("missing")).unwrap_err(),
+        ProbeFailure::NotFound,
+        "a missing path is still reported as not found"
+    );
+}

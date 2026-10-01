@@ -4,7 +4,7 @@
 - **Issues**: GitHub #256 (CAM-17, no camera diagnostics command), #195 (CAM-13, IR/RGB
   classification heuristics), #198 (CAM-16, no hermetic camera tests)
 - **Branch**: `fix/p3-camera-diagnostics`
-- **Matrix rows**: CDX1–CDX10 (component `camera-diagnostics`)
+- **Matrix rows**: CDX1–CDX11 (component `camera-diagnostics`)
 - **ADR**: 2026-10-01 "Metadata-Only Camera Diagnostics, Explained Resolution and Shared By-Id
   Stems" (`AI/DECISIONS.md`)
 
@@ -127,6 +127,15 @@ cargo test --locked --workspace --all-targets --all-features --no-fail-fast
 ```
 
 Results are recorded in the branch report.
+
+## 7a. Candid review follow-up: probe only V4L2 nodes (CDX11)
+
+`soos-admin camera probe <DEVICE>` accepts an arbitrary path and often runs as root. The
+production `SystemV4lDeviceProbe` now calls `ensure_v4l2_char_device` before `open(2)`: a path
+that is not a character device with major 81 is refused with `ENOTTY`, so probing a tape drive,
+tty or regular file has no side effect. Proven by
+`test_cdx_system_probe_refuses_non_v4l2_nodes_before_open`; `camera probe /dev/video0` still
+reports the real laptop camera.
 
 ## 8. Follow-ups
 
