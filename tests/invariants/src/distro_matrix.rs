@@ -1352,6 +1352,55 @@ fn test_mock_daemon_malformed_modes_put_one_defect_on_the_wire() {
     );
 }
 
+/// GitHub #293 (FGP1, FGP2) — the mock daemon is race-free for callers that poll for its
+/// socket path: the path appears only once the socket listens (bound and configured under
+/// a staging name, then renamed), and an `expired` window closes long before any request a
+/// harness can build (the stamp is read at send time, after interpreter start-up and the
+/// 10 s socket wait).
+#[test]
+fn test_mock_daemon_publishes_its_socket_only_once_listening() {
+    let mock = fs::read_to_string(workspace_root().join("tests/docker/mock_daemon.py"))
+        .expect("read mock");
+    let code: Vec<&str> = code_lines(&mock);
+    let position = |needle: &str| {
+        code.iter()
+            .position(|l| l.contains(needle))
+            .unwrap_or_else(|| panic!("mock_daemon.py must contain `{needle}`"))
+    };
+    assert!(
+        !code.iter().any(|l| l.contains("bind(sock_path)")),
+        "mock_daemon.py must never bind the published socket path directly"
+    );
+    let bind = position("server.bind(staging_path)");
+    let chmod = position("os.chmod(staging_path, socket_mode)");
+    let listen = position("server.listen(");
+    let publish = position("os.rename(staging_path, sock_path)");
+    assert!(
+        bind < chmod && chmod < listen && listen < publish,
+        "mock_daemon.py must bind, set the mode and listen before publishing the socket path"
+    );
+
+    let age_line = code
+        .iter()
+        .find(|l| l.trim_start().starts_with("EXPIRED_AGE_NS ="))
+        .expect("mock_daemon.py must declare EXPIRED_AGE_NS");
+    let age_ns: u64 = age_line
+        .split_once('=')
+        .map(|(_, v)| {
+            v.split('#')
+                .next()
+                .unwrap_or_default()
+                .trim()
+                .replace('_', "")
+        })
+        .and_then(|v| v.parse().ok())
+        .expect("EXPIRED_AGE_NS must be a decimal literal");
+    assert!(
+        age_ns >= 20_000_000_000,
+        "EXPIRED_AGE_NS ({age_ns}) must exceed the 10 s socket wait plus the 10 s read timeout"
+    );
+}
+
 /// #189 — Deny (T13), truncated (T14) and malformed responses (T15) never authenticate
 /// without a password and always leave the password fallback working.
 #[test]

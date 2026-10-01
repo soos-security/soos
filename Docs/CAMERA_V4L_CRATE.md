@@ -390,11 +390,36 @@ Stream creation and teardown are guarded as well (GitHub #289): `mmap_stream_gua
 `CameraError::StreamTeardown` (`CameraErrorKind::Io`): the supervisor backs off and reopens
 (`Recovering`, not `Dead`); after a shutdown it is logged and the shutdown proceeds; after a
 streaming error that error is kept. Frames are withdrawn on every one of these paths, so
-authentication stays fail-closed. Not guardable: when `Drop for Stream` panics, Rust still drops
-its `Arena` field while unwinding, and a second panic there aborts the process; avoiding it would
-require leaking the mappings (`ManuallyDrop`), rejected (ADR 2026-10-01 "By-Id Alias Lookup for
-Plain Capture Nodes; Silent, Guarded v4l Teardown"). Any other panic of a streaming session is
-still caught by the supervisor's own `catch_unwind` (camera `Dead`, fail-closed).
+authentication stays fail-closed. Any other panic of a streaming session is still caught by the
+supervisor's own `catch_unwind` (camera `Dead`, fail-closed).
+
+**Known upstream limitation: double teardown panic aborts (GitHub #291, #293).** One teardown
+failure cannot be guarded from this crate:
+
+- *Condition* (`v4l` 0.14.0, `src/io/mmap/stream.rs` and `src/io/mmap/arena.rs`): while a
+  capture stream is dropped, `Drop for Stream` gets an error other than `ENODEV` from
+  `VIDIOC_STREAMOFF` and panics; Rust then still drops the stream's `Arena` field during that
+  unwind, and `Drop for Arena` also gets an error other than `ENODEV` from `munmap` or
+  `VIDIOC_REQBUFS(0)` and panics a second time. Both ioctls must fail on a device that still
+  answers (an unplugged device returns `ENODEV`, which both drops ignore). A single failure of
+  either drop is caught by `guarded_v4l_drop` / `mmap_stream_guarded` as described above.
+- *Effect*: a panic while panicking always aborts the process (`SIGABRT`), whatever the panic
+  strategy; no `catch_unwind` can stop it. In `soos-daemon` this is fail-closed for
+  authentication: the socket goes away, every pending and new `pam_soos.so` request ends in
+  `PAM_IGNORE` (the next PAM module, usually the password, decides), never `PAM_SUCCESS`, and
+  systemd restarts the daemon (`Restart=on-failure`, `RestartSec=2`, bounded by
+  `StartLimitBurst=5` in 320 s, `packaging/soos-daemon.service`). An evidence or template write
+  under way at that moment leaves at most a temporary file, removed by the first startup sweep
+that finds it at least `TEMP_SWEEP_MIN_AGE` (60 s) old. In
+  `soos-enroll`, `soos-gui` and `soos-admin` the command aborts; nothing partial is stored
+  because every store write is an atomic rename.
+- *Why it stays*: only `v4l` can provide a fallible teardown (a `stop` / `release` returning the
+  error instead of panicking in `Drop`). Leaking the stream (`ManuallyDrop` / `mem::forget`,
+  which leaks the buffer mappings and the handle reference on every failure) and forking or
+  patching `v4l` (supply-chain cost) were both rejected (ADR 2026-10-01 "By-Id Alias Lookup for
+  Plain Capture Nodes; Silent, Guarded v4l Teardown", restated by ADR 2026-10-01 "Evidence Sweep
+  Lists Partitions Through Their Descriptor; v4l Double Teardown Panic Left Upstream"). Revisit
+  when a `v4l` release offers a fallible teardown.
 
 Panic hook: a panic the guard catches never reaches the process panic hook. The first guarded
 call installs once (`install_v4l_panic_hook_filter`, idempotent, public) a wrapper hook that is
