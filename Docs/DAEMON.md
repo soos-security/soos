@@ -193,6 +193,14 @@ pad_threshold = 0.85
   is left of the same one-`connection_timeout` budget (`drain_budget.saturating_sub(elapsed)`); a
   write still running at the deadline is reported as abandoned (a blocking write cannot be
   cancelled). Finished writes are reaped on every spawn, so the set stays bounded.
+- **Bounded process exit** (GitHub #289): `soos-daemon` builds its Tokio runtime explicitly
+  (no `tokio::main` attribute, whose runtime drop waits without bound for every `spawn_blocking`
+  job) and ends with `soos_daemon::shutdown::shutdown_runtime(runtime, remaining)`, i.e.
+  `Runtime::shutdown_timeout`, where `remaining = remaining_budget(drain_started, drain_budget,
+  now)` is what is left of the same one-`connection_timeout` budget. An abandoned evidence write,
+  or an inference left running by an aborted handler, is therefore not awaited: process exit
+  stays bounded by the drain budget (plus the 100 ms abort reap). A startup failure shuts the
+  runtime down with a zero budget (nothing was served).
 - **Accept errors** (GitHub #287): a failed `accept()` (`EMFILE`, `ENFILE`, `ENOBUFS`, `ENOMEM`,
   ...) is logged at `error` level with `retry_in_ms` and retried after a bounded exponential
   `AcceptBackoff`: `ACCEPT_BACKOFF_INITIAL` (5 ms), doubled after each consecutive error, capped at

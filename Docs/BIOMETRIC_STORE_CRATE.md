@@ -78,7 +78,7 @@ Recorded as ADR 2026-09-30 "AES-GCM Associated Data for Stored Templates and Evi
   best-effort overwrite of the legacy inode). `BiometricStore::template_format(uid)` reports the
   format, and `BiometricStore::migrate_legacy_template(uid)` re-encrypts a legacy template in place
   without changing its content (it refuses a legacy file whose embedded UID does not match and
-  leaves it untouched; it must not run concurrently with an `enroll` of the same UID).
+  leaves it untouched; it is serialized with `enroll` and `delete` by the store lock below).
 - **Bulk migration (GitHub #287, owner decision 2026-10-01)**: `BiometricStore::migrate_legacy_templates(dry_run)`
   runs `migrate_template(uid, dry_run)` (outcome `TemplateMigration::{Missing, AlreadyCurrent,
   Migrated, WouldMigrate}`) for every UID of `list_enrolled` and returns a
@@ -93,6 +93,26 @@ Recorded as ADR 2026-09-30 "AES-GCM Associated Data for Stored Templates and Evi
   (`Docs/ENROLLMENT_CLI.md`); v1 stays readable without it (no cut-off). `MasterKey::load_existing(path)`
   loads an existing master key with the validation of `load_or_create` and never creates a key or a
   directory; `migrate` uses it so that a host without a key is never given one.
+- **Store lock and migration identity check (GitHub #289, ADR 2026-10-01 "Biometric Store
+  Lock and Migration Identity Check")**: `enroll`, `delete` (hence `soos-enroll enroll`,
+  `import` and `delete`, and the GUI) and a real `migrate_template` take an exclusive advisory
+  `flock` on the store directory itself (opened `O_RDONLY | O_DIRECTORY | O_NOFOLLOW`; no lock
+  file is created). The lock is held only around the file mutation, never across a camera
+  capture; reads (`get`, `get_metadata`, `template_format`, `list_enrolled`) and dry runs never
+  take it. A contended lock is retried every 10 ms up to `STORE_LOCK_TIMEOUT` (5 s, configurable
+  with `BiometricStore::with_lock_timeout`), then the call fails with
+  `BiometricStoreError::LockTimeout` ("... is locked by another enroll, delete, import or
+  migrate operation; gave up after N ms") and changes nothing. A migration holds the lock from
+  its read to its rewrite, so a concurrent `delete` never sees its template resurrected and a
+  concurrent re-enrollment is never overwritten. As a second layer against writers that bypass
+  the lock, the device, inode, size and modification time of the file read are recorded; the
+  rewrite is refused with `BiometricStoreError::ChangedConcurrently` ("template of UID N changed
+  concurrently during migration; left as found") when the write handle or, just before the
+  rename, the path no longer matches; the temporary file is removed and the file is left as found
+  (a per-file failure of `migrate_legacy_templates`).
+- **Never-create constructor (GitHub #289)**: `BiometricStore::open_existing(dir, key)` validates
+  an existing directory exactly like `new` and reports a missing one as `Io(NotFound)` without
+  creating it or any parent. `soos-enroll migrate` opens the template store with it.
 - **What is detected**: moving a ciphertext between UIDs, editing the clear header, any bit flip,
   a wrong key.
 - **What is not detected (rollback)**: restoring an older, still-valid bound template of the
