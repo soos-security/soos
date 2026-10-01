@@ -1,0 +1,88 @@
+# =============================================================================
+# Dockerfile.systemd — ubuntu:24.04 booting systemd as PID 1 (GitHub #211)
+# =============================================================================
+# Runtime image of tests/docker/systemd_unit_acceptance_test.sh: the shipped
+# packaging/soos-daemon.service is installed by scripts/install.sh and driven by
+# a real systemd manager. No Rust toolchain: the release artifacts are built in
+# tests/docker/Dockerfile.ubuntu (same distribution, same glibc) and copied in.
+# The build context is empty (.dockerignore); the workspace is bind-mounted
+# read-only at run time.
+# =============================================================================
+
+FROM ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+# Lets systemd detect the container and skip units that only make sense on a
+# real machine (gettys, udev triggers).
+ENV container=docker
+
+# systemd + systemd-sysv: /sbin/init and systemd-analyze.
+# curl + ca-certificates: scripts/download_models.sh (only when models are
+# downloaded instead of copied from the host).
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        systemd \
+        systemd-sysv \
+        ca-certificates \
+        curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Keep the boot minimal and deterministic: no login prompts, no periodic jobs,
+# nothing that touches hardware or the network.
+RUN systemctl mask \
+        getty.target \
+        console-getty.service \
+        systemd-logind.service \
+        systemd-timesyncd.service \
+        systemd-networkd.service \
+        systemd-resolved.service \
+        apt-daily.timer \
+        apt-daily-upgrade.timer \
+        e2scrub_all.timer \
+        fstrim.timer \
+        motd-news.timer \
+    || true
+
+# Host isolation (candid review of #211): --privileged makes /proc/sys, /sys and
+# the host device nodes writable from the container, and several boot units
+# would apply container settings to the HOST kernel and firmware (sysctl.d,
+# modules-load.d, binfmt_misc, rfkill/backlight state, TPM PCR extends and
+# TPM2 setup, the random seed). Mask every one of them. A mask always succeeds,
+# even for a unit name that does not exist, so the build also fails when one of
+# the three units that write host kernel state (sysctl, modules-load, binfmt) is
+# no longer shipped under that name; the acceptance script asserts the masks at
+# run time and its host sysctl comparison is the final backstop.
+RUN for unit in \
+        systemd-sysctl.service \
+        systemd-modules-load.service \
+        systemd-binfmt.service \
+        proc-sys-fs-binfmt_misc.automount \
+        proc-sys-fs-binfmt_misc.mount \
+        systemd-rfkill.service \
+        systemd-rfkill.socket \
+        systemd-backlight@.service \
+        systemd-random-seed.service \
+        systemd-pcrphase.service \
+        systemd-pcrphase-sysinit.service \
+        systemd-pcrphase-initrd.service \
+        systemd-pcrmachine.service \
+        systemd-pcrfs-root.service \
+        systemd-pcrfs@.service \
+        systemd-pcrextend@.service \
+        systemd-tpm2-setup-early.service \
+        systemd-tpm2-setup.service; do \
+        ln -sf /dev/null "/etc/systemd/system/${unit}" || exit 1; \
+    done \
+    && for unit in systemd-sysctl.service systemd-modules-load.service systemd-binfmt.service; do \
+        [ -e "/usr/lib/systemd/system/${unit}" ] \
+            || { echo "host-state unit ${unit} not found: update the mask list" >&2; exit 1; }; \
+    done
+
+STOPSIGNAL SIGRTMIN+3
+
+# The container runs --privileged (systemd and the unit sandbox need mount,
+# network and cgroup namespaces), which copies every host device node into
+# /dev. Remove the V4L2, media, TPM and rfkill nodes before systemd starts, so
+# nothing in the container opens a host camera or TPM; the daemon uses the mock
+# camera. This is a mitigation, not a hard barrier: --privileged keeps
+# CAP_MKNOD, so the image must never run untrusted code.
+CMD ["/bin/bash", "-c", "rm -rf /dev/tpm* /dev/rfkill && rm -rf /dev/video* /dev/media* /dev/v4l && exec /sbin/init"]

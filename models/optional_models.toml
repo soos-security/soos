@@ -1,0 +1,48 @@
+# models/optional_models.toml — Attested but DISABLED optional models for soos
+#
+# Nothing in this file is loaded by soos-daemon, soos-enroll or soos-gui: they only read the
+# deployed models/manifest.toml, and models/manifest.toml does not declare these entries.
+# Every entry uses the exact models/manifest.toml schema, so the attestation (SHA-256,
+# size_bytes, I/O shapes) is ready the day an entry is enabled.
+#
+# Fetching: `scripts/download_models.sh --with-optional` downloads and verifies these files
+# next to the attested models. The deployed manifest.toml is still the repository manifest,
+# so the models stay disabled.
+#
+# Enabling (operator decision, NOT the default): append the `[models.<id>]` table below,
+# without the `[manifest]` header, to the deployed /var/lib/soos/models/manifest.toml and
+# restart soos-daemon. The daemon then wires the member (crates/daemon/src/pipeline.rs
+# `attach_optional_pad_members`, ADR 2026-09-30 "Optional Manifest-Gated Second PAD
+# Member") and refuses to start when the file or its shape does not match the entry.
+#
+# minifasnet_v1se_pad stays disabled until the fused PAD threshold is calibrated on a
+# print / screen-replay corpus captured with the real camera (GitHub #212, PAD-07;
+# walkthrough 161; ADR 2026-10-01 "Second PAD Model Attested, Disabled Until Calibrated").
+
+[manifest]
+version = "2.0.0"
+
+[models.minifasnet_v1se_pad]
+id = "minifasnet_v1se_pad"
+filename = "minifasnet_v1se_80x80.onnx"
+sha256 = "a25886a85cdcfa2c4ea23edb71de35f250c17827b4cadd253a972b28c80fdf1e"
+size_bytes = 1743294
+license = "Apache-2.0"
+# Pinned commit of the ONNX export fork (Apache-2.0) that also hosts the attested
+# minifasnet_v2_80x80.onnx; never a branch name.
+source_url = "https://github.com/QingHeYang/Silent-Face-Anti-Spoofing-onnx/raw/584d4421d7ac42c59e640796f46e886b0095367a/onnx/4_0_0_80x80_MiniFASNetV1SE.onnx"
+description = "MiniFASNetV1SE 80x80 presentation attack detection, 4.0x context crop (upstream 4_0_0_80x80_MiniFASNetV1SE); optional fused PAD member, disabled"
+input_shape = [1, 3, 80, 80]
+input_layout = "NCHW"
+output_shapes = [[1, 3]]
+# Provenance (informational keys, ignored by the Rust and bash manifest parsers).
+# The fork file is numerically identical to the reproducible conversion of the upstream
+# checkpoint by scripts/convert_pad_models.py: all 149 initializers (428,486 parameters)
+# are bit-identical and the softmax outputs agree exactly (scripts/compare_pad_models.py).
+upstream_repository = "https://github.com/minivision-ai/Silent-Face-Anti-Spoofing"
+upstream_license = "Apache-2.0"
+upstream_commit = "b6d5f04ad78778917853b25c778acef6d5626d15"
+upstream_weights_url = "https://github.com/minivision-ai/Silent-Face-Anti-Spoofing/raw/b6d5f04ad78778917853b25c778acef6d5626d15/resources/anti_spoof_models/4_0_0_80x80_MiniFASNetV1SE.pth"
+upstream_weights_sha256 = "84ee1d37d96894d5e82de5a57df044ef80a58be2b218b5ed7cdfd875ec2f5990"
+conversion_script = "scripts/convert_pad_models.py"
+converted_sha256 = "335ddec8e675e2c0949b7c57fdfed8e452fbe345dfaff9ab22b857ebcdcbc072"

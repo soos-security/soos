@@ -190,11 +190,14 @@ primary first.
 - The threshold is the modality-aware one (`pad_threshold`, or the stricter IR threshold). For
   monochrome frames the IR gate runs on the primary crop before any model is consulted.
 - `analyze_frame` (GUI) reports the fused result.
-- **Current deployment**: the attested model set holds only MiniFASNetV2, so `soos-daemon`,
-  `soos-enroll` and `soos-gui` still build a single-member pipeline. Wiring the 4.0× MiniFASNetV1SE
-  needs its ONNX export attested in `models/manifest.toml` (SHA-256, I/O shapes) and a threshold
-  re-measurement; it is a follow-up of GitHub #212 (ADR 2026-09-30 "Upstream-Parity PAD Crop
-  Geometry and Multi-Scale Fusion").
+- **Current deployment**: the 4.0× MiniFASNetV1SE is attested in `models/optional_models.toml`
+  (walkthrough 161) but disabled: `models/manifest.toml` does not declare it, so `soos-daemon`,
+  `soos-enroll` and `soos-gui` build a single-member pipeline. Appending its table to the deployed
+  manifest makes `soos-daemon` fuse it (`attach_optional_pad_members`); `soos-enroll` and `soos-gui`
+  do not wire it yet. Measured with the real files (release build, i7-13620H, 640x480 frame,
+  `pad_v1se_real_model_tests`): the second member adds about 3 ms per frame (median 2.6-2.8 ms single,
+  5.8-6.0 ms fused). The fused threshold is not calibrated (no print / replay corpus), which is why it
+  stays disabled (ADR 2026-10-01 "Second PAD Model Attested, Disabled Until Calibrated").
 
 #### 2.4.3 Pre-PAD Face Quality Gate (`quality.rs`, GitHub #218)
 
@@ -217,6 +220,24 @@ after the confidence check and before the PAD model and the embedding extractor 
   skips PAD, alignment and embedding, so a rejected face never feeds guided enrollment.
 - `soos-daemon` maps both errors to an unusable capture (`FrameEvaluation::no_face()`): `Deny` /
   `NoFace` when no frame of the request is usable, never `Allow` and never `InternalError`.
+
+#### 2.4.4 Real-Face LFW Evaluation Harness (`tests/embedding_lfw_evaluation_tests.rs`, GitHub #278)
+
+An ignored test, `test_lfw_real_face_evaluation_report`, measures the shipped verification path
+on the public LFW benchmark. It uses the production MJPEG decode, `OrtScrfdDetector` with
+`DEFAULT_MIN_FACE_CONFIDENCE` / `DEFAULT_NMS_IOU_THRESHOLD`, `align_face_112` and
+`OrtEmbeddingExtractor`. It reports 10-fold accuracy, TAR and the cosine threshold at FAR 1e-2
+to 1e-5, FAR and TAR at fixed thresholds (0.40 to 0.70), score distributions,
+failure-to-detect counts and per-stage latency. It covers each pre-processing variant (BGR or
+RGB, `/127.5` or `/128`) and an optional attested candidate model (`SOOS_EVAL_CANDIDATE_DIR`).
+`scripts/fetch_lfw_eval.sh` fetches the data into `~/.cache/soos-eval`. The download is
+bounded and SHA-256 verified, and the script refuses a cache inside the repository.
+
+The harness refuses to run unless `SOOS_EVAL_LFW_DIR`, `SOOS_EVAL_LFW_PAIRS` and
+`SOOS_MODELS_DIR` are set. Images, crops, embeddings and per-pair scores never leave memory,
+and only aggregates are printed. Results and the reproducible command are in walkthrough 160.
+The recalibration proposal built on them is ADR 2026-10-01 "Real-Face Embedding Evaluation and
+Recalibration Proposal" (Proposed). The production defaults are unchanged.
 
 ### 2.5 Letterbox Padding & Coordinate Projection (`letterbox.rs`)
 

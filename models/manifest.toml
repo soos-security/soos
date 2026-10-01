@@ -24,7 +24,7 @@ filename = "scrfd_500m_kps.onnx"
 sha256 = "a3562ef62592bf387f6ef19151282ac127518e51c77696e62e0661bee95ba1ad"
 size_bytes = 2524155
 license = "MIT"
-source_url = "https://huggingface.co/ykk648/face_lib/resolve/main/face_detect/scrfd_onnx/scrfd_500m_bnkps.onnx"
+source_url = "https://huggingface.co/ykk648/face_lib/resolve/10005fec5e0fec7c186e3b96318f00b4807fc70b/face_detect/scrfd_onnx/scrfd_500m_bnkps.onnx"
 description = "SCRFD 500M KPS unified face detection and 5-point facial landmarks"
 input_shape = [1, 3, 640, 640]
 output_shapes = [
@@ -47,7 +47,7 @@ size_bytes = 136619444
 # The source repository (garavv/arcface-onnx, revision 224c23c) declares no licence, so the
 # licence is recorded as the SPDX "NOASSERTION" value (GitHub #278, AI/DECISIONS.md).
 license = "NOASSERTION"
-source_url = "https://huggingface.co/garavv/arcface-onnx/resolve/main/arc.onnx"
+source_url = "https://huggingface.co/garavv/arcface-onnx/resolve/224c23cbbdc27a22add7fa538dee5b2aa9304b83/arc.onnx"
 description = "ArcFace ResNet34 (Keras, tf2onnx export, ~34.1M params, 136.6 MB) 512D face embedding extractor; NHWC input_1 [N,112,112,3]"
 input_shape = [1, 3, 112, 112]
 input_layout = "NHWC"
@@ -59,7 +59,7 @@ filename = "minifasnet_v2_80x80.onnx"
 sha256 = "0cbe5caec95c31de9d2ef845cb85407d76aecd1b6a2c0e343f7d35306bfbccb8"
 size_bytes = 1744126
 license = "Apache-2.0"
-source_url = "https://github.com/QingHeYang/Silent-Face-Anti-Spoofing-onnx/raw/main/onnx/2.7_80x80_MiniFASNetV2.onnx"
+source_url = "https://github.com/QingHeYang/Silent-Face-Anti-Spoofing-onnx/raw/584d4421d7ac42c59e640796f46e886b0095367a/onnx/2.7_80x80_MiniFASNetV2.onnx"
 description = "MiniFASNetV2 80x80 presentation attack detection (anti-spoofing)"
 input_shape = [1, 3, 80, 80]
 output_shapes = [[1, 3]]

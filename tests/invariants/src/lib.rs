@@ -147,6 +147,11 @@ mod unit_start_guard_contract;
 #[cfg(all(test, unix))]
 mod model_download_size_contract;
 
+/// The real-face LFW evaluation harness is ignored, env-gated and keeps its data outside the
+/// repository (GitHub #278, row EVR6).
+#[cfg(all(test, unix))]
+mod embedding_evaluation_contract;
+
 /// Camera diagnostics are metadata-only and built on the shared resolver (GitHub #256).
 #[cfg(test)]
 mod camera_diagnostics_contract;
@@ -175,6 +180,10 @@ mod camera_vision_followups_contract;
 #[cfg(all(test, unix))]
 mod camera_alias_guard_contract;
 
+/// Capture-backend seam below the V4L2 supervisor (GitHub #198, rows CCB11–CCB12).
+#[cfg(all(test, unix))]
+mod capture_backend_contract;
+
 /// `daemon.toml` `O_PATH` open, `v4l` hook filter re-installation and 32-bit clock conversions
 /// (GitHub #291, rows CDF1, CDF3–CDF5).
 #[cfg(all(test, unix))]
@@ -188,6 +197,17 @@ mod diagnostics_parity_contract;
 /// PAM response expiry enforcement and protocol follow-ups (GitHub #287, rows PRE6–PRE9).
 #[cfg(all(test, unix))]
 mod pam_response_expiry_contract;
+
+/// `soos-daemon.service` driven by a real systemd PID 1 in Docker: the harness exists, is
+/// wired in CI and asserts condition failed, start-limit-hit and READY ordering (GitHub #211,
+/// rows IRP8, SUA1–SUA6).
+#[cfg(all(test, unix))]
+mod systemd_unit_acceptance_contract;
+
+/// Second PAD model (4.0x MiniFASNetV1SE) attested in `models/optional_models.toml` but
+/// disabled by default; `download_models.sh --with-optional` (GitHub #212, rows PVA1–PVA4).
+#[cfg(all(test, unix))]
+mod pad_second_model_attestation_contract;
 
 #[cfg(test)]
 #[allow(

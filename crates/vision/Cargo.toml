@@ -19,3 +19,6 @@ zeroize = { workspace = true }
 [dev-dependencies]
 soos-test-fixtures = { workspace = true }
 proptest = "1"
+# Real-face LFW evaluation harness only (raw session runs of pre-processing variants).
+ort = { workspace = true }
+tempfile = { workspace = true }

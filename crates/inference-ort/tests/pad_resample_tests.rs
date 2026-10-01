@@ -30,18 +30,18 @@ fn ramp(edge: u32) -> Vec<u8> {
 
 #[test]
 fn test_pad_prepare_input_downscale_uses_half_pixel_centres() {
-    // 160 -> 80: output x samples source 2x + 0.5, so R = (2x + 0.5) / 255.
+    // 160 -> 80: output x samples source 2x + 0.5, so R = 2x + 0.5 (raw [0, 255] range).
     let tensor = OrtPadDetector::prepare_input(&ramp(160), 160, 160).expect("prepare_input");
     for y in 0..80usize {
         for x in 0..80usize {
             let r = tensor[2 * PLANE + y * 80 + x];
             let g = tensor[PLANE + y * 80 + x];
             let b = tensor[y * 80 + x];
-            let expected_r = (2.0 * x as f32 + 0.5) / 255.0;
-            let expected_g = (2.0 * y as f32 + 0.5) / 255.0;
+            let expected_r = 2.0 * x as f32 + 0.5;
+            let expected_g = 2.0 * y as f32 + 0.5;
             assert!((r - expected_r).abs() < 1e-5, "R({x},{y}) = {r}");
             assert!((g - expected_g).abs() < 1e-5, "G({x},{y}) = {g}");
-            assert!((b - 200.0 / 255.0).abs() < 1e-6, "B({x},{y}) = {b}");
+            assert!((b - 200.0).abs() < 1e-6, "B({x},{y}) = {b}");
         }
     }
 }
@@ -52,7 +52,7 @@ fn test_pad_prepare_input_upscale_clamps_to_border() {
     let tensor = OrtPadDetector::prepare_input(&ramp(40), 40, 40).expect("prepare_input");
     for x in 0..80usize {
         let r = tensor[2 * PLANE + x];
-        let expected = ((x as f32 + 0.5) * 0.5 - 0.5).clamp(0.0, 39.0) / 255.0;
+        let expected = ((x as f32 + 0.5) * 0.5 - 0.5).clamp(0.0, 39.0);
         assert!(
             (r - expected).abs() < 1e-5,
             "R({x},0) = {r}, expected {expected}"
@@ -65,8 +65,8 @@ fn test_pad_prepare_input_80x80_is_identity() {
     let tensor = OrtPadDetector::prepare_input(&ramp(80), 80, 80).expect("prepare_input");
     for y in 0..80usize {
         for x in 0..80usize {
-            assert_eq!(tensor[2 * PLANE + y * 80 + x], x as f32 / 255.0);
-            assert_eq!(tensor[PLANE + y * 80 + x], y as f32 / 255.0);
+            assert_eq!(tensor[2 * PLANE + y * 80 + x], x as f32);
+            assert_eq!(tensor[PLANE + y * 80 + x], y as f32);
         }
     }
 }

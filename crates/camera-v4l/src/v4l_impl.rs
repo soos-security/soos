@@ -52,6 +52,124 @@ where
     }
 }
 
+/// `VIDIOC_QUERYCAP` result the supervisor needs from an opened node.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NodeCapabilities {
+    /// Card name, classified by the sensor scorer.
+    card: String,
+    /// Whether the node advertises `V4L2_CAP_VIDEO_CAPTURE`.
+    video_capture: bool,
+}
+
+/// Device operations below the capture supervisor (GitHub #198, CAM-16).
+///
+/// The supervisor state machine (`supervise`, `open_and_stream`, `run_capture_loop`) is generic
+/// over this seam so that it runs unchanged against a scripted fake in the hermetic
+/// `supervisor_tests` module. Production uses [`V4lBackend`] only (both public spawn functions),
+/// which forwards each operation to the guarded `v4l` call it replaced.
+trait CaptureBackend: Send + 'static {
+    /// Opened capture node.
+    type Device: CaptureDevice;
+
+    /// Opens the node (`open(2)`); the raw OS error is kept for classification.
+    fn open_device(&self, path: &Path) -> std::io::Result<Self::Device>;
+}
+
+/// Operations on one opened node, in the order the open path issues them.
+trait CaptureDevice {
+    /// MMAP stream started on this node; it borrows the node, so it is torn down first.
+    type Stream<'a>: CaptureSource
+    where
+        Self: 'a;
+
+    /// `VIDIOC_QUERYCAP`.
+    fn capabilities(&self) -> std::io::Result<NodeCapabilities>;
+    /// `VIDIOC_ENUM_FMT` fourccs (guarded and bounded, empty on error); `path` is used for
+    /// logging only.
+    fn pixel_formats(&self, path: &Path) -> Vec<FourCC>;
+    /// Frame sizes of `fourccs` (guarded, bounded `VIDIOC_ENUM_FRAMESIZES`, empty on error);
+    /// `path` is used for logging only.
+    fn frame_sizes(&self, path: &Path, fourccs: &[FourCC]) -> Vec<(u32, u32)>;
+    /// `VIDIOC_S_FMT`: returns the format the driver granted.
+    fn apply_format(&self, requested: &v4l::Format) -> std::io::Result<v4l::Format>;
+    /// `VIDIOC_S_PARM`: returns the granted frame interval `(numerator, denominator)`.
+    fn apply_frame_interval(&self, numerator: u32, denominator: u32)
+        -> std::io::Result<(u32, u32)>;
+    /// `VIDIOC_REQBUFS` + `mmap` of `buffer_count` buffers; DQBUF waits at most `poll_timeout`.
+    fn start_stream(
+        &self,
+        buffer_count: u32,
+        poll_timeout: Duration,
+    ) -> std::io::Result<Self::Stream<'_>>;
+}
+
+/// Production [`CaptureBackend`]: V4L2 through the `v4l` crate and its panic guard.
+#[derive(Debug, Clone, Copy, Default)]
+struct V4lBackend;
+
+impl CaptureBackend for V4lBackend {
+    type Device = v4l::Device;
+
+    fn open_device(&self, path: &Path) -> std::io::Result<v4l::Device> {
+        v4l::Device::with_path(path)
+    }
+}
+
+impl CaptureDevice for v4l::Device {
+    type Stream<'a> = V4lCaptureSource<'a>;
+
+    // `v4l` 0.14 panics on non-UTF-8 capability strings and on unknown format enums: the
+    // guarded calls turn that into an error the supervisor backs off from, instead of a
+    // supervisor panic that marks the camera Dead until restart (GitHub #287).
+    fn capabilities(&self) -> std::io::Result<NodeCapabilities> {
+        query_caps_guarded(self).map(|caps| NodeCapabilities {
+            video_capture: caps.capabilities.contains(Flags::VIDEO_CAPTURE),
+            card: caps.card,
+        })
+    }
+
+    fn pixel_formats(&self, path: &Path) -> Vec<FourCC> {
+        enum_formats_guarded(self, path)
+    }
+
+    fn frame_sizes(&self, path: &Path, fourccs: &[FourCC]) -> Vec<(u32, u32)> {
+        device_frame_sizes(self, path, fourccs)
+    }
+
+    fn apply_format(&self, requested: &v4l::Format) -> std::io::Result<v4l::Format> {
+        set_format_guarded(self, requested)
+    }
+
+    fn apply_frame_interval(
+        &self,
+        numerator: u32,
+        denominator: u32,
+    ) -> std::io::Result<(u32, u32)> {
+        Capture::set_params(
+            self,
+            &v4l::video::capture::Parameters::new(v4l::fraction::Fraction::new(
+                numerator,
+                denominator,
+            )),
+        )
+        .map(|params| (params.interval.numerator, params.interval.denominator))
+    }
+
+    // Guarded: a half-built buffer arena is released inside `v4l`, which panics on failure.
+    fn start_stream(
+        &self,
+        buffer_count: u32,
+        poll_timeout: Duration,
+    ) -> std::io::Result<V4lCaptureSource<'_>> {
+        let mut stream = mmap_stream_guarded(self, buffer_count)?;
+        stream.set_timeout(poll_timeout);
+        Ok(V4lCaptureSource {
+            handle: stream.handle(),
+            stream,
+        })
+    }
+}
+
 /// Encoded [`CameraHealth`] values shared lock-free between the manager and its supervisor.
 const HEALTH_STARTING: u8 = 0;
 const HEALTH_STREAMING: u8 = 1;
@@ -133,7 +251,7 @@ impl V4lCameraManager {
     /// substituted by another device. Use [`V4lCameraManager::spawn_with_resolver`] for
     /// auto-selection that follows re-enumeration.
     pub fn spawn(config: CameraConfig) -> Result<Self, CameraError> {
-        Self::spawn_inner(config, None)
+        Self::spawn_inner(config, None, V4lBackend)
     }
 
     /// Spawns the capture supervisor with a [`DevicePathResolver`] consulted after every
@@ -143,12 +261,13 @@ impl V4lCameraManager {
         config: CameraConfig,
         resolver: Arc<dyn DevicePathResolver>,
     ) -> Result<Self, CameraError> {
-        Self::spawn_inner(config, Some(resolver))
+        Self::spawn_inner(config, Some(resolver), V4lBackend)
     }
 
-    fn spawn_inner(
+    fn spawn_inner<B: CaptureBackend>(
         config: CameraConfig,
         resolver: Option<Arc<dyn DevicePathResolver>>,
+        backend: B,
     ) -> Result<Self, CameraError> {
         let latest_frame = Arc::new(ArcSwapOption::empty());
         let is_ready = Arc::new(AtomicBool::new(false));
@@ -172,7 +291,7 @@ impl V4lCameraManager {
         let handle = thread::Builder::new()
             .name("soos-v4l-capture".into())
             .spawn(move || {
-                run_v4l_supervisor(cfg, resolver, shared);
+                run_v4l_supervisor(&backend, cfg, resolver, shared);
             })
             .map_err(|e| CameraError::Io {
                 path: config.device_path.clone(),
@@ -285,13 +404,14 @@ enum SupervisorAction {
 /// Under `panic = "unwind"` a panic in the capture thread would otherwise end the thread
 /// silently while the daemon keeps running with a stale readiness state. A caught panic
 /// marks the camera `Dead`, withdraws readiness and frames, and never restarts (fail-closed).
-fn run_v4l_supervisor(
+fn run_v4l_supervisor<B: CaptureBackend>(
+    backend: &B,
     config: CameraConfig,
     resolver: Option<Arc<dyn DevicePathResolver>>,
     shared: SupervisorShared,
 ) {
     let outcome = panic::catch_unwind(AssertUnwindSafe(|| {
-        supervise(&config, resolver.as_deref(), &shared);
+        supervise(backend, &config, resolver.as_deref(), &shared);
     }));
 
     shared.withdraw_frames();
@@ -306,7 +426,8 @@ fn run_v4l_supervisor(
 
 /// Supervisor loop handling device reconnection, re-resolution, streaming, exponential
 /// backoff, and auto-standby.
-fn supervise(
+fn supervise<B: CaptureBackend>(
+    backend: &B,
     config: &CameraConfig,
     resolver: Option<&dyn DevicePathResolver>,
     shared: &SupervisorShared,
@@ -316,6 +437,7 @@ fn supervise(
 
     while shared.running.load(Ordering::Acquire) {
         match open_and_stream(
+            backend,
             &active,
             &shared.latest_frame,
             &shared.is_ready,
@@ -627,7 +749,8 @@ fn settle_stream_teardown(
 }
 
 /// Opens device, allocates MMAP queue, discards warmup frames, and streams frames into RAM snapshot.
-fn open_and_stream(
+fn open_and_stream<B: CaptureBackend>(
+    backend: &B,
     config: &CameraConfig,
     latest_frame: &Arc<ArcSwapOption<Frame>>,
     is_ready: &Arc<AtomicBool>,
@@ -635,32 +758,36 @@ fn open_and_stream(
     last_activity: &Arc<RwLock<Instant>>,
     health: &AtomicU8,
 ) -> Result<SupervisorAction, CameraError> {
-    let device = v4l::Device::with_path(&config.device_path)
+    let device = backend
+        .open_device(&config.device_path)
         .map_err(|e| CameraError::from_io_error(config.device_path.clone(), e))?;
 
-    // `v4l` 0.14 panics on non-UTF-8 capability strings and on unknown format enums: the
-    // guarded calls turn that into an error the supervisor backs off from, instead of a
-    // supervisor panic that marks the camera Dead until restart (GitHub #287).
-    let caps = query_caps_guarded(&device).map_err(|e| CameraError::QueryCapabilities {
-        path: config.device_path.clone(),
-        reason: e.to_string(),
-    })?;
+    // Guarded in production (`V4lBackend`): a `v4l` panic becomes this error (GitHub #287).
+    let caps = device
+        .capabilities()
+        .map_err(|e| CameraError::QueryCapabilities {
+            path: config.device_path.clone(),
+            reason: e.to_string(),
+        })?;
 
-    if !caps.capabilities.contains(Flags::VIDEO_CAPTURE) {
+    if !caps.video_capture {
         return Err(CameraError::UnsupportedCapability {
             path: config.device_path.clone(),
         });
     }
 
     // Query hardware-supported formats via VIDIOC_ENUM_FMT
-    let fourccs: Vec<FourCC> = enum_formats_guarded(&device);
+    let fourccs: Vec<FourCC> = device.pixel_formats(&config.device_path);
     // Deep-greyscale IR fourccs (Y8I/Y10/Y12/Y16) are delivered as Grey (GitHub #195).
     let supported = delivered_formats(&fourccs);
 
     // Classify the opened node on its own hints (`supervisor_sensor_hints`), then negotiate
     // its format. Frames are stamped with the sensor type so an IR node streaming a colour
     // format still takes the IR PAD policy (GitHub #169, #195).
-    let hints = supervisor_sensor_hints(&config.device_path, device_frame_sizes(&device, &fourccs));
+    let hints = supervisor_sensor_hints(
+        &config.device_path,
+        device.frame_sizes(&config.device_path, &fourccs),
+    );
     // A plain `/dev/videoN` path carries no by-id name: look up its alias (GitHub #289). It can
     // only add an IR stamp, never remove one (`supervisor_alias_hints`).
     let hints = supervisor_alias_hints(hints, &config.device_path, Path::new(DEFAULT_BY_ID_DIR));
@@ -673,7 +800,7 @@ fn open_and_stream(
     let req_format = v4l::Format::new(config.width, config.height, fourcc);
     // uvcvideo reports a node streamed by another process (e.g. the daemon) as EBUSY here,
     // not at open(): classify it as `DeviceBusy` (GitHub #150).
-    let actual_format = set_format_guarded(&device, &req_format).map_err(|e| {
+    let actual_format = device.apply_format(&req_format).map_err(|e| {
         CameraError::from_ioctl_error(config.device_path.clone(), e, |reason| {
             CameraError::SetFormat {
                 path: config.device_path.clone(),
@@ -726,19 +853,19 @@ fn open_and_stream(
     // Request the configured frame rate (VIDIOC_S_PARM, GitHub #193). Drivers without
     // frame-interval control keep their default rate: best-effort, logged, never fatal.
     let granted = apply_frame_rate(&config.device_path, config.fps, |numerator, denominator| {
-        Capture::set_params(
-            &device,
-            &v4l::video::capture::Parameters::new(v4l::fraction::Fraction::new(
-                numerator,
-                denominator,
-            )),
-        )
-        .map(|params| (params.interval.numerator, params.interval.denominator))
+        device.apply_frame_interval(numerator, denominator)
     })
     .granted_fps();
 
-    // Guarded: a half-built buffer arena is released inside `v4l`, which panics on failure.
-    let mut stream = mmap_stream_guarded(&device, 4).map_err(|e| {
+    // Bounded DQBUF wait (GitHub #194): three frame intervals clamped to 150-250 ms, so the
+    // capture thread re-checks `running` at least every 250 ms and Drop completes within the
+    // 500 ms Criterion C9 budget even on a stalled camera. Consecutive timeouts escalate to
+    // `Starved` after MAX_STREAM_STALL.
+    let poll_timeout = dqbuf_poll_timeout(granted.unwrap_or(config.fps));
+
+    // Guarded in production (`V4lBackend::start_stream` uses `mmap_stream_guarded`); the poll
+    // timeout is applied to the new stream before its first DQBUF, as before.
+    let mut source = device.start_stream(4, poll_timeout).map_err(|e| {
         CameraError::from_ioctl_error(config.device_path.clone(), e, |reason| {
             CameraError::StreamCreate {
                 path: config.device_path.clone(),
@@ -746,13 +873,6 @@ fn open_and_stream(
             }
         })
     })?;
-
-    // Bounded DQBUF wait (GitHub #194): three frame intervals clamped to 150-250 ms, so the
-    // capture thread re-checks `running` at least every 250 ms and Drop completes within the
-    // 500 ms Criterion C9 budget even on a stalled camera. Consecutive timeouts escalate to
-    // `Starved` after MAX_STREAM_STALL.
-    let poll_timeout = dqbuf_poll_timeout(granted.unwrap_or(config.fps));
-    stream.set_timeout(poll_timeout);
 
     info!(
         "Camera stream initialized on '{}' ({}x{}, {:?}, stride {}, sensor {:?}, poll {:?})",
@@ -765,10 +885,6 @@ fn open_and_stream(
         poll_timeout
     );
 
-    let mut source = V4lCaptureSource {
-        handle: stream.handle(),
-        stream,
-    };
     let settings = StreamSettings {
         config,
         device_path: &config.device_path,
@@ -901,3 +1017,6 @@ mod tests {
         ));
     }
 }
+
+#[cfg(test)]
+mod supervisor_tests;
