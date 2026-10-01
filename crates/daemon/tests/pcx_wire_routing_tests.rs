@@ -93,35 +93,52 @@ async fn read_frame(client: &mut UnixStream) -> Option<Vec<u8>> {
     Some(buf)
 }
 
-/// Unprivileged UID the test process switches to when it is started as root.
-const UNPRIVILEGED_TEST_UID: u32 = 65_534;
+/// Unprivileged UID the test thread switches to when the suite is started as root.
+const UNPRIVILEGED_TEST_UID: libc::uid_t = 65_534;
 
-/// Restores root when dropped (see [`run_as_unprivileged_peer_when_root`]).
+/// Sets the real, effective and saved UID of the CALLING THREAD only.
+///
+/// The raw syscall is used on purpose: glibc's `setresuid` wrapper (and `nix`) broadcast the
+/// change to every thread of the process, so concurrently running tests of this binary (the
+/// libtest harness runs tests on parallel threads) would execute as the unprivileged UID.
+/// The kernel keeps credentials per thread, so the raw call changes only this test's thread
+/// (and threads it creates afterwards).
+fn set_thread_uids(ruid: libc::uid_t, euid: libc::uid_t, suid: libc::uid_t) -> std::io::Result<()> {
+    // SAFETY: SYS_setresuid takes three uid_t values and reads or writes no memory of this
+    // process; the return value is checked below.
+    let ret = unsafe { libc::syscall(libc::SYS_setresuid, ruid, euid, suid) };
+    if ret == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+/// Restores root on the test thread when dropped (see [`run_as_unprivileged_peer_when_root`]).
 struct RootRestore(bool);
 
 impl Drop for RootRestore {
     fn drop(&mut self) {
         if self.0 {
-            let root = nix::unistd::Uid::from_raw(0);
             // The saved set-user-ID stayed 0, so returning to root is always permitted.
-            nix::unistd::setresuid(root, root, root).expect("restore root identity");
+            set_thread_uids(0, 0, 0).expect("restore root identity");
         }
     }
 }
 
 /// Root-safe setup (GitHub #287): the scenario needs a peer whose kernel UID differs from
-/// `uid_hint` 0, which a root test process can never be. When started as root, the whole
-/// test process switches its real and effective UID to an unprivileged UID (saved UID kept
-/// at 0) BEFORE any socket or temporary directory is created, so the server, the client
-/// and the `SO_PEERCRED` check see exactly what a developer account sees. Non-root runs
-/// are unchanged. The single test of this binary runs on a current-thread runtime.
+/// `uid_hint` 0, which a root test thread can never be. When started as root, the test
+/// thread alone switches its real and effective UID to an unprivileged UID (saved UID kept
+/// at 0) BEFORE any socket or temporary directory is created. `#[tokio::test]` runs a
+/// current-thread runtime on this same thread, so the listener, the dispatcher tasks, the
+/// client `connect` and therefore `SO_PEERCRED` all see what a developer account sees.
+/// Other tests of the binary keep their own credentials. Non-root runs are unchanged.
 fn run_as_unprivileged_peer_when_root() -> RootRestore {
     if !nix::unistd::getuid().is_root() {
         return RootRestore(false);
     }
-    let unprivileged = nix::unistd::Uid::from_raw(UNPRIVILEGED_TEST_UID);
-    nix::unistd::setresuid(unprivileged, unprivileged, nix::unistd::Uid::from_raw(0))
-        .expect("switch to an unprivileged UID");
+    set_thread_uids(UNPRIVILEGED_TEST_UID, UNPRIVILEGED_TEST_UID, 0)
+        .expect("switch the test thread to an unprivileged UID");
     RootRestore(true)
 }
 
