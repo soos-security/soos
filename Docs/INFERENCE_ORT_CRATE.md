@@ -201,7 +201,9 @@ Implemented by `OrtPadDetector` (MiniFASNetV2 80×80 BGR) and `MockPadDetector`.
   `ZeroizingOutputs::new`. The guard lends the outputs to the decoder (`Deref`) and, on drop
   (including early error returns) or explicit `wipe()`, overwrites every `f32` output tensor in
   place through `try_extract_tensor_mut`. The raw, unnormalized embedding therefore no longer
-  lingers in the ORT allocation after `BiometricEmbedding::new` copies it. **Limitation**:
+  lingers in the ORT allocation after `BiometricEmbedding::new` copies it. Every later copy is
+  wiped on drop too: `BiometricEmbedding::to_vec` returns `Zeroizing<Vec<f32>>` (GitHub #287,
+  matrix CVF6), like `into_inner`. **Limitation**:
   ORT-internal intermediate activation buffers (arena memory) are not reachable through the
   public `ort` API and are not wiped (ADR 2026-09-30 "ORT Output Tensors Wiped In Place"). The
   redundant explicit `input_data.zeroize()` calls were removed: the `Zeroizing` wrapper wipes

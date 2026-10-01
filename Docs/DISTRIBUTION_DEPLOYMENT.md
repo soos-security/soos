@@ -203,8 +203,11 @@ sudo soos-admin camera list
 
 `soos-admin camera list` prints every V4L2 node (capabilities, formats, frame sizes, RGB/IR
 classification and the rule that decided it) followed by the device the shared resolver selects
-and the reason; add `--json` for support tickets and `--sensor-preference` / `--device` to mirror
-`sensor_preference` / `camera_device` of `/etc/soos/daemon.toml` (see `Docs/CAMERA_V4L_CRATE.md`).
+and the reason; add `--json` for support tickets. It resolves with `sensor_preference` /
+`camera_device` of `/etc/soos/daemon.toml` (`--config <PATH>` reads another file);
+`--sensor-preference` / `--device` override them, and the settings used are printed on stderr
+(see `Docs/CAMERA_V4L_CRATE.md`). `scripts/install.sh` prints the same report at the end of a
+live install (informational, never fatal).
 
 The package contains no key material: `postinst` generates `/var/lib/soos/master.key` (mode `0600 root:root`) on this host at first install through `/usr/libexec/soos/provision-master-key`, and package upgrades or removal never touch it (see `Docs/PACKAGING_AND_PROVISIONING.md` §7.4).
 
