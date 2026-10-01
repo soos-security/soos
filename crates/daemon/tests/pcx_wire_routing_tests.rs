@@ -93,6 +93,38 @@ async fn read_frame(client: &mut UnixStream) -> Option<Vec<u8>> {
     Some(buf)
 }
 
+/// Unprivileged UID the test process switches to when it is started as root.
+const UNPRIVILEGED_TEST_UID: u32 = 65_534;
+
+/// Restores root when dropped (see [`run_as_unprivileged_peer_when_root`]).
+struct RootRestore(bool);
+
+impl Drop for RootRestore {
+    fn drop(&mut self) {
+        if self.0 {
+            let root = nix::unistd::Uid::from_raw(0);
+            // The saved set-user-ID stayed 0, so returning to root is always permitted.
+            nix::unistd::setresuid(root, root, root).expect("restore root identity");
+        }
+    }
+}
+
+/// Root-safe setup (GitHub #287): the scenario needs a peer whose kernel UID differs from
+/// `uid_hint` 0, which a root test process can never be. When started as root, the whole
+/// test process switches its real and effective UID to an unprivileged UID (saved UID kept
+/// at 0) BEFORE any socket or temporary directory is created, so the server, the client
+/// and the `SO_PEERCRED` check see exactly what a developer account sees. Non-root runs
+/// are unchanged. The single test of this binary runs on a current-thread runtime.
+fn run_as_unprivileged_peer_when_root() -> RootRestore {
+    if !nix::unistd::getuid().is_root() {
+        return RootRestore(false);
+    }
+    let unprivileged = nix::unistd::Uid::from_raw(UNPRIVILEGED_TEST_UID);
+    nix::unistd::setresuid(unprivileged, unprivileged, nix::unistd::Uid::from_raw(0))
+        .expect("switch to an unprivileged UID");
+    RootRestore(true)
+}
+
 async fn send(client: &mut UnixStream, frame: &[u8]) {
     client.write_all(frame).await.expect("write");
     client.flush().await.expect("flush");
@@ -102,6 +134,7 @@ async fn send(client: &mut UnixStream, frame: &[u8]) {
 async fn test_pcx_tagged_ambiguous_request_with_foreign_uid_hint_gets_a_response() {
     // Precondition: the peer UID differs from `uid_hint`, which the removed heuristic
     // treated as "this must be an Event" (no response, client timeout).
+    let _identity = run_as_unprivileged_peer_when_root();
     assert_ne!(nix::unistd::getuid().as_raw(), 0, "run as a non-root peer");
     let server = spawn_server();
     let mut client = UnixStream::connect(&server.sock_path)
