@@ -20,6 +20,7 @@ pub mod logging;
 pub mod privileged;
 pub mod state;
 pub mod store_mode;
+pub mod store_tasks;
 pub mod worker;
 
 pub use app::SoosApp;

@@ -110,6 +110,34 @@ Recorded as ADR 2026-09-30 "AES-GCM Associated Data for Stored Templates and Evi
   concurrently during migration; left as found") when the write handle or, just before the
   rename, the path no longer matches; the temporary file is removed and the file is left as found
   (a per-file failure of `migrate_legacy_templates`).
+- **Local filesystem required for the store lock (GitHub #291)**: the lock is a `flock(2)` on a
+  directory descriptor opened `O_RDONLY`. On NFS, Linux emulates `flock` with POSIX byte-range
+  locks, and an exclusive byte-range lock needs a descriptor opened for writing, which a
+  directory can never be: every `flock(LOCK_EX)` there fails with `EBADF`. `lock_store` maps any
+  errno other than `EAGAIN` / `EINTR` to `BiometricStoreError::Io`, so on NFS every `enroll`,
+  `delete`, `enroll_if_absent` and real migration fails closed with an I/O error and changes
+  nothing (reads still work). The store directory (`/var/lib/soos/biometrics` and any
+  `--biometrics-dir` / `--dev-store`) must therefore live on a local filesystem (ext4, xfs,
+  btrfs, tmpfs, ...); network filesystems are not supported.
+- **Atomic enroll-if-absent (GitHub #291)**: `BiometricStore::enroll_if_absent(&template)`
+  takes the store lock, then refuses with `BiometricStoreError::AlreadyEnrolled(uid)` when any
+  entry exists at the template path (nothing is written), otherwise writes exactly like
+  `enroll`. The check and the write are under the same lock, so a template enrolled by another
+  `enroll`, `import` or GUI save after an earlier check of the caller is never replaced.
+  `soos-enroll import` without `--yes` writes through it.
+- **Orphaned temporary file sweep (GitHub #291)**: `BiometricStore::sweep_orphaned_temp_files()`
+  removes the temporary files an interrupted `enroll` left (process killed between the
+  `create_new` of `<uid>.tmp.<pid>.<suffix>` and the rename). Candidates are only names of that
+  exact form with canonical decimal numbers (`u32`, `u32`, `u64`); a candidate is removed only
+  if it is a regular file with one link, owned by root or the effective UID and modified at
+  least `TEMP_SWEEP_MIN_AGE` (60 s) ago (a future time is never old). `fstatat` and `unlinkat`
+  run relative to the store directory descriptor (`O_DIRECTORY | O_NOFOLLOW`, identity checked
+  against the path), with `AT_SYMLINK_NOFOLLOW`; nothing is followed. At most
+  `MAX_TEMP_SWEEP_REMOVALS` (256) files are removed and 65 536 entries examined per call
+  (`TempSweepReport::limit_reached`). The store lock is tried once and never waited for; while
+  another operation holds it, nothing is examined (`TempSweepReport::lock_busy`). `soos-daemon`
+  runs it once at startup (`pipeline::sweep_orphaned_store_temp_files`). Master-key temporary
+  files (`master.key.tmp.*`, outside the store directory) are not swept.
 - **Never-create constructor (GitHub #289)**: `BiometricStore::open_existing(dir, key)` validates
   an existing directory exactly like `new` and reports a missing one as `Io(NotFound)` without
   creating it or any parent. `soos-enroll migrate` opens the template store with it.
@@ -216,6 +244,13 @@ let uids = store.list_enrolled()?; // vec![1000]
 
 // 5. Delete
 assert!(store.delete(1000)?);
+
+// 6. Enroll only if absent (check and write under one store lock, GitHub #291)
+store.enroll_if_absent(&template)?; // Err(AlreadyEnrolled(1000)) if enrolled meanwhile
+
+// 7. Startup housekeeping: remove orphaned `<uid>.tmp.<pid>.<suffix>` files (GitHub #291)
+let report = store.sweep_orphaned_temp_files()?;
+println!("removed {} orphaned temporary files", report.removed);
 ```
 
 ---
@@ -233,3 +268,5 @@ assert!(store.delete(1000)?);
 | **B10** | CBOR plaintext returned in a zeroizing buffer | `tests/cbor_zeroize_tests.rs` | ✅ Verified |
 | **SRK2** | Existing master key validated on the open descriptor (regular, trusted owner, no group/world bit, 32 bytes, bounded read, `O_NOFOLLOW`) | `tests/master_key_hardening_tests.rs`, `crypto::key_open_tests::test_230_key_open_does_not_follow_symlinks` | ✅ Verified |
 | **SRK3** | Missing key parents created `0755`, existing parents never chmod-ed | `tests/master_key_hardening_tests.rs` | ✅ Verified |
+| **SGU3** | `enroll_if_absent` checks and writes under one store lock; a concurrent enrollment is never replaced (GitHub #291) | `tests/enroll_if_absent_tests.rs` | ✅ Verified |
+| **SGU4** | Orphaned `<uid>.tmp.<pid>.<suffix>` files swept: exact names, regular single-link files of root/euid, older than 60 s, capped, lock tried once, decoys kept (GitHub #291) | `tests/temp_sweep_tests.rs` | ✅ Verified |

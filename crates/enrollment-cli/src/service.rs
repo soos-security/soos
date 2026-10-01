@@ -1148,7 +1148,7 @@ impl EnrollmentService {
         self.refuse_unconfirmed_overwrite(args, allow_overwrite)?;
         let invoker = parse_pkexec_uid(std::env::var("PKEXEC_UID").ok().as_deref())?;
         let bytes = read_import_file(&args.file, invoker)?;
-        self.store_imported(args, &bytes)
+        self.store_imported(args, &bytes, allow_overwrite)
     }
 
     /// Imports a template read from `reader`, replacing an existing one only when
@@ -1168,7 +1168,8 @@ impl EnrollmentService {
         reader: R,
     ) -> Result<EnrollmentOutcome, EnrollmentCliError> {
         self.refuse_unconfirmed_overwrite(args, allow_overwrite)?;
-        self.import_from_reader(args, reader)
+        let bytes = read_import_input(reader)?;
+        self.store_imported(args, &bytes, allow_overwrite)
     }
 
     /// Checks privileges and refuses to replace an enrolled template without `--yes`.
@@ -1204,13 +1205,19 @@ impl EnrollmentService {
     ) -> Result<EnrollmentOutcome, EnrollmentCliError> {
         check_privileges(self.require_root)?;
         let bytes = read_import_input(reader)?;
-        self.store_imported(args, &bytes)
+        self.store_imported(args, &bytes, true)
     }
 
+    /// Parses and stores an imported template. Without `allow_overwrite` the write goes
+    /// through [`BiometricStore::enroll_if_absent`] (GitHub #291): the duplicate check and
+    /// the write run under one store lock, so a template enrolled after the early
+    /// [`Self::refuse_unconfirmed_overwrite`] check is never replaced and the import fails
+    /// with [`EnrollmentCliError::AlreadyEnrolled`] instead.
     fn store_imported(
         &self,
         args: &ImportArgs,
         bytes: &[u8],
+        allow_overwrite: bool,
     ) -> Result<EnrollmentOutcome, EnrollmentCliError> {
         let uid = resolve_target_uid(args.uid, args.username.as_deref())?;
         let (embedding, model_id, model_version) = parse_import_payload(bytes, args)?;
@@ -1223,8 +1230,19 @@ impl EnrollmentService {
         let template =
             BiometricTemplate::new(uid, model_id.clone(), model_version.clone(), now, embedding)?;
 
-        let replaced_existing = self.store.exists(uid)?;
-        self.store.enroll(&template)?;
+        let replaced_existing = if allow_overwrite {
+            let existed = self.store.exists(uid)?;
+            self.store.enroll(&template)?;
+            existed
+        } else {
+            match self.store.enroll_if_absent(&template) {
+                Ok(()) => false,
+                Err(soos_biometric_store::BiometricStoreError::AlreadyEnrolled(uid)) => {
+                    return Err(EnrollmentCliError::AlreadyEnrolled(uid));
+                }
+                Err(e) => return Err(e.into()),
+            }
+        };
 
         Ok(EnrollmentOutcome {
             uid,
@@ -1626,8 +1644,29 @@ pub fn build_store_only(cli: &Cli) -> Result<EnrollmentService, EnrollmentCliErr
 
 /// Builds a full `EnrollmentService` with camera hardware streaming and all 4 ONNX models.
 ///
-/// Required for biometric capture and comparison commands (`enroll`, `verify`).
+/// Required for biometric capture and comparison commands (`enroll`, `verify`). The notes
+/// about `daemon.toml` are dropped; `soos-enroll` uses [`build_full_service_with_notes`].
 pub fn build_full_service(cli: &Cli) -> Result<EnrollmentService, EnrollmentCliError> {
+    build_full_service_with_notes(
+        cli,
+        Path::new(soos_camera_v4l::daemon_config::DEFAULT_DAEMON_CONFIG_PATH),
+        &mut |_| {},
+    )
+}
+
+/// [`build_full_service`] with the camera settings read from `config_path`, handing the notes
+/// of that single read to `report_notes` (GitHub #291).
+///
+/// The camera device is resolved once through [`resolve_camera_device_from_config_reported`];
+/// `report_notes` is called exactly once with that call's notes (an empty slice when the file
+/// applies as written), before the device path is validated and before the camera or any
+/// model is opened. The printed notes therefore always describe the configuration that is
+/// applied, never a second read of a file that may have changed in between.
+pub fn build_full_service_with_notes(
+    cli: &Cli,
+    config_path: &Path,
+    report_notes: &mut dyn FnMut(&[String]),
+) -> Result<EnrollmentService, EnrollmentCliError> {
     let raw_key_path = cli
         .key_file
         .clone()
@@ -1640,13 +1679,13 @@ pub fn build_full_service(cli: &Cli) -> Result<EnrollmentService, EnrollmentCliE
         .unwrap_or_else(|| PathBuf::from(DEFAULT_BIOMETRICS_DIR));
     let bio_dir = validate_fhs_path(&raw_bio_dir)?;
 
-    let raw_camera = resolve_camera_device_from_config(
+    let choice = resolve_camera_device_from_config_reported(
         cli.camera_device.clone(),
-        Some(Path::new(
-            soos_camera_v4l::daemon_config::DEFAULT_DAEMON_CONFIG_PATH,
-        )),
+        Some(config_path),
+        &soos_camera_v4l::SystemCameraEnumerator::default(),
     );
-    let device_path = validate_camera_device_path(&raw_camera)?;
+    report_notes(&choice.notes);
+    let device_path = validate_camera_device_path(&choice.path)?;
 
     let raw_models_dir = cli
         .models_dir

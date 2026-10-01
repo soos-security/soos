@@ -281,6 +281,31 @@ let report = store.rotate_retention("2026-09-14")?;
 println!("Pruned {} expired date directories", report.directories_pruned);
 ```
 
+### 4.6 Orphaned Temporary File Sweep (GitHub #291)
+
+`soos-daemon` does not await an evidence write still running when its shutdown drain budget
+is exhausted (ADR 2026-10-01 "Daemon Exit Bounded by the Shutdown Drain Budget"), so the
+process can exit between the `create_new` of a temporary file and its rename.
+`EvidenceStore::sweep_orphaned_temp_files()` removes such leftovers; the daemon calls it once
+at startup (`pipeline::sweep_orphaned_store_temp_files`, which logs counts only and never fails
+the startup).
+
+- **Scope**: only real `YYYY-MM-DD` partition directories of the base directory (symlinked or
+  misnamed entries skipped, never followed), and inside them only the exact names this store
+  creates: `.tmp.<uuid>.<pid>.<16 hex>` (snapshot write), `.tmp.migrate.<uuid>.<pid>.<16 hex>`
+  (migration) and `.tmp.daily_count.<uid>.<pid>.<16 hex>` (daily counter; `uid` ≤
+  `MAX_VALID_UID`), with a lowercase hyphenated UUID, canonical decimal numbers and lowercase hex.
+- **Removal rule**: a regular file with one link, owned by root or the effective UID, modified at
+  least `TEMP_SWEEP_MIN_AGE` (60 s) ago (a future time is never old). `fstatat` /
+  `unlinkat` run relative to the partition descriptor (`O_DIRECTORY | O_NOFOLLOW`) with
+  `AT_SYMLINK_NOFOLLOW`; snapshots, counters and every other name are never touched.
+- **Bounds**: at most `MAX_TEMP_SWEEP_REMOVALS` (256) removals and 65 536 examined entries per
+  call (`TempSweepReport::limit_reached`; the next start continues).
+- **Exclusion**: writers of this process by the daily-counter mutex; retention and migration by
+  the base-directory `flock`, tried once and never waited for (`TempSweepReport::lock_busy`).
+- **No side effect when unused**: a disabled store or a missing base directory returns an empty
+  report and creates nothing; a symlinked base directory is refused with `InvalidPath`.
+
 ---
 
 ## 5. Security & Invariant Verification
@@ -296,3 +321,4 @@ println!("Pruned {} expired date directories", report.directories_pruned);
 - **Criterion E7 (Concurrent Rotation File Locking)**: Verified by `tests/safety_hardening_tests.rs::test_concurrent_rotation_does_not_corrupt`.
 - **Criterion E8 (POSIX UID Bounds Validation)**: Verified by `tests/safety_hardening_tests.rs::test_evidence_store_rejects_path_traversal_uid`.
 - **Criteria ESF1–ESF5 (Self-Describing Frames, GitHub #181)**: Verified by `tests/frame_format_tests.rs` and `crates/daemon/tests/pipeline_integration_tests.rs::test_181_password_failed_snapshot_records_frame_metadata`.
+- **Criterion SGU5 (Orphaned Temporary File Sweep, GitHub #291)**: Verified by `tests/temp_sweep_tests.rs`.

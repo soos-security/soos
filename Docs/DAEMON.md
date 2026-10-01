@@ -176,6 +176,15 @@ pad_threshold = 0.85
    is wired by `attach_optional_pad_members` only when the deployed `manifest.toml` attests it;
    the repository manifest does not, so the daemon is single-model by default. When the entry is
    present, a load, shape or self-test failure of the member stops the daemon (fail closed).
+   Right after both stores are opened, `pipeline::sweep_orphaned_store_temp_files` removes the
+   temporary files an interrupted write left behind (GitHub #291): an evidence write abandoned at
+   the previous shutdown (see §5) or an interrupted `soos-enroll` template write. It runs
+   `BiometricStore::sweep_orphaned_temp_files` and `EvidenceStore::sweep_orphaned_temp_files`,
+   which remove only the stores' exact temporary names (regular single-link files owned by
+   root, older than 60 s, at most 256 per store, never following a symlink; see
+   `Docs/BIOMETRIC_STORE_CRATE.md` and `Docs/EVIDENCE_STORE_CRATE.md`). The sweep is
+   housekeeping: a failure is logged at `warn` and never stops the startup; only counts are
+   logged.
 4. The socket is bound (§1.2) and the accept loop starts.
 
 ## 5. Shutdown, Panic Reporting and Log Anonymization (GitHub #257, #258, #259)
