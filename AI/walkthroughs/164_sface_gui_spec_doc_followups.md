@@ -3,7 +3,7 @@
 - **Date**: 2026-10-01
 - **Issue**: GitHub #298 (review follow-ups of the SFace switch, PR #297; no backlog issue) —
   **Branch**: `fix/sface-gui-and-spec-followups`
-- **Matrix criteria**: SGF1–SGF4 (component `sface-gui-spec-doc-followups`)
+- **Matrix criteria**: SGF1–SGF5 (component `sface-gui-spec-doc-followups`)
 
 ## 1. Context & Objectives
 
@@ -18,6 +18,8 @@ delivered by a separate branch):
 2. `crates/inference-ort/src/embedding.rs`: `OrtEmbeddingExtractor::with_spec` accepted a spec of
    any layout although extraction always feeds an NCHW tensor (it only failed closed at run time).
 3. `Docs/BIOMETRIC_STORE_CRATE.md`: the CRUD example still built a 512-D `glintr100` template.
+4. Coordinator request during the batch: the GUI match reference (a copy of the enrolled
+   template embedding) was a plain `Vec<f32>`; it must live in a wipe-on-drop container.
 
 ## 2. Architect Design
 
@@ -36,6 +38,11 @@ delivered by a separate branch):
   `OrtEmbeddingExtractor::new` keeps its infallible signature through a private `bind`; a
   `const _: () = assert!(...)` guarantees at compile time that `SHIPPED_EMBEDDING_MODEL` is NCHW.
   No caller outside the module used `with_spec`.
+- `WorkerSharedInput::match_reference` is `Mutex<Option<Zeroizing<Vec<f32>>>>` (SGF5). The
+  selection clones the template's `Zeroizing<Vec<f32>>` directly (no plain `Vec` intermediate);
+  assigning the slot drops, and so wipes, the previous reference; `update_live_match_score`
+  only borrows it for `cosine_similarity`. The fetched `BiometricTemplate` and the live
+  `BiometricEmbedding` were already zeroized on drop.
 - Invariants touched: none of the PAM or daemon invariants (no daemon or PAM change).
 
 ## 3. Plan Evaluation
@@ -55,13 +62,17 @@ Scope agreed with the orchestrator (no separate plan-evaluator run for this foll
 | `...::test_with_spec_rejects_nhwc_spec_for_nhwc_session` | SGF3 | same panic |
 | `...::test_with_spec_accepts_nchw_shipped_spec` | SGF3 | passes (non-regression of the accepted path) |
 | `tests/invariants/src/sface_followups_contract.rs::test_biometric_store_doc_example_uses_shipped_sface_template` | SGF4 | `Docs/BIOMETRIC_STORE_CRATE.md still names the retired glintr100 model` |
+| `crates/gui/tests/match_reference_zeroize_tests.rs::test_match_reference_is_a_zeroizing_container` | SGF5 | `error[E0308]: mismatched types ... expected &Mutex<Option<Zeroizing<Vec<f32>>>>, found &Mutex<Option<Vec<f32>>>` (compile-time type contract) |
 
 Red was proven against signature stubs (`select_match_reference` returning `None` without touching
 state, `with_spec` returning `Ok` for every spec).
 
 ### Migrated existing tests
 
-None. No existing test file was edited.
+None from `main`. The `reference()` helper of this branch's own
+`match_reference_selection_tests.rs` changed its body from `.clone()` to
+`.as_ref().map(|reference| reference.to_vec())` so it still returns `Option<Vec<f32>>` after the
+SGF5 type change (setup only; no assertion changed).
 
 ### Flakiness check
 
@@ -72,7 +83,7 @@ spinning worker thread) was run 10 times in a row: 10/10 green.
 
 1. No `unwrap`, `expect` or `panic!` in production code: the GUI helper recovers poisoned locks
    with `PoisonError::into_inner`; `with_spec` returns an error. Met.
-2. No embedding or template value is logged; the note contains only the model id and the vector
+2. The template copy held by the GUI is wiped on replace, clear and drop (SGF5). No embedding or template value is logged; the note contains only the model id and the vector
    length (as before). Met.
 3. Fail closed early: a non-NCHW spec cannot build an extractor. Met.
 4. No change to `crates/daemon` or `crates/pam`. Met.
@@ -82,7 +93,7 @@ spinning worker thread) was run 10 times in a row: 10/10 green.
 
 | File | Change |
 |---|---|
-| `crates/gui/src/worker.rs` | `select_match_reference`, `update_live_match_score` (worker loop uses it) |
+| `crates/gui/src/worker.rs` | `select_match_reference`, `update_live_match_score` (worker loop uses it); `match_reference` is `Zeroizing<Vec<f32>>` |
 | `crates/gui/src/app.rs` | profile selection calls `select_match_reference` for every lookup result |
 | `crates/inference-ort/src/embedding.rs` | fallible `with_spec`, private `bind`, compile-time NCHW assertion on the shipped spec |
 | `Docs/BIOMETRIC_STORE_CRATE.md` | CRUD example uses `sface_2021dec`, `2.0.0`, 128 values |
@@ -100,7 +111,7 @@ is run by the orchestrator before the push.
 ```bash
 export CARGO_BUILD_JOBS=6
 SOOS_MODELS_DIR=<scratch SFace models dir> cargo test --locked --all-features \
-  -p soos-gui -p soos-inference-ort -p soos-biometric-store -p soos-invariants   # 731 passed, 0 failed
+  -p soos-gui -p soos-inference-ort -p soos-biometric-store -p soos-invariants   # 732 passed, 0 failed
 cargo fmt --all -- --check                                                       # clean
 cargo clippy --locked --all-targets --all-features \
   -p soos-gui -p soos-inference-ort -p soos-invariants -p soos-biometric-store -- -D warnings  # clean
@@ -109,7 +120,5 @@ cargo clippy --locked --all-targets --all-features \
 
 ## 9. Known Limitations / Follow-ups
 
-- The GUI match reference is still a plain `Vec<f32>` copy of the template (unchanged behavior);
-  wrapping it in `Zeroizing` would be a separate hardening item.
 - The GitHub #298 dispatcher (template check before camera wake) and rate-limit items are
   delivered by the parallel daemon branch.

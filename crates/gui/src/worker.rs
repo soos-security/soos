@@ -22,6 +22,7 @@ use soos_enrollment_cli::guided_enrollment::LivenessPolicy;
 use soos_enrollment_cli::guided_enrollment::{EnrollmentStepFeedback, GuidedEnrollmentSession};
 use soos_vision::matcher::cosine_similarity;
 use soos_vision::{PadInputModality, VisionAnalysis, VisionPipeline};
+use zeroize::Zeroizing;
 
 use crate::state::LatestFrameData;
 
@@ -32,8 +33,9 @@ pub struct WorkerSharedInput {
     pub enrollment_session: Mutex<Option<GuidedEnrollmentSession>>,
     /// Last feedback produced by the enrollment session.
     pub enrollment_feedback: Mutex<Option<EnrollmentStepFeedback>>,
-    /// Active reference embedding for live 1-to-1 verification testing.
-    pub match_reference: Mutex<Option<Vec<f32>>>,
+    /// Active reference embedding for live 1-to-1 verification testing: a copy of the enrolled
+    /// template embedding, wiped when it is replaced, cleared or dropped (GitHub #298).
+    pub match_reference: Mutex<Option<Zeroizing<Vec<f32>>>>,
     /// Latest live match score against reference embedding.
     pub live_match_score: Mutex<Option<f32>>,
 }
@@ -80,7 +82,9 @@ pub fn select_match_reference(
         .match_reference
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    *ref_guard = current.map(|t| t.embedding.as_slice().to_vec());
+    // The template is cloned straight into a new `Zeroizing` container (no plain `Vec`
+    // intermediate); assigning drops, and therefore wipes, the previous reference.
+    *ref_guard = current.map(|t| t.embedding.clone());
     let mut score_guard = shared
         .live_match_score
         .lock()

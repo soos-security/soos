@@ -60,7 +60,12 @@ fn score(shared: &WorkerSharedInput) -> Option<f32> {
 }
 
 fn reference(shared: &WorkerSharedInput) -> Option<Vec<f32>> {
-    shared.match_reference.lock().unwrap().clone()
+    shared
+        .match_reference
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|reference| reference.to_vec())
 }
 
 fn select(shared: &WorkerSharedInput, template: Option<&BiometricTemplate>) -> Option<String> {
