@@ -21,7 +21,6 @@ use soos_camera_v4l::{CameraManager, CameraStatus};
 use soos_enrollment_cli::guided_enrollment::{EnrollmentStep, EnrollmentStepFeedback};
 use soos_enrollment_cli::service::EnrolledUserSummary;
 use soos_vision::VisionPipeline;
-use zeroize::Zeroizing;
 
 use crate::camera_source::{
     CameraSourceBackend, CameraSourceSupervisor, HandoverExecutor, HandoverSlot, SwitchableCamera,
@@ -1110,7 +1109,7 @@ impl SoosApp {
                                 .as_ref()
                                 .map(|session| session.compute_composite_embedding())
                             {
-                                Some(Ok(embedding)) => Some(Zeroizing::new(embedding)),
+                                Some(Ok(embedding)) => Some(embedding),
                                 Some(Err(e)) => {
                                     self.enrollment.status_message = Some((
                                         format!("Cannot build the template: {e}"),

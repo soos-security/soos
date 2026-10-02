@@ -56,6 +56,7 @@ sudo soos-admin gdm enable                    # insert the managed block (below)
 sudo soos-admin gdm enable --pam-module-dir /usr/lib64/security   # explicit module directory
 sudo soos-admin gdm disable                   # create /etc/soos/gdm.disable (PAM file untouched)
 sudo soos-admin gdm restore                   # put back gdm-password.soos-backup, remove it
+                                              # (refused if the file changed after enable; --force overrides)
 sudo soos-admin --format json gdm status      # machine-readable status
 ```
 

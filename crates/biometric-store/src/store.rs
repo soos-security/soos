@@ -596,11 +596,18 @@ impl BiometricStore {
             return Ok(None);
         }
 
+        // `O_NONBLOCK`: a FIFO planted at the template path never blocks the open or the
+        // read; only a regular file is read (GitHub #312, STO-NEW-6).
         let file = OpenOptions::new()
             .read(true)
-            .custom_flags(libc::O_NOFOLLOW)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
             .open(&path)?;
         let opened = file.metadata()?;
+        if !opened.file_type().is_file() {
+            return Err(BiometricStoreError::CorruptFile(
+                "template path is not a regular file".to_string(),
+            ));
+        }
         let identity = FileIdentity::of(&opened);
         let len = opened.len();
         if len > MAX_TEMPLATE_FILE_BYTES {

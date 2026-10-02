@@ -25,7 +25,6 @@ use soos_admin_cli::status::query_status;
 use soos_admin_cli::test_pam::{effective_timeout_ms, simulate_pam_auth};
 use soos_admin_cli::user::add_user_to_soos_group;
 use soos_camera_v4l::diagnostics::SystemV4lDeviceProbe;
-use soos_protocol::types::Verdict;
 
 fn run() -> Result<(), AdminCliError> {
     // Parsed through `ArgMatches` so `camera list` can tell an explicit `--sensor-preference`
@@ -76,8 +75,10 @@ fn run() -> Result<(), AdminCliError> {
                 }
             }
 
-            if report.verdict != Verdict::Allow {
-                std::process::exit(1);
+            // GitHub #312: a rejected `Allow` (other nonce, late, stale) is a failure too.
+            let code = report.exit_code();
+            if code != 0 {
+                std::process::exit(code);
             }
         }
 
@@ -155,10 +156,11 @@ fn run() -> Result<(), AdminCliError> {
                     )));
                 }
             }
-            let status = soos_admin_cli::gdm::configure_gdm(
+            let status = soos_admin_cli::gdm::configure_gdm_with_options(
                 &args.action,
                 &args.pam_file,
                 &args.disable_file,
+                soos_admin_cli::gdm::GdmOptions { force: args.force },
             )?;
             match cli.format {
                 OutputFormat::Table => {

@@ -85,7 +85,11 @@ Associated Data for Stored Templates and Evidence".
 **Legacy migration (GitHub #287, owner decision 2026-10-01)**:
 `EvidenceStore::migrate_legacy_snapshots(dry_run)` re-encrypts every legacy snapshot with the bound
 envelope, run by the operator through `soos-enroll migrate [--dry-run]` (`Docs/ENROLLMENT_CLI.md`).
-It holds the same exclusive `flock` on the base directory as `rotate_retention`, walks the real
+It holds the same exclusive `flock` on the base directory as `rotate_retention` (both take it
+through `O_DIRECTORY | O_NOFOLLOW` and poll a contended lock for at most the store's lock timeout,
+`EVIDENCE_LOCK_TIMEOUT` = 5 s by default, `EvidenceStore::with_lock_timeout`; past it the call fails
+with `EvidenceStoreError::LockTimeout` and changes nothing, GitHub #310 / STO-NEW-10,
+`bounded_lock_tests.rs`, row SKE4), walks the real
 `YYYY-MM-DD` partitions and their `*.enc` files (symlinked partitions and files are skipped, never
 followed), opens each file with `O_NOFOLLOW`, bounds it by `MAX_EVIDENCE_FILE_BYTES`,
 authenticates it against its path binding and decodes its record. A legacy record must carry the
@@ -272,6 +276,13 @@ descriptor: regular file, owned by root or by the effective UID, no group or wor
 `EvidenceStoreError::KeyError` and the file is left unchanged. Missing parent directories are
 created with `KEY_PARENT_DIR_MODE` (`0755`, the `/var/lib/soos` contract); an existing parent
 is never chmod-ed.
+
+A new key is published race-free (GitHub #303): it is written and `fsync`ed into an exclusive
+`0600` temporary file, then published with `link(2)`, which fails with `EEXIST` instead of
+replacing a key another process (daemon, `soos-enroll`, GUI) published first; the loser reads and
+returns the published key. The temporary file is unlinked on every path
+(`key_publication_race_tests.rs`, row SKE1). `EvidenceStore::open` and `soos-daemon` load or
+create the key only when `enabled` is set (GitHub #312, row SKE7).
 
 ### 4.5 Retention Rotation
 
