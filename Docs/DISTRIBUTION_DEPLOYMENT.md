@@ -524,10 +524,13 @@ auth include login
 ```
 
 #### When Face Verification Runs
-- **`swaylock` calls `pam_authenticate` only when a password is submitted** (Enter). There is
-  no background verification while the lock screen is displayed: locking, waiting or moving
-  the mouse never starts the camera, and nothing is shown on screen (`swaylock` ignores
-  `PAM_TEXT_INFO` and `pam_soos.so` never writes to the terminal).
+- **`swaylock` calls `pam_authenticate` only when a password is submitted** (Enter). The PAM
+  path does no background verification while the lock screen is displayed: locking, waiting or
+  moving the mouse never makes `pam_soos.so` start the camera, and nothing is shown on screen
+  (`swaylock` ignores `PAM_TEXT_INFO` and `pam_soos.so` never writes to the terminal). The
+  separate daemon path of §5.5 (presence auto-unlock) does scan in the background, but only when
+  logind reports the session locked, which a plain `swaylock` never does: without the §5.5
+  `SetLockedHint` wrapper and `swayidle` `unlock` hook, the camera stays off until Enter.
 - **Enter on an empty field** submits an empty password: `pam_soos.so` runs first and, on a
   face match, unlocks the screen. If the face does not match, the stack continues to
   `pam_unix.so` with the empty password, which fails and, on the §5.2 stack, sends one
@@ -567,6 +570,70 @@ sudo cp /etc/pam.d/system-auth.soos-backup /etc/pam.d/system-auth
 ```
 
 ---
+
+### 5.5 Presence Auto-Unlock of Locked Sessions (all distributions, GitHub #323)
+
+`soos-daemon` also unlocks a locked local session **without any keypress** when it verifies
+the face of the session owner: while systemd-logind reports the session locked (`LockedHint`),
+the daemon runs the normal face pipeline (PAD consensus and match) after a lock grace of 3 s
+and asks logind to unlock it (`UnlockSession`). It is **enabled by default** (`[presence]` in
+`Docs/DAEMON.md` §1.7 and §6). The password path of the locker is never touched: any error,
+unknown state or timeout leaves the screen locked.
+
+| Desktop / locker | Behaviour |
+|---|---|
+| GNOME (GDM, `gnome-shell` lock screen) | Sets `LockedHint` and honours `UnlockSession`: works out of the box. |
+| KDE Plasma (`kscreenlocker`) | Sets `LockedHint` and honours `UnlockSession`: works out of the box. |
+| Cinnamon, MATE | Honour `UnlockSession`; the lock hint is set by their screensavers. |
+| `swaylock`, `hyprlock` and other wlroots lockers | Do not set `LockedHint` and do not listen to logind by themselves. Without the hooks below presence never scans for them. |
+
+None of these rows is validated on hardware yet: the procedure is
+`tests/physical/screensaver_test.md` §3.6 (matrix PAU21, pending).
+
+For a wlroots compositor, a small wrapper sets the hint around the locker and `swayidle`
+forwards logind's unlock request to it (not yet validated on hardware, matrix PAU21). Save as
+`~/.local/bin/swaylock-presence` (executable):
+
+```sh
+#!/bin/sh
+# Tell logind the session is locked, run the locker, then clear the hint.
+busctl --system call org.freedesktop.login1 /org/freedesktop/login1/session/auto \
+    org.freedesktop.login1.Session SetLockedHint b true
+swaylock
+busctl --system call org.freedesktop.login1 /org/freedesktop/login1/session/auto \
+    org.freedesktop.login1.Session SetLockedHint b false
+```
+
+and start `swayidle` with the `lock` and `unlock` hooks (`UnlockSession` emits the session's
+`Unlock` signal, which `swayidle` turns into its `unlock` hook; `SIGUSR1` makes `swaylock`
+exit unlocked):
+
+```sh
+exec swayidle lock 'swaylock-presence &' unlock 'pkill -USR1 swaylock'
+```
+
+For `hyprlock`, put `hyprlock` in the wrapper and use `pkill -USR1 hyprlock` as the `unlock`
+hook. Lock with `loginctl lock-session`. Check the hint with
+`busctl --system get-property org.freedesktop.login1 /org/freedesktop/login1/session/auto org.freedesktop.login1.Session LockedHint`.
+
+**Disabling it.** Create `/etc/soos/presence.disable` (presence only) or `/etc/soos/disabled`
+(face PAM and presence); both take effect within one second, without a restart. Alternatively
+set `[presence] enabled = false` in `/etc/soos/daemon.toml` and restart `soos-daemon`.
+`/etc/soos/gdm.disable` does **not** stop presence.
+
+**Account policy.** Presence respects `pam_faillock` and account / password expiry: after
+`deny` wrong passwords the screen stays locked for `unlock_time` like the password path, and an
+expired account, an expired or locked password, or a forced password change is never unlocked
+by presence. Keep the faillock policy in `/etc/security/faillock.conf`: a `pam_faillock.so`
+line in `/etc/pam.d` (or `/usr/lib/pam.d`, `/usr/etc/pam.d`) that carries `deny=`, `dir=`,
+`unlock_time=` or another policy option (bracketed forms such as `[deny=2]` included) disables presence for every user. Users without an
+`/etc/shadow` line (LDAP/SSSD, systemd-homed) never get presence unlock.
+
+**Trade-offs (owner decisions).** While a session is locked and the screen is on, the camera
+LED is on and the scan uses about 15 % of one CPU core; closing the lid stops the scans, and
+blanking the screen stops them when the driver reports DPMS off in sysfs (best effort: on
+atomic-KMS drivers `dpms` may stay `On` while the compositor blanks, and scans continue). Every face path, `sudo` included, now accepts 40 attempts per
+minute and per user instead of 5.
 
 ## 6. Automated Validation Test Harness
 

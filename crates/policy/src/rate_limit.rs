@@ -15,8 +15,10 @@ pub struct RateLimitConfig {
 }
 
 impl RateLimitConfig {
-    /// Default maximum attempts: 5 attempts.
-    pub const DEFAULT_MAX_ATTEMPTS: u32 = 5;
+    /// Default maximum attempts per window: 40 (GitHub #323, owner decision 2026-10-02:
+    /// about 30 presence scans per minute plus PAM headroom; applies to every face request,
+    /// `sudo`, GDM and presence scans alike).
+    pub const DEFAULT_MAX_ATTEMPTS: u32 = 40;
 
     /// Default window duration: 60 seconds (60,000,000,000 ns).
     pub const DEFAULT_WINDOW_DURATION_NS: u64 = 60_000_000_000;
@@ -182,6 +184,37 @@ impl RateLimiter {
         attempts.push_back(now_monotonic_ns);
         self.history.insert(uid, attempts);
         Ok(())
+    }
+
+    /// Records an attempt only while more than `reserve` attempts remain in the window.
+    ///
+    /// Expired timestamps are ignored before `remaining` is evaluated (exactly as in
+    /// [`Self::check_and_record`]), and the evaluation and the recording happen inside this
+    /// single `&mut self` call. `reserve == 0` behaves exactly like
+    /// [`Self::check_and_record`]; `reserve >= max_attempts` always refuses.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PolicyError::RateLimitExceeded`] without recording anything when
+    /// `remaining_attempts(uid, now) <= reserve`, and in every case
+    /// [`Self::check_and_record`] refuses (`max_attempts == 0`, capacity 0).
+    pub fn check_and_record_with_reserve(
+        &mut self,
+        uid: u32,
+        now_monotonic_ns: u64,
+        reserve: u32,
+    ) -> Result<(), PolicyError> {
+        if reserve > 0 && self.remaining_attempts(uid, now_monotonic_ns) <= reserve {
+            let retry_after_ns = match self.check_allowed(uid, now_monotonic_ns) {
+                Err(PolicyError::RateLimitExceeded { retry_after_ns, .. }) => retry_after_ns,
+                _ => self.config.window_duration_ns,
+            };
+            return Err(PolicyError::RateLimitExceeded {
+                uid,
+                retry_after_ns,
+            });
+        }
+        self.check_and_record(uid, now_monotonic_ns)
     }
 
     /// Check rate limit without mutating state.

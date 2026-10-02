@@ -3,6 +3,7 @@
 #![deny(clippy::undocumented_unsafe_blocks)]
 
 pub mod config;
+pub mod consensus;
 pub mod dispatcher;
 pub mod error;
 pub mod health;
@@ -12,6 +13,7 @@ pub mod logging;
 pub mod mlock;
 pub mod peercred;
 pub mod pipeline;
+pub mod presence;
 pub mod preview;
 pub mod preview_image;
 pub mod sd_notify;

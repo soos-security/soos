@@ -99,6 +99,10 @@ pub fn classify_template(
 }
 
 /// Composite runtime container holding all operational pipeline components.
+///
+/// Every field is an `Arc`, so clones share the same subsystems (GitHub #323: the presence
+/// worker shares the camera, vision, store and policy with the dispatcher).
+#[derive(Clone)]
 pub struct PipelineComponents {
     /// Warm camera capture manager.
     pub camera: Arc<dyn CameraManager>,

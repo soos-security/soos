@@ -34,7 +34,7 @@ fn read(rel: &str) -> String {
 
 /// TOML table served by each private `*ConfigFile` struct of `crates/daemon/src/config.rs`.
 /// An empty table name is the document root.
-const CONFIG_FILE_TABLES: [(&str, &str); 9] = [
+const CONFIG_FILE_TABLES: [(&str, &str); 10] = [
     ("DaemonConfigFile", ""),
     ("SocketConfigFile", "socket"),
     ("DispatcherConfigFile", "dispatcher"),
@@ -44,6 +44,7 @@ const CONFIG_FILE_TABLES: [(&str, &str); 9] = [
     ("RateLimitConfigFile", "pipeline.rate_limit"),
     ("PreviewConfigFile", "preview"),
     ("PeerLimitsConfigFile", "peer_limits"),
+    ("PresenceConfigFile", "presence"),
 ];
 
 /// Returns `(struct name, [(field, type)])` for every `struct *ConfigFile` in `source`.

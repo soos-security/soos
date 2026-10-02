@@ -129,7 +129,7 @@ impl SessionRecord {
     }
 }
 
-fn non_empty(value: &str) -> Option<String> {
+pub(crate) fn non_empty(value: &str) -> Option<String> {
     if value.is_empty() {
         None
     } else {
@@ -229,7 +229,7 @@ pub trait LogindSource: Send + Sync + Debug {
 }
 
 /// Returns whether `id` is a syntactically valid logind session ID (ASCII alphanumeric).
-fn is_valid_session_id(id: &str) -> bool {
+pub(crate) fn is_valid_session_id(id: &str) -> bool {
     !id.is_empty()
         && id.len() <= MAX_SESSION_ID_LEN
         && id.bytes().all(|b| b.is_ascii_alphanumeric())

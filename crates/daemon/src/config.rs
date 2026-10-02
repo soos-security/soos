@@ -8,6 +8,8 @@ use serde::Deserialize;
 
 use crate::error::DaemonError;
 use crate::limits::PeerLimitsConfig;
+use crate::presence::config::PresenceConfig;
+use crate::presence::PRESENCE_RESERVED_ATTEMPTS;
 use crate::preview::PreviewConfig;
 
 /// The only socket permission modes accepted from configuration (GitHub #199, DMN-08).
@@ -281,6 +283,8 @@ pub struct DaemonConfig {
     pub preview: PreviewConfig,
     /// Per-peer connection and event limits (`[peer_limits]`, GitHub #157 / #175).
     pub peer_limits: PeerLimitsConfig,
+    /// Presence auto-unlock of locked local sessions (`[presence]`, GitHub #323).
+    pub presence: PresenceConfig,
     /// Logging filter directive (e.g. "info", "debug").
     pub log_level: String,
     /// Non-fatal problems found while loading the file (GitHub #315), for example an unknown
@@ -298,6 +302,7 @@ impl Default for DaemonConfig {
             pipeline: PipelineConfig::default(),
             preview: PreviewConfig::default(),
             peer_limits: PeerLimitsConfig::default(),
+            presence: PresenceConfig::default(),
             log_level: "info".to_string(),
             warnings: Vec::new(),
         }
@@ -317,7 +322,17 @@ struct DaemonConfigFile {
     #[serde(default)]
     peer_limits: Option<PeerLimitsConfigFile>,
     #[serde(default)]
+    presence: Option<PresenceConfigFile>,
+    #[serde(default)]
     log_level: Option<String>,
+}
+
+/// `[presence]` table (GitHub #323): presence auto-unlock of locked local sessions.
+#[derive(Debug, Deserialize)]
+struct PresenceConfigFile {
+    enabled: Option<bool>,
+    scan_interval_ms: Option<u64>,
+    lock_grace_ms: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -450,7 +465,40 @@ impl DaemonConfig {
         self.preview.validate()?;
         self.peer_limits
             .validate(self.dispatcher.max_concurrent_connections)?;
+        self.presence.validate()?;
         Ok(())
+    }
+
+    /// Non-fatal interactions between `[presence]` and `[pipeline.rate_limit]` (GitHub #323).
+    ///
+    /// A host that pinned a low `max_attempts` still starts; the warnings say that presence
+    /// can never scan, or that its scans will be throttled by the shared per-UID limit.
+    fn presence_rate_limit_warnings(&self) -> Vec<String> {
+        if !self.presence.enabled {
+            return Vec::new();
+        }
+        let max_attempts = self.pipeline.rate_limit.max_attempts;
+        if max_attempts <= PRESENCE_RESERVED_ATTEMPTS {
+            return vec![format!(
+                "presence auto-unlock can never scan: [pipeline.rate_limit] max_attempts must \
+                 exceed {PRESENCE_RESERVED_ATTEMPTS} (the attempts reserved for PAM)"
+            )];
+        }
+        let interval_ns = u64::try_from(self.presence.scan_interval.as_nanos())
+            .unwrap_or(u64::MAX)
+            .max(1);
+        let window_ns = self.pipeline.rate_limit.window_duration_ns;
+        let scans_per_window = window_ns.div_ceil(interval_ns);
+        let budget = u64::from(max_attempts.saturating_sub(PRESENCE_RESERVED_ATTEMPTS));
+        if scans_per_window > budget {
+            return vec![
+                "presence auto-unlock scans will be throttled by the rate limit: \
+                 [pipeline.rate_limit] max_attempts leaves fewer attempts per window than \
+                 [presence] scan_interval_ms schedules"
+                    .to_string(),
+            ];
+        }
+        Vec::new()
     }
 
     /// Configuration the running daemon uses when no key overrides a value.
@@ -670,7 +718,22 @@ impl DaemonConfig {
         config
             .peer_limits
             .validate(config.dispatcher.max_concurrent_connections)?;
+
+        if let Some(presence) = file.presence {
+            if let Some(enabled) = presence.enabled {
+                config.presence.enabled = enabled;
+            }
+            if let Some(ms) = presence.scan_interval_ms {
+                config.presence.scan_interval = Duration::from_millis(ms);
+            }
+            if let Some(ms) = presence.lock_grace_ms {
+                config.presence.lock_grace = Duration::from_millis(ms);
+            }
+        }
+
         config.validate()?;
+        let presence_warnings = config.presence_rate_limit_warnings();
+        config.warnings.extend(presence_warnings);
 
         Ok(config)
     }

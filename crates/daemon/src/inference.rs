@@ -10,7 +10,7 @@
 //! - [`InferenceEstimator`]: bounded moving average of measured inference latency; an inference
 //!   is only started when the estimate fits in the remaining budget.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -242,12 +242,47 @@ pub enum InferenceJobError {
     Cancelled,
 }
 
-/// Semaphore-guarded gateway to the Tokio blocking pool for vision inference (GitHub #158).
+/// Who asks for the single inference slot (GitHub #323).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InferencePriority {
+    /// A PAM `Auth` request: may wait up to its remaining budget
+    /// ([`InferenceGate::acquire_within`]).
+    Interactive,
+    /// The presence scanner: never waits, never queues, yields to any interactive demand
+    /// ([`InferenceGate::try_acquire_background`]).
+    Background,
+}
+
+/// RAII registration of one interactive (PAM `Auth`) request (GitHub #323).
+///
+/// While at least one guard is alive, [`InferenceGate::try_acquire_background`] refuses and
+/// a background consensus is preempted before its next inference. The counter is decremented
+/// (saturating) when the guard is dropped. Deliberately not `Clone`.
 #[derive(Debug)]
+pub struct InteractiveDemandGuard {
+    counter: Arc<AtomicUsize>,
+}
+
+impl Drop for InteractiveDemandGuard {
+    fn drop(&mut self) {
+        let _ = self
+            .counter
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
+                current.checked_sub(1)
+            });
+    }
+}
+
+/// Semaphore-guarded gateway to the Tokio blocking pool for vision inference (GitHub #158).
+///
+/// Clones share the same semaphore, latency estimator and interactive-demand counter
+/// (GitHub #323: the dispatcher and the presence worker use one gate).
+#[derive(Debug, Clone)]
 pub struct InferenceGate {
     permits: Arc<Semaphore>,
     max_concurrent: usize,
     estimator: Arc<InferenceEstimator>,
+    interactive_demand: Arc<AtomicUsize>,
 }
 
 impl InferenceGate {
@@ -259,7 +294,41 @@ impl InferenceGate {
             permits: Arc::new(Semaphore::new(max_concurrent)),
             max_concurrent,
             estimator: Arc::new(InferenceEstimator::new(initial_estimate)),
+            interactive_demand: Arc::new(AtomicUsize::new(0)),
         }
+    }
+
+    /// Registers one interactive (PAM `Auth`) request until the returned guard is dropped.
+    #[must_use]
+    pub fn register_interactive(&self) -> InteractiveDemandGuard {
+        self.interactive_demand.fetch_add(1, Ordering::SeqCst);
+        InteractiveDemandGuard {
+            counter: Arc::clone(&self.interactive_demand),
+        }
+    }
+
+    /// Number of live [`InteractiveDemandGuard`]s.
+    #[must_use]
+    pub fn interactive_demand(&self) -> usize {
+        self.interactive_demand.load(Ordering::SeqCst)
+    }
+
+    /// Background (presence) acquisition of an inference slot: never waits.
+    ///
+    /// Returns `None` when an interactive request is registered or no slot is free right now.
+    /// The demand is re-checked after a successful acquisition; if an interactive request
+    /// appeared in between, the permit is released and `None` returned.
+    #[must_use]
+    pub fn try_acquire_background(&self) -> Option<OwnedSemaphorePermit> {
+        if self.interactive_demand() > 0 {
+            return None;
+        }
+        let permit = self.permits.clone().try_acquire_owned().ok()?;
+        if self.interactive_demand() > 0 {
+            drop(permit);
+            return None;
+        }
+        Some(permit)
     }
 
     /// Number of inference slots.

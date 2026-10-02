@@ -51,6 +51,9 @@ ort = "=2.0.0-rc.13"
 sha2 = "0.10"
 toml = "0.8"
 
+# systemd-logind client of the presence auto-unlock (soos-daemon only, GitHub #323)
+zbus = { version = "5", default-features = false, features = ["tokio"] }
+
 # Logging and diagnostics
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }

@@ -1,7 +1,7 @@
 # soos-daemon Reference
 
 > Crate: `crates/daemon` (`soos-daemon`)
-> Scope: configuration file, connection model, authorization per request kind, startup and swap protection.
+> Scope: configuration file, connection model, authorization per request kind, startup and swap protection, presence auto-unlock.
 > Source of truth: `crates/daemon/src/config.rs` (keys and defaults), `crates/daemon/src/dispatcher.rs`
 > (request handling), `crates/daemon/src/limits.rs`, `crates/daemon/src/preview.rs`. When this
 > document and the code disagree, the code is right; the repository invariant
@@ -106,7 +106,7 @@ logging is initialized; a warning names the key, never its value.
 
 | Key | Type | Default | Notes |
 |---|---|---|---|
-| `max_attempts` | integer | `5` | Attempts accepted per window. |
+| `max_attempts` | integer | `40` | Attempts accepted per window and per target UID, shared by every face request (`sudo`, GDM, lock screens) and by presence scans (GitHub #323; was `5`). Presence never consumes the last 5 attempts of a window (`PRESENCE_RESERVED_ATTEMPTS`), so PAM always keeps at least the former budget. A value of `5` or less with presence enabled is accepted with a startup warning (presence then never scans). |
 | `window_duration_secs` | integer (s) | `60` | Sliding window. |
 | `max_tracked_uids` | integer | `1024` | Bounded limiter table. |
 
@@ -129,7 +129,19 @@ logging is initialized; a warning names the key, never its value.
 | `max_events_per_window` | integer | `5` | `PasswordFailed` events per peer UID; `0` drops all events. |
 | `event_window_ms` | integer (ms) | `10000` | At least 1. |
 
-### 1.7 Example
+### 1.7 `[presence]` (presence auto-unlock of locked local sessions, GitHub #323)
+
+| Key | Type | Default | Validation / notes |
+|---|---|---|---|
+| `enabled` | bool | `true` | Enabled by default (owner decision). `false` keeps the worker from starting. |
+| `scan_interval_ms` | integer (ms) | `2000` | Minimum time between the starts of two scans of one session; `1000..=60000`. `0` is refused (never "immediately" nor "disabled"). |
+| `lock_grace_ms` | integer (ms) | `3000` | Time a session must have been observed locked before any scan or unlock; `1000..=60000`. `0` is refused. |
+
+Both intervals are validated even when `enabled = false`. When `ceil(window / scan_interval)`
+exceeds `max_attempts - 5`, a startup warning says that presence scans will be throttled by the
+rate limit. See §6 for the behaviour.
+
+### 1.8 Example
 
 ```toml
 log_level = "info"
@@ -145,6 +157,11 @@ warmup_frames = 0
 [pipeline.thresholds]
 match_threshold = 0.50
 pad_threshold = 0.85
+
+[presence]
+enabled = true
+scan_interval_ms = 2000
+lock_grace_ms = 3000
 ```
 
 ---
@@ -176,6 +193,7 @@ pad_threshold = 0.85
 | `RequestKind::Auth` | root peer for any UID, or an unprivileged peer for its own UID | wire validation, `SO_PEERCRED` UID versus `uid_hint`, local-session policy (ADR 2026-09-30 "Local Session Binding"), deadline, template model binding (a `Foreign` template is answered `Unavailable`/`ModelUnavailable` here, without an attempt or a camera wake; GitHub #298), rate limit, missing template, camera wake + PAD consensus + match | `ProtocolError`/`UidMismatch`, `Unavailable`, or `Deny`; never `Allow` on an error path |
 | `RequestKind::PreviewFrame` | root peer, or an allow-listed UID with `[preview] enabled = true` and an active local session | wire validation, `SO_PEERCRED` UID versus `uid_hint`, `authorize_preview`, session check, per-UID rate limit | standard `Response` with `ProtocolError`, zero pixel bytes |
 | `Event` (`PasswordFailed`) | root peer for any UID, any other peer for itself | target UID versus peer UID, per-peer event quota | dropped with a `warn`; events never get a response |
+| Presence auto-unlock (no message; daemon-internal, GitHub #323) | nobody: the daemon itself, for the owner of one locked local session | kill switch, logind snapshot (bound + `LockedHint`), lock grace and scan interval, template binding, account guard, lid/screen gates, PAM priority, rate-limit reserve, camera wake + PAD consensus + match, fresh logind re-check, fresh account check, kill-switch re-check, then `UnlockSession` (§6) | no unlock; the locker and its password path are untouched |
 
 ## 4. Startup and Swap Protection
 
@@ -272,3 +290,89 @@ pad_threshold = 0.85
   PAM client enforces both fields against its own CLOCK_MONOTONIC reading and returns
   `PAM_IGNORE` for an unstamped, inverted, future-dated or expired response (see
   `Docs/IPC_PROTOCOL.md`, "Response Freshness").
+
+## 6. Presence Auto-Unlock (GitHub #323)
+
+`soos-daemon` unlocks a locked local session when the face of its owner is verified, without a
+keypress and without PAM, through systemd-logind `Manager.UnlockSession` (ADR 2026-10-02
+"Presence Auto-Unlock Through logind", ARCHITECTURE invariant 6). Source of truth:
+`crates/daemon/src/presence/` and `crates/daemon/src/consensus.rs`.
+
+**Start and stop.** The worker starts after `READY=1` (startup never waits for the system bus)
+when `[presence] enabled = true` and `[dispatcher] enforce_active_session = true` (the harness
+mode never starts it). At shutdown it is signalled right after the accept loop returns, joined
+for at most 500 ms, then aborted; no attempt and no unlock starts after the stop signal. A
+worker panic is logged once (`error`) and disables presence until the next daemon start.
+
+**One tick per second** (`LOCK_POLL_INTERVAL_MS`), each step failing closed:
+
+1. Kill switch: `/etc/soos/disabled` (the global flag, which also disables face PAM) or
+   `/etc/soos/presence.disable` (presence only), as any entry kind, or a stat error other than
+   "not found", stops presence and restarts every grace. `gdm.disable` and the other
+   per-service PAM flags do **not** stop presence. No restart is needed in either direction.
+2. logind snapshot over the pinned system bus `unix:path=/run/dbus/system_bus_socket` (`zbus`,
+   every call bounded by 500 ms; failures back off 1 s, doubling to 30 s, logged at `warn` once
+   per outage). A session is eligible only if it passes the `Auth` binding predicate (owner UID,
+   active, explicit `REMOTE=0`, seat, `CLASS=user`) and `LockedHint` is `true`.
+3. Grace: no scan until `lock_grace_ms` after the lock was first observed; a session seen
+   unlocked, inactive or gone ends its lock period. Scans of one session are spaced by
+   `scan_interval_ms`.
+4. Exactly one eligible session must have a current-model template and pass the account guard;
+   zero or several mean no scan (no attempt, no camera wake).
+5. Gates: no scan while logind reports the lid closed or every connected DRM connector is
+   DPMS-off; an undetectable state does not gate. Screen-off detection is best effort: on
+   atomic-KMS drivers the sysfs `dpms` attribute may stay `On` while the compositor blanks the
+   screen, and scans then continue. Gate transitions are logged at `info`.
+6. PAM priority: no scan while an `Auth` request is in progress; a running scan yields before
+   its next inference.
+7. One attempt is recorded in the shared per-UID rate limiter, never consuming the last 5.
+8. The unchanged pipeline (camera wake, `k = 3` consecutive passing captures, any spoof vetoes,
+   `[pipeline.thresholds]`) runs; a spoof veto is logged at `warn` and never sealed as evidence.
+9. After an `Allow`, a fresh logind re-check of the same session ID (still bound, locked, same
+   UID and same `Name`), a fresh account check, a lid re-check (a lid closed during the scan
+   refuses; a read error does not) and a kill-switch re-check must pass within 1000 ms
+   (`MAX_ALLOW_TO_UNLOCK_MS`), measured on both `CLOCK_MONOTONIC` and `CLOCK_BOOTTIME` (a
+   suspend in between expires the `Allow`; a boot-clock error refuses); then `UnlockSession` is called once (never retried for the
+   same `Allow`) and one `info` line names the session ID and the UID. A locker still locked 5 s
+   later is not scanned again until its next lock period.
+
+**Account guard.** Owner rule: a presence unlock respects `pam_faillock` and account / password
+expiry; locked, expired **or undeterminable** means no unlock, and the password stays the only
+path. Before every scan and again after the `Allow`, the guard (files re-read every time):
+
+- refuses UID 0;
+- scans every file of `/etc/pam.d`, `/usr/lib/pam.d` and `/usr/etc/pam.d` (symbolic links
+  followed like libpam, so authselect stacks are seen): a `pam_faillock.so` line carrying a
+  policy option (`deny=`, `dir=`, `fail_interval=`, `unlock_time=`, `root_unlock_time=`,
+  `admin_group=`, `conf=`, `even_deny_root`), also as a bracketed argument (`[deny=2]`,
+  `[dir=/x y]`: libpam strips the brackets), makes the state undeterminable; a bracketed
+  control field such as `[success=1 default=bad]` is not an argument. Keep faillock
+  policy in `/etc/security/faillock.conf`, not on PAM lines;
+- reads `faillock.conf` (`/etc/security/faillock.conf`; when absent, the built-in defaults
+  3 / 900 s / 600 s **and** the vendor `/usr/etc/security/faillock.conf` are both evaluated,
+  strictest wins); an unknown key or malformed value is undeterminable;
+- reads the tally `/run/faillock/<user>` (or the configured `dir`) with `O_NOFOLLOW` under a
+  shared non-blocking `flock` and applies the `pam_faillock` `check_tally` rule; a tally
+  directory that is a symlink or group/other-writable is undeterminable; with `admin_group`
+  set, the stricter unlock time applies;
+- reads `/etc/shadow`: account expired or inactive, password expired, forced change
+  (`lastchg = 0`) or locked password (a field starting with `!` or `*`, e.g. `*LK*`) refuse; a missing or duplicated line is
+  undeterminable, so NSS-only (LDAP/SSSD) and systemd-homed users never get presence unlock.
+
+There is no tally reset: a presence unlock never writes `/run/faillock` (it is not a PAM authentication;
+the guard already refused while locked). `CAP_DAC_OVERRIDE` (kept in the unit's
+`CapabilityBoundingSet`) is required to read the `0660 user:root` tally and, on distributions
+that ship `/etc/shadow` as `0000 root:root` (Fedora, RHEL), the shadow file; without it the
+guard refuses every unlock. Other account modules (`pam_access`, `pam_time`, `pam_nologin`,
+`pam_tally2`) are not consulted.
+
+**Logging.** Users are identified by UID and session ID above `debug`, never by name; no frame,
+embedding, template, score, file content or D-Bus body is logged. Skip reasons are logged at
+`debug` on change only.
+
+**Known limits.** The session owner can set `LockedHint` itself: `false` under a running locker
+only denies presence to that owner, `true` while unlocked only turns the camera on (logind
+refuses `SetLockedHint` on another user's session). Any user able to hold more than 1024 logind
+sessions (for example over SSH) makes every tick `TooManySessions` and disables presence for
+everyone until they close (fail closed; PAM is unaffected). Locking while seated unlocks again
+after the grace period, by design.

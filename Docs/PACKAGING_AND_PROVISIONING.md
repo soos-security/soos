@@ -300,16 +300,26 @@ The daemon runs as `root:soos` but inside a bounded sandbox:
 
 | Directive | Why |
 |---|---|
-| `CapabilityBoundingSet=CAP_IPC_LOCK CAP_CHOWN CAP_FOWNER CAP_DAC_OVERRIDE`, `AmbientCapabilities=` | `mlockall` (`CAP_IPC_LOCK`), socket `fchownat` / `fchmodat` (`CAP_CHOWN`, `CAP_FOWNER`); `CAP_DAC_OVERRIDE` is kept until dropping it is validated on a real host |
+| `CapabilityBoundingSet=CAP_IPC_LOCK CAP_CHOWN CAP_FOWNER CAP_DAC_OVERRIDE`, `AmbientCapabilities=` | `mlockall` (`CAP_IPC_LOCK`), socket `fchownat` / `fchmodat` (`CAP_CHOWN`, `CAP_FOWNER`); `CAP_DAC_OVERRIDE` is required by the presence account guard (GitHub #323): it reads the `pam_faillock` tally `/run/faillock/<user>` (`0660 user:root`) and, on distributions that ship `/etc/shadow` as `0000 root:root` (Fedora, RHEL), the shadow file; without it the guard refuses every presence unlock (fail closed). It also keeps state files whose owner or mode an administrator changed readable |
 | `SystemCallFilter=@system-service`, `SystemCallErrorNumber=EPERM` | `@system-service` includes `@memlock`, `@chown`, `ioctl` (V4L2) and `sched_setaffinity` (ONNX Runtime threads) |
 | `ProtectKernelTunables/Modules/Logs=yes`, `ProtectControlGroups=yes`, `ProtectClock=yes`, `ProtectHostname=yes`, `RestrictNamespaces=yes`, `RestrictRealtime=yes` | No kernel, cgroup, clock, namespace or realtime access is needed |
-| `PrivateNetwork=yes`, `IPAddressDeny=any`, `RestrictAddressFamilies=AF_UNIX` | No network at all; the filesystem socket `/run/soos/daemon.sock` works inside a private network namespace |
+| `PrivateNetwork=yes`, `IPAddressDeny=any`, `RestrictAddressFamilies=AF_UNIX` | No network at all; the filesystem socket `/run/soos/daemon.sock` works inside a private network namespace, and so does the system bus `/run/dbus/system_bus_socket` used by the presence auto-unlock (GitHub #323) |
 | `DevicePolicy=closed`, `DeviceAllow=char-video4linux rw` | systemd does not expand globs in `DeviceAllow=` node paths, so `/dev/video*` alone matches nothing; the device group allows every V4L2 node |
 | `Before=display-manager.service`, `Type=notify`, `NotifyAccess=main`, `TimeoutStartSec=60` | The daemon sends `READY=1` (`soos_daemon::sd_notify`) only after `/run/soos/daemon.sock` is bound, so the greeter waits until PAM requests can be served; a start that never reports readiness fails after 60 s (GitHub #203) |
 
 Deliberately **not** set: `ProtectProc=invisible` / `ProcSubset=pid` (they would hide
 `/proc/<pid>/cgroup` of other users' peers, which the session policy reads), `PrivateDevices=yes`
 (removes `/dev/video*`). The contract is `crates/daemon/tests/systemd_hardening_tests.rs`.
+
+Presence auto-unlock (GitHub #323) needs **no unit change**: the system bus is an `AF_UNIX`
+filesystem socket reachable under `PrivateNetwork=yes` and `ProtectSystem=strict`
+(`SystemCallFilter=@system-service` covers `socket`/`connect`/`sendmsg`/`recvmsg`); logind >= 255
+grants `UnlockSession` to a root sender without `CAP_SYS_ADMIN` (older releases fall back to
+polkit, which authorizes UID 0); `ProtectKernelTunables=yes` keeps `/sys/class/drm` readable for
+the screen gate. The account guard only reads `/etc/security/faillock.conf`, the PAM
+directories, `/run/faillock` and `/etc/shadow` (no tally reset, `ReadWritePaths` unchanged),
+which is why `CAP_DAC_OVERRIDE` stays in `CapabilityBoundingSet` and no `InaccessiblePaths=`
+may cover those sources (invariant `presence_unlock_contract::test_pau_unit_keeps_the_account_guard_sandbox`).
 `systemd-analyze security --offline=yes` reports an exposure of 1.7 (7.5 before). Check the
 installed unit with `systemd-analyze security soos-daemon` on the target host.
 

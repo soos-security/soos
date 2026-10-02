@@ -142,6 +142,28 @@ impl AuthorizationEngine {
         }
     }
 
+    /// [`Self::record_attempt`] keeping `reserve` attempts of the window for other callers
+    /// (GitHub #323: the presence scanner never consumes the last attempts PAM relies on).
+    ///
+    /// If no rate limiter is configured, this always succeeds.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PolicyError::RateLimitExceeded`] when the limiter refuses (see
+    /// [`RateLimiter::check_and_record_with_reserve`]); nothing is recorded then.
+    pub fn record_attempt_with_reserve(
+        &mut self,
+        uid: u32,
+        now_monotonic_ns: u64,
+        reserve: u32,
+    ) -> Result<(), PolicyError> {
+        if let Some(ref mut limiter) = self.rate_limiter {
+            limiter.check_and_record_with_reserve(uid, now_monotonic_ns, reserve)
+        } else {
+            Ok(())
+        }
+    }
+
     /// Evaluates an [`AuthContext`] with rate-limiting enforcement.
     ///
     /// If the rate limiter is configured and the attempt limit is exceeded,

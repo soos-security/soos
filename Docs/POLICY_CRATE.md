@@ -98,6 +98,8 @@ Memory growth is strictly bounded to prevent Denial of Service (DoS) through spo
   1. On capacity saturation, expired entries across all UIDs are pruned first (`prune_stale`).
   2. If capacity remains saturated, the least recently used (LRU) UID—determined by oldest active attempt timestamp—is evicted.
 - **Fail-Closed Guarantees**: A capacity of zero immediately rejects attempts with `PolicyError::RateLimitExceeded`.
+- **Default Budget**: `RateLimitConfig::DEFAULT_MAX_ATTEMPTS` is 40 attempts per 60 s window (`DEFAULT_WINDOW_DURATION_NS`), shared by every face request (`sudo`, GDM, lock screens) and by the presence auto-unlock scans of the daemon (GitHub #323, owner decision 2026-10-02; it was 5 attempts before).
+- **Reserve-Keeping Recording**: `RateLimiter::check_and_record_with_reserve(uid, now, reserve)` (and `AuthorizationEngine::record_attempt_with_reserve`) prunes expired attempts, then records one attempt only while more than `reserve` attempts remain in the window, evaluated and recorded inside one `&mut self` call. When `remaining <= reserve` it returns `RateLimitExceeded` without recording; `reserve = 0` behaves exactly like `check_and_record`, and `reserve >= max_attempts` always refuses. The daemon's presence worker calls it with `PRESENCE_RESERVED_ATTEMPTS` (5), so PAM always keeps at least 5 attempts of every window.
 
 ```rust
 use soos_policy::{RateLimiter, RateLimitConfig};

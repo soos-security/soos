@@ -242,6 +242,11 @@ mod gcv_review_contract;
 #[cfg(all(test, unix))]
 mod arch_faillock_ci_contract;
 
+/// Presence auto-unlock of locked local sessions through logind (GitHub #323, spec C1–C9;
+/// rows PAU2, PAU10, PAU11, PAU16, PAU17, PAU19, PAU20, PAU29).
+#[cfg(all(test, unix))]
+mod presence_unlock_contract;
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,
