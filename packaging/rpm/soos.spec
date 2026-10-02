@@ -36,6 +36,8 @@ presentation attack detection (PAD), and encrypted vector storage at rest.
 %setup -q
 
 %build
+# soos-enroll is packaged in %{_bindir}: build soos-gui for that path (GitHub #318).
+export SOOS_BINDIR=%{_bindir}
 cargo build --locked --release --workspace
 
 %install

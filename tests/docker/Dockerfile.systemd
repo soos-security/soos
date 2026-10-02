@@ -9,7 +9,11 @@
 # read-only at run time.
 # =============================================================================
 
-FROM ubuntu:24.04
+# Base image pinned by its multi-arch index digest, the same one as
+# tests/docker/Dockerfile.ubuntu (the release build image: same glibc), so a
+# re-tagged upstream image can no longer change the runtime between two runs
+# (GitHub #318). Bump both digests together (docker manifest inspect ubuntu:24.04).
+FROM ubuntu:24.04@sha256:008173c23f95b170204355c12626cb5a965d779a7e1283b09e9cffbb1bf33ca3
 
 ENV DEBIAN_FRONTEND=noninteractive
 # Lets systemd detect the container and skip units that only make sense on a

@@ -143,9 +143,13 @@ fn test_systemd_acceptance_harness_exists_and_isolates_the_host() {
     );
 
     let dockerfile = read(DOCKERFILE);
+    // GitHub #318 (owner approval 2026-10-02): the tag alone (`FROM ubuntu:24.04`) is no
+    // longer accepted; the base is pinned by a 64-hex digest (row AFC3).
     assert!(
-        dockerfile.contains("\nFROM ubuntu:24.04\n"),
-        "{DOCKERFILE} must use ubuntu:24.04 (same glibc as the release build image)"
+        dockerfile.lines().any(|l| l
+            .strip_prefix("FROM ubuntu:24.04@sha256:")
+            .is_some_and(|d| d.len() == 64 && d.chars().all(|c| c.is_ascii_hexdigit()))),
+        "{DOCKERFILE} must use ubuntu:24.04 pinned by digest (same glibc as the release build image)"
     );
     assert!(
         dockerfile.contains("rm -rf /dev/video* /dev/media* /dev/v4l && exec /sbin/init"),

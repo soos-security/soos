@@ -30,6 +30,8 @@ source=()
 _soos_srcdir="${SOOS_SRC_DIR:-${startdir}/../..}"
 
 build() {
+    # soos-enroll is packaged in /usr/bin: build soos-gui for that path (GitHub #318).
+    export SOOS_BINDIR=/usr/bin
     cd "${_soos_srcdir}"
     cargo build --locked --release --workspace
 }

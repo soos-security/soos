@@ -3,7 +3,7 @@
 auth       required                    pam_faillock.so      preauth
 # Optionally use requisite above if you do not want to prompt for the password
 # on locked accounts.
-auth  [success=done default=ignore]  pam_soos.so
+auth  [success=4 default=ignore]  pam_soos.so
 -auth      [success=3 default=ignore]  pam_systemd_home.so
 auth       [success=2 default=bad]     pam_unix.so          try_first_pass nullok
 auth  optional                       pam_soos.so event=password-failed timeout_ms=20

@@ -10,6 +10,9 @@ export DH_VERBOSE = 1
 
 DEB_HOST_MULTIARCH ?= $(shell dpkg-architecture -qDEB_HOST_MULTIARCH)
 
+# soos-enroll is packaged in /usr/bin: build soos-gui for that path (GitHub #318).
+export SOOS_BINDIR = /usr/bin
+
 override_dh_auto_build:
 	cargo build --locked --release --workspace
 

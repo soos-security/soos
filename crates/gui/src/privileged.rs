@@ -29,8 +29,17 @@ pub const PKEXEC_PROGRAM: &str = "/usr/bin/pkexec";
 pub const SYSTEMCTL_PROGRAM: &str = "/usr/bin/systemctl";
 
 /// Absolute path of `soos-enroll` as installed by `scripts/install.sh`, the Debian, Arch and
-/// RPM packages (`/usr/bin/soos-enroll`).
+/// RPM packages (`/usr/bin/soos-enroll`). This is the default, used when the build-time
+/// `SOOS_BINDIR` is unset or `/usr/bin` (every package builder sets `/usr/bin`).
+#[cfg(not(soos_custom_bindir))]
 pub const SOOS_ENROLL_PROGRAM: &str = "/usr/bin/soos-enroll";
+
+/// Absolute path of `soos-enroll` under a non-default install prefix: `scripts/install.sh
+/// --build --prefix <P>` exports `SOOS_BINDIR=<P>/bin`, which `build.rs` validated (normalized
+/// absolute directory of `[A-Za-z0-9._+-]` components, otherwise the build fails) before it
+/// enabled this `cfg` (GitHub #318).
+#[cfg(soos_custom_bindir)]
+pub const SOOS_ENROLL_PROGRAM: &str = concat!(env!("SOOS_BINDIR"), "/soos-enroll");
 
 /// A privileged operation requested by the UI.
 pub enum PrivilegedAction {

@@ -412,6 +412,9 @@ done
 
 # A.3 Optional release build (explicit, locked, never a debug build).
 BUILD_CMD=(cargo build --release --locked --workspace)
+# soos-gui runs soos-enroll by absolute path through pkexec: the build bakes in
+# the bin directory of this install (crates/gui/build.rs validates it; GitHub #318).
+SOOS_BUILD_BINDIR="${PREFIX}/bin"
 
 # The user who invoked a root shell through sudo, doas or pkexec (GitHub #308), or
 # nothing. A plain 'su' leaves no trace: the caller then decides from the checkout owner.
@@ -453,16 +456,16 @@ run_release_build() {
         info "Building as the invoking user '${build_user}' (never as root)."
         # shellcheck disable=SC2016 # "$1" is expanded by the inner login shell.
         runuser -u "${build_user}" -- bash -lc \
-            'cd "$1" && ./scripts/check_build_deps.sh && cargo build --release --locked --workspace' \
-            _ "${WORKSPACE_ROOT}"
+            'cd "$1" && ./scripts/check_build_deps.sh && SOOS_BINDIR="$2" cargo build --release --locked --workspace' \
+            _ "${WORKSPACE_ROOT}" "${SOOS_BUILD_BINDIR}"
     else
-        (cd "${WORKSPACE_ROOT}" && ./scripts/check_build_deps.sh && "${BUILD_CMD[@]}")
+        (cd "${WORKSPACE_ROOT}" && ./scripts/check_build_deps.sh && SOOS_BINDIR="${PREFIX}/bin" "${BUILD_CMD[@]}")
     fi
 }
 
 if [[ "${DO_BUILD}" = true ]]; then
     if [[ "${DRY_RUN}" = true ]]; then
-        info "[DRY-RUN] Would run: ${BUILD_CMD[*]} (after scripts/check_build_deps.sh)"
+        info "[DRY-RUN] Would run: SOOS_BINDIR=${SOOS_BUILD_BINDIR} ${BUILD_CMD[*]} (after scripts/check_build_deps.sh)"
         "${WORKSPACE_ROOT}/scripts/check_build_deps.sh" || preflight_fail "Build dependencies are missing (see above)."
     elif [[ "${PREFLIGHT_ERRORS}" -eq 0 ]]; then
         if ! run_release_build; then
@@ -470,6 +473,15 @@ if [[ "${DO_BUILD}" = true ]]; then
             exit 40
         fi
     fi
+fi
+
+# Prebuilt artifacts under another prefix: soos-gui was compiled with the
+# soos-enroll path of its own build (default /usr/bin/soos-enroll), and its
+# privileged actions fail closed when that program is missing (GitHub #318).
+SOOS_GUI_ENROLL_DEFAULT="/usr/bin/soos-enroll"
+if [[ "${DO_BUILD}" = false && "${SOOS_BUILD_BINDIR}" != "/usr/bin" ]]; then
+    warn "--prefix ${PREFIX}: soos-gui runs ${SOOS_GUI_ENROLL_DEFAULT} unless it was built with"
+    warn "SOOS_BINDIR=${SOOS_BUILD_BINDIR}; use --build (which sets it) or rebuild the artifacts with it."
 fi
 
 # A.4 Artifacts: release profile only, every artifact present unless --allow-missing.
