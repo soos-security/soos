@@ -39,7 +39,8 @@ with a half-applied configuration.
 after the file is validated, so it does not make a file with `enforce_active_session = false`
 acceptable (§1.3).
 
-Non-fatal problems (currently an unknown `sensor_preference`) are collected in
+Non-fatal problems (an unknown `sensor_preference`, and `allow_virtual_camera = true`, which
+weakens the camera trust boundary; GitHub #318) are collected in
 `DaemonConfig::warnings` while the file is parsed and logged at `warn` level by `main.rs` once
 logging is initialized; a warning names the key, never its value.
 
@@ -72,7 +73,8 @@ logging is initialized; a warning names the key, never its value.
 
 | Key | Type | Default | Validation / notes |
 |---|---|---|---|
-| `camera_device` | path | auto (`/dev/v4l/by-id/default-camera` sentinel) | `""`, `auto` and `default` keep auto-detection; any other value is used verbatim (ADR 2026-09-30 "Single Camera Resolver"). |
+| `camera_device` | path | auto (`/dev/v4l/by-id/default-camera` sentinel) | `""`, `auto` and `default` keep auto-detection; any other value is used verbatim (ADR 2026-09-30 "Single Camera Resolver"). A value holding a NUL byte is a startup error naming the key, never the value (GitHub #318; no path can hold one and `v4l` would panic on it). |
+| `allow_virtual_camera` | bool | `false` | Opt-in to open a virtual or output-capable V4L2 node (v4l2loopback, vivid, output or memory-to-memory capability), copied to `CameraConfig::allow_virtual_device` (GitHub #318, ADR 2026-10-02 "Virtual V4L2 Nodes Are Never Biometric Cameras"). Test rigs only: when `true` the daemon logs a configuration warning at startup, because any local writer of such a node can inject frames. A value that is not a boolean is a startup error. |
 | `sensor_preference` | string | `prefer_ir` | `prefer_ir`/`ir`, `prefer_rgb`/`rgb`, `any` (case-insensitive); an unknown value keeps the default and is logged as a configuration warning (GitHub #315). |
 | `idle_timeout_secs` | integer (s) | `10` | Inactivity delay before the capture thread drops to its idle rate / standby. |
 | `warmup_frames` | integer | `0` (`DAEMON_DEFAULT_WARMUP_FRAMES`) | Frames discarded after each camera (re)start. The daemon default is the same with and without a config file (GitHub #205); the camera crate's library default of 20 does not apply to the daemon. |

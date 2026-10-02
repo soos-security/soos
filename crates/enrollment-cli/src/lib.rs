@@ -30,7 +30,7 @@ pub use quality::{select_best_frame, BestCandidate, CandidateEvaluation};
 pub use service::{
     build_evidence_for_migration, build_full_service, build_full_service_with_notes,
     build_store_only, build_templates_for_migration, camera_config_notes, check_privileges,
-    ensure_debug_report_dir, format_enrolled_json, format_migration_json,
+    enrollment_camera_config, ensure_debug_report_dir, format_enrolled_json, format_migration_json,
     open_evidence_store_for_migration, open_template_store_for_migration, resolve_camera_device,
     resolve_camera_device_from_config, resolve_camera_device_from_config_reported,
     resolve_camera_device_from_config_with, resolve_debug_report_path, run_migration,

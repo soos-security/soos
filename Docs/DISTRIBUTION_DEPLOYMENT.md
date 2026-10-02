@@ -152,7 +152,11 @@ Placement rules:
 4. The account phase is never edited: GDM calls `pam_acct_mgmt` after a successful
    `pam_authenticate`, so `pam_nologin`/`pam_faillock`/`pam_unix` account checks always run.
 5. The first `enable` keeps the pristine file as `gdm-password.soos-backup` (restored by
-   `gdm restore` and by `scripts/uninstall.sh`); the rewrite is atomic. A misplaced line
+   `gdm restore` and by `scripts/uninstall.sh`); the rewrite is atomic. `gdm restore` refuses
+   a backup that no longer matches the file without its soos rules (unless `--force`), and,
+   with or without `--force`, re-reads the file right before the rename: if it changed after
+   the comparison (other bytes or another inode), nothing is written and the command fails
+   with "changed concurrently"; re-run it (GitHub #312, #318). A misplaced line
    written by older releases (`auth  sufficient  pam_soos.so timeout_ms=2500`) is moved to
    the safe position; a `pam_soos.so` rule you wrote yourself is left untouched.
 6. **Known refusals.** These default stacks make `enable` refuse. The refusal is fail-closed

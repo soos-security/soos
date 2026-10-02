@@ -115,6 +115,9 @@ pub struct CameraDeviceChoice {
     /// because of its type or value). Names keys, never their values. Empty when the
     /// configuration was applied as written or no configuration path was given.
     pub notes: Vec<String>,
+    /// `[pipeline] allow_virtual_camera` of the same read (GitHub #318): `true` only when the
+    /// file says `true`; absent, mistyped or unusable configuration keeps it `false`.
+    pub allow_virtual_camera: bool,
 }
 
 /// Resolves the camera device like [`resolve_camera_device_from_config_with`] and also returns
@@ -130,7 +133,11 @@ pub fn resolve_camera_device_from_config_reported(
     config_path: Option<&Path>,
     enumerator: &dyn soos_camera_v4l::CameraEnumerator,
 ) -> CameraDeviceChoice {
-    let (settings, notes) = config_path
+    let CameraSettingsRead {
+        settings,
+        notes,
+        allow_virtual_camera,
+    } = config_path
         .map(read_camera_settings_with_notes)
         .unwrap_or_default();
 
@@ -151,7 +158,22 @@ pub fn resolve_camera_device_from_config_reported(
         )
         .path,
         notes,
+        allow_virtual_camera,
     }
+}
+
+/// Camera configuration `soos-enroll` opens the hardware camera with (GitHub #318):
+/// `device_path`, and the `[pipeline] allow_virtual_camera` opt-in of `daemon.toml`
+/// ([`CameraDeviceChoice::allow_virtual_camera`]) as `CameraConfig::allow_virtual_device`.
+#[must_use]
+pub fn enrollment_camera_config(
+    device_path: PathBuf,
+    allow_virtual_device: bool,
+) -> soos_camera_v4l::CameraConfig {
+    CameraConfigBuilder::new()
+        .device_path(device_path)
+        .allow_virtual_device(allow_virtual_device)
+        .build()
 }
 
 /// Notes about the daemon configuration at `config_path`, as
@@ -159,16 +181,20 @@ pub fn resolve_camera_device_from_config_reported(
 /// written, otherwise one line per problem naming the file (sanitized for display) and the key,
 /// never a value.
 pub fn camera_config_notes(config_path: &Path) -> Vec<String> {
-    read_camera_settings_with_notes(config_path).1
+    read_camera_settings_with_notes(config_path).notes
+}
+
+/// What one read of `daemon.toml` yields for the camera resolution.
+#[derive(Debug, Default)]
+struct CameraSettingsRead {
+    settings: soos_camera_v4l::daemon_config::DaemonCameraSettings,
+    notes: Vec<String>,
+    /// `[pipeline] allow_virtual_camera` (`false` unless the usable file says `true`).
+    allow_virtual_camera: bool,
 }
 
 /// Reads the camera settings through the shared reader and turns its outcome into notes.
-fn read_camera_settings_with_notes(
-    path: &Path,
-) -> (
-    soos_camera_v4l::daemon_config::DaemonCameraSettings,
-    Vec<String>,
-) {
+fn read_camera_settings_with_notes(path: &Path) -> CameraSettingsRead {
     // Same sanitizer as the `soos-admin camera list` note: control characters and
     // bidirectional overrides in the operator-supplied path become `?` (GitHub #289).
     let shown = soos_camera_v4l::diagnostics::sanitize_display_text(&path.to_string_lossy());
@@ -179,14 +205,18 @@ fn read_camera_settings_with_notes(
                 .into_iter()
                 .map(|warning| format!("camera settings: {shown}: {warning}"))
                 .collect();
-            (config.settings, notes)
+            CameraSettingsRead {
+                settings: config.settings,
+                notes,
+                allow_virtual_camera: config.allow_virtual_camera,
+            }
         }
-        Err(err) => (
-            soos_camera_v4l::daemon_config::DaemonCameraSettings::default(),
-            vec![format!(
+        Err(err) => CameraSettingsRead {
+            notes: vec![format!(
                 "camera settings: {shown} {err}; using the soos-daemon defaults"
             )],
-        ),
+            ..CameraSettingsRead::default()
+        },
     }
 }
 
@@ -1783,7 +1813,7 @@ pub fn build_full_service_with_notes(
         return Ok(EnrollmentService::new(store, camera, pipeline, true));
     }
 
-    let camera_config = CameraConfigBuilder::new().device_path(device_path).build();
+    let camera_config = enrollment_camera_config(device_path, choice.allow_virtual_camera);
     let camera: Arc<dyn CameraManager> = Arc::new(V4lCameraManager::spawn(camera_config)?);
 
     let mut registry = ModelRegistry::new(RegistryConfig::new(models_dir))?;
