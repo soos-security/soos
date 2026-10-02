@@ -215,3 +215,141 @@ fn test_daemon_doc_states_the_single_warmup_default() {
         "Docs/CAMERA_V4L_CRATE.md must say that soos-daemon overrides the crate warmup default"
     );
 }
+
+/// Returns the body of the Markdown section that starts with `heading` (up to the next
+/// heading of the same or a higher level).
+fn markdown_section<'a>(doc: &'a str, heading: &str) -> &'a str {
+    let start = doc
+        .find(heading)
+        .unwrap_or_else(|| panic!("missing section heading `{heading}`"));
+    let level = heading.chars().take_while(|c| *c == '#').count();
+    let body = &doc[start + heading.len()..];
+    let mut offset = 0;
+    for line in body.split_inclusive('\n') {
+        let hashes = line.chars().take_while(|c| *c == '#').count();
+        if hashes > 0 && hashes <= level && line[hashes..].starts_with(' ') {
+            return &body[..offset];
+        }
+        offset += line.len();
+    }
+    body
+}
+
+/// Numbers of the top-level ordered-list items (`N. ` at column 0) of `text`.
+fn top_level_list_numbers(text: &str) -> Vec<u32> {
+    text.lines()
+        .filter_map(|line| {
+            let (number, rest) = line.split_once(". ")?;
+            if rest.is_empty() || number.is_empty() || !number.chars().all(|c| c.is_ascii_digit()) {
+                return None;
+            }
+            number.parse().ok()
+        })
+        .collect()
+}
+
+/// GitHub #315 (DMN-NEW-5, matrix DRM): the start-up sequence of `Docs/DAEMON.md` §4 is one
+/// numbered list (no duplicate step), includes the inference warm-up and ends with the bind
+/// + `READY=1`; no stray start-up step is left in §5.
+#[test]
+fn test_daemon_doc_startup_steps_are_sequential_and_include_warmup() {
+    let doc = read("Docs/DAEMON.md");
+    let startup = markdown_section(&doc, "## 4. Startup and Swap Protection");
+    let numbers = top_level_list_numbers(startup);
+    let expected: Vec<u32> = (1..=u32::try_from(numbers.len()).unwrap()).collect();
+    assert_eq!(
+        numbers, expected,
+        "Docs/DAEMON.md §4 start-up steps must be numbered 1..N without duplicates"
+    );
+    assert!(
+        numbers.len() >= 5,
+        "§4 must list configuration, swap protection, pipeline, warm-up and bind"
+    );
+    assert!(
+        startup.contains("warmed_inference_gate") && startup.contains("WARMUP_PASSES"),
+        "§4 must document the inference warm-up step (warmed_inference_gate, WARMUP_PASSES)"
+    );
+    let warmup = startup.find("warmed_inference_gate").unwrap();
+    let bind = startup
+        .find("READY=1")
+        .expect("§4 must document READY=1 after the bind");
+    assert!(warmup < bind, "the warm-up runs before the socket is bound");
+    let shutdown = markdown_section(&doc, "## 5. Shutdown, Panic Reporting");
+    assert!(
+        top_level_list_numbers(shutdown).is_empty(),
+        "no numbered start-up step may be left in §5"
+    );
+}
+
+/// GitHub #315 (DMN-NEW-5): `AI/ARCHITECTURE.md` describes what the code does.
+#[test]
+fn test_architecture_doc_matches_daemon_code_claims() {
+    let arch = read("AI/ARCHITECTURE.md");
+    let dispatcher = read("crates/daemon/src/dispatcher.rs");
+    let socket = read("crates/daemon/src/socket.rs");
+    let session = read("crates/daemon/src/session.rs");
+
+    // Evidence is sealed for PasswordFailed and for PAD-vetoed Auth requests.
+    assert!(
+        dispatcher.contains("capture_spoof_evidence"),
+        "precondition: the dispatcher seals PAD evidence"
+    );
+    assert!(
+        !arch.contains("only following PasswordFailed"),
+        "AI/ARCHITECTURE.md must not say evidence is written only after PasswordFailed"
+    );
+    let evidence_line = arch
+        .lines()
+        .find(|l| l.contains("EvidenceStore ("))
+        .expect("the architecture diagram names the EvidenceStore");
+    assert!(
+        evidence_line.contains("PasswordFailed") && evidence_line.contains("PadFailed"),
+        "the EvidenceStore line must name both reasons: {evidence_line}"
+    );
+
+    // Invariant 3 must not claim an /etc/passwd cross-check the daemon does not perform.
+    let invariant3 = arch
+        .lines()
+        .find(|l| l.starts_with("3. The daemon never trusts"))
+        .expect("Invariant 3 exists");
+    let daemon_sources = [dispatcher.as_str(), socket.as_str(), session.as_str()];
+    let reads_passwd = daemon_sources
+        .iter()
+        .any(|s| s.contains("getpwuid") || s.contains("User::from_uid"));
+    assert!(
+        reads_passwd || !invariant3.contains("/etc/passwd"),
+        "Invariant 3 claims an /etc/passwd cross-check that the daemon does not perform"
+    );
+    assert!(
+        !session.contains("/etc/passwd"),
+        "crates/daemon/src/session.rs must not claim an /etc/passwd cross-check"
+    );
+
+    // The /run/soos group claim is backed by a check in socket.rs.
+    if arch.contains("is owned by `root:soos`") {
+        assert!(
+            socket.contains("pub fn validate_directory_group("),
+            "AI/ARCHITECTURE.md claims a root:soos check of /run/soos that socket.rs does not do"
+        );
+    }
+}
+
+/// GitHub #315 suggestion: `sd_notify` must not claim that an abstract `NOTIFY_SOCKET` is
+/// reachable inside `PrivateNetwork=yes` (abstract sockets are network-namespace scoped).
+#[test]
+fn test_sd_notify_doc_does_not_overclaim_private_network_reachability() {
+    let source = read("crates/daemon/src/sd_notify.rs");
+    let header: String = source
+        .lines()
+        .take_while(|l| l.starts_with("//!"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        !header.contains("reachable inside `PrivateNetwork=yes`)"),
+        "the sd_notify module doc over-claims PrivateNetwork reachability"
+    );
+    assert!(
+        header.contains("abstract") && header.contains("network namespace"),
+        "the sd_notify module doc must say an abstract address is network-namespace scoped"
+    );
+}

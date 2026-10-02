@@ -179,6 +179,32 @@ impl InferenceEstimator {
         );
     }
 
+    /// Halves the distance between the estimate and [`DEFAULT_INFERENCE_ESTIMATE_MS`]
+    /// (GitHub #315, review finding DMN-NEW-2).
+    ///
+    /// Called when a request was finalized by the estimate admission gate without evaluating
+    /// a single capture: no inference ran, so nothing would otherwise ever lower an estimate
+    /// that grew above every client budget (a slow warm-up pass, one pathological
+    /// measurement), and face authentication would stay disabled until the daemon restarts.
+    /// The decay never goes below the default and never raises an estimate that is already
+    /// at or below it (that value is a real measurement). The gated request itself still fails
+    /// closed; the next inference that does run re-measures the real latency.
+    pub fn decay_toward_default(&self) {
+        let default_micros = DEFAULT_INFERENCE_ESTIMATE_MS.saturating_mul(1000);
+        let _ =
+            self.estimate_micros
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                    if current <= default_micros {
+                        return None;
+                    }
+                    // Midpoint, rounded down so repeated decay reaches the default exactly.
+                    let excess = current.saturating_sub(default_micros);
+                    Some(clamp_estimate_micros(
+                        default_micros.saturating_add(excess / 2),
+                    ))
+                });
+    }
+
     /// Folds one measured inference duration into the estimate.
     pub fn record(&self, measured: Duration) {
         let sample = clamp_estimate_micros(duration_to_micros(measured));
@@ -252,6 +278,12 @@ impl InferenceGate {
     #[must_use]
     pub fn estimate(&self) -> Duration {
         self.estimator.estimate()
+    }
+
+    /// Decays the latency estimate toward [`DEFAULT_INFERENCE_ESTIMATE_MS`]
+    /// ([`InferenceEstimator::decay_toward_default`], GitHub #315).
+    pub fn decay_estimate(&self) {
+        self.estimator.decay_toward_default();
     }
 
     /// Waits at most `max_wait` for a free inference slot.

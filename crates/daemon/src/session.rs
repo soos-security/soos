@@ -2,8 +2,8 @@
 //!
 //! Enforces ARCHITECTURE.md §2.3 (Invariant 3) and §4:
 //! "The daemon never trusts the username, PID, PAM service, or UID declared in
-//! payload messages: it strictly cross-references SO_PEERCRED, /etc/passwd, and
-//! active logind sessions."
+//! payload messages: it strictly cross-references SO_PEERCRED and active logind
+//! sessions." (No user database lookup is made: the target is a numeric UID.)
 //!
 //! Queries `/run/systemd/sessions/` to confirm that the asserted target UID owns
 //! an active session (`ACTIVE=1` or `STATE=active`) that logind does not flag as

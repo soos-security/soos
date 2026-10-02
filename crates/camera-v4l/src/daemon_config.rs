@@ -175,6 +175,24 @@ pub fn read_daemon_camera_config(path: &Path) -> Result<DaemonCameraConfig, Daem
     Ok(config)
 }
 
+/// Reads the whole text of a daemon configuration file with the same bounded, side-effect
+/// free open as [`read_daemon_camera_config`] (GitHub #315, review finding DMN-NEW-4).
+///
+/// `soos-daemon` loads `daemon.toml` through this function, so the daemon and its clients
+/// share one reader: the path is pinned with `O_PATH`, must be a regular file of at most
+/// [`MAX_DAEMON_CONFIG_BYTES`] (a FIFO or a device node is refused without being opened for
+/// reading), and the pinned inode is read through `/proc/self/fd/<n>`. Nothing is parsed.
+///
+/// # Errors
+///
+/// Returns [`DaemonConfigError::NotFound`] for a missing path (a dangling symbolic link
+/// included), [`DaemonConfigError::NotARegularFile`], [`DaemonConfigError::Unreadable`],
+/// [`DaemonConfigError::TooLarge`], or [`DaemonConfigError::Malformed`] when the bytes are
+/// not UTF-8.
+pub fn read_daemon_config_text(path: &Path) -> Result<String, DaemonConfigError> {
+    read_bounded_regular_file(path)
+}
+
 /// Opens `path` without side effects (following symbolic links like `soos-daemon`), checks the
 /// handle is a regular file, then reopens it for reading and reads at most
 /// [`MAX_DAEMON_CONFIG_BYTES`] of UTF-8 text.

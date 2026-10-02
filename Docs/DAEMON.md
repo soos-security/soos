@@ -15,8 +15,16 @@
 `soos-daemon` reads its configuration from, in order:
 
 1. `--config <FILE>` (`-c`): the file must exist and parse, otherwise the daemon refuses to start.
-2. `/etc/soos/daemon.toml` (`DEFAULT_CONFIG_PATH`) when it is a regular file.
-3. Otherwise the built-in runtime defaults (`DaemonConfig::runtime_default()`).
+2. `/etc/soos/daemon.toml` (`DEFAULT_CONFIG_PATH`).
+3. The built-in runtime defaults (`DaemonConfig::runtime_default()`), only when
+   `/etc/soos/daemon.toml` does not exist.
+
+Both files are read with the bounded reader shared with the daemon clients,
+`soos_camera_v4l::daemon_config::read_daemon_config_text` (GitHub #315): the path is pinned with
+`O_PATH` (symbolic links followed), must be a regular file of at most `MAX_DAEMON_CONFIG_BYTES`
+(1 MiB), and the pinned inode is read through `/proc/self/fd/<n>`. There is no check-then-open:
+a directory, FIFO, device node, unreadable, oversized or non-UTF-8 file at either path is a
+startup error (a FIFO is refused at once, never read), not a fall back to the defaults.
 
 No `daemon.toml` is packaged: a fresh install runs on the runtime defaults below. Every load path
 starts from `DaemonConfig::runtime_default()`, so an absent file, an empty file and a file with an
@@ -27,7 +35,13 @@ Parsing uses `toml` with `serde`: a malformed file or a value of the wrong type 
 Validation errors listed below are also startup errors; the daemon is fail-closed and never starts
 with a half-applied configuration.
 
-`--mock-camera` forces `[pipeline] use_mock_camera = true` (development only).
+`--mock-camera` forces `[pipeline] use_mock_camera = true` (development only). It is applied
+after the file is validated, so it does not make a file with `enforce_active_session = false`
+acceptable (§1.3).
+
+Non-fatal problems (currently an unknown `sensor_preference`) are collected in
+`DaemonConfig::warnings` while the file is parsed and logged at `warn` level by `main.rs` once
+logging is initialized; a warning names the key, never its value.
 
 ### 1.1 Root keys
 
@@ -39,8 +53,8 @@ with a half-applied configuration.
 
 | Key | Type | Default | Validation / notes |
 |---|---|---|---|
-| `socket_path` | path | `/run/soos/daemon.sock` | Keep it inside `socket_dir`: the stale-node checks resolve its file name relative to `socket_dir`; a stale symlink or non-socket node is refused. |
-| `socket_dir` | path | `/run/soos` | Validated at bind time: not a symlink, not world-writable, root-owned when `enforce_root_owner`. |
+| `socket_path` | path | `/run/soos/daemon.sock` | Must be a file name directly inside `socket_dir` (`SocketConfig::validate`, a startup error otherwise; GitHub #315): the stale-node checks resolve its file name relative to `socket_dir`; a stale symlink or non-socket node is refused. |
+| `socket_dir` | path | `/run/soos` | Validated at bind time: not a symlink, not world-writable; when `enforce_root_owner`, owned by root and, when `socket_group` is set, by that group (`socket::validate_directory_group`, GitHub #315). Under systemd it is created by `RuntimeDirectory=soos` with the unit's `Group=soos`. |
 | `socket_mode` | integer | `0o660` | Permission bits applied with `fchmodat`. Write it as a TOML octal literal (`0o660`). It must never grant world access (AGENTS.md prohibits `0666`); keep `0o660`. |
 | `enforce_root_owner` | bool | `true` | Require `socket_dir` to be owned by UID 0. Only test harnesses disable it. |
 | `socket_group` | string | `"soos"` | Group given to the socket node (`fchownat`); members of this group may connect. |
@@ -51,7 +65,7 @@ with a half-applied configuration.
 |---|---|---|---|
 | `max_concurrent_connections` | integer | `8` | Global connection permits; must be at least 1 and strictly above `[peer_limits] reserved_root_connections`. |
 | `connection_timeout_ms` | integer (ms) | `2500` (`DEFAULT_CONNECTION_TIMEOUT_MS`) | Budget of one request (read, verification, encoding) and idle timeout of a persistent connection (§2). Must lie in 100..=10000. The default matches the GDM line `timeout_ms=2500` (user decision 2026-09-30); console/sudo requests stay capped by their 1000 ms PAM client deadline. |
-| `enforce_active_session` | bool | `true` | Local-session policy for `Auth` and the session check of `PreviewFrame` (§3). `false` is for test harnesses only. |
+| `enforce_active_session` | bool | `true` | Local-session policy for `Auth` and the session check of `PreviewFrame` (§3). `false` is accepted only together with `[pipeline] use_mock_camera = true` (test harnesses); otherwise it is a startup error (GitHub #315, orchestrator decision). |
 | `logind_sessions_dir` | path | `/run/systemd/sessions` | logind runtime session records read by the session policy. |
 
 ### 1.4 `[pipeline]`
@@ -59,7 +73,7 @@ with a half-applied configuration.
 | Key | Type | Default | Validation / notes |
 |---|---|---|---|
 | `camera_device` | path | auto (`/dev/v4l/by-id/default-camera` sentinel) | `""`, `auto` and `default` keep auto-detection; any other value is used verbatim (ADR 2026-09-30 "Single Camera Resolver"). |
-| `sensor_preference` | string | `prefer_ir` | `prefer_ir`/`ir`, `prefer_rgb`/`rgb`, `any` (case-insensitive); an unknown value keeps the default. |
+| `sensor_preference` | string | `prefer_ir` | `prefer_ir`/`ir`, `prefer_rgb`/`rgb`, `any` (case-insensitive); an unknown value keeps the default and is logged as a configuration warning (GitHub #315). |
 | `idle_timeout_secs` | integer (s) | `10` | Inactivity delay before the capture thread drops to its idle rate / standby. |
 | `warmup_frames` | integer | `0` (`DAEMON_DEFAULT_WARMUP_FRAMES`) | Frames discarded after each camera (re)start. The daemon default is the same with and without a config file (GitHub #205); the camera crate's library default of 20 does not apply to the daemon. |
 | `use_mock_camera` | bool | `false` | Simulated camera (development only). |
@@ -185,7 +199,22 @@ pad_threshold = 0.85
    `Docs/BIOMETRIC_STORE_CRATE.md` and `Docs/EVIDENCE_STORE_CRATE.md`). The sweep is
    housekeeping: a failure is logged at `warn` and never stops the startup; only counts are
    logged.
-4. The socket is bound (§1.2) and the accept loop starts.
+4. Inference warm-up (GitHub #276): `pipeline::warmed_inference_gate` runs every vision stage
+   `WARMUP_PASSES` (2) times on blank inputs on the blocking pool and seeds the inference
+   latency estimate with the last pass, so the first `Auth` request is admitted against a
+   measured latency. A failing or panicking warm-up keeps `DEFAULT_INFERENCE_ESTIMATE_MS` and
+   never stops the start-up. The estimate is clamped to `MAX_INFERENCE_ESTIMATE_MS` and, when
+   a request is finalized by the estimate admission gate without evaluating any capture,
+   decays toward `DEFAULT_INFERENCE_ESTIMATE_MS` (`InferenceEstimator::decay_toward_default`,
+   GitHub #315), so a slow warm-up pass cannot disable face authentication for 1000 ms PAM
+   stacks until a restart; that request itself still fails closed (`Unavailable` / `Timeout`).
+5. The socket is bound (§1.2). When started by systemd (`Type=notify`, `NOTIFY_SOCKET` set) the
+   daemon then sends `READY=1` through `soos_daemon::sd_notify`; only then does systemd start
+   units ordered after it (`display-manager.service`). A notification failure is logged at
+   `warn`. The accept loop starts, and `STOPPING=1` is sent on SIGTERM / SIGINT (GitHub #203).
+   Under `PrivateNetwork=yes` only a filesystem `NOTIFY_SOCKET` (systemd's default) is
+   reachable; an abstract `@` address belongs to the host network namespace and cannot be
+   reached from the unit's private one.
 
 ## 5. Shutdown, Panic Reporting and Log Anonymization (GitHub #257, #258, #259)
 
@@ -236,7 +265,3 @@ pad_threshold = 0.85
   PAM client enforces both fields against its own CLOCK_MONOTONIC reading and returns
   `PAM_IGNORE` for an unstamped, inverted, future-dated or expired response (see
   `Docs/IPC_PROTOCOL.md`, "Response Freshness").
-4. The socket is bound (§1.2). When started by systemd (`Type=notify`, `NOTIFY_SOCKET` set) the daemon
-   then sends `READY=1` through `soos_daemon::sd_notify`; only then does systemd start units ordered
-   after it (`display-manager.service`). A notification failure is logged at `warn`. The accept loop
-   starts, and `STOPPING=1` is sent on SIGTERM / SIGINT (GitHub #203).

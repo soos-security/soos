@@ -613,3 +613,77 @@ async fn test_159_estimate_exceeding_budget_times_out_and_records_attempt() {
         "a timed-out attempt must still be recorded by the rate limiter"
     );
 }
+
+// ---------------------------------------------------------------------------
+// GitHub #315 (DMN-NEW-2, matrix DRM): a saturated estimate never disables face auth
+// ---------------------------------------------------------------------------
+
+/// PAM console/sudo client budget: the module default `timeout_ms` (1000ms).
+const PAM_DEFAULT_CLIENT_BUDGET_MS: u64 = 1000;
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_drm_estimate_seeded_at_max_recovers_for_1000ms_requests() {
+    // Warm-up (or one pathological measurement) left the estimate at its upper bound, which
+    // exceeds the 950ms budget of every 1000ms PAM request.
+    let fx = fixture(
+        Duration::from_millis(2500),
+        20,
+        Some(InferenceGate::new(
+            1,
+            Duration::from_millis(MAX_INFERENCE_ESTIMATE_MS),
+        )),
+    )
+    .await;
+    assert_eq!(
+        fx.dispatcher.inference_gate().estimate(),
+        Duration::from_millis(MAX_INFERENCE_ESTIMATE_MS)
+    );
+
+    let mut verdicts = Vec::new();
+    for tag in 0..5u8 {
+        let now_ns = current_monotonic_nanos().expect("clock");
+        let resp = auth(
+            &fx.sock_path,
+            &request(
+                RequestKind::Auth,
+                fx.uid,
+                100 + tag,
+                now_ns + PAM_DEFAULT_CLIENT_BUDGET_MS * MS,
+            ),
+        )
+        .await
+        .expect("decoded response, never EOF");
+        if verdicts.is_empty() {
+            // Fail closed per request: the gated request itself never runs an inference.
+            assert_eq!(resp.verdict, Verdict::Unavailable);
+            assert_eq!(resp.reason_class, ReasonClass::Timeout);
+            assert_eq!(
+                fx.pad.calls(),
+                0,
+                "the gated request must not start an inference"
+            );
+            assert!(
+                fx.dispatcher.inference_gate().estimate()
+                    < Duration::from_millis(MAX_INFERENCE_ESTIMATE_MS),
+                "a request finalized by the estimate gate with zero frames evaluated must \
+                 decay the estimate"
+            );
+        }
+        verdicts.push(resp.verdict);
+        if resp.verdict == Verdict::Allow {
+            break;
+        }
+    }
+
+    assert_eq!(
+        verdicts.last(),
+        Some(&Verdict::Allow),
+        "a saturated estimate must not disable face authentication for 1000ms stacks \
+         (verdicts: {verdicts:?})"
+    );
+    assert!(
+        verdicts.len() <= 3,
+        "recovery must take at most a couple of requests (verdicts: {verdicts:?})"
+    );
+    assert!(fx.pad.calls() > 0);
+}
