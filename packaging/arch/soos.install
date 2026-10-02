@@ -53,8 +53,9 @@ post_upgrade() {
 
 pre_remove() {
     # pacman never edits /etc/pam.d: warn when a manual integration is still active.
-    # The lines are harmless once the module is gone ([success=done default=ignore]
-    # and optional controls), but they should be reverted.
+    # The lines are harmless once the module is gone ([success=4 default=ignore]
+    # and optional controls: a missing module only takes the default=ignore
+    # branch), but they should be reverted.
     if grep -Eqs '^[[:space:]]*-?(auth|account|password|session)[[:space:]].*pam_soos\.so' /etc/pam.d/system-auth; then
         echo "==> WARNING: /etc/pam.d/system-auth still loads pam_soos.so."
         echo "==> Restore it: cp /etc/pam.d/system-auth.soos-backup /etc/pam.d/system-auth"

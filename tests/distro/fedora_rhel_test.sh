@@ -179,6 +179,8 @@ cd "${WORKSPACE_ROOT}"
 # Without --skip-build, always invoke cargo (a no-op when up to date) so a stale
 # release artifact from the bind-mounted target/ is never packaged (GitHub #244).
 if [[ "${SKIP_BUILD}" = false ]]; then
+    # Bounded retry of the ort-sys ONNX Runtime download (GitHub #318).
+    bash scripts/prefetch_onnxruntime.sh
     info "Building release artifacts (no-op when up to date)..."
     cargo build --locked --release --workspace
 fi

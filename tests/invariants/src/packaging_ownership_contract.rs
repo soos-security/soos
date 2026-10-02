@@ -41,7 +41,7 @@ fn read(rel: &str) -> String {
     fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
 }
 
-fn combined(out: &Output) -> String {
+pub(crate) fn combined(out: &Output) -> String {
     format!(
         "{}{}",
         String::from_utf8_lossy(&out.stdout),
@@ -158,7 +158,7 @@ fn tar_entries(tar: &[u8]) -> Vec<TarEntry> {
     entries
 }
 
-fn scratch(tag: &str) -> PathBuf {
+pub(crate) fn scratch(tag: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("soos_poa_{tag}_{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).expect("create scratch dir");
@@ -413,7 +413,7 @@ fn test_read_write_workspace_mounts_overlay_target_with_a_volume() {
 
 /// Shim directory: `id -u` reports root, `runuser`/`cargo` record their arguments, `getent`
 /// resolves uid 4242 to `pkexecuser`.
-fn root_shims(dir: &Path, log: &Path) {
+pub(crate) fn root_shims(dir: &Path, log: &Path) {
     let write = |name: &str, body: String| {
         let path = dir.join(name);
         fs::write(&path, body).expect("write shim");
@@ -530,14 +530,14 @@ fn test_install_build_as_root_drops_to_invoking_user_or_refuses() {
 
 /// One `auth` rule: (control, module, arguments).
 #[derive(Debug, Clone)]
-struct AuthRule {
-    line: String,
-    control: String,
-    module: String,
-    args: Vec<String>,
+pub(crate) struct AuthRule {
+    pub(crate) line: String,
+    pub(crate) control: String,
+    pub(crate) module: String,
+    pub(crate) args: Vec<String>,
 }
 
-fn auth_rules(text: &str) -> Vec<AuthRule> {
+pub(crate) fn auth_rules(text: &str) -> Vec<AuthRule> {
     let mut rules = Vec::new();
     for line in text.lines() {
         let trimmed = line.trim();
@@ -568,7 +568,7 @@ fn auth_rules(text: &str) -> Vec<AuthRule> {
     rules
 }
 
-fn success_jump(control: &str) -> Option<usize> {
+pub(crate) fn success_jump(control: &str) -> Option<usize> {
     control
         .trim_matches(['[', ']'])
         .split_whitespace()
@@ -576,12 +576,13 @@ fn success_jump(control: &str) -> Option<usize> {
         .and_then(|v| v.parse().ok())
 }
 
-const ARCH_PRIMARY_LINE: &str = "auth  [success=done default=ignore]  pam_soos.so";
+const ARCH_PRIMARY_LINE: &str = "auth  [success=4 default=ignore]  pam_soos.so";
 const ARCH_EVENT_LINE: &str =
     "auth  optional                       pam_soos.so event=password-failed timeout_ms=20";
 
 /// POA5 — #309: the shipped Arch stack is the stock pambase `system-auth` with the exact soos
-/// edit; every `success=N` jump lands where stock pambase lands (`pam_permit.so`), the event
+/// edit; every `success=N` jump (since GitHub #318 also the primary soos rule, owner-approved
+/// change from `success=done` to `success=4`) lands where stock pambase lands (`pam_permit.so`), the event
 /// line is reachable only after a failed `pam_unix`, faillock `authfail`/`authsucc` are kept,
 /// and the snippet and the deployment guide show the same lines.
 #[test]
@@ -590,7 +591,7 @@ fn test_arch_system_auth_is_stock_pambase_with_exact_soos_edit() {
     let rules = auth_rules(&full);
     let expected: [(&str, &str, Option<&str>); 9] = [
         ("pam_faillock.so", "required", Some("preauth")),
-        ("pam_soos.so", "[success=done default=ignore]", None),
+        ("pam_soos.so", "[success=4 default=ignore]", None),
         ("pam_systemd_home.so", "[success=3 default=ignore]", None),
         (
             "pam_unix.so",
@@ -825,8 +826,8 @@ fn test_debian_pam_configs_are_opt_in_and_deb_enables_explicitly() {
 }
 
 /// POA9 — TCI-NEW-3: every sandbox Dockerfile and harness default image is pinned by digest.
-/// `tests/docker/Dockerfile.systemd` is exempt: its `FROM ubuntu:24.04` line is pinned verbatim
-/// by `systemd_unit_acceptance_contract` (owner approval required to change it).
+/// `tests/docker/Dockerfile.systemd` was exempt until GitHub #318 (owner approval 2026-10-02):
+/// it is now pinned too (same digest as `Dockerfile.ubuntu`, row AFC3).
 #[test]
 fn test_docker_base_images_are_pinned_by_digest() {
     let is_pinned = |reference: &str| {
@@ -839,6 +840,7 @@ fn test_docker_base_images_are_pinned_by_digest() {
         "tests/docker/Dockerfile.ubuntu",
         "tests/docker/Dockerfile.fedora",
         "tests/docker/Dockerfile.arch",
+        "tests/docker/Dockerfile.systemd",
     ] {
         let text = read(file);
         let from: Vec<&str> = text.lines().filter(|l| l.starts_with("FROM ")).collect();

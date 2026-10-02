@@ -451,34 +451,46 @@ fn regular_file_metadata(path: &Path, what: &str) -> Result<fs::Metadata, AdminC
 /// STO-NEW-7): the current PAM file, once its soos managed rules are removed, must be
 /// byte-for-byte the backup, so that a change made after `gdm enable` is never discarded.
 fn restore_gdm_pam_file(pam_file: &Path, force: bool) -> Result<(), AdminCliError> {
+    restore_gdm_pam_file_with(pam_file, force, &mut || {})
+}
+
+/// [`restore_gdm_pam_file`] with a hook run between the comparison and the rename (a test
+/// seam: production passes a no-op).
+///
+/// GitHub #318: the PAM file is read once (`O_NOFOLLOW`, bounded) into a [`PamFileSnapshot`];
+/// that snapshot is what the stale-backup check compares, and right before the rename (after
+/// the temporary file is written and synced) the file is read again and must still be the
+/// same inode with the same bytes (or still be absent). Otherwise nothing is written and the
+/// restore fails with "changed concurrently". `force` skips the stale-backup check only.
+fn restore_gdm_pam_file_with(
+    pam_file: &Path,
+    force: bool,
+    before_rename: &mut dyn FnMut(),
+) -> Result<(), AdminCliError> {
     let backup = pam_backup_path(pam_file);
     let (bytes, backup_meta) = read_backup_bounded(&backup)?;
-    let pam_file_exists = match fs::symlink_metadata(pam_file) {
-        Ok(meta) if meta.file_type().is_symlink() || !meta.is_file() => {
+    let snapshot = read_pam_file_snapshot(pam_file)?;
+    if let Some(current) = &snapshot {
+        if !force && !backup_matches_current(pam_file, current, &bytes)? {
             return Err(AdminCliError::GdmConfig(format!(
-                "Refusing to replace '{}': not a regular file (symlink or special file)",
-                pam_file.display()
+                "'{}' was changed after `gdm enable`: restoring '{}' would discard those \
+                 changes. Remove the soos rules by hand, or re-run `gdm restore --force` to \
+                 restore the backup anyway",
+                pam_file.display(),
+                backup.display()
             )));
         }
-        Ok(_) => true,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
-        Err(e) => return Err(gdm_error("Failed to inspect PAM file", pam_file, &e)),
-    };
-    if pam_file_exists && !force && !backup_matches_current(pam_file, &bytes)? {
-        return Err(AdminCliError::GdmConfig(format!(
-            "'{}' was changed after `gdm enable`: restoring '{}' would discard those \
-             changes. Remove the soos rules by hand, or re-run `gdm restore --force` to \
-             restore the backup anyway",
-            pam_file.display(),
-            backup.display()
-        )));
     }
     let mode = backup_meta.permissions().mode() & 0o7755;
-    write_atomic(
+    write_atomic_checked(
         pam_file,
         &bytes,
         mode,
         (backup_meta.uid(), backup_meta.gid()),
+        &mut || {
+            before_rename();
+            ensure_pam_file_unchanged(pam_file, snapshot.as_ref())
+        },
     )?;
     fs::remove_file(&backup).map_err(|e| gdm_error("Failed to remove PAM backup", &backup, &e))?;
     let dir = pam_file
@@ -490,17 +502,97 @@ fn restore_gdm_pam_file(pam_file: &Path, force: bool) -> Result<(), AdminCliErro
         .map_err(|e| gdm_error("Failed to sync PAM directory", dir, &e))
 }
 
-/// Whether `pam_file` without its soos managed rules is exactly `backup` (GitHub #312).
-///
-/// The file is read bounded like every PAM file; an unbalanced managed block or a file
-/// that is not valid UTF-8 never matches.
-fn backup_matches_current(pam_file: &Path, backup: &[u8]) -> Result<bool, AdminCliError> {
-    let current = match read_bounded_utf8(pam_file) {
-        Ok(content) => content,
-        Err(ReadError::NotFound) => return Ok(true),
-        Err(ReadError::Other(msg)) => return Err(AdminCliError::GdmConfig(msg)),
+/// The PAM file as `gdm restore` compared it: its identity and its exact bytes.
+#[derive(Debug, PartialEq, Eq)]
+struct PamFileSnapshot {
+    dev: u64,
+    ino: u64,
+    bytes: Vec<u8>,
+}
+
+/// Reads `pam_file` through one `O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC` descriptor, bounded to
+/// [`MAX_PAM_FILE_BYTES`]; `None` when it does not exist. A symbolic link or a non-regular
+/// file is refused.
+fn read_pam_file_snapshot(pam_file: &Path) -> Result<Option<PamFileSnapshot>, AdminCliError> {
+    let not_regular = || {
+        AdminCliError::GdmConfig(format!(
+            "Refusing to replace '{}': not a regular file (symlink or special file)",
+            pam_file.display()
+        ))
     };
-    Ok(strip_managed_rules(&current).is_ok_and(|pristine| pristine.as_bytes() == backup))
+    let file = match fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
+        .open(pam_file)
+    {
+        Ok(file) => file,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) if e.raw_os_error() == Some(libc::ELOOP) => return Err(not_regular()),
+        Err(e) => return Err(gdm_error("Failed to open PAM file", pam_file, &e)),
+    };
+    let metadata = file
+        .metadata()
+        .map_err(|e| gdm_error("Failed to inspect PAM file", pam_file, &e))?;
+    if !metadata.is_file() {
+        return Err(not_regular());
+    }
+    let too_large = || {
+        AdminCliError::GdmConfig(format!(
+            "PAM file '{}' exceeds {MAX_PAM_FILE_BYTES} bytes",
+            pam_file.display()
+        ))
+    };
+    if metadata.len() > MAX_PAM_FILE_BYTES {
+        return Err(too_large());
+    }
+    let mut bytes = Vec::with_capacity(usize::try_from(metadata.len()).unwrap_or(0));
+    file.take(MAX_PAM_FILE_BYTES.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|e| gdm_error("Failed to read PAM file", pam_file, &e))?;
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAX_PAM_FILE_BYTES {
+        return Err(too_large());
+    }
+    Ok(Some(PamFileSnapshot {
+        dev: metadata.dev(),
+        ino: metadata.ino(),
+        bytes,
+    }))
+}
+
+/// Fails with "changed concurrently" unless `pam_file` is still exactly `expected` (same
+/// device, inode and bytes), or still absent when `expected` is `None` (GitHub #318).
+fn ensure_pam_file_unchanged(
+    pam_file: &Path,
+    expected: Option<&PamFileSnapshot>,
+) -> Result<(), AdminCliError> {
+    let current = read_pam_file_snapshot(pam_file);
+    if matches!(&current, Ok(now) if now.as_ref() == expected) {
+        return Ok(());
+    }
+    Err(AdminCliError::GdmConfig(format!(
+        "'{}' changed concurrently while `gdm restore` was running; nothing was written. \
+         Check the file and re-run `soos-admin gdm restore`",
+        pam_file.display()
+    )))
+}
+
+/// Whether the compared PAM file without its soos managed rules is exactly `backup`
+/// (GitHub #312).
+///
+/// A file that is not valid UTF-8 is refused (never rewritten lossily); an unbalanced
+/// managed block never matches.
+fn backup_matches_current(
+    pam_file: &Path,
+    current: &PamFileSnapshot,
+    backup: &[u8],
+) -> Result<bool, AdminCliError> {
+    let Ok(current) = std::str::from_utf8(&current.bytes) else {
+        return Err(AdminCliError::GdmConfig(format!(
+            "PAM file '{}' is not valid UTF-8; refusing to edit it",
+            pam_file.display()
+        )));
+    };
+    Ok(strip_managed_rules(current).is_ok_and(|pristine| pristine.as_bytes() == backup))
 }
 
 /// Opens `backup` with `O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC`, checks on the open
@@ -565,6 +657,19 @@ fn write_atomic(
     mode: u32,
     owner: (u32, u32),
 ) -> Result<(), AdminCliError> {
+    write_atomic_checked(target, bytes, mode, owner, &mut || Ok(()))
+}
+
+/// [`write_atomic`] that runs `before_rename` once the temporary file is written and synced,
+/// right before the rename; an error from it removes the temporary file and is returned as
+/// is, leaving `target` untouched (GitHub #318).
+fn write_atomic_checked(
+    target: &Path,
+    bytes: &[u8],
+    mode: u32,
+    owner: (u32, u32),
+    before_rename: &mut dyn FnMut() -> Result<(), AdminCliError>,
+) -> Result<(), AdminCliError> {
     let dir = target
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
@@ -575,10 +680,27 @@ fn write_atomic(
         .unwrap_or_default();
     let tmp = dir.join(format!(".{file_name}.soos-tmp-{}", std::process::id()));
 
-    write_and_rename(&tmp, target, dir, bytes, mode, owner).map_err(|e| {
+    write_and_rename(&tmp, target, dir, bytes, mode, owner, before_rename).map_err(|failure| {
         let _ = fs::remove_file(&tmp);
-        gdm_error("Failed to write PAM file atomically", target, &e)
+        match failure {
+            WriteFailure::Io(e) => gdm_error("Failed to write PAM file atomically", target, &e),
+            WriteFailure::Refused(err) => err,
+        }
     })
+}
+
+/// Why [`write_and_rename`] stopped.
+enum WriteFailure {
+    /// A system call failed.
+    Io(std::io::Error),
+    /// The pre-rename check refused the rename.
+    Refused(AdminCliError),
+}
+
+impl From<std::io::Error> for WriteFailure {
+    fn from(err: std::io::Error) -> Self {
+        Self::Io(err)
+    }
 }
 
 fn write_and_rename(
@@ -588,7 +710,8 @@ fn write_and_rename(
     bytes: &[u8],
     mode: u32,
     owner: (u32, u32),
-) -> std::io::Result<()> {
+    before_rename: &mut dyn FnMut() -> Result<(), AdminCliError>,
+) -> Result<(), WriteFailure> {
     let mut file = fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -599,6 +722,138 @@ fn write_and_rename(
     file.set_permissions(fs::Permissions::from_mode(mode))?;
     file.sync_all()?;
     drop(file);
+    before_rename().map_err(WriteFailure::Refused)?;
     fs::rename(tmp, target)?;
-    fs::File::open(dir)?.sync_all()
+    fs::File::open(dir)?.sync_all()?;
+    Ok(())
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    reason = "Unit tests of the restore race seam use direct assertions"
+)]
+mod restore_race_tests {
+    //! GitHub #318 (row VCO4): `gdm restore` re-checks the PAM file right before the rename
+    //! and aborts without writing when it changed after the comparison.
+
+    use super::*;
+
+    const PRISTINE: &str = "\
+#%PAM-1.0
+auth    requisite       pam_nologin.so
+auth    required        pam_unix.so
+account required        pam_unix.so
+";
+
+    struct Fixture {
+        dir: tempfile::TempDir,
+        pam_file: PathBuf,
+    }
+
+    fn enabled() -> Fixture {
+        let dir = tempfile::tempdir().unwrap();
+        let pam_file = dir.path().join("gdm-password");
+        fs::write(&pam_file, PRISTINE).unwrap();
+        let disable = dir.path().join("gdm.disable");
+        configure_gdm(&GdmAction::Enable, &pam_file, &disable).unwrap();
+        assert!(pam_backup_path(&pam_file).exists());
+        Fixture { dir, pam_file }
+    }
+
+    fn leftover_temp_files(dir: &Path) -> Vec<String> {
+        fs::read_dir(dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.contains("soos-tmp"))
+            .collect()
+    }
+
+    fn assert_aborted(f: &Fixture, result: Result<(), AdminCliError>, expected: &str) {
+        let err = result.expect_err("a concurrent change must abort the restore");
+        let msg = err.to_string();
+        assert!(msg.contains("changed concurrently"), "{msg}");
+        assert!(
+            msg.contains("re-run"),
+            "the error must suggest re-running: {msg}"
+        );
+        assert_eq!(
+            fs::read_to_string(&f.pam_file).unwrap(),
+            expected,
+            "the concurrent change must be kept, nothing written"
+        );
+        assert_eq!(
+            fs::read_to_string(pam_backup_path(&f.pam_file)).unwrap(),
+            PRISTINE,
+            "the backup must be kept"
+        );
+        assert!(leftover_temp_files(f.dir.path()).is_empty());
+    }
+
+    /// VCO4: an edit between the comparison and the rename aborts the restore.
+    #[test]
+    fn test_vco_gdm_restore_aborts_when_file_changes_before_rename() {
+        let f = enabled();
+        let mut changed = String::new();
+        let pam_file = f.pam_file.clone();
+        let result = restore_gdm_pam_file_with(&f.pam_file, false, &mut || {
+            let mut content = fs::read_to_string(&pam_file).unwrap();
+            content.push_str("session optional        pam_keyinit.so force revoke\n");
+            fs::write(&pam_file, &content).unwrap();
+            changed = content;
+        });
+        assert_aborted(&f, result, &changed);
+    }
+
+    /// VCO4: `--force` skips the stale-backup comparison, never the concurrency check.
+    #[test]
+    fn test_vco_gdm_restore_force_still_aborts_on_concurrent_change() {
+        let f = enabled();
+        let pam_file = f.pam_file.clone();
+        let result = restore_gdm_pam_file_with(&f.pam_file, true, &mut || {
+            fs::write(&pam_file, "auth required pam_deny.so\n").unwrap();
+        });
+        assert_aborted(&f, result, "auth required pam_deny.so\n");
+    }
+
+    /// VCO4: a file replaced by another inode with identical bytes is a concurrent change too.
+    #[test]
+    fn test_vco_gdm_restore_aborts_when_file_is_replaced_by_same_bytes() {
+        let f = enabled();
+        let before = fs::read_to_string(&f.pam_file).unwrap();
+        let pam_file = f.pam_file.clone();
+        let other = f.dir.path().join("replacement");
+        let result = restore_gdm_pam_file_with(&f.pam_file, false, &mut || {
+            fs::write(&other, fs::read(&pam_file).unwrap()).unwrap();
+            fs::rename(&other, &pam_file).unwrap();
+        });
+        assert_aborted(&f, result, &before);
+    }
+
+    /// VCO4: a PAM file created after the comparison found none is never overwritten.
+    #[test]
+    fn test_vco_gdm_restore_aborts_when_missing_file_appears() {
+        let f = enabled();
+        fs::remove_file(&f.pam_file).unwrap();
+        let pam_file = f.pam_file.clone();
+        let result = restore_gdm_pam_file_with(&f.pam_file, false, &mut || {
+            fs::write(&pam_file, "auth required pam_unix.so\n").unwrap();
+        });
+        assert_aborted(&f, result, "auth required pam_unix.so\n");
+    }
+
+    /// VCO4: without a concurrent change the restore still succeeds.
+    #[test]
+    fn test_vco_gdm_restore_without_concurrent_change_restores() {
+        let f = enabled();
+        let mut calls = 0_u32;
+        restore_gdm_pam_file_with(&f.pam_file, false, &mut || calls += 1).unwrap();
+        assert_eq!(calls, 1, "the hook runs exactly once, before the rename");
+        assert_eq!(fs::read_to_string(&f.pam_file).unwrap(), PRISTINE);
+        assert!(!pam_backup_path(&f.pam_file).exists());
+        assert!(leftover_temp_files(f.dir.path()).is_empty());
+    }
 }

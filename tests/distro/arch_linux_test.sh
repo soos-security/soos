@@ -81,6 +81,7 @@ Security Invariants Tested:
   - /var/lib/soos/master.key mode 0600 (root:root, 32 bytes)
   - Nominal facial auth (Verdict::Allow -> PAM_SUCCESS, 0 password prompts)
   - Password fallback (Verdict::Deny / offline daemon -> password authentication)
+  - Face login resets the pam_faillock tally; a locked account still fails
   - Safe rollback and uninstallation via pacman -R or uninstall.sh
 EOF
 }
@@ -137,6 +138,7 @@ if [[ "${DRY_RUN}" = true ]]; then
     info "  5. Configure and test swaylock and hyprlock PAM services"
     info "  6. Test nominal screen unlocking via facial authentication (0 prompts)"
     info "  7. Test screen unlocking password fallback (valid succeeds, invalid rejected)"
+    info "  7b. Face login resets the faillock tally; a locked account still fails"
     info "  8. Execute rollback procedure and restore clean system state"
     success "Dry run deployment validation completed successfully."
     exit 0
@@ -178,6 +180,8 @@ cd "${WORKSPACE_ROOT}"
 # Without --skip-build, always invoke cargo (a no-op when up to date) so a stale
 # release artifact from the bind-mounted target/ is never packaged (GitHub #244).
 if [[ "${SKIP_BUILD}" = false ]]; then
+    # Bounded retry of the ort-sys ONNX Runtime download (GitHub #318).
+    bash scripts/prefetch_onnxruntime.sh
     info "Building release artifacts (no-op when up to date)..."
     cargo build --locked --release --workspace
 fi
@@ -274,7 +278,7 @@ success "Stock system-auth matches the pambase mtree digest (${PAMBASE_MTREE%/mt
 apply_soos_arch_edit() {
     awk '
         /^-auth[ \t]+\[success=2 default=ignore\][ \t]+pam_systemd_home\.so/ && !home {
-            print "auth  [success=done default=ignore]  pam_soos.so"
+            print "auth  [success=4 default=ignore]  pam_soos.so"
             sub(/success=2/, "success=3")
             print
             home = 1
@@ -416,6 +420,26 @@ assert_events() {
     fi
 }
 
+# pam_faillock deny limit: the last "deny = N" of /etc/security/faillock.conf,
+# else the pam_faillock built-in default of 3.
+faillock_deny_limit() {
+    local deny
+    deny="$(sed -nE 's/^[[:space:]]*deny[[:space:]]*=[[:space:]]*([0-9]+)[[:space:]]*$/\1/p' \
+        /etc/security/faillock.conf 2>/dev/null | tail -n 1)"
+    printf '%s' "${deny:-3}"
+}
+
+# Runs <count> wrong-password logins through the edited stack (daemon absent).
+wrong_passwords() {
+    local count="$1" i
+    for (( i = 0; i < count; i++ )); do
+        if /usr/local/bin/pam_test_runner test-swaylock "${TEST_USER}" "wrong_password" 2>/dev/null; then
+            error "Security Invariant Violation: Invalid password accepted by swaylock!"
+            exit 1
+        fi
+    done
+}
+
 faillock --user "${TEST_USER}" --reset
 
 # ---------------------------------------------------------------------------
@@ -476,6 +500,48 @@ if /usr/local/bin/pam_test_runner test-swaylock "${TEST_USER}" "wrong_password" 
     exit 1
 fi
 success "swaylock rejected the invalid password with the daemon absent."
+faillock --user "${TEST_USER}" --reset
+
+# 6g/6h (GitHub #318): a face match is a successful login for pam_faillock. The
+# primary rule jumps to pam_permit.so, so pam_env.so and pam_faillock.so authsucc
+# run exactly as after a correct password: the tally is reset, while a locked
+# account still fails (preauth and authsucc both refuse it).
+FAILLOCK_DENY="$(faillock_deny_limit)"
+if [[ ! "${FAILLOCK_DENY}" =~ ^[0-9]+$ ]] || (( FAILLOCK_DENY < 2 )); then
+    error "pam_faillock deny limit '${FAILLOCK_DENY}' is unusable (need an integer >= 2)."
+    exit 1
+fi
+BELOW_DENY=$(( FAILLOCK_DENY - 1 ))
+info "pam_faillock deny limit: ${FAILLOCK_DENY} (/etc/security/faillock.conf or built-in default)."
+
+# 6g. N wrong passwords (N = deny - 1, not locked), then face Allow: success, tally 0.
+info "Testing that a face login resets ${BELOW_DENY} recorded password failure(s)..."
+wrong_passwords "${BELOW_DENY}"
+assert_tally "${BELOW_DENY}" "${BELOW_DENY} wrong password(s) before the face login"
+start_mock_daemon --mode allow
+if ! /usr/local/bin/pam_test_runner test-swaylock "${TEST_USER}"; then
+    error "swaylock rejected the face Allow after ${BELOW_DENY} wrong password(s) (account not locked)."
+    exit 1
+fi
+assert_events 0 "face Allow after ${BELOW_DENY} wrong password(s)"
+assert_tally 0 "face Allow after ${BELOW_DENY} wrong password(s)"
+cleanup
+success "Face Allow after ${BELOW_DENY} wrong password(s): accepted, faillock tally reset to 0."
+
+# 6h. deny wrong passwords (locked), then face Allow: still rejected, tally kept.
+info "Testing that a locked account still fails with a face Allow..."
+faillock --user "${TEST_USER}" --reset
+wrong_passwords "${FAILLOCK_DENY}"
+assert_tally "${FAILLOCK_DENY}" "${FAILLOCK_DENY} wrong passwords (locked account)"
+start_mock_daemon --mode allow
+if /usr/local/bin/pam_test_runner test-swaylock "${TEST_USER}" 2>/dev/null; then
+    error "Security Invariant Violation: a face Allow unlocked an account locked by pam_faillock!"
+    exit 1
+fi
+assert_events 0 "face Allow on a locked account"
+assert_tally "${FAILLOCK_DENY}" "face Allow on a locked account"
+cleanup
+success "Locked account: face Allow rejected, faillock tally kept at ${FAILLOCK_DENY}."
 faillock --user "${TEST_USER}" --reset
 
 # Restore the image's synthetic system-auth (used by tests/docker/test_suite.sh).

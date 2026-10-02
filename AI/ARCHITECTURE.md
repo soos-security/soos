@@ -148,6 +148,13 @@ auth  [success=done default=bad]     pam_unix.so try_first_pass
 auth  optional                       pam_soos.so event=password-failed timeout_ms=20
 ```
 
+**Arch Linux only** (ADR 2026-10-02 "Arch Face Match Runs the Stock Success Path", GitHub #318):
+the primary rule of `packaging/pam/arch/system-auth` is `auth  [success=4 default=ignore]  pam_soos.so`.
+On a face match it jumps onto the stock pambase success path (`pam_permit.so`, `pam_env.so`,
+`pam_faillock.so authsucc`) so the faillock tally is reset as after a correct password; a locked
+account still fails at `pam_faillock.so preauth`, which runs first. Debian/Ubuntu, Fedora/RHEL and
+GDM keep `success=done`.
+
 ### Distribution Adaptation Guidelines
 
 | Family | Primary Auth File | Integration Strategy |

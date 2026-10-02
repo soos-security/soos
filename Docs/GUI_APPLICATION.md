@@ -35,7 +35,12 @@ waits on I/O it does not own.
   absolute path, never resolved through the caller's `PATH` (GitHub #314, CAM-NEW-7):
   `PKEXEC_PROGRAM` (`/usr/bin/pkexec`), `SYSTEMCTL_PROGRAM` (`/usr/bin/systemctl`) and
   `SOOS_ENROLL_PROGRAM` (`/usr/bin/soos-enroll`, where `scripts/install.sh` with its default
-  prefix, the Debian, Arch and RPM packages install it). The template import passes the same
+  prefix, the Debian, Arch and RPM packages install it). Since GitHub #318 the `soos-enroll`
+  directory comes from the build-time `SOOS_BINDIR` (unset or `/usr/bin`: the default above;
+  `scripts/install.sh --build --prefix <P>` exports `<P>/bin`): `crates/gui/build.rs` validates it
+  (normalized absolute directory of `[A-Za-z0-9._+-]` components, otherwise the build fails) and
+  enables `cfg(soos_custom_bindir)`, which selects `concat!(env!("SOOS_BINDIR"), "/soos-enroll")`
+  (contract `crates/gui/tests/program_path_tests.rs`). Package builders export `/usr/bin`. The template import passes the same
   absolute `SOOS_ENROLL_PROGRAM` from `privileged::import_helper_args` (pinned by the
   `import_privacy_tests` contract, owner-approved 2026-10-02, walkthrough 168). The `PrivilegedOutcome` comes
   back over an `mpsc` channel that `SoosApp::handle_task_outcomes` drains each frame; the worker

@@ -90,12 +90,29 @@ retitling a PR re-validates it without re-running the whole pipeline.
   `tests/docker/Dockerfile.{ubuntu,fedora,arch}`, and the default images of
   `tests/docker/pam_rollback_test.sh` / `authselect_profile_test.sh`), so a re-tagged upstream image
   cannot change a required check between two runs. The Arch image is still upgraded by `pacman -Syu`.
-  `tests/docker/Dockerfile.systemd` keeps `FROM ubuntu:24.04`: that exact line is pinned by
-  `systemd_unit_acceptance_contract` and changing it needs owner approval. Bump a digest deliberately
-  (`docker manifest inspect <image>:<tag>`). Enforced by
-  `packaging_ownership_contract::test_docker_base_images_are_pinned_by_digest`.
-- The `ort-sys` prebuilt ONNX Runtime download is still not retried (a transient failure fails the
-  build); caching it across CI jobs is a follow-up (walkthrough 166 §9).
+  `tests/docker/Dockerfile.systemd` is pinned to the same `ubuntu:24.04@sha256:` digest as
+  `tests/docker/Dockerfile.ubuntu` (same glibc as the release build; GitHub #318, owner-approved change
+  of the `systemd_unit_acceptance_contract` line). Bump a digest deliberately
+  (`docker manifest inspect <image>:<tag>`), both ubuntu files together. Enforced by
+  `packaging_ownership_contract::test_docker_base_images_are_pinned_by_digest` and
+  `arch_faillock_ci_contract::test_systemd_runtime_image_uses_the_build_image_digest`.
+- **ONNX Runtime download (GitHub #318)**: the `ort-sys` build script downloads a prebuilt ONNX Runtime
+  archive, verifies its SHA-256 and extracts it into `ORT_CACHE_DIR` (default `~/.cache/ort.pyke.io`).
+  The required jobs that compile it (`clippy`, `test`, `package-deploy`, `systemd-unit`) restore that
+  directory with SHA-pinned `actions/cache/restore` (v6.1.0, key `ort-<os>-<hash of Cargo.lock>`) before
+  their first build; only `main` saves it (`actions/cache/save`, skipped on a cache hit), so a pull
+  request can never write a cache entry another run would trust. `clippy` and `test` then run
+  `scripts/prefetch_onnxruntime.sh`: `cargo check --locked -p ort` (same default features as every
+  workspace crate, hence the same archive), at most 3 attempts with a linear back-off
+  (`SOOS_ORT_FETCH_ATTEMPTS` 1..5, `SOOS_ORT_FETCH_DELAY_S` 0..60 s). The Docker jobs hand the host
+  directory to the harness as `SOOS_ORT_CACHE_DIR` (it must be an existing absolute directory; it is
+  mounted on `/ort-cache` with `ORT_CACHE_DIR=/ort-cache`), and `tests/distro/*_test.sh` and
+  `tests/docker/systemd_unit_acceptance_test.sh` prefetch inside the container before their release
+  build; locally the systemd harness keeps the archive in the Docker volume `soos-sua-ort-cache`. No job
+  gains a permission (workflow default `contents: read`). Enforced by
+  `arch_faillock_ci_contract::test_ci_caches_and_retries_the_onnxruntime_download`,
+  `arch_faillock_ci_contract::test_onnxruntime_prefetch_retries_a_bounded_number_of_times` and
+  `arch_faillock_ci_contract::test_docker_harnesses_prefetch_and_share_the_onnxruntime_cache`.
 
 ### Performance Design
 - **Parallel jobs**: clippy, test, security and lint run concurrently; the critical path is the

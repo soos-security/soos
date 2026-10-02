@@ -236,6 +236,12 @@ mod pad_second_model_attestation_contract;
 #[cfg(all(test, unix))]
 mod gcv_review_contract;
 
+/// Review follow-ups of 2026-10-02 (GitHub #318): Arch face login through faillock `authsucc`,
+/// `Dockerfile.systemd` digest pin, cached and retried ONNX Runtime download, `soos-gui`
+/// program paths derived from the install prefix (rows AFC1–AFC8).
+#[cfg(all(test, unix))]
+mod arch_faillock_ci_contract;
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,
@@ -909,8 +915,14 @@ mod tests {
         );
 
         let arch_content = fs::read_to_string(&arch_system_auth).expect("read arch system-auth");
-        let arch_soos_pos =
-            primary_soos_rule_offset(&arch_content, "packaging/pam/arch/system-auth");
+        // GitHub #318 (owner approval 2026-10-02): the Arch primary rule is
+        // `[success=4 default=ignore]` (was `[success=done default=ignore]`); Debian and Fedora
+        // above keep `success=done`.
+        let arch_soos_pos = soos_rule_offset_with_control(
+            &arch_content,
+            "packaging/pam/arch/system-auth",
+            ARCH_PRIMARY_SOOS_CONTROL,
+        );
         let arch_unix_pos = arch_content.find("pam_unix.so").expect("unix auth in arch");
         let arch_fail_pos = arch_content
             .find("pam_soos.so event=password-failed")
@@ -925,9 +937,8 @@ mod tests {
         );
 
         let snippet_content = fs::read_to_string(&arch_snippet).expect("read arch snippet");
-        assert!(snippet_content
-            .lines()
-            .any(|l| l.starts_with("auth") && is_default_timeout_primary_soos_rule(l)));
+        assert!(snippet_content.lines().any(|l| l.starts_with("auth")
+            && is_default_timeout_soos_rule_with_control(l, ARCH_PRIMARY_SOOS_CONTROL)));
         assert!(snippet_content.contains(
             "auth  optional                       pam_soos.so event=password-failed timeout_ms=20"
         ));
@@ -2539,11 +2550,25 @@ mod tests {
     /// default deadline: no `timeout_ms=` argument, or `timeout_ms=<DEFAULT_TIMEOUT_MS>`
     /// (GitHub #185, user-approved assertion change 2026-09-30).
     fn is_default_timeout_primary_soos_rule(line: &str) -> bool {
+        is_default_timeout_soos_rule_with_control(line, PRIMARY_SOOS_CONTROL)
+    }
+
+    /// Control of the primary soos rule on Debian, Fedora and GDM.
+    const PRIMARY_SOOS_CONTROL: &str = "[success=done default=ignore]";
+
+    /// Control of the Arch primary soos rule: jumps onto `pam_permit.so` so that `pam_env.so`
+    /// and `pam_faillock.so authsucc` run after a face match (GitHub #318, owner-approved
+    /// Arch-only change from `success=done`, ADR 2026-10-02 "Arch Face Match Runs the Stock
+    /// Success Path").
+    const ARCH_PRIMARY_SOOS_CONTROL: &str = "[success=4 default=ignore]";
+
+    /// [`is_default_timeout_primary_soos_rule`] with an explicit `control`.
+    fn is_default_timeout_soos_rule_with_control(line: &str, control: &str) -> bool {
         let normalized = line.split_whitespace().collect::<Vec<_>>().join(" ");
         let Some(module_at) = normalized.find("pam_soos.so") else {
             return false;
         };
-        if !normalized[..module_at].contains("[success=done default=ignore]") {
+        if !normalized[..module_at].contains(control) {
             return false;
         }
         let default_arg = format!("timeout_ms={}", pam_default_timeout_ms());
@@ -2560,15 +2585,20 @@ mod tests {
     /// Byte offset of `pam_soos.so` on the primary soos rule of `content` (see
     /// [`is_default_timeout_primary_soos_rule`]); panics with `what` when absent.
     fn primary_soos_rule_offset(content: &str, what: &str) -> usize {
+        soos_rule_offset_with_control(content, what, PRIMARY_SOOS_CONTROL)
+    }
+
+    /// [`primary_soos_rule_offset`] with an explicit `control`.
+    fn soos_rule_offset_with_control(content: &str, what: &str, control: &str) -> usize {
         let mut offset = 0;
         for line in content.split_inclusive('\n') {
-            if is_default_timeout_primary_soos_rule(line) {
+            if is_default_timeout_soos_rule_with_control(line, control) {
                 let module_at = line.find("pam_soos.so").expect("rule names pam_soos.so");
                 return offset + module_at;
             }
             offset += line.len();
         }
-        panic!("{what}: no primary `[success=done default=ignore] pam_soos.so` rule relying on the default timeout");
+        panic!("{what}: no primary `{control} pam_soos.so` rule relying on the default timeout");
     }
 
     /// Collects the feature names referenced by authselect conditionals

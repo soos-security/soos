@@ -249,11 +249,28 @@ run_docker_distro() {
         flags+=(--skip-build)
     fi
 
+    # Optional pass-throughs (GitHub #318): the build parallelism of a shared
+    # machine, and the host ONNX Runtime download cache that CI restores and saves
+    # (SOOS_ORT_CACHE_DIR, an existing absolute directory). ort-sys verifies the
+    # SHA-256 of every download before it extracts it into ORT_CACHE_DIR.
+    local extra_args=()
+    if [[ -n "${CARGO_BUILD_JOBS:-}" ]]; then
+        extra_args+=(-e "CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS}")
+    fi
+    if [[ -n "${SOOS_ORT_CACHE_DIR:-}" ]]; then
+        if [[ "${SOOS_ORT_CACHE_DIR}" != /* || ! -d "${SOOS_ORT_CACHE_DIR}" ]]; then
+            error "SOOS_ORT_CACHE_DIR must be an existing absolute directory: '${SOOS_ORT_CACHE_DIR}'"
+            return 1
+        fi
+        extra_args+=(-v "${SOOS_ORT_CACHE_DIR}:/ort-cache" -e "ORT_CACHE_DIR=/ort-cache")
+    fi
+
     # Consent is granted only to the disposable container, never to the host.
     info "Executing ${script} inside '${tag}'..."
     "${DOCKER_BIN}" run --rm \
         -v "${WORKSPACE_ROOT}":/workspace \
         -v "soos-distro-target-${distro}":/workspace/target \
+        "${extra_args[@]}" \
         "${tag}" \
         bash "/workspace/tests/distro/${script}" --allow-host-changes "${flags[@]}"
 }

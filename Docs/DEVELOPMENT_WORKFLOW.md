@@ -95,6 +95,12 @@ the armv7 PCX check stays manual. `timespec` and `stat` time fields are converte
 `u64::try_from` from `libc::time_t`, never `cast_unsigned` or an `i64` parameter (invariant
 `config_open_diagnostics_contract::test_cdf_timespec_fields_are_not_cast_unsigned`).
 
+These checks cover type-checking only. The crates that link ONNX Runtime (`soos-daemon`,
+`soos-enrollment-cli`, and everything that depends on `soos-inference-ort`) type-check for i686
+and armv7 only with `ORT_SKIP_DOWNLOAD=1`; they cannot be linked or run there because no prebuilt
+ONNX Runtime binaries exist for those targets. 32-bit hosts are not a supported runtime target
+(GitHub #318).
+
 ---
 
 ## 5. Multi-Agent TDD Development Cycle (Phases 0 through 5)

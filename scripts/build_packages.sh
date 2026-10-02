@@ -109,6 +109,9 @@ fi
 # 1. Compile workspace crates once upfront if not skipped
 if [[ "${SKIP_BUILD}" = false ]]; then
     echo "[Build] Compiling workspace crates in release mode..."
+    # Packages install soos-enroll in /usr/bin: soos-gui is built for that path,
+    # whatever SOOS_BINDIR the caller exported (GitHub #318).
+    export SOOS_BINDIR=/usr/bin
     cargo build --locked --release --workspace
     # Subsequent target builders can reuse the compiled artifacts
     PASSTHROUGH_ARGS+=("--skip-build")

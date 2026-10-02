@@ -1,5 +1,6 @@
 //! Configuration structures for the soos daemon.
 
+use std::os::unix::ffi::OsStrExt as _;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -357,6 +358,7 @@ struct DispatcherConfigFile {
 struct PipelineConfigFile {
     camera_device: Option<PathBuf>,
     sensor_preference: Option<String>,
+    allow_virtual_camera: Option<bool>,
     idle_timeout_secs: Option<u64>,
     warmup_frames: Option<usize>,
     use_mock_camera: Option<bool>,
@@ -510,6 +512,13 @@ impl DaemonConfig {
 
         if let Some(pipe) = file.pipeline {
             if let Some(camera_device) = pipe.camera_device {
+                // GitHub #318: no path can hold a NUL byte, and `v4l` would panic on one;
+                // the key is refused at load time (the value is never echoed).
+                if camera_device.as_os_str().as_bytes().contains(&0) {
+                    return Err(DaemonError::Config(
+                        "[pipeline] camera_device must not contain a NUL byte".into(),
+                    ));
+                }
                 // Shared sentinel vocabulary with soos-enroll / soos-gui (GitHub #152):
                 // "", "auto" and "default" keep the auto-detection sentinel.
                 if !soos_camera_v4l::is_auto_camera_device(&camera_device) {
@@ -529,6 +538,20 @@ impl DaemonConfig {
                          default (prefer_ir) applies"
                             .to_string(),
                     ),
+                }
+            }
+            if let Some(allow) = pipe.allow_virtual_camera {
+                // GitHub #318: opt-in to open a virtual or output-capable V4L2 node
+                // (ADR 2026-10-02 "Virtual V4L2 Nodes Are Never Biometric Cameras"). It
+                // weakens the camera trust boundary, so the startup log says so.
+                config.pipeline.camera.allow_virtual_device = allow;
+                if allow {
+                    config.warnings.push(
+                        "[pipeline] allow_virtual_camera = true: soos-daemon may open a virtual \
+                         or output-capable V4L2 node (v4l2loopback, vivid, ...) whose frames \
+                         any local writer can inject; use it only for testing"
+                            .to_string(),
+                    );
                 }
             }
             if let Some(idle_secs) = pipe.idle_timeout_secs {
