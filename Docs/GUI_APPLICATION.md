@@ -15,18 +15,29 @@ waits on I/O it does not own.
 |---|---|---|
 | Camera capture / daemon preview polling | `soos-v4l-capture` or `soos-gui-ipc-cam` | `soos-camera-v4l`, `ipc_camera` |
 | Face detection, PAD, embedding | `soos-gui-worker` | `worker` |
-| `systemctl is-active soos-daemon.service` | `soos-gui-daemon-monitor` | `daemon_control` |
+| `systemctl show --property=ActiveState --value soos-daemon.service` | `soos-gui-daemon-monitor` | `daemon_control` |
 | `pkexec` (pause/resume daemon, list/import/delete templates) | `soos-gui-privileged` | `privileged` |
 | Camera-source probing, switching and device release | `soos-gui-camera-source` | `camera_source` |
 
 - **Daemon state polling**: `DaemonMonitor` probes through the `DaemonStatusProbe` trait
   (production: `SystemctlProbe`) at most once per `DAEMON_POLL_INTERVAL` (2 s), gated by the
   clock-injectable `PollThrottle`, and publishes `DaemonState::{Unknown, Active, Inactive}` in an
-  atomic. The header reads it lock-free. After Pause/Resume the UI calls `request_refresh()` so the
+  atomic. `SystemctlProbe` reads the unit's `ActiveState` (`/usr/bin/systemctl show
+  --property=ActiveState --value`) and maps it with `active_state_means_running`: only
+  `inactive` and `failed` are `Inactive`; `active`, `reloading`, `refreshing`, `activating`
+  (start-up, `auto-restart`) and `deactivating`, an unknown value and a `systemctl` that cannot
+  be run all count as `Active`, so the GUI never opens the device directly while the daemon is
+  restarting (EBUSY fight; GitHub #314, CAM-NEW-7). The header reads it lock-free. After Pause/Resume the UI calls `request_refresh()` so the
   new state appears within one monitor tick (50 ms) instead of the next interval.
 - **Privileged operations**: the UI submits a `PrivilegedAction` to `TaskRunner`, which runs it on
   a worker thread through the `PrivilegedExecutor` trait (production: `PkexecExecutor`, fixed
-  argument vectors, no shell, stdin closed) and returns immediately. The `PrivilegedOutcome` comes
+  argument vectors, no shell, stdin closed) and returns immediately. Programs are named by
+  absolute path, never resolved through the caller's `PATH` (GitHub #314, CAM-NEW-7):
+  `PKEXEC_PROGRAM` (`/usr/bin/pkexec`), `SYSTEMCTL_PROGRAM` (`/usr/bin/systemctl`) and
+  `SOOS_ENROLL_PROGRAM` (`/usr/bin/soos-enroll`, where `scripts/install.sh` with its default
+  prefix, the Debian, Arch and RPM packages install it). The template import still passes the
+  relative `soos-enroll` of `privileged::import_helper_args` to `pkexec` (pinned by the
+  `import_privacy_tests` contract; owner decision pending, walkthrough 168). The `PrivilegedOutcome` comes
   back over an `mpsc` channel that `SoosApp::handle_task_outcomes` drains each frame; the worker
   wakes the UI with `request_repaint`. Only one privileged action runs at a time
   (`TaskRunnerError::Busy`), so the user never faces stacked Polkit dialogs; the Pause/Resume
@@ -99,6 +110,10 @@ soos-gui                              # system store (root) or Polkit mode (user
 soos-gui --mock --dev-store "$HOME/.local/share/soos-dev"   # hardware-free development
 ```
 
+`--mock` requires `--dev-store` (clap `requires`, GitHub #314 CAM-NEW-5): templates computed by
+the mock models carry the production model id, so they must never be imported into the system
+store; `soos-gui --mock` alone is a usage error.
+
 Verification: `crates/gui/tests/import_privacy_tests.rs` (matrix rows ISE1–ISE4).
 
 ## 1c. Guided Enrollment Liveness (GitHub #217 / #218)
@@ -115,7 +130,14 @@ The worker feeds every analyzed frame to the guided enrollment session through
 - a frame with a face but no PAD verdict, or with no face, breaks the live streak without counting
   as a spoof;
 - a spoof PAD verdict is counted even when the frame yields no pose or no embedding
-  (`GuidedEnrollmentSession::record_presentation_attack`, GitHub #285).
+  (`GuidedEnrollmentSession::record_presentation_attack`, GitHub #285);
+- only a frame with exactly one face is ever sampled (GitHub #304): `VisionPipeline::analyze_frame`
+  reports every detection (`VisionAnalysis::face_count`) but runs PAD, alignment and embedding
+  only for a single face, `feed_guided_enrollment` breaks the live streak and returns `None` for
+  any other count, and `worker::guided_enrollment_feedback` shows "One face only: make sure
+  nobody else is in view of the camera." (`GuiEnrollmentFeedback::OneFaceOnly`) for a frame
+  with several faces. This is the rule of the CLI enrollment (`process_frame` rejects more than
+  one detection).
 
 ## 1d. Live Verification Reference (GitHub #278 / #298)
 
@@ -154,11 +176,24 @@ preview worker stops):
 | `SourceUnreachable` | Daemon preview unreachable | Daemon paused or stopped |
 | `SourceUnauthorized` | Daemon preview not authorized | UID not in `[preview] allowed_uids` |
 | `SourceRateLimited` | Daemon preview rate-limited | `[preview] max_requests_per_sec` |
-| `SourceUnavailable` | Daemon camera unavailable | Daemon has no camera frame to serve |
+| `SourceUnavailable` | Daemon camera unavailable | Daemon has no camera frame to serve (`Verdict::Unavailable`, or an empty preview after the first frame) |
 | `SourceProtocol` | Daemon preview protocol error | GUI/daemon version mismatch, stale or unstamped daemon `Response` |
 
 `IpcCameraManager` maps each `IpcPreviewError` to the matching `Source*` kind
-(`IpcPreviewError::kind`). A daemon refusal (`Response` echoing the request nonce) is trusted
+(`IpcPreviewError::kind`). Every preview reply goes through `ipc_camera::frame_from_preview`
+(GitHub #305, #306, #314 S2):
+
+| Reply | Before the first frame | After a frame was shown |
+|---|---|---|
+| Empty preview (no data, `format = 255`) | `Starting` ("Connecting to camera"), keep polling | frame and overlays withdrawn, not ready, `SourceUnavailable` until frames resume |
+| Known format, payload length equal to the geometry (any non-empty length for MJPEG) | frame shown, `Ready` | frame shown, `Ready`, error cleared |
+| Unknown format code, `255` with data, zero dimension with data, length mismatch | `SourceProtocol`, reconnect | `SourceProtocol`, reconnect |
+| Greyscale (`format = 1`, how the daemon sends every infrared frame) | Monochrome PAD path (IR gate, IR threshold) | same |
+
+Unknown format codes used to be decoded as RGB24 and an empty preview used to leave the last
+frame frozen on screen as `Ready`. The reply buffer and the published frame copies
+(`LatestFrameData::rgb`, `aligned_crop`) are `Zeroizing`, and `LatestFrameData`'s `Debug`
+prints only lengths (GitHub #314, CAM-NEW-6). A daemon refusal (`Response` echoing the request nonce) is trusted
 only after `Response::check_freshness` with the shared `MAX_RESPONSE_FUTURE_SKEW_NS` against
 CLOCK_MONOTONIC, exactly like `pam_soos.so` and `soos-admin test-pam`: a stale, unstamped or
 future-dated `Response` is `IpcPreviewError::Protocol`, and no `Response` is ever an authorized

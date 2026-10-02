@@ -230,6 +230,12 @@ mod packaging_ownership_contract;
 #[cfg(all(test, unix))]
 mod pad_second_model_attestation_contract;
 
+/// GUI / camera / vision review fixes of 2026-10-02: manifest layouts, zeroizing face buffers,
+/// guarded V4L2 open, absolute privileged program paths (GitHub #313, #314; rows GCV10, GCV11,
+/// GCV14, GCV19).
+#[cfg(all(test, unix))]
+mod gcv_review_contract;
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,

@@ -130,7 +130,10 @@ impl VisionPipelineConfig {
 }
 
 /// Output of a single processed frame through the vision pipeline.
-#[derive(Debug, Clone)]
+///
+/// `Debug` is implemented by hand and never prints the aligned crop or the embedding
+/// (GitHub #313, VIS-NEW-6).
+#[derive(Clone)]
 pub struct PipelineOutput {
     /// Primary bounding box and detection score.
     pub detection: FaceDetection,
@@ -142,6 +145,17 @@ pub struct PipelineOutput {
     pub pad_result: PadResult,
     /// Extracted L2-normalized biometric embedding.
     pub embedding: BiometricEmbedding,
+}
+
+impl std::fmt::Debug for PipelineOutput {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PipelineOutput")
+            .field("detection", &self.detection)
+            .field("pad_result", &self.pad_result)
+            .field("aligned_crop_len", &self.aligned_crop_rgb.len())
+            .field("embedding", &self.embedding)
+            .finish_non_exhaustive()
+    }
 }
 
 impl zeroize::Zeroize for PipelineOutput {
@@ -158,12 +172,21 @@ impl Drop for PipelineOutput {
 }
 
 /// Verification outcome containing both pipeline output and biometric comparison.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct VerificationOutcome {
     /// Intermediate outputs from frame processing.
     pub output: PipelineOutput,
     /// Biometric match comparison against the enrolled template.
     pub match_result: MatchResult,
+}
+
+impl std::fmt::Debug for VerificationOutcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("VerificationOutcome")
+            .field("output", &self.output)
+            .field("match_result", &self.match_result)
+            .finish()
+    }
 }
 
 impl zeroize::Zeroize for VerificationOutcome {
@@ -179,7 +202,10 @@ impl Drop for VerificationOutcome {
 }
 
 /// Diagnostic and real-time visualization output for GUI and monitoring tools.
-#[derive(Debug, Clone)]
+///
+/// `Debug` is implemented by hand and never prints pixels, the aligned crop or the
+/// embedding (GitHub #313, VIS-NEW-6).
+#[derive(Clone)]
 pub struct VisionAnalysis {
     /// Frame converted to RGB24.
     pub rgb: Zeroizing<Vec<u8>>,
@@ -196,6 +222,33 @@ pub struct VisionAnalysis {
     /// Set when the primary face failed the pre-PAD quality gate (GitHub #218); PAD,
     /// alignment and embedding are then skipped (`pad_result` and `embedding` are `None`).
     pub quality_rejection: Option<FaceQualityRejection>,
+}
+
+impl VisionAnalysis {
+    /// Number of faces the detector reported in the frame, whatever their confidence (the
+    /// rule of [`VisionPipeline::process_frame`], which rejects any frame with more than one
+    /// detection). PAD, alignment and embedding only ever run when it is exactly 1
+    /// (GitHub #304).
+    pub fn face_count(&self) -> usize {
+        self.detections.len()
+    }
+}
+
+impl std::fmt::Debug for VisionAnalysis {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("VisionAnalysis")
+            .field("rgb_len", &self.rgb.len())
+            .field("detections", &self.detections)
+            .field("pad_result", &self.pad_result)
+            .field("pose", &self.pose)
+            .field(
+                "aligned_crop_len",
+                &self.aligned_crop.as_ref().map(|c| c.len()),
+            )
+            .field("embedding_len", &self.embedding.as_ref().map(|e| e.len()))
+            .field("quality_rejection", &self.quality_rejection)
+            .finish()
+    }
 }
 
 impl zeroize::Zeroize for VisionAnalysis {
@@ -316,6 +369,10 @@ impl VisionPipeline {
     }
 
     /// Analyzes a camera frame without fail-closed short circuiting for GUI live inspection.
+    ///
+    /// Every detection is reported, but PAD, alignment and embedding run only when the frame
+    /// holds exactly one face ([`VisionAnalysis::face_count`]): a frame with several faces
+    /// never yields a PAD verdict or an embedding a consumer could sample (GitHub #304).
     pub fn analyze_frame(&self, frame: &Frame) -> Result<VisionAnalysis, VisionError> {
         let rgb = Zeroizing::new(convert_to_rgb(
             &frame.data,
@@ -341,7 +398,9 @@ impl VisionPipeline {
         let mut embedding = None;
         let mut quality_rejection = None;
 
-        if let Some(det) = primary {
+        // Single-face invariant of `process_frame` (GitHub #304): with more than one face no
+        // face is scored, aligned or embedded.
+        if let Some(det) = primary.filter(|_| detections.len() == 1) {
             if let Some(landmarks) = &det.landmarks {
                 pose = Some(crate::pose::estimate_head_pose(landmarks));
                 quality_rejection = self.analyze_primary_face(

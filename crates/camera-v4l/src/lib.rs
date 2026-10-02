@@ -41,6 +41,10 @@ pub use sensor::{
     V4lNodeCapabilities, V4lNodeProbe, IR_SIGNATURE_MAX_HEIGHT, IR_SIGNATURE_MAX_WIDTH,
     MAX_FRAME_SIZE_HINTS, MAX_SYSFS_ENTRIES, MAX_VIDEO_NODES, SYSFS_VIDEO4LINUX_DIR,
 };
+pub use sensor::{
+    virtual_node_rejection, VirtualNodeRejection, V4L2_MEM_TO_MEM_CAPS, V4L2_OUTPUT_CAPABLE_CAPS,
+    VIRTUAL_CAPTURE_DRIVERS,
+};
 pub use stable_path::{stable_device_path, DEFAULT_BY_ID_DIR};
 pub use status::{CameraErrorKind, CameraStatus, CameraStatusCell};
 pub use v4l_impl::{

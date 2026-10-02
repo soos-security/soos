@@ -189,6 +189,8 @@ pub fn unproject(x: f32, y: f32, scale: f32, pad_x: f32, pad_y: f32) -> (f32, f3
 /// Letterbox pads an RGB image buffer to target x target dimensions, maintaining aspect ratio.
 ///
 /// Output tensor is in NCHW format with BGR channel ordering and (pixel - 127.5) / 128.0 normalization.
+/// Upstream insightface feeds SCRFD RGB; the measured difference on 400 LFW images is
+/// negligible, and changing the order needs an owner decision (GitHub #313, VIS-NEW-7).
 /// Border padding is filled with 0.0. Resampling is bilinear and the returned `pad_x` / `pad_y`
 /// are the exact integer placement offsets, shared with `soos-vision` through
 /// [`crate::letterbox`] (GitHub #248, VIS-06). Allocates a new zeroized tensor; the detector
