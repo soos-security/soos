@@ -62,6 +62,11 @@ pub enum EvidenceStoreError {
     #[error("Invalid evidence frame: {0}")]
     InvalidFrame(String),
 
+    /// The exclusive base-directory lock could not be taken within the store's lock
+    /// timeout (GitHub #310): another retention or migration holds it.
+    #[error("Evidence store lock timeout: {0}")]
+    LockTimeout(String),
+
     /// Invalid storage path, symlink detected, or path traversal attempt.
     #[error("Invalid store path: {0}")]
     InvalidPath(String),
