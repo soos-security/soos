@@ -126,6 +126,11 @@ mod vision_threshold_contract;
 #[cfg(test)]
 mod ort_output_zeroize_contract;
 
+/// Fail-closed PAM UID resolution, `uid=` / PAM_USER match and the 2026-10-02 PAM review
+/// follow-ups (GitHub #300, #302, #311, rows PUR13–PUR20).
+#[cfg(test)]
+mod pam_uid_resolution_contract;
+
 /// PAM module hygiene: panic hook chaining, protocol predicates, config warnings
 /// (GitHub #263, #264, #265, rows PHY1–PHY9).
 #[cfg(test)]

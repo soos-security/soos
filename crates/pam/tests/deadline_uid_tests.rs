@@ -9,7 +9,8 @@
 //! - PDR4 (GitHub #223): username -> UID resolution (NSS, possibly LDAP/SSSD) runs inside the
 //!   authentication budget: a resolution that consumes the whole `timeout_ms` budget falls back
 //!   to `PAM_IGNORE` without contacting the daemon, and the `event=password-failed` path stays
-//!   bounded by `EVENT_TIMEOUT_MS` after resolution; `uid=` skips resolution entirely.
+//!   bounded by `EVENT_TIMEOUT_MS` after resolution; `uid=` is honoured only when the resolved
+//!   PAM user matches it (GitHub #302).
 
 #![allow(
     clippy::unwrap_used,
@@ -256,7 +257,7 @@ fn test_slow_uid_resolution_exhausting_the_budget_returns_ignore() {
     let start = Instant::now();
     let code = SoosPam::authenticate_with_uid_resolver(None, &config, |_| {
         thread::sleep(Duration::from_millis(150));
-        4242
+        Some(4242)
     });
     let elapsed = start.elapsed();
 
@@ -291,41 +292,57 @@ fn test_fast_uid_resolution_sends_resolved_uid() {
     args.push("timeout_ms=500".to_string());
     let config = config_from(&args);
 
-    let code = SoosPam::authenticate_with_uid_resolver(None, &config, |_| 4242);
+    let code = SoosPam::authenticate_with_uid_resolver(None, &config, |_| Some(4242));
     assert_eq!(code, PamResultCode::PAM_SUCCESS);
     assert_eq!(server.join().expect("server thread"), 4242);
 }
 
-/// PDR4: an explicit `uid=` argument bypasses NSS resolution entirely.
+/// PDR4 / GitHub #302 (assertion migrated with owner approval 2026-10-02; formerly
+/// `test_uid_argument_bypasses_the_resolver`, which asserted that the resolver is never
+/// called): `uid=` is honoured only when PAM_USER resolves to the same UID. The resolver
+/// always runs once; a matching resolution delivers the event, a different UID or a
+/// failed resolution sends nothing.
 #[test]
-fn test_uid_argument_bypasses_the_resolver() {
-    let tmp = tempdir().expect("tempdir");
-    let sock = tmp.path().join("uid_arg.sock");
-    let listener = UnixListener::bind(&sock).expect("bind");
+fn test_uid_argument_requires_matching_resolved_uid() {
+    for (resolved, delivered) in [(Some(1000), true), (Some(1001), false), (None, false)] {
+        let tmp = tempdir().expect("tempdir");
+        let sock = tmp.path().join("uid_arg.sock");
+        let listener = UnixListener::bind(&sock).expect("bind");
+        listener
+            .set_nonblocking(true)
+            .expect("non-blocking listener");
 
-    let server = thread::spawn(move || {
-        let (mut stream, _) = listener.accept().expect("client connected");
-        let frame = read_frame(&mut stream);
-        let event: Event = decode(&frame).expect("decoded event");
-        event.uid
-    });
+        let mut args = base_args(&sock);
+        args.push("event=password-failed".to_string());
+        args.push("uid=1000".to_string());
+        let config = config_from(&args);
 
-    let mut args = base_args(&sock);
-    args.push("event=password-failed".to_string());
-    args.push("uid=1000".to_string());
-    let config = config_from(&args);
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        let code = SoosPam::authenticate_with_uid_resolver(None, &config, |_| {
+            calls.fetch_add(1, Ordering::SeqCst);
+            resolved
+        });
+        assert_eq!(code, PamResultCode::PAM_IGNORE, "{resolved:?}");
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "uid= must be checked against the resolved PAM user ({resolved:?})"
+        );
 
-    let called = AtomicBool::new(false);
-    let code = SoosPam::authenticate_with_uid_resolver(None, &config, |_| {
-        called.store(true, Ordering::SeqCst);
-        4242
-    });
-    assert_eq!(code, PamResultCode::PAM_IGNORE);
-    assert!(
-        !called.load(Ordering::SeqCst),
-        "uid= must skip the NSS lookup"
-    );
-    assert_eq!(server.join().expect("server thread"), Some(1000));
+        match listener.accept() {
+            Ok((mut stream, _)) => {
+                assert!(delivered, "{resolved:?}: no event may be sent");
+                stream.set_nonblocking(false).expect("blocking stream");
+                let frame = read_frame(&mut stream);
+                let event: Event = decode(&frame).expect("decoded event");
+                assert_eq!(event.uid, Some(1000));
+            }
+            Err(e) => {
+                assert_eq!(e.kind(), std::io::ErrorKind::WouldBlock, "{e}");
+                assert!(!delivered, "{resolved:?}: the event must be delivered");
+            }
+        }
+    }
 }
 
 /// PDR4: on the `event=password-failed` path a slow resolution is not charged to the
@@ -352,7 +369,7 @@ fn test_slow_uid_resolution_event_path_stays_bounded() {
     let start = Instant::now();
     let code = SoosPam::authenticate_with_uid_resolver(None, &config, |_| {
         thread::sleep(resolver_delay);
-        4242
+        Some(4242)
     });
     let elapsed = start.elapsed();
 

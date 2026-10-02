@@ -57,8 +57,11 @@ pub enum EventKind {
 
 /// Authentication request payload sent by the PAM module.
 ///
-/// Note: `uid_hint` is merely a consistency assertion; the authoritative
-/// target UID is obtained by the daemon via kernel `SO_PEERCRED`.
+/// `uid_hint` names the user whose face is verified. For an unprivileged peer the daemon
+/// requires `SO_PEERCRED` UID == `uid_hint`; for a root peer (`su`, `sudo`, polkit helper,
+/// display manager) it is the authoritative target UID, bounded only by the local session
+/// binding. A PAM client must therefore send the UID of `PAM_USER` and never a stand-in
+/// such as the caller's real UID (GitHub #300).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Request {
     /// Protocol version.
@@ -67,7 +70,8 @@ pub struct Request {
     pub kind: RequestKind,
     /// Unique 256-bit cryptographic nonce (`getrandom`).
     pub request_id: RequestId,
-    /// Declared UID from PAM client (cross-checked against `SO_PEERCRED`).
+    /// Target UID: must equal the `SO_PEERCRED` UID of an unprivileged peer; the
+    /// authoritative target UID of a root peer (see the type documentation).
     pub uid_hint: u32,
     /// PAM service name (e.g. "gdm", "sudo", "login"). Bounded to 64 bytes.
     pub service: String,

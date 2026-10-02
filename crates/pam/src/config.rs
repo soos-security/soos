@@ -65,7 +65,9 @@ pub struct PamConfig {
     /// Directory holding the administrator disable flag files ([`DEFAULT_FLAG_DIR`]).
     /// Not settable from PAM arguments.
     pub flag_dir: PathBuf,
-    /// Optional target UID override specified in PAM arguments.
+    /// Optional `uid=` PAM argument. It never overrides `PAM_USER`: the flow honours it
+    /// only when `PAM_USER` resolves to this UID and otherwise returns `PAM_IGNORE`
+    /// (GitHub #302).
     pub uid: Option<u32>,
     /// Explicitly disabled via PAM argument.
     pub disabled: bool,

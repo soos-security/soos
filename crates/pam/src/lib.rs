@@ -16,9 +16,12 @@
 //!
 //! Linux-PAM invokes `pam_sm_authenticate`:
 //! 1. Arguments are parsed into a bounded [`config::PamConfig`].
-//! 2. Target UID is determined via explicit PAM argument override, [`PamFeedback::user`] lookup (`pam_get_user`), or `libc::getuid()` fallback.
+//! 2. The target UID is `PAM_USER` ([`PamFeedback::user`], `pam_get_user`) resolved through `getpwnam_r`.
+//!    A user that cannot be resolved returns `PAM_IGNORE` without contacting the daemon and never falls back to the
+//!    caller's UID (GitHub #300); a `uid=` argument is honoured only when it equals the resolved UID (GitHub #302).
 //!    A lookup that spends the whole authentication budget returns `PAM_IGNORE` without contacting the daemon (GitHub #223).
-//! 3. If configured with `event=password-failed`: sends telemetry to daemon within 20ms and returns `PAM_IGNORE`.
+//! 3. If configured with `event=password-failed`: sends telemetry to daemon within 20ms and returns `PAM_IGNORE`
+//!    (no event at all when the target UID is not resolved).
 //! 4. Otherwise: performs synchronous IPC authentication handshake with `soos-daemon`.
 //! 5. Renders `PAM_SUCCESS` exclusively upon receiving `Verdict::Allow`. All other outcomes return `PAM_IGNORE`.
 //! 6. `PAM_TEXT_INFO` feedback goes through [`PamFeedback`]; none is sent under `PAM_SILENT`, and
@@ -146,35 +149,48 @@ pub struct SoosPam;
 impl SoosPam {
     /// Authenticates with no PAM flags (compatibility entry for callers without flags).
     ///
-    /// `None` means no PAM handle: no conversation, no user lookup, no service item.
+    /// `None` means no PAM handle: no conversation, no service item, and the process UID
+    /// stands in for `PAM_USER` ([`detached_uid_resolver`]; libpam never passes a null
+    /// handle).
     pub fn authenticate_with_config(
         pamh: Option<&mut PamHandle>,
         config: &PamConfig,
     ) -> PamResultCode {
         match pamh {
             Some(h) => Self::authenticate_with_feedback(h, config, 0),
-            None => Self::authenticate_with_feedback(&mut Detached, config, 0),
+            None => Self::authenticate_detached(config, 0),
         }
+    }
+
+    /// The null-handle flow (`pam_sm_authenticate(NULL, ..)`, `authenticate_with_config(None,
+    /// ..)`): [`Detached`] feedback and [`detached_uid_resolver`].
+    fn authenticate_detached(config: &PamConfig, flags: PamFlag) -> PamResultCode {
+        Self::authenticate_flow(&mut Detached, config, flags, detached_uid_resolver)
     }
 
     /// [`Self::authenticate_with_config`] with an injectable username -> UID resolver.
     ///
-    /// `resolve_uid` runs only when no `uid=` argument is configured. It stands for
-    /// `pam_get_user` + `getpwnam_r`, which can block in NSS (LDAP / SSSD / NIS) and cannot
-    /// be interrupted, so the module bounds what it controls (review PAM-11, GitHub #223):
+    /// `resolve_uid` stands for `pam_get_user` + `getpwnam_r` and runs once per call, also
+    /// when `uid=` is configured (the argument must equal its result, GitHub #302). `None`
+    /// means the PAM user could not be resolved: the module returns `PAM_IGNORE` without
+    /// contacting the daemon (GitHub #300). The lookup can block in NSS (LDAP / SSSD /
+    /// NIS) and cannot be interrupted, so the module bounds what it controls (review
+    /// PAM-11, GitHub #223):
     /// - the authentication budget (`timeout_ms`) starts BEFORE resolution, so a slow lookup
     ///   is charged to it; a lookup that spends the whole budget returns `PAM_IGNORE`
     ///   without contacting the daemon;
     /// - the `event=password-failed` path still delivers the event, bounded by
     ///   `EVENT_TIMEOUT_MS` after resolution;
     /// - either overrun is logged at `LOG_INFO` (duration only, never the username).
+    ///
+    /// With `pamh = None` the injected resolver replaces [`detached_uid_resolver`].
     pub fn authenticate_with_uid_resolver<R>(
         pamh: Option<&mut PamHandle>,
         config: &PamConfig,
         resolve_uid: R,
     ) -> PamResultCode
     where
-        R: FnOnce(&mut dyn PamFeedback) -> u32,
+        R: FnOnce(&mut dyn PamFeedback) -> Option<u32>,
     {
         match pamh {
             Some(h) => Self::authenticate_flow(h, config, 0, resolve_uid),
@@ -212,7 +228,7 @@ impl SoosPam {
         resolve_uid: R,
     ) -> PamResultCode
     where
-        R: FnOnce(&mut dyn PamFeedback) -> u32,
+        R: FnOnce(&mut dyn PamFeedback) -> Option<u32>,
     {
         let result = syslog::catch_entry(|| {
             // Test-only hook (Docker T10): panics here when armed, before any socket activity.
@@ -224,6 +240,13 @@ impl SoosPam {
             // Pinned by `tests/invariants` (PHS11).
             #[cfg(feature = "fault-injection")]
             fault_injection::trigger(config.fault_inject);
+
+            // The authentication budget starts first (GitHub #311 PAM-NEW-7): the
+            // PAM_SERVICE read, the disable-flag `stat` calls and the UID resolution
+            // (GitHub #223) are all charged to it, and the deadline sent to the daemon is
+            // fixed here, before connect (GitHub #222). `timeout_ms` is already clamped by
+            // the argument parser; `service=` never changes it.
+            let auth_deadline = ipc::ExchangeDeadline::start(config.timeout_ms);
 
             let silent = is_silent(flags);
             let resolved = with_pam_service(feedback, config);
@@ -237,21 +260,24 @@ impl SoosPam {
                 return PamResultCode::PAM_IGNORE;
             }
 
-            // The authentication budget starts before UID resolution (GitHub #223) and the
-            // deadline sent to the daemon is fixed here, before connect (GitHub #222).
-            let auth_deadline = ipc::ExchangeDeadline::start(config.timeout_ms);
             let resolution_start = std::time::Instant::now();
-            let uid = match config.uid {
-                Some(uid) => uid,
-                None => resolve_uid(&mut *feedback),
-            };
+            let resolved_uid = resolve_uid(&mut *feedback);
             let resolution_elapsed = resolution_start.elapsed();
+
+            // Fail closed (GitHub #300, #302): no target UID, no daemon contact and no
+            // event. Value-free log lines: never the user name or either UID.
+            let uid = match target_uid(config.uid, resolved_uid) {
+                Ok(uid) => uid,
+                Err(reason) => {
+                    syslog::log_info(reason.log_message());
+                    return PamResultCode::PAM_IGNORE;
+                }
+            };
 
             if config.event == Some(PamEvent::PasswordFailed) {
                 if resolution_elapsed > std::time::Duration::from_millis(ipc::EVENT_TIMEOUT_MS) {
                     syslog::log_info(&format!(
-                        "soos user lookup took {} ms, above the {} ms event budget; \
-                         configure uid= to avoid the NSS lookup",
+                        "soos user lookup took {} ms, above the {} ms event budget",
                         resolution_elapsed.as_millis(),
                         ipc::EVENT_TIMEOUT_MS
                     ));
@@ -285,6 +311,13 @@ impl SoosPam {
             if !silent && connected {
                 feedback.info(feedback_message(&outcome));
             }
+            // Security-relevant rejections (replay, stale or foreign-version response) are
+            // logged value-free (GitHub #311 PAM-NEW-7); plain unavailability is not.
+            if let Err(err) = &outcome {
+                if let Some(line) = err.security_log_message() {
+                    syslog::log_warning(&line);
+                }
+            }
 
             // PAM_SUCCESS exclusively on a daemon Allow; every other outcome falls back.
             // The protocol crate owns the predicate (`Verdict::should_ignore`, GitHub #264).
@@ -309,17 +342,62 @@ impl SoosPam {
     }
 }
 
-/// Production username -> UID resolver: `pam_get_user` (through [`PamFeedback::user`]) +
-/// `getpwnam_r`, falling back to the caller's real UID when the handle, the username or
-/// the passwd entry is unavailable.
-fn default_uid_resolver(feedback: &mut dyn PamFeedback) -> u32 {
-    if let Some(username) = feedback.user() {
-        if let Some(resolved_uid) = resolve_username_to_uid(&username) {
-            return resolved_uid;
+/// Why no target UID could be chosen (GitHub #300, #302).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TargetUidError {
+    /// `PAM_USER` is missing, not UTF-8, not a C string, or `getpwnam_r` failed (not
+    /// found, `ERANGE` past the buffer cap, NSS error).
+    Unresolved,
+    /// `uid=` is set and differs from the UID `PAM_USER` resolves to.
+    UidArgumentMismatch,
+}
+
+impl TargetUidError {
+    /// Value-free syslog text (never the user name, never a UID).
+    fn log_message(self) -> &'static str {
+        match self {
+            Self::Unresolved => {
+                "soos could not resolve the PAM user to a UID; falling back to the next module"
+            }
+            Self::UidArgumentMismatch => {
+                "soos uid= argument does not match the PAM user; falling back to the next module"
+            }
         }
     }
+}
+
+/// The UID sent to the daemon: the resolved `PAM_USER`, which a `uid=` argument may only
+/// confirm, never replace (GitHub #302). An unresolved user never falls back to the
+/// caller's UID (GitHub #300): in a setuid-root host (`su B` from A) that UID is A's, and
+/// the daemon treats `uid_hint` as the authoritative target of a root peer.
+fn target_uid(configured: Option<u32>, resolved: Option<u32>) -> Result<u32, TargetUidError> {
+    let resolved = resolved.ok_or(TargetUidError::Unresolved)?;
+    match configured {
+        Some(configured) if configured != resolved => Err(TargetUidError::UidArgumentMismatch),
+        _ => Ok(resolved),
+    }
+}
+
+/// Production username -> UID resolver: `pam_get_user` (through [`PamFeedback::user`]) +
+/// `getpwnam_r`. Any failure is `None` (GitHub #300): a missing or non-UTF-8 `PAM_USER`
+/// (`pam_get_user` error), a name that is not a C string, or a `getpwnam_r` failure.
+fn default_uid_resolver(feedback: &mut dyn PamFeedback) -> Option<u32> {
+    let username = feedback.user()?;
+    resolve_username_to_uid(&username)
+}
+
+/// Null-handle resolver (`pam_sm_authenticate(NULL, ..)`, `authenticate_with_config(None,
+/// ..)`): without a PAM handle there is no `PAM_USER`, and the process UID is its
+/// stand-in (owner decision 2026-10-02, GitHub #300). libpam never passes a null handle,
+/// so this path is reached only by direct callers (tests, harnesses); a `uid=` argument
+/// must still equal this UID.
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "Same signature as default_uid_resolver so both plug into authenticate_flow"
+)]
+fn detached_uid_resolver(_feedback: &mut dyn PamFeedback) -> Option<u32> {
     // SAFETY: getuid is a safe, non-allocating libc syscall returning caller process UID.
-    unsafe { libc::getuid() }
+    Some(unsafe { libc::getuid() })
 }
 
 impl PamHooks for SoosPam {
@@ -492,9 +570,7 @@ pub extern "C" fn pam_sm_authenticate(
         let code = match unsafe { pamh.as_mut() } {
             // The exported symbol runs the `PamHooks` implementation (GitHub #264).
             Some(h) => SoosPam::sm_authenticate(h, args, pam_flags),
-            None => {
-                SoosPam::authenticate_with_feedback(&mut Detached, &parse_cstrs(args), pam_flags)
-            }
+            None => SoosPam::authenticate_detached(&parse_cstrs(args), pam_flags),
         };
 
         match code {

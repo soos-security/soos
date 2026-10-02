@@ -17,11 +17,12 @@
 
 mod common;
 
-use std::os::unix::fs::MetadataExt;
 use std::os::unix::net::UnixListener;
 use std::path::Path;
 
-use common::{spawn_daemon, SeenRequest, LOOKING_FOR_FACE};
+use common::{
+    assert_never_contacted, silent_listener, spawn_daemon, SeenRequest, LOOKING_FOR_FACE,
+};
 use pam_bindings::constants::{PAM_DISALLOW_NULL_AUTHTOK, PAM_SILENT};
 use pam_soos::config::{PamConfig, PamEvent};
 use pam_soos::{PamFeedback, PamFlag, PamResultCode, SoosPam};
@@ -54,6 +55,19 @@ impl PamFeedback for Recorder {
     }
 }
 
+/// UID of the `root` PAM user every recorder test authenticates as.
+const ROOT_UID: u32 = 0;
+
+/// Recorder whose PAM user is `root` (setup migration of GitHub #300 / #302, owner
+/// decision 2026-10-02: a recorder without a PAM user, or with a `uid=` that the PAM
+/// user does not resolve to, now falls back without contacting the daemon).
+fn root_recorder() -> Recorder {
+    Recorder {
+        user: Some("root".to_owned()),
+        ..Default::default()
+    }
+}
+
 fn config(socket: &Path, flag_dir: &Path, uid: Option<u32>) -> PamConfig {
     PamConfig {
         timeout_ms: 1000,
@@ -80,14 +94,31 @@ fn run(
     (code, daemon.join().unwrap())
 }
 
+/// Runs one authentication through `recorder` against a non-blocking listener and asserts
+/// that the module never connected to it.
+fn run_unreached(
+    recorder: &mut Recorder,
+    uid: Option<u32>,
+    event: Option<PamEvent>,
+) -> PamResultCode {
+    let tmp = tempdir().unwrap();
+    let sock = tmp.path().join("daemon.sock");
+    let listener = silent_listener(&sock);
+    let mut cfg = config(&sock, tmp.path(), uid);
+    cfg.event = event;
+    let code = SoosPam::authenticate_with_feedback(recorder, &cfg, 0);
+    assert_never_contacted(&listener, "unresolved or mismatching PAM user");
+    code
+}
+
 // ---------------------------------------------------------------------------
 // Message selection
 // ---------------------------------------------------------------------------
 
 #[test]
 fn test_feedback_allow_emits_lookup_then_recognized() {
-    let mut rec = Recorder::default();
-    let (code, seen) = run(&mut rec, Some(1000), Verdict::Allow, 0);
+    let mut rec = root_recorder();
+    let (code, seen) = run(&mut rec, Some(ROOT_UID), Verdict::Allow, 0);
     assert_eq!(code, PamResultCode::PAM_SUCCESS);
     assert!(seen.is_some());
     assert_eq!(
@@ -98,8 +129,8 @@ fn test_feedback_allow_emits_lookup_then_recognized() {
 
 #[test]
 fn test_feedback_deny_emits_lookup_then_not_recognized() {
-    let mut rec = Recorder::default();
-    let (code, _) = run(&mut rec, Some(1000), Verdict::Deny, 0);
+    let mut rec = root_recorder();
+    let (code, _) = run(&mut rec, Some(ROOT_UID), Verdict::Deny, 0);
     assert_eq!(code, PamResultCode::PAM_IGNORE);
     assert_eq!(
         rec.infos,
@@ -110,8 +141,8 @@ fn test_feedback_deny_emits_lookup_then_not_recognized() {
 #[test]
 fn test_feedback_unavailable_and_protocol_error_emit_generic_text() {
     for verdict in [Verdict::Unavailable, Verdict::ProtocolError] {
-        let mut rec = Recorder::default();
-        let (code, _) = run(&mut rec, Some(1000), verdict, 0);
+        let mut rec = root_recorder();
+        let (code, _) = run(&mut rec, Some(ROOT_UID), verdict, 0);
         assert_eq!(code, PamResultCode::PAM_IGNORE, "{verdict:?}");
         assert_eq!(
             rec.infos,
@@ -134,8 +165,8 @@ fn test_feedback_pam_silent_suppresses_every_message_for_every_verdict() {
         Verdict::ProtocolError,
     ] {
         for flags in [PAM_SILENT, PAM_SILENT | PAM_DISALLOW_NULL_AUTHTOK] {
-            let mut rec = Recorder::default();
-            let (code, seen) = run(&mut rec, Some(1000), verdict, flags);
+            let mut rec = root_recorder();
+            let (code, seen) = run(&mut rec, Some(ROOT_UID), verdict, flags);
             assert!(seen.is_some(), "PAM_SILENT must not skip the daemon");
             let expected = if verdict == Verdict::Allow {
                 PamResultCode::PAM_SUCCESS
@@ -155,8 +186,8 @@ fn test_feedback_pam_silent_suppresses_every_message_for_every_verdict() {
 #[test]
 fn test_feedback_pam_silent_daemon_absent_emits_nothing() {
     let tmp = tempdir().unwrap();
-    let cfg = config(&tmp.path().join("absent.sock"), tmp.path(), Some(1000));
-    let mut rec = Recorder::default();
+    let cfg = config(&tmp.path().join("absent.sock"), tmp.path(), Some(ROOT_UID));
+    let mut rec = root_recorder();
     let code = SoosPam::authenticate_with_feedback(&mut rec, &cfg, PAM_SILENT);
     assert_eq!(code, PamResultCode::PAM_IGNORE);
     assert!(rec.infos.is_empty(), "got {:?}", rec.infos);
@@ -169,8 +200,8 @@ fn test_feedback_pam_silent_daemon_absent_emits_nothing() {
 #[test]
 fn test_feedback_daemon_absent_never_announces_face_lookup() {
     let tmp = tempdir().unwrap();
-    let cfg = config(&tmp.path().join("absent.sock"), tmp.path(), Some(1000));
-    let mut rec = Recorder::default();
+    let cfg = config(&tmp.path().join("absent.sock"), tmp.path(), Some(ROOT_UID));
+    let mut rec = root_recorder();
     let code = SoosPam::authenticate_with_feedback(&mut rec, &cfg, 0);
     assert_eq!(code, PamResultCode::PAM_IGNORE);
     assert!(
@@ -186,8 +217,8 @@ fn test_feedback_connection_refused_never_announces_face_lookup() {
     let tmp = tempdir().unwrap();
     let sock = tmp.path().join("stale.sock");
     drop(UnixListener::bind(&sock).unwrap());
-    let cfg = config(&sock, tmp.path(), Some(1000));
-    let mut rec = Recorder::default();
+    let cfg = config(&sock, tmp.path(), Some(ROOT_UID));
+    let mut rec = root_recorder();
     let code = SoosPam::authenticate_with_feedback(&mut rec, &cfg, 0);
     assert_eq!(code, PamResultCode::PAM_IGNORE);
     assert!(
@@ -214,29 +245,73 @@ fn test_feedback_user_lookup_resolves_uid_when_no_uid_argument() {
     assert_eq!(seen.unwrap().uid_hint, 0, "root must resolve to uid 0");
 }
 
+/// GitHub #302 (assertion migrated with owner approval 2026-10-02; formerly
+/// `test_feedback_user_lookup_skipped_when_uid_argument_present`, which asserted
+/// `user_calls == 0` and `uid_hint == 4242`): `uid=` no longer overrides PAM_USER. The
+/// user is still looked up, and a `uid=` the PAM user does not resolve to falls back
+/// without contacting the daemon, even when it would answer `Allow`.
 #[test]
-fn test_feedback_user_lookup_skipped_when_uid_argument_present() {
-    let mut rec = Recorder {
-        user: Some("root".to_owned()),
-        ..Default::default()
-    };
-    let (_, seen) = run(&mut rec, Some(4242), Verdict::Deny, 0);
-    assert_eq!(rec.user_calls, 0, "uid= must take precedence over PAM_USER");
-    assert_eq!(seen.unwrap().uid_hint, 4242);
+fn test_feedback_uid_argument_mismatching_pam_user_returns_ignore() {
+    let mut rec = root_recorder();
+    let code = run_unreached(&mut rec, Some(4242), None);
+    assert_eq!(code, PamResultCode::PAM_IGNORE);
+    assert_eq!(rec.user_calls, 1, "uid= must be checked against PAM_USER");
+    assert!(rec.infos.is_empty(), "got {:?}", rec.infos);
 }
 
+/// GitHub #302: a `uid=` equal to the UID PAM_USER resolves to is honoured.
 #[test]
-fn test_feedback_unknown_user_falls_back_to_process_uid() {
-    let process_uid = std::fs::metadata("/proc/self").unwrap().uid();
-    for user in [None, Some("soos-no-such-user-contract".to_owned())] {
+fn test_feedback_uid_argument_matching_pam_user_sends_request() {
+    let mut rec = root_recorder();
+    let (code, seen) = run(&mut rec, Some(ROOT_UID), Verdict::Allow, 0);
+    assert_eq!(code, PamResultCode::PAM_SUCCESS);
+    assert_eq!(rec.user_calls, 1);
+    assert_eq!(seen.unwrap().uid_hint, ROOT_UID);
+}
+
+/// GitHub #300 (assertion migrated with owner approval 2026-10-02; formerly
+/// `test_feedback_unknown_user_falls_back_to_process_uid`, which asserted
+/// `uid_hint == <process uid>`): a missing PAM user, an unknown one or a name that is
+/// not a C string never falls back to the caller's UID; the module returns
+/// `PAM_IGNORE` without contacting the daemon.
+#[test]
+fn test_feedback_unknown_user_returns_ignore_without_daemon_contact() {
+    for user in [
+        None,
+        Some("soos-no-such-user-contract".to_owned()),
+        Some("ro\0ot".to_owned()),
+    ] {
         let mut rec = Recorder {
-            user,
+            user: user.clone(),
             ..Default::default()
         };
-        let (code, seen) = run(&mut rec, None, Verdict::Deny, 0);
-        assert_eq!(code, PamResultCode::PAM_IGNORE);
-        assert_eq!(rec.user_calls, 1);
-        assert_eq!(seen.unwrap().uid_hint, process_uid);
+        let code = run_unreached(&mut rec, None, None);
+        assert_eq!(code, PamResultCode::PAM_IGNORE, "{user:?}");
+        assert_eq!(rec.user_calls, 1, "{user:?}");
+        assert!(rec.infos.is_empty(), "{user:?}: got {:?}", rec.infos);
+    }
+}
+
+/// GitHub #300 / #302 on the `event=password-failed` path: no event is sent when the PAM
+/// user does not resolve or does not match `uid=`.
+#[test]
+fn test_feedback_unresolved_user_sends_no_password_failed_event() {
+    for (user, uid) in [
+        (None, None),
+        (Some("soos-no-such-user-contract".to_owned()), None),
+        (
+            Some("soos-no-such-user-contract".to_owned()),
+            Some(ROOT_UID),
+        ),
+        (Some("root".to_owned()), Some(4242)),
+    ] {
+        let mut rec = Recorder {
+            user: user.clone(),
+            ..Default::default()
+        };
+        let code = run_unreached(&mut rec, uid, Some(PamEvent::PasswordFailed));
+        assert_eq!(code, PamResultCode::PAM_IGNORE, "{user:?} uid={uid:?}");
+        assert_eq!(rec.user_calls, 1, "{user:?} uid={uid:?}");
     }
 }
 
@@ -248,9 +323,9 @@ fn test_feedback_unknown_user_falls_back_to_process_uid() {
 fn test_feedback_service_item_forwarded_and_gdm_disable_honored() {
     let mut rec = Recorder {
         service: Some(b"gdm-password".to_vec()),
-        ..Default::default()
+        ..root_recorder()
     };
-    let (_, seen) = run(&mut rec, Some(1000), Verdict::Deny, 0);
+    let (_, seen) = run(&mut rec, Some(ROOT_UID), Verdict::Deny, 0);
     assert_eq!(seen.unwrap().service, "gdm-password");
 
     let tmp = tempdir().unwrap();
@@ -277,9 +352,9 @@ fn test_feedback_service_item_forwarded_and_gdm_disable_honored() {
 #[test]
 fn test_feedback_password_failed_event_is_silent() {
     let tmp = tempdir().unwrap();
-    let mut cfg = config(&tmp.path().join("absent.sock"), tmp.path(), Some(1000));
+    let mut cfg = config(&tmp.path().join("absent.sock"), tmp.path(), Some(ROOT_UID));
     cfg.event = Some(PamEvent::PasswordFailed);
-    let mut rec = Recorder::default();
+    let mut rec = root_recorder();
     let code = SoosPam::authenticate_with_feedback(&mut rec, &cfg, 0);
     assert_eq!(code, PamResultCode::PAM_IGNORE);
     assert!(rec.infos.is_empty(), "got {:?}", rec.infos);

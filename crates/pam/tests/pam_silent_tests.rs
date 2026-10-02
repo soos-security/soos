@@ -40,7 +40,7 @@ fn module_args(socket: &Path) -> Vec<CString> {
     vec![
         CString::new(format!("socket={}", socket.display())).unwrap(),
         CString::new("timeout_ms=1000").unwrap(),
-        CString::new("uid=1000").unwrap(),
+        CString::new("uid=0").unwrap(),
     ]
 }
 
