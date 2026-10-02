@@ -1,319 +1,145 @@
 # Candid Review Report
 
 - **Date**: 2026-10-02
-- **Target Branch**: `feat/presence-auto-unlock`
-- **Base (merge-base)**: `f76a80b`
-- **Reviewed-Diff-Fingerprint**: `567a007536902c405d0cc28ce5bd3cde7383659336647b680ef47c0ce6b1b5ef`
-- **Re-review**: the previous fingerprint
-  `a934eeb53bc8f3a048bf9699c461bd12aada1d77b946433528d0215f43ac2d21` was APPROVED with one
-  MINOR finding. A line-by-line `diff` of the two frozen patches shows that only the hunk of
-  `AI/walkthroughs/175_presence_auto_unlock.md` changed (321 → 355 lines). No code, test or
-  other document changed, so the earlier gate results still apply.
-- **Audited Files**: `.agents/skills/dev-workflow/references/project-facts.md`, `AI/ARCHITECTURE.md`,
-  `AI/DECISIONS.md`, `AI/MOCK_STRATEGY.md`, `AI/VERIFICATION_MATRIX.md`,
-  `AI/architect_spec_presence_unlock.md`, `AI/auditor_constraints_presence_unlock.md`,
-  `AI/tester_contract_presence_unlock.md`, `AI/walkthroughs/175_presence_auto_unlock.md`,
-  `Cargo.lock`, `Cargo.toml`, `Docs/DAEMON.md`, `Docs/DISTRIBUTION_DEPLOYMENT.md`,
-  `Docs/PACKAGING_AND_PROVISIONING.md`, `Docs/POLICY_CRATE.md`,
-  `Docs/SECURITY_AND_QUALITY_GUIDELINES.md`, `README.md`, `crates/daemon/Cargo.toml`,
-  `crates/daemon/src/{config,consensus,dispatcher,inference,lib,main,pipeline,session_policy}.rs`,
-  `crates/daemon/src/presence/{account,config,display,logind,mod,switch,tracker,worker}.rs`,
-  `crates/daemon/tests/common/mod.rs`, `crates/daemon/tests/inference_priority_tests.rs`,
-  `crates/daemon/tests/presence_{account,candid_review,config,consensus,display,logging,logind_mapping,tracker,worker}_tests.rs`,
-  `crates/policy/src/{decision,rate_limit}.rs`, `crates/policy/tests/rate_limit_reserve_tests.rs`,
-  `packaging/soos-daemon.service`, `tests/invariants/src/{daemon_docs_contract,lib,presence_unlock_contract}.rs`,
-  `tests/physical/screensaver_test.md` (53 files, 15,383 patch lines)
+- **Target Branch**: `fix/presence-review-followups`
+- **Base (merge-base)**: `35a708a`
+- **Reviewed-Diff-Fingerprint**: `bfdc896454cae33a647afd2f6b6292aba649eb08894227751d6536a8c6d422f4`
+- **Audited Files**: `AI/DECISIONS.md`, `AI/VERIFICATION_MATRIX.md`, `AI/architect_spec_presence_followups.md`, `AI/auditor_constraints_presence_followups.md`, `AI/tester_contract_presence_followups.md`, `AI/walkthroughs/176_presence_review_followups.md`, `Docs/BIOMETRIC_STORE_CRATE.md`, `Docs/DAEMON.md`, `crates/admin-cli/tests/cli_deadline_json_tests.rs`, `crates/biometric-store/src/store.rs`, `crates/biometric-store/tests/enrollment_probe_tests.rs`, `crates/daemon/src/presence/account.rs`, `crates/daemon/src/presence/logind.rs`, `crates/daemon/src/presence/mod.rs`, `crates/daemon/src/presence/worker.rs`, `crates/daemon/tests/presence_account_tests.rs`, `crates/daemon/tests/presence_candid_review_tests.rs`, `crates/daemon/tests/presence_followups_connect_tests.rs`, `crates/daemon/tests/presence_followups_pam_conf_tests.rs`, `crates/daemon/tests/presence_followups_tests.rs`, `crates/daemon/tests/presence_logging_tests.rs`, `crates/daemon/tests/presence_worker_tests.rs`, `tests/invariants/src/lib.rs`, `tests/invariants/src/presence_followups_contract.rs`
 
 ## 1. Executive Summary
 
-I froze the target with `./scripts/candid_subagent.sh --prepare`, read the whole patch, and then
-read the code around every production hunk. I did not rely on the walkthrough, the spec or the
-earlier report. The account guard was compared line by line with current upstream Linux-PAM
-sources (`libpam_internal/pam_line.c`, `libpam/pam_misc.c` `_pam_tokenize` / `_pam_mkargv`,
-`libpam/pam_handlers.c`, `modules/pam_faillock/{pam_faillock,faillock_config,faillock}.c`).
-
-Results:
-
-- **Unlock call.** There is one production `UnlockSession` call
-  (`presence/worker.rs:716` → `logind.rs:439`). It is reached only after all of these:
-  - a consensus `Allow`;
-  - a fresh `GetSession` / `GetAll` of the same ID (locked, bound, same UID, same `Name`);
-  - a fresh account check;
-  - a lid re-check;
-  - a kill-switch re-check;
-  - a shutdown check;
-  - the 1000 ms window, checked on both `CLOCK_MONOTONIC` and `CLOCK_BOOTTIME`.
-
-  There is no retry and no other route.
-- **Account guard.** It is equal to libpam / `pam_faillock` or stricter on every path I tried.
-  The round-4 fixes are present: bracketed arguments, `*` / `!` markers, `CLOCK_BOOTTIME`, and
-  the lid re-check.
-- **Consensus.** The extraction keeps the former dispatcher loop's behaviour.
-- **Gates.** All four pass: fmt, clippy, tests (1,084 passed, 0 failed) and `cargo deny`.
-
-There is no CRITICAL or MAJOR finding. The one MINOR finding (walkthrough 175 did not describe
-round 4) is **resolved** in this diff; I checked it against the code and tests in §4. Three
-SUGGESTIONs remain open, and the walkthrough now lists them in §9 as follow-ups.
+GitHub #325 follow-ups to the presence auto-unlock worker (PR #324). Reviewed from the raw
+patch (3741 lines) and the surrounding code, not from the author documents. The changes are a
+fresh attempt stamp taken under the policy write lock, an explicit `connect()` step bounded
+outside the call bound, a bounded, non-decrypting enrollment probe that runs before any D-Bus
+traffic, an `/etc/pam.conf` rule, and a substring-superset PAM line scan with an include-of-a-path
+rule. Every change moves toward fail-closed. No new route reaches `UnlockSession`. The
+pre-existing test edits are setup-only, except the one owner-approved assertion migration, and
+that migration matches the owner decision exactly. The local gates are green: fmt, clippy
+`-D warnings`, tests for the four crates (1316 tests ok, 0 failed) and `cargo deny`. There are
+no CRITICAL or MAJOR findings, one MINOR and two SUGGESTION.
 
 ## 2. Test Changes (mechanical listing from step 3, with justification per change)
 
-- **Test files touched.** The only pre-existing test file touched is
-  `tests/invariants/src/daemon_docs_contract.rs`. `tests/invariants/src/lib.rs` only gains a
-  `mod presence_unlock_contract;` declaration. Every other test file in the patch is new:
-  `crates/daemon/tests/presence_*_tests.rs`, `common/mod.rs`, `inference_priority_tests.rs`,
-  `crates/policy/tests/rate_limit_reserve_tests.rs` and
-  `tests/invariants/src/presence_unlock_contract.rs`.
-- **Removed or changed checks** (`^-` lines with `assert`, `#[test]`, `#[tokio::test`,
-  `proptest!` or `#[should_panic`): **none**.
-- **New escape hatches** (`#[ignore`, `#[cfg(any())]`, `should_panic`, `tolerance`, `epsilon`):
-  **none**.
-- **Inline test modules.** Lines 14547 and 14554 match only because they are string fixtures
-  inside `presence_unlock_contract.rs`. They are test inputs for the "strip trailing test module"
-  grep. No `mod tests` was added or removed.
-- **`daemon_docs_contract.rs`.** `CONFIG_FILE_TABLES` goes from `[(&str, &str); 9]` to `10` and
-  gains `("PresenceConfigFile", "presence")`. This is the one allowed migration. No assertion
-  changed, and the test now checks more.
-- **Inline `#[cfg(test)]` modules of `dispatcher.rs`, `inference.rs`, `rate_limit.rs`,
-  `decision.rs` and `config.rs`.** Untouched: no deleted test lines in their diffs.
-- **The one ignored test in the run.** It existed before this branch; no `#[ignore` was added.
+Step 3 greps on `target/candid_diff.patch`:
+- Removed or changed assertion lines (`^-` with assert, `#[test]`, `should_panic`): **none**.
+- New escape hatches (`#[ignore]`, `cfg(any())`, `should_panic`, tolerance, epsilon): **none**.
+- Inline `mod tests` changes: **none**.
+
+Pre-existing test files touched, checked one by one:
+1. `crates/daemon/tests/presence_account_tests.rs:161`: adds `.with_pam_conf(self.path("etc/pam.conf"))` to the guard builder. Setup only, so the host `/etc/pam.conf` is never read. No assertion touched.
+2. `crates/daemon/tests/presence_candid_review_tests.rs:112`: adds `.with_pam_conf(root.join("pam.conf"))`. Setup only.
+3. `crates/daemon/tests/presence_logging_tests.rs:383`: adds `.with_pam_conf(root.join("pam.conf"))`. Setup only.
+4. `crates/daemon/tests/presence_worker_tests.rs:460-464`: in the "not enrolled" case, UID 1001 (not the session owner `UID`) is now enrolled. The expected `SkipReason::NotEnrolled`, the `NoCandidate` alternative and `assert_nothing_spent` are unchanged. Justification: with an empty store the new probe would short-circuit before `select`. With another UID enrolled, the case still exercises the original path, where the session owner has no template (`select`, `Ok(None)`). The empty-store path is covered by the new `test_pfu_no_logind_traffic_while_nobody_is_enrolled`. Setup only.
+5. `crates/admin-cli/tests/cli_deadline_json_tests.rs`: the owner-approved migration (owner decision 2026-10-02, PFU7). Checked against the decision:
+   - Only `test_simulate_pam_auth_zero_timeout_is_clamped_to_pam_minimum` (line 128) uses `Completion::TimeoutTolerated`. The 250 ms test and the `u64::MAX` test still use `capture_deadline`, which maps to `Completion::Required` and therefore `Ok` only.
+   - The match (lines 103-106) accepts `Ok(_)` always, and `Err(AdminCliError::Timeout)` only under `TimeoutTolerated`. Any other error, in any mode, hits `panic!`.
+   - The `deadline >= before + budget && deadline <= after + budget` assertion is byte-identical and always runs. The deadline comes from `rx.recv_timeout(CAPTURE_WAIT = 5 s)` with `.expect`, so a missing capture fails the test. It is never skipped.
+   - The server write-failure tolerance (`written.expect` only under `Required`) is limited to the tolerated mode. In `Required` mode, a write failure still panics the server thread, and `server.join().expect` fails the test.
+   - `server.join()` now runs after the receive, which removes no check.
+   - Conclusion: the implementation matches the owner decision exactly. No other test was weakened.
+6. `tests/invariants/src/lib.rs`: only registers the new `presence_followups_contract` module.
+
+New test files: `enrollment_probe_tests.rs`, `presence_followups_tests.rs`, `presence_followups_connect_tests.rs`, `presence_followups_pam_conf_tests.rs` and `presence_followups_contract.rs`. Sampled tests can fail against plausible wrong implementations:
+- the stale stamp is caught by the 39-remaining-attempts probe at `before + 60.5 s`;
+- the reserve test fails if the step-3 clock is used;
+- the clock regression and clock failure tests assert `ClockUnavailable` and `assert_nothing_spent`;
+- the lock-ordering test parks a policy writer;
+- the probe bound test checks 4096 entries (`false`) against 4097 (error);
+- the no-template test checks `seat_calls() == 0`, `lid_calls() == 0` and `state_calls() == 0`.
 
 ## 3. Deep Reasoning Audit
 
 ### Logic & Architecture
 
-- **Path to `UnlockSession` (worker.rs:477–738).** Scenarios tried:
-  - Re-check returns `None`, an error, another ID, unlocked, inactive, remote, another UID or
-    another `Name` → `SessionChanged`.
-  - Account refused after the `Allow` → `AccountRefused`.
-  - `lid_closed() == Ok(true)` → `LidClosed`.
-  - Kill switch engaged → `KillSwitchEngaged`.
-  - Shutdown → `ShuttingDown`.
-  - Either clock fails → `AllowExpired`.
-  - Suspend between the `Allow` and the unlock (only `CLOCK_BOOTTIME` advances) → `AllowExpired`.
-  - The worst case of the post-`Allow` steps (account 500 ms + logind 2 × 500 ms) is above the
-    1000 ms window, so it expires (fail closed).
+- **(a) Single `UnlockSession` route.** `unlock_session` is still called once, at `worker.rs:759`, after the unchanged re-check chain. The new early returns are:
+  - the probe `Ok(false)` and `Err` (lines 500-510);
+  - the connect failure (511-525);
+  - the clock error or regression at step 10 (600-606);
+  - the rate limiter.
 
-  All PASS.
-- **Unlock failure.** `UnlockSession` failure or timeout → `UnlockFailed` plus backoff, with no
-  retry.
-- **Alias or indirect route.** I grepped for `UnlockSession`, `unlock_session` and
-  `call_method`. `call()` takes a `&'static str` method, and its callers name only
-  `ListSessions`, `GetSession`, `GetAll`, `Get` and `UnlockSession`. PASS.
-- **Tracker.** I checked:
-  - the grace boundary;
-  - UID change → new lock period;
-  - kill switch / overflow / logind failure → clear (grace restarts);
-  - `unlock_requested` → no rescan, then `locker_ignored` after 5 s;
-  - D5 ambiguity (two due sessions) → no scan.
+  All of them return `Skipped` before any camera, inference or unlock work. `current()` (`logind.rs:260`) never opens a connection. After a mid-tick `reset()`, the re-check and the unlock get `BusUnavailable`, which ends as `SessionChanged` or the unlock failure path. Fail closed. **PASS.**
+- **(b) Worker.**
+  - The probe runs after the kill switch, the backoff and the clock, and before step 4a. No logind access precedes it in any tick.
+  - `Err` maps to `TemplateStoreError` and `Ok(false)` to `NotEnrolled`. Both clear the tracker.
+  - The connect step is wrapped in `tokio::time::timeout(DBUS_CONNECT_TIMEOUT_MS)` (worker side) and again around `builder.build()` inside `ZbusLogind::connect`. The outer bound also covers waiting for the slot mutex.
+  - A connect `Err` or a timeout runs `logind_failed` (backoff and a single warn), clears the tracker and returns `LogindUnavailable`, all before any snapshot.
+  - Step 10 acquires `policy.write().await`, then reads the clock synchronously. `Ok(ns) if ns >= now_ns` is required. A regression or an error drops the guard and returns `ClockUnavailable` before `record_attempt_with_reserve`.
+  - There is no `.await` while the guard is held: the guard is dropped explicitly before `skip`, `mark_scan_started` and `scan`.
+  - `attempt_ns` is used for both the recording and `mark_scan_started`. **PASS.**
+- **(c) `account.rs` superset.** Old rule: tokenize with `_pam_mkargv` semantics, find the first token *ending* with `pam_faillock.so`, then any later token (after trimming `[`) equal to `even_deny_root` or starting with a policy prefix. Break attempts against the new rule:
+  - *Bracket unescape.* `\]` becomes `]` in the old tokenizer. None of the prefixes or the flag contain `]` or `\`, so unescaping can never create a match that is absent from the raw text.
+  - *Bracket stripping and leading `[` trim.* The raw text still holds the option text, and `starts_with` implies `contains`.
+  - *First occurrence vs module token.* `pam_faillock.so` cannot overlap itself (no proper prefix equals a suffix), so the first occurrence ends at or before the start of the module token's occurrence. The text after it therefore contains every later token. A first occurrence inside a non-module token (`xpam_faillock.sox`) only widens the searched text.
+  - *Whitespace.* The substring search is independent of the separators.
 
-  A lock period that restarts during one scan is not re-graced. That is ADR accepted risk (e).
-  PASS.
-- **Binding.** The same `check_local_seat_session_of` as the `Auth` path (UID, active,
-  `REMOTE=0`, seat, `CLASS=user`), plus `LockedHint == Bool(true)`. Greeter, remote and
-  inactive (fast-user-switched) sessions are never eligible. PASS.
-- **Consensus vs `origin/main`.** I diffed the removed dispatcher loop against
-  `consensus.rs:155–379`:
-  - the `Interactive` branch is token-for-token identical (freshness, `can_start`,
-    `decay_estimate`, `acquire_within`, the re-check after acquire, every `VisionError` mapping,
-    the spoof veto, the poll sleep);
-  - the clock is `self.clock_fn`, which is the same thing as `now_nanos()`;
-  - wake constants 1200 / 1000 / 15 ms are unchanged;
-  - aborts map to the same verdict, reason and `completion_error`;
-  - `Preempted` in the interactive path fails closed (`Unavailable` / `InternalError`).
+  No line detected by the old rule escapes the new one. The include rule uses one iterator, so `any(directive) && any('/')` finds a `/`-token strictly after the directive token, in any later position. `eq_ignore_ascii_case` covers `INCLUDE`, `SubStack` and `@Include`.
 
-  PASS.
-- **Config.** `[presence]` intervals are validated whether or not presence is enabled, and `0`
-  is refused. The warning arithmetic uses `div_ceil` and a saturating budget. The defaults
-  (40 attempts, 2000 ms → 30 scans per window ≤ 35) give no warning. PASS.
+  The `pam.conf` rule:
+  - `any_pam_dir` uses `metadata`, which follows symlinks like libpam's `stat`. NotFound or a non-directory does not count; other errors are `Undeterminable`.
+  - `pam.conf` is detected with `symlink_metadata`, so a dangling symlink counts as present.
+  - If `pam.conf` is present and no PAM directory is a directory, the result is `Undeterminable`.
+  - If both are present, `pam.conf` is scanned. `Absent` (a race or dangling link), a directory, a non-regular file, an unreadable file, more than `MAX_PAM_FILE_BYTES` or non-UTF-8 all give `Undeterminable`.
+  - An `any_pam_dir` error is `Undeterminable` even when `pam.conf` is absent. That is conservative.
+  - A system where `/usr/lib/pam.d` exists but libpam lacks that vendordir still has `pam.conf` scanned with the superset rule.
+
+  **PASS.**
+- **(d) `has_enrolled_template`.**
+  - `enumerate()` counts every entry, error entries and non-UTF-8 names included. The bound check precedes `entry?`, so exactly 4096 entries are examined and the 4097th returns `InvalidPath`.
+  - The error message is static: no path, no name.
+  - `DirEntry::file_type()` does not follow symlinks; `is_file()` is required.
+  - The canonical name check is `parse::<u32>()` plus a `to_string()` round trip. It rejects `+1`, `01` and overflow while accepting `0`.
+  - `TEMPLATE_EXTENSION` is `.cbor.enc`, so temporary names never match.
+  - Nothing is opened or decrypted, and the store lock is not taken.
+  - An I/O failure maps to `Io` through `#[from]`, a missing directory included, never `false`.
+
+  **PASS.**
 
 ### PAM Concurrency & Deadlines
-
-- **Scope.** `crates/pam` is not touched by this diff.
-- **Interactive demand.** The dispatcher registers interactive demand at the start of Step 8.
-  This is before the 8c reservation and before the wake. The RAII guard releases it on every
-  return path.
-- **Background acquisition.** `try_acquire_background` never waits, and it re-checks demand
-  after acquiring. A background run is preempted before every new inference.
-- **Worst-case PAM delay.** One background inference already in flight. This matches the ADR.
-- **Rate-limit reserve (`rate_limit.rs:202`).** Pruning, evaluation and recording all happen in
-  one `&mut self` call under the policy write lock. `reserve >= max` always refuses. Because
-  `remaining_attempts` (filter count) is never above what `check_and_record` sees (deque
-  length), the reserve can only be stricter. PASS.
+`crates/pam` is untouched. The daemon-side D-Bus steps stay bounded: connect by 1000 ms on both sides, every other step by `bounded()` at 500 ms plus the zbus `method_timeout`. The probe is synchronous, bounded at 4096 directory entries and makes no network call. **PASS.**
 
 ### Panic Safety & Fail-Closed
-
-- **No panic paths.** There is no `unwrap`, `expect`, indexing or `panic!` in the new
-  production modules. `#![forbid(unsafe_code)]` is set on `presence` and `consensus`.
-- **Account guard failures.** Every `Option` / `Result` failure in the guard maps to
-  `Undeterminable`.
-- **Worker panic.** A panic is logged once and the worker is never respawned (main.rs). A dead
-  worker never unlocks.
-- **Shutdown.** The worker is stopped before the drain, joined for at most
-  `min(drain, 500 ms)`, then aborted. `stop_requested()` is checked before recording an attempt
-  and again before the unlock. PASS.
+The production hunks contain no `unwrap`, `expect`, indexing or `panic!`. Every new error path skips or refuses. None of them yields an unlock or an attempt-free scan. **PASS.**
 
 ### Test Integrity & Anti-Weakening
-
-- **Mechanical listing.** Clean (§2).
-- **Spot-checked round-4 tests** (`presence_candid_review_tests.rs`):
-  - a suspend injected through the boot clock must give `AllowExpired`;
-  - a lid closed from the extractor hook must give `LidClosed`;
-  - bracketed `[deny=2]` / `[dir=/x y]` are detected while a bracketed control field is not.
-
-  Each would fail against the pre-round-4 code.
-- **Contract migration.** The only one is the `CONFIG_FILE_TABLES` entry. PASS.
+See §2. The only assertion-level migration is the owner-approved PFU7 change, and it is implemented exactly as decided. **PASS.**
 
 ### Memory, Bounds & Secrets
+- **(e) Logs and secrets.**
+  - Probe and connect errors are discarded (`Err(_)`) or logged only through the existing `logind_failed` warn (error kind only).
+  - No file content, path content, template or user data is logged.
+  - The PAM scan works on content bounded by `MAX_PAM_FILE_BYTES`, and its logical line is bounded by the same limit.
+  - The probe holds no template bytes.
 
-- **Account guard vs libpam.**
-  - **Tokenizer** (`account.rs:470`):
-    - same `[`-at-token-start rule as `_pam_tokenize`;
-    - same "first `]` ends it" rule;
-    - same `\]` → `]` rule;
-    - same unclosed-bracket-to-end rule;
-    - `"[a b]c"` → two tokens, as in libpam.
-
-    The tokenizer splits on Unicode whitespace, which is a superset of libpam's `" \n\t"`.
-    Continuation lines that end in a comment are joined, while libpam ends the logical line at
-    any `#`. Both differences only over-detect, so they fail closed.
-  - **Blank line inside a continuation.** It ends the logical line in both implementations
-    (`_pam_line_buffer_add_eol` / `buffer_valid`).
-  - **Argument matching.** It matches `set_conf_opt` (split at the first `=`).
-    `even_deny_root=x` is not detected, but it only matters for admins, and the guard already
-    treats admins as lockable. Option and module names are case-sensitive, as upstream.
-- **Faillock.**
-  - `check_tally`: the same `latest`, the same `<` / `>=` comparisons, the same
-    `latest + unlock_time < now`.
-  - `struct tally`: `status` is at byte 54 and `time` at 56, as upstream.
-  - The admin case is evaluated as both admin and non-admin. That is stricter than upstream,
-    which never locks an admin without `even_deny_root`.
-  - `faillock.conf`: same grammar. An unknown key or a bad value is `Undeterminable`, where
-    upstream logs it and ignores it, so the guard is stricter.
-  - Vendor file: evaluated together with the defaults. That is stricter than upstream, which
-    evaluates the vendor file alone.
-  - `pam_faillock` takes the same `flock(LOCK_EX)`, so the shared non-blocking `flock` is
-    consistent with it.
-  - An unreadable tally (`EACCES`) is `Undeterminable`. Upstream treats it as success, so the
-    guard is stricter.
-- **Shadow.** Same rules as `pam_unix` `check_shadow_expiry`:
-  - expire `>=`, including 0;
-  - `lastchg == 0` → `PasswordChangeForced`;
-  - the inactive and max ordering.
-
-  The `!` / `*` markers are an extra, stricter refusal. Nine fields are required, and `-1` or
-  non-digits are `Undeterminable`.
-- **File handling.**
-  - `O_NONBLOCK | O_CLOEXEC` everywhere; the tally adds `O_NOFOLLOW`;
-  - type decided by `fstat` on the open descriptor;
-  - a single allocation of at most `limit + 1` bytes, `Zeroizing`, never reallocated;
-  - a file that grew after `fstat` → refused;
-  - the user name cannot hold `/` and cannot start with `.` or `-`;
-  - tally directory: `symlink_metadata`, and not group- or other-writable unless it is
-    root-owned and sticky.
-- **One check in flight.** `swap(true)` with an RAII release inside the blocking job. A check
-  that times out keeps the flag set until its thread ends, so checks never pile up.
-- **Bounds.** Sessions (1024 / 16), tracker (16), DRM entries (64), PAM directory entries
-  (512 × 64 KiB), shadow (4 MiB / 65,536 lines), and D-Bus error text (256 bytes).
-- **Logs.** UID and session ID only above `debug`, never the user name. No frame, embedding,
-  file content or D-Bus body is logged. A spoof veto is logged and never sealed as evidence.
-  PASS.
+  **PASS.**
 
 ### Supply Chain & Automation
-
-- **zbus.** `zbus 5` with `default-features = false` and `tokio` adds 22 crates (MIT or
-  Apache-2.0). I checked `zcheapstr`: its author is the zbus maintainer (`z-galaxy`
-  repository), and the crate comes from crates.io with a checksum. `uds_windows` is built only
-  for Windows targets.
-- **cargo deny.** `advisories ok, bans ok, licenses ok, sources ok`.
-- **Pinned bus address.** No `Builder::system` and no environment variable.
-- **Unit file.** Only a comment changed. `AF_UNIX` and `PrivateNetwork` keep the filesystem
-  bus socket reachable.
-- **`.github/` and `scripts/`.** Not changed. PASS.
+No `Cargo.*`, `deny.toml`, `.github/` or `scripts/` change. `cargo deny --locked check` reports advisories, bans, licenses and sources ok. **PASS.**
 
 ### English-Only Policy
+- **(f) Docs and English.** Code, comments and docs are in English: the accented-character grep found no non-English content in the added lines. The docs match the code:
+  - `Docs/DAEMON.md` §6 steps 2-4 and 9, and the `pam.conf` and over-detection bullets;
+  - `Docs/BIOMETRIC_STORE_CRATE.md` §3.6 (bound semantics, the `InvalidPath` and `Io` mapping, no lock);
+  - the ADR amendment items (i) to (vi);
+  - matrix rows PFU1-PFU7;
+  - walkthrough 176, including an honest record of the residual PFU7 flake.
 
-All added code, comments and documents are in English. The only non-ASCII characters are
-Unicode test fixtures (`"é"`, `"ünïcode"`) used to test truncation and validation. PASS.
+  **PASS.**
 
-### Documentation accuracy
-
-These documents match the code, including the round-4 fixes:
-
-- ADR 2026-10-02 (clauses 5 and 10);
-- `Docs/DAEMON.md` §1.7 and §6;
-- `Docs/DISTRIBUTION_DEPLOYMENT.md` §5.3 and §5.5;
-- the README Quick Start;
-- `tests/physical/screensaver_test.md` §3.6 (lid re-check, `LidClosed`);
-- `VERIFICATION_MATRIX` rows PAU11, PAU25, PAU26 and PAU28.
-
-Walkthrough 175 now matches too (FINDING 1 resolved, see §4).
+### Verification Commands (run by the reviewer)
+- `cargo fmt --all -- --check`: exit 0.
+- `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`: exit 0.
+- `cargo test --locked -p soos-daemon -p soos-biometric-store -p soos-admin-cli -p soos-invariants --all-targets --all-features`: exit 0, 0 failed.
+- `cargo deny --locked check`: exit 0.
 
 ## 4. Detailed Findings & Action Items
 
-- **[MINOR — RESOLVED]** `AI/walkthroughs/175_presence_auto_unlock.md` — **The walkthrough did
-  not describe round 4.**
-  - **Resolution, checked against the code and tests.**
-    - The counts now say 220 tests.
-    - The §4 table lists `presence_candid_review_tests.rs` with 9 tests. That file has 9
-      `#[test]` / `#[tokio::test]` functions.
-    - `presence_unlock_contract` is listed with 19 tests. It has 19, including
-      `test_pau_allow_window_uses_the_boot_clock` at line 1058.
-    - A Round 4 entry is added.
-    - §7 now records both reviews and the four fixes, and each description matches
-      `account.rs`, `worker.rs` and the tests.
-    - §8 is updated.
-    - The `soos-admin-cli` timing test it cites exists:
-      `crates/admin-cli/tests/cli_deadline_json_tests.rs:98`.
-    - §9 lists the three suggestions below.
-
-  Original finding:
-  - **Defect.**
-    - It still says the contract has **210 tests**. `AI/tester_contract_presence_unlock.md:474`
-      says 220.
-    - Its §4 table does not list `crates/daemon/tests/presence_candid_review_tests.rs`.
-    - §7 says "Candid Review — Not run yet". In fact a `CHANGES_REQUESTED` review happened and
-      its fixes were applied:
-      - bracketed `pam_faillock.so` arguments are detected;
-      - any `!` / `*` shadow marker is locked;
-      - the `Allow` window is also measured on `CLOCK_BOOTTIME`;
-      - the lid is re-checked after the `Allow` (`ScanOutcome::LidClosed`).
-    - None of these four fixes appears anywhere in the walkthrough. §8 shows the earlier test
-      counts.
-  - **Correction.**
-    - Add a "Round 4 (candid review)" entry in §4 and §7 listing the four fixes and the new
-      test file (9 runtime tests and 1 invariant).
-    - Update the counts to 220.
-    - Refresh the §8 numbers.
-- **[SUGGESTION]** `crates/daemon/src/presence/worker.rs:565-570` — **Stale attempt time.**
-  - The attempt is recorded with `now_ns` read at step 3. Steps 4–9 (snapshot, account checks,
-    lid call) can take more than 1.5 s, so the timestamp is older than the real attempt and can
-    land behind a newer PAM entry in the per-UID deque.
-  - This only shifts the window by that delay, and it is never fail-open.
-  - Read `(self.clock_fn)()` again just before `record_attempt_with_reserve`. On error, skip
-    with `ClockUnavailable`.
-- **[SUGGESTION]** `crates/daemon/src/presence/logind.rs:246-267` — **Connect timeout cannot be
-  reached.**
-  - `DBUS_CONNECT_TIMEOUT_MS = 1000` is never reached, because every worker call is wrapped in
-    `bounded()` at 500 ms (worker.rs:189).
-  - A bus whose handshake takes 500–1000 ms never connects, and the request is refused.
-  - Either lower the connect timeout below the call bound, or connect outside `bounded()`.
-    Also document that the 500 ms bound covers the whole snapshot (`ListSessions` plus up to 16
-    `GetAll`), not each call.
-- **[SUGGESTION]** `crates/daemon/src/presence/account.rs:446-503` — **Document the tokenizer
-  differences.**
-  - Note in the doc comment that it deliberately over-detects compared with libpam: Unicode
-    whitespace, and a `\` continuation line that ends in `#` is still joined.
-  - Note that `/etc/pam.conf` is not scanned. libpam reads it only when `/etc/pam.d` is absent.
-    Optionally refuse (`Undeterminable`) when `/etc/pam.conf` exists and `/etc/pam.d` does not.
+- **[MINOR]** `crates/admin-cli/tests/cli_deadline_json_tests.rs:107-109`. A residual load-only flake is documented in walkthrough 176 §6 (2/576 runs under 64-way single-CPU pinning). Under that stress, the client misses its 10 ms deadline before it writes the request, so no deadline is captured and `recv_timeout(...).expect` fails. This is the strict reading of the owner rule ("fail if the captured value never arrives"), so it is not a defect in the migration. Required correction: none for this PR. If the flake shows up in CI, it needs a new owner decision; the tests must not be relaxed unilaterally.
+- **[SUGGESTION]** `crates/daemon/src/presence/worker.rs:500-510`. A transient probe error (or `Ok(false)`) clears the tracker, including any "locker ignored UnlockSession" marker. On the next enrolled tick, that lock period is therefore observed afresh and can be scanned again after the grace period. A logind outage already behaves this way, the shared rate limiter still bounds attempts, and this direction is fail-closed for unlocking. An optional follow-up is a one-line note in `Docs/DAEMON.md` §6 that a store-probe skip, like a logind outage, restarts every lock period.
+- **[SUGGESTION]** `crates/daemon/src/presence/logind.rs:358-380`. `ZbusLogind::connect` holds the slot mutex across `builder.build()`. This is harmless today, because the worker is the only caller and is sequential. A comment stating that single-caller assumption would keep a future concurrent caller from inheriting a connect-long lock wait.
 
 ## 5. Final Verdict
 
-There is no CRITICAL or MAJOR finding. Gates run on this tree:
-
-- `cargo fmt --all -- --check`: rc=0.
-- `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`: rc=0.
-- `cargo test --locked -p soos-daemon -p soos-policy -p soos-invariants --all-targets --all-features`:
-  rc=0, 1,084 passed, 0 failed.
-- `cargo deny --locked check`: rc=0.
+No CRITICAL or MAJOR finding after concrete break attempts on every pillar.
 
 **VERDICT: APPROVED**

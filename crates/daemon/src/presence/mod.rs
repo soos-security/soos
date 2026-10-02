@@ -34,10 +34,19 @@ pub const LOCK_POLL_INTERVAL_MS: u64 = 1000;
 /// always keeps at least the pre-#323 budget.
 pub const PRESENCE_RESERVED_ATTEMPTS: u32 = 5;
 
-/// Bound of every logind D-Bus call; expiry is `PresenceLogindError::Timeout`.
+/// Bound of each logind step of the worker on an established connection; expiry is
+/// `PresenceLogindError::Timeout`. A step is the whole `seat_sessions` snapshot taken as one
+/// unit (one `ListSessions` plus one `GetAll` per seat session, at most
+/// 1 + `MAX_PRESENCE_SEAT_SESSIONS` round trips), `session_state` (`GetSession` + `GetAll`),
+/// `lid_closed` or `unlock_session`. Every single D-Bus round trip inside a step is bounded
+/// by the same value (zbus `method_timeout` and the per-call timeout of `ZbusLogind`), so the
+/// step bound is the binding one. It never covers opening the connection
+/// ([`DBUS_CONNECT_TIMEOUT_MS`]).
 pub const DBUS_CALL_TIMEOUT_MS: u64 = 500;
 
-/// Bound of one system-bus connection attempt (authentication handshake and `Hello`).
+/// Bound of one system-bus connection attempt, `PresenceLogind::connect()` (authentication
+/// handshake and `Hello`). The worker applies it before the snapshot, outside the
+/// [`DBUS_CALL_TIMEOUT_MS`] bound; only `connect()` opens a connection.
 pub const DBUS_CONNECT_TIMEOUT_MS: u64 = 1000;
 
 /// First reconnect backoff after a logind failure.
@@ -111,6 +120,10 @@ pub const MAX_PAM_FILE_BYTES: usize = 65_536;
 
 /// PAM stack directories scanned for `pam_faillock.so` policy options.
 pub const DEFAULT_PAM_DIRS: [&str; 3] = ["/etc/pam.d", "/usr/lib/pam.d", "/usr/etc/pam.d"];
+
+/// Single-file PAM configuration, read by libpam only when none of the PAM directories is a
+/// directory (scanned like a stack file when one is; `Undeterminable` when none is).
+pub const DEFAULT_PAM_CONF: &str = "/etc/pam.conf";
 
 /// Directory entries examined per PAM directory; more is `Undeterminable`.
 pub const MAX_PAM_DIR_ENTRIES: usize = 512;

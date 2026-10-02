@@ -247,6 +247,10 @@ mod arch_faillock_ci_contract;
 #[cfg(all(test, unix))]
 mod presence_unlock_contract;
 
+/// Presence auto-unlock review follow-ups (GitHub #325; rows PFU2, PFU3, PFU4, PFU6).
+#[cfg(all(test, unix))]
+mod presence_followups_contract;
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,

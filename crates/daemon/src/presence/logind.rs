@@ -4,7 +4,9 @@
 //! `org.freedesktop.login1` on the pinned system bus address [`SYSTEM_BUS_ADDRESS`]. The
 //! connection registers no object server, no well-known name and no signal match; every
 //! property is read with a fresh `Properties.GetAll` / `Get` round trip (no cache); every
-//! call is bounded by [`DBUS_CALL_TIMEOUT_MS`].
+//! call is bounded by [`DBUS_CALL_TIMEOUT_MS`]. The connection is opened only by
+//! [`PresenceLogind::connect`], under its own [`DBUS_CONNECT_TIMEOUT_MS`] bound and outside
+//! the call bound (GitHub #325).
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -108,6 +110,14 @@ impl PresenceLogindError {
 
 /// Mockable logind access for the presence worker.
 pub trait PresenceLogind: Send + Sync + 'static {
+    /// Opens the system-bus connection when none is held (no-op when one is). The worker
+    /// calls it once per tick, right before the snapshot, bounded by `DBUS_CONNECT_TIMEOUT_MS`
+    /// and outside the `DBUS_CALL_TIMEOUT_MS` bound. The default (doubles without a
+    /// connection) succeeds at once and performs no I/O.
+    fn connect(&self) -> impl Future<Output = Result<(), PresenceLogindError>> + Send {
+        std::future::ready(Ok(()))
+    }
+
     /// Every session with a non-empty seat, mapped through
     /// [`session_state_from_properties`]. More than `MAX_SCANNED_SESSIONS` listed, or more
     /// than `MAX_PRESENCE_SEAT_SESSIONS` seat sessions, is `TooManySessions`; invalid IDs
@@ -215,8 +225,8 @@ pub fn session_state_from_properties<S: std::hash::BuildHasher>(
     })
 }
 
-/// Production logind access over the pinned system bus (lazy connection, no I/O before
-/// the first call).
+/// Production logind access over the pinned system bus (no I/O before the first
+/// [`PresenceLogind::connect`], the only place that opens a connection).
 #[derive(Debug, Default)]
 pub struct ZbusLogind {
     slot: tokio::sync::Mutex<Option<zbus::Connection>>,
@@ -231,7 +241,8 @@ enum CallFailure {
 }
 
 impl ZbusLogind {
-    /// Creates the client; performs no I/O (the connection is opened on first use).
+    /// Creates the client; performs no I/O (the connection is opened by
+    /// [`PresenceLogind::connect`]).
     #[must_use]
     pub fn new() -> Self {
         Self::default()
@@ -243,31 +254,19 @@ impl ZbusLogind {
         SYSTEM_BUS_ADDRESS
     }
 
-    /// Returns the cached connection or opens one (bounded by `DBUS_CONNECT_TIMEOUT_MS`).
-    async fn connection(&self) -> Result<zbus::Connection, PresenceLogindError> {
-        let mut slot = self.slot.lock().await;
-        if let Some(connection) = slot.as_ref() {
-            return Ok(connection.clone());
-        }
-        let builder = zbus::connection::Builder::address(self.address())
-            .map_err(|_| PresenceLogindError::BusUnavailable)?
-            .method_timeout(Duration::from_millis(DBUS_CALL_TIMEOUT_MS))
-            .max_queued(MAX_QUEUED_MESSAGES);
-        let connection = match tokio::time::timeout(
-            Duration::from_millis(DBUS_CONNECT_TIMEOUT_MS),
-            builder.build(),
-        )
-        .await
-        {
-            Ok(Ok(connection)) => connection,
-            Ok(Err(_)) => return Err(PresenceLogindError::BusUnavailable),
-            Err(_) => return Err(PresenceLogindError::Timeout),
-        };
-        *slot = Some(connection.clone());
-        Ok(connection)
+    /// The held connection; never opens one (`BusUnavailable` when none is held, e.g.
+    /// after a transport failure earlier in the tick: the next tick reconnects through
+    /// [`PresenceLogind::connect`]).
+    async fn current(&self) -> Result<zbus::Connection, PresenceLogindError> {
+        self.slot
+            .lock()
+            .await
+            .as_ref()
+            .cloned()
+            .ok_or(PresenceLogindError::BusUnavailable)
     }
 
-    /// Drops the cached connection (the next call reconnects).
+    /// Drops the cached connection (the next `connect()` opens a new one).
     async fn reset(&self) {
         *self.slot.lock().await = None;
     }
@@ -283,7 +282,7 @@ impl ZbusLogind {
     where
         B: serde::Serialize + zbus::zvariant::DynamicType + Sync,
     {
-        let connection = self.connection().await.map_err(CallFailure::Transport)?;
+        let connection = self.current().await.map_err(CallFailure::Transport)?;
         let reply = tokio::time::timeout(
             Duration::from_millis(DBUS_CALL_TIMEOUT_MS),
             connection.call_method(
@@ -356,6 +355,30 @@ impl ZbusLogind {
 }
 
 impl PresenceLogind for ZbusLogind {
+    async fn connect(&self) -> Result<(), PresenceLogindError> {
+        let mut slot = self.slot.lock().await;
+        if slot.is_some() {
+            return Ok(());
+        }
+        let builder = zbus::connection::Builder::address(self.address())
+            .map_err(|_| PresenceLogindError::BusUnavailable)?
+            .method_timeout(Duration::from_millis(DBUS_CALL_TIMEOUT_MS))
+            .max_queued(MAX_QUEUED_MESSAGES);
+        match tokio::time::timeout(
+            Duration::from_millis(DBUS_CONNECT_TIMEOUT_MS),
+            builder.build(),
+        )
+        .await
+        {
+            Ok(Ok(connection)) => {
+                *slot = Some(connection);
+                Ok(())
+            }
+            Ok(Err(_)) => Err(PresenceLogindError::BusUnavailable),
+            Err(_) => Err(PresenceLogindError::Timeout),
+        }
+    }
+
     async fn seat_sessions(&self) -> Result<Vec<LogindSessionState>, PresenceLogindError> {
         let listing = match self
             .call(

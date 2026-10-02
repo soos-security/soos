@@ -183,6 +183,14 @@ Recorded as ADR 2026-09-30 "Bounded Template Reads and Metadata-Only Listing".
 - `MAX_TEMPLATE_FILE_BYTES` = 64 KiB bounds every template file. `get` and `get_metadata` refuse a larger file with `BiometricStoreError::CorruptFile` from its `fstat` length, before any read, and read through `take(MAX + 1)` so a file that grows after the check is refused too. `enroll` refuses (`InvalidMetadata`) a template whose ciphertext would exceed the bound.
 - `get_metadata(uid) -> Option<TemplateMetadata>` authenticates and decrypts like `get`, then deserializes `TemplateMetadata` (`uid`, `model_id`, `model_version`, `enrollment_timestamp`, `embedding_dim`): the embedding array is walked only to count its elements and check they are finite, never stored. Listing callers (`soos-enroll list`, the GUI profile refresh) use it.
 
+### 3.6 Enrollment Probe (GitHub #325)
+
+`has_enrolled_template() -> Result<bool, _>` tells whether the store holds at least one template file without opening, reading or decrypting any, and without taking the store lock (its 5 s wait would block the caller). The presence worker of `soos-daemon` runs it every tick, before any D-Bus traffic, and does not poll logind while it returns `false`.
+
+- `true` at the first entry named `<uid>.cbor.enc` with a canonical decimal `u32` (no sign, no leading zero except `0` itself) whose type, read with `DirEntry::file_type` (symlinks not followed), is a regular file. Symlinks (even to a real template), directories, temporary files (`<uid>.tmp.<pid>.<suffix>`) and other names never count.
+- At most `MAX_ENROLLMENT_PROBE_ENTRIES` (4096) entries are examined, non-UTF-8 names included: exactly 4096 non-matching entries give `false`, one more is `BiometricStoreError::InvalidPath`. A directory that cannot be listed (missing included) is `BiometricStoreError::Io`, never `false`.
+- A file with a template name counts even if it cannot be decrypted; the caller's per-UID `get` reports it later. `list_enrolled` (diagnostic API: unbounded, accepts non-canonical names) is not used for this.
+
 ---
 
 ## 4. Public API & Usage
@@ -243,6 +251,9 @@ assert!(store.exists(1000)?);
 
 // 4. List Enrolled UIDs
 let uids = store.list_enrolled()?; // vec![1000]
+
+// 4b. Cheap probe: any template file at all? (bounded, nothing opened or decrypted)
+assert!(store.has_enrolled_template()?);
 
 // 5. Delete
 assert!(store.delete(1000)?);

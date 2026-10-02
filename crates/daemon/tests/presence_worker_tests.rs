@@ -457,7 +457,11 @@ type UnusableTemplateCase = (&'static str, Vec<(u32, Enrollment)>, SkipReason);
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_pau_unusable_templates_cost_no_attempt_and_no_camera() {
     let cases: Vec<UnusableTemplateCase> = vec![
-        ("not enrolled", vec![], SkipReason::NotEnrolled),
+        (
+            "not enrolled",
+            vec![(1001, Enrollment::LiveIdentity)],
+            SkipReason::NotEnrolled,
+        ),
         (
             "foreign template",
             vec![(UID, Enrollment::RetiredArcFace)],

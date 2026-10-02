@@ -310,25 +310,39 @@ worker panic is logged once (`error`) and disables presence until the next daemo
    `/etc/soos/presence.disable` (presence only), as any entry kind, or a stat error other than
    "not found", stops presence and restarts every grace. `gdm.disable` and the other
    per-service PAM flags do **not** stop presence. No restart is needed in either direction.
-2. logind snapshot over the pinned system bus `unix:path=/run/dbus/system_bus_socket` (`zbus`,
-   every call bounded by 500 ms; failures back off 1 s, doubling to 30 s, logged at `warn` once
-   per outage). A session is eligible only if it passes the `Auth` binding predicate (owner UID,
+2. Enrollment probe (GitHub #325): while the biometric store holds no template file (a bounded
+   listing of `/var/lib/soos/biometrics`, at most 4096 entries, nothing opened or decrypted),
+   the tick ends as `not_enrolled` before any D-Bus traffic (no connection, no snapshot) and
+   every grace restarts; a store listing error ends it as `template_store_error`. The probe runs
+   every tick, so a new enrollment is picked up within one second, without a restart.
+3. Connection: when none is held, the worker opens one over the pinned system bus
+   `unix:path=/run/dbus/system_bus_socket` (`zbus`) under its own 1000 ms bound
+   (`DBUS_CONNECT_TIMEOUT_MS`), outside the 500 ms call bound; only this step opens a
+   connection. A failure or timeout ends the tick as `logind_unavailable` with the backoff below.
+4. logind snapshot. The 500 ms bound (`DBUS_CALL_TIMEOUT_MS`) covers the whole snapshot as one
+   unit (one `ListSessions` plus one `GetAll` per seat session), and separately each later
+   logind step (re-check, lid read, `UnlockSession`); every single D-Bus round trip is bounded
+   by the same value. It never covers opening the connection. Failures back off 1 s, doubling
+   to 30 s, logged at `warn` once per outage. A session is eligible only if it passes the `Auth` binding predicate (owner UID,
    active, explicit `REMOTE=0`, seat, `CLASS=user`) and `LockedHint` is `true`.
-3. Grace: no scan until `lock_grace_ms` after the lock was first observed; a session seen
+5. Grace: no scan until `lock_grace_ms` after the lock was first observed; a session seen
    unlocked, inactive or gone ends its lock period. Scans of one session are spaced by
    `scan_interval_ms`.
-4. Exactly one eligible session must have a current-model template and pass the account guard;
+6. Exactly one eligible session must have a current-model template and pass the account guard;
    zero or several mean no scan (no attempt, no camera wake).
-5. Gates: no scan while logind reports the lid closed or every connected DRM connector is
+7. Gates: no scan while logind reports the lid closed or every connected DRM connector is
    DPMS-off; an undetectable state does not gate. Screen-off detection is best effort: on
    atomic-KMS drivers the sysfs `dpms` attribute may stay `On` while the compositor blanks the
    screen, and scans then continue. Gate transitions are logged at `info`.
-6. PAM priority: no scan while an `Auth` request is in progress; a running scan yields before
+8. PAM priority: no scan while an `Auth` request is in progress; a running scan yields before
    its next inference.
-7. One attempt is recorded in the shared per-UID rate limiter, never consuming the last 5.
-8. The unchanged pipeline (camera wake, `k = 3` consecutive passing captures, any spoof vetoes,
+9. One attempt is recorded in the shared per-UID rate limiter, never consuming the last 5. It
+   is stamped with a clock read taken under the policy lock right before recording (GitHub
+   #325); a clock error or a reading older than the start of the tick skips the tick
+   (`clock_unavailable`) with no attempt, no camera wake and no unlock.
+10. The unchanged pipeline (camera wake, `k = 3` consecutive passing captures, any spoof vetoes,
    `[pipeline.thresholds]`) runs; a spoof veto is logged at `warn` and never sealed as evidence.
-9. After an `Allow`, a fresh logind re-check of the same session ID (still bound, locked, same
+11. After an `Allow`, a fresh logind re-check of the same session ID (still bound, locked, same
    UID and same `Name`), a fresh account check, a lid re-check (a lid closed during the scan
    refuses; a read error does not) and a kill-switch re-check must pass within 1000 ms
    (`MAX_ALLOW_TO_UNLOCK_MS`), measured on both `CLOCK_MONOTONIC` and `CLOCK_BOOTTIME` (a
@@ -341,13 +355,28 @@ expiry; locked, expired **or undeterminable** means no unlock, and the password 
 path. Before every scan and again after the `Allow`, the guard (files re-read every time):
 
 - refuses UID 0;
+- applies the `/etc/pam.conf` rule (GitHub #325): libpam reads `/etc/pam.conf` only when none
+  of `/etc/pam.d`, `/usr/lib/pam.d` and `/usr/etc/pam.d` is a directory. A present
+  `/etc/pam.conf` (any type) without any of these directories is undeterminable (the guard does
+  not model a `pam.conf`-only system); next to a PAM directory it is scanned like a stack file
+  (a policy option, or a special, unreadable, oversized or non-UTF-8 file, is undeterminable).
+  A comment-only `pam.conf`, as shipped by Debian and Ubuntu, stays usable;
 - scans every file of `/etc/pam.d`, `/usr/lib/pam.d` and `/usr/etc/pam.d` (symbolic links
-  followed like libpam, so authselect stacks are seen): a `pam_faillock.so` line carrying a
-  policy option (`deny=`, `dir=`, `fail_interval=`, `unlock_time=`, `root_unlock_time=`,
-  `admin_group=`, `conf=`, `even_deny_root`), also as a bracketed argument (`[deny=2]`,
-  `[dir=/x y]`: libpam strips the brackets), makes the state undeterminable; a bracketed
-  control field such as `[success=1 default=bad]` is not an argument. Keep faillock
-  policy in `/etc/security/faillock.conf`, not on PAM lines;
+  followed like libpam, so authselect stacks are seen): a line holding `pam_faillock.so`
+  followed anywhere later by a policy option (`deny=`, `dir=`, `fail_interval=`,
+  `unlock_time=`, `root_unlock_time=`, `admin_group=`, `conf=`, `even_deny_root`) makes the
+  state undeterminable. The scan is a plain substring search after the first `pam_faillock.so`
+  of the line, independent of the tokenizer: it deliberately over-detects compared with libpam
+  (any whitespace, Unicode included, any brackets, a `\` before a `#` comment joining the next
+  line), so it can never miss an option libpam passes, and a false positive only refuses
+  presence. A bracketed control field before the module such as `[success=1 default=bad]` is
+  not matched. An `include`, `substack` or `@include` of a path (a target holding `/`:
+  absolute, nested or `..`) is undeterminable, since the guard scans only the top level of the
+  three directories; plain names (`include system-auth`) stay usable. The module is recognised
+  by its name only: a renamed copy of `pam_faillock.so` is not seen. The guard assumes libpam's
+  `VENDORDIR=/usr/etc`; a libpam built with another `VENDORDIR` reads `<VENDORDIR>/pam.d`
+  stacks that the guard never scans. Keep faillock policy in `/etc/security/faillock.conf`,
+  not on PAM lines;
 - reads `faillock.conf` (`/etc/security/faillock.conf`; when absent, the built-in defaults
   3 / 900 s / 600 s **and** the vendor `/usr/etc/security/faillock.conf` are both evaluated,
   strictest wins); an unknown key or malformed value is undeterminable;

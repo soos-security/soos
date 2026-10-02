@@ -3,9 +3,16 @@
 //! A presence unlock respects `pam_faillock` and account / password expiry: a locked,
 //! expired **or undeterminable** account is never unlocked by presence (the password stays
 //! the only path). The guard only reads: the PAM stack directories (policy options on
-//! `pam_faillock.so` lines), `faillock.conf`, the user's tally file and `/etc/shadow`.
-//! It never writes anything (no tally reset), never logs any file content and never keeps
-//! the password hash or the tally `source` bytes.
+//! `pam_faillock.so` lines), `/etc/pam.conf`, `faillock.conf`, the user's tally file and
+//! `/etc/shadow`. It never writes anything (no tally reset), never logs any file content and
+//! never keeps the password hash or the tally `source` bytes.
+//!
+//! `/etc/pam.conf` rule (GitHub #325): libpam reads `pam.conf` only when none of its PAM
+//! directories is a directory. A present `pam.conf` without any PAM directory is therefore
+//! `Undeterminable` (the guard does not model a `pam.conf`-only system); a present `pam.conf`
+//! next to a PAM directory is scanned like a stack file (fail closed: it covers libpam builds
+//! that also read it). The PAM line scan deliberately over-detects: it is a superset of what
+//! libpam passes to `pam_faillock.so` (see [`scan_pam_faillock_options`]).
 
 use std::fs::{File, OpenOptions};
 use std::io::{ErrorKind, Read};
@@ -17,10 +24,10 @@ use zeroize::Zeroizing;
 
 use super::{
     DEFAULT_FAILLOCK_CONF, DEFAULT_FAILLOCK_DENY, DEFAULT_FAILLOCK_DIR,
-    DEFAULT_FAILLOCK_FAIL_INTERVAL_S, DEFAULT_FAILLOCK_UNLOCK_TIME_S, DEFAULT_PAM_DIRS,
-    DEFAULT_SHADOW_PATH, MAX_FAILLOCK_CONF_BYTES, MAX_FAILLOCK_TIME_INTERVAL, MAX_PAM_DIR_ENTRIES,
-    MAX_PAM_FILE_BYTES, MAX_SHADOW_BYTES, MAX_SHADOW_LINES, MAX_TALLY_BYTES, MAX_USER_NAME_LEN,
-    TALLY_RECORD_BYTES, TALLY_STATUS_VALID, VENDOR_FAILLOCK_CONF,
+    DEFAULT_FAILLOCK_FAIL_INTERVAL_S, DEFAULT_FAILLOCK_UNLOCK_TIME_S, DEFAULT_PAM_CONF,
+    DEFAULT_PAM_DIRS, DEFAULT_SHADOW_PATH, MAX_FAILLOCK_CONF_BYTES, MAX_FAILLOCK_TIME_INTERVAL,
+    MAX_PAM_DIR_ENTRIES, MAX_PAM_FILE_BYTES, MAX_SHADOW_BYTES, MAX_SHADOW_LINES, MAX_TALLY_BYTES,
+    MAX_USER_NAME_LEN, TALLY_RECORD_BYTES, TALLY_STATUS_VALID, VENDOR_FAILLOCK_CONF,
 };
 use crate::error::DaemonError;
 
@@ -40,6 +47,12 @@ const PAM_POLICY_ARGUMENT_PREFIXES: [&str; 7] = [
     "admin_group=",
     "conf=",
 ];
+/// `pam_faillock.so` flag argument that sets policy.
+const PAM_POLICY_FLAG: &str = "even_deny_root";
+/// Module name the PAM line scan looks for.
+const PAM_FAILLOCK_MODULE: &str = "pam_faillock.so";
+/// PAM directives that read another stack file (ASCII case-insensitive).
+const PAM_INCLUDE_DIRECTIVES: [&str; 3] = ["include", "substack", "@include"];
 /// `faillock.conf` flags (no value).
 const FAILLOCK_FLAGS: [&str; 6] = [
     "even_deny_root",
@@ -440,8 +453,25 @@ pub fn faillock_denies(policy: &FaillockPolicy, records: &[TallyRecord], now_s: 
         )
 }
 
-/// Whether some `pam_faillock.so` line of a PAM stack file sets a policy option
-/// (backslash continuations joined, `#` comments dropped). `true` = `Undeterminable`.
+/// Whether some line of a PAM stack file (or of `pam.conf`) sets `pam_faillock.so` policy
+/// options or reads a stack file the guard cannot follow. `true` = `Undeterminable`.
+///
+/// The scan deliberately over-detects: it is a superset of what libpam passes to
+/// `pam_faillock.so` and must never be narrowed. Logical lines are assembled with the `#`
+/// comment dropped per physical line and a remaining trailing `\` joining the next line (a
+/// `\` left before a `#` comment joins the next line although libpam ends that line). A
+/// logical line is a hit when, after the first occurrence of `pam_faillock.so`, it contains
+/// any policy-option substring (`dir=`, `deny=`, `fail_interval=`, `unlock_time=`,
+/// `root_unlock_time=`, `admin_group=`, `conf=`, `even_deny_root`), independent of ASCII or
+/// Unicode whitespace, brackets (unterminated included) and quoting; or when it holds an
+/// `include` / `substack` / `@include` directive (ASCII case-insensitive) followed anywhere
+/// later by a token containing `/` (an absolute, nested or relative stack path that the guard,
+/// which scans only the top level of its PAM directories, never reads). A false positive only
+/// refuses presence (the password path is untouched).
+///
+/// Known limit: the module is recognised by its name `pam_faillock.so`, so a renamed copy or
+/// a differently named symlink to it is not seen (root-only configuration, an accepted risk
+/// of the presence ADR).
 #[must_use]
 pub fn scan_pam_faillock_options(content: &str) -> bool {
     let mut logical = String::new();
@@ -464,60 +494,31 @@ pub fn scan_pam_faillock_options(content: &str) -> bool {
     line_sets_faillock_policy(&logical)
 }
 
-/// Splits a logical PAM line into tokens like libpam (`_pam_mkargv`): a token starting with
-/// `[` extends to the matching `]` (spaces included, `\]` is a literal `]`) and its brackets
-/// are stripped; any other token ends at whitespace.
-fn pam_tokens(line: &str) -> Vec<String> {
-    let mut tokens = Vec::new();
-    let mut chars = line.chars().peekable();
-    while let Some(&c) = chars.peek() {
-        if c.is_whitespace() {
-            chars.next();
-            continue;
-        }
-        let mut token = String::new();
-        if c == '[' {
-            chars.next();
-            while let Some(c) = chars.next() {
-                match c {
-                    '\\' if chars.peek() == Some(&']') => {
-                        token.push(']');
-                        chars.next();
-                    }
-                    ']' => break,
-                    other => token.push(other),
-                }
-            }
-        } else {
-            while let Some(&c) = chars.peek() {
-                if c.is_whitespace() {
-                    break;
-                }
-                token.push(c);
-                chars.next();
-            }
-        }
-        tokens.push(token);
-    }
-    tokens
+/// One logical PAM line: a policy-option substring after the first `pam_faillock.so`, or an
+/// include of a path (see [`scan_pam_faillock_options`]).
+fn line_sets_faillock_policy(line: &str) -> bool {
+    sets_faillock_option(line) || includes_a_path(line)
 }
 
-/// One logical PAM line: a `pam_faillock.so` module token followed by a policy argument
-/// (bracketed arguments included, as libpam strips their brackets; a bracketed control field
-/// before the module token is never an argument).
-fn line_sets_faillock_policy(line: &str) -> bool {
-    let tokens = pam_tokens(line);
-    let mut iter = tokens.iter();
-    if !iter.any(|token| token.ends_with("pam_faillock.so")) {
+/// Substring rule: any policy option after the end of the first `pam_faillock.so`.
+fn sets_faillock_option(line: &str) -> bool {
+    let Some((_, after)) = line.split_once(PAM_FAILLOCK_MODULE) else {
         return false;
-    }
-    iter.any(|arg| {
-        let arg = arg.trim_start_matches('[');
-        arg == "even_deny_root"
-            || PAM_POLICY_ARGUMENT_PREFIXES
-                .iter()
-                .any(|prefix| arg.starts_with(prefix))
-    })
+    };
+    after.contains(PAM_POLICY_FLAG)
+        || PAM_POLICY_ARGUMENT_PREFIXES
+            .iter()
+            .any(|prefix| after.contains(prefix))
+}
+
+/// Include rule: some token is an include directive and any later token contains `/`.
+fn includes_a_path(line: &str) -> bool {
+    let mut tokens = line.split(char::is_whitespace).filter(|t| !t.is_empty());
+    tokens.any(|token| {
+        PAM_INCLUDE_DIRECTIVES
+            .iter()
+            .any(|directive| token.eq_ignore_ascii_case(directive))
+    }) && tokens.any(|token| token.contains('/'))
 }
 
 /// Parses one numeric shadow field: empty = not set; otherwise decimal `i64 >= 0`.
@@ -621,6 +622,7 @@ pub struct SystemAccountGuard {
     vendor_faillock_conf: PathBuf,
     default_faillock_dir: PathBuf,
     pam_dirs: Vec<PathBuf>,
+    pam_conf: PathBuf,
     shadow: PathBuf,
     realtime: fn() -> Result<u64, DaemonError>,
 }
@@ -648,6 +650,7 @@ impl SystemAccountGuard {
             vendor_faillock_conf: PathBuf::from(VENDOR_FAILLOCK_CONF),
             default_faillock_dir: PathBuf::from(DEFAULT_FAILLOCK_DIR),
             pam_dirs: DEFAULT_PAM_DIRS.iter().map(PathBuf::from).collect(),
+            pam_conf: PathBuf::from(DEFAULT_PAM_CONF),
             shadow: PathBuf::from(DEFAULT_SHADOW_PATH),
             realtime: realtime_seconds,
         }
@@ -681,6 +684,13 @@ impl SystemAccountGuard {
         self
     }
 
+    /// Replaces the `pam.conf` path (default `DEFAULT_PAM_CONF`).
+    #[must_use]
+    pub fn with_pam_conf(mut self, path: PathBuf) -> Self {
+        self.pam_conf = path;
+        self
+    }
+
     /// Replaces the shadow path.
     #[must_use]
     pub fn with_shadow(mut self, path: PathBuf) -> Self {
@@ -695,8 +705,51 @@ impl SystemAccountGuard {
         self
     }
 
-    /// Step 3: no `pam_faillock.so` line of any PAM directory sets a policy option.
+    /// Whether some configured PAM directory is a directory (symlinks followed, like
+    /// libpam's `stat`). A missing path or a non-directory is not one; any other error is
+    /// `Undeterminable`.
+    fn any_pam_dir(&self) -> StepResult<bool> {
+        for dir in &self.pam_dirs {
+            match std::fs::metadata(dir) {
+                Ok(metadata) if metadata.is_dir() => return Ok(true),
+                Ok(_) => {}
+                Err(err) if err.kind() == ErrorKind::NotFound => {}
+                Err(_) => return Err(AccountRefusal::Undeterminable),
+            }
+        }
+        Ok(false)
+    }
+
+    /// `/etc/pam.conf` rule: absent ⇒ nothing; present (any type) without a PAM directory ⇒
+    /// `Undeterminable` (libpam would read only `pam.conf`); present next to a PAM directory
+    /// ⇒ scanned like a stack file (a policy option, a non-regular, unreadable, oversized or
+    /// non-UTF-8 file is `Undeterminable`).
+    fn check_pam_conf(&self) -> StepResult<()> {
+        let any_dir = self.any_pam_dir()?;
+        match std::fs::symlink_metadata(&self.pam_conf) {
+            Ok(_) => {}
+            Err(err) if err.kind() == ErrorKind::NotFound => return Ok(()),
+            Err(_) => return Err(AccountRefusal::Undeterminable),
+        }
+        if !any_dir {
+            return Err(AccountRefusal::Undeterminable);
+        }
+        match determinable(read_source(&self.pam_conf, MAX_PAM_FILE_BYTES))? {
+            SourceRead::Content(content) => {
+                let text = determinable(std::str::from_utf8(&content).ok())?;
+                if scan_pam_faillock_options(text) {
+                    return Err(AccountRefusal::Undeterminable);
+                }
+                Ok(())
+            }
+            SourceRead::Absent | SourceRead::Directory => Err(AccountRefusal::Undeterminable),
+        }
+    }
+
+    /// Step 3: the `/etc/pam.conf` rule, then no line of any PAM directory sets a
+    /// `pam_faillock.so` policy option (or includes a path).
     fn check_pam_stacks(&self) -> StepResult<()> {
+        self.check_pam_conf()?;
         for dir in &self.pam_dirs {
             let entries = match std::fs::read_dir(dir) {
                 Ok(entries) => entries,

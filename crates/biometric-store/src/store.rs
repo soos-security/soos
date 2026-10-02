@@ -54,6 +54,9 @@ pub const TEMP_SWEEP_MIN_AGE: Duration = Duration::from_secs(60);
 /// Maximum number of orphaned temporary files one sweep removes (GitHub #291).
 pub const MAX_TEMP_SWEEP_REMOVALS: usize = 256;
 
+/// Directory entries examined by [`BiometricStore::has_enrolled_template`] (GitHub #325).
+pub const MAX_ENROLLMENT_PROBE_ENTRIES: usize = 4096;
+
 /// Maximum number of directory entries one sweep examines (GitHub #291).
 const MAX_TEMP_SWEEP_SCANNED_ENTRIES: usize = 65_536;
 
@@ -656,6 +659,42 @@ impl BiometricStore {
         Ok(true)
     }
 
+    /// Whether the store holds at least one template file, without reading or decrypting any
+    /// (GitHub #325: the presence worker polls logind only while this is `true`).
+    ///
+    /// `true` at the first entry named `<uid>.cbor.enc` (canonical decimal `u32`: no sign, no
+    /// leading zero except `0` itself) whose type, not followed, is a regular file; symlinks,
+    /// directories, temporary files and other names never count. No entry is opened and the
+    /// store lock is not taken. At most [`MAX_ENROLLMENT_PROBE_ENTRIES`] entries are examined
+    /// (non-UTF-8 names included): a directory with more entries and no match among the first
+    /// ones is an error.
+    ///
+    /// # Errors
+    ///
+    /// [`BiometricStoreError::Io`] when the directory cannot be listed (missing included),
+    /// [`BiometricStoreError::InvalidPath`] when the bound is exceeded.
+    pub fn has_enrolled_template(&self) -> Result<bool, BiometricStoreError> {
+        for (examined, entry) in std::fs::read_dir(&self.base_dir)?.enumerate() {
+            if examined >= MAX_ENROLLMENT_PROBE_ENTRIES {
+                return Err(BiometricStoreError::InvalidPath(format!(
+                    "Biometrics directory holds more than {MAX_ENROLLMENT_PROBE_ENTRIES} entries"
+                )));
+            }
+            let entry = entry?;
+            if !entry.file_type()?.is_file() {
+                continue;
+            }
+            if entry
+                .file_name()
+                .to_str()
+                .is_some_and(is_template_file_name)
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     /// Lists all enrolled user IDs present in the biometric store, returned in ascending order.
     pub fn list_enrolled(&self) -> Result<Vec<u32>, BiometricStoreError> {
         let mut uids = Vec::new();
@@ -1006,6 +1045,13 @@ fn overwrite_file_contents(file: &File) -> Result<(), BiometricStoreError> {
 fn sync_dir(dir: &Path) -> Result<(), BiometricStoreError> {
     File::open(dir)?.sync_all()?;
     Ok(())
+}
+
+/// `<uid>.cbor.enc` with `<uid>` a canonical decimal `u32` (no sign, no leading zero except
+/// `0` itself).
+fn is_template_file_name(name: &str) -> bool {
+    name.strip_suffix(TEMPLATE_EXTENSION)
+        .is_some_and(|stem| stem.parse::<u32>().is_ok_and(|uid| uid.to_string() == stem))
 }
 
 #[cfg(test)]
