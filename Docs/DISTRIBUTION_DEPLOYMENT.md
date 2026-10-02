@@ -510,21 +510,51 @@ line, stock jumps) rejected the correct password, emitted the event and counted 
 every successful password login.
 
 ### 5.3 Wayland Screen Locker Integration (`swaylock` & `hyprlock`)
-Wayland compositors (Hyprland, Sway) rely on dedicated PAM service files located in `/etc/pam.d/`:
+Wayland screen lockers use their own PAM service files in `/etc/pam.d/`:
 - `/etc/pam.d/swaylock`
 - `/etc/pam.d/hyprlock`
 
-Both configurations standardly include `system-auth`:
+They reach the soos rule through the distribution base stack. On Arch Linux,
+`/etc/pam.d/swaylock` is `auth include login`, and `login` → `system-local-login` →
+`system-login` → `system-auth`, so the soos line installed in §5.2 is evaluated. Other
+distributions ship equivalent chains (Debian/Ubuntu `@include common-auth`, Fedora/RHEL
+`system-auth`). Arch's packaged file (comment header omitted):
 ```pam
-#%PAM-1.0
-auth include system-auth
-account include system-auth
+auth include login
 ```
 
+#### When Face Verification Runs
+- **`swaylock` calls `pam_authenticate` only when a password is submitted** (Enter). There is
+  no background verification while the lock screen is displayed: locking, waiting or moving
+  the mouse never starts the camera, and nothing is shown on screen (`swaylock` ignores
+  `PAM_TEXT_INFO` and `pam_soos.so` never writes to the terminal).
+- **Enter on an empty field** submits an empty password: `pam_soos.so` runs first and, on a
+  face match, unlocks the screen. If the face does not match, the stack continues to
+  `pam_unix.so` with the empty password, which fails and, on the §5.2 stack, sends one
+  `PasswordFailed` event. On stacks with `pam_faillock` (Arch default, Fedora `with-faillock`)
+  it also **counts as one `pam_faillock` failure** (Arch default `deny = 3`). After `deny`
+  such failures the account is locked for `unlock_time` (default 600 s): `pam_faillock
+  preauth` runs before `pam_soos.so`, so neither the face nor the correct password unlocks
+  the screen until it expires.
+- **`ignore-empty-password`** (`swaylock -e`, or the key in the swaylock config file) drops
+  empty submissions before PAM: face verification then never runs for an empty field. With
+  this option, face verification only happens when a typed password is submitted, before the
+  password is checked.
+- **Latency**: measured on a laptop camera woken from auto-standby, a face match takes about
+  0.3–0.5 s (camera wake plus three consecutive live captures); the module deadline is
+  `timeout_ms` (default 1000 ms, clamped to 10–5000 ms, `crates/pam/src/config.rs`; the §5.2
+  primary line sets none, so the default applies).
+- **Session policy**: `swaylock` runs as the locked user (not setuid with PAM), so the daemon
+  applies the same-UID rule of ADR 2026-09-30 "Local Session Binding for Facial `Auth`": the
+  user must own an active, non-remote logind session.
+- **`hyprlock`**: not validated on hardware; it drives its PAM conversation differently from
+  `swaylock`. Confirm when face verification runs before relying on it.
+
 #### Operational Guarantees
-- **Instant Unlock**: Upon user face recognition, `pam_soos.so` returns `PAM_SUCCESS` within `< 150ms`, unlocking the screen locker without requiring Enter or keyboard input.
-- **Graceful Fallback**: If the camera is occluded or the user is absent, the screen locker remains locked and immediately accepts the user's password.
-- **Zero Lockup**: Because `pam_soos.so` forbids stdout/stderr writes, no escape sequences or debug messages corrupt Wayland client/compositor sockets.
+- **Graceful Fallback**: If the camera is occluded or the user is absent, `pam_soos.so` returns
+  `PAM_IGNORE` and the locker keeps accepting the user's password.
+- **Zero Lockup**: Because `pam_soos.so` forbids stdout/stderr writes, no escape sequences or
+  debug messages corrupt Wayland client/compositor sockets.
 
 ### 5.4 Rollback & Uninstallation
 ```bash
