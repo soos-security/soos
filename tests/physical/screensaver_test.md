@@ -95,23 +95,30 @@ shown on screen. With `ignore-empty-password` (`-e`), an empty submission never 
 
 ### 3.2 Hyprlock (`hyprlock`) — Hyprland Wayland Compositor
 
-`hyprlock` is the native multi-threaded GPU-accelerated screen locker for Hyprland.
+`hyprlock` is the native multi-threaded GPU-accelerated screen locker for Hyprland. It is
+**not validated on hardware**: it drives its PAM conversation differently from `swaylock`, so
+this procedure first records when face verification runs.
 
 #### PAM Configuration: `/etc/pam.d/hyprlock`
-```pam
-#%PAM-1.0
-auth        [success=done default=ignore]  pam_soos.so
-auth        include                        system-auth
-account     include                        system-auth
-```
+Keep the file shipped with `hyprlock`. Like `swaylock`, it reaches the soos line through the
+distribution base stack (see `Docs/DISTRIBUTION_DEPLOYMENT.md` §5.3). Do not add a
+`pam_soos.so` line of its own: on a base stack that already carries one (Arch `system-auth`),
+a face that does not match would be tried a second time.
 
 #### Test Procedure:
-1. Launch `hyprlock`.
-2. **Test Case 1 (Nominal Face Unlock)**:
-   - Face camera.
-   - Press `Enter` or start typing.
-   - **Expected Result**: Screen unlocks immediately; input field clears and session restores seamlessly.
-3. **Test Case 2 (Multi-Monitor Integrity)**:
+1. Ensure the daemon is running: `systemctl is-active soos-daemon` prints `active`.
+2. **Test Case 1 (When Face Verification Runs)**:
+   - Launch `hyprlock`, face the camera and do not touch the keyboard for 5 s.
+   - Press `Enter` on the empty field.
+   - After unlocking (face or password), read the daemon journal:
+     `journalctl -u soos-daemon --since "-5min" | grep "Rendered authentication response"`.
+   - **Expected Result**: The session unlocks without a password only after a
+     `verdict=Allow reason=FaceMatch` line. Record in the validation report whether that line
+     was written when the lock screen appeared or when `Enter` was pressed.
+3. **Test Case 2 (Password Fallback)**:
+   - Cover the webcam, launch `hyprlock`, type the account password and press `Enter`.
+   - **Expected Result**: The password unlocks the session within the `timeout_ms` budget.
+4. **Test Case 3 (Multi-Monitor Integrity)**:
    - With multiple active displays, invoke `hyprlock`.
    - Authenticate via facial verification.
    - **Expected Result**: All displays unlock simultaneously without visual artifacts or hung surface textures.
@@ -123,23 +130,31 @@ account     include                        system-auth
 GDM manages graphical session logins and greeter screen unlocks for GNOME desktops.
 
 #### PAM Configuration: `/etc/pam.d/gdm-password`
-```pam
-#%PAM-1.0
-auth     requisite                      pam_nologin.so
-auth     [success=done default=ignore]  pam_soos.so
-auth     include                        common-auth
-account  include                        common-account
-password include                        common-password
-session  include                        common-session
-```
+Do not edit the file by hand. `sudo soos-admin gdm enable` inserts the managed block (lockout
+and login gates copied from the delegated stack, then `pam_soos.so timeout_ms=2500`) before the
+first credential rule or delegation; see `Docs/DISTRIBUTION_DEPLOYMENT.md` §2.1 for the exact
+block, `gdm status`, `gdm disable` and `gdm restore`. Check the result with
+`sudo soos-admin gdm status`.
+
+When the delegated stack also carries a soos line (Arch: `gdm-password` →
+`system-local-login` → `system-login` → `system-auth`), a face that does not match at the
+managed block is tried again by the base-stack line. Record whether the journal shows one or
+two `Rendered authentication response` lines for one GDM attempt.
 
 #### Test Procedure:
-1. Lock GNOME session (`Super+L`) or log out to the GDM login greeter.
-2. Select the enrolled user profile.
-3. **Test Case 1 (Greeter Unlock)**:
-   - GDM initiates the PAM conversation upon user selection.
-   - **Expected Result**: The greeter authenticates and opens the desktop shell without prompting for a password.
-4. **Test Case 2 (Output Isolation Audit)**:
+1. **Test Case 1 (Initial Greeter Login Never Uses Face)**:
+   - Reboot, or log out to the GDM greeter, and select the enrolled user.
+   - **Expected Result**: GDM asks for the password; the camera does not light. The daemon
+     journal shows `Local-session policy refused auth request` with
+     `reason="caller_session_unresolved"`: the user has no session yet, so the ADR 2026-09-30
+     "Local Session Binding for Facial `Auth`" refuses face verification by design.
+2. **Test Case 2 (Screen Unlock)**:
+   - From an open GNOME session, lock the screen (`Super+L`), then raise the shield (any key).
+   - **Expected Result**: The session unlocks without a password after a
+     `verdict=Allow reason=FaceMatch` line. This relies on the GDM reauthentication worker
+     running in the user's session scope (`cat /proc/<worker pid>/cgroup` shows
+     `session-<id>.scope`); record the result, since the ADR leaves it to hardware validation.
+3. **Test Case 3 (Output Isolation Audit)**:
    - Check journal logs: `journalctl -u gdm -b`.
    - **Expected Result**: Zero stream pollution (`stdout` or `stderr` messages from `pam_soos.so`) that could corrupt GDM's JSON/DBus communication channel.
 
@@ -150,24 +165,21 @@ session  include                        common-session
 Text-mode virtual terminal authentication (`/dev/tty1` through `/dev/tty6`).
 
 #### PAM Configuration: `/etc/pam.d/login`
-```pam
-#%PAM-1.0
-auth       [success=done default=ignore] pam_soos.so
-auth       include                       system-local-login
-account    include                       system-local-login
-password   include                       system-local-login
-session    include                       system-local-login
-```
+Keep the distribution file. It reaches the soos line through the base stack (Arch:
+`login` → `system-local-login` → `system-login` → `system-auth`). Do not add a
+`pam_soos.so` line of its own.
 
 #### Test Procedure:
 1. Switch to a virtual console (`Ctrl+Alt+F3`).
-2. At the login prompt, enter the username of the enrolled user.
-3. **Test Case 1 (TTY Facial Auth)**:
-   - While facing the webcam, press `Enter` after entering the username.
-   - **Expected Result**: Login completes immediately to the shell without prompting for `Password:`.
-4. **Test Case 2 (Camera Warmup and Timeout)**:
-   - Block the camera lens, enter username.
-   - **Expected Result**: Once the `timeout_ms` deadline of the installed profile expires, TTY displays the standard `Password:` prompt.
+2. At the login prompt, enter the username of the enrolled user while facing the webcam.
+3. **Test Case 1 (Initial TTY Login Never Uses Face)**:
+   - **Expected Result**: `Password:` is prompted; the camera does not light. The daemon
+     journal shows `Local-session policy refused auth request` with
+     `reason="caller_session_unresolved"` (the user has no session on this TTY yet; ADR
+     2026-09-30 "Local Session Binding for Facial `Auth`").
+4. **Test Case 2 (Password Login)**:
+   - Enter the account password.
+   - **Expected Result**: The shell opens normally.
 
 ---
 
@@ -176,22 +188,19 @@ session    include                       system-local-login
 Administrative privilege elevation from terminal sessions.
 
 #### PAM Configuration: `/etc/pam.d/sudo`
-```pam
-#%PAM-1.0
-auth       [success=done default=ignore] pam_soos.so
-auth       include                       system-auth
-account    include                       system-auth
-session    include                       system-auth
-```
+Keep the distribution file (Arch: `auth include system-auth`). Do not add a `pam_soos.so`
+line of its own.
 
 #### Test Procedure:
-1. In an unprivileged terminal, execute: `sudo whoami`.
+1. In a terminal of the local desktop session (not SSH), run `sudo -k`, then `sudo whoami`.
 2. **Test Case 1 (Nominal Sudo Elevation)**:
    - Face the camera.
    - **Expected Result**: Command executes immediately and outputs `root` with zero password prompt.
 3. **Test Case 2 (Terminal Password Fallback)**:
-   - Cover camera, execute `sudo whoami`.
-   - **Expected Result**: Prompt `[sudo] password for <user>:` appears within 250ms. Entering valid password executes the command.
+   - Cover camera, run `sudo -k`, then `sudo whoami`.
+   - **Expected Result**: Prompt `[sudo] password for <user>:` appears once face verification
+     gives up, within the `timeout_ms` budget (default 1000 ms). Entering valid password
+     executes the command.
 
 ---
 
@@ -200,13 +209,13 @@ session    include                       system-auth
 | Scenario | Daemon State | Camera State | Face Alignment / Match | PAM Result | UI Response |
 |---|---|---|---|---|---|
 | **Nominal Unlock** | Active | Streaming MMAP | Single face, Score >= 0.50, PAD Pass | `PAM_SUCCESS` | Unlocks after the PAM call (Enter on `swaylock`) within the `timeout_ms` budget |
-| **Unknown Person** | Active | Streaming MMAP | Single face, Score < 0.50 | `PAM_IGNORE` | Prompts for password |
-| **Presentation Attack** | Active | Streaming MMAP | Photo / Phone Screen / Video | `PAM_IGNORE` | Prompts for password (rejection logged) |
-| **Multiple Faces** | Active | Streaming MMAP | >= 2 faces detected in frame | `PAM_IGNORE` | Prompts for password |
-| **Lens Covered** | Active | Streaming MMAP | Zero faces detected | `PAM_IGNORE` | Prompts for password |
-| **Camera Hardware Unplugged** | Active | `ENODEV` hotplug | N/A (CameraManager backoff) | `PAM_IGNORE` | Immediate password prompt (<= 5ms) |
-| **Daemon Crashed / Stopped** | Inactive | N/A | N/A (Socket connection refused) | `PAM_IGNORE` | Immediate password prompt (<= 2ms) |
-| **Daemon Deadline Exceeded** | Busy | Stalled | Evaluation > 250ms | `PAM_IGNORE` | Deadline timeout -> password prompt |
+| **Unknown Person** | Active | Streaming MMAP | Single face, Score < 0.50 | `PAM_IGNORE` | Falls back to the password |
+| **Presentation Attack** | Active | Streaming MMAP | Photo / Phone Screen / Video | `PAM_IGNORE` | Falls back to the password (rejection logged) |
+| **Multiple Faces** | Active | Streaming MMAP | >= 2 faces detected in frame | `PAM_IGNORE` | Falls back to the password |
+| **Lens Covered** | Active | Streaming MMAP | Zero faces detected | `PAM_IGNORE` | Falls back to the password |
+| **Camera Hardware Unplugged** | Active | `ENODEV` hotplug | N/A (CameraManager backoff) | `PAM_IGNORE` | Falls back to the password within the `timeout_ms` budget |
+| **Daemon Crashed / Stopped** | Inactive | N/A | N/A (Socket connection refused) | `PAM_IGNORE` | Falls back to the password at once (connection refused, no wait) |
+| **Daemon Deadline Exceeded** | Busy | Stalled | Evaluation exceeds the client deadline (`timeout_ms`) | `PAM_IGNORE` | Deadline expiry -> falls back to the password |
 
 ---
 
@@ -232,6 +241,8 @@ If a misconfigured PAM stack prevents login:
      ```bash
      sudo sed -i 's/^auth.*pam_soos\.so/# &/' /etc/pam.d/common-auth /etc/pam.d/system-auth /etc/pam.d/swaylock /etc/pam.d/hyprlock /etc/pam.d/sudo
      ```
+   - GDM: `sudo soos-admin gdm disable` stops face verification at once (`/etc/soos/gdm.disable`);
+     `sudo soos-admin gdm restore` puts back `gdm-password.soos-backup`.
 3. **Service Rollback**:
    - Stop and disable the daemon:
      ```bash
