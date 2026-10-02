@@ -109,6 +109,7 @@ fn guard_tree() -> (tempfile::TempDir, SystemAccountGuard, PathBuf) {
         .with_vendor_faillock_conf(root.join("vendor.conf"))
         .with_default_faillock_dir(tally)
         .with_pam_dirs(vec![pam.clone()])
+        .with_pam_conf(root.join("pam.conf"))
         .with_shadow(root.join("shadow"))
         .with_realtime_fn(now);
     (temp, guard, pam)

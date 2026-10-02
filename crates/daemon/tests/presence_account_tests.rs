@@ -158,6 +158,7 @@ impl Accounts {
             .with_vendor_faillock_conf(self.vendor_conf())
             .with_default_faillock_dir(self.default_tally_dir())
             .with_pam_dirs(self.pam_dirs())
+            .with_pam_conf(self.path("etc/pam.conf"))
             .with_shadow(self.shadow())
             .with_realtime_fn(now_realtime)
     }

@@ -24,10 +24,12 @@ use std::io::{Read, Write};
 use std::os::unix::net::UnixListener;
 use std::sync::mpsc;
 use std::thread;
+use std::time::Duration;
 use tempfile::tempdir;
 
 use nix::time::{clock_gettime, ClockId};
 use soos_admin_cli::args::{MAX_TIMEOUT_MS, MIN_TIMEOUT_MS};
+use soos_admin_cli::error::AdminCliError;
 use soos_admin_cli::status::DaemonStatusReport;
 use soos_admin_cli::test_pam::{
     effective_timeout_ms, simulate_pam_auth, LatencyMetrics, PamTestReport,
@@ -40,9 +42,29 @@ fn monotonic_ns() -> u64 {
     u64::try_from(ts.tv_sec()).unwrap() * 1_000_000_000 + u64::try_from(ts.tv_nsec()).unwrap()
 }
 
+/// Bound on the wait for the deadline captured by the mock server.
+const CAPTURE_WAIT: Duration = Duration::from_secs(5);
+
+/// How the simulated authentication must end.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Completion {
+    /// `simulate_pam_auth` must return `Ok`.
+    Required,
+    /// `Ok` or `Err(AdminCliError::Timeout)` (owner decision 2026-10-02, GitHub #325 item 6:
+    /// a 10 ms clamped deadline may expire before a loaded host schedules the mock server);
+    /// any other error still fails the test.
+    TimeoutTolerated,
+}
+
 /// Runs one simulated authentication with `timeout_ms` and returns
 /// `(before_ns, deadline_ns, after_ns)`, all on `CLOCK_MONOTONIC`.
 fn capture_deadline(timeout_ms: u64) -> (u64, u64, u64) {
+    capture_deadline_with(timeout_ms, Completion::Required)
+}
+
+/// [`capture_deadline`] with an explicit completion rule. The deadline is always captured by
+/// the mock server from the request (written by the client before it waits for the reply).
+fn capture_deadline_with(timeout_ms: u64, completion: Completion) -> (u64, u64, u64) {
     let dir = tempdir().expect("tempdir");
     let socket_path = dir.path().join("deadline.sock");
     let listener = UnixListener::bind(&socket_path).expect("bind socket");
@@ -68,17 +90,24 @@ fn capture_deadline(timeout_ms: u64) -> (u64, u64, u64) {
             issued_monotonic_ns: issued,
             expires_monotonic_ns: expires,
         };
-        stream
-            .write_all(&encode(&resp).expect("encode"))
-            .expect("write response");
+        let written = stream.write_all(&encode(&resp).expect("encode"));
+        // A client that already timed out has closed its socket: only then may the write fail.
+        if completion == Completion::Required {
+            written.expect("write response");
+        }
     });
 
     let before = monotonic_ns();
-    simulate_pam_auth(&socket_path, 1000, "soos-admin", timeout_ms)
-        .expect("simulated authentication must complete");
+    let outcome = simulate_pam_auth(&socket_path, 1000, "soos-admin", timeout_ms);
     let after = monotonic_ns();
+    match (completion, outcome) {
+        (_, Ok(_)) | (Completion::TimeoutTolerated, Err(AdminCliError::Timeout)) => {}
+        (_, Err(err)) => panic!("simulated authentication must complete: {err:?}"),
+    }
+    let deadline = rx
+        .recv_timeout(CAPTURE_WAIT)
+        .expect("the mock server must capture the request deadline");
     server.join().expect("join server");
-    let deadline = rx.recv().expect("deadline received");
     (before, deadline, after)
 }
 
@@ -96,7 +125,7 @@ fn test_simulate_pam_auth_deadline_uses_monotonic_clock() {
 
 #[test]
 fn test_simulate_pam_auth_zero_timeout_is_clamped_to_pam_minimum() {
-    let (before, deadline, after) = capture_deadline(0);
+    let (before, deadline, after) = capture_deadline_with(0, Completion::TimeoutTolerated);
     let budget = MIN_TIMEOUT_MS * 1_000_000;
     assert!(
         deadline >= before + budget && deadline <= after + budget,

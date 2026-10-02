@@ -380,6 +380,7 @@ fn test_pau_account_guard_never_logs_its_sources() {
         .with_vendor_faillock_conf(root.join("vendor.conf"))
         .with_default_faillock_dir(tally_dir.clone())
         .with_pam_dirs(vec![pam.clone()])
+        .with_pam_conf(root.join("pam.conf"))
         .with_shadow(shadow.clone())
         .with_realtime_fn(fixed_now);
     let user = UserName::parse(USER).unwrap();

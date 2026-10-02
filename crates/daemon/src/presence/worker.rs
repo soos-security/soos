@@ -19,8 +19,9 @@ use super::logind::{LogindSessionState, PresenceLogind, PresenceLogindError, Ses
 use super::switch::PresenceSwitch;
 use super::tracker::{select_candidate, LockEntry, LockTracker};
 use super::{
-    reconnect_backoff, ACCOUNT_CHECK_TIMEOUT_MS, DBUS_CALL_TIMEOUT_MS, LOCK_POLL_INTERVAL_MS,
-    MAX_ALLOW_TO_UNLOCK_MS, MAX_PRESENCE_SEAT_SESSIONS, PRESENCE_RESERVED_ATTEMPTS,
+    reconnect_backoff, ACCOUNT_CHECK_TIMEOUT_MS, DBUS_CALL_TIMEOUT_MS, DBUS_CONNECT_TIMEOUT_MS,
+    LOCK_POLL_INTERVAL_MS, MAX_ALLOW_TO_UNLOCK_MS, MAX_PRESENCE_SEAT_SESSIONS,
+    PRESENCE_RESERVED_ATTEMPTS,
 };
 use crate::consensus::{
     run_face_consensus, wake_camera, ConsensusContext, ConsensusRun, MAX_CAMERA_WAKE_WAIT_MS,
@@ -55,7 +56,8 @@ pub enum SkipReason {
     /// The last scan is more recent than the scan interval (or the session is waiting for
     /// an unlock confirmation, or its locker ignored an unlock).
     NotDue,
-    /// The session owner has no template.
+    /// The session owner has no template, or the store holds none at all and logind is
+    /// not polled (GitHub #325).
     NotEnrolled,
     /// The template belongs to another embedding model.
     ForeignTemplate,
@@ -491,7 +493,37 @@ impl<L: PresenceLogind, D: DisplayProbe, A: AccountGuard> PresenceWorker<L, D, A
         let Ok(now_ns) = (self.clock_fn)() else {
             return self.skip(SkipReason::ClockUnavailable);
         };
-        // 4. logind snapshot.
+        // 3b. Enrollment probe, before any D-Bus traffic (connection included): while the
+        // store holds no template, logind is not polled. Re-evaluated every tick, so a new
+        // enrollment is picked up within one tick. The tracker is cleared because sessions
+        // are not observed while skipping (the grace restarts after the next enrollment).
+        match self.pipeline.biometric_store.has_enrolled_template() {
+            Ok(true) => {}
+            Ok(false) => {
+                self.tracker.clear();
+                return self.skip(SkipReason::NotEnrolled);
+            }
+            Err(_) => {
+                self.tracker.clear();
+                return self.skip(SkipReason::TemplateStoreError);
+            }
+        }
+        // 4a. Connection, under its own bound and outside the call bound.
+        let connected = match tokio::time::timeout(
+            Duration::from_millis(DBUS_CONNECT_TIMEOUT_MS),
+            self.logind.connect(),
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => Err(PresenceLogindError::Timeout),
+        };
+        if let Err(err) = connected {
+            self.logind_failed(&err);
+            self.tracker.clear();
+            return self.skip(SkipReason::LogindUnavailable);
+        }
+        // 4b. logind snapshot.
         let snapshot = match bounded(self.logind.seat_sessions()).await {
             Ok(snapshot) => snapshot,
             Err(err) => {
@@ -561,17 +593,28 @@ impl<L: PresenceLogind, D: DisplayProbe, A: AccountGuard> PresenceWorker<L, D, A
         if self.stop_requested() {
             return self.skip(SkipReason::ShuttingDown);
         }
-        // 10. One attempt in the shared limiter, keeping the PAM reserve.
-        let recorded = self
-            .pipeline
-            .policy
-            .write()
-            .await
-            .record_attempt_with_reserve(candidate.entry.uid, now_ns, PRESENCE_RESERVED_ATTEMPTS);
+        // 10. One attempt in the shared limiter, keeping the PAM reserve, stamped with a
+        // clock read taken under the policy write lock, right before recording.
+        let policy = Arc::clone(&self.pipeline.policy);
+        let mut engine = policy.write().await;
+        let attempt_ns = match (self.clock_fn)() {
+            Ok(ns) if ns >= now_ns => ns,
+            // Clock error, or a reading older than step 3: no attempt, no scan.
+            Ok(_) | Err(_) => {
+                drop(engine);
+                return self.skip(SkipReason::ClockUnavailable);
+            }
+        };
+        let recorded = engine.record_attempt_with_reserve(
+            candidate.entry.uid,
+            attempt_ns,
+            PRESENCE_RESERVED_ATTEMPTS,
+        );
+        drop(engine);
         if recorded.is_err() {
             return self.skip(SkipReason::RateLimited);
         }
-        self.tracker.mark_scan_started(&candidate.id, now_ns);
+        self.tracker.mark_scan_started(&candidate.id, attempt_ns);
         let outcome = self.scan(candidate).await;
         self.scanned(outcome)
     }
