@@ -195,13 +195,14 @@ fn list_profiles() -> Result<Vec<EnrolledUserSummary>, String> {
         .map_err(|_| "soos-enroll returned a malformed profile list".to_string())
 }
 
-/// Argument vector of the import helper: `soos-enroll import --uid <uid> --file -`.
+/// Argument vector of the import helper: `/usr/bin/soos-enroll import --uid <uid> --file -`
+/// (absolute path, so pkexec never resolves the program through the caller's `PATH`).
 ///
 /// `--file -` makes `soos-enroll` read the embedding from its standard input, so the
 /// plaintext template never touches the filesystem (GitHub #156).
 pub fn import_helper_args(uid: u32) -> Vec<String> {
     vec![
-        "soos-enroll".to_string(),
+        SOOS_ENROLL_PROGRAM.to_string(),
         "import".to_string(),
         "--uid".to_string(),
         uid.to_string(),

@@ -149,3 +149,17 @@ touch a physical webcam.
   open turns it into a recoverable error instead of a panic.
 - The absolute program paths assume the default installation prefix `/usr`
   (`scripts/install.sh --prefix` other than `/usr` would break the GUI privileged actions).
+
+## Integration note: CAM-NEW-7(b) import path (owner-approved 2026-10-02)
+
+The GUI import helper now calls `SOOS_ENROLL_PROGRAM` (`/usr/bin/soos-enroll`) like every other
+privileged action, so pkexec never resolves the program through the caller's `PATH`. Owner-approved
+change of two existing assertions in `crates/gui/tests/import_privacy_tests.rs`:
+
+| Test | Old expectation | New expectation |
+|---|---|---|
+| `test_import_helper_args_use_stdin` | first argument `"soos-enroll"` | `"/usr/bin/soos-enroll"` |
+| `test_import_finalize_pipes_embedding_without_temp_file` | `"soos-enroll\nimport\n…"` | `"/usr/bin/soos-enroll\nimport\n…"` |
+
+The rest of both tests (stdin, no temporary file, `--yes` consent) is unchanged. With this, #314 is
+fully delivered.
