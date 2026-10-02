@@ -216,7 +216,15 @@ fn test_gdm_disable_file_triggers_disabled_state() {
 
 #[test]
 fn test_authenticate_with_none_handle_returns_ignore_cleanly() {
-    let config = pam_soos::config::PamConfig::default();
+    // Hermetic setup: an absent socket in a private directory, never the default
+    // `/run/soos/daemon.sock`. On a host running `soos-daemon` with an enrolled user in
+    // front of the camera, the default socket answered `Allow` and this test saw
+    // `PAM_SUCCESS`.
+    let tmp = tempfile::tempdir().unwrap();
+    let config = pam_soos::config::PamConfig {
+        socket_path: tmp.path().join("absent.sock"),
+        ..Default::default()
+    };
     let result = pam_soos::SoosPam::authenticate_with_config(None, &config);
     assert_eq!(
         result,

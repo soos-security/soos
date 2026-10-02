@@ -1,114 +1,121 @@
 # Candid Review Report
 
 - **Date**: 2026-10-02
-- **Target Branch**: `chore/swaylock-pam-doc`
-- **Base (merge-base)**: `be1dd95`
-- **Reviewed-Diff-Fingerprint**: `7917341f5a4e11853c1805c7c5ba17a604b9fe34a2221a3bc2ba2f971d1e0c19`
-- **Audited Files**: `Docs/DISTRIBUTION_DEPLOYMENT.md`, `AI/walkthroughs/172_swaylock_pam_behaviour_doc.md`
+- **Target Branch**: `test/pam-hermetic-and-screensaver`
+- **Base (merge-base)**: `4d56a01`
+- **Reviewed-Diff-Fingerprint**: `c8ccbb0f9317d4782134f3a35dcc2d2af1cb8f5891c39ecb6e577f4178422873`
+- **Audited Files**:
+  - `AI/walkthroughs/173_hermetic_pam_test_and_screensaver_procedure.md` (new)
+  - `crates/pam/tests/config_tests.rs`
+  - `tests/physical/screensaver_test.md`
 
 ## 1. Executive Summary
 
-Documentation-only change. It rewrites `Docs/DISTRIBUTION_DEPLOYMENT.md` §5.3 (Wayland screen
-locker PAM behaviour), removes the false "Instant Unlock" guarantee (< 150 ms, no Enter needed),
-and adds walkthrough 172. Every factual claim of the new §5.3 was checked against the repository,
-the host PAM configuration (Arch Linux, `swaylock 1.8.6-1`, `pambase 20260616-1`, `pam 1.7.3-1`)
-and the swaylock 1.8.7 source tree (`password.c`, `pam.c`). No claim was found to be wrong. One
-MINOR finding: a stale copy of the removed claim remains outside the diff, in
-`tests/physical/screensaver_test.md`. No CRITICAL or MAJOR finding.
+The diff makes one PAM integration test hermetic (setup only), rewrites the `swaylock` physical
+validation procedure (§3.1) and one behaviour-matrix row, and adds walkthrough 173. No
+production code changes. The test assertion is byte-for-byte unchanged and still rejects a
+fail-open implementation. The swaylock procedure was walked step by step against this host's
+PAM chain, `packaging/pam/arch/system-auth`, `/etc/security/faillock.conf`, the swaylock man
+page and the daemon log sites; every expected result is reachable from the state left by the
+previous step, and both journal strings exist in `crates/daemon/src/dispatcher.rs` (and appear
+verbatim in this host's `soos-daemon` journal). Only SUGGESTION-level findings remain, all in
+unchanged surrounding lines.
 
-## 2. Test Changes
+## 2. Test Changes (mechanical listing from step 3, with justification per change)
 
-Mechanical listing on `target/candid_diff.patch`:
-
-- Test, fixture or invariant files touched: none.
-- Removed or changed assertions (`assert`, `#[test]`, `proptest!`, `should_panic`): none.
-- New escape hatches (`#[ignore]`, `cfg(any())`, tolerance, epsilon): none.
-- Inline `mod tests` changes: none.
-
-These invariants read `Docs/DISTRIBUTION_DEPLOYMENT.md`: `arch_faillock_ci_contract.rs`,
-`packaging_ownership_contract.rs` (both read only §5.2, split at `### 5.3 `, a heading this diff
-keeps unchanged), `quality_followups.rs` (§2.1), and `lib.rs` (the topic list, which still finds
-`swaylock` and `pam_faillock`; the Fedora `authselect` activation; `pam_deny`; the rollback
-paths). `cargo test -p soos-invariants` passed: 378 passed, 0 failed.
+- Test files touched: `crates/pam/tests/config_tests.rs`, `tests/physical/screensaver_test.md`
+  (a document, not code; matched by path filter).
+- Removed/changed checks (`^-...assert|#[test]|...`): **none**.
+- New escape hatches (`#[ignore]`, `#[cfg(any())]`, `should_panic`, tolerance, epsilon): **none**.
+- Inline `mod tests` changes: **none**.
+- `test_authenticate_with_none_handle_returns_ignore_cleanly`: only the configuration line
+  changed, from `PamConfig::default()` (socket `/run/soos/daemon.sock`) to
+  `PamConfig { socket_path: <tempdir>/absent.sock, ..Default::default() }`. The `assert_eq!`
+  on `PAM_IGNORE` and its message are untouched. Justification: setup-only migration (the
+  test was non-hermetic: on a host with a running daemon and an enrolled user it received a
+  genuine `Allow`). Contract strength: `authenticate_with_config(None, ..)` goes through
+  `authenticate_detached` → `authenticate_flow` with `detached_uid_resolver` (`getuid`), so the
+  daemon connection is attempted and fails on the absent socket; an implementation that
+  returns `PAM_SUCCESS` unconditionally, or maps a connect error to `PAM_SUCCESS`, still fails
+  the assertion. The `TempDir` guard lives until the end of the function. Not a weakening.
 
 ## 3. Deep Reasoning Audit
 
 ### Logic & Architecture
-Each claim was checked against a source:
-- **Arch chain**: on the host, `/etc/pam.d/swaylock` (owned by `swaylock 1.8.6-1`) is
-  `auth include login`. The chain `login` → `system-local-login` → `system-login` →
-  `system-auth` matches the host files, and the host `system-auth` is identical to
+- Swaylock chain: host `/etc/pam.d/swaylock` = `auth include login`; `login` →
+  `system-local-login` → `system-login` → `system-auth`, matching §3.1 and
+  `Docs/DISTRIBUTION_DEPLOYMENT.md` §5.3. Host `system-auth` equals
   `packaging/pam/arch/system-auth`. PASS.
-- **Submit-only verification**: in swaylock 1.8.x `password.c`, `submit_password` returns early
-  when `ignore_empty && password.len == 0`. In `pam.c`, `pam_authenticate` runs only for each
-  password request it reads. `PAM_TEXT_INFO` and `PAM_ERROR_MSG` are dropped (`break`). The
-  walkthrough's naming of the function is correct. PASS.
-- **`pam_soos.so` output**: the module writes nothing to stdout or stderr. Its feedback goes
-  through the `PAM_TEXT_INFO` conversation, which swaylock ignores (`crates/pam/src/lib.rs`
-  `PamFeedback`), so "nothing is shown on screen" holds. PASS.
-- **Empty-password failure path**: on the §5.2 stack, a face miss returns `PAM_IGNORE` and takes
-  `default=ignore`. `pam_unix.so` then fails on the empty password for an account that has a
-  password. The event line sends `PasswordFailed` (`lib.rs` lines 277-287), and `authfail`
-  records the failure. PASS.
-- **Fedora `with-faillock`**: `packaging/pam/fedora/soos/system-auth` places `preauth` before
-  `pam_soos.so` and `authfail` after `pam_unix.so`, so the counting and lockout claims hold
-  there too. PASS.
-- **Faillock defaults**: `/etc/security/faillock.conf` lists `# deny = 3` and
-  `# unlock_time = 600`, which are the built-in defaults. `preauth` comes before `pam_soos.so`
-  on the Arch stack, so a locked account blocks both face and password. This matches the §5.2
-  text and the `arch_linux_test.sh` assertions. PASS.
-- **Timeout**: `crates/pam/src/config.rs` has `DEFAULT_TIMEOUT_MS = 1000`, clamped to
-  `MIN_TIMEOUT_MS = 10` ..= `MAX_TIMEOUT_MS = 5000`. The §5.2 primary line
-  `auth  [success=4 default=ignore]  pam_soos.so` has no arguments, so the default applies.
-  PASS.
-- **"Three consecutive live captures"**: matches `DEFAULT_PAD_CONSENSUS_REQUIRED = 3`, whose
-  passing frames must be consecutive (`crates/policy/src/pad_consensus.rs`). The 0.3–0.5 s
-  figure is labelled as a hardware measurement, which is acceptable. PASS.
-- **Session policy**: `/usr/bin/swaylock` is `0755 root:root`, not setuid. An unprivileged peer
-  therefore falls under rule (2) of ADR 2026-09-30 "Local Session Binding for Facial `Auth`":
-  same UID through `SO_PEERCRED`, and the target must own an active session that is not flagged
-  `REMOTE=1` (`session_policy.rs` `is_active_non_remote_of`). The doc's wording "active,
-  non-remote logind session" is faithful. PASS.
-- **Debian/Ubuntu and Fedora/RHEL chains**: the doc describes these only as "equivalent chains",
-  ending in `common-auth` or `system-auth`, which the soos packaging profiles target. Plausible,
-  and not presented as verified detail. PASS.
-- **Removed claim still elsewhere**: the removed "Instant Unlock" claim survives outside the
-  diff. FINDING 1 (MINOR).
+- Step 2: `swaylock -C /dev/null -c 000000`. Man page: `-C, --config <path>` replaces the
+  default search of `$HOME/.swaylock/config`, `$XDG_CONFIG_HOME/swaylock/config`,
+  `SYSCONFDIR/swaylock/config`; `-e` is `--ignore-empty-password`. The three listed paths match. PASS.
+- Test Case 1 (locked by step 2, face present, empty Enter): `pam_soos.so` `[success=4]`
+  skips `pam_systemd_home`, `pam_unix`, the event line and `pam_faillock authfail`, landing on
+  `pam_permit`; then `pam_faillock authsucc`. Unlock within the 1000 ms default
+  (`DEFAULT_TIMEOUT_MS`, `crates/pam/src/config.rs:9`). Journal substring
+  `verdict=Allow reason=FaceMatch` is produced by `info!(verdict = ?.., reason = ?..,
+  "Rendered authentication response")` (`dispatcher.rs:1431-1435`) with the `fmt` layer
+  (`logging.rs:74`); seen on this host at 16:38:12. PASS.
+- Test Case 2 (re-locked explicitly since TC1 unlocked; lens covered; empty Enter): main line
+  Deny → `PAM_IGNORE`; `pam_unix nullok` fails the empty input against a set hash →
+  `default=bad`; event line sends `PasswordFailed`; daemon logs `Processing telemetry auth
+  failure event` (`dispatcher.rs:587-591`) — swaylock runs as the user, so peer UID equals the
+  event UID and the per-peer quota admits one event; `pam_faillock authfail` records one
+  failure. `faillock --user <user>` is readable by the user (`/run/faillock/<user>` is
+  `rw-rw---- <user>:root` here). `deny = 3` / `unlock_time = 600` are the documented defaults
+  (commented in `/etc/security/faillock.conf`). Lockout claim: `pam_faillock preauth` is
+  `required` before `pam_soos.so`, so a locked account fails even after a face success. The
+  following correct password unlocks and `authsucc` resets the tally, so TC3/TC4 start clean. PASS.
+- Test Case 3 (daemon stopped, password typed): no `.socket` unit exists in `packaging/`
+  (only `soos-daemon.service`), so no socket activation restarts the daemon; connect fails at
+  once → `PAM_IGNORE`; `pam_unix` success skips the event line. Daemon restarted for TC4. PASS.
+- Test Case 4 (`-e`, daemon active): empty Enter never reaches PAM, so no `Rendered
+  authentication response` line (INFO level, default visible). A typed password runs the main
+  `pam_soos.so` line first. PASS.
+- Walkthrough 173 matches the final files (§2.1 and every §2.2 bullet checked against the
+  diff; test counts reproduced: invariants 378 passed, `config_tests` 25 passed). PASS.
 
 ### PAM Concurrency & Deadlines
-No code change. The documented deadline matches the clamped `timeout_ms` contract. PASS.
+- No PAM production code changed. The procedure's latency statements are tied to the clamped
+  `timeout_ms` budget (10–5000 ms), consistent with the ADR "PAM Deadline Derived From Clamped
+  `timeout_ms`". PASS.
 
 ### Panic Safety & Fail-Closed
-No code change. The new "Graceful Fallback" wording (a failure returns `PAM_IGNORE`) matches
-`lib.rs`. No text suggests an error path leading to `PAM_SUCCESS`. PASS.
+- No production change. The new test `unwrap()` on `tempdir()` is in a test file with
+  `#![allow(clippy::unwrap_used, ..)]`. `cargo clippy -p soos-pam --tests -- -D warnings` clean. PASS.
 
 ### Test Integrity & Anti-Weakening
-No test or invariant changed, and the invariant suite is green. PASS.
+- See §2. Tried: could the absent socket make the test vacuous? No — the flow still runs UID
+  resolution and the IPC client, and any fail-open mapping would surface as `PAM_SUCCESS`. PASS.
 
 ### Memory, Bounds & Secrets
-No code change. The documentation exposes no credentials and no biometric data. PASS.
+- No code paths changed. The procedure asks the operator to read only verdict/reason and the
+  telemetry line, never frames or embeddings. PASS.
 
 ### Supply Chain & Automation
-No `Cargo.*`, `deny.toml`, `.github/`, `scripts/` or `.githooks/` change. Not applicable.
+- No `Cargo.*`, `deny.toml`, `.github/`, `scripts/` or hook changes. `tempfile` is an existing
+  dev-dependency of `crates/pam`. PASS.
 
 ### English-Only Policy
-Both files are in English only. No added line exceeds 100 columns, which matches the wrapping
-of the surrounding §5.2 text. Walkthrough number 172 follows 171. `sync_issue.py --check`
-passes, and the unregistered `chore/` branch is accepted. PASS.
+- All added text, comments and file names are English. PASS.
 
 ## 4. Detailed Findings & Action Items
 
-- **[MINOR]** `tests/physical/screensaver_test.md:42-57` and `:176` (outside the diff). The
-  physical validation plan still shows a `/etc/pam.d/swaylock` that includes `system-auth` and
-  adds its own event line. It also still expects "Screen unlocks instantly (< 150ms) without
-  prompting for a password" after "Press any key (e.g. `Space` or `Enter`)", and its matrix row
-  says "Unlocks session instantly (<= 150ms)". Each of these contradicts the corrected §5.3:
-  swaylock verifies only on Enter, the latency is about 0.3–0.5 s, and `Space` types a
-  character instead of submitting. Required correction, in a follow-up or in this branch:
-  - Replace the PAM block with Arch's `auth include login`, and point to §5.3 for the chain.
-  - Change step 3 to "Press `Enter` on an empty field" with "Expected Result: the screen
-    unlocks within about 0.5 s (bounded by `timeout_ms`)".
-  - Change line 176 to "Unlocks after Enter within the `timeout_ms` budget".
+- **[SUGGESTION]** `tests/physical/screensaver_test.md:203-207` — the unchanged matrix rows
+  ("Unknown Person", "Presentation Attack", "Multiple Faces", "Lens Covered") still say
+  "Prompts for password", while the new §3.1 text states that `swaylock` shows no prompt and
+  only a failure state after a submit. Correction: reword to "Stays locked; the password still
+  unlocks" (or similar) in a follow-up.
+- **[SUGGESTION]** `tests/physical/screensaver_test.md:208-210` — unchanged rows still promise
+  "<= 5ms" / "<= 2ms" and "Evaluation > 250ms" for the deadline, inconsistent with the 1000 ms
+  default `timeout_ms`. Correction: express them relative to `timeout_ms` as was done for the
+  "Nominal Unlock" row.
+- **[SUGGESTION]** `tests/physical/screensaver_test.md:68` — name where to read the journal
+  line, e.g. "`journalctl -u soos-daemon -f` shows `Rendered authentication response
+  verdict=Allow reason=FaceMatch`", to match the precision of Test Cases 2 and 4.
+- **[SUGGESTION]** `tests/physical/screensaver_test.md:48-50` — the shown block
+  `auth include login` is Arch's file; label it "Arch:" in the code-block lead-in so operators
+  on Debian/Fedora do not copy it.
 
 ## 5. Final Verdict
 
