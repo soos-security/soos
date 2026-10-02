@@ -56,6 +56,9 @@ ADR entry in `AI/DECISIONS.md`. Re-check every value below with the listed `grep
 | `WARMUP_PASSES` | `crates/daemon/src/inference.rs` | 2 (start-up warm-up passes; the estimate is seeded with the last one) |
 | `DEFAULT_DAILY_CAP_TOTAL` | `crates/evidence-store/src/config.rs` | 100 evidence snapshots per day across all UIDs (`[pipeline.evidence] daily_cap_total`) |
 | `DEFAULT_PAD_CONSENSUS_REQUIRED` / `_WINDOW` / `MAX_PAD_CONSENSUS_WINDOW` | `crates/policy/src/pad_consensus.rs` | 3 / 5 / 32 captures (Allow needs 3 consecutive; any spoof vetoes the request) |
+| `RateLimitConfig::DEFAULT_MAX_ATTEMPTS` / `DEFAULT_WINDOW_DURATION_NS` | `crates/policy/src/rate_limit.rs` | 40 attempts / 60 s per UID, shared by every face request (`sudo` included) and presence scans (was 5 before GitHub #323 [175]) |
+| `PRESENCE_RESERVED_ATTEMPTS` | `crates/daemon/src/presence/mod.rs` | 5 (presence never consumes the last 5 attempts of a window) |
+| `[presence]` `scan_interval_ms` / `lock_grace_ms` | `crates/daemon/src/presence/config.rs` | 2000 / 3000 ms (each `1000..=60000`); presence auto-unlock is enabled by default [175] |
 | `GDM_PAM_LINE` | `crates/admin-cli/src/gdm.rs` | `auth  [success=done default=ignore]  pam_soos.so timeout_ms=2500`, inside a managed block after every pre-credential gate [98] |
 | admin-cli `DEFAULT_TIMEOUT_MS` | `crates/admin-cli/src/args.rs` | 250 ms |
 | Match / PAD thresholds | `crates/vision/src/pipeline.rs`, policy | 0.50 / 0.85 (match default 0.50 since the SFace switch, GitHub #278 [162]; floor `MIN_MATCH_THRESHOLD` 0.40) |
@@ -80,6 +83,7 @@ production never overrides it — `OrtPadDetector::new` only, enforced by the in
 | `/var/lib/soos/models/` | 0755 (files 0644) | `root:root` |
 | `/var/lib/soos/master.key` | 0600 | `root:root` |
 | `/etc/soos/disabled`, `/etc/soos/gdm.disable`, `/etc/soos/<service>.disable` | flag files | PAM returns `PAM_IGNORE` immediately; the service is `service=` or else the `PAM_SERVICE` item [94] |
+| `/etc/soos/presence.disable` (and the global `/etc/soos/disabled`) | flag files | presence auto-unlock stops within one tick (1 s), no restart; `gdm.disable` does **not** stop it [175] |
 
 ## 4. Model Contract (manifest `models/manifest.toml` v2.0.0)
 

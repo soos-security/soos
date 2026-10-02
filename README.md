@@ -41,6 +41,16 @@ sudo soos-enroll enroll --username alice         # captures and encrypts the tem
 sudo soos-enroll list                            # templates are stored as /var/lib/soos/biometrics/<uid>.cbor.enc
 ```
 
+Once a user is enrolled and the daemon runs, **presence auto-unlock** is active by default, even
+before PAM is activated: when the screen of that user's local session is locked (GNOME, KDE
+Plasma; wlroots lockers need the `swayidle` hooks), the daemon scans for the owner's face after a
+3 s grace and unlocks the session through systemd-logind, without any keypress. It respects
+`pam_faillock` and account expiry, and stops while the lid is closed or, when the driver
+reports it, while the screen is off (screen-off detection is best effort). Turn it
+off with `sudo touch /etc/soos/presence.disable` or `[presence] enabled = false` in
+`/etc/soos/daemon.toml` (see [`Docs/DISTRIBUTION_DEPLOYMENT.md`](Docs/DISTRIBUTION_DEPLOYMENT.md)
+§5.5 and [`Docs/DAEMON.md`](Docs/DAEMON.md) §6).
+
 ### 3. Verify Before Activating PAM
 
 ```bash
@@ -66,8 +76,9 @@ remains available: when the daemon is stopped or the face does not match, `pam_s
 ### 5. Rescue and Uninstall
 
 ```bash
-sudo touch /etc/soos/disabled                    # immediate kill switch: pam_soos.so returns PAM_IGNORE
-sudo touch /etc/soos/gdm.disable                 # disable facial login for GDM only
+sudo touch /etc/soos/disabled                    # immediate kill switch: pam_soos.so returns PAM_IGNORE, presence auto-unlock stops
+sudo touch /etc/soos/presence.disable            # stop presence auto-unlock only (face PAM unchanged)
+sudo touch /etc/soos/gdm.disable                 # disable facial login for GDM only (presence auto-unlock keeps running)
 sudo ./scripts/uninstall.sh --keep-data          # restores the PAM stack, keeps templates and master key
 sudo ./scripts/uninstall.sh --purge-data         # also erases templates, master key and evidence
 ```

@@ -14,6 +14,12 @@ use soos_daemon::dispatcher::ConnectionDispatcher;
 use soos_daemon::health::HealthState;
 use soos_daemon::logging::init_logging;
 use soos_daemon::pipeline::{initialize_pipeline, warmed_inference_gate, EMBEDDING_MODEL_ID};
+use soos_daemon::presence::account::SystemAccountGuard;
+use soos_daemon::presence::display::SysfsDisplayProbe;
+use soos_daemon::presence::logind::ZbusLogind;
+use soos_daemon::presence::switch::PresenceSwitch;
+use soos_daemon::presence::worker::PresenceWorker;
+use soos_daemon::presence::{DEFAULT_DRM_SYSFS_DIR, DEFAULT_KILL_SWITCH_DIR};
 use soos_daemon::sd_notify::{self, NotifyOutcome};
 use soos_daemon::shutdown::{
     accept_until_shutdown, install_panic_hook, install_panic_hook_with, remaining_budget,
@@ -23,6 +29,9 @@ use soos_daemon::socket::bind_socket;
 
 /// Poll interval of the camera health transition logger.
 const CAMERA_HEALTH_POLL_INTERVAL: Duration = Duration::from_millis(500);
+
+/// Upper bound of the presence worker join at shutdown (GitHub #323).
+const PRESENCE_STOP_BUDGET: Duration = Duration::from_millis(500);
 
 /// Privileged background daemon for soos local biometric PAM verification.
 #[derive(Parser, Debug)]
@@ -112,6 +121,11 @@ async fn run() -> Result<Duration, Box<dyn std::error::Error>> {
 
     // Shutdown drain budget: one connection_timeout (GitHub #259).
     let drain_budget = config.dispatcher.connection_timeout;
+    // Presence auto-unlock (GitHub #323) shares the pipeline and the inference gate with
+    // the dispatcher (same camera, store, rate limiter and single inference slot).
+    let presence_components = components.clone();
+    let presence_gate = inference_gate.clone();
+    let enforce_active_session = config.dispatcher.enforce_active_session;
     let dispatcher = Arc::new(
         ConnectionDispatcher::with_pipeline(config.dispatcher, health.clone(), components)
             .with_inference_gate(inference_gate)
@@ -161,6 +175,42 @@ async fn run() -> Result<Duration, Box<dyn std::error::Error>> {
         Err(err) => warn!(error = %err, "Failed to report readiness to systemd"),
     }
 
+    // Presence auto-unlock (GitHub #323): started only after READY=1, so startup never
+    // waits for the system bus (the logind client connects lazily, with backoff).
+    let presence = if config.presence.enabled && enforce_active_session {
+        let (presence_stop, presence_rx) = tokio::sync::watch::channel(false);
+        let worker = PresenceWorker::new(
+            config.presence.clone(),
+            ZbusLogind::new(),
+            SysfsDisplayProbe::new(PathBuf::from(DEFAULT_DRM_SYSFS_DIR)),
+            PresenceSwitch::new(PathBuf::from(DEFAULT_KILL_SWITCH_DIR)),
+            SystemAccountGuard::new(),
+            presence_components,
+            presence_gate,
+        )
+        .with_expected_embedding_model(EMBEDDING_MODEL_ID);
+        let worker_task = tokio::spawn(worker.run(presence_rx));
+        let worker_abort = worker_task.abort_handle();
+        // A dead worker never unlocks: a panic is logged once and never respawned.
+        let monitor = tokio::spawn(async move {
+            if let Err(err) = worker_task.await {
+                if err.is_panic() {
+                    error!("presence worker stopped; auto-unlock disabled until restart");
+                }
+            }
+        });
+        info!("Presence auto-unlock of locked local sessions started");
+        Some((presence_stop, worker_abort, monitor))
+    } else {
+        info!(
+            enabled = config.presence.enabled,
+            enforce_active_session,
+            "Presence auto-unlock not started ([presence] enabled = false, or the \
+             local-session policy is disabled in this harness mode)"
+        );
+        None
+    };
+
     let shutdown_signal = async {
         tokio::select! {
             _ = tokio::signal::ctrl_c() => {
@@ -180,6 +230,19 @@ async fn run() -> Result<Duration, Box<dyn std::error::Error>> {
         shutdown_signal,
     )
     .await;
+
+    // Stop the presence worker first: no new scan and no unlock after the stop signal; a
+    // worker that does not return in time is aborted (GitHub #323).
+    if let Some((presence_stop, worker_abort, monitor)) = presence {
+        let _ = presence_stop.send(true);
+        if tokio::time::timeout(drain_budget.min(PRESENCE_STOP_BUDGET), monitor)
+            .await
+            .is_err()
+        {
+            warn!("Presence worker did not stop within its budget; aborting it");
+        }
+        worker_abort.abort();
+    }
 
     // Stop accepting and unlink the socket before draining, so no new PAM client can
     // connect to a daemon that is going away (GitHub #259).

@@ -50,9 +50,12 @@ auth include login
 ```
 
 #### Behaviour to Keep in Mind
-`swaylock` calls `pam_authenticate` only when a password is submitted. There is no background
-verification: locking, waiting or moving the mouse never starts the camera, and nothing is
-shown on screen. With `ignore-empty-password` (`-e`), an empty submission never reaches PAM.
+`swaylock` calls `pam_authenticate` only when a password is submitted. The PAM path does no
+background verification: locking, waiting or moving the mouse never makes `pam_soos.so` start
+the camera, and nothing is shown on screen. With `ignore-empty-password` (`-e`), an empty
+submission never reaches PAM. The daemon's presence auto-unlock (§3.6) scans in the background
+only when logind reports the session locked, which a plain `swaylock` never does; the cases
+below run without the §3.6 wrapper.
 
 #### Test Procedure:
 1. Ensure the user is enrolled: `soos-enroll list`.
@@ -204,6 +207,197 @@ line of its own.
 
 ---
 
+### 3.6 Presence Auto-Unlock of Locked Sessions (daemon path, no PAM) — matrix PAU21
+
+`soos-daemon` unlocks a locked local session **without any keypress** when it verifies the face
+of the session owner (ADR 2026-10-02 "Presence Auto-Unlock Through logind",
+`Docs/DAEMON.md` §6, `Docs/DISTRIBUTION_DEPLOYMENT.md` §5.5). This path does not go through
+PAM: the daemon polls systemd-logind every second, scans only a session whose `LockedHint` is
+`true` once its lock grace (`[presence] lock_grace_ms`, default 3000 ms) has passed, runs the
+normal pipeline (PAD consensus, then match) and calls `UnlockSession`. It is enabled by default.
+Everything in this section is **not yet validated on hardware**: record the observed behaviour
+and timings in the validation report.
+
+#### Preconditions
+1. The user is enrolled (`soos-enroll list`) and the daemon runs:
+   `systemctl is-active soos-daemon` prints `active`, and
+   `journalctl -u soos-daemon -b | grep "Presence auto-unlock of locked local sessions started"`
+   shows one line. A `Presence auto-unlock not started` line means `[presence] enabled = false`
+   (or the test harness mode); fix `/etc/soos/daemon.toml` before continuing.
+2. No kill switch is set: `ls /etc/soos/disabled /etc/soos/presence.disable` reports both missing.
+3. The account is one the account guard can evaluate (otherwise presence never scans, by
+   design):
+   - `sudo grep -c '^<user>:' /etc/shadow` prints `1` (LDAP/SSSD and systemd-homed users have
+     no line and never get presence unlock);
+   - `grep -rn 'pam_faillock' /etc/pam.d /usr/lib/pam.d /usr/etc/pam.d 2>/dev/null` shows no
+     line carrying `deny=`, `dir=`, `fail_interval=`, `unlock_time=`, `root_unlock_time=`,
+     `admin_group=`, `conf=` or `even_deny_root` (such options belong in
+     `/etc/security/faillock.conf`; `preauth`, `authfail`, `authsucc`, `silent` and `audit` are
+     fine);
+   - `sudo faillock --user <user>` lists no valid failure of the last `fail_interval`.
+4. Keep a root shell that does not depend on the lock screen (another TTY with `Ctrl+Alt+F3`,
+   or SSH from a second machine): several cases below lock the account on purpose.
+5. Skip reasons are logged at `debug` only. To read them, set
+   `log_level = "info,soos_daemon::presence=debug"` in `/etc/soos/daemon.toml` and restart the
+   daemon (`sudo systemctl restart soos-daemon`); put `log_level = "info"` back at the end.
+   Follow the journal during the whole section: `journalctl -u soos-daemon -f`.
+
+Journal lines this section refers to (all in `crates/daemon/src`):
+
+| Line | Level | Meaning |
+|---|---|---|
+| `Presence verified the session owner; locked session unlocked through logind` | `info` | `UnlockSession` succeeded; carries `session_id`, `uid` and `captures_evaluated` |
+| `Presence scan vetoed by presentation attack detection; the session stays locked` | `warn` | A capture was classified as a spoof (once per lock period); preceded by `Presentation attack detected; vetoing request` |
+| `Presence unlock refused by the account guard; the session stays locked` | `info` | The account check made after an `Allow` refused (`refusal=faillocked`, `account_expired`, `password_locked`, ...) |
+| `Presence scan gated by the lid or the screen state` / `Presence scan gate open` | `info` | Lid or screen gate transition, with `lid_closed` and `display_state` |
+| `The screen locker ignored UnlockSession; this lock period is no longer scanned` | `warn` | The session was still locked 5 s after a successful `UnlockSession` |
+| `UnlockSession failed; the session stays locked` | `warn` | logind refused or timed out (never retried for the same `Allow`) |
+| `systemd-logind unavailable; presence auto-unlock backs off (sessions stay locked)` | `warn` | No system bus or logind (once per outage) |
+| `Presence tick skipped` (`reason=kill_switch`, `in_grace`, `account_refused`, `not_enrolled`, `lid_closed`, `display_off`, `no_locked_session`, ...) | `debug` | Why a tick did not scan (logged when the reason changes) |
+| `Presence scan finished` (`outcome=NoMatch`, `SpoofVetoed`, `Unlocked { .. }`, ...) | `debug` | Result of a scan that recorded an attempt |
+
+No line may contain a user name above `debug`, a score, an embedding, a frame or file content.
+
+#### Test Procedure — GNOME / GDM (primary)
+1. **Test Case 1 (Lock, Leave, Return)**:
+   - Lock with `Super+L`, leave the camera field of view within 2 s and stay away 20 s.
+   - Return and face the camera (move the mouse first if the screen has blanked).
+   - **Expected Result**: The session unlocks without any keypress within about 4 s of facing the
+     camera, and the journal shows one
+     `Presence verified the session owner; locked session unlocked through logind` line with the
+     session ID and UID. Record the delay.
+2. **Test Case 2 (Lock While Seated)**:
+   - Lock with `Super+L` and keep facing the camera.
+   - **Expected Result**: The session unlocks again shortly after the 3 s grace. This is the
+     expected behaviour (owner decision), not a defect. With
+     `[presence] lock_grace_ms = 10000` and a restart, the unlock comes after about 10 s instead.
+3. **Test Case 3 (Grace Period)**:
+   - Lock with `Super+L` while facing the camera and watch the camera LED.
+   - **Expected Result**: No scan (LED stays off unless the PAM path wakes it, see the note
+     below; debug `reason="in_grace"`) during the first `lock_grace_ms`; the scan and the unlock
+     follow afterwards.
+4. **Test Case 4 (Unknown Face)**:
+   - Lock, leave, and let a person who is not enrolled face the camera for 30 s.
+   - **Expected Result**: The session stays locked; debug lines show `outcome=NoMatch` about
+     every `scan_interval_ms` (2 s); no unlock line. The owner returning then unlocks it.
+5. **Test Case 5 (Presentation Attack)**:
+   - Lock, leave, and present a printed photo, then a phone or tablet replay of the owner.
+   - **Expected Result**: The session never unlocks. A spoof capture produces one
+     `Presence scan vetoed by presentation attack detection; the session stays locked` warning
+     per lock period (no evidence snapshot is written for presence vetoes). Record any unlock as
+     a security defect.
+6. **Test Case 6 (Lid Closed / Screen Off)**:
+   - On a laptop with an external monitor and `HandleLidSwitch=ignore` (or `HandleLidSwitchDocked=ignore`
+     while docked), lock and close the lid. Separately, lock, leave, and let GNOME blank the
+     screen (Settings → Power → Screen Blank set to a short delay).
+   - **Expected Result**: `Presence scan gated by the lid or the screen state` with
+     `lid_closed="true"` (or `display_state="off"`), no scan, and the camera LED goes off after
+     `[camera] idle_timeout_secs` (default 10 s). Opening the lid or waking the screen logs
+     `Presence scan gate open` and the scans resume. A state the daemon cannot read
+     (`display_state="unknown"`) does not gate.
+   - **Record**: the `display_state` value logged while GNOME blanks the screen, and
+     `cat /sys/class/drm/card*-*/dpms` at that moment. On atomic-KMS drivers the sysfs `dpms`
+     attribute may stay `On` while the compositor blanks (screen-off detection is best effort);
+     if so, note it as a known limitation, not a failure, and check that the lid case still
+     gates.
+   - Also close the lid **during** a scan (after the camera LED turns on): the scan must end
+     with no unlock (`ScanOutcome::LidClosed`, the lid re-check after the `Allow`).
+7. **Test Case 7 (Sandboxed `UnlockSession`)**:
+   - Confirm Test Case 1 ran with the packaged unit (`systemctl cat soos-daemon` shows
+     `PrivateNetwork=yes` and `ProtectSystem=strict`).
+   - **Expected Result**: The unlock line is present and no `UnlockSession failed` warning
+     appears: logind accepts the call from the sandboxed root service.
+
+Note: with `soos-admin gdm enable`, raising the GNOME shield also starts the PAM face path
+(§3.3 Test Case 2). Cover the camera, or do not touch the keyboard and mouse, when a case must
+observe presence alone.
+
+#### Test Procedure — KDE Plasma
+1. Lock with `Meta+L` (or `loginctl lock-session`); check the hint from a terminal of another
+   session or over SSH:
+   `busctl --system get-property org.freedesktop.login1 /org/freedesktop/login1/session/<id> org.freedesktop.login1.Session LockedHint`
+   prints `b true` (`loginctl list-sessions` gives `<id>`).
+2. Repeat GNOME Test Cases 1, 4 and 5.
+3. **Expected Result**: Same as GNOME: `kscreenlocker` sets `LockedHint` and honours
+   `UnlockSession`. A `The screen locker ignored UnlockSession; this lock period is no longer scanned`
+   warning means the locker did not react; record it.
+
+#### Test Procedure — `swaylock` / `hyprlock` (wlroots, `swayidle` hooks)
+Plain `swaylock` and `hyprlock` never set `LockedHint` and never listen to logind, so presence
+never scans for them (expected: no `Presence scan finished` line at all). Install the wrapper
+and the `swayidle` hooks of `Docs/DISTRIBUTION_DEPLOYMENT.md` §5.5 (for `hyprlock`, use
+`hyprlock` in the wrapper and `pkill -USR1 hyprlock` as the `unlock` hook), then:
+1. Lock with `loginctl lock-session`. Check `LockedHint` as in the KDE procedure (`b true`).
+2. **Test Case 1 (Unlock Hook)**: leave, return and face the camera.
+   - **Expected Result**: The journal shows the unlock line, `swayidle` runs its `unlock` hook,
+     the locker exits, and the wrapper sets `LockedHint` back to `b false`.
+3. **Test Case 2 (Missing Hook)**: run `swaylock -C /dev/null -c 000000` directly, without the
+   wrapper.
+   - **Expected Result**: No scan and no unlock; the camera stays off until a password (or an
+     empty `Enter`, §3.1) is submitted.
+4. **Test Case 3 (Hint Without Hook)**: start the wrapper but `swayidle` without the `unlock`
+   hook, then face the camera.
+   - **Expected Result**: `UnlockSession` succeeds but the locker stays up; 5 s later the journal
+     shows `The screen locker ignored UnlockSession; this lock period is no longer scanned` and
+     no further scan happens until the next lock.
+
+#### Test Procedure — Account Guard (`pam_faillock`, expiry, locked password)
+Run on the GNOME (or KDE) session; restore every change from the root shell of the
+preconditions.
+1. **Test Case 1 (`pam_faillock` Locked)**:
+   - Lock the screen, cover the camera, and enter a wrong password `deny` times (default
+     `deny = 3`, `/etc/security/faillock.conf`). From the root shell,
+     `faillock --user <user>` lists the failures.
+   - Uncover the camera and face it for 60 s.
+   - **Expected Result**: No presence unlock and no camera wake by presence while the account is
+     locked (debug `reason="account_refused"`; if the lock happened during a scan,
+     `Presence unlock refused by the account guard; the session stays locked` with
+     `refusal="faillocked"`). After `unlock_time` (default 600 s) has passed, presence unlocks
+     again at the next scan; alternatively `sudo faillock --user <user> --reset` from the root
+     shell makes it unlock within a few seconds (the guard re-reads the tally on every check).
+   - Check that the presence unlock did not reset the tally: after a test with fewer than `deny`
+     failures, `faillock --user <user>` still lists them (no tally reset by presence).
+2. **Test Case 2 (Expired Account)**:
+   - From the root shell: `sudo chage -E 0 <user>`, then lock the screen and face the camera.
+   - **Expected Result**: No presence unlock (debug `reason="account_refused"`). Restore with
+     `sudo chage -E -1 <user>`; presence unlocks at the next scan.
+3. **Test Case 3 (Locked Password)**:
+   - From the root shell: `sudo passwd -l <user>`, then lock the screen and face the camera.
+   - **Expected Result**: No presence unlock. Restore with `sudo passwd -u <user>`; presence
+     unlocks at the next scan.
+4. **Test Case 4 (Policy Option on a PAM Line)**: add `deny=5` to the `pam_faillock.so preauth`
+   line of a copy-safe test stack (for example a new file `/etc/pam.d/soos-presence-test`
+   containing `auth required pam_faillock.so preauth deny=5`), then lock and face the camera.
+   - **Expected Result**: No presence unlock for any user (state undeterminable). Delete the file;
+     presence unlocks at the next scan.
+
+Test Cases 2 and 3 also block the password at the lock screen (expired account, locked
+password): restore them from the root shell before unlocking, and never leave any of these
+changes in place.
+
+#### Test Procedure — Kill Switches
+1. **Test Case 1 (`presence.disable`)**:
+   - Lock, leave, then `sudo touch /etc/soos/presence.disable` from the root shell; return and
+     face the camera for 30 s.
+   - **Expected Result**: No scan and no unlock within one second of the flag (debug
+     `reason="kill_switch"`), no restart needed. Face PAM still works (raising the GNOME shield,
+     `sudo`). `sudo rm /etc/soos/presence.disable`: the grace restarts and the session unlocks
+     after about 3 s more.
+2. **Test Case 2 (`disabled`)**:
+   - Repeat Test Case 1 with `/etc/soos/disabled`.
+   - **Expected Result**: No presence unlock, and `pam_soos.so` returns `PAM_IGNORE` too (the
+     password is the only way in). Removing the flag restores both.
+3. **Test Case 3 (`gdm.disable` Does Not Stop Presence)**:
+   - `sudo touch /etc/soos/gdm.disable`, lock, leave, return.
+   - **Expected Result**: Presence still unlocks the session (owner decision); only the GDM PAM
+     face path is disabled. `sudo rm /etc/soos/gdm.disable` afterwards.
+4. **Test Case 4 (`enabled = false`)**:
+   - Set `[presence] enabled = false` in `/etc/soos/daemon.toml` and restart the daemon.
+   - **Expected Result**: `Presence auto-unlock not started` at startup; locking never starts the
+     camera. Restore `enabled = true` (or remove the key) and restart.
+
+---
+
 ## 4. Operational Invariant and Behavior Matrix
 
 | Scenario | Daemon State | Camera State | Face Alignment / Match | PAM Result | UI Response |
@@ -216,6 +410,8 @@ line of its own.
 | **Camera Hardware Unplugged** | Active | `ENODEV` hotplug | N/A (CameraManager backoff) | `PAM_IGNORE` | Falls back to the password within the `timeout_ms` budget |
 | **Daemon Crashed / Stopped** | Inactive | N/A | N/A (Socket connection refused) | `PAM_IGNORE` | Falls back to the password at once (connection refused, no wait) |
 | **Daemon Deadline Exceeded** | Busy | Stalled | Evaluation exceeds the client deadline (`timeout_ms`) | `PAM_IGNORE` | Deadline expiry -> falls back to the password |
+| **Presence: Owner Returns** (§3.6) | Active | Woken by the presence scan | Single face, Score >= 0.50, PAD Pass (3 consecutive captures) | No PAM call | `UnlockSession` after the lock grace, no keypress |
+| **Presence: Unknown Face, Spoof, Lid Closed, Screen Off, Account Locked or Expired, Kill Switch** (§3.6) | Active | Standby (or scanning without match) | Refused or not attempted | No PAM call | Session stays locked; the password path is unchanged |
 
 ---
 
@@ -243,6 +439,8 @@ If a misconfigured PAM stack prevents login:
      ```
    - GDM: `sudo soos-admin gdm disable` stops face verification at once (`/etc/soos/gdm.disable`);
      `sudo soos-admin gdm restore` puts back `gdm-password.soos-backup`.
+   - Presence auto-unlock: `sudo touch /etc/soos/presence.disable` stops it within one second
+     (`gdm.disable` does not); `/etc/soos/disabled` stops it together with every face PAM path.
 3. **Service Rollback**:
    - Stop and disable the daemon:
      ```bash

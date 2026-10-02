@@ -19,7 +19,7 @@ The system is not considered a high-assurance biometric factor until robust Pres
 | Local AI Inference | `ort` (ONNX Runtime) CPU execution provider; **SCRFD 500M KPS** (face detection + 5-point landmarks) + **SFace 2021dec** (128D embeddings, manifest id `sface_2021dec`, Apache-2.0; replaced the ArcFace ResNet34 on 2026-10-01, GitHub #278) + **MiniFASNetV2** (anti-spoofing) | Fast 3-model pipeline with unified detection+landmarks, battle-tested ORT runtime, no OpenCV required | Claiming "pure Rust" (ORT is native C/C++); unverified weight downloads; separate landmark model (absorbed into SCRFD) |
 | Biometric Storage | AES-GCM encrypted embeddings at rest; intrusion snapshots opt-in and isolated | Minimizes attack surface and persistent biometric risk | Storing raw frames or passwords on disk or sending over socket |
 
-Verified crate versions: `pam-bindings` 0.3.0, `tokio` 1.53.1, `v4l` 0.14.0, `ort` 2.0.0-rc.13, `zeroize` 1.9.0. Versions are pinned in `Cargo.lock` and audited via `cargo-deny`.[^pam-bindings][^tokio][^v4l][^ort][^zeroize]
+Verified crate versions: `pam-bindings` 0.3.0, `tokio` 1.53.1, `v4l` 0.14.0, `ort` 2.0.0-rc.13, `zeroize` 1.9.0, `zbus` 5.19.0 (daemon only, `default-features = false`, `tokio`; the systemd-logind client of the presence auto-unlock, GitHub #323). Versions are pinned in `Cargo.lock` and audited via `cargo-deny`.[^pam-bindings][^tokio][^v4l][^ort][^zeroize]
 
 ---
 
@@ -38,9 +38,10 @@ Local unprivileged users, processes running under an attacker UID, rogue IPC soc
 ### Mandatory Security Invariants
 1. The PAM module returns `PAM_SUCCESS` **only** upon receiving a fresh `Allow` response matched to the kernel-verified socket UID (`SO_PEERCRED`); all other scenarios return `PAM_IGNORE`.
 2. Zero passwords ever transit to `soos`, are parsed by its module, or are logged.
-3. The daemon never trusts the username, PID, PAM service, or UID declared in payload messages: it strictly cross-references the numeric target UID with the kernel `SO_PEERCRED` credentials and the active `logind` session records (no user database lookup is made; the PAM module resolves the username to a UID before the request is sent).
+3. The daemon never trusts the username, PID, PAM service, or UID declared in payload messages: it strictly cross-references the numeric target UID with the kernel `SO_PEERCRED` credentials and the active `logind` session records (no user database lookup is made for a request; the PAM module resolves the username to a UID before the request is sent; the presence account guard reads the shadow and faillock records of a logind session owner, never of a payload identity).
 4. An `Allow` verdict is single-use, cryptographically bound to a 256-bit random nonce (`request_id`), target UID, service name, and monotonic deadline; it is never cached inside PAM.
 5. Any timeout, panic, disconnected socket, missing camera, ambiguous face, invalid model, or internal error degrades silently to password fallback, never to authorization.
+6. The daemon asks `logind` to unlock a session (presence auto-unlock, GitHub #323) only after a fresh, single-use `Allow` consensus of the unchanged pipeline for that session owner's UID, obtained after the lock grace period, and only if a `logind` re-check made after that `Allow` still shows the same session bound (local, active, `REMOTE=0`, seat, `CLASS=user`), locked and owned by that UID, and a fresh account check finds the owner neither locked by `pam_faillock` nor expired (account or password); every error, unknown state or timeout leaves the session locked.
 
 ---
 
@@ -61,6 +62,15 @@ PAM Caller (gdm, swaylock, hyprlock, sudo, login)
                    Allow / Deny / Unavailable, cryptographically bound to request_id
                                        │
                          EvidenceStore (opt-in: PasswordFailed events and PadFailed vetoes)
+
+Presence auto-unlock (GitHub #323, daemon-internal, no PAM, nothing crosses the socket):
+  PresenceWorker (1 s tick) ── zbus, pinned system bus ── systemd-logind (LockedHint, LidClosed)
+        │ one bound, locked, enrolled session past its grace; lid/screen gates; account guard
+        ▼
+  consensus::run_face_consensus (same pipeline, Background priority, yields to PAM)
+        │ Allow → fresh logind re-check + fresh account check + kill-switch re-check
+        ▼
+  Manager.UnlockSession(id)   (any error, unknown state or timeout: session stays locked)
 ```
 
 The daemon starts as a systemd service before login prompts, loads and validates model checksums, opens the camera, and stabilizes auto-exposure. The PAM module contains only the lightweight IPC client, response interpreter, and C ABI bindings. This separation guarantees that AI model loading, camera reinitialization, or video processing delays cannot block PAM authentication calls beyond the strictly enforced latency budget.
@@ -116,7 +126,7 @@ Event v1:    version | kind=PASSWORD_FAILED | request_id[32] |
 ```
 
 ### Async Boundaries (Tokio vs. PAM)
-- **Privileged Daemon**: Runs Tokio for IPC connection dispatching. Capture runs on the dedicated `soos-v4l-capture` thread; vision inference runs on the Tokio blocking pool (`spawn_blocking`) behind the `InferenceGate` semaphore (`MAX_CONCURRENT_INFERENCES` = 1, `crates/daemon/src/inference.rs`), so Tokio workers, the accept loop and Status requests never block on inference (GitHub #158). Each authentication request computes one `RequestDeadline` (client deadline and outer `connection_timeout`, each minus the 50ms `RESPONSE_WRITE_MARGIN_MS`) and never starts an inference whose measured estimate exceeds the remaining budget (GitHub #159).
+- **Privileged Daemon**: Runs Tokio for IPC connection dispatching. Capture runs on the dedicated `soos-v4l-capture` thread; vision inference runs on the Tokio blocking pool (`spawn_blocking`) behind the `InferenceGate` semaphore (`MAX_CONCURRENT_INFERENCES` = 1, `crates/daemon/src/inference.rs`), so Tokio workers, the accept loop and Status requests never block on inference (GitHub #158). Each authentication request computes one `RequestDeadline` (client deadline and outer `connection_timeout`, each minus the 50ms `RESPONSE_WRITE_MARGIN_MS`) and never starts an inference whose measured estimate exceeds the remaining budget (GitHub #159). The presence auto-unlock worker (GitHub #323) shares the same gate at `InferencePriority::Background`: it never waits for the slot (`try_acquire_background`), never starts an inference while an `Auth` request holds an `InteractiveDemandGuard`, and is preempted between captures, so a PAM request waits at most one in-flight presence inference.
 - **PAM Module**: **Strictly forbidden from starting Tokio**. Uses `std::os::unix::net::UnixStream`; every blocking PAM operation has an explicit deadline derived from the clamped `timeout_ms` (`DEFAULT_TIMEOUT_MS` = 1000, clamped to 10–5000 ms): connect, request write and verdict read share one cumulative deadline, and the `event=password-failed` notification uses its own `timeout_ms=20`. Immediately closes socket after response. Packaged console/sudo stacks rely on the module default (ADR 2026-09-30 "PAM Deadline Derived From Clamped `timeout_ms`"); GDM uses `timeout_ms=2500`.
 
 ---

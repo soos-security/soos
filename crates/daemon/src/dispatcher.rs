@@ -9,15 +9,18 @@ use tracing::{debug, info, warn};
 use zeroize::Zeroizing;
 
 use crate::config::DispatcherConfig;
+use crate::consensus::{
+    run_face_consensus, wake_camera, ConsensusContext, ConsensusRun, DEFAULT_CAMERA_WAKE_WAIT_MS,
+    MAX_CAMERA_WAKE_WAIT_MS,
+};
 use crate::error::DaemonError;
 use crate::health::HealthState;
-use crate::inference::{InferenceGate, RequestDeadline};
+use crate::inference::{InferenceGate, InferencePriority, RequestDeadline};
 use crate::limits::{PeerConnectionLimiter, PeerLimitsConfig};
 use crate::logging::short_request_id;
 use crate::peercred::{get_peer_credentials, verify_peer_credentials, PeerCredentials};
 use crate::pipeline::{
     classify_template, current_monotonic_nanos, PipelineComponents, TemplateModelBinding,
-    FRAME_POLL_INTERVAL_MS, MAX_FRAME_AGE_NS,
 };
 use crate::preview::{
     authorize_preview, preview_image_for_frame, PreviewConfig, PREVIEW_FORMAT_EMPTY,
@@ -27,7 +30,7 @@ use crate::session_policy::LocalSessionPolicy;
 use crate::shutdown::BlockingTasks;
 use soos_camera_v4l::{Frame, PixelFormat};
 use soos_evidence_store::{EvidenceFrame, EvidencePixelFormat, EvidenceStore, FrameMetadata};
-use soos_policy::{ConsensusDecision, FrameClass, FrameEvaluation, PadAggregator, RateLimiter};
+use soos_policy::{ConsensusDecision, RateLimiter};
 use soos_protocol::codec::{encode, encode_preview, CodecError};
 use soos_protocol::message::{decode_client_message, ClientMessage, FrameFormat};
 use soos_protocol::types::{
@@ -157,17 +160,6 @@ fn store_evidence_capture(store: &EvidenceStore, uid: u32, reason: &str, frame: 
                 "Failed to store intrusion evidence snapshot"
             );
         }
-    }
-}
-
-/// Whether a capture taken at `timestamp_ns` is still fresh at `now_ns` (`MAX_FRAME_AGE_NS`).
-///
-/// Captures without a timestamp, or stamped in the future, are accepted as before.
-fn is_frame_fresh(timestamp_ns: u64, now_ns: u64) -> bool {
-    if timestamp_ns > 0 && now_ns > timestamp_ns {
-        now_ns.saturating_sub(timestamp_ns) <= MAX_FRAME_AGE_NS
-    } else {
-        true
     }
 }
 
@@ -780,6 +772,10 @@ impl ConnectionDispatcher {
 
         // Step 8: Full pipeline processing
         if let Some(ref pipe) = self.pipeline {
+            // PAM priority over the presence scanner (GitHub #323): this request is
+            // registered as interactive demand until it returns (every return path).
+            let _interactive = self.inference.register_interactive();
+
             // Single request deadline (GitHub #159), computed once and threaded through the
             // camera wake wait and the consensus loop: min(client deadline, request start +
             // connection_timeout), each minus the response write margin.
@@ -903,9 +899,9 @@ impl ConnectionDispatcher {
             {
                 let remaining =
                     Duration::from_nanos(req.deadline_monotonic_ns.saturating_sub(now_ns));
-                remaining.min(Duration::from_millis(1200))
+                remaining.min(Duration::from_millis(MAX_CAMERA_WAKE_WAIT_MS))
             } else {
-                Duration::from_millis(1000)
+                Duration::from_millis(DEFAULT_CAMERA_WAKE_WAIT_MS)
             };
             let max_wake = max_wake
                 .min(
@@ -915,14 +911,7 @@ impl ConnectionDispatcher {
                 )
                 .min(deadline.remaining(now_ns));
 
-            if !pipe.camera.is_ready() {
-                let wake_start = Instant::now();
-                while !pipe.camera.is_ready() && wake_start.elapsed() < max_wake {
-                    tokio::time::sleep(Duration::from_millis(15)).await;
-                }
-            }
-
-            if !pipe.camera.is_ready() {
+            if !wake_camera(&pipe.camera, max_wake).await {
                 warn!("Camera is not ready; rejecting auth request");
                 let encoded = self.build_response(
                     req.request_id,
@@ -935,242 +924,83 @@ impl ConnectionDispatcher {
                 });
             }
 
-            // 8e: Multi-frame PAD consensus loop (GitHub #147 / PAD-02).
+            // 8e: Multi-frame PAD consensus loop (GitHub #147 / PAD-02), shared with the
+            // presence auto-unlock scanner (GitHub #323, `consensus::run_face_consensus`).
             // Allow requires k consecutive passing captures (live at or above the PAD
             // threshold and matching at or above the cosine threshold) inside a bounded
             // window; any spoof-classified capture vetoes the whole request (fail closed).
-            let consensus_thresholds = *pipe.policy.read().await.thresholds();
-            let mut aggregator = PadAggregator::with_defaults(consensus_thresholds);
-            let mut last_sequence: Option<u64> = None;
-            let mut last_capture_stale = false;
-            // First capture classified as a presentation attack (GitHub #261 / PAD-14),
-            // kept only to seal it as opt-in evidence once the verdict is rendered.
-            let mut spoof_capture: Option<Arc<Frame>> = None;
-
-            loop {
-                let cur_ns = match self.now_nanos() {
-                    Ok(ns) => ns,
-                    Err(err) => {
-                        warn!(error = %err, "Monotonic clock query failed checking loop deadline");
-                        let encoded = self.build_response(
-                            req.request_id,
-                            Verdict::Unavailable,
-                            ReasonClass::InternalError,
-                        )?;
-                        return Ok(ResponseOutput {
-                            encoded_response: encoded,
-                            completion_error: Some(err),
-                        });
-                    }
-                };
-
-                if deadline.remaining(cur_ns).is_zero() {
-                    break;
-                }
-
-                if let Some(frame) = pipe.camera.latest_frame() {
-                    let is_new = match last_sequence {
-                        Some(seq) => frame.sequence != seq,
-                        None => true,
-                    };
-
-                    if is_new {
-                        last_sequence = Some(frame.sequence);
-
-                        if is_frame_fresh(frame.timestamp_mono_ns, cur_ns) {
-                            last_capture_stale = false;
-
-                            // 8e-1: Inference admission (GitHub #158 / #159). Never start an
-                            // inference whose estimated duration exceeds the remaining budget,
-                            // and never queue behind a busy inference slot past the last
-                            // feasible start time: finalize with the current consensus instead.
-                            let estimate = self.inference.estimate();
-                            if !deadline.can_start(cur_ns, estimate) {
-                                debug!(
-                                    estimate_ms = estimate.as_millis(),
-                                    "Remaining budget below the inference estimate; finalizing"
-                                );
-                                // GitHub #315 (DMN-NEW-2): with no capture evaluated, no
-                                // measurement would ever lower an estimate above every
-                                // client budget; decay it so face auth recovers. This
-                                // request still fails closed.
-                                if aggregator.frames_evaluated() == 0 {
-                                    self.inference.decay_estimate();
-                                }
-                                break;
-                            }
-                            let max_wait = deadline.remaining(cur_ns).saturating_sub(estimate);
-                            let Some(permit) = self.inference.acquire_within(max_wait).await else {
-                                debug!("Inference slot still busy at the last feasible start; finalizing");
-                                break;
-                            };
-                            let start_ns = self.now_nanos().unwrap_or(u64::MAX);
-                            if !deadline.can_start(start_ns, self.inference.estimate()) {
-                                drop(permit);
-                                break;
-                            }
-                            if !is_frame_fresh(frame.timestamp_mono_ns, start_ns) {
-                                // Aged while waiting for the slot: never evaluate it.
-                                drop(permit);
-                                continue;
-                            }
-
-                            // 8e-2: CPU inference on the bounded blocking pool; the async
-                            // worker stays free for the accept loop and Status requests.
-                            let vision = Arc::clone(&pipe.vision);
-                            let job_frame = Arc::clone(&frame);
-                            let result = match self
-                                .inference
-                                .run(permit, move || vision.process_frame(&job_frame))
-                                .await
-                            {
-                                Ok(result) => result,
-                                Err(err) => {
-                                    warn!(error = %err, "Vision inference job failed; failing closed");
-                                    let encoded = self.build_response(
-                                        req.request_id,
-                                        Verdict::Unavailable,
-                                        ReasonClass::InternalError,
-                                    )?;
-                                    return Ok(ResponseOutput {
-                                        encoded_response: encoded,
-                                        completion_error: None,
-                                    });
-                                }
-                            };
-
-                            let evaluation = match result {
-                                Ok(output) => {
-                                    let sim = match soos_vision::cosine_similarity(
-                                        enrolled_template.embedding.as_slice(),
-                                        output.embedding.as_slice(),
-                                    ) {
-                                        Ok(s) => s,
-                                        Err(e) => {
-                                            warn!(error = %e, "Cosine similarity calculation error");
-                                            0.0
-                                        }
-                                    };
-                                    FrameEvaluation::new(
-                                        1,
-                                        output.pad_result.is_live,
-                                        output.pad_result.score,
-                                        sim,
-                                    )
-                                }
-                                Err(soos_vision::VisionError::PadFailed { score, threshold }) => {
-                                    debug!(
-                                        score = score,
-                                        threshold = threshold,
-                                        "Presentation attack detected (PAD failed)"
-                                    );
-                                    FrameEvaluation::spoof(score)
-                                }
-                                Err(soos_vision::VisionError::IrLivenessGateFailed { reason }) => {
-                                    debug!(
-                                        reason = %reason,
-                                        "Presentation attack detected (IR liveness gate)"
-                                    );
-                                    FrameEvaluation::spoof(0.0)
-                                }
-                                Err(soos_vision::VisionError::NoFaceDetected) => {
-                                    debug!("Zero faces detected in capture");
-                                    FrameEvaluation::no_face()
-                                }
-                                Err(soos_vision::VisionError::MultipleFacesDetected { count }) => {
-                                    let count_u8 = u8::try_from(count).unwrap_or(u8::MAX);
-                                    debug!(count = count, "Multiple faces detected in capture");
-                                    FrameEvaluation::multiple_faces(count_u8)
-                                }
-                                Err(soos_vision::VisionError::FaceBelowConfidence { .. }) => {
-                                    debug!("Face detected below confidence threshold");
-                                    FrameEvaluation::no_face()
-                                }
-                                // Pre-PAD quality gate (GitHub #218): an unusable capture,
-                                // never a pass and never an internal error.
-                                Err(
-                                    soos_vision::VisionError::FaceTooSmall { .. }
-                                    | soos_vision::VisionError::FaceBlurred { .. },
-                                ) => {
-                                    debug!("Face rejected by the pre-PAD quality gate");
-                                    FrameEvaluation::no_face()
-                                }
-                                Err(soos_vision::VisionError::Inference(err)) => {
-                                    warn!(error = %err, "Vision neural inference failure");
-                                    let encoded = self.build_response(
-                                        req.request_id,
-                                        Verdict::Unavailable,
-                                        ReasonClass::ModelUnavailable,
-                                    )?;
-                                    return Ok(ResponseOutput {
-                                        encoded_response: encoded,
-                                        completion_error: None,
-                                    });
-                                }
-                                Err(err) => {
-                                    warn!(error = %err, "Vision pipeline processing error");
-                                    let encoded = self.build_response(
-                                        req.request_id,
-                                        Verdict::Unavailable,
-                                        ReasonClass::InternalError,
-                                    )?;
-                                    return Ok(ResponseOutput {
-                                        encoded_response: encoded,
-                                        completion_error: None,
-                                    });
-                                }
-                            };
-
-                            let class = aggregator.record(&evaluation);
-                            if class == FrameClass::Spoof && spoof_capture.is_none() {
-                                spoof_capture = Some(Arc::clone(&frame));
-                            }
-                            match aggregator.decision() {
-                                ConsensusDecision::Allow => break,
-                                ConsensusDecision::SpoofVetoed => {
-                                    warn!(
-                                        uid = req.uid_hint,
-                                        captures_evaluated = aggregator.frames_evaluated(),
-                                        "Presentation attack detected; vetoing request"
-                                    );
-                                    break;
-                                }
-                                ConsensusDecision::Pending(_) => {
-                                    debug!(
-                                        class = ?class,
-                                        consecutive_live = aggregator.consecutive_passing(),
-                                        required = aggregator.config().required(),
-                                        "Capture recorded; consensus pending"
-                                    );
-                                }
-                            }
-                        } else {
-                            last_capture_stale = true;
-                        }
-                    }
-                }
-
-                // Deadline-aware poll: never sleep past the decision budget so the response
-                // is always rendered before the connection timeout.
-                let remaining = deadline.remaining(self.now_nanos().unwrap_or(u64::MAX));
-                if remaining.is_zero() {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(FRAME_POLL_INTERVAL_MS).min(remaining))
-                    .await;
-            }
+            let consensus_ctx = ConsensusContext {
+                camera: &pipe.camera,
+                vision: &pipe.vision,
+                inference: &self.inference,
+                thresholds: *pipe.policy.read().await.thresholds(),
+                clock: self.clock_fn,
+                priority: InferencePriority::Interactive,
+                uid: req.uid_hint,
+            };
+            let run = run_face_consensus(
+                &consensus_ctx,
+                enrolled_template.embedding.as_slice(),
+                deadline,
+            )
+            .await;
 
             drop(enrolled_template);
 
+            let (
+                decision,
+                frames_evaluated,
+                consecutive_passing,
+                last_capture_stale,
+                spoof_capture,
+            ) = match run {
+                ConsensusRun::Decided {
+                    decision,
+                    frames_evaluated,
+                    consecutive_passing,
+                    last_capture_stale,
+                    spoof_capture,
+                } => (
+                    decision,
+                    frames_evaluated,
+                    consecutive_passing,
+                    last_capture_stale,
+                    spoof_capture,
+                ),
+                ConsensusRun::Aborted {
+                    verdict,
+                    reason,
+                    completion_error,
+                } => {
+                    let encoded = self.build_response(req.request_id, verdict, reason)?;
+                    return Ok(ResponseOutput {
+                        encoded_response: encoded,
+                        completion_error,
+                    });
+                }
+                ConsensusRun::Preempted => {
+                    // An interactive run is never preempted; fail closed regardless.
+                    warn!("Interactive consensus reported preemption; failing closed");
+                    let encoded = self.build_response(
+                        req.request_id,
+                        Verdict::Unavailable,
+                        ReasonClass::InternalError,
+                    )?;
+                    return Ok(ResponseOutput {
+                        encoded_response: encoded,
+                        completion_error: None,
+                    });
+                }
+            };
+
             // 8f: Render the aggregate verdict. The attempt was already recorded by the
             // reservation in 8c (exactly one per request), so nothing is recorded here.
-            let decision = aggregator.decision();
             let (final_verdict, final_reason) = match decision {
                 ConsensusDecision::Allow => {
                     info!(
                         uid = req.uid_hint,
-                        captures_evaluated = aggregator.frames_evaluated(),
-                        consecutive_live = aggregator.consecutive_passing(),
+                        captures_evaluated = frames_evaluated,
+                        consecutive_live = consecutive_passing,
                         "Face verification consensus reached; authorizing authentication"
                     );
                     decision.verdict()

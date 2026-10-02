@@ -35,3 +35,26 @@ Face detection (SCRFD), 112x112 alignment, MiniFASNetV2 PAD and SFace embeddings
 through the mock backends above. Real-model evidence lives in
 `crates/inference-ort/tests/pad_real_model_tests.rs` and `embedding_real_model_tests.rs`, which skip
 cleanly when `/var/lib/soos/models` is absent.
+
+## Presence Auto-Unlock Doubles (GitHub #323)
+The presence worker (`soos_daemon::presence::worker::PresenceWorker`) is generic over its
+logind access, display probe and account guard, so every contract test runs without D-Bus,
+without a real lock screen and without reading `/etc` or `/run`
+(`crates/daemon/tests/common/mod.rs`):
+- `MockPresenceLogind`: implements `PresenceLogind` with a scripted `seat_sessions` snapshot,
+  one-shot `session_state` replies, settable `lid_closed` / `unlock_session` results,
+  never-resolving calls (`hang_*`, to prove the 500 ms call bound), per-call counters, the
+  recorded `unlock_session` and `session_state` IDs, and hooks that shift the test clock or
+  inject faults between the `Allow` and the unlock;
+- `TestDisplay` (settable `DisplayState`) instead of `SysfsDisplayProbe`;
+- `StaticAccountGuard` / `ScriptedAccountGuard` (per-call answers, blocking delays, call
+  counter) instead of `SystemAccountGuard`, which is itself tested on tempdir trees
+  (`faillock.conf`, `pam.d/`, byte-built `struct tally` files, `shadow`) with an injected
+  wall clock;
+- `SpyCamera` over `MockCameraManager` (counts `notify_activity` and captures, can stay not
+  ready, re-stamps frames with the test clock) and `CountingExtractor` over the mock vision
+  backends (counts inferences, runs a hook that registers PAM demand or panics);
+- `PresenceWorker::tick()` with `with_clock_fn` (a `fn` pointer over `CLOCK_MONOTONIC` plus a
+  static offset) drives grace, interval and backoff deterministically.
+The production `ZbusLogind` is exercised only on hardware (`tests/physical/`); its pure reply
+mapping `session_state_from_properties` is tested with hand-built `zvariant::OwnedValue` maps.

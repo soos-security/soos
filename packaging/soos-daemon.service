@@ -60,9 +60,11 @@ SystemCallArchitectures=native
 
 # Least-privilege hardening (GitHub #203, DMN-14; Docs/PACKAGING_AND_PROVISIONING.md §8).
 # Capabilities actually used: CAP_IPC_LOCK (mlockall), CAP_CHOWN / CAP_FOWNER
-# (socket fchownat / fchmodat). CAP_DAC_OVERRIDE is kept so state files whose
-# owner or mode an administrator changed (e.g. models copied as a regular user)
-# stay readable; dropping it needs validation on a real host first.
+# (socket fchownat / fchmodat). CAP_DAC_OVERRIDE is required by the presence
+# account guard (GitHub #323): it reads the pam_faillock tally /run/faillock/<user>
+# (0660 user:root) and, where /etc/shadow ships 0000 root:root (Fedora, RHEL),
+# the shadow file; without it presence refuses every unlock. It also keeps state
+# files whose owner or mode an administrator changed readable.
 CapabilityBoundingSet=CAP_IPC_LOCK CAP_CHOWN CAP_FOWNER CAP_DAC_OVERRIDE
 AmbientCapabilities=
 SystemCallFilter=@system-service
