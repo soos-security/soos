@@ -246,38 +246,84 @@ fi
 success "All directory hierarchy and permission invariants verified."
 
 # ---------------------------------------------------------------------------
-# Step 4: Arch Linux system-auth Snippet Verification
+# Step 4: Documented edit applied to the REAL stock /etc/pam.d/system-auth
 # ---------------------------------------------------------------------------
-info "Verifying Arch Linux PAM configuration and system-auth integration..."
+# GitHub #309: the image keeps the pristine pambase system-auth (Dockerfile.arch);
+# it is verified against the pambase mtree digest, the documented soos edit
+# (Docs/DISTRIBUTION_DEPLOYMENT.md section 5.2, packaging/pam/arch/system-auth.snippet)
+# is applied to it, and the result must equal packaging/pam/arch/system-auth.
+info "Applying the documented soos edit to the stock pambase /etc/pam.d/system-auth..."
 test -f "packaging/pam/arch/system-auth.snippet" || { error "Arch PAM snippet missing"; exit 1; }
+STOCK_SYSTEM_AUTH="/usr/local/share/soos-test/system-auth.stock"
+test -f "${STOCK_SYSTEM_AUTH}" || { error "${STOCK_SYSTEM_AUTH} missing (tests/docker/Dockerfile.arch keeps it)"; exit 1; }
 
-cat << 'EOF' > /etc/pam.d/test-system-auth-arch
-#%PAM-1.0
-# /etc/pam.d/test-system-auth-arch with soos snippet
-auth      [success=done default=ignore] pam_soos.so timeout_ms=250
-auth      required      pam_unix.so try_first_pass nullok
-auth      optional      pam_soos.so event=password-failed timeout_ms=20
-account   required      pam_unix.so
-session   required      pam_unix.so
-EOF
+PAMBASE_MTREE="$(find /var/lib/pacman/local -maxdepth 2 -path '/var/lib/pacman/local/pambase-*/mtree' | head -n 1)"
+[[ -n "${PAMBASE_MTREE}" ]] || { error "pambase is not installed (no /var/lib/pacman/local/pambase-*/mtree)"; exit 1; }
+STOCK_EXPECTED_SHA="$(zcat "${PAMBASE_MTREE}" | awk '$1 == "./etc/pam.d/system-auth"' \
+    | sed -nE 's/.*sha256digest=([0-9a-f]{64}).*/\1/p')"
+STOCK_ACTUAL_SHA="$(sha256sum "${STOCK_SYSTEM_AUTH}" | cut -d' ' -f1)"
+if [[ -z "${STOCK_EXPECTED_SHA}" || "${STOCK_EXPECTED_SHA}" != "${STOCK_ACTUAL_SHA}" ]]; then
+    error "The saved system-auth is not the stock pambase file (mtree ${STOCK_EXPECTED_SHA:-none}, file ${STOCK_ACTUAL_SHA})."
+    exit 1
+fi
+success "Stock system-auth matches the pambase mtree digest (${PAMBASE_MTREE%/mtree})."
+
+# The four-line edit of section 5.2: primary rule before pam_systemd_home.so, event
+# rule right after pam_unix.so, both stock success jumps widened by one. Fails when
+# the stock lines it anchors on are not found (pambase changed: review the edit).
+apply_soos_arch_edit() {
+    awk '
+        /^-auth[ \t]+\[success=2 default=ignore\][ \t]+pam_systemd_home\.so/ && !home {
+            print "auth  [success=done default=ignore]  pam_soos.so"
+            sub(/success=2/, "success=3")
+            print
+            home = 1
+            next
+        }
+        /^auth[ \t]+\[success=1 default=bad\][ \t]+pam_unix\.so/ && !unix {
+            sub(/success=1/, "success=2")
+            print
+            print "auth  optional                       pam_soos.so event=password-failed timeout_ms=20"
+            unix = 1
+            next
+        }
+        { print }
+        END { if (!home || !unix) exit 1 }
+    '
+}
+
+EDITED_SYSTEM_AUTH="$(mktemp)"
+if ! apply_soos_arch_edit < "${STOCK_SYSTEM_AUTH}" > "${EDITED_SYSTEM_AUTH}"; then
+    error "The documented edit does not apply to the stock pambase system-auth (anchors not found)."
+    exit 1
+fi
+if ! diff -u "packaging/pam/arch/system-auth" "${EDITED_SYSTEM_AUTH}"; then
+    error "packaging/pam/arch/system-auth differs from the stock stack with the documented edit (diff above)."
+    exit 1
+fi
+success "Stock system-auth + documented edit == packaging/pam/arch/system-auth."
+
+SYNTHETIC_SYSTEM_AUTH_BACKUP="$(mktemp)"
+cp -p /etc/pam.d/system-auth "${SYNTHETIC_SYSTEM_AUTH_BACKUP}"
+install -m 0644 "${EDITED_SYSTEM_AUTH}" /etc/pam.d/system-auth
+rm -f "${EDITED_SYSTEM_AUTH}"
 
 # ---------------------------------------------------------------------------
 # Step 5: Screen Locker Integration (swaylock / hyprlock)
 # ---------------------------------------------------------------------------
-info "Configuring and verifying Wayland screen locker PAM stacks (swaylock, hyprlock)..."
+info "Configuring Wayland screen locker PAM stacks (swaylock, hyprlock) on the edited system-auth..."
 
-# In Arch Linux, swaylock includes system-auth
+# Arch swaylock and hyprlock include system-auth.
 cat << 'EOF' > /etc/pam.d/test-swaylock
 #%PAM-1.0
-auth include test-system-auth-arch
-account include test-system-auth-arch
+auth include system-auth
+account include system-auth
 EOF
 
-# In Arch Linux, hyprlock includes system-auth
 cat << 'EOF' > /etc/pam.d/test-hyprlock
 #%PAM-1.0
-auth include test-system-auth-arch
-account include test-system-auth-arch
+auth include system-auth
+account include system-auth
 EOF
 
 # Ensure test user exists
@@ -326,8 +372,11 @@ assert_socket_modes() {
         || { error "/run/soos/daemon.sock is '${sock_modes}', expected '660 root:soos'"; exit 1; }
 }
 
+EVENTS_LOG="$(mktemp)"
 start_mock_daemon() {
-    python3 tests/docker/mock_daemon.py --stamps monotonic --socket /run/soos/daemon.sock "$@" &
+    : > "${EVENTS_LOG}"
+    python3 tests/docker/mock_daemon.py --stamps monotonic --socket /run/soos/daemon.sock \
+        --record "${EVENTS_LOG}" "$@" &
     MOCK_PID=$!
     for _ in $(seq 1 50); do
         [[ -S /run/soos/daemon.sock ]] && break
@@ -336,50 +385,102 @@ start_mock_daemon() {
     assert_socket_modes
 }
 
+# Number of PasswordFailed events the recording mock daemon received.
+password_failed_events() {
+    sleep 0.3
+    grep -c '^event kind=password-failed' "${EVENTS_LOG}" || true
+}
+
+# Current pam_faillock tally of the test user (one line per recorded failure).
+faillock_tally() {
+    faillock --user "${TEST_USER}" | grep -cE '^[0-9]{4}-[0-9]{2}-[0-9]{2}' || true
+}
+
+assert_tally() {
+    local expected="$1" label="$2" tally
+    tally="$(faillock_tally)"
+    if [[ "${tally}" != "${expected}" ]]; then
+        error "${label}: faillock tally is ${tally}, expected ${expected}"
+        faillock --user "${TEST_USER}" >&2 || true
+        exit 1
+    fi
+}
+
+assert_events() {
+    local expected="$1" label="$2" count
+    count="$(password_failed_events)"
+    if [[ "${count}" != "${expected}" ]]; then
+        error "${label}: ${count} PasswordFailed event(s) received, expected ${expected}"
+        cat "${EVENTS_LOG}" >&2
+        exit 1
+    fi
+}
+
+faillock --user "${TEST_USER}" --reset
+
 # ---------------------------------------------------------------------------
-# Step 6: Test Screen Locker PAM Flow (swaylock & hyprlock)
+# Step 6: PAM flows through the edited stock stack (swaylock & hyprlock)
 # ---------------------------------------------------------------------------
-# 6a. Nominal Facial Auth for swaylock
-info "Testing nominal facial unlock for swaylock..."
-start_mock_daemon --mode allow
+# 6a/6b. Nominal facial unlock: Allow -> success, no event, no faillock entry.
+for locker in test-swaylock test-hyprlock; do
+    info "Testing nominal facial unlock for ${locker}..."
+    start_mock_daemon --mode allow
+    if /usr/local/bin/pam_test_runner "${locker}" "${TEST_USER}"; then
+        success "${locker} authenticated via facial verification without password prompt."
+    else
+        error "${locker} failed nominal facial authentication."
+        exit 1
+    fi
+    assert_events 0 "${locker} face Allow"
+    assert_tally 0 "${locker} face Allow"
+    cleanup
+done
 
-if /usr/local/bin/pam_test_runner test-swaylock "${TEST_USER}"; then
-    success "swaylock authenticated via facial verification without password prompt."
-else
-    error "swaylock failed nominal facial authentication."
-    exit 1
-fi
-cleanup
-
-# 6b. Nominal Facial Auth for hyprlock
-info "Testing nominal facial unlock for hyprlock..."
-start_mock_daemon --mode allow
-
-if /usr/local/bin/pam_test_runner test-hyprlock "${TEST_USER}"; then
-    success "hyprlock authenticated via facial verification without password prompt."
-else
-    error "hyprlock failed nominal facial authentication."
-    exit 1
-fi
-cleanup
-
-# 6c. Password Fallback on Screen Locker (Offline Daemon)
-info "Testing screen locker password fallback (daemon offline)..."
+# 6c. Password fallback with the daemon absent: success, faillock tally 0.
+info "Testing screen locker password fallback (daemon absent)..."
 if /usr/local/bin/pam_test_runner test-swaylock "${TEST_USER}" "${TEST_PASS}"; then
     success "swaylock cleanly fell back to password authentication."
 else
-    error "swaylock rejected valid password during fallback."
+    error "swaylock rejected valid password during fallback (daemon absent)."
     exit 1
 fi
+assert_tally 0 "valid password, daemon absent"
+success "Valid password with the daemon absent: faillock tally 0."
 
-# 6d. Rejection of Wrong Password on Screen Locker
-info "Testing screen locker rejection of incorrect password..."
+# 6d. Face Deny + valid password: success, NO PasswordFailed event, tally 0.
+info "Testing valid password after a face Deny (recording daemon)..."
+start_mock_daemon --mode deny
+if ! /usr/local/bin/pam_test_runner test-swaylock "${TEST_USER}" "${TEST_PASS}"; then
+    error "swaylock rejected the valid password after a face Deny."
+    exit 1
+fi
+assert_events 0 "valid password after face Deny"
+assert_tally 0 "valid password after face Deny"
+success "Valid password: accepted, no PasswordFailed event, faillock tally 0."
+
+# 6e. Wrong password: failure, exactly one PasswordFailed event, tally 1.
+info "Testing screen locker rejection of an incorrect password..."
 if /usr/local/bin/pam_test_runner test-swaylock "${TEST_USER}" "wrong_password" 2>/dev/null; then
     error "Security Invariant Violation: Invalid password accepted by swaylock!"
     exit 1
-else
-    success "swaylock rejected invalid password cleanly."
 fi
+assert_events 1 "wrong password"
+assert_tally 1 "wrong password"
+success "Wrong password: rejected, exactly one PasswordFailed event, faillock tally 1."
+cleanup
+faillock --user "${TEST_USER}" --reset
+
+# 6f. Wrong password with the daemon absent: still rejected (no bypass).
+if /usr/local/bin/pam_test_runner test-swaylock "${TEST_USER}" "wrong_password" 2>/dev/null; then
+    error "Security Invariant Violation: Invalid password accepted with the daemon absent!"
+    exit 1
+fi
+success "swaylock rejected the invalid password with the daemon absent."
+faillock --user "${TEST_USER}" --reset
+
+# Restore the image's synthetic system-auth (used by tests/docker/test_suite.sh).
+install -m 0644 "${SYNTHETIC_SYSTEM_AUTH_BACKUP}" /etc/pam.d/system-auth
+rm -f "${SYNTHETIC_SYSTEM_AUTH_BACKUP}" "${EVENTS_LOG}"
 
 # ---------------------------------------------------------------------------
 # Step 7: Rollback Procedure Verification
@@ -398,7 +499,7 @@ else
 fi
 
 # Clean up test files
-rm -f /etc/pam.d/test-system-auth-arch /etc/pam.d/test-swaylock /etc/pam.d/test-hyprlock "${ENROLLED_TEMPLATE}"
+rm -f /etc/pam.d/test-swaylock /etc/pam.d/test-hyprlock "${ENROLLED_TEMPLATE}"
 
 echo ""
 success "==================================================================="

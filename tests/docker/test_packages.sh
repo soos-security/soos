@@ -12,6 +12,11 @@
 # (fedora RPM and arch pacman branches, push to main and manual dispatch) run it
 # in the image and target volume of tests/distro/run_distro_validation.sh.
 # Fails closed: missing packaging tools or an unknown distribution is an error.
+#
+# Ownership (GitHub #301): the .deb and the Arch package are built by the
+# unprivileged user soosbuild; every archive entry must be root:root and every
+# installed path uid 0. The Arch branch also builds packaging/arch/PKGBUILD with
+# makepkg and requires the same layout as scripts/build_arch.sh (GitHub #316).
 # =============================================================================
 
 set -euo pipefail
@@ -157,6 +162,125 @@ verify_distro_templates() {
     success "Package ships only the ${family} PAM template."
 }
 
+# GitHub #301: native packages are built by an unprivileged user (like a developer
+# running scripts/build_*.sh in a checkout), never only by root as in CI. Package
+# outputs go to a directory that user owns; nothing is written into /workspace.
+BUILD_USER="soosbuild"
+PKG_OUT="/tmp/soos-packages"
+ensure_build_user() {
+    if ! id -u "${BUILD_USER}" >/dev/null 2>&1; then
+        useradd -m "${BUILD_USER}"
+    fi
+    rm -rf "${PKG_OUT}"
+    install -d -m 0755 -o "${BUILD_USER}" "${PKG_OUT}"
+}
+
+# Every archive entry must be owned by root:root: package managers extract the
+# recorded owners, and a builder-owned soos-daemon or pam_soos.so would let that
+# user replace the root daemon or the PAM module (GitHub #301).
+# $1 = package path, $2 = family (debian|arch|fedora).
+verify_archive_root_owned() {
+    local pkg="$1" family="$2" foreign=""
+    info "Verifying that every entry of ${pkg} is owned by root:root..."
+    case "${family}" in
+        debian)
+            foreign="$(dpkg-deb -c "${pkg}" | awk '$2 != "root/root" {print $2, $NF}')"
+            ;;
+        arch)
+            foreign="$(bsdtar -tvf "${pkg}" | awk '$3 != "root" || $4 != "root" {print $3 ":" $4, $NF}')"
+            foreign+="$(bsdtar --numeric-owner -tvf "${pkg}" | awk '$3 != "0" || $4 != "0" {print $3 ":" $4, $NF}')"
+            ;;
+        fedora)
+            foreign="$(rpm -qlvp --noghost "${pkg}" | awk '$3 != "root" || $4 != "root" {print $3 ":" $4, $NF}')"
+            ;;
+        *)
+            error "verify_archive_root_owned: unknown family '${family}'"
+            return 1
+            ;;
+    esac
+    if [[ -n "${foreign}" ]]; then
+        error "${pkg} contains entries not owned by root:root:"
+        echo "${foreign}" >&2
+        return 1
+    fi
+    success "Every entry of ${pkg} is owned by root:root."
+}
+
+# After installation every file and directory owned by the package is uid 0 and
+# gid 0 (the RPM %ghost /run/soos is root:soos by design and is not a payload).
+# Remaining args = command listing the installed paths of the package.
+verify_installed_files_root_owned() {
+    local path owner bad=""
+    info "Verifying that every installed soos path is owned by uid 0..."
+    while IFS= read -r path; do
+        [[ -z "${path}" || ! -e "${path}" ]] && continue
+        owner="$(stat -c '%u:%g' "${path}")"
+        if [[ "${path}" == /run/soos ]]; then
+            [[ "${owner%%:*}" == "0" ]] || bad+="${owner} ${path}"$'\n'
+        elif [[ "${owner}" != "0:0" ]]; then
+            bad+="${owner} ${path}"$'\n'
+        fi
+    done < <("$@")
+    if [[ -n "${bad}" ]]; then
+        error "Installed paths not owned by root:"
+        printf '%s' "${bad}" >&2
+        return 1
+    fi
+    success "Every installed soos path is owned by uid 0 (gid 0)."
+}
+
+# GitHub #316 ONB-NEW-3: packages own the unit under /usr/lib/systemd/system
+# (/etc/systemd/system belongs to the administrator) and never ship /run (a tmpfs
+# recreated by the scriptlets and the unit's RuntimeDirectory=).
+# Remaining args = command printing the archive listing.
+verify_unit_and_run_layout() {
+    local listing
+    listing=$("$@" | awk '{print $NF}' | sed -e 's|^\./||' -e 's|^/||')
+    grep -Fxq "usr/lib/systemd/system/soos-daemon.service" <<< "${listing}" \
+        || { error "Package lacks usr/lib/systemd/system/soos-daemon.service"; return 1; }
+    if grep -Eq '^(etc/systemd/|run/|var/run/)' <<< "${listing}"; then
+        error "Package ships /etc/systemd or /run entries: $(grep -E '^(etc/systemd/|run/|var/run/)' <<< "${listing}" | tr '\n' ' ')"
+        return 1
+    fi
+    success "Unit under /usr/lib/systemd/system; no /etc/systemd or /run entry."
+}
+
+# GitHub #316 ONB-NEW-3: packaging/arch/PKGBUILD (makepkg) and scripts/build_arch.sh
+# (install.sh staging) must produce the same package layout: same paths, modes and
+# owners. makepkg runs as the unprivileged builder under fakeroot; --repackage
+# packages the release artifacts already built in target/ (no second build).
+# $1 = package built by scripts/build_arch.sh.
+verify_pkgbuild_parity() {
+    local reference="$1" work src
+    src="$(pwd)"
+    work="$(mktemp -d /tmp/soos-makepkg.XXXXXX)"
+    cp packaging/arch/PKGBUILD packaging/arch/soos.install "${work}/"
+    # No stripping and no debug split package: the parity is about the layout.
+    sed -e 's/^OPTIONS=.*/OPTIONS=(!strip docs !libtool !staticlibs emptydirs zipman purge !debug !lto)/' \
+        /etc/makepkg.conf > "${work}/makepkg.conf"
+    chown -R "${BUILD_USER}" "${work}"
+    info "Building packaging/arch/PKGBUILD with makepkg as '${BUILD_USER}'..."
+    (cd "${work}" && runuser -u "${BUILD_USER}" -- env SOOS_SRC_DIR="${src}" \
+        PKGDEST="${work}/out" BUILDDIR="${work}/build" SRCDEST="${work}/src" \
+        makepkg --config "${work}/makepkg.conf" --noconfirm --nodeps --repackage --force) \
+        || { error "makepkg failed on packaging/arch/PKGBUILD"; return 1; }
+    local made
+    made="$(find "${work}/out" -name 'soos-[0-9]*.pkg.tar.*' | head -n 1)"
+    [[ -n "${made}" ]] || { error "makepkg produced no soos package"; return 1; }
+    verify_archive_root_owned "${made}" arch
+    layout() {
+        bsdtar --numeric-owner -tvf "$1" | awk '{print $1, $3, $4, $NF}' \
+            | sed -e 's| \./| |' | grep -Ev ' \.(PKGINFO|BUILDINFO|MTREE|INSTALL)$' \
+            | sed -e 's|/$||' | sort
+    }
+    if ! diff -u <(layout "${reference}") <(layout "${made}"); then
+        error "PKGBUILD (makepkg) and scripts/build_arch.sh package layouts differ (diff above: - build_arch.sh, + PKGBUILD)."
+        return 1
+    fi
+    rm -rf "${work}"
+    success "PKGBUILD (makepkg) and scripts/build_arch.sh produce the same paths, modes and owners."
+}
+
 # The key must be generated on the target host: a second fresh install must
 # produce a different key, and package removal must leave the key untouched
 # (it is not package-owned, so enrolled templates survive remove/upgrade).
@@ -253,11 +377,15 @@ SPEC
 case "${DISTRO}" in
     ubuntu|debian)
         info "Running Debian (.deb) package verification..."
-        bash scripts/build_deb.sh --skip-build
+        ensure_build_user
+        info "Building the .deb as the unprivileged user '${BUILD_USER}'..."
+        runuser -u "${BUILD_USER}" -- bash scripts/build_deb.sh --skip-build -o "${PKG_OUT}"
 
-        DEB_FILE=$(ls -t target/packages/soos_*.deb | head -n 1)
+        DEB_FILE=$(ls -t "${PKG_OUT}"/soos_*.deb | head -n 1)
         verify_package_has_no_key_material "${DEB_FILE}" dpkg-deb -c "${DEB_FILE}"
         verify_distro_templates debian dpkg-deb -c "${DEB_FILE}"
+        verify_archive_root_owned "${DEB_FILE}" debian
+        verify_unit_and_run_layout dpkg-deb -c "${DEB_FILE}"
 
         info "Installing ${DEB_FILE} via dpkg -i..."
         dpkg -i "${DEB_FILE}"
@@ -268,6 +396,7 @@ case "${DISTRO}" in
         fi
 
         verify_installation "${PAM_DIR}"
+        verify_installed_files_root_owned dpkg -L soos
         FIRST_KEY_FP=$(key_fingerprint)
 
         info "Testing package removal via dpkg -r soos..."
@@ -297,6 +426,9 @@ case "${DISTRO}" in
         # --noghost: %ghost entries are metadata only and carry no payload.
         verify_package_has_no_key_material "${RPM_FILE}" rpm -qlp --noghost "${RPM_FILE}"
         verify_distro_templates fedora rpm -qlp --noghost "${RPM_FILE}"
+        # rpmbuild takes owners from %files (%defattr / %attr), never from the builder.
+        verify_archive_root_owned "${RPM_FILE}" fedora
+        verify_unit_and_run_layout rpm -qlp --noghost "${RPM_FILE}"
 
         info "Installing ${RPM_FILE} via rpm -i..."
         rpm -i "${RPM_FILE}"
@@ -307,6 +439,7 @@ case "${DISTRO}" in
         fi
 
         verify_installation "${PAM_DIR}"
+        verify_installed_files_root_owned rpm -ql soos
         FIRST_KEY_FP=$(key_fingerprint)
 
         info "Testing package removal via rpm -e soos..."
@@ -330,16 +463,22 @@ case "${DISTRO}" in
 
     arch)
         info "Running Arch Linux package verification..."
-        bash scripts/build_arch.sh --skip-build
+        ensure_build_user
+        info "Building the Arch package as the unprivileged user '${BUILD_USER}'..."
+        runuser -u "${BUILD_USER}" -- bash scripts/build_arch.sh --skip-build -o "${PKG_OUT}"
 
-        PKG_FILE=$(ls -t target/packages/soos-*.pkg.tar.* | head -n 1)
+        PKG_FILE=$(ls -t "${PKG_OUT}"/soos-*.pkg.tar.* | head -n 1)
         verify_package_has_no_key_material "${PKG_FILE}" bsdtar -tf "${PKG_FILE}"
         verify_distro_templates arch bsdtar -tf "${PKG_FILE}"
+        verify_archive_root_owned "${PKG_FILE}" arch
+        verify_unit_and_run_layout bsdtar -tf "${PKG_FILE}"
+        verify_pkgbuild_parity "${PKG_FILE}"
 
         info "Installing ${PKG_FILE} via pacman -U..."
         pacman -U --noconfirm "${PKG_FILE}"
 
         verify_installation "/usr/lib/security"
+        verify_installed_files_root_owned pacman -Qlq soos
         FIRST_KEY_FP=$(key_fingerprint)
 
         info "Testing package removal via pacman -R soos..."

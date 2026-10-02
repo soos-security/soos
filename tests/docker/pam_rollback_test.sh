@@ -26,6 +26,11 @@
 #   D5. scripts/uninstall.sh restores every /etc/pam.d file (incl. a gdm-password
 #       edited like `soos-admin gdm enable`) byte-for-byte (sha256), removes the
 #       profiles and discards the verified snapshot; password login still works.
+#   D6. A successful live `scripts/install.sh --distro debian` installs the pam-configs
+#       with `Default: no` (GitHub #316 ONB-NEW-4): a later plain
+#       `pam-auth-update --package` (what any other PAM package runs) leaves
+#       /etc/pam.d/common-auth byte-identical, then scripts/uninstall.sh restores the
+#       pre-install state.
 #
 # Fedora (fedora:40):
 #   F1. snapshot, profile install, `authselect select custom/soos with-faillock --force`
@@ -42,8 +47,9 @@
 
 set -euo pipefail
 
-readonly DEBIAN_IMAGE="${SOOS_DEBIAN_IMAGE:-ubuntu:24.04}"
-readonly FEDORA_IMAGE="${SOOS_FEDORA_IMAGE:-fedora:40}"
+# Default images pinned by digest (GitHub #316 TCI-NEW-3); override with the variables.
+readonly DEBIAN_IMAGE="${SOOS_DEBIAN_IMAGE:-ubuntu:24.04@sha256:008173c23f95b170204355c12626cb5a965d779a7e1283b09e9cffbb1bf33ca3}"
+readonly FEDORA_IMAGE="${SOOS_FEDORA_IMAGE:-fedora:40@sha256:3c86d25fef9d2001712bc3d9b091fc40cf04be4767e48f1aa3b785bf58d300ed}"
 readonly TEST_USER="soostest"
 readonly TEST_PASS="password123"
 readonly SNAPSHOT_DIR="/var/lib/soos/state/pam-backup"
@@ -395,6 +401,36 @@ EOF
         || fail "D5: pam-auth-update profiles still installed"
     assert_no_soos_reference D5
     assert_same_state D5 "${baseline}"
+    assert_password_auth soos-login
+
+    info "D6: live scripts/install.sh --distro debian, then a plain pam-auth-update --package"
+    local d6_stub=/tmp/soos-d6 d6_name d6_profile d6_before d6_after
+    rm -rf "${d6_stub}"
+    mkdir -p "${d6_stub}/release"
+    for d6_name in soos-daemon soos-admin soos-enroll soos-gui libpam_soos.so; do
+        printf 'fixture:%s\n' "${d6_name}" > "${d6_stub}/release/${d6_name}"
+        chmod 0755 "${d6_stub}/release/${d6_name}"
+    done
+    d6_before="$(sha256sum "${ca}" | cut -d' ' -f1)"
+    bash "${WORKSPACE_ROOT}/scripts/install.sh" --artifact-dir "${d6_stub}/release" \
+        --skip-models --skip-systemd --distro debian >/dev/null \
+        || fail "D6: scripts/install.sh --distro debian failed"
+    for d6_profile in /usr/share/pam-configs/soos /usr/share/pam-configs/soos-notify; do
+        grep -qx 'Default: no' "${d6_profile}" \
+            || fail "D6: ${d6_profile} is not 'Default: no' (pam-auth-update --package would enable it)"
+    done
+    DEBIAN_FRONTEND=noninteractive pam-auth-update --package \
+        || fail "D6: pam-auth-update --package failed"
+    d6_after="$(sha256sum "${ca}" | cut -d' ' -f1)"
+    if [[ "${d6_after}" != "${d6_before}" ]] || grep -q 'pam_soos\.so' "${ca}"; then
+        auth_lines "${ca}" | sed 's/^/        /' >&2
+        fail "D6: pam-auth-update --package changed ${ca} after install.sh: facial authentication was enabled implicitly"
+    fi
+    success "D6: ${ca} unchanged by pam-auth-update --package (profiles are opt-in)."
+    run_uninstall D6
+    rm -rf "${d6_stub}"
+    assert_no_soos_reference D6
+    assert_same_state D6 "${baseline}"
     assert_password_auth soos-login
 }
 

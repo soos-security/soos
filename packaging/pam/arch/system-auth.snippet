@@ -1,11 +1,24 @@
 # =============================================================================
-# soos Local Facial Biometric PAM Snippet (ARCHITECTURE.md §5)
-# Place immediately BEFORE standard pam_unix line in /etc/pam.d/system-auth
+# soos edit of the stock Arch Linux /etc/pam.d/system-auth (pambase)
 # =============================================================================
+# The complete edited file is packaging/pam/arch/system-auth (shown verbatim in
+# Docs/DISTRIBUTION_DEPLOYMENT.md section 5.2). Back up the stock file first:
+#   cp /etc/pam.d/system-auth /etc/pam.d/system-auth.soos-backup
+#
+# 1. Insert this line right after "auth required pam_faillock.so preauth"
+#    (before the pam_systemd_home.so line), so a locked account still fails:
 auth  [success=done default=ignore]  pam_soos.so
-
-# Note: The standard pam_unix line should be configured as:
-# auth  [success=done default=bad]     pam_unix.so try_first_pass
-
-# Password failure event handler (reached only if pam_unix fails)
+#
+# 2. Insert this line right after the pam_unix.so line (before
+#    "auth [default=die] pam_faillock.so authfail"): it is reached only when
+#    pam_unix fails, and pam_faillock.so authfail still records the failure:
 auth  optional                       pam_soos.so event=password-failed timeout_ms=20
+#
+# 3. Adjust the two stock success jumps so that they still land on
+#    "auth optional pam_permit.so" (skipping the new event line and
+#    pam_faillock.so authfail):
+#      -auth [success=2 default=ignore] pam_systemd_home.so  ->  success=3
+#       auth [success=1 default=bad]    pam_unix.so          ->  success=2
+#
+# Never edit any other line: pam_faillock.so preauth/authfail/authsucc,
+# pam_systemd_home.so and pam_env.so stay as shipped by pambase.

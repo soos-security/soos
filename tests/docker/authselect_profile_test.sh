@@ -28,7 +28,8 @@
 
 set -euo pipefail
 
-readonly FEDORA_IMAGE="${SOOS_FEDORA_IMAGE:-fedora:40}"
+# Default image pinned by digest (GitHub #316 TCI-NEW-3); override with SOOS_FEDORA_IMAGE.
+readonly FEDORA_IMAGE="${SOOS_FEDORA_IMAGE:-fedora:40@sha256:3c86d25fef9d2001712bc3d9b091fc40cf04be4767e48f1aa3b785bf58d300ed}"
 readonly PROFILE_SRC_REL="packaging/pam/fedora/soos"
 readonly PROFILE_DST="/etc/authselect/custom/soos"
 readonly PREVIOUS_FILE="/etc/soos/authselect.previous"
