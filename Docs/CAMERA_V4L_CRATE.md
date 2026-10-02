@@ -427,8 +427,11 @@ refuses, in this order:
   kind, retried with backoff, re-resolution consulted) unless `CameraConfig::allow_virtual_device`
   is set. The opt-in is `[pipeline] allow_virtual_camera = true` in `/etc/soos/daemon.toml`
   (boolean, `false` when absent or mistyped), read by the shared reader
-  (`DaemonCameraConfig::allow_virtual_camera`) and honoured by `soos-gui` direct mode; with it the
-  supervisor logs a warning and streams. ADR 2026-10-02 "Virtual V4L2 Nodes Are Never Biometric
+  (`DaemonCameraConfig::allow_virtual_camera`) and honoured by `soos-gui` direct mode and
+  `soos-enroll` (`CameraDeviceChoice::allow_virtual_camera`, same read as the device
+  resolution); `soos-daemon` reads it in its own typed loader (`[pipeline] allow_virtual_camera`
+  → `CameraConfig::allow_virtual_device`, a startup warning when `true`, a non-boolean value is
+  a startup error; GitHub #318). With it the supervisor logs a warning and streams. ADR 2026-10-02 "Virtual V4L2 Nodes Are Never Biometric
   Cameras".
 - Tests: `gcv_review_tests::*` (rule, enumeration, diagnostics, opt-in),
   `supervisor_tests::test_gcv_explicit_loopback_node_is_refused_without_opt_in`,
@@ -442,7 +445,8 @@ used to panic the probe or the capture supervisor (camera `Dead` until restart).
 opened through `v4l_guard::open_device_guarded`: a NUL byte is `ErrorKind::InvalidInput`, the call
 runs inside the panic guard, and the returned `GuardedDevice` closes the descriptor through the
 guard (`Drop for v4l::device::Handle` unwraps `close(2)`). The shared `daemon.toml` reader ignores
-such a `camera_device` like a mistyped key (listed in `mistyped_keys`, auto-detection applies).
+such a `camera_device` like a mistyped key (listed in `mistyped_keys`, auto-detection applies);
+the `soos-daemon` loader refuses it at load time with a configuration error (GitHub #318).
 The capture supervisor opens through `V4lBackend::open_device` (same NUL check, call inside the
 guard) and closes through `DropGuarded`. The invariant
 `tests/invariants/src/gcv_review_contract.rs` forbids any other `Device::with_path` /
