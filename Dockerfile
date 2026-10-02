@@ -17,7 +17,10 @@
 #             complete isolation between the image and host system.
 # =============================================================================
 
-FROM ubuntu:24.04
+# Base image pinned by its multi-arch index digest (GitHub #316 TCI-NEW-3, resolved
+# 2026-10-02): a re-tagged upstream image can no longer change the sandbox between
+# two runs. Bump the digest deliberately (docker manifest inspect <image>:<tag>).
+FROM ubuntu:24.04@sha256:008173c23f95b170204355c12626cb5a965d779a7e1283b09e9cffbb1bf33ca3
 
 # ---------------------------------------------------------------------------
 # Environment Variables

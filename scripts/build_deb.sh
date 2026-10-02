@@ -115,6 +115,7 @@ bash "${WORKSPACE_ROOT}/scripts/install.sh" \
     --destdir "${STAGE_DIR}" \
     --prefix "/usr" \
     --pam-dir "${DEB_PAM_DIR}" \
+    --unitdir /usr/lib/systemd/system \
     --distro debian \
     --skip-models \
     --skip-systemd

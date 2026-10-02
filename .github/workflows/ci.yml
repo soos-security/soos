@@ -243,6 +243,7 @@ jobs:
           docker run --rm \
             -e SOOS_REQUIRE_TOOLCHAIN_SYNC=1 \
             -v "${GITHUB_WORKSPACE}:/workspace" \
+            -v soos-sandbox-target:/workspace/target \
             soos-sandbox:ci \
             bash /workspace/tests/docker/test_suite.sh
 
