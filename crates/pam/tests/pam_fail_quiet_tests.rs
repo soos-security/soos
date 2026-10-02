@@ -26,7 +26,7 @@ fn call_c_entry(socket: &Path) -> (i32, Vec<String>) {
     let args = [
         CString::new(format!("socket={}", socket.display())).unwrap(),
         CString::new("timeout_ms=1000").unwrap(),
-        CString::new("uid=1000").unwrap(),
+        CString::new("uid=0").unwrap(),
     ];
     let argv: Vec<*const u8> = args.iter().map(|a| a.as_ptr().cast::<u8>()).collect();
     let argc = i32::try_from(argv.len()).unwrap();

@@ -108,10 +108,38 @@ pub fn encode_preview<T: Serialize>(msg: &T) -> Result<Vec<u8>, CodecError> {
 /// Returns [`CodecError::Serialize`] if serialization fails, or
 /// [`CodecError::MessageTooLarge`] if the serialized payload exceeds `max_size`.
 pub fn encode_with_limit<T: Serialize>(msg: &T, max_size: usize) -> Result<Vec<u8>, CodecError> {
-    // Size first so the oversize check happens before any allocation, and the frame is
-    // allocated exactly once at its final size (no reallocation leaving stale copies).
-    let payload_len = postcard::serialize_with_flavor(msg, postcard::ser_flavors::Size::default())
-        .map_err(CodecError::Serialize)?;
+    encode_with_limit_and_trailer(msg, max_size, None)
+}
+
+/// [`encode_with_limit`] with an optional one-byte trailer appended inside the declared
+/// payload (the client message tag of `message::encode_request` / `encode_event`, GitHub
+/// #204).
+///
+/// The payload is sized with `postcard::ser_flavors::Size` first, so an oversize frame
+/// (payload plus trailer above `max_size`) is rejected before anything is allocated; the
+/// frame is then allocated once at its final size and serialized in place, so no
+/// intermediate buffer holding the request nonce is ever freed un-zeroized. On a
+/// serialization failure the partially written frame is zeroized before it is dropped
+/// (GitHub #225, #311 PAM-NEW-3).
+///
+/// # Errors
+///
+/// Returns [`CodecError::Serialize`] if serialization fails, or
+/// [`CodecError::MessageTooLarge`] if the payload plus trailer exceeds `max_size`.
+pub fn encode_with_limit_and_trailer<T: Serialize>(
+    msg: &T,
+    max_size: usize,
+    trailer: Option<u8>,
+) -> Result<Vec<u8>, CodecError> {
+    let serialized_len =
+        postcard::serialize_with_flavor(msg, postcard::ser_flavors::Size::default())
+            .map_err(CodecError::Serialize)?;
+    let payload_len = serialized_len
+        .checked_add(usize::from(trailer.is_some()))
+        .ok_or(CodecError::MessageTooLarge {
+            size: usize::MAX,
+            max: max_size,
+        })?;
 
     if payload_len > max_size {
         return Err(CodecError::MessageTooLarge {
@@ -136,15 +164,23 @@ pub fn encode_with_limit<T: Serialize>(msg: &T, max_size: usize) -> Result<Vec<u
 
     let mut buf = vec![0u8; total_len];
     let written = match buf.split_at_mut_checked(4) {
-        Some((prefix, body)) => {
+        Some((prefix, rest)) => {
             prefix.copy_from_slice(&size_prefix);
-            postcard::to_slice(msg, body).map(|used| used.len())
+            match rest.split_at_mut_checked(serialized_len) {
+                Some((body, tail)) => {
+                    if let (Some(tag), Some(slot)) = (trailer, tail.first_mut()) {
+                        *slot = tag;
+                    }
+                    postcard::to_slice(msg, body).map(|used| used.len())
+                }
+                None => Err(postcard::Error::SerializeBufferFull),
+            }
         }
         None => Err(postcard::Error::SerializeBufferFull),
     };
 
     match written {
-        Ok(len) if len == payload_len => Ok(buf),
+        Ok(len) if len == serialized_len => Ok(buf),
         Ok(_) => {
             // A non-deterministic `Serialize` impl produced a different size: fail closed.
             buf.zeroize();

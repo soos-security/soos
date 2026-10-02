@@ -99,6 +99,12 @@ fn spawn_allow_daemon(listener: UnixListener, kind: Stamps) -> thread::JoinHandl
     })
 }
 
+/// Real UID of this test process.
+fn process_uid() -> u32 {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata("/proc/self").expect("/proc/self").uid()
+}
+
 /// Runs `pam_sm_authenticate` (null handle, detached flow) against a mock daemon.
 fn pam_code_with(kind: Stamps) -> i32 {
     let tmp = tempdir().expect("tempdir");
@@ -108,7 +114,9 @@ fn pam_code_with(kind: Stamps) -> i32 {
     let args: Vec<CString> = [
         format!("socket_path={}", sock.display()),
         "timeout_ms=1000".to_string(),
-        "uid=1000".to_string(),
+        // Setup migration (GitHub #302, owner decision 2026-10-02): on the null-handle
+        // path `uid=` must equal the process UID (the detached PAM_USER stand-in).
+        format!("uid={}", process_uid()),
     ]
     .into_iter()
     .map(|s| CString::new(s).expect("cstring"))

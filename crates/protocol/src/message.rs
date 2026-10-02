@@ -34,7 +34,6 @@
 
 use crate::codec::CodecError;
 use crate::types::{Event, Request, MAX_MESSAGE_SIZE};
-use zeroize::Zeroizing;
 
 /// Trailer byte of a tagged frame carrying a [`Request`].
 pub const MESSAGE_TAG_REQUEST: u8 = 0xA0;
@@ -112,25 +111,11 @@ pub fn encode_event(event: &Event) -> Result<Vec<u8>, CodecError> {
     encode_tagged(event, MESSAGE_TAG_EVENT)
 }
 
+/// Single-allocation tagged frame: sized first, oversize rejected before allocation,
+/// serialized in place, zeroized on error (GitHub #311 PAM-NEW-3, same path as
+/// `codec::encode_with_limit`, GitHub #225).
 fn encode_tagged<T: serde::Serialize>(msg: &T, tag: u8) -> Result<Vec<u8>, CodecError> {
-    let mut payload = Zeroizing::new(postcard::to_allocvec(msg).map_err(CodecError::Serialize)?);
-    payload.push(tag);
-    if payload.len() > MAX_MESSAGE_SIZE {
-        return Err(CodecError::MessageTooLarge {
-            size: payload.len(),
-            max: MAX_MESSAGE_SIZE,
-        });
-    }
-    let size_prefix = u32::try_from(payload.len())
-        .map_err(|_| CodecError::MessageTooLarge {
-            size: payload.len(),
-            max: MAX_MESSAGE_SIZE,
-        })?
-        .to_be_bytes();
-    let mut buf = Vec::with_capacity(payload.len().saturating_add(4));
-    buf.extend_from_slice(&size_prefix);
-    buf.extend_from_slice(&payload);
-    Ok(buf)
+    crate::codec::encode_with_limit_and_trailer(msg, MAX_MESSAGE_SIZE, Some(tag))
 }
 
 /// Decodes `bytes` as exactly one `T`, rejecting any unconsumed trailing byte.
