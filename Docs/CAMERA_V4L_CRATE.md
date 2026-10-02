@@ -359,6 +359,9 @@ camera_device` and `[pipeline] sensor_preference` through one implementation,
 `daemon.toml` Camera Reader"). It lives in this crate because all three clients already depend on
 it, it owns the vocabulary (`parse_sensor_preference`, `is_auto_camera_device`), and it pulls in
 neither Tokio nor ONNX Runtime (only `toml`, already locked by `soos-daemon`).
+`soos-daemon` itself loads the whole file through the same open and bound,
+`soos_camera_v4l::daemon_config::read_daemon_config_text(path)` (GitHub #315), so the daemon and
+its clients share one reader (`Docs/DAEMON.md` §1).
 
 - **Pin with `O_PATH`, check the handle, then reopen it (GitHub #291).** The path is first opened
   with `O_PATH | O_CLOEXEC` (`OpenOptionsExt::custom_flags`): the name is resolved and the inode

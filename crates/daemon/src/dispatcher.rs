@@ -990,6 +990,13 @@ impl ConnectionDispatcher {
                                     estimate_ms = estimate.as_millis(),
                                     "Remaining budget below the inference estimate; finalizing"
                                 );
+                                // GitHub #315 (DMN-NEW-2): with no capture evaluated, no
+                                // measurement would ever lower an estimate above every
+                                // client budget; decay it so face auth recovers. This
+                                // request still fails closed.
+                                if aggregator.frames_evaluated() == 0 {
+                                    self.inference.decay_estimate();
+                                }
                                 break;
                             }
                             let max_wait = deadline.remaining(cur_ns).saturating_sub(estimate);

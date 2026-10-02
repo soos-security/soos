@@ -38,7 +38,7 @@ Local unprivileged users, processes running under an attacker UID, rogue IPC soc
 ### Mandatory Security Invariants
 1. The PAM module returns `PAM_SUCCESS` **only** upon receiving a fresh `Allow` response matched to the kernel-verified socket UID (`SO_PEERCRED`); all other scenarios return `PAM_IGNORE`.
 2. Zero passwords ever transit to `soos`, are parsed by its module, or are logged.
-3. The daemon never trusts the username, PID, PAM service, or UID declared in payload messages: it strictly cross-references `SO_PEERCRED`, `/etc/passwd`, and active `logind` sessions.
+3. The daemon never trusts the username, PID, PAM service, or UID declared in payload messages: it strictly cross-references the numeric target UID with the kernel `SO_PEERCRED` credentials and the active `logind` session records (no user database lookup is made; the PAM module resolves the username to a UID before the request is sent).
 4. An `Allow` verdict is single-use, cryptographically bound to a 256-bit random nonce (`request_id`), target UID, service name, and monotonic deadline; it is never cached inside PAM.
 5. Any timeout, panic, disconnected socket, missing camera, ambiguous face, invalid model, or internal error degrades silently to password fallback, never to authorization.
 
@@ -60,7 +60,7 @@ PAM Caller (gdm, swaylock, hyprlock, sudo, login)
                                        │
                    Allow / Deny / Unavailable, cryptographically bound to request_id
                                        │
-                         EvidenceStore (only following PasswordFailed, opt-in)
+                         EvidenceStore (opt-in: PasswordFailed events and PadFailed vetoes)
 ```
 
 The daemon starts as a systemd service before login prompts, loads and validates model checksums, opens the camera, and stabilizes auto-exposure. The PAM module contains only the lightweight IPC client, response interpreter, and C ABI bindings. This separation guarantees that AI model loading, camera reinitialization, or video processing delays cannot block PAM authentication calls beyond the strictly enforced latency budget.
@@ -93,7 +93,7 @@ RuntimeDirectoryMode=0750
 UMask=0077
 ```
 
-The daemon verifies `/run/soos` is owned by `root:soos`, is not world-writable, and is not a symlink; it unlinks its own socket node following `lstat` verification, then binds `/run/soos/daemon.sock` with mode `0660`, owner `root:soos`. Users permitted to use facial verification are added to the system `soos` group.
+The daemon verifies `/run/soos` is owned by `root:soos` (UID 0 and the configured `socket_group`, checked on the opened directory descriptor by `socket::validate_directory_group`), is not world-writable, and is not a symlink, and refuses a `socket_path` that is not a direct child of `socket_dir`; it unlinks its own socket node following `lstat` verification, then binds `/run/soos/daemon.sock` with mode `0660`, owner `root:soos`. Users permitted to use facial verification are added to the system `soos` group.
 
 On every incoming connection, the daemon queries `getsockopt(..., SO_PEERCRED)`:[^unix7]
 - `peer.uid == uid` of target identity (or documented rule for root PAM caller).
