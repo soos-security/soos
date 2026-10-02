@@ -21,7 +21,6 @@ use soos_camera_v4l::{CameraManager, CameraStatus};
 use soos_enrollment_cli::guided_enrollment::{EnrollmentStep, EnrollmentStepFeedback};
 use soos_enrollment_cli::service::EnrolledUserSummary;
 use soos_vision::VisionPipeline;
-use zeroize::Zeroizing;
 
 use crate::camera_source::{
     CameraSourceBackend, CameraSourceSupervisor, HandoverExecutor, HandoverSlot, SwitchableCamera,
@@ -32,7 +31,7 @@ use crate::privileged::{PkexecExecutor, PrivilegedAction, PrivilegedOutcome, Tas
 use crate::state::{EnrollmentGuiState, LatestFrameData, ProfilesGuiState};
 use crate::store_mode::GuiStore;
 use crate::store_tasks::{StoreTask, StoreTaskOutcome, StoreTaskRunner};
-use crate::worker::{spawn_vision_worker, WorkerSharedInput};
+use crate::worker::{spawn_vision_worker, GuiEnrollmentFeedback, WorkerSharedInput};
 
 /// Application navigation tabs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -896,7 +895,7 @@ impl SoosApp {
                     painter.rect_stroke(reticle_rect, 120.0, reticle_stroke, egui::StrokeKind::Outside);
 
                     // Draw guidance arrows if active
-                    if let Some(fb) = &self.enrollment.last_feedback {
+                    if let Some(GuiEnrollmentFeedback::Step(fb)) = &self.enrollment.last_feedback {
                         match fb {
                             EnrollmentStepFeedback::PromptTurnLeft => {
                                 painter.arrow(
@@ -1015,8 +1014,11 @@ impl SoosApp {
                     }
                 }
 
-                if let Some(fb) = &self.enrollment.last_feedback {
-                    let (msg, color) = match fb {
+                if let Some(gui_fb) = &self.enrollment.last_feedback {
+                    let (msg, color) = match gui_fb {
+                        // GitHub #304: a multi-face frame is never sampled.
+                        GuiEnrollmentFeedback::OneFaceOnly => (gui_fb.message(), Color32::RED),
+                        GuiEnrollmentFeedback::Step(fb) => match fb {
                         EnrollmentStepFeedback::PromptCenterFace => (
                             "Please center your face inside the target frame.",
                             Color32::YELLOW,
@@ -1069,6 +1071,7 @@ impl SoosApp {
                             "Face too small or blurred: move closer and hold still.",
                             Color32::YELLOW,
                         ),
+                        },
                     };
 
                     ui.group(|ui| {
@@ -1110,7 +1113,7 @@ impl SoosApp {
                                 .as_ref()
                                 .map(|session| session.compute_composite_embedding())
                             {
-                                Some(Ok(embedding)) => Some(Zeroizing::new(embedding)),
+                                Some(Ok(embedding)) => Some(embedding),
                                 Some(Err(e)) => {
                                     self.enrollment.status_message = Some((
                                         format!("Cannot build the template: {e}"),

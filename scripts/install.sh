@@ -26,7 +26,10 @@
 #   --prefix <DIR>           Installation prefix (default: /usr)
 #   --sysconfdir <DIR>       Configuration directory (default: /etc)
 #   --localstatedir <DIR>    State directory (default: /var)
-#   --runstatedir <DIR>      Runtime directory (default: /run)
+#   --runstatedir <DIR>      Runtime directory (default: /run; created on a live
+#                            install only, never staged under --destdir)
+#   --unitdir <DIR>          systemd unit directory (default: SYSCONFDIR/systemd/system;
+#                            packages pass /usr/lib/systemd/system, GitHub #316)
 #   --pam-dir <DIR>          Explicit PAM module directory (overrides auto-detection;
 #                            under --destdir only the stage is probed, then
 #                            /usr/lib/security is used with a warning)
@@ -34,6 +37,9 @@
 #                            (default: ${CARGO_TARGET_DIR:-target}/release)
 #   --build                  Run the dependency preflight and
 #                            'cargo build --release --locked --workspace' first
+#                            (as root: as the invoking sudo/doas/pkexec user; refused
+#                            when no invoking user is known and the checkout is not
+#                            owned by root, GitHub #308)
 #   --allow-missing          Install a partial artifact set (developer use only)
 #   --allow-debug-artifacts  Accept artifacts from a cargo 'debug' profile directory
 #   --manifest <PATH>        Model manifest (default: models/manifest.toml)
@@ -52,7 +58,8 @@
 #   - /var/lib/soos/{biometrics,evidence} created mode 0700 (root:root)
 #   - /var/lib/soos/master.key created mode 0600 (root:root, 32 bytes) on the
 #     target host only (never under --destdir)
-#   - /run/soos created mode 0750 (root:soos)
+#   - /run/soos created mode 0750 (root:soos) on a live install (a staging tree
+#     never contains /run: it is a tmpfs the package scriptlets recreate)
 #   - Binaries installed mode 0755
 #   - PAM module installed mode 0644
 #   - Pre-existing system directories (bin, PAM module dir, ...) are never re-moded
@@ -91,6 +98,7 @@ PREFIX="/usr"
 SYSCONFDIR="/etc"
 LOCALSTATEDIR="/var"
 RUNSTATEDIR="/run"
+UNIT_DIR=""
 PAM_DIR=""
 ARTIFACT_DIR=""
 MANIFEST_PATH="${WORKSPACE_ROOT}/models/manifest.toml"
@@ -118,13 +126,16 @@ Options:
   --prefix <DIR>           Installation prefix (default: /usr)
   --sysconfdir <DIR>       Configuration directory (default: /etc)
   --localstatedir <DIR>    State directory (default: /var)
-  --runstatedir <DIR>      Runtime directory (default: /run)
+  --runstatedir <DIR>      Runtime directory (default: /run; live install only)
+  --unitdir <DIR>          systemd unit directory (default: <sysconfdir>/systemd/system;
+                           packages use /usr/lib/systemd/system)
   --pam-dir <DIR>          Explicit PAM module directory (auto-detected if omitted;
                            with --destdir only the stage is probed, then
                            /usr/lib/security is used with a warning)
   --artifact-dir <DIR>     Built artifacts directory (default: target/release)
   --build                  Check build dependencies, then run
                            'cargo build --release --locked --workspace'
+                           (as root: built as the sudo/doas/pkexec invoking user)
   --allow-missing          Install a partial artifact set (developer use only)
   --allow-debug-artifacts  Accept artifacts from a cargo 'debug' profile directory
   --manifest <PATH>        Model manifest (default: models/manifest.toml)
@@ -175,6 +186,11 @@ while [[ $# -gt 0 ]]; do
         --runstatedir)
             require_value "$@"
             RUNSTATEDIR="$2"
+            shift 2
+            ;;
+        --unitdir)
+            require_value "$@"
+            UNIT_DIR="$2"
             shift 2
             ;;
         --pam-dir)
@@ -282,7 +298,7 @@ fi
 TARGET_BIN_DIR="${DESTDIR}${PREFIX}/bin"
 TARGET_LIBEXEC_DIR="${DESTDIR}${PREFIX}/libexec/soos"
 TARGET_PAM_DIR="${DESTDIR}${PAM_DIR}"
-TARGET_SYSTEMD_DIR="${DESTDIR}${SYSCONFDIR}/systemd/system"
+TARGET_SYSTEMD_DIR="${DESTDIR}${UNIT_DIR:-${SYSCONFDIR}/systemd/system}"
 TARGET_STATE_DIR="${DESTDIR}${LOCALSTATEDIR}/lib/soos"
 TARGET_RUN_DIR="${DESTDIR}${RUNSTATEDIR}/soos"
 
@@ -348,7 +364,11 @@ info "Daemon libexec:     ${TARGET_LIBEXEC_DIR}"
 info "PAM Module:         ${TARGET_PAM_DIR}/pam_soos.so"
 info "Systemd Unit:       ${TARGET_SYSTEMD_DIR}/soos-daemon.service"
 info "State Directory:    ${TARGET_STATE_DIR}"
-info "Runtime Directory:  ${TARGET_RUN_DIR}"
+if [[ "${LIVE_INSTALL}" = true ]]; then
+    info "Runtime Directory:  ${TARGET_RUN_DIR}"
+else
+    info "Runtime Directory:  ${RUNSTATEDIR}/soos (not staged: created by the package scriptlets)"
+fi
 info "PAM Templates:      ${PAM_FAMILY:-invalid} (--distro ${DISTRO})"
 info "==============================="
 
@@ -392,13 +412,47 @@ done
 
 # A.3 Optional release build (explicit, locked, never a debug build).
 BUILD_CMD=(cargo build --release --locked --workspace)
+
+# The user who invoked a root shell through sudo, doas or pkexec (GitHub #308), or
+# nothing. A plain 'su' leaves no trace: the caller then decides from the checkout owner.
+invoking_user() {
+    local name=""
+    if [[ -n "${SUDO_USER:-}" ]]; then
+        name="${SUDO_USER}"
+    elif [[ -n "${DOAS_USER:-}" ]]; then
+        name="${DOAS_USER}"
+    elif [[ -n "${PKEXEC_UID:-}" && "${PKEXEC_UID}" =~ ^[0-9]+$ ]]; then
+        name="$(getent passwd "${PKEXEC_UID}" | cut -d: -f1)"
+    fi
+    [[ "${name}" == "root" ]] && name=""
+    printf '%s' "${name}"
+}
+
 run_release_build() {
     info "Checking build dependencies (scripts/check_build_deps.sh)..."
     info "Building release artifacts: cargo build --release --locked --workspace"
-    if [[ "$(id -u)" -eq 0 && -n "${SUDO_USER:-}" && "${SUDO_USER}" != "root" ]]; then
+    local build_user=""
+    if [[ "$(id -u)" -eq 0 ]]; then
+        build_user="$(invoking_user)"
+        if [[ -z "${build_user}" ]]; then
+            local owner_uid
+            owner_uid="$(stat -c '%u' "${WORKSPACE_ROOT}")"
+            if [[ "${owner_uid}" != "0" ]]; then
+                # A root build would leave root-owned files in target/ and break later
+                # user builds; the installer could then deploy stale root-built artifacts.
+                error "Refusing to build as root in a checkout owned by uid ${owner_uid} (${WORKSPACE_ROOT})."
+                error "No invoking user is known (SUDO_USER, DOAS_USER and PKEXEC_UID are unset)."
+                error "Build as the checkout owner first: cargo build --release --locked --workspace,"
+                error "then re-run this installer without --build (or run it through sudo, doas or pkexec)."
+                return 1
+            fi
+        fi
+    fi
+    if [[ -n "${build_user}" ]]; then
         # Never compile as root inside a user's checkout: build as the invoking user.
+        info "Building as the invoking user '${build_user}' (never as root)."
         # shellcheck disable=SC2016 # "$1" is expanded by the inner login shell.
-        runuser -u "${SUDO_USER}" -- bash -lc \
+        runuser -u "${build_user}" -- bash -lc \
             'cd "$1" && ./scripts/check_build_deps.sh && cargo build --release --locked --workspace' \
             _ "${WORKSPACE_ROOT}"
     else
@@ -631,7 +685,11 @@ ensure_dir "${TARGET_STATE_DIR}" 0755 owned
 ensure_dir "${TARGET_STATE_DIR}/biometrics" 0700 owned
 ensure_dir "${TARGET_STATE_DIR}/evidence" 0700 owned
 ensure_dir "${TARGET_STATE_DIR}/models" 0755 owned
-ensure_dir "${TARGET_RUN_DIR}" 0750 owned
+# /run is a tmpfs: only a live install creates the runtime directory; a staging
+# tree never ships it (the package scriptlets and the unit's RuntimeDirectory do).
+if [[ "${LIVE_INSTALL}" = true ]]; then
+    ensure_dir "${TARGET_RUN_DIR}" 0750 owned
+fi
 ensure_dir "${TARGET_LIBEXEC_DIR}" 0755 owned
 ensure_dir "${TARGET_BIN_DIR}" 0755
 ensure_dir "${TARGET_PAM_DIR}" 0755

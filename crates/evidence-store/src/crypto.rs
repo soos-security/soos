@@ -102,17 +102,7 @@ impl MasterKey {
                 std::process::id(),
                 u64::from_ne_bytes(rand_bytes)
             );
-            {
-                let mut tmp_file = OpenOptions::new()
-                    .write(true)
-                    .create_new(true)
-                    .mode(0o600)
-                    .open(&tmp_path)?;
-                tmp_file.write_all(key.as_bytes())?;
-                tmp_file.sync_all()?;
-            }
-            std::fs::rename(&tmp_path, path)?;
-            Ok(key)
+            publish_new_key(path, Path::new(&tmp_path), key)
         }
     }
 }
@@ -134,6 +124,57 @@ impl MasterKey {
         }
         read_existing_key(path)
     }
+}
+
+/// Publishes a freshly generated key without ever replacing a key another caller has
+/// already published (GitHub #303, STO-NEW-1).
+///
+/// The key is written and `fsync`ed into `tmp_path` (`O_CREAT | O_EXCL`, mode `0600`), then
+/// published with `link(2)`, which fails with `EEXIST` instead of replacing an existing file
+/// (unlike `rename(2)`). The loser of a concurrent first-boot race therefore reads and returns
+/// the winner's key, so every caller ends up with the key that is on disk. The temporary file
+/// is unlinked on every path, success or error.
+fn publish_new_key(
+    path: &Path,
+    tmp_path: &Path,
+    key: MasterKey,
+) -> Result<MasterKey, EvidenceStoreError> {
+    // `O_EXCL` creation failure (including a pre-existing name): nothing of ours to unlink.
+    let mut tmp_file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(tmp_path)?;
+    let published =
+        write_and_sync(&mut tmp_file, &key).and_then(|()| std::fs::hard_link(tmp_path, path));
+    drop(tmp_file);
+    // Best-effort cleanup on every path: the temporary name was created by this call and is
+    // never read again (a failed unlink leaves only an inert `0600` copy of a key).
+    let _ = std::fs::remove_file(tmp_path);
+    match published.and_then(|()| sync_parent_dir(path)) {
+        Ok(()) => Ok(key),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            // Another caller published first: its key is authoritative.
+            drop(key);
+            read_existing_key(path)
+        }
+        Err(e) => Err(EvidenceStoreError::Io(e)),
+    }
+}
+
+/// Flushes the directory entry of a just-published key, so a crash right after first-boot
+/// key creation cannot lose the key while templates encrypted with it survive.
+fn sync_parent_dir(path: &Path) -> std::io::Result<()> {
+    match path.parent() {
+        Some(dir) if !dir.as_os_str().is_empty() => std::fs::File::open(dir)?.sync_all(),
+        _ => Ok(()),
+    }
+}
+
+/// Writes `key` into the freshly created temporary file and flushes it to stable storage.
+fn write_and_sync(tmp_file: &mut std::fs::File, key: &MasterKey) -> std::io::Result<()> {
+    tmp_file.write_all(key.as_bytes())?;
+    tmp_file.sync_all()
 }
 
 /// Opens and validates an existing master key file (GitHub #230).

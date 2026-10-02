@@ -54,6 +54,10 @@ async fn run() -> Result<Duration, Box<dyn std::error::Error>> {
 
     // Initialize structured logging
     let _ = init_logging(&config.log_level);
+    // Non-fatal configuration problems found before logging existed (GitHub #315).
+    for warning in &config.warnings {
+        warn!(warning = %warning, "Configuration warning");
+    }
     // Report panics through tracing (GitHub #259). Release builds log the location only,
     // never the payload; debug builds also log the bounded panic message (GitHub #287).
     match PanicMessagePolicy::for_build() {

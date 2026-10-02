@@ -106,7 +106,16 @@ pub fn get_gdm_status(pam_file: &Path, disable_file: &Path) -> GdmStatus {
     }
 }
 
-/// Executes GDM configuration action (Status, Enable, Disable, Restore).
+/// Options of [`configure_gdm_with_options`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct GdmOptions {
+    /// `restore` only: restore a backup that no longer matches the PAM file without its
+    /// soos rules (GitHub #312, STO-NEW-7); the later changes are lost.
+    pub force: bool,
+}
+
+/// Executes GDM configuration action (Status, Enable, Disable, Restore) with the default
+/// [`GdmOptions`] (a stale backup is never restored).
 ///
 /// `Enable` does not check that the module is installed: the `soos-admin` binary
 /// calls [`find_pam_module`] first (tests run against temporary directories).
@@ -114,6 +123,16 @@ pub fn configure_gdm(
     action: &GdmAction,
     pam_file: &Path,
     disable_file: &Path,
+) -> Result<GdmStatus, AdminCliError> {
+    configure_gdm_with_options(action, pam_file, disable_file, GdmOptions::default())
+}
+
+/// [`configure_gdm`] with explicit [`GdmOptions`].
+pub fn configure_gdm_with_options(
+    action: &GdmAction,
+    pam_file: &Path,
+    disable_file: &Path,
+    options: GdmOptions,
 ) -> Result<GdmStatus, AdminCliError> {
     match action {
         GdmAction::Status => Ok(get_gdm_status(pam_file, disable_file)),
@@ -137,7 +156,7 @@ pub fn configure_gdm(
             Ok(get_gdm_status(pam_file, disable_file))
         }
         GdmAction::Restore => {
-            restore_gdm_pam_file(pam_file)?;
+            restore_gdm_pam_file(pam_file, options.force)?;
             Ok(get_gdm_status(pam_file, disable_file))
         }
         GdmAction::Enable => {
@@ -427,19 +446,32 @@ fn regular_file_metadata(path: &Path, what: &str) -> Result<fs::Metadata, AdminC
 /// missing, a symlink, not a regular file or larger than [`MAX_PAM_FILE_BYTES`].
 /// The backup is checked and read through one `O_NOFOLLOW` descriptor, so the checks
 /// and the bytes restored concern the same file.
-fn restore_gdm_pam_file(pam_file: &Path) -> Result<(), AdminCliError> {
+///
+/// Without `force`, a stale backup is refused and nothing changes (GitHub #312,
+/// STO-NEW-7): the current PAM file, once its soos managed rules are removed, must be
+/// byte-for-byte the backup, so that a change made after `gdm enable` is never discarded.
+fn restore_gdm_pam_file(pam_file: &Path, force: bool) -> Result<(), AdminCliError> {
     let backup = pam_backup_path(pam_file);
     let (bytes, backup_meta) = read_backup_bounded(&backup)?;
-    match fs::symlink_metadata(pam_file) {
+    let pam_file_exists = match fs::symlink_metadata(pam_file) {
         Ok(meta) if meta.file_type().is_symlink() || !meta.is_file() => {
             return Err(AdminCliError::GdmConfig(format!(
                 "Refusing to replace '{}': not a regular file (symlink or special file)",
                 pam_file.display()
             )));
         }
-        Ok(_) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Ok(_) => true,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
         Err(e) => return Err(gdm_error("Failed to inspect PAM file", pam_file, &e)),
+    };
+    if pam_file_exists && !force && !backup_matches_current(pam_file, &bytes)? {
+        return Err(AdminCliError::GdmConfig(format!(
+            "'{}' was changed after `gdm enable`: restoring '{}' would discard those \
+             changes. Remove the soos rules by hand, or re-run `gdm restore --force` to \
+             restore the backup anyway",
+            pam_file.display(),
+            backup.display()
+        )));
     }
     let mode = backup_meta.permissions().mode() & 0o7755;
     write_atomic(
@@ -456,6 +488,19 @@ fn restore_gdm_pam_file(pam_file: &Path) -> Result<(), AdminCliError> {
     fs::File::open(dir)
         .and_then(|d| d.sync_all())
         .map_err(|e| gdm_error("Failed to sync PAM directory", dir, &e))
+}
+
+/// Whether `pam_file` without its soos managed rules is exactly `backup` (GitHub #312).
+///
+/// The file is read bounded like every PAM file; an unbalanced managed block or a file
+/// that is not valid UTF-8 never matches.
+fn backup_matches_current(pam_file: &Path, backup: &[u8]) -> Result<bool, AdminCliError> {
+    let current = match read_bounded_utf8(pam_file) {
+        Ok(content) => content,
+        Err(ReadError::NotFound) => return Ok(true),
+        Err(ReadError::Other(msg)) => return Err(AdminCliError::GdmConfig(msg)),
+    };
+    Ok(strip_managed_rules(&current).is_ok_and(|pristine| pristine.as_bytes() == backup))
 }
 
 /// Opens `backup` with `O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC`, checks on the open

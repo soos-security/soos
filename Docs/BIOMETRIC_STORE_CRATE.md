@@ -7,6 +7,8 @@ The `soos-biometric-store` crate provides secure, hardware-free, AES-256-GCM enc
 - **Unique Nonces**: Unique 96-bit cryptographically secure pseudorandom nonces generated on every write.
 - **Strict POSIX Permissions**: Template files written with mode `0600` (`-rw-------`); a store directory created by the crate gets mode `0700` (`drwx------`). An existing directory is validated, never chmod-ed (§3.3).
 - **Atomic File Operations**: Safe write-to-temporary (`.tmp`) followed by `fsync`, atomic POSIX rename and a directory `fsync` to prevent incomplete reads.
+- **Race-free master key creation** (GitHub #303): `MasterKey::load_or_create` publishes a new key with `link(2)` from an exclusive `0600` temporary file; `EEXIST` means another process (daemon, `soos-enroll`, GUI) published first, and its key is read and returned instead of being replaced. The temporary file is unlinked on every path (`key_publication_race_tests.rs`, row SKE1).
+- **Template reads never block** (GitHub #312): a template is opened `O_NOFOLLOW | O_NONBLOCK` and must be a regular file on the open descriptor; a FIFO or directory at the template path fails closed with `CorruptFile` (`template_fifo_tests.rs`, row SKE8).
 - **Honest Erasure Model**: Encryption at rest plus master-key destruction is the erasure guarantee; in-place overwrite on `delete` and re-`enroll` is best effort (§3.4).
 - **Model Migration Support**: Explicit tracking of `model_id`, `model_version`, `enrollment_timestamp`, and `embedding_dim`.
 - **Memory Zeroization**: Plaintext embeddings stored in `zeroize::Zeroizing<Vec<f32>>`, the CBOR plaintext returned by `BiometricTemplate::to_cbor` in a pre-reserved `Zeroizing<Vec<u8>>`, and master keys zeroized on drop.

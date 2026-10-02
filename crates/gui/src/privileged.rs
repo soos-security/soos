@@ -21,6 +21,17 @@ use zeroize::Zeroizing;
 /// Upper bound on the `soos-enroll list --format json` output accepted from the helper.
 pub const MAX_PROFILE_LIST_BYTES: usize = 1024 * 1024;
 
+/// Absolute path of `pkexec` (polkit installs it there on every supported distribution).
+/// Programs are never resolved through the caller's `PATH` (GitHub #314, CAM-NEW-7).
+pub const PKEXEC_PROGRAM: &str = "/usr/bin/pkexec";
+
+/// Absolute path of `systemctl` (`/usr/bin` on every supported merged-`/usr` distribution).
+pub const SYSTEMCTL_PROGRAM: &str = "/usr/bin/systemctl";
+
+/// Absolute path of `soos-enroll` as installed by `scripts/install.sh`, the Debian, Arch and
+/// RPM packages (`/usr/bin/soos-enroll`).
+pub const SOOS_ENROLL_PROGRAM: &str = "/usr/bin/soos-enroll";
+
 /// A privileged operation requested by the UI.
 pub enum PrivilegedAction {
     /// `pkexec systemctl stop soos-daemon.service`.
@@ -97,7 +108,7 @@ pub trait PrivilegedExecutor: Send + Sync {
 pub struct PkexecExecutor;
 
 fn pkexec_status(args: &[&str], what: &str) -> Result<(), String> {
-    let status = Command::new("pkexec")
+    let status = Command::new(PKEXEC_PROGRAM)
         .args(args)
         .stdin(Stdio::null())
         .status()
@@ -146,8 +157,8 @@ pub fn read_bounded<R: Read>(reader: R, limit: usize) -> Result<Vec<u8>, Bounded
 }
 
 fn list_profiles() -> Result<Vec<EnrolledUserSummary>, String> {
-    let mut child = Command::new("pkexec")
-        .args(["soos-enroll", "list", "--format", "json"])
+    let mut child = Command::new(PKEXEC_PROGRAM)
+        .args([SOOS_ENROLL_PROGRAM, "list", "--format", "json"])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -184,13 +195,14 @@ fn list_profiles() -> Result<Vec<EnrolledUserSummary>, String> {
         .map_err(|_| "soos-enroll returned a malformed profile list".to_string())
 }
 
-/// Argument vector of the import helper: `soos-enroll import --uid <uid> --file -`.
+/// Argument vector of the import helper: `/usr/bin/soos-enroll import --uid <uid> --file -`
+/// (absolute path, so pkexec never resolves the program through the caller's `PATH`).
 ///
 /// `--file -` makes `soos-enroll` read the embedding from its standard input, so the
 /// plaintext template never touches the filesystem (GitHub #156).
 pub fn import_helper_args(uid: u32) -> Vec<String> {
     vec![
-        "soos-enroll".to_string(),
+        SOOS_ENROLL_PROGRAM.to_string(),
         "import".to_string(),
         "--uid".to_string(),
         uid.to_string(),
@@ -282,18 +294,18 @@ pub fn import_template_with(
 }
 
 fn import_template(uid: u32, embedding: &[f32]) -> Result<(), String> {
-    import_template_with(Command::new("pkexec"), uid, embedding)
+    import_template_with(Command::new(PKEXEC_PROGRAM), uid, embedding)
 }
 
 impl PrivilegedExecutor for PkexecExecutor {
     fn execute(&self, action: PrivilegedAction) -> PrivilegedOutcome {
         match action {
             PrivilegedAction::PauseDaemon => PrivilegedOutcome::DaemonPaused(pkexec_status(
-                &["systemctl", "stop", "soos-daemon.service"],
+                &[SYSTEMCTL_PROGRAM, "stop", "soos-daemon.service"],
                 "pause soos-daemon",
             )),
             PrivilegedAction::ResumeDaemon => PrivilegedOutcome::DaemonResumed(pkexec_status(
-                &["systemctl", "start", "soos-daemon.service"],
+                &[SYSTEMCTL_PROGRAM, "start", "soos-daemon.service"],
                 "resume soos-daemon",
             )),
             PrivilegedAction::ListProfiles => PrivilegedOutcome::ProfilesListed(list_profiles()),
@@ -308,7 +320,7 @@ impl PrivilegedExecutor for PkexecExecutor {
                 PrivilegedOutcome::TemplateDeleted {
                     uid,
                     result: pkexec_status(
-                        &["soos-enroll", "delete", "--uid", &uid_arg, "--yes"],
+                        &[SOOS_ENROLL_PROGRAM, "delete", "--uid", &uid_arg, "--yes"],
                         "delete the template from the system store",
                     ),
                 }

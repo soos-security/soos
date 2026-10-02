@@ -54,6 +54,8 @@
 )]
 
 use soos_vision::pose::HeadPose;
+use std::fmt;
+use zeroize::Zeroizing;
 
 /// Minimum cosine similarity between a candidate sample and the frontal identity anchor
 /// (every accepted frontal sample and, for off-axis steps, their mean direction).
@@ -206,19 +208,42 @@ pub enum EnrollmentStepFeedback {
     FaceQualityTooLow,
 }
 
+/// One accepted embedding sample, wiped from memory when dropped (GitHub #312, STO-NEW-9).
+type Sample = Zeroizing<Vec<f32>>;
+
 /// State machine coordinating interactive multi-angle enrollment.
-#[derive(Debug, Clone)]
+///
+/// The collected samples are biometric data: they are held in [`Zeroizing`] buffers and
+/// the `Debug` output only reports how many samples each step holds (GitHub #312).
+#[derive(Clone)]
 pub struct GuidedEnrollmentSession {
     target_samples_per_step: usize,
     current_step: EnrollmentStep,
-    frontal_samples: Vec<Vec<f32>>,
-    left_samples: Vec<Vec<f32>>,
-    right_samples: Vec<Vec<f32>>,
-    tilt_samples: Vec<Vec<f32>>,
+    frontal_samples: Vec<Sample>,
+    left_samples: Vec<Sample>,
+    right_samples: Vec<Sample>,
+    tilt_samples: Vec<Sample>,
     liveness: LivenessPolicy,
     live_streak: usize,
     spoof_events: usize,
     aborted: bool,
+}
+
+impl fmt::Debug for GuidedEnrollmentSession {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("GuidedEnrollmentSession")
+            .field("target_samples_per_step", &self.target_samples_per_step)
+            .field("current_step", &self.current_step)
+            .field("frontal_samples", &self.frontal_samples.len())
+            .field("left_samples", &self.left_samples.len())
+            .field("right_samples", &self.right_samples.len())
+            .field("tilt_samples", &self.tilt_samples.len())
+            .field("liveness", &self.liveness)
+            .field("live_streak", &self.live_streak)
+            .field("spoof_events", &self.spoof_events)
+            .field("aborted", &self.aborted)
+            .finish_non_exhaustive()
+    }
 }
 
 impl GuidedEnrollmentSession {
@@ -389,7 +414,7 @@ impl GuidedEnrollmentSession {
             return EnrollmentStepFeedback::PromptHoldStill;
         }
 
-        samples.push(embedding.to_vec());
+        samples.push(Zeroizing::new(embedding.to_vec()));
         let collected = samples.len();
         if collected >= target {
             self.current_step = next_step;
@@ -460,7 +485,7 @@ impl GuidedEnrollmentSession {
     }
 
     /// Iterates over every accepted sample in step order.
-    fn all_samples(&self) -> impl Iterator<Item = &Vec<f32>> {
+    fn all_samples(&self) -> impl Iterator<Item = &Sample> {
         self.frontal_samples
             .iter()
             .chain(self.left_samples.iter())
@@ -507,8 +532,9 @@ impl GuidedEnrollmentSession {
     ///
     /// The composite is the mean direction of the L2-normalized samples. Every sample is
     /// re-validated (dimension, finiteness, identity consistency with the frontal anchor);
-    /// any violation fails closed with an error.
-    pub fn compute_composite_embedding(&self) -> Result<Vec<f32>, String> {
+    /// any violation fails closed with an error. The composite is returned in a
+    /// [`Zeroizing`] buffer, like every intermediate vector of the fusion (GitHub #312).
+    pub fn compute_composite_embedding(&self) -> Result<Zeroizing<Vec<f32>>, String> {
         if self.aborted {
             return Err("Enrollment session aborted after repeated spoof detections".to_string());
         }
@@ -566,14 +592,16 @@ fn cosine(a: &[f32], b: &[f32]) -> Option<f32> {
 }
 
 /// Mean direction (normalized sum of normalized vectors), or `None` when degenerate.
-fn mean_direction<'a>(samples: impl Iterator<Item = &'a Vec<f32>>) -> Option<Vec<f32>> {
-    let mut sum: Option<Vec<f32>> = None;
+///
+/// The accumulator is a [`Zeroizing`] buffer: it is a template-grade vector.
+fn mean_direction<'a>(samples: impl Iterator<Item = &'a Sample>) -> Option<Zeroizing<Vec<f32>>> {
+    let mut sum: Option<Zeroizing<Vec<f32>>> = None;
     for sample in samples {
         let norm = l2_norm(sample)?;
         if norm <= MIN_EMBEDDING_NORM {
             return None;
         }
-        let acc = sum.get_or_insert_with(|| vec![0.0f32; sample.len()]);
+        let acc = sum.get_or_insert_with(|| Zeroizing::new(vec![0.0f32; sample.len()]));
         if acc.len() != sample.len() {
             return None;
         }
@@ -586,7 +614,7 @@ fn mean_direction<'a>(samples: impl Iterator<Item = &'a Vec<f32>>) -> Option<Vec
     if norm <= MIN_EMBEDDING_NORM {
         return None;
     }
-    for x in &mut sum {
+    for x in sum.iter_mut() {
         *x /= norm;
     }
     Some(sum)

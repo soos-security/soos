@@ -8,6 +8,9 @@
 # Options:
 #   -o, --output-dir <DIR>   Output directory for built package (default: target/packages)
 #   --skip-build             Skip cargo build step (use existing target/release artifacts)
+#   --tar <bsdtar|tar>       Archiver (default: bsdtar when installed, else GNU tar)
+#   --compress <auto|zstd|gzip>
+#                            Compression (default auto: zstd when installed, else gzip)
 #   --dry-run                Print build plan without generating package
 #   -h, --help               Display help message
 # =============================================================================
@@ -20,6 +23,8 @@ WORKSPACE_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 OUTPUT_DIR="${WORKSPACE_ROOT}/target/packages"
 SKIP_BUILD=false
 DRY_RUN=false
+TAR_BIN=""
+COMPRESS="auto"
 
 usage() {
     cat <<EOF
@@ -30,6 +35,9 @@ Builds the Arch Linux (.pkg.tar.zst) distribution package for soos.
 Options:
   -o, --output-dir <DIR>   Output directory (default: target/packages)
   --skip-build             Skip cargo compilation (use existing release binaries)
+  --tar <bsdtar|tar>       Archiver (default: bsdtar when installed, else GNU tar)
+  --compress <auto|zstd|gzip>
+                           Compression (default auto: zstd when installed, else gzip)
   --dry-run                Display plan without building package
   -h, --help               Display this help message
 EOF
@@ -44,6 +52,22 @@ while [[ $# -gt 0 ]]; do
         --skip-build)
             SKIP_BUILD=true
             shift
+            ;;
+        --tar)
+            if [[ $# -lt 2 || -z "${2:-}" ]]; then
+                echo "Option --tar requires a value" >&2; usage >&2
+                exit 1
+            fi
+            TAR_BIN="$2"
+            shift 2
+            ;;
+        --compress)
+            if [[ $# -lt 2 || -z "${2:-}" ]]; then
+                echo "Option --compress requires a value" >&2; usage >&2
+                exit 1
+            fi
+            COMPRESS="$2"
+            shift 2
             ;;
         --dry-run)
             DRY_RUN=true
@@ -103,6 +127,7 @@ bash "${WORKSPACE_ROOT}/scripts/install.sh" \
     --destdir "${ARCH_STAGE}" \
     --prefix "/usr" \
     --pam-dir "/usr/lib/security" \
+    --unitdir /usr/lib/systemd/system \
     --distro arch \
     --skip-models \
     --skip-systemd
@@ -134,18 +159,45 @@ EOF
 cp "${WORKSPACE_ROOT}/packaging/arch/soos.install" "${ARCH_STAGE}/.INSTALL"
 
 echo "[4/4] Creating package archive..."
-if command -v bsdtar >/dev/null 2>&1; then
-    TAR_BIN="bsdtar"
+if [[ -z "${TAR_BIN}" ]]; then
+    if command -v bsdtar >/dev/null 2>&1; then
+        TAR_BIN="bsdtar"
+    else
+        TAR_BIN="tar"
+    fi
+fi
+case "${TAR_BIN}" in
+    bsdtar|tar) ;;
+    *)
+        echo "Error: --tar must be bsdtar or tar (got '${TAR_BIN}')." >&2
+        exit 1
+        ;;
+esac
+# GitHub #301: pacman extracts the owners recorded in the archive, so every entry
+# must be root:root whoever runs this script (a builder-owned soos-daemon or
+# pam_soos.so would let that user replace the root daemon or the PAM module).
+if "${TAR_BIN}" --version 2>/dev/null | grep -q 'GNU tar'; then
+    TAR_OWNER_FLAGS=(--owner=root:0 --group=root:0)
 else
-    TAR_BIN="tar"
+    TAR_OWNER_FLAGS=(--uid 0 --gid 0 --uname root --gname root)
+fi
+if [[ "${COMPRESS}" == "auto" ]]; then
+    if command -v zstd >/dev/null 2>&1; then
+        COMPRESS="zstd"
+    else
+        COMPRESS="gzip"
+    fi
 fi
 
-if command -v zstd >/dev/null 2>&1; then
-    (cd "${ARCH_STAGE}" && ${TAR_BIN} -cf - .PKGINFO .INSTALL * | zstd -c -T0 -19 > "${OUTPUT_DIR}/${PKG_FILENAME}")
-else
+if [[ "${COMPRESS}" == "zstd" ]]; then
+    (cd "${ARCH_STAGE}" && ${TAR_BIN} "${TAR_OWNER_FLAGS[@]}" -cf - .PKGINFO .INSTALL * | zstd -q -c -T0 -19 > "${OUTPUT_DIR}/${PKG_FILENAME}")
+elif [[ "${COMPRESS}" == "gzip" ]]; then
     # Fallback to standard gzip if zstd is absent
     PKG_FILENAME="${PKG_NAME}-${VERSION}-${RELEASE}-${ARCH}.pkg.tar.gz"
-    (cd "${ARCH_STAGE}" && ${TAR_BIN} -czf "${OUTPUT_DIR}/${PKG_FILENAME}" .PKGINFO .INSTALL *)
+    (cd "${ARCH_STAGE}" && ${TAR_BIN} "${TAR_OWNER_FLAGS[@]}" -czf "${OUTPUT_DIR}/${PKG_FILENAME}" .PKGINFO .INSTALL *)
+else
+    echo "Error: --compress must be auto, zstd or gzip (got '${COMPRESS}')." >&2
+    exit 1
 fi
 
 echo "Successfully built Arch package: ${OUTPUT_DIR}/${PKG_FILENAME}"

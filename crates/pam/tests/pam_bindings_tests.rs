@@ -57,7 +57,7 @@ fn test_pam_hooks_authenticate_offline_daemon_returns_ignore() {
     // dummy 0x1000 pointer, so production code no longer needs an address heuristic.
     let sock_arg = CString::new("socket=/tmp/nonexistent_daemon_sock_for_test.sock").unwrap();
     let timeout_arg = CString::new("timeout_ms=50").unwrap();
-    let uid_arg = CString::new("uid=1000").unwrap();
+    let uid_arg = CString::new("uid=0").unwrap();
     let args = vec![
         sock_arg.as_c_str(),
         timeout_arg.as_c_str(),
@@ -77,7 +77,7 @@ fn test_pam_hooks_authenticate_password_failed_event_returns_ignore() {
     // dummy 0x1000 pointer, so production code no longer needs an address heuristic.
     let event_arg = CString::new("event=password-failed").unwrap();
     let timeout_arg = CString::new("timeout_ms=20").unwrap();
-    let uid_arg = CString::new("uid=1000").unwrap();
+    let uid_arg = CString::new("uid=0").unwrap();
     let sock_arg = CString::new("socket=/tmp/nonexistent_daemon_sock_for_test.sock").unwrap();
     let args = vec![
         event_arg.as_c_str(),

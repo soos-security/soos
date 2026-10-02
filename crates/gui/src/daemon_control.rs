@@ -24,20 +24,49 @@ pub trait DaemonStatusProbe: Send + Sync {
     fn is_active(&self) -> bool;
 }
 
-/// Production probe running `systemctl is-active --quiet soos-daemon.service`.
+/// Upper bound on the `systemctl show` output read (one short `ActiveState` value).
+const MAX_ACTIVE_STATE_BYTES: usize = 256;
+
+/// Whether a systemd `ActiveState` value means the daemon may own the camera.
+///
+/// Only `inactive` and `failed` release the device. `active`, `reloading`, `refreshing`,
+/// `activating` (start-up and `auto-restart`) and `deactivating` keep the camera with the
+/// daemon, and so does any value this build does not know or an empty/unreadable answer:
+/// opening `/dev/video*` directly while the daemon restarts would fight it for the device
+/// (EBUSY; GitHub #314, CAM-NEW-7).
+pub fn active_state_means_running(active_state: &str) -> bool {
+    !matches!(active_state.trim(), "inactive" | "failed")
+}
+
+/// Production probe reading `systemctl show --property=ActiveState --value soos-daemon.service`
+/// (`/usr/bin/systemctl`, never resolved through `PATH`).
 #[derive(Debug, Default, Clone, Copy)]
 pub struct SystemctlProbe;
 
 impl DaemonStatusProbe for SystemctlProbe {
     fn is_active(&self) -> bool {
-        std::process::Command::new("systemctl")
-            .args(["is-active", "--quiet", "soos-daemon.service"])
+        let output = std::process::Command::new(crate::privileged::SYSTEMCTL_PROGRAM)
+            .args([
+                "show",
+                "--property=ActiveState",
+                "--value",
+                "soos-daemon.service",
+            ])
             .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false)
+            .output();
+        // A spawn failure or a non-UTF-8 answer is treated as running (fail safe: the GUI
+        // then uses the IPC preview and never grabs the device).
+        match output {
+            Ok(out) => {
+                let text = out
+                    .stdout
+                    .get(..MAX_ACTIVE_STATE_BYTES)
+                    .unwrap_or(&out.stdout);
+                std::str::from_utf8(text).map_or(true, active_state_means_running)
+            }
+            Err(_) => true,
+        }
     }
 }
 

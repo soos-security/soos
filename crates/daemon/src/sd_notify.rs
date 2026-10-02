@@ -6,8 +6,12 @@
 //! greeter never shows its first prompt before `/run/soos/daemon.sock` accepts connections.
 //!
 //! Safe code only: the message is one datagram on an unbound `AF_UNIX` socket (allowed by
-//! `RestrictAddressFamilies=AF_UNIX` and reachable inside `PrivateNetwork=yes`). Only fixed
-//! single-line assignments are sent; nothing derived from requests, frames or keys.
+//! `RestrictAddressFamilies=AF_UNIX`). Under `PrivateNetwork=yes` only a filesystem
+//! `NOTIFY_SOCKET` (systemd's default, `/run/systemd/notify`) stays reachable; an abstract
+//! `@` address is scoped to its network namespace, so a manager that hands out an abstract
+//! address cannot be reached from the private namespace and the notification fails (logged
+//! at `warn`; with `Type=notify` the start then times out). Only fixed single-line
+//! assignments are sent; nothing derived from requests, frames or keys.
 
 use std::ffi::OsStr;
 use std::io;

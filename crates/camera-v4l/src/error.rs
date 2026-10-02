@@ -52,6 +52,20 @@ pub enum CameraError {
         path: PathBuf,
     },
 
+    /// The node is not a physical camera (virtual driver such as v4l2loopback or vivid, or an
+    /// output / memory-to-memory capability; GitHub #307). Refused even when configured
+    /// explicitly, unless `[pipeline] allow_virtual_camera = true` (fail closed).
+    #[error(
+        "Refusing camera '{path}': {reason}; set [pipeline] allow_virtual_camera = true in \
+         /etc/soos/daemon.toml only for a deliberate test setup"
+    )]
+    VirtualDevice {
+        /// Target device path.
+        path: PathBuf,
+        /// Why the node was refused.
+        reason: &'static str,
+    },
+
     /// Failed to configure video format on camera.
     #[error("Failed to set format ({width}x{height}, {format:?}) on '{path}': {reason}")]
     SetFormat {

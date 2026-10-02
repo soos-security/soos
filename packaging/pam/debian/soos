@@ -1,5 +1,5 @@
 Name: soos Local Facial Biometric Authentication
-Default: yes
+Default: no
 Priority: 260
 Conflicts:
 Auth-Type: Primary

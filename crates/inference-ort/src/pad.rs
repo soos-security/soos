@@ -281,13 +281,18 @@ impl OrtPadDetector {
     }
 
     /// Computes numerically stable softmax probabilities over a slice of raw logits.
+    ///
+    /// The intermediate exponentials live in a zeroizing container, and the production caller
+    /// ([`PadDetector::evaluate_liveness`]) wraps the returned probabilities in one too: the PAD
+    /// scores of a face are wiped on drop (GitHub #313, VIS-NEW-5).
     pub fn softmax(logits: &[f32]) -> Vec<f32> {
         if logits.is_empty() {
             return Vec::new();
         }
 
         let max_val = logits.iter().copied().fold(f32::NEG_INFINITY, f32::max);
-        let exps: Vec<f32> = logits.iter().map(|&x| (x - max_val).exp()).collect();
+        let exps: Zeroizing<Vec<f32>> =
+            Zeroizing::new(logits.iter().map(|&x| (x - max_val).exp()).collect());
         let sum: f32 = exps.iter().sum();
 
         if sum <= 0.0 || sum.is_nan() {
@@ -472,7 +477,7 @@ impl PadDetector for OrtPadDetector {
         height: u32,
     ) -> Result<PadResult, InferenceError> {
         let logits = self.run_logits(rgb, width, height)?;
-        let probs = Self::softmax(&logits);
+        let probs = Zeroizing::new(Self::softmax(&logits));
         Self::interpret_probabilities(&probs, self.liveness_threshold, self.live_class_index)
     }
 }

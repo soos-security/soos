@@ -2,7 +2,10 @@
 # Dockerfile.fedora — Isolated RHEL / Fedora PAM Sandbox for soos
 # =============================================================================
 
-FROM fedora:40
+# Base image pinned by its multi-arch index digest (GitHub #316 TCI-NEW-3, resolved
+# 2026-10-02): a re-tagged upstream image can no longer change the sandbox between
+# two runs. Bump the digest deliberately (docker manifest inspect <image>:<tag>).
+FROM fedora:40@sha256:3c86d25fef9d2001712bc3d9b091fc40cf04be4767e48f1aa3b785bf58d300ed
 
 ENV RUSTUP_HOME=/usr/local/rustup
 ENV CARGO_HOME=/usr/local/cargo

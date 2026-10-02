@@ -4,7 +4,8 @@
 # =============================================================================
 # Executes:
 #   1. Builds sandbox Docker image (if not already cached)
-#   2. Runs ephemeral container with workspace bind-mounted
+#   2. Runs ephemeral container with workspace bind-mounted and target/ on the
+#      soos-sandbox-target Docker volume (no root-owned files on the host)
 #   3. Compiles PAM module in release mode
 #   4. Deploys .so into container PAM directory
 #   5. Runs the PAM matrix T1–T15 through tests/docker/pam_test_runner.c (ABI
@@ -42,6 +43,12 @@ fi
 # ---------------------------------------------------------------------------
 readonly IMAGE_NAME="soos-sandbox"
 readonly CONTAINER_NAME="soos-test-run"
+# The container builds as root: the named volume soos-sandbox-target mounted over
+# /workspace/target (step 3) keeps every build artifact out of the host checkout
+# (GitHub #308). Without it the release and fault-injection builds left root-owned
+# directories in the host target/, broke later host builds and could be picked up
+# by scripts/install.sh.
+# Remove it with: docker volume rm soos-sandbox-target
 
 # ---------------------------------------------------------------------------
 # Terminal Colors
@@ -110,11 +117,13 @@ fi
 # ---------------------------------------------------------------------------
 info "Launching ephemeral sandbox container '${CONTAINER_NAME}'..."
 info "  → Mount: $(pwd) → /workspace"
+info "  → Volume: soos-sandbox-target → /workspace/target (no root-owned files in the host target/)"
 info "  → Running full PAM test matrix suite..."
 
 docker run --rm \
     --name "${CONTAINER_NAME}" \
     -v "$(pwd)":/workspace \
+    -v soos-sandbox-target:/workspace/target \
     "${IMAGE_NAME}" \
     bash /workspace/tests/docker/test_suite.sh
 

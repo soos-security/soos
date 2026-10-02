@@ -18,7 +18,7 @@ The `soos` installation script (`scripts/install.sh`) guarantees the following f
 | `/usr/bin/soos-enroll` | `0755` | `root:root` | Biometric enrollment CLI | §8 Monorepo Structure |
 | `/usr/bin/soos-admin` | `0755` | `root:root` | Non-biometric diagnostic & admin CLI | §8 Monorepo Structure |
 | `/lib/security/pam_soos.so` (or arch/distro equiv) | `0644` | `root:root` | PAM shared object module | §5 PAM Crate & ABI |
-| `/etc/systemd/system/soos-daemon.service` | `0644` | `root:root` | Hardened systemd service unit (`Group=soos`, `StateDirectory=soos`) | §10 Systemd Sandboxing |
+| `/etc/systemd/system/soos-daemon.service` (live `install.sh`; native packages: `/usr/lib/systemd/system/soos-daemon.service`) | `0644` | `root:root` | Hardened systemd service unit (`Group=soos`, `StateDirectory=soos`) | §10 Systemd Sandboxing |
 | `/var/lib/soos/` | `0755` | `root:root` | Persistent base state directory | §9 Privacy & Persistence |
 | `/var/lib/soos/biometrics/` | `0700` | `root:root` | Encrypted biometric vector templates | §9 Biometric Templates |
 | `/var/lib/soos/evidence/` | `0700` | `root:root` | Opt-in encrypted intrusion snapshots | §9 Evidence Snapshots |
@@ -61,7 +61,7 @@ Why each build package is needed (from the locked dependency graph):
 
 ### 3.2 Features & Capabilities
 - **Fail-closed preflight (GitHub #164)**: before any change, `install.sh` checks that a live install (no `--destdir`) runs as root, that every artifact (`soos-daemon`, `soos-admin`, `soos-enroll`, `soos-gui`, `libpam_soos.so`) exists in the artifact directory, that the directory is not a cargo `debug` profile directory, and that the model manifest and tools pass `download_models.sh --preflight`. Any failure exits non-zero (exit `2`) with nothing modified. `target/debug` is never searched implicitly.
-- **Explicit release build**: `install.sh --build` runs `scripts/check_build_deps.sh` and then `cargo build --release --locked --workspace` (as `$SUDO_USER` when run through sudo, never as root in a user's checkout); a failed build exits `40`. Without `--build`, artifacts are taken from `${CARGO_TARGET_DIR:-target}/release` or `--artifact-dir`.
+- **Explicit release build**: `install.sh --build` runs `scripts/check_build_deps.sh` and then `cargo build --release --locked --workspace`; a failed build exits `40`. Run as root, it builds as the invoking user (`SUDO_USER`, then `DOAS_USER`, then the name of `PKEXEC_UID`) through `runuser`; when none is known (plain `su`) and the checkout is not owned by root it refuses ("Refusing to build as root ...", exit `40`, nothing built or installed): build as the checkout owner first, then install without `--build` (GitHub #308). Without `--build`, artifacts are taken from `${CARGO_TARGET_DIR:-target}/release` or `--artifact-dir`.
 - **Transactional install with rollback**: every created file and directory and every overwritten file (saved to a private `mktemp -d` backup directory) is journaled. Files are written atomically (temporary file + rename in the target directory). If any later step fails, or the script is interrupted, the journal is replayed backwards: overwritten files are restored, created files and directories are removed, a group created by the run is deleted, the unit is disabled if the run enabled it, and the script reports `Installation FAILED ... all changes were rolled back` with a non-zero exit.
 - **System Group Provisioning**: Creates the `soos` system group if absent (`groupadd -r soos` or `addgroup --system soos`). The unit runs with `Group=soos`, so a live install without the group and without either tool fails the preflight (GitHub #211) instead of warning.
 - **Cryptographic Master Key Generation (live install only)**: On a live install (no `--destdir`), delegates to `scripts/provision_master_key.sh`, which generates a 32-byte key from `openssl rand 32` or `/dev/urandom` with mode `0600` from inception if `/var/lib/soos/master.key` is absent. In staging mode (`--destdir`) **no key material is ever generated**: the tree is package content, and the key is created on the target host at first install by the shipped helper (see §7.4). A key created by a run that later fails is removed by the rollback (nothing was encrypted with it yet); an existing key is never touched.
@@ -128,6 +128,7 @@ auth  optional                       pam_soos.so event=password-failed timeout_m
 #### Debian / Ubuntu (`pam-auth-update`)
 - **Primary Profile**: `packaging/pam/debian/soos` installed to `/usr/share/pam-configs/soos` (Priority `260`, placed before `unix` Priority `256`).
 - **Notification Profile**: `packaging/pam/debian/soos-notify` installed to `/usr/share/pam-configs/soos-notify` (`Auth-Type: Primary`, Priority `12`, control `[default=ignore]`): emitted after `pam_unix` and every other standard primary method but **before** `auth requisite pam_deny.so`, so it is reached on a wrong password only (an `Additional` profile would sit after `pam_deny` and never fire). The line is ignored whatever it returns.
+- Both profiles declare `Default: no` (GitHub #316 ONB-NEW-4): they are opt-in, so a later plain `pam-auth-update --package` run by any other PAM package never enables facial authentication implicitly after `install.sh --distro debian`. The `.deb` `postinst` enables them explicitly.
 - Enable command: `pam-auth-update --package --enable soos soos-notify`
 - The `postinst` never passes `--force`: a locally modified stack is left untouched, and the skip (or a `pam-auth-update` failure) is reported with a `soos: WARNING:` on stderr instead of being silenced (GitHub #281, `Docs/DISTRIBUTION_DEPLOYMENT.md` §3.2).
 
@@ -144,7 +145,7 @@ auth  optional                       pam_soos.so event=password-failed timeout_m
 
 #### Arch Linux
 - Universal snippet in `packaging/pam/arch/system-auth.snippet`, installed as reference material to `/usr/share/soos/pam/system-auth.snippet` (never `/etc/pam.d/soos.snippet`, which Linux-PAM would treat as a service named `soos.snippet`; `uninstall.sh` still removes that legacy file).
-- Full `/etc/pam.d/system-auth` configuration in `packaging/pam/arch/system-auth`.
+- `packaging/pam/arch/system-auth` is the stock pambase (`20260616-1`) `/etc/pam.d/system-auth` with exactly that edit (primary rule after `pam_faillock.so preauth`, event rule right after `pam_unix.so`, the `pam_systemd_home.so` / `pam_unix.so` jumps widened to `success=3` / `success=2`, faillock `authfail` / `authsucc` untouched); it is the reference shown in `Docs/DISTRIBUTION_DEPLOYMENT.md` §5.2 and is not installed by any package (GitHub #309).
 
 ---
 
@@ -199,7 +200,7 @@ sudo soos-admin add-user <username>
 |---|---|---|---|---|
 | **Debian / Ubuntu** | `packaging/debian/control`<br>`packaging/debian/rules`<br>`packaging/debian/postinst`<br>`packaging/debian/prerm`<br>`packaging/debian/postrm` | `soos_<version>_<arch>.deb` | `dpkg -i` / `apt` | `pam-auth-update` profiles in `/usr/share/pam-configs/` |
 | **Fedora / RHEL** | `packaging/rpm/soos.spec` | `soos-<version>-<release>.<arch>.rpm` | `rpm -i` / `dnf` | `authselect` custom profile in `/etc/authselect/custom/soos/` |
-| **Arch Linux** | `packaging/arch/PKGBUILD`<br>`packaging/arch/soos.install` | `soos-<version>-<release>-<arch>.pkg.tar.zst` | `pacman -U` / `makepkg -si` | Snippet in `/usr/share/soos/pam/system-auth.snippet` (integrated by hand into `/etc/pam.d/system-auth`) |
+| **Arch Linux** | `scripts/build_arch.sh` (CI and release path)<br>`packaging/arch/PKGBUILD` (makepkg path, same layout)<br>`packaging/arch/soos.install` | `soos-<version>-<release>-<arch>.pkg.tar.zst` | `pacman -U` / `makepkg -si` | Snippet in `/usr/share/soos/pam/system-auth.snippet` (integrated by hand into `/etc/pam.d/system-auth`) |
 
 ### 7.2 Building Distribution Packages
 
@@ -240,6 +241,26 @@ Generated packages are placed in `target/packages/`.
   `.deb` and the RPM and `optdepends` in the PKGBUILD (lists from `check_build_deps.sh --print-packages gui`).
 - The PKGBUILD has no release tarball yet (`source=()`): run `makepkg` from `packaging/arch/` in a
   checkout, or point `SOOS_SRC_DIR` at one; `build()` and `package()` `cd` into that tree.
+- Two Arch build paths, one layout (ADR 2026-10-02 "Arch Packaging Paths Proven Equivalent"):
+  `scripts/build_arch.sh` stages through `install.sh` like the `.deb` and is the path CI and releases use;
+  `packaging/arch/PKGBUILD` serves `makepkg` users. The Arch branch of `tests/docker/test_packages.sh`
+  builds both as an unprivileged user and requires identical paths, modes and owners.
+
+### 7.2.2 Package Ownership and Layout (GitHub #301, #316)
+
+- **Owner 0 whoever builds**: package managers extract the owners recorded in the archive, so a package
+  built by a normal user must still contain only `root:root` entries; otherwise that user could replace
+  `/usr/libexec/soos/soos-daemon` or `pam_soos.so` after installation. `build_deb.sh` uses
+  `dpkg-deb --build --root-owner-group`; `build_arch.sh` archives with `--uid 0 --gid 0 --uname root
+  --gname root` (bsdtar) or `--owner=root:0 --group=root:0` (GNU tar) on both the zstd and the gzip path
+  (`--tar bsdtar|tar` and `--compress auto|zstd|gzip` select the tools); `makepkg` runs `package()` under
+  fakeroot; `rpmbuild` takes owners from `%files`. Before GitHub #301 the Arch archive recorded the
+  builder's uid for every entry.
+- **Unit and runtime directory**: the packages pass `--unitdir /usr/lib/systemd/system` to `install.sh`
+  (`/etc/systemd/system` belongs to the administrator; a live `install.sh` keeps it as default) and a
+  staging tree never contains `/run`: it is a tmpfs, recreated by the post-install scriptlets and the
+  unit's `RuntimeDirectory=soos`. The RPM keeps its `%ghost` `/run/soos`.
+- Evidence: `packaging_ownership_contract` (rows POA1, POA2, POA7, POA10) and the Docker package harness.
 
 ### 7.3 Security and Filesystem Invariants Enforced by Packages
 
@@ -252,7 +273,7 @@ Every distribution package enforces the following invariant properties during po
    - `/var/lib/soos/models/` mode `0755` (`root:root`)
    - `/run/soos/` mode `0750` (`root:soos`)
 3. **Master Key Generation on the Target Host**: The post-install scriptlet (`postinst configure`, `%post`, `post_install`) runs `/usr/libexec/soos/provision-master-key`, which generates a 32-byte AES key at `/var/lib/soos/master.key` (mode `0600 root:root`) if absent and never overwrites an existing key, so upgrades keep enrolled templates decryptable. The key is host state, not package content: it is never listed in the archive nor owned by any package (not even as `%ghost` in RPM, which RPM would delete on erase; an upgrade from an older `%ghost` build is protected by a `%pre` copy restored in `%posttrans`, proven by the `rpm -U` case of `tests/docker/test_packages.sh`; `%posttrans` compares the copy with `cmp`, hence `Requires(posttrans): diffutils`, and a comparison that cannot run (exit status 2 or 127) keeps both files with a "could not compare" warning instead of claiming the keys differ) and survives package removal.
-4. **Service Management**: Installs `/usr/lib/systemd/system/soos-daemon.service` (or `/etc/systemd/system/`), triggers `systemctl daemon-reload`, and enables the service unit.
+4. **Service Management**: Installs `/usr/lib/systemd/system/soos-daemon.service` (every native package; a live `install.sh` uses `/etc/systemd/system/` unless `--unitdir` is given), triggers `systemctl daemon-reload`, and enables the service unit.
 5. **Fail-Closed Teardown**: Pre-removal scriptlets (`prerm`, `%preun`, `pre_remove`) stop and disable `soos-daemon.service` before removing binaries, and remove runtime sockets while preserving biometric data at rest.
 
 ### 7.4 Key Material Is Never Packaged (GitHub #144)

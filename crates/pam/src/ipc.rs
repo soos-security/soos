@@ -45,8 +45,9 @@ pub enum IpcError {
     Io(std::io::Error),
     /// Protocol serialization or deserialization failure.
     Codec(soos_protocol::codec::CodecError),
-    /// Cryptographic random number generator failure.
-    Random(getrandom::Error),
+    /// The kernel random source failed or is not initialized yet (`EAGAIN` from
+    /// `getrandom(2)` with `GRND_NONBLOCK`, GitHub #311).
+    Random(std::io::Error),
     /// Communication deadline expired.
     Timeout,
     /// Response declared length is zero.
@@ -93,6 +94,96 @@ impl core::fmt::Display for IpcError {
 }
 
 impl std::error::Error for IpcError {}
+
+/// Upper bound on `getrandom(2)` calls for one nonce: `EINTR` and short reads are retried
+/// at most this many times in total, so filling a nonce is never an unbounded loop.
+pub const MAX_RANDOM_ATTEMPTS: usize = 8;
+
+/// Fills `buf` from `source`, a `getrandom(2)`-like call returning the number of bytes
+/// written (GitHub #311 PAM-NEW-6).
+///
+/// `EINTR` and short reads are retried, bounded by [`MAX_RANDOM_ATTEMPTS`]; any other
+/// error, including `EAGAIN` (kernel CRNG not initialized yet), and a zero-byte read fail
+/// at once with [`IpcError::Random`], so the module falls back to `PAM_IGNORE` instead of
+/// blocking the PAM host.
+///
+/// # Errors
+///
+/// Returns [`IpcError::Random`] when `buf` could not be filled.
+pub fn fill_random_with<F>(buf: &mut [u8], mut source: F) -> Result<(), IpcError>
+where
+    F: FnMut(&mut [u8]) -> std::io::Result<usize>,
+{
+    let mut filled = 0usize;
+    for _ in 0..MAX_RANDOM_ATTEMPTS {
+        let Some(pending) = buf.get_mut(filled..) else {
+            break;
+        };
+        if pending.is_empty() {
+            return Ok(());
+        }
+        match source(pending) {
+            Ok(0) => {
+                return Err(IpcError::Random(std::io::Error::from(
+                    std::io::ErrorKind::UnexpectedEof,
+                )))
+            }
+            Ok(n) => filled = filled.saturating_add(n.min(pending.len())),
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(IpcError::Random(e)),
+        }
+    }
+    if filled >= buf.len() {
+        Ok(())
+    } else {
+        Err(IpcError::Random(std::io::Error::from(
+            std::io::ErrorKind::Interrupted,
+        )))
+    }
+}
+
+/// Fills `buf` with `getrandom(2)` and `GRND_NONBLOCK`: before the kernel CRNG is
+/// initialized (early boot) the call fails with `EAGAIN` instead of blocking, and the
+/// module returns `PAM_IGNORE` (GitHub #311 PAM-NEW-6).
+///
+/// # Errors
+///
+/// Returns [`IpcError::Random`] (see [`fill_random_with`]).
+pub fn fill_random_nonblocking(buf: &mut [u8]) -> Result<(), IpcError> {
+    fill_random_with(buf, |chunk| {
+        // SAFETY: `chunk` is a valid, writable buffer of `chunk.len()` bytes for the whole
+        // call; getrandom(2) writes at most that many bytes and does not retain the pointer.
+        let ret = unsafe {
+            libc::getrandom(
+                chunk.as_mut_ptr().cast::<libc::c_void>(),
+                chunk.len(),
+                libc::GRND_NONBLOCK,
+            )
+        };
+        usize::try_from(ret).map_err(|_| std::io::Error::last_os_error())
+    })
+}
+
+impl IpcError {
+    /// Value-free syslog line for the security-relevant rejections (GitHub #311
+    /// PAM-NEW-7): a response bound to another request (replay), a stale or future-dated
+    /// response, or a foreign protocol version. Never renders a nonce, a stamp or the
+    /// received version number. Other errors (daemon absent, timeout, I/O) are ordinary
+    /// unavailability and return `None`.
+    #[must_use]
+    pub fn security_log_message(&self) -> Option<String> {
+        match self {
+            Self::RequestIdMismatch => {
+                Some("daemon response rejected: request_id does not match the request".to_owned())
+            }
+            Self::StaleResponse(reason) => Some(format!("daemon response rejected: {reason}")),
+            Self::UnsupportedVersion { .. } => {
+                Some("daemon response rejected: unsupported protocol version".to_owned())
+            }
+            _ => None,
+        }
+    }
+}
 
 /// Computes remaining time before deadline or returns `IpcError::Timeout`.
 ///
@@ -423,9 +514,9 @@ pub fn authenticate_before_with_progress<F: FnOnce()>(
     let mut stream = connect_with_timeout(&config.socket_path, connect_timeout)?;
     on_connected();
 
-    // Generate single-use cryptographic 256-bit nonce
+    // Generate single-use cryptographic 256-bit nonce (never blocks, GitHub #311)
     let mut request_id = Zeroizing::new([0u8; REQUEST_ID_LEN]);
-    getrandom::fill(&mut *request_id).map_err(IpcError::Random)?;
+    fill_random_nonblocking(&mut *request_id)?;
 
     // Captured before connect together with the client's own budget (GitHub #222).
     let deadline_monotonic_ns = deadline.monotonic_deadline_ns();

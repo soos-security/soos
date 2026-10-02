@@ -22,7 +22,6 @@ fault-injection = []
 
 [dependencies]
 soos-protocol = { workspace = true }
-getrandom = { workspace = true }
 libc = { workspace = true }
 pam_bindings = { workspace = true }
 zeroize = { workspace = true }

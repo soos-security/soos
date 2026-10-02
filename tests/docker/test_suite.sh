@@ -140,7 +140,8 @@ info "Toolchain in use: $(rustc --version)"
 # ---------------------------------------------------------------------------
 # Always invoke cargo (a no-op when up to date) so a stale artifact built by
 # another distribution image is never deployed. run_matrix.sh overlays
-# /workspace/target with a per-distribution Docker volume.
+# /workspace/target with a per-distribution Docker volume, run_tests.sh and the
+# CI job pam-integration with the soos-sandbox-target volume (GitHub #308).
 SO_PATH="target/release/libpam_soos.so"
 info "Compiling pam_soos in release mode..."
 cargo build --locked --release -p soos-pam

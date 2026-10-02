@@ -187,7 +187,8 @@ pub struct ConnectionDispatcher {
     peer_limits: PeerLimitsConfig,
     event_limiter: tokio::sync::Mutex<RateLimiter>,
     expected_embedding_model: Option<String>,
-    /// Tracked spoof evidence writes, drained at shutdown (GitHub #287).
+    /// Tracked spoof and `PasswordFailed` evidence writes, drained at shutdown (GitHub #287,
+    /// #310).
     evidence_writes: BlockingTasks,
 }
 
@@ -284,7 +285,8 @@ impl ConnectionDispatcher {
         self.expected_embedding_model.as_deref()
     }
 
-    /// Returns the tracked spoof evidence writes; `soos-daemon` drains them at shutdown
+    /// Returns the tracked spoof and `PasswordFailed` evidence writes (GitHub #310);
+    /// `soos-daemon` drains them at shutdown
     /// within what is left of the connection drain budget (GitHub #287).
     #[must_use]
     pub const fn evidence_writes(&self) -> &BlockingTasks {
@@ -590,12 +592,19 @@ impl ConnectionDispatcher {
             if let Some(ref pipe) = self.pipeline {
                 if pipe.evidence_store.config().enabled {
                     if let Some(frame) = pipe.camera.latest_frame() {
-                        store_evidence_capture(
-                            &pipe.evidence_store,
-                            target_uid,
-                            PASSWORD_FAILED_EVIDENCE_REASON,
-                            &frame,
-                        );
+                        // GitHub #310: encryption, fsync and the retention `flock` are
+                        // blocking; run them on the blocking pool, tracked in the same set as
+                        // the spoof evidence writes so that shutdown drains them, and never on
+                        // a Tokio worker.
+                        let store = Arc::clone(&pipe.evidence_store);
+                        self.evidence_writes.spawn_blocking(move || {
+                            store_evidence_capture(
+                                &store,
+                                target_uid,
+                                PASSWORD_FAILED_EVIDENCE_REASON,
+                                &frame,
+                            );
+                        });
                     } else {
                         warn!("No camera capture available for evidence snapshot");
                     }
@@ -981,6 +990,13 @@ impl ConnectionDispatcher {
                                     estimate_ms = estimate.as_millis(),
                                     "Remaining budget below the inference estimate; finalizing"
                                 );
+                                // GitHub #315 (DMN-NEW-2): with no capture evaluated, no
+                                // measurement would ever lower an estimate above every
+                                // client budget; decay it so face auth recovers. This
+                                // request still fails closed.
+                                if aggregator.frames_evaluated() == 0 {
+                                    self.inference.decay_estimate();
+                                }
                                 break;
                             }
                             let max_wait = deadline.remaining(cur_ns).saturating_sub(estimate);

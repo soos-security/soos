@@ -2,7 +2,11 @@
 # Dockerfile.arch — Isolated Arch Linux PAM Sandbox for soos
 # =============================================================================
 
-FROM archlinux:latest
+# Base image pinned by its multi-arch index digest (GitHub #316 TCI-NEW-3, resolved
+# 2026-10-02): a re-tagged upstream image can no longer change the sandbox between
+# two runs. Bump the digest deliberately (docker manifest inspect <image>:<tag>).
+# Arch is rolling: the pinned base is still upgraded by `pacman -Syu` below.
+FROM archlinux:latest@sha256:b21322c663be387c0ed9cbc7bbbfe18e41633ad4e7b7c77cfad45f128be20040
 
 ENV RUSTUP_HOME=/usr/local/rustup
 ENV CARGO_HOME=/usr/local/cargo
@@ -39,6 +43,14 @@ RUN printf '%s\n' \
         'account required pam_unix.so' \
         'session required pam_unix.so' \
     > /etc/pam.d/test-soos
+
+# Keep the pristine pambase system-auth before the synthetic one below replaces it
+# (GitHub #309): tests/distro/arch_linux_test.sh verifies this copy against the
+# pambase mtree digest and applies the documented soos edit to the real stock stack.
+# (cd + relative name: this RUN writes no PAM service, see distro_matrix.rs.)
+RUN install -d -m 0755 /usr/local/share/soos-test \
+    && cd /etc/pam.d \
+    && cp -p system-auth /usr/local/share/soos-test/system-auth.stock
 
 # Configure Arch Linux system-auth integration
 RUN printf '%s\n' \

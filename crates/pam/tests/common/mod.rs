@@ -4,7 +4,10 @@
 
 #![allow(
     dead_code,
-    reason = "Each integration test binary uses a different subset of the shared harness"
+    clippy::panic,
+    clippy::unwrap_used,
+    reason = "Each integration test binary uses a different subset of the shared harness; \
+              harness failures must abort the test"
 )]
 
 pub mod stamps;
@@ -81,18 +84,37 @@ extern "C" fn capture_conv(
 
 /// Opens a real PAM handle for `service`, runs `f`, closes the handle and returns `f`'s
 /// result together with every conversation message the module emitted.
+///
+/// The PAM user is `root` (`CONTRACT_USER`), which resolves to UID 0 on every host, so a
+/// module line with `uid=0` passes the PAM_USER match of GitHub #302.
 pub fn with_pam_handle<T>(service: &str, f: impl FnOnce(&mut PamHandle) -> T) -> (T, Vec<String>) {
+    with_pam_handle_as(service, CONTRACT_USER, f)
+}
+
+/// PAM user of [`with_pam_handle`] (setup migration of GitHub #300 / #302, owner decision
+/// 2026-10-02: the former `soos-contract-user` does not resolve and now falls back).
+pub const CONTRACT_USER: &CStr = c"root";
+
+/// UID of [`CONTRACT_USER`].
+pub const CONTRACT_UID: u32 = 0;
+
+/// [`with_pam_handle`] with an explicit PAM user (raw bytes, so a non-UTF-8 name can be
+/// passed).
+pub fn with_pam_handle_as<T>(
+    service: &str,
+    user: &CStr,
+    f: impl FnOnce(&mut PamHandle) -> T,
+) -> (T, Vec<String>) {
     let sink: Mutex<Vec<String>> = Mutex::new(Vec::new());
     let conv = PamConvC {
         conv: Some(capture_conv),
         appdata_ptr: std::ptr::from_ref(&sink).cast_mut().cast(),
     };
     let service_c = CString::new(service).unwrap();
-    let user_c = CString::new("soos-contract-user").unwrap();
     let mut pamh: *mut PamHandle = std::ptr::null_mut();
     // SAFETY: valid NUL-terminated strings, a conv struct that outlives the handle, and
     // an out-pointer to a local.
-    let rc = unsafe { pam_start(service_c.as_ptr(), user_c.as_ptr(), &conv, &mut pamh) };
+    let rc = unsafe { pam_start(service_c.as_ptr(), user.as_ptr(), &conv, &mut pamh) };
     assert_eq!(rc, 0, "pam_start failed with {rc}");
     assert!(!pamh.is_null());
 
@@ -143,6 +165,23 @@ pub fn spawn_daemon(
             service: req.service.clone(),
         })
     })
+}
+
+/// Binds a NON-BLOCKING listener: [`assert_never_contacted`] then proves that the module
+/// did not connect (no thread blocks on `accept`).
+pub fn silent_listener(path: &std::path::Path) -> UnixListener {
+    let listener = UnixListener::bind(path).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    listener
+}
+
+/// Asserts that no client ever connected to `listener` (see [`silent_listener`]).
+pub fn assert_never_contacted(listener: &UnixListener, context: &str) {
+    match listener.accept() {
+        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+        Err(e) => panic!("{context}: unexpected accept error {e}"),
+        Ok(_) => panic!("{context}: the daemon must not be contacted"),
+    }
 }
 
 /// Text announcing that the camera lookup started.

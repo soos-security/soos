@@ -92,9 +92,16 @@ pub fn panic_summary<'a>(payload: &'a (dyn std::any::Any + Send), fallback: &'a 
 }
 
 /// Retrieves and clears the most recently recorded panic location for the current thread.
+///
+/// Callers run it in the `Err` arm of [`catch_entry`], outside `catch_unwind`, so it must
+/// never panic: a thread-local already torn down or a slot still borrowed yields `None`
+/// (GitHub #311 PAM-NEW-5).
 #[must_use]
 pub fn take_panic_location() -> Option<String> {
-    LAST_PANIC_LOC.with(|cell| cell.borrow_mut().take())
+    LAST_PANIC_LOC
+        .try_with(|cell| cell.try_borrow_mut().ok().and_then(|mut slot| slot.take()))
+        .ok()
+        .flatten()
 }
 
 /// Formats a panic summary and optional source location into a bounded, sanitized log line.

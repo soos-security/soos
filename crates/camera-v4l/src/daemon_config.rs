@@ -55,6 +55,8 @@ pub enum DaemonConfigKey {
     CameraDevice,
     /// `[pipeline] sensor_preference` (a string of the shared vocabulary).
     SensorPreference,
+    /// `[pipeline] allow_virtual_camera` (a boolean, `false` by default; GitHub #307).
+    AllowVirtualCamera,
 }
 
 impl DaemonConfigKey {
@@ -64,6 +66,7 @@ impl DaemonConfigKey {
         match self {
             Self::CameraDevice => "camera_device",
             Self::SensorPreference => "sensor_preference",
+            Self::AllowVirtualCamera => "allow_virtual_camera",
         }
     }
 
@@ -72,6 +75,7 @@ impl DaemonConfigKey {
         match self {
             Self::CameraDevice => "auto-detection",
             Self::SensorPreference => "prefer_ir",
+            Self::AllowVirtualCamera => "false",
         }
     }
 }
@@ -108,8 +112,14 @@ pub struct DaemonCameraConfig {
     /// The keys that apply (a mistyped key is `None` here).
     pub settings: DaemonCameraSettings,
     /// Keys present with the wrong TOML type, in file-independent order (`camera_device`
-    /// first); each one fell back to its default.
+    /// first); each one fell back to its default. A `camera_device` string holding a NUL byte
+    /// is listed here too: no path can contain one (GitHub #314, CAM-NEW-4).
     pub mistyped_keys: Vec<DaemonConfigKey>,
+    /// `[pipeline] allow_virtual_camera`: opt-in to open a node that is not a physical camera
+    /// (v4l2loopback, vivid, output or memory-to-memory capability). `false` when absent or
+    /// mistyped (fail closed; GitHub #307, ADR 2026-10-02 "Virtual V4L2 Nodes Are Never
+    /// Biometric Cameras"). Feeds `CameraConfig::allow_virtual_device`.
+    pub allow_virtual_camera: bool,
 }
 
 impl DaemonCameraConfig {
@@ -158,6 +168,11 @@ pub fn read_daemon_camera_config(path: &Path) -> Result<DaemonCameraConfig, Daem
     let mut config = DaemonCameraConfig::default();
     match pipeline.get(DaemonConfigKey::CameraDevice.name()) {
         None => {}
+        // A NUL byte would reach `open(2)` through `v4l`, which panics on it (GitHub #314):
+        // the key is ignored like a mistyped one.
+        Some(toml::Value::String(device)) if device.contains('\0') => {
+            config.mistyped_keys.push(DaemonConfigKey::CameraDevice);
+        }
         Some(toml::Value::String(device)) => {
             config.settings.camera_device = Some(PathBuf::from(device));
         }
@@ -172,7 +187,32 @@ pub fn read_daemon_camera_config(path: &Path) -> Result<DaemonCameraConfig, Daem
         }
         Some(_) => config.mistyped_keys.push(DaemonConfigKey::SensorPreference),
     }
+    match pipeline.get(DaemonConfigKey::AllowVirtualCamera.name()) {
+        None => {}
+        Some(toml::Value::Boolean(allow)) => config.allow_virtual_camera = *allow,
+        Some(_) => config
+            .mistyped_keys
+            .push(DaemonConfigKey::AllowVirtualCamera),
+    }
     Ok(config)
+}
+
+/// Reads the whole text of a daemon configuration file with the same bounded, side-effect
+/// free open as [`read_daemon_camera_config`] (GitHub #315, review finding DMN-NEW-4).
+///
+/// `soos-daemon` loads `daemon.toml` through this function, so the daemon and its clients
+/// share one reader: the path is pinned with `O_PATH`, must be a regular file of at most
+/// [`MAX_DAEMON_CONFIG_BYTES`] (a FIFO or a device node is refused without being opened for
+/// reading), and the pinned inode is read through `/proc/self/fd/<n>`. Nothing is parsed.
+///
+/// # Errors
+///
+/// Returns [`DaemonConfigError::NotFound`] for a missing path (a dangling symbolic link
+/// included), [`DaemonConfigError::NotARegularFile`], [`DaemonConfigError::Unreadable`],
+/// [`DaemonConfigError::TooLarge`], or [`DaemonConfigError::Malformed`] when the bytes are
+/// not UTF-8.
+pub fn read_daemon_config_text(path: &Path) -> Result<String, DaemonConfigError> {
+    read_bounded_regular_file(path)
 }
 
 /// Opens `path` without side effects (following symbolic links like `soos-daemon`), checks the

@@ -703,6 +703,12 @@ async fn test_password_failed_events_are_rate_limited_per_peer_uid() {
         .await
         .expect("Server finished")
         .expect("Server task");
+    // Setup migration (GitHub #310): PasswordFailed evidence writes run on the blocking
+    // pool; wait for every tracked write before counting snapshots.
+    let _ = dispatcher
+        .evidence_writes()
+        .drain(Duration::from_secs(5))
+        .await;
 
     assert_eq!(
         count_snapshots(&evidence_store),
@@ -755,6 +761,12 @@ async fn test_unprivileged_peer_cannot_report_event_for_foreign_uid() {
         .await
         .expect("Server finished")
         .expect("Server task");
+    // Setup migration (GitHub #310): PasswordFailed evidence writes run on the blocking
+    // pool; wait for every tracked write before counting snapshots.
+    let _ = dispatcher
+        .evidence_writes()
+        .drain(Duration::from_secs(5))
+        .await;
     assert_eq!(
         count_snapshots(&evidence_store),
         0,

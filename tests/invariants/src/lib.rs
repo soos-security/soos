@@ -126,6 +126,11 @@ mod vision_threshold_contract;
 #[cfg(test)]
 mod ort_output_zeroize_contract;
 
+/// Fail-closed PAM UID resolution, `uid=` / PAM_USER match and the 2026-10-02 PAM review
+/// follow-ups (GitHub #300, #302, #311, rows PUR13–PUR20).
+#[cfg(test)]
+mod pam_uid_resolution_contract;
+
 /// PAM module hygiene: panic hook chaining, protocol predicates, config warnings
 /// (GitHub #263, #264, #265, rows PHY1–PHY9).
 #[cfg(test)]
@@ -215,10 +220,21 @@ mod pam_response_expiry_contract;
 #[cfg(all(test, unix))]
 mod systemd_unit_acceptance_contract;
 
+/// Packaging ownership, Docker workspace isolation and the Arch PAM stack (GitHub #301, #308,
+/// #309, #316; rows POA1–POA12).
+#[cfg(all(test, unix))]
+mod packaging_ownership_contract;
+
 /// Second PAD model (4.0x MiniFASNetV1SE) attested in `models/optional_models.toml` but
 /// disabled by default; `download_models.sh --with-optional` (GitHub #212, rows PVA1–PVA4).
 #[cfg(all(test, unix))]
 mod pad_second_model_attestation_contract;
+
+/// GUI / camera / vision review fixes of 2026-10-02: manifest layouts, zeroizing face buffers,
+/// guarded V4L2 open, absolute privileged program paths (GitHub #313, #314; rows GCV10, GCV11,
+/// GCV14, GCV19).
+#[cfg(all(test, unix))]
+mod gcv_review_contract;
 
 #[cfg(test)]
 #[allow(
@@ -792,6 +808,27 @@ mod tests {
         }
     }
 
+    /// Priority of Debian's stock `unix` pam-auth-update profile (`libpam-runtime`).
+    const DEBIAN_UNIX_PROFILE_PRIORITY: u32 = 256;
+
+    /// The single `Priority:` value of a pam-auth-update profile (fails on none, several or a
+    /// non-numeric value).
+    fn pam_config_priority(content: &str, what: &str) -> u32 {
+        let values: Vec<&str> = content
+            .lines()
+            .filter_map(|l| l.strip_prefix("Priority:"))
+            .map(str::trim)
+            .collect();
+        assert_eq!(
+            values.len(),
+            1,
+            "{what} must declare exactly one Priority: line"
+        );
+        values[0]
+            .parse()
+            .unwrap_or_else(|e| panic!("{what}: Priority {:?} is not a number: {e}", values[0]))
+    }
+
     /// Invariant: PAM Configuration Ordering Matches Spec (Sub-issue #26.2)
     /// Validates that Debian, Fedora, and Arch PAM configurations place pam_soos.so
     /// before pam_unix, and password-failed event handler after pam_unix.
@@ -817,13 +854,20 @@ mod tests {
                 .any(is_default_timeout_primary_soos_rule),
             "Debian soos profile must carry the primary rule relying on the default timeout"
         );
-        assert!(
-            deb_soos_content.contains("Priority: 260") || deb_soos_content.contains("Priority: 26")
-        );
+        // TCI-NEW-2 (GitHub #316, owner approval 2026-10-02): the exact `Priority:` values are
+        // parsed; pam-auth-update orders profiles by descending priority, so soos must sort
+        // before pam_unix (Debian's `unix` profile, Priority 256) and the notify hook after it.
+        let deb_soos_priority = pam_config_priority(&deb_soos_content, "packaging/pam/debian/soos");
         assert!(deb_notify_content.contains("pam_soos.so event=password-failed timeout_ms=20"));
+        let deb_notify_priority =
+            pam_config_priority(&deb_notify_content, "packaging/pam/debian/soos-notify");
         assert!(
-            deb_notify_content.contains("Priority: 128")
-                || deb_notify_content.contains("Priority: 12")
+            deb_soos_priority > DEBIAN_UNIX_PROFILE_PRIORITY,
+            "soos Priority {deb_soos_priority} must be above pam_unix ({DEBIAN_UNIX_PROFILE_PRIORITY})"
+        );
+        assert!(
+            DEBIAN_UNIX_PROFILE_PRIORITY > deb_notify_priority,
+            "soos-notify Priority {deb_notify_priority} must be below pam_unix ({DEBIAN_UNIX_PROFILE_PRIORITY})"
         );
 
         // 2. Fedora authselect profile

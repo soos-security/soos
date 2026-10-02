@@ -355,10 +355,15 @@ impl CameraSourceBackend for SystemCameraSourceBackend {
             tracing::warn!("{note}");
         }
         let device_path = choice.path;
+        // `[pipeline] allow_virtual_camera` (GitHub #307): off unless the file says `true`.
+        let allow_virtual =
+            soos_camera_v4l::daemon_config::read_daemon_camera_config(&self.daemon_config)
+                .is_ok_and(|config| config.allow_virtual_camera);
         let config = CameraConfigBuilder::new()
             .device_path(device_path.clone())
             .warmup_frames(0)
             .idle_timeout(Duration::ZERO)
+            .allow_virtual_device(allow_virtual)
             .build();
         tracing::info!(
             "soos-daemon is not running; opening direct V4L2 camera device '{}'",

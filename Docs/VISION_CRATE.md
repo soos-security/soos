@@ -37,6 +37,7 @@ V4L2 capture devices emit frames in various pixel formats. `convert_to_rgb` tran
 | `PixelFormat::Rgb24` | 3 bytes/pixel `[R, G, B]` | Length validation; `convert_to_rgb_cow` borrows the frame without a copy (`Cow::Borrowed`, used by `process_frame`), `convert_to_rgb` returns an owned copy (GitHub #252) | Standard RGB24 |
 | `PixelFormat::Grey` | 1 byte/pixel `[G]` | Broadcasts grayscale value to 3 channels `[G, G, G]` | Standard RGB24 |
 | `PixelFormat::Yuyv` | 4 bytes/2 pixels `[Y0, U, Y1, V]` | Full-range integer fixed-point BT.601 conversion; an odd width is rejected with `InvalidDimensions` (GitHub #253) | Standard RGB24 |
+| `PixelFormat::Nv12` | Y plane (`width * height` bytes) then one interleaved `[U, V]` plane at half resolution (`width * height / 2` bytes) | Same fixed-point BT.601 formula, each chroma pair shared by a 2×2 block; an odd width or height is rejected with `InvalidDimensions`, any other buffer length with `InvalidBufferSize` | Standard RGB24 |
 | `PixelFormat::Mjpeg` | Compressed JPEG stream | Bounded, header-checked pure-Rust `jpeg-decoder` decompression (§2.1.1) | Standard RGB24 |
 
 #### 2.1.1 Bounded MJPEG Decoding (GitHub #190, review finding VIS-02)

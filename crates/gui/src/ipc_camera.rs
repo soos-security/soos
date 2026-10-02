@@ -4,6 +4,13 @@
 //! a root peer or to a UID explicitly listed in its `[preview]` configuration. A refusal arrives
 //! as a standard `Response` (`ProtocolError`) bound to the request nonce; this client surfaces it
 //! as [`IpcPreviewError::Unauthorized`] and stops polling instead of hammering the daemon.
+//!
+//! Preview payloads are validated by [`frame_from_preview`] (GitHub #314, S2): an unknown wire
+//! format or a payload whose length disagrees with the geometry is a protocol error. An empty
+//! preview after the first frame means the daemon camera failed (GitHub #306): the frozen frame
+//! is withdrawn and the source is reported unavailable until frames resume. The daemon sends
+//! frames of an infrared sensor as greyscale (wire format 1, GitHub #305), so they take the
+//! Monochrome PAD path here.
 
 use arc_swap::ArcSwapOption;
 use soos_camera_v4l::{
@@ -22,6 +29,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
+use zeroize::Zeroizing;
 
 /// Read timeout applied to every preview exchange with the daemon.
 const PREVIEW_READ_TIMEOUT: Duration = Duration::from_millis(2500);
@@ -92,6 +100,7 @@ impl IpcCameraManager {
 
         let worker = WorkerState {
             latest_frame: Arc::clone(&latest_frame),
+            had_frame: AtomicBool::new(false),
             is_ready: Arc::clone(&is_ready),
             running: Arc::clone(&running),
             last_error: Arc::clone(&last_error),
@@ -190,6 +199,8 @@ impl Drop for IpcCameraManager {
 /// Shared state between the manager and its polling worker thread.
 struct WorkerState {
     latest_frame: Arc<ArcSwapOption<Frame>>,
+    /// Whether a frame was ever received (an empty preview then means a camera failure).
+    had_frame: AtomicBool,
     is_ready: Arc<AtomicBool>,
     running: Arc<AtomicBool>,
     last_error: Arc<Mutex<Option<IpcPreviewError>>>,
@@ -266,7 +277,8 @@ fn request_preview(stream: &mut UnixStream, uid: u32) -> Result<PreviewResponse,
     }
 
     let total_size = declared_size.saturating_add(4);
-    let mut buf = vec![0u8; total_size];
+    // The reply holds camera pixels: wiped on drop (GitHub #314, CAM-NEW-6).
+    let mut buf = Zeroizing::new(vec![0u8; total_size]);
     if let Some(prefix) = buf.get_mut(..4) {
         prefix.copy_from_slice(&len_bytes);
     }
@@ -320,14 +332,56 @@ fn map_refusal(resp: &Response) -> IpcPreviewError {
     }
 }
 
-fn pixel_format_from_wire(format: u8) -> PixelFormat {
+/// Wire format code of the explicit empty preview (`soos-daemon` `PREVIEW_FORMAT_EMPTY`).
+const PREVIEW_FORMAT_EMPTY: u8 = 255;
+
+/// Maps a preview wire format code to its pixel format; `None` for an unknown code.
+fn pixel_format_from_wire(format: u8) -> Option<PixelFormat> {
     match format {
-        1 => PixelFormat::Grey,
-        2 => PixelFormat::Yuyv,
-        3 => PixelFormat::Nv12,
-        4 => PixelFormat::Mjpeg,
-        _ => PixelFormat::Rgb24,
+        0 => Some(PixelFormat::Rgb24),
+        1 => Some(PixelFormat::Grey),
+        2 => Some(PixelFormat::Yuyv),
+        3 => Some(PixelFormat::Nv12),
+        4 => Some(PixelFormat::Mjpeg),
+        _ => None,
     }
+}
+
+/// Validates one preview reply and turns it into a camera frame.
+///
+/// - `Ok(None)`: the explicit empty preview (no pixel data; the daemon has no frame ready).
+/// - `Ok(Some(frame))`: a known wire format (`0` RGB24, `1` Grey, `2` YUYV, `3` NV12, `4`
+///   MJPEG) with non-zero dimensions whose payload is exactly the uncompressed size of the
+///   geometry (any non-empty length for MJPEG, bounded by the codec). The pixel bytes are moved
+///   into the frame (zeroized on drop). A greyscale frame, how the daemon sends infrared frames
+///   (GitHub #305), is a Monochrome PAD source.
+///
+/// # Errors
+///
+/// [`IpcPreviewError::Protocol`] for an unknown format code (the empty code `255` included when
+/// data is present), a zero dimension with data, or a payload length that disagrees with the
+/// geometry (GitHub #314, S2). Unknown codes used to be decoded as RGB24.
+pub fn frame_from_preview(resp: &mut PreviewResponse) -> Result<Option<Frame>, IpcPreviewError> {
+    if resp.data.is_empty() {
+        return Ok(None);
+    }
+    if resp.format == PREVIEW_FORMAT_EMPTY || resp.width == 0 || resp.height == 0 {
+        return Err(IpcPreviewError::Protocol);
+    }
+    let format = pixel_format_from_wire(resp.format).ok_or(IpcPreviewError::Protocol)?;
+    if let Some(expected) = format.expected_buffer_size(resp.width, resp.height) {
+        if resp.data.len() != expected {
+            return Err(IpcPreviewError::Protocol);
+        }
+    }
+    Ok(Some(Frame::new(
+        std::mem::take(&mut resp.data),
+        resp.width,
+        resp.height,
+        resp.timestamp_monotonic_ns,
+        format,
+        resp.sequence,
+    )))
 }
 
 /// Outcome of one polling iteration, deciding how the worker loop continues.
@@ -341,22 +395,26 @@ enum PollStep {
 }
 
 fn poll_once(stream: &mut UnixStream, uid: u32, state: &WorkerState) -> PollStep {
-    match request_preview(stream, uid) {
-        Ok(mut resp) => {
-            if resp.width > 0 && resp.height > 0 && !resp.data.is_empty() {
-                let frame = Frame::new(
-                    std::mem::take(&mut resp.data),
-                    resp.width,
-                    resp.height,
-                    resp.timestamp_monotonic_ns,
-                    pixel_format_from_wire(resp.format),
-                    resp.sequence,
-                );
-                state.latest_frame.store(Some(Arc::new(frame)));
-                state.is_ready.store(true, Ordering::Release);
-                state.set_error(None);
-            }
+    match request_preview(stream, uid).and_then(|mut resp| frame_from_preview(&mut resp)) {
+        Ok(Some(frame)) => {
+            state.latest_frame.store(Some(Arc::new(frame)));
+            state.had_frame.store(true, Ordering::Release);
+            state.set_error(None);
+            state.is_ready.store(true, Ordering::Release);
             PollStep::Continue(PREVIEW_POLL_INTERVAL)
+        }
+        Ok(None) => {
+            // Before the first frame an empty preview means the daemon camera is warming up.
+            // After it, the daemon camera failed (GitHub #306): withdraw the frozen frame and
+            // its overlays and say so, instead of staying Ready on the last frame.
+            if state.had_frame.load(Ordering::Acquire) {
+                state.not_ready();
+                state.latest_frame.store(None);
+                state.set_error(Some(IpcPreviewError::Unavailable));
+                PollStep::Continue(UNAVAILABLE_BACKOFF)
+            } else {
+                PollStep::Continue(PREVIEW_POLL_INTERVAL)
+            }
         }
         Err(IpcPreviewError::Unauthorized) => {
             state.set_error(Some(IpcPreviewError::Unauthorized));

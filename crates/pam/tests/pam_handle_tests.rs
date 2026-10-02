@@ -106,7 +106,9 @@ fn with_pam_handle<T>(service: &str, f: impl FnOnce(&mut PamHandle) -> T) -> (T,
         appdata_ptr: std::ptr::from_ref(&sink).cast_mut().cast(),
     };
     let service_c = CString::new(service).unwrap();
-    let user_c = CString::new("soos-contract-user").unwrap();
+    // Setup migration (GitHub #300 / #302, owner decision 2026-10-02): `root` resolves
+    // to UID 0 on every host, matching the `uid: Some(0)` of `base_config`.
+    let user_c = CString::new("root").unwrap();
     let mut pamh: *mut PamHandle = std::ptr::null_mut();
     // SAFETY: valid NUL-terminated strings, a conv struct that outlives the handle, and
     // an out-pointer to a local.
@@ -157,7 +159,7 @@ fn base_config(socket_path: &Path, flag_dir: &Path) -> PamConfig {
     PamConfig {
         timeout_ms: 1000,
         socket_path: socket_path.to_path_buf(),
-        uid: Some(1000),
+        uid: Some(0),
         flag_dir: flag_dir.to_path_buf(),
         ..Default::default()
     }
@@ -278,7 +280,7 @@ fn test_explicit_service_argument_overrides_pam_service_item() {
             let mut config = parse_cstrs([arg.as_c_str()]);
             config.timeout_ms = 1000;
             config.socket_path = sock.to_path_buf();
-            config.uid = Some(1000);
+            config.uid = Some(0);
             config.flag_dir = flags.to_path_buf();
             config
         },

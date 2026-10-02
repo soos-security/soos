@@ -15,6 +15,9 @@ use crate::error::DaemonError;
 /// - Is a genuine directory.
 /// - Is not world-writable (`mode & 002 == 0`).
 /// - Is owned by root (`uid == 0`) when `enforce_root_owner` is true.
+///
+/// The group check ([`validate_directory_group`]) is done by [`bind_socket`], which knows the
+/// configured socket group.
 pub fn validate_directory(dir: &Path, enforce_root_owner: bool) -> Result<(), DaemonError> {
     let file = open_and_validate_directory(dir, enforce_root_owner)?;
     drop(file);
@@ -91,6 +94,40 @@ pub fn open_and_validate_directory(
     }
 
     Ok(file)
+}
+
+/// Checks that the already-opened socket directory belongs to the socket group
+/// (GitHub #315, review finding DMN-NEW-5).
+///
+/// `/run/soos` is `0750 root:<socket_group>`: the group bit is what lets members of the
+/// socket group reach `daemon.sock`, so a directory of any other group would silently grant
+/// that access to the wrong group. The check runs on the descriptor returned by
+/// [`open_and_validate_directory`] (no path is resolved again). Under systemd the directory
+/// comes from `RuntimeDirectory=soos` with `Group=soos` in `packaging/soos-daemon.service`.
+///
+/// # Errors
+///
+/// Returns [`DaemonError::SocketDirValidation`] when the directory group differs from
+/// `expected_gid` or the descriptor cannot be inspected.
+pub fn validate_directory_group(
+    dir_file: &std::fs::File,
+    dir: &Path,
+    expected_gid: u32,
+) -> Result<(), DaemonError> {
+    let stat = nix::sys::stat::fstat(dir_file.as_raw_fd()).map_err(|e| {
+        DaemonError::SocketDirValidation(format!(
+            "Failed to stat directory fd for '{}': {e}",
+            dir.display()
+        ))
+    })?;
+    if stat.st_gid != expected_gid {
+        return Err(DaemonError::SocketDirValidation(format!(
+            "Directory group is gid {} instead of the socket group gid {expected_gid}: '{}'",
+            stat.st_gid,
+            dir.display()
+        )));
+    }
+    Ok(())
 }
 
 /// Resolves the GID for the given group name.
@@ -206,6 +243,8 @@ impl Drop for SocketGuard {
 /// 0. Validates `socket_mode` against [`crate::config::ALLOWED_SOCKET_MODES`].
 /// 1. Opens and validates parent directory invariants (`O_DIRECTORY | O_NOFOLLOW`).
 /// 2. Acquires exclusive lock (`flock`) on the parent directory descriptor to serialize binding.
+///    When `enforce_root_owner` is set and a `socket_group` is configured, the directory must
+///    also belong to that group ([`validate_directory_group`], GitHub #315).
 /// 3. Checks stale socket node via `fstatat` with `AT_SYMLINK_NOFOLLOW`:
 ///    - If symlink: rejects immediately (prevents symlink race attacks).
 ///    - If non-socket: rejects immediately.
@@ -230,6 +269,15 @@ pub async fn bind_socket(
             "Failed to lock socket directory (another daemon may be binding): {e}"
         ))
     })?;
+
+    // Step 2b: `/run/soos` must be `root:<socket_group>` (GitHub #315). Checked on the locked
+    // descriptor, so the directory that was validated is the one the socket is bound in.
+    if config.enforce_root_owner {
+        if let Some(ref group_name) = config.socket_group {
+            let gid = resolve_socket_group(group_name)?;
+            validate_directory_group(&dir_lock, &config.socket_dir, gid)?;
+        }
+    }
 
     let socket_name = config
         .socket_path

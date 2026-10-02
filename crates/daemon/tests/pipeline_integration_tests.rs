@@ -388,6 +388,13 @@ async fn test_12_4_password_failed_event_captures_evidence_snapshot() {
 
     // Wait for server task to finish handling the connection
     let _ = handle.await;
+    // Setup migration (GitHub #310): the PasswordFailed evidence write now runs on the
+    // blocking pool; wait for the tracked write before inspecting the store.
+    let _ = fixture
+        .dispatcher
+        .evidence_writes()
+        .drain(Duration::from_secs(5))
+        .await;
 
     // Verify snapshot file exists in evidence directory
     let mut found_snapshots = 0;
@@ -448,6 +455,13 @@ async fn test_181_password_failed_snapshot_records_frame_metadata() {
     client.flush().await.expect("Flush event");
     drop(client);
     let _ = handle.await;
+    // Setup migration (GitHub #310): the PasswordFailed evidence write now runs on the
+    // blocking pool; wait for the tracked write before inspecting the store.
+    let _ = fixture
+        .dispatcher
+        .evidence_writes()
+        .drain(Duration::from_secs(5))
+        .await;
 
     let mut records = Vec::new();
     for entry in std::fs::read_dir(&fixture.evidence_store.config().base_dir).expect("Read dir") {

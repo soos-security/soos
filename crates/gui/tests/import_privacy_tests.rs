@@ -62,8 +62,9 @@ fn test_import_helper_args_use_stdin() {
     assert_eq!(
         import_helper_args(1000),
         // User-approved 2026-09-30 (GitHub #237): the GUI passes explicit overwrite consent.
+        // Owner-approved 2026-10-02 (GitHub #314 CAM-NEW-7b): absolute program path for pkexec.
         vec![
-            "soos-enroll",
+            "/usr/bin/soos-enroll",
             "import",
             "--uid",
             "1000",
@@ -87,7 +88,10 @@ fn test_import_finalize_pipes_embedding_without_temp_file() {
 
     let args = std::fs::read_to_string(dir.path().join("args")).unwrap();
     // User-approved 2026-09-30 (GitHub #237): the GUI passes explicit overwrite consent.
-    assert_eq!(args, "soos-enroll\nimport\n--uid\n1000\n--file\n-\n--yes\n");
+    assert_eq!(
+        args,
+        "/usr/bin/soos-enroll\nimport\n--uid\n1000\n--file\n-\n--yes\n"
+    );
     let piped: Vec<f32> =
         serde_json::from_slice(&std::fs::read(dir.path().join("stdin")).unwrap()).unwrap();
     assert_eq!(

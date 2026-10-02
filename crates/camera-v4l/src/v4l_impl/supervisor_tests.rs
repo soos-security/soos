@@ -52,6 +52,10 @@ enum StreamScript {
 struct FakeNode {
     card: String,
     video_capture: bool,
+    /// `v4l2_capability.driver` (GitHub #307).
+    driver: String,
+    /// `v4l2_capability.device_caps` (GitHub #307).
+    device_caps: u32,
     fourccs: Vec<FourCC>,
     /// `bytesperline` granted by `VIDIOC_S_FMT`.
     stride: u32,
@@ -73,6 +77,8 @@ impl FakeNode {
         Self {
             card: "Integrated Camera".into(),
             video_capture: true,
+            driver: "uvcvideo".into(),
+            device_caps: 0x8420_0001,
             fourccs: vec![FourCC::new(b"YUYV")],
             stride: 8,
             frame_len: 16,
@@ -232,6 +238,8 @@ impl CaptureDevice for FakeDevice {
         self.node(|node| NodeCapabilities {
             card: node.card.clone(),
             video_capture: node.video_capture,
+            driver: node.driver.clone(),
+            device_caps: node.device_caps,
         })
         .ok_or_else(Self::gone)
     }
@@ -885,4 +893,79 @@ fn test_ccb_shutdown_releases_the_device_within_budget() {
         assert_eq!(started, torn_down, "case {index}: every stream torn down");
         drop(camera);
     }
+}
+
+/// GCV6 (GitHub #307): an explicitly configured v4l2loopback node is refused (fail closed,
+/// `UnsupportedDevice`, no stream, no frame) unless the deployment opted in.
+#[test]
+fn test_gcv_explicit_loopback_node_is_refused_without_opt_in() {
+    let path = fake_path("video9");
+    let backend = FakeBackend::with_node(
+        &path,
+        FakeNode {
+            driver: "v4l2 loopback".into(),
+            ..FakeNode::ir_grey(0x51)
+        },
+    );
+    let camera = spawn(
+        &backend,
+        config(&path, Duration::ZERO, Duration::from_millis(20)),
+        None,
+    );
+    assert!(
+        wait_until(|| is_error_of_kind(camera.status(), CameraErrorKind::UnsupportedDevice)),
+        "a virtual node must be refused, got {:?}",
+        camera.status()
+    );
+    assert!(
+        wait_until(|| backend.opens_of(&path) >= 2),
+        "retried with backoff"
+    );
+    assert!(camera.latest_frame().is_none());
+    assert_eq!(backend.log(|log| log.streams_started), 0, "never streamed");
+    camera.stop();
+}
+
+/// GCV6 (GitHub #307): an output-capable node is refused like a virtual driver.
+#[test]
+fn test_gcv_output_capable_node_is_refused() {
+    let path = fake_path("video9");
+    let backend = FakeBackend::with_node(
+        &path,
+        FakeNode {
+            device_caps: 0x8420_0003,
+            ..FakeNode::rgb(0x52)
+        },
+    );
+    let camera = spawn(
+        &backend,
+        config(&path, Duration::ZERO, Duration::from_millis(20)),
+        None,
+    );
+    assert!(wait_until(|| is_error_of_kind(
+        camera.status(),
+        CameraErrorKind::UnsupportedDevice
+    )));
+    assert_eq!(backend.log(|log| log.streams_started), 0);
+    camera.stop();
+}
+
+/// GCV6 (GitHub #307): `allow_virtual_device` (`[pipeline] allow_virtual_camera`) is the
+/// documented opt-in for test setups.
+#[test]
+fn test_gcv_virtual_node_streams_with_explicit_opt_in() {
+    let path = fake_path("video9");
+    let backend = FakeBackend::with_node(
+        &path,
+        FakeNode {
+            driver: "vivid".into(),
+            ..FakeNode::rgb(0x53)
+        },
+    );
+    let mut cfg = config(&path, Duration::ZERO, Duration::from_millis(20));
+    cfg.allow_virtual_device = true;
+    let camera = spawn(&backend, cfg, None);
+    let frame = wait_for_frame(&camera);
+    assert_eq!(frame.data[0], 0x53);
+    camera.stop();
 }

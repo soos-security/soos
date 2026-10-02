@@ -13,8 +13,9 @@ use crate::resolver::{
     explain_camera_resolution, CameraEnumerator, CameraResolution, SelectionReason,
 };
 use crate::sensor::{
-    device_frame_sizes, explain_sensor_classification, scan_video_node_names, CameraDeviceInfo,
-    ClassificationReason, SensorHints, SensorPreference, SensorType, MAX_FRAME_SIZE_HINTS,
+    device_frame_sizes, explain_sensor_classification, scan_video_node_names,
+    virtual_node_rejection, CameraDeviceInfo, ClassificationReason, SensorHints, SensorPreference,
+    SensorType, VirtualNodeRejection, MAX_FRAME_SIZE_HINTS,
 };
 use std::path::{Path, PathBuf};
 
@@ -215,12 +216,14 @@ fn ensure_v4l2_char_device(dev_path: &Path) -> Result<(), ProbeFailure> {
 /// Body of [`SystemV4lDeviceProbe::details`] (metadata ioctls only).
 fn system_details(dev_path: &Path) -> Result<V4lNodeDetails, ProbeFailure> {
     ensure_v4l2_char_device(dev_path)?;
-    let device = v4l::Device::with_path(dev_path).map_err(|e| ProbeFailure::from_io_error(&e))?;
-    let caps = crate::v4l_guard::query_caps_guarded(&device)
+    let guarded = crate::v4l_guard::open_device_guarded(dev_path)
         .map_err(|e| ProbeFailure::from_io_error(&e))?;
-    let mut fourccs: Vec<v4l::FourCC> = crate::v4l_guard::enum_formats_guarded(&device, dev_path);
+    let device = guarded.get().ok_or(ProbeFailure::NotFound)?;
+    let caps = crate::v4l_guard::query_caps_guarded(device)
+        .map_err(|e| ProbeFailure::from_io_error(&e))?;
+    let mut fourccs: Vec<v4l::FourCC> = crate::v4l_guard::enum_formats_guarded(device, dev_path);
     fourccs.truncate(MAX_DIAGNOSTIC_FOURCCS);
-    let frame_sizes = device_frame_sizes(&device, dev_path, &fourccs);
+    let frame_sizes = device_frame_sizes(device, dev_path, &fourccs);
     Ok(V4lNodeDetails {
         driver: caps.driver,
         card_name: caps.card,
@@ -240,6 +243,9 @@ pub enum NodeStatus {
     NotVideoCapture,
     /// Capture node without any pixel format soos can decode.
     NoDecodableFormat,
+    /// Capture node that is not a physical camera (virtual driver, output or memory-to-memory
+    /// capability, GitHub #307); never auto-selected.
+    Rejected(VirtualNodeRejection),
     /// The node could not be opened or queried.
     ProbeFailed(ProbeFailure),
 }
@@ -251,6 +257,7 @@ impl NodeStatus {
             Self::Candidate => "candidate",
             Self::NotVideoCapture => "not_video_capture",
             Self::NoDecodableFormat => "no_decodable_format",
+            Self::Rejected(reason) => reason.as_str(),
             Self::ProbeFailed(_) => "probe_failed",
         }
     }
@@ -310,6 +317,10 @@ fn status_of(details: &V4lNodeDetails) -> (Vec<PixelFormat>, NodeStatus) {
     }
     let fourccs: Vec<v4l::FourCC> = details.fourccs.iter().map(v4l::FourCC::new).collect();
     let formats = delivered_formats(&fourccs);
+    // Same rule as the enumeration the resolver consults (GitHub #307).
+    if let Some(rejection) = virtual_node_rejection(&details.driver, details.device_caps) {
+        return (formats, NodeStatus::Rejected(rejection));
+    }
     if formats.is_empty() {
         (formats, NodeStatus::NoDecodableFormat)
     } else {

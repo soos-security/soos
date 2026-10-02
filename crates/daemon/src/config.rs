@@ -67,13 +67,27 @@ impl SocketConfig {
     /// # Errors
     ///
     /// Returns [`DaemonError::Config`] when `socket_mode` is not one of
-    /// [`ALLOWED_SOCKET_MODES`].
+    /// [`ALLOWED_SOCKET_MODES`], or when `socket_path` is not a file name directly inside
+    /// `socket_dir` (GitHub #315).
     pub fn validate(&self) -> Result<(), DaemonError> {
         if !ALLOWED_SOCKET_MODES.contains(&self.socket_mode) {
             return Err(DaemonError::Config(format!(
                 "[socket] socket_mode {:o} is not allowed (accepted: 660, 600; the socket must \
                  never be accessible to other users)",
                 self.socket_mode
+            )));
+        }
+        // GitHub #315: the stale-node checks and the bind resolve the node name relative to
+        // the validated `socket_dir`, so the socket must be a direct child of that directory.
+        let direct_child = matches!(
+            self.socket_path.components().next_back(),
+            Some(std::path::Component::Normal(_))
+        ) && self.socket_path.parent() == Some(self.socket_dir.as_path());
+        if !direct_child {
+            return Err(DaemonError::Config(format!(
+                "[socket] socket_path '{}' must be a file directly inside socket_dir '{}'",
+                self.socket_path.display(),
+                self.socket_dir.display()
             )));
         }
         Ok(())
@@ -268,6 +282,11 @@ pub struct DaemonConfig {
     pub peer_limits: PeerLimitsConfig,
     /// Logging filter directive (e.g. "info", "debug").
     pub log_level: String,
+    /// Non-fatal problems found while loading the file (GitHub #315), for example an unknown
+    /// `[pipeline] sensor_preference`. Logging is not initialized while the file is parsed,
+    /// so `main.rs` logs each entry at `warn` level once the subscriber is installed. Each
+    /// message names the key, never its value.
+    pub warnings: Vec<String>,
 }
 
 impl Default for DaemonConfig {
@@ -279,6 +298,7 @@ impl Default for DaemonConfig {
             preview: PreviewConfig::default(),
             peer_limits: PeerLimitsConfig::default(),
             log_level: "info".to_string(),
+            warnings: Vec::new(),
         }
     }
 }
@@ -390,6 +410,17 @@ fn validate_log_level(level: &str) -> Result<(), DaemonError> {
         .map_err(|e| DaemonError::Config(format!("log_level is not a valid filter: {e}")))
 }
 
+/// Maps a bounded-reader failure to the startup error naming the file (never its content).
+fn config_read_error(
+    path: &Path,
+    err: &soos_camera_v4l::daemon_config::DaemonConfigError,
+) -> DaemonError {
+    DaemonError::Config(format!(
+        "Failed to read configuration file at '{}': {err}",
+        path.display()
+    ))
+}
+
 impl DaemonConfig {
     /// Validates the complete configuration fail-closed (GitHub #199, DMN-08).
     ///
@@ -403,6 +434,16 @@ impl DaemonConfig {
         validate_log_level(&self.log_level)?;
         self.socket.validate()?;
         self.dispatcher.validate()?;
+        // GitHub #315 (DMN-NEW-3, orchestrator decision): the local-session policy can only
+        // be disabled together with the simulated camera, i.e. in a test harness.
+        if !self.dispatcher.enforce_active_session && !self.pipeline.use_mock_camera {
+            return Err(DaemonError::Config(
+                "[dispatcher] enforce_active_session = false is only accepted with [pipeline] \
+                 use_mock_camera = true (test harnesses); a production daemon always enforces \
+                 the local-session policy"
+                    .into(),
+            ));
+        }
         self.pipeline.validate()?;
         self.preview.validate()?;
         self.peer_limits
@@ -478,12 +519,17 @@ impl DaemonConfig {
             if let Some(warmup_frames) = pipe.warmup_frames {
                 config.pipeline.camera.warmup_frames = warmup_frames;
             }
-            if let Some(preference) = pipe
-                .sensor_preference
-                .as_deref()
-                .and_then(soos_camera_v4l::parse_sensor_preference)
-            {
-                config.pipeline.camera.sensor_preference = preference;
+            if let Some(raw) = pipe.sensor_preference.as_deref() {
+                match soos_camera_v4l::parse_sensor_preference(raw) {
+                    Some(preference) => config.pipeline.camera.sensor_preference = preference,
+                    // Kept non-fatal (documented behaviour) but reported (GitHub #315): the
+                    // warning names the key, never the value.
+                    None => config.warnings.push(
+                        "[pipeline] sensor_preference is not recognized and is ignored; its \
+                         default (prefer_ir) applies"
+                            .to_string(),
+                    ),
+                }
             }
             if let Some(idle_secs) = pipe.idle_timeout_secs {
                 config.pipeline.camera.idle_timeout = Duration::from_secs(idle_secs);
@@ -607,15 +653,22 @@ impl DaemonConfig {
     }
 
     /// Loads and parses configuration from a specific file path.
+    ///
+    /// The file is read with the bounded regular-file reader shared with the daemon clients
+    /// (`soos_camera_v4l::daemon_config::read_daemon_config_text`, GitHub #315): the path is
+    /// pinned with `O_PATH`, a FIFO, a device node or any other non-regular file is refused
+    /// without being opened for reading, and a file above
+    /// [`soos_camera_v4l::daemon_config::MAX_DAEMON_CONFIG_BYTES`] (1 MiB) is refused before
+    /// parsing.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DaemonError::Config`] when the file is missing, not a regular file,
+    /// unreadable, too large, not UTF-8, or does not parse and validate.
     pub fn load_from_path<P: AsRef<Path>>(path: P) -> Result<Self, DaemonError> {
         let path = path.as_ref();
-        let content = std::fs::read_to_string(path).map_err(|e| {
-            DaemonError::Config(format!(
-                "Failed to read configuration file at '{}': {}",
-                path.display(),
-                e
-            ))
-        })?;
+        let content = soos_camera_v4l::daemon_config::read_daemon_config_text(path)
+            .map_err(|e| config_read_error(path, &e))?;
         Self::from_toml_str(&content)
     }
 
@@ -628,8 +681,10 @@ impl DaemonConfig {
     /// [`DaemonConfig::load_or_default`] with an injectable system configuration path.
     ///
     /// An explicit `path_opt` is always read (a missing file is an error). Otherwise
-    /// `system_path` is read when it is a regular file, and
-    /// [`DaemonConfig::runtime_default`] is returned when it is absent.
+    /// `system_path` is read, and [`DaemonConfig::runtime_default`] is returned only when it
+    /// does not exist. There is no check-then-open (GitHub #315): the single bounded open
+    /// decides, so any other failure (a directory, a FIFO, a device node, an unreadable or
+    /// oversized file) is a startup error instead of a silent fall back to the defaults.
     pub fn load_or_default_with_system_path(
         path_opt: Option<&Path>,
         system_path: &Path,
@@ -638,10 +693,12 @@ impl DaemonConfig {
             return Self::load_from_path(path);
         }
 
-        if system_path.is_file() {
-            Self::load_from_path(system_path)
-        } else {
-            Ok(Self::runtime_default())
+        match soos_camera_v4l::daemon_config::read_daemon_config_text(system_path) {
+            Ok(content) => Self::from_toml_str(&content),
+            Err(soos_camera_v4l::daemon_config::DaemonConfigError::NotFound) => {
+                Ok(Self::runtime_default())
+            }
+            Err(err) => Err(config_read_error(system_path, &err)),
         }
     }
 }
