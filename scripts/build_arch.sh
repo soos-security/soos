@@ -113,6 +113,9 @@ mkdir -p "${OUTPUT_DIR}"
 
 if [[ "${SKIP_BUILD}" = false ]]; then
     echo "[1/4] Compiling workspace crates in release mode..."
+    # Packages install soos-enroll in /usr/bin: soos-gui is built for that path,
+    # whatever SOOS_BINDIR the caller exported (GitHub #318).
+    export SOOS_BINDIR=/usr/bin
     cargo build --locked --release --workspace
 fi
 

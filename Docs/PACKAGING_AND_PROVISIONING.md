@@ -102,6 +102,8 @@ Options:
   -h, --help               Display help message and exit
 ```
 
+Install prefix and `soos-gui` (GitHub #318): the GUI runs `soos-enroll` by absolute path through `pkexec`. That path is fixed at build time from `SOOS_BINDIR` (default `/usr/bin`, so `/usr/bin/soos-enroll`); `crates/gui/build.rs` accepts only a normalized absolute directory made of `[A-Za-z0-9._+-]` components and fails the build otherwise. `--build` exports `SOOS_BINDIR=<prefix>/bin` (also when it drops to the invoking user through `runuser`), so `install.sh --build --prefix /opt/soos` produces a GUI that runs `/opt/soos/bin/soos-enroll`. Installing prebuilt artifacts under another prefix prints a warning: build them with `SOOS_BINDIR=<prefix>/bin` or use `--build`. Every package builder (`scripts/build_{deb,arch,rpm,packages}.sh`, `packaging/debian/rules`, `packaging/arch/PKGBUILD`, `packaging/rpm/soos.spec`) exports `SOOS_BINDIR=/usr/bin`. `pkexec` and `systemctl` are system tools and stay `/usr/bin/pkexec` / `/usr/bin/systemctl`.
+
 PAM module directory under `--destdir`: only directories that already exist inside the stage are probed; the build host is never consulted (its `/usr/lib64` says nothing about the target). With no match, `/usr/lib/security` is used and a warning asks for `--pam-dir`. Packaging always passes it explicitly: `/usr/lib/<DEB_HOST_MULTIARCH>/security` (Debian/Ubuntu), `/usr/lib/security` (Arch), `%{_libdir}/security` (RPM).
 
 Exit codes: `0` success, `1` usage error, `2` preflight failure (nothing modified), `40` release build failed (nothing installed), `60` model deployment or verification failed (rolled back), `70` installed but `--start` did not reach readiness (not rolled back); any other non-zero code is the failing step's own status (rolled back).
@@ -145,7 +147,7 @@ auth  optional                       pam_soos.so event=password-failed timeout_m
 
 #### Arch Linux
 - Universal snippet in `packaging/pam/arch/system-auth.snippet`, installed as reference material to `/usr/share/soos/pam/system-auth.snippet` (never `/etc/pam.d/soos.snippet`, which Linux-PAM would treat as a service named `soos.snippet`; `uninstall.sh` still removes that legacy file).
-- `packaging/pam/arch/system-auth` is the stock pambase (`20260616-1`) `/etc/pam.d/system-auth` with exactly that edit (primary rule after `pam_faillock.so preauth`, event rule right after `pam_unix.so`, the `pam_systemd_home.so` / `pam_unix.so` jumps widened to `success=3` / `success=2`, faillock `authfail` / `authsucc` untouched); it is the reference shown in `Docs/DISTRIBUTION_DEPLOYMENT.md` §5.2 and is not installed by any package (GitHub #309).
+- `packaging/pam/arch/system-auth` is the stock pambase (`20260616-1`) `/etc/pam.d/system-auth` with exactly that edit (primary rule `[success=4 default=ignore]` after `pam_faillock.so preauth`, landing on the stock `pam_permit.so` / `pam_env.so` / `pam_faillock.so authsucc` success path so a face login resets the faillock tally — GitHub #318, Arch only —, event rule right after `pam_unix.so`, the `pam_systemd_home.so` / `pam_unix.so` jumps widened to `success=3` / `success=2`, faillock `authfail` / `authsucc` untouched); it is the reference shown in `Docs/DISTRIBUTION_DEPLOYMENT.md` §5.2 and is not installed by any package (GitHub #309).
 
 ---
 

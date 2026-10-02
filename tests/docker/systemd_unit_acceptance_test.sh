@@ -57,15 +57,18 @@
 # are snapshotted before the container boots and compared after the run: any
 # difference fails the test. --privileged still grants CAP_MKNOD, so these are
 # mitigations, not a hard barrier: the image must never run untrusted code.
-# The Docker volumes soos-sua-target and soos-sua-cargo-registry and the two
-# images are kept on purpose as build caches.
+# The Docker volumes soos-sua-target, soos-sua-cargo-registry and
+# soos-sua-ort-cache (ONNX Runtime download; replaced by the host directory
+# SOOS_ORT_CACHE_DIR when set), as well as the two images, are kept on purpose
+# as build caches.
 #
 # Usage:
 #   bash tests/docker/systemd_unit_acceptance_test.sh [--models auto|host|download|none]
 #   bash tests/docker/systemd_unit_acceptance_test.sh --in-container <stage> --models <mode>
 #   bash tests/docker/systemd_unit_acceptance_test.sh --help
 # Environment: SOOS_DOCKER (docker binary), SOOS_SUA_TARGET_VOLUME,
-# SOOS_SUA_REGISTRY_VOLUME, CARGO_BUILD_JOBS (forwarded to the build).
+# SOOS_SUA_REGISTRY_VOLUME, SOOS_SUA_ORT_CACHE_VOLUME, SOOS_ORT_CACHE_DIR,
+# CARGO_BUILD_JOBS (forwarded to the build).
 # =============================================================================
 
 set -euo pipefail
@@ -151,6 +154,7 @@ if [[ "${MODE}" = "host" ]]; then
     DOCKER="${SOOS_DOCKER:-docker}"
     TARGET_VOLUME="${SOOS_SUA_TARGET_VOLUME:-soos-sua-target}"
     REGISTRY_VOLUME="${SOOS_SUA_REGISTRY_VOLUME:-soos-sua-cargo-registry}"
+    ORT_CACHE_VOLUME="${SOOS_SUA_ORT_CACHE_VOLUME:-soos-sua-ort-cache}"
     CONTAINER="soos-sua-$$"
     command -v "${DOCKER}" >/dev/null 2>&1 || fail "Docker ('${DOCKER}') is not installed or not in PATH."
     "${DOCKER}" info >/dev/null 2>&1 || fail "Docker daemon is not accessible."
@@ -186,16 +190,37 @@ if [[ "${MODE}" = "host" ]]; then
     "${DOCKER}" build -q -f "${WORKSPACE_ROOT}/tests/docker/Dockerfile.systemd" \
         -t "${RUNTIME_IMAGE}" "${WORKSPACE_ROOT}" >/dev/null
 
+    # ONNX Runtime download cache of ort-sys (GitHub #318): the host directory
+    # SOOS_ORT_CACHE_DIR (restored and saved by CI) when set, otherwise the
+    # named volume ORT_CACHE_VOLUME. ort-sys verifies the SHA-256 of every
+    # download before it extracts it there.
+    if [[ -n "${SOOS_ORT_CACHE_DIR:-}" ]]; then
+        if [[ "${SOOS_ORT_CACHE_DIR}" != /* || ! -d "${SOOS_ORT_CACHE_DIR}" ]]; then
+            fail "SOOS_ORT_CACHE_DIR must be an existing absolute directory: '${SOOS_ORT_CACHE_DIR}'"
+        fi
+        ort_cache_args=(-v "${SOOS_ORT_CACHE_DIR}:/ort-cache" -e "ORT_CACHE_DIR=/ort-cache")
+    else
+        ort_cache_args=(-v "${ORT_CACHE_VOLUME}:/ort-cache" -e "ORT_CACHE_DIR=/ort-cache")
+    fi
+    build_args=(
+        --rm
+        -v "${WORKSPACE_ROOT}:/workspace:ro"
+        -v "${TARGET_VOLUME}:/target"
+        -v "${REGISTRY_VOLUME}:/usr/local/cargo/registry"
+        "${ort_cache_args[@]}"
+        -e CARGO_TARGET_DIR=/target
+        -e CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-4}"
+        -w /workspace
+    )
+
+    info "Prefetching ONNX Runtime with a bounded retry (scripts/prefetch_onnxruntime.sh)..."
+    "${DOCKER}" run "${build_args[@]}" "${BUILDER_IMAGE}" \
+        bash /workspace/scripts/prefetch_onnxruntime.sh
+
     # Always rebuild (a no-op when up to date): a stale binary left in the
     # target volume must never be the one under test (artifact freshness).
     info "Building the release daemon and soos-admin (cargo build --locked --release)..."
-    "${DOCKER}" run --rm \
-        -v "${WORKSPACE_ROOT}:/workspace:ro" \
-        -v "${TARGET_VOLUME}:/target" \
-        -v "${REGISTRY_VOLUME}:/usr/local/cargo/registry" \
-        -e CARGO_TARGET_DIR=/target \
-        -e CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-4}" \
-        -w /workspace \
+    "${DOCKER}" run "${build_args[@]}" \
         "${BUILDER_IMAGE}" \
         cargo build --locked --release -p soos-daemon -p soos-admin-cli
 

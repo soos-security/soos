@@ -6,8 +6,12 @@
 #   cp /etc/pam.d/system-auth /etc/pam.d/system-auth.soos-backup
 #
 # 1. Insert this line right after "auth required pam_faillock.so preauth"
-#    (before the pam_systemd_home.so line), so a locked account still fails:
-auth  [success=done default=ignore]  pam_soos.so
+#    (before the pam_systemd_home.so line), so a locked account still fails.
+#    On a face match it jumps over pam_systemd_home.so, pam_unix.so, the event
+#    line and "pam_faillock.so authfail" onto "auth optional pam_permit.so":
+#    pam_env.so and pam_faillock.so authsucc then run exactly as after a
+#    correct password (the faillock tally is reset):
+auth  [success=4 default=ignore]  pam_soos.so
 #
 # 2. Insert this line right after the pam_unix.so line (before
 #    "auth [default=die] pam_faillock.so authfail"): it is reached only when
@@ -21,4 +25,6 @@ auth  optional                       pam_soos.so event=password-failed timeout_m
 #       auth [success=1 default=bad]    pam_unix.so          ->  success=2
 #
 # Never edit any other line: pam_faillock.so preauth/authfail/authsucc,
-# pam_systemd_home.so and pam_env.so stay as shipped by pambase.
+# pam_systemd_home.so and pam_env.so stay as shipped by pambase. Re-count the
+# success=4 jump if a future pambase adds or removes a line between the soos
+# line and pam_permit.so.

@@ -141,6 +141,29 @@ jobs:
           # Only main writes caches; PRs restore them (avoids cache thrash and poisoning).
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
+      # ONNX Runtime prebuilt download of ort-sys (GitHub #318): restored from a
+      # Cargo.lock-keyed cache (only main writes it), then fetched with a bounded
+      # retry. ort-sys verifies the SHA-256 of every download before extracting it.
+      - name: ONNX Runtime cache location
+        run: echo "ORT_CACHE_DIR=${HOME}/.cache/ort.pyke.io" >> "$GITHUB_ENV"
+
+      - name: Restore the ONNX Runtime download cache
+        id: ort-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/ort.pyke.io
+          key: ort-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+
+      - name: Prefetch ONNX Runtime (bounded retry)
+        run: ./scripts/prefetch_onnxruntime.sh
+
+      - name: Save the ONNX Runtime download cache
+        if: github.ref == 'refs/heads/main' && steps.ort-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/ort.pyke.io
+          key: ort-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+
       - name: cargo clippy
         run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 
@@ -176,6 +199,29 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      # ONNX Runtime prebuilt download of ort-sys (GitHub #318): restored from a
+      # Cargo.lock-keyed cache (only main writes it), then fetched with a bounded
+      # retry. ort-sys verifies the SHA-256 of every download before extracting it.
+      - name: ONNX Runtime cache location
+        run: echo "ORT_CACHE_DIR=${HOME}/.cache/ort.pyke.io" >> "$GITHUB_ENV"
+
+      - name: Restore the ONNX Runtime download cache
+        id: ort-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/ort.pyke.io
+          key: ort-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+
+      - name: Prefetch ONNX Runtime (bounded retry)
+        run: ./scripts/prefetch_onnxruntime.sh
+
+      - name: Save the ONNX Runtime download cache
+        if: github.ref == 'refs/heads/main' && steps.ort-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/ort.pyke.io
+          key: ort-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
 
       - name: Build test binaries
         run: cargo test --locked --workspace --all-targets --all-features --no-run
@@ -302,8 +348,31 @@ jobs:
         with:
           persist-credentials: false
 
+      # ONNX Runtime prebuilt download of ort-sys (GitHub #318): the host cache
+      # directory is handed to the Docker harness (SOOS_ORT_CACHE_DIR), restored
+      # from a Cargo.lock-keyed cache and saved by main only; the harness fetches
+      # with a bounded retry. ort-sys verifies the SHA-256 of every download.
+      - name: ONNX Runtime cache location
+        run: |
+          mkdir -p "${HOME}/.cache/ort.pyke.io"
+          echo "SOOS_ORT_CACHE_DIR=${HOME}/.cache/ort.pyke.io" >> "$GITHUB_ENV"
+
+      - name: Restore the ONNX Runtime download cache
+        id: ort-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/ort.pyke.io
+          key: ort-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+
       - name: Drive soos-daemon.service with systemd as PID 1 (ubuntu:24.04)
         run: ./tests/docker/systemd_unit_acceptance_test.sh --models download
+
+      - name: Save the ONNX Runtime download cache
+        if: github.ref == 'refs/heads/main' && steps.ort-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/ort.pyke.io
+          key: ort-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
 
   # ---------------------------------------------------------------------------
   # Job 6c: Ubuntu packaging and deployment path (GitHub #168). Builds the
@@ -324,8 +393,31 @@ jobs:
         with:
           persist-credentials: false
 
+      # ONNX Runtime prebuilt download of ort-sys (GitHub #318): the host cache
+      # directory is handed to the Docker harness (SOOS_ORT_CACHE_DIR), restored
+      # from a Cargo.lock-keyed cache and saved by main only; the harness fetches
+      # with a bounded retry. ort-sys verifies the SHA-256 of every download.
+      - name: ONNX Runtime cache location
+        run: |
+          mkdir -p "${HOME}/.cache/ort.pyke.io"
+          echo "SOOS_ORT_CACHE_DIR=${HOME}/.cache/ort.pyke.io" >> "$GITHUB_ENV"
+
+      - name: Restore the ONNX Runtime download cache
+        id: ort-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/ort.pyke.io
+          key: ort-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+
       - name: Deploy the .deb, enroll, fall back to password and roll back (ubuntu:24.04)
         run: ./tests/distro/run_distro_validation.sh ubuntu
+
+      - name: Save the ONNX Runtime download cache
+        if: github.ref == 'refs/heads/main' && steps.ort-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/ort.pyke.io
+          key: ort-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
 
       - name: Package content, key isolation and removal (tests/docker/test_packages.sh)
         run: |
