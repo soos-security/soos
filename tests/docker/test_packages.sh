@@ -17,6 +17,11 @@
 # unprivileged user soosbuild; every archive entry must be root:root and every
 # installed path uid 0. The Arch branch also builds packaging/arch/PKGBUILD with
 # makepkg and requires the same layout as scripts/build_arch.sh (GitHub #316).
+#
+# Upgrade path (GitHub #327): every branch upgrades or reinstalls over the installed
+# package (dpkg -i of a version-bumped copy, rpm -U --replacepkgs, pacman -U) and requires
+# master.key, an enrolled template, /etc/soos/daemon.toml and the PAM activation state to
+# stay byte-identical; the Debian branch also keeps an administrator-disabled profile.
 # =============================================================================
 
 set -euo pipefail
@@ -374,6 +379,82 @@ SPEC
     success "rpm -U from a %ghost-owning build kept the exact master key (no leftover copy)."
 }
 
+# GitHub #327 (UPG4, UPG6): an upgrade or a reinstall over the installed package keeps the
+# master key, an enrolled template (synthetic ciphertext: no camera), /etc/soos/daemon.toml
+# and the PAM activation state byte-identical. Digests are compared, never printed.
+readonly UPGRADE_TEMPLATE="/var/lib/soos/biometrics/4242.cbor.enc"
+UPGRADE_CREATED_CONFIG=false
+
+prepare_upgrade_state() {
+    if [[ ! -f /etc/soos/daemon.toml ]]; then
+        install -d -m 0755 /etc/soos
+        printf '%s\n' '# package upgrade test' '[pipeline]' 'use_mock_camera = true' > /etc/soos/daemon.toml
+        chmod 0644 /etc/soos/daemon.toml
+        UPGRADE_CREATED_CONFIG=true
+    fi
+    (umask 077 && head -c 512 /dev/urandom > "${UPGRADE_TEMPLATE}")
+}
+
+cleanup_upgrade_state() {
+    rm -f "${UPGRADE_TEMPLATE}"
+    if [[ "${UPGRADE_CREATED_CONFIG}" = true ]]; then
+        rm -f /etc/soos/daemon.toml
+        rmdir /etc/soos 2>/dev/null || true
+        UPGRADE_CREATED_CONFIG=false
+    fi
+}
+
+# "<path> <sha256>" lines of every preserved file, then modes and the authselect profile.
+upgrade_state_digest() {
+    local f
+    for f in /var/lib/soos/master.key "${UPGRADE_TEMPLATE}" /etc/soos/daemon.toml; do
+        if [[ -f "${f}" ]]; then
+            printf '%s %s\n' "${f}" "$(sha256sum < "${f}" | cut -d' ' -f1)"
+        else
+            printf '%s missing\n' "${f}"
+        fi
+    done
+    while IFS= read -r -d '' f; do
+        printf '%s %s\n' "${f}" "$(sha256sum < "${f}" | cut -d' ' -f1)"
+    done < <(find /etc/pam.d /var/lib/pam -type f -print0 2>/dev/null | sort -z)
+    stat -c '%n %a %U:%G' /var/lib/soos/master.key /var/lib/soos/biometrics 2>/dev/null || true
+    if command -v authselect >/dev/null 2>&1; then
+        printf 'authselect %s\n' "$(authselect current --raw 2>/dev/null || echo none)"
+    fi
+}
+
+# $1 = label, then the upgrade command.
+verify_upgrade_preserves_state() {
+    local label="$1" before after changed
+    shift
+    before="$(upgrade_state_digest)"
+    info "${label}: $*"
+    "$@"
+    after="$(upgrade_state_digest)"
+    if [[ "${after}" != "${before}" ]]; then
+        changed="$({ diff <(echo "${before}") <(echo "${after}") || true; } | sed -nE '/^[<>] /{s/[0-9a-f]{64}/<sha256>/;p}')"
+        error "${label} changed preserved state (master.key, template, /etc/soos/daemon.toml or /etc/pam.d):"
+        sed 's/^/  /' <<< "${changed}" >&2
+        return 1
+    fi
+    grep -qx '/var/lib/soos/master.key 600 root:root' <<< "${after}" \
+        || { error "${label}: master.key is not 600 root:root"; return 1; }
+    success "${label} kept master.key, ${UPGRADE_TEMPLATE}, /etc/soos/daemon.toml and the PAM activation state byte-identical."
+}
+
+# A copy of the .deb with a higher version (same payload and maintainer scripts), so that
+# `dpkg -i` runs a real upgrade (prerm upgrade, postinst configure <old-version>) without a
+# second package build. Prints the path of the copy.
+make_newer_deb() {
+    local deb="$1" work version
+    work="$(mktemp -d /tmp/soos_upgrade_deb.XXXXXX)"
+    dpkg-deb -R "${deb}" "${work}/root"
+    version="$(dpkg-deb -f "${deb}" Version)"
+    sed -i "s/^Version: .*/Version: ${version}+upgradetest1/" "${work}/root/DEBIAN/control"
+    dpkg-deb -b --root-owner-group "${work}/root" "${work}/soos_upgrade.deb" >/dev/null
+    printf '%s\n' "${work}/soos_upgrade.deb"
+}
+
 case "${DISTRO}" in
     ubuntu|debian)
         info "Running Debian (.deb) package verification..."
@@ -398,6 +479,32 @@ case "${DISTRO}" in
         verify_installation "${PAM_DIR}"
         verify_installed_files_root_owned dpkg -L soos
         FIRST_KEY_FP=$(key_fingerprint)
+
+        info "Upgrade path (GitHub #327): dpkg -i of a newer .deb over the installed one..."
+        # The image ships a hand-written common-auth that pam-auth-update treats as locally
+        # modified (never rewritten): hand the stack to pam-auth-update for this case, so the
+        # profile selection is really exercised, and restore the image's files afterwards.
+        PAM_BACKUP=$(mktemp -d /tmp/soos_pam_backup.XXXXXX)
+        cp -a /etc/pam.d "${PAM_BACKUP}/pam.d"
+        cp -a /var/lib/pam "${PAM_BACKUP}/var-lib-pam"
+        pam-auth-update --package --force --enable soos soos-notify
+        grep -q 'pam_soos\.so' /etc/pam.d/common-auth \
+            || { error "precondition: pam-auth-update did not enable soos in /etc/pam.d/common-auth"; exit 1; }
+        prepare_upgrade_state
+        UPGRADE_DEB=$(make_newer_deb "${DEB_FILE}")
+        verify_upgrade_preserves_state "dpkg -i newer .deb (soos enabled)" dpkg -i "${UPGRADE_DEB}"
+        # An administrator's choice survives the upgrade: soos disabled stays disabled.
+        pam-auth-update --package --disable soos soos-notify
+        if grep -q 'pam_soos\.so' /etc/pam.d/common-auth; then
+            error "precondition: pam-auth-update --disable left pam_soos.so in common-auth"; exit 1
+        fi
+        verify_upgrade_preserves_state "dpkg -i .deb again (soos disabled by the administrator)" dpkg -i "${UPGRADE_DEB}"
+        cleanup_upgrade_state
+        rm -rf "$(dirname "${UPGRADE_DEB}")"
+        rm -rf /etc/pam.d /var/lib/pam
+        cp -a "${PAM_BACKUP}/pam.d" /etc/pam.d
+        cp -a "${PAM_BACKUP}/var-lib-pam" /var/lib/pam
+        rm -rf "${PAM_BACKUP}"
 
         info "Testing package removal via dpkg -r soos..."
         dpkg -r soos
@@ -442,6 +549,11 @@ case "${DISTRO}" in
         verify_installed_files_root_owned rpm -ql soos
         FIRST_KEY_FP=$(key_fingerprint)
 
+        prepare_upgrade_state
+        verify_upgrade_preserves_state "rpm -U --replacepkgs (reinstall over the installed package)" \
+            rpm -U --replacepkgs "${RPM_FILE}"
+        cleanup_upgrade_state
+
         info "Testing package removal via rpm -e soos..."
         rpm -e soos
         test ! -f "/usr/bin/soos-admin" || { error "soos-admin still present after rpm -e"; exit 1; }
@@ -480,6 +592,11 @@ case "${DISTRO}" in
         verify_installation "/usr/lib/security"
         verify_installed_files_root_owned pacman -Qlq soos
         FIRST_KEY_FP=$(key_fingerprint)
+
+        prepare_upgrade_state
+        verify_upgrade_preserves_state "pacman -U (reinstall over the installed package)" \
+            pacman -U --noconfirm "${PKG_FILE}"
+        cleanup_upgrade_state
 
         info "Testing package removal via pacman -R soos..."
         pacman -R --noconfirm soos

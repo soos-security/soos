@@ -85,6 +85,40 @@ sudo ./scripts/uninstall.sh --purge-data         # also erases templates, master
 
 ---
 
+## Upgrade
+
+Pull, rebuild and reinstall with the method used for the first install. The master key, the enrolled
+templates, `/etc/soos/daemon.toml` and the PAM activation state are kept (details, and how to switch
+from `install.sh` to a package: [`Docs/PACKAGING_AND_PROVISIONING.md`](Docs/PACKAGING_AND_PROVISIONING.md) §9).
+
+```bash
+git pull --ff-only
+
+# Debian / Ubuntu (.deb; dpkg -i also reinstalls a rebuilt package of the same version)
+./scripts/build_deb.sh
+sudo dpkg -i target/packages/soos_<version>_<arch>.deb
+sudo systemctl restart soos-daemon
+
+# Arch Linux
+./scripts/build_arch.sh
+sudo pacman -U target/packages/soos-<version>-<release>-<arch>.pkg.tar.zst
+sudo systemctl restart soos-daemon
+
+# Fedora / RHEL (the package restarts a running daemon itself)
+./scripts/build_rpm.sh
+sudo dnf upgrade ./target/packages/soos-<version>-<release>.<arch>.rpm    # same version: sudo dnf reinstall ./target/packages/...
+
+# scripts/install.sh (restarts a running daemon on the new binaries, then waits for it)
+sudo ./scripts/install.sh --build --start
+
+# Verify
+soos-admin status
+sudo soos-enroll list                            # a "[WARN] UID N: ... re-enroll" line marks a foreign template
+sudo soos-enroll enroll --username alice         # only for a user reported as foreign above
+```
+
+---
+
 ## Technical Documentation
 
 Detailed guides and specifications are maintained in the [`Docs/`](Docs/) directory:

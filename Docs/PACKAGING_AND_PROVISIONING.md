@@ -69,7 +69,7 @@ Why each build package is needed (from the locked dependency graph):
 - **Model Download & Attestation before enabling the unit**: Invokes `scripts/download_models.sh` to download and verify (SHA-256) all ONNX models cataloged in `models/manifest.toml` (or `--manifest`). A verification failure exits `60` and rolls back; the unit is never enabled without verified models.
 - **Systemd Integration**: Deploys `packaging/soos-daemon.service`, and as the last step invokes `systemctl daemon-reload` and enables the unit. The unit bounds restarts (`StartLimitIntervalSec=320`, `StartLimitBurst=5`) so a daemon that cannot start does not crash-loop forever; the interval covers five starts that each time out (5 × (`TimeoutStartSec=60` + `RestartSec=2`) = 310 s ≤ 320 s), otherwise the limit would never be reached (GitHub #287, enforced by the invariant `installer_templates_contract::test_daemon_unit_start_limit_interval_covers_burst_of_timed_out_starts`), and carries `ConditionPathExists=/var/lib/soos/models/manifest.toml` (GitHub #211): until `download_models.sh` has deployed the manifest, a start is skipped (`condition failed`) instead of failing and restarting.
 - **Distribution PAM template (GitHub #209)**: exactly one template family is installed, chosen by `--distro` (`auto` by default, `debian`, `fedora`, `arch`, `none`). `auto` parses (never sources) `ID` then `ID_LIKE` from the target `os-release` (`debian`/`ubuntu` → Debian `pam-auth-update` profiles, `fedora`/`rhel`/`centos` → authselect profile, `arch` → Arch snippet); under `--destdir` only the stage's `etc/os-release` / `usr/lib/os-release` is read, and with none (or an unsupported distribution) no template is installed and a warning asks for `--distro`. An unknown `--distro` value fails the preflight. `build_deb.sh` / `debian/rules` pass `--distro debian`, `build_arch.sh` passes `--distro arch`; the RPM spec installs only the authselect profile. No file is ever installed in `/etc/pam.d` (every file there is a PAM service): the Arch snippet lives in `/usr/share/soos/pam/system-auth.snippet`.
-- **Start and readiness (GitHub #211)**: `--start` (live install, systemd running) starts the unit after enabling it and runs `scripts/wait_daemon_ready.sh`, which fails immediately when the models manifest is missing, waits at most `--timeout` seconds (default 30, 1..300) for the daemon socket, then prints `soos-admin --format json --socket-path <sock> status`. A daemon that does not become ready exits `70` without rolling back the (committed) install. Operators can run the helper on its own after `systemctl start soos-daemon`.
+- **Start and readiness (GitHub #211)**: `--start` (live install, systemd running) starts the unit after enabling it and runs `scripts/wait_daemon_ready.sh`, which fails immediately when the models manifest is missing, waits at most `--timeout` seconds (default 30, 1..300) for the daemon socket, then prints `soos-admin --format json --socket-path <sock> status`. A daemon that does not become ready exits `70` without rolling back the (committed) install. Operators can run the helper on its own after `systemctl start soos-daemon`. On a re-run over an existing install, a unit that was active is restarted on the new binaries (`systemctl restart`) and awaited the same way, with or without `--start`, and a failed re-run never disables a unit that was enabled before it (GitHub #327, §9).
 - **Camera selection report (GitHub #287)**: as the last step of a live install (after the install is committed, so it can never trigger the rollback), `scripts/camera_report.sh` runs the installed `soos-admin camera list --config <sysconfdir>/soos/daemon.toml` and prints which V4L2 node `soos-daemon` would open and why. It is metadata only (no frame is captured), bounded by `--timeout` (default 15 s, 1..300, through coreutils `timeout` when present) and purely informational: no camera, a missing binary, a failure or a timeout is a `[WARN]` line and the helper still exits 0. DESTDIR staging builds never probe the build host's camera.
 - `--allow-missing` (developer use only) installs a partial artifact set and ends with an `INCOMPLETE` banner instead of the success message.
 
@@ -97,7 +97,8 @@ Options:
   --distro <FAMILY>        PAM template to install: auto (default), debian,
                            fedora, arch or none (auto reads the target os-release)
   --start                  Start the unit after enabling it and wait until the
-                           daemon answers (live install only)
+                           daemon answers (live install only); an already active
+                           unit is restarted on the new binaries even without it
   --dry-run                Run the read-only preflight and print the plan
   -h, --help               Display help message and exit
 ```
@@ -106,7 +107,7 @@ Install prefix and `soos-gui` (GitHub #318): the GUI runs `soos-enroll` by absol
 
 PAM module directory under `--destdir`: only directories that already exist inside the stage are probed; the build host is never consulted (its `/usr/lib64` says nothing about the target). With no match, `/usr/lib/security` is used and a warning asks for `--pam-dir`. Packaging always passes it explicitly: `/usr/lib/<DEB_HOST_MULTIARCH>/security` (Debian/Ubuntu), `/usr/lib/security` (Arch), `%{_libdir}/security` (RPM).
 
-Exit codes: `0` success, `1` usage error, `2` preflight failure (nothing modified), `40` release build failed (nothing installed), `60` model deployment or verification failed (rolled back), `70` installed but `--start` did not reach readiness (not rolled back); any other non-zero code is the failing step's own status (rolled back).
+Exit codes: `0` success, `1` usage error, `2` preflight failure (nothing modified), `40` release build failed (nothing installed), `60` model deployment or verification failed (rolled back), `70` installed but the started or restarted daemon did not reach readiness (not rolled back); any other non-zero code is the failing step's own status (rolled back).
 
 ---
 
@@ -369,3 +370,107 @@ The group is provisioned by the packages and `scripts/install.sh` only. If it is
 daemon fails to bind with `Group 'soos' not found` instead of running `groupadd`. On C libraries
 without `fchmodat(AT_SYMLINK_NOFOLLOW)` support, the socket mode is set through an
 `O_PATH | O_NOFOLLOW` descriptor, never through a path that could follow a symlink.
+
+## 9. Upgrading an Existing Installation (GitHub #327)
+
+Users update soos by pulling `main`, rebuilding and reinstalling with the method of the first
+install. The short command list is in the README (`## Upgrade`); this section states what each
+method does to an existing installation.
+
+### 9.1 Procedure per Method
+
+```bash
+git pull --ff-only
+
+# Debian / Ubuntu: dpkg -i upgrades a newer version and reinstalls a rebuilt package of the same version
+./scripts/build_deb.sh
+sudo dpkg -i target/packages/soos_<version>_<arch>.deb
+sudo systemctl restart soos-daemon
+
+# Arch Linux: pacman -U upgrades or reinstalls
+./scripts/build_arch.sh
+sudo pacman -U target/packages/soos-<version>-<release>-<arch>.pkg.tar.zst
+sudo systemctl restart soos-daemon
+
+# Fedora / RHEL: %postun (%systemd_postun_with_restart) restarts a running daemon
+./scripts/build_rpm.sh
+sudo dnf upgrade ./target/packages/soos-<version>-<release>.<arch>.rpm
+sudo dnf reinstall ./target/packages/soos-<version>-<release>.<arch>.rpm   # same version rebuilt from main
+
+# scripts/install.sh: a re-run restarts an active unit on the new binaries (also without --start)
+sudo ./scripts/install.sh --build --start
+
+# Verify (every method)
+soos-admin status
+sudo soos-enroll list
+```
+
+The package version comes from `[workspace.package]` in `Cargo.toml` (§7.2.1) and changes only with a
+release, so a package rebuilt from a newer `main` usually has the same version: use `dpkg -i`,
+`pacman -U` or `dnf reinstall`, which reinstall it (`apt install ./…` and `dnf upgrade` skip a package
+whose version is already installed). Re-enroll a user (`sudo soos-enroll enroll --username <user>`) only
+when `soos-enroll list` prints a `[WARN] UID N: ... re-enroll` line for that UID: the template was made
+with another embedding model (Docs/ENROLLMENT_CLI.md). Templates of the current model stay valid across
+upgrades because the master key is never regenerated.
+
+### 9.2 What an Upgrade Preserves
+
+| State | `install.sh` re-run | `.deb` (`dpkg -i`) | Arch (`pacman -U`) | RPM (`dnf upgrade` / `reinstall`) |
+|---|---|---|---|---|
+| `/var/lib/soos/master.key` | kept (the helper never overwrites a key; mode re-set to `0600 root:root`) | kept (`postinst`) | kept (`post_upgrade`) | kept (`%post`; a legacy `%ghost`-owned key is restored by `%posttrans`) |
+| `/var/lib/soos/biometrics` (templates), `/var/lib/soos/evidence` | kept: never read or written; only the directory mode is re-set | kept (not package files) | kept | kept |
+| `/etc/soos/daemon.toml`, `/etc/soos/*disable*` flag files | kept: never written | kept (not package files) | kept | kept |
+| PAM activation (`/etc/pam.d`) | kept: `install.sh` never runs `pam-auth-update` or `authselect select` and never writes `/etc/pam.d` | kept: the `postinst` enables `soos` / `soos-notify` only when the administrator has not disabled them (a profile disabled with `pam-auth-update --disable soos soos-notify` stays disabled) | kept: pacman never edits `/etc/pam.d` | kept: the profile is never selected automatically |
+| Unit enablement | kept (re-enabled; a failed re-run never disables a unit that was enabled before) | kept (`systemctl enable`) | kept | kept |
+| Running daemon | an active unit is restarted on the new binaries and awaited (`scripts/wait_daemon_ready.sh`, exit 70 if not ready) | **not restarted**: run `sudo systemctl restart soos-daemon` | **not restarted**: run `sudo systemctl restart soos-daemon` | try-restarted by `%systemd_postun_with_restart` |
+| Models (`/var/lib/soos/models`) | files with the attested SHA-256 are kept (no download), `manifest.toml` is refreshed | kept | kept | kept |
+| PAM snapshot (`/var/lib/soos/state/pam-backup`) | kept: the pre-install snapshot is never overwritten | n/a | n/a | n/a |
+
+Group ownership under `/var/lib/soos` is not upgrade state: the installers set `root:root`, and systemd
+re-owns the `StateDirectory=soos` tree to the unit's `Group=soos` when the daemon starts (contents and
+modes unchanged: `master.key` stays `0600`, `biometrics/` stays `0700`, so that group gains no access).
+
+### 9.3 Not Preserved (Replaced on Purpose)
+
+- Binaries (`soos-admin`, `soos-enroll`, `soos-gui`, `/usr/libexec/soos/soos-daemon`), `pam_soos.so` and the
+  key helper: replaced atomically (`rename(2)`), so a process that has the old file open keeps it.
+- The unit file: an edit of the installed `soos-daemon.service` is overwritten; customize it with a
+  drop-in (`sudo systemctl edit soos-daemon`).
+- PAM templates: `/usr/share/pam-configs/soos*`, `/etc/authselect/custom/soos/*` and the Arch snippet.
+  On Fedora, when `custom/soos` is the selected profile, regenerate the stacks from the new template with
+  `sudo authselect apply-changes`; on Debian the `postinst` refreshes the enabled profiles (a locally
+  modified `common-*` stack is left untouched with a warning, GitHub #281); on Arch, compare
+  `/usr/share/soos/pam/system-auth.snippet` with the lines integrated by hand.
+- During the restart PAM returns `PAM_IGNORE` and the password prompt is used (fail-safe).
+
+### 9.4 Switching from an `install.sh` Install to a Native Package
+
+`install.sh` puts the unit in `/etc/systemd/system/soos-daemon.service`, which would shadow the package
+unit in `/usr/lib/systemd/system`, and it records a PAM snapshot that only `scripts/uninstall.sh`
+restores. Remove the script install first, keeping the data:
+
+```bash
+sudo ./scripts/uninstall.sh --keep-data            # restores the PAM stack; keeps master.key, templates, evidence, models, /etc/soos
+test ! -e /etc/systemd/system/soos-daemon.service  # removed by uninstall.sh
+sudo dpkg -i target/packages/soos_<version>_<arch>.deb    # or: sudo pacman -U ... / sudo dnf install ./...rpm
+# Re-activate PAM: done by the .deb postinst; Fedora: sudo authselect select custom/soos with-faillock --force;
+# Arch: integrate /usr/share/soos/pam/system-auth.snippet again (Docs/DISTRIBUTION_DEPLOYMENT.md)
+sudo systemctl enable --now soos-daemon
+soos-admin status
+sudo soos-enroll list                              # the kept master.key still decrypts the templates
+```
+
+The reverse switch removes the package first (`sudo dpkg -r soos`, `sudo pacman -R soos` or
+`sudo dnf remove soos`, all of which keep the key and the templates), then runs `sudo ./scripts/install.sh --build --start`.
+
+### 9.5 Evidence
+
+- `tests/docker/systemd_unit_acceptance_test.sh` part 6 (CI job `systemd-unit`): re-runs `install.sh`
+  twice over a live install with activated Debian profiles, an enrolled template and a running daemon;
+  `master.key`, the template, `daemon.toml`, `/etc/pam.d`, `/var/lib/pam` and the PAM snapshot stay
+  byte-identical, the unit stays enabled, and the daemon is restarted on the new binary (new `MainPID`,
+  `/proc/<pid>/exe` not `(deleted)`) and reports `is_healthy`.
+- `tests/docker/test_packages.sh`: a version-bumped `.deb` installed over the package (soos enabled, then
+  soos disabled by the administrator), `pacman -U` and `rpm -U --replacepkgs` reinstalls keep the same
+  state byte-identical (`.deb` on every pull request, RPM and Arch on push to `main`).
+- `tests/invariants/src/upgrade_procedure_contract.rs` (rows UPG1–UPG9).

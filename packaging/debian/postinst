@@ -50,14 +50,37 @@ case "$1" in
         #    and still exits 0. The administrator's edits are kept, but the skip
         #    (or a failure) is reported instead of being silent (GitHub #281);
         #    the package installation itself never fails because of it.
+        #    Upgrade (GitHub #327): a profile pam-auth-update already knows (listed in
+        #    its 'seen' file) but that no state file enables ('Module: <name>') was
+        #    disabled by the administrator (pam-auth-update --disable, or the menu);
+        #    --enable would silently re-enable it. Then only refresh the stack with the
+        #    current selection. 'pam-auth-update --remove' (prerm on removal) drops the
+        #    profiles from 'seen', so a reinstall after removal enables them again.
         if command -v pam-auth-update >/dev/null 2>&1; then
-            if ! pam-auth-update --package --enable soos soos-notify; then
-                echo "soos: WARNING: pam-auth-update failed; facial authentication is not enabled in the PAM stack." >&2
-            fi
-            if [ -f /etc/pam.d/common-auth ] && ! grep -q 'pam_soos\.so' /etc/pam.d/common-auth; then
-                echo "soos: WARNING: /etc/pam.d/common-auth does not call pam_soos.so (locally modified PAM stack?);" >&2
-                echo "soos: WARNING: facial authentication is inactive. Review the stack, then run" >&2
-                echo "soos: WARNING: 'pam-auth-update --enable soos soos-notify' (interactive) or add the rules by hand." >&2
+            PAM_STATE_DIR=/var/lib/pam
+            soos_pam_kept=false
+            for soos_profile in soos soos-notify; do
+                if grep -qsx "${soos_profile}" "${PAM_STATE_DIR}/seen" \
+                        && ! grep -qsx "Module: ${soos_profile}" "${PAM_STATE_DIR}/auth" \
+                            "${PAM_STATE_DIR}/account" "${PAM_STATE_DIR}/password" \
+                            "${PAM_STATE_DIR}/session" "${PAM_STATE_DIR}/session-noninteractive"; then
+                    soos_pam_kept=true
+                fi
+            done
+            if [ "${soos_pam_kept}" = true ]; then
+                echo "soos: keeping the administrator's PAM profile selection (soos or soos-notify is disabled)."
+                if ! pam-auth-update --package; then
+                    echo "soos: WARNING: pam-auth-update failed; the PAM stack was not refreshed." >&2
+                fi
+            else
+                if ! pam-auth-update --package --enable soos soos-notify; then
+                    echo "soos: WARNING: pam-auth-update failed; facial authentication is not enabled in the PAM stack." >&2
+                fi
+                if [ -f /etc/pam.d/common-auth ] && ! grep -q 'pam_soos\.so' /etc/pam.d/common-auth; then
+                    echo "soos: WARNING: /etc/pam.d/common-auth does not call pam_soos.so (locally modified PAM stack?);" >&2
+                    echo "soos: WARNING: facial authentication is inactive. Review the stack, then run" >&2
+                    echo "soos: WARNING: 'pam-auth-update --enable soos soos-notify' (interactive) or add the rules by hand." >&2
+                fi
             fi
         fi
 

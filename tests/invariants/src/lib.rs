@@ -251,6 +251,12 @@ mod presence_unlock_contract;
 #[cfg(all(test, unix))]
 mod presence_followups_contract;
 
+/// Upgrade path of local installs: `install.sh` re-run restarts an active daemon, the `.deb`
+/// `postinst` keeps an administrator's disabled PAM profile, Docker upgrade cases and the
+/// documented procedure (GitHub #327; rows UPG1–UPG9).
+#[cfg(all(test, unix))]
+mod upgrade_procedure_contract;
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,
