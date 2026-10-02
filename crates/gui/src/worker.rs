@@ -32,7 +32,7 @@ pub struct WorkerSharedInput {
     /// Active guided enrollment session.
     pub enrollment_session: Mutex<Option<GuidedEnrollmentSession>>,
     /// Last feedback produced by the enrollment session.
-    pub enrollment_feedback: Mutex<Option<EnrollmentStepFeedback>>,
+    pub enrollment_feedback: Mutex<Option<GuiEnrollmentFeedback>>,
     /// Active reference embedding for live 1-to-1 verification testing: a copy of the enrolled
     /// template embedding, wiped when it is replaced, cleared or dropped (GitHub #298).
     pub match_reference: Mutex<Option<Zeroizing<Vec<f32>>>>,
@@ -112,6 +112,47 @@ pub fn update_live_match_score(shared: &WorkerSharedInput, live: &[f32]) {
     }
 }
 
+/// Feedback shown by the GUI guided enrollment (GitHub #304): the session's own feedback, or
+/// the GUI-level refusal of a frame holding more than one face.
+#[derive(Debug, Clone, PartialEq)]
+pub enum GuiEnrollmentFeedback {
+    /// Feedback of the guided enrollment session.
+    Step(EnrollmentStepFeedback),
+    /// The frame holds several faces: nothing was sampled and the live streak was broken.
+    OneFaceOnly,
+}
+
+impl GuiEnrollmentFeedback {
+    /// User-facing guidance of [`GuiEnrollmentFeedback::OneFaceOnly`]; the session feedback
+    /// texts are rendered by the application.
+    pub const fn message(&self) -> &'static str {
+        match self {
+            Self::OneFaceOnly => "One face only: make sure nobody else is in view of the camera.",
+            Self::Step(_) => "",
+        }
+    }
+}
+
+/// Feeds one analyzed frame to the session and returns the GUI feedback to display.
+///
+/// A frame with more than one face ([`VisionAnalysis::face_count`]) is never sampled and
+/// reports [`GuiEnrollmentFeedback::OneFaceOnly`]; every other frame goes through
+/// [`feed_guided_enrollment`] (GitHub #304).
+pub fn guided_enrollment_feedback(
+    session: &mut GuidedEnrollmentSession,
+    analysis: &VisionAnalysis,
+    frame_width: u32,
+    frame_height: u32,
+    pad_threshold: f32,
+) -> Option<GuiEnrollmentFeedback> {
+    if analysis.face_count() > 1 {
+        session.interrupt_liveness_streak();
+        return Some(GuiEnrollmentFeedback::OneFaceOnly);
+    }
+    feed_guided_enrollment(session, analysis, frame_width, frame_height, pad_threshold)
+        .map(GuiEnrollmentFeedback::Step)
+}
+
 /// Samples per step of a GUI guided enrollment session.
 pub const GUI_GUIDED_SAMPLES_PER_STEP: usize = 4;
 
@@ -125,6 +166,10 @@ pub fn new_guided_enrollment_session() -> GuidedEnrollmentSession {
 }
 
 /// Feeds one analyzed frame to a guided enrollment session.
+///
+/// - Not exactly one face ([`VisionAnalysis::face_count`], GitHub #304): the live streak is
+///   broken and `None` is returned; no PAD verdict, sample or spoof event is taken from it
+///   (the CLI enrollment rejects such frames in `process_frame` too).
 ///
 /// - No usable face (no pose or embedding, no quality verdict): the live streak is broken
 ///   and `None` is returned (nothing new to report), unless the frame carries a spoof PAD
@@ -143,6 +188,10 @@ pub fn feed_guided_enrollment(
     frame_height: u32,
     pad_threshold: f32,
 ) -> Option<EnrollmentStepFeedback> {
+    if analysis.face_count() != 1 {
+        session.interrupt_liveness_streak();
+        return None;
+    }
     if analysis.quality_rejection.is_some() {
         session.interrupt_liveness_streak();
         return Some(EnrollmentStepFeedback::FaceQualityTooLow);
@@ -233,7 +282,7 @@ pub fn spawn_vision_worker(
                                     shared_input.enrollment_session.lock()
                                 {
                                     if let Some(session) = session_guard.as_mut() {
-                                        if let Some(fb) = feed_guided_enrollment(
+                                        if let Some(fb) = guided_enrollment_feedback(
                                             session,
                                             &analysis,
                                             frame.width,
@@ -255,17 +304,15 @@ pub fn spawn_vision_worker(
                                 }
 
                                 let frame_data = LatestFrameData {
-                                    rgb: analysis.rgb.to_vec(),
+                                    // Zeroizing copies (GitHub #314, CAM-NEW-6).
+                                    rgb: analysis.rgb.clone(),
                                     width: frame.width,
                                     height: frame.height,
                                     detections: analysis.detections.clone(),
                                     pad_result: analysis.pad_result.clone(),
                                     pad_live: is_live,
                                     pose: analysis.pose,
-                                    aligned_crop: analysis
-                                        .aligned_crop
-                                        .as_ref()
-                                        .map(|c| c.to_vec()),
+                                    aligned_crop: analysis.aligned_crop.clone(),
                                     pipeline_latency_ms: total_latency,
                                     det_latency_ms: total_latency * 0.45,
                                     pad_latency_ms: total_latency * 0.25,
@@ -290,7 +337,7 @@ pub fn spawn_vision_worker(
                                     frame.format,
                                 ) {
                                     let fallback_frame = LatestFrameData {
-                                        rgb: rgb_buf,
+                                        rgb: Zeroizing::new(rgb_buf),
                                         width: frame.width,
                                         height: frame.height,
                                         detections: Vec::new(),

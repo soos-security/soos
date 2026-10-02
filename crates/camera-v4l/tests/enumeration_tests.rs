@@ -37,6 +37,8 @@ impl FakeProbe {
                 card_name: card.to_string(),
                 video_capture: capture,
                 supported_formats: formats.to_vec(),
+                driver: "uvcvideo".to_string(),
+                device_caps: 0,
             },
         );
         self

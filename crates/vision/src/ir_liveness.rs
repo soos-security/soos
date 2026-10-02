@@ -33,6 +33,7 @@ use std::fmt;
 use soos_camera_v4l::{Frame, PixelFormat, SensorType};
 
 use crate::error::VisionError;
+use zeroize::Zeroizing;
 
 /// Default liveness threshold applied to monochrome (IR) frames.
 ///
@@ -166,12 +167,15 @@ pub fn ir_crop_statistics(
         });
     }
 
-    let luma: Vec<f64> = crop_rgb
-        .as_chunks::<3>()
-        .0
-        .iter()
-        .map(|px| (f64::from(px[0]) + f64::from(px[1]) + f64::from(px[2])) / 3.0)
-        .collect();
+    // Face luma values, wiped on drop (GitHub #313, VIS-NEW-5).
+    let luma: Zeroizing<Vec<f64>> = Zeroizing::new(
+        crop_rgb
+            .as_chunks::<3>()
+            .0
+            .iter()
+            .map(|px| (f64::from(px[0]) + f64::from(px[1]) + f64::from(px[2])) / 3.0)
+            .collect(),
+    );
 
     let count = luma.len() as f64;
     let mean = luma.iter().sum::<f64>() / count;

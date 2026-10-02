@@ -53,6 +53,8 @@ pub struct GuiArgs {
     pub dev_store: Option<PathBuf>,
 
     /// Run with software mock camera and mock neural models (for testing without physical camera).
-    #[arg(long = "mock")]
+    /// Requires `--dev-store`: templates computed by mock models must never reach the system
+    /// store under the production model id (GitHub #314, CAM-NEW-5).
+    #[arg(long = "mock", requires = "dev_store")]
     pub mock: bool,
 }

@@ -194,6 +194,72 @@ pub fn guarded_v4l_drop<T>(value: T) -> std::io::Result<()> {
     guard_v4l_call(move || drop(value))
 }
 
+/// Refuses a device path holding a NUL byte (GitHub #314, CAM-NEW-4).
+///
+/// `v4l` 0.14 unwraps `CString::new` on the path, so such a path (a `camera_device` written
+/// `"/dev/vid\u0000eo0"`) would panic inside the crate; every opener checks it first.
+///
+/// # Errors
+///
+/// `ErrorKind::InvalidInput` when `path` contains a NUL byte.
+pub(crate) fn reject_nul_device_path(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::ffi::OsStrExt as _;
+    if path.as_os_str().as_bytes().contains(&0) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "camera device path contains a NUL byte",
+        ));
+    }
+    Ok(())
+}
+
+/// Opens a V4L2 node (`open(2)`) through the guard (GitHub #314, CAM-NEW-4): NUL bytes are
+/// refused ([`reject_nul_device_path`]), any panic of the call is caught, and the returned
+/// [`GuardedDevice`] closes the descriptor through the guard as well (`Drop for
+/// v4l::device::Handle` unwraps `close(2)`). Used by the enumeration and diagnostics probes;
+/// the capture supervisor opens through `V4lBackend` with the same check.
+///
+/// # Errors
+///
+/// `InvalidInput` for a NUL byte, the `open(2)` error otherwise.
+pub(crate) fn open_device_guarded(path: &Path) -> std::io::Result<GuardedDevice> {
+    reject_nul_device_path(path)?;
+    guard_v4l_call(|| v4l::Device::with_path(path))
+        .and_then(|result| result)
+        .map(DropGuarded::new)
+}
+
+/// An open `v4l::Device` whose descriptor is closed through the guard on drop.
+pub(crate) type GuardedDevice = DropGuarded<v4l::Device>;
+
+/// Owns a `v4l` value (device or anything holding its handle) and drops it through the guard.
+pub(crate) struct DropGuarded<T> {
+    /// Always `Some` until `Drop` takes it.
+    value: Option<T>,
+}
+
+impl<T> DropGuarded<T> {
+    /// Takes ownership of `value`.
+    pub(crate) fn new(value: T) -> Self {
+        Self { value: Some(value) }
+    }
+
+    /// The owned value; `None` only after `Drop` took it, so every caller treats `None` like a
+    /// vanished node instead of panicking.
+    pub(crate) fn get(&self) -> Option<&T> {
+        self.value.as_ref()
+    }
+}
+
+impl<T> Drop for DropGuarded<T> {
+    fn drop(&mut self) {
+        if let Some(value) = self.value.take() {
+            // A failing close(2) is reported by nobody: the descriptor is gone either way.
+            let _ = guarded_v4l_drop(value);
+        }
+    }
+}
+
 /// `VIDIOC_REQBUFS` + `VIDIOC_QUERYBUF` + `mmap` through the guard (the half-built arena is
 /// dropped inside `v4l` on failure, which can panic).
 pub(crate) fn mmap_stream_guarded<'a>(

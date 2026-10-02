@@ -10,16 +10,22 @@
     reason = "Telemetry calculation and GUI coordinate conversions"
 )]
 
-use soos_enrollment_cli::guided_enrollment::{EnrollmentStepFeedback, GuidedEnrollmentSession};
+use soos_enrollment_cli::guided_enrollment::GuidedEnrollmentSession;
 use soos_enrollment_cli::service::EnrolledUserSummary;
 use soos_inference_ort::{FaceDetection, PadResult};
 use soos_vision::pose::HeadPose;
+use zeroize::Zeroizing;
+
+use crate::worker::GuiEnrollmentFeedback;
 
 /// Captured frame telemetry and neural model outputs ready for UI rendering.
-#[derive(Debug, Clone)]
+///
+/// The pixel buffers are zeroizing copies and `Debug` never prints them (GitHub #314,
+/// CAM-NEW-6).
+#[derive(Clone)]
 pub struct LatestFrameData {
     /// RGB24 raw pixel buffer.
-    pub rgb: Vec<u8>,
+    pub rgb: Zeroizing<Vec<u8>>,
     /// Frame width in pixels.
     pub width: u32,
     /// Frame height in pixels.
@@ -34,7 +40,7 @@ pub struct LatestFrameData {
     /// Estimated 3D head rotation pose.
     pub pose: Option<HeadPose>,
     /// 112x112 aligned face crop for preview.
-    pub aligned_crop: Option<Vec<u8>>,
+    pub aligned_crop: Option<Zeroizing<Vec<u8>>>,
     /// Instantaneous pipeline latency in milliseconds.
     pub pipeline_latency_ms: f64,
     /// Detector inference latency in milliseconds.
@@ -45,6 +51,27 @@ pub struct LatestFrameData {
     pub fps: f32,
     /// Monotonic frame sequence counter.
     pub sequence: u64,
+}
+
+impl std::fmt::Debug for LatestFrameData {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LatestFrameData")
+            .field("rgb_len", &self.rgb.len())
+            .field("width", &self.width)
+            .field("height", &self.height)
+            .field("detections", &self.detections)
+            .field("pad_result", &self.pad_result)
+            .field("pad_live", &self.pad_live)
+            .field("pose", &self.pose)
+            .field(
+                "aligned_crop_len",
+                &self.aligned_crop.as_ref().map(|c| c.len()),
+            )
+            .field("pipeline_latency_ms", &self.pipeline_latency_ms)
+            .field("fps", &self.fps)
+            .field("sequence", &self.sequence)
+            .finish_non_exhaustive()
+    }
 }
 
 /// GUI state for guided multi-step face enrollment.
@@ -59,7 +86,7 @@ pub struct EnrollmentGuiState {
     /// Target numeric UID.
     pub target_uid: u32,
     /// Last feedback received from state machine.
-    pub last_feedback: Option<EnrollmentStepFeedback>,
+    pub last_feedback: Option<GuiEnrollmentFeedback>,
     /// Generated composite embedding ready for encryption and storage.
     pub composite_embedding: Option<Vec<f32>>,
     /// Status or error banner message.

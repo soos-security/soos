@@ -16,6 +16,7 @@ use std::borrow::Cow;
 use soos_camera_v4l::PixelFormat;
 
 use crate::error::VisionError;
+use zeroize::Zeroizing;
 
 /// Maximum accepted size of one compressed MJPEG frame (16 MiB).
 ///
@@ -271,9 +272,13 @@ fn decode_mjpeg(
     };
 
     decoder.set_max_decoding_buffer_size(decoded_len);
-    let decoded_bytes = decoder
-        .decode()
-        .map_err(|e| VisionError::ColorConversionFailed(format!("JPEG decode error: {e}")))?;
+    // The decoded pixels are wiped on every path that does not hand them to the caller,
+    // including the L8 buffer after its expansion to RGB24 (GitHub #313, VIS-NEW-5).
+    let mut decoded_bytes = Zeroizing::new(
+        decoder
+            .decode()
+            .map_err(|e| VisionError::ColorConversionFailed(format!("JPEG decode error: {e}")))?,
+    );
 
     if decoded_bytes.len() != decoded_len {
         return Err(VisionError::InvalidBufferSize {
@@ -283,11 +288,11 @@ fn decode_mjpeg(
     }
 
     if !is_grey {
-        return Ok(decoded_bytes);
+        return Ok(std::mem::take(&mut *decoded_bytes));
     }
 
     let mut rgb = Vec::with_capacity(expected_rgb_len);
-    for &grey in &decoded_bytes {
+    for &grey in decoded_bytes.iter() {
         rgb.push(grey);
         rgb.push(grey);
         rgb.push(grey);

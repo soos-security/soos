@@ -12,12 +12,13 @@ use crate::frame::{Frame, PixelFormat};
 use crate::manager::{CameraHealth, CameraManager};
 use crate::resolver::{CameraEnumerator, SystemCameraEnumerator, DEFAULT_BY_ID_DIR};
 use crate::sensor::{
-    classify_sensor_with_hints, device_frame_sizes, has_ir_token, SensorHints, SensorType,
+    classify_sensor_with_hints, device_frame_sizes, has_ir_token, virtual_node_rejection,
+    SensorHints, SensorType,
 };
 use crate::status::{CameraStatus, CameraStatusCell};
 use crate::v4l_guard::{
-    enum_formats_guarded, guarded_v4l_drop, mmap_stream_guarded, query_caps_guarded,
-    set_format_guarded,
+    enum_formats_guarded, guard_v4l_call, guarded_v4l_drop, mmap_stream_guarded,
+    query_caps_guarded, reject_nul_device_path, set_format_guarded, DropGuarded,
 };
 use arc_swap::ArcSwapOption;
 use std::panic::{self, AssertUnwindSafe};
@@ -59,6 +60,10 @@ struct NodeCapabilities {
     card: String,
     /// Whether the node advertises `V4L2_CAP_VIDEO_CAPTURE`.
     video_capture: bool,
+    /// Driver name, checked by [`virtual_node_rejection`] (GitHub #307).
+    driver: String,
+    /// `v4l2_capability.device_caps`, checked by [`virtual_node_rejection`].
+    device_caps: u32,
 }
 
 /// Device operations below the capture supervisor (GitHub #198, CAM-16).
@@ -110,8 +115,12 @@ struct V4lBackend;
 impl CaptureBackend for V4lBackend {
     type Device = v4l::Device;
 
+    // Guarded open (GitHub #314, CAM-NEW-4): a NUL byte in the path is an `InvalidInput`
+    // error instead of a `v4l` panic (`CString::new(..).unwrap()`), and any other panic of the
+    // call is caught. `open_and_stream` closes the device through the guard.
     fn open_device(&self, path: &Path) -> std::io::Result<v4l::Device> {
-        v4l::Device::with_path(path)
+        reject_nul_device_path(path)?;
+        guard_v4l_call(|| v4l::Device::with_path(path)).and_then(|result| result)
     }
 }
 
@@ -124,6 +133,8 @@ impl CaptureDevice for v4l::Device {
     fn capabilities(&self) -> std::io::Result<NodeCapabilities> {
         query_caps_guarded(self).map(|caps| NodeCapabilities {
             video_capture: caps.capabilities.contains(Flags::VIDEO_CAPTURE),
+            device_caps: caps.capabilities.bits(),
+            driver: caps.driver,
             card: caps.card,
         })
     }
@@ -203,7 +214,9 @@ fn decode_health(raw: u8) -> CameraHealth {
 fn warrants_reresolution(err: &CameraError) -> bool {
     matches!(
         err,
-        CameraError::DeviceNotFound { .. } | CameraError::UnsupportedCapability { .. }
+        CameraError::DeviceNotFound { .. }
+            | CameraError::UnsupportedCapability { .. }
+            | CameraError::VirtualDevice { .. }
     )
 }
 
@@ -758,9 +771,20 @@ fn open_and_stream<B: CaptureBackend>(
     last_activity: &Arc<RwLock<Instant>>,
     health: &AtomicU8,
 ) -> Result<SupervisorAction, CameraError> {
-    let device = backend
-        .open_device(&config.device_path)
-        .map_err(|e| CameraError::from_io_error(config.device_path.clone(), e))?;
+    // The device is closed through the `v4l` guard on every return path (GitHub #314): `Drop
+    // for v4l::device::Handle` unwraps `close(2)`. It is declared before the stream, so it is
+    // dropped after it.
+    let opened = DropGuarded::new(
+        backend
+            .open_device(&config.device_path)
+            .map_err(|e| CameraError::from_io_error(config.device_path.clone(), e))?,
+    );
+    let device = opened.get().ok_or_else(|| {
+        CameraError::from_io_error(
+            config.device_path.clone(),
+            std::io::Error::from_raw_os_error(libc::ENODEV),
+        )
+    })?;
 
     // Guarded in production (`V4lBackend`): a `v4l` panic becomes this error (GitHub #287).
     let caps = device
@@ -774,6 +798,23 @@ fn open_and_stream<B: CaptureBackend>(
         return Err(CameraError::UnsupportedCapability {
             path: config.device_path.clone(),
         });
+    }
+
+    // A virtual or output-capable node lets a local process inject frames (GitHub #307): it
+    // is refused, explicit `camera_device` included, unless the deployment opted in.
+    if let Some(rejection) = virtual_node_rejection(&caps.driver, caps.device_caps) {
+        if !config.allow_virtual_device {
+            return Err(CameraError::VirtualDevice {
+                path: config.device_path.clone(),
+                reason: rejection.description(),
+            });
+        }
+        warn!(
+            "Opening '{}' although it is not a physical camera ({}): allow_virtual_camera is \
+             set; never use this outside a test setup",
+            config.device_path.display(),
+            rejection.as_str()
+        );
     }
 
     // Query hardware-supported formats via VIDIOC_ENUM_FMT

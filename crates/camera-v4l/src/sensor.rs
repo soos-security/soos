@@ -305,11 +305,80 @@ pub(crate) fn device_frame_sizes(
 
 /// Opens `path` and enumerates its frame sizes (empty on any error).
 pub(crate) fn frame_sizes_at(path: &std::path::Path) -> Vec<(u32, u32)> {
-    let Ok(device) = v4l::Device::with_path(path) else {
+    let Ok(guarded) = crate::v4l_guard::open_device_guarded(path) else {
         return Vec::new();
     };
-    let fourccs = crate::v4l_guard::enum_formats_guarded(&device, path);
-    device_frame_sizes(&device, path, &fourccs)
+    let Some(device) = guarded.get() else {
+        return Vec::new();
+    };
+    let fourccs = crate::v4l_guard::enum_formats_guarded(device, path);
+    device_frame_sizes(device, path, &fourccs)
+}
+
+/// Driver names (`v4l2_capability.driver`, compared trimmed and case-insensitively) of
+/// virtual capture devices whose frames any local process can write: v4l2loopback (which
+/// reports `"v4l2 loopback"`) and the vivid test driver (GitHub #307, CAM-NEW-3).
+pub const VIRTUAL_CAPTURE_DRIVERS: [&str; 3] = ["v4l2 loopback", "v4l2loopback", "vivid"];
+
+/// `device_caps` bits of a node that accepts frames from user space: `VIDEO_OUTPUT`,
+/// `VBI_OUTPUT`, `SLICED_VBI_OUTPUT`, `VIDEO_OUTPUT_OVERLAY`, `VIDEO_OUTPUT_MPLANE`,
+/// `SDR_OUTPUT` and `META_OUTPUT`.
+pub const V4L2_OUTPUT_CAPABLE_CAPS: u32 =
+    0x0000_0002 | 0x0000_0020 | 0x0000_0080 | 0x0000_0200 | 0x0000_2000 | 0x0040_0000 | 0x0800_0000;
+
+/// `device_caps` bits of a memory-to-memory node (`VIDEO_M2M_MPLANE`, `VIDEO_M2M`): its
+/// "capture" queue returns what user space wrote to its output queue.
+pub const V4L2_MEM_TO_MEM_CAPS: u32 = 0x0000_4000 | 0x0000_8000;
+
+/// Why a V4L2 node is never used as a biometric camera (GitHub #307, CAM-NEW-3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum VirtualNodeRejection {
+    /// Memory-to-memory node (`VIDEO_M2M` / `VIDEO_M2M_MPLANE`).
+    MemToMem,
+    /// The node also accepts frames from user space (an output capability bit).
+    OutputCapable,
+    /// The driver is a virtual capture driver ([`VIRTUAL_CAPTURE_DRIVERS`]).
+    VirtualDriver,
+}
+
+impl VirtualNodeRejection {
+    /// Stable snake_case label (`soos-admin camera list` status).
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::MemToMem => "rejected_mem_to_mem",
+            Self::OutputCapable => "rejected_output_capable",
+            Self::VirtualDriver => "rejected_virtual_driver",
+        }
+    }
+
+    /// Human-readable reason, used in logs and errors.
+    pub const fn description(self) -> &'static str {
+        match self {
+            Self::MemToMem => "memory-to-memory node (its frames come from user space)",
+            Self::OutputCapable => "the node accepts frames written by user space (output capability)",
+            Self::VirtualDriver => {
+                "virtual capture driver (v4l2loopback or vivid): any local process can inject frames"
+            }
+        }
+    }
+}
+
+/// Returns why a node with `driver` and `device_caps` must not be used as a biometric camera,
+/// or `None` for a real capture device. Applied by the enumeration (auto-selection and
+/// re-resolution), the diagnostics and, unless `CameraConfig::allow_virtual_device` is set,
+/// the capture supervisor when it opens any device, explicit or not.
+pub fn virtual_node_rejection(driver: &str, device_caps: u32) -> Option<VirtualNodeRejection> {
+    if device_caps & V4L2_MEM_TO_MEM_CAPS != 0 {
+        return Some(VirtualNodeRejection::MemToMem);
+    }
+    if device_caps & V4L2_OUTPUT_CAPABLE_CAPS != 0 {
+        return Some(VirtualNodeRejection::OutputCapable);
+    }
+    let driver = driver.trim();
+    VIRTUAL_CAPTURE_DRIVERS
+        .iter()
+        .any(|virtual_driver| driver.eq_ignore_ascii_case(virtual_driver))
+        .then_some(VirtualNodeRejection::VirtualDriver)
 }
 
 /// Sysfs directory listing the V4L2 device nodes.
@@ -330,6 +399,11 @@ pub struct V4lNodeCapabilities {
     pub video_capture: bool,
     /// Pixel formats the node can deliver (unknown FourCCs removed, deep greyscale as `Grey`).
     pub supported_formats: Vec<PixelFormat>,
+    /// Driver name (`v4l2_capability.driver`), checked against [`VIRTUAL_CAPTURE_DRIVERS`].
+    pub driver: String,
+    /// Capabilities of this node (`v4l2_capability.device_caps`), checked for output and
+    /// memory-to-memory bits (GitHub #307).
+    pub device_caps: u32,
 }
 
 /// Queries the capabilities of one V4L2 node.
@@ -348,17 +422,20 @@ pub struct SystemV4lNodeProbe;
 
 impl V4lNodeProbe for SystemV4lNodeProbe {
     fn probe(&self, dev_path: &Path) -> Option<V4lNodeCapabilities> {
-        let dev = v4l::Device::with_path(dev_path).ok()?;
+        // Guarded open: a NUL byte in the path is refused instead of panicking in `v4l`, and
+        // the descriptor is closed through the guard (GitHub #314, CAM-NEW-4).
+        let guarded = crate::v4l_guard::open_device_guarded(dev_path).ok()?;
+        let dev = guarded.get()?;
         // `v4l` 0.14 panics on non-UTF-8 capability strings: such a node is skipped like any
         // node whose ioctls fail, instead of unwinding through the daemon (GitHub #287).
-        let caps = crate::v4l_guard::query_caps_guarded(&dev).ok()?;
+        let caps = crate::v4l_guard::query_caps_guarded(dev).ok()?;
         let video_capture = caps
             .capabilities
             .contains(v4l::capability::Flags::VIDEO_CAPTURE);
         // Deep-greyscale IR formats (Y8I, Y10, Y12, Y16) are delivered as Grey, so Y16-only IR
         // nodes stay visible (GitHub #195).
         let supported_formats = if video_capture {
-            let fourccs = crate::v4l_guard::enum_formats_guarded(&dev, dev_path);
+            let fourccs = crate::v4l_guard::enum_formats_guarded(dev, dev_path);
             crate::deep_grey::delivered_formats(&fourccs)
         } else {
             Vec::new()
@@ -367,6 +444,8 @@ impl V4lNodeProbe for SystemV4lNodeProbe {
             card_name: caps.card,
             video_capture,
             supported_formats,
+            driver: caps.driver,
+            device_caps: caps.capabilities.bits(),
         })
     }
 }
@@ -408,8 +487,10 @@ pub(crate) fn scan_video_node_names(sysfs_dir: &Path) -> Vec<String> {
 /// Only `video<N>` entries are considered, in numeric order, at most [`MAX_SYSFS_ENTRIES`]
 /// entries are read and at most [`MAX_VIDEO_NODES`] nodes are probed. A node is listed only
 /// when it advertises `V4L2_CAP_VIDEO_CAPTURE` **and** at least one decodable pixel format, so
-/// uvcvideo metadata nodes and codec nodes are never candidates. A missing or unreadable
-/// `sysfs_dir` yields an empty list.
+/// uvcvideo metadata nodes and codec nodes are never candidates, and when
+/// [`virtual_node_rejection`] accepts it: virtual drivers (v4l2loopback, vivid) and nodes with
+/// an output or memory-to-memory capability are never auto-selected (GitHub #307). A missing
+/// or unreadable `sysfs_dir` yields an empty list.
 pub fn enumerate_capture_devices_with(
     sysfs_dir: &Path,
     dev_dir: &Path,
@@ -421,6 +502,14 @@ pub fn enumerate_capture_devices_with(
             let path = dev_dir.join(name);
             let caps = probe.probe(&path)?;
             if !caps.video_capture || caps.supported_formats.is_empty() {
+                return None;
+            }
+            if let Some(rejection) = virtual_node_rejection(&caps.driver, caps.device_caps) {
+                tracing::debug!(
+                    node = %path.display(),
+                    reason = rejection.as_str(),
+                    "Skipping V4L2 node that is not a physical camera"
+                );
                 return None;
             }
             Some(CameraDeviceInfo {

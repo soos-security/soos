@@ -12,8 +12,10 @@ use crate::error::InferenceError;
 
 /// Upper bound on the size of a model file read into memory for attestation (512 MiB).
 ///
-/// The largest attested model (ArcFace ResNet34) is 136.6 MB; the bound leaves headroom for a
-/// future model while keeping the verified in-memory read bounded (GitHub #246).
+/// The largest shipped model (SFace 2021dec) is 38.7 MB and the largest attested one, the
+/// retired ArcFace ResNet34 (evaluation only, never loaded at runtime), 136.6 MB; the bound
+/// leaves headroom for a future model while keeping the verified in-memory read bounded
+/// (GitHub #246).
 pub const MAX_MODEL_FILE_BYTES: u64 = 512 * 1024 * 1024;
 
 /// Manifest file metadata header.

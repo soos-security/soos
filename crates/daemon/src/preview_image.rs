@@ -11,12 +11,17 @@
 //!   wide: greyscale stays greyscale (wire format 1), every colour format becomes RGB24
 //!   (wire format 0);
 //! - a frame that cannot be converted (truncated buffer, undecodable MJPEG, zero dimension)
-//!   yields an explicit empty image ([`PREVIEW_FORMAT_EMPTY`]), never an error.
+//!   yields an explicit empty image ([`PREVIEW_FORMAT_EMPTY`]), never an error;
+//! - a frame stamped [`SensorType::Infrared`] is always sent as greyscale (wire format 1), the
+//!   luma of its pixels, whatever the pixel format its node streams (GitHub #305). The
+//!   `PreviewResponse` carries no sensor field, so this is how the IR stamp reaches the GUI:
+//!   a greyscale preview takes the Monochrome PAD path (IR gate and stricter IR threshold,
+//!   GitHub #169) instead of the colour path.
 //!
 //! Only preview-authorized peers ever receive the result (see [`crate::preview`]); no pixel
 //! data is logged, and every intermediate buffer is zeroized.
 
-use soos_camera_v4l::{Frame, PixelFormat};
+use soos_camera_v4l::{Frame, PixelFormat, SensorType};
 use soos_protocol::types::MAX_PREVIEW_MESSAGE_SIZE;
 use zeroize::{Zeroize, Zeroizing};
 
@@ -77,6 +82,22 @@ pub const fn wire_format_code(format: PixelFormat) -> u8 {
 
 /// Builds the preview payload of `frame` (see the module documentation for the rules).
 pub fn preview_image_for_frame(frame: &Frame) -> PreviewImage {
+    if frame.sensor_type == SensorType::Infrared && frame.format != PixelFormat::Grey {
+        // IR stamp (GitHub #305): convert to greyscale first, then apply the usual rules to
+        // the greyscale frame. The intermediate frame is zeroized on drop (`Drop for Frame`).
+        return match infrared_luma(frame) {
+            Some(mut luma) => preview_image_for_frame(&Frame {
+                data: std::mem::take(&mut *luma),
+                width: frame.width,
+                height: frame.height,
+                timestamp_mono_ns: frame.timestamp_mono_ns,
+                format: PixelFormat::Grey,
+                sequence: frame.sequence,
+                sensor_type: SensorType::Infrared,
+            }),
+            None => PreviewImage::empty(),
+        };
+    }
     // A compressed MJPEG frame that fits the budget is forwarded as-is whatever its width:
     // decoding it at the preview poll rate would cost far more than sending it.
     let narrow_enough = frame.width <= MAX_PREVIEW_WIDTH || frame.format == PixelFormat::Mjpeg;
@@ -89,6 +110,55 @@ pub fn preview_image_for_frame(frame: &Frame) -> PreviewImage {
         };
     }
     downscale(frame).unwrap_or_else(PreviewImage::empty)
+}
+
+/// Extracts the 8-bit luma plane (`width * height` bytes) of a colour-format frame: the `Y`
+/// samples of YUYV and NV12, BT.601 luma of RGB24 and of decoded MJPEG. `None` when the
+/// buffer is too short for the geometry or the MJPEG frame cannot be decoded.
+fn infrared_luma(frame: &Frame) -> Option<Zeroizing<Vec<u8>>> {
+    let width = usize::try_from(frame.width).ok()?;
+    let height = usize::try_from(frame.height).ok()?;
+    let pixels = width.checked_mul(height)?;
+    if pixels == 0 {
+        return None;
+    }
+    let data = frame.data.as_slice();
+    let luma: Zeroizing<Vec<u8>> = Zeroizing::new(match frame.format {
+        PixelFormat::Grey => data.get(..pixels)?.to_vec(),
+        PixelFormat::Yuyv => data
+            .get(..pixels.checked_mul(2)?)?
+            .iter()
+            .step_by(2)
+            .copied()
+            .collect(),
+        PixelFormat::Nv12 => data.get(..pixels)?.to_vec(),
+        PixelFormat::Rgb24 => rgb_luma(data.get(..pixels.checked_mul(3)?)?),
+        PixelFormat::Mjpeg => {
+            let rgb = Zeroizing::new(
+                soos_vision::convert_to_rgb(&frame.data, frame.width, frame.height, frame.format)
+                    .ok()?,
+            );
+            rgb_luma(rgb.get(..pixels.checked_mul(3)?)?)
+        }
+    });
+    (luma.len() == pixels).then_some(luma)
+}
+
+/// BT.601 luma of packed RGB24 pixels (`(77 R + 150 G + 29 B + 128) >> 8`).
+#[allow(
+    clippy::arithmetic_side_effects,
+    reason = "u8 inputs widened to u32 and multiplied by constants summing to 256: the \
+              largest intermediate value is 65,408"
+)]
+fn rgb_luma(rgb: &[u8]) -> Vec<u8> {
+    rgb.as_chunks::<3>()
+        .0
+        .iter()
+        .map(|&[r, g, b]| {
+            let y = (77 * u32::from(r) + 150 * u32::from(g) + 29 * u32::from(b) + 128) >> 8;
+            u8::try_from(y).unwrap_or(u8::MAX)
+        })
+        .collect()
 }
 
 /// Source layout validated against the buffer length before any sampling.

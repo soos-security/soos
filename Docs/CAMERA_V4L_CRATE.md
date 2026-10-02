@@ -16,7 +16,7 @@ When an authentication request arrives, consumer vision pipelines query `latest_
 4. **Auto-Exposure Warmup Discard (Criterion C5)**: Discards the first 15–30 frames (default 20) during startup to let sensor auto-exposure and white balance stabilize before advertising `is_ready() == true`.
 5. **Idle Power Management**: Automatically drops capture rate to 5 FPS after 60 seconds of inactivity to conserve CPU and camera thermals. Restores full capture rate immediately upon `notify_activity()`.
 6. **Error Recovery with Bounded Backoff (Criterion C3 & C7)**: Handles `ENODEV`, `EBUSY`, and `EIO` without crashing. Uses exponential backoff (100ms → 200ms → 400ms → cap at 5,000ms) with fail-closed availability reporting. Seamlessly re-initializes and warms up when a hot-unplugged device is reconnected.
-7. **Hardware-Free Mocking (Criterion C1)**: Provides `MockCameraManager` behind the `mock-camera` feature flag for testing in headless CI and Docker environments.
+7. **Hardware-Free Mocking (Criterion C1)**: Provides `MockCameraManager` for testing in headless CI and Docker environments. It is compiled unconditionally (it is part of the public API used by `soos-enroll --mock` and `soos-gui --mock`); the `mock-camera` Cargo feature exists but gates nothing (GitHub #314, S1).
 8. **Automatic Format Negotiation (Criterion C6)**: Discovers device capabilities via `VIDIOC_ENUM_FMT` and automatically negotiates capture format across preference priority `RGB24 -> YUYV -> NV12 -> MJPEG -> Grey` with graceful fallback. `plan_capture` classifies the opened node with `classify_sensor`; on an `Infrared` node auto negotiation prefers `Grey`, and every captured `Frame` is stamped with the node's `SensorType` (`Frame::sensor_type`, GitHub #169) so the IR PAD policy applies even when an IR node streams a colour format.
 9. **Dual-Sensor Device Discrimination (Criterion C8)**: Distinguishes RGB color sensors from Infrared sensors (e.g. on ThinkPad dual-camera laptops) and selects according to `sensor_preference`. The code default is `SensorPreference::PreferIr` (`CameraConfig::default`, also the `soos-enroll` default); `PreferRgb` and `Any` are explicit overrides. Grey frames and every frame tagged `SensorType::Infrared` are subject to the format-aware PAD policy of `soos-vision` (GitHub #169, see "IR Sensors and Emitter Requirements" below).
 10. **Device Re-Resolution (CSH1–CSH4, GitHub #151)**: `V4lCameraManager::spawn_with_resolver` takes a `DevicePathResolver` (any `Fn() -> Option<PathBuf> + Send + Sync`) that the supervisor consults once per backoff period after `DeviceNotFound` / `UnsupportedCapability`, so a camera re-enumerated under a new `/dev/videoN` (suspend, replug, boot race) is reopened without a restart. `V4lCameraManager::spawn` never substitutes the configured path. `stable_device_path` maps an enumerated node to its `/dev/v4l/by-id/...` link by delegating to the resolver's single bounded by-id scanner (`SystemCameraEnumerator::by_id_aliases`, `MAX_BY_ID_ENTRIES`).
@@ -92,6 +92,8 @@ Configures:
   `Duration::ZERO` disables both auto-standby and the idle throttle
 - `warmup_frames`: Discarded startup frames (default: 20). This is the library default: `soos-daemon` does not use this default: it runs with `DAEMON_DEFAULT_WARMUP_FRAMES` (0, `crates/daemon/src/config.rs`) whether or not `/etc/soos/daemon.toml` exists, unless `[pipeline] warmup_frames` is set (GitHub #205, `Docs/DAEMON.md` §1.4)
 - `min_backoff` & `max_backoff`: Error backoff limits (default: 100ms to 5s)
+- `allow_virtual_device`: Opt-in to open a virtual or output-capable node (default: false);
+  set from `[pipeline] allow_virtual_camera` (GitHub #307, see "Virtual and Output-Capable Nodes")
 
 These are the `CameraConfig::default()` / `CameraConfigBuilder` values. `soos-daemon` builds its
 camera configuration from `/etc/soos/daemon.toml`: a `[pipeline]` section without `warmup_frames`
@@ -312,7 +314,10 @@ explicit)` and `probe_camera_node(path, aliases, &dyn V4lDeviceProbe)`:
   `VIDIOC_ENUM_FRAMESIZES`: no format is set, no buffer is mapped, no frame is read (enforced by
   the invariant `tests/invariants/src/camera_diagnostics_contract.rs`).
 - Every `video<N>` node listed in sysfs is reported (same bounded scan as the enumeration), each
-  with a `NodeStatus`: `candidate`, `not_video_capture`, `no_decodable_format` or `probe_failed`.
+  with a `NodeStatus`: `candidate`, `not_video_capture`, `no_decodable_format`, `probe_failed`,
+  or `Rejected(VirtualNodeRejection)` rendered as `rejected_virtual_driver`,
+  `rejected_output_capable` or `rejected_mem_to_mem` (see "Virtual and Output-Capable Nodes"
+  below; GitHub #307). A rejected node is never a candidate.
   At most `MAX_DIAGNOSTIC_FOURCCS` (64) fourccs and `MAX_FRAME_SIZE_HINTS` frame sizes are kept;
   driver-supplied strings are cut to `MAX_V4L_TEXT_CHARS` (32) and control characters or
   bidirectional overrides are replaced (`sanitize_v4l_text`, `sanitize_display_text`), because a
@@ -397,6 +402,48 @@ neither Tokio nor ONNX Runtime (only `toml`, already locked by `soos-daemon`).
 Tests: `daemon_config_reader_tests::*` (this crate), `camera_config_shared_reader_tests::*`
 (admin), `daemon_config_shared_reader_tests::*` (enrollment), invariant
 `tests/invariants/src/diagnostics_parity_contract.rs` (matrix DGP4–DGP7).
+
+### Virtual and Output-Capable Nodes (`sensor.rs`, GitHub #307, CAM-NEW-3)
+
+A v4l2loopback node streaming `GREY` is classified `Infrared` and would win under `PreferIr`,
+or be adopted on re-resolution after the real camera disappeared: any local process able to
+write to the loopback could then inject frames. `virtual_node_rejection(driver, device_caps)`
+refuses, in this order:
+
+| Reason (`VirtualNodeRejection`) | Rule | `soos-admin camera list` status |
+|---|---|---|
+| `MemToMem` | `device_caps & V4L2_MEM_TO_MEM_CAPS` (`VIDEO_M2M`, `VIDEO_M2M_MPLANE`) | `rejected_mem_to_mem` |
+| `OutputCapable` | `device_caps & V4L2_OUTPUT_CAPABLE_CAPS` (`VIDEO_OUTPUT`, `VBI_OUTPUT`, `SLICED_VBI_OUTPUT`, `VIDEO_OUTPUT_OVERLAY`, `VIDEO_OUTPUT_MPLANE`, `SDR_OUTPUT`, `META_OUTPUT`) | `rejected_output_capable` |
+| `VirtualDriver` | `driver` (trimmed, case-insensitive) in `VIRTUAL_CAPTURE_DRIVERS` = `v4l2 loopback`, `v4l2loopback`, `vivid` (v4l2loopback with `exclusive_caps=1` hides its output bit) | `rejected_virtual_driver` |
+
+- `V4lNodeCapabilities` carries `driver` and `device_caps`; `enumerate_capture_devices_with` drops
+  rejected nodes (debug log with the node and the reason), so auto-selection and re-resolution
+  never see them. The diagnostics apply the same rule and report the reason.
+- The capture supervisor checks every node it opens, an explicit `camera_device` included: a
+  rejected node fails with `CameraError::VirtualDevice { path, reason }` (`UnsupportedDevice`
+  kind, retried with backoff, re-resolution consulted) unless `CameraConfig::allow_virtual_device`
+  is set. The opt-in is `[pipeline] allow_virtual_camera = true` in `/etc/soos/daemon.toml`
+  (boolean, `false` when absent or mistyped), read by the shared reader
+  (`DaemonCameraConfig::allow_virtual_camera`) and honoured by `soos-gui` direct mode; with it the
+  supervisor logs a warning and streams. ADR 2026-10-02 "Virtual V4L2 Nodes Are Never Biometric
+  Cameras".
+- Tests: `gcv_review_tests::*` (rule, enumeration, diagnostics, opt-in),
+  `supervisor_tests::test_gcv_explicit_loopback_node_is_refused_without_opt_in`,
+  `supervisor_tests::test_gcv_output_capable_node_is_refused`,
+  `supervisor_tests::test_gcv_virtual_node_streams_with_explicit_opt_in`.
+
+### NUL Bytes in Device Paths (`v4l_guard.rs`, GitHub #314, CAM-NEW-4)
+
+`v4l` 0.14 `Device::with_path` unwraps `CString::new`, so a `camera_device` holding a NUL byte
+used to panic the probe or the capture supervisor (camera `Dead` until restart). Every node is now
+opened through `v4l_guard::open_device_guarded`: a NUL byte is `ErrorKind::InvalidInput`, the call
+runs inside the panic guard, and the returned `GuardedDevice` closes the descriptor through the
+guard (`Drop for v4l::device::Handle` unwraps `close(2)`). The shared `daemon.toml` reader ignores
+such a `camera_device` like a mistyped key (listed in `mistyped_keys`, auto-detection applies).
+The capture supervisor opens through `V4lBackend::open_device` (same NUL check, call inside the
+guard) and closes through `DropGuarded`. The invariant
+`tests/invariants/src/gcv_review_contract.rs` forbids any other `Device::with_path` /
+`Device::new` in the crate.
 
 ### `v4l` 0.14 Panic Guard (`v4l_guard.rs`, GitHub #287)
 
@@ -533,4 +580,6 @@ while frames are captured.
 | **CAG1–CAG2** | A plain `/dev/videoN` capture path takes its by-id alias name, bounded, never downgrading Infrared (GitHub #289) | `supervisor_alias_hint_tests::*` | ✅ Verified |
 | **CAG3** | Panics caught by the `v4l` guard stay out of the process panic hook; other panics still reach it (GitHub #289) | `v4l_panic_hook_filter_tests::*` | ✅ Verified |
 | **CAG4** | Stream creation / teardown panics become recoverable errors (GitHub #289) | `v4l_teardown_guard_tests::*` | ✅ Verified |
+| **GCV4–GCV6** | Virtual / output-capable / M2M nodes never auto-selected, reported rejected with a reason, explicit device refused unless `allow_virtual_camera` (GitHub #307) | `gcv_review_tests::test_gcv_loopback_grey_node_is_not_enumerated_and_uvc_is_chosen`, `supervisor_tests::test_gcv_explicit_loopback_node_is_refused_without_opt_in` (and siblings) | ✅ Verified |
+| **GCV14** | NUL byte in a device path is an error, never a `v4l` panic (GitHub #314) | `gcv_review_tests::test_gcv_nul_byte_device_path_never_panics`, `gcv_review_tests::test_gcv_nul_byte_camera_device_is_refused_at_config_load` | ✅ Verified |
 | **CCB1–CCB15** | Hermetic supervisor state machine through the capture-backend seam: backoff, busy, sensor stamps, `Starved`, `ENODEV` re-resolution, idle suspend, teardown panic, shutdown; bounded frame-size and format enumeration (GitHub #198) | `supervisor_tests::*`, `v4l_guard::test_ccb_endless_enumeration_is_truncated_at_the_bound` (and siblings) | ✅ Verified |

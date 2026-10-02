@@ -55,6 +55,8 @@ pub enum DaemonConfigKey {
     CameraDevice,
     /// `[pipeline] sensor_preference` (a string of the shared vocabulary).
     SensorPreference,
+    /// `[pipeline] allow_virtual_camera` (a boolean, `false` by default; GitHub #307).
+    AllowVirtualCamera,
 }
 
 impl DaemonConfigKey {
@@ -64,6 +66,7 @@ impl DaemonConfigKey {
         match self {
             Self::CameraDevice => "camera_device",
             Self::SensorPreference => "sensor_preference",
+            Self::AllowVirtualCamera => "allow_virtual_camera",
         }
     }
 
@@ -72,6 +75,7 @@ impl DaemonConfigKey {
         match self {
             Self::CameraDevice => "auto-detection",
             Self::SensorPreference => "prefer_ir",
+            Self::AllowVirtualCamera => "false",
         }
     }
 }
@@ -108,8 +112,14 @@ pub struct DaemonCameraConfig {
     /// The keys that apply (a mistyped key is `None` here).
     pub settings: DaemonCameraSettings,
     /// Keys present with the wrong TOML type, in file-independent order (`camera_device`
-    /// first); each one fell back to its default.
+    /// first); each one fell back to its default. A `camera_device` string holding a NUL byte
+    /// is listed here too: no path can contain one (GitHub #314, CAM-NEW-4).
     pub mistyped_keys: Vec<DaemonConfigKey>,
+    /// `[pipeline] allow_virtual_camera`: opt-in to open a node that is not a physical camera
+    /// (v4l2loopback, vivid, output or memory-to-memory capability). `false` when absent or
+    /// mistyped (fail closed; GitHub #307, ADR 2026-10-02 "Virtual V4L2 Nodes Are Never
+    /// Biometric Cameras"). Feeds `CameraConfig::allow_virtual_device`.
+    pub allow_virtual_camera: bool,
 }
 
 impl DaemonCameraConfig {
@@ -158,6 +168,11 @@ pub fn read_daemon_camera_config(path: &Path) -> Result<DaemonCameraConfig, Daem
     let mut config = DaemonCameraConfig::default();
     match pipeline.get(DaemonConfigKey::CameraDevice.name()) {
         None => {}
+        // A NUL byte would reach `open(2)` through `v4l`, which panics on it (GitHub #314):
+        // the key is ignored like a mistyped one.
+        Some(toml::Value::String(device)) if device.contains('\0') => {
+            config.mistyped_keys.push(DaemonConfigKey::CameraDevice);
+        }
         Some(toml::Value::String(device)) => {
             config.settings.camera_device = Some(PathBuf::from(device));
         }
@@ -171,6 +186,13 @@ pub fn read_daemon_camera_config(path: &Path) -> Result<DaemonCameraConfig, Daem
                 config.settings.sensor_preference.is_none();
         }
         Some(_) => config.mistyped_keys.push(DaemonConfigKey::SensorPreference),
+    }
+    match pipeline.get(DaemonConfigKey::AllowVirtualCamera.name()) {
+        None => {}
+        Some(toml::Value::Boolean(allow)) => config.allow_virtual_camera = *allow,
+        Some(_) => config
+            .mistyped_keys
+            .push(DaemonConfigKey::AllowVirtualCamera),
     }
     Ok(config)
 }

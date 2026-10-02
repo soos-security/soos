@@ -36,6 +36,12 @@ pub struct CameraConfig {
     pub min_backoff: Duration,
     /// Maximum ceiling for exponential backoff delay.
     pub max_backoff: Duration,
+    /// Opt-in to open a node that is not a physical camera (v4l2loopback, vivid, output or
+    /// memory-to-memory capability). `false` by default: such a node is refused with
+    /// [`crate::CameraError::VirtualDevice`] even when configured explicitly (GitHub #307,
+    /// ADR 2026-10-02 "Virtual V4L2 Nodes Are Never Biometric Cameras"). Set from
+    /// `[pipeline] allow_virtual_camera` of `/etc/soos/daemon.toml`.
+    pub allow_virtual_device: bool,
 }
 
 impl Default for CameraConfig {
@@ -53,6 +59,7 @@ impl Default for CameraConfig {
             warmup_frames: 20,
             min_backoff: Duration::from_millis(100),
             max_backoff: Duration::from_secs(5),
+            allow_virtual_device: false,
         }
     }
 }
@@ -157,6 +164,12 @@ impl CameraConfigBuilder {
     pub fn backoff_limits(mut self, min: Duration, max: Duration) -> Self {
         self.config.min_backoff = min;
         self.config.max_backoff = max.max(min);
+        self
+    }
+
+    /// Allows (or refuses, the default) a node that is not a physical camera (GitHub #307).
+    pub fn allow_virtual_device(mut self, allow: bool) -> Self {
+        self.config.allow_virtual_device = allow;
         self
     }
 

@@ -94,6 +94,7 @@ impl CameraError {
                 .map_or(CameraErrorKind::Io, CameraErrorKind::from_os_code),
             Self::QueryCapabilities { .. }
             | Self::UnsupportedCapability { .. }
+            | Self::VirtualDevice { .. }
             | Self::SetFormat { .. }
             | Self::NoSupportedFormats
             | Self::NoCompatibleFormat { .. } => CameraErrorKind::UnsupportedDevice,

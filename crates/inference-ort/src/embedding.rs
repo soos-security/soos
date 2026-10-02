@@ -71,9 +71,19 @@ pub fn template_matches_model(
 }
 
 /// Facial biometric embedding vector (128-D for the shipped SFace model) with automatic memory zeroization.
-#[derive(Debug, Clone, PartialEq, Zeroize)]
+///
+/// `Debug` prints the dimension only, never the values (GitHub #313, VIS-NEW-6).
+#[derive(Clone, PartialEq, Zeroize)]
 pub struct BiometricEmbedding {
     vector: Zeroizing<Vec<f32>>,
+}
+
+impl std::fmt::Debug for BiometricEmbedding {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BiometricEmbedding")
+            .field("dimension", &self.vector.len())
+            .finish_non_exhaustive()
+    }
 }
 
 impl BiometricEmbedding {
@@ -119,8 +129,22 @@ impl BiometricEmbedding {
     }
 
     /// Normalizes vector in-place such that `||v||_2 == 1.0`.
+    ///
+    /// Fails closed on a non-finite component or norm (NaN, infinity, or squares overflowing
+    /// to an infinite norm): such a model output is never turned into an embedding
+    /// (GitHub #313, VIS-NEW-3).
     pub fn normalize(&mut self) -> Result<(), InferenceError> {
+        if self.vector.iter().any(|x| !x.is_finite()) {
+            return Err(InferenceError::EmbeddingFailed(
+                "Cannot L2-normalize an embedding with non-finite components".to_string(),
+            ));
+        }
         let norm = self.l2_norm();
+        if !norm.is_finite() {
+            return Err(InferenceError::EmbeddingFailed(
+                "Cannot L2-normalize an embedding whose norm is not finite".to_string(),
+            ));
+        }
         if norm <= 1e-12 {
             return Err(InferenceError::EmbeddingFailed(
                 "Cannot L2-normalize zero or near-zero embedding vector".to_string(),
@@ -313,6 +337,15 @@ impl OrtEmbeddingExtractor {
             .checked_mul(height as usize)
             .and_then(|px| px.checked_mul(3))
             .ok_or_else(|| InferenceError::InvalidInput("Image dimensions overflow".to_string()))?;
+
+        // A zero dimension would underflow `width - 1` / `height - 1` below (GitHub #313,
+        // VIS-NEW-2); same guard as the PAD input preparation.
+        if width == 0 || height == 0 {
+            return Err(InferenceError::InvalidDimensions {
+                expected: (112, 112),
+                actual: (width, height),
+            });
+        }
 
         if aligned_crop_rgb.len() != expected_len {
             return Err(InferenceError::InvalidBufferSize {
