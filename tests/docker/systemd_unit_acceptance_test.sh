@@ -33,6 +33,12 @@
 #           under TimeoutStartSec=60.
 #   Part 5. `systemctl stop` is clean: SIGTERM, graceful drain, exit 0 well
 #           within TimeoutStopSec, socket removed, no SIGKILL.
+#   Part 6. Upgrade (GitHub #327): re-running scripts/install.sh over the live
+#           install keeps master.key, an enrolled template, daemon.toml and the
+#           PAM activation state (/etc/pam.d, /var/lib/pam, PAM snapshot)
+#           byte-identical and the unit enabled; with models, an active daemon
+#           is restarted on the new binary (plain re-run and --start) and
+#           reports is_healthy. Without models the health half is SKIPPED.
 #
 # Model sources for parts 2 and 5 (--models):
 #   auto      host if /var/lib/soos/models/manifest.toml exists on the host,
@@ -123,7 +129,7 @@ Options:
   --models <mode>          Model source for the readiness and stop parts:
                            auto (default), host, download or none
   --in-container <stage>   Internal: run one stage inside the systemd container
-                           (install, after-reboot)
+                           (install, after-reboot, upgrade)
   -h, --help               Display this help message and exit
 EOF
 }
@@ -274,6 +280,7 @@ if [[ "${MODE}" = "host" ]]; then
     info "Rebooting the container (systemd shutdown, fresh /run, persistent /var)..."
     "${DOCKER}" restart --time 30 "${CONTAINER}" >/dev/null
     stage after-reboot
+    stage upgrade
 
     host_sysctls_unchanged || fail "host isolation broken: kernel sysctls differ after the run"
     success "Host kernel.*, vm.* and fs.* sysctls are unchanged after the privileged container ran."
@@ -629,6 +636,119 @@ part5_clean_stop() {
     success "Part 5: systemctl stop took ${stop_ms} ms (TimeoutStopSec=$(prop TimeoutStopUSec)): SIGTERM, graceful drain, exit status 0, Result=success, socket removed, no SIGKILL."
 }
 
+# Part 6 helpers — digests of the state an upgrade must keep (GitHub #327). Lines are
+# "<path> <sha256>"; a mismatch is reported with the digests masked.
+readonly UPGRADE_TEMPLATE="/var/lib/soos/biometrics/4242.cbor.enc"
+upgrade_state_digest() {
+    local f
+    for f in /var/lib/soos/master.key "${UPGRADE_TEMPLATE}" /etc/soos/daemon.toml; do
+        [[ -f "${f}" ]] || fail "upgrade state: ${f} is missing"
+        printf '%s %s\n' "${f}" "$(sha256sum < "${f}" | cut -d' ' -f1)"
+    done
+    while IFS= read -r -d '' f; do
+        printf '%s %s\n' "${f}" "$(sha256sum < "${f}" | cut -d' ' -f1)"
+    done < <(find /etc/pam.d /var/lib/pam /var/lib/soos/state -type f -print0 2>/dev/null | sort -z)
+    # Owner and mode only: systemd re-owns the StateDirectory= tree to the unit's Group=soos at
+    # each start while install.sh re-applies root:root, so the group is not upgrade state
+    # (the 0600 / 0700 modes give that group no access either way).
+    stat -c '%n %a %U' /var/lib/soos/master.key /var/lib/soos/biometrics "${UPGRADE_TEMPLATE}" /etc/soos/daemon.toml
+    printf 'unit %s\n' "$(systemctl is-enabled "${UNIT}" 2>/dev/null || true)"
+}
+
+assert_upgrade_state_unchanged() {
+    local before="$1" label="$2" after changed
+    after="$(upgrade_state_digest)"
+    if [[ "${after}" != "${before}" ]]; then
+        changed="$({ diff <(echo "${before}") <(echo "${after}") || true; } | sed -nE '/^[<>] /{s/[0-9a-f]{64}/<sha256>/;p}')"
+        error "${label}: the upgrade changed preserved state:"
+        sed 's/^/  /' <<< "${changed}" >&2
+        fail "${label}: master.key, the template, daemon.toml, the PAM stack or the unit enablement changed"
+    fi
+    grep -qx 'unit enabled' <<< "${after}" || fail "${label}: ${UNIT} is not enabled after the upgrade"
+    grep -qx "/var/lib/soos/master.key 600 root" <<< "${after}" || fail "${label}: master.key is not mode 600 owned by root"
+    grep -qx "/var/lib/soos/biometrics 700 root" <<< "${after}" || fail "${label}: biometrics/ is not mode 700 owned by root"
+}
+
+# The running daemon is the installed binary of this run (not the replaced inode), was
+# restarted (new MainPID) and answers healthy.
+assert_daemon_upgraded() {
+    local previous_pid="$1" label="$2" pid exe status_json key
+    expect_prop ActiveState "active"
+    pid="$(prop MainPID)"
+    [[ "${pid}" -gt 0 ]] || fail "${label}: MainPID is 0 after the upgrade"
+    [[ "${pid}" != "${previous_pid}" ]] \
+        || fail "${label}: MainPID ${pid} is unchanged: the daemon was not restarted onto the new binary"
+    exe="$(readlink "/proc/${pid}/exe")"
+    [[ "${exe}" = "/usr/libexec/soos/soos-daemon" ]] \
+        || fail "${label}: the daemon runs '${exe}', expected /usr/libexec/soos/soos-daemon (' (deleted)' = the replaced binary)"
+    cmp -s /target/release/soos-daemon /usr/libexec/soos/soos-daemon \
+        || fail "${label}: /usr/libexec/soos/soos-daemon is not the freshly built release binary"
+    status_json="$(bash /workspace/scripts/wait_daemon_ready.sh --socket "${SOCKET}" \
+        --manifest "${MANIFEST}" --admin /usr/bin/soos-admin --timeout 10)" \
+        || fail "${label}: scripts/wait_daemon_ready.sh did not report the upgraded daemon ready"
+    for key in '"is_healthy": true' '"socket_ready": true' '"models_verified": true'; do
+        grep -qF "${key}" <<< "${status_json}" || fail "${label}: soos-admin status JSON lacks ${key}"
+    done
+    success "${label}: ${UNIT} was restarted on the new binary (MainPID ${previous_pid} -> ${pid}, exe ${exe}) and reports is_healthy."
+}
+
+# Part 6 — re-running scripts/install.sh over a live install (GitHub #327, UPG1–UPG2):
+# master.key, an enrolled template, daemon.toml and the PAM activation state stay
+# byte-identical, the unit stays enabled, and an active daemon is restarted on the new
+# binary and comes back healthy (plain re-run, then --start).
+part6_reinstall_preserves_state() {
+    local models_ready=false
+    [[ -f "${MANIFEST}" ]] && models_ready=true
+    local -a install_args=(--artifact-dir /target/release --allow-missing)
+    [[ "${models_ready}" = true ]] || install_args+=(--skip-models)
+
+    # Previous installation, as an operator leaves it: Debian profiles installed by
+    # install.sh (--distro auto on ubuntu) and activated, a daemon.toml, an enrolled
+    # template (synthetic ciphertext: no camera) and, with models, a running daemon.
+    info "Part 6: previous install (scripts/install.sh, --distro auto) and PAM activation..."
+    bash /workspace/scripts/install.sh "${install_args[@]}"
+    pam-auth-update --package --enable soos soos-notify
+    grep -q 'pam_soos\.so' /etc/pam.d/common-auth \
+        || fail "precondition: pam-auth-update did not activate soos in /etc/pam.d/common-auth"
+    if [[ ! -f /etc/soos/daemon.toml ]]; then
+        install -d -m 0755 /etc/soos
+        printf '%s\n' '# upgrade test: no camera in the container' \
+            '[pipeline]' 'use_mock_camera = true' > /etc/soos/daemon.toml
+        chmod 0644 /etc/soos/daemon.toml
+    fi
+    (umask 077 && head -c 512 /dev/urandom > "${UPGRADE_TEMPLATE}")
+    local pid_before=0
+    if [[ "${models_ready}" = true ]]; then
+        systemctl start "${UNIT}"
+        bash /workspace/scripts/wait_daemon_ready.sh --socket "${SOCKET}" \
+            --manifest "${MANIFEST}" --admin /usr/bin/soos-admin --timeout 10 >/dev/null \
+            || fail "precondition: the daemon is not ready before the upgrade"
+        pid_before="$(prop MainPID)"
+    fi
+    local before
+    before="$(upgrade_state_digest)"
+    grep -qx 'unit enabled' <<< "${before}" || fail "precondition: ${UNIT} is not enabled"
+
+    # Upgrade 1: plain re-run, exactly the documented command without --build.
+    info "Part 6: upgrade 1 — scripts/install.sh re-run over the existing install..."
+    bash /workspace/scripts/install.sh "${install_args[@]}"
+    assert_upgrade_state_unchanged "${before}" "Part 6 (re-run)"
+    if [[ "${models_ready}" = true ]]; then
+        assert_daemon_upgraded "${pid_before}" "Part 6 (re-run)"
+
+        # Upgrade 2: re-run with --start (the README command adds it).
+        pid_before="$(prop MainPID)"
+        info "Part 6: upgrade 2 — scripts/install.sh --start re-run over a running daemon..."
+        bash /workspace/scripts/install.sh "${install_args[@]}" --start
+        assert_upgrade_state_unchanged "${before}" "Part 6 (--start)"
+        assert_daemon_upgraded "${pid_before}" "Part 6 (--start)"
+    else
+        expect_prop ActiveState "inactive"
+        warn "SKIPPED: part 6 daemon restart and health after the upgrade need the real models (--models host|download)."
+    fi
+    success "Part 6: re-running scripts/install.sh kept master.key, ${UPGRADE_TEMPLATE}, /etc/soos/daemon.toml, /etc/pam.d, /var/lib/pam and the PAM snapshot byte-identical; ${UNIT} stays enabled."
+}
+
 case "${STAGE}" in
     install)
         wait_for_boot
@@ -650,7 +770,10 @@ case "${STAGE}" in
             warn "SKIPPED: parts 2 (Type=notify readiness) and 5 (clean stop) need the real models (--models host|download)."
         fi
         ;;
+    upgrade)
+        part6_reinstall_preserves_state
+        ;;
     *)
-        fail "Unknown stage '${STAGE}' (expected install or after-reboot)"
+        fail "Unknown stage '${STAGE}' (expected install, after-reboot or upgrade)"
         ;;
 esac

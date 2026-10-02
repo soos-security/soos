@@ -50,7 +50,9 @@
 #                            target's os-release (under --destdir only the stage
 #                            is read; nothing is guessed from the build host)
 #   --start                  Live install: start the unit after enabling it and
-#                            wait for readiness (scripts/wait_daemon_ready.sh)
+#                            wait for readiness (scripts/wait_daemon_ready.sh).
+#                            A unit that was already active is restarted on the
+#                            new binaries and awaited even without --start (GitHub #327)
 #   --dry-run                Run the read-only preflight and print the plan
 #   -h, --help               Display this help message
 #
@@ -144,7 +146,8 @@ Options:
   --distro <FAMILY>        PAM template to install: auto (default), debian,
                            fedora, arch or none (auto reads the target os-release)
   --start                  Start the unit after enabling it and wait until the
-                           daemon answers (live install only)
+                           daemon answers (live install only); an already active
+                           unit is restarted on the new binaries even without it
   --dry-run                Run the read-only preflight and print the plan
   -h, --help               Display this help message and exit
 
@@ -543,6 +546,10 @@ JOURNAL_BACKUP_COPY=()    # ... and their saved previous version
 GROUP_CREATED=false
 UNIT_INSTALLED=false
 UNIT_ENABLED=false
+# Unit state before this run (GitHub #327): a re-run over an existing install restarts an
+# active daemon on the new binaries and never disables, on rollback, a unit enabled before.
+UNIT_WAS_ENABLED=false
+UNIT_WAS_ACTIVE=false
 PAM_SNAPSHOT_CREATED=false
 COMMITTED=false
 KEEP_BACKUP=false
@@ -552,7 +559,7 @@ rollback() {
     set +e
     local i
     warn "Rolling back all changes made by this installation run..."
-    if [[ "${UNIT_ENABLED}" = true ]]; then
+    if [[ "${UNIT_ENABLED}" = true && "${UNIT_WAS_ENABLED}" != true ]]; then
         systemctl disable soos-daemon.service >/dev/null 2>&1
     fi
     for ((i = ${#JOURNAL_BACKUP_ORIG[@]} - 1; i >= 0; i--)); do
@@ -843,6 +850,13 @@ fi
 # 8. Enable the Systemd Unit (live install only, last mutating step)
 if [[ "${UNIT_INSTALLED}" = true && "${SKIP_SYSTEMD}" = false && "${LIVE_INSTALL}" = true && -d "/run/systemd/system" ]] \
         && command -v systemctl >/dev/null 2>&1; then
+    # Upgrade over an existing install (GitHub #327): record the unit state first.
+    if systemctl is-enabled --quiet soos-daemon.service 2>/dev/null; then
+        UNIT_WAS_ENABLED=true
+    fi
+    if systemctl is-active --quiet soos-daemon.service 2>/dev/null; then
+        UNIT_WAS_ACTIVE=true
+    fi
     info "Reloading systemd manager configuration..."
     systemctl daemon-reload
     UNIT_ENABLED=true
@@ -854,15 +868,26 @@ COMMITTED=true
 
 # 9. Optional start and bounded readiness wait (GitHub #211). The install itself
 #    is committed: a daemon that does not become ready is reported, not rolled back.
-if [[ "${START_UNIT}" = true ]]; then
+#    A daemon that was already running is restarted on the new binaries, with or
+#    without --start (GitHub #327): `systemctl start` is a no-op on an active unit,
+#    which would leave the replaced binary running.
+if [[ "${START_UNIT}" = true || ( "${UNIT_WAS_ACTIVE}" = true && "${UNIT_ENABLED}" = true ) ]]; then
     if [[ "${UNIT_ENABLED}" != true ]]; then
         error "--start: the unit was not enabled (systemd not running?); start it manually."
         exit 70
     fi
-    info "Starting soos-daemon.service..."
-    if ! systemctl start soos-daemon.service; then
-        error "systemctl start soos-daemon.service failed; see: journalctl -u soos-daemon.service"
-        exit 70
+    if [[ "${UNIT_WAS_ACTIVE}" = true ]]; then
+        info "Restarting the running soos-daemon.service on the new binaries..."
+        if ! systemctl restart soos-daemon.service; then
+            error "systemctl restart soos-daemon.service failed; see: journalctl -u soos-daemon.service"
+            exit 70
+        fi
+    else
+        info "Starting soos-daemon.service..."
+        if ! systemctl start soos-daemon.service; then
+            error "systemctl start soos-daemon.service failed; see: journalctl -u soos-daemon.service"
+            exit 70
+        fi
     fi
     if ! bash "${WORKSPACE_ROOT}/scripts/wait_daemon_ready.sh" \
             --socket "${RUNSTATEDIR}/soos/daemon.sock" \
