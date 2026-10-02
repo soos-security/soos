@@ -41,29 +41,55 @@ auth  optional                       pam_soos.so event=password-failed timeout_m
 `swaylock` is the reference Wayland screen locker for wlroots-based compositors (Sway, River, Wayfire).
 
 #### PAM Configuration: `/etc/pam.d/swaylock`
+Keep the distribution file. It reaches the soos line through the base stack (Arch:
+`swaylock` → `login` → `system-local-login` → `system-login` → `system-auth`; see
+`Docs/DISTRIBUTION_DEPLOYMENT.md` §5.3). Do not add a second `pam_soos.so` line: the
+`event=password-failed` line already lives in the base stack.
 ```pam
-#%PAM-1.0
-auth        include     system-auth
-auth        optional    pam_soos.so event=password-failed timeout_ms=20
-account     include     system-auth
+auth include login
 ```
+
+#### Behaviour to Keep in Mind
+`swaylock` calls `pam_authenticate` only when a password is submitted. There is no background
+verification: locking, waiting or moving the mouse never starts the camera, and nothing is
+shown on screen. With `ignore-empty-password` (`-e`), an empty submission never reaches PAM.
 
 #### Test Procedure:
 1. Ensure the user is enrolled: `soos-enroll list`.
-2. Lock the active session: `swaylock -c 000000`.
+2. Lock the active session **without** `-e`, and with no swaylock config file applied
+   (`ignore-empty-password` may be set in `~/.swaylock/config`,
+   `$XDG_CONFIG_HOME/swaylock/config` or `/etc/swaylock/config`):
+   `swaylock -C /dev/null -c 000000`.
 3. **Test Case 1 (Nominal Face Unlock)**:
    - Position face directly before the webcam.
-   - Press any key (e.g. `Space` or `Enter`) to trigger the PAM authentication attempt.
-   - **Expected Result**: Screen unlocks instantly (< 150ms) without prompting for a password or displaying an input indicator.
+   - Press `Enter` on the empty field.
+   - **Expected Result**: Screen unlocks within the `timeout_ms` budget (default 1000 ms;
+     about 0.3–0.5 s measured with the camera woken from auto-standby) without typing a
+     password. The journal shows `verdict=Allow reason=FaceMatch`.
 4. **Test Case 2 (Occluded / Unrecognized Face)**:
+   - Lock screen again without `-e`: `swaylock -C /dev/null -c 000000`.
    - Cover the webcam lens or look away.
-   - Press `Enter`.
-   - **Expected Result**: Screen remains locked; `swaylock` displays the standard password input ring. Entering the correct account password unlocks the session. Entering an invalid password marks an auth failure.
+   - Press `Enter` on the empty field.
+   - **Expected Result**: Screen remains locked and `swaylock` shows its failure state. The
+     empty password failed `pam_unix.so`, so the base-stack event line sends one
+     `PasswordFailed` event (journal: `Processing telemetry auth failure event`) and `faillock --user <user>` shows one more failure (stacks with
+     `pam_faillock`). Entering the correct account password then unlocks the
+     session. Do not repeat this `deny` times (Arch default 3): the account would be locked for
+     `unlock_time` (default 600 s), and neither face nor password unlocks until it expires.
 5. **Test Case 3 (Daemon Offline)**:
    - Stop daemon: `sudo systemctl stop soos-daemon`.
-   - Lock screen: `swaylock`.
-   - Press `Enter`.
-   - **Expected Result**: Immediate fallback to password prompt with zero UI freeze.
+   - Lock screen: `swaylock -C /dev/null -c 000000`.
+   - Type the account password and press `Enter`.
+   - **Expected Result**: `pam_soos.so` returns `PAM_IGNORE` immediately and the password
+     unlocks the session with zero UI freeze.
+   - Restart daemon: `sudo systemctl start soos-daemon` (Test Case 4 needs it running).
+6. **Test Case 4 (`ignore-empty-password`)**:
+   - Check the daemon is running: `systemctl is-active soos-daemon` prints `active`.
+   - Lock screen: `swaylock -C /dev/null -e -c 000000`.
+   - Face the webcam and press `Enter` on the empty field.
+   - **Expected Result**: The empty `Enter` does nothing and the `soos-daemon` journal shows
+     no new `Rendered authentication response` line for it. Typing the password and pressing `Enter`
+     then runs face verification first and unlocks the session (by face or by password).
 
 ---
 
@@ -173,7 +199,7 @@ session    include                       system-auth
 
 | Scenario | Daemon State | Camera State | Face Alignment / Match | PAM Result | UI Response |
 |---|---|---|---|---|---|
-| **Nominal Unlock** | Active | Streaming MMAP | Single face, Score >= 0.50, PAD Pass | `PAM_SUCCESS` | Unlocks session instantly (<= 150ms) |
+| **Nominal Unlock** | Active | Streaming MMAP | Single face, Score >= 0.50, PAD Pass | `PAM_SUCCESS` | Unlocks after the PAM call (Enter on `swaylock`) within the `timeout_ms` budget |
 | **Unknown Person** | Active | Streaming MMAP | Single face, Score < 0.50 | `PAM_IGNORE` | Prompts for password |
 | **Presentation Attack** | Active | Streaming MMAP | Photo / Phone Screen / Video | `PAM_IGNORE` | Prompts for password (rejection logged) |
 | **Multiple Faces** | Active | Streaming MMAP | >= 2 faces detected in frame | `PAM_IGNORE` | Prompts for password |
