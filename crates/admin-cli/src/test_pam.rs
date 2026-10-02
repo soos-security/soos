@@ -56,6 +56,9 @@ pub enum PamTestRejection {
     /// The response does not echo the request nonce (`Response::matches_request`); checked
     /// first, like `IpcError::RequestIdMismatch` in the PAM module.
     RequestIdMismatch,
+    /// The response completed after the cumulative deadline started before `connect`
+    /// (GitHub #312, STO-NEW-4); `pam_soos.so` never honors such a verdict.
+    DeadlineExceeded,
     /// The response stamps are outside their `CLOCK_MONOTONIC` validity window
     /// (`Response::check_freshness`), or the clock could not be read.
     StaleResponse,
@@ -67,6 +70,7 @@ impl PamTestRejection {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::RequestIdMismatch => "request_id_mismatch",
+            Self::DeadlineExceeded => "deadline_exceeded",
             Self::StaleResponse => "stale_response",
         }
     }
@@ -97,6 +101,18 @@ pub struct PamTestReport {
 }
 
 impl PamTestReport {
+    /// Process exit code of `soos-admin test-pam` (GitHub #312, STO-NEW-3): `0` only when
+    /// the response was accepted (nonce binding, deadline, freshness) AND its verdict is
+    /// `Allow`, i.e. exactly when `pam_soos.so` would return `PAM_SUCCESS`; `1` otherwise.
+    #[must_use]
+    pub fn exit_code(&self) -> i32 {
+        if self.accepted && self.verdict == Verdict::Allow {
+            0
+        } else {
+            1
+        }
+    }
+
     /// Formats the report as a pretty-printed JSON document.
     ///
     /// Produced by `serde_json`, so every string field is escaped (GitHub #232).
@@ -149,9 +165,16 @@ impl PamTestReport {
 /// `timeout_ms` is clamped with [`effective_timeout_ms`]; the request deadline is expressed
 /// on `CLOCK_MONOTONIC`, the clock `soos-daemon` compares it against (GitHub #231).
 ///
+/// Like `pam_soos.so` (GitHub #312, STO-NEW-4), one cumulative deadline is started before
+/// `connect` and bounds the whole exchange: the connection is attempted without blocking,
+/// `SO_SNDTIMEO` / `SO_RCVTIMEO` are re-armed with the budget left before every `write()` /
+/// `read()`, and a response completed after the deadline is reported as
+/// [`PamTestRejection::DeadlineExceeded`] whatever its verdict.
+///
 /// # Errors
 ///
-/// Returns `AdminCliError` on socket, codec, timeout, or random number generator failures.
+/// Returns `AdminCliError` on socket, codec, or random number generator failures, and
+/// [`AdminCliError::Timeout`] when the deadline expires before the response is complete.
 pub fn simulate_pam_auth(
     socket_path: &Path,
     uid: u32,
@@ -159,28 +182,17 @@ pub fn simulate_pam_auth(
     timeout_ms: u64,
 ) -> Result<PamTestReport, AdminCliError> {
     let timeout_ms = effective_timeout_ms(timeout_ms);
-    let connect_start = Instant::now();
-    let mut stream =
-        UnixStream::connect(socket_path).map_err(|e| AdminCliError::SocketConnect {
-            path: socket_path.display().to_string(),
-            source: e,
-        })?;
-    let connect_ms = connect_start.elapsed().as_secs_f64() * 1000.0;
+    let deadline = ExchangeDeadline::start(Duration::from_millis(timeout_ms));
+    // The CLOCK_MONOTONIC deadline sent to the daemon is fixed together with the local one.
+    let deadline_monotonic_ns =
+        monotonic_now_ns()?.saturating_add(timeout_ms.saturating_mul(1_000_000));
 
-    let timeout = Duration::from_millis(timeout_ms);
-    stream
-        .set_read_timeout(Some(timeout))
-        .map_err(AdminCliError::SocketIo)?;
-    stream
-        .set_write_timeout(Some(timeout))
-        .map_err(AdminCliError::SocketIo)?;
+    let connect_start = Instant::now();
+    let mut stream = connect_before_deadline(socket_path, deadline)?;
+    let connect_ms = connect_start.elapsed().as_secs_f64() * 1000.0;
 
     let mut request_id = [0u8; REQUEST_ID_LEN];
     getrandom::fill(&mut request_id)?;
-
-    let now_monotonic_ns = monotonic_now_ns()?;
-    let deadline_monotonic_ns =
-        now_monotonic_ns.saturating_add(timeout_ms.saturating_mul(1_000_000));
 
     let req = Request {
         version: CURRENT_VERSION,
@@ -193,15 +205,10 @@ pub fn simulate_pam_auth(
 
     let req_start = Instant::now();
     let encoded_req = encode_request(&req)?;
-    stream
-        .write_all(&encoded_req)
-        .map_err(AdminCliError::SocketIo)?;
-    stream.flush().map_err(AdminCliError::SocketIo)?;
+    write_all_before_deadline(&mut stream, &encoded_req, deadline)?;
 
     let mut len_bytes = [0u8; 4];
-    stream
-        .read_exact(&mut len_bytes)
-        .map_err(AdminCliError::SocketIo)?;
+    read_exact_before_deadline(&mut stream, &mut len_bytes, deadline)?;
     let declared_size = usize::try_from(u32::from_be_bytes(len_bytes))
         .map_err(|_| AdminCliError::UnexpectedResponse("overflow in length prefix".to_string()))?;
 
@@ -212,11 +219,12 @@ pub fn simulate_pam_auth(
     }
 
     let mut body = vec![0u8; declared_size];
-    stream
-        .read_exact(&mut body)
-        .map_err(AdminCliError::SocketIo)?;
+    read_exact_before_deadline(&mut stream, &mut body, deadline)?;
+    // Checked once the last byte is in, like `pam_soos.so` (never honored when late).
+    let within_deadline = deadline.remaining().is_some();
     let response_ms = req_start.elapsed().as_secs_f64() * 1000.0;
     let total_ms = connect_ms + response_ms;
+    drop(stream);
 
     let total_capacity = declared_size.saturating_add(4);
     let mut full = Vec::with_capacity(total_capacity);
@@ -238,17 +246,17 @@ pub fn simulate_pam_auth(
     let freshness =
         resp.check_freshness(monotonic_now_ns().unwrap_or(0), MAX_RESPONSE_FUTURE_SKEW_NS);
 
-    let rejected_reason = if !bound_to_request {
-        Some(PamTestRejection::RequestIdMismatch)
-    } else if freshness.is_err() {
-        Some(PamTestRejection::StaleResponse)
-    } else {
-        None
-    };
+    let rejected_reason = first_rejection(bound_to_request, within_deadline, freshness.is_ok());
 
     let pam_result = if !bound_to_request {
         format!(
             "PAM_IGNORE (response request_id does not match the request nonce; the PAM module \
+             falls back to the password whatever the {:?} verdict)",
+            resp.verdict
+        )
+    } else if !within_deadline {
+        format!(
+            "PAM_IGNORE (response completed after the {timeout_ms} ms deadline; the PAM module \
              falls back to the password whatever the {:?} verdict)",
             resp.verdict
         )
@@ -283,6 +291,158 @@ pub fn simulate_pam_auth(
     })
 }
 
+/// The first check a response fails, in the order of `pam_soos.so`: nonce binding, then the
+/// cumulative deadline, then the freshness of the stamps.
+const fn first_rejection(
+    bound_to_request: bool,
+    within_deadline: bool,
+    fresh: bool,
+) -> Option<PamTestRejection> {
+    if !bound_to_request {
+        Some(PamTestRejection::RequestIdMismatch)
+    } else if !within_deadline {
+        Some(PamTestRejection::DeadlineExceeded)
+    } else if !fresh {
+        Some(PamTestRejection::StaleResponse)
+    } else {
+        None
+    }
+}
+
+/// Interval between two connection attempts while the daemon listen backlog is full.
+const CONNECT_RETRY_INTERVAL: Duration = Duration::from_millis(5);
+
+/// One cumulative deadline shared by every blocking operation of the exchange.
+#[derive(Debug, Clone, Copy)]
+struct ExchangeDeadline {
+    start: Instant,
+    total: Duration,
+}
+
+impl ExchangeDeadline {
+    fn start(total: Duration) -> Self {
+        Self {
+            start: Instant::now(),
+            total,
+        }
+    }
+
+    /// Budget left, `None` once the deadline has passed (a zero budget never reaches
+    /// `set_*_timeout`, which rejects it with `EINVAL`).
+    fn remaining(&self) -> Option<Duration> {
+        self.total
+            .checked_sub(self.start.elapsed())
+            .filter(|left| !left.is_zero())
+    }
+
+    fn remaining_or_timeout(&self) -> Result<Duration, AdminCliError> {
+        self.remaining().ok_or(AdminCliError::Timeout)
+    }
+}
+
+/// Connects to the daemon socket without ever blocking past `deadline`.
+///
+/// The socket is created non-blocking: a full listen backlog (`EAGAIN`) is retried until the
+/// deadline instead of blocking in `connect()`. The connected socket is switched back to
+/// blocking mode; every later operation is bounded by its re-armed timeout.
+fn connect_before_deadline(
+    socket_path: &Path,
+    deadline: ExchangeDeadline,
+) -> Result<UnixStream, AdminCliError> {
+    use nix::errno::Errno;
+    use nix::sys::socket::{connect, socket, AddressFamily, SockFlag, SockType, UnixAddr};
+    use std::os::fd::AsRawFd;
+
+    let connect_error = |source: std::io::Error| AdminCliError::SocketConnect {
+        path: socket_path.display().to_string(),
+        source,
+    };
+    let addr = UnixAddr::new(socket_path).map_err(|e| connect_error(e.into()))?;
+    let fd = socket(
+        AddressFamily::Unix,
+        SockType::Stream,
+        SockFlag::SOCK_NONBLOCK | SockFlag::SOCK_CLOEXEC,
+        None,
+    )
+    .map_err(|e| connect_error(e.into()))?;
+    loop {
+        match connect(fd.as_raw_fd(), &addr) {
+            Ok(()) | Err(Errno::EISCONN) => break,
+            Err(Errno::EAGAIN | Errno::EINTR | Errno::EINPROGRESS | Errno::EALREADY) => {
+                let left = deadline.remaining_or_timeout()?;
+                std::thread::sleep(CONNECT_RETRY_INTERVAL.min(left));
+            }
+            Err(e) => return Err(connect_error(e.into())),
+        }
+    }
+    deadline.remaining_or_timeout()?;
+    let stream = UnixStream::from(fd);
+    stream
+        .set_nonblocking(false)
+        .map_err(AdminCliError::SocketIo)?;
+    Ok(stream)
+}
+
+/// Whether an I/O error is the expiry of a socket timeout.
+fn is_timeout(err: &std::io::Error) -> bool {
+    matches!(
+        err.kind(),
+        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+    )
+}
+
+/// Writes all of `bytes`, re-arming `SO_SNDTIMEO` with the budget left before every write.
+fn write_all_before_deadline(
+    stream: &mut UnixStream,
+    bytes: &[u8],
+    deadline: ExchangeDeadline,
+) -> Result<(), AdminCliError> {
+    let mut offset = 0usize;
+    while let Some(rest) = bytes.get(offset..).filter(|rest| !rest.is_empty()) {
+        stream
+            .set_write_timeout(Some(deadline.remaining_or_timeout()?))
+            .map_err(AdminCliError::SocketIo)?;
+        match stream.write(rest) {
+            Ok(0) => {
+                return Err(AdminCliError::SocketIo(std::io::Error::from(
+                    std::io::ErrorKind::WriteZero,
+                )))
+            }
+            Ok(n) => offset = offset.saturating_add(n),
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(e) if is_timeout(&e) => return Err(AdminCliError::Timeout),
+            Err(e) => return Err(AdminCliError::SocketIo(e)),
+        }
+    }
+    Ok(())
+}
+
+/// Fills `buf`, re-arming `SO_RCVTIMEO` with the budget left before every read.
+fn read_exact_before_deadline(
+    stream: &mut UnixStream,
+    buf: &mut [u8],
+    deadline: ExchangeDeadline,
+) -> Result<(), AdminCliError> {
+    let mut offset = 0usize;
+    while let Some(rest) = buf.get_mut(offset..).filter(|rest| !rest.is_empty()) {
+        stream
+            .set_read_timeout(Some(deadline.remaining_or_timeout()?))
+            .map_err(AdminCliError::SocketIo)?;
+        match stream.read(rest) {
+            Ok(0) => {
+                return Err(AdminCliError::SocketIo(std::io::Error::from(
+                    std::io::ErrorKind::UnexpectedEof,
+                )))
+            }
+            Ok(n) => offset = offset.saturating_add(n),
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(e) if is_timeout(&e) => return Err(AdminCliError::Timeout),
+            Err(e) => return Err(AdminCliError::SocketIo(e)),
+        }
+    }
+    Ok(())
+}
+
 /// Reads `CLOCK_MONOTONIC` in nanoseconds (the clock of `deadline_monotonic_ns`).
 ///
 /// # Errors
@@ -296,5 +456,32 @@ fn monotonic_now_ns() -> Result<u64, AdminCliError> {
         _ => Err(AdminCliError::SocketIo(std::io::Error::other(
             "CLOCK_MONOTONIC returned a negative timestamp",
         ))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{first_rejection, PamTestRejection};
+
+    #[test]
+    fn test_312_rejection_order_matches_pam_module() {
+        assert_eq!(first_rejection(true, true, true), None);
+        assert_eq!(
+            first_rejection(false, false, false),
+            Some(PamTestRejection::RequestIdMismatch)
+        );
+        assert_eq!(
+            first_rejection(true, false, true),
+            Some(PamTestRejection::DeadlineExceeded),
+            "a late Allow is never accepted"
+        );
+        assert_eq!(
+            first_rejection(true, false, false),
+            Some(PamTestRejection::DeadlineExceeded)
+        );
+        assert_eq!(
+            first_rejection(true, true, false),
+            Some(PamTestRejection::StaleResponse)
+        );
     }
 }

@@ -839,7 +839,23 @@ impl EnrollmentService {
             Zeroizing::new(best_output.embedding.as_slice().to_vec()),
         )?;
 
-        self.store.enroll(&template)?;
+        if args.yes || already_enrolled {
+            // Explicit consent to replace: `--yes`, or a confirmation that showed
+            // `summary.already_enrolled`.
+            self.store.enroll(&template)?;
+        } else {
+            // GitHub #312 (STO-NEW-2): the administrator confirmed a first enrollment. A
+            // template created by another tool since the `exists` check above (during the
+            // capture or while the prompt was open) is never replaced: the check and the
+            // write run under one store lock.
+            match self.store.enroll_if_absent(&template) {
+                Ok(()) => {}
+                Err(soos_biometric_store::BiometricStoreError::AlreadyEnrolled(uid)) => {
+                    return Err(EnrollmentCliError::AlreadyEnrolled(uid));
+                }
+                Err(e) => return Err(e.into()),
+            }
+        }
 
         Ok(EnrollmentOutcome {
             uid,

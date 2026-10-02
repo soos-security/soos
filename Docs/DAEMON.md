@@ -74,7 +74,7 @@ with a half-applied configuration.
 |---|---|---|---|
 | `enabled` | bool | `false` | Strictly opt-in. When set, the daemon seals a snapshot for a `PasswordFailed` event (reason `PasswordFailed`) and for every `Auth` request vetoed as a presentation attack (reason `PadFailed`, the capture that triggered the veto, one per request, written on the blocking pool after the `Deny` / `PadFailed` response is rendered; GitHub #261). |
 | `base_dir` | path | `/var/lib/soos/evidence` | `0700 root:root`. |
-| `key_path` | path | `/var/lib/soos/evidence.key` | Evidence encryption key. |
+| `key_path` | path | `/var/lib/soos/evidence.key` | Evidence encryption key, loaded or created only when `enabled` is set (GitHub #312): a disabled store never touches it, so a missing key means evidence was never enabled. |
 | `retention_days` | integer | `7` | Snapshots older than this are purged. |
 | `daily_cap_per_uid` | integer | `10` | Maximum snapshots per UID and day. |
 | `daily_cap_total` | integer | `100` (`DEFAULT_DAILY_CAP_TOTAL`) | Maximum snapshots per day across all UIDs (GitHub #276); refused before any write without consuming the per-UID quota. The day's total is derived from the snapshot files already stored, so it survives a restart. |
@@ -195,13 +195,18 @@ pad_threshold = 0.85
   `ConnectionTasks::drain(connection_timeout)`; handlers still running when that budget expires are
   aborted (the PAM client sees EOF and returns `PAM_IGNORE`). The drain logs its start
   (`in_flight`, `budget_ms`) and its outcome (`completed`, `panicked`, `aborted`).
-- **Evidence writes at shutdown** (GitHub #287): the opt-in spoof evidence snapshot is written on
-  the blocking pool without delaying the `Deny` response, but it is tracked in
+- **Evidence writes at shutdown** (GitHub #287, #310): the opt-in spoof evidence snapshot and the
+  `PasswordFailed` evidence snapshot are written on the blocking pool (never on a Tokio worker:
+  encryption, `fsync` and the retention `flock` block) without delaying the response, but they
+  are tracked in
   `ConnectionDispatcher::evidence_writes()` (`soos_daemon::shutdown::BlockingTasks`) instead of
   being detached. After the connection drain, `soos-daemon` waits for the tracked writes with what
   is left of the same one-`connection_timeout` budget (`drain_budget.saturating_sub(elapsed)`); a
   write still running at the deadline is reported as abandoned (a blocking write cannot be
-  cancelled). Finished writes are reaped on every spawn, so the set stays bounded.
+  cancelled). Finished writes are reaped on every spawn, so the set stays bounded. The retention
+  rotation that follows every write waits at most `EVIDENCE_LOCK_TIMEOUT` (5 s) for the evidence
+  base-directory lock, so a running `soos-enroll migrate` can never pin a blocking thread
+  indefinitely either (`password_failed_evidence_offload_tests.rs`, rows SKE2–SKE3).
 - **Bounded process exit** (GitHub #289): `soos-daemon` builds its Tokio runtime explicitly
   (no `tokio::main` attribute, whose runtime drop waits without bound for every `spawn_blocking`
   job) and ends with `soos_daemon::shutdown::shutdown_runtime(runtime, remaining)`, i.e.

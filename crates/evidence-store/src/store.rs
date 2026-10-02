@@ -19,7 +19,7 @@ use std::os::fd::AsRawFd;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// Maximum valid POSIX UID accepted by the evidence store (2^31 - 1).
 ///
@@ -64,6 +64,14 @@ pub struct TempSweepReport {
     /// Retention or migration held the base-directory lock: nothing was examined or removed.
     pub lock_busy: bool,
 }
+
+/// Default bound on the wait for the exclusive base-directory `flock` taken by
+/// [`EvidenceStore::rotate_retention`] and [`EvidenceStore::migrate_legacy_snapshots`]
+/// (GitHub #310, STO-NEW-10). Override with [`EvidenceStore::with_lock_timeout`].
+pub const EVIDENCE_LOCK_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Interval between two attempts to take a contended base-directory lock.
+const EVIDENCE_LOCK_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 /// Upper bound of a persisted daily counter file (a decimal `u32` plus an optional newline).
 const MAX_DAILY_COUNT_FILE_BYTES: u64 = 16;
@@ -122,6 +130,8 @@ pub struct EvidenceStore {
     /// concurrent writers of this process can never exceed either cap (GitHub #234, #276).
     /// The per-UID counts live on disk; the in-memory view is bounded by the global cap.
     daily_counts: Mutex<DailyCounters>,
+    /// Bound on the wait for the base-directory `flock` (GitHub #310).
+    lock_timeout: Duration,
 }
 
 impl EvidenceStore {
@@ -132,7 +142,20 @@ impl EvidenceStore {
             key,
             daily_cap_total: DEFAULT_DAILY_CAP_TOTAL,
             daily_counts: Mutex::new(DailyCounters::default()),
+            lock_timeout: EVIDENCE_LOCK_TIMEOUT,
         }
+    }
+
+    /// Sets the bound on the wait for the exclusive base-directory `flock` (GitHub #310).
+    ///
+    /// [`Self::rotate_retention`] and [`Self::migrate_legacy_snapshots`] poll a contended lock
+    /// until `timeout` and then fail with [`EvidenceStoreError::LockTimeout`], changing
+    /// nothing. `Duration::ZERO` means a single attempt without waiting. The default is
+    /// [`EVIDENCE_LOCK_TIMEOUT`].
+    #[must_use]
+    pub fn with_lock_timeout(mut self, timeout: Duration) -> Self {
+        self.lock_timeout = timeout;
+        self
     }
 
     /// Overrides the global daily snapshot cap across all UIDs
@@ -156,6 +179,42 @@ impl EvidenceStore {
         }
         let key = MasterKey::load_or_create(&config.key_path)?;
         Ok(Self::new(config, key))
+    }
+
+    /// Takes the exclusive `flock` on the evidence base directory (GitHub #310, STO-NEW-10).
+    ///
+    /// The lock is taken on the directory itself, opened `O_RDONLY | O_DIRECTORY | O_NOFOLLOW`
+    /// (a symlink swapped in after the caller's pre-check fails with `ELOOP`), so no lock file
+    /// is ever created. A contended lock is retried every [`EVIDENCE_LOCK_POLL_INTERVAL`] until
+    /// the lock timeout; past it, [`EvidenceStoreError::LockTimeout`] is returned. The lock is
+    /// released when the returned guard is dropped (also on error paths).
+    fn lock_base_dir(&self) -> Result<Flock<File>, EvidenceStoreError> {
+        let base = &self.config.base_dir;
+        let mut dir = OpenOptions::new()
+            .read(true)
+            .custom_flags(nix::libc::O_DIRECTORY | nix::libc::O_NOFOLLOW)
+            .open(base)?;
+        let started = Instant::now();
+        loop {
+            match Flock::lock(dir, FlockArg::LockExclusiveNonblock) {
+                Ok(lock) => return Ok(lock),
+                Err((returned, nix::errno::Errno::EAGAIN | nix::errno::Errno::EINTR)) => {
+                    let waited = started.elapsed();
+                    if waited >= self.lock_timeout {
+                        return Err(EvidenceStoreError::LockTimeout(format!(
+                            "evidence store '{}' is locked by another retention or migration; gave up after {} ms",
+                            base.display(),
+                            u64::try_from(waited.as_millis()).unwrap_or(u64::MAX)
+                        )));
+                    }
+                    std::thread::sleep(
+                        EVIDENCE_LOCK_POLL_INTERVAL.min(self.lock_timeout.saturating_sub(waited)),
+                    );
+                    dir = returned;
+                }
+                Err((_, errno)) => return Err(EvidenceStoreError::Io(std::io::Error::from(errno))),
+            }
+        }
     }
 
     /// Removes the temporary files an interrupted write left in the date partitions
@@ -625,10 +684,7 @@ impl EvidenceStore {
             Err(e) => return Err(EvidenceStoreError::Io(e)),
         }
 
-        let dir_file = File::open(base)?;
-        let _lock = Flock::lock(dir_file, FlockArg::LockExclusive).map_err(|(_, e)| {
-            EvidenceStoreError::Io(std::io::Error::from_raw_os_error(e as i32))
-        })?;
+        let _lock = self.lock_base_dir()?;
 
         let mut dates = Vec::new();
         for entry in fs::read_dir(base)? {
@@ -876,7 +932,9 @@ impl EvidenceStore {
 
     /// Executes retention rotation: deletes date directories strictly older than `retention_days`.
     ///
-    /// Synchronizes concurrent executions using an exclusive file lock (`flock`) on the evidence base directory.
+    /// Synchronizes concurrent executions using an exclusive file lock (`flock`) on the evidence
+    /// base directory, waited for at most the lock timeout ([`EVIDENCE_LOCK_TIMEOUT`] by default,
+    /// GitHub #310); past it, [`EvidenceStoreError::LockTimeout`] is returned and nothing is pruned.
     pub fn rotate_retention(
         &self,
         current_date: &str,
@@ -897,11 +955,9 @@ impl EvidenceStore {
             return Ok(RetentionReport::default());
         }
 
-        // Acquire exclusive RAII file lock on the evidence root directory (Sub-issue #30.2)
-        let dir_file = File::open(&self.config.base_dir)?;
-        let _lock = Flock::lock(dir_file, FlockArg::LockExclusive).map_err(|(_, e)| {
-            EvidenceStoreError::Io(std::io::Error::from_raw_os_error(e as i32))
-        })?;
+        // Acquire exclusive RAII file lock on the evidence root directory (Sub-issue #30.2),
+        // waiting at most the store's lock timeout (GitHub #310).
+        let _lock = self.lock_base_dir()?;
 
         let mut pruned_dates = Vec::new();
 

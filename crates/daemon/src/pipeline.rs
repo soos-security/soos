@@ -598,8 +598,15 @@ pub fn initialize_pipeline(
         bio_key,
     )?);
 
-    // 3. Evidence Store & Master Key
-    let ev_key = soos_evidence_store::MasterKey::load_or_create(&config.evidence.key_path)?;
+    // 3. Evidence Store & Master Key. The evidence key is loaded or created only when
+    // `[pipeline.evidence] enabled` is set (GitHub #312, STO-NEW-5), like
+    // `EvidenceStore::open`: a disabled store never touches `key_path` (a missing key keeps
+    // meaning "never enabled") and holds an ephemeral in-memory key it never uses.
+    let ev_key = if config.evidence.enabled {
+        soos_evidence_store::MasterKey::load_or_create(&config.evidence.key_path)?
+    } else {
+        soos_evidence_store::MasterKey::generate()?
+    };
     let evidence_store = Arc::new(
         soos_evidence_store::EvidenceStore::new(config.evidence.clone(), ev_key)
             .with_daily_cap_total(config.evidence_daily_cap_total),

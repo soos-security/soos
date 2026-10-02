@@ -1,12 +1,19 @@
 //! Filtered journal log retriever with automatic sensitive data redaction.
 
-use std::fs::File;
-use std::io::{BufRead, BufReader, Write};
+use std::collections::VecDeque;
+use std::io::{BufRead, BufReader, Read, Write};
 use std::process::{Command, Stdio};
 
 use crate::args::LogsArgs;
 use crate::error::AdminCliError;
 use crate::redact::RedactionFilter;
+
+/// Upper bound of the tail `logs --file` keeps (GitHub #312, STO-NEW-8); `-n 0` and larger
+/// requests are clamped to it.
+pub const MAX_LOG_TAIL_LINES: usize = 10_000;
+
+/// Upper bound of one line read by `logs --file`; the rest of a longer line is dropped.
+pub const MAX_LOG_LINE_BYTES: usize = 16 * 1024;
 
 /// Fetches logs from systemd journal or file, applies redaction filtering, and writes to `out`.
 ///
@@ -26,37 +33,96 @@ pub fn fetch_and_filter_logs(
 }
 
 /// Reads lines from a file, retains the last `lines` entries, applies redaction, and writes to `out`.
+///
+/// Bounded (GitHub #312, STO-NEW-8): the file is opened `O_NONBLOCK | O_CLOEXEC` and must be
+/// a regular file on the open descriptor (a FIFO or device is refused without blocking); the
+/// tail is kept in a ring buffer of at most [`MAX_LOG_TAIL_LINES`] lines (`limit == 0` and
+/// larger limits are clamped to it); each line keeps at most [`MAX_LOG_LINE_BYTES`] bytes and
+/// invalid UTF-8 is replaced, never an error.
 fn read_and_filter_file(
     path: &std::path::Path,
     limit: usize,
     filter: &dyn RedactionFilter,
     out: &mut dyn Write,
 ) -> Result<(), AdminCliError> {
-    let file = File::open(path).map_err(|e| {
-        AdminCliError::Logs(format!("failed to open log file {}: {e}", path.display()))
-    })?;
-    let reader = BufReader::new(file);
+    use std::os::unix::fs::OpenOptionsExt;
 
-    let all_lines: Result<Vec<String>, std::io::Error> = reader.lines().collect();
-    let lines = all_lines.map_err(|e| {
-        AdminCliError::Logs(format!("failed to read lines from {}: {e}", path.display()))
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK | libc::O_CLOEXEC)
+        .open(path)
+        .map_err(|e| {
+            AdminCliError::Logs(format!("failed to open log file {}: {e}", path.display()))
+        })?;
+    let is_regular = file.metadata().map(|m| m.is_file()).map_err(|e| {
+        AdminCliError::Logs(format!(
+            "failed to inspect log file {}: {e}",
+            path.display()
+        ))
     })?;
+    if !is_regular {
+        return Err(AdminCliError::Logs(format!(
+            "log file {} is not a regular file",
+            path.display()
+        )));
+    }
 
-    let start_idx = if limit > 0 && lines.len() > limit {
-        lines.len().saturating_sub(limit)
+    let capacity = if limit == 0 {
+        MAX_LOG_TAIL_LINES
     } else {
-        0
+        limit.min(MAX_LOG_TAIL_LINES)
     };
-
-    if let Some(slice) = lines.get(start_idx..) {
-        for line in slice {
-            let redacted = filter.redact(line);
-            writeln!(out, "{redacted}").map_err(AdminCliError::SocketIo)?;
+    let mut tail: VecDeque<String> = VecDeque::with_capacity(capacity);
+    let mut reader = BufReader::new(file);
+    while let Some(line) = read_bounded_line(&mut reader).map_err(|e| {
+        AdminCliError::Logs(format!("failed to read lines from {}: {e}", path.display()))
+    })? {
+        if tail.len() == capacity {
+            tail.pop_front();
         }
+        tail.push_back(line);
+    }
+
+    for line in &tail {
+        let redacted = filter.redact(line);
+        writeln!(out, "{redacted}").map_err(AdminCliError::SocketIo)?;
     }
 
     out.flush().map_err(AdminCliError::SocketIo)?;
     Ok(())
+}
+
+/// Reads one line of at most [`MAX_LOG_LINE_BYTES`] bytes (without its `\n`), dropping the
+/// rest of a longer line; `None` at end of file.
+fn read_bounded_line(reader: &mut impl BufRead) -> std::io::Result<Option<String>> {
+    let mut buf = Vec::new();
+    let bound = u64::try_from(MAX_LOG_LINE_BYTES).unwrap_or(u64::MAX);
+    let read = reader.by_ref().take(bound).read_until(b'\n', &mut buf)?;
+    if read == 0 {
+        return Ok(None);
+    }
+    if buf.last() == Some(&b'\n') {
+        buf.pop();
+    } else if buf.len() >= MAX_LOG_LINE_BYTES {
+        // Discard the remainder of the oversized line, chunk by chunk.
+        loop {
+            let chunk = reader.fill_buf()?;
+            if chunk.is_empty() {
+                break;
+            }
+            match chunk.iter().position(|&b| b == b'\n') {
+                Some(pos) => {
+                    reader.consume(pos.saturating_add(1));
+                    break;
+                }
+                None => {
+                    let len = chunk.len();
+                    reader.consume(len);
+                }
+            }
+        }
+    }
+    Ok(Some(String::from_utf8_lossy(&buf).into_owned()))
 }
 
 /// Invokes `journalctl` as a child process and streams redacted lines to `out`.

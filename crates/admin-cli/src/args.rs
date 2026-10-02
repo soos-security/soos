@@ -169,6 +169,11 @@ pub struct GdmArgs {
     /// PAM file (defaults to probing the distribution security directories).
     #[arg(long)]
     pub pam_module_dir: Option<PathBuf>,
+
+    /// `restore` only: restore the backup even when the PAM file was changed after
+    /// `gdm enable` (the changes are lost). Without it a stale backup is refused.
+    #[arg(long)]
+    pub force: bool,
 }
 
 /// Arguments for `add-user` subcommand.
