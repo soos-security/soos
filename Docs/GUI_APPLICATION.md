@@ -35,9 +35,9 @@ waits on I/O it does not own.
   absolute path, never resolved through the caller's `PATH` (GitHub #314, CAM-NEW-7):
   `PKEXEC_PROGRAM` (`/usr/bin/pkexec`), `SYSTEMCTL_PROGRAM` (`/usr/bin/systemctl`) and
   `SOOS_ENROLL_PROGRAM` (`/usr/bin/soos-enroll`, where `scripts/install.sh` with its default
-  prefix, the Debian, Arch and RPM packages install it). The template import still passes the
-  relative `soos-enroll` of `privileged::import_helper_args` to `pkexec` (pinned by the
-  `import_privacy_tests` contract; owner decision pending, walkthrough 168). The `PrivilegedOutcome` comes
+  prefix, the Debian, Arch and RPM packages install it). The template import passes the same
+  absolute `SOOS_ENROLL_PROGRAM` from `privileged::import_helper_args` (pinned by the
+  `import_privacy_tests` contract, owner-approved 2026-10-02, walkthrough 168). The `PrivilegedOutcome` comes
   back over an `mpsc` channel that `SoosApp::handle_task_outcomes` drains each frame; the worker
   wakes the UI with `request_repaint`. Only one privileged action runs at a time
   (`TaskRunnerError::Busy`), so the user never faces stacked Polkit dialogs; the Pause/Resume
@@ -57,7 +57,7 @@ waits on I/O it does not own.
   `PrivilegedExecutor` contract unchanged.
 - **Template import (GitHub #156, review findings CAM-08 / STO-12)**: the fused embedding is
   serialized to JSON in a zeroizing buffer and piped to the standard input of
-  `pkexec soos-enroll import --uid <uid> --file -` (`privileged::import_helper_args`,
+  `pkexec /usr/bin/soos-enroll import --uid <uid> --file -` (`privileged::import_helper_args`,
   `import_template_with`). No file is created, under the temporary directory or anywhere else;
   the child is always reaped, even if it exits before reading its stdin (denied Polkit prompt).
   The fused embedding is held in `Zeroizing<Vec<f32>>` from the enrollment session to the
@@ -97,7 +97,7 @@ temporary directory is gone):
 | Mode | When | Templates |
 |---|---|---|
 | `GuiStore::System` | `--key-file` and `--biometrics-dir` are accessible (root session) | written directly to the system store |
-| `GuiStore::Polkit` | the system store is not accessible (unprivileged session) | no local store at all; list / import / delete go through `pkexec soos-enroll` |
+| `GuiStore::Polkit` | the system store is not accessible (unprivileged session) | no local store at all; list / import / delete go through `pkexec /usr/bin/soos-enroll` |
 | `GuiStore::Developer` | explicit `--dev-store <DIR>` (absolute path) | `<DIR>/master.key` and `<DIR>/biometrics` (created `0700`); never used by PAM |
 
 The developer mode shows a persistent orange banner under the header ("DEVELOPER STORE:

@@ -317,8 +317,10 @@ pub(crate) fn frame_sizes_at(path: &std::path::Path) -> Vec<(u32, u32)> {
 
 /// Driver names (`v4l2_capability.driver`, compared trimmed and case-insensitively) of
 /// virtual capture devices whose frames any local process can write: v4l2loopback (which
-/// reports `"v4l2 loopback"`) and the vivid test driver (GitHub #307, CAM-NEW-3).
-pub const VIRTUAL_CAPTURE_DRIVERS: [&str; 3] = ["v4l2 loopback", "v4l2loopback", "vivid"];
+/// reports `"v4l2 loopback"`), the akvcam virtual webcam and the vivid / vimc test drivers
+/// (GitHub #307, CAM-NEW-3).
+pub const VIRTUAL_CAPTURE_DRIVERS: [&str; 5] =
+    ["v4l2 loopback", "v4l2loopback", "akvcam", "vivid", "vimc"];
 
 /// `device_caps` bits of a node that accepts frames from user space: `VIDEO_OUTPUT`,
 /// `VBI_OUTPUT`, `SLICED_VBI_OUTPUT`, `VIDEO_OUTPUT_OVERLAY`, `VIDEO_OUTPUT_MPLANE`,

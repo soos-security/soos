@@ -151,7 +151,7 @@ fn publish_new_key(
     // Best-effort cleanup on every path: the temporary name was created by this call and is
     // never read again (a failed unlink leaves only an inert `0600` copy of a key).
     let _ = std::fs::remove_file(tmp_path);
-    match published {
+    match published.and_then(|()| sync_parent_dir(path)) {
         Ok(()) => Ok(key),
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
             // Another caller published first: its key is authoritative.
@@ -159,6 +159,15 @@ fn publish_new_key(
             read_existing_key(path)
         }
         Err(e) => Err(EvidenceStoreError::Io(e)),
+    }
+}
+
+/// Flushes the directory entry of a just-published key, so a crash right after first-boot
+/// key creation cannot lose the key while templates encrypted with it survive.
+fn sync_parent_dir(path: &Path) -> std::io::Result<()> {
+    match path.parent() {
+        Some(dir) if !dir.as_os_str().is_empty() => std::fs::File::open(dir)?.sync_all(),
+        _ => Ok(()),
     }
 }
 

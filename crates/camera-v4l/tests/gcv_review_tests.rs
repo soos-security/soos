@@ -296,3 +296,19 @@ fn test_gcv_nul_byte_device_path_never_panics() {
     );
     manager.stop();
 }
+
+/// GCV7 (candid review follow-up): other virtual webcam drivers whose capture node reports
+/// capture-only capabilities are refused too (akvcam, the vimc test driver).
+#[test]
+fn test_gcv_akvcam_and_vimc_capture_nodes_are_rejected() {
+    use soos_camera_v4l::{virtual_node_rejection, VirtualNodeRejection};
+    const CAPTURE_ONLY: u32 = 0x0000_0001 | 0x0400_0000;
+    for driver in ["akvcam", "AKVCam ", "vimc"] {
+        assert_eq!(
+            virtual_node_rejection(driver, CAPTURE_ONLY),
+            Some(VirtualNodeRejection::VirtualDriver),
+            "{driver:?} must be rejected as a virtual capture driver"
+        );
+    }
+    assert_eq!(virtual_node_rejection("uvcvideo", CAPTURE_ONLY), None);
+}

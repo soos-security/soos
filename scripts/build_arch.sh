@@ -54,11 +54,19 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         --tar)
-            TAR_BIN="${2:-}"
+            if [[ $# -lt 2 || -z "${2:-}" ]]; then
+                echo "Option --tar requires a value" >&2; usage >&2
+                exit 1
+            fi
+            TAR_BIN="$2"
             shift 2
             ;;
         --compress)
-            COMPRESS="${2:-}"
+            if [[ $# -lt 2 || -z "${2:-}" ]]; then
+                echo "Option --compress requires a value" >&2; usage >&2
+                exit 1
+            fi
+            COMPRESS="$2"
             shift 2
             ;;
         --dry-run)

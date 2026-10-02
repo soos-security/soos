@@ -1709,7 +1709,7 @@ GUI guided enrollment samples one face only, the IPC preview keeps the infrared 
 | GCV18 | `frame_from_preview` refuses unknown wire formats, `255` with data, zero dimensions with data and payloads whose length disagrees with the geometry (`Protocol`); the explicit empty preview is not an error (S2) | `crates/gui/tests/gcv_review_tests.rs::test_gcv_preview_validation_rejects_unknown_format_and_bad_length` | ✅ Verified |
 | GCV19 | `soos-gui` runs `pkexec`, `systemctl` and `soos-enroll` (pause, resume, list, delete) by absolute path, and `/usr/bin/soos-enroll` is where `install.sh`, the PKGBUILD and the RPM spec install it (CAM-NEW-7 b) | `gcv_review_contract::test_gcv_gui_privileged_programs_use_absolute_paths` | ✅ Verified |
 | GCV20 | `Docs/CAMERA_V4L_CRATE.md` states that `MockCameraManager` is compiled unconditionally (the `mock-camera` feature gates nothing) (S1) | `Docs/CAMERA_V4L_CRATE.md` | ✅ Verified |
-| GCV21 | The template import passes `/usr/bin/soos-enroll` to `pkexec` (CAM-NEW-7 b, import path) | none yet | ⬜ Pending (owner decision: `import_privacy_tests::test_import_helper_args_use_stdin` and `import_privacy_tests::test_import_finalize_pipes_embedding_without_temp_file` pin the relative `soos-enroll` program name of `import_helper_args`) |
+| GCV21 | The template import passes `/usr/bin/soos-enroll` (`SOOS_ENROLL_PROGRAM`) to `pkexec` (CAM-NEW-7 b, import path; owner-approved 2026-10-02) | `crates/gui/tests/import_privacy_tests.rs::test_import_helper_args_use_stdin`, `crates/gui/tests/import_privacy_tests.rs::test_import_finalize_pipes_embedding_without_temp_file` | ✅ Verified |
 
 ## Component: `evidence-sweep-fd-listing` (GitHub #293, evidence sweep and `v4l` teardown hardening items, `fix/p3fu4-evidence-sweep-fd`)
 

@@ -417,7 +417,7 @@ refuses, in this order:
 |---|---|---|
 | `MemToMem` | `device_caps & V4L2_MEM_TO_MEM_CAPS` (`VIDEO_M2M`, `VIDEO_M2M_MPLANE`) | `rejected_mem_to_mem` |
 | `OutputCapable` | `device_caps & V4L2_OUTPUT_CAPABLE_CAPS` (`VIDEO_OUTPUT`, `VBI_OUTPUT`, `SLICED_VBI_OUTPUT`, `VIDEO_OUTPUT_OVERLAY`, `VIDEO_OUTPUT_MPLANE`, `SDR_OUTPUT`, `META_OUTPUT`) | `rejected_output_capable` |
-| `VirtualDriver` | `driver` (trimmed, case-insensitive) in `VIRTUAL_CAPTURE_DRIVERS` = `v4l2 loopback`, `v4l2loopback`, `vivid` (v4l2loopback with `exclusive_caps=1` hides its output bit) | `rejected_virtual_driver` |
+| `VirtualDriver` | `driver` (trimmed, case-insensitive) in `VIRTUAL_CAPTURE_DRIVERS` = `v4l2 loopback`, `v4l2loopback`, `akvcam`, `vivid`, `vimc` (v4l2loopback with `exclusive_caps=1` hides its output bit) | `rejected_virtual_driver` |
 
 - `V4lNodeCapabilities` carries `driver` and `device_caps`; `enumerate_capture_devices_with` drops
   rejected nodes (debug log with the node and the reason), so auto-selection and re-resolution

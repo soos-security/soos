@@ -137,7 +137,7 @@ touch a physical webcam.
 
 ## 9. Known Limitations / Follow-ups
 
-- **CAM-NEW-7 (b), import path (owner decision required)**: `privileged::import_helper_args` still
+- **Resolved (see the integration note below; owner-approved 2026-10-02).** ~~CAM-NEW-7 (b), import path (owner decision required)~~: `privileged::import_helper_args` still
   starts with the relative `soos-enroll`, which `pkexec` resolves through the caller's `PATH`.
   Changing it to `/usr/bin/soos-enroll` changes two existing assertions:
   `import_privacy_tests::test_import_helper_args_use_stdin` (`"soos-enroll"` →
@@ -163,3 +163,14 @@ change of two existing assertions in `crates/gui/tests/import_privacy_tests.rs`:
 
 The rest of both tests (stdin, no temporary file, `--yes` consent) is unchanged. With this, #314 is
 fully delivered.
+
+## Candid review follow-ups (batch merge)
+
+- `VIRTUAL_CAPTURE_DRIVERS` also lists `akvcam` (a virtual webcam whose capture node reports
+  capture-only capabilities) and the `vimc` test driver; red test
+  `gcv_review_tests::test_gcv_akvcam_and_vimc_capture_nodes_are_rejected` (failed before the list
+  change). Matrix GCV21 now cites the import-path tests; `Docs/GUI_APPLICATION.md` shows the
+  absolute `pkexec /usr/bin/soos-enroll` commands.
+- Both store crates fsync the key directory after publishing a new key (`sync_parent_dir`), so a
+  crash right after first-boot creation cannot lose the key while templates encrypted with it
+  survive; `scripts/build_arch.sh` refuses `--tar` / `--compress` without a value.
