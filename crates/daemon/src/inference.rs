@@ -74,6 +74,8 @@ fn clamp_estimate_micros(micros: u64) -> u64 {
 pub struct RequestDeadline {
     deadline_ns: u64,
     outer_deadline: Instant,
+    /// Captures stamped before this monotonic instant are never evaluated (0: no bound).
+    not_before_ns: u64,
 }
 
 impl RequestDeadline {
@@ -103,7 +105,25 @@ impl RequestDeadline {
         Self {
             deadline_ns,
             outer_deadline,
+            not_before_ns: 0,
         }
+    }
+
+    /// Returns this window with the evaluation lower bound `not_before_ns` (monotonic clock
+    /// domain): captures stamped before it are never evaluated. `0` means no bound. The bound
+    /// does not change the remaining budget, the admission or the expiry of the window.
+    #[must_use]
+    pub const fn with_not_before(self, not_before_ns: u64) -> Self {
+        Self {
+            not_before_ns,
+            ..self
+        }
+    }
+
+    /// The evaluation lower bound (`0` when none was set).
+    #[must_use]
+    pub const fn not_before_ns(&self) -> u64 {
+        self.not_before_ns
     }
 
     /// Absolute deadline in the monotonic nanosecond clock domain (client bound only).

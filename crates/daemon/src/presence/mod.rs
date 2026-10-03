@@ -79,6 +79,13 @@ pub const MAX_SYSFS_ATTR_BYTES: usize = 64;
 /// Bound of one account check on the blocking pool; expiry is `Undeterminable`.
 pub const ACCOUNT_CHECK_TIMEOUT_MS: u64 = 500;
 
+/// Settle period after a presence scan woke the camera (GitHub #329): captures stamped
+/// earlier, while the sensor's auto-exposure is still converging, are never evaluated (no
+/// pass, no spoof). Presence only; the PAM path keeps the instant-wake contract
+/// (`DAEMON_DEFAULT_WARMUP_FRAMES` = 0). Bounded by construction to
+/// `1 ..= config::MIN_SCAN_INTERVAL_MS`; not configurable.
+pub const PRESENCE_WAKE_SETTLE_MS: u64 = 1000;
+
 /// Maximum length in bytes of a logind user name (`UserName::parse`).
 pub const MAX_USER_NAME_LEN: usize = 256;
 

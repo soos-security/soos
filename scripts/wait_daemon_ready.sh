@@ -11,13 +11,20 @@
 #      soos-daemon.service skips the start: fail immediately, never wait);
 #   2. the daemon socket exists and is a Unix socket (polled every 0.5 s, for
 #      at most --timeout seconds);
-#   3. 'soos-admin --format json --socket-path <sock> status' succeeds.
+#   3. 'soos-admin --format json --socket-path <sock> status' exits 0, i.e.
+#      the daemon reports "is_healthy": true. Right after a (re)start the
+#      camera is still starting and the status is unhealthy, so the query is
+#      repeated every 0.5 s within the same --timeout bound (GitHub #329).
+#      Every attempt is bounded by 'timeout --kill-after=1 5' when coreutils
+#      'timeout' supports it. Only the final attempt's report is printed: the
+#      healthy one on success, the last completed one on timeout.
 #
 # Options:
 #   --socket <PATH>     Daemon socket (default: /run/soos/daemon.sock)
 #   --manifest <PATH>   Deployed models manifest (default: /var/lib/soos/models/manifest.toml)
 #   --admin <PATH>      soos-admin binary (default: soos-admin from PATH)
-#   --timeout <SECS>    Maximum wait for the socket, 1..300 (default: 30)
+#   --timeout <SECS>    Maximum wait for the socket and a healthy status,
+#                       1..300 (default: 30)
 #   -h, --help          Display this help message
 #
 # Exit codes: 0 ready, 1 not ready, 2 usage error.
@@ -30,12 +37,14 @@ MANIFEST_PATH="/var/lib/soos/models/manifest.toml"
 ADMIN_BIN="soos-admin"
 TIMEOUT_S=30
 readonly MAX_TIMEOUT_S=300
+readonly POLL_INTERVAL_S=0.5
+readonly ATTEMPT_TIMEOUT_S=5
 
 usage() {
     cat <<EOF
 Usage: $(basename "$0") [--socket PATH] [--manifest PATH] [--admin PATH] [--timeout SECS]
 
-Waits (bounded) until soos-daemon answers, then prints 'soos-admin status' as JSON.
+Waits (bounded) until soos-daemon reports healthy, then prints 'soos-admin status' as JSON.
 Exit codes: 0 ready, 1 not ready, 2 usage error.
 EOF
 }
@@ -82,6 +91,10 @@ if [[ ! -f "${MANIFEST_PATH}" ]]; then
     exit 1
 fi
 
+# One bound covers the socket wait and the health poll. Only SECONDS deltas
+# are used (SECONDS may be inherited from the environment; never 'date').
+start=${SECONDS}
+
 # 2. Bounded wait for the socket (two polls per second).
 polls=$((TIMEOUT_S * 2))
 while [[ ! -S "${SOCKET_PATH}" ]]; do
@@ -91,13 +104,44 @@ while [[ ! -S "${SOCKET_PATH}" ]]; do
         exit 1
     fi
     polls=$((polls - 1))
-    sleep 0.5
+    sleep "${POLL_INTERVAL_S}"
 done
 
-# 3. The daemon answers a status query.
-if ! "${ADMIN_BIN}" --format json --socket-path "${SOCKET_PATH}" status; then
-    echo "[ERROR] soos-daemon socket exists but '${ADMIN_BIN} status' failed." >&2
-    echo "        Inspect: journalctl -u soos-daemon.service -n 50" >&2
-    exit 1
+# 3. Poll the status until the daemon reports healthy (bounded).
+# Each attempt is bounded by coreutils 'timeout' (whole process group, no
+# --foreground) once a capability probe shows it supports --kill-after;
+# otherwise the attempt runs unwrapped (degraded mode).
+attempt_prefix=()
+if command -v timeout >/dev/null 2>&1 \
+    && timeout --kill-after=1 "${ATTEMPT_TIMEOUT_S}" true >/dev/null 2>&1; then
+    attempt_prefix=(timeout --kill-after=1 "${ATTEMPT_TIMEOUT_S}")
+else
+    echo "[WARN] coreutils 'timeout --kill-after' is unavailable: status attempts are not individually bounded." >&2
 fi
-exit 0
+
+last_report=""
+have_report=0
+while true; do
+    rc=0
+    report="$(${attempt_prefix[@]+"${attempt_prefix[@]}"} "${ADMIN_BIN}" --format json --socket-path "${SOCKET_PATH}" status 2>/dev/null)" || rc=$?
+    if (( rc == 0 )); then
+        printf '%s\n' "${report}"
+        exit 0
+    fi
+    # A killed attempt (124: timed out, 137: SIGKILL) contributes no output.
+    if (( rc != 124 && rc != 137 )) && [[ -n "${report}" ]]; then
+        last_report="${report}"
+        have_report=1
+    fi
+    if (( SECONDS - start >= TIMEOUT_S + 1 )); then
+        break
+    fi
+    sleep "${POLL_INTERVAL_S}"
+done
+
+if (( have_report == 1 )); then
+    printf '%s\n' "${last_report}"
+fi
+echo "[ERROR] soos-daemon did not report healthy within ${TIMEOUT_S} s ('${ADMIN_BIN} status' kept failing)." >&2
+echo "        Inspect: soos-admin status; journalctl -u soos-daemon.service -n 50" >&2
+exit 1

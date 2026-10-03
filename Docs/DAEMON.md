@@ -342,6 +342,17 @@ worker panic is logged once (`error`) and disables presence until the next daemo
    (`clock_unavailable`) with no attempt, no camera wake and no unlock.
 10. The unchanged pipeline (camera wake, `k = 3` consecutive passing captures, any spoof vetoes,
    `[pipeline.thresholds]`) runs; a spoof veto is logged at `warn` and never sealed as evidence.
+   **Wake settle (GitHub #329)**: when the camera was not streaming before the scan (`is_ready()`
+   sampled before `notify_activity`), captures stamped earlier than
+   `PRESENCE_WAKE_SETTLE_MS` (1000 ms, `crates/daemon/src/presence/mod.rs`, not configurable) after
+   the wake are never evaluated, because the sensor's auto-exposure is still converging and
+   MiniFASNet classifies such frames as spoof. The bound travels in the request window
+   (`RequestDeadline::with_not_before`, read by `run_face_consensus` through `not_before_ns()`);
+   a skipped capture is neither a pass nor a spoof (no admission, no inference, no estimate
+   decay), and the 900 ms decision budget starts after the settle. A scan of a streaming camera
+   applies no settle. Presence only: the PAM path computes its window with `RequestDeadline::compute`
+   (bound 0, nothing skipped) and keeps the instant wake (`warmup_frames` = 0); PAD rules and
+   thresholds are unchanged, so any settled spoof capture still vetoes the scan.
 11. After an `Allow`, a fresh logind re-check of the same session ID (still bound, locked, same
    UID and same `Name`), a fresh account check, a lid re-check (a lid closed during the scan
    refuses; a read error does not) and a kill-switch re-check must pass within 1000 ms

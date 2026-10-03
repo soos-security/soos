@@ -408,8 +408,12 @@ if [[ "${START_UNIT}" = true && ( "${LIVE_INSTALL}" = false || "${SKIP_SYSTEMD}"
     preflight_fail "--start requires a live install (no --destdir) without --skip-systemd."
 fi
 
-# A.2 Required tools.
-for tool in install mv cp rm rmdir mkdir chmod; do
+# A.2 Required tools ('find' only for the --build target directory check).
+REQUIRED_TOOLS=(install mv cp rm rmdir mkdir chmod)
+if [[ "${DO_BUILD}" = true ]]; then
+    REQUIRED_TOOLS+=(find)
+fi
+for tool in "${REQUIRED_TOOLS[@]}"; do
     command -v "${tool}" >/dev/null 2>&1 || preflight_fail "Required tool not found: ${tool}"
 done
 
@@ -465,6 +469,88 @@ run_release_build() {
         (cd "${WORKSPACE_ROOT}" && ./scripts/check_build_deps.sh && SOOS_BINDIR="${PREFIX}/bin" "${BUILD_CMD[@]}")
     fi
 }
+
+# The account cargo will run as: the invoking user of a root shell (empty when
+# unknown: run_release_build then decides from the checkout owner), otherwise
+# the current user.
+resolve_build_user() {
+    if [[ "$(id -u)" -eq 0 ]]; then
+        invoking_user
+    else
+        id -un 2>/dev/null || true
+    fi
+}
+
+# Counts one preflight error printed verbatim: unlike error() (echo -e), escape
+# sequences are never interpreted, so printf %q-quoted, user-controlled paths
+# stay inert on the terminal.
+preflight_fail_verbatim() {
+    local line
+    for line in "$@"; do
+        printf '%b[ERROR]%b %s\n' "${RED}" "${NC}" "${line}" >&2
+    done
+    PREFLIGHT_ERRORS=$((PREFLIGHT_ERRORS + 1))
+}
+
+# Read-only check (GitHub #329): the build user must own and be able to write
+# every entry of the cargo target directory, otherwise cargo fails late with
+# 'Permission denied' (typically on files left by an earlier root build). It
+# never changes anything: the chown/chmod lines are advice only.
+BUILD_TARGET_DIR="${CARGO_TARGET_DIR:-${WORKSPACE_ROOT}/target}"
+check_build_target_dir() {
+    local user="$1"
+    local target="${BUILD_TARGET_DIR}"
+    local uid="" hit="" rc=0 q_target q_user q_hit
+    # Never let find parse the path as an option or a predicate.
+    if [[ "${target}" != /* ]]; then
+        target="./${target}"
+    fi
+    q_target="$(printf '%q' "${target}")"
+    if [[ ! -e "${target}" && ! -L "${target}" ]]; then
+        return 0 # cargo creates it as the build user
+    fi
+    if [[ ! -d "${target}" ]]; then
+        preflight_fail_verbatim "The cargo target directory ${q_target} is not a directory."
+        return 0
+    fi
+    # Root build in a root-owned checkout, or a user that does not resolve
+    # (runuser then fails closed): nothing to check.
+    [[ -n "${user}" ]] || return 0
+    uid="$(id -u -- "${user}" 2>/dev/null)" || return 0
+    [[ "${uid}" =~ ^[0-9]+$ ]] || return 0
+    [[ "${uid}" != "0" ]] || return 0
+    q_user="$(printf '%q' "${user}")"
+
+    hit="$(find -H "${target}" ! -uid "${uid}" -print -quit 2>/dev/null)" || rc=$?
+    if [[ -n "${hit}" ]]; then
+        q_hit="$(printf '%q' "${hit}")"
+        preflight_fail_verbatim \
+            "The cargo target directory ${q_target} holds files not owned by the build user '${q_user}' (first: ${q_hit}), e.g. left by an earlier root build; cargo would fail with 'Permission denied'." \
+            "Fix it with: sudo chown -R ${q_user}: ${q_target}"
+        return 0
+    fi
+    if (( rc == 0 )); then
+        hit="$(find -H "${target}" -type d ! -perm -u+w -print -quit 2>/dev/null)" || rc=$?
+        if [[ -n "${hit}" ]]; then
+            q_hit="$(printf '%q' "${hit}")"
+            preflight_fail_verbatim \
+                "The cargo target directory ${q_target} holds a directory the build user '${q_user}' cannot write (first: ${q_hit})." \
+                "Fix it with: chmod -R u+w ${q_target}"
+            return 0
+        fi
+    fi
+    if (( rc != 0 )); then
+        # Unreadable subtree or filesystem loop: fail closed.
+        preflight_fail_verbatim \
+            "The cargo target directory ${q_target} cannot be fully inspected for the build user '${q_user}' (find failed)." \
+            "Fix it with: sudo chown -R ${q_user}: ${q_target}"
+    fi
+    return 0
+}
+
+if [[ "${DO_BUILD}" = true ]]; then
+    check_build_target_dir "$(resolve_build_user)"
+fi
 
 if [[ "${DO_BUILD}" = true ]]; then
     if [[ "${DRY_RUN}" = true ]]; then

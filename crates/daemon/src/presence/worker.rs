@@ -21,7 +21,7 @@ use super::tracker::{select_candidate, LockEntry, LockTracker};
 use super::{
     reconnect_backoff, ACCOUNT_CHECK_TIMEOUT_MS, DBUS_CALL_TIMEOUT_MS, DBUS_CONNECT_TIMEOUT_MS,
     LOCK_POLL_INTERVAL_MS, MAX_ALLOW_TO_UNLOCK_MS, MAX_PRESENCE_SEAT_SESSIONS,
-    PRESENCE_RESERVED_ATTEMPTS,
+    PRESENCE_RESERVED_ATTEMPTS, PRESENCE_WAKE_SETTLE_MS,
 };
 use crate::consensus::{
     run_face_consensus, wake_camera, ConsensusContext, ConsensusRun, MAX_CAMERA_WAKE_WAIT_MS,
@@ -629,7 +629,9 @@ impl<L: PresenceLogind, D: DisplayProbe, A: AccountGuard> PresenceWorker<L, D, A
         } = candidate;
         let uid = entry.uid;
 
-        // 11. Camera wake.
+        // 11. Camera wake. Whether this scan wakes the camera is sampled before
+        // `notify_activity` (GitHub #329): a woken sensor needs its auto-exposure to settle.
+        let woke = !self.pipeline.camera.is_ready();
         self.pipeline.camera.notify_activity();
         if !wake_camera(
             &self.pipeline.camera,
@@ -645,12 +647,32 @@ impl<L: PresenceLogind, D: DisplayProbe, A: AccountGuard> PresenceWorker<L, D, A
         let Ok(start_ns) = (self.clock_fn)() else {
             return ScanOutcome::Aborted(ReasonClass::InternalError);
         };
+        // After a wake, captures stamped before `start + PRESENCE_WAKE_SETTLE_MS` are never
+        // evaluated; the decision budget starts at the end of the settle, so the settle never
+        // eats it. A scan of a streaming camera keeps the plain window (bound 0).
+        let settle_ms = if woke { PRESENCE_WAKE_SETTLE_MS } else { 0 };
+        let not_before_ns = if woke {
+            start_ns.saturating_add(settle_ms.saturating_mul(1_000_000))
+        } else {
+            0
+        };
+        if woke {
+            debug!(
+                settle_ms,
+                "Camera woken by presence; captures before the settle are not evaluated"
+            );
+        }
         let deadline = RequestDeadline::compute(
-            start_ns,
+            not_before_ns.max(start_ns),
             0,
             Instant::now(),
-            Duration::from_millis(DECISION_BUDGET_MS.saturating_add(RESPONSE_WRITE_MARGIN_MS)),
-        );
+            Duration::from_millis(
+                DECISION_BUDGET_MS
+                    .saturating_add(RESPONSE_WRITE_MARGIN_MS)
+                    .saturating_add(settle_ms),
+            ),
+        )
+        .with_not_before(not_before_ns);
         let run = {
             let ctx = ConsensusContext {
                 camera: &self.pipeline.camera,
