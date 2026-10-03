@@ -257,6 +257,11 @@ mod presence_followups_contract;
 #[cfg(all(test, unix))]
 mod upgrade_procedure_contract;
 
+/// Install readiness health poll, foreign-owned build directory preflight and the
+/// presence-only wake settle (GitHub #329; rows IWP1–IWP7, IWP11, IWP13).
+#[cfg(all(test, unix))]
+mod install_presence_warmup_contract;
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,

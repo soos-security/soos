@@ -29,7 +29,8 @@ models (`scripts/download_models.sh`, needs `curl`, no Python) before enabling `
 every change it made if any step fails. It installs only the PAM template of the detected distribution
 (`--distro` overrides). `soos-daemon.service` does not start before the models manifest is deployed;
 `sudo ./scripts/install.sh --start` (or `sudo ./scripts/wait_daemon_ready.sh` after `systemctl start soos-daemon`)
-waits at most 30 s for the daemon and prints its JSON status. PAM activation stays a separate, explicit step
+waits at most 30 s until the daemon reports healthy and prints its JSON status. `--build` refuses, before building, a cargo
+target directory the build user cannot write (e.g. files left by a root build) and prints the `sudo chown -R <user>: <target>` fix. PAM activation stays a separate, explicit step
 (see [`Docs/DISTRIBUTION_DEPLOYMENT.md`](Docs/DISTRIBUTION_DEPLOYMENT.md)).
 
 ### 2. Start the Daemon and Enroll

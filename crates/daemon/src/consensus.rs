@@ -194,7 +194,13 @@ pub async fn run_face_consensus(
             if is_new {
                 last_sequence = Some(frame.sequence);
 
-                if is_frame_fresh(frame.timestamp_mono_ns, cur_ns) {
+                if frame.timestamp_mono_ns < deadline.not_before_ns() {
+                    // GitHub #329: a capture stamped before the window's lower bound
+                    // (e.g. while the sensor's auto-exposure settles after a presence
+                    // wake) is never evaluated: neither a pass nor a spoof, no admission,
+                    // no inference, no estimate decay. An unknown stamp (0) under a bound
+                    // is never treated as settled. Bound 0 (every PAM request) skips nothing.
+                } else if is_frame_fresh(frame.timestamp_mono_ns, cur_ns) {
                     last_capture_stale = false;
 
                     // Background priority (GitHub #323): never start an inference while a
