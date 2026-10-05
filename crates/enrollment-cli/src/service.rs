@@ -12,7 +12,8 @@ use zeroize::Zeroizing;
 
 use soos_biometric_store::{BiometricStore, BiometricTemplate, MasterKey, DEFAULT_BIOMETRICS_DIR};
 use soos_camera_v4l::{
-    CameraConfigBuilder, CameraManager, Frame, MockCameraManager, V4lCameraManager,
+    CameraConfigBuilder, CameraErrorKind, CameraManager, CameraStatus, Frame, MockCameraManager,
+    V4lCameraManager,
 };
 use soos_inference_ort::{
     BoundingBox, FaceDetection, MockEmbeddingExtractor, MockFaceDetector, MockPadDetector,
@@ -686,7 +687,11 @@ impl EnrollmentService {
     ///
     /// # Errors
     ///
-    /// [`soos_camera_v4l::CameraError::Starved`] when no (fresh) frame arrives in time.
+    /// [`EnrollmentCliError::CameraBusy`] when no (fresh) frame arrives in time and the
+    /// camera reports `CameraStatus::Error { kind: CameraErrorKind::DeviceBusy, .. }`
+    /// (another process, normally `soos-daemon`, holds the device; GitHub #337).
+    /// [`soos_camera_v4l::CameraError::Starved`] when no (fresh) frame arrives in time for
+    /// any other camera status.
     fn acquire_frame_after(
         &self,
         previous_sequence: Option<u64>,
@@ -708,9 +713,20 @@ impl EnrollmentService {
                 }
             }
             if start.elapsed() >= budget {
-                return Err(EnrollmentCliError::Camera(
-                    soos_camera_v4l::CameraError::Starved,
-                ));
+                // The status is read only once the budget has expired, so a frame that
+                // arrives in time is always used whatever the status (GitHub #337).
+                let busy = matches!(
+                    camera.status(),
+                    CameraStatus::Error {
+                        kind: CameraErrorKind::DeviceBusy,
+                        ..
+                    }
+                );
+                return Err(if busy {
+                    EnrollmentCliError::CameraBusy
+                } else {
+                    EnrollmentCliError::Camera(soos_camera_v4l::CameraError::Starved)
+                });
             }
             std::thread::sleep(Duration::from_millis(FRAME_POLL_INTERVAL_MS));
         }
