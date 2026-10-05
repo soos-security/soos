@@ -262,6 +262,12 @@ mod upgrade_procedure_contract;
 #[cfg(all(test, unix))]
 mod install_presence_warmup_contract;
 
+/// Build preflight read-only files and unreadable subtree, readiness helper bound and
+/// stderr, relative `CARGO_TARGET_DIR`, presence-only stream settle, physical procedure and
+/// GDM shared-rule documentation (GitHub #331; rows IGF1–IGF5, IGF9, IGF10, IGF12, IGF13, IGF19).
+#[cfg(all(test, unix))]
+mod install_gdm_followups_contract;
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,

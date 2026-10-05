@@ -17,7 +17,17 @@
 #      repeated every 0.5 s within the same --timeout bound (GitHub #329).
 #      Every attempt is bounded by 'timeout --kill-after=1 5' when coreutils
 #      'timeout' supports it. Only the final attempt's report is printed: the
-#      healthy one on success, the last completed one on timeout.
+#      healthy one on success, the last completed one on timeout. On timeout
+#      the error also shows the last non-empty stderr of 'soos-admin status'
+#      (at most 1024 characters, control characters printed as '?'). An exit
+#      status of 126 or 127 (soos-admin not executable / not found) stops at
+#      once with exit 1 (GitHub #331).
+#
+# Bound: --timeout bounds the socket wait and the
+# start of the last status attempt; the worst case is about --timeout + 7.5 s
+# (1 s SECONDS granularity, 0.5 s poll, one 5 s attempt plus 1 s kill grace),
+# i.e. about 37.5 s with the default. Without coreutils 'timeout --kill-after'
+# an attempt is not bounded.
 #
 # Options:
 #   --socket <PATH>     Daemon socket (default: /run/soos/daemon.sock)
@@ -39,12 +49,19 @@ TIMEOUT_S=30
 readonly MAX_TIMEOUT_S=300
 readonly POLL_INTERVAL_S=0.5
 readonly ATTEMPT_TIMEOUT_S=5
+readonly ADMIN_STDERR_TAIL_MAX=1024
+# Bytes of one attempt's stderr ever held in memory (only the last ones are kept).
+readonly ADMIN_STDERR_CAPTURE_BYTES=4096
 
 usage() {
     cat <<EOF
 Usage: $(basename "$0") [--socket PATH] [--manifest PATH] [--admin PATH] [--timeout SECS]
 
 Waits (bounded) until soos-daemon reports healthy, then prints 'soos-admin status' as JSON.
+--timeout (1..300, default 30) bounds the socket wait and the start of the last status
+attempt; the worst case is about --timeout + 7.5 s (1 s SECONDS granularity, 0.5 s poll,
+one 5 s attempt plus 1 s kill grace). Without coreutils 'timeout --kill-after' an attempt
+is not bounded.
 Exit codes: 0 ready, 1 not ready, 2 usage error.
 EOF
 }
@@ -119,19 +136,85 @@ else
     echo "[WARN] coreutils 'timeout --kill-after' is unavailable: status attempts are not individually bounded." >&2
 fi
 
+# Keeps the last ADMIN_STDERR_TAIL_MAX characters of a stderr text.
+bounded_tail() {
+    local text="$1"
+    if (( ${#text} > ADMIN_STDERR_TAIL_MAX )); then
+        text="${text:${#text}-ADMIN_STDERR_TAIL_MAX}"
+    fi
+    printf '%s' "${text}"
+}
+
+# Prints a stderr tail on stderr, each line indented by 8 spaces, every control
+# character (except the line breaks) replaced by '?'; never interpreted.
+print_tail() {
+    local text="$1" line
+    while [[ "${text}" == *$'\n' ]]; do
+        text="${text%$'\n'}"
+    done
+    [[ -n "${text}" ]] || return 0
+    while IFS= read -r line; do
+        printf '        %s\n' "${line//[[:cntrl:]]/?}" >&2
+    done <<< "${text}"
+}
+
+q_admin="$(printf '%q' "${ADMIN_BIN}")"
 last_report=""
 have_report=0
+last_error=""
 while true; do
-    rc=0
-    report="$(${attempt_prefix[@]+"${attempt_prefix[@]}"} "${ADMIN_BIN}" --format json --socket-path "${SOCKET_PATH}" status 2>/dev/null)" || rc=$?
+    # One attempt: stdout, stderr and exit status captured separately, in memory
+    # ("<stderr>\037<status>\037<stdout>", parsed from the right). Stderr passes through
+    # 'tail -c', so at most ADMIN_STDERR_CAPTURE_BYTES of it are ever held. A report that
+    # contains a raw \037 is not valid soos-admin JSON: it is dropped.
+    captured="$(
+        {
+            attempt_rc=0
+            out="$(
+                {
+                    { ${attempt_prefix[@]+"${attempt_prefix[@]}"} "${ADMIN_BIN}" --format json --socket-path "${SOCKET_PATH}" status 2>&1 1>&5 5>&-; } \
+                        | tail -c "${ADMIN_STDERR_CAPTURE_BYTES}" >&3
+                    exit "${PIPESTATUS[0]}"
+                } 5>&1
+            )" || attempt_rc=$?
+            if [[ "${out}" == *$'\037'* ]]; then
+                out=""
+                (( attempt_rc != 0 )) || attempt_rc=1
+            fi
+            printf '\037%s\037%s' "${attempt_rc}" "${out}"
+        } 3>&1
+    )"
+    report="${captured##*$'\037'}"
+    rest="${captured%$'\037'*}"
+    rc="${rest##*$'\037'}"
+    err="${rest%$'\037'*}"
+    [[ "${rc}" =~ ^[0-9]+$ ]] || rc=1
     if (( rc == 0 )); then
         printf '%s\n' "${report}"
         exit 0
     fi
+    if (( rc == 126 || rc == 127 )); then
+        if (( rc == 126 )); then
+            reason="found but not executable"
+        else
+            reason="not found"
+        fi
+        printf '%s\n' "[ERROR] Cannot run '${q_admin}' (exit ${rc}: ${reason}); readiness cannot be checked." >&2
+        printf '%s\n' "        Pass --admin <PATH> with the installed soos-admin binary." >&2
+        print_tail "$(bounded_tail "${err}")"
+        exit 1
+    fi
     # A killed attempt (124: timed out, 137: SIGKILL) contributes no output.
-    if (( rc != 124 && rc != 137 )) && [[ -n "${report}" ]]; then
-        last_report="${report}"
-        have_report=1
+    if (( rc == 124 || rc == 137 )); then
+        last_error="status attempt killed after ${ATTEMPT_TIMEOUT_S} s (no answer)"
+    else
+        if [[ -n "${report}" ]]; then
+            last_report="${report}"
+            have_report=1
+        fi
+        if [[ -n "${err}" ]]; then
+            last_error="$(bounded_tail "${err}")"
+        fi
     fi
     if (( SECONDS - start >= TIMEOUT_S + 1 )); then
         break
@@ -143,5 +226,9 @@ if (( have_report == 1 )); then
     printf '%s\n' "${last_report}"
 fi
 echo "[ERROR] soos-daemon did not report healthy within ${TIMEOUT_S} s ('${ADMIN_BIN} status' kept failing)." >&2
+if [[ -n "${last_error}" ]]; then
+    printf '%s\n' "        Last '${q_admin} status' error:" >&2
+    print_tail "${last_error}"
+fi
 echo "        Inspect: soos-admin status; journalctl -u soos-daemon.service -n 50" >&2
 exit 1

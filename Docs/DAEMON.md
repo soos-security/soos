@@ -349,8 +349,12 @@ worker panic is logged once (`error`) and disables presence until the next daemo
    MiniFASNet classifies such frames as spoof. The bound travels in the request window
    (`RequestDeadline::with_not_before`, read by `run_face_consensus` through `not_before_ns()`);
    a skipped capture is neither a pass nor a spoof (no admission, no inference, no estimate
-   decay), and the 900 ms decision budget starts after the settle. A scan of a streaming camera
-   applies no settle. Presence only: the PAM path computes its window with `RequestDeadline::compute`
+   decay), and the 900 ms decision budget starts after the settle. **Stream start (GitHub #331)**:
+   the bound is `max(wake ? scan start + settle : 0, stream start + settle)`
+   (`presence_settle_window`), where the stream start is `CameraManager::stream_started_mono_ns()`
+   (the V4L supervisor's CLOCK_MONOTONIC stamp of the stream set-up; `None` by default), so a
+   camera woken by a PAM request less than 1 s before the scan is settled too. A scan of a camera
+   streaming for longer than the settle applies no settle. Presence only: the PAM path computes its window with `RequestDeadline::compute`
    (bound 0, nothing skipped) and keeps the instant wake (`warmup_frames` = 0); PAD rules and
    thresholds are unchanged, so any settled spoof capture still vetoes the scan.
 11. After an `Allow`, a fresh logind re-check of the same session ID (still bound, locked, same

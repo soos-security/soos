@@ -170,6 +170,10 @@ fn run() -> Result<(), AdminCliError> {
                         "  Installed in PAM:  {}",
                         if status.installed { "Yes" } else { "No" }
                     );
+                    if let Some(stack) = &status.shared_stack {
+                        // A validated include name ([A-Za-z0-9._-]): no terminal escapes.
+                        println!("  Shared soos Rule:  {stack}");
+                    }
                     println!("  Disable Flag File: {}", status.disable_file.display());
                     println!(
                         "  Status:            {}",

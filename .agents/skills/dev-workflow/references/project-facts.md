@@ -59,7 +59,9 @@ ADR entry in `AI/DECISIONS.md`. Re-check every value below with the listed `grep
 | `RateLimitConfig::DEFAULT_MAX_ATTEMPTS` / `DEFAULT_WINDOW_DURATION_NS` | `crates/policy/src/rate_limit.rs` | 40 attempts / 60 s per UID, shared by every face request (`sudo` included) and presence scans (was 5 before GitHub #323 [175]) |
 | `PRESENCE_RESERVED_ATTEMPTS` | `crates/daemon/src/presence/mod.rs` | 5 (presence never consumes the last 5 attempts of a window) |
 | `[presence]` `scan_interval_ms` / `lock_grace_ms` | `crates/daemon/src/presence/config.rs` | 2000 / 3000 ms (each `1000..=60000`); presence auto-unlock is enabled by default [175] |
-| `GDM_PAM_LINE` | `crates/admin-cli/src/gdm.rs` | `auth  [success=done default=ignore]  pam_soos.so timeout_ms=2500`, inside a managed block after every pre-credential gate [98] |
+| `GDM_PAM_LINE` | `crates/admin-cli/src/gdm.rs` | `auth  [success=done default=ignore]  pam_soos.so timeout_ms=2500`, inside a managed block after every pre-credential gate [98]; omitted (and an existing block removed) when the delegated stack already reaches a primary `pam_soos.so` rule, GitHub #331 |
+| `PRESENCE_WAKE_SETTLE_MS` | `crates/daemon/src/presence/mod.rs` | 1000 ms (presence-only settle; bound keyed on the scan wake and the camera stream start, GitHub #329/#331) |
+| `SYSTEMCTL_SHOW_TIMEOUT_MS` | `crates/admin-cli/src/status.rs` | 1000 ms (`soos-admin status` kills and reaps a slow `systemctl show`, fields `unknown`) |
 | admin-cli `DEFAULT_TIMEOUT_MS` | `crates/admin-cli/src/args.rs` | 250 ms |
 | Match / PAD thresholds | `crates/vision/src/pipeline.rs`, policy | 0.50 / 0.85 (match default 0.50 since the SFace switch, GitHub #278 [162]; floor `MIN_MATCH_THRESHOLD` 0.40) |
 | `DEFAULT_MINIFASNET_LIVE_CLASS_INDEX` | `crates/inference-ort/src/pad.rs` | 1 |

@@ -23,6 +23,8 @@ pub struct MockCameraManager {
     frozen: Arc<AtomicBool>,
     active_error: Arc<RwLock<Option<CameraError>>>,
     last_activity: Arc<RwLock<Instant>>,
+    /// Test hook of `stream_started_mono_ns` (0 = `None`), GitHub #331.
+    stream_started_ns: AtomicU64,
     worker_handle: Option<JoinHandle<()>>,
 }
 
@@ -194,6 +196,7 @@ impl MockCameraManager {
             sequence,
             active_error,
             last_activity,
+            stream_started_ns: AtomicU64::new(0),
             worker_handle: handle,
         }
     }
@@ -260,6 +263,13 @@ impl MockCameraManager {
             .fetch_max(frame.sequence.saturating_add(1), Ordering::SeqCst);
         store_frame_monotonic(&self.latest_frame, Arc::new(frame));
         self.is_ready.store(true, Ordering::Release);
+    }
+
+    /// Sets the value returned by `stream_started_mono_ns`, regardless of readiness
+    /// (`None` or `Some(0)` mean unknown). Test hook of GitHub #331; the default is `None`.
+    pub fn set_stream_started_mono_ns(&self, ns: Option<u64>) {
+        self.stream_started_ns
+            .store(ns.unwrap_or(0), Ordering::Release);
     }
 
     /// Returns the current configuration.
@@ -370,6 +380,13 @@ impl CameraManager for MockCameraManager {
             CameraStatus::Ready
         } else {
             CameraStatus::Starting
+        }
+    }
+
+    fn stream_started_mono_ns(&self) -> Option<u64> {
+        match self.stream_started_ns.load(Ordering::Acquire) {
+            0 => None,
+            ns => Some(ns),
         }
     }
 }

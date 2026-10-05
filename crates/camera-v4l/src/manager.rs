@@ -89,4 +89,14 @@ pub trait CameraManager: Send + Sync {
             CameraStatus::Starting
         }
     }
+
+    /// CLOCK_MONOTONIC instant, in nanoseconds (the domain of `Frame::timestamp_mono_ns`), at
+    /// which the current capture stream was set up (buffers mapped), immediately before its
+    /// first dequeue, which issues `VIDIOC_STREAMON` (v4l 0.14 starts the stream lazily);
+    /// `None` when it is unknown or the camera is not ready (GitHub #331). Never later than the
+    /// stamp of any frame of that stream. Used only to settle the sensor's auto-exposure before
+    /// presence evaluation; never by the PAM path.
+    fn stream_started_mono_ns(&self) -> Option<u64> {
+        None
+    }
 }

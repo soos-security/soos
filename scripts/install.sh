@@ -34,7 +34,9 @@
 #                            under --destdir only the stage is probed, then
 #                            /usr/lib/security is used with a warning)
 #   --artifact-dir <DIR>     Directory holding the built artifacts
-#                            (default: ${CARGO_TARGET_DIR:-target}/release)
+#                            (default: <target>/release, where <target> is
+#                            $CARGO_TARGET_DIR (a relative value is resolved against
+#                            the checkout) or <checkout>/target)
 #   --build                  Run the dependency preflight and
 #                            'cargo build --release --locked --workspace' first
 #                            (as root: as the invoking sudo/doas/pkexec user; refused
@@ -134,7 +136,9 @@ Options:
   --pam-dir <DIR>          Explicit PAM module directory (auto-detected if omitted;
                            with --destdir only the stage is probed, then
                            /usr/lib/security is used with a warning)
-  --artifact-dir <DIR>     Built artifacts directory (default: target/release)
+  --artifact-dir <DIR>     Built artifacts directory (default: <target>/release, where
+                           <target> is \$CARGO_TARGET_DIR (a relative value is
+                           resolved against the checkout) or <checkout>/target)
   --build                  Check build dependencies, then run
                            'cargo build --release --locked --workspace'
                            (as root: built as the sudo/doas/pkexec invoking user)
@@ -259,7 +263,20 @@ done
 # Clean DESTDIR trailing slash
 DESTDIR="${DESTDIR%/}"
 
-DEFAULT_ARTIFACT_DIR="${CARGO_TARGET_DIR:-${WORKSPACE_ROOT}/target}/release"
+# The cargo target directory as cargo sees it from the checkout (GitHub #331, P-1):
+# resolved once, lexically (no canonicalization), and passed explicitly to the build.
+resolve_cargo_target_dir() {
+    local dir="${CARGO_TARGET_DIR:-}"
+    if [[ -z "${dir}" ]]; then
+        printf '%s' "${WORKSPACE_ROOT}/target"
+    elif [[ "${dir}" == /* ]]; then
+        printf '%s' "${dir}"
+    else
+        printf '%s' "${WORKSPACE_ROOT}/${dir}"
+    fi
+}
+BUILD_TARGET_DIR="$(resolve_cargo_target_dir)"
+DEFAULT_ARTIFACT_DIR="${BUILD_TARGET_DIR}/release"
 if [[ "${DO_BUILD}" = true && -n "${ARTIFACT_DIR}" ]]; then
     error "--build always produces ${DEFAULT_ARTIFACT_DIR}; do not combine it with --artifact-dir"
     exit 1
@@ -461,12 +478,15 @@ run_release_build() {
     if [[ -n "${build_user}" ]]; then
         # Never compile as root inside a user's checkout: build as the invoking user.
         info "Building as the invoking user '${build_user}' (never as root)."
+        # The target directory reaches the inner shell only through the environment
+        # (runuser -u keeps it; the script re-asserts it after the login profile), never
+        # interpolated into the -c string (GitHub #331).
         # shellcheck disable=SC2016 # "$1" is expanded by the inner login shell.
-        runuser -u "${build_user}" -- bash -lc \
-            'cd "$1" && ./scripts/check_build_deps.sh && SOOS_BINDIR="$2" cargo build --release --locked --workspace' \
+        SOOS_CARGO_TARGET_DIR="${BUILD_TARGET_DIR}" runuser -u "${build_user}" -- bash -lc \
+            'cd "$1" && ./scripts/check_build_deps.sh && CARGO_TARGET_DIR="${SOOS_CARGO_TARGET_DIR}" SOOS_BINDIR="$2" cargo build --release --locked --workspace' \
             _ "${WORKSPACE_ROOT}" "${SOOS_BUILD_BINDIR}"
     else
-        (cd "${WORKSPACE_ROOT}" && ./scripts/check_build_deps.sh && SOOS_BINDIR="${PREFIX}/bin" "${BUILD_CMD[@]}")
+        (cd "${WORKSPACE_ROOT}" && ./scripts/check_build_deps.sh && CARGO_TARGET_DIR="${BUILD_TARGET_DIR}" SOOS_BINDIR="${PREFIX}/bin" "${BUILD_CMD[@]}")
     fi
 }
 
@@ -492,11 +512,12 @@ preflight_fail_verbatim() {
     PREFLIGHT_ERRORS=$((PREFLIGHT_ERRORS + 1))
 }
 
-# Read-only check (GitHub #329): the build user must own and be able to write
-# every entry of the cargo target directory, otherwise cargo fails late with
-# 'Permission denied' (typically on files left by an earlier root build). It
-# never changes anything: the chown/chmod lines are advice only.
-BUILD_TARGET_DIR="${CARGO_TARGET_DIR:-${WORKSPACE_ROOT}/target}"
+# Read-only check (GitHub #329, #331): the build user must own, read and write
+# every entry of the cargo target directory (BUILD_TARGET_DIR, resolved once
+# above), otherwise cargo fails late with 'Permission denied' (typically on files
+# left by an earlier root build). It never changes anything: the chown/chmod
+# lines are advice only. The first hit in priority order (owner, read, write)
+# produces exactly one failure; each find runs on its own.
 check_build_target_dir() {
     local user="$1"
     local target="${BUILD_TARGET_DIR}"
@@ -529,21 +550,30 @@ check_build_target_dir() {
             "Fix it with: sudo chown -R ${q_user}: ${q_target}"
         return 0
     fi
-    if (( rc == 0 )); then
-        hit="$(find -H "${target}" -type d ! -perm -u+w -print -quit 2>/dev/null)" || rc=$?
-        if [[ -n "${hit}" ]]; then
-            q_hit="$(printf '%q' "${hit}")"
-            preflight_fail_verbatim \
-                "The cargo target directory ${q_target} holds a directory the build user '${q_user}' cannot write (first: ${q_hit})." \
-                "Fix it with: chmod -R u+w ${q_target}"
-            return 0
-        fi
+    # The alternation is grouped before the actions, so -print -quit applies to both.
+    hit="$(find -H "${target}" \( \( -type d ! -perm -u+rx \) -o \( ! -type d ! -type l ! -perm -u+r \) \) -print -quit 2>/dev/null)" || rc=$?
+    if [[ -n "${hit}" ]]; then
+        q_hit="$(printf '%q' "${hit}")"
+        preflight_fail_verbatim \
+            "The cargo target directory ${q_target} holds an entry the build user '${q_user}' cannot read (first: ${q_hit})." \
+            "Fix it with: chmod -R u+rwX ${q_target}"
+        return 0
+    fi
+    hit="$(find -H "${target}" ! -type l ! -perm -u+w -print -quit 2>/dev/null)" || rc=$?
+    if [[ -n "${hit}" ]]; then
+        q_hit="$(printf '%q' "${hit}")"
+        local kind="file"
+        [[ -d "${hit}" ]] && kind="directory"
+        preflight_fail_verbatim \
+            "The cargo target directory ${q_target} holds a ${kind} the build user '${q_user}' cannot write (first: ${q_hit})." \
+            "Fix it with: chmod -R u+w ${q_target}"
+        return 0
     fi
     if (( rc != 0 )); then
-        # Unreadable subtree or filesystem loop: fail closed.
+        # Filesystem loop or another find failure without a hit: fail closed.
         preflight_fail_verbatim \
             "The cargo target directory ${q_target} cannot be fully inspected for the build user '${q_user}' (find failed)." \
-            "Fix it with: sudo chown -R ${q_user}: ${q_target}"
+            "Fix it with: sudo chown -R ${q_user}: ${q_target} && chmod -R u+rwX ${q_target}"
     fi
     return 0
 }

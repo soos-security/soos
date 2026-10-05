@@ -1,89 +1,153 @@
 # Candid Review Report
 
-- **Date**: 2026-10-03
-- **Target Branch**: `fix/install-readiness-and-presence-warmup`
-- **Base (merge-base)**: `b16f567`
-- **Reviewed-Diff-Fingerprint**: `1d7229d954d017fa29c5f28c6468067625835f310a45c2d9772637ae8cf1064c`
-- **Audited Files**: `AI/DECISIONS.md`, `AI/VERIFICATION_MATRIX.md`, `AI/architect_spec_install_presence_warmup.md`, `AI/auditor_constraints_install_presence_warmup.md`, `AI/tester_contract_install_presence_warmup.md`, `AI/walkthroughs/178_install_readiness_presence_warmup.md`, `Docs/DAEMON.md`, `Docs/PACKAGING_AND_PROVISIONING.md`, `README.md`, `crates/daemon/src/consensus.rs`, `crates/daemon/src/inference.rs`, `crates/daemon/src/presence/mod.rs`, `crates/daemon/src/presence/worker.rs`, `crates/daemon/tests/presence_wake_settle_consensus_tests.rs`, `crates/daemon/tests/presence_wake_settle_tests.rs`, `scripts/install.sh`, `scripts/wait_daemon_ready.sh`, `tests/invariants/src/install_presence_warmup_contract.rs`, `tests/invariants/src/lib.rs`
+- **Date**: 2026-10-05
+- **Target Branch**: `fix/install-gdm-followups`
+- **Base (merge-base)**: `b05477d`
+- **Reviewed-Diff-Fingerprint**: `093ce4584408c25190daaca347ad5b44cebeb9b9a3ea7bcc1f61b869bc16b191`
+- **Audited Files**: `.agents/skills/dev-workflow/references/project-facts.md`, `AI/ARCHITECTURE.md`,
+  `AI/DECISIONS.md`, `AI/VERIFICATION_MATRIX.md`, `AI/architect_spec_install_gdm_followups.md`,
+  `AI/auditor_constraints_install_gdm_followups.md`, `AI/tester_contract_install_gdm_followups.md`,
+  `AI/walkthroughs/179_install_gdm_followups.md`, `Docs/CAMERA_V4L_CRATE.md`, `Docs/DAEMON.md`,
+  `Docs/DISTRIBUTION_DEPLOYMENT.md`, `Docs/PACKAGING_AND_PROVISIONING.md`, `README.md`,
+  `crates/admin-cli/src/gdm.rs`, `crates/admin-cli/src/main.rs`, `crates/admin-cli/src/pam_stack.rs`,
+  `crates/admin-cli/src/status.rs`, `crates/admin-cli/tests/gdm_shared_rule_tests.rs`,
+  `crates/admin-cli/tests/gdm_shared_status_tests.rs`, `crates/camera-v4l/src/manager.rs`,
+  `crates/camera-v4l/src/mock.rs`, `crates/camera-v4l/src/v4l_impl.rs`,
+  `crates/camera-v4l/src/v4l_impl/supervisor_tests.rs`, `crates/camera-v4l/tests/stream_start_stamp_tests.rs`,
+  `crates/daemon/src/presence/mod.rs`, `crates/daemon/src/presence/worker.rs`,
+  `crates/daemon/tests/common/mod.rs`, `crates/daemon/tests/presence_stream_settle_tests.rs`,
+  `scripts/install.sh`, `scripts/wait_daemon_ready.sh`,
+  `tests/invariants/src/install_gdm_followups_contract.rs`, `tests/invariants/src/lib.rs`,
+  `tests/physical/screensaver_test.md`
 
 ## 1. Executive Summary
 
-GitHub #329 delivers three changes: (1) `scripts/wait_daemon_ready.sh` polls `soos-admin status` until it exits 0, within one `--timeout` bound and with each attempt bounded by `timeout --kill-after=1 5`; (2) `scripts/install.sh --build` runs a read-only check that refuses a cargo target directory holding entries not owned by the build user, or directories without `u+w`, and prints the `chown`/`chmod` fix; (3) a presence-only wake settle: when a presence scan wakes the camera, captures stamped before `wake + 1000 ms` are never evaluated, through `RequestDeadline::with_not_before`.
+Second review round of GitHub #331. The diff covers every acceptance line of the issue:
+(1) build preflight detects read-only files and unreadable subtrees with `chmod -R u+rwX` advice;
+(2) the real `--timeout + 7.5 s` bound of `wait_daemon_ready.sh` is documented; (3) the last
+`soos-admin status` stderr (bounded through `tail -c 4096`, then 1024 characters, control
+characters neutralized) is kept in the timeout error and exit 126/127 fails fast; (4) the presence
+settle is keyed on `CameraManager::stream_started_mono_ns()` as well as on the scan's own wake;
+(P-1) a relative `CARGO_TARGET_DIR` is resolved once against the checkout and passed explicitly to
+cargo; (P-2) `systemctl show` is bounded to 1000 ms with kill + reap and bounded output;
+(§2) physical procedure rollback loop and worker discovery; (§3) `gdm enable` inserts no managed
+block (and removes a redundant one, without touching the backup) when the delegated stack reaches
+an active primary `pam_soos.so` rule, and `gdm status` reports it as installed with
+`shared_stack`.
 
-The raw diff and the code around it were reviewed. Author summaries were not relied on. The skip only filters captures out. It cannot reach `Allow` or erase a veto. Only the presence worker sets it. The dispatcher, config, protocol, PAM and camera-v4l code are byte-identical to `origin/main`. All gates are green: fmt, clippy `-D warnings`, `cargo test -p soos-daemon -p soos-invariants`, `cargo deny` and `bash -n`. No CRITICAL or MAJOR findings. Four MINOR findings and two SUGGESTIONs remain, all in operator messages or documentation wording.
+All three findings of the previous round are resolved: the `RemoveRedundant` path now applies the
+jump-crossing check when managed rules are removed (test
+`test_igf18_block_removal_with_crossing_jump_is_refused`), stderr capture is bounded before
+truncation, and `gdm status` refuses a shared rule that a pre-anchor jump bypasses
+(`jump_skips_anchor`). No CRITICAL or MAJOR finding remains. Targeted test suites
+(`soos-admin-cli`, `soos-invariants`, `soos-camera-v4l` with `mock-camera`,
+`soos-daemon --test presence_stream_settle_tests`) pass locally; both scripts pass `bash -n`; the
+readiness helper was smoke-tested (stderr tail with an ESC byte rendered as `?`, exit 127 stops in
+11 ms).
 
-## 2. Test Changes
+## 2. Test Changes (mechanical listing from step 3, with justification per change)
 
-Mechanical listing from the frozen patch:
-
-- Test files touched: `crates/daemon/tests/presence_wake_settle_consensus_tests.rs` (new, +212), `crates/daemon/tests/presence_wake_settle_tests.rs` (new, +328), `tests/invariants/src/install_presence_warmup_contract.rs` (new), `tests/invariants/src/lib.rs` (+5 lines: the doc comment, `#[cfg(all(test, unix))]` and `mod install_presence_warmup_contract;`).
-- Removed or changed assertions (`^-.*assert|#[test]|...`): **none**.
-- New escape hatches (`#[ignore]`, `#[cfg(any())]`, `should_panic`, tolerance or epsilon): **none**.
-- Inline `mod tests` changes: **none**.
-
-Only additions, as expected. No contract migration is needed. Spot checks of the new tests:
-- `test_iwp_woken_scan_unlocks_after_spoof_looking_wake_frames` fails if `woke` is sampled after `notify_activity()`, because the scan then vetoes.
-- `test_iwp_not_before_past_the_deadline_fails_closed` asserts `Pending`, 0 captures and 0 inferences.
-- `test_iwp_spoof_after_the_settle_still_vetoes` and `test_iwp_constant_spoof_never_unlocks_a_woken_scan` assert the veto survives the settle.
-
-Each of these fails against a plausible wrong implementation. Every test name referenced in matrix rows IWP1–IWP13 resolves to an existing `fn` (checked by grep).
+- Test files touched: `crates/admin-cli/tests/gdm_shared_rule_tests.rs` (new),
+  `crates/admin-cli/tests/gdm_shared_status_tests.rs` (new),
+  `crates/camera-v4l/src/v4l_impl/supervisor_tests.rs` (additions only),
+  `crates/camera-v4l/tests/stream_start_stamp_tests.rs` (new),
+  `crates/daemon/tests/common/mod.rs` (new `SpyCamera::stream_started_ns` field and trait method;
+  default 0 = `None` = previous trait behaviour, no existing assertion touched),
+  `crates/daemon/tests/presence_stream_settle_tests.rs` (new),
+  `tests/invariants/src/install_gdm_followups_contract.rs` (new) and `tests/invariants/src/lib.rs`
+  (module registration), plus inline test modules added in `crates/admin-cli/src/pam_stack.rs`
+  (additions to the existing `mod tests`, one extra `clippy::arithmetic_side_effects` allow scoped
+  to tests) and `crates/admin-cli/src/status.rs` (new `mod systemctl_bound_tests`).
+- Removed/changed assertions: the only `^-` hit is line 61 of the patch, an `AI/DECISIONS.md` ADR
+  paragraph that contains the word "assertion" (amended in place to point at the #331 ADR); it is
+  not a test. **No test assertion was removed or modified.**
+- New escape hatches (`#[ignore]`, `#[cfg(any())]`, `should_panic`, tolerance/epsilon): none.
+- `mod tests` lines changed: none removed; additions only.
 
 ## 3. Deep Reasoning Audit
 
 ### Logic & Architecture
-- **Can the skip produce `Allow` on frames the rules would not accept?** In `consensus.rs:197`, a skipped capture only updates `last_sequence`. It touches neither the aggregator, the spoof capture, admission, the permit, inference nor estimate decay. `Allow` still requires `k` consecutive passing captures that `PadAggregator::record` actually evaluated, and the aggregator is never reset. The skip removes inputs and adds none, and an evaluated spoof still vetoes. → PASS.
-- **Skip placement.** The skip sits before `is_frame_fresh`, the background preemption check, admission, `decay_estimate` (the `frames_evaluated() == 0` branch) and `acquire_within`. A settle therefore cannot decay the estimate, so it cannot make later PAM admission more permissive or less permissive. → PASS.
-- **Timestamp 0.** Production frames are stamped with `CLOCK_MONOTONIC` at dequeue (`camera-v4l/src/capture.rs:745`, `v4l_impl.rs:994`). That is the same domain as the worker's `clock_fn` (`current_monotonic_nanos`). The stamp is 0 only when `clock_gettime` fails, and `0 < not_before` then skips the frame (fail closed). With bound 0, `x < 0` never holds for a `u64`, so PAM behaviour is unchanged. → PASS.
-- **Deadline arithmetic.** `not_before = start_ns.saturating_add(1000 * 1_000_000)`. `compute(max(not_before, start_ns), 0, Instant::now(), 900 + margin + settle)` gives a client deadline of `not_before + 900 ms` and an outer deadline of `now + 900 ms + settle`, which agree. If `start_ns` saturates to `u64::MAX`, every capture is skipped, the result is `Pending` and `ScanOutcome::NoMatch` follows (fail closed). `MAX_ALLOW_TO_UNLOCK_MS` is measured from `allow_ns`, which is read after the consensus, so the longer window does not affect it. → PASS.
-- **Woke detection race.** `woke = !is_ready()` is sampled before `notify_activity()`. If the stream stops between the sample and `notify_activity`, `woke` is false and the scan behaves as before #329, so nothing is weakened. A camera that PAM woke milliseconds earlier also gives `woke = false` (SUGGESTION 2). In the opposite case, a camera that has not yet suspended reports ready, which is correct. → PASS.
-- **Scope / unchanged surfaces.** `git diff --stat origin/main` over `crates/daemon/src/dispatcher.rs`, `crates/daemon/src/config.rs`, `crates/daemon/src/presence/config.rs`, `crates/protocol`, `crates/pam` and `crates/camera-v4l` is empty. `with_not_before` is called only from `presence/worker.rs:675`. Nothing on the IPC path can set the bound: `compute` always sets 0. → PASS.
-- **Preemption during the settle.** While captures are being skipped, the background loop does not check `interactive_demand`. It also holds no inference permit and no policy lock, so a PAM request is never blocked. Preemption fires on the first settled capture. → PASS.
+
+- *Shared-rule classification*: tried `required`/`requisite`/`optional`, `success=ok`,
+  `success=0`, `success=-1`, empty value, duplicate `success`, `default=die|bad`,
+  `new_authtok_reqd=done`, `event=`/`service=` arguments, `pam_soos_other.so`; all rejected by
+  `is_primary_soos_rule` and covered by IGF17. `sufficient`, `done`, `N>=1`, path forms and `-auth`
+  accepted. `service=` exclusion keeps `gdm.disable` effective (verified in
+  `crates/pam/src/config.rs:132`, flag keyed on `PAM_SERVICE` containing `gdm`). PASS.
+- *Ordering*: the primary rule is only recognized inside a delegated stack, after the credential
+  check (a soos rule after `pam_unix.so` still inserts the block, IGF17) and before the gate check,
+  so gates in intermediate stacks are naturally evaluated before the shared rule. A non-primary
+  soos rule before the credential module stays a refusal. PASS.
+- *include vs substack*: with `substack`, `done` ends only the substack and the parent continues;
+  this is stricter than the managed `[success=done]` block, never fail-open. PASS.
+- *Backup integrity*: `RemoveRedundant` never creates or rewrites the backup; `gdm restore` still
+  returns pristine bytes and still requires `--force` for a stale backup (IGF15). PASS.
+- *Jump check on removal*: `pristine != content` with a crossing jump now refuses with the
+  existing error; nothing removed → `Ok(None)` without a check (no target moves). PASS.
+- *Presence settle*: `presence_settle_window` is total over `u64`, saturating, clamps a future
+  stream stamp to `start_ns`, `Some(0)` = `None`, `wait_ms <= settle_ms`; `woke` path keeps the
+  #329 bound; a stream younger than 1000 ms started by a PAM request is now covered. V4L stamp is
+  stored before the first dequeue (STREAMON) and cleared in `withdraw_frames`; the getter returns
+  `None` when not ready. A stale stamp read across a suspend race only lengthens the settle
+  (conservative). The settle is presence-only; the PAM path is untouched. PASS.
+- *Install P-1*: relative `CARGO_TARGET_DIR` resolved lexically against `WORKSPACE_ROOT` and passed
+  explicitly to both build paths, through the environment (never interpolated into `bash -lc`).
+  PASS.
+- *Status P-2*: hanging child killed and reaped at the deadline; a descendant holding stdout only
+  detaches the reader thread (CLI process); oversized output and non-zero exit → `unknown`. PASS.
+- FINDING (MINOR): enable/status disagreement when a pre-anchor jump skips the delegation, see §4.
 
 ### PAM Concurrency & Deadlines
-- `crates/pam` is unchanged, and PAM windows come only from `compute` (`not_before = 0`, test IWP11). The worst-case presence scan grows to about 1.9 s plus the wake wait. It runs at background priority and cannot stall `login`, `sudo` or `gdm`. → PASS.
+
+No file of `crates/pam` changed. The 1000 ms module default now applies to GDM when the shared rule
+is used (owner-accepted trade-off recorded in the issue and ADR). PASS.
 
 ### Panic Safety & Fail-Closed
-- The new Rust code has no `unwrap`, `expect` or indexing (`with_not_before` is a `const fn` struct update). No path leads from an error to `Allow`. A bound past the deadline gives `Pending`, then `NoMatch`.
-- Shell checks:
-  - `install.sh` under `set -euo pipefail`. A failed `find` sets `rc` and is refused ("cannot be fully inspected"). A target that is a dangling symlink or not a directory is refused. A target that does not exist is not checked; cargo creates it. `id -u -- user` failures skip the check, and `runuser` then fails closed.
-  - Exercised in `--dry-run --destdir` with `/etc`, a dir holding a `u-w` subdir, an unreadable subtree, a plain file, a missing path and `-x<ESC>[31m`. Each gave the expected refusal or pass, and preflight exited 2 with `nothing was modified`.
-  - `wait_daemon_ready.sh` was exercised with four fake admins. One unhealthy twice then healthy gave exit 0 and one JSON document. One always unhealthy gave exit 1, the last JSON and the stderr error. One that hangs and ignores TERM was killed by `--kill-after` (≈6 s), printed no partial output, then exited 1. A missing binary exited 1 within the bound.
-  - The `install.sh` exit 70 mapping is unchanged (`install.sh:977-983`).
-  → PASS.
+
+No `unwrap/expect/panic!/unreachable!` in production hunks (all hits are in test modules or test
+files). `plan_gdm_enable` keeps a total match on `DelegatedAuth` without a panic path. Every
+analysis failure in `gdm status` reports `installed: false`. No path turns an error into face
+acceptance. PASS.
 
 ### Test Integrity & Anti-Weakening
-- See §2. Only additions, and the new tests discriminate. → PASS.
+
+New tests would fail against plausible wrong implementations (e.g. accepting `success=ok`,
+creating a backup on removal, skipping the jump check on removal, missing the stream bound, an
+unbounded `systemctl`). No existing test weakened. FINDING (MINOR): no test exercises the new
+`jump_skips_anchor` refusal in `gdm status`.
 
 ### Memory, Bounds & Secrets
-- One added `u64` field and no new allocations. The template is still dropped (zeroized) right after the consensus.
-- The new `debug!` logs only `settle_ms`: no frames, embeddings or credentials.
-- Script loops are bounded:
-  - The socket wait is capped at `2*T` polls.
-  - The health poll breaks once `SECONDS - start >= T + 1`.
-  - Each attempt is capped at 6 s.
-  - An inherited or garbage `SECONDS` is harmless because only deltas are used (tested: `SECONDS=abc` → 0).
 
-  `find -H` uses `-print -quit`, so the cost is at most one walk per check on a clean tree. → PASS.
+PAM files still read with `MAX_PAM_FILE_BYTES` and `MAX_PAM_INCLUDE_DEPTH`; `systemctl` output
+capped at 4097 bytes; readiness stderr capped by `tail -c 4096` then 1024 characters; the
+printed stack name is a validated include name (no terminal escapes). No biometric data or
+credential involved. PASS.
 
 ### Supply Chain & Automation
-- No change to `Cargo.*`, `deny.toml` or `.github/`. `cargo deny --locked check`: advisories, bans, licenses and sources all ok.
-- `find` is required only under `--build`.
-- Option injection is closed: a relative `CARGO_TARGET_DIR` gets a `./` prefix, so `-x…` cannot be parsed as a `find` option or predicate.
-- User-controlled paths are printed with `printf '%q'` through `printf '%b…%s'`, never `echo -e`, so escape sequences stay inert.
 
-→ PASS.
+No `Cargo.*`, `deny.toml`, `.github/` or hook change. Scripts: no new external dependency beyond
+coreutils `tail`/`find`; `printf %q` used for every user-controlled path in messages. PASS.
 
 ### English-Only Policy
-- Code, comments, docs, ADR, matrix and walkthrough 178 are in English. The only non-ASCII characters are typographic symbols (`—`, `⇒`, `≠`, `✅`). → PASS.
+
+All added code, comments, docs and walkthrough text are English. PASS.
 
 ## 4. Detailed Findings & Action Items
 
-- **[MINOR]** `scripts/install.sh:545-546`: when `find` fails (unreadable subtree, e.g. a `0000` directory owned by the build user, reachable in a non-root `--dry-run`/`--destdir` run), the advice is `sudo chown -R <user>: <target>`. Ownership is already correct, so that command does not fix the error. Correction: print an advice that covers both causes, e.g. `Fix it with: sudo chown -R <user>: <target> && chmod -R u+rwX <target>`, or say plainly that the subtree is unreadable and name the first `find` error.
-- **[MINOR]** `scripts/install.sh:534-539`: only directories are checked for `u+w`. A file owned by the build user but read-only (e.g. `chmod -R a-w target`) is not detected. Cargo can still fail on files it rewrites in place. Correction: drop `-type d` from the second `find` (`! -perm -u+w` on every entry), or document that only directories are checked.
-- **[MINOR]** `README.md:32` and `Docs/PACKAGING_AND_PROVISIONING.md` ("Start and readiness"): "waits at most 30 s" / "One bound, `--timeout` seconds ... plus a 1 s granularity margin" understates the real worst case. The last attempt starts before the bound is checked and may itself take up to 6 s (`timeout --kill-after=1 5`), plus the 0.5 s poll, so the wait can reach about `T + 7.5` s. Correction: state "about `--timeout` seconds (the final attempt may add up to 6 s)", or check the remaining budget before starting an attempt.
-- **[MINOR]** `scripts/wait_daemon_ready.sh:126`: `2>/dev/null` discards `soos-admin`'s stderr on every attempt, including the last one. A persistent failure (permission denied on the socket, missing binary, protocol error) now prints only the generic "kept failing" line, where the previous version showed the admin error. Correction: keep the last attempt's stderr in a variable or temp file and print it with the final error.
-- **[SUGGESTION]** `scripts/wait_daemon_ready.sh:131-135`: exit codes 126 and 127 (admin binary not executable or not found) are retried until the bound instead of failing fast. Consider exiting 1 at once on 126/127.
-- **[SUGGESTION]** `crates/daemon/src/presence/worker.rs:634`: a camera that PAM woke just before the presence scan reports `is_ready()` and gets no settle. This is fail-safe and the pre-#329 behaviour, but the settle could instead be keyed on the stream start time, if the camera manager ever exposes it.
+- **[MINOR]** `crates/admin-cli/src/gdm.rs` (`plan_gdm_enable` shared branch vs
+  `shared_soos_stack`) — when a pre-anchor `[...=N]` jump lands beyond the delegation and the
+  delegated stack carries a shared primary rule with no managed block, `gdm enable` returns
+  success without writing (and clears `gdm.disable`) while the returned status says
+  `installed: false`. Fail-closed for reporting, but confusing; consider refusing with the jump
+  error in that case or printing why the integration is not reported. Add a status test for
+  `jump_skips_anchor`.
+- **[SUGGESTION]** `scripts/install.sh` (`check_build_target_dir`) — the write check now flags any
+  read-only regular file in the target directory, as the issue asks. Cargo can usually unlink a
+  read-only file inside a writable directory, so this may be a false positive for some build
+  scripts that copy read-only inputs; keep an eye on reports.
+- **[SUGGESTION]** `crates/camera-v4l/src/v4l_impl.rs` — the stream stamp precedes the real
+  `VIDIOC_STREAMON` by the buffer set-up only (microseconds); the settle may end that much early.
+  Negligible; documented.
 
 ## 5. Final Verdict
 

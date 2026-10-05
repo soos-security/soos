@@ -48,8 +48,46 @@ fails at `pam_faillock.so preauth`. Any failure or `PAM_IGNORE` still takes `def
 ### 2.1 GDM Login Integration (`soos-admin gdm`)
 
 GDM authenticates through its own service file, `/etc/pam.d/gdm-password`, with a longer
-PAM-side deadline (`timeout_ms=2500`). `soos-admin` manages it (ADR 2026-09-30 "GDM PAM Stack Placement",
-walkthrough 98).
+PAM-side deadline (`timeout_ms=2500`) when `soos-admin gdm enable` inserts its managed block.
+`soos-admin` manages it (ADR 2026-09-30 "GDM PAM Stack Placement", walkthrough 98; amended by
+ADR 2026-10-05 "GDM Reuses a Shared Primary soos Rule", walkthrough 179).
+
+**Shared primary soos rule (GitHub #331).** When the auth stack that `gdm-password` delegates
+to (`include`, `substack`, `@include`, followed up to 4 levels) already reaches, before any
+credential module, a primary `pam_soos.so` rule (an `auth` rule without `event=` or
+`service=` argument whose control is `sufficient`, or a bracket whose `success` action is
+`done` or a jump N >= 1 and whose every other action is `ignore`), GDM already authenticates
+through that rule: packaged Arch `system-auth`, Debian/Ubuntu `common-auth` with the soos
+`pam-auth-update` profile and Fedora `custom/soos`. Then:
+
+- `gdm enable` writes nothing (no managed block, no backup) and removes a managed block, or a
+  bare or legacy soos line, left by an earlier release (atomic rewrite; refused with the usual
+  `[...=N] jump ... would change target` error, nothing written, when a jump before the block
+  crosses it, because removing the block would retarget that jump; an existing
+  `gdm-password.soos-backup` is left untouched, so `gdm restore` still works, and still needs
+  `--force` when the file was edited after the first `enable`). On a fresh install there is no
+  backup and `gdm restore` reports that it does not exist; use `gdm disable` instead.
+- `gdm status` reports `installed: true` and names the stack, `Shared soos Rule:  <stack>` in
+  the table and `"shared_stack": "<stack>"` in JSON (`null` otherwise).
+- Each GDM attempt makes one daemon request and one rate-limit attempt, with the shared rule's
+  deadline: the module default of 1000 ms unless that rule sets `timeout_ms=`, instead of
+  2500 ms. A GDM unlock that needs a camera wake from auto-standby may then fall back to the
+  password (accepted trade-off). `gdm disable` keeps working, because the shared rule reads
+  `PAM_SERVICE`.
+- Rules before the shared rule are classified exactly as for the managed block (an
+  unclassified rule refuses); gates placed after the shared rule in the delegated stack are
+  governed by that stack's own ordering, as for `sudo` and `login`. Any other `pam_soos.so`
+  rule (`optional`, `required`, `event=password-failed`, `service=...`, `[success=ok ...]`)
+  before the credential module is still an unclassified rule (refusal).
+- `gdm status` uses the analysis of `enable` and additionally reports `installed: false` when a
+  `[...=N]` jump in `gdm-password` lands beyond the delegation (that branch skips the shared
+  rule). It can still be wrong in two documented, fail-closed ways. *False negative*: on a
+  stack `enable` refuses (e.g. an unclassified rule before the shared rule), `status` reports
+  `installed: false` although libpam reaches the shared rule; `enable` names the reason.
+  *False positive*: the jump target of a shared `[success=N ...]` rule is not checked (one
+  landing on `pam_deny.so` never lets a face login succeed), yet `status` reports
+  `installed: true`. Neither writes anything nor touches the password path; confirm on hardware (`tests/physical/screensaver_test.md`
+  §3.3: one `Rendered authentication response` line per GDM attempt).
 
 **Daemon budget cap (GitHub #281).** `timeout_ms=2500` bounds only the PAM module's own wait
 (connect, request write, verdict read). The daemon decides every request within
@@ -66,7 +104,8 @@ Timeout Raised to 2500 ms").
 
 ```bash
 sudo soos-admin gdm status                    # installed in PAM? disable flag present?
-sudo soos-admin gdm enable                    # insert the managed block (below), remove the flag
+sudo soos-admin gdm enable                    # insert the managed block (below) unless a shared
+                                              # soos rule is reached, remove the flag
 sudo soos-admin gdm enable --pam-module-dir /usr/lib64/security   # explicit module directory
 sudo soos-admin gdm disable                   # create /etc/soos/gdm.disable (PAM file untouched)
 sudo soos-admin gdm restore                   # put back gdm-password.soos-backup, remove it
@@ -84,7 +123,9 @@ a comment (GitHub #236). The PAM file is read with the same 64 KiB bound as `gdm
 switch: `pam_soos.so` reads `PAM_SERVICE` and returns `PAM_IGNORE` for every `gdm*` service
 while the flag exists.
 
-What `gdm enable` writes, e.g. on Fedora 40 (`authselect ... with-faillock`):
+What `gdm enable` writes on a stack **without** a soos rule, e.g. Fedora 40 with the stock
+authselect `local` profile and `with-faillock`, before the soos `custom/soos` profile is
+selected:
 
 ```pam
 auth     [success=done ignore=ignore default=bad] pam_selinux_permit.so
@@ -95,6 +136,10 @@ auth  [success=done default=ignore]  pam_soos.so timeout_ms=2500
 auth        substack      password-auth
 ...
 ```
+
+With `custom/soos` selected (`password-auth` carries the primary soos rule), `gdm enable`
+leaves `gdm-password` unchanged (or removes the block above) and `gdm status` prints
+`Shared soos Rule:  password-auth`.
 
 Placement rules:
 

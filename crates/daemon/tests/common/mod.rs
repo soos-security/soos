@@ -29,7 +29,7 @@
 use std::collections::VecDeque;
 use std::io::Write;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -464,6 +464,9 @@ pub struct SpyCamera {
     pub captures: AtomicUsize,
     /// Runs inside every `notify_activity` (e.g. to observe the inference gate).
     pub on_wake: Mutex<Option<Hook>>,
+    /// Stream start stamp in the test-clock domain returned by `stream_started_mono_ns`
+    /// (0 = `None`, the trait default; GitHub #331).
+    pub stream_started_ns: AtomicU64,
 }
 
 impl SpyCamera {
@@ -501,6 +504,13 @@ impl CameraManager for SpyCamera {
 
     fn stop(&self) {
         self.inner.stop();
+    }
+
+    fn stream_started_mono_ns(&self) -> Option<u64> {
+        match self.stream_started_ns.load(Ordering::SeqCst) {
+            0 => None,
+            ns => Some(ns),
+        }
     }
 }
 
@@ -761,6 +771,7 @@ pub async fn build_pipeline(options: PipelineOptions) -> PipelineParts {
         wakes: AtomicUsize::new(0),
         captures: AtomicUsize::new(0),
         on_wake: Mutex::new(None),
+        stream_started_ns: AtomicU64::new(0),
     });
     let components = PipelineComponents::new(
         camera.clone(),

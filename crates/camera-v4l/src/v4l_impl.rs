@@ -23,7 +23,7 @@ use crate::v4l_guard::{
 use arc_swap::ArcSwapOption;
 use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, RwLock};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -229,6 +229,8 @@ struct SupervisorShared {
     health: Arc<AtomicU8>,
     device_path: Arc<RwLock<PathBuf>>,
     status: Arc<CameraStatusCell>,
+    /// CLOCK_MONOTONIC stamp of the current stream set-up (0 = unknown), GitHub #331.
+    stream_started_ns: Arc<AtomicU64>,
 }
 
 impl SupervisorShared {
@@ -240,6 +242,7 @@ impl SupervisorShared {
     fn withdraw_frames(&self) {
         self.is_ready.store(false, Ordering::Release);
         self.latest_frame.store(None);
+        self.stream_started_ns.store(0, Ordering::Release);
     }
 }
 
@@ -253,6 +256,7 @@ pub struct V4lCameraManager {
     health: Arc<AtomicU8>,
     device_path: Arc<RwLock<PathBuf>>,
     status: Arc<CameraStatusCell>,
+    stream_started_ns: Arc<AtomicU64>,
     worker_handle: Option<JoinHandle<()>>,
 }
 
@@ -289,6 +293,7 @@ impl V4lCameraManager {
         let health = Arc::new(AtomicU8::new(HEALTH_STARTING));
         let device_path = Arc::new(RwLock::new(config.device_path.clone()));
         let status = Arc::new(CameraStatusCell::new());
+        let stream_started_ns = Arc::new(AtomicU64::new(0));
 
         let shared = SupervisorShared {
             latest_frame: Arc::clone(&latest_frame),
@@ -298,6 +303,7 @@ impl V4lCameraManager {
             health: Arc::clone(&health),
             device_path: Arc::clone(&device_path),
             status: Arc::clone(&status),
+            stream_started_ns: Arc::clone(&stream_started_ns),
         };
         let cfg = config.clone();
 
@@ -320,6 +326,7 @@ impl V4lCameraManager {
             health,
             device_path,
             status,
+            stream_started_ns,
             worker_handle: Some(handle),
         })
     }
@@ -394,6 +401,16 @@ impl CameraManager for V4lCameraManager {
             other => other,
         }
     }
+
+    fn stream_started_mono_ns(&self) -> Option<u64> {
+        if !self.is_ready() {
+            return None;
+        }
+        match self.stream_started_ns.load(Ordering::Acquire) {
+            0 => None,
+            ns => Some(ns),
+        }
+    }
 }
 
 impl Drop for V4lCameraManager {
@@ -449,15 +466,7 @@ fn supervise<B: CaptureBackend>(
     let mut current_backoff = config.min_backoff;
 
     while shared.running.load(Ordering::Acquire) {
-        match open_and_stream(
-            backend,
-            &active,
-            &shared.latest_frame,
-            &shared.is_ready,
-            &shared.running,
-            &shared.last_activity,
-            &shared.health,
-        ) {
+        match open_and_stream(backend, &active, shared) {
             Ok(SupervisorAction::Shutdown) => {
                 // Clean shutdown requested
                 break;
@@ -765,11 +774,7 @@ fn settle_stream_teardown(
 fn open_and_stream<B: CaptureBackend>(
     backend: &B,
     config: &CameraConfig,
-    latest_frame: &Arc<ArcSwapOption<Frame>>,
-    is_ready: &Arc<AtomicBool>,
-    running: &Arc<AtomicBool>,
-    last_activity: &Arc<RwLock<Instant>>,
-    health: &AtomicU8,
+    shared: &SupervisorShared,
 ) -> Result<SupervisorAction, CameraError> {
     // The device is closed through the `v4l` guard on every return path (GitHub #314): `Drop
     // for v4l::device::Handle` unwraps `close(2)`. It is declared before the stream, so it is
@@ -914,6 +919,12 @@ fn open_and_stream<B: CaptureBackend>(
             }
         })
     })?;
+    // Stream set-up instant (GitHub #331): v4l 0.14 issues VIDIOC_STREAMON at the first
+    // dequeue of `run_capture_loop`, so this stamp is never later than a frame of this stream.
+    // A clock failure stores 0 (unknown).
+    shared
+        .stream_started_ns
+        .store(monotonic_nanos(), Ordering::Release);
 
     info!(
         "Camera stream initialized on '{}' ({}x{}, {:?}, stride {}, sensor {:?}, poll {:?})",
@@ -935,11 +946,11 @@ fn open_and_stream<B: CaptureBackend>(
         deep_grey,
     };
     let targets = StreamTargets {
-        latest_frame,
-        is_ready,
-        running,
-        last_activity,
-        health,
+        latest_frame: &shared.latest_frame,
+        is_ready: &shared.is_ready,
+        running: &shared.running,
+        last_activity: &shared.last_activity,
+        health: &shared.health,
         streaming_health: HEALTH_STREAMING,
     };
     let session = match run_capture_loop(&mut source, &settings, &targets, &monotonic_nanos) {

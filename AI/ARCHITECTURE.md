@@ -127,7 +127,7 @@ Event v1:    version | kind=PASSWORD_FAILED | request_id[32] |
 
 ### Async Boundaries (Tokio vs. PAM)
 - **Privileged Daemon**: Runs Tokio for IPC connection dispatching. Capture runs on the dedicated `soos-v4l-capture` thread; vision inference runs on the Tokio blocking pool (`spawn_blocking`) behind the `InferenceGate` semaphore (`MAX_CONCURRENT_INFERENCES` = 1, `crates/daemon/src/inference.rs`), so Tokio workers, the accept loop and Status requests never block on inference (GitHub #158). Each authentication request computes one `RequestDeadline` (client deadline and outer `connection_timeout`, each minus the 50ms `RESPONSE_WRITE_MARGIN_MS`) and never starts an inference whose measured estimate exceeds the remaining budget (GitHub #159). The presence auto-unlock worker (GitHub #323) shares the same gate at `InferencePriority::Background`: it never waits for the slot (`try_acquire_background`), never starts an inference while an `Auth` request holds an `InteractiveDemandGuard`, and is preempted between captures, so a PAM request waits at most one in-flight presence inference.
-- **PAM Module**: **Strictly forbidden from starting Tokio**. Uses `std::os::unix::net::UnixStream`; every blocking PAM operation has an explicit deadline derived from the clamped `timeout_ms` (`DEFAULT_TIMEOUT_MS` = 1000, clamped to 10–5000 ms): connect, request write and verdict read share one cumulative deadline, and the `event=password-failed` notification uses its own `timeout_ms=20`. Immediately closes socket after response. Packaged console/sudo stacks rely on the module default (ADR 2026-09-30 "PAM Deadline Derived From Clamped `timeout_ms`"); GDM uses `timeout_ms=2500`.
+- **PAM Module**: **Strictly forbidden from starting Tokio**. Uses `std::os::unix::net::UnixStream`; every blocking PAM operation has an explicit deadline derived from the clamped `timeout_ms` (`DEFAULT_TIMEOUT_MS` = 1000, clamped to 10–5000 ms): connect, request write and verdict read share one cumulative deadline, and the `event=password-failed` notification uses its own `timeout_ms=20`. Immediately closes socket after response. Packaged console/sudo stacks rely on the module default (ADR 2026-09-30 "PAM Deadline Derived From Clamped `timeout_ms`"); GDM uses `timeout_ms=2500` only when `soos-admin gdm enable` inserts the managed block; when the delegated stack already carries a primary soos rule, GDM uses that rule's deadline (module default 1000 ms), ADR 2026-10-05 "GDM Reuses a Shared Primary soos Rule".
 
 ---
 
@@ -174,12 +174,17 @@ GDM keep `success=done`.
 | Arch Linux | `/etc/pam.d/system-auth` | Inserted into include chain; preserve `.pacnew` files during system updates. |
 | openSUSE | `/etc/pam.d/common-auth` | Managed via `pam-config`; inspect resulting stack before deployment. |
 
-**GDM (`/etc/pam.d/gdm-password`)**: managed by `soos-admin gdm enable` with
-`auth  [success=done default=ignore]  pam_soos.so timeout_ms=2500` inside a marked block placed
-before the first credential or shared-stack rule, after every in-file `pam_nologin`,
-`pam_succeed_if`, `pam_shells` and `pam_faillock preauth` rule; the gates of a delegated stack
-that run before its credential module are copied in front of it (ADR 2026-09-30 "GDM PAM Stack
-Placement", `Docs/DISTRIBUTION_DEPLOYMENT.md` section 2.1).
+**GDM (`/etc/pam.d/gdm-password`)**: when the auth stack it delegates to already reaches a
+primary `pam_soos.so` rule (packaged Arch `system-auth`, Debian `common-auth` with the soos
+profile, Fedora `custom/soos`), `soos-admin gdm enable` writes nothing and removes a managed
+block left by an earlier release; GDM authenticates through that shared rule (one daemon
+request per attempt, the rule's deadline) and `gdm status` reports it in `shared_stack`.
+Otherwise `gdm enable` inserts `auth  [success=done default=ignore]  pam_soos.so timeout_ms=2500`
+inside a marked block placed before the first credential or shared-stack rule, after every
+in-file `pam_nologin`, `pam_succeed_if`, `pam_shells` and `pam_faillock preauth` rule, with the
+gates of a delegated stack that run before its credential module copied in front of it (ADR
+2026-09-30 "GDM PAM Stack Placement", amended by ADR 2026-10-05;
+`Docs/DISTRIBUTION_DEPLOYMENT.md` section 2.1).
 
 Before deployment, always maintain an active root rescue shell, verify fallback to password in a VM, and test screensavers (`swaylock`, `hyprlock`), TTY, SSH, and `sudo`.
 

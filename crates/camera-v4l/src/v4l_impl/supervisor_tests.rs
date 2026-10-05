@@ -969,3 +969,120 @@ fn test_gcv_virtual_node_streams_with_explicit_opt_in() {
     assert_eq!(frame.data[0], 0x53);
     camera.stop();
 }
+
+// ---------------------------------------------------------------------------------------
+// IGF8 — stream start stamp (GitHub #331, spec §3.2)
+// ---------------------------------------------------------------------------------------
+
+/// IGF8: once the supervisor streams, `stream_started_mono_ns` is the CLOCK_MONOTONIC instant
+/// of the stream set-up: after the spawn, never later than the stamp of a frame of that stream.
+#[test]
+fn test_igf_stream_start_stamp_precedes_the_first_frame() {
+    let path = fake_path("video0");
+    let backend = FakeBackend::with_node(&path, FakeNode::rgb(0x51));
+    let before_spawn = monotonic_nanos();
+    let camera = spawn(
+        &backend,
+        config(&path, Duration::ZERO, Duration::from_millis(20)),
+        None,
+    );
+
+    let frame = wait_for_frame(&camera);
+    let stamp = camera
+        .stream_started_mono_ns()
+        .expect("a streaming camera reports its stream start");
+    assert!(
+        stamp >= before_spawn,
+        "the stamp is taken after the spawn ({stamp} < {before_spawn})"
+    );
+    assert!(
+        stamp <= frame.timestamp_mono_ns,
+        "the stream start ({stamp}) is never later than a frame of that stream ({})",
+        frame.timestamp_mono_ns
+    );
+    assert!(
+        stamp <= monotonic_nanos(),
+        "the stamp is in the CLOCK_MONOTONIC domain"
+    );
+    // The stamp belongs to the stream, not to the frame: it stays put while frames flow.
+    assert!(wait_until(|| camera
+        .latest_frame()
+        .is_some_and(|f| f.sequence > frame.sequence)));
+    assert_eq!(camera.stream_started_mono_ns(), Some(stamp));
+    camera.stop();
+    assert_eq!(
+        camera.stream_started_mono_ns(),
+        None,
+        "a stopped camera reports no stream start"
+    );
+}
+
+/// IGF8: the stamp is withdrawn while the camera is suspended (auto-standby) and a resumed
+/// stream carries a strictly later stamp, still not later than its first frame.
+#[test]
+fn test_igf_stream_start_stamp_is_withdrawn_on_suspend_and_renewed_on_resume() {
+    let path = fake_path("video0");
+    let backend = FakeBackend::with_node(&path, FakeNode::rgb(0x52));
+    let camera = spawn(
+        &backend,
+        config(&path, Duration::from_millis(300), Duration::from_millis(20)),
+        None,
+    );
+    camera.notify_activity();
+    wait_for_frame(&camera);
+    let first = camera
+        .stream_started_mono_ns()
+        .expect("stamp of the first stream");
+
+    assert!(
+        wait_until(|| camera.status() == CameraStatus::Suspended),
+        "no auto-standby, status {:?}",
+        camera.status()
+    );
+    assert_eq!(
+        camera.stream_started_mono_ns(),
+        None,
+        "a suspended camera reports no stream start"
+    );
+
+    camera.notify_activity();
+    assert!(
+        wait_until(|| backend.log(|log| log.streams_started) == 2),
+        "activity reopens the device"
+    );
+    camera.notify_activity();
+    let frame = wait_for_frame(&camera);
+    let second = camera
+        .stream_started_mono_ns()
+        .expect("stamp of the resumed stream");
+    assert!(
+        second > first,
+        "the resumed stream has a strictly later stamp ({second} <= {first})"
+    );
+    assert!(
+        second <= frame.timestamp_mono_ns,
+        "the resumed stream start ({second}) is never later than its frame ({})",
+        frame.timestamp_mono_ns
+    );
+    camera.stop();
+}
+
+/// IGF8: a camera that never streams (open always fails) never reports a stream start.
+#[test]
+fn test_igf_stream_start_stamp_is_none_before_any_stream() {
+    let path = fake_path("video0");
+    let backend = FakeBackend::default();
+    let camera = spawn(
+        &backend,
+        config(&path, Duration::ZERO, Duration::from_millis(20)),
+        None,
+    );
+    camera.notify_activity();
+    assert!(
+        wait_until(|| backend.opens_of(&path) >= 2),
+        "the supervisor retries the missing device"
+    );
+    assert!(!camera.is_ready());
+    assert_eq!(camera.stream_started_mono_ns(), None);
+    camera.stop();
+}
