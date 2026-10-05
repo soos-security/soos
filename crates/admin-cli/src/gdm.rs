@@ -272,6 +272,29 @@ fn ensure_gdm_pam_line_with(
     pam_file: &Path,
     before_rename: &mut dyn FnMut(),
 ) -> Result<(), AdminCliError> {
+    ensure_gdm_pam_line_with_hooks(pam_file, before_rename, &mut backup_post_link_steps)
+}
+
+/// Production post-link steps of [`publish_backup`]: remove this run's temporary file (a
+/// missing name is fine) and fsync the directory (GitHub #333, #335).
+fn backup_post_link_steps(tmp: &Path, dir: &Path) -> std::io::Result<()> {
+    match fs::remove_file(tmp) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e),
+        _ => {}
+    }
+    fs::File::open(dir)?.sync_all()
+}
+
+/// GitHub #335: [`ensure_gdm_pam_line_with`] with a second hook that replaces the post-link
+/// steps of the backup publication. The hook receives `(own_tmp_path, dir)` right after the
+/// backup hard link succeeded; production passes [`backup_post_link_steps`] (remove this run's
+/// temporary file, fsync the directory). An error from it fails the enable before the PAM
+/// file is written, and the backup this run created goes through [`discard_created_backup`].
+fn ensure_gdm_pam_line_with_hooks(
+    pam_file: &Path,
+    before_rename: &mut dyn FnMut(),
+    post_link: &mut dyn FnMut(&Path, &Path) -> std::io::Result<()>,
+) -> Result<(), AdminCliError> {
     let Some(snapshot) = read_pam_file_snapshot(pam_file, GdmOperation::Enable)? else {
         return Err(AdminCliError::GdmConfig(format!(
             "PAM file '{}' does not exist",
@@ -302,7 +325,14 @@ fn ensure_gdm_pam_line_with(
     match plan {
         EnablePlan::Insert { pristine, updated } => {
             let backup = pam_backup_path(pam_file);
-            let created = publish_backup(&backup, pristine.as_bytes(), mode, owner)?;
+            let created = publish_backup(
+                pam_file,
+                &backup,
+                pristine.as_bytes(),
+                mode,
+                owner,
+                post_link,
+            )?;
             write_atomic_checked(pam_file, updated.as_bytes(), mode, owner, &mut recheck).map_err(
                 |err| match created {
                     Some(identity) => discard_created_backup(pam_file, &backup, identity, err),
@@ -326,18 +356,67 @@ fn parent_dir(path: &Path) -> &Path {
         .unwrap_or_else(|| Path::new("."))
 }
 
+/// Upper bound on the fresh temporary names tried before giving up (GitHub #335).
+const MAX_TEMP_NAME_ATTEMPTS: u32 = 16;
+
+/// Creates a new `0600` file `<dir>/.<file_name>.soos-tmp-<pid>-<n>` with `create_new`
+/// (`O_CREAT | O_EXCL`: never opens or truncates an existing file, never follows a symlink at
+/// that name), trying `n` in `0..MAX_TEMP_NAME_ATTEMPTS` on `AlreadyExists` (GitHub #335).
+///
+/// Returns the path actually created and its handle; any other error is returned at once, and
+/// after the last attempt the `AlreadyExists` error is returned. A stale file left by a
+/// crashed run with a reused PID only consumes one attempt and is never removed or modified.
+fn create_temp_sibling(dir: &Path, file_name: &str) -> std::io::Result<(PathBuf, fs::File)> {
+    let pid = std::process::id();
+    let mut last = std::io::Error::from(std::io::ErrorKind::AlreadyExists);
+    for n in 0..MAX_TEMP_NAME_ATTEMPTS {
+        let path = dir.join(format!(".{file_name}.soos-tmp-{pid}-{n}"));
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&path)
+        {
+            Ok(file) => return Ok((path, file)),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => last = e,
+            Err(e) => return Err(e),
+        }
+    }
+    Err(last)
+}
+
+/// Removes `path` only when it is still the regular file with exactly `identity`
+/// (`symlink_metadata`, no follow); best effort, every error is ignored (GitHub #335).
+fn remove_own_file(path: &Path, identity: (u64, u64)) {
+    if let Ok(meta) = fs::symlink_metadata(path) {
+        if meta.is_file() && (meta.dev(), meta.ino()) == identity {
+            let _ = fs::remove_file(path);
+        }
+    }
+}
+
 /// Publishes `bytes` as the backup without ever replacing an existing name (GitHub #333): the
-/// bytes go to an exclusive temporary file in the same directory (mode, owner, `fsync`), which
-/// is hard-linked to `backup` (`linkat(2)` fails with `EEXIST` on any existing name, a symlink
-/// included, and never follows it); the temporary name is always removed.
+/// bytes go to an exclusive temporary file in the same directory ([`create_temp_sibling`],
+/// mode, owner, `fsync`), which is hard-linked to `backup` (`linkat(2)` fails with `EEXIST` on
+/// any existing name, a symlink included, and never follows it). Only the temporary file this
+/// call created is ever removed; a stale temporary file of another run is left alone
+/// (GitHub #335).
+///
+/// After a successful link, `post_link(tmp, dir)` runs once (production:
+/// [`backup_post_link_steps`]). If it fails, this run's temporary file is removed again (only
+/// while it is still the created inode) and the backup this call created goes through
+/// [`discard_created_backup`], so a failed `enable` leaves no new backup unless the re-read PAM
+/// file holds a soos managed block or cannot be re-read (GitHub #335).
 ///
 /// Returns the `(dev, ino)` of the backup this call created, or `None` when a backup already
 /// existed (it is kept untouched: it holds the pristine pre-soos state).
 fn publish_backup(
+    pam_file: &Path,
     backup: &Path,
     bytes: &[u8],
     mode: u32,
     owner: (u32, u32),
+    post_link: &mut dyn FnMut(&Path, &Path) -> std::io::Result<()>,
 ) -> Result<Option<(u64, u64)>, AdminCliError> {
     // Fast path only; correctness relies on the link below.
     match fs::symlink_metadata(backup) {
@@ -345,38 +424,50 @@ fn publish_backup(
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => return Err(gdm_error("Failed to inspect PAM backup", backup, &e)),
     }
+    let write_error =
+        |e: &std::io::Error| gdm_error("Failed to write PAM file atomically", backup, e);
     let dir = parent_dir(backup);
     let file_name = backup
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let tmp = dir.join(format!(".{file_name}.soos-tmp-{}", std::process::id()));
-    let linked = link_new_file(&tmp, backup, bytes, mode, owner);
-    let removed = match fs::remove_file(&tmp) {
-        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
-        _ => Ok(()),
+    let (tmp, file) = create_temp_sibling(dir, &file_name).map_err(|e| write_error(&e))?;
+    let identity = match link_new_file(file, &tmp, backup, bytes, mode, owner) {
+        Ok(Some(identity)) => identity,
+        Ok(None) => {
+            // A backup appeared concurrently: it is kept; only this run's temporary file goes.
+            return match fs::remove_file(&tmp) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(write_error(&e)),
+                _ => Ok(None),
+            };
+        }
+        Err(e) => {
+            let _ = fs::remove_file(&tmp);
+            return Err(write_error(&e));
+        }
     };
-    let created = linked
-        .and_then(|created| removed.map(|()| created))
-        .and_then(|created| fs::File::open(dir)?.sync_all().map(|()| created))
-        .map_err(|e| gdm_error("Failed to write PAM file atomically", backup, &e))?;
-    Ok(created)
+    if let Err(e) = post_link(&tmp, dir) {
+        remove_own_file(&tmp, identity);
+        return Err(discard_created_backup(
+            pam_file,
+            backup,
+            identity,
+            write_error(&e),
+        ));
+    }
+    Ok(Some(identity))
 }
 
-/// Writes `bytes` to the new file `tmp` and hard-links it to `target`; `None` when `target`
-/// already exists.
+/// Writes `bytes` to `file` (the new temporary file `tmp`) and hard-links it to `target`;
+/// `None` when `target` already exists.
 fn link_new_file(
+    mut file: fs::File,
     tmp: &Path,
     target: &Path,
     bytes: &[u8],
     mode: u32,
     owner: (u32, u32),
 ) -> std::io::Result<Option<(u64, u64)>> {
-    let mut file = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(tmp)?;
     file.write_all(bytes)?;
     std::os::unix::fs::fchown(&file, Some(owner.0), Some(owner.1))?;
     file.set_permissions(fs::Permissions::from_mode(mode))?;
@@ -1008,7 +1099,10 @@ fn read_backup_bounded(backup: &Path) -> Result<(Vec<u8>, fs::Metadata), AdminCl
 
 /// Writes `bytes` to `target` atomically: exclusive temporary file in the same
 /// directory (created with `mode`, owned like the original), `fsync`, `rename`,
-/// then `fsync` of the directory. The temporary file is removed on failure.
+/// then `fsync` of the directory. On failure only the temporary file this call created
+/// ([`create_temp_sibling`]) is removed; a stale temporary file of another run is never
+/// removed or modified, and when no fresh name can be created nothing is removed
+/// (GitHub #335).
 ///
 /// `before_rename` runs once the temporary file is written and synced, right before the
 /// rename; an error from it removes the temporary file and is returned as is, leaving
@@ -1028,9 +1122,10 @@ fn write_atomic_checked(
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let tmp = dir.join(format!(".{file_name}.soos-tmp-{}", std::process::id()));
+    let (tmp, file) = create_temp_sibling(dir, &file_name)
+        .map_err(|e| gdm_error("Failed to write PAM file atomically", target, &e))?;
 
-    write_and_rename(&tmp, target, dir, bytes, mode, owner, before_rename).map_err(|failure| {
+    write_and_rename(file, &tmp, target, bytes, mode, owner, before_rename).map_err(|failure| {
         let _ = fs::remove_file(&tmp);
         match failure {
             WriteFailure::Io(e) => gdm_error("Failed to write PAM file atomically", target, &e),
@@ -1053,20 +1148,17 @@ impl From<std::io::Error> for WriteFailure {
     }
 }
 
+/// Writes `bytes` to `file` (the new temporary file `tmp`), syncs it, runs `before_rename`,
+/// renames `tmp` over `target` and fsyncs the directory of `target`.
 fn write_and_rename(
+    mut file: fs::File,
     tmp: &Path,
     target: &Path,
-    dir: &Path,
     bytes: &[u8],
     mode: u32,
     owner: (u32, u32),
     before_rename: &mut dyn FnMut() -> Result<(), AdminCliError>,
 ) -> Result<(), WriteFailure> {
-    let mut file = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(tmp)?;
     file.write_all(bytes)?;
     std::os::unix::fs::fchown(&file, Some(owner.0), Some(owner.1))?;
     file.set_permissions(fs::Permissions::from_mode(mode))?;
@@ -1074,7 +1166,7 @@ fn write_and_rename(
     drop(file);
     before_rename().map_err(WriteFailure::Refused)?;
     fs::rename(tmp, target)?;
-    fs::File::open(dir)?.sync_all()?;
+    fs::File::open(parent_dir(target))?.sync_all()?;
     Ok(())
 }
 
@@ -1619,5 +1711,425 @@ account    include     shared-auth
                 f.pam_file.display()
             )
         );
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::arithmetic_side_effects,
+    reason = "Unit tests of the backup publication seam use direct assertions"
+)]
+mod backup_publish_tests {
+    //! GitHub #335 (rows GBP1-GBP5): temporary files are named `.<file>.soos-tmp-<pid>-<n>`
+    //! with up to 16 fresh names, a stale file (legacy `-<pid>` or `-<pid>-<n>`) never blocks
+    //! `gdm enable` / `gdm restore` and is never removed or modified, and a failure after the
+    //! backup hard link removes the backup this run created through `discard_created_backup`.
+
+    use super::*;
+    use std::collections::BTreeSet;
+
+    const PRISTINE: &str = "\
+#%PAM-1.0
+auth    requisite       pam_nologin.so
+auth    required        pam_unix.so
+account required        pam_unix.so
+";
+
+    const STALE: &[u8] = b"stale temporary file of a crashed run\n";
+
+    const INJECTED: &str = "injected post-link failure";
+
+    struct Fixture {
+        dir: tempfile::TempDir,
+        pam_file: PathBuf,
+    }
+
+    fn fixture() -> Fixture {
+        let dir = tempfile::tempdir().unwrap();
+        let pam_file = dir.path().join("gdm-password");
+        fs::write(&pam_file, PRISTINE).unwrap();
+        fs::set_permissions(&pam_file, fs::Permissions::from_mode(0o644)).unwrap();
+        Fixture { dir, pam_file }
+    }
+
+    fn entries(dir: &Path) -> BTreeSet<String> {
+        fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect()
+    }
+
+    fn names<S: AsRef<str>>(list: &[S]) -> BTreeSet<String> {
+        list.iter().map(|s| s.as_ref().to_string()).collect()
+    }
+
+    /// Legacy temporary name of `file_name` (before GitHub #335), with this process's PID.
+    fn legacy_tmp(file_name: &str) -> String {
+        format!(".{file_name}.soos-tmp-{}", std::process::id())
+    }
+
+    /// GitHub #335 temporary name number `n` of `file_name`, with this process's PID.
+    fn numbered_tmp(file_name: &str, n: u32) -> String {
+        format!(".{file_name}.soos-tmp-{}-{n}", std::process::id())
+    }
+
+    /// The stale-file sets each GBP1/GBP2/GBP5 test plants: the legacy name alone (red
+    /// against the current code), the `-0` name alone, and both.
+    fn stale_sets(file_name: &str) -> Vec<Vec<String>> {
+        vec![
+            vec![legacy_tmp(file_name)],
+            vec![numbered_tmp(file_name, 0)],
+            vec![legacy_tmp(file_name), numbered_tmp(file_name, 0)],
+        ]
+    }
+
+    /// Plants stale files; returns their `(path, inode)` for the byte-identity checks.
+    fn plant(dir: &Path, stale: &[String]) -> Vec<(PathBuf, u64)> {
+        stale
+            .iter()
+            .map(|name| {
+                let path = dir.join(name);
+                fs::write(&path, STALE).unwrap();
+                fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+                let ino = fs::metadata(&path).unwrap().ino();
+                (path, ino)
+            })
+            .collect()
+    }
+
+    fn assert_stale_untouched(planted: &[(PathBuf, u64)], context: &str) {
+        for (path, ino) in planted {
+            let meta = fs::symlink_metadata(path)
+                .unwrap_or_else(|e| panic!("{context}: stale {} removed: {e}", path.display()));
+            assert!(meta.is_file(), "{context}: {}", path.display());
+            assert_eq!(meta.ino(), *ino, "{context}: stale file replaced");
+            assert_eq!(
+                fs::read(path).unwrap(),
+                STALE,
+                "{context}: stale file modified"
+            );
+        }
+    }
+
+    fn post_link_error(backup: &Path) -> String {
+        format!(
+            "GDM configuration error: Failed to write PAM file atomically '{}': {INJECTED}",
+            backup.display()
+        )
+    }
+
+    /// Runs the enable through `ensure_gdm_pam_line_with_hooks`; returns the result and the
+    /// call counts of the before-rename and post-link hooks.
+    fn enable_with_post_link(
+        pam_file: &Path,
+        mut post_link: impl FnMut(&Path, &Path) -> std::io::Result<()>,
+    ) -> (Result<(), AdminCliError>, u32, u32) {
+        let mut before_calls = 0_u32;
+        let mut post_calls = 0_u32;
+        let result =
+            ensure_gdm_pam_line_with_hooks(pam_file, &mut || before_calls += 1, &mut |tmp, dir| {
+                post_calls += 1;
+                post_link(tmp, dir)
+            });
+        (result, before_calls, post_calls)
+    }
+
+    /// Checks the hook arguments: this run's temporary file of the backup, still present and
+    /// holding the pristine bytes, in the PAM directory, with the backup already linked.
+    fn assert_hook_args(f_dir: &Path, backup: &Path, tmp: &Path, dir: &Path) {
+        assert_eq!(dir, f_dir, "the hook receives the PAM directory");
+        assert_eq!(
+            tmp.parent(),
+            Some(f_dir),
+            "own temporary file in the same dir"
+        );
+        let tmp_name = tmp.file_name().unwrap().to_string_lossy().into_owned();
+        assert!(
+            tmp_name.starts_with(".gdm-password.soos-backup.soos-tmp-"),
+            "{tmp_name}"
+        );
+        assert_eq!(fs::read_to_string(tmp).unwrap(), PRISTINE);
+        assert_eq!(fs::read_to_string(backup).unwrap(), PRISTINE);
+        assert_eq!(
+            fs::metadata(tmp).unwrap().ino(),
+            fs::metadata(backup).unwrap().ino(),
+            "the hook runs right after the hard link"
+        );
+    }
+
+    /// GBP1: a stale backup temporary file (legacy `-<pid>`, `-<pid>-0`, or both) never makes
+    /// `gdm enable` fail; it is left byte-identical and no temporary file of this run remains.
+    #[test]
+    fn test_gbp1_stale_backup_temp_file_does_not_block_enable() {
+        for stale in stale_sets("gdm-password.soos-backup") {
+            let context = format!("stale={stale:?}");
+            let f = fixture();
+            let planted = plant(f.dir.path(), &stale);
+            ensure_gdm_pam_line(&f.pam_file)
+                .unwrap_or_else(|e| panic!("{context}: enable must succeed: {e}"));
+            assert!(
+                fs::read_to_string(&f.pam_file)
+                    .unwrap()
+                    .contains(GDM_PAM_LINE),
+                "{context}"
+            );
+            assert_eq!(
+                fs::read_to_string(pam_backup_path(&f.pam_file)).unwrap(),
+                PRISTINE,
+                "{context}"
+            );
+            assert_stale_untouched(&planted, &context);
+            let mut expected = vec![
+                "gdm-password".to_string(),
+                "gdm-password.soos-backup".to_string(),
+            ];
+            expected.extend(stale.iter().cloned());
+            assert_eq!(
+                entries(f.dir.path()),
+                names(&expected),
+                "{context}: no temporary file of this run remains"
+            );
+        }
+    }
+
+    /// GBP1 (exhaustion): with the 16 numbered backup temporary names taken, `gdm enable`
+    /// fails with an `AlreadyExists` I/O error, removes nothing and creates no backup.
+    #[test]
+    fn test_gbp1_exhausted_backup_temp_names_fail_without_removing_anything() {
+        let f = fixture();
+        let stale: Vec<String> = (0..16)
+            .map(|n| numbered_tmp("gdm-password.soos-backup", n))
+            .collect();
+        let planted = plant(f.dir.path(), &stale);
+        let backup = pam_backup_path(&f.pam_file);
+        let msg = ensure_gdm_pam_line(&f.pam_file)
+            .expect_err("16 taken temporary names must fail the enable")
+            .to_string();
+        assert!(
+            msg.starts_with(&format!(
+                "GDM configuration error: Failed to write PAM file atomically '{}': ",
+                backup.display()
+            )),
+            "{msg}"
+        );
+        let expected_io = std::io::Error::from(std::io::ErrorKind::AlreadyExists).to_string();
+        assert!(
+            msg.contains("File exists") || msg.contains(&expected_io),
+            "the AlreadyExists I/O error is reported: {msg}"
+        );
+        assert_eq!(fs::read_to_string(&f.pam_file).unwrap(), PRISTINE);
+        assert!(!backup.exists(), "no backup is created");
+        assert_stale_untouched(&planted, "exhaustion");
+        let mut expected = vec!["gdm-password".to_string()];
+        expected.extend(stale.iter().cloned());
+        assert_eq!(entries(f.dir.path()), names(&expected));
+    }
+
+    /// GBP2: a stale PAM-file temporary file (`write_atomic_checked`) never makes
+    /// `gdm enable` fail and is left byte-identical.
+    #[test]
+    fn test_gbp2_stale_pam_temp_file_does_not_block_enable() {
+        for stale in stale_sets("gdm-password") {
+            let context = format!("stale={stale:?}");
+            let f = fixture();
+            let planted = plant(f.dir.path(), &stale);
+            ensure_gdm_pam_line(&f.pam_file)
+                .unwrap_or_else(|e| panic!("{context}: enable must succeed: {e}"));
+            assert!(
+                fs::read_to_string(&f.pam_file)
+                    .unwrap()
+                    .contains(GDM_PAM_LINE),
+                "{context}"
+            );
+            assert_eq!(
+                fs::read_to_string(pam_backup_path(&f.pam_file)).unwrap(),
+                PRISTINE,
+                "{context}"
+            );
+            assert_stale_untouched(&planted, &context);
+            let mut expected = vec![
+                "gdm-password".to_string(),
+                "gdm-password.soos-backup".to_string(),
+            ];
+            expected.extend(stale.iter().cloned());
+            assert_eq!(
+                entries(f.dir.path()),
+                names(&expected),
+                "{context}: no temporary file of this run remains"
+            );
+        }
+    }
+
+    /// GBP3: a post-link failure (no managed block in the PAM file) fails the enable with the
+    /// atomic-write error, removes the backup this run created, leaves the PAM file
+    /// byte-identical and removes this run's temporary file, whether or not the failing step
+    /// removed it; the PAM-file write is never reached.
+    #[test]
+    fn test_gbp3_post_link_failure_removes_created_backup() {
+        for hook_removes_tmp in [true, false] {
+            let context = format!("hook_removes_tmp={hook_removes_tmp}");
+            let f = fixture();
+            let backup = pam_backup_path(&f.pam_file);
+            let f_dir = f.dir.path().to_path_buf();
+            let hook_backup = backup.clone();
+            let (result, before_calls, post_calls) =
+                enable_with_post_link(&f.pam_file, |tmp, dir| {
+                    assert_hook_args(&f_dir, &hook_backup, tmp, dir);
+                    if hook_removes_tmp {
+                        fs::remove_file(tmp)?;
+                    }
+                    Err(std::io::Error::other(INJECTED))
+                });
+            assert_eq!(post_calls, 1, "{context}: the post-link hook runs once");
+            assert_eq!(
+                before_calls, 0,
+                "{context}: the PAM-file write is not reached"
+            );
+            let err = result.expect_err("a post-link failure must fail gdm enable");
+            assert_eq!(err.to_string(), post_link_error(&backup), "{context}");
+            assert_eq!(
+                fs::read_to_string(&f.pam_file).unwrap(),
+                PRISTINE,
+                "{context}"
+            );
+            assert!(
+                !backup.exists(),
+                "{context}: the backup created by this run is removed"
+            );
+            assert_eq!(
+                entries(f.dir.path()),
+                names(&["gdm-password"]),
+                "{context}: no temporary file of this run remains"
+            );
+        }
+    }
+
+    /// GBP3: a pre-existing backup is never removed: the link is never attempted (fast path),
+    /// so the post-link hook is not reached and the enable succeeds.
+    #[test]
+    fn test_gbp3_preexisting_backup_never_reaches_post_link_hook() {
+        let f = fixture();
+        let backup = pam_backup_path(&f.pam_file);
+        fs::write(&backup, "#%PAM-1.0\n# older pristine copy\n").unwrap();
+        let ino = fs::metadata(&backup).unwrap().ino();
+        let (result, before_calls, post_calls) =
+            enable_with_post_link(&f.pam_file, |_tmp, _dir| {
+                Err(std::io::Error::other(INJECTED))
+            });
+        result.expect("an existing backup is kept and the enable proceeds");
+        assert_eq!(post_calls, 0, "no link, no post-link step");
+        assert_eq!(before_calls, 1);
+        assert_eq!(
+            fs::read_to_string(&backup).unwrap(),
+            "#%PAM-1.0\n# older pristine copy\n"
+        );
+        assert_eq!(fs::metadata(&backup).unwrap().ino(), ino);
+        assert_eq!(
+            entries(f.dir.path()),
+            names(&["gdm-password", "gdm-password.soos-backup"])
+        );
+    }
+
+    /// GBP3b: when the post-link step fails after a concurrent `gdm enable` wrote its managed
+    /// block, the backup is the one the winner relies on: it is kept byte-identical.
+    #[test]
+    fn test_gbp3b_post_link_failure_keeps_backup_when_file_holds_managed_block() {
+        let f = fixture();
+        let backup = pam_backup_path(&f.pam_file);
+        let winner = format!(
+            "#%PAM-1.0\nauth    requisite       pam_nologin.so\n{GDM_BLOCK_BEGIN}\n\
+             {GDM_PAM_LINE}\n{GDM_BLOCK_END}\nauth    required        pam_unix.so\n\
+             account required        pam_unix.so\n"
+        );
+        let pam_file = f.pam_file.clone();
+        let winner_bytes = winner.clone();
+        let (result, before_calls, post_calls) = enable_with_post_link(&f.pam_file, |tmp, _| {
+            fs::remove_file(tmp)?;
+            let other = pam_file.with_extension("concurrent-writer");
+            fs::write(&other, winner_bytes.as_bytes())?;
+            fs::rename(&other, &pam_file)?;
+            Err(std::io::Error::other(INJECTED))
+        });
+        assert_eq!(post_calls, 1);
+        assert_eq!(before_calls, 0, "the PAM-file write is not reached");
+        let err = result.expect_err("a post-link failure must fail gdm enable");
+        assert_eq!(err.to_string(), post_link_error(&backup));
+        assert_eq!(fs::read_to_string(&f.pam_file).unwrap(), winner);
+        assert_eq!(
+            fs::read_to_string(&backup).unwrap(),
+            PRISTINE,
+            "the winner's managed block needs the pristine backup: it must be kept"
+        );
+        assert_eq!(
+            entries(f.dir.path()),
+            names(&["gdm-password", "gdm-password.soos-backup"])
+        );
+    }
+
+    /// GBP4: a backup replaced before the post-link failure is not this run's inode: it is
+    /// left byte-identical and the error carries the `discard_created_backup` note.
+    #[test]
+    fn test_gbp4_post_link_failure_leaves_a_replaced_backup_and_reports_it() {
+        let f = fixture();
+        let backup = pam_backup_path(&f.pam_file);
+        let hook_backup = backup.clone();
+        let (result, before_calls, post_calls) = enable_with_post_link(&f.pam_file, |tmp, _| {
+            fs::remove_file(tmp)?;
+            let other = hook_backup.with_extension("concurrent-writer");
+            fs::write(&other, b"#%PAM-1.0\n# replaced concurrently\n")?;
+            fs::rename(&other, &hook_backup)?;
+            Err(std::io::Error::other(INJECTED))
+        });
+        assert_eq!(post_calls, 1);
+        assert_eq!(before_calls, 0, "the PAM-file write is not reached");
+        let msg = result
+            .expect_err("a post-link failure must fail gdm enable")
+            .to_string();
+        assert!(msg.starts_with(&post_link_error(&backup)), "{msg}");
+        assert!(
+            msg.contains("could not be removed: it was replaced"),
+            "{msg}"
+        );
+        assert_eq!(
+            fs::read_to_string(&backup).unwrap(),
+            "#%PAM-1.0\n# replaced concurrently\n",
+            "a backup that is not this run's inode is never removed"
+        );
+        assert_eq!(fs::read_to_string(&f.pam_file).unwrap(), PRISTINE);
+        assert_eq!(
+            entries(f.dir.path()),
+            names(&["gdm-password", "gdm-password.soos-backup"])
+        );
+    }
+
+    /// GBP5: a stale PAM-file temporary file never makes `gdm restore` fail and is left
+    /// byte-identical.
+    #[test]
+    fn test_gbp5_stale_pam_temp_file_does_not_block_restore() {
+        for stale in stale_sets("gdm-password") {
+            let context = format!("stale={stale:?}");
+            let f = fixture();
+            ensure_gdm_pam_line(&f.pam_file).unwrap();
+            let planted = plant(f.dir.path(), &stale);
+            restore_gdm_pam_file(&f.pam_file, false)
+                .unwrap_or_else(|e| panic!("{context}: restore must succeed: {e}"));
+            assert_eq!(
+                fs::read_to_string(&f.pam_file).unwrap(),
+                PRISTINE,
+                "{context}"
+            );
+            assert!(!pam_backup_path(&f.pam_file).exists(), "{context}");
+            assert_stale_untouched(&planted, &context);
+            let mut expected = vec!["gdm-password".to_string()];
+            expected.extend(stale.iter().cloned());
+            assert_eq!(
+                entries(f.dir.path()),
+                names(&expected),
+                "{context}: no temporary file of this run remains"
+            );
+        }
     }
 }

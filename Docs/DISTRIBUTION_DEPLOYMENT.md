@@ -242,7 +242,11 @@ Placement rules:
    a backup replaced meanwhile is left alone and reported. Two residual windows remain,
    root-only and inherent without locking: a change made in the few system calls between
    the re-check and `rename(2)` is still replaced, and a backup replaced between the identity
-   check and its removal is not detected. A misplaced line
+   check and its removal is not detected. Temporary files are named
+   `.<file>.soos-tmp-<pid>-<n>` (up to 16 fresh names), so a stale one left by a crashed run
+   never blocks `enable` or `restore` and is never removed, and a failure right after the
+   backup is linked leaves no new backup unless the re-read file holds a soos managed block
+   (a concurrent `enable` relies on it) or cannot be re-read (GitHub #335). A misplaced line
    written by older releases (`auth  sufficient  pam_soos.so timeout_ms=2500`) is moved to
    the safe position; a `pam_soos.so` rule you wrote yourself is left untouched.
 6. **Known refusals.** These default stacks make `enable` refuse. The refusal is fail-closed
