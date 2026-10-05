@@ -220,8 +220,8 @@ fn test_ghf6_no_message_prints_a_raw_admin_path() {
 // GHF7 — READY=1 send time, deterministic harness ordering (OA-2)
 // ---------------------------------------------------------------------------
 
-/// GHF7: the daemon reports readiness through `notify_ready_stamped` and logs the two exact
-/// message shapes; `sd_notify.rs` stamps with the daemon's `CLOCK_MONOTONIC` helper.
+/// GHF7: the daemon reports readiness through `sd_notify::notify_ready()` (the stamped variant
+/// since OA-4) and logs the two exact message shapes; `sd_notify.rs` stamps with the daemon's `CLOCK_MONOTONIC` helper.
 #[test]
 fn test_ghf7_daemon_logs_the_ready_send_time_in_the_message_text() {
     // Owner approval OA-4 (2026-10-05): `sd_notify::notify_ready()` is itself the stamped
