@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 
 use crate::args::GdmAction;
 use crate::error::AdminCliError;
-use crate::pam_stack::{delegated_gates, read_bounded_utf8, PamLine, ReadError};
+use crate::pam_stack::{delegated_auth, read_bounded_utf8, DelegatedAuth, PamLine, ReadError};
 
 pub use crate::pam_stack::{MAX_PAM_FILE_BYTES, MAX_PAM_INCLUDE_DEPTH};
 
@@ -73,6 +73,9 @@ pub struct GdmStatus {
     pub pam_file: PathBuf,
     /// Path to the inspected disable flag file.
     pub disable_file: PathBuf,
+    /// GitHub #331: name of the delegated stack file whose primary `pam_soos.so` rule GDM
+    /// uses when the service file carries no soos rule of its own; `None` otherwise.
+    pub shared_stack: Option<String>,
 }
 
 /// True when `content` holds an active (not commented-out) PAM rule whose module
@@ -88,12 +91,26 @@ pub fn has_active_pam_soos_rule(content: &str) -> bool {
 
 /// Inspects current GDM integration and disable state.
 ///
-/// `installed` requires an active `pam_soos.so` rule ([`has_active_pam_soos_rule`]);
-/// the file is read with the same bound as `gdm enable` ([`MAX_PAM_FILE_BYTES`]), and
-/// an unreadable, oversized or non-UTF-8 file reports `installed: false`.
+/// `installed` requires an active `pam_soos.so` rule in the file
+/// ([`has_active_pam_soos_rule`]) or, failing that, a shared primary `pam_soos.so` rule
+/// reached through the delegated auth stack, found with exactly the analysis of
+/// `gdm enable` (GitHub #331; reported in `shared_stack`). The file is read with the same
+/// bound as `gdm enable` ([`MAX_PAM_FILE_BYTES`]), and an unreadable, oversized or
+/// non-UTF-8 file, or any refusal of the shared-stack analysis, reports `installed: false`.
 pub fn get_gdm_status(pam_file: &Path, disable_file: &Path) -> GdmStatus {
-    let installed = pam_file.is_file()
-        && read_bounded_utf8(pam_file).is_ok_and(|content| has_active_pam_soos_rule(&content));
+    let content = if pam_file.is_file() {
+        read_bounded_utf8(pam_file).ok()
+    } else {
+        None
+    };
+    let (installed, shared_stack) = match content {
+        Some(content) if has_active_pam_soos_rule(&content) => (true, None),
+        Some(content) => {
+            let shared = shared_soos_stack(&content, include_dir_of(pam_file));
+            (shared.is_some(), shared)
+        }
+        None => (false, None),
+    };
 
     let disabled = disable_file.exists() || Path::new("/etc/soos/disabled").exists();
     let enabled = installed && !disabled;
@@ -103,6 +120,36 @@ pub fn get_gdm_status(pam_file: &Path, disable_file: &Path) -> GdmStatus {
         enabled,
         pam_file: pam_file.to_path_buf(),
         disable_file: disable_file.to_path_buf(),
+        shared_stack,
+    }
+}
+
+/// Directory in which the include targets of `pam_file` are resolved.
+fn include_dir_of(pam_file: &Path) -> &Path {
+    pam_file
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
+}
+
+/// Name of the stack holding the shared primary soos rule reached by `content`'s auth stack,
+/// using exactly the analysis of `plan_gdm_enable` ([`pre_credential_scan`] and
+/// `delegated_auth`). `None` on any refusal condition (continuation lines, unclassified rule,
+/// no anchor, non-delegating anchor, unreadable or missing include, depth exceeded): fail
+/// closed, never an error to the caller.
+fn shared_soos_stack(content: &str, include_dir: &Path) -> Option<String> {
+    refuse_continuations(content).ok()?;
+    let pristine = strip_managed_rules(content).ok()?;
+    let scan = pre_credential_scan(&pristine).ok()?;
+    scan.anchor_rule.delegation()?;
+    // A pre-anchor jump landing beyond the delegation bypasses the shared rule on that branch:
+    // not reported as installed (fail closed; candid review 2026-10-05 suggestion).
+    if scan.jump_skips_anchor() {
+        return None;
+    }
+    match delegated_auth(include_dir, scan.delegated_lines()).ok()? {
+        DelegatedAuth::SharedSoosRule { stack } => Some(stack),
+        DelegatedAuth::Gates(_) => None,
     }
 }
 
@@ -218,10 +265,7 @@ fn ensure_gdm_pam_line(pam_file: &Path) -> Result<(), AdminCliError> {
         }
         Err(ReadError::Other(msg)) => return Err(AdminCliError::GdmConfig(msg)),
     };
-    let include_dir = pam_file
-        .parent()
-        .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
+    let include_dir = include_dir_of(pam_file);
 
     let Some(plan) = plan_gdm_enable(&content, include_dir)? else {
         return Ok(());
@@ -231,38 +275,114 @@ fn ensure_gdm_pam_line(pam_file: &Path) -> Result<(), AdminCliError> {
     let mode = metadata.permissions().mode() & 0o7755;
     let owner = (metadata.uid(), metadata.gid());
 
-    let backup = pam_backup_path(pam_file);
-    match fs::symlink_metadata(&backup) {
-        Ok(_) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            write_atomic(&backup, plan.pristine.as_bytes(), mode, owner)?;
+    match plan {
+        EnablePlan::Insert { pristine, updated } => {
+            let backup = pam_backup_path(pam_file);
+            match fs::symlink_metadata(&backup) {
+                Ok(_) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    write_atomic(&backup, pristine.as_bytes(), mode, owner)?;
+                }
+                Err(e) => return Err(gdm_error("Failed to inspect PAM backup", &backup, &e)),
+            }
+            write_atomic(pam_file, updated.as_bytes(), mode, owner)
         }
-        Err(e) => return Err(gdm_error("Failed to inspect PAM backup", &backup, &e)),
+        // GitHub #331: never creates a backup and leaves an existing one byte-identical, so
+        // `gdm restore` keeps returning the pristine pre-soos bytes (and keeps refusing a
+        // stale backup without `--force`).
+        EnablePlan::RemoveRedundant { updated } => {
+            write_atomic(pam_file, updated.as_bytes(), mode, owner)
+        }
     }
-    write_atomic(pam_file, plan.updated.as_bytes(), mode, owner)
 }
 
 /// Result of [`plan_gdm_enable`] when the file must be rewritten.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct EnablePlan {
-    /// Content without any soos rule (what the backup must hold).
-    pristine: String,
-    /// Content with the managed block at the safe position.
-    updated: String,
+enum EnablePlan {
+    /// Insert the managed block.
+    Insert {
+        /// Content without any soos rule (what the backup must hold).
+        pristine: String,
+        /// Content with the managed block at the safe position.
+        updated: String,
+    },
+    /// GitHub #331: the delegated stack already reaches a shared primary soos rule; write the
+    /// file without its managed rules. Never creates a backup.
+    RemoveRedundant {
+        /// Content without any soos managed rule.
+        updated: String,
+    },
 }
 
-/// Computes the rewritten GDM service file, or `None` when nothing must change.
-fn plan_gdm_enable(content: &str, include_dir: &Path) -> Result<Option<EnablePlan>, AdminCliError> {
+/// Refuses a PAM file using line continuations (the stack order cannot be told).
+fn refuse_continuations(content: &str) -> Result<(), AdminCliError> {
     if content.lines().any(|l| l.trim_end().ends_with('\\')) {
         return Err(AdminCliError::GdmConfig(
             "PAM file uses line continuations; refusing to edit it automatically".into(),
         ));
     }
-    let pristine = strip_managed_rules(content)?;
-    if has_active_pam_soos_rule(&pristine) {
-        return Ok(None);
+    Ok(())
+}
+
+/// The pre-credential part of a GDM service file, as `gdm enable` classifies it.
+struct AnchorScan<'a> {
+    /// Lines of the pristine content, line endings included.
+    lines: Vec<&'a str>,
+    /// Index in `lines` of the first credential or delegating rule.
+    anchor_index: usize,
+    /// That rule.
+    anchor_rule: PamLine<'a>,
+    /// Number of pre-credential auth rules before the anchor.
+    ordinal: usize,
+    /// `(ordinal, largest jump)` of every pre-credential rule with a `[...=N]` jump.
+    jumps: Vec<(usize, usize)>,
+}
+
+impl<'a> AnchorScan<'a> {
+    /// The lines from the anchor onward (what a delegated-stack scan starts from).
+    fn delegated_lines(&self) -> &[&'a str] {
+        self.lines.get(self.anchor_index..).unwrap_or_default()
     }
 
+    /// Auth-rule position at which the `[...=N]` jump of the rule at `from` lands.
+    fn jump_target(from: usize, jump: usize) -> usize {
+        from.saturating_add(jump).saturating_add(1)
+    }
+
+    /// True when a pre-anchor jump lands on or beyond the anchor: inserting or removing
+    /// rules at the insertion point would change its target.
+    fn jump_crosses_anchor(&self) -> bool {
+        self.jumps
+            .iter()
+            .any(|&(from, jump)| Self::jump_target(from, jump) >= self.ordinal)
+    }
+
+    /// True when a pre-anchor jump lands beyond the anchor, so that branch of the stack skips
+    /// the delegation (and any shared rule it reaches).
+    fn jump_skips_anchor(&self) -> bool {
+        self.jumps
+            .iter()
+            .any(|&(from, jump)| Self::jump_target(from, jump) > self.ordinal)
+    }
+}
+
+/// The refusal of a `[...=N]` jump whose target an edit would change.
+fn jump_crossing_error() -> AdminCliError {
+    AdminCliError::GdmConfig(
+        "a [...=N] jump before the insertion point would change target; \
+         refusing to edit the PAM file automatically"
+            .into(),
+    )
+}
+
+/// Classifies the auth rules of `pristine` up to its credential or delegating anchor. The
+/// single source of truth of `gdm enable` and `gdm status` (GitHub #331).
+///
+/// # Errors
+///
+/// Refuses an unclassified auth rule before the anchor and a file without an anchor
+/// (line continuations are refused on the whole file first, [`refuse_continuations`]).
+fn pre_credential_scan(pristine: &str) -> Result<AnchorScan<'_>, AdminCliError> {
     let lines: Vec<&str> = pristine.split_inclusive('\n').collect();
     let mut anchor = None;
     let mut ordinal = 0_usize;
@@ -303,17 +423,55 @@ fn plan_gdm_enable(content: &str, include_dir: &Path) -> Result<Option<EnablePla
                 .into(),
         ));
     };
+    Ok(AnchorScan {
+        lines,
+        anchor_index,
+        anchor_rule,
+        ordinal,
+        jumps,
+    })
+}
+
+/// Computes the rewritten GDM service file, or `None` when nothing must change.
+fn plan_gdm_enable(content: &str, include_dir: &Path) -> Result<Option<EnablePlan>, AdminCliError> {
+    refuse_continuations(content)?;
+    let pristine = strip_managed_rules(content)?;
+    if has_active_pam_soos_rule(&pristine) {
+        return Ok(None);
+    }
+
+    let scan = pre_credential_scan(&pristine)?;
+    let jump_crosses = scan.jump_crosses_anchor();
+    let AnchorScan {
+        lines,
+        anchor_index,
+        anchor_rule,
+        jumps,
+        ..
+    } = scan;
+    // GitHub #331: the delegated scan runs before the jump check, but its error surfaces
+    // after it (unchanged priority). A shared primary soos rule short-circuits: nothing is
+    // inserted. When nothing is removed either, no jump target can move. Removing managed
+    // rules does move every jump that crosses them (the block sits at the insertion point and
+    // a crossing jump coexisting with it was written with its rules counted), so the jump
+    // check applies then (candid review 2026-10-05).
+    let delegated = anchor_rule
+        .delegation()
+        .map(|_| delegated_auth(include_dir, lines.get(anchor_index..).unwrap_or_default()));
+    if let Some(Ok(DelegatedAuth::SharedSoosRule { .. })) = delegated {
+        if pristine == content {
+            return Ok(None);
+        }
+        if jump_crosses {
+            return Err(jump_crossing_error());
+        }
+        return Ok(Some(EnablePlan::RemoveRedundant { updated: pristine }));
+    }
     let has_jump = !jumps.is_empty();
     // A jump from a rule before the insertion point that lands on or beyond it would
     // silently change target once rules are inserted.
-    for (from, jump) in jumps {
-        if from.saturating_add(jump).saturating_add(1) >= ordinal {
-            return Err(AdminCliError::GdmConfig(
-                "a [...=N] jump before the insertion point would change target; \
-                 refusing to edit the PAM file automatically"
-                    .into(),
-            ));
-        }
+    if jump_crosses {
+        return Err(jump_crossing_error());
     }
 
     // Only an earlier rule with a plain `required`/`requisite` control enforces the
@@ -332,10 +490,13 @@ fn plan_gdm_enable(content: &str, include_dir: &Path) -> Result<Option<EnablePla
             .filter_map(|rule| normalized_rule(&rule))
             .collect()
     };
-    let gates = if anchor_rule.delegation().is_some() {
-        delegated_gates(include_dir, lines.get(anchor_index..).unwrap_or_default())?
-    } else {
-        Vec::new()
+    let gates = match delegated {
+        Some(result) => match result? {
+            DelegatedAuth::Gates(gates) => gates,
+            // Handled above; kept total without a panic path.
+            DelegatedAuth::SharedSoosRule { .. } => return Ok(None),
+        },
+        None => Vec::new(),
     };
 
     let mut updated = String::with_capacity(pristine.len().saturating_add(512));
@@ -364,7 +525,7 @@ fn plan_gdm_enable(content: &str, include_dir: &Path) -> Result<Option<EnablePla
     if updated == content {
         return Ok(None);
     }
-    Ok(Some(EnablePlan { pristine, updated }))
+    Ok(Some(EnablePlan::Insert { pristine, updated }))
 }
 
 /// `"<module basename> <args>"` of a non-delegating rule, for duplicate detection.

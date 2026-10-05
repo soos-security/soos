@@ -1,10 +1,13 @@
 //! Daemon health and status query subsystem.
 
+use std::ffi::OsStr;
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
-use std::process::Command;
-use std::time::Duration;
+use std::process::{Child, Command, Stdio};
+use std::sync::mpsc;
+use std::thread;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use soos_protocol::codec::decode;
@@ -14,6 +17,15 @@ use soos_protocol::types::{
 };
 
 use crate::error::AdminCliError;
+
+/// Upper bound of the `systemctl show` call made by `soos-admin status` (GitHub #331, P-2).
+pub const SYSTEMCTL_SHOW_TIMEOUT_MS: u64 = 1000;
+
+/// Bytes of `systemctl show` output read at most (three properties need < 200 bytes).
+const MAX_SYSTEMCTL_OUTPUT_BYTES: u64 = 4096;
+
+/// Poll interval of the `systemctl` child while waiting for it.
+const SYSTEMCTL_POLL_INTERVAL_MS: u64 = 10;
 
 /// Aggregated daemon health and runtime report.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -235,15 +247,101 @@ fn query_daemon_socket(socket_path: &Path) -> Result<StatusResponse, AdminCliErr
 
 /// Inspects systemd unit state via `systemctl show` with safe fallback.
 fn inspect_systemd_unit(unit_name: &str) -> (String, String, Option<u32>) {
-    let output = match Command::new("systemctl")
+    inspect_systemd_unit_with(
+        OsStr::new("systemctl"),
+        unit_name,
+        Duration::from_millis(SYSTEMCTL_SHOW_TIMEOUT_MS),
+    )
+}
+
+/// Kills and reaps `child` (never leaves a zombie behind).
+fn kill_and_reap(child: &mut Child) {
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+/// Test seam of the bounded `systemctl show` call (GitHub #331, P-2).
+///
+/// Runs `<program> show <unit> --property=ActiveState,SubState,MainPID` with stdin and
+/// stderr null and stdout piped. Stdout is drained on a helper thread (at most
+/// `MAX_SYSTEMCTL_OUTPUT_BYTES + 1` bytes) so a child filling the pipe never blocks on it;
+/// the child is polled with `try_wait` every `SYSTEMCTL_POLL_INTERVAL_MS` until `timeout`,
+/// then killed and reaped. A reader still running at the deadline (a descendant keeps the
+/// pipe open) is detached. On a timeout, a non-zero exit, a spawn or wait error, or output
+/// above `MAX_SYSTEMCTL_OUTPUT_BYTES`, the result is `("unknown", "unknown", None)`.
+pub(crate) fn inspect_systemd_unit_with(
+    program: &OsStr,
+    unit_name: &str,
+    timeout: Duration,
+) -> (String, String, Option<u32>) {
+    let unknown = || ("unknown".to_string(), "unknown".to_string(), None);
+    // An unrepresentable deadline is treated as already expired (fail closed to unknown).
+    let deadline = Instant::now().checked_add(timeout);
+    let remaining = || {
+        deadline.map_or(Duration::ZERO, |d| {
+            d.saturating_duration_since(Instant::now())
+        })
+    };
+
+    let mut child = match Command::new(program)
         .arg("show")
         .arg(unit_name)
         .arg("--property=ActiveState,SubState,MainPID")
-        .output()
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .stdout(Stdio::piped())
+        .spawn()
     {
-        Ok(out) if out.status.success() => out.stdout,
-        _ => return ("unknown".to_string(), "unknown".to_string(), None),
+        Ok(child) => child,
+        Err(_) => return unknown(),
     };
+    let Some(stdout) = child.stdout.take() else {
+        kill_and_reap(&mut child);
+        return unknown();
+    };
+    let (sender, receiver) = mpsc::channel();
+    let reader = thread::Builder::new()
+        .name("soos-admin-systemctl".into())
+        .spawn(move || {
+            let mut bytes = Vec::new();
+            let result = stdout
+                .take(MAX_SYSTEMCTL_OUTPUT_BYTES.saturating_add(1))
+                .read_to_end(&mut bytes)
+                .map(|_| bytes);
+            // The receiver may be gone (deadline passed): nothing to report then.
+            let _ = sender.send(result);
+        });
+    if reader.is_err() {
+        kill_and_reap(&mut child);
+        return unknown();
+    }
+
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {}
+            Err(_) => {
+                kill_and_reap(&mut child);
+                return unknown();
+            }
+        }
+        let left = remaining();
+        if left.is_zero() {
+            kill_and_reap(&mut child);
+            return unknown();
+        }
+        thread::sleep(left.min(Duration::from_millis(SYSTEMCTL_POLL_INTERVAL_MS)));
+    };
+
+    let output = match receiver.recv_timeout(remaining()) {
+        Ok(Ok(bytes)) => bytes,
+        _ => return unknown(),
+    };
+    let oversized =
+        u64::try_from(output.len()).map_or(true, |len| len > MAX_SYSTEMCTL_OUTPUT_BYTES);
+    if !status.success() || oversized {
+        return unknown();
+    }
 
     let text = String::from_utf8_lossy(&output);
     let mut active = "unknown".to_string();
@@ -265,4 +363,146 @@ fn inspect_systemd_unit(unit_name: &str) -> (String, String, Option<u32>) {
     }
 
     (active, sub, pid)
+}
+
+#[cfg(test)]
+mod systemctl_bound_tests {
+    //! GitHub #331 P-2 (matrix IGF11): `soos-admin status` bounds its `systemctl show` call.
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        reason = "unit tests use direct assertions"
+    )]
+
+    use super::*;
+    use std::ffi::OsStr;
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::PathBuf;
+    use std::sync::OnceLock;
+    use std::time::Instant;
+
+    const SHORT_TIMEOUT: Duration = Duration::from_millis(300);
+    const SLACK: Duration = Duration::from_secs(1);
+
+    /// Fake `systemctl` programs, written once before any of them is spawned (avoids
+    /// `ETXTBSY` from a concurrent fork inheriting a write descriptor).
+    fn fakes() -> &'static PathBuf {
+        static DIR: OnceLock<(tempfile::TempDir, PathBuf)> = OnceLock::new();
+        &DIR.get_or_init(|| {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().to_path_buf();
+            let scripts: &[(&str, &str)] = &[
+                ("hang", "#!/bin/sh\nexec sleep 30\n"),
+                (
+                    "pipe-holder",
+                    "#!/bin/sh\nsleep 30 &\necho ActiveState=active\n",
+                ),
+                (
+                    "ok",
+                    "#!/bin/sh\nprintf 'ActiveState=active\\nSubState=running\\nMainPID=42\\n'\n",
+                ),
+                (
+                    "args",
+                    "#!/bin/sh\n[ \"$1\" = show ] && [ \"$2\" = soos-daemon.service ] && \
+                     [ \"$3\" = --property=ActiveState,SubState,MainPID ] && [ $# -eq 3 ] || exit 9\n\
+                     printf 'ActiveState=activating\\nSubState=start\\nMainPID=7\\n'\n",
+                ),
+                (
+                    "fail",
+                    "#!/bin/sh\nprintf 'ActiveState=active\\nSubState=running\\nMainPID=42\\n'\nexit 3\n",
+                ),
+                (
+                    "huge",
+                    "#!/bin/sh\nprintf 'ActiveState=active\\nSubState=running\\nMainPID=42\\n'\n\
+                     head -c 8192 /dev/zero | tr '\\000' 'x'\necho\n",
+                ),
+            ];
+            for (name, body) in scripts {
+                let file = path.join(name);
+                std::fs::write(&file, body).unwrap();
+                std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
+            (dir, path)
+        })
+        .1
+    }
+
+    fn run(name: &str, timeout: Duration) -> ((String, String, Option<u32>), Duration) {
+        let program = fakes().join(name);
+        let start = Instant::now();
+        let out = inspect_systemd_unit_with(program.as_os_str(), "soos-daemon.service", timeout);
+        (out, start.elapsed())
+    }
+
+    fn unknown() -> (String, String, Option<u32>) {
+        ("unknown".to_string(), "unknown".to_string(), None)
+    }
+
+    #[test]
+    fn test_igf11_systemctl_show_timeout_is_one_second() {
+        assert_eq!(SYSTEMCTL_SHOW_TIMEOUT_MS, 1000);
+    }
+
+    #[test]
+    fn test_igf11_hanging_systemctl_is_killed_and_reported_unknown() {
+        let (out, elapsed) = run("hang", SHORT_TIMEOUT);
+        assert_eq!(out, unknown());
+        assert!(
+            elapsed < SHORT_TIMEOUT + SLACK,
+            "a hanging systemctl must be bounded by the timeout, took {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn test_igf11_descendant_holding_stdout_does_not_block() {
+        let (out, elapsed) = run("pipe-holder", SHORT_TIMEOUT);
+        assert!(
+            elapsed < SHORT_TIMEOUT + SLACK,
+            "a descendant keeping stdout open must not block the call, took {elapsed:?}"
+        );
+        assert!(
+            out == unknown() || out.0 == "active",
+            "either unknown or parsed, got {out:?}"
+        );
+    }
+
+    #[test]
+    fn test_igf11_normal_output_is_parsed() {
+        let (out, _) = run("ok", Duration::from_millis(SYSTEMCTL_SHOW_TIMEOUT_MS));
+        assert_eq!(out, ("active".to_string(), "running".to_string(), Some(42)));
+    }
+
+    #[test]
+    fn test_igf11_arguments_are_unchanged() {
+        let (out, _) = run("args", Duration::from_millis(SYSTEMCTL_SHOW_TIMEOUT_MS));
+        assert_eq!(
+            out,
+            ("activating".to_string(), "start".to_string(), Some(7))
+        );
+    }
+
+    #[test]
+    fn test_igf11_non_zero_exit_is_unknown() {
+        let (out, _) = run("fail", Duration::from_millis(SYSTEMCTL_SHOW_TIMEOUT_MS));
+        assert_eq!(out, unknown());
+    }
+
+    #[test]
+    fn test_igf11_oversized_output_is_unknown() {
+        let (out, _) = run("huge", Duration::from_millis(SYSTEMCTL_SHOW_TIMEOUT_MS));
+        assert_eq!(out, unknown());
+    }
+
+    #[test]
+    fn test_igf11_missing_program_is_unknown() {
+        let start = Instant::now();
+        let out = inspect_systemd_unit_with(
+            OsStr::new("/nonexistent/soos-test-systemctl"),
+            "soos-daemon.service",
+            SHORT_TIMEOUT,
+        );
+        assert_eq!(out, unknown());
+        assert!(start.elapsed() < SHORT_TIMEOUT + SLACK);
+    }
 }

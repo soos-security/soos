@@ -46,8 +46,20 @@ pub trait CameraManager: Send + Sync {
 
     /// User-presentable lifecycle state (default: derived from `is_ready()`).
     fn status(&self) -> CameraStatus { /* Ready or Starting */ }
+
+    /// CLOCK_MONOTONIC stamp of the current stream set-up (default: `None`, GitHub #331).
+    fn stream_started_mono_ns(&self) -> Option<u64> { None }
 }
 ```
+
+`stream_started_mono_ns` is the instant at which the current capture stream was set up (buffers
+mapped), immediately before its first dequeue, which issues `VIDIOC_STREAMON` (v4l 0.14 starts
+the stream lazily); it is never later than the `timestamp_mono_ns` of a frame of that stream.
+`V4lCameraManager` stores it right after `start_stream` succeeds, clears it whenever frames are
+withdrawn (suspend, error, shutdown, panic) and returns `None` while not ready.
+`MockCameraManager::set_stream_started_mono_ns` is a test hook returned regardless of readiness
+(`None` by default). Only the daemon's presence worker reads it, to settle the sensor's
+auto-exposure before presence evaluation; the PAM path never does.
 
 ### Daemon Health Integration
 `soos-daemon` attaches its camera manager to `HealthState` (`HealthState::attach_camera`);

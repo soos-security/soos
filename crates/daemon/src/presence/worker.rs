@@ -19,9 +19,9 @@ use super::logind::{LogindSessionState, PresenceLogind, PresenceLogindError, Ses
 use super::switch::PresenceSwitch;
 use super::tracker::{select_candidate, LockEntry, LockTracker};
 use super::{
-    reconnect_backoff, ACCOUNT_CHECK_TIMEOUT_MS, DBUS_CALL_TIMEOUT_MS, DBUS_CONNECT_TIMEOUT_MS,
-    LOCK_POLL_INTERVAL_MS, MAX_ALLOW_TO_UNLOCK_MS, MAX_PRESENCE_SEAT_SESSIONS,
-    PRESENCE_RESERVED_ATTEMPTS, PRESENCE_WAKE_SETTLE_MS,
+    presence_settle_window, reconnect_backoff, ACCOUNT_CHECK_TIMEOUT_MS, DBUS_CALL_TIMEOUT_MS,
+    DBUS_CONNECT_TIMEOUT_MS, LOCK_POLL_INTERVAL_MS, MAX_ALLOW_TO_UNLOCK_MS,
+    MAX_PRESENCE_SEAT_SESSIONS, PRESENCE_RESERVED_ATTEMPTS, PRESENCE_WAKE_SETTLE_MS,
 };
 use crate::consensus::{
     run_face_consensus, wake_camera, ConsensusContext, ConsensusRun, MAX_CAMERA_WAKE_WAIT_MS,
@@ -647,32 +647,36 @@ impl<L: PresenceLogind, D: DisplayProbe, A: AccountGuard> PresenceWorker<L, D, A
         let Ok(start_ns) = (self.clock_fn)() else {
             return ScanOutcome::Aborted(ReasonClass::InternalError);
         };
-        // After a wake, captures stamped before `start + PRESENCE_WAKE_SETTLE_MS` are never
-        // evaluated; the decision budget starts at the end of the settle, so the settle never
-        // eats it. A scan of a streaming camera keeps the plain window (bound 0).
-        let settle_ms = if woke { PRESENCE_WAKE_SETTLE_MS } else { 0 };
-        let not_before_ns = if woke {
-            start_ns.saturating_add(settle_ms.saturating_mul(1_000_000))
-        } else {
-            0
-        };
-        if woke {
+        // Captures stamped before the settle bound are never evaluated (GitHub #329, #331): the
+        // bound is `PRESENCE_WAKE_SETTLE_MS` after this scan's wake or after the camera stream
+        // start, whichever is later (a stream started shortly before by a PAM request is
+        // covered too). The decision budget starts at the end of the settle, so the settle
+        // never eats it. A camera streaming for longer than the settle keeps the plain window.
+        let stream_started_ns = self.pipeline.camera.stream_started_mono_ns();
+        let settle =
+            presence_settle_window(woke, start_ns, stream_started_ns, PRESENCE_WAKE_SETTLE_MS);
+        if settle.wait_ms > 0 {
+            let cause = if woke {
+                "presence_wake"
+            } else {
+                "stream_start"
+            };
             debug!(
-                settle_ms,
-                "Camera woken by presence; captures before the settle are not evaluated"
+                settle_ms = settle.wait_ms,
+                cause, "Camera settling; captures before the settle are not evaluated"
             );
         }
         let deadline = RequestDeadline::compute(
-            not_before_ns.max(start_ns),
+            settle.not_before_ns.max(start_ns),
             0,
             Instant::now(),
             Duration::from_millis(
                 DECISION_BUDGET_MS
                     .saturating_add(RESPONSE_WRITE_MARGIN_MS)
-                    .saturating_add(settle_ms),
+                    .saturating_add(settle.wait_ms),
             ),
         )
-        .with_not_before(not_before_ns);
+        .with_not_before(settle.not_before_ns);
         let run = {
             let ctx = ConsensusContext {
                 camera: &self.pipeline.camera,

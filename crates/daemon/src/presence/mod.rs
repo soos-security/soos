@@ -79,7 +79,8 @@ pub const MAX_SYSFS_ATTR_BYTES: usize = 64;
 /// Bound of one account check on the blocking pool; expiry is `Undeterminable`.
 pub const ACCOUNT_CHECK_TIMEOUT_MS: u64 = 500;
 
-/// Settle period after a presence scan woke the camera (GitHub #329): captures stamped
+/// Settle period after a presence scan woke the camera (GitHub #329) or after the camera
+/// stream started (GitHub #331, see [`presence_settle_window`]): captures stamped
 /// earlier, while the sensor's auto-exposure is still converging, are never evaluated (no
 /// pass, no spoof). Presence only; the PAM path keeps the instant-wake contract
 /// (`DAEMON_DEFAULT_WARMUP_FRAMES` = 0). Bounded by construction to
@@ -158,6 +159,61 @@ pub const GLOBAL_DISABLE_FLAG: &str = "disabled";
 
 /// Presence-only disable flag.
 pub const PRESENCE_DISABLE_FLAG: &str = "presence.disable";
+
+/// Nanoseconds per millisecond.
+const NANOS_PER_MS: u64 = 1_000_000;
+
+/// Evaluation lower bound of one presence scan (GitHub #329, #331).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PresenceSettle {
+    /// Captures stamped before this CLOCK_MONOTONIC instant are not evaluated (0: no bound).
+    pub not_before_ns: u64,
+    /// Settle time still to wait after `start_ns`, rounded up to whole ms; `0..=settle_ms`.
+    pub wait_ms: u64,
+}
+
+/// Computes the settle window of a scan that starts evaluating at `start_ns`.
+///
+/// - `woke`: this scan woke the camera (sampled before `notify_activity`);
+/// - `stream_started_ns`: `CameraManager::stream_started_mono_ns()` read after the wake;
+///   `Some(0)` is `None`; a value later than `start_ns` is clamped to `start_ns`.
+///
+/// `bound = max(woke ? start_ns + settle : 0, stream ? stream + settle : 0)` with saturating
+/// arithmetic (`settle = settle_ms * 1_000_000`, saturating). If `bound <= start_ns` the result
+/// is `{ not_before_ns: 0, wait_ms: 0 }`, else `wait_ms = ceil((bound - start_ns) / 1_000_000)`.
+#[must_use]
+pub fn presence_settle_window(
+    woke: bool,
+    start_ns: u64,
+    stream_started_ns: Option<u64>,
+    settle_ms: u64,
+) -> PresenceSettle {
+    const NO_SETTLE: PresenceSettle = PresenceSettle {
+        not_before_ns: 0,
+        wait_ms: 0,
+    };
+    if settle_ms == 0 {
+        return NO_SETTLE;
+    }
+    let settle_ns = settle_ms.saturating_mul(NANOS_PER_MS);
+    let wake_bound = if woke {
+        start_ns.saturating_add(settle_ns)
+    } else {
+        0
+    };
+    let stream_bound = match stream_started_ns {
+        Some(stream) if stream != 0 => stream.min(start_ns).saturating_add(settle_ns),
+        _ => 0,
+    };
+    let bound = wake_bound.max(stream_bound);
+    let Some(remaining_ns) = bound.checked_sub(start_ns).filter(|ns| *ns > 0) else {
+        return NO_SETTLE;
+    };
+    PresenceSettle {
+        not_before_ns: bound,
+        wait_ms: remaining_ns.div_ceil(NANOS_PER_MS).min(settle_ms),
+    }
+}
 
 /// Reconnect backoff after `consecutive_failures` logind failures: zero without a failure,
 /// then 1 s doubling per failure, saturating at [`DBUS_RECONNECT_BACKOFF_MAX_MS`].

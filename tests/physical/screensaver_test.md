@@ -139,10 +139,13 @@ first credential rule or delegation; see `Docs/DISTRIBUTION_DEPLOYMENT.md` §2.1
 block, `gdm status`, `gdm disable` and `gdm restore`. Check the result with
 `sudo soos-admin gdm status`.
 
-When the delegated stack also carries a soos line (Arch: `gdm-password` →
-`system-local-login` → `system-login` → `system-auth`), a face that does not match at the
-managed block is tried again by the base-stack line. Record whether the journal shows one or
-two `Rendered authentication response` lines for one GDM attempt.
+When the delegated stack already carries the primary soos rule (Arch `system-auth` through
+`gdm-password` → `system-local-login` → `system-login`, Debian `common-auth` with the soos
+profile, Fedora `custom/soos`), `gdm enable` adds no managed block (and removes one left by an
+earlier release); `sudo soos-admin gdm status` then shows `Shared soos Rule:  <stack>`. GDM
+authenticates through that shared rule, with its deadline (module default 1000 ms) instead of
+`timeout_ms=2500`: expect exactly one `Rendered authentication response` line per GDM attempt
+(GitHub #331).
 
 #### Test Procedure:
 1. **Test Case 1 (Initial Greeter Login Never Uses Face)**:
@@ -155,8 +158,13 @@ two `Rendered authentication response` lines for one GDM attempt.
    - From an open GNOME session, lock the screen (`Super+L`), then raise the shield (any key).
    - **Expected Result**: The session unlocks without a password after a
      `verdict=Allow reason=FaceMatch` line. This relies on the GDM reauthentication worker
-     running in the user's session scope (`cat /proc/<worker pid>/cgroup` shows
+     running in the user's session scope (`cat /proc/<pid>/cgroup` shows
      `session-<id>.scope`); record the result, since the ADR leaves it to hardware validation.
+   - **Finding the worker**: it exists only while the unlock prompt is up. In a terminal (or
+     from a TTY / SSH session) start
+     `sleep 15; pgrep -af 'gdm-session-worker \[pam/gdm-password\]'`, lock with `Super+L`,
+     raise the shield within 15 s, then run `cat /proc/<pid>/cgroup` with the pid of the first
+     column.
 3. **Test Case 3 (Output Isolation Audit)**:
    - Check journal logs: `journalctl -u gdm -b`.
    - **Expected Result**: Zero stream pollution (`stdout` or `stderr` messages from `pam_soos.so`) that could corrupt GDM's JSON/DBus communication channel.
@@ -433,12 +441,21 @@ If a misconfigured PAM stack prevents login:
 1. **Rescue Shell**:
    - Switch to TTY (`Ctrl+Alt+F2`) or reboot into systemd rescue target: `systemd.unit=rescue.target`.
 2. **Disable Module in PAM Stack**:
-   - Comment out `pam_soos.so` entries in `/etc/pam.d/`:
+   - Comment out `pam_soos.so` entries in the base stacks that carry them, following symlinks
+     (authselect ships `system-auth` and `password-auth` as symlinks; a plain `sed -i` would
+     replace them by regular files) and skipping missing files:
      ```bash
-     sudo sed -i 's/^auth.*pam_soos\.so/# &/' /etc/pam.d/common-auth /etc/pam.d/system-auth /etc/pam.d/swaylock /etc/pam.d/hyprlock /etc/pam.d/sudo
+     for f in /etc/pam.d/common-auth /etc/pam.d/system-auth /etc/pam.d/password-auth; do
+         [ -f "$f" ] && sudo sed -i --follow-symlinks 's/^auth.*pam_soos\.so/# &/' "$f"
+     done
      ```
-   - GDM: `sudo soos-admin gdm disable` stops face verification at once (`/etc/soos/gdm.disable`);
-     `sudo soos-admin gdm restore` puts back `gdm-password.soos-backup`.
+     `swaylock`, `hyprlock`, `login` and `sudo` keep their distribution files and reach soos
+     only through these base stacks (§3.1–§3.5), so they need no edit.
+   - GDM: `sudo soos-admin gdm disable` stops face verification at once (`/etc/soos/gdm.disable`).
+     When GDM uses a managed block, `sudo soos-admin gdm restore` puts back
+     `gdm-password.soos-backup`. When it uses the shared base-stack rule (`gdm status` shows
+     `Shared soos Rule`), there may be no backup (`gdm restore` then reports that it does not
+     exist): use `gdm disable` or the base-stack loop above.
    - Presence auto-unlock: `sudo touch /etc/soos/presence.disable` stops it within one second
      (`gdm.disable` does not); `/etc/soos/disabled` stops it together with every face PAM path.
 3. **Service Rollback**:

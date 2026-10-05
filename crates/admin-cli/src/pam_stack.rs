@@ -230,20 +230,95 @@ impl<'a> PamLine<'a> {
         self.module_name()
             .is_some_and(|name| NEUTRAL_MODULES.contains(&name))
     }
+
+    /// True for an active `auth` rule of `pam_soos.so` (bare name or path) that can grant the
+    /// whole auth phase on a face match and is driven by `PAM_SERVICE` (GitHub #331):
+    /// - no argument starting with `event=` (the password-failed hook is not primary) and no
+    ///   argument starting with `service=` (the `gdm.disable` flag must keep applying);
+    /// - control `sufficient` (case-insensitive), or a bracketed control whose `success` value
+    ///   is `done` or a decimal jump `N >= 1`, and whose every other `key=value` action is
+    ///   `ignore` (keys and values compared case-insensitively).
+    ///
+    /// Anything else (`required`, `requisite`, `optional`, `success=ok`, `default=die`, a
+    /// duplicate or missing `success`, ...) is not primary. The caller has already checked
+    /// `is_auth()`.
+    pub(crate) fn is_primary_soos_rule(&self) -> bool {
+        let Self::Rule { control, args, .. } = self else {
+            return false;
+        };
+        if self.module_name() != Some("pam_soos.so") {
+            return false;
+        }
+        if args
+            .iter()
+            .any(|arg| arg.starts_with("event=") || arg.starts_with("service="))
+        {
+            return false;
+        }
+        if control.eq_ignore_ascii_case("sufficient") {
+            return true;
+        }
+        let Some(inside) = control
+            .strip_prefix('[')
+            .and_then(|rest| rest.strip_suffix(']'))
+        else {
+            return false;
+        };
+        let mut success_seen = false;
+        for token in inside.split_whitespace() {
+            let Some((key, value)) = token.split_once('=') else {
+                return false;
+            };
+            if key.eq_ignore_ascii_case("success") {
+                if success_seen || !is_primary_success_action(value) {
+                    return false;
+                }
+                success_seen = true;
+            } else if !value.eq_ignore_ascii_case("ignore") {
+                return false;
+            }
+        }
+        success_seen
+    }
+}
+
+/// `done`, or a decimal jump `N >= 1` written with digits only (no sign, not empty).
+fn is_primary_success_action(value: &str) -> bool {
+    if value.eq_ignore_ascii_case("done") {
+        return true;
+    }
+    !value.is_empty()
+        && value.bytes().all(|b| b.is_ascii_digit())
+        && value.parse::<usize>().is_ok_and(|jump| jump >= 1)
 }
 
 /// Outcome of scanning an auth stack.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Scan {
     /// The lines ended without reaching a credential module: keep scanning the caller.
     Continue,
     /// A credential module was reached: gates end here.
     Stop,
+    /// A primary `pam_soos.so` rule was reached first (GitHub #331); payload = stack name.
+    SharedSoos(String),
 }
 
-/// Collects, in evaluation order, the gate rules run by `lines` (the edited file from
-/// its delegating anchor onward, resolved inside `dir`) before the first credential
-/// module.
+/// What the auth stack delegated from the GDM file runs before its first credential module.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum DelegatedAuth {
+    /// Gate rules to copy in front of the managed block.
+    Gates(Vec<String>),
+    /// The delegated stack reaches an active primary `pam_soos.so` rule (in the named stack
+    /// file) before any credential module: GDM already authenticates through it.
+    SharedSoosRule {
+        /// Name of the stack file holding the shared rule (a validated include target).
+        stack: String,
+    },
+}
+
+/// Scans `lines` (the edited file from its delegating anchor onward, resolved inside `dir`)
+/// in evaluation order up to the first credential module or primary `pam_soos.so` rule,
+/// collecting the gate rules met before it.
 ///
 /// # Errors
 ///
@@ -251,16 +326,18 @@ pub(crate) enum Scan {
 /// an unresolvable include target, an include chain deeper than
 /// [`MAX_PAM_INCLUDE_DEPTH`] or line continuations are met before the credential
 /// module, and when no credential module is reached at all.
-pub(crate) fn delegated_gates(dir: &Path, lines: &[&str]) -> Result<Vec<String>, AdminCliError> {
+pub(crate) fn delegated_auth(dir: &Path, lines: &[&str]) -> Result<DelegatedAuth, AdminCliError> {
     let mut gates = Vec::new();
     match scan_lines(
         dir,
         "the edited PAM file",
+        None,
         lines.iter().copied(),
         0,
         &mut gates,
     )? {
-        Scan::Stop => Ok(gates),
+        Scan::Stop => Ok(DelegatedAuth::Gates(gates)),
+        Scan::SharedSoos(stack) => Ok(DelegatedAuth::SharedSoosRule { stack }),
         Scan::Continue => Err(AdminCliError::GdmConfig(
             "the auth stack reaches no known credential module (pam_unix.so, pam_sss.so, ...); \
              refusing to guess where pam_soos.so belongs"
@@ -307,12 +384,15 @@ fn scan_stack(
         Err(ReadError::Other(msg)) => return Err(AdminCliError::GdmConfig(msg)),
     };
     let label = format!("the shared auth stack '{name}'");
-    scan_lines(dir, &label, content.lines(), depth, gates)
+    scan_lines(dir, &label, Some(name), content.lines(), depth, gates)
 }
 
+/// `stack` is the validated name of the stack file being scanned (`None` for the edited
+/// file itself, where a primary soos rule is unreachable and stays unclassified).
 fn scan_lines<'a>(
     dir: &Path,
     label: &str,
+    stack: Option<&str>,
     lines: impl Iterator<Item = &'a str>,
     depth: usize,
     gates: &mut Vec<String>,
@@ -331,13 +411,18 @@ fn scan_lines<'a>(
         }
         if let Some(target) = line.delegation() {
             let next = depth.saturating_add(1);
-            if scan_stack(dir, target, next, gates)? == Scan::Stop {
-                return Ok(Scan::Stop);
+            match scan_stack(dir, target, next, gates)? {
+                Scan::Continue => continue,
+                decisive => return Ok(decisive),
             }
-            continue;
         }
         if line.is_credential() {
             return Ok(Scan::Stop);
+        }
+        if let Some(name) = stack {
+            if line.is_primary_soos_rule() {
+                return Ok(Scan::SharedSoos(name.to_string()));
+            }
         }
         if let Some(guard) = line.as_guard() {
             if !gates.contains(&guard) {
@@ -424,6 +509,7 @@ mod tests {
     #![allow(
         clippy::unwrap_used,
         clippy::expect_used,
+        clippy::arithmetic_side_effects,
         reason = "unit tests use direct assertions"
     )]
     use super::*;
@@ -463,5 +549,170 @@ mod tests {
         let jump =
             PamLine::parse("auth [success=1 default=ignore] pam_succeed_if.so uid < 1000").unwrap();
         assert_eq!(jump.as_guard(), None, "conditional gates are never copied");
+    }
+
+    // ------------------------------------------------------------------
+    // GitHub #331 (matrix IGF17): primary pam_soos.so rule classification
+    // ------------------------------------------------------------------
+
+    fn primary(line: &str) -> bool {
+        let rule = PamLine::parse(line).unwrap();
+        assert!(rule.is_auth(), "fixture {line:?} must be an auth rule");
+        rule.is_primary_soos_rule()
+    }
+
+    #[test]
+    fn test_igf17_packaged_soos_rules_are_primary() {
+        for line in [
+            "auth  [success=4 default=ignore]  pam_soos.so",
+            "auth\t[success=done default=ignore]\tpam_soos.so",
+            "auth\t[success=2 default=ignore]\tpam_soos.so",
+            "auth        [success=done default=ignore]                pam_soos.so",
+            "auth sufficient pam_soos.so",
+        ] {
+            assert!(primary(line), "{line:?} must be primary");
+        }
+    }
+
+    #[test]
+    fn test_igf17_qualifying_edge_forms_are_primary() {
+        for line in [
+            "auth SUFFICIENT pam_soos.so",
+            "auth [Success=DONE Default=Ignore] pam_soos.so",
+            "auth [success=done ignore=ignore default=ignore] pam_soos.so",
+            "auth [success=done default=ignore] /usr/lib/security/pam_soos.so",
+            "-auth [success=1 default=ignore] pam_soos.so timeout_ms=1500",
+            "auth [success=done default=ignore] pam_soos.so debug",
+        ] {
+            assert!(primary(line), "{line:?} must be primary");
+        }
+    }
+
+    #[test]
+    fn test_igf17_non_primary_soos_rules_are_rejected() {
+        for line in [
+            "auth optional pam_soos.so event=password-failed timeout_ms=20",
+            "auth [success=done default=ignore] pam_soos.so event=password-failed",
+            "auth [success=done default=ignore] pam_soos.so service=sudo",
+            "auth sufficient pam_soos.so service=gdm-password",
+            "auth optional pam_soos.so",
+            "auth required pam_soos.so",
+            "auth requisite pam_soos.so",
+            "auth [success=ok default=ignore] pam_soos.so",
+            "auth [success=done default=die] pam_soos.so",
+            "auth [success=done default=bad] pam_soos.so",
+            "auth [success=0 default=ignore] pam_soos.so",
+            "auth [success=-1 default=ignore] pam_soos.so",
+            "auth [success= default=ignore] pam_soos.so",
+            "auth [default=ignore] pam_soos.so",
+            "auth [success=done success=bad default=ignore] pam_soos.so",
+            "auth [success=done success=2 default=ignore] pam_soos.so",
+            "auth [success=done new_authtok_reqd=done default=ignore] pam_soos.so",
+            "auth sufficient pam_unix.so",
+            "auth [success=done default=ignore] pam_soos_other.so",
+        ] {
+            assert!(!primary(line), "{line:?} must not be primary");
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // GitHub #331 (matrix IGF14/IGF18): delegated_auth outcome
+    // ------------------------------------------------------------------
+
+    fn pam_dir(files: &[(&str, &str)]) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        for (name, content) in files {
+            fs::write(dir.path().join(name), content).unwrap();
+        }
+        dir
+    }
+
+    #[test]
+    fn test_igf14_delegated_auth_reports_the_stack_of_the_shared_rule() {
+        let dir = pam_dir(&[
+            ("outer", "auth required pam_shells.so\nauth include inner\n"),
+            (
+                "inner",
+                "auth required pam_faillock.so preauth\n\
+                 auth [success=4 default=ignore] pam_soos.so\n\
+                 auth [success=1 default=bad] pam_unix.so\n",
+            ),
+        ]);
+        let lines = [
+            "auth include outer\n",
+            "auth optional pam_gnome_keyring.so\n",
+        ];
+        assert_eq!(
+            delegated_auth(dir.path(), &lines).unwrap(),
+            DelegatedAuth::SharedSoosRule {
+                stack: "inner".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn test_igf14_delegated_auth_without_soos_rule_returns_gates() {
+        let dir = pam_dir(&[(
+            "inner",
+            "auth required pam_faillock.so preauth\nauth sufficient pam_unix.so\n",
+        )]);
+        let lines = ["auth include inner\n"];
+        assert_eq!(
+            delegated_auth(dir.path(), &lines).unwrap(),
+            DelegatedAuth::Gates(vec!["auth  required  pam_faillock.so preauth".to_string()])
+        );
+    }
+
+    #[test]
+    fn test_igf18_delegated_auth_credential_before_soos_rule_is_not_shared() {
+        let dir = pam_dir(&[(
+            "inner",
+            "auth sufficient pam_unix.so\nauth [success=done default=ignore] pam_soos.so\n",
+        )]);
+        let lines = ["auth include inner\n"];
+        assert_eq!(
+            delegated_auth(dir.path(), &lines).unwrap(),
+            DelegatedAuth::Gates(Vec::new())
+        );
+    }
+
+    #[test]
+    fn test_igf18_delegated_auth_keeps_refusals() {
+        let unclassified = pam_dir(&[(
+            "inner",
+            "auth required pam_mystery.so\nauth [success=done default=ignore] pam_soos.so\n",
+        )]);
+        assert!(delegated_auth(unclassified.path(), &["auth include inner\n"]).is_err());
+
+        let non_primary = pam_dir(&[(
+            "inner",
+            "auth optional pam_soos.so\nauth sufficient pam_unix.so\n",
+        )]);
+        assert!(delegated_auth(non_primary.path(), &["auth include inner\n"]).is_err());
+
+        let missing = pam_dir(&[]);
+        assert!(delegated_auth(missing.path(), &["auth include inner\n"]).is_err());
+
+        let no_credential = pam_dir(&[("inner", "auth required pam_env.so\n")]);
+        assert!(delegated_auth(no_credential.path(), &["auth include inner\n"]).is_err());
+    }
+
+    #[test]
+    fn test_igf18_delegated_auth_keeps_the_depth_bound() {
+        // d0 -> d1 -> ... -> d5: the shared rule sits beyond MAX_PAM_INCLUDE_DEPTH.
+        let files: Vec<(String, String)> = (0..=MAX_PAM_INCLUDE_DEPTH)
+            .map(|i| (format!("d{i}"), format!("auth include d{}\n", i + 1)))
+            .chain(std::iter::once((
+                format!("d{}", MAX_PAM_INCLUDE_DEPTH + 1),
+                "auth [success=done default=ignore] pam_soos.so\nauth sufficient pam_unix.so\n"
+                    .to_string(),
+            )))
+            .collect();
+        let refs: Vec<(&str, &str)> = files
+            .iter()
+            .map(|(n, c)| (n.as_str(), c.as_str()))
+            .collect();
+        let dir = pam_dir(&refs);
+        assert!(delegated_auth(dir.path(), &["auth include d0\n"]).is_err());
     }
 }
