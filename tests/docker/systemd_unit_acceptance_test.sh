@@ -586,17 +586,29 @@ part2_notify_readiness() {
     started_line="$(grep -n '^Started soos-daemon.service' <<< "${log}" | head -n 1 | cut -d: -f1)"
     [[ -n "${listening_line}" && -n "${ready_line}" && -n "${started_line}" ]] \
         || fail "missing listening / readiness / Started lines in the journal"
-    (( listening_line < ready_line && ready_line < started_line )) \
-        || fail "journal order is not socket bound -> READY=1 -> Started (lines ${listening_line}, ${ready_line}, ${started_line})"
+    # GitHub #333 (OA-2): the daemon's stdout line and PID 1's 'Started' line come through two
+    # journald inputs and are logged after READY=1, so their journal order is not causal. Only
+    # the daemon's own stream is ordered (bind -> readiness); the READY=1 -> Started order is
+    # checked on CLOCK_MONOTONIC: the send stamp is taken before the datagram exists.
+    local ready_sent_us
+    ready_sent_us="$(grep -m1 'Reported readiness to systemd' <<< "${log}" \
+        | sed -e 's/\x1b\[[0-9;]*m//g' \
+        | sed -n 's/.*(ready_sent_monotonic_us=\([0-9][0-9]*\)).*/\1/p')"
+    [[ -n "${ready_sent_us}" ]] \
+        || fail "the readiness line carries no numeric ready_sent_monotonic_us (missing, or 'unknown': the daemon could not read CLOCK_MONOTONIC)"
+    (( listening_line < ready_line )) \
+        || fail "daemon log order is not socket bound -> readiness reported (lines ${listening_line}, ${ready_line})"
 
     local exec_us active_us ready_ms
     exec_us="$(prop ExecMainStartTimestampMonotonic)"
     active_us="$(prop ActiveEnterTimestampMonotonic)"
     (( exec_us > 0 && active_us > exec_us )) || fail "invalid start timestamps (exec ${exec_us}, active ${active_us})"
+    (( ready_sent_us <= active_us )) \
+        || fail "READY=1 sent at ${ready_sent_us} us, after systemd entered active at ${active_us} us"
     ready_ms=$(( (active_us - exec_us) / 1000 ))
     (( ready_ms < MAX_READY_MS )) \
         || fail "start-to-ready took ${ready_ms} ms, not well under TimeoutStartSec=60 (limit ${MAX_READY_MS} ms)"
-    success "Part 2: Type=notify — systemctl start returned after READY=1 (${wall_ms} ms wall); ${SOCKET} was already bound (${sock_meta}, /run/soos ${dir_meta}); journal order bind -> READY=1 -> Started; ActiveState=active."
+    success "Part 2: Type=notify — systemctl start returned after READY=1 (${wall_ms} ms wall); ${SOCKET} was already bound (${sock_meta}, /run/soos ${dir_meta}); bind -> READY=1 (sent ${ready_sent_us} us) -> active/Started (${active_us} us); ActiveState=active."
     success "Part 2: start-to-ready ${ready_ms} ms (ExecMainStartTimestamp -> ActiveEnterTimestamp) on $(nproc) CPU(s) of '$(sed -n 's/^model name[[:space:]]*: //p' /proc/cpuinfo | head -n 1)', TimeoutStartSec=60 s."
 
     local status_json

@@ -169,9 +169,17 @@ async fn run() -> Result<Duration, Box<dyn std::error::Error>> {
 
     // Type=notify (GitHub #203): report readiness only now that the socket is bound, so
     // Before=display-manager.service holds the greeter until PAM requests can be served.
+    // GitHub #333: the CLOCK_MONOTONIC time read right before READY=1 is sent goes into the
+    // message text (not a field the ANSI formatter styles), so the systemd acceptance harness
+    // can require it to be no later than ActiveEnterTimestampMonotonic.
     match sd_notify::notify_ready() {
-        Ok(NotifyOutcome::Sent) => info!("Reported readiness to systemd"),
-        Ok(NotifyOutcome::NotSupervised) => {}
+        Ok((NotifyOutcome::Sent, Some(us))) => {
+            info!("Reported readiness to systemd (ready_sent_monotonic_us={us})");
+        }
+        Ok((NotifyOutcome::Sent, None)) => {
+            info!("Reported readiness to systemd (ready_sent_monotonic_us=unknown)");
+        }
+        Ok((NotifyOutcome::NotSupervised, _)) => {}
         Err(err) => warn!(error = %err, "Failed to report readiness to systemd"),
     }
 

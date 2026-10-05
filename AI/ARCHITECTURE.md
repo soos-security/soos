@@ -184,7 +184,12 @@ inside a marked block placed before the first credential or shared-stack rule, a
 in-file `pam_nologin`, `pam_succeed_if`, `pam_shells` and `pam_faillock preauth` rule, with the
 gates of a delegated stack that run before its credential module copied in front of it (ADR
 2026-09-30 "GDM PAM Stack Placement", amended by ADR 2026-10-05;
-`Docs/DISTRIBUTION_DEPLOYMENT.md` section 2.1).
+`Docs/DISTRIBUTION_DEPLOYMENT.md` section 2.1). Since GitHub #333, `enable` and `status` agree
+(a successful `enable` always reports `installed: true`; a pre-anchor jump past the delegation
+makes both fail closed), a shared `[success=N]` rule counts only when its jump lands on an auth
+rule of its own stack file, the analysis opens at most `MAX_PAM_STACK_READS` = 32 stack files,
+and `gdm enable` reads `gdm-password` through one `O_NOFOLLOW` descriptor and re-checks it
+before the atomic rename, like `gdm restore`.
 
 Before deployment, always maintain an active root rescue shell, verify fallback to password in a VM, and test screensavers (`swaylock`, `hyprlock`), TTY, SSH, and `sudo`.
 

@@ -268,6 +268,12 @@ mod install_presence_warmup_contract;
 #[cfg(all(test, unix))]
 mod install_gdm_followups_contract;
 
+/// GDM file single-descriptor read, readiness helper `%q` timeout line, `READY=1` send time
+/// ordering of the systemd harness, bounded clamp-test retry and documentation
+/// (GitHub #333; rows GHF2, GHF6–GHF9).
+#[cfg(all(test, unix))]
+mod gdm_hardening_flaky_tests_contract;
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,

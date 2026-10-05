@@ -62,25 +62,73 @@ fn capture_deadline(timeout_ms: u64) -> (u64, u64, u64) {
     capture_deadline_with(timeout_ms, Completion::Required)
 }
 
+/// Bound on the attempts of a [`Completion::TimeoutTolerated`] run (owner approval OA-3,
+/// GitHub #333 item 8): only an attempt in which the client timed out before writing its
+/// request is repeated.
+const MAX_CLAMP_ATTEMPTS: u32 = 20;
+
 /// [`capture_deadline`] with an explicit completion rule. The deadline is always captured by
 /// the mock server from the request (written by the client before it waits for the reply).
+///
+/// GitHub #333 (OA-3): with [`Completion::TimeoutTolerated`], a 10 ms clamped deadline may
+/// expire after `connect` and before the first `write` (PAM parity: nothing is written once
+/// the deadline expired), so such an attempt has no deadline to assert. It is repeated, at
+/// most [`MAX_CLAMP_ATTEMPTS`] times; the returned values belong to the attempt that captured
+/// the request. [`Completion::Required`] makes exactly one attempt, as before.
 fn capture_deadline_with(timeout_ms: u64, completion: Completion) -> (u64, u64, u64) {
+    let attempts = match completion {
+        Completion::Required => 1,
+        Completion::TimeoutTolerated => MAX_CLAMP_ATTEMPTS,
+    };
+    for _ in 0..attempts {
+        if let Some(captured) = capture_attempt(timeout_ms, completion) {
+            return captured;
+        }
+    }
+    panic!(
+        "no request was written in {MAX_CLAMP_ATTEMPTS} attempts; the clamp could not be observed"
+    );
+}
+
+/// One attempt of [`capture_deadline_with`]: `None` only when the client timed out
+/// ([`Completion::TimeoutTolerated`]) and closed the connection before a complete request
+/// reached the mock server.
+fn capture_attempt(timeout_ms: u64, completion: Completion) -> Option<(u64, u64, u64)> {
     let dir = tempdir().expect("tempdir");
     let socket_path = dir.path().join("deadline.sock");
     let listener = UnixListener::bind(&socket_path).expect("bind socket");
-    let (tx, rx) = mpsc::channel();
+    let (tx, rx) = mpsc::channel::<Option<u64>>();
 
     let server = thread::spawn(move || {
         let (mut stream, _) = listener.accept().expect("accept");
+        // Only the tolerated mode accepts a client that closed before a complete request
+        // (it timed out before its first write); every other failure still panics.
+        let no_request = |e: &std::io::Error| {
+            completion == Completion::TimeoutTolerated
+                && e.kind() == std::io::ErrorKind::UnexpectedEof
+        };
         let mut len_buf = [0u8; 4];
-        stream.read_exact(&mut len_buf).expect("read length");
+        if let Err(e) = stream.read_exact(&mut len_buf) {
+            if no_request(&e) {
+                tx.send(None).expect("send no-request");
+                return;
+            }
+            panic!("read length: {e:?}");
+        }
         let len = u32::from_be_bytes(len_buf) as usize;
         let mut body = vec![0u8; len];
-        stream.read_exact(&mut body).expect("read body");
+        if let Err(e) = stream.read_exact(&mut body) {
+            if no_request(&e) {
+                tx.send(None).expect("send no-request");
+                return;
+            }
+            panic!("read body: {e:?}");
+        }
         let mut full = len_buf.to_vec();
         full.extend_from_slice(&body);
         let req: Request = decode(&full).expect("decode request");
-        tx.send(req.deadline_monotonic_ns).expect("send deadline");
+        tx.send(Some(req.deadline_monotonic_ns))
+            .expect("send deadline");
         let (issued, expires) = stamps::fresh_stamps();
         let resp = Response {
             version: CURRENT_VERSION,
@@ -100,15 +148,21 @@ fn capture_deadline_with(timeout_ms: u64, completion: Completion) -> (u64, u64, 
     let before = monotonic_ns();
     let outcome = simulate_pam_auth(&socket_path, 1000, "soos-admin", timeout_ms);
     let after = monotonic_ns();
-    match (completion, outcome) {
-        (_, Ok(_)) | (Completion::TimeoutTolerated, Err(AdminCliError::Timeout)) => {}
+    let timed_out = match (completion, outcome) {
+        (_, Ok(_)) => false,
+        (Completion::TimeoutTolerated, Err(AdminCliError::Timeout)) => true,
         (_, Err(err)) => panic!("simulated authentication must complete: {err:?}"),
-    }
-    let deadline = rx
+    };
+    let captured = rx
         .recv_timeout(CAPTURE_WAIT)
         .expect("the mock server must capture the request deadline");
     server.join().expect("join server");
-    (before, deadline, after)
+    match captured {
+        Some(deadline) => Some((before, deadline, after)),
+        // The client timed out before writing its request: nothing to assert, try again.
+        None if timed_out => None,
+        None => panic!("the mock server must capture the request deadline"),
+    }
 }
 
 #[test]
