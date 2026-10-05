@@ -1,68 +1,96 @@
 # Plan Evaluation Report
 - **Date**: 2026-10-05
-- **Issue**: GitHub #337 — fix: soos-enroll reports a generic starvation error when soos-daemon holds the camera (GitHub-only, no backlog entry)
-- **Branch**: `fix/enroll-camera-busy-message`
-- **Base commit**: `a1612f1`
-- **Spec**: `AI/architect_spec_enroll_camera_busy_message.md`
+- **Issue**: GitHub-only issue — Remote companion for real-time lock status and remote lock, `soos-remote` (GitHub #339; no `AI/BACKLOG.md` entry, acceptance taken from the issue body)
+- **Branch**: `feat/remote-companion`
+- **Base commit**: `222665f`
+- **Plan evaluated**: `AI/architect_spec_remote_companion.md` **Revision 3** (round 3)
+- **Round history**:
+  - Round 1 (Revision 1): `REVISION_REQUIRED`, findings F1–F12.
+  - Round 2 (Revision 2): `REVISION_REQUIRED`, findings R2-1 (MAJOR) and R2-2 to R2-6 (MINOR).
+- **Scope of this round**: a focused re-check of D6, §2.6, the §2.4/§2.5 CSRF signature, §4, §8 RMC-S9 and §2.12, plus any side effects of these edits. The six owner decisions are binding and were not reopened.
 
 ## 1. Coverage Matrix
-| Acceptance line / TDD test | Spec element | Status |
+
+| Acceptance line (GitHub #339) / TDD test | Spec element (Rev. 3) | Status |
 |---|---|---|
-| #337-1: no frame in time + status `Error { kind: DeviceBusy, .. }` ⇒ dedicated error naming another process, `soos-daemon`, `soos-gui`, `systemctl stop/start` | `EnrollmentCliError::CameraBusy` + status check on budget expiry; ECB1 | Covered |
-| #337-2: every other timeout keeps `CameraError::Starved` | "otherwise return the existing `Camera(Starved)`"; ECB2; `enroll_fresh_frames_tests.rs:240` unchanged | Covered |
-| #337-3: no frame/biometric data in message; English only | Static `#[error]` text without fields; Invariants section | Covered |
-| ECB3 (spec addition): exit code of `CameraBusy` equals `Camera(_)` | "no new exit-code contract" | Covered by construction, test is weak (Finding 1) |
+| Real-time status: locked / active / idle / no session | D6, §2.6 `Reading { seq, view }`, poller `send_replace` on every read, per-stream change detection + keep-alive re-send, §2.11 | Mapped (R2-1 resolved) |
+| Remote lock | D9, §2.5, §2.8 | Mapped |
+| iPhone PWA | §2.11, D11 PNG `apple-touch-icon` | Mapped |
+| No hosted site / no cloud | D2, D5a, ADR (2)(8) | Mapped |
+| User-level, never root | D1, `check_not_root`, RMC-S10 | Mapped |
+| Daemon, PAM and IPC untouched | §1.2, RMC-S4 | Mapped |
+| No TCP socket | D2, RMC-S2/S5 | Mapped |
+| Owner only, fails closed when empty | D3, D5a, RC-2 | Mapped |
+| No remote unlock | D10, RMC-S3 | Mapped |
+| ADR + spec | §9 items (1)–(9) | Mapped |
+| Feature branch, draft PR | Header | Mapped |
+| TDD tests | §7: stale-replay test, steady-state keep-alive test (timestamps strictly advancing, no extra events), backward-clock test, `check_not_root`/`check_host` table tests, end-to-end `421`, SSE slot release, poller-exit test | Mapped |
 
 ## 2. Facts Verified Against Code
+
 | Fact cited by plan | Code location | Actual value | Match |
 |---|---|---|---|
-| `acquire_frame_after` polls `latest_frame()` and returns `Camera(Starved)` on budget expiry | `crates/enrollment-cli/src/service.rs:690-716` | Yes; budgets `FIRST_FRAME_TIMEOUT_MS = 2000` (prev `None`), `ENROLL_FRESH_FRAME_TIMEOUT_MS = 500` (prev `Some`), poll 10 ms | Match |
-| Callers | `service.rs:677` (`acquire_frame`), `:744` (enroll loop), `:939` (verify), `:1370` (debug-vision) | All go through `acquire_frame_after`, so one change covers enroll, verify and debug-vision | Match (spec names only enroll/verify; debug-vision benefits too) |
-| `camera` is a `dyn CameraManager` exposing `status()` | `service.rs:639`; `crates/camera-v4l/src/manager.rs:85` | `Option<Arc<dyn CameraManager>>`; trait default `status()` derives `Ready`/`Starting` from `is_ready()` | Match |
-| V4L supervisor records `DeviceBusy` on EBUSY | `crates/camera-v4l/src/v4l_impl.rs:509` `shared.status.record_error(err.kind())`; EBUSY at `VIDIOC_S_FMT`/stream ioctls mapped via `CameraError::from_ioctl_error` → `from_io_error` → `DeviceBusy` (`error.rs:143-165`); open() EBUSY via `from_io_error` (`v4l_impl.rs:785-788`) | Yes | Match |
-| Status stays `Error{DeviceBusy}` across retries (so a single read at expiry is reliable) | `v4l_impl.rs` status writes: 448 (Stopped on exit), 477 (Suspended), 495 (Starting on resume), 505 (Starting only if a frame was published), 509 (record_error) | No reset to `Starting` at the start of each attempt; with a busy device the status remains `Error{DeviceBusy, failures: n}` during backoff (100 ms min, 5 s max) | Match |
-| `V4lCameraManager::status()` passes errors through | `v4l_impl.rs:395-402` | `Ready` if ready; else cell value (`Ready`→`Starting`) | Match |
-| Mock cannot report DeviceBusy today (spec allows a test-only setter) | `crates/camera-v4l/src/mock.rs:210` `set_error`, `:362` `status()` | `set_error(Some(CameraError::Simulated { code: libc::EBUSY, .. }))` (or `DeviceBusy { .. }`) already yields `Error { kind: DeviceBusy, failures: 1 }`, withdraws the frame, and both the worker loop and `notify_activity` stop publishing frames while an error is set | Mismatch: no new setter is needed (Finding 2) |
-| Exit code mapping | `crates/enrollment-cli/src/main.rs:294-297` | Every `Err` from `run()` prints `[ERROR] {err}` and exits 1; no per-variant mapping exists | Match ("same as `Camera(_)`" is automatic) |
-| GUI parses soos-enroll error text | `crates/gui/src/privileged.rs` | GUI only invokes `list`/`import`/`delete` via pkexec and parses JSON / own messages; never parses enroll errors. `crates/gui/src/camera_status.rs` "Starved" is the GUI's own `CameraErrorKind` presentation | No impact |
-| Existing tests pinning the text/variant | `crates/enrollment-cli/tests/enroll_fresh_frames_tests.rs:240-256` | Uses a custom `SlowSwapCamera` with the default `status()` (never `DeviceBusy`), so stays `Starved`; no invariant in `tests/invariants` pins the starvation text | Match |
-| `libc` / `MockCameraManager` available to enrollment-cli tests | `crates/enrollment-cli/Cargo.toml:24,28`; `service.rs:15` | `libc` is a dependency; `MockCameraManager` is imported un-gated | Match |
-| Next walkthrough | `AI/walkthroughs/` | Highest is 181 ⇒ 182 | n/a |
+| PAU17 cites `presence_unlock_contract::test_pau_zbus_is_used_only_by_the_daemon` | `AI/VERIFICATION_MATRIX.md:1895` | cited; Rev. 3 keeps the name and adds an italic annotation | Yes (R2-2 resolved) |
+| Presence bus rules that RMC-S9 mirrors | `presence_unlock_contract::test_pau_presence_connects_only_to_the_pinned_system_bus` | RMC-S9 now covers `Connection::system`/`session`, `Builder::system`/`session`, `env::var`, both env bus names, `object_server`, `#[proxy`, `zbus::proxy`, `receive_signal`, `MessageStream` and `CacheProperties::{Yes,Lazily}`, and requires `Builder::address(` | Mostly. `serve_at`, `request_name`, `#[interface`, `SignalStream`, `zbus::blocking` and `Address::system` are not listed (Finding R3-2) |
+| `check_lock_csrf` uses the normalized host | §2.5 `check_lock_csrf(head: &RequestHead, normalized_host: &str)`; §2.4 `check_host` returns the normalized host (lowercased, `:443` removed) | consistent | Yes |
+| §4 exit codes | `SocketError::{NotADirectory, WrongOwner, NotASocket}` → 78; `Io(_)` → 1; `ConfigError` → 78; poller or accept task ended → 1 | consistent with `RestartPreventExitStatus=78` | Yes (R2-5 resolved) |
+| §5 freshness bound | `poll_interval_ms` + `SNAPSHOT_DEADLINE_MS` | consistent with §3 | Yes |
+| All round-1 and round-2 code facts (lockfile, features, `test-util`, sync points) | unchanged | — | Yes |
 
 ## 3. Pillar Analysis
+
 ### Pillar 1 — Architecture & threat model
-- Failure scenario considered: the message could push operators to run a second camera owner permanently, or tell non-root users to bypass the daemon. The text only recommends the GUI (which goes through the daemon preview proxy) or a stop/enroll/start cycle that `soos-enroll` already requires root for. No change to the root daemon's exclusive ownership, IPC or socket permissions.
-- Result: PASS
+- No change to the trust boundary in Rev. 3. Host, identity and CSRF now run in this order: `check_host` (421), then `authorize` (403), then `check_lock_csrf` against the normalized host (403).
+- Failure scenario: `Origin: https://PC.tail1.ts.net:443` with `Host: pc.tail1.ts.net`. Both normalize to the same name, so the request passes as intended. A `http://` origin or any other port still fails. **PASS**.
 
 ### Pillar 2 — PAM deadline & concurrency
-- Failure scenario considered: an extra blocking call in the wait loop could lengthen the budget. `status()` is a mutex read done once after the budget expires, outside PAM; `crates/pam` is untouched.
-- Result: PASS
+- Not applicable to PAM. Every logind flow is bounded (`SNAPSHOT_DEADLINE_MS`, `LOCK_FLOW_DEADLINE_MS`). Each stream does one extra fresh read at open; at most `MAX_SSE_STREAMS` = 4 can run at once. **PASS**.
 
 ### Pillar 3 — Panic safety & fail-closed
-- Failure scenario considered: a frame that arrives while status is still `Error{DeviceBusy}` (stale cell) would be rejected if the implementation checked status first. The spec explicitly checks status only on expiry and returns any in-time frame whatever the status. A poisoned status mutex is handled by `unwrap_or_else(into_inner)` in `CameraStatusCell::get`. Both outcomes are errors; no path turns into success.
-- Result: PASS
+- R2-1 is resolved:
+  - The poller publishes every read with a fresh `checked_unix_ms` and a new `seq`, and resets the channel to `None` when idle.
+  - Change detection is per stream.
+  - Keep-alives re-send the newest reading.
+  - The UI measures staleness from when an event arrives on the phone.
+  - The new steady-state test fails against the round-2 "publish only on change" implementation.
+- R2-4 is resolved: streams filter on the monotonic `seq`, so a backward wall-clock step cannot silence them.
+- Failure scenario 1: the stream's own first read happens just after a lock (`locked`, seq n). A poller read that started *before* the lock completes later and receives seq n+1 (`unlocked`). The stream then shows `locked → unlocked → locked` within about one poll interval, because the counter is taken when a read completes, not when it starts. This brief flicker is bounded by `poll_interval_ms + SNAPSHOT_DEADLINE_MS`. It is not the hours-old replay F2 was about. **FINDING (MINOR, R3-1)**.
+- Failure scenario 2: the server clock is under paused tokio time in tests. `SystemTime::now` does not pause, so the "strictly greater `checked_unix_ms`" assertion depends on the injected clock in `ServerState` (§7 "clocks"). The tester must inject it, or the assertion may flake at millisecond resolution. This is noted under R3-1 as an implementation note, not a separate finding.
 
 ### Pillar 4 — Dependencies
-- Failure scenario considered: a new crate for message formatting. None is added; `thiserror` already in use.
-- Result: PASS
+- The zbus migration (§2.12) keeps the exact two-manifest allowlist, the test name and the PAM assertions, and adds a PAU17 annotation. That is a legitimate, narrow contract migration. **PASS**.
+- RMC-S9 is close to the presence C2 list. The few omissions concern server-side or blocking APIs, which `object_server`/`#[proxy`/`receive_signal` largely already exclude. **FINDING (MINOR, R3-2)**.
 
 ### Pillar 5 — Data confidentiality
-- Failure scenario considered: an implementation that embeds the `CameraError` (which carries the device path and `io::Error`) or frame metadata into the message. The spec's variant is field-less with a static text; the device path would not be sensitive anyway, and nothing biometric is in scope.
-- Result: PASS
+- Unchanged from round 2. The UI source link is a plain `<a href>` that loads nothing, and RMC-S8 allows it. **PASS**.
 
 ### Pillar 6 — Test integrity
-- Failure scenario considered: a wrong implementation that maps *any* `Error { .. }` status (e.g. `Starved`, `DeviceNotFound`, `PermissionDenied`) to `CameraBusy` must fail ECB2; the spec lists `Error` of another kind, so ECB2 has that power if the tester includes at least one non-busy `Error` kind (e.g. `Simulated { code: libc::ENODEV }` and `set_starved(true)`). A wrong implementation that checks status before the budget (returning `CameraBusy` immediately) would still pass ECB1 unless the test or another test covers the "frame arrives while status is busy" case (Finding 3). The existing `Starved` test is kept unchanged.
-- Result: FINDING (MINOR)
+- No existing test is renamed or weakened. The only existing-test edit is the declared §2.12 migration, made in Phase 2 and reviewed as a contract change. The new tests can fail against plausible wrong implementations: change-only publishing, wall-clock filtering, and replay of a stale channel value. **PASS**.
 
 ## 4. Findings
-1. **[MINOR]** ECB3 cannot fail: `main.rs:294-297` maps every `EnrollmentCliError` to exit code 1 and there is no per-variant mapping, and a binary-level test with a hermetically busy V4L device is not feasible. Required change: restate ECB3 as "no new exit path; `main()` unchanged, every error exits 1" verified by review (or drop it); the tester should not invent a variant-to-exit-code function just to test it.
-2. **[MINOR]** The spec's fallback ("the tester may add a test-only setter on the mock") is unnecessary: `MockCameraManager::set_error(Some(CameraError::Simulated { code: libc::EBUSY, message }))` (or `CameraError::DeviceBusy { path, source }`) already makes `status()` return `Error { kind: DeviceBusy, failures: 1 }` and stops frame publication (worker loop and `notify_activity`). Required change: point the tester to `set_error`; no change to `soos-camera-v4l` is needed or allowed by "no change to the camera crate".
-3. **[MINOR]** ECB1/ECB2 do not pin "a frame that arrives in time is returned whatever the status". Recommended: add an ECB test with a custom `CameraManager` stub whose `status()` returns `Error { kind: DeviceBusy, .. }` while `latest_frame()` returns a frame, asserting the frame-acquiring operation does not fail with `CameraBusy` (e.g. `debug_vision`/`verify` proceeds past capture). This guards against a status-first implementation.
-4. **[MINOR]** ECB2 lists `Suspended`, which `MockCameraManager::status()` never returns (its `Suspended` mention is only a comment in the worker). The tester needs a small custom `CameraManager` stub overriding `status()` (the pattern already used by `SlowSwapCamera` in `enroll_fresh_frames_tests.rs`) for `Suspended`/`Starting`; mock `set_error(ENODEV)` and `set_starved(true)` cover the "other `Error` kind" case.
-5. **[MINOR]** The spec names the enroll and verify paths only; `debug_vision` (`service.rs:1370`) and every enroll candidate after the first (500 ms fresh-frame budget, `service.rs:744`) also flow through `acquire_frame_after` and will get the same behavior. This is desirable; the spec/walkthrough should say so explicitly so the fresh-frame path is a known, intended change (mid-enrollment EBUSY is unlikely because the supervisor resets to `Starting` after a streamed attempt, `v4l_impl.rs:504-506`).
-6. **[MINOR]** ECB1 lists `soos-daemon`, `soos-gui` and `sudo systemctl stop soos-daemon` but not the restart step the issue also requires. Required change: ECB1 should also assert `sudo systemctl start soos-daemon` and a phrase saying another process holds the camera.
+
+### Round-2 findings: resolution check
+
+| Finding | Status |
+|---|---|
+| R2-1 (MAJOR) §2.6 vs D6 | Resolved (`Reading { seq, view }`, `send_replace` every read, `None` reset, per-stream change detection, keep-alive re-send, steady-state test) |
+| R2-2 PAU17 citation | Resolved (name kept, annotation) |
+| R2-3 RMC-S9 scope | Resolved in substance (residual R3-2) |
+| R2-4 wall-clock filter | Resolved (`seq`; UI staleness from event arrival) |
+| R2-5 `SocketError` exit | Resolved (78 persistent / 1 `Io`) |
+| R2-6 small gaps | Resolved (§5 deadline, UI source link, `check_host` doc split, normalized-host `Origin` comparison, `check_lock_csrf(head, normalized_host)`) |
+
+### New findings (non-blocking)
+
+1. **R3-1 [MINOR] `seq` is taken when a read completes, which allows a brief out-of-order flicker.**
+   - Evidence: D6/§2.6 stamp a reading with the next value of the shared counter when it is published. A poller read that started before a stream's own first read can finish after it and override that newer state for one interval.
+   - Required change, to apply during Phase 2/4 (no re-evaluation needed): reserve `seq` from the shared `AtomicU64` **when the read starts**, publish it with the result, and have the stream drop readings whose `seq` is not above the last one it sent. The paused-time tests use the injected clock from `ServerState` for `checked_unix_ms`, never `SystemTime::now`.
+
+2. **R3-2 [MINOR] RMC-S9 omits a few presence C2 needles.**
+   - Evidence: the presence contract also forbids `serve_at`, `request_name`, `#[interface`, `SignalStream`, `zbus::blocking` and `Address::system`.
+   - Required change, during Phase 2: the tester adds these six needles to RMC-S9 so the companion's bus rules match presence exactly.
 
 ## 5. Verdict
-No CRITICAL or MAJOR finding. The design matches the code: the V4L supervisor does record and keep `Error { kind: DeviceBusy }` on EBUSY across retries, a single status read at budget expiry is sound, exit code is unchanged by construction, and no GUI or invariant depends on the starvation text. Minor findings 1-6 should be folded into the tester brief.
-
 VALIDATION_VERDICT: APPROVED
+
+Revision 3 resolves every CRITICAL/MAJOR finding from rounds 1 and 2. The two remaining MINOR findings (R3-1, R3-2) are localized and must be carried into the tester contract (Phase 2) and the auditor constraints (Phase 3). They do not require another plan revision. As specified in D5a, Phase 4 must still verify on the owner's host that `tailscale serve unix:` forwards the original `Host`; if it does not, the design returns to the architect.

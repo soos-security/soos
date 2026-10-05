@@ -24,6 +24,7 @@ ADR entry in `AI/DECISIONS.md`. Re-check every value below with the listed `grep
 | `crates/enrollment-cli` | `soos-enrollment-cli` (`soos-enroll`) | lib + bin | `#![forbid(unsafe_code)]` |
 | `crates/admin-cli` | `soos-admin-cli` (`soos-admin`) | lib + bin | `#![forbid(unsafe_code)]` |
 | `crates/gui` | `soos-gui` | lib + bin (eframe/glow) | `#![forbid(unsafe_code)]` |
+| `crates/remote` | `soos-remote` | lib + bin (current-thread Tokio, user-level, Unix socket only, zbus; leaf crate, GitHub #339) | `#![forbid(unsafe_code)]` |
 | `crates/pam` | `soos-pam` → `libpam_soos.so` | cdylib + rlib | adapter: `unsafe` allowed, `// SAFETY:` mandatory |
 | `crates/camera-v4l` | `soos-camera-v4l` | lib, `mock-camera` feature | adapter: `unsafe` allowed, `// SAFETY:` mandatory |
 | `crates/daemon` | `soos-daemon` | lib + bin (Tokio) | `main.rs` forbids; `lib.rs` only denies undocumented unsafe (`mlock.rs`) |
@@ -31,7 +32,7 @@ ADR entry in `AI/DECISIONS.md`. Re-check every value below with the listed `grep
 | `tests/fixtures` | `soos-test-fixtures` | dev-only fixture lib (`[lib] path = "mod.rs"`), never a normal dependency [129] | — |
 
 - The authoritative forbid list is `test_business_crates_forbid_unsafe_code` in
-  `tests/invariants/src/lib.rs` (9 crates). `AGENTS.md` lists only 3 — that is a minimum, not the full set.
+  `tests/invariants/src/lib.rs` (10 crates, `remote` included since GitHub #339). `AGENTS.md` lists only 3 — that is a minimum, not the full set.
 - Workspace-wide lints live in root `Cargo.toml` (`[workspace.lints]`); every crate declares
   `[lints] workspace = true` and `publish.workspace = true` (required by `deny.toml` private-crate exemption).
 - `cargo -p` takes the **package** name (`-p soos-pam`, never `-p pam`) [11].
@@ -66,6 +67,7 @@ ADR entry in `AI/DECISIONS.md`. Re-check every value below with the listed `grep
 | admin-cli `DEFAULT_TIMEOUT_MS` | `crates/admin-cli/src/args.rs` | 250 ms |
 | Match / PAD thresholds | `crates/vision/src/pipeline.rs`, policy | 0.50 / 0.85 (match default 0.50 since the SFace switch, GitHub #278 [162]; floor `MIN_MATCH_THRESHOLD` 0.40) |
 | `DEFAULT_MINIFASNET_LIVE_CLASS_INDEX` | `crates/inference-ort/src/pad.rs` | 1 |
+| `soos-remote` bounds | `crates/remote/src/lib.rs` | `MAX_CONNECTIONS` 16, `MAX_SSE_STREAMS` 4, `MAX_REQUEST_HEAD_BYTES` 8192, `MAX_HEADERS` 32, `MAX_PATH_LEN` 256, `REQUEST_HEAD_TIMEOUT_MS` 5000, `RESPONSE_WRITE_TIMEOUT_MS` 2000, `SSE_KEEPALIVE_MS` 15 000, `MAX_SSE_STREAM_MS` 1 800 000, `MIN_LOCK_INTERVAL_MS` 2000, `SNAPSHOT_DEADLINE_MS` 1500, `LOCK_FLOW_DEADLINE_MS` 2000, `DEFAULT_POLL_INTERVAL_MS` 1000 (250..=10 000), `MAX_ALLOWED_LOGINS` 8, `MAX_ALLOWED_HOSTS` 4, `EXIT_CONFIG` 78 / `EXIT_RUNTIME` 1 (GitHub #339; independent of the daemon presence constants of the same names) |
 
 The fixed "200 to 250 ms" PAM deadline wording was removed from the normative documents (ADR 2026-09-30
 "PAM Deadline Derived From Clamped `timeout_ms`", enforced by `tests/invariants/src/pam_deadline_contract.rs`).

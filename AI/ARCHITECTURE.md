@@ -19,7 +19,7 @@ The system is not considered a high-assurance biometric factor until robust Pres
 | Local AI Inference | `ort` (ONNX Runtime) CPU execution provider; **SCRFD 500M KPS** (face detection + 5-point landmarks) + **SFace 2021dec** (128D embeddings, manifest id `sface_2021dec`, Apache-2.0; replaced the ArcFace ResNet34 on 2026-10-01, GitHub #278) + **MiniFASNetV2** (anti-spoofing) | Fast 3-model pipeline with unified detection+landmarks, battle-tested ORT runtime, no OpenCV required | Claiming "pure Rust" (ORT is native C/C++); unverified weight downloads; separate landmark model (absorbed into SCRFD) |
 | Biometric Storage | AES-GCM encrypted embeddings at rest; intrusion snapshots opt-in and isolated | Minimizes attack surface and persistent biometric risk | Storing raw frames or passwords on disk or sending over socket |
 
-Verified crate versions: `pam-bindings` 0.3.0, `tokio` 1.53.1, `v4l` 0.14.0, `ort` 2.0.0-rc.13, `zeroize` 1.9.0, `zbus` 5.19.0 (daemon only, `default-features = false`, `tokio`; the systemd-logind client of the presence auto-unlock, GitHub #323). Versions are pinned in `Cargo.lock` and audited via `cargo-deny`.[^pam-bindings][^tokio][^v4l][^ort][^zeroize]
+Verified crate versions: `pam-bindings` 0.3.0, `tokio` 1.53.1, `v4l` 0.14.0, `ort` 2.0.0-rc.13, `zeroize` 1.9.0, `zbus` 5.19.0 (`default-features = false`, `tokio`; the systemd-logind client of the presence auto-unlock in `soos-daemon`, GitHub #323, and of the remote companion `soos-remote`, GitHub #339, ADR 2026-10-05; never in `pam_soos.so`). Versions are pinned in `Cargo.lock` and audited via `cargo-deny`.[^pam-bindings][^tokio][^v4l][^ort][^zeroize]
 
 ---
 
@@ -268,7 +268,8 @@ soos/
 │   ├── evidence-store/           # intrusion evidence storage
 │   ├── enrollment-cli/           # root enrollment CLI
 │   ├── admin-cli/                # non-biometric status diagnostic CLI
-│   └── gui/                      # soos-gui diagnostic and enrollment GUI (eframe)
+│   ├── gui/                      # soos-gui diagnostic and enrollment GUI (eframe)
+│   └── remote/                   # soos-remote user-level lock status and remote lock companion (§13)
 ├── models/
 │   ├── manifest.toml             # model IDs, licenses, SHA-256 checksums
 │   └── README.md
@@ -282,7 +283,7 @@ soos/
 └── AI/                           # AI development guidelines and walkthroughs
 ```
 
-`#![forbid(unsafe_code)]` is strictly enforced in all business crates; the authoritative list is the invariant test `test_business_crates_forbid_unsafe_code` in `tests/invariants/src/lib.rs` (`protocol`, `policy`, `vision`, `inference-ort`, `biometric-store`, `evidence-store`, `enrollment-cli`, `admin-cli`, `gui`). The adapter crates `pam` and `camera-v4l` confine documented `unsafe`.
+`#![forbid(unsafe_code)]` is strictly enforced in all business crates; the authoritative list is the invariant test `test_business_crates_forbid_unsafe_code` in `tests/invariants/src/lib.rs` (`protocol`, `policy`, `vision`, `inference-ort`, `biometric-store`, `evidence-store`, `enrollment-cli`, `admin-cli`, `gui`, `remote`). The adapter crates `pam` and `camera-v4l` confine documented `unsafe`.
 
 ---
 
@@ -350,6 +351,33 @@ SystemCallArchitectures=native
 - Assuming `/dev/video0` index is static or shareable across processes.
 - Downloading unverified ONNX weights at runtime without manifest hash checks.
 - Promising presentation attack security without active or dedicated PAD validation.
+
+---
+
+## 13. Remote Companion (`soos-remote`, GitHub #339)
+
+A **user-level** companion that shows the owner's phone the real-time lock status of the desktop
+session and offers a remote **lock**, nothing more (ADR 2026-10-05 "Remote Companion
+`soos-remote`"; operator reference `Docs/REMOTE_COMPANION.md`). It is a leaf crate: `soos-daemon`,
+`pam_soos.so` and the IPC protocol are untouched and no crate depends on it.
+
+| Aspect | Decision |
+|---|---|
+| Process | `systemctl --user` service of the session owner; `check_not_root` refuses uid 0 or euid 0 at start (exit 78, `RestartPreventExitStatus=78`). No polkit rule: the session owner may call `Manager.LockSession` on their own session. |
+| Transport | One `0600` Unix socket in a `0700` directory under `$XDG_RUNTIME_DIR`, proxied by `tailscale serve --bg unix:<path>`; no network socket at all (`RestrictAddressFamilies=AF_UNIX`, invariant RMC-S2/S5). |
+| Identity | Exactly one `Tailscale-User-Login` header in the non-empty `allowed_logins` allowlist, else `403`; trusted only because `tailscaled` strips client copies and only `tailscaled` and the owner can open the socket. `Host` must be an allowed `*.ts.net` name (`421` otherwise); `POST /api/lock` needs `X-Soos-Action: lock` plus same-origin `Sec-Fetch-Site`/`Origin`. |
+| Status | logind `LockedHint` / `IdleHint` / `IdleSinceHint` / `Active` of the owner's local seat `user` session (`Remote == false`, non-empty seat; active first, then the shortest id, then the greatest same-length id), read with fresh `Properties.GetAll` calls over the pinned system bus (same rules as the presence worker: `zbus::connection::Builder::address(SYSTEM_BUS_ADDRESS)`, no proxy, no cache, no signal stream, bounded calls). Server-Sent Events; the poller runs only while a stream is open; a logind failure is `unavailable`, never `unlocked`; readings carry a monotonic `seq` reserved when the read starts. |
+| Lock | `Manager.LockSession(id)` on a fresh snapshot, one per 2 s; success is confirmed through `LockedHint`, not assumed. The crate never names `UnlockSession`, `Unlock` or `SetLockedHint` (RMC-S3). |
+| Bounds | 16 connections, 4 streams, 8 KiB head, 32 headers, 256-byte path, 5 s head deadline, 2 s write deadline, 1.5 s snapshot, 2 s lock flow, 15 s keep-alive, 30 min stream (`crates/remote/src/lib.rs`). |
+| Privacy | No identity, header value, `Host`, path, session id or body is ever logged (RC-5); the status body has exactly five fields and no identity. |
+
+Companion invariants (matrix rows RMC*): RC-1 never root, never a network socket, never an
+unlock; RC-2 every request needs an allowlisted identity and an empty allowlist refuses to start;
+RC-3 a logind failure is never `unlocked` and no stale `unlocked` is replayed to a new stream;
+RC-4 every read, write, connection count and stream lifetime is bounded; RC-5 no identity or
+request data in logs or bodies. Out of scope, each needing its own ADR: remote unlock, push
+notifications, live camera. Matrix rows RMC1–RMC21 and walkthrough 183; the `Host` forwarding
+by `tailscale serve unix:` (RMC20) and the iPhone web app (RMC21) are pending owner checks.
 
 ---
 

@@ -105,7 +105,8 @@ soos/
 │   ├── evidence-store/     # opt-in intrusion snapshots
 │   ├── enrollment-cli/     # root enrollment CLI
 │   ├── admin-cli/          # non-biometric diagnostic CLI
-│   └── gui/                # soos-gui diagnostic and enrollment GUI
+│   ├── gui/                # soos-gui diagnostic and enrollment GUI
+│   └── remote/             # soos-remote user-level lock status and remote lock companion
 ├── models/                 # manifest.toml + SHA-256 checksums
 ├── tests/
 │   ├── invariants/         # soos-invariants static repository checks

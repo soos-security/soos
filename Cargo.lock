@@ -3531,6 +3531,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "soos-remote"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "httparse",
+ "nix",
+ "proptest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokio",
+ "toml",
+ "tracing",
+ "tracing-subscriber",
+ "zbus",
+]
+
+[[package]]
 name = "soos-test-fixtures"
 version = "0.1.0"
 dependencies = [

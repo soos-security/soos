@@ -187,13 +187,27 @@ fn test_pau_zbus_is_declared_once_in_the_workspace() {
     assert!(line.contains("features = [\"tokio\"]"), "{line}");
 }
 
+/// Contract migration (GitHub #339, architect spec §2.12, ADR 2026-10-05 "Remote Companion
+/// `soos-remote`" item (7)): the 2026-10-02 decision "zbus is daemon-only" is widened to
+/// exactly two crates, `soos-daemon` and `soos-remote` (the remote companion must read the
+/// logind `LockedHint`). Every other manifest under `crates/` and `tests/` must still not
+/// mention `zbus`; the PAM assertion and the test name are unchanged (matrix row PAU17).
 #[test]
 fn test_pau_zbus_is_used_only_by_the_daemon() {
-    let daemon = read("crates/daemon/Cargo.toml");
-    assert!(
-        toml_table(&daemon, "dependencies").contains(&"zbus = { workspace = true }"),
-        "crates/daemon/Cargo.toml must declare `zbus = {{ workspace = true }}` in [dependencies]"
-    );
+    const ZBUS_LINE: &str = "zbus = { workspace = true }";
+    const ALLOWED: [&str; 2] = ["crates/daemon/Cargo.toml", "crates/remote/Cargo.toml"];
+    for rel in ALLOWED {
+        let manifest = read(rel);
+        assert!(
+            toml_table(&manifest, "dependencies").contains(&ZBUS_LINE),
+            "{rel} must declare `{ZBUS_LINE}` in [dependencies]"
+        );
+        assert_eq!(
+            manifest.matches("zbus").count(),
+            1,
+            "{rel} names zbus exactly once (no feature override, no second zbus crate)"
+        );
+    }
     let root = workspace_root();
     let mut manifests = Vec::new();
     for parent in ["crates", "tests"] {
@@ -204,18 +218,25 @@ fn test_pau_zbus_is_used_only_by_the_daemon() {
             }
         }
     }
+    let mut allowed_seen = 0;
     for manifest in manifests {
         let rel = manifest
             .strip_prefix(&root)
             .unwrap()
             .to_string_lossy()
             .into_owned();
-        if rel == "crates/daemon/Cargo.toml" {
+        if ALLOWED.contains(&rel.as_str()) {
+            allowed_seen += 1;
             continue;
         }
         let content = fs::read_to_string(&manifest).unwrap();
         assert!(!content.contains("zbus"), "{rel} must not depend on zbus");
     }
+    assert_eq!(
+        allowed_seen,
+        ALLOWED.len(),
+        "both allowed manifests exist: {ALLOWED:?}"
+    );
     let pam = read("crates/pam/Cargo.toml");
     assert!(
         !pam.contains("zbus") && !pam.contains("dbus"),

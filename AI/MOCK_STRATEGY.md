@@ -58,3 +58,26 @@ without a real lock screen and without reading `/etc` or `/run`
   static offset) drives grace, interval and backoff deterministically.
 The production `ZbusLogind` is exercised only on hardware (`tests/physical/`); its pure reply
 mapping `session_state_from_properties` is tested with hand-built `zvariant::OwnedValue` maps.
+
+## Remote Companion Doubles (GitHub #339)
+`soos-remote` is generic over its logind access (`soos_remote::logind::SessionSource`) and
+takes its Unix clock through `ServerState::with_unix_clock`, so the whole end-to-end suite
+(`crates/remote/tests/server_tests.rs`) runs without D-Bus, without Tailscale and without a
+real socket directory:
+- `MockSource`: implements `SessionSource` with a settable `own_sessions` answer (snapshotted
+  when a call starts, which models a slow read), a settable `lock_session` result,
+  `hold_next(n)` / `hold_lock_next(n)` gates that block the next calls until `release()` (to
+  prove the 1500 ms snapshot and 2000 ms lock-flow deadlines), per-call counters and the
+  recorded `lock_session` ids and uids;
+- `TestClock`: the paused tokio clock plus a settable offset, injected as the `checked_unix_ms`
+  source (R3-1), with `shift_ms(-3_600_000)` for the backward-clock test;
+- `FrozenClock`: one live `spawn_blocking` task that inhibits tokio's auto-advance, so virtual
+  time moves only through `tokio::time::advance` and the 5 s head timer, the 15 s keep-alive
+  and the 30 min stream lifetime fire exactly when the test says;
+- `LogCapture`: a `tracing_subscriber::fmt` writer at `TRACE` that proves no identity, `Host`,
+  path, header value or session id is ever logged;
+- the HTTP client is raw bytes over `tokio::net::UnixStream` against a listener bound in a
+  `tempfile::TempDir`.
+The production `ZbusSessionSource` is exercised only on the owner's host; its pure reply
+mapping `session_props_from_properties` is tested with hand-built `zvariant::OwnedValue` maps,
+and the socket helpers over `TempDir` (symlink, regular file and foreign-uid cases).

@@ -1,0 +1,130 @@
+/* soos remote companion page: one status card, light and dark through prefers-color-scheme. */
+:root {
+  color-scheme: light dark;
+  --bg: #f3f4f6;
+  --card: #ffffff;
+  --text: #111827;
+  --muted: #6b7280;
+  --accent: #1f2937;
+  --accent-text: #ffffff;
+  --locked: #15803d;
+  --unlocked: #b45309;
+  --warn: #b91c1c;
+  --unknown: #6b7280;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0f172a;
+    --card: #1e293b;
+    --text: #f8fafc;
+    --muted: #94a3b8;
+    --accent: #e2e8f0;
+    --accent-text: #0f172a;
+    --locked: #4ade80;
+    --unlocked: #fbbf24;
+    --warn: #f87171;
+    --unknown: #94a3b8;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  min-height: 100%;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+  padding: env(safe-area-inset-top) 16px env(safe-area-inset-bottom) 16px;
+}
+
+.card {
+  background: var(--card);
+  border-radius: 20px;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.12);
+  padding: 32px 24px;
+  width: 100%;
+  max-width: 420px;
+  text-align: center;
+}
+
+h1 {
+  font-size: 1.1rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin: 0 0 16px;
+}
+
+.state {
+  font-size: 2.4rem;
+  font-weight: 700;
+  margin: 0 0 8px;
+  color: var(--unknown);
+}
+
+.state-locked {
+  color: var(--locked);
+}
+
+.state-unlocked {
+  color: var(--unlocked);
+}
+
+.state-unavailable,
+.state-unreachable {
+  color: var(--warn);
+}
+
+.detail {
+  margin: 4px 0;
+  color: var(--muted);
+  font-size: 0.95rem;
+}
+
+button {
+  margin-top: 24px;
+  width: 100%;
+  padding: 16px;
+  border: 0;
+  border-radius: 14px;
+  background: var(--accent);
+  color: var(--accent-text);
+  font-size: 1.1rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.feedback {
+  margin: 16px 0 0;
+  min-height: 1.4em;
+  font-size: 0.95rem;
+  color: var(--muted);
+}
+
+footer {
+  margin-top: 24px;
+  font-size: 0.8rem;
+}
+
+footer a {
+  color: var(--muted);
+}

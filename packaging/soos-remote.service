@@ -1,0 +1,22 @@
+[Unit]
+Description=soos remote companion (lock status and remote lock over Tailscale Serve)
+Documentation=https://github.com/Mysticaly622/soos/blob/main/Docs/REMOTE_COMPANION.md
+
+[Service]
+Type=exec
+ExecStart=%h/.local/bin/soos-remote
+Restart=on-failure
+RestartSec=5
+# EXIT_CONFIG (78, EX_CONFIG): configuration / root refusal errors are not retried
+RestartPreventExitStatus=78
+NoNewPrivileges=yes
+RestrictAddressFamilies=AF_UNIX
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+SystemCallArchitectures=native
+UMask=0077
+
+[Install]
+WantedBy=default.target

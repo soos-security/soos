@@ -274,6 +274,12 @@ mod install_gdm_followups_contract;
 #[cfg(all(test, unix))]
 mod gdm_hardening_flaky_tests_contract;
 
+/// Remote companion `soos-remote`: leaf crate, Unix socket only, no unlock literal, bus
+/// rules of the presence worker, user unit and installer hygiene, web assets, documentation
+/// (GitHub #339; spec §8 RMC-S1–RMC-S11 plus R3-2; rows RMC*).
+#[cfg(all(test, unix))]
+mod remote_companion_contract;
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,
@@ -311,6 +317,7 @@ mod tests {
             "enrollment-cli",
             "admin-cli",
             "gui",
+            "remote",
         ];
 
         for crate_name in business_crates {
