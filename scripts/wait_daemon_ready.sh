@@ -225,7 +225,7 @@ done
 if (( have_report == 1 )); then
     printf '%s\n' "${last_report}"
 fi
-echo "[ERROR] soos-daemon did not report healthy within ${TIMEOUT_S} s ('${ADMIN_BIN} status' kept failing)." >&2
+echo "[ERROR] soos-daemon did not report healthy within ${TIMEOUT_S} s ('${q_admin} status' kept failing)." >&2
 if [[ -n "${last_error}" ]]; then
     printf '%s\n' "        Last '${q_admin} status' error:" >&2
     print_tail "${last_error}"

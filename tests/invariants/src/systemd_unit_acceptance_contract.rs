@@ -271,8 +271,10 @@ fn test_systemd_acceptance_harness_asserts_start_limit_hit_with_shipped_values()
 }
 
 /// SUA5 — `systemctl start` returns only after `READY=1`: the socket check comes right after
-/// the start, the journal order is bind -> READY=1 -> Started, the readiness time stays well
-/// under `TimeoutStartSec`, and the stop is a graceful drain.
+/// the start, the daemon stream orders bind -> readiness reported and the `READY=1` send time
+/// (`ready_sent_monotonic_us`) is no later than `ActiveEnterTimestampMonotonic` (GitHub #333,
+/// OA-2), the readiness time stays well under `TimeoutStartSec`, and the stop is a graceful
+/// drain.
 #[test]
 fn test_systemd_acceptance_harness_asserts_ready_ordering_and_clean_stop() {
     let text = read(HARNESS);
@@ -287,7 +289,10 @@ fn test_systemd_acceptance_harness_asserts_ready_ordering_and_clean_stop() {
         "{what} must check the socket and its mode right after systemctl start returned"
     );
     for needle in [
-        "listening_line < ready_line && ready_line < started_line",
+        "listening_line < ready_line",
+        "ready_sent_us <= active_us",
+        "(ready_sent_monotonic_us=\\([0-9][0-9]*\\))",
+        "s/\\x1b\\[[0-9;]*m//g",
         "ExecMainStartTimestampMonotonic",
         "ActiveEnterTimestampMonotonic",
         "ready_ms < MAX_READY_MS",
@@ -329,6 +334,8 @@ fn test_systemd_acceptance_harness_asserts_ready_ordering_and_clean_stop() {
     for line in [
         "soos-daemon initialized and listening for PAM requests",
         "Reported readiness to systemd",
+        "Reported readiness to systemd (ready_sent_monotonic_us={us})",
+        "Reported readiness to systemd (ready_sent_monotonic_us=unknown)",
         "Received SIGTERM signal; shutting down gracefully",
         "soos-daemon terminated cleanly",
     ] {

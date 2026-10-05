@@ -230,7 +230,14 @@ lock_grace_ms = 3000
    stacks until a restart; that request itself still fails closed (`Unavailable` / `Timeout`).
 5. The socket is bound (§1.2). When started by systemd (`Type=notify`, `NOTIFY_SOCKET` set) the
    daemon then sends `READY=1` through `soos_daemon::sd_notify`; only then does systemd start
-   units ordered after it (`display-manager.service`). A notification failure is logged at
+   units ordered after it (`display-manager.service`). A sent notification is logged once as
+   `Reported readiness to systemd (ready_sent_monotonic_us=<us>)`, where `<us>` is the
+   `CLOCK_MONOTONIC` time in microseconds (ASCII digits) read immediately before the `READY=1`
+   datagram was sent, or as `Reported readiness to systemd (ready_sent_monotonic_us=unknown)`
+   when the clock could not be read (the send is never prevented by a clock error). The value
+   is in the message text, not a structured field, so ANSI styling never alters it; the systemd
+   acceptance harness requires it to be no later than the unit's
+   `ActiveEnterTimestampMonotonic` (GitHub #333). A notification failure is logged at
    `warn`. The accept loop starts, and `STOPPING=1` is sent on SIGTERM / SIGINT (GitHub #203).
    Under `PrivateNetwork=yes` only a filesystem `NOTIFY_SOCKET` (systemd's default) is
    reachable; an abstract `@` address belongs to the host network namespace and cannot be

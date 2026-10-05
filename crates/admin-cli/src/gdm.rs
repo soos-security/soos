@@ -14,9 +14,9 @@ use std::path::{Path, PathBuf};
 
 use crate::args::GdmAction;
 use crate::error::AdminCliError;
-use crate::pam_stack::{delegated_auth, read_bounded_utf8, DelegatedAuth, PamLine, ReadError};
+use crate::pam_stack::{delegated_auth, read_bounded_utf8, DelegatedAuth, PamLine};
 
-pub use crate::pam_stack::{MAX_PAM_FILE_BYTES, MAX_PAM_INCLUDE_DEPTH};
+pub use crate::pam_stack::{MAX_PAM_FILE_BYTES, MAX_PAM_INCLUDE_DEPTH, MAX_PAM_STACK_READS};
 
 /// PAM rule inserted into the GDM service file by `gdm enable`. The explicit
 /// `[success=done default=ignore]` control is the one used by every packaged soos
@@ -254,46 +254,189 @@ fn gdm_error(what: &str, path: &Path, err: &std::io::Error) -> AdminCliError {
 /// without any modification. A `pam_soos.so` rule written by the administrator is
 /// left untouched.
 fn ensure_gdm_pam_line(pam_file: &Path) -> Result<(), AdminCliError> {
-    let metadata = regular_file_metadata(pam_file, "PAM file")?;
-    let content = match read_bounded_utf8(pam_file) {
-        Ok(content) => content,
-        Err(ReadError::NotFound) => {
-            return Err(AdminCliError::GdmConfig(format!(
-                "PAM file '{}' does not exist",
-                pam_file.display()
-            )))
-        }
-        Err(ReadError::Other(msg)) => return Err(AdminCliError::GdmConfig(msg)),
+    ensure_gdm_pam_line_with(pam_file, &mut || {})
+}
+
+/// GitHub #333: `ensure_gdm_pam_line` with a hook run once, right before the rename of the PAM
+/// file (after the temporary file is written and synced). Production passes a no-op.
+///
+/// The PAM file is opened once (`O_NOFOLLOW | O_NOCTTY | O_NONBLOCK | O_CLOEXEC`): its type,
+/// size, bytes, mode and owner all come from that descriptor ([`PamFileSnapshot`]) and the
+/// planned content is computed from exactly those bytes. Right before the rename the file is
+/// read again and must still be the same inode with the same bytes, mode and owner; otherwise
+/// nothing is written and the enable fails with "changed concurrently" (as `gdm restore` since
+/// GitHub #318). A change made in the few system calls between that re-check and `rename(2)`
+/// is an inherent residual. A backup created by an aborted run is removed again, unless the
+/// file now holds a soos managed block (a concurrent `gdm enable` won and relies on it).
+fn ensure_gdm_pam_line_with(
+    pam_file: &Path,
+    before_rename: &mut dyn FnMut(),
+) -> Result<(), AdminCliError> {
+    let Some(snapshot) = read_pam_file_snapshot(pam_file, GdmOperation::Enable)? else {
+        return Err(AdminCliError::GdmConfig(format!(
+            "PAM file '{}' does not exist",
+            pam_file.display()
+        )));
+    };
+    let Ok(content) = std::str::from_utf8(&snapshot.bytes) else {
+        return Err(AdminCliError::GdmConfig(format!(
+            "PAM file '{}' is not valid UTF-8; refusing to edit it",
+            pam_file.display()
+        )));
     };
     let include_dir = include_dir_of(pam_file);
 
-    let Some(plan) = plan_gdm_enable(&content, include_dir)? else {
+    let Some(plan) = plan_gdm_enable(content, include_dir)? else {
         return Ok(());
     };
 
-    // Never propagate group/world write permission to the rewritten file or its backup.
-    let mode = metadata.permissions().mode() & 0o7755;
-    let owner = (metadata.uid(), metadata.gid());
+    // Never propagate group/world write permission to the rewritten file or its backup. The
+    // snapshot keeps the unmasked mode, so an unchanged 0o664 file passes the re-check.
+    let mode = snapshot.mode & 0o7755;
+    let owner = (snapshot.uid, snapshot.gid);
+    let mut recheck = || {
+        before_rename();
+        ensure_pam_file_unchanged(pam_file, Some(&snapshot), GdmOperation::Enable)
+    };
 
     match plan {
         EnablePlan::Insert { pristine, updated } => {
             let backup = pam_backup_path(pam_file);
-            match fs::symlink_metadata(&backup) {
-                Ok(_) => {}
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                    write_atomic(&backup, pristine.as_bytes(), mode, owner)?;
-                }
-                Err(e) => return Err(gdm_error("Failed to inspect PAM backup", &backup, &e)),
-            }
-            write_atomic(pam_file, updated.as_bytes(), mode, owner)
+            let created = publish_backup(&backup, pristine.as_bytes(), mode, owner)?;
+            write_atomic_checked(pam_file, updated.as_bytes(), mode, owner, &mut recheck).map_err(
+                |err| match created {
+                    Some(identity) => discard_created_backup(pam_file, &backup, identity, err),
+                    None => err,
+                },
+            )
         }
         // GitHub #331: never creates a backup and leaves an existing one byte-identical, so
         // `gdm restore` keeps returning the pristine pre-soos bytes (and keeps refusing a
         // stale backup without `--force`).
         EnablePlan::RemoveRedundant { updated } => {
-            write_atomic(pam_file, updated.as_bytes(), mode, owner)
+            write_atomic_checked(pam_file, updated.as_bytes(), mode, owner, &mut recheck)
         }
     }
+}
+
+/// Directory holding `path` (`.` for a bare file name).
+fn parent_dir(path: &Path) -> &Path {
+    path.parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
+}
+
+/// Publishes `bytes` as the backup without ever replacing an existing name (GitHub #333): the
+/// bytes go to an exclusive temporary file in the same directory (mode, owner, `fsync`), which
+/// is hard-linked to `backup` (`linkat(2)` fails with `EEXIST` on any existing name, a symlink
+/// included, and never follows it); the temporary name is always removed.
+///
+/// Returns the `(dev, ino)` of the backup this call created, or `None` when a backup already
+/// existed (it is kept untouched: it holds the pristine pre-soos state).
+fn publish_backup(
+    backup: &Path,
+    bytes: &[u8],
+    mode: u32,
+    owner: (u32, u32),
+) -> Result<Option<(u64, u64)>, AdminCliError> {
+    // Fast path only; correctness relies on the link below.
+    match fs::symlink_metadata(backup) {
+        Ok(_) => return Ok(None),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(gdm_error("Failed to inspect PAM backup", backup, &e)),
+    }
+    let dir = parent_dir(backup);
+    let file_name = backup
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let tmp = dir.join(format!(".{file_name}.soos-tmp-{}", std::process::id()));
+    let linked = link_new_file(&tmp, backup, bytes, mode, owner);
+    let removed = match fs::remove_file(&tmp) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+        _ => Ok(()),
+    };
+    let created = linked
+        .and_then(|created| removed.map(|()| created))
+        .and_then(|created| fs::File::open(dir)?.sync_all().map(|()| created))
+        .map_err(|e| gdm_error("Failed to write PAM file atomically", backup, &e))?;
+    Ok(created)
+}
+
+/// Writes `bytes` to the new file `tmp` and hard-links it to `target`; `None` when `target`
+/// already exists.
+fn link_new_file(
+    tmp: &Path,
+    target: &Path,
+    bytes: &[u8],
+    mode: u32,
+    owner: (u32, u32),
+) -> std::io::Result<Option<(u64, u64)>> {
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(tmp)?;
+    file.write_all(bytes)?;
+    std::os::unix::fs::fchown(&file, Some(owner.0), Some(owner.1))?;
+    file.set_permissions(fs::Permissions::from_mode(mode))?;
+    file.sync_all()?;
+    let metadata = file.metadata()?;
+    drop(file);
+    match fs::hard_link(tmp, target) {
+        Ok(()) => Ok(Some((metadata.dev(), metadata.ino()))),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+/// After a failed PAM-file write, removes the backup this run created (`identity`), and
+/// returns `err`, possibly with a note on the backup (GitHub #333).
+///
+/// The backup is kept when the PAM file now holds a soos managed block (a concurrent
+/// `gdm enable` won the rename and relies on it) or cannot be re-read; it is removed only when
+/// it is still the regular file with exactly `identity`. A replaced backup is left alone (a
+/// replacement between that check and the removal is a stated, root-only residual).
+fn discard_created_backup(
+    pam_file: &Path,
+    backup: &Path,
+    identity: (u64, u64),
+    err: AdminCliError,
+) -> AdminCliError {
+    let note = |err: AdminCliError, reason: &str| match err {
+        AdminCliError::GdmConfig(msg) => AdminCliError::GdmConfig(format!(
+            "{msg} The backup '{}' created by this run could not be removed: {reason}",
+            backup.display()
+        )),
+        other => other,
+    };
+    match read_pam_file_snapshot(pam_file, GdmOperation::Enable) {
+        Ok(Some(current)) if holds_managed_block(&current.bytes) => return err,
+        Ok(_) => {}
+        Err(AdminCliError::GdmConfig(reason)) => return note(err, &reason),
+        Err(other) => return note(err, &other.to_string()),
+    }
+    match fs::symlink_metadata(backup) {
+        Ok(meta) if meta.is_file() && (meta.dev(), meta.ino()) == identity => {
+            if let Err(e) = fs::remove_file(backup) {
+                return note(err, &e.to_string());
+            }
+            // Best effort: the removal itself already happened.
+            let _ = fs::File::open(parent_dir(backup)).and_then(|d| d.sync_all());
+            err
+        }
+        Ok(_) => note(err, "it was replaced"),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => err,
+        Err(e) => note(err, &e.to_string()),
+    }
+}
+
+/// True when `bytes` hold a soos managed block (a line equal to [`GDM_BLOCK_BEGIN`] once
+/// trimmed, as [`strip_managed_rules`] detects it).
+fn holds_managed_block(bytes: &[u8]) -> bool {
+    String::from_utf8_lossy(bytes)
+        .lines()
+        .any(|line| line.trim() == GDM_BLOCK_BEGIN)
 }
 
 /// Result of [`plan_gdm_enable`] when the file must be rewritten.
@@ -442,6 +585,8 @@ fn plan_gdm_enable(content: &str, include_dir: &Path) -> Result<Option<EnablePla
 
     let scan = pre_credential_scan(&pristine)?;
     let jump_crosses = scan.jump_crosses_anchor();
+    // GitHub #333: the predicate `gdm status` uses, so both commands agree.
+    let jump_skips = scan.jump_skips_anchor();
     let AnchorScan {
         lines,
         anchor_index,
@@ -458,12 +603,22 @@ fn plan_gdm_enable(content: &str, include_dir: &Path) -> Result<Option<EnablePla
     let delegated = anchor_rule
         .delegation()
         .map(|_| delegated_auth(include_dir, lines.get(anchor_index..).unwrap_or_default()));
-    if let Some(Ok(DelegatedAuth::SharedSoosRule { .. })) = delegated {
+    if let Some(Ok(DelegatedAuth::SharedSoosRule { stack })) = &delegated {
+        if pristine != content && jump_crosses {
+            return Err(jump_crossing_error());
+        }
+        // GitHub #333: a pre-anchor jump landing beyond the delegation skips the shared rule
+        // on that branch; `gdm status` reports `installed: false`, so enable refuses.
+        if jump_skips {
+            return Err(AdminCliError::GdmConfig(format!(
+                "a [...=N] jump in the PAM file lands beyond the shared auth stack '{stack}', so \
+                 that branch never reaches its pam_soos.so rule; nothing was written and GDM \
+                 face login is not enabled automatically \
+                 (see Docs/DISTRIBUTION_DEPLOYMENT.md section 2.1)"
+            )));
+        }
         if pristine == content {
             return Ok(None);
-        }
-        if jump_crosses {
-            return Err(jump_crossing_error());
         }
         return Ok(Some(EnablePlan::RemoveRedundant { updated: pristine }));
     }
@@ -581,27 +736,6 @@ fn strip_managed_rules(content: &str) -> Result<String, AdminCliError> {
     Ok(out)
 }
 
-/// Metadata of `path`, refusing symlinks and non-regular files.
-fn regular_file_metadata(path: &Path, what: &str) -> Result<fs::Metadata, AdminCliError> {
-    let metadata = match fs::symlink_metadata(path) {
-        Ok(metadata) => metadata,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Err(AdminCliError::GdmConfig(format!(
-                "{what} '{}' does not exist",
-                path.display()
-            )));
-        }
-        Err(e) => return Err(gdm_error(&format!("Failed to inspect {what}"), path, &e)),
-    };
-    if metadata.file_type().is_symlink() || !metadata.is_file() {
-        return Err(AdminCliError::GdmConfig(format!(
-            "Refusing to use '{}': not a regular file (symlink or special file)",
-            path.display()
-        )));
-    }
-    Ok(metadata)
-}
-
 /// Restores `pam_file` from its [`pam_backup_path`] copy (bytes, mode and owner),
 /// atomically, then removes the backup. Fails without any change when the backup is
 /// missing, a symlink, not a regular file or larger than [`MAX_PAM_FILE_BYTES`].
@@ -630,7 +764,7 @@ fn restore_gdm_pam_file_with(
 ) -> Result<(), AdminCliError> {
     let backup = pam_backup_path(pam_file);
     let (bytes, backup_meta) = read_backup_bounded(&backup)?;
-    let snapshot = read_pam_file_snapshot(pam_file)?;
+    let snapshot = read_pam_file_snapshot(pam_file, GdmOperation::Restore)?;
     if let Some(current) = &snapshot {
         if !force && !backup_matches_current(pam_file, current, &bytes)? {
             return Err(AdminCliError::GdmConfig(format!(
@@ -650,7 +784,7 @@ fn restore_gdm_pam_file_with(
         (backup_meta.uid(), backup_meta.gid()),
         &mut || {
             before_rename();
-            ensure_pam_file_unchanged(pam_file, snapshot.as_ref())
+            ensure_pam_file_unchanged(pam_file, snapshot.as_ref(), GdmOperation::Restore)
         },
     )?;
     fs::remove_file(&backup).map_err(|e| gdm_error("Failed to remove PAM backup", &backup, &e))?;
@@ -663,27 +797,80 @@ fn restore_gdm_pam_file_with(
         .map_err(|e| gdm_error("Failed to sync PAM directory", dir, &e))
 }
 
-/// The PAM file as `gdm restore` compared it: its identity and its exact bytes.
-#[derive(Debug, PartialEq, Eq)]
+/// Which `gdm` command performs the checked rename (message wording and compared fields).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GdmOperation {
+    /// `gdm enable` (GitHub #333).
+    Enable,
+    /// `gdm restore` (GitHub #318).
+    Restore,
+}
+
+impl GdmOperation {
+    /// The command as the operator types it after `soos-admin`.
+    fn command(self) -> &'static str {
+        match self {
+            Self::Enable => "gdm enable",
+            Self::Restore => "gdm restore",
+        }
+    }
+
+    /// Verb of the "not a regular file" refusal (kept texts of each command).
+    fn refusal_verb(self) -> &'static str {
+        match self {
+            Self::Enable => "use",
+            Self::Restore => "replace",
+        }
+    }
+}
+
+/// The PAM file as one `gdm` command read it: identity, exact bytes and (GitHub #333) the
+/// mode (`st_mode & 0o7777`, unmasked) and owner of the same descriptor.
+#[derive(Debug)]
 struct PamFileSnapshot {
     dev: u64,
     ino: u64,
     bytes: Vec<u8>,
+    mode: u32,
+    uid: u32,
+    gid: u32,
 }
 
-/// Reads `pam_file` through one `O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC` descriptor, bounded to
-/// [`MAX_PAM_FILE_BYTES`]; `None` when it does not exist. A symbolic link or a non-regular
-/// file is refused.
-fn read_pam_file_snapshot(pam_file: &Path) -> Result<Option<PamFileSnapshot>, AdminCliError> {
+impl PamFileSnapshot {
+    /// Whether `other` is the same file for `operation`: identity and bytes for restore
+    /// (GitHub #318), plus mode and owner for enable (GitHub #333), so that a concurrent
+    /// `chmod`/`chown` aborts instead of being reverted.
+    fn matches(&self, other: &Self, operation: GdmOperation) -> bool {
+        let same_file = self.dev == other.dev && self.ino == other.ino && self.bytes == other.bytes;
+        match operation {
+            GdmOperation::Restore => same_file,
+            GdmOperation::Enable => {
+                same_file
+                    && self.mode == other.mode
+                    && self.uid == other.uid
+                    && self.gid == other.gid
+            }
+        }
+    }
+}
+
+/// Reads `pam_file` through one `O_NOFOLLOW | O_NOCTTY | O_NONBLOCK | O_CLOEXEC` descriptor,
+/// bounded to [`MAX_PAM_FILE_BYTES`]; `None` when it does not exist. A symbolic link or a
+/// non-regular file is refused before any byte is read (a FIFO never blocks).
+fn read_pam_file_snapshot(
+    pam_file: &Path,
+    operation: GdmOperation,
+) -> Result<Option<PamFileSnapshot>, AdminCliError> {
     let not_regular = || {
         AdminCliError::GdmConfig(format!(
-            "Refusing to replace '{}': not a regular file (symlink or special file)",
+            "Refusing to {} '{}': not a regular file (symlink or special file)",
+            operation.refusal_verb(),
             pam_file.display()
         ))
     };
     let file = match fs::OpenOptions::new()
         .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NOCTTY | libc::O_NONBLOCK | libc::O_CLOEXEC)
         .open(pam_file)
     {
         Ok(file) => file,
@@ -717,22 +904,32 @@ fn read_pam_file_snapshot(pam_file: &Path) -> Result<Option<PamFileSnapshot>, Ad
         dev: metadata.dev(),
         ino: metadata.ino(),
         bytes,
+        mode: metadata.mode() & 0o7777,
+        uid: metadata.uid(),
+        gid: metadata.gid(),
     }))
 }
 
-/// Fails with "changed concurrently" unless `pam_file` is still exactly `expected` (same
-/// device, inode and bytes), or still absent when `expected` is `None` (GitHub #318).
+/// Fails with "changed concurrently" unless `pam_file` is still `expected`
+/// ([`PamFileSnapshot::matches`] for `operation`), or still absent when `expected` is `None`
+/// (GitHub #318, GitHub #333).
 fn ensure_pam_file_unchanged(
     pam_file: &Path,
     expected: Option<&PamFileSnapshot>,
+    operation: GdmOperation,
 ) -> Result<(), AdminCliError> {
-    let current = read_pam_file_snapshot(pam_file);
-    if matches!(&current, Ok(now) if now.as_ref() == expected) {
+    let unchanged = match (read_pam_file_snapshot(pam_file, operation), expected) {
+        (Ok(None), None) => true,
+        (Ok(Some(now)), Some(expected)) => now.matches(expected, operation),
+        _ => false,
+    };
+    if unchanged {
         return Ok(());
     }
+    let command = operation.command();
     Err(AdminCliError::GdmConfig(format!(
-        "'{}' changed concurrently while `gdm restore` was running; nothing was written. \
-         Check the file and re-run `soos-admin gdm restore`",
+        "'{}' changed concurrently while `{command}` was running; nothing was written. \
+         Check the file and re-run `soos-admin {command}`",
         pam_file.display()
     )))
 }
@@ -756,14 +953,14 @@ fn backup_matches_current(
     Ok(strip_managed_rules(current).is_ok_and(|pristine| pristine.as_bytes() == backup))
 }
 
-/// Opens `backup` with `O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC`, checks on the open
+/// Opens `backup` with `O_NOFOLLOW | O_NOCTTY | O_NONBLOCK | O_CLOEXEC`, checks on the open
 /// descriptor that it is a regular file of at most [`MAX_PAM_FILE_BYTES`], and reads
 /// it through that same descriptor (bounded). Returns the bytes and the descriptor's
 /// metadata (mode and owner to restore).
 fn read_backup_bounded(backup: &Path) -> Result<(Vec<u8>, fs::Metadata), AdminCliError> {
     let file = match fs::OpenOptions::new()
         .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NOCTTY | libc::O_NONBLOCK | libc::O_CLOEXEC)
         .open(backup)
     {
         Ok(file) => file,
@@ -812,18 +1009,10 @@ fn read_backup_bounded(backup: &Path) -> Result<(Vec<u8>, fs::Metadata), AdminCl
 /// Writes `bytes` to `target` atomically: exclusive temporary file in the same
 /// directory (created with `mode`, owned like the original), `fsync`, `rename`,
 /// then `fsync` of the directory. The temporary file is removed on failure.
-fn write_atomic(
-    target: &Path,
-    bytes: &[u8],
-    mode: u32,
-    owner: (u32, u32),
-) -> Result<(), AdminCliError> {
-    write_atomic_checked(target, bytes, mode, owner, &mut || Ok(()))
-}
-
-/// [`write_atomic`] that runs `before_rename` once the temporary file is written and synced,
-/// right before the rename; an error from it removes the temporary file and is returned as
-/// is, leaving `target` untouched (GitHub #318).
+///
+/// `before_rename` runs once the temporary file is written and synced, right before the
+/// rename; an error from it removes the temporary file and is returned as is, leaving
+/// `target` untouched (GitHub #318, #333).
 fn write_atomic_checked(
     target: &Path,
     bytes: &[u8],
@@ -1016,5 +1205,419 @@ account required        pam_unix.so
         assert_eq!(fs::read_to_string(&f.pam_file).unwrap(), PRISTINE);
         assert!(!pam_backup_path(&f.pam_file).exists());
         assert!(leftover_temp_files(f.dir.path()).is_empty());
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::arithmetic_side_effects,
+    reason = "Unit tests of the enable race seam use direct assertions"
+)]
+mod enable_race_tests {
+    //! GitHub #333 (row GHF1): `gdm enable` re-checks the PAM file right before the rename
+    //! (identity, bytes, mode and owner) and aborts without writing when it changed after the
+    //! read. A backup created by the aborted run is removed again; an existing backup, a
+    //! symlink at the backup path and a backup replaced meanwhile are never touched.
+
+    use super::*;
+    use std::collections::BTreeSet;
+    use std::os::unix::fs::symlink;
+
+    const PRISTINE: &str = "\
+#%PAM-1.0
+auth    requisite       pam_nologin.so
+auth    required        pam_unix.so
+account required        pam_unix.so
+";
+
+    /// Shared stack without any soos rule (enable inserts a managed block).
+    const PLAIN_SHARED: &str = "\
+auth       required                    pam_faillock.so preauth
+auth       sufficient                  pam_unix.so nullok
+auth       required                    pam_deny.so
+";
+
+    /// Shared stack whose primary soos rule makes a managed block redundant.
+    const SOOS_SHARED: &str = "\
+auth       required                    pam_faillock.so preauth
+auth       [success=done default=ignore]  pam_soos.so
+auth       sufficient                  pam_unix.so nullok
+auth       required                    pam_deny.so
+";
+
+    const DELEGATING: &str = "\
+#%PAM-1.0
+auth       requisite   pam_nologin.so
+auth       include     shared-auth
+account    include     shared-auth
+";
+
+    struct Fixture {
+        dir: tempfile::TempDir,
+        pam_file: PathBuf,
+    }
+
+    fn fixture(content: &str, mode: u32) -> Fixture {
+        let dir = tempfile::tempdir().unwrap();
+        let pam_file = dir.path().join("gdm-password");
+        fs::write(&pam_file, content).unwrap();
+        fs::set_permissions(&pam_file, fs::Permissions::from_mode(mode)).unwrap();
+        Fixture { dir, pam_file }
+    }
+
+    /// A GDM file holding a managed block over a shared stack that now carries a primary
+    /// soos rule (`EnablePlan::RemoveRedundant`), with the backup of the first enable.
+    fn redundant_block() -> Fixture {
+        let f = fixture(DELEGATING, 0o644);
+        let shared = f.dir.path().join("shared-auth");
+        fs::write(&shared, PLAIN_SHARED).unwrap();
+        ensure_gdm_pam_line(&f.pam_file).unwrap();
+        assert!(fs::read_to_string(&f.pam_file)
+            .unwrap()
+            .contains(GDM_BLOCK_BEGIN));
+        assert!(pam_backup_path(&f.pam_file).exists());
+        fs::write(&shared, SOOS_SHARED).unwrap();
+        f
+    }
+
+    fn entries(dir: &Path) -> BTreeSet<String> {
+        fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect()
+    }
+
+    fn names(list: &[&str]) -> BTreeSet<String> {
+        list.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    fn e1(pam_file: &Path) -> String {
+        format!(
+            "GDM configuration error: '{}' changed concurrently while `gdm enable` was running; \
+             nothing was written. Check the file and re-run `soos-admin gdm enable`",
+            pam_file.display()
+        )
+    }
+
+    /// Runs the enable with `hook` before the rename; returns the result and the hook calls.
+    fn enable_with(pam_file: &Path, mut hook: impl FnMut()) -> (Result<(), AdminCliError>, u32) {
+        let mut calls = 0_u32;
+        let result = ensure_gdm_pam_line_with(pam_file, &mut || {
+            calls += 1;
+            hook();
+        });
+        (result, calls)
+    }
+
+    /// Replaces `path` atomically (another inode) with `content`.
+    fn replace_file(path: &Path, content: &[u8]) {
+        let other = path.with_extension("concurrent-writer");
+        fs::write(&other, content).unwrap();
+        fs::rename(&other, path).unwrap();
+    }
+
+    fn append_line(path: &Path) -> String {
+        let mut content = fs::read_to_string(path).unwrap();
+        content.push_str("session optional        pam_keyinit.so force revoke\n");
+        fs::write(path, &content).unwrap();
+        content
+    }
+
+    /// GHF1: an edit between the read and the rename aborts the Insert; the concurrent bytes
+    /// are kept, the backup this run created is removed, no temporary file is left.
+    #[test]
+    fn test_ghf1_enable_aborts_when_file_is_edited_before_rename() {
+        let f = fixture(PRISTINE, 0o644);
+        let pam_file = f.pam_file.clone();
+        let mut changed = String::new();
+        let (result, calls) = enable_with(&f.pam_file, || changed = append_line(&pam_file));
+        assert_eq!(calls, 1, "the hook runs exactly once, before the rename");
+        let err = result.expect_err("a concurrent edit must abort gdm enable");
+        assert_eq!(err.to_string(), e1(&f.pam_file));
+        assert_eq!(fs::read_to_string(&f.pam_file).unwrap(), changed);
+        assert!(
+            !pam_backup_path(&f.pam_file).exists(),
+            "the backup created by the aborted run must be removed"
+        );
+        assert_eq!(entries(f.dir.path()), names(&["gdm-password"]));
+    }
+
+    /// GHF1: a file replaced by another inode with identical bytes is a concurrent change.
+    #[test]
+    fn test_ghf1_enable_aborts_when_file_is_replaced_by_same_bytes() {
+        let f = fixture(PRISTINE, 0o644);
+        let pam_file = f.pam_file.clone();
+        let (result, calls) = enable_with(&f.pam_file, || {
+            let bytes = fs::read(&pam_file).unwrap();
+            replace_file(&pam_file, &bytes);
+            fs::set_permissions(&pam_file, fs::Permissions::from_mode(0o644)).unwrap();
+        });
+        assert_eq!(calls, 1);
+        let err = result.expect_err("a replaced inode must abort gdm enable");
+        assert_eq!(err.to_string(), e1(&f.pam_file));
+        assert_eq!(fs::read_to_string(&f.pam_file).unwrap(), PRISTINE);
+        assert!(!pam_backup_path(&f.pam_file).exists());
+        assert_eq!(entries(f.dir.path()), names(&["gdm-password"]));
+    }
+
+    /// GHF1: a PAM file deleted between the read and the rename is never re-created.
+    #[test]
+    fn test_ghf1_enable_aborts_when_file_is_deleted_before_rename() {
+        let f = fixture(PRISTINE, 0o644);
+        let pam_file = f.pam_file.clone();
+        let (result, calls) = enable_with(&f.pam_file, || fs::remove_file(&pam_file).unwrap());
+        assert_eq!(calls, 1);
+        let err = result.expect_err("a vanished file must abort gdm enable");
+        assert_eq!(err.to_string(), e1(&f.pam_file));
+        assert!(
+            !f.pam_file.exists(),
+            "the deleted file must not be re-created"
+        );
+        assert!(!pam_backup_path(&f.pam_file).exists());
+        assert!(
+            entries(f.dir.path()).is_empty(),
+            "nothing may be left behind"
+        );
+    }
+
+    /// GHF1 / plan evaluator R2-1: a concurrent `chmod` aborts instead of being reverted to
+    /// the mode read at the start.
+    #[test]
+    fn test_ghf1_enable_aborts_on_chmod_before_rename() {
+        let f = fixture(PRISTINE, 0o644);
+        let pam_file = f.pam_file.clone();
+        let (result, calls) = enable_with(&f.pam_file, || {
+            fs::set_permissions(&pam_file, fs::Permissions::from_mode(0o600)).unwrap();
+        });
+        assert_eq!(calls, 1);
+        let err = result.expect_err("a concurrent chmod must abort gdm enable");
+        assert_eq!(err.to_string(), e1(&f.pam_file));
+        assert_eq!(fs::read_to_string(&f.pam_file).unwrap(), PRISTINE);
+        assert_eq!(
+            fs::metadata(&f.pam_file).unwrap().permissions().mode() & 0o7777,
+            0o600,
+            "the concurrent mode is kept"
+        );
+        assert!(!pam_backup_path(&f.pam_file).exists());
+        assert_eq!(entries(f.dir.path()), names(&["gdm-password"]));
+    }
+
+    /// GHF1 / plan evaluator R2-1: an unchanged group-writable file (`0o664`) is not a
+    /// concurrent change; the rewritten file and its backup drop group/world write (`0o644`).
+    #[test]
+    fn test_ghf1_enable_of_group_writable_file_passes_the_recheck() {
+        let f = fixture(PRISTINE, 0o664);
+        let (result, calls) = enable_with(&f.pam_file, || {});
+        assert_eq!(calls, 1, "the re-check runs once before the rename");
+        result.expect("an unchanged 0o664 file must not be reported as changed");
+        assert!(fs::read_to_string(&f.pam_file)
+            .unwrap()
+            .contains(GDM_PAM_LINE));
+        let mode = |p: &Path| fs::metadata(p).unwrap().permissions().mode() & 0o7777;
+        assert_eq!(mode(&f.pam_file), 0o644);
+        assert_eq!(mode(&pam_backup_path(&f.pam_file)), 0o644);
+    }
+
+    /// GHF1: RemoveRedundant aborts on a concurrent edit and never touches the backup.
+    #[test]
+    fn test_ghf1_enable_remove_redundant_aborts_and_keeps_backup() {
+        let f = redundant_block();
+        let backup = pam_backup_path(&f.pam_file);
+        let backup_bytes = fs::read(&backup).unwrap();
+        let backup_ino = fs::metadata(&backup).unwrap().ino();
+        let before = entries(f.dir.path());
+        let pam_file = f.pam_file.clone();
+        let mut changed = String::new();
+        let (result, calls) = enable_with(&f.pam_file, || changed = append_line(&pam_file));
+        assert_eq!(calls, 1);
+        let err = result.expect_err("a concurrent edit must abort the block removal");
+        assert_eq!(err.to_string(), e1(&f.pam_file));
+        assert_eq!(fs::read_to_string(&f.pam_file).unwrap(), changed);
+        assert_eq!(
+            fs::read(&backup).unwrap(),
+            backup_bytes,
+            "backup bytes kept"
+        );
+        assert_eq!(
+            fs::metadata(&backup).unwrap().ino(),
+            backup_ino,
+            "backup inode kept"
+        );
+        assert_eq!(entries(f.dir.path()), before, "no temporary file left");
+    }
+
+    /// GHF1 / plan evaluator R2-4: with a pre-existing backup the run creates none, so an
+    /// abort leaves that backup byte-identical (same inode) and adds no E1b suffix.
+    #[test]
+    fn test_ghf1_enable_abort_keeps_preexisting_backup() {
+        let f = fixture(PRISTINE, 0o644);
+        let backup = pam_backup_path(&f.pam_file);
+        fs::write(&backup, "#%PAM-1.0\n# older pristine copy\n").unwrap();
+        let backup_ino = fs::metadata(&backup).unwrap().ino();
+        let pam_file = f.pam_file.clone();
+        let mut changed = String::new();
+        let (result, calls) = enable_with(&f.pam_file, || changed = append_line(&pam_file));
+        assert_eq!(calls, 1);
+        let err = result.expect_err("a concurrent edit must abort gdm enable");
+        assert_eq!(err.to_string(), e1(&f.pam_file));
+        assert_eq!(fs::read_to_string(&f.pam_file).unwrap(), changed);
+        assert_eq!(
+            fs::read_to_string(&backup).unwrap(),
+            "#%PAM-1.0\n# older pristine copy\n"
+        );
+        assert_eq!(fs::metadata(&backup).unwrap().ino(), backup_ino);
+        assert_eq!(
+            entries(f.dir.path()),
+            names(&["gdm-password", "gdm-password.soos-backup"])
+        );
+    }
+
+    /// GHF1 / plan evaluator R2-4: a symlink planted at the backup path is never followed,
+    /// replaced or removed (`linkat` fails with `EEXIST`), whether the run aborts or not.
+    #[test]
+    fn test_ghf1_enable_never_follows_or_removes_a_backup_symlink() {
+        for abort in [true, false] {
+            let f = fixture(PRISTINE, 0o644);
+            let victim = f.dir.path().join("victim");
+            fs::write(&victim, "victim\n").unwrap();
+            let backup = pam_backup_path(&f.pam_file);
+            symlink(&victim, &backup).unwrap();
+            let pam_file = f.pam_file.clone();
+            let (result, calls) = enable_with(&f.pam_file, || {
+                if abort {
+                    append_line(&pam_file);
+                }
+            });
+            assert_eq!(calls, 1, "abort={abort}");
+            if abort {
+                let err = result.expect_err("a concurrent edit must abort gdm enable");
+                assert_eq!(err.to_string(), e1(&f.pam_file));
+            } else {
+                result.expect("an existing backup name never blocks the enable");
+                assert!(fs::read_to_string(&f.pam_file)
+                    .unwrap()
+                    .contains(GDM_PAM_LINE));
+            }
+            let meta = fs::symlink_metadata(&backup).unwrap();
+            assert!(meta.file_type().is_symlink(), "abort={abort}: symlink kept");
+            assert_eq!(fs::read_link(&backup).unwrap(), victim);
+            assert_eq!(fs::read_to_string(&victim).unwrap(), "victim\n");
+            assert_eq!(
+                entries(f.dir.path()),
+                names(&["gdm-password", "gdm-password.soos-backup", "victim"]),
+                "abort={abort}: no temporary file left"
+            );
+        }
+    }
+
+    /// GHF1 / plan evaluator R2-4: a backup replaced after this run linked it is not this
+    /// run's inode: it is left alone and the error carries the E1b "it was replaced" suffix.
+    #[test]
+    fn test_ghf1_enable_abort_leaves_a_replaced_backup_and_reports_it() {
+        let f = fixture(PRISTINE, 0o644);
+        let backup = pam_backup_path(&f.pam_file);
+        let pam_file = f.pam_file.clone();
+        let backup_in_hook = backup.clone();
+        let (result, calls) = enable_with(&f.pam_file, || {
+            replace_file(&backup_in_hook, b"#%PAM-1.0\n# replaced concurrently\n");
+            append_line(&pam_file);
+        });
+        assert_eq!(calls, 1);
+        let msg = result
+            .expect_err("a concurrent edit must abort gdm enable")
+            .to_string();
+        assert!(msg.starts_with(&e1(&f.pam_file)), "{msg}");
+        assert!(
+            msg.ends_with(&format!(
+                " The backup '{}' created by this run could not be removed: it was replaced",
+                backup.display()
+            )),
+            "{msg}"
+        );
+        assert_eq!(
+            fs::read_to_string(&backup).unwrap(),
+            "#%PAM-1.0\n# replaced concurrently\n",
+            "a backup that is not this run's inode is never removed"
+        );
+    }
+
+    /// GHF1 / plan evaluator R2-2 (the spec leaves the choice open; the tester contract pins
+    /// the safe option): when the losing run's re-read finds a soos managed block (a
+    /// concurrent `gdm enable` won the rename), its backup is the one the winner relies on and
+    /// is not removed.
+    #[test]
+    fn test_ghf1_losing_enable_keeps_backup_when_file_holds_managed_block() {
+        let f = fixture(PRISTINE, 0o644);
+        let winner = format!(
+            "#%PAM-1.0\nauth    requisite       pam_nologin.so\n{GDM_BLOCK_BEGIN}\n\
+             {GDM_PAM_LINE}\n{GDM_BLOCK_END}\nauth    required        pam_unix.so\n\
+             account required        pam_unix.so\n"
+        );
+        let pam_file = f.pam_file.clone();
+        let winner_bytes = winner.clone();
+        let (result, calls) = enable_with(&f.pam_file, || {
+            replace_file(&pam_file, winner_bytes.as_bytes());
+        });
+        assert_eq!(calls, 1);
+        let msg = result
+            .expect_err("the losing run must abort with changed concurrently")
+            .to_string();
+        assert!(msg.starts_with(&e1(&f.pam_file)), "{msg}");
+        assert_eq!(fs::read_to_string(&f.pam_file).unwrap(), winner);
+        assert_eq!(
+            fs::read_to_string(pam_backup_path(&f.pam_file)).unwrap(),
+            PRISTINE,
+            "the winner's managed block needs the pristine backup: it must be kept"
+        );
+    }
+
+    /// GHF1: the hook runs exactly once when the file is rewritten (Insert and
+    /// RemoveRedundant) and never when nothing is written.
+    #[test]
+    fn test_ghf1_enable_hook_runs_once_per_write_and_never_without_write() {
+        let f = fixture(PRISTINE, 0o644);
+        let (result, calls) = enable_with(&f.pam_file, || {});
+        result.unwrap();
+        assert_eq!(calls, 1, "Insert: one re-check before the rename");
+        assert!(fs::read_to_string(&f.pam_file)
+            .unwrap()
+            .contains(GDM_PAM_LINE));
+        let ino = fs::metadata(&f.pam_file).unwrap().ino();
+        let (result, calls) = enable_with(&f.pam_file, || {});
+        result.unwrap();
+        assert_eq!(calls, 0, "nothing to write: no rename, no hook");
+        assert_eq!(fs::metadata(&f.pam_file).unwrap().ino(), ino);
+
+        let r = redundant_block();
+        let backup = pam_backup_path(&r.pam_file);
+        let backup_bytes = fs::read(&backup).unwrap();
+        let (result, calls) = enable_with(&r.pam_file, || {});
+        result.unwrap();
+        assert_eq!(calls, 1, "RemoveRedundant: one re-check before the rename");
+        assert_eq!(fs::read_to_string(&r.pam_file).unwrap(), DELEGATING);
+        assert_eq!(fs::read(&backup).unwrap(), backup_bytes);
+    }
+
+    /// GHF1: the restore message stays byte-identical (VCO4 wording).
+    #[test]
+    fn test_ghf1_restore_message_is_unchanged() {
+        let f = fixture(PRISTINE, 0o644);
+        ensure_gdm_pam_line(&f.pam_file).unwrap();
+        let pam_file = f.pam_file.clone();
+        let err = restore_gdm_pam_file_with(&f.pam_file, false, &mut || {
+            append_line(&pam_file);
+        })
+        .expect_err("a concurrent edit must abort gdm restore");
+        assert_eq!(
+            err.to_string(),
+            format!(
+                "GDM configuration error: '{}' changed concurrently while `gdm restore` was \
+                 running; nothing was written. Check the file and re-run `soos-admin gdm restore`",
+                f.pam_file.display()
+            )
+        );
     }
 }

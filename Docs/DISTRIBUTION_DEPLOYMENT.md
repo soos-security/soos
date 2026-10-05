@@ -79,14 +79,34 @@ through that rule: packaged Arch `system-auth`, Debian/Ubuntu `common-auth` with
   governed by that stack's own ordering, as for `sudo` and `login`. Any other `pam_soos.so`
   rule (`optional`, `required`, `event=password-failed`, `service=...`, `[success=ok ...]`)
   before the credential module is still an unclassified rule (refusal).
-- `gdm status` uses the analysis of `enable` and additionally reports `installed: false` when a
-  `[...=N]` jump in `gdm-password` lands beyond the delegation (that branch skips the shared
-  rule). It can still be wrong in two documented, fail-closed ways. *False negative*: on a
-  stack `enable` refuses (e.g. an unclassified rule before the shared rule), `status` reports
-  `installed: false` although libpam reaches the shared rule; `enable` names the reason.
-  *False positive*: the jump target of a shared `[success=N ...]` rule is not checked (one
-  landing on `pam_deny.so` never lets a face login succeed), yet `status` reports
-  `installed: true`. Neither writes anything nor touches the password path; confirm on hardware (`tests/physical/screensaver_test.md`
+- `gdm status` and `enable` use one analysis (GitHub #333). When a `[...=N]` jump in
+  `gdm-password` lands beyond the delegation (that branch skips the shared rule), `status`
+  reports `installed: false` and `enable` refuses (`... lands beyond the shared auth stack
+  '<stack>' ...; nothing was written`, the `gdm.disable` flag stays). Agreement: whenever
+  `enable` succeeds, the status it returns (and a later `gdm status`) reports
+  `installed: true`; for a `gdm-password` that is a regular, readable UTF-8 file of at most
+  64 KiB, `shared_stack` set in `status` means `enable` succeeds without writing. A symlinked
+  `gdm-password` is the documented exception: `status` follows it like libpam, `enable`
+  refuses it.
+- A shared `[success=N ...]` rule counts only when its jump lands on an `auth` rule of the
+  same stack file: the N following auth rules (`-auth` included) are skipped, `account`,
+  `password` and `session` rules, comments and blank lines are not counted, and the span may
+  not cross an `include`, `substack` or `@include`, a malformed line, an unknown type keyword
+  or a continued line. Otherwise `enable` refuses (`... [success=N] jump that does not land
+  on a rule of the same file ...`) and `status` reports `installed: false`. libpam treats a
+  jump past the end of the chain as a "bad jump in stack" and returns `PAM_PERM_DENIED`, so
+  such a rule never lets a face login succeed. The packaged Arch (`[success=4]` onto
+  `optional pam_permit.so`) and Debian (`[success=2]` onto `required pam_permit.so`) rules
+  pass this check.
+- `gdm status` can still be wrong in two documented ways. *False negative* (fail closed): on
+  a stack `enable` refuses (e.g. an unclassified rule before the shared rule), `status`
+  reports `installed: false` although libpam reaches the shared rule; `enable` names the
+  reason. *False positive* (availability only): a shared jump that lands inside its file on a
+  rule that then refuses (`pam_deny.so`, `pam_faillock.so authfail`, a `required` credential
+  module) still reports `installed: true`, although a face match then fails or falls back to
+  the password. The jump itself sets no result (the success comes from the target and the
+  rules after it), so a jump never grants more than `success=done`. Neither writes anything
+  nor touches the password path; confirm on hardware (`tests/physical/screensaver_test.md`
   §3.3: one `Rendered authentication response` line per GDM attempt).
 
 **Daemon budget cap (GitHub #281).** `timeout_ms=2500` bounds only the PAM module's own wait
@@ -176,10 +196,15 @@ Placement rules:
    module, or a conditional/`sufficient` gate) runs before the credential module either in
    `gdm-password` or in a delegated stack, an include target cannot be resolved inside the
    PAM directory (absolute path, file missing from the directory, unreadable, or not a
-   regular file: a FIFO, device or socket is refused at once, never waited on), the stack reaches no credential module, a `[...=N]` jump
+   regular file: a FIFO, device or socket is refused at once, never waited on), the
+   analysis would open more than `MAX_PAM_STACK_READS` = 32 stack files in total (every
+   include counts, a file included twice counts twice, on top of the 4-level depth bound),
+   the stack reaches no credential module, a `[...=N]` jump
    would change target, the file is not UTF-8, uses line continuations, exceeds 64 KiB or
    is a symlink. soos cannot tell whether an unknown module is a lockout or login gate, so
-   it never guesses.
+   it never guesses. `gdm-password` itself is opened once with `O_NOFOLLOW | O_NOCTTY |
+   O_NONBLOCK`: its type, size, bytes, mode and owner all come from that descriptor, so a
+   symlink, FIFO or device swapped in between a check and the read is refused (GitHub #333).
 
    **Resolving a refusal.** The error names the rule, e.g. `the PAM file runs the
    unclassified auth rule 'pam_tally2.so' (control 'required') before its credential
@@ -207,7 +232,17 @@ Placement rules:
    a backup that no longer matches the file without its soos rules (unless `--force`), and,
    with or without `--force`, re-reads the file right before the rename: if it changed after
    the comparison (other bytes or another inode), nothing is written and the command fails
-   with "changed concurrently"; re-run it (GitHub #312, #318). A misplaced line
+   with "changed concurrently"; re-run it (GitHub #312, #318). `gdm enable` does the same
+   (GitHub #333): right before the rename it re-reads `gdm-password`, and another inode,
+   other bytes, another mode or another owner abort it with "changed concurrently while
+   `gdm enable` was running; nothing was written" (the `gdm.disable` flag stays). The backup
+   is published with `linkat(2)`, which never replaces an existing backup or follows a
+   symlink planted at its name; a backup created by the aborted run is removed again, unless
+   the file now holds a soos managed block (a concurrent `enable` won and relies on it), and
+   a backup replaced meanwhile is left alone and reported. Two residual windows remain,
+   root-only and inherent without locking: a change made in the few system calls between
+   the re-check and `rename(2)` is still replaced, and a backup replaced between the identity
+   check and its removal is not detected. A misplaced line
    written by older releases (`auth  sufficient  pam_soos.so timeout_ms=2500`) is moved to
    the safe position; a `pam_soos.so` rule you wrote yourself is left untouched.
 6. **Known refusals.** These default stacks make `enable` refuse. The refusal is fail-closed
