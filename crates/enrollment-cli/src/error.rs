@@ -49,6 +49,14 @@ pub enum EnrollmentCliError {
     #[error("Camera error: {0}")]
     Camera(#[from] soos_camera_v4l::CameraError),
 
+    /// Another process (normally `soos-daemon`) holds the camera device (GitHub #337).
+    #[error(
+        "Camera is busy: another process holds the camera device. soos-daemon owns the camera \
+         while it runs; enroll from soos-gui, or stop the daemon (sudo systemctl stop soos-daemon), \
+         enroll, then start it again (sudo systemctl start soos-daemon)"
+    )]
+    CameraBusy,
+
     #[error("Camera is not initialized; operation requires full service")]
     CameraNotInitialized,
 

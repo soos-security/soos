@@ -214,3 +214,18 @@ Verification: `crates/enrollment-cli/tests/migrate_tests.rs`, `crates/biometric-
   - Feature Embedding (128D): `sface_2021dec` (`sface_2021dec.onnx`)
 - **Deterministic Camera Addressing**: Satisfies Criterion C4 by resolving camera device paths via `/dev/v4l/by-id/`, eliminating enumeration races across kernel restarts.
 
+
+---
+
+## 5. Troubleshooting
+
+### Camera busy (`Camera is busy: another process holds the camera device ...`)
+
+`soos-daemon` is the exclusive owner of the camera while it runs, so `soos-enroll enroll`, `verify` or `debug-vision` started next to a running daemon cannot open the device (`EBUSY`). When the capture budget expires without a frame (`FIRST_FRAME_TIMEOUT_MS` = 2 s for the first frame, `ENROLL_FRESH_FRAME_TIMEOUT_MS` = 500 ms for each later candidate) and the camera reports `CameraStatus::Error { kind: CameraErrorKind::DeviceBusy, .. }`, `EnrollmentService::acquire_frame_after` returns `EnrollmentCliError::CameraBusy` instead of the generic starved-camera error (GitHub #337). The message is static text (no device path, user or runtime value) and names both ways out:
+
+- enroll from `soos-gui`, which captures through the daemon preview IPC while the daemon keeps running; or
+- stop the daemon (`sudo systemctl stop soos-daemon`), run `soos-enroll enroll`, then start it again (`sudo systemctl start soos-daemon`).
+
+The status is read only once the budget has expired, after the last frame poll failed: a frame that arrives in time is always used whatever the status, and budgets and polling are unchanged. Any other status (`Starting`, `Suspended`, `Stopped`, `Ready`, or an `Error` of another kind such as device not found) keeps `Camera error: Frame capture timed out or starved`. Like every other error, `CameraBusy` is printed as `[ERROR] <message>` on stderr with exit code 1, and nothing is stored.
+
+Verification: `crates/enrollment-cli/tests/enroll_camera_busy_tests.rs` (matrix rows ECB1, ECB2, ECB-F; ECB3 is a review check of `main.rs`, recorded as pending because no automated test is feasible).
