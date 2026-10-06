@@ -288,9 +288,10 @@ Run on 2026-10-06 in the worktree:
 
 ## 9. Known Limitations / Follow-ups
 
-- **Hardware checks pending (owner)**. Funnel reachability from the iPhone on 4G (RMC40), passkey
-  registration (RMC42), Face ID login (RMC43), Face ID unlock on both paths (RMC44, which also
-  closes the hardware part of RMC25), and the Shortcuts steps of RMC21. The agents never run
+- **Hardware checks (owner)**. Funnel reachability from the iPhone on 4G (RMC40), passkey
+  registration (RMC42), Face ID login (RMC43) and Face ID unlock on both paths (RMC44, which also
+  closes the hardware part of RMC25) were verified by the owner on 2026-10-06; the Shortcuts
+  steps of RMC21 are still pending. The agents never run
   `tailscale funnel` or `tailscale serve` (D-I).
 - **Two MINOR review findings** (section 7): strict counter refusal under the store lock, and a
   uniform anonymous answer to login/options.

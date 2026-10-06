@@ -113,4 +113,4 @@ without a platform authenticator. The shared harness moved to `crates/remote/tes
 - **Held connections** (`Held`): heads and partial bodies left open on the socket to fill the
   Funnel, anonymous and body-read capacity classes under the frozen clock.
 Real-hardware evidence (Funnel reachability on 4G, registration, Face ID login and unlock on the
-owner's iPhone) is matrix rows RMC40 and RMC42–RMC44, pending the owner.
+owner's iPhone) is matrix rows RMC40 and RMC42–RMC44, verified by the owner on 2026-10-06.

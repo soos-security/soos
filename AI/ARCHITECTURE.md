@@ -386,12 +386,11 @@ RC-3 a logind failure is never `unlocked` and no stale `unlocked` is replayed to
 RC-4 every read, write, connection count and stream lifetime is bounded; RC-5 no identity or
 request data in logs or bodies. Out of scope, each needing its own ADR: an automatic re-lock,
 push notifications, live camera, any public exposure other than Tailscale Funnel on port 443.
-Matrix rows RMC1–RMC44 and walkthroughs 183, 184 and 185; the Funnel reachability, passkey
-registration, Face ID login and Face ID unlock on the owner's iPhone are pending (RMC40, RMC42–RMC44); the Serve forwarding
-check (RMC20: `tailscale serve unix:` sends `Host: localhost`, the original name in
-`X-Forwarded-Host` and `X-Forwarded-Proto: https`) was verified by the owner on 2026-10-06; the
-iPhone web app and *Lock now* were confirmed by the owner on 2026-10-06 (RMC21, Shortcuts steps
-still pending) and the remote unlock on the phone is pending (RMC25).
+Matrix rows RMC1–RMC44 and walkthroughs 183, 184 and 185. Verified by the owner on 2026-10-06:
+the Serve forwarding check (RMC20: `tailscale serve unix:` sends `Host: localhost`, the original
+name in `X-Forwarded-Host` and `X-Forwarded-Proto: https`); the iPhone web app and *Lock now*
+(RMC21, Shortcuts steps still pending); the Funnel reachability, passkey registration, Face ID
+login and Face ID unlock on the owner's iPhone (RMC25, RMC40, RMC42–RMC44).
 
 ---
 

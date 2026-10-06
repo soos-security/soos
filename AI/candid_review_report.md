@@ -3,77 +3,85 @@
 - **Date**: 2026-10-06
 - **Target Branch**: `feat/remote-funnel-passkey`
 - **Base (merge-base)**: `222665f`
-- **Reviewed-Diff-Fingerprint**: `67f5f087591ed3727b976818332a089b69cd5cf4182a881879f1151d3398c11e`
-- **Audited Files**: full branch patch (`target/candid_diff.patch`); everything up to HEAD `6d779bf` was approved under the previous fingerprint `5c99775b…`. The only delta since then is the uncommitted change to `AI/VERIFICATION_MATRIX.md` (status cells of RMC25, RMC40, RMC43, RMC44; 4 lines changed).
+- **Reviewed-Diff-Fingerprint**: `9d326db3dfd5b8ac78ec6971015b546f25cfda8465007d33150df922c0cec29e`
+- **Audited Files**: full branch patch (`target/candid_diff.patch`, 72 files); everything up to HEAD
+  `7ba324a` plus the uncommitted `AI/MOCK_STRATEGY.md`, `AI/VERIFICATION_MATRIX.md` and walkthrough
+  185 §9 changes was approved under the previous fingerprint `e5682f8c…`. The only delta since then
+  is the closing paragraph of `AI/ARCHITECTURE.md` §13 (lines 389-393), rewritten and rewrapped.
 
 ## 1. Executive Summary
 
-The delta records the owner's hardware report of 2026-10-06: the test ran on 4G with the Tailscale
-VPN off, in the home-screen web app (not a Safari tab), and after *Unlock now* plus Face ID the page
-showed `Unlocked`. Each updated status cell was checked against its row's acceptance criteria and
-against this evidence. RMC25 is promoted to Verified; its hardware criterion (with `allow_unlock`
-and a registered passkey, *Unlock now* and Face ID dismiss the lock screen and the page shows
-`Unlocked`) is now fully covered. RMC40, RMC43 and RMC44 remain Pending (partly verified) and list
-exactly the still-unreported items. No production code, test, script or dependency changed.
+The previous review raised one MINOR: `AI/ARCHITECTURE.md` still said the remote unlock on the
+phone was pending (RMC25), contradicting the matrix, plus a line-wrap suggestion. The rewritten
+paragraph now reads "Verified by the owner on 2026-10-06:" followed by RMC20 (Serve forwarding:
+`Host: localhost`, original name in `X-Forwarded-Host`, `X-Forwarded-Proto: https`), RMC21 (web app
+and *Lock now*, Shortcuts steps still pending) and RMC25, RMC40, RMC42–RMC44 (Funnel reachability,
+registration, Face ID login and unlock). Every statement was checked against the current matrix
+rows; all match. The paragraph is rewrapped to 92–96 columns, consistent with the surrounding text.
+Both earlier items are resolved. No production code, test, script or dependency changed.
 
 ## 2. Test Changes
 
-Mechanical listing on the delta: no test file, assertion, `#[ignore]`, `should_panic`, tolerance or
-inline test module is touched (the delta is one Markdown file). The branch-level listing is
-unchanged from the previously approved review.
+Delta: one Markdown paragraph; no test file, assertion, `#[ignore]`, `should_panic`, tolerance or
+inline test module is touched. Step-3 greps over the full branch patch return the same hits as the
+previously approved review: 20 test files touched (new `crates/remote/tests/*`, invariant
+contracts), one removed assertion line (already justified in the earlier approved reviews), one
+escape-hatch hit (report prose only). Nothing new.
 
 ## 3. Deep Reasoning Audit
 
 ### Logic & Architecture
-- **RMC25** — criterion: hardware dismissal of the lock screen with Face ID **and** the page showing
-  `Unlocked`. The previous cell left only the `Unlocked` state unreported; the owner now reports it.
-  Confirmed `Unlocked` is a real page state (`crates/remote/assets/app.js:44` status label and
-  `:274` feedback after an accepted unlock), so the claim is plausible and matches the code. The
-  automated part was already verified. The "(tracked with RMC44)" note refers to the shared hardware
-  check; RMC25's own hardware criterion does not require the tailnet path, so Verified while RMC44
-  stays Pending is consistent. → PASS.
-- **RMC40** — criterion requires Safari **and** the home-screen app, on 4G with the VPN off. The cell
-  now credits 4G and the home-screen app and lists "a Safari tab" as unreported; the other items
-  (port 443 only, Funnel-mode refusals, tailnet one-tap) were already evidenced in the approved
-  version. Pending is correct. → PASS.
-- **RMC43** — criterion: Safari and home-screen app sign-in, status, live events, *Lock now*,
-  *Sign out*. The cell credits home-screen-app sign-in on 4G and *Lock now*, and lists Safari tab,
-  live events and *Sign out* as unreported. Pending is correct. → PASS (see MINOR note on "status").
-- **RMC44** — criterion: unlock both via tailnet and via Funnel; passkey POST framing. The cell
-  credits the Funnel path in the home-screen app with `Unlocked` shown, lists the tailnet path as
-  unreported, and defers registration framing to RMC42 (Verified). Claims no more than the evidence.
-  → PASS.
-- Attempted break: does any cell credit Safari-tab behaviour or the VPN-on unlock path from this
-  report? No. Does any cell promote to Verified with an open criterion item? No.
+Each claim of the new paragraph against `AI/VERIFICATION_MATRIX.md`:
+- **RMC20** — matrix: ✅ Verified (owner, 2026-10-06); evidence lists `Host: localhost`,
+  `X-Forwarded-Host: arch.<tailnet>.ts.net`, `X-Forwarded-Proto: https`. The paragraph's
+  parenthetical matches exactly. → PASS.
+- **RMC21** — matrix: ⬜ Pending; owner report 2026-10-06 covers the home-screen web app and
+  *Lock now*, Shortcuts steps not reported. The paragraph credits only those two items and states
+  "Shortcuts steps still pending". It does not imply RMC21 is Verified. → PASS.
+- **RMC25** — matrix: ✅ Verified (automated; hardware owner report 2026-10-06, Face ID unlock over
+  Funnel, page showed `Unlocked`). Listed among the verified rows under "Face ID unlock". → PASS;
+  the previous MINOR is resolved.
+- **RMC40, RMC42, RMC43, RMC44** — matrix: all ✅ Verified 2026-10-06 (RMC40 now includes the Safari
+  tab; RMC43 Safari tab, live events, *Sign out*; RMC44 both tailnet and Funnel paths). The paragraph's
+  "Funnel reachability, passkey registration, Face ID login and Face ID unlock" maps one-to-one. → PASS.
+- RMC41 is not mentioned, correctly: it is automated, not an owner check.
+- Attempted break: does the paragraph credit anything still open? The only open owner item across
+  these rows is the RMC21 Shortcuts step, and it is explicitly called pending. No overclaim.
+- Stale-claim sweep (`pending|not reported|partly verified` across `AI/ARCHITECTURE.md`,
+  `AI/MOCK_STRATEGY.md`, `AI/DECISIONS.md`, `Docs/REMOTE_COMPANION.md`, `Docs/README.md`, the
+  specs, research notes and walkthroughs 183–185): no remaining pending claim for RMC20, RMC25,
+  RMC40 or RMC42–RMC44 in a living document. Remaining hits are correct or historical:
+  `AI/DECISIONS.md:121` "RMC21 pending owner check on the phone" (still true, Shortcuts);
+  walkthrough 185 §9 "Shortcuts steps of RMC21 are still pending" (true) and the spec-fold item
+  (unrelated); walkthroughs 183 line 9/315 and 184 line 9 are dated point-in-time records of their
+  own phases, not status sources (see SUGGESTION). → PASS.
 
 ### PAM Concurrency & Deadlines
-No code change. → PASS (not applicable).
+No code change in the delta. → PASS (not applicable).
 
 ### Panic Safety & Fail-Closed
-No code change. → PASS (not applicable).
+No code change in the delta. → PASS (not applicable).
 
 ### Test Integrity & Anti-Weakening
-No test change; evidence columns unchanged. → PASS.
+No test change; matrix evidence columns untouched by the delta. → PASS.
 
 ### Memory, Bounds & Secrets
-The status cells contain no login, host name, credential id or other identifier (`<rp_id>` remains
-a placeholder). → PASS.
+The paragraph contains no login, host name, credential id or tailnet name. → PASS.
 
 ### Supply Chain & Automation
-No `Cargo.*`, `deny.toml`, `.github/`, `scripts/` or hook change in the delta. → PASS.
+No `Cargo.*`, `deny.toml`, `.github/`, `scripts/` or `.githooks/` change in the delta. → PASS.
 
 ### English-Only Policy
-All new text is English. → PASS.
+The rewritten paragraph is English. → PASS.
 
 ## 4. Detailed Findings & Action Items
 
-- **[MINOR]** `AI/VERIFICATION_MATRIX.md` RMC43 — the criterion lists "status" among the items that
-  must work after sign-in, but the cell neither credits nor lists it as unreported (pre-existing
-  wording, not introduced by this delta). The `Unlocked` state seen in the RMC44 report indicates the
-  page status works in a Funnel session; consider naming it explicitly when the row is closed. Does
-  not affect the Pending status.
+- **[SUGGESTION]** `AI/walkthroughs/184_remote_unlock.md:9` and
+  `AI/walkthroughs/183_remote_companion.md:9,315` — these say the RMC25 / RMC21 phone checks are
+  pending. They are historical phase records and the matrix is the status source of truth, so no
+  change is required; optionally add a one-line "superseded by matrix status of 2026-10-06" note.
 
-No CRITICAL or MAJOR findings.
+No CRITICAL, MAJOR or MINOR findings.
 
 ## 5. Final Verdict
 
