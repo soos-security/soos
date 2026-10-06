@@ -19,6 +19,8 @@ pub struct MockCameraManager {
     starved: Arc<AtomicBool>,
     running: Arc<AtomicBool>,
     warmup_remaining: Arc<AtomicUsize>,
+    /// Set once the initial warmup has published its first stabilized frame.
+    stabilized: Arc<AtomicBool>,
     sequence: Arc<AtomicU64>,
     frozen: Arc<AtomicBool>,
     active_error: Arc<RwLock<Option<CameraError>>>,
@@ -50,6 +52,7 @@ impl MockCameraManager {
         let running = Arc::new(AtomicBool::new(true));
         let frozen = Arc::new(AtomicBool::new(false));
         let warmup_remaining = Arc::new(AtomicUsize::new(config.warmup_frames));
+        let stabilized = Arc::new(AtomicBool::new(false));
         let sequence = Arc::new(AtomicU64::new(0));
         let active_error = Arc::new(RwLock::new(None));
         let last_activity = Arc::new(RwLock::new(Instant::now()));
@@ -60,6 +63,7 @@ impl MockCameraManager {
         let running_clone = Arc::clone(&running);
         let frozen_clone = Arc::clone(&frozen);
         let warmup_clone = Arc::clone(&warmup_remaining);
+        let stabilized_clone = Arc::clone(&stabilized);
         let sequence_clone = Arc::clone(&sequence);
         let error_clone = Arc::clone(&active_error);
         let activity_clone = Arc::clone(&last_activity);
@@ -100,7 +104,12 @@ impl MockCameraManager {
                     let remaining = warmup_clone.load(Ordering::Acquire);
                     if remaining > 0 {
                         ready_clone.store(false, Ordering::Release);
-                        warmup_clone.fetch_sub(1, Ordering::AcqRel);
+                        // Saturating: `notify_activity` may zero the counter concurrently on a
+                        // wake; a plain `fetch_sub` would then wrap to `usize::MAX`.
+                        let _ =
+                            warmup_clone.fetch_update(Ordering::AcqRel, Ordering::Acquire, |r| {
+                                r.checked_sub(1)
+                            });
                         sequence_clone.fetch_add(1, Ordering::SeqCst);
                         thread::sleep(full_frame_interval);
                         if warmup_clone.load(Ordering::Acquire) == 0 {
@@ -164,6 +173,7 @@ impl MockCameraManager {
                     store_frame_monotonic(&latest_clone, Arc::new(frame));
                     // Camera has completed warmup and is healthy: publish ready flag after frame store
                     ready_clone.store(true, Ordering::Release);
+                    stabilized_clone.store(true, Ordering::Release);
 
                     // Responsive sleep checking running_clone and starved_clone in small increments
                     let sleep_start = Instant::now();
@@ -193,6 +203,7 @@ impl MockCameraManager {
             running,
             frozen,
             warmup_remaining,
+            stabilized,
             sequence,
             active_error,
             last_activity,
@@ -306,7 +317,10 @@ impl CameraManager for MockCameraManager {
 
         // Fulfill CameraManager contract ("immediately restoring full FPS") and
         // guarantee fresh frame availability for incoming auth requests under CI load.
-        if !self.starved.load(Ordering::Acquire)
+        // Never during the initial warmup (Criterion C5): no stabilized frame exists yet, and the
+        // warmup thread would withdraw it on its next tick (Ready/Starting flapping).
+        if self.stabilized.load(Ordering::Acquire)
+            && !self.starved.load(Ordering::Acquire)
             && !self.frozen.load(Ordering::Acquire)
             && self.running.load(Ordering::Acquire)
         {
@@ -326,6 +340,10 @@ impl CameraManager for MockCameraManager {
                     mono_ns,
                 );
                 store_frame_monotonic(&self.latest_frame, Arc::new(frame));
+                // The wake frame ends any re-warmup started after the first stabilized frame
+                // (suspension, or a cleared injected error / starvation), so the capture thread
+                // does not withdraw the readiness it just gained.
+                self.warmup_remaining.store(0, Ordering::Release);
                 self.is_ready.store(true, Ordering::Release);
             }
         }
