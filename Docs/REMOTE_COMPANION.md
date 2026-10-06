@@ -419,6 +419,61 @@ The drop-in widens the sandbox by that one read-only directory; the endpoint all
 refusal of private addresses are unchanged (the stub resolver at `127.0.0.53` is only queried
 for names, never used as a push destination). Remove the file and run `daemon-reload` to undo.
 
+## 2e. Page design (soos brand)
+
+The phone page follows the soos brand, which is the brand of the whole project (ADR "[2026-10-06]
+soos Brand Direction Applied to the `soos-remote` Web App" in `AI/DECISIONS.md`):
+
+| Color | Value | Use on the page |
+|---|---|---|
+| Brand blue (Pantone 2728 C) | `#0047BB` | header band, status tile, primary buttons, card borders |
+| Brilliant White | `#EDF1FF` | light body and cards, text on blue |
+| Ink (Pantone Black 6 C) | `#101820` | text in light mode, body in dark mode |
+| Pink (Pantone 244 C) | `#E59BDC` | the star accent on the status and login tiles |
+
+- **One set of tokens with the desktop GUI.** `style.css` declares the palette as CSS custom
+  properties named after the constants of `crates/gui/src/theme.rs` (`--blue` = `BLUE`,
+  `--pale-2` = `PALE_2`, `--danger-text` = `DANGER_TEXT`, ...), with the same values, plus the
+  GUI radii and strokes (`--r-card` 20 px, `--r-table` 14 px, `--r-input` 10 px, `--stroke-card`
+  2 px). Fourteen web-only dark tints (`--ink-2`, `--blue-soft`, ...) are integer-percentage mixes
+  of two palette colors. Components use role tokens only (`--page`, `--card`, `--tile`,
+  `--primary`, `--danger-fg`, ...); no other color literal exists in the stylesheet.
+- **Light by default, dark through `prefers-color-scheme`.** The dark variant keeps the blue band
+  and tiles and switches the body to ink `#101820` with ink cards and a softened blue border. No
+  manual switch (it would need storage).
+- **Layout.** A blue header band carries the SOOS wordmark (inline SVG, the owner's vector) and a
+  static "Remote" pill; the pale body is cut out of the band with 20 px top corners. The lock
+  state is a big blue tile with a pale caption strip, a state dot (decorative: the state is
+  always written in words), the state in large white type and the pink star. Cards have a 2 px
+  blue border; lists sit in pale inner tables; alerts use banners (info, danger when attempts wait
+  for acknowledgement, warn for the lock-screen coverage note).
+- **Buttons.** `Lock now` is the primary (blue) button. `Unlock now` is a danger outline button
+  (it lowers protection; it stays behind the confirmation dialog and Face ID). Its text and
+  border use `--danger-text` (light) or `--danger-soft` (dark) so it meets WCAG AA; the GUI
+  outline uses `DANGER`, which is below AA on pale, and should follow later. Disabled buttons use
+  a grey fill, never a faded copy of the enabled look.
+- **Notifications card.** It has no on/off switch: the page can only know that the PC has at
+  least one registered device, not that this phone receives alerts, so `#push-state` (text) stays
+  the only statement of the push state.
+- **Accessibility.** Text contrast at least 4.5:1 in both themes, a 3 px focus ring for keyboard
+  focus, 48 px buttons and 44 px links, safe-area insets on all sides, no motion under
+  `prefers-reduced-motion`, zoom kept.
+- **Icons.** `icon.svg` (also the favicon) is the owner's star mark. `apple-touch-icon.png`
+  (180 x 180, opaque RGB, deterministic bytes) is generated from it on a developer machine:
+
+  ```bash
+  rsvg-convert -w 180 -h 180 crates/remote/assets/icon.svg \
+    | magick png:- -background '#EDF1FF' -alpha remove -alpha off -strip \
+        -define png:color-type=2 -define png:exclude-chunks=date,time,tIME \
+        png:crates/remote/assets/apple-touch-icon.png
+  ```
+
+  The manifest uses `theme_color` `#0047BB` and `background_color` `#EDF1FF`; the
+  `theme-color` meta is `#0047BB` and the iOS status bar is `black-translucent` over the band.
+- **Unchanged.** The Content Security Policy, `app.js`, `sw.js`, every element id and label, and
+  the routes. The page uses the system font stack (no font file, no CDN) and contains no raster
+  from the brand archive.
+
 ## 3. Requirements on the desktop
 
 - **`LockedHint` must be set by the desktop.** GNOME, Plasma and niri set it natively;
@@ -533,7 +588,9 @@ dot: `Self.DNSName` ends with `.` (`pc.<tailnet>.ts.net.`), and the service refu
 a trailing dot (`421`).
 
 **Web app icon.** Open `https://<pc>.<tailnet>.ts.net` in Safari, then *Share* → *Add to Home
-Screen*. The icon opens the page full screen (live status and the *Lock now* button).
+Screen*. The icon opens the page full screen (live status and the *Lock now* button). iOS caches
+the home-screen icon: after an icon change (such as the soos brand star of section 2e), remove
+the web app from the home screen and add it again to see the new icon.
 
 **"Lock PC" shortcut (one tap, or Siri).** In the Shortcuts app, create a shortcut with:
 

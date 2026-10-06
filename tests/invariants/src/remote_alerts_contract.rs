@@ -16,6 +16,8 @@
 //!   `serde_json::Value`/`Map` in the journal parser;
 //! - RMC-S43 (round 3, owner request 2026-10-06, test 62, matrix RMC75) acknowledged
 //!   records are removed, never kept behind a flag; journal entries are never deleted.
+//! - RMC-S56 (brand spec D10, test 75, Contract Migration CM-1) the string-literal scanner of
+//!   RMC-S43 treats raw byte strings and raw C strings as raw strings.
 
 #![allow(
     clippy::unwrap_used,
@@ -427,8 +429,15 @@ fn blank_string_literals(code: &str) -> String {
     let mut i = 0;
     while i < bytes.len() {
         let c = bytes[i];
+        let is_ident = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+        // `r` opens a raw string at an identifier boundary, or right after a `b` / `c`
+        // prefix that itself starts at an identifier boundary (`br"…"`, `cr#"…"#`).
+        let raw_prefix_ok = i == 0
+            || !is_ident(bytes[i - 1])
+            || ((bytes[i - 1] == b'b' || bytes[i - 1] == b'c')
+                && (i == 1 || !is_ident(bytes[i - 2])));
         let raw_start = c == b'r'
-            && (i == 0 || !(bytes[i - 1].is_ascii_alphanumeric() || bytes[i - 1] == b'_'))
+            && raw_prefix_ok
             && bytes[i + 1..]
                 .iter()
                 .position(|&b| b != b'#')
@@ -580,4 +589,35 @@ fn test_rmc_s43_scanner_self_test() {
             "{bad}"
         );
     }
+}
+
+/// Test 75 (RMC87, brand spec D10, Contract Migration CM-1 in `AI/tester_contract_brand.md`):
+/// the scanner of test 62 treats raw byte strings (`br"…"`, `br#"…"#`) and raw C strings
+/// (`cr"…"`, `cr#"…"#`) as raw strings, so a trailing backslash inside one can no longer
+/// swallow the code after it and hide an `acknowledged` binding (a false negative).
+#[test]
+fn test_rmc_s56_scanner_handles_raw_byte_and_c_strings() {
+    let quiet = r###"let a = br"acknowledged"; let b = br#"x"acknowledged"#; let c = cr"acknowledged"; let d = b"acknowledged"; let e = b'"';"###;
+    assert!(
+        identifier_uses(&blank_string_literals(quiet), "acknowledged").is_empty(),
+        "words inside raw byte, raw C and byte strings are not code"
+    );
+    for hidden in [
+        r#"let p = br"C:\"; let acknowledged = true; let q = "x";"#,
+        r#"let p = cr"C:\"; acknowledged = 1; let q = "x";"#,
+        r##"let p = br#"C:\"#; let acknowledged = true; let q = "x";"##,
+        r##"let p = cr#"C:\"#; acknowledged = 1; let q = "x";"##,
+    ] {
+        assert_eq!(
+            identifier_uses(&blank_string_literals(hidden), "acknowledged").len(),
+            1,
+            "a backslash at the end of a raw byte or C string must not hide code: {hidden}"
+        );
+    }
+    let plain = "let xbr = 1; let acknowledged = 2;";
+    assert_eq!(
+        identifier_uses(&blank_string_literals(plain), "acknowledged").len(),
+        1,
+        "an identifier ending in `br` is not a string prefix"
+    );
 }

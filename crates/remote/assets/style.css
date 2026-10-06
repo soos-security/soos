@@ -1,34 +1,213 @@
-/* soos remote companion page: one status card, light and dark through prefers-color-scheme. */
+/*
+ * soos remote: phone page in the soos brand (ADR "soos Brand Direction Applied to the
+ * `soos-remote` Web App"). The palette tokens mirror crates/gui/src/theme.rs (same names in
+ * kebab case, same values), so the phone page and the desktop GUI read as one product.
+ * Light is the brand default; the dark variant follows prefers-color-scheme and is built from
+ * the same palette. Components only use role tokens (light block and dark block below).
+ */
+
+/* Palette: identical to crates/gui/src/theme.rs. */
 :root {
-  color-scheme: light dark;
-  --bg: #f3f4f6;
-  --card: #ffffff;
-  --text: #111827;
-  --muted: #6b7280;
-  --accent: #1f2937;
-  --accent-text: #ffffff;
-  --locked: #15803d;
-  --unlocked: #b45309;
-  --warn: #b91c1c;
-  --unknown: #6b7280;
+  --blue: #0047BB;
+  --blue-hover: #1D5CC3;
+  --blue-pressed: #003A99;
+  --pale: #EDF1FF;
+  --pale-2: #E4EAFD;
+  --pale-3: #DCE4FC;
+  --pale-4: #C9D6FA;
+  --line: #C9D0E1;
+  --ink: #101820;
+  --ink-muted: #5A6270;
+  --ink-weak: #7A818E;
+  --pink: #E59BDC;
+  --white: #FFFFFF;
+  --success: #29B53B;
+  --success-toggle: #46BE82;
+  --success-bg: #E6F6EA;
+  --success-text: #146C2A;
+  --danger: #D92D45;
+  --danger-hover: #B81F35;
+  --danger-bg: #FDE8EB;
+  --danger-text: #8A1426;
+  --warn: #F59E0B;
+  --warn-border: #F5B547;
+  --warn-bg: #FFF4E0;
+  --warn-text: #8A4B00;
 }
 
+/* Dark tints (web only): mix(a, b, n) = (a * (100 - n) + b * n + 50) / 100 per sRGB channel. */
+:root {
+  --ink-2: #1B232B; /* mix(INK, PALE, 5) */
+  --ink-3: #262E36; /* mix(INK, PALE, 10) */
+  --ink-4: #333B44; /* mix(INK, PALE, 16) */
+  --ink-line: #414851; /* mix(INK, PALE, 22) */
+  --pale-muted: #ABB0BC; /* mix(PALE, INK, 30) */
+  --pale-weak: #7F8590; /* mix(PALE, INK, 50) */
+  --blue-edge: #477ACF; /* mix(BLUE, PALE, 30) */
+  --blue-soft: #82A5E0; /* mix(BLUE, PALE, 55) */
+  --danger-soft: #E28599; /* mix(DANGER, PALE, 45) */
+  --danger-bg-dark: #341C27; /* mix(INK, DANGER, 18) */
+  --success-soft: #81D093; /* mix(SUCCESS, PALE, 45) */
+  --success-bg-dark: #143124; /* mix(INK, SUCCESS, 16) */
+  --warn-soft: #F2BB60; /* mix(WARN, PALE, 35) */
+  --warn-bg-dark: #352D1D; /* mix(INK, WARN, 16) */
+}
+
+/* Scale: typography, radii and strokes (GUI names and values), spacing, motion. */
+:root {
+  color-scheme: light dark;
+  --font: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --f-display: clamp(48px, 16vw, 64px);
+  --f-display-long: clamp(32px, 11vw, 44px);
+  --f-title: 20px;
+  --f-section: 17px;
+  --f-body: 16px;
+  --f-button: 17px;
+  --f-small: 13px;
+  --f-caption: 12px;
+  --f-code: 18px;
+  --r-body: 20px;
+  --r-card: 20px;
+  --r-table: 14px;
+  --r-banner: 12px;
+  --r-input: 10px;
+  --r-pill: 999px;
+  --stroke-card: 2px;
+  --stroke-thin: 1px;
+  --gap-card: 14px;
+  --pad-card: 20px;
+  --gap-item: 8px;
+  --gutter: max(16px, env(safe-area-inset-left), env(safe-area-inset-right));
+  --band-h: 56px;
+  --strip-h: 44px;
+  --touch: 48px;
+  --t-fast: 120ms;
+}
+
+/*
+ * Roles, light (brand default). --focus-on-blue is reserved for a future focusable element on
+ * the blue band or a blue tile; nothing focusable sits there today.
+ */
+:root {
+  --page: var(--pale);
+  --band: var(--blue);
+  --on-band: var(--pale);
+  --card: var(--pale);
+  --card-border: var(--blue);
+  --text: var(--ink);
+  --text-muted: var(--ink-muted);
+  --text-disabled: var(--ink-weak);
+  --link: var(--blue);
+  --table: var(--pale-2);
+  --divider: var(--line);
+  --tile: var(--blue);
+  --on-tile: var(--pale);
+  --strip: var(--pale);
+  --on-strip: var(--ink);
+  --primary: var(--blue);
+  --on-primary: var(--pale);
+  --primary-hover: var(--blue-hover);
+  --primary-pressed: var(--blue-pressed);
+  --secondary-fg: var(--blue);
+  --secondary-hover: var(--pale-3);
+  --secondary-pressed: var(--pale-4);
+  --danger-fill: var(--danger);
+  --danger-fill-hover: var(--danger-hover);
+  --on-danger: var(--white);
+  --danger-fg: var(--danger-text);
+  --danger-outline-hover: var(--danger-bg);
+  --disabled-fill: var(--line);
+  --disabled-fg: var(--ink-weak);
+  --input-bg: var(--white);
+  --input-border: var(--ink-weak);
+  --placeholder: var(--ink-muted);
+  --focus: var(--blue);
+  --focus-on-blue: var(--pink);
+  --banner-info-bg: var(--pale-2);
+  --banner-info-border: var(--line);
+  --banner-info-fg: var(--ink);
+  --banner-info-icon: var(--blue);
+  --banner-success-bg: var(--success-bg);
+  --banner-success-border: var(--success);
+  --banner-success-fg: var(--success-text);
+  --banner-success-icon: var(--success-text);
+  --banner-warn-bg: var(--warn-bg);
+  --banner-warn-border: var(--warn-border);
+  --banner-warn-fg: var(--warn-text);
+  --banner-warn-icon: var(--warn-text);
+  --banner-danger-bg: var(--danger-bg);
+  --banner-danger-border: var(--danger);
+  --banner-danger-fg: var(--danger-text);
+  --banner-danger-icon: var(--danger-text);
+  --dot-locked: var(--success-text);
+  --dot-unlocked: var(--warn-text);
+  --dot-alarm: var(--danger-text);
+  --dot-idle: var(--ink-weak);
+  --star: var(--pink);
+}
+
+/* Roles, dark: ink body, same blue band and tiles. */
 @media (prefers-color-scheme: dark) {
   :root {
-    --bg: #0f172a;
-    --card: #1e293b;
-    --text: #f8fafc;
-    --muted: #94a3b8;
-    --accent: #e2e8f0;
-    --accent-text: #0f172a;
-    --locked: #4ade80;
-    --unlocked: #fbbf24;
-    --warn: #f87171;
-    --unknown: #94a3b8;
+    --page: var(--ink);
+    --card: var(--ink-2);
+    --card-border: var(--blue-edge);
+    --text: var(--pale);
+    --text-muted: var(--pale-muted);
+    --text-disabled: var(--pale-weak);
+    --link: var(--blue-soft);
+    --table: var(--ink-3);
+    --divider: var(--ink-line);
+    --strip: var(--ink-2);
+    --on-strip: var(--pale);
+    --secondary-fg: var(--blue-soft);
+    --secondary-hover: var(--ink-3);
+    --secondary-pressed: var(--ink-4);
+    --danger-fg: var(--danger-soft);
+    --danger-outline-hover: var(--danger-bg-dark);
+    --disabled-fill: var(--ink-4);
+    --disabled-fg: var(--pale-weak);
+    --input-bg: var(--ink);
+    --input-border: var(--pale-weak);
+    --placeholder: var(--pale-muted);
+    --focus: var(--blue-soft);
+    --banner-info-bg: var(--ink-3);
+    --banner-info-border: var(--ink-line);
+    --banner-info-fg: var(--pale);
+    --banner-info-icon: var(--blue-soft);
+    --banner-success-bg: var(--success-bg-dark);
+    --banner-success-border: var(--success-soft);
+    --banner-success-fg: var(--success-soft);
+    --banner-success-icon: var(--success-soft);
+    --banner-warn-bg: var(--warn-bg-dark);
+    --banner-warn-border: var(--warn-soft);
+    --banner-warn-fg: var(--warn-soft);
+    --banner-warn-icon: var(--warn-soft);
+    --banner-danger-bg: var(--danger-bg-dark);
+    --banner-danger-border: var(--danger-soft);
+    --banner-danger-fg: var(--danger-soft);
+    --banner-danger-icon: var(--danger-soft);
+    --dot-locked: var(--success);
+    --dot-unlocked: var(--warn);
+    --dot-alarm: var(--danger-soft);
+    --dot-idle: var(--pale-weak);
+  }
+
+  /*
+   * The header pill stays pale with ink text in both themes, like the brand lockups: --on-band
+   * is pale in both themes and --page is the ink body in this block (the two-class selector
+   * outranks the base `.band-pill` rule declared later in the file).
+   */
+  .band-row .band-pill {
+    color: var(--page);
   }
 }
 
-* {
+/* Base. */
+*,
+*::before,
+*::after {
   box-sizing: border-box;
 }
 
@@ -36,187 +215,538 @@
   display: none !important;
 }
 
-html,
+html {
+  background: linear-gradient(var(--band) 50%, var(--page) 50%);
+}
+
 body {
   margin: 0;
-  min-height: 100%;
-}
-
-body {
-  background: var(--bg);
-  color: var(--text);
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  min-height: 100vh;
+  min-height: 100dvh;
   display: flex;
   flex-direction: column;
+  background: var(--band);
+  color: var(--text);
+  font-family: var(--font);
+  font-size: var(--f-body);
+  line-height: 1.4;
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+  -webkit-tap-highlight-color: transparent;
+}
+
+p,
+h1,
+h2,
+ul {
+  margin: 0;
+}
+
+/* Header band with the SOOS wordmark. */
+.band {
+  flex: 0 0 auto;
+  background: var(--band);
+  color: var(--on-band);
+  padding-top: env(safe-area-inset-top);
+}
+
+.band-row {
+  display: flex;
   align-items: center;
-  justify-content: center;
-  min-height: 100vh;
-  padding: env(safe-area-inset-top) 16px env(safe-area-inset-bottom) 16px;
-}
-
-.card {
-  background: var(--card);
-  border-radius: 20px;
-  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.12);
-  padding: 32px 24px;
+  justify-content: space-between;
+  gap: 12px;
   width: 100%;
-  max-width: 420px;
-  text-align: center;
+  max-width: 480px;
+  height: var(--band-h);
+  margin: 0 auto;
+  padding: 0 var(--gutter);
 }
 
-h1 {
-  font-size: 1.1rem;
-  font-weight: 600;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-  color: var(--muted);
-  margin: 0 0 16px;
+.brand {
+  display: flex;
+  align-items: center;
+  line-height: 0;
 }
 
-.state {
-  font-size: 2.4rem;
+.wordmark {
+  display: block;
+  height: 18px;
+  width: auto;
+  fill: var(--on-band);
+}
+
+.band-pill {
+  padding: 6px 12px;
+  border-radius: var(--r-pill);
+  background: var(--on-band);
+  color: var(--text);
+  font-size: var(--f-caption);
   font-weight: 700;
-  margin: 0 0 8px;
-  color: var(--unknown);
+  letter-spacing: 0.08em;
+  line-height: 1.2;
+  text-transform: uppercase;
 }
 
-.state-locked {
-  color: var(--locked);
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
 }
 
-.state-unlocked {
-  color: var(--unlocked);
+/* Pale body cut out of the band (rounded top corners on blue, like the GUI). */
+main.page {
+  flex: 1 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap-card);
+  width: 100%;
+  max-width: 480px;
+  margin: -1px auto 0;
+  padding: 20px var(--gutter) 24px;
+  border-radius: var(--r-body) var(--r-body) 0 0;
+  background: var(--page);
 }
 
-.state-unavailable,
-.state-unreachable {
-  color: var(--warn);
+.status {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap-card);
+}
+
+/* Card: pale (dark: ink) with the 2 px brand border. */
+.card {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: var(--pad-card);
+  border: var(--stroke-card) solid var(--card-border);
+  border-radius: var(--r-card);
+  background: var(--card);
+  color: var(--text);
+  text-align: left;
+}
+
+.card h2 {
+  color: var(--text);
+  font-size: var(--f-title);
+  font-weight: 700;
+  line-height: 1.25;
 }
 
 .detail {
-  margin: 4px 0;
-  color: var(--muted);
-  font-size: 0.95rem;
+  color: var(--text-muted);
+  font-size: var(--f-body);
 }
 
+.hint {
+  font-size: var(--f-small);
+}
+
+/* Status: big blue stat tile with a pale caption strip, the state word and the pink star. */
+/*
+ * The star sits in the bottom-right corner, below the state word: the detail lines under the
+ * word plus the bottom padding (at least 8 + 22 + 18 + 38 = 86 px, the 6 px and 8 px margins
+ * collapse) are taller than the star and its offset (60 + 16 = 76 px), so the star stays at
+ * least 10 px under the word, whatever the width or the number of detail lines.
+ */
+.stat-tile {
+  position: relative;
+  min-height: 196px;
+  padding-bottom: 38px;
+  overflow: hidden;
+  border-radius: var(--r-card);
+  background: var(--tile);
+  color: var(--on-tile);
+}
+
+.stat-strip {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: var(--strip-h);
+  margin: var(--stroke-card);
+  padding: 0 18px;
+  border-radius: calc(var(--r-card) - var(--stroke-card)) calc(var(--r-card) - var(--stroke-card)) 0 0;
+  background: var(--strip);
+  color: var(--on-strip);
+  font-size: var(--f-caption);
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.stat-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: var(--r-pill);
+  background: var(--dot-idle);
+}
+
+.stat-tile:has(.state-locked) .stat-dot {
+  background: var(--dot-locked);
+}
+
+.stat-tile:has(.state-unlocked) .stat-dot {
+  background: var(--banner-warn-border);
+  box-shadow: inset 0 0 0 var(--stroke-card) var(--dot-unlocked);
+}
+
+.stat-tile:has(.state-unavailable) .stat-dot,
+.stat-tile:has(.state-unreachable) .stat-dot {
+  background: var(--dot-alarm);
+}
+
+.state {
+  margin: 20px 20px 6px;
+  color: var(--on-tile);
+  font-size: var(--f-display-long);
+  font-weight: 800;
+  line-height: 1;
+  letter-spacing: -0.02em;
+  overflow-wrap: anywhere;
+}
+
+.state-locked,
+.state-unlocked {
+  font-size: var(--f-display);
+}
+
+.state-unknown,
+.state-unreachable {
+  opacity: 0.7;
+}
+
+.stat-tile .detail {
+  padding: 0 92px 0 20px;
+  color: var(--on-tile);
+  font-variant-numeric: tabular-nums;
+}
+
+#activity {
+  margin-top: 8px;
+  opacity: 0.9;
+}
+
+#updated {
+  font-size: var(--f-small);
+  opacity: 0.8;
+}
+
+.stat-star {
+  position: absolute;
+  right: 18px;
+  bottom: 16px;
+  width: 60px;
+  height: 60px;
+  fill: var(--star);
+}
+
+/* Buttons: blue pill primary, outline secondary, danger outline for Unlock now. */
 button {
-  margin-top: 24px;
+  display: block;
   width: 100%;
-  padding: 16px;
+  min-height: var(--touch);
+  margin: 0;
+  padding: 12px 20px;
   border: 0;
-  border-radius: 14px;
-  background: var(--accent);
-  color: var(--accent-text);
-  font-size: 1.1rem;
+  border-radius: var(--r-pill);
+  background: var(--primary);
+  color: var(--on-primary);
+  font-family: var(--font);
+  font-size: var(--f-button);
   font-weight: 600;
+  line-height: 1.2;
   cursor: pointer;
+  touch-action: manipulation;
+  transition: background-color var(--t-fast), box-shadow var(--t-fast), transform var(--t-fast);
+}
+
+button:active:not(:disabled) {
+  background: var(--primary-pressed);
+  transform: scale(0.98);
 }
 
 button.secondary {
-  margin-top: 12px;
   background: transparent;
-  color: var(--accent);
-  box-shadow: inset 0 0 0 2px var(--accent);
+  box-shadow: inset 0 0 0 var(--stroke-card) var(--secondary-fg);
+  color: var(--secondary-fg);
+}
+
+button.secondary:active:not(:disabled) {
+  background: var(--secondary-pressed);
+}
+
+button.secondary.danger {
+  box-shadow: inset 0 0 0 var(--stroke-card) var(--danger-fg);
+  color: var(--danger-fg);
+}
+
+button.secondary.danger:active:not(:disabled) {
+  background: var(--danger-outline-hover);
+}
+
+button.danger:not(.secondary) {
+  background: var(--danger-fill);
+  color: var(--on-danger);
+}
+
+@media (hover: hover) {
+  button:hover:not(:disabled) {
+    background: var(--primary-hover);
+  }
+
+  button.secondary:hover:not(:disabled) {
+    background: var(--secondary-hover);
+  }
+
+  button.secondary.danger:hover:not(:disabled) {
+    background: var(--danger-outline-hover);
+  }
+
+  button.danger:not(.secondary):hover:not(:disabled) {
+    background: var(--danger-fill-hover);
+  }
 }
 
 button:disabled {
-  opacity: 0.4;
+  background: var(--disabled-fill);
+  box-shadow: none;
+  color: var(--disabled-fg);
   cursor: default;
+  transform: none;
 }
 
-.feedback {
-  margin: 16px 0 0;
-  min-height: 1.4em;
-  font-size: 0.95rem;
-  color: var(--muted);
+button.secondary:disabled,
+button.secondary.danger:disabled {
+  background: transparent;
+  box-shadow: inset 0 0 0 var(--stroke-card) var(--divider);
+  color: var(--disabled-fg);
 }
 
-footer {
-  margin-top: 24px;
-  font-size: 0.8rem;
-}
-
-footer a {
-  color: var(--muted);
-}
-
-.enroll {
-  margin-top: 28px;
-  padding-top: 20px;
-  border-top: 1px solid var(--muted);
-}
-
-h2 {
-  font-size: 1rem;
+/* Banners: info by default, danger when attempts wait for acknowledgement, warn for coverage. */
+.banner {
+  position: relative;
+  padding: 12px 14px 12px 44px;
+  border: var(--stroke-thin) solid var(--banner-info-border);
+  border-radius: var(--r-banner);
+  background: var(--banner-info-bg);
+  color: var(--banner-info-fg);
+  font-size: var(--f-section);
   font-weight: 600;
-  margin: 0 0 8px;
+  line-height: 1.35;
 }
 
-input {
-  margin-top: 12px;
-  width: 100%;
-  padding: 14px;
-  border: 2px solid var(--muted);
-  border-radius: 12px;
-  background: var(--bg);
+.banner::before {
+  content: "i";
+  content: "i" / "";
+  position: absolute;
+  top: 13px;
+  left: 14px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border-radius: var(--r-pill);
+  background: var(--banner-info-icon);
+  color: var(--banner-info-bg);
+  font-size: var(--f-small);
+  font-weight: 700;
+  line-height: 1;
+}
+
+.alerts-summary {
+  background: var(--banner-info-bg);
+  color: var(--banner-info-fg);
+}
+
+.alerts-attention .alerts-summary {
+  border-color: var(--banner-danger-border);
+  background: var(--banner-danger-bg);
+  color: var(--banner-danger-fg);
+}
+
+.alerts-attention .alerts-summary::before {
+  content: "!";
+  content: "!" / "";
+  background: var(--banner-danger-icon);
+  color: var(--banner-danger-bg);
+}
+
+.banner-warn {
+  border-color: var(--banner-warn-border);
+  background: var(--banner-warn-bg);
+  color: var(--banner-warn-fg);
+}
+
+.banner-warn::before {
+  content: "!";
+  content: "!" / "";
+  background: var(--banner-warn-icon);
+  color: var(--banner-warn-bg);
+}
+
+.banner-success {
+  border-color: var(--banner-success-border);
+  background: var(--banner-success-bg);
+  color: var(--banner-success-fg);
+}
+
+.banner-success::before {
+  background: var(--banner-success-icon);
+  color: var(--banner-success-bg);
+}
+
+/* Inner table (alert history, push devices). */
+.table {
+  padding: 4px 14px;
+  border-radius: var(--r-table);
+  background: var(--table);
+  list-style: none;
+  font-variant-numeric: tabular-nums;
+}
+
+.table:empty {
+  display: none;
+}
+
+.table li {
+  display: flex;
+  align-items: center;
+  min-height: 44px;
+  padding: 10px 0;
+  border-bottom: var(--stroke-thin) solid var(--divider);
   color: var(--text);
-  font-size: 1.2rem;
+  font-size: var(--f-body);
+}
+
+.table li:last-child {
+  border-bottom: 0;
+}
+
+/* Enrollment code input. */
+#enroll-code {
+  display: block;
+  width: 100%;
+  min-height: 52px;
+  margin: 0;
+  padding: 10px 14px;
+  border: var(--stroke-card) solid var(--input-border);
+  border-radius: var(--r-input);
+  background: var(--input-bg);
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: var(--f-code);
+  font-weight: 600;
   letter-spacing: 0.12em;
   text-align: center;
   text-transform: uppercase;
 }
 
+#enroll-code::placeholder {
+  color: var(--placeholder);
+  opacity: 1;
+}
+
+#enroll-code:focus {
+  border-color: var(--focus);
+}
+
 code {
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  padding: 1px 5px;
+  border-radius: 6px;
+  background: var(--table);
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 0.9em;
+  overflow-wrap: anywhere;
 }
 
-/* Failed-password alerts (ADR 2026-10-06 "Failed-Password Alerts in soos-remote From the
- * System Journal"). */
-.alerts {
-  margin-top: 28px;
-  padding-top: 20px;
-  border-top: 1px solid var(--muted);
+/*
+ * Feedback lines keep their reserved line (no jump when a message appears) but sit close to
+ * the control above; when one is the last visible element of a card it eats into the bottom
+ * padding, so an empty line does not make the card bottom-heavy.
+ */
+.feedback {
+  min-height: 1.25em;
+  margin: -8px 0 -6px;
+  line-height: 1.25;
+  color: var(--text-muted);
+  font-size: var(--f-small);
 }
 
-.alerts-summary {
-  margin: 4px 0;
-  font-weight: 600;
+.card > .feedback:last-child,
+.card > .feedback:has(+ [hidden]:last-child) {
+  margin-bottom: -16px;
 }
 
-.alerts-attention .alerts-summary {
-  color: var(--warn);
+/* Funnel login: star tile above the sign-in card content. */
+.login-tile {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  align-self: center;
+  width: 96px;
+  height: 96px;
+  margin-bottom: 4px;
+  border-radius: var(--r-card);
+  background: var(--tile);
 }
 
-.alerts-history {
-  list-style: none;
-  margin: 12px 0 0;
-  padding: 0;
-  text-align: left;
-  font-size: 0.9rem;
+.login-tile .star {
+  width: 56px;
+  height: 56px;
+  fill: var(--star);
 }
 
-.alerts-history li {
-  padding: 6px 0;
-  border-bottom: 1px solid var(--bg);
+/* Footer: on the page color, same width as the body. */
+footer {
+  flex: 0 0 auto;
+  width: 100%;
+  max-width: 480px;
+  margin: 0 auto;
+  padding: 0 var(--gutter) calc(12px + env(safe-area-inset-bottom));
+  background: var(--page);
+  font-size: var(--f-small);
+  text-align: center;
 }
 
-/* Push notifications (ADR 2026-10-06 "Web Push Notifications for Failed-Password Alerts
- * Through a Separate Sender Unit"). */
-.push {
-  margin-top: 28px;
-  padding-top: 20px;
-  border-top: 1px solid var(--muted);
+footer a {
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+  padding: 0 12px;
+  color: var(--link);
+  text-decoration: underline;
 }
 
-.push-devices {
-  list-style: none;
-  margin: 8px 0 0;
-  padding: 0;
-  text-align: left;
-  font-size: 0.9rem;
+/* Focus: a visible ring for keyboard focus, none for pointer focus. */
+button:focus-visible,
+a:focus-visible,
+input:focus-visible {
+  outline: 3px solid var(--focus);
+  outline-offset: 3px;
 }
 
-.push-devices li {
-  padding: 4px 0;
-  border-bottom: 1px solid var(--bg);
+:focus:not(:focus-visible) {
+  outline: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    transition: none !important;
+  }
+
+  button:active:not(:disabled) {
+    transform: none;
+  }
 }

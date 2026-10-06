@@ -297,6 +297,12 @@ mod remote_alerts_contract;
 #[cfg(all(test, unix))]
 mod remote_push_contract;
 
+/// soos brand applied to the `soos-remote` web app: tokens equal to the GUI theme, palette-only
+/// colors, light and dark roles, WCAG AA contrast, kept ids and labels, wordmark, icons (ADR
+/// 2026-10-06; spec AI/architect_spec_remote_brand.md §9 tests 63–74; rows RMC76–RMC87).
+#[cfg(all(test, unix))]
+mod remote_brand_contract;
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,

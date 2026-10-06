@@ -188,8 +188,12 @@ and `packaging/soos-remote.service` byte-identical (C-52), documentation of F-2/
 ### R3.7 Candid Review
 
 `AI/candid_review_report.md` (2026-10-06, fingerprint `655a58cb…`): **VERDICT: APPROVED**, no CRITICAL or MAJOR
-finding; one SUGGESTION (raw byte strings in the test-only scanner of test 62; the failure direction is a false
-positive, never a hidden violation). This traceability phase edits documentation only, after that review.
+finding; one SUGGESTION (raw byte strings in the test-only scanner of test 62). The review described the failure
+direction as a false positive only; that was wrong: a raw byte or raw C string ending in a backslash
+(`br"C:\"; let acknowledged = true; let q = "x";`) was scanned as one escaped string running into the next quote, so
+the scanner could hide an `acknowledged` binding (a false negative). The brand change fixed the scanner (Contract
+Migration CM-1 in `AI/tester_contract_brand.md`, test 75 `test_rmc_s56_scanner_handles_raw_byte_and_c_strings`). This
+traceability phase edits documentation only, after that review.
 
 ### R3.8 Verification Results
 
