@@ -2,79 +2,79 @@
 
 - **Date**: 2026-10-06
 - **Target Branch**: `feat/remote-funnel-passkey`
-- **Base (merge-base)**: `222665f0`
-- **Reviewed-Diff-Fingerprint**: `5c99775b8601fca296d273f5aa4ce0fb0878cf3ede63189e598e214f64c725a0`
-- **Audited Files**: `.agents/skills/dev-workflow/references/project-facts.md`, `AGENTS.md`, `AI/ARCHITECTURE.md`, `AI/DECISIONS.md`, `AI/MOCK_STRATEGY.md`, `AI/VERIFICATION_MATRIX.md`, `AI/architect_spec_remote_companion.md`, `AI/architect_spec_remote_passkey_funnel.md`, `AI/auditor_constraints_remote_companion.md`, `AI/auditor_constraints_remote_passkey_funnel.md`, `AI/research_funnel.md`, `AI/research_webauthn.md`, `AI/tester_contract_remote_companion.md`, `AI/tester_contract_remote_passkey_funnel.md`, `AI/walkthroughs/183_remote_companion.md`, `AI/walkthroughs/184_remote_unlock.md`, `AI/walkthroughs/185_remote_funnel_passkey.md`, `Cargo.lock`, `Cargo.toml`, `Docs/README.md`, `Docs/REMOTE_COMPANION.md`, `Docs/SECURITY_AND_QUALITY_GUIDELINES.md`, `crates/remote/Cargo.toml`, `crates/remote/assets/app.js`, `crates/remote/assets/apple-touch-icon.png`, `crates/remote/assets/icon.svg`, `crates/remote/assets/index.html`, `crates/remote/assets/manifest.webmanifest`, `crates/remote/assets/style.css`, `crates/remote/src/assets.rs`, `crates/remote/src/audit.rs`, `crates/remote/src/auth.rs`, `crates/remote/src/challenge.rs`, `crates/remote/src/config.rs`, `crates/remote/src/credentials.rs`, `crates/remote/src/enroll.rs`, `crates/remote/src/http.rs`, `crates/remote/src/identity.rs`, `crates/remote/src/lib.rs`, `crates/remote/src/logind.rs`, `crates/remote/src/main.rs`, `crates/remote/src/routes.rs`, `crates/remote/src/server.rs`, `crates/remote/src/session.rs`, `crates/remote/src/socket.rs`, `crates/remote/src/status.rs`, `crates/remote/src/webauthn.rs`, `crates/remote/src/websession.rs`, `crates/remote/tests/auth_capacity_tests.rs`, `crates/remote/tests/auth_server_tests.rs`, `crates/remote/tests/auth_store_tests.rs`, `crates/remote/tests/common/harness.rs`, `crates/remote/tests/common/passkey.rs`, `crates/remote/tests/config_tests.rs`, `crates/remote/tests/credentials_tests.rs`, `crates/remote/tests/enroll_tests.rs`, `crates/remote/tests/http_tests.proptest-regressions`, `crates/remote/tests/http_tests.rs`, `crates/remote/tests/identity_tests.rs`, `crates/remote/tests/routes_tests.rs`, `crates/remote/tests/server_tests.rs`, `crates/remote/tests/session_tests.rs`, `crates/remote/tests/socket_tests.rs`, `crates/remote/tests/webauthn_tests.rs`, `deny.toml`, `packaging/soos-remote.service`, `scripts/candid_review.sh`, `scripts/install_remote.sh`, `tests/invariants/src/lib.rs`, `tests/invariants/src/presence_unlock_contract.rs`, `tests/invariants/src/remote_companion_contract.rs`, `tests/invariants/src/remote_passkey_contract.rs`, ``
+- **Base (merge-base)**: `222665f`
+- **Reviewed-Diff-Fingerprint**: `67f5f087591ed3727b976818332a089b69cd5cf4182a881879f1151d3398c11e`
+- **Audited Files**: full branch patch (`target/candid_diff.patch`); everything up to HEAD `6d779bf` was approved under the previous fingerprint `5c99775b…`. The only delta since then is the uncommitted change to `AI/VERIFICATION_MATRIX.md` (status cells of RMC25, RMC40, RMC43, RMC44; 4 lines changed).
 
 ## 1. Executive Summary
 
-The branch up to HEAD `3cedd5d` was approved under fingerprint `9c761e60…`. The only delta
-(`git diff HEAD`, excluding this report) is five status cells in `AI/VERIFICATION_MATRIX.md`
-(RMC25, RMC40, RMC42, RMC43, RMC44) recording the owner's 2026-10-06 hardware results. The
-previous CHANGES_REQUESTED report on this delta asked to downgrade RMC25 and RMC40 to partly
-verified and to remove the real host name; both were done. Every status was re-checked against
-its row requirement, `Docs/REMOTE_COMPANION.md` and `crates/remote/src`. No status claims
-more than its stated evidence. No production code, test, script or dependency changed.
+The delta records the owner's hardware report of 2026-10-06: the test ran on 4G with the Tailscale
+VPN off, in the home-screen web app (not a Safari tab), and after *Unlock now* plus Face ID the page
+showed `Unlocked`. Each updated status cell was checked against its row's acceptance criteria and
+against this evidence. RMC25 is promoted to Verified; its hardware criterion (with `allow_unlock`
+and a registered passkey, *Unlock now* and Face ID dismiss the lock screen and the page shows
+`Unlocked`) is now fully covered. RMC40, RMC43 and RMC44 remain Pending (partly verified) and list
+exactly the still-unreported items. No production code, test, script or dependency changed.
 
 ## 2. Test Changes
 
-No test file, inline test module, assertion, `#[ignore]` or escape hatch changed in the delta
-(`git diff HEAD --stat` lists only `AI/VERIFICATION_MATRIX.md`, 5 insertions, 5 deletions).
-The test changes in the frozen patch belong to the committed branch reviewed and approved under
-`9c761e60…`.
+Mechanical listing on the delta: no test file, assertion, `#[ignore]`, `should_panic`, tolerance or
+inline test module is touched (the delta is one Markdown file). The branch-level listing is
+unchanged from the previously approved review.
 
 ## 3. Deep Reasoning Audit
 
 ### Logic & Architecture
-- RMC42 (✅ Verified): requires (a) registration with the VPN on via `enroll-code` + Face ID,
-  visible in `soos-remote passkeys list`, and (b) the same attempt over Funnel refused. (a) is
-  stated as 1 record, `synced`, which is a real output label (`crates/remote/src/main.rs:238`).
-  (b) is stated as an anonymous Funnel register-options request answering `403 forbidden`;
-  `crates/remote/src/server.rs:1011-1012` refuses `RegisterOptions`/`RegisterVerify` on the
-  Funnel class with `403 forbidden` before any session or code check, so the anonymous probe
-  is the same refusal the page would hit. Both halves evidenced → Verified is justified. PASS.
-- RMC40 (⬜ Pending, partly verified): `403 login_required` for status/lock/unlock without a
-  session matches `server.rs:1013-1014`; `mode: funnel` / `mode: tailnet` match
-  `server.rs:393-399`; a forged `Tailscale-User-Login` over Funnel is irrelevant because the
-  Funnel class is refused before identity. The cell lists what is missing (4G, Safari and
-  home-screen app separately). PASS.
-- RMC43 (⬜ Pending, partly verified): sign-in and *Lock now* reported; Safari/home-screen
-  separately, live events and *Sign out* listed as missing. PASS.
-- RMC44 (⬜ Pending, partly verified): Funnel unlock reported; tailnet path missing. The note that
-  registration framing is covered by RMC42 is accurate (RMC42 registration POSTs went through
-  `tailscaled` on the tailnet path). PASS.
-- RMC25 (⬜ Pending, automated ✅, hardware partly verified): dismissal of the lock screen and the
-  `remote unlock requested` journal line reported (matches the audit line of the row); the
-  page state `Unlocked` is explicitly missing. Consistent with `Docs/REMOTE_COMPANION.md`,
-  which documents `swaylock-plugin` and the `Unlocked` state. PASS.
-- Scenario tried: could any row be read as fully closed by a partial report? Only RMC42 is ✅ and
-  its requirement is fully covered. PASS.
+- **RMC25** — criterion: hardware dismissal of the lock screen with Face ID **and** the page showing
+  `Unlocked`. The previous cell left only the `Unlocked` state unreported; the owner now reports it.
+  Confirmed `Unlocked` is a real page state (`crates/remote/assets/app.js:44` status label and
+  `:274` feedback after an accepted unlock), so the claim is plausible and matches the code. The
+  automated part was already verified. The "(tracked with RMC44)" note refers to the shared hardware
+  check; RMC25's own hardware criterion does not require the tailnet path, so Verified while RMC44
+  stays Pending is consistent. → PASS.
+- **RMC40** — criterion requires Safari **and** the home-screen app, on 4G with the VPN off. The cell
+  now credits 4G and the home-screen app and lists "a Safari tab" as unreported; the other items
+  (port 443 only, Funnel-mode refusals, tailnet one-tap) were already evidenced in the approved
+  version. Pending is correct. → PASS.
+- **RMC43** — criterion: Safari and home-screen app sign-in, status, live events, *Lock now*,
+  *Sign out*. The cell credits home-screen-app sign-in on 4G and *Lock now*, and lists Safari tab,
+  live events and *Sign out* as unreported. Pending is correct. → PASS (see MINOR note on "status").
+- **RMC44** — criterion: unlock both via tailnet and via Funnel; passkey POST framing. The cell
+  credits the Funnel path in the home-screen app with `Unlocked` shown, lists the tailnet path as
+  unreported, and defers registration framing to RMC42 (Verified). Claims no more than the evidence.
+  → PASS.
+- Attempted break: does any cell credit Safari-tab behaviour or the VPN-on unlock path from this
+  report? No. Does any cell promote to Verified with an open criterion item? No.
 
 ### PAM Concurrency & Deadlines
-No PAM, daemon or IPC change in the delta. PASS (not applicable).
+No code change. → PASS (not applicable).
 
 ### Panic Safety & Fail-Closed
-No code change. The recorded behavior (`403` refusals for unauthenticated Funnel callers)
-confirms fail-closed in the field. PASS.
+No code change. → PASS (not applicable).
 
 ### Test Integrity & Anti-Weakening
-No test touched; matrix evidence columns unchanged, only status cells. PASS.
+No test change; evidence columns unchanged. → PASS.
 
 ### Memory, Bounds & Secrets
-Scenario: does the delta leak the owner's host name, login, credential fingerprint or session id?
-The cells use the `<rp_id>` placeholder, no login, no fingerprint, no tailnet name. The `.ts.net`
-strings in the frozen patch are generic examples from the approved commits. PASS.
+The status cells contain no login, host name, credential id or other identifier (`<rp_id>` remains
+a placeholder). → PASS.
 
 ### Supply Chain & Automation
-No `Cargo.*`, `deny.toml`, `.github/`, `scripts/` or `.githooks/` change. PASS.
+No `Cargo.*`, `deny.toml`, `.github/`, `scripts/` or hook change in the delta. → PASS.
 
 ### English-Only Policy
-All new text is English. PASS.
+All new text is English. → PASS.
 
 ## 4. Detailed Findings & Action Items
-- **[SUGGESTION]** `AI/VERIFICATION_MATRIX.md:2077` — the RMC40 status reads
-  "(partly verified) 2026-10-06:" while RMC43/RMC44 read "(partly verified). Owner report
-  2026-10-06:"; harmonising the wording is optional.
+
+- **[MINOR]** `AI/VERIFICATION_MATRIX.md` RMC43 — the criterion lists "status" among the items that
+  must work after sign-in, but the cell neither credits nor lists it as unreported (pre-existing
+  wording, not introduced by this delta). The `Unlocked` state seen in the RMC44 report indicates the
+  page status works in a Funnel session; consider naming it explicitly when the row is closed. Does
+  not affect the Pending status.
+
+No CRITICAL or MAJOR findings.
 
 ## 5. Final Verdict
+
 **VERDICT: APPROVED**
