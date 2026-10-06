@@ -11,16 +11,20 @@
 
 pub mod app;
 pub mod args;
+pub mod brand;
 pub mod camera_mode;
 pub mod camera_source;
 pub mod camera_status;
 pub mod daemon_control;
+pub mod header;
 pub mod ipc_camera;
 pub mod logging;
 pub mod privileged;
 pub mod state;
 pub mod store_mode;
 pub mod store_tasks;
+pub mod theme;
+pub mod widgets;
 pub mod worker;
 
 pub use app::SoosApp;

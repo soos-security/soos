@@ -6,8 +6,10 @@
 
 #![forbid(unsafe_code)]
 
-use eframe::egui::{self, Color32};
+use eframe::egui;
 use soos_camera_v4l::{CameraErrorKind, CameraStatus};
+
+use crate::{theme, widgets};
 
 /// Visual severity of a [`StatusBanner`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -140,18 +142,25 @@ pub fn camera_status_banner(status: &CameraStatus) -> StatusBanner {
     }
 }
 
-/// Draws `banner` as a centered status block (spinner for in-progress states).
+/// Draws `banner` as a centered brand status card (spinner for in-progress states).
 pub fn render_status_banner(ui: &mut egui::Ui, banner: &StatusBanner) {
     let color = match banner.severity {
-        BannerSeverity::Info => ui.visuals().text_color(),
-        BannerSeverity::Warning => Color32::YELLOW,
-        BannerSeverity::Error => Color32::from_rgb(0xFF, 0x60, 0x60),
+        BannerSeverity::Info => theme::INK,
+        BannerSeverity::Warning => theme::WARN_TEXT,
+        BannerSeverity::Error => theme::DANGER,
     };
-    ui.vertical_centered(|ui| {
+    widgets::status_card(ui, |ui| {
         if banner.severity == BannerSeverity::Info {
-            ui.spinner();
+            ui.add(egui::Spinner::new().size(22.0).color(theme::BLUE));
+            ui.add_space(4.0);
         }
-        ui.heading(egui::RichText::new(banner.title.as_str()).color(color));
-        ui.label(banner.detail.as_str());
+        // Same faux-bold title as every other card (the default font has one weight).
+        widgets::card_title_colored(ui, banner.title.as_str(), color);
+        ui.add_space(-10.0);
+        ui.label(
+            egui::RichText::new(banner.detail.as_str())
+                .size(theme::F_BODY)
+                .color(theme::INK_MUTED),
+        );
     });
 }
