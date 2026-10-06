@@ -1,4 +1,4 @@
-# Walkthrough 188 — soos Brand Redesign of the `soos-remote` Web App
+# Walkthrough 190 — soos Brand Redesign of the `soos-remote` Web App
 
 - **Date**: 2026-10-06
 - **Issue**: GitHub-only follow-up of #339 (owner request of 2026-10-06). **Branch**: `feat/remote-auth-alerts`
@@ -94,7 +94,7 @@ Contract Migration **CM-1** (the owner's optional small fix): `blank_string_lite
 (`test_rmc_s43_acknowledged_entries_are_not_kept`), only knew `r"…"`/`r#"…"#` as raw strings; a raw byte string ending
 in a backslash (`br"C:\"; let acknowledged = true; let q = "x";`) was read as one escaped string, hiding the code after
 it (a false negative). `br` and `cr` at an identifier boundary now open raw strings too. This strengthens the scanner;
-no assertion of test 62 or its self-test changed. Walkthrough 186 §R3.7, which called the flaw "a false positive only",
+no assertion of test 62 or its self-test changed. Walkthrough 188 §R3.7, which called the flaw "a false positive only",
 was reworded.
 
 ## 5. Auditor Constraints
@@ -133,7 +133,7 @@ Files changed:
   `tests/invariants/src/remote_alerts_contract.rs` (CM-1 and test 75).
 - Documentation: `AI/DECISIONS.md` (ADR), `Docs/REMOTE_COMPANION.md` §2e (page design) and §4 (re-add the home-screen
   app to refresh the cached icon), `AI/ARCHITECTURE.md` §13 ("Page design" row), `AI/VERIFICATION_MATRIX.md`
-  (RMC76–RMC88), `AI/walkthroughs/186_remote_auth_alerts.md` §R3.7.
+  (RMC76–RMC88), `AI/walkthroughs/188_remote_auth_alerts.md` §R3.7.
 
 `assets.rs` needed no change: the asset set is still the same seven embedded files.
 
@@ -171,5 +171,5 @@ Final run of this traceability phase (2026-10-06):
   (`DANGER_TEXT` in light). Not in scope of this change.
 - `[hidden] { display: none !important; }` is protected by review and the visual pass, not by an automated test
   (residual risk R-2); test 75's `b'"'` case has no positive follow-up statement (R-1).
-- The walkthrough numbers 183 and 184 exist on both this line and `main`; the collision predates this change and is
-  resolved at rebase.
+- The walkthrough numbers 183 and 184 existed on both this line and `main`; the collision predated this change and was
+  resolved on 2026-10-06 by renumbering this line's walkthroughs +2 (183–188 became 185–190).

@@ -1,4 +1,4 @@
-# Walkthrough 186 — Failed-Password Alerts in `soos-remote`
+# Walkthrough 188 — Failed-Password Alerts in `soos-remote`
 
 - **Date**: 2026-10-06
 - **Issue**: GitHub-only follow-up of #339. **Branch**: `feat/remote-auth-alerts`, from

@@ -29,7 +29,7 @@
 | Rust untouched beyond `assets.rs` needs | D1, §1.1 (no Rust change at all) | Covered |
 | Playwright visual checks: 5 states x light/dark at 390 x 844 @3x, stub server, scratchpad only | §9.1 (+ 375/320 px narrow checks) | Covered |
 | Contract Migrations in `AI/tester_contract_brand.md` | §13 (CM-1), test 74 | Covered |
-| Optional scanner fix (`br`/`cr`), self-test, walkthrough 186 R3.7 reword | D10, test 75, CM-1, §1.1 | Covered; N2 (one case without power) |
+| Optional scanner fix (`br`/`cr`), self-test, walkthrough 188 R3.7 reword | D10, test 75, CM-1, §1.1 | Covered; N2 (one case without power) |
 | Docs `Docs/REMOTE_COMPANION.md` §2e + §4 icon-cache note | §10, test 74 | Covered |
 
 ## 2. Facts Verified Against Code
@@ -50,7 +50,7 @@
 | Touch-icon command determinism (2 742 B, `3442af18…`) | re-run in round 1 | identical | Yes |
 | Current markup needles of existing tests | `index.html`, `remote_*_contract.rs`, `crates/remote/tests` | no test pins `h1`, `main.card`, `#1f2937`, `detail` on `#alerts-coverage`, meta values or manifest colors; S8 checks ` onclick=`/` onload=`/` onerror=` with a leading space | Yes (§13: CM-1 only) |
 | `blank_string_literals` current behaviour | `remote_alerts_contract.rs` l.424–484 | raw start requires `r` at an identifier boundary, so `br"C:\"` opens an escaped string; char literals (incl. `'"'`) kept whole | Yes (test 75 red on current helper, both the positive and the `br#"x"acknowledged"#` negative case) |
-| Walkthrough 186 R3.7 claim | `AI/walkthroughs/186_remote_auth_alerts.md` l.190–191 | "the failure direction is a false positive, never a hidden violation" | Yes (claim wrong, reword planned) |
+| Walkthrough 188 R3.7 claim | `AI/walkthroughs/188_remote_auth_alerts.md` l.190–191 | "the failure direction is a false positive, never a hidden violation" | Yes (claim wrong, reword planned) |
 | Brief and ADR consistent with round 2 | `AI/design_brief_remote_brand.md`, `AI/DECISIONS.md` diff | no `#7E8490`/`#82A4E0`; switch removed (brief §5.8); ADR states integer rounding, no switch, D12 deviation | Yes |
 
 ## 3. Pillar Analysis

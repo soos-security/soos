@@ -1,4 +1,4 @@
-# Walkthrough 185 — Tailscale Funnel Access and In-House Passkey Authentication for `soos-remote`
+# Walkthrough 187 — Tailscale Funnel Access and In-House Passkey Authentication for `soos-remote`
 
 - **Date**: 2026-10-06
 - **Issue**: GitHub-only follow-up of #339 (no `AI/BACKLOG.md` entry; the branch is not registered
@@ -13,7 +13,7 @@
 
 ## 1. Context & Objectives
 
-Walkthroughs 183 and 184 delivered `soos-remote`: a user-level service on a `0600` Unix socket,
+Walkthroughs 185 and 186 delivered `soos-remote`: a user-level service on a `0600` Unix socket,
 proxied by `tailscale serve`, that shows the lock status, locks the session and, when
 `allow_unlock = true`, unlocks it on the Tailscale identity alone. The owner then asked for two
 things (decisions D-A to D-I, 2026-10-06):

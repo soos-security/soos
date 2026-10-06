@@ -4,7 +4,7 @@
 - **Target Branch**: `feat/remote-auth-alerts`
 - **Base (merge-base)**: `222665f`
 - **Reviewed-Diff-Fingerprint**: `7bf5595f962d10d7617c55f7e560f19e6850deff615b12220d63ef3aab595746`
-- **Audited Files**: full frozen patch `target/candid_diff.patch` (merge-base `222665f` to the working tree, 114 files). The last approved state is HEAD `ed52b02`; the delta reviewed in depth is the uncommitted soos brand redesign and its documentation: `crates/remote/assets/{index.html,style.css,icon.svg,apple-touch-icon.png,manifest.webmanifest}`, `tests/invariants/src/{lib.rs,remote_alerts_contract.rs,remote_brand_contract.rs}`, `AI/{ARCHITECTURE,DECISIONS,VERIFICATION_MATRIX}.md`, `AI/walkthroughs/{186_remote_auth_alerts,188_remote_brand_redesign}.md`, `Docs/REMOTE_COMPANION.md`, `AI/{architect_spec_remote_brand,auditor_constraints_brand,design_brief_remote_brand,tester_contract_brand}.md`.
+- **Audited Files**: full frozen patch `target/candid_diff.patch` (merge-base `222665f` to the working tree, 114 files). The last approved state is HEAD `ed52b02`; the delta reviewed in depth is the uncommitted soos brand redesign and its documentation: `crates/remote/assets/{index.html,style.css,icon.svg,apple-touch-icon.png,manifest.webmanifest}`, `tests/invariants/src/{lib.rs,remote_alerts_contract.rs,remote_brand_contract.rs}`, `AI/{ARCHITECTURE,DECISIONS,VERIFICATION_MATRIX}.md`, `AI/walkthroughs/{188_remote_auth_alerts,190_remote_brand_redesign}.md`, `Docs/REMOTE_COMPANION.md`, `AI/{architect_spec_remote_brand,auditor_constraints_brand,design_brief_remote_brand,tester_contract_brand}.md`.
 
 ## 1. Executive Summary
 
@@ -121,8 +121,8 @@ Mechanical listing (step 3) on the frozen patch:
   committed bytes, but writes to the current directory (see finding 1).
 - `AI/ARCHITECTURE.md` "Page design" row: accurate (seven assets present, RMC76-RMC88 exist in
   the matrix, RMC88 being the manual owner row).
-- `AI/DECISIONS.md` new ADR, `AI/VERIFICATION_MATRIX.md` rows RMC76-RMC88, walkthrough 188
-  (SHA-256 and 519-passed figures match what I measured), walkthrough 186 correction (the
+- `AI/DECISIONS.md` new ADR, `AI/VERIFICATION_MATRIX.md` rows RMC76-RMC88, walkthrough 190
+  (SHA-256 and 519-passed figures match what I measured), walkthrough 188 correction (the
   earlier "false positive only" statement was wrong; the scanner bug was a false negative):
   accurate.
 - Sections of `Docs/REMOTE_COMPANION.md` outside 2e do not describe old colors; the added
@@ -131,12 +131,12 @@ Mechanical listing (step 3) on the frozen patch:
 ## 4. Detailed Findings & Action Items
 
 - **[MINOR — RESOLVED in this fingerprint]** `Docs/REMOTE_COMPANION.md` section 2e (icon command) and the matching
-  walkthrough 188 description: the command reads `crates/remote/assets/icon.svg` from the repository
+  walkthrough 190 description: the command reads `crates/remote/assets/icon.svg` from the repository
   root but writes `png:apple-touch-icon.png`, which lands in the repository root, not in
   `crates/remote/assets/`. A maintainer following it would leave a stray file and not update the
   served icon. Correction: write to `png:crates/remote/assets/apple-touch-icon.png`.
   Resolution verified: the command now writes there and reproduces the committed bytes
-  (SHA-256 `3442af18…cd46b3`). Walkthrough 188 only refers to the docs command, so it needs no
+  (SHA-256 `3442af18…cd46b3`). Walkthrough 190 only refers to the docs command, so it needs no
   change.
 
 No open findings.

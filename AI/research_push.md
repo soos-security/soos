@@ -3,7 +3,7 @@
 Status: research note for GitHub #339 (branch `feat/remote-auth-alerts`), 2026-10-06.
 Scope: every external fact the "real push notifications on the iPhone" design (owner decisions
 O-1 to O-5, feature level 2 on top of the level-1 failed-password alerts of ADR 2026-10-06 and
-walkthrough 186) depends on. Only read-only commands were run on the host (`pacman -Q`,
+walkthrough 188) depends on. Only read-only commands were run on the host (`pacman -Q`,
 `journalctl` queries printing counts only, `getent ahosts`, `ip route get`,
 `systemctl --user show`, `systemd-analyze --user security`, `sysctl`, `man`, registry
 metadata from crates.io and the local Cargo registry cache). Nothing was installed, started,

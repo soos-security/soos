@@ -88,7 +88,7 @@ file was restored afterwards, so test 75 is red in the hand-off.
 CM-1 strengthens the scanner: no assertion of test 62 or of its self-test changes, and test 75 is new. The **only**
 edit the developer may make to an existing test file is the body of `blank_string_literals` (raw-string prefix
 detection), so that test 75 turns green while `test_rmc_s43_acknowledged_entries_are_not_kept` and
-`test_rmc_s43_scanner_self_test` stay green unchanged. Walkthrough 186 §R3.7 must be reworded in the traceability
+`test_rmc_s43_scanner_self_test` stay green unchanged. Walkthrough 188 §R3.7 must be reworded in the traceability
 phase (its "false positive only" claim is wrong, spec D10).
 
 No other existing test is migrated: no test in `tests/` or `crates/remote/tests/` pins the old colors, the `h1`

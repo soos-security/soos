@@ -4,7 +4,7 @@
 - **Branch**: `feat/remote-funnel-passkey` (from `feat/remote-companion` at `b5d593a`); nothing is committed,
   pushed or deployed by agents (D-I).
 - **Inputs**: owner decisions D-A to D-I (2026-10-06), `AI/research_funnel.md`, `AI/research_webauthn.md`,
-  ADRs 2026-10-05 and 2026-10-06 on `soos-remote`, `Docs/REMOTE_COMPANION.md`, walkthroughs 183/184,
+  ADRs 2026-10-05 and 2026-10-06 on `soos-remote`, `Docs/REMOTE_COMPANION.md`, walkthroughs 185/186,
   `crates/remote/src/*.rs`, `crates/remote/tests/*.rs`, `tests/invariants/src/remote_companion_contract.rs`.
 - **ADR**: "[2026-10-06] Tailscale Funnel Access and In-House Passkey Authentication for `soos-remote`"
   (drafted in `AI/DECISIONS.md`, text in §13 below).
@@ -86,7 +86,7 @@ Spec-level decisions taken here (each is restated in the ADR):
 | `deny.toml` | One `[bans] skip` for `der@0.7.10` (§3.4). |
 | `packaging/soos-remote.service` | **No change** (still `RestrictAddressFamilies=AF_UNIX`; `~/.config` writable because the unit sets no `ProtectHome`). |
 | `scripts/install_remote.sh` | Template gains commented `rp_id`, `allow_funnel`, `credentials_path`; printed next steps mention `soos-remote enroll-code` and (inside `echo`) `tailscale funnel --bg unix:`. Never runs `tailscale`. |
-| `Docs/REMOTE_COMPANION.md`, `AI/ARCHITECTURE.md` §13, `AI/MOCK_STRATEGY.md`, `Docs/SECURITY_AND_QUALITY_GUIDELINES.md` (crate list), `.claude/skills/dev-workflow/references/project-facts.md`, `AI/VERIFICATION_MATRIX.md`, `AI/walkthroughs/185_remote_funnel_passkey.md` | Documentation (traceability phase). |
+| `Docs/REMOTE_COMPANION.md`, `AI/ARCHITECTURE.md` §13, `AI/MOCK_STRATEGY.md`, `Docs/SECURITY_AND_QUALITY_GUIDELINES.md` (crate list), `.claude/skills/dev-workflow/references/project-facts.md`, `AI/VERIFICATION_MATRIX.md`, `AI/walkthroughs/187_remote_funnel_passkey.md` | Documentation (traceability phase). |
 | `tests/invariants/src/remote_passkey_contract.rs` (new) + `tests/invariants/src/lib.rs` (`mod` line) | Static contracts RMC-S13–RMC-S21 (§10.8). |
 
 ### 1.2 Consumers

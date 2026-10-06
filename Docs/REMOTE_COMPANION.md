@@ -16,10 +16,10 @@
 > Source of truth: `crates/remote/src/lib.rs` (constants), `crates/remote/src/config.rs`
 > (configuration keys), `crates/remote/src/server.rs` (request handling). If this document and
 > the code disagree, report the drift: the invariant `remote_companion_contract` pins the parts
-> of this page the acceptance criteria rely on (matrix rows RMC1–RMC44, walkthroughs 183, 184
-> and 185); `remote_passkey_contract` pins the Funnel and passkey parts; `remote_alerts_contract`
-> pins the failed-password alerts (rows RMC45–RMC59, walkthrough 186); `remote_push_contract`
-> pins the push notifications (rows RMC60–RMC74, walkthrough 187).
+> of this page the acceptance criteria rely on (matrix rows RMC1–RMC44, walkthroughs 185, 186
+> and 187); `remote_passkey_contract` pins the Funnel and passkey parts; `remote_alerts_contract`
+> pins the failed-password alerts (rows RMC45–RMC59, walkthrough 188); `remote_push_contract`
+> pins the push notifications (rows RMC60–RMC74, walkthrough 189).
 
 ---
 

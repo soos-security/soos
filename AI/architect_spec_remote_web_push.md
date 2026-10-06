@@ -10,14 +10,14 @@
 - **Inputs**: owner decisions O-1 to O-5 (2026-10-06), `AI/research_push.md` (read-only research: RFC 8030/8188/
   8291/8292, Apple and Mozilla push behaviour, crate metadata, systemd user-unit facts), level-1 spec
   `AI/architect_spec_remote_auth_alerts.md`, ADRs 2026-10-05 and 2026-10-06 (x4) on `soos-remote`,
-  `Docs/REMOTE_COMPANION.md`, walkthroughs 183–186, `crates/remote/src/*.rs` (notably `alerts.rs`, `audit.rs`,
+  `Docs/REMOTE_COMPANION.md`, walkthroughs 185–188, `crates/remote/src/*.rs` (notably `alerts.rs`, `audit.rs`,
   `server.rs`, `routes.rs`, `http.rs`, `credentials.rs`, `config.rs`), `packaging/soos-remote.service`,
   `scripts/install_remote.sh`, `deny.toml`, `tests/invariants/src/remote_{companion,passkey,alerts}_contract.rs`.
 - **ADR**: "[2026-10-06] Web Push Notifications for Failed-Password Alerts Through a Separate Sender Unit" (drafted
   in `AI/DECISIONS.md`; the text there is authoritative, §14 summarises it). It supersedes "push notifications out
   of scope" in item (5) of the 2026-10-05 ADR and the last sentence of item (1) of the level-1 alerts ADR.
 - **Matrix**: new rows RMC60–RMC74 (§13), after RMC59.
-- **Walkthrough**: `AI/walkthroughs/187_remote_web_push.md` (traceability phase).
+- **Walkthrough**: `AI/walkthroughs/189_remote_web_push.md` (traceability phase).
 - **Test prefix**: `test_rwp_` (remote web push) for behaviour tests, `test_rmc_s32`–`test_rmc_s42` for static
   invariants.
 

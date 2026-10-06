@@ -16,7 +16,7 @@
 - **ADR**: "[2026-10-06] soos Brand Direction Applied to the `soos-remote` Web App" (drafted in `AI/DECISIONS.md`;
   the text there is authoritative, §12 summarises it).
 - **Matrix**: new rows RMC76–RMC88 (§11), after RMC75.
-- **Walkthrough**: `AI/walkthroughs/188_remote_brand.md` (traceability phase).
+- **Walkthrough**: `AI/walkthroughs/190_remote_brand_redesign.md` (traceability phase).
 - **Test prefix**: `test_rmc_s44`–`test_rmc_s56` (static invariants, tests 63–75: test N is `test_rmc_s(N − 19)_…`);
   tests 63–74 in the new module `tests/invariants/src/remote_brand_contract.rs`, test 75 in
   `tests/invariants/src/remote_alerts_contract.rs`.
@@ -53,7 +53,7 @@
 | D7 | Banner glyphs are CSS generated content with empty alternative text (`content: "!"; content: "!" / "";`), so screen readers do not read "i" / "!" (the first declaration is the fallback for engines without the alt syntax). | The text of the paragraph is the information. |
 | D8 | The status dot is a decorative `aria-hidden="true"` span driven only by CSS from `#state.state-<s>`, which is the same state `app.js` writes as text in `#state`; it never carries information that is not already written in text. | Accessibility; no JavaScript change. |
 | D9 | `apple-touch-icon.png` is generated deterministically (fixed command, no time chunks, only `IHDR`/`IDAT`/`IEND`); the candid fingerprint and the CI fingerprint of binary assets stay stable (ADR of `ea862cc`). | Reproducible binary. Verified in the scratchpad: two runs give identical bytes (2 742 bytes, RGB, 180 x 180). |
-| D10 | Optional fix accepted in scope: `blank_string_literals` in `tests/invariants/src/remote_alerts_contract.rs` treats `br"…"`, `br#"…"#`, `cr"…"`, `cr#"…"#` as raw strings; new self-test; walkthrough 186 §R3.7 reworded (its claim "the failure direction is a false positive, never a hidden violation" is wrong: `br"C:\"; let acknowledged = true; let q = "x";` is scanned as one escaped string and hides the `acknowledged` binding, a false negative). Recorded as Contract Migration CM-1 (helper strengthened, no assertion weakened). | Owner-optional small fix; the scanner protects test 62. |
+| D10 | Optional fix accepted in scope: `blank_string_literals` in `tests/invariants/src/remote_alerts_contract.rs` treats `br"…"`, `br#"…"#`, `cr"…"`, `cr#"…"#` as raw strings; new self-test; walkthrough 188 §R3.7 reworded (its claim "the failure direction is a false positive, never a hidden violation" is wrong: `br"C:\"; let acknowledged = true; let q = "x";` is scanned as one escaped string and hides the `acknowledged` binding, a false negative). Recorded as Contract Migration CM-1 (helper strengthened, no assertion weakened). | Owner-optional small fix; the scanner protects test 62. |
 | D11 | **No push switch** (round 2, F3). The only CSS-observable push condition is `#push-disable` visible, which `app.js` sets from `view.subscriptions > 0`: *the PC has at least one registered device*, not *this phone receives alerts*; it stays true after `syncSubscription` drops this phone's stale subscription. A green switch would therefore state a per-device delivery guarantee the page does not have, in a failed-password alerting feature. The `#push` card keeps a plain `h2` `Notifications`; `#push-state` (written by `app.js`) stays the only statement of the push state. Tested (test 69). | Misleading security state is worse than a missing decoration; `app.js` is frozen (D1), so a per-device indicator is not possible here. |
 | D12 | **Danger outline deviates from the GUI on purpose** (round 2, F8). The GUI `ButtonKind::DangerOutline` (`origin/main:crates/gui/src/widgets.rs` l.712–719) paints text and border in `DANGER` `#D92D45`, 4.22:1 on `PALE` (below AA for 17 px text). The web uses `--danger-fg` = `--danger-text` `#8A1426` (8.43:1) in light and `--danger-soft` (6.09:1 on `--ink-2`) in dark. A later parity review must not "fix" the web back; the GUI should follow (open point §15.4). | WCAG AA is an owner requirement for the phone. |
 | D13 | **Body cut out of the band** (round 2, F6): `body` background `var(--band)`, flex column, `min-height: 100dvh`; `main.page` (`--page`, top radius `--r-body`) grows with `flex: 1`; `footer` background `var(--page)`. The rounded top corners of `main` thus sit on blue, like the GUI body under its band, and no blue shows below the content. | The round-1 frame put `main`'s corners on a pale body, so they were invisible. |
@@ -88,7 +88,7 @@
 | `Docs/REMOTE_COMPANION.md` | New section `## 2e. Page design (soos brand)` after §2d (§10); §6 table row text unchanged |
 | `AI/DECISIONS.md` | New ADR (drafted with this spec) |
 | `AI/tester_contract_brand.md` | New (tester phase): test list, CM-1, any further migration |
-| `AI/VERIFICATION_MATRIX.md`, `AI/walkthroughs/186_remote_auth_alerts.md` (§R3.7), `AI/walkthroughs/188_remote_brand.md` | Traceability phase |
+| `AI/VERIFICATION_MATRIX.md`, `AI/walkthroughs/188_remote_auth_alerts.md` (§R3.7), `AI/walkthroughs/190_remote_brand_redesign.md` | Traceability phase |
 
 Not touched: `crates/gui/**` (the GUI brand lives on `main`; editing it here would conflict), `Docs/GUI_APPLICATION.md`,
 packaging, installers, units, `deny.toml`, `Cargo.toml`/`Cargo.lock` (no dependency: the invariants crate stays
@@ -589,9 +589,9 @@ IPC or latency path is touched (no latency budget section needed).
 ## 15. Open Points
 
 1. Walkthrough numbering: `origin/main` already has `183_gui_brand_redesign.md` and `184_gui_frame_pacing_and_egui_ids.md`,
-   while this branch has `183_remote_companion.md`–`187_remote_web_push.md`. The collision predates this spec; it must be
-   resolved when the branch is rebased on `main` (renumbering the branch walkthroughs). `188_remote_brand.md` is used
-   here.
+   while this branch had `183_remote_companion.md`–`187_remote_web_push.md`. The collision predated this spec; it was
+   resolved on 2026-10-06 by renumbering the branch walkthroughs +2 (`185_remote_companion.md`–`189_remote_web_push.md`),
+   and this change's walkthrough is `190_remote_brand_redesign.md` (planned here as `188_remote_brand.md`).
 2. `Docs/GUI_APPLICATION.md` §5 (on `main`) should later point to the ADR as the project-wide brand rule; not edited
    here to avoid a conflict.
 3. RMC88 needs the owner on the iPhone (home-screen icon must be re-added to refresh the cached icon).

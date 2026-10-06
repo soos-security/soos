@@ -5,7 +5,7 @@
   stashed, deployed or restarted by agents (O-5).
 - **Inputs**: owner decisions O-1 to O-5 (2026-10-06), `AI/research_alerts.md` (read-only host research, systemd 262,
   Linux-PAM 1.7.3), ADRs 2026-10-05 and 2026-10-06 (x3) on `soos-remote`, `Docs/REMOTE_COMPANION.md`, walkthroughs
-  183–185, `crates/remote/src/*.rs`, `crates/remote/tests/common/harness.rs`, `packaging/soos-remote.service`,
+  185–187, `crates/remote/src/*.rs`, `crates/remote/tests/common/harness.rs`, `packaging/soos-remote.service`,
   `scripts/install_remote.sh`, `tests/invariants/src/remote_{companion,passkey}_contract.rs`.
 - **ADR**: "[2026-10-06] Failed-Password Alerts in `soos-remote` From the System Journal" (drafted in
   `AI/DECISIONS.md`; the text there is authoritative, §14 summarises it).
@@ -1006,7 +1006,7 @@ relayed-request/O-2 point of §0.1, the residual risks (§15) and the setup-only
   the page reports "Lock screen not monitored"; group check `id -nG`), what is shown, what is never shown ("never
   the typed password"), the acknowledge semantics (epoch, `409 stale_view`).
 - ADR 2026-10-05 item (5) said "push notifications … out of scope": unchanged; this ADR adds in-page alerts only.
-- Walkthrough `AI/walkthroughs/186_remote_auth_alerts.md` (traceability phase).
+- Walkthrough `AI/walkthroughs/188_remote_auth_alerts.md` (traceability phase).
 
 ## 17. Exit criteria
 

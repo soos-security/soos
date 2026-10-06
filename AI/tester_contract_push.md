@@ -175,7 +175,7 @@ server tests use only paused time with `FrozenClock`, no wall-clock assertion.
    depends on the answer except the feature itself. The same request also asks to see the passwords that were
    tried: no test, fixture or seam carries typed text, `AGENTS.md` forbids it, and a request for it needs an
    `AGENTS.md` amendment and its own ADR. The orchestrator must still obtain and record the confirmation (quoted,
-   dated) in the ADR and walkthrough 187.
+   dated) in the ADR and walkthrough 189.
 2. **`AGENTS.md` workspace tree (existing invariant GitHub #239)**: registering the two crates makes
    `maintainer_hygiene_contract::test_workspace_maps_list_every_member_and_real_tests_dirs` fail ("AGENTS.md workspace
    tree must list Cargo member 'crates/push-protocol'"). Spec §1.1 omits this file; Phase 4/6 must add

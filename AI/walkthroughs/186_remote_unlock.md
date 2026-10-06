@@ -1,4 +1,4 @@
-# Walkthrough 184 — Opt-In Remote Unlock in `soos-remote`
+# Walkthrough 186 — Opt-In Remote Unlock in `soos-remote`
 
 - **Date**: 2026-10-06
 - **Issue**: GitHub #339 (GitHub-only, no backlog id; commits carry `Refs #339`) — **Branch**:
@@ -11,7 +11,7 @@
 
 ## 1. Context & Objectives
 
-After confirming on the iPhone that the status page and *Lock now* work (walkthrough 183), the
+After confirming on the iPhone that the status page and *Lock now* work (walkthrough 185), the
 owner asked for the reverse action: unlock the PC from the phone. The owner chose two settings
 explicitly when offered a passkey / Face ID step and an automatic re-lock:
 
@@ -31,7 +31,7 @@ Tailscale login) on the tailnet can unlock the PC.
   session without a polkit rule, so the service gains no new right.
 - **Opt-in**: `allow_unlock` (TOML boolean, default `false`) in `remote.toml`. Disabled ⇒
   `403 {"result":"unlock_disabled"}` and no logind call. This keeps the merged default
-  behaviour identical to walkthrough 183 for any user who does not ask for it.
+  behaviour identical to walkthrough 185 for any user who does not ask for it.
 - **Route and CSRF**: `POST /api/unlock`, `405 Allow: POST` otherwise. `check_unlock_csrf` runs
   the same rules as the lock with its own action value (`X-Soos-Action: unlock`); both routes
   share one private `check_action_csrf`, so neither accepts the other's value. Dispatch order:
@@ -71,7 +71,7 @@ New tests (red before the implementation: they failed on the missing API only):
 | `server_tests::test_rmc_unlock_is_audited_without_identity` | one `INFO` audit line, no identity in logs |
 | `remote_companion_contract::test_rmc_unlock_is_opt_in_and_documented` | doc, page and ADR needles |
 
-Three assertions of the walkthrough-183 contract encoded the old "never unlock" scope and are
+Three assertions of the walkthrough-185 contract encoded the old "never unlock" scope and are
 **superseded by the ADR**, not weakened to make code pass:
 
 - `routes_tests` and `server_tests` listed `/api/unlock` among the `404` paths; it is now a real

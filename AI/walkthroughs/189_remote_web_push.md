@@ -1,4 +1,4 @@
-# Walkthrough 187 — Web Push Notifications for Failed-Password Alerts
+# Walkthrough 189 — Web Push Notifications for Failed-Password Alerts
 
 - **Date**: 2026-10-06
 - **Issue**: GitHub-only follow-up of #339 (feature level 2 of the failed-password alerts).
@@ -14,7 +14,7 @@
 
 ## 1. Context & Objectives
 
-Level 1 (walkthrough 186) shows failed password attempts on the PC inside the open
+Level 1 (walkthrough 188) shows failed password attempts on the PC inside the open
 `soos-remote` page. The owner wants to be told **even when the app is closed** (O-1): a standard
 Web Push notification to the home-screen web app on the iPhone (iOS 16.4 or later).
 

@@ -1,4 +1,4 @@
-# Walkthrough 183 — Remote Companion `soos-remote` (Lock Status and Remote Lock over Tailscale Serve)
+# Walkthrough 185 — Remote Companion `soos-remote` (Lock Status and Remote Lock over Tailscale Serve)
 
 - **Date**: 2026-10-05 (revision 4, D5a′ effective host: 2026-10-06)
 - **Issue**: GitHub #339 (GitHub-only, no backlog id; not registered in `scripts/sync_issue.py`;
