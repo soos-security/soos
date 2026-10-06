@@ -229,6 +229,22 @@ pub fn feed_guided_enrollment(
     Some(session.process_sample(pose, emb.as_slice(), is_live, is_centered))
 }
 
+/// Wait between two worker iterations that found no new camera frame.
+pub const WORKER_IDLE_POLL: Duration = Duration::from_millis(5);
+
+/// Delay before the next worker iteration: none right after a frame was analyzed, so the next
+/// frame is picked up as soon as it is published, and [`WORKER_IDLE_POLL`] otherwise. A fixed
+/// sleep after every frame added to the analysis time and skipped frames (about 27 instead of
+/// 30 analyzed frames per second with a 25 ms analysis).
+#[must_use]
+pub const fn worker_idle_delay(analyzed_frame: bool) -> Duration {
+    if analyzed_frame {
+        Duration::ZERO
+    } else {
+        WORKER_IDLE_POLL
+    }
+}
+
 /// Spawns the dedicated vision worker thread that continuously processes camera frames.
 pub fn spawn_vision_worker(
     camera: Arc<dyn CameraManager>,
@@ -250,10 +266,12 @@ pub fn spawn_vision_worker(
 
             while running.load(Ordering::Acquire) {
                 camera.notify_activity();
+                let mut analyzed_frame = false;
 
                 if let Some(frame) = camera.latest_frame() {
                     if frame.sequence != last_seq {
                         last_seq = frame.sequence;
+                        analyzed_frame = true;
                         frames_in_second = frames_in_second.saturating_add(1);
 
                         let now = Instant::now();
@@ -366,7 +384,10 @@ pub fn spawn_vision_worker(
                     egui_ctx.request_repaint();
                 }
 
-                std::thread::sleep(Duration::from_millis(10));
+                let delay = worker_idle_delay(analyzed_frame);
+                if !delay.is_zero() {
+                    std::thread::sleep(delay);
+                }
             }
         })
 }

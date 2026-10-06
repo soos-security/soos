@@ -144,6 +144,22 @@ strip = "symbols"
 overflow-checks = true
 debug = 1
 
+# Live preview hot path (YUYV/MJPEG conversion, letterbox, alignment, tensor packing, and the
+# volatile wipe of every ~1 MB frame buffer): unoptimized, `soos-gui` from `cargo run` analyzes
+# about 6 frames per second. Per-package overrides only raise `opt-level`; `overflow-checks`
+# and the unwind panic strategy still come from [profile.dev].
+[profile.dev.package.soos-vision]
+opt-level = 3
+
+[profile.dev.package.soos-inference-ort]
+opt-level = 3
+
+[profile.dev.package.jpeg-decoder]
+opt-level = 3
+
+[profile.dev.package.zeroize]
+opt-level = 3
+
 [profile.test]
 overflow-checks = true
 debug = 1

@@ -76,6 +76,19 @@ waits on I/O it does not own.
   `MAX_PROFILE_LIST_BYTES` (1 MiB) while it is read (`read_bounded`, `Read::take`); an oversized
   output kills the helper.
 
+- **Frame pacing (walkthrough 184)**: the daemon preview worker keeps a fixed cadence of
+  `PREVIEW_POLL_INTERVAL` (33 ms) from one request to the next (`ipc_camera::frame_cadence_delay`
+  subtracts the exchange time; a slow exchange polls again at once), which stays below the
+  daemon default of 40 preview requests per second. The vision worker polls again immediately
+  after it analyzed a frame and waits `WORKER_IDLE_POLL` (5 ms) only when no new frame was
+  available (`worker::worker_idle_delay`). Both used to sleep a fixed time after each frame,
+  which added to the 25 ms analysis and capped the live view at about 27 analyzed frames per
+  second in release builds (30 now, the camera rate).
+- **Debug builds**: `[profile.dev]` optimizes the preview hot path (`soos-vision`,
+  `soos-inference-ort`, `jpeg-decoder`, `zeroize`). Unoptimized, `cargo run -p soos-gui`
+  analyzed about 6 frames per second; it now reaches about 23. Packages and `scripts/install.sh`
+  build the release profile.
+
 ## 1a. Runtime Camera Source (GitHub #154 / #150)
 
 The camera source is not chosen once at startup. `camera_source::CameraSourceSupervisor` follows
@@ -239,7 +252,9 @@ Failure paths without a daemon or camera (oversized, zero-length and truncated p
 daemon without camera, `EACCES` socket, direct-mode `EACCES` / `EBUSY`) are covered by
 `crates/gui/tests/ipc_camera_failure_tests.rs` (matrix CHT5–CHT6, GitHub #198).
 Visual design system: rows GUX1–GUX13, `crates/gui/tests/theme_tests.rs` and
-`crates/gui/tests/brand_layout_tests.rs`.
+`crates/gui/tests/brand_layout_tests.rs`. Frame pacing and stable card ids: rows GFP1–GFP3,
+`crates/gui/tests/ipc_preview_cadence_tests.rs`, `crates/gui/tests/worker_pacing_tests.rs` and
+`crates/gui/tests/card_id_stability_tests.rs`.
 
 ## 5. Visual Design System (brand redesign, walkthrough 183)
 
@@ -323,4 +338,8 @@ and 16-point gap; the CLP4 / GARP3 minimum canvas sizes still hold with the deve
 
 In the right column (`column_stack_card_first`), the card first gets the height its content
 needs (measured on the previous frame), the stat tile shrinks toward 140 points, and the tiles
-are dropped entirely before the card would have to scroll.
+are dropped entirely before the card would have to scroll. Because a second egui pass in the
+same frame can read the new measurement and show or hide a tile above the card, each card's
+content runs in an explicit id scope (`widgets::card_scope_id`: the parent's stable id and the
+card's `id_salt`, never the parent's auto-id counter), so its widget ids never shift between
+passes (no "Widget rect changed id between passes" warning, no lost hover or scroll state).

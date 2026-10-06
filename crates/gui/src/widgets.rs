@@ -410,6 +410,14 @@ pub const STAT_TILE_MIN: f32 = 140.0;
 /// Vertical chrome of [`card_in_rect`] around its scroll content (top and bottom margins).
 pub const CARD_CHROME_H: f32 = 38.0;
 
+/// Explicit id of a card's content scope: the parent's stable id and the card's `id_salt`
+/// only, never the parent's auto-id counter, so the content ids do not shift with what was laid
+/// out before the card (a stat tile shown on one egui pass and hidden on the next).
+/// `id_salt` must therefore be unique among the cards drawn in the same parent `Ui`.
+fn card_scope_id(ui: &Ui, id_salt: &str) -> egui::Id {
+    ui.id().with(("soos_card_scope", id_salt))
+}
+
 fn content_height_id(id_salt: &str) -> egui::Id {
     egui::Id::new(("soos_card_content_height", id_salt))
 }
@@ -832,19 +840,24 @@ pub fn card_in_rect<R>(
         Pos2::new(rect.max.x - 18.0, rect.max.y - 14.0),
     );
     let output = ui
-        .scope_builder(egui::UiBuilder::new().max_rect(inner), |ui| {
-            egui::ScrollArea::vertical()
-                .id_salt(id_salt)
-                .auto_shrink([false, false])
-                .show(ui, |ui| {
-                    // Keep a small right margin so the floating scroll bar never covers text.
-                    ui.set_width((ui.available_width() - 4.0).max(0.0));
-                    let top = ui.min_rect().min.y;
-                    let result = add_contents(ui);
-                    (result, ui.min_rect().max.y - top)
-                })
-                .inner
-        })
+        .scope_builder(
+            egui::UiBuilder::new()
+                .id(card_scope_id(ui, id_salt))
+                .max_rect(inner),
+            |ui| {
+                egui::ScrollArea::vertical()
+                    .id_salt(id_salt)
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        // Keep a small right margin so the floating scroll bar never covers text.
+                        ui.set_width((ui.available_width() - 4.0).max(0.0));
+                        let top = ui.min_rect().min.y;
+                        let result = add_contents(ui);
+                        (result, ui.min_rect().max.y - top)
+                    })
+                    .inner
+            },
+        )
         .inner;
     store_content_height(ui, id_salt, output.1);
     output.0
@@ -1210,19 +1223,24 @@ pub fn card_in_rect_with_footer<R>(
         ),
     );
     let (result, content_h) = ui
-        .scope_builder(egui::UiBuilder::new().max_rect(inner), |ui| {
-            egui::ScrollArea::vertical()
-                .id_salt(id_salt)
-                .auto_shrink([false, false])
-                .show(ui, |ui| {
-                    // Keep a small right margin so the floating scroll bar never covers text.
-                    ui.set_width((ui.available_width() - 4.0).max(0.0));
-                    let top = ui.min_rect().min.y;
-                    let result = add_contents(ui);
-                    (result, ui.min_rect().max.y - top)
-                })
-                .inner
-        })
+        .scope_builder(
+            egui::UiBuilder::new()
+                .id(card_scope_id(ui, id_salt))
+                .max_rect(inner),
+            |ui| {
+                egui::ScrollArea::vertical()
+                    .id_salt(id_salt)
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        // Keep a small right margin so the floating scroll bar never covers text.
+                        ui.set_width((ui.available_width() - 4.0).max(0.0));
+                        let top = ui.min_rect().min.y;
+                        let result = add_contents(ui);
+                        (result, ui.min_rect().max.y - top)
+                    })
+                    .inner
+            },
+        )
         .inner;
     store_content_height(ui, id_salt, content_h);
     ui.painter().hline(

@@ -28,15 +28,16 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use zeroize::Zeroizing;
 
 /// Read timeout applied to every preview exchange with the daemon.
 const PREVIEW_READ_TIMEOUT: Duration = Duration::from_millis(2500);
 /// Write timeout applied to every preview exchange with the daemon.
 const PREVIEW_WRITE_TIMEOUT: Duration = Duration::from_millis(500);
-/// Poll interval targeting roughly 30 preview frames per second.
-const PREVIEW_POLL_INTERVAL: Duration = Duration::from_millis(33);
+/// Poll interval targeting roughly 30 preview frames per second, measured from one request to
+/// the next (see [`frame_cadence_delay`]); below the daemon default of 40 requests per second.
+pub const PREVIEW_POLL_INTERVAL: Duration = Duration::from_millis(33);
 /// Back-off applied after the daemon reported a rate-limit refusal.
 const RATE_LIMIT_BACKOFF: Duration = Duration::from_millis(250);
 /// Back-off applied while the daemon reports itself unavailable.
@@ -384,9 +385,21 @@ pub fn frame_from_preview(resp: &mut PreviewResponse) -> Result<Option<Frame>, I
     )))
 }
 
+/// Delay before the next preview request when the previous exchange took `elapsed`.
+///
+/// Keeps a fixed cadence of [`PREVIEW_POLL_INTERVAL`] between requests: sleeping the full
+/// interval after each reply would add the round trip and decode time to every frame (about 27
+/// instead of 30 frames per second). A slow exchange polls again immediately.
+#[must_use]
+pub fn frame_cadence_delay(elapsed: Duration) -> Duration {
+    PREVIEW_POLL_INTERVAL.saturating_sub(elapsed)
+}
+
 /// Outcome of one polling iteration, deciding how the worker loop continues.
 enum PollStep {
-    /// Keep polling on the same connection after the given delay.
+    /// Keep polling on the same connection at the frame cadence ([`frame_cadence_delay`]).
+    Cadence,
+    /// Keep polling on the same connection after the given back-off.
     Continue(Duration),
     /// Drop the connection and reconnect after `RECONNECT_DELAY`.
     Reconnect,
@@ -401,7 +414,7 @@ fn poll_once(stream: &mut UnixStream, uid: u32, state: &WorkerState) -> PollStep
             state.had_frame.store(true, Ordering::Release);
             state.set_error(None);
             state.is_ready.store(true, Ordering::Release);
-            PollStep::Continue(PREVIEW_POLL_INTERVAL)
+            PollStep::Cadence
         }
         Ok(None) => {
             // Before the first frame an empty preview means the daemon camera is warming up.
@@ -413,7 +426,7 @@ fn poll_once(stream: &mut UnixStream, uid: u32, state: &WorkerState) -> PollStep
                 state.set_error(Some(IpcPreviewError::Unavailable));
                 PollStep::Continue(UNAVAILABLE_BACKOFF)
             } else {
-                PollStep::Continue(PREVIEW_POLL_INTERVAL)
+                PollStep::Cadence
             }
         }
         Err(IpcPreviewError::Unauthorized) => {
@@ -454,7 +467,9 @@ fn run_ipc_camera_worker(socket_path: PathBuf, state: &WorkerState) {
         configure_stream(&stream);
 
         while state.running.load(Ordering::Acquire) {
+            let started = Instant::now();
             match poll_once(&mut stream, uid, state) {
+                PollStep::Cadence => thread::sleep(frame_cadence_delay(started.elapsed())),
                 PollStep::Continue(delay) => thread::sleep(delay),
                 PollStep::Reconnect => break,
                 PollStep::Stop => {
