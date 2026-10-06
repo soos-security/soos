@@ -574,8 +574,8 @@ fn test_rwp_runtime_constants_match_the_spec() {
     assert_eq!(PUSH_ROUTE_MIN_INTERVAL_MS, 1000);
     assert_eq!(PUSH_EXCHANGE_TIMEOUT_MS, 18_000);
     assert_eq!(PUSH_CONNECT_UNIX_TIMEOUT_MS, 1000);
-    assert_eq!(PUSH_TOPIC, "soos-alerts");
-    assert_eq!(PUSH_TEST_TOPIC, "soos-test");
+    assert_eq!(PUSH_TOPIC, "soosalerts");
+    assert_eq!(PUSH_TEST_TOPIC, "soostest");
 }
 
 // ---------------------------------------------------------------------------------------
@@ -1044,7 +1044,7 @@ async fn test_rwp_live_attempt_sends_one_coalesced_notification() {
         assert_eq!(req.ttl_s, PUSH_TTL_S);
         assert_eq!(req.ttl_s, 43_200);
         assert_eq!(req.urgency, Urgency::High);
-        assert_eq!(req.topic.as_deref(), Some("soos-alerts"));
+        assert_eq!(req.topic.as_deref(), Some("soosalerts"));
         let vapid = verify_vapid(&req.authorization, Some(&public_key));
         assert_eq!(vapid.header, "{\"typ\":\"JWT\",\"alg\":\"ES256\"}");
         let origin = PushEndpoint::parse(endpoint).unwrap().origin();
@@ -1358,7 +1358,7 @@ async fn test_rwp_notification_rate_is_bounded() {
 // ---------------------------------------------------------------------------------------
 
 /// Test 31 (RMC68, §6.4, F-5): no subscription is `409`; with two, `202 test_queued` and
-/// one delivery each with the test payload and `Topic: soos-test`; the test gate; a body is
+/// one delivery each with the test payload and `Topic: soostest`; the test gate; a body is
 /// refused; a test sent while an alert retry is pending changes neither the retry nor its
 /// counts.
 #[tokio::test(start_paused = true)]
@@ -1380,7 +1380,7 @@ async fn test_rwp_test_notification() {
     for (endpoint, ua) in endpoints.iter().zip(&uas) {
         let calls = t.calls_to(endpoint);
         assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].topic(), Some("soos-test"));
+        assert_eq!(calls[0].topic(), Some("soostest"));
         assert_eq!(calls[0].request.ttl_s, PUSH_TTL_S);
         assert_eq!(payload_of(&calls[0], ua), test_json());
     }

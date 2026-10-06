@@ -381,10 +381,12 @@ pub const PUSH_MAX_ATTEMPT_AGE_MS: u64 = 300_000;
 pub const PUSH_RETRY_DELAYS_MS: [u64; 2] = [5_000, 30_000];
 /// `TTL` header of every notification.
 pub const PUSH_TTL_S: u32 = 43_200;
-/// `Topic` of alert summaries (an offline phone receives only the newest).
-pub const PUSH_TOPIC: &str = "soos-alerts";
-/// `Topic` of the test notification (never replaces an undelivered alert).
-pub const PUSH_TEST_TOPIC: &str = "soos-test";
+/// `Topic` of alert summaries (an offline phone receives only the newest). ASCII letters and
+/// digits only: `web.push.apple.com` answered `400 BadWebPushTopic` to a `-` (observed on the
+/// owner's iPhone, 2026-10-06), although RFC 8030 allows the base64url alphabet.
+pub const PUSH_TOPIC: &str = "soosalerts";
+/// `Topic` of the test notification (never replaces an undelivered alert); same alphabet.
+pub const PUSH_TEST_TOPIC: &str = "soostest";
 /// `Urgency` of every notification.
 pub const PUSH_URGENCY: soos_push_protocol::Urgency = soos_push_protocol::Urgency::High;
 /// Gate of `POST /api/push/test`.
@@ -436,6 +438,23 @@ const _: () = assert!(!const_bytes_eq(
     PUSH_TEST_TOPIC.as_bytes()
 ));
 const _: () = assert!(PUSH_TOPIC.len() <= soos_push_protocol::MAX_TOPIC_LEN);
+const _: () = assert!(is_ascii_alphanumeric_topic(PUSH_TOPIC.as_bytes()));
+const _: () = assert!(is_ascii_alphanumeric_topic(PUSH_TEST_TOPIC.as_bytes()));
+
+/// Compile-time check that a `Topic` uses only ASCII letters and digits (Apple's push
+/// service refused `-` with `400 BadWebPushTopic`; `_` is excluded as a precaution).
+const fn is_ascii_alphanumeric_topic(bytes: &[u8]) -> bool {
+    !bytes.is_empty() && all_ascii_alphanumeric(bytes)
+}
+
+/// Every byte is an ASCII letter or digit (an empty slice is `true`).
+const fn all_ascii_alphanumeric(bytes: &[u8]) -> bool {
+    match bytes {
+        [] => true,
+        [first, rest @ ..] => first.is_ascii_alphanumeric() && all_ascii_alphanumeric(rest),
+    }
+}
+
 const _: () = assert!(PUSH_TEST_TOPIC.len() <= soos_push_protocol::MAX_TOPIC_LEN);
 const _: () = assert!(VAPID_JWT_REUSE_S < VAPID_JWT_LIFETIME_S);
 const _: () = assert!(PUSH_TTL_S <= soos_push_protocol::MAX_PUSH_TTL_S);

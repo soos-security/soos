@@ -99,8 +99,8 @@ fn test_rwp_push_constants_match_the_spec() {
     assert_eq!(PUSH_MAX_PER_HOUR, 20);
     assert_eq!(PUSH_MAX_ATTEMPT_AGE_MS, 300_000);
     assert_eq!(PUSH_TTL_S, 43_200);
-    assert_eq!(PUSH_TOPIC, "soos-alerts");
-    assert_eq!(PUSH_TEST_TOPIC, "soos-test");
+    assert_eq!(PUSH_TOPIC, "soosalerts");
+    assert_eq!(PUSH_TEST_TOPIC, "soostest");
     assert_eq!(MAX_PUSH_PLAINTEXT_BYTES, 1024);
 }
 
@@ -997,4 +997,18 @@ fn test_rwp_cli_lines_never_print_secrets() {
         subscription_line(4, &s),
         "4  updates.push.services.mozilla.com  created 0"
     );
+}
+
+/// Regression (owner hardware, 2026-10-06): `web.push.apple.com` answered
+/// `400 {"reason":"BadWebPushTopic"}` to `Topic: soos-test` and `201` to `Topic: soostest`, so
+/// every topic must use ASCII letters and digits only.
+#[test]
+fn test_rwp_topics_are_ascii_alphanumeric_for_apple() {
+    for topic in [PUSH_TOPIC, PUSH_TEST_TOPIC] {
+        assert!(!topic.is_empty(), "{topic:?}");
+        assert!(
+            topic.bytes().all(|b| b.is_ascii_alphanumeric()),
+            "{topic:?} must use ASCII letters and digits only (Apple BadWebPushTopic)"
+        );
+    }
 }

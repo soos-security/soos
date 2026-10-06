@@ -199,3 +199,12 @@ server tests use only paused time with `FrozenClock`, no wall-clock assertion.
    is `n + 3` bytes, so the at-limit path now uses `MAX_SOCKET_PATH_LEN - 3` (was `- 4`, which built 106 bytes while
    asserting 107) and the over-limit path `MAX_SOCKET_PATH_LEN - 2` (was `- 3`, which was exactly at the limit).
    The assertions and `MAX_SOCKET_PATH_LEN` are unchanged.
+3. `crates/remote/tests/push_tests.rs` (lines 102-103) and `crates/remote/tests/push_server_tests.rs` (lines
+   577-578, 1047, 1383, doc comment 1361): the pinned topic values `soos-alerts` / `soos-test` become
+   `soosalerts` / `soostest`. Evidence (owner's iPhone, 2026-10-06): `web.push.apple.com` answered
+   `400 {"reason":"BadWebPushTopic"}` to `Topic: soos-test` and `201` to `Topic: soostest` with the same VAPID key,
+   payload and RFC 8291 encryption; after the change the service reported `last_delivery: delivered`. The
+   assertions still check exact values. New regression test `test_rwp_topics_are_ascii_alphanumeric_for_apple`
+   (fails against `soos-test`); `crates/remote/src/lib.rs` const-checks both topics. The service-worker display tags
+   `soos-alerts` / `soos-test` in `sw.js` are not push topics and are unchanged; `push-protocol` keeps accepting the
+   RFC 8030 alphabet (`protocol_tests.rs` still uses `soos-alerts` to test that check).

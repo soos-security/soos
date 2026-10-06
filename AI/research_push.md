@@ -200,7 +200,7 @@ NONCE    = HMAC-SHA-256(PRK, nonce_info || 0x01)[0..11]
   missing or not positive; Apple stores up to 30 days at most depending on TTL).
 - `Urgency`: `very-low`, `low`, `normal` (default), `high` (RFC 8030 §5.3; Apple: "To attempt
   to deliver the notification immediately, specify `high`"; `BadUrgency` otherwise).
-- `Topic`: ≤ 32 characters of the base64url alphabet; a newer message with the same topic
+- `Topic`: ≤ 32 characters of the base64url alphabet (observed 2026-10-06: Apple is stricter and refuses `-` with `400 BadWebPushTopic`, so soos uses ASCII letters and digits only); a newer message with the same topic
   replaces an undelivered older one (RFC 8030 §5.4; Apple `BadWebPushTopic`). A fixed topic
   for alerts coalesces on the push service while the phone is offline.
 - Responses: `201 Created` success (RFC 8030 §5; Apple `201`). Apple: `400` bad request,

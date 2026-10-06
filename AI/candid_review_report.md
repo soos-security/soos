@@ -3,177 +3,101 @@
 - **Date**: 2026-10-06
 - **Target Branch**: `feat/remote-auth-alerts`
 - **Base (merge-base)**: `222665f`
-- **Reviewed-Diff-Fingerprint**: `39c34d962267df57fd25eccd1867a0b8b8fb35684a6f5ac3610375213b49c286`
-- **Audited Files**: full branch diff vs `origin/main` (`target/candid_diff.patch`, 56 257 lines,
-  108 files). Reviewed in depth (uncommitted alerts + Web Push work on top of `ea862cc`):
-  `crates/remote/src/{alerts,journal,push,webpush}.rs`,
-  `crates/remote/src/{server,routes,config,credentials,http,main,lib,assets,audit}.rs`,
-  `crates/remote/assets/{app.js,sw.js,index.html,style.css}`, `crates/push-protocol/src/lib.rs`,
-  `crates/push-sender/src/{lib,main}.rs`, `crates/push-sender/Cargo.toml`,
-  `packaging/soos-push-sender.service`, `scripts/install_remote.sh`, `scripts/candid_review.sh`,
-  `Cargo.toml`, `crates/remote/Cargo.toml`, `deny.toml`, `tests/invariants/src/{lib,
-  remote_passkey_contract,remote_alerts_contract,remote_push_contract}.rs`,
-  `crates/remote/tests/*`, `AI/DECISIONS.md`, `AI/tester_contract_push.md`,
-  `AI/walkthroughs/{186,187}_*.md`. The committed remote companion / passkey / funnel part of
-  the branch diff was scanned for test changes only (reviewed in earlier rounds).
+- **Reviewed-Diff-Fingerprint**: `4e9001617229845f6b4f208cd9c4a7705b4c021a5a1e267503df50466f4a1b70`
+- **Audited Files**: full branch diff vs `origin/main` (`target/candid_diff.patch`, 108 files). The
+  branch up to HEAD `86ad4df` was approved under fingerprint `39c34d96…`; the push-topic delta was
+  reviewed under `9bd0bbdd…` (CHANGES_REQUESTED: F-1 MAJOR, F-2 MINOR). This review re-checks the
+  whole uncommitted delta against HEAD: `crates/remote/src/lib.rs`,
+  `crates/remote/tests/push_tests.rs`, `crates/remote/tests/push_server_tests.rs`,
+  `AI/architect_spec_remote_web_push.md`, `AI/DECISIONS.md`, `AI/VERIFICATION_MATRIX.md`,
+  `AI/tester_contract_push.md`, `AI/research_push.md`, plus every remaining occurrence of the
+  topic strings (`crates/remote/assets/sw.js`, `tests/invariants/src/remote_push_contract.rs`,
+  `AI/auditor_constraints_push.md`, `crates/push-protocol/tests/protocol_tests.rs`,
+  `crates/push-sender/tests/sender_tests.rs`).
 
 ## 1. Executive Summary
 
-**Delta round (fingerprint `39c34d96…`, previous APPROVED report `11ca15a2…`).** Only two files
-changed since the previous review (verified by modification time against the previous report:
-no source, test, script or manifest file is newer): `AI/walkthroughs/187_remote_web_push.md`
-§6 and `AI/DECISIONS.md` Web Push ADR item (10) (`git diff --stat`: 3 insertions, 1 deletion).
-Both edits are accurate against the code and `AI/tester_contract_push.md` "Contract Migrations":
+Both findings of the previous review are resolved and nothing else changed. The code delta
+(`git diff HEAD -- crates`), re-read in full, matches the one described under `9bd0bbdd…` apart
+from the two corrected `lib.rs` doc comments: `PUSH_TOPIC = "soosalerts"`, `PUSH_TEST_TOPIC = "soostest"`, const-checked
+non-empty ASCII alphanumeric, distinct and `<= MAX_TOPIC_LEN`, with a new runtime regression test.
+The topic migration is now recorded consistently in the architect spec (W-11, §3.1 example and
+constant table with the alphanumeric rule, §6.4, tests 28/31 descriptions, RMC68, F-5), the Web
+Push ADR, matrix row RMC68, the tester contract (Contract Migration 3, with hardware evidence and
+exact line numbers that match the diff) and the research note. The `sw.js` display tags
+`soos-alerts` / `soos-test` (spec §5.6 lines 912-913, auditor C-26, invariant test 48) correctly
+remain unchanged, and the spec now says so explicitly. Targeted tests pass. **APPROVED.**
 
-- Walkthrough §6 now describes the two applied migrations. Checked: `config_tests.rs:1329-1339`
-  uses `MAX_SOCKET_PATH_LEN - 3` (asserted equal to 107) and `- 2` for the refused path, with
-  `MAX_SOCKET_PATH_LEN = 107` still asserted at line 62; `remote_passkey_contract.rs:351-358`
-  requires exactly one `.register(` and the `SERVICE_WORKER_PATH = "/sw.js"` registration with
-  scope `/`, matching `app.js:63, 837`. The old `- 4` building 106 bytes (`1 + n + 2`) is
-  correct arithmetic. Both tests re-run green here (`test_rmc_s18`, `test_rwp_push_config_keys`).
-- ADR item (10) now records both migrations and points at the tester contract; the three
-  setup-only `push: soos_remote::config::PushConfig::default(),` literals it lists exist in
-  `harness.rs:783`, `server_tests.rs:774` and `alerts_server_tests.rs:216` (the ADR writes the
-  short type name; prose only, not a defect).
+## 2. Test Changes
 
-Both previous MINOR findings are therefore resolved. The full-diff review below is carried
-over unchanged, because no code changed since `11ca15a2…`.
+Mechanical listing over the frozen patch (`target/candid_diff.patch`):
 
-### Carried-over summary of the previous round
-
-This is a re-review after the previous `CHANGES_REQUESTED` (fingerprint `946bce8e…`), which
-rested only on two failing contract tests. Both are now resolved by recorded Contract
-Migrations (end of `AI/tester_contract_push.md`), and I judge both legitimate:
-
-- (a) `test_rmc_s18`: `serviceWorker` removed from the forbidden tokens of `app.js`. This is a
-  supersession justified by the 2026-10-06 Web Push ADR item (7), which explicitly introduces
-  the same-origin `/sw.js` with no `fetch` handler and no storage. The removed needle is
-  replaced by a **stricter** positive rule: exactly one `.register(` in `app.js` and it must be
-  `navigator.serviceWorker.register(SERVICE_WORKER_PATH, { scope: "/" })` with
-  `SERVICE_WORKER_PATH = "/sw.js"`. All other forbidden tokens (storage, `allowCredentials`,
-  `innerHTML`, `eval(`) are untouched. `remote_push_contract` additionally pins the worker's
-  behaviour. Not a weakening.
-- (b) `test_rwp_push_config_keys`: pure fixture arithmetic. `"/" + n×"d" + "/s"` is `n + 3`
-  bytes; `MAX_SOCKET_PATH_LEN - 3` now builds exactly 107 (accepted) and `- 2` builds 108
-  (refused). The assertions and `MAX_SOCKET_PATH_LEN = 107` are unchanged; the old fixture made
-  the "over" case sit exactly at the limit, so the fix makes the test strictly more meaningful.
-- `journal_tests.rs:1075` comment reword: the comment now states the rule the production code
-  actually implements (first ` user=` after `rhost=`, ambiguous second occurrence → `Other`),
-  which is the fix of the previous SUGGESTION in `journal.rs:708-728`. The assertion beside it
-  is unchanged in substance and is consistent with the new production rule.
-
-The previous MINOR (misplaced doc comment, `config.rs:399-409`) and both SUGGESTIONS
-(`rfind(" user=")` ambiguity, synchronous store read in the dispatcher) are fixed.
-
-Full suites are green here: `cargo test -p soos-invariants -p soos-remote -p soos-push-protocol
--p soos-push-sender` (0 failures, every test binary listed below ok), `cargo clippy ... --all-targets
--- -D warnings` clean, `cargo fmt --all -- --check` clean.
-
-The core invariant holds: no typed password is ever captured, stored, logged, displayed or
-sent. The relayed request to see tried passwords is correctly declined; the ADR records owner
-confirmation of the safe subset as **pending**, and the branch must not be merged before the
-owner confirms it in his own words (ADR item (1)). Remaining findings are documentation drift
-only (MINOR).
-
-## 2. Test Changes (mechanical listing from step 3)
-
-- Test files touched: new `crates/push-protocol/tests/protocol_tests.rs`,
-  `crates/push-sender/tests/sender_tests.rs`, `crates/remote/tests/{alerts_server,alerts,
-  journal_process,journal,push_server,push,webpush}_tests.rs`,
-  `crates/remote/tests/common/{journal,push}.rs`, `tests/invariants/src/{remote_alerts,
-  remote_push}_contract.rs`; modified `crates/remote/tests/{config,http,routes,server}_tests.rs`,
-  `crates/remote/tests/common/harness.rs`, `tests/invariants/src/{lib,remote_passkey_contract}.rs`;
-  plus the test files of the earlier committed remote work.
-- Removed/changed assertions (`^-` hits with assert/test markers):
-  - `remote_passkey_contract.rs` — the `"serviceWorker",` entry of the S18 forbidden list.
-    Contract Migration 1 (Web Push ADR item (7)); replaced by two stricter assertions. Justified.
-  - `presence_unlock_contract.rs` `test_pau_zbus_is_used_only_by_the_daemon` (committed part):
-    documented Contract Migration (ADR 2026-10-05 item (7), PAU17), adds an `assert_eq!`.
-    Justified (reviewed in a previous round).
-- `config_tests.rs` vs `HEAD`: additions only, except the two repeat counts of the new
-  `test_rwp_push_config_keys` (Contract Migration 2, arithmetic defect). Justified.
-- `harness.rs` / `server_tests.rs`: setup-only `alerts:`/`push:` defaults in `RemoteConfig`
-  literals (ADR item (10)). Justified.
-- `tests/invariants/src/lib.rs`: module registration and `push-protocol`/`push-sender` added to
-  the forbid-unsafe list (strengthening).
-- New escape hatches (`#[ignore]`, `should_panic`, tolerance): none in code (the only hits are
-  prose).
-- Inline `mod tests` changes: none.
+- Removed assertion lines: one hit, `tests/invariants/src/presence_unlock_contract.rs`
+  (`test_pau_zbus_is_used_only_by_the_daemon`), part of the branch already approved under
+  `39c34d96…`; it is a recorded contract migration (ADR 2026-10-05 item (7), PAU17) that keeps
+  and widens the check. Unchanged by this delta.
+- New escape hatches (`#[ignore]`, `#[cfg(any())]`, `should_panic`, tolerance/epsilon): none
+  (the only hit is prose in a walkthrough stating none were added).
+- Delta-specific test edits vs HEAD:
+  - `push_tests.rs:102-103` and `push_server_tests.rs:577-578, 1047, 1383` (and doc comment
+    1361): pinned topic values change from `soos-alerts`/`soos-test` to `soosalerts`/`soostest`.
+    Exact-value strength kept. Justified by Contract Migration 3 in
+    `AI/tester_contract_push.md` (Apple `400 BadWebPushTopic` vs `201`, hardware evidence) and by
+    the updated RMC68 acceptance line in both the matrix and the spec. Line numbers in the
+    contract entry match the diff.
+  - New `test_rwp_topics_are_ascii_alphanumeric_for_apple` (`push_tests.rs:1002-1014`): fails
+    against `soos-test` or an empty topic; strengthens the contract.
 
 ## 3. Deep Reasoning Audit
 
 ### Logic & Architecture
-- Fixed failure parser: `rhost=` anchor, first ` user=` after it, refusal on a second
-  occurrence. Tried a typed user name `x user=sooshost` (lands before or after `rhost=`) and a
-  remote host name `a user=sooshost`: the first case yields the trailing name or `Other`; the
-  second leaves a second ` user=` in the remainder → `Other`. Only a class label is at stake.
-  PASS.
-- Correlator / AlertBook / push scheduler (coalesce 3 s, 30 s min interval, 20/h, retry caps,
-  only live attempts ≤ 300 s old, never the 24 h replay): re-checked against spec; unchanged
-  since the previous round. PASS.
-- RFC 8291: `PRK_key = HMAC(auth, ecdh)`, `IKM = HMAC(PRK_key, "WebPush: info\0"‖ua‖as‖0x01)`,
-  `PRK = HMAC(salt, IKM)`, `CEK/NONCE = HMAC(PRK, "Content-Encoding: aes128gcm|nonce\0"‖0x01)`
-  truncated to 16/12; plaintext‖`0x02`; header `salt‖rs(BE)‖idlen=65‖as_public`; all-zero ECDH
-  refused; Appendix A vector tested. RFC 8292: ES256 raw r‖s, `aud` = origin without trailing
-  slash, `exp` = now + 12 h. PASS.
-- Service worker: always shows a notification inside `waitUntil`, generic fallback on an
-  unreadable payload, no `fetch` handler, no storage, click only focuses an existing window or
-  opens `/` of its own origin. PASS.
+- Tried: does any producer still emit a hyphenated topic? The only consumer of both constants is
+  the dispatcher in `push.rs`; grep finds no other literal. `push-protocol` still accepts the RFC
+  8030 alphabet, which is correct (protocol-level validation, not Apple policy) and its tests
+  still use `soos-alerts` for that check, as documented. PASS.
+- Tried: spec vs code drift. Spec §3.1 table, example JSON (243), §6.4 (713-714), tests 28/31
+  (1090, 1103-1104), RMC68 (1243), F-5 (1338) all name `soosalerts`/`soostest`; ADR and matrix
+  RMC68 agree and give the rationale. F-1 resolved. PASS.
+- Tried: were the `sw.js` notification tags wrongly renamed? No: `sw.js:16,29` keep
+  `soos-alerts`/`soos-test`, matching spec §5.6 (912-913), auditor C-26 and invariant test 48
+  (`remote_push_contract.rs:680-681`). These are local `showNotification` tags, never sent to a
+  push service. PASS.
+- `const fn` recursion over a slice pattern is valid in const context; the empty-slice base case
+  is guarded by `!bytes.is_empty()` in the caller. The F-2 comment now says the helper returns
+  `true` for an empty slice and that `_` is excluded as a precaution, which is accurate. PASS.
 
 ### PAM Concurrency & Deadlines
-- `crates/pam` untouched. New code is in user-level `soos-remote` (Tokio permitted) and the
-  separate `soos-push-sender`. PASS.
+- No change under `crates/pam`. N/A, PASS.
 
 ### Panic Safety & Fail-Closed
-- No `unwrap/expect/panic!` in new production code (clippy workspace lints clean); indexing via
-  `get`. Journal/store/push failures surface as `unavailable`/`failed`, never as "no attempts";
-  push errors never touch lock/unlock/PAM outcomes. Store reads now on `spawn_blocking`. PASS.
+- The new checks are compile-time `const` asserts (a violation fails the build, never runtime).
+  No new `unwrap`/`expect`/indexing in production. No path to `Allow`/`PAM_SUCCESS`. PASS.
 
 ### Test Integrity & Anti-Weakening
-- Both migrations analysed in §1/§2: one ADR-justified supersession replaced by a stricter rule,
-  one arithmetic defect fix that preserves the "107 accepted, 108 refused" intent. No assertion
-  relaxed elsewhere; full suite green under the CI commands. PASS.
+- Every changed assertion keeps exact-value comparison and is justified by a recorded contract
+  migration with external evidence; a stronger property test is added. Verified:
+  `cargo test -p soos-remote --test push_tests --test push_server_tests` green;
+  `cargo test -p soos-invariants test_rmc_s38` green. PASS.
 
 ### Memory, Bounds & Secrets
-- No typed password, length or hash anywhere: journal names are reduced to `AccountClass`
-  inside `classify_entry`; views, SSE events and push payloads carry enums and counts only.
-  Journal reader buffers are zeroized (`journal.rs:293, 973-987`); lines ≤ 24 KiB checked before
-  JSON. PASS.
-- Authorization: `/api/alerts*` and `/api/push*` are never Funnel-public (`403 login_required`
-  before body read), CSRF header and rate gate before body read, SSE re-validates the session
-  before each send; push subscriptions ≤ 4, never evicted. PASS.
-- SSRF: exact three-host allowlist checked at subscribe time and again in the sender; resolver
-  refuses the request if any address is non-public (v4 special ranges incl. `100.64/10`; v6
-  limited to `2000::/3` minus Teredo/doc/6to4, so ULA, mapped, NAT64 are refused); port 443,
-  `https_only(true)`, `max_redirects(0)`, `proxy(None)`, `Agent::with_parts` with the filtering
-  resolver only. PASS.
-- Logging: no `tracing` in `push.rs`/`webpush.rs`; sender logs constant messages through
-  `set_global_default`, no `log` bridge, `ureq`/`rustls` targets off. Keys, CEK/nonce, auth
-  secrets and the body are `Zeroizing`; `DeliveryRequest` has no `Debug`. PASS.
+- Topics are shorter, still `<= MAX_TOPIC_LEN` (const-checked). No secret, endpoint or key added
+  to logs or docs. PASS.
 
 ### Supply Chain & Automation
-- `ureq =3.4.2` with rustls/ring/webpki-roots only in the sender; RustCrypto in `soos-remote`;
-  `deny.toml` skip reasons updated; `candid_review.sh` forbid-unsafe list extended; no
-  workflow change. PASS.
+- No `Cargo.*`, `deny.toml`, `.github/`, `scripts/` or `.githooks/` change in this delta. PASS.
 
 ### English-Only Policy
-- Code, comments, docs, UI strings in the reviewed hunks are English. PASS.
+- All new text (comments, spec, ADR, matrix, contract, research) is English. PASS.
 
 ## 4. Detailed Findings & Action Items
 
-- Previous **[MINOR]** `AI/walkthroughs/187_remote_web_push.md` (stale "cannot pass" text):
-  resolved, verified against the tests.
-- Previous **[MINOR]** `AI/DECISIONS.md:125` Web Push ADR item (10): resolved, both migrations
-  recorded.
-- **[SUGGESTION]** Merge gate, not a code defect: the Web Push ADR item (1) keeps "owner
-  confirmation pending" for the safe subset (classes and counts, never typed passwords); do not
-  merge until the owner has confirmed it in his own words.
+- **F-1 (previous, MAJOR)** — resolved: spec, ADR, matrix RMC68, tester contract and research
+  note record the `soosalerts`/`soostest` migration with evidence.
+- **F-2 (previous, MINOR)** — resolved: `lib.rs` comments are accurate.
+- **[SUGGESTION]** `AI/VERIFICATION_MATRIX.md:2115` — the RMC68 evidence column could also cite
+  `push_tests::test_rwp_topics_are_ascii_alphanumeric_for_apple` (it is named in the tester
+  contract). Optional; traceability phase may add it.
 
 ## 5. Final Verdict
-
-No CRITICAL, MAJOR or MINOR finding. The delta since `11ca15a2…` is documentation only and
-accurate. Both contract migrations are genuine (one ADR-backed supersession
-with a stricter replacement, one fixture arithmetic fix) and not weakenings; the full suite,
-clippy and fmt are green.
 
 **VERDICT: APPROVED**
