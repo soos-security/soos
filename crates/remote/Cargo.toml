@@ -16,7 +16,8 @@ name = "soos_remote"
 path = "src/lib.rs"
 
 [dependencies]
-tokio = { workspace = true }
+# `process`: the `journalctl` child of the failed-password alerts (ADR 2026-10-06).
+tokio = { workspace = true, features = ["process"] }
 nix = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
@@ -35,6 +36,10 @@ ciborium = { workspace = true }
 getrandom = { workspace = true }
 base64ct = { workspace = true }
 subtle = { workspace = true }
+# Web Push (ADR 2026-10-06, spec §4): RFC 8291 key schedule and aes128gcm, VAPID frames.
+hmac = { workspace = true }
+aes-gcm = { workspace = true }
+soos-push-protocol = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

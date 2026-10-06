@@ -950,3 +950,482 @@ fn test_rmc_auth_config_error_messages_are_fixed_english_text() {
     let err = parse_auth("rp_id = \"secret-node.example.com\"\n").unwrap_err();
     assert!(!err.to_string().contains("secret-node"));
 }
+
+// ---------------------------------------------------------------------------------------
+// Failed-password alerts (ADR 2026-10-06 "Failed-Password Alerts in `soos-remote` From the
+// System Journal", architect spec `AI/architect_spec_remote_auth_alerts.md` §3.2, tests 37,
+// 38 and 57; matrix RMC45, RMC54). New tests only; nothing above is changed.
+// ---------------------------------------------------------------------------------------
+
+mod alerts_contract {
+    use std::path::{Path, PathBuf};
+
+    use soos_remote::config::{
+        parse_config, resolve_alerts_ack_path, AlertsConfig, ConfigError, RemoteConfig,
+        DEFAULT_LOCK_SCREEN_PROGRAMS,
+    };
+    use soos_remote::{MAX_CREDENTIALS_PATH_LEN, MAX_LOCK_SCREEN_PROGRAMS};
+
+    const BASE: &str = "allowed_logins = [\"owner@example.com\"]\n";
+
+    fn parse(extra: &str) -> Result<RemoteConfig, ConfigError> {
+        parse_config(&format!("{BASE}{extra}"), Some(Path::new("/run/user/1000")))
+    }
+
+    /// A TOML basic string (control characters as `\\uXXXX`).
+    fn toml_string(raw: &str) -> String {
+        let mut out = String::from("\"");
+        for c in raw.chars() {
+            match c {
+                '"' => out.push_str("\\\""),
+                '\\' => out.push_str("\\\\"),
+                c if (c as u32) < 0x20 || c as u32 == 0x7f => {
+                    out.push_str(&format!("\\u{:04X}", c as u32));
+                }
+                c => out.push(c),
+            }
+        }
+        out.push('"');
+        out
+    }
+
+    fn programs(list: &[&str]) -> String {
+        let items: Vec<String> = list.iter().map(|p| toml_string(p)).collect();
+        format!("lock_screen_programs = [{}]\n", items.join(", "))
+    }
+
+    /// Test 37 (RMC45, A-2, §3.2): absent keys give `AlertsConfig::default()` (off, the four
+    /// built-in lockers); `password_alerts = true`; `lock_screen_programs` holds at most 4
+    /// absolute paths, deduplicated in order; `[]` stays empty; bad entries name their index.
+    #[test]
+    fn test_rmc_alerts_config_keys() {
+        assert_eq!(MAX_LOCK_SCREEN_PROGRAMS, 4);
+        assert_eq!(
+            DEFAULT_LOCK_SCREEN_PROGRAMS,
+            [
+                "/usr/bin/swaylock",
+                "/usr/bin/hyprlock",
+                "/usr/bin/gtklock",
+                "/usr/bin/waylock"
+            ]
+        );
+        let default = AlertsConfig::default();
+        assert!(!default.enabled);
+        assert_eq!(
+            default.lock_screen_programs,
+            DEFAULT_LOCK_SCREEN_PROGRAMS
+                .iter()
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(parse("").unwrap().alerts, AlertsConfig::default());
+        let config = parse("password_alerts = true\n").unwrap();
+        assert!(config.alerts.enabled);
+        assert_eq!(
+            config.alerts.lock_screen_programs,
+            AlertsConfig::default().lock_screen_programs
+        );
+        assert!(!parse("password_alerts = false\n").unwrap().alerts.enabled);
+        assert_eq!(
+            parse("password_alerts = \"yes\"\n").map(|c| c.alerts),
+            Err(ConfigError::Syntax)
+        );
+        assert_eq!(
+            parse("lock_screen_programs = \"/usr/bin/swaylock\"\n").map(|c| c.alerts),
+            Err(ConfigError::Syntax)
+        );
+
+        let four = [
+            "/home/me/.local/bin/swaylock-plugin",
+            "/usr/bin/swaylock",
+            "/opt/locker/bin/lock",
+            "/usr/local/bin/hyprlock",
+        ];
+        let config = parse(&programs(&four)).unwrap();
+        assert_eq!(config.alerts.lock_screen_programs, four.to_vec());
+        assert!(!config.alerts.enabled, "independent of password_alerts");
+        let five = ["/a/1", "/a/2", "/a/3", "/a/4", "/a/5"];
+        assert_eq!(
+            parse(&programs(&five)).map(|c| c.alerts),
+            Err(ConfigError::TooManyLockScreenPrograms {
+                max: MAX_LOCK_SCREEN_PROGRAMS
+            })
+        );
+        // Duplicates removed, order kept (a list of 5 with one duplicate is 4 entries).
+        let config = parse(&programs(&[
+            "/b/locker",
+            "/a/locker",
+            "/b/locker",
+            "/c/locker",
+        ]))
+        .unwrap();
+        assert_eq!(
+            config.alerts.lock_screen_programs,
+            vec!["/b/locker", "/a/locker", "/c/locker"]
+        );
+        // An empty list stays empty (no owner-UID lock-screen line is ever trusted).
+        assert!(parse("lock_screen_programs = []\n")
+            .unwrap()
+            .alerts
+            .lock_screen_programs
+            .is_empty());
+        // Exactly 4096 bytes is accepted; every invalid entry names its index.
+        let at_bound = format!("/{}", "p".repeat(4095));
+        assert_eq!(
+            parse(&programs(&[&at_bound]))
+                .unwrap()
+                .alerts
+                .lock_screen_programs,
+            vec![at_bound.clone()]
+        );
+        let over = format!("/{}", "p".repeat(4096));
+        for bad in [
+            "bin/swaylock",
+            "swaylock",
+            "/usr/bin/",
+            "/usr/../bin/swaylock",
+            "/usr/bin/..",
+            "",
+            over.as_str(),
+        ] {
+            assert_eq!(
+                parse(&programs(&["/usr/bin/ok", "/usr/bin/fine", bad])).map(|c| c.alerts),
+                Err(ConfigError::InvalidLockScreenProgram { index: 2 }),
+                "{bad:?}"
+            );
+        }
+    }
+
+    /// Test 38 (RMC54, §3.2): the ack file is the sibling `remote-alerts.json` of the
+    /// credential store; no parent or an over-long result is an error.
+    #[test]
+    fn test_rmc_alerts_ack_path_resolution() {
+        assert_eq!(
+            resolve_alerts_ack_path(Path::new("/home/me/.config/soos/remote-passkeys.json")),
+            Ok(PathBuf::from("/home/me/.config/soos/remote-alerts.json"))
+        );
+        assert_eq!(
+            resolve_alerts_ack_path(Path::new("/srv/keys/p.json")),
+            Ok(PathBuf::from("/srv/keys/remote-alerts.json"))
+        );
+        let invalid = Err(ConfigError::InvalidCredentialsPath {
+            max: MAX_CREDENTIALS_PATH_LEN,
+        });
+        assert_eq!(
+            resolve_alerts_ack_path(Path::new("/")),
+            invalid,
+            "no parent"
+        );
+        assert_eq!(
+            resolve_alerts_ack_path(Path::new("remote-passkeys.json")),
+            invalid,
+            "empty parent"
+        );
+        let deep = format!("/{}/p.json", "d".repeat(MAX_CREDENTIALS_PATH_LEN - 10));
+        assert!(deep.len() <= MAX_CREDENTIALS_PATH_LEN);
+        assert_eq!(
+            resolve_alerts_ack_path(Path::new(&deep)),
+            invalid,
+            "the resolved path is bounded"
+        );
+    }
+
+    /// Test 57 (RMC45, F-2 b): a configured path may not end in ` (deleted)` nor contain a
+    /// control byte; the error never echoes the path.
+    #[test]
+    fn test_rmc_alerts_lock_screen_program_validation() {
+        for (index, bad) in [
+            (0, "/usr/bin/swaylock (deleted)"),
+            (1, "/usr/bin/sway\u{1b}lock"),
+            (1, "/usr/bin/sway\nlock"),
+            (1, "/usr/bin/sway\u{7f}lock"),
+            (1, "/usr/bin/sway\tlock"),
+        ] {
+            let list = if index == 0 {
+                vec![bad]
+            } else {
+                vec!["/usr/bin/ok", bad]
+            };
+            let err = parse(&programs(&list)).map(|c| c.alerts).unwrap_err();
+            assert_eq!(
+                err,
+                ConfigError::InvalidLockScreenProgram { index },
+                "{bad:?}"
+            );
+            let text = err.to_string();
+            assert!(!text.contains("sway"), "the path is never echoed: {text}");
+            assert!(!text.contains("deleted"), "{text}");
+        }
+        // A path merely containing the words is fine.
+        assert!(parse(&programs(&["/opt/(deleted) dir/lock"])).is_ok());
+        let err = ConfigError::TooManyLockScreenPrograms { max: 4 };
+        assert!(err.to_string().contains('4'), "{err}");
+    }
+}
+
+// ---------------------------------------------------------------------------------------
+// Web Push notifications (ADR 2026-10-06 "Web Push Notifications for Failed-Password Alerts
+// Through a Separate Sender Unit", architect spec AI/architect_spec_remote_web_push.md §3.2,
+// §3.3, tests 37 and 38; matrix RMC60, RMC64)
+// ---------------------------------------------------------------------------------------
+
+mod push_contract {
+    use std::path::{Path, PathBuf};
+
+    use soos_remote::config::{
+        parse_config, resolve_push_store_path, ConfigError, PushConfig, PushPreviews, RemoteConfig,
+    };
+    use soos_remote::{MAX_CREDENTIALS_PATH_LEN, MAX_SOCKET_PATH_LEN};
+
+    const BASE: &str = "allowed_logins = [\"owner@example.com\"]\n";
+    const ENABLED: &str =
+        "password_alerts = true\nrp_id = \"pc.tail1234.ts.net\"\npush_notifications = true\n";
+
+    fn parse(extra: &str) -> Result<RemoteConfig, ConfigError> {
+        parse_config(&format!("{BASE}{extra}"), Some(Path::new("/run/user/1000")))
+    }
+
+    /// A TOML basic string (control characters as `\\uXXXX`).
+    fn toml_string(raw: &str) -> String {
+        let mut out = String::from("\"");
+        for c in raw.chars() {
+            match c {
+                '"' => out.push_str("\\\""),
+                '\\' => out.push_str("\\\\"),
+                c if (c as u32) < 0x20 || c as u32 == 0x7f => {
+                    out.push_str(&format!("\\u{:04X}", c as u32));
+                }
+                c => out.push(c),
+            }
+        }
+        out.push('"');
+        out
+    }
+
+    fn subject(raw: &str) -> Result<PushConfig, ConfigError> {
+        parse(&format!("{ENABLED}vapid_subject = {}\n", toml_string(raw))).map(|c| c.push)
+    }
+
+    /// Test 37 (RMC60, RMC64, W-2, W-12, §3.2, §3.3): absent keys give
+    /// `PushConfig::default()`; push needs alerts and `rp_id`; `vapid_subject` accepts only
+    /// a deliverable `mailto:` or `https:` subject and never echoes a refused value;
+    /// `push_socket_path` follows the `socket_path` rules; `push_previews` is `detailed` or
+    /// `generic`.
+    #[test]
+    fn test_rwp_push_config_keys() {
+        let default = PushConfig::default();
+        assert!(!default.enabled);
+        assert_eq!(default.vapid_subject, None);
+        assert_eq!(default.socket_path, None);
+        assert_eq!(default.previews, PushPreviews::Detailed);
+        assert_eq!(parse("").unwrap().push, PushConfig::default());
+        assert!(!parse("push_notifications = false\n").unwrap().push.enabled);
+        assert_eq!(
+            parse("push_notifications = \"yes\"\n").map(|c| c.push),
+            Err(ConfigError::Syntax)
+        );
+
+        // Requirements.
+        assert_eq!(
+            parse("rp_id = \"pc.tail1234.ts.net\"\npush_notifications = true\n").map(|c| c.push),
+            Err(ConfigError::PushRequiresAlerts)
+        );
+        assert_eq!(
+            parse("password_alerts = false\nrp_id = \"pc.tail1234.ts.net\"\npush_notifications = true\n")
+                .map(|c| c.push),
+            Err(ConfigError::PushRequiresAlerts)
+        );
+        assert_eq!(
+            parse("password_alerts = true\npush_notifications = true\n").map(|c| c.push),
+            Err(ConfigError::PushRequiresRpId)
+        );
+        let config = parse(ENABLED).unwrap();
+        assert!(config.push.enabled);
+        assert_eq!(config.push.vapid_subject, None, "default resolved later");
+        assert_eq!(config.push.previews, PushPreviews::Detailed);
+        let default_socket = PathBuf::from("/run/user/1000/soos-push/push.sock");
+        assert!(
+            config.push.socket_path.is_none()
+                || config.push.socket_path == Some(default_socket.clone()),
+            "{:?}",
+            config.push.socket_path
+        );
+
+        // vapid_subject accepted.
+        for good in [
+            "mailto:owner@proton.me",
+            "https://pc.tail1234.ts.net",
+            "https://github.com/Mysticaly622/soos",
+        ] {
+            assert_eq!(
+                subject(good).unwrap().vapid_subject,
+                Some(good.to_string()),
+                "{good}"
+            );
+        }
+        // vapid_subject refused, never echoed.
+        let long = format!("mailto:{}@proton.me", "a".repeat(250));
+        assert!(long.len() > 256);
+        for bad in [
+            "",
+            "mailto:",
+            "mailto:a@localhost",
+            "mailto:a@x.invalid",
+            "mailto:a@x.test",
+            "mailto:a@box.local",
+            "mailto:a@b.example",
+            "mailto:a@b.internal",
+            "mailto:a@b.home.arpa",
+            "mailto:a@x.localhost",
+            "mailto:mailto:a@b.co",
+            "mailto:a@nodot",
+            "mailto:a@@b.co",
+            "mailto:a<b@b.co",
+            "mailto:@b.co",
+            "https://x.test",
+            "https://h.local",
+            "https://localhost",
+            "https://nodot",
+            "http://pc.tail1234.ts.net",
+            "https://pc.tail1234.ts.net:8443",
+            "https://pc.tail1234.ts.net/a?b",
+            "https://pc.tail1234.ts.net/a#b",
+            "https://user@pc.tail1234.ts.net",
+            "pc.tail1234.ts.net",
+            "mailto:a @b.co",
+            "mailto:a\u{1}@b.co",
+            "https://pc.tail1234.ts.net/\u{e9}",
+            long.as_str(),
+        ] {
+            let err = subject(bad).unwrap_err();
+            assert_eq!(err, ConfigError::InvalidVapidSubject, "{bad:?}");
+            let text = err.to_string();
+            for needle in [
+                "mailto",
+                "proton",
+                "localhost",
+                "invalid",
+                "tail1234",
+                "8443",
+            ] {
+                assert!(!text.contains(needle), "{text} echoes {bad:?}");
+            }
+        }
+
+        // push_socket_path.
+        let invalid = || {
+            Err(ConfigError::InvalidPushSocketPath {
+                max: MAX_SOCKET_PATH_LEN,
+            })
+        };
+        let custom = parse(&format!(
+            "{ENABLED}push_socket_path = \"/run/user/1000/sp/s.sock\"\n"
+        ))
+        .unwrap();
+        assert_eq!(
+            custom.push.socket_path,
+            Some(PathBuf::from("/run/user/1000/sp/s.sock"))
+        );
+        // "/" + n + "/s" is n + 3 bytes (contract migration: the fixture used n - 4).
+        let at_bound = format!("/{}/s", "d".repeat(MAX_SOCKET_PATH_LEN - 3));
+        assert_eq!(at_bound.len(), MAX_SOCKET_PATH_LEN);
+        assert_eq!(
+            parse(&format!("{ENABLED}push_socket_path = {at_bound:?}\n"))
+                .unwrap()
+                .push
+                .socket_path,
+            Some(PathBuf::from(&at_bound))
+        );
+        let over = format!("/{}/s", "d".repeat(MAX_SOCKET_PATH_LEN - 2));
+        for bad in [
+            "relative/push.sock",
+            "/run/user/1000/soos-push/",
+            "/",
+            "",
+            over.as_str(),
+        ] {
+            assert_eq!(
+                parse(&format!("{ENABLED}push_socket_path = {bad:?}\n")).map(|c| c.push),
+                invalid(),
+                "{bad:?}"
+            );
+        }
+        // No runtime directory: an error only when push is enabled and no explicit path.
+        let explicit_socket = "socket_path = \"/srv/remote/remote.sock\"\n";
+        assert_eq!(
+            parse_config(&format!("{BASE}{explicit_socket}{ENABLED}"), None).map(|c| c.push),
+            Err(ConfigError::NoRuntimeDir)
+        );
+        assert!(parse_config(
+            &format!(
+                "{BASE}{explicit_socket}{ENABLED}push_socket_path = \"/srv/push/push.sock\"\n"
+            ),
+            None
+        )
+        .is_ok());
+        assert!(parse_config(
+            &format!("{BASE}{explicit_socket}password_alerts = true\n"),
+            None
+        )
+        .is_ok());
+
+        // push_previews.
+        assert_eq!(
+            parse(&format!("{ENABLED}push_previews = \"detailed\"\n"))
+                .unwrap()
+                .push
+                .previews,
+            PushPreviews::Detailed
+        );
+        assert_eq!(
+            parse(&format!("{ENABLED}push_previews = \"generic\"\n"))
+                .unwrap()
+                .push
+                .previews,
+            PushPreviews::Generic
+        );
+        for bad in ["Generic", "none", "", "detailed "] {
+            assert_eq!(
+                parse(&format!("{ENABLED}push_previews = {bad:?}\n")).map(|c| c.push),
+                Err(ConfigError::InvalidPushPreviews),
+                "{bad:?}"
+            );
+        }
+        // Every new error is configuration-class fixed text.
+        for err in [
+            ConfigError::PushRequiresAlerts,
+            ConfigError::PushRequiresRpId,
+            ConfigError::InvalidVapidSubject,
+            ConfigError::InvalidPushSocketPath {
+                max: MAX_SOCKET_PATH_LEN,
+            },
+            ConfigError::InvalidPushPreviews,
+        ] {
+            assert!(!err.to_string().is_empty());
+        }
+    }
+
+    /// Test 38 (RMC65, §3.2): the push store is the sibling `remote-push.json` of the
+    /// credential store, with the same errors as the ack file path.
+    #[test]
+    fn test_rwp_push_store_path_resolution() {
+        assert_eq!(
+            resolve_push_store_path(Path::new("/home/me/.config/soos/remote-passkeys.json")),
+            Ok(PathBuf::from("/home/me/.config/soos/remote-push.json"))
+        );
+        assert_eq!(
+            resolve_push_store_path(Path::new("/srv/keys/p.json")),
+            Ok(PathBuf::from("/srv/keys/remote-push.json"))
+        );
+        let invalid = Err(ConfigError::InvalidCredentialsPath {
+            max: MAX_CREDENTIALS_PATH_LEN,
+        });
+        assert_eq!(resolve_push_store_path(Path::new("/")), invalid);
+        assert_eq!(
+            resolve_push_store_path(Path::new("remote-passkeys.json")),
+            invalid
+        );
+        let deep = format!("/{}/p.json", "d".repeat(MAX_CREDENTIALS_PATH_LEN - 10));
+        assert_eq!(resolve_push_store_path(Path::new(&deep)), invalid);
+    }
+}

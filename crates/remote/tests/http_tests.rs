@@ -843,3 +843,30 @@ mod body_framing {
         assert_eq!(BodyError::TooLarge.to_string(), "body too large");
     }
 }
+
+// ---------------------------------------------------------------------------------------
+// Failed-password alerts (ADR 2026-10-06 "Failed-Password Alerts in `soos-remote` From the
+// System Journal", architect spec `AI/architect_spec_remote_auth_alerts.md` §6, test 41;
+// matrix RMC55). New tests only; nothing above is changed.
+// ---------------------------------------------------------------------------------------
+
+mod alerts_contract {
+    use soos_remote::http::{encode_sse_alerts_event, encode_sse_event};
+
+    /// Test 41 (RMC55): `event: alerts\ndata: <json>\n\n`; the status encoding is unchanged.
+    #[test]
+    fn test_rmc_alerts_sse_alerts_event_encoding() {
+        assert_eq!(
+            encode_sse_alerts_event("{\"state\":\"active\",\"through\":3}"),
+            b"event: alerts\ndata: {\"state\":\"active\",\"through\":3}\n\n".to_vec()
+        );
+        assert_eq!(
+            encode_sse_alerts_event(""),
+            b"event: alerts\ndata: \n\n".to_vec()
+        );
+        assert_eq!(
+            encode_sse_event("{\"state\":\"locked\"}"),
+            b"event: status\ndata: {\"state\":\"locked\"}\n\n".to_vec()
+        );
+    }
+}

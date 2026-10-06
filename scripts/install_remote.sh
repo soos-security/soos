@@ -2,15 +2,16 @@
 # =============================================================================
 # scripts/install_remote.sh — per-user installation of the soos remote companion
 # =============================================================================
-# Installs `soos-remote` (GitHub #339) for the current user only: the binary under
-# ~/.local/bin, the user unit under the systemd user directory and a configuration
+# Installs `soos-remote` (GitHub #339) and the optional Web Push sender `soos-push-sender`
+# (ADR 2026-10-06) for the current user only: both binaries under ~/.local/bin, both user
+# units under the systemd user directory and a configuration
 # template (only when absent) that refuses to start until the owner fills in the
 # Tailscale login. Never runs as root, never escalates privileges, never enables the
-# unit and never touches the Tailscale configuration: those steps are printed for the
+# units and never touches the Tailscale configuration: those steps are printed for the
 # owner to run.
 #
 #   scripts/install_remote.sh              install or update
-#   scripts/install_remote.sh --uninstall  stop the unit, remove binary and unit, keep config
+#   scripts/install_remote.sh --uninstall  stop the units, remove binaries and units, keep config
 # =============================================================================
 
 set -euo pipefail
@@ -28,6 +29,9 @@ BIN_DIR="${HOME}/.local/bin"
 BIN_PATH="${BIN_DIR}/soos-remote"
 UNIT_SRC="${REPO_ROOT}/packaging/soos-remote.service"
 UNIT_PATH="${CONFIG_HOME}/systemd/user/soos-remote.service"
+SENDER_BIN_PATH="${BIN_DIR}/soos-push-sender"
+SENDER_UNIT_SRC="${REPO_ROOT}/packaging/soos-push-sender.service"
+SENDER_UNIT_PATH="${CONFIG_HOME}/systemd/user/soos-push-sender.service"
 CONFIG_DIR="${CONFIG_HOME}/soos"
 CONFIG_PATH="${CONFIG_HOME}/soos/remote.toml"
 RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
@@ -38,24 +42,29 @@ usage() {
 }
 
 uninstall() {
-    echo "Stopping and disabling the user unit (if present)..."
+    echo "Stopping and disabling the user units (if present)..."
     systemctl --user stop soos-remote.service 2>/dev/null || true
     systemctl --user disable soos-remote.service 2>/dev/null || true
-    rm -f "${UNIT_PATH}" "${BIN_PATH}"
+    systemctl --user stop soos-push-sender.service 2>/dev/null || true
+    systemctl --user disable soos-push-sender.service 2>/dev/null || true
+    rm -f "${UNIT_PATH}" "${BIN_PATH}" "${SENDER_UNIT_PATH}" "${SENDER_BIN_PATH}"
     systemctl --user daemon-reload 2>/dev/null || true
-    echo "Removed ${BIN_PATH} and ${UNIT_PATH}."
-    echo "The configuration ${CONFIG_PATH} was kept."
+    echo "Removed ${BIN_PATH}, ${UNIT_PATH}, ${SENDER_BIN_PATH} and ${SENDER_UNIT_PATH}."
+    echo "The configuration ${CONFIG_PATH} and the stores next to it were kept."
 }
 
 install_companion() {
-    echo "Building soos-remote (release, locked)..."
-    (cd "${REPO_ROOT}" && cargo build --release --locked -p soos-remote)
+    echo "Building soos-remote and soos-push-sender (release, locked)..."
+    (cd "${REPO_ROOT}" && cargo build --release --locked -p soos-remote -p soos-push-sender)
 
-    echo "Installing the binary to ${BIN_PATH}..."
+    echo "Installing the binaries to ${BIN_DIR}..."
     install -Dm755 "${REPO_ROOT}/target/release/soos-remote" "${BIN_PATH}"
+    install -Dm755 "${REPO_ROOT}/target/release/soos-push-sender" "${SENDER_BIN_PATH}"
 
-    echo "Installing the user unit to ${UNIT_PATH}..."
+    echo "Installing the user units to ${CONFIG_HOME}/systemd/user/..."
     install -Dm644 "${UNIT_SRC}" "${UNIT_PATH}"
+    # packaging/soos-push-sender.service: installed, never enabled by this script.
+    install -Dm644 "${SENDER_UNIT_SRC}" "${SENDER_UNIT_PATH}"
 
     if [[ ! -e "${CONFIG_PATH}" ]]; then
         echo "Writing the configuration template to ${CONFIG_PATH} (mode 0600)..."
@@ -90,6 +99,18 @@ allowed_logins = []
 
 # Optional: remote unlock, always with a fresh passkey assertion (section 2a).
 # allow_unlock = false
+
+# Optional: failed-password alerts from the system journal (section 2c). Counts and classes
+# only, never the typed password.
+# password_alerts = false
+
+# Optional: Web Push notifications of those alerts to the home-screen app (section 2d).
+# Requires password_alerts = true and rp_id, and the soos-push-sender user unit.
+# push_notifications = false
+# Contact of the VAPID key (default: https://<rp_id>); a mailto: address also works.
+# vapid_subject = "mailto:you@example.com"
+# What the iPhone lock screen shows: "detailed" (source, account, count) or "generic".
+# push_previews = "detailed"
 TEMPLATE
         chmod 0600 "${CONFIG_PATH}"
     else
@@ -110,7 +131,27 @@ TEMPLATE
     echo "     run soos-remote enroll-code and register Face ID from the phone over the tailnet,"
     echo "     then optionally set allow_funnel = true, restart, and publish on port 443 with:"
     echo "     tailscale funnel --bg unix:${SOCKET_PATH}"
+    echo "  6. Optional push notifications on the phone (Docs/REMOTE_COMPANION.md section 2d):"
+    echo "     set password_alerts = true and push_notifications = true, then run"
+    echo "     systemctl --user enable --now soos-push-sender and restart soos-remote,"
+    echo "     open the home-screen app and tap Enable notifications."
     echo "Never use tailscale serve --http, nor tailscale funnel without rp_id and allow_funnel (see Docs/REMOTE_COMPANION.md)."
+    warn_resolver_stub
+}
+
+# The push sender's sandbox hides /run (TemporaryFileSystem=/run:ro), so a resolv.conf that
+# points into /run/systemd/resolve/ leaves it without DNS: every push would fail. Read-only
+# check, prints a warning only; the system configuration is never changed.
+warn_resolver_stub() {
+    local target
+    target="$(readlink -f /etc/resolv.conf 2>/dev/null || true)"
+    if [[ "${target}" == /run/* ]]; then
+        echo
+        echo "WARNING: /etc/resolv.conf resolves to ${target}, which the soos-push-sender"
+        echo "sandbox hides (/run is not visible to it). Push notifications would fail to resolve"
+        echo "the push service. See Docs/REMOTE_COMPANION.md section 2d (Limits) before enabling"
+        echo "push_notifications."
+    fi
 }
 
 case "${1:-}" in

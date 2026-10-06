@@ -17,10 +17,12 @@ use serde::Deserialize;
 
 use crate::identity::is_valid_host_name;
 use crate::{
-    CREDENTIALS_FILE_NAME, MAX_ALLOWED_HOSTS, MAX_ALLOWED_LOGINS, MAX_CONFIG_BYTES,
-    MAX_CREDENTIALS_PATH_LEN, MAX_LOGIN_LEN, MAX_POLL_INTERVAL_MS, MAX_SOCKET_PATH_LEN,
-    MIN_POLL_INTERVAL_MS, SOCKET_DIR_NAME, SOCKET_FILE_NAME, TS_NET_SUFFIX,
+    ALERTS_ACK_FILE_NAME, CREDENTIALS_FILE_NAME, MAX_ALLOWED_HOSTS, MAX_ALLOWED_LOGINS,
+    MAX_CONFIG_BYTES, MAX_CREDENTIALS_PATH_LEN, MAX_LOCK_SCREEN_PROGRAMS, MAX_LOGIN_LEN,
+    MAX_POLL_INTERVAL_MS, MAX_SOCKET_PATH_LEN, MAX_VAPID_SUBJECT_LEN, MIN_POLL_INTERVAL_MS,
+    PUSH_STORE_FILE_NAME, SOCKET_DIR_NAME, SOCKET_FILE_NAME, TS_NET_SUFFIX,
 };
+use soos_push_protocol::{PUSH_SOCKET_DIR_NAME, PUSH_SOCKET_FILE_NAME};
 
 /// Validated Tailscale login (`Tailscale-User-Login` value), stored ASCII-lowercased.
 #[derive(Clone, PartialEq, Eq)]
@@ -71,6 +73,69 @@ pub struct RemoteConfig {
     /// Passkey and Funnel settings (ADR 2026-10-06 "Tailscale Funnel Access and In-House
     /// Passkey Authentication for `soos-remote`").
     pub auth: AuthConfig,
+    /// Failed-password alert settings (ADR 2026-10-06 "Failed-Password Alerts in
+    /// `soos-remote` From the System Journal").
+    pub alerts: AlertsConfig,
+    /// Web Push settings (ADR 2026-10-06 "Web Push Notifications for Failed-Password Alerts
+    /// Through a Separate Sender Unit").
+    pub push: PushConfig,
+}
+
+/// What a push notification shows on the phone's lock screen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PushPreviews {
+    /// Source class, account class, kind and counts.
+    #[default]
+    Detailed,
+    /// A fixed generic text (counts kept in the hidden payload member).
+    Generic,
+}
+
+/// Web Push settings; `Default` = off.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct PushConfig {
+    /// `push_notifications`; default `false`.
+    pub enabled: bool,
+    /// `vapid_subject`; `None` → `https://<rp_id>` at resolution time.
+    pub vapid_subject: Option<String>,
+    /// `push_socket_path`; resolved to `$XDG_RUNTIME_DIR/soos-push/push.sock` when push is
+    /// enabled and the key is absent.
+    pub socket_path: Option<PathBuf>,
+    /// `push_previews`: `detailed` (default) or `generic`.
+    pub previews: PushPreviews,
+}
+
+/// Built-in lock-screen programs when `lock_screen_programs` is absent.
+pub const DEFAULT_LOCK_SCREEN_PROGRAMS: [&str; 4] = [
+    "/usr/bin/swaylock",
+    "/usr/bin/hyprlock",
+    "/usr/bin/gtklock",
+    "/usr/bin/waylock",
+];
+
+/// Longest `lock_screen_programs` entry (bytes).
+const MAX_LOCK_SCREEN_PROGRAM_LEN: usize = 4096;
+
+/// Password-alert settings; `Default` = off, built-in lock-screen programs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlertsConfig {
+    /// `password_alerts`; default `false`.
+    pub enabled: bool,
+    /// `lock_screen_programs`: 0..=`MAX_LOCK_SCREEN_PROGRAMS` absolute paths, duplicates
+    /// removed, order kept.
+    pub lock_screen_programs: Vec<String>,
+}
+
+impl Default for AlertsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            lock_screen_programs: DEFAULT_LOCK_SCREEN_PROGRAMS
+                .iter()
+                .map(|path| (*path).to_string())
+                .collect(),
+        }
+    }
 }
 
 /// Passkey and Funnel settings; `Default` = everything off.
@@ -153,12 +218,42 @@ pub enum ConfigError {
     /// `allow_funnel = true` without `rp_id`.
     #[error("allow_funnel requires rp_id")]
     FunnelNeedsRpId,
+    /// More than `MAX_LOCK_SCREEN_PROGRAMS` lock-screen programs.
+    #[error("too many lock_screen_programs (max {max})")]
+    TooManyLockScreenPrograms {
+        /// `MAX_LOCK_SCREEN_PROGRAMS`.
+        max: usize,
+    },
+    /// A lock-screen program path is not acceptable (the path is never echoed).
+    #[error("invalid lock_screen_programs entry at index {index}")]
+    InvalidLockScreenProgram {
+        /// Index in the file order.
+        index: usize,
+    },
     /// Relative, trailing-slash, parentless or oversize `credentials_path`.
     #[error("credentials_path must be absolute and at most {max} bytes")]
     InvalidCredentialsPath {
         /// `MAX_CREDENTIALS_PATH_LEN`.
         max: usize,
     },
+    /// `push_notifications = true` without `password_alerts = true`.
+    #[error("push_notifications requires password_alerts")]
+    PushRequiresAlerts,
+    /// `push_notifications = true` without `rp_id`.
+    #[error("push_notifications requires rp_id")]
+    PushRequiresRpId,
+    /// `vapid_subject` is not an acceptable subject (the value is never echoed).
+    #[error("vapid_subject must be a deliverable contact address or site")]
+    InvalidVapidSubject,
+    /// Relative, trailing-slash, parentless or oversize `push_socket_path`.
+    #[error("push_socket_path must be absolute and at most {max} bytes")]
+    InvalidPushSocketPath {
+        /// `MAX_SOCKET_PATH_LEN`.
+        max: usize,
+    },
+    /// `push_previews` is neither `detailed` nor `generic`.
+    #[error("push_previews must be detailed or generic")]
+    InvalidPushPreviews,
 }
 
 /// Pure. `Err(RunningAsRoot)` when `uid == 0 || euid == 0`.
@@ -185,6 +280,172 @@ struct FileConfig {
     rp_id: Option<String>,
     allow_funnel: Option<bool>,
     credentials_path: Option<String>,
+    password_alerts: Option<bool>,
+    lock_screen_programs: Option<Vec<String>>,
+    push_notifications: Option<bool>,
+    vapid_subject: Option<String>,
+    push_socket_path: Option<String>,
+    push_previews: Option<String>,
+}
+
+/// One `lock_screen_programs` entry: absolute, 1..=4096 bytes, no trailing `/`, no `..`
+/// component, no control byte, not ending in the kernel's ` (deleted)` suffix.
+fn valid_lock_screen_program(raw: &str) -> bool {
+    !raw.is_empty()
+        && raw.len() <= MAX_LOCK_SCREEN_PROGRAM_LEN
+        && raw.starts_with('/')
+        && !raw.ends_with('/')
+        && !raw.ends_with(crate::journal::EXE_DELETED_SUFFIX)
+        && !raw.split('/').any(|component| component == "..")
+        && !raw.bytes().any(|b| b < 0x20 || b == 0x7f)
+}
+
+/// The alert settings of the file (absent keys: off, built-in lock-screen programs).
+fn alerts_config(
+    password_alerts: Option<bool>,
+    lock_screen_programs: Option<Vec<String>>,
+) -> Result<AlertsConfig, ConfigError> {
+    let mut alerts = AlertsConfig {
+        enabled: password_alerts.unwrap_or(false),
+        ..AlertsConfig::default()
+    };
+    if let Some(list) = lock_screen_programs {
+        if list.len() > MAX_LOCK_SCREEN_PROGRAMS {
+            return Err(ConfigError::TooManyLockScreenPrograms {
+                max: MAX_LOCK_SCREEN_PROGRAMS,
+            });
+        }
+        let mut programs: Vec<String> = Vec::with_capacity(list.len());
+        for (index, path) in list.into_iter().enumerate() {
+            if !valid_lock_screen_program(&path) {
+                return Err(ConfigError::InvalidLockScreenProgram { index });
+            }
+            if !programs.contains(&path) {
+                programs.push(path);
+            }
+        }
+        alerts.lock_screen_programs = programs;
+    }
+    Ok(alerts)
+}
+
+/// Host names a push service refuses as a VAPID subject (research §3.2: Apple answers
+/// `403 BadJwtToken`).
+const RESERVED_SUBJECT_SUFFIXES: [&str; 7] = [
+    ".localhost",
+    ".local",
+    ".invalid",
+    ".test",
+    ".example",
+    ".internal",
+    ".home.arpa",
+];
+
+/// A subject host: a valid DNS name with at least one dot, not a reserved name.
+fn valid_subject_host(host: &str) -> bool {
+    is_valid_host_name(host)
+        && host.contains('.')
+        && host != "localhost"
+        && !RESERVED_SUBJECT_SUFFIXES
+            .iter()
+            .any(|suffix| host.ends_with(suffix))
+}
+
+/// `vapid_subject` (spec §3.2): `mailto:<local>@<domain>` or `https://<host>[/<path>]`,
+/// 1..=`MAX_VAPID_SUBJECT_LEN` printable ASCII bytes without space.
+fn validate_vapid_subject(raw: &str) -> Result<String, ConfigError> {
+    let invalid = ConfigError::InvalidVapidSubject;
+    if raw.is_empty()
+        || raw.len() > MAX_VAPID_SUBJECT_LEN
+        || !raw.bytes().all(|b| (0x21..=0x7e).contains(&b))
+    {
+        return Err(invalid);
+    }
+    if let Some(address) = raw.strip_prefix("mailto:") {
+        let mut parts = address.split('@');
+        let (Some(local), Some(domain), None) = (parts.next(), parts.next(), parts.next()) else {
+            return Err(invalid);
+        };
+        let local_ok = !local.is_empty()
+            && local.len() <= 64
+            && !local.bytes().any(|b| b"<>()[],;:\\\"".contains(&b));
+        if local_ok && valid_subject_host(domain) {
+            return Ok(raw.to_owned());
+        }
+        return Err(invalid);
+    }
+    if let Some(rest) = raw.strip_prefix("https://") {
+        let (host, path) = match rest.find('/') {
+            Some(slash) => rest.split_at(slash),
+            None => (rest, ""),
+        };
+        if valid_subject_host(host) && !path.contains('?') && !path.contains('#') {
+            return Ok(raw.to_owned());
+        }
+        return Err(invalid);
+    }
+    Err(invalid)
+}
+
+/// `push_previews`: exactly `detailed` or `generic`.
+fn parse_push_previews(raw: Option<&str>) -> Result<PushPreviews, ConfigError> {
+    match raw {
+        None | Some("detailed") => Ok(PushPreviews::Detailed),
+        Some("generic") => Ok(PushPreviews::Generic),
+        Some(_) => Err(ConfigError::InvalidPushPreviews),
+    }
+}
+
+/// The four push keys of the file.
+struct PushKeys {
+    push_notifications: Option<bool>,
+    vapid_subject: Option<String>,
+    push_socket_path: Option<String>,
+    push_previews: Option<String>,
+}
+
+/// The push settings of the file; the default sender socket is resolved only when push is
+/// enabled.
+fn push_config(
+    file: &PushKeys,
+    alerts: &AlertsConfig,
+    rp_id: Option<&str>,
+    runtime_dir: Option<&Path>,
+) -> Result<PushConfig, ConfigError> {
+    let enabled = file.push_notifications.unwrap_or(false);
+    if enabled && !alerts.enabled {
+        return Err(ConfigError::PushRequiresAlerts);
+    }
+    if enabled && rp_id.is_none() {
+        return Err(ConfigError::PushRequiresRpId);
+    }
+    let vapid_subject = match &file.vapid_subject {
+        Some(raw) => Some(validate_vapid_subject(raw)?),
+        None => None,
+    };
+    let invalid_socket = ConfigError::InvalidPushSocketPath {
+        max: MAX_SOCKET_PATH_LEN,
+    };
+    let socket_path = match &file.push_socket_path {
+        Some(raw) => Some(validate_socket_path(raw).map_err(|_| invalid_socket)?),
+        None if enabled => {
+            let dir = runtime_dir
+                .filter(|dir| !dir.as_os_str().is_empty() && dir.is_absolute())
+                .ok_or(ConfigError::NoRuntimeDir)?;
+            let path = dir.join(PUSH_SOCKET_DIR_NAME).join(PUSH_SOCKET_FILE_NAME);
+            if path.as_os_str().len() > MAX_SOCKET_PATH_LEN {
+                return Err(invalid_socket);
+            }
+            Some(path)
+        }
+        None => None,
+    };
+    Ok(PushConfig {
+        enabled,
+        vapid_subject,
+        socket_path,
+        previews: parse_push_previews(file.push_previews.as_deref())?,
+    })
 }
 
 /// An explicit `socket_path`: absolute, with a parent and a file name, no trailing `/`,
@@ -319,6 +580,14 @@ pub fn parse_config(text: &str, runtime_dir: Option<&Path>) -> Result<RemoteConf
         Some(raw) => Some(validate_credentials_path(&raw)?),
         None => None,
     };
+    let alerts = alerts_config(file.password_alerts, file.lock_screen_programs)?;
+    let push_keys = PushKeys {
+        push_notifications: file.push_notifications,
+        vapid_subject: file.vapid_subject,
+        push_socket_path: file.push_socket_path,
+        push_previews: file.push_previews,
+    };
+    let push = push_config(&push_keys, &alerts, rp_id.as_deref(), runtime_dir)?;
     Ok(RemoteConfig {
         allowed_logins,
         socket_path,
@@ -330,6 +599,8 @@ pub fn parse_config(text: &str, runtime_dir: Option<&Path>) -> Result<RemoteConf
             allow_funnel,
             credentials_path,
         },
+        alerts,
+        push,
     })
 }
 
@@ -421,6 +692,49 @@ pub fn resolve_credentials_path(
         .filter(|parent| !parent.as_os_str().is_empty())
         .ok_or_else(invalid)?;
     let path = parent.join(CREDENTIALS_FILE_NAME);
+    if path.as_os_str().len() > MAX_CREDENTIALS_PATH_LEN {
+        return Err(invalid());
+    }
+    Ok(path)
+}
+
+/// Pure. `<parent of credentials_path>/ALERTS_ACK_FILE_NAME` (the acknowledgement file of
+/// the failed-password alerts).
+///
+/// # Errors
+///
+/// [`ConfigError::InvalidCredentialsPath`] when `credentials_path` has no parent or the
+/// result exceeds `MAX_CREDENTIALS_PATH_LEN`.
+pub fn resolve_alerts_ack_path(credentials_path: &Path) -> Result<PathBuf, ConfigError> {
+    let invalid = || ConfigError::InvalidCredentialsPath {
+        max: MAX_CREDENTIALS_PATH_LEN,
+    };
+    let parent = credentials_path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .ok_or_else(invalid)?;
+    let path = parent.join(ALERTS_ACK_FILE_NAME);
+    if path.as_os_str().len() > MAX_CREDENTIALS_PATH_LEN {
+        return Err(invalid());
+    }
+    Ok(path)
+}
+
+/// Pure. `<parent of credentials_path>/PUSH_STORE_FILE_NAME` (the Web Push store).
+///
+/// # Errors
+///
+/// [`ConfigError::InvalidCredentialsPath`] when `credentials_path` has no parent or the
+/// result exceeds `MAX_CREDENTIALS_PATH_LEN`.
+pub fn resolve_push_store_path(credentials_path: &Path) -> Result<PathBuf, ConfigError> {
+    let invalid = || ConfigError::InvalidCredentialsPath {
+        max: MAX_CREDENTIALS_PATH_LEN,
+    };
+    let parent = credentials_path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .ok_or_else(invalid)?;
+    let path = parent.join(PUSH_STORE_FILE_NAME);
     if path.as_os_str().len() > MAX_CREDENTIALS_PATH_LEN {
         return Err(invalid());
     }

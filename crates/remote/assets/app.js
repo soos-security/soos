@@ -3,13 +3,26 @@
  *
  * Server data only ever reaches the DOM through textContent. The page keeps no state
  * beyond the live EventSource: no script-readable cookie (the web session cookie is
- * HttpOnly), no storage, no service worker. Staleness is measured with the browser's own
+ * HttpOnly), no storage. The only service worker (/sw.js) shows push notifications and
+ * does nothing else. Staleness is measured with the browser's own
  * clock from the arrival of the last event, never by comparing checked_unix_ms with the
  * phone's clock.
  *
  * Passkeys: every WebAuthn ceremony is modal (a tap, then Face ID / Touch ID), always with
  * user verification required, and never names a credential: the server only answers with a
  * challenge, so the phone offers the passkey it holds for this site.
+ *
+ * Failed-password alerts (ADR 2026-10-06 "Failed-Password Alerts in soos-remote From the
+ * System Journal"): the server only ever sends time, source class, account class, kind and
+ * count, never the typed password. The page shows them with textContent, says "No failed
+ * password attempts" only while the feature is active, and acknowledges exactly the view it
+ * displayed (epoch and through headers; a stale view is re-fetched, never acknowledged).
+ *
+ * Push notifications (ADR 2026-10-06 "Web Push Notifications for Failed-Password Alerts
+ * Through a Separate Sender Unit"): from the home-screen app, "Enable notifications" asks
+ * the permission from the tap itself, subscribes with the PC's public VAPID key fetched
+ * before the tap, and hands the subscription to the PC. A notification carries counts and
+ * classes only, never the typed password.
  */
 "use strict";
 
@@ -26,6 +39,9 @@ const TICK_MS = 1000;
 // Button labels (the markup carries the same text for the no-script fallback).
 const LOCK_LABEL = "Lock now";
 const UNLOCK_LABEL = "Unlock now";
+const PUSH_ENABLE_LABEL = "Enable notifications";
+const PUSH_TEST_LABEL = "Send test notification";
+const PUSH_DISABLE_LABEL = "Disable notifications";
 
 const STATUS_PATH = "/api/status";
 const EVENTS_PATH = "/api/events";
@@ -38,6 +54,36 @@ const LOGOUT_PATH = "/api/auth/logout";
 const UNLOCK_OPTIONS_PATH = "/api/auth/unlock/options";
 const REGISTER_OPTIONS_PATH = "/api/auth/register/options";
 const REGISTER_PATH = "/api/auth/register/verify";
+const ALERTS_PATH = "/api/alerts";
+const ALERTS_ACK_PATH = "/api/alerts/ack";
+const PUSH_PATH = "/api/push";
+const PUSH_SUBSCRIBE_PATH = "/api/push/subscribe";
+const PUSH_UNSUBSCRIBE_PATH = "/api/push/unsubscribe";
+const PUSH_TEST_PATH = "/api/push/test";
+const SERVICE_WORKER_PATH = "/sw.js";
+// History rows shown (the server keeps at most 32).
+const ALERTS_HISTORY_SHOWN = 10;
+
+const ALERT_SOURCES = {
+  lock_screen: "lock screen",
+  sudo: "sudo",
+  login: "login",
+  other: "other",
+};
+
+const ALERT_ACCOUNTS = {
+  owner: "your account",
+  root: "root",
+  other: "another account",
+};
+
+const ALERT_REASONS = {
+  no_journal_access: "the account cannot read the system journal",
+  journal_reader_failed: "journal reader stopped",
+  owner_unresolved: "the owner account could not be resolved",
+  overflow: "attempt counter exhausted, restart the service",
+  rng_failed: "the random source failed",
+};
 
 const LABELS = {
   locked: "Locked",
@@ -86,6 +132,20 @@ const enrollSection = document.getElementById("enroll");
 const enrollCode = document.getElementById("enroll-code");
 const enrollButton = document.getElementById("enroll-button");
 const enrollFeedback = document.getElementById("enroll-feedback");
+const alertsSection = document.getElementById("alerts");
+const alertsSummary = document.getElementById("alerts-summary");
+const alertsCoverage = document.getElementById("alerts-coverage");
+const alertsHistory = document.getElementById("alerts-history");
+const alertsAckButton = document.getElementById("alerts-ack");
+const alertsFeedback = document.getElementById("alerts-feedback");
+const pushSection = document.getElementById("push");
+const pushStateNode = document.getElementById("push-state");
+const pushDevices = document.getElementById("push-devices");
+const pushHint = document.getElementById("push-hint");
+const pushEnableButton = document.getElementById("push-enable");
+const pushTestButton = document.getElementById("push-test");
+const pushDisableButton = document.getElementById("push-disable");
+const pushFeedback = document.getElementById("push-feedback");
 
 let source = null;
 let latest = null;
@@ -95,6 +155,9 @@ let lockConfirmTimer = null;
 let unlockRequestedAt = 0;
 let unlockConfirmTimer = null;
 let signedOut = false;
+let alertsView = null;
+let pushView = null;
+let pushRegistration = null;
 
 function setText(node, text) {
   node.textContent = text;
@@ -189,6 +252,10 @@ function showLogin(message) {
   statusCard.hidden = true;
   logoutButton.hidden = true;
   enrollSection.hidden = true;
+  alertsSection.hidden = true;
+  alertsView = null;
+  pushSection.hidden = true;
+  pushView = null;
   setText(loginFeedback, message || " ");
 }
 
@@ -284,6 +351,13 @@ function openStream() {
       // A malformed event is ignored; the next one or the fetch below recovers.
     }
   });
+  source.addEventListener("alerts", function (event) {
+    try {
+      renderAlerts(JSON.parse(event.data));
+    } catch (_error) {
+      // A malformed event is ignored; the next one or the fetch below recovers.
+    }
+  });
   source.onerror = function () {
     // EventSource reconnects on its own; one fetch decides between a transient blip, an
     // expired web session and an unreachable PC.
@@ -318,12 +392,184 @@ function fetchStatus(markUnreachableOnFailure) {
     .then(function (view) {
       if (view !== null) {
         accept(view);
+        fetchAlerts();
       }
     })
     .catch(function () {
       if (markUnreachableOnFailure && !signedOut) {
         render(latest === null ? { state: "unreachable" } : latest, false);
       }
+    });
+}
+
+// --- failed-password alerts -----------------------------------------------------------
+
+function plural(count, word) {
+  return count + " " + word + (count === 1 ? "" : "s");
+}
+
+function clockTime(unixMs) {
+  if (typeof unixMs !== "number") {
+    return "--:--";
+  }
+  return new Date(unixMs).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
+
+function labelOf(table, key) {
+  return Object.prototype.hasOwnProperty.call(table, key) ? table[key] : "other";
+}
+
+function renderAlerts(view) {
+  if (signedOut || view === null || typeof view !== "object") {
+    return;
+  }
+  alertsView = view;
+  if (view.state === "disabled") {
+    alertsSection.hidden = true;
+    return;
+  }
+  alertsSection.hidden = false;
+  const wrong = typeof view.unacknowledged_wrong_password === "number" ? view.unacknowledged_wrong_password : 0;
+  const lockedOut = typeof view.unacknowledged_locked_out === "number" ? view.unacknowledged_locked_out : 0;
+  const notMonitored = view.lock_screen === "not_configured";
+  let counts = "";
+  if (wrong > 0 || lockedOut > 0) {
+    counts = plural(wrong, "failed password attempt");
+    counts += ", last at " + clockTime(view.last_unix_ms);
+    counts += " (" + labelOf(ALERT_SOURCES, view.last_source) + ")";
+    if (lockedOut > 0) {
+      counts += " and " + plural(lockedOut, "attempt") + " while locked out";
+    }
+  }
+  let summary;
+  if (view.state === "active") {
+    if (counts !== "") {
+      summary = counts;
+    } else if (notMonitored) {
+      summary = "No failed password attempts (sudo, login, other)";
+    } else {
+      summary = "No failed password attempts";
+    }
+  } else {
+    if (view.state === "unavailable") {
+      summary = "Password alerts unavailable";
+      if (Object.prototype.hasOwnProperty.call(ALERT_REASONS, view.reason)) {
+        summary += ": " + ALERT_REASONS[view.reason];
+      }
+    } else {
+      summary = "Password alerts starting";
+    }
+    if (counts !== "") {
+      summary += ". " + counts;
+    }
+  }
+  setText(alertsSummary, summary);
+  alertsSection.classList.toggle("alerts-attention", counts !== "");
+  alertsCoverage.hidden = !notMonitored;
+  setText(alertsCoverage, notMonitored ? "Lock screen not monitored — see setup" : " ");
+
+  while (alertsHistory.firstChild) {
+    alertsHistory.removeChild(alertsHistory.firstChild);
+  }
+  const history = Array.isArray(view.history) ? view.history.slice(0, ALERTS_HISTORY_SHOWN) : [];
+  history.forEach(function (record) {
+    const item = document.createElement("li");
+    const count = typeof record.count === "number" ? record.count : 0;
+    const what =
+      record.kind === "locked_out"
+        ? plural(count, "attempt") + " while locked out"
+        : plural(count, "wrong password");
+    setText(
+      item,
+      clockTime(record.last_unix_ms) +
+        " " +
+        labelOf(ALERT_SOURCES, record.source) +
+        ", " +
+        labelOf(ALERT_ACCOUNTS, record.account) +
+        ", " +
+        what
+    );
+    if (record.acknowledged === true) {
+      item.className = "acknowledged";
+    }
+    alertsHistory.appendChild(item);
+  });
+  alertsAckButton.hidden = !(wrong > 0 || lockedOut > 0) || typeof view.epoch !== "string";
+}
+
+function fetchAlerts() {
+  if (signedOut) {
+    return;
+  }
+  fetch(ALERTS_PATH, { method: "GET", cache: "no-store" })
+    .then(function (response) {
+      if (!response.ok) {
+        throw new Error("status " + response.status);
+      }
+      return response.json();
+    })
+    .then(renderAlerts)
+    .catch(function () {
+      // The status line already reports an unreachable PC.
+    });
+}
+
+function requestAlertsAck() {
+  const view = alertsView;
+  if (view === null || typeof view.epoch !== "string" || typeof view.through !== "number") {
+    return;
+  }
+  alertsAckButton.disabled = true;
+  fetch(ALERTS_ACK_PATH, {
+    method: "POST",
+    cache: "no-store",
+    headers: {
+      "X-Soos-Action": "alerts-ack",
+      "X-Soos-Alerts-Epoch": view.epoch,
+      "X-Soos-Alerts-Through": String(view.through),
+    },
+  })
+    .then(function (response) {
+      return response
+        .json()
+        .catch(function () {
+          return {};
+        })
+        .then(function (body) {
+          return { status: response.status, body: body };
+        });
+    })
+    .then(function (outcome) {
+      if (outcome.status === 200) {
+        setText(alertsFeedback, "Acknowledged");
+        renderAlerts(outcome.body);
+        return;
+      }
+      if (outcome.body.result === "login_required") {
+        showLogin("Your session ended, please sign in again");
+        return;
+      }
+      if (outcome.body.result === "stale_view") {
+        // The PC restarted since this view: show the fresh one, never acknowledge it blindly.
+        setText(alertsFeedback, "New attempts since this view, check them and acknowledge again");
+        fetchAlerts();
+        return;
+      }
+      const reasons = {
+        rate_limited: "Please wait a moment before acknowledging again",
+        alerts_disabled: "Password alerts are disabled (password_alerts in remote.toml)",
+        unavailable: "Password alerts are unavailable",
+        bad_request: "The view changed, refresh and acknowledge again",
+        forbidden: "Request refused",
+      };
+      setText(alertsFeedback, reasonFor(outcome.body.result, reasons, "Acknowledge refused (" + outcome.status + ")"));
+      fetchAlerts();
+    })
+    .catch(function () {
+      setText(alertsFeedback, "Acknowledge request failed");
+    })
+    .finally(function () {
+      alertsAckButton.disabled = false;
     });
 }
 
@@ -558,6 +804,261 @@ function requestEnroll() {
     });
 }
 
+// --- push notifications (home-screen app, iOS 16.4 or later) ---------------------------
+
+const PUSH_REASONS = {
+  unsupported_push_service: "This browser's push service is not supported",
+  too_many_subscriptions:
+    "Four devices already receive notifications: remove one on the PC (soos-remote push list, then push remove N)",
+  no_subscriptions: "No device receives notifications yet",
+  push_disabled: "Notifications are off on the PC (push_notifications in remote.toml)",
+  store_unavailable: "The notification store is unavailable on the PC",
+  rate_limited: "Please wait a moment and try again",
+  unavailable: "Notifications are unavailable on the PC",
+};
+
+const PUSH_SERVICES = {
+  apple: "Apple",
+  google: "Google",
+  mozilla: "Mozilla",
+};
+
+function pushSupported() {
+  return "serviceWorker" in navigator && "PushManager" in window && "Notification" in window;
+}
+
+function registerServiceWorker() {
+  if (!pushSupported()) {
+    return Promise.resolve(null);
+  }
+  if (pushRegistration !== null) {
+    return Promise.resolve(pushRegistration);
+  }
+  const registering = navigator.serviceWorker.register(SERVICE_WORKER_PATH, { scope: "/" });
+  return registering
+    .then(function (registration) {
+      pushRegistration = registration;
+      return registration;
+    })
+    .catch(function () {
+      return null;
+    });
+}
+
+// True when the subscription was made with the PC's current public key.
+function sameServerKey(subscription, publicKey) {
+  const own = subscription.options ? subscription.options.applicationServerKey : null;
+  if (!own || typeof publicKey !== "string") {
+    return false;
+  }
+  const a = new Uint8Array(own);
+  const b = new Uint8Array(fromBase64Url(publicKey));
+  if (a.length !== b.length) {
+    return false;
+  }
+  for (let i = 0; i < a.length; i += 1) {
+    if (a[i] !== b[i]) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function renderPush(view) {
+  pushView = view;
+  if (!view || view.state === "disabled") {
+    pushSection.hidden = true;
+    return;
+  }
+  pushSection.hidden = false;
+  while (pushDevices.firstChild) {
+    pushDevices.removeChild(pushDevices.firstChild);
+  }
+  pushHint.hidden = true;
+  if (!pushSupported()) {
+    setText(pushStateNode, "Notifications need the home-screen app (iOS 16.4 or later)");
+    pushEnableButton.hidden = true;
+    pushTestButton.hidden = true;
+    pushDisableButton.hidden = true;
+    return;
+  }
+  if (view.state !== "active") {
+    if (view.reason === "store_missing") {
+      setText(
+        pushStateNode,
+        "The notification store was removed on the PC — run soos-remote push reset"
+      );
+    } else {
+      setText(pushStateNode, "Notifications are unavailable on the PC");
+    }
+    pushEnableButton.hidden = true;
+    pushTestButton.hidden = true;
+    pushDisableButton.hidden = true;
+    return;
+  }
+  const count = typeof view.subscriptions === "number" ? view.subscriptions : 0;
+  let text =
+    count === 0
+      ? "No device receives notifications yet"
+      : count === 1
+        ? "1 device receives notifications"
+        : count + " devices receive notifications";
+  if (view.sender === "unavailable") {
+    text += ". Push sender not running on the PC";
+  } else if (view.last_delivery === "rejected") {
+    text += ". The push service refused the last notification — see setup";
+  } else if (view.last_delivery === "failed") {
+    text += ". The last notification could not be sent";
+  }
+  setText(pushStateNode, text);
+  const devices = Array.isArray(view.devices) ? view.devices : [];
+  devices.forEach(function (device) {
+    const item = document.createElement("li");
+    const service = labelOf(PUSH_SERVICES, device.service);
+    const when =
+      typeof device.created_unix_s === "number"
+        ? new Date(device.created_unix_s * 1000).toLocaleString()
+        : "?";
+    setText(item, service + " device, enabled " + when);
+    pushDevices.appendChild(item);
+  });
+  pushHint.hidden = devices.length === 0;
+  pushEnableButton.hidden = false;
+  pushTestButton.hidden = count === 0;
+  pushDisableButton.hidden = count === 0;
+}
+
+// Keeps the PC in sync with this phone's subscription; a subscription made with an older
+// key (after soos-remote push reset) is dropped locally and must be enabled again.
+function syncSubscription(view) {
+  if (view.state !== "active" || !pushSupported() || Notification.permission !== "granted") {
+    return;
+  }
+  registerServiceWorker()
+    .then(function (registration) {
+      return registration === null ? null : registration.pushManager.getSubscription();
+    })
+    .then(function (subscription) {
+      if (subscription === null) {
+        return null;
+      }
+      if (sameServerKey(subscription, view.public_key)) {
+        return postJson(PUSH_SUBSCRIBE_PATH, "push-subscribe", subscription.toJSON());
+      }
+      return subscription.unsubscribe().then(function () {
+        setText(pushFeedback, "Notifications must be re-enabled on this phone");
+        pushEnableButton.hidden = false;
+      });
+    })
+    .catch(function () {
+      return null;
+    });
+}
+
+function fetchPush() {
+  fetch(PUSH_PATH, { method: "GET", cache: "no-store" })
+    .then(function (response) {
+      if (!response.ok) {
+        throw new Error("status " + response.status);
+      }
+      return response.json();
+    })
+    .then(function (view) {
+      renderPush(view);
+      syncSubscription(view);
+    })
+    .catch(function () {
+      pushSection.hidden = true;
+    });
+}
+
+// The permission request is the first step of the tap (Safari requires a user gesture).
+async function enableNotifications() {
+  if (!pushSupported()) {
+    setText(pushFeedback, "Notifications need the home-screen app (iOS 16.4 or later)");
+    return;
+  }
+  if (pushView === null || pushView.state !== "active" || typeof pushView.public_key !== "string") {
+    setText(pushFeedback, "Notifications are unavailable on the PC");
+    return;
+  }
+  const publicKey = pushView.public_key;
+  pushEnableButton.disabled = true;
+  try {
+    const permission = await Notification.requestPermission();
+    if (permission !== "granted") {
+      setText(pushFeedback, "Notifications are blocked in the iPhone settings");
+      return;
+    }
+    const registration = pushRegistration !== null ? pushRegistration : await navigator.serviceWorker.ready;
+    const subscription = await registration.pushManager.subscribe({
+      userVisibleOnly: true,
+      applicationServerKey: fromBase64Url(publicKey),
+    });
+    const outcome = await postJson(PUSH_SUBSCRIBE_PATH, "push-subscribe", subscription.toJSON());
+    if (outcome.status !== 200) {
+      throw new Error(reasonFor(outcome.result, PUSH_REASONS, "Refused (" + outcome.status + ")"));
+    }
+    setText(pushFeedback, "Notifications enabled on this phone");
+  } catch (error) {
+    setText(pushFeedback, error && error.message ? error.message : "Notifications not enabled");
+  } finally {
+    pushEnableButton.disabled = false;
+    fetchPush();
+  }
+}
+
+function sendTestNotification() {
+  pushTestButton.disabled = true;
+  postJson(PUSH_TEST_PATH, "push-test")
+    .then(function (outcome) {
+      if (outcome.status === 202) {
+        setText(pushFeedback, "Test notification sent");
+      } else {
+        setText(pushFeedback, reasonFor(outcome.result, PUSH_REASONS, "Refused (" + outcome.status + ")"));
+      }
+    })
+    .catch(function () {
+      setText(pushFeedback, "The PC is unreachable");
+    })
+    .finally(function () {
+      pushTestButton.disabled = false;
+      setTimeout(fetchPush, 3000);
+    });
+}
+
+function disableNotifications() {
+  pushDisableButton.disabled = true;
+  registerServiceWorker()
+    .then(function (registration) {
+      return registration === null ? null : registration.pushManager.getSubscription();
+    })
+    .then(function (subscription) {
+      if (subscription === null) {
+        setText(pushFeedback, "This phone has no subscription");
+        return null;
+      }
+      const endpoint = subscription.endpoint;
+      return subscription.unsubscribe().then(function () {
+        return postJson(PUSH_UNSUBSCRIBE_PATH, "push-unsubscribe", { endpoint: endpoint });
+      });
+    })
+    .then(function (outcome) {
+      if (outcome && outcome.status === 200) {
+        setText(pushFeedback, "Notifications disabled on this phone");
+      } else if (outcome) {
+        setText(pushFeedback, reasonFor(outcome.result, PUSH_REASONS, "Refused (" + outcome.status + ")"));
+      }
+    })
+    .catch(function () {
+      setText(pushFeedback, "Notifications not disabled");
+    })
+    .finally(function () {
+      pushDisableButton.disabled = false;
+      fetchPush();
+    });
+}
+
 // --- life cycle -----------------------------------------------------------------------
 
 function resume() {
@@ -576,6 +1077,7 @@ function resume() {
       showApp(state);
       openStream();
       fetchStatus(true);
+      fetchPush();
     })
     .catch(function () {
       render(latest === null ? { state: "unreachable" } : latest, false);
@@ -584,11 +1086,18 @@ function resume() {
 
 setText(lockButton, LOCK_LABEL);
 setText(unlockButton, UNLOCK_LABEL);
+setText(pushEnableButton, PUSH_ENABLE_LABEL);
+setText(pushTestButton, PUSH_TEST_LABEL);
+setText(pushDisableButton, PUSH_DISABLE_LABEL);
 lockButton.addEventListener("click", requestLock);
 unlockButton.addEventListener("click", requestUnlock);
 loginButton.addEventListener("click", requestLogin);
 logoutButton.addEventListener("click", requestLogout);
 enrollButton.addEventListener("click", requestEnroll);
+alertsAckButton.addEventListener("click", requestAlertsAck);
+pushEnableButton.addEventListener("click", enableNotifications);
+pushTestButton.addEventListener("click", sendTestNotification);
+pushDisableButton.addEventListener("click", disableNotifications);
 document.addEventListener("visibilitychange", function () {
   if (document.visibilityState === "visible") {
     resume();
@@ -598,4 +1107,5 @@ document.addEventListener("visibilitychange", function () {
 });
 window.addEventListener("pageshow", resume);
 setInterval(renderUpdated, TICK_MS);
+registerServiceWorker();
 resume();

@@ -25,6 +25,8 @@ ADR entry in `AI/DECISIONS.md`. Re-check every value below with the listed `grep
 | `crates/admin-cli` | `soos-admin-cli` (`soos-admin`) | lib + bin | `#![forbid(unsafe_code)]` |
 | `crates/gui` | `soos-gui` | lib + bin (eframe/glow) | `#![forbid(unsafe_code)]` |
 | `crates/remote` | `soos-remote` | lib + bin (current-thread Tokio, user-level, Unix socket only, zbus, in-house WebAuthn on RustCrypto `p256`; optional Tailscale Funnel; leaf crate, GitHub #339) | `#![forbid(unsafe_code)]` |
+| `crates/push-protocol` | `soos-push-protocol` | lib (pure Web Push wire contract shared by `soos-remote` and the sender: endpoint allowlist, public-address predicate, bounded frames, status classification; no I/O, no network crate) | `#![forbid(unsafe_code)]` |
+| `crates/push-sender` | `soos-push-sender` | lib + bin (optional sandboxed user unit, the only network-capable part of the companion: one outbound HTTPS Web Push request per framed Unix-socket request, `ureq` + rustls/ring, holds no key; ADR 2026-10-06) | `#![forbid(unsafe_code)]` |
 | `crates/pam` | `soos-pam` → `libpam_soos.so` | cdylib + rlib | adapter: `unsafe` allowed, `// SAFETY:` mandatory |
 | `crates/camera-v4l` | `soos-camera-v4l` | lib, `mock-camera` feature | adapter: `unsafe` allowed, `// SAFETY:` mandatory |
 | `crates/daemon` | `soos-daemon` | lib + bin (Tokio) | `main.rs` forbids; `lib.rs` only denies undocumented unsafe (`mlock.rs`) |
@@ -32,7 +34,7 @@ ADR entry in `AI/DECISIONS.md`. Re-check every value below with the listed `grep
 | `tests/fixtures` | `soos-test-fixtures` | dev-only fixture lib (`[lib] path = "mod.rs"`), never a normal dependency [129] | — |
 
 - The authoritative forbid list is `test_business_crates_forbid_unsafe_code` in
-  `tests/invariants/src/lib.rs` (10 crates, `remote` included since GitHub #339). `AGENTS.md` lists only 3 — that is a minimum, not the full set.
+  `tests/invariants/src/lib.rs` (12 crates, `remote` included since GitHub #339, `push-protocol` and `push-sender` since the Web Push ADR of 2026-10-06). `AGENTS.md` lists only 3 — that is a minimum, not the full set.
 - Workspace-wide lints live in root `Cargo.toml` (`[workspace.lints]`); every crate declares
   `[lints] workspace = true` and `publish.workspace = true` (required by `deny.toml` private-crate exemption).
 - `cargo -p` takes the **package** name (`-p soos-pam`, never `-p pam`) [11].

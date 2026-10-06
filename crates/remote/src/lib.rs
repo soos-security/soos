@@ -8,10 +8,23 @@
 //! Access and In-House Passkey Authentication for `soos-remote`"). It never runs as root,
 //! never opens a network socket, and treats every logind failure as `unavailable`.
 //!
+//! When `password_alerts = true` it also follows the system journal (a `journalctl` child
+//! process) and shows the owner failed-password attempts made on the PC: time, source class,
+//! account class, kind and count only, never the typed text (ADR 2026-10-06 "Failed-Password
+//! Alerts in `soos-remote` From the System Journal").
+//!
+//! When `push_notifications = true` it also sends each new failed-password summary to the
+//! owner's home-screen web app as a standard, end-to-end encrypted Web Push notification
+//! (VAPID, RFC 8291). All keys and all cryptography stay here; the outbound HTTPS request is
+//! made by the separate sandboxed `soos-push-sender` unit reached over a `0600` Unix socket,
+//! so this service itself still opens no network socket (ADR 2026-10-06 "Web Push
+//! Notifications for Failed-Password Alerts Through a Separate Sender Unit").
+//!
 //! This file is the single source of the crate constants (architect spec §3).
 
 #![forbid(unsafe_code)]
 
+pub mod alerts;
 pub mod assets;
 pub mod audit;
 pub mod auth;
@@ -21,13 +34,16 @@ pub mod credentials;
 pub mod enroll;
 pub mod http;
 pub mod identity;
+pub mod journal;
 pub mod logind;
+pub mod push;
 pub mod routes;
 pub mod server;
 pub mod session;
 pub mod socket;
 pub mod status;
 pub mod webauthn;
+pub mod webpush;
 pub mod websession;
 
 /// Largest configuration file accepted (bytes); larger → `ConfigError::TooLarge`.
@@ -256,3 +272,171 @@ const _: () = assert!(MAX_ANONYMOUS_BODY_READS_PER_HINT <= MAX_ANONYMOUS_BODY_RE
 const _: () = assert!(MAX_FUNNEL_SSE_STREAMS < MAX_SSE_STREAMS);
 const _: () = assert!(MAX_LOGIN_CHALLENGES_PER_HINT < MAX_PENDING_ANONYMOUS_LOGIN_CHALLENGES);
 const _: () = assert!(FUNNEL_REFUSAL_LINGER_MS < RESPONSE_WRITE_TIMEOUT_MS);
+
+// ---------------------------------------------------------------------------------------
+// Failed-password alerts (ADR 2026-10-06 "Failed-Password Alerts in `soos-remote` From the
+// System Journal", architect spec `AI/architect_spec_remote_auth_alerts.md` §3.1).
+// ---------------------------------------------------------------------------------------
+
+/// Longest journal line read (bytes); longer → `LineRead::Overlong`, skipped unparsed.
+pub const MAX_JOURNAL_LINE_BYTES: usize = 24_576;
+/// Longest `MESSAGE` field accepted (bytes); longer → `EntryError::Shape`.
+pub const MAX_MESSAGE_BYTES: usize = 4096;
+/// Longest value of any other read journal field (bytes); longer → `EntryError::Shape`.
+pub const MAX_FIELD_BYTES: usize = 4096;
+/// Longest journal cursor kept (bytes); longer → not kept.
+pub const MAX_CURSOR_LEN: usize = 256;
+/// Bound of the journal access probe (ms); exceeded → `JournalError::ProbeTimeout`.
+pub const JOURNAL_PROBE_TIMEOUT_MS: u64 = 2000;
+/// First restart backoff of the journal follower (ms).
+pub const JOURNAL_RESTART_MIN_MS: u64 = 1000;
+/// Cap of the doubling restart backoff (ms).
+pub const JOURNAL_RESTART_MAX_MS: u64 = 60_000;
+/// A follower that ran at least this long resets the backoff to the minimum (ms).
+pub const JOURNAL_STABLE_RUN_MS: u64 = 60_000;
+/// Lines processed between two back-pressure pauses.
+pub const JOURNAL_LINES_PER_BATCH: usize = 256;
+/// Back-pressure pause after `JOURNAL_LINES_PER_BATCH` lines (ms).
+pub const JOURNAL_BATCH_PAUSE_MS: u64 = 50;
+/// History rebuilt from the journal at every start (s before now).
+pub const HISTORY_REBUILD_WINDOW_S: u64 = 86_400;
+/// A password check and a `pam_unix` failure of the same side and account within this
+/// window are one attempt (µs).
+pub const PAIR_WINDOW_US: u64 = 2_000_000;
+/// A helper-only check inherits the class of an anchor at most this old (µs).
+pub const ANCHOR_WINDOW_US: u64 = 3_600_000_000;
+/// Pending (unpaired) password checks kept; one more resolves the oldest at once.
+pub const MAX_PENDING_CHECKS: usize = 16;
+/// Recent `pam_unix` failures kept for pairing; the oldest is evicted.
+pub const MAX_RECENT_FAILURES: usize = 16;
+/// Alert records kept in memory; the oldest is evicted.
+pub const MAX_ALERT_HISTORY: usize = 32;
+/// Attempts of the same class, account, kind and acknowledgement state within this window
+/// join one record (µs).
+pub const ALERT_COALESCE_WINDOW_US: u64 = 60_000_000;
+/// At most one `alerts` SSE event per stream per this interval (ms).
+pub const ALERT_EVENT_MIN_INTERVAL_MS: u64 = 1000;
+/// Minimum interval between two acknowledgement requests that reach the rate gate (ms).
+pub const MIN_ALERT_ACK_INTERVAL_MS: u64 = 1000;
+/// Largest acknowledgement file accepted (bytes); larger → treated as invalid (marker 0).
+pub const MAX_ALERTS_ACK_FILE_BYTES: usize = 256;
+/// Acknowledgement file name (sibling of the credential store).
+pub const ALERTS_ACK_FILE_NAME: &str = "remote-alerts.json";
+/// Most `lock_screen_programs` entries.
+pub const MAX_LOCK_SCREEN_PROGRAMS: usize = 4;
+/// `X-Soos-Action` of `POST /api/alerts/ack`.
+pub const ACTION_ALERTS_ACK: &str = "alerts-ack";
+/// Header naming the per-start epoch of the acknowledged view (lowercased name).
+pub const ALERTS_EPOCH_HEADER: &str = "x-soos-alerts-epoch";
+/// Header naming the highest attempt seq of the acknowledged view (lowercased name).
+pub const ALERTS_THROUGH_HEADER: &str = "x-soos-alerts-through";
+/// Rendering of the epoch: exactly this many lowercase hex characters.
+pub const ALERTS_EPOCH_HEX_LEN: usize = 16;
+/// Most ASCII digits of the `through` header value.
+pub const MAX_ALERTS_THROUGH_DIGITS: usize = 20;
+/// Bytes of one read of the bounded journal line reader.
+pub const JOURNAL_READ_CHUNK_BYTES: usize = 4096;
+/// Idle tick of the follower: pending-check expiry with the wall clock and catch-up (ms).
+pub const JOURNAL_IDLE_TICK_MS: u64 = 2000;
+/// At most one acknowledgement-file write per this interval caused by a marker lowering
+/// (ms); an acknowledgement writes at once.
+pub const ALERTS_MARKER_FLUSH_MIN_INTERVAL_MS: u64 = 1000;
+
+// Compile-time relations of the alerts spec §3.1.
+const _: () = assert!(MAX_MESSAGE_BYTES * 4 <= MAX_JOURNAL_LINE_BYTES);
+const _: () = assert!(JOURNAL_RESTART_MIN_MS < JOURNAL_RESTART_MAX_MS);
+const _: () = assert!(PAIR_WINDOW_US < ALERT_COALESCE_WINDOW_US);
+const _: () = assert!(ALERT_COALESCE_WINDOW_US < ANCHOR_WINDOW_US);
+const _: () = assert!(MAX_CURSOR_LEN <= MAX_FIELD_BYTES);
+const _: () = assert!(JOURNAL_IDLE_TICK_MS * 1000 == PAIR_WINDOW_US);
+const _: () = assert!(JOURNAL_BATCH_PAUSE_MS < JOURNAL_IDLE_TICK_MS);
+const _: () = assert!(JOURNAL_READ_CHUNK_BYTES <= MAX_JOURNAL_LINE_BYTES);
+const _: () = assert!(ALERTS_EPOCH_HEX_LEN == 16);
+
+// ---------------------------------------------------------------------------------------
+// Web Push (architect spec `AI/architect_spec_remote_web_push.md` §3.1).
+// ---------------------------------------------------------------------------------------
+
+/// Stored push subscriptions; a further distinct endpoint is refused, never evicted.
+pub const MAX_PUSH_SUBSCRIPTIONS: usize = 4;
+/// Largest push store file.
+pub const MAX_PUSH_STORE_BYTES: usize = 16_384;
+/// Push store file name (sibling of the credential store).
+pub const PUSH_STORE_FILE_NAME: &str = "remote-push.json";
+/// Largest subscribe or unsubscribe body.
+pub const MAX_PUSH_SUBSCRIBE_BODY_BYTES: usize = 2048;
+/// Largest notification payload (plaintext JSON).
+pub const MAX_PUSH_PLAINTEXT_BYTES: usize = 1024;
+/// RFC 8188 record size of the encrypted body.
+pub const PUSH_RECORD_SIZE: u32 = 4096;
+/// The first send after a quiet period waits this long.
+pub const PUSH_COALESCE_MS: u64 = 3000;
+/// Spacing between two alert notifications.
+pub const PUSH_MIN_INTERVAL_MS: u64 = 30_000;
+/// Alert notifications per rolling hour.
+pub const PUSH_MAX_PER_HOUR: u32 = 20;
+/// A live attempt older than this when recorded is not pushed.
+pub const PUSH_MAX_ATTEMPT_AGE_MS: u64 = 300_000;
+/// Delays of the retries of one subscription for one message.
+pub const PUSH_RETRY_DELAYS_MS: [u64; 2] = [5_000, 30_000];
+/// `TTL` header of every notification.
+pub const PUSH_TTL_S: u32 = 43_200;
+/// `Topic` of alert summaries (an offline phone receives only the newest).
+pub const PUSH_TOPIC: &str = "soos-alerts";
+/// `Topic` of the test notification (never replaces an undelivered alert).
+pub const PUSH_TEST_TOPIC: &str = "soos-test";
+/// `Urgency` of every notification.
+pub const PUSH_URGENCY: soos_push_protocol::Urgency = soos_push_protocol::Urgency::High;
+/// Gate of `POST /api/push/test`.
+pub const PUSH_TEST_MIN_INTERVAL_MS: u64 = 10_000;
+/// Shared gate of subscribe and unsubscribe.
+pub const PUSH_ROUTE_MIN_INTERVAL_MS: u64 = 1000;
+/// Bound of one whole exchange with the sender (connect, write, wait, read).
+pub const PUSH_EXCHANGE_TIMEOUT_MS: u64 = 18_000;
+/// Bound of the connection to the sender socket.
+pub const PUSH_CONNECT_UNIX_TIMEOUT_MS: u64 = 1000;
+/// VAPID JWT lifetime (`exp = now + 12 h`, below Apple's 24 h).
+pub const VAPID_JWT_LIFETIME_S: u64 = 43_200;
+/// A cached VAPID JWT is reused for at most this long.
+pub const VAPID_JWT_REUSE_S: u64 = 3600;
+/// Longest `vapid_subject`.
+pub const MAX_VAPID_SUBJECT_LEN: usize = 256;
+/// A Unix clock below this is implausible: no JWT, nothing sent.
+pub const MIN_PLAUSIBLE_UNIX_S: u64 = 1_700_000_000;
+/// `X-Soos-Action` of `POST /api/push/subscribe`.
+pub const ACTION_PUSH_SUBSCRIBE: &str = "push-subscribe";
+/// `X-Soos-Action` of `POST /api/push/unsubscribe`.
+pub const ACTION_PUSH_UNSUBSCRIBE: &str = "push-unsubscribe";
+/// `X-Soos-Action` of `POST /api/push/test`.
+pub const ACTION_PUSH_TEST: &str = "push-test";
+
+/// Byte equality usable in constant assertions.
+const fn const_bytes_eq(a: &[u8], b: &[u8]) -> bool {
+    match (a, b) {
+        ([], []) => true,
+        ([x, rest_a @ ..], [y, rest_b @ ..]) => *x == *y && const_bytes_eq(rest_a, rest_b),
+        _ => false,
+    }
+}
+
+const _: () = assert!(PUSH_COALESCE_MS < PUSH_MIN_INTERVAL_MS);
+const _: () = assert!(PUSH_MAX_PER_HOUR as u64 * PUSH_MIN_INTERVAL_MS <= 3_600_000);
+const _: () = assert!(MAX_PUSH_SUBSCRIBE_BODY_BYTES <= MAX_AUTH_BODY_BYTES);
+const _: () =
+    assert!(MAX_PUSH_PLAINTEXT_BYTES + 1 + 16 + 86 <= soos_push_protocol::MAX_PUSH_BODY_BYTES);
+const _: () = assert!(PUSH_RECORD_SIZE as usize > MAX_PUSH_PLAINTEXT_BYTES + 17);
+const _: () = assert!(
+    PUSH_EXCHANGE_TIMEOUT_MS
+        > PUSH_CONNECT_UNIX_TIMEOUT_MS
+            + 3 * soos_push_protocol::PUSH_FRAME_IO_TIMEOUT_MS
+            + soos_push_protocol::PUSH_SEND_TIMEOUT_MS
+);
+const _: () = assert!(!const_bytes_eq(
+    PUSH_TOPIC.as_bytes(),
+    PUSH_TEST_TOPIC.as_bytes()
+));
+const _: () = assert!(PUSH_TOPIC.len() <= soos_push_protocol::MAX_TOPIC_LEN);
+const _: () = assert!(PUSH_TEST_TOPIC.len() <= soos_push_protocol::MAX_TOPIC_LEN);
+const _: () = assert!(VAPID_JWT_REUSE_S < VAPID_JWT_LIFETIME_S);
+const _: () = assert!(PUSH_TTL_S <= soos_push_protocol::MAX_PUSH_TTL_S);
+const _: () = assert!(MAX_PUSH_SUBSCRIPTIONS <= MAX_PASSKEYS);

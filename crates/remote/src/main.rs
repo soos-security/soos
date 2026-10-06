@@ -7,6 +7,17 @@
 //! Configuration-class failures exit `EXIT_CONFIG` (78, never restarted by the user unit),
 //! runtime failures exit `EXIT_RUNTIME` (1, restarted).
 //!
+//! With `password_alerts = true` the service resolves the owner's login once (passwd entry
+//! of the process uid) and wires the `journalctl` source of the failed-password alerts (ADR
+//! 2026-10-06 "Failed-Password Alerts in `soos-remote` From the System Journal"); an
+//! unresolvable login leaves the alerts `unavailable` and the service still starts.
+//!
+//! With `push_notifications = true` the service also wires Web Push (ADR 2026-10-06 "Web
+//! Push Notifications for Failed-Password Alerts Through a Separate Sender Unit"): the store
+//! `remote-push.json` next to the credential store and the Unix-socket transport to
+//! `soos-push-sender`. `push list`, `push remove N` and `push reset` manage the store
+//! locally; their lines never contain an endpoint path or a key.
+//!
 //! Subcommand output goes through `writeln!` on a locked stdout; nothing printed ever
 //! contains a credential id, a public key, a user handle or a Tailscale login. The enrollment
 //! code is printed exactly once, by `enroll-code`, and never logged.
@@ -24,16 +35,25 @@ use clap::{Parser, Subcommand};
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
+use soos_remote::alerts::AlertSettings;
 use soos_remote::auth::system_random;
 use soos_remote::config::{
-    check_not_root, default_config_path, load_config, resolve_credentials_path, RemoteConfig,
+    check_not_root, default_config_path, load_config, resolve_alerts_ack_path,
+    resolve_credentials_path, resolve_push_store_path, RemoteConfig,
 };
 use soos_remote::credentials::{credential_hash, CredentialStore, StoreError};
 use soos_remote::enroll::{write_code_file, CodeFile, EnrollCode};
+use soos_remote::journal::{JournalctlSource, OwnerLogin};
 use soos_remote::logind::ZbusSessionSource;
+use soos_remote::push::{
+    subscription_line, PushSettings, PushStore, PushStoreError, UnixPushTransport,
+};
 use soos_remote::server::{serve, ServerState};
 use soos_remote::socket::{bind_listener, prepare_socket_dir, SocketError};
-use soos_remote::{ENROLL_CODE_TTL_S, EXIT_CONFIG, EXIT_RUNTIME, MAX_PASSKEYS};
+use soos_remote::{
+    ENROLL_CODE_TTL_S, EXIT_CONFIG, EXIT_RUNTIME, MAX_PASSKEYS, MAX_PUSH_SUBSCRIPTIONS,
+    STORE_LOCK_TIMEOUT_MS,
+};
 
 /// Command line of `soos-remote`.
 #[derive(Debug, Parser)]
@@ -63,6 +83,26 @@ enum Command {
         #[command(subcommand)]
         action: PasskeysAction,
     },
+    /// List or remove the Web Push subscriptions, or replace the push key.
+    Push {
+        #[command(subcommand)]
+        action: PushAction,
+    },
+}
+
+/// `soos-remote push …`.
+#[derive(Debug, Subcommand)]
+enum PushAction {
+    /// Index, push service host and creation time of every subscription.
+    List,
+    /// Remove subscription number N (as shown by `list`, 1-based).
+    Remove {
+        /// 1-based index.
+        index: usize,
+    },
+    /// Replace the push key and drop every subscription (each phone must enable
+    /// notifications again).
+    Reset,
 }
 
 /// `soos-remote passkeys …`.
@@ -140,6 +180,7 @@ fn main() -> ExitCode {
     match args.command {
         Some(Command::EnrollCode) => enroll_code(&config, uid),
         Some(Command::Passkeys { action }) => passkeys(action, credentials_path, uid),
+        Some(Command::Push { action }) => push_command(action, &credentials_path, uid),
         None => run_service(config, credentials_path, uid),
     }
 }
@@ -283,6 +324,119 @@ fn remove_passkey(store: &mut CredentialStore, index: usize) -> ExitCode {
     }
 }
 
+/// Retries `op` while the push store is locked by the service, for at most
+/// `STORE_LOCK_TIMEOUT_MS` (blocking sleeps are fine in the CLI).
+fn with_push_lock<T>(
+    mut op: impl FnMut() -> Result<T, PushStoreError>,
+) -> Result<T, PushStoreError> {
+    let started = std::time::Instant::now();
+    loop {
+        match op() {
+            Err(PushStoreError::Locked)
+                if started.elapsed() < std::time::Duration::from_millis(STORE_LOCK_TIMEOUT_MS) =>
+            {
+                std::thread::sleep(std::time::Duration::from_millis(25));
+            }
+            other => return other,
+        }
+    }
+}
+
+/// `soos-remote push list|remove N|reset` on the push store next to the credential store.
+fn push_command(action: PushAction, credentials_path: &std::path::Path, uid: u32) -> ExitCode {
+    let path = match resolve_push_store_path(credentials_path) {
+        Ok(path) => path,
+        Err(err) => {
+            error!(%err, "configuration refused");
+            return ExitCode::from(EXIT_CONFIG);
+        }
+    };
+    let store = PushStore::new(path, uid);
+    let random = system_random();
+    let lines = match action {
+        PushAction::List => match store.load() {
+            Ok(Some(file)) if !file.subscriptions.is_empty() => (1usize..)
+                .zip(file.subscriptions.iter())
+                .map(|(number, sub)| subscription_line(number, sub))
+                .collect(),
+            Ok(_) => vec!["No push subscription.".to_string()],
+            Err(err) => {
+                error!(%err, "push store refused");
+                return ExitCode::from(EXIT_RUNTIME);
+            }
+        },
+        PushAction::Remove { index } => {
+            if index == 0 || index > MAX_PUSH_SUBSCRIPTIONS {
+                error!("no such push subscription");
+                return ExitCode::from(EXIT_CONFIG);
+            }
+            match with_push_lock(|| store.remove_index(index, &random)) {
+                Ok(true) => vec![format!("Push subscription {index} removed.")],
+                Ok(false) => {
+                    error!("no such push subscription");
+                    return ExitCode::from(EXIT_CONFIG);
+                }
+                Err(err) => {
+                    error!(%err, "push store refused");
+                    return ExitCode::from(EXIT_RUNTIME);
+                }
+            }
+        }
+        PushAction::Reset => match with_push_lock(|| store.reset(&random)) {
+            Ok(_) => vec![
+                "Push key replaced; every subscription was removed.".to_string(),
+                "Open the soos app on each phone and tap \"Enable notifications\" again."
+                    .to_string(),
+            ],
+            Err(err) => {
+                error!(%err, "push store refused");
+                return ExitCode::from(EXIT_RUNTIME);
+            }
+        },
+    };
+    for line in lines {
+        if say(&line).is_err() {
+            return ExitCode::from(EXIT_RUNTIME);
+        }
+    }
+    ExitCode::SUCCESS
+}
+
+/// The Web Push settings and transport (`None` when push is off or `rp_id`/the socket path
+/// is missing, which the configuration already refuses).
+fn push_wiring(
+    config: &RemoteConfig,
+    credentials_path: &std::path::Path,
+    uid: u32,
+) -> Option<(PushSettings, Arc<UnixPushTransport>)> {
+    if !config.push.enabled {
+        return None;
+    }
+    let rp_id = config.auth.rp_id.clone()?;
+    let socket_path = config.push.socket_path.clone()?;
+    let store_path = match resolve_push_store_path(credentials_path) {
+        Ok(path) => path,
+        Err(err) => {
+            warn!(%err, "push store path refused: push notifications unavailable");
+            return None;
+        }
+    };
+    let subject = config
+        .push
+        .vapid_subject
+        .clone()
+        .unwrap_or_else(|| format!("https://{rp_id}"));
+    Some((
+        PushSettings {
+            store_path,
+            subject,
+            previews: config.push.previews,
+            rp_id,
+        },
+        Arc::new(UnixPushTransport::new(socket_path, uid)),
+    ))
+}
+
 /// The service: current-thread runtime, then [`run`].
 fn run_service(config: RemoteConfig, credentials_path: PathBuf, uid: u32) -> ExitCode {
     if config.allow_unlock && config.auth.rp_id.is_none() {
@@ -332,16 +486,48 @@ async fn run(config: RemoteConfig, credentials_path: PathBuf, uid: u32) -> ExitC
         info!("shutdown signal received");
     };
 
-    let state = Arc::new(
-        ServerState::new(config, uid, ZbusSessionSource::new())
-            .with_credentials_path(credentials_path),
-    );
+    let alerts = config
+        .alerts
+        .enabled
+        .then(|| alert_settings(&config, &credentials_path, uid));
+    let push = push_wiring(&config, &credentials_path, uid);
+    let mut state = ServerState::new(config, uid, ZbusSessionSource::new())
+        .with_credentials_path(credentials_path);
+    if let Some(settings) = alerts {
+        state = state.with_password_alerts(settings, Arc::new(JournalctlSource));
+    }
+    if let Some((settings, transport)) = push {
+        state = state.with_push(settings, transport);
+    }
+    let state = Arc::new(state);
     match serve(listener, state, shutdown).await {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
             error!(%err, "server stopped");
             ExitCode::from(EXIT_RUNTIME)
         }
+    }
+}
+
+/// The failed-password alert settings: the owner's login (passwd entry of `uid`; `None`
+/// when unresolvable or invalid), the configured lock-screen programs and the
+/// acknowledgement file next to the credential store (`None`: in memory only).
+fn alert_settings(
+    config: &RemoteConfig,
+    credentials_path: &std::path::Path,
+    uid: u32,
+) -> AlertSettings {
+    let owner_login = match nix::unistd::User::from_uid(nix::unistd::Uid::from_raw(uid)) {
+        Ok(Some(user)) => OwnerLogin::parse(&user.name),
+        Ok(None) | Err(_) => None,
+    };
+    if owner_login.is_none() {
+        warn!("owner login unresolved: password alerts unavailable");
+    }
+    AlertSettings {
+        owner_login,
+        lock_screen_programs: config.alerts.lock_screen_programs.clone(),
+        ack_path: resolve_alerts_ack_path(credentials_path).ok(),
     }
 }
 

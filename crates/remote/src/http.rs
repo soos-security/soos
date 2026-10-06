@@ -653,3 +653,10 @@ pub async fn read_body(
         Err(_) => Err(BodyError::Timeout),
     }
 }
+
+/// One `event: alerts` SSE event (`event: alerts\ndata: <json>\n\n`; ADR 2026-10-06
+/// "Failed-Password Alerts in `soos-remote` From the System Journal").
+#[must_use]
+pub fn encode_sse_alerts_event(json: &str) -> Vec<u8> {
+    format!("event: alerts\ndata: {json}\n\n").into_bytes()
+}

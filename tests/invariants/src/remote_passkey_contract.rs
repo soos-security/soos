@@ -339,13 +339,26 @@ fn test_rmc_s18_page_uses_modal_webauthn_without_storage() {
         "allowCredentials",
         "innerHTML",
         "eval(",
-        "serviceWorker",
     ] {
         assert!(
             !app.contains(forbidden),
             "app.js must not contain {forbidden}"
         );
     }
+    // Contract migration (ADR 2026-10-06 "Web Push", owner request): the page may register
+    // exactly one service worker, the same-origin `/sw.js` with scope `/`, and nothing else.
+    assert_eq!(
+        app.matches(".register(").count(),
+        1,
+        "app.js registers exactly one service worker and nothing else"
+    );
+    assert!(
+        app.contains("const SERVICE_WORKER_PATH = \"/sw.js\";")
+            && app.contains(
+                "navigator.serviceWorker.register(SERVICE_WORKER_PATH, { scope: \"/\" })"
+            ),
+        "the only service worker is the same-origin /sw.js with scope /"
+    );
     let html = read("crates/remote/assets/index.html");
     for id in [
         "id=\"login\"",

@@ -2,17 +2,24 @@
 
 > Crate: `crates/remote` (`soos-remote`, GitHub #339, ADR 2026-10-05 "Remote Companion `soos-remote`",
 > ADR 2026-10-06 "Remote Unlock in `soos-remote`", ADR 2026-10-06 "Tailscale Funnel Access and
-> In-House Passkey Authentication for `soos-remote`")
+> In-House Passkey Authentication for `soos-remote`", ADR 2026-10-06 "Failed-Password Alerts in
+> `soos-remote` From the System Journal", ADR 2026-10-06 "Web Push Notifications for
+> Failed-Password Alerts Through a Separate Sender Unit")
 > Scope: a **user-level** service that shows the owner's phone the real-time lock status of the
 > desktop session, offers a remote **lock** and, only when `allow_unlock = true`, a remote
 > **unlock** protected by a passkey (Face ID) on every request (section 2a). Optionally it is
 > also reachable from the internet through Tailscale Funnel, behind a passkey login (section
-> 2b). Nothing else: no camera, no push notification (see "Out of scope").
+> 2b). When `password_alerts = true` the page also lists failed password attempts made on the
+> PC (section 2c), never the typed password, and with `push_notifications = true` sends them to
+> the phone as push notifications even when the app is closed (section 2d). Nothing else: no
+> camera (see "Out of scope").
 > Source of truth: `crates/remote/src/lib.rs` (constants), `crates/remote/src/config.rs`
 > (configuration keys), `crates/remote/src/server.rs` (request handling). If this document and
 > the code disagree, report the drift: the invariant `remote_companion_contract` pins the parts
 > of this page the acceptance criteria rely on (matrix rows RMC1–RMC44, walkthroughs 183, 184
-> and 185); `remote_passkey_contract` pins the Funnel and passkey parts.
+> and 185); `remote_passkey_contract` pins the Funnel and passkey parts; `remote_alerts_contract`
+> pins the failed-password alerts (rows RMC45–RMC59, walkthrough 186); `remote_push_contract`
+> pins the push notifications (rows RMC60–RMC74, walkthrough 187).
 
 ---
 
@@ -21,7 +28,9 @@
 `soos-remote` is a small HTTP/1.1 server that:
 
 - listens on **one Unix socket** (`0600`, inside a `0700` directory under `$XDG_RUNTIME_DIR`)
-  and never opens a network socket (`RestrictAddressFamilies=AF_UNIX` in the unit);
+  and never opens a network socket itself (`RestrictAddressFamilies=AF_UNIX` in the unit); the
+  optional `soos-push-sender` unit (section 2d) is the only part of the companion that makes
+  outbound HTTPS requests, to three push services only;
 - is reached from the phone through the owner's Tailscale tailnet (`tailscale serve`
   terminates HTTPS with the node's `*.ts.net` certificate and proxies to the socket) and,
   only when `allow_funnel = true`, from the public internet through `tailscale funnel` on
@@ -32,7 +41,12 @@
 - when `allow_unlock = true`, can ask logind to **unlock** it (`Manager.UnlockSession`,
   section 2a), only after a fresh passkey assertion with user verification (Face ID / Touch ID);
 - verifies WebAuthn passkeys itself (ES256, attestation `none`, pure-Rust RustCrypto code, no
-  OpenSSL, no external service).
+  OpenSSL, no external service);
+- when `password_alerts = true`, follows the system journal through a `journalctl` child
+  process and shows failed password attempts made on the PC (section 2c);
+- when `push_notifications = true`, encrypts a short summary of each new burst of failed
+  attempts for the phone and hands it to `soos-push-sender`, which delivers it as a standard
+  Web Push notification (section 2d).
 
 It runs as the session owner, never as root. `soos-daemon`, `pam_soos.so` and the IPC protocol
 are untouched; no other crate depends on `soos-remote`.
@@ -213,6 +227,176 @@ accepted, bounded stall: each Funnel request re-reads at most 16 KiB of the loca
 again only when it changed), and a write (registration, removal, counter change of a device-bound
 passkey) is one small atomic write waited for at most 500 ms on the lock.
 
+## 2c. Failed-password alerts (opt-in)
+
+When someone types a wrong password on the PC (lock screen, `sudo`, GDM or console login, any
+other local PAM password check), the page shows a banner such as
+"3 failed password attempts, last at 14:07 (lock screen)", a short history and an
+*Acknowledge* button. The phone sees it on the tailnet and over a Funnel session; an anonymous
+Funnel visitor never does.
+
+**What is shown, and what never is.** Each history row carries only the time, the source class
+(`lock_screen`, `sudo`, `login`, `other`), the account class ("your account", "root", "another
+account"), the kind (wrong password, or an attempt while `pam_faillock` had locked the account)
+and a count. It is **never the typed password**, nor any part, length or hash of it: no journal
+line contains it (`unix_chkpwd` and `pam_unix` never log it), and soos does not add any PAM
+component to capture it (`AGENTS.md`). The user-name field of a journal line can hold text typed
+into a user-name box (a password typed at GDM by mistake), so it is reduced at once to the three
+account classes and dropped: no user name, uid, service name, program path, journal cursor or
+raw log line reaches the page, an event or a log.
+
+**Setup** (nothing is read until you enable it):
+
+1. The service account must be able to read the **system** journal: be a member of `wheel`,
+   `adm` or `systemd-journal` (check with `id -nG`). A new group membership takes effect only in
+   a new user-manager session (log out and in, or reboot); restarting the service is not enough.
+   Without it the page says "Password alerts unavailable: the account cannot read the system
+   journal", never "no attempts".
+2. In `remote.toml`:
+
+   ```toml
+   password_alerts = true
+   # Mandatory when the lock screen is not one of /usr/bin/{swaylock,hyprlock,gtklock,waylock}:
+   lock_screen_programs = ["/home/<you>/.local/bin/swaylock-plugin"]
+   ```
+
+   `lock_screen_programs` lists at most 4 absolute paths of the lock-screen programs whose own
+   `pam_unix` lines are trusted. On a host whose locker lives outside `/usr/bin` (for example the
+   driftwm `swaylock-plugin` in `~/.local/bin`) this key is **mandatory**: when none of the
+   configured paths exists the page shows "Lock screen not monitored — see setup" and lock-screen
+   attempts are not counted (sudo, login and the other sources still are).
+3. `systemctl --user restart soos-remote` (done by you; the unit file itself is unchanged).
+
+**How it works.** The service spawns `/usr/bin/journalctl --follow --output=json` with a fixed
+field list and the match `SYSLOG_FACILITY=10` (environment cleared, no shell, killed with the
+service). It first probes that a root-owned journal entry is visible (2 s bound); the view is
+`starting` while the last 24 hours are replayed and becomes `active` once caught up. A stopped
+reader restarts with a 1 s → 60 s backoff and resumes after the last cursor. One attempt is
+counted per real password check (`unix_chkpwd`), merged with the `pam_unix` failure line of the
+same attempt; attempts refused while `pam_faillock` locked the account are counted separately.
+Trust comes only from journald-set fields (`_UID`, `_EXE`, `_COMM`, `_TRANSPORT`): root-side
+lines, the setuid `sudo`/`su`, and the configured lock-screen programs; lines of other accounts
+and of other programs of yours (for example test binaries that write real
+`pam_unix(swaylock:auth)` lines) are ignored.
+
+**Routes.** `GET /api/alerts` returns the view (`state` `disabled`/`starting`/`active`/
+`unavailable`, `reason`, `epoch`, `lock_screen`, the unacknowledged counts, the last attempt
+time and source, `through`, `history`). `POST /api/alerts/ack` has no body and needs
+`X-Soos-Action: alerts-ack` plus exactly one `X-Soos-Alerts-Epoch` and one
+`X-Soos-Alerts-Through` header naming the view the page displayed; it acknowledges exactly the
+attempts of that view. A view from before a service restart is refused with `409 stale_view`
+(the page then shows the fresh view, and you acknowledge again after reading it). One
+acknowledgement per second (`429`). The event stream adds `event: alerts` (at most one per
+second). Only the acknowledgement marker is stored, in `remote-alerts.json` (`0600`, next to the
+passkey store); the history itself is rebuilt from the journal at each start.
+
+**Limits.** Any process running as you can write log lines that look like lock-screen failures,
+so it can create **false alerts** (and, while it keeps doing so, hide the 2nd and later
+lock-screen attempts that only `unix_chkpwd` logs); root-side attempts (`sudo`, login, polkit)
+and the first failure of each lock-screen prompt are still counted. Such a process already runs
+as you. Section 8 lists the other residual limitations.
+
+## 2d. Push notifications (opt-in)
+
+With `push_notifications = true` the phone is told about failed passwords on the PC **even
+when the app is closed**: a standard Web Push notification to the home-screen web app
+(iOS/iPadOS 16.4 or later; Safari tabs cannot receive push). It is the same information as
+section 2c, sent at most once per burst: "3 wrong passwords — lock screen, your account".
+
+**What a notification carries, and what never.** Only the source class (lock screen, sudo,
+login, other), the account class (your account, root, another account), the kind (wrong
+password, or attempt while locked out) and counts — **never the typed password**, nor any
+part, length or hash of it (no journal line contains it, and soos never captures it). With
+`push_previews = "generic"` the visible text is only "Security alert on your PC — Open soos for
+details". A notification is readable on the **locked** iPhone unless you set *Settings →
+Notifications → Show Previews → When Unlocked* (or choose `push_previews = "generic"`). The
+message is end-to-end encrypted (RFC 8291): Apple's push service sees only its size, time and
+the PC's public address, never its content. The page stays the source of truth: push delivery
+is best effort.
+
+**When.** Only attempts recorded live (not the 24 h replay at start): the first attempt of a
+burst is sent 3 s later as one summary; then at most one notification every 30 s and 20 per
+hour, the counts accumulating meanwhile (a failed delivery is retried twice, then its counts
+are added to the next notification, so the counts you receive add up). Any process running as
+you can forge lock-screen journal lines and therefore cause **false notifications** (bounded by
+these limits), exactly like the false alerts of section 2c.
+
+**Setup** (owner steps, nothing is enabled by the installer):
+
+1. Make section 2c work first (`password_alerts = true`) and set `rp_id` (section 2b).
+2. In `remote.toml`:
+
+   ```toml
+   push_notifications = true
+   # Optional: the VAPID contact (default https://<rp_id>). Apple refuses localhost and
+   # reserved names with 403 BadJwtToken; a mailto: address of yours also works.
+   # vapid_subject = "mailto:you@example.com"
+   # Optional: "generic" hides source and account on the lock screen.
+   # push_previews = "detailed"
+   ```
+
+3. Run `scripts/install_remote.sh` (it installs `soos-push-sender` and its unit
+   `soos-push-sender.service`), then `systemctl --user enable --now soos-push-sender` and
+   `systemctl --user restart soos-remote`.
+4. On the iPhone, open the app **from the home-screen icon** (section 4), tap
+   **Enable notifications** and allow them. The card then lists the device ("Apple device,
+   enabled …"); its endpoint is on `web.push.apple.com`.
+5. Tap **Send test notification**. Then lock the phone and type a wrong password at the PC's lock
+   screen: one notification arrives within about 10 s.
+
+**Devices.** At most 4 devices receive notifications. The card lists each one (push service and
+date). Anyone signed in to the page (your tailnet identity, or a Funnel passkey session) can add
+a device, so check the list after enabling and whenever a device is unknown:
+`soos-remote push list` prints `<N>  <push host>  created <unix time>`,
+`soos-remote push remove N` removes one, and `soos-remote passkeys remove N` ends the Funnel
+sessions of a passkey that is not yours. `soos-remote push reset` replaces the push key and
+removes every device (each phone must tap *Enable notifications* again); use it as well if the
+page says the notification store was removed.
+
+**How it works.** All keys and all cryptography stay in `soos-remote`: the VAPID key and the
+subscriptions live in `remote-push.json` (`0600`, next to the passkey store, at most 4
+subscriptions, never rewritten when invalid; only the service start and `push reset` create
+it). For each notification `soos-remote` encrypts the payload with the phone's keys, signs a
+VAPID token (ES256, 12 h) and hands the encrypted body over a `0600` Unix socket to
+`soos-push-sender`. The sender is a separate user unit: the only part of the companion with
+network access (`AF_INET`/`AF_INET6`), it holds no key, accepts only `https://` endpoints on
+`web.push.apple.com`, `fcm.googleapis.com` and `updates.push.services.mozilla.com`, refuses
+the whole request if any resolved address is private (loopback, LAN, tailnet `100.64.0.0/10`
+and `fd7a:115c:a1e0::/48`, …), follows no redirect, uses no proxy, and gives up after 10 s.
+Its sandbox hides your home directory (except its own binary) and `/run` (except its socket
+directory), so it cannot read your files, `remote.sock`, the session bus or `tailscaled`.
+Its logging filter is fixed in code (no `RUST_LOG`): the HTTP and TLS libraries never log the
+endpoint or the request. A 404/410 answer removes the device; other refusals are shown as
+"The push service refused the last notification".
+
+**Limits.** A compromised sender keeps outbound network access, can reach **abstract**
+Unix sockets of the host (not files, so no sandbox directive hides them), and can forge
+answers (at worst a wrong delivery state or a removed device). On a host whose
+`/etc/resolv.conf` points into `/run/systemd/resolve/` the sender cannot resolve names inside
+its sandbox and every notification fails; `scripts/install_remote.sh` prints a warning when it
+detects this. The workaround is a user drop-in (`systemctl --user edit soos-push-sender`) that adds
+`BindReadOnlyPaths=-/run/systemd/resolve`; the packaged unit keeps `/run` fully hidden. The sandbox and the delivery to the iPhone are
+verified on the owner's hardware (matrix row RMC74).
+
+Opt-in drop-in for such hosts only (check first with `readlink -f /etc/resolv.conf`; nothing
+to do when it does not start with `/run/systemd/resolve/`):
+
+```bash
+mkdir -p ~/.config/systemd/user/soos-push-sender.service.d
+cat > ~/.config/systemd/user/soos-push-sender.service.d/resolved.conf <<'EOF'
+[Service]
+# Expose only the systemd-resolved directory (stub resolv.conf and its local socket),
+# read-only; the rest of /run stays hidden.
+BindReadOnlyPaths=-/run/systemd/resolve
+EOF
+systemctl --user daemon-reload
+systemctl --user restart soos-push-sender
+```
+
+The drop-in widens the sandbox by that one read-only directory; the endpoint allowlist and the
+refusal of private addresses are unchanged (the stub resolver at `127.0.0.53` is only queried
+for names, never used as a push destination). Remove the file and run `daemon-reload` to undo.
+
 ## 3. Requirements on the desktop
 
 - **`LockedHint` must be set by the desktop.** GNOME, Plasma and niri set it natively;
@@ -379,6 +563,12 @@ the PC is unreachable (off, asleep, or Tailscale disconnected).
 | `allow_funnel` | no | `false` | TOML boolean; `true` accepts `Tailscale-Funnel-Request: ?1` requests (section 2b); requires `rp_id` |
 | `credentials_path` | no | `<dir of remote.toml>/remote-passkeys.json` | absolute path of the passkey store, at most 4096 bytes |
 | `poll_interval_ms` | no | 1000 | 250..=10000; logind polling cadence **while a stream is open**; out of range → refused, never clamped |
+| `password_alerts` | no | `false` | TOML boolean; `true` follows the system journal and shows failed password attempts (section 2c) |
+| `lock_screen_programs` | no | `["/usr/bin/swaylock", "/usr/bin/hyprlock", "/usr/bin/gtklock", "/usr/bin/waylock"]` | 0..=4 absolute paths (at most 4096 bytes each, no trailing `/`, no `..`, no control byte, not ending in ` (deleted)`), duplicates removed; the lock-screen programs whose `pam_unix` lines are trusted (section 2c) |
+| `push_notifications` | no | `false` | TOML boolean; `true` sends failed-password alerts as Web Push notifications (section 2d); requires `password_alerts = true` and `rp_id` |
+| `vapid_subject` | no | `https://<rp_id>` | `mailto:<you>@<domain>` or `https://<host>[/path]`, at most 256 printable bytes, no space, no port, no reserved name (`localhost`, `.local`, `.test`, `.example`, `.invalid`, `.internal`, `.home.arpa`) |
+| `push_socket_path` | no | `$XDG_RUNTIME_DIR/soos-push/push.sock` | absolute, at most 107 bytes; the socket of `soos-push-sender` |
+| `push_previews` | no | `"detailed"` | `"detailed"` (source, account, counts) or `"generic"` (fixed text on the lock screen) |
 | `socket_path` | no | `$XDG_RUNTIME_DIR/soos-remote/remote.sock` | absolute, at most 107 bytes; `XDG_RUNTIME_DIR` unset or relative without `socket_path` → refused (no `/tmp` fallback) |
 
 A missing file, an unknown key or an invalid value exits with status 78 (`EX_CONFIG`), which the
@@ -399,6 +589,13 @@ The service also refuses to start when its real or effective uid is 0.
 | `POST /api/auth/logout` | Funnel only: `200 logged_out`, clears the cookie |
 | `POST /api/auth/unlock/options` | tailnet, or Funnel with a session: an `unlock` challenge (`200 {challenge, rp_id, timeout_ms}`) |
 | `POST /api/auth/register/options`, `POST /api/auth/register/verify` | tailnet only, with the code of `soos-remote enroll-code`: `200 registered`, `403 enroll_code_rejected`, `409 passkey_limit` / `already_registered` / `registration_conflict` |
+| `GET /api/alerts` | tailnet, or Funnel with a session (`403 login_required` otherwise): `200` the alerts view (section 2c); `{"state":"disabled",…}` while `password_alerts` is off |
+| `POST /api/alerts/ack` | no body; `X-Soos-Action: alerts-ack`, `X-Soos-Alerts-Epoch`, `X-Soos-Alerts-Through`: `200` the new view, `403 forbidden` (CSRF), `403 alerts_disabled`, `400 bad_request` (headers, or a `through` beyond the newest attempt), `429 rate_limited` (one per second), `409 stale_view`, `503 unavailable` |
+| `GET /sw.js` | the service worker (public asset, `text/javascript`); it only shows notifications |
+| `GET /api/push` | tailnet, or Funnel with a session: `{state, reason, public_key, subscriptions, devices, last_delivery, sender}`; `{"state":"disabled",…}` while `push_notifications` is off |
+| `POST /api/push/subscribe` | `X-Soos-Action: push-subscribe`, the browser's subscription JSON (at most 2 KiB): `200 subscribed`, `400 bad_request` / `unsupported_push_service`, `403 forbidden` / `push_disabled`, `409 too_many_subscriptions`, `413 body_too_large`, `429 rate_limited` (one per second, shared with unsubscribe), `503 unavailable` / `store_unavailable` |
+| `POST /api/push/unsubscribe` | `X-Soos-Action: push-unsubscribe`, `{"endpoint":…}`: `200 unsubscribed` (also for an unknown endpoint), `400`, `403`, `429`, `503` as above |
+| `POST /api/push/test` | no body; `X-Soos-Action: push-test`: `202 test_queued`, `409 no_subscriptions`, `429 rate_limited` (one per 10 s), `403`, `503` as above |
 | `HEAD` of a `GET` route | same headers, empty body |
 
 `state` is one of `locked`, `unlocked`, `no_session`, `unavailable`. Any logind failure is
@@ -408,8 +605,8 @@ The service also refuses to start when its real or effective uid is 0.
 Every response carries `Cache-Control: no-store`, the CSP, `X-Content-Type-Options: nosniff`,
 `Referrer-Policy: no-referrer`, `X-Frame-Options: DENY` and `Connection: close`. Requests are
 bounded: 16 connections, 8 KiB head, 32 headers, 256-byte path, 5 s to send the head, 2 s per
-write, no request body except on the four passkey body routes (`413 body_not_allowed` /
-`400`; on those routes at most 8 KiB, `Content-Length` or strict `Transfer-Encoding: chunked`,
+write, no request body except on the four passkey body routes and the two push subscription
+routes (`413 body_not_allowed` / `400`; on those routes at most 8 KiB, `Content-Length` or strict `Transfer-Encoding: chunked`,
 5 s to send it, `413 body_too_large`), 1.5 s per logind snapshot, 2 s per lock flow, 2 s per
 unlock flow.
 
@@ -468,6 +665,31 @@ reason classes.
 - A device-bound (non-synced) passkey presenting the same counter twice concurrently is accepted
   twice (clone detection only, never an authentication bypass; synced iCloud passkeys report
   `0/0` and are unaffected; candid review MINOR finding, follow-up).
+- Failed-password alerts (section 2c): a process running as the owner can create false
+  lock-screen alerts, relabel the class of a helper-only attempt, and, while it keeps forging
+  untrusted owner-side `pam_unix` failures, hide the lock-screen attempts that only `unix_chkpwd`
+  logs; only `_UID=0` lines cannot be forged without root (lines trusted through `_EXE`, such as
+  `sudo`, `su` or a configured locker, can be forged through journald's PID-reuse race: false
+  alerts and relabelling only, never the suppression of a trusted failure). A helper-only check
+  can carry the class of another recent attempt of the same side and account (the count stays
+  right). The service needs a group that reads the whole system journal. With volatile journal
+  storage the history does not survive a reboot. An attempt whose journal line or user-name
+  field exceeds the bounds (24 KiB line, 4 KiB field) is skipped; this can only concern accounts
+  other than yours. The kernel pipe buffer and `serde_json`'s escape scratch buffer are not
+  wiped. A `journalctl` stalled for more than 2 s inside the 24 h replay, or silent for 2 s right
+  after a cold start, can report `active` before the replay ends (later lines still count). A
+  lock screen outside `lock_screen_programs` is not monitored; the page says so only when none
+  of the configured paths exists. `journalctl` inside the exact unit sandbox is verified on the
+  owner's hardware (matrix row RMC59).
+- Push notifications (section 2d): a detailed notification is readable on the locked iPhone
+  (use *Show Previews: When Unlocked* or `push_previews = "generic"`); Apple (or Google,
+  Mozilla) sees delivery metadata, never the content; an owner-uid process can cause false
+  notifications (at most 20 per hour) and can use the sender socket to post to the three push
+  hosts; a compromised sender can reach abstract-namespace sockets (for example Xwayland's
+  `@/tmp/.X11-unix/X0`) and forge replies; a client of your uid that delays `soos-remote`
+  beyond 18 s can cause a duplicate notification; a newer summary replaces a pending
+  `Retry-After` retry and is sent at once; a stolen Funnel session can register a device (check
+  the device list); `ring`, `rustls` and the RustCrypto crates are not independently audited.
 - The `bind` → `chmod 0600` window of the socket is closed by the `0700` parent directory and
   the unit's `UMask=0077`; the service must therefore be started through the unit (or with the
   same umask).
@@ -480,7 +702,9 @@ reason classes.
   ES256, several users.
 - Any other public exposure path (Cloudflare Tunnel, Cloudflare Access, a custom domain, a
   reverse proxy): explored separately; it needs its own ADR before it may reach this socket.
-- **Push notifications** (lock/unlock alerts while the page is in the background).
+- **Lock/unlock-state notifications**, "monitoring lost" notifications, notification
+  actions, and push hosts other than Apple, Google and Mozilla (section 2d covers only
+  failed-password alerts and the test notification).
 - **Live camera** or any frame, embedding or evidence access.
 - System-wide packaging (`install.sh`, deb/rpm/Arch): deferred until the owner approves the
   merge; `scripts/install_remote.sh` is the only installer.

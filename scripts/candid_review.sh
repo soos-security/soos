@@ -200,7 +200,7 @@ ERRORS_FOUND=0
 # 1. Check for unsafe code in business crates
 step "Audit 1: Checking #![forbid(unsafe_code)] Invariant"
 # Business crates (must match test_business_crates_forbid_unsafe_code in tests/invariants)
-BUSINESS_CRATES=(protocol policy vision inference-ort biometric-store evidence-store enrollment-cli admin-cli gui remote)
+BUSINESS_CRATES=(protocol policy vision inference-ort biometric-store evidence-store enrollment-cli admin-cli gui remote push-protocol push-sender)
 BUSINESS_PATHS=()
 for crate_name in "${BUSINESS_CRATES[@]}"; do
     BUSINESS_PATHS+=("crates/${crate_name}")

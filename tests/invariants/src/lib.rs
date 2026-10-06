@@ -286,6 +286,17 @@ mod remote_companion_contract;
 #[cfg(all(test, unix))]
 mod remote_passkey_contract;
 
+/// Failed-password alerts of `soos-remote` from the system journal (ADR 2026-10-06; spec
+/// AI/architect_spec_remote_auth_alerts.md §12.8 RMC-S24–RMC-S31; rows RMC45–RMC58).
+#[cfg(all(test, unix))]
+mod remote_alerts_contract;
+
+/// Web Push notifications of `soos-remote` through the separate `soos-push-sender` unit (ADR
+/// 2026-10-06; spec AI/architect_spec_remote_web_push.md §12.9 RMC-S32–RMC-S42; rows
+/// RMC60–RMC74).
+#[cfg(all(test, unix))]
+mod remote_push_contract;
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,
@@ -324,6 +335,8 @@ mod tests {
             "admin-cli",
             "gui",
             "remote",
+            "push-protocol",
+            "push-sender",
         ];
 
         for crate_name in business_crates {

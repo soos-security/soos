@@ -14,6 +14,8 @@ members = [
     "crates/admin-cli",
     "crates/gui",
     "crates/remote",
+    "crates/push-protocol",
+    "crates/push-sender",
     "tests/invariants",
     "tests/fixtures",
 ]
@@ -85,6 +87,12 @@ ciborium = "0.2"
 p256 = { version = "0.13.2", default-features = false, features = ["ecdsa"] }
 base64ct = { version = "1.8", features = ["alloc"] }
 subtle = "2.6"
+# Web Push (ADR 2026-10-06 "Web Push Notifications for Failed-Password Alerts Through a
+# Separate Sender Unit"): RFC 8291 HKDF steps in soos-remote (RustCrypto, already locked)
+hmac = "0.12"
+# Outbound HTTPS of soos-push-sender only: rustls + ring + webpki-roots, no OpenSSL,
+# exact pin (the resolver API is unversioned in ureq 3)
+ureq = { version = "=3.4.2", default-features = false, features = ["rustls"] }
 
 # CLI argument parsing
 clap = { version = "4", features = ["derive"] }
@@ -103,6 +111,7 @@ soos-enrollment-cli = { path = "crates/enrollment-cli", version = "0.1.0" }
 soos-admin-cli = { path = "crates/admin-cli", version = "0.1.0" }
 soos-gui = { path = "crates/gui", version = "0.1.0" }
 soos-remote = { path = "crates/remote", version = "0.1.0" }
+soos-push-protocol = { path = "crates/push-protocol", version = "0.1.0" }
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"

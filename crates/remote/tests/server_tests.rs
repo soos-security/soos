@@ -770,6 +770,8 @@ impl Harness {
                 allow_funnel: false,
                 credentials_path: Some(store_path.clone()),
             },
+            alerts: soos_remote::config::AlertsConfig::default(),
+            push: soos_remote::config::PushConfig::default(),
         };
         let source = MockSource::unlocked();
         let clock = TestClock::new();

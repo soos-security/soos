@@ -22,6 +22,21 @@
 //! and then forwards readings whose `seq` is above the last one it sent when the view
 //! changed, or as a keep-alive so that an event reaches the phone at least every
 //! `SSE_KEEPALIVE_MS`; a reading is sent at most once and never re-stamped.
+//!
+//! Failed-password alerts (ADR 2026-10-06 "Failed-Password Alerts in `soos-remote` From the
+//! System Journal"): when `password_alerts = true` and a journal source is wired, `serve`
+//! draws a per-start epoch, reads the acknowledgement marker and supervises the journal
+//! follower next to the poller (it never ends `serve` on its own). `GET /api/alerts` and
+//! `POST /api/alerts/ack` are authenticated routes (never Funnel-public); event streams add
+//! `event: alerts` (at most one per `ALERT_EVENT_MIN_INTERVAL_MS`), re-validating a Funnel
+//! session before each one.
+//!
+//! Web Push (ADR 2026-10-06 "Web Push Notifications for Failed-Password Alerts Through a
+//! Separate Sender Unit"): when `push_notifications = true` and a transport is wired, `serve`
+//! loads or creates the push store, hands the alerts runtime a live-attempt sink and
+//! supervises the push dispatcher. `GET /api/push` and the three push `POST` routes are
+//! authenticated (never Funnel-public); every push `POST` is checked (CSRF, enabled,
+//! available, rate gate) before any body byte is read.
 
 use std::future::Future;
 use std::io::ErrorKind;
@@ -41,6 +56,7 @@ use tracing::debug;
 use subtle::ConstantTimeEq;
 use zeroize::Zeroizing;
 
+use crate::alerts::{run_follower, AckRefusal, AlertSettings, AlertsRuntime, AlertsView};
 use crate::assets::asset;
 use crate::audit;
 use crate::auth::{
@@ -57,15 +73,17 @@ use crate::credentials::{
 };
 use crate::enroll::{normalized_code_hash, read_code_file, remove_code_file, EnrollError};
 use crate::http::{
-    encode_response, encode_response_head, encode_sse_event, encode_sse_head, parse_request,
-    read_body, write_bounded, BodyError, HttpError, Method, ParsedRequest, RequestHead, Response,
-    WriteError,
+    encode_response, encode_response_head, encode_sse_alerts_event, encode_sse_event,
+    encode_sse_head, parse_request, read_body, write_bounded, BodyError, HttpError, Method,
+    ParsedRequest, RequestHead, Response, WriteError,
 };
 use crate::identity::{check_host, classify_request, client_hint, ClientHint, PathClass};
+use crate::journal::JournalSource;
 use crate::logind::{SessionSource, SourceError};
+use crate::push::{run_dispatcher, PushRuntime, PushSettings, PushTransport, PushView};
 use crate::routes::{
-    accepts_body, allow_header, check_auth_csrf, check_lock_csrf, check_unlock_csrf,
-    is_funnel_public, route, Route,
+    accepts_body, allow_header, check_alerts_ack_csrf, check_auth_csrf, check_lock_csrf,
+    check_push_csrf, check_unlock_csrf, is_funnel_public, parse_alerts_ack_headers, route, Route,
 };
 use crate::session::{select_session, SessionProps};
 use crate::status::{status_from, view_changed, Reading, StatusView};
@@ -81,6 +99,8 @@ use crate::{
     RESPONSE_WRITE_TIMEOUT_MS, SESSION_TOKEN_BYTES, SNAPSHOT_DEADLINE_MS, SSE_KEEPALIVE_MS,
     STORE_LOCK_TIMEOUT_MS, UNLOCK_FLOW_DEADLINE_MS, USER_HANDLE_BYTES, WEBAUTHN_TIMEOUT_MS,
 };
+use crate::{ACTION_PUSH_SUBSCRIBE, ACTION_PUSH_TEST, ACTION_PUSH_UNSUBSCRIBE};
+use crate::{ALERT_EVENT_MIN_INTERVAL_MS, MIN_ALERT_ACK_INTERVAL_MS};
 
 // Streams hold their connection permit for their whole lifetime; request permits must
 // always remain.
@@ -112,6 +132,8 @@ pub struct ServerState<S: SessionSource> {
     random: RandomSource,
     credentials_path: Option<PathBuf>,
     file_owner_uid: u32,
+    password_alerts: Option<(AlertSettings, Arc<dyn JournalSource>)>,
+    push: Option<(PushSettings, Arc<dyn PushTransport>)>,
 }
 
 impl<S: SessionSource> ServerState<S> {
@@ -131,7 +153,33 @@ impl<S: SessionSource> ServerState<S> {
             random: system_random(),
             credentials_path: None,
             file_owner_uid: uid,
+            password_alerts: None,
+            push: None,
         }
+    }
+
+    /// Wires Web Push (production and tests): the settings resolved by `main` and the
+    /// transport to `soos-push-sender`. Ignored unless `config.push.enabled` (opt-in, W-2).
+    #[must_use]
+    pub fn with_push(mut self, settings: PushSettings, transport: Arc<dyn PushTransport>) -> Self {
+        if self.config.push.enabled {
+            self.push = Some((settings, transport));
+        }
+        self
+    }
+
+    /// Wires the failed-password alerts (production and tests): the settings resolved by
+    /// `main` and the journal source. Ignored unless `config.alerts.enabled` (opt-in, A-2).
+    #[must_use]
+    pub fn with_password_alerts(
+        mut self,
+        settings: AlertSettings,
+        source: Arc<dyn JournalSource>,
+    ) -> Self {
+        if self.config.alerts.enabled {
+            self.password_alerts = Some((settings, source));
+        }
+        self
     }
 
     /// Test hook: injected CSPRNG (scripted or failing).
@@ -264,11 +312,21 @@ struct Shared<S: SessionSource> {
     capacity: Capacity,
     /// The relying party (`None` when `rp_id` is not configured).
     rp: Option<RelyingParty>,
+    /// Failed-password alerts (`None` when `password_alerts` is off).
+    alerts: Option<Arc<AlertsRuntime>>,
+    /// Web Push (`None` when `push_notifications` is off or not wired).
+    push: Option<Arc<PushRuntime>>,
 }
 
 impl<S: SessionSource> Shared<S> {
-    fn new(state: Arc<ServerState<S>>) -> Self {
+    fn new(
+        state: Arc<ServerState<S>>,
+        alerts: Option<Arc<AlertsRuntime>>,
+        push: Option<Arc<PushRuntime>>,
+    ) -> Self {
         Self {
+            alerts,
+            push,
             seq: AtomicU64::new(state.seq_start),
             fatal: AtomicBool::new(false),
             subscribers: AtomicUsize::new(0),
@@ -617,10 +675,58 @@ pub async fn serve<S: SessionSource>(
     shutdown: impl Future<Output = ()> + Send,
 ) -> Result<(), ServeError> {
     let socket_path = state.config.socket_path.clone();
-    let shared = Arc::new(Shared::new(state));
+    let push = state.push.as_ref().map(|(settings, transport)| {
+        PushRuntime::new(
+            settings.clone(),
+            Arc::clone(transport),
+            Arc::clone(&state.random),
+            Arc::clone(&state.unix_clock),
+            state.file_owner_uid,
+        )
+    });
+    // The sink ignores attempts until the store is open (`start`, after the alerts set-up).
+    let live_sink = push.as_ref().map(PushRuntime::live_sink);
+    let (alerts, follower) = if state.config.alerts.enabled {
+        let (runtime, context) = AlertsRuntime::setup(
+            state.password_alerts.as_ref().map(|(settings, _)| settings),
+            &state.random,
+            Arc::clone(&state.unix_clock),
+            state.file_owner_uid,
+            state.uid,
+            live_sink,
+        );
+        let follower = match (context, state.password_alerts.as_ref()) {
+            (Some(context), Some((_, source))) => {
+                Some((Arc::clone(&runtime), Arc::clone(source), context))
+            }
+            _ => None,
+        };
+        (Some(runtime), follower)
+    } else {
+        (None, None)
+    };
+    if let Some(runtime) = push.as_ref() {
+        runtime.start();
+    }
+    let dispatcher = push.as_ref().filter(|runtime| runtime.is_active()).cloned();
+    let shared = Arc::new(Shared::new(state, alerts, push));
     let connections: Arc<Mutex<JoinSet<()>>> = Arc::new(Mutex::new(JoinSet::new()));
     let mut supervised: JoinSet<ServeError> = JoinSet::new();
     supervised.spawn(poller(Arc::clone(&shared)));
+    if let Some((runtime, source, context)) = follower {
+        // The follower never ends `serve` on its own (C-26): a panic is `TaskPanicked`.
+        supervised.spawn(async move {
+            run_follower(runtime, source, context).await;
+            std::future::pending::<ServeError>().await
+        });
+    }
+    if let Some(runtime) = dispatcher {
+        // No push error ends the dispatcher; a panic is `TaskPanicked` (supervised set).
+        supervised.spawn(async move {
+            run_dispatcher(runtime).await;
+            std::future::pending::<ServeError>().await
+        });
+    }
     supervised.spawn(accept_loop(
         listener,
         Arc::clone(&shared),
@@ -1100,6 +1206,16 @@ async fn handle_connection<S: SessionSource>(
         Route::UnlockOptions => Some(unlock_options(&shared, &ctx).await),
         Route::RegisterOptions => register_options(&shared, &ctx, &mut stream).await,
         Route::RegisterVerify => register_verify(&shared, &ctx, &mut stream).await,
+        Route::Alerts => Some(alerts_response(200, &alerts_view(&shared))),
+        Route::AlertsAck => Some(alerts_ack(&shared, &ctx).await),
+        Route::Push => Some(push_view_response(&shared).await),
+        Route::PushSubscribe => {
+            push_body_route(&shared, &ctx, &mut stream, PushBodyRoute::Subscribe).await
+        }
+        Route::PushUnsubscribe => {
+            push_body_route(&shared, &ctx, &mut stream, PushBodyRoute::Unsubscribe).await
+        }
+        Route::PushTest => Some(push_test(&shared, &ctx).await),
         Route::NotFound => Some(Response::json(404, "not_found")),
         Route::MethodNotAllowed => {
             let mut response = Response::json(405, "method_not_allowed");
@@ -1753,6 +1869,170 @@ async fn unlock_flow<S: SessionSource>(shared: &Shared<S>) -> Response {
     }
 }
 
+// ---------------------------------------------------------------------------------------
+// Failed-password alerts (ADR 2026-10-06 "Failed-Password Alerts in `soos-remote` From the
+// System Journal", architect spec §6)
+// ---------------------------------------------------------------------------------------
+
+/// The current alerts view (`disabled` when the feature is off).
+fn alerts_view<S: SessionSource>(shared: &Shared<S>) -> AlertsView {
+    shared
+        .alerts
+        .as_ref()
+        .map_or_else(AlertsView::disabled, |runtime| runtime.view())
+}
+
+/// A JSON response carrying a view; a serialisation failure is `503 unavailable`.
+fn alerts_response(status: u16, view: &AlertsView) -> Response {
+    match serde_json::to_vec(view) {
+        Ok(body) => Response {
+            status,
+            content_type: "application/json",
+            body,
+            extra_headers: Vec::new(),
+        },
+        Err(_) => Response::json(503, "unavailable"),
+    }
+}
+
+/// `POST /api/alerts/ack`: CSRF → disabled → snapshot headers → rate gate → book →
+/// epoch → `through` → apply and persist (spec §6 gate order).
+async fn alerts_ack<S: SessionSource>(shared: &Shared<S>, ctx: &RequestContext) -> Response {
+    if let Err(err) = check_alerts_ack_csrf(ctx.head(), &ctx.normalized_host) {
+        debug!(%err, "alerts acknowledgement refused");
+        return Response::json(403, "forbidden");
+    }
+    let Some(runtime) = shared.alerts.as_ref() else {
+        return Response::json(403, "alerts_disabled");
+    };
+    let target = match parse_alerts_ack_headers(ctx.head()) {
+        Ok(target) => target,
+        Err(err) => {
+            debug!(%err, "alerts acknowledgement refused");
+            return Response::json(400, "bad_request");
+        }
+    };
+    {
+        let mut gate = runtime.ack_gate.lock().await;
+        let now = Instant::now();
+        if gate.is_some_and(|last| {
+            now.duration_since(last) < Duration::from_millis(MIN_ALERT_ACK_INTERVAL_MS)
+        }) {
+            return Response::json(429, "rate_limited");
+        }
+        *gate = Some(now);
+    }
+    match runtime.acknowledge(target.epoch, target.through) {
+        Ok(view) => alerts_response(200, &view),
+        Err(AckRefusal::Unavailable) => Response::json(503, "unavailable"),
+        Err(AckRefusal::StaleView) => Response::json(409, "stale_view"),
+        Err(AckRefusal::BeyondNewest) => Response::json(400, "bad_request"),
+    }
+}
+
+// ---------------------------------------------------------------------------------------
+// Web Push (ADR 2026-10-06 "Web Push Notifications for Failed-Password Alerts Through a
+// Separate Sender Unit", architect spec §6)
+// ---------------------------------------------------------------------------------------
+
+/// `GET|HEAD /api/push` (the disabled view when push is off).
+async fn push_view_response<S: SessionSource>(shared: &Shared<S>) -> Response {
+    let view = match shared.push.as_ref() {
+        Some(runtime) => runtime.view().await,
+        None => PushView::disabled(),
+    };
+    match serde_json::to_vec(&view) {
+        Ok(body) => Response {
+            status: 200,
+            content_type: "application/json",
+            body,
+            extra_headers: Vec::new(),
+        },
+        Err(_) => Response::json(503, "unavailable"),
+    }
+}
+
+/// The two push body routes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PushBodyRoute {
+    Subscribe,
+    Unsubscribe,
+}
+
+/// CSRF → enabled → available: the checks every push `POST` passes before its gate.
+fn push_route_checks<'a, S: SessionSource>(
+    shared: &'a Shared<S>,
+    ctx: &RequestContext,
+    action: &str,
+) -> Result<&'a Arc<PushRuntime>, Response> {
+    if let Err(err) = check_push_csrf(ctx.head(), &ctx.normalized_host, action) {
+        debug!(%err, "push route refused");
+        return Err(Response::json(403, "forbidden"));
+    }
+    let Some(runtime) = shared.push.as_ref() else {
+        return Err(Response::json(403, "push_disabled"));
+    };
+    if let Err((status, result)) = runtime.availability() {
+        return Err(Response::json(status, result));
+    }
+    Ok(runtime)
+}
+
+/// `POST /api/push/subscribe` and `POST /api/push/unsubscribe` (spec §6.2, §6.3): CSRF →
+/// enabled → available → shared rate gate, all before the body; then the bounded body read
+/// (no mutex held) and the handler.
+async fn push_body_route<S: SessionSource>(
+    shared: &Shared<S>,
+    ctx: &RequestContext,
+    stream: &mut UnixStream,
+    which: PushBodyRoute,
+) -> Option<Response> {
+    let action = match which {
+        PushBodyRoute::Subscribe => ACTION_PUSH_SUBSCRIBE,
+        PushBodyRoute::Unsubscribe => ACTION_PUSH_UNSUBSCRIBE,
+    };
+    let runtime = match push_route_checks(shared, ctx, action) {
+        Ok(runtime) => Arc::clone(runtime),
+        Err(response) => return Some(response),
+    };
+    if !runtime.pass_route_gate().await {
+        return Some(Response::json(429, "rate_limited"));
+    }
+    let body = match read_request_body(stream, ctx).await {
+        BodyOutcome::Body(body) => body,
+        BodyOutcome::Refuse(response, _) => return Some(response),
+        BodyOutcome::Close => return None,
+    };
+    let (status, result) = match which {
+        PushBodyRoute::Subscribe => runtime.subscribe(&body).await,
+        PushBodyRoute::Unsubscribe => runtime.unsubscribe(&body).await,
+    };
+    Some(Response::json(status, result))
+}
+
+/// `POST /api/push/test` (spec §6.4): CSRF → enabled → available → test gate → store →
+/// queue.
+async fn push_test<S: SessionSource>(shared: &Shared<S>, ctx: &RequestContext) -> Response {
+    let runtime = match push_route_checks(shared, ctx, ACTION_PUSH_TEST) {
+        Ok(runtime) => runtime,
+        Err(response) => return response,
+    };
+    if !runtime.pass_test_gate().await {
+        return Response::json(429, "rate_limited");
+    }
+    let (status, result) = runtime.queue_test().await;
+    Response::json(status, result)
+}
+
+/// Serializes an alerts view as one `event: alerts` and writes it under the write bound.
+async fn send_alerts_event<W: AsyncWrite + Unpin>(
+    writer: &mut W,
+    view: &AlertsView,
+) -> Result<(), WriteError> {
+    let json = serde_json::to_string(view).map_err(|_| WriteError::Io)?;
+    write_bounded(writer, &encode_sse_alerts_event(&json)).await
+}
+
 /// Serializes a view as one SSE event and writes it under the write bound.
 async fn send_event<W: AsyncWrite + Unpin>(
     writer: &mut W,
@@ -1818,6 +2098,29 @@ async fn serve_stream<S: SessionSource>(
     if send_event(&mut write_half, &first.view).await.is_err() {
         return;
     }
+    // Alerts: the first `event: alerts` right after the first status event; a Funnel
+    // session is re-validated before every alerts event (F-4).
+    let mut alert_versions = shared.alerts.as_ref().map(|runtime| runtime.subscribe());
+    if let Some(runtime) = shared.alerts.as_ref() {
+        if let Some(hash) = session.as_ref() {
+            if !shared.session_still_valid(hash).await {
+                debug!("stream session ended");
+                return;
+            }
+        }
+        if let Some(versions) = alert_versions.as_mut() {
+            versions.borrow_and_update();
+        }
+        if send_alerts_event(&mut write_half, &runtime.view())
+            .await
+            .is_err()
+        {
+            return;
+        }
+    }
+    let alert_interval = Duration::from_millis(ALERT_EVENT_MIN_INTERVAL_MS);
+    let mut last_alert_at = Instant::now();
+    let mut alert_pending = false;
     debug!("stream opened");
 
     let opened_at = Instant::now();
@@ -1883,6 +2186,35 @@ async fn serve_stream<S: SessionSource>(
                 }
                 last_sent_at = Instant::now();
                 keepalive_pending = false;
+            }
+            changed = async {
+                match alert_versions.as_mut() {
+                    Some(versions) => versions.changed().await,
+                    None => std::future::pending().await,
+                }
+            }, if !alert_pending => {
+                if changed.is_err() {
+                    break;
+                }
+                alert_pending = true;
+            }
+            () = sleep_until(deadline(last_alert_at, alert_interval)), if alert_pending => {
+                if let Some(hash) = session.as_ref() {
+                    if !shared.session_still_valid(hash).await {
+                        debug!("stream session ended");
+                        break;
+                    }
+                }
+                if let Some(versions) = alert_versions.as_mut() {
+                    versions.borrow_and_update();
+                }
+                if let Some(runtime) = shared.alerts.as_ref() {
+                    if send_alerts_event(&mut write_half, &runtime.view()).await.is_err() {
+                        break;
+                    }
+                }
+                last_alert_at = Instant::now();
+                alert_pending = false;
             }
             () = sleep_until(session_check_at), if session.is_some() => {
                 if let Some(hash) = session.as_ref() {

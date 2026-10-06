@@ -31,6 +31,24 @@
       <p id="feedback" class="feedback" role="status">&nbsp;</p>
       <button id="logout" type="button" class="secondary" hidden>Sign out</button>
     </section>
+    <section id="alerts" class="alerts" hidden aria-live="polite">
+      <h2>Failed passwords on the PC</h2>
+      <p id="alerts-summary" class="alerts-summary">&nbsp;</p>
+      <p id="alerts-coverage" class="detail" hidden>&nbsp;</p>
+      <ul id="alerts-history" class="alerts-history"></ul>
+      <button id="alerts-ack" type="button" class="secondary" hidden>Acknowledge</button>
+      <p id="alerts-feedback" class="feedback" role="status">&nbsp;</p>
+    </section>
+    <section id="push" class="push" hidden aria-live="polite">
+      <h2>Notifications</h2>
+      <p id="push-state" class="detail">&nbsp;</p>
+      <ul id="push-devices" class="push-devices"></ul>
+      <p id="push-hint" class="detail" hidden>Not yours? Run <code>soos-remote push list</code> and <code>push remove N</code> on the PC, and, if a passkey is not yours either, <code>soos-remote passkeys remove N</code>.</p>
+      <button id="push-enable" type="button" hidden>Enable notifications</button>
+      <button id="push-test" type="button" class="secondary" hidden>Send test notification</button>
+      <button id="push-disable" type="button" class="secondary" hidden>Disable notifications</button>
+      <p id="push-feedback" class="feedback" role="status">&nbsp;</p>
+    </section>
     <section id="enroll" class="enroll" hidden>
       <h2>Add a passkey</h2>
       <p class="detail">Run <code>soos-remote enroll-code</code> on the PC, then type the code.</p>

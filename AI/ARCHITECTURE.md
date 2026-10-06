@@ -269,7 +269,9 @@ soos/
 │   ├── enrollment-cli/           # root enrollment CLI
 │   ├── admin-cli/                # non-biometric status diagnostic CLI
 │   ├── gui/                      # soos-gui diagnostic and enrollment GUI (eframe)
-│   └── remote/                   # soos-remote user-level lock status, remote lock and opt-in unlock companion (§13)
+│   ├── remote/                   # soos-remote user-level lock status, remote lock and opt-in unlock companion (§13)
+│   ├── push-protocol/            # soos-push-protocol pure push wire contract (§13)
+│   └── push-sender/              # soos-push-sender sandboxed outbound Web Push user service (§13)
 ├── models/
 │   ├── manifest.toml             # model IDs, licenses, SHA-256 checksums
 │   └── README.md
@@ -369,7 +371,8 @@ deployment stays tailnet-only. It is a leaf crate: `soos-daemon`,
 | Aspect | Decision |
 |---|---|
 | Process | `systemctl --user` service of the session owner; `check_not_root` refuses uid 0 or euid 0 at start (exit 78, `RestartPreventExitStatus=78`). No polkit rule: the session owner may call `Manager.LockSession` and `Manager.UnlockSession` on their own session. |
-| Transport | One `0600` Unix socket in a `0700` directory under `$XDG_RUNTIME_DIR`, proxied by `tailscale serve --bg unix:<path>` and, only when `allow_funnel = true`, published by the owner with `tailscale funnel --bg unix:<path>` on port 443 (same `*.ts.net` name and certificate); no network socket at all (`RestrictAddressFamilies=AF_UNIX`, invariant RMC-S2/S5). |
+| Transport | One `0600` Unix socket in a `0700` directory under `$XDG_RUNTIME_DIR`, proxied by `tailscale serve --bg unix:<path>` and, only when `allow_funnel = true`, published by the owner with `tailscale funnel --bg unix:<path>` on port 443 (same `*.ts.net` name and certificate); no network socket at all in `soos-remote` (`RestrictAddressFamilies=AF_UNIX`, invariant RMC-S2/S5). |
+| Push sender (opt-in) | `soos-push-sender` (crates `push-sender`, `push-protocol`): the only network-capable component of the companion, a separate sandboxed user unit (`AF_UNIX AF_INET AF_INET6`, `$HOME` and `/run` hidden) reached over a `0600` Unix socket; it holds no key and makes one outbound HTTPS `POST` per request to `web.push.apple.com`, `fcm.googleapis.com` or `updates.push.services.mozilla.com`, after refusing any non-public resolved address (ADR 2026-10-06 "Web Push Notifications for Failed-Password Alerts Through a Separate Sender Unit", matrix RMC60–RMC74, walkthrough 187). |
 | Request classes | Exactly one allowed `Tailscale-User-Login` and no Funnel marker ⇒ tailnet caller; exactly one `Tailscale-Funnel-Request: ?1` and no identity, with `allow_funnel = true` ⇒ Funnel caller (effective host must equal `rp_id`, else `421`); both, neither, repeated or another value ⇒ `403`. Never derived from `Host`, `X-Forwarded-Host` or `X-Forwarded-For`; `tailscaled` deletes client copies of both headers (verified in the 1.102.4 source). |
 | Passkeys | In-house WebAuthn (pure Rust: RustCrypto `p256` ECDSA, `ciborium`, `sha2`, `getrandom`, `base64ct`, `subtle`; no OpenSSL, no `webauthn-rs`): RP ID `rp_id` (full node host), origin exactly `https://<rp_id>`, ES256 only, attestation `none` only, UV required on every ceremony, discoverable credentials, `userHandle` required, `signCount` `0/0` accepted. Challenges 32 random bytes, single use, purpose/class/binding scoped, 120 s. Store `remote-passkeys.json` (`0600`, owner-checked, `O_NOFOLLOW`, ≤ 16 KiB, ≤ 4 passkeys, `flock`, atomic rename). Registration only from the tailnet with an allowed identity **and** a local one-time code (`soos-remote enroll-code`: 50 bits, 5 min, single use, 3 attempts). |
 | Funnel access | Without a web session a Funnel caller reaches only the page, its assets, `GET /api/auth/state`, the login ceremony and logout; status, events, lock and unlock ⇒ `403 login_required`; registration ⇒ `403`. A passkey login sets `__Host-soos_session` (`Secure; HttpOnly; SameSite=Strict`), stored only as SHA-256 in memory, ≤ 4 sessions, 15 min idle, 8 h absolute, revoked with its passkey. The tailnet path keeps one-tap status and lock. |
@@ -385,7 +388,10 @@ unlock unless `allow_unlock = true` and a fresh UV passkey assertion; RC-2 every
 RC-3 a logind failure is never `unlocked` and no stale `unlocked` is replayed to a new stream;
 RC-4 every read, write, connection count and stream lifetime is bounded; RC-5 no identity or
 request data in logs or bodies. Out of scope, each needing its own ADR: an automatic re-lock,
-push notifications, live camera, any public exposure other than Tailscale Funnel on port 443.
+lock/unlock-state push notifications, live camera, any public exposure other than Tailscale
+Funnel on port 443. Opt-in Web Push of the failed-password alerts keeps RC-1 for `soos-remote`
+(every key and all cryptography stay there; the outbound request is made by the sandboxed,
+key-less `soos-push-sender` unit) and never carries a typed password.
 Matrix rows RMC1–RMC44 and walkthroughs 183, 184 and 185. Verified by the owner on 2026-10-06:
 the Serve forwarding check (RMC20: `tailscale serve unix:` sends `Host: localhost`, the original
 name in `X-Forwarded-Host` and `X-Forwarded-Proto: https`); the iPhone web app and *Lock now*

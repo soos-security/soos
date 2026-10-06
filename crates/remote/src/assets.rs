@@ -19,6 +19,8 @@ pub enum AssetId {
     IconSvg,
     /// `/apple-touch-icon.png`.
     AppleTouchIcon,
+    /// `/sw.js`: the Web Push service worker.
+    ServiceWorker,
 }
 
 /// One embedded asset.
@@ -57,6 +59,10 @@ pub fn asset(id: AssetId) -> Asset {
         AssetId::AppleTouchIcon => Asset {
             content_type: "image/png",
             body: include_bytes!("../assets/apple-touch-icon.png"),
+        },
+        AssetId::ServiceWorker => Asset {
+            content_type: "text/javascript; charset=utf-8",
+            body: include_bytes!("../assets/sw.js"),
         },
     }
 }

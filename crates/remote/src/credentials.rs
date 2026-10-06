@@ -215,6 +215,17 @@ pub(crate) fn read_owned_file(
     uid: u32,
     bound: usize,
 ) -> Result<Option<(Vec<u8>, FileStamp)>, StoreError> {
+    read_owned_file_with_capacity(path, uid, bound, bound.min(4096))
+}
+
+/// [`read_owned_file`] into a buffer of `capacity` bytes up front: a store holding a secret
+/// passes `bound + 1`, so the bounded read never reallocates (no unwiped copy is left).
+pub(crate) fn read_owned_file_with_capacity(
+    path: &Path,
+    uid: u32,
+    bound: usize,
+    capacity: usize,
+) -> Result<Option<(Vec<u8>, FileStamp)>, StoreError> {
     let file = match OpenOptions::new()
         .read(true)
         .custom_flags((OFlag::O_NOFOLLOW | OFlag::O_NONBLOCK | OFlag::O_CLOEXEC).bits())
@@ -240,7 +251,7 @@ pub(crate) fn read_owned_file(
     if metadata.len() > limit {
         return Err(StoreError::TooLarge);
     }
-    let mut bytes = Vec::with_capacity(bound.min(4096));
+    let mut bytes = Vec::with_capacity(capacity);
     file.take(limit.saturating_add(1))
         .read_to_end(&mut bytes)
         .map_err(|_| StoreError::Io)?;
@@ -311,6 +322,41 @@ pub(crate) fn write_atomic(
     Ok(())
 }
 
+/// Checks the parent directory of `path`, then one non-blocking attempt at the exclusive
+/// lock on `<path>.lock`: `Ok(None)` when another holder has it. The lock file is opened
+/// `O_CREAT | O_NOFOLLOW | O_CLOEXEC` with mode `0600`; a symlink is refused. Shared by the
+/// passkey store and the Web Push store.
+///
+/// # Errors
+///
+/// [`StoreError::Io`], [`StoreError::Insecure`].
+pub(crate) fn try_lock_file(path: &Path, uid: u32) -> Result<Option<StoreLock>, StoreError> {
+    check_parent_dir(path, uid)?;
+    let mut name = path.as_os_str().to_os_string();
+    name.push(".lock");
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .custom_flags((OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC | OFlag::O_NONBLOCK).bits())
+        .open(PathBuf::from(name))
+        .map_err(|e| match e.raw_os_error().map(Errno::from_raw) {
+            Some(Errno::ELOOP) => StoreError::Insecure,
+            _ => StoreError::Io,
+        })?;
+    let metadata = file.metadata().map_err(|_| StoreError::Io)?;
+    if !metadata.is_file() || metadata.uid() != uid {
+        return Err(StoreError::Insecure);
+    }
+    match Flock::lock(file, FlockArg::LockExclusiveNonblock) {
+        Ok(lock) => Ok(Some(StoreLock(lock))),
+        Err((_, Errno::EWOULDBLOCK)) => Ok(None),
+        Err(_) => Err(StoreError::Io),
+    }
+}
+
 /// An exclusive lock on `<path>.lock`, released on drop.
 pub struct StoreLock(#[allow(dead_code, reason = "Held only for its Drop (unlock)")] Flock<File>);
 
@@ -376,13 +422,6 @@ impl CredentialStore {
         Ok(self.cache.as_ref().map(|(_, file)| file))
     }
 
-    /// The lock file path `<path>.lock`.
-    fn lock_path(&self) -> PathBuf {
-        let mut name = self.path.as_os_str().to_os_string();
-        name.push(".lock");
-        PathBuf::from(name)
-    }
-
     /// Checks the parent directory, then one non-blocking attempt at the exclusive lock:
     /// `Ok(None)` when another holder has it. The lock file is opened
     /// `O_CREAT | O_NOFOLLOW | O_CLOEXEC` with mode `0600`; a symlink is refused.
@@ -391,28 +430,7 @@ impl CredentialStore {
     ///
     /// [`StoreError::Io`], [`StoreError::Insecure`].
     pub fn try_lock(&self) -> Result<Option<StoreLock>, StoreError> {
-        check_parent_dir(&self.path, self.uid)?;
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .mode(0o600)
-            .custom_flags((OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC | OFlag::O_NONBLOCK).bits())
-            .open(self.lock_path())
-            .map_err(|e| match e.raw_os_error().map(Errno::from_raw) {
-                Some(Errno::ELOOP) => StoreError::Insecure,
-                _ => StoreError::Io,
-            })?;
-        let metadata = file.metadata().map_err(|_| StoreError::Io)?;
-        if !metadata.is_file() || metadata.uid() != self.uid {
-            return Err(StoreError::Insecure);
-        }
-        match Flock::lock(file, FlockArg::LockExclusiveNonblock) {
-            Ok(lock) => Ok(Some(StoreLock(lock))),
-            Err((_, Errno::EWOULDBLOCK)) => Ok(None),
-            Err(_) => Err(StoreError::Io),
-        }
+        try_lock_file(&self.path, self.uid)
     }
 
     /// Read-modify-write while `lock` is held: loads fresh from disk (the cache is

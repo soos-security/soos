@@ -622,3 +622,501 @@ mod passkey_routes {
         );
     }
 }
+
+// ---------------------------------------------------------------------------------------
+// Failed-password alerts (ADR 2026-10-06 "Failed-Password Alerts in `soos-remote` From the
+// System Journal", architect spec `AI/architect_spec_remote_auth_alerts.md` §6, §6.1, tests 39
+// and 40; matrix RMC53, RMC54). New tests only; nothing above is changed.
+// ---------------------------------------------------------------------------------------
+
+mod alerts_contract {
+    use soos_remote::alerts::AlertsEpoch;
+    use soos_remote::http::{parse_request_head, Method, RequestHead};
+    use soos_remote::routes::{
+        accepts_body, allow_header, check_alerts_ack_csrf, is_funnel_public,
+        parse_alerts_ack_headers, route, AckHeaderError, AckTarget, CsrfError, Route,
+        ALERTS_ACK_PATH, ALERTS_PATH,
+    };
+
+    const HOST: &str = "pc.tail1234.ts.net";
+
+    fn head(headers: &[(&str, &[u8])]) -> RequestHead {
+        RequestHead {
+            method: Method::Post,
+            path: ALERTS_ACK_PATH.to_string(),
+            headers: headers
+                .iter()
+                .map(|(n, v)| (n.to_string(), v.to_vec()))
+                .collect(),
+        }
+    }
+
+    /// Test 39 (RMC53, §6): the two routes, their methods and `Allow`; the parser keeps the
+    /// query out of the path; neither route is Funnel-public nor accepts a body.
+    #[test]
+    fn test_rmc_alerts_routes_table() {
+        assert_eq!(ALERTS_PATH, "/api/alerts");
+        assert_eq!(ALERTS_ACK_PATH, "/api/alerts/ack");
+        for method in [Method::Get, Method::Head] {
+            assert_eq!(route(method, "/api/alerts"), Route::Alerts);
+            assert_eq!(route(method, "/api/alerts/ack"), Route::MethodNotAllowed);
+        }
+        assert_eq!(route(Method::Post, "/api/alerts/ack"), Route::AlertsAck);
+        assert_eq!(route(Method::Post, "/api/alerts"), Route::MethodNotAllowed);
+        assert_eq!(route(Method::Other, "/api/alerts"), Route::MethodNotAllowed);
+        assert_eq!(
+            route(Method::Other, "/api/alerts/ack"),
+            Route::MethodNotAllowed
+        );
+        assert_eq!(allow_header("/api/alerts/ack"), "POST");
+        assert_eq!(allow_header("/api/alerts"), "GET, HEAD");
+        for near in [
+            "/api/alerts/",
+            "/api/Alerts",
+            "/api/alerts/ack/",
+            "/api/alert",
+        ] {
+            assert_eq!(route(Method::Get, near), Route::NotFound, "{near}");
+            assert_eq!(route(Method::Post, near), Route::NotFound, "{near}");
+        }
+        let parsed = parse_request_head(
+            b"POST /api/alerts/ack?through=5 HTTP/1.1\r\nHost: x.ts.net\r\n\r\n",
+        )
+        .unwrap();
+        assert_eq!(parsed.path, "/api/alerts/ack");
+        assert!(!is_funnel_public(Route::Alerts));
+        assert!(!is_funnel_public(Route::AlertsAck));
+        assert!(!accepts_body(Method::Post, "/api/alerts/ack"));
+        assert!(!accepts_body(Method::Post, "/api/alerts"));
+    }
+
+    /// Test 40 (RMC54, §6, §6.1, F-1): the CSRF table of the lock route with `alerts-ack`,
+    /// and the strict snapshot headers (exactly one each, lowercased names only).
+    #[test]
+    fn test_rmc_alerts_ack_csrf_rules() {
+        let csrf = |headers: &[(&str, &[u8])]| check_alerts_ack_csrf(&head(headers), HOST);
+        assert_eq!(csrf(&[("x-soos-action", b"alerts-ack")]), Ok(()));
+        assert_eq!(csrf(&[]), Err(CsrfError::MissingActionHeader));
+        for action in [&b"lock"[..], b"unlock", b"Alerts-Ack", b"alerts-ack ", b""] {
+            assert_eq!(
+                csrf(&[("x-soos-action", action)]),
+                Err(CsrfError::MissingActionHeader),
+                "{:?}",
+                String::from_utf8_lossy(action)
+            );
+        }
+        assert_eq!(
+            csrf(&[
+                ("x-soos-action", b"alerts-ack"),
+                ("x-soos-action", b"alerts-ack")
+            ]),
+            Err(CsrfError::MissingActionHeader)
+        );
+        assert_eq!(
+            csrf(&[
+                ("x-soos-action", b"alerts-ack"),
+                ("sec-fetch-site", b"same-origin")
+            ]),
+            Ok(())
+        );
+        for site in [&b"cross-site"[..], b"same-site", b"none"] {
+            assert_eq!(
+                csrf(&[("x-soos-action", b"alerts-ack"), ("sec-fetch-site", site)]),
+                Err(CsrfError::CrossSite)
+            );
+        }
+        for origin in [
+            &b"https://pc.tail1234.ts.net"[..],
+            b"https://pc.tail1234.ts.net:443",
+            b"HTTPS://PC.TAIL1234.TS.NET",
+        ] {
+            assert_eq!(
+                csrf(&[("x-soos-action", b"alerts-ack"), ("origin", origin)]),
+                Ok(())
+            );
+        }
+        for origin in [
+            &b"https://evil.example.com"[..],
+            b"http://pc.tail1234.ts.net",
+            b"https://pc.tail1234.ts.net:8443",
+            b"null",
+        ] {
+            assert_eq!(
+                csrf(&[("x-soos-action", b"alerts-ack"), ("origin", origin)]),
+                Err(CsrfError::OriginMismatch)
+            );
+        }
+
+        // Snapshot headers.
+        let parse = |epoch: Option<&[u8]>, through: Option<&[u8]>| {
+            let mut headers: Vec<(&str, &[u8])> = Vec::new();
+            if let Some(e) = epoch {
+                headers.push(("x-soos-alerts-epoch", e));
+            }
+            if let Some(t) = through {
+                headers.push(("x-soos-alerts-through", t));
+            }
+            parse_alerts_ack_headers(&head(&headers))
+        };
+        assert_eq!(
+            parse(Some(b"0000000000000000"), Some(b"0")),
+            Ok(AckTarget {
+                epoch: AlertsEpoch::from_u64(0),
+                through: 0
+            })
+        );
+        assert_eq!(
+            parse(Some(b"ffffffffffffffff"), Some(b"18446744073709551615")),
+            Ok(AckTarget {
+                epoch: AlertsEpoch::from_u64(u64::MAX),
+                through: u64::MAX
+            })
+        );
+        assert_eq!(
+            parse(Some(b"0123456789abcdef"), Some(b"00000000000000000007")),
+            Ok(AckTarget {
+                epoch: AlertsEpoch::from_u64(0x0123_4567_89ab_cdef),
+                through: 7
+            })
+        );
+        let good_epoch: &[u8] = b"0123456789abcdef";
+        let bad_epochs: [Option<&[u8]>; 8] = [
+            None,
+            Some(&b""[..]),
+            Some(b"0123456789abcde"),
+            Some(b"0123456789abcdef0"),
+            Some(b"0123456789ABCDEF"),
+            Some(b"0123456789abcdeg"),
+            Some(b" 123456789abcdef"),
+            Some(b"0123456789abcd\xc3\xa9"),
+        ];
+        for bad in bad_epochs {
+            assert_eq!(
+                parse(bad, Some(b"1")),
+                Err(AckHeaderError::Epoch),
+                "{:?}",
+                bad.map(String::from_utf8_lossy)
+            );
+        }
+        let bad_throughs: [Option<&[u8]>; 14] = [
+            None,
+            Some(&b""[..]),
+            Some(b"a"),
+            Some(b"-1"),
+            Some(b"+1"),
+            Some(b" 5"),
+            Some(b"5 "),
+            Some(b"1.0"),
+            Some(b"0x1"),
+            Some(b"1e3"),
+            Some(b"123456789012345678901"),
+            Some(b"18446744073709551616"),
+            Some(b"99999999999999999999"),
+            Some("\u{ff15}".as_bytes()),
+        ];
+        for bad in bad_throughs {
+            assert_eq!(
+                parse(Some(good_epoch), bad),
+                Err(AckHeaderError::Through),
+                "{:?}",
+                bad.map(String::from_utf8_lossy)
+            );
+        }
+        // Repeated headers.
+        assert_eq!(
+            parse_alerts_ack_headers(&head(&[
+                ("x-soos-alerts-epoch", good_epoch),
+                ("x-soos-alerts-epoch", good_epoch),
+                ("x-soos-alerts-through", b"1"),
+            ])),
+            Err(AckHeaderError::Epoch)
+        );
+        assert_eq!(
+            parse_alerts_ack_headers(&head(&[
+                ("x-soos-alerts-epoch", good_epoch),
+                ("x-soos-alerts-through", b"1"),
+                ("x-soos-alerts-through", b"1"),
+            ])),
+            Err(AckHeaderError::Through)
+        );
+        // Names are matched only in their lowercased parsed form.
+        assert_eq!(
+            parse_alerts_ack_headers(&head(&[
+                ("X-Soos-Alerts-Epoch", good_epoch),
+                ("x-soos-alerts-through", b"1"),
+            ])),
+            Err(AckHeaderError::Epoch)
+        );
+        // The path (and any query in it) is never read.
+        let mut with_query = head(&[
+            ("x-soos-alerts-epoch", good_epoch),
+            ("x-soos-alerts-through", b"3"),
+        ]);
+        with_query.path = "/api/alerts/ack?through=9".to_string();
+        assert_eq!(
+            parse_alerts_ack_headers(&with_query).map(|t| t.through),
+            Ok(3)
+        );
+        let mut no_through = head(&[("x-soos-alerts-epoch", good_epoch)]);
+        no_through.path = "/api/alerts/ack?through=9".to_string();
+        assert_eq!(
+            parse_alerts_ack_headers(&no_through),
+            Err(AckHeaderError::Through)
+        );
+        // Errors never echo a value.
+        assert!(!AckHeaderError::Epoch.to_string().contains("0123"));
+    }
+}
+
+// ---------------------------------------------------------------------------------------
+// Web Push routes (ADR 2026-10-06 "Web Push Notifications for Failed-Password Alerts Through
+// a Separate Sender Unit", architect spec AI/architect_spec_remote_web_push.md §6, tests
+// 39–41; matrix RMC66, RMC73)
+// ---------------------------------------------------------------------------------------
+
+mod push_contract {
+    use soos_remote::assets::{asset, AssetId};
+    use soos_remote::http::{Method, RequestHead};
+    use soos_remote::routes::{
+        accepts_body, allow_header, check_push_csrf, is_funnel_public, route, CsrfError, Route,
+        PUSH_PATH, PUSH_SUBSCRIBE_PATH, PUSH_TEST_PATH, PUSH_UNSUBSCRIBE_PATH, SERVICE_WORKER_PATH,
+    };
+    use soos_remote::{ACTION_PUSH_SUBSCRIBE, ACTION_PUSH_TEST, ACTION_PUSH_UNSUBSCRIBE};
+
+    const HOST: &str = "pc.tail1234.ts.net";
+
+    fn head(path: &str, headers: &[(&str, &[u8])]) -> RequestHead {
+        RequestHead {
+            method: Method::Post,
+            path: path.to_string(),
+            headers: headers
+                .iter()
+                .map(|(n, v)| (n.to_string(), v.to_vec()))
+                .collect(),
+        }
+    }
+
+    /// Test 39 (RMC66, RMC73, §6.1): the route table, methods and `Allow`; near paths are
+    /// `404`; exactly subscribe and unsubscribe join the body routes; the four push API
+    /// routes are not Funnel-public, the service worker is.
+    #[test]
+    fn test_rwp_push_route_table() {
+        assert_eq!(PUSH_PATH, "/api/push");
+        assert_eq!(PUSH_SUBSCRIBE_PATH, "/api/push/subscribe");
+        assert_eq!(PUSH_UNSUBSCRIBE_PATH, "/api/push/unsubscribe");
+        assert_eq!(PUSH_TEST_PATH, "/api/push/test");
+        assert_eq!(SERVICE_WORKER_PATH, "/sw.js");
+        for method in [Method::Get, Method::Head] {
+            assert_eq!(route(method, "/api/push"), Route::Push);
+            assert_eq!(
+                route(method, "/sw.js"),
+                Route::Asset(AssetId::ServiceWorker)
+            );
+            for post_only in [
+                "/api/push/subscribe",
+                "/api/push/unsubscribe",
+                "/api/push/test",
+            ] {
+                assert_eq!(
+                    route(method, post_only),
+                    Route::MethodNotAllowed,
+                    "{post_only}"
+                );
+            }
+        }
+        assert_eq!(
+            route(Method::Post, "/api/push/subscribe"),
+            Route::PushSubscribe
+        );
+        assert_eq!(
+            route(Method::Post, "/api/push/unsubscribe"),
+            Route::PushUnsubscribe
+        );
+        assert_eq!(route(Method::Post, "/api/push/test"), Route::PushTest);
+        assert_eq!(route(Method::Post, "/api/push"), Route::MethodNotAllowed);
+        assert_eq!(route(Method::Post, "/sw.js"), Route::MethodNotAllowed);
+        assert_eq!(route(Method::Other, "/api/push"), Route::MethodNotAllowed);
+        assert_eq!(route(Method::Other, "/sw.js"), Route::MethodNotAllowed);
+        assert_eq!(
+            route(Method::Other, "/api/push/test"),
+            Route::MethodNotAllowed
+        );
+        assert_eq!(allow_header("/api/push"), "GET, HEAD");
+        assert_eq!(allow_header("/sw.js"), "GET, HEAD");
+        for post_only in [
+            "/api/push/subscribe",
+            "/api/push/unsubscribe",
+            "/api/push/test",
+        ] {
+            assert_eq!(allow_header(post_only), "POST", "{post_only}");
+        }
+        for near in [
+            "/api/push/",
+            "/api/Push",
+            "/api/push/subscribe/",
+            "/api/push/Subscribe",
+            "/api/push/unsubscribe/",
+            "/api/push/test/",
+            "/api/pushes",
+            "/sw.js/",
+            "/SW.js",
+            "/sw.JS",
+            "/sw",
+            "/service-worker.js",
+        ] {
+            assert_eq!(route(Method::Get, near), Route::NotFound, "{near}");
+            assert_eq!(route(Method::Post, near), Route::NotFound, "{near}");
+        }
+
+        // Body routes: exactly the four existing ones plus subscribe and unsubscribe.
+        for path in [
+            "/api/push/subscribe",
+            "/api/push/subscribe?x=1",
+            "/api/push/unsubscribe",
+            "/api/push/unsubscribe?x=1",
+            "/api/unlock",
+            "/api/auth/login/verify",
+            "/api/auth/register/options",
+            "/api/auth/register/verify",
+        ] {
+            assert!(accepts_body(Method::Post, path), "{path}");
+        }
+        for path in [
+            "/api/push",
+            "/api/push/test",
+            "/sw.js",
+            "/api/lock",
+            "/api/alerts/ack",
+        ] {
+            assert!(!accepts_body(Method::Post, path), "{path}");
+        }
+        assert!(!accepts_body(Method::Get, "/api/push/subscribe"));
+        assert!(!accepts_body(Method::Other, "/api/push/unsubscribe"));
+
+        for r in [
+            Route::Push,
+            Route::PushSubscribe,
+            Route::PushUnsubscribe,
+            Route::PushTest,
+        ] {
+            assert!(!is_funnel_public(r), "{r:?}");
+        }
+        assert!(is_funnel_public(Route::Asset(AssetId::ServiceWorker)));
+        // Existing answers unchanged.
+        assert!(is_funnel_public(Route::AuthState));
+        assert!(!is_funnel_public(Route::Alerts));
+        assert!(!is_funnel_public(Route::Lock));
+    }
+
+    /// Test 40 (RMC66, §6.1): `check_push_csrf` applies the lock table to each push action;
+    /// an action value of another route, or an unknown action argument, is refused.
+    #[test]
+    fn test_rwp_push_csrf_rules() {
+        assert_eq!(ACTION_PUSH_SUBSCRIBE, "push-subscribe");
+        assert_eq!(ACTION_PUSH_UNSUBSCRIBE, "push-unsubscribe");
+        assert_eq!(ACTION_PUSH_TEST, "push-test");
+        for (path, action) in [
+            (PUSH_SUBSCRIBE_PATH, "push-subscribe"),
+            (PUSH_UNSUBSCRIBE_PATH, "push-unsubscribe"),
+            (PUSH_TEST_PATH, "push-test"),
+        ] {
+            let csrf =
+                |headers: &[(&str, &[u8])]| check_push_csrf(&head(path, headers), HOST, action);
+            let a = action.as_bytes();
+            assert_eq!(csrf(&[("x-soos-action", a)]), Ok(()), "{action}");
+            assert_eq!(csrf(&[]), Err(CsrfError::MissingActionHeader));
+            let upper = action.to_ascii_uppercase();
+            let spaced = format!("{action} ");
+            for other in [
+                &b"lock"[..],
+                b"unlock",
+                b"alerts-ack",
+                b"",
+                upper.as_bytes(),
+                spaced.as_bytes(),
+            ] {
+                assert_eq!(
+                    csrf(&[("x-soos-action", other)]),
+                    Err(CsrfError::MissingActionHeader),
+                    "{action} vs {:?}",
+                    String::from_utf8_lossy(other)
+                );
+            }
+            for sibling in ["push-subscribe", "push-unsubscribe", "push-test"] {
+                if sibling != action {
+                    assert_eq!(
+                        csrf(&[("x-soos-action", sibling.as_bytes())]),
+                        Err(CsrfError::MissingActionHeader),
+                        "{action} vs {sibling}"
+                    );
+                }
+            }
+            assert_eq!(
+                csrf(&[("x-soos-action", a), ("x-soos-action", a)]),
+                Err(CsrfError::MissingActionHeader),
+                "repeated"
+            );
+            assert_eq!(
+                csrf(&[("x-soos-action", a), ("sec-fetch-site", b"same-origin")]),
+                Ok(())
+            );
+            for site in [&b"cross-site"[..], b"same-site", b"none", b""] {
+                assert_eq!(
+                    csrf(&[("x-soos-action", a), ("sec-fetch-site", site)]),
+                    Err(CsrfError::CrossSite)
+                );
+            }
+            assert_eq!(
+                csrf(&[
+                    ("x-soos-action", a),
+                    ("origin", b"https://pc.tail1234.ts.net")
+                ]),
+                Ok(())
+            );
+            assert_eq!(
+                csrf(&[
+                    ("x-soos-action", a),
+                    ("origin", b"https://PC.tail1234.ts.net:443")
+                ]),
+                Ok(())
+            );
+            for origin in [
+                &b"https://evil.example"[..],
+                b"http://pc.tail1234.ts.net",
+                b"https://pc.tail1234.ts.net:8443",
+                b"null",
+                b"",
+            ] {
+                assert_eq!(
+                    csrf(&[("x-soos-action", a), ("origin", origin)]),
+                    Err(CsrfError::OriginMismatch)
+                );
+            }
+        }
+        // Only the three push actions are valid arguments.
+        for bad in ["lock", "unlock", "alerts-ack", "", "push-other"] {
+            assert_eq!(
+                check_push_csrf(
+                    &head(PUSH_TEST_PATH, &[("x-soos-action", bad.as_bytes())]),
+                    HOST,
+                    bad
+                ),
+                Err(CsrfError::MissingActionHeader),
+                "{bad:?}"
+            );
+        }
+    }
+
+    /// Test 41 (RMC73, §6.1, §9): the service worker asset is `assets/sw.js`, served as
+    /// JavaScript.
+    #[test]
+    fn test_rwp_service_worker_asset() {
+        let a = asset(AssetId::ServiceWorker);
+        assert_eq!(a.content_type, "text/javascript; charset=utf-8");
+        let on_disk =
+            std::fs::read(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/sw.js"))
+                .unwrap();
+        assert!(!on_disk.is_empty());
+        assert_eq!(a.body, on_disk.as_slice());
+    }
+}
