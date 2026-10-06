@@ -3,100 +3,79 @@
 - **Date**: 2026-10-06
 - **Target Branch**: `feat/remote-auth-alerts`
 - **Base (merge-base)**: `222665f`
-- **Reviewed-Diff-Fingerprint**: `4e9001617229845f6b4f208cd9c4a7705b4c021a5a1e267503df50466f4a1b70`
-- **Audited Files**: full branch diff vs `origin/main` (`target/candid_diff.patch`, 108 files). The
-  branch up to HEAD `86ad4df` was approved under fingerprint `39c34d96…`; the push-topic delta was
-  reviewed under `9bd0bbdd…` (CHANGES_REQUESTED: F-1 MAJOR, F-2 MINOR). This review re-checks the
-  whole uncommitted delta against HEAD: `crates/remote/src/lib.rs`,
-  `crates/remote/tests/push_tests.rs`, `crates/remote/tests/push_server_tests.rs`,
-  `AI/architect_spec_remote_web_push.md`, `AI/DECISIONS.md`, `AI/VERIFICATION_MATRIX.md`,
-  `AI/tester_contract_push.md`, `AI/research_push.md`, plus every remaining occurrence of the
-  topic strings (`crates/remote/assets/sw.js`, `tests/invariants/src/remote_push_contract.rs`,
-  `AI/auditor_constraints_push.md`, `crates/push-protocol/tests/protocol_tests.rs`,
-  `crates/push-sender/tests/sender_tests.rs`).
+- **Reviewed-Diff-Fingerprint**: `6d8107f243caae214db43e4af1894027a65f1327a97ef7aefcee4d67ee43f169`
+- **Audited Files**: full branch diff vs `origin/main` (`target/candid_diff.patch`). HEAD
+  `0c3fefe` was approved under fingerprint `4e900161…`. The only new delta (uncommitted, vs HEAD)
+  is documentation: `AI/DECISIONS.md` (lines 124, 125) and `AI/VERIFICATION_MATRIX.md`
+  (rows RMC59, RMC74). The previous review of this delta (`bdb7c55b…`) requested changes.
 
 ## 1. Executive Summary
 
-Both findings of the previous review are resolved and nothing else changed. The code delta
-(`git diff HEAD -- crates`), re-read in full, matches the one described under `9bd0bbdd…` apart
-from the two corrected `lib.rs` doc comments: `PUSH_TOPIC = "soosalerts"`, `PUSH_TEST_TOPIC = "soostest"`, const-checked
-non-empty ASCII alphanumeric, distinct and `<= MAX_TOPIC_LEN`, with a new runtime regression test.
-The topic migration is now recorded consistently in the architect spec (W-11, §3.1 example and
-constant table with the alphanumeric rule, §6.4, tests 28/31 descriptions, RMC68, F-5), the Web
-Push ADR, matrix row RMC68, the tester contract (Contract Migration 3, with hardware evidence and
-exact line numbers that match the diff) and the research note. The `sw.js` display tags
-`soos-alerts` / `soos-test` (spec §5.6 lines 912-913, auditor C-26, invariant test 48) correctly
-remain unchanged, and the spec now says so explicitly. Targeted tests pass. **APPROVED.**
+The delta records the owner's confirmation of the alert safe subset in the Failed-Password Alerts
+ADR and the Web Push ADR, and moves RMC59 / RMC74 to "Pending (partly verified)" with host checks
+and owner reports. All three items of the `bdb7c55b…` review are resolved: the stale "the hand-off
+asks the owner to confirm" clause is gone (F-1), both quotes carry an English translation (F-2),
+and the "Not reported yet" lists now include the 5 s / ~10 s bounds and the Funnel-session case
+(suggestion). A word-level diff vs HEAD shows no other change. No code, test, script or dependency
+is touched. **APPROVED.**
 
 ## 2. Test Changes
 
-Mechanical listing over the frozen patch (`target/candid_diff.patch`):
-
-- Removed assertion lines: one hit, `tests/invariants/src/presence_unlock_contract.rs`
-  (`test_pau_zbus_is_used_only_by_the_daemon`), part of the branch already approved under
-  `39c34d96…`; it is a recorded contract migration (ADR 2026-10-05 item (7), PAU17) that keeps
-  and widens the check. Unchanged by this delta.
-- New escape hatches (`#[ignore]`, `#[cfg(any())]`, `should_panic`, tolerance/epsilon): none
-  (the only hit is prose in a walkthrough stating none were added).
-- Delta-specific test edits vs HEAD:
-  - `push_tests.rs:102-103` and `push_server_tests.rs:577-578, 1047, 1383` (and doc comment
-    1361): pinned topic values change from `soos-alerts`/`soos-test` to `soosalerts`/`soostest`.
-    Exact-value strength kept. Justified by Contract Migration 3 in
-    `AI/tester_contract_push.md` (Apple `400 BadWebPushTopic` vs `201`, hardware evidence) and by
-    the updated RMC68 acceptance line in both the matrix and the spec. Line numbers in the
-    contract entry match the diff.
-  - New `test_rwp_topics_are_ascii_alphanumeric_for_apple` (`push_tests.rs:1002-1014`): fails
-    against `soos-test` or an empty topic; strengthens the contract.
+Mechanical listing over the frozen patch: identical to the approved `4e900161…` review (one
+removed assertion line in `tests/invariants/src/presence_unlock_contract.rs`, recorded contract
+migration PAU17; topic value migrations in `push_tests.rs` / `push_server_tests.rs` justified by
+Contract Migration 3). No new `#[ignore]`, `should_panic`, tolerance or epsilon. The delta touches
+no test file.
 
 ## 3. Deep Reasoning Audit
 
 ### Logic & Architecture
-- Tried: does any producer still emit a hyphenated topic? The only consumer of both constants is
-  the dispatcher in `push.rs`; grep finds no other literal. `push-protocol` still accepts the RFC
-  8030 alphabet, which is correct (protocol-level validation, not Apple policy) and its tests
-  still use `soos-alerts` for that check, as documented. PASS.
-- Tried: spec vs code drift. Spec §3.1 table, example JSON (243), §6.4 (713-714), tests 28/31
-  (1090, 1103-1104), RMC68 (1243), F-5 (1338) all name `soosalerts`/`soostest`; ADR and matrix
-  RMC68 agree and give the rationale. F-1 resolved. PASS.
-- Tried: were the `sw.js` notification tags wrongly renamed? No: `sw.js:16,29` keep
-  `soos-alerts`/`soos-test`, matching spec §5.6 (912-913), auditor C-26 and invariant test 48
-  (`remote_push_contract.rs:680-681`). These are local `showNotification` tags, never sent to a
-  push service. PASS.
-- `const fn` recursion over a slice pattern is valid in const context; the empty-slice base case
-  is guarded by `!bytes.is_empty()` in the caller. The F-2 comment now says the helper returns
-  `true` for an empty slice and that `_` is excluded as a precaution, which is accurate. PASS.
+- Tried: F-1 leftover. `grep` of lines 124–125 for "pending", "asks the owner", "confirm": the Web
+  Push status now ends "...the tests and the implementation exist (they cannot carry typed
+  text)." with no residual request; line 124's "needs the owner's explicit confirmation before
+  tests are written" is the original requirement, followed by the dated **Owner confirmation**
+  record. Consistent. PASS.
+- Tried: does RMC59 overclaim? Claimed: host checks (`state: active`, `lock_screen: monitored`,
+  24 h replay, anonymous Funnel `403`) and the owner report "a wrong password at the lock screen
+  reached the iPhone". Not reported list: 5 s bound, Funnel-session case, banner source and count,
+  `sudo`, GDM, `drift_verrou`, *Acknowledge* across restart — this covers every clause of the
+  criterion. Status `⬜ Pending`. PASS.
+- Tried: does RMC74 overclaim? Claimed: one `apple` subscription, sandboxed sender delivering,
+  test notification from both paths, lock-screen notification. Not reported: `sudo`, ~10 s bound,
+  app-closed / phone-locked. Status `⬜ Pending`. PASS (see suggestion S-1).
+- `⏳` → `⬜`: matrix convention recognized by the citation parser (MXC2); the two remaining `⏳`
+  markers (SFU5, SFX4) are pre-existing and outside the delta. `cargo test -p soos-invariants`:
+  500 passed. PASS.
 
 ### PAM Concurrency & Deadlines
-- No change under `crates/pam`. N/A, PASS.
+- No code change in the delta; carried over from the `4e900161…` full-diff review. PASS.
 
 ### Panic Safety & Fail-Closed
-- The new checks are compile-time `const` asserts (a violation fails the build, never runtime).
-  No new `unwrap`/`expect`/indexing in production. No path to `Allow`/`PAM_SUCCESS`. PASS.
+- No code change in the delta; carried over. PASS.
 
 ### Test Integrity & Anti-Weakening
-- Every changed assertion keeps exact-value comparison and is justified by a recorded contract
-  migration with external evidence; a stronger property test is added. Verified:
-  `cargo test -p soos-remote --test push_tests --test push_server_tests` green;
-  `cargo test -p soos-invariants test_rmc_s38` green. PASS.
+- No test change in the delta; carried-over listing unchanged. PASS.
 
 ### Memory, Bounds & Secrets
-- Topics are shorter, still `<= MAX_TOPIC_LEN` (const-checked). No secret, endpoint or key added
-  to logs or docs. PASS.
+- Tried: does new text expose a password, account, endpoint, key or token? Only the placeholder
+  `/home/<owner>/`, device class `apple` and status values; the confirmation explicitly excludes
+  typed text. PASS.
 
 ### Supply Chain & Automation
-- No `Cargo.*`, `deny.toml`, `.github/`, `scripts/` or `.githooks/` change in this delta. PASS.
+- No `Cargo.*`, `deny.toml`, `.github/`, `scripts/` or `.githooks/` change in the delta. PASS.
 
 ### English-Only Policy
-- All new text (comments, spec, ADR, matrix, contract, research) is English. PASS.
+- The French owner quote is kept verbatim as consent evidence (the ADR requires the owner's own
+  words) and is now followed by the English translation "I confirm, install and configure
+  everything" in both ADRs. PASS.
 
 ## 4. Detailed Findings & Action Items
 
-- **F-1 (previous, MAJOR)** — resolved: spec, ADR, matrix RMC68, tester contract and research
-  note record the `soosalerts`/`soostest` migration with evidence.
-- **F-2 (previous, MINOR)** — resolved: `lib.rs` comments are accurate.
-- **[SUGGESTION]** `AI/VERIFICATION_MATRIX.md:2115` — the RMC68 evidence column could also cite
-  `push_tests::test_rwp_topics_are_ascii_alphanumeric_for_apple` (it is named in the tester
-  contract). Optional; traceability phase may add it.
+- **[SUGGESTION] S-1** `AI/VERIFICATION_MATRIX.md` RMC74 — the criterion clause "the page lists the
+  phone under devices" is neither explicitly claimed nor in the "Not reported yet" list
+  ("subscribed one `apple` device" implies it only indirectly). Optional: state it either way.
+
+No CRITICAL, MAJOR or MINOR finding.
 
 ## 5. Final Verdict
 
