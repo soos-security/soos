@@ -1,212 +1,110 @@
 # Plan Evaluation Report
 - **Date**: 2026-10-06
-- **Issue**: GitHub-only follow-up of #339 — Web Push notifications for failed-password alerts in `soos-remote`, feature level 2 (no `AI/BACKLOG.md` entry; owner decisions O-1 to O-5 of 2026-10-06)
-- **Branch**: `feat/remote-auth-alerts` (from `feat/remote-companion` at `ea862cc`; level 1 implemented, uncommitted)
-- **Base commit**: `ea862cc` (branch base; draft PR #340 belongs to `feat/remote-companion`)
-- **Plan evaluated**: `AI/architect_spec_remote_web_push.md` **round 2** (1 345 lines), the drafted ADR "[2026-10-06] Web Push Notifications for Failed-Password Alerts Through a Separate Sender Unit" (uncommitted `AI/DECISIONS.md`), and `AI/research_push.md`
-- **Previous content of this file**: the round-1 evaluation of the same spec (REVISION_REQUIRED, MAJOR F-1 to F-3, MINOR F-4 to F-10); overwritten as the skill requires.
-
-## 0. Precondition outside the spec: the relayed request versus O-2
-
-The relayed owner request asks to "see on the phone the passwords that were tried remotely". The spec (§0.1) keeps
-refusing to carry the typed text: no journal producer contains it, `AGENTS.md` ("NEVER log … credentials", "NEVER
-accept, store, or transmit passwords") and O-2 forbid capturing it, and a Web Push message is shown on the iPhone lock
-screen and transits Apple's push service. Nothing in the spec (fields, frames, buffers, payload vocabulary, store) can
-carry typed text. This evaluation agrees.
-
-The spec keeps the owner's explicit confirmation of the safe subset (time, source class, account class, kind, count;
-never the typed password) as an **open gate before Phase 2**. That gate is independent of the verdict below: the
-orchestrator must obtain it in the owner's own conversation and record it (quoted, dated) in the ADR and walkthrough
-187. The relayed request itself, workflow script output and agent messages do not count as that confirmation.
+- **Issue**: GitHub #339 — soos-remote failed-password alerts, Round 3 "clear acknowledged entries" (owner request 2026-10-06)
+- **Branch**: `feat/remote-auth-alerts` (head `e8e3f28`, spec and ADR amendment uncommitted)
+- **Base commit**: `47ab53e` (`origin/main`)
+- **Scope evaluated**: `AI/architect_spec_remote_auth_alerts.md` section "Round 3 — clear acknowledged entries" (R3.0–R3.8) and the ADR amendment "(Amended 2026-10-06, "clear acknowledged entries" …)" in `AI/DECISIONS.md`. Round 1 of this evaluation.
 
 ## 1. Coverage Matrix
 
-There is no backlog entry; the acceptance lines are the owner decisions, the level-2 requirements of the task, and the
-round-1 findings.
-
-| Acceptance line / finding | Spec element | Status |
+| Acceptance line / TDD test | Spec element | Status |
 |---|---|---|
-| O-1 notification on the phone, centralised in the web app | W-1, §5.3–§5.6, §9, RMC67, RMC74; tests 18, 19, 28, 30, 54 | Covered |
-| O-2 never the password, nor any part/length/hash; minimal payload | §0.1, W-11, W-12, §5.4 fixed vocabulary, W-14; tests 20, 24, 33, 47, 53 | Covered |
-| O-3 untrusted journal, spoofing documented | level-1 parser unchanged; `is_live` on journald-set time; §15.3 false notifications bounded by W-13 | Covered |
-| O-4 bounded / fail-closed / authenticated only | §2.1, §3.1 (compile-time relations), W-9 routes not Funnel-public + CSRF + gates, §3.3, §7; tests 25–27, 35, 39 | Covered |
-| O-5 agent limits, English, no `unwrap`/`expect`, forbid lint, immutable tests | header, W-15, §12.8, tests 42, 46 | Covered |
-| Service worker same-origin, CSP minimal | `/sw.js` public asset, W-10 (CSP unchanged; `worker-src` → `script-src 'self'` fallback) | Covered |
-| Enable button (user gesture), `requestPermission`, `pushManager.subscribe` with VAPID key | §9, test 48 | Covered |
-| Subscription storage bounded, 0600, authenticated create/remove | W-8, §3.3, §5.1, §6.2, §6.3; tests 21, 22, 27, 32, 35 | Covered |
-| Unsubscribe; test notification | §6.3, §6.4; tests 31, 32 | Covered |
-| VAPID RFC 8292 ES256 | §4; tests 15, 16, 37 | Covered |
-| RFC 8291 `aes128gcm` | §4 key schedule; test 13 (RFC Appendix A) | Covered (**F-11**: wrong body length cited) |
-| Crates: HMAC-based HKDF, rustls/TLS, cargo-deny licences, no OpenSSL | W-6, W-7, §1.1; tests 42, 43 | Covered (F-18 lock-file note) |
-| ADR: separate sender process versus relaxing `AF_UNIX` | W-3, §8.2, §15.3 | Covered (F-13, F-14 sandbox details) |
-| Endpoint allowlist, https only, no redirects, no private IPs | W-5, §2.2, §2.3, §8.1; tests 1–3, 7, 9, 12, 44, 52 | Covered |
-| Bounded timeouts, retries, rate limits; 404/410 removal | §2.1, §3.1, W-13, §5.6; tests 6, 29, 30, 36, 54 | Covered (F-12, F-16, F-17) |
-| Trigger: each new level-1 alert, coalesced and rate-limited | W-1, W-13 | Covered |
-| New ADR, spec, matrix rows, walkthrough 187, Docs owner steps | §13 RMC60–RMC74, §14, §16, test 49 | Covered |
-| Round-1 F-1 (dependency logs) | W-14, §8.1 `install_logging`, test 53 | **Resolved** (test-power gap F-15) |
-| Round-1 F-2 (sender sandbox) | §8.2, §15.3, §15.7, test 45, RMC74 | **Resolved** (F-13, F-14) |
-| Round-1 F-3 (resolver wiring) | W-5, §8.1 `FilteringResolver`/`with_lookup`/`send_error_outcome`, test 52 | **Resolved** |
-| Round-1 F-4 … F-10 | §3.1 relation 17 000 < 18 000; `PUSH_TEST_TOPIC`; lock order §5.3; store recreation §3.3; §7 wording; `devices` + §15.10; carry §5.6 | **Resolved** (F-12 on test 54 wording) |
+| Owner request: acknowledged entries disappear from the page/API immediately after a successful acknowledge | R3.1 (drop in the same critical section), R3.3 A′, R3.4 (`200` body, `GET`, next `event: alerts`), R3.5 (page renders returned view); tests 58, 60 | Covered |
+| Acknowledged entries never reappear after a service restart (replayed attempts at or before the persisted marker) | R3.3 R′ (discard), R3.4 restart semantics; tests 59, 60 (restart part), migrated 19, 31, 54 | Covered (with the documented rule-M residual, see F-3) |
+| Only attempts newer than the acknowledgement are shown | R3.3 coalescing (a new attempt never joins a removed record), R3.4; tests 58, 60 | Covered |
+| "Acknowledged-only data" removed (JSON key, CSS class, page branch) | R3.2 (field and key removed, 7 record keys), R3.5; tests 21 (migrated), 62 | Covered (test power gap, F-1) |
+| Refusal: no deletion of system journal entries, documented | R3.0, R3.6 (`Docs/REMOTE_COMPANION.md` §2c sentence), ADR (e); test 62 doc check | Covered |
+| O-2: no password stored anywhere | R3.0, R3.8, ADR (b) | Covered (no new field, file or log) |
+| Bounded memory | R3.3 eviction, R3.8; test 58 (1 000 attempts, then 40 → `MAX_ALERT_HISTORY`) | Covered |
+| Epoch / stale-view rules unchanged | R3.3 A′ (`StaleView`, `BeyondNewest`, `through == 0` order unchanged); tests 58, existing 53 | Covered |
+| Push notifications and counts unaffected | R3.4 (sink only for `Kept` and live; scheduler never reads the book); test 61 | Covered |
+| Authorization, CSRF, rate limit unchanged | R3.4 (no new route/header/status/key); migrated `alerts-ack` CSRF test | Covered |
+| No logging of data, audit via `audit.rs` only | R3.4 "Logging: none added" | Covered |
+| ADR amendment records drop-vs-filter decision | R3.1, ADR (a) | Covered |
+| Contract migrations recorded in `AI/tester_contract_alerts.md` citing the owner | R3.7 migration table (18, 19, 21, 31, 54, CSRF test, helpers) | Covered — verified each listed assertion exists (see §2) |
+| Owner hardware results (traceability) | R3.6 (RMC59, RMC74 updates, RMC75 row) | Covered (wording caveat, F-4) |
 
 ## 2. Facts Verified Against Code
 
 | Fact cited by plan | Code location | Actual value | Match |
 |---|---|---|---|
-| ureq `Agent::with_parts(config, connector, resolver)` exists | `ureq-3.4.2/src/agent.rs:130` | `pub fn with_parts(config: Config, connector: impl Connector, resolver: impl Resolver) -> Self` | Yes |
-| `Resolver` trait: `resolve(&self, &Uri, &Config, NextTimeout) -> Result<ResolvedSocketAddrs, Error>`; requires `Debug` | `ureq-3.4.2/src/unversioned/resolver.rs:29–41` | as cited; `Debug + Send + Sync + 'static` (spec gives a manual `Debug`) | Yes |
-| `ResolvedSocketAddrs` capped at 16 | `resolver.rs:54,59` | `ArrayVec<SocketAddr, 16>` | Yes |
-| `ureq::Error::Other(Box<dyn Error + Send + Sync>)`, `HostNotFound`, `Timeout(_)` | `ureq-3.4.2/src/error.rs:36,39,182` | present | Yes (`e.is::<ResolveRefused>()` workable via `downcast_ref`) |
-| The resolver is called once per request without a proxy and the connector uses only its addresses | `ureq-3.4.2/src/run.rs:381–397` (`agent.resolver.resolve` only when no proxy / no-proxy / SOCKS4), `transport/connect.rs:64` (second resolve only for a CONNECT proxy) | as cited; `proxy(None)` disables the second path | Yes |
-| Config builder: `https_only`, `max_redirects`, `proxy(Option)`, `http_status_as_error`, `timeout_global`, `timeout_connect`, `max_response_header_size` | `ureq-3.4.2/src/config.rs:491–763` | present | Yes |
-| ureq's `rustls` dependency has `default-features = false` and features `logging, std, tls12`; ureq feature `rustls` = `rustls-no-provider` + `_ring` + `rustls-webpki-roots` | `ureq-3.4.2/Cargo.toml:101–112, 194–202` | as cited (no `aws-lc-rs`) | Yes |
-| `tracing-subscriber` default features include `tracing-log` | `tracing-subscriber-0.3.23/Cargo.toml:64` | `default = ["smallvec","fmt","ansi","tracing-log","std"]` | Yes |
-| `.init()`/`.try_init()` install `LogTracer` | `tracing-subscriber-0.3.23/src/util.rs:61–96` | as cited | Yes |
-| **`SubscriberInitExt::set_default()` also installs `LogTracer`** | `tracing-subscriber-0.3.23/src/util.rs:39–46` | `let _ = tracing_log::LogTracer::init();` | **Not covered by test 53 → F-15** |
-| `filter::Targets` available with default features; matching is by target prefix | `tracing-subscriber-0.3.23/src/filter/mod.rs:35`, `directive.rs:182,250` | `starts_with` | Yes (`ureq` would also cover `ureq_proto`; the explicit entries are harmless) |
-| RFC 8291 Appendix A body "145 bytes" (spec test 13, research §3.1) | decoded `DGv6ra1n…a-fN` (192 base64url chars) | **144 bytes** (86-byte header + 41-byte plaintext + 1 delimiter + 16 tag) | **No → F-11** |
-| `deny.toml` allows `ISC`, `CDLA-Permissive-2.0` (`ring`, `webpki-roots`) | `deny.toml` `[licenses] allow` | present | Yes |
-| `rustls`, `rustls-webpki`, `webpki-roots`, `ring` in `Cargo.lock` | `Cargo.lock` | **absent** (`ring 0.17.14`/`untrusted 0.9.0` only in the local registry cache; `rustls`, `webpki-roots` not cached) | Spec says ureq is locked (true), not the TLS crates → F-18 (informational) |
-| `RandomSource` seam | `crates/remote/src/auth.rs:40` | `Arc<dyn Fn(&mut [u8]) -> Result<(), RandomError> + Send + Sync>` | Yes |
-| `UnixClock` (ms) injected; `started_us = clock() * 1000` | `server.rs:114`, `alerts.rs:841` | as cited | Yes |
-| `AlertBook::started_us` private field | `alerts.rs:365` | private; spec adds an accessor | Yes |
-| `identity::is_valid_host_name`, `MAX_SOCKET_PATH_LEN = 107`, `STORE_LOCK_TIMEOUT_MS = 500`, `resolve_alerts_ack_path`, `with_file_owner_uid`, `check_action_csrf` (private) | `identity.rs:87`, `lib.rs:53`, `lib.rs:226`, `config.rs:531`, `server.rs:182`, `routes.rs:200` | as cited | Yes |
-| Supervised task panic ends `serve` with `TaskPanicked` | `server.rs:262,673,690` | as cited | Yes (§5.6/§7 wording now correct) |
-| Workspace lines `p256 … features = ["ecdsa"]`, `aes-gcm = "0.10"`, `tracing-subscriber … ["fmt","env-filter"]`; `hmac 0.12.1` locked | root `Cargo.toml:65,81,85`; `Cargo.lock:1568` | as cited | Yes |
-| systemd 262 on the owner's host; `kernel.unprivileged_userns_clone = 1` | `systemctl --version`, `sysctl` | `systemd 262 (262-1-arch)`, `1` | Yes |
-| `/etc/resolv.conf` is a regular file with `nameserver 100.100.100.100` (+ `fd7a:115c:a1e0::53`); `hosts: mymachines resolve [!UNAVAIL=return] files myhostname dns` | `/etc/resolv.conf`, `/etc/nsswitch.conf` (read only) | as cited | Yes (DNS under `TemporaryFileSystem=/run:ro` plausible) |
-| `ProtectProc=` unsupported in user managers | `man systemd.exec` (262) | "only available for system services and is not supported for … per-user instances" | Yes |
-| `ProtectHome=tmpfs` + `BindReadOnlyPaths=`, `TemporaryFileSystem=`, `PrivateDevices=`, `PrivateIPC=`, `ProtectKernel*`, `ProtectHostname=`, `ProtectClock=` available to user units with implied `PrivateUsers=` | `man systemd.exec` (262) | as cited | Yes |
-| **`ProtectControlGroups=` in a user unit** | `man systemd.exec` (262) | "only available for system services and **is not supported** for services running in per-user instances" — same wording as `ProtectProc=` | **No → F-13** |
-| `RuntimeDirectory=` bound into the namespace over `ProtectHome=tmpfs` and `TemporaryFileSystem=/run:ro` | `man systemd.exec` (262) | not stated by the man page (only the symlink parameter is said to be created after `BindPaths=`/`TemporaryFileSystem=`) | **Unverified → F-14** |
+| `AlertRecord` has `pub acknowledged: bool` today | `crates/remote/src/alerts.rs:327` | present | Yes |
+| `record` returns `Result<(), BookError>`, overflow checked first, `highest_seq = seq` before classification | `alerts.rs:409-415` | yes | Yes |
+| Rule R predicate `at_us <= loaded_marker_us && at_us < started_us` | `alerts.rs:414-415` | identical | Yes |
+| Coalescing requires equal `acknowledged` flag, window `ALERT_COALESCE_WINDOW_US`, newest record only | `alerts.rs:416-430` | yes | Yes |
+| Eviction skips acknowledged records (`continue`) | `alerts.rs:449-451` | yes | Yes |
+| `acknowledge`: epoch → `through == 0` → `BeyondNewest` order; `ack_high_water_us` raised per record; evicted reset iff `through >= evicted.max_seq`, `max_seq` kept | `alerts.rs:477-500` | yes | Yes |
+| `marker()` uses only unacknowledged records, `evicted.first_us`, pending, `ack_high_water_us` | `alerts.rs:505-518` | yes | Yes |
+| View filters `!r.acknowledged` for totals and `last_*`; `through = highest_seq`; history newest first | `alerts.rs:526-557` | yes | Yes |
+| Runtime `acknowledge`: book under `inner`, then `flush(true)`, `bump()`, `view()` | `alerts.rs:1033-1056` | yes | Yes |
+| Runtime `record`: live attempts collected under the mutex, delivered after release | `alerts.rs:1062-1100` | yes (doc of `LiveAttemptSink` at `alerts.rs:803` still says "Called under the alerts runtime mutex" — stale, F-5) | Yes |
+| `is_live` requires `at_us >= started_us` (disjoint from R′ discard `at_us < started_us`) | `alerts.rs:799-802` | yes | Yes |
+| Push scheduler never reads the book | `crates/remote/src/push.rs:38` imports only `Attempt`, `AttemptKind`, `LiveAttemptSink` | yes | Yes |
+| SSE alerts event serializes `runtime.view()` at send time | `crates/remote/src/server.rs:2114, 2212` | yes | Yes |
+| Page dims rows via `record.acknowledged === true` | `crates/remote/assets/app.js:492-494` | yes | Yes |
+| CSS `.alerts-history li.acknowledged` | `crates/remote/assets/style.css:203` | yes | Yes |
+| Test 18 assertions on `acknowledged` | `crates/remote/tests/alerts_tests.rs:675, 682-683, 697, 709, 718-722` | yes; migrated values recomputed by hand (ids 3, 4, then 5/4; marker `T + 1.5 s − 1` unchanged) | Yes |
+| Test 19 `(source, acknowledged)` list | `alerts_tests.rs:744-758` | yes; R′ yields `[Other, LockScreen, Sudo]`, `through == 5`, marker-0 case `len == 1` | Yes |
+| Test 21 `acknowledged` key/literals | `alerts_tests.rs:926, 958, 1100` | yes | Yes |
+| `counts`/`key` helpers, `RECORD_KEYS` (8) | `crates/remote/tests/alerts_server_tests.rs:368-415` | yes | Yes |
+| `key(…, true)` call sites | `alerts_server_tests.rs:1470, 1580-1581, 1714` | exactly the CSRF test, test 31 and test 54 listed in the migration table | Yes |
+| Test 54 restart expectation | `alerts_server_tests.rs:1655-1730` | marker `< t`; after restart first failure (`t − 20 s`) discarded, check at `t` and `sudo` at `t + 1 s` kept, `through == 3` | Yes (see F-3) |
+| Test 52 eviction case unaffected | `alerts_tests.rs:851-880` | record 1 removed at ack, record 2 + 32 → record 2 evicted; all ids > 2, wrong total 1, marker `T − 1` | Yes |
+| Audit test "acknowledged in memory" reads only the total | `alerts_server_tests.rs:2044` | yes | Yes |
+| `crates/remote/tests/push_server_tests.rs` exists with `FakeTransport` and journal harness | file present | yes | Yes |
+| ADR amendment contains `clear acknowledged entries` | `AI/DECISIONS.md` | 1 match | Yes |
+| Next walkthrough number | `AI/walkthroughs/` | 187 is the highest → 188 | Yes |
 
 ## 3. Pillar Analysis
 
 ### Pillar 1 — Architecture & threat model
-- PAM ↔ daemon boundary untouched; `soos-remote` keeps `AF_UNIX` only and its unit unchanged; all keys and crypto stay in
-  `soos-remote` (test 51). PASS.
-- Failure scenario (round-1 F-2): a parser exploit in the sender reads `$HOME` or reaches `remote.sock`/the buses.
-  Round 2 hides `$HOME` (`ProtectHome=tmpfs` + the binary bound read-only) and `/run` (`TemporaryFileSystem=/run:ro`),
-  and §15.3 states the remaining reach precisely. PASS for the design.
-- Failure scenario: the exact line set pinned by test 45 contains a directive the user manager does not support
-  (`ProtectControlGroups=`, F-13) or the runtime directory is not visible inside the namespace (F-14) → the unit does
-  not start or the socket is unreachable. Fail-closed (no push, "Push sender not running"), but an immutable exact-line
-  test would then pin a broken unit. **FINDING (MINOR, F-13, F-14)**.
-- Failure scenario: a compromised sender connects to an abstract Unix socket of the host network namespace, for
-  example Xwayland's `@/tmp/.X11-unix/X0`, and injects or reads X11 input of X clients. §15.3 names abstract sockets
-  generically only. **FINDING (MINOR, F-17)**.
+- Failure scenario considered: the "delete" request leaking into a root action (journal vacuum) or a new privileged path. The plan refuses journal deletion explicitly (R3.0, ADR (e)) and adds no route, file, header or privilege. The service stays unprivileged; only `remote-alerts.json` (unchanged format, `0600`) is written.
+- Failure scenario considered: a filter-only implementation leaving acknowledged data reachable through a future view or debug seam. The plan drops records (R3.1). Structural fact verified: the acknowledged set is always a **prefix** of the deque (records are appended in seq order and only the newest grows, so `last_seq` is increasing along the deque, and A′ removes `last_seq <= through`), so `VecDeque::retain` with this predicate is equivalent to popping a prefix and eviction behaviour is identical to round 2.
+- Result: PASS.
 
-### Pillar 2 — PAM deadline & concurrency
-- Not on the PAM path. Lock order is now stated (alerts → scheduler only; no mutex across `.await`, `flock` or the
-  transport; leaf mutexes). PASS.
-- Timing: `PUSH_EXCHANGE_TIMEOUT_MS` 18 000 > 1 000 + 3 × 2 000 + 10 000 for a single client. Failure scenario: another
-  owner-uid process holds the sequential sender (or trickles a 12 KiB frame byte by byte, if "under
-  `PUSH_FRAME_IO_TIMEOUT_MS` each" is implemented as a per-syscall read timeout) → the request of `soos-remote` sits in
-  the listen backlog, `soos-remote` times out at 18 s and retries, the sender later accepts the abandoned connection
-  whose request bytes are already buffered and sends it → duplicate notification; or push is stalled for a long time.
-  Only an owner-uid process can do this (socket `0600`, peer uid checked). **FINDING (MINOR, F-16)**.
+### Pillar 2 — PAM deadline & concurrency (here: epoch / stale-view / lock races)
+- `crates/pam` is untouched. Concurrency in `soos-remote`:
+- Scenario A (attempt between view and ack): a new record has `seq > through` and survives; an attempt coalescing into a displayed record pushes its `last_seq > through`, so the whole record stays (unchanged semantics). Visible effect: after clicking, that row is still listed (with a larger count). Correct and fail-safe, but the owner may perceive it as "the entry was not deleted"; see F-6.
+- Scenario B (SSE event in flight): an `event: alerts` serialized just before the ack can arrive after the `200` and briefly re-render the removed rows. The ack always `bump()`s, so a fresh event follows within the 1 s throttle and overwrites it. Transient, self-correcting, pre-existing; see F-6.
+- Scenario C (restart between view and ack): `409 stale_view`, unchanged.
+- Scenario D (lock order): sink still invoked after `inner` is released; R′ adds no lock.
+- Result: PASS (observations F-5, F-6).
 
 ### Pillar 3 — Panic safety & fail-closed
-- Store invalid/insecure/absent-while-running, RNG failure, clock before 2023, sender absent, malformed reply, 3xx,
-  unknown status, private DNS answer, resolver refusal: each maps to `unavailable`/`failed`/`rejected`/`refused` with
-  nothing sent and counts carried (§7). A deleted store is never silently re-keyed. PASS.
-- §7 now distinguishes a push *error* from a dispatcher panic (`TaskPanicked`). PASS.
-- ureq's `DefaultResolver` contains `unwrap` (after `ensure_valid_url`); sender-side only, the process restarts. PASS.
+- New code paths: `Recorded` enum, `retain`, removal of a branch. No index, `unwrap`, or arithmetic without saturation added. Overflow still reported before the discard decision (R′ step 1), so an overflow on a covered attempt still sets `unavailable` / `overflow`.
+- Fail-closed direction: every residual (rule M fail-safe, ack-file write failure) shows **more** alerts, never fewer. Scenario: the ack file cannot be written → records are removed in memory (`200`, WARN audit line) but after a restart they reappear because the marker was not persisted. This is fail-safe but not stated in R3.4/R3.6; see F-2.
+- Scenario (partial ack after eviction): evicted totals are reset only when `through >= evicted.max_seq`; if ≥ 32 new records arrive between the view and the ack, acknowledged evicted attempts stay counted (counts only, no record data). Fail-safe, pre-existing; should be stated (F-2).
+- Result: PASS (F-2 MINOR).
 
 ### Pillar 4 — Dependencies
-- `ureq =3.4.2`, `default-features = false, ["rustls"]` → rustls 0.23 (`logging`, `std`, `tls12`), `ring`,
-  `webpki-roots`; no `aws-lc-rs`, OpenSSL or `native-tls` in the normal graph (resolver 2 keeps `ort-sys`'s
-  build-dependency features apart); licences allowed. PASS.
-- `rustls`, `rustls-webpki`, `webpki-roots` are not in `Cargo.lock` nor in the local registry cache: the developer
-  needs one online lock update before the `--locked`/`--offline` gates and test 43 can pass. **Informational (F-18)**.
-- HKDF as RFC 8291 HMAC calls over `hmac 0.12` (already locked), `aes-gcm 0.10`, `p256` `ecdsa` line untouched. PASS.
+- No new crate, feature or version. `cargo deny` unaffected.
+- Result: PASS.
 
 ### Pillar 5 — Data confidentiality
-- Password (O-2): payload only from enums and counts through a fixed vocabulary; no route, frame, buffer or store field
-  can carry typed text. PASS.
-- Round-1 F-1: `install_logging` uses `registry()` + `fmt::layer()` + fixed `Targets` + `tracing::subscriber::
-  set_global_default` (no `log` bridge, no environment filter); `log`'s runtime maximum stays `Off`, so the `ureq-proto`
-  byte dump and rustls logs are discarded. Verified against `tracing-subscriber 0.3.23`. PASS for the design.
-- Failure scenario (test power): a developer writes `registry().with(layer).with(filter).set_default()` (kept guard)
-  instead of `tracing::subscriber::set_global_default(...)`. `SubscriberInitExt::set_default` calls
-  `LogTracer::init()` (`util.rs:43`), re-opening the `log` → `tracing` bridge; test 53 only forbids `.init()`,
-  `try_init`, `LogTracer`, `tracing_log` and requires the substring `set_global_default`, which can appear elsewhere
-  (comment). The bridge would then forward `ureq`/`rustls` records — the fixed `Targets` filter still turns them off,
-  so this is defence in depth only. **FINDING (MINOR, F-15)**.
-- Endpoint, keys, JWT, ciphertext never in responses, SSE or logs (test 33); redacted `Debug`; no `Debug` on
-  secret-bearing types (test 47). PASS.
+- Scenario: acknowledged data retained in memory after acknowledgement. Under A′/R′ nothing acknowledged is kept except two scalars (`ack_high_water_us`, `loaded_marker_us`) and, in the rare burst case above, aggregated evicted counts. No password, account name, raw line or cursor is added anywhere; no log line added; the ack file keeps its single `u64`.
+- Result: PASS.
 
-### Pillar 6 — Test integrity and power
-- Existing tests: setup-only `push: PushConfig::default(),` in three `RemoteConfig` literals (precedent A-12 and the
-  setup-migration memory note); CSP, `RequestHead`, route answers unchanged. PASS.
-- Round-1 F-3: test 52 fails if `UreqDeliverer` ignores the injected lookup (ureq's resolver) or maps the refusal to
-  `Retry`; test 44 pins `Agent::with_parts(` and forbids the unfiltered constructors. PASS.
-- Failure scenario (crypto KAT): test 13 asserts "the exact 145-byte body"; the RFC vector is **144** bytes. A tester
-  who encodes a length assertion of 145 writes an immutable test no correct implementation can pass. **FINDING
-  (MINOR, F-11)** — must be corrected before Phase 2.
-- Failure scenario (scheduler): test 54 case 2 says "a first summary … gets `Retry` once, then 2 more attempts produce
-  a new summary **before the +5 s retry is due**". The next summary is due at `last_sent + PUSH_MIN_INTERVAL_MS`
-  (30 s), so it can never be taken before a 5 s retry: the scenario is unreachable as written. The same applies to the
-  phrase "a new summary replaces a pending retry" in test 29 unless the retry delay exceeds 30 s. **FINDING (MINOR,
-  F-12)** — must be reworded before Phase 2.
-- Crypto: test 13 (CEK, NONCE, exact bytes) and test 15 (signature verifies, exact claims) would fail on a wrong
-  `key_info` order, a DER signature or an `aud` with a path. PASS.
+### Pillar 6 — Test integrity
+- Each migrated assertion exists in code at the cited lines and encodes the old "acknowledged rows stay in the history" contract; each is justified by the owner's request; every count, `through`, `last_*` and marker value is kept (hand-checked for 18, 19, 31, 52, 54). Migrations are confined to `acknowledged`-related assertions and recorded in `AI/tester_contract_alerts.md`.
+- Power check against a plausible wrong implementation "keep a **private** `acknowledged` flag and filter in the view": because the acknowledged set is always a deque prefix (Pillar 1), the view, the totals, eviction and the marker are identical to the dropping implementation; test 59's coalescing clause catches a filter implementation of R′ (an acknowledged replayed record between two kept attempts breaks coalescing), but **no test catches retention after A′**: test 62 only greps `pub acknowledged:`. See F-1.
+- Power check "discard does not consume a seq": caught by test 59 (`through` advances) and migrated 19 (`through == 5`) and 54 (`through == 3`).
+- Power check "`<` instead of `<=` for the marker": caught by test 59 (`at_us == marker` before start is discarded, `marker + 1` kept).
+- Power check "ack cancels pending push": caught by test 61.
+- Result: FINDING F-1 (MINOR).
 
 ## 4. Findings
 
-No CRITICAL or MAJOR finding. The three round-1 MAJOR findings are resolved and their resolutions were checked against
-the pinned dependency sources (ureq 3.4.2, tracing-subscriber 0.3.23) and the systemd 262 man page.
+- **[MINOR] F-1 — Test 62 cannot detect a private-field filter implementation of A′.** Every proposed behavioural test passes if `AlertRecord` keeps a non-`pub` `acknowledged` flag and the view filters it (the acknowledged set is always a deque prefix, so views are indistinguishable). Required plan change: test 62 asserts that `crates/remote/src/alerts.rs` contains no `acknowledged:` field declaration and no `.acknowledged` access at all (any visibility; `acknowledged_until_us` does not match `acknowledged:`), in addition to `pub acknowledged:`.
+- **[MINOR] F-2 — Fail-safe residuals not fully stated.** R3.4 and the `Docs/REMOTE_COMPANION.md` §2c text mention only the rule-M residual. Add: (a) when `remote-alerts.json` cannot be written (`password alert acknowledgement not persisted`), the entries are removed from the page at once but reappear after a restart; (b) when more than 32 records arrive between the displayed view and the acknowledgement, evicted attempts stay counted in the totals (counts only) until the next acknowledgement.
+- **[MINOR] F-3 — Test 54 migration should assert the documented residual explicitly.** After the restart, the acknowledged `sudo` attempt at `t + 1 s` lies above the marker (`< t`) and is shown again (rule-M residual). The migrated assertions check only the `lock_screen` record; add `counts == {(lock_screen, wrong_password): 1, (sudo, wrong_password): 1}` so the residual stated in R3.4/ADR (d) is pinned by a test and cannot silently change in either direction.
+- **[MINOR] F-4 — "Identical persisted values" overclaims slightly; traceability wording.** R3.1 and ADR (b) say dropping never changes a persisted marker. This holds whenever journal time order matches seq order (eviction of unacknowledged records happens at the same moment in both designs because acknowledged rows are a prefix), but when late lines make journal time and seq disagree, removing an evicted-reset record now raises `ack_high_water_us` where round 2 did not; the marker can only be equal or higher and stays strictly below every unacknowledged attempt (still correct). Reword to "never lower than round 2 and still strictly below every unacknowledged attempt; identical in all migrated tests". Also, in the traceability phase, record that the owner's 2026-10-06 report ("Acknowledge resets the banner and stays reset after a service restart") was made on the round-2 build (`e8e3f28`): RMC75 needs its own owner check after reinstall (rows disappear and do not return after a restart); do not mark RMC75 hardware-verified from that report.
+- **[MINOR] F-5 — Stale doc comment.** `LiveAttemptSink` (`alerts.rs:803-804`) says the sink is "Called under the alerts runtime mutex"; the code and R3.8 say it runs after the mutex is released. The developer should correct the comment while touching this file (doc only).
+- **[MINOR] F-6 — UX note for §2c.** Document in one sentence that an entry that received a new attempt after the page was displayed is kept (with its new count) and that a just-removed list may flash back for under a second before the next update. No behaviour change.
 
-- **[MINOR] F-11 — Wrong length of the RFC 8291 Appendix A body.** The vector decodes to **144** bytes (86 + 41 + 1 +
-  16), not 145 (spec test 13, research §3.1). Required change (binding on the tester before Phase 2, and on the
-  architect for the spec text): test 13 compares the exact decoded bytes of the RFC string and, if it asserts a
-  length, asserts 144. Correct "145" in the spec and in `AI/research_push.md`.
-- **[MINOR] F-12 — Test 54 case 2 (and the "replaces a pending retry" case of test 29) is unreachable as worded.**
-  Required change before Phase 2: drive the cancellation through a pending retry later than the next due summary,
-  e.g. `Retry` with `Retry-After: 120` (or the second retry at +30 s after the first, i.e. +35 s, while the next
-  summary is due at +30 s), then assert the cancelled `effective` is folded into the delivered count (sum 5).
-- **[MINOR] F-13 — `ProtectControlGroups=yes` is documented as not supported in per-user managers** (same wording the
-  spec used to drop `ProtectProc=`). Remove it from §8.2 and from test 45's exact line set (or record in RMC74 that the
-  owner's systemd accepts it and what it does there). Also note in §8.2 that `ProtectClock=` implies `DeviceAllow=` and
-  `PrivateDevices=` implies `DevicePolicy=closed`, which rely on cgroup device control the user manager may not
-  enforce (the mount part still applies).
-- **[MINOR] F-14 — Visibility of `RuntimeDirectory=` under `ProtectHome=tmpfs` + `TemporaryFileSystem=/run:ro` is not
-  documented by the man page.** The spec asserts it; it is plausible but unverified, and test 45 forbids `BindPaths=`,
-  which would be the obvious fix. Required change: RMC74 explicitly checks that `soos-remote` reaches
-  `$XDG_RUNTIME_DIR/soos-push/push.sock` (the test notification proves it) and §8.2 names the fallback (an explicit
-  `BindPaths=%t/soos-push`, adopted through a documented contract migration of test 45 if needed).
-- **[MINOR] F-15 — Test 53 does not forbid the bridge-installing `SubscriberInitExt::set_default()`.** Add
-  `SubscriberInitExt` and `.set_default(` to the forbidden needles of test 53 (the free function
-  `tracing::subscriber::set_global_default` remains the required form), and require that the `set_global_default` call
-  is in the body of `install_logging`.
-- **[MINOR] F-16 — Sender frame deadlines and queueing.** State that the sender bounds each frame by one cumulative
-  deadline (prefix + payload ≤ `PUSH_FRAME_IO_TIMEOUT_MS` each as a deadline, not a per-`read` timeout), so a trickling
-  owner-uid peer cannot hold the sequential sender for longer than about 4 s; and add to §15.3 that a concurrent
-  owner-uid client can delay `soos-remote`'s exchange past 18 s, after which the sender may still send the abandoned
-  request (possible duplicate notification). Extend test 9 with a peer that trickles one byte every second.
-- **[MINOR] F-17 — Abstract-namespace sockets reachable by a compromised sender.** Name the concrete case in §15.3 and
-  Docs §8 (Xwayland's abstract X11 socket on the owner's desktop). Optional cheap hardening for a later ADR: the
-  sender applies a Landlock scope restricting abstract Unix sockets (`LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET`, kernel
-  ≥ 6.12; owner host 7.2) after binding its listener.
-- **[MINOR] F-18 — `rustls`, `rustls-webpki`, `webpki-roots` are not yet in `Cargo.lock`.** The developer must run one
-  online lock update (a plain `cargo check -p soos-push-sender` without `--locked`, which adds only the new entries)
-  before the `--locked` gates and test 43 (`--offline`) can pass; record the new lock entries in the
-  walkthrough and re-run `cargo deny check`.
-- **[MINOR] F-19 — `Retry-After` is not honoured across summaries.** After a `429` with `Retry-After: 120`, the next
-  alert summary (due 30 s after the previous send) cancels the retry and is sent at once to the same push service.
-  Either defer the next delivery to that subscription until the `Retry-After` instant (carrying the counts) or record
-  the behaviour in §15; Apple counts such calls against the rate limit.
+No CRITICAL or MAJOR finding: the drop-at-once design is sound (prefix property makes `retain` exact and eviction-equivalent), R′ is disjoint from `is_live` and guarded additionally by `Kept`, the epoch/`through`/`BeyondNewest` order is preserved, push is independent of the book, memory stays ≤ `MAX_ALERT_HISTORY` records, and every migration preserves its numeric expectations.
 
 ## 5. Verdict
 
-The round-2 spec resolves every round-1 finding: the sender installs no `log` bridge and uses a fixed filter, the
-sandbox hides `$HOME` and `/run` with precise residual reach, and the filtering resolver is the only resolver of the
-production agent with a network-free test that fails on wrong wiring or mapping. O-2 is preserved end to end, every new
-route is authenticated and CSRF-checked, every collection and frame is bounded, and every failure is fail-closed. The
-remaining findings are MINOR. F-11 and F-12 are binding corrections to the test wording that the tester must apply
-when writing tests 13, 29 and 54 (and the architect in the spec text). F-13 to F-19 are to be applied in the spec, the
-tests or the residual-risk section before or during Phase 2.
-
-Independent of this verdict, Phase 2 must not start before the owner's own confirmation of the safe subset (§0 above,
-spec §0.1) is recorded.
-
 VALIDATION_VERDICT: APPROVED
+
+Conditions carried to Phase 2 (tester) and Phase 6 (traceability): F-1 and F-3 are folded into tests 62 and the test-54 migration; F-2, F-4 and F-6 are folded into the ADR amendment wording, R3.4 and `Docs/REMOTE_COMPANION.md` §2c; F-5 is a doc-comment fix for the developer.

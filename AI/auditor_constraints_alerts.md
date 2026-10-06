@@ -127,3 +127,82 @@ The spec, the tester contract and the code to change satisfy the checklist; ever
 constraint above (notably C-12 cancel safety, C-20 exact ack-file mode, C-21 temp naming, C-23 marker write
 ordering, C-26 follower never ends `serve`, C-40 documentation corrections). The developer-agent may start Phase 4
 and must satisfy C-1 to C-42.
+
+---
+
+## Round 3 — clear acknowledged entries (owner request 2026-10-06)
+
+- **Date**: 2026-10-06
+- **Branch**: `feat/remote-auth-alerts` (head `e8e3f28`; spec, ADR amendment and tests uncommitted; nothing committed,
+  pushed or stashed by this phase)
+- **Audited**: spec section "Round 3 — clear acknowledged entries" (R3.0–R3.8) of
+  `AI/architect_spec_remote_auth_alerts.md`; the ADR amendment "clear acknowledged entries" of the alerts ADR in
+  `AI/DECISIONS.md`; `AI/plan_evaluator_report.md` (round 3, APPROVED, F-1 to F-6); `AI/tester_contract_alerts.md`
+  "Round 3" (tests 58–62, contract migrations of 18, 19, 21, 30, 31, 54 and the server-suite helpers); the code to
+  change: `crates/remote/src/alerts.rs` (`AlertRecord`, `AlertBook::{record, acknowledge, marker, view_with}`,
+  `LiveAttemptSink`, `AlertsRuntime::{acknowledge, record}`), `crates/remote/src/{server,push}.rs` (readers of the
+  view / sink), `crates/remote/assets/{app.js,style.css,sw.js}`.
+- **Owner request (binding)**: "once the acknowledge button is clicked, delete the entries" — acknowledged entries
+  disappear from the page and the API at once and after a restart; journal deletion refused (R3.0); O-2 unchanged.
+
+### Audit checklist results (round 3)
+
+| # | Check | Command / evidence | Result |
+|---|---|---|---|
+| 1 | Panic paths | `grep -nE '\.unwrap\(\|\.expect\(\|panic!\|todo!\|unimplemented!\|unreachable!' crates/remote/src/*.rs` | 0 hits. The change uses `VecDeque::retain`, a two-variant enum and existing `saturating_*`/`checked_add`; no indexing is needed. |
+| 2 | Forbidden raw-memory code | grep of the raw-memory keyword in `crates/remote/src/*.rs` | only the crate-level `forbid` attribute in `lib.rs`/`main.rs`; nothing to add. |
+| 3 | Output isolation | invariant `test_rmc_production_code_never_panics_or_prints` | unchanged; no print added by the spec. |
+| 4 | Bounded I/O & deadlines | spec R3.4/R3.8 | no new I/O: the ack file write path, format (≤ 256 B) and throttle are unchanged; no new route, header or status. |
+| 5 | Arithmetic | `alerts.rs::AlertBook::record` | `seq` still `checked_add` before anything else (overflow reported even for an attempt that would be discarded — test 59); counts `saturating_add`; `ack_high_water_us` via `max`. |
+| 6 | Filesystem | `write_ack_file` / `credentials::write_atomic` | untouched (C-20/C-21 still apply verbatim). |
+| 7 | Secrets & privacy | `grep -nE 'tracing::\|info!\|warn!\|error!\|debug!' crates/remote/src/alerts.rs` | 0 hits; records hold only classes, times and counts (no password, no raw journal data); dropping them shrinks retained data. No new log/audit line. |
+| 8 | Fail-closed | spec R3.4, ADR (d) | every residual errs towards **more** alerts (rule-M residual, ack-file write failure, partial ack after eviction); no path hides an unacknowledged attempt. |
+| 9 | Supply chain | `git diff --stat HEAD -- Cargo.lock crates/remote/Cargo.toml deny.toml` | empty; no dependency change. `cargo deny --locked check` still required by the gate. |
+| 10 | CI/workflow | — | not touched. |
+| — | Red state | `cargo test --locked -p soos-remote --all-features --no-run` | compile-red exactly as the contract states: `E0432 unresolved import soos_remote::alerts::Recorded` (alerts_tests.rs:46), `E0063 missing field acknowledged` (alerts_tests.rs:1328). |
+| — | Remaining `acknowledged` identifiers | `grep -rnw acknowledged crates/remote/src crates/remote/assets` | production code: `alerts.rs` 327, 414, 420, 440, 449, 488–489, 509, 535, 541; `app.js` 492–493; `style.css` 203. The other hits are comments or the fixed `StaleView` message (blanked/stripped by the test-62 scanner). |
+
+### Audit Constraints — round 3
+
+| # | Constraint | Applies to (file::fn) | Verified by |
+|---|---|---|---|
+| C-43 | **Drop, never flag** (R3.1, F-1): the `acknowledged` field, every binding, access and filter on it disappear from all production code of `crates/remote/src` (any visibility, any module; comments and the fixed `StaleView` message may keep the word). No replacement flag, set, tombstone or "removed ids" list may be introduced under another name: after a successful acknowledgement the removed `AlertRecord` values no longer exist anywhere in the process. | `alerts.rs::AlertRecord`, `AlertBook` | test 62 (`test_rmc_s43_acknowledged_entries_are_not_kept`, scanner self-test), test 58; review |
+| C-44 | **A′ order and atomicity**: `AlertBook::acknowledge` keeps the exact round-2 refusal order (epoch → `through == 0` no-op → `BeyondNewest`), and nothing changes on a refusal. On success, `ack_high_water_us = max(ack_high_water_us, r.last_us)` is computed over **every** record with `last_seq <= through` **before** they are removed by one `VecDeque::retain(|r| r.last_seq > through)` (survivor order preserved); the evicted reset rule (`through >= evicted.max_seq`, `max_seq` kept) is unchanged. All of it runs inside the one `inner` mutex section of `AlertsRuntime::acknowledge`, so no view can observe a half-applied acknowledgement. | `alerts.rs::AlertBook::acknowledge`, `AlertsRuntime::acknowledge` | tests 18 (migrated), 53, 58, 60; review |
+| C-45 | **R′ discard is side-effect free except for the seq**: in `AlertBook::record`, overflow is checked first (unchanged), then `highest_seq = seq`, then the predicate `attempt.at_us <= loaded_marker_us && attempt.at_us < started_us` returns `Ok(Recorded::Discarded)` without touching `records`, any count, `evicted` or `ack_high_water_us`. The predicate text is unchanged from rule R (no `<` / `<=` drift). | `alerts.rs::AlertBook::record` | tests 19 (migrated), 59 |
+| C-46 | **Coalescing and eviction without the flag**: coalescing compares only source, account, kind and the `ALERT_COALESCE_WINDOW_US` window against the newest stored record; eviction (`len > MAX_ALERT_HISTORY`) always adds the popped count to the per-kind evicted totals (saturating) and updates `max_seq`/`first_us` — the old `continue` branch is deleted, never replaced by a silent drop. The `VecDeque` capacity stays `MAX_ALERT_HISTORY + 1`; no allocation depends on the number of acknowledged or discarded attempts. | `alerts.rs::AlertBook::record` | tests 52, 58 (1 000 attempts → ack → 40 → exactly `MAX_ALERT_HISTORY`) |
+| C-47 | **Marker correctness (rule M unchanged)**: `marker()` uses every stored record (all unacknowledged), `evicted.first_us`, the oldest pending check and `ack_high_water_us`; it must stay strictly below every attempt known to be unacknowledged. The persisted value may be equal to or higher than round 2 only in the late-line case named by F-4, never lower than an unacknowledged attempt; no code path may lower `ack_high_water_us`. The ack file format, `ALERTS_MARKER_FLUSH_MIN_INTERVAL_MS` throttle, `flush(true)` after an acknowledgement and the C-23 single synchronous write section are unchanged. | `alerts.rs::AlertBook::marker`, `AlertsRuntime::flush` | tests 18, 19, 31, 52, 54 (migrated, numeric values unchanged), 60 |
+| C-48 | **Runtime record path**: `AlertsRuntime::record` must match the `Result<Recorded, BookError>` explicitly: `Err(_)` → overflow path (unchanged); `Ok(Recorded::Discarded)` → neither `changed`, `bump()` nor the live list; `Ok(Recorded::Kept)` → `changed = true` and, only if `is_live(...)` holds, the attempt is pushed to the live list. No `let _ =` / `.is_err()`-only handling that would treat `Discarded` as `Kept`. The live list is still delivered by `deliver_live` after the `inner` mutex is released (lock order alerts → push unchanged), and the stale `LiveAttemptSink` doc comment ("Called under the alerts runtime mutex") is corrected (F-5). | `alerts.rs::AlertsRuntime::record`, `LiveAttemptSink` | test 61; clippy `-D warnings`; review |
+| C-49 | **Push independence**: no change to `crates/remote/src/push.rs` is needed or allowed beyond compile fixes; the push scheduler never reads the book; an acknowledgement never calls the transport, never cancels, reduces or resends a pending summary or a carried count; replayed attempts (kept or discarded) are never pushed. | `push.rs`, `alerts.rs::AlertsRuntime::acknowledge` | test 61; `git diff push.rs` review |
+| C-50 | **API shape**: `AlertsView` keeps its 10 top-level keys; each record serialises exactly the 7 keys `id`, `first_unix_ms`, `last_unix_ms`, `source`, `account`, `kind`, `count` (`last_seq`/`first_us`/`last_us` stay `#[serde(skip)]`). The `200` body of `POST /api/alerts/ack`, `GET /api/alerts` and the next `event: alerts` are computed from the book after the removal; no new route, header, status code, response key or query parameter. Authorization, Funnel gating, CSRF (`X-Soos-Action: alerts-ack`), header parsing and the rate gate (C-28 to C-31) are untouched. | `alerts.rs::AlertRecord`, `server.rs` ack/GET/SSE handlers | tests 21, 30 (migrated), 60 |
+| C-51 | **Page**: `renderAlerts` loses the `record.acknowledged` branch and reads no acknowledgement field; `style.css` loses `.alerts-history li.acknowledged`; `textContent` only, no storage (`localStorage`/`sessionStorage`/IndexedDB), no service-worker cache of alert data, CSP and pinned asset headers unchanged (C-39 still applies). After a `200` the page renders the returned body. | `assets/app.js::renderAlerts`, `assets/style.css` | test 62; invariant RMC-S30, RMC-S8 |
+| C-52 | **Journal untouched** (R3.0, ADR (e)): no code, script, unit or doc instruction may run `journalctl --vacuum-*`, `--rotate`, `--flush`, delete or truncate journal files, or widen the `journalctl` argument list of C-9; `packaging/soos-remote.service` stays byte-identical (C-38). `Docs/REMOTE_COMPANION.md` §2c states "journal entries are never deleted" with the reason (single entries cannot be deleted; root-only whole-file vacuum would destroy unrelated logs and the intrusion evidence). | `alerts.rs` spawn args, `scripts/`, `packaging/`, `Docs/REMOTE_COMPANION.md` §2c | test 62; invariant `test_rmc_s26_…`; `grep -rn 'vacuum\|--rotate' crates/remote scripts packaging` empty |
+| C-53 | **Documentation folds the round-3 plan-evaluator findings that are not yet in the deliverables**: F-2 (both extra fail-safe residuals: ack-file write failure → entries reappear after a restart; > 32 records between view and ack → evicted counts stay in the totals) in spec R3.4, ADR (d) and §2c; F-4 rewording of ADR (b) and spec R3.1 ("identical persisted values" → "never lower than round 2 and still strictly below every unacknowledged attempt; identical in all migrated tests") — the current ADR (b) text still overclaims; F-6 UX sentence in §2c (a row that grew after display is kept with its new count; a removed list may flash back for under a second). English only; avoid the word that the commit gate greps for raw-memory code. | `AI/DECISIONS.md`, `AI/architect_spec_remote_auth_alerts.md`, `Docs/REMOTE_COMPANION.md` §2c, walkthrough 188 | candid review; invariant RMC-S29 needles still present |
+| C-54 | **Traceability honesty** (F-4): the owner's 2026-10-06 hardware report (wrong `sudo` password → iPhone notification; Acknowledge resets the banner and it stays reset after a restart; GDM login not tested, owner: not important; the test and lock-screen notifications already in RMC59/RMC74; the phone listed under devices, host check `GET /api/push` shows one `apple` device) is recorded against RMC59/RMC74 as made on the round-2 build `e8e3f28`; RMC75 is **not** marked hardware-verified from it and needs its own owner check after the reinstall (rows disappear and do not return after a restart). No agent reinstalls or restarts the service to obtain it (C-41). | `AI/VERIFICATION_MATRIX.md`, walkthrough 188 | candid review |
+| C-55 | **Test integrity**: tests 58–62 and the migrated assertions are immutable; the only permitted test changes are those already recorded in `AI/tester_contract_alerts.md` "Contract migration — owner request 2026-10-06". `Recorded` derives at least `Debug, Clone, Copy, PartialEq, Eq`, is `pub` in `soos_remote::alerts`, and carries no `#[must_use]` (tests drop it). | `crates/remote/tests/*`, `tests/invariants/src/remote_alerts_contract.rs`, `alerts.rs::Recorded` | `git diff --stat` of test files vs. this audit; compile |
+| C-56 | **Gate before hand-off** (unchanged C-42 plus round 3): `cargo fmt --all -- --check`; `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings`; `cargo test --workspace --locked --all-features`; `cargo deny --locked check`; `alerts_tests`, `alerts_server_tests`, `push_server_tests` and the full `soos-remote` suite **at least 5 times in a row** green; `soos-invariants` green. Agents never commit, push, stash, open PRs, run `tailscale`, restart/reinstall host services or touch `~/.config`. | workspace | command output recorded by the developer |
+
+### Pre-existing violations found (not introduced by this change)
+
+- None in `crates/remote/src` (0 panic macros, 0 raw-memory blocks, no `tracing` macro in `alerts.rs`).
+- Stale doc comment on `LiveAttemptSink` (`alerts.rs:803-804`, F-5) — fixed under C-48.
+- ADR amendment (b) "persisted values are identical" overclaims (F-4) and (d) names only the rule-M residual (F-2) —
+  fixed under C-53.
+
+### Residual risks accepted (round 3, documented, not blocking)
+
+1. Rule-M residual: acknowledged attempts above a marker held down by an older unacknowledged attempt or pending
+   lock-screen check reappear after a restart (pinned by migrated test 54; fail-safe direction).
+2. Ack-file write failure: entries vanish at once but reappear after a restart (WARN audit line already emitted).
+3. Partial acknowledgement after eviction: evicted counts stay in the totals (no record data) until the next
+   acknowledgement; the page may then show non-zero totals with fewer rows.
+4. An `event: alerts` serialised just before the acknowledgement can briefly re-render the removed rows; the
+   acknowledgement bumps the version, so the next event (≤ `ALERT_EVENT_MIN_INTERVAL_MS`) corrects it.
+5. Removed records are plain freed memory (not wiped); they contain only classes, times and counts, no secret.
+6. The journal keeps every entry by design (R3.0); the page is a view, not a deletion tool.
+
+### Clearance: CLEARED
+
+The round-3 spec, ADR amendment and tester contract satisfy the checklist; the drop-at-once design keeps every bound,
+the epoch/stale-view order, the marker rules and push independence, adds no I/O, field, log line or dependency, and
+retains no acknowledged data. The developer-agent may start Phase 4 for round 3 and must satisfy C-43 to C-56 (in
+addition to C-1 to C-42), notably C-48 (explicit `Recorded` match, F-5 comment) and C-53 (F-2/F-4/F-6 wording).

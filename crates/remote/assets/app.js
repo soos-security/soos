@@ -489,9 +489,6 @@ function renderAlerts(view) {
         ", " +
         what
     );
-    if (record.acknowledged === true) {
-      item.className = "acknowledged";
-    }
     alertsHistory.appendChild(item);
   });
   alertsAckButton.hidden = !(wrong > 0 || lockedOut > 0) || typeof view.epoch !== "string";

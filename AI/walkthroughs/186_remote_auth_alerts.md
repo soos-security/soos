@@ -120,3 +120,103 @@ helper-only lock-screen checks) by a process running as the owner; class relabel
 helper-only checks; the broad journal read right needed by the service; volatile journal storage;
 oversized fields of other accounts; unwiped kernel pipe and `serde_json` scratch buffers; the
 catch-up heuristic and cold start; the unit sandbox verified only on hardware.
+
+## Round 3 — Clear Acknowledged Entries (2026-10-06)
+
+- **Date**: 2026-10-06
+- **Issue**: GitHub-only follow-up of #339. **Branch**: `feat/remote-auth-alerts` (head `e8e3f28`, change
+  uncommitted at hand-off).
+- **Matrix criteria**: RMC75 (new); RMC54 evidence extended; RMC59 and RMC74 owner results recorded.
+
+### R3.1 Context & Objectives
+
+Owner request of 2026-10-06, binding, in the owner's words: "once the acknowledge button is clicked, delete the
+entries". Agreed interpretation: acknowledged entries disappear from everything the page and the API show, at once
+after a successful acknowledgement and after a service restart (replayed attempts at or before the persisted marker
+never reappear); only newer attempts are shown. Refused and documented: deleting system journal entries (`journald`
+cannot delete a single entry; the root-only vacuum works on whole files and would destroy unrelated logs and the
+evidence of the reported intrusion attempts). No password is stored anywhere (O-2 unchanged).
+
+### R3.2 Architect Design
+
+Spec `AI/architect_spec_remote_auth_alerts.md` "Round 3 — clear acknowledged entries" (R3.0–R3.8) and the ADR
+amendment "clear acknowledged entries" in `AI/DECISIONS.md`. Decision: acknowledged records are **dropped from
+memory** at once, not filtered from views. `AlertBook::acknowledge` raises the high water with every covered record
+and then keeps only records with `last_seq > through` (coalescing only joins the back record, so the covered records
+are always a prefix of the deque). `AlertBook::record` returns `Recorded::{Kept, Discarded}`; a replayed attempt with
+`at_us <= loaded_marker && at_us < started_us` is discarded without creating a record but still consumes a seq, so
+`through`, `BeyondNewest` and `409 stale_view` are unchanged. The `acknowledged` field and JSON key are removed
+(records serialise 7 keys); the page no longer dims rows. Only `Kept` live attempts reach the push sink.
+
+### R3.3 Plan Evaluation
+
+`AI/plan_evaluator_report.md` round 3: `VALIDATION_VERDICT: APPROVED`, six MINOR findings. F-1 (a private flag plus a
+view filter would pass every behavioural test) folded into invariant test 62; F-2 (two further fail-safe residuals),
+F-4 (marker "never lower", not "identical") and F-6 (UX sentence) folded into the ADR amendment and §2c; F-3 folded
+into the test-54 migration; F-5 (stale `LiveAttemptSink` comment) fixed by the developer. F-4 also binds this phase:
+RMC75 is not marked hardware-verified from the owner's report on the round-2 build.
+
+### R3.4 Tester Contract
+
+`AI/tester_contract_alerts.md` "Round 3": tests 58 `test_rmc_alerts_book_acknowledge_removes_records`, 59
+`test_rmc_alerts_book_replay_covered_attempts_are_discarded` (`alerts_tests`), 60
+`test_rmc_alerts_ack_clears_history_end_to_end` (`alerts_server_tests`), 61 `test_rwp_acknowledge_never_changes_push`
+(`push_server_tests`) and 62 `test_rmc_s43_acknowledged_entries_are_not_kept` with
+`test_rmc_s43_scanner_self_test` (`soos-invariants::remote_alerts_contract`). Red evidence: compile errors on the new
+API (`Recorded`, removed field) and the record key-set assertion. Contract migration (recorded in the tester contract,
+citing the owner request): tests 18, 19, 21, 30, 31, 54 and the `counts`/`key`/`RECORD_KEYS` helpers, where an
+assertion encoded "acknowledged records stay in the history"; every count, `through`, marker and file-value assertion
+kept its value.
+
+### R3.5 Auditor Constraints
+
+`AI/auditor_constraints_alerts.md` C-43 to C-56, among them: push independence (C-49, test 61), the unchanged API
+shape apart from the removed key (C-50), the page without any acknowledgement branch (C-51), the journal never touched
+and `packaging/soos-remote.service` byte-identical (C-52), documentation of F-2/F-4/F-6 (C-53), traceability honesty
+(C-54, applied below), test integrity (C-55) and the gate with five consecutive suite runs (C-56).
+
+### R3.6 Implementation
+
+- `crates/remote/src/alerts.rs`: `Recorded`, field removal, `retain` after the high-water update in `acknowledge`,
+  discard in `record`, eviction without the acknowledged branch, views without filters, runtime forwards only `Kept`
+  attempts; `LiveAttemptSink` comment corrected.
+- `crates/remote/assets/app.js`, `style.css`: dimming branch and `.alerts-history li.acknowledged` rule removed.
+- `AI/DECISIONS.md` (amendment), `Docs/REMOTE_COMPANION.md` §2c ("Acknowledge removes the entries" with the
+  residuals; "The system journal is never modified: journal entries are never deleted" with the reason).
+- `AI/ARCHITECTURE.md` §13 does not describe the alert history; unchanged.
+
+### R3.7 Candid Review
+
+`AI/candid_review_report.md` (2026-10-06, fingerprint `655a58cb…`): **VERDICT: APPROVED**, no CRITICAL or MAJOR
+finding; one SUGGESTION (raw byte strings in the test-only scanner of test 62; the failure direction is a false
+positive, never a hidden violation). This traceability phase edits documentation only, after that review.
+
+### R3.8 Verification Results
+
+```bash
+cargo test --locked -p soos-remote --all-features --test alerts_tests -- <tests 18, 19, 21, 58, 59> --exact   # 5 passed
+cargo test --locked -p soos-remote --all-features --test alerts_server_tests -- <tests 30, 31, 54, 60> --exact # 4 passed
+cargo test --locked -p soos-remote --all-features --test push_server_tests -- test_rwp_acknowledge_never_changes_push --exact  # 1 passed
+cargo test --locked -p soos-invariants --all-features rmc_s43                                                  # 2 passed
+cargo test --locked -p soos-remote --all-features            # 5 runs in a row
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --locked --all-features -- -D warnings
+cargo test --workspace --locked --all-features
+cargo deny check
+```
+
+Owner hardware results recorded (owner report 2026-10-06, made on the round-2 build `e8e3f28`): a wrong `sudo`
+password produced a notification on the iPhone (RMC59, RMC74); *Acknowledge* resets the banner and it stays reset after
+a service restart (RMC59); GDM login was not tested (owner: not important); the test notification and the lock-screen
+notification were already recorded in RMC59/RMC74; the page lists the phone under devices (RMC74; host check
+`GET /api/push` shows one `apple` device). RMC59 and RMC74 stay partly verified.
+
+### R3.9 Known Limitations / Follow-ups
+
+- RMC75 needs its own owner check after the reinstall: rows disappear on *Acknowledge* and do not return after a
+  service restart. Agents never reinstall or restart the service.
+- Accepted fail-safe residuals (all show more alerts, never fewer): acknowledged attempts above a marker held down
+  by an older unacknowledged attempt or pending check reappear after a restart; entries reappear after a restart when
+  `remote-alerts.json` cannot be written; evicted attempts stay counted in the totals when more than 32 records
+  arrive between the displayed view and the acknowledgement.
+- Journal entries are never deleted; the raw history stays available to root through `journalctl`.

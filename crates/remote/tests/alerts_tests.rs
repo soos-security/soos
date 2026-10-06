@@ -1,7 +1,10 @@
 //! Contract tests of the pure alert state of `soos-remote` (ADR 2026-10-06 "Failed-Password
 //! Alerts in `soos-remote` From the System Journal", architect spec
 //! `AI/architect_spec_remote_auth_alerts.md` §3.1, §4, tests 13–22 and 52; matrix RMC49–RMC51,
-//! RMC54).
+//! RMC54), plus round 3 (owner request 2026-10-06 "clear acknowledged entries", spec R3.3,
+//! tests 58–59, matrix RMC75): acknowledged records are removed and covered replays are
+//! discarded; tests 18, 19 and 21 carry recorded contract migrations
+//! (`AI/tester_contract_alerts.md`).
 //!
 //! The correlator (pairing, anchors, bounds), the alert book (coalescing, eviction,
 //! saturation, acknowledgement, replay marker, persisted marker), the JSON view, and the
@@ -40,7 +43,7 @@ use serde_json::{json, Value};
 
 use soos_remote::alerts::{
     read_ack_file, write_ack_file, AlertBook, AlertRecord, AlertsEpoch, AlertsState, AlertsView,
-    Attempt, AttemptKind, BookError, Correlator, LockScreenCoverage, UnavailableReason,
+    Attempt, AttemptKind, BookError, Correlator, LockScreenCoverage, Recorded, UnavailableReason,
 };
 use soos_remote::journal::{AccountClass, HelperSide, Signal, SourceClass};
 use soos_remote::{
@@ -672,15 +675,17 @@ fn test_rmc_alerts_book_acknowledge_through() {
     // unacknowledged as a whole.
     b.acknowledge(epoch(), snapshot.through).unwrap();
     let v = view(&b);
-    assert!(v.history.iter().all(|r| !r.acknowledged), "{v:?}");
+    // Contract migration (owner request 2026-10-06, "clear acknowledged entries"): nothing
+    // is removed, both records are still present.
+    assert_eq!(v.history.len(), 2, "{v:?}");
     assert_eq!(v.unacknowledged_wrong_password, 2);
 
     // `through = 2` covers record 1 (last seq 2) but not record 3.
     b.acknowledge(epoch(), 2).unwrap();
     let v = view(&b);
-    assert_eq!(v.history[1].id, 1);
-    assert!(v.history[1].acknowledged);
-    assert!(!v.history[0].acknowledged);
+    // Contract migration (owner request 2026-10-06): record 1 is removed, record 3 stays.
+    assert_eq!(v.history.len(), 1, "{v:?}");
+    assert_eq!(v.history[0].id, 3);
     assert_eq!(v.unacknowledged_wrong_password, 0);
     assert_eq!(v.unacknowledged_locked_out, 1);
     assert_eq!(v.last_unix_ms, Some((T + 2 * S) / 1000));
@@ -694,7 +699,8 @@ fn test_rmc_alerts_book_acknowledge_through() {
     // Everything.
     b.acknowledge(epoch(), 3).unwrap();
     let v = view(&b);
-    assert!(v.history.iter().all(|r| r.acknowledged));
+    // Contract migration (owner request 2026-10-06): every acknowledged record is removed.
+    assert!(v.history.is_empty(), "{v:?}");
     assert_eq!(v.unacknowledged_wrong_password, 0);
     assert_eq!(v.unacknowledged_locked_out, 0);
     assert_eq!(v.last_unix_ms, None);
@@ -705,8 +711,8 @@ fn test_rmc_alerts_book_acknowledge_through() {
     b.record(attempt(C::Login, A::Owner, K::LockedOut, T + 3 * S))
         .unwrap();
     let v = view(&b);
-    assert_eq!(v.history.len(), 3);
-    assert!(!v.history[0].acknowledged);
+    // Contract migration (owner request 2026-10-06): only the new record is shown.
+    assert_eq!(v.history.len(), 1, "{v:?}");
     assert_eq!(v.history[0].id, 4);
     assert_eq!(v.unacknowledged_locked_out, 1);
     // The high water never decreases: re-acknowledging an old snapshot keeps it.
@@ -715,11 +721,10 @@ fn test_rmc_alerts_book_acknowledge_through() {
     // An unacknowledged record older than the high water lowers the marker (fail-safe).
     b.record(wrong(C::Other, T + S + 500 * MS)).unwrap();
     assert_eq!(b.marker(None), T + S + 500 * MS - 1);
-    // The acknowledged state survives in the view: acknowledged rows stay in the history.
-    assert_eq!(
-        view(&b).history.iter().filter(|r| r.acknowledged).count(),
-        2
-    );
+    // Contract migration (owner request 2026-10-06): the history holds only the
+    // unacknowledged records (newest first by insertion); no acknowledged row exists.
+    let ids: Vec<u64> = view(&b).history.iter().map(|r| r.id).collect();
+    assert_eq!(ids, vec![5, 4]);
 }
 
 /// Test 19 (RMC54, §4.3 rule R, F-3 b): the loaded marker acknowledges only replayed
@@ -741,22 +746,11 @@ fn test_rmc_alerts_book_rebuild_respects_marker() {
     b.record(attempt(C::Sudo, A::Root, K::WrongPassword, marker + 1))
         .unwrap();
     let v = view(&b);
-    let acknowledged: Vec<(C, bool)> = v
-        .history
-        .iter()
-        .rev()
-        .map(|r| (r.source, r.acknowledged))
-        .collect();
-    assert_eq!(
-        acknowledged,
-        vec![
-            (C::Sudo, true),
-            (C::Login, true),
-            (C::Other, false),
-            (C::LockScreen, false),
-            (C::Sudo, false),
-        ]
-    );
+    // Contract migration (owner request 2026-10-06, "clear acknowledged entries"): the two
+    // covered replays are discarded (absent), oldest first.
+    let sources: Vec<C> = v.history.iter().rev().map(|r| r.source).collect();
+    assert_eq!(sources, vec![C::Other, C::LockScreen, C::Sudo]);
+    assert_eq!(v.through, 5, "discarded replays consume a seq");
     assert_eq!(v.unacknowledged_wrong_password, 3);
     // A marker past the start never acknowledges live attempts.
     let mut b = AlertBook::new(u64::MAX, epoch(), started);
@@ -769,6 +763,8 @@ fn test_rmc_alerts_book_rebuild_respects_marker() {
     b.record(wrong(C::Login, 1)).unwrap();
     let v = view(&b);
     assert_eq!(v.unacknowledged_wrong_password, 1);
+    // Contract migration (owner request 2026-10-06): the covered replay is absent.
+    assert_eq!(v.history.len(), 1);
     // The loaded marker is kept as the persisted value while nothing is unacknowledged
     // below it (no regression of the file across restarts, plan-evaluator G-1).
     let b = AlertBook::new(marker, epoch(), started);
@@ -896,6 +892,248 @@ fn test_rmc_alerts_book_marker_never_covers_unacknowledged() {
 }
 
 // ---------------------------------------------------------------------------------------
+// Tests 58–59 — round 3: acknowledged entries are removed (owner request 2026-10-06)
+// ---------------------------------------------------------------------------------------
+
+/// Test 58 (RMC75, spec R3.3 A′, owner request 2026-10-06 "once the acknowledge button is
+/// clicked, delete the entries"): an acknowledgement removes exactly the records whose
+/// `last_seq <= through` (a record grown past `through` stays whole); after acknowledging
+/// everything the view is empty; a later attempt never joins a removed record; refused and
+/// no-op acknowledgements change nothing; memory stays bounded; evicted totals reset only
+/// when `through` covers the evicted seqs.
+#[test]
+fn test_rmc_alerts_book_acknowledge_removes_records() {
+    let mut b = book();
+    b.record(wrong(C::Sudo, T)).unwrap(); // seq 1, record 1
+    b.record(wrong(C::Sudo, T + S)).unwrap(); // seq 2, joins record 1
+    b.record(attempt(C::Login, A::Owner, K::LockedOut, T + 2 * S))
+        .unwrap(); // seq 3, record 3
+    b.record(wrong(C::Other, T + 3 * S)).unwrap(); // seq 4, record 4
+    let ids = |b: &AlertBook| -> Vec<u64> { view(b).history.iter().map(|r| r.id).collect() };
+    assert_eq!(ids(&b), vec![4, 3, 1]);
+
+    // No-op, stale epoch, beyond newest: nothing is removed.
+    let before = view(&b);
+    assert_eq!(b.acknowledge(epoch(), 0), Ok(()));
+    assert_eq!(view(&b), before);
+    assert_eq!(
+        b.acknowledge(AlertsEpoch::from_u64(7), 4),
+        Err(BookError::StaleView)
+    );
+    assert_eq!(view(&b), before);
+    assert_eq!(b.acknowledge(epoch(), 5), Err(BookError::BeyondNewest));
+    assert_eq!(view(&b), before);
+    assert_eq!(b.marker(None), 0, "nothing acknowledged yet");
+
+    // `through = 1`: record 1 grew to seq 2, it stays whole.
+    b.acknowledge(epoch(), 1).unwrap();
+    assert_eq!(ids(&b), vec![4, 3, 1]);
+    assert_eq!(view(&b).history[2].count, 2);
+
+    // `through = 3`: records 1 and 3 are removed, record 4 survives.
+    b.acknowledge(epoch(), 3).unwrap();
+    let v = view(&b);
+    assert_eq!(ids(&b), vec![4]);
+    assert_eq!(v.unacknowledged_wrong_password, 1);
+    assert_eq!(v.unacknowledged_locked_out, 0);
+    assert_eq!(v.last_unix_ms, Some((T + 3 * S) / 1000));
+    assert_eq!(v.last_source, Some(C::Other));
+    assert_eq!(v.through, 4);
+    assert_eq!(
+        b.marker(None),
+        T + 2 * S,
+        "min(high water T + 2 s, unacknowledged T + 3 s − 1)"
+    );
+
+    // Record 4 grows past the displayed `through = 4`: it stays whole.
+    b.record(wrong(C::Other, T + 4 * S)).unwrap(); // seq 5, joins record 4
+    b.acknowledge(epoch(), 4).unwrap();
+    let v = view(&b);
+    assert_eq!(ids(&b), vec![4]);
+    assert_eq!(v.history[0].count, 2);
+    assert_eq!(v.unacknowledged_wrong_password, 2);
+
+    // Everything: the view is empty, `through` unchanged.
+    b.acknowledge(epoch(), 5).unwrap();
+    let v = view(&b);
+    assert!(v.history.is_empty(), "{v:?}");
+    assert_eq!(v.unacknowledged_wrong_password, 0);
+    assert_eq!(v.unacknowledged_locked_out, 0);
+    assert_eq!(v.last_unix_ms, None);
+    assert_eq!(v.last_source, None);
+    assert_eq!(v.through, 5);
+    assert_eq!(b.marker(None), T + 4 * S, "the high water");
+    let json = serde_json::to_value(&v).unwrap();
+    assert_eq!(json["history"], json!([]));
+
+    // A later attempt within 60 s of a removed record starts a new record.
+    b.record(wrong(C::Other, T + 5 * S)).unwrap(); // seq 6
+    let v = view(&b);
+    assert_eq!(v.history.len(), 1, "{v:?}");
+    assert_eq!(v.history[0].id, 6);
+    assert_eq!(v.history[0].count, 1);
+    assert_eq!(v.history[0].first_unix_ms, (T + 5 * S) / 1000);
+    assert_eq!(v.unacknowledged_wrong_password, 1);
+    assert_eq!(b.marker(None), T + 4 * S);
+    // Re-acknowledging an old snapshot removes nothing new and keeps the high water.
+    b.acknowledge(epoch(), 5).unwrap();
+    assert_eq!(ids(&b), vec![6]);
+    assert_eq!(b.marker(None), T + 4 * S);
+
+    // Bounded: 1 000 attempts, acknowledge everything, then 40 more.
+    let mut b = book();
+    let alternating = |i: u64| {
+        if i.is_multiple_of(2) {
+            K::WrongPassword
+        } else {
+            K::LockedOut
+        }
+    };
+    for i in 0..1000u64 {
+        b.record(attempt(C::Login, A::Owner, alternating(i), T + i * S))
+            .unwrap();
+    }
+    assert_eq!(view(&b).history.len(), MAX_ALERT_HISTORY);
+    b.acknowledge(epoch(), 1000).unwrap();
+    let v = view(&b);
+    assert!(v.history.is_empty(), "{} records left", v.history.len());
+    assert_eq!(v.unacknowledged_wrong_password, 0);
+    assert_eq!(v.unacknowledged_locked_out, 0);
+    assert_eq!(v.through, 1000);
+    for i in 0..40u64 {
+        b.record(attempt(
+            C::Login,
+            A::Owner,
+            alternating(i),
+            T + 2000 * S + i * S,
+        ))
+        .unwrap();
+    }
+    let v = view(&b);
+    assert_eq!(v.history.len(), MAX_ALERT_HISTORY);
+    assert_eq!(v.history[0].id, 1040);
+    assert_eq!(v.history.last().unwrap().id, 1009);
+    assert_eq!(v.unacknowledged_wrong_password, 20, "evicted still counted");
+    assert_eq!(v.unacknowledged_locked_out, 20);
+
+    // Evicted totals: a `through` below the evicted seqs removes nothing and keeps them; a
+    // `through` covering them resets them.
+    let mut b = book();
+    b.record(wrong(C::Sudo, T)).unwrap(); // seq 1
+    let shown = view(&b).through;
+    for i in 1..=(MAX_ALERT_HISTORY as u64 + 1) {
+        b.record(wrong(C::Sudo, T + i * 120 * S)).unwrap(); // seqs 2..=34
+    }
+    let v = view(&b);
+    assert_eq!(v.history.len(), MAX_ALERT_HISTORY);
+    assert_eq!(v.history.last().unwrap().id, 3, "records 1 and 2 evicted");
+    assert_eq!(v.unacknowledged_wrong_password, 34);
+    b.acknowledge(epoch(), shown).unwrap();
+    let v = view(&b);
+    assert_eq!(v.history.len(), MAX_ALERT_HISTORY, "nothing removed");
+    assert_eq!(v.unacknowledged_wrong_password, 34, "evicted totals kept");
+    assert_eq!(
+        b.marker(None),
+        0,
+        "an evicted attempt is still unacknowledged"
+    );
+    b.acknowledge(epoch(), 2).unwrap();
+    let v = view(&b);
+    assert_eq!(v.history.len(), MAX_ALERT_HISTORY);
+    assert_eq!(v.unacknowledged_wrong_password, 32, "evicted totals reset");
+}
+
+/// Test 59 (RMC75, spec R3.3 R′): a replayed attempt covered by the loaded marker (journal
+/// time at or before it **and** before the start) is discarded: `Ok(Recorded::Discarded)`,
+/// no record, no total, but its seq is consumed; every other attempt is `Kept`; overflow
+/// is reported first; a discarded attempt never breaks coalescing; the loaded marker stays
+/// the persisted value.
+#[test]
+fn test_rmc_alerts_book_replay_covered_attempts_are_discarded() {
+    let marker = T + 50 * S;
+    let started = T + 40 * S;
+    let mut b = AlertBook::new(marker, epoch(), started);
+    assert_eq!(b.record(wrong(C::Sudo, T)), Ok(Recorded::Discarded));
+    let v = view(&b);
+    assert!(v.history.is_empty(), "{v:?}");
+    assert_eq!(v.unacknowledged_wrong_password, 0);
+    assert_eq!(v.last_unix_ms, None);
+    assert_eq!(v.through, 1, "the seq is consumed");
+    assert_eq!(
+        b.record(wrong(C::Login, started - 1)),
+        Ok(Recorded::Discarded)
+    );
+    assert_eq!(view(&b).through, 2);
+    assert_eq!(b.marker(None), marker, "discards keep the loaded marker");
+    // Acknowledging seqs that were all discarded is a harmless no-op.
+    let before = view(&b);
+    assert_eq!(b.acknowledge(epoch(), 2), Ok(()));
+    assert_eq!(view(&b), before);
+    assert_eq!(b.marker(None), marker);
+    // At the start (not before it), and above the marker: kept.
+    assert_eq!(b.record(wrong(C::Other, started)), Ok(Recorded::Kept));
+    assert_eq!(
+        b.record(attempt(C::LockScreen, A::Owner, K::WrongPassword, marker)),
+        Ok(Recorded::Kept)
+    );
+    assert_eq!(
+        b.record(attempt(C::Sudo, A::Root, K::WrongPassword, marker + 1)),
+        Ok(Recorded::Kept)
+    );
+    let v = view(&b);
+    let summary: Vec<(u64, C)> = v.history.iter().map(|r| (r.id, r.source)).collect();
+    assert_eq!(
+        summary,
+        vec![(5, C::Sudo), (4, C::LockScreen), (3, C::Other)]
+    );
+    assert_eq!(v.through, 5);
+    assert_eq!(v.unacknowledged_wrong_password, 3);
+
+    // One microsecond above a marker that lies before the start: kept.
+    let low = T + 10 * S;
+    let mut b = AlertBook::new(low, epoch(), started);
+    assert_eq!(b.record(wrong(C::Sudo, low)), Ok(Recorded::Discarded));
+    assert_eq!(b.record(wrong(C::Login, low + 1)), Ok(Recorded::Kept));
+    let v = view(&b);
+    assert_eq!(v.history.len(), 1);
+    assert_eq!(v.history[0].id, 2);
+    assert_eq!(v.history[0].source, C::Login);
+
+    // A marker past the start never covers a live attempt.
+    let mut b = AlertBook::new(u64::MAX, epoch(), started);
+    assert_eq!(b.record(wrong(C::Sudo, started)), Ok(Recorded::Kept));
+    assert_eq!(
+        b.record(wrong(C::Login, started - 1)),
+        Ok(Recorded::Discarded)
+    );
+    assert_eq!(view(&b).history.len(), 1);
+    assert_eq!(view(&b).unacknowledged_wrong_password, 1);
+
+    // Overflow is reported before the discard decision, nothing changes.
+    let mut b = AlertBook::new(u64::MAX, epoch(), started).with_next_seq(u64::MAX);
+    assert_eq!(b.record(wrong(C::Sudo, T)), Err(BookError::Overflow));
+    assert_eq!(view(&b).through, 0);
+    assert!(view(&b).history.is_empty());
+
+    // A discarded late line between two coalescible kept attempts does not split them.
+    let mut b = AlertBook::new(marker, epoch(), started);
+    assert_eq!(b.record(wrong(C::Sudo, started)), Ok(Recorded::Kept)); // seq 1
+    assert_eq!(
+        b.record(wrong(C::Sudo, started - S)),
+        Ok(Recorded::Discarded)
+    ); // seq 2
+    assert_eq!(b.record(wrong(C::Sudo, started + S)), Ok(Recorded::Kept)); // seq 3
+    let v = view(&b);
+    assert_eq!(v.history.len(), 1, "{v:?}");
+    assert_eq!(v.history[0].id, 1);
+    assert_eq!(v.history[0].count, 2);
+    assert_eq!(v.history[0].first_unix_ms, started / 1000);
+    assert_eq!(v.history[0].last_unix_ms, (started + S) / 1000);
+    assert_eq!(v.through, 3);
+    assert_eq!(v.unacknowledged_wrong_password, 2);
+}
+
+// ---------------------------------------------------------------------------------------
 // Test 21 — view JSON
 // ---------------------------------------------------------------------------------------
 
@@ -923,7 +1161,6 @@ fn test_rmc_alerts_view_json_shape() {
         "account",
         "kind",
         "count",
-        "acknowledged",
     ]);
     let mut b = book();
     b.record(wrong(C::LockScreen, T)).unwrap();
@@ -955,7 +1192,6 @@ fn test_rmc_alerts_view_json_shape() {
             "account": "root",
             "kind": "locked_out",
             "count": 1,
-            "acknowledged": false,
         })
     );
     assert_eq!(history[1]["source"], "lock_screen");
@@ -1097,7 +1333,6 @@ fn test_rmc_alerts_view_json_shape() {
         account: A::Owner,
         kind: K::WrongPassword,
         count: 1,
-        acknowledged: false,
         last_seq: 99,
         first_us: 2000,
         last_us: 3000,

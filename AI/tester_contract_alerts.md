@@ -176,3 +176,116 @@ more after that.
    exists; on a host without it the test prints a note and returns.
 3. The developer must add the `process` tokio feature in `crates/remote/Cargo.toml` only (test 47) and the §2c
    documentation, page strings and `index.html` `id="alerts"` banner (tests 49, 50).
+
+---
+
+## Round 3 — clear acknowledged entries (owner request 2026-10-06)
+
+- **Date**: 2026-10-06
+- **Branch**: `feat/remote-auth-alerts` (head `e8e3f28`; nothing committed, pushed or stashed)
+- **Spec**: `AI/architect_spec_remote_auth_alerts.md` section "Round 3 — clear acknowledged entries" (R3.0–R3.8);
+  plan-evaluator round 3 `VALIDATION_VERDICT: APPROVED` with findings F-1 to F-6
+- **ADR**: amendment "clear acknowledged entries" of the alerts ADR in `AI/DECISIONS.md`
+- **Owner request (binding, owner's words)**: "once the acknowledge button is clicked, delete the entries".
+  Agreed interpretation: acknowledged entries disappear from everything the page and the API show, at once after a
+  successful acknowledgement and after a service restart (replayed attempts at or before the persisted marker never
+  reappear); only newer attempts are shown. System journal entries are never deleted (refused, spec R3.0). No
+  password is stored anywhere (O-2 unchanged).
+
+### Files
+
+| File | Change | Tests |
+|---|---|---|
+| `crates/remote/tests/alerts_tests.rs` | 2 new tests; migrations of 18, 19, 21; imports `alerts::Recorded` | 58, 59 |
+| `crates/remote/tests/alerts_server_tests.rs` | 1 new test; migration of the `counts`/`key` helpers, `RECORD_KEYS` and tests 23 (call sites only), 30, 31, 54 | 60 |
+| `crates/remote/tests/push_server_tests.rs` | 1 new test (+ local `alerts_ack` helper) | 61 |
+| `tests/invariants/src/remote_alerts_contract.rs` | 1 new contract (RMC-S43) + scanner self-test | 62 |
+
+### Tester Contract
+
+| Test (path::name) | Acceptance line / matrix ID | Red evidence (failure message) |
+|---|---|---|
+| `alerts_tests::test_rmc_alerts_book_acknowledge_removes_records` (58) | R3.3 A′, eviction, bounds / RMC75 | compile-red on exactly the specified API: `E0432 unresolved import soos_remote::alerts::Recorded`, `E0063 missing field acknowledged in initializer of AlertRecord` (field removal, R3.2) |
+| `alerts_tests::test_rmc_alerts_book_replay_covered_attempts_are_discarded` (59) | R3.3 R′ / RMC75 | same compile-red (`AlertBook::record` must return `Result<Recorded, BookError>`) |
+| `alerts_server_tests::test_rmc_alerts_ack_clears_history_end_to_end` (60) | R3.3 A′, R3.4 (`200` body, `GET`, next `event: alerts`, restart) / RMC75 | `assertion left == right failed` on the record key set: `left: {"account", "acknowledged", "count", …}` `right: {"account", "count", …}` (alerts_server_tests.rs:424, `assert_view_shape`) |
+| `push_server_tests::test_rwp_acknowledge_never_changes_push` (61) | R3.4 push unaffected, R′ after restart / RMC75 | `assertion left == right failed: the entry is removed` — `left: Array [Object {… "acknowledged": Bool(true) …}]`, `right: Array []` |
+| `remote_alerts_contract::test_rmc_s43_acknowledged_entries_are_not_kept` (62) | R3.2, R3.5, R3.6, plan-evaluator F-1 / RMC75 | `AlertRecord has no acknowledged field` |
+| `remote_alerts_contract::test_rmc_s43_scanner_self_test` | guard of test 62 (a wrong scanner would make it vacuous) | passes by design (it tests the scanner, not the product) |
+
+Test 62 encodes plan-evaluator F-1 in full: besides `pub acknowledged:`, it rejects any whole-identifier
+`acknowledged` (field of any visibility, binding, struct shorthand, `.acknowledged` access) in the production code of
+every `crates/remote/src` file, with comments stripped and string literals blanked (so the fixed message "the
+acknowledged view belongs to an earlier start", `unacknowledged_*` and `acknowledged_until_us` do not match). A
+"private flag + view filter" implementation of A′ therefore fails, although every behavioural test would pass
+against it (acknowledged records always form a prefix of the deque).
+
+Server-suite red under the current (round-2) code: 13 of the 18 tests of `alerts_server_tests` fail on the migrated
+record key set as soon as a view has a record. The five that pass never show a record:
+`test_rmc_alerts_disabled_by_default`, `test_rmc_alerts_owner_unresolved`,
+`test_rmc_alerts_probe_failure_is_unavailable_never_zero`, `test_rmc_alerts_rng_failure_is_unavailable` and
+`test_rmc_alerts_unavailable_never_affects_status_or_lock`. This is the intended red of the shape migration, not a
+harness failure.
+
+### Contract migration — owner request 2026-10-06 (clear acknowledged entries)
+
+Mandate: the owner's request "once the acknowledge button is clicked, delete the entries" (2026-10-06), spec R3.2/R3.3
+and the migration table of spec R3.7. Only assertions that encoded "acknowledged records stay in the history" (or the
+`acknowledged` key) change; every count, `through`, `last_*`, marker and file-value assertion keeps its value and
+strength. Each changed site carries an inline `Contract migration (owner request 2026-10-06 …)` comment.
+
+| Test | Old assertion | New assertion | Mandating line |
+|---|---|---|---|
+| `alerts_tests::test_rmc_alerts_book_acknowledge_through` (18) | after `through = snapshot` all rows `!acknowledged` | `history.len() == 2` (nothing removed) | R3.3 A′ |
+| same | after `through = 2`: `history[1].id == 1`, `history[1].acknowledged`, `!history[0].acknowledged` | `history.len() == 1`, `history[0].id == 3` | R3.3 A′ |
+| same | after `through = 3`: all rows acknowledged | `history.is_empty()` | R3.3 A′ |
+| same | after the live attempt: `history.len() == 3`, `!history[0].acknowledged`, `history[0].id == 4` | `history.len() == 1`, `history[0].id == 4` | R3.3 coalescing |
+| same | final: 2 acknowledged rows stay in the history | ids `[5, 4]` (only unacknowledged records) | R3.1 |
+| `alerts_tests::test_rmc_alerts_book_rebuild_respects_marker` (19) | `(source, acknowledged)` list `[(Sudo,true),(Login,true),(Other,false),(LockScreen,false),(Sudo,false)]` | oldest-first sources `[Other, LockScreen, Sudo]`, `through == 5` (added: discarded replays consume a seq); totals and every marker assertion unchanged | R3.3 R′ |
+| same | marker-0 case: only the total | total unchanged + `history.len() == 1` (added) | R3.3 R′ |
+| `alerts_tests::test_rmc_alerts_view_json_shape` (21) | record key set with `acknowledged` (8 keys); `history[0]` literal with `"acknowledged": false`; `AlertRecord { …, acknowledged: false, … }` | 7 keys; literal and struct literal without it | R3.2 |
+| `alerts_server_tests` helpers `counts` / `key` / `RECORD_KEYS` | keyed by `(source, kind, acknowledged)` reading `r["acknowledged"]`; 8 record keys | keyed by `(source, kind)` and asserting that no record has an `acknowledged` key; 7 record keys; every `key(…, false)` call site (test 23, two cases) becomes `key(…)` with the same expected count; the tuple pattern `(source, _, _)` becomes `(source, _)` | R3.2 |
+| `alerts_server_tests::test_rmc_alerts_ack_csrf_headers_and_rate` (30) | `counts[(sudo, wrong_password, true)] == 1` after `through = 1` | the sudo record is absent from `counts`; `counts[(other, wrong_password)] == 1`; `wrong_count == 1` unchanged | R3.3 A′ |
+| `alerts_server_tests::test_rmc_alerts_ack_persists_and_survives_restart` (31) | runs 2 and 3: `{(sudo,wp,true):1, (other,wp,true):1, (login,wp,false):1}` | runs 2 and 3: `{(login, wrong_password): 1}`; `wrong_count == 1`, file marker `t2`, epochs unchanged; doc comment updated | R3.3 R′, R3.4 |
+| `alerts_server_tests::test_rmc_alerts_pending_check_older_than_ack_stays_unacknowledged` (54) | `newest["acknowledged"] == false`; after restart `(lock_screen,wp,true) == 1` and `(lock_screen,wp,false) == 1`; filter on `acknowledged == false` | `newest` has no `acknowledged` key; after restart `counts == {(lock_screen, wp): 1, (sudo, wp): 1}` exactly (the acknowledged first failure at `t − 20 s` is absent; the acknowledged sudo attempt at `t + 1 s` above the marker is shown again — the rule-M fail-safe residual, plan-evaluator F-3); exactly one `lock_screen` record with `first_unix_ms == t / 1000`; `through == 3` (added) | R3.3 R′, R3.4 residual, F-3 |
+
+Not migrated (verified unaffected): tests 16, 17, 20, 52 (no `acknowledged` read; values unchanged under R′/A′), the
+audit test (`"acknowledged in memory"` reads only the total), the SSE, raw-field and push suites (they now see 7-key
+records through the migrated `assert_view_shape`). Setup-only changes: none.
+
+### Contract choices where the spec is silent (binding for Phase 4)
+
+1. `Recorded` derives at least `Debug, Clone, Copy, PartialEq, Eq` (tests compare `Ok(Recorded::…)` with
+   `assert_eq!`) and is reachable as `soos_remote::alerts::Recorded`.
+2. Test 60: the acknowledgement's `200` body is the complete view (exact key set) with `history: []`, both totals 0,
+   `last_unix_ms`/`last_source` `null`, `through` unchanged; `GET /api/alerts` right after is **equal** to that
+   body; at least one `event: alerts` arrives within `ALERT_EVENT_MIN_INTERVAL_MS + 500` ms after it and every such
+   event has `history: []`; the marker file is written before the `200` (`ack_marker == t + 1 s` at once).
+3. Test 60 restart: the post-acknowledgement attempt keeps `id == 3` after the restart (two discarded replays consume
+   seqs 1 and 2).
+4. Test 61: the acknowledgement itself never causes a transport call; the pending 3 s summary is still sent with
+   `wrong_password = 1`; push subscriptions survive the restart (store unchanged).
+5. Test 62 scans every file of `crates/remote/src`, not only `alerts.rs` (a flag moved to another module is caught).
+
+### Satisfiability check (validation prototype, not delivered)
+
+A throw-away implementation of R3.2/R3.3 (`Recorded`, field removed, `retain` in `acknowledge`, discard in `record`,
+the runtime keeps only `Kept` attempts for `changed`/live), the `app.js` branch and `style.css` rule removed, and a
+temporary §2c sentence was applied, run and **reverted** (`git checkout -- crates/remote/src/alerts.rs
+crates/remote/assets/app.js crates/remote/assets/style.css Docs/REMOTE_COMPANION.md`). With it: the whole
+`soos-remote` suite was green (every test binary), `soos-invariants` 502/502 green, and `cargo clippy -p soos-remote
+-p soos-invariants --all-targets --all-features -- -D warnings` clean. The prototype diff is kept only in the
+session scratchpad (`round3_validation_prototype.diff`); Phase 4 writes the production code from the spec (and must
+also fix the stale `LiveAttemptSink` comment, F-5, and update §2c with the F-2/F-6 wording).
+
+### Flakiness check
+
+With the prototype: `alerts_tests`, `alerts_server_tests` and `push_server_tests` together **10 times in a row**:
+10/10 green; the full `soos-remote` suite (`cargo test --locked -p soos-remote --all-features`) **5 times in a
+row**: 5/5 green. `cargo fmt --all --check` is clean for the test files.
+
+### Open points (round 3)
+
+1. The owner's hardware report of 2026-10-06 ("Acknowledge resets the banner and stays reset after a service
+   restart") was made on the round-2 build (`e8e3f28`); RMC75 needs its own owner check after the reinstall (rows
+   disappear and do not return after a restart) — traceability must not mark RMC75 hardware-verified from that
+   report (plan-evaluator F-4).

@@ -1032,3 +1032,211 @@ new field has a stated bound (§3.1, §3.2, §4). The relayed request (§0.1) st
 | F-11 MINOR — duplicate keys | Hand-written `Visitor` with a seen-set for the nine read keys, `IgnoredAny` for others, bounded while visiting, `end()` required | §2.3, test 4, test 56 |
 | Observation — `sudo` command-log line | Prefix anchoring stated; negative case in test 10 | §2.4, test 10 |
 | Relayed request (see the tested passwords) | Unchanged answer: the safe subset per O-2; marked **open** for the owner's explicit confirmation before Phase 2 | §0.1 |
+
+## Round 3 — clear acknowledged entries (owner request 2026-10-06)
+
+### R3.0 Request and interpretation (binding)
+
+Owner request, 2026-10-06, in the owner's own words: "once the acknowledge button is clicked, delete the entries".
+Interpretation agreed in chat: acknowledged entries **disappear** from everything the page and the API show
+(history list and any acknowledged-only data), immediately after a successful acknowledgement **and** after a
+service restart (an attempt replayed at start-up whose journal time is at or before the persisted marker never
+reappears); only attempts newer than the acknowledgement are shown.
+
+**Refused and out of scope**: deleting entries of the system journal. `journald` cannot delete single entries;
+the only removal tools (`journalctl --vacuum-*`, `--rotate`, deleting journal files) are root-only, act on whole
+files and would destroy unrelated logs and the evidence of the very intrusion attempts the feature reports. The
+journal stays the authoritative, untouched record; `soos-remote` only stops showing what was acknowledged.
+Nothing else changes: no password is captured, stored, logged or displayed anywhere (O-2 unchanged), every bound
+of §3.1 holds, the epoch and stale-view rules (A, A-13) are unchanged, Web Push is unchanged, authorization and
+CSRF are unchanged, and no new log line exists.
+
+### R3.1 Decision: drop at once, never filter
+
+Acknowledged records are **removed from memory** in the same critical section that acknowledges them, and an
+attempt that rule R would have recorded acknowledged on arrival is **discarded** without creating a record. A
+view-only filter was rejected: it would keep acknowledged data in memory (and in a 32-slot history whose
+acknowledged rows would still evict nothing useful), and any future view, SSE path or debug seam could leak it.
+After this round the book holds **only unacknowledged records**; the `acknowledged` flag ceases to exist.
+
+What the marker logic still needs is kept as scalars that already exist: `ack_high_water_us` (maximum `last_us`
+over every record acknowledged in this start, initialised to the loaded marker) and the `loaded_marker_us` /
+`started_us` pair of rule R. Rule M is unchanged in value: it already used only unacknowledged records,
+`evicted.first_us` and the pending checks, plus `ack_high_water_us`. Dropping records therefore never makes a
+persisted marker lower than in round 2, and it stays strictly below every unacknowledged attempt; the values are
+identical in all migrated tests (every term of `marker()` is computed from data that is still present; the dropped
+records only ever contributed through `ack_high_water_us`, which is updated before they are dropped). The marker
+can only be higher than in round 2 when late journal lines make journal time and seq order disagree and an
+acknowledged record that round 2 would have evicted without counting now raises the high water (plan-evaluator F-4).
+
+### R3.2 Data-structure and API changes (`crates/remote/src/alerts.rs`)
+
+```rust
+/// One history record (several coalesced unacknowledged attempts).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct AlertRecord {
+    pub id: u64,
+    pub first_unix_ms: u64,
+    pub last_unix_ms: u64,
+    pub source: SourceClass,
+    pub account: AccountClass,
+    pub kind: AttemptKind,
+    pub count: u32,
+    // `pub acknowledged: bool` is REMOVED (field and JSON key).
+    #[serde(skip)] pub last_seq: u64,
+    #[serde(skip)] pub first_us: u64,
+    #[serde(skip)] pub last_us: u64,
+}
+
+/// What `AlertBook::record` did with an attempt (no `#[must_use]`: tests call `.unwrap()` and drop it).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Recorded {
+    /// Stored (new record or coalesced into the newest one).
+    Kept,
+    /// Replayed from before the start and covered by the loaded marker (rule R): not stored.
+    Discarded,
+}
+
+impl AlertBook {
+    /// # Errors  `BookError::Overflow` when the seq counter cannot advance (nothing changes).
+    pub fn record(&mut self, attempt: Attempt) -> Result<Recorded, BookError>;   // was Result<(), BookError>
+    pub fn acknowledge(&mut self, epoch: AlertsEpoch, through: u64) -> Result<(), BookError>; // unchanged signature
+    #[must_use] pub fn marker(&self, oldest_pending_us: Option<u64>) -> u64;     // unchanged
+}
+```
+
+`Recorded` is re-exported from `alerts` like `BookError`. No other public type changes; `AlertsView` keeps its
+exact top-level key set (`state`, `reason`, `epoch`, `lock_screen`, `unacknowledged_wrong_password`,
+`unacknowledged_locked_out`, `last_unix_ms`, `last_source`, `through`, `history`); the record key set becomes
+exactly `id`, `first_unix_ms`, `last_unix_ms`, `source`, `account`, `kind`, `count` (7 keys).
+
+### R3.3 Rules (replacing R, A, coalescing and eviction of §4.3; M and P unchanged)
+
+- **R′ (replay discard).** `record(attempt)`:
+  1. `seq = next_seq`; `next_seq = seq.checked_add(1)` or `Err(Overflow)` with nothing changed (unchanged order:
+     overflow is reported before anything else, also for an attempt that would be discarded).
+  2. `highest_seq = seq` (the seq is **consumed** even when the attempt is discarded, so `through` keeps counting
+     every attempt the book has seen in this start; an acknowledgement whose `through` covers only discarded seqs
+     is a harmless no-op, and the round-2 `through` values of replay scenarios stay identical).
+  3. If `attempt.at_us <= loaded_marker_us && attempt.at_us < started_us` → `Ok(Recorded::Discarded)`: no record
+     is created or modified, no counter, total, `evicted` field or `ack_high_water_us` changes.
+  4. Otherwise coalesce or append as below → `Ok(Recorded::Kept)`.
+- **Coalescing**: joins the newest record when source, account and kind are equal and `|at_us − last_us| ≤
+  ALERT_COALESCE_WINDOW_US` (the acknowledged-flag condition disappears: every stored record is unacknowledged).
+  An attempt arriving after an acknowledgement therefore never joins a removed record: it starts a new record
+  with `id = seq` (the removed record is gone).
+- **A′ (acknowledge = remove).** `acknowledge(epoch, through)`: epoch mismatch → `StaleView` (nothing changes);
+  `through == 0` → no-op `Ok`; `through > highest_seq` → `BeyondNewest` (nothing changes); otherwise, for every
+  record with `last_seq <= through`: `ack_high_water_us = max(ack_high_water_us, record.last_us)`, then the record
+  is removed (`VecDeque::retain(|r| r.last_seq > through)`, order of the survivors preserved); the evicted
+  counters are reset exactly as in round 2 when `through >= evicted.max_seq` (`max_seq` kept). A record that grew
+  after the snapshot (`last_seq > through`) stays as a whole (unchanged semantics).
+- **Eviction**: the oldest record is popped when the length exceeds `MAX_ALERT_HISTORY`; its count is always
+  added to `evicted` (saturating) with `max_seq`/`first_us` updated (the "skip if acknowledged" branch is deleted:
+  no stored record is acknowledged).
+- **View**: unchanged formulas minus the `!r.acknowledged` filters (every record counts): totals = sum of record
+  counts per kind + evicted totals (saturating); `last_unix_ms`/`last_source` from the record with the greatest
+  `last_us`; `through = highest_seq`; `history` = records newest first. After a full acknowledgement the view is
+  `history: []`, both totals 0, `last_* = null`, `through` unchanged.
+- **M, P**: unchanged text and values (§4.3). Memory: at most `MAX_ALERT_HISTORY` records as before; in practice
+  fewer, since acknowledged records no longer occupy slots.
+
+### R3.4 Runtime, routes, SSE and push (`alerts.rs` runtime, `server.rs`, `push.rs`)
+
+- `AlertsRuntime::acknowledge` is unchanged in structure: book update under the `inner` mutex, then `flush(true)`
+  (marker written at once), then `bump()`, then the response view. The `200` body of `POST /api/alerts/ack` is
+  therefore the view **without** the removed records; `GET /api/alerts` and the next `event: alerts` (version
+  bump, throttle of one per second per stream unchanged) show the same. No new route, header, status code or
+  response key.
+- `AlertsRuntime::record` hands an attempt to the live sink only when `book.record` returned
+  `Ok(Recorded::Kept)` **and** `is_live(...)` holds. (A discarded attempt has `at_us < started_us` while
+  `is_live` requires `at_us >= started_us`, so the two are already disjoint; the explicit `Kept` check makes this
+  independent of that arithmetic.) `changed`/`bump()` is set only for `Kept`.
+- **Push is unaffected**: the push scheduler accumulates live attempts through the sink at record time and never
+  reads the book; acknowledging neither cancels, reduces nor sends a notification, a pending 3 s summary or a
+  carried undelivered count (the owner acknowledges on the page; the phone notification is a separate, already
+  delivered or pending message). No push count changes because of R′ either (discarded attempts are replayed, and
+  replayed attempts were never pushed).
+- **Restart / marker semantics** (stated for the docs and the walkthrough): after a restart, every replayed
+  attempt with journal time `<=` the persisted marker is discarded (never shown); every other attempt is shown.
+  The persisted marker is `min(ack high water, earliest known unacknowledged − 1)` (rule M), so in the normal case
+  (acknowledge with nothing older still pending) it equals the newest acknowledged attempt and the page after a
+  restart shows only newer attempts. **Fail-safe residual** (unchanged from round 2, now stated explicitly): when,
+  at the last marker write, an attempt older than an acknowledged one was still unacknowledged (or a lock-screen
+  check still pending), the marker stays below that older attempt, and acknowledged attempts above the marker are
+  shown again after a restart — never fewer alerts than the truth, and the banner is non-empty in that case
+  anyway. Two further residuals err the same way (plan-evaluator F-2): when `remote-alerts.json` cannot be written
+  (`password alert acknowledgement not persisted`), the entries are removed from the page at once but reappear
+  after a restart; when more than `MAX_ALERT_HISTORY` records arrive between the displayed view and the
+  acknowledgement, the evicted attempts stay counted in the totals (counts only) until the next acknowledgement. A scalar marker is kept on purpose (≤ 256 bytes, bounded); persisting per-attempt identities is
+  rejected (unbounded, and a journal cursor list would add raw journal data to the file).
+- Logging: none added; `alerts.rs` keeps no `tracing` macro; no audit event changes.
+
+### R3.5 Page (`crates/remote/assets/`)
+
+- `app.js` `renderAlerts`: the `if (record.acknowledged === true) { item.className = "acknowledged"; }` branch is
+  deleted; the page no longer reads any `acknowledged` field. After a `200` acknowledgement the page renders the
+  returned view (history now only newer attempts, usually empty) and shows the feedback "Acknowledged"; the
+  Acknowledge button stays hidden while both totals are 0 (unchanged rule). An empty history renders an empty
+  list (no placeholder text is needed: the summary line already reads "No failed password attempts" in `active`).
+- `style.css`: the `.alerts-history li.acknowledged` rule is deleted.
+- `index.html`: unchanged. The CSP and every pinned asset header are unchanged.
+
+### R3.6 Documentation
+
+- `Docs/REMOTE_COMPANION.md` §2c: *Acknowledge* removes the acknowledged entries from the page and the API at
+  once and after a restart (replayed attempts at or before the stored marker are not shown again; the fail-safe
+  residual of R3.4 in one sentence); the system journal is never modified: "journal entries are never deleted"
+  (root-only, whole-file vacuum would destroy unrelated logs and intrusion evidence; use `journalctl` as root if
+  the owner wants to look at the raw history).
+- §4.3/§4.4/§9 of this spec are superseded by R3.2–R3.5 where they mention `acknowledged` records or dimmed rows.
+- ADR amendment (AI/DECISIONS.md, alerts ADR, dated item 2026-10-06) — added in this phase.
+- Traceability phase: matrix row **RMC75** (new, below), RMC54 evidence updated, RMC59 updated with the owner's
+  hardware results of 2026-10-06: a wrong `sudo` password produced a notification on the iPhone; *Acknowledge*
+  resets the banner and it stays reset after a service restart; GDM login not tested (owner: not important); the
+  test notification and the lock-screen notification already recorded in RMC59/RMC74; the page lists the phone
+  under devices (host check: `GET /api/push` shows one `apple` device). RMC74 gains the `sudo` notification
+  result. Walkthrough: next free number in `AI/walkthroughs/`.
+
+New matrix row:
+
+| ID | Criterion | Evidence |
+|---|---|---|
+| RMC75 | A successful acknowledgement removes the acknowledged records from memory, from the `200` view, from `GET /api/alerts` and from the next `event: alerts`; replayed attempts at or before the persisted marker are discarded at start-up and never shown; records carry no `acknowledged` key; push notifications and counts are unaffected; journal entries are never deleted | tests 58–62 below + migrated tests 18, 19, 21, 31, 54 and the `alerts-ack` CSRF test |
+
+### R3.7 Tests (Phase 2, numbering continues the alerts series after 57)
+
+New tests:
+
+| # | File::name | Asserts |
+|---|---|---|
+| 58 | `crates/remote/tests/alerts_tests.rs::test_rmc_alerts_book_acknowledge_removes_records` | `acknowledge(epoch, through)` removes exactly the records with `last_seq <= through` from `view().history` (survivor ids and order checked), a record grown past `through` stays whole; after acknowledging everything: `history == []`, both totals 0, `last_unix_ms`/`last_source` `None`, `through` unchanged; a later attempt within 60 s of a removed record starts a new record with `id = its seq` and count 1; `through == 0` no-op, `StaleView` and `BeyondNewest` change nothing; `marker()` values identical to the round-2 rule-M expectations of test 18; bounded: 1 000 attempts then acknowledge-all leaves `history` empty, then 40 more attempts leave exactly `MAX_ALERT_HISTORY` records; evicted totals still reset only when `through >= evicted max seq` |
+| 59 | `alerts_tests.rs::test_rmc_alerts_book_replay_covered_attempts_are_discarded` | `AlertBook::new(marker, epoch, started)`: an attempt with `at_us <= marker && at_us < started` returns `Ok(Recorded::Discarded)`, is absent from `history` and from the totals, but advances `through`; `at_us == started` (or later) with `marker == u64::MAX` returns `Ok(Recorded::Kept)`; `at_us == marker + 1` before the start is `Kept`; an `Overflow` at `next_seq == u64::MAX` is returned even for a covered attempt; a discarded attempt between two coalescible kept attempts does not break the coalescing; `marker(None)` stays the loaded marker after discards |
+| 60 | `crates/remote/tests/alerts_server_tests.rs::test_rmc_alerts_ack_clears_history_end_to_end` | harness + `ScriptedJournal`, SSE open: two attempts (sudo, polkit), ack with the displayed epoch/through → `200` view with `history == []`, totals 0; `GET /api/alerts` identical; the next `event: alerts` data has `history == []`; a new attempt after the ack shows a history of exactly that one record; no record of any view has an `acknowledged` key; restart with the same journal lines plus one newer line → history shows only the newer attempt (the two acknowledged ones never reappear), file marker unchanged |
+| 61 | `crates/remote/tests/push_server_tests.rs::test_rwp_acknowledge_never_changes_push` | push enabled, one subscription, `FakeTransport`: a live attempt, then an acknowledgement before the 3 s summary is due → exactly one notification with `wrong = 1` is still delivered; a second live attempt after the ack → its own notification counts 1 (no carry from the acknowledged one, no loss); acknowledging with nothing pending sends nothing; replayed attempts (covered or not) are never pushed |
+| 62 | `tests/invariants/src/remote_alerts_contract.rs::test_rmc_s43_acknowledged_entries_are_not_kept` | `crates/remote/src/alerts.rs` does not contain `pub acknowledged:`; `assets/app.js` contains neither `.acknowledged` nor `"acknowledged"`; `assets/style.css` contains no `.acknowledged`; `Docs/REMOTE_COMPANION.md` §2c contains `journal entries are never deleted`; `AI/DECISIONS.md` contains `clear acknowledged entries` |
+
+Contract migrations (each recorded in `AI/tester_contract_alerts.md`, section "Contract migration — owner request
+2026-10-06 (clear acknowledged entries)", citing the owner's words; no assertion unrelated to the `acknowledged`
+flag changes, and every marker/count/through assertion keeps its value):
+
+| Existing test | Old assertion | New assertion |
+|---|---|---|
+| `alerts_tests::test_rmc_alerts_book_acknowledge_through` (18) | after `through = snapshot` all rows `!acknowledged`; after `through = 2` `history[1].acknowledged`, `!history[0].acknowledged`; after `through = 3` all rows acknowledged; after the live attempt `history.len() == 3`, `!history[0].acknowledged`; final "2 acknowledged rows stay in the history" | after `through = snapshot`: `history.len() == 2` (both still present); after `through = 2`: `history.len() == 1`, `history[0].id == 3`; after `through = 3`: `history.is_empty()`; after the live attempt: `history.len() == 1`, `history[0].id == 4`; final: the history holds only the unacknowledged records (ids 5 then 4, newest first by insertion), no acknowledged row exists. All counts, `last_*` and `marker()` assertions unchanged |
+| `alerts_tests::test_rmc_alerts_book_rebuild_respects_marker` (19) | `(source, acknowledged)` list `[(Sudo,true),(Login,true),(Other,false),(LockScreen,false),(Sudo,false)]` | oldest-first source list `[Other, LockScreen, Sudo]` (the two covered replays are absent); `through == 5`; totals and every `marker()` assertion unchanged; marker-0 case: `history.len() == 1` |
+| `alerts_tests::test_rmc_alerts_view_json_shape` (21) | record key set includes `acknowledged`; `history[0]` literal has `"acknowledged": false`; `AlertRecord { …, acknowledged: false, … }` literal | record key set without `acknowledged` (7 keys); literal without it; struct literal without the field |
+| `alerts_server_tests` helpers `counts`/`key`, `RECORD_KEYS` | `counts` keyed by `(source, kind, acknowledged)` reading `r["acknowledged"]`; `RECORD_KEYS` has 8 entries | `counts` keyed by `(source, kind)` and asserts that no record has an `acknowledged` key; `key(source, kind)`; `RECORD_KEYS` has the 7 keys; every `key(…, false)` call site becomes `key(…)` with the same expected count |
+| `alerts_server_tests::test_rmc_alerts_ack_csrf_headers_and_rate` | `counts[(sudo, wrong_password, true)] == 1` after `through = 1` | the sudo record is absent from `history` and `counts[(other, wrong_password)] == 1`; `wrong_count == 1` unchanged |
+| `alerts_server_tests::test_rmc_alerts_ack_persists_and_survives_restart` (31) | runs 2 and 3 expect `{(sudo,wp,true):1, (other,wp,true):1, (login,wp,false):1}` | runs 2 and 3 expect `{(login, wrong_password): 1}` only; `wrong_count == 1`, file marker `t2` and epochs unchanged |
+| `alerts_server_tests::test_rmc_alerts_pending_check_older_than_ack_stays_unacknowledged` (54) | `newest["acknowledged"] == false`; after restart `(lock_screen,wp,true) == 1` and `(lock_screen,wp,false) == 1`; filter on `acknowledged == false` | `newest` has no `acknowledged` key; after restart exactly one `lock_screen` record, `first_unix_ms == t / 1000` (the acknowledged first failure at `t − 20 s` is below the marker and absent); `through_of(v) == 3` unchanged (discarded replays consume a seq) |
+
+Not migrated (verified unaffected): tests 16, 17, 20, 52 (no `acknowledged` read; values unchanged under R′/A′),
+the audit test ("acknowledged in memory" reads only the total), the SSE, raw-field and push suites.
+
+Setup-only changes: none (`AlertRecord` literals exist only in test 21).
+
+### R3.8 Auditor focus
+
+No panic path added (`retain` and the enum are total); memory strictly bounded (≤ `MAX_ALERT_HISTORY` records,
+fewer than before); no new I/O, file, field or log line; the ack file format and write path unchanged; push lock
+order unchanged (the sink is still called after the `inner` mutex is released); O-2 unchanged.

@@ -1,7 +1,8 @@
 //! End-to-end contract tests of Web Push in `soos-remote::server::serve` (ADR 2026-10-06
 //! "Web Push Notifications for Failed-Password Alerts Through a Separate Sender Unit",
 //! architect spec `AI/architect_spec_remote_web_push.md` §5–§7, tests 23 and 25–36, 54;
-//! matrix RMC60, RMC61, RMC65–RMC71).
+//! matrix RMC60, RMC61, RMC65–RMC71), plus test 61 of the alerts round 3 (owner request
+//! 2026-10-06 "clear acknowledged entries", matrix RMC75).
 //!
 //! Same deterministic harness as `alerts_server_tests.rs` (frozen paused clock, scripted
 //! logind, raw HTTP/1.1 over the Unix socket in a `TempDir`, passkey store fixture for
@@ -2134,4 +2135,107 @@ async fn test_rwp_undelivered_counts_carry_forward() {
         assert_eq!(wrong_of(&b[0], &uas[1]), 2);
         assert_eq!(wrong_of(&b[1], &uas[1]), 1, "the other phone has no carry");
     }
+}
+
+// ---------------------------------------------------------------------------------------
+// Test 61 — round 3: acknowledging never changes push (owner request 2026-10-06)
+// ---------------------------------------------------------------------------------------
+
+/// `POST /api/alerts/ack` for the displayed `epoch` and `through`.
+async fn alerts_ack(h: &Harness, epoch: &str, through: u64) -> HttpResponse {
+    let through = through.to_string();
+    h.send(
+        &Via::Tailnet,
+        "POST",
+        "/api/alerts/ack",
+        &[
+            ("X-Soos-Action", "alerts-ack"),
+            ("X-Soos-Alerts-Epoch", epoch),
+            ("X-Soos-Alerts-Through", &through),
+        ],
+        None,
+    )
+    .await
+}
+
+/// Test 61 (RMC75, spec R3.4, alerts round 3, owner request 2026-10-06 "clear acknowledged
+/// entries"): removing acknowledged entries never cancels, reduces or sends a notification:
+/// an acknowledgement before the coalesced summary is due still delivers it with its
+/// count; a later live attempt gets its own notification (no carry, no loss); an
+/// acknowledgement with nothing pending sends nothing; replayed attempts (covered by the
+/// marker or not) are never pushed after a restart.
+#[tokio::test(start_paused = true)]
+async fn test_rwp_acknowledge_never_changes_push() {
+    let ep = apple_endpoint(1);
+    let (env, j, t, h, uas) = setup(std::slice::from_ref(&ep)).await;
+
+    // A live attempt, acknowledged at once (before the 3 s summary is due).
+    let a1 = (now_us(&h) / 1000) * 1000;
+    j.push(&sudo_failure(a1));
+    pump().await;
+    let v = alerts_view(&h).await;
+    assert_eq!(v["through"], 1, "{v}");
+    let epoch = v["epoch"].as_str().unwrap().to_string();
+    let r = alerts_ack(&h, &epoch, 1).await;
+    assert_eq!(r.status, 200, "{}", r.result_or_body());
+    assert_eq!(r.json()["history"], json!([]), "the entry is removed");
+    assert_eq!(t.count(), 0, "the acknowledgement sends nothing by itself");
+    wait_calls(&h, &t, 1, PUSH_COALESCE_MS + 2000, 100).await;
+    idle(&h, 10_000, 500).await;
+    assert_eq!(t.count(), 1, "exactly one notification");
+    assert_eq!(
+        wrong_of(&t.calls()[0], &uas[0]),
+        1,
+        "its count is unchanged"
+    );
+
+    // A second live attempt after the acknowledgement: its own notification, count 1.
+    idle(&h, PUSH_MIN_INTERVAL_MS, 1000).await;
+    let b1 = (now_us(&h) / 1000) * 1000;
+    j.push(&sudo_failure(b1));
+    pump().await;
+    wait_calls(
+        &h,
+        &t,
+        2,
+        PUSH_MIN_INTERVAL_MS + PUSH_COALESCE_MS + 2000,
+        250,
+    )
+    .await;
+    idle(&h, 10_000, 500).await;
+    assert_eq!(t.count(), 2);
+    assert_eq!(
+        wrong_of(&t.calls()[1], &uas[0]),
+        1,
+        "no carry from the acknowledged attempt, no loss"
+    );
+
+    // Acknowledging with nothing pending sends nothing.
+    let v = alerts_view(&h).await;
+    assert_eq!(v["through"], 2, "{v}");
+    let r = alerts_ack(&h, &epoch, 2).await;
+    assert_eq!(r.status, 200, "{}", r.result_or_body());
+    assert_eq!(r.json()["history"], json!([]));
+    idle(&h, 2 * PUSH_MIN_INTERVAL_MS, 1000).await;
+    assert_eq!(t.count(), 2, "nothing sent by an acknowledgement");
+    h.shutdown().await.unwrap();
+    tokio::time::advance(ms(10_000)).await;
+
+    // Restart: covered replays are discarded, an uncovered replay is shown; none is pushed.
+    let j = ScriptedJournal::new();
+    let t = FakeTransport::new();
+    let h = start_push(&env, &j, &t, PushOptions::enabled()).await;
+    until_active(&h, &j).await;
+    assert_eq!(push_view(&h).await["subscriptions"], 1);
+    j.push(&sudo_failure(a1));
+    j.push(&sudo_failure(b1));
+    let c1 = b1 + 5 * SECOND_US;
+    j.push(&sudo_failure(c1));
+    idle(&h, 60_000, 500).await;
+    assert_eq!(t.count(), 0, "replayed attempts are never pushed");
+    let v = alerts_view(&h).await;
+    let history = v["history"].as_array().unwrap();
+    assert_eq!(history.len(), 1, "only the uncovered replay is shown: {v}");
+    assert_eq!(history[0]["first_unix_ms"], c1 / 1000);
+    assert_eq!(v["unacknowledged_wrong_password"], 1);
 }

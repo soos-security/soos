@@ -200,11 +200,6 @@ code {
   border-bottom: 1px solid var(--bg);
 }
 
-.alerts-history li.acknowledged {
-  color: var(--muted);
-  opacity: 0.6;
-}
-
 /* Push notifications (ADR 2026-10-06 "Web Push Notifications for Failed-Password Alerts
  * Through a Separate Sender Unit"). */
 .push {

@@ -1,7 +1,10 @@
 //! End-to-end contract tests of the failed-password alerts in `soos-remote::server::serve`
 //! (ADR 2026-10-06 "Failed-Password Alerts in `soos-remote` From the System Journal",
 //! architect spec `AI/architect_spec_remote_auth_alerts.md` §5, §6, §7, §9, tests 23–36 and
-//! 53–55; matrix RMC45, RMC48–RMC55).
+//! 53–55; matrix RMC45, RMC48–RMC55), plus round 3 (owner request 2026-10-06 "clear
+//! acknowledged entries", spec R3.3/R3.4, test 60, matrix RMC75; the helpers `counts`/`key`,
+//! `RECORD_KEYS` and tests 30, 31, 54 carry recorded contract migrations,
+//! `AI/tester_contract_alerts.md`).
 //!
 //! Same deterministic harness as `server_tests.rs` / `auth_server_tests.rs` (frozen paused
 //! clock, scripted logind, raw HTTP/1.1 over the Unix socket in a `TempDir`, passkey store
@@ -365,22 +368,24 @@ fn locked_count(v: &Value) -> u64 {
     v["unacknowledged_locked_out"].as_u64().unwrap()
 }
 
-/// Sum of `count` per (`source`, `kind`, `acknowledged`) over the history.
-fn counts(v: &Value) -> BTreeMap<(String, String, bool), u64> {
+/// Sum of `count` per (`source`, `kind`) over the history. Contract migration (owner
+/// request 2026-10-06, "clear acknowledged entries"): records carry no `acknowledged` key
+/// any more (acknowledged records are removed), which this helper asserts.
+fn counts(v: &Value) -> BTreeMap<(String, String), u64> {
     let mut out = BTreeMap::new();
     for r in v["history"].as_array().unwrap() {
+        assert!(r.get("acknowledged").is_none(), "no acknowledged key: {r}");
         let key = (
             r["source"].as_str().unwrap().to_string(),
             r["kind"].as_str().unwrap().to_string(),
-            r["acknowledged"].as_bool().unwrap(),
         );
         *out.entry(key).or_insert(0) += r["count"].as_u64().unwrap();
     }
     out
 }
 
-fn key(source: &str, kind: &str, acknowledged: bool) -> (String, String, bool) {
-    (source.to_string(), kind.to_string(), acknowledged)
+fn key(source: &str, kind: &str) -> (String, String) {
+    (source.to_string(), kind.to_string())
 }
 
 const VIEW_KEYS: [&str; 10] = [
@@ -395,7 +400,7 @@ const VIEW_KEYS: [&str; 10] = [
     "through",
     "history",
 ];
-const RECORD_KEYS: [&str; 8] = [
+const RECORD_KEYS: [&str; 7] = [
     "id",
     "first_unix_ms",
     "last_unix_ms",
@@ -403,7 +408,6 @@ const RECORD_KEYS: [&str; 8] = [
     "account",
     "kind",
     "count",
-    "acknowledged",
 ];
 
 /// Exact key sets of the view and of every record (§4.4); `reason` iff `unavailable`.
@@ -898,11 +902,11 @@ async fn test_rmc_alerts_end_to_end_lock_screen_burst() {
     let (h, v) = replay_day(&env, AlertOptions::with_locker(&env), &locker).await;
     assert_eq!(v["lock_screen"], "monitored");
     let expected: BTreeMap<_, _> = [
-        (key("lock_screen", "wrong_password", false), 6),
-        (key("lock_screen", "locked_out", false), 4),
-        (key("login", "locked_out", false), 3),
-        (key("sudo", "wrong_password", false), 3),
-        (key("other", "wrong_password", false), 2),
+        (key("lock_screen", "wrong_password"), 6),
+        (key("lock_screen", "locked_out"), 4),
+        (key("login", "locked_out"), 3),
+        (key("sudo", "wrong_password"), 3),
+        (key("other", "wrong_password"), 2),
     ]
     .into_iter()
     .collect();
@@ -924,9 +928,9 @@ async fn test_rmc_alerts_end_to_end_lock_screen_burst() {
     let locker = env.locker();
     let (h, v) = replay_day(&env, AlertOptions::enabled(), &locker).await;
     let expected: BTreeMap<_, _> = [
-        (key("login", "locked_out", false), 3),
-        (key("sudo", "wrong_password", false), 3),
-        (key("other", "wrong_password", false), 2),
+        (key("login", "locked_out"), 3),
+        (key("sudo", "wrong_password"), 3),
+        (key("other", "wrong_password"), 2),
     ]
     .into_iter()
     .collect();
@@ -950,9 +954,7 @@ async fn test_rmc_alerts_end_to_end_lock_screen_burst() {
     .await;
     assert_eq!(v["lock_screen"], "not_configured");
     assert!(
-        counts(&v)
-            .keys()
-            .all(|(source, _, _)| source != "lock_screen"),
+        counts(&v).keys().all(|(source, _)| source != "lock_screen"),
         "{v}"
     );
     assert_eq!(wrong_count(&v), 5);
@@ -1467,8 +1469,13 @@ async fn test_rmc_alerts_ack_csrf_headers_and_rate() {
     let v = r.json();
     assert_view_shape(&v);
     assert_eq!(wrong_count(&v), 1, "only the record of seq 1");
-    assert_eq!(counts(&v)[&key("sudo", "wrong_password", true)], 1);
-    assert_eq!(counts(&v)[&key("other", "wrong_password", false)], 1);
+    // Contract migration (owner request 2026-10-06): the acknowledged sudo record is
+    // removed from the history.
+    assert!(
+        !counts(&v).contains_key(&key("sudo", "wrong_password")),
+        "{v}"
+    );
+    assert_eq!(counts(&v)[&key("other", "wrong_password")], 1);
     // Rate limit.
     assert_result(
         &post(vec![action(), e(), th("2")], path).await,
@@ -1525,8 +1532,8 @@ fn ack_marker(env: &Env) -> u64 {
 
 /// Test 31 (RMC54, A-9, G-1): an acknowledgement is persisted `0600` and survives two
 /// restarts (the second without a new acknowledgement): replayed attempts at or before the
-/// marker are acknowledged, newer ones are not, the file keeps its value; every start has
-/// its own epoch.
+/// marker are discarded and never shown again (round 3, owner request 2026-10-06), newer
+/// ones are shown, the file keeps its value; every start has its own epoch.
 #[tokio::test(start_paused = true)]
 async fn test_rmc_alerts_ack_persists_and_survives_restart() {
     let env = Env::new();
@@ -1576,13 +1583,9 @@ async fn test_rmc_alerts_ack_persists_and_survives_restart() {
     .await;
     let e2 = epoch_of(&v);
     assert_ne!(e1, e2, "a new epoch per start");
-    let expected: BTreeMap<_, _> = [
-        (key("sudo", "wrong_password", true), 1),
-        (key("other", "wrong_password", true), 1),
-        (key("login", "wrong_password", false), 1),
-    ]
-    .into_iter()
-    .collect();
+    // Contract migration (owner request 2026-10-06): the two acknowledged replays are
+    // discarded and never shown again.
+    let expected: BTreeMap<_, _> = [(key("login", "wrong_password"), 1)].into_iter().collect();
     assert_eq!(counts(&v), expected, "{v}");
     assert_eq!(wrong_count(&v), 1);
     h.advance_ms(3000).await;
@@ -1691,15 +1694,15 @@ async fn test_rmc_alerts_pending_check_older_than_ack_stays_unacknowledged() {
     assert_eq!(wrong_count(&v), 1);
     let newest = &v["history"][0];
     assert_eq!(newest["source"], "lock_screen");
-    assert_eq!(newest["acknowledged"], false);
+    // Contract migration (owner request 2026-10-06): records carry no acknowledged key.
+    assert!(newest.get("acknowledged").is_none(), "{newest}");
     assert_eq!(newest["first_unix_ms"], t / 1000);
     h.advance_ms(2000).await;
     assert!(ack_marker(&env) < t);
     h.shutdown().await.unwrap();
     tokio::time::advance(ms(10_000)).await;
 
-    // Restart: the check is shown unacknowledged again; the first failure stays
-    // acknowledged.
+    // Restart: the check is shown unacknowledged again; the first failure is not shown.
     let j = ScriptedJournal::new();
     let h = start_alerts(&env, &j, AlertOptions::with_locker(&env).socket("r2.sock")).await;
     wait_follows(&h, &j, 1, 1000).await;
@@ -1710,20 +1713,149 @@ async fn test_rmc_alerts_pending_check_older_than_ack_stays_unacknowledged() {
         v["state"] == "active" && through_of(v) == 3
     })
     .await;
-    let c = counts(&v);
-    assert_eq!(c.get(&key("lock_screen", "wrong_password", true)), Some(&1));
-    assert_eq!(
-        c.get(&key("lock_screen", "wrong_password", false)),
-        Some(&1)
-    );
-    let unacked_lock_screen: Vec<&Value> = v["history"]
+    // Contract migration (owner request 2026-10-06): the acknowledged first failure at
+    // t − 20 s is at or below the marker and absent; the check at t is shown again; the
+    // acknowledged sudo attempt at t + 1 s lies above the marker (< t) and is shown again
+    // (rule-M fail-safe residual, spec R3.4, plan-evaluator F-3).
+    let expected: BTreeMap<_, _> = [
+        (key("lock_screen", "wrong_password"), 1),
+        (key("sudo", "wrong_password"), 1),
+    ]
+    .into_iter()
+    .collect();
+    assert_eq!(counts(&v), expected, "{v}");
+    let lock_screen: Vec<&Value> = v["history"]
         .as_array()
         .unwrap()
         .iter()
-        .filter(|r| r["source"] == "lock_screen" && r["acknowledged"] == false)
+        .filter(|r| r["source"] == "lock_screen")
         .collect();
-    assert_eq!(unacked_lock_screen.len(), 1);
-    assert_eq!(unacked_lock_screen[0]["first_unix_ms"], t / 1000);
+    assert_eq!(lock_screen.len(), 1);
+    assert_eq!(lock_screen[0]["first_unix_ms"], t / 1000);
+    assert_eq!(through_of(&v), 3, "the discarded replay consumes a seq");
+}
+
+/// Test 60 (RMC75, spec R3.3 A′ / R3.4, owner request 2026-10-06 "once the acknowledge
+/// button is clicked, delete the entries"): a successful acknowledgement removes the
+/// acknowledged records from the `200` view, from `GET /api/alerts` and from the next
+/// `event: alerts`; a later attempt is shown alone; after a restart the acknowledged
+/// attempts never reappear and the file marker is unchanged.
+#[tokio::test(start_paused = true)]
+async fn test_rmc_alerts_ack_clears_history_end_to_end() {
+    let env = Env::new();
+    let j = ScriptedJournal::new();
+    let h = start_alerts(&env, &j, AlertOptions::enabled().socket("r1.sock")).await;
+    until_active(&h, &j).await;
+    let mut stream = h.open_stream_via(&Via::Tailnet).await.expect("stream");
+    assert_sse_head(&stream.head);
+    let (name, _) = frame_now(&mut stream).await;
+    assert_eq!(name, "status");
+    let (name, _) = frame_now(&mut stream).await;
+    assert_eq!(name, "alerts");
+
+    let t = now_us(&h);
+    let acknowledged_lines = [sudo_failure(t), polkit_failure(t + SECOND_US)];
+    for line in &acknowledged_lines {
+        j.push(line);
+    }
+    let v = view_settled(&h).await;
+    assert_eq!(through_of(&v), 2, "{v}");
+    assert_eq!(wrong_count(&v), 2);
+    assert_eq!(v["history"].as_array().unwrap().len(), 2);
+    // Let the throttled `alerts` event of the two attempts go out.
+    let (frames, eof) = frames_during(&mut stream, &h, ALERT_EVENT_MIN_INTERVAL_MS + 500, 50).await;
+    assert!(!eof);
+    let last = frames
+        .iter()
+        .rfind(|(_, n, _, _)| n == "alerts")
+        .expect("an alerts event for the two attempts");
+    assert_eq!(wrong_count(&last.2), 2);
+
+    // Acknowledge what is displayed: the `200` view has no record left.
+    let r = ack(&h, &epoch_of(&v), "2").await;
+    assert_eq!(r.status, 200, "{}", r.result_or_body());
+    r.assert_mandatory_headers();
+    r.assert_json_body();
+    let acked = r.json();
+    assert_view_shape(&acked);
+    assert_eq!(acked["history"], json!([]), "{acked}");
+    assert_eq!(wrong_count(&acked), 0);
+    assert_eq!(locked_count(&acked), 0);
+    assert_eq!(acked["last_unix_ms"], Value::Null);
+    assert_eq!(acked["last_source"], Value::Null);
+    assert_eq!(through_of(&acked), 2, "through unchanged");
+    assert_eq!(ack_marker(&env), t + SECOND_US, "written at once");
+    // `GET /api/alerts` shows the same.
+    assert_eq!(view_settled(&h).await, acked);
+    // The next `alerts` event shows the same.
+    let (frames, eof) = frames_during(&mut stream, &h, ALERT_EVENT_MIN_INTERVAL_MS + 500, 50).await;
+    assert!(!eof);
+    let events: Vec<&Value> = frames
+        .iter()
+        .filter(|(_, n, _, _)| n == "alerts")
+        .map(|(_, _, d, _)| d)
+        .collect();
+    assert!(
+        !events.is_empty(),
+        "the acknowledgement sends an alerts event"
+    );
+    for data in &events {
+        assert_eq!(data["history"], json!([]), "{data}");
+        assert_eq!(wrong_count(data), 0);
+    }
+
+    // A new attempt after the acknowledgement is shown alone.
+    let t3 = now_us(&h);
+    let newer = sudo_failure(t3);
+    j.push(&newer);
+    let v = view_settled(&h).await;
+    assert_eq!(through_of(&v), 3);
+    let history = v["history"].as_array().unwrap();
+    assert_eq!(history.len(), 1, "{v}");
+    assert_eq!(history[0]["id"], 3);
+    assert_eq!(history[0]["source"], "sudo");
+    assert_eq!(history[0]["count"], 1);
+    assert_eq!(history[0]["first_unix_ms"], t3 / 1000);
+    assert_eq!(wrong_count(&v), 1);
+    let (frames, eof) = frames_during(&mut stream, &h, ALERT_EVENT_MIN_INTERVAL_MS + 500, 50).await;
+    assert!(!eof);
+    let last = frames
+        .iter()
+        .rfind(|(_, n, _, _)| n == "alerts")
+        .expect("an alerts event for the new attempt");
+    assert_eq!(last.2["history"].as_array().unwrap().len(), 1);
+    h.advance_ms(3000).await;
+    assert_eq!(ack_marker(&env), t + SECOND_US);
+    drop(stream);
+    h.shutdown().await.unwrap();
+    tokio::time::advance(ms(10_000)).await;
+
+    // Restart: the same journal lines are replayed; the acknowledged ones never reappear.
+    let j = ScriptedJournal::new();
+    let h = start_alerts(&env, &j, AlertOptions::enabled().socket("r2.sock")).await;
+    wait_follows(&h, &j, 1, 1000).await;
+    for line in &acknowledged_lines {
+        j.push(line);
+    }
+    j.push(&newer);
+    let (v, _) = view_within(&h, 3 * JOURNAL_IDLE_TICK_MS, 250, |v| {
+        v["state"] == "active"
+    })
+    .await;
+    let expected: BTreeMap<_, _> = [(key("sudo", "wrong_password"), 1)].into_iter().collect();
+    assert_eq!(counts(&v), expected, "{v}");
+    let history = v["history"].as_array().unwrap();
+    assert_eq!(history.len(), 1, "{v}");
+    assert_eq!(history[0]["first_unix_ms"], t3 / 1000);
+    assert_eq!(history[0]["id"], 3, "discarded replays consume a seq");
+    assert_eq!(through_of(&v), 3);
+    assert_eq!(wrong_count(&v), 1);
+    h.advance_ms(3000).await;
+    assert_eq!(
+        ack_marker(&env),
+        t + SECOND_US,
+        "the file marker is unchanged"
+    );
 }
 
 /// Test 55 (RMC52, A-13): a failing CSPRNG leaves alerts `unavailable` / `rng_failed` with

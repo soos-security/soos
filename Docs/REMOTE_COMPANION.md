@@ -290,6 +290,28 @@ acknowledgement per second (`429`). The event stream adds `event: alerts` (at mo
 second). Only the acknowledgement marker is stored, in `remote-alerts.json` (`0600`, next to the
 passkey store); the history itself is rebuilt from the journal at each start.
 
+**Acknowledge removes the entries.** A successful acknowledgement removes the acknowledged
+entries from memory, from the page and from the API at once (the `200` body, `GET /api/alerts`
+and the next `event: alerts` no longer contain them; records carry no acknowledgement flag).
+After a service restart, an attempt replayed from the journal whose time is at or before the
+stored marker is discarded and never shown again; only newer attempts appear. An entry that
+grew after the page displayed it (a new attempt merged into it) is kept as a whole with its new
+count, and a list that was just cleared may flash back for under a second when an event
+serialised just before the acknowledgement arrives (the next event corrects it). The residuals
+all err towards showing **more** alerts, never fewer: when an older attempt was still
+unacknowledged (or a lock-screen check still pending) at the last marker write, the marker stays
+below it and acknowledged attempts above the marker are shown again after a restart; when
+`remote-alerts.json` cannot be written, the entries disappear at once but reappear after a
+restart; when more than 32 entries arrived between the displayed view and the acknowledgement,
+the evicted attempts stay counted in the totals (counts only) until the next acknowledgement.
+Push notifications are not affected: an acknowledgement neither cancels nor resends one.
+
+**The system journal is never modified: journal entries are never deleted.** `journald` cannot
+delete a single entry, and the only removal tools (`journalctl --vacuum-*`, `--rotate`, deleting
+journal files) are root-only, act on whole files and would destroy unrelated logs together with
+the evidence of the very intrusion attempts the page reports. *Acknowledge* only stops the page
+from showing what you have seen; the raw history stays available to root through `journalctl`.
+
 **Limits.** Any process running as you can write log lines that look like lock-screen failures,
 so it can create **false alerts** (and, while it keeps doing so, hide the 2nd and later
 lock-screen attempts that only `unix_chkpwd` logs); root-side attempts (`sudo`, login, polkit)

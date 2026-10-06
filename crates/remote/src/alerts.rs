@@ -306,7 +306,8 @@ impl AlertsEpoch {
     }
 }
 
-/// One history record (several coalesced attempts).
+/// One history record (several coalesced unacknowledged attempts; acknowledged records
+/// are removed, never kept).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct AlertRecord {
     /// Seq of the first attempt of the record.
@@ -323,8 +324,6 @@ pub struct AlertRecord {
     pub kind: AttemptKind,
     /// Attempts in the record (saturating).
     pub count: u32,
-    /// Acknowledged by the owner.
-    pub acknowledged: bool,
     /// Seq of the newest attempt of the record.
     #[serde(skip)]
     pub last_seq: u64,
@@ -359,7 +358,16 @@ struct Evicted {
     first_us: Option<u64>,
 }
 
-/// Bounded alert history of one service start.
+/// What [`AlertBook::record`] did with an attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Recorded {
+    /// Stored (new record or coalesced into the newest one).
+    Kept,
+    /// Replayed from before the start and covered by the loaded marker (rule R): not stored.
+    Discarded,
+}
+
+/// Bounded alert history of one service start (unacknowledged records only).
 pub struct AlertBook {
     epoch: AlertsEpoch,
     started_us: u64,
@@ -400,24 +408,25 @@ impl AlertBook {
         self.epoch
     }
 
-    /// Records one attempt (rule R: acknowledged on arrival only when replayed from before
-    /// the start and covered by the loaded marker; coalescing into the newest record).
+    /// Records one attempt (rule R: an attempt replayed from before the start and covered
+    /// by the loaded marker is discarded, but still consumes a seq; otherwise it coalesces
+    /// into the newest record or starts a new one).
     ///
     /// # Errors
     ///
     /// [`BookError::Overflow`] when the seq counter cannot advance (nothing recorded).
-    pub fn record(&mut self, attempt: Attempt) -> Result<(), BookError> {
+    pub fn record(&mut self, attempt: Attempt) -> Result<Recorded, BookError> {
         let seq = self.next_seq;
         let next = seq.checked_add(1).ok_or(BookError::Overflow)?;
         self.next_seq = next;
         self.highest_seq = seq;
-        let acknowledged =
-            attempt.at_us <= self.loaded_marker_us && attempt.at_us < self.started_us;
+        if attempt.at_us <= self.loaded_marker_us && attempt.at_us < self.started_us {
+            return Ok(Recorded::Discarded);
+        }
         if let Some(newest) = self.records.back_mut() {
             if newest.source == attempt.class
                 && newest.account == attempt.account
                 && newest.kind == attempt.kind
-                && newest.acknowledged == acknowledged
                 && attempt.at_us.abs_diff(newest.last_us) <= ALERT_COALESCE_WINDOW_US
             {
                 newest.count = newest.count.saturating_add(1);
@@ -426,7 +435,7 @@ impl AlertBook {
                 newest.last_seq = seq;
                 newest.first_unix_ms = newest.first_us / 1000;
                 newest.last_unix_ms = newest.last_us / 1000;
-                return Ok(());
+                return Ok(Recorded::Kept);
             }
         }
         self.records.push_back(AlertRecord {
@@ -437,7 +446,6 @@ impl AlertBook {
             account: attempt.account,
             kind: attempt.kind,
             count: 1,
-            acknowledged,
             last_seq: seq,
             first_us: attempt.at_us,
             last_us: attempt.at_us,
@@ -446,9 +454,6 @@ impl AlertBook {
             let Some(oldest) = self.records.pop_front() else {
                 break;
             };
-            if oldest.acknowledged {
-                continue;
-            }
             match oldest.kind {
                 AttemptKind::WrongPassword => {
                     self.evicted.wrong_password =
@@ -465,10 +470,11 @@ impl AlertBook {
                     .map_or(oldest.first_us, |first| first.min(oldest.first_us)),
             );
         }
-        Ok(())
+        Ok(Recorded::Kept)
     }
 
-    /// Acknowledges every record whose `last_seq <= through`, for the current epoch only.
+    /// Acknowledges every record whose `last_seq <= through`, for the current epoch only:
+    /// the high water absorbs their newest journal time, then they are removed from memory.
     ///
     /// # Errors
     ///
@@ -484,12 +490,12 @@ impl AlertBook {
         if through > self.highest_seq {
             return Err(BookError::BeyondNewest);
         }
-        for record in &mut self.records {
-            if record.last_seq <= through && !record.acknowledged {
-                record.acknowledged = true;
+        for record in &self.records {
+            if record.last_seq <= through {
                 self.ack_high_water_us = self.ack_high_water_us.max(record.last_us);
             }
         }
+        self.records.retain(|record| record.last_seq > through);
         if through >= self.evicted.max_seq {
             self.evicted = Evicted {
                 max_seq: self.evicted.max_seq,
@@ -506,7 +512,6 @@ impl AlertBook {
         let earliest_unacknowledged = self
             .records
             .iter()
-            .filter(|r| !r.acknowledged)
             .map(|r| r.first_us)
             .chain(self.evicted.first_us)
             .chain(oldest_pending_us)
@@ -532,14 +537,10 @@ impl AlertBook {
         let unacknowledged = |kind: AttemptKind| {
             self.records
                 .iter()
-                .filter(|r| !r.acknowledged && r.kind == kind)
+                .filter(|r| r.kind == kind)
                 .fold(0u32, |total, r| total.saturating_add(r.count))
         };
-        let newest = self
-            .records
-            .iter()
-            .filter(|r| !r.acknowledged)
-            .max_by_key(|r| r.last_us);
+        let newest = self.records.iter().max_by_key(|r| r.last_us);
         AlertsView {
             state,
             reason,
@@ -801,8 +802,9 @@ pub fn is_live(at_us: u64, started_us: u64, now_us: u64) -> bool {
         && now_us.saturating_sub(at_us) <= PUSH_MAX_ATTEMPT_AGE_MS.saturating_mul(1000)
 }
 
-/// Receives each live attempt the book recorded. Called under the alerts runtime mutex: it
-/// must not block, await or do I/O (lock order: alerts mutex → push scheduler mutex).
+/// Receives each live attempt the book kept. Called by `AlertsRuntime::deliver_live` after
+/// the alerts runtime mutex is released, so the push scheduler mutex is never taken under it;
+/// it must not block, await or do I/O.
 pub(crate) type LiveAttemptSink = Arc<dyn Fn(Attempt) + Send + Sync>;
 
 /// The alert state shared by the server routes, the event streams and the follower.
@@ -1068,13 +1070,19 @@ impl AlertsRuntime {
             let Some(book) = inner.book.as_mut() else {
                 break;
             };
-            if book.record(attempt).is_err() {
-                overflow = true;
-                break;
-            }
-            changed = true;
-            if self.live_sink.is_some() && is_live(attempt.at_us, book.started_us(), now_us) {
-                live.push(attempt);
+            match book.record(attempt) {
+                Err(_) => {
+                    overflow = true;
+                    break;
+                }
+                Ok(Recorded::Discarded) => {}
+                Ok(Recorded::Kept) => {
+                    changed = true;
+                    if self.live_sink.is_some() && is_live(attempt.at_us, book.started_us(), now_us)
+                    {
+                        live.push(attempt);
+                    }
+                }
             }
         }
         if overflow {

@@ -13,7 +13,9 @@
 //! - RMC-S29 the feature is documented (`Docs/REMOTE_COMPANION.md` §2c) and the ADR exists;
 //! - RMC-S30 the page shows the alerts with `textContent`, the snapshot headers, no storage;
 //! - RMC-S31 line buffers and entry strings are `Zeroizing`; no `BufReader`, no
-//!   `serde_json::Value`/`Map` in the journal parser.
+//!   `serde_json::Value`/`Map` in the journal parser;
+//! - RMC-S43 (round 3, owner request 2026-10-06, test 62, matrix RMC75) acknowledged
+//!   records are removed, never kept behind a flag; journal entries are never deleted.
 
 #![allow(
     clippy::unwrap_used,
@@ -414,4 +416,168 @@ fn test_rmc_s31_line_buffers_are_zeroizing() {
         journal.contains("IgnoredAny"),
         "unknown keys are skipped without being materialised"
     );
+}
+
+/// `code` with the contents of every string literal blanked (escapes honoured, raw strings
+/// `r"…"` / `r#"…"#` included); char literals and everything else are kept. Used after
+/// `strip_comments`, so messages such as "the acknowledged view …" never count as code.
+fn blank_string_literals(code: &str) -> String {
+    let bytes = code.as_bytes();
+    let mut out = String::with_capacity(code.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let c = bytes[i];
+        let raw_start = c == b'r'
+            && (i == 0 || !(bytes[i - 1].is_ascii_alphanumeric() || bytes[i - 1] == b'_'))
+            && bytes[i + 1..]
+                .iter()
+                .position(|&b| b != b'#')
+                .is_some_and(|p| bytes[i + 1 + p] == b'"');
+        if raw_start {
+            let hashes = bytes[i + 1..].iter().take_while(|&&b| b == b'#').count();
+            let mut close = String::from("\"");
+            close.push_str(&"#".repeat(hashes));
+            let body_start = i + 2 + hashes;
+            let end = code[body_start..]
+                .find(&close)
+                .map_or(bytes.len(), |p| body_start + p + close.len());
+            out.push_str("r\"\"");
+            i = end;
+            continue;
+        }
+        if c == b'"' {
+            i += 1;
+            while i < bytes.len() {
+                if bytes[i] == b'\\' {
+                    i += 2;
+                    continue;
+                }
+                if bytes[i] == b'"' {
+                    i += 1;
+                    break;
+                }
+                i += 1;
+            }
+            out.push_str("\"\"");
+            continue;
+        }
+        if c == b'\'' {
+            // Char literal ('x' or an escape) kept whole, so a '"' never opens a string.
+            if i + 1 < bytes.len() && bytes[i + 1] == b'\\' {
+                let start = i;
+                i += 2;
+                while i < bytes.len() && bytes[i] != b'\'' {
+                    i += 1;
+                }
+                i += 1;
+                out.push_str(&code[start..i.min(bytes.len())]);
+                continue;
+            }
+            if i + 2 < bytes.len() && bytes[i + 2] == b'\'' {
+                out.push_str(&code[i..i + 3]);
+                i += 3;
+                continue;
+            }
+        }
+        let ch = code[i..].chars().next().unwrap();
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    out
+}
+
+/// Every line of `code` holding `word` as a whole identifier (not part of a longer one such
+/// as `unacknowledged_wrong_password` or `acknowledged_until_us`).
+fn identifier_uses(code: &str, word: &str) -> Vec<String> {
+    let ident = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+    code.lines()
+        .filter(|line| {
+            let bytes = line.as_bytes();
+            line.match_indices(word).any(|(at, _)| {
+                let before = at.checked_sub(1).map(|p| bytes[p]);
+                let after = bytes.get(at + word.len()).copied();
+                !before.is_some_and(ident) && !after.is_some_and(ident)
+            })
+        })
+        .map(|line| line.trim().to_string())
+        .collect()
+}
+
+/// Test 62 (RMC75, alerts round 3, owner request 2026-10-06 "once the acknowledge button is
+/// clicked, delete the entries"; plan-evaluator round-3 F-1): acknowledged records are
+/// removed, never kept behind a flag of any visibility: no `acknowledged` identifier
+/// (field, binding or access) in the production code of `crates/remote/src`; the page reads
+/// and styles no acknowledged row; `Docs/REMOTE_COMPANION.md` §2c states that journal
+/// entries are never deleted; the ADR amendment exists.
+#[test]
+fn test_rmc_s43_acknowledged_entries_are_not_kept() {
+    let alerts = code_of(ALERTS_RS);
+    assert!(
+        !alerts.contains("pub acknowledged:"),
+        "AlertRecord has no acknowledged field"
+    );
+    let mut found = Vec::new();
+    for (rel, code) in remote_code() {
+        for line in identifier_uses(&blank_string_literals(&code), "acknowledged") {
+            found.push(format!("{rel}: {line}"));
+        }
+    }
+    assert!(
+        found.is_empty(),
+        "acknowledged records must be removed, not flagged: {found:#?}"
+    );
+
+    let app = read("crates/remote/assets/app.js");
+    for forbidden in [".acknowledged", "\"acknowledged\""] {
+        assert!(
+            !app.contains(forbidden),
+            "app.js must not contain {forbidden}"
+        );
+    }
+    let css = read("crates/remote/assets/style.css");
+    assert!(
+        !css.contains(".acknowledged"),
+        "style.css has no acknowledged row style"
+    );
+
+    let docs = read("Docs/REMOTE_COMPANION.md");
+    let start = docs
+        .lines()
+        .position(|l| l.starts_with("## 2c."))
+        .expect("Docs/REMOTE_COMPANION.md has a `## 2c.` section");
+    let section = docs
+        .lines()
+        .skip(start + 1)
+        .take_while(|l| !l.starts_with("## "))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        section.contains("journal entries are never deleted"),
+        "§2c must state that journal entries are never deleted"
+    );
+    let decisions = read("AI/DECISIONS.md");
+    assert!(
+        decisions.contains("clear acknowledged entries"),
+        "the ADR amendment exists"
+    );
+}
+
+/// Self-test of the two scanners of test 62 (a wrong scanner would make test 62 vacuous).
+#[test]
+fn test_rmc_s43_scanner_self_test() {
+    let code = "let msg = \"the acknowledged view\";\nlet c = '\"';\nlet raw = r#\"acknowledged\"#;\nrecord.unacknowledged_wrong_password = 1;\nlet acknowledged_until_us = 0;\n";
+    assert!(identifier_uses(&blank_string_literals(code), "acknowledged").is_empty());
+    for bad in [
+        "if record.acknowledged {",
+        "    acknowledged: bool,",
+        "let acknowledged = true;",
+        "Record { id, acknowledged }",
+        "r.acknowledged=true",
+    ] {
+        assert_eq!(
+            identifier_uses(&blank_string_literals(bad), "acknowledged").len(),
+            1,
+            "{bad}"
+        );
+    }
 }
