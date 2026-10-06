@@ -1,8 +1,8 @@
 # `soos-gui` — Responsiveness, Privileged Operations and Diagnostics
 
 `soos-gui` (crate `crates/gui`) is the eframe/egui desktop application for live model
-diagnostics, guided enrollment and profile management. This page documents its threading model
-and how it reports failures. Camera device selection and the daemon preview proxy are covered by
+diagnostics, guided enrollment and profile management. This page documents its threading model,
+how it reports failures and its visual design system (§5). Camera device selection and the daemon preview proxy are covered by
 `Docs/IPC_PROTOCOL.md` and `Docs/CAMERA_V4L_CRATE.md`.
 
 ## 1. Threading Model (GitHub #154, review finding CAM-06)
@@ -27,8 +27,11 @@ waits on I/O it does not own.
   `inactive` and `failed` are `Inactive`; `active`, `reloading`, `refreshing`, `activating`
   (start-up, `auto-restart`) and `deactivating`, an unknown value and a `systemctl` that cannot
   be run all count as `Active`, so the GUI never opens the device directly while the daemon is
-  restarting (EBUSY fight; GitHub #314, CAM-NEW-7). The header reads it lock-free. After Pause/Resume the UI calls `request_refresh()` so the
-  new state appears within one monitor tick (50 ms) instead of the next interval.
+  restarting (EBUSY fight; GitHub #314, CAM-NEW-7). The header reads it lock-free. Pause and
+  Resume are driven by the daemon toggle switch of the header (§5.3), which submits the same
+  `PrivilegedAction::PauseDaemon` / `ResumeDaemon`; after either the UI calls
+  `request_refresh()` so the new state appears within one monitor tick (50 ms) instead of the
+  next interval.
 - **Privileged operations**: the UI submits a `PrivilegedAction` to `TaskRunner`, which runs it on
   a worker thread through the `PrivilegedExecutor` trait (production: `PkexecExecutor`, fixed
   argument vectors, no shell, stdin closed) and returns immediately. Programs are named by
@@ -45,8 +48,9 @@ waits on I/O it does not own.
   `import_privacy_tests` contract, owner-approved 2026-10-02, walkthrough 168). The `PrivilegedOutcome` comes
   back over an `mpsc` channel that `SoosApp::handle_task_outcomes` drains each frame; the worker
   wakes the UI with `request_repaint`. Only one privileged action runs at a time
-  (`TaskRunnerError::Busy`), so the user never faces stacked Polkit dialogs; the Pause/Resume
-  buttons are disabled and a spinner is shown meanwhile.
+  (`TaskRunnerError::Busy`), so the user never faces stacked Polkit dialogs; the daemon switch
+  is disabled and replaced by a spinner with "Waiting for authorization..." meanwhile ("Daemon
+  status unknown" while the daemon state is not yet known).
 - **Direct-mode store mutations (GitHub #291)**: with a local store (`GuiStore::System` or
   `GuiStore::Developer`) the UI never calls `BiometricStore::enroll` / `delete` itself: both
   take the store lock and may wait up to `STORE_LOCK_TIMEOUT` (5 s) while `soos-enroll` holds
@@ -105,7 +109,8 @@ temporary directory is gone):
 | `GuiStore::Polkit` | the system store is not accessible (unprivileged session) | no local store at all; list / import / delete go through `pkexec /usr/bin/soos-enroll` |
 | `GuiStore::Developer` | explicit `--dev-store <DIR>` (absolute path) | `<DIR>/master.key` and `<DIR>/biometrics` (created `0700`); never used by PAM |
 
-The developer mode shows a persistent orange banner under the header ("DEVELOPER STORE:
+The developer mode shows a persistent amber warning banner at the top of the page body, right
+under the header band, on every tab ("DEVELOPER STORE:
 templates are saved in `<DIR>` and are NOT used by PAM") and logs it at startup; it never
 imports into the system store. In Polkit mode the Profiles tab lists the system templates but
 the in-process match test needs a readable template (root session or `--dev-store`).
@@ -165,7 +170,10 @@ the stored template (or `None` when the store lookup fails or finds nothing):
 
 Every `CameraManager` exposes `status() -> CameraStatus` (see `Docs/CAMERA_V4L_CRATE.md`). When no
 analyzed frame is available, the central panel renders `camera_status::camera_status_banner`
-instead of a generic spinner, and the header shows the banner title. Each `CameraErrorKind` has a
+instead of a generic spinner (a centered brand status card, `render_status_banner`), and the
+header band shows the banner title (with a frame: FPS, latency and resolution). When the band is
+too narrow for that text next to the tabs, it is hidden and shown instead as the tooltip of the
+wordmark; the status card always carries the title. Each `CameraErrorKind` has a
 distinct title and an actionable hint, plus the consecutive failure count and whether the source
 retries automatically (`error_is_retried`: every kind except `SourceUnauthorized`, where the IPC
 preview worker stops):
@@ -230,3 +238,89 @@ wipe-on-drop reference: row SGF5, `crates/gui/tests/match_reference_zeroize_test
 Failure paths without a daemon or camera (oversized, zero-length and truncated preview replies,
 daemon without camera, `EACCES` socket, direct-mode `EACCES` / `EBUSY`) are covered by
 `crates/gui/tests/ipc_camera_failure_tests.rs` (matrix CHT5–CHT6, GitHub #198).
+Visual design system: rows GUX1–GUX13, `crates/gui/tests/theme_tests.rs` and
+`crates/gui/tests/brand_layout_tests.rs`.
+
+## 5. Visual Design System (brand redesign, walkthrough 183)
+
+The GUI follows the soos design direction (mockup `New_Gui_Interface.png`, 1512x982, Live Model
+Diagnostic page). The redesign is presentation only: threading, privileged flows, store tasks,
+fail-closed camera logic and every documented message are unchanged. No crate was added; text
+uses the egui default fonts (nothing is downloaded or bundled) and the brand marks are drawn
+with the egui painter (no image or SVG loader).
+
+### 5.1 Palette
+
+| Token (`theme`) | Hex | Name | Use |
+|---|---|---|---|
+| `BLUE` | `#0047BB` | Pantone 2728 C | Header band, card borders, primary buttons, stat and star tiles |
+| `PALE` | `#EDF1FF` | Brilliant White | Page body, cards, active tab, text on blue |
+| `INK` | `#101820` | Pantone Black 6 C | Primary text, video placeholder |
+| `PINK` | `#E59BDC` | Pantone 244 C | Brand accent: star mark, overlay chip dots, guidance arrows, rejected-sample reticle |
+
+Every other tone is a tint of these four (`PALE_2..4`, `LINE`, `INK_MUTED`, `INK_WEAK`,
+`BLUE_HOVER`, `BLUE_PRESSED`) or a semantic state set (`SUCCESS*`, `DANGER*`, `WARN*`) and
+the video overlay colors (`FACE_LIVE`, `FACE_SPOOF`, `EYE`, `NOSE`, `MOUTH`). `theme::apply`
+installs the light brand visuals for both system theme preferences (blue selection, rounded
+widgets, thin floating scroll bars).
+
+### 5.2 Modules
+
+| Module | Role |
+|---|---|
+| `theme` | Palette tokens, sizes, `Metrics::for_width` (responsive paddings and the 250–300 pt right column), `split_columns`, `content_rect`, `fit_video`, `apply`, and `paint_faux_bold` (the default font has one weight; passes are snapped to whole physical pixels by `faux_bold_offsets` so headings render with the same weight everywhere) |
+| `brand` | SVG path data of the "SOOS" wordmark and the star mark, a small anti-aliased rasterizer (each mark is rasterized once into a texture, re-rasterized only when its size or color changes), `paint_wordmark`, `paint_star` and `window_icon` (the four-quadrant logo used as the window icon) |
+| `widgets` | Cards (`card_in_rect`, `card_in_rect_with_footer`), card and section titles, inner tables, stat and star tiles, `column_stack` / `column_stack_card_first`, banners with vector icons, `BrandButton` (primary, secondary, danger, danger outline), `progress_bar`, overlay chips, the enrollment checklist (`step_list`) and the toggle switch |
+| `header` | Header band and tabs ("Live Model Diagnostic", "Guided Enrollment", "Biometric Profiles", with painted icons; inactive tabs collapse to their icon on narrow windows) and the daemon panel |
+
+Symbols missing from the default fonts (check, cross, warning, info) are painted as shapes.
+
+### 5.3 Header and Daemon Switch
+
+A 44-point blue band holds the wordmark, the tabs (the active tab is a pale folder shape joined
+to the body) and, aligned with the right column, the daemon panel. The panel replaces the old
+Pause/Resume buttons with a toggle switch (`header::DaemonSwitch`):
+
+| `DaemonState` | Switch | Click |
+|---|---|---|
+| `Active` | on (green track) | `PrivilegedAction::PauseDaemon` |
+| `Inactive` | off | `PrivilegedAction::ResumeDaemon` |
+| `Unknown` | no knob, inert | nothing |
+| `Active` / `Inactive`, privileged action pending | spinner, "Waiting for authorization..." | nothing |
+| `Unknown`, privileged action pending | spinner, "Daemon status unknown" | nothing |
+
+The action goes through `submit_privileged` exactly as the buttons did, followed by
+`request_refresh()`. The result of a daemon action is shown as a success or error banner at
+the top of the body, under the developer-store banner when present.
+
+### 5.4 Page Layout
+
+The body below the band is `theme::content_rect` (padding `Metrics::pad`, 40 pt at 1512 pt and
+at least 20 pt) and is split by `Metrics::split_columns` into a main area and a right column of
+`(259 * k).clamp(250, 300)` points, separated by `Metrics::gap_main`. These formulas replace the
+former Live sidebar `(x * 0.32).clamp(280, 380)`, Enrollment sidebar `(x * 0.35).clamp(300, 420)`
+and 16-point gap; the CLP4 / GARP3 minimum canvas sizes still hold with the developer banner
+(`brand_layout_tests::test_gux12_*`). `crates/gui/tests/layout_tests.rs` is unchanged.
+
+- **Live Model Diagnostic**: the video keeps the frame aspect, centered horizontally at the top
+  of the main area with 16-point corners and rule-of-thirds guides. The five overlay toggles are
+  pill chips floating over the video (compact size when one row does not fit), so they never
+  shrink the canvas. Face and inset captions sit on a translucent ink backing. The right column
+  stacks the "Telemetry & Analysis" card (all telemetry rows and the "Live 1-to-1 Match Test"),
+  a stat tile (match score while a listed profile is selected, otherwise PAD liveness) and, when
+  the height allows, the pink star tile. A selected profile that leaves the list clears the match
+  reference.
+- **Guided Enrollment**: same video panel with the oval reticle (pale idle, blue capturing, pink
+  on a rejected sample, green when complete) and the guidance message in a caption pill. The
+  enrollment card holds the target fields, a brand progress bar (no fill at 0 %, label always
+  readable), the four-step checklist (compact 30-point rows on short columns, hint in the
+  tooltip) and the feedback banner; Start / Cancel / Save stay in a fixed footer.
+- **Biometric Profiles**: one main card with the title, Refresh, a store notice (Info for the
+  system and Polkit stores, Warning for the developer store) and the table (blue header row,
+  40-point rows, red outline Delete). The right column holds the "TEMPLATES" count tile and a
+  star tile filling the rest of the height. "Confirm Deletion" is an `egui::Modal`: the backdrop
+  blocks every click behind it, and Escape or a backdrop click cancels.
+
+In the right column (`column_stack_card_first`), the card first gets the height its content
+needs (measured on the previous frame), the stat tile shrinks toward 140 points, and the tiles
+are dropped entirely before the card would have to scroll.

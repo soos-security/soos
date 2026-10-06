@@ -83,6 +83,13 @@ daemon switching to another camera.
 - `V4lCameraManager` records every supervisor failure in a `CameraStatusCell` (the existing
   `warn!` log is kept), reports `Suspended` during auto-standby and `Stopped` after shutdown.
   `MockCameraManager::status()` reports injected faults (`set_error`, `set_starved`).
+- `MockCameraManager::notify_activity` publishes a frame (and readiness) only once the initial
+  warmup has produced its first stabilized frame. Before that it refreshes the idle clock only:
+  `soos-gui --mock` calls it for every analyzed frame, and the warmup thread used to withdraw the
+  forced frame on its next tick, so the status flapped between `Ready` and `Starting`. Once
+  stabilized, activity still serves a frame immediately and ends any re-warmup (after a suspension,
+  or after an injected error / starvation clears); the capture thread decrements the warmup counter
+  saturating, so that concurrent reset can never wrap it (`mock_warmup_activity_tests`).
 - The status carries no frame data, device contents or biometric material.
 
 ### `CameraConfig` & `CameraConfigBuilder`
@@ -579,7 +586,7 @@ while frames are captured.
 | **C2** | Fresh frame available in < 5ms via `ArcSwap` | `bench_latency_tests::test_arcswap_frame_retrieval_latency_under_5ms` | Validated |
 | **C3** | Handles `ENODEV`, `EIO`, `EBUSY` without panic | `error_recovery_tests::test_error_recovery_enodev_without_panic` | Validated |
 | **C4** | Hardware selection by `/dev/v4l/by-id/` rather than index | `config_hardware_tests::test_config_by_id_path_selection` | Validated |
-| **C5** | Drops the first `warmup_frames` frames after startup for auto-exposure (20 in `CameraConfig::default()`; a daemon.toml `[pipeline]` section without the key sets 0, matrix CLP2) | `warmup_tests::test_warmup_frames_discard_before_ready` | Validated |
+| **C5** | Drops the first `warmup_frames` frames after startup for auto-exposure (20 in `CameraConfig::default()`; a daemon.toml `[pipeline]` section without the key sets 0, matrix CLP2) | `warmup_tests::test_warmup_frames_discard_before_ready`, `mock_warmup_activity_tests::test_notify_activity_during_warmup_never_publishes_ready` | Validated |
 | **C6** | Priority format negotiation (`RGB24 -> YUYV -> NV12 -> MJPEG -> Grey`) | `format_negotiation_tests::test_format_negotiation_prefers_rgb24` | Validated |
 | **C7** | Graceful hot-unplug recovery on `ENODEV` | `hotunplug_tests::test_camera_hotunplug_recovery` | Validated |
 | **C8** | Dual-sensor discrimination (RGB vs IR preference) | `dual_sensor_tests::test_dual_sensor_prefers_rgb` | Validated |
