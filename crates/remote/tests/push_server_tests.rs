@@ -459,6 +459,28 @@ async fn wait_calls(h: &Harness, t: &FakeTransport, n: usize, max_ms: u64, step:
     }
 }
 
+/// Polls `GET /api/push` until `done` holds, letting blocking-pool store work finish in real
+/// time (at most `VIEW_WAIT_ROUNDS` x `VIEW_WAIT_SLEEP`, about 2 s), and returns the last view.
+/// Contract migration (CI 2026-10-07): a single `pump()` raced the blocking-pool removal of a
+/// gone subscription on slower runners.
+async fn wait_view(h: &Harness, done: impl Fn(&Value) -> bool) -> Value {
+    let mut view = push_view(h).await;
+    for _ in 0..VIEW_WAIT_ROUNDS {
+        if done(&view) {
+            break;
+        }
+        std::thread::sleep(VIEW_WAIT_SLEEP);
+        pump().await;
+        view = push_view(h).await;
+    }
+    view
+}
+
+/// Rounds of [`wait_view`].
+const VIEW_WAIT_ROUNDS: usize = 200;
+/// Real-time sleep between two rounds of [`wait_view`].
+const VIEW_WAIT_SLEEP: std::time::Duration = std::time::Duration::from_millis(10);
+
 /// Advances `total` ms in `step` ms steps.
 async fn idle(h: &Harness, total: u64, step: u64) {
     h.step_ms(step, total).await;
@@ -1160,8 +1182,10 @@ async fn test_rwp_delivery_outcomes() {
         t.set_default(reply(Outcome::Gone, Some(410), None));
         sudo_burst(&h, &j, 1).await;
         wait_calls(&h, &t, 1, 10_000, 100).await;
-        pump().await;
-        let v = push_view(&h).await;
+        let v = wait_view(&h, |v| {
+            v["subscriptions"] == 0 && v["last_delivery"] == "gone"
+        })
+        .await;
         assert_eq!(
             (v["subscriptions"].clone(), v["last_delivery"].clone()),
             (json!(0), json!("gone"))

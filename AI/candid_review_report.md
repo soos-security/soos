@@ -1,10 +1,62 @@
 # Candid Review Report
 
-- **Date**: 2026-10-06
+- **Date**: 2026-10-07
 - **Target Branch**: `feat/remote-companion`
 - **Base (merge-base)**: `47ab53e`
-- **Reviewed-Diff-Fingerprint**: `3a50f87a4c604d85b8542e943b85bdae4fcd2a69ee38f37c70b0bb1efbd3c22a`
-- **Audited Files**: full frozen patch `target/candid_diff.patch` (merge-base `47ab53e` to the working tree at HEAD `0585076`, 114 files, 61 441 insertions / 236 deletions): `crates/remote/**`, `crates/push-protocol/**`, `crates/push-sender/**`, `tests/invariants/src/{lib.rs,presence_unlock_contract.rs,artifact_freshness_contract.rs,remote_*_contract.rs}`, `Cargo.toml`, `Cargo.lock`, `Docs/{README.md,REMOTE_COMPANION.md,SECURITY_AND_QUALITY_GUIDELINES.md,...}`, `AI/{ARCHITECTURE.md,DECISIONS.md,VERIFICATION_MATRIX.md,MOCK_STRATEGY.md,architect_spec_remote_*.md,auditor_constraints_*.md,tester_contract_*.md,research_push.md,design_brief_remote_brand.md}`, `AI/walkthroughs/185_remote_companion.md` to `190_remote_brand_redesign.md`, `.agents/skills/dev-workflow/references/project-facts.md`.
+- **Reviewed-Diff-Fingerprint**: `9f54532975080df65dfe205234276b5cf657bcb3019ee7ded65a1342dc1b6143`
+- **Audited Files**: full frozen patch `target/candid_diff.patch` (merge-base `47ab53e` to the working tree at HEAD `7bad7d9` plus the uncommitted CI timing fix in `crates/remote/tests/push_server_tests.rs` and `AI/tester_contract_push.md`; the earlier part was frozen at HEAD `0585076`, 114 files, 61 441 insertions / 236 deletions): `crates/remote/**`, `crates/push-protocol/**`, `crates/push-sender/**`, `tests/invariants/src/{lib.rs,presence_unlock_contract.rs,artifact_freshness_contract.rs,remote_*_contract.rs}`, `Cargo.toml`, `Cargo.lock`, `Docs/{README.md,REMOTE_COMPANION.md,SECURITY_AND_QUALITY_GUIDELINES.md,...}`, `AI/{ARCHITECTURE.md,DECISIONS.md,VERIFICATION_MATRIX.md,MOCK_STRATEGY.md,architect_spec_remote_*.md,auditor_constraints_*.md,tester_contract_*.md,research_push.md,design_brief_remote_brand.md}`, `AI/walkthroughs/185_remote_companion.md` to `190_remote_brand_redesign.md`, `.agents/skills/dev-workflow/references/project-facts.md`.
+
+## 00. Re-Review of the CI Timing Fix (fingerprint `9f545329…1b6143`)
+
+The previous review approved fingerprint `3a50f87a…bd3c22a`. The only change since (`git diff
+7bad7d9` outside this report) is 2 files, 32 insertions / 2 deletions: a new test helper
+`wait_view` in `crates/remote/tests/push_server_tests.rs` used in one block of
+`test_rwp_delivery_outcomes`, and Contract Migration 4 in `AI/tester_contract_push.md`. Every
+other path of the patch is unchanged, so sections 0 to 5 below are carried over.
+
+**Root cause (verified in code).** `PushService::remove_gone` (`crates/remote/src/push.rs:1540`)
+awaits `with_store_lock(...)`, i.e. `tokio::task::spawn_blocking` on the blocking pool, and only
+then calls `record_gone()`. The test is `#[tokio::test(start_paused = true)]` (current-thread);
+`pump()` only does `POLL_ROUNDS` x `yield_now()`, which bounds runtime scheduler rounds but not the
+wall-clock time a blocking-pool thread needs for the file rewrite. CI run 37537551565 saw
+`(subscriptions 0, last_delivery null)`: the store removal had finished (the view reads the store)
+but the dispatcher task had not yet been polled past the `.await` to record the outcome. This is a
+genuine test-timing defect, not a product defect.
+
+**Is the helper a weakening? No.**
+- The assertion `(subscriptions, last_delivery) == (0, "gone")` is byte-identical; the predicate
+  passed to `wait_view` is the same condition, so the helper cannot make a different state pass.
+- `wait_view` returns the last observed view even when the predicate never holds, so a wrong
+  implementation (outcome never recorded, subscription never removed, `failed` instead of `gone`)
+  still fails the exact assertion after at most 200 x (10 ms + pump + one GET) ≈ 2 s. Bounded, no
+  infinite loop, no `#[ignore]`, no tolerance.
+- `std::thread::sleep` deliberately blocks the current-thread runtime so the virtual clock does not
+  move while real time passes for the blocking pool; no timers fire during the wait. After the
+  subscription is removed there is no subscription left to deliver to, so even an auto-advance
+  inside `push_view` cannot produce extra transport calls that the test would miss. No other
+  assertion of the test depends on the wait.
+- The migration is recorded (tester contract Migration 4) with the CI run, cause and the unchanged
+  assertion, matching the project's contract-migration rule.
+- Other `Gone` assertions: the two-subscription 404/410 loop runs `idle(60 s, 1 s)` (60 pumps with
+  clock moves) before asserting `subscriptions == 1` and does not assert `last_delivery`; no other
+  test reads `last_delivery == "gone"`. No sibling race left unpatched.
+
+**Should production order change? No (SUGGESTION at most).** Either order leaves a microsecond
+transient visible only to a `GET /api/push` that lands inside the window: today `(0, previous
+outcome)`, reversed it would be `(1, "gone")`. Both are eventually consistent within one store
+write and the page re-polls; neither is a security or correctness problem (no fail-open, no lost
+audit line, the outcome is always recorded, including when the removal fails, which is the
+approved behavior). Recording before removing would arguably be worse (it claims removal before it
+happened). No change requested.
+
+**Checks run by the reviewer.** `cargo test -p soos-remote --test push_server_tests
+test_rwp_delivery_outcomes` 5/5 green (0.36 s each); `cargo fmt --all -- --check` clean;
+`cargo clippy -p soos-remote --all-targets -- -D warnings` clean. Step-3 mechanical listing over the
+full patch: the only removed assertion line is the previously approved PAU17 migration in
+`tests/invariants/src/presence_unlock_contract.rs`; the only escape-hatch match is the text "no
+`#[ignore]` or tolerance was added" in a document. English only.
+
+**Findings for this delta:** none. Verdict carried: APPROVED.
 
 ## 0. Re-Review After the Rebase onto `main` (fingerprint `3a50f87a…bd3c22a`)
 

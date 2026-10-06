@@ -208,3 +208,9 @@ server tests use only paused time with `FrozenClock`, no wall-clock assertion.
    (fails against `soos-test`); `crates/remote/src/lib.rs` const-checks both topics. The service-worker display tags
    `soos-alerts` / `soos-test` in `sw.js` are not push topics and are unchanged; `push-protocol` keeps accepting the
    RFC 8030 alphabet (`protocol_tests.rs` still uses `soos-alerts` to test that check).
+4. `crates/remote/tests/push_server_tests.rs` `test_rwp_delivery_outcomes` (single-subscription `410` block): CI on
+   2026-10-07 (run 37537551565) observed `(subscriptions 0, last_delivery null)` because the gone subscription is
+   removed on the blocking pool and the outcome is recorded after that await; one `pump()` did not wait for it on a
+   slower runner. The block now waits with the new bounded helper `wait_view` (polls `GET /api/push` until the
+   expected state, at most about 2 s of real time) before the unchanged exact assertion
+   `(subscriptions, last_delivery) == (0, "gone")`. No assertion changed.
