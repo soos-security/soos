@@ -2167,3 +2167,227 @@ async fn test_rmc_server_never_logs_identity_or_request_data() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------------------
+// D5a′ — the request head as `tailscale serve unix:` delivers it (spec §13, Revision 4)
+// ---------------------------------------------------------------------------------------
+
+/// Synthetic stand-in for the forwarding address Serve adds (never a real 100.x address).
+const FORWARDED_FOR: &str = "100.64.0.1";
+
+/// The §13.1 capture, verbatim in shape, with the synthetic names of this suite: Serve
+/// rewrites `Host` to `localhost` and carries the original name in `X-Forwarded-Host`.
+/// `extra` is appended after the captured headers.
+fn serve_head<'a>(extra: &[(&'a str, &'a str)]) -> Vec<(&'a str, &'a str)> {
+    let mut headers = vec![
+        ("Host", "localhost"),
+        ("Tailscale-User-Login", LOGIN),
+        ("X-Forwarded-For", FORWARDED_FOR),
+        ("X-Forwarded-Host", HOST),
+        ("X-Forwarded-Proto", "https"),
+    ];
+    headers.extend_from_slice(extra);
+    headers
+}
+
+/// The captured head with one header name dropped and `replacement` appended.
+fn serve_head_without<'a>(
+    name: &str,
+    replacement: &[(&'a str, &'a str)],
+) -> Vec<(&'a str, &'a str)> {
+    let mut headers: Vec<(&str, &str)> = serve_head(&[])
+        .into_iter()
+        .filter(|(n, _)| !n.eq_ignore_ascii_case(name))
+        .collect();
+    headers.extend_from_slice(replacement);
+    headers
+}
+
+/// D5a′ / RMC20: the head captured on the owner's host is accepted end to end (`Host:
+/// localhost` is not inspected, the effective host comes from `X-Forwarded-Host`), and the
+/// lock `Origin` is compared to the effective host, not to `Host`.
+#[tokio::test(start_paused = true)]
+async fn test_rmc_serve_head_status_and_lock_end_to_end() {
+    let h = Harness::start().await;
+    let r = h
+        .raw(&raw_request("GET", "/api/status", &serve_head(&[])))
+        .await;
+    assert_eq!(r.status, 200, "{:?}", String::from_utf8_lossy(&r.body));
+    r.assert_json_body();
+    r.assert_mandatory_headers();
+    assert_status_shape(&r.json());
+    assert_eq!(r.json()["state"], "unlocked");
+    assert_eq!(h.source.reads(), 1);
+
+    // `Origin: https://localhost` names the rewritten `Host`, not the effective host.
+    let r = h
+        .raw(&raw_request(
+            "POST",
+            "/api/lock",
+            &serve_head(&[("X-Soos-Action", "lock"), ("Origin", "https://localhost")]),
+        ))
+        .await;
+    assert_eq!(r.status, 403);
+    assert_eq!(r.result(), "forbidden");
+    assert!(
+        h.source.lock_ids().is_empty(),
+        "a mismatched Origin never reaches LockSession"
+    );
+    assert_eq!(
+        h.source.reads(),
+        1,
+        "CSRF is refused before any logind read"
+    );
+
+    let r = h
+        .raw(&raw_request(
+            "POST",
+            "/api/lock",
+            &serve_head(&[
+                ("X-Soos-Action", "lock"),
+                ("Origin", "https://pc.tail1234.ts.net"),
+            ]),
+        ))
+        .await;
+    assert_eq!(r.status, 202, "{:?}", String::from_utf8_lossy(&r.body));
+    r.assert_json_body();
+    assert_eq!(r.result(), "lock_requested");
+    assert_eq!(h.source.lock_ids(), vec![SESSION_ID.to_string()]);
+    assert_eq!(h.source.reads(), 2, "one fresh snapshot before the lock");
+
+    // The browser Origin carries the name the user typed, case and :443 included.
+    h.advance_ms(MIN_LOCK_INTERVAL_MS + 1).await;
+    let r = h
+        .raw(&raw_request(
+            "POST",
+            "/api/lock",
+            &serve_head(&[
+                ("X-Soos-Action", "lock"),
+                ("Origin", "https://PC.Tail1234.TS.NET:443"),
+            ]),
+        ))
+        .await;
+    assert_eq!(r.status, 202);
+    assert_eq!(h.source.lock_ids().len(), 2);
+}
+
+/// D5a′ "Transport": the captured head over `tailscale serve --http` is `421` end to end,
+/// with the mandatory headers and no logind read.
+#[tokio::test(start_paused = true)]
+async fn test_rmc_serve_head_with_http_proto_is_misdirected() {
+    let h = Harness::start().await;
+    let r = h
+        .raw(&raw_request(
+            "GET",
+            "/api/status",
+            &serve_head_without("X-Forwarded-Proto", &[("X-Forwarded-Proto", "http")]),
+        ))
+        .await;
+    assert_eq!(r.status, 421);
+    r.assert_json_body();
+    r.assert_mandatory_headers();
+    assert_eq!(r.result(), "misdirected_request");
+    let r = h
+        .raw(&raw_request(
+            "POST",
+            "/api/lock",
+            &serve_head_without(
+                "X-Forwarded-Proto",
+                &[
+                    ("X-Forwarded-Proto", "http"),
+                    ("X-Soos-Action", "lock"),
+                    ("Origin", "https://pc.tail1234.ts.net"),
+                ],
+            ),
+        ))
+        .await;
+    assert_eq!(r.status, 421, "the lock route is refused the same way");
+    assert_eq!(r.result(), "misdirected_request");
+    assert_eq!(h.source.reads(), 0);
+    assert!(h.source.lock_ids().is_empty());
+    // The scheme is the only difference with the accepted head: the `421` above is the
+    // transport rule, not the rewritten `Host: localhost`.
+    let r = h
+        .raw(&raw_request("GET", "/api/status", &serve_head(&[])))
+        .await;
+    assert_eq!(r.status, 200, "{:?}", String::from_utf8_lossy(&r.body));
+    assert_eq!(h.source.reads(), 1);
+}
+
+/// D5a′: a proxied head without `X-Forwarded-Proto`, or with a foreign `X-Forwarded-Host`,
+/// is `421` end to end even though `Host: localhost` is the same as in the accepted head;
+/// a repeated `X-Forwarded-Host` is refused as well.
+#[tokio::test(start_paused = true)]
+async fn test_rmc_serve_head_without_proto_or_with_foreign_host_is_misdirected() {
+    let h = Harness::start().await;
+    let variants: Vec<(&str, Vec<(&str, &str)>)> = vec![
+        (
+            "no X-Forwarded-Proto",
+            serve_head_without("X-Forwarded-Proto", &[]),
+        ),
+        (
+            "X-Forwarded-Proto twice",
+            serve_head(&[("X-Forwarded-Proto", "https")]),
+        ),
+        (
+            "foreign X-Forwarded-Host",
+            serve_head_without("X-Forwarded-Host", &[("X-Forwarded-Host", "evil.com")]),
+        ),
+        (
+            "X-Forwarded-Host with a port",
+            serve_head_without(
+                "X-Forwarded-Host",
+                &[("X-Forwarded-Host", "pc.tail1234.ts.net:8443")],
+            ),
+        ),
+        (
+            "X-Forwarded-Host repeated",
+            serve_head(&[("X-Forwarded-Host", HOST)]),
+        ),
+        (
+            "X-Forwarded-Host is an IP literal",
+            serve_head_without("X-Forwarded-Host", &[("X-Forwarded-Host", FORWARDED_FOR)]),
+        ),
+    ];
+    for (label, headers) in variants {
+        let r = h.raw(&raw_request("GET", "/api/status", &headers)).await;
+        assert_eq!(r.status, 421, "{label}");
+        r.assert_mandatory_headers();
+        assert_eq!(r.result(), "misdirected_request", "{label}");
+    }
+    assert_eq!(h.source.reads(), 0, "no refused head reached logind");
+    // The accepted head still passes on the same server.
+    let r = h
+        .raw(&raw_request("GET", "/api/status", &serve_head(&[])))
+        .await;
+    assert_eq!(r.status, 200);
+}
+
+/// D5a′ / RC-2: `allowed_hosts` applies to the effective host behind Serve.
+#[tokio::test(start_paused = true)]
+async fn test_rmc_allowed_hosts_apply_to_the_forwarded_host() {
+    let h = Harness::start_with(Options {
+        allowed_hosts: vec!["mypc.tail1234.ts.net".to_string()],
+        ..Options::default()
+    })
+    .await;
+    let r = h
+        .raw(&raw_request("GET", "/api/status", &serve_head(&[])))
+        .await;
+    assert_eq!(
+        r.status, 421,
+        "another *.ts.net name in X-Forwarded-Host is refused once a list exists"
+    );
+    let r = h
+        .raw(&raw_request(
+            "GET",
+            "/api/status",
+            &serve_head_without(
+                "X-Forwarded-Host",
+                &[("X-Forwarded-Host", "MYPC.tail1234.ts.net:443")],
+            ),
+        ))
+        .await;
+    assert_eq!(r.status, 200, "{:?}", String::from_utf8_lossy(&r.body));
+    assert_eq!(h.source.reads(), 1);
+}

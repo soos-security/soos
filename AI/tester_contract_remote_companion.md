@@ -352,3 +352,91 @@ Invariants:
 - The keep-alive and the max-stream tests move time in 15 s jumps once per iteration: the stream must re-send "the newest reading it holds" even when the poller's publish and the keep-alive timer fire in the same jump (ordering between the two tasks is not guaranteed; strictly increasing `checked_unix_ms` across keep-alives still holds because at least one poller read happens per jump).
 - `test_rmc_seq_is_reserved_when_a_read_starts` holds a poller read across a new stream's first read and release: the reservation must happen before `own_sessions` is awaited (R3-1), and a stream must drop any reading whose `seq` is not above the last one it sent.
 - `proptest` writes `crates/remote/tests/*.proptest-regressions` files on failing runs; they are scratch artifacts of the red state and were deleted — do not commit them.
+
+---
+
+## Revision 4 — D5a′ Effective Host From `X-Forwarded-Host` (spec §13, 2026-10-06)
+
+Scope of this cycle: spec §13.3 only (D5a′: effective host decided by `X-Forwarded-Host`,
+mandatory `X-Forwarded-Proto: https` on a proxied request; installer git mode `100755`
+static contract; documentation needles). No existing test was modified; the three existing
+`check_host` tests and every `server_tests` fixture send no `X-Forwarded-*` header and stay
+valid under D5a′. Every fixture uses the synthetic names of the suites (`pc.tail1234.ts.net`,
+`owner@example.com`, `100.64.0.1`); no real login, tailnet name, 100.x address or profile
+URL appears anywhere (R4-8).
+
+Stub added for compilation (the exactly specified §3 API, nothing more):
+`crates/remote/src/lib.rs` gains `FORWARDED_HOST_HEADER = "x-forwarded-host"`,
+`FORWARDED_PROTO_HEADER = "x-forwarded-proto"` and `FORWARDED_PROTO_HTTPS = "https"`.
+`check_host` itself is untouched, so every behavioural test fails on its assertion.
+
+### Tests added
+
+| Test (path::name) | Acceptance line / matrix ID | Red evidence (failure message) |
+|---|---|---|
+| `crates/remote/tests/identity_tests.rs::test_rmc_forwarded_header_constants` | spec §3 / §13.3 `lib.rs` row | G (green by construction: pins the constant values) |
+| `identity_tests.rs::test_rmc_check_host_effective_host_comes_from_x_forwarded_host` | §13.2 "Effective host", "Evaluation order"; RMC4 (R4-2) — XFH + `Host: localhost` → OK; XFH + `Host` absent → OK; XFH + `Host` repeated → OK; XFH + a `Host` that is refused alone → OK; neither header → `Missing`; `X-Forwarded-For` alone → `Missing`; XFH twice → `Repeated`; XFH twice + proto `http` → `Repeated`; `Host` twice without XFH → `Repeated` | `assertion left == right failed: Host: localhost is not inspected when X-Forwarded-Host is present` — `left: Err(NotAllowed)`, `right: Ok("pc.tail1234.ts.net")` |
+| `identity_tests.rs::test_rmc_check_host_normalises_the_forwarded_host` | §13.2 "Normalisation"; RMC4 (R4-3) — `" PC.Tail1234.TS.NET:443 "` → OK; `a.ts.net`, 253-byte name → OK; `:8443`, `:443:443`, `100.64.0.1`, IPv6 literal, `evil.com`, `localhost`, `a.ts.net, b.ts.net`, empty, OWS-only, trailing dot, `ts.net`, `pc.ts.net.evil.com`, `p_c.ts.net`, `https://…`, non-UTF-8, 254 bytes → `NotAllowed`, each also with a valid `Host` beside the refused XFH | `assertion left == right failed` — `left: Err(NotAllowed)`, `right: Ok("pc.tail1234.ts.net")` |
+| `identity_tests.rs::test_rmc_check_host_requires_https_forwarded_proto` | §13.2 "Transport"; RMC4 (R4-1) — XFH + proto absent / `http` / `https` twice (identical) / `https, https` / `https:` / `wss` / empty / non-UTF-8 / `httpsx` → `NotAllowed`; XFH + `HTTPS`, `" https "`, `"\thttps\t"` → OK; `Host` only + proto absent / `https` / `HTTPS` → OK; `Host` only + `http` / `https` twice / empty → `NotAllowed` | `assertion left == right failed: scheme compared ASCII-case-insensitively` — `left: Err(NotAllowed)`, `right: Ok("pc.tail1234.ts.net")` |
+| `identity_tests.rs::test_rmc_check_host_allowlist_applies_to_the_forwarded_host` | §13.2 + `allowed_hosts`; RMC4, RC-2 — XFH `mypc…` + `Host: other…` → `Ok("mypc.tail1234.ts.net")`; XFH `MYPC…:443` + `Host: localhost` → OK; XFH `other…` + `Host: mypc…` → `NotAllowed`; listed XFH + proto `http` → `NotAllowed` | `assertion left == right failed` — `left: Err(NotAllowed)`, `right: Ok("mypc.tail1234.ts.net")` |
+| `crates/remote/tests/server_tests.rs::test_rmc_serve_head_status_and_lock_end_to_end` | §13.1 capture reproduced by `serve_head()` (`Host: localhost`, `Tailscale-User-Login`, `X-Forwarded-For: 100.64.0.1`, `X-Forwarded-Host: pc.tail1234.ts.net`, `X-Forwarded-Proto: https`); §13.2 "Origin"; RMC20, RMC4 (R4-3) — `GET /api/status` → `200` (shape, mandatory headers, one logind read); `POST /api/lock` + `Origin: https://localhost` → `403 forbidden`, no `LockSession`, no read; + `Origin: https://pc.tail1234.ts.net` → `202 lock_requested`, one `LockSession(c0ffee42)`; + `Origin: https://PC.Tail1234.TS.NET:443` → `202` | `assertion left == right failed: "{\"result\":\"misdirected_request\"}"` — `left: 421`, `right: 200` (server_tests.rs:2215) |
+| `server_tests.rs::test_rmc_serve_head_with_http_proto_is_misdirected` | §13.2 "Transport" end to end; RMC4 (R4-1) — captured head with `X-Forwarded-Proto: http` → `421 misdirected_request` on `/api/status` and `/api/lock`, mandatory headers, no logind read, no `LockSession`; the same head with `https` → `200` (pins the `421` to the scheme, not to `Host: localhost`) | `assertion left == right failed: "{\"result\":\"misdirected_request\"}"` — `left: 421`, `right: 200` (server_tests.rs:2313; the `421` assertions pass on the current code for the wrong reason, the final `200` fails) |
+| `server_tests.rs::test_rmc_serve_head_without_proto_or_with_foreign_host_is_misdirected` | §13.2 end to end; RMC4 (R4-1, R4-2, R4-3) — captured head without `X-Forwarded-Proto`, with `X-Forwarded-Proto` twice, with `X-Forwarded-Host: evil.com`, `…:8443`, repeated XFH, XFH `100.64.0.1` → `421 misdirected_request` with mandatory headers and no logind read; the unmodified head → `200` | `assertion left == right failed` — `left: 421`, `right: 200` (server_tests.rs:2363, the accepted-head assertion) |
+| `server_tests.rs::test_rmc_allowed_hosts_apply_to_the_forwarded_host` | §13.3 e2e row (`allowed_hosts = ["mypc.tail1234.ts.net"]`); RMC4, RC-2 — captured head (XFH `pc…`) → `421`; XFH `MYPC.tail1234.ts.net:443` + `Host: localhost` → `200`, one read | `assertion left == right failed: "{\"result\":\"misdirected_request\"}"` — `left: 421`, `right: 200` (server_tests.rs:2384) |
+| `tests/invariants/src/remote_companion_contract.rs::test_rmc_s12_installer_scripts_are_executable` | §8 RMC-S12 (R4-5); RMC16 — `scripts/install_remote.sh` and `scripts/install.sh`: `metadata.permissions().mode() & 0o111 != 0`, `std::fs` only, no `git` subprocess | G on this working tree (the `100755` mode change is already staged). Teeth proven in a scratch run with `chmod 644 scripts/install_remote.sh` (mode restored to `755` afterwards, `git status` unchanged): `scripts/install_remote.sh must be executable (git mode 100755, RMC-S12); found 644` |
+| `remote_companion_contract.rs::test_rmc_s7b_documentation_describes_the_effective_host` | §8 RMC-S7b (R4-4); RMC19 — `Docs/REMOTE_COMPANION.md` contains `X-Forwarded-Host`, `X-Forwarded-Proto`, `effective host`; no longer contains `pending owner verification` or `(pending)` | `Docs/REMOTE_COMPANION.md must mention \`X-Forwarded-Host\` (RMC-S7b)` |
+
+### Migrated existing tests
+
+none — `test_rmc_check_host_requires_exactly_one_host_header`,
+`test_rmc_check_host_table_without_allowlist`, `test_rmc_check_host_table_with_allowlist`,
+`test_rmc_host_is_checked_before_identity_and_routing`,
+`test_rmc_allowed_hosts_config_is_enforced_end_to_end`,
+`test_rmc_s7_operator_documentation_exists_and_covers_the_requirements` and
+`test_rmc_identity_errors_never_echo_values` are untouched and pass (they send no
+`X-Forwarded-*` header; `HostError` variants, `Display` texts and the `421` mapping are
+unchanged by D5a′).
+
+### Red tally (2026-10-06)
+
+| Suite | Result |
+|---|---|
+| `identity_tests` | 10 passed (all pre-existing + `test_rmc_forwarded_header_constants`), 4 failed (new) |
+| `server_tests` | 28 passed (all pre-existing), 4 failed (new) |
+| invariants `remote_companion_contract` | 467 passed in the crate (RMC-S12 among them), 1 failed (`RMC-S7b`) |
+| rest of the workspace (`--no-fail-fast`) | no failure |
+
+### Flakiness check
+
+`cargo test --locked -p soos-remote --all-features --test server_tests -q serve_head` run
+10 times in a row: `0 passed; 3 failed` every time, identical assertions and line numbers
+(frozen-clock harness, real I/O, no wall-clock dependency);
+`test_rmc_allowed_hosts_apply_to_the_forwarded_host` fails deterministically at the same
+assertion. No `*.proptest-regressions` file was produced (no new property test).
+
+### Quality gates at hand-off
+
+- `cargo fmt --all -- --check`: clean.
+- `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`: clean.
+- `cargo test --locked --workspace --all-targets --all-features --no-fail-fast`: red only
+  in the 9 new tests listed above; every pre-existing test green.
+- `cargo deny --locked check`: `advisories ok, bans ok, licenses ok, sources ok`.
+- `./scripts/candid_review.sh`: `Candid Review PASSED`.
+
+### Notes for Phase 3 (auditor) and Phase 4 (developer)
+
+- `check_host` keeps its signature; the e2e `202`/`403` rows rely on `server.rs` passing
+  the value `check_host` returns to `check_lock_csrf` (already the case): the fix is
+  confined to `identity.rs` (plus the doc comments listed in spec §13.3).
+- The "Transport" rows pin the counting semantics: `X-Forwarded-Proto` twice with identical
+  `https` values is `NotAllowed`, so a first-header-wins or last-header-wins lookup fails;
+  reuse `single_header` with `NotAllowed` for both the missing and the repeated case when
+  XFH is present, and treat `Missing` as acceptable only when XFH is absent.
+- Evaluation order is pinned by "XFH twice + proto `http` → `Repeated`" and "`Host` twice
+  without XFH → `Repeated`": count XFH first, then decide the branch.
+- `test_rmc_serve_head_status_and_lock_end_to_end` asserts `reads() == 1` after the `403`
+  (CSRF before any logind read) and `== 2` after the first `202` (exactly one fresh
+  snapshot per accepted lock) — the current dispatch order already satisfies both.
+- RMC-S7b and the §13.3 `Docs/REMOTE_COMPANION.md` rows (including the Shortcuts hedge,
+  R4-6/R4-7) are the developer's and traceability agent's documentation work; the needles
+  are the only thing the test checks, the content rules are in spec §13.3.

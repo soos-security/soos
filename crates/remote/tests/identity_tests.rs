@@ -1,5 +1,5 @@
 //! Contract tests of GitHub #339 for the pure Host and identity checks (spec §2.4, D3, D5a,
-//! RC-2).
+//! D5a′ effective host from `X-Forwarded-Host` (§13.2, Revision 4), RC-2).
 
 #![allow(
     clippy::unwrap_used,
@@ -15,7 +15,10 @@
 
 use soos_remote::config::TailscaleLogin;
 use soos_remote::identity::{authorize, check_host, AuthError, HostError};
-use soos_remote::{MAX_HOST_LEN, MAX_LOGIN_LEN};
+use soos_remote::{
+    FORWARDED_HOST_HEADER, FORWARDED_PROTO_HEADER, FORWARDED_PROTO_HTTPS, MAX_HOST_LEN,
+    MAX_LOGIN_LEN,
+};
 
 fn login(raw: &str) -> TailscaleLogin {
     TailscaleLogin::parse(raw).unwrap()
@@ -271,4 +274,302 @@ fn test_rmc_identity_errors_never_echo_values() {
     assert_eq!(HostError::Missing.to_string(), "host header missing");
     assert_eq!(HostError::Repeated.to_string(), "host header repeated");
     assert_eq!(HostError::NotAllowed.to_string(), "host not allowed");
+}
+
+// ---------------------------------------------------------------------------------------
+// check_host — D5a′ effective host (spec §13.2, Revision 4)
+// ---------------------------------------------------------------------------------------
+
+const XFH: &str = "X-Forwarded-Host";
+const XFP: &str = "X-Forwarded-Proto";
+const OK_HOST: &str = "pc.tail1234.ts.net";
+
+fn ok_host() -> Result<String, HostError> {
+    Ok(OK_HOST.to_string())
+}
+
+/// §3 / §13.3: the forwarded header names and the accepted scheme are single-source
+/// constants (lowercased names, as `IDENTITY_HEADER`).
+#[test]
+fn test_rmc_forwarded_header_constants() {
+    assert_eq!(FORWARDED_HOST_HEADER, "x-forwarded-host");
+    assert_eq!(FORWARDED_PROTO_HEADER, "x-forwarded-proto");
+    assert_eq!(FORWARDED_PROTO_HTTPS, "https");
+}
+
+/// D5a′ "Effective host": when `X-Forwarded-Host` is present exactly once it decides the
+/// effective host and `Host` is not inspected (absent, single or repeated give the same
+/// result); `Missing` means neither header is present; a repeated `X-Forwarded-Host` is
+/// `Repeated` before the proto rule is evaluated.
+#[test]
+fn test_rmc_check_host_effective_host_comes_from_x_forwarded_host() {
+    // The captured Serve head (§13.1): `Host: localhost`, real name in XFH.
+    assert_eq!(
+        host_check(&[
+            ("Host", b"localhost"),
+            ("Tailscale-User-Login", b"owner@example.com"),
+            ("X-Forwarded-For", b"100.64.0.1"),
+            (XFH, OK_HOST.as_bytes()),
+            (XFP, b"https"),
+        ]),
+        ok_host(),
+        "Host: localhost is not inspected when X-Forwarded-Host is present"
+    );
+    assert_eq!(
+        host_check(&[(XFH, OK_HOST.as_bytes()), (XFP, b"https")]),
+        ok_host(),
+        "Host absent"
+    );
+    assert_eq!(
+        host_check(&[
+            ("Host", b"localhost"),
+            ("host", b"evil.com"),
+            (XFH, OK_HOST.as_bytes()),
+            (XFP, b"https"),
+        ]),
+        ok_host(),
+        "a repeated Host is not inspected either"
+    );
+    assert_eq!(
+        host_check(&[
+            ("Host", b"evil.com"),
+            (XFH, OK_HOST.as_bytes()),
+            (XFP, b"https")
+        ]),
+        ok_host(),
+        "a single Host that would be refused on its own is not inspected"
+    );
+    assert_eq!(
+        host_check(&[(XFP, b"https")]),
+        Err(HostError::Missing),
+        "neither X-Forwarded-Host nor Host"
+    );
+    assert_eq!(
+        host_check(&[("X-Forwarded-For", b"100.64.0.1"), (XFP, b"https")]),
+        Err(HostError::Missing),
+        "X-Forwarded-For never stands in for the host"
+    );
+    assert_eq!(
+        host_check(&[
+            ("Host", b"localhost"),
+            (XFH, OK_HOST.as_bytes()),
+            ("x-forwarded-host", OK_HOST.as_bytes()),
+            (XFP, b"https"),
+        ]),
+        Err(HostError::Repeated),
+        "X-Forwarded-Host twice (identical values, case-insensitive name)"
+    );
+    assert_eq!(
+        host_check(&[
+            (XFH, OK_HOST.as_bytes()),
+            (XFH, OK_HOST.as_bytes()),
+            (XFP, b"http"),
+        ]),
+        Err(HostError::Repeated),
+        "the repeated check precedes the proto check"
+    );
+    assert_eq!(
+        host_check(&[("Host", OK_HOST.as_bytes()), ("Host", OK_HOST.as_bytes())]),
+        Err(HostError::Repeated),
+        "without X-Forwarded-Host the D5a Host rules still apply"
+    );
+}
+
+/// D5a′ "Normalisation": the forwarded host goes through the same pipeline as `Host`
+/// (OWS, lowercase, one `:443`, `is_valid_host_name`, `*.ts.net` rule).
+#[test]
+fn test_rmc_check_host_normalises_the_forwarded_host() {
+    assert_eq!(
+        host_check(&[
+            ("Host", b"localhost"),
+            (XFH, b" PC.Tail1234.TS.NET:443 "),
+            (XFP, b"https"),
+        ]),
+        ok_host()
+    );
+    assert_eq!(
+        host_check(&[("Host", b"localhost"), (XFH, b"a.ts.net"), (XFP, b"https")]),
+        Ok("a.ts.net".to_string())
+    );
+    let longest = format!("{}.ts.net", "a".repeat(MAX_HOST_LEN - ".ts.net".len()));
+    assert_eq!(
+        host_check(&[
+            ("Host", b"localhost"),
+            (XFH, longest.as_bytes()),
+            (XFP, b"https"),
+        ]),
+        Ok(longest.clone())
+    );
+    let too_long = format!("a{longest}");
+    let cases: Vec<Vec<u8>> = vec![
+        b"pc.tail1234.ts.net:8443".to_vec(),
+        b"pc.tail1234.ts.net:443:443".to_vec(),
+        b"100.64.0.1".to_vec(),
+        b"[fd7a:115c::1]:443".to_vec(),
+        b"evil.com".to_vec(),
+        b"localhost".to_vec(),
+        b"a.ts.net, b.ts.net".to_vec(),
+        b"a.ts.net,b.ts.net".to_vec(),
+        b"".to_vec(),
+        b"   ".to_vec(),
+        b"pc.tail1234.ts.net.".to_vec(),
+        b"ts.net".to_vec(),
+        b"pc.ts.net.evil.com".to_vec(),
+        b"p_c.ts.net".to_vec(),
+        b"https://pc.tail1234.ts.net".to_vec(),
+        b"\xff.ts.net".to_vec(),
+        too_long.into_bytes(),
+    ];
+    for value in cases {
+        assert_eq!(
+            host_check(&[("Host", b"localhost"), (XFH, &value), (XFP, b"https")]),
+            Err(HostError::NotAllowed),
+            "{value:?}"
+        );
+        assert_eq!(
+            host_check(&[("Host", OK_HOST.as_bytes()), (XFH, &value), (XFP, b"https")]),
+            Err(HostError::NotAllowed),
+            "a valid Host never rescues a refused X-Forwarded-Host: {value:?}"
+        );
+    }
+}
+
+/// D5a′ "Transport": with `X-Forwarded-Host`, exactly one `X-Forwarded-Proto` equal to
+/// `https` (ASCII-case-insensitive, OWS-trimmed) is mandatory; without it the proto header
+/// is optional but, when present, must still be exactly one `https`.
+#[test]
+fn test_rmc_check_host_requires_https_forwarded_proto() {
+    let xfh: (&str, &[u8]) = (XFH, OK_HOST.as_bytes());
+    let host: (&str, &[u8]) = ("Host", OK_HOST.as_bytes());
+    let localhost: (&str, &[u8]) = ("Host", b"localhost");
+
+    // With X-Forwarded-Host: mandatory.
+    assert_eq!(
+        host_check(&[localhost, xfh]),
+        Err(HostError::NotAllowed),
+        "proto absent with X-Forwarded-Host"
+    );
+    assert_eq!(
+        host_check(&[localhost, xfh, (XFP, b"http")]),
+        Err(HostError::NotAllowed),
+        "tailscale serve --http"
+    );
+    assert_eq!(
+        host_check(&[
+            localhost,
+            xfh,
+            (XFP, b"https"),
+            ("x-forwarded-proto", b"https")
+        ]),
+        Err(HostError::NotAllowed),
+        "two identical https values are still repeated"
+    );
+    assert_eq!(
+        host_check(&[localhost, xfh, (XFP, b"HTTPS")]),
+        ok_host(),
+        "scheme compared ASCII-case-insensitively"
+    );
+    assert_eq!(
+        host_check(&[localhost, xfh, (XFP, b" https ")]),
+        ok_host(),
+        "OWS around the scheme is trimmed"
+    );
+    assert_eq!(
+        host_check(&[localhost, xfh, (XFP, b"\thttps\t")]),
+        ok_host(),
+        "HTAB is OWS"
+    );
+    for bad in [
+        &b"https, https"[..],
+        b"https,http",
+        b"http, https",
+        b"https:",
+        b"https://",
+        b"wss",
+        b"",
+        b"   ",
+        b"\xff",
+        b"httpsx",
+        b"xhttps",
+    ] {
+        assert_eq!(
+            host_check(&[localhost, xfh, (XFP, bad)]),
+            Err(HostError::NotAllowed),
+            "{bad:?}"
+        );
+    }
+
+    // Without X-Forwarded-Host: optional, but https when present.
+    assert_eq!(host_check(&[host]), ok_host(), "direct local client");
+    assert_eq!(host_check(&[host, (XFP, b"https")]), ok_host());
+    assert_eq!(host_check(&[host, (XFP, b"HTTPS")]), ok_host());
+    assert_eq!(
+        host_check(&[host, (XFP, b"http")]),
+        Err(HostError::NotAllowed),
+        "Host only + proto http"
+    );
+    assert_eq!(
+        host_check(&[host, (XFP, b"https"), (XFP, b"https")]),
+        Err(HostError::NotAllowed),
+        "Host only + proto https twice"
+    );
+    assert_eq!(
+        host_check(&[host, (XFP, b"")]),
+        Err(HostError::NotAllowed),
+        "Host only + empty proto"
+    );
+}
+
+/// D5a′ + `allowed_hosts`: the allowlist applies to the effective host, so a listed
+/// `X-Forwarded-Host` passes whatever `Host` says, and an unlisted one is refused even when
+/// `Host` is listed.
+#[test]
+fn test_rmc_check_host_allowlist_applies_to_the_forwarded_host() {
+    let allowed = vec!["mypc.tail1234.ts.net".to_string()];
+    assert_eq!(
+        check_host(
+            &[
+                ("Host", b"other.tail1234.ts.net"),
+                (XFH, b"mypc.tail1234.ts.net"),
+                (XFP, b"https"),
+            ],
+            &allowed
+        ),
+        Ok("mypc.tail1234.ts.net".to_string())
+    );
+    assert_eq!(
+        check_host(
+            &[
+                ("Host", b"localhost"),
+                (XFH, b"MYPC.tail1234.ts.net:443"),
+                (XFP, b"https"),
+            ],
+            &allowed
+        ),
+        Ok("mypc.tail1234.ts.net".to_string())
+    );
+    assert_eq!(
+        check_host(
+            &[
+                ("Host", b"mypc.tail1234.ts.net"),
+                (XFH, b"other.tail1234.ts.net"),
+                (XFP, b"https"),
+            ],
+            &allowed
+        ),
+        Err(HostError::NotAllowed),
+        "a listed Host never rescues an unlisted X-Forwarded-Host"
+    );
+    assert_eq!(
+        check_host(
+            &[
+                ("Host", b"localhost"),
+                (XFH, b"mypc.tail1234.ts.net"),
+                (XFP, b"http"),
+            ],
+            &allowed
+        ),
+        Err(HostError::NotAllowed),
+        "the proto rule holds with an allowlist"
+    );
 }

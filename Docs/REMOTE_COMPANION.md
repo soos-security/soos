@@ -44,12 +44,20 @@ Consequences:
   `tailscale serve --http` (plain HTTP) or `tailscale funnel` (public internet) for it: each one
   voids the model (forgeable headers, no tailnet identity, or exposure beyond the owner's
   devices).
-- The `Host` header must be an allowed `*.ts.net` name (or a name from `allowed_hosts`);
+- The **effective host** (`X-Forwarded-Host` as set by `tailscale serve`, or `Host` for a
+  direct local client) must be an allowed `*.ts.net` name (or a name from `allowed_hosts`);
   anything else is `421 Misdirected Request`, which defeats DNS rebinding even if the socket
-  were ever reached over plain HTTP.
+  were ever reached over plain HTTP. When `X-Forwarded-Host` is present the `Host` header
+  (the proxy's backend name, `localhost` today) is not inspected at all.
+- A proxied request (one carrying `X-Forwarded-Host`) must also carry exactly one
+  `X-Forwarded-Proto: https`; anything else is `421`, so the `--http` ban above is enforced,
+  not only documented. `tailscale serve` was observed (Tailscale 1.102.4, 2026-10-06) to
+  overwrite a client-supplied `X-Forwarded-Host`, `X-Forwarded-Proto` and
+  `Tailscale-User-Login` with the real values; these three are the only headers the checks
+  rely on (`X-Forwarded-For` is sent too but ignored by the service).
 - `POST /api/lock` additionally needs `X-Soos-Action: lock` (a non-simple header a cross-origin
   page cannot send without a CORS preflight, which is never answered), `Sec-Fetch-Site` absent or
-  `same-origin`, and `Origin` absent or equal to `https://<Host>`.
+  `same-origin`, and `Origin` absent or equal to `https://<effective host>`.
 - Nothing about a request is logged: no identity, no `Host`, no path, no header value, no
   session id. Denials log their reason class only.
 
@@ -128,27 +136,78 @@ never runs `tailscale`; those are your steps:
 the unit; the configuration is kept. To undo step 3 run `tailscale serve reset` (or remove only
 this handler with `tailscale serve --https=443 off`).
 
-### Owner verification of the `Host` forwarding (pending)
+### What `tailscale serve` forwards to the socket (verified)
 
-The design assumes that `tailscale serve unix:` forwards the original `Host` header (the
-`*.ts.net` name the phone used). This cannot be verified by the development agents; the owner
-confirms it once after step 3:
+Verified by the owner on 2026-10-06 with Tailscale 1.102.4 (`tailscale serve --bg unix:`,
+tailnet only): `tailscale serve unix:` does **not** forward the original `Host`. A request for
+`https://<pc>.<tailnet>.ts.net/api/status` reaches the socket as
 
-```bash
-curl -sS -o /dev/null -w '%{http_code}\n' https://<this-pc>.<tailnet>.ts.net/api/status
+```text
+GET /api/status HTTP/1.1
+Host: localhost
+Tailscale-User-Login: <login>
+X-Forwarded-For: 100.x.y.z
+X-Forwarded-Host: <pc>.<tailnet>.ts.net
+X-Forwarded-Proto: https
 ```
 
-Expected `200` (through the tailnet, from a logged-in device). A `421` means the proxy does not
-forward the original `Host`; in that case set `allowed_hosts` to the name it does forward, or
-report it so the design is revisited (spec D5a). Until the owner confirms, this check is
-recorded as **pending owner verification** in the walkthrough.
+so the service takes the effective host from `X-Forwarded-Host` and requires
+`X-Forwarded-Proto: https` on such a request (section 2). A client that sent forged
+`X-Forwarded-Host`, `X-Forwarded-Proto` and `Tailscale-User-Login` values reached the socket
+with the real ones: Serve overwrites all three. Post-install check, from a logged-in device on
+the tailnet:
+
+```bash
+curl -sS -o /dev/null -w '%{http_code}\n' https://<pc>.<tailnet>.ts.net/api/status
+```
+
+Expected `200`. A `421` means the effective host is not accepted or the transport is not
+`https`: see section 7.
+
+### iPhone home screen and Shortcuts
+
+Every option below goes through the Tailscale VPN, so the iPhone must be connected to the
+tailnet (the Tailscale app, optionally with *VPN On Demand*). Replace `<pc>.<tailnet>.ts.net`
+with the name printed by `tailscale serve status` (the same name Safari shows in the address
+bar). If you read it from `tailscale status --json` (`Self.DNSName`) instead, drop the trailing
+dot: `Self.DNSName` ends with `.` (`pc.<tailnet>.ts.net.`), and the service refuses a host with
+a trailing dot (`421`).
+
+**Web app icon.** Open `https://<pc>.<tailnet>.ts.net` in Safari, then *Share* → *Add to Home
+Screen*. The icon opens the page full screen (live status and the *Lock now* button).
+
+**"Lock PC" shortcut (one tap, or Siri).** In the Shortcuts app, create a shortcut with:
+
+1. *Get Contents of URL*
+   - URL: `https://<pc>.<tailnet>.ts.net/api/lock`
+   - Method: `POST`
+   - Headers: `X-Soos-Action` = `lock`
+   - Request Body: *File*, with no file selected (the documented way to send an empty body;
+     the service refuses any request body with `413`, and an empty JSON body `{}` is a body;
+     a `Content-Length: 0` header is accepted, so a client that declares an empty body is fine)
+2. *Get Dictionary Value* `result` from *Contents of URL*.
+3. *Show Notification* with the *Dictionary Value* (`lock_requested`, `already_locked`,
+   `no_session`, `rate_limited`, `unavailable`, `forbidden` or `misdirected_request`; any
+   other value, or a `421`/`403`, is a configuration problem: see section 7).
+
+Name it "Lock PC", then *Share* → *Add to Home Screen* for a one-tap button. Siri runs it by name
+("Hey Siri, Lock PC"). The shortcut passes the CSRF check because it sends the action header and
+no `Origin` or `Sec-Fetch-Site` header (the server accepts an absent `Origin`); the identity
+still comes from Tailscale, so it works only on a device logged in with an allowed login. If
+the shortcut reports an error instead of a notification, the service refused the request
+(`403`, `421`, `413`): check section 7 and that the body is empty.
+
+**"PC status" shortcut.** *Get Contents of URL* `https://<pc>.<tailnet>.ts.net/api/status`
+(method `GET`), then *Get Dictionary Value* `state`, then *Show Notification* (or *Speak Text*).
+`state` is `locked`, `unlocked`, `no_session` or `unavailable`; if the request itself fails,
+the PC is unreachable (off, asleep, or Tailscale disconnected).
 
 ## 5. Configuration (`remote.toml`)
 
 | Key | Required | Default | Bounds / meaning |
 |---|---|---|---|
 | `allowed_logins` | yes | — | 1..=8 Tailscale logins (`Tailscale-User-Login` values), printable ASCII, compared case-insensitively; empty → the service refuses to start |
-| `allowed_hosts` | no | `[]` (any valid `*.ts.net` name) | 0..=4 DNS names accepted in `Host` (lowercased, no port, no scheme) |
+| `allowed_hosts` | no | `[]` (any valid `*.ts.net` name) | 0..=4 DNS names accepted as the effective host (`X-Forwarded-Host`, or `Host`) (lowercased, no port, no scheme) |
 | `poll_interval_ms` | no | 1000 | 250..=10000; logind polling cadence **while a stream is open**; out of range → refused, never clamped |
 | `socket_path` | no | `$XDG_RUNTIME_DIR/soos-remote/remote.sock` | absolute, at most 107 bytes; `XDG_RUNTIME_DIR` unset or relative without `socket_path` → refused (no `/tmp` fallback) |
 
@@ -178,14 +237,15 @@ write, no request body (`413` / `400`), 1.5 s per logind snapshot, 2 s per lock 
 ## 7. Troubleshooting
 
 Start with `systemctl --user status soos-remote` and `journalctl --user -u soos-remote -e`.
-Logs never contain the identity, the `Host`, a path or a header value, only reason classes.
+Logs never contain the identity, the `Host`, the effective host, a path or a header value, only
+reason classes.
 
 | Symptom | Cause | Fix |
 |---|---|---|
 | Unit `failed`, exit status 78, not restarted | Configuration refused: `configuration file not found`, `allowed_logins is empty`, `poll_interval_ms out of range`, `socket_path must be absolute…`, `XDG_RUNTIME_DIR is not set or not absolute`, `configuration is not valid TOML for soos-remote` (unknown key included), `soos-remote must not run as root`, or a socket directory that is a symlink, a file or not yours | Fix `remote.toml` (section 5) or the socket directory, then `systemctl --user restart soos-remote` |
 | Unit restarts every 5 s with exit status 1 | Runtime failure: the socket directory could not be created or bound (`$XDG_RUNTIME_DIR` missing, see linger in section 4), or the poller or accept loop ended | Check the journal line before the exit; make sure `$XDG_RUNTIME_DIR` exists for your user |
 | Phone gets `403` on every page | Your login is not in `allowed_logins` (compared case-insensitively, the value is the Tailscale account login, usually the e-mail), the request did not come through `tailscale serve` (no `Tailscale-User-Login`: Funnel, a tagged device, a direct `curl` on the socket), or the header was repeated | Fix the list; use a device logged in with your account; never expose the socket another way |
-| Phone gets `421 Misdirected Request` | The `Host` is not an allowed `*.ts.net` name or not in `allowed_hosts`, or the proxy does not forward the original `Host` (section 4) | Set `allowed_hosts` to the forwarded name, or report the drift |
+| Phone gets `421 Misdirected Request` | The effective host (`X-Forwarded-Host`, section 4) is not an allowed `*.ts.net` name / not in `allowed_hosts`, or `X-Forwarded-Proto` is missing or not `https` (`tailscale serve --http`, a port other than 443) | Use `tailscale serve --bg unix:` on port 443; set `allowed_hosts` if the name differs |
 | Page shows `Unreachable` | No event for 45 s: the PC is off, asleep or off the tailnet, `tailscaled` is stopped, the unit is down, or iOS suspended the web app | Bring the page back to the foreground (it reconnects), check `tailscale status` and the unit |
 | Status `Unavailable` | logind could not be read within the bounds (system bus down, `ListSessions`/`GetAll` failed or timed out, too many sessions) | `busctl --system status org.freedesktop.login1`; the status never falls back to a stale value |
 | Status `No session` | None of your sessions is `Class=user`, `Remote=false` and on a seat (only SSH, a greeter, or you are logged out) | Expected from the login screen; log in locally |
@@ -202,7 +262,10 @@ Logs never contain the identity, the `Host`, a path or a header value, only reas
   consumer. The page shows `Unreachable` when no event arrived for 45 s (measured on the phone
   from the last event's arrival, not from `checked_unix_ms`).
 - The status is only as truthful as the desktop's `LockedHint` (section 3).
-- The `Host` forwarding by `tailscale serve unix:` is pending owner verification (section 4).
+- The host and transport checks rely on `tailscale serve` setting `X-Forwarded-Host` and
+  `X-Forwarded-Proto` (verified with Tailscale 1.102.4, 2026-10-06; section 4); a Serve
+  release that stops sending them makes every proxied request `421` (fail-closed, section 7),
+  never `200`.
 - The `bind` → `chmod 0600` window of the socket is closed by the `0700` parent directory and
   the unit's `UMask=0077`; the service must therefore be started through the unit (or with the
   same umask).

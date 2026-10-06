@@ -1,86 +1,58 @@
 # Candid Review Report
 
-- **Date**: 2026-10-05
-- **Target Branch**: `feat/remote-companion` (GitHub #339, draft PR; owner decision: no merge without an explicit go)
+- **Date**: 2026-10-06
+- **Target Branch**: `feat/remote-companion` (GitHub #339, draft PR; not merged until the owner says so)
 - **Base (merge-base)**: `222665f`
-- **Reviewed-Diff-Fingerprint**: `a2b42b2fdeab35ec6b6e8844e4ca3f8b276496b5eb040515d203f23372aa5a15`
-- **Audited Files** (48, from `target/candid_diff.patch`, 11 095 lines):
-  `.agents/skills/dev-workflow/references/project-facts.md`, `AGENTS.md`, `AI/ARCHITECTURE.md`,
-  `AI/DECISIONS.md`, `AI/MOCK_STRATEGY.md`, `AI/VERIFICATION_MATRIX.md`,
-  `AI/architect_spec_remote_companion.md`, `AI/auditor_constraints_remote_companion.md`,
-  `AI/tester_contract_remote_companion.md`, `AI/walkthroughs/183_remote_companion.md`,
-  `Cargo.lock`, `Cargo.toml`, `Docs/README.md`, `Docs/REMOTE_COMPANION.md`,
-  `Docs/SECURITY_AND_QUALITY_GUIDELINES.md`, `crates/remote/Cargo.toml`,
-  `crates/remote/assets/{app.js, apple-touch-icon.png, icon.svg, index.html, manifest.webmanifest, style.css}`,
-  `crates/remote/src/{assets.rs, config.rs, http.rs, identity.rs, lib.rs, logind.rs, main.rs, routes.rs, server.rs, session.rs, socket.rs, status.rs}`,
-  `crates/remote/tests/{config_tests.rs, http_tests.rs, identity_tests.rs, routes_tests.rs, server_tests.rs, session_tests.rs, socket_tests.rs}`,
-  `packaging/soos-remote.service`, `scripts/candid_review.sh`, `scripts/install_remote.sh`,
-  `tests/invariants/src/lib.rs`, `tests/invariants/src/presence_unlock_contract.rs`,
-  `tests/invariants/src/remote_companion_contract.rs`
-
-This is a fresh, context-free review of the complete working tree (the whole change is
-uncommitted: `git log origin/main..HEAD` is empty). It supersedes the earlier report bound to
-fingerprint `793d899a…51f4`, which predates the Phase 6 documents (walkthrough 183, matrix rows
-RMC1–RMC21, ADR item (4) wording, `Docs/REMOTE_COMPANION.md` corrections). I did not rely on
-that report, the walkthrough or the author summaries; every statement below was checked
-against the patch and the surrounding code.
+- **Reviewed-Diff-Fingerprint**: `13b1b076f8112f70811a587c58b24d4ed00703d97da414ab7cc6cf7efab3089b`
+- **Audited Files** (49, from `target/candid_diff.patch`, 12 153 lines; commit `0b0b50c` plus the
+  revision-4/5 working tree):
+  - Production: `crates/remote/Cargo.toml`, `crates/remote/src/{lib,main,config,identity,http,routes,session,logind,status,server,socket,assets}.rs`, `crates/remote/assets/{index.html,app.js,style.css,manifest.webmanifest,icon.svg,apple-touch-icon.png}`
+  - Tests: `crates/remote/tests/{config,http,identity,routes,server,session,socket}_tests.rs`, `tests/invariants/src/lib.rs`, `tests/invariants/src/presence_unlock_contract.rs`, `tests/invariants/src/remote_companion_contract.rs`
+  - Build / automation: `Cargo.toml`, `Cargo.lock`, `packaging/soos-remote.service`, `scripts/install_remote.sh` (mode `100644 → 100755`, content unchanged), `scripts/candid_review.sh`
+  - Documentation: `AGENTS.md`, `.agents/skills/dev-workflow/references/project-facts.md`, `AI/ARCHITECTURE.md`, `AI/DECISIONS.md`, `AI/MOCK_STRATEGY.md`, `AI/VERIFICATION_MATRIX.md`, `AI/architect_spec_remote_companion.md` (revision 5, §13), `AI/auditor_constraints_remote_companion.md`, `AI/tester_contract_remote_companion.md`, `AI/walkthroughs/183_remote_companion.md`, `Docs/README.md`, `Docs/REMOTE_COMPANION.md`, `Docs/SECURITY_AND_QUALITY_GUIDELINES.md`
 
 ## 1. Executive Summary
 
-The diff adds the leaf crate `soos-remote` (user-level companion: real-time lock status over
-Server-Sent Events and remote lock through `Manager.LockSession`, served on a `0600` Unix
-socket in a `0700` directory behind `tailscale serve`), its user unit, a per-user installer,
-operator documentation, an ADR, the static contract `remote_companion_contract.rs` (18 tests),
-seven integration suites (97 tests) and the spec-mandated migration of
-`test_pau_zbus_is_used_only_by_the_daemon`. No existing crate, PAM pathway, IPC schema,
-daemon code or CI workflow changes (`crates/pam`, `crates/daemon`, `crates/protocol`,
-`.github/` are absent from the patch).
+The diff adds the leaf crate `soos-remote`: a user-level, `#![forbid(unsafe_code)]`,
+current-thread Tokio service that serves the owner's phone a lock-status page (Server-Sent Events
+fed by bounded logind reads) and a remote `Manager.LockSession` over a `0600` Unix socket behind
+`tailscale serve`, plus its user unit, per-user installer, static contracts and documentation.
+The working tree on top of `0b0b50c` implements spec §13 (D5a′): the effective host is taken from
+`X-Forwarded-Host` when present (`Host` not inspected), a proxied request must carry exactly one
+`X-Forwarded-Proto: https`, and the owner's verification of the Serve head (Tailscale 1.102.4) is
+recorded in redacted form only.
 
-Evidence gathered on the frozen tree (all commands run by me during this review):
-`cargo fmt --all -- --check` clean; `cargo clippy -p soos-remote --all-targets -- -D warnings`
-clean; `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings` clean;
-`cargo test -p soos-remote` → 97 passed, 0 failed (config 18, http 16, identity 9, routes 7,
-server 28, session 10, socket 9); `cargo test -p soos-invariants` → 466 passed, 0 failed;
-`cargo deny --locked check` → `advisories ok, bans ok, licenses ok, sources ok`; `Cargo.lock`
-gains exactly one `[[package]]` (`soos-remote`) and no external crate.
+This review was done cold, from the frozen patch and the code it lands in. I read every
+production file in full, the new D5a′ unit and end-to-end tests, the static contracts, the
+migrated presence contract, the unit, the installer, the web assets and the documentation
+deltas, and ran the CI commands on the reviewed fingerprint: `cargo fmt --all --check` (clean),
+`cargo clippy -p soos-remote --all-targets -- -D warnings` (clean), `cargo test -p soos-remote`
+(106 passed), `cargo test -p soos-invariants` (468 passed, matrix citations included) and
+`cargo deny --locked check bans licenses sources` (ok). No CRITICAL or MAJOR defect was found.
+Two MINOR findings (an installer template comment and a tie-break wording drift between the
+phase documents) and three SUGGESTIONS are listed in §4; none blocks the merge.
 
-I tried to break the design along every pillar: a path from a logind failure, a missing
-header, a stale reading or a slow read to `unlocked`/`202`; an unbounded read, write,
-allocation or stream; a race between the poller's `seq` and a stream's first read; a
-rate-limit bypass through concurrency; a Host/Origin/CSRF bypass; a symlink or ownership race
-on the socket directory; an identity or request datum reaching a log line; a weakened or
-masked test. None of these produced a CRITICAL or MAJOR finding. Five MINOR findings and three
-suggestions are recorded in §4 (two of them already known from the superseded report and now
-carried in the ADR and the walkthrough follow-ups). The verdict is **APPROVED**.
+## 2. Test Changes (mechanical listing from step 3)
 
-## 2. Test Changes (mechanical listing from step 3, with justification per change)
+Commands run on the frozen patch (`P=target/candid_diff.patch`):
 
-Commands run on `target/candid_diff.patch`:
-
-- **Test files touched**: `crates/remote/tests/{config,http,identity,routes,server,session,socket}_tests.rs`
+- Test files touched: `crates/remote/tests/{config,http,identity,routes,server,session,socket}_tests.rs`
   (all new), `tests/invariants/src/lib.rs`, `tests/invariants/src/presence_unlock_contract.rs`,
   `tests/invariants/src/remote_companion_contract.rs` (new).
-- **Removed/changed checks** (`^-[^-].*(assert|#\[test\]|…)`): **one** hit, patch line 9743,
-  in `tests/invariants/src/presence_unlock_contract.rs::test_pau_zbus_is_used_only_by_the_daemon`.
-  The single `assert!(toml_table(&daemon, "dependencies").contains(&"zbus = { workspace = true }"))`
-  over `crates/daemon/Cargo.toml` becomes the same assertion over each of exactly two allowed
-  manifests (`crates/daemon/Cargo.toml`, `crates/remote/Cargo.toml`) **plus** two new
-  assertions (`zbus` named exactly once per allowed manifest; both allowed manifests exist,
-  `allowed_seen == ALLOWED.len()`). The "every other manifest under `crates/` and `tests/`
-  must not mention `zbus`" loop is kept with `ALLOWED.contains(&rel.as_str())` replacing the
-  single-path comparison; the PAM `no zbus / no dbus` assertion and the test name are
-  unchanged; a doc comment cites the ADR. **Justification**: architect spec §2.12 "Contract
-  migration" and ADR 2026-10-05 item (7), an owner-approved scope change of the 2026-10-02
-  decision; the migrated test is strictly stronger for every manifest it already covered and
-  weaker for none. Matrix row PAU17 keeps citing the test (italic scope annotation added).
-  **Not a weakening.**
-- **New escape hatches** (`#[ignore`, `#[cfg(any())]`, `should_panic`, `tolerance`, `epsilon`):
-  **none**.
-- **Inline `mod tests`** added or removed: **none** (all remote tests live in `tests/`; the
-  lib and bin unit-test targets are empty, as `cargo test` reports).
-- `tests/invariants/src/lib.rs`: `"remote"` appended to the `business_crates` list of
-  `test_business_crates_forbid_unsafe_code` and `mod remote_companion_contract;` registered
-  (strengthening only).
+- Removed/changed checks (`^-[^-].*(assert|#\[test\]|#\[tokio::test|proptest!|#\[should_panic)`):
+  **one** hit, patch line 10752, the `assert!(daemon manifest declares zbus)` of
+  `tests/invariants/src/presence_unlock_contract.rs::test_pau_zbus_is_used_only_by_the_daemon`.
+  All six removed lines in test files belong to that one hunk (listed with `awk` over the patch).
+- New escape hatches (`#[ignore`, `#[cfg(any())]`, `should_panic`, `tolerance`, `epsilon`): **none**.
+- Inline `mod tests` added or removed: **none** (no in-source `#[cfg(test)]` module in `crates/remote/src`).
+
+Justification per change:
+
+| Change | Justification | Verdict |
+|---|---|---|
+| `presence_unlock_contract.rs::test_pau_zbus_is_used_only_by_the_daemon`: the single daemon assertion becomes a loop over `ALLOWED = ["crates/daemon/Cargo.toml", "crates/remote/Cargo.toml"]` asserting the exact `zbus = { workspace = true }` line **and** exactly one `zbus` mention per manifest, plus a new `allowed_seen == 2` assertion; the "every other manifest is zbus-free" loop and the PAM `no zbus / no dbus` assertion are unchanged; the test name is kept (matrix row PAU17). | Contract migration recorded in the test's doc comment and in spec §2.12: ADR 2026-10-05 "Remote Companion `soos-remote`" item (7) widens "zbus is daemon-only" to exactly two crates, an owner-approved scope change. The replacement is strictly stronger (adds exactly-once and both-manifests-exist). | Justified, not a weakening |
+| `tests/invariants/src/lib.rs`: `"remote"` appended to `business_crates` in `test_business_crates_forbid_unsafe_code`; new `mod remote_companion_contract`. | Spec §1.1; mirrored by `scripts/candid_review.sh` `BUSINESS_CRATES` and enforced by `test_rmc_forbid_unsafe_list_and_review_tooling_include_remote`. | Strengthening |
+| Revision 4/5 tests are **new functions only**: `identity_tests.rs` gains `test_rmc_forwarded_header_constants`, `test_rmc_check_host_effective_host_comes_from_x_forwarded_host`, `test_rmc_check_host_normalises_the_forwarded_host`, `test_rmc_check_host_requires_https_forwarded_proto`, `test_rmc_check_host_allowlist_applies_to_the_forwarded_host`; `server_tests.rs` gains `serve_head()` / `serve_head_without()` and `test_rmc_serve_head_status_and_lock_end_to_end`, `test_rmc_serve_head_with_http_proto_is_misdirected`, `test_rmc_serve_head_without_proto_or_with_foreign_host_is_misdirected`, `test_rmc_allowed_hosts_apply_to_the_forwarded_host`; `remote_companion_contract.rs` gains RMC-S12 and RMC-S7b. The three pre-existing `check_host` tests, `with_identity` and every pre-existing server fixture are untouched (they send no `X-Forwarded-*` header and stay valid). | Spec §13.3 rows "Unit tests", "End-to-end tests", "Static contracts". | New coverage |
 
 ## 3. Deep Reasoning Audit
 
@@ -88,205 +60,228 @@ Commands run on `target/candid_diff.patch`:
 
 Scenarios attempted:
 
-- **Dispatch order leak** — an unauthenticated `GET /nope` or a misdirected `Host` must learn
-  nothing about routes. `server.rs::handle_connection` runs `parse → check_host (421) →
-  authorize (403) → route → check_lock_csrf (403) → handler`; `test_rmc_identity_is_required_before_routing`
-  and `test_rmc_host_is_checked_before_identity_and_routing` prove `403`/`421` on unknown
-  paths with zero logind reads. PASS.
-- **Stale `unlocked` replay to a new stream** (plan F2) — stream A sees `unlocked`, closes;
-  logind fails; stream B opens. B's first event is its own `fresh_view` after `reserve_seq`;
-  the poller resets the channel to `None` once `subscribers == 0`; `Sender::subscribe()` marks
-  the current value seen. `test_rmc_events_new_stream_never_replays_a_stale_unlocked` covers
-  `unavailable` and `locked`. PASS.
-- **Slow read overriding a newer state** (R3-1) — the poller reserves `seq` *before*
-  awaiting `own_sessions`; a stream drops any reading with `seq <= last_seq`. I walked both
-  interleavings (poller reserves first / stream reserves first); in each the newer reservation
-  wins and the older reading is skipped or superseded. `test_rmc_seq_is_reserved_when_a_read_starts`
-  holds the poller read with the mock and asserts silence on B. PASS.
-- **Keep-alive starvation** — `next_read_too_late = now + poll_interval >= keepalive_at`
-  sends the reading that precedes the deadline; `keepalive_pending` sends the next reading
-  after the deadline; `fallback_at = keepalive_at + poll_interval + SNAPSHOT_DEADLINE_MS`
-  re-sends the newest unsent reading. With `poll_interval_ms` 250, 1000 and 10 000 an event
-  arrives within `SSE_KEEPALIVE_MS` in every case I traced; the only silent branch (no new
-  reading at `fallback_at`) requires a stopped poller, which ends the server. PASS.
-- **Channel `None` handling** — a stream reading `None` `continue`s (no event, no break); a
-  poller sleep spanning a stream close/open cannot publish `None` to a live subscriber
-  (checked after the sleep against the current count). PASS.
-- **Rate-limit atomicity** — the whole lock flow (gate acquisition, snapshot, select, record,
-  `lock_session`) runs under one `tokio::sync::Mutex` guard inside
-  `timeout(LOCK_FLOW_DEADLINE_MS)`; the interval is recorded only immediately before
-  `lock_session` is awaited, so `409`/`503`-from-snapshot record nothing and a failed or cut
-  `LockSession` does. `test_rmc_lock_flow_and_rate_limit` and
-  `test_rmc_deadlines_bound_hung_logind_calls` cover each branch at exact boundaries. PASS.
-- **Session selection** — candidates are `uid == Some(uid) && class == "user" &&
-  remote == Some(false) && seat.is_some()`; active first. The tie-break among same-length ids
-  is the **greatest** byte sequence (`"c9"` before `"10"`), as the tester contract and
-  `test_rmc_select_session_prefers_active_local_user_seat_session` require, while spec D7 and
-  auditor constraint 24 say "smallest". Deterministic, own-uid only, inactive ties only; ADR
-  item (4) and `AI/ARCHITECTURE.md` §13 record the built behaviour. FINDING F1 (MINOR).
-- **Missing `LockedHint`** — `locked = LockedHint == Bool(true)`; a missing or ill-typed
-  property yields `locked == false` and therefore `unlocked` for a seated session. This is
-  exactly what spec §2.6 `SessionProps`, auditor constraint 24 and
-  `test_rmc_session_props_tolerates_missing_or_ill_typed_optionals` prescribe (parity with
-  the presence worker), and `Docs/REMOTE_COMPANION.md` §3 states the desktop requirement; but
-  it is weaker than the D8 sentence "never reports `unlocked` unless a fresh read returned
-  `LockedHint == false`". FINDING F3 (MINOR, spec-internal, contract-bound).
-- **Host normalisation** — exactly one `Host`, OWS trimmed, lowercased, one `:443` stripped,
-  `is_valid_host_name`, `.ts.net` suffix with a non-empty prefix or exact allowlist
-  membership; the normalized value feeds the `Origin` comparison (`https://<host>` or
-  `https://<host>:443`). The table tests cover IP literals, IPv6 brackets, trailing dot,
-  double port, `https://` prefix, non-UTF-8, 254 bytes. No per-label 63-byte bound. FINDING F2
-  (MINOR).
-- **HTTP parser bounds** — `read_head` caps the buffer at `MAX_REQUEST_HEAD_BYTES + 1`,
-  re-parses after each 1024-byte chunk; `Partial` at the bound → `431`; `MAX_HEADERS` slots
-  → `431`; path without query > 256 → `414`; `Transfer-Encoding` → `400`; any positive
-  `Content-Length` → `413` (two different positive lengths → `400`); HTTP/1.0 and the h2
-  preface → `400`. Proptests cover arbitrary input and every positive length. PASS.
-- **Scope** — no unlock, no push, no camera, no change to `install.sh`/packaging (deferred by
-  ADR item 6); nothing missing from the §10 acceptance mapping that the code can deliver
-  (RMC20/RMC21 are owner/hardware checks, honestly marked pending). PASS.
+- **D5a′ evaluation order** (`identity.rs::check_host`): `X-Forwarded-Host` is counted first over
+  the whole header list (`single_header`), so "XFH twice + `X-Forwarded-Proto: http`" is
+  `Repeated`, not `NotAllowed`; with one XFH `forwarded_proto_ok(headers, true)` runs and `Host`
+  is never read (the `"host"` lookup is only in the `Err(Missing)` arm); without XFH, `Host`
+  must occur exactly once, then `forwarded_proto_ok(headers, false)`. Matches §13.2 step by step.
+  `Missing` is returned only when neither header exists (`X-Forwarded-For` never stands in).
+- **Transport rule**: a proto header is accepted only as exactly one occurrence whose OWS-trimmed
+  value equals `https` ASCII-case-insensitively. Tried `https, https`, `https:`, `httpsx`, an
+  empty value, `\xff`, two identical `https` lines: all `NotAllowed`; all are in the tests.
+- **Normalisation**: one shared `normalize_host` for both branches: OWS trim → ASCII lowercase →
+  one `strip_suffix(":443")` → `is_valid_host_name` → `*.ts.net` with a non-empty prefix, or
+  `allowed_hosts` membership. Tried `pc.tail1234.ts.net:443:443` (one strip leaves a colon →
+  charset fails), `ts.net` (empty prefix), `100.64.0.1` (all-digit last label), `a.ts.net, b.ts.net`,
+  a trailing dot, 254 bytes: all `NotAllowed`; a `lan-box.example` entry in `allowed_hosts` passes
+  (the allowlist is exact membership, not `*.ts.net`-restricted, as the spec says).
+- **Fail-closed if Serve changes**: a Serve release that stops sending `X-Forwarded-Host` leaves
+  `Host: localhost` → `NotAllowed` → `421`, never `200` (stated in `Docs/REMOTE_COMPANION.md` §8).
+  Funnel traffic passes the host check but carries no `Tailscale-User-Login` → `403`.
+- **Dispatch order** (`server.rs::handle_connection`): HTTP error → `check_host` (`421`) →
+  `authorize` (`403`) → `route` → `check_lock_csrf` (`403`) → handler; no logind call, SSE slot or
+  subscriber registration before every check passed (proven by the `reads() == 0` assertions).
+- **Lock CSRF** (`routes.rs::check_lock_csrf`): exactly one `X-Soos-Action: lock` (byte-exact);
+  `Sec-Fetch-Site`, if present, exactly `same-origin` (so `none`, `same-site`, `cross-site` are
+  refused); `Origin`, if present, lowercased and equal to `https://<effective host>` or `…:443`.
+  A cross-site `fetch` with the custom header triggers a CORS preflight; `OPTIONS /api/lock` is
+  `Method::Other` → `405` without any `Access-Control-Allow-*` header, so the browser blocks it.
+  With the captured Serve head, `Origin: https://localhost` → `403` and
+  `Origin: https://PC.Tail1234.TS.NET:443` → `202` (end-to-end test).
+- **Lock flow** (`lock_flow`): the `Mutex<Option<Instant>>` gate serialises the flow; rate gate
+  (monotonic `Instant`, `saturating_duration_since`) → fresh snapshot → `select_session` →
+  `409 no_session` / `409 already_locked` → `LockSession`; the interval is recorded only when
+  `lock_session` is called (a failed call still counts, a `409`/`503` snapshot does not); the
+  whole flow is under `LOCK_FLOW_DEADLINE_MS` and the guard is released when the timeout drops
+  the future. Verified by `test_rmc_lock_flow_and_rate_limit` and the hung-logind test.
+- **Stream protocol** (`serve_stream` / `poller`): the stream reserves its own `seq`, makes its
+  own fresh read after accept, then drops channel readings with `seq <= last_seq` (no stale
+  replay even if the poller skipped its `None` reset because subscribers went 1 → 0 → 1 inside
+  one sleep); a view change or the keep-alive rule (`now + poll_interval >= last_sent_at +
+  SSE_KEEPALIVE_MS`) triggers a send; the `keepalive_pending` / `fallback_at` pair covers a
+  slow poller read (bounded by `poll_interval + SNAPSHOT_DEADLINE_MS`, exactly the grace); the
+  stream ends on read-half EOF or error, write failure, `MAX_SSE_STREAM_MS`, shutdown
+  (`closing` watch, `biased` first) or counter overflow. The `Notify` + `AtomicUsize` wake-up
+  is race-free: `notify_one` stores a permit when the poller is not waiting, and the
+  `while subscribers == 0` loop absorbs a stale permit.
+- **Session selection** (`session.rs::select_session`): candidates need `uid`, `Class == "user"`
+  (exact), explicit `Remote == Some(false)` and a seat; `min_by_key((!active, id.len(),
+  Reverse(id.as_bytes())))` is total and deterministic for any input order. The same-length
+  tie-break takes the **greatest** byte sequence, which is what the binding tester contract item
+  16 and `AI/ARCHITECTURE.md` §13 state, but not what spec D7 / auditor constraint 24 wrote
+  (see §4, MINOR 2). No security consequence: every candidate is an owner session on a local
+  seat, active sessions are preferred, and the lock result is confirmed through `LockedHint`.
+- **Single source of constants**: all bounds and the three forwarded-header constants live in
+  `lib.rs`; `grep -ri x-forwarded crates/remote/src` outside comments hits only the two
+  `lib.rs` definitions; the matrix and project-facts rows list the same values.
+- **Scope**: everything in the diff is #339; no PAM, daemon, protocol or policy code is touched;
+  `soos-remote` is a leaf (RMC-S4 passes). The commit message carries `Refs #339`, not `Closes`.
+
+→ **PASS**
 
 ### PAM Concurrency & Deadlines
 
-`crates/pam` is not in the patch; no PAM pathway, deadline or IPC frame changes. The
-companion's own deadlines: head read `timeout_at(accept + 5 s)`, every write
-`timeout(2 s)` through `write_bounded`, lingering close `timeout(2 s)` and 64 KiB, snapshot
-`timeout(1.5 s)`, lock flow `timeout(2 s)`, D-Bus connect `timeout(1 s)` and call
-`timeout(500 ms)` plus `method_timeout`, stream lifetime 30 min, keep-alive 15 s. Every bound
-is a `tokio::time` primitive and the tests drive them under a frozen paused clock at exact
-boundaries (`REQUEST_HEAD_TIMEOUT_MS - 1` vs `+ 1`, `SNAPSHOT_DEADLINE_MS - 1` vs `+ 1`). A
-hung logind cannot stall `login`/`sudo`/`gdm` because nothing on the authentication path
-depends on this process. PASS.
+`crates/pam` is not in the diff; the PAM manifest assertion (`!pam.contains("zbus") &&
+!pam.contains("dbus")`) is unchanged and passes. For the new service every blocking point is a
+`tokio::time` bound: head read `REQUEST_HEAD_TIMEOUT_MS` (5 s, connection closed without a byte),
+every write `RESPONSE_WRITE_TIMEOUT_MS`, lingering close bounded by the same timeout and
+`LINGER_MAX_BYTES`, snapshot `SNAPSHOT_DEADLINE_MS`, lock flow `LOCK_FLOW_DEADLINE_MS` (the wait
+on the lock gate included), D-Bus connect/call `DBUS_CONNECT_TIMEOUT_MS` / `DBUS_CALL_TIMEOUT_MS`
+(plus `method_timeout` on the builder), stream life `MAX_SSE_STREAM_MS`. A hung logind cannot
+stall `login`/`sudo`/`gdm`: the companion is a separate user process that only reads logind,
+and `test_rmc_deadlines_bound_hung_logind_calls` shows the cut at exactly the deadline with no
+retry. `deadline()` falls back to "fire at once" on an unrepresentable `Instant` (fail closed).
+
+→ **PASS**
 
 ### Panic Safety & Fail-Closed
 
-- Grep of `crates/remote/src` for `.unwrap()`, `.expect(`, `panic!`, `unreachable!`, `todo!`,
-  indexing: none in production code (the static test `test_rmc_production_code_never_panics_or_prints`
-  enforces it with comments stripped, and `[lints] workspace = true` denies the panic family
-  under `-D warnings`). The only `unwrap_or` family uses have total fallbacks
-  (`checked_add` → `from`, `u64::try_from` → `u64::MAX`, `get(..)` → empty slice). PASS.
-- Fail-closed paths: `SourceError::*` → `unavailable` (status) or `503` (lock);
-  `serde_json` failure → `503`; `reserve_seq` overflow → `set_fatal` → `PollerEnded` → exit
-  `EXIT_RUNTIME`; `ConfigError::*` and persistent `SocketError` → exit `EXIT_CONFIG` = 78
-  (`RestartPreventExitStatus=78`); `SocketError::Io` → exit 1 (restart). No path converts an
-  error into `202`, `unlocked` or `PAM_SUCCESS` (no PAM code exists here). PASS.
-- `check_not_root(getuid, geteuid)` runs before `clap`, before any environment or file read.
-  PASS.
+- `grep -rnE '\.unwrap\(|\.expect\(|panic!|unreachable!|todo!|unimplemented!' crates/remote/src`
+  → empty; the only `unwrap_or*` forms are total. No `[]` indexing in production; `get`,
+  `checked_add`, `checked_div`, `saturating_*` throughout (`reserve_seq`, `deadline`, `trim_ows`,
+  `truncated_error_name`, `TestClock` is test-only). `const _: () = assert!(MAX_SSE_STREAMS <
+  MAX_CONNECTIONS)` is compile-time. `test_rmc_production_code_never_panics_or_prints` enforces
+  the same with comments stripped.
+- Fail-closed paths: `status_from(Err(_))` → `Unavailable` (never `Unlocked`); `Unlocked` needs
+  a fresh `Ok` read with `LockedHint == false` on the selected session; `serde_json` failure →
+  `503 unavailable`; every `HostError` → `421`, every `AuthError` → `403`, every `CsrfError` →
+  `403`; snapshot or lock error → `503`; configuration errors refuse to start (`EXIT_CONFIG`,
+  `RestartPreventExitStatus=78`); persistent socket errors (`NotADirectory`, `WrongOwner`,
+  `NotASocket`) → `EXIT_CONFIG`, transient `Io` → `EXIT_RUNTIME`; root → refused before any
+  configuration read (RMC-S10). The poller or accept loop ending makes `serve` return `Err` and
+  the process exits `EXIT_RUNTIME`.
+- `main.rs` handles `clap` help/version, runtime build failure and signal setup failure without
+  panicking; `ExitCode` only.
+
+→ **PASS**
 
 ### Test Integrity & Anti-Weakening
 
-- §2 listing reviewed: the single migrated assertion is strengthened and justified by spec
-  §2.12 / ADR (7). PASS.
-- New tests can fail against plausible wrong implementations: the stale-replay test fails if
-  the channel is not reset; the `seq` test fails if `seq` were reserved after the read or
-  stamped from the wall clock; the keep-alive test asserts strictly increasing
-  `checked_unix_ms` and "at most one keep-alive old"; the deadline tests assert no answer at
-  `deadline - 1` and an answer at `deadline`; the connection-limit test asserts zero bytes to
-  the 17th connection and 16 idle ones alive until exactly 5 s; the log test runs at `TRACE`
-  with identity, Host, path and header-value probes. PASS.
-- Mock masking: `MockSource` snapshots its answer when a call starts (models a slow read) and
-  can hold calls; it cannot mask the D-Bus wire contract, which is covered by
-  `session_props_from_properties` tests over hand-built `OwnedValue` maps (`a(susso)` listing
-  shape, `(uo)`/`(so)` structures, boolean-only hints, µs → s). The production
-  `ZbusSessionSource` is unexercised in CI, as `AI/MOCK_STRATEGY.md` states; this is the
-  project's declared strategy for D-Bus. PASS, with the auditor's T1–T5 additions still
-  absent (SUGGESTION S1).
+- §2 above: one changed assertion, justified by a recorded contract migration and strictly
+  stronger. No `#[ignore]`, no tolerance, no deleted test, no inline test module.
+- Power of the new D5a′ tests against plausible wrong implementations: a first-header-wins proto
+  check fails "two identical `https` values are still repeated"; an implementation that still
+  inspects `Host` fails "`Host: evil.com` + XFH → OK" and "`Host` repeated + XFH → OK"; an
+  optional proto with XFH fails "proto absent with X-Forwarded-Host → NotAllowed"; a check that
+  skips normalisation on XFH fails `" PC.Tail1234.TS.NET:443 "` → OK and `:8443` → `NotAllowed`;
+  a fallback from a refused XFH to a valid `Host` fails "a valid Host never rescues a refused
+  X-Forwarded-Host"; a `Host`-based `Origin` comparison fails the e2e `Origin: https://localhost
+  → 403` / `Origin: https://pc.tail1234.ts.net → 202` pair; a proto check applied only with XFH
+  fails "`Host` only + proto `http` → NotAllowed".
+- The `MockSource` records reads and `LockSession` ids, so the e2e tests prove "no logind call
+  before every check" instead of assuming it; time is frozen (`start_paused` plus an
+  auto-advance inhibitor), so the deadline and keep-alive assertions are exact, not tolerant.
+- No real-model contract is involved (no mock of channel order, layout or class index).
+
+→ **PASS**
 
 ### Memory, Bounds & Secrets
 
-- Allocations: head buffer ≤ 8193 bytes, header vector ≤ 32 entries, config read through
-  `take(16 385)`, `ListSessions` capped at 256 rows and 16 own rows before any per-session
-  call, stream sink 64 bytes, lingering sink 1024 bytes / 64 KiB total, 16 connections, 4
-  streams. PASS.
-- Secrets: no frames, embeddings, passwords or keys exist in this crate (nothing to
-  `Zeroize`). Identity: `TailscaleLogin` has a redacting `Debug`; `authorize`'s result is
-  discarded by the caller; tracing fields are `%err` of fixed-text enums, `?resolved`
-  (`Route` enum), `status`, `dbus_error` (logind error *name*, truncated on a char boundary),
-  `socket_path` once at `info!`; the `TRACE` capture test and the static field-key denylist
-  both pass. The JSON bodies carry exactly five fields and no identity. PASS.
-- Files: socket directory created `0700` or opened `O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC`,
-  owner checked by `fstat`, tightened by `fchmod`; stale socket unlinked only when
-  `symlink_metadata` says socket-owned-by-uid; listener `0600` (bind → chmod window inside the
-  `0700` parent and `UMask=0077`); config opened `O_NONBLOCK | O_CLOEXEC`, must be a regular
-  file. The installer writes the template under `umask 077` then `chmod 0600`. PASS.
-- `unsafe`: `#![forbid(unsafe_code)]` in `lib.rs` and `main.rs`; `remote` added to the
-  business list, `scripts/candid_review.sh` and `AI/ARCHITECTURE.md`. PASS.
+- Request head buffer capped at `MAX_REQUEST_HEAD_BYTES + 1` and re-parsed after every read;
+  `httparse` with exactly `MAX_HEADERS` slots; path ≤ `MAX_PATH_LEN`; no body ever read
+  (`Content-Length > 0` → `413`, `Transfer-Encoding` → `400`, conflicting positive lengths →
+  `400`, `Content-Length: 0` accepted); lingering close discards at most `LINGER_MAX_BYTES`;
+  config read through `take(MAX_CONFIG_BYTES + 1)` on an `O_NONBLOCK | O_CLOEXEC` descriptor
+  that must be a regular file (a FIFO cannot stall the start); `ListSessions` bounded by
+  `MAX_LISTED_SESSIONS` / `MAX_OWN_SESSIONS`; `Properties.GetAll` only for own sessions;
+  D-Bus queue `max_queued(16)`; logind error name truncated on a char boundary.
+- Secrets: `TailscaleLogin` has a redacting `Debug`; `StatusView` carries no uid, session id,
+  seat or login; `HostError` / `AuthError` / `CsrfError` `Display` texts are fixed; every
+  tracing field key passes `test_rmc_logging_never_names_identity_header_or_session_fields`
+  (`%err` of fixed-text errors, `status`, `?resolved` route enum, `dbus_error` truncated name,
+  `socket_path` of the configuration). No frames, embeddings or passwords exist in this crate.
+- Files: socket directory created `0700` or verified through `O_DIRECTORY | O_NOFOLLOW` +
+  `fstat` owner check + `fchmod`; stale socket unlinked only when `symlink_metadata` says socket
+  owned by the service uid; listener `set_permissions(0o600)` with unlink on failure; unit
+  `UMask=0077`; config template written under `umask 077` then `chmod 0600`.
+- Redaction: the patch contains no address other than the synthetic `100.64.0.1` and the
+  placeholder `100.x.y.z`, only `*.tail1234.ts.net` / `arch.<tailnet>.ts.net` / `<pc>.<tailnet>.ts.net`
+  names and `example.com` / `example.org` / `x.io` logins; `Docs/REMOTE_COMPANION.md`, the
+  matrix (RMC20) and the walkthrough §9 use `<redacted>` / `<login>` / `<uid>`.
+- `unsafe`: none in the crate (RMC-S1 passes; `remote` is in the forbid list and in
+  `scripts/candid_review.sh`).
+
+→ **PASS**
 
 ### Supply Chain & Automation
 
-- `Cargo.toml`: `crates/remote` member, `httparse = "1.10"` (already locked through `ureq`),
-  `soos-remote` path dependency. `Cargo.lock`: one new `[[package]]`, no new external crate,
-  no `hyper`/`axum`/`tower` (asserted by `test_rmc_crate_is_registered_in_the_workspace`).
-  `cargo deny --locked check` clean. PASS.
-- `scripts/candid_review.sh`: only `remote` appended to `BUSINESS_CRATES`. `.github/`,
-  `deny.toml`, `.githooks/` untouched. PASS.
-- `packaging/soos-remote.service`: user unit, no `User=`/`Group=`, `NoNewPrivileges=yes`,
-  `RestrictAddressFamilies=AF_UNIX`, `UMask=0077`, `RestartPreventExitStatus=78`, seccomp
-  options that work in a user instance. PASS.
-- `scripts/install_remote.sh`: `set -euo pipefail`, `EUID` root refusal, `bash -n` clean, no
-  `sudo`/`tailscale`/`systemctl --user enable` outside `echo` text. Hard-coded
-  `target/release` path ignores `CARGO_TARGET_DIR` (FINDING F5, MINOR).
+- `Cargo.toml`: `crates/remote` registered; `httparse = "1.10"` added to
+  `[workspace.dependencies]` (already locked through `ureq`, exactly one version in the lock);
+  `soos-remote` path dependency declared; `zbus` comment widened. `Cargo.lock` adds only the
+  `soos-remote` package entry; no `hyper` / `axum` / `tower` (contract test). `proptest = "1"`
+  as a dev-dependency follows the existing convention. `cargo deny --locked check bans licenses
+  sources`: ok.
+- `packaging/soos-remote.service`: `Type=exec`, `Restart=on-failure`,
+  `RestartPreventExitStatus=78`, `NoNewPrivileges`, `RestrictAddressFamilies=AF_UNIX`,
+  `LockPersonality`, `MemoryDenyWriteExecute`, `RestrictRealtime`, `RestrictSUIDSGID`,
+  `SystemCallArchitectures=native`, `UMask=0077`, no `User=` / `Group=` / `DynamicUser=`,
+  `WantedBy=default.target`. All of these are seccomp-based and apply to a user-manager unit
+  (unlike the namespace-based `Protect*` / `Private*` options, which are correctly not used).
+- `scripts/install_remote.sh`: `set -euo pipefail`, refuses `EUID 0`, never runs `sudo`,
+  `tailscale` or `systemctl --user enable` (only prints them), `cargo build --release --locked`,
+  `bash -n` clean; mode `100755` staged, content byte-identical to `HEAD` (auditor constraint 48);
+  RMC-S12 covers both installer scripts.
+- `scripts/candid_review.sh`: `remote` added to `BUSINESS_CRATES`, consistent with the invariant.
+- No `.github/` or `deny.toml` change.
+
+→ **PASS**
 
 ### English-Only Policy
 
-Grep of every added line for common French tokens: none. Code, comments, docs, UI strings,
-unit, installer and walkthrough are English. PASS.
+Code, comments, docs, test names, the commit message of `0b0b50c` and the installer output are
+English. The only non-ASCII letters in the patch are the `é` test inputs that assert non-ASCII
+logins and hosts are refused, typographic arrows/dashes in the documentation and one
+non-breaking space placeholder in `app.js`. `index.html` declares `lang="en"`.
+
+→ **PASS**
 
 ## 4. Detailed Findings & Action Items
 
-- **[MINOR]** `crates/remote/src/session.rs:158` — `select_session` breaks same-length ties
-  by the **greatest** byte sequence (`Reverse(s.id.as_bytes())`), while
-  `AI/architect_spec_remote_companion.md` D7 says "smallest session ID under (byte length,
-  then bytes)" and `AI/auditor_constraints_remote_companion.md` constraint 24 prescribes
-  `min_by_key(|s| (s.id.len(), s.id.as_bytes()))`. The tester contract item 16 and
-  `test_rmc_select_session_prefers_active_local_user_seat_session` encode the built
-  behaviour, and ADR 2026-10-05 item (4) plus `AI/ARCHITECTURE.md` §13 now record it. No
-  security impact (own uid, local seat, inactive ties only; deterministic). **Correction**:
-  reconcile spec D7 and auditor constraint 24 with the ADR wording in a documentation
-  follow-up; never edit the test silently.
-- **[MINOR]** `crates/remote/src/identity.rs:69` — `is_valid_host_name` bounds the whole name
-  (≤ 253 bytes) but not each label (RFC 1035: ≤ 63 bytes). Harmless today (exact allowlist
-  membership or `.ts.net` suffix, total bound, charset restricted). **Correction**: add
-  `label.len() <= 63` with two table rows (63 accepted, 64 refused) in a later developer
-  cycle with a fresh review.
-- **[MINOR]** `crates/remote/src/session.rs:124` — a missing or ill-typed `LockedHint` maps to
-  `locked = false`, so a seated `user` session is reported `unlocked` when the desktop never
-  sets the hint. This follows spec §2.6 `SessionProps`, auditor constraint 24 and the
-  contract test, and `Docs/REMOTE_COMPANION.md` §3 documents the desktop requirement; it is
-  nevertheless weaker than D8's "never reports `unlocked` unless a fresh read returned
-  `LockedHint == false`". **Correction**: architect follow-up — either amend D8 to the
-  implemented rule or specify `locked: Option<bool>` with `None` → `unavailable` and migrate
-  the contract test (owner-approved, not a silent edit).
-- **[MINOR]** `crates/remote/assets/app.js:117` — `source.onerror` always treats the error as a
-  transient reconnect and only fetches `/api/status`; when the browser closes the
-  `EventSource` for good (`readyState === EventSource.CLOSED`, e.g. after `503
-  too_many_streams`), the page keeps the last status until `STALE_UI_MS` and then shows
-  `Unreachable`, with no new stream until `visibilitychange`/`pageshow`. UI robustness only;
-  not an acceptance criterion. **Correction**: on `CLOSED`, schedule `openStream()` after a
-  short back-off (same-origin `textContent` discipline unchanged).
-- **[MINOR]** `scripts/install_remote.sh:54` — `install -Dm755 "${REPO_ROOT}/target/release/soos-remote"`
-  ignores `CARGO_TARGET_DIR`; with that variable set the build succeeds elsewhere and the
-  install step fails under `set -e` (safe failure, no partial install of the unit before the
-  binary). **Correction**: resolve the artifact path from `cargo metadata --format-version 1`
-  or honour `${CARGO_TARGET_DIR:-${REPO_ROOT}/target}`.
-- **[SUGGESTION]** S1 — the auditor's non-blocking test additions T1–T5 (slow-reader stream
-  write timeout, two concurrent lock requests, `HEAD /api/events` opens no slot, edge-table
-  rows, static `O_DIRECTORY`/`O_NOFOLLOW` needle) are still absent. I verified each property
-  by reading the code; adding the tests would pin them.
-- **[SUGGESTION]** S2 — `crates/remote/src/main.rs:63` lets clap print `--help`/`--version` to
-  stdout through `err.print()`, the only stdout path of the binary; acceptable for an
-  operator-run `--help`, could route through tracing for strict output isolation.
-- **[SUGGESTION]** S3 — `crates/remote/src/main.rs:41` reads `RUST_LOG` through
-  `EnvFilter::try_from_default_env()`, an environment input not listed in spec §2.3 (the
-  RMC-S9 invariant only matches `env::var` literals). It only sets the log level; the
-  `TRACE`-capture test proves no identity or request datum is emitted at any level. Document
-  the variable in `Docs/REMOTE_COMPANION.md` or pin the filter to `info`.
+- **[MINOR]** `scripts/install_remote.sh:72` — the configuration template comment still reads
+  "DNS names accepted in the Host header", while D5a′ (spec §13.2, `Docs/REMOTE_COMPANION.md`
+  §5 row `allowed_hosts`) defines the list as names accepted as the **effective host**
+  (`X-Forwarded-Host` set by `tailscale serve`, or `Host` for a direct local client); behind
+  Serve the `Host` header is `localhost` and is not inspected, so the comment can mislead an
+  owner filling in the file. Already recorded as a follow-up in the walkthrough §9 (auditor
+  constraint 48 pins this cycle's installer change to the git mode). Correction: reword to
+  "DNS names accepted as the effective host (`X-Forwarded-Host` set by `tailscale serve`, or
+  `Host` for a direct local client) (0..=4)". Behaviour and tests are unaffected.
+- **[MINOR]** `AI/architect_spec_remote_companion.md` D7 (§2.1) and
+  `AI/auditor_constraints_remote_companion.md` constraint 24 — both describe the same-length
+  tie-break of `select_session` as the **smallest** id under `(byte length, then bytes)`
+  (`min_by_key(|s| (s.id.len(), s.id.as_bytes()))`), whereas the binding tester contract item 16
+  asserts `"c9"` before `"10"` (which is the **greatest** same-length byte sequence, not the
+  smallest: `b'1' < b'c'`), and the implementation (`session.rs:158`, `Reverse(s.id.as_bytes())`)
+  and `AI/ARCHITECTURE.md` §13 follow the tester. The shipped behaviour is deterministic, covered
+  by `test_rmc_select_session_prefers_active_local_user_seat_session`, and harmless (every
+  candidate is an owner session on a local seat, active sessions win first, and the lock is
+  confirmed through `LockedHint`), but the phase documents contradict each other. Correction
+  (documentation only, no code or test change): amend spec D7 and auditor constraint 24 to
+  "shortest id, then the greatest same-length byte sequence" and note in the tester contract that
+  `"c9" < "10"` is false under byte order (the intended rule is "most recently allocated among
+  same-length numeric ids").
+- **[SUGGESTION]** `crates/remote/src/server.rs:478` — on a request-head parse error the
+  response is always encoded as for `GET` (a body is sent even to a `HEAD` request), because the
+  method is unknown when parsing failed. Harmless (`Connection: close`); a sentence in the
+  `handle_connection` doc comment would avoid a future "bug" report.
+- **[SUGGESTION]** `crates/remote/src/main.rs:41` — `EnvFilter::try_from_default_env()` reads
+  `RUST_LOG`, a fourth environment variable beyond the three documented in spec §2.3
+  (`XDG_RUNTIME_DIR`, `XDG_CONFIG_HOME`, `HOME`); the RMC-S9 needle (`env::var`) cannot see it.
+  It is the standard tracing pattern and can only change log verbosity (no field value is
+  identity-bearing), so no behaviour change is requested; list it in spec §2.3 / D12 or switch
+  to a fixed `EnvFilter::new("info")`.
+- **[SUGGESTION]** `tests/invariants/src/presence_unlock_contract.rs:195` — the test name
+  `test_pau_zbus_is_used_only_by_the_daemon` now checks two allowed crates. The name is kept on
+  purpose (matrix row PAU17); a later rename with a matrix update would remove the mismatch.
 
 ## 5. Final Verdict
 
-No CRITICAL or MAJOR finding: no security invariant is broken, no path fails open, no test is
-weakened or masked, no identity or request datum leaks, every I/O and allocation is bounded,
-and the diff matches the approved revision-3 spec except for the documented tie-break wording
-(F1) and the two spec-internal consistency items (F2, F3), all MINOR follow-ups.
-
 **VERDICT: APPROVED**
+
+No CRITICAL or MAJOR finding. The single changed assertion in the whole diff is a recorded,
+strictly stronger contract migration; the D5a′ implementation follows spec §13.2 exactly and is
+covered by unit, end-to-end and static tests that fail against the plausible wrong
+implementations listed above; every blocking point is bounded, every failure path fails closed,
+no identity or header value is logged or echoed, and all local CI commands pass on the reviewed
+fingerprint. The two MINOR findings are documentation corrections that may land in this cycle or
+as the follow-ups already listed in walkthrough 183 §9.

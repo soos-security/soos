@@ -1,5 +1,5 @@
-//! Remote companion static contracts (GitHub #339, architect spec §8 RMC-S1–RMC-S11 plus
-//! the plan-evaluator round-3 needles R3-2; matrix rows RMC*).
+//! Remote companion static contracts (GitHub #339, architect spec §8 RMC-S1–RMC-S12 and
+//! RMC-S7b plus the plan-evaluator round-3 needles R3-2; matrix rows RMC*).
 //!
 //! - RMC-S1 `crates/remote/src/{lib,main}.rs` forbid `unsafe`;
 //! - RMC-S2 no TCP/UDP type is ever named in the crate;
@@ -12,6 +12,8 @@
 //! - RMC-S9 the bus rules of the presence worker apply verbatim (pinned address only, no
 //!   proxy, no cache, no environment-derived bus, no signal stream, no blocking API);
 //! - RMC-S10 `main` refuses root before reading any configuration;
+//! - RMC-S12 both installer scripts are executable in the checkout (R4-5);
+//! - RMC-S7b the documentation describes the D5a′ effective host and nothing is pending;
 //! - workspace registration, lint hygiene and logging hygiene of the new crate.
 
 #![allow(
@@ -1295,5 +1297,52 @@ fn test_rmc_logging_never_names_identity_header_or_session_fields() {
                 );
             }
         }
+    }
+}
+
+// ---------------------------------------------------------------------------------------
+// RMC-S12 — installer scripts are executable (spec §8, R4-5)
+// ---------------------------------------------------------------------------------------
+
+/// RMC-S12: both installer scripts carry an execute bit in the checkout (git mode
+/// `100755`), so the documented `./scripts/install_remote.sh` invocation works. The
+/// checkout honours the git mode, so `std::fs::metadata` is enough (no `git` subprocess).
+#[test]
+fn test_rmc_s12_installer_scripts_are_executable() {
+    use std::os::unix::fs::PermissionsExt;
+    for rel in ["scripts/install_remote.sh", "scripts/install.sh"] {
+        let path = workspace_root().join(rel);
+        let metadata =
+            fs::metadata(&path).unwrap_or_else(|e| panic!("Cannot stat {}: {e}", path.display()));
+        assert!(metadata.is_file(), "{rel} must be a regular file");
+        let mode = metadata.permissions().mode();
+        assert!(
+            mode & 0o111 != 0,
+            "{rel} must be executable (git mode 100755, RMC-S12); found {:o}",
+            mode & 0o777
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------------------
+// RMC-S7b — documentation describes the verified effective host (spec §8, R4-4)
+// ---------------------------------------------------------------------------------------
+
+/// RMC-S7b: `Docs/REMOTE_COMPANION.md` documents the D5a′ effective host (`X-Forwarded-Host`,
+/// `X-Forwarded-Proto`) and no longer calls the Serve forwarding pending.
+#[test]
+fn test_rmc_s7b_documentation_describes_the_effective_host() {
+    let doc = read("Docs/REMOTE_COMPANION.md");
+    for needle in ["X-Forwarded-Host", "X-Forwarded-Proto", "effective host"] {
+        assert!(
+            doc.contains(needle),
+            "Docs/REMOTE_COMPANION.md must mention `{needle}` (RMC-S7b)"
+        );
+    }
+    for stale in ["pending owner verification", "(pending)"] {
+        assert!(
+            !doc.contains(stale),
+            "Docs/REMOTE_COMPANION.md must no longer contain `{stale}` (RMC-S7b, RMC20 verified)"
+        );
     }
 }

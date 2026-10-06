@@ -365,7 +365,7 @@ session and offers a remote **lock**, nothing more (ADR 2026-10-05 "Remote Compa
 |---|---|
 | Process | `systemctl --user` service of the session owner; `check_not_root` refuses uid 0 or euid 0 at start (exit 78, `RestartPreventExitStatus=78`). No polkit rule: the session owner may call `Manager.LockSession` on their own session. |
 | Transport | One `0600` Unix socket in a `0700` directory under `$XDG_RUNTIME_DIR`, proxied by `tailscale serve --bg unix:<path>`; no network socket at all (`RestrictAddressFamilies=AF_UNIX`, invariant RMC-S2/S5). |
-| Identity | Exactly one `Tailscale-User-Login` header in the non-empty `allowed_logins` allowlist, else `403`; trusted only because `tailscaled` strips client copies and only `tailscaled` and the owner can open the socket. `Host` must be an allowed `*.ts.net` name (`421` otherwise); `POST /api/lock` needs `X-Soos-Action: lock` plus same-origin `Sec-Fetch-Site`/`Origin`. |
+| Identity | Exactly one `Tailscale-User-Login` header in the non-empty `allowed_logins` allowlist, else `403`; trusted only because `tailscaled` strips client copies and only `tailscaled` and the owner can open the socket. The **effective host** (`X-Forwarded-Host` as set by `tailscale serve`, otherwise `Host`; `Host` is not inspected when `X-Forwarded-Host` is present) must be an allowed `*.ts.net` name, and a proxied request must carry exactly one `X-Forwarded-Proto: https` (`421` otherwise; D5a′, verified with Tailscale 1.102.4 on 2026-10-06); `POST /api/lock` needs `X-Soos-Action: lock` plus same-origin `Sec-Fetch-Site`/`Origin` (compared with the effective host). |
 | Status | logind `LockedHint` / `IdleHint` / `IdleSinceHint` / `Active` of the owner's local seat `user` session (`Remote == false`, non-empty seat; active first, then the shortest id, then the greatest same-length id), read with fresh `Properties.GetAll` calls over the pinned system bus (same rules as the presence worker: `zbus::connection::Builder::address(SYSTEM_BUS_ADDRESS)`, no proxy, no cache, no signal stream, bounded calls). Server-Sent Events; the poller runs only while a stream is open; a logind failure is `unavailable`, never `unlocked`; readings carry a monotonic `seq` reserved when the read starts. |
 | Lock | `Manager.LockSession(id)` on a fresh snapshot, one per 2 s; success is confirmed through `LockedHint`, not assumed. The crate never names `UnlockSession`, `Unlock` or `SetLockedHint` (RMC-S3). |
 | Bounds | 16 connections, 4 streams, 8 KiB head, 32 headers, 256-byte path, 5 s head deadline, 2 s write deadline, 1.5 s snapshot, 2 s lock flow, 15 s keep-alive, 30 min stream (`crates/remote/src/lib.rs`). |
@@ -376,8 +376,10 @@ unlock; RC-2 every request needs an allowlisted identity and an empty allowlist 
 RC-3 a logind failure is never `unlocked` and no stale `unlocked` is replayed to a new stream;
 RC-4 every read, write, connection count and stream lifetime is bounded; RC-5 no identity or
 request data in logs or bodies. Out of scope, each needing its own ADR: remote unlock, push
-notifications, live camera. Matrix rows RMC1–RMC21 and walkthrough 183; the `Host` forwarding
-by `tailscale serve unix:` (RMC20) and the iPhone web app (RMC21) are pending owner checks.
+notifications, live camera. Matrix rows RMC1–RMC21 and walkthrough 183; the Serve forwarding
+check (RMC20: `tailscale serve unix:` sends `Host: localhost`, the original name in
+`X-Forwarded-Host` and `X-Forwarded-Proto: https`) was verified by the owner on 2026-10-06; the
+iPhone web app check (RMC21) is the remaining pending owner check.
 
 ---
 

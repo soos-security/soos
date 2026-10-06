@@ -1,12 +1,12 @@
 # Walkthrough 183 — Remote Companion `soos-remote` (Lock Status and Remote Lock over Tailscale Serve)
 
-- **Date**: 2026-10-05
+- **Date**: 2026-10-05 (revision 4, D5a′ effective host: 2026-10-06)
 - **Issue**: GitHub #339 (GitHub-only, no backlog id; not registered in `scripts/sync_issue.py`;
   commits carry `Refs #339`, never `Closes #339`) — **Branch**: `feat/remote-companion`, base
   `222665f`. Development branch reviewed through a draft PR; **not merged** until the owner gives
   an explicit go (owner decision 6).
-- **Matrix criteria**: RMC1–RMC21 (component `remote-companion`; RMC20 and RMC21 pending owner
-  checks), PAU17 annotation (zbus scope widened)
+- **Matrix criteria**: RMC1–RMC21 (component `remote-companion`; RMC20 verified 2026-10-06
+  (D5a′), RMC21 pending), PAU17 annotation (zbus scope widened)
 
 ## 1. Context & Objectives
 
@@ -29,7 +29,9 @@ sets `Tailscale-User-Login` and strips client copies; `httparse` and `http` were
 ## 2. Architect Design
 
 Spec: `AI/architect_spec_remote_companion.md`, revision 3 (revision 1 → F1–F12, revision 2 →
-R2-1…R2-6, revision 3 approved with two MINOR findings applied during Phases 2 and 4).
+R2-1…R2-6, revision 3 approved with two MINOR findings applied during Phases 2 and 4), amended
+by §13 "Revision 4" (D5a′, 2026-10-06; evaluator findings R4-1…R4-9 resolved in revision 5, §13.4)
+after the owner's verification of what `tailscale serve unix:` forwards (§9).
 
 - **Crate** `crates/remote` (`soos-remote`, lib + bin, `#![forbid(unsafe_code)]`): modules
   `config`, `identity`, `http`, `routes`, `session`, `logind`, `status`, `socket`, `assets`,
@@ -37,8 +39,13 @@ R2-1…R2-6, revision 3 approved with two MINOR findings applied during Phases 2
   `icon.svg`, 180×180 `apple-touch-icon.png`; current-thread Tokio runtime.
 - **Decisions** D1–D12: user-level service refusing root (`check_not_root`, exit 78); one `0600`
   Unix socket in a `0700` directory under `$XDG_RUNTIME_DIR`, no TCP; exactly one allowlisted
-  `Tailscale-User-Login` (`403` otherwise, before routing); `Host` must be an allowed `*.ts.net`
-  name (`421`); CSRF through `X-Soos-Action: lock` + `Sec-Fetch-Site`/`Origin`; minimal bounded
+  `Tailscale-User-Login` (`403` otherwise, before routing); the **effective host** must be an
+  allowed `*.ts.net` name (`421`; D5a′: `X-Forwarded-Host` when present, with `Host` not
+  inspected and exactly one `X-Forwarded-Proto: https` required, otherwise exactly one `Host`
+  with an optional-but-`https` `X-Forwarded-Proto`; one shared normalisation: OWS trim,
+  ASCII lowercase, one `:443` stripped, `is_valid_host_name`, `*.ts.net` or `allowed_hosts`);
+  CSRF through `X-Soos-Action: lock` + `Sec-Fetch-Site`/`Origin` compared with the normalised
+  effective host; minimal bounded
   HTTP/1.1 over `httparse`; SSE fed by a poller that runs only while a stream is open, with a
   monotonic `seq` and a fresh first read per stream; own-uid local seat `user` session only; a
   logind failure is `unavailable`, never `unlocked`; `LockSession` on a fresh snapshot, one per
@@ -50,10 +57,16 @@ R2-1…R2-6, revision 3 approved with two MINOR findings applied during Phases 2
   `MAX_SSE_STREAM_MS` 1 800 000, `MIN_LOCK_INTERVAL_MS` 2000, `DBUS_CALL_TIMEOUT_MS` 500,
   `DBUS_CONNECT_TIMEOUT_MS` 1000, `SNAPSHOT_DEADLINE_MS` 1500, `LOCK_FLOW_DEADLINE_MS` 2000,
   `MAX_ALLOWED_LOGINS` 8, `MAX_ALLOWED_HOSTS` 4, `MAX_SOCKET_PATH_LEN` 107, `EXIT_CONFIG` 78,
-  `EXIT_RUNTIME` 1, `SYSTEM_BUS_ADDRESS = unix:path=/run/dbus/system_bus_socket`.
+  `EXIT_RUNTIME` 1, `SYSTEM_BUS_ADDRESS = unix:path=/run/dbus/system_bus_socket`; revision 4
+  adds `FORWARDED_HOST_HEADER = "x-forwarded-host"`, `FORWARDED_PROTO_HEADER =
+  "x-forwarded-proto"` and `FORWARDED_PROTO_HTTPS = "https"` (the only spellings of these
+  names in `src/`).
 - **Invariants** RC-1…RC-5 (never root / no network socket / no unlock; identity required and an
   empty allowlist refuses to start; no `unlocked` from a failure or a stale reading; every bound
-  explicit; no identity in logs or bodies) and static contracts RMC-S1…RMC-S11.
+  explicit; no identity in logs or bodies) and static contracts RMC-S1…RMC-S11, plus RMC-S12
+  (both installer scripts executable, `std::fs::metadata` only) and RMC-S7b (the operator page
+  names `X-Forwarded-Host`, `X-Forwarded-Proto` and `effective host`, and no longer calls the
+  Serve forwarding pending) from revision 4.
 - **Contract migration** (§2.12): `test_pau_zbus_is_used_only_by_the_daemon` allows exactly the
   two manifests `crates/daemon` and `crates/remote`, keeps its name (PAU17 citation) and every
   other check.
@@ -71,24 +84,34 @@ R2-4 wall-clock filter, R2-5 `SocketError` exit codes, R2-6 small gaps); round 3
 `SystemTime::now`) and R3-2 (RMC-S9 also forbids `serve_at`, `request_name`, `#[interface`,
 `SignalStream`, `zbus::blocking`, `Address::system`). The evaluator also required the Phase 4
 verification, on the owner's host, that `tailscale serve unix:` forwards the original `Host`
-(see §9).
+(performed 2026-10-06, see §9: it does not; the effective host now comes from
+`X-Forwarded-Host`, D5a′).
 
 ## 4. Tester Contract
 
 `AI/tester_contract_remote_companion.md`: **115 new tests** (`test_rmc_*`, `prop_rmc_*`) plus
-**one migrated invariant**.
+**one migrated invariant** in the first cycle, and **11 more** in revision 4 (126 in total; no
+existing test edited).
 
 | Suite | Tests | Criteria |
 |---|---|---|
 | `crates/remote/tests/config_tests.rs` | 18 (1 proptest) | RMC1, RMC2 |
-| `crates/remote/tests/identity_tests.rs` | 9 | RMC3, RMC4 |
+| `crates/remote/tests/identity_tests.rs` | 9 + 5 (revision 4: `test_rmc_forwarded_header_constants`, `test_rmc_check_host_effective_host_comes_from_x_forwarded_host`, `test_rmc_check_host_normalises_the_forwarded_host`, `test_rmc_check_host_requires_https_forwarded_proto`, `test_rmc_check_host_allowlist_applies_to_the_forwarded_host`) | RMC3, RMC4 |
 | `crates/remote/tests/http_tests.rs` | 16 (4 proptests) | RMC5, RMC6 |
 | `crates/remote/tests/routes_tests.rs` | 7 | RMC7, RMC8 |
 | `crates/remote/tests/session_tests.rs` | 10 | RMC9 |
 | `crates/remote/tests/socket_tests.rs` | 9 | RMC13 |
-| `crates/remote/tests/server_tests.rs` | 28 (end to end over a temp Unix socket, `MockSource`, injected clock, frozen paused time) | RMC3–RMC12, RMC14 |
-| `tests/invariants/src/remote_companion_contract.rs` | 18 | RMC2, RMC7, RMC14–RMC19 |
+| `crates/remote/tests/server_tests.rs` | 28 + 4 (revision 4: `test_rmc_serve_head_status_and_lock_end_to_end`, `test_rmc_serve_head_with_http_proto_is_misdirected`, `test_rmc_serve_head_without_proto_or_with_foreign_host_is_misdirected`, `test_rmc_allowed_hosts_apply_to_the_forwarded_host`; end to end over a temp Unix socket, `MockSource`, injected clock, frozen paused time) | RMC3–RMC12, RMC14, RMC20 |
+| `tests/invariants/src/remote_companion_contract.rs` | 18 + 2 (revision 4: `test_rmc_s12_installer_scripts_are_executable`, `test_rmc_s7b_documentation_describes_the_effective_host`) | RMC2, RMC7, RMC14–RMC19 |
 | `tests/invariants/src/presence_unlock_contract.rs` | 1 migrated | RMC17, PAU17 |
+
+Revision 4 Red evidence (2026-10-06, stub constants only, `check_host` untouched):
+`identity_tests` 10 passed / 4 failed, `server_tests` 28 / 4, invariants 467 / 1 (RMC-S7b;
+RMC-S12 was green because the `100755` mode change was already staged, its teeth proven in a
+scratch `chmod 644` run); the three pre-existing `check_host` tests and every pre-existing
+`server_tests` fixture send no `X-Forwarded-*` header and stayed valid. The `serve_head()`
+helper reproduces the §9 capture in shape with synthetic names only (`Host: localhost`,
+`owner@example.com`, `100.64.0.1`, `pc.tail1234.ts.net`, `https`).
 
 Red evidence (stubs with signatures only): `config_tests` 5 passed / 13 failed, `http_tests`
 1 / 15, `identity_tests` 1 / 8, `routes_tests` 1 / 6, `session_tests` 3 / 7, `socket_tests` 1 / 8,
@@ -115,7 +138,10 @@ covered. `test_business_crates_forbid_unsafe_code` gained `"remote"` (strengthen
 ## 5. Auditor Constraints
 
 `AI/auditor_constraints_remote_companion.md`: **CLEARED**, 36 constraints, plus five
-non-blocking test additions T1–T5. How the constraints were met (grouped):
+non-blocking test additions T1–T5; revision 4 **CLEARED** again with constraints 37–48 (header
+trust argument audited: the `Host`-only path is unchanged or stricter, the `X-Forwarded-Host`
+path accepts only a value Serve is observed to overwrite). How the constraints were met
+(grouped):
 
 1. **Panic paths (1, 5, 29)**: no `unwrap`/`expect`/panic or print macro in `crates/remote/src`;
    `checked_add` on `seq`, `checked_div` on `IdleSinceHint`, `u64::try_from` on the clock; the
@@ -150,8 +176,25 @@ non-blocking test additions T1–T5. How the constraints were met (grouped):
    `candid_review.sh` change is `remote` in `BUSINESS_CRATES`.
 10. **Assets, tests, docs, host checks, English (32–36)**: assets embedded with
     `include_str!`/`include_bytes!`; no test file edited; the documentation needles were
-    delivered; the `tailscale` host check is recorded as pending (constraint 35); every string
-    is English.
+    delivered; the `tailscale` host check was performed by the owner on 2026-10-06 (constraint
+    35 still forbids the agents to run `tailscale`); every string is English.
+11. **Revision 4, D5a′ (37–48)**: `check_host` follows the §13.2 evaluation order exactly
+    (`X-Forwarded-Host` counted first, `Repeated` before any proto or `Host` lookup; `Host`
+    never read in the forwarded branch; no fallback between the two headers) (37); the proto
+    rule is one pure helper `forwarded_proto_ok(headers, required)` built on `single_header`,
+    `from_utf8`, `trim_matches(OWS)` and `eq_ignore_ascii_case(FORWARDED_PROTO_HTTPS)`, with
+    the header names and `"https"` spelled only through the `lib.rs` constants (38); one
+    normalisation pipeline `normalize_host` shared by both branches, `is_valid_host_name`,
+    `server.rs` and `routes.rs` untouched (39); no new `HostError` variant, `Display` text or
+    log field, `x-forwarded-for` never read (40); still pure, allocation-bounded (one
+    lowercase copy, three scans over at most 32 headers) and panic-free (41); the module doc
+    of `identity.rs` states the trust basis without a stronger claim (42); no test edited
+    (43); `Docs/REMOTE_COMPANION.md` rewritten per §13.3 with no `(pending)` left (44); the
+    Shortcuts section carries the trailing-dot fix, `misdirected_request`, the hedged
+    *Request Body: File* wording and no iOS claim stated as fact (45); every quotation of the
+    owner's capture is redacted (`arch.<tailnet>.ts.net`, `<redacted>`, `100.x.y.z`) (46); the
+    traceability edits are exactly §13.3 and constraint 35 is amended, not revoked (47);
+    `scripts/install_remote.sh` changes git mode only, content byte-identical to `HEAD` (48).
 
 T1–T5 (slow-reader write timeout on a stream, two concurrent lock requests, `HEAD /api/events`
 opens no slot, edge table rows, static `O_DIRECTORY`/`O_NOFOLLOW` needle) were not added in this
@@ -200,10 +243,10 @@ Notable decisions:
 
 ## 7. Candid Review
 
-`AI/candid_review_report.md`, Reviewed-Diff-Fingerprint
+First review (commit `0b0b50c`), Reviewed-Diff-Fingerprint
 `793d899a1c43e496a6cce8ae7da28b6e07631667c08434aead9c6ae9a28f51f4` (the code and the
-pre-Phase-6 documents; this walkthrough and the Phase 6 matrix rows came after it, as the report
-notes). **VERDICT: APPROVED**, no CRITICAL or MAJOR finding. Findings and their resolution:
+pre-Phase-6 documents; the first Phase 6 matrix rows came after it, as that report noted).
+**VERDICT: APPROVED**, no CRITICAL or MAJOR finding. Findings and their resolution:
 
 | Finding | Resolution |
 |---|---|
@@ -214,23 +257,38 @@ notes). **VERDICT: APPROVED**, no CRITICAL or MAJOR finding. Findings and their 
 | Suggestion: `err.print()` lets clap write `--help` to stdout | Follow-up (§9); accepted for an operator-run `--help`. |
 | Suggestion: "the code is right" wording in the doc header | **Fixed in Phase 6**: replaced by "report the drift" wording citing the invariant and the matrix rows. |
 
+Second review (revision 4/5 working tree on top of `0b0b50c`, 2026-10-06), current
+`AI/candid_review_report.md`, Reviewed-Diff-Fingerprint
+`112e25dde568f7b1ceb8815860b80d73782d5108af764cee801960189d1c8500` (49 files; this walkthrough's
+revision-4 sections and the `AI/ARCHITECTURE.md` §13 wording came after it). **VERDICT:
+APPROVED**, no CRITICAL or MAJOR finding; the single changed assertion in the whole diff is the
+recorded `test_pau_zbus_is_used_only_by_the_daemon` migration. Findings and their resolution:
+
+| Finding | Resolution |
+|---|---|
+| MINOR `scripts/install_remote.sh:72` — the configuration template comment still says "DNS names accepted in the Host header" | **Follow-up** (§9): auditor constraint 48 pins the installer to a mode-only change in this cycle (content byte-identical to `HEAD`), so the comment is reworded to "accepted as the effective host (`X-Forwarded-Host` set by `tailscale serve`, or `Host` for a direct local client)" in the next cycle that touches the script. `Docs/REMOTE_COMPANION.md` §5 already carries the correct wording. |
+| SUGGESTION `test_pau_zbus_is_used_only_by_the_daemon` now allows two crates | Name kept on purpose (PAU17 citation, spec §2.12); a rename with a matrix update is a follow-up (§9). |
+| SUGGESTION `server.rs::handle_connection` answers a head parse error as for `GET` even to a `HEAD` request | Harmless (`Connection: close`); documenting the choice in the doc comment is a follow-up (§9). |
+
 ## 8. Verification Results
 
-Commands run on 2026-10-05 on the final working tree (no commit; the orchestrator owns the
-commit, the draft PR and CI):
+Commands run on 2026-10-06 on the final revision-4 working tree (no commit; the orchestrator
+owns the commit, the draft PR and CI). The 2026-10-05 results of the first cycle were 97
+`soos-remote` tests and 466 invariants, all green.
 
 - `cargo fmt --all -- --check`: clean (candid review; no Rust file changed in Phase 6).
 - `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`: clean (candid
   review).
-- `cargo test --locked -p soos-remote --all-features`: **97 passed**, 0 failed
-  (`config_tests` 18, `http_tests` 16, `identity_tests` 9, `routes_tests` 7, `session_tests` 10,
-  `socket_tests` 9, `server_tests` 28; the lib and bin unit test targets are empty).
-- `cargo test --locked -p soos-invariants --all-features`: **466 passed**, 0 failed, re-run
-  after the Phase 6 edits (matrix citations of the 21 RMC rows resolve under
-  `test_matrix_claimed_rows_cite_only_existing_evidence`, documentation needles, workspace
-  trees, `test_pau_zbus_is_used_only_by_the_daemon`, `test_business_crates_forbid_unsafe_code`).
-- `cargo deny --locked check`: `advisories ok, bans ok, licenses ok, sources ok` (candid
-  review and auditor; `Cargo.lock` gains only the `soos-remote` package).
+- `cargo deny --locked check`: `advisories ok, bans ok, licenses ok, sources ok` (candid review
+  and auditor; `Cargo.lock` unchanged in revision 4).
+- `cargo test --locked -p soos-remote --all-features`: **106 passed**, 0 failed
+  (`config_tests` 18, `http_tests` 16, `identity_tests` 14, `routes_tests` 7, `session_tests` 10,
+  `socket_tests` 9, `server_tests` 32; the lib and bin unit test targets are empty).
+- `cargo test --locked -p soos-invariants --all-features`: **468 passed**, 0 failed, re-run
+  after the Phase 6 edits (matrix citations of the 21 RMC rows, including the eight revision-4
+  test names, resolve under `test_matrix_claimed_rows_cite_only_existing_evidence`; RMC-S12 and
+  RMC-S7b green; documentation needles, workspace trees,
+  `test_pau_zbus_is_used_only_by_the_daemon`, `test_business_crates_forbid_unsafe_code`).
 - `./scripts/candid_review.sh`: `Candid Review PASSED` (layer 1: forbid-unsafe list including
   `remote`, English policy, invariants) on the final tree.
 - `python3 scripts/sync_issue.py --check`: offline mapping self-check only (GitHub-only issue, no
@@ -238,13 +296,33 @@ commit, the draft PR and CI):
 
 ## 9. Known Limitations / Follow-ups
 
-- **RMC20 pending owner verification**: the agents may not run `tailscale`; the owner confirms
-  after `tailscale serve --bg unix:…` that `GET /api/status` through the tailnet answers `200`
-  (a `421` means the proxy forwards another `Host`: set `allowed_hosts` or return the design to
-  the architect, spec D5a).
+- **RMC20 verified by the owner on 2026-10-06 (D5a′, spec §13)**: with Tailscale 1.102.4 and
+  `tailscale serve --bg unix:/run/user/<uid>/soos-remote/remote.sock` (tailnet only), a capture
+  listener on the socket received, for `curl https://arch.<tailnet>.ts.net/api/status`:
+  `Host: localhost`, `Tailscale-User-Login: <redacted>`, `X-Forwarded-For: 100.x.y.z`,
+  `X-Forwarded-Host: arch.<tailnet>.ts.net`, `X-Forwarded-Proto: https`. A second request with
+  forged `X-Forwarded-Host`, `X-Forwarded-Proto: http` and `Tailscale-User-Login` reached the
+  socket with the real values: Serve overwrites all three. The deployed revision-3 build
+  answered `421` end to end (it pinned `Host`). Resolution D5a′: the effective host is decided
+  by `X-Forwarded-Host` when present (`Host` not inspected), otherwise by `Host`; a request
+  carrying `X-Forwarded-Host` must carry exactly one `X-Forwarded-Proto: https`; the same
+  normalisation applies; `X-Forwarded-For` is ignored. Implemented in
+  `crates/remote/src/identity.rs::check_host` (`forwarded_proto_ok`, `normalize_host`),
+  pinned by four new `identity_tests` and four new `server_tests` (the captured head
+  reproduced with synthetic names), RMC-S12 (installer mode `100755`) and RMC-S7b
+  (documentation needles). The agents still never run `tailscale`, `sudo` or `systemctl`
+  (constraint 35, amended by constraint 47).
 - **RMC21 pending hardware check**: Safari "Add to Home Screen", lock/unlock follow-up, "Lock
   now" confirmation through `LockedHint`, reconnection after background, `Unreachable` off the
-  tailnet.
+  tailnet; plus the "Lock PC" shortcut (run once unlocked → `lock_requested` and the desktop
+  locks; again within 2 s → `rate_limited`), after which the hedged iOS wording of the
+  Shortcuts section may be removed (spec §13.3, R4-7).
+- **Installer template comment (candid review of revision 4, MINOR)**: `scripts/install_remote.sh`
+  line 72 still describes `allowed_hosts` as "accepted in the Host header"; reword to the
+  effective-host wording in the next cycle that may change the script's content (constraint 48
+  limited this cycle to the `100755` mode change). The spec §13.3 installer row now records
+  that `tests/invariants/src/lib.rs` already checked `scripts/install.sh` (auditor A7); every
+  "verified with Tailscale 1.102.4" statement keeps the version and the date (auditor A8).
 - **Candid F1**: reconcile spec D7 and auditor constraint 24 with the built tie-break
   (shortest id, then greatest same-length id) in one place; the test must not be edited
   silently.

@@ -92,3 +92,12 @@ pub const IDENTITY_HEADER: &str = "tailscale-user-login";
 pub const ACTION_HEADER: &str = "x-soos-action";
 /// Required value of [`ACTION_HEADER`].
 pub const ACTION_LOCK: &str = "lock";
+/// Header through which `tailscale serve` forwards the original `*.ts.net` name (D5a′,
+/// spec §13.2; lowercased name). When present it alone decides the effective host.
+pub const FORWARDED_HOST_HEADER: &str = "x-forwarded-host";
+/// Header through which `tailscale serve` forwards the client-facing scheme (D5a′;
+/// lowercased name). Mandatory with [`FORWARDED_HOST_HEADER`], optional otherwise; when
+/// present it must occur once and equal [`FORWARDED_PROTO_HTTPS`].
+pub const FORWARDED_PROTO_HEADER: &str = "x-forwarded-proto";
+/// The only accepted [`FORWARDED_PROTO_HEADER`] value (compared ASCII-case-insensitively).
+pub const FORWARDED_PROTO_HTTPS: &str = "https";

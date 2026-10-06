@@ -476,6 +476,7 @@ This edit is made by the tester in Phase 2 and is reviewed as a contract change.
 | `EXIT_CONFIG` / `EXIT_RUNTIME` *[R2: F3, F7]* | 78 / 1 | 78 is in `RestartPreventExitStatus` |
 | `STALE_UI_MS` (UI constant in `app.js`) *[R2: F2]* | 45 000 | UI shows `Unreachable` |
 | `IDENTITY_HEADER` / `ACTION_HEADER` / `ACTION_LOCK` | `tailscale-user-login` / `x-soos-action` / `lock` | — |
+| `FORWARDED_HOST_HEADER` / `FORWARDED_PROTO_HEADER` / `FORWARDED_PROTO_HTTPS` *[R5: R4-1, R4-2]* | `x-forwarded-host` / `x-forwarded-proto` / `https` | header names compared ASCII-case-insensitively, as `IDENTITY_HEADER`; the only place these strings are written |
 
 These are independent of the daemon presence constants of the same names (different binary, different crate, no shared runtime); the remote crate does not import `soos-daemon` (it would pull ONNX Runtime and V4L into a user service).
 
@@ -543,6 +544,8 @@ Not on the authentication path. Status freshness: ≤ `poll_interval_ms` (1 s de
 | RMC-S9 *[R2: F1; R3: R2-3]* | `crates/remote/Cargo.toml` declares exactly `zbus = { workspace = true }` (no feature override). `crates/remote/src/lib.rs` defines `SYSTEM_BUS_ADDRESS = "unix:path=/run/dbus/system_bus_socket"` and `crates/remote/src/logind.rs` opens the connection only through `zbus::connection::Builder::address(`. With comments stripped, no file under `crates/remote/src` contains: `Connection::system`, `Connection::session`, `Builder::system`, `Builder::session`, `env::var`, `DBUS_SYSTEM_BUS_ADDRESS`, `DBUS_SESSION_BUS_ADDRESS`, `object_server`, `#[proxy`, `zbus::proxy`, `receive_signal`, `MessageStream`, `CacheProperties::Yes`, `CacheProperties::Lazily` (no generated proxy, no property cache: every read is a fresh `Properties.GetAll`, as presence). |
 | RMC-S10 *[R2: F3]* | `crates/remote/src/main.rs` calls `check_not_root` before `load_config`. |
 | RMC-S11 *[R2: F7]* | `packaging/soos-remote.service` has `RestartPreventExitStatus=78` and `crates/remote/src/lib.rs` defines `EXIT_CONFIG: u8 = 78`. |
+| RMC-S12 *[R5: R4-5]* | New test `test_rmc_s12_installer_scripts_are_executable` in `tests/invariants/src/remote_companion_contract.rs`: for each of `scripts/install_remote.sh` and `scripts/install.sh` (paths resolved through the same repository-root helper as the other RMC contracts), `std::fs::metadata(path)?.permissions().mode() & 0o111 != 0` (`std::os::unix::fs::PermissionsExt`). The checkout honours the git mode, so no `git` subprocess is needed (consistent with every other invariant: none shells out). The mode change `100644 → 100755` of `scripts/install_remote.sh` is already staged and lands in this cycle's commit; the test fails on a `100644` checkout of the script. |
+| RMC-S7b *[R5: R4-4]* | New test `test_rmc_s7b_documentation_describes_the_effective_host` (the existing RMC-S7 test is **not** edited): `Docs/REMOTE_COMPANION.md` contains `X-Forwarded-Host`, `X-Forwarded-Proto` and `effective host`, and no longer contains the strings `pending owner verification` or `(pending)`. |
 
 ## 9. Documentation Drift / ADR
 
@@ -598,3 +601,106 @@ Other doc updates listed in §1.1. Drift found *[R2: F1]*: ADR 2026-10-02 presen
 | R2-4 wall-clock filter | monotonic `seq` filter; UI staleness measured from event arrival |
 | R2-5 SocketError exit | persistent errors → 78, `Io` → 1 |
 | R2-6 small gaps | §5 deadline, UI source link, `check_host` doc split and normalized-host `Origin` comparison |
+
+---
+
+## 13. Revision 4 — D5a Host Forwarding Verified on the Owner's Host (2026-10-06)
+
+D5a required a Phase 4 check on the owner's host that `tailscale serve unix:` forwards the
+original `Host`, and returned the design to the architect if it did not. It does not.
+
+### 13.1 Evidence (owner's host, Tailscale 1.102.4, `tailscale serve --bg unix:/run/user/1000/soos-remote/remote.sock`, "tailnet only")
+
+A capture listener on the socket (service stopped for the capture, identity values redacted) received, for `curl https://arch.<tailnet>.ts.net/api/status` from the same tailnet:
+
+```
+GET /api/status HTTP/1.1
+Host: localhost
+Tailscale-User-Login: <redacted>
+X-Forwarded-For: 100.x.y.z
+X-Forwarded-Host: arch.<tailnet>.ts.net
+X-Forwarded-Proto: https
+```
+
+A second request sent with forged `X-Forwarded-Host: evil.com`, `X-Forwarded-Proto: http` and
+`Tailscale-User-Login: forged@x` reached the socket with the **real** values
+(`X-Forwarded-Host: arch.<tailnet>.ts.net`, `X-Forwarded-Proto: https`, the real login): Serve
+overwrites all three. The deployed revision-3 build answered `421 misdirected_request` end to end.
+
+### 13.2 Decision D5a′ (replaces D5a's Host rule; everything else in D5a stands)
+
+- **Effective host.** *[R5: R4-2]* The effective host of a request is decided by
+  `X-Forwarded-Host` alone whenever that header is present: when it occurs exactly once its value
+  is the effective host, and the `Host` header is **not inspected at all** (absent, single or
+  repeated `Host` give the same result). When `X-Forwarded-Host` is absent the single `Host`
+  header is the effective host under the unchanged D5a rules (direct local clients and tests).
+  `HostError::Missing` therefore means that **neither** `X-Forwarded-Host` **nor** `Host` is
+  present. Rationale (for the auditor): Go's reverse proxy always emits exactly one `Host`
+  (`localhost` for Unix backends today, §13.1), so inspecting it adds nothing, and a local client
+  forging either header on the `0600` socket is the owner; not pinning `Host: localhost` keeps the
+  check valid if Serve ever forwards the original name.
+- **Normalisation.** *[R5: R4-3]* The effective host, whichever header it came from, goes through
+  the same pipeline as the D5a `Host`: OWS trimmed, ASCII-lowercased, one trailing `:443`
+  stripped, then `is_valid_host_name`, then the `*.ts.net` / `allowed_hosts` rule. So
+  `X-Forwarded-Host: " PC.Tail1234.TS.NET:443 "` → `Ok("pc.tail1234.ts.net")`, and a port other
+  than `:443`, an IP literal (`100.64.0.1`), a trailing dot, an empty value, a comma-separated
+  list (`a.ts.net, b.ts.net`) or any invalid DNS name → `NotAllowed`. `X-Forwarded-Host` repeated
+  → `HostError::Repeated` (decided before the proto check, so "XFH twice + bad proto" is
+  `Repeated`).
+- **Transport.** *[R5: R4-1]* When `X-Forwarded-Host` is present, `X-Forwarded-Proto` **MUST**
+  be present exactly once and its value, OWS-trimmed, MUST equal `https` ASCII-case-insensitively
+  (`HTTPS`, `" https "` accepted); absent, repeated (even two identical `https`) or any other value
+  → `NotAllowed` (`421`). When `X-Forwarded-Host` is absent, `X-Forwarded-Proto`, if present, must
+  still be exactly one `https`; absent is accepted (direct local clients and tests send neither
+  header). This turns the documented ban on `tailscale serve --http` into an enforced one on
+  every proxied request, not only when the proxy volunteers the header.
+- **Evaluation order** (fixed, so the tester can pin the variant): (1) count `X-Forwarded-Host`:
+  two or more → `Repeated`; (2) if one: proto rule (mandatory) → `NotAllowed` on failure; if
+  none: `Host` count → `Missing` / `Repeated`, then proto rule (optional) → `NotAllowed` on
+  failure; (3) normalise and validate the effective host → `NotAllowed` on failure; (4) return the
+  normalised host. `check_host` stays pure, allocation-bounded (`MAX_HOST_LEN` 253, at most
+  `MAX_HEADERS` 32 headers) and panic-free; the header names are the §3 constants
+  `FORWARDED_HOST_HEADER` / `FORWARDED_PROTO_HEADER` / `FORWARDED_PROTO_HTTPS`.
+- **Trust argument** (same as D3). *[R5: R4-9]* The socket is `0600`, reachable only by
+  `tailscaled` (root) and the owner. On the owner's host (§13.1) Serve was observed to
+  **overwrite** exactly three client-supplied headers with the real values: `X-Forwarded-Host`,
+  `X-Forwarded-Proto` and `Tailscale-User-Login`; these are the only headers D5a′ and D3 rely on.
+  `X-Forwarded-For` was also sent by Serve but is **ignored by the service** (never read, never
+  compared, never logged); no claim is made about it. The owner forging their own headers on the
+  socket is no escalation.
+- **Origin.** The `Origin` comparison of `check_lock_csrf` uses the normalised **effective host**
+  returned by `check_host` (signature unchanged; `server.rs` already passes the returned value):
+  with the captured head, `Origin: https://pc.tail1234.ts.net` → lock proceeds, while
+  `Origin: https://localhost` → `OriginMismatch` → `403`.
+
+### 13.3 Changes
+
+| Item | Change |
+|---|---|
+| `crates/remote/src/lib.rs` *[R5]* | Add `pub const FORWARDED_HOST_HEADER: &str = "x-forwarded-host";`, `pub const FORWARDED_PROTO_HEADER: &str = "x-forwarded-proto";`, `pub const FORWARDED_PROTO_HTTPS: &str = "https";` (§3 row). |
+| `crates/remote/src/identity.rs::check_host` | D5a′ as in §13.2 (effective host, normalisation, mandatory proto with XFH, evaluation order); signature unchanged: `pub fn check_host(headers: &[(&str, &[u8])], allowed_hosts: &[String]) -> Result<String, HostError>`. Doc comment rewritten to describe the effective host. |
+| `HostError` doc comments *[R5: R4-2]* | Variants, `Display` texts and the `421` mapping unchanged (so `test_rmc_identity_errors_never_echo_values` and the message test keep passing). Doc comments become: `Missing` — "Neither `X-Forwarded-Host` nor `Host` is present."; `Repeated` — "The header that decides the effective host (`X-Forwarded-Host` when present, otherwise `Host`) occurs more than once."; `NotAllowed` — "Port other than 443, IP literal, invalid DNS name, a name outside the allowlist, or an `X-Forwarded-Proto` that is absent while `X-Forwarded-Host` is present, repeated, or not `https`." |
+| Unit tests (`crates/remote/tests/identity_tests.rs`, **new** test functions only; the three existing `check_host` tests are not edited and stay valid because they send no `X-Forwarded-*` header) *[R5: R4-1, R4-2, R4-3]* | `check_host` rows — effective host: XFH `pc.tail1234.ts.net` + `Host: localhost` → `Ok("pc.tail1234.ts.net")`; XFH + `Host` absent → OK; XFH + `Host` repeated (two `Host` lines) → OK; neither XFH nor `Host` → `Missing`; `Host` once + XFH absent → unchanged D5a rules (existing tests); XFH twice → `Repeated`; XFH twice + `X-Forwarded-Proto: http` → `Repeated`. Normalisation: XFH `" PC.Tail1234.TS.NET:443 "` → `Ok("pc.tail1234.ts.net")`; XFH `pc.tail1234.ts.net:8443` → `NotAllowed`; XFH `100.64.0.1` → `NotAllowed`; XFH `evil.com` → `NotAllowed`; XFH `a.ts.net, b.ts.net` → `NotAllowed`; XFH empty → `NotAllowed`; XFH `pc.tail1234.ts.net.` → `NotAllowed`. Transport (every row carries proto `https` unless stated): XFH + proto absent → `NotAllowed`; XFH + `X-Forwarded-Proto: http` → `NotAllowed`; XFH + `X-Forwarded-Proto: https` **twice** (identical values, so a first-header-wins implementation fails) → `NotAllowed`; XFH + `X-Forwarded-Proto: HTTPS` → OK; XFH + `X-Forwarded-Proto: " https "` (OWS-padded) → OK; `Host` only + proto absent → OK; `Host` only + proto `https` → OK; `Host` only + proto `http` → `NotAllowed`; `Host` only + proto `https` twice → `NotAllowed`. Allowlist (`allowed_hosts = ["mypc.tail1234.ts.net"]`): XFH `mypc.tail1234.ts.net` + `Host: other.tail1234.ts.net` → `Ok("mypc.tail1234.ts.net")`; XFH `other.tail1234.ts.net` + `Host: mypc.tail1234.ts.net` → `NotAllowed`. |
+| End-to-end tests (`crates/remote/tests/server_tests.rs`, **new** test functions; `with_identity` and every existing test untouched) *[R5: R4-3, R4-8]* | A `serve_head()` helper sends the §13.1 capture **verbatim in shape**, with the synthetic names already used by `server_tests` (`Host: localhost`, `Tailscale-User-Login: owner@example.com`, `X-Forwarded-For: 100.64.0.1`, `X-Forwarded-Host: pc.tail1234.ts.net`, `X-Forwarded-Proto: https`). Assertions: `GET /api/status` → `200`; `POST /api/lock` with `X-Soos-Action: lock` and `Origin: https://pc.tail1234.ts.net` → `202 {"result":"lock_requested"}` (mock session unlocked, one `LockSession` call); same with `Origin: https://localhost` → `403 {"result":"forbidden"}` and **no** `LockSession` call; the captured head with `X-Forwarded-Proto: http` → `421 {"result":"misdirected_request"}`; the captured head without `X-Forwarded-Proto` → `421`; the captured head with `X-Forwarded-Host: evil.com` → `421`; and an `allowed_hosts = ["mypc.tail1234.ts.net"]` server accepts XFH `mypc.tail1234.ts.net` with `Host: localhost` (`200`). The `421` responses carry the mandatory headers (`Connection: close`, `Cache-Control: no-store`, …) like every other error. No test and no fixture contains a real login, tailnet name, 100.x address or profile URL. |
+| Static contracts (§8) *[R5: R4-4, R4-5]* | RMC-S12 (installer scripts executable, `std::fs::metadata` only) and RMC-S7b (documentation names `X-Forwarded-Host`, `X-Forwarded-Proto`, `effective host` and no longer `pending owner verification` / `(pending)`). Decision on the optional RMC-S7 extension: the existing `test_rmc_s7_operator_documentation_exists_and_covers_the_requirements` is **not** edited; RMC-S7b is a separate new test carrying the new needles, so no existing test changes in this cycle. |
+| `Docs/REMOTE_COMPANION.md` *[R5: R4-4, R4-6, R4-7, R4-8]* | §2 trust bullets (lines 47–52): "The `Host` header must be…" → "The **effective host** (`X-Forwarded-Host` as set by `tailscale serve`, or `Host` for a direct local client) must be an allowed `*.ts.net` name…", and "`Origin` absent or equal to `https://<Host>`" → `https://<effective host>`; add that a proxied request must carry `X-Forwarded-Proto: https`, so the `--http` ban is enforced (`421`), not only documented. §4: the "Owner verification of the `Host` forwarding (pending)" section is **renamed** (no `(pending)` left) and rewritten with the verified behaviour (Serve sends `Host: localhost` and the real name in `X-Forwarded-Host`), in **redacted form only** (`<pc>.<tailnet>.ts.net`, `<login>`, `100.x.y.z`; never the real login, tailnet name, 100.x address or profile URL). §5 `allowed_hosts` row: "accepted in `Host`" → "accepted as the effective host (`X-Forwarded-Host`, or `Host`)". §7 `421` row: cause → "the effective host is not an allowed `*.ts.net` name / not in `allowed_hosts`, or `X-Forwarded-Proto` is missing or not `https` (`tailscale serve --http`, a port other than 443)"; fix → "use `tailscale serve --bg unix:` on port 443; set `allowed_hosts` if the name differs". §8 residual bullet "The `Host` forwarding … is pending owner verification" is **replaced** (not supplemented) by: "The host and transport checks rely on `tailscale serve` setting `X-Forwarded-Host` and `X-Forwarded-Proto` (verified with Tailscale 1.102.4); a Serve release that stops sending them makes every proxied request `421` (fail-closed, section 7), never `200`." Shortcuts section, see the next two rows. |
+| Shortcuts section — factual fix *[R5: R4-6]* | `Self.DNSName` from `tailscale status --json` ends with a trailing dot (`arch.<tailnet>.ts.net.`), which `check_host` rejects (existing row `pc.tail1234.ts.net.` → `NotAllowed`): the doc must say "drop the trailing dot", or point to the name printed by `tailscale serve status` / shown in the Safari address bar. The list of possible `result` values gains `misdirected_request` and the sentence "any other value, or a `421`/`403`, is a configuration problem: see section 7". |
+| Shortcuts section — unverifiable iOS claims *[R5: R4-7]* | Two statements cannot be checked from the repository and the agents have no iOS device: (a) *Get Contents of URL* `POST` with an empty *Request Body* sends no body (the default body type is JSON; an empty JSON body `{}` would be `413`); (b) a non-2xx response still feeds *Get Dictionary Value* instead of raising a Shortcuts error. **Resolution for this cycle: hedge the text.** The doc recommends *Request Body: File* with no file selected (the documented way to send an empty body), says "if the shortcut reports an error instead of a notification, the service refused the request (`403`, `421`, `413`): check section 7 and that the body is empty", and does not assert either iOS behaviour as fact. **Who verifies and how:** the owner, on their iPhone, by running the "Lock PC" shortcut once with the desktop unlocked and observing (1) the notification text `lock_requested`, (2) the desktop locking, and once more within 2 s observing `rate_limited` (a non-2xx body reaching the notification confirms (b)); the result is recorded as RMC21 evidence in the matrix and the hedge may then be removed in a follow-up. "Reviewed for accuracy" in the previous revision meant this review by the plan evaluator (R4-6, R4-7); nothing else is claimed. |
+| `AI/DECISIONS.md` | ADR 2026-10-05 item (8) amended to D5a′: "requires the **effective host** (`X-Forwarded-Host` set by `tailscale serve`, otherwise `Host`) to be an allowed `*.ts.net` name and, on a proxied request, `X-Forwarded-Proto: https`; verified on the owner's host with Tailscale 1.102.4 on 2026-10-06; `tailscale serve --http` and `tailscale funnel` must not be used for it and are refused with `421`". |
+| `AI/VERIFICATION_MATRIX.md` *[R5: R4-4]* | RMC4 text rewritten to D5a′ (effective host from `X-Forwarded-Host`, else `Host`; `Host` not inspected when XFH is present; mandatory `X-Forwarded-Proto: https` with XFH, optional-but-`https` without; same normalisation), evidence column extended with the new `identity_tests` and `server_tests` names. **RMC20 moved from ⬜ Pending to ✅ Verified** with the §13.1 evidence (owner's host, Tailscale 1.102.4, `tailscale serve --bg unix:`, 2026-10-06: `Host: localhost`, real name in `X-Forwarded-Host`, `X-Forwarded-Proto: https`, forged client headers overwritten; the end-to-end test reproduces the head); its text is reworded from "forwards the original `Host`" to "sets `X-Forwarded-Host` to the original `*.ts.net` name and `X-Forwarded-Proto: https`". **RMC21 stays ⬜ Pending** (phone check) and gains the R4-7 shortcut verification steps in its evidence column. RMC16 evidence gains RMC-S12; RMC19 evidence gains RMC-S7b. |
+| `AI/walkthroughs/183_remote_companion.md` *[R5: R4-4, R4-8]* | Line 8 ("RMC20 and RMC21 pending owner checks") → "RMC20 verified 2026-10-06 (D5a′), RMC21 pending"; line 73 (evaluator required the Phase 4 verification) → add "performed 2026-10-06, see §9"; line 153 ("the `tailscale` host check is recorded as pending (constraint 35)") → "performed by the owner on 2026-10-06 (constraint 35 still forbids the agents to run `tailscale`)"; §9 records the §13.1 evidence **only in redacted form** (`arch.<tailnet>.ts.net`, `<redacted>` login, `100.x.y.z`, no profile URL) and D5a′. The redaction rule holds for every repository file: the walkthrough, `Docs/`, the matrix, test fixtures and commit messages. |
+| `scripts/install_remote.sh` *[R5: R4-5]* | The git mode change `100644 → 100755` is already **staged** (index `100755`, `HEAD` `100644`) and lands in this cycle's commit; the documented `./scripts/install_remote.sh` invocation failed with "permission denied" on the `100644` checkout. RMC-S12 (§8) is the static contract (`tests/invariants/src/lib.rs` already asserts that `scripts/install.sh` is executable, so RMC-S12 is the first contract covering `scripts/install_remote.sh` and is redundant for `scripts/install.sh`, auditor A7; no invariant shells out to `git`). |
+
+### 13.4 Revision 5 Change Log *[R5]*
+
+| Finding | Resolution |
+|---|---|
+| R4-1 proto optional with XFH (MAJOR) | §13.2 "Transport": proto mandatory, exactly one, `https` case-insensitive OWS-trimmed when XFH present; optional-but-`https` otherwise; rows "XFH + proto absent → `NotAllowed`", "`Host` only + proto absent → OK"; e2e `421` without proto |
+| R4-2 `Host` with XFH under-specified (MAJOR) | §13.2 "Effective host": `Host` not inspected when XFH present; `Missing` = neither header; fixed evaluation order; `HostError` doc comments; rows XFH + `Host` absent / repeated → OK, neither → `Missing` |
+| R4-3 test power | §13.2 "Normalisation" explicit; rows: proto `https` twice, `HTTPS`, `" https "`, `" PC.Tail1234.TS.NET:443 "`, `:8443`, `100.64.0.1`, allowlist cross rows; e2e verbatim head, `202` with `Origin: https://<xfh>`, `403` with `Origin: https://localhost` |
+| R4-4 docs / matrix drift list | §13.3 rows for `Docs/REMOTE_COMPANION.md` §2, §4, §5, §7, §8; RMC4 text; RMC20 → ✅ with §13.1 evidence; RMC21 pending; walkthrough lines 8, 73, 153; RMC-S7b instead of editing RMC-S7 |
+| R4-5 script mode contract | §8 RMC-S12 (`std::fs::metadata(...).permissions().mode() & 0o111 != 0`, both installer scripts, no `git` subprocess); staged mode change noted |
+| R4-6 Shortcuts factual nit | trailing dot of `Self.DNSName` dropped / `tailscale serve status`; `misdirected_request` listed with a pointer to section 7 |
+| R4-7 unverifiable iOS claims | text hedged (*Request Body: File*, error sentence); owner verification procedure named (who, how, recorded as RMC21 evidence) |
+| R4-8 redaction | redaction rule for every repository file; e2e fixtures use `pc.tail1234.ts.net` / `owner@example.com` / `100.64.0.1` |
+| R4-9 trust wording | §13.2 "Trust argument" names the three overwritten headers; `X-Forwarded-For` stated as ignored by the service |

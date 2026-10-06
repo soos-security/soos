@@ -1,12 +1,21 @@
-//! Host and identity checks (architect spec §2.4, D3, D5a).
+//! Host and identity checks (architect spec §2.4, D3, D5a′).
 //!
-//! Both checks are pure over the parsed header list. The identity header is trusted only
-//! because the socket is a `0600` file reachable by `tailscaled` and the owner alone; the
-//! Host check refuses anything that is not an allowed `*.ts.net` name (or a configured
-//! name) so that a misdirected or rebound request learns nothing.
+//! Both checks are pure over the parsed header list. Trust basis (spec §13.1, §13.2): the
+//! socket is a `0600` file in a `0700` directory reachable by `tailscaled` and the owner
+//! alone; `tailscale serve` was observed (Tailscale 1.102.4) to overwrite exactly three
+//! client-supplied headers with the real values, `X-Forwarded-Host`, `X-Forwarded-Proto` and
+//! `Tailscale-User-Login`, and these three are the only headers the host and identity checks
+//! rely on. Behind Serve the `Host` header is the proxy's backend name, so it is not inspected
+//! when `X-Forwarded-Host` is present; `X-Forwarded-For` is ignored. The owner forging their
+//! own headers on the socket is no escalation. The host check refuses anything whose effective
+//! host is not an allowed `*.ts.net` name (or a configured name), or whose proxied transport
+//! is not `https`, so that a misdirected, rebound or plain-HTTP request learns nothing.
 
 use crate::config::TailscaleLogin;
-use crate::{IDENTITY_HEADER, MAX_HOST_LEN, TS_NET_SUFFIX};
+use crate::{
+    FORWARDED_HOST_HEADER, FORWARDED_PROTO_HEADER, FORWARDED_PROTO_HTTPS, IDENTITY_HEADER,
+    MAX_HOST_LEN, TS_NET_SUFFIX,
+};
 
 /// Identity refusal; every variant → `403`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -28,13 +37,16 @@ pub enum AuthError {
 /// Host refusal; every variant → `421`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum HostError {
-    /// No `Host` header.
+    /// Neither `X-Forwarded-Host` nor `Host` is present.
     #[error("host header missing")]
     Missing,
-    /// More than one `Host` header.
+    /// The header that decides the effective host (`X-Forwarded-Host` when present,
+    /// otherwise `Host`) occurs more than once.
     #[error("host header repeated")]
     Repeated,
-    /// Port other than 443, IP literal, invalid DNS name or a name outside the allowlist.
+    /// Port other than 443, IP literal, invalid DNS name, a name outside the allowlist, or an
+    /// `X-Forwarded-Proto` that is absent while `X-Forwarded-Host` is present, repeated, or
+    /// not `https`.
     #[error("host not allowed")]
     NotAllowed,
 }
@@ -86,12 +98,19 @@ pub fn is_valid_host_name(name: &str) -> bool {
     !last_label.bytes().all(|b| b.is_ascii_digit())
 }
 
-/// Pure. Exactly one Host header; the value is trimmed of optional whitespace,
-/// ASCII-lowercased, one trailing `:443` is stripped, and the remainder must be a valid DNS
-/// name (see [`is_valid_host_name`]). With `allowed_hosts` empty the name must end with
-/// `.ts.net` and have at least one label before it; otherwise it must be a member of
-/// `allowed_hosts`. Returns the normalized host (lowercased, `:443` removed), the value the
-/// `Origin` comparison of the lock CSRF check uses.
+/// Pure. The *effective host* is decided by `X-Forwarded-Host` alone whenever that header
+/// is present (set by `tailscale serve`; the `Host` header is then not inspected at all);
+/// otherwise it is the single `Host` header (direct local clients). Evaluation order (spec
+/// §13.2): (1) `X-Forwarded-Host` repeated → [`HostError::Repeated`]; (2) with one
+/// `X-Forwarded-Host`, `X-Forwarded-Proto` must occur exactly once and equal `https`
+/// (ASCII-case-insensitive, OWS-trimmed) → otherwise [`HostError::NotAllowed`]; without it,
+/// `Host` must occur exactly once ([`HostError::Missing`] / [`HostError::Repeated`]) and
+/// `X-Forwarded-Proto`, if present, must still be exactly one `https`; (3) the selected value
+/// is trimmed of optional whitespace, ASCII-lowercased, one trailing `:443` is stripped, and
+/// the remainder must be a valid DNS name (see [`is_valid_host_name`]); with `allowed_hosts`
+/// empty the name must end with `.ts.net` and have at least one label before it, otherwise it
+/// must be a member of `allowed_hosts`. Returns the normalized effective host (lowercased,
+/// `:443` removed), the value the `Origin` comparison of the lock CSRF check uses.
 ///
 /// # Errors
 ///
@@ -100,7 +119,59 @@ pub fn check_host(
     headers: &[(&str, &[u8])],
     allowed_hosts: &[String],
 ) -> Result<String, HostError> {
-    let raw = single_header(headers, "host", HostError::Missing, HostError::Repeated)?;
+    let raw = match single_header(
+        headers,
+        FORWARDED_HOST_HEADER,
+        HostError::Missing,
+        HostError::Repeated,
+    ) {
+        Ok(forwarded) => {
+            forwarded_proto_ok(headers, true)?;
+            forwarded
+        }
+        Err(HostError::Missing) => {
+            let host = single_header(headers, "host", HostError::Missing, HostError::Repeated)?;
+            forwarded_proto_ok(headers, false)?;
+            host
+        }
+        Err(err) => return Err(err),
+    };
+    normalize_host(raw, allowed_hosts)
+}
+
+/// Transport rule of D5a′: `X-Forwarded-Proto`, when present, must occur exactly once and its
+/// OWS-trimmed value must equal `https` ASCII-case-insensitively. With `required` an absent
+/// header is refused as well (a proxied request must state its scheme); otherwise absent is
+/// accepted (direct local clients send no forwarding header).
+fn forwarded_proto_ok(headers: &[(&str, &[u8])], required: bool) -> Result<(), HostError> {
+    enum Lookup {
+        Missing,
+        Repeated,
+    }
+    let raw = match single_header(
+        headers,
+        FORWARDED_PROTO_HEADER,
+        Lookup::Missing,
+        Lookup::Repeated,
+    ) {
+        Ok(raw) => raw,
+        Err(Lookup::Missing) if !required => return Ok(()),
+        Err(Lookup::Missing | Lookup::Repeated) => return Err(HostError::NotAllowed),
+    };
+    let text = std::str::from_utf8(raw).map_err(|_| HostError::NotAllowed)?;
+    if text
+        .trim_matches(OWS)
+        .eq_ignore_ascii_case(FORWARDED_PROTO_HTTPS)
+    {
+        Ok(())
+    } else {
+        Err(HostError::NotAllowed)
+    }
+}
+
+/// Shared normalisation and validation of the selected raw host value (step 3 of
+/// [`check_host`]); the only place a host name is validated against the allowlist.
+fn normalize_host(raw: &[u8], allowed_hosts: &[String]) -> Result<String, HostError> {
     let text = std::str::from_utf8(raw).map_err(|_| HostError::NotAllowed)?;
     let lowered = text.trim_matches(OWS).to_ascii_lowercase();
     let name = lowered.strip_suffix(":443").unwrap_or(&lowered);
