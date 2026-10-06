@@ -3,7 +3,9 @@
 //!
 //! - RMC-S1 `crates/remote/src/{lib,main}.rs` forbid `unsafe`;
 //! - RMC-S2 no TCP/UDP type is ever named in the crate;
-//! - RMC-S3 no `UnlockSession` / `Unlock` / `SetLockedHint` string literal (D10);
+//! - RMC-S3 no `Unlock` / `SetLockedHint` / session-ending string literal (D10); since the
+//!   ADR 2026-10-06 "Remote Unlock in soos-remote", exactly one `UnlockSession` literal, in
+//!   `logind.rs` (as for `LockSession`);
 //! - RMC-S4 `soos-remote` is a leaf: nothing depends on it, it depends on no daemon crate;
 //! - RMC-S5 / RMC-S11 the user unit is sandboxed and never retries configuration errors;
 //! - RMC-S6 the installer refuses root and never runs `sudo`, `tailscale` or enables the unit;
@@ -517,7 +519,6 @@ fn test_rmc_s3_no_unlock_or_locked_hint_literal() {
     for (rel, content) in remote_sources() {
         let code = strip_comments(&content);
         for forbidden in [
-            "\"UnlockSession\"",
             "\"UnlockSessions\"",
             "\"Unlock\"",
             "\"SetLockedHint\"",
@@ -543,6 +544,63 @@ fn test_rmc_s3_no_unlock_or_locked_hint_literal() {
             .sum::<usize>(),
         1,
         "exactly one \"LockSession\" literal in the crate"
+    );
+    // ADR 2026-10-06: the remote unlock names Manager.UnlockSession exactly once, in
+    // logind.rs, and nowhere else.
+    assert_eq!(
+        logind.matches("\"UnlockSession\"").count(),
+        1,
+        "logind.rs names Manager.UnlockSession through exactly one string literal"
+    );
+    assert_eq!(
+        remote_sources()
+            .iter()
+            .map(|(_, c)| strip_comments(c).matches("\"UnlockSession\"").count())
+            .sum::<usize>(),
+        1,
+        "exactly one \"UnlockSession\" literal in the crate"
+    );
+}
+
+/// ADR 2026-10-06 "Remote Unlock in soos-remote": the operator documentation covers the
+/// opt-in unlock and its accepted risk (the default itself is pinned by `config_tests`).
+#[test]
+fn test_rmc_unlock_is_opt_in_and_documented() {
+    let doc = read("Docs/REMOTE_COMPANION.md");
+    for needle in [
+        "allow_unlock = true",
+        "POST /api/unlock",
+        "X-Soos-Action` = `unlock",
+        "unlock_disabled",
+        "already_unlocked",
+        "Accepted risk",
+    ] {
+        assert!(
+            doc.contains(needle),
+            "Docs/REMOTE_COMPANION.md must mention `{needle}`"
+        );
+    }
+    let js = read("crates/remote/assets/app.js");
+    for required in [
+        "/api/unlock",
+        "\"X-Soos-Action\": \"unlock\"",
+        "Unlock now",
+        "window.confirm(",
+        "unlock_disabled",
+    ] {
+        assert!(
+            js.contains(required),
+            "app.js must contain `{required}` (ADR 2026-10-06)"
+        );
+    }
+    assert!(
+        read("crates/remote/assets/index.html").contains("id=\"unlock\""),
+        "index.html carries the unlock button"
+    );
+    let decisions = read("AI/DECISIONS.md");
+    assert!(
+        decisions.contains("Remote Unlock in `soos-remote`, Tailscale Identity Only, Opt-In"),
+        "the remote unlock ADR is registered"
     );
 }
 

@@ -27,7 +27,7 @@ Welcome to the technical documentation for **soos** (local zero-trust facial ver
 | [**Memory Protection & Swap Hardening**](MEMORY_PROTECTION_AND_SWAP.md) | `mlock` page pinning and zeroization of keys, embeddings and frames. | Security Reviewers |
 | [**Packaging & Provisioning**](PACKAGING_AND_PROVISIONING.md) | Build dependencies, installer, packages, runtime paths and modes. | Packagers, Operators |
 | [**Distribution Deployment Guide**](DISTRIBUTION_DEPLOYMENT.md) | Per-distribution PAM activation, validation and rollback. | Operators, Packagers |
-| [**Remote Companion**](REMOTE_COMPANION.md) | `soos-remote` user-level lock status page and remote lock over Tailscale Serve: trust model, `LockedHint` requirements, per-user install, out-of-scope list. | Operators, Security Reviewers |
+| [**Remote Companion**](REMOTE_COMPANION.md) | `soos-remote` user-level lock status page, remote lock and opt-in remote unlock over Tailscale Serve: trust model, accepted unlock risk, `LockedHint` requirements, per-user install, out-of-scope list. | Operators, Security Reviewers |
 
 ---
 

@@ -11,15 +11,20 @@
 const STALE_UI_MS = 45000;
 // After a lock request, report "LockedHint unchanged" unless the stream confirmed "locked".
 const LOCK_CONFIRM_UI_MS = 5000;
+// After an unlock request, report "LockedHint unchanged" unless the stream confirmed
+// "unlocked".
+const UNLOCK_CONFIRM_UI_MS = 5000;
 // Refresh the relative "Updated N s ago" and "idle for N min" lines at this cadence.
 const TICK_MS = 1000;
 
-// Button label (the markup carries the same text for the no-script fallback).
+// Button labels (the markup carries the same text for the no-script fallback).
 const LOCK_LABEL = "Lock now";
+const UNLOCK_LABEL = "Unlock now";
 
 const STATUS_PATH = "/api/status";
 const EVENTS_PATH = "/api/events";
 const LOCK_PATH = "/api/lock";
+const UNLOCK_PATH = "/api/unlock";
 
 const LABELS = {
   locked: "Locked",
@@ -35,12 +40,15 @@ const activityNode = document.getElementById("activity");
 const updatedNode = document.getElementById("updated");
 const feedbackNode = document.getElementById("feedback");
 const lockButton = document.getElementById("lock");
+const unlockButton = document.getElementById("unlock");
 
 let source = null;
 let latest = null;
 let lastEventAt = 0;
 let lockRequestedAt = 0;
 let lockConfirmTimer = null;
+let unlockRequestedAt = 0;
+let unlockConfirmTimer = null;
 
 function setText(node, text) {
   node.textContent = text;
@@ -72,8 +80,12 @@ function render(view, reachable) {
   }
 
   lockButton.disabled = !(reachable && view.state === "unlocked");
+  unlockButton.disabled = !(reachable && view.state === "locked");
   if (reachable && view.state === "locked" && lockRequestedAt !== 0) {
     confirmLock();
+  }
+  if (reachable && view.state === "unlocked" && unlockRequestedAt !== 0) {
+    confirmUnlock();
   }
 }
 
@@ -105,6 +117,15 @@ function confirmLock() {
     lockConfirmTimer = null;
   }
   setText(feedbackNode, "Locked");
+}
+
+function confirmUnlock() {
+  unlockRequestedAt = 0;
+  if (unlockConfirmTimer !== null) {
+    clearTimeout(unlockConfirmTimer);
+    unlockConfirmTimer = null;
+  }
+  setText(feedbackNode, "Unlocked");
 }
 
 function openStream() {
@@ -204,13 +225,78 @@ function requestLock() {
     });
 }
 
+function requestUnlock() {
+  // A deliberate second tap: the unlock has no other factor than the Tailscale identity
+  // (ADR 2026-10-06), so a stray tap must not open the PC.
+  if (!window.confirm("Unlock the PC now?")) {
+    return;
+  }
+  unlockButton.disabled = true;
+  setText(feedbackNode, "Unlock requested…");
+  unlockRequestedAt = Date.now();
+  if (unlockConfirmTimer !== null) {
+    clearTimeout(unlockConfirmTimer);
+  }
+  unlockConfirmTimer = setTimeout(function () {
+    unlockConfirmTimer = null;
+    if (unlockRequestedAt !== 0) {
+      unlockRequestedAt = 0;
+      setText(feedbackNode, "The desktop did not confirm the unlock (LockedHint unchanged)");
+      if (latest !== null) {
+        render(latest, true);
+      }
+    }
+  }, UNLOCK_CONFIRM_UI_MS);
+
+  fetch(UNLOCK_PATH, { method: "POST", headers: { "X-Soos-Action": "unlock" } })
+    .then(function (response) {
+      return response.json().then(function (body) {
+        return { status: response.status, result: body.result };
+      });
+    })
+    .then(function (outcome) {
+      if (outcome.status === 202) {
+        return;
+      }
+      unlockRequestedAt = 0;
+      if (unlockConfirmTimer !== null) {
+        clearTimeout(unlockConfirmTimer);
+        unlockConfirmTimer = null;
+      }
+      const reasons = {
+        no_session: "No session to unlock",
+        already_unlocked: "Already unlocked",
+        rate_limited: "Please wait a moment before unlocking again",
+        unavailable: "logind is unavailable",
+        unlock_disabled: "Remote unlock is disabled (allow_unlock = false in remote.toml)",
+        forbidden: "Request refused",
+      };
+      const reason = Object.prototype.hasOwnProperty.call(reasons, outcome.result)
+        ? reasons[outcome.result]
+        : "Unlock refused (" + outcome.status + ")";
+      setText(feedbackNode, reason);
+      fetchStatus(false);
+    })
+    .catch(function () {
+      unlockRequestedAt = 0;
+      if (unlockConfirmTimer !== null) {
+        clearTimeout(unlockConfirmTimer);
+        unlockConfirmTimer = null;
+      }
+      setText(feedbackNode, "Unlock request failed");
+      fetchStatus(true);
+    });
+}
+
 function resume() {
   openStream();
   fetchStatus(true);
 }
 
 setText(lockButton, LOCK_LABEL);
+setText(unlockButton, UNLOCK_LABEL);
 lockButton.addEventListener("click", requestLock);
+unlockButton.addEventListener("click", requestUnlock);
 document.addEventListener("visibilitychange", function () {
   if (document.visibilityState === "visible") {
     resume();

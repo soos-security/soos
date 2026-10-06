@@ -108,6 +108,13 @@ button {
   cursor: pointer;
 }
 
+button.secondary {
+  margin-top: 12px;
+  background: transparent;
+  color: var(--accent);
+  box-shadow: inset 0 0 0 2px var(--accent);
+}
+
 button:disabled {
   opacity: 0.4;
   cursor: default;

@@ -1,13 +1,14 @@
 # Remote Companion (`soos-remote`)
 
-> Crate: `crates/remote` (`soos-remote`, GitHub #339, ADR 2026-10-05 "Remote Companion `soos-remote`")
+> Crate: `crates/remote` (`soos-remote`, GitHub #339, ADR 2026-10-05 "Remote Companion `soos-remote`",
+> ADR 2026-10-06 "Remote Unlock in `soos-remote`")
 > Scope: a **user-level** service that shows the owner's phone the real-time lock status of the
-> desktop session and offers a remote **lock**. Nothing else: no remote unlock, no camera, no
-> push notification (see "Out of scope").
+> desktop session, offers a remote **lock** and, only when `allow_unlock = true`, a remote
+> **unlock** (section 2a). Nothing else: no camera, no push notification (see "Out of scope").
 > Source of truth: `crates/remote/src/lib.rs` (constants), `crates/remote/src/config.rs`
 > (configuration keys), `crates/remote/src/server.rs` (request handling). If this document and
 > the code disagree, report the drift: the invariant `remote_companion_contract` pins the parts
-> of this page the acceptance criteria rely on (matrix rows RMC1–RMC21, walkthrough 183).
+> of this page the acceptance criteria rely on (matrix rows RMC1–RMC25, walkthroughs 183 and 184).
 
 ---
 
@@ -21,7 +22,9 @@
   terminates HTTPS with the node's `*.ts.net` certificate and proxies to the socket;
 - reads the session state from systemd-logind (`LockedHint`, `IdleHint`, `IdleSinceHint`,
   `Active`) over the pinned system bus, exactly like the daemon's presence worker;
-- can ask logind to **lock** the owner's local session (`Manager.LockSession`).
+- can ask logind to **lock** the owner's local session (`Manager.LockSession`);
+- when `allow_unlock = true`, can ask logind to **unlock** it (`Manager.UnlockSession`,
+  section 2a).
 
 It runs as the session owner, never as root. `soos-daemon`, `pam_soos.so` and the IPC protocol
 are untouched; no other crate depends on `soos-remote`.
@@ -58,8 +61,42 @@ Consequences:
 - `POST /api/lock` additionally needs `X-Soos-Action: lock` (a non-simple header a cross-origin
   page cannot send without a CORS preflight, which is never answered), `Sec-Fetch-Site` absent or
   `same-origin`, and `Origin` absent or equal to `https://<effective host>`.
+- `POST /api/unlock` needs the same three CSRF conditions with `X-Soos-Action: unlock`; the lock
+  route never accepts the unlock value and the unlock route never accepts `lock`.
 - Nothing about a request is logged: no identity, no `Host`, no path, no header value, no
-  session id. Denials log their reason class only.
+  session id. Denials log their reason class only. An accepted unlock adds one `info` line,
+  `remote unlock requested`, without any of these.
+
+## 2a. Remote unlock (opt-in)
+
+`POST /api/unlock` asks systemd-logind to unlock the owner's local session (the same session
+the lock picks: `Class=user`, `Remote=false`, on a seat, the active one first). logind emits its
+`Unlock` signal; GNOME and Plasma close their lock screen, and on a sway-family desktop the
+`swayidle` `unlock` hook of section 3 stops the locker, exactly as for the daemon's presence
+auto-unlock. The service gains no right the owner's account does not already have: logind lets
+a user unlock their own session.
+
+It is **disabled by default**. Enable it in `remote.toml`, then restart the unit:
+
+```toml
+allow_unlock = true
+```
+
+```sh
+systemctl --user restart soos-remote
+```
+
+While it is disabled, `POST /api/unlock` answers `403 {"result":"unlock_disabled"}` without
+reading logind. The page shows an *Unlock now* button (enabled only while the session is
+`Locked`) that asks for a confirmation tap before sending the request.
+
+**Accepted risk** (owner decision, ADR 2026-10-06): the only authentication is the Tailscale
+identity. Anyone who holds the owner's unlocked phone, or any other device logged in to an
+allowed Tailscale login, while it is connected to the tailnet, can unlock the PC, and the PC
+stays unlocked until it locks again by itself (no automatic re-lock). There is no passkey, PIN
+or Face ID step. To revoke the capability at once: set `allow_unlock = false` (or remove the
+login from `allowed_logins`) and restart the unit, or remove the device from the tailnet in the
+Tailscale admin console.
 
 ## 3. Requirements on the desktop
 
@@ -197,6 +234,21 @@ still comes from Tailscale, so it works only on a device logged in with an allow
 the shortcut reports an error instead of a notification, the service refused the request
 (`403`, `421`, `413`): check section 7 and that the body is empty.
 
+**"Unlock PC" shortcut** (only with `allow_unlock = true`, section 2a). The same three actions
+as "Lock PC" with:
+
+- URL: `https://<pc>.<tailnet>.ts.net/api/unlock`
+- Method: `POST`
+- Headers: `X-Soos-Action` = `unlock`
+- Request Body: *File*, with no file selected (empty body)
+
+The result is `unlock_requested`, `already_unlocked`, `no_session`, `rate_limited`,
+`unavailable`, `unlock_disabled` or `forbidden`. Put a *Choose from Menu* step first (prompt
+"Unlock the PC?", items "Unlock" and "Cancel") and place *Get Contents of URL* and the
+following actions under "Unlock" only: Siri and home-screen shortcuts run without the page's
+confirmation tap, so this step is the shortcut's protection against a stray tap or an
+unintended Siri match.
+
 **"PC status" shortcut.** *Get Contents of URL* `https://<pc>.<tailnet>.ts.net/api/status`
 (method `GET`), then *Get Dictionary Value* `state`, then *Show Notification* (or *Speak Text*).
 `state` is `locked`, `unlocked`, `no_session` or `unavailable`; if the request itself fails,
@@ -208,6 +260,7 @@ the PC is unreachable (off, asleep, or Tailscale disconnected).
 |---|---|---|---|
 | `allowed_logins` | yes | — | 1..=8 Tailscale logins (`Tailscale-User-Login` values), printable ASCII, compared case-insensitively; empty → the service refuses to start |
 | `allowed_hosts` | no | `[]` (any valid `*.ts.net` name) | 0..=4 DNS names accepted as the effective host (`X-Forwarded-Host`, or `Host`) (lowercased, no port, no scheme) |
+| `allow_unlock` | no | `false` | TOML boolean; `true` enables `POST /api/unlock` (section 2a); any other type → refused |
 | `poll_interval_ms` | no | 1000 | 250..=10000; logind polling cadence **while a stream is open**; out of range → refused, never clamped |
 | `socket_path` | no | `$XDG_RUNTIME_DIR/soos-remote/remote.sock` | absolute, at most 107 bytes; `XDG_RUNTIME_DIR` unset or relative without `socket_path` → refused (no `/tmp` fallback) |
 
@@ -223,6 +276,7 @@ The service also refuses to start when its real or effective uid is 0.
 | `GET /api/status` | `200 application/json` `{state, active, idle, idle_since_unix_s, checked_unix_ms}`; one fresh logind read |
 | `GET /api/events` | `200 text/event-stream`; first event = the stream's own fresh read; then an event on every change and a keep-alive at least every 15 s; `503` beyond 4 streams; closed after 30 min (the browser reconnects) |
 | `POST /api/lock` | `202 {"result":"lock_requested"}`, `409 no_session` / `already_locked`, `429 rate_limited` (one lock per 2 s), `503 unavailable` |
+| `POST /api/unlock` | `403 unlock_disabled` (default), `202 {"result":"unlock_requested"}`, `409 no_session` / `already_unlocked`, `429 rate_limited` (one unlock per 2 s, independent of the lock), `503 unavailable` |
 | `HEAD` of a `GET` route | same headers, empty body |
 
 `state` is one of `locked`, `unlocked`, `no_session`, `unavailable`. Any logind failure is
@@ -232,7 +286,8 @@ The service also refuses to start when its real or effective uid is 0.
 Every response carries `Cache-Control: no-store`, the CSP, `X-Content-Type-Options: nosniff`,
 `Referrer-Policy: no-referrer`, `X-Frame-Options: DENY` and `Connection: close`. Requests are
 bounded: 16 connections, 8 KiB head, 32 headers, 256-byte path, 5 s to send the head, 2 s per
-write, no request body (`413` / `400`), 1.5 s per logind snapshot, 2 s per lock flow.
+write, no request body (`413` / `400`), 1.5 s per logind snapshot, 2 s per lock flow, 2 s per
+unlock flow.
 
 ## 7. Troubleshooting
 
@@ -253,6 +308,8 @@ reason classes.
 | "Lock requested…" then "The desktop did not confirm the lock (LockedHint unchanged)" | The desktop ignores the logind `Lock` signal, or the locker runs without the `SetLockedHint` wrapper | Section 3, second bullet |
 | `POST /api/lock` answers `429` | A lock was accepted less than 2 s ago | Wait and retry |
 | `POST /api/lock` answers `409` | `no_session` (see above) or `already_locked` | Nothing to do |
+| `POST /api/unlock` answers `403 unlock_disabled` | `allow_unlock` is absent or `false` | Section 2a, if you accept its risk |
+| "Unlock requested…" then "The desktop did not confirm the unlock (LockedHint unchanged)" | logind emitted `Unlock` but the locker ignored it (no `swayidle` `unlock` hook), or the wrapper did not clear `LockedHint` | Section 3; check `swayidle` runs with `unlock 'pkill -USR1 swaylock'` |
 | `GET /api/events` answers `503` | Four streams are already open (old suspended tabs) | Close other tabs; a stream ends by itself after 30 min |
 
 ## 8. Residual limitations
@@ -272,9 +329,10 @@ reason classes.
 
 ## 9. Out of scope (each needs its own ADR)
 
-- **Remote unlock**: the crate never names `UnlockSession`, `Unlock` or `SetLockedHint`
-  (invariant RMC-S3); a user-level service gains no capability the owner's account does not
-  already hold, and an unlock path would.
+- **A second factor for the remote unlock** (passkey / Face ID through WebAuthn) and an
+  automatic re-lock after a remote unlock: the owner chose the Tailscale identity alone
+  (section 2a). The crate still never names `SetLockedHint`, the `Unlock` signal or a
+  session-ending method (invariant RMC-S3).
 - **Push notifications** (lock/unlock alerts while the page is in the background).
 - **Live camera** or any frame, embedding or evidence access.
 - System-wide packaging (`install.sh`, deb/rpm/Arch): deferred until the owner approves the

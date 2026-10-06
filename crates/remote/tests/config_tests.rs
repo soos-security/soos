@@ -595,3 +595,48 @@ fn test_rmc_config_error_messages_are_fixed_english_text() {
         "socket_path must be absolute and at most 107 bytes"
     );
 }
+
+// ---------------------------------------------------------------------------------------
+// Remote unlock (ADR 2026-10-06 "Remote Unlock in soos-remote", matrix RMC22)
+// ---------------------------------------------------------------------------------------
+
+/// RMC22: the unlock constants have the specified values.
+#[test]
+fn test_rmc_unlock_constants_match_the_adr() {
+    assert_eq!(soos_remote::ACTION_UNLOCK, "unlock");
+    assert_eq!(soos_remote::MIN_UNLOCK_INTERVAL_MS, 2000);
+    assert_eq!(soos_remote::UNLOCK_FLOW_DEADLINE_MS, 2000);
+    let (snapshot, unlock_flow) = (SNAPSHOT_DEADLINE_MS, soos_remote::UNLOCK_FLOW_DEADLINE_MS);
+    assert!(
+        unlock_flow > snapshot,
+        "the unlock flow covers one snapshot plus the call"
+    );
+}
+
+/// RMC22: `allow_unlock` is opt-in: absent means `false`; only a TOML boolean is accepted.
+#[test]
+fn test_rmc_parse_config_allow_unlock_is_opt_in() {
+    let config = parse("allowed_logins = [\"owner@example.com\"]\n").unwrap();
+    assert!(
+        !config.allow_unlock,
+        "unlock is disabled unless explicitly enabled"
+    );
+    let config = parse("allowed_logins = [\"o@x.io\"]\nallow_unlock = true\n").unwrap();
+    assert!(config.allow_unlock);
+    let config = parse("allowed_logins = [\"o@x.io\"]\nallow_unlock = false\n").unwrap();
+    assert!(!config.allow_unlock);
+    for bad in ["\"true\"", "1", "\"yes\"", "[true]"] {
+        assert_eq!(
+            parse(&format!(
+                "allowed_logins = [\"o@x.io\"]\nallow_unlock = {bad}\n"
+            )),
+            Err(ConfigError::Syntax),
+            "{bad}"
+        );
+    }
+    assert_eq!(
+        parse("allow_unlock = true\n"),
+        Err(ConfigError::NoAllowedLogins),
+        "enabling unlock never relaxes the allowlist"
+    );
+}

@@ -15,7 +15,9 @@
 
 use soos_remote::assets::{asset, AssetId};
 use soos_remote::http::{Method, RequestHead};
-use soos_remote::routes::{check_lock_csrf, route, CsrfError, Route};
+use soos_remote::routes::{
+    allow_header, check_lock_csrf, check_unlock_csrf, route, CsrfError, Route,
+};
 
 const HOST: &str = "pc.tail1234.ts.net";
 
@@ -100,7 +102,8 @@ fn test_rmc_route_wrong_method_and_unknown_paths() {
         "/index.html/",
         "/app.js.map",
         "/api/lock/",
-        "/api/unlock",
+        "/api/unlock/",
+        "/API/UNLOCK",
         "/api/events2",
         "//",
         "",
@@ -273,4 +276,83 @@ fn test_rmc_csrf_error_messages() {
     );
     assert_eq!(CsrfError::CrossSite.to_string(), "cross-site request");
     assert_eq!(CsrfError::OriginMismatch.to_string(), "origin mismatch");
+}
+
+// ---------------------------------------------------------------------------------------
+// /api/unlock (ADR 2026-10-06 "Remote Unlock in soos-remote", matrix RMC22, RMC24)
+// ---------------------------------------------------------------------------------------
+
+fn unlock_csrf(headers: &[(&str, &[u8])]) -> Result<(), CsrfError> {
+    let mut request = head(headers);
+    request.path = "/api/unlock".to_string();
+    check_unlock_csrf(&request, HOST)
+}
+
+/// RMC22: `POST /api/unlock` is the unlock route; any other method is `405 Allow: POST`.
+#[test]
+fn test_rmc_unlock_route() {
+    assert_eq!(route(Method::Post, "/api/unlock"), Route::Unlock);
+    assert_eq!(route(Method::Post, "/api/unlock?x=1"), Route::Unlock);
+    for method in [Method::Get, Method::Head, Method::Other] {
+        assert_eq!(
+            route(method, "/api/unlock"),
+            Route::MethodNotAllowed,
+            "{method:?}"
+        );
+    }
+    assert_eq!(allow_header("/api/unlock"), "POST");
+    assert_eq!(allow_header("/api/lock"), "POST");
+    assert_eq!(allow_header("/api/status"), "GET, HEAD");
+}
+
+/// RMC24: the unlock CSRF check requires exactly `X-Soos-Action: unlock` and applies the
+/// same `Sec-Fetch-Site` and `Origin` rules as the lock.
+#[test]
+fn test_rmc_check_unlock_csrf() {
+    assert_eq!(unlock_csrf(&[("x-soos-action", b"unlock")]), Ok(()));
+    for value in [&b"lock"[..], b"", b"UNLOCK", b"unlock ", b"unlock,unlock"] {
+        assert_eq!(
+            unlock_csrf(&[("x-soos-action", value)]),
+            Err(CsrfError::MissingActionHeader),
+            "{value:?}"
+        );
+    }
+    assert_eq!(unlock_csrf(&[]), Err(CsrfError::MissingActionHeader));
+    assert_eq!(
+        unlock_csrf(&[("x-soos-action", b"unlock"), ("x-soos-action", b"unlock")]),
+        Err(CsrfError::MissingActionHeader)
+    );
+    assert_eq!(
+        unlock_csrf(&[
+            ("x-soos-action", b"unlock"),
+            ("sec-fetch-site", b"same-origin")
+        ]),
+        Ok(())
+    );
+    assert_eq!(
+        unlock_csrf(&[
+            ("x-soos-action", b"unlock"),
+            ("sec-fetch-site", b"cross-site")
+        ]),
+        Err(CsrfError::CrossSite)
+    );
+    assert_eq!(
+        unlock_csrf(&[
+            ("x-soos-action", b"unlock"),
+            ("origin", b"https://PC.tail1234.ts.net:443")
+        ]),
+        Ok(())
+    );
+    assert_eq!(
+        unlock_csrf(&[
+            ("x-soos-action", b"unlock"),
+            ("origin", b"https://evil.ts.net")
+        ]),
+        Err(CsrfError::OriginMismatch)
+    );
+    // The lock check never accepts the unlock action (no action confusion).
+    assert_eq!(
+        csrf(&[("x-soos-action", b"unlock")]),
+        Err(CsrfError::MissingActionHeader)
+    );
 }

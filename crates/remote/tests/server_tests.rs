@@ -55,7 +55,8 @@ use soos_remote::session::SessionProps;
 use soos_remote::{
     DEFAULT_POLL_INTERVAL_MS, LOCK_FLOW_DEADLINE_MS, MAX_CONNECTIONS, MAX_HEADERS, MAX_PATH_LEN,
     MAX_REQUEST_HEAD_BYTES, MAX_SSE_STREAMS, MAX_SSE_STREAM_MS, MIN_LOCK_INTERVAL_MS,
-    REQUEST_HEAD_TIMEOUT_MS, SNAPSHOT_DEADLINE_MS, SSE_KEEPALIVE_MS,
+    MIN_UNLOCK_INTERVAL_MS, REQUEST_HEAD_TIMEOUT_MS, SNAPSHOT_DEADLINE_MS, SSE_KEEPALIVE_MS,
+    UNLOCK_FLOW_DEADLINE_MS,
 };
 
 const HOST: &str = "pc.tail1234.ts.net";
@@ -134,11 +135,14 @@ fn session(locked: bool) -> SessionProps {
 struct MockInner {
     answer: Mutex<Result<Vec<SessionProps>, SourceError>>,
     lock_answer: Mutex<Result<(), SourceError>>,
+    unlock_answer: Mutex<Result<(), SourceError>>,
     hold_remaining: AtomicUsize,
     hold_lock_remaining: AtomicUsize,
+    hold_unlock_remaining: AtomicUsize,
     release: watch::Sender<u64>,
     started: watch::Sender<u64>,
     lock_ids: Mutex<Vec<String>>,
+    unlock_ids: Mutex<Vec<String>>,
     uids: Mutex<Vec<u32>>,
 }
 
@@ -152,11 +156,14 @@ impl MockSource {
         Self(Arc::new(MockInner {
             answer: Mutex::new(Ok(vec![session(false)])),
             lock_answer: Mutex::new(Ok(())),
+            unlock_answer: Mutex::new(Ok(())),
             hold_remaining: AtomicUsize::new(0),
             hold_lock_remaining: AtomicUsize::new(0),
+            hold_unlock_remaining: AtomicUsize::new(0),
             release: watch::channel(0).0,
             started: watch::channel(0).0,
             lock_ids: Mutex::new(Vec::new()),
+            unlock_ids: Mutex::new(Vec::new()),
             uids: Mutex::new(Vec::new()),
         }))
     }
@@ -183,6 +190,19 @@ impl MockSource {
 
     fn set_lock_result(&self, result: Result<(), SourceError>) {
         *self.0.lock_answer.lock().unwrap() = result;
+    }
+
+    fn set_unlock_result(&self, result: Result<(), SourceError>) {
+        *self.0.unlock_answer.lock().unwrap() = result;
+    }
+
+    /// The next `n` `unlock_session` calls block until [`Self::release`].
+    fn hold_unlock_next(&self, n: usize) {
+        self.0.hold_unlock_remaining.store(n, Ordering::SeqCst);
+    }
+
+    fn unlock_ids(&self) -> Vec<String> {
+        self.0.unlock_ids.lock().unwrap().clone()
     }
 
     /// The next `n` `own_sessions` calls block (after snapshotting the answer) until
@@ -261,6 +281,20 @@ impl SessionSource for MockSource {
                 rx.wait_for(|g| *g > generation).await.ok();
             }
             inner.lock_answer.lock().unwrap().clone()
+        }
+    }
+
+    fn unlock_session(&self, id: &str) -> impl Future<Output = Result<(), SourceError>> + Send {
+        let inner = Arc::clone(&self.0);
+        let id = id.to_string();
+        async move {
+            inner.unlock_ids.lock().unwrap().push(id);
+            let generation = *inner.release.borrow();
+            if Self::take_hold(&inner.hold_unlock_remaining) {
+                let mut rx = inner.release.subscribe();
+                rx.wait_for(|g| *g > generation).await.ok();
+            }
+            inner.unlock_answer.lock().unwrap().clone()
         }
     }
 }
@@ -676,6 +710,7 @@ struct Options {
     poll_interval_ms: Option<u64>,
     allowed_hosts: Vec<String>,
     seq_start: Option<u64>,
+    allow_unlock: bool,
 }
 
 struct Harness {
@@ -702,6 +737,7 @@ impl Harness {
             socket_path: path.clone(),
             poll_interval_ms: options.poll_interval_ms.unwrap_or(DEFAULT_POLL_INTERVAL_MS),
             allowed_hosts: options.allowed_hosts,
+            allow_unlock: options.allow_unlock,
         };
         let source = MockSource::unlocked();
         let clock = TestClock::new();
@@ -766,6 +802,20 @@ impl Harness {
         let mut headers = vec![("X-Soos-Action", "lock")];
         headers.extend_from_slice(extra);
         self.request("POST", "/api/lock", &headers).await
+    }
+
+    async fn unlock(&self, extra: &[(&str, &str)]) -> HttpResponse {
+        let mut headers = vec![("X-Soos-Action", "unlock")];
+        headers.extend_from_slice(extra);
+        self.request("POST", "/api/unlock", &headers).await
+    }
+
+    async fn start_unlock_enabled() -> Self {
+        Self::start_with(Options {
+            allow_unlock: true,
+            ..Options::default()
+        })
+        .await
     }
 
     async fn try_open_stream(&self, headers: &[(&str, &str)]) -> Result<SseClient, Outcome> {
@@ -1230,7 +1280,7 @@ async fn test_rmc_unknown_route_and_wrong_method() {
         "/api/status/",
         "/API/STATUS",
         "/index.html/",
-        "/api/unlock",
+        "/api/unlock/",
     ] {
         let r = h.get(target).await;
         assert_eq!(r.status, 404, "{target}");
@@ -1457,6 +1507,377 @@ async fn test_rmc_lock_requires_csrf_headers() {
         "the Origin is compared to the normalised host"
     );
     assert_eq!(h.source.lock_ids().len(), 2);
+}
+
+// ---------------------------------------------------------------------------------------
+// /api/unlock (ADR 2026-10-06 "Remote Unlock in soos-remote", matrix RMC22–RMC25)
+// ---------------------------------------------------------------------------------------
+
+/// RMC22: unlock is opt-in. With the default configuration a fully valid unlock request is
+/// `403 unlock_disabled` and never reaches logind.
+#[tokio::test(start_paused = true)]
+async fn test_rmc_unlock_disabled_by_default_never_reaches_logind() {
+    let h = Harness::start().await;
+    h.source.set_locked();
+    let r = h.unlock(&[]).await;
+    assert_eq!(r.status, 403);
+    r.assert_mandatory_headers();
+    r.assert_json_body();
+    assert_eq!(r.result(), "unlock_disabled");
+    assert!(h.source.unlock_ids().is_empty());
+    assert!(h.source.lock_ids().is_empty());
+    assert_eq!(h.source.reads(), 0, "a disabled unlock never reads logind");
+}
+
+/// RMC23: fresh snapshot → `UnlockSession(id)` → `202 unlock_requested`; `409
+/// already_unlocked` / `409 no_session` / `503` without an unlock call and without recording
+/// the interval; `429` within `MIN_UNLOCK_INTERVAL_MS`; a failed call counts; no retry.
+#[tokio::test(start_paused = true)]
+async fn test_rmc_unlock_flow_and_rate_limit() {
+    let h = Harness::start_unlock_enabled().await;
+    h.source.set_locked();
+    let r = h.unlock(&[]).await;
+    assert_eq!(r.status, 202);
+    r.assert_mandatory_headers();
+    r.assert_json_body();
+    assert_eq!(r.result(), "unlock_requested");
+    assert_eq!(h.source.unlock_ids(), vec![SESSION_ID.to_string()]);
+    assert!(h.source.lock_ids().is_empty(), "an unlock never locks");
+    let reads_after_first = h.source.reads();
+    assert_eq!(
+        reads_after_first, 1,
+        "one fresh snapshot before the unlock call"
+    );
+
+    let r = h.unlock(&[]).await;
+    assert_eq!(r.status, 429);
+    assert_eq!(r.result(), "rate_limited");
+    assert_eq!(h.source.unlock_ids().len(), 1);
+    assert_eq!(
+        h.source.reads(),
+        reads_after_first,
+        "a rate-limited unlock never reads logind"
+    );
+
+    h.advance_ms(MIN_UNLOCK_INTERVAL_MS - 1).await;
+    assert_eq!(h.unlock(&[]).await.status, 429, "still inside the interval");
+    h.advance_ms(2).await;
+    assert_eq!(h.unlock(&[]).await.status, 202);
+    assert_eq!(h.source.unlock_ids().len(), 2);
+
+    // already_unlocked: no call, interval not recorded.
+    h.advance_ms(MIN_UNLOCK_INTERVAL_MS + 1).await;
+    h.source.set_unlocked();
+    let r = h.unlock(&[]).await;
+    assert_eq!(r.status, 409);
+    assert_eq!(r.result(), "already_unlocked");
+    assert_eq!(h.source.unlock_ids().len(), 2);
+    h.source.set_locked();
+    assert_eq!(
+        h.unlock(&[]).await.status,
+        202,
+        "a 409 recorded no interval"
+    );
+    assert_eq!(h.source.unlock_ids().len(), 3);
+
+    // no_session, including a locked remote session (never unlocked).
+    h.advance_ms(MIN_UNLOCK_INTERVAL_MS + 1).await;
+    h.source.set_no_session();
+    let r = h.unlock(&[]).await;
+    assert_eq!(r.status, 409);
+    assert_eq!(r.result(), "no_session");
+    let mut remote = session(true);
+    remote.remote = Some(true);
+    h.source.set_sessions(vec![remote]);
+    assert_eq!(
+        h.unlock(&[]).await.result(),
+        "no_session",
+        "a remote session is never unlocked"
+    );
+    let mut greeter = session(true);
+    greeter.class = Some("greeter".to_string());
+    h.source.set_sessions(vec![greeter]);
+    assert_eq!(
+        h.unlock(&[]).await.result(),
+        "no_session",
+        "only a user-class session"
+    );
+    assert_eq!(h.source.unlock_ids().len(), 3);
+
+    // Snapshot failure: 503, no call, interval not recorded.
+    h.source.set_error(SourceError::Timeout);
+    let r = h.unlock(&[]).await;
+    assert_eq!(r.status, 503);
+    assert_eq!(r.result(), "unavailable");
+    assert_eq!(h.source.unlock_ids().len(), 3);
+    h.source.set_locked();
+    assert_eq!(h.unlock(&[]).await.status, 202);
+    assert_eq!(h.source.unlock_ids().len(), 4);
+
+    // UnlockSession failure: 503, exactly one attempt, the interval is recorded.
+    h.advance_ms(MIN_UNLOCK_INTERVAL_MS + 1).await;
+    h.source.set_unlock_result(Err(SourceError::Call));
+    let r = h.unlock(&[]).await;
+    assert_eq!(r.status, 503);
+    assert_eq!(r.result(), "unavailable");
+    assert_eq!(
+        h.source.unlock_ids().len(),
+        5,
+        "exactly one attempt, no retry"
+    );
+    h.source.set_unlock_result(Ok(()));
+    assert_eq!(
+        h.unlock(&[]).await.status,
+        429,
+        "a failed UnlockSession still counts"
+    );
+    assert!(h.source.unlock_ids().iter().all(|id| id == SESSION_ID));
+    assert!(h.source.lock_ids().is_empty());
+}
+
+/// RMC23: the unlock and lock rate limits are independent (locking right after an unlock,
+/// or unlocking right after a lock, is never `429`).
+#[tokio::test(start_paused = true)]
+async fn test_rmc_unlock_and_lock_rate_limits_are_independent() {
+    let h = Harness::start_unlock_enabled().await;
+    assert_eq!(h.lock(&[]).await.status, 202);
+    h.source.set_locked();
+    assert_eq!(h.unlock(&[]).await.status, 202);
+    h.source.set_unlocked();
+    assert_eq!(
+        h.lock(&[]).await.status,
+        429,
+        "the lock interval still applies"
+    );
+    assert_eq!(h.source.lock_ids().len(), 1);
+    assert_eq!(h.source.unlock_ids().len(), 1);
+}
+
+/// RMC24: the unlock needs every identity, host and CSRF check, with its own action value
+/// (`X-Soos-Action: unlock`); a refused request never reaches logind, enabled or not.
+#[tokio::test(start_paused = true)]
+async fn test_rmc_unlock_requires_identity_host_and_csrf() {
+    let h = Harness::start_unlock_enabled().await;
+    h.source.set_locked();
+    for extra in [
+        vec![],
+        vec![("X-Soos-Action", "lock")],
+        vec![("X-Soos-Action", "UNLOCK")],
+        vec![("X-Soos-Action", "unlock"), ("X-Soos-Action", "unlock")],
+        vec![
+            ("X-Soos-Action", "unlock"),
+            ("Sec-Fetch-Site", "cross-site"),
+        ],
+        vec![("X-Soos-Action", "unlock"), ("Sec-Fetch-Site", "same-site")],
+        vec![
+            ("X-Soos-Action", "unlock"),
+            ("Origin", "https://other.tail1234.ts.net"),
+        ],
+        vec![
+            ("X-Soos-Action", "unlock"),
+            ("Origin", "http://pc.tail1234.ts.net"),
+        ],
+        vec![("X-Soos-Action", "unlock"), ("Origin", "null")],
+    ] {
+        let r = h.request("POST", "/api/unlock", &extra).await;
+        assert_eq!(r.status, 403, "{extra:?}");
+        assert_eq!(r.result(), "forbidden", "{extra:?}");
+    }
+    // The lock route never accepts the unlock action, and vice versa (no confusion).
+    let r = h
+        .request("POST", "/api/lock", &[("X-Soos-Action", "unlock")])
+        .await;
+    assert_eq!(r.status, 403);
+
+    // Identity: unknown login, missing login, repeated login.
+    let r = h
+        .raw(&raw_request(
+            "POST",
+            "/api/unlock",
+            &[
+                ("Host", HOST),
+                ("Tailscale-User-Login", "evil@example.org"),
+                ("X-Soos-Action", "unlock"),
+            ],
+        ))
+        .await;
+    assert_eq!(r.status, 403);
+    let r = h
+        .raw(&raw_request(
+            "POST",
+            "/api/unlock",
+            &[("Host", HOST), ("X-Soos-Action", "unlock")],
+        ))
+        .await;
+    assert_eq!(r.status, 403);
+    let r = h
+        .raw(&raw_request(
+            "POST",
+            "/api/unlock",
+            &[
+                ("Host", HOST),
+                ("Tailscale-User-Login", LOGIN),
+                ("Tailscale-User-Login", LOGIN),
+                ("X-Soos-Action", "unlock"),
+            ],
+        ))
+        .await;
+    assert_eq!(r.status, 403);
+    // Host: not a tailnet name.
+    let r = h
+        .raw(&raw_request(
+            "POST",
+            "/api/unlock",
+            &[
+                ("Host", "evil.example.com"),
+                ("Tailscale-User-Login", LOGIN),
+                ("X-Soos-Action", "unlock"),
+            ],
+        ))
+        .await;
+    assert_eq!(r.status, 421);
+    // A body is refused.
+    let mut with_body = raw_request(
+        "POST",
+        "/api/unlock",
+        &with_identity(&[("X-Soos-Action", "unlock"), ("Content-Length", "2")]),
+    );
+    with_body.extend_from_slice(b"{}");
+    assert_eq!(h.raw(&with_body).await.status, 413);
+
+    assert!(h.source.unlock_ids().is_empty());
+    assert!(h.source.lock_ids().is_empty());
+    assert_eq!(
+        h.source.reads(),
+        0,
+        "every refusal happens before any logind read"
+    );
+
+    let r = h
+        .unlock(&[
+            ("Sec-Fetch-Site", "same-origin"),
+            ("Origin", "https://PC.Tail1234.TS.NET:443"),
+        ])
+        .await;
+    assert_eq!(r.status, 202);
+    assert_eq!(h.source.unlock_ids(), vec![SESSION_ID.to_string()]);
+}
+
+/// RMC24: a disabled unlock still runs the CSRF check first (a cross-site request learns
+/// `forbidden`, not whether unlock is enabled).
+#[tokio::test(start_paused = true)]
+async fn test_rmc_disabled_unlock_checks_csrf_first() {
+    let h = Harness::start().await;
+    let r = h
+        .request("POST", "/api/unlock", &[("X-Soos-Action", "lock")])
+        .await;
+    assert_eq!(r.status, 403);
+    assert_eq!(r.result(), "forbidden");
+    assert_eq!(h.source.reads(), 0);
+}
+
+/// RMC22: `/api/unlock` is `POST` only (`405`, `Allow: POST`), like `/api/lock`.
+#[tokio::test(start_paused = true)]
+async fn test_rmc_unlock_route_is_post_only() {
+    let h = Harness::start_unlock_enabled().await;
+    for method in ["GET", "HEAD", "PUT", "DELETE"] {
+        let r = h
+            .request(method, "/api/unlock", &[("X-Soos-Action", "unlock")])
+            .await;
+        assert_eq!(r.status, 405, "{method}");
+        assert_eq!(r.header("allow"), Some("POST"), "{method}");
+        r.assert_mandatory_headers();
+    }
+    assert_eq!(h.source.reads(), 0);
+    assert!(h.source.unlock_ids().is_empty());
+}
+
+/// RMC25: the whole unlock flow is bounded by `UNLOCK_FLOW_DEADLINE_MS`: a hung
+/// `UnlockSession` answers `503 unavailable` at the deadline, never later.
+#[tokio::test(start_paused = true)]
+async fn test_rmc_unlock_flow_deadline() {
+    let h = Harness::start_unlock_enabled().await;
+    h.source.set_locked();
+    h.source.hold_unlock_next(1);
+    let unlock = spawn_exchange(
+        &h.path,
+        raw_request(
+            "POST",
+            "/api/unlock",
+            &with_identity(&[("X-Soos-Action", "unlock")]),
+        ),
+    );
+    h.source.wait_reads_at_least(1).await;
+    settle().await;
+    assert_eq!(
+        h.source.unlock_ids().len(),
+        1,
+        "UnlockSession was called and hangs"
+    );
+    h.advance_ms(UNLOCK_FLOW_DEADLINE_MS - 1).await;
+    assert!(
+        !finished_soon(&unlock).await,
+        "no answer before UNLOCK_FLOW_DEADLINE_MS"
+    );
+    h.advance_ms(1).await;
+    assert!(
+        finished_soon(&unlock).await,
+        "the unlock flow deadline cuts the hung call"
+    );
+    match unlock.await.unwrap() {
+        Outcome::Response(r) => {
+            assert_eq!(r.status, 503);
+            assert_eq!(r.result(), "unavailable");
+        }
+        other => panic!("expected a 503, got {other:?}"),
+    }
+    assert_eq!(h.source.unlock_ids().len(), 1, "one attempt, no retry");
+    h.source.release();
+    let r = h.get("/api/status").await;
+    assert_eq!(r.json()["state"], "locked", "the service is still healthy");
+}
+
+/// RMC25: every accepted unlock leaves one `info` audit line without identity, session id
+/// or request data; refused unlocks leave no such line.
+#[tokio::test(start_paused = true)]
+async fn test_rmc_unlock_is_audited_without_identity() {
+    let capture = LogCapture::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::TRACE)
+        .with_ansi(false)
+        .with_writer(capture.clone())
+        .finish();
+    let _guard = tracing::subscriber::set_default(subscriber);
+
+    let h = Harness::start_unlock_enabled().await;
+    h.source.set_unlocked();
+    let _ = h.unlock(&[]).await; // 409: no audit line
+    let _ = h
+        .request("POST", "/api/unlock", &[("X-Soos-Action", "lock")])
+        .await; // 403
+    assert!(
+        !capture.text().contains("remote unlock requested"),
+        "refused unlocks are not audited as requested"
+    );
+    h.source.set_locked();
+    assert_eq!(h.unlock(&[]).await.status, 202);
+    let text = capture.text();
+    let audit: Vec<&str> = text
+        .lines()
+        .filter(|l| l.contains("remote unlock requested"))
+        .collect();
+    assert_eq!(audit.len(), 1, "{text}");
+    assert!(audit[0].contains("INFO"), "{}", audit[0]);
+    for forbidden in [
+        LOGIN,
+        SESSION_ID,
+        HOST,
+        "1000",
+        "/api/unlock",
+        "x-soos-action",
+    ] {
+        assert!(!text.contains(forbidden), "the log leaks {forbidden}");
+    }
 }
 
 /// D5 / §4: a lock request with a body is refused before any logind call.

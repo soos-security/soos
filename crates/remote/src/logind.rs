@@ -8,7 +8,8 @@
 //! [`DBUS_CONNECT_TIMEOUT_MS`]. A transport failure, a timeout or a malformed reply drops
 //! the connection, which the next call reopens.
 //!
-//! The only state-changing call is `Manager.LockSession`; the crate never names an unlock.
+//! The only state-changing calls are `Manager.LockSession` and, for the opt-in remote unlock
+//! (ADR 2026-10-06), `Manager.UnlockSession`, both on the owner's own session.
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -72,6 +73,9 @@ pub trait SessionSource: Send + Sync + 'static {
 
     /// `Manager.LockSession(id)`.
     fn lock_session(&self, id: &str) -> impl Future<Output = Result<(), SourceError>> + Send;
+
+    /// `Manager.UnlockSession(id)` (ADR 2026-10-06).
+    fn unlock_session(&self, id: &str) -> impl Future<Output = Result<(), SourceError>> + Send;
 }
 
 /// Production logind access over the pinned system bus.
@@ -205,6 +209,21 @@ impl ZbusSessionSource {
         }
     }
 
+    /// One `Manager.<method>(id)` call on a validated session id (lock or unlock).
+    async fn session_action(&self, id: &str, method: &'static str) -> Result<(), SourceError> {
+        if !is_valid_session_id(id) {
+            return Err(SourceError::Malformed);
+        }
+        match self
+            .call(LOGIND_MANAGER_PATH, LOGIND_MANAGER_IFACE, method, &(id,))
+            .await
+        {
+            Ok(_) => Ok(()),
+            Err(CallFailure::Method(name)) => Err(Self::method_error(&name)),
+            Err(CallFailure::Transport(err)) => Err(err),
+        }
+    }
+
     /// `Properties.GetAll` of one own session object; `Ok(None)` when it vanished.
     async fn session_properties(
         &self,
@@ -267,21 +286,10 @@ impl SessionSource for ZbusSessionSource {
     }
 
     async fn lock_session(&self, id: &str) -> Result<(), SourceError> {
-        if !is_valid_session_id(id) {
-            return Err(SourceError::Malformed);
-        }
-        match self
-            .call(
-                LOGIND_MANAGER_PATH,
-                LOGIND_MANAGER_IFACE,
-                "LockSession",
-                &(id,),
-            )
-            .await
-        {
-            Ok(_) => Ok(()),
-            Err(CallFailure::Method(name)) => Err(Self::method_error(&name)),
-            Err(CallFailure::Transport(err)) => Err(err),
-        }
+        self.session_action(id, "LockSession").await
+    }
+
+    async fn unlock_session(&self, id: &str) -> Result<(), SourceError> {
+        self.session_action(id, "UnlockSession").await
     }
 }

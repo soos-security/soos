@@ -1,9 +1,9 @@
 //! soos remote companion (`soos-remote`, GitHub #339).
 //!
-//! A user-level service that serves the owner's phone a real-time lock status page and a
-//! remote lock action over a `0600` Unix socket proxied by `tailscale serve`. It never runs as
-//! root, never opens a network socket, never unlocks anything, and treats every logind
-//! failure as `unavailable`.
+//! A user-level service that serves the owner's phone a real-time lock status page, a remote
+//! lock action and, when `allow_unlock = true`, a remote unlock action (ADR 2026-10-06) over a
+//! `0600` Unix socket proxied by `tailscale serve`. It never runs as root, never opens a
+//! network socket, and treats every logind failure as `unavailable`.
 //!
 //! This file is the single source of the crate constants (architect spec §3).
 
@@ -90,8 +90,15 @@ pub const EXIT_RUNTIME: u8 = 1;
 pub const IDENTITY_HEADER: &str = "tailscale-user-login";
 /// CSRF action header required by `POST /api/lock` (lowercased name).
 pub const ACTION_HEADER: &str = "x-soos-action";
-/// Required value of [`ACTION_HEADER`].
+/// Required value of [`ACTION_HEADER`] on `POST /api/lock`.
 pub const ACTION_LOCK: &str = "lock";
+/// Required value of [`ACTION_HEADER`] on `POST /api/unlock` (ADR 2026-10-06).
+pub const ACTION_UNLOCK: &str = "unlock";
+/// Minimum interval between two accepted unlock requests; sooner → `429`. Independent of
+/// [`MIN_LOCK_INTERVAL_MS`].
+pub const MIN_UNLOCK_INTERVAL_MS: u64 = 2000;
+/// Bound of one whole unlock flow (snapshot plus `UnlockSession`).
+pub const UNLOCK_FLOW_DEADLINE_MS: u64 = 2000;
 /// Header through which `tailscale serve` forwards the original `*.ts.net` name (D5a′,
 /// spec §13.2; lowercased name). When present it alone decides the effective host.
 pub const FORWARDED_HOST_HEADER: &str = "x-forwarded-host";

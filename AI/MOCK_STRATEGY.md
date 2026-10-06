@@ -65,10 +65,12 @@ takes its Unix clock through `ServerState::with_unix_clock`, so the whole end-to
 (`crates/remote/tests/server_tests.rs`) runs without D-Bus, without Tailscale and without a
 real socket directory:
 - `MockSource`: implements `SessionSource` with a settable `own_sessions` answer (snapshotted
-  when a call starts, which models a slow read), a settable `lock_session` result,
-  `hold_next(n)` / `hold_lock_next(n)` gates that block the next calls until `release()` (to
-  prove the 1500 ms snapshot and 2000 ms lock-flow deadlines), per-call counters and the
-  recorded `lock_session` ids and uids;
+  when a call starts, which models a slow read), settable `lock_session` and `unlock_session`
+  results, `hold_next(n)` / `hold_lock_next(n)` / `hold_unlock_next(n)` gates that block the
+  next calls until `release()` (to prove the 1500 ms snapshot and the 2000 ms lock- and
+  unlock-flow deadlines), per-call counters and the recorded `lock_session` /
+  `unlock_session` ids and uids; `Options { allow_unlock: true, .. }` starts the harness with
+  the remote unlock enabled (ADR 2026-10-06);
 - `TestClock`: the paused tokio clock plus a settable offset, injected as the `checked_unix_ms`
   source (R3-1), with `shift_ms(-3_600_000)` for the backward-clock test;
 - `FrozenClock`: one live `spawn_blocking` task that inhibits tokio's auto-advance, so virtual

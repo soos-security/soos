@@ -1,11 +1,11 @@
-//! Route table and lock CSRF check (spec §2.5, D4).
+//! Route table and the lock / unlock CSRF checks (spec §2.5, D4; ADR 2026-10-06).
 //!
 //! Paths are matched exactly (no normalisation, no case folding): anything that is not in
 //! the table is `404`, a known path with a wrong method is `405`.
 
 use crate::assets::AssetId;
 use crate::http::{Method, RequestHead};
-use crate::{ACTION_HEADER, ACTION_LOCK};
+use crate::{ACTION_HEADER, ACTION_LOCK, ACTION_UNLOCK};
 
 /// Resolved route.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -18,26 +18,32 @@ pub enum Route {
     Events,
     /// `POST /api/lock`.
     Lock,
+    /// `POST /api/unlock` (ADR 2026-10-06).
+    Unlock,
     /// `404`.
     NotFound,
     /// `405` with an `Allow` header.
     MethodNotAllowed,
 }
 
-/// Path of the only `POST` route.
+/// Path of the lock `POST` route.
 pub const LOCK_PATH: &str = "/api/lock";
+/// Path of the unlock `POST` route.
+pub const UNLOCK_PATH: &str = "/api/unlock";
 
 /// The `Allow` header value of a `405` on `path`.
 #[must_use]
 pub fn allow_header(path: &str) -> &'static str {
-    if path == LOCK_PATH {
+    let path = path.split('?').next().unwrap_or(path);
+    if path == LOCK_PATH || path == UNLOCK_PATH {
         "POST"
     } else {
         "GET, HEAD"
     }
 }
 
-/// Pure. GET/HEAD for assets, `/api/status` and `/api/events`; POST only for `/api/lock`.
+/// Pure. GET/HEAD for assets, `/api/status` and `/api/events`; POST only for `/api/lock`
+/// and `/api/unlock`.
 /// `/` → `Asset(Index)`. Query strings are ignored.
 #[must_use]
 pub fn route(method: Method, path: &str) -> Route {
@@ -59,9 +65,14 @@ pub fn route(method: Method, path: &str) -> Route {
             Method::Post | Method::Other => Route::MethodNotAllowed,
         };
     }
-    if path == LOCK_PATH {
+    let post_route = match path {
+        LOCK_PATH => Some(Route::Lock),
+        UNLOCK_PATH => Some(Route::Unlock),
+        _ => None,
+    };
+    if let Some(found) = post_route {
         return match method {
-            Method::Post => Route::Lock,
+            Method::Post => found,
             Method::Get | Method::Head | Method::Other => Route::MethodNotAllowed,
         };
     }
@@ -71,7 +82,7 @@ pub fn route(method: Method, path: &str) -> Route {
 /// CSRF refusal; every variant → `403`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum CsrfError {
-    /// `X-Soos-Action: lock` absent.
+    /// `X-Soos-Action` absent, repeated or not the route's action.
     #[error("action header missing")]
     MissingActionHeader,
     /// `Sec-Fetch-Site` present and not `same-origin`.
@@ -106,8 +117,26 @@ fn optional_single<'a>(head: &'a RequestHead, name: &str) -> Result<Option<&'a [
 ///
 /// [`CsrfError`].
 pub fn check_lock_csrf(head: &RequestHead, normalized_host: &str) -> Result<(), CsrfError> {
+    check_action_csrf(head, normalized_host, ACTION_LOCK)
+}
+
+/// Pure; the rules of [`check_lock_csrf`] with the action value `unlock` (ADR 2026-10-06).
+///
+/// # Errors
+///
+/// [`CsrfError`].
+pub fn check_unlock_csrf(head: &RequestHead, normalized_host: &str) -> Result<(), CsrfError> {
+    check_action_csrf(head, normalized_host, ACTION_UNLOCK)
+}
+
+/// The shared CSRF rules; `action` is the exact `X-Soos-Action` value of the route.
+fn check_action_csrf(
+    head: &RequestHead,
+    normalized_host: &str,
+    action: &str,
+) -> Result<(), CsrfError> {
     match optional_single(head, ACTION_HEADER) {
-        Ok(Some(value)) if value == ACTION_LOCK.as_bytes() => {}
+        Ok(Some(value)) if value == action.as_bytes() => {}
         _ => return Err(CsrfError::MissingActionHeader),
     }
     match optional_single(head, "sec-fetch-site") {

@@ -1,4 +1,5 @@
-//! Accept loop, request handling, SSE streams and the lock flow (spec §2.8, D4–D9).
+//! Accept loop, request handling, SSE streams, the lock flow (spec §2.8, D4–D9) and the
+//! opt-in unlock flow (ADR 2026-10-06).
 //!
 //! Every bound is a `tokio::time` primitive (constants in the crate root): the connection
 //! count (`MAX_CONNECTIONS`, excess accepted streams are dropped without a byte), the head
@@ -7,7 +8,8 @@
 //! the number and lifetime of streams (`MAX_SSE_STREAMS`, `MAX_SSE_STREAM_MS`).
 //!
 //! Dispatch order on a parsed head: HTTP error → `Host` (`421`) → identity (`403`) → route
-//! → CSRF for the lock (`403`) → handler. No logind call, stream slot or subscriber
+//! → CSRF for the lock and the unlock (`403`) → `allow_unlock` for the unlock (`403`) →
+//! handler. No logind call, stream slot or subscriber
 //! registration happens before every check has passed.
 //!
 //! Readings: one poller task reads logind every `poll_interval_ms` while at least one
@@ -29,7 +31,7 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{watch, Mutex, Notify, OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinSet;
 use tokio::time::{sleep, sleep_until, timeout, timeout_at, Instant};
-use tracing::debug;
+use tracing::{debug, info};
 
 use crate::assets::asset;
 use crate::config::RemoteConfig;
@@ -39,13 +41,13 @@ use crate::http::{
 };
 use crate::identity::{authorize, check_host};
 use crate::logind::{SessionSource, SourceError};
-use crate::routes::{allow_header, check_lock_csrf, route, Route};
+use crate::routes::{allow_header, check_lock_csrf, check_unlock_csrf, route, Route};
 use crate::session::{select_session, SessionProps};
 use crate::status::{status_from, view_changed, Reading, StatusView};
 use crate::{
     LOCK_FLOW_DEADLINE_MS, MAX_CONNECTIONS, MAX_REQUEST_HEAD_BYTES, MAX_SSE_STREAMS,
-    MAX_SSE_STREAM_MS, MIN_LOCK_INTERVAL_MS, REQUEST_HEAD_TIMEOUT_MS, RESPONSE_WRITE_TIMEOUT_MS,
-    SNAPSHOT_DEADLINE_MS, SSE_KEEPALIVE_MS,
+    MAX_SSE_STREAM_MS, MIN_LOCK_INTERVAL_MS, MIN_UNLOCK_INTERVAL_MS, REQUEST_HEAD_TIMEOUT_MS,
+    RESPONSE_WRITE_TIMEOUT_MS, SNAPSHOT_DEADLINE_MS, SSE_KEEPALIVE_MS, UNLOCK_FLOW_DEADLINE_MS,
 };
 
 // Streams hold their connection permit for their whole lifetime; request permits must
@@ -171,6 +173,8 @@ struct Shared<S: SessionSource> {
     sse_slots: AtomicUsize,
     /// Last accepted lock (the lock gate serializes the whole flow).
     lock_gate: Mutex<Option<Instant>>,
+    /// Last accepted unlock (the unlock gate serializes the whole flow).
+    unlock_gate: Mutex<Option<Instant>>,
     /// Connection permits.
     connections: Arc<Semaphore>,
     /// Set to `true` at shutdown so every stream ends.
@@ -188,6 +192,7 @@ impl<S: SessionSource> Shared<S> {
             readings: watch::Sender::new(None),
             sse_slots: AtomicUsize::new(0),
             lock_gate: Mutex::new(None),
+            unlock_gate: Mutex::new(None),
             connections: Arc::new(Semaphore::new(MAX_CONNECTIONS)),
             closing: watch::Sender::new(false),
         }
@@ -557,6 +562,25 @@ async fn handle_connection<S: SessionSource>(
             let response = lock_flow(&shared).await;
             respond(&mut stream, head.method, &response).await;
         }
+        Route::Unlock => {
+            if let Err(err) = check_unlock_csrf(&head, &normalized_host) {
+                debug!(%err, "unlock refused");
+                respond(&mut stream, head.method, &Response::json(403, "forbidden")).await;
+                return;
+            }
+            if !config.allow_unlock {
+                debug!("unlock refused: allow_unlock is false");
+                respond(
+                    &mut stream,
+                    head.method,
+                    &Response::json(403, "unlock_disabled"),
+                )
+                .await;
+                return;
+            }
+            let response = unlock_flow(&shared).await;
+            respond(&mut stream, head.method, &response).await;
+        }
         Route::NotFound => {
             respond(&mut stream, head.method, &Response::json(404, "not_found")).await;
         }
@@ -611,6 +635,54 @@ async fn lock_flow<S: SessionSource>(shared: &Shared<S>) -> Response {
         Ok(response) => response,
         Err(_) => {
             debug!("lock flow deadline");
+            Response::json(503, "unavailable")
+        }
+    }
+}
+
+/// ADR 2026-10-06: rate limit → fresh snapshot → `select_session` → `UnlockSession`,
+/// serialized under the unlock gate and bounded by `UNLOCK_FLOW_DEADLINE_MS`; the mirror of
+/// [`lock_flow`]. The interval is recorded only when `unlock_session` is called. Every accepted
+/// unlock (one that reaches `unlock_session`) leaves one `info` audit line without identity or
+/// session id.
+async fn unlock_flow<S: SessionSource>(shared: &Shared<S>) -> Response {
+    let flow = async {
+        let mut gate = shared.unlock_gate.lock().await;
+        if let Some(last) = *gate {
+            if Instant::now().saturating_duration_since(last)
+                < Duration::from_millis(MIN_UNLOCK_INTERVAL_MS)
+            {
+                return Response::json(429, "rate_limited");
+            }
+        }
+        let (_, result) = shared.fresh_read().await;
+        let sessions = match result {
+            Ok(sessions) => sessions,
+            Err(err) => {
+                debug!(%err, "unlock snapshot failed");
+                return Response::json(503, "unavailable");
+            }
+        };
+        let Some(session) = select_session(&sessions, shared.uid()) else {
+            return Response::json(409, "no_session");
+        };
+        if !session.locked {
+            return Response::json(409, "already_unlocked");
+        }
+        *gate = Some(Instant::now());
+        info!("remote unlock requested");
+        match shared.state.source.unlock_session(&session.id).await {
+            Ok(()) => Response::json(202, "unlock_requested"),
+            Err(err) => {
+                debug!(%err, "unlock call failed");
+                Response::json(503, "unavailable")
+            }
+        }
+    };
+    match timeout(Duration::from_millis(UNLOCK_FLOW_DEADLINE_MS), flow).await {
+        Ok(response) => response,
+        Err(_) => {
+            debug!("unlock flow deadline");
             Response::json(503, "unavailable")
         }
     }

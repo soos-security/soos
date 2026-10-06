@@ -269,7 +269,7 @@ soos/
 │   ├── enrollment-cli/           # root enrollment CLI
 │   ├── admin-cli/                # non-biometric status diagnostic CLI
 │   ├── gui/                      # soos-gui diagnostic and enrollment GUI (eframe)
-│   └── remote/                   # soos-remote user-level lock status and remote lock companion (§13)
+│   └── remote/                   # soos-remote user-level lock status, remote lock and opt-in unlock companion (§13)
 ├── models/
 │   ├── manifest.toml             # model IDs, licenses, SHA-256 checksums
 │   └── README.md
@@ -357,29 +357,33 @@ SystemCallArchitectures=native
 ## 13. Remote Companion (`soos-remote`, GitHub #339)
 
 A **user-level** companion that shows the owner's phone the real-time lock status of the desktop
-session and offers a remote **lock**, nothing more (ADR 2026-10-05 "Remote Companion
+session, offers a remote **lock** and, only when `allow_unlock = true`, a remote **unlock**
+(ADR 2026-10-05 "Remote Companion `soos-remote`", ADR 2026-10-06 "Remote Unlock in
 `soos-remote`"; operator reference `Docs/REMOTE_COMPANION.md`). It is a leaf crate: `soos-daemon`,
 `pam_soos.so` and the IPC protocol are untouched and no crate depends on it.
 
 | Aspect | Decision |
 |---|---|
-| Process | `systemctl --user` service of the session owner; `check_not_root` refuses uid 0 or euid 0 at start (exit 78, `RestartPreventExitStatus=78`). No polkit rule: the session owner may call `Manager.LockSession` on their own session. |
+| Process | `systemctl --user` service of the session owner; `check_not_root` refuses uid 0 or euid 0 at start (exit 78, `RestartPreventExitStatus=78`). No polkit rule: the session owner may call `Manager.LockSession` and `Manager.UnlockSession` on their own session. |
 | Transport | One `0600` Unix socket in a `0700` directory under `$XDG_RUNTIME_DIR`, proxied by `tailscale serve --bg unix:<path>`; no network socket at all (`RestrictAddressFamilies=AF_UNIX`, invariant RMC-S2/S5). |
 | Identity | Exactly one `Tailscale-User-Login` header in the non-empty `allowed_logins` allowlist, else `403`; trusted only because `tailscaled` strips client copies and only `tailscaled` and the owner can open the socket. The **effective host** (`X-Forwarded-Host` as set by `tailscale serve`, otherwise `Host`; `Host` is not inspected when `X-Forwarded-Host` is present) must be an allowed `*.ts.net` name, and a proxied request must carry exactly one `X-Forwarded-Proto: https` (`421` otherwise; D5a′, verified with Tailscale 1.102.4 on 2026-10-06); `POST /api/lock` needs `X-Soos-Action: lock` plus same-origin `Sec-Fetch-Site`/`Origin` (compared with the effective host). |
 | Status | logind `LockedHint` / `IdleHint` / `IdleSinceHint` / `Active` of the owner's local seat `user` session (`Remote == false`, non-empty seat; active first, then the shortest id, then the greatest same-length id), read with fresh `Properties.GetAll` calls over the pinned system bus (same rules as the presence worker: `zbus::connection::Builder::address(SYSTEM_BUS_ADDRESS)`, no proxy, no cache, no signal stream, bounded calls). Server-Sent Events; the poller runs only while a stream is open; a logind failure is `unavailable`, never `unlocked`; readings carry a monotonic `seq` reserved when the read starts. |
-| Lock | `Manager.LockSession(id)` on a fresh snapshot, one per 2 s; success is confirmed through `LockedHint`, not assumed. The crate never names `UnlockSession`, `Unlock` or `SetLockedHint` (RMC-S3). |
-| Bounds | 16 connections, 4 streams, 8 KiB head, 32 headers, 256-byte path, 5 s head deadline, 2 s write deadline, 1.5 s snapshot, 2 s lock flow, 15 s keep-alive, 30 min stream (`crates/remote/src/lib.rs`). |
+| Lock | `Manager.LockSession(id)` on a fresh snapshot, one per 2 s; success is confirmed through `LockedHint`, not assumed. |
+| Unlock (opt-in) | `allow_unlock = true` in `remote.toml` (default `false`, else `403 unlock_disabled` without a logind call); `POST /api/unlock` with `X-Soos-Action: unlock` and the lock's CSRF rules; `Manager.UnlockSession(id)` on a fresh snapshot of the same selected session, one per 2 s (independent of the lock), 2 s flow bound, one `info` audit line without identity. Authentication is the Tailscale identity alone, no second factor and no automatic re-lock (owner decision, accepted risk in the ADR). The crate names `UnlockSession` exactly once and never `Unlock`, `SetLockedHint` or a session-ending method (RMC-S3 as amended). |
+| Bounds | 16 connections, 4 streams, 8 KiB head, 32 headers, 256-byte path, 5 s head deadline, 2 s write deadline, 1.5 s snapshot, 2 s lock flow, 2 s unlock flow, 15 s keep-alive, 30 min stream (`crates/remote/src/lib.rs`). |
 | Privacy | No identity, header value, `Host`, path, session id or body is ever logged (RC-5); the status body has exactly five fields and no identity. |
 
 Companion invariants (matrix rows RMC*): RC-1 never root, never a network socket, never an
-unlock; RC-2 every request needs an allowlisted identity and an empty allowlist refuses to start;
+unlock unless `allow_unlock = true`; RC-2 every request needs an allowlisted identity and an empty allowlist refuses to start;
 RC-3 a logind failure is never `unlocked` and no stale `unlocked` is replayed to a new stream;
 RC-4 every read, write, connection count and stream lifetime is bounded; RC-5 no identity or
-request data in logs or bodies. Out of scope, each needing its own ADR: remote unlock, push
-notifications, live camera. Matrix rows RMC1–RMC21 and walkthrough 183; the Serve forwarding
+request data in logs or bodies. Out of scope, each needing its own ADR: a second factor for the
+remote unlock, push notifications, live camera. Matrix rows RMC1–RMC25 and walkthroughs 183
+and 184; the Serve forwarding
 check (RMC20: `tailscale serve unix:` sends `Host: localhost`, the original name in
 `X-Forwarded-Host` and `X-Forwarded-Proto: https`) was verified by the owner on 2026-10-06; the
-iPhone web app check (RMC21) is the remaining pending owner check.
+iPhone web app and *Lock now* were confirmed by the owner on 2026-10-06 (RMC21, Shortcuts steps
+still pending) and the remote unlock on the phone is pending (RMC25).
 
 ---
 

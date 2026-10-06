@@ -106,7 +106,7 @@ soos/
 │   ├── enrollment-cli/     # root enrollment CLI
 │   ├── admin-cli/          # non-biometric diagnostic CLI
 │   ├── gui/                # soos-gui diagnostic and enrollment GUI
-│   └── remote/             # soos-remote user-level lock status and remote lock companion
+│   └── remote/             # soos-remote user-level lock status, remote lock and opt-in unlock companion
 ├── models/                 # manifest.toml + SHA-256 checksums
 ├── tests/
 │   ├── invariants/         # soos-invariants static repository checks

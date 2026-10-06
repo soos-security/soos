@@ -65,6 +65,8 @@ pub struct RemoteConfig {
     pub poll_interval_ms: u64,
     /// 0..=`MAX_ALLOWED_HOSTS` lowercased DNS names; empty = any `*.ts.net` name.
     pub allowed_hosts: Vec<String>,
+    /// `POST /api/unlock` enabled (ADR 2026-10-06); `false` unless the file says `true`.
+    pub allow_unlock: bool,
 }
 
 /// Configuration failure; every variant exits with `EXIT_CONFIG`.
@@ -152,6 +154,7 @@ struct FileConfig {
     socket_path: Option<String>,
     poll_interval_ms: Option<u64>,
     allowed_hosts: Option<Vec<String>>,
+    allow_unlock: Option<bool>,
 }
 
 /// An explicit `socket_path`: absolute, with a parent and a file name, no trailing `/`,
@@ -242,6 +245,7 @@ pub fn parse_config(text: &str, runtime_dir: Option<&Path>) -> Result<RemoteConf
         socket_path,
         poll_interval_ms,
         allowed_hosts,
+        allow_unlock: file.allow_unlock.unwrap_or(false),
     })
 }
 
