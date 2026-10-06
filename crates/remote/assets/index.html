@@ -17,12 +17,27 @@
 <body>
   <main class="card" aria-live="polite">
     <h1>soos remote</h1>
-    <p id="state" class="state state-unknown" data-state="unknown">Connecting</p>
-    <p id="activity" class="detail">&nbsp;</p>
-    <p id="updated" class="detail">&nbsp;</p>
-    <button id="lock" type="button" disabled>Lock now</button>
-    <button id="unlock" type="button" class="secondary" disabled>Unlock now</button>
-    <p id="feedback" class="feedback" role="status">&nbsp;</p>
+    <section id="login" hidden>
+      <p class="detail">Sign in with your passkey to reach this PC over the internet.</p>
+      <button id="login-button" type="button">Sign in with Face ID</button>
+      <p id="login-feedback" class="feedback" role="status">&nbsp;</p>
+    </section>
+    <section id="status-card">
+      <p id="state" class="state state-unknown" data-state="unknown">Connecting</p>
+      <p id="activity" class="detail">&nbsp;</p>
+      <p id="updated" class="detail">&nbsp;</p>
+      <button id="lock" type="button" disabled>Lock now</button>
+      <button id="unlock" type="button" class="secondary" disabled>Unlock now</button>
+      <p id="feedback" class="feedback" role="status">&nbsp;</p>
+      <button id="logout" type="button" class="secondary" hidden>Sign out</button>
+    </section>
+    <section id="enroll" class="enroll" hidden>
+      <h2>Add a passkey</h2>
+      <p class="detail">Run <code>soos-remote enroll-code</code> on the PC, then type the code.</p>
+      <input id="enroll-code" type="text" inputmode="text" autocomplete="one-time-code" autocapitalize="characters" spellcheck="false" maxlength="11" placeholder="XXXXX-XXXXX" aria-label="Enrollment code">
+      <button id="enroll-button" type="button">Add this device's passkey</button>
+      <p id="enroll-feedback" class="feedback" role="status">&nbsp;</p>
+    </section>
   </main>
   <footer>
     <a href="https://github.com/Mysticaly622/soos">source</a>

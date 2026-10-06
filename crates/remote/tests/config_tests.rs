@@ -640,3 +640,313 @@ fn test_rmc_parse_config_allow_unlock_is_opt_in() {
         "enabling unlock never relaxes the allowlist"
     );
 }
+
+// ---------------------------------------------------------------------------------------
+// Funnel and passkeys (ADR 2026-10-06 "Tailscale Funnel Access and In-House Passkey
+// Authentication for `soos-remote`", spec AI/architect_spec_remote_passkey_funnel.md §3,
+// tests 1–7, matrix RMC28)
+// ---------------------------------------------------------------------------------------
+
+/// Test 1 (RMC28): every §3.1 constant has the specified value and the §3.1 relations hold.
+#[test]
+#[allow(
+    clippy::assertions_on_constants,
+    reason = "The §3.1 relations between constants are themselves the contract"
+)]
+fn test_rmc_passkey_constants_match_the_adr() {
+    use soos_remote::*;
+    assert_eq!(FUNNEL_HEADER, "tailscale-funnel-request");
+    assert_eq!(FUNNEL_HEADER_VALUE, "?1");
+    assert_eq!(FORWARDED_FOR_HEADER, "x-forwarded-for");
+    assert_eq!(MAX_AUTH_BODY_BYTES, 8192);
+    assert_eq!(BODY_READ_TIMEOUT_MS, 5000);
+    assert_eq!(MAX_BODY_CHUNKS, 64);
+    assert_eq!(MAX_CHUNK_SIZE_DIGITS, 8);
+    assert_eq!(MAX_FUNNEL_CONNECTIONS, 8);
+    assert_eq!(MAX_ANONYMOUS_FUNNEL_CONNECTIONS, 4);
+    assert_eq!(MAX_ANONYMOUS_BODY_READS, 2);
+    assert_eq!(MAX_ANONYMOUS_BODY_READS_PER_HINT, 1);
+    assert_eq!(MAX_FUNNEL_SSE_STREAMS, 2);
+    assert_eq!(MAX_CLIENT_HINTS, 64);
+    assert_eq!(MAX_PENDING_ANONYMOUS_LOGIN_CHALLENGES, 16);
+    assert_eq!(MAX_LOGIN_CHALLENGES_PER_HINT, 2);
+    assert_eq!(MAX_CLIENT_DATA_JSON_BYTES, 1024);
+    assert_eq!(MAX_ATTESTATION_OBJECT_BYTES, 2048);
+    assert_eq!(ASSERTION_AUTH_DATA_LEN, 37);
+    assert_eq!(MAX_SIGNATURE_BYTES, 72);
+    assert_eq!(MAX_CREDENTIAL_ID_BYTES, 1023);
+    assert_eq!(USER_HANDLE_BYTES, 16);
+    assert_eq!(CHALLENGE_BYTES, 32);
+    assert_eq!(CHALLENGE_TTL_MS, 120_000);
+    assert_eq!(WEBAUTHN_TIMEOUT_MS, 120_000);
+    assert_eq!(WEBAUTHN_TIMEOUT_MS, CHALLENGE_TTL_MS);
+    assert_eq!(MAX_PENDING_CHALLENGES, 4);
+    assert_eq!(MAX_PASSKEYS, 4);
+    assert_eq!(MAX_CREDENTIAL_STORE_BYTES, 16_384);
+    assert_eq!(CREDENTIALS_FILE_NAME, "remote-passkeys.json");
+    assert_eq!(MAX_CREDENTIALS_PATH_LEN, 4096);
+    assert_eq!(MAX_WEB_SESSIONS, 4);
+    assert_eq!(WEB_SESSION_IDLE_MS, 900_000);
+    assert_eq!(WEB_SESSION_ABSOLUTE_MS, 28_800_000);
+    assert_eq!(SESSION_TOKEN_BYTES, 32);
+    assert_eq!(SESSION_COOKIE_NAME, "__Host-soos_session");
+    assert_eq!(
+        SESSION_COOKIE_ATTRIBUTES,
+        "Path=/; Secure; HttpOnly; SameSite=Strict"
+    );
+    for needle in ["Secure", "HttpOnly", "SameSite=Strict", "Path=/"] {
+        assert!(SESSION_COOKIE_ATTRIBUTES.contains(needle), "{needle}");
+    }
+    assert!(!SESSION_COOKIE_ATTRIBUTES
+        .to_ascii_lowercase()
+        .contains("domain"));
+    assert!(SESSION_COOKIE_NAME.starts_with("__Host-"));
+    assert_eq!(MAX_AUTH_FAILURES, 5);
+    assert_eq!(AUTH_FAILURE_WINDOW_MS, 300_000);
+    assert_eq!(MAX_OPTIONS_PER_WINDOW, 10);
+    assert_eq!(OPTIONS_WINDOW_MS, 60_000);
+    assert_eq!(ENROLL_CODE_LEN, 10);
+    assert_eq!(ENROLL_CODE_ALPHABET, b"0123456789ABCDEFGHJKMNPQRSTVWXYZ");
+    for forbidden in *b"ILOU" {
+        assert!(!ENROLL_CODE_ALPHABET.contains(&forbidden));
+    }
+    assert_eq!(ENROLL_CODE_TTL_S, 300);
+    assert_eq!(MAX_ENROLL_CODE_ATTEMPTS, 3);
+    assert_eq!(ENROLL_CODE_FILE_NAME, "enroll-code");
+    assert_eq!(MAX_ENROLL_CODE_FILE_BYTES, 256);
+    assert_eq!(STORE_LOCK_TIMEOUT_MS, 500);
+    assert_eq!(COSE_ALG_ES256, -7);
+    assert_eq!(RP_NAME, "soos");
+    assert_eq!(ACTION_UNLOCK_OPTIONS, "unlock-options");
+    assert_eq!(ACTION_LOGIN_OPTIONS, "login-options");
+    assert_eq!(ACTION_LOGIN, "login");
+    assert_eq!(ACTION_LOGOUT, "logout");
+    assert_eq!(ACTION_REGISTER_OPTIONS, "register-options");
+    assert_eq!(ACTION_REGISTER, "register");
+    // §3.1 relations.
+    assert!(
+        MAX_AUTH_BODY_BYTES
+            >= 4 * MAX_ATTESTATION_OBJECT_BYTES / 3
+                + 4 * MAX_CREDENTIAL_ID_BYTES / 3
+                + 4 * MAX_CLIENT_DATA_JSON_BYTES / 3
+                + 256
+    );
+    assert!(MAX_ANONYMOUS_FUNNEL_CONNECTIONS < MAX_FUNNEL_CONNECTIONS);
+    assert!(MAX_FUNNEL_CONNECTIONS < MAX_CONNECTIONS);
+    assert!(MAX_CONNECTIONS - MAX_FUNNEL_CONNECTIONS >= 8);
+    assert!(MAX_ANONYMOUS_BODY_READS < MAX_ANONYMOUS_FUNNEL_CONNECTIONS);
+    assert!(MAX_ANONYMOUS_BODY_READS_PER_HINT <= MAX_ANONYMOUS_BODY_READS);
+    assert!(MAX_FUNNEL_SSE_STREAMS < MAX_SSE_STREAMS);
+    assert!(MAX_LOGIN_CHALLENGES_PER_HINT < MAX_PENDING_ANONYMOUS_LOGIN_CHALLENGES);
+    assert_eq!(WEB_SESSION_ABSOLUTE_MS / 1000, 28_800, "cookie Max-Age");
+}
+
+const LOGINS: &str = "allowed_logins = [\"owner@example.com\"]\n";
+
+fn parse_auth(extra: &str) -> Result<RemoteConfig, ConfigError> {
+    parse(&format!("{LOGINS}{extra}"))
+}
+
+/// Test 2 (RMC28): absent keys keep every passkey and Funnel feature off.
+#[test]
+fn test_rmc_parse_config_auth_defaults_are_off() {
+    use soos_remote::config::AuthConfig;
+    let config = parse(LOGINS).unwrap();
+    assert_eq!(config.auth, AuthConfig::default());
+    assert_eq!(config.auth.rp_id, None);
+    assert!(!config.auth.allow_funnel);
+    assert_eq!(config.auth.credentials_path, None);
+    let explicit = parse_auth("allow_funnel = false\n").unwrap();
+    assert_eq!(explicit.auth, AuthConfig::default());
+}
+
+/// Test 3 (RMC28, plan-evaluator G-6): `rp_id` is the full node host: lowercased, a valid
+/// DNS name under `.ts.net` with at least two labels before it, no port, no scheme, never
+/// empty; with `allowed_hosts` it must also be a member, and the `.ts.net` rule applies in
+/// both cases.
+#[test]
+fn test_rmc_parse_config_rp_id_rules() {
+    let config = parse_auth("rp_id = \"PC.Tail1234.TS.NET\"\n").unwrap();
+    assert_eq!(config.auth.rp_id.as_deref(), Some("pc.tail1234.ts.net"));
+    let config = parse_auth("rp_id = \"my-pc.tail-1234.ts.net\"\n").unwrap();
+    assert_eq!(config.auth.rp_id.as_deref(), Some("my-pc.tail-1234.ts.net"));
+    for bad in [
+        "tail1234.ts.net",
+        "ts.net",
+        ".ts.net",
+        "pc.example.com",
+        "pc.tail1234.ts.net:443",
+        "pc.tail1234.ts.net:8443",
+        "https://pc.tail1234.ts.net",
+        "pc.tail1234.ts.net/",
+        "pc.tail1234.ts.net.",
+        "pc..tail1234.ts.net",
+        "-pc.tail1234.ts.net",
+        "pc tail.ts.net",
+        "",
+        " ",
+        "100.64.0.1",
+        "[fd7a:115c:a1e0::1]",
+        "*.tail1234.ts.net",
+    ] {
+        assert_eq!(
+            parse_auth(&format!("rp_id = \"{bad}\"\n")).map(|c| c.auth),
+            Err(ConfigError::InvalidRpId),
+            "{bad:?}"
+        );
+    }
+    let long_label = format!("{}.tail1234.ts.net", "a".repeat(250));
+    assert_eq!(
+        parse_auth(&format!("rp_id = \"{long_label}\"\n")).map(|c| c.auth),
+        Err(ConfigError::InvalidRpId)
+    );
+    for bad in ["1", "true", "[\"pc.tail1234.ts.net\"]"] {
+        assert_eq!(
+            parse_auth(&format!("rp_id = {bad}\n")).map(|c| c.auth),
+            Err(ConfigError::Syntax),
+            "{bad}"
+        );
+    }
+    // With an allowlist: membership required, and still a full *.ts.net node host (G-6).
+    let hosts = "allowed_hosts = [\"pc.tail1234.ts.net\", \"lan-box.example\"]\n";
+    let config = parse_auth(&format!("{hosts}rp_id = \"pc.tail1234.ts.net\"\n")).unwrap();
+    assert_eq!(config.auth.rp_id.as_deref(), Some("pc.tail1234.ts.net"));
+    for bad in ["other.tail1234.ts.net", "lan-box.example"] {
+        assert_eq!(
+            parse_auth(&format!("{hosts}rp_id = \"{bad}\"\n")).map(|c| c.auth),
+            Err(ConfigError::InvalidRpId),
+            "{bad}"
+        );
+    }
+}
+
+/// Test 4 (RMC28): `allow_funnel` is a TOML boolean, `false` by default, and requires
+/// `rp_id`; `allow_unlock` without `rp_id` stays a valid configuration.
+#[test]
+fn test_rmc_parse_config_allow_funnel_requires_rp_id() {
+    assert_eq!(
+        parse_auth("allow_funnel = true\n").map(|c| c.auth),
+        Err(ConfigError::FunnelNeedsRpId)
+    );
+    let config = parse_auth("allow_funnel = true\nrp_id = \"pc.tail1234.ts.net\"\n").unwrap();
+    assert!(config.auth.allow_funnel);
+    assert_eq!(config.auth.rp_id.as_deref(), Some("pc.tail1234.ts.net"));
+    let config = parse_auth("rp_id = \"pc.tail1234.ts.net\"\n").unwrap();
+    assert!(!config.auth.allow_funnel, "Funnel is opt-in");
+    for bad in ["\"true\"", "1", "\"yes\"", "[true]"] {
+        assert_eq!(
+            parse_auth(&format!(
+                "rp_id = \"pc.tail1234.ts.net\"\nallow_funnel = {bad}\n"
+            ))
+            .map(|c| c.auth),
+            Err(ConfigError::Syntax),
+            "{bad}"
+        );
+    }
+    let config = parse_auth("allow_unlock = true\n").unwrap();
+    assert!(config.allow_unlock);
+    assert_eq!(config.auth.rp_id, None, "allow_unlock never implies rp_id");
+    assert_eq!(
+        parse("allow_funnel = true\nrp_id = \"pc.tail1234.ts.net\"\n").map(|c| c.auth),
+        Err(ConfigError::NoAllowedLogins),
+        "enabling Funnel never relaxes the allowlist"
+    );
+}
+
+/// Test 5 (RMC28): `credentials_path` is absolute, has a parent and a file name, no
+/// trailing `/`, at most `MAX_CREDENTIALS_PATH_LEN` bytes.
+#[test]
+fn test_rmc_parse_config_credentials_path_rules() {
+    use soos_remote::MAX_CREDENTIALS_PATH_LEN;
+    let config =
+        parse_auth("credentials_path = \"/home/me/.config/soos/passkeys.json\"\n").unwrap();
+    assert_eq!(
+        config.auth.credentials_path,
+        Some(PathBuf::from("/home/me/.config/soos/passkeys.json"))
+    );
+    let at_bound = format!("/{}", "p".repeat(MAX_CREDENTIALS_PATH_LEN - 1));
+    assert_eq!(at_bound.len(), MAX_CREDENTIALS_PATH_LEN);
+    let config = parse_auth(&format!("credentials_path = \"{at_bound}\"\n")).unwrap();
+    assert_eq!(config.auth.credentials_path, Some(PathBuf::from(&at_bound)));
+    let over = format!("/{}", "p".repeat(MAX_CREDENTIALS_PATH_LEN));
+    for bad in [
+        "relative/passkeys.json",
+        "passkeys.json",
+        "/home/me/.config/soos/",
+        "/",
+        "",
+        over.as_str(),
+    ] {
+        assert_eq!(
+            parse_auth(&format!("credentials_path = \"{bad}\"\n")).map(|c| c.auth),
+            Err(ConfigError::InvalidCredentialsPath {
+                max: MAX_CREDENTIALS_PATH_LEN
+            }),
+            "{bad:?}"
+        );
+    }
+    assert_eq!(
+        parse_auth("credentials_path = 7\n").map(|c| c.auth),
+        Err(ConfigError::Syntax)
+    );
+}
+
+/// Test 6 (RMC28, S-5): the explicit path wins; otherwise the store is the sibling
+/// `remote-passkeys.json` of the configuration file.
+#[test]
+fn test_rmc_resolve_credentials_path() {
+    use soos_remote::config::{resolve_credentials_path, AuthConfig};
+    use soos_remote::MAX_CREDENTIALS_PATH_LEN;
+    let config_path = Path::new("/home/me/.config/soos/remote.toml");
+    assert_eq!(
+        resolve_credentials_path(&AuthConfig::default(), config_path),
+        Ok(PathBuf::from("/home/me/.config/soos/remote-passkeys.json"))
+    );
+    let explicit = AuthConfig {
+        credentials_path: Some(PathBuf::from("/srv/keys/p.json")),
+        ..AuthConfig::default()
+    };
+    assert_eq!(
+        resolve_credentials_path(&explicit, config_path),
+        Ok(PathBuf::from("/srv/keys/p.json"))
+    );
+    assert_eq!(
+        resolve_credentials_path(&explicit, Path::new("/")),
+        Ok(PathBuf::from("/srv/keys/p.json")),
+        "an explicit path never looks at the configuration path"
+    );
+    let invalid = Err(ConfigError::InvalidCredentialsPath {
+        max: MAX_CREDENTIALS_PATH_LEN,
+    });
+    assert_eq!(
+        resolve_credentials_path(&AuthConfig::default(), Path::new("/")),
+        invalid,
+        "no parent"
+    );
+    let deep = format!("/{}/remote.toml", "d".repeat(MAX_CREDENTIALS_PATH_LEN - 20));
+    assert_eq!(
+        resolve_credentials_path(&AuthConfig::default(), Path::new(&deep)),
+        invalid,
+        "the resolved path is bounded"
+    );
+}
+
+/// Test 7 (RMC28): the new configuration errors are fixed English texts.
+#[test]
+fn test_rmc_auth_config_error_messages_are_fixed_english_text() {
+    assert_eq!(
+        ConfigError::InvalidRpId.to_string(),
+        "rp_id must be the full node host name"
+    );
+    assert_eq!(
+        ConfigError::FunnelNeedsRpId.to_string(),
+        "allow_funnel requires rp_id"
+    );
+    assert_eq!(
+        ConfigError::InvalidCredentialsPath { max: 4096 }.to_string(),
+        "credentials_path must be absolute and at most 4096 bytes"
+    );
+    // A refused value is never echoed.
+    let err = parse_auth("rp_id = \"secret-node.example.com\"\n").unwrap_err();
+    assert!(!err.to_string().contains("secret-node"));
+}

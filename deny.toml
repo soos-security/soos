@@ -87,6 +87,7 @@ skip = [
     { crate = "calloop@0.13.0", reason = "Used by winit 0.30, smithay-client-toolkit 0.19 and calloop-wayland-source 0.3" },
     { crate = "calloop-wayland-source@0.3.0", reason = "Used by smithay-client-toolkit 0.19 (winit 0.30)" },
     { crate = "core-foundation@0.9.4", reason = "Used by winit 0.30, core-graphics and core-graphics-types (macOS only)" },
+    { crate = "der@0.7.10", reason = "Used by ecdsa 0.16 and sec1 0.7 (p256 0.13 via soos-remote) while ureq 3 (build dependency of ort-sys) uses der 0.8" },
     { crate = "foreign-types@0.3.2", reason = "Used by openssl (native-tls via the ureq build dependency of ort-sys)" },
     { crate = "foreign-types-shared@0.1.1", reason = "Used by foreign-types 0.3 (openssl)" },
     { crate = "jni-sys@0.3.1", reason = "Used by ndk 0.9 and ndk-sys 0.6 (winit on Android only)" },

@@ -356,3 +356,269 @@ fn test_rmc_check_unlock_csrf() {
         Err(CsrfError::MissingActionHeader)
     );
 }
+
+// ---------------------------------------------------------------------------------------
+// Passkey routes (ADR 2026-10-06 "Tailscale Funnel Access and In-House Passkey
+// Authentication for `soos-remote`", spec §4.7, tests 14–15, matrix RMC27 / RMC29)
+// ---------------------------------------------------------------------------------------
+
+mod passkey_routes {
+    use super::*;
+    use soos_remote::routes::{accepts_body, check_auth_csrf, is_funnel_public};
+    use soos_remote::{
+        ACTION_LOGIN, ACTION_LOGIN_OPTIONS, ACTION_LOGOUT, ACTION_REGISTER,
+        ACTION_REGISTER_OPTIONS, ACTION_UNLOCK_OPTIONS,
+    };
+
+    const POST_ROUTES: [(&str, Route); 6] = [
+        ("/api/auth/login/options", Route::LoginOptions),
+        ("/api/auth/login/verify", Route::LoginVerify),
+        ("/api/auth/logout", Route::Logout),
+        ("/api/auth/unlock/options", Route::UnlockOptions),
+        ("/api/auth/register/options", Route::RegisterOptions),
+        ("/api/auth/register/verify", Route::RegisterVerify),
+    ];
+
+    /// Test 14 (RMC27/RMC29, plan-evaluator G-2b): every new route and method, `405` +
+    /// `Allow`, the four body routes, and the routes reachable on Funnel without a session
+    /// (logout included, so an expired session can still clear its cookie).
+    #[test]
+    fn test_rmc_auth_route_table() {
+        for method in [Method::Get, Method::Head] {
+            assert_eq!(route(method, "/api/auth/state"), Route::AuthState);
+            assert_eq!(route(method, "/api/auth/state?x=1"), Route::AuthState);
+        }
+        assert_eq!(
+            route(Method::Post, "/api/auth/state"),
+            Route::MethodNotAllowed
+        );
+        assert_eq!(
+            route(Method::Other, "/api/auth/state"),
+            Route::MethodNotAllowed
+        );
+        assert_eq!(allow_header("/api/auth/state"), "GET, HEAD");
+        for (path, expected) in POST_ROUTES {
+            assert_eq!(route(Method::Post, path), expected, "{path}");
+            assert_eq!(
+                route(Method::Post, &format!("{path}?q=1")),
+                expected,
+                "{path} with a query"
+            );
+            for method in [Method::Get, Method::Head, Method::Other] {
+                assert_eq!(route(method, path), Route::MethodNotAllowed, "{path}");
+            }
+            assert_eq!(allow_header(path), "POST", "{path}");
+        }
+        for unknown in [
+            "/api/auth",
+            "/api/auth/",
+            "/api/auth/login",
+            "/api/auth/login/",
+            "/api/auth/Login/options",
+            "/api/auth/register",
+            "/api/auth/unlock",
+            "/api/auth/state/",
+            "/api/auth/logout/",
+        ] {
+            assert_eq!(route(Method::Post, unknown), Route::NotFound, "{unknown}");
+            assert_eq!(route(Method::Get, unknown), Route::NotFound, "{unknown}");
+        }
+
+        // accepts_body: exactly the four body routes, POST only, query ignored.
+        for path in [
+            "/api/unlock",
+            "/api/auth/login/verify",
+            "/api/auth/register/options",
+            "/api/auth/register/verify",
+        ] {
+            assert!(accepts_body(Method::Post, path), "{path}");
+            assert!(accepts_body(Method::Post, &format!("{path}?x=1")), "{path}");
+            for method in [Method::Get, Method::Head, Method::Other] {
+                assert!(!accepts_body(method, path), "{path}");
+            }
+        }
+        for path in [
+            "/",
+            "/api/status",
+            "/api/events",
+            "/api/lock",
+            "/api/auth/state",
+            "/api/auth/login/options",
+            "/api/auth/logout",
+            "/api/auth/unlock/options",
+            "/api/unlock/",
+            "/api/auth/login/verify/",
+            "/nope",
+        ] {
+            assert!(!accepts_body(Method::Post, path), "{path}");
+        }
+
+        // is_funnel_public.
+        for public in [
+            Route::Asset(AssetId::Index),
+            Route::Asset(AssetId::AppJs),
+            Route::Asset(AssetId::StyleCss),
+            Route::Asset(AssetId::Manifest),
+            Route::Asset(AssetId::IconSvg),
+            Route::Asset(AssetId::AppleTouchIcon),
+            Route::AuthState,
+            Route::LoginOptions,
+            Route::LoginVerify,
+            Route::Logout,
+            Route::NotFound,
+            Route::MethodNotAllowed,
+        ] {
+            assert!(is_funnel_public(public), "{public:?}");
+        }
+        for private in [
+            Route::Status,
+            Route::Events,
+            Route::Lock,
+            Route::Unlock,
+            Route::UnlockOptions,
+            Route::RegisterOptions,
+            Route::RegisterVerify,
+        ] {
+            assert!(!is_funnel_public(private), "{private:?}");
+        }
+    }
+
+    fn auth_head(headers: &[(&str, &[u8])]) -> RequestHead {
+        RequestHead {
+            method: Method::Post,
+            path: "/api/auth/login/verify".to_string(),
+            headers: headers
+                .iter()
+                .map(|(n, v)| (n.to_string(), v.to_vec()))
+                .collect(),
+        }
+    }
+
+    fn auth_csrf(headers: &[(&str, &[u8])], action: &str) -> Result<(), CsrfError> {
+        check_auth_csrf(&auth_head(headers), HOST, action)
+    }
+
+    /// Test 15 (RMC33): the lock CSRF rules with the route's action and a **required**
+    /// `Origin` equal to `https://<rp_id>` (`:443` accepted, ASCII-lowercased); sibling
+    /// tailnet nodes (same-site, cross-origin) are refused.
+    #[test]
+    fn test_rmc_check_auth_csrf_requires_origin() {
+        let origin: &[u8] = b"https://pc.tail1234.ts.net";
+        for action in [
+            ACTION_LOGIN_OPTIONS,
+            ACTION_LOGIN,
+            ACTION_LOGOUT,
+            ACTION_UNLOCK_OPTIONS,
+            ACTION_REGISTER_OPTIONS,
+            ACTION_REGISTER,
+        ] {
+            let act = action.as_bytes();
+            assert_eq!(
+                auth_csrf(&[("x-soos-action", act), ("origin", origin)], action),
+                Ok(()),
+                "{action}"
+            );
+            assert_eq!(
+                auth_csrf(
+                    &[
+                        ("x-soos-action", act),
+                        ("sec-fetch-site", b"same-origin"),
+                        ("origin", b"HTTPS://PC.Tail1234.TS.NET:443"),
+                    ],
+                    action
+                ),
+                Ok(()),
+                "{action}"
+            );
+            assert_eq!(
+                auth_csrf(&[("x-soos-action", act)], action),
+                Err(CsrfError::OriginMismatch),
+                "Origin is required on {action}"
+            );
+            assert_eq!(
+                auth_csrf(&[("origin", origin)], action),
+                Err(CsrfError::MissingActionHeader)
+            );
+        }
+        // The action must be exactly the route's value.
+        for wrong in [&b"login-options"[..], b"LOGIN", b"login ", b"unlock", b""] {
+            assert_eq!(
+                auth_csrf(
+                    &[("x-soos-action", wrong), ("origin", origin)],
+                    ACTION_LOGIN
+                ),
+                Err(CsrfError::MissingActionHeader),
+                "{wrong:?}"
+            );
+        }
+        assert_eq!(
+            auth_csrf(
+                &[
+                    ("x-soos-action", b"login"),
+                    ("x-soos-action", b"login"),
+                    ("origin", origin)
+                ],
+                ACTION_LOGIN
+            ),
+            Err(CsrfError::MissingActionHeader)
+        );
+        for site in [&b"cross-site"[..], b"same-site", b"none", b""] {
+            assert_eq!(
+                auth_csrf(
+                    &[
+                        ("x-soos-action", b"login"),
+                        ("sec-fetch-site", site),
+                        ("origin", origin)
+                    ],
+                    ACTION_LOGIN
+                ),
+                Err(CsrfError::CrossSite),
+                "{site:?}"
+            );
+        }
+        for bad in [
+            &b"https://other.tail1234.ts.net"[..],
+            b"https://tail1234.ts.net",
+            b"http://pc.tail1234.ts.net",
+            b"https://pc.tail1234.ts.net:8443",
+            b"https://pc.tail1234.ts.net/",
+            b"null",
+            b"",
+        ] {
+            assert_eq!(
+                auth_csrf(
+                    &[("x-soos-action", b"login"), ("origin", bad)],
+                    ACTION_LOGIN
+                ),
+                Err(CsrfError::OriginMismatch),
+                "{bad:?}"
+            );
+        }
+        assert_eq!(
+            auth_csrf(
+                &[
+                    ("x-soos-action", b"login"),
+                    ("origin", origin),
+                    ("origin", origin)
+                ],
+                ACTION_LOGIN
+            ),
+            Err(CsrfError::OriginMismatch),
+            "a repeated Origin"
+        );
+        // The comparison uses rp_id, never a request header.
+        assert_eq!(
+            check_auth_csrf(
+                &auth_head(&[
+                    ("x-soos-action", b"login"),
+                    ("origin", b"https://evil.example"),
+                    ("host", b"evil.example"),
+                    ("x-forwarded-host", b"evil.example"),
+                ]),
+                HOST,
+                ACTION_LOGIN
+            ),
+            Err(CsrfError::OriginMismatch)
+        );
+    }
+}

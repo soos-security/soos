@@ -78,6 +78,18 @@ allowed_logins = []
 
 # Optional: Unix socket path (default: $XDG_RUNTIME_DIR/soos-remote/remote.sock).
 # socket_path = "/run/user/1000/soos-remote/remote.sock"
+
+# Passkeys (Face ID / Touch ID) and internet access through Tailscale Funnel
+# (Docs/REMOTE_COMPANION.md section 2b). rp_id is the full node name; without it every
+# remote unlock is refused.
+# rp_id = "mypc.tail1234.ts.net"
+# Accept requests from tailscale funnel (port 443 only; requires rp_id).
+# allow_funnel = false
+# Passkey store (default: remote-passkeys.json next to this file).
+# credentials_path = "/srv/soos/remote-passkeys.json"
+
+# Optional: remote unlock, always with a fresh passkey assertion (section 2a).
+# allow_unlock = false
 TEMPLATE
         chmod 0600 "${CONFIG_PATH}"
     else
@@ -93,7 +105,12 @@ TEMPLATE
     echo "  2. Start the service: systemctl --user enable --now soos-remote"
     echo "  3. Publish the socket on your tailnet: tailscale serve --bg unix:${SOCKET_PATH}"
     echo "  4. Open https://<this-pc>.<tailnet>.ts.net on the phone and add it to the home screen."
-    echo "Never use tailscale serve --http or tailscale funnel for this socket (see Docs/REMOTE_COMPANION.md)."
+    echo "  5. Optional passkeys and internet access (Docs/REMOTE_COMPANION.md section 2b):"
+    echo "     set rp_id = \"<this-pc>.<tailnet>.ts.net\" in ${CONFIG_PATH}, restart the service,"
+    echo "     run soos-remote enroll-code and register Face ID from the phone over the tailnet,"
+    echo "     then optionally set allow_funnel = true, restart, and publish on port 443 with:"
+    echo "     tailscale funnel --bg unix:${SOCKET_PATH}"
+    echo "Never use tailscale serve --http, nor tailscale funnel without rp_id and allow_funnel (see Docs/REMOTE_COMPANION.md)."
 }
 
 case "${1:-}" in

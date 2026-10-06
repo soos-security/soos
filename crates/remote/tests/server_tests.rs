@@ -48,7 +48,7 @@ use tokio::task::{yield_now, JoinHandle};
 use tokio::time::{timeout, Instant};
 use tracing_subscriber::fmt::MakeWriter;
 
-use soos_remote::config::{RemoteConfig, TailscaleLogin};
+use soos_remote::config::{AuthConfig, RemoteConfig, TailscaleLogin};
 use soos_remote::logind::{SessionSource, SourceError};
 use soos_remote::server::{serve, ServeError, ServerState};
 use soos_remote::session::SessionProps;
@@ -58,6 +58,22 @@ use soos_remote::{
     MIN_UNLOCK_INTERVAL_MS, REQUEST_HEAD_TIMEOUT_MS, SNAPSHOT_DEADLINE_MS, SSE_KEEPALIVE_MS,
     UNLOCK_FLOW_DEADLINE_MS,
 };
+
+// ADR 2026-10-06 "Tailscale Funnel Access and In-House Passkey Authentication for
+// `soos-remote`" item (10): every unlock that used to succeed on the identity alone now
+// carries a fresh passkey assertion; the deterministic WebAuthn fixtures come from here.
+#[path = "common/passkey.rs"]
+mod passkey;
+
+use passkey::{
+    assertion_auth_data, assertion_body, b64url, client_data, own_uid, store_json, write_file_mode,
+    Authenticator, StoredPasskey,
+};
+
+/// The owner's user handle in the harness credential store.
+const OWNER_HANDLE: [u8; 16] = [0x0d; 16];
+/// `Origin` of the web app (`https://<rp_id>`).
+const ORIGIN: &str = "https://pc.tail1234.ts.net";
 
 const HOST: &str = "pc.tail1234.ts.net";
 const LOGIN: &str = "owner@example.com";
@@ -721,6 +737,8 @@ struct Harness {
     shutdown: Option<oneshot::Sender<()>>,
     server: Option<JoinHandle<Result<(), ServeError>>>,
     _frozen: FrozenClock,
+    /// Every unlock challenge issued to the harness (log-hygiene needles).
+    challenges: Mutex<Vec<String>>,
 }
 
 impl Harness {
@@ -732,18 +750,34 @@ impl Harness {
         let frozen = FrozenClock::hold();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("remote.sock");
+        // Setup only (ADR 2026-10-06 Funnel/passkey item 10): passkeys configured with the
+        // owner's synced passkey stored; Funnel stays off, so every existing request shape is
+        // a tailnet request exactly as before.
+        let store_path = dir.path().join("remote-passkeys.json");
+        write_file_mode(
+            &store_path,
+            store_json(&OWNER_HANDLE, &[StoredPasskey::of(&Authenticator::owner())]).as_bytes(),
+            0o600,
+        );
         let config = RemoteConfig {
             allowed_logins: vec![TailscaleLogin::parse(LOGIN).unwrap()],
             socket_path: path.clone(),
             poll_interval_ms: options.poll_interval_ms.unwrap_or(DEFAULT_POLL_INTERVAL_MS),
             allowed_hosts: options.allowed_hosts,
             allow_unlock: options.allow_unlock,
+            auth: AuthConfig {
+                rp_id: Some(HOST.to_string()),
+                allow_funnel: false,
+                credentials_path: Some(store_path.clone()),
+            },
         };
         let source = MockSource::unlocked();
         let clock = TestClock::new();
         let clock_fn = Arc::clone(&clock);
         let mut state = ServerState::new(config, UID, source.clone())
-            .with_unix_clock(Arc::new(move || clock_fn.now_ms()));
+            .with_unix_clock(Arc::new(move || clock_fn.now_ms()))
+            .with_credentials_path(store_path)
+            .with_file_owner_uid(own_uid());
         if let Some(seq) = options.seq_start {
             state = state.with_seq_start(seq);
         }
@@ -761,6 +795,7 @@ impl Harness {
             shutdown: Some(tx),
             server: Some(server),
             _frozen: frozen,
+            challenges: Mutex::new(Vec::new()),
         }
     }
 
@@ -808,6 +843,51 @@ impl Harness {
         let mut headers = vec![("X-Soos-Action", "unlock")];
         headers.extend_from_slice(extra);
         self.request("POST", "/api/unlock", &headers).await
+    }
+
+    /// ADR 2026-10-06 (Funnel/passkey) item 10: the bytes of an unlock request carrying a
+    /// fresh valid assertion of the stored owner passkey over a new unlock-purpose challenge
+    /// (`POST /api/auth/unlock/options` first, which must succeed); `extra` goes to
+    /// `POST /api/unlock`.
+    async fn unlock_request_with_passkey(&self, extra: &[(&str, &str)]) -> Vec<u8> {
+        let options = self
+            .request(
+                "POST",
+                "/api/auth/unlock/options",
+                &[("X-Soos-Action", "unlock-options"), ("Origin", ORIGIN)],
+            )
+            .await;
+        assert_eq!(options.status, 200, "unlock options must be issued");
+        let mut headers = vec![("X-Soos-Action", "unlock")];
+        headers.extend_from_slice(extra);
+        let challenge = options.json()["challenge"]
+            .as_str()
+            .expect("challenge")
+            .to_string();
+        self.challenges.lock().unwrap().push(challenge.clone());
+        let owner = Authenticator::owner();
+        let client = client_data("webauthn.get", &challenge, ORIGIN, "");
+        let authenticator_data = assertion_auth_data(HOST, owner.flags(), 0);
+        let signature = owner.sign(&authenticator_data, &client);
+        let body = assertion_body(
+            &owner.credential_id,
+            &client,
+            &authenticator_data,
+            &signature,
+            Some(&OWNER_HANDLE),
+        );
+        let length = body.len().to_string();
+        headers.push(("Content-Type", "application/json"));
+        headers.push(("Content-Length", &length));
+        let mut bytes = raw_request("POST", "/api/unlock", &with_identity(&headers));
+        bytes.extend_from_slice(body.as_bytes());
+        bytes
+    }
+
+    /// [`Self::unlock_request_with_passkey`], sent.
+    async fn unlock_with_passkey(&self, extra: &[(&str, &str)]) -> HttpResponse {
+        let bytes = self.unlock_request_with_passkey(extra).await;
+        self.raw(&bytes).await
     }
 
     async fn start_unlock_enabled() -> Self {
@@ -1536,7 +1616,7 @@ async fn test_rmc_unlock_disabled_by_default_never_reaches_logind() {
 async fn test_rmc_unlock_flow_and_rate_limit() {
     let h = Harness::start_unlock_enabled().await;
     h.source.set_locked();
-    let r = h.unlock(&[]).await;
+    let r = h.unlock_with_passkey(&[]).await;
     assert_eq!(r.status, 202);
     r.assert_mandatory_headers();
     r.assert_json_body();
@@ -1549,7 +1629,7 @@ async fn test_rmc_unlock_flow_and_rate_limit() {
         "one fresh snapshot before the unlock call"
     );
 
-    let r = h.unlock(&[]).await;
+    let r = h.unlock_with_passkey(&[]).await;
     assert_eq!(r.status, 429);
     assert_eq!(r.result(), "rate_limited");
     assert_eq!(h.source.unlock_ids().len(), 1);
@@ -1560,21 +1640,25 @@ async fn test_rmc_unlock_flow_and_rate_limit() {
     );
 
     h.advance_ms(MIN_UNLOCK_INTERVAL_MS - 1).await;
-    assert_eq!(h.unlock(&[]).await.status, 429, "still inside the interval");
+    assert_eq!(
+        h.unlock_with_passkey(&[]).await.status,
+        429,
+        "still inside the interval"
+    );
     h.advance_ms(2).await;
-    assert_eq!(h.unlock(&[]).await.status, 202);
+    assert_eq!(h.unlock_with_passkey(&[]).await.status, 202);
     assert_eq!(h.source.unlock_ids().len(), 2);
 
     // already_unlocked: no call, interval not recorded.
     h.advance_ms(MIN_UNLOCK_INTERVAL_MS + 1).await;
     h.source.set_unlocked();
-    let r = h.unlock(&[]).await;
+    let r = h.unlock_with_passkey(&[]).await;
     assert_eq!(r.status, 409);
     assert_eq!(r.result(), "already_unlocked");
     assert_eq!(h.source.unlock_ids().len(), 2);
     h.source.set_locked();
     assert_eq!(
-        h.unlock(&[]).await.status,
+        h.unlock_with_passkey(&[]).await.status,
         202,
         "a 409 recorded no interval"
     );
@@ -1582,15 +1666,19 @@ async fn test_rmc_unlock_flow_and_rate_limit() {
 
     // no_session, including a locked remote session (never unlocked).
     h.advance_ms(MIN_UNLOCK_INTERVAL_MS + 1).await;
+    // Migration (ADR 2026-10-06 Funnel/passkey item 10, setup only): every unlock now
+    // issues one challenge, and the tailnet issues at most MAX_OPTIONS_PER_WINDOW per
+    // OPTIONS_WINDOW_MS; time moves on so the rest of the sequence stays inside the limit.
+    h.advance_ms(soos_remote::OPTIONS_WINDOW_MS).await;
     h.source.set_no_session();
-    let r = h.unlock(&[]).await;
+    let r = h.unlock_with_passkey(&[]).await;
     assert_eq!(r.status, 409);
     assert_eq!(r.result(), "no_session");
     let mut remote = session(true);
     remote.remote = Some(true);
     h.source.set_sessions(vec![remote]);
     assert_eq!(
-        h.unlock(&[]).await.result(),
+        h.unlock_with_passkey(&[]).await.result(),
         "no_session",
         "a remote session is never unlocked"
     );
@@ -1598,7 +1686,7 @@ async fn test_rmc_unlock_flow_and_rate_limit() {
     greeter.class = Some("greeter".to_string());
     h.source.set_sessions(vec![greeter]);
     assert_eq!(
-        h.unlock(&[]).await.result(),
+        h.unlock_with_passkey(&[]).await.result(),
         "no_session",
         "only a user-class session"
     );
@@ -1606,18 +1694,18 @@ async fn test_rmc_unlock_flow_and_rate_limit() {
 
     // Snapshot failure: 503, no call, interval not recorded.
     h.source.set_error(SourceError::Timeout);
-    let r = h.unlock(&[]).await;
+    let r = h.unlock_with_passkey(&[]).await;
     assert_eq!(r.status, 503);
     assert_eq!(r.result(), "unavailable");
     assert_eq!(h.source.unlock_ids().len(), 3);
     h.source.set_locked();
-    assert_eq!(h.unlock(&[]).await.status, 202);
+    assert_eq!(h.unlock_with_passkey(&[]).await.status, 202);
     assert_eq!(h.source.unlock_ids().len(), 4);
 
     // UnlockSession failure: 503, exactly one attempt, the interval is recorded.
     h.advance_ms(MIN_UNLOCK_INTERVAL_MS + 1).await;
     h.source.set_unlock_result(Err(SourceError::Call));
-    let r = h.unlock(&[]).await;
+    let r = h.unlock_with_passkey(&[]).await;
     assert_eq!(r.status, 503);
     assert_eq!(r.result(), "unavailable");
     assert_eq!(
@@ -1627,7 +1715,7 @@ async fn test_rmc_unlock_flow_and_rate_limit() {
     );
     h.source.set_unlock_result(Ok(()));
     assert_eq!(
-        h.unlock(&[]).await.status,
+        h.unlock_with_passkey(&[]).await.status,
         429,
         "a failed UnlockSession still counts"
     );
@@ -1642,7 +1730,7 @@ async fn test_rmc_unlock_and_lock_rate_limits_are_independent() {
     let h = Harness::start_unlock_enabled().await;
     assert_eq!(h.lock(&[]).await.status, 202);
     h.source.set_locked();
-    assert_eq!(h.unlock(&[]).await.status, 202);
+    assert_eq!(h.unlock_with_passkey(&[]).await.status, 202);
     h.source.set_unlocked();
     assert_eq!(
         h.lock(&[]).await.status,
@@ -1736,14 +1824,27 @@ async fn test_rmc_unlock_requires_identity_host_and_csrf() {
         ))
         .await;
     assert_eq!(r.status, 421);
-    // A body is refused.
+    // Superseded by ADR 2026-10-06 "Tailscale Funnel Access and In-House Passkey
+    // Authentication for `soos-remote`" item (10): the unlock now carries an assertion body,
+    // so "a 2-byte body is 413" becomes "`{}` is 400 bad_request and a body over
+    // MAX_AUTH_BODY_BYTES is 413", both without a logind read.
     let mut with_body = raw_request(
         "POST",
         "/api/unlock",
         &with_identity(&[("X-Soos-Action", "unlock"), ("Content-Length", "2")]),
     );
     with_body.extend_from_slice(b"{}");
-    assert_eq!(h.raw(&with_body).await.status, 413);
+    let r = h.raw(&with_body).await;
+    assert_eq!(r.status, 400);
+    assert_eq!(r.result(), "bad_request");
+    let oversize = (soos_remote::MAX_AUTH_BODY_BYTES + 1).to_string();
+    let mut too_large = raw_request(
+        "POST",
+        "/api/unlock",
+        &with_identity(&[("X-Soos-Action", "unlock"), ("Content-Length", &oversize)]),
+    );
+    too_large.extend(vec![b'a'; soos_remote::MAX_AUTH_BODY_BYTES + 1]);
+    assert_eq!(h.raw(&too_large).await.status, 413);
 
     assert!(h.source.unlock_ids().is_empty());
     assert!(h.source.lock_ids().is_empty());
@@ -1754,7 +1855,7 @@ async fn test_rmc_unlock_requires_identity_host_and_csrf() {
     );
 
     let r = h
-        .unlock(&[
+        .unlock_with_passkey(&[
             ("Sec-Fetch-Site", "same-origin"),
             ("Origin", "https://PC.Tail1234.TS.NET:443"),
         ])
@@ -1799,14 +1900,7 @@ async fn test_rmc_unlock_flow_deadline() {
     let h = Harness::start_unlock_enabled().await;
     h.source.set_locked();
     h.source.hold_unlock_next(1);
-    let unlock = spawn_exchange(
-        &h.path,
-        raw_request(
-            "POST",
-            "/api/unlock",
-            &with_identity(&[("X-Soos-Action", "unlock")]),
-        ),
-    );
+    let unlock = spawn_exchange(&h.path, h.unlock_request_with_passkey(&[]).await);
     h.source.wait_reads_at_least(1).await;
     settle().await;
     assert_eq!(
@@ -1851,7 +1945,7 @@ async fn test_rmc_unlock_is_audited_without_identity() {
 
     let h = Harness::start_unlock_enabled().await;
     h.source.set_unlocked();
-    let _ = h.unlock(&[]).await; // 409: no audit line
+    let _ = h.unlock_with_passkey(&[]).await; // 409: no audit line
     let _ = h
         .request("POST", "/api/unlock", &[("X-Soos-Action", "lock")])
         .await; // 403
@@ -1860,7 +1954,7 @@ async fn test_rmc_unlock_is_audited_without_identity() {
         "refused unlocks are not audited as requested"
     );
     h.source.set_locked();
-    assert_eq!(h.unlock(&[]).await.status, 202);
+    assert_eq!(h.unlock_with_passkey(&[]).await.status, 202);
     let text = capture.text();
     let audit: Vec<&str> = text
         .lines()
@@ -1877,6 +1971,18 @@ async fn test_rmc_unlock_is_audited_without_identity() {
         "x-soos-action",
     ] {
         assert!(!text.contains(forbidden), "the log leaks {forbidden}");
+    }
+    // ADR 2026-10-06 (Funnel/passkey) item 10: nor any passkey material.
+    let owner = Authenticator::owner();
+    let mut passkey_needles = vec![
+        owner.credential_id_b64(),
+        b64url(&owner.public_key()),
+        b64url(&OWNER_HANDLE),
+    ];
+    passkey_needles.extend(h.challenges.lock().unwrap().iter().cloned());
+    assert!(passkey_needles.len() >= 5, "the challenges were recorded");
+    for forbidden in passkey_needles {
+        assert!(!text.contains(&forbidden), "the log leaks passkey material");
     }
 }
 

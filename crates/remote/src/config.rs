@@ -17,8 +17,9 @@ use serde::Deserialize;
 
 use crate::identity::is_valid_host_name;
 use crate::{
-    MAX_ALLOWED_HOSTS, MAX_ALLOWED_LOGINS, MAX_CONFIG_BYTES, MAX_LOGIN_LEN, MAX_POLL_INTERVAL_MS,
-    MAX_SOCKET_PATH_LEN, MIN_POLL_INTERVAL_MS, SOCKET_DIR_NAME, SOCKET_FILE_NAME,
+    CREDENTIALS_FILE_NAME, MAX_ALLOWED_HOSTS, MAX_ALLOWED_LOGINS, MAX_CONFIG_BYTES,
+    MAX_CREDENTIALS_PATH_LEN, MAX_LOGIN_LEN, MAX_POLL_INTERVAL_MS, MAX_SOCKET_PATH_LEN,
+    MIN_POLL_INTERVAL_MS, SOCKET_DIR_NAME, SOCKET_FILE_NAME, TS_NET_SUFFIX,
 };
 
 /// Validated Tailscale login (`Tailscale-User-Login` value), stored ASCII-lowercased.
@@ -67,6 +68,20 @@ pub struct RemoteConfig {
     pub allowed_hosts: Vec<String>,
     /// `POST /api/unlock` enabled (ADR 2026-10-06); `false` unless the file says `true`.
     pub allow_unlock: bool,
+    /// Passkey and Funnel settings (ADR 2026-10-06 "Tailscale Funnel Access and In-House
+    /// Passkey Authentication for `soos-remote`").
+    pub auth: AuthConfig,
+}
+
+/// Passkey and Funnel settings; `Default` = everything off.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct AuthConfig {
+    /// WebAuthn RP ID = the full node host; `None` disables passkeys.
+    pub rp_id: Option<String>,
+    /// Accept `Tailscale-Funnel-Request: ?1` requests; requires `rp_id`.
+    pub allow_funnel: bool,
+    /// Explicit credential store path.
+    pub credentials_path: Option<PathBuf>,
 }
 
 /// Configuration failure; every variant exits with `EXIT_CONFIG`.
@@ -132,6 +147,18 @@ pub enum ConfigError {
     /// The real or effective uid is 0.
     #[error("soos-remote must not run as root")]
     RunningAsRoot,
+    /// `rp_id` is not the full node host name.
+    #[error("rp_id must be the full node host name")]
+    InvalidRpId,
+    /// `allow_funnel = true` without `rp_id`.
+    #[error("allow_funnel requires rp_id")]
+    FunnelNeedsRpId,
+    /// Relative, trailing-slash, parentless or oversize `credentials_path`.
+    #[error("credentials_path must be absolute and at most {max} bytes")]
+    InvalidCredentialsPath {
+        /// `MAX_CREDENTIALS_PATH_LEN`.
+        max: usize,
+    },
 }
 
 /// Pure. `Err(RunningAsRoot)` when `uid == 0 || euid == 0`.
@@ -155,6 +182,9 @@ struct FileConfig {
     poll_interval_ms: Option<u64>,
     allowed_hosts: Option<Vec<String>>,
     allow_unlock: Option<bool>,
+    rp_id: Option<String>,
+    allow_funnel: Option<bool>,
+    credentials_path: Option<String>,
 }
 
 /// An explicit `socket_path`: absolute, with a parent and a file name, no trailing `/`,
@@ -164,6 +194,43 @@ fn validate_socket_path(raw: &str) -> Result<PathBuf, ConfigError> {
         max: MAX_SOCKET_PATH_LEN,
     };
     if raw.is_empty() || raw.len() > MAX_SOCKET_PATH_LEN || raw.ends_with('/') {
+        return Err(invalid);
+    }
+    let path = PathBuf::from(raw);
+    if !path.is_absolute() || path.parent().is_none() || path.file_name().is_none() {
+        return Err(invalid);
+    }
+    Ok(path)
+}
+
+/// `rp_id`: lowercased, a valid DNS name ending with `.ts.net` with at least two labels
+/// before the suffix (`<node>.<tailnet>.ts.net`), and a member of `allowed_hosts` when that
+/// list is non-empty. Never echoed in the error.
+fn validate_rp_id(raw: &str, allowed_hosts: &[String]) -> Result<String, ConfigError> {
+    let lowered = raw.to_ascii_lowercase();
+    if !is_valid_host_name(&lowered) {
+        return Err(ConfigError::InvalidRpId);
+    }
+    let prefix = lowered
+        .strip_suffix(TS_NET_SUFFIX)
+        .ok_or(ConfigError::InvalidRpId)?;
+    let labels = prefix.split('.').filter(|label| !label.is_empty()).count();
+    if prefix.is_empty() || labels < 2 {
+        return Err(ConfigError::InvalidRpId);
+    }
+    if !allowed_hosts.is_empty() && !allowed_hosts.contains(&lowered) {
+        return Err(ConfigError::InvalidRpId);
+    }
+    Ok(lowered)
+}
+
+/// An explicit `credentials_path`: absolute, with a parent and a file name, no trailing `/`,
+/// at most `MAX_CREDENTIALS_PATH_LEN` bytes.
+fn validate_credentials_path(raw: &str) -> Result<PathBuf, ConfigError> {
+    let invalid = ConfigError::InvalidCredentialsPath {
+        max: MAX_CREDENTIALS_PATH_LEN,
+    };
+    if raw.is_empty() || raw.len() > MAX_CREDENTIALS_PATH_LEN || raw.ends_with('/') {
         return Err(invalid);
     }
     let path = PathBuf::from(raw);
@@ -240,12 +307,29 @@ pub fn parse_config(text: &str, runtime_dir: Option<&Path>) -> Result<RemoteConf
         None => default_socket_path(runtime_dir)?,
     };
 
+    let rp_id = match file.rp_id {
+        Some(raw) => Some(validate_rp_id(&raw, &allowed_hosts)?),
+        None => None,
+    };
+    let allow_funnel = file.allow_funnel.unwrap_or(false);
+    if allow_funnel && rp_id.is_none() {
+        return Err(ConfigError::FunnelNeedsRpId);
+    }
+    let credentials_path = match file.credentials_path {
+        Some(raw) => Some(validate_credentials_path(&raw)?),
+        None => None,
+    };
     Ok(RemoteConfig {
         allowed_logins,
         socket_path,
         poll_interval_ms,
         allowed_hosts,
         allow_unlock: file.allow_unlock.unwrap_or(false),
+        auth: AuthConfig {
+            rp_id,
+            allow_funnel,
+            credentials_path,
+        },
     })
 }
 
@@ -314,4 +398,31 @@ pub fn default_config_path(
         return Ok(home.join(".config").join("soos").join("remote.toml"));
     }
     Err(ConfigError::NoConfigPath)
+}
+
+/// Pure. `explicit` wins; otherwise `<config_path parent>/CREDENTIALS_FILE_NAME` (spec S-5).
+///
+/// # Errors
+///
+/// [`ConfigError::InvalidCredentialsPath`] when `config_path` has no parent or the result
+/// exceeds `MAX_CREDENTIALS_PATH_LEN`.
+pub fn resolve_credentials_path(
+    auth: &AuthConfig,
+    config_path: &Path,
+) -> Result<PathBuf, ConfigError> {
+    let invalid = || ConfigError::InvalidCredentialsPath {
+        max: MAX_CREDENTIALS_PATH_LEN,
+    };
+    if let Some(explicit) = &auth.credentials_path {
+        return Ok(explicit.clone());
+    }
+    let parent = config_path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .ok_or_else(invalid)?;
+    let path = parent.join(CREDENTIALS_FILE_NAME);
+    if path.as_os_str().len() > MAX_CREDENTIALS_PATH_LEN {
+        return Err(invalid());
+    }
+    Ok(path)
 }

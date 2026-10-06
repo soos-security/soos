@@ -20,6 +20,20 @@ pub enum Route {
     Lock,
     /// `POST /api/unlock` (ADR 2026-10-06).
     Unlock,
+    /// `GET|HEAD /api/auth/state`.
+    AuthState,
+    /// `POST /api/auth/login/options`.
+    LoginOptions,
+    /// `POST /api/auth/login/verify`.
+    LoginVerify,
+    /// `POST /api/auth/logout`.
+    Logout,
+    /// `POST /api/auth/unlock/options`.
+    UnlockOptions,
+    /// `POST /api/auth/register/options`.
+    RegisterOptions,
+    /// `POST /api/auth/register/verify`.
+    RegisterVerify,
     /// `404`.
     NotFound,
     /// `405` with an `Allow` header.
@@ -31,11 +45,41 @@ pub const LOCK_PATH: &str = "/api/lock";
 /// Path of the unlock `POST` route.
 pub const UNLOCK_PATH: &str = "/api/unlock";
 
+/// Path of `GET|HEAD /api/auth/state`.
+pub const AUTH_STATE_PATH: &str = "/api/auth/state";
+/// Path of `POST /api/auth/login/options`.
+pub const LOGIN_OPTIONS_PATH: &str = "/api/auth/login/options";
+/// Path of `POST /api/auth/login/verify`.
+pub const LOGIN_VERIFY_PATH: &str = "/api/auth/login/verify";
+/// Path of `POST /api/auth/logout`.
+pub const LOGOUT_PATH: &str = "/api/auth/logout";
+/// Path of `POST /api/auth/unlock/options`.
+pub const UNLOCK_OPTIONS_PATH: &str = "/api/auth/unlock/options";
+/// Path of `POST /api/auth/register/options`.
+pub const REGISTER_OPTIONS_PATH: &str = "/api/auth/register/options";
+/// Path of `POST /api/auth/register/verify`.
+pub const REGISTER_VERIFY_PATH: &str = "/api/auth/register/verify";
+
+/// The `POST`-only routes, by exact path.
+fn post_route(path: &str) -> Option<Route> {
+    match path {
+        LOCK_PATH => Some(Route::Lock),
+        UNLOCK_PATH => Some(Route::Unlock),
+        LOGIN_OPTIONS_PATH => Some(Route::LoginOptions),
+        LOGIN_VERIFY_PATH => Some(Route::LoginVerify),
+        LOGOUT_PATH => Some(Route::Logout),
+        UNLOCK_OPTIONS_PATH => Some(Route::UnlockOptions),
+        REGISTER_OPTIONS_PATH => Some(Route::RegisterOptions),
+        REGISTER_VERIFY_PATH => Some(Route::RegisterVerify),
+        _ => None,
+    }
+}
+
 /// The `Allow` header value of a `405` on `path`.
 #[must_use]
 pub fn allow_header(path: &str) -> &'static str {
     let path = path.split('?').next().unwrap_or(path);
-    if path == LOCK_PATH || path == UNLOCK_PATH {
+    if post_route(path).is_some() {
         "POST"
     } else {
         "GET, HEAD"
@@ -57,6 +101,7 @@ pub fn route(method: Method, path: &str) -> Route {
         "/apple-touch-icon.png" => Some(Route::Asset(AssetId::AppleTouchIcon)),
         "/api/status" => Some(Route::Status),
         "/api/events" => Some(Route::Events),
+        AUTH_STATE_PATH => Some(Route::AuthState),
         _ => None,
     };
     if let Some(found) = read_route {
@@ -65,12 +110,7 @@ pub fn route(method: Method, path: &str) -> Route {
             Method::Post | Method::Other => Route::MethodNotAllowed,
         };
     }
-    let post_route = match path {
-        LOCK_PATH => Some(Route::Lock),
-        UNLOCK_PATH => Some(Route::Unlock),
-        _ => None,
-    };
-    if let Some(found) = post_route {
+    if let Some(found) = post_route(path) {
         return match method {
             Method::Post => found,
             Method::Get | Method::Head | Method::Other => Route::MethodNotAllowed,
@@ -158,5 +198,55 @@ fn check_action_csrf(
             }
         }
         Err(()) => Err(CsrfError::OriginMismatch),
+    }
+}
+
+// ---------------------------------------------------------------------------------------
+// Passkey routes (architect spec §4.7).
+// ---------------------------------------------------------------------------------------
+
+/// Pure: true exactly for the four body routes, `POST` only, query ignored:
+/// `/api/unlock`, `/api/auth/login/verify`, `/api/auth/register/options`,
+/// `/api/auth/register/verify`.
+#[must_use]
+pub fn accepts_body(method: Method, path: &str) -> bool {
+    let path = path.split('?').next().unwrap_or(path);
+    method == Method::Post
+        && matches!(
+            path,
+            UNLOCK_PATH | LOGIN_VERIFY_PATH | REGISTER_OPTIONS_PATH | REGISTER_VERIFY_PATH
+        )
+}
+
+/// Pure: the routes reachable on the Funnel path without a web session: every asset,
+/// `AuthState`, the login ceremony, `Logout` (an expired session can still clear its
+/// cookie), `NotFound` and `MethodNotAllowed`.
+#[must_use]
+pub fn is_funnel_public(route: Route) -> bool {
+    matches!(
+        route,
+        Route::Asset(_)
+            | Route::AuthState
+            | Route::LoginOptions
+            | Route::LoginVerify
+            | Route::Logout
+            | Route::NotFound
+            | Route::MethodNotAllowed
+    )
+}
+
+/// Pure; the lock CSRF rules with the route's `action`, and `Origin` **required**: exactly
+/// one `Origin` equal (ASCII-lowercased) to `https://<rp_id>` or `https://<rp_id>:443`; an
+/// absent `Origin` is [`CsrfError::OriginMismatch`]. `rp_id` comes from the configuration,
+/// never from a request header.
+///
+/// # Errors
+///
+/// [`CsrfError`].
+pub fn check_auth_csrf(head: &RequestHead, rp_id: &str, action: &str) -> Result<(), CsrfError> {
+    check_action_csrf(head, rp_id, action)?;
+    match optional_single(head, "origin") {
+        Ok(Some(_)) => Ok(()),
+        Ok(None) | Err(()) => Err(CsrfError::OriginMismatch),
     }
 }

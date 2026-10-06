@@ -83,3 +83,34 @@ real socket directory:
 The production `ZbusSessionSource` is exercised only on the owner's host; its pure reply
 mapping `session_props_from_properties` is tested with hand-built `zvariant::OwnedValue` maps,
 and the socket helpers over `TempDir` (symlink, regular file and foreign-uid cases).
+
+### Funnel and passkey doubles (ADR 2026-10-06 "Tailscale Funnel Access and In-House Passkey Authentication for `soos-remote`")
+The Funnel path and the WebAuthn ceremonies are tested without Tailscale, without an iPhone and
+without a platform authenticator. The shared harness moved to `crates/remote/tests/common/`
+(`harness.rs`, `passkey.rs`) and is used by `server_tests.rs`, `auth_server_tests.rs` and
+`auth_capacity_tests.rs`:
+- **Fixture authenticator** (`passkey.rs`, `Authenticator`): P-256 keys derived from fixed seeds
+  (`p256` dev-dependency, deterministic RFC 6979 signatures), `owner()` (synced, `BE|BS`,
+  counter `0/0`) and `device(seed, id)` (device-bound, increasing counter); it builds CBOR
+  `none` attestation objects and COSE keys (`ciborium`), client data JSON, authenticator data
+  with any flag combination (`UP`, `UV`, `BE`, `BS`, `AT`, `ED`), DER signatures and their
+  high-S complement (`s_complement`), and the registration / assertion JSON bodies. The verbatim
+  WebAuthn L3 §16.2 vector is kept as a negative fixture (no UV). Store JSON and the
+  enrollment-code line are written by hand, never by the code under test.
+- **Funnel requests** (`harness.rs`, `Via::Funnel { ip, cookie }`): built byte for byte as
+  `tailscaled` forwards them (`Host: localhost`, `X-Forwarded-Host`, `X-Forwarded-Proto: https`,
+  `Tailscale-Funnel-Request: ?1`, one `X-Forwarded-For`, optional session cookie); `Via::Tailnet`
+  carries the allowed `Tailscale-User-Login`. `Options::passkeys()` starts the server with `rp_id` set,
+  `allow_unlock = true` and the owner's passkey stored, `Options::funnel()` adds
+  `allow_funnel = true`.
+- **Injected seams** on `ServerState`: `with_random(RandomSource)` (scripted or failing random
+  source, to prove the `503` fail-closed path and to remember every issued challenge as a log
+  needle), `with_credentials_path(PathBuf)` (a store in the test `TempDir`) and
+  `with_file_owner_uid(u32)` (the uid that must own the store and code files, because the harness
+  logind uid differs from the CI runner uid). The production wiring in `main.rs` calls only
+  `with_credentials_path` (the resolved store path), never `with_random`, `with_file_owner_uid`
+  or `with_unix_clock` (invariant `remote_passkey_contract::test_rmc_s22_production_wiring_has_no_test_hooks`).
+- **Held connections** (`Held`): heads and partial bodies left open on the socket to fill the
+  Funnel, anonymous and body-read capacity classes under the frozen clock.
+Real-hardware evidence (Funnel reachability on 4G, registration, Face ID login and unlock on the
+owner's iPhone) is matrix rows RMC40 and RMC42–RMC44, pending the owner.

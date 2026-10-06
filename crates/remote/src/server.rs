@@ -7,10 +7,14 @@
 //! logind snapshot (`SNAPSHOT_DEADLINE_MS`), the whole lock flow (`LOCK_FLOW_DEADLINE_MS`),
 //! the number and lifetime of streams (`MAX_SSE_STREAMS`, `MAX_SSE_STREAM_MS`).
 //!
-//! Dispatch order on a parsed head: HTTP error → `Host` (`421`) → identity (`403`) → route
-//! → CSRF for the lock and the unlock (`403`) → `allow_unlock` for the unlock (`403`) →
-//! handler. No logind call, stream slot or subscriber
-//! registration happens before every check has passed.
+//! Dispatch order on a parsed head (spec §6 of the Funnel/passkey ADR): HTTP error → `Host`
+//! (`421`) → classification (tailnet identity or Funnel marker, `403`) → Funnel class permit
+//! (`503 busy`) and Funnel host = `rp_id` (`421`) → route → Funnel session (revocation, then
+//! validation; `403 login_required`, register routes `403 forbidden`) and anonymous permit →
+//! route CSRF (`403`) → route gates (`allow_unlock`, `rp_id`, body presence, lockout) →
+//! anonymous body-read reservation → bounded body read (no mutex held) → handler. No logind
+//! call, stream slot, subscriber registration or body read happens before every check has
+//! passed, and every unlock needs a fresh passkey assertion with user verification.
 //!
 //! Readings: one poller task reads logind every `poll_interval_ms` while at least one
 //! stream is open and publishes every read on a `watch` channel with a strictly increasing
@@ -21,6 +25,7 @@
 
 use std::future::Future;
 use std::io::ErrorKind;
+use std::path::PathBuf;
 use std::pin::pin;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -33,21 +38,48 @@ use tokio::task::JoinSet;
 use tokio::time::{sleep, sleep_until, timeout, timeout_at, Instant};
 use tracing::{debug, info};
 
+use subtle::ConstantTimeEq;
+use zeroize::Zeroizing;
+
 use crate::assets::asset;
-use crate::config::RemoteConfig;
-use crate::http::{
-    encode_response, encode_response_head, encode_sse_event, encode_sse_head, parse_request_head,
-    write_bounded, HttpError, Method, RequestHead, Response, WriteError,
+use crate::audit;
+use crate::auth::{
+    decode_assertion, decode_register_options, decode_registration, system_random,
+    AssertionFailure, AuthState, BodyReadGuard, Capacity, FunnelStreamGuard, LimitKey,
+    RandomSource, Verified,
 };
-use crate::identity::{authorize, check_host};
+use crate::challenge::{
+    ChallengeBinding, ChallengeError, ChallengePurpose, PendingRegistration, Taken,
+};
+use crate::config::RemoteConfig;
+use crate::credentials::{
+    CredentialStore, PasskeyFile, PasskeyRecord, StoreError, STORE_LOCK_RETRY_MS,
+};
+use crate::enroll::{normalized_code_hash, read_code_file, remove_code_file, EnrollError};
+use crate::http::{
+    encode_response, encode_response_head, encode_sse_event, encode_sse_head, parse_request,
+    read_body, write_bounded, BodyError, HttpError, Method, ParsedRequest, RequestHead, Response,
+    WriteError,
+};
+use crate::identity::{check_host, classify_request, client_hint, ClientHint, PathClass};
 use crate::logind::{SessionSource, SourceError};
-use crate::routes::{allow_header, check_lock_csrf, check_unlock_csrf, route, Route};
+use crate::routes::{
+    accepts_body, allow_header, check_auth_csrf, check_lock_csrf, check_unlock_csrf,
+    is_funnel_public, route, Route,
+};
 use crate::session::{select_session, SessionProps};
 use crate::status::{status_from, view_changed, Reading, StatusView};
+use crate::webauthn::{
+    b64url_encode, parse_client_data, verify_registration, CeremonyType, RelyingParty,
+};
+use crate::websession::{clear_cookie_header, session_token_hash, set_cookie_header, Touch};
 use crate::{
-    LOCK_FLOW_DEADLINE_MS, MAX_CONNECTIONS, MAX_REQUEST_HEAD_BYTES, MAX_SSE_STREAMS,
+    ACTION_LOGIN, ACTION_LOGIN_OPTIONS, ACTION_LOGOUT, ACTION_REGISTER, ACTION_REGISTER_OPTIONS,
+    ACTION_UNLOCK_OPTIONS, CHALLENGE_BYTES, ENROLL_CODE_TTL_S, FUNNEL_REFUSAL_LINGER_MS,
+    LOCK_FLOW_DEADLINE_MS, MAX_CONNECTIONS, MAX_PASSKEYS, MAX_REQUEST_HEAD_BYTES, MAX_SSE_STREAMS,
     MAX_SSE_STREAM_MS, MIN_LOCK_INTERVAL_MS, MIN_UNLOCK_INTERVAL_MS, REQUEST_HEAD_TIMEOUT_MS,
-    RESPONSE_WRITE_TIMEOUT_MS, SNAPSHOT_DEADLINE_MS, SSE_KEEPALIVE_MS, UNLOCK_FLOW_DEADLINE_MS,
+    RESPONSE_WRITE_TIMEOUT_MS, SESSION_TOKEN_BYTES, SNAPSHOT_DEADLINE_MS, SSE_KEEPALIVE_MS,
+    STORE_LOCK_TIMEOUT_MS, UNLOCK_FLOW_DEADLINE_MS, USER_HANDLE_BYTES, WEBAUTHN_TIMEOUT_MS,
 };
 
 // Streams hold their connection permit for their whole lifetime; request permits must
@@ -77,6 +109,9 @@ pub struct ServerState<S: SessionSource> {
     source: S,
     unix_clock: UnixClock,
     seq_start: u64,
+    random: RandomSource,
+    credentials_path: Option<PathBuf>,
+    file_owner_uid: u32,
 }
 
 impl<S: SessionSource> ServerState<S> {
@@ -93,7 +128,51 @@ impl<S: SessionSource> ServerState<S> {
                     .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
             }),
             seq_start: 0,
+            random: system_random(),
+            credentials_path: None,
+            file_owner_uid: uid,
         }
+    }
+
+    /// Test hook: injected CSPRNG (scripted or failing).
+    #[must_use]
+    pub fn with_random(mut self, random: RandomSource) -> Self {
+        self.random = random;
+        self
+    }
+
+    /// The resolved credential store path (`resolve_credentials_path`); `None` keeps every
+    /// passkey route fail-closed (`503 store_unavailable`).
+    #[must_use]
+    pub fn with_credentials_path(mut self, path: PathBuf) -> Self {
+        self.credentials_path = Some(path);
+        self
+    }
+
+    /// Test hook: uid that must own the credential store and the enrollment code file
+    /// (default: the state's uid, i.e. the service uid).
+    #[must_use]
+    pub fn with_file_owner_uid(mut self, uid: u32) -> Self {
+        self.file_owner_uid = uid;
+        self
+    }
+
+    /// The injected CSPRNG.
+    #[must_use]
+    pub fn random(&self) -> &RandomSource {
+        &self.random
+    }
+
+    /// The credential store path.
+    #[must_use]
+    pub fn credentials_path(&self) -> Option<&std::path::Path> {
+        self.credentials_path.as_deref()
+    }
+
+    /// The uid that must own the store and code files.
+    #[must_use]
+    pub fn file_owner_uid(&self) -> u32 {
+        self.file_owner_uid
     }
 
     /// Test hook: injected `checked_unix_ms` source.
@@ -179,13 +258,18 @@ struct Shared<S: SessionSource> {
     connections: Arc<Semaphore>,
     /// Set to `true` at shutdown so every stream ends.
     closing: watch::Sender<bool>,
+    /// Every mutable passkey structure; never held across a logind call nor a body read.
+    auth: Mutex<AuthState>,
+    /// Per-class connection capacity (outside the auth mutex).
+    capacity: Capacity,
+    /// The relying party (`None` when `rp_id` is not configured).
+    rp: Option<RelyingParty>,
 }
 
 impl<S: SessionSource> Shared<S> {
     fn new(state: Arc<ServerState<S>>) -> Self {
         Self {
             seq: AtomicU64::new(state.seq_start),
-            state,
             fatal: AtomicBool::new(false),
             subscribers: AtomicUsize::new(0),
             poller_wake: Notify::new(),
@@ -195,6 +279,15 @@ impl<S: SessionSource> Shared<S> {
             unlock_gate: Mutex::new(None),
             connections: Arc::new(Semaphore::new(MAX_CONNECTIONS)),
             closing: watch::Sender::new(false),
+            auth: Mutex::new(AuthState::new(
+                state
+                    .credentials_path
+                    .clone()
+                    .map(|path| CredentialStore::new(path, state.file_owner_uid)),
+            )),
+            capacity: Capacity::new(),
+            rp: state.config.auth.rp_id.as_deref().map(RelyingParty::new),
+            state,
         }
     }
 
@@ -244,6 +337,243 @@ impl<S: SessionSource> Shared<S> {
     async fn fresh_view(&self) -> StatusView {
         let (checked_unix_ms, result) = self.fresh_read().await;
         status_from(&result, self.uid(), checked_unix_ms)
+    }
+}
+
+/// Passkey and session helpers of the shared state (spec §4.6, §5, §6).
+impl<S: SessionSource> Shared<S> {
+    /// Unix time in seconds from the injected clock (enrollment-code expiry).
+    fn now_unix_s(&self) -> u64 {
+        (self.state.unix_clock)() / 1000
+    }
+
+    /// The `0700` socket directory (home of the enrollment code file).
+    fn socket_dir(&self) -> Option<&std::path::Path> {
+        self.state.config.socket_path.parent()
+    }
+
+    /// Revocation, then validation of a presented session (dispatch step 7, spec §4.3).
+    async fn validate_session(
+        &self,
+        presented: Option<[u8; 32]>,
+        touch: Touch,
+    ) -> Option<[u8; 32]> {
+        let mut auth = self.auth.lock().await;
+        auth.revoke();
+        let hash = presented?;
+        auth.sessions.validate(Instant::now(), &hash, touch)
+    }
+
+    /// SSE keep-alive re-validation: revocation first, then [`Touch::Keep`].
+    async fn session_still_valid(&self, hash: &[u8; 32]) -> bool {
+        let mut auth = self.auth.lock().await;
+        auth.revoke();
+        auth.sessions
+            .validate(Instant::now(), hash, Touch::Keep)
+            .is_some()
+    }
+
+    /// Records one counted authentication failure of `key`.
+    async fn fail(&self, key: LimitKey) {
+        let in_flight = self.capacity.hints_in_flight();
+        self.auth
+            .lock()
+            .await
+            .record_failure(key, Instant::now(), &in_flight);
+    }
+
+    /// `GET /api/auth/state` (spec §4.6); never reads logind.
+    async fn auth_state_view(&self, ctx: &RequestContext) -> Response {
+        let config = &self.state.config;
+        let authenticated = match ctx.class {
+            PathClass::Tailnet => true,
+            PathClass::Funnel => ctx.session.is_some(),
+        };
+        let mode = match ctx.class {
+            PathClass::Tailnet => "tailnet",
+            PathClass::Funnel => "funnel",
+        };
+        if !authenticated {
+            return json_value(
+                200,
+                &serde_json::json!({"mode": mode, "authenticated": false}),
+            );
+        }
+        let passkeys = matches!(
+            self.auth.lock().await.store_snapshot(),
+            Ok(Some(file)) if !file.passkeys.is_empty()
+        );
+        json_value(
+            200,
+            &serde_json::json!({
+                "mode": mode,
+                "authenticated": true,
+                "passkeys": passkeys,
+                "unlock_enabled": config.allow_unlock && config.auth.rp_id.is_some(),
+                "enrollment": ctx.class == PathClass::Tailnet && config.auth.rp_id.is_some(),
+            }),
+        )
+    }
+
+    /// The common tail of the login and unlock options routes: lockout and options limiter
+    /// of `key`, a non-empty store, a fresh challenge issued into its pool.
+    async fn issue_options(
+        &self,
+        key: LimitKey,
+        class: PathClass,
+        purpose: ChallengePurpose,
+        binding: ChallengeBinding,
+    ) -> Response {
+        let Some(rp) = self.rp.as_ref() else {
+            return Response::json(403, "passkeys_not_configured");
+        };
+        let in_flight = self.capacity.hints_in_flight();
+        let mut auth = self.auth.lock().await;
+        let now = Instant::now();
+        if auth.locked_out(key, now) || auth.options_exhausted(key, now) {
+            return Response::json(429, "rate_limited");
+        }
+        match auth.store_snapshot() {
+            Ok(Some(file)) if !file.passkeys.is_empty() => {}
+            Ok(_) => return Response::json(409, "no_passkey"),
+            Err(err) => return store_error_response(err),
+        }
+        let mut challenge = Zeroizing::new([0u8; CHALLENGE_BYTES]);
+        if (self.state.random)(challenge.as_mut_slice()).is_err() {
+            return Response::json(503, "unavailable");
+        }
+        match auth
+            .challenges
+            .issue(now, class, purpose, binding, None, *challenge)
+        {
+            Ok(_) => {}
+            Err(ChallengeError::PoolFull) => return Response::json(429, "too_many_challenges"),
+            Err(_) => return Response::json(503, "unavailable"),
+        }
+        auth.record_issuance(key, now, &in_flight);
+        drop(auth);
+        options_response(rp.rp_id(), &challenge)
+    }
+
+    /// Persists the counter and backup state of a verified assertion when they changed
+    /// (synced `0/0` passkeys never write).
+    async fn persist_counter(&self, verified: &Verified) -> Result<(), StoreError> {
+        if !verified.changed {
+            return Ok(());
+        }
+        let id = verified.credential_id.clone();
+        let outcome = verified.outcome;
+        self.store_update(move |current| {
+            let mut file = current.ok_or(StoreError::NoSuchPasskey)?;
+            let record = file
+                .passkeys
+                .iter_mut()
+                .find(|r| r.credential_id == id)
+                .ok_or(StoreError::NoSuchPasskey)?;
+            // Re-checked under the store lock: a concurrent assertion of the same
+            // credential may already have stored a higher counter, which must never be
+            // overwritten by a lower one (clone detection, last writer would otherwise win).
+            if outcome.sign_count < record.sign_count {
+                return Ok((file, ()));
+            }
+            record.sign_count = outcome.sign_count;
+            record.backup_state = outcome.backup_state;
+            Ok((file, ()))
+        })
+        .await
+    }
+
+    /// Read-modify-write of the credential store: non-blocking lock attempts every
+    /// `STORE_LOCK_RETRY_MS` with `tokio::time::sleep` in between (never a blocking wait on
+    /// the runtime, the auth mutex released while waiting), at most `STORE_LOCK_TIMEOUT_MS`
+    /// (then `Busy`). A store failure other than `Busy` drops every web session.
+    ///
+    /// Accepted bound (candid review 2026-10-06): the read, `fsync` and `rename` of
+    /// [`crate::credentials::CredentialStore::update_locked`] run synchronously on the
+    /// current-thread runtime. They touch one local `0600` file of at most
+    /// `MAX_CREDENTIAL_STORE_BYTES` (16 KiB) and happen only on a passkey registration,
+    /// a removal or a counter change of a device-bound credential, so the stall is a
+    /// single small local write; `spawn_blocking` is not used because the store lives
+    /// behind the auth mutex and every caller already waits for its result.
+    async fn store_update<T>(
+        &self,
+        f: impl FnOnce(Option<PasskeyFile>) -> Result<(PasskeyFile, T), StoreError>,
+    ) -> Result<T, StoreError> {
+        let started = Instant::now();
+        let budget = Duration::from_millis(STORE_LOCK_TIMEOUT_MS);
+        let lock = loop {
+            let attempt = {
+                let auth = self.auth.lock().await;
+                match auth.store.as_ref() {
+                    Some(store) => store.try_lock(),
+                    None => Err(StoreError::Io),
+                }
+            };
+            match attempt {
+                Ok(Some(lock)) => break lock,
+                Ok(None) => {}
+                Err(err) => {
+                    self.auth.lock().await.store_failed(err);
+                    return Err(err);
+                }
+            }
+            if started.elapsed() >= budget {
+                return Err(StoreError::Busy);
+            }
+            sleep(Duration::from_millis(STORE_LOCK_RETRY_MS)).await;
+        };
+        let mut auth = self.auth.lock().await;
+        let result = match auth.store.as_mut() {
+            Some(store) => store.update_locked(&lock, &self.state.random, f),
+            None => Err(StoreError::Io),
+        };
+        if let Err(err) = result {
+            auth.store_failed(err);
+        }
+        drop(auth);
+        drop(lock);
+        result
+    }
+
+    /// Checks the enrollment code file (and, for register options, the typed `code`):
+    /// absent, insecure, malformed, expired or future-dated files are refused (the last
+    /// three removed); a wrong code counts one attempt and the `MAX_ENROLL_CODE_ATTEMPTS`th
+    /// removes the file.
+    async fn check_code(&self, typed: Option<&str>) -> CodeCheck {
+        let Some(dir) = self.socket_dir() else {
+            return CodeCheck::Rejected;
+        };
+        let file = match read_code_file(dir, self.state.file_owner_uid) {
+            Ok(Some(file)) => file,
+            Ok(None) => return CodeCheck::Rejected,
+            Err(EnrollError::Malformed) => {
+                remove_code_file(dir);
+                return CodeCheck::Rejected;
+            }
+            Err(err) => {
+                debug!(%err, "enrollment code file refused");
+                return CodeCheck::Rejected;
+            }
+        };
+        let now = self.now_unix_s();
+        if file.expires_unix_s <= now || file.expires_unix_s > now.saturating_add(ENROLL_CODE_TTL_S)
+        {
+            remove_code_file(dir);
+            self.auth.lock().await.reset_code_attempts();
+            return CodeCheck::Rejected;
+        }
+        let Some(typed) = typed else {
+            return CodeCheck::Valid(file.code_hash);
+        };
+        let matches =
+            normalized_code_hash(typed).is_some_and(|hash| bool::from(hash.ct_eq(&file.code_hash)));
+        if matches {
+            return CodeCheck::Valid(file.code_hash);
+        }
+        if self.auth.lock().await.wrong_code(&file.code_hash) {
+            remove_code_file(dir);
+        }
+        CodeCheck::Rejected
     }
 }
 
@@ -394,13 +724,14 @@ enum HeadRead {
 }
 
 /// Assembles the request head in a buffer capped at `MAX_REQUEST_HEAD_BYTES + 1` bytes,
-/// re-parsing after every read; bytes after the head terminator are never read on purpose
-/// and ignored when already received.
-async fn read_head(stream: &mut UnixStream, buf: &mut Vec<u8>) -> Result<RequestHead, HeadRead> {
+/// re-parsing after every read with [`parse_request`]; bytes after the head terminator are
+/// never read on purpose, and those already received are the body prefix of a body route
+/// (ignored on every other route).
+async fn read_head(stream: &mut UnixStream, buf: &mut Vec<u8>) -> Result<ParsedRequest, HeadRead> {
     let capacity = MAX_REQUEST_HEAD_BYTES.saturating_add(1);
     loop {
-        match parse_request_head(buf) {
-            Ok(head) => return Ok(head),
+        match parse_request(buf, accepts_body) {
+            Ok(parsed) => return Ok(parsed),
             Err(HttpError::Incomplete) => {}
             Err(err) => return Err(HeadRead::Http(err)),
         }
@@ -421,14 +752,14 @@ async fn read_head(stream: &mut UnixStream, buf: &mut Vec<u8>) -> Result<Request
 }
 
 /// Lingering close: shuts the write side down, then discards whatever the client still
-/// sends (an ignored body, a pipelined request) until it closes, bounded by
-/// `RESPONSE_WRITE_TIMEOUT_MS` and `LINGER_MAX_BYTES`, so that unread input never turns the
-/// response into a connection reset. Nothing read here is parsed or kept.
-async fn finish(stream: &mut UnixStream) {
+/// sends (an ignored body, a pipelined request) until it closes, bounded by `linger` and
+/// `LINGER_MAX_BYTES`, so that unread input never turns the response into a connection
+/// reset. Nothing read here is parsed or kept.
+async fn finish(stream: &mut UnixStream, linger: Duration) {
     let _ = stream.shutdown().await;
     let mut sink = [0u8; HEAD_CHUNK_BYTES];
     let mut discarded = 0usize;
-    let _ = timeout(Duration::from_millis(RESPONSE_WRITE_TIMEOUT_MS), async {
+    let _ = timeout(linger, async {
         loop {
             match stream.read(&mut sink).await {
                 Ok(0) | Err(_) => break,
@@ -444,9 +775,24 @@ async fn finish(stream: &mut UnixStream) {
     .await;
 }
 
+/// The lingering bound of a served response (and of every classified tailnet response).
+fn served_linger() -> Duration {
+    Duration::from_millis(RESPONSE_WRITE_TIMEOUT_MS)
+}
+
+/// The lingering bound of a refusal before classification or of a refused Funnel request.
+fn refusal_linger() -> Duration {
+    Duration::from_millis(FUNNEL_REFUSAL_LINGER_MS)
+}
+
 /// Writes a fully computed response (head only for `HEAD`) under the write bound and
-/// closes the connection.
-async fn respond(stream: &mut UnixStream, method: Method, response: &Response) {
+/// closes the connection after a lingering close of at most `linger`.
+async fn respond_with(
+    stream: &mut UnixStream,
+    method: Method,
+    response: &Response,
+    linger: Duration,
+) {
     let bytes = if method == Method::Head {
         encode_response_head(response)
     } else {
@@ -454,11 +800,108 @@ async fn respond(stream: &mut UnixStream, method: Method, response: &Response) {
     };
     debug!(status = response.status, "response");
     if write_bounded(stream, &bytes).await.is_ok() {
-        finish(stream).await;
+        finish(stream, linger).await;
     }
 }
 
-/// One connection: bounded head read, then the §2.8 dispatch order.
+/// [`respond_with`] with the served-response linger.
+async fn respond(stream: &mut UnixStream, method: Method, response: &Response) {
+    respond_with(stream, method, response, served_linger()).await;
+}
+
+/// Class permits of one connection; every refusal releases them before lingering.
+#[derive(Default)]
+struct ClassPermits {
+    funnel: Option<OwnedSemaphorePermit>,
+    anonymous: Option<OwnedSemaphorePermit>,
+    body_read: Option<BodyReadGuard>,
+    stream: Option<FunnelStreamGuard>,
+}
+
+impl ClassPermits {
+    fn release(&mut self) {
+        *self = Self::default();
+    }
+}
+
+/// What the dispatcher knows about a classified request.
+struct RequestContext {
+    parsed: ParsedRequest,
+    /// Body bytes received together with the head (zeroized on drop).
+    prefix: Zeroizing<Vec<u8>>,
+    normalized_host: String,
+    class: PathClass,
+    /// Anonymous rate-limit bucket (Funnel only; `UNKNOWN` on the tailnet, never used there).
+    hint: ClientHint,
+    /// SHA-256 of a valid web-session token (Funnel only).
+    session: Option<[u8; 32]>,
+}
+
+impl RequestContext {
+    fn head(&self) -> &RequestHead {
+        &self.parsed.head
+    }
+
+    /// The limiter key of the unlock routes.
+    fn unlock_key(&self) -> LimitKey {
+        match self.class {
+            PathClass::Tailnet => LimitKey::Tailnet,
+            PathClass::Funnel => LimitKey::FunnelSession,
+        }
+    }
+
+    /// The binding of an unlock challenge of this caller.
+    fn unlock_binding(&self) -> ChallengeBinding {
+        match (self.class, self.session) {
+            (PathClass::Funnel, Some(hash)) => ChallengeBinding::WebSession(hash),
+            _ => ChallengeBinding::None,
+        }
+    }
+}
+
+/// Sends `response` for a request of `class`: a Funnel refusal (status ≥ 400) releases every
+/// class permit first and lingers at most `FUNNEL_REFUSAL_LINGER_MS`; anything else keeps the
+/// served-response linger.
+async fn answer(
+    stream: &mut UnixStream,
+    method: Method,
+    response: &Response,
+    class: PathClass,
+    permits: &mut ClassPermits,
+) {
+    if class == PathClass::Funnel && response.status >= 400 {
+        permits.release();
+        respond_with(stream, method, response, refusal_linger()).await;
+    } else {
+        respond(stream, method, response).await;
+    }
+}
+
+/// A JSON response with an arbitrary object body.
+fn json_value(status: u16, value: &serde_json::Value) -> Response {
+    match serde_json::to_vec(value) {
+        Ok(body) => Response {
+            status,
+            content_type: "application/json",
+            body,
+            extra_headers: Vec::new(),
+        },
+        Err(_) => Response::json(503, "unavailable"),
+    }
+}
+
+/// The result string of a head refusal.
+fn head_refusal_result(err: HttpError, status: u16) -> &'static str {
+    match (err, status) {
+        (HttpError::BodyTooLarge, _) => "body_too_large",
+        (_, 400) => "bad_request",
+        (_, 413) => "body_not_allowed",
+        (_, 414) => "path_too_long",
+        _ => "head_too_large",
+    }
+}
+
+/// One connection: bounded head read, then the dispatch order of spec §6.
 async fn handle_connection<S: SessionSource>(
     mut stream: UnixStream,
     _permit: OwnedSemaphorePermit,
@@ -468,19 +911,20 @@ async fn handle_connection<S: SessionSource>(
         Instant::now(),
         Duration::from_millis(REQUEST_HEAD_TIMEOUT_MS),
     );
-    let mut buf = Vec::with_capacity(MAX_REQUEST_HEAD_BYTES.saturating_add(1));
-    let head = match timeout_at(head_deadline, read_head(&mut stream, &mut buf)).await {
-        Ok(Ok(head)) => head,
+    let mut buf = Zeroizing::new(Vec::with_capacity(MAX_REQUEST_HEAD_BYTES.saturating_add(1)));
+    let parsed = match timeout_at(head_deadline, read_head(&mut stream, &mut buf)).await {
+        Ok(Ok(parsed)) => parsed,
         Ok(Err(HeadRead::Http(err))) => {
             if let Some(status) = err.status(&buf) {
                 debug!(%err, "request head refused");
-                let result = match status {
-                    400 => "bad_request",
-                    413 => "body_not_allowed",
-                    414 => "path_too_long",
-                    _ => "head_too_large",
-                };
-                respond(&mut stream, Method::Get, &Response::json(status, result)).await;
+                let result = head_refusal_result(err, status);
+                respond_with(
+                    &mut stream,
+                    Method::Get,
+                    &Response::json(status, result),
+                    refusal_linger(),
+                )
+                .await;
             }
             return;
         }
@@ -490,50 +934,126 @@ async fn handle_connection<S: SessionSource>(
             return;
         }
     };
+    let prefix = Zeroizing::new(buf.get(parsed.head_len..).unwrap_or_default().to_vec());
     drop(buf);
 
     let config = &shared.state.config;
-    let headers: Vec<(&str, &[u8])> = head
-        .headers
-        .iter()
-        .map(|(n, v)| (n.as_str(), v.as_slice()))
-        .collect();
-    let normalized_host = match check_host(&headers, &config.allowed_hosts) {
-        Ok(normalized) => normalized,
-        Err(err) => {
-            debug!(%err, "misdirected request");
-            respond(
-                &mut stream,
-                head.method,
-                &Response::json(421, "misdirected_request"),
-            )
-            .await;
+    let method = parsed.head.method;
+    let (normalized_host, caller, hint, presented) = {
+        let headers: Vec<(&str, &[u8])> = parsed
+            .head
+            .headers
+            .iter()
+            .map(|(n, v)| (n.as_str(), v.as_slice()))
+            .collect();
+        let normalized_host = match check_host(&headers, &config.allowed_hosts) {
+            Ok(normalized) => normalized,
+            Err(err) => {
+                debug!(%err, "misdirected request");
+                let response = Response::json(421, "misdirected_request");
+                respond_with(&mut stream, method, &response, refusal_linger()).await;
+                return;
+            }
+        };
+        let caller =
+            match classify_request(&headers, &config.allowed_logins, config.auth.allow_funnel) {
+                Ok(caller) => caller,
+                Err(err) => {
+                    debug!(%err, "identity refused");
+                    let response = Response::json(403, "forbidden");
+                    respond_with(&mut stream, method, &response, refusal_linger()).await;
+                    return;
+                }
+            };
+        let (hint, presented) = if caller.class() == PathClass::Funnel {
+            (client_hint(&headers), session_token_hash(&headers))
+        } else {
+            (ClientHint::UNKNOWN, None)
+        };
+        (normalized_host, caller, hint, presented)
+    };
+    let class = caller.class();
+    let mut permits = ClassPermits::default();
+
+    if class == PathClass::Funnel {
+        match shared.capacity.enter_funnel() {
+            Ok(permit) => permits.funnel = Some(permit),
+            Err(_) => {
+                debug!("funnel capacity reached");
+                answer(
+                    &mut stream,
+                    method,
+                    &Response::json(503, "busy"),
+                    class,
+                    &mut permits,
+                )
+                .await;
+                return;
+            }
+        }
+        if config.auth.rp_id.as_deref() != Some(normalized_host.as_str()) {
+            debug!("funnel host is not the relying party");
+            let response = Response::json(421, "misdirected_request");
+            answer(&mut stream, method, &response, class, &mut permits).await;
             return;
         }
-    };
-    if let Err(err) = authorize(&headers, &config.allowed_logins) {
-        debug!(%err, "identity refused");
-        respond(&mut stream, head.method, &Response::json(403, "forbidden")).await;
-        return;
     }
-    drop(headers);
 
-    let resolved = route(head.method, &head.path);
+    let resolved = route(method, &parsed.head.path);
     debug!(?resolved, "request");
-    match resolved {
+    let mut session = None;
+    if class == PathClass::Funnel {
+        let touch = match resolved {
+            Route::Asset(_) | Route::NotFound | Route::MethodNotAllowed => Touch::Keep,
+            _ => Touch::Refresh,
+        };
+        session = shared.validate_session(presented, touch).await;
+        let refusal = if matches!(resolved, Route::RegisterOptions | Route::RegisterVerify) {
+            Some(Response::json(403, "forbidden"))
+        } else if !is_funnel_public(resolved) && session.is_none() {
+            Some(Response::json(403, "login_required"))
+        } else {
+            None
+        };
+        if let Some(response) = refusal {
+            debug!("funnel request refused before routing");
+            answer(&mut stream, method, &response, class, &mut permits).await;
+            return;
+        }
+        if session.is_none() {
+            match shared.capacity.enter_anonymous() {
+                Ok(permit) => permits.anonymous = Some(permit),
+                Err(_) => {
+                    debug!("anonymous funnel capacity reached");
+                    let response = Response::json(503, "busy");
+                    answer(&mut stream, method, &response, class, &mut permits).await;
+                    return;
+                }
+            }
+        }
+    }
+
+    let ctx = RequestContext {
+        parsed,
+        prefix,
+        normalized_host,
+        class,
+        hint,
+        session,
+    };
+    let response = match resolved {
         Route::Asset(id) => {
             let embedded = asset(id);
-            let response = Response {
+            Some(Response {
                 status: 200,
                 content_type: embedded.content_type,
                 body: embedded.body.to_vec(),
                 extra_headers: Vec::new(),
-            };
-            respond(&mut stream, head.method, &response).await;
+            })
         }
         Route::Status => {
             let view = shared.fresh_view().await;
-            let response = match serde_json::to_vec(&view) {
+            Some(match serde_json::to_vec(&view) {
                 Ok(body) => Response {
                     status: 200,
                     content_type: "application/json",
@@ -541,56 +1061,601 @@ async fn handle_connection<S: SessionSource>(
                     extra_headers: Vec::new(),
                 },
                 Err(_) => Response::json(503, "unavailable"),
-            };
-            respond(&mut stream, head.method, &response).await;
+            })
         }
         Route::Events => {
-            if head.method == Method::Head {
+            if method == Method::Head {
                 if write_bounded(&mut stream, &encode_sse_head()).await.is_ok() {
-                    finish(&mut stream).await;
+                    finish(&mut stream, served_linger()).await;
                 }
                 return;
             }
-            serve_stream(stream, shared).await;
+            if class == PathClass::Funnel {
+                match shared.capacity.enter_funnel_stream() {
+                    Ok(slot) => permits.stream = Some(slot),
+                    Err(_) => {
+                        debug!("funnel stream limit reached");
+                        let response = Response::json(503, "too_many_streams");
+                        answer(&mut stream, method, &response, class, &mut permits).await;
+                        return;
+                    }
+                }
+            }
+            serve_stream(stream, Arc::clone(&shared), ctx.session).await;
+            drop(permits);
+            return;
         }
-        Route::Lock => {
-            if let Err(err) = check_lock_csrf(&head, &normalized_host) {
+        Route::Lock => Some(match check_lock_csrf(ctx.head(), &ctx.normalized_host) {
+            Ok(()) => lock_flow(&shared).await,
+            Err(err) => {
                 debug!(%err, "lock refused");
-                respond(&mut stream, head.method, &Response::json(403, "forbidden")).await;
-                return;
+                Response::json(403, "forbidden")
             }
-            let response = lock_flow(&shared).await;
-            respond(&mut stream, head.method, &response).await;
-        }
-        Route::Unlock => {
-            if let Err(err) = check_unlock_csrf(&head, &normalized_host) {
-                debug!(%err, "unlock refused");
-                respond(&mut stream, head.method, &Response::json(403, "forbidden")).await;
-                return;
-            }
-            if !config.allow_unlock {
-                debug!("unlock refused: allow_unlock is false");
-                respond(
-                    &mut stream,
-                    head.method,
-                    &Response::json(403, "unlock_disabled"),
-                )
-                .await;
-                return;
-            }
-            let response = unlock_flow(&shared).await;
-            respond(&mut stream, head.method, &response).await;
-        }
-        Route::NotFound => {
-            respond(&mut stream, head.method, &Response::json(404, "not_found")).await;
-        }
+        }),
+        Route::Unlock => unlock_route(&shared, &ctx, &mut stream, &mut permits).await,
+        Route::AuthState => Some(shared.auth_state_view(&ctx).await),
+        Route::LoginOptions => Some(login_options(&shared, &ctx).await),
+        Route::LoginVerify => login_verify(&shared, &ctx, &mut stream, &mut permits).await,
+        Route::Logout => Some(logout(&shared, &ctx).await),
+        Route::UnlockOptions => Some(unlock_options(&shared, &ctx).await),
+        Route::RegisterOptions => register_options(&shared, &ctx, &mut stream).await,
+        Route::RegisterVerify => register_verify(&shared, &ctx, &mut stream).await,
+        Route::NotFound => Some(Response::json(404, "not_found")),
         Route::MethodNotAllowed => {
             let mut response = Response::json(405, "method_not_allowed");
             response
                 .extra_headers
-                .push(("Allow", allow_header(&head.path).to_string()));
-            respond(&mut stream, head.method, &response).await;
+                .push(("Allow", allow_header(&ctx.head().path).to_string()));
+            Some(response)
         }
+    };
+    match response {
+        Some(response) => answer(&mut stream, method, &response, class, &mut permits).await,
+        None => debug!("connection closed without a response"),
+    }
+}
+
+// ---------------------------------------------------------------------------------------
+// Passkey routes (spec §5, §5.1)
+// ---------------------------------------------------------------------------------------
+
+/// How a body read ended.
+enum BodyOutcome {
+    /// The bounded body.
+    Body(Zeroizing<Vec<u8>>),
+    /// A refusal; `counted` when it is an authentication failure of the caller's key.
+    Refuse(Response, bool),
+    /// Deadline or peer closed: the connection is closed without a response.
+    Close,
+}
+
+/// Reads the body of a body route under `BODY_READ_TIMEOUT_MS`, with no mutex held.
+async fn read_request_body(stream: &mut UnixStream, ctx: &RequestContext) -> BodyOutcome {
+    match read_body(stream, &ctx.prefix, ctx.parsed.framing).await {
+        Ok(body) => BodyOutcome::Body(body),
+        Err(BodyError::Malformed) => BodyOutcome::Refuse(Response::json(400, "bad_request"), true),
+        Err(BodyError::TooLarge) => {
+            BodyOutcome::Refuse(Response::json(413, "body_too_large"), false)
+        }
+        Err(BodyError::Timeout | BodyError::Closed) => BodyOutcome::Close,
+    }
+}
+
+/// The CSRF, `rp_id` and host gates of every `/api/auth/*` POST route (spec §5): `X-Soos-Action`
+/// equal to `action` and the required `Origin` (`403 forbidden`), `rp_id` configured (`403
+/// passkeys_not_configured`), effective host equal to `rp_id` (`421`).
+fn auth_route_gate<S: SessionSource>(
+    shared: &Shared<S>,
+    ctx: &RequestContext,
+    action: &str,
+) -> Result<(), Response> {
+    let rp_id = shared.state.config.auth.rp_id.as_deref();
+    let csrf_host = rp_id.unwrap_or(ctx.normalized_host.as_str());
+    if let Err(err) = check_auth_csrf(ctx.head(), csrf_host, action) {
+        debug!(%err, "passkey route refused");
+        return Err(Response::json(403, "forbidden"));
+    }
+    rp_host_gate(shared, ctx)
+}
+
+/// `rp_id` configured (`403 passkeys_not_configured`) and equal to the effective host (`421`).
+fn rp_host_gate<S: SessionSource>(
+    shared: &Shared<S>,
+    ctx: &RequestContext,
+) -> Result<(), Response> {
+    match shared.state.config.auth.rp_id.as_deref() {
+        None => Err(Response::json(403, "passkeys_not_configured")),
+        Some(rp_id) if rp_id != ctx.normalized_host => {
+            Err(Response::json(421, "misdirected_request"))
+        }
+        Some(_) => Ok(()),
+    }
+}
+
+/// The options response of a login or unlock ceremony.
+fn options_response(rp_id: &str, challenge: &[u8; CHALLENGE_BYTES]) -> Response {
+    json_value(
+        200,
+        &serde_json::json!({
+            "challenge": b64url_encode(challenge),
+            "rp_id": rp_id,
+            "timeout_ms": WEBAUTHN_TIMEOUT_MS,
+        }),
+    )
+}
+
+/// `503 store_unavailable` (sessions already handled by the caller).
+fn store_unavailable() -> Response {
+    Response::json(503, "store_unavailable")
+}
+
+/// The outcome of a store failure on the auth routes.
+fn store_error_response(err: StoreError) -> Response {
+    debug!(%err, "credential store refused");
+    store_unavailable()
+}
+
+/// `POST /api/auth/login/options` (Funnel only).
+async fn login_options<S: SessionSource>(shared: &Shared<S>, ctx: &RequestContext) -> Response {
+    if ctx.class != PathClass::Funnel {
+        return Response::json(403, "forbidden");
+    }
+    if let Err(response) = auth_route_gate(shared, ctx, ACTION_LOGIN_OPTIONS) {
+        return response;
+    }
+    let key = LimitKey::FunnelAnonymous(ctx.hint);
+    let binding = ChallengeBinding::Login(ctx.hint);
+    shared
+        .issue_options(key, PathClass::Funnel, ChallengePurpose::Login, binding)
+        .await
+}
+
+/// `POST /api/auth/unlock/options` (tailnet, or Funnel with a session).
+async fn unlock_options<S: SessionSource>(shared: &Shared<S>, ctx: &RequestContext) -> Response {
+    let rp_id = shared.state.config.auth.rp_id.as_deref();
+    let csrf_host = rp_id.unwrap_or(ctx.normalized_host.as_str());
+    if let Err(err) = check_auth_csrf(ctx.head(), csrf_host, ACTION_UNLOCK_OPTIONS) {
+        debug!(%err, "unlock options refused");
+        return Response::json(403, "forbidden");
+    }
+    if !shared.state.config.allow_unlock {
+        return Response::json(403, "unlock_disabled");
+    }
+    if let Err(response) = rp_host_gate(shared, ctx) {
+        return response;
+    }
+    shared
+        .issue_options(
+            ctx.unlock_key(),
+            ctx.class,
+            ChallengePurpose::Unlock,
+            ctx.unlock_binding(),
+        )
+        .await
+}
+
+/// `POST /api/auth/logout` (Funnel; with or without a session).
+async fn logout<S: SessionSource>(shared: &Shared<S>, ctx: &RequestContext) -> Response {
+    if ctx.class != PathClass::Funnel {
+        return Response::json(403, "forbidden");
+    }
+    if let Err(response) = auth_route_gate(shared, ctx, ACTION_LOGOUT) {
+        return response;
+    }
+    if let Some(hash) = ctx.session {
+        shared.auth.lock().await.sessions.remove(&hash);
+    }
+    let mut response = Response::json(200, "logged_out");
+    response
+        .extra_headers
+        .push(("Set-Cookie", clear_cookie_header()));
+    response
+}
+
+/// `POST /api/auth/login/verify` (Funnel only).
+async fn login_verify<S: SessionSource>(
+    shared: &Shared<S>,
+    ctx: &RequestContext,
+    stream: &mut UnixStream,
+    permits: &mut ClassPermits,
+) -> Option<Response> {
+    if ctx.class != PathClass::Funnel {
+        return Some(Response::json(403, "forbidden"));
+    }
+    if let Err(response) = auth_route_gate(shared, ctx, ACTION_LOGIN) {
+        return Some(response);
+    }
+    let key = LimitKey::FunnelAnonymous(ctx.hint);
+    if shared.auth.lock().await.locked_out(key, Instant::now()) {
+        return Some(Response::json(429, "rate_limited"));
+    }
+    if ctx.session.is_none() {
+        match shared.capacity.reserve_anonymous_body_read(ctx.hint) {
+            Ok(guard) => permits.body_read = Some(guard),
+            Err(_) => return Some(Response::json(503, "busy")),
+        }
+    }
+    let body = match read_request_body(stream, ctx).await {
+        BodyOutcome::Body(body) => body,
+        BodyOutcome::Refuse(response, counted) => {
+            permits.body_read = None;
+            if counted {
+                shared.fail(key).await;
+            }
+            return Some(response);
+        }
+        BodyOutcome::Close => return None,
+    };
+    let Ok(assertion) = decode_assertion(&body) else {
+        drop(body);
+        shared.fail(key).await;
+        permits.body_read = None;
+        return Some(Response::json(400, "bad_request"));
+    };
+    drop(body);
+    let Some(rp) = shared.rp.as_ref() else {
+        return Some(Response::json(403, "passkeys_not_configured"));
+    };
+    let checked = {
+        let mut auth = shared.auth.lock().await;
+        let checked = auth.check_assertion(
+            rp,
+            PathClass::Funnel,
+            ChallengePurpose::Login,
+            &ChallengeBinding::Login(ctx.hint),
+            &assertion,
+            Instant::now(),
+        );
+        if matches!(checked, Err(AssertionFailure::Rejected)) {
+            auth.record_failure(key, Instant::now(), &shared.capacity.hints_in_flight());
+        }
+        checked
+    };
+    // The verified body is done with; the anonymous body-read slot is released before the
+    // store and session work.
+    drop(assertion);
+    permits.body_read = None;
+    let verified = match checked {
+        Ok(verified) => verified,
+        Err(AssertionFailure::Rejected) => return Some(Response::json(403, "passkey_rejected")),
+        Err(AssertionFailure::Store(err)) => return Some(store_error_response(err)),
+    };
+    if let Err(err) = shared.persist_counter(&verified).await {
+        return Some(store_error_response(err));
+    }
+    let mut token = Zeroizing::new([0u8; SESSION_TOKEN_BYTES]);
+    if (shared.state.random)(token.as_mut_slice()).is_err() {
+        return Some(Response::json(503, "unavailable"));
+    }
+    let created = {
+        let mut auth = shared.auth.lock().await;
+        if let Some(previous) = ctx.session {
+            auth.sessions.remove(&previous);
+        }
+        auth.sessions
+            .create(Instant::now(), *token, verified.credential_hash)
+    };
+    let Ok(issued) = created else {
+        return Some(Response::json(429, "too_many_sessions"));
+    };
+    audit::login_accepted();
+    let mut response = Response::json(200, "logged_in");
+    response
+        .extra_headers
+        .push(("Set-Cookie", set_cookie_header(&issued)));
+    Some(response)
+}
+
+/// `POST /api/unlock` (spec §5.1): CSRF → `allow_unlock` → `rp_id` → body present → host →
+/// lockout → body → assertion (`unlock` purpose, caller class and binding) → counter
+/// persistence → the unchanged unlock flow.
+async fn unlock_route<S: SessionSource>(
+    shared: &Shared<S>,
+    ctx: &RequestContext,
+    stream: &mut UnixStream,
+    permits: &mut ClassPermits,
+) -> Option<Response> {
+    if let Err(err) = check_unlock_csrf(ctx.head(), &ctx.normalized_host) {
+        debug!(%err, "unlock refused");
+        return Some(Response::json(403, "forbidden"));
+    }
+    if !shared.state.config.allow_unlock {
+        debug!("unlock refused: allow_unlock is false");
+        return Some(Response::json(403, "unlock_disabled"));
+    }
+    if shared.state.config.auth.rp_id.is_none() {
+        return Some(Response::json(403, "passkeys_not_configured"));
+    }
+    if !ctx.parsed.has_body() {
+        debug!("unlock refused: no passkey assertion");
+        return Some(Response::json(403, "passkey_required"));
+    }
+    if let Err(response) = rp_host_gate(shared, ctx) {
+        return Some(response);
+    }
+    let key = ctx.unlock_key();
+    if shared.auth.lock().await.locked_out(key, Instant::now()) {
+        return Some(Response::json(429, "rate_limited"));
+    }
+    let body = match read_request_body(stream, ctx).await {
+        BodyOutcome::Body(body) => body,
+        BodyOutcome::Refuse(response, counted) => {
+            if counted {
+                shared.fail(key).await;
+            }
+            return Some(response);
+        }
+        BodyOutcome::Close => return None,
+    };
+    let Ok(assertion) = decode_assertion(&body) else {
+        drop(body);
+        shared.fail(key).await;
+        return Some(Response::json(400, "bad_request"));
+    };
+    drop(body);
+    let Some(rp) = shared.rp.as_ref() else {
+        return Some(Response::json(403, "passkeys_not_configured"));
+    };
+    let checked = {
+        let mut auth = shared.auth.lock().await;
+        let checked = auth.check_assertion(
+            rp,
+            ctx.class,
+            ChallengePurpose::Unlock,
+            &ctx.unlock_binding(),
+            &assertion,
+            Instant::now(),
+        );
+        if matches!(checked, Err(AssertionFailure::Rejected)) {
+            auth.record_failure(key, Instant::now(), &shared.capacity.hints_in_flight());
+        }
+        checked
+    };
+    drop(assertion);
+    let verified = match checked {
+        Ok(verified) => verified,
+        Err(AssertionFailure::Rejected) => {
+            debug!("unlock refused: passkey assertion rejected");
+            return Some(Response::json(403, "passkey_rejected"));
+        }
+        Err(AssertionFailure::Store(err)) => return Some(store_error_response(err)),
+    };
+    if let Err(err) = shared.persist_counter(&verified).await {
+        return Some(store_error_response(err));
+    }
+    permits.body_read = None;
+    Some(unlock_flow(shared).await)
+}
+
+/// The verdict on a typed enrollment code against the code file.
+enum CodeCheck {
+    /// The code matches an unexpired code file with this hash.
+    Valid([u8; 32]),
+    /// No valid code (a counted failure).
+    Rejected,
+}
+
+/// `POST /api/auth/register/options` (tailnet only).
+async fn register_options<S: SessionSource>(
+    shared: &Shared<S>,
+    ctx: &RequestContext,
+    stream: &mut UnixStream,
+) -> Option<Response> {
+    if let Err(response) = auth_route_gate(shared, ctx, ACTION_REGISTER_OPTIONS) {
+        return Some(response);
+    }
+    let key = LimitKey::Tailnet;
+    {
+        let mut auth = shared.auth.lock().await;
+        let now = Instant::now();
+        if auth.locked_out(key, now) || auth.options_exhausted(key, now) {
+            return Some(Response::json(429, "rate_limited"));
+        }
+    }
+    let body = match read_request_body(stream, ctx).await {
+        BodyOutcome::Body(body) => body,
+        BodyOutcome::Refuse(response, counted) => {
+            if counted {
+                shared.fail(key).await;
+            }
+            return Some(response);
+        }
+        BodyOutcome::Close => return None,
+    };
+    let Ok(code) = decode_register_options(&body) else {
+        drop(body);
+        shared.fail(key).await;
+        return Some(Response::json(400, "bad_request"));
+    };
+    drop(body);
+    let code_hash = match shared.check_code(Some(&code)).await {
+        CodeCheck::Valid(hash) => hash,
+        CodeCheck::Rejected => {
+            shared.fail(key).await;
+            return Some(Response::json(403, "enroll_code_rejected"));
+        }
+    };
+    drop(code);
+    let Some(rp) = shared.rp.as_ref() else {
+        return Some(Response::json(403, "passkeys_not_configured"));
+    };
+    let rp_id = rp.rp_id().to_string();
+    let mut auth = shared.auth.lock().await;
+    let (stored_handle, exclude) = match auth.store_snapshot() {
+        Ok(Some(file)) => {
+            if file.passkeys.len() >= MAX_PASSKEYS {
+                return Some(Response::json(409, "passkey_limit"));
+            }
+            let exclude: Vec<String> = file
+                .passkeys
+                .iter()
+                .map(|r| b64url_encode(&r.credential_id))
+                .collect();
+            (Some(file.user_handle), exclude)
+        }
+        Ok(None) => (None, Vec::new()),
+        Err(err) => return Some(store_error_response(err)),
+    };
+    let user_handle = match stored_handle {
+        Some(handle) => handle,
+        None => {
+            let mut fresh = [0u8; USER_HANDLE_BYTES];
+            if (shared.state.random)(&mut fresh).is_err() {
+                return Some(Response::json(503, "unavailable"));
+            }
+            fresh
+        }
+    };
+    let mut challenge = Zeroizing::new([0u8; CHALLENGE_BYTES]);
+    if (shared.state.random)(challenge.as_mut_slice()).is_err() {
+        return Some(Response::json(503, "unavailable"));
+    }
+    let now = Instant::now();
+    if auth
+        .challenges
+        .issue(
+            now,
+            PathClass::Tailnet,
+            ChallengePurpose::Register,
+            ChallengeBinding::EnrollCode(code_hash),
+            Some(PendingRegistration { user_handle }),
+            *challenge,
+        )
+        .is_err()
+    {
+        return Some(Response::json(429, "too_many_challenges"));
+    }
+    auth.record_issuance(key, now, &[]);
+    drop(auth);
+    Some(json_value(
+        200,
+        &serde_json::json!({
+            "challenge": b64url_encode(challenge.as_slice()),
+            "rp_id": rp_id,
+            "timeout_ms": WEBAUTHN_TIMEOUT_MS,
+            "user_id": b64url_encode(&user_handle),
+            "exclude_credentials": exclude,
+        }),
+    ))
+}
+
+/// `POST /api/auth/register/verify` (tailnet only).
+async fn register_verify<S: SessionSource>(
+    shared: &Shared<S>,
+    ctx: &RequestContext,
+    stream: &mut UnixStream,
+) -> Option<Response> {
+    if let Err(response) = auth_route_gate(shared, ctx, ACTION_REGISTER) {
+        return Some(response);
+    }
+    let key = LimitKey::Tailnet;
+    if shared.auth.lock().await.locked_out(key, Instant::now()) {
+        return Some(Response::json(429, "rate_limited"));
+    }
+    let body = match read_request_body(stream, ctx).await {
+        BodyOutcome::Body(body) => body,
+        BodyOutcome::Refuse(response, counted) => {
+            if counted {
+                shared.fail(key).await;
+            }
+            return Some(response);
+        }
+        BodyOutcome::Close => return None,
+    };
+    let Ok(registration) = decode_registration(&body) else {
+        drop(body);
+        shared.fail(key).await;
+        return Some(Response::json(400, "bad_request"));
+    };
+    drop(body);
+    let Some(rp) = shared.rp.as_ref() else {
+        return Some(Response::json(403, "passkeys_not_configured"));
+    };
+    let Ok(client) = parse_client_data(rp, &registration.client_data_json, CeremonyType::Create)
+    else {
+        shared.fail(key).await;
+        return Some(Response::json(403, "passkey_rejected"));
+    };
+    let code_hash = match shared.check_code(None).await {
+        CodeCheck::Valid(hash) => hash,
+        CodeCheck::Rejected => {
+            shared.fail(key).await;
+            return Some(Response::json(403, "enroll_code_rejected"));
+        }
+    };
+    let verified = {
+        let mut auth = shared.auth.lock().await;
+        let taken = auth.challenges.take(
+            Instant::now(),
+            PathClass::Tailnet,
+            ChallengePurpose::Register,
+            &ChallengeBinding::EnrollCode(code_hash),
+            &client.challenge,
+        );
+        let checked = match taken {
+            Ok(Taken::Register(pending)) => {
+                verify_registration(rp, &registration.id, &registration.attestation_object)
+                    .map(|credential| (pending, credential))
+                    .ok()
+            }
+            Ok(Taken::Plain) | Err(_) => None,
+        };
+        if checked.is_none() {
+            auth.record_failure(key, Instant::now(), &[]);
+        }
+        checked
+    };
+    drop(registration);
+    let Some((pending, credential)) = verified else {
+        return Some(Response::json(403, "passkey_rejected"));
+    };
+    let created_unix_s = shared.now_unix_s();
+    let written = shared
+        .store_update(move |current| {
+            let record = PasskeyRecord {
+                credential_id: credential.credential_id,
+                public_key: credential.public_key,
+                sign_count: credential.sign_count,
+                backup_eligible: credential.backup_eligible,
+                backup_state: credential.backup_state,
+                created_unix_s,
+            };
+            let mut file = match current {
+                None => PasskeyFile {
+                    user_handle: pending.user_handle,
+                    passkeys: Vec::new(),
+                },
+                Some(file) => file,
+            };
+            if !bool::from(file.user_handle.ct_eq(&pending.user_handle)) {
+                return Err(StoreError::UserHandleConflict);
+            }
+            if file.passkeys.iter().any(|r| {
+                r.credential_id.len() == record.credential_id.len()
+                    && bool::from(r.credential_id.ct_eq(&record.credential_id))
+            }) {
+                return Err(StoreError::Duplicate);
+            }
+            if file.passkeys.len() >= MAX_PASSKEYS {
+                return Err(StoreError::Full);
+            }
+            file.passkeys.push(record);
+            Ok((file, ()))
+        })
+        .await;
+    match written {
+        Ok(()) => {
+            if let Some(dir) = shared.socket_dir() {
+                remove_code_file(dir);
+            }
+            shared.auth.lock().await.reset_code_attempts();
+            audit::passkey_registered();
+            Some(Response::json(200, "registered"))
+        }
+        Err(StoreError::UserHandleConflict) => Some(Response::json(409, "registration_conflict")),
+        Err(StoreError::Duplicate) => Some(Response::json(409, "already_registered")),
+        Err(StoreError::Full) => Some(Response::json(409, "passkey_limit")),
+        Err(err) => Some(store_error_response(err)),
     }
 }
 
@@ -706,7 +1771,11 @@ async fn send_event<W: AsyncWrite + Unpin>(
 /// hard fallback re-sends the newest unsent reading after one more poll interval plus the
 /// snapshot deadline. The stream ends at EOF on its read half, on a write failure, after
 /// `MAX_SSE_STREAM_MS`, at shutdown, or when the reading counter overflowed.
-async fn serve_stream<S: SessionSource>(mut stream: UnixStream, shared: Arc<Shared<S>>) {
+async fn serve_stream<S: SessionSource>(
+    mut stream: UnixStream,
+    shared: Arc<Shared<S>>,
+    session: Option<[u8; 32]>,
+) {
     let acquired = shared
         .sse_slots
         .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
@@ -762,6 +1831,9 @@ async fn serve_stream<S: SessionSource>(mut stream: UnixStream, shared: Arc<Shar
     let mut last_sent_at = opened_at;
     let mut keepalive_pending = false;
     let mut sink = [0u8; STREAM_SINK_BYTES];
+    // A Funnel stream re-validates its web session (revocation first, `Touch::Keep`) at every
+    // keep-alive tick and ends as soon as the session is gone (spec §5, F-4).
+    let mut session_check_at = deadline(opened_at, keepalive);
 
     loop {
         let keepalive_at = deadline(last_sent_at, keepalive);
@@ -811,6 +1883,15 @@ async fn serve_stream<S: SessionSource>(mut stream: UnixStream, shared: Arc<Shar
                 }
                 last_sent_at = Instant::now();
                 keepalive_pending = false;
+            }
+            () = sleep_until(session_check_at), if session.is_some() => {
+                if let Some(hash) = session.as_ref() {
+                    if !shared.session_still_valid(hash).await {
+                        debug!("stream session ended");
+                        break;
+                    }
+                }
+                session_check_at = deadline(Instant::now(), keepalive);
             }
             () = sleep_until(end_at) => {
                 debug!("stream lifetime reached");

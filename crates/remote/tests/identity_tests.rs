@@ -573,3 +573,281 @@ fn test_rmc_check_host_allowlist_applies_to_the_forwarded_host() {
         "the proto rule holds with an allowlist"
     );
 }
+
+// ---------------------------------------------------------------------------------------
+// Funnel classification and client hint (ADR 2026-10-06 "Tailscale Funnel Access and
+// In-House Passkey Authentication for `soos-remote`", spec §2.1, §2.4, tests 8–10 and 58,
+// matrix RMC26 / RMC37)
+// ---------------------------------------------------------------------------------------
+
+mod funnel_classification {
+    use super::*;
+    use soos_remote::identity::{classify_request, client_hint, Caller, ClientHint, PathClass};
+    use soos_remote::{FORWARDED_FOR_HEADER, FUNNEL_HEADER, FUNNEL_HEADER_VALUE};
+
+    const LOGIN_HEADER: &str = "Tailscale-User-Login";
+    const MARKER: &str = "Tailscale-Funnel-Request";
+
+    fn classify(headers: &[(&str, &[u8])], allow_funnel: bool) -> Result<Caller, AuthError> {
+        classify_request(headers, &allowlist(), allow_funnel)
+    }
+
+    /// Test 8 (RMC26): the six rules of spec §2.1, in order.
+    #[test]
+    fn test_rmc_classify_request_table() {
+        assert_eq!(FUNNEL_HEADER, "tailscale-funnel-request");
+        assert_eq!(FUNNEL_HEADER_VALUE, "?1");
+        let owner: &[u8] = b"owner@example.com";
+        for allow_funnel in [false, true] {
+            // Rule 2: no marker ⇒ the unchanged identity check.
+            assert_eq!(
+                classify(&[(LOGIN_HEADER, owner)], allow_funnel),
+                Ok(Caller::Tailnet(login("owner@example.com")))
+            );
+            assert_eq!(
+                classify(&[("host", b"pc.tail1234.ts.net")], allow_funnel),
+                Err(AuthError::Missing)
+            );
+            assert_eq!(
+                classify(
+                    &[(LOGIN_HEADER, owner), (LOGIN_HEADER, owner)],
+                    allow_funnel
+                ),
+                Err(AuthError::Repeated)
+            );
+            assert_eq!(
+                classify(&[(LOGIN_HEADER, b"evil@example.com")], allow_funnel),
+                Err(AuthError::NotAllowed)
+            );
+            assert_eq!(
+                classify(&[(LOGIN_HEADER, b"a,b")], allow_funnel),
+                Err(AuthError::Malformed)
+            );
+            // Rule 1: both markers ⇒ ambiguous, whatever the values and the setting.
+            for marker in [&b"?1"[..], b"?0", b""] {
+                assert_eq!(
+                    classify(&[(LOGIN_HEADER, owner), (MARKER, marker)], allow_funnel),
+                    Err(AuthError::Ambiguous),
+                    "{marker:?}"
+                );
+                assert_eq!(
+                    classify(
+                        &[(MARKER, marker), (LOGIN_HEADER, b"evil@x.io")],
+                        allow_funnel
+                    ),
+                    Err(AuthError::Ambiguous)
+                );
+            }
+            // Rule 3: a repeated marker, before the value and the setting.
+            assert_eq!(
+                classify(&[(MARKER, b"?1"), (MARKER, b"?1")], allow_funnel),
+                Err(AuthError::Repeated)
+            );
+            // Rule 4: another value, before the setting.
+            for bad in [&b"?0"[..], b"?1?1", b"1", b"", b"?1,?1", b"?T", b"\xff"] {
+                assert_eq!(
+                    classify(&[(MARKER, bad)], allow_funnel),
+                    Err(AuthError::Malformed),
+                    "{bad:?}"
+                );
+            }
+        }
+        // Rules 5 and 6.
+        for value in [&b"?1"[..], b" ?1", b"?1\t", b" \t?1 "] {
+            assert_eq!(
+                classify(&[(MARKER, value)], false),
+                Err(AuthError::FunnelDisabled),
+                "{value:?}"
+            );
+            assert_eq!(classify(&[(MARKER, value)], true), Ok(Caller::Funnel));
+        }
+        assert_eq!(
+            classify(&[("TAILSCALE-FUNNEL-REQUEST", b"?1")], true),
+            Ok(Caller::Funnel),
+            "names are ASCII-case-insensitive"
+        );
+        assert_eq!(Caller::Funnel.class(), PathClass::Funnel);
+        assert_eq!(
+            Caller::Tailnet(login("owner@example.com")).class(),
+            PathClass::Tailnet
+        );
+        assert_eq!(
+            AuthError::Ambiguous.to_string(),
+            "identity and funnel markers both present"
+        );
+        assert_eq!(
+            AuthError::FunnelDisabled.to_string(),
+            "funnel access disabled"
+        );
+    }
+
+    /// Test 9 (RMC26, spec §2.2 item 4): spelling variants pass through `tailscaled` but are
+    /// never matched by the service.
+    #[test]
+    fn test_rmc_classify_request_ignores_spelling_variants() {
+        let owner: &[u8] = b"owner@example.com";
+        for name in [
+            "Tailscale_User_Login",
+            "Tailscale-User-Name",
+            "Tailscale-User-Login-Name",
+            "X-Tailscale-User-Login",
+            "TailscaleUserLogin",
+        ] {
+            for allow_funnel in [false, true] {
+                assert_eq!(
+                    classify(&[(name, owner)], allow_funnel),
+                    Err(AuthError::Missing),
+                    "{name} never authorizes"
+                );
+            }
+        }
+        for name in [
+            "Tailscale_Funnel_Request",
+            "Tailscale-Funnel-Requests",
+            "X-Tailscale-Funnel-Request",
+        ] {
+            assert_eq!(
+                classify(&[(name, b"?1")], true),
+                Err(AuthError::Missing),
+                "{name} never classifies as Funnel"
+            );
+            assert_eq!(
+                classify(&[(LOGIN_HEADER, owner), (name, b"?1")], true),
+                Ok(Caller::Tailnet(login("owner@example.com"))),
+                "{name} is not the marker, so the request is not ambiguous"
+            );
+        }
+        assert_eq!(
+            classify(&[(MARKER, b"?1"), ("Tailscale_User_Login", owner)], true),
+            Ok(Caller::Funnel),
+            "an underscore login next to the marker is an anonymous Funnel caller"
+        );
+    }
+
+    /// Test 10 (RMC26, spec §2.2 item 8): `X-Forwarded-For`, `X-Forwarded-Host` and `Host`
+    /// never change the classification.
+    #[test]
+    fn test_rmc_classify_request_never_reads_forwarding_headers() {
+        let owner: &[u8] = b"owner@example.com";
+        let bases: Vec<Vec<(&str, &[u8])>> = vec![
+            vec![],
+            vec![(LOGIN_HEADER, owner)],
+            vec![(LOGIN_HEADER, b"evil@example.com")],
+            vec![(MARKER, b"?1")],
+            vec![(MARKER, b"?0")],
+            vec![(MARKER, b"?1"), (LOGIN_HEADER, owner)],
+        ];
+        let extras: Vec<Vec<(&str, &[u8])>> = vec![
+            vec![("x-forwarded-for", b"203.0.113.7")],
+            vec![
+                ("x-forwarded-for", b"127.0.0.1"),
+                ("x-forwarded-for", b"::1"),
+            ],
+            vec![("x-forwarded-host", b"pc.tail1234.ts.net")],
+            vec![("x-forwarded-host", b"evil.example.com:8443")],
+            vec![("host", b"localhost")],
+            vec![
+                ("host", b"pc.tail1234.ts.net"),
+                ("x-forwarded-proto", b"http"),
+            ],
+            vec![("forwarded", b"for=203.0.113.7;host=pc.tail1234.ts.net")],
+        ];
+        for base in &bases {
+            for allow_funnel in [false, true] {
+                let expected = classify(base, allow_funnel);
+                for extra in &extras {
+                    let mut headers = base.clone();
+                    headers.extend_from_slice(extra);
+                    assert_eq!(
+                        classify(&headers, allow_funnel),
+                        expected,
+                        "{base:?} + {extra:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    fn hint(value: &[u8]) -> ClientHint {
+        client_hint(&[(FORWARDED_FOR_HEADER, value)])
+    }
+
+    /// Test 58 (RMC37, plan-evaluator G-4): exactly one `X-Forwarded-For` holding one IP
+    /// address; IPv4 and IPv4-mapped IPv6 share a hint, distinct IPv4 addresses never do,
+    /// IPv6 is masked to its /64; anything else is the shared `UNKNOWN` bucket; `Debug` is
+    /// redacted.
+    #[test]
+    fn test_rmc_client_hint_parsing() {
+        assert_eq!(FORWARDED_FOR_HEADER, "x-forwarded-for");
+        let v4 = hint(b"203.0.113.7");
+        assert_ne!(v4, ClientHint::UNKNOWN);
+        assert_eq!(
+            v4,
+            hint(b"::ffff:203.0.113.7"),
+            "IPv4-mapped IPv6 shares the hint"
+        );
+        assert_eq!(v4, hint(b" 203.0.113.7\t"), "OWS trimmed");
+        assert_eq!(
+            v4,
+            client_hint(&[("X-Forwarded-For", b"203.0.113.7")]),
+            "name is ASCII-case-insensitive"
+        );
+        // G-4: IPv4 is never collapsed by the /64 mask.
+        assert_ne!(v4, hint(b"203.0.113.8"));
+        assert_ne!(v4, hint(b"203.0.114.7"));
+        assert_ne!(hint(b"10.0.0.1"), hint(b"10.0.0.2"));
+        assert_ne!(hint(b"198.51.100.1"), hint(b"2001:db8::1"));
+        assert_ne!(hint(b"::ffff:203.0.113.7"), hint(b"::ffff:203.0.113.9"));
+        // IPv6 /64.
+        let a = hint(b"2001:db8:1:2:aaaa::1");
+        assert_ne!(a, ClientHint::UNKNOWN);
+        assert_eq!(a, hint(b"2001:db8:1:2:bbbb::2"));
+        assert_eq!(a, hint(b"2001:DB8:1:2:ffff:ffff:ffff:ffff"));
+        assert_ne!(a, hint(b"2001:db8:1:3::1"));
+        assert_ne!(a, hint(b"2001:db9:1:2::1"));
+        // UNKNOWN.
+        assert_eq!(client_hint(&[]), ClientHint::UNKNOWN);
+        assert_eq!(
+            client_hint(&[("host", b"pc.tail1234.ts.net")]),
+            ClientHint::UNKNOWN
+        );
+        assert_eq!(
+            client_hint(&[
+                (FORWARDED_FOR_HEADER, b"203.0.113.7"),
+                (FORWARDED_FOR_HEADER, b"203.0.113.7"),
+            ]),
+            ClientHint::UNKNOWN,
+            "a repeated header"
+        );
+        let forty_six = "1".repeat(46);
+        for bad in [
+            &b"203.0.113.7, 198.51.100.1"[..],
+            b"203.0.113.7,",
+            b"203.0.113.7:443",
+            b"[2001:db8::1]",
+            b"[2001:db8::1]:443",
+            b"fe80::1%eth0",
+            forty_six.as_bytes(),
+            b"\xff\xfe",
+            b"",
+            b" ",
+            b"unknown",
+            b"203.0.113",
+            b"203.0.113.256",
+            b"0x7f.0.0.1",
+        ] {
+            assert_eq!(
+                hint(bad),
+                ClientHint::UNKNOWN,
+                "{:?}",
+                String::from_utf8_lossy(bad)
+            );
+        }
+        // Debug never shows the address.
+        for h in [v4, a, ClientHint::UNKNOWN] {
+            let shown = format!("{h:?}");
+            assert!(shown.contains("<redacted>"), "{shown}");
+            assert!(!shown.bytes().any(|b| b.is_ascii_digit()), "{shown}");
+        }
+    }
+}

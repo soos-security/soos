@@ -280,6 +280,12 @@ mod gdm_hardening_flaky_tests_contract;
 #[cfg(all(test, unix))]
 mod remote_companion_contract;
 
+/// Tailscale Funnel access and in-house passkey authentication of `soos-remote` (ADR
+/// 2026-10-06; spec AI/architect_spec_remote_passkey_funnel.md §10.8 RMC-S13–RMC-S21;
+/// row RMC39).
+#[cfg(all(test, unix))]
+mod remote_passkey_contract;
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,

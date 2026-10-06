@@ -31,7 +31,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-fn workspace_root() -> PathBuf {
+pub(crate) fn workspace_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(Path::parent)
@@ -39,7 +39,7 @@ fn workspace_root() -> PathBuf {
         .to_path_buf()
 }
 
-fn read(rel: &str) -> String {
+pub(crate) fn read(rel: &str) -> String {
     let path = workspace_root().join(rel);
     fs::read_to_string(&path).unwrap_or_else(|e| panic!("Cannot read {}: {e}", path.display()))
 }
@@ -49,12 +49,12 @@ fn read_bytes(rel: &str) -> Vec<u8> {
     fs::read(&path).unwrap_or_else(|e| panic!("Cannot read {}: {e}", path.display()))
 }
 
-fn exists(rel: &str) -> bool {
+pub(crate) fn exists(rel: &str) -> bool {
     workspace_root().join(rel).is_file()
 }
 
 /// Every `.rs` file under `rel` (recursive), as `(repo-relative path, content)`.
-fn rust_files(rel: &str) -> Vec<(String, String)> {
+pub(crate) fn rust_files(rel: &str) -> Vec<(String, String)> {
     let root = workspace_root();
     let mut out = Vec::new();
     let mut stack = vec![root.join(rel)];
@@ -110,7 +110,7 @@ fn remote_sources() -> Vec<(String, String)> {
 
 /// `src` with `//` line comments and (nested) `/* */` block comments removed; string and
 /// char literals are preserved verbatim.
-fn strip_comments(src: &str) -> String {
+pub(crate) fn strip_comments(src: &str) -> String {
     let bytes = src.as_bytes();
     let mut out = String::with_capacity(src.len());
     let mut i = 0;
@@ -185,7 +185,7 @@ fn strip_comments(src: &str) -> String {
 
 /// Production part of a source file: everything before a trailing `#[cfg(test)] mod … { … }`
 /// block (any other `#[cfg(test)]` hides nothing).
-fn production_part(content: &str) -> &str {
+pub(crate) fn production_part(content: &str) -> &str {
     let mut search = 0;
     while let Some(pos) = content[search..].find("#[cfg(test)]") {
         let idx = search + pos;
@@ -224,7 +224,7 @@ fn production_part(content: &str) -> &str {
 }
 
 /// Body of the TOML table `[name]` (until the next table header).
-fn toml_table<'a>(manifest: &'a str, name: &str) -> Vec<&'a str> {
+pub(crate) fn toml_table<'a>(manifest: &'a str, name: &str) -> Vec<&'a str> {
     let header = format!("[{name}]");
     let mut out = Vec::new();
     let mut inside = false;
@@ -251,7 +251,7 @@ fn first_code_line(content: &str) -> &str {
 
 /// Arguments of every `macro!(...)` invocation in `code` (balanced parentheses, strings
 /// skipped), for the given macro names.
-fn macro_invocations(code: &str, macros: &[&str]) -> Vec<String> {
+pub(crate) fn macro_invocations(code: &str, macros: &[&str]) -> Vec<String> {
     let mut out = Vec::new();
     for name in macros {
         let needle = format!("{name}!(");
@@ -301,7 +301,7 @@ fn macro_invocations(code: &str, macros: &[&str]) -> Vec<String> {
 }
 
 /// Field keys of a tracing macro argument list (`key = value`, `%key`, `?key`, `key`).
-fn field_keys(args: &str) -> Vec<String> {
+pub(crate) fn field_keys(args: &str) -> Vec<String> {
     let mut keys = Vec::new();
     let mut depth = 0i32;
     let mut in_string = false;
@@ -346,7 +346,7 @@ fn field_keys(args: &str) -> Vec<String> {
     keys
 }
 
-const TRACING_MACROS: [&str; 10] = [
+pub(crate) const TRACING_MACROS: [&str; 10] = [
     "trace",
     "debug",
     "info",

@@ -27,6 +27,14 @@ toml = { workspace = true }
 clap = { workspace = true }
 httparse = { workspace = true }
 zbus = { workspace = true }
+zeroize = { workspace = true }
+# In-house WebAuthn passkeys (ADR 2026-10-06, spec §3.4): pure-Rust RustCrypto only.
+p256 = { workspace = true }
+sha2 = { workspace = true }
+ciborium = { workspace = true }
+getrandom = { workspace = true }
+base64ct = { workspace = true }
+subtle = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

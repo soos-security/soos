@@ -32,6 +32,10 @@
   box-sizing: border-box;
 }
 
+[hidden] {
+  display: none !important;
+}
+
 html,
 body {
   margin: 0;
@@ -134,4 +138,34 @@ footer {
 
 footer a {
   color: var(--muted);
+}
+
+.enroll {
+  margin-top: 28px;
+  padding-top: 20px;
+  border-top: 1px solid var(--muted);
+}
+
+h2 {
+  font-size: 1rem;
+  font-weight: 600;
+  margin: 0 0 8px;
+}
+
+input {
+  margin-top: 12px;
+  width: 100%;
+  padding: 14px;
+  border: 2px solid var(--muted);
+  border-radius: 12px;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 1.2rem;
+  letter-spacing: 0.12em;
+  text-align: center;
+  text-transform: uppercase;
+}
+
+code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
 }

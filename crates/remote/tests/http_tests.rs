@@ -446,3 +446,400 @@ proptest! {
         prop_assert_eq!(got, body);
     }
 }
+
+// ---------------------------------------------------------------------------------------
+// Body framing on the four body routes (ADR 2026-10-06 "Tailscale Funnel Access and
+// In-House Passkey Authentication for `soos-remote`", spec §4.8, tests 11–13, matrix RMC29)
+// ---------------------------------------------------------------------------------------
+
+mod body_framing {
+    use super::*;
+    use soos_remote::http::{parse_request, read_body, BodyError, BodyFraming, ParsedRequest};
+    use soos_remote::{BODY_READ_TIMEOUT_MS, MAX_AUTH_BODY_BYTES, MAX_BODY_CHUNKS};
+    use std::time::Duration;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::UnixStream;
+
+    fn never(_: Method, _: &str) -> bool {
+        false
+    }
+
+    /// Local stand-in for `routes::accepts_body` so the framing contract is tested alone.
+    fn unlock_only(method: Method, path: &str) -> bool {
+        method == Method::Post && path == "/api/unlock"
+    }
+
+    fn post_unlock(headers: &[(&str, &str)]) -> Vec<u8> {
+        head("POST", "/api/unlock", headers)
+    }
+
+    fn framing(headers: &[(&str, &str)]) -> Result<BodyFraming, HttpError> {
+        parse_request(&post_unlock(headers), unlock_only).map(|p| p.framing)
+    }
+
+    fn same_as_head_parser(buf: &[u8]) -> Result<(), String> {
+        let expected = parse_request_head(buf);
+        let got = parse_request(buf, never);
+        match (expected, got) {
+            (Ok(head), Ok(parsed)) => {
+                let end = buf
+                    .windows(4)
+                    .position(|w| w == b"\r\n\r\n")
+                    .ok_or("no terminator")?
+                    + 4;
+                if parsed.head != head {
+                    return Err("head differs".into());
+                }
+                if parsed.framing != BodyFraming::None || parsed.has_body() {
+                    return Err("non-body route got a body framing".into());
+                }
+                if parsed.head_len != end {
+                    return Err(format!("head_len {} != {end}", parsed.head_len));
+                }
+                Ok(())
+            }
+            (Err(a), Err(b)) if a == b => {
+                if a.status(buf) == b.status(buf) {
+                    Ok(())
+                } else {
+                    Err("status differs".into())
+                }
+            }
+            (a, b) => Err(format!("{a:?} vs {b:?}")),
+        }
+    }
+
+    proptest! {
+        /// Test 11 (RMC29): when `accepts_body` is false, `parse_request` is exactly
+        /// `parse_request_head` (same head, same error, same status), framing `None`.
+        #[test]
+        fn test_rmc_parse_request_matches_parse_request_head_for_non_body_routes(
+            method in prop::sample::select(vec!["GET", "HEAD", "POST", "PUT", "OPTIONS"]),
+            path in prop::sample::select(vec![
+                "/", "/api/status", "/api/lock", "/api/unlock", "/api/auth/login/verify",
+                "/api/auth/register/verify", "/api/auth/state?x=1",
+            ]),
+            extra in proptest::collection::vec(prop::sample::select(vec![
+                ("Content-Length", "0"), ("Content-Length", "5"), ("Content-Length", "abc"),
+                ("Content-Length", "8193"), ("Transfer-Encoding", "chunked"),
+                ("Transfer-Encoding", "gzip"), ("Host", "pc.tail1234.ts.net"),
+                ("Tailscale-Funnel-Request", "?1"), ("X-Soos-Action", "unlock"),
+            ]), 0..4),
+            trailing in proptest::collection::vec(any::<u8>(), 0..16),
+        ) {
+            let mut buf = head(method, path, &extra);
+            buf.extend_from_slice(&trailing);
+            prop_assert_eq!(same_as_head_parser(&buf), Ok(()));
+        }
+
+        /// Test 11 (RMC29, RC-4): on arbitrary bytes `parse_request` never panics and, for a
+        /// non-body route, never differs from `parse_request_head`.
+        #[test]
+        fn prop_rmc_parse_request_never_panics(bytes in proptest::collection::vec(any::<u8>(), 0..9000)) {
+            prop_assert_eq!(same_as_head_parser(&bytes), Ok(()));
+            let _ = parse_request(&bytes, |_, _| true);
+        }
+    }
+
+    /// Test 12 (RMC29, S-13): framing of a body route; every refusal and its status; the
+    /// non-body routes keep their existing refusals.
+    #[test]
+    fn test_rmc_parse_request_body_framing() {
+        assert_eq!(framing(&[]), Ok(BodyFraming::None));
+        assert_eq!(framing(&[("Content-Length", "0")]), Ok(BodyFraming::None));
+        assert_eq!(
+            framing(&[("Content-Length", "1")]),
+            Ok(BodyFraming::Length(1))
+        );
+        assert_eq!(
+            framing(&[("Content-Length", "8192")]),
+            Ok(BodyFraming::Length(MAX_AUTH_BODY_BYTES))
+        );
+        assert_eq!(
+            framing(&[("Content-Length", "8192"), ("Content-Length", "8192")]),
+            Ok(BodyFraming::Length(8192)),
+            "equal repeated lengths"
+        );
+        let over = post_unlock(&[("Content-Length", "8193")]);
+        assert_eq!(
+            parse_request(&over, unlock_only).map(|p| p.framing),
+            Err(HttpError::BodyTooLarge)
+        );
+        assert_eq!(HttpError::BodyTooLarge.status(&over), Some(413));
+        assert_eq!(
+            framing(&[("Content-Length", "18446744073709551615")]),
+            Err(HttpError::BodyTooLarge)
+        );
+        for value in ["chunked", "Chunked", "CHUNKED", " chunked ", "chunked\t"] {
+            assert_eq!(
+                framing(&[("Transfer-Encoding", value)]),
+                Ok(BodyFraming::Chunked),
+                "{value:?}"
+            );
+        }
+        for bad in [
+            vec![("Transfer-Encoding", "gzip")],
+            vec![("Transfer-Encoding", "gzip, chunked")],
+            vec![("Transfer-Encoding", "chunked, chunked")],
+            vec![("Transfer-Encoding", "")],
+            vec![
+                ("Transfer-Encoding", "chunked"),
+                ("Transfer-Encoding", "chunked"),
+            ],
+            vec![("Transfer-Encoding", "chunked"), ("Content-Length", "5")],
+            vec![("Content-Length", "5"), ("Transfer-Encoding", "chunked")],
+            vec![("Transfer-Encoding", "chunked"), ("Content-Length", "0")],
+            vec![("Content-Length", "5"), ("Content-Length", "6")],
+            vec![("Content-Length", "0"), ("Content-Length", "5")],
+            vec![("Content-Length", "abc")],
+            vec![("Content-Length", "-1")],
+            vec![("Content-Length", "+5")],
+        ] {
+            let buf = post_unlock(&bad);
+            let err = parse_request(&buf, unlock_only).map(|p| p.framing);
+            assert_eq!(err, Err(HttpError::Malformed), "{bad:?}");
+            assert_eq!(HttpError::Malformed.status(&buf), Some(400));
+        }
+        // head_len points at the first body byte, even with the body already buffered.
+        let mut buf = post_unlock(&[("Content-Length", "4")]);
+        let head_len = buf.len();
+        buf.extend_from_slice(b"{}{}");
+        let parsed: ParsedRequest = parse_request(&buf, unlock_only).unwrap();
+        assert_eq!(parsed.head_len, head_len);
+        assert_eq!(parsed.framing, BodyFraming::Length(4));
+        assert!(parsed.has_body());
+        assert_eq!(parsed.head.path, "/api/unlock");
+        let chunked = parse_request(
+            &post_unlock(&[("Transfer-Encoding", "chunked")]),
+            unlock_only,
+        )
+        .unwrap();
+        assert!(chunked.has_body());
+        let none = parse_request(&post_unlock(&[]), unlock_only).unwrap();
+        assert!(!none.has_body());
+
+        // A non-body route keeps the existing refusals and statuses.
+        let lock = head("POST", "/api/lock", &[("Content-Length", "5")]);
+        assert_eq!(
+            parse_request(&lock, unlock_only).map(|p| p.framing),
+            Err(HttpError::BodyNotAllowed)
+        );
+        assert_eq!(HttpError::BodyNotAllowed.status(&lock), Some(413));
+        let lock_te = head("POST", "/api/lock", &[("Transfer-Encoding", "chunked")]);
+        assert_eq!(
+            parse_request(&lock_te, unlock_only).map(|p| p.framing),
+            Err(HttpError::BodyNotAllowed)
+        );
+        assert_eq!(HttpError::BodyNotAllowed.status(&lock_te), Some(400));
+        let get_unlock = head("GET", "/api/unlock", &[("Content-Length", "5")]);
+        assert_eq!(
+            parse_request(&get_unlock, unlock_only).map(|p| p.framing),
+            Err(HttpError::BodyNotAllowed),
+            "the method is part of the body-route decision"
+        );
+        assert_eq!(
+            HttpError::BodyTooLarge.to_string(),
+            "request body too large"
+        );
+    }
+
+    async fn pair_with(sent: &[u8]) -> (UnixStream, UnixStream) {
+        let (server, mut client) = UnixStream::pair().unwrap();
+        client.write_all(sent).await.unwrap();
+        (server, client)
+    }
+
+    async fn body(prefix: &[u8], sent: &[u8], framing: BodyFraming) -> Result<Vec<u8>, BodyError> {
+        let (mut server, _client) = pair_with(sent).await;
+        read_body(&mut server, prefix, framing)
+            .await
+            .map(|b| b.to_vec())
+    }
+
+    async fn chunked(prefix: &[u8], sent: &[u8]) -> Result<Vec<u8>, BodyError> {
+        body(prefix, sent, BodyFraming::Chunked).await
+    }
+
+    /// The bytes still unread on `server` (the client is closed first).
+    async fn rest(server: &mut UnixStream, client: UnixStream) -> Vec<u8> {
+        drop(client);
+        let mut out = Vec::new();
+        tokio::time::timeout(Duration::from_secs(1), server.read_to_end(&mut out))
+            .await
+            .unwrap()
+            .unwrap();
+        out
+    }
+
+    /// Test 13 (RMC29, S-13): `Length` reads exactly the body (prefix first, pipelined bytes
+    /// ignored, never past the end), times out at exactly `BODY_READ_TIMEOUT_MS`, EOF is
+    /// `Closed`; the strict bounded chunked decoder accepts what Go's reverse proxy writes and
+    /// nothing looser.
+    #[tokio::test(start_paused = true)]
+    async fn test_rmc_read_body_is_bounded() {
+        // Length.
+        assert_eq!(
+            body(b"hello", b"", BodyFraming::Length(5)).await,
+            Ok(b"hello".to_vec())
+        );
+        assert_eq!(
+            body(b"hel", b"lo", BodyFraming::Length(5)).await,
+            Ok(b"hello".to_vec())
+        );
+        assert_eq!(
+            body(b"hello world", b"", BodyFraming::Length(5)).await,
+            Ok(b"hello".to_vec()),
+            "pipelined bytes in the prefix are ignored"
+        );
+        let (mut server, client) = pair_with(b"llo EXTRA").await;
+        assert_eq!(
+            read_body(&mut server, b"he", BodyFraming::Length(5))
+                .await
+                .map(|b| b.to_vec()),
+            Ok(b"hello".to_vec())
+        );
+        assert_eq!(
+            rest(&mut server, client).await,
+            b" EXTRA".to_vec(),
+            "never reads past the body"
+        );
+        assert_eq!(body(b"", b"", BodyFraming::None).await, Ok(Vec::new()));
+        // EOF before the end.
+        let (mut server, client) = pair_with(b"l").await;
+        drop(client);
+        assert_eq!(
+            read_body(&mut server, b"he", BodyFraming::Length(5))
+                .await
+                .map(|b| b.to_vec()),
+            Err(BodyError::Closed)
+        );
+        // Deadline: exactly BODY_READ_TIMEOUT_MS, the peer staying open and silent.
+        let (mut server, _client) = pair_with(b"").await;
+        let start = tokio::time::Instant::now();
+        let result = read_body(&mut server, b"he", BodyFraming::Length(5))
+            .await
+            .map(|b| b.to_vec());
+        assert_eq!(result, Err(BodyError::Timeout));
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed >= Duration::from_millis(BODY_READ_TIMEOUT_MS)
+                && elapsed <= Duration::from_millis(BODY_READ_TIMEOUT_MS + 1),
+            "{elapsed:?}"
+        );
+
+        // Chunked: Go-style body split across the prefix and the stream.
+        let data = b"abcdefghijklmnopqrstuvwxyz";
+        let mut go = b"1a\r\n".to_vec();
+        go.extend_from_slice(data);
+        go.extend_from_slice(b"\r\n0\r\n\r\n");
+        for split in [0, 1, 4, 10, go.len() - 3, go.len()] {
+            assert_eq!(
+                chunked(&go[..split], &go[split..]).await,
+                Ok(data.to_vec()),
+                "split at {split}"
+            );
+        }
+        assert_eq!(
+            chunked(b"5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n", b"").await,
+            Ok(b"hello world".to_vec())
+        );
+        assert_eq!(
+            chunked(b"A\r\n0123456789\r\n0\r\n\r\n", b"").await,
+            Ok(b"0123456789".to_vec()),
+            "uppercase hex"
+        );
+        assert_eq!(
+            chunked(b"00000005\r\nhello\r\n0\r\n\r\n", b"").await,
+            Ok(b"hello".to_vec()),
+            "8 hex digits"
+        );
+        assert_eq!(chunked(b"0\r\n\r\n", b"").await, Ok(Vec::new()), "empty");
+        let mut sixty_four = b"1\r\na\r\n".repeat(MAX_BODY_CHUNKS);
+        sixty_four.extend_from_slice(b"0\r\n\r\n");
+        assert_eq!(
+            chunked(b"", &sixty_four).await,
+            Ok(vec![b'a'; MAX_BODY_CHUNKS])
+        );
+        // Bytes after the last CRLF are never read.
+        let (mut server, mut client) = pair_with(b"").await;
+        client.write_all(b"\r\nNEXT").await.unwrap();
+        assert_eq!(
+            read_body(&mut server, b"5\r\nhello\r\n0\r\n", BodyFraming::Chunked)
+                .await
+                .map(|b| b.to_vec()),
+            Ok(b"hello".to_vec())
+        );
+        assert_eq!(rest(&mut server, client).await, b"NEXT".to_vec());
+
+        // Chunked refusals.
+        let mut sixty_five = b"1\r\na\r\n".repeat(MAX_BODY_CHUNKS + 1);
+        sixty_five.extend_from_slice(b"0\r\n\r\n");
+        for bad in [
+            b"5;x=1\r\nhello\r\n0\r\n\r\n".to_vec(),
+            b"5 \r\nhello\r\n0\r\n\r\n".to_vec(),
+            b" 5\r\nhello\r\n0\r\n\r\n".to_vec(),
+            b"5\nhello\r\n0\r\n\r\n".to_vec(),
+            b"5\r\nhello\n0\r\n\r\n".to_vec(),
+            b"5\r\nhelloXY0\r\n\r\n".to_vec(),
+            b"5\r\nhello\r\n0\r\nX-Trailer: a\r\n\r\n".to_vec(),
+            b"5\r\nhello\r\n0\r\n\n".to_vec(),
+            b"000000005\r\nhello\r\n0\r\n\r\n".to_vec(),
+            b"\r\nhello\r\n0\r\n\r\n".to_vec(),
+            b"g\r\nhello\r\n0\r\n\r\n".to_vec(),
+            b"-5\r\nhello\r\n0\r\n\r\n".to_vec(),
+            b"0x5\r\nhello\r\n0\r\n\r\n".to_vec(),
+            sixty_five,
+        ] {
+            assert_eq!(
+                chunked(b"", &bad).await,
+                Err(BodyError::Malformed),
+                "{:?}",
+                String::from_utf8_lossy(&bad[..bad.len().min(40)])
+            );
+        }
+
+        // Decoded size bound, checked before a chunk's data is read.
+        let mut full = b"2000\r\n".to_vec();
+        full.extend(vec![b'a'; MAX_AUTH_BODY_BYTES]);
+        full.extend_from_slice(b"\r\n0\r\n\r\n");
+        assert_eq!(
+            chunked(b"", &full).await.map(|b| b.len()),
+            Ok(MAX_AUTH_BODY_BYTES)
+        );
+        assert_eq!(
+            chunked(b"2001\r\n", b"").await,
+            Err(BodyError::TooLarge),
+            "refused at the size line, without waiting for the data"
+        );
+        let mut split = b"1000\r\n".to_vec();
+        split.extend(vec![b'a'; 4096]);
+        split.extend_from_slice(b"\r\n1001\r\n");
+        assert_eq!(chunked(b"", &split).await, Err(BodyError::TooLarge));
+        assert_eq!(
+            chunked(b"ffffffff\r\n", b"").await,
+            Err(BodyError::TooLarge)
+        );
+        // EOF inside a chunked body.
+        let (mut server, client) = pair_with(b"5\r\nhel").await;
+        drop(client);
+        assert_eq!(
+            read_body(&mut server, b"", BodyFraming::Chunked)
+                .await
+                .map(|b| b.to_vec()),
+            Err(BodyError::Closed)
+        );
+        // A chunked body that never ends times out.
+        let (mut server, _client) = pair_with(b"5\r\nhello\r\n").await;
+        assert_eq!(
+            read_body(&mut server, b"", BodyFraming::Chunked)
+                .await
+                .map(|b| b.to_vec()),
+            Err(BodyError::Timeout)
+        );
+
+        assert_eq!(BodyError::Timeout.to_string(), "body read deadline");
+        assert_eq!(BodyError::Closed.to_string(), "peer closed");
+        assert_eq!(BodyError::Malformed.to_string(), "body framing invalid");
+        assert_eq!(BodyError::TooLarge.to_string(), "body too large");
+    }
+}
