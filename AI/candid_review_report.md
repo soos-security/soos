@@ -1,87 +1,118 @@
 # Candid Review Report
 
 - **Date**: 2026-10-06
-- **Target Branch**: `feat/remote-funnel-passkey`
+- **Target Branch**: `feat/remote-companion`
 - **Base (merge-base)**: `222665f`
-- **Reviewed-Diff-Fingerprint**: `9d326db3dfd5b8ac78ec6971015b546f25cfda8465007d33150df922c0cec29e`
-- **Audited Files**: full branch patch (`target/candid_diff.patch`, 72 files); everything up to HEAD
-  `7ba324a` plus the uncommitted `AI/MOCK_STRATEGY.md`, `AI/VERIFICATION_MATRIX.md` and walkthrough
-  185 §9 changes was approved under the previous fingerprint `e5682f8c…`. The only delta since then
-  is the closing paragraph of `AI/ARCHITECTURE.md` §13 (lines 389-393), rewritten and rewrapped.
+- **Reviewed-Diff-Fingerprint**: `723a0c0cce5cce5068305797b2973959c187a18f579d0e062afd00fa958f90c6`
+- **Audited Files**: full branch patch (`target/candid_diff.patch`, 74 files, 30274 lines). Everything
+  up to HEAD `a2ab864` was approved under fingerprint `9d326db3…`, and the candid fingerprint fix
+  (`scripts/candid_subagent.sh` drops `--binary`; new test
+  `test_candid_fingerprint_is_portable_for_binary_files`) was approved under `4a670e7a…`; both are
+  unchanged and their audit is kept below (section "Prior delta"). The new delta is
+  `crates/remote/src/audit.rs` (new `unlock_requested()` audit event) and
+  `crates/remote/src/server.rs` (`unlock_flow` calls it instead of `info!`; `info` import dropped).
 
 ## 1. Executive Summary
 
-The previous review raised one MINOR: `AI/ARCHITECTURE.md` still said the remote unlock on the
-phone was pending (RMC25), contradicting the matrix, plus a line-wrap suggestion. The rewritten
-paragraph now reads "Verified by the owner on 2026-10-06:" followed by RMC20 (Serve forwarding:
-`Host: localhost`, original name in `X-Forwarded-Host`, `X-Forwarded-Proto: https`), RMC21 (web app
-and *Lock now*, Shortcuts steps still pending) and RMC25, RMC40, RMC42–RMC44 (Funnel reachability,
-registration, Face ID login and unlock). Every statement was checked against the current matrix
-rows; all match. The paragraph is rewrapped to 92–96 columns, consistent with the surrounding text.
-Both earlier items are resolved. No production code, test, script or dependency changed.
+`soos-remote::server_tests::test_rmc_unlock_is_audited_without_identity` was intermittent: the
+`info!("remote unlock requested")` macro callsite caches its interest process-wide, so when a
+parallel test thread with no subscriber registered the callsite first, the event stayed disabled
+for this test's thread-scoped subscriber. The fix routes the line through the same hand-built
+callsite path that `audit.rs` already uses for `remote login accepted` and `passkey registered`
+(`get_default` + per-dispatch `enabled` check, no cached interest). Message text, level (INFO),
+position (after the gate update, right before `unlock_session`) and the absence of any field are
+unchanged; only the event target changes from `soos_remote::server` to `soos_remote::audit`, which
+no document or test names. The test is untouched. No CRITICAL or MAJOR findings.
 
 ## 2. Test Changes
 
-Delta: one Markdown paragraph; no test file, assertion, `#[ignore]`, `should_panic`, tolerance or
-inline test module is touched. Step-3 greps over the full branch patch return the same hits as the
-previously approved review: 20 test files touched (new `crates/remote/tests/*`, invariant
-contracts), one removed assertion line (already justified in the earlier approved reviews), one
-escape-hatch hit (report prose only). Nothing new.
+Mechanical step-3 listing over the full patch:
+- Removed/changed assertion lines: one hit (`presence_unlock_contract.rs`, patch line 28227), the
+  zbus "daemon-only" contract migration already justified in the earlier approved reviews (ADR
+  2026-10-05 item (7), PAU17). Unchanged.
+- New escape hatches: one hit at patch line 4800, report/walkthrough prose only.
+- New delta: no test file touched. `crates/remote/tests/server_tests.rs`
+  (`test_rmc_unlock_is_audited_without_identity`) is byte-identical to HEAD.
+- Prior delta (approved under `4a670e7a…`), unchanged:
+  - `artifact_freshness_contract.rs` adds one test and one module doc bullet,
+  and moves the body of `ScratchRepo::fingerprint()` into
+  `fingerprint_with_compression(Option<&str>)`; `fingerprint()` calls it with `None`. No assertion
+  removed or weakened. The old body called `candid(&["--fingerprint"])`; the new body builds the same
+  command through the same isolated `self.command("bash")` (all `GIT_*` and `CANDID_BASE_REF`
+  removed, `GIT_CONFIG_NOSYSTEM=1`, `GIT_CONFIG_GLOBAL=/dev/null`, `HOME` in the scratch dir), merges
+  stdout and stderr the same way, asserts success with the same message, and parses the last
+  64-hex line. With `None` no extra env var is set, so behavior is identical. → PASS.
 
 ## 3. Deep Reasoning Audit
 
 ### Logic & Architecture
-Each claim of the new paragraph against `AI/VERIFICATION_MATRIX.md`:
-- **RMC20** — matrix: ✅ Verified (owner, 2026-10-06); evidence lists `Host: localhost`,
-  `X-Forwarded-Host: arch.<tailnet>.ts.net`, `X-Forwarded-Proto: https`. The paragraph's
-  parenthetical matches exactly. → PASS.
-- **RMC21** — matrix: ⬜ Pending; owner report 2026-10-06 covers the home-screen web app and
-  *Lock now*, Shortcuts steps not reported. The paragraph credits only those two items and states
-  "Shortcuts steps still pending". It does not imply RMC21 is Verified. → PASS.
-- **RMC25** — matrix: ✅ Verified (automated; hardware owner report 2026-10-06, Face ID unlock over
-  Funnel, page showed `Unlocked`). Listed among the verified rows under "Face ID unlock". → PASS;
-  the previous MINOR is resolved.
-- **RMC40, RMC42, RMC43, RMC44** — matrix: all ✅ Verified 2026-10-06 (RMC40 now includes the Safari
-  tab; RMC43 Safari tab, live events, *Sign out*; RMC44 both tailnet and Funnel paths). The paragraph's
-  "Funnel reachability, passkey registration, Face ID login and Face ID unlock" maps one-to-one. → PASS.
-- RMC41 is not mentioned, correctly: it is automated, not an owner check.
-- Attempted break: does the paragraph credit anything still open? The only open owner item across
-  these rows is the RMC21 Shortcuts step, and it is explicitly called pending. No overclaim.
-- Stale-claim sweep (`pending|not reported|partly verified` across `AI/ARCHITECTURE.md`,
-  `AI/MOCK_STRATEGY.md`, `AI/DECISIONS.md`, `Docs/REMOTE_COMPANION.md`, `Docs/README.md`, the
-  specs, research notes and walkthroughs 183–185): no remaining pending claim for RMC20, RMC25,
-  RMC40 or RMC42–RMC44 in a living document. Remaining hits are correct or historical:
-  `AI/DECISIONS.md:121` "RMC21 pending owner check on the phone" (still true, Shortcuts);
-  walkthrough 185 §9 "Shortcuts steps of RMC21 are still pending" (true) and the spec-fold item
-  (unrelated); walkthroughs 183 line 9/315 and 184 line 9 are dated point-in-time records of their
-  own phases, not status sources (see SUGGESTION). → PASS.
+- **Same event semantics?** `UNLOCK_META` is a copy of the two existing audit metadata entries with
+  name `remote unlock requested`, target `soos_remote::audit`, `Level::INFO`, `Kind::EVENT`, a
+  single `message` field whose value is the constant name. `emit` checks
+  `dispatch.enabled(meta)` on every call, so a subscriber filtering `INFO` still sees it and one
+  filtering it out still drops it. With the fmt subscriber the output line is
+  `INFO soos_remote::audit: remote unlock requested`. → PASS.
+- **Placement unchanged?** `server.rs:1737-1739`: gate set, `audit::unlock_requested()`, then
+  `unlock_session`. Refusal paths (403 disabled/CSRF/passkey, 429, 503 snapshot, 409 no_session,
+  409 already_unlocked) all return before the call. A logind failure or the
+  `UNLOCK_FLOW_DEADLINE_MS` timeout after the call still leaves exactly one line, as before (the
+  line marks a request, not a success). → PASS.
+- **Cached-interest diagnosis.** `AuditCallsite::set_interest` is a no-op and the callsite is never
+  registered with the callsite registry, so there is no global interest cache to poison; this is the
+  documented pattern of the module and works the same for the third line. Attempted: a thread with
+  no subscriber calling `unlock_requested()` first → `get_default` yields the no-op dispatcher,
+  `enabled` false, nothing cached; a later call under a scoped subscriber is evaluated afresh.
+  → PASS.
+- **Remaining macros.** `server.rs` still uses `debug!` for refusals; those are not asserted by any
+  test as "present", only as absent/clean, so the same caching effect cannot cause a false failure.
+  → PASS.
+- **Docs.** `Docs/REMOTE_COMPANION.md:85`, `AI/DECISIONS.md:122`, `AI/VERIFICATION_MATRIX.md`
+  RMC25 and `AI/walkthroughs/184_remote_unlock.md:44` describe an `info` line
+  `remote unlock requested` without naming a target; all remain accurate. Planning artifacts
+  (`AI/auditor_constraints_remote_passkey_funnel.md` C15, architect spec) describe the line in
+  `info!(...)` macro form, the same historical wording already accepted for the two other audit
+  lines. → PASS.
+- **Prior delta (candid fingerprint portability)**, unchanged since the `4a670e7a…` review:
+  `review_diff` without `--binary` still binds every binary change kind through the
+  `--full-index` blob ids; `--rev`, the working-tree gate and `--prepare` share one code path; the
+  repository has no `.gitattributes` or submodules. → PASS.
 
 ### PAM Concurrency & Deadlines
-No code change in the delta. → PASS (not applicable).
+No PAM code in the delta. The unlock flow is still under `timeout(UNLOCK_FLOW_DEADLINE_MS)`; the
+audit call is synchronous and non-blocking (a subscriber write). → PASS (n/a).
 
 ### Panic Safety & Fail-Closed
-No code change in the delta. → PASS (not applicable).
+`emit` has no `unwrap`/indexing; a missing `message` field returns silently (impossible with the
+static `FIELDS`). Audit emission cannot change the HTTP outcome. No path to an unlock without the
+existing passkey, CSRF, opt-in and rate-limit checks. → PASS.
 
 ### Test Integrity & Anti-Weakening
-No test change; matrix evidence columns untouched by the delta. → PASS.
+Test unchanged. It would still fail against a wrong implementation that emits the line on a refusal
+(first `assert!`), emits twice (`audit.len() == 1`), drops it, logs at another level (`INFO`
+check), or adds the login/session id/host/uid/path/header or passkey material (forbidden needles;
+the target `soos_remote::audit` and message contain none of them). Ran `cargo test -p soos-remote`:
+all suites green; `cargo clippy -p soos-remote --all-targets -- -D warnings` clean;
+`cargo fmt -p soos-remote -- --check` clean. Prior-delta test analysis unchanged. → PASS.
 
 ### Memory, Bounds & Secrets
-The paragraph contains no login, host name, credential id or tailnet name. → PASS.
+The event has one field holding a `&'static str` constant; no identity, session id, address or
+credential can reach it. `module_path!`/`file!`/`line!` metadata are compile-time constants. → PASS.
 
 ### Supply Chain & Automation
-No `Cargo.*`, `deny.toml`, `.github/`, `scripts/` or `.githooks/` change in the delta. → PASS.
+No dependency, workflow or script change in the new delta (`tracing` already used). Prior script
+change unchanged. → PASS.
 
 ### English-Only Policy
-The rewritten paragraph is English. → PASS.
+New doc comments and module doc are English. → PASS.
 
 ## 4. Detailed Findings & Action Items
 
-- **[SUGGESTION]** `AI/walkthroughs/184_remote_unlock.md:9` and
-  `AI/walkthroughs/183_remote_companion.md:9,315` — these say the RMC25 / RMC21 phone checks are
-  pending. They are historical phase records and the matrix is the status source of truth, so no
-  change is required; optionally add a one-line "superseded by matrix status of 2026-10-06" note.
-
-No CRITICAL, MAJOR or MINOR findings.
+- **[SUGGESTION]** `crates/remote/src/audit.rs:2` — the edited module doc line is 139 columns
+  (rustfmt does not reflow comments); rewrap to the crate's 100-column style.
+- **[SUGGESTION]** `scripts/candid_subagent.sh:134` — carried over: consider pinning
+  `-c core.bigFileThreshold=512m` and `-c core.attributesFile=/dev/null` in `review_diff`.
+- **[SUGGESTION]** `scripts/candid_subagent.sh:126` — carried over: the comment could say the
+  binding is now through the SHA-1 blob id, so `--binary` is not reintroduced for "stronger" binding.
 
 ## 5. Final Verdict
 

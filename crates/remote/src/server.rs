@@ -36,7 +36,7 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{watch, Mutex, Notify, OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinSet;
 use tokio::time::{sleep, sleep_until, timeout, timeout_at, Instant};
-use tracing::{debug, info};
+use tracing::debug;
 
 use subtle::ConstantTimeEq;
 use zeroize::Zeroizing;
@@ -1735,7 +1735,7 @@ async fn unlock_flow<S: SessionSource>(shared: &Shared<S>) -> Response {
             return Response::json(409, "already_unlocked");
         }
         *gate = Some(Instant::now());
-        info!("remote unlock requested");
+        audit::unlock_requested();
         match shared.state.source.unlock_session(&session.id).await {
             Ok(()) => Response::json(202, "unlock_requested"),
             Err(err) => {

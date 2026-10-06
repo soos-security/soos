@@ -1,5 +1,5 @@
-//! Fixed-text audit lines of the passkey ceremonies (`remote login accepted`, `passkey
-//! registered`; ADR 2026-10-06 "Tailscale Funnel Access and In-House Passkey Authentication
+//! Fixed-text audit lines of the passkey ceremonies and of the remote unlock (`remote login
+//! accepted`, `passkey registered`, `remote unlock requested`; ADR 2026-10-06 "Tailscale Funnel Access and In-House Passkey Authentication
 //! for `soos-remote`", constraint C15).
 //!
 //! Each line is one `INFO` event with a constant message and no field. It is dispatched to
@@ -52,6 +52,18 @@ static REGISTERED_META: Metadata<'static> = Metadata::new(
     Kind::EVENT,
 );
 
+static UNLOCK_CALLSITE: AuditCallsite = AuditCallsite(&UNLOCK_META);
+static UNLOCK_META: Metadata<'static> = Metadata::new(
+    "remote unlock requested",
+    "soos_remote::audit",
+    Level::INFO,
+    Some(file!()),
+    Some(line!()),
+    Some(module_path!()),
+    FieldSet::new(FIELDS, Identifier(&UNLOCK_CALLSITE)),
+    Kind::EVENT,
+);
+
 /// Dispatches one audit event whose message is the metadata name.
 fn emit(meta: &'static Metadata<'static>) {
     tracing::dispatcher::get_default(|dispatch| {
@@ -76,4 +88,10 @@ pub fn login_accepted() {
 /// `INFO passkey registered` (one line per stored passkey).
 pub fn passkey_registered() {
     emit(&REGISTERED_META);
+}
+
+/// `INFO remote unlock requested` (one line per accepted unlock, right before
+/// `UnlockSession`).
+pub fn unlock_requested() {
+    emit(&UNLOCK_META);
 }
