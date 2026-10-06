@@ -1,10 +1,79 @@
 # Candid Review Report
 
 - **Date**: 2026-10-06
-- **Target Branch**: `feat/remote-auth-alerts`
-- **Base (merge-base)**: `222665f`
-- **Reviewed-Diff-Fingerprint**: `7bf5595f962d10d7617c55f7e560f19e6850deff615b12220d63ef3aab595746`
-- **Audited Files**: full frozen patch `target/candid_diff.patch` (merge-base `222665f` to the working tree, 114 files). The last approved state is HEAD `ed52b02`; the delta reviewed in depth is the uncommitted soos brand redesign and its documentation: `crates/remote/assets/{index.html,style.css,icon.svg,apple-touch-icon.png,manifest.webmanifest}`, `tests/invariants/src/{lib.rs,remote_alerts_contract.rs,remote_brand_contract.rs}`, `AI/{ARCHITECTURE,DECISIONS,VERIFICATION_MATRIX}.md`, `AI/walkthroughs/{188_remote_auth_alerts,190_remote_brand_redesign}.md`, `Docs/REMOTE_COMPANION.md`, `AI/{architect_spec_remote_brand,auditor_constraints_brand,design_brief_remote_brand,tester_contract_brand}.md`.
+- **Target Branch**: `feat/remote-companion`
+- **Base (merge-base)**: `47ab53e`
+- **Reviewed-Diff-Fingerprint**: `3a50f87a4c604d85b8542e943b85bdae4fcd2a69ee38f37c70b0bb1efbd3c22a`
+- **Audited Files**: full frozen patch `target/candid_diff.patch` (merge-base `47ab53e` to the working tree at HEAD `0585076`, 114 files, 61 441 insertions / 236 deletions): `crates/remote/**`, `crates/push-protocol/**`, `crates/push-sender/**`, `tests/invariants/src/{lib.rs,presence_unlock_contract.rs,artifact_freshness_contract.rs,remote_*_contract.rs}`, `Cargo.toml`, `Cargo.lock`, `Docs/{README.md,REMOTE_COMPANION.md,SECURITY_AND_QUALITY_GUIDELINES.md,...}`, `AI/{ARCHITECTURE.md,DECISIONS.md,VERIFICATION_MATRIX.md,MOCK_STRATEGY.md,architect_spec_remote_*.md,auditor_constraints_*.md,tester_contract_*.md,research_push.md,design_brief_remote_brand.md}`, `AI/walkthroughs/185_remote_companion.md` to `190_remote_brand_redesign.md`, `.agents/skills/dev-workflow/references/project-facts.md`.
+
+## 0. Re-Review After the Rebase onto `main` (fingerprint `3a50f87a…bd3c22a`)
+
+The previous report approved fingerprint `7bf5595f…595746` (base `222665f`, HEAD `2cefb5d`). Since
+then: `ab68a48` renumbers this branch's walkthroughs, and `0585076` merges `origin/main` (`47ab53e`,
+PRs #343 GUI brand redesign and #344 GUI frame pacing). The new merge-base is `47ab53e`.
+
+**Carry-over method.** For every path in the new patch I compared the branch delta
+`git diff 222665f 2cefb5d -- <path>` with `git diff 47ab53e HEAD -- <path>` (added/removed lines
+only). The two file lists are identical apart from the six renamed walkthroughs. Every file under
+`crates/`, `tests/`, `Cargo.toml`, `Cargo.lock`, `Docs/README.md`,
+`Docs/SECURITY_AND_QUALITY_GUIDELINES.md` and every other non-documentation path has a
+**byte-identical delta**; only documentation files differ (25 paths: walkthroughs, specs, auditor
+constraints, tester contracts, `AI/ARCHITECTURE.md`, `AI/DECISIONS.md`,
+`AI/VERIFICATION_MATRIX.md`, `Docs/REMOTE_COMPANION.md`, `project-facts.md`, the two reports). The
+code review of the earlier report (sections 1 to 5 below) is therefore carried over unchanged.
+
+**Renumbering (`ab68a48`, 25 files, 69/69 lines).** A word-level diff of the commit shows only
+`183→185`, `184→186`, `185→187`, `186→188`, `187→189`, `188→190` (plus `188_remote_brand.md` →
+`190_remote_brand_redesign.md`, the file's real name) and tense changes in the three notes that
+described the collision as pending ("predates"→"predated", "at rebase"→"on 2026-10-06 by
+renumbering ... +2"). No mapping off by one, none skipped. Checks on the result:
+- `AI/walkthroughs/` holds `183_gui_brand_redesign.md`, `184_gui_frame_pacing_and_egui_ids.md`
+  (main's, untouched) and `185`–`190` (this branch); no number is duplicated.
+- No stale `18x_remote_*` filename remains except in the historical note of
+  `AI/architect_spec_remote_brand.md:592-594`, which explicitly records the old names.
+- Every "walkthrough 183/184" left in the tree points at main's GUI work:
+  `Docs/GUI_APPLICATION.md:79,259`, `AI/VERIFICATION_MATRIX.md` gui rows,
+  `AI/architect_spec_remote_brand.md:13,47,591`, `AI/design_brief_remote_brand.md:25`,
+  `AI/walkthroughs/190_remote_brand_redesign.md:16` ("walkthrough 183 on `main`", the GUI brand
+  redesign, correct). Every branch reference to 185–190 names the right topic (companion, unlock,
+  funnel/passkey, auth alerts, web push, brand), checked over all `+` lines of the patch.
+- `main`'s files are not touched by the renumbering (none of them is in the commit).
+
+**Conflict resolution (`0585076`).**
+- `AI/VERIFICATION_MATRIX.md`: every line of `47ab53e` and every line of `ab68a48` is in HEAD
+  except main's original `PAU17` row, which is replaced by the branch's annotated `PAU17` row
+  ("scope widened to soos-remote by ADR 2026-10-05"), the branch-side edit approved earlier
+  (`222665f` and `47ab53e` carry the same original row, so main did not change it). HEAD has no
+  line that is in neither parent. Line count 2175 = 2145 (branch) + 30 (main's addition since
+  `222665f`). Order: main's `gui-brand-redesign` (183) and `gui-frame-pacing` (184) components,
+  then the remote components (185 on). No conflict markers anywhere in the tree.
+- `AI/candid_review_report.md`: replaced by this report.
+
+**Auto-merged shared files (semantic interaction).** `main` changed `Cargo.toml` (four
+`[profile.dev.package.*] opt-level = 3` overrides for `soos-vision`, `soos-inference-ort`,
+`jpeg-decoder`, `zeroize`), `Docs/README.md` (GUI row text) and
+`Docs/SECURITY_AND_QUALITY_GUIDELINES.md` (one profile table row); this branch changes the
+workspace members, workspace dependencies, the README Remote row and the zbus bullet. The hunks
+are disjoint. `main` did not touch `Cargo.lock`, so the branch lockfile (and its `cargo deny`
+result) is unchanged. The `zeroize` dev override also applies to `soos-remote`; it only raises
+`opt-level` in dev/test builds and leaves `overflow-checks` and `panic = "unwind"` as before:
+no effect on behavior or on the release profile.
+
+**New live check introduced by the merge.** `crates/gui/src/theme.rs` did not exist at `222665f`;
+it now exists, so `remote_brand_contract::test_rmc_s44_brand_tokens_match_the_gui_theme` runs its
+live cross-check (it is unconditional once the file exists, never skipped). Re-run here:
+`cargo test -p soos-invariants -p soos-remote -p soos-push-protocol -p soos-push-sender -p soos-gui`
+all green (`soos-invariants`: 519 passed, 0 failed), so the 25 pinned palette colors and six
+metrics equal main's `theme.rs`. `cargo fmt --all -- --check` clean; `cargo clippy --workspace
+--all-targets --locked -- -D warnings` clean.
+
+**Mechanical test listing on the new patch.** 35 test files (same set as before); one removed
+assertion line (`presence_unlock_contract.rs`, the documented zbus contract migration, unchanged);
+no new `#[ignore]`/tolerance in code (the only hit is a walkthrough sentence); one inline
+`mod tests` hunk (business-crate list, strengthening). Identical to the previously approved
+listing in section 2.
+
+Result: no finding introduced by the renumbering or the merge. Verdict below unchanged.
 
 ## 1. Executive Summary
 
