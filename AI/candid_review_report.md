@@ -3,8 +3,21 @@
 - **Date**: 2026-10-07
 - **Target Branch**: `feat/remote-companion`
 - **Base (merge-base)**: `47ab53e`
-- **Reviewed-Diff-Fingerprint**: `9f54532975080df65dfe205234276b5cf657bcb3019ee7ded65a1342dc1b6143`
+- **Reviewed-Diff-Fingerprint**: `41d3a47a593e2375ceb3412ff6078efd3f524873028cc6d46443b1b45751a68a`
 - **Audited Files**: full frozen patch `target/candid_diff.patch` (merge-base `47ab53e` to the working tree at HEAD `7bad7d9` plus the uncommitted CI timing fix in `crates/remote/tests/push_server_tests.rs` and `AI/tester_contract_push.md`; the earlier part was frozen at HEAD `0585076`, 114 files, 61 441 insertions / 236 deletions): `crates/remote/**`, `crates/push-protocol/**`, `crates/push-sender/**`, `tests/invariants/src/{lib.rs,presence_unlock_contract.rs,artifact_freshness_contract.rs,remote_*_contract.rs}`, `Cargo.toml`, `Cargo.lock`, `Docs/{README.md,REMOTE_COMPANION.md,SECURITY_AND_QUALITY_GUIDELINES.md,...}`, `AI/{ARCHITECTURE.md,DECISIONS.md,VERIFICATION_MATRIX.md,MOCK_STRATEGY.md,architect_spec_remote_*.md,auditor_constraints_*.md,tester_contract_*.md,research_push.md,design_brief_remote_brand.md}`, `AI/walkthroughs/185_remote_companion.md` to `190_remote_brand_redesign.md`, `.agents/skills/dev-workflow/references/project-facts.md`.
+
+## 000. Re-Review of the Owner Hardware Results (fingerprint `41d3a47a…51a68a`)
+
+The previous review approved fingerprint `9f545329…1b6143` at HEAD `976816b`. The only change
+since (`git diff 976816b` outside this report) is `AI/VERIFICATION_MATRIX.md`, 4 insertions / 4
+deletions, status column only: RMC59 and RMC74 gain the owner's 2026-10-07 GDM-at-boot
+notification report; RMC75 and RMC88 move to Verified on the owner's report (acknowledged alert
+removed from the page on the reinstalled build; re-added home-screen icon and dark theme look
+right, light theme stated as not reported separately). No code, test, criterion or other path
+changed, so sections 00 and 0 to 5 below are carried over. The statuses match the owner's words
+and claim nothing beyond them (RMC21 stays Pending). English only, no secret or biometric data.
+
+**VERDICT: APPROVED**
 
 ## 00. Re-Review of the CI Timing Fix (fingerprint `9f545329…1b6143`)
 
