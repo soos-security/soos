@@ -2102,10 +2102,6 @@ fn camera_gates<S: SessionSource>(
 fn camera_slot_refusal(err: SlotError) -> Response {
     match err {
         SlotError::Busy => Response::json(409, "view_in_progress"),
-        SlotError::Cooldown { remaining_ms } => json_value(
-            429,
-            &serde_json::json!({"result": "camera_cooldown", "retry_after_ms": remaining_ms}),
-        ),
         SlotError::TokenRejected => Response::json(403, "view_token_rejected"),
     }
 }
@@ -2115,19 +2111,15 @@ fn camera_slot_refusal(err: SlotError) -> Response {
 fn camera_view_response<S: SessionSource>(shared: &Shared<S>, ctx: &RequestContext) -> Response {
     let config = &shared.state.config.camera;
     let settings = shared.camera.settings();
-    // One snapshot of the slot, so the state and the cooldown always agree.
-    let (state, cooldown_ms) = if config.enabled {
-        let (phase, cooldown) = shared.camera.phase(Instant::now());
-        let state = match phase {
+    let state = if config.enabled {
+        match shared.camera.phase(Instant::now()) {
             SlotPhase::Idle => "idle",
             SlotPhase::Pending => "pending",
             SlotPhase::Starting => "starting",
             SlotPhase::Streaming => "streaming",
-            SlotPhase::Cooldown => "cooldown",
-        };
-        (state, cooldown.unwrap_or(0))
+        }
     } else {
-        ("disabled", 0)
+        "disabled"
     };
     json_value(
         200,
@@ -2135,7 +2127,6 @@ fn camera_view_response<S: SessionSource>(shared: &Shared<S>, ctx: &RequestConte
             "enabled": config.enabled,
             "reachable": config.enabled && camera_reachable_for(shared, ctx.class),
             "state": state,
-            "cooldown_ms": cooldown_ms,
             "max_view_s": settings.max_view_s(),
             "fps": settings.fps,
             "width": settings.width_px(),
@@ -2385,7 +2376,7 @@ async fn camera_stream<S: SessionSource>(
         return None;
     }
     // From the first part on, pixels may reach the client even when the write fails half
-    // way: the view counts as shown (cooldown, `camera view started` / `ended`, push alert)
+    // way: the view counts as shown (`camera view started` / `ended`, push alert)
     // before that write, never after it.
     guard.set_shown();
     audit::camera_view_started();

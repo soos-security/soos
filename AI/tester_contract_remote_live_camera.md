@@ -67,7 +67,7 @@ targeted run (assertions). "E0432" = unresolved import of the specified-but-miss
 | `test_rlc_slot_single_global_view` (11) | RLC9, RLC-S5 | same |
 | `test_rlc_slot_token_single_use_and_ttl` (12) | RLC8, RLC-S4 | same |
 | `test_rlc_slot_token_bound_to_owner` (13) | RLC8 | same |
-| `test_rlc_slot_cooldown_only_after_shown_view` (14) | RLC9 | same |
+| `test_rlc_slot_no_cooldown_after_any_view` (14; was `test_rlc_slot_cooldown_only_after_shown_view`, M13) | RLC9 | same |
 | `test_rlc_slot_stop` (15, F3 durable flag) | RLC14, RLC-S10 | same |
 | `test_rlc_view_token_format_and_redaction` (16) | RLC8, RLC-S4 | same |
 
@@ -121,7 +121,7 @@ skipped with `pause`/`advance`/`resume` only while no exchange is in flight.
 | `test_rlc_funnel_is_tailnet_only_by_default` (26) | RLC7 | same |
 | `test_rlc_stream_is_multipart_jpeg` (27) | RLC10 | same |
 | `test_rlc_stream_token_single_use_and_owner_bound` (28) | RLC8, RLC-S4 | same |
-| `test_rlc_one_view_and_cooldown` (29) | RLC9 | same |
+| `test_rlc_one_view_and_no_cooldown` (29; was `test_rlc_one_view_and_cooldown`, M13) | RLC9 | same |
 | `test_rlc_view_end_conditions` (30, F3 a/b/c) | RLC14, RLC-S10 | same |
 | `test_rlc_frame_rate_and_no_replay` (31, F11) | RLC9, RLC-S9 | same |
 | `test_rlc_non_terminal_arms_never_cancel_a_frame` (61, F2) | RLC14, RLC-S10 | same |
@@ -268,3 +268,33 @@ iPhone the iOS network stack split such a response and the page's `fetch` failed
 explicit approval ("corrige ca", 2026-10-07) the expected head `Content-Type` is now `application/octet-stream`; the
 part framing (`--soosframe`, `Content-Type: image/jpeg`, `Content-Length`), the mandatory headers, the CSP, the absence
 of `Content-Length`/`Transfer-Encoding` and every JPEG assertion are unchanged.
+
+## Owner-approved amendment M13 (2026-10-07): no cooldown between views
+
+The owner asked (2026-10-07, after the live view worked on the iPhone) to "remove the countdown when we activate the
+camera and deactivate and reactivate it", and explicitly approved turning the cooldown tests into assertions that
+there is **no** cooldown. Face ID per view, the single global view slot, the token TTL and the shared failure lockout
+are unchanged; no other test was weakened.
+
+| Id | Test / location | Old rule | New rule |
+|---|---|---|---|
+| M13a | `camera_slot_tests.rs` test 10 `test_rlc_slot_reserve_begin_stream_end_cycle` | `end(shown)` → `(Cooldown, Some(10_000))`; second reserve only after `CAMERA_VIEW_COOLDOWN_MS` | `end` → `Idle`, `check` is `Ok` and a second reserve/begin succeeds at the same instant with a new view id |
+| M13b | `camera_slot_tests.rs` test 14 `test_rlc_slot_cooldown_only_after_shown_view` → `test_rlc_slot_no_cooldown_after_any_view` | cooldown only after a shown view, `SlotError::Cooldown { remaining_ms }` counting down to 0 | after a shown view, a stopped view and an unshown view the slot is `Idle` at once and reserves immediately; stale/second `end` stay no-ops; exhaustive matches pin `SlotPhase` = {Idle, Pending, Starting, Streaming} and `SlotError` = {Busy, TokenRejected} (stricter: a cooldown variant no longer compiles) |
+| M13c | `camera_slot_tests.rs` test 15 `test_rlc_slot_stop` | the Streaming sub-case started at `t0 + CAMERA_VIEW_COOLDOWN_MS` | it starts at `t0`, right after the previous view (proves the immediate restart) |
+| M13d | `camera_slot_tests.rs` (whole file) | `ViewSlot::phase` returned `(SlotPhase, Option<u64>)`, `end(now, view, shown)` | `phase` returns `SlotPhase`, `end(view)` (API shape only, assertions otherwise identical) |
+| M13e | `camera_config_tests.rs` `test_rlc_camera_constants_match_the_spec` | `CAMERA_VIEW_COOLDOWN_MS == 10_000` | constant removed; its absence is pinned by invariant test 60 |
+| M13f | `camera_server_tests.rs` helper `assert_ended_shown` | `state == "cooldown"`, `cooldown_ms > 0` | `state == "idle"`, no `cooldown_ms` field |
+| M13g | `camera_server_tests.rs` test 23 `assert_camera_disabled` key list | keys include `cooldown_ms` | `cooldown_ms` removed from the `GET /api/camera` shape (every other key unchanged) |
+| M13h | `camera_server_tests.rs` test 28 `test_rlc_stream_token_single_use_and_owner_bound` | `advance_ms(CAMERA_VIEW_COOLDOWN_MS)` before `idle`; `cooldown_ms == 0` after the TTL | `idle` 100 ms after the view closed without waiting; no `cooldown_ms` field |
+| M13i | `camera_server_tests.rs` test 29 `test_rlc_one_view_and_cooldown` → `test_rlc_one_view_and_no_cooldown` | `429 camera_cooldown` with `retry_after_ms` after a stopped view, `state == "cooldown"` | after a stopped view: `state == "idle"`, no `cooldown_ms`, an immediate new start (fresh assertion) streams pixels again, then a third start is accepted; `409 view_in_progress` during a view unchanged |
+| M13j | `camera_server_tests.rs` test 30 `test_rlc_view_end_conditions` | stop / `max_view_s` sub-cases checked the cooldown state | they now also assert an immediate restart (`assert_immediate_restart`) |
+| M13k | `common/camera.rs` comment of `HARNESS_REAL_BUDGET` | mentions cooldown timers | comment only |
+| M13l | `AI/VERIFICATION_MATRIX.md` RLC9 / RLC16 | 10 s cooldown, "second start within 10 s is refused" | no cooldown, immediate restart; full screen and rotation in the owner check |
+
+New static test (not a migration): `tests/invariants/src/remote_camera_contract.rs` test 60
+`test_rlc_page_fullscreen_rotate_and_no_cooldown` pins the full-screen toggle (`requestFullscreen` /
+`webkitRequestFullscreen` with the overlay fallback), the exit control (`"Exit full screen"`, Escape,
+`fullscreenchange`), the rotation classes `camera-rot-90/180/270`, the full-screen exit in `endCameraView`, the
+classList-only styling, and the absence of `cooldown`, `retry_after_ms` and `CAMERA_VIEW_COOLDOWN_MS` in the page and
+the camera/server sources. Red evidence: the slot, config and server test files did not compile against the old API
+(E0308/E0061), and test 60 failed on its first assertion before the page change.

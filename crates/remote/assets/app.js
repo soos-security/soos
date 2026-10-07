@@ -29,7 +29,12 @@
  * a confirmation and a fresh Face ID assertion; the multipart JPEG stream is read with
  * fetch and a ReadableStream into a bounded buffer, each part decoded with
  * createImageBitmap and drawn on a canvas, then released. No image element, no object
- * address, no storage; the view stops when the page is hidden or left.
+ * address, no storage; the view stops when the page is hidden or left. A tap on the live
+ * image toggles full screen (element fullscreen where the browser has it, a fixed overlay
+ * otherwise, as on iPhone Safari); Rotate turns the image by 90° steps through CSS classes
+ * only. The rotation lives in memory for the page lifetime and is never stored. Every end
+ * of a view leaves full screen. A new view may start right after the previous one ended
+ * (owner request 2026-10-07), always after a fresh Face ID assertion.
  */
 "use strict";
 
@@ -1079,13 +1084,15 @@ const CAMERA_MAX_BUFFER_BYTES = 1048576;
 const CAMERA_START_LABEL = "Start camera view";
 const CAMERA_STOP_LABEL = "Stop camera view";
 const CAMERA_STREAM_PATTERN = /^\/api\/camera\/stream\/[A-Za-z0-9_-]{43}$/;
+const CAMERA_LIVE_TEXT = "Live view of the PC camera (tap the image for full screen)";
+// Rotation classes of the stage, in 90° steps (index 0 = upright, no class).
+const CAMERA_ROTATIONS = ["", "camera-rot-90", "camera-rot-180", "camera-rot-270"];
 
 const CAMERA_REASONS = {
   camera_refused:
     "The PC refused the camera view (check the [preview] settings and that you are logged in at the PC)",
   camera_unavailable: "The camera of the PC is unavailable, try again",
   camera_format_unsupported: "The camera format of the PC is not supported",
-  camera_cooldown: "Please wait a moment before starting another camera view",
   view_in_progress: "A camera view is already in progress",
   camera_tailnet_only: "Camera view is available on the tailnet only",
   camera_disabled: "The camera view is off on the PC (camera_view in remote.toml)",
@@ -1096,6 +1103,9 @@ const CAMERA_REASONS = {
 let camera = null;
 let cameraController = null;
 let cameraDecoding = false;
+// Index into CAMERA_ROTATIONS; kept for the page lifetime, never stored.
+let cameraRotation = 0;
+let cameraFull = false;
 
 function cameraReason(result, status) {
   return reasonFor(result, CAMERA_REASONS, "Camera view refused (" + status + ")");
@@ -1114,10 +1124,33 @@ function buildCameraCard() {
   const stateLine = document.createElement("p");
   stateLine.className = "detail";
   setText(stateLine, " ");
+  const stage = document.createElement("div");
+  stage.className = "camera-stage";
+  stage.hidden = true;
   const canvas = document.createElement("canvas");
   canvas.className = "camera-canvas";
   canvas.width = 0;
   canvas.height = 0;
+  canvas.tabIndex = 0;
+  canvas.setAttribute("role", "button");
+  canvas.setAttribute("aria-label", "Live camera image, toggle full screen");
+  const tools = document.createElement("div");
+  tools.className = "camera-tools";
+  const rotateButton = document.createElement("button");
+  rotateButton.type = "button";
+  rotateButton.className = "camera-tool";
+  rotateButton.setAttribute("aria-label", "Rotate the image by 90 degrees");
+  setText(rotateButton, "Rotate");
+  const closeButton = document.createElement("button");
+  closeButton.type = "button";
+  closeButton.className = "camera-tool";
+  closeButton.hidden = true;
+  closeButton.setAttribute("aria-label", "Exit full screen");
+  setText(closeButton, "✕");
+  tools.appendChild(rotateButton);
+  tools.appendChild(closeButton);
+  stage.appendChild(canvas);
+  stage.appendChild(tools);
   const startButton = document.createElement("button");
   startButton.type = "button";
   setText(startButton, CAMERA_START_LABEL);
@@ -1132,24 +1165,118 @@ function buildCameraCard() {
   setText(feedback, " ");
   section.appendChild(title);
   section.appendChild(stateLine);
-  section.appendChild(canvas);
+  section.appendChild(stage);
   section.appendChild(startButton);
   section.appendChild(stopButton);
   section.appendChild(feedback);
   pushSection.parentNode.insertBefore(section, pushSection.nextSibling);
   startButton.addEventListener("click", startCameraView);
+  canvas.addEventListener("click", toggleCameraFullscreen);
+  canvas.addEventListener("keydown", function (event) {
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      toggleCameraFullscreen();
+    }
+  });
+  rotateButton.addEventListener("click", rotateCamera);
+  closeButton.addEventListener("click", exitCameraFullscreen);
   stopButton.addEventListener("click", function () {
     stopCameraView("Camera view stopped");
   });
   camera = {
     section: section,
     stateLine: stateLine,
+    stage: stage,
     canvas: canvas,
+    rotateButton: rotateButton,
+    closeButton: closeButton,
     startButton: startButton,
     stopButton: stopButton,
     feedback: feedback,
   };
+  applyCameraRotation(camera);
   return camera;
+}
+
+function applyCameraRotation(c) {
+  CAMERA_ROTATIONS.forEach(function (name, index) {
+    if (name !== "") {
+      c.stage.classList.toggle(name, index === cameraRotation);
+    }
+  });
+}
+
+function rotateCamera() {
+  cameraRotation = (cameraRotation + 1) % CAMERA_ROTATIONS.length;
+  applyCameraRotation(buildCameraCard());
+}
+
+function fullscreenElement() {
+  return document.fullscreenElement || document.webkitFullscreenElement || null;
+}
+
+// Full screen for the open view: the stage becomes a fixed overlay (iPhone Safari has no
+// element fullscreen) and, where available, the element fullscreen of the browser.
+function enterCameraFullscreen() {
+  const c = buildCameraCard();
+  if (cameraController === null || cameraFull) {
+    return;
+  }
+  cameraFull = true;
+  c.stage.classList.add("camera-full");
+  document.documentElement.classList.add("camera-lock");
+  c.closeButton.hidden = false;
+  const request = c.stage.requestFullscreen || c.stage.webkitRequestFullscreen;
+  if (typeof request === "function") {
+    try {
+      const pending = request.call(c.stage);
+      if (pending && typeof pending.catch === "function") {
+        pending.catch(function () {
+          // Refused by the browser: the overlay stays.
+        });
+      }
+    } catch (_) {
+      // Refused by the browser: the overlay stays.
+    }
+  }
+}
+
+function exitCameraFullscreen() {
+  const c = buildCameraCard();
+  cameraFull = false;
+  c.stage.classList.remove("camera-full");
+  document.documentElement.classList.remove("camera-lock");
+  c.closeButton.hidden = true;
+  if (fullscreenElement() === c.stage) {
+    const exit = document.exitFullscreen || document.webkitExitFullscreen;
+    if (typeof exit === "function") {
+      try {
+        const pending = exit.call(document);
+        if (pending && typeof pending.catch === "function") {
+          pending.catch(function () {
+            // Already left.
+          });
+        }
+      } catch (_) {
+        // Already left.
+      }
+    }
+  }
+}
+
+function toggleCameraFullscreen() {
+  if (cameraFull) {
+    exitCameraFullscreen();
+  } else {
+    enterCameraFullscreen();
+  }
+}
+
+// The browser left its element fullscreen (Escape, system gesture): leave the overlay too.
+function cameraFullscreenChanged() {
+  if (cameraFull && fullscreenElement() === null) {
+    exitCameraFullscreen();
+  }
 }
 
 function clearCameraCanvas() {
@@ -1179,10 +1306,7 @@ function renderCamera(view) {
   c.startButton.hidden = streaming;
   c.stopButton.hidden = !streaming;
   if (streaming) {
-    setText(c.stateLine, "Live view of the PC camera");
-  } else if (view.state === "cooldown") {
-    const seconds = Math.ceil((typeof view.cooldown_ms === "number" ? view.cooldown_ms : 0) / 1000);
-    setText(c.stateLine, "Next view possible in " + seconds + " s");
+    setText(c.stateLine, CAMERA_LIVE_TEXT);
   } else if (view.state === "idle") {
     setText(c.stateLine, "Up to " + view.max_view_s + " s at " + view.fps + " frames per second");
   } else {
@@ -1353,6 +1477,8 @@ function endCameraView(message) {
   if (controller !== null) {
     controller.abort();
   }
+  exitCameraFullscreen();
+  c.stage.hidden = true;
   clearCameraCanvas();
   c.startButton.disabled = false;
   if (message) {
@@ -1404,7 +1530,8 @@ function openCameraStream(path) {
       setText(c.feedback, " ");
       c.startButton.hidden = true;
       c.stopButton.hidden = false;
-      setText(c.stateLine, "Live view of the PC camera");
+      c.stage.hidden = false;
+      setText(c.stateLine, CAMERA_LIVE_TEXT);
       return readCameraStream(response, controller);
     })
     .then(function () {
@@ -1525,6 +1652,13 @@ document.addEventListener("visibilitychange", function () {
 });
 window.addEventListener("pagehide", function () {
   stopCameraView(null);
+});
+document.addEventListener("fullscreenchange", cameraFullscreenChanged);
+document.addEventListener("webkitfullscreenchange", cameraFullscreenChanged);
+document.addEventListener("keydown", function (event) {
+  if (event.key === "Escape" && cameraFull) {
+    exitCameraFullscreen();
+  }
 });
 window.addEventListener("pageshow", resume);
 setInterval(renderUpdated, TICK_MS);

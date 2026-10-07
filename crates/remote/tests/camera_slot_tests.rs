@@ -4,7 +4,8 @@
 //! tests 10–16, matrix RLC8, RLC9, RLC14).
 //!
 //! Pure: every time is a `tokio::time::Instant` built by adding durations to one origin, so
-//! the token TTL and the cooldown are exact without any clock.
+//! the token TTL is exact without any clock. Migration M13 (owner request 2026-10-07): there
+//! is no cooldown between views; a new reservation right after any view ends succeeds.
 
 #![allow(
     clippy::unwrap_used,
@@ -24,10 +25,7 @@ use tokio::time::Instant;
 
 use soos_remote::camera_slot::{SlotError, SlotPhase, ViewOwner, ViewSlot, ViewToken};
 use soos_remote::identity::PathClass;
-use soos_remote::{
-    CAMERA_VIEW_COOLDOWN_MS, CAMERA_VIEW_TOKEN_B64_LEN, CAMERA_VIEW_TOKEN_BYTES,
-    CAMERA_VIEW_TOKEN_TTL_MS,
-};
+use soos_remote::{CAMERA_VIEW_TOKEN_B64_LEN, CAMERA_VIEW_TOKEN_BYTES, CAMERA_VIEW_TOKEN_TTL_MS};
 
 const MAX_VIEW: Duration = Duration::from_secs(120);
 
@@ -62,7 +60,7 @@ fn funnel(session: u8) -> ViewOwner {
 }
 
 fn phase(slot: &ViewSlot, now: Instant) -> SlotPhase {
-    slot.phase(now).0
+    slot.phase(now)
 }
 
 // ---------------------------------------------------------------------------------------
@@ -70,12 +68,13 @@ fn phase(slot: &ViewSlot, now: Instant) -> SlotPhase {
 // ---------------------------------------------------------------------------------------
 
 /// Test 10 (RLC9): Idle → reserve → Pending → begin → Starting → mark_streaming →
-/// Streaming → end(shown) → Cooldown, with `ends_at = begin time + max_view`.
+/// Streaming → end → Idle, with `ends_at = begin time + max_view`; M13: a new reservation
+/// at the very instant the view ended succeeds (no cooldown).
 #[test]
 fn test_rlc_slot_reserve_begin_stream_end_cycle() {
     let t0 = Instant::now();
     let mut slot = ViewSlot::new();
-    assert_eq!(slot.phase(t0), (SlotPhase::Idle, None));
+    assert_eq!(slot.phase(t0), SlotPhase::Idle);
     assert_eq!(slot.check(t0), Ok(()));
 
     slot.reserve(t0, tailnet(), token(1))
@@ -95,17 +94,14 @@ fn test_rlc_slot_reserve_begin_stream_end_cycle() {
     assert!(!slot.stop_requested(ticket.view));
 
     let t2 = t1 + ms(30_000);
-    slot.end(t2, ticket.view, true);
-    assert_eq!(
-        slot.phase(t2),
-        (SlotPhase::Cooldown, Some(CAMERA_VIEW_COOLDOWN_MS))
-    );
+    slot.end(ticket.view);
+    assert_eq!(slot.phase(t2), SlotPhase::Idle);
+    assert_eq!(slot.check(t2), Ok(()), "no cooldown after a shown view");
 
-    // A second cycle after the cooldown gets a different view id.
-    let t3 = t2 + ms(CAMERA_VIEW_COOLDOWN_MS);
-    slot.reserve(t3, tailnet(), token(2))
-        .expect("cooldown elapsed");
-    let second = slot.begin(t3, tailnet(), &token(2), MAX_VIEW).unwrap();
+    // A second cycle at the same instant gets a different view id.
+    slot.reserve(t2, tailnet(), token(2))
+        .expect("immediate reserve after a view ended");
+    let second = slot.begin(t2, tailnet(), &token(2), MAX_VIEW).unwrap();
     assert_ne!(second.view, ticket.view, "view ids are never reused");
 }
 
@@ -147,8 +143,7 @@ fn test_rlc_slot_single_global_view() {
 // ---------------------------------------------------------------------------------------
 
 /// Test 12 (RLC8, RLC-S4): a token is single use and valid strictly less than
-/// `CAMERA_VIEW_TOKEN_TTL_MS`; an expired Pending reservation returns the slot to Idle
-/// without cooldown.
+/// `CAMERA_VIEW_TOKEN_TTL_MS`; an expired Pending reservation returns the slot to Idle.
 #[test]
 fn test_rlc_slot_token_single_use_and_ttl() {
     let t0 = Instant::now();
@@ -168,9 +163,9 @@ fn test_rlc_slot_token_single_use_and_ttl() {
         Err(SlotError::TokenRejected)
     );
     assert_eq!(phase(&slot, t0 + ms(2)), SlotPhase::Starting);
-    slot.end(t0 + ms(3), ticket.view, false);
+    slot.end(ticket.view);
 
-    // Expiry: `begin` at exactly `expires` is rejected and the slot is Idle, no cooldown.
+    // Expiry: `begin` at exactly `expires` is rejected and the slot is Idle.
     let t1 = t0 + ms(100_000);
     slot.reserve(t1, tailnet(), token(2)).unwrap();
     let at_expiry = t1 + ms(CAMERA_VIEW_TOKEN_TTL_MS);
@@ -178,7 +173,7 @@ fn test_rlc_slot_token_single_use_and_ttl() {
         slot.begin(at_expiry, tailnet(), &token(2), MAX_VIEW),
         Err(SlotError::TokenRejected)
     );
-    assert_eq!(slot.phase(at_expiry), (SlotPhase::Idle, None));
+    assert_eq!(slot.phase(at_expiry), SlotPhase::Idle);
     assert_eq!(slot.check(at_expiry), Ok(()));
     // The expired reservation also frees the slot for `check`/`reserve` without a `begin`.
     let t2 = t1 + ms(200_000);
@@ -254,10 +249,11 @@ fn test_rlc_slot_token_bound_to_owner() {
 // Test 14
 // ---------------------------------------------------------------------------------------
 
-/// Test 14 (RLC9): the cooldown follows only a view that showed pixels; its remaining time
-/// decreases to 0; `end` with a stale view id is a no-op.
+/// Test 14 (RLC9, migration M13): there is no cooldown: after a view that showed pixels,
+/// and after one that never did, the slot is Idle at the very instant it ended and accepts a
+/// new reservation immediately; `end` with a stale view id is a no-op.
 #[test]
-fn test_rlc_slot_cooldown_only_after_shown_view() {
+fn test_rlc_slot_no_cooldown_after_any_view() {
     let t0 = Instant::now();
     let mut slot = ViewSlot::new();
     slot.reserve(t0, tailnet(), token(1)).unwrap();
@@ -265,60 +261,59 @@ fn test_rlc_slot_cooldown_only_after_shown_view() {
     slot.mark_streaming(ticket.view);
 
     // Stale id: no-op.
-    slot.end(t0, ticket.view.wrapping_add(1), true);
+    slot.end(ticket.view.wrapping_add(1));
     assert_eq!(phase(&slot, t0), SlotPhase::Streaming);
 
+    // A view that showed pixels (it reached Streaming): no cooldown.
     let t1 = t0 + ms(5_000);
-    slot.end(t1, ticket.view, true);
-    assert_eq!(
-        slot.phase(t1),
-        (SlotPhase::Cooldown, Some(CAMERA_VIEW_COOLDOWN_MS))
-    );
-    let t2 = t1 + ms(4_000);
-    assert_eq!(
-        slot.phase(t2),
-        (SlotPhase::Cooldown, Some(CAMERA_VIEW_COOLDOWN_MS - 4_000))
-    );
-    assert_eq!(
-        slot.check(t2),
-        Err(SlotError::Cooldown {
-            remaining_ms: CAMERA_VIEW_COOLDOWN_MS - 4_000
-        })
-    );
-    assert_eq!(
-        slot.reserve(t2, tailnet(), token(2)),
-        Err(SlotError::Cooldown {
-            remaining_ms: CAMERA_VIEW_COOLDOWN_MS - 4_000
-        })
-    );
-    let almost = t1 + ms(CAMERA_VIEW_COOLDOWN_MS - 1);
-    assert_eq!(
-        slot.check(almost),
-        Err(SlotError::Cooldown { remaining_ms: 1 })
-    );
-    let over = t1 + ms(CAMERA_VIEW_COOLDOWN_MS);
-    assert_eq!(phase(&slot, over), SlotPhase::Idle);
-    assert_eq!(slot.check(over), Ok(()));
+    slot.end(ticket.view);
+    assert_eq!(slot.phase(t1), SlotPhase::Idle);
+    assert_eq!(slot.check(t1), Ok(()));
+    slot.reserve(t1, tailnet(), token(2))
+        .expect("immediate reserve after a shown view");
+    let again = slot.begin(t1, tailnet(), &token(2), MAX_VIEW).unwrap();
+    assert_ne!(again.view, ticket.view);
+    slot.mark_streaming(again.view);
+    assert!(slot.stop());
+    slot.end(again.view);
+    assert_eq!(slot.check(t1), Ok(()), "a stopped view leaves no cooldown");
 
-    // A view that never showed pixels (first frame failed): no cooldown.
-    slot.reserve(over, tailnet(), token(3)).unwrap();
-    let failed = slot.begin(over, tailnet(), &token(3), MAX_VIEW).unwrap();
-    slot.end(over, failed.view, false);
-    assert_eq!(slot.phase(over), (SlotPhase::Idle, None));
-    slot.reserve(over, tailnet(), token(4))
+    // A view that never showed pixels (first frame failed): no cooldown either.
+    slot.reserve(t1, tailnet(), token(3)).unwrap();
+    let failed = slot.begin(t1, tailnet(), &token(3), MAX_VIEW).unwrap();
+    slot.end(failed.view);
+    assert_eq!(slot.phase(t1), SlotPhase::Idle);
+    slot.reserve(t1, tailnet(), token(4))
         .expect("immediate reserve after an unshown view");
 
     // A second `end` of an already ended view is a no-op as well.
-    let pending_phase = phase(&slot, over);
-    slot.end(over, failed.view, true);
-    assert_eq!(phase(&slot, over), pending_phase);
+    let pending_phase = phase(&slot, t1);
+    slot.end(failed.view);
+    assert_eq!(phase(&slot, t1), pending_phase);
+    assert_eq!(pending_phase, SlotPhase::Pending);
+
+    // The phase set has no cooldown variant: this exhaustive match only compiles while
+    // `SlotPhase` is exactly Idle, Pending, Starting and Streaming.
+    for later in [
+        t1 + ms(1),
+        t1 + ms(CAMERA_VIEW_TOKEN_TTL_MS),
+        t1 + ms(1_000_000),
+    ] {
+        match slot.phase(later) {
+            SlotPhase::Idle | SlotPhase::Pending | SlotPhase::Starting | SlotPhase::Streaming => {}
+        }
+        // Likewise `SlotError` is exactly Busy and TokenRejected (no cooldown refusal).
+        match slot.check(later) {
+            Ok(()) | Err(SlotError::Busy | SlotError::TokenRejected) => {}
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------------------
 // Test 15
 // ---------------------------------------------------------------------------------------
 
-/// Test 15 (RLC14, RLC-S10): `stop` cancels a Pending reservation (Idle, no cooldown), sets
+/// Test 15 (RLC14, RLC-S10): `stop` cancels a Pending reservation (Idle), sets
 /// a durable flag on a Starting/Streaming view (kept until `end`), and is `false` on an Idle
 /// slot; `stop_requested` is also true for a view the slot no longer holds (fail closed).
 #[test]
@@ -329,7 +324,7 @@ fn test_rlc_slot_stop() {
 
     slot.reserve(t0, tailnet(), token(1)).unwrap();
     assert!(slot.stop());
-    assert_eq!(slot.phase(t0), (SlotPhase::Idle, None));
+    assert_eq!(slot.phase(t0), SlotPhase::Idle);
     assert_eq!(slot.check(t0), Ok(()));
     assert_eq!(
         slot.begin(t0, tailnet(), &token(1), MAX_VIEW),
@@ -358,15 +353,15 @@ fn test_rlc_slot_stop() {
 
     // A view id the slot does not hold reads as stopped (fail closed).
     assert!(slot.stop_requested(ticket.view.wrapping_add(1)));
-    slot.end(t0, ticket.view, true);
+    slot.end(ticket.view);
     assert!(
         slot.stop_requested(ticket.view),
         "ended view reads as stopped"
     );
-    assert!(!slot.stop(), "Idle (cooldown) has nothing to stop");
+    assert!(!slot.stop(), "Idle has nothing to stop");
 
-    // Stop during Streaming without an earlier stop.
-    let t1 = t0 + ms(CAMERA_VIEW_COOLDOWN_MS);
+    // Stop during Streaming without an earlier stop, right after the previous view (M13).
+    let t1 = t0;
     slot.reserve(t1, tailnet(), token(3)).unwrap();
     let ticket = slot.begin(t1, tailnet(), &token(3), MAX_VIEW).unwrap();
     slot.mark_streaming(ticket.view);

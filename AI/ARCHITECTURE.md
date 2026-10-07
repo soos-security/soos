@@ -383,7 +383,8 @@ security boundary) and an active local seat session of the UID (now required for
 unprivileged preview peer, GUI included); the companion needs `camera_view = true` (and
 `camera_view_funnel = true` over Funnel). Every view needs a fresh UV passkey assertion of
 purpose `CameraView`, yields a single-use 256-bit stream token valid 10 s, and is bounded (one
-global view, ≤ 300 s, default 120 s, ≤ 10 fps, ≤ 640x480, 10 s cooldown). No recording: frames
+global view, ≤ 300 s, default 120 s, ≤ 10 fps, ≤ 640x480, no cooldown between views since
+2026-10-07). No recording: frames
 and JPEG buffers stay in memory, the companion's own buffers are zeroized, nothing is written to
 disk, logged or pushed (the start push carries fixed text only). PAM `Auth` latency is unchanged
 (the cgroup is read only for `PreviewFrame`); a view holds one of the UID's

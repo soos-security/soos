@@ -50,8 +50,7 @@ use soos_remote::push::TransportError;
 use soos_remote::{
     CAMERA_FIRST_FRAME_TIMEOUT_MS, CAMERA_RATE_LIMITED_BACKOFF_MS,
     CAMERA_REFUSED_AUDIT_MIN_INTERVAL_MS, CAMERA_SESSION_CHECK_MS, CAMERA_STALL_TIMEOUT_MS,
-    CAMERA_VIEW_COOLDOWN_MS, CAMERA_VIEW_TOKEN_TTL_MS, MAX_AUTH_BODY_BYTES, PUSH_CAMERA_TOPIC,
-    RESPONSE_WRITE_TIMEOUT_MS,
+    CAMERA_VIEW_TOKEN_TTL_MS, MAX_AUTH_BODY_BYTES, PUSH_CAMERA_TOPIC, RESPONSE_WRITE_TIMEOUT_MS,
 };
 
 const IP_A: &str = "203.0.113.10";
@@ -114,13 +113,25 @@ async fn shown_view(h: &Harness, spy: &SourceSpy, via: &Via) -> ViewClient {
     view
 }
 
-/// After a shown view ended: the slot is in cooldown, the source was dropped.
+/// After a shown view ended: the slot is idle at once (M13: no cooldown, no `cooldown_ms`
+/// field), the source was dropped.
 async fn assert_ended_shown(h: &Harness, spy: &SourceSpy) {
     settle().await;
     let state = camera_state(h, &Via::Tailnet).await;
-    assert_eq!(state["state"], "cooldown", "{state}");
-    assert!(state["cooldown_ms"].as_u64().unwrap() > 0, "{state}");
+    assert_eq!(
+        state["state"], "idle",
+        "no cooldown after a shown view: {state}"
+    );
+    assert!(state.get("cooldown_ms").is_none(), "{state}");
     assert_eq!(spy.dropped(), spy.built(), "every source dropped");
+}
+
+/// M13: a new start right after a view ended succeeds at once (a fresh assertion, no wait),
+/// then the reservation is stopped again.
+async fn assert_immediate_restart(h: &Harness) {
+    let _path = ready_view(h, &Via::Tailnet).await;
+    assert_result(&camera_stop(h, &Via::Tailnet).await, 200, "stopped");
+    assert_eq!(camera_state(h, &Via::Tailnet).await["state"], "idle");
 }
 
 /// Exactly `expected_new` more `camera view ended` lines since the last check.
@@ -148,7 +159,6 @@ async fn assert_camera_disabled(h: &Harness) {
     assert_eq!(
         json_keys(&v),
         vec![
-            "cooldown_ms",
             "enabled",
             "fps",
             "max_view_s",
@@ -618,10 +628,13 @@ async fn test_rlc_stream_token_single_use_and_owner_bound() {
     assert_result(&r, 403, "view_token_rejected");
     drop(view);
     h.advance_ms(100).await;
-    h.advance_ms(CAMERA_VIEW_COOLDOWN_MS).await;
-    assert_eq!(camera_state(&h, &Via::Tailnet).await["state"], "idle");
+    assert_eq!(
+        camera_state(&h, &Via::Tailnet).await["state"],
+        "idle",
+        "M13: idle right after the view closed, no cooldown"
+    );
 
-    // TTL: a token presented at `expires` is rejected and the slot is idle without cooldown.
+    // TTL: a token presented at `expires` is rejected and the slot is idle.
     let path = ready_view(&h, &Via::Tailnet).await;
     h.advance_ms(CAMERA_VIEW_TOKEN_TTL_MS).await;
     let r = open_view(&h, &spy, &Via::Tailnet, &path, VIEW_STEP_MS)
@@ -630,7 +643,7 @@ async fn test_rlc_stream_token_single_use_and_owner_bound() {
     assert_result(&r, 403, "view_token_rejected");
     let state = camera_state(&h, &Via::Tailnet).await;
     assert_eq!(state["state"], "idle", "{state}");
-    assert_eq!(state["cooldown_ms"], 0, "{state}");
+    assert!(state.get("cooldown_ms").is_none(), "{state}");
 
     // Funnel session B cannot use session A's token; neither can the tailnet.
     let a = h.session(IP_A).await;
@@ -651,14 +664,15 @@ async fn test_rlc_stream_token_single_use_and_owner_bound() {
 }
 
 // ---------------------------------------------------------------------------------------
-// Test 29 — one view and cooldown
+// Test 29 — one view, no cooldown
 // ---------------------------------------------------------------------------------------
 
-/// Test 29 (RLC9): one global view; `409 view_in_progress` during a view; `429
-/// camera_cooldown` with `retry_after_ms` after a shown view; a view whose first frame
-/// failed sets no cooldown.
+/// Test 29 (RLC9, migration M13): one global view; `409 view_in_progress` during a view;
+/// after a shown view is stopped, a new start succeeds at once (no `429 camera_cooldown`,
+/// no `retry_after_ms`, state `idle`, still a fresh assertion per view); a view whose first
+/// frame failed leaves the slot idle as well.
 #[tokio::test(start_paused = true)]
-async fn test_rlc_one_view_and_cooldown() {
+async fn test_rlc_one_view_and_no_cooldown() {
     let spy = SourceSpy::increasing();
     let h = start_camera(Options::funnel(), camera_on_funnel(), &spy, None).await;
     let mut view = shown_view(&h, &spy, &Via::Tailnet).await;
@@ -673,19 +687,21 @@ async fn test_rlc_one_view_and_cooldown() {
     assert_result(&held_start(&h, &s, 300).await, 409, "view_in_progress");
     assert_result(&camera_stop(&h, &Via::Tailnet).await, 200, "stopped");
     assert!(view.ends_within(&h, &spy, 2000, 100).await.is_some());
-    // Cooldown.
-    let r = held_start(&h, &Via::Tailnet, 300).await;
-    assert_eq!(r.status, 429, "{}", r.result_or_body());
-    assert_eq!(r.result(), "camera_cooldown");
-    let retry = r.json()["retry_after_ms"].as_u64().expect("retry_after_ms");
-    assert!(retry > 0 && retry <= CAMERA_VIEW_COOLDOWN_MS, "{retry}");
+    settle().await;
+    // No cooldown: the state is idle and an immediate start is accepted.
     let state = camera_state(&h, &Via::Tailnet).await;
-    assert_eq!(state["state"], "cooldown");
-    h.advance_ms(retry).await;
+    assert_eq!(state["state"], "idle", "{state}");
+    assert!(state.get("cooldown_ms").is_none(), "{state}");
+    // The immediate restart (fresh assertion, `200 view_ready`, never `429
+    // camera_cooldown`) streams pixels again.
+    let mut again = shown_view(&h, &spy, &Via::Tailnet).await;
+    assert_result(&camera_stop(&h, &Via::Tailnet).await, 200, "stopped");
+    assert!(again.ends_within(&h, &spy, 2000, 100).await.is_some());
+    settle().await;
     let _path = ready_view(&h, &Via::Tailnet).await;
     assert_result(&camera_stop(&h, &Via::Tailnet).await, 200, "stopped");
 
-    // A failed first frame sets no cooldown.
+    // A failed first frame leaves the slot idle.
     spy.queue(vec![Step::Fail(PreviewError::Refused)]);
     let path = ready_view(&h, &Via::Tailnet).await;
     let r = open_view(
@@ -707,12 +723,12 @@ async fn test_rlc_one_view_and_cooldown() {
 // Test 30 — end conditions
 // ---------------------------------------------------------------------------------------
 
-/// Test 30 (RLC14, RLC-S10): every end condition ends the stream, frees the slot (cooldown
-/// after a shown view), emits `camera view ended` once and drops the source: stop route,
-/// `max_view_s`, client close, write stall, Funnel session revoked, shutdown, daemon refusal
+/// Test 30 (RLC14, RLC-S10): every end condition ends the stream, frees the slot at once
+/// (M13: no cooldown; a stop or `max_view_s` end is followed by an immediate restart),
+/// emits `camera view ended` once and drops the source: stop route, `max_view_s`, client close, write stall, Funnel session revoked, shutdown, daemon refusal
 /// mid-view, no new frame for 5 s. F3: (a) a stop issued while a part write is blocked ends
 /// the view right after that write; (b) a stop during the first-frame phase closes without
-/// a head and without cooldown; (c) stray read-half bytes never end the view.
+/// a head and leaves the slot idle; (c) stray read-half bytes never end the view.
 #[tokio::test(start_paused = true)]
 async fn test_rlc_view_end_conditions() {
     let (capture, _guard) = capture_logs();
@@ -733,6 +749,7 @@ async fn test_rlc_view_end_conditions() {
         );
         assert_ended_shown(&h, &spy).await;
         check_ended_line(&capture, &mut ended, 1);
+        assert_immediate_restart(&h).await;
     }
     // max_view_s.
     {
@@ -751,6 +768,7 @@ async fn test_rlc_view_end_conditions() {
         assert!(view.trailer);
         assert_ended_shown(&h, &spy).await;
         check_ended_line(&capture, &mut ended, 1);
+        assert_immediate_restart(&h).await;
     }
     // Client close.
     {
@@ -889,7 +907,10 @@ async fn test_rlc_view_end_conditions() {
             String::from_utf8_lossy(&held.buf)
         );
         let state = camera_state(&h, &Via::Tailnet).await;
-        assert_eq!(state["state"], "idle", "no cooldown: {state}");
+        assert_eq!(
+            state["state"], "idle",
+            "idle after a stop without pixels: {state}"
+        );
         assert_eq!(spy.dropped(), spy.built());
         check_ended_line(&capture, &mut ended, 0);
         assert_eq!(
@@ -1132,7 +1153,7 @@ async fn test_rlc_first_frame_failures_are_json_errors() {
         .await
         .view();
     assert_eq!(view.head.status, 200);
-    // None of the failed views set a cooldown (checked by the successive starts).
+    // Each failed view left the slot idle (checked by the successive starts).
 }
 
 // ---------------------------------------------------------------------------------------

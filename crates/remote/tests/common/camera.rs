@@ -76,7 +76,7 @@ pub const PARTIAL_BODY_ROUNDS: u32 = 64;
 /// Virtual time granted to a partially received refusal body beyond `max_ms`.
 pub const PARTIAL_BODY_GRACE_MS: u64 = 1_000;
 /// Real-time budget of one harness: `FrozenClock` releases after `WALL_CLOCK_FALLBACK`
-/// (20 s), after which tokio auto-advance could fire the stall, TTL and cooldown timers.
+/// (20 s), after which tokio auto-advance could fire the stall and TTL timers.
 pub const HARNESS_REAL_BUDGET: Duration = Duration::from_secs(17);
 
 /// Real-time budget of one harness (auditor B9): a sub-case that would outlive the

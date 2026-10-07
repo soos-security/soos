@@ -252,18 +252,18 @@ impl CameraRuntime {
             .map_or(true, |slot| slot.stop_requested(view))
     }
 
-    /// Phase and remaining cooldown (a poisoned lock reads as idle).
+    /// Phase of the slot (a poisoned lock reads as idle).
     #[must_use]
-    pub fn phase(&self, now: Instant) -> (SlotPhase, Option<u64>) {
+    pub fn phase(&self, now: Instant) -> SlotPhase {
         self.slot
             .lock()
-            .map_or((SlotPhase::Idle, None), |slot| slot.phase(now))
+            .map_or(SlotPhase::Idle, |slot| slot.phase(now))
     }
 
     /// Ends `view`.
-    fn end(&self, now: Instant, view: u64, shown: bool) {
+    fn end(&self, view: u64) {
         if let Ok(mut slot) = self.slot.lock() {
-            slot.end(now, view, shown);
+            slot.end(view);
         }
     }
 
@@ -308,7 +308,7 @@ impl ViewGuard {
         }
     }
 
-    /// Records that pixels were shown (cooldown and `camera view ended` at the end).
+    /// Records that pixels were shown (`camera view ended` at the end).
     pub fn set_shown(&mut self) {
         self.shown = true;
     }
@@ -316,7 +316,7 @@ impl ViewGuard {
 
 impl Drop for ViewGuard {
     fn drop(&mut self) {
-        self.runtime.end(Instant::now(), self.view, self.shown);
+        self.runtime.end(self.view);
         if self.shown {
             audit::camera_view_ended();
         }

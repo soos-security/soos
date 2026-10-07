@@ -515,8 +515,6 @@ pub const CAMERA_VIEW_TOKEN_BYTES: usize = 32;
 pub const CAMERA_VIEW_TOKEN_B64_LEN: usize = 43;
 /// Lifetime of a stream token (start → stream request).
 pub const CAMERA_VIEW_TOKEN_TTL_MS: u64 = 10_000;
-/// Cooldown after a view that showed pixels.
-pub const CAMERA_VIEW_COOLDOWN_MS: u64 = 10_000;
 /// Stream request → first JPEG; exceeded → JSON error, no head.
 pub const CAMERA_FIRST_FRAME_TIMEOUT_MS: u64 = 5_000;
 /// No new frame sent for this long → the view ends.

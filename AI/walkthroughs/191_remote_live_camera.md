@@ -202,7 +202,8 @@ finding remains. Open items:
      about 1 s at about 5 fps for up to 120 s, and the camera LED is on.
   4. With `soos-gui` closed, face unlock at the PC's lock screen still works during the view.
   5. The push "camera view started" arrives (when Web Push is set up).
-  6. *Stop camera view* ends the view at once; a second start within 10 s is refused (`camera_cooldown`).
+  6. *Stop camera view* ends the view at once; a new start right after it succeeds (no cooldown since section 11).
+  6a. A tap on the image toggles full screen (✕, Escape or a second tap exits); *Rotate* turns the image by 90°.
   7. After a full logout at the PC, a start is refused (`camera_refused`).
   8. Optionally, over Funnel with `camera_view_funnel = true`, repeat steps 3 and 6.
 - The owner should confirm the M11 installer-test amendment before the merge.
@@ -224,3 +225,33 @@ reader fails. The owner approved changing the head's `Content-Type` to `applicat
 Test 27 (`test_rlc_stream_is_multipart_jpeg`) now expects `application/octet-stream`; every other assertion is
 unchanged. The ADR transport item, `Docs/REMOTE_COMPANION.md` §2f/§6, `AI/ARCHITECTURE.md` §13 and matrix row RLC10
 were updated accordingly.
+
+## 11. Owner Request: Full Screen, Rotation and No Cooldown (2026-10-07)
+
+Once the live view worked on the owner's iPhone, the owner asked for a tap-to-full-screen view with a way out, a
+portrait/landscape rotation, and no countdown between stopping and restarting a view.
+
+- **No cooldown (migration M13).** `CAMERA_VIEW_COOLDOWN_MS`, the slot's `cooldown_until` state, `SlotPhase::Cooldown`,
+  `SlotError::Cooldown` and the `429 camera_cooldown` answer are removed. `ViewSlot::end(view)` returns the slot to
+  `Idle` at once and `ViewSlot::phase` returns a bare `SlotPhase`. `GET /api/camera` keeps its JSON shape minus
+  `cooldown_ms`; `state` is `disabled|idle|pending|starting|streaming`. A new view still needs its own fresh Face ID
+  assertion, there is still one global view slot, and the shared failure lockout is unchanged. The owner approved
+  turning the cooldown tests into "no cooldown" assertions; the old and new rules are listed as M13a–M13l in
+  `AI/tester_contract_remote_live_camera.md`.
+- **Full screen.** The canvas now sits in a runtime-built `.camera-stage` (no new markup id). A tap (or Enter/Space on
+  the focused image) toggles the `camera-full` class: a fixed full-viewport overlay in the brand ink
+  (`--text` in light, `--page` in dark, both ink), padded by `env(safe-area-inset-*)`, the image scaled with
+  `object-fit: contain`. Where `requestFullscreen` / `webkitRequestFullscreen` exist (iPad, desktop) the stage also
+  enters element fullscreen; iPhone Safari has none, so the overlay alone covers the home-screen app. Exit: a second
+  tap, the **✕** button (`aria-label` "Exit full screen"), Escape, the browser's own exit (`fullscreenchange` /
+  `webkitfullscreenchange`), and always in `endCameraView` (stop, maximum duration, error, page hidden, `pagehide`).
+- **Rotation.** **Rotate** cycles 0/90/180/270 degrees by toggling `camera-rot-90|180|270` on the stage (classList
+  only; no inline style, CSSOM style or storage, CSP unchanged). The stage is a CSS size container; turned by 90 or
+  270 degrees the canvas box takes the container's height x width before the `rotate()` transform, so the image
+  still fits, and the card stage switches from 4:3 to 3:4 (at most 70vh). The rotation is kept in memory for the
+  page lifetime (the next view starts with the same orientation) and is never persisted (RLC-S12).
+- **Service worker.** `sw.js` only shows notifications and versions no asset cache, so there is nothing to bump; the
+  page and its assets are served with `Cache-Control: no-store`.
+- **Tests.** New invariant test 60 `test_rlc_page_fullscreen_rotate_and_no_cooldown`; migrated slot, config and
+  server tests per M13. Docs: ADR item (5) amendment note, `Docs/REMOTE_COMPANION.md` §2f/§6/§7, matrix RLC9/RLC16,
+  `AI/ARCHITECTURE.md` §13.

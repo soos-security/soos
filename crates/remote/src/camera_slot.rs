@@ -1,10 +1,11 @@
 //! Pure view slot and stream token of the live camera view (ADR 2026-10-07, architect spec
 //! §7).
 //!
-//! One global slot: `Idle` (optionally in cooldown) → `Pending` (token reserved after a
-//! verified passkey assertion, valid `CAMERA_VIEW_TOKEN_TTL_MS`) → `Starting` (stream request
-//! accepted, first frame pending) → `Streaming` → `Idle` with a cooldown when pixels were
-//! shown. Every method receives the current time; nothing here reads a clock, logs or does
+//! One global slot: `Idle` → `Pending` (token reserved after a verified passkey assertion,
+//! valid `CAMERA_VIEW_TOKEN_TTL_MS`) → `Starting` (stream request accepted, first frame
+//! pending) → `Streaming` → `Idle`. There is no cooldown between views (removed at the
+//! owner's request on 2026-10-07): a new view may be reserved as soon as the previous one
+//! ended, still behind a fresh passkey assertion. Every method receives the current time; nothing here reads a clock, logs or does
 //! I/O. The token is 32 CSPRNG bytes, single use, bound to its owner, compared in constant
 //! time, zeroized on drop and never printed.
 
@@ -17,10 +18,7 @@ use tokio::time::Instant;
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::identity::PathClass;
-use crate::{
-    CAMERA_VIEW_COOLDOWN_MS, CAMERA_VIEW_TOKEN_B64_LEN, CAMERA_VIEW_TOKEN_BYTES,
-    CAMERA_VIEW_TOKEN_TTL_MS,
-};
+use crate::{CAMERA_VIEW_TOKEN_B64_LEN, CAMERA_VIEW_TOKEN_BYTES, CAMERA_VIEW_TOKEN_TTL_MS};
 
 /// 32-byte single-use stream token. Manual redacted `Debug`, zeroized on drop, compared in
 /// constant time.
@@ -126,7 +124,7 @@ impl fmt::Debug for ViewOwner {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SlotPhase {
-    /// No view and no cooldown.
+    /// No view.
     Idle,
     /// A token is reserved.
     Pending,
@@ -134,8 +132,6 @@ pub enum SlotPhase {
     Starting,
     /// Frames are being sent.
     Streaming,
-    /// A view ended recently.
-    Cooldown,
 }
 
 /// Why the slot refused an operation.
@@ -144,12 +140,6 @@ pub enum SlotError {
     /// `409 view_in_progress`.
     #[error("a camera view is in progress")]
     Busy,
-    /// `429 camera_cooldown` (remaining ms in the body).
-    #[error("camera view cooldown")]
-    Cooldown {
-        /// Remaining cooldown in milliseconds.
-        remaining_ms: u64,
-    },
     /// `403 view_token_rejected`.
     #[error("view token rejected")]
     TokenRejected,
@@ -166,9 +156,7 @@ pub struct ViewTicket {
 
 /// Internal slot state.
 enum SlotState {
-    Idle {
-        cooldown_until: Option<Instant>,
-    },
+    Idle,
     Pending {
         token: ViewToken,
         owner: ViewOwner,
@@ -198,36 +186,21 @@ impl Default for ViewSlot {
     }
 }
 
-/// Milliseconds from `now` until `until`, rounded up (0 when elapsed).
-fn remaining_ms(until: Instant, now: Instant) -> u64 {
-    let left = until.saturating_duration_since(now);
-    let whole = u64::try_from(left.as_millis()).unwrap_or(u64::MAX);
-    if left.subsec_nanos().is_multiple_of(1_000_000) {
-        whole
-    } else {
-        whole.saturating_add(1)
-    }
-}
-
 impl ViewSlot {
-    /// An idle slot without cooldown.
+    /// An idle slot.
     #[must_use]
     pub fn new() -> Self {
         Self {
-            state: SlotState::Idle {
-                cooldown_until: None,
-            },
+            state: SlotState::Idle,
             next_view: Some(1),
         }
     }
 
-    /// Expires a `Pending` reservation whose `expires <= now` (Idle, no cooldown).
+    /// Expires a `Pending` reservation whose `expires <= now` (Idle).
     fn expire(&mut self, now: Instant) {
         if let SlotState::Pending { expires, .. } = &self.state {
             if *expires <= now {
-                self.state = SlotState::Idle {
-                    cooldown_until: None,
-                };
+                self.state = SlotState::Idle;
             }
         }
     }
@@ -236,17 +209,11 @@ impl ViewSlot {
     ///
     /// # Errors
     ///
-    /// [`SlotError::Cooldown`] in a cooldown, [`SlotError::Busy`] while a view is pending,
-    /// starting or streaming.
+    /// [`SlotError::Busy`] while a view is pending, starting or streaming.
     pub fn check(&mut self, now: Instant) -> Result<(), SlotError> {
         self.expire(now);
         match &self.state {
-            SlotState::Idle { cooldown_until } => match cooldown_until {
-                Some(until) if *until > now => Err(SlotError::Cooldown {
-                    remaining_ms: remaining_ms(*until, now),
-                }),
-                _ => Ok(()),
-            },
+            SlotState::Idle => Ok(()),
             SlotState::Pending { .. }
             | SlotState::Starting { .. }
             | SlotState::Streaming { .. } => Err(SlotError::Busy),
@@ -333,16 +300,14 @@ impl ViewSlot {
         }
     }
 
-    /// Stops what the slot holds: a `Pending` reservation is cancelled (Idle, no cooldown);
+    /// Stops what the slot holds: a `Pending` reservation is cancelled (Idle);
     /// a `Starting`/`Streaming` view gets a durable stop flag (kept until `end`). `false` when
     /// idle.
     pub fn stop(&mut self) -> bool {
         match &mut self.state {
-            SlotState::Idle { .. } => false,
+            SlotState::Idle => false,
             SlotState::Pending { .. } => {
-                self.state = SlotState::Idle {
-                    cooldown_until: None,
-                };
+                self.state = SlotState::Idle;
                 true
             }
             SlotState::Starting { stop, .. } | SlotState::Streaming { stop, .. } => {
@@ -366,46 +331,36 @@ impl ViewSlot {
                 stop,
                 ..
             } => *current != view || *stop,
-            SlotState::Idle { .. } | SlotState::Pending { .. } => true,
+            SlotState::Idle | SlotState::Pending { .. } => true,
         }
     }
 
-    /// Ends `view`: Idle, with a cooldown when it showed pixels. Another view id is a no-op.
-    pub fn end(&mut self, now: Instant, view: u64, shown: bool) {
+    /// Ends `view`: the slot is Idle at once (no cooldown). Another view id is a no-op.
+    pub fn end(&mut self, view: u64) {
         let holds = matches!(
             &self.state,
             SlotState::Starting { view: current, .. } | SlotState::Streaming { view: current, .. }
                 if *current == view
         );
         if holds {
-            self.state = SlotState::Idle {
-                cooldown_until: shown.then(|| {
-                    now.checked_add(Duration::from_millis(CAMERA_VIEW_COOLDOWN_MS))
-                        .unwrap_or(now)
-                }),
-            };
+            self.state = SlotState::Idle;
         }
     }
 
-    /// Read-only phase and remaining cooldown (ms).
+    /// Read-only phase (an expired reservation reads as Idle).
     #[must_use]
-    pub fn phase(&self, now: Instant) -> (SlotPhase, Option<u64>) {
+    pub fn phase(&self, now: Instant) -> SlotPhase {
         match &self.state {
-            SlotState::Idle { cooldown_until } => match cooldown_until {
-                Some(until) if *until > now => {
-                    (SlotPhase::Cooldown, Some(remaining_ms(*until, now)))
-                }
-                _ => (SlotPhase::Idle, None),
-            },
+            SlotState::Idle => SlotPhase::Idle,
             SlotState::Pending { expires, .. } => {
                 if *expires <= now {
-                    (SlotPhase::Idle, None)
+                    SlotPhase::Idle
                 } else {
-                    (SlotPhase::Pending, None)
+                    SlotPhase::Pending
                 }
             }
-            SlotState::Starting { .. } => (SlotPhase::Starting, None),
-            SlotState::Streaming { .. } => (SlotPhase::Streaming, None),
+            SlotState::Starting { .. } => SlotPhase::Starting,
+            SlotState::Streaming { .. } => SlotPhase::Streaming,
         }
     }
 

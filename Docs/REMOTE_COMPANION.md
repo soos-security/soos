@@ -530,9 +530,11 @@ returns a single-use stream token (256 random bits, valid 10 s, bound to the cal
 Funnel session, carried only in the path, never logged); the page then opens
 `GET /api/camera/stream/<token>` with `X-Soos-Action: camera-stream`.
 
-**One view, bounded.** One view at a time for the whole PC (`409 view_in_progress`), a 10 s
-cooldown after a view that showed pixels (`429 camera_cooldown` with `retry_after_ms`), and a
-maximum duration of `camera_max_view_s`. The view also ends on *Stop camera view*
+**One view, bounded.** One view at a time for the whole PC (`409 view_in_progress`) and a
+maximum duration of `camera_max_view_s`. There is **no cooldown** between views (removed at
+the owner's request on 2026-10-07): right after a view ends (stop, maximum duration, error) a
+new one can start at once, still behind its own fresh Face ID assertion and the shared
+failure lockout. The view also ends on *Stop camera view*
 (`POST /api/camera/stop`, any signed-in caller may stop), when the page is hidden or closed,
 when the connection closes, when a part cannot be written within 2 s, when the Funnel web
 session expires (checked every 5 s), when no new frame could be sent for 5 s, on a daemon
@@ -549,6 +551,19 @@ failed", seen on the owner's iPhone on 2026-10-07). The `200` head is sent only 
 failure is a JSON error the page can explain (`camera_refused`, `camera_unavailable`,
 `camera_format_unsupported`). Only Grey, YUYV and RGB24 preview frames are converted;
 `soos-remote` contains no image decoder.
+
+**Full screen and rotation.** A tap on the live image toggles **full screen**: the image
+fills the screen on the brand ink background, inside the iPhone safe areas, scaled to fit
+without cropping. Where the browser offers element fullscreen (iPad, desktop browsers) the
+page also requests it; iPhone Safari has none, so there the page uses a fixed full-viewport
+overlay, which in the home-screen app covers the whole screen. Full screen is left by tapping
+the image again, by the **✕** button ("Exit full screen"), by the Escape key or the browser's
+own exit gesture, and always when the view ends (stop, maximum duration, error, page hidden or
+left). The **Rotate** button turns the image by 90° steps (0, 90, 180, 270 degrees) for a
+portrait or landscape picture, in the card as in full screen; turned by 90 or 270 degrees the
+image is refitted to the box. The rotation is applied with CSS classes only (the Content
+Security Policy is unchanged), is kept in memory for the life of the page, so the next view
+starts with the same orientation, and is never stored.
 
 **Awareness.** The camera **LED** lights while the daemon captures, and stays on for about 10 s
 after the last frame; it is the only indicator at the PC (no on-screen indicator). With push
@@ -622,10 +637,12 @@ app on the tailnet:
    120 s; the camera LED is on;
 2. with `soos-gui` closed, face unlock at the PC's lock screen still works during the view;
 3. the push "camera view started" arrives (when section 2d is set up);
-4. *Stop camera view* ends the view at once; a second start within 10 s is refused
-   (`camera_cooldown`);
-5. after a full logout at the PC, a start is refused (`camera_refused`);
-6. optionally, over Funnel with `camera_view_funnel = true`, steps 1 and 4 again (the frame
+4. *Stop camera view* ends the view at once; a new start right after it succeeds (after Face
+   ID, no countdown, no waiting);
+5. a tap on the image shows it full screen; tapping again or **✕** returns to the card;
+   **Rotate** turns the image by 90° each time, in the card and in full screen;
+6. after a full logout at the PC, a start is refused (`camera_refused`);
+7. optionally, over Funnel with `camera_view_funnel = true`, steps 1 and 4 again (the frame
    rate over Funnel is bounded by Tailscale's relay throughput).
 
 ## 3. Requirements on the desktop
@@ -835,9 +852,9 @@ The service also refuses to start when its real or effective uid is 0.
 | `POST /api/push/subscribe` | `X-Soos-Action: push-subscribe`, the browser's subscription JSON (at most 2 KiB): `200 subscribed`, `400 bad_request` / `unsupported_push_service`, `403 forbidden` / `push_disabled`, `409 too_many_subscriptions`, `413 body_too_large`, `429 rate_limited` (one per second, shared with unsubscribe), `503 unavailable` / `store_unavailable` |
 | `POST /api/push/unsubscribe` | `X-Soos-Action: push-unsubscribe`, `{"endpoint":…}`: `200 unsubscribed` (also for an unknown endpoint), `400`, `403`, `429`, `503` as above |
 | `POST /api/push/test` | no body; `X-Soos-Action: push-test`: `202 test_queued`, `409 no_subscriptions`, `429 rate_limited` (one per 10 s), `403`, `503` as above |
-| `GET /api/camera` | tailnet, or Funnel with a session: `200 {enabled, reachable, state, cooldown_ms, max_view_s, fps, width}`; `state` is `disabled`, `idle`, `pending`, `starting`, `streaming` or `cooldown`; never a token or a frame property |
+| `GET /api/camera` | tailnet, or Funnel with a session: `200 {enabled, reachable, state, max_view_s, fps, width}`; `state` is `disabled`, `idle`, `pending`, `starting` or `streaming` (no cooldown state since 2026-10-07); never a token or a frame property |
 | `POST /api/auth/camera/options` | `X-Soos-Action: camera-options`, `Origin` = `https://<rp_id>`: a `CameraView` challenge (`200 {challenge, rp_id, timeout_ms}`), `403 forbidden` / `camera_disabled` / `camera_tailnet_only` / `passkeys_not_configured`, `409 no_passkey`, `429 rate_limited` / `too_many_challenges`, `503 unavailable` / `store_unavailable` |
-| `POST /api/camera/start` | `X-Soos-Action: camera-view`, JSON assertion body (section 2f): `200 {"result":"view_ready","stream_path":"/api/camera/stream/<token>","token_ttl_ms":10000,…}`, `403 forbidden` / `camera_disabled` / `camera_tailnet_only` / `passkeys_not_configured` / `passkey_required` / `passkey_rejected`, `400 bad_request`, `413 body_too_large`, `409 view_in_progress`, `429 rate_limited` / `{"result":"camera_cooldown","retry_after_ms":N}`, `503 unavailable` / `store_unavailable` |
+| `POST /api/camera/start` | `X-Soos-Action: camera-view`, JSON assertion body (section 2f): `200 {"result":"view_ready","stream_path":"/api/camera/stream/<token>","token_ttl_ms":10000,…}`, `403 forbidden` / `camera_disabled` / `camera_tailnet_only` / `passkeys_not_configured` / `passkey_required` / `passkey_rejected`, `400 bad_request`, `413 body_too_large`, `409 view_in_progress`, `429 rate_limited`, `503 unavailable` / `store_unavailable` |
 | `GET /api/camera/stream/<token>` | `X-Soos-Action: camera-stream`: `200 application/octet-stream` (`soosframe` JPEG parts until the view ends), or before the head `403 forbidden` / `camera_disabled` / `camera_tailnet_only` / `view_token_rejected` / `camera_refused`, `503 camera_unavailable` / `camera_format_unsupported`; `HEAD` → `405` |
 | `POST /api/camera/stop` | no body; `X-Soos-Action: camera-stop`: `200 stopped` / `no_view`, `403 forbidden` / `camera_disabled` |
 | `HEAD` of a `GET` route | same headers, empty body |
@@ -894,7 +911,7 @@ reason classes.
 | Camera: `503 camera_unavailable` | The daemon is stopped, the camera gives no frame, or the daemon connection failed | `systemctl status soos-daemon`; retry |
 | Camera: `503 camera_format_unsupported` | The camera delivers NV12 or MJPEG previews, which `soos-remote` does not convert | Not supported in this version |
 | Camera: `403 camera_tailnet_only` | Over Funnel without `camera_view_funnel = true` | Use the tailnet, or section 2f |
-| Camera: `429 camera_cooldown` / `409 view_in_progress` | A view ended less than 10 s ago, or another view is open | Wait, or stop the other view |
+| Camera: `409 view_in_progress` | Another view is open (one view for the whole PC; there is no cooldown after a view) | Stop the other view, then start again |
 | Face unlock falls back to the password during a view | The view and `soos-gui` hold both daemon connections of your UID (`max_connections_per_uid` = 2) | Close `soos-gui` during a view, or raise `max_connections_per_uid` (section 2f) |
 | Signed in in Safari but the home-screen app asks again | Safari and the home-screen app keep separate cookies | Sign in once in each |
 

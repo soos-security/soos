@@ -1083,3 +1083,134 @@ fn test_rlc_s10_no_decoder_and_no_device_access_in_remote() {
         }
     }
 }
+
+// ---------------------------------------------------------------------------------------
+// Test 60 — owner request 2026-10-07: full screen, rotation, no cooldown (M13)
+// ---------------------------------------------------------------------------------------
+
+/// The live view toggles a full-screen stage by a tap (element fullscreen when the browser
+/// has it, a fixed overlay otherwise), offers a visible exit control and the Escape key,
+/// rotates the image by 90° steps through CSS classes only, always leaves full screen when
+/// the view ends, and shows no cooldown anywhere (migration M13).
+#[test]
+fn test_rlc_page_fullscreen_rotate_and_no_cooldown() {
+    let app = read("crates/remote/assets/app.js");
+    for needle in [
+        "requestFullscreen",
+        "webkitRequestFullscreen",
+        "exitFullscreen",
+        "webkitExitFullscreen",
+        "fullscreenchange",
+        "webkitfullscreenchange",
+        "\"Escape\"",
+        "\"Exit full screen\"",
+        "\"Rotate\"",
+        "\"aria-label\"",
+        "\"camera-full\"",
+        "\"camera-rot-90\"",
+        "\"camera-rot-180\"",
+        "\"camera-rot-270\"",
+        "classList",
+        "function enterCameraFullscreen(",
+        "function exitCameraFullscreen(",
+        "function rotateCamera(",
+    ] {
+        assert!(
+            app.contains(needle),
+            "crates/remote/assets/app.js must contain {needle} (owner request 2026-10-07)"
+        );
+    }
+    for forbidden in [".style.", "cssText", "setAttribute(\"style\"", "\"style\""] {
+        assert!(
+            !app.contains(forbidden),
+            "app.js changes the view through classList only, never {forbidden} (CSP unchanged)"
+        );
+    }
+    let lower = app.to_ascii_lowercase();
+    for forbidden in ["cooldown", "next view possible", "retry_after_ms"] {
+        assert!(
+            !lower.contains(forbidden),
+            "app.js must not mention {forbidden} (M13: no cooldown between views)"
+        );
+    }
+    let end_at = app
+        .find("function endCameraView(")
+        .expect("app.js defines endCameraView");
+    assert!(
+        block_from(&app, end_at).contains("exitCameraFullscreen("),
+        "every end of the view (stop, max duration, error, pagehide) leaves full screen"
+    );
+    let canvas_at = app
+        .find("function buildCameraCard(")
+        .expect("app.js defines buildCameraCard");
+    let card = block_from(&app, canvas_at);
+    assert!(
+        card.contains("toggleCameraFullscreen"),
+        "a tap on the live image toggles full screen"
+    );
+
+    let css = read("crates/remote/assets/style.css");
+    for needle in [
+        ".camera-stage",
+        ".camera-full",
+        "position: fixed",
+        "object-fit: contain",
+        ".camera-rot-90",
+        ".camera-rot-180",
+        ".camera-rot-270",
+        "rotate(90deg)",
+        "rotate(180deg)",
+        "rotate(270deg)",
+    ] {
+        assert!(
+            css.contains(needle),
+            "crates/remote/assets/style.css must contain {needle}"
+        );
+    }
+    let full_at = css
+        .find("\n.camera-stage.camera-full {")
+        .expect("style.css has a top-level `.camera-stage.camera-full` rule");
+    let full = block_from(&css, full_at);
+    for needle in ["position: fixed", "inset: 0", "env(safe-area-inset-"] {
+        assert!(
+            full.contains(needle),
+            "the full-screen stage rule must contain {needle}: {full}"
+        );
+    }
+
+    let lib = strip_comments(&read("crates/remote/src/lib.rs"));
+    assert!(
+        !lib.contains("CAMERA_VIEW_COOLDOWN_MS"),
+        "M13: CAMERA_VIEW_COOLDOWN_MS is removed"
+    );
+    for (rel, code) in camera_sources().into_iter().chain([(
+        "crates/remote/src/server.rs".to_string(),
+        strip_comments(&read("crates/remote/src/server.rs")),
+    )]) {
+        let lower = code.to_ascii_lowercase();
+        for forbidden in ["cooldown", "retry_after_ms"] {
+            assert!(
+                !lower.contains(forbidden),
+                "{rel} must not contain {forbidden} (M13: no cooldown between views)"
+            );
+        }
+    }
+
+    let doc = read("Docs/REMOTE_COMPANION.md");
+    let section = markdown_section(&doc, "## 2f.").expect("Docs/REMOTE_COMPANION.md §2f");
+    for needle in ["full screen", "Rotate", "no cooldown"] {
+        assert!(
+            section.contains(needle),
+            "Docs/REMOTE_COMPANION.md §2f must mention {needle}"
+        );
+    }
+    assert!(
+        !doc.contains("camera_cooldown"),
+        "Docs/REMOTE_COMPANION.md no longer documents camera_cooldown"
+    );
+    let contract = read("AI/tester_contract_remote_live_camera.md");
+    assert!(
+        contract.contains("M13"),
+        "AI/tester_contract_remote_live_camera.md records migration M13"
+    );
+}
