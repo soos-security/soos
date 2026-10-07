@@ -84,6 +84,19 @@ The production `ZbusSessionSource` is exercised only on the owner's host; its pu
 mapping `session_props_from_properties` is tested with hand-built `zvariant::OwnedValue` maps,
 and the socket helpers over `TempDir` (symlink, regular file and foreign-uid cases).
 
+### Battery level doubles (ADR 2026-10-07 "Live Battery Level in `soos-remote`", GitHub #346)
+`crates/remote/tests/common/battery.rs` tests the battery level without the real `/sys`:
+- **`FakeSysfs`**: a `tempfile::TempDir` standing for `/sys/class/power_supply` (one plain
+  directory per supply, one file per attribute), with helpers for FIFOs, directory and symlink
+  attributes, raw-byte entry names and an unreadable root; the production `SysfsBattery::new`
+  reads it. `SysfsBattery::kernel()` is only constructed in tests, never read.
+- **`ScriptedBattery`**: a `BatterySource` returning a settable view and counting calls, in four
+  modes (immediate, delayed by a real-time duration, gated until a `GateRelease` guard drops, to
+  model a hung driver, and panicking); `Tracked<S>` / `Probe` count started and finished reads
+  so a test waits in real time for the blocking pool before it moves the paused clock.
+- `battery_server_tests.rs` injects either through `ServerState::with_battery` and moves virtual
+  time only with `tokio::time::advance`.
+
 ### Funnel and passkey doubles (ADR 2026-10-06 "Tailscale Funnel Access and In-House Passkey Authentication for `soos-remote`")
 The Funnel path and the WebAuthn ceremonies are tested without Tailscale, without an iPhone and
 without a platform authenticator. The shared harness moved to `crates/remote/tests/common/`

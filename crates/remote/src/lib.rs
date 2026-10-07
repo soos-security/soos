@@ -26,6 +26,11 @@
 //! recording (ADR 2026-10-07 "Live Camera View in `soos-remote` Through the Daemon Preview
 //! Channel").
 //!
+//! It also shows the PC's battery level on the same page: level, charge state and mains
+//! presence only, read from the kernel power-supply class directory with bounded, read-only
+//! accesses, sent as `event: battery` on the status stream and as `GET /api/battery`, with
+//! the visibility of `/api/status` (ADR 2026-10-07 "Live Battery Level in `soos-remote`").
+//!
 //! This file is the single source of the crate constants (architect spec §3).
 
 #![forbid(unsafe_code)]
@@ -34,6 +39,7 @@ pub mod alerts;
 pub mod assets;
 pub mod audit;
 pub mod auth;
+pub mod battery;
 pub mod camera;
 pub mod camera_ipc;
 pub mod camera_jpeg;
@@ -604,3 +610,35 @@ const _: () = assert!(CAMERA_DAEMON_SERVICE.len() <= soos_protocol::types::MAX_S
 const _: () = assert!(CAMERA_FULL_WIDTH as usize * 2 <= u16::MAX as usize);
 const _: () = assert!(CAMERA_DAEMON_CLOSE_WAIT_MS < CAMERA_DAEMON_CONNECT_TIMEOUT_MS);
 const _: () = assert!(CAMERA_DAEMON_IDLE_RETRIES == 1);
+
+// ---------------------------------------------------------------------------------------
+// Battery level (ADR 2026-10-07 "Live Battery Level in `soos-remote`", architect spec
+// `AI/architect_spec_remote_battery.md` §3).
+// ---------------------------------------------------------------------------------------
+
+/// Production power-supply class directory (the only `/sys` literal of the crate).
+pub const POWER_SUPPLY_ROOT: &str = "/sys/class/power_supply";
+/// Most directory entries examined under the root; one more → `BatteryState::Unavailable`.
+pub const MAX_POWER_SUPPLIES: usize = 64;
+/// Most included system batteries; one more → `BatteryState::Unavailable`.
+pub const MAX_BATTERIES: usize = 8;
+/// Longest accepted entry name (bytes); longer → entry skipped.
+pub const MAX_POWER_SUPPLY_NAME_LEN: usize = 64;
+/// Largest attribute value read (bytes, trailing newline included); larger → malformed.
+pub const MAX_SYSFS_VALUE_BYTES: usize = 32;
+/// Most ASCII digits of an energy/charge value (µWh/µAh); more → malformed.
+pub const MAX_SYSFS_MICRO_DIGITS: usize = 19;
+/// Bound of one whole sysfs read on the blocking pool (ms); exceeded → `Unavailable`.
+pub const BATTERY_READ_TIMEOUT_MS: u64 = 500;
+/// Sampler period while at least one stream is open, and the cache lifetime (ms).
+pub const BATTERY_SAMPLE_INTERVAL_MS: u64 = 5000;
+/// Longest wait for blocking-pool tasks when the service runtime shuts down (ms); a read stuck
+/// in a hung driver is abandoned after it (`main.rs::run_service`, B-13).
+pub const RUNTIME_SHUTDOWN_TIMEOUT_MS: u64 = 1000;
+
+const _: () = assert!(BATTERY_READ_TIMEOUT_MS < BATTERY_SAMPLE_INTERVAL_MS);
+const _: () = assert!(BATTERY_SAMPLE_INTERVAL_MS < SSE_KEEPALIVE_MS);
+const _: () = assert!(MAX_BATTERIES <= MAX_POWER_SUPPLIES);
+// Any value of at most `MAX_SYSFS_MICRO_DIGITS` digits fits a `u64`.
+const _: () = assert!(MAX_SYSFS_MICRO_DIGITS < 20);
+const _: () = assert!(BATTERY_READ_TIMEOUT_MS < RUNTIME_SHUTDOWN_TIMEOUT_MS);

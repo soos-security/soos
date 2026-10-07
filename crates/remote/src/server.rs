@@ -44,6 +44,13 @@
 //! returns a single-use stream token; `GET /api/camera/stream/<token>` answers its `200` head
 //! only once the first JPEG is ready and then streams `soosframe` multipart parts until
 //! an end condition. Tailnet only unless `camera_view_funnel = true`. Never recorded.
+//!
+//! Battery level (ADR 2026-10-07 "Live Battery Level in `soos-remote`"): when
+//! `battery_status = true` and a source is wired, `serve` supervises a sampler that reads the
+//! source every `BATTERY_SAMPLE_INTERVAL_MS` only while a stream is open. `GET /api/battery`
+//! has the visibility of `/api/status` (never Funnel-public); event streams add
+//! `event: battery` after the first status (and alerts) event, then only when the view
+//! changes, re-validating a Funnel session before each one.
 
 use std::future::Future;
 use std::io::ErrorKind;
@@ -71,6 +78,7 @@ use crate::auth::{
     AssertionFailure, AuthState, BodyReadGuard, Capacity, FunnelStreamGuard, LimitKey,
     RandomSource, Verified,
 };
+use crate::battery::{run_sampler, BatteryRuntime, BatterySource, BatteryView};
 use crate::camera::{
     finish_view, log_unshown_end, CameraRuntime, CameraSettings, FirstFrame, SessionCheck,
     ViewContext, ViewEnd, ViewGuard,
@@ -87,8 +95,8 @@ use crate::credentials::{
 use crate::enroll::{normalized_code_hash, read_code_file, remove_code_file, EnrollError};
 use crate::http::{
     encode_camera_stream_head, encode_response, encode_response_head, encode_sse_alerts_event,
-    encode_sse_event, encode_sse_head, parse_request, read_body, write_bounded, BodyError,
-    HttpError, Method, ParsedRequest, RequestHead, Response, WriteError,
+    encode_sse_battery_event, encode_sse_event, encode_sse_head, parse_request, read_body,
+    write_bounded, BodyError, HttpError, Method, ParsedRequest, RequestHead, Response, WriteError,
 };
 use crate::identity::{check_host, classify_request, client_hint, ClientHint, PathClass};
 use crate::journal::JournalSource;
@@ -158,6 +166,7 @@ pub struct ServerState<S: SessionSource> {
     password_alerts: Option<(AlertSettings, Arc<dyn JournalSource>)>,
     push: Option<(PushSettings, Arc<dyn PushTransport>)>,
     camera: Option<(CameraSettings, PreviewSourceFactory)>,
+    battery: Option<Arc<dyn BatterySource>>,
 }
 
 impl<S: SessionSource> ServerState<S> {
@@ -180,6 +189,7 @@ impl<S: SessionSource> ServerState<S> {
             password_alerts: None,
             push: None,
             camera: None,
+            battery: None,
         }
     }
 
@@ -190,6 +200,16 @@ impl<S: SessionSource> ServerState<S> {
     pub fn with_camera(mut self, settings: CameraSettings, factory: PreviewSourceFactory) -> Self {
         if self.config.camera.enabled {
             self.camera = Some((settings, factory));
+        }
+        self
+    }
+
+    /// Wires the battery level (production and tests). Ignored unless
+    /// `config.battery.enabled` (ADR 2026-10-07 "Live Battery Level in `soos-remote`" item (4)).
+    #[must_use]
+    pub fn with_battery(mut self, source: Arc<dyn BatterySource>) -> Self {
+        if self.config.battery.enabled {
+            self.battery = Some(source);
         }
         self
     }
@@ -354,6 +374,8 @@ struct Shared<S: SessionSource> {
     push: Option<Arc<PushRuntime>>,
     /// Live camera view (always present; without a wired factory no view can start).
     camera: Arc<CameraRuntime>,
+    /// Battery level (`None` when `battery_status` is off or no source is wired).
+    battery: Option<Arc<BatteryRuntime>>,
 }
 
 impl<S: SessionSource> Shared<S> {
@@ -361,10 +383,12 @@ impl<S: SessionSource> Shared<S> {
         state: Arc<ServerState<S>>,
         alerts: Option<Arc<AlertsRuntime>>,
         push: Option<Arc<PushRuntime>>,
+        battery: Option<Arc<BatteryRuntime>>,
     ) -> Self {
         Self {
             alerts,
             push,
+            battery,
             seq: AtomicU64::new(state.seq_start),
             fatal: AtomicBool::new(false),
             subscribers: AtomicUsize::new(0),
@@ -753,7 +777,12 @@ pub async fn serve<S: SessionSource>(
         runtime.start();
     }
     let dispatcher = push.as_ref().filter(|runtime| runtime.is_active()).cloned();
-    let shared = Arc::new(Shared::new(state, alerts, push));
+    let battery = state
+        .battery
+        .as_ref()
+        .map(|source| Arc::new(BatteryRuntime::new(Arc::clone(source))));
+    let sampler = battery.clone();
+    let shared = Arc::new(Shared::new(state, alerts, push, battery));
     let connections: Arc<Mutex<JoinSet<()>>> = Arc::new(Mutex::new(JoinSet::new()));
     let mut supervised: JoinSet<ServeError> = JoinSet::new();
     supervised.spawn(poller(Arc::clone(&shared)));
@@ -768,6 +797,13 @@ pub async fn serve<S: SessionSource>(
         // No push error ends the dispatcher; a panic is `TaskPanicked` (supervised set).
         supervised.spawn(async move {
             run_dispatcher(runtime).await;
+            std::future::pending::<ServeError>().await
+        });
+    }
+    if let Some(runtime) = sampler {
+        // The sampler never ends `serve` on its own; a panic is `TaskPanicked`.
+        supervised.spawn(async move {
+            run_sampler(runtime).await;
             std::future::pending::<ServeError>().await
         });
     }
@@ -1253,6 +1289,7 @@ async fn handle_connection<S: SessionSource>(
         Route::Alerts => Some(alerts_response(200, &alerts_view(&shared))),
         Route::AlertsAck => Some(alerts_ack(&shared, &ctx).await),
         Route::Push => Some(push_view_response(&shared).await),
+        Route::Battery => Some(battery_response(&shared).await),
         Route::PushSubscribe => {
             push_body_route(&shared, &ctx, &mut stream, PushBodyRoute::Subscribe).await
         }
@@ -2422,6 +2459,32 @@ fn camera_first_frame_refusal(runtime: &CameraRuntime, end: ViewEnd) -> Option<R
     Some(response)
 }
 
+/// `GET|HEAD /api/battery` (the disabled view when the battery level is off or unwired).
+async fn battery_response<S: SessionSource>(shared: &Shared<S>) -> Response {
+    let view = match shared.battery.as_ref() {
+        Some(runtime) => runtime.current().await,
+        None => BatteryView::disabled(),
+    };
+    match serde_json::to_vec(&view) {
+        Ok(body) => Response {
+            status: 200,
+            content_type: "application/json",
+            body,
+            extra_headers: Vec::new(),
+        },
+        Err(_) => Response::json(503, "unavailable"),
+    }
+}
+
+/// Serializes a battery view as one `event: battery` and writes it under the write bound.
+async fn send_battery_event<W: AsyncWrite + Unpin>(
+    writer: &mut W,
+    view: &BatteryView,
+) -> Result<(), WriteError> {
+    let json = serde_json::to_string(view).map_err(|_| WriteError::Io)?;
+    write_bounded(writer, &encode_sse_battery_event(&json)).await
+}
+
 /// Serializes an alerts view as one `event: alerts` and writes it under the write bound.
 async fn send_alerts_event<W: AsyncWrite + Unpin>(
     writer: &mut W,
@@ -2477,6 +2540,7 @@ async fn serve_stream<S: SessionSource>(
         });
     shared.poller_wake.notify_one();
     let _subscriber = SubscriberGuard(Arc::clone(&shared));
+    let _battery_stream = shared.battery.as_ref().map(BatteryRuntime::register_stream);
     let mut readings = shared.readings.subscribe();
     let mut closing = shared.closing.subscribe();
 
@@ -2515,6 +2579,27 @@ async fn serve_stream<S: SessionSource>(
         {
             return;
         }
+    }
+    // Battery: the first `event: battery` after the first status (and alerts) event. The
+    // receiver is created right before the first read, with no `.await` in between, so every
+    // view the sampler publishes later fires `changed()` (the cache is written before each
+    // publication); a Funnel session is re-validated before every battery event.
+    let mut battery_views = None;
+    let mut last_battery = None;
+    if let Some(runtime) = shared.battery.as_ref() {
+        if let Some(hash) = session.as_ref() {
+            if !shared.session_still_valid(hash).await {
+                debug!("stream session ended");
+                return;
+            }
+        }
+        let views = runtime.subscribe();
+        let view = runtime.current().await;
+        if send_battery_event(&mut write_half, &view).await.is_err() {
+            return;
+        }
+        last_battery = Some(view);
+        battery_views = Some(views);
     }
     let alert_interval = Duration::from_millis(ALERT_EVENT_MIN_INTERVAL_MS);
     let mut last_alert_at = Instant::now();
@@ -2613,6 +2698,31 @@ async fn serve_stream<S: SessionSource>(
                 }
                 last_alert_at = Instant::now();
                 alert_pending = false;
+            }
+            changed = async {
+                match battery_views.as_mut() {
+                    Some(views) => views.changed().await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                if changed.is_err() {
+                    break;
+                }
+                let sampled = battery_views
+                    .as_mut()
+                    .and_then(|views| *views.borrow_and_update());
+                if let Some(view) = sampled.filter(|view| Some(*view) != last_battery) {
+                    if let Some(hash) = session.as_ref() {
+                        if !shared.session_still_valid(hash).await {
+                            debug!("stream session ended");
+                            break;
+                        }
+                    }
+                    if send_battery_event(&mut write_half, &view).await.is_err() {
+                        break;
+                    }
+                    last_battery = Some(view);
+                }
             }
             () = sleep_until(session_check_at), if session.is_some() => {
                 if let Some(hash) = session.as_ref() {

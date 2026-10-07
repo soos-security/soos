@@ -5,7 +5,8 @@
 > In-House Passkey Authentication for `soos-remote`", ADR 2026-10-06 "Failed-Password Alerts in
 > `soos-remote` From the System Journal", ADR 2026-10-06 "Web Push Notifications for
 > Failed-Password Alerts Through a Separate Sender Unit", ADR 2026-10-07 "Live Camera View in
-> `soos-remote` Through the Daemon Preview Channel")
+> `soos-remote` Through the Daemon Preview Channel", ADR 2026-10-07 "Live Battery Level in
+> `soos-remote`", GitHub #346)
 > Scope: a **user-level** service that shows the owner's phone the real-time lock status of the
 > desktop session, offers a remote **lock** and, only when `allow_unlock = true`, a remote
 > **unlock** protected by a passkey (Face ID) on every request (section 2a). Optionally it is
@@ -14,7 +15,9 @@
 > PC (section 2c), never the typed password, and with `push_notifications = true` sends them to
 > the phone as push notifications even when the app is closed (section 2d). With
 > `camera_view = true` and the daemon's `[preview] remote_view = true` it also shows a live view
-> of the PC camera after Face ID (section 2f), never recorded. Nothing else (see "Out of scope").
+> of the PC camera after Face ID (section 2f), never recorded. The status card also shows the
+> PC's battery level, charge state and mains presence (section 2g, on by default,
+> `battery_status = false` turns it off). Nothing else (see "Out of scope").
 > Source of truth: `crates/remote/src/lib.rs` (constants), `crates/remote/src/config.rs`
 > (configuration keys), `crates/remote/src/server.rs` (request handling). If this document and
 > the code disagree, report the drift: the invariant `remote_companion_contract` pins the parts
@@ -53,6 +56,9 @@
 - when `camera_view = true`, asks `soos-daemon` for preview frames over its Unix socket
   (`RequestKind::PreviewFrame`) and streams them as JPEG to the page after a fresh Face ID
   (section 2f).
+- unless `battery_status = false`, reads the battery level, charge state and mains presence
+  from `/sys/class/power_supply` (read-only, bounded) and shows them on the status card
+  (section 2g).
 
 It runs as the session owner, never as root. It is **not** a camera owner (it never opens
 `/dev/video*`), a recorder (no frame, snapshot or video is ever stored), a second face
@@ -645,6 +651,60 @@ app on the tailnet:
 7. optionally, over Funnel with `camera_view_funnel = true`, steps 1 and 4 again (the frame
    rate over Funnel is bounded by Tailscale's relay throughput).
 
+## 2g. Battery level
+
+ADR 2026-10-07 "Live Battery Level in `soos-remote`" (GitHub #346). On by default;
+`battery_status = false` in `remote.toml` turns it off completely: no sysfs access at all, the
+view is `{"state":"disabled",…}` and no `event: battery` is ever sent.
+
+- **Source.** `soos-remote` reads the kernel power-supply class directory
+  `/sys/class/power_supply` itself (the user service already runs as the owner and these
+  attributes are world-readable). No daemon, D-Bus, UPower or dependency change. Only ten
+  attributes are ever opened: `type`, `scope`, `present`, `capacity`, `status`, `energy_now`,
+  `energy_full`, `charge_now`, `charge_full`, `online`. Supply names, serial numbers, model and
+  manufacturer are never read or sent; nothing is ever written.
+- **Bounds.** At most 64 class entries and 8 system batteries (one more → `unavailable`), entry
+  names of at most 64 bytes of `[A-Za-z0-9_.:-]`, regular files only (opened with
+  `O_NOFOLLOW | O_NONBLOCK`, then `fstat`), at most 32 bytes per value. One whole read runs on the
+  blocking pool under 500 ms (the wait for a concurrent read included); at most one read is in
+  flight, and every concurrent caller (the sampler, `GET /api/battery`, the first frame of a
+  stream) shares that one read (single-flight). A read stuck in a hung driver makes every later
+  attempt `unavailable` at once until it returns; no second thread is started.
+- **Cadence.** While at least one event stream is open, a sampler reads every 5 s; with no
+  stream open there is no sysfs traffic at all. `GET /api/battery` reuses a reading at most 5 s
+  old.
+- **Page.** The battery line of the status card is fed only by `event: battery` on the existing
+  `GET /api/events` stream (the page never fetches `/api/battery`): one frame right after the
+  first `status` (and `alerts`) frame of every stream, then a frame only when the view changes.
+  The line is hidden while the PC is unreachable, while the stream is down (it reappears with the
+  first battery frame of the reopened stream) and while signed out. Texts: "Battery 82%, on
+  battery", "Battery 41%, charging", "Battery 100%, full", "Battery 80%, plugged in, not
+  charging", "Battery 64%, plugged in" (charge state unknown, mains online), "No battery",
+  "Battery: unknown".
+- **Aggregation.** One battery: its firmware `capacity` (never recomputed from energy). Several:
+  energy-weighted when every battery reports a usable pair of the same kind (`energy_*` or
+  `charge_*`), else the floor mean of the capacities, else unknown. Charge state: any charging →
+  charging; else any discharging → discharging; else all full → full; else any not charging →
+  not charging; else unknown. `external_power` is `true` when any non-battery system supply
+  reports `online` 1 or 2, `false` when all report 0, unknown otherwise. `scope=Device`
+  batteries (mice, headsets) and empty bays (`present=0`) are ignored.
+- **`unavailable` and `no_battery`.** `no_battery` means a complete, readable scan found no
+  system battery (a desktop). `unavailable` means the class directory could not be read
+  completely (missing or unreadable directory, an invalid entry name or an unreadable `type`
+  without any battery, a bound exceeded, a timeout, a stuck or failed read). A malformed value
+  never becomes a guessed one: it is an unknown field.
+- **Visibility.** Exactly that of `/api/status`: tailnet callers in `allowed_logins`, or Funnel
+  callers with a web session; an anonymous Funnel request gets `403 login_required`, and a
+  stream re-validates a Funnel session before every battery event.
+
+```json
+{"state":"present","percent":82,"charge":"discharging","external_power":false}
+```
+
+`state` is one of `present`, `no_battery`, `unavailable`, `disabled`; `percent` (0..=100),
+`charge` (`charging`, `discharging`, `full`, `not_charging`, `unknown`) and `external_power` are
+`null` unless `present` (and known). Matrix rows RBS1–RBS12; invariant `remote_battery_contract`.
+
 ## 3. Requirements on the desktop
 
 - **`LockedHint` must be set by the desktop.** GNOME, Plasma and niri set it natively;
@@ -682,7 +742,8 @@ The script refuses to run as root and never calls `sudo`. It builds `soos-remote
 `packaging/soos-remote.service` to `${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/soos-remote.service`,
 writes a commented configuration template to `${XDG_CONFIG_HOME:-$HOME/.config}/soos/remote.toml`
 (mode `0600`, **only when absent**, with `allowed_logins = []` so the service refuses to start
-until you fill it in), and runs `systemctl --user daemon-reload`. It never enables the unit and
+until you fill it in; it ends with a commented `# battery_status = true` line, section 2g),
+and runs `systemctl --user daemon-reload`. It never enables the unit and
 never runs `tailscale`; those are your steps:
 
 1. Put your Tailscale login in `remote.toml`:
@@ -825,6 +886,7 @@ the PC is unreachable (off, asleep, or Tailscale disconnected).
 | `camera_fps` | no | `5` | 1..=10; frames per second sent to the phone |
 | `camera_width` | no | `640` | `640` (source size, at most 640x480) or `320` (2x downscale); any other value → refused |
 | `camera_quality` | no | `70` | 50..=85; JPEG quality |
+| `battery_status` | no | `true` | TOML boolean; false disables every sysfs read (no battery line, `GET /api/battery` answers `disabled`, section 2g); any other type → refused |
 | `socket_path` | no | `$XDG_RUNTIME_DIR/soos-remote/remote.sock` | absolute, at most 107 bytes; `XDG_RUNTIME_DIR` unset or relative without `socket_path` → refused (no `/tmp` fallback) |
 
 A missing file, an unknown key or an invalid value exits with status 78 (`EX_CONFIG`), which the
@@ -837,7 +899,7 @@ The service also refuses to start when its real or effective uid is 0.
 |---|---|
 | `GET /`, `/index.html`, `/app.js`, `/style.css`, `/manifest.webmanifest`, `/icon.svg`, `/apple-touch-icon.png` | the embedded page (strict CSP `default-src 'self'`, no inline script, no CDN) |
 | `GET /api/status` | `200 application/json` `{state, active, idle, idle_since_unix_s, checked_unix_ms}`; one fresh logind read |
-| `GET /api/events` | `200 text/event-stream`; first event = the stream's own fresh read; then an event on every change and a keep-alive at least every 15 s; `503` beyond 4 streams; closed after 30 min (the browser reconnects) |
+| `GET /api/events` | `200 text/event-stream`; first event = the stream's own fresh read; then an event on every change and a keep-alive at least every 15 s; `503` beyond 4 streams; closed after 30 min (the browser reconnects). With the battery level on, an `event: battery` follows the first status (and alerts) event, then one on every change of the battery view (section 2g) |
 | `POST /api/lock` | `202 {"result":"lock_requested"}`, `409 no_session` / `already_locked`, `429 rate_limited` (one lock per 2 s), `503 unavailable` |
 | `POST /api/unlock` | JSON assertion body (section 2a). `403 unlock_disabled` (default), `403 passkeys_not_configured`, `403 passkey_required` (no body), `403 passkey_rejected`, `400 bad_request`, `413 body_too_large`, `202 {"result":"unlock_requested"}`, `409 no_session` / `already_unlocked`, `429 rate_limited` (one unlock per 2 s, independent of the lock; or the failure lockout), `503 unavailable` / `store_unavailable` |
 | `GET /api/auth/state` | `{"mode":"tailnet"\|"funnel","authenticated",…}`; an anonymous Funnel caller gets only `{"mode":"funnel","authenticated":false}` |
@@ -847,6 +909,7 @@ The service also refuses to start when its real or effective uid is 0.
 | `POST /api/auth/register/options`, `POST /api/auth/register/verify` | tailnet only, with the code of `soos-remote enroll-code`: `200 registered`, `403 enroll_code_rejected`, `409 passkey_limit` / `already_registered` / `registration_conflict` |
 | `GET /api/alerts` | tailnet, or Funnel with a session (`403 login_required` otherwise): `200` the alerts view (section 2c); `{"state":"disabled",…}` while `password_alerts` is off |
 | `POST /api/alerts/ack` | no body; `X-Soos-Action: alerts-ack`, `X-Soos-Alerts-Epoch`, `X-Soos-Alerts-Through`: `200` the new view, `403 forbidden` (CSRF), `403 alerts_disabled`, `400 bad_request` (headers, or a `through` beyond the newest attempt), `429 rate_limited` (one per second), `409 stale_view`, `503 unavailable` |
+| `GET /api/battery` | tailnet, or Funnel with a session (`403 login_required` otherwise): `200 application/json` `{state, percent, charge, external_power}` (section 2g); `{"state":"disabled",…}` while `battery_status` is `false`; a reading at most 5 s old, or one bounded read |
 | `GET /sw.js` | the service worker (public asset, `text/javascript`); it only shows notifications |
 | `GET /api/push` | tailnet, or Funnel with a session: `{state, reason, public_key, subscriptions, devices, last_delivery, sender}`; `{"state":"disabled",…}` while `push_notifications` is off |
 | `POST /api/push/subscribe` | `X-Soos-Action: push-subscribe`, the browser's subscription JSON (at most 2 KiB): `200 subscribed`, `400 bad_request` / `unsupported_push_service`, `403 forbidden` / `push_disabled`, `409 too_many_subscriptions`, `413 body_too_large`, `429 rate_limited` (one per second, shared with unsubscribe), `503 unavailable` / `store_unavailable` |
@@ -913,6 +976,7 @@ reason classes.
 | Camera: `403 camera_tailnet_only` | Over Funnel without `camera_view_funnel = true` | Use the tailnet, or section 2f |
 | Camera: `409 view_in_progress` | Another view is open (one view for the whole PC; there is no cooldown after a view) | Stop the other view, then start again |
 | Face unlock falls back to the password during a view | The view and `soos-gui` hold both daemon connections of your UID (`max_connections_per_uid` = 2) | Close `soos-gui` during a view, or raise `max_connections_per_uid` (section 2f) |
+| The page shows "Battery: unknown" | The power-supply class could not be read completely within the bounds (an entry without a readable `type`, more than 64 entries or 8 batteries, a driver slower than 500 ms) | `cat /sys/class/power_supply/*/type`; a desktop without a battery shows "No battery" |
 | Signed in in Safari but the home-screen app asks again | Safari and the home-screen app keep separate cookies | Sign in once in each |
 
 ## 8. Residual limitations
@@ -980,6 +1044,14 @@ reason classes.
   - The camera LED is the only local indicator; there is no on-screen indicator.
   - The daemon reads the peer cgroup by PID after `SO_PEERCRED`; PID reuse within a connection
     is theoretically possible and only affects this administrative classification.
+- Battery level (section 2g): the value is only as fine as the kernel and the firmware report
+  it, and reaches the page up to about 5 s late; `external_power` is unknown without a readable
+  `online` attribute; a single battery without a readable `capacity` shows "Battery level
+  unknown" even if it exposes an energy pair (fail closed, never recomputed). At service stop
+  the runtime waits at most `RUNTIME_SHUTDOWN_TIMEOUT_MS` (1 s) for blocking tasks: a battery
+  read stuck in a hung driver is abandoned, and the same bound applies to every other blocking
+  task still running then (a push store write, which is temp file + `fsync` + `rename` and so
+  never leaves a torn store).
 - The `bind` → `chmod 0600` window of the socket is closed by the `0700` parent directory and
   the unit's `UMask=0077`; the service must therefore be started through the unit (or with the
   same umask).
@@ -998,5 +1070,7 @@ reason classes.
 - Any recording, snapshot or still image of the **live camera** view (section 2f), audio,
   H.264/WebRTC or any other live camera transport, an on-screen indicator, NV12/MJPEG
   conversion, and any embedding or evidence access.
+- Battery time-to-empty or time-to-full, battery health or cycle count, peripheral batteries
+  (`scope=Device`), low-battery notifications, any write to sysfs, UPower.
 - System-wide packaging (`install.sh`, deb/rpm/Arch): deferred until the owner approves the
   merge; `scripts/install_remote.sh` is the only installer.

@@ -22,6 +22,11 @@
 //! "Live Camera View in `soos-remote` Through the Daemon Preview Channel"): one daemon
 //! preview client per view on `/run/soos/daemon.sock` (root peer only), never a device.
 //!
+//! With `battery_status = true` (the default) the service also wires the battery level of
+//! the PC from the kernel power-supply class directory (ADR 2026-10-07 "Live Battery Level in
+//! `soos-remote`"). The runtime shutdown is bounded by `RUNTIME_SHUTDOWN_TIMEOUT_MS`, so a
+//! blocking read stuck in a hung driver never delays the service stop past that bound.
+//!
 //! Subcommand output goes through `writeln!` on a locked stdout; nothing printed ever
 //! contains a credential id, a public key, a user handle or a Tailscale login. The enrollment
 //! code is printed exactly once, by `enroll-code`, and never logged.
@@ -33,7 +38,7 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use clap::{Parser, Subcommand};
 use tracing::{error, info, warn};
@@ -41,6 +46,7 @@ use tracing_subscriber::EnvFilter;
 
 use soos_remote::alerts::AlertSettings;
 use soos_remote::auth::system_random;
+use soos_remote::battery::SysfsBattery;
 use soos_remote::camera::CameraSettings;
 use soos_remote::camera_ipc::{DaemonPreviewClient, PreviewSource, PreviewSourceFactory};
 use soos_remote::config::{
@@ -58,7 +64,7 @@ use soos_remote::server::{serve, ServerState};
 use soos_remote::socket::{bind_listener, prepare_socket_dir, SocketError};
 use soos_remote::{
     CAMERA_DAEMON_SOCKET_PATH, ENROLL_CODE_TTL_S, EXIT_CONFIG, EXIT_RUNTIME, MAX_PASSKEYS,
-    MAX_PUSH_SUBSCRIPTIONS, STORE_LOCK_TIMEOUT_MS,
+    MAX_PUSH_SUBSCRIPTIONS, RUNTIME_SHUTDOWN_TIMEOUT_MS, STORE_LOCK_TIMEOUT_MS,
 };
 
 /// Command line of `soos-remote`.
@@ -458,7 +464,11 @@ fn run_service(config: RemoteConfig, credentials_path: PathBuf, uid: u32) -> Exi
             return ExitCode::from(EXIT_RUNTIME);
         }
     };
-    runtime.block_on(run(config, credentials_path, uid))
+    let code = runtime.block_on(run(config, credentials_path, uid));
+    // Blocking-pool tasks still running (a battery read stuck in a hung driver, a push store
+    // write, which is temp file + fsync + rename) are abandoned after this bound (B-13).
+    runtime.shutdown_timeout(Duration::from_millis(RUNTIME_SHUTDOWN_TIMEOUT_MS));
+    code
 }
 
 /// Socket preparation, signal handling and the server loop (inside the runtime).
@@ -506,6 +516,11 @@ async fn run(config: RemoteConfig, credentials_path: PathBuf, uid: u32) -> ExitC
         });
         (CameraSettings::from_config(&config.camera), factory)
     });
+    let battery = if config.battery.enabled {
+        Some(Arc::new(SysfsBattery::kernel()))
+    } else {
+        None
+    };
     let mut state = ServerState::new(config, uid, ZbusSessionSource::new())
         .with_credentials_path(credentials_path);
     if let Some(settings) = alerts {
@@ -516,6 +531,9 @@ async fn run(config: RemoteConfig, credentials_path: PathBuf, uid: u32) -> ExitC
     }
     if let Some((settings, factory)) = camera {
         state = state.with_camera(settings, factory);
+    }
+    if let Some(source) = battery {
+        state = state.with_battery(source);
     }
     let state = Arc::new(state);
     match serve(listener, state, shutdown).await {

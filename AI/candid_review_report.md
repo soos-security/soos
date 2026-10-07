@@ -1,117 +1,66 @@
 # Candid Review Report
 
 - **Date**: 2026-10-07
-- **Target Branch**: `feat/remote-live-camera` (GitHub #345, PR #347), round 1 of the pre-push review of the
-  unpushed commits `fee8480`, `0a34872`, `1168206`, `bb1d19a`
-- **Base (merge-base)**: `05001c9` (`origin/main`; full branch diff as computed by the pre-push hook)
-- **Reviewed-Diff-Fingerprint**: `dd37774cccbd8ee0f9541ef3641e8416ab0dc3e5f952145f1863ffde808d0409`
-- **Audited Files**: `.agents/skills/dev-workflow/references/project-facts.md`, `.github/workflows/ci.yml`,
-  `AI/ARCHITECTURE.md`, `AI/DECISIONS.md`, `AI/VERIFICATION_MATRIX.md`, `AI/architect_spec_remote_live_camera.md`,
-  `AI/auditor_constraints_remote_live_camera.md`, `AI/research_live_camera.md`,
-  `AI/tester_contract_remote_live_camera.md`, `AI/walkthroughs/191_remote_live_camera.md`, `Cargo.lock`, `Cargo.toml`,
-  `Docs/DAEMON.md`, `Docs/GUI_APPLICATION.md`, `Docs/IPC_PROTOCOL.md`, `Docs/REMOTE_COMPANION.md`,
-  `Docs/SECURITY_AND_QUALITY_GUIDELINES.md`, `crates/daemon/src/{config,dispatcher,lib,main,preview,preview_image,preview_peer,session,session_policy}.rs`,
-  `crates/daemon/tests/{preview_authorization_tests,preview_remote_view_tests}.rs`, `crates/gui/src/ipc_camera.rs`,
-  `crates/protocol/src/types.rs`, `crates/remote/Cargo.toml`, `crates/remote/assets/{app.js,style.css}`,
-  `crates/remote/src/{audit,camera,camera_ipc,camera_jpeg,camera_slot,challenge,config,http,lib,main,routes,server}.rs`,
-  `crates/remote/tests/{alerts_server_tests,camera_challenge_tests,camera_config_tests,camera_ipc_tests,camera_jpeg_tests,camera_routes_tests,camera_server_tests,camera_slot_tests,push_server_tests,server_tests}.rs`,
-  `crates/remote/tests/common/{camera,harness}.rs`, `deny.toml`, `scripts/install_remote.sh`,
-  `tests/invariants/src/{lib,remote_camera_contract,remote_companion_contract}.rs`
-
-Scope note: commits `a2876c9` and `df4798e` are already on `origin/feat/remote-live-camera` and were reviewed in
-earlier rounds; this round re-reads the whole frozen patch but concentrates on the four new commits
-(`git diff df4798e HEAD`): stream `Content-Type` for iOS (M12), full screen and two orientation modes, removal of the
-view cooldown (M13), removal of the camera-start Web Push (M14). `crates/remote/assets/sw.js` and
-`crates/remote/src/push.rs` changed in these commits and were read in their changed regions.
+- **Target Branch**: `feat/remote-battery-status` (GitHub #346), stacked on `origin/feat/remote-live-camera` (PR #347)
+- **Base (merge-base)**: `df4798e` (`origin/feat/remote-live-camera`; frozen with `CANDID_BASE_REF=origin/feat/remote-live-camera ./scripts/candid_subagent.sh --prepare`, the documented base override, so the fingerprint binds only the battery diff and not the unmerged #345 camera diff)
+- **Reviewed-Diff-Fingerprint**: `3d71593f471906f3b7ceff21f8f63ee130427337f187a8a1b0fdb233ae7e0280`
+- **Re-review (Phase 6 delta)**: the previous APPROVED round was bound to `4ce2a95e…a30491c`. Phase 6 then added only `AI/VERIFICATION_MATRIX.md` (component `remote-battery-status`, rows RBS1–RBS12) and `AI/walkthroughs/192_remote_battery_status.md`; no code, test, script or dependency changed. The patch was re-frozen with the same base override and re-reviewed (see §3 "Phase 6 documentation delta").
+- **Audited Files**: `.agents/skills/dev-workflow/references/project-facts.md`, `AI/ARCHITECTURE.md`, `AI/DECISIONS.md`, `AI/MOCK_STRATEGY.md`, `AI/VERIFICATION_MATRIX.md`, `AI/walkthroughs/192_remote_battery_status.md`, `AI/architect_spec_remote_battery.md`, `AI/auditor_constraints_remote_battery.md`, `AI/tester_contract_remote_battery.md`, `Docs/REMOTE_COMPANION.md`, `crates/remote/assets/app.js`, `crates/remote/src/battery.rs`, `crates/remote/src/config.rs`, `crates/remote/src/http.rs`, `crates/remote/src/lib.rs`, `crates/remote/src/main.rs`, `crates/remote/src/routes.rs`, `crates/remote/src/server.rs`, `crates/remote/tests/alerts_server_tests.rs`, `crates/remote/tests/battery_config_tests.rs`, `crates/remote/tests/battery_routes_tests.rs`, `crates/remote/tests/battery_server_tests.rs`, `crates/remote/tests/battery_tests.rs`, `crates/remote/tests/common/battery.rs`, `crates/remote/tests/common/camera.rs`, `crates/remote/tests/common/harness.rs`, `crates/remote/tests/push_server_tests.rs`, `crates/remote/tests/server_tests.rs`, `scripts/install_remote.sh`, `tests/invariants/src/lib.rs`, `tests/invariants/src/remote_battery_contract.rs`
 
 ## 1. Executive Summary
 
-The four commits are owner-requested behavior changes in `soos-remote` only. They remove state (cooldown, camera
-push), switch the stream head to `application/octet-stream` while keeping the `soosframe` part framing, and add a
-client-side full-screen overlay plus a portrait/landscape CSS toggle. No PAM, daemon, protocol or dependency code
-changed in these commits. Every removed assertion is covered by a recorded owner-approved migration (M12, M13, M14 in
-`AI/tester_contract_remote_live_camera.md`) and is replaced by a stricter negative assertion (no cooldown, zero push
-calls with a positive control, static absence checks). `cargo fmt --check`, `cargo clippy --workspace --all-targets
--- -D warnings`, `cargo test -p soos-remote` and `cargo test -p soos-invariants` (532 passed) are green. No CRITICAL or
-MAJOR finding.
+The diff adds a read-only, bounded sysfs battery reader (`crates/remote/src/battery.rs`), a single-flight cached runtime with a sampler that runs only while an event stream is open, `GET|HEAD /api/battery` with the exact visibility of `/api/status` (not Funnel-public), an `event: battery` frame on the status stream (first frame after status/alerts, then only on change, Funnel session re-validated before each frame), a `battery_status` config key (default on), a bounded runtime shutdown in `main.rs`, the page line in `app.js` (textContent only, hidden when unreachable/stream down/signed out), docs, installer template comment and contract tests. No PAM, daemon, protocol or dependency change. `cargo test -p soos-remote` (all suites), `cargo test -p soos-invariants remote_` (89 passed) and `cargo clippy -p soos-remote --all-targets -- -D warnings` are green locally. No CRITICAL or MAJOR finding.
 
-## 2. Test Changes (mechanical listing, step 3)
+## 2. Test Changes (mechanical listing from step 3)
 
-Removed/changed assertions found in `git diff df4798e HEAD -- crates/remote/tests tests/invariants`:
-
-| Location | Change | Justification |
-|---|---|---|
-| `camera_config_tests.rs` | `CAMERA_VIEW_COOLDOWN_MS == 10_000`, `PUSH_CAMERA_TOPIC == "sooscamera"` removed | M13e / M14c; absence pinned by invariant tests 60 and 63 |
-| `camera_push_tests.rs` (file deleted) | `test_rlc_camera_payload` and its payload assertions | M14b; nothing remains to test; absence pinned by test 63 |
-| `camera_server_tests.rs` | cooldown state / `cooldown_ms` / `429 camera_cooldown` assertions → `idle`, no `cooldown_ms`, immediate restart | M13f-M13j; the new form asserts a real second and third view stream pixels |
-| `camera_server_tests.rs` test 35 | one `sooscamera` delivery → zero transport calls during start, run, stop, end and failed first frame | M14a; positive control (test notification reaches the same spy) prevents a vacuous pass |
-| `camera_slot_tests.rs` | `phase()` tuple → `SlotPhase`; `end(now, view, shown)` → `end(view)`; cooldown cases → immediate re-reserve | M13a-M13d; exhaustive `match` on `SlotPhase` / `SlotError` makes a reintroduced cooldown variant fail to compile |
-| `camera_server_tests.rs` test 27 | expected head `Content-Type` `multipart/x-mixed-replace; boundary=soosframe` → `application/octet-stream` | M12 (iOS "Load failed"); part framing, mandatory headers, CSP and JPEG assertions unchanged |
-| `remote_camera_contract.rs` `camera_functions_outside_modules` | `push.rs` camera functions no longer required | M14d; those functions no longer exist; `server.rs` / `http.rs` camera functions still scanned |
-
-New escape hatches (`#[ignore]`, `#[cfg(any())]`, `should_panic`, tolerance/epsilon): none. New tests: invariant test
-60 (`test_rlc_page_fullscreen_rotate_and_no_cooldown`) and test 63 (`test_remote_camera_sends_no_push`).
+- Test files touched: `crates/remote/tests/{alerts_server_tests,battery_config_tests,battery_routes_tests,battery_server_tests,battery_tests,push_server_tests,server_tests}.rs`, `crates/remote/tests/common/{battery,camera,harness}.rs`, `tests/invariants/src/{lib,remote_battery_contract}.rs`.
+- Removed/changed assertions (`^-` with assert/#[test]/proptest/should_panic): **none**. Removed lines in test files: **none**.
+- New escape hatches (`#[ignore]`, `#[cfg(any())]`, `should_panic`, tolerance, epsilon): **none** (the single grep hit is the text of constraint C-31 inside the auditor document).
+- Inline `mod tests` changes: **none**.
+- Pre-existing tests edited: exactly five one-line additions `battery: soos_remote::config::BatteryConfig::default(),` to `RemoteConfig` literals in `alerts_server_tests.rs`, `common/camera.rs`, `common/harness.rs`, `push_server_tests.rs`, `server_tests.rs`. These are the spec setup migrations M1-M5 (new required struct field); no assertion touched. Justified.
+- `tests/invariants/src/lib.rs`: only adds `mod remote_battery_contract;` with its doc comment.
+- All other test files are new Phase 2 contract tests.
 
 ## 3. Deep Reasoning Audit
 
 ### Logic & Architecture
-- Slot state machine without cooldown: `Idle → Pending → Starting → Streaming → Idle`; `end` of a stale view id is a
-  no-op; an expired `Pending` reads as `Idle` in both `check` and `phase`. Tried: end of a non-current view while a new
-  one streams (no-op, covered by test 14), stop while `Pending` (Idle, `true`), stop while Idle (`false`). PASS.
-- `SlotPhase::Cooldown` and `SlotError::Cooldown` removed; every consumer (`camera.rs`, `server.rs`
-  `camera_slot_refusal`, `camera_view_response`, `app.js` `CAMERA_REASONS` / `renderCamera`) updated; no dangling
-  `cooldown_ms` in the JSON shape or page. PASS.
-- Push removal: `Message::CameraView`, `camera_queued`, `queue_camera_view`, `send_camera`, `camera_payload`,
-  `PUSH_CAMERA_TOPIC` and its const assertions are all gone; `send_test` folded back into a single path; the
-  dispatcher loop is otherwise unchanged (test notification and alert retries untouched). `sw.js` no longer special-
-  cases `kind: "camera"`. PASS.
-- Stream head: `CAMERA_STREAM_CONTENT_TYPE = "application/octet-stream"` is the single source of truth in Rust; the page
-  checks the same prefix. `X-Content-Type-Options: nosniff` is in `MANDATORY_HEADERS`, so a browser does not sniff the
-  opaque body. PASS.
-- Full screen: `enterCameraFullscreen` is a no-op without an open view (`cameraController === null`);
-  `endCameraView` always calls `exitCameraFullscreen` and hides the stage; `fullscreenchange` / `webkitfullscreenchange`
-  and Escape exit the overlay. Element fullscreen refusal (promise rejection or throw) is swallowed and the overlay
-  remains. Orientation is a CSS class only, kept in memory, never stored. PASS.
-- Architecture, ADR, verification matrix (RLC9, RLC10, RLC13, RLC15, RLC16), `Docs/REMOTE_COMPANION.md` and the
-  walkthrough are updated consistently. Removing the cooldown is bounded by the unchanged per-view fresh passkey
-  assertion, the single global slot, the token TTL and the shared failure lockout. Removing the camera push is an
-  explicit owner decision recorded in the ADR; the audit lines and camera LED remain the awareness signals. PASS.
+- Parsers: tried `capacity` = `"100\n"`, `"101"`, `"007"`, `" 50"`, 33-byte value, `"5\r"` → only canonical 0..=100 accepted, others `None`. `status` other than the four kernel strings → `Unknown`. `online` `2` → true (kernel ABI). `energy_*` 20 digits → rejected; 19 digits fit `u64` (const assert). PASS.
+- Aggregation: tried mixed energy/charge pairs, overflow of `sum_now * 100`, a battery without a pair, `full = 0` → falls back to floor mean of capacities, else `percent: None`; never guesses. `external_power` is `None` when no non-battery supply reported a valid `online`. Charge precedence Charging > Discharging > all Full > Not charging > Unknown. PASS.
+- Scan: unreadable root or a failing `read_dir` entry → `unavailable`; 65th entry → `unavailable`; 9th included battery → `unavailable`; invalid name or unreadable `type` with no battery found → `unavailable` (never a false `no_battery`); `scope = Device` (peripheral batteries) excluded; `present = 0` excluded. Identifying attributes are never opened. PASS.
+- Runtime: tried concurrent HTTP + sampler + first-frame callers → one gate, cache re-checked under the gate, one blocking read; a timed-out read leaves `in_flight` set so no second thread is spawned until it returns (`InFlightGuard` clears it even on panic or if the task never runs); gate wait and read share one 500 ms deadline; gate-wait timeout is never cached or published. PASS.
+- Sampler: stream count 0 → publishes `None` and parks on a permit-storing `Notify` (lost-wakeup closed by `enable()` + re-check). Supervised in `serve` and never ends it on its own. PASS.
+- Stream: receiver subscribed before the first `current()` with no `.await` in between; `None` and unchanged views filtered; sender lives in the shared runtime so `changed()` cannot spuriously error while a stream is open. PASS.
+- Config: `battery_status` absent → true, `false` → `with_battery` ignored and `/api/battery` answers `disabled`. PASS.
+- Single source of truth: all constants in `lib.rs`, `/sys` literal only in `POWER_SUPPLY_ROOT`. PASS.
 
 ### PAM Concurrency & Deadlines
-- No file under `crates/pam` changed in the reviewed commits (nor in the branch). PASS.
+- No file under `crates/pam` changed. The remote crate is a user-level Tokio service; the only blocking I/O runs in `spawn_blocking` under `BATTERY_READ_TIMEOUT_MS`, and service shutdown is bounded by `RUNTIME_SHUTDOWN_TIMEOUT_MS` so a read stuck in a hung driver cannot block stop. Attributes are opened `O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC`. PASS.
 
 ### Panic Safety & Fail-Closed
-- New Rust code removes branches only; no `unwrap`/`expect`/indexing added in production. The removed
-  `remaining_ms` helper used `unwrap_or`, not a panic. No path from an error to a stream or an unlock; slot refusals
-  still map to `409` / `403`. PASS.
+- Grep of added production lines: no `unwrap()`, `expect(`, `panic!`, `todo!`, `unreachable!`, no indexing. A source panic becomes a `JoinError` → `unavailable`. Every failure maps to `unavailable` / unknown field, never to a guessed level; the feature does not touch any authorization path (status, lock or unlock decisions). PASS.
 
 ### Test Integrity & Anti-Weakening
-- See §2. Each removed assertion maps to a recorded migration with owner approval; replacements are stronger
-  negative checks. Test 35 can fail against a plausible wrong implementation (one `sooscamera` call is detected, as
-  shown during this review on a stale build artifact; after a clean rebuild of the current sources it passes). PASS.
+- See section 2: zero assertion removed, only M1-M5 setup migrations. New tests exercise wrong-implementation cases (non-canonical capacity, false `no_battery` on unreadable entries, second thread after timeout, Funnel visibility). PASS.
 
 ### Memory, Bounds & Secrets
-- No new allocation in Rust. The page's bounded buffer (`CAMERA_MAX_BUFFER_BYTES`) and canvas-only rendering are
-  unchanged; no `blob:` URL, no storage of the orientation mode. The camera push payload (which carried no token or
-  image) is removed entirely. PASS.
+- Every read is capped (`take(MAX_SYSFS_VALUE_BYTES + 1)`), entry and battery counts capped, `Vec` capacities bounded. The JSON view has exactly four keys and no device names, serial, model or manufacturer; entry names never leave the module; the module never logs; server only logs the existing fixed `"stream session ended"` debug line. `/api/battery` is refused on Funnel without a session (not in `is_funnel_public`). Page uses `textContent` only. PASS.
 
 ### Supply Chain & Automation
-- No `Cargo.*`, `deny.toml`, `.github/`, `scripts/` or `.githooks/` change in the four reviewed commits. PASS.
+- No `Cargo.toml`/`Cargo.lock`/`deny.toml`/`.github/` change; `nix` and `serde` were already dependencies. `scripts/install_remote.sh` only gains two commented template lines. PASS.
 
 ### English-Only Policy
-- Code, comments, docs, UI strings and commit subjects are English. PASS.
+- French-marker grep over the added lines: no hit. Code, comments, docs and test names are English. PASS.
+
+### Phase 6 documentation delta
+- Frozen patch: 31 files (the 29 code/test/doc files of the previous round, byte-identical, plus the two Phase 6 files). Mechanical listing re-run: 0 removed or changed assertions, 0 new escape hatches (the single hit is again the C-31 text of the auditor document), 0 inline `mod tests` changes.
+- Matrix rows RBS1–RBS11 are `✅ Verified` and cite only `test_rbs_*` / `test_rmc_*` functions that exist; tried a misspelled and a moved test name mentally against `test_matrix_claimed_rows_cite_only_existing_evidence`, which resolves every citation by file stem and package and passes (`cargo test --locked -p soos-invariants`: 537 passed). RBS12 (owner hardware check) is `⬜ Pending`, not claimed. The row texts match the spec §13 table and the tests they cite (e.g. RBS8 cites the anonymous-Funnel test 21, RBS10 cites the RC-5 shape test). PASS.
+- Walkthrough 192: number follows 191 (camera), repository-relative paths only (`grep /home/` empty), every section filled; the counts (888 = 351 + 537), the review history (rounds 1–3 `CHANGES_REQUESTED` on `05001c9` for test 37, then APPROVED when stacked) and the limitation text ("Battery level unknown", matching `app.js:344`) were checked against the tree. PASS.
+- `./scripts/candid_review.sh` (keyword, unsafe, shell syntax, PAM output, English audits): PASSED. English-only: PASS.
 
 ## 4. Detailed Findings & Action Items
 
-- **[MINOR]** `crates/remote/src/camera_slot.rs:8` — one module doc line ("ended, still behind a fresh passkey
-  assertion. Every method receives the current time; ...") is much longer than the surrounding wrapped lines.
-  Cosmetic; rewrap when next touched.
-- **[SUGGESTION]** `crates/remote/assets/style.css` `.camera-canvas` — `width`/`height` are declared twice (percent then
-  container units). This is a valid fallback for browsers without container query units; a short comment would make
-  the intent explicit.
-- **[SUGGESTION]** Process note: during this review `test_rlc_no_push_on_camera_view` first failed with one
-  `sooscamera` delivery although no source contained the string; touching `crates/remote/src/*.rs` and rebuilding made
-  it pass. Run gates from a clean incremental state after branch switches in this worktree.
+- **[MINOR]** Process — this report is bound to the diff against `origin/feat/remote-live-camera`. The pre-push hook and CI run `scripts/candid_subagent.sh` against `origin/main`, where the merge-base still includes the unmerged #345 diff, so the fingerprint will only match once PR #347 is merged and this branch is rebased onto `main` with an identical camera tree. Push after #347 merges (or re-run `--prepare` and re-review if the rebase changes any content).
+- **[SUGGESTION]** `crates/remote/src/battery.rs` `read_power_supplies` — an entry whose `type` is unreadable is ignored when at least one battery was found; this matches the spec (a partial scan still reports the batteries it saw) but could under-report a second battery. Acceptable as specified.
 
 ## 5. Final Verdict
 

@@ -303,6 +303,13 @@ mod remote_push_contract;
 #[cfg(all(test, unix))]
 mod remote_brand_contract;
 
+/// Live PC battery level in the `soos-remote` web app: read-only bounded sysfs reader, single
+/// `/sys` source, page line fed only by `event: battery`, documentation, no new dependency,
+/// bounded runtime shutdown (GitHub #346, ADR 2026-10-07; spec
+/// AI/architect_spec_remote_battery.md §10.5 tests 32-37 and §10.6 test 39; rows RBS6, RBS7,
+/// RBS11).
+#[cfg(all(test, unix))]
+mod remote_battery_contract;
 /// Live camera view of `soos-remote` through the daemon preview channel: dependencies, IJG
 /// exception, no logging or recording, redacted types, page reader, daemon `remote_view` gate,
 /// documentation and installer (ADR 2026-10-07; spec AI/architect_spec_remote_live_camera.md
