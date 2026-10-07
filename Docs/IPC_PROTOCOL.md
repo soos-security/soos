@@ -93,7 +93,7 @@ Client-to-daemon payloads (`Request`, `Event`) additionally end with a one-byte 
 ### `Request`
 Sent by the PAM module to the daemon to request facial verification (and by `soos-admin` / `soos-gui` for `Status` and `PreviewFrame`):
 - `version: u8`: Protocol version (`CURRENT_VERSION`).
-- `kind: RequestKind`: Request operation (`Auth`, `Status`, or `PreviewFrame` — the latter is reserved for the diagnostic GUI and governed by §9).
+- `kind: RequestKind`: Request operation (`Auth`, `Status`, or `PreviewFrame` — the latter is reserved for the diagnostic GUI and the `soos-remote` live camera view, and governed by §9).
 - `request_id: RequestId`: 256-bit cryptographic random identifier (`[u8; 32]`) sourced via `getrandom`.
 - `uid_hint: u32`: Target UID whose face is verified. For an unprivileged peer the daemon requires the kernel `SO_PEERCRED` UID to equal it; for a root peer (`su`, `sudo`, polkit helper, display manager) it is the authoritative target UID, bounded only by the local session binding (ADR 2026-09-30 "Local Session Binding for Facial `Auth`"). `pam_soos.so` therefore sends the UID `PAM_USER` resolves to and returns `PAM_IGNORE` without sending anything when that resolution fails or a `uid=` argument disagrees with it; it never substitutes the caller's real UID (GitHub #300, #302).
 - `service: String`: PAM service name (`"sudo"`, `"su"`, `"gdm-password"`...). Bounded to 64 bytes.
@@ -145,7 +145,7 @@ Best-effort telemetry notification sent by PAM following password failures:
 |---|---|---|
 | `RequestKind::Auth` (0) | PAM module | `Response` (above); the daemon closes the connection after it |
 | `RequestKind::Status` (1) | `soos-admin status`, any admitted peer | `StatusResponse` |
-| `RequestKind::PreviewFrame` (2) | `soos-gui` preview, authorized peers only (§9) | `PreviewResponse`, or a `Response` with `ProtocolError` on refusal |
+| `RequestKind::PreviewFrame` (2) | `soos-gui` preview and the `soos-remote` live camera view, authorized peers only (§9) | `PreviewResponse`, or a `Response` with `ProtocolError` on refusal |
 
 ### `StatusResponse`
 Non-biometric health snapshot returned for `RequestKind::Status` (bounded by `MAX_MESSAGE_SIZE`): `version: u8`, `socket_ready`, `camera_ready`, `models_verified`, `is_healthy` (`bool`, one byte each), `pid: u32`, `uptime_secs: u64`, `memory_locked: bool` (whether `mlockall` swap protection is active, GitHub #201; appended last, so the daemon and `soos-admin` / `soos-gui` must be upgraded together). It carries no frame, template, embedding or UID data.
@@ -162,7 +162,7 @@ The daemon-side authorization of each kind and every `daemon.toml` key are speci
 
 ## 4. Strict Security Invariants
 
-1. **Zero Secrets on Wire**: Neither PAM passwords nor biometric embeddings ever travel over the IPC socket. Camera frames travel only on the authorized diagnostic preview stream described in §9, never towards the PAM module.
+1. **Zero Secrets on Wire**: Neither PAM passwords nor biometric embeddings ever travel over the IPC socket. Camera frames travel only on the authorized preview stream described in §9 (to `soos-gui` and the `soos-remote` live camera view, for a peer with an active local seat session), never towards the PAM module.
 2. **Fail-Closed Fallback (`PAM_IGNORE`)**: Any verdict other than `Allow` (`Deny`, `ProtocolError`, `Unavailable`), network error, or timeout immediately returns `PAM_IGNORE`, seamlessly delegating to fallback modules (`pam_unix.so`).
 3. **Single-Use Binding**: Responses are bound to unique 256-bit nonces and cannot be logically replayed.
 
@@ -246,7 +246,7 @@ All sensitive payloads and buffers in the IPC pipeline are scrubbed on drop:
 
 ## 9. Camera Preview Stream Authorization (`RequestKind::PreviewFrame`)
 
-Camera frames are protected biometric data (`AI/ARCHITECTURE.md` §1). `RequestKind::PreviewFrame` lets the diagnostic GUI (`soos-gui`) display the daemon-owned camera without opening `/dev/video*` itself. Since GitHub #143 (review findings CAM-01 / DMN-02) the daemon treats it as a privileged operation.
+Camera frames are protected biometric data (`AI/ARCHITECTURE.md` §1). `RequestKind::PreviewFrame` lets the diagnostic GUI (`soos-gui`) display the daemon-owned camera without opening `/dev/video*` itself. Since GitHub #143 (review findings CAM-01 / DMN-02) the daemon treats it as a privileged operation. Since GitHub #345 (ADR 2026-10-07 "Live Camera View in `soos-remote` Through the Daemon Preview Channel") it has exactly two unprivileged consumers: `soos-gui` and the remote companion `soos-remote` (live camera view, `Docs/REMOTE_COMPANION.md` §2f), which depends on `soos-protocol` for this exchange only and holds at most one daemon connection.
 
 ### Daemon configuration (`/etc/soos/daemon.toml`)
 
@@ -255,6 +255,7 @@ Camera frames are protected biometric data (`AI/ARCHITECTURE.md` §1). `RequestK
 enabled = false            # default: only a root peer may request preview frames
 allowed_uids = []          # unprivileged peer UIDs allowed when enabled = true (max 64 entries)
 max_requests_per_sec = 40  # per peer UID sliding window (root included); 0 refuses every request
+remote_view = false        # default: a peer inside the soos-remote.service user unit is refused
 ```
 
 Constants live in `crates/daemon/src/preview.rs`: `MAX_PREVIEW_ALLOWED_UIDS = 64`, `DEFAULT_PREVIEW_MAX_REQUESTS_PER_SEC = 40`, `PREVIEW_RATE_WINDOW_NS = 1 s`, `PREVIEW_RATE_MAX_TRACKED_UIDS = 64`. A configuration with more than 64 allow-listed UIDs is rejected at startup (`DaemonError::Config`). The dispatcher created without `with_preview_config` uses `PreviewConfig::default()` (fail-closed).
@@ -265,11 +266,13 @@ Constants live in `crates/daemon/src/preview.rs`: `MAX_PREVIEW_ALLOWED_UIDS = 64
 |---|---|---|
 | 6 | Kernel `SO_PEERCRED` UID versus `uid_hint` (`verify_peer_credentials`) | `ProtocolError` / `UidMismatch` |
 | 6c-1 | `authorize_preview`: `peer_uid == 0`, or `enabled` and `peer_uid ∈ allowed_uids` and `peer_uid == uid_hint` | `ProtocolError` / `UidMismatch` |
-| 6c-2 | Unprivileged peer owns an active logind session not flagged `REMOTE=1` (`SessionValidator`) | `ProtocolError` / `UidMismatch` |
+| 6c-1a | Unprivileged peer: origin from its `/proc/<pid>/cgroup`, read once per connection (`classify_preview_peer_cgroup`, `Docs/DAEMON.md` §1.5); missing PID, unreadable or malformed cgroup refuses | `ProtocolError` / `UidMismatch` |
+| 6c-1b | Origin `soos-remote.service` and `[preview] remote_view = false` | `ProtocolError` / `UidMismatch` |
+| 6c-2 | Unprivileged peer owns an active local seat session (`SessionValidator::has_local_seat_session`: `UID` equal, `ACTIVE=1` or `STATE=active`, `REMOTE=0` exactly, non-empty `SEAT`, `CLASS=user`; the predicate of the root-peer `Auth` path, §10) | `ProtocolError` / `UidMismatch` |
 | 6c-3 | Per-peer-UID rate limit (`soos_policy::RateLimiter`, `check_and_record`) | `ProtocolError` / `RateLimited` |
 | 6c-4 | Monotonic clock available | `Unavailable` / `InternalError` |
 
-Only after these checks does the daemon call `camera.notify_activity()`, wait for readiness and copy the latest capture into a `PreviewResponse` (`format = 255` and empty `data` when no capture is available). The camera is therefore never woken, and the privacy LED never lit, by an unauthorized peer.
+The rate limit is shared by every preview client of one UID (GUI and companion). The first non-empty frame served to a `soos-remote.service` connection logs one `info` line with the peer UID only. Only after these checks does the daemon call `camera.notify_activity()`, wait for readiness and copy the latest capture into a `PreviewResponse` (`format = 255` and empty `data` when no capture is available). The camera is therefore never woken, and the privacy LED never lit, by an unauthorized peer.
 
 #### Preview frame size (GitHub #196, CAM-14)
 
@@ -281,6 +284,14 @@ A raw capture can exceed `MAX_PREVIEW_MESSAGE_SIZE` (2 MiB; a 1920x1080 YUYV fra
 - a frame stamped `SensorType::Infrared` is always sent as `Grey` (format `1`): the `Y` samples of YUYV / NV12, BT.601 luma of RGB24 and decoded MJPEG, then the rules above (GitHub #305). `PreviewResponse` has no sensor field (no protocol bump), so this keeps the IR stamp: the GUI builds a `Grey` frame and takes the Monochrome PAD path (IR gate, stricter IR threshold, GitHub #169) instead of the colour path. Colour and unknown sensors keep their wire format.
 
 The connection is never closed because of the frame size, so the GUI keeps polling on the same connection instead of reconnecting every 100 ms. Intermediate buffers are zeroized; no pixel data is logged.
+
+Format codes are defined once in `soos_protocol::types` (`PREVIEW_FORMAT_RGB24` = 0, `PREVIEW_FORMAT_GREY` = 1, `PREVIEW_FORMAT_YUYV` = 2, `PREVIEW_FORMAT_NV12` = 3, `PREVIEW_FORMAT_MJPEG` = 4, `PREVIEW_FORMAT_EMPTY` = 255); the daemon's `PREVIEW_FORMAT_EMPTY` and the GUI use these constants.
+
+### Client contract (`soos-remote` `DaemonPreviewClient`)
+
+- One connection at most (`/run/soos/daemon.sock`, `CAMERA_DAEMON_SOCKET_PATH`), connect and peer check within 500 ms; a daemon peer that is not root is refused. Each exchange (write + read) is bounded by 3 s; replies are bounded by `MAX_PREVIEW_MESSAGE_SIZE` and allocated only after the length check.
+- The client reconnects before the daemon's caps (after 25 s, below `max_connection_lifetime_ms` = 30 000, and after 1000 requests, below `max_requests_per_connection` = 1024), half-closes the old connection and waits at most 200 ms for the daemon's EOF before connecting the next one; one immediate retry on a fresh connection follows an I/O error on an idle reused connection.
+- A refusal (`ProtocolError`/`Deny` other than `RateLimited`) ends the view; `RateLimited` backs off 250 ms; `Unavailable`, I/O and protocol errors back off 200..2000 ms (doubling). Only Grey, YUYV and RGB24 frames are accepted (at most 640x480); any other format ends the view (no image decoder).
 
 ### Client contract (`soos-gui` `IpcCameraManager`)
 

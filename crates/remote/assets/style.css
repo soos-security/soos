@@ -750,3 +750,12 @@ input:focus-visible {
     transform: none;
   }
 }
+
+/* Live camera view (ADR 2026-10-07): layout only, the card is built by app.js. */
+.camera-canvas {
+  display: block;
+  width: 100%;
+  height: auto;
+  margin: 12px 0;
+  border-radius: var(--r-table);
+}

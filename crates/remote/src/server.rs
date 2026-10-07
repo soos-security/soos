@@ -37,6 +37,13 @@
 //! supervises the push dispatcher. `GET /api/push` and the three push `POST` routes are
 //! authenticated (never Funnel-public); every push `POST` is checked (CSRF, enabled,
 //! available, rate gate) before any body byte is read.
+//!
+//! Live camera view (ADR 2026-10-07 "Live Camera View in `soos-remote` Through the Daemon
+//! Preview Channel"): when `camera_view = true` and a preview source factory is wired, a fresh
+//! user-verified passkey assertion of purpose `CameraView` reserves the single view slot and
+//! returns a single-use stream token; `GET /api/camera/stream/<token>` answers its `200` head
+//! only once the first JPEG is ready and then streams `multipart/x-mixed-replace` parts until
+//! an end condition. Tailnet only unless `camera_view_funnel = true`. Never recorded.
 
 use std::future::Future;
 use std::io::ErrorKind;
@@ -64,6 +71,12 @@ use crate::auth::{
     AssertionFailure, AuthState, BodyReadGuard, Capacity, FunnelStreamGuard, LimitKey,
     RandomSource, Verified,
 };
+use crate::camera::{
+    finish_view, log_unshown_end, CameraRuntime, CameraSettings, FirstFrame, SessionCheck,
+    ViewContext, ViewEnd, ViewGuard,
+};
+use crate::camera_ipc::PreviewSourceFactory;
+use crate::camera_slot::{SlotError, SlotPhase, ViewOwner, ViewToken};
 use crate::challenge::{
     ChallengeBinding, ChallengeError, ChallengePurpose, PendingRegistration, Taken,
 };
@@ -73,17 +86,18 @@ use crate::credentials::{
 };
 use crate::enroll::{normalized_code_hash, read_code_file, remove_code_file, EnrollError};
 use crate::http::{
-    encode_response, encode_response_head, encode_sse_alerts_event, encode_sse_event,
-    encode_sse_head, parse_request, read_body, write_bounded, BodyError, HttpError, Method,
-    ParsedRequest, RequestHead, Response, WriteError,
+    encode_camera_stream_head, encode_response, encode_response_head, encode_sse_alerts_event,
+    encode_sse_event, encode_sse_head, parse_request, read_body, write_bounded, BodyError,
+    HttpError, Method, ParsedRequest, RequestHead, Response, WriteError,
 };
 use crate::identity::{check_host, classify_request, client_hint, ClientHint, PathClass};
 use crate::journal::JournalSource;
 use crate::logind::{SessionSource, SourceError};
 use crate::push::{run_dispatcher, PushRuntime, PushSettings, PushTransport, PushView};
 use crate::routes::{
-    accepts_body, allow_header, check_alerts_ack_csrf, check_auth_csrf, check_lock_csrf,
-    check_push_csrf, check_unlock_csrf, is_funnel_public, parse_alerts_ack_headers, route, Route,
+    accepts_body, allow_header, camera_stream_token, check_alerts_ack_csrf, check_auth_csrf,
+    check_camera_csrf, check_lock_csrf, check_push_csrf, check_unlock_csrf, is_funnel_public,
+    parse_alerts_ack_headers, route, Route,
 };
 use crate::session::{select_session, SessionProps};
 use crate::status::{status_from, view_changed, Reading, StatusView};
@@ -91,6 +105,11 @@ use crate::webauthn::{
     b64url_encode, parse_client_data, verify_registration, CeremonyType, RelyingParty,
 };
 use crate::websession::{clear_cookie_header, session_token_hash, set_cookie_header, Touch};
+use crate::{
+    ACTION_CAMERA_OPTIONS, ACTION_CAMERA_STOP, ACTION_CAMERA_STREAM, ACTION_CAMERA_VIEW,
+    CAMERA_FIRST_FRAME_TIMEOUT_MS, CAMERA_VIEW_TOKEN_BYTES, CAMERA_VIEW_TOKEN_TTL_MS,
+    MAX_CAMERA_VIEWS, MAX_FUNNEL_CONNECTIONS, MAX_FUNNEL_SSE_STREAMS,
+};
 use crate::{
     ACTION_LOGIN, ACTION_LOGIN_OPTIONS, ACTION_LOGOUT, ACTION_REGISTER, ACTION_REGISTER_OPTIONS,
     ACTION_UNLOCK_OPTIONS, CHALLENGE_BYTES, ENROLL_CODE_TTL_S, FUNNEL_REFUSAL_LINGER_MS,
@@ -105,6 +124,10 @@ use crate::{ALERT_EVENT_MIN_INTERVAL_MS, MIN_ALERT_ACK_INTERVAL_MS};
 // Streams hold their connection permit for their whole lifetime; request permits must
 // always remain.
 const _: () = assert!(MAX_SSE_STREAMS < MAX_CONNECTIONS);
+// A camera view holds its connection (and, on the Funnel, its `funnel` class permit) for its
+// whole lifetime, next to the event streams (ADR 2026-10-07).
+const _: () = assert!(MAX_SSE_STREAMS + MAX_CAMERA_VIEWS < MAX_CONNECTIONS);
+const _: () = assert!(MAX_FUNNEL_SSE_STREAMS + MAX_CAMERA_VIEWS < MAX_FUNNEL_CONNECTIONS);
 
 /// `from + after` as a `tokio::time::Instant`; an unrepresentable deadline (never in
 /// practice) falls back to `from`, which fails closed (the bound fires at once).
@@ -134,6 +157,7 @@ pub struct ServerState<S: SessionSource> {
     file_owner_uid: u32,
     password_alerts: Option<(AlertSettings, Arc<dyn JournalSource>)>,
     push: Option<(PushSettings, Arc<dyn PushTransport>)>,
+    camera: Option<(CameraSettings, PreviewSourceFactory)>,
 }
 
 impl<S: SessionSource> ServerState<S> {
@@ -155,7 +179,19 @@ impl<S: SessionSource> ServerState<S> {
             file_owner_uid: uid,
             password_alerts: None,
             push: None,
+            camera: None,
         }
+    }
+
+    /// Wires the live camera view (production and tests): the settings resolved from the
+    /// configuration and the preview source factory. Ignored unless `config.camera.enabled`
+    /// (opt-in, ADR 2026-10-07).
+    #[must_use]
+    pub fn with_camera(mut self, settings: CameraSettings, factory: PreviewSourceFactory) -> Self {
+        if self.config.camera.enabled {
+            self.camera = Some((settings, factory));
+        }
+        self
     }
 
     /// Wires Web Push (production and tests): the settings resolved by `main` and the
@@ -316,6 +352,8 @@ struct Shared<S: SessionSource> {
     alerts: Option<Arc<AlertsRuntime>>,
     /// Web Push (`None` when `push_notifications` is off or not wired).
     push: Option<Arc<PushRuntime>>,
+    /// Live camera view (always present; without a wired factory no view can start).
+    camera: Arc<CameraRuntime>,
 }
 
 impl<S: SessionSource> Shared<S> {
@@ -345,6 +383,12 @@ impl<S: SessionSource> Shared<S> {
             )),
             capacity: Capacity::new(),
             rp: state.config.auth.rp_id.as_deref().map(RelyingParty::new),
+            camera: Arc::new(match &state.camera {
+                Some((settings, factory)) => {
+                    CameraRuntime::new(*settings, Some(Arc::clone(factory)))
+                }
+                None => CameraRuntime::new(CameraSettings::from_config(&state.config.camera), None),
+            }),
             state,
         }
     }
@@ -1216,6 +1260,11 @@ async fn handle_connection<S: SessionSource>(
             push_body_route(&shared, &ctx, &mut stream, PushBodyRoute::Unsubscribe).await
         }
         Route::PushTest => Some(push_test(&shared, &ctx).await),
+        Route::Camera => Some(camera_view_response(&shared, &ctx)),
+        Route::CameraOptions => Some(camera_options(&shared, &ctx).await),
+        Route::CameraStart => camera_start(&shared, &ctx, &mut stream).await,
+        Route::CameraStop => Some(camera_stop(&shared, &ctx)),
+        Route::CameraStream => camera_stream(&shared, &ctx, &mut stream).await,
         Route::NotFound => Some(Response::json(404, "not_found")),
         Route::MethodNotAllowed => {
             let mut response = Response::json(405, "method_not_allowed");
@@ -2022,6 +2071,367 @@ async fn push_test<S: SessionSource>(shared: &Shared<S>, ctx: &RequestContext) -
     }
     let (status, result) = runtime.queue_test().await;
     Response::json(status, result)
+}
+
+// ---------------------------------------------------------------------------------------
+// Live camera view (ADR 2026-10-07 "Live Camera View in `soos-remote` Through the Daemon
+// Preview Channel", architect spec §8)
+// ---------------------------------------------------------------------------------------
+
+/// Whether the caller's path may use the camera: always on the tailnet, on the Funnel only
+/// with `camera_view_funnel = true`.
+fn camera_reachable_for<S: SessionSource>(shared: &Shared<S>, class: PathClass) -> bool {
+    class == PathClass::Tailnet || shared.state.config.camera.funnel
+}
+
+/// `camera_disabled` / `camera_tailnet_only` gates shared by every camera route but stop.
+fn camera_gates<S: SessionSource>(
+    shared: &Shared<S>,
+    ctx: &RequestContext,
+) -> Result<(), Response> {
+    if !shared.state.config.camera.enabled {
+        return Err(Response::json(403, "camera_disabled"));
+    }
+    if !camera_reachable_for(shared, ctx.class) {
+        return Err(Response::json(403, "camera_tailnet_only"));
+    }
+    Ok(())
+}
+
+/// The JSON answer of a slot refusal.
+fn camera_slot_refusal(err: SlotError) -> Response {
+    match err {
+        SlotError::Busy => Response::json(409, "view_in_progress"),
+        SlotError::Cooldown { remaining_ms } => json_value(
+            429,
+            &serde_json::json!({"result": "camera_cooldown", "retry_after_ms": remaining_ms}),
+        ),
+        SlotError::TokenRejected => Response::json(403, "view_token_rejected"),
+    }
+}
+
+/// `GET|HEAD /api/camera`: enabled, reachable, slot state and the view settings; never a
+/// token, an identity or a frame property.
+fn camera_view_response<S: SessionSource>(shared: &Shared<S>, ctx: &RequestContext) -> Response {
+    let config = &shared.state.config.camera;
+    let settings = shared.camera.settings();
+    // One snapshot of the slot, so the state and the cooldown always agree.
+    let (state, cooldown_ms) = if config.enabled {
+        let (phase, cooldown) = shared.camera.phase(Instant::now());
+        let state = match phase {
+            SlotPhase::Idle => "idle",
+            SlotPhase::Pending => "pending",
+            SlotPhase::Starting => "starting",
+            SlotPhase::Streaming => "streaming",
+            SlotPhase::Cooldown => "cooldown",
+        };
+        (state, cooldown.unwrap_or(0))
+    } else {
+        ("disabled", 0)
+    };
+    json_value(
+        200,
+        &serde_json::json!({
+            "enabled": config.enabled,
+            "reachable": config.enabled && camera_reachable_for(shared, ctx.class),
+            "state": state,
+            "cooldown_ms": cooldown_ms,
+            "max_view_s": settings.max_view_s(),
+            "fps": settings.fps,
+            "width": settings.width_px(),
+        }),
+    )
+}
+
+/// `POST /api/auth/camera/options`: CSRF (Origin required) → enabled → Funnel flag → `rp_id`
+/// and host → a `CameraView` challenge on the unlock limiter key (shared lockout).
+async fn camera_options<S: SessionSource>(shared: &Shared<S>, ctx: &RequestContext) -> Response {
+    let rp_id = shared.state.config.auth.rp_id.as_deref();
+    let csrf_host = rp_id.unwrap_or(ctx.normalized_host.as_str());
+    if let Err(err) = check_auth_csrf(ctx.head(), csrf_host, ACTION_CAMERA_OPTIONS) {
+        debug!(%err, "camera options refused");
+        return Response::json(403, "forbidden");
+    }
+    if let Err(response) = camera_gates(shared, ctx) {
+        return response;
+    }
+    if let Err(response) = rp_host_gate(shared, ctx) {
+        return response;
+    }
+    shared
+        .issue_options(
+            ctx.unlock_key(),
+            ctx.class,
+            ChallengePurpose::CameraView,
+            ctx.unlock_binding(),
+        )
+        .await
+}
+
+/// `POST /api/camera/start` (spec §8.5): CSRF → enabled → Funnel flag → `rp_id` → body
+/// present → host → lockout and slot pre-check (no body byte read before) → bounded body →
+/// `CameraView` assertion with UV → counter → CSPRNG token → slot reservation.
+async fn camera_start<S: SessionSource>(
+    shared: &Shared<S>,
+    ctx: &RequestContext,
+    stream: &mut UnixStream,
+) -> Option<Response> {
+    let rp_id = shared.state.config.auth.rp_id.as_deref();
+    let csrf_host = rp_id.unwrap_or(ctx.normalized_host.as_str());
+    if let Err(err) = check_auth_csrf(ctx.head(), csrf_host, ACTION_CAMERA_VIEW) {
+        debug!(%err, "camera start refused");
+        return Some(Response::json(403, "forbidden"));
+    }
+    if let Err(response) = camera_gates(shared, ctx) {
+        return Some(response);
+    }
+    if rp_id.is_none() {
+        return Some(Response::json(403, "passkeys_not_configured"));
+    }
+    if !ctx.parsed.has_body() {
+        return Some(Response::json(403, "passkey_required"));
+    }
+    if let Err(response) = rp_host_gate(shared, ctx) {
+        return Some(response);
+    }
+    let key = ctx.unlock_key();
+    if shared.auth.lock().await.locked_out(key, Instant::now()) {
+        shared.camera.audit_refused();
+        return Some(Response::json(429, "rate_limited"));
+    }
+    if let Err(err) = shared.camera.check(Instant::now()) {
+        shared.camera.audit_refused();
+        return Some(camera_slot_refusal(err));
+    }
+    let body = match read_request_body(stream, ctx).await {
+        BodyOutcome::Body(body) => body,
+        BodyOutcome::Refuse(response, counted) => {
+            if counted {
+                shared.fail(key).await;
+            }
+            shared.camera.audit_refused();
+            return Some(response);
+        }
+        BodyOutcome::Close => return None,
+    };
+    let Ok(assertion) = decode_assertion(&body) else {
+        drop(body);
+        shared.fail(key).await;
+        shared.camera.audit_refused();
+        return Some(Response::json(400, "bad_request"));
+    };
+    drop(body);
+    let Some(rp) = shared.rp.as_ref() else {
+        return Some(Response::json(403, "passkeys_not_configured"));
+    };
+    let checked = {
+        let mut auth = shared.auth.lock().await;
+        let checked = auth.check_assertion(
+            rp,
+            ctx.class,
+            ChallengePurpose::CameraView,
+            &ctx.unlock_binding(),
+            &assertion,
+            Instant::now(),
+        );
+        if matches!(checked, Err(AssertionFailure::Rejected)) {
+            auth.record_failure(key, Instant::now(), &shared.capacity.hints_in_flight());
+        }
+        checked
+    };
+    drop(assertion);
+    let verified = match checked {
+        Ok(verified) => verified,
+        Err(AssertionFailure::Rejected) => {
+            shared.camera.audit_refused();
+            return Some(Response::json(403, "passkey_rejected"));
+        }
+        Err(AssertionFailure::Store(err)) => {
+            shared.camera.audit_refused();
+            return Some(store_error_response(err));
+        }
+    };
+    if let Err(err) = shared.persist_counter(&verified).await {
+        shared.camera.audit_refused();
+        return Some(store_error_response(err));
+    }
+    let mut bytes = Zeroizing::new([0u8; CAMERA_VIEW_TOKEN_BYTES]);
+    if (shared.state.random)(bytes.as_mut_slice()).is_err() {
+        shared.camera.audit_refused();
+        return Some(Response::json(503, "unavailable"));
+    }
+    let token = ViewToken::from_bytes(*bytes);
+    let stream_path = Zeroizing::new(format!(
+        "{}{}",
+        crate::routes::CAMERA_STREAM_PREFIX,
+        token.encode().as_str()
+    ));
+    let owner = ViewOwner {
+        class: ctx.class,
+        session: ctx.session,
+    };
+    if let Err(err) = shared.camera.reserve(Instant::now(), owner, token) {
+        shared.camera.audit_refused();
+        return Some(camera_slot_refusal(err));
+    }
+    let settings = shared.camera.settings();
+    let response = json_value(
+        200,
+        &serde_json::json!({
+            "result": "view_ready",
+            "stream_path": stream_path.as_str(),
+            "token_ttl_ms": CAMERA_VIEW_TOKEN_TTL_MS,
+            "max_view_s": settings.max_view_s(),
+            "fps": settings.fps,
+            "width": settings.width_px(),
+        }),
+    );
+    Some(response)
+}
+
+/// `POST /api/camera/stop` (spec §8.8): CSRF → enabled → durable stop of whatever the slot
+/// holds. Any authenticated caller may stop (stopping never reveals pixels).
+fn camera_stop<S: SessionSource>(shared: &Shared<S>, ctx: &RequestContext) -> Response {
+    if let Err(err) = check_camera_csrf(ctx.head(), &ctx.normalized_host, ACTION_CAMERA_STOP) {
+        debug!(%err, "camera stop refused");
+        return Response::json(403, "forbidden");
+    }
+    if !shared.state.config.camera.enabled {
+        return Response::json(403, "camera_disabled");
+    }
+    if shared.camera.stop() {
+        Response::json(200, "stopped")
+    } else {
+        Response::json(200, "no_view")
+    }
+}
+
+/// `GET /api/camera/stream/<token>` (spec §8.6): CSRF (custom header) → enabled → Funnel flag
+/// → token → first frame (no head byte before it; failures are JSON errors) → head and first
+/// part → view loop → best-effort trailer. `None` when the connection closes without a
+/// (further) response.
+async fn camera_stream<S: SessionSource>(
+    shared: &Arc<Shared<S>>,
+    ctx: &RequestContext,
+    stream: &mut UnixStream,
+) -> Option<Response> {
+    if let Err(err) = check_camera_csrf(ctx.head(), &ctx.normalized_host, ACTION_CAMERA_STREAM) {
+        debug!(%err, "camera stream refused");
+        return Some(Response::json(403, "forbidden"));
+    }
+    if let Err(response) = camera_gates(shared, ctx) {
+        return Some(response);
+    }
+    let path = ctx.head().path.split('?').next().unwrap_or_default();
+    let Some(token) = camera_stream_token(path) else {
+        return Some(Response::json(404, "not_found"));
+    };
+    let owner = ViewOwner {
+        class: ctx.class,
+        session: ctx.session,
+    };
+    let runtime = Arc::clone(&shared.camera);
+    let (ticket, stop_rx) = match runtime.begin(Instant::now(), owner, &token) {
+        Ok(begun) => begun,
+        Err(err) => {
+            runtime.audit_refused();
+            return Some(camera_slot_refusal(err));
+        }
+    };
+    drop(token);
+    let mut guard = ViewGuard::new(Arc::clone(&runtime), ticket.view);
+    let Some(source) = runtime.new_source() else {
+        runtime.audit_refused();
+        return Some(Response::json(503, "camera_unavailable"));
+    };
+    let session_check: Option<SessionCheck> = ctx.session.map(|hash| {
+        let checker = Arc::clone(shared);
+        let check: SessionCheck = Box::new(move || {
+            let checker = Arc::clone(&checker);
+            Box::pin(async move { checker.session_still_valid(&hash).await })
+        });
+        check
+    });
+    let mut view = ViewContext {
+        runtime: &runtime,
+        ticket,
+        stop_rx,
+        closing: shared.closing.subscribe(),
+        session_check,
+    };
+    let (mut read_half, mut write_half) = stream.split();
+    let first_deadline = deadline(
+        Instant::now(),
+        Duration::from_millis(CAMERA_FIRST_FRAME_TIMEOUT_MS),
+    );
+    let (jpeg, sequence, source, pacer) = match view
+        .first_frame(&mut read_half, source, first_deadline)
+        .await
+    {
+        FirstFrame::Ready(jpeg, sequence, source, pacer) => (jpeg, sequence, source, pacer),
+        FirstFrame::Ended(end) => {
+            log_unshown_end(end);
+            drop(view);
+            drop(guard);
+            return camera_first_frame_refusal(&runtime, end);
+        }
+    };
+    runtime.mark_streaming(ticket.view);
+    if write_bounded(&mut write_half, &encode_camera_stream_head())
+        .await
+        .is_err()
+    {
+        log_unshown_end(ViewEnd::WriteFailed);
+        return None;
+    }
+    // From the first part on, pixels may reach the client even when the write fails half
+    // way: the view counts as shown (cooldown, `camera view started` / `ended`, push alert)
+    // before that write, never after it.
+    guard.set_shown();
+    audit::camera_view_started();
+    if let Some(push) = shared.push.as_ref() {
+        push.queue_camera_view();
+    }
+    if crate::camera::write_part(&mut write_half, &jpeg)
+        .await
+        .is_err()
+    {
+        return None;
+    }
+    drop(jpeg);
+    let last_sent_at = Instant::now();
+    let end = view
+        .stream(
+            &mut read_half,
+            &mut write_half,
+            (source, pacer, sequence),
+            last_sent_at,
+        )
+        .await;
+    finish_view(&mut write_half, end).await;
+    drop(view);
+    drop(guard);
+    None
+}
+
+/// The JSON answer of a view that ended before its head (`None`: closed without a response).
+fn camera_first_frame_refusal(runtime: &CameraRuntime, end: ViewEnd) -> Option<Response> {
+    let response = match end {
+        ViewEnd::DaemonRefused => Response::json(403, "camera_refused"),
+        ViewEnd::CameraUnavailable | ViewEnd::Internal => Response::json(503, "camera_unavailable"),
+        ViewEnd::UnsupportedFrame => Response::json(503, "camera_format_unsupported"),
+        ViewEnd::Stopped
+        | ViewEnd::ClientClosed
+        | ViewEnd::Shutdown
+        | ViewEnd::SessionExpired
+        | ViewEnd::MaxDuration
+        | ViewEnd::WriteFailed => {
+            runtime.audit_refused();
+            return None;
+        }
+    };
+    runtime.audit_refused();
+    Some(response)
 }
 
 /// Serializes an alerts view as one `event: alerts` and writes it under the write bound.

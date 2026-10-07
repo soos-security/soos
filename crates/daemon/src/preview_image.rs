@@ -29,7 +29,7 @@ use zeroize::{Zeroize, Zeroizing};
 pub const MAX_PREVIEW_WIDTH: u32 = 640;
 
 /// Wire format code of an empty preview response (no frame available or not convertible).
-pub const PREVIEW_FORMAT_EMPTY: u8 = 255;
+pub const PREVIEW_FORMAT_EMPTY: u8 = soos_protocol::types::PREVIEW_FORMAT_EMPTY;
 
 /// Headroom reserved in [`MAX_PREVIEW_MESSAGE_SIZE`] for the `PreviewResponse` header fields
 /// (version, sequence, dimensions, format, timestamp, length prefixes).

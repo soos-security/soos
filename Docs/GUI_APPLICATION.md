@@ -102,6 +102,15 @@ worker:
 | Active, preview refused / socket unreachable | blocked notice (`CameraBlockReason`) |
 | Inactive (paused) | direct V4L2 through the shared resolver (`resolve_camera_device_from_config`) |
 
+Since GitHub #345 (ADR 2026-10-07 "Live Camera View in `soos-remote` Through the Daemon Preview
+Channel") the daemon serves preview frames to an unprivileged peer only while that UID owns an
+**active local seat session** (`CLASS=user`, non-empty `SEAT`, `REMOTE=0`, active; a locked seat
+session still qualifies; `Docs/DAEMON.md` §1.5). Running `soos-gui` from an SSH session, from a
+lingering user manager or after a full logout therefore shows the "not authorized" notice instead
+of a preview. The GUI is no longer the only preview consumer: `soos-remote` may read the same
+stream when `[preview] remote_view = true`, and both share the per-UID
+`[preview] max_requests_per_sec` quota and `[peer_limits] max_connections_per_uid` connections.
+
 The previous source is always stopped and dropped (device closed) before the next one is opened.
 **Resume** first releases a direct V4L2 manager on the privileged worker thread
 (`HandoverExecutor`) and keeps direct mode disabled until the daemon is seen active, so the daemon
@@ -200,7 +209,7 @@ preview worker stops):
 | `Starved` | Camera stopped sending frames | Privacy shutter, cable |
 | `Io` | Camera I/O error | Other V4L2 failure |
 | `SourceUnreachable` | Daemon preview unreachable | Daemon paused or stopped |
-| `SourceUnauthorized` | Daemon preview not authorized | UID not in `[preview] allowed_uids` |
+| `SourceUnauthorized` | Daemon preview not authorized | UID not in `[preview] allowed_uids`, or no active local seat session (GUI started from SSH, under a lingering user manager, or after a full logout) |
 | `SourceRateLimited` | Daemon preview rate-limited | `[preview] max_requests_per_sec` |
 | `SourceUnavailable` | Daemon camera unavailable | Daemon has no camera frame to serve (`Verdict::Unavailable`, or an empty preview after the first frame) |
 | `SourceProtocol` | Daemon preview protocol error | GUI/daemon version mismatch, stale or unstamped daemon `Response` |

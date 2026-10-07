@@ -641,7 +641,6 @@ fn test_rmc_s4_remote_is_a_leaf_crate() {
         "soos-vision",
         "soos-biometric-store",
         "soos-evidence-store",
-        "soos-protocol",
         "soos-policy",
         "ort",
         "v4l",
@@ -655,6 +654,25 @@ fn test_rmc_s4_remote_is_a_leaf_crate() {
             !hit,
             "crates/remote/Cargo.toml must not depend on {forbidden} (RMC-S4)"
         );
+    }
+    // ADR 2026-10-07 "Live Camera View" (LC-1): soos-protocol is the only soos crate allowed
+    // besides soos-push-protocol.
+    assert!(
+        manifest
+            .lines()
+            .map(str::trim)
+            .any(|l| l == "soos-protocol = { workspace = true }"),
+        "crates/remote/Cargo.toml must depend on soos-protocol through the workspace (RMC-S4, LC-1)"
+    );
+    for line in manifest.lines().map(str::trim) {
+        if let Some(key) = line.split([' ', '.', '=']).next() {
+            if key.starts_with("soos-") {
+                assert!(
+                    key == "soos-protocol" || key == "soos-push-protocol",
+                    "crates/remote/Cargo.toml must not depend on {key} (RMC-S4)"
+                );
+            }
+        }
     }
 }
 

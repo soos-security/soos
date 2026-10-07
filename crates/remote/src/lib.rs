@@ -20,6 +20,12 @@
 //! so this service itself still opens no network socket (ADR 2026-10-06 "Web Push
 //! Notifications for Failed-Password Alerts Through a Separate Sender Unit").
 //!
+//! When `camera_view = true` it also offers a live camera view: after a fresh passkey
+//! assertion with user verification it streams JPEG frames converted from the daemon's
+//! preview channel (`RequestKind::PreviewFrame`), never opening a video device and never
+//! recording (ADR 2026-10-07 "Live Camera View in `soos-remote` Through the Daemon Preview
+//! Channel").
+//!
 //! This file is the single source of the crate constants (architect spec §3).
 
 #![forbid(unsafe_code)]
@@ -28,6 +34,10 @@ pub mod alerts;
 pub mod assets;
 pub mod audit;
 pub mod auth;
+pub mod camera;
+pub mod camera_ipc;
+pub mod camera_jpeg;
+pub mod camera_slot;
 pub mod challenge;
 pub mod config;
 pub mod credentials;
@@ -459,3 +469,149 @@ const _: () = assert!(PUSH_TEST_TOPIC.len() <= soos_push_protocol::MAX_TOPIC_LEN
 const _: () = assert!(VAPID_JWT_REUSE_S < VAPID_JWT_LIFETIME_S);
 const _: () = assert!(PUSH_TTL_S <= soos_push_protocol::MAX_PUSH_TTL_S);
 const _: () = assert!(MAX_PUSH_SUBSCRIPTIONS <= MAX_PASSKEYS);
+
+// ---------------------------------------------------------------------------------------
+// Live camera view (ADR 2026-10-07 "Live Camera View in `soos-remote` Through the Daemon
+// Preview Channel", architect spec `AI/architect_spec_remote_live_camera.md` §3.2).
+// ---------------------------------------------------------------------------------------
+
+/// Global view slots.
+pub const MAX_CAMERA_VIEWS: usize = 1;
+/// Default `camera_max_view_s`.
+pub const DEFAULT_CAMERA_MAX_VIEW_S: u32 = 120;
+/// Smallest `camera_max_view_s`.
+pub const MIN_CAMERA_MAX_VIEW_S: u32 = 10;
+/// Largest `camera_max_view_s`.
+pub const MAX_CAMERA_MAX_VIEW_S: u32 = 300;
+/// Default `camera_fps`.
+pub const DEFAULT_CAMERA_FPS: u32 = 5;
+/// Smallest `camera_fps`.
+pub const MIN_CAMERA_FPS: u32 = 1;
+/// Largest `camera_fps`.
+pub const MAX_CAMERA_FPS: u32 = 10;
+/// `camera_width` of the full source size.
+pub const CAMERA_FULL_WIDTH: u32 = 640;
+/// `camera_width` of the 2x downscale.
+pub const CAMERA_HALF_WIDTH: u32 = 320;
+/// Default `camera_quality`.
+pub const DEFAULT_CAMERA_QUALITY: u8 = 70;
+/// Smallest `camera_quality`.
+pub const MIN_CAMERA_QUALITY: u8 = 50;
+/// Largest `camera_quality`.
+pub const MAX_CAMERA_QUALITY: u8 = 85;
+/// Smallest accepted source width and height.
+pub const CAMERA_MIN_SOURCE_DIM: u32 = 16;
+/// Largest accepted source width.
+pub const CAMERA_MAX_SOURCE_WIDTH: u32 = 640;
+/// Largest accepted source height.
+pub const CAMERA_MAX_SOURCE_HEIGHT: u32 = 480;
+/// Largest converted pixel buffer (640 x 480 x 3).
+pub const CAMERA_MAX_SCRATCH_BYTES: usize = 921_600;
+/// JPEG sink capacity; the sink never grows.
+pub const MAX_CAMERA_JPEG_BYTES: usize = 524_288;
+/// Stream token length (CSPRNG bytes).
+pub const CAMERA_VIEW_TOKEN_BYTES: usize = 32;
+/// Unpadded base64url length of the stream token.
+pub const CAMERA_VIEW_TOKEN_B64_LEN: usize = 43;
+/// Lifetime of a stream token (start → stream request).
+pub const CAMERA_VIEW_TOKEN_TTL_MS: u64 = 10_000;
+/// Cooldown after a view that showed pixels.
+pub const CAMERA_VIEW_COOLDOWN_MS: u64 = 10_000;
+/// Stream request → first JPEG; exceeded → JSON error, no head.
+pub const CAMERA_FIRST_FRAME_TIMEOUT_MS: u64 = 5_000;
+/// No new frame sent for this long → the view ends.
+pub const CAMERA_STALL_TIMEOUT_MS: u64 = 5_000;
+/// Funnel web-session re-validation period during a view.
+pub const CAMERA_SESSION_CHECK_MS: u64 = 5_000;
+/// Consecutive geometry or encode failures that end a view.
+pub const CAMERA_MAX_BAD_FRAMES: u32 = 10;
+/// At most one `camera view refused` audit line per this interval.
+pub const CAMERA_REFUSED_AUDIT_MIN_INTERVAL_MS: u64 = 5_000;
+/// The daemon socket (never configurable).
+pub const CAMERA_DAEMON_SOCKET_PATH: &str = "/run/soos/daemon.sock";
+/// `Request.service` of the preview requests.
+pub const CAMERA_DAEMON_SERVICE: &str = "soos-remote";
+/// Bound of the daemon connect plus the peer-credential check.
+pub const CAMERA_DAEMON_CONNECT_TIMEOUT_MS: u64 = 500;
+/// Bound of one daemon exchange (write plus read).
+///
+/// Worst case of one `next_frame` (plan O2): the immediate retry after an idle-closed reused
+/// connection gets only the remaining budget of the original attempt, so one exchange is
+/// bounded by close wait + connect + this timeout.
+pub const CAMERA_DAEMON_IO_TIMEOUT_MS: u64 = 3_000;
+/// Proactive reconnect age (below the daemon default lifetime of 30 s).
+pub const CAMERA_DAEMON_RECONNECT_AFTER_MS: u64 = 25_000;
+/// Proactive reconnect request count (below the daemon default cap of 1024).
+pub const CAMERA_DAEMON_MAX_REQUESTS_PER_CONNECTION: u32 = 1_000;
+/// First back-off after an `Io`, `Protocol` or `Unavailable` failure.
+pub const CAMERA_DAEMON_BACKOFF_MIN_MS: u64 = 200;
+/// Cap of the doubling back-off.
+pub const CAMERA_DAEMON_BACKOFF_MAX_MS: u64 = 2_000;
+/// Back-off after a `RateLimited` reply (preview quota shared with `soos-gui`).
+pub const CAMERA_RATE_LIMITED_BACKOFF_MS: u64 = 250;
+/// After `shutdown(Write)` of a connection being replaced, wait at most this long for the
+/// daemon's EOF before connecting the next one.
+pub const CAMERA_DAEMON_CLOSE_WAIT_MS: u64 = 200;
+/// Immediate retries on a fresh connection after an I/O failure of a reused connection
+/// before any reply byte.
+pub const CAMERA_DAEMON_IDLE_RETRIES: u32 = 1;
+/// Multipart boundary of the stream.
+pub const CAMERA_STREAM_BOUNDARY: &str = "soosframe";
+/// Web Push `Topic` of the camera notification (ASCII letters and digits only).
+pub const PUSH_CAMERA_TOPIC: &str = "sooscamera";
+/// `X-Soos-Action` of `POST /api/auth/camera/options`.
+pub const ACTION_CAMERA_OPTIONS: &str = "camera-options";
+/// `X-Soos-Action` of `POST /api/camera/start`.
+pub const ACTION_CAMERA_VIEW: &str = "camera-view";
+/// `X-Soos-Action` of `GET /api/camera/stream/<token>`.
+pub const ACTION_CAMERA_STREAM: &str = "camera-stream";
+/// `X-Soos-Action` of `POST /api/camera/stop`.
+pub const ACTION_CAMERA_STOP: &str = "camera-stop";
+
+// Compile-time relations of the live camera spec §3.2.
+const _: () = assert!(MAX_SSE_STREAMS + MAX_CAMERA_VIEWS < MAX_CONNECTIONS);
+const _: () = assert!(MAX_FUNNEL_SSE_STREAMS + MAX_CAMERA_VIEWS < MAX_FUNNEL_CONNECTIONS);
+const _: () = assert!(
+    MIN_CAMERA_MAX_VIEW_S <= DEFAULT_CAMERA_MAX_VIEW_S
+        && DEFAULT_CAMERA_MAX_VIEW_S <= MAX_CAMERA_MAX_VIEW_S
+);
+const _: () = assert!(MIN_CAMERA_FPS <= DEFAULT_CAMERA_FPS && DEFAULT_CAMERA_FPS <= MAX_CAMERA_FPS);
+const _: () = assert!(
+    MIN_CAMERA_QUALITY <= DEFAULT_CAMERA_QUALITY && DEFAULT_CAMERA_QUALITY <= MAX_CAMERA_QUALITY
+);
+const _: () = assert!(
+    CAMERA_MAX_SCRATCH_BYTES == (CAMERA_MAX_SOURCE_WIDTH * CAMERA_MAX_SOURCE_HEIGHT * 3) as usize
+);
+const _: () =
+    assert!(CAMERA_MAX_SCRATCH_BYTES + 1024 <= soos_protocol::types::MAX_PREVIEW_MESSAGE_SIZE);
+const _: () = assert!(
+    CAMERA_HALF_WIDTH * 2 == CAMERA_FULL_WIDTH && CAMERA_FULL_WIDTH == CAMERA_MAX_SOURCE_WIDTH
+);
+const _: () = assert!(CAMERA_VIEW_TOKEN_B64_LEN == (CAMERA_VIEW_TOKEN_BYTES * 4).div_ceil(3));
+// Daemon defaults `max_connection_lifetime_ms` (30 000) and `max_requests_per_connection`
+// (1024); soos-remote must not depend on soos-daemon.
+const _: () = assert!(CAMERA_DAEMON_RECONNECT_AFTER_MS < 30_000);
+const _: () = assert!(CAMERA_DAEMON_MAX_REQUESTS_PER_CONNECTION < 1024);
+const _: () = assert!(CAMERA_DAEMON_BACKOFF_MIN_MS < CAMERA_DAEMON_BACKOFF_MAX_MS);
+const _: () = assert!(CAMERA_DAEMON_BACKOFF_MAX_MS < CAMERA_STALL_TIMEOUT_MS);
+// The first-frame phase is bounded as a whole by CAMERA_FIRST_FRAME_TIMEOUT_MS; one
+// `next_frame` (close wait + connect + remaining IO budget, plan O2) fits inside it.
+const _: () = assert!(CAMERA_DAEMON_IO_TIMEOUT_MS < CAMERA_FIRST_FRAME_TIMEOUT_MS);
+const _: () = assert!(
+    CAMERA_DAEMON_CLOSE_WAIT_MS + CAMERA_DAEMON_CONNECT_TIMEOUT_MS + CAMERA_DAEMON_IO_TIMEOUT_MS
+        < CAMERA_FIRST_FRAME_TIMEOUT_MS
+);
+const _: () = assert!(CAMERA_DAEMON_SERVICE.len() <= soos_protocol::types::MAX_SERVICE_LEN);
+const _: () = assert!(is_ascii_alphanumeric_topic(PUSH_CAMERA_TOPIC.as_bytes()));
+const _: () = assert!(PUSH_CAMERA_TOPIC.len() <= soos_push_protocol::MAX_TOPIC_LEN);
+const _: () = assert!(!const_bytes_eq(
+    PUSH_CAMERA_TOPIC.as_bytes(),
+    PUSH_TOPIC.as_bytes()
+));
+const _: () = assert!(!const_bytes_eq(
+    PUSH_CAMERA_TOPIC.as_bytes(),
+    PUSH_TEST_TOPIC.as_bytes()
+));
+const _: () = assert!(CAMERA_FULL_WIDTH as usize * 2 <= u16::MAX as usize);
+const _: () = assert!(CAMERA_DAEMON_CLOSE_WAIT_MS < CAMERA_DAEMON_CONNECT_TIMEOUT_MS);
+const _: () = assert!(CAMERA_DAEMON_IDLE_RETRIES == 1);

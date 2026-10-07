@@ -3,8 +3,8 @@
 //! Camera frames are biometric data (ARCHITECTURE.md §1). They may leave the daemon only
 //! towards a peer that is either root or explicitly listed by the administrator in the
 //! `[preview]` section of `daemon.toml`, which is disabled by default (fail-closed).
-//! The dispatcher additionally requires an active logind session for unprivileged peers
-//! and applies a per-UID rate limit to every preview request, root included.
+//! The dispatcher additionally requires a local seat session for unprivileged peers, refuses
+//! the remote companion unless `remote_view` is set (ADR 2026-10-07), and applies a per-UID rate limit to every preview request, root included.
 
 use soos_policy::RateLimitConfig;
 use thiserror::Error;
@@ -43,6 +43,11 @@ pub struct PreviewConfig {
     /// Preview requests permitted per peer UID within [`PREVIEW_RATE_WINDOW_NS`].
     /// `0` denies every preview request (root included).
     pub max_requests_per_sec: u32,
+    /// Whether a peer running inside the `soos-remote.service` user unit (the remote
+    /// companion's live camera view) may receive preview frames (ADR 2026-10-07, LC-3b).
+    /// `false` (default) refuses it. No effect unless `enabled` and the UID is allowed.
+    /// An administrative opt-in, not a security boundary.
+    pub remote_view: bool,
 }
 
 impl Default for PreviewConfig {
@@ -51,6 +56,7 @@ impl Default for PreviewConfig {
             enabled: false,
             allowed_uids: Vec::new(),
             max_requests_per_sec: DEFAULT_PREVIEW_MAX_REQUESTS_PER_SEC,
+            remote_view: false,
         }
     }
 }

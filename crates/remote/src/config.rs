@@ -22,6 +22,11 @@ use crate::{
     MAX_POLL_INTERVAL_MS, MAX_SOCKET_PATH_LEN, MAX_VAPID_SUBJECT_LEN, MIN_POLL_INTERVAL_MS,
     PUSH_STORE_FILE_NAME, SOCKET_DIR_NAME, SOCKET_FILE_NAME, TS_NET_SUFFIX,
 };
+use crate::{
+    CAMERA_FULL_WIDTH, CAMERA_HALF_WIDTH, DEFAULT_CAMERA_FPS, DEFAULT_CAMERA_MAX_VIEW_S,
+    DEFAULT_CAMERA_QUALITY, MAX_CAMERA_FPS, MAX_CAMERA_MAX_VIEW_S, MAX_CAMERA_QUALITY,
+    MIN_CAMERA_FPS, MIN_CAMERA_MAX_VIEW_S, MIN_CAMERA_QUALITY,
+};
 use soos_push_protocol::{PUSH_SOCKET_DIR_NAME, PUSH_SOCKET_FILE_NAME};
 
 /// Validated Tailscale login (`Tailscale-User-Login` value), stored ASCII-lowercased.
@@ -79,6 +84,49 @@ pub struct RemoteConfig {
     /// Web Push settings (ADR 2026-10-06 "Web Push Notifications for Failed-Password Alerts
     /// Through a Separate Sender Unit").
     pub push: PushConfig,
+    /// Live camera view settings (ADR 2026-10-07 "Live Camera View in `soos-remote` Through
+    /// the Daemon Preview Channel").
+    pub camera: CameraConfig,
+}
+
+/// Output width of the live view.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CameraWidth {
+    /// Source size (at most 640x480).
+    #[default]
+    Full,
+    /// 2x2 box downscale when the source is wider than `CAMERA_HALF_WIDTH`.
+    Half,
+}
+
+/// Live camera view settings; `Default` = off with the default bounds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CameraConfig {
+    /// `camera_view`; default `false`.
+    pub enabled: bool,
+    /// `camera_view_funnel`; default `false` (tailnet only).
+    pub funnel: bool,
+    /// `camera_max_view_s` in `MIN_CAMERA_MAX_VIEW_S..=MAX_CAMERA_MAX_VIEW_S`, default 120.
+    pub max_view_s: u32,
+    /// `camera_fps` in `MIN_CAMERA_FPS..=MAX_CAMERA_FPS`, default 5.
+    pub fps: u32,
+    /// `camera_width` in {320, 640}, default 640.
+    pub width: CameraWidth,
+    /// `camera_quality` in `MIN_CAMERA_QUALITY..=MAX_CAMERA_QUALITY`, default 70.
+    pub quality: u8,
+}
+
+impl Default for CameraConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            funnel: false,
+            max_view_s: DEFAULT_CAMERA_MAX_VIEW_S,
+            fps: DEFAULT_CAMERA_FPS,
+            width: CameraWidth::Full,
+            quality: DEFAULT_CAMERA_QUALITY,
+        }
+    }
 }
 
 /// What a push notification shows on the phone's lock screen.
@@ -254,6 +302,27 @@ pub enum ConfigError {
     /// `push_previews` is neither `detailed` nor `generic`.
     #[error("push_previews must be detailed or generic")]
     InvalidPushPreviews,
+    /// `camera_view = true` without `rp_id`.
+    #[error("camera_view requires rp_id")]
+    CameraRequiresRpId,
+    /// `camera_view_funnel = true` while `camera_view` is not `true`.
+    #[error("camera_view_funnel requires camera_view")]
+    CameraFunnelRequiresCameraView,
+    /// `camera_view_funnel = true` without `allow_funnel = true`.
+    #[error("camera_view_funnel requires allow_funnel")]
+    CameraFunnelRequiresFunnel,
+    /// `camera_max_view_s` outside the accepted range (the value is never echoed).
+    #[error("camera_max_view_s out of range")]
+    CameraMaxViewOutOfRange,
+    /// `camera_fps` outside the accepted range (the value is never echoed).
+    #[error("camera_fps out of range")]
+    CameraFpsOutOfRange,
+    /// `camera_width` is neither 320 nor 640 (the value is never echoed).
+    #[error("camera_width must be 320 or 640")]
+    InvalidCameraWidth,
+    /// `camera_quality` outside the accepted range (the value is never echoed).
+    #[error("camera_quality out of range")]
+    CameraQualityOutOfRange,
 }
 
 /// Pure. `Err(RunningAsRoot)` when `uid == 0 || euid == 0`.
@@ -286,6 +355,70 @@ struct FileConfig {
     vapid_subject: Option<String>,
     push_socket_path: Option<String>,
     push_previews: Option<String>,
+    camera_view: Option<bool>,
+    camera_view_funnel: Option<bool>,
+    camera_max_view_s: Option<u32>,
+    camera_fps: Option<u32>,
+    camera_width: Option<u32>,
+    camera_quality: Option<u8>,
+}
+
+/// The six camera keys of the file.
+struct CameraKeys {
+    camera_view: Option<bool>,
+    camera_view_funnel: Option<bool>,
+    camera_max_view_s: Option<u32>,
+    camera_fps: Option<u32>,
+    camera_width: Option<u32>,
+    camera_quality: Option<u8>,
+}
+
+/// The camera settings of the file (spec §4.1). Absent keys take their default; `0` is out
+/// of range (never "unlimited"); range keys are validated even when `camera_view = false`.
+/// Check order: rp_id, funnel needs view, funnel needs `allow_funnel`, max view, fps, width,
+/// quality.
+fn camera_config(
+    keys: &CameraKeys,
+    rp_id: Option<&str>,
+    allow_funnel: bool,
+) -> Result<CameraConfig, ConfigError> {
+    let enabled = keys.camera_view.unwrap_or(false);
+    let funnel = keys.camera_view_funnel.unwrap_or(false);
+    if enabled && rp_id.is_none() {
+        return Err(ConfigError::CameraRequiresRpId);
+    }
+    if funnel && !enabled {
+        return Err(ConfigError::CameraFunnelRequiresCameraView);
+    }
+    if funnel && !allow_funnel {
+        return Err(ConfigError::CameraFunnelRequiresFunnel);
+    }
+    let max_view_s = keys.camera_max_view_s.unwrap_or(DEFAULT_CAMERA_MAX_VIEW_S);
+    if !(MIN_CAMERA_MAX_VIEW_S..=MAX_CAMERA_MAX_VIEW_S).contains(&max_view_s) {
+        return Err(ConfigError::CameraMaxViewOutOfRange);
+    }
+    let fps = keys.camera_fps.unwrap_or(DEFAULT_CAMERA_FPS);
+    if !(MIN_CAMERA_FPS..=MAX_CAMERA_FPS).contains(&fps) {
+        return Err(ConfigError::CameraFpsOutOfRange);
+    }
+    let width = match keys.camera_width {
+        None => CameraWidth::Full,
+        Some(w) if w == CAMERA_FULL_WIDTH => CameraWidth::Full,
+        Some(w) if w == CAMERA_HALF_WIDTH => CameraWidth::Half,
+        Some(_) => return Err(ConfigError::InvalidCameraWidth),
+    };
+    let quality = keys.camera_quality.unwrap_or(DEFAULT_CAMERA_QUALITY);
+    if !(MIN_CAMERA_QUALITY..=MAX_CAMERA_QUALITY).contains(&quality) {
+        return Err(ConfigError::CameraQualityOutOfRange);
+    }
+    Ok(CameraConfig {
+        enabled,
+        funnel,
+        max_view_s,
+        fps,
+        width,
+        quality,
+    })
 }
 
 /// One `lock_screen_programs` entry: absolute, 1..=4096 bytes, no trailing `/`, no `..`
@@ -588,6 +721,15 @@ pub fn parse_config(text: &str, runtime_dir: Option<&Path>) -> Result<RemoteConf
         push_previews: file.push_previews,
     };
     let push = push_config(&push_keys, &alerts, rp_id.as_deref(), runtime_dir)?;
+    let camera_keys = CameraKeys {
+        camera_view: file.camera_view,
+        camera_view_funnel: file.camera_view_funnel,
+        camera_max_view_s: file.camera_max_view_s,
+        camera_fps: file.camera_fps,
+        camera_width: file.camera_width,
+        camera_quality: file.camera_quality,
+    };
+    let camera = camera_config(&camera_keys, rp_id.as_deref(), allow_funnel)?;
     Ok(RemoteConfig {
         allowed_logins,
         socket_path,
@@ -601,6 +743,7 @@ pub fn parse_config(text: &str, runtime_dir: Option<&Path>) -> Result<RemoteConf
         },
         alerts,
         push,
+        camera,
     })
 }
 

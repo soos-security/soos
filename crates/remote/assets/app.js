@@ -23,6 +23,13 @@
  * the permission from the tap itself, subscribes with the PC's public VAPID key fetched
  * before the tap, and hands the subscription to the PC. A notification carries counts and
  * classes only, never the typed password.
+ *
+ * Live camera view (ADR 2026-10-07 "Live Camera View in soos-remote Through the Daemon
+ * Preview Channel"): the card is built at runtime (no markup id). Every view needs a tap,
+ * a confirmation and a fresh Face ID assertion; the multipart JPEG stream is read with
+ * fetch and a ReadableStream into a bounded buffer, each part decoded with
+ * createImageBitmap and drawn on a canvas, then released. No image element, no object
+ * address, no storage; the view stops when the page is hidden or left.
  */
 "use strict";
 
@@ -256,6 +263,8 @@ function showLogin(message) {
   alertsView = null;
   pushSection.hidden = true;
   pushView = null;
+  stopCameraView(null);
+  buildCameraCard().section.hidden = true;
   setText(loginFeedback, message || " ");
 }
 
@@ -1056,6 +1065,416 @@ function disableNotifications() {
     });
 }
 
+// --- live camera view (ADR 2026-10-07) --------------------------------------------------
+
+const CAMERA_PATH = "/api/camera";
+const CAMERA_OPTIONS_PATH = "/api/auth/camera/options";
+const CAMERA_START_PATH = "/api/camera/start";
+const CAMERA_STOP_PATH = "/api/camera/stop";
+const CAMERA_BOUNDARY = "--soosframe";
+// Largest JPEG part accepted (the server never sends more).
+const CAMERA_MAX_PART_BYTES = 524288;
+// Largest amount of unparsed stream bytes kept; beyond it the view is aborted.
+const CAMERA_MAX_BUFFER_BYTES = 1048576;
+const CAMERA_START_LABEL = "Start camera view";
+const CAMERA_STOP_LABEL = "Stop camera view";
+const CAMERA_STREAM_PATTERN = /^\/api\/camera\/stream\/[A-Za-z0-9_-]{43}$/;
+
+const CAMERA_REASONS = {
+  camera_refused:
+    "The PC refused the camera view (check the [preview] settings and that you are logged in at the PC)",
+  camera_unavailable: "The camera of the PC is unavailable, try again",
+  camera_format_unsupported: "The camera format of the PC is not supported",
+  camera_cooldown: "Please wait a moment before starting another camera view",
+  view_in_progress: "A camera view is already in progress",
+  camera_tailnet_only: "Camera view is available on the tailnet only",
+  camera_disabled: "The camera view is off on the PC (camera_view in remote.toml)",
+  view_token_rejected: "The camera view expired, start it again",
+  passkey_rejected: "The passkey was not accepted, try again",
+};
+
+let camera = null;
+let cameraController = null;
+let cameraDecoding = false;
+
+function cameraReason(result, status) {
+  return reasonFor(result, CAMERA_REASONS, "Camera view refused (" + status + ")");
+}
+
+function buildCameraCard() {
+  if (camera !== null) {
+    return camera;
+  }
+  const section = document.createElement("section");
+  section.className = "card camera";
+  section.hidden = true;
+  section.setAttribute("aria-live", "polite");
+  const title = document.createElement("h2");
+  setText(title, "Camera");
+  const stateLine = document.createElement("p");
+  stateLine.className = "detail";
+  setText(stateLine, " ");
+  const canvas = document.createElement("canvas");
+  canvas.className = "camera-canvas";
+  canvas.width = 0;
+  canvas.height = 0;
+  const startButton = document.createElement("button");
+  startButton.type = "button";
+  setText(startButton, CAMERA_START_LABEL);
+  const stopButton = document.createElement("button");
+  stopButton.type = "button";
+  stopButton.className = "secondary";
+  stopButton.hidden = true;
+  setText(stopButton, CAMERA_STOP_LABEL);
+  const feedback = document.createElement("p");
+  feedback.className = "feedback";
+  feedback.setAttribute("role", "status");
+  setText(feedback, " ");
+  section.appendChild(title);
+  section.appendChild(stateLine);
+  section.appendChild(canvas);
+  section.appendChild(startButton);
+  section.appendChild(stopButton);
+  section.appendChild(feedback);
+  pushSection.parentNode.insertBefore(section, pushSection.nextSibling);
+  startButton.addEventListener("click", startCameraView);
+  stopButton.addEventListener("click", function () {
+    stopCameraView("Camera view stopped");
+  });
+  camera = {
+    section: section,
+    stateLine: stateLine,
+    canvas: canvas,
+    startButton: startButton,
+    stopButton: stopButton,
+    feedback: feedback,
+  };
+  return camera;
+}
+
+function clearCameraCanvas() {
+  const c = buildCameraCard();
+  const context = c.canvas.getContext("2d");
+  if (context) {
+    context.clearRect(0, 0, c.canvas.width, c.canvas.height);
+  }
+  c.canvas.width = 0;
+  c.canvas.height = 0;
+}
+
+function renderCamera(view) {
+  const c = buildCameraCard();
+  if (signedOut || !view || view.enabled !== true) {
+    c.section.hidden = true;
+    return;
+  }
+  c.section.hidden = false;
+  if (view.reachable === false) {
+    setText(c.stateLine, "Camera view is available on the tailnet only");
+    c.startButton.hidden = true;
+    c.stopButton.hidden = true;
+    return;
+  }
+  const streaming = cameraController !== null;
+  c.startButton.hidden = streaming;
+  c.stopButton.hidden = !streaming;
+  if (streaming) {
+    setText(c.stateLine, "Live view of the PC camera");
+  } else if (view.state === "cooldown") {
+    const seconds = Math.ceil((typeof view.cooldown_ms === "number" ? view.cooldown_ms : 0) / 1000);
+    setText(c.stateLine, "Next view possible in " + seconds + " s");
+  } else if (view.state === "idle") {
+    setText(c.stateLine, "Up to " + view.max_view_s + " s at " + view.fps + " frames per second");
+  } else {
+    setText(c.stateLine, "A camera view is in progress");
+  }
+}
+
+function fetchCamera() {
+  if (signedOut) {
+    return;
+  }
+  fetch(CAMERA_PATH, { method: "GET", cache: "no-store" })
+    .then(function (response) {
+      if (!response.ok) {
+        throw new Error("status " + response.status);
+      }
+      return response.json();
+    })
+    .then(renderCamera)
+    .catch(function () {
+      buildCameraCard().section.hidden = true;
+    });
+}
+
+// Draws one JPEG part; a part arriving while the previous one decodes is dropped.
+function showCameraFrame(jpeg, controller) {
+  if (cameraDecoding) {
+    return;
+  }
+  cameraDecoding = true;
+  createImageBitmap(new Blob([jpeg], { type: "image/jpeg" }))
+    .then(function (bitmap) {
+      const c = buildCameraCard();
+      if (cameraController !== controller) {
+        bitmap.close();
+        return;
+      }
+      if (c.canvas.width !== bitmap.width || c.canvas.height !== bitmap.height) {
+        c.canvas.width = bitmap.width;
+        c.canvas.height = bitmap.height;
+      }
+      const context = c.canvas.getContext("2d");
+      if (context) {
+        context.drawImage(bitmap, 0, 0);
+      }
+      bitmap.close();
+    })
+    .catch(function () {
+      // An undecodable part is skipped; the next one replaces it.
+    })
+    .finally(function () {
+      cameraDecoding = false;
+    });
+}
+
+function asciiBytes(text) {
+  const out = new Uint8Array(text.length);
+  for (let i = 0; i < text.length; i += 1) {
+    out[i] = text.charCodeAt(i) & 0x7f;
+  }
+  return out;
+}
+
+function startsWithBytes(buffer, prefix) {
+  if (buffer.length < prefix.length) {
+    return false;
+  }
+  for (let i = 0; i < prefix.length; i += 1) {
+    if (buffer[i] !== prefix[i]) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function headEndOf(buffer, from) {
+  for (let i = from; i + 3 < buffer.length; i += 1) {
+    if (buffer[i] === 13 && buffer[i + 1] === 10 && buffer[i + 2] === 13 && buffer[i + 3] === 10) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+// Reads the multipart stream: `--soosframe`, part headers, `Content-Length` digits only
+// (at most CAMERA_MAX_PART_BYTES), the JPEG bytes and a CRLF; anything else aborts.
+function readCameraStream(response, controller) {
+  const reader = response.body.getReader();
+  const opener = asciiBytes(CAMERA_BOUNDARY + "\r\n");
+  const closer = asciiBytes(CAMERA_BOUNDARY + "--");
+  let buffer = new Uint8Array(0);
+
+  function append(chunk) {
+    if (buffer.length + chunk.length > CAMERA_MAX_BUFFER_BYTES) {
+      throw new Error("The camera stream exceeded its bound");
+    }
+    const next = new Uint8Array(buffer.length + chunk.length);
+    next.set(buffer, 0);
+    next.set(chunk, buffer.length);
+    buffer = next;
+  }
+
+  // True when the closing boundary arrived.
+  function parse() {
+    for (;;) {
+      if (startsWithBytes(buffer, closer)) {
+        return true;
+      }
+      if (buffer.length < opener.length) {
+        return false;
+      }
+      if (!startsWithBytes(buffer, opener)) {
+        throw new Error("The camera stream is malformed");
+      }
+      const headEnd = headEndOf(buffer, opener.length);
+      if (headEnd < 0) {
+        if (buffer.length > 1024) {
+          throw new Error("The camera stream is malformed");
+        }
+        return false;
+      }
+      let head = "";
+      for (let i = opener.length; i < headEnd; i += 1) {
+        head += String.fromCharCode(buffer[i]);
+      }
+      let length = -1;
+      head.split("\r\n").forEach(function (line) {
+        const colon = line.indexOf(":");
+        if (colon > 0 && line.slice(0, colon).trim().toLowerCase() === "content-length") {
+          const value = line.slice(colon + 1).trim();
+          if (/^[0-9]{1,7}$/.test(value)) {
+            length = Number(value);
+          }
+        }
+      });
+      if (length <= 0 || length > CAMERA_MAX_PART_BYTES) {
+        throw new Error("The camera stream is malformed");
+      }
+      const start = headEnd + 4;
+      if (buffer.length < start + length + 2) {
+        return false;
+      }
+      const jpeg = buffer.slice(start, start + length);
+      buffer = buffer.slice(start + length + 2);
+      showCameraFrame(jpeg, controller);
+    }
+  }
+
+  function pump() {
+    return reader.read().then(function (result) {
+      if (result.done) {
+        return null;
+      }
+      append(result.value);
+      if (parse()) {
+        return null;
+      }
+      return pump();
+    });
+  }
+  return pump();
+}
+
+function endCameraView(message) {
+  const c = buildCameraCard();
+  const controller = cameraController;
+  cameraController = null;
+  if (controller !== null) {
+    controller.abort();
+  }
+  clearCameraCanvas();
+  c.startButton.disabled = false;
+  if (message) {
+    setText(c.feedback, message);
+  }
+  fetchCamera();
+}
+
+// Ends the view here and asks the PC to stop it (also from a hidden or closing page).
+function stopCameraView(message) {
+  if (cameraController === null) {
+    return;
+  }
+  fetch(CAMERA_STOP_PATH, {
+    method: "POST",
+    headers: { "X-Soos-Action": "camera-stop" },
+    keepalive: true,
+  }).catch(function () {
+    // The PC also ends the view when the stream closes.
+  });
+  endCameraView(message);
+}
+
+function openCameraStream(path) {
+  const c = buildCameraCard();
+  const controller = new AbortController();
+  cameraController = controller;
+  setText(c.feedback, "Starting the camera…");
+  return fetch(path, {
+    headers: { "X-Soos-Action": "camera-stream" },
+    signal: controller.signal,
+    cache: "no-store",
+  })
+    .then(function (response) {
+      if (response.status !== 200) {
+        return response
+          .json()
+          .catch(function () {
+            return {};
+          })
+          .then(function (body) {
+            throw new Error(cameraReason(body.result, response.status));
+          });
+      }
+      const type = response.headers.get("Content-Type") || "";
+      if (type.indexOf("multipart/x-mixed-replace") !== 0 || !response.body) {
+        throw new Error("The camera stream is malformed");
+      }
+      setText(c.feedback, " ");
+      c.startButton.hidden = true;
+      c.stopButton.hidden = false;
+      setText(c.stateLine, "Live view of the PC camera");
+      return readCameraStream(response, controller);
+    })
+    .then(function () {
+      if (cameraController === controller) {
+        endCameraView("The camera view ended");
+      }
+    })
+    .catch(function (error) {
+      if (cameraController === controller) {
+        endCameraView(error && error.message ? error.message : "The camera view ended");
+      }
+    });
+}
+
+function startCameraView() {
+  const c = buildCameraCard();
+  // A deliberate second tap, then Face ID: a stray tap must never turn the camera on.
+  if (!window.confirm("Start the live camera view of the PC? Its camera light turns on.")) {
+    return;
+  }
+  c.startButton.disabled = true;
+  setText(c.feedback, "Confirm with Face ID…");
+  postJson(CAMERA_OPTIONS_PATH, "camera-options")
+    .then(function (options) {
+      if (options.status !== 200) {
+        throw new Error(cameraReason(options.result, options.status));
+      }
+      return getAssertion(options.body);
+    })
+    .then(function (credential) {
+      return fetch(CAMERA_START_PATH, {
+        method: "POST",
+        cache: "no-store",
+        headers: { "X-Soos-Action": "camera-view", "Content-Type": "application/json" },
+        body: JSON.stringify(assertionBody(credential)),
+      });
+    })
+    .then(function (response) {
+      return response
+        .json()
+        .catch(function () {
+          return {};
+        })
+        .then(function (body) {
+          return { status: response.status, body: body };
+        });
+    })
+    .then(function (outcome) {
+      if (outcome.body.result === "login_required") {
+        showLogin("Your session ended, please sign in again");
+        return null;
+      }
+      if (outcome.status !== 200) {
+        throw new Error(cameraReason(outcome.body.result, outcome.status));
+      }
+      const path = outcome.body.stream_path;
+      if (typeof path !== "string" || !CAMERA_STREAM_PATTERN.test(path)) {
+        throw new Error("The PC answered an unexpected camera address");
+      }
+      return openCameraStream(path);
+    })
+    .catch(function (error) {
+      setText(c.feedback, error && error.message ? error.message : "Camera view cancelled");
+      fetchCamera();
+    })
+    .finally(function () {
+      c.startButton.disabled = false;
+    });
+}
+
 // --- life cycle -----------------------------------------------------------------------
 
 function resume() {
@@ -1075,6 +1494,7 @@ function resume() {
       openStream();
       fetchStatus(true);
       fetchPush();
+      fetchCamera();
     })
     .catch(function () {
       render(latest === null ? { state: "unreachable" } : latest, false);
@@ -1100,7 +1520,11 @@ document.addEventListener("visibilitychange", function () {
     resume();
   } else {
     closeStream();
+    stopCameraView("Camera view stopped (page hidden)");
   }
+});
+window.addEventListener("pagehide", function () {
+  stopCameraView(null);
 });
 window.addEventListener("pageshow", resume);
 setInterval(renderUpdated, TICK_MS);

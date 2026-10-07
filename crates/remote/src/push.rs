@@ -51,7 +51,7 @@ use crate::webpush::{
 };
 use crate::{
     MAX_PUSH_PLAINTEXT_BYTES, MAX_PUSH_STORE_BYTES, MAX_PUSH_SUBSCRIBE_BODY_BYTES,
-    MAX_PUSH_SUBSCRIPTIONS, PUSH_COALESCE_MS, PUSH_CONNECT_UNIX_TIMEOUT_MS,
+    MAX_PUSH_SUBSCRIPTIONS, PUSH_CAMERA_TOPIC, PUSH_COALESCE_MS, PUSH_CONNECT_UNIX_TIMEOUT_MS,
     PUSH_EXCHANGE_TIMEOUT_MS, PUSH_MAX_PER_HOUR, PUSH_MIN_INTERVAL_MS, PUSH_RETRY_DELAYS_MS,
     PUSH_ROUTE_MIN_INTERVAL_MS, PUSH_TEST_MIN_INTERVAL_MS, PUSH_TEST_TOPIC, PUSH_TOPIC, PUSH_TTL_S,
     PUSH_URGENCY, STORE_LOCK_TIMEOUT_MS,
@@ -818,6 +818,32 @@ pub fn test_payload(rp_id: &str) -> Result<Vec<u8>, WebPushError> {
     })
 }
 
+/// The camera-view notification payload (ADR 2026-10-07): a fixed generic text, `kind:
+/// "camera"`, zero counts, no source, account, time or image, whatever `push_previews` says.
+///
+/// # Errors
+/// [`WebPushError::Encode`], [`WebPushError::PlaintextTooLarge`].
+pub fn camera_payload(rp_id: &str) -> Result<Vec<u8>, WebPushError> {
+    render(&Payload {
+        web_push: DECLARATIVE_WEB_PUSH,
+        notification: NotificationText {
+            title: "soos camera view",
+            body: "The live camera view of your PC was started",
+            navigate: format!("https://{rp_id}/"),
+            lang: "en",
+        },
+        soos: PayloadSoos {
+            v: PAYLOAD_VERSION,
+            kind: "camera",
+            wrong_password: 0,
+            locked_out: 0,
+            source: None,
+            account: None,
+            last_unix_ms: None,
+        },
+    })
+}
+
 // ---------------------------------------------------------------------------------------
 // Transport (spec §5.5)
 // ---------------------------------------------------------------------------------------
@@ -1104,6 +1130,8 @@ pub(crate) struct PushRuntime {
     scheduler: Mutex<PushScheduler>,
     wake: Notify,
     test_queued: AtomicBool,
+    /// Set when a live camera view started (ADR 2026-10-07); one best-effort notification.
+    camera_queued: AtomicBool,
     /// Shared gate of subscribe and unsubscribe.
     pub(crate) route_gate: tokio::sync::Mutex<Option<Instant>>,
     /// Gate of the test notification.
@@ -1139,6 +1167,7 @@ struct UnsubscribeBody {
 enum Message {
     Alert(PushSummary),
     Test,
+    CameraView,
 }
 
 /// A scheduled retry of one alert summary for one subscription.
@@ -1221,6 +1250,7 @@ impl PushRuntime {
             scheduler: Mutex::new(PushScheduler::new()),
             wake: Notify::new(),
             test_queued: AtomicBool::new(false),
+            camera_queued: AtomicBool::new(false),
             route_gate: tokio::sync::Mutex::new(None),
             test_gate: tokio::sync::Mutex::new(None),
         })
@@ -1449,6 +1479,16 @@ impl PushRuntime {
         }
     }
 
+    /// Queues one best-effort camera-view notification (ADR 2026-10-07): sets a flag and
+    /// wakes the dispatcher; never awaits, never fails; a no-op unless push is active.
+    pub(crate) fn queue_camera_view(&self) {
+        if !self.is_active() {
+            return;
+        }
+        self.camera_queued.store(true, Ordering::SeqCst);
+        self.wake.notify_one();
+    }
+
     // --- status transitions ------------------------------------------------------------
 
     fn with_status(&self, f: impl FnOnce(&mut PushStatus)) {
@@ -1510,6 +1550,7 @@ impl PushRuntime {
                 PUSH_TOPIC,
             ),
             Message::Test => (test_payload(&self.settings.rp_id)?, PUSH_TEST_TOPIC),
+            Message::CameraView => (camera_payload(&self.settings.rp_id)?, PUSH_CAMERA_TOPIC),
         };
         let payload = Zeroizing::new(payload);
         let body = encrypt(&payload, &sub.keys, &self.random)?;
@@ -1685,6 +1726,17 @@ impl PushRuntime {
     /// The queued test notification: one attempt per subscription, never touching alert
     /// retries or carries.
     async fn send_test(&self, state: &mut DispatchState) {
+        self.send_once(state, Message::Test).await;
+    }
+
+    /// The queued camera-view notification: one attempt per subscription, no retry, never
+    /// touching alert retries, carries or the hourly cap.
+    async fn send_camera(&self, state: &mut DispatchState) {
+        self.send_once(state, Message::CameraView).await;
+    }
+
+    /// One attempt of `message` per subscription (test and camera notifications).
+    async fn send_once(&self, state: &mut DispatchState, message: Message) {
         let file = match self.store.load() {
             Ok(Some(file)) => file,
             Ok(None) | Err(_) => {
@@ -1694,7 +1746,7 @@ impl PushRuntime {
         };
         state.after_load(&file);
         for sub in &file.subscriptions {
-            let Ok(request) = self.build_request(state, &file.key, sub, Message::Test) else {
+            let Ok(request) = self.build_request(state, &file.key, sub, message) else {
                 self.record_failure(LastDelivery::Failed);
                 continue;
             };
@@ -1749,6 +1801,10 @@ pub(crate) async fn run_dispatcher(push: Arc<PushRuntime>) {
         let now = push.now_ms();
         if push.test_queued.swap(false, Ordering::SeqCst) {
             push.send_test(&mut state).await;
+            continue;
+        }
+        if push.camera_queued.swap(false, Ordering::SeqCst) {
+            push.send_camera(&mut state).await;
             continue;
         }
         if let Some(position) = state.retries.iter().position(|r| r.due_ms <= now) {

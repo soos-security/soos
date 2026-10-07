@@ -340,6 +340,7 @@ struct PreviewConfigFile {
     enabled: Option<bool>,
     allowed_uids: Option<Vec<u32>>,
     max_requests_per_sec: Option<u32>,
+    remote_view: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -690,6 +691,9 @@ impl DaemonConfig {
             }
             if let Some(max_per_sec) = preview.max_requests_per_sec {
                 config.preview.max_requests_per_sec = max_per_sec;
+            }
+            if let Some(remote_view) = preview.remote_view {
+                config.preview.remote_view = remote_view;
             }
         }
         config.preview.validate()?;

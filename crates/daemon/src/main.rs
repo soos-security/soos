@@ -106,6 +106,7 @@ async fn run() -> Result<Duration, Box<dyn std::error::Error>> {
         info!(
             allowed_uids = ?config.preview.allowed_uids,
             max_requests_per_sec = config.preview.max_requests_per_sec,
+            remote_view = config.preview.remote_view,
             "Camera preview stream enabled for the configured unprivileged peers"
         );
     }

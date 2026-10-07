@@ -78,6 +78,10 @@ libc = "0.2"
 pam_bindings = { package = "pam-bindings", version = "0.3.0" }
 
 jpeg-decoder = { version = "0.3", default-features = false }
+# Live camera view of soos-remote (ADR 2026-10-07, LC-2): pure-Rust baseline JPEG encoder,
+# default features only (never `simd`), licence (MIT OR Apache-2.0) AND IJG (crate-scoped
+# exception in deny.toml)
+jpeg-encoder = { version = "=0.7.1" }
 
 # Cryptography & binary serialization
 aes-gcm = "0.10"
@@ -179,6 +183,11 @@ opt-level = 3
 opt-level = 3
 
 [profile.dev.package.zeroize]
+opt-level = 3
+
+# Live camera view JPEG encoding in soos-remote (ADR 2026-10-07): debug-build encodes stay
+# well under the per-frame budget of the camera tests.
+[profile.dev.package.jpeg-encoder]
 opt-level = 3
 
 [profile.test]

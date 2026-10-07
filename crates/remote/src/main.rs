@@ -18,6 +18,10 @@
 //! `soos-push-sender`. `push list`, `push remove N` and `push reset` manage the store
 //! locally; their lines never contain an endpoint path or a key.
 //!
+//! With `camera_view = true` the service also wires the live camera view (ADR 2026-10-07
+//! "Live Camera View in `soos-remote` Through the Daemon Preview Channel"): one daemon
+//! preview client per view on `/run/soos/daemon.sock` (root peer only), never a device.
+//!
 //! Subcommand output goes through `writeln!` on a locked stdout; nothing printed ever
 //! contains a credential id, a public key, a user handle or a Tailscale login. The enrollment
 //! code is printed exactly once, by `enroll-code`, and never logged.
@@ -37,6 +41,8 @@ use tracing_subscriber::EnvFilter;
 
 use soos_remote::alerts::AlertSettings;
 use soos_remote::auth::system_random;
+use soos_remote::camera::CameraSettings;
+use soos_remote::camera_ipc::{DaemonPreviewClient, PreviewSource, PreviewSourceFactory};
 use soos_remote::config::{
     check_not_root, default_config_path, load_config, resolve_alerts_ack_path,
     resolve_credentials_path, resolve_push_store_path, RemoteConfig,
@@ -51,8 +57,8 @@ use soos_remote::push::{
 use soos_remote::server::{serve, ServerState};
 use soos_remote::socket::{bind_listener, prepare_socket_dir, SocketError};
 use soos_remote::{
-    ENROLL_CODE_TTL_S, EXIT_CONFIG, EXIT_RUNTIME, MAX_PASSKEYS, MAX_PUSH_SUBSCRIPTIONS,
-    STORE_LOCK_TIMEOUT_MS,
+    CAMERA_DAEMON_SOCKET_PATH, ENROLL_CODE_TTL_S, EXIT_CONFIG, EXIT_RUNTIME, MAX_PASSKEYS,
+    MAX_PUSH_SUBSCRIPTIONS, STORE_LOCK_TIMEOUT_MS,
 };
 
 /// Command line of `soos-remote`.
@@ -491,6 +497,15 @@ async fn run(config: RemoteConfig, credentials_path: PathBuf, uid: u32) -> ExitC
         .enabled
         .then(|| alert_settings(&config, &credentials_path, uid));
     let push = push_wiring(&config, &credentials_path, uid);
+    let camera = config.camera.enabled.then(|| {
+        let factory: PreviewSourceFactory = Arc::new(move || -> Box<dyn PreviewSource> {
+            Box::new(DaemonPreviewClient::new(
+                PathBuf::from(CAMERA_DAEMON_SOCKET_PATH),
+                uid,
+            ))
+        });
+        (CameraSettings::from_config(&config.camera), factory)
+    });
     let mut state = ServerState::new(config, uid, ZbusSessionSource::new())
         .with_credentials_path(credentials_path);
     if let Some(settings) = alerts {
@@ -498,6 +513,9 @@ async fn run(config: RemoteConfig, credentials_path: PathBuf, uid: u32) -> ExitC
     }
     if let Some((settings, transport)) = push {
         state = state.with_push(settings, transport);
+    }
+    if let Some((settings, factory)) = camera {
+        state = state.with_camera(settings, factory);
     }
     let state = Arc::new(state);
     match serve(listener, state, shutdown).await {

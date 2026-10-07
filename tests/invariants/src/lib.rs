@@ -303,6 +303,13 @@ mod remote_push_contract;
 #[cfg(all(test, unix))]
 mod remote_brand_contract;
 
+/// Live camera view of `soos-remote` through the daemon preview channel: dependencies, IJG
+/// exception, no logging or recording, redacted types, page reader, daemon `remote_view` gate,
+/// documentation and installer (ADR 2026-10-07; spec AI/architect_spec_remote_live_camera.md
+/// §13.8 tests 50–59 RLC-S1–RLC-S10; rows RLC2, RLC3, RLC10, RLC13, RLC15).
+#[cfg(all(test, unix))]
+mod remote_camera_contract;
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,

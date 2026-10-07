@@ -202,6 +202,7 @@ async fn start_push(
         },
         alerts: alerts.clone(),
         push,
+        camera: soos_remote::config::CameraConfig::default(),
     };
     let alert_settings = AlertSettings {
         owner_login: Some(OwnerLogin::parse(OWNER).unwrap()),
