@@ -37,7 +37,7 @@ use soos_remote::{
     CAMERA_VIEW_TOKEN_BYTES, CAMERA_VIEW_TOKEN_TTL_MS, DEFAULT_CAMERA_FPS,
     DEFAULT_CAMERA_MAX_VIEW_S, DEFAULT_CAMERA_QUALITY, MAX_CAMERA_FPS, MAX_CAMERA_JPEG_BYTES,
     MAX_CAMERA_MAX_VIEW_S, MAX_CAMERA_QUALITY, MAX_CAMERA_VIEWS, MIN_CAMERA_FPS,
-    MIN_CAMERA_MAX_VIEW_S, MIN_CAMERA_QUALITY, PUSH_CAMERA_TOPIC,
+    MIN_CAMERA_MAX_VIEW_S, MIN_CAMERA_QUALITY,
 };
 
 const RUNTIME_DIR: &str = "/run/user/1000";
@@ -96,7 +96,9 @@ fn test_rlc_camera_constants_match_the_spec() {
     assert_eq!(CAMERA_DAEMON_CLOSE_WAIT_MS, 200);
     assert_eq!(CAMERA_DAEMON_IDLE_RETRIES, 1);
     assert_eq!(CAMERA_STREAM_BOUNDARY, "soosframe");
-    assert_eq!(PUSH_CAMERA_TOPIC, "sooscamera");
+    // M14 (owner request 2026-10-07): `PUSH_CAMERA_TOPIC` is removed, a camera view sends
+    // no Web Push; the absence is pinned by the static invariant
+    // `test_remote_camera_sends_no_push`.
     assert_eq!(ACTION_CAMERA_OPTIONS, "camera-options");
     assert_eq!(ACTION_CAMERA_VIEW, "camera-view");
     assert_eq!(ACTION_CAMERA_STREAM, "camera-stream");

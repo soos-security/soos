@@ -4,8 +4,7 @@
 // It only shows notifications. Every push shows one (Safari revokes the permission after a
 // push without a visible notification); an absent or unreadable payload shows a generic
 // text. A notification carries counts and classes only, never a typed password. A tap
-// focuses the open app or opens the start page of this origin. A live camera view start
-// (ADR 2026-10-07) shows a fixed text under its own tag.
+// focuses the open app or opens the start page of this origin.
 "use strict";
 
 const FALLBACK_TITLE = "soos";
@@ -28,8 +27,6 @@ function readNotification(event) {
       }
       if (data && data.soos && data.soos.kind === "test") {
         tag = "soos-test";
-      } else if (data && data.soos && data.soos.kind === "camera") {
-        tag = "soos-camera";
       }
     }
   } catch (_) {

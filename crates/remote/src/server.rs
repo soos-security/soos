@@ -2376,13 +2376,10 @@ async fn camera_stream<S: SessionSource>(
         return None;
     }
     // From the first part on, pixels may reach the client even when the write fails half
-    // way: the view counts as shown (`camera view started` / `ended`, push alert)
-    // before that write, never after it.
+    // way: the view counts as shown (`camera view started` / `ended`) before that write,
+    // never after it.
     guard.set_shown();
     audit::camera_view_started();
-    if let Some(push) = shared.push.as_ref() {
-        push.queue_camera_view();
-    }
     if crate::camera::write_part(&mut write_half, &jpeg)
         .await
         .is_err()

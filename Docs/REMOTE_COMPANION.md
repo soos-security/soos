@@ -566,10 +566,10 @@ a CSS class only (the Content Security Policy is unchanged), is kept in memory f
 of the page, so the next view starts in the same mode, and is never stored.
 
 **Awareness.** The camera **LED** lights while the daemon captures, and stays on for about 10 s
-after the last frame; it is the only indicator at the PC (no on-screen indicator). With push
-configured (section 2d) a view start sends one generic notification "soos camera view — The
-live camera view of your PC was started" (no image, best effort, never delaying the view). The
-journal records `camera view started`, `camera view ended` and `camera view refused` (fixed
+after the last frame; it is the only indicator at the PC (no on-screen indicator). A view sends
+**no push notification**, even with push configured (section 2d): the notification sent at
+view start was removed at the owner's request (2026-10-07); push stays for the failed-password
+alerts only. The journal records `camera view started`, `camera view ended` and `camera view refused` (fixed
 text, at most one `refused` line per 5 s), and the daemon logs one `info` line per companion
 connection on its first frame, without any pixel data.
 
@@ -636,7 +636,7 @@ app on the tailnet:
 1. a view starts after Face ID and shows live video within about 1 s, at about 5 fps, for up to
    120 s; the camera LED is on;
 2. with `soos-gui` closed, face unlock at the PC's lock screen still works during the view;
-3. the push "camera view started" arrives (when section 2d is set up);
+3. no push notification arrives for the view, even when section 2d is set up;
 4. *Stop camera view* ends the view at once; a new start right after it succeeds (after Face
    ID, no countdown, no waiting);
 5. a tap on the image shows it full screen; tapping again or **✕** returns to the card;
@@ -992,9 +992,9 @@ reason classes.
   ES256, several users.
 - Any other public exposure path (Cloudflare Tunnel, Cloudflare Access, a custom domain, a
   reverse proxy): explored separately; it needs its own ADR before it may reach this socket.
-- **Lock/unlock-state notifications**, "monitoring lost" notifications, notification
-  actions, and push hosts other than Apple, Google and Mozilla (section 2d covers only
-  failed-password alerts and the test notification).
+- **Lock/unlock-state notifications**, camera view notifications (removed 2026-10-07),
+  "monitoring lost" notifications, notification actions, and push hosts other than Apple,
+  Google and Mozilla (section 2d covers only failed-password alerts and the test notification).
 - Any recording, snapshot or still image of the **live camera** view (section 2f), audio,
   H.264/WebRTC or any other live camera transport, an on-screen indicator, NV12/MJPEG
   conversion, and any embedding or evidence access.

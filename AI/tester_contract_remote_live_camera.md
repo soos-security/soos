@@ -84,7 +84,7 @@ hand-off (a tuple arity and the all-0xFF token encoding).
 | `camera_config_tests.rs::test_rlc_camera_constants_match_the_spec` (extra, not numbered) | §3.2 constants (RLC1, RLC-S6) | E0432 on the 43 new `soos_remote::*` constants |
 | `camera_routes_tests.rs::test_rlc_camera_route_table` (37) | RLC8, RLC6 | E0432 `routes::{camera_stream_token, check_camera_csrf, CAMERA_*_PATH, CAMERA_STREAM_PREFIX}`, `camera_slot`; E0599 `Route::Camera*` |
 | `camera_routes_tests.rs::test_rlc_camera_csrf_rules` (38) | RLC6 | same |
-| `camera_push_tests.rs::test_rlc_camera_payload` (39) | RLC13, RLC15 | E0432 `push::camera_payload`, `PUSH_CAMERA_TOPIC` |
+| `camera_push_tests.rs::test_rlc_camera_payload` (39; deleted by M14, see below) | RLC13, RLC15 | E0432 `push::camera_payload`, `PUSH_CAMERA_TOPIC` |
 | `camera_challenge_tests.rs::test_rlc_camera_view_challenge_pool` (40) | RLC6, RLC-S3 | E0432 `ChallengePurpose::CameraView` |
 
 ### 3.4 `crates/remote/tests/camera_ipc_tests.rs` (11 functions = tests 17–22, 62; spec §13.4)
@@ -128,7 +128,7 @@ skipped with `pause`/`advance`/`resume` only while no exchange is in flight.
 | `test_rlc_first_frame_failures_are_json_errors` (32) | RLC12 | same |
 | `test_rlc_rate_limited_backs_off_without_ending` (33) | RLC12 | same |
 | `test_rlc_camera_audit_lines` (34) | RLC15, RLC-S11 | same |
-| `test_rlc_push_on_view_start_is_best_effort` (35) | RLC15, RLC-S11 | same |
+| `test_rlc_no_push_on_camera_view` (35; was `test_rlc_push_on_view_start_is_best_effort`, M14) | RLC15, RLC-S11 | same |
 
 Fixture: `crates/remote/tests/common/camera.rs` (`SourceSpy`/`ScriptedPreviewSource` recording factory calls, started,
 completed and cancelled `next_frame` calls with virtual times and dropped sources; `start_camera(..)` building its own
@@ -298,3 +298,25 @@ New static test (not a migration): `tests/invariants/src/remote_camera_contract.
 classList-only styling, and the absence of `cooldown`, `retry_after_ms` and `CAMERA_VIEW_COOLDOWN_MS` in the page and
 the camera/server sources. Red evidence: the slot, config and server test files did not compile against the old API
 (E0308/E0061), and test 60 failed on its first assertion before the page change.
+
+## Owner-approved amendment M14 (2026-10-07): no push notification at camera start
+
+The owner asked (2026-10-07) to "remove the notification that is sent when we start the camera" and explicitly
+approved removing the camera-start Web Push and amending the tests that pin it. The failed-password alert pushes, the
+test notification, the audit lines (`camera view started` / `ended` / `refused`) and every other camera test are
+unchanged; no other test was weakened.
+
+| Id | Test / location | Old rule | New rule |
+|---|---|---|---|
+| M14a | `camera_server_tests.rs` test 35 `test_rlc_push_on_view_start_is_best_effort` → `test_rlc_no_push_on_camera_view` | one delivery with topic `sooscamera` and the fixed payload per started view; a hanging or failing transport never delays the frames; no push when the first frame failed | with push active and one subscription, a view that starts, runs (frames flowing), stops and ends causes **zero** transport calls whatever the topic, and so does a view whose first frame failed; positive control: the same spy then receives exactly one test notification (`PUSH_TEST_TOPIC`), so the silence is not an unwired transport |
+| M14b | `camera_push_tests.rs` test 39 `test_rlc_camera_payload` | fixed camera payload text, `kind: "camera"`, topic `sooscamera` | file deleted (nothing meaningful remains); the absence is pinned by invariant test 63 |
+| M14c | `camera_config_tests.rs` `test_rlc_camera_constants_match_the_spec` | `PUSH_CAMERA_TOPIC == "sooscamera"` | constant removed; its absence is pinned by invariant test 63 |
+| M14d | `remote_camera_contract.rs` `camera_functions_outside_modules` (used by tests 52 and 53) | `push.rs` must define `send_camera`, `queue_camera_view`, `camera_payload` (scanned for log hygiene and recording paths) | `push.rs` entry removed; the `server.rs` and `http.rs` camera functions are still required and scanned |
+| M14e | `AI/VERIFICATION_MATRIX.md` RLC13 / RLC15 / RLC16 | best-effort push `sooscamera` at view start; owner check "the push camera view started arrives" | no Web Push for a camera view; owner check "no push notification arrives for the view" |
+
+New static test (not a migration): `tests/invariants/src/remote_camera_contract.rs` test 63
+`test_remote_camera_sends_no_push` asserts that no file of `crates/remote/src` (comments included) contains
+`sooscamera`, `queue_camera_view`, `camera_payload`, `send_camera` or `PUSH_CAMERA_TOPIC`, that `push.rs` renders no
+`kind: "camera"`, that `sw.js` has no camera notification (`"camera"`, `soos-camera`) and that this contract records
+M14. Red evidence: test 35 (new form) failed with one `sooscamera` call on the old code path, and test 63 failed on
+`crates/remote/src/lib.rs must not contain sooscamera` before the removal.

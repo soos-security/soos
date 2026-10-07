@@ -386,7 +386,8 @@ purpose `CameraView`, yields a single-use 256-bit stream token valid 10 s, and i
 global view, ≤ 300 s, default 120 s, ≤ 10 fps, ≤ 640x480, no cooldown between views since
 2026-10-07). No recording: frames
 and JPEG buffers stay in memory, the companion's own buffers are zeroized, nothing is written to
-disk, logged or pushed (the start push carries fixed text only). PAM `Auth` latency is unchanged
+disk, logged or pushed; a view sends no push notification (removed at the owner's request on
+2026-10-07; the audit lines and the camera LED are the awareness signals). PAM `Auth` latency is unchanged
 (the cgroup is read only for `PreviewFrame`); a view holds one of the UID's
 `max_connections_per_uid` daemon connections.
 

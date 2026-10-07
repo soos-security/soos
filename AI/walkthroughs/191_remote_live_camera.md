@@ -201,7 +201,7 @@ finding remains. Open items:
   3. From the iPhone home-screen app on the tailnet: *Start camera view*, pass Face ID; live video appears within
      about 1 s at about 5 fps for up to 120 s, and the camera LED is on.
   4. With `soos-gui` closed, face unlock at the PC's lock screen still works during the view.
-  5. The push "camera view started" arrives (when Web Push is set up).
+  5. No push notification arrives for the view, even when Web Push is set up (section 12).
   6. *Stop camera view* ends the view at once; a new start right after it succeeds (no cooldown since section 11).
   6a. A tap on the image toggles full screen (✕, Escape or a second tap exits); *Portrait* / *Landscape* switches between the two modes.
   7. After a full logout at the PC, a start is refused (`camera_refused`).
@@ -257,3 +257,26 @@ portrait/landscape rotation, and no countdown between stopping and restarting a 
 - **Tests.** New invariant test 60 `test_rlc_page_fullscreen_rotate_and_no_cooldown`; migrated slot, config and
   server tests per M13. Docs: ADR item (5) amendment note, `Docs/REMOTE_COMPANION.md` §2f/§6/§7, matrix RLC9/RLC16,
   `AI/ARCHITECTURE.md` §13.
+
+## 12. Owner Request: No Notification at Camera Start (2026-10-07)
+
+The owner asked to "remove the notification that is sent when we start the camera" and explicitly approved removing
+the camera-start Web Push and amending the tests that pinned it.
+
+- **Removed.** `crates/remote/src/push.rs` loses `camera_payload`, `Message::CameraView`, the `camera_queued` flag,
+  `queue_camera_view`, `send_camera` and its dispatcher branch (the test notification keeps its own one-shot send);
+  `crates/remote/src/lib.rs` loses `PUSH_CAMERA_TOPIC` (`sooscamera`) and its compile-time topic checks;
+  `crates/remote/src/server.rs` no longer queues a push when the first part is written; `crates/remote/assets/sw.js`
+  loses the `kind === "camera"` notification tag. `push.rs` and `sw.js` are back to their pre-#345 content.
+- **Kept.** The failed-password alert pushes and the test notification are unchanged. The audit lines
+  `camera view started` / `ended` / `refused` and the camera LED are now the awareness signals.
+- **Tests (migration M14, `AI/tester_contract_remote_live_camera.md`).** Test 35 becomes
+  `test_rlc_no_push_on_camera_view`: with push active and one subscription, a view that starts, runs, stops and ends,
+  and a view whose first frame fails, cause zero calls on the push transport spy whatever the topic, while the same
+  spy still receives the test notification (positive control). `camera_push_tests.rs` (test 39) is deleted, the
+  `PUSH_CAMERA_TOPIC` check leaves the config constants test, the camera function list of the log-hygiene scans no
+  longer requires the push functions, and the new invariant test 63 `test_remote_camera_sends_no_push` pins that no
+  file of `crates/remote/src` contains `sooscamera`, `queue_camera_view`, `camera_payload`, `send_camera` or
+  `PUSH_CAMERA_TOPIC`, that `push.rs` renders no `kind: "camera"` and that `sw.js` has no camera notification.
+- **Docs.** ADR item (8) amendment note, `Docs/REMOTE_COMPANION.md` §2f awareness and owner hardware check step 3,
+  §9 out-of-scope list, matrix RLC13/RLC15/RLC16, `AI/ARCHITECTURE.md` §13.

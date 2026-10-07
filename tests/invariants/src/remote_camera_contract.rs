@@ -12,6 +12,7 @@
 //! - RLC-S6 the page reads the stream into a canvas, CSP unchanged;
 //! - RLC-S7 the daemon `remote_view` gate and seat-session check;
 //! - RLC-S8 documentation; RLC-S9 installer template; RLC-S10 no decoder, no device access.
+//! - M14 (owner request 2026-10-07): a camera view sends no Web Push.
 
 #![allow(
     clippy::unwrap_used,
@@ -249,8 +250,8 @@ fn recording_hits(code: &str) -> Vec<&'static str> {
         .collect()
 }
 
-/// The camera functions of the non-camera modules (spec §1.1): the `server.rs` handlers,
-/// the `http.rs` part encoders and the `push.rs` camera notification.
+/// The camera functions of the non-camera modules (spec §1.1): the `server.rs` handlers
+/// and the `http.rs` part encoders (M14: `push.rs` has no camera notification any more).
 fn camera_functions_outside_modules() -> Vec<(String, String, Vec<String>)> {
     let mut out = Vec::new();
     for (rel, required, select) in [
@@ -268,12 +269,6 @@ fn camera_functions_outside_modules() -> Vec<(String, String, Vec<String>)> {
             "crates/remote/src/http.rs",
             vec!["encode_camera_stream_head", "encode_camera_part_head"],
             (|n: &str| n.starts_with("encode_camera")) as fn(&str) -> bool,
-        ),
-        (
-            "crates/remote/src/push.rs",
-            vec!["send_camera", "queue_camera_view", "camera_payload"],
-            (|n: &str| matches!(n, "send_camera" | "queue_camera_view" | "camera_payload"))
-                as fn(&str) -> bool,
         ),
     ] {
         let code = strip_comments(production_part(&read(rel)));
@@ -584,7 +579,7 @@ fn test_rlc_s3_camera_modules_never_log() {
             );
         }
     }
-    // B4: the camera code of server.rs / http.rs / push.rs logs fixed text only, without a
+    // B4: the camera code of server.rs / http.rs logs fixed text only, without a
     // token, dimension, size or sequence field.
     for (rel, name, bodies) in camera_functions_outside_modules() {
         for body in bodies {
@@ -1228,5 +1223,52 @@ fn test_rlc_page_fullscreen_rotate_and_no_cooldown() {
     assert!(
         contract.contains("M13"),
         "AI/tester_contract_remote_live_camera.md records migration M13"
+    );
+}
+
+/// Needles of the removed camera-view Web Push (M14).
+const CAMERA_PUSH_NEEDLES: [&str; 5] = [
+    "sooscamera",
+    "queue_camera_view",
+    "camera_payload",
+    "send_camera",
+    "PUSH_CAMERA_TOPIC",
+];
+
+/// M14 (owner request 2026-10-07, matrix RLC15): starting a live camera view sends no Web
+/// Push. No source file of `crates/remote/src` (comments included) names the removed
+/// camera notification, the service worker has no camera notification kind, and the tester
+/// contract records the migration.
+#[test]
+fn test_remote_camera_sends_no_push() {
+    let files = rust_files("crates/remote/src");
+    assert!(
+        files.iter().any(|(rel, _)| rel.ends_with("push.rs")),
+        "crates/remote/src must be scanned (push.rs found)"
+    );
+    for (rel, content) in &files {
+        for needle in CAMERA_PUSH_NEEDLES {
+            assert!(
+                !content.contains(needle),
+                "{rel} must not contain {needle} (M14: no camera-view Web Push)"
+            );
+        }
+    }
+    let push = strip_comments(&read("crates/remote/src/push.rs"));
+    assert!(
+        !push.contains("kind: \"camera\""),
+        "push.rs renders no camera payload kind (M14)"
+    );
+    let sw = read("crates/remote/assets/sw.js");
+    for needle in ["\"camera\"", "soos-camera"] {
+        assert!(
+            !sw.contains(needle),
+            "sw.js has no camera notification ({needle}, M14)"
+        );
+    }
+    let contract = read("AI/tester_contract_remote_live_camera.md");
+    assert!(
+        contract.contains("M14"),
+        "AI/tester_contract_remote_live_camera.md records migration M14"
     );
 }

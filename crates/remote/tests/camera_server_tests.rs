@@ -46,11 +46,10 @@ use passkey::*;
 use push::*;
 use soos_remote::camera_ipc::PreviewError;
 use soos_remote::config::{CameraConfig, CameraWidth};
-use soos_remote::push::TransportError;
 use soos_remote::{
     CAMERA_FIRST_FRAME_TIMEOUT_MS, CAMERA_RATE_LIMITED_BACKOFF_MS,
     CAMERA_REFUSED_AUDIT_MIN_INTERVAL_MS, CAMERA_SESSION_CHECK_MS, CAMERA_STALL_TIMEOUT_MS,
-    CAMERA_VIEW_TOKEN_TTL_MS, MAX_AUTH_BODY_BYTES, PUSH_CAMERA_TOPIC, RESPONSE_WRITE_TIMEOUT_MS,
+    CAMERA_VIEW_TOKEN_TTL_MS, MAX_AUTH_BODY_BYTES, PUSH_TEST_TOPIC, RESPONSE_WRITE_TIMEOUT_MS,
 };
 
 const IP_A: &str = "203.0.113.10";
@@ -1270,7 +1269,7 @@ async fn test_rlc_camera_audit_lines() {
 }
 
 // ---------------------------------------------------------------------------------------
-// Test 35 — push at view start, best effort
+// Test 35 — no push for a camera view (M14)
 // ---------------------------------------------------------------------------------------
 
 /// Subscribes one Apple endpoint with fixture keys `ua` (push must be active).
@@ -1289,13 +1288,14 @@ async fn subscribe_one(h: &Harness, ua: &UaFixture) {
     assert_result(&r, 200, "subscribed");
 }
 
-/// Test 35 (RLC15, RLC-S11): one Web Push delivery with topic `sooscamera` and the fixed
-/// generic payload when a view starts; a failing or hanging transport never delays the
-/// frames; no push when the first frame failed.
+/// Test 35 (RLC15, RLC-S11; M14, owner request 2026-10-07): with push active and one
+/// subscription, starting, running and ending a camera view sends no Web Push at all (zero
+/// calls on the transport spy, whatever the topic), and neither does a view whose first
+/// frame failed; the same spy still receives the test notification, so the silence is not
+/// an unwired transport.
 #[tokio::test(start_paused = true)]
-async fn test_rlc_push_on_view_start_is_best_effort() {
-    assert_eq!(PUSH_CAMERA_TOPIC, "sooscamera");
-    // Delivered.
+async fn test_rlc_no_push_on_camera_view() {
+    // A shown view: started, running, stopped, ended.
     {
         let t = FakeTransport::new();
         let spy = SourceSpy::increasing();
@@ -1303,51 +1303,37 @@ async fn test_rlc_push_on_view_start_is_best_effort() {
         let ua = UaFixture::new(1);
         subscribe_one(&h, &ua).await;
         let mut view = shown_view(&h, &spy, &Via::Tailnet).await;
-        view.run(&h, &spy, 1_000, VIEW_STEP_MS).await;
-        let calls = t.calls_with_topic(PUSH_CAMERA_TOPIC);
-        assert_eq!(calls.len(), 1, "one camera notification per started view");
-        let payload = decrypt_json(&calls[0].request.body, &ua);
-        assert_eq!(payload["web_push"], 8030, "{payload}");
-        assert_eq!(payload["notification"]["title"], "soos camera view");
-        assert_eq!(
-            payload["notification"]["body"],
-            "The live camera view of your PC was started"
-        );
-        assert_eq!(
-            payload["notification"]["navigate"],
-            "https://pc.tail1234.ts.net/"
-        );
-        assert_eq!(payload["soos"]["kind"], "camera");
-        assert_eq!(payload["soos"]["wrong_password"], 0);
-        assert_eq!(payload["soos"]["locked_out"], 0);
-        assert!(payload["soos"]["source"].is_null());
-        assert!(payload["soos"]["account"].is_null());
-        assert!(payload["soos"]["last_unix_ms"].is_null());
-        let text = payload.to_string();
-        for secret in h.secrets.lock().unwrap().iter() {
-            assert!(!text.contains(secret.as_str()), "no token in the payload");
-        }
-        assert!(!view.eof);
-    }
-    // Hanging and failing transports never delay the frames.
-    for scripted in [Scripted::Hold, Scripted::Fail(TransportError::Unavailable)] {
-        let t = FakeTransport::new();
-        t.set_default(scripted);
-        let spy = SourceSpy::increasing();
-        let h = start_camera(Options::passkeys(), camera_on(), &spy, Some(&t)).await;
-        let ua = UaFixture::new(2);
-        subscribe_one(&h, &ua).await;
-        let mut view = shown_view(&h, &spy, &Via::Tailnet).await;
         view.run(&h, &spy, 2_000, VIEW_STEP_MS).await;
         assert!(!view.eof);
+        assert!(view.parts.len() >= 8, "frames flow: {}", view.parts.len());
+        assert_eq!(t.count(), 0, "no Web Push while a view runs");
+        assert_result(&camera_stop(&h, &Via::Tailnet).await, 200, "stopped");
         assert!(
-            view.parts.len() >= 8,
-            "frames on time despite the push transport: {}",
-            view.parts.len()
+            view.ends_within(&h, &spy, RESPONSE_WRITE_TIMEOUT_MS, 100)
+                .await
+                .is_some(),
+            "stopped within one iteration"
         );
-        assert_eq!(t.calls_with_topic(PUSH_CAMERA_TOPIC).len(), 1);
+        assert_ended_shown(&h, &spy).await;
+        h.step_ms(500, 10_000).await;
+        assert_eq!(t.count(), 0, "no Web Push when a view ends");
+
+        // Positive control: the same transport spy receives the test notification.
+        let r = h
+            .send(
+                &Via::Tailnet,
+                "POST",
+                "/api/push/test",
+                &[("X-Soos-Action", "push-test"), ("Origin", ORIGIN)],
+                None,
+            )
+            .await;
+        assert_result(&r, 202, "test_queued");
+        h.step_ms(500, 10_000).await;
+        assert_eq!(t.count(), 1, "only the test notification");
+        assert_eq!(t.calls_with_topic(PUSH_TEST_TOPIC).len(), 1);
     }
-    // No push when the first frame failed.
+    // A view whose first frame failed.
     {
         let t = FakeTransport::new();
         let spy = SourceSpy::increasing();
@@ -1367,6 +1353,6 @@ async fn test_rlc_push_on_view_start_is_best_effort() {
         .refused();
         assert_result(&r, 403, "camera_refused");
         h.step_ms(500, 10_000).await;
-        assert!(t.calls_with_topic(PUSH_CAMERA_TOPIC).is_empty());
+        assert_eq!(t.count(), 0, "no Web Push for a refused view");
     }
 }

@@ -558,8 +558,6 @@ pub const CAMERA_STREAM_BOUNDARY: &str = "soosframe";
 /// `Content-Type` of the stream head: an opaque byte stream that the page parses itself, so
 /// no browser network stack applies its own `multipart/x-mixed-replace` handling.
 pub const CAMERA_STREAM_CONTENT_TYPE: &str = "application/octet-stream";
-/// Web Push `Topic` of the camera notification (ASCII letters and digits only).
-pub const PUSH_CAMERA_TOPIC: &str = "sooscamera";
 /// `X-Soos-Action` of `POST /api/auth/camera/options`.
 pub const ACTION_CAMERA_OPTIONS: &str = "camera-options";
 /// `X-Soos-Action` of `POST /api/camera/start`.
@@ -603,16 +601,6 @@ const _: () = assert!(
         < CAMERA_FIRST_FRAME_TIMEOUT_MS
 );
 const _: () = assert!(CAMERA_DAEMON_SERVICE.len() <= soos_protocol::types::MAX_SERVICE_LEN);
-const _: () = assert!(is_ascii_alphanumeric_topic(PUSH_CAMERA_TOPIC.as_bytes()));
-const _: () = assert!(PUSH_CAMERA_TOPIC.len() <= soos_push_protocol::MAX_TOPIC_LEN);
-const _: () = assert!(!const_bytes_eq(
-    PUSH_CAMERA_TOPIC.as_bytes(),
-    PUSH_TOPIC.as_bytes()
-));
-const _: () = assert!(!const_bytes_eq(
-    PUSH_CAMERA_TOPIC.as_bytes(),
-    PUSH_TEST_TOPIC.as_bytes()
-));
 const _: () = assert!(CAMERA_FULL_WIDTH as usize * 2 <= u16::MAX as usize);
 const _: () = assert!(CAMERA_DAEMON_CLOSE_WAIT_MS < CAMERA_DAEMON_CONNECT_TIMEOUT_MS);
 const _: () = assert!(CAMERA_DAEMON_IDLE_RETRIES == 1);
