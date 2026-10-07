@@ -100,6 +100,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1120.0, 780.0])
             .with_min_inner_size([900.0, 600.0])
+            .with_icon(Arc::new(soos_gui::brand::window_icon(128)))
             .with_active(true)
             .with_title("SOOS — Linux Biometric PAM"),
         ..Default::default()

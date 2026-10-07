@@ -1,0 +1,49 @@
+# soos push sender: the only network-capable part of the remote companion (ADR 2026-10-06
+# "Web Push Notifications for Failed-Password Alerts Through a Separate Sender Unit").
+# It holds no key: soos-remote hands it an already-encrypted body and an already-signed
+# Authorization value over a 0600 Unix socket, and it makes one outbound HTTPS request to an
+# allowlisted push service (web.push.apple.com, fcm.googleapis.com,
+# updates.push.services.mozilla.com). The sandbox hides $HOME (except this binary, read
+# only) and /run (except its own runtime directory).
+# Install: scripts/install_remote.sh; enable: systemctl --user enable --now soos-push-sender
+
+[Unit]
+Description=soos push sender (outbound Web Push for the remote companion)
+Documentation=https://github.com/Mysticaly622/soos/blob/main/Docs/REMOTE_COMPANION.md
+
+[Service]
+Type=exec
+ExecStart=%h/.local/bin/soos-push-sender
+Restart=on-failure
+RestartSec=5
+# EXIT_CONFIG (78, EX_CONFIG): root refusal and environment errors are not retried
+RestartPreventExitStatus=78
+RuntimeDirectory=soos-push
+RuntimeDirectoryMode=0700
+NoNewPrivileges=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+SystemCallArchitectures=native
+ProtectSystem=strict
+ProtectHome=tmpfs
+BindReadOnlyPaths=%h/.local/bin/soos-push-sender
+TemporaryFileSystem=/run:ro
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateIPC=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+CapabilityBoundingSet=
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+UMask=0077
+
+[Install]
+WantedBy=default.target

@@ -13,6 +13,9 @@ members = [
     "crates/enrollment-cli",
     "crates/admin-cli",
     "crates/gui",
+    "crates/remote",
+    "crates/push-protocol",
+    "crates/push-sender",
     "tests/invariants",
     "tests/fixtures",
 ]
@@ -51,8 +54,13 @@ ort = "=2.0.0-rc.13"
 sha2 = "0.10"
 toml = "0.8"
 
-# systemd-logind client of the presence auto-unlock (soos-daemon only, GitHub #323)
+# systemd-logind client of the presence auto-unlock (soos-daemon, GitHub #323) and of the
+# remote companion soos-remote (GitHub #339, ADR 2026-10-05 item 7)
 zbus = { version = "5", default-features = false, features = ["tokio"] }
+
+# Minimal bounded HTTP/1.1 request-head parser of soos-remote (GitHub #339; already locked
+# through ureq, no hyper/axum)
+httparse = "1.10"
 
 # Logging and diagnostics
 tracing = "0.1"
@@ -74,6 +82,17 @@ jpeg-decoder = { version = "0.3", default-features = false }
 # Cryptography & binary serialization
 aes-gcm = "0.10"
 ciborium = "0.2"
+# WebAuthn ES256 verification of soos-remote (ADR 2026-10-06 "Tailscale Funnel Access and
+# In-House Passkey Authentication"): RustCrypto only, no OpenSSL
+p256 = { version = "0.13.2", default-features = false, features = ["ecdsa"] }
+base64ct = { version = "1.8", features = ["alloc"] }
+subtle = "2.6"
+# Web Push (ADR 2026-10-06 "Web Push Notifications for Failed-Password Alerts Through a
+# Separate Sender Unit"): RFC 8291 HKDF steps in soos-remote (RustCrypto, already locked)
+hmac = "0.12"
+# Outbound HTTPS of soos-push-sender only: rustls + ring + webpki-roots, no OpenSSL,
+# exact pin (the resolver API is unversioned in ureq 3)
+ureq = { version = "=3.4.2", default-features = false, features = ["rustls"] }
 
 # CLI argument parsing
 clap = { version = "4", features = ["derive"] }
@@ -91,6 +110,8 @@ soos-evidence-store = { path = "crates/evidence-store", version = "0.1.0" }
 soos-enrollment-cli = { path = "crates/enrollment-cli", version = "0.1.0" }
 soos-admin-cli = { path = "crates/admin-cli", version = "0.1.0" }
 soos-gui = { path = "crates/gui", version = "0.1.0" }
+soos-remote = { path = "crates/remote", version = "0.1.0" }
+soos-push-protocol = { path = "crates/push-protocol", version = "0.1.0" }
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
@@ -143,6 +164,22 @@ strip = "symbols"
 [profile.dev]
 overflow-checks = true
 debug = 1
+
+# Live preview hot path (YUYV/MJPEG conversion, letterbox, alignment, tensor packing, and the
+# volatile wipe of every ~1 MB frame buffer): unoptimized, `soos-gui` from `cargo run` analyzes
+# about 6 frames per second. Per-package overrides only raise `opt-level`; `overflow-checks`
+# and the unwind panic strategy still come from [profile.dev].
+[profile.dev.package.soos-vision]
+opt-level = 3
+
+[profile.dev.package.soos-inference-ort]
+opt-level = 3
+
+[profile.dev.package.jpeg-decoder]
+opt-level = 3
+
+[profile.dev.package.zeroize]
+opt-level = 3
 
 [profile.test]
 overflow-checks = true

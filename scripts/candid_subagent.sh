@@ -123,13 +123,17 @@ worktree_tree() {
 
 # Diff between merge-base and a tree, excluding the review-report singletons.
 # Every option that user/system git config could alter is pinned so that the
-# fingerprint is identical on every machine and in CI.
+# fingerprint is identical on every machine and in CI. Binary files are bound by
+# their full blob ids (--full-index) instead of a --binary patch: the deflated
+# bytes of a --binary patch depend on the zlib build and core.compression
+# (zlib-ng on Arch, zlib on the CI runners), which made the fingerprint of the
+# same commit differ between the owner's host and CI (GitHub #339).
 review_diff() {
     local tree="$1" merge_base
     merge_base="$(git merge-base "$BASE_REF" "$2")"
     git -c core.quotePath=false -c diff.noprefix=false -c diff.mnemonicPrefix=false \
         -c diff.relative=false -c diff.suppressBlankEmpty=false \
-        diff --binary --no-color --no-ext-diff --no-textconv --full-index --no-renames \
+        diff --no-color --no-ext-diff --no-textconv --full-index --no-renames \
         --diff-algorithm=myers --indent-heuristic --src-prefix=a/ --dst-prefix=b/ \
         -O/dev/null --unified=3 --inter-hunk-context=0 "$merge_base" "$tree" -- . "${REVIEW_EXCLUDES[@]}"
 }
