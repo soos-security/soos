@@ -1,153 +1,118 @@
 # Candid Review Report
 
 - **Date**: 2026-10-07
-- **Target Branch**: `feat/remote-live-camera` (GitHub #345, PR #347), owner request "full screen, rotation, no cooldown", round 1
-- **Base (merge-base)**: `fee8480` (review limited to the uncommitted diff, `CANDID_BASE_REF=HEAD`)
-- **Reviewed-Diff-Fingerprint**: `a76be1ee29a222b834cd66e47bca79be07211b43c7cabcd3bdad4a7e3454702f`
-- **Audited Files**: `AI/ARCHITECTURE.md`, `AI/DECISIONS.md`, `AI/VERIFICATION_MATRIX.md`,
-  `AI/tester_contract_remote_live_camera.md`, `AI/walkthroughs/191_remote_live_camera.md`,
-  `Docs/REMOTE_COMPANION.md`, `crates/remote/assets/app.js`, `crates/remote/assets/style.css`,
-  `crates/remote/src/camera.rs`, `crates/remote/src/camera_slot.rs`, `crates/remote/src/lib.rs`,
-  `crates/remote/src/server.rs`, `crates/remote/tests/camera_config_tests.rs`,
-  `crates/remote/tests/camera_server_tests.rs`, `crates/remote/tests/camera_slot_tests.rs`,
-  `crates/remote/tests/common/camera.rs`, `tests/invariants/src/remote_camera_contract.rs`
+- **Target Branch**: `feat/remote-live-camera` (GitHub #345, PR #347), round 1 of the pre-push review of the
+  unpushed commits `fee8480`, `0a34872`, `1168206`, `bb1d19a`
+- **Base (merge-base)**: `05001c9` (`origin/main`; full branch diff as computed by the pre-push hook)
+- **Reviewed-Diff-Fingerprint**: `dd37774cccbd8ee0f9541ef3641e8416ab0dc3e5f952145f1863ffde808d0409`
+- **Audited Files**: `.agents/skills/dev-workflow/references/project-facts.md`, `.github/workflows/ci.yml`,
+  `AI/ARCHITECTURE.md`, `AI/DECISIONS.md`, `AI/VERIFICATION_MATRIX.md`, `AI/architect_spec_remote_live_camera.md`,
+  `AI/auditor_constraints_remote_live_camera.md`, `AI/research_live_camera.md`,
+  `AI/tester_contract_remote_live_camera.md`, `AI/walkthroughs/191_remote_live_camera.md`, `Cargo.lock`, `Cargo.toml`,
+  `Docs/DAEMON.md`, `Docs/GUI_APPLICATION.md`, `Docs/IPC_PROTOCOL.md`, `Docs/REMOTE_COMPANION.md`,
+  `Docs/SECURITY_AND_QUALITY_GUIDELINES.md`, `crates/daemon/src/{config,dispatcher,lib,main,preview,preview_image,preview_peer,session,session_policy}.rs`,
+  `crates/daemon/tests/{preview_authorization_tests,preview_remote_view_tests}.rs`, `crates/gui/src/ipc_camera.rs`,
+  `crates/protocol/src/types.rs`, `crates/remote/Cargo.toml`, `crates/remote/assets/{app.js,style.css}`,
+  `crates/remote/src/{audit,camera,camera_ipc,camera_jpeg,camera_slot,challenge,config,http,lib,main,routes,server}.rs`,
+  `crates/remote/tests/{alerts_server_tests,camera_challenge_tests,camera_config_tests,camera_ipc_tests,camera_jpeg_tests,camera_routes_tests,camera_server_tests,camera_slot_tests,push_server_tests,server_tests}.rs`,
+  `crates/remote/tests/common/{camera,harness}.rs`, `deny.toml`, `scripts/install_remote.sh`,
+  `tests/invariants/src/{lib,remote_camera_contract,remote_companion_contract}.rs`
+
+Scope note: commits `a2876c9` and `df4798e` are already on `origin/feat/remote-live-camera` and were reviewed in
+earlier rounds; this round re-reads the whole frozen patch but concentrates on the four new commits
+(`git diff df4798e HEAD`): stream `Content-Type` for iOS (M12), full screen and two orientation modes, removal of the
+view cooldown (M13), removal of the camera-start Web Push (M14). `crates/remote/assets/sw.js` and
+`crates/remote/src/push.rs` changed in these commits and were read in their changed regions.
 
 ## 1. Executive Summary
 
-The diff implements the three owner-approved items: (A) a tap-to-toggle full-screen stage
-(element fullscreen when the API exists, a fixed `inset: 0` overlay otherwise, exit by tap, ✕,
-Escape, `fullscreenchange`/`webkitfullscreenchange`, and unconditionally in `endCameraView`);
-(B) a Rotate button cycling 0/90/180/270 degrees through `classList` only, with the canvas box
-swapped to container height x width for 90/270; (C) full removal of the cooldown
-(`CAMERA_VIEW_COOLDOWN_MS`, `SlotState::Idle { cooldown_until }`, `SlotPhase::Cooldown`,
-`SlotError::Cooldown`, the `429 camera_cooldown` answer, `cooldown_ms` in `GET /api/camera`, and
-the page countdown). Face ID per view, the single global slot, the token TTL and the shared
-lockout are untouched. Locally verified: `cargo fmt --all -- --check` clean, `cargo clippy -p
-soos-remote -p soos-invariants --all-targets -- -D warnings` clean, `cargo test -p soos-remote`
-all green, `cargo test -p soos-invariants` 531 passed. No CRITICAL or MAJOR finding; three MINOR
-items below.
+The four commits are owner-requested behavior changes in `soos-remote` only. They remove state (cooldown, camera
+push), switch the stream head to `application/octet-stream` while keeping the `soosframe` part framing, and add a
+client-side full-screen overlay plus a portrait/landscape CSS toggle. No PAM, daemon, protocol or dependency code
+changed in these commits. Every removed assertion is covered by a recorded owner-approved migration (M12, M13, M14 in
+`AI/tester_contract_remote_live_camera.md`) and is replaced by a stricter negative assertion (no cooldown, zero push
+calls with a positive control, static absence checks). `cargo fmt --check`, `cargo clippy --workspace --all-targets
+-- -D warnings`, `cargo test -p soos-remote` and `cargo test -p soos-invariants` (532 passed) are green. No CRITICAL or
+MAJOR finding.
 
-## 2. Test Changes (mechanical listing from step 3, with justification per change)
+## 2. Test Changes (mechanical listing, step 3)
 
-Test files touched: `camera_config_tests.rs`, `camera_server_tests.rs`, `camera_slot_tests.rs`,
-`common/camera.rs`, `tests/invariants/src/remote_camera_contract.rs`. No `#[ignore]`,
-`should_panic`, tolerance/epsilon or inline `mod tests` changes. 27 removed lines match the
-assertion pattern; every one maps to migration M13 in `AI/tester_contract_remote_live_camera.md`
-(owner approval 2026-10-07):
+Removed/changed assertions found in `git diff df4798e HEAD -- crates/remote/tests tests/invariants`:
 
-- `camera_slot_tests.rs` test 10 (M13a): `(Cooldown, Some(10_000))` and a reserve after the
-  cooldown → `Idle`, `check == Ok`, reserve + begin at the same instant with a new view id.
-- test 14 renamed `test_rlc_slot_no_cooldown_after_any_view` (M13b): the countdown asserts are
-  replaced by immediate-reserve asserts after a shown, a stopped and an unshown view, plus
-  exhaustive matches on `SlotPhase`/`SlotError` that stop compiling if a cooldown variant
-  returns. The stale-id `end` no-op and double-`end` no-op checks are kept (the pending phase is
-  now asserted explicitly, which is stronger).
-- test 15 (M13c): the Streaming sub-case starts at `t0` instead of `t0 + COOLDOWN`, proving the
-  immediate restart.
-- test 12 and others (M13d): `phase()` / `end()` signature changes only; same assertions.
-- `camera_config_tests.rs` (M13e): constant assertion removed; the absence is pinned by
-  invariant test 60.
-- `camera_server_tests.rs` `assert_ended_shown` (M13f), test 23 key list (M13g), test 28 (M13h),
-  test 29 renamed `test_rlc_one_view_and_no_cooldown` (M13i: the `429` assert becomes a full
-  second shown view right after the stop, then another reservation), test 30 (M13j: the stop and
-  `max_view_s` sub-cases gain `assert_immediate_restart`). The `409 view_in_progress` and
-  "failed first frame leaves the slot idle" checks are kept.
-- `common/camera.rs` (M13k): comment only.
+| Location | Change | Justification |
+|---|---|---|
+| `camera_config_tests.rs` | `CAMERA_VIEW_COOLDOWN_MS == 10_000`, `PUSH_CAMERA_TOPIC == "sooscamera"` removed | M13e / M14c; absence pinned by invariant tests 60 and 63 |
+| `camera_push_tests.rs` (file deleted) | `test_rlc_camera_payload` and its payload assertions | M14b; nothing remains to test; absence pinned by test 63 |
+| `camera_server_tests.rs` | cooldown state / `cooldown_ms` / `429 camera_cooldown` assertions → `idle`, no `cooldown_ms`, immediate restart | M13f-M13j; the new form asserts a real second and third view stream pixels |
+| `camera_server_tests.rs` test 35 | one `sooscamera` delivery → zero transport calls during start, run, stop, end and failed first frame | M14a; positive control (test notification reaches the same spy) prevents a vacuous pass |
+| `camera_slot_tests.rs` | `phase()` tuple → `SlotPhase`; `end(now, view, shown)` → `end(view)`; cooldown cases → immediate re-reserve | M13a-M13d; exhaustive `match` on `SlotPhase` / `SlotError` makes a reintroduced cooldown variant fail to compile |
+| `camera_server_tests.rs` test 27 | expected head `Content-Type` `multipart/x-mixed-replace; boundary=soosframe` → `application/octet-stream` | M12 (iOS "Load failed"); part framing, mandatory headers, CSP and JPEG assertions unchanged |
+| `remote_camera_contract.rs` `camera_functions_outside_modules` | `push.rs` camera functions no longer required | M14d; those functions no longer exist; `server.rs` / `http.rs` camera functions still scanned |
 
-No assertion unrelated to the cooldown was removed or loosened. Each converted assertion fails
-against a plausible wrong implementation (any cooldown left on `end` breaks tests 10/14/29/30; a
-reintroduced variant breaks the exhaustive match or test 60).
+New escape hatches (`#[ignore]`, `#[cfg(any())]`, `should_panic`, tolerance/epsilon): none. New tests: invariant test
+60 (`test_rlc_page_fullscreen_rotate_and_no_cooldown`) and test 63 (`test_remote_camera_sends_no_push`).
 
 ## 3. Deep Reasoning Audit
 
 ### Logic & Architecture
-- Every view end path leaves full screen: `stopCameraView` (Stop button, `visibilitychange`
-  hidden, `pagehide`, sign-out via the login path) and the stream `then`/`catch` (max duration
-  trailer, stall, error) all go through `endCameraView`, which calls `exitCameraFullscreen()` and
-  hides the stage before clearing the canvas. `cameraController` is only reset in
-  `endCameraView`, and `enterCameraFullscreen` refuses without a controller, so full screen cannot
-  outlive a view through a missed path. → PASS.
-- iOS-safe APIs: `requestFullscreen || webkitRequestFullscreen` and `exitFullscreen ||
-  webkitExitFullscreen` are `typeof === "function"` guarded, called with `.call`, wrapped in
-  try/catch with a guarded `.catch` on a returned promise; `fullscreenElement()` reads both the
-  prefixed and unprefixed properties with a `null` default. iPhone Safari (no element fullscreen)
-  falls back to the overlay. The request runs synchronously inside the click/keydown handler, so
-  user activation holds. → PASS.
-- A tap on Rotate/✕ does not toggle full screen (the listener is on the canvas; the buttons are
-  siblings). → PASS.
-- `[hidden] { display: none !important; }` outranks `.camera-stage { display: flex }`, so the
-  hidden stage is really hidden. → PASS.
-- Rotation: 90/270 set the canvas to `100cqh x 100cqw` inside a `container-type: size` stage
-  before `rotate()`; with `flex: none` and centered alignment the turned box exactly fits the
-  content box (cq units resolve against the content box, so the overlay's safe-area padding is
-  respected). The `width/height: 100%` fallback precedes the cq values. Rotation is kept in
-  memory for the page lifetime, documented in the app.js header, Docs §2f and walkthrough §11.
-  → PASS.
-- Cooldown removal: no dead code left (`remaining_ms` helper, `Instant` and `shown` parameters of
-  `end` removed; `shown` remains used for the `ended` audit; `phase(now)` still needs `now` for
-  pending expiry). `GET /api/camera` loses only `cooldown_ms`. Docs §2f, API table,
-  troubleshooting, hardware checklist, ADR item (5) amendment note, ARCHITECTURE §13 and matrix
-  RLC9/RLC16 are updated. → PASS (see MINOR 2 for historical documents).
-- Scenario: Stop then immediate Start. The page aborts the stream and refetches state; the server
-  frees the slot when the guard drops. Start requires `confirm()` + Face ID (seconds), so the slot
-  is free; no `429 camera_cooldown` exists anywhere. → PASS (see MINOR 3 for a stale label).
-- Scenario: element fullscreen request still pending when the view ends. → FINDING MINOR 1.
+- Slot state machine without cooldown: `Idle → Pending → Starting → Streaming → Idle`; `end` of a stale view id is a
+  no-op; an expired `Pending` reads as `Idle` in both `check` and `phase`. Tried: end of a non-current view while a new
+  one streams (no-op, covered by test 14), stop while `Pending` (Idle, `true`), stop while Idle (`false`). PASS.
+- `SlotPhase::Cooldown` and `SlotError::Cooldown` removed; every consumer (`camera.rs`, `server.rs`
+  `camera_slot_refusal`, `camera_view_response`, `app.js` `CAMERA_REASONS` / `renderCamera`) updated; no dangling
+  `cooldown_ms` in the JSON shape or page. PASS.
+- Push removal: `Message::CameraView`, `camera_queued`, `queue_camera_view`, `send_camera`, `camera_payload`,
+  `PUSH_CAMERA_TOPIC` and its const assertions are all gone; `send_test` folded back into a single path; the
+  dispatcher loop is otherwise unchanged (test notification and alert retries untouched). `sw.js` no longer special-
+  cases `kind: "camera"`. PASS.
+- Stream head: `CAMERA_STREAM_CONTENT_TYPE = "application/octet-stream"` is the single source of truth in Rust; the page
+  checks the same prefix. `X-Content-Type-Options: nosniff` is in `MANDATORY_HEADERS`, so a browser does not sniff the
+  opaque body. PASS.
+- Full screen: `enterCameraFullscreen` is a no-op without an open view (`cameraController === null`);
+  `endCameraView` always calls `exitCameraFullscreen` and hides the stage; `fullscreenchange` / `webkitfullscreenchange`
+  and Escape exit the overlay. Element fullscreen refusal (promise rejection or throw) is swallowed and the overlay
+  remains. Orientation is a CSS class only, kept in memory, never stored. PASS.
+- Architecture, ADR, verification matrix (RLC9, RLC10, RLC13, RLC15, RLC16), `Docs/REMOTE_COMPANION.md` and the
+  walkthrough are updated consistently. Removing the cooldown is bounded by the unchanged per-view fresh passkey
+  assertion, the single global slot, the token TTL and the shared failure lockout. Removing the camera push is an
+  explicit owner decision recorded in the ADR; the audit lines and camera LED remain the awareness signals. PASS.
 
 ### PAM Concurrency & Deadlines
-- `crates/pam` untouched. → N/A, PASS.
+- No file under `crates/pam` changed in the reviewed commits (nor in the branch). PASS.
 
 ### Panic Safety & Fail-Closed
-- No new `unwrap`/`expect`/indexing in production Rust; the removed `checked_add(..).unwrap_or`
-  path is gone entirely. Removing the cooldown opens no authorization path: start still goes
-  through the gate order, a fresh UV assertion of purpose `CameraView`, the single-use token, the
-  single slot (`409`) and the shared lockout. The push alert stays one per started view; view
-  frequency is now bounded by the human Face ID rate and the existing start rate limit instead of
-  10 s spacing. → PASS.
+- New Rust code removes branches only; no `unwrap`/`expect`/indexing added in production. The removed
+  `remaining_ms` helper used `unwrap_or`, not a panic. No path from an error to a stream or an unlock; slot refusals
+  still map to `409` / `403`. PASS.
 
 ### Test Integrity & Anti-Weakening
-- See section 2: every removed assertion is an M13 entry replaced by a positive no-cooldown
-  assertion. Invariant test 60 pins full screen, the rotation classes, classList-only styling
-  (`.style.`, `cssText`, `"style"` forbidden), the exit in `endCameraView`, and the absence of
-  `cooldown`/`retry_after_ms`/`CAMERA_VIEW_COOLDOWN_MS` in the page, camera sources and server.
-  → PASS.
+- See §2. Each removed assertion maps to a recorded migration with owner approval; replacements are stronger
+  negative checks. Test 35 can fail against a plausible wrong implementation (one `sooscamera` call is detected, as
+  shown during this review on a stale build artifact; after a clean rebuild of the current sources it passes). PASS.
 
 ### Memory, Bounds & Secrets
-- No new buffers, no storage API, no `blob:` or object URL, no `innerHTML`; text set through
-  `setText`, elements via `createElement`; no new ids (`index.html` not in the diff); CSP untouched
-  (no inline style attribute); all existing remote page invariants pass. Nothing logged. → PASS.
+- No new allocation in Rust. The page's bounded buffer (`CAMERA_MAX_BUFFER_BYTES`) and canvas-only rendering are
+  unchanged; no `blob:` URL, no storage of the orientation mode. The camera push payload (which carried no token or
+  image) is removed entirely. PASS.
 
 ### Supply Chain & Automation
-- No `Cargo.*`, `deny.toml`, `.github/`, `scripts/` or `.githooks/` change. → N/A, PASS.
+- No `Cargo.*`, `deny.toml`, `.github/`, `scripts/` or `.githooks/` change in the four reviewed commits. PASS.
 
 ### English-Only Policy
-- Code, comments, CSS, docs, contract and walkthrough are English. The ✕ glyph carries an English
-  `aria-label`. → PASS.
+- Code, comments, docs, UI strings and commit subjects are English. PASS.
 
 ## 4. Detailed Findings & Action Items
 
-- **[MINOR]** `crates/remote/assets/app.js:1276` (`cameraFullscreenChanged`) — if the view ends
-  between `requestFullscreen()` and its asynchronous completion (desktop/iPad only),
-  `exitCameraFullscreen` sees `fullscreenElement() !== stage` and skips `exitFullscreen`; the
-  request then completes on a now-hidden stage and `cameraFullscreenChanged` ignores it because
-  `cameraFull` is false, leaving the browser in element fullscreen of an invisible element until
-  the user presses Escape. Suggested: in `cameraFullscreenChanged`, also run the guarded exit when
-  `!cameraFull && fullscreenElement() === stage`. Narrow race, never on iPhone.
-- **[MINOR]** `AI/architect_spec_remote_live_camera.md`, `AI/auditor_constraints_remote_live_camera.md`
-  — the historical spec and auditor documents still describe the 10 s cooldown (spec §7.1/§7.2,
-  the `GET /api/camera` example with `cooldown_ms`, "views are ≥ `CAMERA_VIEW_COOLDOWN_MS`
-  apart"). Suggested: a one-line "superseded by M13 (2026-10-07)" note at the top of each, so a
-  future agent does not reintroduce the cooldown from the spec.
-- **[MINOR]** `crates/remote/assets/app.js:1487` (`endCameraView` → `renderCamera`) — the state is
-  refetched immediately after a stop; if the server has not yet dropped the view guard the answer
-  is `streaming`, and the card shows "A camera view is in progress" next to an enabled Start
-  button until the next refresh. Pre-existing and cosmetic, but more visible now that a restart is
-  immediate. Suggested: a short delayed second `fetchCamera()` after a stop.
+- **[MINOR]** `crates/remote/src/camera_slot.rs:8` — one module doc line ("ended, still behind a fresh passkey
+  assertion. Every method receives the current time; ...") is much longer than the surrounding wrapped lines.
+  Cosmetic; rewrap when next touched.
+- **[SUGGESTION]** `crates/remote/assets/style.css` `.camera-canvas` — `width`/`height` are declared twice (percent then
+  container units). This is a valid fallback for browsers without container query units; a short comment would make
+  the intent explicit.
+- **[SUGGESTION]** Process note: during this review `test_rlc_no_push_on_camera_view` first failed with one
+  `sooscamera` delivery although no source contained the string; touching `crates/remote/src/*.rs` and rebuilding made
+  it pass. Run gates from a clean incremental state after branch switches in this worktree.
 
 ## 5. Final Verdict
-
-No CRITICAL or MAJOR finding. The cooldown is fully removed with positive replacement tests
-limited to migration M13, full screen exits on every view end path, the fullscreen APIs are
-guarded for iOS, and the page invariants (no storage, no new ids, classList only, CSP unchanged)
-hold.
 
 **VERDICT: APPROVED**
