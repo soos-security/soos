@@ -552,18 +552,18 @@ failure is a JSON error the page can explain (`camera_refused`, `camera_unavaila
 `camera_format_unsupported`). Only Grey, YUYV and RGB24 preview frames are converted;
 `soos-remote` contains no image decoder.
 
-**Full screen and rotation.** A tap on the live image toggles **full screen**: the image
+**Full screen, portrait and landscape.** A tap on the live image toggles **full screen**: the image
 fills the screen on the brand ink background, inside the iPhone safe areas, scaled to fit
 without cropping. Where the browser offers element fullscreen (iPad, desktop browsers) the
 page also requests it; iPhone Safari has none, so there the page uses a fixed full-viewport
 overlay, which in the home-screen app covers the whole screen. Full screen is left by tapping
 the image again, by the **✕** button ("Exit full screen"), by the Escape key or the browser's
 own exit gesture, and always when the view ends (stop, maximum duration, error, page hidden or
-left). The **Rotate** button turns the image by 90° steps (0, 90, 180, 270 degrees) for a
-portrait or landscape picture, in the card as in full screen; turned by 90 or 270 degrees the
-image is refitted to the box. The rotation is applied with CSS classes only (the Content
-Security Policy is unchanged), is kept in memory for the life of the page, so the next view
-starts with the same orientation, and is never stored.
+left). One button switches between two modes, in the card as in full screen: **landscape**
+(the default, the image as the camera captures it) and **portrait** (the image turned by 90°
+and refitted to the box); the button names the mode it switches to. The mode is applied with
+a CSS class only (the Content Security Policy is unchanged), is kept in memory for the life
+of the page, so the next view starts in the same mode, and is never stored.
 
 **Awareness.** The camera **LED** lights while the daemon captures, and stays on for about 10 s
 after the last frame; it is the only indicator at the PC (no on-screen indicator). With push
@@ -640,7 +640,7 @@ app on the tailnet:
 4. *Stop camera view* ends the view at once; a new start right after it succeeds (after Face
    ID, no countdown, no waiting);
 5. a tap on the image shows it full screen; tapping again or **✕** returns to the card;
-   **Rotate** turns the image by 90° each time, in the card and in full screen;
+   **Portrait** / **Landscape** switches between the two modes, in the card and in full screen;
 6. after a full logout at the PC, a start is refused (`camera_refused`);
 7. optionally, over Funnel with `camera_view_funnel = true`, steps 1 and 4 again (the frame
    rate over Funnel is bounded by Tailscale's relay throughput).

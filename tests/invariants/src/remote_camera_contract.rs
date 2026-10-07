@@ -1085,12 +1085,14 @@ fn test_rlc_s10_no_decoder_and_no_device_access_in_remote() {
 }
 
 // ---------------------------------------------------------------------------------------
-// Test 60 — owner request 2026-10-07: full screen, rotation, no cooldown (M13)
+// Test 60 — owner request 2026-10-07: full screen, portrait/landscape, no cooldown (M13)
 // ---------------------------------------------------------------------------------------
 
 /// The live view toggles a full-screen stage by a tap (element fullscreen when the browser
 /// has it, a fixed overlay otherwise), offers a visible exit control and the Escape key,
-/// rotates the image by 90° steps through CSS classes only, always leaves full screen when
+/// switches between exactly two modes, landscape and portrait (the image turned by 90°),
+/// through a CSS class only (owner correction 2026-10-07: two modes, not four rotations),
+/// always leaves full screen when
 /// the view ends, and shows no cooldown anywhere (migration M13).
 #[test]
 fn test_rlc_page_fullscreen_rotate_and_no_cooldown() {
@@ -1104,20 +1106,32 @@ fn test_rlc_page_fullscreen_rotate_and_no_cooldown() {
         "webkitfullscreenchange",
         "\"Escape\"",
         "\"Exit full screen\"",
-        "\"Rotate\"",
+        "\"Portrait\"",
+        "\"Landscape\"",
+        "\"Switch to portrait mode\"",
+        "\"Switch to landscape mode\"",
         "\"aria-label\"",
         "\"camera-full\"",
-        "\"camera-rot-90\"",
-        "\"camera-rot-180\"",
-        "\"camera-rot-270\"",
+        "\"camera-portrait\"",
         "classList",
         "function enterCameraFullscreen(",
         "function exitCameraFullscreen(",
-        "function rotateCamera(",
+        "function toggleCameraOrientation(",
     ] {
         assert!(
             app.contains(needle),
             "crates/remote/assets/app.js must contain {needle} (owner request 2026-10-07)"
+        );
+    }
+    for forbidden in [
+        "camera-rot-",
+        "rotate(180deg)",
+        "rotate(270deg)",
+        "\"Rotate\"",
+    ] {
+        assert!(
+            !app.contains(forbidden),
+            "app.js offers two modes only, never {forbidden} (owner correction 2026-10-07)"
         );
     }
     for forbidden in [".style.", "cssText", "setAttribute(\"style\"", "\"style\""] {
@@ -1155,16 +1169,18 @@ fn test_rlc_page_fullscreen_rotate_and_no_cooldown() {
         ".camera-full",
         "position: fixed",
         "object-fit: contain",
-        ".camera-rot-90",
-        ".camera-rot-180",
-        ".camera-rot-270",
+        ".camera-portrait",
         "rotate(90deg)",
-        "rotate(180deg)",
-        "rotate(270deg)",
     ] {
         assert!(
             css.contains(needle),
             "crates/remote/assets/style.css must contain {needle}"
+        );
+    }
+    for forbidden in ["camera-rot-", "rotate(180deg)", "rotate(270deg)"] {
+        assert!(
+            !css.contains(forbidden),
+            "style.css offers two modes only, never {forbidden}"
         );
     }
     let full_at = css
@@ -1198,7 +1214,7 @@ fn test_rlc_page_fullscreen_rotate_and_no_cooldown() {
 
     let doc = read("Docs/REMOTE_COMPANION.md");
     let section = markdown_section(&doc, "## 2f.").expect("Docs/REMOTE_COMPANION.md §2f");
-    for needle in ["full screen", "Rotate", "no cooldown"] {
+    for needle in ["full screen", "portrait", "landscape", "no cooldown"] {
         assert!(
             section.contains(needle),
             "Docs/REMOTE_COMPANION.md §2f must mention {needle}"

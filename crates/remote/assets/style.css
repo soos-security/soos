@@ -761,9 +761,10 @@ input:focus-visible {
 
 /*
  * Live camera view (ADR 2026-10-07): layout only, the card is built by app.js. The stage
- * is a size container: the canvas fills it with object-fit: contain, and a 90/270 degree
- * rotation swaps the canvas box to the container's height x width before rotating it, so
- * the turned image still fits. In the card the stage is 4:3 (3:4 when turned); a tap puts
+ * is a size container: the canvas fills it with object-fit: contain. Two modes: landscape
+ * (the image as captured) and portrait, where the canvas box takes the container's height x
+ * width before a 90 degree rotation, so the turned image still fits. In the card the stage
+ * is 4:3 (3:4 in portrait); a tap puts
  * it in full screen as a fixed overlay in the brand ink, inside the safe areas.
  */
 .camera-stage {
@@ -778,8 +779,7 @@ input:focus-visible {
   container-type: size;
 }
 
-.camera-stage.camera-rot-90,
-.camera-stage.camera-rot-270 {
+.camera-stage.camera-portrait {
   aspect-ratio: 3 / 4;
   max-height: 70vh;
 }
@@ -796,20 +796,10 @@ input:focus-visible {
   touch-action: manipulation;
 }
 
-.camera-stage.camera-rot-90 .camera-canvas {
+.camera-stage.camera-portrait .camera-canvas {
   width: 100cqh;
   height: 100cqw;
   transform: rotate(90deg);
-}
-
-.camera-stage.camera-rot-180 .camera-canvas {
-  transform: rotate(180deg);
-}
-
-.camera-stage.camera-rot-270 .camera-canvas {
-  width: 100cqh;
-  height: 100cqw;
-  transform: rotate(270deg);
 }
 
 .camera-tools {

@@ -203,7 +203,7 @@ finding remains. Open items:
   4. With `soos-gui` closed, face unlock at the PC's lock screen still works during the view.
   5. The push "camera view started" arrives (when Web Push is set up).
   6. *Stop camera view* ends the view at once; a new start right after it succeeds (no cooldown since section 11).
-  6a. A tap on the image toggles full screen (✕, Escape or a second tap exits); *Rotate* turns the image by 90°.
+  6a. A tap on the image toggles full screen (✕, Escape or a second tap exits); *Portrait* / *Landscape* switches between the two modes.
   7. After a full logout at the PC, a start is refused (`camera_refused`).
   8. Optionally, over Funnel with `camera_view_funnel = true`, repeat steps 3 and 6.
 - The owner should confirm the M11 installer-test amendment before the merge.
@@ -245,11 +245,13 @@ portrait/landscape rotation, and no countdown between stopping and restarting a 
   enters element fullscreen; iPhone Safari has none, so the overlay alone covers the home-screen app. Exit: a second
   tap, the **✕** button (`aria-label` "Exit full screen"), Escape, the browser's own exit (`fullscreenchange` /
   `webkitfullscreenchange`), and always in `endCameraView` (stop, maximum duration, error, page hidden, `pagehide`).
-- **Rotation.** **Rotate** cycles 0/90/180/270 degrees by toggling `camera-rot-90|180|270` on the stage (classList
-  only; no inline style, CSSOM style or storage, CSP unchanged). The stage is a CSS size container; turned by 90 or
-  270 degrees the canvas box takes the container's height x width before the `rotate()` transform, so the image
-  still fits, and the card stage switches from 4:3 to 3:4 (at most 70vh). The rotation is kept in memory for the
-  page lifetime (the next view starts with the same orientation) and is never persisted (RLC-S12).
+- **Orientation.** Two modes only (owner correction 2026-10-07: "two modes, not four"): landscape, the default
+  (the image as captured), and portrait, toggled by one button that names the mode it switches to and sets
+  `camera-portrait` on the stage (classList only; no inline style, CSSOM style or storage, CSP unchanged). The stage
+  is a CSS size container; in portrait the canvas box takes the container's height x width before
+  `rotate(90deg)`, so the image still fits, and the card stage switches from 4:3 to 3:4 (at most 70vh). The mode is
+  kept in memory for the page lifetime and is never persisted (RLC-S12). A first version cycled four 90° rotations;
+  the owner asked for two modes and test 60 was updated accordingly before the change was pushed.
 - **Service worker.** `sw.js` only shows notifications and versions no asset cache, so there is nothing to bump; the
   page and its assets are served with `Cache-Control: no-store`.
 - **Tests.** New invariant test 60 `test_rlc_page_fullscreen_rotate_and_no_cooldown`; migrated slot, config and

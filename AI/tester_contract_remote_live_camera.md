@@ -294,7 +294,7 @@ are unchanged; no other test was weakened.
 New static test (not a migration): `tests/invariants/src/remote_camera_contract.rs` test 60
 `test_rlc_page_fullscreen_rotate_and_no_cooldown` pins the full-screen toggle (`requestFullscreen` /
 `webkitRequestFullscreen` with the overlay fallback), the exit control (`"Exit full screen"`, Escape,
-`fullscreenchange`), the rotation classes `camera-rot-90/180/270`, the full-screen exit in `endCameraView`, the
+`fullscreenchange`), the two-mode orientation class `camera-portrait` (owner correction 2026-10-07: two modes, not four rotations; `camera-rot-*`, `rotate(180deg)` and `rotate(270deg)` are now forbidden), the full-screen exit in `endCameraView`, the
 classList-only styling, and the absence of `cooldown`, `retry_after_ms` and `CAMERA_VIEW_COOLDOWN_MS` in the page and
 the camera/server sources. Red evidence: the slot, config and server test files did not compile against the old API
 (E0308/E0061), and test 60 failed on its first assertion before the page change.

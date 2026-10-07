@@ -31,8 +31,9 @@
  * createImageBitmap and drawn on a canvas, then released. No image element, no object
  * address, no storage; the view stops when the page is hidden or left. A tap on the live
  * image toggles full screen (element fullscreen where the browser has it, a fixed overlay
- * otherwise, as on iPhone Safari); Rotate turns the image by 90° steps through CSS classes
- * only. The rotation lives in memory for the page lifetime and is never stored. Every end
+ * otherwise, as on iPhone Safari); one button switches between two modes, landscape (the
+ * image as captured) and portrait (the image turned by 90°), through a CSS class only. The
+ * mode lives in memory for the page lifetime and is never stored. Every end
  * of a view leaves full screen. A new view may start right after the previous one ended
  * (owner request 2026-10-07), always after a fresh Face ID assertion.
  */
@@ -1085,8 +1086,8 @@ const CAMERA_START_LABEL = "Start camera view";
 const CAMERA_STOP_LABEL = "Stop camera view";
 const CAMERA_STREAM_PATTERN = /^\/api\/camera\/stream\/[A-Za-z0-9_-]{43}$/;
 const CAMERA_LIVE_TEXT = "Live view of the PC camera (tap the image for full screen)";
-// Rotation classes of the stage, in 90° steps (index 0 = upright, no class).
-const CAMERA_ROTATIONS = ["", "camera-rot-90", "camera-rot-180", "camera-rot-270"];
+// Stage class of the portrait mode (the image turned by 90°); landscape has no class.
+const CAMERA_PORTRAIT_CLASS = "camera-portrait";
 
 const CAMERA_REASONS = {
   camera_refused:
@@ -1103,8 +1104,8 @@ const CAMERA_REASONS = {
 let camera = null;
 let cameraController = null;
 let cameraDecoding = false;
-// Index into CAMERA_ROTATIONS; kept for the page lifetime, never stored.
-let cameraRotation = 0;
+// True in portrait mode; kept for the page lifetime, never stored.
+let cameraPortrait = false;
 let cameraFull = false;
 
 function cameraReason(result, status) {
@@ -1136,18 +1137,16 @@ function buildCameraCard() {
   canvas.setAttribute("aria-label", "Live camera image, toggle full screen");
   const tools = document.createElement("div");
   tools.className = "camera-tools";
-  const rotateButton = document.createElement("button");
-  rotateButton.type = "button";
-  rotateButton.className = "camera-tool";
-  rotateButton.setAttribute("aria-label", "Rotate the image by 90 degrees");
-  setText(rotateButton, "Rotate");
+  const orientationButton = document.createElement("button");
+  orientationButton.type = "button";
+  orientationButton.className = "camera-tool";
   const closeButton = document.createElement("button");
   closeButton.type = "button";
   closeButton.className = "camera-tool";
   closeButton.hidden = true;
   closeButton.setAttribute("aria-label", "Exit full screen");
   setText(closeButton, "✕");
-  tools.appendChild(rotateButton);
+  tools.appendChild(orientationButton);
   tools.appendChild(closeButton);
   stage.appendChild(canvas);
   stage.appendChild(tools);
@@ -1178,7 +1177,7 @@ function buildCameraCard() {
       toggleCameraFullscreen();
     }
   });
-  rotateButton.addEventListener("click", rotateCamera);
+  orientationButton.addEventListener("click", toggleCameraOrientation);
   closeButton.addEventListener("click", exitCameraFullscreen);
   stopButton.addEventListener("click", function () {
     stopCameraView("Camera view stopped");
@@ -1188,27 +1187,29 @@ function buildCameraCard() {
     stateLine: stateLine,
     stage: stage,
     canvas: canvas,
-    rotateButton: rotateButton,
+    orientationButton: orientationButton,
     closeButton: closeButton,
     startButton: startButton,
     stopButton: stopButton,
     feedback: feedback,
   };
-  applyCameraRotation(camera);
+  applyCameraOrientation(camera);
   return camera;
 }
 
-function applyCameraRotation(c) {
-  CAMERA_ROTATIONS.forEach(function (name, index) {
-    if (name !== "") {
-      c.stage.classList.toggle(name, index === cameraRotation);
-    }
-  });
+// Applies the current mode; the button names the mode it switches to.
+function applyCameraOrientation(c) {
+  c.stage.classList.toggle(CAMERA_PORTRAIT_CLASS, cameraPortrait);
+  setText(c.orientationButton, cameraPortrait ? "Landscape" : "Portrait");
+  c.orientationButton.setAttribute(
+    "aria-label",
+    cameraPortrait ? "Switch to landscape mode" : "Switch to portrait mode"
+  );
 }
 
-function rotateCamera() {
-  cameraRotation = (cameraRotation + 1) % CAMERA_ROTATIONS.length;
-  applyCameraRotation(buildCameraCard());
+function toggleCameraOrientation() {
+  cameraPortrait = !cameraPortrait;
+  applyCameraOrientation(buildCameraCard());
 }
 
 function fullscreenElement() {
