@@ -1,12 +1,26 @@
 # Candid Review Report
 
 - **Date**: 2026-10-07
-- **Target Branch**: `feat/remote-live-camera` (GitHub #345), round 4
+- **Target Branch**: `feat/remote-live-camera` (GitHub #345), round 5
 - **Base (merge-base)**: `05001c9`
-- **Reviewed-Diff-Fingerprint**: `714ade40ffdb37d33e08a54ae030fd56faef7a7d04ce23a2a7287acb519bc7df`
-- **Audited Files**: .agents/skills/dev-workflow/references/project-facts.md, AI/ARCHITECTURE.md, AI/DECISIONS.md, AI/VERIFICATION_MATRIX.md, AI/architect_spec_remote_live_camera.md, AI/auditor_constraints_remote_live_camera.md, AI/research_live_camera.md, AI/tester_contract_remote_live_camera.md, AI/walkthroughs/191_remote_live_camera.md, Cargo.lock, Cargo.toml, Docs/DAEMON.md, Docs/GUI_APPLICATION.md, Docs/IPC_PROTOCOL.md, Docs/REMOTE_COMPANION.md, Docs/SECURITY_AND_QUALITY_GUIDELINES.md, crates/daemon/src/config.rs, crates/daemon/src/dispatcher.rs, crates/daemon/src/lib.rs, crates/daemon/src/main.rs, crates/daemon/src/preview.rs, crates/daemon/src/preview_image.rs, crates/daemon/src/preview_peer.rs, crates/daemon/src/session.rs, crates/daemon/src/session_policy.rs, crates/daemon/tests/preview_authorization_tests.rs, crates/daemon/tests/preview_remote_view_tests.rs, crates/gui/src/ipc_camera.rs, crates/protocol/src/types.rs, crates/remote/Cargo.toml, crates/remote/assets/app.js, crates/remote/assets/style.css, crates/remote/assets/sw.js, crates/remote/src/audit.rs, crates/remote/src/camera.rs, crates/remote/src/camera_ipc.rs, crates/remote/src/camera_jpeg.rs, crates/remote/src/camera_slot.rs, crates/remote/src/challenge.rs, crates/remote/src/config.rs, crates/remote/src/http.rs, crates/remote/src/lib.rs, crates/remote/src/main.rs, crates/remote/src/push.rs, crates/remote/src/routes.rs, crates/remote/src/server.rs, crates/remote/tests/alerts_server_tests.rs, crates/remote/tests/camera_challenge_tests.rs, crates/remote/tests/camera_config_tests.rs, crates/remote/tests/camera_ipc_tests.rs, crates/remote/tests/camera_jpeg_tests.rs, crates/remote/tests/camera_push_tests.rs, crates/remote/tests/camera_routes_tests.rs, crates/remote/tests/camera_server_tests.rs, crates/remote/tests/camera_slot_tests.rs, crates/remote/tests/common/camera.rs, crates/remote/tests/common/harness.rs, crates/remote/tests/push_server_tests.rs, crates/remote/tests/server_tests.rs, deny.toml, scripts/install_remote.sh, tests/invariants/src/lib.rs, tests/invariants/src/remote_camera_contract.rs, tests/invariants/src/remote_companion_contract.rs
+- **Reviewed-Diff-Fingerprint**: `3b685280322d4c459bd163b9c7bfb86be280d23f79cb017062ff0f846a0c7857`
+- **Audited Files**: .agents/skills/dev-workflow/references/project-facts.md, .github/workflows/ci.yml, AI/ARCHITECTURE.md, AI/DECISIONS.md, AI/VERIFICATION_MATRIX.md, AI/architect_spec_remote_live_camera.md, AI/auditor_constraints_remote_live_camera.md, AI/research_live_camera.md, AI/tester_contract_remote_live_camera.md, AI/walkthroughs/191_remote_live_camera.md, Cargo.lock, Cargo.toml, Docs/DAEMON.md, Docs/GUI_APPLICATION.md, Docs/IPC_PROTOCOL.md, Docs/REMOTE_COMPANION.md, Docs/SECURITY_AND_QUALITY_GUIDELINES.md, crates/daemon/src/config.rs, crates/daemon/src/dispatcher.rs, crates/daemon/src/lib.rs, crates/daemon/src/main.rs, crates/daemon/src/preview.rs, crates/daemon/src/preview_image.rs, crates/daemon/src/preview_peer.rs, crates/daemon/src/session.rs, crates/daemon/src/session_policy.rs, crates/daemon/tests/preview_authorization_tests.rs, crates/daemon/tests/preview_remote_view_tests.rs, crates/gui/src/ipc_camera.rs, crates/protocol/src/types.rs, crates/remote/Cargo.toml, crates/remote/assets/app.js, crates/remote/assets/style.css, crates/remote/assets/sw.js, crates/remote/src/audit.rs, crates/remote/src/camera.rs, crates/remote/src/camera_ipc.rs, crates/remote/src/camera_jpeg.rs, crates/remote/src/camera_slot.rs, crates/remote/src/challenge.rs, crates/remote/src/config.rs, crates/remote/src/http.rs, crates/remote/src/lib.rs, crates/remote/src/main.rs, crates/remote/src/push.rs, crates/remote/src/routes.rs, crates/remote/src/server.rs, crates/remote/tests/alerts_server_tests.rs, crates/remote/tests/camera_challenge_tests.rs, crates/remote/tests/camera_config_tests.rs, crates/remote/tests/camera_ipc_tests.rs, crates/remote/tests/camera_jpeg_tests.rs, crates/remote/tests/camera_push_tests.rs, crates/remote/tests/camera_routes_tests.rs, crates/remote/tests/camera_server_tests.rs, crates/remote/tests/camera_slot_tests.rs, crates/remote/tests/common/camera.rs, crates/remote/tests/common/harness.rs, crates/remote/tests/push_server_tests.rs, crates/remote/tests/server_tests.rs, deny.toml, scripts/install_remote.sh, tests/invariants/src/lib.rs, tests/invariants/src/remote_camera_contract.rs, tests/invariants/src/remote_companion_contract.rs
 
 ## 1. Executive Summary
+
+### Round 5 (re-review after a CI fix)
+
+CI run 37639513976 failed one test on the round-4 commit: `test_rlc_s1_remote_camera_dependencies` panicked because
+`cargo tree --offline --locked --workspace --target all` could not resolve `android-activity v0.6.1` (a crate of a
+non-host target that the host-only build never downloads; the test's own message says to run `cargo fetch`). The fix
+is CI environment setup, not test or production code: `.github/workflows/ci.yml` gains a `cargo fetch --locked` step
+(all targets, lockfile-pinned) before "Build test binaries" in the test job. The test itself is unchanged and keeps
+`--target all`, so target-specific `jpeg-encoder` feature activation is still checked.
+
+Pillar 6 on the new hunk: no new action, no `${{ github.event.* }}` interpolation, `--locked` keeps the lockfile
+authoritative, `permissions:` unchanged. The new frozen patch differs from round 4 only by these 6 added lines.
+Re-run: `cargo test --locked -p soos-invariants` 530 passed, 0 failed; `./scripts/candid_review.sh` PASSED. No
+finding. Verdict: APPROVED.
 
 ### Round 4 (re-review after traceability)
 
