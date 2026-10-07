@@ -1,192 +1,295 @@
 # Candid Review Report
 
-- **Date**: 2026-10-06
-- **Target Branch**: `fix/gui-fps-and-egui-ids`
-- **Base (merge-base)**: `304af03`
-- **Reviewed-Diff-Fingerprint**: `755c11d286cae8e9689907a008a9af6700276121a1e1ed50df4582a9eb2a7b1d`
-- **Audited Files**: `AI/VERIFICATION_MATRIX.md`, `AI/walkthroughs/184_gui_frame_pacing_and_egui_ids.md`, `Cargo.toml`, `Docs/GUI_APPLICATION.md`, `Docs/SECURITY_AND_QUALITY_GUIDELINES.md`, `crates/gui/src/ipc_camera.rs`, `crates/gui/src/widgets.rs`, `crates/gui/src/worker.rs`, `crates/gui/tests/card_id_stability_tests.rs`, `crates/gui/tests/ipc_preview_cadence_tests.rs`, `crates/gui/tests/worker_pacing_tests.rs`
+- **Date**: 2026-10-07
+- **Target Branch**: `feat/remote-companion`
+- **Base (merge-base)**: `47ab53e`
+- **Reviewed-Diff-Fingerprint**: `2adfa32f857bc0673846164c372dcd3d57db5999f06c0960d5c32087bbd3716e`
+- **Audited Files**: full frozen patch `target/candid_diff.patch` (merge-base `47ab53e` to the working tree at HEAD `7bad7d9` plus the uncommitted CI timing fix in `crates/remote/tests/push_server_tests.rs` and `AI/tester_contract_push.md`; the earlier part was frozen at HEAD `0585076`, 114 files, 61 441 insertions / 236 deletions): `crates/remote/**`, `crates/push-protocol/**`, `crates/push-sender/**`, `tests/invariants/src/{lib.rs,presence_unlock_contract.rs,artifact_freshness_contract.rs,remote_*_contract.rs}`, `Cargo.toml`, `Cargo.lock`, `Docs/{README.md,REMOTE_COMPANION.md,SECURITY_AND_QUALITY_GUIDELINES.md,...}`, `AI/{ARCHITECTURE.md,DECISIONS.md,VERIFICATION_MATRIX.md,MOCK_STRATEGY.md,architect_spec_remote_*.md,auditor_constraints_*.md,tester_contract_*.md,research_push.md,design_brief_remote_brand.md}`, `AI/walkthroughs/185_remote_companion.md` to `190_remote_brand_redesign.md`, `.agents/skills/dev-workflow/references/project-facts.md`.
+
+## 0000. Re-Review of the RMC21 Waiver (fingerprint `2adfa32f…d3716e`)
+
+The previous review approved fingerprint `41d3a47a…51a68a` at HEAD `f3cda70`. The only change
+since is one status cell of `AI/VERIFICATION_MATRIX.md` (RMC21): the owner dropped the iOS
+"Lock PC" Shortcuts check on 2026-10-07, so the row records the partial hardware result and the
+waiver instead of claiming a pass, and states that the hedged Shortcuts wording in
+`Docs/REMOTE_COMPANION.md` §4 stays. No code, test or criterion changed; sections 000, 00 and 0
+to 5 are carried over. English only.
+
+**VERDICT: APPROVED**
+
+## 000. Re-Review of the Owner Hardware Results (fingerprint `41d3a47a…51a68a`)
+
+The previous review approved fingerprint `9f545329…1b6143` at HEAD `976816b`. The only change
+since (`git diff 976816b` outside this report) is `AI/VERIFICATION_MATRIX.md`, 4 insertions / 4
+deletions, status column only: RMC59 and RMC74 gain the owner's 2026-10-07 GDM-at-boot
+notification report; RMC75 and RMC88 move to Verified on the owner's report (acknowledged alert
+removed from the page on the reinstalled build; re-added home-screen icon and dark theme look
+right, light theme stated as not reported separately). No code, test, criterion or other path
+changed, so sections 00 and 0 to 5 below are carried over. The statuses match the owner's words
+and claim nothing beyond them (RMC21 stays Pending). English only, no secret or biometric data.
+
+**VERDICT: APPROVED**
+
+## 00. Re-Review of the CI Timing Fix (fingerprint `9f545329…1b6143`)
+
+The previous review approved fingerprint `3a50f87a…bd3c22a`. The only change since (`git diff
+7bad7d9` outside this report) is 2 files, 32 insertions / 2 deletions: a new test helper
+`wait_view` in `crates/remote/tests/push_server_tests.rs` used in one block of
+`test_rwp_delivery_outcomes`, and Contract Migration 4 in `AI/tester_contract_push.md`. Every
+other path of the patch is unchanged, so sections 0 to 5 below are carried over.
+
+**Root cause (verified in code).** `PushService::remove_gone` (`crates/remote/src/push.rs:1540`)
+awaits `with_store_lock(...)`, i.e. `tokio::task::spawn_blocking` on the blocking pool, and only
+then calls `record_gone()`. The test is `#[tokio::test(start_paused = true)]` (current-thread);
+`pump()` only does `POLL_ROUNDS` x `yield_now()`, which bounds runtime scheduler rounds but not the
+wall-clock time a blocking-pool thread needs for the file rewrite. CI run 37537551565 saw
+`(subscriptions 0, last_delivery null)`: the store removal had finished (the view reads the store)
+but the dispatcher task had not yet been polled past the `.await` to record the outcome. This is a
+genuine test-timing defect, not a product defect.
+
+**Is the helper a weakening? No.**
+- The assertion `(subscriptions, last_delivery) == (0, "gone")` is byte-identical; the predicate
+  passed to `wait_view` is the same condition, so the helper cannot make a different state pass.
+- `wait_view` returns the last observed view even when the predicate never holds, so a wrong
+  implementation (outcome never recorded, subscription never removed, `failed` instead of `gone`)
+  still fails the exact assertion after at most 200 x (10 ms + pump + one GET) ≈ 2 s. Bounded, no
+  infinite loop, no `#[ignore]`, no tolerance.
+- `std::thread::sleep` deliberately blocks the current-thread runtime so the virtual clock does not
+  move while real time passes for the blocking pool; no timers fire during the wait. After the
+  subscription is removed there is no subscription left to deliver to, so even an auto-advance
+  inside `push_view` cannot produce extra transport calls that the test would miss. No other
+  assertion of the test depends on the wait.
+- The migration is recorded (tester contract Migration 4) with the CI run, cause and the unchanged
+  assertion, matching the project's contract-migration rule.
+- Other `Gone` assertions: the two-subscription 404/410 loop runs `idle(60 s, 1 s)` (60 pumps with
+  clock moves) before asserting `subscriptions == 1` and does not assert `last_delivery`; no other
+  test reads `last_delivery == "gone"`. No sibling race left unpatched.
+
+**Should production order change? No (SUGGESTION at most).** Either order leaves a microsecond
+transient visible only to a `GET /api/push` that lands inside the window: today `(0, previous
+outcome)`, reversed it would be `(1, "gone")`. Both are eventually consistent within one store
+write and the page re-polls; neither is a security or correctness problem (no fail-open, no lost
+audit line, the outcome is always recorded, including when the removal fails, which is the
+approved behavior). Recording before removing would arguably be worse (it claims removal before it
+happened). No change requested.
+
+**Checks run by the reviewer.** `cargo test -p soos-remote --test push_server_tests
+test_rwp_delivery_outcomes` 5/5 green (0.36 s each); `cargo fmt --all -- --check` clean;
+`cargo clippy -p soos-remote --all-targets -- -D warnings` clean. Step-3 mechanical listing over the
+full patch: the only removed assertion line is the previously approved PAU17 migration in
+`tests/invariants/src/presence_unlock_contract.rs`; the only escape-hatch match is the text "no
+`#[ignore]` or tolerance was added" in a document. English only.
+
+**Findings for this delta:** none. Verdict carried: APPROVED.
+
+## 0. Re-Review After the Rebase onto `main` (fingerprint `3a50f87a…bd3c22a`)
+
+The previous report approved fingerprint `7bf5595f…595746` (base `222665f`, HEAD `2cefb5d`). Since
+then: `ab68a48` renumbers this branch's walkthroughs, and `0585076` merges `origin/main` (`47ab53e`,
+PRs #343 GUI brand redesign and #344 GUI frame pacing). The new merge-base is `47ab53e`.
+
+**Carry-over method.** For every path in the new patch I compared the branch delta
+`git diff 222665f 2cefb5d -- <path>` with `git diff 47ab53e HEAD -- <path>` (added/removed lines
+only). The two file lists are identical apart from the six renamed walkthroughs. Every file under
+`crates/`, `tests/`, `Cargo.toml`, `Cargo.lock`, `Docs/README.md`,
+`Docs/SECURITY_AND_QUALITY_GUIDELINES.md` and every other non-documentation path has a
+**byte-identical delta**; only documentation files differ (25 paths: walkthroughs, specs, auditor
+constraints, tester contracts, `AI/ARCHITECTURE.md`, `AI/DECISIONS.md`,
+`AI/VERIFICATION_MATRIX.md`, `Docs/REMOTE_COMPANION.md`, `project-facts.md`, the two reports). The
+code review of the earlier report (sections 1 to 5 below) is therefore carried over unchanged.
+
+**Renumbering (`ab68a48`, 25 files, 69/69 lines).** A word-level diff of the commit shows only
+`183→185`, `184→186`, `185→187`, `186→188`, `187→189`, `188→190` (plus `188_remote_brand.md` →
+`190_remote_brand_redesign.md`, the file's real name) and tense changes in the three notes that
+described the collision as pending ("predates"→"predated", "at rebase"→"on 2026-10-06 by
+renumbering ... +2"). No mapping off by one, none skipped. Checks on the result:
+- `AI/walkthroughs/` holds `183_gui_brand_redesign.md`, `184_gui_frame_pacing_and_egui_ids.md`
+  (main's, untouched) and `185`–`190` (this branch); no number is duplicated.
+- No stale `18x_remote_*` filename remains except in the historical note of
+  `AI/architect_spec_remote_brand.md:592-594`, which explicitly records the old names.
+- Every "walkthrough 183/184" left in the tree points at main's GUI work:
+  `Docs/GUI_APPLICATION.md:79,259`, `AI/VERIFICATION_MATRIX.md` gui rows,
+  `AI/architect_spec_remote_brand.md:13,47,591`, `AI/design_brief_remote_brand.md:25`,
+  `AI/walkthroughs/190_remote_brand_redesign.md:16` ("walkthrough 183 on `main`", the GUI brand
+  redesign, correct). Every branch reference to 185–190 names the right topic (companion, unlock,
+  funnel/passkey, auth alerts, web push, brand), checked over all `+` lines of the patch.
+- `main`'s files are not touched by the renumbering (none of them is in the commit).
+
+**Conflict resolution (`0585076`).**
+- `AI/VERIFICATION_MATRIX.md`: every line of `47ab53e` and every line of `ab68a48` is in HEAD
+  except main's original `PAU17` row, which is replaced by the branch's annotated `PAU17` row
+  ("scope widened to soos-remote by ADR 2026-10-05"), the branch-side edit approved earlier
+  (`222665f` and `47ab53e` carry the same original row, so main did not change it). HEAD has no
+  line that is in neither parent. Line count 2175 = 2145 (branch) + 30 (main's addition since
+  `222665f`). Order: main's `gui-brand-redesign` (183) and `gui-frame-pacing` (184) components,
+  then the remote components (185 on). No conflict markers anywhere in the tree.
+- `AI/candid_review_report.md`: replaced by this report.
+
+**Auto-merged shared files (semantic interaction).** `main` changed `Cargo.toml` (four
+`[profile.dev.package.*] opt-level = 3` overrides for `soos-vision`, `soos-inference-ort`,
+`jpeg-decoder`, `zeroize`), `Docs/README.md` (GUI row text) and
+`Docs/SECURITY_AND_QUALITY_GUIDELINES.md` (one profile table row); this branch changes the
+workspace members, workspace dependencies, the README Remote row and the zbus bullet. The hunks
+are disjoint. `main` did not touch `Cargo.lock`, so the branch lockfile (and its `cargo deny`
+result) is unchanged. The `zeroize` dev override also applies to `soos-remote`; it only raises
+`opt-level` in dev/test builds and leaves `overflow-checks` and `panic = "unwind"` as before:
+no effect on behavior or on the release profile.
+
+**New live check introduced by the merge.** `crates/gui/src/theme.rs` did not exist at `222665f`;
+it now exists, so `remote_brand_contract::test_rmc_s44_brand_tokens_match_the_gui_theme` runs its
+live cross-check (it is unconditional once the file exists, never skipped). Re-run here:
+`cargo test -p soos-invariants -p soos-remote -p soos-push-protocol -p soos-push-sender -p soos-gui`
+all green (`soos-invariants`: 519 passed, 0 failed), so the 25 pinned palette colors and six
+metrics equal main's `theme.rs`. `cargo fmt --all -- --check` clean; `cargo clippy --workspace
+--all-targets --locked -- -D warnings` clean.
+
+**Mechanical test listing on the new patch.** 35 test files (same set as before); one removed
+assertion line (`presence_unlock_contract.rs`, the documented zbus contract migration, unchanged);
+no new `#[ignore]`/tolerance in code (the only hit is a walkthrough sentence); one inline
+`mod tests` hunk (business-crate list, strengthening). Identical to the previously approved
+listing in section 2.
+
+Result: no finding introduced by the renumbering or the merge. Verdict below unchanged.
 
 ## 1. Executive Summary
 
-The diff makes three changes to `soos-gui` pacing and layout:
+**Re-review (new fingerprint `7bf5595f…595746`).** The previous report approved fingerprint
+`b37d69c9…` with one MINOR finding (icon command output path). Since that report, the only file
+modified in the tree is `Docs/REMOTE_COMPANION.md` (checked with `find -newer` on the previous
+report, excluding `.git/` and `target/`); its section 2e command now ends in
+`png:crates/remote/assets/apple-touch-icon.png`. I re-ran that exact command (output redirected
+to the scratchpad): SHA-256 `3442af183a9d1e3b50983612d927aa333453c56557aeb571a56950eff5cd46b3`,
+byte-identical to the committed `crates/remote/assets/apple-touch-icon.png`. No stray PNG exists
+in the repository root. Carried-over checks re-run on the current tree: CSP at
+`crates/remote/src/http.rs:263` unchanged and no `crates/remote/src` change since HEAD; element
+id set of `index.html` identical to HEAD; no inline `style=`, handler or `data:` URI added (the
+only external URL is the pre-existing `source` link); no assertion removed and no `#[ignore]`
+added under `tests/` since HEAD; `cargo test -p soos-invariants`: 519 passed, 0 failed. The
+MINOR finding is resolved; the full-diff review below is carried over unchanged.
 
-- The vision worker (`worker.rs`) no longer sleeps after an analyzed frame. It waits
-  `WORKER_IDLE_POLL` (5 ms) only when no new frame sequence was available.
-- The daemon preview worker (`ipc_camera.rs`) now keeps a 33 ms cadence from request to request
-  (`PollStep::Cadence`, `frame_cadence_delay`). Before, it slept 33 ms after each reply. All
-  back-off paths keep their delays.
-- `card_in_rect` and `card_in_rect_with_footer` (`widgets.rs`) give their content scope an
-  explicit id (`card_scope_id`), so a stat tile shown or hidden above the card between two egui
-  passes no longer shifts the ids of the widgets inside the card.
+**Original summary (fingerprint `b37d69c9…`):**
 
-`Cargo.toml` adds four `[profile.dev.package.*] opt-level = 3` overrides. `[profile.release]` is
-unchanged. No dependency, `unsafe`, logging or I/O was added.
-
-Gates run by the reviewer: the fingerprint of `target/candid_diff.patch` matches
-(`sha256sum` and `scripts/candid_subagent.sh --fingerprint`). `cargo clippy -p soos-gui
---all-targets -- -D warnings` is clean. `cargo test -p soos-gui` gives **156 passed, 0 failed**.
-`cargo test -p soos-invariants` gives **448 passed, 0 failed**.
-
-**Delta (re-review, fingerprint `755c11d2…7b1d`).** I checked that the fingerprint matches
-(`sha256sum` and `scripts/candid_subagent.sh --fingerprint`). The patch grew from 564 to 565
-lines. The delta changes only comments and docs:
-
-- the module doc of `crates/gui/tests/worker_pacing_tests.rs` (M1);
-- the profile-table row in `Docs/SECURITY_AND_QUALITY_GUIDELINES.md` (M2);
-- one added doc line on `card_scope_id` in `crates/gui/src/widgets.rs` (S2).
-
-I checked this by filtering the diff of `worker.rs`, `ipc_camera.rs`, `Cargo.toml` and the three
-test files down to non-comment lines. Every code line and every test assertion is the same as in
-the first round. I re-ran the gates: clippy is clean, `cargo test -p soos-gui` gives 156 passed,
-0 failed, and `cargo test -p soos-invariants` gives 448 passed, 0 failed.
-
-I found no blocking issues. M1, M2 and S2 are resolved. S1 is kept on purpose, and I accept the
-author's reason for keeping it.
+The delta since the approved HEAD is presentation and documentation only. `git diff HEAD --stat`
+shows no change to any file under `crates/remote/src/`, to `app.js` or to `sw.js`; the Content
+Security Policy (`crates/remote/src/http.rs:263`, `default-src 'self'; script-src 'self';
+style-src 'self'; img-src 'self'; ...`) is therefore unchanged and the new markup needs nothing
+beyond it (inline SVG elements, no inline style, script, handler or `data:` URI). The new touch
+icon is a flat graphic regenerated from `icon.svg`: re-running the documented `rsvg-convert` +
+ImageMagick pipeline here produced a byte-identical file (SHA-256 `3442af18...cd46b3`), so it is
+not a raster from the owner's archive and contains no photo. Every element id `app.js` reads
+(29 `getElementById` targets) is present, the id set is identical to HEAD, and `[hidden]` is
+forced to `display: none !important`, so the `.card { display: flex }` rule cannot keep a
+hidden section visible. Tests: `soos-invariants` 519 passed, `soos-remote` all suites passed,
+`clippy -D warnings` and `fmt --check` clean. One MINOR documentation finding; verdict APPROVED.
 
 ## 2. Test Changes
 
-I listed these mechanically from `target/candid_diff.patch`:
+Mechanical listing (step 3) on the frozen patch:
 
-- Test files touched: `crates/gui/tests/card_id_stability_tests.rs` (new, 2 tests),
-  `crates/gui/tests/ipc_preview_cadence_tests.rs` (new, 3 tests) and
-  `crates/gui/tests/worker_pacing_tests.rs` (new, 2 tests). All three are new files. No existing
-  test file is in the patch: `git diff --name-only 304af03 -- crates/gui/tests tests` lists only
-  these three.
-- Removed or changed assertions (`^-` lines in test files): **none**.
-- New escape hatches (`#[ignore]`, `#[cfg(any())]`, `should_panic`): **none**. The file-level
-  `#![allow(clippy::unwrap_used, clippy::expect_used, reason = ...)]` follows the existing GUI
-  test style.
-- Inline `mod tests` changes: **none**.
-- Do the tests fail on the old code? I checked out a scratch worktree at `304af03` (the old
-  `widgets.rs` and the old `Cargo.toml`), copied in `card_id_stability_tests.rs` and ran it. Both
-  tests **FAIL** there (`left: Id::new(10978825285480028652)` vs `right: Id::new(8741797889808405595)`).
-  Then I removed the worktree. `ipc_preview_cadence_tests` and `worker_pacing_tests` cannot
-  compile against the old code (`frame_cadence_delay`, `worker_idle_delay` and
-  `WORKER_IDLE_POLL` did not exist, and `PREVIEW_POLL_INTERVAL` was private).
-- Matrix rows GFP1–GFP3 cite 7 test functions. All 7 exist under exactly those names, and all
-  pass.
+- Test files touched: 35 (whole branch). Delta since HEAD: `tests/invariants/src/lib.rs`
+  (registers `remote_brand_contract`), `tests/invariants/src/remote_alerts_contract.rs`,
+  new `tests/invariants/src/remote_brand_contract.rs`.
+- Removed/changed assertion lines: one hit, `presence_unlock_contract.rs`
+  (`test_pau_zbus_is_used_only_by_the_daemon`), in the already approved committed part; it is a
+  documented contract migration (ADR 2026-10-05 item (7)) that widens the allowed set to exactly
+  two manifests and adds an exactly-once check; not a weakening.
+- New escape hatches: none in code (the only hit is a walkthrough sentence).
+- Inline `mod tests` changes: one hit adding `remote`, `push-protocol`, `push-sender` to the
+  forbid-unsafe business crate list (committed, strengthening).
+- `remote_alerts_contract.rs` delta: the `raw_start` condition of `blank_string_literals` now
+  also accepts an `r` preceded by a `b`/`c` prefix at an identifier boundary (Contract Migration
+  CM-1). No assertion was removed; new test 75
+  `test_rmc_s56_scanner_handles_raw_byte_and_c_strings` checks four hidden-binding inputs that
+  the old scanner missed and a negative case (`xbr` identifier). This strengthens the RMC-S43
+  guard (closes a false negative); justified by matrix RMC87.
+- `remote_brand_contract.rs` (new, 16 tests incl. 4 helper self-tests): pinned palette and
+  metrics with a live cross-check against `crates/gui/src/theme.rs` when present (absent on this
+  merge-base; I verified the 25 colors and 6 metrics against `origin/main:crates/gui/src/theme.rs`
+  at `47ab53e`, all equal, so the live branch will pass after a rebase); palette-only colors;
+  WCAG contrast from tokens; ids/labels kept; no inline style/script/`data:`; touch-icon PNG
+  structure; manifest colors; asset set. The walkthrough records red evidence
+  (`508 passed; 11 failed` on the old assets), so the tests can fail.
 
 ## 3. Deep Reasoning Audit
 
-### Logic & Behavior Preservation
+### Logic & Architecture
+- Scenario: a section the JS hides stays visible because of the new `display: flex` on `.card`.
+  `[hidden] { display: none !important; }` precedes all component rules -> PASS.
+- Scenario: an id renamed or dropped breaks a UI state (login, status, alerts with ack and
+  coverage, push enable/test/disable/hint, enroll, logout, unlock). Id sets of HEAD and working
+  tree compared with `diff`: identical; `app.js` unchanged -> every state reachable -> PASS.
+- Scenario: `stateNode.className = "state state-<s>"` overwrites a styling class. The new
+  markup puts tile classes on the parent `.stat-tile` and uses `:has(.state-*)` for the dot, so
+  the overwrite loses nothing; on browsers without `:has()` the dot stays idle grey while the
+  state is still written in words -> PASS.
+- Scenario: `Unlock now` changed class to `secondary danger`; no JS sets button classes
+  (only `stateNode.className` and `alerts.classList.toggle`) -> PASS.
+- Scenario: `black-translucent` status bar hides content under the notch. The band pads with
+  `env(safe-area-inset-top)`, gutters use left/right insets, the footer uses the bottom inset
+  -> PASS (on-device check is matrix row RMC88, owner).
 
-- *Vision worker spin risk* (`worker.rs` ~267–390): `analyzed_frame` becomes `true` only inside
-  `if frame.sequence != last_seq`, right after `last_seq = frame.sequence`. So a zero-delay
-  iteration always consumes a new sequence number, and the next iteration either finds another
-  new frame or sleeps 5 ms. The worker cannot spin when frames stop, when `latest_frame()`
-  returns `None`, or when it keeps returning the same frozen frame. The analysis-error path,
-  including a failed `convert_to_rgb`, also consumes the sequence, so it cannot spin either.
-  `running` is still checked at the top of every iteration, so shutdown is still prompt. PASS.
-- *Frozen-frame withdrawal*: the `else if published && !camera.is_ready()` branch is unchanged
-  and still runs every iteration where `latest_frame()` is `None`, followed by a 5 ms wait.
-  PASS.
-- *Idle cost*: the idle wait drops from 10 ms to 5 ms, so a camera that is absent or suspended
-  now wakes the worker about 200 times per second instead of 100. Each wake calls
-  `notify_activity` (one `RwLock` write in the V4L manager, a no-op for IPC). This is negligible
-  but not free. See S1.
-- *Preview request rate* (`ipc_camera.rs` ~470–477): `started` is taken before `poll_once`, and
-  the delay is `33 ms - elapsed` (saturating). So the time from one request start to the next is
-  always at least 33 ms, and `thread::sleep` never sleeps less than asked. That caps the rate at
-  about 30.3 requests per second, even when a slow exchange polls again at once. This is below
-  `DEFAULT_PREVIEW_MAX_REQUESTS_PER_SEC = 40` (`crates/daemon/src/preview.rs:26`). Before, the
-  start-to-start time was 33 ms plus the exchange time, so the new cadence is strictly faster but
-  still bounded. PASS.
-- *Back-off paths*: `RateLimited` → `Continue(250 ms)`, `Unavailable` and post-frame empty preview
-  → `Continue(UNAVAILABLE_BACKOFF)`, `Protocol` / `Io` → `Reconnect`, `Unauthorized` → `Stop`.
-  All are unchanged. Only the two paths that used `Continue(PREVIEW_POLL_INTERVAL)` (frame
-  received, and an empty preview before the first frame) moved to `Cadence`. PASS.
-- *egui ids* (`widgets.rs` ~413–418, 842–859, 1225–1242): in egui 0.35 `Ui::new_child`
-  (`ui.rs:251–256`), an `IdSource::Child` id is `stable_id.with(next_auto_id_salt)`, so it
-  depends on how many widgets came before it. `IdSource::Explicit(id)` uses `id` for both the
-  stable and the unique id. That confirms the walkthrough's claim and the fix.
-  `card_scope_id = ui.id().with(("soos_card_scope", id_salt))`. In both call sites
-  (`app.rs:844`, `app.rs:1262`), the parent `ui` is the same column `Ui` that draws the stat and
-  star tiles, so its own id does not depend on those tiles.
-- *Collision risk*: an explicit id has no auto-counter suffix, so two cards with the same
-  `id_salt` under the same parent would share a scope id. Production has two salts
-  (`live_telemetry_card`, `enrollment_card`). Each is rendered once per pass, on different tabs.
-  The same card rendered on two passes of one frame should keep its id, and that is what this
-  change does. The `ScrollArea` id now derives from the new scope id. That only resets the
-  scroll offset once after the upgrade. `content_height_id` was already a global
-  `Id::new((..., id_salt))`, so it has the same uniqueness requirement as before. No collision.
-  See S2 for documenting it.
+### PAM Concurrency & Deadlines
+- No change to `crates/pam` in the branch delta; the remote crate is a leaf with no PAM link
+  -> PASS (not applicable).
 
-### Panic Safety
+### Panic Safety & Fail-Closed
+- No production Rust changed since HEAD. Lock/unlock authorization (CSRF header, passkey
+  assertion, `allow_unlock`) lives server-side and is untouched; CSS cannot enable a disabled
+  button's request path (`unlockButton.disabled` is still computed in `app.js`) -> PASS.
 
-- No `unwrap`, `expect`, `panic!`, indexing or arithmetic that could overflow was added.
-  `Duration::saturating_sub` cannot panic. `worker_idle_delay` is a `const fn` with two constant
-  branches. `thread::sleep(Duration::ZERO)` is avoided explicitly, and would be harmless anyway.
-  PASS.
+### Test Integrity & Anti-Weakening
+- See section 2. No assertion removed or loosened in the delta; one test-only scanner made
+  stricter with a regression test -> PASS.
+- Scenario: contrast test passes while opacity lowers real contrast. Checked by hand: pale on
+  blue at opacity 0.8 (`#updated`, 13 px) = 5.11:1, at 0.9 (`#activity`) = 6.05:1, at 0.7
+  (`state-unknown/unreachable`, large bold display text) = 4.27:1 >= 3:1 -> PASS.
 
-### Security Invariants / Compiler Profiles
+### Memory, Bounds & Secrets
+- No secret, identity or code is rendered by the new markup; the static text is unchanged.
+  Icon files contain only vector paths / a flat raster; no EXIF or text chunks
+  (`IHDR`/`IDAT`/`IEND` only) -> PASS.
+- Owner archive: only path data of two owner vectors entered (star, wordmark); the PNG is
+  reproducible from `icon.svg`; the GUI mockup with the owner's face is not in the tree
+  -> PASS.
 
-- `[profile.release]` is untouched: `opt-level = 3`, `lto`, `codegen-units = 1`,
-  `panic = "unwind"`, `strip`, `overflow-checks`. `[profile.dev]` and `[profile.test]` keep
-  `overflow-checks = true`. A per-package override only sets `opt-level`, and Cargo does not
-  allow `panic` per package, so the unwind strategy and debug assertions are inherited.
-  Invariant 7 (`test_workspace_cargo_toml_enforces_overflow_checks`) and
-  `test_release_profile_unwinds_so_pam_catch_unwind_is_effective` pass. All four overridden
-  packages are in `Cargo.lock`, and `cargo metadata` gives no "did not match any packages"
-  warning. PASS.
-- Because `[profile.test]` inherits from `[profile.dev]`, the overrides also apply to
-  `cargo test`. That has no security impact, since overflow checks stay on, but see M2.
-
-### Secrets & Logging
-
-- No `log`, `tracing` or `eprintln` call was added. The walkthrough says the temporary timing
-  logs were removed, and no such line is in the diff. PASS.
+### Supply Chain & Automation
+- No `Cargo.*`, `deny.toml`, `.github/`, `scripts/` or hook change in the delta; no font
+  file, CDN or external URL added (system font stack) -> PASS.
 
 ### English-Only Policy
+- New docs, test comments and assets scanned for non-ASCII French letters: none -> PASS.
 
-- All code, comments, docs, matrix rows and walkthrough 184 are in English. PASS.
-
-### Doc Accuracy
-
-- `Docs/GUI_APPLICATION.md` §1, §4 and §5.4 match the code: 33 ms request-to-request,
-  `WORKER_IDLE_POLL` of 5 ms, the explicit card scope id, and the four overridden packages. The
-  matrix GFP1–GFP3 wording matches the tests. Two minor inaccuracies are listed below.
+### Documentation Accuracy
+- `Docs/REMOTE_COMPANION.md` section 2e: palette values, token names, radii, the claim that the
+  CSP, `app.js`, `sw.js`, ids, labels and routes are unchanged, and the "DANGER is below AA on
+  pale" note (computed 4.22:1) are all correct. The icon regeneration command reproduces the
+  committed bytes, but writes to the current directory (see finding 1).
+- `AI/ARCHITECTURE.md` "Page design" row: accurate (seven assets present, RMC76-RMC88 exist in
+  the matrix, RMC88 being the manual owner row).
+- `AI/DECISIONS.md` new ADR, `AI/VERIFICATION_MATRIX.md` rows RMC76-RMC88, walkthrough 190
+  (SHA-256 and 519-passed figures match what I measured), walkthrough 188 correction (the
+  earlier "false positive only" statement was wrong; the scanner bug was a false negative):
+  accurate.
+- Sections of `Docs/REMOTE_COMPANION.md` outside 2e do not describe old colors; the added
+  note about iOS caching the home-screen icon is correct guidance.
 
 ## 4. Detailed Findings & Action Items
 
-- **[RESOLVED in delta] M1 / M2 / S2.**
-  - *M1*: `worker_pacing_tests.rs:5-6` now says "about 27 instead of 30 analyzed frames per
-    second in a release build". The conflicting debug figure is gone, and the assertions are
-    unchanged.
-  - *M2*: the row now says "Development and test builds only (`[profile.test]` inherits
-    `[profile.dev]`)", which matches how Cargo applies the profiles.
-  - *S2*: `card_scope_id` now documents that "`id_salt` must therefore be unique among the cards
-    drawn in the same parent `Ui`".
-  - The original text of each finding is kept below for traceability.
-- **[ACCEPTED] S1.** The author keeps the 5 ms idle wait: it halves the delay before a frame
-  that arrives during an idle spell is picked up, and the CPU cost is negligible. This is a
-  reasonable trade-off and not a defect.
-- **[MINOR] M1 — wrong debug-build rate in a test doc comment.**
-  `crates/gui/tests/worker_pacing_tests.rs:6` says the old worker reached "about 20 in a debug
-  build". The walkthrough (§2 table, about 6.5) and the matrix intro (about 6) both give a
-  different number for the same old code. Align the comment (e.g. "about 6"). This is
-  documentation only, and no assertion changes.
-- **[MINOR] M2 — "Development builds only" is not quite right.** The new row in
-  `Docs/SECURITY_AND_QUALITY_GUIDELINES.md` (profile table) says the overrides apply to
-  development builds only. `[profile.test]` inherits `[profile.dev]` and its package overrides,
-  so `cargo test` and CI test builds also compile those four crates at `opt-level = 3`. That
-  makes them a little slower to compile, and overflow checks are kept. Say "dev and test
-  profiles". There is no security impact.
-- **[SUGGESTION] S1 — idle wake rate.** `WORKER_IDLE_POLL` at 5 ms doubles the idle wake rate
-  when no frame arrives (camera absent, suspended or failed). This is still cheap, but 10 ms
-  would keep the old idle behavior. The frame-rate win comes from `Duration::ZERO` after an
-  analyzed frame, not from the shorter idle wait (a 10 ms idle wait adds at most 10 ms of
-  latency to the first frame after an idle spell). It is optional.
-- **[SUGGESTION] S2 — document the uniqueness requirement for `id_salt`.** Since
-  `card_scope_id` no longer uses egui's auto counter, two cards with the same `id_salt` under one
-  parent `Ui` would share the scope and `ScrollArea` ids. That is true today only by convention
-  (`live_telemetry_card` and `enrollment_card`). A one-line note on `card_in_rect` and
-  `card_in_rect_with_footer` ("`id_salt` must be unique among cards drawn in the same parent")
-  would prevent a future clash.
-- **[OBSERVATION] Test depth.** GFP1 and GFP2 test the pure helpers (`frame_cadence_delay` and
-  `worker_idle_delay`), not the loops that call them. I checked the wiring by reading the code
-  (`ipc_camera.rs` ~471–477, `worker.rs` ~384–388), and it is correct. A loop-level test would
-  need a fake socket and a clock, which is out of scope here.
+- **[MINOR — RESOLVED in this fingerprint]** `Docs/REMOTE_COMPANION.md` section 2e (icon command) and the matching
+  walkthrough 190 description: the command reads `crates/remote/assets/icon.svg` from the repository
+  root but writes `png:apple-touch-icon.png`, which lands in the repository root, not in
+  `crates/remote/assets/`. A maintainer following it would leave a stray file and not update the
+  served icon. Correction: write to `png:crates/remote/assets/apple-touch-icon.png`.
+  Resolution verified: the command now writes there and reproduces the committed bytes
+  (SHA-256 `3442af18…cd46b3`). Walkthrough 190 only refers to the docs command, so it needs no
+  change.
+
+No open findings.
 
 ## 5. Final Verdict
+
+No CRITICAL, MAJOR or open MINOR finding. CSP and server code unchanged, no archive raster or photo
+committed, every UI state reachable, no test weakened, documentation accurate apart from the
+MINOR output path above, which is now fixed and verified.
 
 **VERDICT: APPROVED**

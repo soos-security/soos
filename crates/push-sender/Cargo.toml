@@ -1,0 +1,31 @@
+[package]
+name = "soos-push-sender"
+description = "Optional sandboxed user service performing the outbound Web Push requests of the soos remote companion"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lib]
+name = "soos_push_sender"
+path = "src/lib.rs"
+
+[[bin]]
+name = "soos-push-sender"
+path = "src/main.rs"
+
+[dependencies]
+soos-push-protocol = { workspace = true }
+nix = { workspace = true }
+ureq = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+thiserror = { workspace = true }
+zeroize = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

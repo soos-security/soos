@@ -19,7 +19,7 @@ The system is not considered a high-assurance biometric factor until robust Pres
 | Local AI Inference | `ort` (ONNX Runtime) CPU execution provider; **SCRFD 500M KPS** (face detection + 5-point landmarks) + **SFace 2021dec** (128D embeddings, manifest id `sface_2021dec`, Apache-2.0; replaced the ArcFace ResNet34 on 2026-10-01, GitHub #278) + **MiniFASNetV2** (anti-spoofing) | Fast 3-model pipeline with unified detection+landmarks, battle-tested ORT runtime, no OpenCV required | Claiming "pure Rust" (ORT is native C/C++); unverified weight downloads; separate landmark model (absorbed into SCRFD) |
 | Biometric Storage | AES-GCM encrypted embeddings at rest; intrusion snapshots opt-in and isolated | Minimizes attack surface and persistent biometric risk | Storing raw frames or passwords on disk or sending over socket |
 
-Verified crate versions: `pam-bindings` 0.3.0, `tokio` 1.53.1, `v4l` 0.14.0, `ort` 2.0.0-rc.13, `zeroize` 1.9.0, `zbus` 5.19.0 (daemon only, `default-features = false`, `tokio`; the systemd-logind client of the presence auto-unlock, GitHub #323). Versions are pinned in `Cargo.lock` and audited via `cargo-deny`.[^pam-bindings][^tokio][^v4l][^ort][^zeroize]
+Verified crate versions: `pam-bindings` 0.3.0, `tokio` 1.53.1, `v4l` 0.14.0, `ort` 2.0.0-rc.13, `zeroize` 1.9.0, `zbus` 5.19.0 (`default-features = false`, `tokio`; the systemd-logind client of the presence auto-unlock in `soos-daemon`, GitHub #323, and of the remote companion `soos-remote`, GitHub #339, ADR 2026-10-05; never in `pam_soos.so`). Versions are pinned in `Cargo.lock` and audited via `cargo-deny`.[^pam-bindings][^tokio][^v4l][^ort][^zeroize]
 
 ---
 
@@ -268,7 +268,10 @@ soos/
 │   ├── evidence-store/           # intrusion evidence storage
 │   ├── enrollment-cli/           # root enrollment CLI
 │   ├── admin-cli/                # non-biometric status diagnostic CLI
-│   └── gui/                      # soos-gui diagnostic and enrollment GUI (eframe)
+│   ├── gui/                      # soos-gui diagnostic and enrollment GUI (eframe)
+│   ├── remote/                   # soos-remote user-level lock status, remote lock and opt-in unlock companion (§13)
+│   ├── push-protocol/            # soos-push-protocol pure push wire contract (§13)
+│   └── push-sender/              # soos-push-sender sandboxed outbound Web Push user service (§13)
 ├── models/
 │   ├── manifest.toml             # model IDs, licenses, SHA-256 checksums
 │   └── README.md
@@ -282,7 +285,7 @@ soos/
 └── AI/                           # AI development guidelines and walkthroughs
 ```
 
-`#![forbid(unsafe_code)]` is strictly enforced in all business crates; the authoritative list is the invariant test `test_business_crates_forbid_unsafe_code` in `tests/invariants/src/lib.rs` (`protocol`, `policy`, `vision`, `inference-ort`, `biometric-store`, `evidence-store`, `enrollment-cli`, `admin-cli`, `gui`). The adapter crates `pam` and `camera-v4l` confine documented `unsafe`.
+`#![forbid(unsafe_code)]` is strictly enforced in all business crates; the authoritative list is the invariant test `test_business_crates_forbid_unsafe_code` in `tests/invariants/src/lib.rs` (`protocol`, `policy`, `vision`, `inference-ort`, `biometric-store`, `evidence-store`, `enrollment-cli`, `admin-cli`, `gui`, `remote`). The adapter crates `pam` and `camera-v4l` confine documented `unsafe`.
 
 ---
 
@@ -350,6 +353,51 @@ SystemCallArchitectures=native
 - Assuming `/dev/video0` index is static or shareable across processes.
 - Downloading unverified ONNX weights at runtime without manifest hash checks.
 - Promising presentation attack security without active or dedicated PAD validation.
+
+---
+
+## 13. Remote Companion (`soos-remote`, GitHub #339)
+
+A **user-level** companion that shows the owner's phone the real-time lock status of the desktop
+session, offers a remote **lock** and, only when `allow_unlock = true`, a remote **unlock**
+(ADR 2026-10-05 "Remote Companion `soos-remote`", ADR 2026-10-06 "Remote Unlock in
+`soos-remote`", ADR 2026-10-06 "Tailscale Funnel Access and In-House Passkey Authentication for
+`soos-remote`"; operator reference `Docs/REMOTE_COMPANION.md`). Every unlock needs a fresh
+WebAuthn passkey assertion with user verification, and the service is optionally reachable from
+the internet through Tailscale Funnel (opt-in, port 443, behind a passkey login); the default
+deployment stays tailnet-only. It is a leaf crate: `soos-daemon`,
+`pam_soos.so` and the IPC protocol are untouched and no crate depends on it.
+
+| Aspect | Decision |
+|---|---|
+| Process | `systemctl --user` service of the session owner; `check_not_root` refuses uid 0 or euid 0 at start (exit 78, `RestartPreventExitStatus=78`). No polkit rule: the session owner may call `Manager.LockSession` and `Manager.UnlockSession` on their own session. |
+| Transport | One `0600` Unix socket in a `0700` directory under `$XDG_RUNTIME_DIR`, proxied by `tailscale serve --bg unix:<path>` and, only when `allow_funnel = true`, published by the owner with `tailscale funnel --bg unix:<path>` on port 443 (same `*.ts.net` name and certificate); no network socket at all in `soos-remote` (`RestrictAddressFamilies=AF_UNIX`, invariant RMC-S2/S5). |
+| Push sender (opt-in) | `soos-push-sender` (crates `push-sender`, `push-protocol`): the only network-capable component of the companion, a separate sandboxed user unit (`AF_UNIX AF_INET AF_INET6`, `$HOME` and `/run` hidden) reached over a `0600` Unix socket; it holds no key and makes one outbound HTTPS `POST` per request to `web.push.apple.com`, `fcm.googleapis.com` or `updates.push.services.mozilla.com`, after refusing any non-public resolved address (ADR 2026-10-06 "Web Push Notifications for Failed-Password Alerts Through a Separate Sender Unit", matrix RMC60–RMC74, walkthrough 189). |
+| Request classes | Exactly one allowed `Tailscale-User-Login` and no Funnel marker ⇒ tailnet caller; exactly one `Tailscale-Funnel-Request: ?1` and no identity, with `allow_funnel = true` ⇒ Funnel caller (effective host must equal `rp_id`, else `421`); both, neither, repeated or another value ⇒ `403`. Never derived from `Host`, `X-Forwarded-Host` or `X-Forwarded-For`; `tailscaled` deletes client copies of both headers (verified in the 1.102.4 source). |
+| Passkeys | In-house WebAuthn (pure Rust: RustCrypto `p256` ECDSA, `ciborium`, `sha2`, `getrandom`, `base64ct`, `subtle`; no OpenSSL, no `webauthn-rs`): RP ID `rp_id` (full node host), origin exactly `https://<rp_id>`, ES256 only, attestation `none` only, UV required on every ceremony, discoverable credentials, `userHandle` required, `signCount` `0/0` accepted. Challenges 32 random bytes, single use, purpose/class/binding scoped, 120 s. Store `remote-passkeys.json` (`0600`, owner-checked, `O_NOFOLLOW`, ≤ 16 KiB, ≤ 4 passkeys, `flock`, atomic rename). Registration only from the tailnet with an allowed identity **and** a local one-time code (`soos-remote enroll-code`: 50 bits, 5 min, single use, 3 attempts). |
+| Funnel access | Without a web session a Funnel caller reaches only the page, its assets, `GET /api/auth/state`, the login ceremony and logout; status, events, lock and unlock ⇒ `403 login_required`; registration ⇒ `403`. A passkey login sets `__Host-soos_session` (`Secure; HttpOnly; SameSite=Strict`), stored only as SHA-256 in memory, ≤ 4 sessions, 15 min idle, 8 h absolute, revoked with its passkey. The tailnet path keeps one-tap status and lock. |
+| Identity (tailnet class) | Exactly one `Tailscale-User-Login` header in the non-empty `allowed_logins` allowlist, else `403`; trusted only because `tailscaled` strips client copies and only `tailscaled` and the owner can open the socket. The **effective host** (`X-Forwarded-Host` as set by `tailscale serve`, otherwise `Host`; `Host` is not inspected when `X-Forwarded-Host` is present) must be an allowed `*.ts.net` name, and a proxied request must carry exactly one `X-Forwarded-Proto: https` (`421` otherwise; D5a′, verified with Tailscale 1.102.4 on 2026-10-06); `POST /api/lock` needs `X-Soos-Action: lock` plus same-origin `Sec-Fetch-Site`/`Origin` (compared with the effective host). |
+| Status | logind `LockedHint` / `IdleHint` / `IdleSinceHint` / `Active` of the owner's local seat `user` session (`Remote == false`, non-empty seat; active first, then the shortest id, then the greatest same-length id), read with fresh `Properties.GetAll` calls over the pinned system bus (same rules as the presence worker: `zbus::connection::Builder::address(SYSTEM_BUS_ADDRESS)`, no proxy, no cache, no signal stream, bounded calls). Server-Sent Events; the poller runs only while a stream is open; a logind failure is `unavailable`, never `unlocked`; readings carry a monotonic `seq` reserved when the read starts. |
+| Lock | `Manager.LockSession(id)` on a fresh snapshot, one per 2 s; success is confirmed through `LockedHint`, not assumed. |
+| Unlock (opt-in) | `allow_unlock = true` in `remote.toml` (default `false`, else `403 unlock_disabled` without a logind call); `POST /api/unlock` with `X-Soos-Action: unlock` and the lock's CSRF rules **and a fresh `unlock`-purpose passkey assertion with user verification on every path** (`403 passkey_required` / `passkey_rejected` / `passkeys_not_configured` otherwise; a Funnel unlock also needs a web session); `Manager.UnlockSession(id)` on a fresh snapshot of the same selected session, one per 2 s (independent of the lock), 2 s flow bound, one `info` audit line without identity. No automatic re-lock (owner decision D-F, accepted risk in the ADR). The crate names `UnlockSession` exactly once and never `Unlock`, `SetLockedHint` or a session-ending method (RMC-S3 as amended). |
+| Bounds | 16 connections, 4 streams, 8 KiB head, 32 headers, 256-byte path, 5 s head deadline, 2 s write deadline, 1.5 s snapshot, 2 s lock flow, 2 s unlock flow, 15 s keep-alive, 30 min stream; request bodies only on the four passkey body routes, ≤ 8 KiB (`Content-Length` or strict chunked, ≤ 64 chunks), 5 s body deadline; Funnel ≤ 8 of 16 connections (anonymous ≤ 4, anonymous body reads ≤ 2, 1 per client hint), Funnel streams ≤ 2 of 4, `503 busy` otherwise; ≤ 4 pending challenges per authenticated pool, anonymous login pool ≤ 16 (≤ 2 per hint, oldest evicted); limiters 10 options / 60 s and 5 failures / 5 min per limiter key, ≤ 64 client-hint buckets; store lock wait ≤ 500 ms (`crates/remote/src/lib.rs`). |
+| Page design | The phone page follows the project-wide soos brand (ADR 2026-10-06 "soos Brand Direction Applied to the `soos-remote` Web App", `Docs/REMOTE_COMPANION.md` §2e, matrix RMC76–RMC88, walkthrough 190): CSS custom properties mirror the `crates/gui/src/theme.rs` constants by name and value, light by default with a dark variant under `prefers-color-scheme`, WCAG AA text contrast, system fonts only. Presentation only: the CSP, `app.js`, `sw.js`, the routes, the seven embedded assets and every element id and label are unchanged. |
+| Privacy | No identity, header value, `Host`, path, session id, body, challenge, session token or its hash, cookie, credential id, public key, user handle or enrollment code is ever logged, echoed or shown through `Debug` (RC-5, D-H); the status body has exactly five fields and no identity. |
+
+Companion invariants (matrix rows RMC*): RC-1 never root, never a network socket, never an
+unlock unless `allow_unlock = true` and a fresh UV passkey assertion; RC-2 every request needs an allowlisted identity or, with `allow_funnel = true`, the Funnel marker (and a passkey web session beyond the public login surface), and an empty allowlist refuses to start;
+RC-3 a logind failure is never `unlocked` and no stale `unlocked` is replayed to a new stream;
+RC-4 every read, write, connection count and stream lifetime is bounded; RC-5 no identity or
+request data in logs or bodies. Out of scope, each needing its own ADR: an automatic re-lock,
+lock/unlock-state push notifications, live camera, any public exposure other than Tailscale
+Funnel on port 443. Opt-in Web Push of the failed-password alerts keeps RC-1 for `soos-remote`
+(every key and all cryptography stay there; the outbound request is made by the sandboxed,
+key-less `soos-push-sender` unit) and never carries a typed password.
+Matrix rows RMC1–RMC44 and walkthroughs 185, 186 and 187. Verified by the owner on 2026-10-06:
+the Serve forwarding check (RMC20: `tailscale serve unix:` sends `Host: localhost`, the original
+name in `X-Forwarded-Host` and `X-Forwarded-Proto: https`); the iPhone web app and *Lock now*
+(RMC21, Shortcuts steps still pending); the Funnel reachability, passkey registration, Face ID
+login and Face ID unlock on the owner's iPhone (RMC25, RMC40, RMC42–RMC44).
 
 ---
 

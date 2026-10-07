@@ -24,6 +24,9 @@ ADR entry in `AI/DECISIONS.md`. Re-check every value below with the listed `grep
 | `crates/enrollment-cli` | `soos-enrollment-cli` (`soos-enroll`) | lib + bin | `#![forbid(unsafe_code)]` |
 | `crates/admin-cli` | `soos-admin-cli` (`soos-admin`) | lib + bin | `#![forbid(unsafe_code)]` |
 | `crates/gui` | `soos-gui` | lib + bin (eframe/glow) | `#![forbid(unsafe_code)]` |
+| `crates/remote` | `soos-remote` | lib + bin (current-thread Tokio, user-level, Unix socket only, zbus, in-house WebAuthn on RustCrypto `p256`; optional Tailscale Funnel; leaf crate, GitHub #339) | `#![forbid(unsafe_code)]` |
+| `crates/push-protocol` | `soos-push-protocol` | lib (pure Web Push wire contract shared by `soos-remote` and the sender: endpoint allowlist, public-address predicate, bounded frames, status classification; no I/O, no network crate) | `#![forbid(unsafe_code)]` |
+| `crates/push-sender` | `soos-push-sender` | lib + bin (optional sandboxed user unit, the only network-capable part of the companion: one outbound HTTPS Web Push request per framed Unix-socket request, `ureq` + rustls/ring, holds no key; ADR 2026-10-06) | `#![forbid(unsafe_code)]` |
 | `crates/pam` | `soos-pam` → `libpam_soos.so` | cdylib + rlib | adapter: `unsafe` allowed, `// SAFETY:` mandatory |
 | `crates/camera-v4l` | `soos-camera-v4l` | lib, `mock-camera` feature | adapter: `unsafe` allowed, `// SAFETY:` mandatory |
 | `crates/daemon` | `soos-daemon` | lib + bin (Tokio) | `main.rs` forbids; `lib.rs` only denies undocumented unsafe (`mlock.rs`) |
@@ -31,7 +34,7 @@ ADR entry in `AI/DECISIONS.md`. Re-check every value below with the listed `grep
 | `tests/fixtures` | `soos-test-fixtures` | dev-only fixture lib (`[lib] path = "mod.rs"`), never a normal dependency [129] | — |
 
 - The authoritative forbid list is `test_business_crates_forbid_unsafe_code` in
-  `tests/invariants/src/lib.rs` (9 crates). `AGENTS.md` lists only 3 — that is a minimum, not the full set.
+  `tests/invariants/src/lib.rs` (12 crates, `remote` included since GitHub #339, `push-protocol` and `push-sender` since the Web Push ADR of 2026-10-06). `AGENTS.md` lists only 3 — that is a minimum, not the full set.
 - Workspace-wide lints live in root `Cargo.toml` (`[workspace.lints]`); every crate declares
   `[lints] workspace = true` and `publish.workspace = true` (required by `deny.toml` private-crate exemption).
 - `cargo -p` takes the **package** name (`-p soos-pam`, never `-p pam`) [11].
@@ -66,6 +69,8 @@ ADR entry in `AI/DECISIONS.md`. Re-check every value below with the listed `grep
 | admin-cli `DEFAULT_TIMEOUT_MS` | `crates/admin-cli/src/args.rs` | 250 ms |
 | Match / PAD thresholds | `crates/vision/src/pipeline.rs`, policy | 0.50 / 0.85 (match default 0.50 since the SFace switch, GitHub #278 [162]; floor `MIN_MATCH_THRESHOLD` 0.40) |
 | `DEFAULT_MINIFASNET_LIVE_CLASS_INDEX` | `crates/inference-ort/src/pad.rs` | 1 |
+| `soos-remote` bounds | `crates/remote/src/lib.rs` | `MAX_CONNECTIONS` 16, `MAX_SSE_STREAMS` 4, `MAX_REQUEST_HEAD_BYTES` 8192, `MAX_HEADERS` 32, `MAX_PATH_LEN` 256, `REQUEST_HEAD_TIMEOUT_MS` 5000, `RESPONSE_WRITE_TIMEOUT_MS` 2000, `SSE_KEEPALIVE_MS` 15 000, `MAX_SSE_STREAM_MS` 1 800 000, `MIN_LOCK_INTERVAL_MS` 2000, `SNAPSHOT_DEADLINE_MS` 1500, `LOCK_FLOW_DEADLINE_MS` 2000, `MIN_UNLOCK_INTERVAL_MS` 2000 / `UNLOCK_FLOW_DEADLINE_MS` 2000 (opt-in `allow_unlock`, ADR 2026-10-06), `DEFAULT_POLL_INTERVAL_MS` 1000 (250..=10 000), `MAX_ALLOWED_LOGINS` 8, `MAX_ALLOWED_HOSTS` 4, `EXIT_CONFIG` 78 / `EXIT_RUNTIME` 1 (GitHub #339; independent of the daemon presence constants of the same names) |
+| `soos-remote` Funnel and passkey bounds | `crates/remote/src/lib.rs` | ADR 2026-10-06 "Tailscale Funnel Access and In-House Passkey Authentication for `soos-remote`" (walkthrough 187): `MAX_AUTH_BODY_BYTES` 8192, `BODY_READ_TIMEOUT_MS` 5000, `MAX_BODY_CHUNKS` 64, `MAX_CHUNK_SIZE_DIGITS` 8; capacity `MAX_FUNNEL_CONNECTIONS` 8 (of 16), `MAX_ANONYMOUS_FUNNEL_CONNECTIONS` 4, `MAX_ANONYMOUS_BODY_READS` 2 / `_PER_HINT` 1, `MAX_FUNNEL_SSE_STREAMS` 2, `MAX_CLIENT_HINTS` 64, `FUNNEL_REFUSAL_LINGER_MS` 100; challenges `CHALLENGE_BYTES` 32, `CHALLENGE_TTL_MS` = `WEBAUTHN_TIMEOUT_MS` 120 000, `MAX_PENDING_CHALLENGES` 4 per authenticated pool, `MAX_PENDING_ANONYMOUS_LOGIN_CHALLENGES` 16 / `MAX_LOGIN_CHALLENGES_PER_HINT` 2; WebAuthn `COSE_ALG_ES256` -7, `ASSERTION_AUTH_DATA_LEN` 37, `MAX_SIGNATURE_BYTES` 72, `MAX_CREDENTIAL_ID_BYTES` 1023, `MAX_CLIENT_DATA_JSON_BYTES` 1024, `MAX_ATTESTATION_OBJECT_BYTES` 2048, `USER_HANDLE_BYTES` 16; store `MAX_PASSKEYS` 4, `MAX_CREDENTIAL_STORE_BYTES` 16 384, `CREDENTIALS_FILE_NAME` `remote-passkeys.json`, `STORE_LOCK_TIMEOUT_MS` 500; web sessions `MAX_WEB_SESSIONS` 4, `WEB_SESSION_IDLE_MS` 900 000, `WEB_SESSION_ABSOLUTE_MS` 28 800 000, `SESSION_TOKEN_BYTES` 32, cookie `__Host-soos_session` (`Path=/; Secure; HttpOnly; SameSite=Strict`); limiters `MAX_OPTIONS_PER_WINDOW` 10 / `OPTIONS_WINDOW_MS` 60 000, `MAX_AUTH_FAILURES` 5 / `AUTH_FAILURE_WINDOW_MS` 300 000; enrollment `ENROLL_CODE_LEN` 10 (Crockford base32, 50 bits), `ENROLL_CODE_TTL_S` 300, `MAX_ENROLL_CODE_ATTEMPTS` 3. Config keys `rp_id`, `allow_funnel` (default `false`, requires `rp_id`), `credentials_path`; every unlock needs a fresh UV passkey assertion on every path |
 
 The fixed "200 to 250 ms" PAM deadline wording was removed from the normative documents (ADR 2026-09-30
 "PAM Deadline Derived From Clamped `timeout_ms`", enforced by `tests/invariants/src/pam_deadline_contract.rs`).

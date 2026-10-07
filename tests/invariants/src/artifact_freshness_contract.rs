@@ -9,6 +9,9 @@
 //! - The candid fingerprint (`scripts/candid_subagent.sh`) excludes both review-report
 //!   singletons, `AI/candid_review_report.md` and `AI/plan_evaluator_report.md`, so rewriting
 //!   either report never changes the reviewed diff.
+//! - The candid fingerprint is portable for binary files: it does not depend on the zlib build
+//!   or `core.compression` (a `git diff --binary` patch does), yet still changes with the
+//!   binary content (GitHub #339, CI fingerprint mismatch on `apple-touch-icon.png`).
 
 #![allow(
     clippy::unwrap_used,
@@ -263,7 +266,26 @@ impl ScratchRepo {
     }
 
     fn fingerprint(&self) -> String {
-        let (ok, text) = self.candid(&["--fingerprint"]);
+        self.fingerprint_with_compression(None)
+    }
+
+    /// The fingerprint with `core.compression` forced through `GIT_CONFIG_*` (a stand-in for
+    /// a different zlib build: zlib-ng on Arch, zlib on the Ubuntu CI runners).
+    fn fingerprint_with_compression(&self, level: Option<&str>) -> String {
+        let mut cmd = self.command("bash");
+        cmd.arg("scripts/candid_subagent.sh").arg("--fingerprint");
+        if let Some(level) = level {
+            cmd.env("GIT_CONFIG_COUNT", "1")
+                .env("GIT_CONFIG_KEY_0", "core.compression")
+                .env("GIT_CONFIG_VALUE_0", level);
+        }
+        let out = cmd.output().expect("run candid_subagent.sh");
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let ok = out.status.success();
         assert!(ok, "--fingerprint failed:\n{text}");
         text.lines()
             .rev()
@@ -361,4 +383,35 @@ fn test_candid_report_exclusions_are_documented() {
             "{rel} must state that {PLAN_REPORT} is excluded from the fingerprint"
         );
     }
+}
+
+/// GitHub #339: a binary file in the diff must give the same fingerprint whatever the zlib
+/// build or compression level (`git diff --binary` deflates the blob, so zlib-ng on the
+/// owner's Arch host and zlib on the CI runner produced different fingerprints for the same
+/// commit), and the fingerprint must still change when the binary content changes.
+#[test]
+fn test_candid_fingerprint_is_portable_for_binary_files() {
+    let repo = ScratchRepo::new("binary");
+    let icon = repo.dir.join("assets").join("icon.png");
+    fs::create_dir_all(icon.parent().expect("parent")).expect("create assets");
+    let mut bytes = b"\x89PNG\r\n\x1a\n".to_vec();
+    bytes.extend((0u16..2048).map(|i| (i.wrapping_mul(31) % 251) as u8));
+    fs::write(&icon, &bytes).expect("write binary");
+
+    let default = repo.fingerprint();
+    for level in ["0", "1", "9"] {
+        assert_eq!(
+            repo.fingerprint_with_compression(Some(level)),
+            default,
+            "core.compression={level} changed the fingerprint of a binary diff"
+        );
+    }
+
+    bytes[100] ^= 0xff;
+    fs::write(&icon, &bytes).expect("rewrite binary");
+    assert_ne!(
+        repo.fingerprint(),
+        default,
+        "changing the binary content must change the fingerprint"
+    );
 }

@@ -274,6 +274,35 @@ mod install_gdm_followups_contract;
 #[cfg(all(test, unix))]
 mod gdm_hardening_flaky_tests_contract;
 
+/// Remote companion `soos-remote`: leaf crate, Unix socket only, no unlock literal, bus
+/// rules of the presence worker, user unit and installer hygiene, web assets, documentation
+/// (GitHub #339; spec §8 RMC-S1–RMC-S11 plus R3-2; rows RMC*).
+#[cfg(all(test, unix))]
+mod remote_companion_contract;
+
+/// Tailscale Funnel access and in-house passkey authentication of `soos-remote` (ADR
+/// 2026-10-06; spec AI/architect_spec_remote_passkey_funnel.md §10.8 RMC-S13–RMC-S21;
+/// row RMC39).
+#[cfg(all(test, unix))]
+mod remote_passkey_contract;
+
+/// Failed-password alerts of `soos-remote` from the system journal (ADR 2026-10-06; spec
+/// AI/architect_spec_remote_auth_alerts.md §12.8 RMC-S24–RMC-S31; rows RMC45–RMC58).
+#[cfg(all(test, unix))]
+mod remote_alerts_contract;
+
+/// Web Push notifications of `soos-remote` through the separate `soos-push-sender` unit (ADR
+/// 2026-10-06; spec AI/architect_spec_remote_web_push.md §12.9 RMC-S32–RMC-S42; rows
+/// RMC60–RMC74).
+#[cfg(all(test, unix))]
+mod remote_push_contract;
+
+/// soos brand applied to the `soos-remote` web app: tokens equal to the GUI theme, palette-only
+/// colors, light and dark roles, WCAG AA contrast, kept ids and labels, wordmark, icons (ADR
+/// 2026-10-06; spec AI/architect_spec_remote_brand.md §9 tests 63–74; rows RMC76–RMC87).
+#[cfg(all(test, unix))]
+mod remote_brand_contract;
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,
@@ -311,6 +340,9 @@ mod tests {
             "enrollment-cli",
             "admin-cli",
             "gui",
+            "remote",
+            "push-protocol",
+            "push-sender",
         ];
 
         for crate_name in business_crates {

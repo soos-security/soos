@@ -1,0 +1,50 @@
+[package]
+name = "soos-remote"
+description = "User-level remote companion of soos: real-time lock status and remote lock over a Unix socket behind Tailscale Serve"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "soos-remote"
+path = "src/main.rs"
+
+[lib]
+name = "soos_remote"
+path = "src/lib.rs"
+
+[dependencies]
+# `process`: the `journalctl` child of the failed-password alerts (ADR 2026-10-06).
+tokio = { workspace = true, features = ["process"] }
+nix = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+clap = { workspace = true }
+httparse = { workspace = true }
+zbus = { workspace = true }
+zeroize = { workspace = true }
+# In-house WebAuthn passkeys (ADR 2026-10-06, spec §3.4): pure-Rust RustCrypto only.
+p256 = { workspace = true }
+sha2 = { workspace = true }
+ciborium = { workspace = true }
+getrandom = { workspace = true }
+base64ct = { workspace = true }
+subtle = { workspace = true }
+# Web Push (ADR 2026-10-06, spec §4): RFC 8291 key schedule and aes128gcm, VAPID frames.
+hmac = { workspace = true }
+aes-gcm = { workspace = true }
+soos-push-protocol = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+tempfile = { workspace = true }
+proptest = "1"
+
+[lints]
+workspace = true

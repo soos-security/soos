@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="soos">
+  <meta name="theme-color" content="#0047BB">
+  <meta name="color-scheme" content="light dark">
+  <title>soos remote</title>
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="apple-touch-icon.png">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="band">
+    <div class="band-row">
+      <h1 class="brand">
+        <svg class="wordmark" viewBox="0 0 514 64" aria-hidden="true" focusable="false">
+          <path d="M128.5 32H112.438V16H58.3913C54.7967 16.0001 53.9151 20.9841 57.2932 22.2078L128.5 48V56C128.5 60.4183 124.904 64 120.469 64H0V32H16.0625V48H70.1087C73.7034 48 74.585 43.0159 71.2068 41.7922L0 16V8C0 3.58172 3.59571 0 8.03125 0H128.5V32Z"/>
+          <path d="M514 32H497.938V16H443.891C440.297 16.0001 439.415 20.9841 442.793 22.2078L514 48V56C514 60.4183 510.404 64 505.969 64H385.5V32H401.562V48H455.609C459.203 48 460.085 43.0159 456.707 41.7922L385.5 16V8C385.5 3.58172 389.096 0 393.531 0H514V32Z"/>
+          <path d="M257 48C257 56.8366 249.809 64 240.938 64H144.562C135.691 64 128.5 56.8366 128.5 48H257ZM240.938 0C249.809 0 257 7.16344 257 16V32H240.938V24C240.938 19.5817 237.342 16 232.906 16H152.594C148.158 16 144.562 19.5817 144.562 24V32H128.5V16C128.5 7.16344 135.691 0 144.562 0H240.938Z"/>
+          <path d="M240.938 48H257C257 39.1634 249.809 32 240.938 32V48Z"/>
+          <path d="M257 32H273.062V40C273.062 44.4183 276.658 48 281.094 48H361.406C365.842 48 369.438 44.4183 369.438 40V32H385.5V48C385.5 56.8366 378.309 64 369.438 64H273.062C264.191 64 257 56.8366 257 48V32ZM369.438 0C378.309 0 385.5 7.16344 385.5 16H363.013V16.1594C362.494 16.0545 361.956 16 361.406 16H257C257 7.16344 264.191 0 273.062 0H369.438Z"/>
+          <path d="M273.062 16H257C257 24.8366 264.191 32 273.062 32V16Z"/>
+        </svg>
+        <span class="visually-hidden">soos remote</span>
+      </h1>
+      <span class="band-pill">Remote</span>
+    </div>
+  </header>
+  <main class="page" aria-live="polite">
+    <section id="login" class="card login" hidden>
+      <div class="login-tile" aria-hidden="true">
+        <svg class="star" viewBox="0 0 508 508" focusable="false">
+          <path d="M254 0C254 140.28 367.72 254 508 254L254 254Z"/>
+          <path d="M0 254C140.28 254 254 367.72 254 508V254H0Z"/>
+        </svg>
+      </div>
+      <h2>Sign in</h2>
+      <p class="detail">Sign in with your passkey to reach this PC over the internet.</p>
+      <button id="login-button" type="button">Sign in with Face ID</button>
+      <p id="login-feedback" class="feedback" role="status">&nbsp;</p>
+    </section>
+    <section id="status-card" class="status">
+      <div class="stat-tile">
+        <div class="stat-strip">
+          <span class="stat-caption">PC status</span>
+          <span class="stat-dot" aria-hidden="true"></span>
+        </div>
+        <p id="state" class="state state-unknown" data-state="unknown">Connecting</p>
+        <p id="activity" class="detail">&nbsp;</p>
+        <p id="updated" class="detail">&nbsp;</p>
+        <svg class="stat-star star" viewBox="0 0 508 508" aria-hidden="true" focusable="false">
+          <path d="M254 0C254 140.28 367.72 254 508 254L254 254Z"/>
+          <path d="M0 254C140.28 254 254 367.72 254 508V254H0Z"/>
+        </svg>
+      </div>
+      <div class="card actions">
+        <button id="lock" type="button" disabled>Lock now</button>
+        <button id="unlock" type="button" class="secondary danger" disabled>Unlock now</button>
+        <p id="feedback" class="feedback" role="status">&nbsp;</p>
+        <button id="logout" type="button" class="secondary" hidden>Sign out</button>
+      </div>
+    </section>
+    <section id="alerts" class="card alerts" hidden aria-live="polite">
+      <h2>Failed passwords on the PC</h2>
+      <p id="alerts-summary" class="alerts-summary banner">&nbsp;</p>
+      <p id="alerts-coverage" class="banner banner-warn" hidden>&nbsp;</p>
+      <ul id="alerts-history" class="alerts-history table"></ul>
+      <button id="alerts-ack" type="button" class="secondary" hidden>Acknowledge</button>
+      <p id="alerts-feedback" class="feedback" role="status">&nbsp;</p>
+    </section>
+    <section id="push" class="card push" hidden aria-live="polite">
+      <h2>Notifications</h2>
+      <p id="push-state" class="detail">&nbsp;</p>
+      <ul id="push-devices" class="push-devices table"></ul>
+      <p id="push-hint" class="detail hint" hidden>Not yours? Run <code>soos-remote push list</code> and <code>push remove N</code> on the PC, and, if a passkey is not yours either, <code>soos-remote passkeys remove N</code>.</p>
+      <button id="push-enable" type="button" hidden>Enable notifications</button>
+      <button id="push-test" type="button" class="secondary" hidden>Send test notification</button>
+      <button id="push-disable" type="button" class="secondary" hidden>Disable notifications</button>
+      <p id="push-feedback" class="feedback" role="status">&nbsp;</p>
+    </section>
+    <section id="enroll" class="card enroll" hidden>
+      <h2>Add a passkey</h2>
+      <p class="detail">Run <code>soos-remote enroll-code</code> on the PC, then type the code.</p>
+      <input id="enroll-code" type="text" inputmode="text" autocomplete="one-time-code" autocapitalize="characters" spellcheck="false" maxlength="11" placeholder="XXXXX-XXXXX" aria-label="Enrollment code">
+      <button id="enroll-button" type="button">Add this device's passkey</button>
+      <p id="enroll-feedback" class="feedback" role="status">&nbsp;</p>
+    </section>
+  </main>
+  <footer>
+    <a href="https://github.com/Mysticaly622/soos">source</a>
+  </footer>
+  <script src="app.js"></script>
+</body>
+</html>
