@@ -18,7 +18,7 @@ The owner wants to look at the PC's camera from the iPhone home-screen app of `s
 of the PC, or that nobody is. The camera is owned exclusively by the root `soos-daemon` (architectural invariant), so
 the companion must never open `/dev/video*`. The view reuses the daemon preview channel that `soos-gui` already uses
 (`RequestKind::PreviewFrame` over `/run/soos/daemon.sock`), converts each preview frame to a baseline JPEG in pure
-Rust and streams it to the page as `multipart/x-mixed-replace`. Face unlock, presence auto-unlock and the view share
+Rust and streams it to the page as `soosframe` multipart parts served as `application/octet-stream` (section 10). Face unlock, presence auto-unlock and the view share
 one capture.
 
 Goals: off by default on both sides (double opt-in), a fresh Face ID per view, one bounded view at a time, no
@@ -212,3 +212,15 @@ finding remains. Open items:
   back to the password (close `soos-gui` or raise `max_connections_per_uid` to 3).
 - Out of scope (each needs its own ADR): recording, snapshots, audio, an on-screen indicator, any other live-camera
   transport.
+
+## 10. Hardware Finding: iOS and `multipart/x-mixed-replace` (owner-approved amendment)
+
+The owner's first iPhone check (RLC16, 2026-10-07, over Funnel with `camera_view_funnel = true`) started a view, the
+daemon served the first preview frame, and `soos-remote` logged `live view closed: client gone` about one second
+later while the page showed "Load failed". The iOS network stack handles a response labelled
+`multipart/x-mixed-replace` itself (it splits it into separate responses), so the page's `fetch` + `ReadableStream`
+reader fails. The owner approved changing the head's `Content-Type` to `application/octet-stream`
+(`CAMERA_STREAM_CONTENT_TYPE`); the body keeps the exact `soosframe` framing that the page already parses itself.
+Test 27 (`test_rlc_stream_is_multipart_jpeg`) now expects `application/octet-stream`; every other assertion is
+unchanged. The ADR transport item, `Docs/REMOTE_COMPANION.md` §2f/§6, `AI/ARCHITECTURE.md` §13 and matrix row RLC10
+were updated accordingly.

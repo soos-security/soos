@@ -10,8 +10,8 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use crate::{
-    BODY_READ_TIMEOUT_MS, CAMERA_STREAM_BOUNDARY, MAX_AUTH_BODY_BYTES, MAX_BODY_CHUNKS,
-    MAX_CHUNK_SIZE_DIGITS, MAX_HEADERS, MAX_PATH_LEN, MAX_REQUEST_HEAD_BYTES,
+    BODY_READ_TIMEOUT_MS, CAMERA_STREAM_BOUNDARY, CAMERA_STREAM_CONTENT_TYPE, MAX_AUTH_BODY_BYTES,
+    MAX_BODY_CHUNKS, MAX_CHUNK_SIZE_DIGITS, MAX_HEADERS, MAX_PATH_LEN, MAX_REQUEST_HEAD_BYTES,
     RESPONSE_WRITE_TIMEOUT_MS,
 };
 
@@ -305,13 +305,15 @@ pub fn encode_sse_head() -> Vec<u8> {
         .into_bytes()
 }
 
-/// Head of a live camera view (ADR 2026-10-07): `200`, `multipart/x-mixed-replace` with the
-/// `soosframe` boundary and the unchanged mandatory headers; no `Content-Length`, no
-/// `Transfer-Encoding` (a close-delimited body).
+/// Head of a live camera view (ADR 2026-10-07, transport amended the same day): `200`,
+/// [`CAMERA_STREAM_CONTENT_TYPE`] and the unchanged mandatory headers; no `Content-Length`,
+/// no `Transfer-Encoding` (a close-delimited body). The body keeps the `soosframe` multipart
+/// framing, but it is not labelled `multipart/x-mixed-replace`: the iOS network stack splits
+/// such a response into separate responses and the page's `fetch` fails ("Load failed").
 #[must_use]
 pub fn encode_camera_stream_head() -> Vec<u8> {
     format!(
-        "HTTP/1.1 200 OK\r\nContent-Type: multipart/x-mixed-replace; boundary={CAMERA_STREAM_BOUNDARY}\r\n{MANDATORY_HEADERS}\r\n"
+        "HTTP/1.1 200 OK\r\nContent-Type: {CAMERA_STREAM_CONTENT_TYPE}\r\n{MANDATORY_HEADERS}\r\n"
     )
     .into_bytes()
 }

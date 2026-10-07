@@ -374,7 +374,8 @@ Through the Daemon Preview Channel", `Docs/REMOTE_COMPANION.md` §2f).** The pho
 PC camera live without a second camera owner: `soos-remote` asks `soos-daemon` for its latest
 frame over `/run/soos/daemon.sock` with `RequestKind::PreviewFrame` (one daemon connection at
 most), converts Grey/YUYV/RGB24 frames (no image decoder) and encodes them to baseline JPEG in
-pure Rust (`jpeg-encoder`), and streams them as `multipart/x-mixed-replace` that the page reads
+pure Rust (`jpeg-encoder`), and streams them as `soosframe` multipart parts (served as
+`application/octet-stream`, see the ADR transport amendment) that the page reads
 with `fetch` + `ReadableStream` into a canvas (CSP unchanged). Double opt-in, fail closed: the
 daemon needs `[preview] enabled`, the UID in `allowed_uids`, `[preview] remote_view = true` (the
 companion is recognised by its `soos-remote.service` cgroup, an administrative opt-in, not a

@@ -557,6 +557,9 @@ pub const CAMERA_DAEMON_CLOSE_WAIT_MS: u64 = 200;
 pub const CAMERA_DAEMON_IDLE_RETRIES: u32 = 1;
 /// Multipart boundary of the stream.
 pub const CAMERA_STREAM_BOUNDARY: &str = "soosframe";
+/// `Content-Type` of the stream head: an opaque byte stream that the page parses itself, so
+/// no browser network stack applies its own `multipart/x-mixed-replace` handling.
+pub const CAMERA_STREAM_CONTENT_TYPE: &str = "application/octet-stream";
 /// Web Push `Topic` of the camera notification (ASCII letters and digits only).
 pub const PUSH_CAMERA_TOPIC: &str = "sooscamera";
 /// `X-Soos-Action` of `POST /api/auth/camera/options`.

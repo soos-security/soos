@@ -260,3 +260,11 @@ Round-2 power-check limits: against the stubs the camera routes return `404`, so
 run yet. They are first exercised by the implementation; the 10× flakiness run of §6 applies to them. Note that the
 already-applied migrations (M1 in invariants, M2 in `common/harness.rs`, M6 in `preview_authorization_tests.rs`) are red
 or do not compile until the API and manifest exist, as expected.
+
+## Owner-approved amendment M12 (2026-10-07): stream `Content-Type`
+
+Test 27 `test_rlc_stream_is_multipart_jpeg` expected `multipart/x-mixed-replace; boundary=soosframe`. On the owner's
+iPhone the iOS network stack split such a response and the page's `fetch` failed ("Load failed"). With the owner's
+explicit approval ("corrige ca", 2026-10-07) the expected head `Content-Type` is now `application/octet-stream`; the
+part framing (`--soosframe`, `Content-Type: image/jpeg`, `Content-Length`), the mandatory headers, the CSP, the absence
+of `Content-Length`/`Transfer-Encoding` and every JPEG assertion are unchanged.

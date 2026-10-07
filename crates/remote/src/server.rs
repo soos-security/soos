@@ -42,7 +42,7 @@
 //! Preview Channel"): when `camera_view = true` and a preview source factory is wired, a fresh
 //! user-verified passkey assertion of purpose `CameraView` reserves the single view slot and
 //! returns a single-use stream token; `GET /api/camera/stream/<token>` answers its `200` head
-//! only once the first JPEG is ready and then streams `multipart/x-mixed-replace` parts until
+//! only once the first JPEG is ready and then streams `soosframe` multipart parts until
 //! an end condition. Tailnet only unless `camera_view_funnel = true`. Never recorded.
 
 use std::future::Future;

@@ -1398,7 +1398,7 @@ function openCameraStream(path) {
           });
       }
       const type = response.headers.get("Content-Type") || "";
-      if (type.indexOf("multipart/x-mixed-replace") !== 0 || !response.body) {
+      if (type.indexOf("application/octet-stream") !== 0 || !response.body) {
         throw new Error("The camera stream is malformed");
       }
       setText(c.feedback, " ");

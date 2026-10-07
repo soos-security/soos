@@ -538,12 +538,14 @@ when the connection closes, when a part cannot be written within 2 s, when the F
 session expires (checked every 5 s), when no new frame could be sent for 5 s, on a daemon
 refusal, on an unsupported frame format and when the service stops.
 
-**Transport.** The stream is `multipart/x-mixed-replace; boundary=soosframe`: one baseline JPEG
-part per frame, each with its `Content-Length` (at most 512 KiB), at most `camera_fps` parts
+**Transport.** The stream is served as `application/octet-stream` and carries
+`soosframe`-delimited multipart parts: one baseline JPEG part per frame, each with its `Content-Length` (at most 512 KiB), at most `camera_fps` parts
 per second, over the existing `tailscale serve` / `tailscale funnel` path. The page reads it
 with `fetch` and a `ReadableStream` (bounded to 1 MiB of buffered bytes) and draws each frame
 into a canvas; the Content Security Policy is unchanged (no `blob:` or object URL, no `<img>`
-stream). The `200` head is sent only once the first JPEG is ready (within 5 s); before that a
+stream). It is deliberately not labelled `multipart/x-mixed-replace`: the iOS network stack
+handles that type itself, splits the response and makes the page's `fetch` fail ("Load
+failed", seen on the owner's iPhone on 2026-10-07). The `200` head is sent only once the first JPEG is ready (within 5 s); before that a
 failure is a JSON error the page can explain (`camera_refused`, `camera_unavailable`,
 `camera_format_unsupported`). Only Grey, YUYV and RGB24 preview frames are converted;
 `soos-remote` contains no image decoder.
@@ -836,7 +838,7 @@ The service also refuses to start when its real or effective uid is 0.
 | `GET /api/camera` | tailnet, or Funnel with a session: `200 {enabled, reachable, state, cooldown_ms, max_view_s, fps, width}`; `state` is `disabled`, `idle`, `pending`, `starting`, `streaming` or `cooldown`; never a token or a frame property |
 | `POST /api/auth/camera/options` | `X-Soos-Action: camera-options`, `Origin` = `https://<rp_id>`: a `CameraView` challenge (`200 {challenge, rp_id, timeout_ms}`), `403 forbidden` / `camera_disabled` / `camera_tailnet_only` / `passkeys_not_configured`, `409 no_passkey`, `429 rate_limited` / `too_many_challenges`, `503 unavailable` / `store_unavailable` |
 | `POST /api/camera/start` | `X-Soos-Action: camera-view`, JSON assertion body (section 2f): `200 {"result":"view_ready","stream_path":"/api/camera/stream/<token>","token_ttl_ms":10000,…}`, `403 forbidden` / `camera_disabled` / `camera_tailnet_only` / `passkeys_not_configured` / `passkey_required` / `passkey_rejected`, `400 bad_request`, `413 body_too_large`, `409 view_in_progress`, `429 rate_limited` / `{"result":"camera_cooldown","retry_after_ms":N}`, `503 unavailable` / `store_unavailable` |
-| `GET /api/camera/stream/<token>` | `X-Soos-Action: camera-stream`: `200 multipart/x-mixed-replace; boundary=soosframe` (JPEG parts until the view ends), or before the head `403 forbidden` / `camera_disabled` / `camera_tailnet_only` / `view_token_rejected` / `camera_refused`, `503 camera_unavailable` / `camera_format_unsupported`; `HEAD` → `405` |
+| `GET /api/camera/stream/<token>` | `X-Soos-Action: camera-stream`: `200 application/octet-stream` (`soosframe` JPEG parts until the view ends), or before the head `403 forbidden` / `camera_disabled` / `camera_tailnet_only` / `view_token_rejected` / `camera_refused`, `503 camera_unavailable` / `camera_format_unsupported`; `HEAD` → `405` |
 | `POST /api/camera/stop` | no body; `X-Soos-Action: camera-stop`: `200 stopped` / `no_view`, `403 forbidden` / `camera_disabled` |
 | `HEAD` of a `GET` route | same headers, empty body |
 

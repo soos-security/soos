@@ -489,7 +489,8 @@ async fn test_rlc_funnel_is_tailnet_only_by_default() {
 // Test 27 — multipart JPEG transport
 // ---------------------------------------------------------------------------------------
 
-/// Test 27 (RLC10): `200 multipart/x-mixed-replace; boundary=soosframe` with the unchanged
+/// Test 27 (RLC10): `200 application/octet-stream` (owner-approved amendment 2026-10-07: iOS
+/// breaks `fetch` on `multipart/x-mixed-replace`) carrying `soosframe` parts, with the unchanged
 /// mandatory headers and no `Content-Length`; parts framed by `Content-Length`, each a
 /// baseline JPEG; the trailer on `MaxDuration`.
 #[tokio::test(start_paused = true)]
@@ -511,7 +512,7 @@ async fn test_rlc_stream_is_multipart_jpeg() {
     assert_eq!(head.status, 200);
     assert_eq!(
         head.header("content-type"),
-        Some("multipart/x-mixed-replace; boundary=soosframe")
+        Some("application/octet-stream")
     );
     head.assert_mandatory_headers();
     assert_eq!(head.header("content-security-policy"), Some(CSP));
