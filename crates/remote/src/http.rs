@@ -688,3 +688,10 @@ pub async fn read_body(
 pub fn encode_sse_alerts_event(json: &str) -> Vec<u8> {
     format!("event: alerts\ndata: {json}\n\n").into_bytes()
 }
+
+/// One battery event: `event: battery\ndata: <json>\n\n` (`json` carries no newline; ADR
+/// 2026-10-07 "Live Battery Level in `soos-remote`").
+#[must_use]
+pub fn encode_sse_battery_event(json: &str) -> Vec<u8> {
+    format!("event: battery\ndata: {json}\n\n").into_bytes()
+}

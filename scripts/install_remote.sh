@@ -126,6 +126,8 @@ allowed_logins = []
 # camera_width = 640
 # JPEG quality (50..=85).
 # camera_quality = 70
+# Battery level of the PC on the page (section 2g): level, charge state and mains only.
+# battery_status = true
 TEMPLATE
         chmod 0600 "${CONFIG_PATH}"
     else

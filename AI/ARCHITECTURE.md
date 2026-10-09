@@ -422,6 +422,18 @@ name in `X-Forwarded-Host` and `X-Forwarded-Proto: https`); the iPhone web app a
 (RMC21, Shortcuts steps still pending); the Funnel reachability, passkey registration, Face ID
 login and Face ID unlock on the owner's iPhone (RMC25, RMC40, RMC42–RMC44).
 
+Battery level (ADR 2026-10-07 "Live Battery Level in `soos-remote`", GitHub #346; on by default,
+`battery_status = false` turns it off): `soos-remote` reads `/sys/class/power_supply` itself,
+read-only and bounded (64 entries, 8 batteries, 32-byte regular files opened with
+`O_NOFOLLOW | O_NONBLOCK`, ten allowlisted attributes, no supply name, serial, model or
+manufacturer), on the blocking pool under 500 ms with one single-flight read in flight, and
+samples every 5 s only while a stream is open. The four-key `BatteryView` (`state`, `percent`,
+`charge`, `external_power`) is served by `GET /api/battery` and as a separate `event: battery`
+on the existing stream (only on change), with the visibility of `/api/status`; `StatusView`,
+`/api/status` and `event: status` are unchanged, and no daemon, D-Bus, UPower or dependency
+change is involved. The service runtime shutdown is bounded by `RUNTIME_SHUTDOWN_TIMEOUT_MS`
+(1 s). Matrix rows RBS1–RBS12.
+
 ---
 
 ## References

@@ -36,6 +36,10 @@
  * mode lives in memory for the page lifetime and is never stored. Every end
  * of a view leaves full screen. A new view may start right after the previous one ended
  * (owner request 2026-10-07), always after a fresh Face ID assertion.
+ *
+ * Battery level (ADR 2026-10-07 "Live Battery Level in soos-remote"): level, charge state
+ * and mains presence only, from event: battery on the status stream only, shown with
+ * textContent; hidden while the PC is unreachable or the stream is down.
  */
 "use strict";
 
@@ -160,6 +164,12 @@ const pushTestButton = document.getElementById("push-test");
 const pushDisableButton = document.getElementById("push-disable");
 const pushFeedback = document.getElementById("push-feedback");
 
+// The battery line, built at run time between the activity and the "Updated" lines.
+const batteryNode = document.createElement("p");
+batteryNode.className = "detail battery";
+batteryNode.hidden = true;
+updatedNode.parentNode.insertBefore(batteryNode, updatedNode);
+
 let source = null;
 let latest = null;
 let lastEventAt = 0;
@@ -171,6 +181,7 @@ let signedOut = false;
 let alertsView = null;
 let pushView = null;
 let pushRegistration = null;
+let batteryView = null;
 
 function setText(node, text) {
   node.textContent = text;
@@ -260,6 +271,7 @@ function getAssertion(options) {
 function showLogin(message) {
   signedOut = true;
   closeStream();
+  clearBattery();
   latest = null;
   loginSection.hidden = false;
   statusCard.hidden = true;
@@ -315,6 +327,57 @@ function render(view, reachable) {
   if (reachable && view.state === "unlocked" && unlockRequestedAt !== 0) {
     confirmUnlock();
   }
+  showBattery(reachable);
+}
+
+// --- battery level ------------------------------------------------------------------
+
+// The battery line of a view, or null to hide it (unknown states fail closed).
+function batteryText(view) {
+  if (view === null || typeof view !== "object" || typeof view.state !== "string") {
+    return null;
+  }
+  if (view.state === "unavailable") {
+    return "Battery: unknown";
+  }
+  if (view.state === "no_battery") {
+    return "No battery";
+  }
+  if (view.state !== "present") {
+    return null;
+  }
+  const p = view.percent;
+  const level = Number.isInteger(p) && p >= 0 && p <= 100 ? "Battery " + p + "%" : "Battery level unknown";
+  let suffix = "";
+  if (view.charge === "charging") {
+    suffix = ", charging";
+  } else if (view.charge === "discharging") {
+    suffix = ", on battery";
+  } else if (view.charge === "full") {
+    suffix = ", full";
+  } else if (view.charge === "not_charging") {
+    suffix = ", plugged in, not charging";
+  }
+  if (suffix === "" && view.external_power === true) {
+    suffix = ", plugged in";
+  }
+  return level + suffix;
+}
+
+function showBattery(reachable) {
+  const text = reachable && !signedOut ? batteryText(batteryView) : null;
+  batteryNode.hidden = text === null;
+  setText(batteryNode, text === null ? " " : text);
+}
+
+function renderBattery(view) {
+  batteryView = view;
+  showBattery(true);
+}
+
+function clearBattery() {
+  batteryView = null;
+  showBattery(false);
 }
 
 function renderUpdated() {
@@ -373,9 +436,18 @@ function openStream() {
       // A malformed event is ignored; the next one or the fetch below recovers.
     }
   });
+  source.addEventListener("battery", function (event) {
+    try {
+      renderBattery(JSON.parse(event.data));
+    } catch (_error) {
+      // A malformed event is ignored; the next battery frame recovers.
+    }
+  });
   source.onerror = function () {
     // EventSource reconnects on its own; one fetch decides between a transient blip, an
-    // expired web session and an unreachable PC.
+    // expired web session and an unreachable PC. The battery line stays hidden until the
+    // reopened stream sends its first battery frame.
+    clearBattery();
     fetchStatus(true);
   };
 }
@@ -385,6 +457,7 @@ function closeStream() {
     source.close();
     source = null;
   }
+  clearBattery();
 }
 
 function fetchStatus(markUnreachableOnFailure) {

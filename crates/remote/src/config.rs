@@ -87,6 +87,8 @@ pub struct RemoteConfig {
     /// Live camera view settings (ADR 2026-10-07 "Live Camera View in `soos-remote` Through
     /// the Daemon Preview Channel").
     pub camera: CameraConfig,
+    /// Battery level settings (ADR 2026-10-07 "Live Battery Level in `soos-remote`").
+    pub battery: BatteryConfig,
 }
 
 /// Output width of the live view.
@@ -126,6 +128,19 @@ impl Default for CameraConfig {
             width: CameraWidth::Full,
             quality: DEFAULT_CAMERA_QUALITY,
         }
+    }
+}
+
+/// Battery level settings; `Default` = on (ADR 2026-10-07 item (4)).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BatteryConfig {
+    /// `battery_status`; default `true`.
+    pub enabled: bool,
+}
+
+impl Default for BatteryConfig {
+    fn default() -> Self {
+        Self { enabled: true }
     }
 }
 
@@ -361,6 +376,7 @@ struct FileConfig {
     camera_fps: Option<u32>,
     camera_width: Option<u32>,
     camera_quality: Option<u8>,
+    battery_status: Option<bool>,
 }
 
 /// The six camera keys of the file.
@@ -744,6 +760,9 @@ pub fn parse_config(text: &str, runtime_dir: Option<&Path>) -> Result<RemoteConf
         alerts,
         push,
         camera,
+        battery: BatteryConfig {
+            enabled: file.battery_status.unwrap_or(true),
+        },
     })
 }
 

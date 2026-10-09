@@ -521,6 +521,7 @@ pub async fn start_camera(
         alerts: soos_remote::config::AlertsConfig::default(),
         push: push_config,
         camera: camera.clone(),
+        battery: soos_remote::config::BatteryConfig::default(),
     };
     let source = MockSource::unlocked();
     let clock = TestClock::new();

@@ -66,6 +66,8 @@ pub enum Route {
     /// `GET /api/camera/stream/<token>`; the token is never kept in the route (it is
     /// `Debug`-logged), the handler re-reads it from the path.
     CameraStream,
+    /// `GET|HEAD /api/battery` (ADR 2026-10-07 "Live Battery Level in `soos-remote`").
+    Battery,
     /// `404`.
     NotFound,
     /// `405` with an `Allow` header.
@@ -101,6 +103,8 @@ pub const CAMERA_STOP_PATH: &str = "/api/camera/stop";
 /// Prefix of `GET /api/camera/stream/<token>`.
 pub const CAMERA_STREAM_PREFIX: &str = "/api/camera/stream/";
 
+/// Path of `GET|HEAD /api/battery` (ADR 2026-10-07).
+pub const BATTERY_PATH: &str = "/api/battery";
 /// Path of the Web Push service worker.
 pub const SERVICE_WORKER_PATH: &str = "/sw.js";
 
@@ -174,6 +178,7 @@ pub fn route(method: Method, path: &str) -> Route {
         ALERTS_PATH => Some(Route::Alerts),
         PUSH_PATH => Some(Route::Push),
         CAMERA_PATH => Some(Route::Camera),
+        BATTERY_PATH => Some(Route::Battery),
         _ => None,
     };
     if let Some(found) = read_route {
