@@ -530,8 +530,10 @@ soos Brand Direction Applied to the `soos-remote` Web App" in `AI/DECISIONS.md`)
 
   The generated files are `crates/remote/assets/icon-192.png`, `icon-512.png`,
   `icon-maskable-512.png` and `badge-96.png`; the 180 px `apple-touch-icon.png` stays for iOS.
-- **Unchanged.** The Content Security Policy, `app.js`, `sw.js`, every element id and label, and
-  the routes. The page uses the system font stack (no font file, no CDN) and contains no raster
+- **Unchanged by the brand redesign.** The Content Security Policy, `app.js`, `sw.js`, every
+  element id and label, and the routes (the later Android support of section 2h kept the CSP and
+  every element id, but changed the login label, `app.js`, `sw.js` and added the four PNG
+  routes). The page uses the system font stack (no font file, no CDN) and contains no raster
   from the brand archive. The later camera card (section 2f) is built by `app.js` at runtime with
   the same tokens and adds no element id.
 

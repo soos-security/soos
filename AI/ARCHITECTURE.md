@@ -404,7 +404,7 @@ disk, logged or pushed; a view sends no push notification (removed at the owner'
 | Lock | `Manager.LockSession(id)` on a fresh snapshot, one per 2 s; success is confirmed through `LockedHint`, not assumed. |
 | Unlock (opt-in) | `allow_unlock = true` in `remote.toml` (default `false`, else `403 unlock_disabled` without a logind call); `POST /api/unlock` with `X-Soos-Action: unlock` and the lock's CSRF rules **and a fresh `unlock`-purpose passkey assertion with user verification on every path** (`403 passkey_required` / `passkey_rejected` / `passkeys_not_configured` otherwise; a Funnel unlock also needs a web session); `Manager.UnlockSession(id)` on a fresh snapshot of the same selected session, one per 2 s (independent of the lock), 2 s flow bound, one `info` audit line without identity. No automatic re-lock (owner decision D-F, accepted risk in the ADR). The crate names `UnlockSession` exactly once and never `Unlock`, `SetLockedHint` or a session-ending method (RMC-S3 as amended). |
 | Bounds | 16 connections, 4 streams, 8 KiB head, 32 headers, 256-byte path, 5 s head deadline, 2 s write deadline, 1.5 s snapshot, 2 s lock flow, 2 s unlock flow, 15 s keep-alive, 30 min stream; request bodies only on the four passkey body routes, ≤ 8 KiB (`Content-Length` or strict chunked, ≤ 64 chunks), 5 s body deadline; Funnel ≤ 8 of 16 connections (anonymous ≤ 4, anonymous body reads ≤ 2, 1 per client hint), Funnel streams ≤ 2 of 4, `503 busy` otherwise; ≤ 4 pending challenges per authenticated pool, anonymous login pool ≤ 16 (≤ 2 per hint, oldest evicted); limiters 10 options / 60 s and 5 failures / 5 min per limiter key, ≤ 64 client-hint buckets; store lock wait ≤ 500 ms (`crates/remote/src/lib.rs`). |
-| Page design | The phone page follows the project-wide soos brand (ADR 2026-10-06 "soos Brand Direction Applied to the `soos-remote` Web App", `Docs/REMOTE_COMPANION.md` §2e, matrix RMC76–RMC88, walkthrough 190): CSS custom properties mirror the `crates/gui/src/theme.rs` constants by name and value, light by default with a dark variant under `prefers-color-scheme`, WCAG AA text contrast, system fonts only. Presentation only: the CSP, `app.js`, `sw.js`, the routes, the seven embedded assets and every element id and label are unchanged. |
+| Page design | The phone page follows the project-wide soos brand (ADR 2026-10-06 "soos Brand Direction Applied to the `soos-remote` Web App", `Docs/REMOTE_COMPANION.md` §2e, matrix RMC76–RMC88, walkthrough 190): CSS custom properties mirror the `crates/gui/src/theme.rs` constants by name and value, light by default with a dark variant under `prefers-color-scheme`, WCAG AA text contrast, system fonts only. Presentation only: the CSP, `app.js`, `sw.js`, the routes, the seven embedded assets and every element id and label are unchanged (amended by the Android support, ADR 2026-10-09: eleven embedded assets, the login label "Sign in with your passkey"). |
 | Privacy | No identity, header value, `Host`, path, session id, body, challenge, session token or its hash, camera view token, frame, JPEG, frame dimension or sequence, cookie, credential id, public key, user handle or enrollment code is ever logged, echoed or shown through `Debug` (RC-5, D-H); the status body has exactly five fields and no identity. |
 
 Companion invariants (matrix rows RMC*): RC-1 never root, never a network socket, never an
@@ -433,6 +433,18 @@ on the existing stream (only on change), with the visibility of `/api/status`; `
 `/api/status` and `event: status` are unchanged, and no daemon, D-Bus, UPower or dependency
 change is involved. The service runtime shutdown is bounded by `RUNTIME_SHUTDOWN_TIMEOUT_MS`
 (1 s). Matrix rows RBS1–RBS12.
+
+Android phones (ADR 2026-10-09 "Android Support for the `soos-remote` Phone Companion and Web
+Push", GitHub #349, `Docs/REMOTE_COMPANION.md` §2h): the phone web app is the iPhone home-screen
+app or Android Chrome, Samsung Internet or Firefox (in a tab or installed), with full parity. The
+wire is unchanged (FCM and Mozilla push hosts were already allowlisted); a `PushHost` enum in
+`soos-push-protocol` is the single source of `PUSH_HOSTS` and makes the device classification
+exhaustive. The manifest gains `id` `/` and PNG icons 192/512 `any` and 512 `maskable`
+(generated deterministically from `icon.svg`), notifications carry `renotify`, a raster icon and
+a monochrome badge, and the service worker re-sends a renewed subscription once on
+`pushsubscriptionchange` (same-origin, page request shape, 10 s abort, no retry; the worker makes
+no request on push). CSP, server checks and routes other than the four new static assets are
+unchanged. Matrix rows RAN1–RAN12 (RAN12: owner check on an Android phone), walkthrough 193.
 
 ---
 
