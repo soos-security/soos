@@ -17,7 +17,7 @@
 //! - RMC-S51 the header band carries the SOOS wordmark;
 //! - RMC-S52 `icon.svg` is the owner's star mark, the touch icon an opaque 180 x 180 RGB PNG;
 //! - RMC-S53 manifest and meta colors come from the palette;
-//! - RMC-S54 system fonts only and the fixed seven-file asset set;
+//! - RMC-S54 system fonts only and the fixed eleven-file asset set (amended by ADR 2026-10-09 Android);
 //! - RMC-S55 the design is documented and the ADR exists.
 
 #![allow(
@@ -293,7 +293,7 @@ const PAGE_IDS: [(&str, &str); 29] = [
 
 /// `(button id, exact label)`.
 const BUTTON_LABELS: [(&str, &str); 9] = [
-    ("login-button", "Sign in with Face ID"),
+    ("login-button", "Sign in with your passkey"),
     ("lock", "Lock now"),
     ("unlock", "Unlock now"),
     ("logout", "Sign out"),
@@ -339,7 +339,7 @@ const ENROLL_CODE_ATTRIBUTES: [(&str, &str); 8] = [
     ("aria-label", "Enrollment code"),
 ];
 
-const ASSET_FILES: [&str; 7] = [
+const ASSET_FILES: [&str; 11] = [
     "index.html",
     "app.js",
     "style.css",
@@ -347,6 +347,10 @@ const ASSET_FILES: [&str; 7] = [
     "manifest.webmanifest",
     "icon.svg",
     "apple-touch-icon.png",
+    "icon-192.png",
+    "icon-512.png",
+    "icon-maskable-512.png",
+    "badge-96.png",
 ];
 
 // ---------------------------------------------------------------------------------------------
@@ -2319,6 +2323,7 @@ fn test_rmc_s53_manifest_and_meta_colors() {
         r#""scope":"/""#,
         r#""short_name":"soos""#,
         r#""name":"soos remote""#,
+        r#""id":"/""#,
     ] {
         assert!(manifest.contains(pair), "manifest must contain {pair}");
     }
@@ -2331,7 +2336,7 @@ fn test_rmc_s53_manifest_and_meta_colors() {
         .split('}')
         .filter(|o| o.contains('{'))
         .collect();
-    assert_eq!(objects.len(), 2, "exactly two manifest icons");
+    assert_eq!(objects.len(), 5, "exactly five manifest icons");
     for entry in [
         [
             r#""src":"icon.svg""#,
@@ -2342,6 +2347,24 @@ fn test_rmc_s53_manifest_and_meta_colors() {
             r#""src":"apple-touch-icon.png""#,
             r#""sizes":"180x180""#,
             r#""type":"image/png""#,
+        ],
+        [
+            r#""src":"icon-192.png""#,
+            r#""sizes":"192x192""#,
+            r#""type":"image/png""#,
+            r#""purpose":"any""#,
+        ],
+        [
+            r#""src":"icon-512.png""#,
+            r#""sizes":"512x512""#,
+            r#""type":"image/png""#,
+            r#""purpose":"any""#,
+        ],
+        [
+            r#""src":"icon-maskable-512.png""#,
+            r#""sizes":"512x512""#,
+            r#""type":"image/png""#,
+            r#""purpose":"maskable""#,
         ],
     ] {
         assert!(
@@ -2373,7 +2396,8 @@ fn test_rmc_s53_manifest_and_meta_colors() {
 // Test 73 – RMC-S54
 // ---------------------------------------------------------------------------------------------
 
-/// Test 73 (RMC86): the system font stack only and the fixed seven-file asset set.
+/// Test 73 (RMC86): the system font stack only and the fixed eleven-file asset set (amended by
+/// ADR 2026-10-09 Android).
 #[test]
 fn test_rmc_s54_system_fonts_and_fixed_asset_set() {
     let rules = css_rules();
@@ -2402,13 +2426,13 @@ fn test_rmc_s54_system_fonts_and_fixed_asset_set() {
     assert_eq!(
         listed,
         sorted_strs(&ASSET_FILES),
-        "the asset directory holds exactly seven files"
+        "the asset directory holds exactly eleven files"
     );
     let assets_rs = read(ASSETS_RS);
     assert_eq!(
         assets_rs.matches("include_bytes!(\"../assets/").count(),
-        7,
-        "assets.rs embeds seven files"
+        11,
+        "assets.rs embeds eleven files"
     );
     for f in ASSET_FILES {
         assert!(

@@ -520,7 +520,7 @@ fn test_rbs_s6_no_new_dependency() {
     for line in &dev {
         let key = line.split('=').next().unwrap_or("").trim();
         assert!(
-            ["tokio", "tempfile", "proptest"].contains(&key),
+            ["tokio", "tempfile", "proptest", "png"].contains(&key),
             "no new dev-dependency: {line}"
         );
     }

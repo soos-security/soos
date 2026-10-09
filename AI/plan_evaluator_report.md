@@ -1,155 +1,135 @@
 # Plan Evaluation Report
-
-- **Date**: 2026-10-07
-- **Issue**: GitHub #346 — feat(remote): live PC battery level in the soos-remote web app (GitHub-only issue, no `AI/BACKLOG.md` entry; acceptance lines taken from the issue body and the ADR)
-- **Branch**: `feat/remote-battery-status`
-- **Base commit**: `05001c9` (`origin/main` = `HEAD`, nothing committed)
-- **Round**: 3 (re-evaluation of `AI/architect_spec_remote_battery.md` Round 3, 842 lines, after the round 2 `REVISION_REQUIRED`)
-- **Inputs read**:
-  - `AGENTS.md` and the Round 3 spec in full.
-  - The ADR "[2026-10-07] Live Battery Level in `soos-remote`" (`git diff AI/DECISIONS.md`) and the round 2 report.
-  - `crates/remote/src/{lib,main,server,routes}.rs` (the relevant parts), `crates/remote/assets/app.js`, `crates/remote/Cargo.toml`, the workspace `Cargo.toml` (dependency features, lints, `[profile.release]`), `packaging/soos-remote.service` and `scripts/install_remote.sh`.
-  - The log-capture test `server_tests.rs:2620-2690` and every crate-wide scan in `tests/invariants/src/remote_companion_contract.rs`: `remote_sources`, `strip_comments`, `production_part`, RMC-S1, S2, S3, S6, S9, S10, and the panic and logging hygiene tests.
-  - The #345 worktree (`feat/remote-live-camera`, read-only, nothing modified): `git status`, the hunk list of `server.rs`, the diffs of `app.js` and `remote_companion_contract.rs`, and the crate-wide scans of `tests/invariants/src/remote_camera_contract.rs` (RLC-S4, RLC-S10).
-
-Scope note: the owner's relayed request also asks for the live camera stream. That is #345 (`feat/remote-live-camera`), a separate branch. This report evaluates only the battery spec and how it merges with #345.
+- **Date**: 2026-10-09
+- **Issue**: GitHub-only — feat(remote): Android support for the phone companion and Web Push (GitHub #349; no `AI/BACKLOG.md` entry)
+- **Branch**: `feat/remote-android`
+- **Base commit**: `24d0d8c` (`origin/main`, #348)
+- **Spec evaluated**: `AI/architect_spec_remote_android.md` round 1, amended in place by this evaluation (items PE-1..PE-6)
+- **Owner decisions in force**: full Android parity (O-1); amendments AM-1..AM-6 approved (O-2). AM-7 (new, PE-4) is **not** covered.
 
 ## 1. Coverage Matrix
 
-| Acceptance line (GitHub #346 / ADR) | Spec element | Status |
+| Acceptance line (#349) | Spec element | Status |
 |---|---|---|
-| `battery_status` key, boolean, default `true`; `false` gives `disabled`, no event and no sysfs read | §4, §6.5, §6.6, RBS-I8; tests 18, 22 | Covered |
-| Reader limited to the 10-attribute allowlist under an injectable root; it never reads names, serial, model or manufacturer | §5.1, §5.4; tests 14, 33, 34 | Covered (R3-2 affects how test 33 is scoped) |
-| Bounds: ≤ 64 entries, ≤ 8 batteries, regular files `O_NOFOLLOW|O_NONBLOCK` + `fstat`, ≤ 32 bytes, 500 ms, ≤ 1 in flight, single-flight | §3, §5.4, §5.5; tests 10, 11, 25, 26, 32, 38 | Covered; test 25 now reaches step 5 |
-| Fail closed: a missing root or a timeout gives `unavailable`; a malformed value is unknown; `no_battery` only after a complete scan; `scope=Device` and `present=0` are ignored; several batteries are aggregated | §5.2–§5.4, B-9, B-10; tests 3–10, 12, 13, 15, 16 | Covered |
-| `GET|HEAD /api/battery` with a 4-key body; visibility equal to `/api/status`; anonymous Funnel gets `403 login_required` | §6.1, §6.2, RBS-I1; tests 19–21 | Covered (`is_funnel_public` is a `matches!` allowlist, `routes.rs:306-317`, so `Battery` is non-public with no code change) |
-| Live update on `/api/events`: first `battery` frame after status (and alerts), change-only, 5 s sampler only while streaming, cache ≤ 5 s, Funnel re-validation; status unchanged | §5.5, §6.3, B-6; tests 23, 24, 27–30, 38 | Covered. The cache boundary and the subscription point are now pinned. |
-| Page line built at run time: no new id, `textContent` only, CSP unchanged, fed only by `event: battery`, hidden when unreachable, stream down, signed out or disabled | §8, B-11; test 35, existing `test_rmc_s8_*`, `test_rmc_s45`–`s50` | Covered |
-| No logging of values, no new dependency, `forbid(unsafe_code)`, no panic paths | RBS-I5, RBS-I6; tests 31, 32, 37 | Covered |
-| Bounded runtime shutdown | B-13, §3; test 39 | Covered |
-| Tempdir fake sysfs + scripted source; static invariants; docs; RBS1–RBS12; walkthrough | §10, §11, §13 | Covered |
-| Owner check on the iPhone | RBS12 manual | Covered |
-
-Every acceptance line maps to a spec element. The authoritative test count is §10.6: 17 + 1 + 1 + 13 + 7 = 39. The orchestrator summary ("37 tests … 12 in battery_server_tests and 6 static invariants") predates tests 38 and 39 and is stale.
-
-### Round 2 findings — resolution check
-
-| Round 2 finding | Resolution in the Round 3 spec | Verified |
-|---|---|---|
-| R2-1 (CRITICAL) `SysfsBattery::system()` matches the RMC-S9 needle `::system(` | Renamed `SysfsBattery::kernel()` (B-4, §1.1, §5.1); test 34 pins `kernel()` and forbids `SysfsBattery::system`; RMC-S9 is added to §7 with its full needle list | **Resolved.** I checked `kernel()` against every RMC-S9 needle (`remote_companion_contract.rs:1148-1171`) and the env-var rule (main.rs is exempt; `battery.rs` has no `env`). `register_stream`, `subscribe`, `session_still_valid` and `with_battery` contain no needle. |
-| R2-2 (MAJOR) cache boundary contradicts test 28; test 25 never reaches step 5 | `CacheRule::MaxAge` (inclusive `age <= interval`, `saturating_duration_since`) and `CacheRule::StoredSince(start)`. Test 28 asserts both sides. Test 25 uses `+ 1` advances and closes its stream before step 4. | **Resolved.** I re-traced test 25 in paused time below. |
-| R2-3 subscription point | §6.3: `subscribe()`, then `current().await` with no `.await` in between, then the first write | Resolved |
-| R2-4 test 31 marker `capacity` | Field-aware markers only; the tester greps the fixed log text before freezing the list | Resolved, re-checked below (§2) |
-| R2-5 `shutdown_timeout` side effects | Exact B-13 tail; other blocking tasks named; Docs §8 | Resolved. `Runtime::shutdown_timeout(self, ..)` consumes the runtime after `block_on` returns, so the tail compiles as written, and RMC-S10 (`remote_companion_contract.rs:1218-1253`) is unaffected. |
-| R2-6 stale §12 `app.js` row | Row corrected | Resolved. The #345 `app.js` diff only adds `renderCamera`/camera code and one `showLogin(..)` call site; it does not touch `openStream`, `closeStream`, `onerror` or `render`. |
-| R2-7 redundant CSS | `style.css` unchanged | Resolved |
-
-#### Test 25 trace (Round 3 steps)
-
-Paused clock, gated source; T is the virtual time at the first GET.
-
-1. **First GET.** The read blocks; auto-advance is inhibited while the blocking task runs. `advance(500)` fires the deadline: the GET gets `unavailable`, which is cached at T+500, and `in_flight` stays set.
-2. **Second GET.** `advance(5001)` makes the entry 5001 ms old, so the GET misses the cache and takes the gate. `in_flight` is still set, so step 5 returns `unavailable`, cached at T+5501. `calls == 1`, and this result can only come from step 5.
-3. **Stream open.** The stream's `current()` is a cache hit (age 0). The sampler, woken by the registration, gets `StoredSince(T+5501)` and the entry stored at T+5501, so it reuses it without a read. `advance(15000)` wakes the sampler once (at T+20501). It misses the cache, hits step 5 again, and the equal view is filtered, so no new frame is sent. The status keep-alive arrives, and `calls == 1`. After the close, the sampler's next sleep ends at T+25501.
-4. **After the release.** Releasing the gate clears `in_flight`. `advance(5001)` brings the clock to T+25502. The sampler wakes, sees `streams == 0` and goes idle without reading. The GET finds the entry from T+20501, now 5001 ms old, misses the cache, reads, and returns `present` with `calls == 2`.
-
-The test now fails against an implementation that spawns a second read while the first is stuck (step 2), and against one that keeps sampling with no stream (step 4).
+| A1 `renotify`, raster `icon`, monochrome `badge`, no fetch/cache, every push shows | §3.1, §6; `test_ran_s1`, `test_ran_badge_is_white_on_transparent`; RAN1 | Covered (wording corrected, PE-3) |
+| A2 `pushsubscriptionchange`: same key, same CSRF + credentials, silent, bounded | §3.2, §3.3; `test_ran_s2`, `test_ran_worker_resubscribe_*` (2); RAN2 | Covered |
+| A3 Manifest installable (`id`, 192/512 `any`, 512 `maskable`, deterministic, touch icon kept) | §5, §6; `test_ran_s3`, `test_ran_s4`, two pixel tests, AM-4; RAN3, RAN4 | Covered |
+| A4 Four PNG assets embedded, `image/png`, GET/HEAD only, CSP unchanged | §2.3; `test_ran_s5`, `test_ran_assets_*` (2), AM-1/AM-2; RAN5 | Covered |
+| A5 Platform-neutral text (passkey phrase, no "iPhone settings", two-case unsupported text) | §4.1, §7; `test_ran_s6`, `test_ran_s10`, AM-5, AM-6; RAN6 | Covered |
+| A6 Unknown-key subscription kept; failed SW registration shows an error | §4.2, §4.3; `test_ran_s7`; RAN7 | Covered |
+| A7 Exhaustive `PushService`; labels | §2.1, §2.2, §4.4; `test_ran_s8`, `test_ran_push_service_maps_each_host`, `test_ran_push_host_*`; RAN8 | Covered |
+| A8 FCM `/fcm/send/`,`/wp/`, Mozilla `/wpush/v1/`,`/wpush/v2/` end to end; Chrome subscription JSON; Chrome clientDataJSON; GPM registration | §11.2 (push-protocol, push-sender, remote push + webauthn tests); RAN9, RAN10 | Covered (coverage contracts, green from start: acceptable, see §3 Pillar 6) |
+| A9 Docs Android section, neutral push text, neutral installer | §7.1, §7.2; `test_ran_s9`, `test_ran_s10`; RAN11 | Covered (+ §9 out-of-scope bullet, PE-5) |
+| A10 ADR, matrix rows incl. owner Android check, walkthrough | §13, §14; RAN11, RAN12; walkthrough **193** | Covered (number drift verified, see §2) |
 
 ## 2. Facts Verified Against Code
 
 | Fact cited by plan | Code location | Actual value | Match |
 |---|---|---|---|
-| RMC-S9 needles | `remote_companion_contract.rs:1148-1171` | 21 needles, as §7 lists them; env reads only in `main.rs` | Yes |
-| `"/sys` appears exactly once in the crate after the change (test 34) | `lib.rs:100` `SYSTEM_BUS_ADDRESS = "unix:path=/run/dbus/system_bus_socket"` | contains the **bare** substring `/sys` (in `/system_bus`), but not `"/sys` with the opening quote | Holds only if the needle keeps its opening quote (R3-1) |
-| `serial_number`, `model_name`, `manufacturer`, `uevent` never appear in `crates/remote/src` (test 33) | `grep` over `crates/remote/src` (both trees) | none today | Yes, but the §5 `//!` doc the spec prescribes contains `manufacturer` (R3-2) |
-| Tokio `sync`, `time` and `rt` features (`Mutex`, `Notify`, `watch`, `timeout_at`, `spawn_blocking`) | workspace `Cargo.toml:43` | `rt-multi-thread, net, sync, time, macros, signal, io-util` (+ `process` in the crate) | Yes |
-| `nix` `fcntl::OFlag` and `unistd::mkfifo` (tests) | workspace `Cargo.toml:44` | `socket, fs, user` (both items are gated on `fs`) | Yes |
-| `proptest`, `tempfile`, `tokio/test-util` dev-dependencies | `crates/remote/Cargo.toml:44-47` | present | Yes |
-| A panicking source yields `JoinError`, not an abort | `[profile.release]` `panic = "unwind"` (`Cargo.toml:160`) | unwind in both profiles | Yes (test 26 matches production) |
-| `run_service` tail | `main.rs:441-456` | `runtime.block_on(run(config, credentials_path, uid))` is the tail expression | Yes (B-13 shape applies cleanly) |
-| Existing deadline and counter patterns that satisfy `arithmetic_side_effects` | `server.rs:110-113` `deadline()` (`checked_add(..).unwrap_or(from)`), `server.rs:363` `fetch_update(.., checked_add(1))` | as cited | Yes (R3-3 asks the spec to name them) |
-| Log capture format for test 31 | `server_tests.rs:2623-2627` | `tracing_subscriber::fmt()`, TRACE, no ANSI, default wall-clock timer | Yes |
-| Field-carrying log calls that could match test 31 markers | `grep` of every tracing macro with a field in `crates/remote/src` | `%err`, `kind = ?..`, `socket_path = %..`, `status = response.status` (2xx–5xx), `?resolved` (a `Route` `Debug`, e.g. `Battery`) | No collision: no `=87`/`=86`, `charge=`, `percent`, `discharging`; RFC 3339 timestamps contain no `: 8x`, `=8x` or `%` |
-| `RemoteConfig` struct literals to migrate (§9) | `harness.rs:771`, `server_tests.rs:762`, `alerts_server_tests.rs:207`, `push_server_tests.rs:192`; #345 adds `tests/common/camera.rs` | exactly these, in both trees (the #345 hits in `src/server.rs` are only the `&RemoteConfig` accessor) | Yes |
-| Stream EOF detection (test 25 step 3, test 27) | `server.rs:2232-2235` | `Ok(0) | Err(_)` breaks | Yes |
-| `is_funnel_public` | `routes.rs:306-317` | `matches!` allowlist | Yes |
-| `app.js` anchors | `app.js:122` `updatedNode`, `:157` `signedOut`, `:247` `showLogin`, `:270` `render`, `:361` `source.onerror`, `:368` `closeStream` | as §8.1 assumes | Yes |
-| #345 leaves `serve_stream` alone | #345 `server.rs` hunks end at `@@ -2024 +2073` (camera functions); `serve_stream` at #345 line 2464 has no hunk | as cited | Yes |
-| #345 crate-wide scans that would see `battery.rs` | `remote_camera_contract.rs:621-650` (RLC-S4: only `camera*` files and functions whose names contain `camera`), `:1061-1085` (RLC-S10: `jpeg_decoder`, `zune`, `image::`, `/dev/video`, `v4l`, `Decoder`) | no battery identifier matches | Yes |
-| #345 `push.rs` line numbers cited in B-13 | #345 tree | `spawn_blocking` at `push.rs:483` and `push.rs:1323` (was 1293 on `main`) | Drift only (observation) |
-| Installer template invariants | RMC-S6 (`remote_companion_contract.rs:716-790`), `remote_push_contract.rs:819-840` | required-substring and command checks only; a commented `# battery_status = true` line is unaffected (`#` lines are excluded from the command scan) | Yes |
-| Unit sandbox does not hide `/sys` | `packaging/soos-remote.service` | `NoNewPrivileges`, `RestrictAddressFamilies=AF_UNIX`, …; no `ProtectKernel*`, `InaccessiblePaths` or `TemporaryFileSystem` | Yes (B-1 needs no unit change) |
+| Walkthroughs 191/192 taken | `AI/walkthroughs/` | `191_remote_live_camera.md`, `192_remote_battery_status.md`; next is 193 | Yes → **193** |
+| Matrix precedent | `AI/VERIFICATION_MATRIX.md` L2177, L2200 | #345 → `RLC1..16`, #346 → `RBS1..12`, dedicated blocks; RMC stops at RMC88 | Settled: **RAN** (PE-1) |
+| `PUSH_HOSTS` + path alphabet (`:` `=`) | `push-protocol/src/lib.rs` L24, L119–L126 | as cited | Yes |
+| `PushEndpoint.host: &'static str`, `PushService::of` private with `_ => Mozilla` | `push-protocol` L109; `remote/src/push.rs` L997–L1004 | as cited | Yes |
+| `check_action_csrf` rules | `routes.rs` L316–L345 | one `X-Soos-Action` == action; `Sec-Fetch-Site` absent/`same-origin`; `Origin` absent/`https://host[:443]` | Yes |
+| Funnel gate before routing | `server.rs` L1190–L1205 | non-public route without session → `403 login_required`; `Touch::Refresh` on non-asset routes | Yes (refresh side effect noted, PE-6) |
+| `PUSH_SUBSCRIBE_PATH` | `routes.rs` L90 | `/api/push/subscribe` | Yes |
+| `ACTION_PUSH_SUBSCRIBE` "parsed from routes.rs" | `crates/remote/src/lib.rs` L425 | defined in **lib.rs**, only imported by routes.rs | **No** → PE-2 fixed |
+| `sameServerKey` → unsubscribe on absent key; `await navigator.serviceWorker.ready` unbounded | `app.js` L934–L950, L1018–L1040, L1078 | as cited | Yes |
+| `readNotification` tag never empty (`renotify` needs a tag) | `sw.js` L16 | defaults to `soos-alerts`, else `soos-test` | Yes |
+| `png 0.18.1` in `Cargo.lock` | `Cargo.lock` L2749 (via `image` ← `arboard`/`eframe` ← `soos-gui`) | 0.18.1; deps `bitflags 2.13.2`, `crc32fast`, `fdeflate`, `flate2`, `miniz_oxide 0.8.9` — all locked | Yes |
+| `png` license vs `deny.toml` | `cargo metadata`; `deny.toml` L26–L34 | `MIT OR Apache-2.0` (deps MIT / Apache-2.0 / Zlib) — all allowed; no new duplicate | Yes |
+| "`test_rbs_s6_no_new_dependency` stays green" | `remote_battery_contract.rs` L519–L526 | dev-dependency keys must be in `["tokio","tempfile","proptest"]` → `png` turns it **red** | **No** → PE-4 |
+| Icon generation deterministic, chunks `IHDR/IDAT/IEND`, sizes 2885/8121/6926/1098 B | Re-run in evaluator scratchpad (rsvg-convert + magick) | two runs byte-identical; IHDR 192²/512²/512² ct 2, 96² ct 6, no interlace; sizes identical; maskable (266,246) `#EDF1FF`, corner `#0047BB`; badge corner alpha 0, (52,44) white opaque | Yes |
+| Existing tests not affected (s8, s38 forbidden list, s39, rlc_s8, passkey `.register(`, routes/server asset lists) | invariants + `crates/remote/tests` | non-exhaustive lists / substring checks; still green with the plan | Yes |
+| CSP unchanged | `http.rs` | `img-src 'self'`, `connect-src 'self'`, `manifest-src 'self'`, worker via `script-src 'self'` | Yes |
 
 ## 3. Pillar Analysis
 
 ### Pillar 1 — Architecture & threat model
-- **Scenario: an anonymous Funnel visitor probes `/api/battery` or the stream.** `Route::Battery` falls outside the `matches!` allowlist, so it gets `403 login_required` before any source read (test 21 asserts zero reads).
-- **Scenario: a revoked Funnel session keeps receiving values.** The session is re-validated before each battery event. Test 29 forces the change to land before `session_check_at`, so a missing re-check fails the test.
-- **Scenario: "on battery" reveals that the laptop is away from mains.** That is visible only to the callers who already see active/idle/locked, which is less sensitive than the existing card. On by default is justified.
-- There is no root, no daemon change and no new trust boundary. The user unit's sandbox does not hide `/sys`.
-- Result: PASS.
+- Failure scenario considered: the worker's `pushsubscriptionchange` POST becomes a new way to register an endpoint
+  without user authentication. The plan adds no route and changes no check; the request goes through `check_host`,
+  `classify_request`, the Funnel session gate and `check_push_csrf` exactly like the page's (verified in code). A
+  Funnel caller without session gets `403 login_required` before routing; a cross-site initiator gets `403 forbidden`;
+  both are pinned by the new regression test. A same-origin SW fetch can only be issued by code served from the origin
+  (CSP `script-src 'self'`, single `/sw.js` registration pinned by the passkey contract).
+- Side effect: a worker POST with a still-valid Funnel session refreshes its idle timer without the owner looking at
+  the page (one request per browser-initiated event, 8 h absolute cap unchanged).
+- Result: PASS, with MINOR PE-6 (documented as accepted risk).
 
 ### Pillar 2 — PAM deadline & concurrency
-- `crates/pam` is untouched.
-- **Scenario: concurrency inside `soos-remote`, cache boundary under paused time.** Test 28's hit at exactly `BATTERY_SAMPLE_INTERVAL_MS` needs the server's fast-path `Instant::now()` to equal the test's clock after `advance`. Auto-advance happens only when the runtime is idle with pending timers. The loopback request makes the connection task ready at once, and the only pending timers are the far harness and handler bounds. The same assumption underlies every existing `advance_ms`-based server test, so it holds.
-- **Scenario: the sampler and the stream open in the same virtual instant.** `StoredSince(start)` uses `>=`, so an entry stored at the same instant counts as fresh. This coalesces the sampler with the stream's first read in paused time, and it is harmless in real time.
+- Not touched: no change in `crates/pam`, daemon or protocol. Client-side waits are bounded (`RESUBSCRIBE_TIMEOUT_MS`
+  10 s with `AbortController`; `SERVICE_WORKER_READY_TIMEOUT_MS` 10 s with `clearTimeout`; no retry loop, statically
+  checked). Failure scenario "worker hangs on a dead PC" → aborted at 10 s, swallowed by the terminal `.catch`.
 - Result: PASS.
 
 ### Pillar 3 — Panic safety & fail-closed
-- **Scenario: the deadline arithmetic overflows (`start + 500 ms`).** It cannot in practice. If the code were written literally as §5.5 step 1 shows, clippy would flag it (`arithmetic_side_effects` is a workspace lint), so it needs the existing checked pattern (R3-3).
-- **Scenario: the source panics.** With release `panic = "unwind"` this gives `JoinError` → `unavailable`, and the `in_flight` guard clears.
-- Result: PASS (MINOR R3-3 is a wording issue).
+- Failure scenario: `PushService::of` mislabels a fourth host — removed by the exhaustive `PushHost` match (compile
+  error on a new host). `renotify: true` with an empty tag would make `showNotification` throw and lose the
+  notification: excluded, the tag is never empty. `PushHost::name` is `const fn`; `PUSH_HOSTS` value unchanged and
+  pinned by `protocol_tests.rs` L47. No new `unwrap`/error path in production Rust.
+- Result: PASS.
 
 ### Pillar 4 — Dependencies
-- No new crate. Every required tokio and nix feature is already enabled (§2). Test 37 pins the post-#345 key set, and Phase 2 is gated on the rebase.
-- Result: PASS.
+- Failure scenario: the `png` dev-dependency is fine for the lock and licences but turns the existing contract test
+  `test_rbs_s6_no_new_dependency` red; the plan asserted the opposite. Fixing it requires amending an existing test
+  assertion that is outside the owner-approved AM-1..AM-6.
+- Result: **FINDING (MAJOR, PE-4)** — resolved in the spec by an explicit AM-7 gate with a binding fallback (see §4).
 
 ### Pillar 5 — Data confidentiality
-- **Scenario: a supply name such as `hid-<MAC>-battery` or a serial leaks.** Names never leave `read_power_supplies`, and identifying attributes are never opened (tests 14, 31, 33).
-- Test 31's markers no longer collide with any fixed or field-carrying log line (§2).
-- Result: PASS.
+- Notification title/body still come from the existing server payload (counts and classes only); `readNotification`
+  is unchanged; icon/badge URLs are constant paths with no identity or alert data. The worker stores nothing, logs
+  nothing, never reads the response. No new server log line. `PushEndpoint` `Debug` stays redacted.
+- Failure scenario: the ADR's "push path makes no network access" is false in practice — the browser fetches the
+  icon and badge from the PC when it displays the notification. Not a leak (Funnel-public static assets, no
+  credentials needed), but an inaccurate invariant statement; a failed fetch must not suppress the notification.
+- Result: PASS, with MINOR PE-3 (wording corrected, RAN12 step 5b added).
 
 ### Pillar 6 — Test integrity
-- **Scenario: a spec-compliant implementation fails a new static test.**
-  - Test 34: a tester who drops the opening quote of the `"/sys` needle counts 2 occurrences in `lib.rs`, the second being `/run/dbus/system_bus_socket`, which RMC (`remote_companion_contract.rs:1115`) pins byte for byte. That test could then never pass (R3-1).
-  - Test 33: if the tester scans raw text, it fails on the `//!` doc that §5 prescribes, which mentions "manufacturer" (R3-2).
-  - Both traps are cheap to remove in the spec text, and neither forces a weakening of an existing test.
-- The §9 setup-only migrations are complete in both trees.
-- Result: FINDING (MINOR R3-1, MINOR R3-2).
+- Amendments AM-1..AM-6 each replace an exact value with an exact value (AM-6 is strictly stronger); none removes a
+  check. Verified that no other existing assertion pins the changed text (`Face ID` in docs §2f stays; `home-screen`,
+  `16.4`, `web.push.apple.com` stay in §2d).
+- Power check: `test_ran_s7` fails against the current `sameServerKey` (unsubscribes on absent key) and the unbounded
+  `serviceWorker.ready`; `test_ran_s8` fails against the `_ =>` arm; pixel tests fail on an `#EDF1FF` maskable
+  background (corner/safe-zone ring) or an RGB-coloured badge; the regression test fails if `same-site` or a missing
+  action header were ever accepted.
+- Coverage tests green from the start (endpoint shapes, sender, Chrome JSON, WebAuthn, worker request shape) are
+  acceptable because A8 is a tests-only acceptance line with no behaviour change; the tester must label them
+  "coverage contract (green at red phase)" in `AI/tester_contract_remote_android.md`. Every behaviour change (A1–A7,
+  A9) has at least one red test.
+- Test `test_ran_s2` parsed `ACTION_PUSH_SUBSCRIBE` from the wrong file and would have panicked rather than fail
+  meaningfully.
+- Result: PASS after PE-2 fix.
 
 ## 4. Findings
 
-- **[MINOR] R3-1: Test 34's needle must keep its opening quote, and the spec should say so explicitly.**
-  - **What happens.** `lib.rs:100` already contains the bare substring `/sys` (`"unix:path=/run/dbus/system_bus_socket"`), and RMC pins that literal byte for byte (`remote_companion_contract.rs:1115`). With a bare `/sys` needle, test 34 counts 2 and can never pass.
-  - **Required spec text.** Add to test 34: "the needle is `"/sys` (opening double quote included) or `"/sys/`; a bare `/sys` also matches `SYSTEM_BUS_ADDRESS` (`lib.rs:100`) and must not be used". The ADR phrase "the only `/sys` literal" stays correct with this reading.
+- **[MAJOR] PE-4** `png` dev-dependency breaks `test_rbs_s6_no_new_dependency` (dev-dependency allowlist
+  `["tokio","tempfile","proptest"]`, `remote_battery_contract.rs` L519–L526); spec §2.4/§12 claimed it stays green.
+  — *Fixed in spec*: §2.4 corrected; §12 adds **AM-7** (exact new value `["tokio","tempfile","proptest","png"]`) marked
+  **pending owner approval**, plus a binding fallback if declined/unanswered: no new dependency, the three pixel tests
+  move unchanged to `tests/invariants/src/remote_android_contract.rs` with a test-only DEFLATE/PNG decoder that
+  verifies the zlib Adler-32 trailer and decoded length (a decoder bug can only make a test red) and self-tests on
+  `apple-touch-icon.png`. Supply chain itself is clean (locked 0.18.1, MIT OR Apache-2.0, no lock entry added).
+  **Required before Phase 2: orchestrator asks the owner about AM-7 and records the branch taken.**
+- **[MINOR] PE-1** Matrix prefix: settled to **`RAN`** (RAN1–RAN12; `test_ran_s1_*`…`test_ran_s10_*`; behaviour
+  tests `test_ran_*`), consistent with #345 `RLC` / #346 `RBS`. — *Fixed in spec* (all ids renamed); binding.
+- **[MINOR] PE-2** `ACTION_PUSH_SUBSCRIBE` lives in `crates/remote/src/lib.rs` L425, not `routes.rs`. — *Fixed in spec*
+  (`test_ran_s2`, §9).
+- **[MINOR] PE-3** "The push path makes no network access" is inaccurate: the browser loads `/icon-192.png` and
+  `/badge-96.png` on display. — *Fixed in spec* (§3.1 note, RAN1 text, ADR text: "the worker makes no request on
+  push"; RAN12 step 5b checks a notification still appears off-tailnet).
+- **[MINOR] PE-5** `Docs/REMOTE_COMPANION.md` §9 must list the #349 out-of-scope items. — *Fixed in spec* (§7.1).
+- **[MINOR] PE-6** Worker POST over Funnel refreshes a valid session's idle timer. — *Fixed in spec* (§3.3 note, ADR
+  accepted risks).
 
-- **[MINOR] R3-2: Test 33 conflicts with the prescribed `battery.rs` module doc.**
-  - **What happens.** §5 prescribes a `//!` doc containing "never reads names/serial/model/manufacturer". Test 33 says `manufacturer` (and the other three needles) "never appear in `crates/remote/src`", without saying whether comments are excluded.
-  - **Required change.** Either pin test 33 to `strip_comments(production_part(..))`, like test 34 (preferred, because the doc is useful), or reword the doc to "never reads identifying attributes". State the choice in the test text.
+Settled open questions: walkthrough **193** (191/192 verified taken); matrix prefix **RAN**; `png` acceptable on
+licence/lock grounds but gated by AM-7; coverage tests green from the start acceptable when labelled.
 
-- **[MINOR] R3-3: Name the checked forms for the two arithmetic spots in §5.5.**
-  - **What happens.** Step 1 writes `deadline = start + BATTERY_READ_TIMEOUT_MS`. Under the workspace lint `arithmetic_side_effects` (and the "no unchecked arithmetic" rule of §5), the developer needs `start.checked_add(Duration::from_millis(BATTERY_READ_TIMEOUT_MS)).unwrap_or(start)`, the `server.rs:110-113` `deadline()` pattern. That fallback fails closed: the wait expires at once and the result is `GateTimeout` / `unavailable`.
-  - **`register_stream`.** The spec gives a saturating `fetch_update` only for the decrement. The increment should use `fetch_update(.., |n| n.checked_add(1))`, as at `server.rs:363`. A wrapped atomic cannot panic, but saturation keeps the count meaningful.
-  - **Test.** None is required; this is a one-line clarification for the auditor and the developer.
-
-Observations (no change required):
-- The orchestrator summary's test count (37: 12 server and 6 static tests) is stale. The spec has 39, adding test 38 (server) and test 39 (static). Downstream agents should use §10.6.
-- In the #345 tree, the second push `spawn_blocking` cited in B-13 is at `push.rs:1323` (`1293` on `main`). Refresh it at the rebase.
-- §8.1 `renderBattery` calls `showBattery(true)` regardless of status staleness. A battery frame can only arrive on a live stream, and the next `TICK_MS` render applies the stale rule, so at worst there is a one-tick display. No change is needed.
-- A stream that ends with a non-200 reconnect (`EventSource` CLOSED) keeps the battery line hidden until `openStream` runs again. This matches B-11 ("no value the stream is not keeping current").
+Security checks requested by the orchestrator: `pushsubscriptionchange` loosens no CSRF/session/Funnel check (PASS);
+the worker still never fetches on `push` and every push shows a notification (PASS, tag never empty); CSP unchanged
+(PASS, pinned by `test_ran_s5` and the existing CSP tests); no sensitive data in notifications (PASS); icons
+deterministic (PASS, reproduced byte-identically by the evaluator).
 
 ## 5. Verdict
-
-Round 3 resolves every round 2 finding:
-- **R2-1:** the constructor `kernel()` clears all 21 RMC-S9 needles.
-- **R2-2:** the inclusive `MaxAge` rule is pinned. Test 28 checks both sides of the boundary, and test 25 provably reaches step 5. I traced it step by step in paused time.
-
-The MINOR items R2-3 to R2-7 are folded in correctly. Facts re-checked against both trees hold:
-- dependency features, the release panic strategy and the unit sandbox;
-- the log capture format and the field-carrying log lines;
-- the migration literals;
-- #345's crate-wide scans, and #345 leaving `serve_stream` unchanged.
-
-Three new items are MINOR spec-text clarifications that keep two static tests (33, 34) from being written in a form that cannot pass, and name the checked-arithmetic pattern. They are not design defects and can go into the tester contract and the auditor constraints without another architect round.
-
 VALIDATION_VERDICT: APPROVED
+
+The single MAJOR finding (PE-4) is resolved in the spec with two fully specified branches; the orchestrator must
+obtain the owner's AM-7 answer (or apply the fallback) before Phase 2. No other revision is required.
