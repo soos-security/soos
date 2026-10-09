@@ -2337,36 +2337,37 @@ fn test_rmc_s53_manifest_and_meta_colors() {
         .filter(|o| o.contains('{'))
         .collect();
     assert_eq!(objects.len(), 5, "exactly five manifest icons");
-    for entry in [
-        [
+    let entries: [&[&str]; 5] = [
+        &[
             r#""src":"icon.svg""#,
             r#""sizes":"any""#,
             r#""type":"image/svg+xml""#,
         ],
-        [
+        &[
             r#""src":"apple-touch-icon.png""#,
             r#""sizes":"180x180""#,
             r#""type":"image/png""#,
         ],
-        [
+        &[
             r#""src":"icon-192.png""#,
             r#""sizes":"192x192""#,
             r#""type":"image/png""#,
             r#""purpose":"any""#,
         ],
-        [
+        &[
             r#""src":"icon-512.png""#,
             r#""sizes":"512x512""#,
             r#""type":"image/png""#,
             r#""purpose":"any""#,
         ],
-        [
+        &[
             r#""src":"icon-maskable-512.png""#,
             r#""sizes":"512x512""#,
             r#""type":"image/png""#,
             r#""purpose":"maskable""#,
         ],
-    ] {
+    ];
+    for entry in entries {
         assert!(
             objects
                 .iter()
