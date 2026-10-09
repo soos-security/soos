@@ -317,6 +317,14 @@ mod remote_battery_contract;
 #[cfg(all(test, unix))]
 mod remote_camera_contract;
 
+/// Android support for the `soos-remote` phone companion and Web Push: notification options,
+/// bounded `pushsubscriptionchange` re-subscription, installable manifest and PNG icons, new
+/// routed assets under the unchanged CSP, platform-neutral text, kept unknown-key
+/// subscriptions, exhaustive push service classification, documentation (GitHub #349, ADR
+/// 2026-10-09; spec AI/architect_spec_remote_android.md §11.1 RAN-S1–RAN-S10; rows RAN1–RAN11).
+#[cfg(all(test, unix))]
+mod remote_android_contract;
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,
