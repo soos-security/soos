@@ -111,6 +111,21 @@ allowed_logins = []
 # vapid_subject = "mailto:you@example.com"
 # What the iPhone lock screen shows: "detailed" (source, account, count) or "generic".
 # push_previews = "detailed"
+
+# Optional: live camera view on the phone (section 2f). Needs rp_id, a fresh Face ID per view,
+# and, on the PC, the [preview] section of the daemon configuration must allow your uid and
+# the remote view (an administrator change, printed by the installer). No recording.
+# camera_view = false
+# Also over Tailscale Funnel (requires camera_view and allow_funnel).
+# camera_view_funnel = false
+# Longest view in seconds (10..=300).
+# camera_max_view_s = 120
+# Frames per second (1..=10).
+# camera_fps = 5
+# Output width: 640 (source size) or 320 (half).
+# camera_width = 640
+# JPEG quality (50..=85).
+# camera_quality = 70
 TEMPLATE
         chmod 0600 "${CONFIG_PATH}"
     else
@@ -135,6 +150,13 @@ TEMPLATE
     echo "     set password_alerts = true and push_notifications = true, then run"
     echo "     systemctl --user enable --now soos-push-sender and restart soos-remote,"
     echo "     open the home-screen app and tap Enable notifications."
+    echo "  7. Optional live camera view (Docs/REMOTE_COMPANION.md section 2f): set camera_view = true"
+    echo "     in ${CONFIG_PATH} and restart soos-remote; an administrator must also add to"
+    echo "     /etc/soos/daemon.toml and restart soos-daemon (this script never does it):"
+    echo "       [preview]"
+    echo "       enabled = true"
+    echo "       allowed_uids = [$(id -u)]"
+    echo "       remote_view = true"
     echo "Never use tailscale serve --http, nor tailscale funnel without rp_id and allow_funnel (see Docs/REMOTE_COMPANION.md)."
     warn_resolver_stub
 }

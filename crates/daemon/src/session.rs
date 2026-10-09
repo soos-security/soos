@@ -7,13 +7,16 @@
 //!
 //! Queries `/run/systemd/sessions/` to confirm that the asserted target UID owns
 //! an active session (`ACTIVE=1` or `STATE=active`) that logind does not flag as
-//! remote (`REMOTE=1`). Used by the preview path; facial `Auth` requests go through
-//! the stricter [`crate::session_policy::LocalSessionPolicy`] (GitHub #160).
+//! remote (`REMOTE=1`), and whether it owns a local seat session (the preview path,
+//! ADR 2026-10-07 LC-3a). Facial `Auth` requests go through the stricter
+//! [`crate::session_policy::LocalSessionPolicy`] (GitHub #160).
 
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use tracing::{debug, warn};
+
+use crate::session_policy::SessionRecord;
 
 /// Default systemd logind runtime sessions directory.
 pub const DEFAULT_LOGIND_SESSIONS_DIR: &str = "/run/systemd/sessions";
@@ -80,6 +83,22 @@ impl SessionValidator {
     /// or contains no active session file for `uid`, returns `false`.
     #[must_use]
     pub fn is_active_session(&self, uid: u32) -> bool {
+        self.any_session_matches(uid, SessionRecord::is_active_non_remote_of)
+    }
+
+    /// Checks whether the target UID currently owns a local seat session
+    /// ([`SessionRecord::is_local_seat_session_of`]: active, `REMOTE=0`, a seat, `CLASS=user`),
+    /// the predicate of every unprivileged preview peer (ADR 2026-10-07 LC-3a).
+    ///
+    /// Same directory scan and fail-closed rules as [`Self::is_active_session`]; `true` when
+    /// enforcement is disabled (mock harnesses only).
+    #[must_use]
+    pub fn has_local_seat_session(&self, uid: u32) -> bool {
+        self.any_session_matches(uid, SessionRecord::is_local_seat_session_of)
+    }
+
+    /// Scans `sessions_dir` for a session record of `uid` satisfying `predicate`.
+    fn any_session_matches(&self, uid: u32, predicate: fn(&SessionRecord, u32) -> bool) -> bool {
         if !self.enforce {
             debug!(
                 uid = uid,
@@ -132,11 +151,11 @@ impl SessionValidator {
                 continue;
             }
 
-            if self.is_session_file_active_for_uid(&path, uid) {
+            if Self::read_session_file(&path).is_some_and(|record| predicate(&record, uid)) {
                 debug!(
                     uid = uid,
                     session_file = %path.display(),
-                    "Found matching active logind session for UID"
+                    "Found matching logind session for UID"
                 );
                 return true;
             }
@@ -145,27 +164,19 @@ impl SessionValidator {
         debug!(
             uid = uid,
             sessions_dir = %self.sessions_dir.display(),
-            "No active logind session found for UID"
+            "No matching logind session found for UID"
         );
         false
     }
 
-    /// Reads and parses an individual logind session file to determine if it belongs
-    /// to `uid`, is currently active and is not a remote session.
-    fn is_session_file_active_for_uid(&self, path: &Path, uid: u32) -> bool {
-        let file = match fs::File::open(path) {
-            Ok(f) => f,
-            Err(_) => return false,
-        };
+    /// Reads and parses one logind session file (bounded); `None` when it cannot be read.
+    fn read_session_file(path: &Path) -> Option<SessionRecord> {
+        let file = fs::File::open(path).ok()?;
 
         // Bound maximum read size to prevent memory exhaustion
         let mut content = String::new();
         let mut reader = file.take(MAX_SESSION_FILE_SIZE);
-        if reader.read_to_string(&mut content).is_err() {
-            return false;
-        }
-
-        // Sessions flagged `REMOTE=1` (SSH, remote X11) never qualify (GitHub #160).
-        crate::session_policy::SessionRecord::parse(&content).is_active_non_remote_of(uid)
+        reader.read_to_string(&mut content).ok()?;
+        Some(SessionRecord::parse(&content))
     }
 }

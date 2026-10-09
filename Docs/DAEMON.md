@@ -66,7 +66,7 @@ logging is initialized; a warning names the key, never its value.
 |---|---|---|---|
 | `max_concurrent_connections` | integer | `8` | Global connection permits; must be at least 1 and strictly above `[peer_limits] reserved_root_connections`. |
 | `connection_timeout_ms` | integer (ms) | `2500` (`DEFAULT_CONNECTION_TIMEOUT_MS`) | Budget of one request (read, verification, encoding) and idle timeout of a persistent connection (§2). Must lie in 100..=10000. The default matches the GDM line `timeout_ms=2500` (user decision 2026-09-30); console/sudo requests stay capped by their 1000 ms PAM client deadline. |
-| `enforce_active_session` | bool | `true` | Local-session policy for `Auth` and the session check of `PreviewFrame` (§3). `false` is accepted only together with `[pipeline] use_mock_camera = true` (test harnesses); otherwise it is a startup error (GitHub #315, orchestrator decision). |
+| `enforce_active_session` | bool | `true` | Local-session policy for `Auth` and the local seat session check of `PreviewFrame` (§3). `false` is accepted only together with `[pipeline] use_mock_camera = true` (test harnesses); otherwise it is a startup error (GitHub #315, orchestrator decision). |
 | `logind_sessions_dir` | path | `/run/systemd/sessions` | logind runtime session records read by the session policy. |
 
 ### 1.4 `[pipeline]`
@@ -110,13 +110,39 @@ logging is initialized; a warning names the key, never its value.
 | `window_duration_secs` | integer (s) | `60` | Sliding window. |
 | `max_tracked_uids` | integer | `1024` | Bounded limiter table. |
 
-### 1.5 `[preview]` (GUI camera preview, GitHub #143)
+### 1.5 `[preview]` (camera preview for `soos-gui` and `soos-remote`, GitHub #143, #345)
 
 | Key | Type | Default | Validation / notes |
 |---|---|---|---|
 | `enabled` | bool | `false` | When `false`, only a root peer may request preview frames. |
 | `allowed_uids` | list of integers | `[]` | Unprivileged UIDs allowed when `enabled`; at most `MAX_PREVIEW_ALLOWED_UIDS` (64). |
-| `max_requests_per_sec` | integer | `40` | Per-peer-UID rate limit, root included. |
+| `max_requests_per_sec` | integer | `40` | Per-peer-UID rate limit, root included (shared by every preview client of that UID). |
+| `remote_view` | bool | `false` | Daemon-side opt-in for the live camera view of `soos-remote` (ADR 2026-10-07 "Live Camera View in `soos-remote` Through the Daemon Preview Channel"). A peer whose cgroup is the `soos-remote.service` user unit of its own UID is refused unless this is `true`. No effect unless `enabled = true` and the peer UID is in `allowed_uids`; `true` with `enabled = false` is accepted and inert. See below. |
+
+Every unprivileged preview peer (GUI or companion) must also own an **active local seat session**:
+the same record predicate as the root-peer `Auth` path (`UID` equal to the peer UID, `ACTIVE=1`
+or `STATE=active`, `REMOTE=0` exactly — an absent or malformed `REMOTE` refuses —, a non-empty
+`SEAT` and `CLASS=user`). A lingering user manager (`CLASS=manager`), an SSH session or a full
+logout therefore gets no preview; a locked seat session still qualifies. Root peers skip this
+check and the cgroup recognition below (ADR 2026-09-29 rule).
+
+**Remote companion recognition.** On the first `PreviewFrame` of an unprivileged connection the
+daemon reads the peer's `/proc/<pid>/cgroup` once (at most 16 KiB) and classifies it with
+`classify_preview_peer_cgroup` (`crates/daemon/src/preview_peer.rs`): only the systemd
+hierarchies are considered (`0::` and `name=systemd`); a path below
+`/user.slice/user-<u>.slice/user@<u>.service/` whose first non-`.slice` component is exactly
+`soos-remote.service` (`REMOTE_COMPANION_UNIT`), with `<u>` equal on both sides and equal to the
+peer UID, is the remote companion; any other path (`soos-gui.service`, `session-4.scope`,
+`soos-remote@x.service`, ...) is local. A missing PID, an unreadable or oversized file, a
+malformed or UID-inconsistent path, or lines that disagree refuse the preview (fail closed). The
+result is cached for the connection. The first non-empty frame served to a companion connection
+logs one `info` line (`Remote camera view: first preview frame served to soos-remote on this
+connection`) with the peer UID only, never a size, dimension, sequence or pixel. This
+recognition is an administrative opt-in and an audit aid, **not a security boundary**: any
+process of the owner can start a unit of that name, or run `soos-remote` outside it (it is then
+classified local and bypasses `remote_view`), and such code can already read the GUI preview.
+A live camera view holds one of the UID's `max_connections_per_uid` connections for its whole
+duration (§1.6) and uses at most `camera_fps` (≤ 10) of the shared per-UID preview quota.
 
 ### 1.6 `[peer_limits]` (GitHub #157, #175)
 
@@ -191,7 +217,7 @@ lock_grace_ms = 3000
 |---|---|---|---|
 | `RequestKind::Status` | any peer admitted to the socket | wire validation only; returns `StatusResponse` (readiness booleans, PID, uptime; no biometric data) | `ProtocolError` on malformed request |
 | `RequestKind::Auth` | root peer for any UID, or an unprivileged peer for its own UID | wire validation, `SO_PEERCRED` UID versus `uid_hint`, local-session policy (ADR 2026-09-30 "Local Session Binding"), deadline, template model binding (a `Foreign` template is answered `Unavailable`/`ModelUnavailable` here, without an attempt or a camera wake; GitHub #298), rate limit, missing template, camera wake + PAD consensus + match | `ProtocolError`/`UidMismatch`, `Unavailable`, or `Deny`; never `Allow` on an error path |
-| `RequestKind::PreviewFrame` | root peer, or an allow-listed UID with `[preview] enabled = true` and an active local session | wire validation, `SO_PEERCRED` UID versus `uid_hint`, `authorize_preview`, session check, per-UID rate limit | standard `Response` with `ProtocolError`, zero pixel bytes |
+| `RequestKind::PreviewFrame` | root peer, or an allow-listed UID with `[preview] enabled = true` and an active local seat session (`soos-gui`, or `soos-remote` when `[preview] remote_view = true`) | wire validation, `SO_PEERCRED` UID versus `uid_hint`, `authorize_preview`, peer cgroup origin (once per connection, §1.5), `remote_view` for a `soos-remote.service` peer, local seat session check, per-UID rate limit | standard `Response` with `ProtocolError`/`UidMismatch`, zero pixel bytes |
 | `Event` (`PasswordFailed`) | root peer for any UID, any other peer for itself | target UID versus peer UID, per-peer event quota | dropped with a `warn`; events never get a response |
 | Presence auto-unlock (no message; daemon-internal, GitHub #323) | nobody: the daemon itself, for the owner of one locked local session | kill switch, logind snapshot (bound + `LockedHint`), lock grace and scan interval, template binding, account guard, lid/screen gates, PAM priority, rate-limit reserve, camera wake + PAD consensus + match, fresh logind re-check, fresh account check, kill-switch re-check, then `UnlockSession` (§6) | no unlock; the locker and its password path are untouched |
 

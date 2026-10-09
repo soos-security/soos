@@ -16,6 +16,7 @@ pub mod pipeline;
 pub mod presence;
 pub mod preview;
 pub mod preview_image;
+pub mod preview_peer;
 pub mod sd_notify;
 pub mod session;
 pub mod session_policy;

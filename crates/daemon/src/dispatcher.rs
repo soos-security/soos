@@ -1,5 +1,6 @@
 //! Connection dispatcher with bounded concurrency and request routing.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -25,8 +26,9 @@ use crate::pipeline::{
 use crate::preview::{
     authorize_preview, preview_image_for_frame, PreviewConfig, PREVIEW_FORMAT_EMPTY,
 };
+use crate::preview_peer::{classify_preview_peer_cgroup, PreviewPeerError, PreviewPeerOrigin};
 use crate::session::SessionValidator;
-use crate::session_policy::LocalSessionPolicy;
+use crate::session_policy::{LocalSessionPolicy, LogindSource, SystemLogind, DEFAULT_PROC_ROOT};
 use crate::shutdown::BlockingTasks;
 use soos_camera_v4l::{Frame, PixelFormat};
 use soos_evidence_store::{EvidenceFrame, EvidencePixelFormat, EvidenceStore, FrameMetadata};
@@ -106,6 +108,24 @@ struct ProcessedOutput {
     one_shot: bool,
 }
 
+/// Per-connection preview state (GitHub #345): the peer origin, classified once on the first
+/// `PreviewFrame` of the connection, and whether the first remote frame was announced.
+#[derive(Debug, Default)]
+struct PreviewPeerState {
+    origin: Option<PreviewPeerOrigin>,
+    first_frame_announced: bool,
+}
+
+/// Default source of `/proc/<pid>/cgroup` for preview peer classification: procfs at
+/// [`DEFAULT_PROC_ROOT`], independent of `enforce_active_session` (fail closed when the
+/// file is absent, unreadable or oversized).
+fn default_preview_peer_source(config: &DispatcherConfig) -> Arc<dyn LogindSource> {
+    Arc::new(SystemLogind::with_paths(
+        config.logind_sessions_dir.clone(),
+        PathBuf::from(DEFAULT_PROC_ROOT),
+    ))
+}
+
 /// Internal representation of a request response before transmission.
 #[derive(Debug)]
 struct ResponseOutput {
@@ -175,6 +195,8 @@ pub struct ConnectionDispatcher {
     clock_fn: fn() -> Result<u64, DaemonError>,
     preview: PreviewConfig,
     preview_limiter: tokio::sync::Mutex<RateLimiter>,
+    /// Source of the peer cgroup for preview peer classification (GitHub #345).
+    preview_peer_source: Arc<dyn LogindSource>,
     inference: InferenceGate,
     peer_limits: PeerLimitsConfig,
     event_limiter: tokio::sync::Mutex<RateLimiter>,
@@ -201,6 +223,7 @@ impl ConnectionDispatcher {
         let preview = PreviewConfig::default();
         let preview_limiter =
             tokio::sync::Mutex::new(RateLimiter::new(preview.rate_limit_config()));
+        let preview_peer_source = default_preview_peer_source(&config);
         Self {
             config,
             health,
@@ -212,6 +235,7 @@ impl ConnectionDispatcher {
             clock_fn: current_monotonic_nanos,
             preview,
             preview_limiter,
+            preview_peer_source,
             inference: InferenceGate::default(),
             peer_limits,
             event_limiter,
@@ -240,6 +264,7 @@ impl ConnectionDispatcher {
         let preview = PreviewConfig::default();
         let preview_limiter =
             tokio::sync::Mutex::new(RateLimiter::new(preview.rate_limit_config()));
+        let preview_peer_source = default_preview_peer_source(&config);
         Self {
             config,
             health,
@@ -251,6 +276,7 @@ impl ConnectionDispatcher {
             clock_fn: current_monotonic_nanos,
             preview,
             preview_limiter,
+            preview_peer_source,
             inference: InferenceGate::default(),
             peer_limits,
             event_limiter,
@@ -316,6 +342,15 @@ impl ConnectionDispatcher {
         self.preview_limiter =
             tokio::sync::Mutex::new(RateLimiter::new(preview.rate_limit_config()));
         self.preview = preview;
+        self
+    }
+
+    /// Test hook: overrides the source of `/proc/<pid>/cgroup` used to classify preview peers
+    /// (GitHub #345). The default is `SystemLogind::with_paths(config.logind_sessions_dir,
+    /// DEFAULT_PROC_ROOT)`, independent of `enforce_active_session`.
+    #[must_use]
+    pub fn with_preview_peer_source(mut self, source: Arc<dyn LogindSource>) -> Self {
+        self.preview_peer_source = source;
         self
     }
 
@@ -400,6 +435,7 @@ impl ConnectionDispatcher {
 
         let opened_at = Instant::now();
         let mut requests_processed: usize = 0;
+        let mut preview_state = PreviewPeerState::default();
         loop {
             if requests_processed >= self.peer_limits.max_requests_per_connection {
                 info!(
@@ -425,7 +461,7 @@ impl ConnectionDispatcher {
             // upon timeout will never leave partial response bytes on the wire.
             let res = timeout(
                 self.config.connection_timeout,
-                self.read_and_process(&mut stream, peer),
+                self.read_and_process(&mut stream, peer, &mut preview_state),
             )
             .await;
 
@@ -477,6 +513,7 @@ impl ConnectionDispatcher {
         &self,
         stream: &mut UnixStream,
         peer: PeerCredentials,
+        preview_state: &mut PreviewPeerState,
     ) -> Result<ProcessedOutput, DaemonError> {
         // Start of the outer `connection_timeout` window for this request: every later budget
         // (camera wake, consensus loop, inference admission) is measured from here (#159).
@@ -534,7 +571,7 @@ impl ConnectionDispatcher {
             ClientMessage::Request(req) => {
                 let one_shot = req.kind == RequestKind::Auth;
                 let res = self
-                    .handle_request(peer.uid, peer.pid, req, request_started)
+                    .handle_request(peer.uid, peer.pid, req, request_started, preview_state)
                     .await?;
                 Ok(ProcessedOutput {
                     encoded_response: Some(res.encoded_response),
@@ -639,6 +676,7 @@ impl ConnectionDispatcher {
         peer_pid: Option<i32>,
         req: Request,
         request_started: Instant,
+        preview_state: &mut PreviewPeerState,
     ) -> Result<ResponseOutput, DaemonError> {
         // Step 5a: Wire protocol validation (version and bounded fields)
         if let Err(val_err) = req.validate() {
@@ -733,7 +771,9 @@ impl ConnectionDispatcher {
         // Step 6c: Camera preview stream (GitHub #143): served only after kernel peer
         // verification, explicit authorization, session validation and rate limiting.
         if req.kind == RequestKind::PreviewFrame {
-            return self.handle_preview_request(peer_uid, &req).await;
+            return self
+                .handle_preview_request(peer_uid, peer_pid, &req, preview_state)
+                .await;
         }
 
         // Step 7: Monotonic deadline propagation check
@@ -1088,14 +1128,20 @@ impl ConnectionDispatcher {
     ///
     /// Order of checks (each one fails closed with zero pixel bytes on the wire):
     /// 1. `authorize_preview`: root peer, or `enabled` + allow-listed + `peer_uid == uid_hint`;
-    /// 2. active logind session for unprivileged peers (same validator as Step 6b);
-    /// 3. per-peer-UID rate limit (`[preview] max_requests_per_sec`), root included.
+    /// 2. unprivileged peer: origin from the peer cgroup, classified once per connection
+    ///    (unreadable or malformed refuses, GitHub #345);
+    /// 3. the remote companion (`soos-remote.service`) is refused unless `remote_view`;
+    /// 4. unprivileged peer: a local seat session of the peer UID (the root `Auth` predicate,
+    ///    ADR 2026-10-07 LC-3a);
+    /// 5. per-peer-UID rate limit (`[preview] max_requests_per_sec`), root included.
     ///
     /// Only then is the camera woken (`notify_activity`) and the latest capture copied.
     async fn handle_preview_request(
         &self,
         peer_uid: u32,
+        peer_pid: Option<i32>,
         req: &Request,
+        preview_state: &mut PreviewPeerState,
     ) -> Result<ResponseOutput, DaemonError> {
         if let Err(denied) = authorize_preview(&self.preview, peer_uid, req.uid_hint) {
             warn!(
@@ -1115,10 +1161,38 @@ impl ConnectionDispatcher {
             });
         }
 
-        if peer_uid != 0 && !self.session_validator.is_active_session(peer_uid) {
+        let origin = if peer_uid == 0 {
+            PreviewPeerOrigin::Local
+        } else if let Some(origin) = preview_state.origin {
+            origin
+        } else {
+            match self.classify_preview_peer(peer_uid, peer_pid) {
+                Ok(origin) => {
+                    preview_state.origin = Some(origin);
+                    origin
+                }
+                Err(_) => {
+                    warn!(
+                        peer_uid = peer_uid,
+                        "Preview peer cgroup unreadable or malformed; refusing preview request"
+                    );
+                    return self.refuse_preview(req);
+                }
+            }
+        };
+
+        if origin == PreviewPeerOrigin::RemoteCompanion && !self.preview.remote_view {
             warn!(
                 peer_uid = peer_uid,
-                "Preview peer has no active logind session; refusing preview request"
+                "Preview request from soos-remote refused: [preview] remote_view is false"
+            );
+            return self.refuse_preview(req);
+        }
+
+        if peer_uid != 0 && !self.session_validator.has_local_seat_session(peer_uid) {
+            warn!(
+                peer_uid = peer_uid,
+                "Preview peer has no active local seat session; refusing preview request"
             );
             let encoded = self.build_response(
                 req.request_id,
@@ -1237,11 +1311,47 @@ impl ConnectionDispatcher {
             }
             Err(err) => return Err(err.into()),
         };
-        debug!(
-            peer_uid = peer_uid,
-            bytes = encoded.len(),
-            "Generated preview response"
-        );
+        debug!(peer_uid = peer_uid, "Generated preview response");
+        if origin == PreviewPeerOrigin::RemoteCompanion
+            && !preview_resp.data.is_empty()
+            && !preview_state.first_frame_announced
+        {
+            preview_state.first_frame_announced = true;
+            info!(
+                peer_uid = peer_uid,
+                "Remote camera view: first preview frame served to soos-remote on this connection"
+            );
+        }
+        Ok(ResponseOutput {
+            encoded_response: encoded,
+            completion_error: None,
+        })
+    }
+
+    /// Classifies the origin of an unprivileged preview peer from its `/proc/<pid>/cgroup`.
+    fn classify_preview_peer(
+        &self,
+        peer_uid: u32,
+        peer_pid: Option<i32>,
+    ) -> Result<PreviewPeerOrigin, PreviewPeerError> {
+        let pid = peer_pid
+            .filter(|pid| *pid > 0)
+            .ok_or(PreviewPeerError::MissingPid)?;
+        let content = self
+            .preview_peer_source
+            .cgroup_of_pid(pid)
+            .map_err(|_| PreviewPeerError::Unreadable)?
+            .ok_or(PreviewPeerError::Unreadable)?;
+        classify_preview_peer_cgroup(&content, peer_uid)
+    }
+
+    /// Standard preview refusal: `ProtocolError` / `UidMismatch`, zero pixel bytes.
+    fn refuse_preview(&self, req: &Request) -> Result<ResponseOutput, DaemonError> {
+        let encoded = self.build_response(
+            req.request_id,
+            Verdict::ProtocolError,
+            ReasonClass::UidMismatch,
+        )?;
         Ok(ResponseOutput {
             encoded_response: encoded,
             completion_error: None,

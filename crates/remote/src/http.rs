@@ -10,8 +10,9 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use crate::{
-    BODY_READ_TIMEOUT_MS, MAX_AUTH_BODY_BYTES, MAX_BODY_CHUNKS, MAX_CHUNK_SIZE_DIGITS, MAX_HEADERS,
-    MAX_PATH_LEN, MAX_REQUEST_HEAD_BYTES, RESPONSE_WRITE_TIMEOUT_MS,
+    BODY_READ_TIMEOUT_MS, CAMERA_STREAM_BOUNDARY, CAMERA_STREAM_CONTENT_TYPE, MAX_AUTH_BODY_BYTES,
+    MAX_BODY_CHUNKS, MAX_CHUNK_SIZE_DIGITS, MAX_HEADERS, MAX_PATH_LEN, MAX_REQUEST_HEAD_BYTES,
+    RESPONSE_WRITE_TIMEOUT_MS,
 };
 
 /// Request method.
@@ -303,6 +304,33 @@ pub fn encode_sse_head() -> Vec<u8> {
     format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n{MANDATORY_HEADERS}\r\n")
         .into_bytes()
 }
+
+/// Head of a live camera view (ADR 2026-10-07, transport amended the same day): `200`,
+/// [`CAMERA_STREAM_CONTENT_TYPE`] and the unchanged mandatory headers; no `Content-Length`,
+/// no `Transfer-Encoding` (a close-delimited body). The body keeps the `soosframe` multipart
+/// framing, but it is not labelled `multipart/x-mixed-replace`: the iOS network stack splits
+/// such a response into separate responses and the page's `fetch` fails ("Load failed").
+#[must_use]
+pub fn encode_camera_stream_head() -> Vec<u8> {
+    format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: {CAMERA_STREAM_CONTENT_TYPE}\r\n{MANDATORY_HEADERS}\r\n"
+    )
+    .into_bytes()
+}
+
+/// Head of one camera part carrying `jpeg_bytes` JPEG bytes:
+/// `--soosframe\r\nContent-Type: image/jpeg\r\nContent-Length: <n>\r\n\r\n`. The JPEG bytes
+/// and a closing CRLF follow.
+#[must_use]
+pub fn encode_camera_part_head(jpeg_bytes: usize) -> Vec<u8> {
+    format!(
+        "--{CAMERA_STREAM_BOUNDARY}\r\nContent-Type: image/jpeg\r\nContent-Length: {jpeg_bytes}\r\n\r\n"
+    )
+    .into_bytes()
+}
+
+/// Best-effort closing boundary of a camera stream.
+pub const CAMERA_STREAM_TRAILER: &[u8] = b"--soosframe--\r\n";
 
 /// One SSE event: `event: status\ndata: <json>\n\n` (`json` carries no newline).
 #[must_use]

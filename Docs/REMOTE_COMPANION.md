@@ -4,22 +4,25 @@
 > ADR 2026-10-06 "Remote Unlock in `soos-remote`", ADR 2026-10-06 "Tailscale Funnel Access and
 > In-House Passkey Authentication for `soos-remote`", ADR 2026-10-06 "Failed-Password Alerts in
 > `soos-remote` From the System Journal", ADR 2026-10-06 "Web Push Notifications for
-> Failed-Password Alerts Through a Separate Sender Unit")
+> Failed-Password Alerts Through a Separate Sender Unit", ADR 2026-10-07 "Live Camera View in
+> `soos-remote` Through the Daemon Preview Channel")
 > Scope: a **user-level** service that shows the owner's phone the real-time lock status of the
 > desktop session, offers a remote **lock** and, only when `allow_unlock = true`, a remote
 > **unlock** protected by a passkey (Face ID) on every request (section 2a). Optionally it is
 > also reachable from the internet through Tailscale Funnel, behind a passkey login (section
 > 2b). When `password_alerts = true` the page also lists failed password attempts made on the
 > PC (section 2c), never the typed password, and with `push_notifications = true` sends them to
-> the phone as push notifications even when the app is closed (section 2d). Nothing else: no
-> camera (see "Out of scope").
+> the phone as push notifications even when the app is closed (section 2d). With
+> `camera_view = true` and the daemon's `[preview] remote_view = true` it also shows a live view
+> of the PC camera after Face ID (section 2f), never recorded. Nothing else (see "Out of scope").
 > Source of truth: `crates/remote/src/lib.rs` (constants), `crates/remote/src/config.rs`
 > (configuration keys), `crates/remote/src/server.rs` (request handling). If this document and
 > the code disagree, report the drift: the invariant `remote_companion_contract` pins the parts
 > of this page the acceptance criteria rely on (matrix rows RMC1–RMC44, walkthroughs 185, 186
 > and 187); `remote_passkey_contract` pins the Funnel and passkey parts; `remote_alerts_contract`
 > pins the failed-password alerts (rows RMC45–RMC59, walkthrough 188); `remote_push_contract`
-> pins the push notifications (rows RMC60–RMC74, walkthrough 189).
+> pins the push notifications (rows RMC60–RMC74, walkthrough 189); `remote_camera_contract`
+> pins the live camera view (rows RLC1–RLC16, walkthrough 191).
 
 ---
 
@@ -46,10 +49,17 @@
   process and shows failed password attempts made on the PC (section 2c);
 - when `push_notifications = true`, encrypts a short summary of each new burst of failed
   attempts for the phone and hands it to `soos-push-sender`, which delivers it as a standard
-  Web Push notification (section 2d).
+  Web Push notification (section 2d);
+- when `camera_view = true`, asks `soos-daemon` for preview frames over its Unix socket
+  (`RequestKind::PreviewFrame`) and streams them as JPEG to the page after a fresh Face ID
+  (section 2f).
 
-It runs as the session owner, never as root. `soos-daemon`, `pam_soos.so` and the IPC protocol
-are untouched; no other crate depends on `soos-remote`.
+It runs as the session owner, never as root. It is **not** a camera owner (it never opens
+`/dev/video*`), a recorder (no frame, snapshot or video is ever stored), a second face
+verifier or a way to view the camera after a full logout. `pam_soos.so` and the IPC wire format
+are untouched; the daemon only gained the opt-in `[preview] remote_view` key and the local seat
+session rule for previews (section 2f). Its only soos dependency is `soos-protocol`; no other
+crate depends on `soos-remote`.
 
 ## 2. Trust model (read this before exposing anything)
 
@@ -472,7 +482,168 @@ soos Brand Direction Applied to the `soos-remote` Web App" in `AI/DECISIONS.md`)
   `theme-color` meta is `#0047BB` and the iOS status bar is `black-translucent` over the band.
 - **Unchanged.** The Content Security Policy, `app.js`, `sw.js`, every element id and label, and
   the routes. The page uses the system font stack (no font file, no CDN) and contains no raster
-  from the brand archive.
+  from the brand archive. The later camera card (section 2f) is built by `app.js` at runtime with
+  the same tokens and adds no element id.
+
+## 2f. Live camera view (opt-in)
+
+The page can show the PC's camera live (ADR "[2026-10-07] Live Camera View in `soos-remote`
+Through the Daemon Preview Channel", GitHub #345): to check who is in front of the PC, or that
+nobody is. `soos-remote` never opens the camera itself. `soos-daemon` stays its only owner and
+`soos-remote` asks it for its latest frame over `/run/soos/daemon.sock`
+(`RequestKind::PreviewFrame`, the same channel `soos-gui` uses), so face unlock, presence
+auto-unlock and the view share one capture.
+
+**Double opt-in, off by default on both sides.** No frame reaches the phone unless **all** of
+these hold; every unknown or failed check refuses:
+
+- in `/etc/soos/daemon.toml` (root, `Docs/DAEMON.md` §1.5): `[preview] enabled = true`, your
+  UID in `allowed_uids`, and `remote_view = true` (default `false`, the daemon-side opt-in for
+  the companion);
+- your UID owns an active **local seat session** at the PC (`CLASS=user`, a seat, `REMOTE=0`,
+  active; a locked session counts). There is no view after a full logout, from an SSH-only
+  login or under a lingering user manager (the same rule now applies to the `soos-gui`
+  preview);
+- in `remote.toml` (section 5): `camera_view = true` (requires `rp_id`); over Funnel also
+  `camera_view_funnel = true` (requires `camera_view` and `allow_funnel`), otherwise the view
+  is tailnet only and a Funnel caller gets `403 camera_tailnet_only`.
+
+| `remote.toml` key | Default | Bounds |
+|---|---|---|
+| `camera_view` | `false` | TOML boolean; requires `rp_id` |
+| `camera_view_funnel` | `false` | TOML boolean; requires `camera_view = true` and `allow_funnel = true` |
+| `camera_max_view_s` | `120` | 10..=300 seconds per view |
+| `camera_fps` | `5` | 1..=10 frames per second |
+| `camera_width` | `640` | `640` (source size, at most 640x480) or `320` (2x downscale) |
+| `camera_quality` | `70` | 50..=85 (JPEG quality) |
+
+A value out of range (`0` included, never "unlimited") is refused at start-up (exit 78), never
+clamped; the range keys are checked even while `camera_view = false`. `camera_view` does not
+require `push_notifications`.
+
+**Fresh Face ID per view.** Every view, on the tailnet as over Funnel, starts with a fresh
+passkey assertion with user verification (Face ID / Touch ID) over a new single-use challenge
+of purpose `CameraView` (`POST /api/auth/camera/options`), distinct from the unlock challenge;
+a web session, a cookie or an earlier assertion never starts a view. Failures count against the
+same 5-failures lockout as unlock. A successful `POST /api/camera/start` reserves the view and
+returns a single-use stream token (256 random bits, valid 10 s, bound to the caller's class and
+Funnel session, carried only in the path, never logged); the page then opens
+`GET /api/camera/stream/<token>` with `X-Soos-Action: camera-stream`.
+
+**One view, bounded.** One view at a time for the whole PC (`409 view_in_progress`) and a
+maximum duration of `camera_max_view_s`. There is **no cooldown** between views (removed at
+the owner's request on 2026-10-07): right after a view ends (stop, maximum duration, error) a
+new one can start at once, still behind its own fresh Face ID assertion and the shared
+failure lockout. The view also ends on *Stop camera view*
+(`POST /api/camera/stop`, any signed-in caller may stop), when the page is hidden or closed,
+when the connection closes, when a part cannot be written within 2 s, when the Funnel web
+session expires (checked every 5 s), when no new frame could be sent for 5 s, on a daemon
+refusal, on an unsupported frame format and when the service stops.
+
+**Transport.** The stream is served as `application/octet-stream` and carries
+`soosframe`-delimited multipart parts: one baseline JPEG part per frame, each with its `Content-Length` (at most 512 KiB), at most `camera_fps` parts
+per second, over the existing `tailscale serve` / `tailscale funnel` path. The page reads it
+with `fetch` and a `ReadableStream` (bounded to 1 MiB of buffered bytes) and draws each frame
+into a canvas; the Content Security Policy is unchanged (no `blob:` or object URL, no `<img>`
+stream). It is deliberately not labelled `multipart/x-mixed-replace`: the iOS network stack
+handles that type itself, splits the response and makes the page's `fetch` fail ("Load
+failed", seen on the owner's iPhone on 2026-10-07). The `200` head is sent only once the first JPEG is ready (within 5 s); before that a
+failure is a JSON error the page can explain (`camera_refused`, `camera_unavailable`,
+`camera_format_unsupported`). Only Grey, YUYV and RGB24 preview frames are converted;
+`soos-remote` contains no image decoder.
+
+**Full screen, portrait and landscape.** A tap on the live image toggles **full screen**: the image
+fills the screen on the brand ink background, inside the iPhone safe areas, scaled to fit
+without cropping. Where the browser offers element fullscreen (iPad, desktop browsers) the
+page also requests it; iPhone Safari has none, so there the page uses a fixed full-viewport
+overlay, which in the home-screen app covers the whole screen. Full screen is left by tapping
+the image again, by the **✕** button ("Exit full screen"), by the Escape key or the browser's
+own exit gesture, and always when the view ends (stop, maximum duration, error, page hidden or
+left). One button switches between two modes, in the card as in full screen: **landscape**
+(the default, the image as the camera captures it) and **portrait** (the image turned by 90°
+and refitted to the box); the button names the mode it switches to. The mode is applied with
+a CSS class only (the Content Security Policy is unchanged), is kept in memory for the life
+of the page, so the next view starts in the same mode, and is never stored.
+
+**Awareness.** The camera **LED** lights while the daemon captures, and stays on for about 10 s
+after the last frame; it is the only indicator at the PC (no on-screen indicator). A view sends
+**no push notification**, even with push configured (section 2d): the notification sent at
+view start was removed at the owner's request (2026-10-07); push stays for the failed-password
+alerts only. The journal records `camera view started`, `camera view ended` and `camera view refused` (fixed
+text, at most one `refused` line per 5 s), and the daemon logs one `info` line per companion
+connection on its first frame, without any pixel data.
+
+**No recording.** There is **no recording**, no snapshot and no still image: frames and JPEG
+buffers live only in memory, the buffers `soos-remote` owns (daemon reply, converted pixels,
+JPEG output) are zeroized on drop, nothing is written to disk, logged or sent through Web Push.
+The encoder's internal working buffers are not zeroized (accepted residual). The phone itself
+can still screen-record what it shows.
+
+**Interaction with face unlock.** A view holds one daemon connection of your UID for its whole
+duration and uses at most `camera_fps` of the per-UID preview quota (`[preview]
+max_requests_per_sec`, 40 by default, shared with `soos-gui`). The daemon admits at most
+`max_connections_per_uid` (`[peer_limits]`, default 2) connections per unprivileged UID: with a
+view open **and** `soos-gui` open, a face request of a lock screen running as your user is
+refused at admission and falls back to the password (fail-safe, never an unlock). Close
+`soos-gui` during a view, or raise `max_connections_per_uid` to 3. Root PAM callers (`sudo`,
+the display manager) are not limited this way. The daemon closes an idle connection after
+`connection_timeout_ms` (`[dispatcher]`, default 2500 ms) and every connection after its
+lifetime and request caps; the client sends a request at least once per second, reconnects on
+its own before those caps (after 25 s or 1000 requests, closing the old connection first and
+waiting at most 200 ms for it) and abandons a daemon exchange that takes longer than 3 s, so
+keep `connection_timeout_ms` at its default or above `1000 / camera_fps` ms.
+
+**Not a security boundary.** The daemon recognises the companion by the peer process's cgroup
+(the `soos-remote.service` user unit) and refuses it unless `remote_view = true`. This is an
+administrative opt-in and an audit aid, **not a security boundary** against code already
+running as you: such code can read the GUI preview with `allowed_uids` alone, start a unit
+named `soos-remote.service`, or run `soos-remote` outside its unit (classified as a local
+client, which bypasses `remote_view`).
+
+**Third-party notice.** The JPEG encoder is the pure-Rust crate `jpeg-encoder` (licence
+`(MIT OR Apache-2.0) AND IJG`, allowed through a crate-scoped `deny.toml` exception); its IJG
+terms require the following attribution, reproduced here because it comes through
+`jpeg-encoder`:
+
+> This software is based in part on the work of the Independent JPEG Group.
+
+**Setup** (owner steps; agents and the installer never change `daemon.toml`):
+
+1. Make passkeys work first (`rp_id`, section 2b).
+2. As root, add to `/etc/soos/daemon.toml` (replace `1000` with your UID, `id -u`) and restart
+   the daemon:
+
+   ```toml
+   [preview]
+   enabled = true
+   allowed_uids = [1000]
+   remote_view = true
+   ```
+
+   ```sh
+   sudo systemctl restart soos-daemon
+   ```
+
+3. In `remote.toml`, set `camera_view = true` (and, for Funnel, `camera_view_funnel = true`),
+   then `systemctl --user restart soos-remote`. `scripts/install_remote.sh` writes these keys
+   commented out and prints the `daemon.toml` snippet; it never writes it.
+4. On the iPhone, open the app from the home-screen icon; the **Camera** card appears. Tap
+   **Start camera view**, confirm, pass Face ID.
+
+**Owner hardware check (matrix row RLC16).** With the setup above, from the iPhone home-screen
+app on the tailnet:
+
+1. a view starts after Face ID and shows live video within about 1 s, at about 5 fps, for up to
+   120 s; the camera LED is on;
+2. with `soos-gui` closed, face unlock at the PC's lock screen still works during the view;
+3. no push notification arrives for the view, even when section 2d is set up;
+4. *Stop camera view* ends the view at once; a new start right after it succeeds (after Face
+   ID, no countdown, no waiting);
+5. a tap on the image shows it full screen; tapping again or **✕** returns to the card;
+   **Portrait** / **Landscape** switches between the two modes, in the card and in full screen;
+6. after a full logout at the PC, a start is refused (`camera_refused`);
+7. optionally, over Funnel with `camera_view_funnel = true`, steps 1 and 4 again (the frame
+   rate over Funnel is bounded by Tailscale's relay throughput).
 
 ## 3. Requirements on the desktop
 
@@ -648,6 +819,12 @@ the PC is unreachable (off, asleep, or Tailscale disconnected).
 | `vapid_subject` | no | `https://<rp_id>` | `mailto:<you>@<domain>` or `https://<host>[/path]`, at most 256 printable bytes, no space, no port, no reserved name (`localhost`, `.local`, `.test`, `.example`, `.invalid`, `.internal`, `.home.arpa`) |
 | `push_socket_path` | no | `$XDG_RUNTIME_DIR/soos-push/push.sock` | absolute, at most 107 bytes; the socket of `soos-push-sender` |
 | `push_previews` | no | `"detailed"` | `"detailed"` (source, account, counts) or `"generic"` (fixed text on the lock screen) |
+| `camera_view` | no | `false` | TOML boolean; `true` enables the live camera view (section 2f); requires `rp_id`, and the daemon must allow it (`[preview] enabled`, `allowed_uids`, `remote_view`) |
+| `camera_view_funnel` | no | `false` | TOML boolean; `true` also allows the view over Funnel; requires `camera_view = true` and `allow_funnel = true` |
+| `camera_max_view_s` | no | `120` | 10..=300; maximum duration of one view in seconds |
+| `camera_fps` | no | `5` | 1..=10; frames per second sent to the phone |
+| `camera_width` | no | `640` | `640` (source size, at most 640x480) or `320` (2x downscale); any other value → refused |
+| `camera_quality` | no | `70` | 50..=85; JPEG quality |
 | `socket_path` | no | `$XDG_RUNTIME_DIR/soos-remote/remote.sock` | absolute, at most 107 bytes; `XDG_RUNTIME_DIR` unset or relative without `socket_path` → refused (no `/tmp` fallback) |
 
 A missing file, an unknown key or an invalid value exits with status 78 (`EX_CONFIG`), which the
@@ -675,6 +852,11 @@ The service also refuses to start when its real or effective uid is 0.
 | `POST /api/push/subscribe` | `X-Soos-Action: push-subscribe`, the browser's subscription JSON (at most 2 KiB): `200 subscribed`, `400 bad_request` / `unsupported_push_service`, `403 forbidden` / `push_disabled`, `409 too_many_subscriptions`, `413 body_too_large`, `429 rate_limited` (one per second, shared with unsubscribe), `503 unavailable` / `store_unavailable` |
 | `POST /api/push/unsubscribe` | `X-Soos-Action: push-unsubscribe`, `{"endpoint":…}`: `200 unsubscribed` (also for an unknown endpoint), `400`, `403`, `429`, `503` as above |
 | `POST /api/push/test` | no body; `X-Soos-Action: push-test`: `202 test_queued`, `409 no_subscriptions`, `429 rate_limited` (one per 10 s), `403`, `503` as above |
+| `GET /api/camera` | tailnet, or Funnel with a session: `200 {enabled, reachable, state, max_view_s, fps, width}`; `state` is `disabled`, `idle`, `pending`, `starting` or `streaming` (no cooldown state since 2026-10-07); never a token or a frame property |
+| `POST /api/auth/camera/options` | `X-Soos-Action: camera-options`, `Origin` = `https://<rp_id>`: a `CameraView` challenge (`200 {challenge, rp_id, timeout_ms}`), `403 forbidden` / `camera_disabled` / `camera_tailnet_only` / `passkeys_not_configured`, `409 no_passkey`, `429 rate_limited` / `too_many_challenges`, `503 unavailable` / `store_unavailable` |
+| `POST /api/camera/start` | `X-Soos-Action: camera-view`, JSON assertion body (section 2f): `200 {"result":"view_ready","stream_path":"/api/camera/stream/<token>","token_ttl_ms":10000,…}`, `403 forbidden` / `camera_disabled` / `camera_tailnet_only` / `passkeys_not_configured` / `passkey_required` / `passkey_rejected`, `400 bad_request`, `413 body_too_large`, `409 view_in_progress`, `429 rate_limited`, `503 unavailable` / `store_unavailable` |
+| `GET /api/camera/stream/<token>` | `X-Soos-Action: camera-stream`: `200 application/octet-stream` (`soosframe` JPEG parts until the view ends), or before the head `403 forbidden` / `camera_disabled` / `camera_tailnet_only` / `view_token_rejected` / `camera_refused`, `503 camera_unavailable` / `camera_format_unsupported`; `HEAD` → `405` |
+| `POST /api/camera/stop` | no body; `X-Soos-Action: camera-stop`: `200 stopped` / `no_view`, `403 forbidden` / `camera_disabled` |
 | `HEAD` of a `GET` route | same headers, empty body |
 
 `state` is one of `locked`, `unlocked`, `no_session`, `unavailable`. Any logind failure is
@@ -684,10 +866,12 @@ The service also refuses to start when its real or effective uid is 0.
 Every response carries `Cache-Control: no-store`, the CSP, `X-Content-Type-Options: nosniff`,
 `Referrer-Policy: no-referrer`, `X-Frame-Options: DENY` and `Connection: close`. Requests are
 bounded: 16 connections, 8 KiB head, 32 headers, 256-byte path, 5 s to send the head, 2 s per
-write, no request body except on the four passkey body routes and the two push subscription
-routes (`413 body_not_allowed` / `400`; on those routes at most 8 KiB, `Content-Length` or strict `Transfer-Encoding: chunked`,
+write, no request body except on the four passkey body routes, `POST /api/camera/start` and the two
+push subscription routes (`413 body_not_allowed` / `400`; on those routes at most 8 KiB, `Content-Length` or strict `Transfer-Encoding: chunked`,
 5 s to send it, `413 body_too_large`), 1.5 s per logind snapshot, 2 s per lock flow, 2 s per
-unlock flow.
+unlock flow. A camera stream keeps its connection (one of the 16, and one of the 8 Funnel
+connections over Funnel) for its whole lifetime, takes no event-stream slot, writes each part
+within 2 s and has no `Content-Length` (the body ends when the connection closes).
 
 ## 7. Troubleshooting
 
@@ -722,6 +906,13 @@ reason classes.
 | The address does not resolve with the VPN off | Funnel is not active (`tailscale funnel status` empty), the `funnel` node attribute is missing, *shields up* is on, or the public DNS name is younger than about 10 minutes | Section 2b prerequisites; wait and retry |
 | `tailscale funnel` refuses to start | The tailnet lacks HTTPS certificates or MagicDNS, or the node lacks the `funnel` attribute | Enable them in the admin console (section 2b) |
 | Face ID prompt never appears / `passkey_rejected` on every try | The page was not opened on `https://<rp_id>` (the passkey is bound to that exact name), the passkey was removed, or user verification was skipped | Open the exact `rp_id` address; `soos-remote passkeys list`; register again over the tailnet |
+| No **Camera** card on the page | `camera_view` is absent or `false` | Section 2f |
+| Camera: "The PC refused the camera view" (`403 camera_refused`) | The daemon refused the preview: `[preview] enabled`, `allowed_uids` or `remote_view` not set, or nobody is logged in at the PC's seat (SSH only, full logout) | Section 2f setup, step 2; log in at the PC |
+| Camera: `503 camera_unavailable` | The daemon is stopped, the camera gives no frame, or the daemon connection failed | `systemctl status soos-daemon`; retry |
+| Camera: `503 camera_format_unsupported` | The camera delivers NV12 or MJPEG previews, which `soos-remote` does not convert | Not supported in this version |
+| Camera: `403 camera_tailnet_only` | Over Funnel without `camera_view_funnel = true` | Use the tailnet, or section 2f |
+| Camera: `409 view_in_progress` | Another view is open (one view for the whole PC; there is no cooldown after a view) | Stop the other view, then start again |
+| Face unlock falls back to the password during a view | The view and `soos-gui` hold both daemon connections of your UID (`max_connections_per_uid` = 2) | Close `soos-gui` during a view, or raise `max_connections_per_uid` (section 2f) |
 | Signed in in Safari but the home-screen app asks again | Safari and the home-screen app keep separate cookies | Sign in once in each |
 
 ## 8. Residual limitations
@@ -769,6 +960,26 @@ reason classes.
   beyond 18 s can cause a duplicate notification; a newer summary replaces a pending
   `Retry-After` retry and is sent at once; a stolen Funnel session can register a device (check
   the device list); `ring`, `rustls` and the RustCrypto crates are not independently audited.
+- Live camera view (section 2f):
+  - Any process of your UID can already read frames through the GUI preview
+    (`allowed_uids`), start a unit named `soos-remote.service`, or run `soos-remote` outside
+    its unit (then classified as a local client, bypassing `remote_view`): `remote_view` is an
+    administrative opt-in and an audit aid, not a boundary.
+  - Whoever can pass Face ID on a device holding your passkey (iCloud Keychain compromise
+    included) can watch the camera; a stolen Funnel cookie alone gives no view, but can call
+    `POST /api/camera/stop` (harmless).
+  - A view holds one of your UID's 2 daemon connections and up to 10 of the 40 preview requests
+    per second shared with `soos-gui`: with `soos-gui` open as well, a lock-screen face request
+    is refused at admission and falls back to the password. At each proactive reconnect (at
+    most every 25 s) the client waits at most 200 ms for the daemon to release the old
+    connection; a PAM request in that window can still be refused at admission (password
+    fallback).
+  - Pixels transit `tailscaled` (and, over Funnel, Tailscale's relays, TLS terminated on the
+    PC); kernel socket buffers and `tailscaled`'s memory are outside soos' control; the phone
+    can screen-record.
+  - The camera LED is the only local indicator; there is no on-screen indicator.
+  - The daemon reads the peer cgroup by PID after `SO_PEERCRED`; PID reuse within a connection
+    is theoretically possible and only affects this administrative classification.
 - The `bind` → `chmod 0600` window of the socket is closed by the `0700` parent directory and
   the unit's `UMask=0077`; the service must therefore be started through the unit (or with the
   same umask).
@@ -781,9 +992,11 @@ reason classes.
   ES256, several users.
 - Any other public exposure path (Cloudflare Tunnel, Cloudflare Access, a custom domain, a
   reverse proxy): explored separately; it needs its own ADR before it may reach this socket.
-- **Lock/unlock-state notifications**, "monitoring lost" notifications, notification
-  actions, and push hosts other than Apple, Google and Mozilla (section 2d covers only
-  failed-password alerts and the test notification).
-- **Live camera** or any frame, embedding or evidence access.
+- **Lock/unlock-state notifications**, camera view notifications (removed 2026-10-07),
+  "monitoring lost" notifications, notification actions, and push hosts other than Apple,
+  Google and Mozilla (section 2d covers only failed-password alerts and the test notification).
+- Any recording, snapshot or still image of the **live camera** view (section 2f), audio,
+  H.264/WebRTC or any other live camera transport, an on-screen indicator, NV12/MJPEG
+  conversion, and any embedding or evidence access.
 - System-wide packaging (`install.sh`, deb/rpm/Arch): deferred until the owner approves the
   merge; `scripts/install_remote.sh` is the only installer.

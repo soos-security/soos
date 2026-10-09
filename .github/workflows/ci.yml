@@ -223,6 +223,12 @@ jobs:
           path: ~/.cache/ort.pyke.io
           key: ort-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
 
+      # The RLC-S1 invariant runs `cargo tree --offline --target all` (GitHub #345):
+      # the build only downloads host-target crates, so fetch every target's crates
+      # (for example android-activity) before the offline dependency checks.
+      - name: Fetch dependencies for every target
+        run: cargo fetch --locked
+
       - name: Build test binaries
         run: cargo test --locked --workspace --all-targets --all-features --no-run
 

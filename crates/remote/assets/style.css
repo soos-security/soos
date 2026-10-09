@@ -202,6 +202,14 @@
   .band-row .band-pill {
     color: var(--page);
   }
+
+  /*
+   * The full-screen camera stage stays in the brand ink in both themes: --text is ink in
+   * the light block, --page is ink here (three classes outrank the later base rule).
+   */
+  .camera .camera-stage.camera-full {
+    background: var(--page);
+  }
 }
 
 /* Base. */
@@ -749,4 +757,89 @@ input:focus-visible {
   button:active:not(:disabled) {
     transform: none;
   }
+}
+
+/*
+ * Live camera view (ADR 2026-10-07): layout only, the card is built by app.js. The stage
+ * is a size container: the canvas fills it with object-fit: contain. Two modes: landscape
+ * (the image as captured) and portrait, where the canvas box takes the container's height x
+ * width before a 90 degree rotation, so the turned image still fits. In the card the stage
+ * is 4:3 (3:4 in portrait); a tap puts
+ * it in full screen as a fixed overlay in the brand ink, inside the safe areas.
+ */
+.camera-stage {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  aspect-ratio: 4 / 3;
+  margin: 12px 0;
+  overflow: hidden;
+  border-radius: var(--r-table);
+  container-type: size;
+}
+
+.camera-stage.camera-portrait {
+  aspect-ratio: 3 / 4;
+  max-height: 70vh;
+}
+
+.camera-canvas {
+  display: block;
+  flex: none;
+  width: 100%;
+  height: 100%;
+  width: 100cqw;
+  height: 100cqh;
+  object-fit: contain;
+  cursor: zoom-in;
+  touch-action: manipulation;
+}
+
+.camera-stage.camera-portrait .camera-canvas {
+  width: 100cqh;
+  height: 100cqw;
+  transform: rotate(90deg);
+}
+
+.camera-tools {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  display: flex;
+  gap: var(--gap-item);
+}
+
+button.camera-tool {
+  width: auto;
+  min-width: var(--touch);
+  padding: 8px 16px;
+}
+
+.camera-stage.camera-full {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  width: auto;
+  height: auto;
+  max-height: none;
+  aspect-ratio: auto;
+  margin: 0;
+  padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+  border-radius: 0;
+  background: var(--text);
+}
+
+.camera-stage.camera-full .camera-canvas {
+  cursor: zoom-out;
+}
+
+.camera-stage.camera-full .camera-tools {
+  top: calc(8px + env(safe-area-inset-top));
+  right: calc(8px + env(safe-area-inset-right));
+}
+
+html.camera-lock,
+html.camera-lock body {
+  overflow: hidden;
 }

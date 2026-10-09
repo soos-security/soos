@@ -18,7 +18,8 @@ path = "src/lib.rs"
 [dependencies]
 # `process`: the `journalctl` child of the failed-password alerts (ADR 2026-10-06).
 tokio = { workspace = true, features = ["process"] }
-nix = { workspace = true }
+# `time`: CLOCK_MONOTONIC for the daemon preview reply freshness check (ADR 2026-10-07).
+nix = { workspace = true, features = ["time"] }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 thiserror = { workspace = true }
@@ -40,6 +41,10 @@ subtle = { workspace = true }
 hmac = { workspace = true }
 aes-gcm = { workspace = true }
 soos-push-protocol = { workspace = true }
+# Live camera view (ADR 2026-10-07, LC-1/LC-2): the daemon preview wire protocol, the only
+# other soos crate allowed, and a pure-Rust JPEG encoder (default features, no decoder).
+soos-protocol = { workspace = true }
+jpeg-encoder = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

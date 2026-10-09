@@ -5,7 +5,9 @@
 //! ADR 2026-10-06 "Failed-Password Alerts in `soos-remote` From the System Journal", A-11), and of
 //! Web Push (`push subscription added`, `push subscription removed`, `push delivery failed`,
 //! `push sender unavailable`, `push notifications unavailable`; ADR 2026-10-06 "Web Push
-//! Notifications for Failed-Password Alerts Through a Separate Sender Unit", W-14).
+//! Notifications for Failed-Password Alerts Through a Separate Sender Unit", W-14), and of the
+//! live camera view (`camera view started`, `camera view ended`, `camera view refused`; ADR
+//! 2026-10-07 "Live Camera View in `soos-remote` Through the Daemon Preview Channel").
 //!
 //! Each line is one `INFO` or `WARN` event with a constant message and no field. It is dispatched to
 //! the current subscriber after its own `enabled` check instead of through a `tracing` macro:
@@ -32,6 +34,42 @@ impl Callsite for AuditCallsite {
 
 /// The only field of an audit event.
 const FIELDS: &[&str] = &["message"];
+
+static CAMERA_STARTED_CALLSITE: AuditCallsite = AuditCallsite(&CAMERA_STARTED_META);
+static CAMERA_STARTED_META: Metadata<'static> = Metadata::new(
+    "camera view started",
+    "soos_remote::audit",
+    Level::INFO,
+    Some(file!()),
+    Some(line!()),
+    Some(module_path!()),
+    FieldSet::new(FIELDS, Identifier(&CAMERA_STARTED_CALLSITE)),
+    Kind::EVENT,
+);
+
+static CAMERA_ENDED_CALLSITE: AuditCallsite = AuditCallsite(&CAMERA_ENDED_META);
+static CAMERA_ENDED_META: Metadata<'static> = Metadata::new(
+    "camera view ended",
+    "soos_remote::audit",
+    Level::INFO,
+    Some(file!()),
+    Some(line!()),
+    Some(module_path!()),
+    FieldSet::new(FIELDS, Identifier(&CAMERA_ENDED_CALLSITE)),
+    Kind::EVENT,
+);
+
+static CAMERA_REFUSED_CALLSITE: AuditCallsite = AuditCallsite(&CAMERA_REFUSED_META);
+static CAMERA_REFUSED_META: Metadata<'static> = Metadata::new(
+    "camera view refused",
+    "soos_remote::audit",
+    Level::WARN,
+    Some(file!()),
+    Some(line!()),
+    Some(module_path!()),
+    FieldSet::new(FIELDS, Identifier(&CAMERA_REFUSED_CALLSITE)),
+    Kind::EVENT,
+);
 
 static LOGIN_CALLSITE: AuditCallsite = AuditCallsite(&LOGIN_META);
 static LOGIN_META: Metadata<'static> = Metadata::new(
@@ -236,4 +274,20 @@ pub fn push_sender_unavailable() {
 /// `WARN push notifications unavailable` (once, when the push store cannot be used at start).
 pub fn push_unavailable() {
     emit(&PUSH_UNAVAILABLE_META);
+}
+
+/// `INFO camera view started` (head and first part of a live camera view written).
+pub fn camera_view_started() {
+    emit(&CAMERA_STARTED_META);
+}
+
+/// `INFO camera view ended` (once per view that showed pixels, when it ends).
+pub fn camera_view_ended() {
+    emit(&CAMERA_ENDED_META);
+}
+
+/// `WARN camera view refused` (a refused camera start or stream request; rate gated by the
+/// caller to one line per `CAMERA_REFUSED_AUDIT_MIN_INTERVAL_MS`).
+pub fn camera_view_refused() {
+    emit(&CAMERA_REFUSED_META);
 }

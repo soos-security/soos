@@ -7,12 +7,14 @@
 
 use crate::alerts::AlertsEpoch;
 use crate::assets::AssetId;
+use crate::camera_slot::ViewToken;
 use crate::http::{Method, RequestHead};
 use crate::{
     ACTION_ALERTS_ACK, ACTION_HEADER, ACTION_LOCK, ACTION_PUSH_SUBSCRIBE, ACTION_PUSH_TEST,
     ACTION_PUSH_UNSUBSCRIBE, ACTION_UNLOCK, ALERTS_EPOCH_HEADER, ALERTS_THROUGH_HEADER,
     MAX_ALERTS_THROUGH_DIGITS,
 };
+use crate::{ACTION_CAMERA_STOP, ACTION_CAMERA_STREAM};
 
 /// Resolved route.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -53,6 +55,17 @@ pub enum Route {
     PushUnsubscribe,
     /// `POST /api/push/test`.
     PushTest,
+    /// `GET|HEAD /api/camera` (ADR 2026-10-07).
+    Camera,
+    /// `POST /api/auth/camera/options`.
+    CameraOptions,
+    /// `POST /api/camera/start` (body: the passkey assertion).
+    CameraStart,
+    /// `POST /api/camera/stop`.
+    CameraStop,
+    /// `GET /api/camera/stream/<token>`; the token is never kept in the route (it is
+    /// `Debug`-logged), the handler re-reads it from the path.
+    CameraStream,
     /// `404`.
     NotFound,
     /// `405` with an `Allow` header.
@@ -77,6 +90,17 @@ pub const PUSH_SUBSCRIBE_PATH: &str = "/api/push/subscribe";
 pub const PUSH_UNSUBSCRIBE_PATH: &str = "/api/push/unsubscribe";
 /// Path of `POST /api/push/test`.
 pub const PUSH_TEST_PATH: &str = "/api/push/test";
+/// Path of `GET|HEAD /api/camera` (ADR 2026-10-07).
+pub const CAMERA_PATH: &str = "/api/camera";
+/// Path of `POST /api/auth/camera/options`.
+pub const CAMERA_OPTIONS_PATH: &str = "/api/auth/camera/options";
+/// Path of `POST /api/camera/start`.
+pub const CAMERA_START_PATH: &str = "/api/camera/start";
+/// Path of `POST /api/camera/stop`.
+pub const CAMERA_STOP_PATH: &str = "/api/camera/stop";
+/// Prefix of `GET /api/camera/stream/<token>`.
+pub const CAMERA_STREAM_PREFIX: &str = "/api/camera/stream/";
+
 /// Path of the Web Push service worker.
 pub const SERVICE_WORKER_PATH: &str = "/sw.js";
 
@@ -110,6 +134,9 @@ fn post_route(path: &str) -> Option<Route> {
         PUSH_SUBSCRIBE_PATH => Some(Route::PushSubscribe),
         PUSH_UNSUBSCRIBE_PATH => Some(Route::PushUnsubscribe),
         PUSH_TEST_PATH => Some(Route::PushTest),
+        CAMERA_OPTIONS_PATH => Some(Route::CameraOptions),
+        CAMERA_START_PATH => Some(Route::CameraStart),
+        CAMERA_STOP_PATH => Some(Route::CameraStop),
         _ => None,
     }
 }
@@ -120,6 +147,8 @@ pub fn allow_header(path: &str) -> &'static str {
     let path = path.split('?').next().unwrap_or(path);
     if post_route(path).is_some() {
         "POST"
+    } else if camera_stream_token(path).is_some() {
+        "GET"
     } else {
         "GET, HEAD"
     }
@@ -144,6 +173,7 @@ pub fn route(method: Method, path: &str) -> Route {
         AUTH_STATE_PATH => Some(Route::AuthState),
         ALERTS_PATH => Some(Route::Alerts),
         PUSH_PATH => Some(Route::Push),
+        CAMERA_PATH => Some(Route::Camera),
         _ => None,
     };
     if let Some(found) = read_route {
@@ -158,7 +188,39 @@ pub fn route(method: Method, path: &str) -> Route {
             Method::Get | Method::Head | Method::Other => Route::MethodNotAllowed,
         };
     }
+    if camera_stream_token(path).is_some() {
+        return match method {
+            Method::Get => Route::CameraStream,
+            Method::Head | Method::Post | Method::Other => Route::MethodNotAllowed,
+        };
+    }
     Route::NotFound
+}
+
+/// The token of a stream path: `None` unless `path` is exactly [`CAMERA_STREAM_PREFIX`]
+/// followed by a strict, canonical 43-character token.
+#[must_use]
+pub fn camera_stream_token(path: &str) -> Option<ViewToken> {
+    path.strip_prefix(CAMERA_STREAM_PREFIX)
+        .and_then(ViewToken::parse)
+}
+
+/// Pure: the lock CSRF rules with `action` ∈ {`camera-stream`, `camera-stop`} (Origin
+/// optional, same host when present); any other `action` argument is refused (ADR
+/// 2026-10-07).
+///
+/// # Errors
+///
+/// [`CsrfError`].
+pub fn check_camera_csrf(
+    head: &RequestHead,
+    normalized_host: &str,
+    action: &str,
+) -> Result<(), CsrfError> {
+    if ![ACTION_CAMERA_STREAM, ACTION_CAMERA_STOP].contains(&action) {
+        return Err(CsrfError::MissingActionHeader);
+    }
+    check_action_csrf(head, normalized_host, action)
 }
 
 /// CSRF refusal; every variant → `403`.
@@ -281,9 +343,10 @@ fn check_action_csrf(
 // Passkey routes (architect spec §4.7).
 // ---------------------------------------------------------------------------------------
 
-/// Pure: true exactly for the six body routes, `POST` only, query ignored:
+/// Pure: true exactly for the seven body routes, `POST` only, query ignored:
 /// `/api/unlock`, `/api/auth/login/verify`, `/api/auth/register/options`,
-/// `/api/auth/register/verify`, `/api/push/subscribe`, `/api/push/unsubscribe`.
+/// `/api/auth/register/verify`, `/api/push/subscribe`, `/api/push/unsubscribe`,
+/// `/api/camera/start`.
 #[must_use]
 pub fn accepts_body(method: Method, path: &str) -> bool {
     let path = path.split('?').next().unwrap_or(path);
@@ -296,6 +359,7 @@ pub fn accepts_body(method: Method, path: &str) -> bool {
                 | REGISTER_VERIFY_PATH
                 | PUSH_SUBSCRIBE_PATH
                 | PUSH_UNSUBSCRIBE_PATH
+                | CAMERA_START_PATH
         )
 }
 

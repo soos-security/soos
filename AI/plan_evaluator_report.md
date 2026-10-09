@@ -1,112 +1,84 @@
 # Plan Evaluation Report
-- **Date**: 2026-10-06
-- **Issue**: GitHub #339 follow-up — soos brand direction applied to the `soos-remote` web app (owner request 2026-10-06)
-- **Branch**: `feat/remote-auth-alerts` (base `ed52b02`)
-- **Base commit**: `47ab53e` (`origin/main`)
-- **Spec evaluated**: `AI/architect_spec_remote_brand.md`, round 2 (with `AI/design_brief_remote_brand.md` and the drafted ADR in `AI/DECISIONS.md`)
-- **Previous round**: round 1, REVISION_REQUIRED (F1–F3 MAJOR, F4–F12 MINOR)
+- **Date**: 2026-10-07
+- **Issue**: GitHub #345 — Live camera view in `soos-remote` through the daemon preview channel (GitHub-only issue, no `AI/BACKLOG.md` entry, like #339)
+- **Branch**: `feat/remote-live-camera`
+- **Base commit**: `05001c9` (`origin/main`)
+- **Spec evaluated**: `AI/architect_spec_remote_live_camera.md`, **round 2** (§19 maps the round-1 findings F1–F12), against the ADR "[2026-10-07] Live Camera View in `soos-remote` Through the Daemon Preview Channel" as amended (D-1, D-2), owner decisions LC-1..LC-4, `AI/research_live_camera.md` and the current code.
+- **Previous round**: round 1, REVISION_REQUIRED (F1–F3 MAJOR; F5, F6, F8–F12 and one wording fix MINOR).
 
 ## 1. Coverage Matrix
 
-| Owner requirement / acceptance line | Spec element | Status |
+| Acceptance line (ADR item / owner decision / orchestrator default) | Spec element (round 2) | Status |
 |---|---|---|
-| Palette identical to `origin/main:crates/gui/src/theme.rs`, CSS custom properties named after the constants | §2.2, D3, D4, test 63 | Covered (live parse now accepts every form `theme.rs` uses, §2) |
-| Logo: SOOS wordmark inline SVG on the blue band | §4.2, test 70 | Covered |
-| Star mark as `icon.svg` + favicon; `apple-touch-icon.png` 180 x 180 opaque, regenerated from the vector | §6.1, §6.2, D9, test 71 (color type 2 exactly) | Covered |
-| Manifest `theme_color` / `background_color` from the palette | §6.3, D6, test 72 (per-entry icon check) | Covered |
-| Mobile first, standalone, safe-area insets | §2.4 `--gutter`, band/main/footer `env()`, D13, test 67 | Covered |
-| Light default + dark variant from the same palette (ink body) | §2.2b, §2.3, test 65 | Covered (tints recomputed, §2) |
-| WCAG AA text contrast | §8, test 66 (pairs + selector-to-role bindings) | Covered (recomputed, §2) |
-| Visible focus, 44 px touch targets | §3 Focus/Buttons/Footer, §8, test 67 | Covered |
-| Status as a big blue tile with white text like the GUI stat tiles | §3 Stat tile, §4.2, `clamp()` display sizes | Covered |
-| Button semantics (primary blue, danger for unlock) | D5, D12, §3 | Covered; deviation from the GUI recorded (D12, ADR, open point 4) |
-| Alerts banner and push card in card style | §3 Banner/Table, §4.2, D11 (no switch) | Covered |
-| Every id, label, behaviour kept; every UI state reachable | §4.3, §5, test 69, D1 | Covered (29 ids, `[hidden]` rule kept, `app.js` frozen) |
-| CSP unchanged; no inline script/style, no remote font/CDN, no `data:` | §0.1.6, §7, tests 68, 73 | Covered; N1 (test 68 regex wording) |
-| `textContent` only, no storage, service worker unchanged | D1 (`app.js`, `sw.js` byte-identical) | Covered |
-| System font stack only | §2.4, test 73 | Covered |
-| No archive raster; never `New_Gui_Interface.png` | §0.1.5, ADR item 4, test 73 (fixed asset set), test 68 (no `data:`) | Covered |
-| Rust untouched beyond `assets.rs` needs | D1, §1.1 (no Rust change at all) | Covered |
-| Playwright visual checks: 5 states x light/dark at 390 x 844 @3x, stub server, scratchpad only | §9.1 (+ 375/320 px narrow checks) | Covered |
-| Contract Migrations in `AI/tester_contract_brand.md` | §13 (CM-1), test 74 | Covered |
-| Optional scanner fix (`br`/`cr`), self-test, walkthrough 188 R3.7 reword | D10, test 75, CM-1, §1.1 | Covered; N2 (one case without power) |
-| Docs `Docs/REMOTE_COMPANION.md` §2e + §4 icon-cache note | §10, test 74 | Covered |
+| (1) Single camera owner; remote consumes only `PreviewFrame` | §1.1, §5, RLC-S1, tests 50, 59 | Covered |
+| (1) Face unlock keeps working while a view is open | §11, R-3, test 63 `test_rlc_view_connection_leaves_room_for_auth`, RLC16 | Covered (round-1 F11 resolved) |
+| (2)/LC-1 Only `soos-protocol`; RMC-S4 migrated | §1.1, §12, tests 50, 60 | Covered |
+| (2) ≤ 1 daemon connection, reconnect before lifetime, back off on `RateLimited` | §5.2 steps 1, 3a, 6; tests 20 (F5 extension), 33, 62 | Covered |
+| (3)/LC-2 `jpeg-encoder`, crate-scoped IJG, no decoder, Grey/YUYV/RGB24 | §6, §16 D-6, tests 1–9, 50, 51, 57, 59 | Covered (IJG attribution added) |
+| (4a)/LC-3a Local seat session `CLASS=user`, `SEAT`, `REMOTE=0`, active | S-7, §9.1 (`check_local_seat_session_of(uid).is_ok()`), RLC3, test 44 (+ `REMOTE` absent / `REMOTE=yes` fixtures) | Covered (F1 resolved) |
+| (4b)/LC-3b `remote_view`, cgroup recognition fail closed, one `info` line | §4.2, §9.2, §9.3, tests 41 (+ uid-mismatch case), 42, 43, 45–47 | Covered |
+| (5)/LC-4 `camera_view` / `camera_view_funnel`, tailnet-only default | §4.1, §8.4–8.6, tests 23, 26, 36 | Covered |
+| (5) Fresh UV `CameraView` assertion, `X-Soos-Action: camera-view`, same origin | §8.4, §8.5, tests 24, 25, 38, 40 | Covered |
+| (5) Single-use token, one slot, max duration, fps, resolution, cooldown | §7, §8.6, §8.7 tick rule, tests 10–16, 28, 29, 31 (+ no burst catch-up), 4 | Covered |
+| (5) Ends on stop, close, write timeout, session expiry | §7.2 durable flag, §8.7 rules 1–3, §8.8, tests 30 (a)(b)(c), 61 | Covered (F2, F3 resolved) |
+| (6) multipart JPEG, `fetch` + `ReadableStream` into a canvas, CSP unchanged | §8.6, §10.3, tests 27, 55 | Covered |
+| (7) No recording, no pixel logging, soos-remote buffers zeroized | §6.4, RLC-S7, tests 52–54, 39 | Covered |
+| (8) Push at start (best effort), fixed-text audit lines | §10.1, §10.2, tests 34, 35, 39 | Covered |
+| (9) No view after full logout | test 44, RLC16 | Covered |
+| Orchestrator defaults (120/300 s, 5/1..10 fps, 640/320, q70, one slot, cooldown, push best effort, no recording) | §3.2, §4.1, tests 29, 35, 36, 53 | Covered |
+| Q-1 → S-3 runtime DOM; D-1 amended residual | S-3, §6.4, §16 | Covered |
+| Contract migrations listed and justified | §12 (unchanged, grep-verified complete in round 1) | Covered |
+| Docs, walkthrough 191, matrix RLC1–RLC16 after RMC88 | §14, §16 D-4..D-6 | Covered (F8 resolved) |
 
 ## 2. Facts Verified Against Code
 
+Round-1 facts still hold. Round-2 checks:
+
 | Fact cited by plan | Code location | Actual value | Match |
 |---|---|---|---|
-| 25 palette names and values | `origin/main:crates/gui/src/theme.rs` l.24–73 | 24 `Color32::from_rgb(0x.., 0x.., 0x..)` equal to §2.2, `WHITE` = `Color32::WHITE` | Yes |
-| Numeric constants and their forms | `theme.rs` l.103–117 | `BODY_TOP_RADIUS: u8 = 20`, `GAP_CARD: f32 = 14.0`, `R_CARD: u8 = 20`, `R_TABLE: u8 = 14`, `R_INPUT: u8 = 10`, `STROKE_CARD: f32 = 2.0`; neighbours `R_VIDEO`, `R_BUTTON`, `EYE_AXIS` (`from_rgba_premultiplied`) | Yes — every form is accepted by test 63's parser (round-1 F2 resolved) |
-| 14 dark tints with `(a·(100−n) + b·n + 50) / 100` | §2.2b | Recomputed in integer arithmetic (scratchpad script): all 14 equal the table, incl. `--pale-weak #7F8590`, `--blue-soft #82A5E0` | Yes (round-1 F1 resolved) |
-| Contrast, light | recomputed (WCAG 2.x) | text pairs min 4.76 (`on-danger`/`danger-fill`); `danger-fg`/`card` 8.43; `secondary-fg`/`secondary-pressed` 5.53; non-text: `dot-idle`/`strip` 3.48, `focus`/`card` 7.11; banner glyph cut-outs (`-bg` on `-icon`) all ≥ 3 | Yes |
-| Contrast, dark | recomputed | text min 4.55 (`secondary-fg`/`secondary-pressed`), `danger-fg`/`card` 6.09, `link`/`page` 7.16; non-text `dot-idle`/`strip` 4.28, `focus`/`card` 6.36 | Yes (matches §2.2b) |
-| 29 ids = the `getElementById` set of `app.js` | `app.js` l.120–148 | 29 `getElementById("…")` calls; no `querySelector`, no other `classList`/`className` write | Yes |
-| `#state` class replaced; `.alerts-attention` toggled | `app.js` l.275, l.467 | `stateNode.className = "state state-" + …`; `classList.toggle("alerts-attention", …)` | Yes (D2 hooks exist) |
-| Funnel login hides status card and Sign out | `app.js` l.252–266 | `statusCard.hidden = true; logoutButton.hidden = true` / restored on session | Yes (§4.3) |
-| Push "on" condition is device-agnostic | `app.js` l.925 | `pushDisableButton.hidden = count === 0` with `count = view.subscriptions` | Yes; switch dropped (D11, round-1 F3 resolved) |
-| GUI danger outline color | `origin/main:crates/gui/src/widgets.rs` l.712–719 | `DANGER` text and border | Deviation recorded (D12) |
-| `STAR_SPIKES`, `Icon_logo.svg`, `text_logo.svg` geometry | `brand.rs` l.157–170, owner archive | as §4.2/§6.1 (verified round 1, unchanged) | Yes |
-| Touch-icon command determinism (2 742 B, `3442af18…`) | re-run in round 1 | identical | Yes |
-| Current markup needles of existing tests | `index.html`, `remote_*_contract.rs`, `crates/remote/tests` | no test pins `h1`, `main.card`, `#1f2937`, `detail` on `#alerts-coverage`, meta values or manifest colors; S8 checks ` onclick=`/` onload=`/` onerror=` with a leading space | Yes (§13: CM-1 only) |
-| `blank_string_literals` current behaviour | `remote_alerts_contract.rs` l.424–484 | raw start requires `r` at an identifier boundary, so `br"C:\"` opens an escaped string; char literals (incl. `'"'`) kept whole | Yes (test 75 red on current helper, both the positive and the `br#"x"acknowledged"#` negative case) |
-| Walkthrough 188 R3.7 claim | `AI/walkthroughs/188_remote_auth_alerts.md` l.190–191 | "the failure direction is a false positive, never a hidden violation" | Yes (claim wrong, reword planned) |
-| Brief and ADR consistent with round 2 | `AI/design_brief_remote_brand.md`, `AI/DECISIONS.md` diff | no `#7E8490`/`#82A4E0`; switch removed (brief §5.8); ADR states integer rounding, no switch, D12 deviation | Yes |
+| Root `Auth` predicate reused for preview | `crates/daemon/src/session_policy.rs:106-123` | `check_local_seat_session_of` refuses `remote != Some(false)` (absent/malformed `REMOTE` refused) | Yes |
+| `REMOTE=yes` parses as `remote = None` | `session_policy.rs:87-93` | only `"0"`/`"1"` set it | Yes — test 44's malformed fixture has power |
+| Daemon releases the per-UID permit when `handle_connection` returns on EOF | `crates/daemon/src/dispatcher.rs:381-470` (`UnexpectedEof` → `break` → `_permit` dropped) | yes, so `shutdown(Write)` + wait for EOF orders the release before the next connect | Yes |
+| Daemon never reads a request after its lifetime/request cap or idle timeout fires | `dispatcher.rs:403-452` | caps checked before the read; idle close happens while waiting for a request | Yes — the one immediate retry cannot duplicate a processed request in the normal case |
+| SSE drain pattern | `crates/remote/src/server.rs:118,2136,2231-2235` | `STREAM_SINK_BYTES = 64` (private const of `server.rs`), drain, end on `Ok(0)`/`Err` | Yes (camera module needs its own or a `pub(crate)` constant, observation O4) |
+| Per-UID admission default | `crates/daemon/src/limits.rs:23` | 2, root exempt | Yes — test 63's third-connection refusal is correct |
+| `jpeg-encoder` 0.7.1 | local cargo cache (per coordinator), crates.io | `(MIT OR Apache-2.0) AND IJG`, zero normal deps | Yes |
 
 ## 3. Pillar Analysis
 
 ### Pillar 1 — Architecture & threat model
-- Failure scenario considered: the redesign needs a CSP relaxation (inline style, web font, remote image) on a Funnel-exposed origin.
-- Design excludes it: `http.rs` frozen (D1); tests 68 and 73 forbid `url(`, `@import`, `@font-face`, `<style`, ` style=`, event attributes, `data:`/`blob:`/`javascript:`, and pin the seven-file asset set; inline SVGs carry no `href`/`<use>`/`<foreignObject>`. No PAM, daemon, IPC or socket path is touched.
-- Result: PASS.
+- Failure scenario considered: a logind record without `REMOTE=` or with a malformed value. Round 2 refuses it (`check_local_seat_session_of`), identical to the root `Auth` path; test 44 fails against a `REMOTE != 1` implementation. Result: PASS (F1 resolved).
+- Failure scenario considered: a process placed outside or inside `soos-remote.service`. Unchanged administrative semantics (R-1, RLC-S13). Result: PASS.
 
 ### Pillar 2 — PAM deadline & concurrency
-- Failure scenario considered: a Rust change slipping into `crates/pam` or a latency path.
-- Design excludes it: no Rust source change at all; static assets only.
-- Result: PASS (not applicable).
+- Failure scenario considered (2-connection limit): a proactive reconnect while swaylock-plugin starts a face request. Round 2 half-closes, waits ≤ 200 ms (`CAMERA_DAEMON_CLOSE_WAIT_MS` < connect timeout, compile-asserted) for the daemon's EOF, then connects; the daemon drops the permit before closing its side, so in the normal case at most one permit is held at the next connect; the residual (daemon slower than 200 ms) is fail-safe and documented in R-3. Test 20 pins the ordering; test 63 pins that a held view connection leaves room for a second connection. Result: PASS (F5 resolved).
+- Failure scenario considered (single immediate retry): the daemon idle-closes a reused connection; the client's write gets `EPIPE` or the read gets EOF before any reply byte → one retry on a fresh connection with a new nonce, no back-off; a fresh-connection failure or a second failure is `Io` (bounded, test 62). A reply to the first request can never be read on the retry (different connection, new nonce, refusals checked with `matches_request`); a duplicate daemon-side processing would only cost one preview rate-limit token of a read-only request. Worst-case duration of one `next_frame` becomes ≈ IO timeout + connect + IO timeout (≈ 6.5 s) when the EOF arrives late, above the `CAMERA_DAEMON_IO_TIMEOUT_MS < CAMERA_FIRST_FRAME_TIMEOUT_MS` intuition, but still bounded because the first-frame and stall timers are terminal arms that drop the step. Result: PASS with observation O2.
+- PAM code and the `Auth` path untouched. Result: PASS.
 
-### Pillar 3 — Panic safety & fail-closed (UI-state reachability and truthful security state)
-- Scenario 1: a wrapper (`.actions { display: flex }`, `.table`) reveals an element `app.js` hid. Excluded: `[hidden] { display: none !important; }` kept; `.table:empty` only hides.
-- Scenario 2: a decoration states a security property the text does not (round-1 F3). The switch is gone (D11), and the status dot derives only from `#state.state-*`, the same state written as text (D8). PASS.
-- Scenario 3: the destructive action becomes the most prominent control. `Unlock now` is a danger outline; `confirm()` and Face ID unchanged (D5). PASS.
-- Scenario 4: a long state word overflows the tile on a 320 px phone and is clipped (state hidden). `clamp()` sizes, `overflow-wrap: anywhere` and narrow-width visual checks (§9.1). PASS.
-- Result: PASS.
+### Pillar 3 — Panic safety & fail-closed
+- Failure scenario considered (F2): a Funnel session-check tick or stray read-half bytes while an exchange is in flight or a part write is blocked. Round 2 pins the frame step outside `select!`, polls it by `&mut`, recreates it only after completion, writes the part in the arm body (no other arm runs during it), and drains the read half into a 64-byte sink. Only terminal arms drop the step, and the stream ends right after. Test 61 asserts aligned parts and zero cancelled requests. Result: PASS (F2 resolved); implementation note O1.
+- Failure scenario considered (F3): stop issued while a part write is blocked, or during the first-frame phase. Round 2 combines the durable slot flag (never cleared until `end`; `stop_requested` also true once the slot no longer holds the view) with a `watch` epoch (versions are never lost) and a flag check at the top of every iteration and after every arm body. Test 30(a) fails against a `notify_waiters`-only implementation. Result: PASS (F3 resolved); observation O3.
+- `JoinError` → `Internal`, `ViewGuard` drop on every path, poisoned mutex fail closed. Result: PASS.
 
 ### Pillar 4 — Dependencies
-- Failure scenario considered: a PNG or CSS crate added to the invariants crate, or a font file.
-- Design excludes it: dependency-free tests (PNG chunks parsed by hand, integer tint math, local WCAG formula), system fonts only, `Cargo.lock`/`deny.toml` untouched.
-- Result: PASS.
+- `jpeg-encoder =0.7.1` (cached), crate-scoped IJG exception (cargo-deny 0.20.2 syntax), attribution sentence pinned by test 57, licence policy line of the guidelines updated (D-5). Result: PASS.
 
 ### Pillar 5 — Data confidentiality
-- Failure scenario considered: the owner's face (`New_Gui_Interface.png`) or another archive raster enters the repository, directly or as a `data:` URI or traced image.
-- Design excludes it: §0.1.5, ADR item 4, touch icon rendered only from the repository `icon.svg`, test 73 pins the asset set, test 68 forbids `data:`; screenshots stay in the scratchpad (§9.1).
-- Result: PASS.
+- The retry adds no new buffer: the dropped connection's partial reply buffer is the `Zeroizing` exchange buffer. The close-wait sink holds no pixel data (it is drained after the last full reply). Token, audit and push unchanged from round 1. Result: PASS.
 
-### Pillar 6 — Test integrity and test power
-- Wrong implementation A — tint computed with float and truncation (`#7E8490`): test 64's integer recomputation and self-test (`mix(PALE, INK, 50) == 0x7F8590`) fail it. PASS.
-- Wrong implementation B — after rebase, `theme.rs` changes `BLUE` but the CSS does not: test 63's live branch compares against the pinned table and fails; the parser is exercised now by the excerpt self-test (incl. `WHITE`, `u8`, `f32`, prefix neighbours, unsupported form). PASS.
-- Wrong implementation C — `.alerts-attention .alerts-summary { color: var(--danger-fill) }`: test 66 binding requires `var(--banner-danger-fg)` and forbids `--danger-fill` as `color:`. PASS.
-- Wrong implementation D — `color: var(--blue)` in a component: test 64 token-by-token rule rejects palette names outside role blocks (self-test covers it). PASS.
-- Wrong implementation E — an `onfocus=` handler added to a button: test 68's "any `on[a-z]+=` attribute" catches it, **but** as worded the pattern also matches `content=` of every `<meta>` (`c` + `ontent=`), so a literal implementation is red against a correct page and could only be fixed by editing an immutable test. → N1 (MINOR).
-- Wrong implementation F — a regression making `b'"'` open a string literal: in test 75 that case is the last statement of the negative snippet, so the swallowed tail contains nothing and the test still passes. → N2 (MINOR).
-- Test 69 passes on the current page by design (regression guard), declared and recorded. Existing tests unchanged; CM-1 only strengthens a helper.
-- Result: FINDING (N1, N2, both MINOR).
+### Pillar 6 — Test integrity
+- New tests 61–63 and extended tests 4, 5, 20, 30, 31, 41, 44, 57 each fail against the plausible wrong implementation named in round 1 (`REMOTE != 1`, `notify_waiters`, frame write inside the polled future, burst catch-up, missing uid-mismatch rule, missing retry). §12 migrations unchanged and complete. Result: PASS.
 
 ## 4. Findings
 
-Round-1 findings: F1–F12 all resolved as stated in spec §16 (verified: tints, parser forms, switch removal in spec/brief/ADR, token-by-token rule with self-test, selector bindings, D13 frame, test names s44–s56, D12, manifest entries, glyph cut-out roles ≥ 3:1, `clamp()` + narrow checks, color type 2).
+Every round-1 required revision is resolved in the spec text, not only claimed in §19 (verified in S-7, §5.2 steps 1/3a, §6.2–6.3, §7.2, §8.5 step 5, §8.6 (step 5 and "Permits held by a stream"), §8.7 rules 1–3 and the tick rule, §8.8, §9.1, §14, §16 D-2/D-5/D-6, R-3, and tests 4, 5, 20, 30, 31, 41, 44, 57, 61–63). No `REMOTE != 1`, dangling "§7.4" or "body present" text remains.
 
-New in round 2 (none blocking):
+No CRITICAL or MAJOR finding. Non-blocking observations for the tester and the developer (no spec round needed):
 
-- **[MINOR] N1 — Test 68 event-attribute pattern needs an attribute-name boundary.** "no `on[a-z]+=` attribute" read as a plain regex over `index.html` matches `content=` in every `<meta>` tag. Required wording for the tester: match only attribute names, i.e. `on[a-z]+\s*=` preceded by whitespace inside a tag (lowercased source), with a self-test: `<button onfocus="x">` rejected, `<meta name="a" content="b">` accepted, `<p>button=</p>` text accepted.
-- **[MINOR] N2 — Test 75's `b'"'` case has no power.** Placed last in the negative snippet, a mis-handled `b'"'` swallows nothing. Add a positive case where code follows it, e.g. `let e = b'"'; let acknowledged = 1;` → exactly 1 use.
-- **[MINOR] N3 — Footer width on wide viewports.** `main.page` is capped at 480 px and centered on the blue body, but `footer` spans the full width with `background: var(--page)`, so on a tablet/desktop a full-width pale strip sits under a narrow pale body. Give `footer` the same `max-width: 480px; margin: 0 auto; width: 100%` (it stays on `--page`, so `--link` contrast is unchanged). No effect at 390 px; check once in the visual pass at a wide width.
-- **[MINOR] N4 — `--focus-on-blue` is declared but bound to nothing.** No focusable element sits on blue today (the band pill is static), so it is harmless; either drop the role or state in §2.3 that it is reserved for a future focusable element on the band/tile (light `--focus` on blue is 1.0:1, so it must be used if one is ever added).
-
-Observations (no change required): disabled outline `#unlock` uses an inset `--divider` border at 1.37:1 — inactive controls are exempt from WCAG 1.4.11 and the label stays at 3.48 (light) / 4.28 (dark); banner borders are low-contrast but decorative (the banner text and glyph carry the meaning).
+- **[MINOR] O1 — Borrowing in the pinned frame step.** `frame_step.set(make_step(&mut source, ..))` does not compile when the step future borrows `source`: the replacement is built while the old future still holds the `&mut` borrow. The step future must **own** the `Box<dyn PreviewSource>` and hand it back with its outcome (`async move { let r = source.next_frame().await; …; (source, outcome) }`), or an equivalent `Option`-based state machine. The semantics of §8.7 rule 1 are unchanged.
+- **[MINOR] O2 — Retry bound.** Make the immediately retried exchange use the **remaining** `CAMERA_DAEMON_IO_TIMEOUT_MS` budget of the original attempt (or document the ≈ IO + connect + IO worst case next to the `CAMERA_DAEMON_IO_TIMEOUT_MS < CAMERA_FIRST_FRAME_TIMEOUT_MS` assertion). Only EOF/`EPIPE`/reset before the first reply byte may trigger it, never a timeout, as §5.2 step 3a already says.
+- **[MINOR] O3 — `watch` receiver error.** Treat `stop_rx.changed()` returning `Err` (sender dropped) as terminal (`Shutdown`); otherwise a biased `select!` would spin on an always-ready arm. Unreachable while the view task holds the `CameraRuntime` `Arc`, but cheap to make explicit.
+- **[MINOR] O4 — Editorial.** In the §8.7 arm table the read-half row says "terminal" with "loop continues" for bytes; rule 2 is the normative text (ends only on `Ok(0)`/`Err`). `STREAM_SINK_BYTES` is a private constant of `server.rs`: either make it `pub(crate)` or give `camera.rs` its own 64-byte constant.
 
 ## 5. Verdict
-
-No CRITICAL or MAJOR finding. The round-2 spec is faithful to the brand sources and to `origin/main:crates/gui/src/theme.rs` (every value and declaration form verified), keeps every UI state reachable through the unchanged `app.js` hooks, leaves CSP and the asset set untouched, meets WCAG AA in both themes (independently recomputed), and its tests fail plausible wrong implementations. The four MINOR items (N1–N4) should be folded in by the tester (N1, N2 as test wording) and developer (N3, N4) without another evaluation round.
-
 VALIDATION_VERDICT: APPROVED

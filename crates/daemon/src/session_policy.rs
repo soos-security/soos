@@ -122,6 +122,17 @@ impl SessionRecord {
         Ok(())
     }
 
+    /// Returns whether this record is a local seat session of `uid` that may receive preview
+    /// frames (ADR 2026-10-07 LC-3a, amended): exactly
+    /// `self.check_local_seat_session_of(uid).is_ok()`, i.e. `UID == uid`, active (`ACTIVE=1`
+    /// or `STATE=active`), `REMOTE=0` (an absent or malformed `REMOTE` refuses), a non-empty
+    /// `SEAT` and `CLASS=user`. A locked seat session qualifies (logind does not serialize
+    /// `LockedHint`).
+    #[must_use]
+    pub fn is_local_seat_session_of(&self, uid: u32) -> bool {
+        self.check_local_seat_session_of(uid).is_ok()
+    }
+
     /// Returns whether this record is an active session of `uid` not flagged as remote.
     #[must_use]
     pub fn is_active_non_remote_of(&self, uid: u32) -> bool {
@@ -245,7 +256,7 @@ fn first_unit_component(path: &str) -> Option<&str> {
 /// Returns the path of a `/proc/<pid>/cgroup` line when it belongs to a hierarchy systemd
 /// manages: the unified cgroup v2 hierarchy (empty controller list) or the cgroup v1
 /// `name=systemd` hierarchy. Every other line yields `None`.
-fn systemd_hierarchy_path(line: &str) -> Option<&str> {
+pub(crate) fn systemd_hierarchy_path(line: &str) -> Option<&str> {
     let mut fields = line.splitn(3, ':');
     let (Some(_hierarchy), Some(controllers), Some(path)) =
         (fields.next(), fields.next(), fields.next())
@@ -292,7 +303,7 @@ pub fn parse_session_id_from_cgroup(content: &str) -> Option<String> {
 const MAX_UID_DIGITS: usize = 10;
 
 /// Parses a UID strictly: ASCII decimal digits only, no sign, no leading zero, fits `u32`.
-fn parse_strict_uid(text: &str) -> Option<u32> {
+pub(crate) fn parse_strict_uid(text: &str) -> Option<u32> {
     if text.is_empty()
         || text.len() > MAX_UID_DIGITS
         || !text.bytes().all(|b| b.is_ascii_digit())
@@ -368,7 +379,7 @@ pub fn parse_user_manager_uid_from_cgroup(content: &str) -> Result<Option<u32>, 
 
 /// Reads at most `max` bytes of `path` as UTF-8; `Ok(None)` if the file does not exist.
 /// A file reaching the bound is reported as an error (fail closed on truncation).
-fn read_bounded(path: &Path, max: u64) -> Result<Option<String>, LogindError> {
+pub(crate) fn read_bounded(path: &Path, max: u64) -> Result<Option<String>, LogindError> {
     let file = match fs::File::open(path) {
         Ok(f) => f,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),

@@ -365,8 +365,31 @@ session, offers a remote **lock** and, only when `allow_unlock = true`, a remote
 `soos-remote`"; operator reference `Docs/REMOTE_COMPANION.md`). Every unlock needs a fresh
 WebAuthn passkey assertion with user verification, and the service is optionally reachable from
 the internet through Tailscale Funnel (opt-in, port 443, behind a passkey login); the default
-deployment stays tailnet-only. It is a leaf crate: `soos-daemon`,
-`pam_soos.so` and the IPC protocol are untouched and no crate depends on it.
+deployment stays tailnet-only. No crate depends on it; its only soos dependency is
+`soos-protocol`, used by the opt-in live camera view (below); `pam_soos.so` and the IPC wire
+format are untouched.
+
+**Live camera view (opt-in, GitHub #345, ADR 2026-10-07 "Live Camera View in `soos-remote`
+Through the Daemon Preview Channel", `Docs/REMOTE_COMPANION.md` §2f).** The phone can watch the
+PC camera live without a second camera owner: `soos-remote` asks `soos-daemon` for its latest
+frame over `/run/soos/daemon.sock` with `RequestKind::PreviewFrame` (one daemon connection at
+most), converts Grey/YUYV/RGB24 frames (no image decoder) and encodes them to baseline JPEG in
+pure Rust (`jpeg-encoder`), and streams them as `soosframe` multipart parts (served as
+`application/octet-stream`, see the ADR transport amendment) that the page reads
+with `fetch` + `ReadableStream` into a canvas (CSP unchanged). Double opt-in, fail closed: the
+daemon needs `[preview] enabled`, the UID in `allowed_uids`, `[preview] remote_view = true` (the
+companion is recognised by its `soos-remote.service` cgroup, an administrative opt-in, not a
+security boundary) and an active local seat session of the UID (now required for every
+unprivileged preview peer, GUI included); the companion needs `camera_view = true` (and
+`camera_view_funnel = true` over Funnel). Every view needs a fresh UV passkey assertion of
+purpose `CameraView`, yields a single-use 256-bit stream token valid 10 s, and is bounded (one
+global view, ≤ 300 s, default 120 s, ≤ 10 fps, ≤ 640x480, no cooldown between views since
+2026-10-07). No recording: frames
+and JPEG buffers stay in memory, the companion's own buffers are zeroized, nothing is written to
+disk, logged or pushed; a view sends no push notification (removed at the owner's request on
+2026-10-07; the audit lines and the camera LED are the awareness signals). PAM `Auth` latency is unchanged
+(the cgroup is read only for `PreviewFrame`); a view holds one of the UID's
+`max_connections_per_uid` daemon connections.
 
 | Aspect | Decision |
 |---|---|
@@ -382,15 +405,15 @@ deployment stays tailnet-only. It is a leaf crate: `soos-daemon`,
 | Unlock (opt-in) | `allow_unlock = true` in `remote.toml` (default `false`, else `403 unlock_disabled` without a logind call); `POST /api/unlock` with `X-Soos-Action: unlock` and the lock's CSRF rules **and a fresh `unlock`-purpose passkey assertion with user verification on every path** (`403 passkey_required` / `passkey_rejected` / `passkeys_not_configured` otherwise; a Funnel unlock also needs a web session); `Manager.UnlockSession(id)` on a fresh snapshot of the same selected session, one per 2 s (independent of the lock), 2 s flow bound, one `info` audit line without identity. No automatic re-lock (owner decision D-F, accepted risk in the ADR). The crate names `UnlockSession` exactly once and never `Unlock`, `SetLockedHint` or a session-ending method (RMC-S3 as amended). |
 | Bounds | 16 connections, 4 streams, 8 KiB head, 32 headers, 256-byte path, 5 s head deadline, 2 s write deadline, 1.5 s snapshot, 2 s lock flow, 2 s unlock flow, 15 s keep-alive, 30 min stream; request bodies only on the four passkey body routes, ≤ 8 KiB (`Content-Length` or strict chunked, ≤ 64 chunks), 5 s body deadline; Funnel ≤ 8 of 16 connections (anonymous ≤ 4, anonymous body reads ≤ 2, 1 per client hint), Funnel streams ≤ 2 of 4, `503 busy` otherwise; ≤ 4 pending challenges per authenticated pool, anonymous login pool ≤ 16 (≤ 2 per hint, oldest evicted); limiters 10 options / 60 s and 5 failures / 5 min per limiter key, ≤ 64 client-hint buckets; store lock wait ≤ 500 ms (`crates/remote/src/lib.rs`). |
 | Page design | The phone page follows the project-wide soos brand (ADR 2026-10-06 "soos Brand Direction Applied to the `soos-remote` Web App", `Docs/REMOTE_COMPANION.md` §2e, matrix RMC76–RMC88, walkthrough 190): CSS custom properties mirror the `crates/gui/src/theme.rs` constants by name and value, light by default with a dark variant under `prefers-color-scheme`, WCAG AA text contrast, system fonts only. Presentation only: the CSP, `app.js`, `sw.js`, the routes, the seven embedded assets and every element id and label are unchanged. |
-| Privacy | No identity, header value, `Host`, path, session id, body, challenge, session token or its hash, cookie, credential id, public key, user handle or enrollment code is ever logged, echoed or shown through `Debug` (RC-5, D-H); the status body has exactly five fields and no identity. |
+| Privacy | No identity, header value, `Host`, path, session id, body, challenge, session token or its hash, camera view token, frame, JPEG, frame dimension or sequence, cookie, credential id, public key, user handle or enrollment code is ever logged, echoed or shown through `Debug` (RC-5, D-H); the status body has exactly five fields and no identity. |
 
 Companion invariants (matrix rows RMC*): RC-1 never root, never a network socket, never an
 unlock unless `allow_unlock = true` and a fresh UV passkey assertion; RC-2 every request needs an allowlisted identity or, with `allow_funnel = true`, the Funnel marker (and a passkey web session beyond the public login surface), and an empty allowlist refuses to start;
 RC-3 a logind failure is never `unlocked` and no stale `unlocked` is replayed to a new stream;
 RC-4 every read, write, connection count and stream lifetime is bounded; RC-5 no identity or
 request data in logs or bodies. Out of scope, each needing its own ADR: an automatic re-lock,
-lock/unlock-state push notifications, live camera, any public exposure other than Tailscale
-Funnel on port 443. Opt-in Web Push of the failed-password alerts keeps RC-1 for `soos-remote`
+lock/unlock-state push notifications, recording or snapshots of the live camera view and any
+other live camera transport, any public exposure other than Tailscale Funnel on port 443. Opt-in Web Push of the failed-password alerts keeps RC-1 for `soos-remote`
 (every key and all cryptography stay there; the outbound request is made by the sandboxed,
 key-less `soos-push-sender` unit) and never carries a typed password.
 Matrix rows RMC1–RMC44 and walkthroughs 185, 186 and 187. Verified by the owner on 2026-10-06:

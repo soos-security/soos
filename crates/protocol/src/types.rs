@@ -20,6 +20,25 @@ pub const MAX_MESSAGE_SIZE: usize = 4096;
 /// Maximum serialized message size for video preview frames (2 MiB).
 pub const MAX_PREVIEW_MESSAGE_SIZE: usize = 2 * 1024 * 1024;
 
+/// Preview wire format code of [`PreviewResponse::format`]: packed RGB, 3 bytes per pixel
+/// (ADR 2026-09-29, 2026-10-07).
+pub const PREVIEW_FORMAT_RGB24: u8 = 0;
+
+/// Preview wire format code: 8-bit luma, 1 byte per pixel.
+pub const PREVIEW_FORMAT_GREY: u8 = 1;
+
+/// Preview wire format code: packed `Y0 U Y1 V`, 2 bytes per pixel.
+pub const PREVIEW_FORMAT_YUYV: u8 = 2;
+
+/// Preview wire format code: NV12 (never decoded by `soos-remote`).
+pub const PREVIEW_FORMAT_NV12: u8 = 3;
+
+/// Preview wire format code: MJPEG (never decoded by `soos-remote`).
+pub const PREVIEW_FORMAT_MJPEG: u8 = 4;
+
+/// Explicit empty preview (no frame ready, or not convertible).
+pub const PREVIEW_FORMAT_EMPTY: u8 = 255;
+
 /// Length of the `request_id` in bytes (256 bits).
 pub const REQUEST_ID_LEN: usize = 32;
 

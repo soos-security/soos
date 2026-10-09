@@ -333,8 +333,8 @@ fn map_refusal(resp: &Response) -> IpcPreviewError {
     }
 }
 
-/// Wire format code of the explicit empty preview (`soos-daemon` `PREVIEW_FORMAT_EMPTY`).
-const PREVIEW_FORMAT_EMPTY: u8 = 255;
+// Wire format code of the explicit empty preview (shared `soos-protocol` constant).
+use soos_protocol::types::PREVIEW_FORMAT_EMPTY;
 
 /// Maps a preview wire format code to its pixel format; `None` for an unknown code.
 fn pixel_format_from_wire(format: u8) -> Option<PixelFormat> {

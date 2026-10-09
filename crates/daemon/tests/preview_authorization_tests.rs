@@ -473,7 +473,7 @@ async fn test_preview_frame_allowed_for_configured_uid_serves_frames() {
     std::fs::create_dir_all(&sessions_dir).expect("sessions dir");
     std::fs::write(
         sessions_dir.join("3"),
-        format!("UID={current_uid}\nACTIVE=1\nSTATE=active\n"),
+        format!("UID={current_uid}\nACTIVE=1\nSTATE=active\nREMOTE=0\nSEAT=seat0\nCLASS=user\n"),
     )
     .expect("session file");
     let (components, camera) = mock_pipeline(dir.path()).await;
@@ -509,6 +509,7 @@ async fn test_preview_frame_rate_limited_per_peer_uid() {
             enabled: true,
             allowed_uids: vec![current_uid],
             max_requests_per_sec: 2,
+            remote_view: false,
         }),
     );
     spawn_server(dispatcher, &sock_path).await;

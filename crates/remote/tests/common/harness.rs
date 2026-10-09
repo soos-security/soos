@@ -781,6 +781,7 @@ impl Harness {
             },
             alerts: soos_remote::config::AlertsConfig::default(),
             push: soos_remote::config::PushConfig::default(),
+            camera: soos_remote::config::CameraConfig::default(),
         };
         let source = MockSource::unlocked();
         let clock = TestClock::new();

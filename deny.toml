@@ -39,6 +39,10 @@ allow = [
     "Ubuntu-font-1.0",
 ]
 
+# jpeg-encoder is (MIT OR Apache-2.0) AND IJG: IJG is allowed for that crate only, a
+# crate-scoped licence exception (ADR 2026-10-07 "Live Camera View in soos-remote", LC-2).
+exceptions = [{ crate = "jpeg-encoder", allow = ["IJG"] }]
+
 [licenses.private]
 # Ignore internal workspace crates that are not published to crates.io
 ignore = true

@@ -1,8 +1,9 @@
 //! Bounded, purpose/path/binding-scoped, single-use WebAuthn challenge store (architect
 //! spec §4.2).
 //!
-//! Pools: the authenticated pools `(Tailnet, Register)`, `(Tailnet, Unlock)` and
-//! `(Funnel, Unlock)` hold at most `MAX_PENDING_CHALLENGES` entries each and never evict;
+//! Pools: the authenticated pools `(Tailnet, Register)`, `(Tailnet, Unlock)`,
+//! `(Funnel, Unlock)`, `(Tailnet, CameraView)` and `(Funnel, CameraView)` (ADR 2026-10-07)
+//! hold at most `MAX_PENDING_CHALLENGES` entries each and never evict;
 //! the anonymous `(Funnel, Login)` pool holds at most `MAX_PENDING_ANONYMOUS_LOGIN_CHALLENGES`
 //! entries, at most `MAX_LOGIN_CHALLENGES_PER_HINT` per client hint, and evicts its oldest
 //! entry instead of refusing (eviction can only fail a ceremony, never admit one). An entry
@@ -30,6 +31,8 @@ pub enum ChallengePurpose {
     Login,
     /// Remote unlock.
     Unlock,
+    /// Start of a live camera view (ADR 2026-10-07); its own pools, never an unlock.
+    CameraView,
 }
 
 /// What a challenge is bound to besides purpose and path. `Debug` is redacted; the derived
@@ -80,7 +83,7 @@ impl fmt::Debug for PendingRegistration {
 /// What a successful `take` hands back; `Debug` redacted.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Taken {
-    /// Login or unlock challenge.
+    /// Login, unlock or camera-view challenge.
     Plain,
     /// Register challenge with its pending user handle.
     Register(PendingRegistration),
@@ -119,7 +122,7 @@ impl Entry {
 }
 
 /// Pending challenges, in issuance order (oldest first). At most
-/// `3 × MAX_PENDING_CHALLENGES + MAX_PENDING_ANONYMOUS_LOGIN_CHALLENGES` entries.
+/// `5 × MAX_PENDING_CHALLENGES + MAX_PENDING_ANONYMOUS_LOGIN_CHALLENGES` entries.
 #[derive(Default)]
 pub struct ChallengeStore {
     entries: Vec<Entry>,
@@ -150,7 +153,9 @@ fn pool_of(
         }
         (PathClass::Tailnet, ChallengePurpose::Register, ChallengeBinding::EnrollCode(_))
         | (PathClass::Tailnet, ChallengePurpose::Unlock, ChallengeBinding::None)
-        | (PathClass::Funnel, ChallengePurpose::Unlock, ChallengeBinding::WebSession(_)) => {
+        | (PathClass::Funnel, ChallengePurpose::Unlock, ChallengeBinding::WebSession(_))
+        | (PathClass::Tailnet, ChallengePurpose::CameraView, ChallengeBinding::None)
+        | (PathClass::Funnel, ChallengePurpose::CameraView, ChallengeBinding::WebSession(_)) => {
             Some(Pool::Authenticated)
         }
         _ => None,
