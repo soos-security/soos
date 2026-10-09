@@ -3768,6 +3768,7 @@ dependencies = [
  "jpeg-encoder",
  "nix",
  "p256",
+ "png",
  "proptest",
  "serde",
  "serde_json",

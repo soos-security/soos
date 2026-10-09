@@ -27,7 +27,7 @@ use base64ct::{Base64UrlUnpadded, Encoding};
 use serde::{Deserialize, Deserializer, Serialize};
 use soos_push_protocol::{
     decode_reply, encode_request, frame_len, DeliveryReply, DeliveryRequest, EndpointError,
-    Outcome, PushEndpoint, MAX_PUSH_REPLY_BYTES, PUSH_FRAME_IO_TIMEOUT_MS,
+    Outcome, PushEndpoint, PushHost, MAX_PUSH_REPLY_BYTES, PUSH_FRAME_IO_TIMEOUT_MS,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
@@ -986,20 +986,23 @@ pub enum SenderState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PushService {
-    /// `web.push.apple.com`.
+    /// `web.push.apple.com` (Safari, iOS / iPadOS 16.4+ home-screen apps).
     Apple,
-    /// `fcm.googleapis.com`.
+    /// `fcm.googleapis.com` (Chrome, Samsung Internet and other Chromium browsers, Android
+    /// included).
     Google,
-    /// `updates.push.services.mozilla.com`.
+    /// `updates.push.services.mozilla.com` (Firefox, Android included).
     Mozilla,
 }
 
 impl PushService {
-    fn of(endpoint: &PushEndpoint) -> Self {
-        match endpoint.host() {
-            "web.push.apple.com" => Self::Apple,
-            "fcm.googleapis.com" => Self::Google,
-            _ => Self::Mozilla,
+    /// The service of a validated endpoint; exhaustive, each variant from its own host only.
+    #[must_use]
+    pub fn of(endpoint: &PushEndpoint) -> Self {
+        match endpoint.push_host() {
+            PushHost::Apple => Self::Apple,
+            PushHost::Google => Self::Google,
+            PushHost::Mozilla => Self::Mozilla,
         }
     }
 }

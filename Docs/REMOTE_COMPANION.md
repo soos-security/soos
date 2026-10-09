@@ -9,13 +9,13 @@
 > `soos-remote`", GitHub #346)
 > Scope: a **user-level** service that shows the owner's phone the real-time lock status of the
 > desktop session, offers a remote **lock** and, only when `allow_unlock = true`, a remote
-> **unlock** protected by a passkey (Face ID) on every request (section 2a). Optionally it is
+> **unlock** protected by a passkey (Face ID, fingerprint or screen lock) on every request (section 2a). Optionally it is
 > also reachable from the internet through Tailscale Funnel, behind a passkey login (section
 > 2b). When `password_alerts = true` the page also lists failed password attempts made on the
 > PC (section 2c), never the typed password, and with `push_notifications = true` sends them to
 > the phone as push notifications even when the app is closed (section 2d). With
 > `camera_view = true` and the daemon's `[preview] remote_view = true` it also shows a live view
-> of the PC camera after Face ID (section 2f), never recorded. The status card also shows the
+> of the PC camera after a passkey check (section 2f), never recorded. The status card also shows the
 > PC's battery level, charge state and mains presence (section 2g, on by default,
 > `battery_status = false` turns it off). Nothing else (see "Out of scope").
 > Source of truth: `crates/remote/src/lib.rs` (constants), `crates/remote/src/config.rs`
@@ -25,7 +25,8 @@
 > and 187); `remote_passkey_contract` pins the Funnel and passkey parts; `remote_alerts_contract`
 > pins the failed-password alerts (rows RMC45–RMC59, walkthrough 188); `remote_push_contract`
 > pins the push notifications (rows RMC60–RMC74, walkthrough 189); `remote_camera_contract`
-> pins the live camera view (rows RLC1–RLC16, walkthrough 191).
+> pins the live camera view (rows RLC1–RLC16, walkthrough 191); `remote_android_contract` pins
+> the Android support (rows RAN1–RAN12, walkthrough 193, section 2h).
 
 ---
 
@@ -45,7 +46,7 @@
   `Active`) over the pinned system bus, exactly like the daemon's presence worker;
 - can ask logind to **lock** the owner's local session (`Manager.LockSession`);
 - when `allow_unlock = true`, can ask logind to **unlock** it (`Manager.UnlockSession`,
-  section 2a), only after a fresh passkey assertion with user verification (Face ID / Touch ID);
+  section 2a), only after a fresh passkey assertion with user verification (Face ID, fingerprint or screen lock);
 - verifies WebAuthn passkeys itself (ES256, attestation `none`, pure-Rust RustCrypto code, no
   OpenSSL, no external service);
 - when `password_alerts = true`, follows the system journal through a `journalctl` child
@@ -54,8 +55,8 @@
   attempts for the phone and hands it to `soos-push-sender`, which delivers it as a standard
   Web Push notification (section 2d);
 - when `camera_view = true`, asks `soos-daemon` for preview frames over its Unix socket
-  (`RequestKind::PreviewFrame`) and streams them as JPEG to the page after a fresh Face ID
-  (section 2f).
+  (`RequestKind::PreviewFrame`) and streams them as JPEG to the page after a fresh passkey
+  assertion (section 2f).
 - unless `battery_status = false`, reads the battery level, charge state and mains presence
   from `/sys/class/power_supply` (read-only, bounded) and shows them on the status card
   (section 2g).
@@ -142,13 +143,13 @@ the answer is `403 {"result":"passkey_required"}`; an invalid, replayed or UV-le
 
 While it is disabled, `POST /api/unlock` answers `403 {"result":"unlock_disabled"}` without
 reading the body or logind. The page shows an *Unlock now* button (enabled only while the
-session is `Locked`) that asks for a confirmation tap, then for Face ID, before sending the
+session is `Locked`) that asks for a confirmation tap, then for the passkey check, before sending the
 request.
 
 **Accepted risk** (owner decisions, ADR 2026-10-06 "Remote Unlock" as amended by the Funnel and
-passkey ADR): an unlock needs the owner's passkey and its user verification (Face ID / Touch ID)
+passkey ADR): an unlock needs the owner's passkey and its user verification (Face ID, fingerprint or screen lock)
 on every request; the Tailscale identity alone (tailnet) or a web session alone (Funnel) is no
-longer enough. Whoever can pass Face ID on a device holding the passkey (or the device passcode
+longer enough. Whoever can pass the user verification on a device holding the passkey (or the device passcode
 fallback the platform offers) can unlock the PC, and the PC stays unlocked until it locks again
 by itself (no automatic re-lock). Residual risks also accepted: a distributed attacker can keep
 the anonymous Funnel capacity busy and delay a Funnel **login** (the tailnet path and a
@@ -161,13 +162,13 @@ Tailscale admin console.
 
 ## 2b. Internet access through Tailscale Funnel, and passkeys
 
-Owner decision (ADR 2026-10-06): reach the PC from the iPhone without a permanent VPN and
+Owner decision (ADR 2026-10-06): reach the PC from the phone without a permanent VPN and
 without any paid service, through **Tailscale Funnel** on the node's own `*.ts.net` name,
-**port 443** only. Authentication is in-house: WebAuthn passkeys (Face ID / Touch ID on the
-iPhone, user verification required), verified by `soos-remote` itself.
+**port 443** only. Authentication is in-house: WebAuthn passkeys (user verification required:
+Face ID, fingerprint or screen lock), verified by `soos-remote` itself.
 
 **Funnel is optional.** The default, and the recommended deployment, stays **tailnet-only**
-(`tailscale serve`, the iPhone connected to the tailnet with the Tailscale VPN): with
+(`tailscale serve`, the phone connected to the tailnet with the Tailscale VPN): with
 `allow_funnel` absent or `false` every Funnel request is `403`, and the passkeys still protect
 every unlock (section 2a). Enable Funnel only if you accept the extra public exposure described
 under *Accepted risk* below. Other public exposure paths (for example Cloudflare Tunnel or
@@ -192,11 +193,11 @@ allow_funnel = true               # opt-in; false (the default) keeps Funnel req
 allow_unlock = true               # optional, section 2a
 ```
 
-1. **Register the iPhone's passkey over the tailnet** (VPN on). On the PC run
+1. **Register the phone's passkey over the tailnet** (VPN on). On the PC run
    `soos-remote enroll-code`: it prints a one-time code (10 symbols, valid 5 minutes, single
    use, 3 wrong attempts delete it) and stores only its hash in the `0700` socket directory.
    Open `https://<pc>.<tailnet>.ts.net`, type the code under *Add a passkey* and confirm with
-   Face ID. Registration is impossible from the internet: the register routes answer `403` on
+   the phone's user verification (Face ID, fingerprint or screen lock). Registration is impossible from the internet: the register routes answer `403` on
    the Funnel path, and need an allowed Tailscale identity **and** the local code.
 2. **Publish the socket on the internet** (owner action; neither the installer nor any
    agent runs `tailscale`):
@@ -212,10 +213,10 @@ allow_unlock = true               # optional, section 2a
    `tailscale serve status` no longer lists the socket, restore the tailnet-only handler with
    `tailscale serve --bg unix:$XDG_RUNTIME_DIR/soos-remote/remote.sock`; or simply set
    `allow_funnel = false` and restart the unit (Funnel requests are then `403`).
-3. With the VPN off, open the same address in Safari or the home-screen app: *Sign in with
-   Face ID* creates a web session (cookie `__Host-soos_session`, `Secure`, `HttpOnly`,
+3. With the VPN off, open the same address in the browser or the installed web app: *Sign in
+   with your passkey* creates a web session (cookie `__Host-soos_session`, `Secure`, `HttpOnly`,
    `SameSite=Strict`, 15 min idle, 8 h at most, at most 4 sessions, stored on the PC only as a
-   hash). Status, events and lock then work as on the tailnet; unlock asks for Face ID again.
+   hash). Status, events and lock then work as on the tailnet; unlock asks for the passkey again.
 
 Rules on the Funnel path (requests carrying `Tailscale-Funnel-Request: ?1`):
 
@@ -337,8 +338,11 @@ as you. Section 8 lists the other residual limitations.
 ## 2d. Push notifications (opt-in)
 
 With `push_notifications = true` the phone is told about failed passwords on the PC **even
-when the app is closed**: a standard Web Push notification to the home-screen web app
-(iOS/iPadOS 16.4 or later; Safari tabs cannot receive push). It is the same information as
+when the app is closed**: a standard Web Push notification to the phone web app: the
+home-screen web app on iPhone (iOS/iPadOS 16.4 or later; Safari tabs cannot receive push) or a
+supporting browser on Android (Chrome, Samsung Internet, Firefox; see section 2h). The push
+service is Apple's (`web.push.apple.com`) on iPhone, Google's (`fcm.googleapis.com`) for Chrome
+and Samsung Internet, and Mozilla's (`updates.push.services.mozilla.com`) for Firefox. It is the same information as
 section 2c, sent at most once per burst: "3 wrong passwords — lock screen, your account".
 
 **What a notification carries, and what never.** Only the source class (lock screen, sudo,
@@ -348,8 +352,8 @@ part, length or hash of it (no journal line contains it, and soos never captures
 `push_previews = "generic"` the visible text is only "Security alert on your PC — Open soos for
 details". A notification is readable on the **locked** iPhone unless you set *Settings →
 Notifications → Show Previews → When Unlocked* (or choose `push_previews = "generic"`). The
-message is end-to-end encrypted (RFC 8291): Apple's push service sees only its size, time and
-the PC's public address, never its content. The page stays the source of truth: push delivery
+message is end-to-end encrypted (RFC 8291): the push service (Apple, Google or Mozilla) sees
+only its size, time and the PC's public address, never its content. The page stays the source of truth: push delivery
 is best effort.
 
 **When.** Only attempts recorded live (not the 24 h replay at start): the first attempt of a
@@ -376,9 +380,11 @@ these limits), exactly like the false alerts of section 2c.
 3. Run `scripts/install_remote.sh` (it installs `soos-push-sender` and its unit
    `soos-push-sender.service`), then `systemctl --user enable --now soos-push-sender` and
    `systemctl --user restart soos-remote`.
-4. On the iPhone, open the app **from the home-screen icon** (section 4), tap
+4. On the iPhone, open the app **from the home-screen icon** (section 4); on Android, open the
+   page in Chrome, Samsung Internet or Firefox, installed or in a tab (section 2h). Tap
    **Enable notifications** and allow them. The card then lists the device ("Apple device,
-   enabled …"); its endpoint is on `web.push.apple.com`.
+   enabled …" with an endpoint on `web.push.apple.com`, "Android / Chrome (Google) device" on
+   `fcm.googleapis.com`, "Firefox (Mozilla) device" on `updates.push.services.mozilla.com`).
 5. Tap **Send test notification**. Then lock the phone and type a wrong password at the PC's lock
    screen: one notification arrives within about 10 s.
 
@@ -486,8 +492,48 @@ soos Brand Direction Applied to the `soos-remote` Web App" in `AI/DECISIONS.md`)
 
   The manifest uses `theme_color` `#0047BB` and `background_color` `#EDF1FF`; the
   `theme-color` meta is `#0047BB` and the iOS status bar is `black-translucent` over the band.
-- **Unchanged.** The Content Security Policy, `app.js`, `sw.js`, every element id and label, and
-  the routes. The page uses the system font stack (no font file, no CDN) and contains no raster
+- **Android icons** (ADR 2026-10-09 "Android Support for the `soos-remote` Phone Companion and
+  Web Push", section 2h). The manifest also carries `id` `/` (equal to `start_url`, so a later
+  `start_url` change never installs a second app) and three PNG icons: `icon-192.png` and
+  `icon-512.png` (`purpose` `any`, full-bleed renders like the touch icon) and
+  `icon-maskable-512.png` (`purpose` `maskable`). The maskable icon draws the 508-unit mark at
+  408 px centred on the brand blue `#0047BB`: the blue parts of the tile merge with the
+  background, so the visible mark is the two pale spikes, whose tips lie 204 px from the centre,
+  inside the maskable safe zone (a circle of radius 40 %, 204.8 px of 512), and circular or
+  squircle launcher masks never cut it. The notification badge `badge-96.png` is an alpha-only
+  white silhouette of the pale spikes (blue becomes transparent): Android draws a badge from its
+  alpha channel only. The four files are generated deterministically from `icon.svg` on a
+  developer machine (rsvg-convert 2.63.2, ImageMagick 7.1.2; two runs give byte-identical files
+  that carry only `IHDR`, `IDAT` and `IEND`):
+
+  ```bash
+  A=crates/remote/assets
+  # Full-bleed "any" icons (opaque RGB), like apple-touch-icon.png.
+  for n in 192 512; do
+    rsvg-convert -w "$n" -h "$n" "$A/icon.svg" \
+      | magick png:- -background '#EDF1FF' -alpha remove -alpha off -strip \
+          -define png:color-type=2 -define png:exclude-chunks=date,time,tIME \
+          "png:$A/icon-$n.png"
+  done
+  # Maskable: the 508-unit mark at 408 px, centred on the brand blue (spike tips 204 px from the
+  # centre, inside the 204.8 px safe-zone circle of a 512 px icon).
+  rsvg-convert -w 408 -h 408 "$A/icon.svg" \
+    | magick -size 512x512 'xc:#0047BB' png:- -gravity center -composite -alpha off -strip \
+        -define png:color-type=2 -define png:exclude-chunks=date,time,tIME \
+        "png:$A/icon-maskable-512.png"
+  # Badge: alpha-only white silhouette of the pale star spikes (blue -> transparent, pale -> opaque).
+  rsvg-convert -w 96 -h 96 "$A/icon.svg" \
+    | magick png:- -alpha off -colorspace Gray -level 30%,90% -background white -alpha shape -strip \
+        -define png:color-type=6 -define png:exclude-chunks=date,time,tIME \
+        "png:$A/badge-96.png"
+  ```
+
+  The generated files are `crates/remote/assets/icon-192.png`, `icon-512.png`,
+  `icon-maskable-512.png` and `badge-96.png`; the 180 px `apple-touch-icon.png` stays for iOS.
+- **Unchanged by the brand redesign.** The Content Security Policy, `app.js`, `sw.js`, every
+  element id and label, and the routes (the later Android support of section 2h kept the CSP and
+  every element id, but changed the login label, `app.js`, `sw.js` and added the four PNG
+  routes). The page uses the system font stack (no font file, no CDN) and contains no raster
   from the brand archive. The later camera card (section 2f) is built by `app.js` at runtime with
   the same tokens and adds no element id.
 
@@ -527,8 +573,8 @@ A value out of range (`0` included, never "unlimited") is refused at start-up (e
 clamped; the range keys are checked even while `camera_view = false`. `camera_view` does not
 require `push_notifications`.
 
-**Fresh Face ID per view.** Every view, on the tailnet as over Funnel, starts with a fresh
-passkey assertion with user verification (Face ID / Touch ID) over a new single-use challenge
+**Fresh passkey check per view.** Every view, on the tailnet as over Funnel, starts with a fresh
+passkey assertion with user verification (Face ID, fingerprint or screen lock) over a new single-use challenge
 of purpose `CameraView` (`POST /api/auth/camera/options`), distinct from the unlock challenge;
 a web session, a cookie or an earlier assertion never starts a view. Failures count against the
 same 5-failures lockout as unlock. A successful `POST /api/camera/start` reserves the view and
@@ -705,6 +751,64 @@ view is `{"state":"disabled",…}` and no `event: battery` is ever sent.
 `charge` (`charging`, `discharging`, `full`, `not_charging`, `unknown`) and `external_power` are
 `null` unless `present` (and known). Matrix rows RBS1–RBS12; invariant `remote_battery_contract`.
 
+## 2h. Android phones (Chrome, Samsung Internet, Firefox)
+
+Android has full parity with the iPhone (ADR 2026-10-09 "Android Support for the `soos-remote`
+Phone Companion and Web Push"): status, lock, unlock, alerts, push notifications, live camera
+and battery level work the same way. Owner steps and caveats:
+
+1. **Tailnet access.** Install the Tailscale app (Google Play or F-Droid), sign in to the same
+   tailnet with a login listed in `allowed_logins`, and keep the VPN on for tailnet use. Funnel
+   access (section 2b) needs no Tailscale app.
+2. **Install the web app.** Open `https://<pc>.<tailnet>.ts.net` in Chrome, then menu →
+   **Install app** (or **Add to Home screen**); in Samsung Internet, menu → **Add page to** →
+   **Home screen**. The launcher uses the maskable icon (section 2e). If Chrome only offers a
+   shortcut, it still opens the page standalone. Push works in a normal Chrome tab too: unlike
+   iPhone, no installation is needed for notifications.
+3. **Notification permission.** Tap **Enable notifications**; on Android 13 or later the system
+   also asks whether Chrome may post notifications (if refused: Settings → Apps → Chrome →
+   Notifications). The site permission is under Chrome → Site settings → Notifications.
+4. **Passkey.** The passkey is stored by **Google Password Manager** (or Samsung Pass) and
+   unlocked with **fingerprint or screen lock**; a screen lock is required. It is synced to the
+   Google account (backup flags set), the same accepted risk as iCloud Keychain (section 8).
+   Enroll it over the tailnet with `soos-remote enroll-code` as in section 2b.
+5. **Battery optimisation.** Pushes use `Urgency: high` and reach a phone in Doze, but vendor
+   battery savers can still delay or drop them: set Chrome (and Firefox if used) to
+   **Unrestricted** battery usage (Samsung: "Never sleeping apps").
+6. **Push services.** Chrome and Samsung Internet use `fcm.googleapis.com` (device list label
+   "Android / Chrome (Google)"); Firefox uses `updates.push.services.mozilla.com` ("Firefox
+   (Mozilla)"). Both are in the existing allowlist; Google or Mozilla see delivery metadata,
+   never the content (section 2d). Notifications carry the soos icon and a white star badge in
+   the status bar, and a second burst under the same tag alerts again (`renotify`). The worker
+   makes no request on push: the browser itself loads the two same-origin images when it shows
+   the notification, and still shows it without them when the PC is unreachable.
+7. **Firefox caveats.** The home-screen install opens like a browser shortcut on some versions;
+   passkey support depends on the Firefox and Android versions (if no passkey prompt appears, use
+   Chrome); Firefox must not be battery restricted for its push connection. Firefox fires
+   `pushsubscriptionchange`; the page re-sends the subscription on every open anyway.
+8. **Subscription renewal.** When the browser renews a push subscription
+   (`pushsubscriptionchange`), the service worker re-sends it once to the PC with the page's
+   exact request shape (`POST /api/push/subscribe`, `X-Soos-Action: push-subscribe`, aborted
+   after 10 s, never retried). The server checks are unchanged, so it fails silently when the PC
+   refuses it (off-tailnet, an expired Funnel session, four devices already registered); opening
+   the app re-sends it. Over Funnel, this single request refreshes the idle timer of a still-valid
+   web session (its 8 h absolute lifetime is unchanged).
+9. **Shortcuts/Tasker.** Not integrated; pointer only: the `POST /api/lock` call of section 4 can
+   be issued by any HTTP automation app (Tasker, HTTP Shortcuts) over the tailnet with the same
+   `X-Soos-Action: lock` header. Unlock still needs the page.
+10. **Owner hardware check (matrix row RAN12).** On an Android phone (Chrome; Samsung Internet or
+    Firefox if available): (1) over the tailnet with the Tailscale app, Chrome **Install app**
+    adds the soos icon (maskable, not clipped) and opens standalone with the blue status bar;
+    (2) enroll a passkey with `soos-remote enroll-code`, sign in over Funnel with fingerprint or
+    screen lock; (3) **Enable notifications** (Android 13+ system prompt accepted), the device
+    list shows "Android / Chrome (Google) device"; (4) **Send test notification** arrives with
+    the soos icon and the white star badge; two failed-password bursts under the same tag both
+    sound or vibrate; (5) a failed password at the PC with the phone screen off and Chrome set to
+    Unrestricted arrives within about 1 min; (5b) with the Tailscale VPN and Funnel off, a
+    failed-password notification still appears (the icon may fall back to the browser default);
+    (6) lock and unlock from the phone work; (7) the iPhone home-screen app still works as
+    before.
+
 ## 3. Requirements on the desktop
 
 - **`LockedHint` must be set by the desktop.** GNOME, Plasma and niri set it natively;
@@ -773,9 +877,9 @@ never runs `tailscale`; those are your steps:
    or tag if your policy uses them). Keep the default `tailscale serve` HTTPS listener on 443;
    never use `tailscale serve --http` for this socket, and use `tailscale funnel` only on port
    443 together with `allow_funnel = true` and `rp_id` (section 2b).
-4. Open `https://<this-pc>.<tailnet>.ts.net` in Safari on the iPhone (the phone must be logged
-   in to the same tailnet) and add it to the home screen: Share → **Add to Home Screen** →
-   Add. The page then opens as a standalone web app with its own icon; it reconnects every
+4. Open `https://<this-pc>.<tailnet>.ts.net` on the phone (the phone must be logged in to the
+   same tailnet) and add it to the home screen (iPhone: Safari → Share → **Add to Home Screen**
+   → Add; Android: section 2h). The page then opens as a standalone web app with its own icon; it reconnects every
    time it is brought back to the foreground. No App Store, no account, no password.
 
 `scripts/install_remote.sh --uninstall` stops and disables the unit and removes the binary and
@@ -897,7 +1001,7 @@ The service also refuses to start when its real or effective uid is 0.
 
 | Method + path | Response |
 |---|---|
-| `GET /`, `/index.html`, `/app.js`, `/style.css`, `/manifest.webmanifest`, `/icon.svg`, `/apple-touch-icon.png` | the embedded page (strict CSP `default-src 'self'`, no inline script, no CDN) |
+| `GET /`, `/index.html`, `/app.js`, `/style.css`, `/manifest.webmanifest`, `/icon.svg`, `/apple-touch-icon.png`, `/icon-192.png`, `/icon-512.png`, `/icon-maskable-512.png`, `/badge-96.png` | the embedded page (strict CSP `default-src 'self'`, no inline script, no CDN) |
 | `GET /api/status` | `200 application/json` `{state, active, idle, idle_since_unix_s, checked_unix_ms}`; one fresh logind read |
 | `GET /api/events` | `200 text/event-stream`; first event = the stream's own fresh read; then an event on every change and a keep-alive at least every 15 s; `503` beyond 4 streams; closed after 30 min (the browser reconnects). With the battery level on, an `event: battery` follows the first status (and alerts) event, then one on every change of the battery view (section 2g) |
 | `POST /api/lock` | `202 {"result":"lock_requested"}`, `409 no_session` / `already_locked`, `429 rate_limited` (one lock per 2 s), `503 unavailable` |
@@ -910,7 +1014,7 @@ The service also refuses to start when its real or effective uid is 0.
 | `GET /api/alerts` | tailnet, or Funnel with a session (`403 login_required` otherwise): `200` the alerts view (section 2c); `{"state":"disabled",…}` while `password_alerts` is off |
 | `POST /api/alerts/ack` | no body; `X-Soos-Action: alerts-ack`, `X-Soos-Alerts-Epoch`, `X-Soos-Alerts-Through`: `200` the new view, `403 forbidden` (CSRF), `403 alerts_disabled`, `400 bad_request` (headers, or a `through` beyond the newest attempt), `429 rate_limited` (one per second), `409 stale_view`, `503 unavailable` |
 | `GET /api/battery` | tailnet, or Funnel with a session (`403 login_required` otherwise): `200 application/json` `{state, percent, charge, external_power}` (section 2g); `{"state":"disabled",…}` while `battery_status` is `false`; a reading at most 5 s old, or one bounded read |
-| `GET /sw.js` | the service worker (public asset, `text/javascript`); it only shows notifications |
+| `GET /sw.js` | the service worker (public asset, `text/javascript`); it shows notifications and, on `pushsubscriptionchange` only, re-sends the renewed subscription once to `POST /api/push/subscribe`; the worker makes no request on push |
 | `GET /api/push` | tailnet, or Funnel with a session: `{state, reason, public_key, subscriptions, devices, last_delivery, sender}`; `{"state":"disabled",…}` while `push_notifications` is off |
 | `POST /api/push/subscribe` | `X-Soos-Action: push-subscribe`, the browser's subscription JSON (at most 2 KiB): `200 subscribed`, `400 bad_request` / `unsupported_push_service`, `403 forbidden` / `push_disabled`, `409 too_many_subscriptions`, `413 body_too_large`, `429 rate_limited` (one per second, shared with unsubscribe), `503 unavailable` / `store_unavailable` |
 | `POST /api/push/unsubscribe` | `X-Soos-Action: push-unsubscribe`, `{"endpoint":…}`: `200 unsubscribed` (also for an unknown endpoint), `400`, `403`, `429`, `503` as above |
@@ -958,9 +1062,9 @@ reason classes.
 | `POST /api/unlock` answers `403 unlock_disabled` | `allow_unlock` is absent or `false` | Section 2a, if you accept its risk |
 | "Unlock requested…" then "The desktop did not confirm the unlock (LockedHint unchanged)" | logind emitted `Unlock` but the locker ignored it (no `swayidle` `unlock` hook), or the wrapper did not clear `LockedHint` | Section 3; check `swayidle` runs with `unlock 'pkill -USR1 swaylock'` |
 | `GET /api/events` answers `503` | Four streams are already open (old suspended tabs; two at most over Funnel) | Close other tabs; a stream ends by itself after 30 min |
-| `POST /api/unlock` answers `403 passkey_required` | The request carried no passkey assertion (an old "Unlock PC" shortcut, section 4) | Unlock from the web page (Face ID) |
+| `POST /api/unlock` answers `403 passkey_required` | The request carried no passkey assertion (an old "Unlock PC" shortcut, section 4) | Unlock from the web page (passkey check) |
 | `403 passkeys_not_configured` | `rp_id` is not set | Section 2b |
-| Funnel page shows the sign-in screen again / `403 login_required` | The web session expired (15 min idle, 8 h at most), was signed out, or its passkey was removed | Sign in with Face ID again |
+| Funnel page shows the sign-in screen again / `403 login_required` | The web session expired (15 min idle, 8 h at most), was signed out, or its passkey was removed | Sign in with your passkey again |
 | `409 no_passkey` | No passkey registered yet | `soos-remote enroll-code`, then register over the tailnet (section 2b) |
 | `403 enroll_code_rejected` | No code, a wrong one (3 attempts delete it) or an expired one (5 min) | Run `soos-remote enroll-code` again |
 | `503 store_unavailable` | The passkey store is unreadable, not `0600`, not yours, or busy | Fix the file mode/owner (`chmod 600`), check the journal |
@@ -968,7 +1072,7 @@ reason classes.
 | `421` over Funnel only | The address used is not exactly `rp_id` (another name, a trailing dot, port 8443 or 10000) | Open `https://<rp_id>` exactly; keep Funnel on port 443 |
 | The address does not resolve with the VPN off | Funnel is not active (`tailscale funnel status` empty), the `funnel` node attribute is missing, *shields up* is on, or the public DNS name is younger than about 10 minutes | Section 2b prerequisites; wait and retry |
 | `tailscale funnel` refuses to start | The tailnet lacks HTTPS certificates or MagicDNS, or the node lacks the `funnel` attribute | Enable them in the admin console (section 2b) |
-| Face ID prompt never appears / `passkey_rejected` on every try | The page was not opened on `https://<rp_id>` (the passkey is bound to that exact name), the passkey was removed, or user verification was skipped | Open the exact `rp_id` address; `soos-remote passkeys list`; register again over the tailnet |
+| Passkey prompt (Face ID, fingerprint or screen lock) never appears / `passkey_rejected` on every try | The page was not opened on `https://<rp_id>` (the passkey is bound to that exact name), the passkey was removed, or user verification was skipped | Open the exact `rp_id` address; `soos-remote passkeys list`; register again over the tailnet |
 | No **Camera** card on the page | `camera_view` is absent or `false` | Section 2f |
 | Camera: "The PC refused the camera view" (`403 camera_refused`) | The daemon refused the preview: `[preview] enabled`, `allowed_uids` or `remote_view` not set, or nobody is logged in at the PC's seat (SSH only, full logout) | Section 2f setup, step 2; log in at the PC |
 | Camera: `503 camera_unavailable` | The daemon is stopped, the camera gives no frame, or the daemon connection failed | `systemctl status soos-daemon`; retry |
@@ -978,6 +1082,8 @@ reason classes.
 | Face unlock falls back to the password during a view | The view and `soos-gui` hold both daemon connections of your UID (`max_connections_per_uid` = 2) | Close `soos-gui` during a view, or raise `max_connections_per_uid` (section 2f) |
 | The page shows "Battery: unknown" | The power-supply class could not be read completely within the bounds (an entry without a readable `type`, more than 64 entries or 8 batteries, a driver slower than 500 ms) | `cat /sys/class/power_supply/*/type`; a desktop without a battery shows "No battery" |
 | Signed in in Safari but the home-screen app asks again | Safari and the home-screen app keep separate cookies | Sign in once in each |
+| Android: no notification while the screen is off | A battery saver restricts Chrome (or Firefox) | Set the browser to **Unrestricted** battery usage (section 2h) |
+| "Notifications could not start: the service worker did not register" | `/sw.js` could not be registered or did not activate within 10 s | Reload the page and try again; check that `/sw.js` answers `200` |
 
 ## 8. Residual limitations
 
@@ -997,7 +1103,7 @@ reason classes.
   passkey is registered, so an internet client can learn whether one exists (no credential id,
   user handle or identity is disclosed; candid review MINOR finding, follow-up).
 - A device-bound (non-synced) passkey presenting the same counter twice concurrently is accepted
-  twice (clone detection only, never an authentication bypass; synced iCloud passkeys report
+  twice (clone detection only, never an authentication bypass; synced iCloud Keychain and Google Password Manager passkeys report
   `0/0` and are unaffected; candid review MINOR finding, follow-up).
 - Failed-password alerts (section 2c): a process running as the owner can create false
   lock-screen alerts, relabel the class of a helper-only attempt, and, while it keeps forging
@@ -1015,8 +1121,10 @@ reason classes.
   lock screen outside `lock_screen_programs` is not monitored; the page says so only when none
   of the configured paths exists. `journalctl` inside the exact unit sandbox is verified on the
   owner's hardware (matrix row RMC59).
-- Push notifications (section 2d): a detailed notification is readable on the locked iPhone
-  (use *Show Previews: When Unlocked* or `push_previews = "generic"`); Apple (or Google,
+- Push notifications (section 2d): a detailed notification is readable on the locked phone
+  (iPhone: use *Show Previews: When Unlocked*; or `push_previews = "generic"`); vendor battery
+  savers on Android may delay pushes (section 2h); a renewed subscription is lost until the next
+  app open when the PC refuses the worker's single request (section 2h); Apple (or Google,
   Mozilla) sees delivery metadata, never the content; an owner-uid process can cause false
   notifications (at most 20 per hour) and can use the sender socket to post to the three push
   hosts; a compromised sender can reach abstract-namespace sockets (for example Xwayland's
@@ -1029,8 +1137,8 @@ reason classes.
     (`allowed_uids`), start a unit named `soos-remote.service`, or run `soos-remote` outside
     its unit (then classified as a local client, bypassing `remote_view`): `remote_view` is an
     administrative opt-in and an audit aid, not a boundary.
-  - Whoever can pass Face ID on a device holding your passkey (iCloud Keychain compromise
-    included) can watch the camera; a stolen Funnel cookie alone gives no view, but can call
+  - Whoever can pass the user verification (Face ID, fingerprint or screen lock) on a device
+    holding your passkey (iCloud Keychain or Google Password Manager compromise included) can watch the camera; a stolen Funnel cookie alone gives no view, but can call
     `POST /api/camera/stop` (harmless).
   - A view holds one of your UID's 2 daemon connections and up to 10 of the 40 preview requests
     per second shared with `soos-gui`: with `soos-gui` open as well, a lock-screen face request
@@ -1072,5 +1180,7 @@ reason classes.
   conversion, and any embedding or evidence access.
 - Battery time-to-empty or time-to-full, battery health or cycle count, peripheral batteries
   (`scope=Device`), low-battery notifications, any write to sysfs, UPower.
+- A native Android app, FCM direct API keys, Edge desktop push (`*.notify.windows.com`), Android
+  Shortcuts/Tasker integration (pointer in section 2h only).
 - System-wide packaging (`install.sh`, deb/rpm/Arch): deferred until the owner approves the
   merge; `scripts/install_remote.sh` is the only installer.

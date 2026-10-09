@@ -715,7 +715,7 @@ fn test_rmc_s38_page_and_service_worker() {
         "Enable notifications",
         "Send test notification",
         "Disable notifications",
-        "home-screen app",
+        "On iPhone, notifications need the home-screen app (iOS 16.4 or later); this browser does not support them",
         "Notifications must be re-enabled on this phone",
         "Push sender not running on the PC",
         "soos-remote push reset",

@@ -20,11 +20,39 @@ use zeroize::Zeroizing;
 // Constants (spec §2.1)
 // ---------------------------------------------------------------------------------------
 
-/// Exact host allowlist of the push services (Apple, Google FCM, Mozilla autopush).
+/// One allowlisted push service host (single source of truth of [`PUSH_HOSTS`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PushHost {
+    /// `web.push.apple.com` (Safari, iOS / iPadOS 16.4+ home-screen apps).
+    Apple,
+    /// `fcm.googleapis.com` (Chrome, Samsung Internet and other Chromium browsers, Android
+    /// included).
+    Google,
+    /// `updates.push.services.mozilla.com` (Firefox, Android included).
+    Mozilla,
+}
+
+impl PushHost {
+    /// Every host, in the [`PUSH_HOSTS`] order.
+    pub const ALL: [PushHost; 3] = [PushHost::Apple, PushHost::Google, PushHost::Mozilla];
+
+    /// The exact DNS name.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            PushHost::Apple => "web.push.apple.com",
+            PushHost::Google => "fcm.googleapis.com",
+            PushHost::Mozilla => "updates.push.services.mozilla.com",
+        }
+    }
+}
+
+/// Exact host allowlist of the push services (Apple, Google FCM, Mozilla autopush), derived
+/// from [`PushHost`].
 pub const PUSH_HOSTS: [&str; 3] = [
-    "web.push.apple.com",
-    "fcm.googleapis.com",
-    "updates.push.services.mozilla.com",
+    PushHost::Apple.name(),
+    PushHost::Google.name(),
+    PushHost::Mozilla.name(),
 ];
 /// Longest accepted endpoint URL, in bytes.
 pub const MAX_PUSH_ENDPOINT_BYTES: usize = 1024;
@@ -106,7 +134,7 @@ pub enum EndpointError {
 #[derive(Clone, PartialEq, Eq)]
 pub struct PushEndpoint {
     raw: String,
-    host: &'static str,
+    host: PushHost,
 }
 
 impl fmt::Debug for PushEndpoint {
@@ -149,10 +177,10 @@ impl PushEndpoint {
         if authority.contains(':') || authority.contains('[') {
             return Err(EndpointError::Port);
         }
-        let host = PUSH_HOSTS
+        let host = PushHost::ALL
             .iter()
             .copied()
-            .find(|h| h.as_bytes() == authority.as_bytes())
+            .find(|h| h.name().as_bytes() == authority.as_bytes())
             .ok_or(EndpointError::HostNotAllowed)?;
         if path.len() < 2 || !path.bytes().all(is_path_byte) || path.contains("//") {
             return Err(EndpointError::BadPath);
@@ -178,13 +206,19 @@ impl PushEndpoint {
     /// The allowlisted host (a [`PUSH_HOSTS`] element).
     #[must_use]
     pub fn host(&self) -> &'static str {
+        self.host.name()
+    }
+
+    /// The allowlisted host as an enum (exhaustive matching for consumers).
+    #[must_use]
+    pub fn push_host(&self) -> PushHost {
         self.host
     }
 
     /// `https://<host>`: the VAPID `aud` (RFC 8292 §2: origin, no path, no trailing slash).
     #[must_use]
     pub fn origin(&self) -> String {
-        format!("{HTTPS_PREFIX}{}", self.host)
+        format!("{HTTPS_PREFIX}{}", self.host.name())
     }
 }
 

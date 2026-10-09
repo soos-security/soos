@@ -50,6 +50,9 @@ jpeg-encoder = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
 tempfile = { workspace = true }
 proptest = "1"
+# Test-only PNG decoder for the Android icon pixel contracts (spec #349 §2.4, AM-7); the
+# exact version already locked through `image`, so no crate is added to Cargo.lock.
+png = "=0.18.1"
 
 [lints]
 workspace = true
