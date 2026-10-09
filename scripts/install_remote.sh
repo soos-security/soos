@@ -88,7 +88,7 @@ allowed_logins = []
 # Optional: Unix socket path (default: $XDG_RUNTIME_DIR/soos-remote/remote.sock).
 # socket_path = "/run/user/1000/soos-remote/remote.sock"
 
-# Passkeys (Face ID / Touch ID) and internet access through Tailscale Funnel
+# Passkeys (Face ID, fingerprint or screen lock) and internet access through Tailscale Funnel
 # (Docs/REMOTE_COMPANION.md section 2b). rp_id is the full node name; without it every
 # remote unlock is refused.
 # rp_id = "mypc.tail1234.ts.net"
@@ -104,15 +104,15 @@ allowed_logins = []
 # only, never the typed password.
 # password_alerts = false
 
-# Optional: Web Push notifications of those alerts to the home-screen app (section 2d).
+# Optional: Web Push notifications of those alerts to the phone web app (section 2d; Android: section 2h).
 # Requires password_alerts = true and rp_id, and the soos-push-sender user unit.
 # push_notifications = false
 # Contact of the VAPID key (default: https://<rp_id>); a mailto: address also works.
 # vapid_subject = "mailto:you@example.com"
-# What the iPhone lock screen shows: "detailed" (source, account, count) or "generic".
+# What the phone lock screen shows: "detailed" (source, account, count) or "generic".
 # push_previews = "detailed"
 
-# Optional: live camera view on the phone (section 2f). Needs rp_id, a fresh Face ID per view,
+# Optional: live camera view on the phone (section 2f). Needs rp_id, a fresh passkey check per view,
 # and, on the PC, the [preview] section of the daemon configuration must allow your uid and
 # the remote view (an administrator change, printed by the installer). No recording.
 # camera_view = false
@@ -145,13 +145,13 @@ TEMPLATE
     echo "  4. Open https://<this-pc>.<tailnet>.ts.net on the phone and add it to the home screen."
     echo "  5. Optional passkeys and internet access (Docs/REMOTE_COMPANION.md section 2b):"
     echo "     set rp_id = \"<this-pc>.<tailnet>.ts.net\" in ${CONFIG_PATH}, restart the service,"
-    echo "     run soos-remote enroll-code and register Face ID from the phone over the tailnet,"
+    echo "     run soos-remote enroll-code and register the phone's passkey over the tailnet,"
     echo "     then optionally set allow_funnel = true, restart, and publish on port 443 with:"
     echo "     tailscale funnel --bg unix:${SOCKET_PATH}"
     echo "  6. Optional push notifications on the phone (Docs/REMOTE_COMPANION.md section 2d):"
     echo "     set password_alerts = true and push_notifications = true, then run"
     echo "     systemctl --user enable --now soos-push-sender and restart soos-remote,"
-    echo "     open the home-screen app and tap Enable notifications."
+    echo "     open the web app on the phone (the home-screen app on iPhone) and tap Enable notifications."
     echo "  7. Optional live camera view (Docs/REMOTE_COMPANION.md section 2f): set camera_view = true"
     echo "     in ${CONFIG_PATH} and restart soos-remote; an administrator must also add to"
     echo "     /etc/soos/daemon.toml and restart soos-daemon (this script never does it):"

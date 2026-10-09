@@ -1,4 +1,5 @@
 {
+  "id": "/",
   "name": "soos remote",
   "short_name": "soos",
   "description": "Lock status and remote lock of the soos desktop over the owner's tailnet",
@@ -8,15 +9,10 @@
   "background_color": "#EDF1FF",
   "theme_color": "#0047BB",
   "icons": [
-    {
-      "src": "icon.svg",
-      "sizes": "any",
-      "type": "image/svg+xml"
-    },
-    {
-      "src": "apple-touch-icon.png",
-      "sizes": "180x180",
-      "type": "image/png"
-    }
+    { "src": "icon.svg", "sizes": "any", "type": "image/svg+xml" },
+    { "src": "apple-touch-icon.png", "sizes": "180x180", "type": "image/png" },
+    { "src": "icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
   ]
 }

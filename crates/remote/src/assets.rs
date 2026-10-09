@@ -21,6 +21,14 @@ pub enum AssetId {
     AppleTouchIcon,
     /// `/sw.js`: the Web Push service worker.
     ServiceWorker,
+    /// `/icon-192.png`: the 192 px full-bleed manifest icon (Android).
+    Icon192,
+    /// `/icon-512.png`: the 512 px full-bleed manifest icon (Android).
+    Icon512,
+    /// `/icon-maskable-512.png`: the 512 px maskable manifest icon (Android launchers).
+    IconMaskable512,
+    /// `/badge-96.png`: the monochrome notification badge (Android status bar).
+    Badge96,
 }
 
 /// One embedded asset.
@@ -63,6 +71,22 @@ pub fn asset(id: AssetId) -> Asset {
         AssetId::ServiceWorker => Asset {
             content_type: "text/javascript; charset=utf-8",
             body: include_bytes!("../assets/sw.js"),
+        },
+        AssetId::Icon192 => Asset {
+            content_type: "image/png",
+            body: include_bytes!("../assets/icon-192.png"),
+        },
+        AssetId::Icon512 => Asset {
+            content_type: "image/png",
+            body: include_bytes!("../assets/icon-512.png"),
+        },
+        AssetId::IconMaskable512 => Asset {
+            content_type: "image/png",
+            body: include_bytes!("../assets/icon-maskable-512.png"),
+        },
+        AssetId::Badge96 => Asset {
+            content_type: "image/png",
+            body: include_bytes!("../assets/badge-96.png"),
         },
     }
 }

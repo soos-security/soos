@@ -3,14 +3,15 @@
  *
  * Server data only ever reaches the DOM through textContent. The page keeps no state
  * beyond the live EventSource: no script-readable cookie (the web session cookie is
- * HttpOnly), no storage. The only service worker (/sw.js) shows push notifications and
- * does nothing else. Staleness is measured with the browser's own
+ * HttpOnly), no storage. The only service worker (/sw.js) shows push notifications and,
+ * when the browser renews a push subscription, re-sends it once to the PC. Staleness is measured with the browser's own
  * clock from the arrival of the last event, never by comparing checked_unix_ms with the
  * phone's clock.
  *
- * Passkeys: every WebAuthn ceremony is modal (a tap, then Face ID / Touch ID), always with
- * user verification required, and never names a credential: the server only answers with a
- * challenge, so the phone offers the passkey it holds for this site.
+ * Passkeys: every WebAuthn ceremony is modal (a tap, then the passkey check:
+ * Face ID, fingerprint or screen lock), always with user verification required, and never
+ * names a credential: the server only answers with a challenge, so the phone offers the
+ * passkey it holds for this site.
  *
  * Failed-password alerts (ADR 2026-10-06 "Failed-Password Alerts in soos-remote From the
  * System Journal"): the server only ever sends time, source class, account class, kind and
@@ -19,15 +20,16 @@
  * displayed (epoch and through headers; a stale view is re-fetched, never acknowledged).
  *
  * Push notifications (ADR 2026-10-06 "Web Push Notifications for Failed-Password Alerts
- * Through a Separate Sender Unit"): from the home-screen app, "Enable notifications" asks
+ * Through a Separate Sender Unit"; Android ADR 2026-10-09): from the phone web app (the
+ * iPhone home-screen app or a supporting browser), "Enable notifications" asks
  * the permission from the tap itself, subscribes with the PC's public VAPID key fetched
  * before the tap, and hands the subscription to the PC. A notification carries counts and
  * classes only, never the typed password.
  *
  * Live camera view (ADR 2026-10-07 "Live Camera View in soos-remote Through the Daemon
  * Preview Channel"): the card is built at runtime (no markup id). Every view needs a tap,
- * a confirmation and a fresh Face ID assertion; the multipart JPEG stream is read with
- * fetch and a ReadableStream into a bounded buffer, each part decoded with
+ * a confirmation and a fresh passkey assertion (Face ID, fingerprint or screen lock); the
+ * multipart JPEG stream is read with fetch and a ReadableStream into a bounded buffer, each part decoded with
  * createImageBitmap and drawn on a canvas, then released. No image element, no object
  * address, no storage; the view stops when the page is hidden or left. A tap on the live
  * image toggles full screen (element fullscreen where the browser has it, a fixed overlay
@@ -35,7 +37,7 @@
  * image as captured) and portrait (the image turned by 90°), through a CSS class only. The
  * mode lives in memory for the page lifetime and is never stored. Every end
  * of a view leaves full screen. A new view may start right after the previous one ended
- * (owner request 2026-10-07), always after a fresh Face ID assertion.
+ * (owner request 2026-10-07), always after a fresh passkey assertion.
  *
  * Battery level (ADR 2026-10-07 "Live Battery Level in soos-remote"): level, charge state
  * and mains presence only, from event: battery on the status stream only, shown with
@@ -111,10 +113,20 @@ const LABELS = {
   unknown: "Connecting",
 };
 
+// Every passkey ceremony (login, enroll, unlock, camera view).
+const PASSKEY_PROMPT_TEXT = "Confirm with your passkey (Face ID, fingerprint or screen lock)…";
+const PUSH_UNSUPPORTED_TEXT =
+  "On iPhone, notifications need the home-screen app (iOS 16.4 or later); this browser does not support them";
+const PUSH_BLOCKED_TEXT = "Notifications are blocked: allow them for this site in the browser or phone settings";
+const PUSH_WORKER_FAILED_TEXT =
+  "Notifications could not start: the service worker did not register (reload the page and try again)";
+// Longest wait for an active service worker before subscribing.
+const SERVICE_WORKER_READY_TIMEOUT_MS = 10000;
+
 // Results shared by every passkey ceremony.
 const PASSKEY_REASONS = {
   passkey_rejected: "The passkey was not accepted, try again",
-  passkey_required: "Face ID is required for every unlock",
+  passkey_required: "A passkey check (Face ID, fingerprint or screen lock) is required for every unlock",
   passkeys_not_configured: "Passkeys are not configured (rp_id in remote.toml)",
   no_passkey: "No passkey is registered yet",
   login_required: "Please sign in again",
@@ -124,7 +136,7 @@ const PASSKEY_REASONS = {
   store_unavailable: "The passkey store is unavailable on the PC",
   busy: "The PC is busy, try again",
   registration_conflict:
-    "Enrollment changed meanwhile: get a new code and retry; remove the extra passkey from the phone's Passwords app",
+    "Enrollment changed meanwhile: get a new code and retry; remove the extra passkey from the phone's password manager",
   body_too_large: "Request too large",
   bad_request: "Request refused (malformed)",
   enroll_code_rejected: "The enrollment code is wrong or expired",
@@ -718,7 +730,7 @@ function requestLock() {
     });
 }
 
-// --- unlock (a fresh passkey assertion with Face ID every time) ------------------------
+// --- unlock (a fresh passkey assertion every time) -------------------------------------
 
 function unlockFailed(status, result) {
   unlockRequestedAt = 0;
@@ -743,12 +755,12 @@ function unlockFailed(status, result) {
 }
 
 function requestUnlock() {
-  // A deliberate second tap, then Face ID: a stray tap must never open the PC.
+  // A deliberate second tap, then the passkey check: a stray tap must never open the PC.
   if (!window.confirm("Unlock the PC now?")) {
     return;
   }
   unlockButton.disabled = true;
-  setText(feedbackNode, "Confirm with Face ID…");
+  setText(feedbackNode, PASSKEY_PROMPT_TEXT);
 
   postJson(UNLOCK_OPTIONS_PATH, "unlock-options")
     .then(function (options) {
@@ -799,7 +811,7 @@ function requestUnlock() {
 
 function requestLogin() {
   loginButton.disabled = true;
-  setText(loginFeedback, "Confirm with Face ID…");
+  setText(loginFeedback, PASSKEY_PROMPT_TEXT);
   postJson(LOGIN_OPTIONS_PATH, "login-options")
     .then(function (options) {
       if (options.status !== 200) {
@@ -840,7 +852,7 @@ function requestEnroll() {
     return;
   }
   enrollButton.disabled = true;
-  setText(enrollFeedback, "Confirm with Face ID…");
+  setText(enrollFeedback, PASSKEY_PROMPT_TEXT);
   postJson(REGISTER_OPTIONS_PATH, "register-options", { code: code })
     .then(function (options) {
       if (options.status !== 200) {
@@ -889,7 +901,7 @@ function requestEnroll() {
     });
 }
 
-// --- push notifications (home-screen app, iOS 16.4 or later) ---------------------------
+// --- push notifications (iPhone home-screen app or a supporting browser) ---------------
 
 const PUSH_REASONS = {
   unsupported_push_service: "This browser's push service is not supported",
@@ -904,8 +916,8 @@ const PUSH_REASONS = {
 
 const PUSH_SERVICES = {
   apple: "Apple",
-  google: "Google",
-  mozilla: "Mozilla",
+  google: "Android / Chrome (Google)",
+  mozilla: "Firefox (Mozilla)",
 };
 
 function pushSupported() {
@@ -930,23 +942,56 @@ function registerServiceWorker() {
     });
 }
 
-// True when the subscription was made with the PC's current public key.
-function sameServerKey(subscription, publicKey) {
+// The registration with an active worker, or null when registration failed or no worker
+// was active within SERVICE_WORKER_READY_TIMEOUT_MS of the call (the timer is armed before
+// registering, so a register() that never settles is bounded too).
+function readyRegistration() {
+  return new Promise(function (resolve) {
+    const timer = setTimeout(function () {
+      resolve(null);
+    }, SERVICE_WORKER_READY_TIMEOUT_MS);
+    function settle(registration) {
+      clearTimeout(timer);
+      resolve(registration);
+    }
+    registerServiceWorker()
+      .then(function (registration) {
+        if (registration === null) {
+          settle(null);
+          return;
+        }
+        if (registration.active) {
+          settle(registration);
+          return;
+        }
+        navigator.serviceWorker.ready.then(settle, function () {
+          settle(null);
+        });
+      })
+      .catch(function () {
+        settle(null);
+      });
+  });
+}
+
+// "same" | "different" | "unknown": "unknown" when the browser does not expose
+// options.applicationServerKey (or the PC key is missing); such a subscription is kept.
+function serverKeyMatch(subscription, publicKey) {
   const own = subscription.options ? subscription.options.applicationServerKey : null;
   if (!own || typeof publicKey !== "string") {
-    return false;
+    return "unknown";
   }
   const a = new Uint8Array(own);
   const b = new Uint8Array(fromBase64Url(publicKey));
   if (a.length !== b.length) {
-    return false;
+    return "different";
   }
   for (let i = 0; i < a.length; i += 1) {
     if (a[i] !== b[i]) {
-      return false;
+      return "different";
     }
   }
-  return true;
+  return "same";
 }
 
 function renderPush(view) {
@@ -961,7 +1006,7 @@ function renderPush(view) {
   }
   pushHint.hidden = true;
   if (!pushSupported()) {
-    setText(pushStateNode, "Notifications need the home-screen app (iOS 16.4 or later)");
+    setText(pushStateNode, PUSH_UNSUPPORTED_TEXT);
     pushEnableButton.hidden = true;
     pushTestButton.hidden = true;
     pushDisableButton.hidden = true;
@@ -1014,7 +1059,8 @@ function renderPush(view) {
 }
 
 // Keeps the PC in sync with this phone's subscription; a subscription made with an older
-// key (after soos-remote push reset) is dropped locally and must be enabled again.
+// key (after soos-remote push reset) is dropped locally and must be enabled again. A
+// subscription whose key the browser does not expose is kept and re-sent.
 function syncSubscription(view) {
   if (view.state !== "active" || !pushSupported() || Notification.permission !== "granted") {
     return;
@@ -1027,13 +1073,13 @@ function syncSubscription(view) {
       if (subscription === null) {
         return null;
       }
-      if (sameServerKey(subscription, view.public_key)) {
-        return postJson(PUSH_SUBSCRIBE_PATH, "push-subscribe", subscription.toJSON());
+      if (serverKeyMatch(subscription, view.public_key) === "different") {
+        return subscription.unsubscribe().then(function () {
+          setText(pushFeedback, "Notifications must be re-enabled on this phone");
+          pushEnableButton.hidden = false;
+        });
       }
-      return subscription.unsubscribe().then(function () {
-        setText(pushFeedback, "Notifications must be re-enabled on this phone");
-        pushEnableButton.hidden = false;
-      });
+      return postJson(PUSH_SUBSCRIBE_PATH, "push-subscribe", subscription.toJSON());
     })
     .catch(function () {
       return null;
@@ -1057,10 +1103,10 @@ function fetchPush() {
     });
 }
 
-// The permission request is the first step of the tap (Safari requires a user gesture).
+// The permission request is the first step of the tap (browsers require a user gesture).
 async function enableNotifications() {
   if (!pushSupported()) {
-    setText(pushFeedback, "Notifications need the home-screen app (iOS 16.4 or later)");
+    setText(pushFeedback, PUSH_UNSUPPORTED_TEXT);
     return;
   }
   if (pushView === null || pushView.state !== "active" || typeof pushView.public_key !== "string") {
@@ -1072,10 +1118,14 @@ async function enableNotifications() {
   try {
     const permission = await Notification.requestPermission();
     if (permission !== "granted") {
-      setText(pushFeedback, "Notifications are blocked in the iPhone settings");
+      setText(pushFeedback, PUSH_BLOCKED_TEXT);
       return;
     }
-    const registration = pushRegistration !== null ? pushRegistration : await navigator.serviceWorker.ready;
+    const registration = await readyRegistration();
+    if (registration === null) {
+      setText(pushFeedback, PUSH_WORKER_FAILED_TEXT);
+      return;
+    }
     const subscription = await registration.pushManager.subscribe({
       userVisibleOnly: true,
       applicationServerKey: fromBase64Url(publicKey),
@@ -1622,12 +1672,12 @@ function openCameraStream(path) {
 
 function startCameraView() {
   const c = buildCameraCard();
-  // A deliberate second tap, then Face ID: a stray tap must never turn the camera on.
+  // A deliberate second tap, then the passkey check: a stray tap must never turn the camera on.
   if (!window.confirm("Start the live camera view of the PC? Its camera light turns on.")) {
     return;
   }
   c.startButton.disabled = true;
-  setText(c.feedback, "Confirm with Face ID…");
+  setText(c.feedback, PASSKEY_PROMPT_TEXT);
   postJson(CAMERA_OPTIONS_PATH, "camera-options")
     .then(function (options) {
       if (options.status !== 200) {
