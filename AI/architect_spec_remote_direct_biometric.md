@@ -244,7 +244,7 @@ const _: () = assert!(
 const PASSKEY_TRANSPORTS = ["internal", "hybrid", "usb", "nfc", "ble", "smart-card"];
 
 // A modal passkey assertion over a server challenge. With `nameCredentials`, the
-// credentials listed by the server (unlock, camera) are passed as allowCredentials so the
+// credentials listed by the server (unlock, camera) are passed as the allow list so the
 // phone goes straight to the biometric prompt; sign-in never names one.
 function getAssertion(options, nameCredentials) { ... }
 ```
@@ -253,7 +253,9 @@ function getAssertion(options, nameCredentials) { ... }
   `Array.isArray(options.allow_credentials)` **and** it is non-empty; at most 4 entries are used
   (`MAX_PASSKEYS`); each entry is `{ type: "public-key", id: fromBase64Url(e.id), transports }`
   with `transports` filtered to `PASSKEY_TRANSPORTS` (an entry whose `id` is not a string is
-  skipped). The literal `allowCredentials` appears exactly once in `app.js`.
+  skipped). The literal `allowCredentials` appears exactly once in `app.js`: the single
+  `publicKey.allowCredentials` assignment. No comment, string or other identifier may contain it;
+  comments say "allow list" (PE-1).
 - Call sites: `requestLogin` → `getAssertion(options.body, false)`; `requestUnlock` and
   `startCameraView` → `getAssertion(options.body, true)`.
 - Registration `publicKey` adds `hints: ["client-device"]` and, inside
@@ -331,13 +333,18 @@ at most 4 × (1364 + 60) ≈ 5.7 KiB; no bound on responses is affected.
 ### 8.2 Behaviour — new `crates/remote/tests/direct_biometric_tests.rs` (harness of `auth_server_tests.rs` / `camera_server_tests.rs` via `tests/common`)
 
 - `test_rdb_unlock_options_name_every_registered_credential`: tailnet and Funnel-with-session,
-  two passkeys (one with stored transports `{Hybrid, Internal}` written by registration, one legacy
+  two passkeys (one with stored transports `{Internal, Usb}` written by registration, one legacy
   without): exact keys `["allow_credentials","challenge","rp_id","timeout_ms"]`; exact array in
-  store order; legacy entry carries `["internal","hybrid"]`.
-- `test_rdb_camera_options_name_every_registered_credential`: same for `/api/auth/camera/options`.
+  store order; the stored entry carries `["internal","usb"]` and the legacy entry carries
+  `["internal","hybrid"]` (PE-2: the stored set must differ from `DEFAULT_ALLOW`, so `{Hybrid,
+  Internal}` is not used here).
+- `test_rdb_camera_options_name_every_registered_credential`: same for `/api/auth/camera/options`
+  (same stored set `{Internal, Usb}`, PE-2).
 - `test_rdb_login_options_never_name_a_credential`: with two passkeys and stored transports, login
   options keys exactly `["challenge","rp_id","timeout_ms"]`; the body contains no credential id of
-  either passkey, no `allow`, no `transports`.
+  either passkey, no `allow`, no `transports`. Callers exercised: tailnet, anonymous Funnel, **and a
+  Funnel caller presenting a valid session cookie** (the rotation path), each with the same exact
+  key set and absence of both ids (PE-3: an implementation keyed on session presence must fail).
 - `test_rdb_named_options_refused_without_funnel_session`: Funnel without cookie, with an unknown
   cookie, and with a session revoked by removing its passkey: both routes answer `403
   login_required`, body contains no credential id; no challenge issued.
@@ -348,8 +355,12 @@ at most 4 × (1364 + 60) ≈ 5.7 KiB; no bound on responses is affected.
   `["internal","hybrid","usb"]`, next unlock options entry carries the same list.
 - `test_rdb_register_without_transports_is_accepted`: the pre-change body (no key) and `null` both
   register; the record has `EMPTY`; the store file has no `transports` key.
-- `test_rdb_register_transports_bounds`: 9 entries, a 17-byte entry, a number entry, an object
-  value ⇒ `400 bad_request`, counted (5 such ⇒ `429`), nothing stored, enrollment code kept.
+- `test_rdb_register_transports_bounds`: five malformed bodies, each ⇒ `400 bad_request`: 9
+  entries, a 17-byte entry, a number entry, an object value, and a string value
+  (`"transports": "internal"`) (PE-4: the fifth input). The five are counted on
+  `LimitKey::Tailnet`, so the next register verify (otherwise valid) answers `429 rate_limited`.
+  Nothing is stored, and the enrollment code file still exists after the malformed bodies (the
+  decode runs before `check_code`) (PE-4).
 - `test_rdb_counter_update_keeps_transports`: a device-bound passkey with transports; after an
   unlock with a higher counter the record keeps its transports.
 - `test_rdb_assertion_rules_unchanged_with_allow_list`: after named options, an assertion without
@@ -388,6 +399,12 @@ No other existing test changes. If the plan evaluator classifies AM-1(b) or AM-3
 a security assertion rather than an owner-required exact replacement, the run must stop and report
 to the owner instead of applying them.
 
+PE-6 (plan evaluator): AM-1 … AM-5 are **approved** as listed. AM-1(b) and AM-3 are owner-required
+exact replacements (OD-3/OD-4), not relaxations; the anonymous non-disclosure property stays pinned
+by unchanged test 36 and the new RDB tests, and AM-3 follows the existing "Contract migration"
+pattern of test 51. Conditions: every other `forbidden` needle of test 51 stays unchanged, and no
+other existing test is modified.
+
 ## 10. Documentation to update
 
 - `Docs/REMOTE_COMPANION.md`
@@ -404,7 +421,13 @@ to the owner instead of applying them.
     `soos-remote passkeys remove <n>` for the old one (or keep it until the new one works);
     (3) set the preferred service as above; (4) over the tailnet run `soos-remote enroll-code`
     and enroll from the phone (the page asks for a platform passkey); (5) check unlock shows the
-    fingerprint prompt directly.
+    fingerprint prompt directly. Step (1) stays first: delete the Proton Pass passkey before
+    re-enrolling (PE-5).
+  - §2h, same item (PE-5): enrollment must be done **on the phone itself**; a desktop browser or a
+    cross-device QR flow may be refused because registration asks for
+    `authenticatorAttachment: "platform"`. If the phone reports that the passkey "already exists",
+    the old soos passkey is still present in an enabled provider (for example Proton Pass): delete
+    it there (step 1), or disable that provider, then enroll again.
   - §2h item 11 owner check: add step "(8) RDB10".
   - §2b: one sentence on the named credentials of unlock/camera and the discoverable sign-in.
   - §6 table: unlock and camera options `200 {allow_credentials, challenge, rp_id, timeout_ms}`;
@@ -431,7 +454,18 @@ to the owner instead of applying them.
 | RDB9 | Docs (§2h preferred service and Proton Pass re-enrollment, §6, §8), ARCHITECTURE §13, ADR and walkthrough 195 | `test_rdb_s6_docs_adr_and_walkthrough` | Pending |
 | RDB10 | Hardware (owner): on the owner's Android phone, after re-enrolling a passkey stored on the phone, **unlock** and **camera start** show the fingerprint/face prompt directly with no provider picker, over the tailnet and over Funnel; sign-in may still show the picker; the iPhone flow still works | Owner hardware check (`Docs/REMOTE_COMPANION.md` §2h) | Pending (owner hardware) |
 
-## 12. Assumptions (minor choices decided here)
+## 12. Plan-evaluator items folded in (`AI/plan_evaluator_report.md`, VALIDATION_VERDICT: APPROVED)
+
+| # | Severity | Applied in | Owner phase |
+|---|---|---|---|
+| PE-1 | MINOR | §3.5: the `getAssertion` comment says "allow list"; `allowCredentials` appears only in the single `publicKey.allowCredentials` assignment (exact count 1 required by AM-3 and `test_rdb_s1`). | tester, developer |
+| PE-2 | MINOR | §8.2 RDB1/RDB2 tests: stored set `{Internal, Usb}` (≠ `DEFAULT_ALLOW`) next to a legacy record carrying `["internal","hybrid"]`. | tester |
+| PE-3 | MINOR | §8.2 `test_rdb_login_options_never_name_a_credential`: also a Funnel caller with a valid session cookie (rotation path). | tester |
+| PE-4 | MINOR | §8.2 `test_rdb_register_transports_bounds`: fifth malformed input (string value), then `429 rate_limited`; enrollment code file still exists. | tester |
+| PE-5 | MINOR (docs) | §10 §2h: enroll on the phone itself (platform attachment may refuse desktop/QR); delete the Proton Pass passkey first; meaning of "already exists". No test change beyond the `test_rdb_s6` needles. | traceability/docs |
+| PE-6 | OBSERVATION | §9: AM-1 … AM-5 approved; AM-1(b) and AM-3 classified as owner-required exact replacements (OD-3/OD-4), not relaxations. Conditions: every other `forbidden` needle of test 51 stays unchanged, and no other existing test is modified. | tester |
+
+## 13. Assumptions (minor choices decided here)
 
 - A-1: Default transports `["internal","hybrid"]` (task wording); "internal" routes Chrome Android to
   Credential Manager, "hybrid" keeps cross-device use possible.
@@ -447,7 +481,7 @@ to the owner instead of applying them.
   (`deny_unknown_fields`) and fails closed (`503 store_unavailable`). Accepted; documented in the
   walkthrough (rollback = re-enroll, or delete the key by hand).
 
-## 13. Residual risks
+## 14. Residual risks
 
 - R-1: A tailnet caller with an allowed login, or a Funnel caller holding a valid session, learns the
   registered credential ids. Both already authenticated (the Funnel session was obtained with one of
