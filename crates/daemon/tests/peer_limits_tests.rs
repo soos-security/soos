@@ -773,3 +773,451 @@ async fn test_unprivileged_peer_cannot_report_event_for_foreign_uid() {
         "Foreign-UID events from an unprivileged peer must not create snapshots"
     );
 }
+
+// ---------------------------------------------------------------------------
+// soos-remote security hardening S-3 (ADR 2026-10-12, spec
+// AI/architect_spec_remote_security_hardening.md §4, §11.2; rows RSH4, RSH5): one
+// auth-reserved connection per unprivileged UID above `max_connections_per_uid`, admitted
+// only for an `Auth` request whose whole first frame arrives within
+// `AUTH_RESERVE_FIRST_REQUEST_TIMEOUT_MS`. New tests only; nothing above is changed.
+// ---------------------------------------------------------------------------
+
+mod auth_reserve {
+    use super::*;
+    use soos_daemon::limits::{
+        AdmissionClass, AUTH_RESERVED_CONNECTIONS_PER_UID, AUTH_RESERVE_FIRST_REQUEST_TIMEOUT_MS,
+    };
+    use soos_protocol::types::ReasonClass;
+
+    const A: u32 = 1000;
+    const B: u32 = 1001;
+
+    #[test]
+    fn test_rsh_limiter_auth_reserve_admits_one_extra_per_uid() {
+        assert_eq!(AUTH_RESERVED_CONNECTIONS_PER_UID, 1);
+        let limiter = PeerConnectionLimiter::new(8, &PeerLimitsConfig::default());
+        let a1 = limiter.try_acquire(A).expect("first regular permit");
+        let a2 = limiter.try_acquire(A).expect("second regular permit");
+        assert_eq!(
+            limiter.try_acquire(A).err(),
+            Some(ConnectionRejection::PerUidCap),
+            "the regular cap is unchanged"
+        );
+        let reserve = limiter
+            .try_acquire_auth_reserve(A)
+            .expect("one auth-reserved permit above the cap");
+        assert_eq!(reserve.peer_uid(), A);
+        assert_eq!(reserve.class(), AdmissionClass::AuthReserve);
+        assert_eq!(
+            limiter.try_acquire_auth_reserve(A).err(),
+            Some(ConnectionRejection::PerUidCap),
+            "a second reserve of the same UID is refused"
+        );
+        assert_eq!(limiter.in_use(), 3);
+
+        // Another UID is unaffected: its own two regular permits and its own reserve.
+        let b1 = limiter.try_acquire(B).expect("other UID regular");
+        let b2 = limiter.try_acquire(B).expect("other UID regular");
+        let b_reserve = limiter
+            .try_acquire_auth_reserve(B)
+            .expect("other UID has its own reserve");
+        assert_eq!(b_reserve.class(), AdmissionClass::AuthReserve);
+        assert_eq!(limiter.in_use(), 6);
+
+        // Root never uses the reserve (no per-UID cap).
+        assert_eq!(
+            limiter.try_acquire_auth_reserve(ROOT).err(),
+            Some(ConnectionRejection::PerUidCap)
+        );
+        drop((a1, a2, reserve, b1, b2, b_reserve));
+        assert_eq!(limiter.in_use(), 0);
+        assert_eq!(limiter.available(), 8);
+    }
+
+    #[test]
+    fn test_rsh_limiter_auth_reserve_respects_unprivileged_and_global_capacity() {
+        // Capacity 3, one root-reserved permit: two unprivileged permits.
+        let cfg = PeerLimitsConfig {
+            reserved_root_connections: 1,
+            ..PeerLimitsConfig::default()
+        };
+        let limiter = PeerConnectionLimiter::new(3, &cfg);
+        let a1 = limiter.try_acquire(A).expect("regular");
+        let a2 = limiter.try_acquire(A).expect("regular");
+        let root = limiter.try_acquire(ROOT).expect("root reserved permit");
+        assert_eq!(
+            limiter.try_acquire_auth_reserve(A).err(),
+            Some(ConnectionRejection::GlobalCapacity),
+            "the global capacity is checked first"
+        );
+        drop(root);
+        assert_eq!(
+            limiter.try_acquire_auth_reserve(A).err(),
+            Some(ConnectionRejection::ReservedForPrivileged),
+            "the reserve consumes an unprivileged permit and never a root-reserved one"
+        );
+        assert_eq!(limiter.in_use(), 2);
+        drop((a1, a2));
+
+        // The reserve counts against the unprivileged capacity (8 - 2 = 6).
+        let limiter = PeerConnectionLimiter::new(8, &PeerLimitsConfig::default());
+        let held = vec![
+            limiter.try_acquire(A).expect("A1"),
+            limiter.try_acquire(A).expect("A2"),
+            limiter.try_acquire_auth_reserve(A).expect("A reserve"),
+            limiter.try_acquire(B).expect("B1"),
+            limiter.try_acquire(B).expect("B2"),
+            limiter.try_acquire(1002).expect("C1"),
+        ];
+        assert_eq!(
+            limiter.try_acquire(1002).err(),
+            Some(ConnectionRejection::ReservedForPrivileged),
+            "six unprivileged permits in use, the reserve included"
+        );
+        let r1 = limiter
+            .try_acquire(ROOT)
+            .expect("root keeps its reservation");
+        let r2 = limiter
+            .try_acquire(ROOT)
+            .expect("root keeps its reservation");
+        assert_eq!(limiter.available(), 0);
+        drop((held, r1, r2));
+        assert_eq!(limiter.in_use(), 0);
+    }
+
+    #[test]
+    fn test_rsh_limiter_auth_reserve_released_on_drop_and_tracked() {
+        let limiter = PeerConnectionLimiter::new(8, &PeerLimitsConfig::default());
+        for round in 0..1000u32 {
+            let uid = 20_000 + round;
+            let r1 = limiter.try_acquire(uid).expect("regular");
+            let r2 = limiter.try_acquire(uid).expect("regular");
+            let reserve = limiter.try_acquire_auth_reserve(uid).expect("reserve");
+            assert_eq!(limiter.tracked_uids(), 1, "one UID tracked once");
+            assert!(limiter.tracked_uids() <= 8, "tracking bounded by capacity");
+            drop((r1, r2));
+            assert_eq!(
+                limiter.tracked_uids(),
+                1,
+                "a UID holding only its reserve is still tracked"
+            );
+            assert_eq!(limiter.in_use(), 1);
+            drop(reserve);
+            assert_eq!(limiter.tracked_uids(), 0, "released UIDs are forgotten");
+            assert_eq!(limiter.in_use(), 0);
+            assert_eq!(limiter.available(), 8);
+        }
+        // A released reserve is reusable by the same UID.
+        let first = limiter.try_acquire_auth_reserve(A).expect("reserve");
+        drop(first);
+        let again = limiter
+            .try_acquire_auth_reserve(A)
+            .expect("a released reserve is reusable");
+        drop(again);
+        assert_eq!(limiter.in_use(), 0);
+    }
+
+    #[test]
+    fn test_rsh_limiter_regular_cap_unchanged() {
+        let limiter = PeerConnectionLimiter::new(8, &PeerLimitsConfig::default());
+        let a1 = limiter.try_acquire(A).expect("regular");
+        let a2 = limiter.try_acquire(A).expect("regular");
+        let reserve = limiter.try_acquire_auth_reserve(A).expect("reserve");
+        assert_eq!(
+            limiter.try_acquire(A).err(),
+            Some(ConnectionRejection::PerUidCap),
+            "a held reserve never adds a regular permit"
+        );
+        drop(reserve);
+        assert_eq!(
+            limiter.try_acquire(A).err(),
+            Some(ConnectionRejection::PerUidCap),
+            "releasing the reserve frees no regular permit"
+        );
+        drop(a1);
+        let a3 = limiter.try_acquire(A).expect("a released regular permit");
+        assert_eq!(a3.class(), AdmissionClass::Regular);
+        drop((a2, a3));
+        assert_eq!(limiter.in_use(), 0);
+    }
+
+    #[test]
+    fn test_rsh_permit_reports_admission_class() {
+        let limiter = PeerConnectionLimiter::new(8, &PeerLimitsConfig::default());
+        let regular = limiter.try_acquire(A).expect("regular");
+        assert_eq!(regular.class(), AdmissionClass::Regular);
+        assert_eq!(regular.peer_uid(), A);
+        let root = limiter.try_acquire(ROOT).expect("root");
+        assert_eq!(root.class(), AdmissionClass::Regular);
+        let reserve = limiter.try_acquire_auth_reserve(A).expect("reserve");
+        assert_eq!(reserve.class(), AdmissionClass::AuthReserve);
+        assert_ne!(AdmissionClass::Regular, AdmissionClass::AuthReserve);
+    }
+
+    // -----------------------------------------------------------------------
+    // Socket-level contract (the test peer is the current, unprivileged UID)
+    // -----------------------------------------------------------------------
+
+    /// The reserve window plus a scheduling margin stays inside the close deadline.
+    const _: () = assert!(AUTH_RESERVE_FIRST_REQUEST_TIMEOUT_MS + 100 < 500);
+
+    /// A dispatcher with two held, served regular connections of the test UID.
+    async fn two_held(
+        name: &str,
+    ) -> (
+        tempfile::TempDir,
+        std::path::PathBuf,
+        Arc<ConnectionDispatcher>,
+        UnixStream,
+        UnixStream,
+    ) {
+        let dir = tempdir().expect("tempdir");
+        let sock_path = dir.path().join(name);
+        let dispatcher = Arc::new(ConnectionDispatcher::new(
+            dispatcher_config(8),
+            Arc::new(HealthState::new()),
+        ));
+        spawn_server(dispatcher.clone(), &sock_path).await;
+        let mut c1 = UnixStream::connect(&sock_path).await.expect("Connect c1");
+        status_roundtrip(&mut c1, 1).await;
+        let mut c2 = UnixStream::connect(&sock_path).await.expect("Connect c2");
+        status_roundtrip(&mut c2, 2).await;
+        assert_eq!(dispatcher.available_permits(), 6);
+        (dir, sock_path, dispatcher, c1, c2)
+    }
+
+    /// Waits (bounded) until the dispatcher reports `expected` free permits.
+    async fn permits_back(dispatcher: &ConnectionDispatcher, expected: usize) {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while dispatcher.available_permits() != expected {
+            assert!(
+                Instant::now() < deadline,
+                "permits must return to {expected}, got {}",
+                dispatcher.available_permits()
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    fn auth_response(buf: &[u8]) -> Response {
+        let resp: Response = decode(buf).expect("Auth answered with a standard Response");
+        assert_eq!(resp.request_id, [0x5A; 32], "the request id is echoed");
+        resp
+    }
+
+    #[tokio::test]
+    async fn test_rsh_auth_admitted_on_reserve_while_two_connections_held() {
+        if current_uid() == 0 {
+            return;
+        }
+        let (_dir, sock_path, dispatcher, mut c1, mut c2) = two_held("reserve_auth.sock").await;
+
+        let mut auth = UnixStream::connect(&sock_path).await.expect("Connect auth");
+        let buf = exchange(&mut auth, &auth_request(current_uid())).await;
+        let resp = auth_response(&buf);
+        assert_eq!(
+            resp.verdict,
+            Verdict::Unavailable,
+            "no pipeline: fail closed"
+        );
+        assert!(
+            closed_promptly(&mut auth).await,
+            "the reserve serves one Auth, then closes"
+        );
+        permits_back(&dispatcher, 6).await;
+
+        // While one reserve is held (idle), a second concurrent reserve is refused.
+        let held_reserve = UnixStream::connect(&sock_path)
+            .await
+            .expect("Connect reserve");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let mut second = UnixStream::connect(&sock_path)
+            .await
+            .expect("Connect second reserve");
+        send_ignoring_errors(&mut second, &auth_request(current_uid())).await;
+        assert!(
+            closed_promptly(&mut second).await,
+            "only one auth-reserved connection per UID"
+        );
+        drop(held_reserve);
+        permits_back(&dispatcher, 6).await;
+
+        // The held regular connections keep working.
+        status_roundtrip(&mut c1, 3).await;
+        status_roundtrip(&mut c2, 4).await;
+    }
+
+    #[tokio::test]
+    async fn test_rsh_reserve_closes_non_auth_without_payload() {
+        if current_uid() == 0 {
+            return;
+        }
+        let (_dir, sock_path, dispatcher, _c1, _c2) = two_held("reserve_non_auth.sock").await;
+        let uid = current_uid();
+        let preview = Request {
+            kind: RequestKind::PreviewFrame,
+            service: "soos-gui".to_string(),
+            ..status_request(uid, 0x31)
+        };
+        let event = Event {
+            version: CURRENT_VERSION,
+            kind: EventKind::PasswordFailed,
+            request_id: Some([0x32; 32]),
+            uid: Some(uid),
+            service: "swaylock".into(),
+            timestamp_monotonic_ns: 1,
+        };
+        let frames: Vec<(&str, Vec<u8>)> = vec![
+            (
+                "Status",
+                encode(&status_request(uid, 0x30)).expect("encode"),
+            ),
+            ("PreviewFrame", encode(&preview).expect("encode")),
+            ("PasswordFailed event", encode(&event).expect("encode")),
+        ];
+        for (name, framed) in frames {
+            let mut client = UnixStream::connect(&sock_path).await.expect("Connect");
+            let _ = client.write_all(&framed).await;
+            let _ = client.flush().await;
+            assert!(
+                closed_promptly(&mut client).await,
+                "{name} on the auth-reserved connection is closed without an answer"
+            );
+            permits_back(&dispatcher, 6).await;
+        }
+        // The reserve is free again: an Auth is still admitted on it.
+        let mut auth = UnixStream::connect(&sock_path).await.expect("Connect auth");
+        let buf = exchange(&mut auth, &auth_request(uid)).await;
+        auth_response(&buf);
+    }
+
+    #[tokio::test]
+    async fn test_rsh_reserve_idle_connection_closed_within_window() {
+        if current_uid() == 0 {
+            return;
+        }
+        let (_dir, sock_path, dispatcher, _c1, _c2) = two_held("reserve_idle.sock").await;
+        let started = Instant::now();
+        let mut idle = UnixStream::connect(&sock_path).await.expect("Connect idle");
+        assert!(
+            closed_promptly(&mut idle).await,
+            "a silent auth-reserved connection is closed within the window"
+        );
+        assert!(started.elapsed() < CLOSE_DEADLINE);
+        permits_back(&dispatcher, 6).await;
+        // The reserve is reusable afterwards.
+        let mut auth = UnixStream::connect(&sock_path).await.expect("Connect auth");
+        let buf = exchange(&mut auth, &auth_request(current_uid())).await;
+        auth_response(&buf);
+    }
+
+    #[tokio::test]
+    async fn test_rsh_reserve_partial_frame_closed_within_window() {
+        if current_uid() == 0 {
+            return;
+        }
+        let (_dir, sock_path, dispatcher, _c1, _c2) = two_held("reserve_partial.sock").await;
+        let framed = encode(&auth_request(current_uid())).expect("encode");
+        let body_len = framed.len() - 4;
+        let partials: Vec<(&str, Vec<u8>)> = vec![
+            ("one byte", framed[..1].to_vec()),
+            (
+                "length prefix and half the body",
+                framed[..4 + body_len / 2].to_vec(),
+            ),
+        ];
+        for (name, bytes) in partials {
+            let started = Instant::now();
+            let mut client = UnixStream::connect(&sock_path).await.expect("Connect");
+            client.write_all(&bytes).await.expect("partial write");
+            client.flush().await.expect("flush");
+            let mut byte = [0u8; 1];
+            let remaining = CLOSE_DEADLINE.saturating_sub(started.elapsed());
+            match tokio::time::timeout(remaining, client.read(&mut byte)).await {
+                Ok(Ok(0)) => {}
+                Ok(Ok(n)) => panic!("{name}: no byte may be answered, got {n}"),
+                Ok(Err(e)) => assert!(
+                    matches!(
+                        e.kind(),
+                        std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::BrokenPipe
+                    ),
+                    "{name}: {e}"
+                ),
+                Err(_) => panic!("{name}: a stalled first frame must be closed within 500 ms"),
+            }
+            assert!(started.elapsed() < CLOSE_DEADLINE, "{name}");
+            permits_back(&dispatcher, 6).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn test_rsh_reserve_auth_after_100ms_is_answered() {
+        if current_uid() == 0 {
+            return;
+        }
+        let (_dir, sock_path, _dispatcher, _c1, _c2) = two_held("reserve_delay.sock").await;
+        let mut auth = UnixStream::connect(&sock_path).await.expect("Connect auth");
+        // PAM shows "Looking for face" through the conversation between connect and write.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let buf = exchange(&mut auth, &auth_request(current_uid())).await;
+        let resp = auth_response(&buf);
+        assert_ne!(resp.reason_class, ReasonClass::RateLimited);
+    }
+
+    #[tokio::test]
+    async fn test_rsh_reserve_auth_is_one_shot() {
+        if current_uid() == 0 {
+            return;
+        }
+        let (_dir, sock_path, dispatcher, _c1, _c2) = two_held("reserve_one_shot.sock").await;
+        let mut auth = UnixStream::connect(&sock_path).await.expect("Connect auth");
+        let buf = exchange(&mut auth, &auth_request(current_uid())).await;
+        auth_response(&buf);
+        send_ignoring_errors(&mut auth, &auth_request(current_uid())).await;
+        assert!(
+            closed_promptly(&mut auth).await,
+            "a second Auth on the reserve is never answered"
+        );
+        permits_back(&dispatcher, 6).await;
+    }
+
+    /// Auditor addition (AI/auditor_constraints_remote_security_hardening.md, C-6): a stalled
+    /// first frame is closed by the reserve window, not refused at admission. The stalled
+    /// connection holds an unprivileged permit while it waits (6 -> 5 free), and it is closed
+    /// no earlier than the window (the timer starts at admission, after `connect` returned).
+    #[tokio::test]
+    async fn test_rsh_reserve_stalled_frame_holds_the_reserve_for_the_window() {
+        if current_uid() == 0 {
+            return;
+        }
+        let (_dir, sock_path, dispatcher, _c1, _c2) = two_held("reserve_window.sock").await;
+        let framed = encode(&auth_request(current_uid())).expect("encode");
+        let started = Instant::now();
+        let mut client = UnixStream::connect(&sock_path).await.expect("Connect");
+        client.write_all(&framed[..1]).await.expect("partial write");
+        client.flush().await.expect("flush");
+        // The reserve permit is taken while the first frame is pending.
+        permits_back(&dispatcher, 5).await;
+        let mut byte = [0u8; 1];
+        match tokio::time::timeout(CLOSE_DEADLINE, client.read(&mut byte)).await {
+            Ok(Ok(0)) => {}
+            Ok(Ok(n)) => panic!("no byte may be answered, got {n}"),
+            Ok(Err(e)) => assert!(
+                matches!(
+                    e.kind(),
+                    std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::BrokenPipe
+                ),
+                "{e}"
+            ),
+            Err(_) => panic!("a stalled first frame must be closed by the reserve window"),
+        }
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed >= Duration::from_millis(AUTH_RESERVE_FIRST_REQUEST_TIMEOUT_MS - 50),
+            "closed by the {AUTH_RESERVE_FIRST_REQUEST_TIMEOUT_MS} ms window, not at admission \
+             (closed after {elapsed:?})"
+        );
+        assert!(elapsed < CLOSE_DEADLINE + Duration::from_millis(200));
+        permits_back(&dispatcher, 6).await;
+    }
+}

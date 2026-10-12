@@ -509,3 +509,219 @@ pub fn bind_socket(dir: &Path, uid: u32) -> Result<UnixListener, SocketError> {
     }
     Ok(listener)
 }
+
+// ---------------------------------------------------------------------------------------
+// Start-up sandbox self-check (ADR 2026-10-12 "soos-remote Security Hardening", S-7)
+// ---------------------------------------------------------------------------------------
+
+/// Process mount table read by the start-up sandbox check.
+pub const SANDBOX_MOUNTINFO_PATH: &str = "/proc/self/mountinfo";
+/// Larger mount tables fail closed (the owner host: ~16 KiB).
+pub const MAX_MOUNTINFO_BYTES: usize = 1_048_576;
+/// Directory the unit makes inaccessible (`InaccessiblePaths=`).
+pub const SANDBOX_HIDDEN_LOG_DIR: &str = "/var/log";
+/// Path of the binary relative to the home directory, exactly as in the unit's
+/// `ExecStart=%h/.local/bin/soos-push-sender`.
+pub const SENDER_EXE_HOME_RELATIVE: &str = ".local/bin/soos-push-sender";
+
+/// Mount point the unit covers with a read-only tmpfs (`TemporaryFileSystem=/run:ro`).
+const SANDBOX_RUN_DIR: &str = "/run";
+/// Filesystem type of the hiding mounts.
+const TMPFS: &str = "tmpfs";
+/// Per-mount option of a read-only mount.
+const READ_ONLY_OPTION: &str = "ro";
+
+/// Why the sandbox was not detected. Fixed texts: no path is echoed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum SandboxError {
+    /// The mount table could not be read, was too large or was not UTF-8.
+    #[error("mount table unreadable")]
+    MountInfoUnreadable,
+    /// The home directory could not be derived from the running binary's path.
+    #[error("home not resolved")]
+    HomeUnresolved,
+    /// `/run` is not a read-only tmpfs.
+    #[error("/run not hidden")]
+    RunVisible,
+    /// The home directory is not under a read-only tmpfs, or is mounted back on top of it.
+    #[error("home not hidden")]
+    HomeVisible,
+    /// The system logs directory is listable.
+    #[error("system logs readable")]
+    LogsReadable,
+}
+
+/// The home directory of the running binary: `exe` minus the exact trailing components of
+/// [`SENDER_EXE_HOME_RELATIVE`] (compared component-wise). Never read from the environment.
+///
+/// # Errors
+/// [`SandboxError::HomeUnresolved`] when `exe` does not end with those components, or the
+/// remainder is relative, empty, `/` or contains a `..` component.
+pub fn home_from_exe(exe: &Path) -> Result<std::path::PathBuf, SandboxError> {
+    if !exe.ends_with(SENDER_EXE_HOME_RELATIVE) {
+        return Err(SandboxError::HomeUnresolved);
+    }
+    let home = exe
+        .parent()
+        .and_then(Path::parent)
+        .and_then(Path::parent)
+        .ok_or(SandboxError::HomeUnresolved)?;
+    let has_parent_dir = home
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir));
+    if !home.is_absolute() || home.parent().is_none() || has_parent_dir {
+        return Err(SandboxError::HomeUnresolved);
+    }
+    Ok(home.to_path_buf())
+}
+
+/// One parsed line of `/proc/self/mountinfo` (proc(5)).
+struct MountEntry {
+    id: u64,
+    parent: u64,
+    mount_point: std::path::PathBuf,
+    read_only: bool,
+    tmpfs: bool,
+}
+
+impl MountEntry {
+    /// Whether this is a read-only tmpfs.
+    const fn hides(&self) -> bool {
+        self.read_only && self.tmpfs
+    }
+}
+
+/// Octal-unescapes a mountinfo field (`\040`, `\011`, `\012`, `\134`, any `\ooo`).
+fn unescape_mount_field(field: &str) -> std::path::PathBuf {
+    use std::os::unix::ffi::OsStringExt;
+
+    let bytes = field.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut rest = bytes;
+    while let Some((&first, tail)) = rest.split_first() {
+        if first == b'\\' {
+            if let Some(value) = tail.get(..3).and_then(octal_byte) {
+                out.push(value);
+                rest = tail.get(3..).unwrap_or_default();
+                continue;
+            }
+        }
+        out.push(first);
+        rest = tail;
+    }
+    std::path::PathBuf::from(std::ffi::OsString::from_vec(out))
+}
+
+/// The byte of three octal digits, when they are octal and fit a byte.
+fn octal_byte(digits: &[u8]) -> Option<u8> {
+    let mut value: u32 = 0;
+    for &d in digits {
+        if !(b'0'..=b'7').contains(&d) {
+            return None;
+        }
+        value = value
+            .checked_mul(8)?
+            .checked_add(u32::from(d.checked_sub(b'0')?))?;
+    }
+    u8::try_from(value).ok()
+}
+
+/// Parses one mountinfo line; malformed lines are `None` (skipped).
+fn parse_mount_line(line: &str) -> Option<MountEntry> {
+    let fields: Vec<&str> = line.split(' ').collect();
+    let id = fields.first()?.parse::<u64>().ok()?;
+    let parent = fields.get(1)?.parse::<u64>().ok()?;
+    let mount_point = unescape_mount_field(fields.get(4)?);
+    let options = fields.get(5)?;
+    let separator = fields
+        .iter()
+        .skip(6)
+        .position(|f| *f == "-")?
+        .checked_add(6)?;
+    let fstype = fields.get(separator.checked_add(1)?)?;
+    Some(MountEntry {
+        id,
+        parent,
+        mount_point,
+        read_only: options.split(',').any(|o| o == READ_ONLY_OPTION),
+        tmpfs: *fstype == TMPFS,
+    })
+}
+
+/// Pure sandbox decision (spec §8.2). `mountinfo`: content of `/proc/self/mountinfo`;
+/// `exe`: the running binary's path; `logs_listable`: whether [`SANDBOX_HIDDEN_LOG_DIR`] could
+/// be listed. Rules, in the order of their errors: the home anchor resolves; some mount at
+/// exactly `/run` is a read-only tmpfs; some read-only tmpfs whose mount point (not `/`)
+/// equals or component-wise prefixes the home hides it, and no direct child mount of such a
+/// tmpfs covers or lies inside the home except the exact binary bind; the logs are not
+/// listable. Order-independent over lines; malformed lines are skipped.
+///
+/// # Errors
+/// The first [`SandboxError`] rule that fails.
+pub fn evaluate_sandbox(
+    mountinfo: &str,
+    exe: &Path,
+    logs_listable: bool,
+) -> Result<(), SandboxError> {
+    let home = home_from_exe(exe)?;
+    let entries: Vec<MountEntry> = mountinfo.lines().filter_map(parse_mount_line).collect();
+
+    let run = Path::new(SANDBOX_RUN_DIR);
+    if !entries.iter().any(|e| e.hides() && e.mount_point == run) {
+        return Err(SandboxError::RunVisible);
+    }
+
+    let binary_bind = home.join(SENDER_EXE_HOME_RELATIVE);
+    let covering: Vec<&MountEntry> = entries
+        .iter()
+        .filter(|e| {
+            e.hides() && e.mount_point.parent().is_some() && home.starts_with(&e.mount_point)
+        })
+        .collect();
+    if covering.is_empty() {
+        return Err(SandboxError::HomeVisible);
+    }
+    let reexposed = covering.iter().any(|tmpfs| {
+        entries.iter().any(|child| {
+            child.parent == tmpfs.id
+                && child.mount_point != binary_bind
+                && (home.starts_with(&child.mount_point) || child.mount_point.starts_with(&home))
+        })
+    });
+    if reexposed {
+        return Err(SandboxError::HomeVisible);
+    }
+
+    if logs_listable {
+        return Err(SandboxError::LogsReadable);
+    }
+    Ok(())
+}
+
+/// I/O wrapper of [`evaluate_sandbox`]: a bounded read of [`SANDBOX_MOUNTINFO_PATH`], the
+/// running binary's path (`std::env::current_exe`, no environment variable) and whether
+/// [`SANDBOX_HIDDEN_LOG_DIR`] can be opened as a directory (its entries are never read).
+///
+/// # Errors
+/// [`SandboxError::MountInfoUnreadable`] when the mount table cannot be read, exceeds
+/// [`MAX_MOUNTINFO_BYTES`] or is not UTF-8; [`SandboxError::HomeUnresolved`] when the binary
+/// path is unavailable; otherwise the result of [`evaluate_sandbox`].
+pub fn probe_sandbox() -> Result<(), SandboxError> {
+    let limit = u64::try_from(MAX_MOUNTINFO_BYTES)
+        .ok()
+        .and_then(|max| max.checked_add(1))
+        .ok_or(SandboxError::MountInfoUnreadable)?;
+    let file =
+        fs::File::open(SANDBOX_MOUNTINFO_PATH).map_err(|_| SandboxError::MountInfoUnreadable)?;
+    let mut raw = Vec::new();
+    file.take(limit)
+        .read_to_end(&mut raw)
+        .map_err(|_| SandboxError::MountInfoUnreadable)?;
+    if raw.len() > MAX_MOUNTINFO_BYTES {
+        return Err(SandboxError::MountInfoUnreadable);
+    }
+    let mountinfo = String::from_utf8(raw).map_err(|_| SandboxError::MountInfoUnreadable)?;
+    let exe = std::env::current_exe().map_err(|_| SandboxError::HomeUnresolved)?;
+    let logs_listable = fs::read_dir(SANDBOX_HIDDEN_LOG_DIR).is_ok();
+    evaluate_sandbox(&mountinfo, &exe, logs_listable)
+}

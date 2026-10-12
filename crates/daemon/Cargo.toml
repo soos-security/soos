@@ -43,6 +43,9 @@ tempfile = { workspace = true }
 zeroize = { workspace = true }
 ort = { workspace = true }
 proptest = "1"
+# Valid MJPEG fixtures for the remote preview conversion contract (spec
+# AI/architect_spec_remote_security_hardening.md §11.2, RSH16).
+jpeg-encoder = { workspace = true }
 
 [lints]
 workspace = true

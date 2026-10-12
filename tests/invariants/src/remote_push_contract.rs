@@ -450,7 +450,7 @@ fn test_rmc_s34_sender_policy_literals() {
 
 /// The exact non-comment line set of `packaging/soos-push-sender.service` (spec §8.2 minus
 /// `ProtectControlGroups=yes`, plan-evaluator F-13).
-const SENDER_UNIT_LINES: [&str; 37] = [
+const SENDER_UNIT_LINES: [&str; 38] = [
     "[Unit]",
     "Description=soos push sender (outbound Web Push for the remote companion)",
     "Documentation=https://github.com/Mysticaly622/soos/blob/main/Docs/REMOTE_COMPANION.md",
@@ -473,6 +473,7 @@ const SENDER_UNIT_LINES: [&str; 37] = [
     "ProtectHome=tmpfs",
     "BindReadOnlyPaths=%h/.local/bin/soos-push-sender",
     "TemporaryFileSystem=/run:ro",
+    "InaccessiblePaths=-/var/log -/var/lib/systemd/coredump",
     "PrivateTmp=yes",
     "PrivateDevices=yes",
     "PrivateIPC=yes",

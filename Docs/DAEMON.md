@@ -144,11 +144,22 @@ classified local and bypasses `remote_view`), and such code can already read the
 A live camera view holds one of the UID's `max_connections_per_uid` connections for its whole
 duration (§1.6) and uses at most `camera_fps` (≤ 10) of the shared per-UID preview quota.
 
+**Preview placement (ADR 2026-10-12 "soos-remote Security Hardening").** On every preview request
+of an unprivileged peer, after the UID-level local seat session check, the daemon checks where
+the peer process itself runs (from the same cgroup read): inside `session-<id>.scope` that
+session's own record must be a local seat session of the UID; under `user@<uid>.service` the UID
+must match and own a local seat session and **no** remote (or UID-less) session, the rule of the
+root `Auth` user-manager path; any other placement keeps the UID-level rule. So a preview client
+started from an SSH session is refused, and `soos-remote` and user-unit GUIs are refused while an
+SSH session of the owner (or a process left running from one) exists. A `soos-remote.service`
+peer receives frames converted to Grey, YUYV or RGB24 within 640x480 (MJPEG decoded, NV12 and
+larger frames decimated), because `soos-remote` has no image decoder.
+
 ### 1.6 `[peer_limits]` (GitHub #157, #175)
 
 | Key | Type | Default | Validation / notes |
 |---|---|---|---|
-| `max_connections_per_uid` | integer | `2` | Concurrent connections of one unprivileged UID; at least 1. Root is exempt. |
+| `max_connections_per_uid` | integer | `2` | Concurrent connections of one unprivileged UID; at least 1. Root is exempt. One extra **auth-reserved** connection per unprivileged UID (not configurable) is admitted only for one `Auth` request whose whole first request arrives within 200 ms (ADR 2026-10-12); anything else on it is closed unanswered. |
 | `reserved_root_connections` | integer | `2` | Permits usable only by root peers; strictly below `max_concurrent_connections`. |
 | `max_requests_per_connection` | integer | `1024` | At least 1. |
 | `max_connection_lifetime_ms` | integer (ms) | `30000` | At least 1. |

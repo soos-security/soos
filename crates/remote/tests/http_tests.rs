@@ -870,3 +870,85 @@ mod alerts_contract {
         );
     }
 }
+
+// ---------------------------------------------------------------------------------------
+// soos-remote security hardening S-6 (ADR 2026-10-12, spec
+// AI/architect_spec_remote_security_hardening.md §7, §11.2; row RSH10). New tests only;
+// nothing above is changed.
+// ---------------------------------------------------------------------------------------
+
+mod hardening_headers {
+    use super::{assert_mandatory_headers, header, split_response};
+    use soos_remote::http::{
+        encode_camera_stream_head, encode_response, encode_response_head, encode_sse_head, Response,
+    };
+
+    const HARDENING: [(&str, &str); 4] = [
+        ("strict-transport-security", "max-age=31536000"),
+        ("cross-origin-opener-policy", "same-origin"),
+        ("cross-origin-resource-policy", "same-origin"),
+        (
+            "permissions-policy",
+            "accelerometer=(), camera=(), display-capture=(), geolocation=(), gyroscope=(), \
+             magnetometer=(), microphone=(), midi=(), payment=(), usb=()",
+        ),
+    ];
+
+    fn assert_hardening(bytes: &[u8], what: &str) {
+        let (_, headers, _) = split_response(bytes);
+        assert_mandatory_headers(&headers);
+        for (name, value) in HARDENING {
+            assert_eq!(
+                header(&headers, name),
+                vec![value],
+                "{what}: `{name}` exactly once with the exact value"
+            );
+        }
+        assert!(
+            header(&headers, "strict-transport-security")
+                .iter()
+                .all(|v| !v.contains("includeSubDomains") && !v.contains("preload")),
+            "{what}: no includeSubDomains, no preload"
+        );
+        // The hardening headers follow the mandatory ones (CSP first, then HSTS).
+        let names: Vec<&str> = headers.iter().map(|(n, _)| n.as_str()).collect();
+        let csp = names
+            .iter()
+            .position(|n| *n == "content-security-policy")
+            .expect("CSP");
+        let hsts = names
+            .iter()
+            .position(|n| *n == "strict-transport-security")
+            .expect("HSTS");
+        assert!(
+            csp < hsts,
+            "{what}: MANDATORY_HEADERS then HARDENING_HEADERS"
+        );
+    }
+
+    #[test]
+    fn test_rsh_hardening_headers_on_every_head() {
+        let json = Response::json(200, "ok");
+        assert_hardening(&encode_response(&json), "response");
+        assert_hardening(&encode_response_head(&json), "HEAD response");
+        let with_extra = Response {
+            status: 405,
+            content_type: "application/json",
+            body: b"{}".to_vec(),
+            extra_headers: vec![("Allow", "GET, HEAD".to_string())],
+        };
+        let bytes = encode_response(&with_extra);
+        assert_hardening(&bytes, "response with an extra header");
+        let (_, headers, body) = split_response(&bytes);
+        assert_eq!(header(&headers, "allow"), vec!["GET, HEAD"]);
+        assert_eq!(body, b"{}".to_vec());
+        assert_hardening(&encode_sse_head(), "SSE head");
+        assert_hardening(&encode_camera_stream_head(), "camera stream head");
+        for status in [200u16, 400, 403, 404, 413, 421, 429, 503] {
+            assert_hardening(
+                &encode_response(&Response::json(status, "x")),
+                &format!("status {status}"),
+            );
+        }
+    }
+}

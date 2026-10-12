@@ -325,6 +325,12 @@ mod remote_camera_contract;
 #[cfg(all(test, unix))]
 mod remote_android_contract;
 
+/// soos-remote security hardening (security review of 2026-10-12, ADR "[2026-10-12]
+/// soos-remote Security Hardening"; spec AI/architect_spec_remote_security_hardening.md
+/// §11.1; rows RSH1, RSH3, RSH5-RSH7, RSH9, RSH10, RSH12-RSH17).
+#[cfg(all(test, unix))]
+mod remote_security_hardening_contract;
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,

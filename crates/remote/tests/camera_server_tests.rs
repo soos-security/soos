@@ -1356,3 +1356,111 @@ async fn test_rlc_no_push_on_camera_view() {
         assert_eq!(t.count(), 0, "no Web Push for a refused view");
     }
 }
+
+// ---------------------------------------------------------------------------------------
+// soos-remote security hardening S-8b (ADR 2026-10-12, spec
+// AI/architect_spec_remote_security_hardening.md §9.2, §11.2; row RSH14). New tests only;
+// nothing above is changed. The second stop check (after the head, PE-SR5) has no
+// deterministic socket seam; it is pinned statically by
+// `soos-invariants::remote_security_hardening_contract::test_rsh_s8b_*`.
+// ---------------------------------------------------------------------------------------
+
+mod stop_before_first_part {
+    use super::*;
+    use soos_remote::{MAX_OPTIONS_PER_WINDOW, OPTIONS_WINDOW_MS};
+    use tokio::io::AsyncWriteExt;
+
+    /// Virtual time the scripted source takes to produce the first frame.
+    const FRAME_AT_MS: u64 = 400;
+    const ROUNDS: u64 = 20;
+
+    /// Reads everything the server sends until EOF, moving virtual time in small steps and
+    /// giving the blocking-pool encoder real time; panics if no EOF comes.
+    async fn read_to_eof(h: &Harness, stream: &tokio::net::UnixStream) -> Vec<u8> {
+        let mut buf = Vec::new();
+        for _ in 0..100 {
+            settle().await;
+            loop {
+                let mut chunk = [0u8; 65536];
+                match stream.try_read(&mut chunk) {
+                    Ok(0) => return buf,
+                    Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
+                    Err(_) => return buf,
+                }
+            }
+            real_wait(5);
+            h.advance_ms(VIEW_STEP_MS).await;
+        }
+        panic!(
+            "the stopped view never closed ({} bytes received)",
+            buf.len()
+        );
+    }
+
+    /// RSH14 (spec §9.2): a stop that reaches the view while its first frame is being
+    /// produced ends the view before any byte: no `200` head, no JPEG part, the view is
+    /// audited `refused` and never `started`, the slot is idle again. Repeated with the stop
+    /// at 20 offsets inside the first-frame window.
+    #[tokio::test(start_paused = true)]
+    async fn test_rsh_stop_after_first_frame_sends_no_part() {
+        let (capture, _guard) = capture_logs();
+        let spy = SourceSpy::increasing();
+        let h = start_camera(Options::passkeys(), camera_on(), &spy, None).await;
+        // Never more camera options than the options limiter allows per window.
+        let round_gap = OPTIONS_WINDOW_MS / u64::from(MAX_OPTIONS_PER_WINDOW) + 100;
+        for round in 0..ROUNDS {
+            spy.queue(vec![Step::after(
+                FRAME_AT_MS,
+                Step::Frame(grey_frame(1_000 + round)),
+            )]);
+            let path = ready_view(&h, &Via::Tailnet).await;
+            let mut stream = connect(&h.path).await;
+            stream
+                .write_all(&stream_request(&Via::Tailnet, &path))
+                .await
+                .expect("stream request");
+            settle().await;
+            let offset = round * (FRAME_AT_MS / ROUNDS);
+            assert!(offset < FRAME_AT_MS);
+            if offset > 0 {
+                h.advance_ms(offset).await;
+            }
+            assert_result(&camera_stop(&h, &Via::Tailnet).await, 200, "stopped");
+            h.advance_ms(FRAME_AT_MS).await;
+            let received = read_to_eof(&h, &stream).await;
+            assert!(
+                !received.starts_with(b"HTTP/1.1 200"),
+                "round {round}: no 200 head after a stop"
+            );
+            assert!(
+                !received.windows(2).any(|w| w == [0xFF, 0xD8]),
+                "round {round}: no JPEG part after a stop"
+            );
+            assert!(
+                received.is_empty(),
+                "round {round}: a stopped view closes without a response ({} bytes)",
+                received.len()
+            );
+            settle().await;
+            assert_eq!(
+                camera_state(&h, &Via::Tailnet).await["state"],
+                "idle",
+                "round {round}: the slot is idle again"
+            );
+            h.advance_ms(round_gap).await;
+        }
+        assert_eq!(spy.dropped(), spy.built(), "every source dropped");
+        let text = capture.text();
+        assert_eq!(
+            count_lines(&text, "camera view started"),
+            0,
+            "a stopped view never counts as shown: {text}"
+        );
+        assert_eq!(count_lines(&text, "camera view ended"), 0, "{text}");
+        assert!(
+            count_lines(&text, "camera view refused") >= 1,
+            "a stopped view is audited refused: {text}"
+        );
+    }
+}

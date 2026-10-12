@@ -66,11 +66,14 @@ install_companion() {
     # packaging/soos-push-sender.service: installed, never enabled by this script.
     install -Dm644 "${SENDER_UNIT_SRC}" "${SENDER_UNIT_PATH}"
 
-    if [[ ! -e "${CONFIG_PATH}" ]]; then
+    if [[ -L "${CONFIG_PATH}" ]]; then
+        echo "install_remote.sh: ${CONFIG_PATH} is a symbolic link; refusing to write through it" >&2
+        exit 1
+    elif [[ ! -e "${CONFIG_PATH}" ]]; then
         echo "Writing the configuration template to ${CONFIG_PATH} (mode 0600)..."
         umask 077
         mkdir -p "${CONFIG_DIR}"
-        cat > "${CONFIG_PATH}" <<'TEMPLATE'
+        (set -C; cat > "${CONFIG_PATH}") <<'TEMPLATE'
 # soos-remote configuration (GitHub #339). English only.
 #
 # Tailscale logins allowed to use the page (1..=8). The value is the Tailscale-User-Login
@@ -141,7 +144,10 @@ TEMPLATE
     echo "Next steps (run them yourself, no root needed):"
     echo "  1. Put your Tailscale login in ${CONFIG_PATH}: allowed_logins = [\"you@example.com\"]"
     echo "  2. Start the service: systemctl --user enable --now soos-remote"
-    echo "  3. Publish the socket on your tailnet: tailscale serve --bg unix:${SOCKET_PATH}"
+    echo "  3. Publish the socket on your tailnet."
+    echo "     Requires Tailscale 1.102.4 or later on this PC (check with: tailscale version);"
+    echo "     older releases were not verified to strip forged identity headers."
+    echo "     tailscale serve --bg unix:${SOCKET_PATH}"
     echo "  4. Open https://<this-pc>.<tailnet>.ts.net on the phone and add it to the home screen."
     echo "  5. Optional passkeys and internet access (Docs/REMOTE_COMPANION.md section 2b):"
     echo "     set rp_id = \"<this-pc>.<tailnet>.ts.net\" in ${CONFIG_PATH}, restart the service,"

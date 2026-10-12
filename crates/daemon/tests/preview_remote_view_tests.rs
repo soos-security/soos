@@ -1086,6 +1086,9 @@ async fn test_rlc_local_peer_unaffected_by_remote_view() {
     let dir = tempdir().expect("tempdir");
     let sessions = dir.path().join("sessions");
     write_session(&sessions, "3", &seat_session(uid));
+    // AM-SR1 (spec AI/architect_spec_remote_security_hardening.md §11.3, setup only): the
+    // peer cgroup fixture is `session-4.scope`, whose own record must exist under S-5.
+    write_session(&sessions, "4", &seat_session(uid));
     let sock_path = dir.path().join("local_peer.sock");
     let health = Arc::new(HealthState::new());
     let dispatcher = Arc::new(
@@ -1430,4 +1433,136 @@ async fn test_rlc_peer_cgroup_read_once_per_preview_connection() {
         2,
         "a new connection reads again"
     );
+}
+
+// ---------------------------------------------------------------------------
+// soos-remote security hardening S-8d (ADR 2026-10-12, spec
+// AI/architect_spec_remote_security_hardening.md §9.4, §11.2; row RSH16): the dispatcher
+// converts frames for the `soos-remote.service` origin only. New tests only; nothing above
+// is changed.
+// ---------------------------------------------------------------------------
+
+mod remote_conversion {
+    use super::*;
+    use soos_camera_v4l::Frame;
+
+    /// Camera that always serves the same frame.
+    struct FixedFrameCamera {
+        frame: Arc<Frame>,
+    }
+
+    impl CameraManager for FixedFrameCamera {
+        fn latest_frame(&self) -> Option<Arc<Frame>> {
+            Some(self.frame.clone())
+        }
+        fn is_ready(&self) -> bool {
+            true
+        }
+        fn notify_activity(&self) {}
+        fn stop(&self) {}
+    }
+
+    /// A valid 640x480 baseline MJPEG frame of one colour.
+    fn mjpeg_vga() -> Frame {
+        let pixels: Vec<u8> = (0..640 * 480).flat_map(|_| [30u8, 160, 220]).collect();
+        let mut jpeg = Vec::new();
+        jpeg_encoder::Encoder::new(&mut jpeg, 95)
+            .encode(&pixels, 640, 480, jpeg_encoder::ColorType::Rgb)
+            .expect("encode fixture");
+        Frame::new(jpeg, 640, 480, 1_000_000, PixelFormat::Mjpeg, 7)
+    }
+
+    fn fixed_pipeline(temp: &Path, frame: Frame) -> PipelineComponents {
+        let bio_key = BioMasterKey::generate().expect("Generate bio key");
+        let bio_store =
+            Arc::new(BiometricStore::new(temp.join("biometrics"), bio_key).expect("BioStore init"));
+        let ev_dir = temp.join("evidence");
+        std::fs::create_dir_all(&ev_dir).expect("Create ev dir");
+        let ev_key = EvMasterKey::generate().expect("Generate ev key");
+        let evidence_store = Arc::new(EvidenceStore::new(
+            EvidenceConfig {
+                enabled: false,
+                base_dir: ev_dir,
+                retention_days: 1,
+                daily_cap_per_uid: 1,
+                key_path: temp.join("evidence.key"),
+            },
+            ev_key,
+        ));
+        let vision = Arc::new(VisionPipeline::new(
+            Arc::new(MockFaceDetector::new_centered_face(640, 480, 0.95)),
+            Arc::new(MockPadDetector::new_live()),
+            Arc::new(MockEmbeddingExtractor::new(512)),
+            VisionPipelineConfig::default(),
+        ));
+        let policy = Arc::new(RwLock::new(AuthorizationEngine::with_rate_limiter(
+            ThresholdConfig::default(),
+            RateLimiter::new(RateLimitConfig::new(5, 60_000_000_000)),
+        )));
+        PipelineComponents {
+            camera: Arc::new(FixedFrameCamera {
+                frame: Arc::new(frame),
+            }),
+            vision,
+            biometric_store: bio_store,
+            evidence_store,
+            policy,
+        }
+    }
+
+    async fn serve_one(cgroup: String, name: &str) -> PreviewResponse {
+        let uid = current_uid();
+        let dir = tempdir().expect("tempdir");
+        let sock_path = dir.path().join(name);
+        let dispatcher = Arc::new(
+            ConnectionDispatcher::with_pipeline(
+                dispatcher_config(),
+                Arc::new(HealthState::new()),
+                fixed_pipeline(dir.path(), mjpeg_vga()),
+            )
+            .with_session_validator(SessionValidator::disabled())
+            .with_preview_config(preview_config(uid, true))
+            .with_preview_peer_source(CgroupSource::with(cgroup)),
+        );
+        spawn_server(dispatcher, &sock_path).await;
+        let mut client = UnixStream::connect(&sock_path).await.expect("Connect");
+        let buf = exchange(&mut client, &preview_request(uid, 0xA1)).await;
+        assert_served(&buf, name)
+    }
+
+    #[tokio::test]
+    async fn test_rsh_remote_origin_receives_converted_mjpeg() {
+        let uid = current_uid();
+        if uid == 0 {
+            return;
+        }
+        let preview = serve_one(remote_cgroup(uid), "remote_mjpeg.sock").await;
+        assert_eq!(
+            preview.format, 0,
+            "MJPEG is decoded to RGB24 for soos-remote"
+        );
+        assert_eq!((preview.width, preview.height), (640, 480));
+        assert_eq!(preview.data.len(), 640 * 480 * 3);
+        assert_eq!(preview.sequence, 7);
+        let at = (240 * 640 + 320) * 3;
+        for (got, want) in preview.data[at..at + 3].iter().zip([30u8, 160, 220]) {
+            assert!(got.abs_diff(want) <= 8, "decoded colour in RGB order");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_rsh_local_origin_receives_mjpeg_unchanged() {
+        let uid = current_uid();
+        if uid == 0 {
+            return;
+        }
+        let source = mjpeg_vga();
+        let preview = serve_one(local_cgroup(uid), "local_mjpeg.sock").await;
+        assert_eq!(
+            preview.format, 4,
+            "the GUI keeps receiving compressed MJPEG"
+        );
+        assert_eq!((preview.width, preview.height), (640, 480));
+        assert_eq!(preview.data, source.data);
+    }
 }

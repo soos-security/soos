@@ -43,6 +43,28 @@ pub const DEFAULT_EVENT_WINDOW_MS: u64 = 10_000;
 /// Maximum distinct peer UIDs tracked by the event rate limiter (bounded memory).
 pub const EVENT_RATE_MAX_TRACKED_UIDS: usize = 256;
 
+/// Extra connections per unprivileged UID admitted only for one facial `Auth` request when the
+/// UID already holds `max_connections_per_uid` connections (preview clients cannot starve the
+/// user-level lock screen). Root peers never need it (no per-UID cap).
+pub const AUTH_RESERVED_CONNECTIONS_PER_UID: usize = 1;
+
+/// Time an auth-reserved connection may take to deliver its **whole first frame** (4-byte
+/// length prefix and body) before it is closed without an answer. PAM connects, then shows
+/// "[soos] Looking for face..." through the application's PAM conversation (`on_connected`,
+/// `crates/pam/src/ipc.rs`), then writes its `Auth` request: that conversation call must
+/// return within this window. Kept <= 250 ms: two existing contracts close an idle over-cap
+/// connection against a 500 ms deadline. Not configurable.
+pub const AUTH_RESERVE_FIRST_REQUEST_TIMEOUT_MS: u64 = 200;
+
+/// How a connection was admitted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdmissionClass {
+    /// Regular per-UID permit (any request).
+    Regular,
+    /// Auth-reserved permit: the first and only request must be `RequestKind::Auth`.
+    AuthReserve,
+}
+
 /// Configuration of the `[peer_limits]` section of `daemon.toml`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PeerLimitsConfig {
@@ -150,6 +172,9 @@ struct LimiterState {
     total: usize,
     unprivileged: usize,
     per_uid: HashMap<u32, usize>,
+    /// Auth-reserved permits per unprivileged UID (at most
+    /// [`AUTH_RESERVED_CONNECTIONS_PER_UID`] each).
+    reserved_per_uid: HashMap<u32, usize>,
 }
 
 #[derive(Debug)]
@@ -220,6 +245,49 @@ impl PeerConnectionLimiter {
         Ok(PeerConnectionPermit {
             shared: Arc::clone(&self.shared),
             peer_uid,
+            class: AdmissionClass::Regular,
+        })
+    }
+
+    /// Admits one auth-reserved connection of an unprivileged `peer_uid` (ADR 2026-10-12,
+    /// S-3); the permit is released on drop. Checked in order: the global capacity, the
+    /// unprivileged capacity, then the UID's reserved permits. Nothing changes on refusal.
+    ///
+    /// # Errors
+    ///
+    /// [`ConnectionRejection::GlobalCapacity`], [`ConnectionRejection::ReservedForPrivileged`],
+    /// or [`ConnectionRejection::PerUidCap`] when the UID already holds
+    /// [`AUTH_RESERVED_CONNECTIONS_PER_UID`] reserved permits, and for root (no per-UID cap,
+    /// never reserved).
+    pub fn try_acquire_auth_reserve(
+        &self,
+        peer_uid: u32,
+    ) -> Result<PeerConnectionPermit, ConnectionRejection> {
+        let shared = &self.shared;
+        let mut state = shared.lock();
+        if state.total >= shared.capacity {
+            return Err(ConnectionRejection::GlobalCapacity);
+        }
+        if peer_uid == 0 {
+            return Err(ConnectionRejection::PerUidCap);
+        }
+        if state.unprivileged >= shared.unprivileged_capacity {
+            return Err(ConnectionRejection::ReservedForPrivileged);
+        }
+        let held = state.reserved_per_uid.get(&peer_uid).copied().unwrap_or(0);
+        if held >= AUTH_RESERVED_CONNECTIONS_PER_UID {
+            return Err(ConnectionRejection::PerUidCap);
+        }
+        state
+            .reserved_per_uid
+            .insert(peer_uid, held.saturating_add(1));
+        state.unprivileged = state.unprivileged.saturating_add(1);
+        state.total = state.total.saturating_add(1);
+        drop(state);
+        Ok(PeerConnectionPermit {
+            shared: Arc::clone(&self.shared),
+            peer_uid,
+            class: AdmissionClass::AuthReserve,
         })
     }
 
@@ -235,10 +303,17 @@ impl PeerConnectionLimiter {
         self.shared.capacity.saturating_sub(self.in_use())
     }
 
-    /// Number of distinct unprivileged UIDs currently holding at least one permit.
+    /// Number of distinct unprivileged UIDs currently holding at least one regular or
+    /// auth-reserved permit.
     #[must_use]
     pub fn tracked_uids(&self) -> usize {
-        self.shared.lock().per_uid.len()
+        let state = self.shared.lock();
+        let reserved_only = state
+            .reserved_per_uid
+            .keys()
+            .filter(|uid| !state.per_uid.contains_key(uid))
+            .count();
+        state.per_uid.len().saturating_add(reserved_only)
     }
 }
 
@@ -247,6 +322,7 @@ impl PeerConnectionLimiter {
 pub struct PeerConnectionPermit {
     shared: Arc<LimiterShared>,
     peer_uid: u32,
+    class: AdmissionClass,
 }
 
 impl PeerConnectionPermit {
@@ -254,6 +330,12 @@ impl PeerConnectionPermit {
     #[must_use]
     pub const fn peer_uid(&self) -> u32 {
         self.peer_uid
+    }
+
+    /// How this connection was admitted.
+    #[must_use]
+    pub const fn class(&self) -> AdmissionClass {
+        self.class
     }
 }
 
@@ -263,16 +345,19 @@ impl Drop for PeerConnectionPermit {
         state.total = state.total.saturating_sub(1);
         if self.peer_uid != 0 {
             state.unprivileged = state.unprivileged.saturating_sub(1);
-            let remaining = state
-                .per_uid
+            let map = match self.class {
+                AdmissionClass::Regular => &mut state.per_uid,
+                AdmissionClass::AuthReserve => &mut state.reserved_per_uid,
+            };
+            let remaining = map
                 .get(&self.peer_uid)
                 .copied()
                 .unwrap_or(0)
                 .saturating_sub(1);
             if remaining == 0 {
-                state.per_uid.remove(&self.peer_uid);
+                map.remove(&self.peer_uid);
             } else {
-                state.per_uid.insert(self.peer_uid, remaining);
+                map.insert(self.peer_uid, remaining);
             }
         }
     }

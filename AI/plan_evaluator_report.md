@@ -1,135 +1,117 @@
 # Plan Evaluation Report
-- **Date**: 2026-10-09
-- **Issue**: GitHub-only — feat(remote): Android support for the phone companion and Web Push (GitHub #349; no `AI/BACKLOG.md` entry)
-- **Branch**: `feat/remote-android`
-- **Base commit**: `24d0d8c` (`origin/main`, #348)
-- **Spec evaluated**: `AI/architect_spec_remote_android.md` round 1, amended in place by this evaluation (items PE-1..PE-6)
-- **Owner decisions in force**: full Android parity (O-1); amendments AM-1..AM-6 approved (O-2). AM-7 (new, PE-4) is **not** covered.
+
+- **Date**: 2026-10-12
+- **Issue**: GitHub-only security review of 2026-10-12 (S-1 … S-8d), no backlog id — soos-remote Security Hardening
+- **Spec**: `AI/architect_spec_remote_security_hardening.md` (round 2, commit `d91582b`)
+- **Branch**: `fix/remote-security-hardening`
+- **Base commit**: `f9234ea` (`origin/main`)
+- **Round**: 2 (round 1 `f5058b6`: REVISION_REQUIRED, PE-SR1 MAJOR, PE-SR2 to PE-SR7 MINOR/observations)
 
 ## 1. Coverage Matrix
 
-| Acceptance line (#349) | Spec element | Status |
+| Finding / acceptance line | Spec element | Status |
 |---|---|---|
-| A1 `renotify`, raster `icon`, monochrome `badge`, no fetch/cache, every push shows | §3.1, §6; `test_ran_s1`, `test_ran_badge_is_white_on_transparent`; RAN1 | Covered (wording corrected, PE-3) |
-| A2 `pushsubscriptionchange`: same key, same CSRF + credentials, silent, bounded | §3.2, §3.3; `test_ran_s2`, `test_ran_worker_resubscribe_*` (2); RAN2 | Covered |
-| A3 Manifest installable (`id`, 192/512 `any`, 512 `maskable`, deterministic, touch icon kept) | §5, §6; `test_ran_s3`, `test_ran_s4`, two pixel tests, AM-4; RAN3, RAN4 | Covered |
-| A4 Four PNG assets embedded, `image/png`, GET/HEAD only, CSP unchanged | §2.3; `test_ran_s5`, `test_ran_assets_*` (2), AM-1/AM-2; RAN5 | Covered |
-| A5 Platform-neutral text (passkey phrase, no "iPhone settings", two-case unsupported text) | §4.1, §7; `test_ran_s6`, `test_ran_s10`, AM-5, AM-6; RAN6 | Covered |
-| A6 Unknown-key subscription kept; failed SW registration shows an error | §4.2, §4.3; `test_ran_s7`; RAN7 | Covered |
-| A7 Exhaustive `PushService`; labels | §2.1, §2.2, §4.4; `test_ran_s8`, `test_ran_push_service_maps_each_host`, `test_ran_push_host_*`; RAN8 | Covered |
-| A8 FCM `/fcm/send/`,`/wp/`, Mozilla `/wpush/v1/`,`/wpush/v2/` end to end; Chrome subscription JSON; Chrome clientDataJSON; GPM registration | §11.2 (push-protocol, push-sender, remote push + webauthn tests); RAN9, RAN10 | Covered (coverage contracts, green from start: acceptable, see §3 Pillar 6) |
-| A9 Docs Android section, neutral push text, neutral installer | §7.1, §7.2; `test_ran_s9`, `test_ran_s10`; RAN11 | Covered (+ §9 out-of-scope bullet, PE-5) |
-| A10 ADR, matrix rows incl. owner Android check, walkthrough | §13, §14; RAN11, RAN12; walkthrough **193** | Covered (number drift verified, see §2) |
+| S-1 sender reads the system journal; `InaccessiblePaths=`; correct docs; CM-SR1 on test 45 | §1.1 (host reproduction, journal 1 → 0 lines, DNS ok), §2.1–§2.4, §11.3 CM-SR1, RSH1/RSH2/RSH18-1 | Covered |
+| S-2 raise documented Tailscale minimum; installer warns/refuses; absent tailscale never breaks install; agents never run tailscale | §3: `TAILSCALE_MIN_VERIFIED_VERSION = "1.102.4"`, docs §2b/§2/§4/§8, installer prints (two `echo` lines) | Covered. "Refuse"/"parse `tailscale version`" credibly refuted: RMC-S6 (`tests/invariants/src/remote_companion_contract.rs:735-790`) rejects any non-`echo`/`printf` line containing the word `tailscale`; an exemption would relax it |
+| S-3 face auth not starved by preview connections, per-UID DoS bound kept | §4: one auth-reserved permit per unprivileged UID (cap + 1), whole first frame within 200 ms, `Auth` only, companion graceful close on retry | Covered (round-1 PE-SR2/PE-SR3 resolved) |
+| S-4 Android lock-screen privacy + `push_previews = "generic"` | §5 | Covered |
+| S-5 preview only for processes inside a local seat session; soos-gui and soos-remote keep working | §6: `PeerPlacement`, `classify_peer_placement`, `authorize_preview_placement` (step 6c-2a, per request) | Covered; see PE-SR11 (docs) |
+| S-6 CORP, COOP, Permissions-Policy, HSTS; CSP byte-identical | §7 `HARDENING_HEADERS` appended in the three head encoders | Covered |
+| S-7 sender fails closed (78) unless the sandbox is detected; robust, testable probes | §8: `home_from_exe` (binary path, no environment), `evaluate_sandbox` (pure), `probe_sandbox`, call before `XDG_RUNTIME_DIR`/bind | Covered (round-1 PE-SR1 resolved); see PE-SR9 |
+| S-8a dangling symlink followed by the installer | §9.1 `-L` refusal + `(set -C; cat > …)` | Covered |
+| S-8b JPEG sent after a stop | §9.2 check after `mark_streaming` and a second one after the head (PE-SR5) | Covered |
+| S-8c stale subscription slot on renewal | §9.3 `replacesEndpoint`, `replace_or_upsert`, invalid old endpoint = plain upsert | Covered; see PE-SR10 |
+| S-8d MJPEG / NV12 / > 480 px | §9.4 daemon-side `remote_preview_image_for_frame` for the remote origin only | Covered; see PE-SR8 |
+| Zero test weakening: only CM-SR1 owner-approved; anything else additive and recorded as AM-SRn | §11.3 CM-SR1 (37 → 38, one line inserted), AM-SR1, AM-SR2 (setup only); RMC-S34/S41/S42 listed as compatible unchanged | Covered (verified below) |
+| Daemon changes keep fail-closed PAM behaviour | §4.3, §10, §13.3 | Covered: every reserve refusal closes unanswered → PAM read error → `PAM_IGNORE`; root path, `crates/pam` and the wire format unchanged |
+
+### Round-1 items
+
+| Item | Resolution verified |
+|---|---|
+| PE-SR1 MAJOR (RMC-S34) | Resolved. The only environment read stays `std::env::var_os("XDG_RUNTIME_DIR")` (`crates/push-sender/src/main.rs:26`, the only `env::var*` hit in `crates/push-sender/src`); the anchor comes from `current_exe()` (Linux: `read_link("/proc/self/exe")`, no environment, no NSS) matched component-wise against `.local/bin/soos-push-sender`, consistent with the unit's `ExecStart=%h/.local/bin/soos-push-sender` and `BindReadOnlyPaths=` of the same path. A `" (deleted)"` suffix or another location fails closed (78). New static test `test_rsh_s7_sender_reads_no_other_environment_variable` is strictly stronger than RMC-S34. RMC-S41 forbidden names (`VapidKey`, `p256`, `hmac`, `remote.toml`, …) are not needed by the probe. |
+| PE-SR2 | Resolved: wording corrected, residual §13.3, docs, `test_rsh_reserve_auth_after_100ms_is_answered`. |
+| PE-SR3 | Resolved: `timeout(200 ms, read_client_frame)` covers prefix and body; `.readable()` banned statically; partial-frame test added. |
+| PE-SR4 | Resolved: unparsable `replacesEndpoint` = absent. |
+| PE-SR5 | Resolved: second check after the head, before `set_shown`/`write_part`; static pin. |
+| PE-SR6 / PE-SR7 | Resolved: static assertions (decode only in `handle_preview_request`, outside the limiter guard; constant ≤ 250 ms and not configurable). |
 
 ## 2. Facts Verified Against Code
 
 | Fact cited by plan | Code location | Actual value | Match |
 |---|---|---|---|
-| Walkthroughs 191/192 taken | `AI/walkthroughs/` | `191_remote_live_camera.md`, `192_remote_battery_status.md`; next is 193 | Yes → **193** |
-| Matrix precedent | `AI/VERIFICATION_MATRIX.md` L2177, L2200 | #345 → `RLC1..16`, #346 → `RBS1..12`, dedicated blocks; RMC stops at RMC88 | Settled: **RAN** (PE-1) |
-| `PUSH_HOSTS` + path alphabet (`:` `=`) | `push-protocol/src/lib.rs` L24, L119–L126 | as cited | Yes |
-| `PushEndpoint.host: &'static str`, `PushService::of` private with `_ => Mozilla` | `push-protocol` L109; `remote/src/push.rs` L997–L1004 | as cited | Yes |
-| `check_action_csrf` rules | `routes.rs` L316–L345 | one `X-Soos-Action` == action; `Sec-Fetch-Site` absent/`same-origin`; `Origin` absent/`https://host[:443]` | Yes |
-| Funnel gate before routing | `server.rs` L1190–L1205 | non-public route without session → `403 login_required`; `Touch::Refresh` on non-asset routes | Yes (refresh side effect noted, PE-6) |
-| `PUSH_SUBSCRIBE_PATH` | `routes.rs` L90 | `/api/push/subscribe` | Yes |
-| `ACTION_PUSH_SUBSCRIBE` "parsed from routes.rs" | `crates/remote/src/lib.rs` L425 | defined in **lib.rs**, only imported by routes.rs | **No** → PE-2 fixed |
-| `sameServerKey` → unsubscribe on absent key; `await navigator.serviceWorker.ready` unbounded | `app.js` L934–L950, L1018–L1040, L1078 | as cited | Yes |
-| `readNotification` tag never empty (`renotify` needs a tag) | `sw.js` L16 | defaults to `soos-alerts`, else `soos-test` | Yes |
-| `png 0.18.1` in `Cargo.lock` | `Cargo.lock` L2749 (via `image` ← `arboard`/`eframe` ← `soos-gui`) | 0.18.1; deps `bitflags 2.13.2`, `crc32fast`, `fdeflate`, `flate2`, `miniz_oxide 0.8.9` — all locked | Yes |
-| `png` license vs `deny.toml` | `cargo metadata`; `deny.toml` L26–L34 | `MIT OR Apache-2.0` (deps MIT / Apache-2.0 / Zlib) — all allowed; no new duplicate | Yes |
-| "`test_rbs_s6_no_new_dependency` stays green" | `remote_battery_contract.rs` L519–L526 | dev-dependency keys must be in `["tokio","tempfile","proptest"]` → `png` turns it **red** | **No** → PE-4 |
-| Icon generation deterministic, chunks `IHDR/IDAT/IEND`, sizes 2885/8121/6926/1098 B | Re-run in evaluator scratchpad (rsvg-convert + magick) | two runs byte-identical; IHDR 192²/512²/512² ct 2, 96² ct 6, no interlace; sizes identical; maskable (266,246) `#EDF1FF`, corner `#0047BB`; badge corner alpha 0, (52,44) white opaque | Yes |
-| Existing tests not affected (s8, s38 forbidden list, s39, rlc_s8, passkey `.register(`, routes/server asset lists) | invariants + `crates/remote/tests` | non-exhaustive lists / substring checks; still green with the plan | Yes |
-| CSP unchanged | `http.rs` | `img-src 'self'`, `connect-src 'self'`, `manifest-src 'self'`, worker via `script-src 'self'` | Yes |
+| Unit `ExecStart=%h/.local/bin/soos-push-sender`, `BindReadOnlyPaths=` same path, `TemporaryFileSystem=/run:ro`, `ProtectHome=tmpfs` | `packaging/soos-push-sender.service` | as cited | Yes |
+| `SENDER_UNIT_LINES: [&str; 37]`; forbidden prefixes | `tests/invariants/src/remote_push_contract.rs:452-525` | 37; `InaccessiblePaths=` matches no forbidden prefix (`ReadOnlyPaths=`, `BindPaths=` are prefix-anchored) | Yes |
+| RMC-S34 reader rule | `remote_push_contract.rs:429-439` | every `env::var(`/`env::var_os(`/`std::env::vars` must be followed by `"XDG_RUNTIME_DIR")` | Spec complies |
+| RMC-S36 one-literal tracing | `remote_push_contract.rs:550-590` | as cited | Spec §8.3 complies (one constant string) |
+| `thiserror` available to the sender | `crates/push-sender/Cargo.toml` | dependency present | Yes |
+| `try_acquire` order Global → ReservedForPrivileged → PerUidCap; `max_connections_per_uid >= 1` | `crates/daemon/src/limits.rs:201-224, 99-101` | as cited | Yes (a `PerUidCap` rejection implies the global and unprivileged checks passed) |
+| Every `Auth` is one-shot, including error answers | `dispatcher.rs:572` (`one_shot = req.kind == RequestKind::Auth`) | as cited | Yes, so a reserve connection serves at most one request |
+| Inner reserve timeout returns `Err(Timeout)` through `Ok(Err(e)) => return Err(e)` | `dispatcher.rs:461-482` | closes without writing | Yes |
+| Permit dropped before the stream | `handle_connection(&self, mut stream)`, local `_permit` | locals drop before the by-value parameter | Yes: `test_same_uid_connection_over_cap_is_closed_without_blocking_others` (`available_permits() == 6` after the reserve refusal) and `test_idle_polling_peer_cannot_exhaust_global_capacity` (refused = 6) stay exact |
+| `test_rlc_view_connection_leaves_room_for_auth` third connection | `preview_remote_view_tests.rs:1167-1193` | silent third connection is now closed by the 200 ms window, within the 500 ms `closed_promptly`; later fresh `Auth` still admitted | Compatible unchanged |
+| `authorize_user_manager_caller` rule | `session_policy.rs:589-621` | UID-less or non-`REMOTE=0` record → refuse; a local seat record required | Yes (factoring as a shared helper is behaviour-preserving) |
+| Tests using an enforced session validator for preview | `preview_remote_view_tests.rs:812, 885, 1093, 1116`; `preview_authorization_tests.rs:456, 483` | others use `enforce_active_session: false` (disabled policy) | AM-SR1 covers line 1093 (record `"3"`, cgroup `session-4.scope`); line 1116 (user manager, record `"3"` local) passes unchanged; line 885 uses record `"4"`; `:483` covered by AM-SR2 |
+| Agent test process placement | `/proc/self/cgroup` | `user@1000.service/session.slice/tmux-spawn-….scope` → `UserManager` | AM-SR2 harmless here |
+| `parse_session_id_from_cgroup` first-unit rule | `session_policy.rs:249-290` | first unit component | Yes (nested `session-*.scope` under the manager = `UserManager`) |
+| Head encoders; no other `HTTP/1.1` literal | `crates/remote/src/http.rs:263-316` | three encoders interpolate `{MANDATORY_HEADERS}`; no other response-head source in `crates/remote/src` | Yes: HSTS/COOP/CORP reach every response |
+| S-8b seam and helpers | `server.rs:2341-2420`, `camera.rs:249, 271, 312, 676-689`, `camera_first_frame_refusal` `server.rs:2443` | `Stopped` → `audit_refused`, `None` | Yes |
+| RAN-S2 worker assertions | `remote_android_contract.rs:559-693` | listener needs `renewedSubscription(event)`, `postSubscription(`, terminal `.catch(() => null)`; one `fetch(`; `postSubscription` body unchanged | Spec §9.3 complies (`renewalPayload` returns an object whose `toJSON()` is used unchanged) |
+| Installer template write | `scripts/install_remote.sh:72-77` | `[[ ! -e … ]]` + `cat >`; no invariant pins the `cat >` text | Yes, §9.1 change is safe for existing tests |
+| IR stamp recursion | `crates/daemon/src/preview_image.rs:84-110` | an IR non-Grey frame is converted to Grey and recursed into `preview_image_for_frame` (forwarded unchanged when ≤ 640 wide, any height) | Relevant to PE-SR8 |
+| Highest walkthrough | `AI/walkthroughs/193_remote_android.md` | 193 | Yes (194 is next) |
 
 ## 3. Pillar Analysis
 
 ### Pillar 1 — Architecture & threat model
-- Failure scenario considered: the worker's `pushsubscriptionchange` POST becomes a new way to register an endpoint
-  without user authentication. The plan adds no route and changes no check; the request goes through `check_host`,
-  `classify_request`, the Funnel session gate and `check_push_csrf` exactly like the page's (verified in code). A
-  Funnel caller without session gets `403 login_required` before routing; a cross-site initiator gets `403 forbidden`;
-  both are pinned by the new regression test. A same-origin SW fetch can only be issued by code served from the origin
-  (CSP `script-src 'self'`, single `/sw.js` registration pinned by the passkey contract).
-- Side effect: a worker POST with a still-valid Funnel session refreshes its idle timer without the owner looking at
-  the page (one request per browser-initiated event, 8 h absolute cap unchanged).
-- Result: PASS, with MINOR PE-6 (documented as accepted risk).
+- Scenario: an SSH-only process of the owner asks for frames directly → `Session(id)` with `REMOTE=1` → refused; through `systemd-run --user` → `UserManager` → refused while the SSH record exists. Through the `soos-remote` socket with forged `Tailscale-User-Login` (same-UID boundary accepted by ADR 2026-10-06): the companion itself is `UserManager` and is refused while that SSH session exists, so the bypass is closed by the same rule. Moving its own process into the local `session-N.scope` needs write access to root-owned `cgroup.procs` of the common ancestor (`user-<uid>.slice`): not possible.
+- Scenario: compromised sender reads `/var/log/journal` via the `wheel`/`adm` ACL → hidden by `InaccessiblePaths=`; `/run/log/journal` and the journald sockets are already under the `/run` tmpfs.
+- Result: PASS (docs observation PE-SR11).
 
 ### Pillar 2 — PAM deadline & concurrency
-- Not touched: no change in `crates/pam`, daemon or protocol. Client-side waits are bounded (`RESUBSCRIBE_TIMEOUT_MS`
-  10 s with `AbortController`; `SERVICE_WORKER_READY_TIMEOUT_MS` 10 s with `clearTimeout`; no retry loop, statically
-  checked). Failure scenario "worker hangs on a dead PC" → aborted at 10 s, swallowed by the terminal `.catch`.
+- `crates/pam` untouched; no Tokio added to PAM. Root peers use the unchanged path.
+- Scenario: user-level lock screen while the view and soos-gui hold both regular permits → reserve admitted → `on_connected` conversation < 200 ms → `Auth` served; ≥ 200 ms → closed unanswered → `PAM_IGNORE` (password). Documented residual, tested at 100 ms.
+- Scenario: a same-UID process holds the reserve with a partial frame → closed after 200 ms, permit released (test added). Bound per UID: `max_connections_per_uid + 1`, inside the unchanged global/unprivileged capacity.
 - Result: PASS.
 
 ### Pillar 3 — Panic safety & fail-closed
-- Failure scenario: `PushService::of` mislabels a fourth host — removed by the exhaustive `PushHost` match (compile
-  error on a new host). `renotify: true` with an empty tag would make `showNotification` throw and lose the
-  notification: excluded, the tag is never empty. `PushHost::name` is `const fn`; `PUSH_HOSTS` value unchanged and
-  pinned by `protocol_tests.rs` L47. No new `unwrap`/error path in production Rust.
+- Every new refusal (reserve non-`Auth`, reserve timeout, placement denial, logind read error → `LogindUnavailable`, sandbox not detected → 78, unparsable new endpoint → `400`) ends closed/denied; none produces an allow or `PAM_SUCCESS`. The `Other` placement keeps today's UID-level rule (not a new allow).
+- Scenario: the sender binary is replaced while running and later restarted by `Restart=on-failure` → the new binary is at the expected path → probe passes; a `" (deleted)"` path at start → 78 (fail closed, `RestartPreventExitStatus=78`).
 - Result: PASS.
 
 ### Pillar 4 — Dependencies
-- Failure scenario: the `png` dev-dependency is fine for the lock and licences but turns the existing contract test
-  `test_rbs_s6_no_new_dependency` red; the plan asserted the opposite. Fixing it requires amending an existing test
-  assertion that is outside the owner-approved AM-1..AM-6.
-- Result: **FINDING (MAJOR, PE-4)** — resolved in the spec by an explicit AM-7 gate with a binding fallback (see §4).
+- No new runtime crate; the daemon dev-dependency `jpeg-encoder` is already pinned and outside the RLC-S1 normal-edge check; the sender keeps `nix`/`thiserror`, adds no NSS lookup. `soos-remote` stays decoder-free (RLC-S10).
+- Result: PASS.
 
 ### Pillar 5 — Data confidentiality
-- Notification title/body still come from the existing server payload (counts and classes only); `readNotification`
-  is unchanged; icon/badge URLs are constant paths with no identity or alert data. The worker stores nothing, logs
-  nothing, never reads the response. No new server log line. `PushEndpoint` `Debug` stays redacted.
-- Failure scenario: the ADR's "push path makes no network access" is false in practice — the browser fetches the
-  icon and badge from the PC when it displays the notification. Not a leak (Funnel-public static assets, no
-  credentials needed), but an inaccurate invariant statement; a failed fetch must not suppress the notification.
-- Result: PASS, with MINOR PE-3 (wording corrected, RAN12 step 5b added).
+- New log lines: `peer_uid` and constant strings only; the sender logs one constant line on refusal and no path. `replacesEndpoint` is never logged (push modules have no tracing, RMC-S37). Decoded MJPEG buffers stay in the existing zeroizing path.
+- Scenario: a drop-in that **adds** `BindPaths=%h` (or a bind under `/run`) while keeping the hiding directives leaves the sandbox self-check green (it checks the presence of the tmpfs mounts, not what is mounted on top). See PE-SR9 (recommendation; the review asked about removed directives, which the plan covers).
+- Result: PASS with observation.
 
 ### Pillar 6 — Test integrity
-- Amendments AM-1..AM-6 each replace an exact value with an exact value (AM-6 is strictly stronger); none removes a
-  check. Verified that no other existing assertion pins the changed text (`Face ID` in docs §2f stays; `home-screen`,
-  `16.4`, `web.push.apple.com` stay in §2d).
-- Power check: `test_ran_s7` fails against the current `sameServerKey` (unsubscribes on absent key) and the unbounded
-  `serviceWorker.ready`; `test_ran_s8` fails against the `_ =>` arm; pixel tests fail on an `#EDF1FF` maskable
-  background (corner/safe-zone ring) or an RGB-coloured badge; the regression test fails if `same-site` or a missing
-  action header were ever accepted.
-- Coverage tests green from the start (endpoint shapes, sender, Chrome JSON, WebAuthn, worker request shape) are
-  acceptable because A8 is a tests-only acceptance line with no behaviour change; the tester must label them
-  "coverage contract (green at red phase)" in `AI/tester_contract_remote_android.md`. Every behaviour change (A1–A7,
-  A9) has at least one red test.
-- Test `test_ran_s2` parsed `ACTION_PUSH_SUBSCRIBE` from the wrong file and would have panicked rather than fail
-  meaningfully.
-- Result: PASS after PE-2 fix.
+- CM-SR1 is exactly the owner-approved additive change; the forbidden list is unchanged. AM-SR1/AM-SR2 add only session-record setup; assertions untouched; both justified by the new placement rule. No other existing test needs a change (checked: RMC-S6, RMC-S34, RMC-S36, RMC-S41, RMC-S42, RAN-S2, RLC-S6, the over-cap and room-for-auth tests, the enforced-validator preview tests).
+- Test power: S-3 tests fail on today's code (`PerUidCap`); a reserve accepting any request fails `test_rsh_reserve_closes_non_auth_without_payload`; a once-per-connection placement check fails `test_rsh_placement_rechecked_per_request`; a `str::ends_with` home anchor fails the `x.local/bin` case; a substring `ro` match fails the option test; `/home2` guards the prefix test. Gap: the IR path of the remote conversion (PE-SR8).
+- Result: PASS with one MINOR test-power gap.
 
 ## 4. Findings
 
-- **[MAJOR] PE-4** `png` dev-dependency breaks `test_rbs_s6_no_new_dependency` (dev-dependency allowlist
-  `["tokio","tempfile","proptest"]`, `remote_battery_contract.rs` L519–L526); spec §2.4/§12 claimed it stays green.
-  — *Fixed in spec*: §2.4 corrected; §12 adds **AM-7** (exact new value `["tokio","tempfile","proptest","png"]`) marked
-  **pending owner approval**, plus a binding fallback if declined/unanswered: no new dependency, the three pixel tests
-  move unchanged to `tests/invariants/src/remote_android_contract.rs` with a test-only DEFLATE/PNG decoder that
-  verifies the zlib Adler-32 trailer and decoded length (a decoder bug can only make a test red) and self-tests on
-  `apple-touch-icon.png`. Supply chain itself is clean (locked 0.18.1, MIT OR Apache-2.0, no lock entry added).
-  **Required before Phase 2: orchestrator asks the owner about AM-7 and records the branch taken.**
-- **[MINOR] PE-1** Matrix prefix: settled to **`RAN`** (RAN1–RAN12; `test_ran_s1_*`…`test_ran_s10_*`; behaviour
-  tests `test_ran_*`), consistent with #345 `RLC` / #346 `RBS`. — *Fixed in spec* (all ids renamed); binding.
-- **[MINOR] PE-2** `ACTION_PUSH_SUBSCRIBE` lives in `crates/remote/src/lib.rs` L425, not `routes.rs`. — *Fixed in spec*
-  (`test_ran_s2`, §9).
-- **[MINOR] PE-3** "The push path makes no network access" is inaccurate: the browser loads `/icon-192.png` and
-  `/badge-96.png` on display. — *Fixed in spec* (§3.1 note, RAN1 text, ADR text: "the worker makes no request on
-  push"; RAN12 step 5b checks a notification still appears off-tailnet).
-- **[MINOR] PE-5** `Docs/REMOTE_COMPANION.md` §9 must list the #349 out-of-scope items. — *Fixed in spec* (§7.1).
-- **[MINOR] PE-6** Worker POST over Funnel refreshes a valid session's idle timer. — *Fixed in spec* (§3.3 note, ADR
-  accepted risks).
+- **PE-SR8 [MINOR] S-8d: the remote conversion must bound IR-stamped frames, and no planned test proves it.**
+  `preview_image_for_frame` converts an IR non-Grey frame to Grey and **recurses into itself** (`preview_image.rs:84-98`), which forwards a ≤ 640-wide Grey frame of any height unchanged. If `remote_preview_image_for_frame` reuses that IR branch as-is, a 640x512 YUYV IR sensor (the exact device class of S-8d) still reaches `soos-remote` as 640x512 Grey and ends after 10 bad frames. §9.4 says "the IR rule first (greyscale), then …", which is ambiguous.
+  *Required (tester/developer, no spec round needed)*: the IR branch of the remote function recurses into `remote_preview_image_for_frame` (or applies `downscale_within(.., Some(480))` to the luma frame); `test_rsh_remote_preview_ir_stamp_is_grey` uses a 640x512 YUYV `SensorType::Infrared` frame and asserts 320x256 Grey; the proptest `test_rsh_remote_preview_output_always_within_640x480` also varies `sensor_type`.
 
-Settled open questions: walkthrough **193** (191/192 verified taken); matrix prefix **RAN**; `png` acceptable on
-licence/lock grounds but gated by AM-7; coverage tests green from the start acceptable when labelled.
+- **PE-SR9 [MINOR, recommended] S-7 detects removed directives but not re-exposure on top of them.**
+  Rules 1–2 only require that a read-only tmpfs exists at `/run` and over the home; a drop-in adding `BindPaths=%h` (or `BindReadOnlyPaths=/run/dbus`) keeps both true. Rule 3 is a direct probe and is robust. *Suggested*: add a direct check of the home anchor's content (`read_dir(home)` lists only `.local`, `.local` only `bin`, `bin` only `soos-push-sender`, bounded to a few entries, any error = refuse), or record this explicitly in §13.6 and in the §2d *Limits* text. Not blocking: the review's scenarios (manual run, drop-in removing directives) are covered.
 
-Security checks requested by the orchestrator: `pushsubscriptionchange` loosens no CSRF/session/Funnel check (PASS);
-the worker still never fetches on `push` and every push shows a notification (PASS, tag never empty); CSP unchanged
-(PASS, pinned by `test_ran_s5` and the existing CSP tests); no sensitive data in notifications (PASS); icons
-deterministic (PASS, reproduced byte-identically by the evaluator).
+- **PE-SR10 [MINOR, observation] S-8c depends on `event.oldSubscription`, which some browsers leave `null`.**
+  When the event carries no old subscription, `renewalPayload` falls back to today's request and the stale slot remains until a 404/410. *Suggested*: add this case to residual §13.7 and to the Android/iPhone docs note on `soos-remote push remove`; no design change.
+
+- **PE-SR11 [MINOR, docs] S-5: a lingering remote session blocks user-manager previews until it is gone.**
+  With logind's default `KillUserProcesses=no`, a process started over SSH (for example `tmux`) keeps its session record (`STATE=closing`, `REMOTE=1`) after logout, so the phone view and a user-unit soos-gui stay refused (`camera_refused`) until that process ends. This is the intended rule (same as root `Auth`) but the §7 troubleshooting row should say "an SSH session **or a process left running from one**", with `loginctl list-sessions` / `loginctl terminate-session <id>` as the check and remedy.
+
+No CRITICAL or MAJOR finding. PE-SR8 must be applied in Phase 2/4 (test + implementation detail within the approved design); PE-SR9 to PE-SR11 are recommendations the traceability/docs phase can absorb.
 
 ## 5. Verdict
-VALIDATION_VERDICT: APPROVED
 
-The single MAJOR finding (PE-4) is resolved in the spec with two fully specified branches; the orchestrator must
-obtain the owner's AM-7 answer (or apply the fallback) before Phase 2. No other revision is required.
+The round-2 spec resolves every round-1 item (PE-SR1 MAJOR included) without relaxing any existing assertion. All eleven review findings are addressed or credibly refuted (S-2 installer "refuse" against RMC-S6). The daemon changes keep the fail-closed PAM behaviour. The only test amendments are CM-SR1 (owner-approved) and the additive setup changes AM-SR1/AM-SR2.
+
+VALIDATION_VERDICT: APPROVED

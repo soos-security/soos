@@ -17,6 +17,8 @@ const ICON_PATH = "/icon-192.png";
 const BADGE_PATH = "/badge-96.png";
 // The page's subscription route and action (PUSH_SUBSCRIBE_PATH, ACTION_PUSH_SUBSCRIBE).
 const SUBSCRIBE_PATH = "/api/push/subscribe";
+// The server's subscribe body limit (MAX_PUSH_SUBSCRIBE_BODY_BYTES).
+const SUBSCRIBE_BODY_LIMIT = 2048;
 const SUBSCRIBE_ACTION = "push-subscribe";
 // One attempt, bounded: no retry, no timer left behind.
 const RESUBSCRIBE_TIMEOUT_MS = 10000;
@@ -90,12 +92,30 @@ function postSubscription(subscription) {
   }).finally(() => clearTimeout(timer));
 }
 
+// The renewed subscription, naming the endpoint it replaces when the body still fits the limit
+// (the server then removes the stale endpoint in the same store update). Without an old
+// subscription, or when the body would be too large, the request is the plain re-subscription.
+function renewalPayload(subscription, old) {
+  const json = subscription.toJSON();
+  if (old && typeof old.endpoint === "string" && old.endpoint !== json.endpoint) {
+    const withOld = Object.assign({}, json, { replacesEndpoint: old.endpoint });
+    if (new TextEncoder().encode(JSON.stringify(withOld)).length <= SUBSCRIBE_BODY_LIMIT) {
+      return { toJSON: () => withOld };
+    }
+  }
+  return subscription;
+}
+
 // Silent: a refusal (off-tailnet, expired Funnel session, full store) is swallowed; the page
 // re-sends the subscription on its next open.
 self.addEventListener("pushsubscriptionchange", (event) => {
   event.waitUntil(
     renewedSubscription(event)
-      .then((subscription) => (subscription === null ? null : postSubscription(subscription)))
+      .then((subscription) =>
+        subscription === null
+          ? null
+          : postSubscription(renewalPayload(subscription, event.oldSubscription))
+      )
       .catch(() => null)
   );
 });

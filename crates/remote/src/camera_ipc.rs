@@ -176,7 +176,9 @@ impl DaemonPreviewClient {
             .unwrap_or(started);
         let mut outcome = attempt(&mut conn.stream, self.uid, &self.random, deadline).await;
         if reused && matches!(outcome, Err(AttemptError::Retryable)) {
-            drop(conn);
+            // The daemon already closed the idle connection: the drain ends at once on EOF,
+            // and its per-UID permit is released before the new connection is admitted.
+            graceful_close(conn.stream).await;
             conn = self.connect().await?;
             outcome = attempt(&mut conn.stream, self.uid, &self.random, deadline).await;
         }
