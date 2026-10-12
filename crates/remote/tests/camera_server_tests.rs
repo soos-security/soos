@@ -245,7 +245,7 @@ async fn test_rlc_start_requires_fresh_uv_camera_assertion() {
     let options = camera_options(&h, &Via::Tailnet).await;
     assert_eq!(
         json_keys(&options.json()),
-        vec!["challenge", "rp_id", "timeout_ms"]
+        vec!["allow_credentials", "challenge", "rp_id", "timeout_ms"]
     );
     let c1 = h.challenge_of(&options);
     let first = h.valid_assertion(&owner, &c1);

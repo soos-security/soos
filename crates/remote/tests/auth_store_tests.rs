@@ -782,6 +782,7 @@ fn test_rmc_secret_types_debug_is_redacted() {
         backup_eligible: true,
         backup_state: true,
         created_unix_s: 1,
+        transports: Default::default(),
     };
     check(format!("{record:?}"));
     let file = PasskeyFile {

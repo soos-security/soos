@@ -307,7 +307,7 @@ fn test_rmc_s17_cookie_attributes() {
 
 /// Test 51 (RMC-S18, S-3): the page drives modal WebAuthn with user verification, discoverable
 /// credentials, attestation `none` and ES256, never conditional mediation, never storage,
-/// never `allowCredentials`.
+/// `allowCredentials` only for the authenticated unlock and camera ceremonies, never at sign-in.
 #[test]
 fn test_rmc_s18_page_uses_modal_webauthn_without_storage() {
     let app = read("crates/remote/assets/app.js");
@@ -336,7 +336,6 @@ fn test_rmc_s18_page_uses_modal_webauthn_without_storage() {
         "sessionStorage",
         "indexedDB",
         "document.cookie",
-        "allowCredentials",
         "innerHTML",
         "eval(",
     ] {
@@ -345,6 +344,17 @@ fn test_rmc_s18_page_uses_modal_webauthn_without_storage() {
             "app.js must not contain {forbidden}"
         );
     }
+    // Contract migration (ADR 2026-10-12 "Named Credentials on Authenticated Passkey
+    // Ceremonies of `soos-remote`", spec AM-3): sign-in names no credential.
+    assert_eq!(
+        app.matches("allowCredentials").count(),
+        1,
+        "allowCredentials only in getAssertion"
+    );
+    assert!(
+        app.contains("getAssertion(options.body, false)"),
+        "sign-in stays discoverable"
+    );
     // Contract migration (ADR 2026-10-06 "Web Push", owner request): the page may register
     // exactly one service worker, the same-origin `/sw.js` with scope `/`, and nothing else.
     assert_eq!(

@@ -331,6 +331,14 @@ mod remote_android_contract;
 #[cfg(all(test, unix))]
 mod remote_security_hardening_contract;
 
+/// Direct biometric prompt of `soos-remote` on Android: discoverable sign-in, named
+/// credentials on the authenticated unlock and camera ceremonies only, platform registration
+/// with stored transports, documentation (GitHub #354 sub-issue 1, ADR 2026-10-12 "Named
+/// Credentials on Authenticated Passkey Ceremonies of `soos-remote`"; spec
+/// AI/architect_spec_remote_direct_biometric.md §8.1; rows RDB3-RDB6, RDB9).
+#[cfg(all(test, unix))]
+mod remote_direct_biometric_contract;
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,
