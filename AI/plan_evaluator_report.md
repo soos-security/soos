@@ -1,117 +1,93 @@
 # Plan Evaluation Report
 
 - **Date**: 2026-10-12
-- **Issue**: GitHub-only security review of 2026-10-12 (S-1 … S-8d), no backlog id — soos-remote Security Hardening
-- **Spec**: `AI/architect_spec_remote_security_hardening.md` (round 2, commit `d91582b`)
-- **Branch**: `fix/remote-security-hardening`
-- **Base commit**: `f9234ea` (`origin/main`)
-- **Round**: 2 (round 1 `f5058b6`: REVISION_REQUIRED, PE-SR1 MAJOR, PE-SR2 to PE-SR7 MINOR/observations)
+- **Issue**: GitHub-only #354, sub-issue 1 (web quick win), no backlog id — soos-remote direct biometric prompt on Android
+- **Spec**: `AI/architect_spec_remote_direct_biometric.md` (commit `aa48f25`, with the ADR "[2026-10-12] Named Credentials on Authenticated Passkey Ceremonies of `soos-remote`")
+- **Branch**: `feat/remote-direct-biometric`
+- **Base commit**: `fb2977c` (`origin/main`)
+- **Round**: 1
+- **Owner decisions checked**: issue #354 comments "Owner clarification", "Owner decisions (2026-10-12)", "Owner decisions, part 2 (2026-10-12)".
 
 ## 1. Coverage Matrix
 
-| Finding / acceptance line | Spec element | Status |
+| Acceptance line (task, owner decisions) | Spec element | Status |
 |---|---|---|
-| S-1 sender reads the system journal; `InaccessiblePaths=`; correct docs; CM-SR1 on test 45 | §1.1 (host reproduction, journal 1 → 0 lines, DNS ok), §2.1–§2.4, §11.3 CM-SR1, RSH1/RSH2/RSH18-1 | Covered |
-| S-2 raise documented Tailscale minimum; installer warns/refuses; absent tailscale never breaks install; agents never run tailscale | §3: `TAILSCALE_MIN_VERIFIED_VERSION = "1.102.4"`, docs §2b/§2/§4/§8, installer prints (two `echo` lines) | Covered. "Refuse"/"parse `tailscale version`" credibly refuted: RMC-S6 (`tests/invariants/src/remote_companion_contract.rs:735-790`) rejects any non-`echo`/`printf` line containing the word `tailscale`; an exemption would relax it |
-| S-3 face auth not starved by preview connections, per-UID DoS bound kept | §4: one auth-reserved permit per unprivileged UID (cap + 1), whole first frame within 200 ms, `Auth` only, companion graceful close on retry | Covered (round-1 PE-SR2/PE-SR3 resolved) |
-| S-4 Android lock-screen privacy + `push_previews = "generic"` | §5 | Covered |
-| S-5 preview only for processes inside a local seat session; soos-gui and soos-remote keep working | §6: `PeerPlacement`, `classify_peer_placement`, `authorize_preview_placement` (step 6c-2a, per request) | Covered; see PE-SR11 (docs) |
-| S-6 CORP, COOP, Permissions-Policy, HSTS; CSP byte-identical | §7 `HARDENING_HEADERS` appended in the three head encoders | Covered |
-| S-7 sender fails closed (78) unless the sandbox is detected; robust, testable probes | §8: `home_from_exe` (binary path, no environment), `evaluate_sandbox` (pure), `probe_sandbox`, call before `XDG_RUNTIME_DIR`/bind | Covered (round-1 PE-SR1 resolved); see PE-SR9 |
-| S-8a dangling symlink followed by the installer | §9.1 `-L` refusal + `(set -C; cat > …)` | Covered |
-| S-8b JPEG sent after a stop | §9.2 check after `mark_streaming` and a second one after the head (PE-SR5) | Covered |
-| S-8c stale subscription slot on renewal | §9.3 `replacesEndpoint`, `replace_or_upsert`, invalid old endpoint = plain upsert | Covered; see PE-SR10 |
-| S-8d MJPEG / NV12 / > 480 px | §9.4 daemon-side `remote_preview_image_for_frame` for the remote origin only | Covered; see PE-SR8 |
-| Zero test weakening: only CM-SR1 owner-approved; anything else additive and recorded as AM-SRn | §11.3 CM-SR1 (37 → 38, one line inserted), AM-SR1, AM-SR2 (setup only); RMC-S34/S41/S42 listed as compatible unchanged | Covered (verified below) |
-| Daemon changes keep fail-closed PAM behaviour | §4.3, §10, §13.3 | Covered: every reserve refusal closes unanswered → PAM read error → `PAM_IGNORE`; root path, `crates/pam` and the wire format unchanged |
-
-### Round-1 items
-
-| Item | Resolution verified |
-|---|---|
-| PE-SR1 MAJOR (RMC-S34) | Resolved. The only environment read stays `std::env::var_os("XDG_RUNTIME_DIR")` (`crates/push-sender/src/main.rs:26`, the only `env::var*` hit in `crates/push-sender/src`); the anchor comes from `current_exe()` (Linux: `read_link("/proc/self/exe")`, no environment, no NSS) matched component-wise against `.local/bin/soos-push-sender`, consistent with the unit's `ExecStart=%h/.local/bin/soos-push-sender` and `BindReadOnlyPaths=` of the same path. A `" (deleted)"` suffix or another location fails closed (78). New static test `test_rsh_s7_sender_reads_no_other_environment_variable` is strictly stronger than RMC-S34. RMC-S41 forbidden names (`VapidKey`, `p256`, `hmac`, `remote.toml`, …) are not needed by the probe. |
-| PE-SR2 | Resolved: wording corrected, residual §13.3, docs, `test_rsh_reserve_auth_after_100ms_is_answered`. |
-| PE-SR3 | Resolved: `timeout(200 ms, read_client_frame)` covers prefix and body; `.readable()` banned statically; partial-frame test added. |
-| PE-SR4 | Resolved: unparsable `replacesEndpoint` = absent. |
-| PE-SR5 | Resolved: second check after the head, before `set_shown`/`write_part`; static pin. |
-| PE-SR6 / PE-SR7 | Resolved: static assertions (decode only in `handle_preview_request`, outside the limiter guard; constant ≤ 250 ms and not configurable). |
+| (1a) The login ceremony stays discoverable: no `allowCredentials`, no credential id in the unauthenticated login options (OD part 2) | D-2 (`OptionsCredentials::Discoverable`, type-level), §3.5 `getAssertion(options.body, false)`, RDB3, test 36 unchanged, `test_rdb_login_options_never_name_a_credential`, `test_rdb_s1` | Covered (see PE-3) |
+| (1b) Unlock and camera-start options return the registered credential ids with stored transports, else `["internal","hybrid"]`; the page passes them as `allowCredentials` | D-1, D-3, §3.1 `allow_credentials`, §3.3, §3.5, RDB1, RDB2 | Covered (see PE-1, PE-2) |
+| (1c) These options routes are never reachable unauthenticated over Funnel | D-7, V-4, V-5, RDB4 (`test_rdb_named_options_refused_without_funnel_session`, `test_rdb_s5`) | Covered, verified in code (§2) |
+| (2a) Registration adds `authenticatorAttachment: "platform"` and `hints: ["client-device"]` | D-4, §3.5, RDB5 | Covered (see PE-5) |
+| (2b) Transports from `getTransports()` stored, bounded, allowlisted, backward compatible | D-5, §3.1, §3.2, §3.4, RDB6, RDB7, A-2, A-5, A-6 | Covered |
+| (3) `Docs/REMOTE_COMPANION.md` §2h: preferred passkey service, delete the Proton Pass passkey and re-enroll on the phone with `soos-remote enroll-code` | §10, RDB9 | Covered (see PE-5) |
+| (4) Owner hardware row (pending): unlock and camera start show fingerprint/face directly, sign-in may still show the picker | RDB10 | Covered |
+| Both device-bound and password-manager passkeys accepted (no BE=0 enforcement) | OD-1, D-6, ADR item (4) | Covered: no verifier change |
+| CSP, CSRF, Funnel gates, WebAuthn verification, RC-1 unchanged; remote unlock over Funnel stays supported | D-6, D-7, D-8, §7, RDB8 | Covered |
+| Zero test weakening: amendments listed AM-n and justified | §9 AM-1 … AM-5 | Covered; classification in PE-6 |
+| GitHub-only issue: no `scripts/sync_issue.py` registration, `Refs #354` | Spec header | Covered |
 
 ## 2. Facts Verified Against Code
 
 | Fact cited by plan | Code location | Actual value | Match |
 |---|---|---|---|
-| Unit `ExecStart=%h/.local/bin/soos-push-sender`, `BindReadOnlyPaths=` same path, `TemporaryFileSystem=/run:ro`, `ProtectHome=tmpfs` | `packaging/soos-push-sender.service` | as cited | Yes |
-| `SENDER_UNIT_LINES: [&str; 37]`; forbidden prefixes | `tests/invariants/src/remote_push_contract.rs:452-525` | 37; `InaccessiblePaths=` matches no forbidden prefix (`ReadOnlyPaths=`, `BindPaths=` are prefix-anchored) | Yes |
-| RMC-S34 reader rule | `remote_push_contract.rs:429-439` | every `env::var(`/`env::var_os(`/`std::env::vars` must be followed by `"XDG_RUNTIME_DIR")` | Spec complies |
-| RMC-S36 one-literal tracing | `remote_push_contract.rs:550-590` | as cited | Spec §8.3 complies (one constant string) |
-| `thiserror` available to the sender | `crates/push-sender/Cargo.toml` | dependency present | Yes |
-| `try_acquire` order Global → ReservedForPrivileged → PerUidCap; `max_connections_per_uid >= 1` | `crates/daemon/src/limits.rs:201-224, 99-101` | as cited | Yes (a `PerUidCap` rejection implies the global and unprivileged checks passed) |
-| Every `Auth` is one-shot, including error answers | `dispatcher.rs:572` (`one_shot = req.kind == RequestKind::Auth`) | as cited | Yes, so a reserve connection serves at most one request |
-| Inner reserve timeout returns `Err(Timeout)` through `Ok(Err(e)) => return Err(e)` | `dispatcher.rs:461-482` | closes without writing | Yes |
-| Permit dropped before the stream | `handle_connection(&self, mut stream)`, local `_permit` | locals drop before the by-value parameter | Yes: `test_same_uid_connection_over_cap_is_closed_without_blocking_others` (`available_permits() == 6` after the reserve refusal) and `test_idle_polling_peer_cannot_exhaust_global_capacity` (refused = 6) stay exact |
-| `test_rlc_view_connection_leaves_room_for_auth` third connection | `preview_remote_view_tests.rs:1167-1193` | silent third connection is now closed by the 200 ms window, within the 500 ms `closed_promptly`; later fresh `Auth` still admitted | Compatible unchanged |
-| `authorize_user_manager_caller` rule | `session_policy.rs:589-621` | UID-less or non-`REMOTE=0` record → refuse; a local seat record required | Yes (factoring as a shared helper is behaviour-preserving) |
-| Tests using an enforced session validator for preview | `preview_remote_view_tests.rs:812, 885, 1093, 1116`; `preview_authorization_tests.rs:456, 483` | others use `enforce_active_session: false` (disabled policy) | AM-SR1 covers line 1093 (record `"3"`, cgroup `session-4.scope`); line 1116 (user manager, record `"3"` local) passes unchanged; line 885 uses record `"4"`; `:483` covered by AM-SR2 |
-| Agent test process placement | `/proc/self/cgroup` | `user@1000.service/session.slice/tmux-spawn-….scope` → `UserManager` | AM-SR2 harmless here |
-| `parse_session_id_from_cgroup` first-unit rule | `session_policy.rs:249-290` | first unit component | Yes (nested `session-*.scope` under the manager = `UserManager`) |
-| Head encoders; no other `HTTP/1.1` literal | `crates/remote/src/http.rs:263-316` | three encoders interpolate `{MANDATORY_HEADERS}`; no other response-head source in `crates/remote/src` | Yes: HSTS/COOP/CORP reach every response |
-| S-8b seam and helpers | `server.rs:2341-2420`, `camera.rs:249, 271, 312, 676-689`, `camera_first_frame_refusal` `server.rs:2443` | `Stopped` → `audit_refused`, `None` | Yes |
-| RAN-S2 worker assertions | `remote_android_contract.rs:559-693` | listener needs `renewedSubscription(event)`, `postSubscription(`, terminal `.catch(() => null)`; one `fetch(`; `postSubscription` body unchanged | Spec §9.3 complies (`renewalPayload` returns an object whose `toJSON()` is used unchanged) |
-| Installer template write | `scripts/install_remote.sh:72-77` | `[[ ! -e … ]]` + `cat >`; no invariant pins the `cat >` text | Yes, §9.1 change is safe for existing tests |
-| IR stamp recursion | `crates/daemon/src/preview_image.rs:84-110` | an IR non-Grey frame is converted to Grey and recursed into `preview_image_for_frame` (forwarded unchanged when ≤ 640 wide, any height) | Relevant to PE-SR8 |
-| Highest walkthrough | `AI/walkthroughs/193_remote_android.md` | 193 | Yes (194 is next) |
+| `getAssertion` has no `allowCredentials`; call sites unlock/login/camera | `crates/remote/assets/app.js:270-279`, `:771`, `:820`, `:1686` | as stated | Yes |
+| Registration has no `authenticatorAttachment`/`hints`; `residentKey: "required"`, `requireResidentKey: true`, UV required, attestation `none`, `alg: -7`; `excludeCredentials` already sent (tailnet only) | `app.js:862-879` | as stated | Yes |
+| Shared `issue_options` loads the store snapshot under the auth mutex with `Ok(Some(file)) if !file.passkeys.is_empty()` then `options_response(rp_id, challenge)` | `server.rs:546-583`, `:1378` | as stated; refusal order `403 passkeys_not_configured` → `429` → `409`/`503` → `503` → `429 too_many_challenges` | Yes |
+| Login options pass `ChallengePurpose::Login`, Funnel only (`403 forbidden` on the tailnet) | `server.rs:1401-1413` | as stated | Yes |
+| Funnel gate: non-`is_funnel_public` route without a session ⇒ `403 login_required` before routing; register routes always `403 forbidden` | `server.rs:1190-1205`, `routes.rs:379-390` | `is_funnel_public` = `Asset`, `AuthState`, `LoginOptions`, `LoginVerify`, `Logout`, `NotFound`, `MethodNotAllowed` (no `UnlockOptions`, no `CameraOptions`) | Yes |
+| Tailnet callers need exactly one allowed `Tailscale-User-Login` (non-empty allowlist) | `identity.rs:276-304`, `config.rs:233-237` | as stated | Yes |
+| `unlock_options`/`camera_options`: CSRF with required `Origin` before any store read; `403 unlock_disabled`/camera gates before `issue_options` | `server.rs:1416-1437`, `:2176-2197` | as stated | Yes |
+| `RecordJson` and `StoreJson` are `deny_unknown_fields`; `encode_store` field order; `PasskeyRecord` derives `Clone, PartialEq, Eq` with redacted `Debug` | `credentials.rs:37-189` | as stated | Yes |
+| `RegisterVerifyBody` is `deny_unknown_fields`; `decode_registration` runs before `check_code` (a malformed body never consumes the enrollment code) | `auth.rs:625-741`, `server.rs:1745-1790` | as stated | Yes |
+| `persist_counter` mutates the record in place (other fields preserved) | `server.rs:586-610` | as stated | Yes |
+| `MAX_AUTH_BODY_BYTES` 8192; `MAX_ATTESTATION_OBJECT_BYTES` 2048; `MAX_CREDENTIAL_ID_BYTES` 1023; `MAX_CLIENT_DATA_JSON_BYTES` 1024; existing const assertion | `lib.rs:171-217`, `:279-285` | as stated (5713 + 168 = 5881 < 8192) | Yes |
+| `MAX_PASSKEYS` 4; `MAX_CREDENTIAL_STORE_BYTES` 16 384 | `lib.rs:215-217` | as stated; worst record with six transports ≈ 1.7 KiB, 4 records ≈ 6.8 KiB | Yes |
+| `MAX_AUTH_FAILURES` 5 per `AUTH_FAILURE_WINDOW_MS` 300 000 | `lib.rs:235-237` | as stated | Yes |
+| Every response carries `Cache-Control: no-store` (named options not cached) | `http.rs:263` | as stated | Yes |
+| Existing tests pinning the old behaviour: test 39 (`auth_server_tests.rs:675-679`), camera test 24 (`camera_server_tests.rs:246-249`), invariants test 51 (`remote_passkey_contract.rs:308-347`), literals `credentials_tests.rs:42`, `auth_store_tests.rs:778` | grep of `allowCredentials`, `allow_credentials`, `"challenge", "rp_id", "timeout_ms"`, `PasskeyRecord {`, `issue_options`, `options_response`, `getAssertion` over `crates/` and `tests/` | exactly these; test 36 (`auth_server_tests.rs:386-398`) also pins the login shape and is left unchanged; no invariant pins the `§2h` item numbering (RAN-S9 uses needles only) | Yes (exhaustive) |
+| `soos-remote passkeys list` / `passkeys remove N` exist | `main.rs:260-330` | as stated | Yes |
 
 ## 3. Pillar Analysis
 
-### Pillar 1 — Architecture & threat model
-- Scenario: an SSH-only process of the owner asks for frames directly → `Session(id)` with `REMOTE=1` → refused; through `systemd-run --user` → `UserManager` → refused while the SSH record exists. Through the `soos-remote` socket with forged `Tailscale-User-Login` (same-UID boundary accepted by ADR 2026-10-06): the companion itself is `UserManager` and is refused while that SSH session exists, so the bypass is closed by the same rule. Moving its own process into the local `session-N.scope` needs write access to root-owned `cgroup.procs` of the common ancestor (`user-<uid>.slice`): not possible.
-- Scenario: compromised sender reads `/var/log/journal` via the `wheel`/`adm` ACL → hidden by `InaccessiblePaths=`; `/run/log/journal` and the journald sockets are already under the `/run` tmpfs.
-- Result: PASS (docs observation PE-SR11).
-
-### Pillar 2 — PAM deadline & concurrency
-- `crates/pam` untouched; no Tokio added to PAM. Root peers use the unchanged path.
-- Scenario: user-level lock screen while the view and soos-gui hold both regular permits → reserve admitted → `on_connected` conversation < 200 ms → `Auth` served; ≥ 200 ms → closed unanswered → `PAM_IGNORE` (password). Documented residual, tested at 100 ms.
-- Scenario: a same-UID process holds the reserve with a partial frame → closed after 200 ms, permit released (test added). Bound per UID: `max_connections_per_uid + 1`, inside the unchanged global/unprivileged capacity.
+### Pillar 1 — Architecture and threat model
+- Failure scenario considered: an anonymous Funnel client calls `POST /api/auth/unlock/options` (or camera) and harvests the credential ids. Excluded: the pre-routing gate refuses every non-public route without a valid session (`server.rs:1199`), and the spec pins this statically (`test_rdb_s5`) and behaviourally (no cookie, unknown cookie, revoked session).
+- Failure scenario considered: a future refactor routes login through `Registered`. Excluded by the `OptionsCredentials` argument and the static pin `test_rdb_s1` plus unchanged test 36.
+- Failure scenario considered: the allow list influences verification (e.g. an implementation checks the assertion id against the list instead of the store). Excluded: D-6, allow list never reaches `check_assertion`; `test_rdb_assertion_rules_unchanged_with_allow_list`.
+- Residual R-1 (authenticated caller learns opaque ids) matches the owner decision and the existing `exclude_credentials` precedent on the tailnet register options.
 - Result: PASS.
 
-### Pillar 3 — Panic safety & fail-closed
-- Every new refusal (reserve non-`Auth`, reserve timeout, placement denial, logind read error → `LogindUnavailable`, sandbox not detected → 78, unparsable new endpoint → `400`) ends closed/denied; none produces an allow or `PAM_SUCCESS`. The `Other` placement keeps today's UID-level rule (not a new allow).
-- Scenario: the sender binary is replaced while running and later restarted by `Restart=on-failure` → the new binary is at the expected path → probe passes; a `" (deleted)"` path at start → 78 (fail closed, `RestartPreventExitStatus=78`).
+### Pillar 2 — PAM deadline and concurrency
+- Failure scenario considered: added work under the auth mutex delays other requests. ≤ 4 base64url encodings of ≤ 1023 bytes from the snapshot already loaded; no extra I/O, no second store read (no TOCTOU). `crates/pam` untouched.
+- Result: PASS (not on the PAM path).
+
+### Pillar 3 — Panic safety and fail-closed
+- Failure scenario considered: a corrupted `transports` key in the store. Strict parse ⇒ `StoreError::Malformed` ⇒ existing fail-closed path (`503 store_unavailable`, sessions dropped), never an authorization. Downgrade (A-6) likewise fails closed.
+- Failure scenario considered: `getTransports` throws or is missing on an old browser. `try`/`catch` ⇒ `[]` ⇒ `EMPTY` ⇒ default transports.
 - Result: PASS.
 
 ### Pillar 4 — Dependencies
-- No new runtime crate; the daemon dev-dependency `jpeg-encoder` is already pinned and outside the RLC-S1 normal-edge check; the sender keeps `nix`/`thiserror`, adds no NSS lookup. `soos-remote` stays decoder-free (RLC-S10).
-- Result: PASS.
+- No new crate, no JS library. Result: PASS.
 
 ### Pillar 5 — Data confidentiality
-- New log lines: `peer_uid` and constant strings only; the sender logs one constant line on refusal and no path. `replacesEndpoint` is never logged (push modules have no tracing, RMC-S37). Decoded MJPEG buffers stay in the existing zeroizing path.
-- Scenario: a drop-in that **adds** `BindPaths=%h` (or a bind under `/run`) while keeping the hiding directives leaves the sandbox self-check green (it checks the presence of the tmpfs mounts, not what is mounted on top). See PE-SR9 (recommendation; the review asked about removed directives, which the plan covers).
-- Result: PASS with observation.
+- Failure scenario considered: a `debug!` of the options response logs ids. No new log line; `test_rdb_options_never_log_a_credential_id` plus the existing `server_tests.rs:1982` leak test. `PasskeyRecord`/`RegisterVerifyBody` `Debug` stay redacted. Body bounded at 8 KiB before deserialisation, so the `Vec<String>` cannot be abused for allocation.
+- Result: PASS.
 
-### Pillar 6 — Test integrity
-- CM-SR1 is exactly the owner-approved additive change; the forbidden list is unchanged. AM-SR1/AM-SR2 add only session-record setup; assertions untouched; both justified by the new placement rule. No other existing test needs a change (checked: RMC-S6, RMC-S34, RMC-S36, RMC-S41, RMC-S42, RAN-S2, RLC-S6, the over-cap and room-for-auth tests, the enforced-validator preview tests).
-- Test power: S-3 tests fail on today's code (`PerUidCap`); a reserve accepting any request fails `test_rsh_reserve_closes_non_auth_without_payload`; a once-per-connection placement check fails `test_rsh_placement_rechecked_per_request`; a `str::ends_with` home anchor fails the `x.local/bin` case; a substring `ro` match fails the option test; `/home2` guards the prefix test. Gap: the IR path of the remote conversion (PE-SR8).
-- Result: PASS with one MINOR test-power gap.
+### Pillar 6 — Test integrity and test power
+- Failure scenario considered: a developer always emits `DEFAULT_ALLOW` regardless of stored transports. Caught by `test_rdb_register_stores_allowlisted_transports` (`usb` included) but not by RDB1/RDB2, whose stored set canonicalises to the default (PE-2).
+- Failure scenario considered: login options name credentials when the Funnel caller already holds a session. Not exercised behaviourally (PE-3).
+- Failure scenario considered: the developer follows the §3.5 comment wording, which itself contains the literal `allowCredentials`, so the exact-count assertions of AM-3 and `test_rdb_s1` fail against a correct implementation (PE-1).
+- Amendments AM-1 … AM-5 classified in PE-6.
+- Result: FINDINGS (MINOR only).
 
 ## 4. Findings
 
-- **PE-SR8 [MINOR] S-8d: the remote conversion must bound IR-stamped frames, and no planned test proves it.**
-  `preview_image_for_frame` converts an IR non-Grey frame to Grey and **recurses into itself** (`preview_image.rs:84-98`), which forwards a ≤ 640-wide Grey frame of any height unchanged. If `remote_preview_image_for_frame` reuses that IR branch as-is, a 640x512 YUYV IR sensor (the exact device class of S-8d) still reaches `soos-remote` as 640x512 Grey and ends after 10 bad frames. §9.4 says "the IR rule first (greyscale), then …", which is ambiguous.
-  *Required (tester/developer, no spec round needed)*: the IR branch of the remote function recurses into `remote_preview_image_for_frame` (or applies `downscale_within(.., Some(480))` to the luma frame); `test_rsh_remote_preview_ir_stamp_is_grey` uses a 640x512 YUYV `SensorType::Infrared` frame and asserts 320x256 Grey; the proptest `test_rsh_remote_preview_output_always_within_640x480` also varies `sensor_type`.
-
-- **PE-SR9 [MINOR, recommended] S-7 detects removed directives but not re-exposure on top of them.**
-  Rules 1–2 only require that a read-only tmpfs exists at `/run` and over the home; a drop-in adding `BindPaths=%h` (or `BindReadOnlyPaths=/run/dbus`) keeps both true. Rule 3 is a direct probe and is robust. *Suggested*: add a direct check of the home anchor's content (`read_dir(home)` lists only `.local`, `.local` only `bin`, `bin` only `soos-push-sender`, bounded to a few entries, any error = refuse), or record this explicitly in §13.6 and in the §2d *Limits* text. Not blocking: the review's scenarios (manual run, drop-in removing directives) are covered.
-
-- **PE-SR10 [MINOR, observation] S-8c depends on `event.oldSubscription`, which some browsers leave `null`.**
-  When the event carries no old subscription, `renewalPayload` falls back to today's request and the stale slot remains until a 404/410. *Suggested*: add this case to residual §13.7 and to the Android/iPhone docs note on `soos-remote push remove`; no design change.
-
-- **PE-SR11 [MINOR, docs] S-5: a lingering remote session blocks user-manager previews until it is gone.**
-  With logind's default `KillUserProcesses=no`, a process started over SSH (for example `tmux`) keeps its session record (`STATE=closing`, `REMOTE=1`) after logout, so the phone view and a user-unit soos-gui stay refused (`camera_refused`) until that process ends. This is the intended rule (same as root `Auth`) but the §7 troubleshooting row should say "an SSH session **or a process left running from one**", with `loginctl list-sessions` / `loginctl terminate-session <id>` as the check and remedy.
-
-No CRITICAL or MAJOR finding. PE-SR8 must be applied in Phase 2/4 (test + implementation detail within the approved design); PE-SR9 to PE-SR11 are recommendations the traceability/docs phase can absorb.
+- **PE-1 [MINOR]** §3.5 gives `getAssertion` a doc comment "... are passed as allowCredentials so the phone ...", while AM-3 and `test_rdb_s1` require `allowCredentials` to occur **exactly once** in `app.js`. Required change: no comment, string or identifier other than the single `publicKey.allowCredentials` assignment may contain the literal (write "allow list" in comments). The tester and developer must apply this wording.
+- **PE-2 [MINOR]** RDB1/RDB2 behaviour tests store `{Hybrid, Internal}`, whose canonical output `["internal","hybrid"]` equals `DEFAULT_ALLOW`, so they cannot distinguish stored from default transports. Required change: the stored record in `test_rdb_unlock_options_name_every_registered_credential` and `test_rdb_camera_options_name_every_registered_credential` uses a set different from the default (e.g. `{Hybrid}` or `{Internal, Usb}`), next to the legacy record that must carry `["internal","hybrid"]`.
+- **PE-3 [MINOR]** `test_rdb_login_options_never_name_a_credential` must also call login options from a Funnel caller presenting a **valid session cookie** (the rotation path) and assert the exact key set and absence of both ids, so an implementation keyed on session presence fails.
+- **PE-4 [MINOR]** `test_rdb_register_transports_bounds` lists four malformed inputs but asserts "5 such ⇒ `429`". Required change: add a fifth malformed input (e.g. `"transports": "internal"` (string) or `[null]`), then assert the next register verify answers `429 rate_limited`; also assert the enrollment code file still exists after the malformed bodies (the decode runs before `check_code`).
+- **PE-5 [MINOR, docs]** Consequences of A-4 and of `excludeCredentials` for the §2h procedure: (a) state that enrollment must be done on the phone itself (a desktop browser or a cross-device QR flow may be refused with `authenticatorAttachment: "platform"`); (b) keep "delete the passkey in Proton Pass" before re-enrolling, and say that if the phone reports the passkey "already exists" the old one is still present in an enabled provider. Wording only; no test change beyond the needles of `test_rdb_s6`.
+- **PE-6 [OBSERVATION — amendment classification]** AM-1(b) and AM-3 touch security-relevant assertions. Evaluated as **owner-required exact replacements, not relaxations**: OD part 2 explicitly requires the unlock and camera options of an authenticated caller to carry the credential ids and the page to send `allowCredentials`, which is impossible while those two assertions stand. The property they protected (S-3: no credential id to an anonymous client, sign-in never names a credential) is preserved and strengthened: AM-1(b) becomes an exact-content assertion on an authenticated tailnet caller; the anonymous direction stays pinned by unchanged test 36 and new `test_rdb_login_options_never_name_a_credential`, `test_rdb_named_options_refused_without_funnel_session`, `test_rdb_refusals_never_name_a_credential`; AM-3 replaces the needle by an exact count of 1 plus the `getAssertion(options.body, false)` call-site pin, following the in-test "Contract migration" precedent (service worker). AM-2 is an exact key-set replacement; AM-4/AM-5 are additive setup. Conditions: every other `forbidden` needle of test 51 stays unchanged, and no further existing test is modified. **Approved.**
 
 ## 5. Verdict
 
-The round-2 spec resolves every round-1 item (PE-SR1 MAJOR included) without relaxing any existing assertion. All eleven review findings are addressed or credibly refuted (S-2 installer "refuse" against RMC-S6). The daemon changes keep the fail-closed PAM behaviour. The only test amendments are CM-SR1 (owner-approved) and the additive setup changes AM-SR1/AM-SR2.
+No CRITICAL or MAJOR finding. PE-1 to PE-5 are MINOR plan clarifications to be applied by the tester (PE-1 wording rule, PE-2, PE-3, PE-4) and by the traceability/docs phase (PE-5); PE-6 approves amendments AM-1 to AM-5 as listed in spec §9.
 
 VALIDATION_VERDICT: APPROVED
