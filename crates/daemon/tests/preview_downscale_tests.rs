@@ -305,3 +305,308 @@ async fn test_preview_oversize_frame_returns_empty_response_not_disconnect() {
         assert!(reply.data.is_empty());
     }
 }
+
+// ---------------------------------------------------------------------------
+// soos-remote security hardening S-8d (ADR 2026-10-12, spec
+// AI/architect_spec_remote_security_hardening.md §9.4, §11.2; row RSH16): frames for the
+// remote companion origin are converted daemon-side to Grey/YUYV/RGB24 within 640x480 (the
+// only formats and sizes `soos-remote` accepts); the GUI path is unchanged. New tests only;
+// nothing above is changed.
+// ---------------------------------------------------------------------------
+
+mod remote_preview {
+    use super::*;
+    use proptest::prelude::*;
+    use soos_camera_v4l::SensorType;
+    use soos_daemon::preview::{
+        remote_preview_image_for_frame, REMOTE_PREVIEW_MAX_HEIGHT, REMOTE_PREVIEW_MAX_WIDTH,
+    };
+
+    /// soos-remote `CAMERA_MAX_SCRATCH_BYTES` (640 x 480 x 3).
+    const REMOTE_MAX_BYTES: usize = 921_600;
+
+    /// A valid baseline MJPEG frame of `width` x `height` filled with one RGB colour.
+    fn mjpeg(width: u16, height: u16, rgb: [u8; 3]) -> Frame {
+        let pixels: Vec<u8> = (0..usize::from(width) * usize::from(height))
+            .flat_map(|_| rgb)
+            .collect();
+        let mut jpeg = Vec::new();
+        jpeg_encoder::Encoder::new(&mut jpeg, 95)
+            .encode(&pixels, width, height, jpeg_encoder::ColorType::Rgb)
+            .expect("encode fixture");
+        frame(
+            u32::from(width),
+            u32::from(height),
+            PixelFormat::Mjpeg,
+            jpeg,
+        )
+    }
+
+    fn with_sensor(mut f: Frame, sensor: SensorType) -> Frame {
+        f.sensor_type = sensor;
+        f
+    }
+
+    fn assert_within_bounds(image: &soos_daemon::preview::PreviewImage, what: &str) {
+        assert!(
+            matches!(image.format, 0..=2) || image.format == PREVIEW_FORMAT_EMPTY,
+            "{what}: only RGB24, Grey, YUYV or empty reach soos-remote (got {})",
+            image.format
+        );
+        assert!(
+            image.width <= REMOTE_PREVIEW_MAX_WIDTH,
+            "{what}: {}",
+            image.width
+        );
+        assert!(
+            image.height <= REMOTE_PREVIEW_MAX_HEIGHT,
+            "{what}: {}",
+            image.height
+        );
+        assert!(image.data.len() <= REMOTE_MAX_BYTES, "{what}");
+        let bpp = match image.format {
+            0 => 3,
+            1 => 1,
+            2 => 2,
+            _ => 0,
+        };
+        assert_eq!(
+            image.data.len(),
+            image.width as usize * image.height as usize * bpp,
+            "{what}: payload matches the geometry"
+        );
+        if image.format == PREVIEW_FORMAT_EMPTY {
+            assert_eq!((image.width, image.height), (0, 0), "{what}");
+        } else {
+            assert!(image.width >= 1 && image.height >= 1, "{what}");
+        }
+    }
+
+    #[test]
+    fn test_rsh_remote_preview_bounds_are_640x480() {
+        assert_eq!(REMOTE_PREVIEW_MAX_WIDTH, 640);
+        assert_eq!(REMOTE_PREVIEW_MAX_HEIGHT, 480);
+    }
+
+    #[test]
+    fn test_rsh_remote_preview_decodes_mjpeg_640x480() {
+        let image = remote_preview_image_for_frame(&mjpeg(640, 480, [200, 100, 50]));
+        assert_eq!(
+            image.format, 0,
+            "MJPEG is decoded to RGB24 for the companion"
+        );
+        assert_eq!((image.width, image.height), (640, 480));
+        assert_eq!(image.data.len(), 640 * 480 * 3);
+        // A known pixel (centre) keeps its colour within JPEG tolerance, in RGB order.
+        let at = (240 * 640 + 320) * 3;
+        for (got, want) in image.data[at..at + 3].iter().zip([200u8, 100, 50]) {
+            assert!(
+                got.abs_diff(want) <= 8,
+                "decoded pixel {:?} != [200, 100, 50]",
+                &image.data[at..at + 3]
+            );
+        }
+        assert_within_bounds(&image, "640x480 MJPEG");
+
+        // A wider MJPEG frame is decoded and decimated.
+        let wide = remote_preview_image_for_frame(&mjpeg(1280, 720, [10, 20, 30]));
+        assert_eq!((wide.format, wide.width, wide.height), (0, 640, 360));
+        assert_within_bounds(&wide, "1280x720 MJPEG");
+    }
+
+    #[test]
+    fn test_rsh_remote_preview_bounds_tall_grey_ir_frame() {
+        let data: Vec<u8> = (0u32..640 * 512).map(|i| (i % 251) as u8).collect();
+        let source = with_sensor(
+            frame(640, 512, PixelFormat::Grey, data.clone()),
+            SensorType::Infrared,
+        );
+        let image = remote_preview_image_for_frame(&source);
+        assert_eq!(image.format, 1, "Grey stays Grey");
+        assert_eq!(
+            (image.width, image.height),
+            (320, 256),
+            "step 2 for a 512-line sensor"
+        );
+        assert_eq!(image.data.len(), 320 * 256);
+        assert_eq!(
+            image.data[1], data[2],
+            "output pixel 1 samples source pixel 2"
+        );
+        assert_eq!(
+            image.data[320],
+            data[2 * 640],
+            "output row 1 samples source row 2"
+        );
+        // The GUI path still forwards it unchanged (no height bound there).
+        let local = preview_image_for_frame(&source);
+        assert_eq!((local.format, local.width, local.height), (1, 640, 512));
+    }
+
+    #[test]
+    fn test_rsh_remote_preview_bounds_wide_yuyv() {
+        let image = remote_preview_image_for_frame(&yuyv_frame(1280, 720));
+        assert_eq!((image.format, image.width, image.height), (0, 640, 360));
+        assert_eq!(image.data.len(), 640 * 360 * 3);
+        // Output pixel (1, 0) samples source pixel (2, 0): luma 2, neutral chroma.
+        assert_eq!(&image.data[3..6], &[2, 2, 2]);
+        let full_hd = remote_preview_image_for_frame(&yuyv_frame(1920, 1080));
+        assert_eq!(
+            (full_hd.format, full_hd.width, full_hd.height),
+            (0, 640, 360)
+        );
+        // An even-width YUYV frame within 640x480 is forwarded unchanged.
+        let vga = yuyv_frame(640, 480);
+        let image = remote_preview_image_for_frame(&vga);
+        assert_eq!((image.format, image.width, image.height), (2, 640, 480));
+        assert_eq!(image.data, vga.data);
+        // A 640-wide frame taller than 480 lines is bounded by height.
+        let tall = remote_preview_image_for_frame(&yuyv_frame(640, 960));
+        assert_eq!((tall.format, tall.width, tall.height), (0, 320, 480));
+    }
+
+    #[test]
+    fn test_rsh_remote_preview_converts_nv12() {
+        let mut nv12 = vec![77u8; 640 * 480];
+        nv12.extend(vec![128u8; 640 * 480 / 2]);
+        let image = remote_preview_image_for_frame(&frame(640, 480, PixelFormat::Nv12, nv12));
+        assert_eq!((image.format, image.width, image.height), (0, 640, 480));
+        assert_eq!(image.data.len(), 640 * 480 * 3);
+        assert!(
+            image.data.iter().all(|&b| b == 77),
+            "neutral chroma: grey 77"
+        );
+    }
+
+    #[test]
+    fn test_rsh_remote_preview_odd_width_yuyv_becomes_rgb() {
+        let source = yuyv_frame(321, 240);
+        let image = remote_preview_image_for_frame(&source);
+        assert_eq!(
+            image.format, 0,
+            "soos-remote refuses odd-width YUYV: RGB24 instead"
+        );
+        assert_eq!((image.width, image.height), (321, 240));
+        assert_eq!(image.data.len(), 321 * 240 * 3);
+        assert_eq!(
+            &image.data[3..6],
+            &[1, 1, 1],
+            "pixel 1: luma 1, neutral chroma"
+        );
+    }
+
+    #[test]
+    fn test_rsh_remote_preview_malformed_mjpeg_is_empty() {
+        for data in [
+            vec![0xFF, 0xD8, 0x00, 0x11, 0xFF, 0xD9],
+            vec![0xAB; 4096],
+            Vec::new(),
+        ] {
+            let image = remote_preview_image_for_frame(&frame(640, 480, PixelFormat::Mjpeg, data));
+            assert_eq!(image.format, PREVIEW_FORMAT_EMPTY);
+            assert!(image.data.is_empty());
+            assert_eq!((image.width, image.height), (0, 0));
+        }
+        // A valid JPEG whose size differs from the negotiated frame size is refused too.
+        let mut mismatched = mjpeg(320, 240, [1, 2, 3]);
+        mismatched.width = 640;
+        mismatched.height = 480;
+        let image = remote_preview_image_for_frame(&mismatched);
+        assert_eq!(image.format, PREVIEW_FORMAT_EMPTY);
+    }
+
+    #[test]
+    fn test_rsh_remote_preview_ir_stamp_is_grey() {
+        let source = with_sensor(yuyv_frame(640, 512), SensorType::Infrared);
+        let image = remote_preview_image_for_frame(&source);
+        assert_eq!(image.format, 1, "an IR-stamped frame is Grey");
+        assert_eq!(
+            (image.width, image.height),
+            (320, 256),
+            "and bounded to 640x480"
+        );
+        assert_eq!(image.data.len(), 81_920);
+        // Output pixel 1 samples source pixel 2, whose luma is 2.
+        assert_eq!(image.data[1], 2);
+        // An IR MJPEG frame is decoded, converted to luma and bounded.
+        let ir_mjpeg = with_sensor(mjpeg(640, 480, [90, 90, 90]), SensorType::Infrared);
+        let image = remote_preview_image_for_frame(&ir_mjpeg);
+        assert_eq!((image.format, image.width, image.height), (1, 640, 480));
+        assert!(image.data.iter().all(|&y| y.abs_diff(90) <= 8));
+        // An undecodable IR frame is the empty image.
+        let broken = with_sensor(
+            frame(640, 480, PixelFormat::Mjpeg, vec![0xAB; 64]),
+            SensorType::Infrared,
+        );
+        assert_eq!(
+            remote_preview_image_for_frame(&broken).format,
+            PREVIEW_FORMAT_EMPTY
+        );
+    }
+
+    #[test]
+    fn test_rsh_local_preview_unchanged_for_mjpeg() {
+        let source = mjpeg(640, 480, [200, 100, 50]);
+        let image = preview_image_for_frame(&source);
+        assert_eq!(
+            image.format, 4,
+            "the GUI path still forwards MJPEG compressed"
+        );
+        assert_eq!((image.width, image.height), (640, 480));
+        assert_eq!(image.data, source.data);
+    }
+
+    fn pixel_format() -> impl Strategy<Value = PixelFormat> {
+        prop_oneof![
+            Just(PixelFormat::Grey),
+            Just(PixelFormat::Rgb24),
+            Just(PixelFormat::Yuyv),
+            Just(PixelFormat::Nv12),
+            Just(PixelFormat::Mjpeg),
+        ]
+    }
+
+    fn sensor_type() -> impl Strategy<Value = SensorType> {
+        prop_oneof![
+            Just(SensorType::Rgb),
+            Just(SensorType::Infrared),
+            Just(SensorType::Unknown),
+        ]
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(64))]
+
+        #[test]
+        fn test_rsh_remote_preview_output_always_within_640x480(
+            format in pixel_format(),
+            width in 1u32..=1600,
+            height in 1u32..=1200,
+            sensor in sensor_type(),
+            truncate in any::<bool>(),
+            seed in any::<u8>(),
+        ) {
+            let pixels = (width * height) as usize;
+            let mut data = match format {
+                PixelFormat::Grey => vec![seed; pixels],
+                PixelFormat::Rgb24 => vec![seed; pixels * 3],
+                PixelFormat::Yuyv => vec![seed; pixels * 2],
+                PixelFormat::Nv12 => vec![seed; pixels + pixels / 2],
+                PixelFormat::Mjpeg => {
+                    let w = u16::try_from(width).unwrap();
+                    let h = u16::try_from(height).unwrap();
+                    mjpeg(w, h, [seed, seed / 2, 255 - seed]).data.clone()
+                }
+            };
+            if truncate {
+                data.truncate(data.len() / 2);
+            }
+            let source = with_sensor(frame(width, height, format, data), sensor);
+            let image = remote_preview_image_for_frame(&source);
+            assert_within_bounds(&image, &format!("{format:?} {width}x{height} {sensor:?}"));
+            if sensor == SensorType::Infrared && image.format != PREVIEW_FORMAT_EMPTY {
+                prop_assert_eq!(image.format, 1, "an IR-stamped frame is always Grey");
+            }
+        }
+    }
+}

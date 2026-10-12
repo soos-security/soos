@@ -476,6 +476,22 @@ async fn test_preview_frame_allowed_for_configured_uid_serves_frames() {
         format!("UID={current_uid}\nACTIVE=1\nSTATE=active\nREMOTE=0\nSEAT=seat0\nCLASS=user\n"),
     )
     .expect("session file");
+    // AM-SR2 (spec AI/architect_spec_remote_security_hardening.md §11.3, setup only): the
+    // peer is this test process, classified from the real `/proc/self/cgroup`; when it runs
+    // inside a session scope, that session's own record must exist under S-5.
+    if let Some(own_session) = std::fs::read_to_string("/proc/self/cgroup")
+        .ok()
+        .as_deref()
+        .and_then(soos_daemon::session_policy::parse_session_id_from_cgroup)
+    {
+        std::fs::write(
+            sessions_dir.join(own_session),
+            format!(
+                "UID={current_uid}\nACTIVE=1\nSTATE=active\nREMOTE=0\nSEAT=seat0\nCLASS=user\n"
+            ),
+        )
+        .expect("own session file");
+    }
     let (components, camera) = mock_pipeline(dir.path()).await;
     let health = Arc::new(HealthState::new());
     let dispatcher = Arc::new(

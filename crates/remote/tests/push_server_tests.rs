@@ -2265,3 +2265,337 @@ async fn test_rwp_acknowledge_never_changes_push() {
     assert_eq!(history[0]["first_unix_ms"], c1 / 1000);
     assert_eq!(v["unacknowledged_wrong_password"], 1);
 }
+
+// ---------------------------------------------------------------------------------------
+// soos-remote security hardening S-8c (ADR 2026-10-12, spec
+// AI/architect_spec_remote_security_hardening.md §9.3, §11.2; row RSH15): a renewal names
+// the endpoint it replaces (`replacesEndpoint`), removed atomically with the upsert; an
+// unparsable old endpoint is treated as absent. New tests only; nothing above is changed.
+// ---------------------------------------------------------------------------------------
+
+mod renewal {
+    use super::*;
+
+    /// `PushSubscription.toJSON()` of the renewed subscription plus `replacesEndpoint`.
+    fn renewal_body(endpoint: &str, ua: &UaFixture, replaces: &str) -> String {
+        format!(
+            "{{\"endpoint\":\"{endpoint}\",\"expirationTime\":null,\"keys\":{{\"p256dh\":\"{}\",\"auth\":\"{}\"}},\"replacesEndpoint\":{replaces}}}",
+            ua.p256dh_b64(),
+            ua.auth_b64()
+        )
+    }
+
+    fn quoted(endpoint: &str) -> String {
+        format!("\"{endpoint}\"")
+    }
+
+    fn stored_endpoints(env: &Env) -> Vec<String> {
+        PushStore::new(env.push_store(), own_uid())
+            .load()
+            .unwrap()
+            .unwrap()
+            .subscriptions
+            .iter()
+            .map(|s| s.endpoint.as_str().to_string())
+            .collect()
+    }
+
+    async fn renew(h: &Harness, endpoint: &str, ua: &UaFixture, replaces: &str) -> HttpResponse {
+        post_subscribe(h, renewal_body(endpoint, ua, replaces)).await
+    }
+
+    fn full_store() -> Vec<String> {
+        vec![
+            apple_endpoint(1),
+            mozilla_endpoint(2),
+            fcm_endpoint(3),
+            apple_endpoint(4),
+        ]
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_rsh_subscribe_with_replaces_endpoint_renews_in_place() {
+        let endpoints = full_store();
+        let (env, _j, t, h, _uas) = setup(&endpoints).await;
+        let renewed = UaFixture::new(42);
+        let new_endpoint = apple_endpoint(5);
+        assert_result(
+            &renew(&h, &new_endpoint, &renewed, &quoted(&endpoints[0])).await,
+            200,
+            "subscribed",
+        );
+        let stored = stored_endpoints(&env);
+        assert_eq!(stored.len(), MAX_PUSH_SUBSCRIPTIONS, "still four entries");
+        assert!(
+            !stored.contains(&endpoints[0]),
+            "the stale endpoint is gone"
+        );
+        assert!(
+            stored.contains(&new_endpoint),
+            "the renewed endpoint is stored"
+        );
+        for kept in &endpoints[1..] {
+            assert!(stored.contains(kept), "{kept} untouched");
+        }
+        let file = PushStore::new(env.push_store(), own_uid())
+            .load()
+            .unwrap()
+            .unwrap();
+        let entry = file
+            .subscriptions
+            .iter()
+            .find(|s| s.endpoint.as_str() == new_endpoint)
+            .unwrap();
+        assert!(
+            entry.keys.p256dh == renewed.ua_keys().p256dh,
+            "the new keys are stored"
+        );
+        assert_eq!(
+            fs::metadata(env.push_store()).unwrap().permissions().mode() & 0o7777,
+            0o600
+        );
+        assert_eq!(push_view(&h).await["subscriptions"], 4);
+        assert_eq!(t.count(), 0, "renewing sends nothing");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_rsh_replaces_endpoint_absent_from_store_is_plain_upsert() {
+        let endpoints = full_store();
+        let (env, _j, _t, h, _uas) = setup(&endpoints).await;
+        let before = fs::read(env.push_store()).unwrap();
+        assert_result(
+            &renew(
+                &h,
+                &apple_endpoint(5),
+                &UaFixture::new(7),
+                &quoted(&apple_endpoint(9)),
+            )
+            .await,
+            409,
+            "too_many_subscriptions",
+        );
+        assert_eq!(
+            fs::read(env.push_store()).unwrap(),
+            before,
+            "a refused renewal writes nothing"
+        );
+
+        // On a store with room, an absent old endpoint is a plain add (nothing removed).
+        let (env, _j, _t, h, _uas) = setup(&endpoints[..2]).await;
+        assert_result(
+            &renew(
+                &h,
+                &fcm_endpoint(6),
+                &UaFixture::new(8),
+                &quoted(&apple_endpoint(9)),
+            )
+            .await,
+            200,
+            "subscribed",
+        );
+        assert_eq!(
+            stored_endpoints(&env),
+            vec![endpoints[0].clone(), endpoints[1].clone(), fcm_endpoint(6)]
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_rsh_replaces_endpoint_equal_is_plain_upsert() {
+        let endpoints = full_store();
+        let (env, _j, _t, h, _uas) = setup(&endpoints).await;
+        let other = UaFixture::new(9);
+        assert_result(
+            &renew(&h, &endpoints[0], &other, &quoted(&endpoints[0])).await,
+            200,
+            "subscribed",
+        );
+        assert_eq!(
+            stored_endpoints(&env),
+            endpoints,
+            "same entries, same order"
+        );
+        let file = PushStore::new(env.push_store(), own_uid())
+            .load()
+            .unwrap()
+            .unwrap();
+        assert!(
+            file.subscriptions[0].keys.p256dh == other.ua_keys().p256dh,
+            "the keys are replaced in place"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_rsh_replaces_endpoint_invalid_is_plain_upsert() {
+        let endpoints = full_store();
+        let unparsable = [
+            quoted("https://evil.example/abc"),
+            quoted("http://web.push.apple.com/abc"),
+            quoted("https://web.push.apple.com/a?b"),
+            quoted("not a url"),
+            quoted(""),
+        ];
+        // Room in the store: the new subscription is stored, nothing removed.
+        let (env, _j, _t, h, _uas) = setup(&endpoints[..1]).await;
+        for (i, old) in unparsable.iter().enumerate() {
+            let new_endpoint = mozilla_endpoint(10 + i as u32);
+            let r = renew(&h, &new_endpoint, &UaFixture::new(20 + i as u8), old).await;
+            if i < 3 {
+                assert_result(&r, 200, "subscribed");
+                assert!(
+                    stored_endpoints(&env).contains(&new_endpoint),
+                    "{old}: the new subscription is kept"
+                );
+                assert!(
+                    stored_endpoints(&env).contains(&endpoints[0]),
+                    "{old}: nothing removed"
+                );
+            } else {
+                assert_result(&r, 409, "too_many_subscriptions");
+            }
+        }
+        assert_eq!(stored_endpoints(&env).len(), MAX_PUSH_SUBSCRIPTIONS);
+
+        // Full store without the old endpoint: 409, nothing written.
+        let (env, _j, _t, h, _uas) = setup(&endpoints).await;
+        let before = fs::read(env.push_store()).unwrap();
+        for old in &unparsable {
+            assert_result(
+                &renew(&h, &apple_endpoint(5), &UaFixture::new(30), old).await,
+                409,
+                "too_many_subscriptions",
+            );
+        }
+        assert_eq!(fs::read(env.push_store()).unwrap(), before);
+
+        // A non-string replacesEndpoint is a malformed body.
+        for old in ["42", "{\"a\":1}", "[]", "true"] {
+            assert_result(
+                &renew(&h, &endpoints[0], &UaFixture::new(31), old).await,
+                400,
+                "bad_request",
+            );
+        }
+        // The new endpoint keeps its validation, and the old one is then never removed.
+        assert_result(
+            &renew(
+                &h,
+                "https://push.example.com/abc",
+                &UaFixture::new(32),
+                &quoted(&endpoints[0]),
+            )
+            .await,
+            400,
+            "unsupported_push_service",
+        );
+        assert_result(
+            &renew(
+                &h,
+                "http://web.push.apple.com/abc",
+                &UaFixture::new(33),
+                &quoted(&endpoints[0]),
+            )
+            .await,
+            400,
+            "bad_request",
+        );
+        let bad_keys = renewal_body(
+            &apple_endpoint(5),
+            &UaFixture::new(34),
+            &quoted(&endpoints[0]),
+        )
+        .replace(&UaFixture::new(34).auth_b64(), "AAAA");
+        assert_result(&post_subscribe(&h, bad_keys).await, 400, "bad_request");
+        assert_eq!(
+            fs::read(env.push_store()).unwrap(),
+            before,
+            "nothing written"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_rsh_subscribe_without_replaces_endpoint_unchanged() {
+        let endpoints = full_store();
+        let (env, _j, _t, h, _uas) = setup(&endpoints[..3]).await;
+        assert_result(
+            &subscribe(&h, &endpoints[3], &ua_keys()).await,
+            200,
+            "subscribed",
+        );
+        gap(&h).await;
+        assert_eq!(stored_endpoints(&env), endpoints);
+        let before = fs::read(env.push_store()).unwrap();
+        assert_result(
+            &subscribe(&h, &apple_endpoint(5), &ua_keys()).await,
+            409,
+            "too_many_subscriptions",
+        );
+        assert_eq!(fs::read(env.push_store()).unwrap(), before);
+        gap(&h).await;
+        // A body over the bound is still refused before parsing.
+        let base = renewal_body(&apple_endpoint(5), &ua_keys(), &quoted(&endpoints[0]));
+        let over = format!(
+            "{base}{}",
+            " ".repeat(MAX_PUSH_SUBSCRIBE_BODY_BYTES + 1 - base.len())
+        );
+        assert_result(&post_subscribe(&h, over).await, 413, "body_too_large");
+        assert_eq!(stored_endpoints(&env), endpoints);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_rsh_renewal_audit_lines() {
+        let (capture, _guard) = capture_logs();
+        let endpoints = full_store();
+        let (_env, _j, _t, h, _uas) = setup(&endpoints[..2]).await;
+        let added = count_lines(&capture.text(), "push subscription added");
+        assert_eq!(added, 2);
+
+        // Renewed: one removed and one added line.
+        assert_result(
+            &renew(
+                &h,
+                &fcm_endpoint(3),
+                &UaFixture::new(5),
+                &quoted(&endpoints[0]),
+            )
+            .await,
+            200,
+            "subscribed",
+        );
+        let text = capture.text();
+        assert_eq!(count_lines(&text, "push subscription removed"), 1, "{text}");
+        assert_eq!(count_lines(&text, "push subscription added"), 3, "{text}");
+
+        // Equal endpoints: keys replaced, no audit line.
+        assert_result(
+            &renew(
+                &h,
+                &fcm_endpoint(3),
+                &UaFixture::new(6),
+                &quoted(&fcm_endpoint(3)),
+            )
+            .await,
+            200,
+            "subscribed",
+        );
+        // Absent old endpoint: added only.
+        assert_result(
+            &renew(
+                &h,
+                &apple_endpoint(4),
+                &UaFixture::new(7),
+                &quoted(&apple_endpoint(9)),
+            )
+            .await,
+            200,
+            "subscribed",
+        );
+        let text = capture.text();
+        assert_eq!(count_lines(&text, "push subscription removed"), 1, "{text}");
+        assert_eq!(count_lines(&text, "push subscription added"), 4, "{text}");
+        assert_audit_lines(&text, "push subscription added", "INFO");
+        assert_audit_lines(&text, "push subscription removed", "INFO");
+        for secret in [endpoint_token(&endpoints[0]), UaFixture::new(5).auth_b64()] {
+            assert!(!text.contains(&secret), "no endpoint or key in the logs");
+        }
+    }
+}

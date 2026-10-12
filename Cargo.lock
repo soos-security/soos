@@ -3593,6 +3593,7 @@ name = "soos-daemon"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "jpeg-encoder",
  "libc",
  "nix",
  "ort",
