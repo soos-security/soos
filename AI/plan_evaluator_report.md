@@ -2,128 +2,116 @@
 
 - **Date**: 2026-10-12
 - **Issue**: GitHub-only security review of 2026-10-12 (S-1 … S-8d), no backlog id — soos-remote Security Hardening
-- **Spec**: `AI/architect_spec_remote_security_hardening.md` (round 1, commit `1702291`)
+- **Spec**: `AI/architect_spec_remote_security_hardening.md` (round 2, commit `d91582b`)
 - **Branch**: `fix/remote-security-hardening`
 - **Base commit**: `f9234ea` (`origin/main`)
-- **Round**: 1
+- **Round**: 2 (round 1 `f5058b6`: REVISION_REQUIRED, PE-SR1 MAJOR, PE-SR2 to PE-SR7 MINOR/observations)
 
 ## 1. Coverage Matrix
 
 | Finding / acceptance line | Spec element | Status |
 |---|---|---|
-| S-1 sender reads the system journal; add `InaccessiblePaths=`; correct docs; CM-SR1 on test 45 | §2.1–§2.4, §11.3 CM-SR1, RSH1/RSH2/RSH18-1 | Covered |
-| S-2 raise documented Tailscale minimum; installer warns/refuses (best effort, never breaks without tailscale) | §3 (`TAILSCALE_MIN_VERIFIED_VERSION` = 1.102.4, docs, installer **prints** only) | Covered; "refuse" credibly refuted (RMC-S6 forbids any non-`echo`/`printf` line naming `tailscale`, verified in `tests/invariants/src/remote_companion_contract.rs:735`) |
-| S-3 face auth not starved by preview connections, per-UID DoS bound kept | §4 auth-reserved permit + companion graceful close on retry | Covered, see PE-SR2, PE-SR3 |
+| S-1 sender reads the system journal; `InaccessiblePaths=`; correct docs; CM-SR1 on test 45 | §1.1 (host reproduction, journal 1 → 0 lines, DNS ok), §2.1–§2.4, §11.3 CM-SR1, RSH1/RSH2/RSH18-1 | Covered |
+| S-2 raise documented Tailscale minimum; installer warns/refuses; absent tailscale never breaks install; agents never run tailscale | §3: `TAILSCALE_MIN_VERIFIED_VERSION = "1.102.4"`, docs §2b/§2/§4/§8, installer prints (two `echo` lines) | Covered. "Refuse"/"parse `tailscale version`" credibly refuted: RMC-S6 (`tests/invariants/src/remote_companion_contract.rs:735-790`) rejects any non-`echo`/`printf` line containing the word `tailscale`; an exemption would relax it |
+| S-3 face auth not starved by preview connections, per-UID DoS bound kept | §4: one auth-reserved permit per unprivileged UID (cap + 1), whole first frame within 200 ms, `Auth` only, companion graceful close on retry | Covered (round-1 PE-SR2/PE-SR3 resolved) |
 | S-4 Android lock-screen privacy + `push_previews = "generic"` | §5 | Covered |
-| S-5 preview only for processes inside a local seat session, soos-gui / soos-remote keep working | §6 `PeerPlacement`, `authorize_preview_placement`, 6c-2a | Covered |
-| S-6 CORP, COOP, Permissions-Policy, HSTS; CSP byte-identical | §7 `HARDENING_HEADERS` | Covered |
-| S-7 sender fails closed (78) unless sandbox detected; robust, testable probes | §8 `evaluate_sandbox` / `probe_sandbox` | **Covered but conflicts with an existing contract — PE-SR1** |
-| S-8a dangling symlink followed by the installer | §9.1 `-L` refusal + `set -C` | Covered |
-| S-8b JPEG sent after a stop | §9.2 re-check after `mark_streaming` | Covered |
-| S-8c stale subscription slot on renewal | §9.3 `replacesEndpoint` + `replace_or_upsert` | Covered, see PE-SR4 |
-| S-8d MJPEG / NV12 / >480 px refused by the companion | §9.4 daemon-side `remote_preview_image_for_frame` | Covered |
-| Zero test weakening; only CM-SR1 owner-approved; other changes AM-SRn | §11.3 CM-SR1, AM-SR1, AM-SR2 (setup only, additive) | Covered, but the exhaustive list missed RMC-S34 (PE-SR1) |
-| Daemon changes keep fail-closed PAM behaviour | §4.3, §10 | Covered (reserve refusals close unanswered → PAM `PAM_IGNORE`; root path untouched) |
+| S-5 preview only for processes inside a local seat session; soos-gui and soos-remote keep working | §6: `PeerPlacement`, `classify_peer_placement`, `authorize_preview_placement` (step 6c-2a, per request) | Covered; see PE-SR11 (docs) |
+| S-6 CORP, COOP, Permissions-Policy, HSTS; CSP byte-identical | §7 `HARDENING_HEADERS` appended in the three head encoders | Covered |
+| S-7 sender fails closed (78) unless the sandbox is detected; robust, testable probes | §8: `home_from_exe` (binary path, no environment), `evaluate_sandbox` (pure), `probe_sandbox`, call before `XDG_RUNTIME_DIR`/bind | Covered (round-1 PE-SR1 resolved); see PE-SR9 |
+| S-8a dangling symlink followed by the installer | §9.1 `-L` refusal + `(set -C; cat > …)` | Covered |
+| S-8b JPEG sent after a stop | §9.2 check after `mark_streaming` and a second one after the head (PE-SR5) | Covered |
+| S-8c stale subscription slot on renewal | §9.3 `replacesEndpoint`, `replace_or_upsert`, invalid old endpoint = plain upsert | Covered; see PE-SR10 |
+| S-8d MJPEG / NV12 / > 480 px | §9.4 daemon-side `remote_preview_image_for_frame` for the remote origin only | Covered; see PE-SR8 |
+| Zero test weakening: only CM-SR1 owner-approved; anything else additive and recorded as AM-SRn | §11.3 CM-SR1 (37 → 38, one line inserted), AM-SR1, AM-SR2 (setup only); RMC-S34/S41/S42 listed as compatible unchanged | Covered (verified below) |
+| Daemon changes keep fail-closed PAM behaviour | §4.3, §10, §13.3 | Covered: every reserve refusal closes unanswered → PAM read error → `PAM_IGNORE`; root path, `crates/pam` and the wire format unchanged |
+
+### Round-1 items
+
+| Item | Resolution verified |
+|---|---|
+| PE-SR1 MAJOR (RMC-S34) | Resolved. The only environment read stays `std::env::var_os("XDG_RUNTIME_DIR")` (`crates/push-sender/src/main.rs:26`, the only `env::var*` hit in `crates/push-sender/src`); the anchor comes from `current_exe()` (Linux: `read_link("/proc/self/exe")`, no environment, no NSS) matched component-wise against `.local/bin/soos-push-sender`, consistent with the unit's `ExecStart=%h/.local/bin/soos-push-sender` and `BindReadOnlyPaths=` of the same path. A `" (deleted)"` suffix or another location fails closed (78). New static test `test_rsh_s7_sender_reads_no_other_environment_variable` is strictly stronger than RMC-S34. RMC-S41 forbidden names (`VapidKey`, `p256`, `hmac`, `remote.toml`, …) are not needed by the probe. |
+| PE-SR2 | Resolved: wording corrected, residual §13.3, docs, `test_rsh_reserve_auth_after_100ms_is_answered`. |
+| PE-SR3 | Resolved: `timeout(200 ms, read_client_frame)` covers prefix and body; `.readable()` banned statically; partial-frame test added. |
+| PE-SR4 | Resolved: unparsable `replacesEndpoint` = absent. |
+| PE-SR5 | Resolved: second check after the head, before `set_shown`/`write_part`; static pin. |
+| PE-SR6 / PE-SR7 | Resolved: static assertions (decode only in `handle_preview_request`, outside the limiter guard; constant ≤ 250 ms and not configurable). |
 
 ## 2. Facts Verified Against Code
 
 | Fact cited by plan | Code location | Actual value | Match |
 |---|---|---|---|
-| `DEFAULT_MAX_CONNECTIONS_PER_UID` = 2 | `crates/daemon/src/limits.rs:23` | 2 | Yes |
-| Admission before any read | `crates/daemon/src/dispatcher.rs:424` (`try_acquire`, then `ConcurrencyLimitReached`, no byte written) | as cited | Yes |
-| `has_local_seat_session(peer_uid)` only for preview | `dispatcher.rs:1192` | as cited | Yes |
-| `with_session_validator` also rebuilds `session_policy` | `dispatcher.rs:323-324` | `LocalSessionPolicy::from_validator` | Yes (so `test_rlc_default_peer_source_reads_proc_cgroup`, which disables the validator for both `enforce` values, stays green) |
-| `authorize_user_manager_caller` rule (remote/UID-less record refuses, local seat needed) | `session_policy.rs:589-621` | as cited | Yes |
-| `parse_session_id_from_cgroup` first-unit rule (nested `session-*.scope` under the manager is not a session) | `session_policy.rs:279` | as cited | Yes |
-| Owner host records: manager session `REMOTE=0`, seat session `REMOTE=0` | `/run/systemd/sessions/{1,4}` (read-only check) | `CLASS=manager REMOTE=0`, `CLASS=user REMOTE=0 SEAT=seat0` | User-manager rule passes on the owner host |
-| Agent test process placement | `/proc/self/cgroup` | `user@1000.service/session.slice/tmux-spawn-….scope` → `UserManager` | AM-SR2 harmless here; needed under a TTY session scope |
-| `local_cgroup(uid)` = `session-4.scope`; first scenario writes only record `"3"` | `crates/daemon/tests/preview_remote_view_tests.rs:142,1088` | as cited | Yes (AM-SR1 justified) |
-| `test_rlc_preview_requires_local_seat_session` writes record `"4"` | same file `:884` | `"4"` | Yes (unchanged test stays valid) |
-| `CLOSE_DEADLINE` of the over-cap tests | `peer_limits_tests.rs:58`, `preview_remote_view_tests.rs:74` | 500 ms | 200 ms window fits (300 ms margin) |
-| Permit dropped before the stream on a reserve refusal | `handle_connection(&self, mut stream)`: locals (`_permit`) drop before the by-value parameter | as cited | Yes, keeps `available_permits()` assertions of `test_same_uid_connection_over_cap_is_closed_without_blocking_others` exact |
-| "PAM writes its request right after `connect`" (§4.1, §4.3) | `crates/pam/src/ipc.rs:514-534`, `crates/pam/src/lib.rs:302-307` | `on_connected()` runs between connect and write and sends `PAM_TEXT_INFO` through the PAM conversation | **No — PE-SR2** |
-| Camera retry path `drop(conn)` | `crates/remote/src/camera_ipc.rs:178-181` | `drop(conn); conn = self.connect().await?` | Yes |
-| `SENDER_UNIT_LINES: [&str; 37]`, forbidden prefixes | `tests/invariants/src/remote_push_contract.rs:452-525` | 37; no forbidden prefix matches `InaccessiblePaths=` | Yes |
-| Sender env reads | `remote_push_contract.rs:429-439` (RMC-S34) | every `env::var(`/`env::var_os(`/`std::env::vars` must read `"XDG_RUNTIME_DIR"` | **Spec §8.1 reads `$HOME` — PE-SR1** |
-| Sender tracing hygiene (one string literal) | `remote_push_contract.rs:580-588` (RMC-S36) | as cited | Spec complies |
-| Docs `Tailscale 1.38.3` | `Docs/REMOTE_COMPANION.md:177` | as cited; no test pins `1.38.3` | Yes |
-| RMC-S6 installer rule | `remote_companion_contract.rs:735-790` | `tailscale` only in `echo`/`printf` lines | Yes |
-| `MANDATORY_HEADERS` pinned byte-for-byte; one CSP | `remote_camera_contract.rs:740-762` | as cited | Yes; `assert_mandatory_headers` checks only named headers, no header-count assertion exists |
-| `--http` refused (HSTS rationale) | `crates/remote/src/identity.rs:111-160` (`X-Forwarded-Proto` must be `https`) | as cited | Yes |
-| `mark_streaming` keeps the stop flag; `first_frame` biased `select!` | `camera_slot.rs:286`, `camera.rs:487-560` | stop checked at loop top and before `step`; a stop raised inside the producing poll is missed | Yes (S-8b window real; the planned test seam can fail without the fix) |
-| `SubscribeBody` `deny_unknown_fields`, camelCase | `crates/remote/src/push.rs:1124-1132` | as cited | Yes |
-| RAN-S2 worker assertions | `remote_android_contract.rs:559-693` | listener must contain `renewedSubscription(event)` and `postSubscription(`, end with terminal `.catch(() => null)`; one `fetch(`; `postSubscription` unchanged | Spec §9.3 complies |
-| `MAX_PUSH_SUBSCRIPTIONS` 4, `MAX_PUSH_SUBSCRIBE_BODY_BYTES` 2048 | `crates/remote/src/lib.rs:377,383` | 4 / 2048 | Yes |
-| `push_previews` default `Detailed` | `crates/remote/src/config.rs:152,539` | as cited | Yes |
-| Daemon MJPEG forwarded unchanged at any size; existing bounded `downscale` handles NV12 and MJPEG | `crates/daemon/src/preview_image.rs:84-110,173-262`; `crates/vision/src/color.rs:228` (size/dimension caps, header must match frame) | as cited | Yes |
-| `jpeg-encoder =0.7.1` workspace dep; RLC-S1 feature check uses `-e normal` | `Cargo.toml:84`, `remote_camera_contract.rs:100-140` | a daemon **dev**-dependency is outside the checked edges | Yes |
-| Highest walkthrough 193 | `AI/walkthroughs/` | (spec claim; not contradicted) | Yes |
+| Unit `ExecStart=%h/.local/bin/soos-push-sender`, `BindReadOnlyPaths=` same path, `TemporaryFileSystem=/run:ro`, `ProtectHome=tmpfs` | `packaging/soos-push-sender.service` | as cited | Yes |
+| `SENDER_UNIT_LINES: [&str; 37]`; forbidden prefixes | `tests/invariants/src/remote_push_contract.rs:452-525` | 37; `InaccessiblePaths=` matches no forbidden prefix (`ReadOnlyPaths=`, `BindPaths=` are prefix-anchored) | Yes |
+| RMC-S34 reader rule | `remote_push_contract.rs:429-439` | every `env::var(`/`env::var_os(`/`std::env::vars` must be followed by `"XDG_RUNTIME_DIR")` | Spec complies |
+| RMC-S36 one-literal tracing | `remote_push_contract.rs:550-590` | as cited | Spec §8.3 complies (one constant string) |
+| `thiserror` available to the sender | `crates/push-sender/Cargo.toml` | dependency present | Yes |
+| `try_acquire` order Global → ReservedForPrivileged → PerUidCap; `max_connections_per_uid >= 1` | `crates/daemon/src/limits.rs:201-224, 99-101` | as cited | Yes (a `PerUidCap` rejection implies the global and unprivileged checks passed) |
+| Every `Auth` is one-shot, including error answers | `dispatcher.rs:572` (`one_shot = req.kind == RequestKind::Auth`) | as cited | Yes, so a reserve connection serves at most one request |
+| Inner reserve timeout returns `Err(Timeout)` through `Ok(Err(e)) => return Err(e)` | `dispatcher.rs:461-482` | closes without writing | Yes |
+| Permit dropped before the stream | `handle_connection(&self, mut stream)`, local `_permit` | locals drop before the by-value parameter | Yes: `test_same_uid_connection_over_cap_is_closed_without_blocking_others` (`available_permits() == 6` after the reserve refusal) and `test_idle_polling_peer_cannot_exhaust_global_capacity` (refused = 6) stay exact |
+| `test_rlc_view_connection_leaves_room_for_auth` third connection | `preview_remote_view_tests.rs:1167-1193` | silent third connection is now closed by the 200 ms window, within the 500 ms `closed_promptly`; later fresh `Auth` still admitted | Compatible unchanged |
+| `authorize_user_manager_caller` rule | `session_policy.rs:589-621` | UID-less or non-`REMOTE=0` record → refuse; a local seat record required | Yes (factoring as a shared helper is behaviour-preserving) |
+| Tests using an enforced session validator for preview | `preview_remote_view_tests.rs:812, 885, 1093, 1116`; `preview_authorization_tests.rs:456, 483` | others use `enforce_active_session: false` (disabled policy) | AM-SR1 covers line 1093 (record `"3"`, cgroup `session-4.scope`); line 1116 (user manager, record `"3"` local) passes unchanged; line 885 uses record `"4"`; `:483` covered by AM-SR2 |
+| Agent test process placement | `/proc/self/cgroup` | `user@1000.service/session.slice/tmux-spawn-….scope` → `UserManager` | AM-SR2 harmless here |
+| `parse_session_id_from_cgroup` first-unit rule | `session_policy.rs:249-290` | first unit component | Yes (nested `session-*.scope` under the manager = `UserManager`) |
+| Head encoders; no other `HTTP/1.1` literal | `crates/remote/src/http.rs:263-316` | three encoders interpolate `{MANDATORY_HEADERS}`; no other response-head source in `crates/remote/src` | Yes: HSTS/COOP/CORP reach every response |
+| S-8b seam and helpers | `server.rs:2341-2420`, `camera.rs:249, 271, 312, 676-689`, `camera_first_frame_refusal` `server.rs:2443` | `Stopped` → `audit_refused`, `None` | Yes |
+| RAN-S2 worker assertions | `remote_android_contract.rs:559-693` | listener needs `renewedSubscription(event)`, `postSubscription(`, terminal `.catch(() => null)`; one `fetch(`; `postSubscription` body unchanged | Spec §9.3 complies (`renewalPayload` returns an object whose `toJSON()` is used unchanged) |
+| Installer template write | `scripts/install_remote.sh:72-77` | `[[ ! -e … ]]` + `cat >`; no invariant pins the `cat >` text | Yes, §9.1 change is safe for existing tests |
+| IR stamp recursion | `crates/daemon/src/preview_image.rs:84-110` | an IR non-Grey frame is converted to Grey and recursed into `preview_image_for_frame` (forwarded unchanged when ≤ 640 wide, any height) | Relevant to PE-SR8 |
+| Highest walkthrough | `AI/walkthroughs/193_remote_android.md` | 193 | Yes (194 is next) |
 
 ## 3. Pillar Analysis
 
 ### Pillar 1 — Architecture & threat model
-- Scenario: an SSH-only process of the owner asks for preview frames while the owner also has a local session. Under the plan it sits in `session-N.scope` with `REMOTE=1` (→ `Session`, refused), or reaches `user@uid.service` through `systemd-run --user` (→ `UserManager`, refused while the SSH record exists). Only a root-placed process (`Other`) keeps the UID-level rule; that requires root help. Residual stated in §13.4.
-- Scenario: soos-gui under the owner's TTY-launched compositor (`session-4.scope`, local) → served; soos-remote (`user@1000.service`, records all `REMOTE=0`) → served. Verified against the host records.
-- Scenario: compromised sender reads `/var/log/journal` via `adm`/`wheel` ACL. Blocked by `InaccessiblePaths=` (host-verified per §1.1); `/run/log/journal` already hidden by `TemporaryFileSystem=/run:ro`.
-- Result: PASS.
+- Scenario: an SSH-only process of the owner asks for frames directly → `Session(id)` with `REMOTE=1` → refused; through `systemd-run --user` → `UserManager` → refused while the SSH record exists. Through the `soos-remote` socket with forged `Tailscale-User-Login` (same-UID boundary accepted by ADR 2026-10-06): the companion itself is `UserManager` and is refused while that SSH session exists, so the bypass is closed by the same rule. Moving its own process into the local `session-N.scope` needs write access to root-owned `cgroup.procs` of the common ancestor (`user-<uid>.slice`): not possible.
+- Scenario: compromised sender reads `/var/log/journal` via the `wheel`/`adm` ACL → hidden by `InaccessiblePaths=`; `/run/log/journal` and the journald sockets are already under the `/run` tmpfs.
+- Result: PASS (docs observation PE-SR11).
 
 ### Pillar 2 — PAM deadline & concurrency
-- No change in `crates/pam`; no Tokio in PAM. The reserve adds a daemon-side readiness wait only on the reserve path.
-- Scenario: user-level lock screen (swaylock-plugin, unprivileged) while soos-gui and the phone view hold both regular permits. PAM connects (reserve admitted), then calls `on_connected` → `PAM_TEXT_INFO` through the conversation, then writes. If the conversation takes ≥ 200 ms, the reserve closes the connection unanswered → PAM read fails → `PAM_IGNORE` → password. Fail-safe, but the plan's latency claim is wrong (PE-SR2).
-- Scenario: a same-UID process sends 1 byte on the reserve and stalls: readiness is satisfied, then `read_exact` waits up to `connection_timeout` (default 2500 ms, max 10 000 ms), holding the only reserve (PE-SR3).
-- Result: FINDING (MINOR ×2).
+- `crates/pam` untouched; no Tokio added to PAM. Root peers use the unchanged path.
+- Scenario: user-level lock screen while the view and soos-gui hold both regular permits → reserve admitted → `on_connected` conversation < 200 ms → `Auth` served; ≥ 200 ms → closed unanswered → `PAM_IGNORE` (password). Documented residual, tested at 100 ms.
+- Scenario: a same-UID process holds the reserve with a partial frame → closed after 200 ms, permit released (test added). Bound per UID: `max_connections_per_uid + 1`, inside the unchanged global/unprivileged capacity.
+- Result: PASS.
 
 ### Pillar 3 — Panic safety & fail-closed
-- Every new refusal (reserve non-`Auth`, reserve timeout, placement denial, sandbox not detected, invalid `replacesEndpoint`) ends in a closed connection, a `ProtocolError`/`UidMismatch` preview refusal, exit 78, or `400` — none produces an allow or `PAM_SUCCESS`. Logind read errors map to `LogindUnavailable` (deny). No `unwrap`/`expect` introduced by the spec.
-- Scenario: placement re-check per request when the session turns remote mid-connection → second request refused (`test_rsh_placement_rechecked_per_request`).
+- Every new refusal (reserve non-`Auth`, reserve timeout, placement denial, logind read error → `LogindUnavailable`, sandbox not detected → 78, unparsable new endpoint → `400`) ends closed/denied; none produces an allow or `PAM_SUCCESS`. The `Other` placement keeps today's UID-level rule (not a new allow).
+- Scenario: the sender binary is replaced while running and later restarted by `Restart=on-failure` → the new binary is at the expected path → probe passes; a `" (deleted)"` path at start → 78 (fail closed, `RestartPreventExitStatus=78`).
 - Result: PASS.
 
 ### Pillar 4 — Dependencies
-- No new runtime crate; daemon gains a dev-dependency on the already-pinned `jpeg-encoder =0.7.1` (normal-edge feature check RLC-S1/B1 unaffected; `deny.toml` IJG exception is crate-scoped and already present). `soos-remote` stays decoder-free (RLC-S10).
+- No new runtime crate; the daemon dev-dependency `jpeg-encoder` is already pinned and outside the RLC-S1 normal-edge check; the sender keeps `nix`/`thiserror`, adds no NSS lookup. `soos-remote` stays decoder-free (RLC-S10).
 - Result: PASS.
 
 ### Pillar 5 — Data confidentiality
-- New log lines carry `peer_uid` and constant strings only; sender keeps one-literal tracing (RMC-S36). Decoded MJPEG buffers stay in the existing `Zeroizing` path. `replacesEndpoint` is never logged (push modules have no tracing, RMC-S37).
-- Scenario: the S-7 probe reads the environment to find `$HOME` — this is a confidentiality-hardening contract of the sender (RMC-S34: the sender reads no environment variable except `XDG_RUNTIME_DIR`), which the plan would break (PE-SR1).
-- Result: FINDING (MAJOR, via Pillar 6).
+- New log lines: `peer_uid` and constant strings only; the sender logs one constant line on refusal and no path. `replacesEndpoint` is never logged (push modules have no tracing, RMC-S37). Decoded MJPEG buffers stay in the existing zeroizing path.
+- Scenario: a drop-in that **adds** `BindPaths=%h` (or a bind under `/run`) while keeping the hiding directives leaves the sandbox self-check green (it checks the presence of the tmpfs mounts, not what is mounted on top). See PE-SR9 (recommendation; the review asked about removed directives, which the plan covers).
+- Result: PASS with observation.
 
 ### Pillar 6 — Test integrity
-- CM-SR1 is exactly the owner-approved additive change (37 → 38, one line inserted, forbidden list unchanged).
-- AM-SR1 / AM-SR2 are setup-only additions; assertions untouched; justified by the new placement rule. Verified the other preview tests either use record `"4"` with `session-4.scope`, a `remote_cgroup` (user manager, no remote record) or a disabled validator.
-- `test_same_uid_connection_over_cap_is_closed_without_blocking_others`, `test_idle_polling_peer_cannot_exhaust_global_capacity`, `test_rlc_view_connection_leaves_room_for_auth`: still valid (non-`Auth` closed after decode with zero bytes; idle third connection closed after 200 ms < 500 ms; permit released before the stream closes).
-- **Missed contract**: RMC-S34 (`test_rmc_s34_sender_policy_literals`) fails against §8.1 as written; it is not in §11.3 and cannot be amended (it would relax an assertion). PE-SR1.
-- Test power: the S-8b seam (stop raised inside the producing poll) fails without the fix because `first_frame` polls `stop_rx` before `step` in the same `select!`; the sandbox tests include exact option matching and component-wise prefixes (`/home2`); the hardening-header test pins exact values. Missing power: no test for a partial first frame on the reserve (PE-SR3) and none for a delayed-but-valid `Auth` on the reserve (PE-SR2).
-- Result: FINDING (MAJOR).
+- CM-SR1 is exactly the owner-approved additive change; the forbidden list is unchanged. AM-SR1/AM-SR2 add only session-record setup; assertions untouched; both justified by the new placement rule. No other existing test needs a change (checked: RMC-S6, RMC-S34, RMC-S36, RMC-S41, RMC-S42, RAN-S2, RLC-S6, the over-cap and room-for-auth tests, the enforced-validator preview tests).
+- Test power: S-3 tests fail on today's code (`PerUidCap`); a reserve accepting any request fails `test_rsh_reserve_closes_non_auth_without_payload`; a once-per-connection placement check fails `test_rsh_placement_rechecked_per_request`; a `str::ends_with` home anchor fails the `x.local/bin` case; a substring `ro` match fails the option test; `/home2` guards the prefix test. Gap: the IR path of the remote conversion (PE-SR8).
+- Result: PASS with one MINOR test-power gap.
 
 ## 4. Findings
 
-- **PE-SR1 [MAJOR] S-7 probe reads `$HOME` from the environment, which breaks RMC-S34.**
-  `tests/invariants/src/remote_push_contract.rs:429-439` requires every `env::var(`, `env::var_os(` and `std::env::vars` in `crates/push-sender/src` to read exactly `"XDG_RUNTIME_DIR"`. §8.1 `probe_sandbox` takes "$HOME from the environment", so RMC-S34 would fail, and §11.3 does not list it (and must not: relaxing it is forbidden).
-  *Required plan change*: obtain the home anchor without the environment and without textual circumvention (never `std::env::home_dir()`), e.g. the passwd entry of `getuid()` (`nix::unistd::User::from_uid`, adding the `user` feature to the sender's `nix` if missing, re-checked against `deny.toml`), or the parent chain of `std::env::current_exe()` (the unit's `BindReadOnlyPaths=%h/.local/bin/soos-push-sender`); state which, and what happens when the anchor is unavailable (fail closed, exit 78). Rename/redefine `SandboxError::HomeUnset` and `test_rsh_sandbox_relative_or_empty_home_refused` accordingly, add RMC-S34 to the "checked compatible without change" list, and add a static RSH assertion that the sender still reads no environment variable other than `XDG_RUNTIME_DIR`. Also state the behaviour for a home outside `/home` (e.g. `/var/home` on image-based distributions where `ProtectHome=tmpfs` covers `/home`): either covered by rule 2 or a documented refusal.
+- **PE-SR8 [MINOR] S-8d: the remote conversion must bound IR-stamped frames, and no planned test proves it.**
+  `preview_image_for_frame` converts an IR non-Grey frame to Grey and **recurses into itself** (`preview_image.rs:84-98`), which forwards a ≤ 640-wide Grey frame of any height unchanged. If `remote_preview_image_for_frame` reuses that IR branch as-is, a 640x512 YUYV IR sensor (the exact device class of S-8d) still reaches `soos-remote` as 640x512 Grey and ends after 10 bad frames. §9.4 says "the IR rule first (greyscale), then …", which is ambiguous.
+  *Required (tester/developer, no spec round needed)*: the IR branch of the remote function recurses into `remote_preview_image_for_frame` (or applies `downscale_within(.., Some(480))` to the luma frame); `test_rsh_remote_preview_ir_stamp_is_grey` uses a 640x512 YUYV `SensorType::Infrared` frame and asserts 320x256 Grey; the proptest `test_rsh_remote_preview_output_always_within_640x480` also varies `sensor_type`.
 
-- **PE-SR2 [MINOR] The 200 ms reserve window rests on a false fact.**
-  §4.1/§4.3 say "PAM writes its request right after `connect`". In `crates/pam/src/ipc.rs:514-534` the `on_connected` callback runs between connect and write, and `crates/pam/src/lib.rs:302-307` sends `PAM_TEXT_INFO` ("[soos] Looking for face...") through the application's conversation there. A slow conversation (≥ 200 ms) makes the reserve close an honest `Auth` (fail-safe password fallback, i.e. S-3 not fixed for that lock screen).
-  *Required plan change*: correct the wording; record the dependency on the conversation latency in §13 and in `Docs/IPC_PROTOCOL.md`/`Docs/REMOTE_COMPANION.md` §2f; add a behaviour test where the reserve client writes a valid `Auth` after ~100 ms and is answered. (Moving `on_connected` after the write would touch the PAM path; if chosen, it needs its own justification and PAM tests — not required here.)
+- **PE-SR9 [MINOR, recommended] S-7 detects removed directives but not re-exposure on top of them.**
+  Rules 1–2 only require that a read-only tmpfs exists at `/run` and over the home; a drop-in adding `BindPaths=%h` (or `BindReadOnlyPaths=/run/dbus`) keeps both true. Rule 3 is a direct probe and is robust. *Suggested*: add a direct check of the home anchor's content (`read_dir(home)` lists only `.local`, `.local` only `bin`, `bin` only `soos-push-sender`, bounded to a few entries, any error = refuse), or record this explicitly in §13.6 and in the §2d *Limits* text. Not blocking: the review's scenarios (manual run, drop-in removing directives) are covered.
 
-- **PE-SR3 [MINOR] The reserve window bounds only readiness, not the first frame.**
-  `stream.readable()` returns after one byte; `read_and_process` then waits for the rest under `connection_timeout` (default 2500 ms, up to `MAX_CONNECTION_TIMEOUT_MS` 10 000 ms). A same-UID process can hold the only reserve for seconds per attempt, so §13.3 ("≤ 200 ms at a time") is inaccurate.
-  *Required plan change*: on the reserve, bound reading the whole first frame (4-byte length + body) by the 200 ms window (e.g. a `timeout` around a reserve-specific first read, then hand the decoded message to the normal path), or restate the residual with the real bound. Add `test_rsh_reserve_partial_frame_closed_within_window` (1 byte then stall → closed within 500 ms, zero bytes, permit released).
+- **PE-SR10 [MINOR, observation] S-8c depends on `event.oldSubscription`, which some browsers leave `null`.**
+  When the event carries no old subscription, `renewalPayload` falls back to today's request and the stale slot remains until a 404/410. *Suggested*: add this case to residual §13.7 and to the Android/iPhone docs note on `soos-remote push remove`; no design change.
 
-- **PE-SR4 [MINOR] An invalid `replacesEndpoint` discards the renewal.**
-  §9.3 answers `400` and writes nothing when `PushEndpoint::parse(replacesEndpoint)` fails, so a renewal whose *old* endpoint no longer parses (allowlist change, browser format change) loses the *new* subscription, which is worse than today's behaviour.
-  *Required plan change*: either treat an unparsable `replacesEndpoint` as absent (plain upsert, no oracle) or justify the `400`; adjust `test_rsh_replaces_endpoint_invalid_is_400_nothing_written` to the chosen rule before Phase 2.
+- **PE-SR11 [MINOR, docs] S-5: a lingering remote session blocks user-manager previews until it is gone.**
+  With logind's default `KillUserProcesses=no`, a process started over SSH (for example `tmux`) keeps its session record (`STATE=closing`, `REMOTE=1`) after logout, so the phone view and a user-unit soos-gui stay refused (`camera_refused`) until that process ends. This is the intended rule (same as root `Auth`) but the §7 troubleshooting row should say "an SSH session **or a process left running from one**", with `loginctl list-sessions` / `loginctl terminate-session <id>` as the check and remedy.
 
-- **PE-SR5 [MINOR, observation] S-8b leaves a residual window during the head write.**
-  The re-check happens before `write_bounded(head)`; a stop processed while the head write is pending (socket buffer full) still lets `write_part` send the first JPEG. Bounded and rare, but the review asked for "no JPEG after a stop". *Suggested*: re-check `stop_requested` again after the head and before `set_shown`/`write_part` (end with the normal `finish_view(Stopped)` path, view not shown), or list it in §13.
-
-- **PE-SR6 [MINOR, observation] S-8d decodes MJPEG inline on a Tokio worker.**
-  Up to 10 decodes/s of a 640x480 frame per remote view inside the dispatcher task. Bounded by `MAX_MJPEG_COMPRESSED_BYTES`/`MAX_MJPEG_DIMENSION` and the preview rate limit, and stated in §13.8; acceptable, but the developer should keep it out of the `Auth` critical path (no shared lock held during the decode). No plan change required.
-
-- **PE-SR7 [MINOR, observation] Test timing margin.**
-  Two existing tests now depend on the 200 ms reserve timer against a 500 ms `CLOSE_DEADLINE` (300 ms margin under CI load). Keep `AUTH_RESERVE_FIRST_REQUEST_TIMEOUT_MS` a non-configurable constant (as specified) and make the static RSH test pin it at ≤ 250 ms so a later increase cannot make those contracts flaky.
+No CRITICAL or MAJOR finding. PE-SR8 must be applied in Phase 2/4 (test + implementation detail within the approved design); PE-SR9 to PE-SR11 are recommendations the traceability/docs phase can absorb.
 
 ## 5. Verdict
 
-One MAJOR finding (PE-SR1): the S-7 design breaks the existing RMC-S34 contract, and that contract may not be relaxed. PE-SR2 to PE-SR4 must be resolved in the same revision; PE-SR5 to PE-SR7 are recommended.
+The round-2 spec resolves every round-1 item (PE-SR1 MAJOR included) without relaxing any existing assertion. All eleven review findings are addressed or credibly refuted (S-2 installer "refuse" against RMC-S6). The daemon changes keep the fail-closed PAM behaviour. The only test amendments are CM-SR1 (owner-approved) and the additive setup changes AM-SR1/AM-SR2.
 
-VALIDATION_VERDICT: REVISION_REQUIRED
+VALIDATION_VERDICT: APPROVED
