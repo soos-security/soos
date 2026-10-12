@@ -2,7 +2,8 @@
 
 - **Date**: 2026-10-12
 - **Round**: 2 (Phase 1, architect-agent; revises round 1 `1702291` after `AI/plan_evaluator_report.md`
-  round 1 `f5058b6`, REVISION_REQUIRED; resolution log in §16)
+  round 1 `f5058b6`, REVISION_REQUIRED; resolution log in §16). Round 2 APPROVED by the plan evaluator
+  (`8883c1c`); its non-blocking items PE-SR8 to PE-SR11 are folded in (log in §17)
 - **Branch**: `fix/remote-security-hardening`, created from `origin/main` at `f9234ea` (#350 Android merged).
   GitHub-only security-review fix: no backlog id, **not** registered in `scripts/sync_issue.py`, no
   `AI/BACKLOG.md` entry, commits carry no issue reference.
@@ -383,10 +384,15 @@ unit). Residual, §13.
 
 - `soos-gui` started from a TTY-launched compositor (session scope) and from GNOME/KDE (app scope under the user
   manager) keeps working; `soos-remote` (user manager) keeps working **unless the owner has a remote (SSH) session
-  open at the same time** — the same rule the root `Auth` path applies; documented in §2f and §7.
+  open at the same time** — the same rule the root `Auth` path applies; documented in §2f and §7. A process left
+  running from an SSH login (for example `tmux`, with logind's default `KillUserProcesses=no`) keeps that session
+  record (`STATE=closing`, `REMOTE=1`) after logout, so the refusal lasts until that process ends (PE-SR11).
 - `Docs/IPC_PROTOCOL.md` decision table: new row 6c-2a; `Docs/DAEMON.md` §1.5 one paragraph;
   `Docs/REMOTE_COMPANION.md` §2f requirements list and troubleshooting row "Camera: `403 camera_refused` while
-  an SSH session of yours is open".
+  an SSH session of yours is open" (PE-SR11: worded "an SSH session of yours, **or a process left running from
+  one** (e.g. `tmux`), is open"; check with `loginctl list-sessions` (a `remote` session of your user, possibly in
+  state `closing`), fix by ending that process or with `loginctl terminate-session <id>`; the same row notes that a
+  `soos-gui` started as a user unit is refused for the same reason).
 
 ---
 
@@ -483,11 +489,15 @@ pub fn home_from_exe(exe: &Path) -> Result<PathBuf, SandboxError>;
 /// Rules (order = error order):
 /// 0. `home_from_exe(exe)` (→ `HomeUnresolved`);
 /// 1. some entry with mount point exactly `/run`, fstype `tmpfs` and `ro` in the per-mount options;
-/// 2. some entry whose mount point P ≠ "/" equals the home or is a component-wise prefix of it, with fstype
-///    `tmpfs` and `ro` in the per-mount options (ProtectHome=tmpfs);
+/// 2. some entry T whose mount point P ≠ "/" equals the home or is a component-wise prefix of it, with fstype
+///    `tmpfs` and `ro` in the per-mount options (ProtectHome=tmpfs), **and** (PE-SR9) no entry whose parent
+///    mount ID (field 2) is T's mount ID (field 1) has a mount point that equals the home, is a component-wise
+///    prefix of it, or lies below it, except exactly `<home>/SENDER_EXE_HOME_RELATIVE` (the unit's binary
+///    bind); otherwise `HomeVisible`;
 /// 3. `!logs_listable`.
 /// Mount points are octal-unescaped (`\040`, `\011`, `\012`, `\134`); malformed lines are skipped; options
-/// are matched as a comma-separated list (`ro` exactly, never a substring).
+/// are matched as a comma-separated list (`ro` exactly, never a substring); mount IDs are decimal `u64`
+/// (a line whose ID fields do not parse is malformed and skipped).
 pub fn evaluate_sandbox(mountinfo: &str, exe: &Path, logs_listable: bool) -> Result<(), SandboxError>;
 
 /// I/O wrapper: bounded read of SANDBOX_MOUNTINFO_PATH (take(MAX+1)), `std::env::current_exe()`
@@ -500,6 +510,21 @@ Order-independent on purpose: the mount table lists the host's rw `/run` as well
 (observed, §1.1); a non-sandboxed host never has a read-only tmpfs at `/run` nor over the home. The resolver
 drop-in of §2d (`BindReadOnlyPaths=-/run/systemd/resolve`) keeps rule 1 true (observed). No `unwrap`/`expect`/
 `panic!`, no format argument in tracing (RMC-S36).
+
+**Re-exposure on top of the tmpfs (PE-SR9).** Rules 1–2 as written in round 2 only proved that the tmpfs exists, so
+a drop-in that *adds* `BindPaths=%h` (or `BindReadOnlyPaths=%h/.config`) kept them true. The second half of rule 2
+closes this with the mount table alone (pure, unit-testable, no extra I/O): every mount systemd stacks on the home
+tmpfs is a child of it in `/proc/self/mountinfo` (its parent ID is the tmpfs's mount ID), and the packaged unit
+creates exactly one such child inside the home: the read-only bind of `<home>/.local/bin/soos-push-sender`. A bind
+of the whole home (mount point = home), of a parent of it, or of any other path below it is refused (`HomeVisible`
+→ exit 78). Deeper stacking chains through one of those children, so checking direct children suffices. The
+directory-listing variant suggested by the evaluator (`read_dir(home)` lists only `.local`, …) was not chosen:
+it depends on how systemd materialises intermediate directories in the tmpfs, which cannot be verified by an agent
+on this branch (no unit may be started), whereas the mount relation is defined by the kernel. The owner hardware
+check RSH18-1 (a test notification still arrives after reinstall) confirms the packaged unit passes this rule.
+Re-exposure under `/run` (e.g. a drop-in `BindReadOnlyPaths=/run/dbus`) is **not** detected: the runtime directory
+and the resolver drop-in legitimately add children there, and their exact set depends on the host; recorded in
+§13.6.
 
 ### 8.3 `main.rs`
 
@@ -515,8 +540,10 @@ existing `std::env::var_os("XDG_RUNTIME_DIR")` in `main.rs` (pinned by RSH12).
 
 `Docs/REMOTE_COMPANION.md` §2d *Limits*: the sender refuses to start (exit 78, `journalctl --user -u
 soos-push-sender` shows "sandbox not detected") when run by hand or when a drop-in removes `ProtectHome=tmpfs`,
-`TemporaryFileSystem=/run:ro` or `InaccessiblePaths=`, when its binary is not at `~/.local/bin/soos-push-sender`,
-and when the home directory lies outside the paths `ProtectHome=` covers (§8.1 case c).
+`TemporaryFileSystem=/run:ro` or `InaccessiblePaths=`, when a drop-in mounts the home directory (or a path inside
+it other than the sender binary) back on top of the hidden home (`BindPaths=%h`, PE-SR9), when its binary is not at
+`~/.local/bin/soos-push-sender`, and when the home directory lies outside the paths `ProtectHome=` covers (§8.1
+case c). It also says that a bind added under `/run` is not detected (§13.6).
 
 ---
 
@@ -637,6 +664,11 @@ postSubscription(renewalPayload(subscription, event.oldSubscription)))).catch(()
 unchanged (still `JSON.stringify(subscription.toJSON())`, one `fetch`, the two headers): every RAN-S2 assertion stays
 true. The page (`app.js`) is unchanged.
 
+`event.oldSubscription` may be `null` (some browsers do not provide it, PE-SR10); `renewalPayload` then returns the
+subscription unchanged, i.e. today's request, and the stale slot stays until the next 404/410 or `soos-remote push
+remove N`. Documented in `Docs/REMOTE_COMPANION.md` next to the `push remove` note (Android and iPhone) and in
+§13.7.
+
 ### 9.4 S-8d frames the companion can always convert (daemon side)
 
 `crates/daemon/src/preview_image.rs`:
@@ -656,6 +688,14 @@ pub const REMOTE_PREVIEW_MAX_HEIGHT: u32 = 480;
 /// (= soos-remote `CAMERA_MAX_SCRATCH_BYTES`).
 pub fn remote_preview_image_for_frame(frame: &Frame) -> PreviewImage;
 ```
+
+**IR branch (PE-SR8).** The GUI function converts an IR-stamped non-Grey frame to Grey and recurses into
+*itself*, which forwards any Grey frame ≤ 640 wide unchanged whatever its height. The remote function must not
+reuse that branch as-is: its IR branch builds the same zeroizing luma `Frame` (`infrared_luma`, `SensorType::Infrared`,
+`PixelFormat::Grey`) and recurses into **`remote_preview_image_for_frame`** (never `preview_image_for_frame`), so the
+640x480 bound applies to the luma frame too; an IR frame already in Grey goes straight to the bounds rule.
+Example: 640x512 YUYV `Infrared` → 320x256 Grey. An undecodable IR frame (`infrared_luma` → `None`) is the empty
+image.
 
 Implementation: `downscale` is generalised to `downscale_within(frame, max_width, max_height: Option<u32>)`;
 `preview_image_for_frame` calls it with `(MAX_PREVIEW_WIDTH, None)` and stays bit-for-bit identical (GUI path and its
@@ -720,10 +760,10 @@ frames larger than 640x480 for the companion; `soos-remote` itself still contain
 | `crates/daemon/tests/peer_limits_tests.rs` (append) | `test_rsh_limiter_auth_reserve_admits_one_extra_per_uid` (2 regular, 1 reserve, 2nd reserve `PerUidCap`, other UID unaffected), `test_rsh_limiter_auth_reserve_respects_unprivileged_and_global_capacity`, `test_rsh_limiter_auth_reserve_released_on_drop_and_tracked`, `test_rsh_limiter_regular_cap_unchanged` (third `try_acquire` still `PerUidCap` while a reserve is held), `test_rsh_permit_reports_admission_class` | RSH4 |
 | same file (socket, unprivileged test UID) | `test_rsh_auth_admitted_on_reserve_while_two_connections_held` (two held connections, third sends `Auth` → a `Response` with the request id), `test_rsh_reserve_closes_non_auth_without_payload` (Status, PreviewFrame, `PasswordFailed` event: closed, zero bytes, permit released), `test_rsh_reserve_idle_connection_closed_within_window` (nothing sent: closed within 500 ms), `test_rsh_reserve_partial_frame_closed_within_window` (PE-SR3; two cases: 1 byte then stall, and the 4-byte length prefix of a valid `Auth` plus half its body then stall: each closed within 500 ms of connect, zero bytes received, `available_permits()`/`tracked_uids()` back to the pre-connection values), `test_rsh_reserve_auth_after_100ms_is_answered` (PE-SR2; the reserve client sleeps 100 ms after connect, as a PAM conversation would, then writes a valid `Auth`: a `Response` with its request id is received), `test_rsh_reserve_auth_is_one_shot` | RSH5 |
 | `crates/daemon/tests/preview_placement_tests.rs` (new) | `test_rsh_classify_peer_placement` (session scope, user manager, other, nested `session-*.scope` under the manager = `UserManager`, malformed manager path = error, disagreeing v1/v2 lines), `test_rsh_session_peer_needs_its_own_local_seat_session` (own record local → served; own record `REMOTE=1` while another local seat record exists → refused; own record absent → refused; inactive/greeter → refused), `test_rsh_user_manager_peer_refused_while_remote_session_exists` (served without; refused with a `REMOTE=1` or UID-less record; foreign manager UID refused), `test_rsh_other_placement_keeps_seat_rule`, `test_rsh_placement_rule_disabled_with_validator`, `test_rsh_placement_rechecked_per_request` (record turns remote between two requests on one connection → second refused), `test_rsh_root_auth_user_manager_rule_unchanged` | RSH8 |
-| `crates/daemon/tests/preview_downscale_tests.rs` (append; dev-dependency `jpeg-encoder` from the workspace for valid MJPEG fixtures) | `test_rsh_remote_preview_decodes_mjpeg_640x480`, `test_rsh_remote_preview_bounds_tall_grey_ir_frame` (640x512 → 320x256 Grey), `test_rsh_remote_preview_bounds_wide_yuyv`, `test_rsh_remote_preview_converts_nv12`, `test_rsh_remote_preview_odd_width_yuyv_becomes_rgb`, `test_rsh_remote_preview_malformed_mjpeg_is_empty`, `test_rsh_remote_preview_ir_stamp_is_grey`, `test_rsh_remote_preview_output_always_within_640x480` (proptest over format/size), `test_rsh_local_preview_unchanged_for_mjpeg` (GUI path still format 4) | RSH16 |
+| `crates/daemon/tests/preview_downscale_tests.rs` (append; dev-dependency `jpeg-encoder` from the workspace for valid MJPEG fixtures) | `test_rsh_remote_preview_decodes_mjpeg_640x480`, `test_rsh_remote_preview_bounds_tall_grey_ir_frame` (640x512 → 320x256 Grey), `test_rsh_remote_preview_bounds_wide_yuyv`, `test_rsh_remote_preview_converts_nv12`, `test_rsh_remote_preview_odd_width_yuyv_becomes_rgb`, `test_rsh_remote_preview_malformed_mjpeg_is_empty`, `test_rsh_remote_preview_ir_stamp_is_grey` (PE-SR8: a 640x512 YUYV `SensorType::Infrared` frame → format 1 Grey, 320x256, 81 920 bytes), `test_rsh_remote_preview_output_always_within_640x480` (proptest over format, size **and `sensor_type`** (`Rgb`, `Infrared`, `Unknown`), PE-SR8), `test_rsh_local_preview_unchanged_for_mjpeg` (GUI path still format 4) | RSH16 |
 | `crates/daemon/tests/preview_remote_view_tests.rs` (append) | `test_rsh_remote_origin_receives_converted_mjpeg` (mock camera MJPEG, remote cgroup → format 0, 640x480), `test_rsh_local_origin_receives_mjpeg_unchanged` | RSH16 |
 | `crates/remote/tests/http_tests.rs` (append) | `test_rsh_hardening_headers_on_every_head` (response, HEAD, SSE, camera stream: each of the four headers exactly once with the exact value; mandatory headers unchanged) | RSH10 |
-| `crates/push-sender/tests/sandbox_tests.rs` (new) | `test_rsh_sandbox_accepts_the_unit_mount_table` (fixture captured in §1.1, with and without the resolver drop-in), `test_rsh_sandbox_refuses_host_mount_table`, `test_rsh_sandbox_requires_ro_tmpfs_run`, `test_rsh_sandbox_requires_tmpfs_over_home` (prefix is component-wise: `/home2` never covers `/home/u`), `test_rsh_sandbox_refuses_listable_logs`, `test_rsh_sandbox_unescapes_mount_points`, `test_rsh_sandbox_option_match_is_exact` (`rootcontext=…`, `nosuid` never count as `ro`), `test_rsh_sandbox_home_anchor_unresolved_refused` (PE-SR1, replaces round-1 `test_rsh_sandbox_relative_or_empty_home_refused`: `home_from_exe` refuses a relative path, `/.local/bin/soos-push-sender` (remainder `/`), `/usr/bin/soos-push-sender`, `/home/u/.local/bin/soos-push-sender (deleted)`, `/home/u/x.local/bin/soos-push-sender`, a `..` component; accepts `/home/u/.local/bin/soos-push-sender` → `/home/u`; `evaluate_sandbox` returns `HomeUnresolved` before any other rule), `test_rsh_sandbox_home_outside_home_dir` (PE-SR1: `/var/home/u` accepted with a ro tmpfs at `/var/home`, refused `HomeVisible` with the tmpfs only at `/home`; `/srv/u` refused `HomeVisible`; `/root` accepted with a ro tmpfs at `/root`) | RSH11 |
+| `crates/push-sender/tests/sandbox_tests.rs` (new) | `test_rsh_sandbox_accepts_the_unit_mount_table` (fixture captured in §1.1, with and without the resolver drop-in; PE-SR9: the fixture includes the `BindReadOnlyPaths=%h/.local/bin/soos-push-sender` entry as a child of the `/home` tmpfs), `test_rsh_sandbox_refuses_host_mount_table`, `test_rsh_sandbox_requires_ro_tmpfs_run`, `test_rsh_sandbox_requires_tmpfs_over_home` (prefix is component-wise: `/home2` never covers `/home/u`), `test_rsh_sandbox_refuses_listable_logs`, `test_rsh_sandbox_unescapes_mount_points`, `test_rsh_sandbox_option_match_is_exact` (`rootcontext=…`, `nosuid` never count as `ro`), `test_rsh_sandbox_home_anchor_unresolved_refused` (PE-SR1, replaces round-1 `test_rsh_sandbox_relative_or_empty_home_refused`: `home_from_exe` refuses a relative path, `/.local/bin/soos-push-sender` (remainder `/`), `/usr/bin/soos-push-sender`, `/home/u/.local/bin/soos-push-sender (deleted)`, `/home/u/x.local/bin/soos-push-sender`, a `..` component; accepts `/home/u/.local/bin/soos-push-sender` → `/home/u`; `evaluate_sandbox` returns `HomeUnresolved` before any other rule), `test_rsh_sandbox_home_outside_home_dir` (PE-SR1: `/var/home/u` accepted with a ro tmpfs at `/var/home`, refused `HomeVisible` with the tmpfs only at `/home`; `/srv/u` refused `HomeVisible`; `/root` accepted with a ro tmpfs at `/root`), `test_rsh_sandbox_refuses_mount_over_hidden_home` (PE-SR9: the accepted unit fixture, which carries the binary bind as a child of the `/home` tmpfs, plus one child entry of that tmpfs at `/home/u` (a `BindPaths=%h` drop-in), at `/home` itself, or at `/home/u/.config` → each `HomeVisible`; the same extra entry whose parent ID is **not** the tmpfs's mount ID (a host mount below the tmpfs) does not change the verdict; a child at `/home/other` (outside the home, not a prefix) does not change it either), `test_rsh_sandbox_binary_bind_is_the_only_allowed_child` (PE-SR9: the binary bind at exactly `<home>/.local/bin/soos-push-sender` is accepted; a child at `<home>/.local/bin` or `<home>/.local/bin/soos-push-sender2` is `HomeVisible`; a line with a non-numeric mount ID is skipped) | RSH11 |
 | `crates/remote/tests/camera_server_tests.rs` (append) | `test_rsh_stop_after_first_frame_sends_no_part` (test source that calls `runtime.stop()` while producing the first frame; repeated 20 times: never a `200` head, never a JPEG part, audit `refused`, view not counted as shown). The second check (after the head, PE-SR5) has no deterministic socket seam (the head is far smaller than any socket buffer); it is pinned statically by `test_rsh_s8b_*` | RSH14 |
 | `crates/remote/tests/push_server_tests.rs` (append) | `test_rsh_subscribe_with_replaces_endpoint_renews_in_place` (store full with the old endpoint → `200`, old gone, new present, 4 entries), `test_rsh_replaces_endpoint_absent_from_store_is_plain_upsert` (full store → `409`, nothing written), `test_rsh_replaces_endpoint_equal_is_plain_upsert`, `test_rsh_replaces_endpoint_invalid_is_plain_upsert` (PE-SR4: unparsable old endpoint → `200`, new subscription stored, nothing removed; on a full store without the old endpoint → `409`, nothing written; a non-string `replacesEndpoint` → `400`), `test_rsh_subscribe_without_replaces_endpoint_unchanged`, `test_rsh_renewal_audit_lines` | RSH15 |
 
@@ -770,12 +810,12 @@ it stops and reports instead of editing it.
 | RSH8 | Preview needs the peer's own local seat session, or its user manager without a remote session | `preview_placement_tests.rs` |
 | RSH9 | Placement rule wired after the seat check, per request | `test_rsh_s5_*` |
 | RSH10 | HSTS, COOP, CORP, Permissions-Policy on every response; CSP byte-identical | `test_rsh_hardening_headers_on_every_head`, `test_rsh_s6_*` |
-| RSH11 | Sandbox evaluation pure rules; home anchor from the binary path (never the environment), homes outside `/home` handled | `sandbox_tests.rs` |
+| RSH11 | Sandbox evaluation pure rules; home anchor from the binary path (never the environment), homes outside `/home` handled; no mount re-exposes the home on top of its tmpfs except the binary bind (PE-SR9) | `sandbox_tests.rs` |
 | RSH12 | Sender exits 78 before binding when the sandbox is not detected; it reads no environment variable other than `XDG_RUNTIME_DIR` | `test_rsh_s7_*`, RMC-S34 |
 | RSH13 | Installer refuses a symlinked `remote.toml`, creates it with noclobber | `test_rsh_s8a_*` |
 | RSH14 | A stop between the first frame and the head sends nothing; a stop seen after the head sends no part | `test_rsh_stop_after_first_frame_sends_no_part`, `test_rsh_s8b_*` |
 | RSH15 | Renewal replaces the stale endpoint atomically; worker names it within the body limit | `test_rsh_subscribe_*`, `test_rsh_replaces_*`, `test_rsh_s8c_*` |
-| RSH16 | Remote companion receives Grey/YUYV/RGB24 ≤ 640x480 for MJPEG, NV12 and large frames; GUI path unchanged | `test_rsh_remote_preview_*`, `test_rsh_remote_origin_*`, `test_rsh_local_*`, `test_rsh_s8d_*` |
+| RSH16 | Remote companion receives Grey/YUYV/RGB24 ≤ 640x480 for MJPEG, NV12, large and IR-stamped frames (PE-SR8); GUI path unchanged | `test_rsh_remote_preview_*`, `test_rsh_remote_origin_*`, `test_rsh_local_*`, `test_rsh_s8d_*` |
 | RSH17 | ADR, ARCHITECTURE §13, Docs and walkthrough 194 updated | `test_rsh_docs_adr_and_walkthrough` |
 | RSH18 | **Owner hardware check**: (1) after reinstall, `systemctl --user show soos-push-sender -p InaccessiblePaths` lists both paths and a test notification still arrives; (2) running `~/.local/bin/soos-push-sender` by hand exits 78; (3) with a live camera view **and** `soos-gui` open, the lock screen face unlock works; (4) `soos-gui` preview and the phone view still work; with an SSH session of the owner open, the phone view is refused (`camera_refused`) and works again after logout; (5) a 640x480 MJPEG or 640x512 IR camera shows a live view; (6) the Android notification icon and the iPhone home-screen icon still load (CORP); (7) `tailscale version` ≥ 1.102.4 | Manual (walkthrough 194); agents never install or restart units |
 
@@ -799,15 +839,21 @@ it stops and reports instead of editing it.
    (evidence snapshot only).
 4. **S-5**: placements outside session scopes and the user manager (root-configured services, containers) keep
    the UID-level seat rule; the cgroup is not a security boundary against the same UID with root help. The owner's
-   own SSH session blocks the phone view and user-manager GUIs while it is open (intended, same as root `Auth`).
+   own SSH session blocks the phone view and user-manager GUIs while it is open (intended, same as root `Auth`),
+   and so does a process left running from one (`tmux`, `STATE=closing`) until it ends (PE-SR11; documented in §7
+   with `loginctl list-sessions` / `loginctl terminate-session <id>`).
 5. **S-6**: CORP `same-origin` could hide a notification icon if a browser fetches it cross-origin (owner check
    RSH18-6; the notification is still shown without it).
 6. **S-7**: the self-check proves the three hiding directives, not the whole unit (address families, syscall
    filter, capabilities remain trusted to systemd). The home anchor is the binary's own path: a home outside every
    `ProtectHome=` path (or an image-based layout where the tmpfs mount point is not the resolved home prefix)
    makes the sender refuse to start (exit 78, documented in §2d), which disables Web Push but never weakens it.
-7. **S-8c**: a renewal whose two endpoints exceed 2048 bytes falls back to today's behaviour (stale slot until the
-   next 404/410 or `push remove`).
+   A drop-in that re-exposes the home on top of its tmpfs is refused (PE-SR9), but one that binds a host path
+   under `/run` (e.g. `/run/dbus`) is not detected, and neither are binds outside the home and `/run`
+   (documented in §2d *Limits*).
+7. **S-8c**: a renewal whose two endpoints exceed 2048 bytes, or whose `pushsubscriptionchange` event carries a
+   `null` `oldSubscription` (some browsers, PE-SR10), falls back to today's behaviour (stale slot until the next
+   404/410 or `push remove`).
 8. **S-8d**: the daemon decodes one MJPEG frame per remote request inline on a Tokio worker (bounded size, ≤ 10/s,
    preview rate limit), as its existing downscale and IR paths already do; decimation can halve resolution for
    tall sensors (640x512 → 320x256) instead of cropping. The decode is off the `Auth` path and holds no shared
@@ -826,7 +872,8 @@ it stops and reports instead of editing it.
   sender of a `wheel`/`adm`/`systemd-journal` owner read the whole system journal (reproduced on the owner host,
   systemd 262). The sender refuses to start (exit 78) unless `/run` is a read-only tmpfs, its home directory
   (derived from its own binary path `~/.local/bin/soos-push-sender`, never from the environment, so the sender
-  still reads only `XDG_RUNTIME_DIR`) lies under a read-only tmpfs and `/var/log` is not listable. (2) **Tailscale minimum** 1.102.4 (the verified release) for Serve
+  still reads only `XDG_RUNTIME_DIR`) lies under a read-only tmpfs with nothing mounted back on top of it except
+  its own binary, and `/var/log` is not listable. (2) **Tailscale minimum** 1.102.4 (the verified release) for Serve
   and Funnel, single-sourced in `TAILSCALE_MIN_VERIFIED_VERSION`; printed by the installer, which still never runs
   `tailscale`. (3) **Auth-reserved daemon connection**: one connection per unprivileged UID above
   `max_connections_per_uid`, admitted only for an `Auth` request whose whole first frame arrives within 200 ms
@@ -838,7 +885,7 @@ it stops and reports instead of editing it.
   geolocation, payment and USB; CSP unchanged. (6) **Push renewal** names the replaced endpoint
   (`replacesEndpoint`), removed atomically with the upsert; an unparsable old endpoint is ignored (plain upsert).
   (7) **Camera**: no part after a stop observed before the first part (checked before and after the head); the daemon converts MJPEG, NV12 and frames beyond 640x480 into Grey/RGB24 within 640x480 for the
-  `soos-remote.service` origin only (`soos-remote` stays decoder-free). (8) **Installer** refuses a symlinked
+  `soos-remote.service` origin only, IR-stamped frames included (`soos-remote` stays decoder-free). (8) **Installer** refuses a symlinked
   `remote.toml` and writes it with noclobber. (9) Docs: Android lock-screen privacy. Test amendments: CM-SR1
   (test 45, one exact line added), AM-SR1 and AM-SR2 (additive session-record setup). Residuals as listed in the
   spec §13. Matrix RSH1–RSH18 (RSH18 owner hardware check).
@@ -875,3 +922,17 @@ in `Cargo.lock`), no protocol or config-key change, `#![forbid(unsafe_code)]` cr
 
 Test-integrity status unchanged: the only amendments to existing tests remain CM-SR1 (owner-approved, additive),
 AM-SR1 and AM-SR2 (setup only, additive). No assertion of RMC-S34 or any other existing test is relaxed.
+
+---
+
+## 17. Round 2 approval — non-blocking items of `AI/plan_evaluator_report.md` (round 2, APPROVED)
+
+| Item | Severity | Resolution | Where |
+|---|---|---|---|
+| PE-SR8 | MINOR | The remote IR branch recurses into `remote_preview_image_for_frame`, never the GUI function, so an IR luma frame is bounded to 640x480 (640x512 YUYV `Infrared` → 320x256 Grey). `test_rsh_remote_preview_ir_stamp_is_grey` uses that exact frame; the proptest also varies `sensor_type`. | §9.4, §11.2, §12 RSH16, §14 |
+| PE-SR9 | MINOR (recommended) | Applied as a pure mount-table rule (second half of rule 2): no child mount of the accepted home tmpfs may cover or lie inside the home except the exact binary bind, so `BindPaths=%h` (or a subdirectory bind) on top is refused (`HomeVisible`, exit 78). Directory-listing variant rejected (host-dependent, unverifiable without starting a unit). Binds under `/run` stay a documented residual. Two new tests, accepted fixture extended with the binary bind entry. | §8.2, §8.4, §11.2, §12 RSH11, §13.6, §14 |
+| PE-SR10 | observation | A `null` `event.oldSubscription` falls back to today's request (stale slot until 404/410 or `push remove`); recorded in residual §13.7 and in the `Docs/REMOTE_COMPANION.md` `push remove` note. No design change. | §9.3, §13.7 |
+| PE-SR11 | docs | The §7 `camera_refused` troubleshooting row names "an SSH session, or a process left running from one (`tmux`)", with `loginctl list-sessions` as the check and ending the process or `loginctl terminate-session <id>` as the fix; user-unit `soos-gui` mentioned. | §6.4, §13.4 |
+
+Test-integrity status unchanged: the items add new tests and strengthen new-test definitions only. No existing
+test changes beyond CM-SR1 (owner-approved, additive), AM-SR1 and AM-SR2 (setup only, additive).
