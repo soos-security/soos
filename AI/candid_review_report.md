@@ -3,8 +3,8 @@
 - **Date**: 2026-10-12
 - **Target Branch**: `feat/remote-direct-biometric`
 - **Base (merge-base)**: `fb2977c9`
-- **Reviewed-Diff-Fingerprint**: `64cd78f15b0658a0cdac1133d43192afd6b093bcf2624e88f50b3823e7224dfa`
-- **Audited Files**: `AI/ARCHITECTURE.md`, `AI/DECISIONS.md`, `AI/architect_spec_remote_direct_biometric.md`, `AI/auditor_constraints_remote_direct_biometric.md`, `AI/tester_contract_remote_direct_biometric.md`, `AI/walkthroughs/195_remote_direct_biometric.md`, `Docs/REMOTE_COMPANION.md`, `crates/remote/assets/app.js`, `crates/remote/src/auth.rs`, `crates/remote/src/credentials.rs`, `crates/remote/src/lib.rs`, `crates/remote/src/server.rs`, `crates/remote/tests/auth_server_tests.rs`, `crates/remote/tests/auth_store_tests.rs`, `crates/remote/tests/camera_server_tests.rs`, `crates/remote/tests/credentials_tests.rs`, `crates/remote/tests/direct_biometric_tests.rs`, `tests/invariants/src/lib.rs`, `tests/invariants/src/remote_direct_biometric_contract.rs`, `tests/invariants/src/remote_passkey_contract.rs`
+- **Reviewed-Diff-Fingerprint**: `4a4d0c3c617be0f4923924f5037ec9e8d281b886604031a9b23a4b18d65c5345`
+- **Audited Files**: `AI/ARCHITECTURE.md`, `AI/DECISIONS.md`, `AI/VERIFICATION_MATRIX.md`, `AI/architect_spec_remote_direct_biometric.md`, `AI/auditor_constraints_remote_direct_biometric.md`, `AI/tester_contract_remote_direct_biometric.md`, `AI/walkthroughs/195_remote_direct_biometric.md`, `Docs/REMOTE_COMPANION.md`, `crates/remote/assets/app.js`, `crates/remote/src/auth.rs`, `crates/remote/src/credentials.rs`, `crates/remote/src/lib.rs`, `crates/remote/src/server.rs`, `crates/remote/tests/auth_server_tests.rs`, `crates/remote/tests/auth_store_tests.rs`, `crates/remote/tests/camera_server_tests.rs`, `crates/remote/tests/credentials_tests.rs`, `crates/remote/tests/direct_biometric_tests.rs`, `tests/invariants/src/lib.rs`, `tests/invariants/src/remote_direct_biometric_contract.rs`, `tests/invariants/src/remote_passkey_contract.rs`
 
 ## 1. Executive Summary
 
@@ -15,8 +15,25 @@ Funnel caller), adds `authenticatorAttachment: "platform"` and `hints: ["client-
 registration, and stores browser-reported transports in an optional, strictly validated record
 key. The diff is confined to the user-level `soos-remote` crate, its page and docs; PAM, daemon
 and IPC are untouched. No CRITICAL or MAJOR defect found. `cargo test -p soos-remote` (0 failures),
-`cargo test -p soos-invariants remote_` (123 passed) and `cargo clippy -p soos-remote --all-targets
--- -D warnings` are green locally.
+`cargo test --locked --all-features -p soos-remote --no-fail-fast` (386 passed, 0 failed) and
+`cargo test --locked --all-features -p soos-invariants` (571 passed, 0 failed) were re-run for
+this review and match the counts claimed in the walkthrough and the matrix.
+
+**Re-review scope (this fingerprint).** Since the previous fingerprint
+(`64cd78f1…`), the diff gained only documentation (commit `37c2bdb`):
+`AI/VERIFICATION_MATRIX.md` component `remote-direct-biometric` (RDB1–RDB10) and the rewritten
+walkthrough 195. The whole raw diff was re-read; production code and tests are byte-identical to
+the previously approved diff. The new docs were checked against the code:
+- every test cited in RDB1–RDB9 exists (the matrix citation invariants pass in the 571 run);
+- per-file counts in walkthrough §8 (`direct_biometric_tests` 12, `credentials_tests` 7,
+  `auth_server_tests` 17, `auth_store_tests` 6, `camera_server_tests` 15) match the `#[test]` /
+  `#[tokio::test]` counts in the tree;
+- cited commits `7aa93dc`, `2d8c8f0`, `7f2f395`, `c1ec02b`, `d2c581d` exist with the described
+  subjects; `git diff 2d8c8f0 c1ec02b -- crates/remote/tests tests/invariants` shows only the
+  auditor's additive 45-line test (C-15 claim true), and the developer commit touches no test;
+- walkthrough §2/§5 claims (`persist_counter` mutates the record in place, `is_funnel_public`
+  untouched, `webauthn.rs` and `routes.rs` without diff, bounds checked before `check_code`) are
+  true in the code; AM-1..AM-5 descriptions match the test hunks exactly.
 
 ## 2. Test Changes
 
@@ -111,6 +128,12 @@ All code, comments, docs and walkthrough text in the diff are English. PASS.
 - **[SUGGESTION]** `crates/remote/src/lib.rs:290` — the new compile-time body bound counts
   `name + 3` per entry but relies on the shared `256` slack for the `"transports":[]` key; it
   holds with a wide margin (8192 bytes), so it is informative only.
+
+- **[SUGGESTION]** `AI/walkthroughs/195_remote_direct_biometric.md` §7 — it cites the earlier
+  report fingerprint `64cd78f1…`; the committed report now carries `4a4d0c3c…` (the docs-only
+  re-review). The text says the report predates the traceability commit, so it is historically
+  accurate; optionally refresh the fingerprint at the next docs touch (doing so would change the
+  diff and require another review).
 
 ## 5. Final Verdict
 
