@@ -351,6 +351,45 @@ fn test_rsh_s3_reserve_constants_and_dispatch() {
     );
 }
 
+/// RSH5 (spec §4.3 step 3; auditor addition, `AI/auditor_constraints_remote_security_hardening.md`
+/// C-5): the `Auth`-only rule of a reserve connection is decided before **any** message
+/// processing, events included (`PasswordFailed` is never admitted on the reserve), and the
+/// refusal is a protocol error, never a processed message.
+#[test]
+fn test_rsh_s3_reserve_refuses_events_before_processing() {
+    let dispatcher = code_of(DAEMON_DISPATCHER);
+    let process = body_of(&dispatcher, "async fn read_and_process(");
+    // The first frame read may also name `AuthReserve` (its bounded window); the Auth-only
+    // decision is the occurrence after decoding.
+    let decoded = pos(&process, "decode_client_message(", "read_and_process");
+    let after_decode = &process[decoded..];
+    let reserve_check = pos(
+        after_decode,
+        "AdmissionClass::AuthReserve",
+        "read_and_process after decode_client_message",
+    );
+    let auth_kind = pos(
+        after_decode,
+        "RequestKind::Auth",
+        "read_and_process after decode_client_message",
+    );
+    for processing in ["handle_request(", "handle_event("] {
+        let at = pos(
+            after_decode,
+            processing,
+            "read_and_process after decode_client_message",
+        );
+        assert!(
+            reserve_check < at && auth_kind < at,
+            "the reserve's Auth-only check runs after decoding and before {processing} (spec §4.3)"
+        );
+    }
+    assert!(
+        process.contains("DaemonError::Protocol("),
+        "a non-Auth message on the reserve is refused as a protocol error (spec §4.3 step 3)"
+    );
+}
+
 // ---------------------------------------------------------------------------------------
 // RSH7 — S-4
 // ---------------------------------------------------------------------------------------

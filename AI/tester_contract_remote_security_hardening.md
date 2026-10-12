@@ -210,3 +210,13 @@ RLC-S1 (`cargo tree -e normal` ignores the new dev-dependency), RLC-S6 and RAN-S
 - The `auth_reserve` socket tests are compile-red until the API exists; the developer runs them 10 times in a row
   (`for i in $(seq 10); do cargo test --locked -p soos-daemon --all-features --test peer_limits_tests rsh -q || break;
   done`) before hand-off.
+
+## Auditor additions (Phase 3, new tests only)
+
+Recorded in `AI/auditor_constraints_remote_security_hardening.md` (A-1, A-2). Both are new test functions; no
+existing test was changed.
+
+| Test (path::name) | Row | Red evidence |
+|---|---|---|
+| `peer_limits_tests::auth_reserve::test_rsh_reserve_stalled_frame_holds_the_reserve_for_the_window` (A-1) | RSH5 | compile-red (missing API only); under the wrong-value stub: `permits must return to 5, got 8` |
+| `remote_security_hardening_contract::test_rsh_s3_reserve_refuses_events_before_processing` (A-2) | RSH5 | `read_and_process after decode_client_message: AdmissionClass::AuthReserve not found` |

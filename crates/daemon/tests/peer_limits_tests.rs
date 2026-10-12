@@ -1180,4 +1180,44 @@ mod auth_reserve {
         );
         permits_back(&dispatcher, 6).await;
     }
+
+    /// Auditor addition (AI/auditor_constraints_remote_security_hardening.md, C-6): a stalled
+    /// first frame is closed by the reserve window, not refused at admission. The stalled
+    /// connection holds an unprivileged permit while it waits (6 -> 5 free), and it is closed
+    /// no earlier than the window (the timer starts at admission, after `connect` returned).
+    #[tokio::test]
+    async fn test_rsh_reserve_stalled_frame_holds_the_reserve_for_the_window() {
+        if current_uid() == 0 {
+            return;
+        }
+        let (_dir, sock_path, dispatcher, _c1, _c2) = two_held("reserve_window.sock").await;
+        let framed = encode(&auth_request(current_uid())).expect("encode");
+        let started = Instant::now();
+        let mut client = UnixStream::connect(&sock_path).await.expect("Connect");
+        client.write_all(&framed[..1]).await.expect("partial write");
+        client.flush().await.expect("flush");
+        // The reserve permit is taken while the first frame is pending.
+        permits_back(&dispatcher, 5).await;
+        let mut byte = [0u8; 1];
+        match tokio::time::timeout(CLOSE_DEADLINE, client.read(&mut byte)).await {
+            Ok(Ok(0)) => {}
+            Ok(Ok(n)) => panic!("no byte may be answered, got {n}"),
+            Ok(Err(e)) => assert!(
+                matches!(
+                    e.kind(),
+                    std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::BrokenPipe
+                ),
+                "{e}"
+            ),
+            Err(_) => panic!("a stalled first frame must be closed by the reserve window"),
+        }
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed >= Duration::from_millis(AUTH_RESERVE_FIRST_REQUEST_TIMEOUT_MS - 50),
+            "closed by the {AUTH_RESERVE_FIRST_REQUEST_TIMEOUT_MS} ms window, not at admission \
+             (closed after {elapsed:?})"
+        );
+        assert!(elapsed < CLOSE_DEADLINE + Duration::from_millis(200));
+        permits_back(&dispatcher, 6).await;
+    }
 }
