@@ -18,6 +18,10 @@
 //!   a greyscale preview takes the Monochrome PAD path (IR gate and stricter IR threshold,
 //!   GitHub #169) instead of the colour path.
 //!
+//! The remote companion (`soos-remote`, ADR 2026-10-12 S-8d) has no image decoder and accepts
+//! only Grey, YUYV (even width) and RGB24 up to 640x480: [`remote_preview_image_for_frame`]
+//! prepares its frames, decoding MJPEG and NV12 and bounding both dimensions.
+//!
 //! Only preview-authorized peers ever receive the result (see [`crate::preview`]); no pixel
 //! data is logged, and every intermediate buffer is zeroized.
 
@@ -27,6 +31,13 @@ use zeroize::{Zeroize, Zeroizing};
 
 /// Maximum width, in pixels, of a downscaled preview frame.
 pub const MAX_PREVIEW_WIDTH: u32 = 640;
+
+/// Largest width of a preview prepared for the remote companion (`soos-remote` converts only
+/// Grey, YUYV and RGB24 up to 640x480; it has no decoder by design, RLC-S10).
+pub const REMOTE_PREVIEW_MAX_WIDTH: u32 = 640;
+
+/// Largest height of a preview prepared for the remote companion.
+pub const REMOTE_PREVIEW_MAX_HEIGHT: u32 = 480;
 
 /// Wire format code of an empty preview response (no frame available or not convertible).
 pub const PREVIEW_FORMAT_EMPTY: u8 = soos_protocol::types::PREVIEW_FORMAT_EMPTY;
@@ -109,7 +120,66 @@ pub fn preview_image_for_frame(frame: &Frame) -> PreviewImage {
             data: frame.data.clone(),
         };
     }
-    downscale(frame).unwrap_or_else(PreviewImage::empty)
+    downscale_within(frame, MAX_PREVIEW_WIDTH, None).unwrap_or_else(PreviewImage::empty)
+}
+
+/// Preview for a `PreviewPeerOrigin::RemoteCompanion` connection (ADR 2026-10-12, S-8d): the
+/// IR rule first (greyscale, bounded like any other frame), then a Grey or RGB24 frame within
+/// 640x480 (and YUYV with an even width) is forwarded unchanged; anything else (MJPEG, NV12,
+/// odd-width YUYV, taller or wider frames) is decoded with the bounded
+/// `soos_vision::convert_to_rgb` (MJPEG only) and decimated by the integer step
+/// `max(ceil(w/640), ceil(h/480), 1)` into Grey (Grey sources) or RGB24. An unconvertible
+/// frame is the explicit empty image. The output never exceeds 640x480x3 bytes.
+pub fn remote_preview_image_for_frame(frame: &Frame) -> PreviewImage {
+    if frame.sensor_type == SensorType::Infrared && frame.format != PixelFormat::Grey {
+        // The luma frame goes through this function again, so the 640x480 bound applies to it
+        // too. The intermediate frame is zeroized on drop (`Drop for Frame`).
+        return match infrared_luma(frame) {
+            Some(mut luma) => remote_preview_image_for_frame(&Frame {
+                data: std::mem::take(&mut *luma),
+                width: frame.width,
+                height: frame.height,
+                timestamp_mono_ns: frame.timestamp_mono_ns,
+                format: PixelFormat::Grey,
+                sequence: frame.sequence,
+                sensor_type: SensorType::Infrared,
+            }),
+            None => PreviewImage::empty(),
+        };
+    }
+    if frame.width == 0 || frame.height == 0 {
+        return PreviewImage::empty();
+    }
+    let within =
+        frame.width <= REMOTE_PREVIEW_MAX_WIDTH && frame.height <= REMOTE_PREVIEW_MAX_HEIGHT;
+    let bytes_per_pixel = match frame.format {
+        PixelFormat::Grey => Some(1usize),
+        PixelFormat::Rgb24 => Some(3),
+        PixelFormat::Yuyv if frame.width.is_multiple_of(2) => Some(2),
+        _ => None,
+    };
+    if let (true, Some(bytes_per_pixel)) = (within, bytes_per_pixel) {
+        let expected = usize::try_from(frame.width)
+            .ok()
+            .zip(usize::try_from(frame.height).ok())
+            .and_then(|(w, h)| w.checked_mul(h))
+            .and_then(|pixels| pixels.checked_mul(bytes_per_pixel));
+        return match expected.and_then(|len| frame.data.get(..len)) {
+            Some(data) => PreviewImage {
+                format: wire_format_code(frame.format),
+                width: frame.width,
+                height: frame.height,
+                data: data.to_vec(),
+            },
+            None => PreviewImage::empty(),
+        };
+    }
+    downscale_within(
+        frame,
+        REMOTE_PREVIEW_MAX_WIDTH,
+        Some(REMOTE_PREVIEW_MAX_HEIGHT),
+    )
+    .unwrap_or_else(PreviewImage::empty)
 }
 
 /// Extracts the 8-bit luma plane (`width * height` bytes) of a colour-format frame: the `Y`
@@ -170,7 +240,15 @@ enum Source<'a> {
     Nv12(&'a [u8]),
 }
 
-fn downscale(frame: &Frame) -> Option<PreviewImage> {
+/// Integer decimation of `frame` to at most `max_width` pixels wide and, when `max_height` is
+/// set, at most `max_height` lines (the remote companion bound); within the preview byte
+/// budget either way. With `max_height` set, a YUYV pixel whose macropixel is incomplete at the
+/// end of the buffer (odd width) uses neutral chroma instead of failing the frame.
+fn downscale_within(
+    frame: &Frame,
+    max_width: u32,
+    max_height: Option<u32>,
+) -> Option<PreviewImage> {
     let width = usize::try_from(frame.width).ok()?;
     let height = usize::try_from(frame.height).ok()?;
     let pixels = width.checked_mul(height)?;
@@ -215,9 +293,18 @@ fn downscale(frame: &Frame) -> Option<PreviewImage> {
         _ => (wire_format_code(PixelFormat::Rgb24), 3usize),
     };
 
-    // Integer decimation step: at most MAX_PREVIEW_WIDTH wide and within the byte budget.
-    // `pixels` is bounded by the validated buffer length, so this loop is short.
-    let mut step = frame.width.div_ceil(MAX_PREVIEW_WIDTH).max(1);
+    // Integer decimation step: at most `max_width` wide (and `max_height` tall) and within the
+    // byte budget. `pixels` is bounded by the validated buffer length, so this loop is short.
+    let height_step = match max_height {
+        Some(max_height) => frame.height.div_ceil(max_height.max(1)),
+        None => 1,
+    };
+    let mut step = frame
+        .width
+        .div_ceil(max_width.max(1))
+        .max(height_step)
+        .max(1);
+    let lenient_chroma = max_height.is_some();
     let (out_width, out_height) = loop {
         let out_width = frame.width.checked_div(step)?;
         let out_height = frame.height.checked_div(step)?;
@@ -246,7 +333,14 @@ fn downscale(frame: &Frame) -> Option<PreviewImage> {
             let sx = ox.checked_mul(step)?;
             match source {
                 Source::Grey(buf) => out.push(*buf.get(sy.checked_mul(width)?.checked_add(sx)?)?),
-                _ => out.extend_from_slice(&sample_rgb(source, width, height, sx, sy)?),
+                _ => out.extend_from_slice(&sample_rgb(
+                    source,
+                    width,
+                    height,
+                    sx,
+                    sy,
+                    lenient_chroma,
+                )?),
             }
         }
     }
@@ -266,6 +360,7 @@ fn sample_rgb(
     height: usize,
     x: usize,
     y: usize,
+    lenient_chroma: bool,
 ) -> Option<[u8; 3]> {
     let index = y.checked_mul(width)?.checked_add(x)?;
     match source {
@@ -278,8 +373,15 @@ fn sample_rgb(
             let luma = *buf.get(index.checked_mul(2)?)?;
             // Each 4-byte macropixel [Y0, U, Y1, V] covers two horizontal pixels.
             let pair = y.checked_mul(width)?.checked_add(x & !1)?.checked_mul(2)?;
-            let u = *buf.get(pair.checked_add(1)?)?;
-            let v = *buf.get(pair.checked_add(3)?)?;
+            let chroma = buf
+                .get(pair.checked_add(1)?)
+                .copied()
+                .zip(buf.get(pair.checked_add(3)?).copied());
+            let (u, v) = match chroma {
+                Some(uv) => uv,
+                None if lenient_chroma => (NEUTRAL_CHROMA, NEUTRAL_CHROMA),
+                None => return None,
+            };
             Some(yuv_to_rgb(luma, u, v))
         }
         Source::Nv12(buf) => {
@@ -298,6 +400,9 @@ fn sample_rgb(
         }
     }
 }
+
+/// Chroma value of a colourless pixel.
+const NEUTRAL_CHROMA: u8 = 128;
 
 /// Full-range fixed-point YUV to RGB conversion (same coefficients as `soos_vision`).
 #[allow(

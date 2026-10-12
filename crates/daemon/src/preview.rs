@@ -12,8 +12,9 @@ use thiserror::Error;
 use crate::error::DaemonError;
 
 pub use crate::preview_image::{
-    preview_image_for_frame, wire_format_code, PreviewImage, MAX_PREVIEW_PIXEL_BYTES,
-    MAX_PREVIEW_WIDTH, PREVIEW_FORMAT_EMPTY, PREVIEW_HEADER_RESERVE,
+    preview_image_for_frame, remote_preview_image_for_frame, wire_format_code, PreviewImage,
+    MAX_PREVIEW_PIXEL_BYTES, MAX_PREVIEW_WIDTH, PREVIEW_FORMAT_EMPTY, PREVIEW_HEADER_RESERVE,
+    REMOTE_PREVIEW_MAX_HEIGHT, REMOTE_PREVIEW_MAX_WIDTH,
 };
 
 /// Maximum number of entries accepted in `[preview] allowed_uids` (bounded configuration).

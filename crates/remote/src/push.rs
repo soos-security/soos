@@ -133,6 +133,19 @@ pub enum UpsertResult {
     Replaced,
 }
 
+/// Result of [`PushStore::replace_or_upsert`] (ADR 2026-10-12, S-8c).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RenewResult {
+    /// A new endpoint was stored (no old endpoint removed).
+    Added,
+    /// An existing endpoint got new keys (no old endpoint removed).
+    Replaced,
+    /// The old endpoint was removed and the new endpoint added.
+    Renewed,
+    /// The old endpoint was removed and the already stored new endpoint got new keys.
+    RenewedExisting,
+}
+
 /// A secret string that is wiped on drop, even when parsing fails half-way.
 struct SecretText(Zeroizing<String>);
 
@@ -387,6 +400,54 @@ impl PushStore {
                 Ok(Some(UpsertResult::Added))
             },
             UpsertResult::Replaced,
+        )
+    }
+
+    /// One locked update (S-8c): removes `old` when present and different from
+    /// `sub.endpoint`, then upserts `sub`; the capacity is counted after the removal and
+    /// [`PushStoreError::TooMany`] writes nothing.
+    ///
+    /// # Errors
+    /// [`PushStoreError::TooMany`] for a new endpoint on a full store (nothing written),
+    /// [`PushStoreError::Missing`], and the load/lock/write errors.
+    pub fn replace_or_upsert(
+        &self,
+        sub: &PushSubscription,
+        old: Option<&PushEndpoint>,
+        random: &RandomSource,
+    ) -> Result<RenewResult, PushStoreError> {
+        let old = old.filter(|old| **old != sub.endpoint);
+        self.update(
+            random,
+            |file| {
+                let removed = old.is_some_and(|old| {
+                    let before = file.subscriptions.len();
+                    file.subscriptions.retain(|s| s.endpoint != *old);
+                    file.subscriptions.len() != before
+                });
+                if let Some(existing) = file
+                    .subscriptions
+                    .iter_mut()
+                    .find(|s| s.endpoint == sub.endpoint)
+                {
+                    existing.keys = sub.keys.clone();
+                    return Ok(Some(if removed {
+                        RenewResult::RenewedExisting
+                    } else {
+                        RenewResult::Replaced
+                    }));
+                }
+                if file.subscriptions.len() >= MAX_PUSH_SUBSCRIPTIONS {
+                    return Err(PushStoreError::TooMany);
+                }
+                file.subscriptions.push(sub.duplicate());
+                Ok(Some(if removed {
+                    RenewResult::Renewed
+                } else {
+                    RenewResult::Added
+                }))
+            },
+            RenewResult::Replaced,
         )
     }
 
@@ -1129,6 +1190,9 @@ struct SubscribeBody {
     #[allow(dead_code, reason = "Accepted and ignored (spec §6.2 step 5)")]
     expiration_time: Option<serde::de::IgnoredAny>,
     keys: SubscribeKeys,
+    /// Endpoint of the subscription this one renews (`pushsubscriptionchange`, S-8c).
+    #[serde(default)]
+    replaces_endpoint: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -1405,12 +1469,34 @@ impl PushRuntime {
             created_unix_s: self.now_unix_s(),
         };
         let (store, random) = (self.store.clone(), Arc::clone(&self.random));
-        match with_store_lock(move || store.upsert_ref(&sub, &random)).await {
-            Ok(UpsertResult::Added) => {
+        let Some(replaces) = parsed.replaces_endpoint.as_deref() else {
+            return match with_store_lock(move || store.upsert_ref(&sub, &random)).await {
+                Ok(UpsertResult::Added) => {
+                    audit::push_subscription_added();
+                    (200, "subscribed")
+                }
+                Ok(UpsertResult::Replaced) => (200, "subscribed"),
+                Err(PushStoreError::TooMany) => (409, "too_many_subscriptions"),
+                Err(_) => (503, "store_unavailable"),
+            };
+        };
+        // An old endpoint that no longer parses is treated as absent (no oracle, PE-SR4).
+        let old = PushEndpoint::parse(replaces).ok();
+        match with_store_lock(move || store.replace_or_upsert(&sub, old.as_ref(), &random)).await {
+            Ok(RenewResult::Added) => {
                 audit::push_subscription_added();
                 (200, "subscribed")
             }
-            Ok(UpsertResult::Replaced) => (200, "subscribed"),
+            Ok(RenewResult::Renewed) => {
+                audit::push_subscription_removed();
+                audit::push_subscription_added();
+                (200, "subscribed")
+            }
+            Ok(RenewResult::RenewedExisting) => {
+                audit::push_subscription_removed();
+                (200, "subscribed")
+            }
+            Ok(RenewResult::Replaced) => (200, "subscribed"),
             Err(PushStoreError::TooMany) => (409, "too_many_subscriptions"),
             Err(_) => (503, "store_unavailable"),
         }

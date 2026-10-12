@@ -4,7 +4,10 @@
 # Authorization value over a 0600 Unix socket, and it makes one outbound HTTPS request to an
 # allowlisted push service (web.push.apple.com, fcm.googleapis.com,
 # updates.push.services.mozilla.com). The sandbox hides $HOME (except this binary, read
-# only) and /run (except its own runtime directory).
+# only) and /run (except its own runtime directory). The system logs (/var/log, the journal
+# included, and /var/lib/systemd/coredump) are inaccessible: the session owner may be in
+# wheel, adm or systemd-journal. The sender refuses to start (exit 78) when it does not
+# detect this sandbox (ADR 2026-10-12 "soos-remote Security Hardening").
 # Install: scripts/install_remote.sh; enable: systemctl --user enable --now soos-push-sender
 
 [Unit]
@@ -16,7 +19,7 @@ Type=exec
 ExecStart=%h/.local/bin/soos-push-sender
 Restart=on-failure
 RestartSec=5
-# EXIT_CONFIG (78, EX_CONFIG): root refusal and environment errors are not retried
+# EXIT_CONFIG (78, EX_CONFIG): root refusal, environment errors and a missing sandbox are not retried
 RestartPreventExitStatus=78
 RuntimeDirectory=soos-push
 RuntimeDirectoryMode=0700
@@ -31,6 +34,7 @@ ProtectSystem=strict
 ProtectHome=tmpfs
 BindReadOnlyPaths=%h/.local/bin/soos-push-sender
 TemporaryFileSystem=/run:ro
+InaccessiblePaths=-/var/log -/var/lib/systemd/coredump
 PrivateTmp=yes
 PrivateDevices=yes
 PrivateIPC=yes

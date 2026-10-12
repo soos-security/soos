@@ -377,6 +377,34 @@ pub fn parse_user_manager_uid_from_cgroup(content: &str) -> Result<Option<u32>, 
     Ok(found.flatten())
 }
 
+/// Where a peer process runs, from its `/proc/<pid>/cgroup` (systemd hierarchies only).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PeerPlacement {
+    /// Inside the logind session scope `session-<id>.scope` (validated session ID).
+    Session(String),
+    /// Under `user@<uid>.service` (strict, consistent UIDs).
+    UserManager(u32),
+    /// Neither (system services with `User=`, containers, the root cgroup, CI runners).
+    Other,
+}
+
+/// Classifies a `/proc/<pid>/cgroup` content: a session scope first
+/// ([`parse_session_id_from_cgroup`]), then the user manager
+/// ([`parse_user_manager_uid_from_cgroup`]), otherwise [`PeerPlacement::Other`].
+///
+/// # Errors
+/// [`SessionDenial::UserManagerCgroupMalformed`] for a malformed user-manager path or
+/// disagreeing hierarchies.
+pub fn classify_peer_placement(cgroup: &str) -> Result<PeerPlacement, SessionDenial> {
+    if let Some(id) = parse_session_id_from_cgroup(cgroup) {
+        return Ok(PeerPlacement::Session(id));
+    }
+    Ok(match parse_user_manager_uid_from_cgroup(cgroup)? {
+        Some(uid) => PeerPlacement::UserManager(uid),
+        None => PeerPlacement::Other,
+    })
+}
+
 /// Reads at most `max` bytes of `path` as UTF-8; `Ok(None)` if the file does not exist.
 /// A file reaching the bound is reported as an error (fail closed on truncation).
 pub(crate) fn read_bounded(path: &Path, max: u64) -> Result<Option<String>, LogindError> {
@@ -600,23 +628,66 @@ impl LocalSessionPolicy {
         if manager_uid != target_uid {
             return Err(SessionDenial::UserManagerUidMismatch);
         }
+        Self::check_user_manager_records(source, target_uid)
+    }
+
+    /// Session-record rule of a caller under the systemd user manager of `uid` (shared by
+    /// the root `Auth` path and the preview placement rule): no record of `uid`, or without
+    /// UID, other than `REMOTE=0`, and at least one local seat session of `uid`.
+    fn check_user_manager_records(
+        source: &dyn LogindSource,
+        uid: u32,
+    ) -> Result<(), SessionDenial> {
         let records = source
             .sessions()
             .map_err(|_| SessionDenial::LogindUnavailable)?;
         if records
             .iter()
-            .filter(|r| r.uid.is_none() || r.uid == Some(target_uid))
+            .filter(|r| r.uid.is_none() || r.uid == Some(uid))
             .any(|r| r.remote != Some(false))
         {
             return Err(SessionDenial::UserManagerCallerRemoteSessionActive);
         }
         if records
             .iter()
-            .any(|r| r.check_local_seat_session_of(target_uid).is_ok())
+            .any(|r| r.check_local_seat_session_of(uid).is_ok())
         {
             Ok(())
         } else {
             Err(SessionDenial::UserManagerNoLocalSeatSession)
+        }
+    }
+
+    /// Preview placement rule for an unprivileged `peer_uid` (ADR 2026-10-12, S-5). A
+    /// disabled policy permits everything. `Session(id)`: the peer's own session record must
+    /// exist and be a local seat session of `peer_uid`; `UserManager(u)`: `u == peer_uid`, then
+    /// the user-manager record rule of the root `Auth` path; `Other`: permitted (the UID-level
+    /// seat check stays the gate).
+    ///
+    /// # Errors
+    /// The [`SessionDenial`] reason; an unreadable logind state is
+    /// [`SessionDenial::LogindUnavailable`] (fail closed).
+    pub fn authorize_preview_placement(
+        &self,
+        peer_uid: u32,
+        placement: &PeerPlacement,
+    ) -> Result<(), SessionDenial> {
+        let Some(source) = self.source.as_deref() else {
+            return Ok(());
+        };
+        match placement {
+            PeerPlacement::Session(id) => source
+                .session(id)
+                .map_err(|_| SessionDenial::LogindUnavailable)?
+                .ok_or(SessionDenial::CallerSessionUnresolved)?
+                .check_local_seat_session_of(peer_uid),
+            PeerPlacement::UserManager(manager_uid) => {
+                if *manager_uid != peer_uid {
+                    return Err(SessionDenial::UserManagerUidMismatch);
+                }
+                Self::check_user_manager_records(source, peer_uid)
+            }
+            PeerPlacement::Other => Ok(()),
         }
     }
 

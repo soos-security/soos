@@ -8,7 +8,8 @@ use std::process::ExitCode;
 
 use soos_push_protocol::{EXIT_CONFIG, EXIT_RUNTIME, PUSH_SOCKET_DIR_NAME};
 use soos_push_sender::{
-    bind_socket, check_not_root, install_logging, serve_connection, SendPolicy, UreqDeliverer,
+    bind_socket, check_not_root, install_logging, probe_sandbox, serve_connection, SendPolicy,
+    UreqDeliverer,
 };
 
 fn exit_code(code: i32) -> ExitCode {
@@ -21,6 +22,12 @@ fn main() -> ExitCode {
     let euid = nix::unistd::geteuid().as_raw();
     if check_not_root(uid, euid).is_err() {
         tracing::error!("the push sender refuses to run as root");
+        return exit_code(EXIT_CONFIG);
+    }
+    // ADR 2026-10-12 (S-7): refuse to run outside the unit's sandbox, before any directory
+    // or socket is created.
+    if probe_sandbox().is_err() {
+        tracing::error!("push sender sandbox not detected; refusing to start");
         return exit_code(EXIT_CONFIG);
     }
     let Some(runtime) = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from) else {

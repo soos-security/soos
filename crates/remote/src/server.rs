@@ -2405,11 +2405,28 @@ async fn camera_stream<S: SessionSource>(
         }
     };
     runtime.mark_streaming(ticket.view);
+    // A stop processed while the first frame was produced: no head, no part (S-8b).
+    if runtime.stop_requested(ticket.view) {
+        log_unshown_end(ViewEnd::Stopped);
+        drop(jpeg);
+        drop(view);
+        drop(guard);
+        return camera_first_frame_refusal(&runtime, ViewEnd::Stopped);
+    }
     if write_bounded(&mut write_half, &encode_camera_stream_head())
         .await
         .is_err()
     {
         log_unshown_end(ViewEnd::WriteFailed);
+        return None;
+    }
+    // A stop processed while the head was pending: no part, the view never counts as shown.
+    if runtime.stop_requested(ticket.view) {
+        runtime.audit_refused();
+        drop(jpeg);
+        finish_view(&mut write_half, ViewEnd::Stopped).await;
+        drop(view);
+        drop(guard);
         return None;
     }
     // From the first part on, pixels may reach the client even when the write fails half

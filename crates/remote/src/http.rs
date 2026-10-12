@@ -269,12 +269,22 @@ const MANDATORY_HEADERS: &str = "Cache-Control: no-store\r\n\
     X-Frame-Options: DENY\r\n\
     Connection: close\r\n";
 
+/// Browser hardening headers carried by every response (ADR 2026-10-12, S-6), after
+/// `MANDATORY_HEADERS`. Every reachable path is HTTPS behind `tailscale serve`/`funnel`
+/// (`--http` is refused with `421`), so HSTS is always correct; WebAuthn
+/// (`publickey-credentials-*`) keeps its default `self` allowance.
+const HARDENING_HEADERS: &str = "Strict-Transport-Security: max-age=31536000\r\n\
+    Cross-Origin-Opener-Policy: same-origin\r\n\
+    Cross-Origin-Resource-Policy: same-origin\r\n\
+    Permissions-Policy: accelerometer=(), camera=(), display-capture=(), geolocation=(), \
+    gyroscope=(), magnetometer=(), microphone=(), midi=(), payment=(), usb=()\r\n";
+
 /// Status line + `Content-Type` + `Content-Length` + mandatory headers + extras + blank
 /// line, without the body (what a `HEAD` request receives).
 #[must_use]
 pub fn encode_response_head(response: &Response) -> Vec<u8> {
     let mut out = format!(
-        "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\n{MANDATORY_HEADERS}",
+        "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\n{MANDATORY_HEADERS}{HARDENING_HEADERS}",
         response.status,
         reason_phrase(response.status),
         response.content_type,
@@ -298,10 +308,10 @@ pub fn encode_response(response: &Response) -> Vec<u8> {
     out
 }
 
-/// SSE response head (no `Content-Length`; `Content-Type: text/event-stream`).
+/// SSE response head (mandatory and hardening headers; no `Content-Length`; `Content-Type: text/event-stream`).
 #[must_use]
 pub fn encode_sse_head() -> Vec<u8> {
-    format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n{MANDATORY_HEADERS}\r\n")
+    format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n{MANDATORY_HEADERS}{HARDENING_HEADERS}\r\n")
         .into_bytes()
 }
 
@@ -313,7 +323,7 @@ pub fn encode_sse_head() -> Vec<u8> {
 #[must_use]
 pub fn encode_camera_stream_head() -> Vec<u8> {
     format!(
-        "HTTP/1.1 200 OK\r\nContent-Type: {CAMERA_STREAM_CONTENT_TYPE}\r\n{MANDATORY_HEADERS}\r\n"
+        "HTTP/1.1 200 OK\r\nContent-Type: {CAMERA_STREAM_CONTENT_TYPE}\r\n{MANDATORY_HEADERS}{HARDENING_HEADERS}\r\n"
     )
     .into_bytes()
 }

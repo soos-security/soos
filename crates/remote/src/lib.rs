@@ -62,6 +62,10 @@ pub mod webauthn;
 pub mod webpush;
 pub mod websession;
 
+/// Oldest Tailscale release whose header handling was verified (it deletes client copies of
+/// `Tailscale-User-Login` and `Tailscale-Funnel-Request` before setting them): the owner host
+/// check and the source review of 2026-10-06. Documentation and installer text only.
+pub const TAILSCALE_MIN_VERIFIED_VERSION: &str = "1.102.4";
 /// Largest configuration file accepted (bytes); larger → `ConfigError::TooLarge`.
 pub const MAX_CONFIG_BYTES: usize = 16_384;
 /// Largest `allowed_logins` list; more → `ConfigError::TooManyLogins`.

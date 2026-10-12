@@ -17,18 +17,25 @@ use crate::consensus::{
 use crate::error::DaemonError;
 use crate::health::HealthState;
 use crate::inference::{InferenceGate, InferencePriority, RequestDeadline};
-use crate::limits::{PeerConnectionLimiter, PeerLimitsConfig};
+use crate::limits::{
+    AdmissionClass, ConnectionRejection, PeerConnectionLimiter, PeerLimitsConfig,
+    AUTH_RESERVE_FIRST_REQUEST_TIMEOUT_MS,
+};
 use crate::logging::short_request_id;
 use crate::peercred::{get_peer_credentials, verify_peer_credentials, PeerCredentials};
 use crate::pipeline::{
     classify_template, current_monotonic_nanos, PipelineComponents, TemplateModelBinding,
 };
 use crate::preview::{
-    authorize_preview, preview_image_for_frame, PreviewConfig, PREVIEW_FORMAT_EMPTY,
+    authorize_preview, preview_image_for_frame, remote_preview_image_for_frame, PreviewConfig,
+    PREVIEW_FORMAT_EMPTY,
 };
 use crate::preview_peer::{classify_preview_peer_cgroup, PreviewPeerError, PreviewPeerOrigin};
 use crate::session::SessionValidator;
-use crate::session_policy::{LocalSessionPolicy, LogindSource, SystemLogind, DEFAULT_PROC_ROOT};
+use crate::session_policy::{
+    classify_peer_placement, LocalSessionPolicy, LogindSource, PeerPlacement, SystemLogind,
+    DEFAULT_PROC_ROOT,
+};
 use crate::shutdown::BlockingTasks;
 use soos_camera_v4l::{Frame, PixelFormat};
 use soos_evidence_store::{EvidenceFrame, EvidencePixelFormat, EvidenceStore, FrameMetadata};
@@ -113,6 +120,9 @@ struct ProcessedOutput {
 #[derive(Debug, Default)]
 struct PreviewPeerState {
     origin: Option<PreviewPeerOrigin>,
+    /// The peer's placement (session scope, user manager or other), read with the origin
+    /// from the same cgroup content (ADR 2026-10-12, S-5).
+    placement: Option<PeerPlacement>,
     first_frame_announced: bool,
 }
 
@@ -421,7 +431,17 @@ impl ConnectionDispatcher {
                 return Err(err);
             }
         };
-        let _permit = match self.connection_limiter.try_acquire(peer.uid) {
+        // ADR 2026-10-12 (S-3): a UID at its regular cap may still open one auth-reserved
+        // connection, usable only by one `Auth` request (preview clients never starve the
+        // user-level lock screen).
+        let admitted = match self.connection_limiter.try_acquire(peer.uid) {
+            Err(ConnectionRejection::PerUidCap) => self
+                .connection_limiter
+                .try_acquire_auth_reserve(peer.uid)
+                .map_err(|_| ConnectionRejection::PerUidCap),
+            other => other,
+        };
+        let permit = match admitted {
             Ok(permit) => permit,
             Err(rejection) => {
                 warn!(
@@ -432,6 +452,13 @@ impl ConnectionDispatcher {
                 return Err(DaemonError::ConcurrencyLimitReached);
             }
         };
+        let admission = permit.class();
+        if admission == AdmissionClass::AuthReserve {
+            debug!(
+                peer_uid = peer.uid,
+                "Connection admitted on the auth-reserved permit"
+            );
+        }
 
         let opened_at = Instant::now();
         let mut requests_processed: usize = 0;
@@ -461,7 +488,7 @@ impl ConnectionDispatcher {
             // upon timeout will never leave partial response bytes on the wire.
             let res = timeout(
                 self.config.connection_timeout,
-                self.read_and_process(&mut stream, peer, &mut preview_state),
+                self.read_and_process(&mut stream, peer, admission, &mut preview_state),
             )
             .await;
 
@@ -500,12 +527,13 @@ impl ConnectionDispatcher {
                 return Err(err);
             }
 
-            if output.one_shot {
+            if output.one_shot || admission == AdmissionClass::AuthReserve {
                 debug!("Auth request served; closing one-shot connection");
                 break;
             }
         }
 
+        drop(permit);
         Ok(())
     }
 
@@ -513,6 +541,7 @@ impl ConnectionDispatcher {
         &self,
         stream: &mut UnixStream,
         peer: PeerCredentials,
+        admission: AdmissionClass,
         preview_state: &mut PreviewPeerState,
     ) -> Result<ProcessedOutput, DaemonError> {
         // Start of the outer `connection_timeout` window for this request: every later budget
@@ -521,31 +550,28 @@ impl ConnectionDispatcher {
 
         // Step 1: Peer credentials were extracted once via SO_PEERCRED at admission.
 
-        // Step 2: Read framed length prefix (4 bytes big-endian)
-        let mut len_bytes = [0u8; 4];
-        stream.read_exact(&mut len_bytes).await?;
-        let declared_size = usize::try_from(u32::from_be_bytes(len_bytes)).map_err(|_| {
-            DaemonError::OversizedPayload {
-                size: usize::MAX,
-                max: MAX_MESSAGE_SIZE,
+        // Steps 2-3: bounded frame read. An auth-reserved connection must deliver its whole
+        // first request within `AUTH_RESERVE_FIRST_REQUEST_TIMEOUT_MS` (nested inside the
+        // outer `connection_timeout`, ADR 2026-10-12 S-3).
+        let body_buffer = if admission == AdmissionClass::AuthReserve {
+            match timeout(
+                Duration::from_millis(AUTH_RESERVE_FIRST_REQUEST_TIMEOUT_MS),
+                read_client_frame(stream),
+            )
+            .await
+            {
+                Ok(read) => read?,
+                Err(_) => {
+                    warn!(
+                        peer_uid = peer.uid,
+                        "Auth-reserved connection sent no complete request in time; closing connection"
+                    );
+                    return Err(DaemonError::Timeout);
+                }
             }
-        })?;
-
-        // Step 3: Bounded memory safety assertion
-        if declared_size > MAX_MESSAGE_SIZE || declared_size == 0 {
-            warn!(
-                declared_size = declared_size,
-                max = MAX_MESSAGE_SIZE,
-                "Rejected oversized message"
-            );
-            return Err(DaemonError::OversizedPayload {
-                size: declared_size,
-                max: MAX_MESSAGE_SIZE,
-            });
-        }
-
-        let mut body_buffer = vec![0u8; declared_size];
-        stream.read_exact(&mut body_buffer).await?;
+        } else {
+            read_client_frame(stream).await?
+        };
 
         // Step 4: Classify the frame by protocol rule (GitHub #204 / DMN-15): the message tag
         // trailer selects the type; a legacy untagged frame is accepted only when it decodes
@@ -566,6 +592,20 @@ impl ConnectionDispatcher {
                 )));
             }
         };
+
+        // An auth-reserved connection serves exactly one `Auth` request: anything else is
+        // refused before any processing, without an answer (ADR 2026-10-12 S-3).
+        if admission == AdmissionClass::AuthReserve
+            && !matches!(&message, ClientMessage::Request(req) if req.kind == RequestKind::Auth)
+        {
+            warn!(
+                peer_uid = peer.uid,
+                "Non-Auth message on the auth-reserved connection; closing connection"
+            );
+            return Err(DaemonError::Protocol(
+                "Only Auth is admitted on the auth-reserved connection".into(),
+            ));
+        }
 
         match message {
             ClientMessage::Request(req) => {
@@ -1132,7 +1172,9 @@ impl ConnectionDispatcher {
     ///    (unreadable or malformed refuses, GitHub #345);
     /// 3. the remote companion (`soos-remote.service`) is refused unless `remote_view`;
     /// 4. unprivileged peer: a local seat session of the peer UID (the root `Auth` predicate,
-    ///    ADR 2026-10-07 LC-3a);
+    ///    ADR 2026-10-07 LC-3a), then its placement on every request (its own local seat
+    ///    session, or its own user manager without a remote session of the UID; ADR
+    ///    2026-10-12 S-5);
     /// 5. per-peer-UID rate limit (`[preview] max_requests_per_sec`), root included.
     ///
     /// Only then is the camera woken (`notify_activity`) and the latest capture copied.
@@ -1161,15 +1203,18 @@ impl ConnectionDispatcher {
             });
         }
 
-        let origin = if peer_uid == 0 {
-            PreviewPeerOrigin::Local
-        } else if let Some(origin) = preview_state.origin {
-            origin
+        let (origin, placement) = if peer_uid == 0 {
+            (PreviewPeerOrigin::Local, PeerPlacement::Other)
+        } else if let (Some(origin), Some(placement)) =
+            (preview_state.origin, preview_state.placement.clone())
+        {
+            (origin, placement)
         } else {
             match self.classify_preview_peer(peer_uid, peer_pid) {
-                Ok(origin) => {
+                Ok((origin, placement)) => {
                     preview_state.origin = Some(origin);
-                    origin
+                    preview_state.placement = Some(placement.clone());
+                    (origin, placement)
                 }
                 Err(_) => {
                     warn!(
@@ -1203,6 +1248,23 @@ impl ConnectionDispatcher {
                 encoded_response: encoded,
                 completion_error: None,
             });
+        }
+
+        // 6c-2a (ADR 2026-10-12, S-5): the peer process itself must run in a local seat
+        // session of its UID, or under its own user manager while the UID owns no remote
+        // session. Evaluated on every request: the session may end or turn remote.
+        if peer_uid != 0 {
+            if let Err(denial) = self
+                .session_policy
+                .authorize_preview_placement(peer_uid, &placement)
+            {
+                warn!(
+                    peer_uid = peer_uid,
+                    reason = denial.as_str(),
+                    "Preview peer placement refused; refusing preview request"
+                );
+                return self.refuse_preview(req);
+            }
         }
 
         let now_ns = match self.now_nanos() {
@@ -1283,7 +1345,13 @@ impl ConnectionDispatcher {
         let preview_resp = if let Some(captured) = pipe.camera.latest_frame() {
             // Frames wider than the preview width or above the 2 MiB preview budget are
             // downscaled; unconvertible ones become an explicit empty image (GitHub #196).
-            let mut image = preview_image_for_frame(&captured);
+            // The remote companion has no image decoder: it receives Grey, YUYV or RGB24
+            // within 640x480 (ADR 2026-10-12, S-8d).
+            let mut image = if origin == PreviewPeerOrigin::RemoteCompanion {
+                remote_preview_image_for_frame(&captured)
+            } else {
+                preview_image_for_frame(&captured)
+            };
             PreviewResponse {
                 version: CURRENT_VERSION,
                 sequence: captured.sequence,
@@ -1328,12 +1396,13 @@ impl ConnectionDispatcher {
         })
     }
 
-    /// Classifies the origin of an unprivileged preview peer from its `/proc/<pid>/cgroup`.
+    /// Classifies the origin and the placement of an unprivileged preview peer from one read
+    /// of its `/proc/<pid>/cgroup`.
     fn classify_preview_peer(
         &self,
         peer_uid: u32,
         peer_pid: Option<i32>,
-    ) -> Result<PreviewPeerOrigin, PreviewPeerError> {
+    ) -> Result<(PreviewPeerOrigin, PeerPlacement), PreviewPeerError> {
         let pid = peer_pid
             .filter(|pid| *pid > 0)
             .ok_or(PreviewPeerError::MissingPid)?;
@@ -1342,7 +1411,10 @@ impl ConnectionDispatcher {
             .cgroup_of_pid(pid)
             .map_err(|_| PreviewPeerError::Unreadable)?
             .ok_or(PreviewPeerError::Unreadable)?;
-        classify_preview_peer_cgroup(&content, peer_uid)
+        let origin = classify_preview_peer_cgroup(&content, peer_uid)?;
+        let placement =
+            classify_peer_placement(&content).map_err(|_| PreviewPeerError::Malformed)?;
+        Ok((origin, placement))
     }
 
     /// Standard preview refusal: `ProtocolError` / `UidMismatch`, zero pixel bytes.
@@ -1397,4 +1469,33 @@ impl ConnectionDispatcher {
         debug!("Response delivered successfully");
         Ok(())
     }
+}
+
+/// Steps 2-3 of a request: the 4-byte big-endian length prefix, the bounded size check
+/// (`0 < size <= MAX_MESSAGE_SIZE`, before any allocation) and the body.
+async fn read_client_frame(stream: &mut UnixStream) -> Result<Vec<u8>, DaemonError> {
+    let mut len_bytes = [0u8; 4];
+    stream.read_exact(&mut len_bytes).await?;
+    let declared_size = usize::try_from(u32::from_be_bytes(len_bytes)).map_err(|_| {
+        DaemonError::OversizedPayload {
+            size: usize::MAX,
+            max: MAX_MESSAGE_SIZE,
+        }
+    })?;
+
+    if declared_size > MAX_MESSAGE_SIZE || declared_size == 0 {
+        warn!(
+            declared_size = declared_size,
+            max = MAX_MESSAGE_SIZE,
+            "Rejected oversized message"
+        );
+        return Err(DaemonError::OversizedPayload {
+            size: declared_size,
+            max: MAX_MESSAGE_SIZE,
+        });
+    }
+
+    let mut body_buffer = vec![0u8; declared_size];
+    stream.read_exact(&mut body_buffer).await?;
+    Ok(body_buffer)
 }
