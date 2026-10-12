@@ -656,3 +656,48 @@ async fn test_rdb_options_never_log_a_credential_id() {
         assert!(!text.contains(&needle), "the log leaks {shown}…");
     }
 }
+
+// ---------------------------------------------------------------------------------------
+// Auditor additions (AI/auditor_constraints_remote_direct_biometric.md)
+// ---------------------------------------------------------------------------------------
+
+/// RDB6 (auditor C-4, C-5): the 16-byte entry bound counts UTF-8 bytes, not characters (nine
+/// two-byte characters = 18 bytes ⇒ `400 bad_request`, nothing stored, code file kept), and
+/// names match exactly: wrongly cased names and a 16-byte multibyte name are unknown values,
+/// ignored, so the registration is accepted with no `transports` key stored and the default
+/// list named in the next unlock options.
+#[tokio::test(start_paused = true)]
+async fn test_rdb_register_transports_byte_bound_and_exact_names() {
+    let h = Harness::start_with(Options::funnel()).await;
+    let device = Authenticator::device(0x6d, b"rdb-device-006d");
+    let base = registration_body_of(&h, &device, None).await;
+    let before = std::fs::read(&h.store_path).unwrap();
+    let wide = "\u{e9}".repeat(9);
+    assert_eq!((wide.len(), wide.chars().count()), (18, 9));
+    let r = h
+        .register_verify(&with_transports(&base, &format!("[\"{wide}\"]")))
+        .await;
+    assert_result(&r, 400, "bad_request");
+    assert!(h.code_file_exists(), "the code survives a malformed body");
+    assert_eq!(
+        std::fs::read(&h.store_path).unwrap(),
+        before,
+        "nothing stored"
+    );
+
+    let at_bound = "\u{e9}".repeat(8);
+    assert_eq!(at_bound.len(), 16);
+    let raw = format!("[\"Internal\",\"HYBRID\",\"USB\",\"{at_bound}\"]");
+    let r = register_with(&h, &device, Some(&raw)).await;
+    assert_result(&r, 200, "registered");
+    let store = h.store_json_value();
+    assert!(
+        store["passkeys"][1].get("transports").is_none(),
+        "wrongly cased names are not stored"
+    );
+    let r = h.unlock_options(&Via::Tailnet).await;
+    assert_eq!(
+        r.json()["allow_credentials"][1],
+        entry(&device, &["internal", "hybrid"])
+    );
+}
