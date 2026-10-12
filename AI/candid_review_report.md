@@ -1,117 +1,143 @@
 # Candid Review Report
 
-- **Date**: 2026-10-09
-- **Target Branch**: `feat/remote-android`
-- **Base (merge-base)**: `24d0d8c`
-- **Reviewed-Diff-Fingerprint**: `52583adfe84797adecd30f28aefdd3b79798225a29fc8ce4bd8a15b4498d3047`
-- **Audited Files**: AI/ARCHITECTURE.md, AI/DECISIONS.md, AI/VERIFICATION_MATRIX.md,
-  AI/architect_spec_remote_android.md, AI/auditor_constraints_android.md,
-  AI/tester_contract_remote_android.md, AI/walkthroughs/193_remote_android.md, Cargo.lock,
-  Docs/REMOTE_COMPANION.md, crates/push-protocol/src/lib.rs,
-  crates/push-protocol/tests/android_endpoint_tests.rs,
-  crates/push-sender/tests/android_sender_tests.rs, crates/remote/Cargo.toml,
-  crates/remote/assets/{app.js, index.html, manifest.webmanifest, sw.js, badge-96.png,
-  icon-192.png, icon-512.png, icon-maskable-512.png}, crates/remote/src/{assets.rs, push.rs,
-  routes.rs}, crates/remote/tests/{android_assets_tests.rs, android_push_tests.rs,
-  android_webauthn_tests.rs}, scripts/install_remote.sh, tests/invariants/src/{lib.rs,
-  remote_android_contract.rs, remote_battery_contract.rs, remote_brand_contract.rs,
-  remote_push_contract.rs}
+- **Date**: 2026-10-12
+- **Target Branch**: `fix/remote-security-hardening`
+- **Base (merge-base)**: `f9234ea3c`
+- **Reviewed-Diff-Fingerprint**: `a7fc77f519a1713bf485039034c733eb2c7b04eed6d2d429f739b50db69692e7`
+- **Audited Files**: `AI/ARCHITECTURE.md`, `AI/DECISIONS.md`, `AI/architect_spec_remote_security_hardening.md`,
+  `AI/auditor_constraints_remote_security_hardening.md`, `AI/tester_contract_remote_security_hardening.md`,
+  `AI/walkthroughs/194_remote_security_hardening.md`, `Cargo.lock`, `Docs/DAEMON.md`, `Docs/IPC_PROTOCOL.md`,
+  `Docs/REMOTE_COMPANION.md`, `crates/daemon/Cargo.toml`, `crates/daemon/src/dispatcher.rs`,
+  `crates/daemon/src/limits.rs`, `crates/daemon/src/preview.rs`, `crates/daemon/src/preview_image.rs`,
+  `crates/daemon/src/session_policy.rs`, `crates/daemon/tests/peer_limits_tests.rs`,
+  `crates/daemon/tests/preview_authorization_tests.rs`, `crates/daemon/tests/preview_downscale_tests.rs`,
+  `crates/daemon/tests/preview_placement_tests.rs`, `crates/daemon/tests/preview_remote_view_tests.rs`,
+  `crates/push-sender/src/lib.rs`, `crates/push-sender/src/main.rs`, `crates/push-sender/tests/sandbox_tests.rs`,
+  `crates/remote/assets/sw.js`, `crates/remote/src/camera_ipc.rs`, `crates/remote/src/http.rs`,
+  `crates/remote/src/lib.rs`, `crates/remote/src/push.rs`, `crates/remote/src/server.rs`,
+  `crates/remote/tests/camera_server_tests.rs`, `crates/remote/tests/http_tests.rs`,
+  `crates/remote/tests/push_server_tests.rs`, `packaging/soos-push-sender.service`, `scripts/install_remote.sh`,
+  `tests/invariants/src/lib.rs`, `tests/invariants/src/remote_push_contract.rs`,
+  `tests/invariants/src/remote_security_hardening_contract.rs`
 
 ## 1. Executive Summary
 
-Android support for the `soos-remote` companion: four new embedded PNG assets and routes,
-an installable manifest (`id`, 192/512/maskable icons), notification `icon`/`badge`/`renotify`,
-a bounded single-shot `pushsubscriptionchange` re-subscription in the service worker,
-platform-neutral passkey/push text, a bounded `readyRegistration()` wait, unknown-key
-subscriptions kept instead of dropped, and an exhaustive `PushHost` enum replacing the
-string match (which previously classified any non-Apple/Google host as Mozilla by fallthrough).
-No PAM, daemon, policy or protocol-codec code is touched. Production code is small and
-mechanically checked; `cargo test` (remote, push-protocol, push-sender, invariants),
-`cargo clippy --all-targets -D warnings` and `cargo fmt --check` all pass locally.
+The diff implements the eight remediations of the 2026-10-12 soos-remote security review: S-1 (push sender
+unit hides `/var/log` and the coredump directory), S-2 (single-sourced minimum verified Tailscale version
+in installer/docs), S-3 (one auth-reserved daemon connection per unprivileged UID, `Auth`-only, 200 ms
+first-frame window), S-5 (preview peer placement rule: own local seat session, or own user manager without
+a remote session), S-6 (browser hardening headers on every response head), S-7 (push sender start-up
+sandbox self-check, exit 78), S-8a-d (symlink-safe installer config write, stop re-checked before the
+camera head and first part, in-place push subscription renewal, daemon-side conversion of MJPEG/NV12/oversized
+frames to Grey/RGB24 within 640x480 for the remote companion origin only).
+
+The PAM crate is untouched; no path from an error to `Allow`/`PAM_SUCCESS` was introduced; every new
+daemon branch fails closed. Test changes are additive except one owner-approved contract migration
+(CM-SR1) that strengthens an exact line set. `cargo test` (daemon, remote, push-sender, invariants, all
+features), `cargo clippy --all-targets --all-features -D warnings` and `cargo fmt --check` are green
+locally. No CRITICAL or MAJOR finding.
 
 ## 2. Test Changes
 
-Mechanical listing from the frozen patch:
+Mechanical listing (step 3 of the skill) over `target/candid_diff.patch`:
 
-- New test files: `crates/push-protocol/tests/android_endpoint_tests.rs`,
-  `crates/push-sender/tests/android_sender_tests.rs`, `crates/remote/tests/android_*_tests.rs`,
-  `tests/invariants/src/remote_android_contract.rs` (additive).
-- Removed/changed assertion lines: only patch line 5352
-  (`assert_eq!(objects.len(), 2, "exactly two manifest icons")` → `5`) in
-  `remote_brand_contract.rs::test_rmc_s53`; the other `^-` hits are documentation/comment lines.
-- Other amended assertions: `ASSET_FILES` 7 → 11 and embed count 7 → 11 (`test_rmc_s54`),
-  `login-button` label (`test_rmc_s50`), `"id":"/"` added to the manifest needles (`test_rmc_s53`),
-  `"home-screen app"` → full `PUSH_UNSUPPORTED_TEXT` (`test_rmc_s38`), `png` added to the
-  dev-dependency allowlist (`test_rbs_s6`).
-- Escape hatches: only a `tolerance` parameter in a PNG pixel-colour helper (`close()`), used
-  for exact-palette matching with small encoder slack; not a weakening of an existing check.
-- No `#[ignore]`, no `should_panic`, no inline `mod tests` change.
-
-Justification: every amendment is listed as owner-approved AM-1..AM-7 in
-`AI/architect_spec_remote_android.md` §12 and audited in `AI/auditor_constraints_android.md`.
-Each replacement is exact and equal or stronger (5 exact icon entries now pinned instead of 2;
-full text instead of a substring; the `[dependencies]` set assertion of `test_rbs_s6` untouched).
-The `test_rmc_s38` forbidden list (`addEventListener("fetch"`, `caches`, storage, absolute URLs,
-`eval`, `innerHTML`) is unchanged and still holds for the new `sw.js`. No weakening found.
+- Removed lines matching an assertion pattern: one hit, line 1916 `// Step 3: Bounded memory safety
+  assertion` in `crates/daemon/src/dispatcher.rs`. This is a production comment; the bounded size check it
+  labelled moved verbatim into `read_client_frame` (`0 < size <= MAX_MESSAGE_SIZE` before allocation). Not a
+  test change.
+- New escape hatches: one hit, a comment "within JPEG tolerance" in the new `preview_downscale_tests.rs`
+  (a bounded per-channel pixel comparison on a lossy MJPEG fixture). Justified; not an `#[ignore]`.
+- Inline `mod tests` changes: none.
+- Modified existing tests (`git diff origin/main...HEAD` lines starting with `-` in test files):
+  - `tests/invariants/src/remote_push_contract.rs` `SENDER_UNIT_LINES: [&str; 37]` -> `[&str; 38]` with one
+    inserted line `InaccessiblePaths=-/var/log -/var/lib/systemd/coredump`: tester contract **CM-SR1**
+    (owner-approved), spec §2.2/§11.3. Exact-set assertion kept, nothing removed or reordered:
+    strengthening.
+  - `crates/daemon/tests/preview_remote_view_tests.rs::test_rlc_local_peer_unaffected_by_remote_view`: one
+    added setup line writing session record `"4"` (**AM-SR1**). Assertions untouched.
+  - `crates/daemon/tests/preview_authorization_tests.rs::test_preview_frame_allowed_for_configured_uid_serves_frames`:
+    additive setup writing the test process's own session record when `/proc/self/cgroup` names a session
+    scope (**AM-SR2**). Assertions untouched.
+- All other test files (`peer_limits_tests.rs`, `preview_downscale_tests.rs`, `preview_placement_tests.rs`,
+  `sandbox_tests.rs`, `camera_server_tests.rs`, `http_tests.rs`, `push_server_tests.rs`,
+  `remote_security_hardening_contract.rs`, `tests/invariants/src/lib.rs`) contain additions only.
 
 ## 3. Deep Reasoning Audit
 
 ### Logic & Architecture
-- Tried: unknown push host reaching `PushService::of` → impossible, `PushEndpoint::parse` only
-  stores a `PushHost` from `PushHost::ALL`; the match is now exhaustive, removing the old
-  silent `_ => Mozilla` fallthrough. `PUSH_HOSTS` is derived from `PushHost::name`, so one
-  source of truth. PASS.
-- Tried: route/asset mismatch → four routes map to four `AssetId` variants, each with an
-  `include_bytes!` and `image/png`; asset set test pins the directory to exactly eleven files. PASS.
-- Tried: `readyRegistration()` never settling → timer armed before `register()`, every branch
-  calls `settle`, double resolve harmless. PASS.
-- Tried: `serverKeyMatch` returning "unknown" for a browser without `options.applicationServerKey`
-  → subscription re-posted rather than dropped (previous behaviour silently unsubscribed
-  Android Chrome every page open). Correct per spec. PASS.
-- Tried: `pushsubscriptionchange` without `newSubscription` after a `soos-remote push reset` →
-  the worker re-subscribes with the *old* key and posts it; the PC accepts it but deliveries
-  will fail until the page detects "different" on next open. See MINOR finding 1.
+- S-3 admission: `try_acquire` -> on `PerUidCap` only, `try_acquire_auth_reserve`. Tried: root peer (never
+  reserved, returns `PerUidCap`), global/unprivileged capacity full (checked before the reserve, state
+  untouched on refusal), second reserve of the same UID (refused), permit drop accounting (class-specific
+  map decremented, totals restored). `tracked_uids` counts reserve-only UIDs; the reserve map can only
+  contain UIDs that hit the regular cap, so memory stays bounded. PASS.
+- S-3 dispatch: a reserve connection must deliver its whole frame within 200 ms (nested in the outer
+  `connection_timeout`), the decoded message must be `Request` with `RequestKind::Auth`, and the loop
+  breaks after one request. Tried: preview/event on the reserve (refused before processing, covered by
+  `test_rsh_reserve_closes_non_auth_without_payload` and the invariant `refuses_events_before_processing`),
+  slow-loris partial frame (closed in window). PASS.
+- S-5 placement: `classify_peer_placement` reads the same cgroup content as the origin, session scope
+  first. Tried: a user creating `session-4.scope` inside the delegated `user@UID.service` subtree to pose
+  as a session (classified `UserManager` because only the first unit component is considered; covered by
+  test), SSH session peer (own record `REMOTE=1` -> refused), session ending between two requests on one
+  connection (re-checked per request), disabled policy (permits, as specified). `Other` is permitted by
+  design (spec §6.3); an unprivileged process cannot move itself out of its session scope or user manager
+  into `Other`. PASS.
+- S-8d conversion: applied only to `PreviewPeerOrigin::RemoteCompanion`; the IR recursion terminates after
+  one level (output is Grey); output bound 640x480x3 holds via `height_step`/`width` step and the byte
+  budget loop. Local origins keep `preview_image_for_frame` (test `test_rsh_local_preview_unchanged_for_mjpeg`). PASS.
+- S-8c renewal: `replace_or_upsert` removes the old endpoint and upserts in one locked update; capacity is
+  evaluated after the removal; `TooMany` writes nothing; an unparsable old endpoint is treated as absent.
+  The route already requires an authenticated owner session, who could unsubscribe any endpoint anyway. PASS.
+- S-8b: stop is re-checked after `mark_streaming` and after the head; both paths audit as refused and never
+  count the view as shown. PASS.
 
 ### PAM Concurrency & Deadlines
-- `crates/pam` untouched. The worker POST is bounded by a 10 s `AbortController` with timer
-  cleared in `finally`; one attempt, no retry. PASS.
+- `crates/pam` is not in the diff. The new reserve window is daemon-side and only shortens how long an
+  over-cap connection may stay idle; a PAM client that misses the window gets a closed socket and falls back
+  to `PAM_IGNORE` through the unchanged client path. PASS.
 
 ### Panic Safety & Fail-Closed
-- No new `unwrap/expect/panic!/indexing` in production Rust. The service-worker POST goes
-  through the existing `push-subscribe` CSRF path (`X-Soos-Action`, `Sec-Fetch-Site`, `Origin`
-  same-origin) and the existing session/tailnet gate; a refusal is swallowed and grants
-  nothing. No path to unlock or `PAM_SUCCESS`. PASS.
+- No `unwrap/expect/panic!/todo!/unreachable!` or slice indexing added in production (grep over the
+  production hunks; workspace lints pass under `-D warnings`). Every new error path refuses: placement errors
+  map to `refuse_preview`, cgroup malformation to `PreviewPeerError::Malformed`, logind read failure to
+  `LogindUnavailable`, sandbox probe failure to exit 78, unconvertible frames to the empty image. No path
+  reaches `Allow`/`PAM_SUCCESS`. PASS.
 
 ### Test Integrity & Anti-Weakening
-- See section 2. New tests exercise exhaustive host classification, PNG dimensions/opacity/
-  palette, routes and CSP headers, and sw.js shape; a wrong implementation (e.g. host fallthrough,
-  missing route, transparent maskable icon) would fail them. All pass. PASS.
+- See §2. New tests can fail against plausible wrong implementations: the reserve tests distinguish
+  "admit any request" from "Auth only", the placement tests distinguish "any local session of the UID" from
+  "the peer's own session", the sandbox tests reject non-`ro` options, `/` tmpfs, a mount stacked on the home
+  and a second child bind. Locally all green. PASS.
 
 ### Memory, Bounds & Secrets
-- Assets are compile-time `include_bytes!` (bounded, ~19 KB total). The re-subscription body is
-  the browser's `PushSubscription.toJSON()`, bounded server-side by the existing body limit and
-  endpoint validation (`MAX_PUSH_ENDPOINT_BYTES`, host allowlist). No password, frame or
-  embedding added to any payload or log. PASS.
+- Frame reads bounded before allocation (`read_client_frame`); mountinfo read bounded to 1 MiB + 1 and
+  refused above; decoded MJPEG buffers stay in `Zeroizing`; the IR intermediate frame is zeroized by
+  `Drop for Frame`. Sandbox errors carry fixed texts (no path echoed); the probe never reads `/var/log`
+  entries. Installer refuses a symlinked config and writes with `set -C` under `umask 077`. PASS.
 
 ### Supply Chain & Automation
-- `png = "=0.18.1"` is a test-only dev-dependency already locked transitively through `image`;
-  `Cargo.lock` gains only a dependency-list entry, no new package. No workflow changes.
-  `install_remote.sh` changes are text only. PASS.
+- `jpeg-encoder` added to `soos-daemon` dev-dependencies only, already a workspace dependency (no new crate
+  in `Cargo.lock` beyond the dependency edge). No workflow changes. `scripts/install_remote.sh` change is
+  defensive. PASS.
 
 ### English-Only Policy
-- All code, comments, docs and user-facing strings in the diff are English. PASS.
+- No non-English text in added lines, commit subjects or docs. PASS.
 
 ## 4. Detailed Findings & Action Items
 
-- **[MINOR]** `crates/remote/assets/sw.js` `renewedSubscription()` — when the browser gives no
-  `newSubscription`, the worker re-subscribes with the old subscription's
-  `applicationServerKey` and posts it without comparing against the PC's current VAPID key. After
-  a `soos-remote push reset` this registers a subscription that can never receive pushes until
-  the page is reopened (where `serverKeyMatch` drops it). Not a security issue (the push service
-  rejects the mismatched VAPID JWT; nothing is disclosed). Optional fix: fetch `/api/push` and use
-  its `public_key`, or skip the post when it differs.
-- **[SUGGESTION]** `crates/remote/assets/app.js` header comment: two reflowed lines exceed the
-  file's usual wrap width; cosmetic only.
+- **[MINOR]** `crates/daemon/src/preview_image.rs` (`sample_rgb`, lenient chroma) — for an odd-width YUYV
+  frame the macropixel index `(y*width + (x & !1))*2` does not follow row boundaries, so interior pixels can
+  take chroma bytes from the neighbouring row; only the final incomplete macropixel falls back to neutral
+  chroma. Colour fidelity only (odd-width YUYV is not a real V4L2 layout); no bound or safety impact. No
+  change required for merge.
+- **[SUGGESTION]** `crates/daemon/src/limits.rs` / `dispatcher.rs` — a same-UID process can repeatedly
+  occupy the single auth-reserved permit (connect, send `Auth`, reconnect). Same-UID processes are inside the
+  trust boundary of the user-level lock screen, so this does not regress the threat model; a short per-UID
+  cool-down on reserve admissions could be considered later.
+- **[SUGGESTION]** `crates/push-sender/src/lib.rs` `probe_sandbox` — `std::env::current_exe` returns a
+  path suffixed with ` (deleted)` after the binary is replaced in place, which makes the self-check refuse
+  with exit 78 until the unit restarts on the new binary. Fail-closed and acceptable; worth one line in the
+  troubleshooting table.
 
 ## 5. Final Verdict
 
