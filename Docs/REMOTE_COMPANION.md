@@ -84,6 +84,10 @@ only while both hold:
    Only `tailscaled` (root) and the owner can connect to it, so a local process cannot inject a
    forged identity, and the owner forging their own login is no escalation.
 
+Reason 1 was verified on **Tailscale 1.102.4** (ADR 2026-10-12 "soos-remote Security
+Hardening"): run Tailscale 1.102.4 or later on this PC, for `tailscale serve` as for Funnel
+(check with `tailscale version`). The service cannot detect the proxy version.
+
 Consequences:
 
 - **Never** put any other reverse proxy in front of the socket, and never run
@@ -174,8 +178,11 @@ every unlock (section 2a). Enable Funnel only if you accept the extra public exp
 under *Accepted risk* below. Other public exposure paths (for example Cloudflare Tunnel or
 Cloudflare Access) are not covered by this page or by the ADR.
 
-**Prerequisites for Funnel** (tailnet admin console, owner actions): Tailscale 1.38.3 or later,
-MagicDNS and HTTPS certificates enabled for the tailnet, and the `funnel` node attribute granted
+**Prerequisites for Funnel** (tailnet admin console, owner actions): Tailscale **1.102.4 or later**
+on this PC (the release whose stripping of client-supplied `Tailscale-User-Login` and
+`Tailscale-Funnel-Request` headers was verified; an older `tailscaled` might forward a forged
+identity header from an internet client, which the service would then treat as a tailnet
+caller; check with `tailscale version`), MagicDNS and HTTPS certificates enabled for the tailnet, and the `funnel` node attribute granted
 to this PC in the tailnet policy file, for example
 
 ```jsonc
@@ -351,8 +358,8 @@ password, or attempt while locked out) and counts — **never the typed password
 part, length or hash of it (no journal line contains it, and soos never captures it). With
 `push_previews = "generic"` the visible text is only "Security alert on your PC — Open soos for
 details". A notification is readable on the **locked** iPhone unless you set *Settings →
-Notifications → Show Previews → When Unlocked* (or choose `push_previews = "generic"`). The
-message is end-to-end encrypted (RFC 8291): the push service (Apple, Google or Mozilla) sees
+Notifications → Show Previews → When Unlocked* (or choose `push_previews = "generic"`) (Android:
+section 2h). The message is end-to-end encrypted (RFC 8291): the push service (Apple, Google or Mozilla) sees
 only its size, time and the PC's public address, never its content. The page stays the source of truth: push delivery
 is best effort.
 
@@ -393,7 +400,12 @@ date). Anyone signed in to the page (your tailnet identity, or a Funnel passkey 
 a device, so check the list after enabling and whenever a device is unknown:
 `soos-remote push list` prints `<N>  <push host>  created <unix time>`,
 `soos-remote push remove N` removes one, and `soos-remote passkeys remove N` ends the Funnel
-sessions of a passkey that is not yours. `soos-remote push reset` replaces the push key and
+sessions of a passkey that is not yours. When the browser renews a subscription, the service
+worker names the endpoint it replaces (`replacesEndpoint`) and the PC swaps the two in one store
+update, so a renewal never leaves a stale device in one of the 4 slots. Some browsers (Android
+and iPhone alike) give the worker no old subscription, or the two endpoints together exceed the
+2048-byte request limit: the stale device then stays until the push service reports it gone
+(404/410) or `soos-remote push remove N`. `soos-remote push reset` replaces the push key and
 removes every device (each phone must tap *Enable notifications* again); use it as well if the
 page says the notification store was removed.
 
@@ -407,8 +419,13 @@ network access (`AF_INET`/`AF_INET6`), it holds no key, accepts only `https://` 
 `web.push.apple.com`, `fcm.googleapis.com` and `updates.push.services.mozilla.com`, refuses
 the whole request if any resolved address is private (loopback, LAN, tailnet `100.64.0.0/10`
 and `fd7a:115c:a1e0::/48`, …), follows no redirect, uses no proxy, and gives up after 10 s.
-Its sandbox hides your home directory (except its own binary) and `/run` (except its socket
-directory), so it cannot read your files, `remote.sock`, the session bus or `tailscaled`.
+Its sandbox hides your home directory (except its own binary), `/run` (except its socket
+directory) and the system logs (`/var/log`, the journal included, and
+`/var/lib/systemd/coredump`), which your `wheel`/`adm`/`systemd-journal` membership would
+otherwise let it read, so it cannot read your files, `remote.sock`, the session bus,
+`tailscaled` or the system journal. At start-up it checks that sandbox itself (a read-only
+`/run`, a read-only tmpfs over the home directory with nothing mounted back on top of it except
+its own binary, and `/var/log` not listable) and refuses to start otherwise (exit 78).
 Its logging filter is fixed in code (no `RUST_LOG`): the HTTP and TLS libraries never log the
 endpoint or the request. A 404/410 answer removes the device; other refusals are shown as
 "The push service refused the last notification".
@@ -420,7 +437,21 @@ answers (at worst a wrong delivery state or a removed device). On a host whose
 its sandbox and every notification fails; `scripts/install_remote.sh` prints a warning when it
 detects this. The workaround is a user drop-in (`systemctl --user edit soos-push-sender`) that adds
 `BindReadOnlyPaths=-/run/systemd/resolve`; the packaged unit keeps `/run` fully hidden. The sandbox and the delivery to the iPhone are
-verified on the owner's hardware (matrix row RMC74).
+verified on the owner's hardware (matrix rows RMC74 and RSH18); on a host whose systemd is older
+than the supported range, check the unit with `systemd-analyze --user security soos-push-sender`.
+
+The sender refuses to start (exit 78, not restarted; `journalctl --user -u soos-push-sender`
+shows "sandbox not detected") when it is run by hand, when a drop-in removes
+`ProtectHome=tmpfs`, `TemporaryFileSystem=/run:ro` or `InaccessiblePaths=`, when a drop-in mounts
+the home directory (or a path inside it other than the sender binary) back on top of the hidden
+home (for example `BindPaths=%h`), when its binary is not at `~/.local/bin/soos-push-sender`, and
+when the home directory lies outside the paths `ProtectHome=` covers: the push sender needs a
+home directory under `/home` (or a path `ProtectHome=` covers); elsewhere it refuses to start,
+because its sandbox could not hide it. It derives the home directory from its own binary path,
+never from the environment. A mount table containing a mount point that is not valid UTF-8
+also makes it refuse to start (fail closed). A bind added under `/run` by a drop-in (for example
+`BindReadOnlyPaths=/run/dbus`) is **not** detected: the resolver drop-in below legitimately adds
+one there.
 
 Opt-in drop-in for such hosts only (check first with `readlink -f /etc/resolv.conf`; nothing
 to do when it does not start with `/run/systemd/resolve/`):
@@ -556,6 +587,10 @@ these hold; every unknown or failed check refuses:
   active; a locked session counts). There is no view after a full logout, from an SSH-only
   login or under a lingering user manager (the same rule now applies to the `soos-gui`
   preview);
+- the requesting process itself runs inside such a local seat session, or under your own user
+  manager (`soos-remote.service`) while your UID owns **no remote session** (ADR 2026-10-12, the
+  rule the root face unlock path already applies): while an SSH session of yours is open, or a
+  process left running from one (for example `tmux`), the view is refused (`camera_refused`);
 - in `remote.toml` (section 5): `camera_view = true` (requires `rp_id`); over Funnel also
   `camera_view_funnel = true` (requires `camera_view` and `allow_funnel`), otherwise the view
   is tailnet only and a Funnel caller gets `403 camera_tailnet_only`.
@@ -601,8 +636,10 @@ stream). It is deliberately not labelled `multipart/x-mixed-replace`: the iOS ne
 handles that type itself, splits the response and makes the page's `fetch` fail ("Load
 failed", seen on the owner's iPhone on 2026-10-07). The `200` head is sent only once the first JPEG is ready (within 5 s); before that a
 failure is a JSON error the page can explain (`camera_refused`, `camera_unavailable`,
-`camera_format_unsupported`). Only Grey, YUYV and RGB24 preview frames are converted;
-`soos-remote` contains no image decoder.
+`camera_format_unsupported`). The daemon converts MJPEG, NV12 and frames larger than 640x480
+for the companion (ADR 2026-10-12: Grey, YUYV or RGB24 within 640x480, decimated by an integer
+step, so a 640x512 sensor is shown at 320x256); `soos-remote` itself still contains no image
+decoder.
 
 **Full screen, portrait and landscape.** A tap on the live image toggles **full screen**: the image
 fills the screen on the brand ink background, inside the iPhone safe areas, scaled to fit
@@ -634,10 +671,13 @@ can still screen-record what it shows.
 **Interaction with face unlock.** A view holds one daemon connection of your UID for its whole
 duration and uses at most `camera_fps` of the per-UID preview quota (`[preview]
 max_requests_per_sec`, 40 by default, shared with `soos-gui`). The daemon admits at most
-`max_connections_per_uid` (`[peer_limits]`, default 2) connections per unprivileged UID: with a
-view open **and** `soos-gui` open, a face request of a lock screen running as your user is
-refused at admission and falls back to the password (fail-safe, never an unlock). Close
-`soos-gui` during a view, or raise `max_connections_per_uid` to 3. Root PAM callers (`sudo`,
+`max_connections_per_uid` (`[peer_limits]`, default 2) connections per unprivileged UID, plus one
+**auth-reserved** connection (ADR 2026-10-12): with a view open **and** `soos-gui` open, a face
+request of a lock screen running as your user still gets that reserved connection, which serves
+only one `Auth` request whose whole first request arrives within 200 ms (anything else is closed
+unanswered). PAM shows "Looking for face" through the lock screen's conversation between
+connecting and sending its request, so a lock screen that takes 200 ms or more to display that
+message misses the reserve and falls back to the password (fail-safe, never an unlock). Root PAM callers (`sudo`,
 the display manager) are not limited this way. The daemon closes an idle connection after
 `connection_timeout_ms` (`[dispatcher]`, default 2500 ms) and every connection after its
 lifetime and request caps; the client sends a request at least once per second, reconnects on
@@ -768,35 +808,44 @@ and battery level work the same way. Owner steps and caveats:
 3. **Notification permission.** Tap **Enable notifications**; on Android 13 or later the system
    also asks whether Chrome may post notifications (if refused: Settings → Apps → Chrome →
    Notifications). The site permission is under Chrome → Site settings → Notifications.
-4. **Passkey.** The passkey is stored by **Google Password Manager** (or Samsung Pass) and
+4. **Lock-screen privacy.** Notifications are shown on the **locked** phone with their full text by
+   default (`push_previews` defaults to `"detailed"`: source, account and count). To hide it:
+   Settings → Notifications → **Notifications on lock screen** → *Hide sensitive notifications*
+   (or *Show conversations, default and silent* without content; names vary by vendor: Samsung
+   "Lock screen → Notifications → Hide content"), and per app: Settings → Apps → Chrome →
+   Notifications → the site's channel → *Lock screen* → *Hide sensitive content*. Or set
+   `push_previews = "generic"` in `remote.toml`: the text is then only "Security alert on your
+   PC — Open soos for details" on every phone.
+5. **Passkey.** The passkey is stored by **Google Password Manager** (or Samsung Pass) and
    unlocked with **fingerprint or screen lock**; a screen lock is required. It is synced to the
    Google account (backup flags set), the same accepted risk as iCloud Keychain (section 8).
    Enroll it over the tailnet with `soos-remote enroll-code` as in section 2b.
-5. **Battery optimisation.** Pushes use `Urgency: high` and reach a phone in Doze, but vendor
+6. **Battery optimisation.** Pushes use `Urgency: high` and reach a phone in Doze, but vendor
    battery savers can still delay or drop them: set Chrome (and Firefox if used) to
    **Unrestricted** battery usage (Samsung: "Never sleeping apps").
-6. **Push services.** Chrome and Samsung Internet use `fcm.googleapis.com` (device list label
+7. **Push services.** Chrome and Samsung Internet use `fcm.googleapis.com` (device list label
    "Android / Chrome (Google)"); Firefox uses `updates.push.services.mozilla.com` ("Firefox
    (Mozilla)"). Both are in the existing allowlist; Google or Mozilla see delivery metadata,
    never the content (section 2d). Notifications carry the soos icon and a white star badge in
    the status bar, and a second burst under the same tag alerts again (`renotify`). The worker
    makes no request on push: the browser itself loads the two same-origin images when it shows
    the notification, and still shows it without them when the PC is unreachable.
-7. **Firefox caveats.** The home-screen install opens like a browser shortcut on some versions;
+8. **Firefox caveats.** The home-screen install opens like a browser shortcut on some versions;
    passkey support depends on the Firefox and Android versions (if no passkey prompt appears, use
    Chrome); Firefox must not be battery restricted for its push connection. Firefox fires
    `pushsubscriptionchange`; the page re-sends the subscription on every open anyway.
-8. **Subscription renewal.** When the browser renews a push subscription
+9. **Subscription renewal.** When the browser renews a push subscription
    (`pushsubscriptionchange`), the service worker re-sends it once to the PC with the page's
    exact request shape (`POST /api/push/subscribe`, `X-Soos-Action: push-subscribe`, aborted
    after 10 s, never retried). The server checks are unchanged, so it fails silently when the PC
    refuses it (off-tailnet, an expired Funnel session, four devices already registered); opening
-   the app re-sends it. Over Funnel, this single request refreshes the idle timer of a still-valid
+   the app re-sends it. The request names the replaced endpoint when the browser provides it, so
+   the stale device is removed in the same update (section 2d). Over Funnel, this single request refreshes the idle timer of a still-valid
    web session (its 8 h absolute lifetime is unchanged).
-9. **Shortcuts/Tasker.** Not integrated; pointer only: the `POST /api/lock` call of section 4 can
+10. **Shortcuts/Tasker.** Not integrated; pointer only: the `POST /api/lock` call of section 4 can
    be issued by any HTTP automation app (Tasker, HTTP Shortcuts) over the tailnet with the same
    `X-Soos-Action: lock` header. Unlock still needs the page.
-10. **Owner hardware check (matrix row RAN12).** On an Android phone (Chrome; Samsung Internet or
+11. **Owner hardware check (matrix row RAN12).** On an Android phone (Chrome; Samsung Internet or
     Firefox if available): (1) over the tailnet with the Tailscale app, Chrome **Install app**
     adds the soos icon (maskable, not clipped) and opens standalone with the blue status bar;
     (2) enroll a passkey with `soos-remote enroll-code`, sign in over Funnel with fingerprint or
@@ -847,8 +896,11 @@ The script refuses to run as root and never calls `sudo`. It builds `soos-remote
 writes a commented configuration template to `${XDG_CONFIG_HOME:-$HOME/.config}/soos/remote.toml`
 (mode `0600`, **only when absent**, with `allowed_logins = []` so the service refuses to start
 until you fill it in; it ends with a commented `# battery_status = true` line, section 2g),
-and runs `systemctl --user daemon-reload`. It never enables the unit and
-never runs `tailscale`; those are your steps:
+and runs `systemctl --user daemon-reload`. It refuses to write through a `remote.toml` that is a
+symbolic link and creates the template without ever overwriting a file. It never enables the
+unit and never runs `tailscale`; those are your steps (the tailnet path relies on the same header
+stripping as Funnel, so Tailscale 1.102.4 or later applies to `tailscale serve` too; check with
+`tailscale version`):
 
 1. Put your Tailscale login in `remote.toml`:
 
@@ -1076,10 +1128,12 @@ reason classes.
 | No **Camera** card on the page | `camera_view` is absent or `false` | Section 2f |
 | Camera: "The PC refused the camera view" (`403 camera_refused`) | The daemon refused the preview: `[preview] enabled`, `allowed_uids` or `remote_view` not set, or nobody is logged in at the PC's seat (SSH only, full logout) | Section 2f setup, step 2; log in at the PC |
 | Camera: `503 camera_unavailable` | The daemon is stopped, the camera gives no frame, or the daemon connection failed | `systemctl status soos-daemon`; retry |
-| Camera: `503 camera_format_unsupported` | The camera delivers NV12 or MJPEG previews, which `soos-remote` does not convert | Not supported in this version |
+| Camera: `503 camera_format_unsupported` | A daemon older than the 2026-10-12 hardening (it forwards NV12 or MJPEG previews, which `soos-remote` does not convert), or a frame the daemon could not convert | Update and restart `soos-daemon`; check the camera with `soos-gui` |
+| Camera: `403 camera_refused` while an SSH session of yours is open | An SSH session of yours, or a process left running from one (e.g. `tmux`), is open: the daemon refuses previews to processes under your user manager while your UID owns a remote session (a `soos-gui` started as a user unit is refused for the same reason) | `loginctl list-sessions` (a `remote` session of your user, possibly in state `closing`); end that process or run `loginctl terminate-session <id>` |
+| Push sender unit `failed`, exit status 78, "sandbox not detected" | The sender runs outside its packaged sandbox: started by hand, a drop-in weakened `ProtectHome=`, `TemporaryFileSystem=/run:ro` or `InaccessiblePaths=`, or mounted the home back, the binary is not at `~/.local/bin/soos-push-sender`, or the home directory lies outside `/home` | Reinstall with `scripts/install_remote.sh`, remove the drop-in, then `systemctl --user restart soos-push-sender` (section 2d, Limits) |
 | Camera: `403 camera_tailnet_only` | Over Funnel without `camera_view_funnel = true` | Use the tailnet, or section 2f |
 | Camera: `409 view_in_progress` | Another view is open (one view for the whole PC; there is no cooldown after a view) | Stop the other view, then start again |
-| Face unlock falls back to the password during a view | The view and `soos-gui` hold both daemon connections of your UID (`max_connections_per_uid` = 2) | Close `soos-gui` during a view, or raise `max_connections_per_uid` (section 2f) |
+| Face unlock falls back to the password during a view | The view and `soos-gui` hold both daemon connections of your UID (`max_connections_per_uid` = 2) and the lock screen did not send its request on the auth-reserved connection within 200 ms (a slow PAM conversation), or another process of yours holds that reserve | Close `soos-gui` during a view, or raise `max_connections_per_uid` (section 2f) |
 | The page shows "Battery: unknown" | The power-supply class could not be read completely within the bounds (an entry without a readable `type`, more than 64 entries or 8 batteries, a driver slower than 500 ms) | `cat /sys/class/power_supply/*/type`; a desktop without a battery shows "No battery" |
 | Signed in in Safari but the home-screen app asks again | Safari and the home-screen app keep separate cookies | Sign in once in each |
 | Android: no notification while the screen is off | A battery saver restricts Chrome (or Firefox) | Set the browser to **Unrestricted** battery usage (section 2h) |
@@ -1092,6 +1146,9 @@ reason classes.
   consumer. The page shows `Unreachable` when no event arrived for 45 s (measured on the phone
   from the last event's arrival, not from `checked_unix_ms`).
 - The status is only as truthful as the desktop's `LockedHint` (section 3).
+- Identity headers are trusted because `tailscaled` strips client copies (verified on Tailscale
+  1.102.4): a downgrade of `tailscaled` below 1.102.4, or a future release that stops stripping
+  them, re-opens the forged-header risk, and the service cannot detect the proxy version.
 - The host and transport checks rely on `tailscale serve` setting `X-Forwarded-Host` and
   `X-Forwarded-Proto` (verified with Tailscale 1.102.4, 2026-10-06; section 4); a Serve
   release that stops sending them makes every proxied request `421` (fail-closed, section 7),
@@ -1131,7 +1188,10 @@ reason classes.
   `@/tmp/.X11-unix/X0`) and forge replies; a client of your uid that delays `soos-remote`
   beyond 18 s can cause a duplicate notification; a newer summary replaces a pending
   `Retry-After` retry and is sent at once; a stolen Funnel session can register a device (check
-  the device list); `ring`, `rustls` and the RustCrypto crates are not independently audited.
+  the device list); a renewal without the old subscription (some browsers) or above the
+  2048-byte limit leaves the stale device until a 404/410 or `push remove`; the sender still
+  reads world-readable files outside its hidden paths (`/etc`, `/usr`) and the `/proc` entries of
+  your other processes, and its start-up check does not detect a bind added under `/run`; `ring`, `rustls` and the RustCrypto crates are not independently audited.
 - Live camera view (section 2f):
   - Any process of your UID can already read frames through the GUI preview
     (`allowed_uids`), start a unit named `soos-remote.service`, or run `soos-remote` outside
@@ -1142,7 +1202,9 @@ reason classes.
     `POST /api/camera/stop` (harmless).
   - A view holds one of your UID's 2 daemon connections and up to 10 of the 40 preview requests
     per second shared with `soos-gui`: with `soos-gui` open as well, a lock-screen face request
-    is refused at admission and falls back to the password. At each proactive reconnect (at
+    uses the single auth-reserved connection; a process of your UID can occupy that reserve for
+    up to 200 ms per connection, and a lock screen whose PAM conversation takes 200 ms or more
+    misses it (password fallback). At each proactive reconnect (at
     most every 25 s) the client waits at most 200 ms for the daemon to release the old
     connection; a PAM request in that window can still be refused at admission (password
     fallback).
@@ -1176,8 +1238,8 @@ reason classes.
   "monitoring lost" notifications, notification actions, and push hosts other than Apple,
   Google and Mozilla (section 2d covers only failed-password alerts and the test notification).
 - Any recording, snapshot or still image of the **live camera** view (section 2f), audio,
-  H.264/WebRTC or any other live camera transport, an on-screen indicator, NV12/MJPEG
-  conversion, and any embedding or evidence access.
+  H.264/WebRTC or any other live camera transport, an on-screen indicator, any image decoder
+  inside `soos-remote` (the daemon converts frames for it), and any embedding or evidence access.
 - Battery time-to-empty or time-to-full, battery health or cycle count, peripheral batteries
   (`scope=Device`), low-battery notifications, any write to sysfs, UPower.
 - A native Android app, FCM direct API keys, Edge desktop push (`*.notify.windows.com`), Android
