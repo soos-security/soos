@@ -2,7 +2,9 @@
 //!
 //! On-disk format (JSON, `deny_unknown_fields`, at most `MAX_CREDENTIAL_STORE_BYTES`):
 //! `{"version":1,"user_handle":"<b64url>","passkeys":[{"credential_id":…,"public_key":…,
-//! "sign_count":…,"backup_eligible":…,"backup_state":…,"created_unix_s":…}]}`.
+//! "sign_count":…,"backup_eligible":…,"backup_state":…,"created_unix_s":…[,"transports":[…]]}]}`.
+//! The optional `transports` key (GitHub #354) is omitted when empty, so a store without
+//! transports encodes byte-identically to the original format.
 //!
 //! Reads open the file `O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC` and check type,
 //! owner, mode and size on the same descriptor before a bounded read. Writes are
@@ -49,6 +51,135 @@ pub struct PasskeyRecord {
     pub backup_state: bool,
     /// Registration time (Unix s).
     pub created_unix_s: u64,
+    /// Transports reported by the browser at registration (`EMPTY` when unknown).
+    pub transports: TransportSet,
+}
+
+/// A WebAuthn L3 `AuthenticatorTransport` value (§5.8.4). Declaration order is the
+/// canonical output order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthenticatorTransport {
+    /// "internal"
+    Internal,
+    /// "hybrid"
+    Hybrid,
+    /// "usb"
+    Usb,
+    /// "nfc"
+    Nfc,
+    /// "ble"
+    Ble,
+    /// "smart-card"
+    SmartCard,
+}
+
+impl AuthenticatorTransport {
+    /// Every value, canonical order.
+    pub const ALL: [Self; 6] = [
+        Self::Internal,
+        Self::Hybrid,
+        Self::Usb,
+        Self::Nfc,
+        Self::Ble,
+        Self::SmartCard,
+    ];
+
+    /// The exact WebAuthn name.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Internal => "internal",
+            Self::Hybrid => "hybrid",
+            Self::Usb => "usb",
+            Self::Nfc => "nfc",
+            Self::Ble => "ble",
+            Self::SmartCard => "smart-card",
+        }
+    }
+
+    /// Exact, case-sensitive match of one of the six names; anything else is `None`.
+    #[must_use]
+    pub fn from_name(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|t| t.as_str() == name)
+    }
+
+    /// The bit of this value in a [`TransportSet`] (index in `ALL`, always < 6).
+    const fn bit(self) -> u8 {
+        match self {
+            Self::Internal => 1,
+            Self::Hybrid => 1 << 1,
+            Self::Usb => 1 << 2,
+            Self::Nfc => 1 << 3,
+            Self::Ble => 1 << 4,
+            Self::SmartCard => 1 << 5,
+        }
+    }
+}
+
+/// A set of transports (bit `i` = `AuthenticatorTransport::ALL[i]`); bounded by
+/// construction (at most 6 values, no duplicates). The field is private so no bit outside
+/// `ALL` can be set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct TransportSet(u8);
+
+impl TransportSet {
+    /// No transport (legacy records, or a browser without `getTransports`).
+    pub const EMPTY: Self = Self(0);
+    /// `{Internal, Hybrid}`: what an allow-list entry carries when the record has none.
+    pub const DEFAULT_ALLOW: Self = Self::EMPTY
+        .with(AuthenticatorTransport::Internal)
+        .with(AuthenticatorTransport::Hybrid);
+
+    /// `self` plus `transport`.
+    #[must_use]
+    pub const fn with(self, transport: AuthenticatorTransport) -> Self {
+        Self(self.0 | transport.bit())
+    }
+
+    /// Whether `transport` is in the set.
+    #[must_use]
+    pub const fn contains(self, transport: AuthenticatorTransport) -> bool {
+        self.0 & transport.bit() != 0
+    }
+
+    /// Whether the set is empty.
+    #[must_use]
+    pub const fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+
+    /// Names in canonical (`ALL`) order.
+    #[must_use]
+    pub fn names(self) -> Vec<&'static str> {
+        AuthenticatorTransport::ALL
+            .into_iter()
+            .filter(|t| self.contains(*t))
+            .map(AuthenticatorTransport::as_str)
+            .collect()
+    }
+}
+
+/// The `allow_credentials` value of the unlock and camera options (spec D-1, D-3): one
+/// `{"id": <b64url id>, "transports": [<names>]}` per record, store order; a record with
+/// `EMPTY` transports carries [`TransportSet::DEFAULT_ALLOW`]. Pure, never logs.
+#[must_use]
+pub fn allow_credentials(file: &PasskeyFile) -> serde_json::Value {
+    serde_json::Value::Array(
+        file.passkeys
+            .iter()
+            .map(|record| {
+                let transports = if record.transports.is_empty() {
+                    TransportSet::DEFAULT_ALLOW
+                } else {
+                    record.transports
+                };
+                serde_json::json!({
+                    "id": b64url_encode(&record.credential_id),
+                    "transports": transports.names(),
+                })
+            })
+            .collect(),
+    )
 }
 
 impl fmt::Debug for PasskeyRecord {
@@ -95,6 +226,25 @@ struct RecordJson {
     backup_eligible: bool,
     backup_state: bool,
     created_unix_s: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    transports: Vec<String>,
+}
+
+/// Strictly validates the stored transport names: at most six, each exactly one of the
+/// WebAuthn names, no duplicate.
+fn transports_from(names: &[String]) -> Result<TransportSet, StoreError> {
+    if names.len() > AuthenticatorTransport::ALL.len() {
+        return Err(StoreError::Malformed);
+    }
+    let mut set = TransportSet::EMPTY;
+    for name in names {
+        let transport = AuthenticatorTransport::from_name(name).ok_or(StoreError::Malformed)?;
+        if set.contains(transport) {
+            return Err(StoreError::Malformed);
+        }
+        set = set.with(transport);
+    }
+    Ok(set)
 }
 
 /// Validates one record.
@@ -117,6 +267,7 @@ fn record_from(json: &RecordJson) -> Result<PasskeyRecord, StoreError> {
     if json.backup_state && !json.backup_eligible {
         return Err(StoreError::Malformed);
     }
+    let transports = transports_from(&json.transports)?;
     Ok(PasskeyRecord {
         credential_id,
         public_key,
@@ -124,6 +275,7 @@ fn record_from(json: &RecordJson) -> Result<PasskeyRecord, StoreError> {
         backup_eligible: json.backup_eligible,
         backup_state: json.backup_state,
         created_unix_s: json.created_unix_s,
+        transports,
     })
 }
 
@@ -180,6 +332,12 @@ pub fn encode_store(file: &PasskeyFile) -> Vec<u8> {
                 backup_eligible: r.backup_eligible,
                 backup_state: r.backup_state,
                 created_unix_s: r.created_unix_s,
+                transports: r
+                    .transports
+                    .names()
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect(),
             })
             .collect(),
     };

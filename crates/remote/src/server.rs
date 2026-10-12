@@ -90,7 +90,7 @@ use crate::challenge::{
 };
 use crate::config::RemoteConfig;
 use crate::credentials::{
-    CredentialStore, PasskeyFile, PasskeyRecord, StoreError, STORE_LOCK_RETRY_MS,
+    allow_credentials, CredentialStore, PasskeyFile, PasskeyRecord, StoreError, STORE_LOCK_RETRY_MS,
 };
 use crate::enroll::{normalized_code_hash, read_code_file, remove_code_file, EnrollError};
 use crate::http::{
@@ -541,14 +541,18 @@ impl<S: SessionSource> Shared<S> {
         )
     }
 
-    /// The common tail of the login and unlock options routes: lockout and options limiter
-    /// of `key`, a non-empty store, a fresh challenge issued into its pool.
+    /// The common tail of the login, unlock and camera options routes: lockout and options
+    /// limiter of `key`, a non-empty store, a fresh challenge issued into its pool. With
+    /// [`OptionsCredentials::Registered`], the response names every registered credential,
+    /// built from the same store snapshot that passed the non-empty check; no refusal ever
+    /// carries a credential id.
     async fn issue_options(
         &self,
         key: LimitKey,
         class: PathClass,
         purpose: ChallengePurpose,
         binding: ChallengeBinding,
+        credentials: OptionsCredentials,
     ) -> Response {
         let Some(rp) = self.rp.as_ref() else {
             return Response::json(403, "passkeys_not_configured");
@@ -559,11 +563,14 @@ impl<S: SessionSource> Shared<S> {
         if auth.locked_out(key, now) || auth.options_exhausted(key, now) {
             return Response::json(429, "rate_limited");
         }
-        match auth.store_snapshot() {
-            Ok(Some(file)) if !file.passkeys.is_empty() => {}
+        let allow = match auth.store_snapshot() {
+            Ok(Some(file)) if !file.passkeys.is_empty() => match credentials {
+                OptionsCredentials::Discoverable => None,
+                OptionsCredentials::Registered => Some(allow_credentials(&file)),
+            },
             Ok(_) => return Response::json(409, "no_passkey"),
             Err(err) => return store_error_response(err),
-        }
+        };
         let mut challenge = Zeroizing::new([0u8; CHALLENGE_BYTES]);
         if (self.state.random)(challenge.as_mut_slice()).is_err() {
             return Response::json(503, "unavailable");
@@ -578,7 +585,7 @@ impl<S: SessionSource> Shared<S> {
         }
         auth.record_issuance(key, now, &in_flight);
         drop(auth);
-        options_response(rp.rp_id(), &challenge)
+        options_response(rp.rp_id(), &challenge, allow)
     }
 
     /// Persists the counter and backup state of a verified assertion when they changed
@@ -1374,16 +1381,32 @@ fn rp_host_gate<S: SessionSource>(
     }
 }
 
-/// The options response of a login or unlock ceremony.
-fn options_response(rp_id: &str, challenge: &[u8; CHALLENGE_BYTES]) -> Response {
-    json_value(
-        200,
-        &serde_json::json!({
-            "challenge": b64url_encode(challenge),
-            "rp_id": rp_id,
-            "timeout_ms": WEBAUTHN_TIMEOUT_MS,
-        }),
-    )
+/// Whether an options response names the registered credentials (spec D-1, D-2; ADR
+/// 2026-10-12 "Named Credentials on Authenticated Passkey Ceremonies of `soos-remote`").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OptionsCredentials {
+    /// Login: discoverable flow, no credential id (OD-3).
+    Discoverable,
+    /// Unlock and camera: every registered credential as `allow_credentials` (OD-4).
+    Registered,
+}
+
+/// The options response of a login, unlock or camera ceremony; `allow` is `Some` only for
+/// [`OptionsCredentials::Registered`].
+fn options_response(
+    rp_id: &str,
+    challenge: &[u8; CHALLENGE_BYTES],
+    allow: Option<serde_json::Value>,
+) -> Response {
+    let mut body = serde_json::json!({
+        "challenge": b64url_encode(challenge),
+        "rp_id": rp_id,
+        "timeout_ms": WEBAUTHN_TIMEOUT_MS,
+    });
+    if let (Some(allow), Some(object)) = (allow, body.as_object_mut()) {
+        object.insert("allow_credentials".to_string(), allow);
+    }
+    json_value(200, &body)
 }
 
 /// `503 store_unavailable` (sessions already handled by the caller).
@@ -1408,7 +1431,13 @@ async fn login_options<S: SessionSource>(shared: &Shared<S>, ctx: &RequestContex
     let key = LimitKey::FunnelAnonymous(ctx.hint);
     let binding = ChallengeBinding::Login(ctx.hint);
     shared
-        .issue_options(key, PathClass::Funnel, ChallengePurpose::Login, binding)
+        .issue_options(
+            key,
+            PathClass::Funnel,
+            ChallengePurpose::Login,
+            binding,
+            OptionsCredentials::Discoverable,
+        )
         .await
 }
 
@@ -1432,6 +1461,7 @@ async fn unlock_options<S: SessionSource>(shared: &Shared<S>, ctx: &RequestConte
             ctx.class,
             ChallengePurpose::Unlock,
             ctx.unlock_binding(),
+            OptionsCredentials::Registered,
         )
         .await
 }
@@ -1807,6 +1837,7 @@ async fn register_verify<S: SessionSource>(
         }
         checked
     };
+    let transports = registration.transports;
     drop(registration);
     let Some((pending, credential)) = verified else {
         return Some(Response::json(403, "passkey_rejected"));
@@ -1821,6 +1852,7 @@ async fn register_verify<S: SessionSource>(
                 backup_eligible: credential.backup_eligible,
                 backup_state: credential.backup_state,
                 created_unix_s,
+                transports,
             };
             let mut file = match current {
                 None => PasskeyFile {
@@ -2192,6 +2224,7 @@ async fn camera_options<S: SessionSource>(shared: &Shared<S>, ctx: &RequestConte
             ctx.class,
             ChallengePurpose::CameraView,
             ctx.unlock_binding(),
+            OptionsCredentials::Registered,
         )
         .await
 }

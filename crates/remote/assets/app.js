@@ -114,6 +114,12 @@ const LABELS = {
 };
 
 // Every passkey ceremony (login, enroll, unlock, camera view).
+// The six WebAuthn transport names (anything else is dropped).
+const PASSKEY_TRANSPORTS = ["internal", "hybrid", "usb", "nfc", "ble", "smart-card"];
+// Most credentials named on the unlock and camera ceremonies (the server stores at most 4).
+const MAX_NAMED_CREDENTIALS = 4;
+// Most transport names sent with a registration (the server refuses more than 8).
+const MAX_REGISTER_TRANSPORTS = 8;
 const PASSKEY_PROMPT_TEXT = "Confirm with your passkey (Face ID, fingerprint or screen lock)…";
 const PUSH_UNSUPPORTED_TEXT =
   "On iPhone, notifications need the home-screen app (iOS 16.4 or later); this browser does not support them";
@@ -266,16 +272,44 @@ function assertionBody(credential) {
   return body;
 }
 
-// A modal passkey assertion over a server challenge (no credential is named).
-function getAssertion(options) {
-  return navigator.credentials.get({
-    publicKey: {
-      challenge: fromBase64Url(options.challenge),
-      rpId: options.rp_id,
-      timeout: options.timeout_ms,
-      userVerification: "required",
-    },
+// The known transport names of a server or browser list (anything else is dropped).
+function knownTransports(list) {
+  if (!Array.isArray(list)) {
+    return [];
+  }
+  return list.filter(function (name) {
+    return typeof name === "string" && PASSKEY_TRANSPORTS.indexOf(name) !== -1;
   });
+}
+
+// A modal passkey assertion over a server challenge. With `nameCredentials`, the
+// credentials listed by the server (unlock, camera) are passed as the allow list so the
+// phone goes straight to the biometric prompt; sign-in never names one.
+function getAssertion(options, nameCredentials) {
+  const publicKey = {
+    challenge: fromBase64Url(options.challenge),
+    rpId: options.rp_id,
+    timeout: options.timeout_ms,
+    userVerification: "required",
+  };
+  if (nameCredentials === true && Array.isArray(options.allow_credentials)) {
+    const named = options.allow_credentials
+      .filter(function (entry) {
+        return entry !== null && typeof entry === "object" && typeof entry.id === "string";
+      })
+      .slice(0, MAX_NAMED_CREDENTIALS)
+      .map(function (entry) {
+        return {
+          type: "public-key",
+          id: fromBase64Url(entry.id),
+          transports: knownTransports(entry.transports),
+        };
+      });
+    if (named.length > 0) {
+      publicKey.allowCredentials = named;
+    }
+  }
+  return navigator.credentials.get({ publicKey: publicKey });
 }
 
 // --- screens ------------------------------------------------------------------------
@@ -768,7 +802,7 @@ function requestUnlock() {
         unlockFailed(options.status, options.result);
         return null;
       }
-      return getAssertion(options.body).then(function (credential) {
+      return getAssertion(options.body, true).then(function (credential) {
         setText(feedbackNode, "Unlock requested…");
         unlockRequestedAt = Date.now();
         if (unlockConfirmTimer !== null) {
@@ -817,7 +851,7 @@ function requestLogin() {
       if (options.status !== 200) {
         throw new Error(reasonFor(options.result, {}, "Sign-in refused (" + options.status + ")"));
       }
-      return getAssertion(options.body);
+      return getAssertion(options.body, false);
     })
     .then(function (credential) {
       return postJson(LOGIN_PATH, "login", assertionBody(credential));
@@ -845,6 +879,27 @@ function requestLogout() {
 
 // --- passkey enrollment (tailnet only, with a code from `soos-remote enroll-code`) -----
 
+// The transports the browser reports for a new passkey (known names only, at most 8);
+// an old browser without `getTransports`, or one that throws, sends none.
+function credentialTransports(response) {
+  if (typeof response.getTransports === "function") {
+    try {
+      const reported = response.getTransports();
+      if (!Array.isArray(reported)) {
+        return [];
+      }
+      return reported
+        .filter(function (name) {
+          return typeof name === "string" && PASSKEY_TRANSPORTS.indexOf(name) !== -1;
+        })
+        .slice(0, MAX_REGISTER_TRANSPORTS);
+    } catch (error) {
+      return [];
+    }
+  }
+  return [];
+}
+
 function requestEnroll() {
   const code = enrollCode.value.trim();
   if (code.length === 0) {
@@ -866,11 +921,13 @@ function requestEnroll() {
           challenge: fromBase64Url(o.challenge),
           pubKeyCredParams: [{ type: "public-key", alg: -7 }],
           authenticatorSelection: {
+            authenticatorAttachment: "platform",
             residentKey: "required",
             requireResidentKey: true,
             userVerification: "required",
           },
           attestation: "none",
+          hints: ["client-device"],
           excludeCredentials: o.exclude_credentials.map(function (id) {
             return { type: "public-key", id: fromBase64Url(id) };
           }),
@@ -884,6 +941,7 @@ function requestEnroll() {
         id: toBase64Url(credential.rawId),
         client_data_json: toBase64Url(response.clientDataJSON),
         attestation_object: toBase64Url(response.attestationObject),
+        transports: credentialTransports(response),
       });
     })
     .then(function (outcome) {
@@ -1683,7 +1741,7 @@ function startCameraView() {
       if (options.status !== 200) {
         throw new Error(cameraReason(options.result, options.status));
       }
-      return getAssertion(options.body);
+      return getAssertion(options.body, true);
     })
     .then(function (credential) {
       return fetch(CAMERA_START_PATH, {
