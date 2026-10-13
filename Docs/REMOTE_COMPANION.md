@@ -224,6 +224,10 @@ allow_unlock = true               # optional, section 2a
    with your passkey* creates a web session (cookie `__Host-soos_session`, `Secure`, `HttpOnly`,
    `SameSite=Strict`, 15 min idle, 8 h at most, at most 4 sessions, stored on the PC only as a
    hash). Status, events and lock then work as on the tailnet; unlock asks for the passkey again.
+   Sign-in names no credential (discoverable passkey, so the phone may offer a picker); the
+   unlock and camera-start ceremonies, which already need a session or an allowed tailnet
+   identity, name the registered passkeys (`allow_credentials`) so the phone goes straight to its
+   biometric prompt (section 2h).
 
 Rules on the Funnel path (requests carrying `Tailscale-Funnel-Request: ?1`):
 
@@ -819,7 +823,29 @@ and battery level work the same way. Owner steps and caveats:
 5. **Passkey.** The passkey is stored by **Google Password Manager** (or Samsung Pass) and
    unlocked with **fingerprint or screen lock**; a screen lock is required. It is synced to the
    Google account (backup flags set), the same accepted risk as iCloud Keychain (section 8).
-   Enroll it over the tailnet with `soos-remote enroll-code` as in section 2b.
+   Enroll it over the tailnet with `soos-remote enroll-code` as in section 2b. **Unlock** and
+   **camera start** go straight to the fingerprint/face/screen-lock prompt: the page names the
+   registered passkeys for these two signed-in ceremonies (ADR 2026-10-12 "Named Credentials on
+   Authenticated Passkey Ceremonies of `soos-remote`"). **Sign-in** over Funnel still uses the
+   discoverable flow (no credential is named to an anonymous client), so Android may show a
+   passkey or provider picker there. Both phone-stored and password-manager passkeys are accepted.
+   - **Preferred passkey service.** If a provider picker still appears at unlock, the passkey
+     sits in another provider. Android 14 or later: Settings → **Passwords, passkeys & accounts**
+     (Samsung: Settings → General management → **Passwords, passkeys and autofill**) →
+     **Preferred service** → **Google Password Manager** (or Samsung Pass); under *Additional
+     services*, turn off the other providers if the picker keeps appearing. Android 13 and older
+     store passkeys in Google Password Manager only.
+   - **Move a soos passkey out of Proton Pass** (or another third-party manager) to the phone:
+     (1) first, in Proton Pass, open the item of `<pc>.<tailnet>.ts.net` and delete its passkey;
+     (2) on the PC, `soos-remote passkeys list`, then `soos-remote passkeys remove N` for the old
+     passkey (or keep it until the new one works, then remove it); (3) set the preferred passkey
+     service as above; (4) with the phone on the tailnet (Tailscale VPN on), run
+     `soos-remote enroll-code` on the PC and enroll **on the phone itself**: registration asks
+     for the phone's own (platform) authenticator, so a desktop browser or a cross-device QR code
+     flow may be refused; (5) check that unlock shows the fingerprint prompt directly. If the
+     phone says the passkey **already exists**, the old soos passkey is still present in an
+     enabled provider (for example Proton Pass): delete it there (step 1), or turn that provider
+     off, then enroll again.
 6. **Battery optimisation.** Pushes use `Urgency: high` and reach a phone in Doze, but vendor
    battery savers can still delay or drop them: set Chrome (and Firefox if used) to
    **Unrestricted** battery usage (Samsung: "Never sleeping apps").
@@ -856,7 +882,9 @@ and battery level work the same way. Owner steps and caveats:
     Unrestricted arrives within about 1 min; (5b) with the Tailscale VPN and Funnel off, a
     failed-password notification still appears (the icon may fall back to the browser default);
     (6) lock and unlock from the phone work; (7) the iPhone home-screen app still works as
-    before.
+    before; (8) **RDB10**: after re-enrolling a passkey stored on the phone (item 5), **unlock**
+    and **camera start** show the fingerprint/face prompt directly with no provider picker, over
+    the tailnet and over Funnel; sign-in may still show the picker.
 
 ## 3. Requirements on the desktop
 
@@ -1061,8 +1089,8 @@ The service also refuses to start when its real or effective uid is 0.
 | `GET /api/auth/state` | `{"mode":"tailnet"\|"funnel","authenticated",…}`; an anonymous Funnel caller gets only `{"mode":"funnel","authenticated":false}` |
 | `POST /api/auth/login/options`, `POST /api/auth/login/verify` | Funnel only: passkey login (`200 logged_in` + `Set-Cookie`), `403 passkey_rejected`, `409 no_passkey`, `429 rate_limited` / `too_many_sessions`, `503 busy` |
 | `POST /api/auth/logout` | Funnel only: `200 logged_out`, clears the cookie |
-| `POST /api/auth/unlock/options` | tailnet, or Funnel with a session: an `unlock` challenge (`200 {challenge, rp_id, timeout_ms}`) |
-| `POST /api/auth/register/options`, `POST /api/auth/register/verify` | tailnet only, with the code of `soos-remote enroll-code`: `200 registered`, `403 enroll_code_rejected`, `409 passkey_limit` / `already_registered` / `registration_conflict` |
+| `POST /api/auth/unlock/options` | tailnet, or Funnel with a session: an `unlock` challenge (`200 {allow_credentials, challenge, rp_id, timeout_ms}`; `allow_credentials` = every registered passkey as `{"id": <base64url>, "transports": [..]}`, store order, the stored transports or `["internal", "hybrid"]`). The login options stay `{challenge, rp_id, timeout_ms}` (no credential id) |
+| `POST /api/auth/register/options`, `POST /api/auth/register/verify` | tailnet only, with the code of `soos-remote enroll-code`; the verify body may carry the optional `transports` of `getTransports()` (at most 8 entries of 16 bytes, else `400 bad_request`; only the six WebAuthn names are stored): `200 registered`, `403 enroll_code_rejected`, `409 passkey_limit` / `already_registered` / `registration_conflict` |
 | `GET /api/alerts` | tailnet, or Funnel with a session (`403 login_required` otherwise): `200` the alerts view (section 2c); `{"state":"disabled",…}` while `password_alerts` is off |
 | `POST /api/alerts/ack` | no body; `X-Soos-Action: alerts-ack`, `X-Soos-Alerts-Epoch`, `X-Soos-Alerts-Through`: `200` the new view, `403 forbidden` (CSRF), `403 alerts_disabled`, `400 bad_request` (headers, or a `through` beyond the newest attempt), `429 rate_limited` (one per second), `409 stale_view`, `503 unavailable` |
 | `GET /api/battery` | tailnet, or Funnel with a session (`403 login_required` otherwise): `200 application/json` `{state, percent, charge, external_power}` (section 2g); `{"state":"disabled",…}` while `battery_status` is `false`; a reading at most 5 s old, or one bounded read |
@@ -1072,7 +1100,7 @@ The service also refuses to start when its real or effective uid is 0.
 | `POST /api/push/unsubscribe` | `X-Soos-Action: push-unsubscribe`, `{"endpoint":…}`: `200 unsubscribed` (also for an unknown endpoint), `400`, `403`, `429`, `503` as above |
 | `POST /api/push/test` | no body; `X-Soos-Action: push-test`: `202 test_queued`, `409 no_subscriptions`, `429 rate_limited` (one per 10 s), `403`, `503` as above |
 | `GET /api/camera` | tailnet, or Funnel with a session: `200 {enabled, reachable, state, max_view_s, fps, width}`; `state` is `disabled`, `idle`, `pending`, `starting` or `streaming` (no cooldown state since 2026-10-07); never a token or a frame property |
-| `POST /api/auth/camera/options` | `X-Soos-Action: camera-options`, `Origin` = `https://<rp_id>`: a `CameraView` challenge (`200 {challenge, rp_id, timeout_ms}`), `403 forbidden` / `camera_disabled` / `camera_tailnet_only` / `passkeys_not_configured`, `409 no_passkey`, `429 rate_limited` / `too_many_challenges`, `503 unavailable` / `store_unavailable` |
+| `POST /api/auth/camera/options` | `X-Soos-Action: camera-options`, `Origin` = `https://<rp_id>`: a `CameraView` challenge (`200 {allow_credentials, challenge, rp_id, timeout_ms}`, `allow_credentials` as for the unlock options), `403 forbidden` / `camera_disabled` / `camera_tailnet_only` / `passkeys_not_configured`, `409 no_passkey`, `429 rate_limited` / `too_many_challenges`, `503 unavailable` / `store_unavailable` |
 | `POST /api/camera/start` | `X-Soos-Action: camera-view`, JSON assertion body (section 2f): `200 {"result":"view_ready","stream_path":"/api/camera/stream/<token>","token_ttl_ms":10000,…}`, `403 forbidden` / `camera_disabled` / `camera_tailnet_only` / `passkeys_not_configured` / `passkey_required` / `passkey_rejected`, `400 bad_request`, `413 body_too_large`, `409 view_in_progress`, `429 rate_limited`, `503 unavailable` / `store_unavailable` |
 | `GET /api/camera/stream/<token>` | `X-Soos-Action: camera-stream`: `200 application/octet-stream` (`soosframe` JPEG parts until the view ends), or before the head `403 forbidden` / `camera_disabled` / `camera_tailnet_only` / `view_token_rejected` / `camera_refused`, `503 camera_unavailable` / `camera_format_unsupported`; `HEAD` → `405` |
 | `POST /api/camera/stop` | no body; `X-Soos-Action: camera-stop`: `200 stopped` / `no_view`, `403 forbidden` / `camera_disabled` |
@@ -1159,6 +1187,11 @@ reason classes.
 - Over Funnel an anonymous `POST /api/auth/login/options` answers `409 no_passkey` when no
   passkey is registered, so an internet client can learn whether one exists (no credential id,
   user handle or identity is disclosed; candid review MINOR finding, follow-up).
+- An allowed tailnet identity or a signed-in Funnel session learns the registered credential
+  ids through the unlock and camera options (`allow_credentials`, ADR 2026-10-12); a credential
+  id is an opaque public identifier that cannot sign, and an anonymous client never sees one.
+  When the passkey sits in a third-party provider and several providers are enabled, Android may
+  still show a picker at unlock (section 2h); sign-in keeps the picker by design.
 - A device-bound (non-synced) passkey presenting the same counter twice concurrently is accepted
   twice (clone detection only, never an authentication bypass; synced iCloud Keychain and Google Password Manager passkeys report
   `0/0` and are unaffected; candid review MINOR finding, follow-up).

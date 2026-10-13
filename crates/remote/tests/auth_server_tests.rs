@@ -674,9 +674,12 @@ async fn test_rmc_unlock_requires_a_fresh_passkey_on_every_path() {
     let options = h.unlock_options(&Via::Tailnet).await;
     assert_eq!(
         json_keys(&options),
-        vec!["challenge", "rp_id", "timeout_ms"]
+        vec!["allow_credentials", "challenge", "rp_id", "timeout_ms"]
     );
-    assert!(!String::from_utf8_lossy(&options.body).contains(&h.owner.credential_id_b64()));
+    assert_eq!(
+        options.json()["allow_credentials"],
+        serde_json::json!([{"id": h.owner.credential_id_b64(), "transports": ["internal", "hybrid"]}])
+    );
     let c = h.challenge_of(&options);
     let body = h.valid_assertion(&h.owner, &c);
     assert_result(

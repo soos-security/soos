@@ -46,6 +46,7 @@ fn record(auth: &Authenticator, sign_count: u32) -> PasskeyRecord {
         backup_eligible: auth.synced,
         backup_state: auth.synced,
         created_unix_s: 1_700_000_000,
+        transports: Default::default(),
     }
 }
 
@@ -481,4 +482,245 @@ fn test_rmc_credential_store_lock_file_is_never_followed() {
         .unwrap()
         .file_type()
         .is_symlink());
+}
+
+// ---------------------------------------------------------------------------------------
+// Direct biometric prompt (GitHub #354 sub-issue 1, ADR 2026-10-12 "Named Credentials on
+// Authenticated Passkey Ceremonies of `soos-remote`", spec
+// `AI/architect_spec_remote_direct_biometric.md` §3.1, §8.3; matrix RDB7)
+// ---------------------------------------------------------------------------------------
+
+/// The six WebAuthn L3 transport names, canonical order (spec §3.1).
+const TRANSPORT_NAMES: [&str; 6] = ["internal", "hybrid", "usb", "nfc", "ble", "smart-card"];
+
+/// The set holding exactly the members of `ALL` selected by the low six bits of `mask`.
+fn transport_set_of(mask: u8) -> soos_remote::credentials::TransportSet {
+    use soos_remote::credentials::{AuthenticatorTransport, TransportSet};
+    let mut set = TransportSet::EMPTY;
+    for (i, t) in AuthenticatorTransport::ALL.iter().enumerate() {
+        if mask & (1 << i) != 0 {
+            set = set.with(*t);
+        }
+    }
+    set
+}
+
+/// RDB7 (spec §3.1, §4): exact, case-sensitive names; canonical output order; the default
+/// allow-list transports; every set is bounded (≤ 6 names, no duplicate, canonical order).
+#[test]
+fn test_rdb_transport_set_canonical_and_bounded() {
+    use soos_remote::credentials::{AuthenticatorTransport, TransportSet};
+
+    assert_eq!(AuthenticatorTransport::ALL.len(), 6);
+    let names: Vec<&str> = AuthenticatorTransport::ALL
+        .iter()
+        .map(|t| t.as_str())
+        .collect();
+    assert_eq!(names, TRANSPORT_NAMES.to_vec(), "canonical order");
+    for t in AuthenticatorTransport::ALL {
+        assert_eq!(AuthenticatorTransport::from_name(t.as_str()), Some(t));
+    }
+    for bad in [
+        "",
+        "Internal",
+        "INTERNAL",
+        " internal",
+        "internal ",
+        "hybrid\0",
+        "smartcard",
+        "smart_card",
+        "Smart-Card",
+        "cable",
+        "lightning",
+        "future-x",
+    ] {
+        assert_eq!(AuthenticatorTransport::from_name(bad), None, "{bad:?}");
+    }
+
+    assert!(TransportSet::EMPTY.is_empty());
+    assert!(TransportSet::EMPTY.names().is_empty());
+    assert_eq!(TransportSet::default(), TransportSet::EMPTY);
+    assert_eq!(
+        TransportSet::DEFAULT_ALLOW.names(),
+        vec!["internal", "hybrid"]
+    );
+    assert!(TransportSet::DEFAULT_ALLOW.contains(AuthenticatorTransport::Internal));
+    assert!(TransportSet::DEFAULT_ALLOW.contains(AuthenticatorTransport::Hybrid));
+    assert!(!TransportSet::DEFAULT_ALLOW.contains(AuthenticatorTransport::Usb));
+    assert!(!TransportSet::DEFAULT_ALLOW.is_empty());
+
+    // Insertion order never matters; insertion is idempotent.
+    let set = TransportSet::EMPTY
+        .with(AuthenticatorTransport::SmartCard)
+        .with(AuthenticatorTransport::Usb)
+        .with(AuthenticatorTransport::Internal)
+        .with(AuthenticatorTransport::Usb);
+    assert_eq!(set.names(), vec!["internal", "usb", "smart-card"]);
+    assert_eq!(
+        set,
+        TransportSet::EMPTY
+            .with(AuthenticatorTransport::Internal)
+            .with(AuthenticatorTransport::Usb)
+            .with(AuthenticatorTransport::SmartCard)
+    );
+
+    // Every one of the 64 sets: ≤ 6 names, exactly its members, canonical order.
+    for mask in 0u8..64 {
+        let set = transport_set_of(mask);
+        let names = set.names();
+        assert!(names.len() <= 6);
+        assert_eq!(names.len(), mask.count_ones() as usize, "{mask:06b}");
+        let expected: Vec<&str> = TRANSPORT_NAMES
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| mask & (1 << i) != 0)
+            .map(|(_, n)| *n)
+            .collect();
+        assert_eq!(names, expected, "{mask:06b}");
+        assert_eq!(set.is_empty(), mask == 0);
+        for (i, t) in AuthenticatorTransport::ALL.iter().enumerate() {
+            assert_eq!(set.contains(*t), mask & (1 << i) != 0);
+        }
+    }
+}
+
+/// RDB7 (spec §3.1, D-5, A-6): a legacy store parses with empty transports; a record with
+/// transports round-trips in canonical order; an empty set is omitted and encodes byte for
+/// byte as the legacy format; every malformed `transports` value is refused; the largest
+/// store with all six transports stays within `MAX_CREDENTIAL_STORE_BYTES`.
+#[test]
+fn test_rdb_store_transports_roundtrip_and_strict_parse() {
+    use soos_remote::credentials::{AuthenticatorTransport, TransportSet};
+
+    let all = keys();
+    // Legacy file (no `transports` key): every record has EMPTY.
+    let passkeys: Vec<StoredPasskey> = all[..2].iter().map(StoredPasskey::of).collect();
+    let legacy = store_json(&HANDLE, &passkeys);
+    let parsed = parse_store(legacy.as_bytes()).expect("a legacy store stays valid");
+    assert_eq!(parsed.passkeys.len(), 2);
+    for record in &parsed.passkeys {
+        assert_eq!(record.transports, TransportSet::EMPTY);
+    }
+    // An empty set is omitted: the encoding is byte-identical to the legacy format.
+    let plain = file_of(&all[..2]);
+    let encoded = encode_store(&plain);
+    assert_eq!(
+        String::from_utf8(encoded.clone()).unwrap(),
+        legacy,
+        "no transports key when the set is empty"
+    );
+    let json: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
+    assert!(json["passkeys"][0].get("transports").is_none());
+
+    // A record with transports round-trips, written in canonical order.
+    let mut with = file_of(&all[..2]);
+    with.passkeys[1].transports = TransportSet::EMPTY
+        .with(AuthenticatorTransport::Usb)
+        .with(AuthenticatorTransport::Internal);
+    let encoded = encode_store(&with);
+    let json: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
+    assert_eq!(
+        json["passkeys"][1]["transports"],
+        serde_json::json!(["internal", "usb"])
+    );
+    assert!(json["passkeys"][0].get("transports").is_none());
+    assert!(parse_store(&encoded) == Ok(with.clone()), "round trip");
+    // A hand-written record with transports in any valid order parses to the same set.
+    let text = legacy.replacen(
+        "\"created_unix_s\":1700000000}]",
+        "\"created_unix_s\":1700000000,\"transports\":[\"usb\",\"internal\"]}]",
+        1,
+    );
+    assert_ne!(text, legacy, "fixture edit applied");
+    let parsed = parse_store(text.as_bytes()).expect("valid transports");
+    assert_eq!(parsed.passkeys[1].transports, with.passkeys[1].transports);
+    assert_eq!(parsed.passkeys[0].transports, TransportSet::EMPTY);
+
+    // Strict read: unknown, wrong case, duplicate, 7 entries, non-array, non-string.
+    let malformed: Vec<&str> = vec![
+        "[\"future-x\"]",
+        "[\"Internal\"]",
+        "[\"usb\",\"usb\"]",
+        "[\"internal\",\"hybrid\",\"usb\",\"nfc\",\"ble\",\"smart-card\",\"internal\"]",
+        "\"internal\"",
+        "[1]",
+        "[[\"internal\"]]",
+        "{\"internal\":true}",
+        "7",
+    ];
+    for value in malformed {
+        let text = legacy.replacen(
+            "\"created_unix_s\":1700000000}]",
+            &format!("\"created_unix_s\":1700000000,\"transports\":{value}}}]"),
+            1,
+        );
+        assert_ne!(text, legacy);
+        assert_eq!(
+            parse_store(text.as_bytes()).err(),
+            Some(StoreError::Malformed),
+            "transports {value}"
+        );
+    }
+
+    // The largest legal store, every record with all six transports, fits the bound.
+    let every = transport_set_of(0b11_1111);
+    assert_eq!(every.names().len(), 6);
+    let big: Vec<Authenticator> = (0..MAX_PASSKEYS)
+        .map(|i| {
+            let mut id = vec![0xee; MAX_CREDENTIAL_ID_BYTES];
+            id[0] = i as u8;
+            Authenticator::device(0x60 + i as u8, &id)
+        })
+        .collect();
+    let mut big_file = file_of(&big);
+    for record in &mut big_file.passkeys {
+        record.transports = every;
+    }
+    let big_encoded = encode_store(&big_file);
+    assert!(
+        big_encoded.len() <= MAX_CREDENTIAL_STORE_BYTES,
+        "{} bytes",
+        big_encoded.len()
+    );
+    assert!(parse_store(&big_encoded) == Ok(big_file));
+}
+
+/// RDB7 (spec §3.1 `allow_credentials`, D-1, D-3): one `{id, transports}` per record in store
+/// order, the id in base64url, the stored transports in canonical order, and
+/// `["internal", "hybrid"]` for a record without transports; an empty store is `[]`.
+#[test]
+fn test_rdb_allow_credentials_shape() {
+    use soos_remote::credentials::{allow_credentials, AuthenticatorTransport, TransportSet};
+
+    let all = keys();
+    let mut file = file_of(&all[..4]);
+    file.passkeys[1].transports = TransportSet::EMPTY
+        .with(AuthenticatorTransport::Nfc)
+        .with(AuthenticatorTransport::Usb);
+    file.passkeys[2].transports = transport_set_of(0b11_1111);
+    file.passkeys[3].transports = TransportSet::EMPTY.with(AuthenticatorTransport::Hybrid);
+    assert_eq!(
+        allow_credentials(&file),
+        serde_json::json!([
+            {"id": all[0].credential_id_b64(), "transports": ["internal", "hybrid"]},
+            {"id": all[1].credential_id_b64(), "transports": ["usb", "nfc"]},
+            {"id": all[2].credential_id_b64(), "transports": TRANSPORT_NAMES},
+            {"id": all[3].credential_id_b64(), "transports": ["hybrid"]},
+        ])
+    );
+    // Every entry has exactly the two keys.
+    for entry in allow_credentials(&file).as_array().unwrap() {
+        let mut keys: Vec<&String> = entry.as_object().unwrap().keys().collect();
+        keys.sort();
+        assert_eq!(keys, vec!["id", "transports"]);
+    }
+    assert_eq!(allow_credentials(&file_of(&[])), serde_json::json!([]));
+    // A 1023-byte id is encoded whole (base64url, no padding).
+    let long = Authenticator::device(0x66, &vec![0xab; MAX_CREDENTIAL_ID_BYTES]);
+    let value = allow_credentials(&file_of(std::slice::from_ref(&long)));
+    assert_eq!(value[0]["id"], long.credential_id_b64());
+    assert_eq!(
+        b64url_decode(value[0]["id"].as_str().unwrap()).len(),
+        MAX_CREDENTIAL_ID_BYTES
+    );
 }

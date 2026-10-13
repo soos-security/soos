@@ -169,6 +169,10 @@ pub const FUNNEL_HEADER_VALUE: &str = "?1";
 pub const FORWARDED_FOR_HEADER: &str = "x-forwarded-for";
 /// Largest request body on a body route.
 pub const MAX_AUTH_BODY_BYTES: usize = 8192;
+/// Most entries accepted in the registration `transports` field (WebAuthn defines six).
+pub const MAX_TRANSPORT_FIELD_ENTRIES: usize = 8;
+/// Longest accepted entry of the registration `transports` field, in bytes.
+pub const MAX_TRANSPORT_NAME_BYTES: usize = 16;
 /// Deadline for reading a body, from head completion.
 pub const BODY_READ_TIMEOUT_MS: u64 = 5000;
 /// Data chunks of a chunked body.
@@ -281,6 +285,14 @@ const _: () = assert!(
         >= 4 * MAX_ATTESTATION_OBJECT_BYTES / 3
             + 4 * MAX_CREDENTIAL_ID_BYTES / 3
             + 4 * MAX_CLIENT_DATA_JSON_BYTES / 3
+            + 256
+);
+const _: () = assert!(
+    MAX_AUTH_BODY_BYTES
+        >= 4 * MAX_ATTESTATION_OBJECT_BYTES / 3
+            + 4 * MAX_CREDENTIAL_ID_BYTES / 3
+            + 4 * MAX_CLIENT_DATA_JSON_BYTES / 3
+            + MAX_TRANSPORT_FIELD_ENTRIES * (MAX_TRANSPORT_NAME_BYTES + 3)
             + 256
 );
 const _: () = assert!(MAX_SSE_STREAMS < MAX_CONNECTIONS);

@@ -22,7 +22,9 @@ use zeroize::Zeroizing;
 use subtle::ConstantTimeEq;
 
 use crate::challenge::{ChallengeBinding, ChallengePurpose, ChallengeStore, Taken};
-use crate::credentials::{credential_hash, CredentialStore, PasskeyFile, StoreError};
+use crate::credentials::{
+    credential_hash, AuthenticatorTransport, CredentialStore, PasskeyFile, StoreError, TransportSet,
+};
 use crate::identity::{ClientHint, PathClass};
 use crate::webauthn::{
     b64url_decode, parse_client_data, verify_assertion, AssertionOutcome, CeremonyType,
@@ -632,6 +634,9 @@ pub struct RegisterVerifyBody {
     pub client_data_json: String,
     /// `attestationObject`.
     pub attestation_object: String,
+    /// `getTransports()` as reported by the browser; absent or `null` ⇒ empty.
+    #[serde(default)]
+    pub transports: Option<Vec<String>>,
 }
 
 impl fmt::Debug for RegisterVerifyBody {
@@ -684,6 +689,8 @@ pub struct DecodedRegistration {
     pub client_data_json: Zeroizing<Vec<u8>>,
     /// `attestationObject`.
     pub attestation_object: Zeroizing<Vec<u8>>,
+    /// Allowlisted, de-duplicated transports.
+    pub transports: TransportSet,
 }
 
 /// Malformed body (`400 bad_request`, counted as a failure).
@@ -722,6 +729,27 @@ pub fn decode_assertion(body: &[u8]) -> Result<DecodedAssertion, BodyMalformed> 
     Ok(decoded)
 }
 
+/// Bounds and allowlists the registration `transports` field (spec §3.2): absent, `null`
+/// or `[]` ⇒ empty; more than `MAX_TRANSPORT_FIELD_ENTRIES` entries or an entry longer
+/// than `MAX_TRANSPORT_NAME_BYTES` bytes ⇒ malformed; unknown names ignored (WebAuthn L3
+/// §5.8.4), duplicates collapsed. The names are exact and case-sensitive.
+fn decode_transports(raw: Option<&[String]>) -> Result<TransportSet, BodyMalformed> {
+    let Some(names) = raw else {
+        return Ok(TransportSet::EMPTY);
+    };
+    if names.len() > crate::MAX_TRANSPORT_FIELD_ENTRIES
+        || names
+            .iter()
+            .any(|name| name.len() > crate::MAX_TRANSPORT_NAME_BYTES)
+    {
+        return Err(BodyMalformed);
+    }
+    Ok(names
+        .iter()
+        .filter_map(|name| AuthenticatorTransport::from_name(name))
+        .fold(TransportSet::EMPTY, TransportSet::with))
+}
+
 /// Decodes a [`RegisterVerifyBody`] from a bounded body.
 ///
 /// # Errors
@@ -733,6 +761,7 @@ pub fn decode_registration(body: &[u8]) -> Result<DecodedRegistration, BodyMalfo
         id: field(&raw.id, MAX_CREDENTIAL_ID_BYTES)?,
         client_data_json: field(&raw.client_data_json, MAX_CLIENT_DATA_JSON_BYTES)?,
         attestation_object: field(&raw.attestation_object, crate::MAX_ATTESTATION_OBJECT_BYTES)?,
+        transports: decode_transports(raw.transports.as_deref())?,
     };
     if decoded.id.is_empty() {
         return Err(BodyMalformed);
