@@ -243,6 +243,11 @@ lock_grace_ms = 3000
    not change `is_healthy`.
 3. The pipeline (models, camera supervisor, stores) is initialized fail-closed; any error stops the
    daemon before the socket exists.
+   Its first step (GitHub #375) is `soos_inference_ort::verify_cpu_execution_provider()`: the
+   linked ONNX Runtime must answer the C API handshake and list `CPUExecutionProvider`, otherwise
+   `InferenceError::CpuExecutionProviderUnavailable` stops the daemon before the camera, keys,
+   stores and models are touched (`Docs/INFERENCE_ORT_CRATE.md`, ADR 2026-10-13 "Distribution
+   Builds: System ONNX Runtime").
    The PAD model `minifasnet_v2_pad` is always loaded and self-tested. The optional second PAD
    ensemble member `minifasnet_v1se_pad` (`SECONDARY_PAD_MODEL_ID`, crop scale 4.0, GitHub #212)
    is wired by `attach_optional_pad_members` only when the deployed `manifest.toml` attests it;

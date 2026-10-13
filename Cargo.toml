@@ -25,6 +25,9 @@ members = [
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
+# MSRV (ADR 2026-10-13 "Distribution Builds: System ONNX Runtime"): highest rust-version of the
+# locked dependencies (egui 0.35); built with exactly 1.92.0 by the system-onnxruntime CI job.
+rust-version = "1.92"
 license = "AGPL-3.0-or-later"
 repository = "https://github.com/Mysticaly622/soos"
 publish = false
@@ -51,7 +54,7 @@ arc-swap = "1"
 # ONNX Runtime & Machine Learning
 # Exact pin: ort 2.0 is still a release candidate and pre-release APIs may change
 # between rc versions. Upgrade deliberately (real-model tests) once 2.0.0 GA ships.
-ort = "=2.0.0-rc.13"
+ort = { version = "=2.0.0-rc.13", default-features = false, features = ["std", "ndarray", "tracing"] }
 sha2 = "0.10"
 toml = "0.8"
 
@@ -110,11 +113,11 @@ soos-camera-v4l = { path = "crates/camera-v4l", version = "0.1.0" }
 # Pure frame types shared by the capture backends and soos-vision (GitHub #367, ADR 2026-10-13)
 soos-frame = { path = "crates/frame", version = "0.1.0" }
 soos-test-fixtures = { path = "tests/fixtures", version = "0.1.0" }
-soos-inference-ort = { path = "crates/inference-ort", version = "0.1.0" }
-soos-vision = { path = "crates/vision", version = "0.1.0" }
+soos-inference-ort = { path = "crates/inference-ort", version = "0.1.0", default-features = false }
+soos-vision = { path = "crates/vision", version = "0.1.0", default-features = false }
 soos-biometric-store = { path = "crates/biometric-store", version = "0.1.0" }
 soos-evidence-store = { path = "crates/evidence-store", version = "0.1.0" }
-soos-enrollment-cli = { path = "crates/enrollment-cli", version = "0.1.0" }
+soos-enrollment-cli = { path = "crates/enrollment-cli", version = "0.1.0", default-features = false }
 soos-admin-cli = { path = "crates/admin-cli", version = "0.1.0" }
 soos-gui = { path = "crates/gui", version = "0.1.0" }
 soos-remote = { path = "crates/remote", version = "0.1.0" }

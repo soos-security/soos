@@ -3,6 +3,7 @@ name = "soos-protocol"
 description = "Bounded IPC types and codec v1 for PAM module and soos daemon communication"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 publish.workspace = true

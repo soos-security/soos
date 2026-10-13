@@ -3,6 +3,7 @@ name = "soos-pam"
 description = "PAM module pam_soos.so — synchronous IPC client to the soos daemon"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 publish.workspace = true

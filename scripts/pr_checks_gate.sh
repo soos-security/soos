@@ -24,8 +24,11 @@
 
 set -euo pipefail
 
-# Exactly one advisory (non-required) check, the macOS job of ci.yml.
-readonly ADVISORY_CHECKS=("Portable crates (macOS, non-required)")
+# Advisory (non-required) checks of ci.yml: the macOS job, and the system ONNX
+# Runtime job, which depends on live Arch [extra] state and is required on push
+# to main instead (ci-success-main; ADR 2026-10-13 "Distribution Builds: System
+# ONNX Runtime", GitHub #375).
+readonly ADVISORY_CHECKS=("Portable crates (macOS, non-required)" "System ONNX Runtime (Arch, offline, advisory on PRs)")
 
 readonly EXIT_PROCEED=0
 readonly EXIT_BLOCK=1

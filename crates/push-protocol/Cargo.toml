@@ -3,6 +3,7 @@ name = "soos-push-protocol"
 description = "Pure wire contract shared by the remote companion and its push sender: endpoint allowlist, public-address predicate, bounded frames, status classification"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 publish.workspace = true

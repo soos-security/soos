@@ -171,8 +171,9 @@ WATCH_START=$(date +%s)
 WATCH_RC=0
 timeout "$CI_WATCH_TIMEOUT_SECS" gh pr checks "$PR_NUMBER" --watch --fail-fast --interval 15 || WATCH_RC=$?
 
-# Merge decision over every check except the advisory (non-required) macOS job
-# (ADR 2026-10-13 "macOS Port in a Separate Repository"): 0 proceed, 3 pending,
+# Merge decision over every check except the advisory (non-required) checks of
+# scripts/pr_checks_gate.sh (the macOS job, ADR 2026-10-13 "macOS Port in a Separate
+# Repository"; the system ONNX Runtime job, GitHub #375): 0 proceed, 3 pending,
 # anything else blocks. 'CI Success' alone is not sufficient: checks of other
 # workflows (the PR title check) are outside it.
 GATE_HELPER="$(dirname "${BASH_SOURCE[0]}")/pr_checks_gate.sh"

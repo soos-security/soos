@@ -30,6 +30,11 @@
 
 set -euo pipefail
 
+# Same environment as CI (ADR 2026-10-13 "Distribution Builds: System ONNX Runtime"): the
+# --all-features gates enable system-onnxruntime too; never consult pkg-config for
+# libonnxruntime, so they keep the verified download (a caller-provided value is kept).
+export LIBONNXRUNTIME_NO_PKG_CONFIG="${LIBONNXRUNTIME_NO_PKG_CONFIG:-1}"
+
 # ---------------------------------------------------------------------------
 # Terminal Colors
 # ---------------------------------------------------------------------------

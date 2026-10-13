@@ -42,7 +42,8 @@ ADR entry in `AI/DECISIONS.md`. Re-check every value below with the listed `grep
   `soos-protocol`, `soos-policy`, `soos-push-protocol`, `soos-inference-ort`, `soos-vision`, `soos-biometric-store`.
   `portable_crates_contract::test_portable_crates_have_no_linux_only_dependencies` forbids v4l, Linux-PAM, zbus,
   Tokio, desktop stacks and the Linux-only workspace crates in their graphs; the non-required CI job
-  `portable-macos` is the only advisory check of `scripts/pr_loop.sh` (`scripts/pr_checks_gate.sh`).
+  `portable-macos` and `system-onnxruntime` (GitHub #375) are the advisory checks of `scripts/pr_loop.sh`
+  (`scripts/pr_checks_gate.sh`); `system-onnxruntime` is required on push to `main` through `ci-success-main`.
 - `cargo -p` takes the **package** name (`-p soos-pam`, never `-p pam`) [11].
 
 ## 2. Security & Latency Constants (verify: `grep -rn "pub const" crates/*/src`)
@@ -142,6 +143,13 @@ Toolchain: `rust-toolchain.toml` pins Rust `1.98.1` (components `clippy`, `rustf
 both together, never back to a floating `stable` channel.
 The images install rustup only through `scripts/install_rustup.sh` (pinned rustup release, committed
 `rustup-init` SHA-256 digests, never `curl | sh`) [139]; a rustup bump changes the version and both digests.
+MSRV: `[workspace.package] rust-version = "1.92"` (inherited by every member; highest `rust-version`
+of the locked dependencies, egui 0.35), proven by the `system-onnxruntime` CI job, which builds with
+exactly 1.92.0 (ADR 2026-10-13 "Distribution Builds: System ONNX Runtime", GitHub #375). Distribution
+build against the system ONNX Runtime: `ORT_SKIP_DOWNLOAD=1 cargo build --locked --offline --release
+--workspace --no-default-features --features system-onnxruntime`; the default build keeps the
+downloaded archive. CI and `save.sh` set `LIBONNXRUNTIME_NO_PKG_CONFIG=1` so `--all-features` gates
+never consult pkg-config; do the same locally on a host with a distro ONNX Runtime.
 
 Omitting `--all-features` locally was the root cause of several CI-only failures [65–75].
 `cargo test --all-targets` does not run doctests; do not rely on doctests as acceptance evidence.

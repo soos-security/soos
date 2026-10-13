@@ -355,6 +355,36 @@ A package is a distributable artifact: any key inside it would be shared by ever
 
 ---
 
+### 7.5 Distribution Builds Against the System ONNX Runtime (GitHub #375)
+
+Official repositories and offline build farms (Arch `devtools`, Fedora `mock`, Launchpad, OBS,
+the Nix sandbox) build without network and forbid bundled prebuilt binaries. The opt-in Cargo
+feature `system-onnxruntime` links the distribution `libonnxruntime` (found through pkg-config,
+ONNX Runtime ≥ 1.17, C API level 17) instead of the prebuilt archive that `ort-sys` downloads
+by default (ADR 2026-10-13 "Distribution Builds: System ONNX Runtime"):
+
+```bash
+cargo fetch --locked                       # with network, before the build
+ORT_SKIP_DOWNLOAD=1 cargo build --locked --offline --release --workspace --no-default-features --features system-onnxruntime
+```
+
+- Build dependencies: the distribution ONNX Runtime with its pkg-config file (Arch
+  `onnxruntime-cpu`, which ships `/usr/lib/pkgconfig/libonnxruntime.pc`), `pkgconf`, and Rust ≥
+  `rust-version` (1.92, declared in `[workspace.package]`).
+- Use the CPU build of ONNX Runtime only (`onnxruntime-cpu` on Arch); soos never registers another
+  execution provider.
+- The result links `libonnxruntime.so.1` dynamically; `pam_soos.so` never links it. The package
+  must depend on the distribution ONNX Runtime package (a later #361 PR sets this in the recipes).
+- At start the daemon, `soos-enroll` and `soos-gui` check that the library lists the CPU execution
+  provider and refuse to start otherwise; a missing library stops them at the dynamic loader. A
+  stopped daemon means password authentication (`PAM_IGNORE`).
+- Trust: a system build relies on the distribution-signed library instead of the SHA-256-pinned
+  prebuilt archive (pyke-built ONNX Runtime 1.28.0 from `cdn.pyke.io`); the model SHA-256 and shape attestation are unchanged.
+- The packaging recipes and `scripts/build_*.sh` in this repository still use the default
+  `download-binaries` build; switching them, signed releases and the vendor tarball are later PRs of
+  #361. CI proves the build offline in a clean Arch container (job `system-onnxruntime`,
+  `Docs/CI_CD_AND_SECURITY.md`).
+
 ## 8. Daemon Service Sandbox and Configuration Validation (GitHub #199, #202, #203)
 
 ### 8.1 Least-privilege systemd unit (`packaging/soos-daemon.service`)

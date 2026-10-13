@@ -98,6 +98,8 @@ const FORBIDDEN_PORTABLE_DEPENDENCIES: [&str; 31] = [
 /// `name:` of the macOS job in `ci.yml`, also the single advisory check of `pr_loop.sh`.
 const MACOS_JOB_NAME: &str = "Portable crates (macOS, non-required)";
 const MACOS_JOB_ID: &str = "portable-macos";
+/// `name:` of the system ONNX Runtime job, the second advisory check (GitHub #375).
+const SYSTEM_ORT_JOB_NAME: &str = "System ONNX Runtime (Arch, offline, advisory on PRs)";
 const ADR_TITLE: &str = "macOS Port in a Separate Repository";
 
 fn workspace_root() -> PathBuf {
@@ -623,10 +625,14 @@ fn test_mac_pr_loop_treats_only_the_macos_job_as_advisory() {
         .lines()
         .find(|l| l.starts_with("readonly ADVISORY_CHECKS=("))
         .expect("advisory allowlist");
+    // Contract amendment (GitHub #375, ADR 2026-10-13 "Distribution Builds: System ONNX
+    // Runtime"): the system ONNX Runtime job, which depends on live Arch [extra] state, is the
+    // second advisory check on pull requests (it stays required on push to main through
+    // `ci-success-main`). The macOS job stays advisory; no other check may be added.
     assert_eq!(
         line,
-        format!("readonly ADVISORY_CHECKS=(\"{MACOS_JOB_NAME}\")"),
-        "exactly one advisory check, the macOS job"
+        format!("readonly ADVISORY_CHECKS=(\"{MACOS_JOB_NAME}\" \"{SYSTEM_ORT_JOB_NAME}\")"),
+        "exactly two advisory checks: the macOS job and the system ONNX Runtime job"
     );
     assert_eq!(gate.matches("ADVISORY_CHECKS=(").count(), 1);
     assert!(

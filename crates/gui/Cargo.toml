@@ -2,9 +2,15 @@
 name = "soos-gui"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 publish.workspace = true
+
+[features]
+default = ["download-binaries"]
+download-binaries = ["soos-inference-ort/download-binaries", "soos-vision/download-binaries", "soos-enrollment-cli/download-binaries"]
+system-onnxruntime = ["soos-inference-ort/system-onnxruntime", "soos-vision/system-onnxruntime", "soos-enrollment-cli/system-onnxruntime"]
 
 [dependencies]
 soos-protocol = { workspace = true }

@@ -23,7 +23,15 @@
 #                        in ubuntu:24.04 (after lint)
 #   6e. network-lock-polkit — opt-in polkit Wi-Fi lock under a real polkitd
 #                        (pkcheck) in ubuntu:24.04 (after lint)
+#   6f. system-onnxruntime — distribution build against the Arch onnxruntime-cpu
+#                        with the network disabled, Rust = declared MSRV, and
+#                        the real-model tests on that library (after lint;
+#                        advisory on pull requests: not part of CI Success,
+#                        listed in scripts/pr_checks_gate.sh; required on push
+#                        to main through ci-success-main)
 #   7. ci-success      — single aggregate status for merge gating
+#   7b. ci-success-main — push/dispatch-only aggregate: CI Success and
+#                        system-onnxruntime must both succeed on main
 #   8. distro-pam-matrix — PAM matrix T1–T15 in the Fedora and Arch sandbox
 #                        images (push to main and manual dispatch only)
 #   9. distro-deploy   — Fedora (.rpm, authselect) and Arch (pacman) deployment
@@ -70,6 +78,11 @@ env:
   # CI needs no debuginfo: smaller target dir, faster links, smaller caches.
   CARGO_PROFILE_DEV_DEBUG: 0
   CARGO_PROFILE_TEST_DEBUG: 0
+  # --all-features enables both download-binaries and system-onnxruntime: never consult
+  # pkg-config for libonnxruntime here, so these jobs keep the verified download only (a distro
+  # library older than the API 27 gate would otherwise be linked next to it; ADR 2026-10-13
+  # "Distribution Builds: System ONNX Runtime"). The system build job sets its own environment.
+  LIBONNXRUNTIME_NO_PKG_CONFIG: "1"
 
 jobs:
   # ---------------------------------------------------------------------------
@@ -362,6 +375,32 @@ jobs:
         run: ./tests/docker/network_lock_pkcheck_test.sh
 
   # ---------------------------------------------------------------------------
+  # Job 6f: distribution build against the system ONNX Runtime (GitHub #375,
+  # PR 1 of #361): digest-pinned Arch image with onnxruntime-cpu from [extra]
+  # and Rust = [workspace.package] rust-version; crates and models are fetched
+  # in a separate online step, then `--network none` + ORT_SKIP_DOWNLOAD=1 +
+  # --locked --offline build the release workspace with
+  # --no-default-features --features system-onnxruntime and run the real-model
+  # tests on that library (tests/docker/system_onnxruntime_test.sh).
+  # It depends on live Arch [extra] state (keyring, mirrors, rebuilds), so it is
+  # advisory on pull requests (runs for signal, not part of CI Success, listed in
+  # scripts/pr_checks_gate.sh) and required on push to main (ci-success-main).
+  # ---------------------------------------------------------------------------
+  system-onnxruntime:
+    name: "System ONNX Runtime (Arch, offline, advisory on PRs)"
+    if: github.event_name != 'schedule'
+    needs: lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Offline build and real-model tests against the Arch onnxruntime-cpu
+        run: ./tests/docker/system_onnxruntime_test.sh
+
+  # ---------------------------------------------------------------------------
   # Job 6d: packaging/soos-daemon.service under a real systemd (PID 1) in a
   # privileged ubuntu:24.04 container (GitHub #211): fresh release daemon
   # installed by scripts/install.sh, systemd-analyze verify, condition failed
@@ -602,6 +641,32 @@ jobs:
           for r in $RESULTS; do
             if [[ "$r" != "success" ]]; then
               echo "::error::At least one required job did not succeed ($r)."
+              exit 1
+            fi
+          done
+
+  # ---------------------------------------------------------------------------
+  # Job 7b: required status on main for the advisory-on-PR jobs (GitHub #375,
+  # ADR 2026-10-13 "Distribution Builds: System ONNX Runtime"). Push and manual
+  # dispatch only (skipped on pull requests, where system-onnxruntime is
+  # advisory): fails unless CI Success and system-onnxruntime both succeeded,
+  # so a broken system ONNX Runtime build on main is a red, visible status.
+  # ---------------------------------------------------------------------------
+  ci-success-main:
+    name: "CI Success (main, system ONNX Runtime)"
+    if: always() && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    needs: [ci-success, system-onnxruntime]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Verify CI Success and the system ONNX Runtime job succeeded
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          echo "Job results: $RESULTS"
+          for r in $RESULTS; do
+            if [[ "$r" != "success" ]]; then
+              echo "::error::A job required on main did not succeed ($r)."
               exit 1
             fi
           done

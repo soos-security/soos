@@ -2,12 +2,18 @@
 name = "soos-vision"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
 [lints]
 workspace = true
+
+[features]
+default = ["download-binaries"]
+download-binaries = ["soos-inference-ort/download-binaries"]
+system-onnxruntime = ["soos-inference-ort/system-onnxruntime"]
 
 [dependencies]
 soos-inference-ort = { workspace = true }

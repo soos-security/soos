@@ -1810,6 +1810,12 @@ pub fn build_full_service_with_notes(
         .unwrap_or_else(|| PathBuf::from(DEFAULT_MODELS_DIR));
     let models_dir = validate_fhs_path(&raw_models_dir)?;
 
+    // Linked ONNX Runtime (GitHub #375): checked before the key, the store, the camera and the
+    // models, so an incompatible library writes nothing. The mock pipeline never runs ORT.
+    if !cli.mock {
+        soos_inference_ort::verify_cpu_execution_provider()?;
+    }
+
     let key = MasterKey::load_or_create(&key_path)?;
     let store = Arc::new(BiometricStore::new(bio_dir, key)?);
 

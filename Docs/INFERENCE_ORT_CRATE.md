@@ -26,6 +26,7 @@ crates/inference-ort/src/
 ├── embedding.rs    # EmbeddingModelSpec (SFACE_2021DEC), model-aware extractor (NCHW RGB raw), L2 normalization
 ├── pad.rs          # MiniFASNetV2 OrtPadDetector, DEFAULT_MINIFASNET_LIVE_CLASS_INDEX = 1
 ├── outputs.rs      # ZeroizingOutputs: in-place wipe of ORT-owned output tensors, GitHub #255
+├── runtime.rs      # fail-closed CPU execution provider start-up check, GitHub #375
 └── mock.rs         # Deterministic hardware-free mocks
 ```
 
@@ -306,6 +307,56 @@ by the physical scripts against the clap definition (GitHub #186).
 
 ---
 
+## Linking ONNX Runtime: `download-binaries` and `system-onnxruntime` (GitHub #375)
+
+ADR 2026-10-13 "Distribution Builds: System ONNX Runtime". `soos-inference-ort`, `soos-vision`,
+`soos-daemon`, `soos-enrollment-cli` and `soos-gui` declare two Cargo features:
+
+| Feature | Default | `ort` / `ort-sys` features | Library |
+|---|---|---|---|
+| `download-binaries` | yes | `ort/default` (`std, ndarray, tracing, download-binaries, tls-native, copy-dylibs, api-27`) | pyke-built ONNX Runtime 1.28.0 archive from `cdn.pyke.io`, downloaded by `ort-sys` and verified against the SHA-256 pinned in its `build/download/dist.tsv`, static (unchanged dev/CI build) |
+| `system-onnxruntime` | no | `ort/pkg-config`, `ort/api-17` (resolved `ort-sys`: `api-17, pkg-config, std`) | distribution `libonnxruntime` found through pkg-config, dynamic (`libonnxruntime.so.1`), any ONNX Runtime ≥ 1.17 |
+
+The workspace `ort` entry is `default-features = false` with `std`, `ndarray`, `tracing`; every
+edge to these crates disables default features, so the distribution build is:
+
+```bash
+ORT_SKIP_DOWNLOAD=1 cargo build --locked --offline --release --workspace --no-default-features --features system-onnxruntime
+```
+
+Without a `libonnxruntime.pc` (or with an ONNX Runtime older than 1.17) the build fails at link
+time; no download code is compiled. API level 17 is the lowest level the workspace needs (it
+compiles at `api-17`) and is below Arch (1.29), Fedora 43/44 (1.20/1.22) and Debian (1.19).
+
+`--all-features` enables both. Because the pkg-config crate prints its link directives before
+`ort-sys` applies the API 27 gate of `download-binaries`, a host with an older distro
+`libonnxruntime.pc` would link the downloaded archive and the distro library together. CI (workflow
+`env:`) and `save.sh` therefore set `LIBONNXRUNTIME_NO_PKG_CONFIG=1`, which keeps every
+`--all-features` gate on the verified download; set it too when you run those gates by hand on a
+host that has a distro ONNX Runtime installed.
+
+### Start-up check (`runtime.rs`)
+
+- `CPU_EXECUTION_PROVIDER = "CPUExecutionProvider"`, `MAX_RUNTIME_ERROR_DETAIL_BYTES = 256`.
+- `verify_cpu_execution_provider() -> Result<(), InferenceError>`: asks the linked library, by
+  exact name, whether `CPUExecutionProvider` is available (`execution_provider_listed`, a
+  never-registered `ExecutionProvider` probe that keeps the default `is_available`, i.e.
+  `GetAvailableProviders`; `ort::ep::CPU::is_available` answers `true` without asking and is not
+  used). Never registers a provider, never creates a session.
+- `check_cpu_execution_provider(probe)`: the pure decision. Only `Ok(true)` passes; `Ok(false)`,
+  an ORT error or a panic (the `ort` handshake panics when the library is older than the compiled
+  API level) become `InferenceError::CpuExecutionProviderUnavailable(detail)`, the detail bounded
+  to 256 bytes on a character boundary.
+- Callers: `soos-daemon` (`initialize_pipeline`, step 0: the daemon refuses to start and
+  `pam_soos.so` returns `PAM_IGNORE`), `soos-enroll` (`build_full_service_with_notes`, before the
+  key, store, camera and models) and `soos-gui` (before its `ModelRegistry`). A missing library
+  stops each binary at the dynamic loader.
+- Evidence: `system_onnxruntime_tests::*` (SORT1–SORT6, SORT9),
+  `system_onnxruntime_startup_tests::*` (SORT7), `soos-invariants::system_onnxruntime_contract::*`,
+  and the offline Arch CI job `system-onnxruntime` (SORT8, `tests/docker/system_onnxruntime_test.sh`).
+
+---
+
 ## Model Acquisition & Deployment
 
 Production models are deployed to `/var/lib/soos/models/` via `scripts/download_models.sh`:
@@ -348,5 +399,6 @@ proof that the shipped and optional PAD ONNX files equal the upstream checkpoint
 | **ASG1** | Class 1 = live, class 2 = screen replay is a spoof with the default index | `pad_tests::test_screen_replay_detected_as_spoof_with_default_index` | Validated |
 | **PLC1–PLC3** | Production wiring never overrides the live class index (daemon, enrollment CLI, repository invariant) | `pad_wiring_tests::test_pipeline_pad_detector_uses_default_live_class_index` (daemon), `pad_wiring_tests::test_enrollment_pad_detector_uses_default_live_class_index` (enrollment CLI), `soos-invariants::tests::test_no_pad_live_class_index_override_outside_tests` | Verified |
 | **EMR1–EMR7** | Manifest shape attestation and truthful embedding model metadata (GitHub #191) | `manifest_shape_tests::*`, `embedding_real_model_tests::*` (see `AI/VERIFICATION_MATRIX.md`) | ✅ Verified |
+| **SORT1–SORT10, SORT-S1–SORT-S7** | System ONNX Runtime build, CPU execution provider start-up check, MSRV, offline Arch CI job (GitHub #375) | `system_onnxruntime_tests::*`, `system_onnxruntime_startup_tests::*`, `soos-invariants::system_onnxruntime_contract::*` (see `AI/VERIFICATION_MATRIX.md`) | ✅ Verified |
 | **Invariant** | `#![forbid(unsafe_code)]` enabled | Invariant test & compile-time crate declaration | Validated |
 | **Invariant** | Zero OpenCV across workspace | `tests/invariants::test_no_opencv_in_any_cargo_toml` | Validated |

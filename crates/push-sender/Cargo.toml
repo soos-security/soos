@@ -3,6 +3,7 @@ name = "soos-push-sender"
 description = "Optional sandboxed user service performing the outbound Web Push requests of the soos remote companion"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 publish.workspace = true

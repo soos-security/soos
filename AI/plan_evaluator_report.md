@@ -1,107 +1,105 @@
-# Plan Evaluation Report
+# Plan Evaluation Report (Round 2)
 - **Date**: 2026-10-13
-- **Issue**: GitHub-only #372 — `scripts/setup.sh` core (PR 1 of #362, planned split item 1); no `AI/BACKLOG.md` id
-- **Branch**: `feat/one-command-install`
-- **Base commit**: `37d03c4`
-- **Plan under evaluation**: `AI/architect_spec_one_command_install.md` with the normative §11 "Revision 1" (R-1..R-7, m1..m11)
-- **Round**: 2 (round 1: REVISION_REQUIRED, 7 MAJOR, 11 MINOR)
-- **Note**: the untracked draft `tests/invariants/src/setup_contract.rs` predates Revision 1. It is revised in Phase 2 and is not assessed here as a plan defect.
+- **Issue**: GitHub-only #375: build against the system ONNX Runtime for distribution packages (PR 1 of umbrella #361; no `AI/BACKLOG.md` id)
+- **Branch**: `feat/system-onnxruntime`
+- **Base commit**: `6f32ef8` (`git rev-parse --short origin/main` = `HEAD` = `6f32ef8`)
+- **Plan evaluated**: `AI/architect_spec_system_onnxruntime.md`. "§10 Revision 1" and "§11 Contract Migration" are normative and supersede §0–§9 where they differ. The draft tests and harness in the tree are being updated by the tester. I judged the plan, not how far the drafts lag behind it. No cargo build was run for this round: every fact below comes from source reading.
 
-## 0. Round 1 findings and their resolution
+## 0. Round-1 Findings → Resolution
 
-| Round 1 finding | Revision | Verified against code | Status |
+| Round-1 finding | Revision 1 resolution | Verified against | Status |
 |---|---|---|---|
-| F1 (MAJOR) enrollment vs the daemon's camera | R-1: bounded `systemctl stop` → `soos-enroll --biometrics-dir/--key-file/--models-dir ... enroll --username` → `systemctl start` → readiness; `DAEMON_STOPPED` + EXIT trap restarts on every path; failed restart/readiness = 70; busy stub test hook | Global flags exist (`crates/enrollment-cli/src/args.rs:28-45`, `global = true`, so placing them before `enroll` is valid); the stop/enroll/start sequence is the documented remedy (`error.rs:52-58`, `Docs/ENROLLMENT_CLI.md:227`) | RESOLVED (residual m-B, m-C) |
-| F2 (MAJOR) local seat lost across sudo | R-2: decided in the user half and passed as `--local-seat yes\|no`; SSH vars → no; `XDG_SESSION_ID`/`self`, then `show-user --property=Display` fallback; root-started: no Display fallback, failure → not local | Logic is fail-safe in every root-started case | RESOLVED (residual m-A, m-D) |
-| F3 (MAJOR) sudo stub keeps the environment | R-3: `env -i` allowlist stub; argv assertions; an SSH variable set for the user half must still skip enrollment | — | RESOLVED |
-| F4 (MAJOR) build user vs target user | R-4: build user = current user, or invoking user, or non-root checkout owner, else exit 2; target user separate; `find -H ! -uid` preflight; explicit `PATH`/`HOME` instead of a login shell (deliberate, justified by ADR 2026-10-01 `--no-modify-path`); `runuser` preflight | `install.sh:521-583` checks owner **and** read/write permissions; R-4 checks owner only | RESOLVED (residual m-E, m-F) |
-| F5 (MAJOR) exit 2 after changes | R-5: root-started preflight validates root-only items (exit 2); user-started root half refuses with new **exit 4**; 130/143 documented | — | RESOLVED |
-| F6 (MAJOR) incomplete "already done" | R-6: provision helper equal, `master.key` present, `soos` group, family PAM template, `download_models.sh --check-only`; `--reinstall`; hint after a 70 on a skipped system phase | Paths match `install.sh`: Debian `${DESTDIR}/usr/share/pam-configs` (`install.sh:899`), Fedora `${SYSCONFDIR}/authselect/custom/soos` (`:907`), Arch `${PREFIX}/share/soos/pam` (`:936`); `--check-only` is read-only (`download_models.sh:355,373,421`: no `mkdir`/`chmod`, no `curl`) | RESOLVED (residual m-G) |
-| F7 (MAJOR) unmapped #362 lines | R-7: display manager from the `display-manager.service` link, bounded `tailscale version`, static ban narrowed to "no subcommand but `version`", SET3 as the defaults invariant, write-free snapshot instead of `strace` (the acceptance line allows "a write-free stage"), CI scanners plus an exact state-content assertion, explicit deferral list | — | RESOLVED (residual m-H) |
-| m1 internal options undocumented | `--artifact-dir`, `--local-seat`, `--system-phase` internal in `--help`/§2; absolute re-exec | — | RESOLVED |
-| m2 family / pam dir divergence | always `--distro <family>`; `--pam-dir` resolved with `install.sh`'s rule and passed | candidate list `install.sh:287-303` | RESOLVED |
-| m3 INT and state-write semantics | INT/TERM while armed rolls back; state-write failure keeps changes, exit 1 | — | RESOLVED (see m-B for SIGHUP) |
-| m4 state-file owner / user change | `-O` owner check; a different stored user is refused with "remove it to start over" | — | RESOLVED (residual m-I) |
-| m5 presence lstat, global flag | `-e \|\| -L`; `${SYSCONFDIR}/soos/disabled` reported | matches `presence/switch.rs:20-33` | RESOLVED |
-| m6 distro cargo without rustup | warning + recommendation | — | RESOLVED |
-| m7 apt env, refresh hint, globbing | `sudo -- env DEBIAN_FRONTEND=...`; hints printed, never run; `read -r -a` | — | RESOLVED |
-| m8 dry run | no TTY needed; provisional build/system lines; snapshot covers fake root, HOME, checkout, TMPDIR | — | RESOLVED |
-| m9 bounds, `$EUID` | `systemctl`/`loginctl` bounded; `$EUID`/`$UID` banned | `getent` still unbounded (low risk, local NSS) | RESOLVED |
-| m10 exit 70 continuation | access, presence, verify, enrollment skipped; state written | — | RESOLVED |
-| m11 draft contract / SET2 | revised in Phase 2; SET2 bans every package name as a whole shell word | — | RESOLVED |
+| **M-1** (MAJOR): `dependency_tooling_contract::test_prerelease_workspace_dependencies_are_exact_pinned` breaks, and no migration was planned | §11 lists the test, the old assertion, the new assertion (the `ort = ` line of `[workspace.dependencies]` contains `version = "=2.0.0-rc.`) and the acceptance line that mandates it (#375/#361 require `default-features = false`, which forces an inline table) | `tests/invariants/src/dependency_tooling_contract.rs:340–390`. The generic loop above the assertion already parses `version` inside inline tables, so the `=` pin is still enforced twice. No other invariant pins the literal `ort = "` (grep over `tests/invariants/src`). The intent and strength are kept. | **Resolved** |
+| **M-2** (MAJOR): the startup guard could be a no-op without any test failing | §10: a private `ListedProviderProbe(&'static str)` that does not override `is_available`; `#[doc(hidden)] pub fn execution_provider_listed`; `verify` routes through `execution_provider_listed(CPU_EXECUTION_PROVIDER)`; the linked-library test SORT9 checks the real name, an unknown name and the lower-cased name; static SORT-S4 clauses (the `impl`, no `fn is_available`, no `ep::CPU`, the routing) | `ort-2.0.0-rc.13/src/ep/mod.rs:39–62`: the default `is_available` is `is_ep_available(self.name())`. `:268–291`: `GetAvailableProviders` with an exact, case-sensitive `name == avail`, and `Ok(false)` when the name is not listed. So SORT9's `Ok(false)` cases fail against a constant-true probe, and the static clauses block `ep::CPU::is_available` (`Ok(true)`). | **Resolved** |
+| **M-3** (MINOR): stale base | Rebased on `6f32ef8`, 18 members including `crates/frame`; SORT-S2 reads `[workspace] members` | `Cargo.toml` `members` has 18 entries. `crates/frame/Cargo.toml` assertions in `portable_crates_contract::test_mac_frame_crate_is_pure_and_forbids_unsafe` are line-membership checks, so adding `rust-version.workspace = true` keeps them green. Only the five cited crates depend on `soos-inference-ort`/`soos-vision`/`soos-enrollment-cli`/`ort` (grep over every member manifest). | **Resolved** |
+| **m-4** (MINOR): with both features, pkg-config prints link directives before the API-27 gate rejects the library (mixed link) | Workflow-level `env: LIBONNXRUNTIME_NO_PKG_CONFIG: "1"` in `ci.yml`. The harness passes an explicit environment and asserts the variable is unset in the container. ADR and `Docs/INFERENCE_ORT_CRATE.md` document the hazard; SORT-S5 pins the line. | `pkg-config-0.3.34/src/lib.rs:596–600`: `probe()` checks `format!("{}_NO_PKG_CONFIG", envify(name))` with the plain `env_var_os` (not target-prefixed) **before** running pkg-config or printing any metadata. `envify("libonnxruntime")` = `LIBONNXRUNTIME` (`:1065`). `ort-sys` `build/pkg_config.rs` then takes `Err(_)` → `false` → the download path, which is identical to today. **New-regression check**: no invariant pins the `ci.yml` workflow `env:` block. `portable_crates_contract.rs:611` only searches the header before `\njobs:` for `portable-macos`. `distro_matrix.rs:1576` parses `env:` inside one job body. `config_open_diagnostics_contract.rs:171` checks the job-level `ORT_SKIP_DOWNLOAD` in clippy, which is unaffected. No test greps `CARGO_INCREMENTAL`/`CARGO_PROFILE_*`. The macOS job assertions (`portable_crates_contract.rs:533–612`) look only inside the job body. | **Resolved** (see n-2 on the local gate) |
+| **m-5** (MINOR): the deviation from #361 was overstated | §10 gives the real reasons: download code compiled in, API-27 gate excluding Fedora 43/44 and Debian, a silent download when `ORT_SKIP_DOWNLOAD` is unset | `ort-sys` `build/main.rs` order; `version.rs` | **Resolved** |
+| **m-6** (MINOR): the §6 command fails, and the SORT3 wording was inconsistent | Harness: one plain `--all-targets` run, then an explicit `SOOS_REQUIRE_REAL_MODELS=1` list; SORT-S5 pins the list; SORT3 wording aligned | `grep -l SOOS_REQUIRE_REAL_MODELS crates/*/tests`: the ten listed targets are exactly every REQUIRE-aware target **except** `embedding_preprocessing_evaluation_tests` (retired ArcFace model, which prints `SKIPPED` without REQUIRE, `:87–92`), plus the two new suites. All files exist. | **Resolved** |
+| **m-7** (MINOR): partial MSRV coverage | `cargo check --locked --offline --workspace --all-targets --all-features` under the MSRV in the offline phase; ADR note on `incompatible_msrv` | `cargo check` does not link. With `ORT_SKIP_DOWNLOAD=1`, a rejected or absent `.pc` ends in `link_error_generic`, which `check` tolerates, so the step is deterministic either way. The Ubuntu clippy job compiles the GUI without extra apt packages, so the Arch container needs none either. | **Resolved** |
+| **m-8** (MINOR): a rolling release gates every PR | Accepted risk recorded in the ADR and `Docs/CI_CD_AND_SECURITY.md`: versions printed, one re-run, `fix/` PR or digest bump, never `continue-on-error`, never removed from CI Success without an ADR amendment | The rationale (the job exists to detect Arch ABI drift, which an Arch Linux Archive snapshot would hide) is coherent. The digest equals `tests/docker/Dockerfile.arch:9`. | **Resolved (accepted risk)** |
+| **m-9** (MINOR): `soos-enroll`/`soos-gui` do not run the check | Both call `verify_cpu_execution_provider()?` before `ModelRegistry::new`; pinned by SORT-S4 | `crates/gui/src/main.rs:22,73`: `main` returns `Box<dyn Error>`, so `?` works, and the real-model branch is the only `ModelRegistry::new`. `crates/enrollment-cli/src/error.rs:72–73`: `Inference(#[from] InferenceError)` exists. `service.rs:1782–1835`: placement is feasible, but see n-1. | **Resolved, with n-1** |
+| **m-10** (MINOR): nothing pins "CPU only" in source | SORT-S1 scan: no `with_execution_providers` in `crates/*/src`; `ort::ep` only in `runtime.rs` | Today `with_execution_providers` and `ort::ep` appear nowhere in `crates/*/src`. | **Resolved, with n-3** |
 
 ## 1. Coverage Matrix
 
-| Acceptance line / TDD test | Spec element | Status |
+| Acceptance line (#375 / in-scope #361) | Spec element | Status |
 |---|---|---|
-| `--help` documents every flag (internal ones marked) | §2 + §11 m1 | COVERED |
-| `--dry-run` no write, full plan, exit 0 | §4.11, §11 m8 (write-free whole-tree snapshot) | COVERED |
-| os-release parsed, never sourced | §4.0, §11 m7 | COVERED |
-| Package lists only from `check_build_deps.sh` | §4.0, §11 m11 | COVERED |
-| Reports distribution, package manager, display manager, camera summary, Tailscale version | §4.0 + R-7 | COVERED |
-| Defaults: core only (owner OD-3 amendment through ADR), no PAM/Tailscale write/remote/`[preview]`/network-lock action | §7, R-7 (SET3) | COVERED |
-| Typed confirmations, inconsistent opt-in combinations, user phase never root | R-7 deferral list (PR 4) | DEFERRED (recorded) |
-| Idempotence (second run `already done`) | §4.x + R-6 | COVERED locally; Docker matrix DEFERRED (recorded) |
-| Rollback | §6 + m3 + R-1 trap | COVERED locally; fault-injection matrix and `pam_snapshot.sh verify` DEFERRED (recorded) |
-| PAM activation, Arch `soos-admin pam`, `--check-config`, TOML editor, `--tailscale-serve`, `--from-release` | R-7 deferral list | DEFERRED (recorded) |
-| No secret printed or stored | §5 + R-7 (exact state-content assertion, CI scanners) | COVERED |
-| README leads with the one command | §1 | COVERED |
-| ADR, matrix rows (incl. owner hardware run), invariants, walkthrough | §1, §10 | COVERED |
-| OD-2 local-seat-only enrollment | R-1, R-2 | COVERED |
-| ADR 2026-10-02 #308 never build as root | R-4 | COVERED |
+| Opt-in feature building `ort` without `download-binaries` | §3; SORT-S1, SORT-S3 | Covered |
+| Distro `libonnxruntime.so` through pkg-config | §3 `ort/pkg-config`; §6 `readelf`/`ldd`/`pacman -Qo` | Covered |
+| Lowest needed C API level | `api-17`; SORT-S3 forbids `api-18` | Covered |
+| CPU EP availability checked at startup, fail closed | §2 + §10 M-2; SORT1–SORT5, SORT9, SORT-S4 | Covered, now with a test that can fail |
+| PAM unaffected, `PAM_IGNORE` when the daemon is absent | §5, SORT-S6, `test_ipc_offline_daemon_returns_ignore` | Covered |
+| Declared MSRV, not newer than `rust-toolchain.toml` | §4, SORT-S2 (`1.92` ≤ `1.98.1`) | Covered |
+| CI builds at exactly the MSRV | §6 + §10 m-7 | Covered |
+| Offline Arch job, `onnxruntime-cpu`, no network, no ORT cache | §6, SORT-S5 | Covered |
+| `ORT_SKIP_DOWNLOAD=1`, `--locked --offline` after a separate fetch | §6 | Covered |
+| Real-model tests pass against the system library | §10 m-6 list, SORT7 | Covered |
+| Default dev/CI build unchanged | §3, SORT-S3 default graph, workflow `LIBONNXRUNTIME_NO_PKG_CONFIG` | Covered |
+| `--all-features` keeps working | §3 + §10 m-4 | Covered |
+| ADR with rejected alternatives and trust change | §9 + §10 m-5/m-7/m-8, SORT-S7 | Covered |
+| "ort CPU only" / "no OpenCV" | §8, SORT-S1 + §10 m-10 | Covered |
+| Existing tests not weakened | §11 Contract Migration (one test, justified) | Covered |
 
-## 2. Facts Verified Against Code (round 2 additions; round 1 facts unchanged)
+## 2. Facts Verified Against Code (round 2 additions)
 
 | Fact cited by plan | Code location | Actual value | Match |
 |---|---|---|---|
-| `soos-enroll` path flags are global | `crates/enrollment-cli/src/args.rs:28-45` | `--biometrics-dir`, `--key-file`, `--models-dir`, `global = true` | Yes |
-| `soos-enroll` confirmation | `crates/enrollment-cli/src/main.rs:24-31,131`, `service.rs:871` | stdin `[y/N]`; EOF → declined; `--yes` skips the prompt | See m-C |
-| `download_models.sh --check-only` read-only | `scripts/download_models.sh:355,373,421` | no target-dir creation, no curl requirement, missing file → exit 1 | Yes |
-| PAM template locations | `scripts/install.sh:897-940` | Debian `${DESTDIR}/usr/share/pam-configs/{soos,soos-notify}`; Fedora `${SYSCONFDIR}/authselect/custom/soos/*`; Arch `${PREFIX}/share/soos/pam/system-auth.snippet` | Yes |
-| Provision helper install path | `scripts/install.sh:858` | `${PREFIX}/libexec/soos/provision-master-key` from `scripts/provision_master_key.sh` | Yes |
-| `install.sh` target-dir check | `scripts/install.sh:521-583` | owner, then read, then write checks | R-4 keeps the owner check only (m-E) |
-| "installer never runs `tailscale`" wording | `AI/DECISIONS.md:130` (and agent rule at `:125`) | about `install_remote.sh`; agents never run `tailscale` | Read-only `tailscale version` needs an explicit carve-out in the new ADR (m-H) |
+| `<NAME>_NO_PKG_CONFIG` honoured by pkg-config 0.3.34 | `pkg-config-0.3.34/src/lib.rs:596–600, 682–687, 1065` | Checked first in `probe()`, plain variable name, `LIBONNXRUNTIME` from `envify` | Yes |
+| `ort-sys` falls back on any pkg-config `Err` | `ort-sys-2.0.0-rc.13/build/pkg_config.rs` `Err(_) => false` | As stated | Yes |
+| The default `is_available` asks the library, exact compare | `ort-2.0.0-rc.13/src/ep/mod.rs:57–59, 268–291` | `name == avail` → `Ok(true)`, otherwise `Ok(false)` | Yes |
+| `ExecutionProvider` needs only `name` and `register` | `ep/mod.rs:39–62` | As stated | Yes |
+| No invariant pins the `ci.yml` workflow `env:` block | grep `tests/invariants/src` for `CARGO_INCREMENTAL`, `CARGO_PROFILE_DEV_DEBUG`, `"\nenv:"` | Only the new `system_onnxruntime_contract.rs:612` | Yes (no conflict) |
+| `[workspace.package] rust-version` cannot be misread as `version` | `scripts/lib/pkg_meta.sh` (awk exact key), `onboarding_packaging_contract.rs:61–78` (`k.trim() == key`) | Exact-key match | Yes |
+| `soos-enroll` early mock return precedes the V4L2 camera and models | `crates/enrollment-cli/src/service.rs:1816–1835` | Yes. **But** `MasterKey::load_or_create` and `BiometricStore::new` run before it (`:1813–1814`). | Partial (n-1) |
+| GUI real-model branch | `crates/gui/src/main.rs:55–75` | Single `ModelRegistry::new`, `main` returns `Box<dyn Error>` | Yes |
+| Only five crates reach ORT | grep over all 18 member manifests | daemon, inference-ort, vision, enrollment-cli, gui | Yes |
+| `Dockerfile.arch` digest | `tests/docker/Dockerfile.arch:9` | `sha256:b21322c6…0040` | Yes |
+| Daemon order (camera → keys → models) | `crates/daemon/src/pipeline.rs:574–628` | `resolve_pipeline_camera` :581, `MasterKey` :599/:610, `ModelRegistry::new` :628 | Yes |
 
 ## 3. Pillar Analysis
 
-### Pillar 1 — Architecture & threat model
-- Scenario: the enrollment hand-off stops the daemon. During that window `pam_soos.so` cannot connect → `PAM_IGNORE` → password; presence unlock is off. Exclusive camera ownership is respected because the daemon is stopped before `soos-enroll` opens the device. PASS.
-- Scenario (false local seat): the owner attaches over SSH to a tmux server started at the desk. The existing pane has no `SSH_*`, and `XDG_SESSION_ID` is the desk session (`Remote=no`, `seat0`). Setup decides "local", stops the daemon and runs enrollment while the owner is remote. Whoever sits at the PC is captured, and the owner confirms a summary without seeing the face. The scenario is contrived and needs the owner's cooperation, but the summary should make the remote risk explicit. MINOR m-A.
-- Scenario: `tailscale version` runs from `PATH` (as root when root-started); it is read-only and does not touch Tailscale state. PASS, ADR wording m-H.
+### Pillar 1: Architecture & threat model
+- Scenario: a planted `.pc` on a CI runner. Workflow-level `LIBONNXRUNTIME_NO_PKG_CONFIG=1` means pkg-config is never run in the `--all-features` jobs, so build-host pkg-config state cannot change which library the CI jobs link. The system job runs in a clean container with the variable explicitly unset.
+- Scenario: a GPU variant of `libonnxruntime`. It is still CPU-only by construction (no `with_execution_providers`, no other EP), now pinned by the m-10 scan. That scan has a gap (n-3).
+- Result: PASS, with MINOR n-3.
 
-### Pillar 2 — PAM deadline & concurrency
-- No PAM code or file change. The daemon-down window is bounded by the enrollment duration plus a bounded stop/start and the 30 s readiness wait. PASS.
-- Scenario: the terminal closes during enrollment (SIGHUP to the root half through sudo). R-1 and m3 name EXIT, INT and TERM; HUP is not named. If HUP is not trapped explicitly, the restart guarantee rests on bash behaviour that is not stated in the plan. The unit stays enabled, so the next boot recovers, but the session would run without the daemon until then. MINOR m-B.
+### Pillar 2: PAM deadline & concurrency
+- Scenario: the check adds latency to authentication. It does not: it runs once at daemon, `soos-enroll` and `soos-gui` start, before the socket exists. `crates/pam` is untouched (SORT-S6).
+- Result: PASS.
 
-### Pillar 3 — Panic safety & fail-closed
-- Every new path fails toward "skip / keep / not local": seat detection failure → not local; restart failure → 70; root-half refusal → 4; build-as-root → 2. No path turns an error into 0. PASS.
-- Scenario: `sudo ./scripts/setup.sh` from a GNOME terminal (a likely habit). sudo strips `XDG_SESSION_ID`/`SSH_*`, and `self` fails in an app scope, so enrollment is always skipped. This is fail-safe, but the summary should say "run setup.sh without sudo to enroll from this seat". MINOR m-D.
+### Pillar 3: Panic safety & fail-closed
+- Scenario: a constant-true probe. SORT9's `"SoosNoSuchExecutionProvider"` → `Ok(false)` fails against it, and the static SORT-S4 clauses fail against `ep::CPU` or an `is_available` override. Closed.
+- Scenario: the handshake panic (`OnceLock::get_or_init` + `expect`). It is caught by `check_cpu_execution_provider`. `OnceLock` does not poison after a panicking initializer, so no later call is made inconsistent.
+- Scenario: `soos-enroll` runs against an incompatible library on a fresh host. With the check placed after the mock return (§10), `MasterKey::load_or_create` and `BiometricStore::new` have already created the master key and store directory before the check fails. That is fail closed (no template is written and the exit is non-zero), but it contradicts §10's "nothing written" claim and differs from the daemon's step-0 order (n-1).
+- Result: PASS, with MINOR n-1.
 
-### Pillar 4 — Dependencies
-- No new crate or package list. Scenario: root-started run for a user whose rustup lives in a custom `CARGO_HOME`. The probe only knows `~/.cargo/bin` (sudo reset the environment), so `install_rustup.sh` installs a second toolchain into `~/.cargo`. The result is visible and recoverable, but it is a surprise write into the user's home. MINOR m-F.
+### Pillar 4: Dependencies
+- Scenario: the env line silently changes the default CI build. It does not: the GitHub runners have no `libonnxruntime.pc` today, so pkg-config already failed and the download was already used. The variable only makes that explicit. `ORT_SKIP_DOWNLOAD` in the i686 step is independent of it.
+- Scenario: a developer runs `./save.sh` on an Arch host with `onnxruntime-cpu` installed. `save.sh:239,253` runs the same `--all-features` commands but does not set the variable. If the system library is 1.27 or newer, the local gate links the distro library while CI uses the download. If it is older, the mixed link from m-4 reappears locally. This breaks the "green local predicts green CI" parity claimed in the `ci.yml` header (n-2).
+- No new crate. `pkg-config 0.3.34` is already locked.
+- Result: PASS, with MINOR n-2.
 
-### Pillar 5 — Data confidentiality
-- State-file content is asserted exactly and holds no secret field. It must be owned by the effective user. A user change is refused. PASS.
-- Scenario: a second household member must delete `setup.json` to be set up, which drops the sticky provenance of the first user's run (later `--uninstall` PR). Acceptable for PR 1 if the ADR says so. MINOR m-I.
+### Pillar 5: Data confidentiality
+- Scenario: secrets in the error detail. The detail is ORT text or a panic payload, bounded to 256 bytes. `execution_provider_listed` returns only `bool`/ORT error text. The GUI and `soos-enroll` print the same bounded `Display`.
+- Result: PASS.
 
-### Pillar 6 — Test integrity & power
-- R-3 makes environment reliance detectable. The busy `soos-enroll` stub makes a wrong enrollment ordering fail. Argv assertions cover the build user, artifact dir and seat verdict. PASS.
-- Scenario: an implementation that skips the restart on the exit-3 path must fail a test. R-1 lists the hook but not the assertion that the stub unit is active again after exit 3, INT and a failed state write. The tester must cover each exit path. MINOR m-C (test plan precision).
-- Scenario: an implementation that checks only the presence of the family PAM template (not its content) passes R-6 tests; R-6 says "equal" only for the provision helper. MINOR m-G.
+### Pillar 6: Test integrity
+- Scenario: the developer adapts an existing test ad hoc. §11 now authorizes exactly one migration, with old and new assertions, and the tester has already applied it in a form equivalent to the plan.
+- Scenario: SORT9 against a wrong implementation:
+  - case-insensitive compare → fails on `"cpuexecutionprovider"`;
+  - constant true → fails on the unknown name;
+  - `ep::CPU` → static clause fails.
+- Scenario: the order check for `soos-enroll` passes while the check still runs after key creation. SORT-S4 as described pins only the presence of the call (n-1).
+- Result: PASS, with MINOR n-1.
 
-## 4. Findings (remaining)
+## 4. Findings (round 2)
 
-- **[MINOR] m-A** — The display-session fallback and inherited `XDG_SESSION_ID` can classify a remotely attached tmux/screen pane or a VNC-mirrored desk session as local. Required: state this limitation in the ADR/Docs. Recommended: show "a face will be captured at this PC's camera now" in the plan and require the TTY confirmation for enrollment.
-- **[MINOR] m-B** — Name `HUP` (and `QUIT`) with INT/TERM in the trap set that guarantees the daemon restart and the journal replay. Do not rely on unstated bash EXIT-trap behaviour for signals.
-- **[MINOR] m-C** — Spell out how setup answers `soos-enroll`'s `[y/N]` prompt. With a TTY it stays interactive; without one, `--yes` is passed to `soos-enroll`, or enrollment is skipped with the printed command (EOF currently aborts as exit 3). The tester must assert the unit restart after exit 0, exit 3, INT and a state-write failure.
-- **[MINOR] m-D** — When setup is root-started and the seat is not local, the summary should recommend re-running without `sudo` from the desk session.
-- **[MINOR] m-E** — The R-4 target-directory preflight checks ownership only. `install.sh` also checks read and write permissions (`install.sh:556-572`). Mirror all three checks, or record the narrower rule (cargo then fails late with exit 40).
-- **[MINOR] m-F** — In the root-started toolchain probe, document the custom `CARGO_HOME`/`RUSTUP_HOME` limitation, or probe `runuser -u <build user> -- sh -c 'command -v cargo'` with the user's `HOME` before installing a second toolchain.
-- **[MINOR] m-G** — R-6: compare the family PAM template files by content (`cmp -s` against `packaging/pam/...`), not only by presence, so a template change after `git pull` triggers the system phase.
-- **[MINOR] m-H** — The new ADR must carve out the read-only `tailscale version` call explicitly, next to the remote ADRs' "installer never runs `tailscale`" wording (`AI/DECISIONS.md:130`) and the agent rule (`:125`). The tests must assert that it is the only `tailscale` argv.
-- **[MINOR] m-I** — The ADR must record that `setup.json` is single-user in format 1, and that a second user requires removing it (provenance of the first run is lost).
+- **[MINOR] n-1: the `soos-enroll` check runs after key and store creation, so "nothing written" is not true.** In `build_full_service_with_notes`, `MasterKey::load_or_create(&key_path)` and `BiometricStore::new(bio_dir, key)` (`service.rs:1813–1814`) run before the `if cli.mock` early return. §10 places the check after that return, so on a fresh host with a broken library the master key and store directory are created before the failure. **Required change**: run `soos_inference_ort::verify_cpu_execution_provider()?` guarded by `if !cli.mock` before `MasterKey::load_or_create`, matching the daemon's step 0, and have SORT-S4 pin the order (check offset < `MasterKey::load_or_create` offset < `V4lCameraManager::spawn` offset). Otherwise, drop the "nothing written" claim from §10.
+- **[MINOR] n-2: the local gate loses parity with CI.** The workflow-level `LIBONNXRUNTIME_NO_PKG_CONFIG: "1"` is not mirrored in `save.sh`, which runs the identical `--all-features` clippy/test commands. On a developer host with a distro `libonnxruntime.pc`, the local result depends on that library (mixed link if it is older than 1.27, a dynamic distro link if newer). **Required change**: `export LIBONNXRUNTIME_NO_PKG_CONFIG=1` in `save.sh` before the cargo gates (unless the caller already set it), and mention it in the ADR. Otherwise, state the divergence explicitly in the ADR and in `Docs/INFERENCE_ORT_CRATE.md` as accepted.
+- **[MINOR] n-3: the m-10 source scan can be bypassed by grouped imports.** A substring scan for `ort::ep` misses `use ort::{ep::CUDA, session::Session}` and a direct `SomeEp.register(&mut builder)`. It could also false-positive on a type ending in `ort` followed by `::ep…` (for example `Report::epoch`). **Required change (tester)**: make the scan token-aware, for example by rejecting `ep::` path segments in any file outside `runtime.rs` that imports `ort`, plus `impl ExecutionProvider` and `.register(` on an `ort` builder outside `runtime.rs`.
+- **[MINOR] n-4: the superseded text in §2, §3 and §6 still contradicts §10.** §2 still shows `CpuProviderProbe` and a re-export list without `execution_provider_listed`; §3's "Both features enabled" paragraph still describes pkg-config-first in CI; §6 still lists the old `--all-targets` REQUIRE command. §10 is declared normative, so this is not blocking. **Required change**: replace those passages in place with pointers to §10 so the developer and traceability agents do not implement the stale variant.
+
+No CRITICAL or MAJOR finding. All three round-1 MAJORs (M-1, M-2) and the stale base (M-3) are resolved, and all round-1 MINORs are addressed. The workflow-level env line breaks no existing invariant.
 
 ## 5. Verdict
 VALIDATION_VERDICT: APPROVED
-
-All seven round 1 MAJOR findings and all eleven MINOR ones are resolved by §11 Revision 1 and verified against the code. Nine MINOR refinements remain (m-A..m-I). They do not block Phase 2; the tester and the developer must fold them in (m-B, m-C, m-E, m-G in the script and contract; m-A, m-D, m-F, m-H, m-I in the ADR and Docs).
