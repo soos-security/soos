@@ -151,6 +151,11 @@ After the candid review follow-up, all gates were re-run on `origin/main` `6f32e
 - **ShellCheck 0.11.0:** clean.
 - `./scripts/candid_review.sh` (layer 1): PASSED, and its syntax check covered `scripts/setup.sh`.
 
+**CI follow-up (PR #385).** Three tests failed on the GitHub runner. The harness gave the fake account a hard-coded uid of 1000, but the runner's uid is 1001, so the second run's ownership preflight refused the harness-created `repo/target`.
+- Reproduced with a uid-1001 user namespace: 25 passed, 3 failed, same error.
+- Fixed in the harness only: the fake account now uses the real uid of the test process.
+- Details are in the tester contract, "CI follow-up". The script and the preflight are unchanged.
+
 `setup.sh` was never run for real; nothing was installed and `sudo` was never used.
 
 ## 9. Known Limitations / Follow-ups

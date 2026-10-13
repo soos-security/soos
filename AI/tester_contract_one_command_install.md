@@ -47,3 +47,13 @@ Tests were written first and observed Red against the reviewed script (`cargo te
 | `test_set_full_run_as_root_builds_as_invoking_user` (strengthened: root `CARGO_HOME`, `RUSTUP_HOME`, `RUSTFLAGS` set; build `HOME`/`USER` asserted) | CR-3 | `CARGO_HOME=/root/.cargo RUSTUP_HOME=/root/.rustup RUSTFLAGS=-Cinjected-by-root` reached the user build |
 
 Harness changes (strengthening only): the `loginctl` stub answers per session id; harness paths are baked into every stub so a stub still logs under `env -i`; the cargo stub also logs `HOME`, `USER`, `CARGO_HOME`, `RUSTUP_HOME`, `RUSTFLAGS`. No assertion was relaxed. After the fixes: 28 passed, 0 failed.
+
+## CI follow-up (PR #385, 2026-10-13): fake account uid
+
+`test_set_second_run_is_idempotent`, `test_set_presence_flag_toggles` and `test_set_damaged_install_and_reinstall` failed on the GitHub runner but passed locally. Each failed in the preflight of its second run: "The cargo target directory …/repo/target holds files not owned by the build user 'alice'".
+
+- **Root cause:** a harness defect. The `id` and `getent` stubs hard-coded uid 1000 for the fake account `alice`. The test process creates every file, including the cargo stub's `repo/target`, so those files belong to the real uid of the test process. That uid is 1000 on the developer host, which hid the defect, and 1001 (`runner`) on GitHub's Ubuntu image. The first run passes because `repo/target` does not exist yet. The second run's ownership preflight (`find -H <target> ! -uid <build uid>`) then correctly refuses.
+- **Reproduction:** the committed test binary run as uid 1001 in a user namespace (`unshare --user --map-user=1001 --map-group=1001 <test binary> setup_contract`) fails the same three tests with the same error (25 passed, 3 failed). The same binary run as uid 1000 passes (28 passed).
+- **Fix (harness only):** the fake account now has the real uid of the test process (`STUB_UID`, baked into every stub). This affects `id -u`, `id -u alice`, `getent passwd`, `SUDO_UID` and the enrolled template file name. `real_uid()` asserts a numeric, non-root uid.
+- **Unchanged:** `uid=1000` in log lines stays a role label ("the normal user"). No assertion changed, and the production ownership preflight is unchanged.
+- **Result:** after the fix, the binary passes as uid 1000 and as uid 1001.

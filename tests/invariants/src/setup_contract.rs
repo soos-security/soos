@@ -275,7 +275,11 @@ const SAFE_TOOLS: &[&str] = &[
     "realpath", "printf", "true", "false", "od",
 ];
 
-/// Common prologue of every stub: logs `uid=<0|1000> <name> <args>`.
+/// Common prologue of every stub: logs `uid=<0|1000> <name> <args>`. `uid=1000` is a role label
+/// ("the normal user"), not the numeric uid: the fake account `alice` has the real uid of the
+/// test process (`STUB_UID`), because every file the harness and the stubs create belongs to
+/// it and `setup.sh` checks file ownership against the resolved uid (GitHub runners use uid
+/// 1001, a developer host often 1000).
 const STUB_PROLOGUE: &str = r#"
 __uid=1000
 [[ "${STUB_AS_ROOT:-0}" == 1 ]] && __uid=0
@@ -286,7 +290,7 @@ printf 'uid=%s %s\n' "${__uid}" "$(basename "$0") $*" >> "${STUB_LOG}"
 /// reach the command (no HOME of the user, no TMPDIR, no SSH_*, no XDG_SESSION_ID).
 const STUB_SUDO: &str = r#"
 [[ "${1:-}" == "--" ]] && shift
-keep=(PATH="${PATH}" LC_ALL=C HOME="${STUB_ROOT_HOME}" STUB_AS_ROOT=1 SUDO_USER="${STUB_USER:-alice}" SUDO_UID=1000)
+keep=(PATH="${PATH}" LC_ALL=C HOME="${STUB_ROOT_HOME}" STUB_AS_ROOT=1 SUDO_USER="${STUB_USER:-alice}" SUDO_UID="${STUB_UID}")
 while IFS= read -r name; do
     [[ "${name}" == STUB_* && "${name}" != STUB_AS_ROOT ]] && keep+=("${name}=${!name}")
 done < <(compgen -e)
@@ -307,9 +311,9 @@ for a in "$@"; do [[ "$a" == "--" ]] || args+=("$a"); done
 root=0
 [[ "${STUB_AS_ROOT:-0}" == 1 ]] && root=1
 case "${args[*]}" in
-    "-u") if (( root )); then echo 0; else echo 1000; fi ;;
+    "-u") if (( root )); then echo 0; else echo "${STUB_UID}"; fi ;;
     "-un") if (( root )); then echo root; else echo alice; fi ;;
-    "-u alice") echo 1000 ;;
+    "-u alice") echo "${STUB_UID}" ;;
     "-u root") echo 0 ;;
     "-nG alice")
         if [[ -e "${STUB_STATE}/in_group" ]]; then echo "alice wheel soos"; else echo "alice wheel"; fi ;;
@@ -320,7 +324,7 @@ esac
 const STUB_GETENT: &str = r#"
 case "$*" in
     "group soos") [[ -e "${STUB_STATE}/group_soos" ]] && echo "soos:x:964:alice" || exit 2 ;;
-    "passwd alice"|"passwd 1000") echo "alice:x:1000:1000:Alice:${STUB_HOME}:/bin/bash" ;;
+    "passwd alice"|"passwd ${STUB_UID}") echo "alice:x:${STUB_UID}:${STUB_UID}:Alice:${STUB_HOME}:/bin/bash" ;;
     "passwd root"|"passwd 0") echo "root:x:0:0:root:/root:/bin/bash" ;;
     *) exit 2 ;;
 esac
@@ -443,7 +447,7 @@ while [[ $# -gt 0 ]]; do
 done
 [[ -n "${dir}" ]] || exit 64
 mkdir -p "${dir}"
-touch "${dir}/1000.cbor.enc"
+touch "${dir}/${STUB_UID}.cbor.enc"
 "#;
 
 const STUB_INSTALL_SH: &str = r#"
@@ -514,6 +518,22 @@ fn is_executable(path: &Path) -> bool {
     fs::metadata(path).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
 }
 
+/// Numeric uid of the test process: the fake account `alice` owns everything the harness
+/// creates, exactly like the real build user owns its checkout.
+fn real_uid() -> String {
+    let out = Command::new("id").arg("-u").output().expect("run id -u");
+    let uid = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    assert!(
+        !uid.is_empty() && uid.bytes().all(|b| b.is_ascii_digit()),
+        "numeric uid expected: {uid:?}"
+    );
+    assert_ne!(
+        uid, "0",
+        "the setup contract runs as a normal user (setup.sh never builds as root)"
+    );
+    uid
+}
+
 fn bash_path() -> PathBuf {
     let path_var = std::env::var_os("PATH").expect("PATH");
     std::env::split_paths(&path_var)
@@ -567,8 +587,9 @@ impl Harness {
         let shebang = format!("#!{}\n", bash.display());
         // Harness paths are baked into every stub, so a stub still logs when the script runs
         // it under `env -i` (the root build allow-list).
+        let uid = real_uid();
         let baked = format!(
-            ": \"${{STUB_LOG:={}}}\" \"${{STUB_STATE:={}}}\" \"${{STUB_HOME:={}}}\" \"${{STUB_FAKES:={}}}\"\nexport STUB_LOG STUB_STATE STUB_HOME STUB_FAKES\n",
+            ": \"${{STUB_LOG:={}}}\" \"${{STUB_STATE:={}}}\" \"${{STUB_HOME:={}}}\" \"${{STUB_FAKES:={}}}\" \"${{STUB_UID:={uid}}}\"\nexport STUB_LOG STUB_STATE STUB_HOME STUB_FAKES STUB_UID\n",
             log.display(),
             state.display(),
             home.display(),
@@ -612,8 +633,11 @@ impl Harness {
             write_exec(&stubs.join(name), &stub(body));
         }
         // id and getent are queried often: no log line.
-        write_exec(&stubs.join("id"), &format!("{shebang}{STUB_ID}"));
-        write_exec(&stubs.join("getent"), &format!("{shebang}{STUB_GETENT}"));
+        write_exec(&stubs.join("id"), &format!("{shebang}{baked}{STUB_ID}"));
+        write_exec(
+            &stubs.join("getent"),
+            &format!("{shebang}{baked}{STUB_GETENT}"),
+        );
         write_exec(&fakes.join("soos-admin"), &stub(FAKE_SOOS_ADMIN));
         write_exec(&fakes.join("soos-enroll"), &stub(FAKE_SOOS_ENROLL));
         write_exec(&fakes.join("cargo"), &stub(STUB_CARGO));
@@ -650,6 +674,7 @@ impl Harness {
             ("STUB_STATE".to_string(), state.display().to_string()),
             ("STUB_HOME".to_string(), home.display().to_string()),
             ("STUB_FAKES".to_string(), fakes.display().to_string()),
+            ("STUB_UID".to_string(), uid.clone()),
             (
                 "STUB_ROOT_HOME".to_string(),
                 dir.join("roothome").display().to_string(),
