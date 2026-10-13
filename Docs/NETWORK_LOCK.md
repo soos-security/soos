@@ -1,6 +1,6 @@
 # Network Lock (opt-in polkit Wi-Fi lock)
 
-GitHub #365 (Part A of #359). ADR "[2026-10-13] Opt-In polkit Wi-Fi Lock and `soos-admin network-lock`" in `AI/DECISIONS.md`. Matrix rows NLK1–NLK12 in `AI/VERIFICATION_MATRIX.md`.
+GitHub #365 (Part A of #359). ADR "[2026-10-13] Opt-In polkit Wi-Fi Lock and `soos-admin network-lock`" in `AI/DECISIONS.md`. Matrix rows NLK1–NLK17 in `AI/VERIFICATION_MATRIX.md` (NLK13–NLK17: hardening of GitHub #370).
 
 ## 1. What it does
 
@@ -42,7 +42,7 @@ sudo soos-admin network-lock status             # read-only diagnostic
 soos-admin --format json network-lock status    # same, as JSON
 ```
 
-`install` and `uninstall` also refuse when a directory on the path (`/etc`, `/etc/polkit-1`, `/etc/polkit-1/rules.d`, `/etc/udev/rules.d`) is not owned by root or is group- or world-writable. `install` is declarative: the files on disk match the options, so `install` without `--rfkill` removes an rfkill rule written earlier by soos. It refuses (exit 1, nothing written) when `/etc/polkit-1/rules.d` (or, with `--rfkill`, `/etc/udev/rules.d`) does not exist, when any directory on the path is a symbolic link, or when the target name is a symbolic link or not a regular file. The file is written to a temporary name in the same directory (`O_NOFOLLOW`, created exclusively, mode `0600`, then `0644`, `root:root`), flushed, renamed onto the target and the directory flushed, so polkitd never reads a half-written rule. `scripts/uninstall.sh` also removes both files.
+`install` and `uninstall` also refuse when a directory on the path (`/etc`, `/etc/polkit-1`, `/etc/polkit-1/rules.d`, `/etc/udev`, `/etc/udev/rules.d`) is not owned by root or is group- or world-writable. `install` is declarative: the files on disk match the options, so `install` without `--rfkill` removes an rfkill rule written earlier by soos. It refuses (exit 1, nothing written) when `/etc/polkit-1/rules.d` (or, with `--rfkill`, `/etc/udev/rules.d`) does not exist, when any directory on the path is a symbolic link, or when the target name is a symbolic link or not a regular file. The file is written to a temporary name in the same directory (`O_NOFOLLOW`, created exclusively, mode `0600`, then `0644`, `root:root`), flushed, renamed onto the target and the directory flushed, so polkitd never reads a half-written rule. An interrupted install (power loss, `SIGKILL`) can leave the hidden temporary file `.<name>.<pid>.tmp` behind (polkitd and udev never load it); the next `install` or `uninstall` removes such a file when it is a regular file and no process has that pid any more (a file of a running process, for example a concurrent install, is kept; only processes of the caller's PID namespace are seen, so an install running at the same time from a container that shares `/etc` could lose its temporary file and would then fail without changing the rule). `scripts/uninstall.sh` also removes both files and the same stale temporary files; it keeps a file, with a warning, when any directory on its path (`/etc`, `/etc/polkit-1`, `/etc/polkit-1/rules.d`, `/etc/udev`, `/etc/udev/rules.d`) is a symbolic link.
 
 The distribution packages never install the lock and do not remove it either: run `sudo soos-admin network-lock uninstall` before removing the package (a leftover file only keeps the prompts active and can be deleted by hand).
 
@@ -55,15 +55,16 @@ Read-only; it never changes anything and never prints an SSID, BSSID, Wi-Fi pass
 | Field | Values |
 |---|---|
 | `state` | `installed`, `missing`, `modified`, `insecure_permissions`, `unreadable`, `unsupported_backend` (table: `unsupported_backend(iwd)` or `unsupported_backend(networkd)`) |
-| `backend` | `network_manager`, `networkd`, `iwd`, `unknown` — from the names of running processes (`/proc/<pid>/comm`) |
+| `backend` | `network_manager`, `networkd`, `iwd`, `unknown` — from the names of running processes (`/proc/<pid>/comm`), counted only when `/proc/<pid>/status` names the same process and all four of its uids (real, effective, saved, filesystem) are root, or, for `systemd-networkd`, the `systemd-network` account of `/etc/passwd`. A process any user started under one of these names is ignored (GitHub #370) |
 | `rules` / `rfkill_rule` | state of each file: `installed`, `missing`, `modified`, `insecure_permissions`, `unreadable` |
 | `rfkill` | `uaccess` (the seat user can soft-block radios), `restricted`, `absent` (no rfkill device), `unknown` |
 | `warnings` | fixed words, in this order: `rfkill_uaccess` when `rfkill` is `uaccess`; `rfkill_reboot_pending` when the rfkill rule was written after the last boot (an ACL granted before the reboot may still be in place); `iwd_dbus_bypass` when iwd runs next to NetworkManager (iwd's own D-Bus policy lets root and the `netdev` group drive Wi-Fi without polkit) |
 
-- `insecure_permissions`: the file or `/etc/polkit-1/rules.d` is not owned by root, is group- or world-writable, or is a symbolic link.
+- `insecure_permissions`: the file or any directory on its path (`/etc`, `/etc/polkit-1`, `/etc/polkit-1/rules.d`; for the rfkill rule `/etc`, `/etc/udev`, `/etc/udev/rules.d`) is not owned by root, is group- or world-writable, or is a symbolic link — the same check `install` makes before writing.
 - `modified`: the file is not byte-identical (SHA-256) to the shipped copy, is empty or larger than 16 KiB.
 - `unreadable`: the file could not be read. On Arch `/etc/polkit-1/rules.d` is `0750 root:polkitd`, so run the status with `sudo`.
-- `unsupported_backend`: no NetworkManager runs; on an iwd-only or networkd host the rule cannot lock Wi-Fi (§6).
+- `unsupported_backend`: no NetworkManager runs; on an iwd-only or networkd host the rule cannot lock Wi-Fi (§6). The `systemd-network` uid is read from `/etc/passwd` only (not through NSS, which may block on a network directory): when that account exists only in another user database, or `/etc/passwd` is a symbolic link, a running networkd is not recognised and a networkd-only host reports `installed` or `missing` instead (exit code unchanged).
+- Limits of the process check: a set-uid root program that switches all four uids to root without authentication, started through a link named like one of the services, would still be counted (no standard program does this).
 - Precedence: `insecure_permissions`, `modified`, `unreadable`, `unsupported_backend`, then `installed` or `missing`.
 - Exit code `1` when either file is `modified`, `insecure_permissions` or `unreadable`; `0` otherwise (`missing` is a valid opt-in state, and the `rfkill_uaccess` warning is a documented gap).
 
@@ -108,6 +109,6 @@ polkit prompts always ask for the password, never for your face. With polkit ≥
 ## 8. Testing
 
 - Static invariants: `tests/invariants/src/network_lock_contract.rs` (exact action list, only `AUTH_ADMIN`, fall-through, rfkill rule, opt-in, uninstall, CI wiring, docs).
-- Unit and integration tests: `crates/admin-cli/tests/network_lock_status_tests.rs`, `network_lock_install_tests.rs`, and the shell test `network_lock_install_test.sh` (run by `network_lock_shell_tests.rs`) against a temporary root, including `scripts/uninstall.sh --destdir`.
+- Unit and integration tests: `crates/admin-cli/tests/network_lock_status_tests.rs`, `network_lock_install_tests.rs`, `network_lock_hardening_tests.rs` (GitHub #370: process uids and names, ancestor directories, stale temporary files), and the shell tests `network_lock_install_test.sh` and `network_lock_uninstall_script_test.sh` (run by `network_lock_shell_tests.rs`) against a temporary root, including `scripts/uninstall.sh --destdir`.
 - Real polkitd: `tests/docker/network_lock_pkcheck_test.sh` (CI job `network-lock-polkit`) runs `pkcheck` in `ubuntu:24.04` without and with the rule. A container has no seat, so the subject there is not an active local session; the rule never looks at the subject, and the active-session case is the owner hardware check below.
 - Owner hardware check (NLK12): on the Arch host with NetworkManager, after `sudo soos-admin network-lock install`, switching or disconnecting Wi-Fi from the desktop and `nmcli radio wifi off` ask for the administrator password every time; `sudo soos-admin network-lock status` reports `installed`; after `sudo soos-admin network-lock uninstall` no password is asked.

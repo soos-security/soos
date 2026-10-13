@@ -9,7 +9,8 @@
 //!   `/etc/polkit-1/rules.d/49-soos-network-lock.rules` and, with the rfkill option,
 //!   `/etc/udev/rules.d/72-soos-network-lock-rfkill.rules`. Every directory on the path is
 //!   checked (real directory, owner, not group- or world-writable) before the first write, and
-//!   the file is replaced atomically relative to the verified directory descriptor.
+//!   the file is replaced atomically relative to the verified directory descriptor. Stale
+//!   temp files of an interrupted install (dead pid) are removed first (GitHub #370).
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, ErrorKind, Read, Write};
@@ -65,6 +66,16 @@ pub const MAX_SYSFS_DEV_BYTES: u64 = 32;
 pub const MAX_UDEV_DB_BYTES: u64 = 65_536;
 /// Read cap of `/proc/uptime`.
 pub const MAX_UPTIME_BYTES: u64 = 64;
+/// Prefix of `/proc/<pid>/status` examined for the `Name:` and `Uid:` lines (the first and
+/// ninth lines, about 200 bytes in); only complete lines inside it are parsed.
+pub const MAX_PROC_STATUS_BYTES: u64 = 4096;
+/// Prefix of `/etc/passwd` examined for the [`SYSTEMD_NETWORK_USER`] entry; only complete
+/// lines inside it are parsed.
+pub const MAX_PASSWD_BYTES: u64 = 1_048_576;
+/// Account systemd-networkd runs as (its `comm` is `systemd-network`).
+pub const SYSTEMD_NETWORK_USER: &str = "systemd-network";
+/// Directory entries examined when looking for stale temp files.
+pub const MAX_RULES_DIR_ENTRIES: usize = 4096;
 
 const WARN_RFKILL_UACCESS: &str = "rfkill_uaccess";
 const WARN_RFKILL_REBOOT_PENDING: &str = "rfkill_reboot_pending";
@@ -111,7 +122,11 @@ pub trait NetworkServiceProbe {
 
 /// Production probe: matches the exact `comm` names of the processes under `<root>/proc`
 /// (`NetworkManager`, `systemd-network` — the 15-byte truncation of `systemd-networkd` — and
-/// `iwd`). Read-only and bounded; it reads nothing else of a process.
+/// `iwd`), then credits a match only when `<root>/proc/<pid>/status` names the same process
+/// (`Name:`) and all four uids of its `Uid:` line are trusted: root, or for networkd also the
+/// `systemd-network` account of `<root>/etc/passwd` (GitHub #370). Any user can name a
+/// process; only root can give it these uids. Read-only and bounded; it reads nothing else of
+/// a process.
 #[derive(Debug, Clone)]
 pub struct ProcServiceProbe {
     pub root: PathBuf,
@@ -123,6 +138,8 @@ impl NetworkServiceProbe for ProcServiceProbe {
         let Ok(entries) = fs::read_dir(self.root.join("proc")) else {
             return found;
         };
+        // Resolved at most once per call, and only when a `systemd-network` comm matches.
+        let mut networkd_uid: Option<Option<u32>> = None;
         for entry in entries.take(MAX_PROC_ENTRIES).flatten() {
             let name = entry.file_name();
             let is_pid = name
@@ -136,6 +153,18 @@ impl NetworkServiceProbe for ProcServiceProbe {
                 continue;
             };
             let comm = comm.strip_suffix(b"\n").unwrap_or(&comm);
+            let service_uid = match comm {
+                b"NetworkManager" | b"iwd" => None,
+                b"systemd-network" => *networkd_uid
+                    .get_or_insert_with(|| account_uid(&self.root, SYSTEMD_NETWORK_USER)),
+                _ => continue,
+            };
+            let Some(uids) = trusted_process_uids(&entry.path(), comm) else {
+                continue;
+            };
+            if !uids.iter().all(|&uid| uid == 0 || Some(uid) == service_uid) {
+                continue;
+            }
             match comm {
                 b"NetworkManager" => found.network_manager = true,
                 b"systemd-network" => found.networkd = true,
@@ -145,6 +174,52 @@ impl NetworkServiceProbe for ProcServiceProbe {
         }
         found
     }
+}
+
+/// The four uids (real, effective, saved, filesystem) of `<proc_pid>/status` when its first
+/// `Name:` line equals `comm` (the same process, even if the pid was reused after `comm` was
+/// read) and its first `Uid:` line holds exactly four decimal values; else `None`. Only the
+/// complete lines of the first [`MAX_PROC_STATUS_BYTES`] bytes are parsed. The `status`
+/// content is used, not the owner of `/proc/<pid>`, which is root for any non-dumpable
+/// process.
+fn trusted_process_uids(proc_pid: &Path, comm: &[u8]) -> Option<[u32; 4]> {
+    let status = read_complete_lines(&proc_pid.join("status"), MAX_PROC_STATUS_BYTES).ok()?;
+    let mut lines = status.split(|&b| b == b'\n');
+    let name = lines.clone().find_map(|line| line.strip_prefix(b"Name:"))?;
+    if name.trim_ascii_start() != comm {
+        return None;
+    }
+    let uid_line = lines.find_map(|line| line.strip_prefix(b"Uid:"))?;
+    let text = std::str::from_utf8(uid_line).ok()?;
+    let mut uids = [0_u32; 4];
+    let mut fields = text.split_ascii_whitespace();
+    for slot in &mut uids {
+        *slot = parse_decimal_u32(fields.next()?)?;
+    }
+    fields.next().is_none().then_some(uids)
+}
+
+/// The uid of `user` from the complete lines of the first [`MAX_PASSWD_BYTES`] bytes of
+/// `<root>/etc/passwd`. NSS is not used: it may block on a network directory (LDAP, SSSD)
+/// and cannot follow a test root.
+fn account_uid(root: &Path, user: &str) -> Option<u32> {
+    let passwd = read_complete_lines(&root.join("etc/passwd"), MAX_PASSWD_BYTES).ok()?;
+    passwd.split(|&b| b == b'\n').find_map(|line| {
+        let mut fields = line.split(|&b| b == b':');
+        if fields.next()? != user.as_bytes() {
+            return None;
+        }
+        let _password_field = fields.next()?;
+        parse_decimal_u32(std::str::from_utf8(fields.next()?).ok()?)
+    })
+}
+
+/// A `u32` written with ASCII digits only (no sign, no space).
+fn parse_decimal_u32(text: &str) -> Option<u32> {
+    if text.is_empty() || !text.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    text.parse().ok()
 }
 
 /// State of one installed rule file.
@@ -407,18 +482,12 @@ pub fn rule_file_state(
     file: &str,
     expected: &str,
 ) -> RuleFileState {
-    let dir_path = env.root.join(dir);
-    match fs::symlink_metadata(&dir_path) {
-        Err(e) if e.kind() == ErrorKind::NotFound => return RuleFileState::Missing,
-        Err(_) => return RuleFileState::Unreadable,
-        Ok(meta) => {
-            if !meta.file_type().is_dir()
-                || !is_secure(meta.uid(), meta.mode(), env.required_owner_uid)
-            {
-                return RuleFileState::InsecurePermissions;
-            }
-        }
-    }
+    let dir_path = match walk_dirs(&env.root, dir, env.required_owner_uid) {
+        DirWalk::Secure(_, path) => path,
+        DirWalk::Missing => return RuleFileState::Missing,
+        DirWalk::NotRealDir(_) | DirWalk::Insecure(_) => return RuleFileState::InsecurePermissions,
+        DirWalk::Error(_, _) => return RuleFileState::Unreadable,
+    };
     let path = dir_path.join(file);
     match fs::symlink_metadata(&path) {
         Err(e) if e.kind() == ErrorKind::NotFound => return RuleFileState::Missing,
@@ -527,16 +596,81 @@ enum Bounded {
 
 /// Reads at most `cap` bytes of `path` (`O_NOFOLLOW | O_CLOEXEC`); longer is `TooLarge`.
 fn read_bounded(path: &Path, cap: u64) -> io::Result<Bounded> {
+    let bytes = read_at_most(path, cap.saturating_add(1))?;
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > cap {
+        Ok(Bounded::TooLarge)
+    } else {
+        Ok(Bounded::Data(bytes))
+    }
+}
+
+/// At most `cap` bytes of `path` (`O_NOFOLLOW | O_CLOEXEC`). A file longer than `cap` is
+/// cut to its first `cap` bytes, then after their last newline, so a line cut by the cap is
+/// never parsed (no newline: nothing is kept).
+fn read_complete_lines(path: &Path, cap: u64) -> io::Result<Vec<u8>> {
+    let mut bytes = read_at_most(path, cap.saturating_add(1))?;
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > cap {
+        let keep = usize::try_from(cap).unwrap_or(usize::MAX);
+        bytes.truncate(keep);
+        let complete = bytes
+            .iter()
+            .rposition(|&b| b == b'\n')
+            .map_or(0, |last| last.saturating_add(1));
+        bytes.truncate(complete);
+    }
+    Ok(bytes)
+}
+
+/// The first `cap` bytes (at most) of `path` (`O_NOFOLLOW | O_CLOEXEC`).
+fn read_at_most(path: &Path, cap: u64) -> io::Result<Vec<u8>> {
     let file = OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
         .open(path)?;
     let mut bytes = Vec::new();
-    file.take(cap.saturating_add(1)).read_to_end(&mut bytes)?;
-    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > cap {
-        Ok(Bounded::TooLarge)
-    } else {
-        Ok(Bounded::Data(bytes))
+    file.take(cap).read_to_end(&mut bytes)?;
+    Ok(bytes)
+}
+
+/// Outcome of checking every component of `<root>/<rel>`, in path order.
+enum DirWalk {
+    /// Every component is a real directory owned by the required owner and not group- or
+    /// world-writable: the `lstat` of the last component and its path.
+    Secure(FileStat, PathBuf),
+    /// A component does not exist.
+    Missing,
+    /// A component is a symbolic link or not a directory.
+    NotRealDir(PathBuf),
+    /// A component has another owner or is group- or world-writable.
+    Insecure(PathBuf),
+    /// A component could not be examined.
+    Error(PathBuf, Errno),
+}
+
+/// Checks every component of `<root>/<rel>` below `root` (the root itself is not checked):
+/// shared by `status` and by install/uninstall so both apply the same rule (GitHub #370).
+fn walk_dirs(root: &Path, rel: &str, owner: u32) -> DirWalk {
+    let mut path = root.to_path_buf();
+    let mut last: Option<FileStat> = None;
+    for part in Path::new(rel).components() {
+        path.push(part);
+        let st = match lstat(&path) {
+            Ok(st) => st,
+            Err(Errno::ENOENT) => return DirWalk::Missing,
+            Err(e) => return DirWalk::Error(path, e),
+        };
+        if st.st_mode & libc::S_IFMT != libc::S_IFDIR {
+            return DirWalk::NotRealDir(path);
+        }
+        if !is_secure(st.st_uid, st.st_mode, owner) {
+            return DirWalk::Insecure(path);
+        }
+        last = Some(st);
+    }
+    match last {
+        Some(st) => DirWalk::Secure(st, path),
+        // An empty `rel` names no directory below the root.
+        None => DirWalk::NotRealDir(path),
     }
 }
 
@@ -596,39 +730,27 @@ fn same_inode(a: &FileStat, b: &FileStat) -> bool {
 /// Checks every component of `<root>/<rel>`: a real directory (not a symbolic link), owned by
 /// `owner`, not group- or world-writable. `Ok(None)` when a component does not exist.
 fn checked_dir(root: &Path, rel: &str, owner: u32) -> Result<Option<CheckedDir>, AdminCliError> {
-    let mut path = root.to_path_buf();
-    let mut last: Option<FileStat> = None;
-    for part in Path::new(rel).components() {
-        path.push(part);
-        let st = match lstat(&path) {
-            Ok(st) => st,
-            Err(Errno::ENOENT) => return Ok(None),
-            Err(e) => {
-                return Err(lock_error(format!(
-                    "cannot examine {}: {e}",
-                    path.display()
-                )));
-            }
-        };
-        if st.st_mode & libc::S_IFMT != libc::S_IFDIR {
+    let (expected, path) = match walk_dirs(root, rel, owner) {
+        DirWalk::Secure(st, path) => (st, path),
+        DirWalk::Missing => return Ok(None),
+        DirWalk::Error(path, e) => {
+            return Err(lock_error(format!(
+                "cannot examine {}: {e}",
+                path.display()
+            )));
+        }
+        DirWalk::NotRealDir(path) => {
             return Err(lock_error(format!(
                 "{} is not a real directory (symbolic links are refused)",
                 path.display()
             )));
         }
-        if !is_secure(st.st_uid, st.st_mode, owner) {
+        DirWalk::Insecure(path) => {
             return Err(lock_error(format!(
                 "{} must be owned by uid {owner} and not writable by group or others",
                 path.display()
             )));
         }
-        last = Some(st);
-    }
-    let Some(expected) = last else {
-        return Err(lock_error(format!(
-            "empty target directory below {}",
-            root.display()
-        )));
     };
     let file = OpenOptions::new()
         .read(true)
@@ -754,6 +876,76 @@ fn remove_rule_file(dir: &CheckedDir, name: &str) -> Result<FileAction, AdminCli
     Ok(FileAction::Removed)
 }
 
+/// `true` when `entry` is `.<name>.<pid>.tmp` (1 to 10 ASCII digits without a leading zero,
+/// pid in `1..=i32::MAX`, as `write_rule_file` names it) and no process has that pid: the
+/// temp file of an interrupted install (GitHub #370).
+fn is_stale_temp_name(entry: &str, name: &str) -> bool {
+    let Some(pid) = entry
+        .strip_prefix('.')
+        .and_then(|rest| rest.strip_prefix(name))
+        .and_then(|rest| rest.strip_prefix('.'))
+        .and_then(|rest| rest.strip_suffix(".tmp"))
+    else {
+        return false;
+    };
+    if pid.len() > 10 || pid.starts_with('0') {
+        return false;
+    }
+    let Some(pid) = parse_decimal_u32(pid).and_then(|p| i32::try_from(p).ok()) else {
+        return false;
+    };
+    if pid <= 0 || u32::try_from(pid).ok() == Some(std::process::id()) {
+        return false;
+    }
+    // `ESRCH`: no such process. `Ok` or `EPERM`: it runs (perhaps a concurrent install).
+    matches!(
+        nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None),
+        Err(Errno::ESRCH)
+    )
+}
+
+/// Removes the stale temp files of `name` (regular files only) from the verified `dir`,
+/// examining at most [`MAX_RULES_DIR_ENTRIES`] entries; removals are descriptor-relative.
+fn remove_stale_temp_files(dir: &CheckedDir, name: &str) -> Result<(), AdminCliError> {
+    let entries = fs::read_dir(&dir.path)
+        .map_err(|e| lock_error(format!("cannot list {}: {e}", dir.path.display())))?;
+    let mut removed = false;
+    for entry in entries.take(MAX_RULES_DIR_ENTRIES) {
+        let entry =
+            entry.map_err(|e| lock_error(format!("cannot list {}: {e}", dir.path.display())))?;
+        let file_name = entry.file_name();
+        let Some(entry_name) = file_name.to_str() else {
+            continue;
+        };
+        if !is_stale_temp_name(entry_name, name) {
+            continue;
+        }
+        if entry_type(dir, entry_name)? != Some(libc::S_IFREG) {
+            continue;
+        }
+        match unlinkat(
+            Some(dir.file.as_raw_fd()),
+            entry_name,
+            UnlinkatFlags::NoRemoveDir,
+        ) {
+            Ok(()) => removed = true,
+            Err(Errno::ENOENT) => {}
+            Err(e) => {
+                return Err(lock_error(format!(
+                    "cannot remove {}: {e}",
+                    dir.path.join(entry_name).display()
+                )));
+            }
+        }
+    }
+    if removed {
+        dir.file
+            .sync_all()
+            .map_err(|e| lock_error(format!("cannot flush {}: {e}", dir.path.display())))?;
+    }
+    Ok(())
+}
+
 fn required_owner(chown_root: bool) -> u32 {
     if chown_root {
         0
@@ -785,6 +977,10 @@ pub fn install_network_lock(
             root.join(NETWORK_LOCK_RFKILL_DIR).display()
         )));
     }
+    remove_stale_temp_files(&rules_dir, NETWORK_LOCK_RULES_FILE)?;
+    if let Some(dir) = &rfkill_dir {
+        remove_stale_temp_files(dir, NETWORK_LOCK_RFKILL_FILE)?;
+    }
     let rules = write_rule_file(
         &rules_dir,
         NETWORK_LOCK_RULES_FILE,
@@ -808,11 +1004,17 @@ pub fn install_network_lock(
 pub fn uninstall_network_lock(root: &Path) -> Result<InstallReport, AdminCliError> {
     let owner = required_owner(nix::unistd::geteuid().is_root());
     let rules = match checked_dir(root, NETWORK_LOCK_RULES_DIR, owner)? {
-        Some(dir) => remove_rule_file(&dir, NETWORK_LOCK_RULES_FILE)?,
+        Some(dir) => {
+            remove_stale_temp_files(&dir, NETWORK_LOCK_RULES_FILE)?;
+            remove_rule_file(&dir, NETWORK_LOCK_RULES_FILE)?
+        }
         None => FileAction::Absent,
     };
     let rfkill_rule = match checked_dir(root, NETWORK_LOCK_RFKILL_DIR, owner)? {
-        Some(dir) => remove_rule_file(&dir, NETWORK_LOCK_RFKILL_FILE)?,
+        Some(dir) => {
+            remove_stale_temp_files(&dir, NETWORK_LOCK_RFKILL_FILE)?;
+            remove_rule_file(&dir, NETWORK_LOCK_RFKILL_FILE)?
+        }
         None => FileAction::Absent,
     };
     Ok(InstallReport { rules, rfkill_rule })

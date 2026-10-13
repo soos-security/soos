@@ -200,10 +200,45 @@ NETWORK_LOCK_FILES=(
     "${DESTDIR}${SYSCONFDIR}/polkit-1/rules.d/49-soos-network-lock.rules"
     "${DESTDIR}${SYSCONFDIR}/udev/rules.d/72-soos-network-lock-rfkill.rules"
 )
+# Returns 0 when a directory component of $2 (absolute) below the root $1 is a symbolic
+# link; the root itself is not checked, like `soos-admin network-lock` (GitHub #370).
+path_has_symlink_component() {
+    local path="$1" part
+    local -a parts
+    IFS='/' read -r -a parts <<<"$2"
+    for part in "${parts[@]}"; do
+        [[ -n "${part}" ]] || continue
+        path="${path}/${part}"
+        if [[ -L "${path}" ]]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
 for lock_file in "${NETWORK_LOCK_FILES[@]}"; do
-    if [[ -L "$(dirname "${lock_file}")" ]]; then
-        warn "Keeping ${lock_file}: its directory is a symbolic link."
-    elif [[ -e "${lock_file}" || -L "${lock_file}" ]]; then
+    lock_dir="$(dirname "${lock_file}")"
+    lock_name="$(basename "${lock_file}")"
+    if path_has_symlink_component "${DESTDIR}" "${lock_dir#"${DESTDIR}"}"; then
+        warn "Keeping ${lock_file}: a directory on its path is a symbolic link."
+        continue
+    fi
+    # Temp files of an interrupted `soos-admin network-lock install` (.<name>.<pid>.tmp,
+    # pid 1..2147483647 without a leading zero): removed only when no process of this host
+    # has that pid (host /proc, never ${DESTDIR}/proc; GitHub #370).
+    if [[ -d /proc/self ]]; then
+        stale_re="^\\.${lock_name//./\\.}\\.([1-9][0-9]{0,9})\\.tmp$"
+        for stale in "${lock_dir}/.${lock_name}."*.tmp; do
+            [[ -e "${stale}" || -L "${stale}" ]] || continue
+            if [[ "$(basename "${stale}")" =~ ${stale_re} ]] \
+                && (( BASH_REMATCH[1] <= 2147483647 )) \
+                && [[ -f "${stale}" && ! -L "${stale}" && ! -e "/proc/${BASH_REMATCH[1]}" ]]; then
+                rm -f -- "${stale}"
+                success "Removed ${stale}"
+            fi
+        done
+    fi
+    if [[ -e "${lock_file}" || -L "${lock_file}" ]]; then
         rm -f -- "${lock_file}"
         success "Removed ${lock_file}"
     fi
