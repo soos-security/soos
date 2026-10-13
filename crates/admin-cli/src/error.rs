@@ -57,6 +57,10 @@ pub enum AdminCliError {
     #[error("GDM configuration error: {0}")]
     GdmConfig(String),
 
+    /// `camera ir-emitter probe|configure` refusal or failure (GitHub #378).
+    #[error("camera ir-emitter: {0}")]
+    IrEmitter(String),
+
     /// Network lock install or uninstall refusal (GitHub #365).
     #[error("network lock: {0}")]
     NetworkLock(String),

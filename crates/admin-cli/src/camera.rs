@@ -43,7 +43,7 @@ impl Default for CameraEnvironment {
 
 impl CameraEnvironment {
     /// Reads the by-id aliases through the single bounded scanner of the shared resolver.
-    fn aliases(&self) -> Vec<(PathBuf, PathBuf)> {
+    pub(crate) fn aliases(&self) -> Vec<(PathBuf, PathBuf)> {
         SystemCameraEnumerator::with_by_id_dir(&self.by_id_dir).by_id_aliases()
     }
 }

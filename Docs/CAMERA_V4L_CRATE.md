@@ -556,16 +556,20 @@ a later host hook, no double wrapping) and `v4l_teardown_guard_tests::*`.
 
 ---
 
-## IR Sensors and Emitter Requirements (GitHub #169)
+## IR Sensors and Emitter Requirements (GitHub #169, #378)
 
-`soos` does **not** drive the IR emitter: it only reads frames from the V4L2 node. On an IR
-sensor the capture is usable only if the near-infrared (typically 850 or 940 nm) emitter is lit
-while frames are captured.
+`soos-daemon` still does **not** drive the IR emitter: it only reads frames from the V4L2 node.
+On an IR sensor the capture is usable only if the near-infrared (typically 850 or 940 nm) emitter
+is lit while frames are captured. Since GitHub #378 (PR 1 of the active-IR epic #353) the crate
+contains the building blocks to control and characterize the emitter; the daemon starts using
+them with strict IR mode (split item 4).
 
-- **Emitter must be active during capture.** Many UVC IR cameras only enable their emitter through a
-  vendor UVC extension-unit control that the stock `uvcvideo` driver does not set. Configure it
-  outside `soos` (for example with the community tool `linux-enable-ir-emitter`) and verify with
-  `soos-gui` or a V4L2 viewer that the face is visibly lit in the IR stream.
+- **Emitter must be active during capture.** Many UVC IR cameras only enable their emitter through
+  a vendor UVC extension-unit control that the stock `uvcvideo` driver does not set. Until soos
+  drives it, configure it outside `soos` (for example with the community tool
+  `linux-enable-ir-emitter`, MIT, whose probing idea `soos-admin camera ir-emitter` reimplements
+  in Rust without copying code) and verify with `soos-gui` or a V4L2 viewer that the face is
+  visibly lit in the IR stream.
 - **Unlit crops are rejected, never accepted.** Without IR illumination the PAD crop is dark or
   flat; the IR gate of `soos-vision` rejects it (`IrLivenessGateFailed`: `Underexposed`,
   `LowContrast` or `LowTexture`) and the daemon treats it as a spoof capture, so the request ends
@@ -574,11 +578,74 @@ while frames are captured.
 - **Strobing emitters.** Emitters that light only alternate frames can produce unlit captures in
   which a face is still detected; such a capture vetoes the whole request (fail-closed). Prefer a
   steady emitter mode, or select the RGB sensor (`sensor_preference = "rgb"` in the daemon
-  `[pipeline]` section) until the device is characterized.
+  `[pipeline]` section) until the device is characterized. The strobe classifier below is the
+  first step to turn this into a liveness signal.
 - **Liveness on IR is uncalibrated.** MiniFASNetV2 is RGB-trained; on Grey frames the pipeline
   applies a stricter, conservative threshold (`DEFAULT_IR_PAD_THRESHOLD = 0.95`) whose value is not
   derived from measurements. Calibration on captured IR frames, or running PAD on the RGB sibling
   sensor / an IR-trained model, is a hardware follow-up (GitHub #172 / PAD-06).
+
+### Extension-unit control (`uvc_xu`, `ir_emitter`, `ir_emitter_config`)
+
+- `uvc_xu::XuControl` is the request seam; `UvcXuDevice` sends `UVCIOC_CTRL_QUERY`
+  (`_IOWR('u', 0x21, struct uvc_xu_control_query)`, `0xC010_7521` on 64-bit) to an open V4L2
+  node. It is the **only `unsafe` block** added by this work: the descriptor is owned for the
+  call, the `#[repr(C)]` struct mirrors the kernel ABI (layout asserted by a unit test), the data
+  pointer covers exactly the request size (1..=64 bytes, `GET_LEN` 2, `GET_INFO` 1, checked
+  first) and the kernel keeps no pointer. `UvcXuDevice::open` refuses anything but a V4L2
+  character device before `open(2)` and re-checks the opened descriptor.
+- `XuReadOnly` refuses `SET_CUR` without forwarding it; `probe_xu_controls` scans units
+  `1..=PROBE_MAX_UNIT_ID` (32) × selectors `1..=PROBE_MAX_SELECTOR` (32) with `GET_LEN`,
+  `GET_INFO` and `GET_CUR` only, at most `MAX_PROBE_QUERIES` (4096) requests; `ENOENT`/`EINVAL`
+  skip a selector, `Busy`/`Io` skip it and count (the scan aborts after
+  `MAX_PROBE_CONTROL_ERRORS` = 16, so a pathological device that times out every request at the
+  uvcvideo control timeout of about 5 s bounds the probe to about 80 s), `PermissionDenied` and
+  `Gone` abort at once.
+- `ir_emitter::IrEmitter` (`capability`, `set(On|Off)`, `get`, `commanded`) is implemented by
+  `UvcXuEmitter`, which checks `GET_INFO`/`GET_LEN` and reads the original value when opened and
+  writes it back on `restore()` and on drop (a failed write keeps it dirty, so the restore is
+  still attempted; a failed restore says to replug the camera or reboot).
+- `ir_emitter_config` parses `[camera.ir_emitter]` fail-closed (see `Docs/DAEMON.md`) and reads
+  the USB id of a node from the canonical sysfs parent of `video<N>/device` (bounded reads).
+- With the `mock-camera` feature: `ir_mock::MockXuControl` (request spy, fault injection),
+  `MockIrEmitter` with `MockEmitterBehavior` (`Controllable`, `NativeAlternating`, `Steady`,
+  `Absent`), `synthetic_ir_frame`, `MockCameraManager::new_ir` (Grey frames stamped `Infrared`
+  whose luma follows the mock emitter) and `MockCameraManager::step_frame` (one frame now, even
+  while frozen).
+
+### Strobe classification (`strobe`)
+
+`classify_strobe` turns 8 to 64 `LumaSample`s (frame mean luma, sequence number, commanded
+state) into `Controllable` (commanded states followed, `min(on) − max(off) >= 12`),
+`NativeAlternating` (sequence parity separates lit and unlit frames by at least 12),
+`Absent` (every sample below 20) or `Steady` (spread below 12); anything else fails closed. A
+commanded pattern that is a function of `sequence % p` for `p` in 2..=4 is refused as
+`AmbiguousPattern`, because a natively strobing module would satisfy it too. `StrobeMonitor`
+classifies consecutive blocks; a change of class (or a failed block) is sticky and
+`StrobeStatus::vetoes_allow()` is true for everything but `Stable`. The thresholds are provisional
+and uncalibrated (hardware row IRA25).
+
+### `soos-admin camera ir-emitter`
+
+- `soos-admin camera ir-emitter probe <DEVICE> [--unit N] [--config PATH] [--json]`: root only,
+  Infrared `uvcvideo` capture nodes only; read-only scan of the controls, with the USB id of the
+  node and whether the configured `[camera.ir_emitter]` matches it.
+- `soos-admin camera ir-emitter configure <DEVICE> --unit U --selector S --on HEX --off HEX
+  [--mode off|auto] [--config PATH] [--dry-run] [--test-on-device]`: checks the control
+  read-only (`GET_INFO`, `GET_LEN` equal to the payload length) and writes the managed block of
+  the daemon configuration atomically (no-follow bounded read, fresh temporary file, mode at most
+  0644, identity re-check before the rename; a section defined outside the managed block is
+  refused). `--mode` defaults to `off`; `--mode auto` is accepted only after a successful
+  `--test-on-device` in the same run. `--test-on-device` is the only device write: with SIGINT,
+  SIGTERM, SIGHUP, SIGQUIT and SIGTSTP blocked, it writes `on`, reads it back, writes `off`, reads
+  it back and restores the original value on every path (at most `MAX_DEVICE_TEST_QUERIES` = 11
+  requests including the pre-checks and the drop-time restore retry, enforced with `XuBudget`;
+  the opened descriptor must have the device number of the classified Infrared node). SIGKILL and
+  SIGSTOP cannot be blocked: a killed run may leave the control in its last written state
+  (replug the camera or reboot). It does not capture frames, so it proves that the control
+  accepts the payloads, not that the emitter lights; check that visually.
+- No known-device database is shipped yet: no entry could be verified on IR hardware (assumed
+  owner decision AD-1 of `AI/architect_spec_ir_emitter_control.md`).
 
 ## Verification Matrix Mapping
 
@@ -610,4 +677,5 @@ while frames are captured.
 | **CAG4** | Stream creation / teardown panics become recoverable errors (GitHub #289) | `v4l_teardown_guard_tests::*` | ✅ Verified |
 | **GCV4–GCV6** | Virtual / output-capable / M2M nodes never auto-selected, reported rejected with a reason, explicit device refused unless `allow_virtual_camera` (GitHub #307) | `gcv_review_tests::test_gcv_loopback_grey_node_is_not_enumerated_and_uvc_is_chosen`, `supervisor_tests::test_gcv_explicit_loopback_node_is_refused_without_opt_in` (and siblings) | ✅ Verified |
 | **GCV14** | NUL byte in a device path is an error, never a `v4l` panic (GitHub #314) | `gcv_review_tests::test_gcv_nul_byte_device_path_never_panics`, `gcv_review_tests::test_gcv_nul_byte_camera_device_is_refused_at_config_load` | ✅ Verified |
+| **IRA1–IRA24** | UVC XU emitter control, `[camera.ir_emitter]`, strobe classification, mocks, `soos-admin camera ir-emitter` (GitHub #378) | `ir_emitter_config_tests::*`, `uvc_xu_tests::*`, `ir_emitter_tests::*`, `strobe_classification_tests::*`, `ir_mock_camera_tests::*` | ✅ Verified |
 | **CCB1–CCB15** | Hermetic supervisor state machine through the capture-backend seam: backoff, busy, sensor stamps, `Starved`, `ENODEV` re-resolution, idle suspend, teardown panic, shutdown; bounded frame-size and format enumeration (GitHub #198) | `supervisor_tests::*`, `v4l_guard::test_ccb_endless_enumeration_is_truncated_at_the_bound` (and siblings) | ✅ Verified |

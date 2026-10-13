@@ -124,6 +124,131 @@ pub enum CameraAction {
     List(CameraListArgs),
     /// Show the capabilities, formats, frame sizes and classification of one device.
     Probe(CameraProbeArgs),
+    /// UVC extension-unit IR emitter control: read-only probe, or write `[camera.ir_emitter]`
+    /// (GitHub #378). Root only; touches Infrared uvcvideo nodes only.
+    IrEmitter(IrEmitterArgs),
+}
+
+/// Arguments for `camera ir-emitter` (GitHub #378).
+#[derive(Parser, Debug, Clone)]
+pub struct IrEmitterArgs {
+    /// Action to perform.
+    #[command(subcommand)]
+    pub action: IrEmitterAction,
+}
+
+/// `camera ir-emitter` actions.
+#[derive(Subcommand, Debug, Clone)]
+pub enum IrEmitterAction {
+    /// Read-only scan of the extension-unit controls of an IR node (GET requests only).
+    Probe(IrEmitterProbeArgs),
+    /// Write `[camera.ir_emitter]` to the daemon configuration; the device is written only
+    /// with `--test-on-device`.
+    Configure(IrEmitterConfigureArgs),
+}
+
+/// `[camera.ir_emitter] mode` on the command line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Default)]
+pub enum IrEmitterModeArg {
+    /// soos never touches the emitter (default).
+    #[default]
+    Off,
+    /// soos may drive the emitter (requires a successful `--test-on-device`).
+    Auto,
+}
+
+/// A control payload given as hexadecimal (`0x` prefix optional), 1 to 64 bytes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HexPayload(pub Vec<u8>);
+
+/// Parses `--on` / `--off`.
+fn parse_hex_payload(value: &str) -> Result<HexPayload, String> {
+    let digits = value
+        .strip_prefix("0x")
+        .or_else(|| value.strip_prefix("0X"))
+        .unwrap_or(value);
+    let max_digits = soos_camera_v4l::uvc_xu::XU_MAX_PAYLOAD_BYTES.saturating_mul(2);
+    if digits.is_empty()
+        || !digits.len().is_multiple_of(2)
+        || digits.len() > max_digits
+        || !digits.bytes().all(|b| b.is_ascii_hexdigit())
+    {
+        return Err(format!(
+            "expected an even number of hexadecimal digits (2 to {max_digits})"
+        ));
+    }
+    digits
+        .as_bytes()
+        .chunks(2)
+        .map(|pair| {
+            std::str::from_utf8(pair)
+                .ok()
+                .and_then(|p| u8::from_str_radix(p, 16).ok())
+                .ok_or_else(|| "invalid hexadecimal digit".to_string())
+        })
+        .collect::<Result<Vec<u8>, String>>()
+        .map(HexPayload)
+}
+
+/// Arguments for `camera ir-emitter probe`.
+#[derive(Parser, Debug, Clone)]
+pub struct IrEmitterProbeArgs {
+    /// IR device (`/dev/videoN` or a `/dev/v4l/by-id/` link).
+    #[arg(value_name = "DEVICE")]
+    pub device: PathBuf,
+
+    /// Scan this extension unit only (default: units 1 to 32).
+    #[arg(long, value_parser = clap::value_parser!(u8).range(1..=255))]
+    pub unit: Option<u8>,
+
+    /// Daemon configuration whose `[camera.ir_emitter]` is compared with this node.
+    #[arg(long, value_name = "PATH", default_value = DEFAULT_DAEMON_CONFIG_PATH)]
+    pub config: PathBuf,
+
+    /// Print machine-readable JSON (same as the global `--format json`).
+    #[arg(long)]
+    pub json: bool,
+}
+
+/// Arguments for `camera ir-emitter configure`.
+#[derive(Parser, Debug, Clone)]
+pub struct IrEmitterConfigureArgs {
+    /// IR device (`/dev/videoN` or a `/dev/v4l/by-id/` link).
+    #[arg(value_name = "DEVICE")]
+    pub device: PathBuf,
+
+    /// Extension unit id.
+    #[arg(long, value_parser = clap::value_parser!(u8).range(1..=255))]
+    pub unit: u8,
+
+    /// Control selector.
+    #[arg(long, value_parser = clap::value_parser!(u8).range(1..=255))]
+    pub selector: u8,
+
+    /// Payload that lights the emitter (hexadecimal, 1 to 64 bytes).
+    #[arg(long, value_parser = parse_hex_payload)]
+    pub on: HexPayload,
+
+    /// Payload that switches the emitter off (hexadecimal, same length as `--on`).
+    #[arg(long, value_parser = parse_hex_payload)]
+    pub off: HexPayload,
+
+    /// `mode` written to the section (`auto` requires `--test-on-device`).
+    #[arg(long, value_enum, default_value_t = IrEmitterModeArg::Off)]
+    pub mode: IrEmitterModeArg,
+
+    /// Daemon configuration to update.
+    #[arg(long, value_name = "PATH", default_value = DEFAULT_DAEMON_CONFIG_PATH)]
+    pub config: PathBuf,
+
+    /// Print the section without writing anything.
+    #[arg(long)]
+    pub dry_run: bool,
+
+    /// Write the on and off payloads to the device, read them back and restore the original
+    /// value (the only device write of this command).
+    #[arg(long)]
+    pub test_on_device: bool,
 }
 
 /// Parses the `daemon.toml` `sensor_preference` vocabulary for `--sensor-preference`.

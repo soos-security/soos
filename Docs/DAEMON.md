@@ -203,6 +203,28 @@ lock_grace_ms = 3000
 
 ---
 
+### `[camera]` and `[camera.ir_emitter]` (GitHub #378, PR 1 of #353)
+
+The top-level `camera` table (`[camera]`) accepts a single sub-table, `[camera.ir_emitter]`, which describes the UVC
+extension-unit control that switches the near-infrared emitter of an IR camera. It is parsed
+by `soos_camera_v4l::ir_emitter_config::parse_camera_table` (stored in
+`PipelineConfig::ir_emitter`). Inside `[camera.ir_emitter]` parsing is strict: any invalid value or
+unknown key is a startup error that names the key, never the
+value. Any other key under `[camera]` is ignored, like unknown keys of every other table, and
+reported once at startup as a configuration warning naming the key (never its value), for
+example a misplaced `[camera] idle_timeout_secs` (the key belongs to `[pipeline]`).
+
+| Key | Type | Default | Validation / notes |
+|---|---|---|---|
+| `mode` | string | `"off"` | `"off"` or `"auto"` only. An absent section means `"off"`. `"auto"` is validated and reported as a startup warning but **not acted upon**: this `soos-daemon` never drives the emitter (strict IR mode, split item 4 of #353, will check the VID:PID against the resolved node before the first write). |
+| `device` | string | — | USB `"vvvv:pppp"` (4 + 4 hex digits). Required with `"auto"`. |
+| `unit`, `selector` | integer | — | `1..=255`. Required with `"auto"`. |
+| `on`, `off` | array of integers | — | 1 to 64 bytes (`XU_MAX_PAYLOAD_BYTES`), each `0..=255`, same length, different contents. Required with `"auto"`. |
+
+With `mode = "off"`, keys that are present are still validated. The section is normally written
+by `soos-admin camera ir-emitter configure` (see `Docs/CAMERA_V4L_CRATE.md`), inside a managed
+`# BEGIN soos-admin camera.ir_emitter` / `# END soos-admin camera.ir_emitter` block.
+
 ## 2. Connection Model
 
 - One Tokio task per accepted connection, tracked in `soos_daemon::shutdown::ConnectionTasks`

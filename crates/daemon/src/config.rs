@@ -188,6 +188,9 @@ pub struct PipelineConfig {
     /// GitHub #252). Defaults to `min(4, available_parallelism)`; validated to
     /// `1..=soos_inference_ort::MAX_INTRA_THREADS` at load.
     pub inference_intra_threads: usize,
+    /// `[camera.ir_emitter]` (GitHub #378, PR 1 of #353): validated fail-closed at load, `off`
+    /// by default. Not driven by this version of `soos-daemon` (split item 4 of #353).
+    pub ir_emitter: soos_camera_v4l::IrEmitterSettings,
 }
 
 impl PipelineConfig {
@@ -266,6 +269,7 @@ impl Default for PipelineConfig {
             rate_limit: soos_policy::RateLimitConfig::default(),
             use_mock_camera: false,
             inference_intra_threads: soos_inference_ort::default_intra_threads(),
+            ir_emitter: soos_camera_v4l::IrEmitterSettings::default(),
         }
     }
 }
@@ -323,6 +327,11 @@ struct DaemonConfigFile {
     peer_limits: Option<PeerLimitsConfigFile>,
     #[serde(default)]
     presence: Option<PresenceConfigFile>,
+    /// `[camera]` (only `[camera.ir_emitter]` is read, other keys are ignored with a warning),
+    /// parsed by
+    /// `soos_camera_v4l::ir_emitter_config::parse_camera_table`.
+    #[serde(default)]
+    camera: Option<toml::Table>,
     #[serde(default)]
     log_level: Option<String>,
 }
@@ -680,6 +689,25 @@ impl DaemonConfig {
                     config.pipeline.rate_limit.max_tracked_uids = max_uids;
                 }
             }
+        }
+
+        if let Some(camera) = file.camera {
+            for key in soos_camera_v4l::ir_emitter_config::ignored_camera_keys(&camera) {
+                config.warnings.push(format!(
+                    "[camera] {key} is not recognized and is ignored (only [camera.ir_emitter] \
+                     is read from [camera])"
+                ));
+            }
+            let settings = soos_camera_v4l::ir_emitter_config::parse_camera_table(&camera)
+                .map_err(|e| DaemonError::Config(format!("Invalid [camera] section: {e}")))?;
+            if settings.mode == soos_camera_v4l::IrEmitterMode::Auto {
+                config.warnings.push(
+                    "[camera.ir_emitter] mode = \"auto\" is validated but not acted upon: this \
+                     soos-daemon version never drives the IR emitter"
+                        .to_string(),
+                );
+            }
+            config.pipeline.ir_emitter = settings;
         }
 
         if let Some(preview) = file.preview {

@@ -7,6 +7,8 @@
 //! - `camera list|probe`: V4L2 node metadata, classification and the shared resolver's
 //!   decision (metadata ioctls only, never frames); `camera list` resolves with the
 //!   `camera_device` / `sensor_preference` of `/etc/soos/daemon.toml`
+//! - `camera ir-emitter probe|configure`: read-only UVC extension-unit scan of an IR node, and
+//!   the `[camera.ir_emitter]` writer (device written only with `--test-on-device`; GitHub #378)
 //! - `network-lock status|install|uninstall`: opt-in polkit Wi-Fi lock (GitHub #365); the
 //!   status is read-only and never prints a network name
 
@@ -17,6 +19,7 @@ pub mod camera;
 pub mod daemon_config;
 pub mod error;
 pub mod gdm;
+pub mod ir_emitter;
 pub mod logs;
 pub mod network_lock;
 mod pam_stack;

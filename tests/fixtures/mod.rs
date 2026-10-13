@@ -631,3 +631,129 @@ pub mod readme_web {
         }
     }
 }
+
+/// Synthetic, non-biometric near-infrared frame sequences for the strobe classifier of
+/// `soos-camera-v4l` (GitHub #378, PR 1 of #353).
+///
+/// Every frame is `Grey`, stamped `SensorType::Infrared`, and draws a flat bright disc (the
+/// "lit scene") over a dim background with a small deterministic texture. Nothing here is
+/// derived from a face image.
+#[allow(
+    clippy::arithmetic_side_effects,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_possible_wrap,
+    reason = "Synthetic fixture pixel generation over bounded coordinates"
+)]
+pub mod ir_strobe {
+    use soos_frame::{Frame, PixelFormat, SensorType};
+
+    /// Mean disc level of a lit frame.
+    pub const LIT_DISC: u8 = 160;
+    /// Background level of a lit frame.
+    pub const LIT_BACKGROUND: u8 = 70;
+    /// Disc level of an unlit frame (ambient only).
+    pub const UNLIT_DISC: u8 = 14;
+    /// Background level of an unlit frame.
+    pub const UNLIT_BACKGROUND: u8 = 10;
+
+    /// One frame of a sequence and the emitter state commanded for it (`None`: no command).
+    pub struct IrSample {
+        /// The synthetic frame.
+        pub frame: Frame,
+        /// `Some(true)` = emitter commanded on, `Some(false)` = off, `None` = not commanded.
+        pub commanded_on: Option<bool>,
+    }
+
+    /// One synthetic IR frame, lit or unlit, `Grey` and `Infrared`.
+    pub fn ir_frame(width: u32, height: u32, sequence: u64, lit: bool) -> Frame {
+        let (disc, background) = if lit {
+            (LIT_DISC, LIT_BACKGROUND)
+        } else {
+            (UNLIT_DISC, UNLIT_BACKGROUND)
+        };
+        let w = width as i64;
+        let h = height as i64;
+        let (cx, cy) = (w / 2, h / 2);
+        let radius = (w.min(h) / 3).max(1);
+        let mut data = Vec::with_capacity((width as usize).saturating_mul(height as usize));
+        for y in 0..h {
+            for x in 0..w {
+                let (dx, dy) = (x - cx, y - cy);
+                let base = if dx * dx + dy * dy <= radius * radius {
+                    disc
+                } else {
+                    background
+                };
+                // +/-2 levels of texture so the frame is not perfectly flat.
+                let texture = ((x * 7 + y * 13) % 5) as u8;
+                data.push(base.saturating_add(texture).saturating_sub(2));
+            }
+        }
+        Frame::new(
+            data,
+            width,
+            height,
+            1_000_000u64.saturating_add(sequence.saturating_mul(33_333_333)),
+            PixelFormat::Grey,
+            sequence,
+        )
+        .with_sensor_type(SensorType::Infrared)
+    }
+
+    fn sequence(
+        n: usize,
+        lit: impl Fn(usize) -> bool,
+        cmd: impl Fn(usize) -> Option<bool>,
+    ) -> Vec<IrSample> {
+        (0..n)
+            .map(|i| IrSample {
+                frame: ir_frame(64, 48, i as u64, lit(i)),
+                commanded_on: cmd(i),
+            })
+            .collect()
+    }
+
+    /// `n` lit frames, no command (emitter permanently on).
+    pub fn steady_sequence(n: usize) -> Vec<IrSample> {
+        sequence(n, |_| true, |_| None)
+    }
+
+    /// `n` frames alternating lit / unlit by sequence parity on their own (even = `first_lit`).
+    pub fn native_alternating_sequence(n: usize, first_lit: bool) -> Vec<IrSample> {
+        sequence(n, |i| (i % 2 == 0) == first_lit, |_| None)
+    }
+
+    /// One frame per pattern entry: commanded state = entry, and the scene follows it.
+    pub fn controllable_sequence(pattern: &[bool]) -> Vec<IrSample> {
+        let p = pattern.to_vec();
+        let q = pattern.to_vec();
+        sequence(
+            pattern.len(),
+            move |i| p.get(i).copied().unwrap_or(false),
+            move |i| q.get(i).copied(),
+        )
+    }
+
+    /// One frame per pattern entry: commands are issued but the scene stays lit (a control
+    /// that does not drive the emitter).
+    pub fn unresponsive_sequence(pattern: &[bool]) -> Vec<IrSample> {
+        let q = pattern.to_vec();
+        sequence(pattern.len(), |_| true, move |i| q.get(i).copied())
+    }
+
+    /// `n` unlit frames (no emitter, dark room).
+    pub fn absent_sequence(n: usize) -> Vec<IrSample> {
+        sequence(n, |_| false, |_| None)
+    }
+
+    /// `steady_len` lit frames, then `alternating_len` frames alternating by parity: a stream
+    /// whose class changes mid-request.
+    pub fn class_change_sequence(steady_len: usize, alternating_len: usize) -> Vec<IrSample> {
+        sequence(
+            steady_len + alternating_len,
+            move |i| i < steady_len || i % 2 == 0,
+            |_| None,
+        )
+    }
+}

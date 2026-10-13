@@ -344,6 +344,13 @@ mod remote_direct_biometric_contract;
 #[cfg(all(test, unix))]
 mod network_lock_contract;
 
+/// UVC extension-unit IR emitter control and strobe classification: one documented `unsafe`
+/// ioctl site in `soos-camera-v4l`, read-only probe, no payload in logs, `soos-frame`
+/// untouched, mocks behind `mock-camera` (GitHub #378, PR 1 of #353; spec
+/// AI/architect_spec_ir_emitter_control.md; rows IRA22-IRA24).
+#[cfg(all(test, unix))]
+mod ir_emitter_contract;
+
 /// Browser capability detection and graceful degradation of the `soos-remote` web app: one pure
 /// probe, guarded browser APIs, passkey/push/camera/status degradation with fixed texts, no
 /// User-Agent logic, CSS fallbacks, unchanged network surface, documentation (GitHub #366, PR 1
