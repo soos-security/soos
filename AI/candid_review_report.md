@@ -1,134 +1,172 @@
 # Candid Review Report
 
-- **Date**: 2026-10-15
-- **Target Branch**: `feat/remote-offline-alerts`
-- **Base (merge-base)**: `af511eb`
-- **Reviewed-Diff-Fingerprint**: `396018e73d046acb3b0303804de69c555bcfe89f226666b2fc3760ce960fa2d6`
-- **Audited Files**: `.agents/skills/dev-workflow/references/project-facts.md`, `AI/ARCHITECTURE.md`, `AI/DECISIONS.md`, `AI/VERIFICATION_MATRIX.md`, `AI/architect_spec_remote_offline_alerts.md`, `AI/auditor_constraints_remote_offline_alerts.md`, `AI/tester_contract_remote_offline_alerts.md`, `AI/walkthroughs/202_remote_offline_alerts.md`, `Docs/REMOTE_COMPANION.md`, `crates/remote/assets/app.js`, `crates/remote/assets/style.css`, `crates/remote/assets/sw.js`, `crates/remote/src/audit.rs`, `crates/remote/src/config.rs`, `crates/remote/src/lib.rs`, `crates/remote/src/logind.rs`, `crates/remote/src/main.rs`, `crates/remote/src/offline.rs`, `crates/remote/src/push.rs`, `crates/remote/src/routes.rs`, `crates/remote/src/server.rs`, `crates/remote/tests/alerts_server_tests.rs`, `crates/remote/tests/android_push_tests.rs`, `crates/remote/tests/battery_server_tests.rs`, `crates/remote/tests/common/camera.rs`, `crates/remote/tests/common/harness.rs`, `crates/remote/tests/offline_server_tests.rs`, `crates/remote/tests/offline_tests.rs`, `crates/remote/tests/push_server_tests.rs`, `crates/remote/tests/server_tests.rs`, `scripts/install_remote.sh`, `tests/invariants/src/lib.rs`, `tests/invariants/src/remote_offline_contract.rs`
+- **Date**: 2026-10-13
+- **Target Branch**: `feat/one-command-install`
+- **Base (merge-base)**: `6f32ef8`
+- **Reviewed-Diff-Fingerprint**: `3eff69a541a8c64679233e78f82d6b4ddb5f4345efa03200c0fdd707c6933aec`
+- **Audited Files**: `AI/DECISIONS.md`, `AI/VERIFICATION_MATRIX.md`, `AI/architect_spec_one_command_install.md`, `AI/auditor_constraints_one_command_install.md`, `AI/tester_contract_one_command_install.md`, `AI/walkthroughs/200_one_command_install.md`, `Docs/PACKAGING_AND_PROVISIONING.md`, `README.md`, `scripts/setup.sh`, `tests/invariants/src/lib.rs`, `tests/invariants/src/setup_contract.rs`
 
 ## 1. Executive Summary
 
-Re-review after the rebase of `feat/remote-offline-alerts` (GitHub #376, tier 1 of #359 Part B,
-PR #386) from base `94a7cb3` onto `origin/main` `af511eb`. Main gained #383 (push delivery test
-deflake: `settle_gone` in `crates/remote/tests/common/push.rs`, `push_server_tests.rs`,
-`android_push_tests.rs`), #394 (actions bump), #384 (motion ADR, `mod ui_motion_spec_contract`)
-and #388 (read-only lock-screen state request: daemon, protocol `RequestKind::LockState`,
-`mod lock_state_contract`). The previous review (fingerprint `caf54570…`, APPROVED, one MINOR
-resolved, one SUGGESTION open) is carried forward. The raw diff against the new merge base was
-re-read independently (`offline.rs` runtime/watcher/stop/persist, `push.rs` scheduler,
-notice delivery and retries, `server.rs` wiring and route, `config.rs`, `logind.rs`, `main.rs`,
-`audit.rs`). No CRITICAL or MAJOR finding.
+Re-review of `scripts/setup.sh` (GitHub #372, PR 1 of #362) after the previous
+CHANGES_REQUESTED verdict (fingerprint `62a7a749...`). All three earlier findings are fixed in
+production code, and new contract tests would fail against the old behavior:
 
-Rebase verification (this review):
-- `git range-diff origin/feat/remote-offline-alerts...HEAD`: the single branch commit `b2dbc3e` →
-  `290b8c1`; the only changes are context lines from main and the placement of the conflicted
-  blocks.
-- Per-file comparison of the sorted added/removed lines of `94a7cb3..origin/feat/remote-offline-alerts`
-  against `af511eb..HEAD`, for all 35 files: identical for 32 files, including `AI/DECISIONS.md`
-  and `tests/invariants/src/lib.rs`. Differences: `AI/VERIFICATION_MATRIX.md` gains exactly one
-  blank line and one `---` separator before the `remote-offline-alerts` section (the file's
-  convention); `AI/candid_review_report.md` (this file, rewritten) and
-  `AI/plan_evaluator_report.md` differ only through their base side (main's versions are now the
-  base); the branch's `AI/plan_evaluator_report.md` is byte-identical to the pre-rebase branch
-  file (`git diff origin/feat/remote-offline-alerts HEAD -- AI/plan_evaluator_report.md` is empty).
-- No loss or duplication: `AI/DECISIONS.md` holds the "Motion System", "Read-Only Lock-Screen State
-  Channel" and "Offline History and Back-Online Push Notifications" ADRs once each, main's first;
-  `git diff af511eb HEAD -- AI/DECISIONS.md` removes no line. `tests/invariants/src/lib.rs`
-  declares `mod remote_offline_contract;` once, after `mod ui_motion_spec_contract;` and
-  `mod lock_state_contract;` (76 `mod` lines = 75 at `af511eb` + 1). The matrix holds one
-  `remote-offline-alerts` section after main's `rwp-delivery-deflake`, `ui-motion-spec` and
-  `lockscreen-status` sections. Walkthrough 202 does not collide with main's 203, 204, 205.
-- Semantic interaction: #388 does not touch `crates/remote`; `soos-remote` only constructs
-  `RequestKind::PreviewFrame` and has no exhaustive match on `RequestKind`, so the new wire kind
-  needs nothing here. #383 adds `Call.answer`, `last_gone` and `settle_gone` to the push test
-  harness; this branch's harness edits are the setup-only `offline: OfflineConfig::default()`
-  lines, and its new back-online delivery path reuses the same `remove_gone` store rewrite that
-  `settle_gone` waits for, so the deflake applies to it unchanged. Both suites pass together.
-- `cargo test --locked -p soos-invariants -p soos-remote -- --test-threads=4`: 1044 passed,
-  0 failed, 0 ignored (soos-invariants 625; soos-remote 419, including `offline_tests` 23,
-  `offline_server_tests` 10, `push_server_tests` 22, `android_push_tests` 5).
+1. MAJOR (SSH session could enable enrollment): `session_is_local` now returns three states:
+   0 local, 1 positively not local, 2 unknown. `detect_local_seat` falls back to the
+   `Display` session only on state 2, only in the user half, and only when a target user is
+   known (`scripts/setup.sh:441-487`).
+2. MINOR (`DAEMON_STOPPED` cleared too early): the marker is now set before
+   `systemctl stop` and cleared only after a successful `systemctl start`
+   (`scripts/setup.sh:1036-1058`).
+3. MINOR (root environment leaking into the build): `as_build_user` now runs
+   `runuser -u <user> -- env -i` with an explicit allow-list (`scripts/setup.sh:1312-1326`).
 
-## 2. Test Changes (mechanical listing from step 3, with justification per change)
+No new CRITICAL or MAJOR defect was found. Verdict: APPROVED.
 
-Over `target/candid_diff.patch`:
-- Test files touched: `alerts_server_tests.rs`, `android_push_tests.rs`, `battery_server_tests.rs`,
-  `common/camera.rs`, `common/harness.rs`, `push_server_tests.rs`, `server_tests.rs` — each gains
-  exactly one line `offline: soos_remote::config::OfflineConfig::default(),` in a `RemoteConfig`
-  literal and nothing else (verified per file with `git diff af511eb HEAD`). Setup-only migration
-  forced by the new `RemoteConfig.offline` field (ADR item 10). No assertion changed.
-- `tests/invariants/src/lib.rs`: only adds `mod remote_offline_contract;`.
-- New: `offline_tests.rs` (23 tests), `offline_server_tests.rs` (10 tests),
-  `remote_offline_contract.rs` (ROA-S1..S5).
-- Removed or changed assertions (`^-` with `assert`/`#[test]`/`proptest!`/`should_panic`): none.
-- New escape hatches (`#[ignore]`, `#[cfg(any())]`, `should_panic`, tolerance, epsilon): none in
-  code; the only hit is a sentence in `AI/auditor_constraints_remote_offline_alerts.md` (#38)
-  forbidding them.
-- Inline `mod tests` changes: none.
+## 2. Test Changes
+
+Mechanical listing from `target/candid_diff.patch`:
+
+- Test files touched: `tests/invariants/src/lib.rs` (only adds `mod setup_contract;`) and
+  `tests/invariants/src/setup_contract.rs` (new in this PR; every test in it is new).
+- Removed or changed assertions (`^-` lines with assert, `#[test]`, proptest or
+  should_panic): **none**.
+- New escape hatches (`#[ignore]`, `#[cfg(any())]`, should_panic, tolerance, epsilon):
+  **none**.
+- Inline test modules added or removed: none.
+
+No pre-existing test from `main` is modified, so no test is weakened. The new tests and stub
+changes since the last review:
+
+- `STUB_LOGINCTL` now answers per session id: the desk `Display` session (`c2`) is local by
+  default, and the shell's own session is controlled by `STUB_REMOTE`, `STUB_SEAT` and
+  `STUB_SELF_FAIL`. This makes the mixed local/remote scenario testable, as the earlier
+  SUGGESTION asked.
+- `test_set_remote_own_session_never_borrows_the_desk_session`: the own session is
+  `Remote=yes` or has no seat while the desk session is local. The test asserts the session is
+  reported as remote, `loginctl show-user` is never called, `soos-enroll` never runs and the
+  command is printed. With the old code (fallback on any non-local answer), the desk session
+  would be found local and enrollment would run, so this test would fail. Verified by reading
+  both versions.
+- `test_set_seat_falls_back_to_the_display_session_in_the_user_half`: the fallback is now
+  triggered by `STUB_SELF_FAIL` (own session unknown) instead of the old shared remote stub.
+  Started as root, there is still no fallback.
+- `test_set_full_run_as_root_builds_as_invoking_user`: sets root `CARGO_HOME`, `RUSTUP_HOME`
+  and `RUSTFLAGS`, then asserts the stub cargo sees all three empty and sees `HOME`/`USER` of
+  the build user. Without `env -i`, the test would fail.
+- `test_set_daemon_stop_marker_cleared_only_after_restart`: a static check that every
+  `DAEMON_STOPPED=false` inside `phase_enrollment` comes after `systemctl start "${UNIT}"`.
+  It is a structural check, not a behavioral one, but it is enough for a signal-race ordering
+  that cannot be reproduced deterministically.
+- The stubs now set default values for `STUB_LOG`, `STUB_STATE`, `STUB_HOME` and
+  `STUB_FAKES`, so they keep logging under the script's `env -i`. This is a harness setup
+  change only and relaxes no assertion.
+
+`cargo test -p soos-invariants -- --test-threads=4`: 632 passed, 0 failed.
 
 ## 3. Deep Reasoning Audit
 
 ### Logic & Architecture
-- Tracker (carried forward, re-read): sleep during an open outage closes the outage at the
-  previous sample and records a non-pushed `sleep`; outages under 30 s are dropped; a backwards
-  wall clock gives an empty span, never inverted; `now < last_alive` gives no interval. → PASS.
-- Release: held notice released on `Online` or after 12 consecutive `Unknown` steps. → PASS.
-- Ordering: `PushRuntime` exists before `OfflineRuntime::start`; the sink drops notices unless
-  `is_active()`; the watcher is spawned only when the store was usable; the sink is invoked after
-  the tracker guard is released (no nested lock with the scheduler). → PASS.
-- Scheduler: `take_due` shares `budget_due` (coalescing, spacing, 20/h); earlier first-noted wins,
-  alert wins ties; notice retries (5 s, 30 s, 2 min, 10 min, then `Failed`) are per endpoint,
-  merged on a new notice, pruned with `known`, and included in `next_wake`. → PASS.
-- Config: `offline_alerts` without push → `OfflineRequiresPush` (exit 78, no restart loop);
-  `with_offline_alerts` ignores the wiring unless both flags are set. → PASS.
-- `connect_system_bus` keeps the single pinned `Builder::address(`, `method_timeout`,
-  `max_queued`, connect timeout. → PASS.
-- Rebase: no main API used by this branch changed (§1). → PASS.
+
+- Owner decision on #362 (enrollment from a local seat only):
+  - `su - alice` or `sudo -u alice -i` over SSH: the SSH variables are dropped, but
+    `loginctl show-session self` resolves to the SSH session, which answers `Remote=yes`.
+    That gives state 1, which is final: not local. PASS.
+  - Root shell over SSH: `detect_local_seat false` never falls back. PASS.
+  - Any `SSH_*` variable set: not local immediately. PASS.
+  - `Remote=no` with an empty or invalid `Seat`: state 1, final. PASS.
+  - The own session is unknown to logind (a terminal under the user service manager): the
+    fallback uses `Display` of the target user, and that session must itself be
+    `Remote=no` with a seat. This is the documented rule. PASS.
+  - The session id is validated (`^[A-Za-z0-9]{1,32}$`) before it is passed to `loginctl`;
+    every query is bounded to 5 s. PASS.
+- The root half takes the seat verdict only from `--local-seat yes|no` (a closed enum). The
+  internal options are refused outside `--system-phase`, and `--system-phase` requires uid 0.
+  PASS.
+- Parsing:
+  - os-release is read line by line with `case`, quotes and non-printable characters are
+    stripped, values are bounded to 80 characters, and tokens are split with `read -a`. It is
+    never sourced or evaluated.
+  - The state file uses a strict regex grammar with fixed keys.
+  - There is no `eval` and no `source` anywhere in the script (also enforced by
+    `test_set_s1`). PASS.
+- `./scripts/setup.sh --dry-run` on the reviewer host printed the detection and the plan,
+  exited 0, and left the working tree unchanged. PASS.
 
 ### PAM Concurrency & Deadlines
-- No PAM code touched. Remote bounds: observation under `NETWORK_READ_DEADLINE_MS` (3 s < 5 s
-  tick, compile-time assert covers connect + 4 calls); stop under `OFFLINE_STOP_DEADLINE_MS`, its
-  shutdown read under 1.5 s; store lock retries bounded by `STORE_LOCK_TIMEOUT_MS`; no
-  `std::sync::Mutex` guard across `.await` (`step`, `start`, `persist`, `stop`, sink). → PASS.
+
+No `crates/pam` change. Setup never activates PAM: there is no `pam-auth-update` and no
+`authselect select`, which `test_set_s3` enforces statically. The only Tailscale command is
+`tailscale version`, which is read-only and bounded. External queries are bounded by
+`run_bounded`, `wait_daemon_ready.sh --timeout 30` and a 15 s limit on the camera list. PASS.
 
 ### Panic Safety & Fail-Closed
-- No `unwrap`/`expect`/`panic!`/indexing in the new production paths (`offline.rs` grep clean;
-  `main.rs` `unwrap_or(u64::MAX)` only). `spawn_blocking` join errors map to `Io`; poisoned
-  mutexes are skipped. A refused store sets `failed`, the watcher is not spawned and `stop()`
-  returns early, so the bad file is never rewritten. The watcher is supervised (panic →
-  `TaskPanicked`). This feature has no unlock/allow path. → PASS.
+
+No Rust production code changed. The script runs under `set -euo pipefail`.
+
+Daemon hand-off:
+
+- `DAEMON_STOPPED=true` is set before the stop.
+- Scenario: a signal arrives during `soos-enroll` or during `systemctl start`. Bash runs the
+  trap after the child returns, `on_signal` exits, and `on_exit_system` sees the marker still
+  true and starts the unit (an idempotent start). PASS.
+- Scenario: `systemctl start` fails. The marker stays true, the EXIT trap retries, and the
+  exit code is mapped to 70. PASS.
+- Scenario: the stop fails. Enrollment is skipped, the unit is started, and the run reports a
+  failure. PASS.
+
+Any doubt in the local-seat detection resolves to "not local". PASS.
 
 ### Test Integrity & Anti-Weakening
-- See §2. New tests discriminate plausible wrong implementations (boottime-vs-wall duration,
-  floor, notice merge, generic payload, shared budget, Funnel 403, never-rewritten bad store,
-  heartbeat rate, "off installs nothing"). → PASS.
+
+See section 2. No pre-existing assertion was removed or relaxed. The new tests discriminate
+between the old and the fixed behavior. PASS.
 
 ### Memory, Bounds & Secrets
-- History ≤ 32 (evicting); store ≤ 8 KiB on read and write, compile-time assert on 32 serialized
-  intervals; notice retries ≤ one per known endpoint. Store uses `read_owned_file`,
-  `try_lock_file`, `check_parent_dir`, `write_atomic` (`O_NOFOLLOW`, owner/mode checks, `flock`,
-  temp + `fsync` + `rename`, `0600`).
-- Privacy: only `State`, `Connectivity`, `WirelessEnabled` (NetworkManager), `NameHasOwner`
-  and `PreparingForShutdown` (logind) are read; no SSID, hardware address, IP config, active
-  connection, access point or hostname; no signal match, proxy or `Inhibit`; no inet socket.
-  Audit lines are fixed vocabulary; `generic` previews carry no reason text. `/api/offline` is
-  not Funnel-public (403 `login_required`), GET/HEAD only. → PASS.
+
+- **State file**:
+  - It lives at `<localstatedir>/lib/soos/state/setup.json`, written by root in a `0700`
+    directory, created with `umask 077` and `mktemp`, set to `chmod 0600`, and moved
+    atomically.
+  - Symbolic links are refused for both the directory and the file.
+  - On read, the file must be owned by the effective uid (`-O`), at most 4096 bytes, not
+    group- or world-writable, and must record the same user.
+  - It holds no secret. PASS.
+- **Rollback scope**: only the actions journaled during this run are undone
+  (`group_added`, `presence_flag_created`, `presence_flag_removed`,
+  `soos_conf_dir_created`). Packages, the toolchain and the `install.sh` install are never
+  removed by setup. PASS.
+- **Privilege flow**:
+  - The build never runs as root: as root it runs under `runuser` with `env -i` and the
+    allow-list; build user `root` or uid 0 is refused.
+  - The root half is re-executed once through `sudo --` or `doas --`, with every input passed
+    as an argument.
+  - Root's `PATH` is kept, prefixed with `~/.cargo/bin`. It is controlled by root, so this is
+    acceptable. PASS.
 
 ### Supply Chain & Automation
-- No `Cargo.*`, `deny.toml`, workflow or hook change; `scripts/install_remote.sh` adds a commented
-  template key only. → PASS.
+
+No `Cargo.*`, `deny.toml`, `.github/` or hook change. Packages come only from
+`check_build_deps.sh --print-packages`, and the toolchain only from the verified
+`install_rustup.sh`. The build uses `--locked`. PASS.
 
 ### English-Only Policy
-- All code, comments, docs and UI strings are English. → PASS.
+
+The patch has no non-ASCII accented characters. The code, comments, ADR, docs and walkthrough
+200 are all in English. PASS.
 
 ## 4. Detailed Findings & Action Items
 
-- **[MINOR — RESOLVED, carried forward]** `AI/DECISIONS.md` — the earlier accidental edit to the
-  2026-10-06 ADR ("rMC23") stays fixed; `git diff af511eb HEAD -- AI/DECISIONS.md` removes no line.
-- **[SUGGESTION — open, carried forward]** `crates/remote/src/main.rs` (`offline_wiring`) — a
-  refused network store path logs through `warn!` instead of the fixed audit vocabulary of ADR
-  item (6), and leaves `/api/offline` at `disabled` rather than `unavailable`. Follows the push
-  precedent and leaks nothing (`%err` prints only the byte limit). Consider documenting it or
-  reporting `unavailable`.
+- **[SUGGESTION]** `scripts/setup.sh:471`: a terminal multiplexer started at the desk and
+  later attached over SSH keeps the desk `XDG_SESSION_ID` and has no `SSH_*` variables in old
+  windows, so its own session is the local desk session. This is an inherent logind limit, not
+  a regression. A sentence about it in `Docs/PACKAGING_AND_PROVISIONING.md` would be enough.
+- **[SUGGESTION]** `tests/invariants/src/setup_contract.rs:1674`: the stop-marker ordering is
+  checked structurally. A behavioral test (a `systemctl start` stub that signals the parent)
+  could be added later.
+- shellcheck is not installed on the reviewer host, so it was not run here. CI quality jobs
+  still apply.
 
 ## 5. Final Verdict
 

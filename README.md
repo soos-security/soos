@@ -10,6 +10,22 @@
 
 Supported hosts: Debian 12, Ubuntu 24.04, Fedora 40 / RHEL 9 and Arch Linux (x86_64, aarch64), with systemd.
 
+**One command** (run it as yourself, at the PC, from the checkout; it asks for `sudo` when needed):
+
+```bash
+./scripts/setup.sh --dry-run      # detect the host and print the plan; changes nothing
+./scripts/setup.sh                # packages, verified Rust toolchain, build, install, socket access, check, face enrollment
+```
+
+`scripts/setup.sh` runs the steps below for you and reports each one as done, already done or skipped, so
+running it again is safe. It enrolls your face only from a local seat (from SSH it prints the command to run
+at the PC), stops `soos-daemon` during the enrollment (the daemon owns the camera) and starts it again. Presence
+auto-unlock stays on (`--presence off` turns it off). It does **not** activate PAM (step 4 stays explicit) and
+does not set up the phone companion yet. Details, flags and exit codes:
+[`Docs/PACKAGING_AND_PROVISIONING.md`](Docs/PACKAGING_AND_PROVISIONING.md) §3.0.
+
+The manual procedure, step by step:
+
 ```bash
 # 1. Build dependencies (per-distribution lists: Docs/PACKAGING_AND_PROVISIONING.md §3.1)
 ./scripts/check_build_deps.sh --print-packages build     # e.g. then: sudo apt-get install ...

@@ -383,6 +383,15 @@ mod lock_state_contract;
 #[cfg(all(test, unix))]
 mod remote_offline_contract;
 
+/// One-command setup `scripts/setup.sh` core: strict bash, package lists only from
+/// `check_build_deps.sh`, no PAM/Tailscale/remote action, bounded state file, `--help`,
+/// `--dry-run` without any write, detection, privilege flow, local-seat enrollment, idempotence,
+/// rollback and exit codes, run without root against a fake root and stub commands (GitHub
+/// #372, PR 1 of #362; ADR 2026-10-13 "One-Command Setup `scripts/setup.sh` and Default-On
+/// Installer Profile"; spec AI/architect_spec_one_command_install.md; rows SET1-SET18).
+#[cfg(all(test, unix))]
+mod setup_contract;
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,
