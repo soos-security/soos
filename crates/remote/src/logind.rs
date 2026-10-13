@@ -102,6 +102,32 @@ fn truncated_error_name(name: &str) -> &str {
     name.get(..end).unwrap_or_default()
 }
 
+/// One new connection to the pinned system bus address [`SYSTEM_BUS_ADDRESS`] (never an
+/// environment-derived bus) under `DBUS_CONNECT_TIMEOUT_MS`, with every method call bounded by
+/// `DBUS_CALL_TIMEOUT_MS` and the unsolicited message queue bounded by `MAX_QUEUED_MESSAGES`.
+/// The single connection builder of the crate, shared with the offline history (ADR
+/// 2026-10-13 "Offline History and Back-Online Push Notifications in `soos-remote`").
+///
+/// # Errors
+///
+/// [`SourceError::BusUnavailable`], [`SourceError::Timeout`].
+pub(crate) async fn connect_system_bus() -> Result<zbus::Connection, SourceError> {
+    let builder = zbus::connection::Builder::address(SYSTEM_BUS_ADDRESS)
+        .map_err(|_| SourceError::BusUnavailable)?
+        .method_timeout(Duration::from_millis(DBUS_CALL_TIMEOUT_MS))
+        .max_queued(MAX_QUEUED_MESSAGES);
+    match tokio::time::timeout(
+        Duration::from_millis(DBUS_CONNECT_TIMEOUT_MS),
+        builder.build(),
+    )
+    .await
+    {
+        Ok(Ok(connection)) => Ok(connection),
+        Ok(Err(_)) => Err(SourceError::BusUnavailable),
+        Err(_) => Err(SourceError::Timeout),
+    }
+}
+
 impl ZbusSessionSource {
     /// Creates the client; performs no I/O.
     #[must_use]
@@ -114,30 +140,16 @@ impl ZbusSessionSource {
         self.slot.lock().await.is_some()
     }
 
-    /// The held connection, opened lazily through the pinned address under
-    /// `DBUS_CONNECT_TIMEOUT_MS`. The slot guard is held only for the build or the swap.
+    /// The held connection, opened lazily through [`connect_system_bus`]. The slot guard is
+    /// held only for the build or the swap.
     async fn connection(&self) -> Result<zbus::Connection, SourceError> {
         let mut slot = self.slot.lock().await;
         if let Some(connection) = slot.as_ref() {
             return Ok(connection.clone());
         }
-        let builder = zbus::connection::Builder::address(SYSTEM_BUS_ADDRESS)
-            .map_err(|_| SourceError::BusUnavailable)?
-            .method_timeout(Duration::from_millis(DBUS_CALL_TIMEOUT_MS))
-            .max_queued(MAX_QUEUED_MESSAGES);
-        match tokio::time::timeout(
-            Duration::from_millis(DBUS_CONNECT_TIMEOUT_MS),
-            builder.build(),
-        )
-        .await
-        {
-            Ok(Ok(connection)) => {
-                *slot = Some(connection.clone());
-                Ok(connection)
-            }
-            Ok(Err(_)) => Err(SourceError::BusUnavailable),
-            Err(_) => Err(SourceError::Timeout),
-        }
+        let connection = connect_system_bus().await?;
+        *slot = Some(connection.clone());
+        Ok(connection)
     }
 
     /// Drops the cached connection (the next call opens a new one).

@@ -131,6 +131,11 @@ allowed_logins = []
 # camera_quality = 70
 # Battery level of the PC on the page (section 2g): level, charge state and mains only.
 # battery_status = true
+
+# Optional: offline history and a back-online notification on the phone after the PC was
+# offline (section 2j). Reason and times only, never a network name or address.
+# Requires push_notifications = true (the service refuses to start otherwise).
+# offline_alerts = false
 TEMPLATE
         chmod 0600 "${CONFIG_PATH}"
     else

@@ -982,6 +982,84 @@ sentence and nothing stays subscribed (`soos-remote push list` unchanged); RXB20
 window (Chrome incognito and Firefox private): the matching push sentence while status and lock
 keep working.
 
+## 2j. Offline history and back-online notifications (opt-in)
+
+ADR 2026-10-13 "Offline History and Back-Online Push Notifications in `soos-remote`" (GitHub #376,
+tier 1 of #359 Part B). The PC cannot report its own disappearance while it is offline, so this
+feature reports **after the fact**: it records when the PC was offline and, once the PC is online
+again, sends one notification to the phone. A real-time "PC stopped responding" alert needs an
+observer outside the PC (tier 2 watchdog and tier 3 Android heartbeat, later PRs).
+
+**Enable** in `remote.toml` (the one-command setup of #362 will write both keys):
+
+```toml
+push_notifications = true   # required; the service refuses to start (exit 78) otherwise
+offline_alerts = true
+```
+
+Turning push notifications off later means turning `offline_alerts` off as well.
+
+**What is recorded**: at most 32 intervals (the oldest is dropped), in `remote-network.json` next
+to the passkey store (`0600`, at most 8 KiB, `O_NOFOLLOW`, owner-checked, written under `flock`
+through a temp file, `fsync` and `rename`). Each interval has a start and an end time, a duration,
+and one of four reasons:
+
+| Reason | Meaning | Notification |
+|---|---|---|
+| `network_lost` | NetworkManager reported no usable connection (state disconnected, connecting or asleep, or connectivity `NONE`) | yes |
+| `wifi_disabled` | the same while the Wi-Fi radio was switched off (`WirelessEnabled = false`) | yes |
+| `sleep` | the PC was suspended or hibernated | no (recorded only) |
+| `shutdown_or_crash` | the previous run ended in a system shutdown, a crash or a power loss | yes |
+
+A captive portal (`PORTAL`) or limited connectivity (`LIMITED`) counts as online. Intervals
+shorter than 30 s are not recorded (Wi-Fi roaming, DHCP renewal, the reconnection right after a
+resume).
+
+**How it watches, read-only**: every 5 s the service asks the D-Bus bus driver whether
+NetworkManager is running (`NameHasOwner`, which never starts a stopped service) and, if it is,
+reads three properties of the NetworkManager manager object with `Properties.Get`: `State`,
+`Connectivity` and `WirelessEnabled`. It installs no signal match, calls no NetworkManager method
+that changes anything, and reads no connection, access-point or device object. A suspend shows as
+the gap between `CLOCK_BOOTTIME` (which keeps counting during a suspend) and `CLOCK_MONOTONIC`
+(which stops). Durations within one boot come from `CLOCK_BOOTTIME`, so a clock correction after
+reconnecting does not change them. On a clean stop the service reads logind's
+`PreparingForShutdown` once:
+
+- `false` (a logout or `systemctl --user restart`) writes the marker `stopped`, so the next start
+  records nothing.
+- `true`, or a failed read, writes `shutdown`.
+
+A run that ended without any marker (crash or power loss) is found at the next start through its
+last heartbeat (written at most once a minute). In both cases the next start records one
+`shutdown_or_crash` interval. Hosts without NetworkManager (iwd-only, systemd-networkd) record
+`sleep` and `shutdown_or_crash` only; the page says so.
+
+**The notification** goes through the existing sender on topic `soosonline`, so it never replaces
+an undelivered failed-password alert. It shares the alert budget: at most one notification per
+30 s and 20 per hour across both kinds. It is sent only once NetworkManager reports the PC online
+again, or after 60 s without any NetworkManager reading. The text uses a fixed vocabulary, for
+example "Your PC is back online — Offline for 12 min (network lost)" or "Offline 3 times, latest
+for 2 h 5 min (Wi-Fi turned off)". With `push_previews = "generic"` the lock screen shows only
+"Update from your PC — Open soos for details". The clock times stay inside the encrypted payload,
+and the page shows them in the phone's time zone. A notification whose delivery keeps failing is
+retried after 5 s, 30 s, 2 min and 10 min, then dropped; the history keeps the interval.
+
+**Privacy**: no SSID, BSSID, IP address, MAC address or location is ever read, stored, logged,
+sent or shown. Only reasons and times are kept. A "network changed" notification is not provided,
+because it would need connection objects whose properties include the network name.
+
+**Page**: the "Offline history" card (`GET /api/offline`, the visibility of `/api/alerts`)
+lists the 10 newest intervals with start, end, duration and reason.
+
+**Owner hardware checks** (matrix rows ROA12–ROA14):
+
+- ROA12: turn Wi-Fi off for more than a minute, then on again. The phone receives one back-online
+  notification, and the card shows a `wifi_disabled` row.
+- ROA13: suspend the PC, then resume it. The card shows a `sleep` row, and no notification
+  arrives.
+- ROA14: hard power-off, then boot. At the next start, a `shutdown_or_crash` row appears and one
+  notification arrives.
+
 ## 3. Requirements on the desktop
 
 - **`LockedHint` must be set by the desktop.** GNOME, Plasma and niri set it natively;
@@ -1166,6 +1244,7 @@ the PC is unreachable (off, asleep, or Tailscale disconnected).
 | `camera_fps` | no | `5` | 1..=10; frames per second sent to the phone |
 | `camera_width` | no | `640` | `640` (source size, at most 640x480) or `320` (2x downscale); any other value → refused |
 | `camera_quality` | no | `70` | 50..=85; JPEG quality |
+| `offline_alerts` | no | `false` | TOML boolean; `true` records offline intervals and sends a back-online notification (section 2j); requires `push_notifications = true` (exit 78 otherwise) |
 | `battery_status` | no | `true` | TOML boolean; false disables every sysfs read (no battery line, `GET /api/battery` answers `disabled`, section 2g); any other type → refused |
 | `socket_path` | no | `$XDG_RUNTIME_DIR/soos-remote/remote.sock` | absolute, at most 107 bytes; `XDG_RUNTIME_DIR` unset or relative without `socket_path` → refused (no `/tmp` fallback) |
 
@@ -1190,6 +1269,7 @@ The service also refuses to start when its real or effective uid is 0.
 | `GET /api/alerts` | tailnet, or Funnel with a session (`403 login_required` otherwise): `200` the alerts view (section 2c); `{"state":"disabled",…}` while `password_alerts` is off |
 | `POST /api/alerts/ack` | no body; `X-Soos-Action: alerts-ack`, `X-Soos-Alerts-Epoch`, `X-Soos-Alerts-Through`: `200` the new view, `403 forbidden` (CSRF), `403 alerts_disabled`, `400 bad_request` (headers, or a `through` beyond the newest attempt), `429 rate_limited` (one per second), `409 stale_view`, `503 unavailable` |
 | `GET /api/battery` | tailnet, or Funnel with a session (`403 login_required` otherwise): `200 application/json` `{state, percent, charge, external_power}` (section 2g); `{"state":"disabled",…}` while `battery_status` is `false`; a reading at most 5 s old, or one bounded read |
+| `GET /api/offline` | tailnet, or Funnel with a session (`403 login_required` otherwise): `200 application/json` `{state, reason, network_monitor, intervals}` (section 2j); `state` is `disabled`, `active` or `unavailable` (`reason` `store_failed`), `network_monitor` is `unknown`, `active` or `unavailable`, `intervals` newest first as `{reason, start_unix_ms, end_unix_ms, duration_ms}` |
 | `GET /sw.js` | the service worker (public asset, `text/javascript`); it shows notifications and, on `pushsubscriptionchange` only, re-sends the renewed subscription once to `POST /api/push/subscribe`; the worker makes no request on push |
 | `GET /api/push` | tailnet, or Funnel with a session: `{state, reason, public_key, subscriptions, devices, last_delivery, sender}`; `{"state":"disabled",…}` while `push_notifications` is off |
 | `POST /api/push/subscribe` | `X-Soos-Action: push-subscribe`, the browser's subscription JSON (at most 2 KiB): `200 subscribed`, `400 bad_request` / `unsupported_push_service`, `403 forbidden` / `push_disabled`, `409 too_many_subscriptions`, `413 body_too_large`, `429 rate_limited` (one per second, shared with unsubscribe), `503 unavailable` / `store_unavailable` |
@@ -1366,6 +1446,17 @@ reason classes.
   stage is capped by `max-height: 70vh`; in full screen the box ignores the safe-area padding and `100vh` is the
   large viewport on mobile); pre-Baseline engines (Firefox ESR 115 included) are best effort; there is no
   automated cross-engine run yet (hardware rows RXB12–RXB20).
+- Offline history (section 2j): the notification comes after the fact; a PC kept offline is never
+  reported in real time (tiers 2 and 3). An outage shorter than 30 s, or one that starts and ends
+  between two 5 s readings, is not recorded. Wall times are as good as the PC's clock. After a
+  crash or a power loss, a `shutdown_or_crash` interval starts at the last heartbeat (up to 60 s
+  early). A nightly shutdown gives one `shutdown_or_crash` notification each morning. A laptop that
+  sleeps often fills the 32 rows with `sleep` rows. A notification not yet sent when the service
+  stops is lost (the interval stays in the history). A wired PC with the Wi-Fi radio off reports
+  an unplugged cable as `wifi_disabled`. A process of your UID can edit `remote-network.json`
+  (forged history, bounded to 32 rows and 8 KiB; false notifications bounded by the shared budget
+  of 20 per hour). The service reads 4 bus properties every 5 s (about 69 000 calls a day) and
+  writes the heartbeat at most once a minute.
 - The `bind` → `chmod 0600` window of the socket is closed by the `0700` parent directory and
   the unit's `UMask=0077`; the service must therefore be started through the unit (or with the
   same umask).
@@ -1379,8 +1470,11 @@ reason classes.
 - Any other public exposure path (Cloudflare Tunnel, Cloudflare Access, a custom domain, a
   reverse proxy): explored separately; it needs its own ADR before it may reach this socket.
 - **Lock/unlock-state notifications**, camera view notifications (removed 2026-10-07),
-  "monitoring lost" notifications, notification actions, and push hosts other than Apple,
-  Google and Mozilla (section 2d covers only failed-password alerts and the test notification).
+  real-time "monitoring lost" notifications (section 2j covers only the after-the-fact back-online
+  notification; the watchdog and the Android heartbeat need their own ADR), a "network changed"
+  notification, notification actions, and push hosts other than Apple,
+  Google and Mozilla (section 2d covers failed-password alerts and the test notification, section
+  2j the back-online notification).
 - Any recording, snapshot or still image of the **live camera** view (section 2f), audio,
   H.264/WebRTC or any other live camera transport, an on-screen indicator, any image decoder
   inside `soos-remote` (the daemon converts frames for it), and any embedding or evidence access.

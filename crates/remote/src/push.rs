@@ -4,6 +4,10 @@
 //! coalescing scheduler, the notification payload, the transport seam with its production
 //! Unix-socket client of `soos-push-sender`, the dispatcher task and the route helpers.
 //!
+//! Back-online notices (ADR 2026-10-13 "Offline History and Back-Online Push Notifications in
+//! `soos-remote`") share the scheduler's spacing and hourly budget with the alert summaries and
+//! are built from an [`OfflineNotice`] (enums and times) only.
+//!
 //! Privacy (O-2): a notification is built only from enums and counts through a fixed
 //! vocabulary; no journal text, no account name and never a typed password reaches it.
 //! Nothing here logs through a `tracing` macro: the five push audit lines are fixed-text
@@ -44,6 +48,7 @@ use crate::credentials::{
     StoreLock, STORE_LOCK_RETRY_MS,
 };
 use crate::journal::{AccountClass, BoxFuture, SourceClass};
+use crate::offline::{duration_label, OfflineNotice, OfflineNoticeSink, OfflineReason};
 use crate::server::UnixClock;
 use crate::webpush::{
     encode_subscription_keys, encrypt, parse_subscription_keys, JwtCache, UaKeys, VapidKey,
@@ -56,6 +61,7 @@ use crate::{
     PUSH_ROUTE_MIN_INTERVAL_MS, PUSH_TEST_MIN_INTERVAL_MS, PUSH_TEST_TOPIC, PUSH_TOPIC, PUSH_TTL_S,
     PUSH_URGENCY, STORE_LOCK_TIMEOUT_MS,
 };
+use crate::{OFFLINE_RETRY_DELAYS_MS, PUSH_OFFLINE_TOPIC};
 
 /// The rolling window of `PUSH_MAX_PER_HOUR`.
 const HOUR_MS: u64 = 3_600_000;
@@ -645,6 +651,24 @@ pub struct PushScheduler {
     pending: Option<Pending>,
     last_sent_ms: Option<u64>,
     sent: VecDeque<u64>,
+    /// The pending back-online notice (ADR 2026-10-13), sharing the spacing and hourly budget.
+    offline: Option<PendingNotice>,
+}
+
+/// The pending back-online notice and when it was first noted.
+#[derive(Debug, Clone, Copy)]
+struct PendingNotice {
+    notice: OfflineNotice,
+    first_noted_ms: u64,
+}
+
+/// A message due at the time of [`PushScheduler::take_due`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DueMessage {
+    /// A failed-password alert summary.
+    Alert(PushSummary),
+    /// A back-online notice (ADR 2026-10-13).
+    BackOnline(OfflineNotice),
 }
 
 impl PushScheduler {
@@ -685,11 +709,10 @@ impl PushScheduler {
         }
     }
 
-    /// When the pending summary may be sent; `None` without a pending summary.
-    #[must_use]
-    pub fn due_at(&self) -> Option<u64> {
-        let pending = self.pending.as_ref()?;
-        let mut due = pending.first_noted_ms.saturating_add(PUSH_COALESCE_MS);
+    /// The earliest send time of a message first noted at `first_noted_ms` under the shared
+    /// coalescing delay, spacing and hourly cap.
+    fn budget_due(&self, first_noted_ms: u64) -> u64 {
+        let mut due = first_noted_ms.saturating_add(PUSH_COALESCE_MS);
         if let Some(last) = self.last_sent_ms {
             due = due.max(last.saturating_add(PUSH_MIN_INTERVAL_MS));
         }
@@ -698,16 +721,18 @@ impl PushScheduler {
                 due = due.max(oldest.saturating_add(HOUR_MS));
             }
         }
-        Some(due)
+        due
     }
 
-    /// The pending summary when it is due at `now_ms` (the send is recorded).
-    pub fn take(&mut self, now_ms: u64) -> Option<PushSummary> {
-        let due = self.due_at()?;
-        if due > now_ms {
-            return None;
-        }
-        let pending = self.pending.take()?;
+    /// When the pending summary may be sent; `None` without a pending summary.
+    #[must_use]
+    pub fn due_at(&self) -> Option<u64> {
+        let pending = self.pending.as_ref()?;
+        Some(self.budget_due(pending.first_noted_ms))
+    }
+
+    /// Records one send at `now_ms` in the shared budget.
+    fn record_send(&mut self, now_ms: u64) {
         while self
             .sent
             .front()
@@ -721,7 +746,67 @@ impl PushScheduler {
         }
         self.sent.push_back(now_ms);
         self.last_sent_ms = Some(now_ms);
+    }
+
+    /// The pending summary when it is due at `now_ms` (the send is recorded).
+    pub fn take(&mut self, now_ms: u64) -> Option<PushSummary> {
+        let due = self.due_at()?;
+        if due > now_ms {
+            return None;
+        }
+        let pending = self.pending.take()?;
+        self.record_send(now_ms);
         Some(pending.summary)
+    }
+
+    /// Notes a back-online notice at monotonic `now_ms` (merged into a pending one, whose
+    /// first-noted time is kept).
+    pub fn note_offline(&mut self, notice: OfflineNotice, now_ms: u64) {
+        self.offline = Some(match self.offline {
+            Some(held) => PendingNotice {
+                notice: OfflineNotice::merge(&held.notice, &notice),
+                first_noted_ms: held.first_noted_ms,
+            },
+            None => PendingNotice {
+                notice,
+                first_noted_ms: now_ms,
+            },
+        });
+    }
+
+    /// When the pending back-online notice may be sent; `None` without one.
+    #[must_use]
+    pub fn offline_due_at(&self) -> Option<u64> {
+        let held = self.offline.as_ref()?;
+        Some(self.budget_due(held.first_noted_ms))
+    }
+
+    /// The next message due at `now_ms`, the send recorded in the shared budget. When both
+    /// are due, the one first noted earlier goes first (the alert summary wins ties).
+    pub fn take_due(&mut self, now_ms: u64) -> Option<DueMessage> {
+        let alert = self
+            .pending
+            .as_ref()
+            .filter(|_| self.due_at().is_some_and(|due| due <= now_ms))
+            .map(|p| p.first_noted_ms);
+        let notice = self
+            .offline
+            .as_ref()
+            .filter(|_| self.offline_due_at().is_some_and(|due| due <= now_ms))
+            .map(|p| p.first_noted_ms);
+        let alert_first = match (alert, notice) {
+            (Some(a), Some(n)) => a <= n,
+            (Some(_), None) => true,
+            (None, Some(_)) => false,
+            (None, None) => return None,
+        };
+        if alert_first {
+            self.take(now_ms).map(DueMessage::Alert)
+        } else {
+            let held = self.offline.take()?;
+            self.record_send(now_ms);
+            Some(DueMessage::BackOnline(held.notice))
+        }
     }
 }
 
@@ -780,7 +865,7 @@ fn counted(n: u32, singular: &str, plural: &str) -> String {
     }
 }
 
-fn render(payload: &Payload<'_>) -> Result<Vec<u8>, WebPushError> {
+fn render<T: Serialize>(payload: &T) -> Result<Vec<u8>, WebPushError> {
     let bytes = serde_json::to_vec(payload).map_err(|_| WebPushError::Encode)?;
     if bytes.len() > MAX_PUSH_PLAINTEXT_BYTES {
         return Err(WebPushError::PlaintextTooLarge);
@@ -875,6 +960,81 @@ pub fn test_payload(rp_id: &str) -> Result<Vec<u8>, WebPushError> {
             source: None,
             account: None,
             last_unix_ms: None,
+        },
+    })
+}
+
+#[derive(Serialize)]
+struct OfflinePayload<'a> {
+    web_push: u32,
+    notification: NotificationText<'a>,
+    soos: PayloadOffline,
+}
+
+#[derive(Serialize)]
+struct PayloadOffline {
+    v: u32,
+    kind: &'static str,
+    reason: Option<OfflineReason>,
+    intervals: u32,
+    first_start_unix_ms: u64,
+    last_end_unix_ms: u64,
+}
+
+fn offline_reason_label(reason: OfflineReason) -> &'static str {
+    match reason {
+        OfflineReason::NetworkLost => "network lost",
+        OfflineReason::WifiDisabled => "Wi-Fi turned off",
+        OfflineReason::Sleep => "sleep",
+        OfflineReason::ShutdownOrCrash => "shutdown or crash",
+    }
+}
+
+/// The Declarative Web Push JSON of a back-online notice (≤ `MAX_PUSH_PLAINTEXT_BYTES`), built
+/// only from the notice's enums and times through a fixed vocabulary (ADR 2026-10-13).
+///
+/// # Errors
+/// [`WebPushError::Encode`], [`WebPushError::PlaintextTooLarge`].
+pub fn back_online_payload(
+    notice: &OfflineNotice,
+    previews: PushPreviews,
+    rp_id: &str,
+) -> Result<Vec<u8>, WebPushError> {
+    let (title, body, reason) = match previews {
+        PushPreviews::Generic => (
+            "Update from your PC",
+            "Open soos for details".to_string(),
+            None,
+        ),
+        PushPreviews::Detailed => {
+            let duration = duration_label(notice.last_duration_ms);
+            let label = offline_reason_label(notice.reason);
+            let body = if notice.intervals <= 1 {
+                format!("Offline for {duration} ({label})")
+            } else {
+                format!(
+                    "Offline {} times, latest for {duration} ({label})",
+                    notice.intervals
+                )
+            };
+            ("Your PC is back online", body, Some(notice.reason))
+        }
+    };
+    render(&OfflinePayload {
+        web_push: DECLARATIVE_WEB_PUSH,
+        notification: NotificationText {
+            title,
+            body: &body,
+            navigate: format!("https://{rp_id}/"),
+            lang: "en",
+        },
+        soos: PayloadOffline {
+            v: PAYLOAD_VERSION,
+            kind: "back_online",
+            reason,
+            intervals: notice.intervals,
+            first_start_unix_ms: notice.first_start_unix_ms,
+            last_end_unix_ms: notice.last_end_unix_ms,
         },
     })
 }
@@ -1205,6 +1365,7 @@ struct UnsubscribeBody {
 #[derive(Clone, Copy)]
 enum Message {
     Alert(PushSummary),
+    BackOnline(OfflineNotice),
     Test,
 }
 
@@ -1217,10 +1378,20 @@ struct Retry {
     due_ms: u64,
 }
 
+/// A scheduled retry of one back-online notice for one subscription (ADR 2026-10-13).
+struct NoticeRetry {
+    endpoint: PushEndpoint,
+    notice: OfflineNotice,
+    /// Index into `OFFLINE_RETRY_DELAYS_MS` of the next retry after this one fails.
+    next: usize,
+    due_ms: u64,
+}
+
 /// Dispatcher-local state (never shared, never behind a mutex).
 #[derive(Default)]
 struct DispatchState {
     retries: Vec<Retry>,
+    notice_retries: Vec<NoticeRetry>,
     carry: Vec<(PushEndpoint, PushSummary)>,
     known: Vec<PushEndpoint>,
     jwt: JwtCache,
@@ -1255,6 +1426,7 @@ impl DispatchState {
         let known = &self.known;
         self.carry.retain(|(e, _)| known.contains(e));
         self.retries.retain(|r| known.contains(&r.endpoint));
+        self.notice_retries.retain(|r| known.contains(&r.endpoint));
     }
 }
 
@@ -1334,6 +1506,23 @@ impl PushRuntime {
             let now = push.now_ms();
             if let Ok(mut scheduler) = push.scheduler.lock() {
                 scheduler.note(attempt, now);
+                drop(scheduler);
+                push.wake.notify_one();
+            }
+        })
+    }
+
+    /// The back-online notice sink handed to the offline runtime: notes the notice in the
+    /// shared scheduler and wakes the dispatcher (no I/O, no await).
+    pub(crate) fn offline_sink(self: &Arc<Self>) -> OfflineNoticeSink {
+        let push = Arc::clone(self);
+        Arc::new(move |notice: OfflineNotice| {
+            if !push.is_active() {
+                return;
+            }
+            let now = push.now_ms();
+            if let Ok(mut scheduler) = push.scheduler.lock() {
+                scheduler.note_offline(notice, now);
                 drop(scheduler);
                 push.wake.notify_one();
             }
@@ -1598,6 +1787,10 @@ impl PushRuntime {
                 alert_payload(&summary, self.settings.previews, &self.settings.rp_id)?,
                 PUSH_TOPIC,
             ),
+            Message::BackOnline(notice) => (
+                back_online_payload(&notice, self.settings.previews, &self.settings.rp_id)?,
+                PUSH_OFFLINE_TOPIC,
+            ),
             Message::Test => (test_payload(&self.settings.rp_id)?, PUSH_TEST_TOPIC),
         };
         let payload = Zeroizing::new(payload);
@@ -1809,13 +2002,132 @@ impl PushRuntime {
         }
     }
 
-    fn next_wake(&self, state: &DispatchState) -> Option<u64> {
-        let summary = self.scheduler.lock().ok().and_then(|s| s.due_at());
-        let retry = state.retries.iter().map(|r| r.due_ms).min();
-        match (summary, retry) {
-            (Some(a), Some(b)) => Some(a.min(b)),
-            (a, b) => a.or(b),
+    /// Schedules the next retry of a back-online notice, or gives up (dropped, `failed`).
+    fn retry_notice(
+        &self,
+        state: &mut DispatchState,
+        endpoint: &PushEndpoint,
+        notice: OfflineNotice,
+        next: usize,
+        retry_after_s: Option<u32>,
+    ) {
+        match OFFLINE_RETRY_DELAYS_MS.get(next) {
+            Some(delay) => {
+                let wait = retry_after_s.map_or(*delay, |s| u64::from(s).saturating_mul(1000));
+                state.notice_retries.retain(|r| r.endpoint != *endpoint);
+                state.notice_retries.push(NoticeRetry {
+                    endpoint: endpoint.clone(),
+                    notice,
+                    next: next.saturating_add(1),
+                    due_ms: self.now_ms().saturating_add(wait),
+                });
+            }
+            None => self.record_failure(LastDelivery::Failed),
         }
+    }
+
+    /// Sends a back-online notice to `sub` (alert outcome table without carries).
+    async fn deliver_notice(
+        &self,
+        state: &mut DispatchState,
+        key: &VapidKey,
+        sub: &PushSubscription,
+        notice: OfflineNotice,
+        next: usize,
+    ) {
+        let Ok(request) = self.build_request(state, key, sub, Message::BackOnline(notice)) else {
+            self.record_failure(LastDelivery::Failed);
+            return;
+        };
+        match self.exchange(request).await {
+            Ok(reply) => {
+                self.sender_reachable();
+                match reply.outcome {
+                    Outcome::Delivered => self.record_delivered(),
+                    Outcome::Gone => self.remove_gone(&sub.endpoint).await,
+                    Outcome::Rejected | Outcome::Refused => {
+                        self.record_failure(LastDelivery::Rejected);
+                    }
+                    Outcome::Retry => {
+                        self.retry_notice(state, &sub.endpoint, notice, next, reply.retry_after_s);
+                    }
+                }
+            }
+            Err(error) => {
+                if error == TransportError::Unavailable {
+                    self.sender_unavailable();
+                }
+                self.retry_notice(state, &sub.endpoint, notice, next, None);
+            }
+        }
+    }
+
+    /// A due back-online notice: a pending notice retry of a subscription is cancelled and
+    /// merged in; deliveries are sequential.
+    async fn send_back_online(&self, state: &mut DispatchState, notice: OfflineNotice) {
+        let file = match self.store.load() {
+            Ok(Some(file)) => file,
+            Ok(None) | Err(_) => {
+                self.record_failure(LastDelivery::Failed);
+                return;
+            }
+        };
+        state.after_load(&file);
+        for sub in &file.subscriptions {
+            let effective = match state
+                .notice_retries
+                .iter()
+                .position(|r| r.endpoint == sub.endpoint)
+            {
+                Some(position) => {
+                    let cancelled = state.notice_retries.remove(position);
+                    OfflineNotice::merge(&cancelled.notice, &notice)
+                }
+                None => notice,
+            };
+            self.deliver_notice(state, &file.key, sub, effective, 0)
+                .await;
+        }
+    }
+
+    /// A due back-online notice retry.
+    async fn send_notice_retry(&self, state: &mut DispatchState, retry: NoticeRetry) {
+        let file = match self.store.load() {
+            Ok(Some(file)) => file,
+            Ok(None) | Err(_) => {
+                self.record_failure(LastDelivery::Failed);
+                return;
+            }
+        };
+        state.after_load(&file);
+        let Some(sub) = file
+            .subscriptions
+            .iter()
+            .find(|s| s.endpoint == retry.endpoint)
+        else {
+            return;
+        };
+        self.deliver_notice(state, &file.key, sub, retry.notice, retry.next)
+            .await;
+    }
+
+    fn next_wake(&self, state: &DispatchState) -> Option<u64> {
+        let scheduled =
+            self.scheduler
+                .lock()
+                .ok()
+                .and_then(|s| match (s.due_at(), s.offline_due_at()) {
+                    (Some(a), Some(b)) => Some(a.min(b)),
+                    (a, b) => a.or(b),
+                });
+        [
+            scheduled,
+            state.retries.iter().map(|r| r.due_ms).min(),
+            state.notice_retries.iter().map(|r| r.due_ms).min(),
+        ]
+        .into_iter()
+        .flatten()
+        .min()
     }
 }
 
@@ -1845,10 +2157,22 @@ pub(crate) async fn run_dispatcher(push: Arc<PushRuntime>) {
             push.send_retry(&mut state, retry).await;
             continue;
         }
-        let taken = push.scheduler.lock().ok().and_then(|mut s| s.take(now));
-        if let Some(summary) = taken {
-            push.send_summary(&mut state, summary).await;
+        if let Some(position) = state.notice_retries.iter().position(|r| r.due_ms <= now) {
+            let retry = state.notice_retries.remove(position);
+            push.send_notice_retry(&mut state, retry).await;
             continue;
+        }
+        let taken = push.scheduler.lock().ok().and_then(|mut s| s.take_due(now));
+        match taken {
+            Some(DueMessage::Alert(summary)) => {
+                push.send_summary(&mut state, summary).await;
+                continue;
+            }
+            Some(DueMessage::BackOnline(notice)) => {
+                push.send_back_online(&mut state, notice).await;
+                continue;
+            }
+            None => {}
         }
         match push.next_wake(&state) {
             Some(at) => {

@@ -129,6 +129,7 @@ async fn start(
         battery: BatteryConfig {
             enabled: wiring.enabled,
         },
+        offline: soos_remote::config::OfflineConfig::default(),
     };
     let journal = ScriptedJournal::new();
     let logind = MockSource::unlocked();

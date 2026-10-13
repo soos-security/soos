@@ -171,6 +171,7 @@ async fn start_push(env: &Env, journal: &ScriptedJournal, transport: &FakeTransp
         },
         camera: soos_remote::config::CameraConfig::default(),
         battery: soos_remote::config::BatteryConfig::default(),
+        offline: soos_remote::config::OfflineConfig::default(),
     };
     let alert_settings = AlertSettings {
         owner_login: Some(OwnerLogin::parse(OWNER).unwrap()),

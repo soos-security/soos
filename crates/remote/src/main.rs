@@ -27,6 +27,11 @@
 //! `soos-remote`"). The runtime shutdown is bounded by `RUNTIME_SHUTDOWN_TIMEOUT_MS`, so a
 //! blocking read stuck in a hung driver never delays the service stop past that bound.
 //!
+//! With `offline_alerts = true` (which requires `push_notifications = true`) the service also
+//! records offline intervals and sends a back-online push (ADR 2026-10-13 "Offline History and
+//! Back-Online Push Notifications in `soos-remote`"): the store `remote-network.json` next to
+//! the credential store, read-only NetworkManager and logind property reads.
+//!
 //! Subcommand output goes through `writeln!` on a locked stdout; nothing printed ever
 //! contains a credential id, a public key, a user handle or a Tailscale login. The enrollment
 //! code is printed exactly once, by `enroll-code`, and never logged.
@@ -51,12 +56,13 @@ use soos_remote::camera::CameraSettings;
 use soos_remote::camera_ipc::{DaemonPreviewClient, PreviewSource, PreviewSourceFactory};
 use soos_remote::config::{
     check_not_root, default_config_path, load_config, resolve_alerts_ack_path,
-    resolve_credentials_path, resolve_push_store_path, RemoteConfig,
+    resolve_credentials_path, resolve_network_store_path, resolve_push_store_path, RemoteConfig,
 };
 use soos_remote::credentials::{credential_hash, CredentialStore, StoreError};
 use soos_remote::enroll::{write_code_file, CodeFile, EnrollCode};
 use soos_remote::journal::{JournalctlSource, OwnerLogin};
 use soos_remote::logind::ZbusSessionSource;
+use soos_remote::offline::{OfflineClock, OfflineSettings, SystemOfflineClock, ZbusNetworkSource};
 use soos_remote::push::{
     subscription_line, PushSettings, PushStore, PushStoreError, UnixPushTransport,
 };
@@ -202,6 +208,32 @@ fn now_unix_s() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_secs())
+}
+
+/// Unix time in milliseconds (0 when the clock is before the epoch), the wall clock of the
+/// offline history (R3-1: read here, injected elsewhere).
+fn now_unix_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+}
+
+/// The offline history settings (`None` when `offline_alerts` is off, which the configuration
+/// allows only together with push, or when the store path is refused).
+fn offline_wiring(
+    config: &RemoteConfig,
+    credentials_path: &std::path::Path,
+) -> Option<OfflineSettings> {
+    if !(config.offline.enabled && config.push.enabled) {
+        return None;
+    }
+    match resolve_network_store_path(credentials_path) {
+        Ok(store_path) => Some(OfflineSettings { store_path }),
+        Err(err) => {
+            warn!(%err, "offline history path refused: offline alerts unavailable");
+            None
+        }
+    }
 }
 
 /// Writes `text` and a newline on a locked stdout.
@@ -516,6 +548,7 @@ async fn run(config: RemoteConfig, credentials_path: PathBuf, uid: u32) -> ExitC
         });
         (CameraSettings::from_config(&config.camera), factory)
     });
+    let offline = offline_wiring(&config, &credentials_path);
     let battery = if config.battery.enabled {
         Some(Arc::new(SysfsBattery::kernel()))
     } else {
@@ -534,6 +567,10 @@ async fn run(config: RemoteConfig, credentials_path: PathBuf, uid: u32) -> ExitC
     }
     if let Some(source) = battery {
         state = state.with_battery(source);
+    }
+    if let Some(settings) = offline {
+        let clock: Arc<dyn OfflineClock> = Arc::new(SystemOfflineClock::new(Arc::new(now_unix_ms)));
+        state = state.with_offline_alerts(settings, Arc::new(ZbusNetworkSource::new()), clock);
     }
     let state = Arc::new(state);
     match serve(listener, state, shutdown).await {

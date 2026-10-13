@@ -43,6 +43,11 @@
  * and mains presence only, from event: battery on the status stream only, shown with
  * textContent; hidden while the PC is unreachable or the stream is down.
  *
+ * Offline history (ADR 2026-10-13 "Offline History and Back-Online Push Notifications in
+ * soos-remote"): the PC lists when it was offline, as reason and times only, fetched from
+ * /api/offline with the status and shown with textContent in the phone's own time zone; the
+ * card is built at runtime (no markup id).
+ *
  * Browser support (ADR 2026-10-13 "Browser Support Policy for the soos-remote Web App"):
  * one pure probe, browserCapabilities(), says from feature detection only (never the
  * User-Agent) what this browser can do; every passkey, push, service worker, stream and
@@ -88,6 +93,15 @@ const PUSH_SUBSCRIBE_PATH = "/api/push/subscribe";
 const PUSH_UNSUBSCRIBE_PATH = "/api/push/unsubscribe";
 const PUSH_TEST_PATH = "/api/push/test";
 const SERVICE_WORKER_PATH = "/sw.js";
+const OFFLINE_PATH = "/api/offline";
+// Rows shown in the offline history card (the PC keeps at most 32).
+const OFFLINE_HISTORY_SHOWN = 10;
+const OFFLINE_REASONS = {
+  network_lost: "Network lost",
+  wifi_disabled: "Wi-Fi turned off",
+  sleep: "Sleep",
+  shutdown_or_crash: "Shutdown or crash",
+};
 // History rows shown (the server keeps at most 32).
 const ALERTS_HISTORY_SHOWN = 10;
 
@@ -231,6 +245,26 @@ const batteryNode = document.createElement("p");
 batteryNode.className = "detail battery";
 batteryNode.hidden = true;
 updatedNode.parentNode.insertBefore(batteryNode, updatedNode);
+
+// The "Offline history" card, built at run time before the push card (no markup id).
+const offlineSection = document.createElement("section");
+offlineSection.className = "card offline";
+offlineSection.hidden = true;
+offlineSection.setAttribute("aria-live", "polite");
+const offlineTitle = document.createElement("h2");
+const offlineSummary = document.createElement("p");
+offlineSummary.className = "detail";
+const offlineMonitor = document.createElement("p");
+offlineMonitor.className = "banner banner-warn";
+offlineMonitor.hidden = true;
+const offlineHistory = document.createElement("ul");
+offlineHistory.className = "offline-history table";
+offlineSection.appendChild(offlineTitle);
+offlineSection.appendChild(offlineSummary);
+offlineSection.appendChild(offlineMonitor);
+offlineSection.appendChild(offlineHistory);
+pushSection.parentNode.insertBefore(offlineSection, pushSection);
+setText(offlineTitle, "Offline history");
 
 let source = null;
 let statusPoll = null;
@@ -447,6 +481,8 @@ function showLogin(message) {
   enrollSection.hidden = true;
   alertsSection.hidden = true;
   alertsView = null;
+  offlineSection.hidden = true;
+  clearChildren(offlineHistory);
   pushSection.hidden = true;
   pushView = null;
   stopCameraView(null);
@@ -668,6 +704,7 @@ function fetchStatus(markUnreachableOnFailure) {
       if (view !== null) {
         accept(view);
         fetchAlerts();
+        fetchOffline();
       }
     })
     .catch(function () {
@@ -783,6 +820,111 @@ function fetchAlerts() {
     .then(renderAlerts)
     .catch(function () {
       // The status line already reports an unreachable PC.
+    });
+}
+
+// --- offline history ------------------------------------------------------------------
+
+function clearChildren(node) {
+  while (node.firstChild) {
+    node.removeChild(node.firstChild);
+  }
+}
+
+function dateTime(unixMs) {
+  if (typeof unixMs !== "number") {
+    return "--";
+  }
+  return new Date(unixMs).toLocaleString([], {
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+function durationText(ms) {
+  if (typeof ms !== "number" || ms < 60000) {
+    return "less than a minute";
+  }
+  const minutes = Math.floor(ms / 60000);
+  if (minutes < 60) {
+    return minutes + " min";
+  }
+  const hours = Math.floor(minutes / 60);
+  if (hours < 48) {
+    return minutes % 60 === 0 ? hours + " h" : hours + " h " + (minutes % 60) + " min";
+  }
+  return Math.floor(hours / 24) + " days";
+}
+
+function renderOffline(view) {
+  if (signedOut || view === null || typeof view !== "object") {
+    return;
+  }
+  if (view.state === "disabled") {
+    offlineSection.hidden = true;
+    return;
+  }
+  offlineSection.hidden = false;
+  clearChildren(offlineHistory);
+  if (view.state !== "active") {
+    setText(
+      offlineSummary,
+      view.reason === "store_failed"
+        ? "Offline alerts unavailable: the history file on the PC was refused"
+        : "Offline alerts unavailable"
+    );
+    offlineMonitor.hidden = true;
+    setText(offlineMonitor, " ");
+    return;
+  }
+  const rows = Array.isArray(view.intervals) ? view.intervals : [];
+  setText(
+    offlineSummary,
+    rows.length === 0 ? "No offline period recorded" : plural(rows.length, "offline period") + " recorded"
+  );
+  const unmonitored = view.network_monitor === "unavailable";
+  offlineMonitor.hidden = !unmonitored;
+  setText(
+    offlineMonitor,
+    unmonitored
+      ? "Network changes are not monitored on this PC (NetworkManager not found); sleep and shutdown are"
+      : " "
+  );
+  rows.slice(0, OFFLINE_HISTORY_SHOWN).forEach(function (row) {
+    const item = document.createElement("li");
+    const reason = Object.prototype.hasOwnProperty.call(OFFLINE_REASONS, row.reason)
+      ? OFFLINE_REASONS[row.reason]
+      : "Other";
+    setText(
+      item,
+      dateTime(row.start_unix_ms) +
+        " \u2013 " +
+        clockTime(row.end_unix_ms) +
+        " \u00b7 " +
+        durationText(row.duration_ms) +
+        " \u00b7 " +
+        reason
+    );
+    offlineHistory.appendChild(item);
+  });
+}
+
+function fetchOffline() {
+  if (signedOut) {
+    return;
+  }
+  fetch(OFFLINE_PATH, { method: "GET", cache: "no-store" })
+    .then(function (response) {
+      if (!response.ok) {
+        throw new Error("status " + response.status);
+      }
+      return response.json();
+    })
+    .then(renderOffline)
+    .catch(function () {
+      // The status line already reports an unreachable PC or an ended session.
     });
 }
 

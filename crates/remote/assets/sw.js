@@ -6,7 +6,8 @@
 // `soos-remote` Phone Companion and Web Push"). The worker makes no request on push. Every
 // push shows one notification (Safari revokes the permission after a push without a visible
 // notification); an absent or unreadable payload shows a generic text. A notification
-// carries counts and classes only, never a typed password. A tap focuses the open app or
+// carries counts and classes only, never a typed password; a back-online notice carries a
+// reason and a duration only (ADR 2026-10-13). A tap focuses the open app or
 // opens the start page of this origin.
 "use strict";
 
@@ -40,6 +41,9 @@ function readNotification(event) {
       }
       if (data && data.soos && data.soos.kind === "test") {
         tag = "soos-test";
+      }
+      if (data && data.soos && data.soos.kind === "back_online") {
+        tag = "soos-online";
       }
     }
   } catch (_) {
