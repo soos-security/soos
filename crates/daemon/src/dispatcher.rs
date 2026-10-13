@@ -21,6 +21,10 @@ use crate::limits::{
     AdmissionClass, ConnectionRejection, PeerConnectionLimiter, PeerLimitsConfig,
     AUTH_RESERVE_FIRST_REQUEST_TIMEOUT_MS,
 };
+use crate::lock_state::{
+    LockStateBoard, LockStateView, ScanEnd, LOCK_STATE_MAX_REQUESTS_PER_SEC,
+    LOCK_STATE_MAX_TRACKED_UIDS, LOCK_STATE_RATE_WINDOW_NS, LOCK_STATE_SESSION_CHECK_TIMEOUT_MS,
+};
 use crate::logging::short_request_id;
 use crate::peercred::{get_peer_credentials, verify_peer_credentials, PeerCredentials};
 use crate::pipeline::{
@@ -39,12 +43,12 @@ use crate::session_policy::{
 use crate::shutdown::BlockingTasks;
 use soos_camera_v4l::{Frame, PixelFormat};
 use soos_evidence_store::{EvidenceFrame, EvidencePixelFormat, EvidenceStore, FrameMetadata};
-use soos_policy::{ConsensusDecision, RateLimiter};
+use soos_policy::{ConsensusDecision, RateLimitConfig, RateLimiter};
 use soos_protocol::codec::{encode, encode_preview, CodecError};
 use soos_protocol::message::{decode_client_message, ClientMessage, FrameFormat};
 use soos_protocol::types::{
-    Event, EventKind, PreviewResponse, ReasonClass, Request, RequestId, RequestKind, Response,
-    StatusResponse, Verdict, CURRENT_VERSION, MAX_MESSAGE_SIZE,
+    Event, EventKind, LockStateResponse, PreviewResponse, ReasonClass, Request, RequestId,
+    RequestKind, Response, StatusResponse, Verdict, CURRENT_VERSION, MAX_MESSAGE_SIZE,
 };
 
 /// Validity window of a rendered `Response`: `expires = issued + RESPONSE_VALIDITY_NS`
@@ -214,6 +218,20 @@ pub struct ConnectionDispatcher {
     /// Tracked spoof and `PasswordFailed` evidence writes, drained at shutdown (GitHub #287,
     /// #310).
     evidence_writes: BlockingTasks,
+    /// Lock-screen state snapshot published by `Auth` scans and read by `LockState`
+    /// (GitHub #380); shared with the presence worker by `soos-daemon`.
+    lock_state: LockStateBoard,
+    /// Per-peer-UID `LockState` quota, separate from every other limiter (GitHub #380).
+    lock_state_limiter: tokio::sync::Mutex<RateLimiter>,
+}
+
+/// The `LockState` quota (`LOCK_STATE_MAX_REQUESTS_PER_SEC` per second per peer UID).
+fn lock_state_limiter() -> tokio::sync::Mutex<RateLimiter> {
+    tokio::sync::Mutex::new(RateLimiter::new(RateLimitConfig::new_with_capacity(
+        LOCK_STATE_MAX_REQUESTS_PER_SEC,
+        LOCK_STATE_RATE_WINDOW_NS,
+        LOCK_STATE_MAX_TRACKED_UIDS,
+    )))
 }
 
 impl ConnectionDispatcher {
@@ -251,6 +269,8 @@ impl ConnectionDispatcher {
             event_limiter,
             expected_embedding_model: None,
             evidence_writes: BlockingTasks::new(),
+            lock_state: LockStateBoard::new(),
+            lock_state_limiter: lock_state_limiter(),
         }
     }
 
@@ -292,6 +312,8 @@ impl ConnectionDispatcher {
             event_limiter,
             expected_embedding_model: None,
             evidence_writes: BlockingTasks::new(),
+            lock_state: LockStateBoard::new(),
+            lock_state_limiter: lock_state_limiter(),
         }
     }
 
@@ -319,6 +341,20 @@ impl ConnectionDispatcher {
     #[must_use]
     pub const fn evidence_writes(&self) -> &BlockingTasks {
         &self.evidence_writes
+    }
+
+    /// Publishes into (and answers `LockState` from) `board` instead of a private board, so
+    /// that the presence worker and the dispatcher share one snapshot (GitHub #380).
+    #[must_use]
+    pub fn with_lock_state_board(mut self, board: LockStateBoard) -> Self {
+        self.lock_state = board;
+        self
+    }
+
+    /// Returns the lock-state board (GitHub #380).
+    #[must_use]
+    pub const fn lock_state_board(&self) -> &LockStateBoard {
+        &self.lock_state
     }
 
     /// Overrides the monotonic clock function (used for simulation and test harnesses).
@@ -782,6 +818,14 @@ impl ConnectionDispatcher {
             });
         }
 
+        // Step 6d: Read-only lock-screen state (GitHub #380): answered from the snapshot,
+        // after wire validation and the SO_PEERCRED check, before any pipeline step.
+        if req.kind == RequestKind::LockState {
+            return self
+                .handle_lock_state_request(peer_uid, req.uid_hint, req.request_id)
+                .await;
+        }
+
         // Step 6b: Local-session policy (GitHub #160): a root peer must be tied to its own
         // active, local, seat-attached session of the target UID; fails closed.
         let session_check = if req.kind == RequestKind::Auth {
@@ -969,6 +1013,10 @@ impl ConnectionDispatcher {
                 }
             };
 
+            // 8d-0: Publish `Scanning` for the lock-screen state (GitHub #380). Every verdict
+            // rendered from here on settles it; an early `?` return drops it (abandoned).
+            let scan = self.lock_state.begin_scan(req.uid_hint, now_ns);
+
             // 8d-1: Notify activity to wake camera from auto-standby (current template only)
             pipe.camera.notify_activity();
 
@@ -993,6 +1041,7 @@ impl ConnectionDispatcher {
 
             if !wake_camera(&pipe.camera, max_wake).await {
                 warn!("Camera is not ready; rejecting auth request");
+                scan.finish(ScanEnd::NotRecognized, self.now_nanos().ok());
                 let encoded = self.build_response(
                     req.request_id,
                     Verdict::Unavailable,
@@ -1052,6 +1101,7 @@ impl ConnectionDispatcher {
                     reason,
                     completion_error,
                 } => {
+                    scan.finish(ScanEnd::NotRecognized, self.now_nanos().ok());
                     let encoded = self.build_response(req.request_id, verdict, reason)?;
                     return Ok(ResponseOutput {
                         encoded_response: encoded,
@@ -1061,6 +1111,7 @@ impl ConnectionDispatcher {
                 ConsensusRun::Preempted => {
                     // An interactive run is never preempted; fail closed regardless.
                     warn!("Interactive consensus reported preemption; failing closed");
+                    scan.finish(ScanEnd::NotRecognized, self.now_nanos().ok());
                     let encoded = self.build_response(
                         req.request_id,
                         Verdict::Unavailable,
@@ -1092,6 +1143,15 @@ impl ConnectionDispatcher {
                     decision.verdict()
                 }
             };
+
+            // 8f-1: Settle the lock-screen state: only `Allow` is `Recognized` (read as
+            // `Idle`); every other verdict collapses into `NotRecognized` (GitHub #380).
+            let scan_end = if final_verdict == Verdict::Allow {
+                ScanEnd::Recognized
+            } else {
+                ScanEnd::NotRecognized
+            };
+            scan.finish(scan_end, self.now_nanos().ok());
 
             // 8g: Opt-in spoof evidence (GitHub #261 / PAD-14): one snapshot of the capture
             // that vetoed the request, sealed off the response path.
@@ -1127,6 +1187,58 @@ impl ConnectionDispatcher {
             encoded_response: encoded,
             completion_error: None,
         })
+    }
+
+    /// Answers one `RequestKind::LockState` request (GitHub #380, ADR 2026-10-13
+    /// "Read-Only Lock-Screen State Channel").
+    ///
+    /// Runs after wire validation and the `SO_PEERCRED` check (an unprivileged peer only for
+    /// its own UID). Order: clock (error: neutral answer, nothing recorded), the per-peer-UID
+    /// quota (`ProtocolError`/`RateLimited` beyond it), the local seat session of `uid_hint`
+    /// (none: neutral answer), then the snapshot view. Read-only: no attempt, no wake, no
+    /// inference, no unlock.
+    async fn handle_lock_state_request(
+        &self,
+        peer_uid: u32,
+        uid_hint: u32,
+        request_id: RequestId,
+    ) -> Result<ResponseOutput, DaemonError> {
+        let Ok(now_ns) = self.now_nanos() else {
+            return encode_lock_state(LockStateView::neutral());
+        };
+        let within_quota = self
+            .lock_state_limiter
+            .lock()
+            .await
+            .check_and_record(peer_uid, now_ns)
+            .is_ok();
+        if !within_quota {
+            debug!(
+                peer_uid = peer_uid,
+                "Lock-screen request quota exceeded; refusing"
+            );
+            let encoded =
+                self.build_response(request_id, Verdict::ProtocolError, ReasonClass::RateLimited)?;
+            return Ok(ResponseOutput {
+                encoded_response: encoded,
+                completion_error: None,
+            });
+        }
+        // The logind sessions scan is blocking directory I/O: run it on the blocking pool under
+        // a bound; expiry or a failed job answers the neutral view.
+        let validator = self.session_validator.clone();
+        let local_seat = tokio::time::timeout(
+            Duration::from_millis(LOCK_STATE_SESSION_CHECK_TIMEOUT_MS),
+            tokio::task::spawn_blocking(move || validator.has_local_seat_session(uid_hint)),
+        )
+        .await;
+        let view = if matches!(local_seat, Ok(Ok(true))) {
+            self.lock_state.view(uid_hint, now_ns)
+        } else {
+            LockStateView::neutral()
+        };
+        debug!(peer_uid = peer_uid, "Served lock-screen snapshot");
+        encode_lock_state(view)
     }
 
     /// Seals the capture that vetoed a request as a presentation attack into the evidence
@@ -1469,6 +1581,19 @@ impl ConnectionDispatcher {
         debug!("Response delivered successfully");
         Ok(())
     }
+}
+
+/// Encodes a `LockStateResponse` for `view` (bounded by `MAX_MESSAGE_SIZE`).
+fn encode_lock_state(view: LockStateView) -> Result<ResponseOutput, DaemonError> {
+    let response = LockStateResponse {
+        version: CURRENT_VERSION,
+        state: view.state,
+        sequence: view.sequence,
+    };
+    Ok(ResponseOutput {
+        encoded_response: Zeroizing::new(encode(&response)?),
+        completion_error: None,
+    })
 }
 
 /// Steps 2-3 of a request: the 4-byte big-endian length prefix, the bounded size check

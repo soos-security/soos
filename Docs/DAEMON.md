@@ -217,7 +217,7 @@ lock_grace_ms = 3000
   written in this phase, so a cancelled request never leaves a partial frame), then a separate write
   with its own timeout.
 - `Auth` is one-shot: the daemon closes the connection after its `Response`. `Status`,
-  `PreviewFrame` and `Event` messages may share one connection.
+  `PreviewFrame`, `LockState` and `Event` messages may share one connection.
 - Inbound frames are bounded by `MAX_MESSAGE_SIZE` (4096 bytes); only outbound `PreviewResponse`
   frames may reach `MAX_PREVIEW_MESSAGE_SIZE` (2 MiB). The wire format is specified in
   `Docs/IPC_PROTOCOL.md`.
@@ -229,6 +229,7 @@ lock_grace_ms = 3000
 | `RequestKind::Status` | any peer admitted to the socket | wire validation only; returns `StatusResponse` (readiness booleans, PID, uptime; no biometric data) | `ProtocolError` on malformed request |
 | `RequestKind::Auth` | root peer for any UID, or an unprivileged peer for its own UID | wire validation, `SO_PEERCRED` UID versus `uid_hint`, local-session policy (ADR 2026-09-30 "Local Session Binding"), deadline, template model binding (a `Foreign` template is answered `Unavailable`/`ModelUnavailable` here, without an attempt or a camera wake; GitHub #298), rate limit, missing template, camera wake + PAD consensus + match | `ProtocolError`/`UidMismatch`, `Unavailable`, or `Deny`; never `Allow` on an error path |
 | `RequestKind::PreviewFrame` | root peer, or an allow-listed UID with `[preview] enabled = true` and an active local seat session (`soos-gui`, or `soos-remote` when `[preview] remote_view = true`) | wire validation, `SO_PEERCRED` UID versus `uid_hint`, `authorize_preview`, peer cgroup origin (once per connection, §1.5), `remote_view` for a `soos-remote.service` peer, local seat session check, per-UID rate limit | standard `Response` with `ProtocolError`/`UidMismatch`, zero pixel bytes |
+| `RequestKind::LockState` | root peer for any UID (diagnostics), or an unprivileged peer for its own UID (GitHub #380) | wire validation, `SO_PEERCRED` UID versus `uid_hint`, clock, per-peer-UID quota (`LOCK_STATE_MAX_REQUESTS_PER_SEC` = 8 per second, own limiter), local seat session of `uid_hint`, then the lock-state snapshot (`crates/daemon/src/lock_state.rs`, `Docs/IPC_PROTOCOL.md` §14). Never an attempt, a camera wake, an inference or an unlock | `ProtocolError`/`UidMismatch` or `RateLimited`; no session or clock error: `LockStateResponse { Idle, 0 }` |
 | `Event` (`PasswordFailed`) | root peer for any UID, any other peer for itself | target UID versus peer UID, per-peer event quota | dropped with a `warn`; events never get a response |
 | Presence auto-unlock (no message; daemon-internal, GitHub #323) | nobody: the daemon itself, for the owner of one locked local session | kill switch, logind snapshot (bound + `LockedHint`), lock grace and scan interval, template binding, account guard, lid/screen gates, PAM priority, rate-limit reserve, camera wake + PAD consensus + match, fresh logind re-check, fresh account check, kill-switch re-check, then `UnlockSession` (§6) | no unlock; the locker and its password path are untouched |
 
@@ -464,3 +465,36 @@ refuses `SetLockedHint` on another user's session). Any user able to hold more t
 sessions (for example over SSH) makes every tick `TooManySessions` and disables presence for
 everyone until they close (fail closed; PAM is unaffected). Locking while seated unlocks again
 after the grace period, by design.
+
+## 7. Lock-Screen State Snapshot (GitHub #380)
+
+`soos-daemon` creates one `LockStateBoard` (`crates/daemon/src/lock_state.rs`) and hands it to the
+dispatcher and to the presence worker (`with_lock_state_board`). The PAM `Auth` path publishes a scan
+after the attempt reservation and the template lookup, right before the camera wake; the presence
+worker publishes one after recording its attempt. `RequestKind::LockState` reads it (§3,
+`Docs/IPC_PROTOCOL.md` §14). The board is a `tokio::sync::watch` value, written without `.await` and
+without I/O (the read path runs its logind sessions scan on the blocking pool under
+`LOCK_STATE_SESSION_CHECK_TIMEOUT_MS`), holding per UID only scan counters and `CLOCK_MONOTONIC` stamps (at most
+`MAX_LOCK_STATE_UIDS` = 32 UIDs): no reason class, score, frame, embedding, template or session id,
+and it logs nothing.
+
+| Constant | Value | Meaning |
+|---|---|---|
+| `NOT_RECOGNIZED_REVEAL_FLOOR_MS` | 3240 (derived: camera wake 1200 + presence settle 1000 + decision budget 900 + write margin 50 + `REVEAL_FLOOR_MARGIN_MS` 90) | earliest visibility of any scan end after the scan start; the presence worker also holds its next scan until it (below) |
+| `REVEAL_FLOOR_MARGIN_MS` | 90 (`DEFAULT_INFERENCE_ESTIMATE_MS` 80 + `FRAME_POLL_INTERVAL_MS` 10) | slack for one inference finishing after its admission estimate |
+| `LOCK_STATE_SESSION_CHECK_TIMEOUT_MS` | 250 | bound of the blocking-pool sessions scan of one `LockState` request (expiry: neutral answer) |
+| `NOT_RECOGNIZED_HOLD_MS` | 3000 | a revealed `NotRecognized` then reads `Idle` |
+| `MAX_SCANNING_MS` | 10 000 | a scan still running reads `Idle` |
+| `LOCK_STATE_MAX_REQUESTS_PER_SEC` / `LOCK_STATE_RATE_WINDOW_NS` / `LOCK_STATE_MAX_TRACKED_UIDS` | 8 / 1 s / 64 | per-peer-UID `LockState` quota |
+
+None of them is configurable. Publishing never changes a verdict or an attempt; a dropped
+(abandoned) scan reads `Idle`.
+
+**Presence cadence after a failed scan** (candid review of 2026-10-13). After every presence scan
+that did not unlock, `PresenceWorker::run` waits until that scan's start plus
+`NOT_RECOGNIZED_REVEAL_FLOOR_MS` before its usual `LOCK_POLL_INTERVAL_MS` pause
+(`PresenceWorker::post_scan_hold`), so the next scan starts about floor + 1 s after the previous
+start whatever the previous end, and an early presentation-attack veto cannot be read from the scan
+cadence at the locked screen. Effect: with the defaults the retry cadence of a failing presence scan
+goes from "end + 1 s" (about 2 to 3.3 s) to about 4.24 s from start to start; an unlock is never
+delayed, PAM requests are unaffected, and `scan_interval` still applies on top.

@@ -368,6 +368,12 @@ mod portable_crates_contract;
 #[cfg(test)]
 mod ui_motion_spec_contract;
 
+/// Read-only lock-screen state channel: coarse `LockStateResponse`, three owner-approved
+/// states, non-biometric daemon snapshot, shared board, PAM untouched, fuzz coverage
+/// (GitHub #380, PR 1 of #352; rows LKS14–LKS16).
+#[cfg(test)]
+mod lock_state_contract;
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,

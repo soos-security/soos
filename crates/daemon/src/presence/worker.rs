@@ -30,6 +30,7 @@ use crate::error::DaemonError;
 use crate::inference::{
     InferenceGate, InferencePriority, RequestDeadline, RESPONSE_WRITE_MARGIN_MS,
 };
+use crate::lock_state::{LockStateBoard, ScanEnd, NOT_RECOGNIZED_REVEAL_FLOOR_MS, REVEAL_FLOOR_NS};
 use crate::pipeline::{
     classify_template, current_monotonic_nanos, current_monotonic_nanos_from_clock,
     PipelineComponents, TemplateModelBinding, DECISION_BUDGET_MS,
@@ -218,6 +219,10 @@ pub struct PresenceWorker<L: PresenceLogind, D: DisplayProbe, A: AccountGuard> {
     logind_down: bool,
     last_spoof_warning: Option<(SessionId, u64)>,
     shutdown: Option<watch::Receiver<bool>>,
+    /// Lock-screen state snapshot the scans publish into (GitHub #380).
+    lock_state: LockStateBoard,
+    /// Start (attempt stamp) of the last scan, anchoring the post-scan hold (GitHub #380).
+    last_scan_started_ns: Option<u64>,
 }
 
 impl<L: PresenceLogind, D: DisplayProbe, A: AccountGuard> std::fmt::Debug
@@ -265,6 +270,8 @@ impl<L: PresenceLogind, D: DisplayProbe, A: AccountGuard> PresenceWorker<L, D, A
             logind_down: false,
             last_spoof_warning: None,
             shutdown: None,
+            lock_state: LockStateBoard::new(),
+            last_scan_started_ns: None,
         }
     }
 
@@ -272,6 +279,14 @@ impl<L: PresenceLogind, D: DisplayProbe, A: AccountGuard> PresenceWorker<L, D, A
     #[must_use]
     pub fn with_expected_embedding_model(mut self, id: impl Into<String>) -> Self {
         self.expected_model = Some(id.into());
+        self
+    }
+
+    /// Publishes scan progress into `board` (shared with the dispatcher by `soos-daemon`;
+    /// GitHub #380). Without it the worker publishes into a private board.
+    #[must_use]
+    pub fn with_lock_state_board(mut self, board: LockStateBoard) -> Self {
+        self.lock_state = board;
         self
     }
 
@@ -296,12 +311,14 @@ impl<L: PresenceLogind, D: DisplayProbe, A: AccountGuard> PresenceWorker<L, D, A
             if *shutdown.borrow() {
                 break;
             }
-            let _ = self.tick().await;
+            let tick = self.tick().await;
             if *shutdown.borrow() {
                 break;
             }
+            let pause = Duration::from_millis(LOCK_POLL_INTERVAL_MS)
+                .saturating_add(self.post_scan_hold(&tick));
             tokio::select! {
-                () = tokio::time::sleep(Duration::from_millis(LOCK_POLL_INTERVAL_MS)) => {}
+                () = tokio::time::sleep(pause) => {}
                 changed = shutdown.changed() => {
                     if changed.is_err() {
                         break;
@@ -310,6 +327,34 @@ impl<L: PresenceLogind, D: DisplayProbe, A: AccountGuard> PresenceWorker<L, D, A
             }
         }
         debug!("Presence worker stopped");
+    }
+
+    /// How long the worker waits, on top of `LOCK_POLL_INTERVAL_MS`, before its next tick
+    /// (GitHub #380, candid review of 2026-10-13).
+    ///
+    /// After a scan that did not unlock, the worker holds until that scan's start plus
+    /// `NOT_RECOGNIZED_REVEAL_FLOOR_MS`, so the next scan starts at the same offset from the
+    /// previous start whatever the previous end was (an early presentation-attack veto is not
+    /// observable through the scan cadence at the locked screen). An unlock and a tick without a
+    /// scan wait nothing more. A clock failure waits the whole floor (bounded).
+    #[must_use]
+    pub fn post_scan_hold(&self, tick: &PresenceTick) -> Duration {
+        match tick {
+            PresenceTick::Skipped(_) | PresenceTick::Scanned(ScanOutcome::Unlocked { .. }) => {
+                Duration::ZERO
+            }
+            PresenceTick::Scanned(_) => {
+                let Some(started_ns) = self.last_scan_started_ns else {
+                    return Duration::ZERO;
+                };
+                let reveal_ns = started_ns.saturating_add(REVEAL_FLOOR_NS);
+                match (self.clock_fn)() {
+                    Ok(now_ns) => Duration::from_nanos(reveal_ns.saturating_sub(now_ns))
+                        .min(Duration::from_millis(NOT_RECOGNIZED_REVEAL_FLOOR_MS)),
+                    Err(_) => Duration::from_millis(NOT_RECOGNIZED_REVEAL_FLOOR_MS),
+                }
+            }
+        }
     }
 
     /// Whether the daemon asked the worker to stop.
@@ -615,7 +660,29 @@ impl<L: PresenceLogind, D: DisplayProbe, A: AccountGuard> PresenceWorker<L, D, A
             return self.skip(SkipReason::RateLimited);
         }
         self.tracker.mark_scan_started(&candidate.id, attempt_ns);
+        self.last_scan_started_ns = Some(attempt_ns);
+        let published = self.lock_state.begin_scan(candidate.entry.uid, attempt_ns);
         let outcome = self.scan(candidate).await;
+        // Lock-screen state (GitHub #380): only an unlock is `Recognized`; a preempted or
+        // stopped scan is abandoned; every other outcome collapses into `NotRecognized`.
+        let end = match &outcome {
+            ScanOutcome::Unlocked { .. } => Some(ScanEnd::Recognized),
+            ScanOutcome::Preempted | ScanOutcome::ShuttingDown => None,
+            ScanOutcome::NoMatch
+            | ScanOutcome::SpoofVetoed
+            | ScanOutcome::CameraUnavailable
+            | ScanOutcome::Aborted(_)
+            | ScanOutcome::SessionChanged
+            | ScanOutcome::AllowExpired
+            | ScanOutcome::UnlockFailed
+            | ScanOutcome::AccountRefused(_)
+            | ScanOutcome::KillSwitchEngaged
+            | ScanOutcome::LidClosed => Some(ScanEnd::NotRecognized),
+        };
+        match end {
+            Some(end) => published.finish(end, (self.clock_fn)().ok()),
+            None => drop(published),
+        }
         self.scanned(outcome)
     }
 

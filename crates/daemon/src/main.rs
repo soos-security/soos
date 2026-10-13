@@ -12,6 +12,7 @@ use tracing::{error, info, warn};
 use soos_daemon::config::DaemonConfig;
 use soos_daemon::dispatcher::ConnectionDispatcher;
 use soos_daemon::health::HealthState;
+use soos_daemon::lock_state::LockStateBoard;
 use soos_daemon::logging::init_logging;
 use soos_daemon::pipeline::{initialize_pipeline, warmed_inference_gate, EMBEDDING_MODEL_ID};
 use soos_daemon::presence::account::SystemAccountGuard;
@@ -127,12 +128,15 @@ async fn run() -> Result<Duration, Box<dyn std::error::Error>> {
     let presence_components = components.clone();
     let presence_gate = inference_gate.clone();
     let enforce_active_session = config.dispatcher.enforce_active_session;
+    // One lock-screen state board shared by the PAM path and the presence worker (GitHub #380).
+    let lock_state = LockStateBoard::new();
     let dispatcher = Arc::new(
         ConnectionDispatcher::with_pipeline(config.dispatcher, health.clone(), components)
             .with_inference_gate(inference_gate)
             .with_preview_config(config.preview)
             .with_peer_limits(config.peer_limits)
-            .with_expected_embedding_model(EMBEDDING_MODEL_ID),
+            .with_expected_embedding_model(EMBEDDING_MODEL_ID)
+            .with_lock_state_board(lock_state.clone()),
     );
 
     let (listener, socket_guard) = bind_socket(&config.socket).await?;
@@ -197,7 +201,8 @@ async fn run() -> Result<Duration, Box<dyn std::error::Error>> {
             presence_components,
             presence_gate,
         )
-        .with_expected_embedding_model(EMBEDDING_MODEL_ID);
+        .with_expected_embedding_model(EMBEDDING_MODEL_ID)
+        .with_lock_state_board(lock_state.clone());
         let worker_task = tokio::spawn(worker.run(presence_rx));
         let worker_abort = worker_task.abort_handle();
         // A dead worker never unlocks: a panic is logged once and never respawned.
