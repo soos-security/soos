@@ -513,8 +513,27 @@ soos Brand Direction Applied to the `soos-remote` Web App" in `AI/DECISIONS.md`)
   least one registered device, not that this phone receives alerts, so `#push-state` (text) stays
   the only statement of the push state.
 - **Accessibility.** Text contrast at least 4.5:1 in both themes, a 3 px focus ring for keyboard
-  focus, 48 px buttons and 44 px links, safe-area insets on all sides, no motion under
-  `prefers-reduced-motion`, zoom kept.
+  focus, 48 px buttons and 44 px links, safe-area insets on all sides, reduced motion under
+  `prefers-reduced-motion` (below), zoom kept.
+- **Motion** (ADR "[2026-10-13] Motion System for soos-gui and soos-remote", normative document
+  `Docs/UI_MOTION.md`; the motion itself lands with `feat/remote-motion`, after the owner approves the
+  prototype `Docs/prototypes/ui_motion_prototype.html`). Motion only explains a state change: the
+  state word re-enters, the tile and dot colours cross-fade, the pink star turns 45° on a spring when
+  the PC is confirmed unlocked and back when it locks, buttons press and release on the spring, a
+  pending star ticks inside `Lock now` / `Unlock now` while the request waits (at most the existing
+  5 s confirmation window), revealed cards rise 6 px, banners slide 8 px, lists stagger on their first
+  render only. The tokens (`--t-fast` 120 ms unchanged, `--t-short`, `--t-medium`, `--t-long`,
+  `--t-spring`, exit tokens at 0.7 ×, `--ease-standard`, `--ease-enter`, `--ease-exit`,
+  `--ease-spring`) mirror `crates/gui/src/theme.rs`. Only `transform` and `opacity` move, plus colour
+  cross-fades between role tokens: still no gradient and no decorative shadow. The state text,
+  `aria-live` regions, `.state-*` / `data-state` and `disabled` change first, on the same frame; the
+  page never shows "Unlocked" before the PC confirms, and the unlock confirmation stays the native
+  dialog plus the passkey. `app.js` only toggles classes (`is-pending`, `stagger-once`) and, for the
+  camera full-screen overlay on phones without element fullscreen, calls `document.startViewTransition`
+  when the browser has it. Under `prefers-reduced-motion` every animation and transform is removed,
+  only opacity and colour fades of at most 120 ms remain, and `startViewTransition` is skipped.
+  Engines without `linear()`, `@starting-style` or View Transitions (section 2i) get a
+  `cubic-bezier` spring fallback or today's instant change; no polyfill.
 - **Icons.** `icon.svg` (also the favicon) is the owner's star mark. `apple-touch-icon.png`
   (180 x 180, opaque RGB, deterministic bytes) is generated from it on a developer machine:
 

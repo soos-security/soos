@@ -352,3 +352,16 @@ same frame can read the new measurement and show or hide a tile above the card, 
 content runs in an explicit id scope (`widgets::card_scope_id`: the parent's stable id and the
 card's `id_salt`, never the parent's auto-id counter), so its widget ids never shift between
 passes (no "Widget rect changed id between passes" warning, no lost hover or scroll state).
+
+### 5.5 Motion
+
+Motion is specified in [`UI_MOTION.md`](UI_MOTION.md) (ADR "[2026-10-13] Motion System for soos-gui
+and soos-remote") and lands with `feat/gui-motion` after the owner approves the prototype
+`Docs/prototypes/ui_motion_prototype.html`. Today the GUI animates only the progress bar (0.25 s) and
+the header switch (0.15 s) and shows `egui::Spinner`s. The specification adds the duration, easing and
+spring tokens to `theme.rs`, a pure `motion.rs` (closed-form spring, cubic-bezier easings), a sliding
+tab indicator, a spring daemon switch, card, banner and camera-status cross-fades, and the pink-star
+pending indicator in place of the spinners. The face overlay is never interpolated. Reduced motion
+comes from `--reduce-motion`, then `SOOS_REDUCE_MOTION`, then the XDG desktop portal (read once with a
+200 ms deadline off the UI thread); motion code requests no repaint once every animation has settled.
+The GUI dark variant is out of scope.

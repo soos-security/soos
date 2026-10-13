@@ -360,6 +360,14 @@ mod remote_cross_browser_contract;
 #[cfg(all(test, unix))]
 mod portable_crates_contract;
 
+/// Motion specification of `soos-gui` and `soos-remote`: ADR, token table, spring and easing
+/// mathematics (overshoot at most 4 %), self-contained on-brand HTML prototype, reduced-motion
+/// sources and budgets, documentation pointers (GitHub #377 = PR 1 of #358, ADR 2026-10-13
+/// "Motion System for soos-gui and soos-remote"; spec AI/architect_spec_ui_motion.md §8; rows
+/// UIM1-UIM6).
+#[cfg(test)]
+mod ui_motion_spec_contract;
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,
