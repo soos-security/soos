@@ -399,6 +399,14 @@ mod setup_contract;
 #[cfg(all(test, unix))]
 mod system_onnxruntime_contract;
 
+/// README assets: every README image resolves under `Docs/assets/` with alt text, every asset
+/// is listed in `Docs/assets/MANIFEST.toml` with a known generator and a matching SHA-256,
+/// size budget, no metadata or animation, dev-only and hardware-free capture tooling (GitHub
+/// #381, PR 1 of #356; ADR 2026-10-13 "README Assets Are Generated From Synthetic Data, Never
+/// Hand-Edited"; spec AI/architect_spec_readme_capture.md; rows RAC10-RAC16).
+#[cfg(all(test, unix))]
+mod readme_assets_contract;
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,

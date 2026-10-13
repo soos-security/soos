@@ -264,6 +264,9 @@ Visual design system: rows GUX1–GUX13, `crates/gui/tests/theme_tests.rs` and
 `crates/gui/tests/brand_layout_tests.rs`. Frame pacing and stable card ids: rows GFP1–GFP3,
 `crates/gui/tests/ipc_preview_cadence_tests.rs`, `crates/gui/tests/worker_pacing_tests.rs` and
 `crates/gui/tests/card_id_stability_tests.rs`.
+README screenshots: rows RAC1–RAC6, `crates/gui/tests/readme_snapshots.rs` (dev-only
+`readme-capture` feature; synthetic scenes from `soos_gui::app::capture`, headless CPU rendering,
+drift check against `Docs/assets/screenshots/gui-*.png`; see [README_ASSETS.md](README_ASSETS.md)).
 
 ## 5. Visual Design System (brand redesign, walkthrough 183)
 
