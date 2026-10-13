@@ -1060,6 +1060,112 @@ lists the 10 newest intervals with start, end, duration and reason.
 - ROA14: hard power-off, then boot. At the next start, a `shutdown_or_crash` row appears and one
   notification arrives.
 
+## 2j. Native Android app (Kotlin, first version)
+
+A native Android app (ADR 2026-10-13 "Native Android App for `soos-remote` (Kotlin and Jetpack
+Compose)", GitHub #382, first PR of #357) is an alternative to the web app: each user chooses.
+This first version shows the PC status, locks the PC and signs in over Funnel with a passkey.
+Unlock, the live camera view, push notifications and alerts stay in the web app for now. The
+app is sideloaded only (no store) and its application id is `org.soos.remote` (owner to confirm).
+
+**What the app does.**
+
+- **PC address.** The settings screen accepts only `https://<pc>.<tailnet>.ts.net`, the same
+  rule as `rp_id`: HTTPS, no port, no path, no user name.
+- **Status and lock.** Over the tailnet (Tailscale app on, a login in `allowed_logins`), the app
+  reads `GET /api/status` and calls `POST /api/lock` like the web page. Each request carries
+  `Origin: https://<rp_id>` and the route's `X-Soos-Action`.
+- **Sign-in over Funnel.** The app uses Android Credential Manager (Android 14 or later, no
+  Google Play services library in the app). It runs the existing login ceremony: login options,
+  then the passkey prompt with user verification, then login verify. The server still uses the
+  discoverable flow and never names a passkey to an anonymous client. The app remembers the id
+  of the passkey from its last successful sign-in and names it on the next one, so Android goes
+  straight to the fingerprint, face or screen-lock prompt. Google Password Manager is the
+  provider to validate first; Proton Pass and other providers are best effort.
+- **Session.** The session cookie is kept in memory only and lost when the app process ends.
+  The app never logs anything. Its storage is excluded from backups and device transfer.
+
+**Server binding (opt-in, needed for the Funnel sign-in).** A passkey used by a native app
+carries the origin `android:apk-key-hash:<base64url SHA-256 of the signing certificate>`.
+Android also requires the site to vouch for the app at `/.well-known/assetlinks.json`. Add this
+table at the **end of `remote.toml`**: TOML puts every key written after a table header inside
+that table, and an unknown key there is refused.
+
+```toml
+[android]
+package = "org.soos.remote"
+sha256_cert_fingerprints = ["AA:BB:...:FF"]   # 1 or 2 entries, upper-case, 32 pairs
+```
+
+The table requires `rp_id` and `allow_funnel = true`. The login is Funnel-only, and Google's
+Digital Asset Links check needs the public Funnel host. With the table, `soos-remote` does two
+more things:
+
+- It serves `GET|HEAD /.well-known/assetlinks.json`: one statement with the single relation
+  `delegate_permission/common.get_login_creds`, reachable anonymously like the page's assets.
+- It accepts the app origin for the **login** ceremony only. Unlock, the camera view and
+  passkey registration still require the web origin.
+
+Without the table nothing changes: the path answers `404`, exactly like any unknown path. An
+invalid table stops the service at start-up with exit status 78. Nothing about the table is
+logged.
+
+**Signing key (accepted risk).** The key whose fingerprint is listed becomes a login trust
+anchor. Whoever holds that private key, and gets a matching APK onto a phone where you then pass
+the passkey prompt, receives a Funnel web session: status, events, lock, alerts, push and
+battery, but no unlock and no camera.
+
+- Use a **dedicated** key. Never use the default `~/.android/debug.keystore` (its password is
+  `android`) or any CI key. Create one with
+  `keytool -genkeypair -keystore ~/soos-android.jks -alias soos -keyalg EC -groupname secp256r1 -validity 3650`.
+- Keep the key outside the repository. `*.jks`, `*.keystore`, `keystore.properties` and
+  `local.properties` are git-ignored and rejected by `scripts/secret_scan.sh`.
+- Read the fingerprint with `keytool -list -v -keystore ~/soos-android.jks -alias soos`
+  (the `SHA256:` line is already in the `AA:BB:..` form), or with
+  `apksigner verify --print-certs app.apk`, then upper-case it and add a `:` between each pair.
+- **Key rotation:** list the new fingerprint next to the old one (two entries), install the
+  newly signed app, then remove the old entry.
+- **Switch the binding off:** remove the table and restart the unit. Passkeys are bound to
+  `rp_id`, not to the app, so they keep working in the browser.
+
+**Build (owner).** Use `scripts/android_build.sh` on a machine with a JDK 17 and the Android
+SDK (`ANDROID_HOME`). It downloads Gradle 8.14.5, checks its SHA-256 and runs the debug build,
+the unit tests and lint with strict dependency verification. Gradle signs
+`android/app/build/outputs/apk/debug/app-debug.apk` with the default debug key. Re-sign it with
+your dedicated key before you install it:
+`apksigner sign --ks ~/soos-android.jks --ks-key-alias soos app-debug.apk` (`apksigner` is in the
+SDK build tools). Release signing is a later PR. The debug APK is `debuggable`: with USB debugging
+enabled, `adb` can inspect it. Install it with `adb install` or a file transfer,
+grant "Install unknown apps" to the file manager only, and revoke it afterwards.
+
+**CI and dependency verification.** The `Android (debug build)` job
+(`.github/workflows/android.yml`) runs only when `android/`, its build script or the workflow
+change. It is not part of `CI Success`, but `scripts/pr_loop.sh` blocks a pull request that
+touches those paths while the job fails. The first run happens while
+`android/gradle/verification-metadata.xml` lists no component:
+
+1. The run generates the SHA-256 metadata, uploads it as the artifact
+   `android-verification-metadata`, and **fails**.
+2. Review the file (every dependency comes from Google Maven, Maven Central or the Gradle Plugin
+   Portal) and commit it on the branch (trust on first use).
+3. Re-run the candid review for the new head. Never push with `--no-verify`.
+4. Note the run id in the pull request.
+
+After that, every run is strict. To regenerate after a dependency change, empty the component
+list again, or run `scripts/android_build.sh bootstrap` locally. The file is generated on Linux
+x86_64, so platform-specific entries for other systems may be missing.
+
+**Owner hardware check (matrix ANA14–ANA16).**
+
+1. Install the debug APK signed with the dedicated key. The launcher shows the adaptive soos icon
+   (themed icons OK), with blue system bars.
+2. Over the tailnet, status and lock work.
+3. With `[android]` configured and Funnel on, sign in from the app with fingerprint or screen
+   lock (record the passkey provider used). The second sign-in goes straight to the biometric
+   prompt.
+4. Over Funnel, status and lock work after sign-in.
+5. The web app and the iPhone home-screen app still work.
+
 ## 3. Requirements on the desktop
 
 - **`LockedHint` must be set by the desktop.** GNOME, Plasma and niri set it natively;
@@ -1246,6 +1352,7 @@ the PC is unreachable (off, asleep, or Tailscale disconnected).
 | `camera_quality` | no | `70` | 50..=85; JPEG quality |
 | `offline_alerts` | no | `false` | TOML boolean; `true` records offline intervals and sends a back-online notification (section 2j); requires `push_notifications = true` (exit 78 otherwise) |
 | `battery_status` | no | `true` | TOML boolean; false disables every sysfs read (no battery line, `GET /api/battery` answers `disabled`, section 2g); any other type → refused |
+| `[android]` | no | absent (no binding) | table at the end of the file: `package` (Android application id, at most 128 bytes) and `sha256_cert_fingerprints` (1 or 2 upper-case `AA:BB:..` SHA-256 digests); requires `rp_id` and `allow_funnel = true`; serves `/.well-known/assetlinks.json` and accepts the app origin for the login ceremony (section 2j) |
 | `socket_path` | no | `$XDG_RUNTIME_DIR/soos-remote/remote.sock` | absolute, at most 107 bytes; `XDG_RUNTIME_DIR` unset or relative without `socket_path` → refused (no `/tmp` fallback) |
 
 A missing file, an unknown key or an invalid value exits with status 78 (`EX_CONFIG`), which the
@@ -1270,6 +1377,7 @@ The service also refuses to start when its real or effective uid is 0.
 | `POST /api/alerts/ack` | no body; `X-Soos-Action: alerts-ack`, `X-Soos-Alerts-Epoch`, `X-Soos-Alerts-Through`: `200` the new view, `403 forbidden` (CSRF), `403 alerts_disabled`, `400 bad_request` (headers, or a `through` beyond the newest attempt), `429 rate_limited` (one per second), `409 stale_view`, `503 unavailable` |
 | `GET /api/battery` | tailnet, or Funnel with a session (`403 login_required` otherwise): `200 application/json` `{state, percent, charge, external_power}` (section 2g); `{"state":"disabled",…}` while `battery_status` is `false`; a reading at most 5 s old, or one bounded read |
 | `GET /api/offline` | tailnet, or Funnel with a session (`403 login_required` otherwise): `200 application/json` `{state, reason, network_monitor, intervals}` (section 2j); `state` is `disabled`, `active` or `unavailable` (`reason` `store_failed`), `network_monitor` is `unknown`, `active` or `unavailable`, `intervals` newest first as `{reason, start_unix_ms, end_unix_ms, duration_ms}` |
+| `GET /.well-known/assetlinks.json` | public (also anonymous over Funnel): `404` exactly like an unknown path unless `[android]` is configured; then `200 application/json` with one Digital Asset Links statement (`delegate_permission/common.get_login_creds`, the package and its certificate digests), `HEAD` the same head, `405` for other methods (section 2j) |
 | `GET /sw.js` | the service worker (public asset, `text/javascript`); it shows notifications and, on `pushsubscriptionchange` only, re-sends the renewed subscription once to `POST /api/push/subscribe`; the worker makes no request on push |
 | `GET /api/push` | tailnet, or Funnel with a session: `{state, reason, public_key, subscriptions, devices, last_delivery, sender}`; `{"state":"disabled",…}` while `push_notifications` is off |
 | `POST /api/push/subscribe` | `X-Soos-Action: push-subscribe`, the browser's subscription JSON (at most 2 KiB): `200 subscribed`, `400 bad_request` / `unsupported_push_service`, `403 forbidden` / `push_disabled`, `409 too_many_subscriptions`, `413 body_too_large`, `429 rate_limited` (one per second, shared with unsubscribe), `503 unavailable` / `store_unavailable` |
@@ -1460,6 +1568,11 @@ reason classes.
 - The `bind` → `chmod 0600` window of the socket is closed by the `0700` parent directory and
   the unit's `UMask=0077`; the service must therefore be started through the unit (or with the
   same umask).
+- Native Android app (section 2j): the listed signing key is a login trust anchor (accepted
+  risk); the session cookie lives in the app process only; the first Gradle verification
+  metadata is trusted on first use; the debug APK is debuggable; Credential Manager providers
+  other than Google Password Manager are best effort; the Digital Asset Links check needs the
+  public Funnel host.
 
 ## 9. Out of scope (each needs its own ADR)
 
@@ -1480,7 +1593,7 @@ reason classes.
   inside `soos-remote` (the daemon converts frames for it), and any embedding or evidence access.
 - Battery time-to-empty or time-to-full, battery health or cycle count, peripheral batteries
   (`scope=Device`), low-battery notifications, any write to sysfs, UPower.
-- A native Android app, FCM direct API keys, Edge desktop push (`*.notify.windows.com`; the page says so,
+- Features of the native Android app beyond its first version (section 2j: unlock, camera, push, Keystore device key and release signing are later PRs under the ADR of 2026-10-13; the first version is no longer out of scope), FCM direct API keys, Edge desktop push (`*.notify.windows.com`; the page says so,
   section 2i), Android Shortcuts/Tasker integration (pointer in section 2h only).
 - System-wide packaging (`install.sh`, deb/rpm/Arch): deferred until the owner approves the
   merge; `scripts/install_remote.sh` is the only installer.

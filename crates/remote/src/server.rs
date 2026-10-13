@@ -94,7 +94,7 @@ use crate::camera_slot::{SlotError, SlotPhase, ViewOwner, ViewToken};
 use crate::challenge::{
     ChallengeBinding, ChallengeError, ChallengePurpose, PendingRegistration, Taken,
 };
-use crate::config::RemoteConfig;
+use crate::config::{AndroidAppConfig, RemoteConfig};
 use crate::credentials::{
     allow_credentials, CredentialStore, PasskeyFile, PasskeyRecord, StoreError, STORE_LOCK_RETRY_MS,
 };
@@ -112,7 +112,7 @@ use crate::push::{run_dispatcher, PushRuntime, PushSettings, PushTransport, Push
 use crate::routes::{
     accepts_body, allow_header, camera_stream_token, check_alerts_ack_csrf, check_auth_csrf,
     check_camera_csrf, check_lock_csrf, check_push_csrf, check_unlock_csrf, is_funnel_public,
-    parse_alerts_ack_headers, route, Route,
+    parse_alerts_ack_headers, route, Route, ASSET_LINKS_PATH,
 };
 use crate::session::{select_session, SessionProps};
 use crate::status::{status_from, view_changed, Reading, StatusView};
@@ -183,6 +183,7 @@ pub struct ServerState<S: SessionSource> {
     camera: Option<(CameraSettings, PreviewSourceFactory)>,
     battery: Option<Arc<dyn BatterySource>>,
     offline: Option<OfflineWiring>,
+    android: Option<AndroidAppConfig>,
 }
 
 impl<S: SessionSource> ServerState<S> {
@@ -207,6 +208,7 @@ impl<S: SessionSource> ServerState<S> {
             camera: None,
             battery: None,
             offline: None,
+            android: None,
         }
     }
 
@@ -218,6 +220,14 @@ impl<S: SessionSource> ServerState<S> {
         if self.config.camera.enabled {
             self.camera = Some((settings, factory));
         }
+        self
+    }
+
+    /// Binds the native Android app of the `[android]` table (ADR 2026-10-13): the Digital
+    /// Asset Links route and the app origin of the login ceremony. Ignored without `rp_id`.
+    #[must_use]
+    pub fn with_android_app(mut self, app: AndroidAppConfig) -> Self {
+        self.android = Some(app);
         self
     }
 
@@ -402,6 +412,8 @@ struct Shared<S: SessionSource> {
     capacity: Capacity,
     /// The relying party (`None` when `rp_id` is not configured).
     rp: Option<RelyingParty>,
+    /// The prebuilt `assetlinks.json` body (`None` without `rp_id` or `[android]`).
+    asset_links: Option<Vec<u8>>,
     /// Failed-password alerts (`None` when `password_alerts` is off).
     alerts: Option<Arc<AlertsRuntime>>,
     /// Web Push (`None` when `push_notifications` is off or not wired).
@@ -444,7 +456,20 @@ impl<S: SessionSource> Shared<S> {
                     .map(|path| CredentialStore::new(path, state.file_owner_uid)),
             )),
             capacity: Capacity::new(),
-            rp: state.config.auth.rp_id.as_deref().map(RelyingParty::new),
+            rp: state.config.auth.rp_id.as_deref().map(|rp_id| {
+                let rp = RelyingParty::new(rp_id);
+                match &state.android {
+                    Some(app) => rp.with_android_app(app.package(), app.cert_fingerprints()),
+                    None => rp,
+                }
+            }),
+            asset_links: state
+                .config
+                .auth
+                .rp_id
+                .as_ref()
+                .and(state.android.as_ref())
+                .map(AndroidAppConfig::asset_links_json),
             camera: Arc::new(match &state.camera {
                 Some((settings, factory)) => {
                     CameraRuntime::new(*settings, Some(Arc::clone(factory)))
@@ -1271,7 +1296,9 @@ async fn handle_connection<S: SessionSource>(
     let mut session = None;
     if class == PathClass::Funnel {
         let touch = match resolved {
-            Route::Asset(_) | Route::NotFound | Route::MethodNotAllowed => Touch::Keep,
+            Route::Asset(_) | Route::AssetLinks | Route::NotFound | Route::MethodNotAllowed => {
+                Touch::Keep
+            }
             _ => Touch::Refresh,
         };
         session = shared.validate_session(presented, touch).await;
@@ -1384,6 +1411,7 @@ async fn handle_connection<S: SessionSource>(
         Route::CameraStart => camera_start(&shared, &ctx, &mut stream).await,
         Route::CameraStop => Some(camera_stop(&shared, &ctx)),
         Route::CameraStream => camera_stream(&shared, &ctx, &mut stream).await,
+        Route::AssetLinks => Some(asset_links_response(&shared, method)),
         Route::NotFound => Some(Response::json(404, "not_found")),
         Route::MethodNotAllowed => {
             let mut response = Response::json(405, "method_not_allowed");
@@ -1396,6 +1424,30 @@ async fn handle_connection<S: SessionSource>(
     match response {
         Some(response) => answer(&mut stream, method, &response, class, &mut permits).await,
         None => debug!("connection closed without a response"),
+    }
+}
+
+/// `/.well-known/assetlinks.json` (ADR 2026-10-13): without an `[android]` binding the exact
+/// unknown-path `404`; with it, the prebuilt statement on `GET`/`HEAD`, `405` otherwise. Never
+/// a cookie, never a log line about the binding.
+fn asset_links_response<S: SessionSource>(shared: &Shared<S>, method: Method) -> Response {
+    let Some(body) = shared.asset_links.as_ref() else {
+        return Response::json(404, "not_found");
+    };
+    match method {
+        Method::Get | Method::Head => Response {
+            status: 200,
+            content_type: "application/json",
+            body: body.clone(),
+            extra_headers: Vec::new(),
+        },
+        Method::Post | Method::Other => {
+            let mut response = Response::json(405, "method_not_allowed");
+            response
+                .extra_headers
+                .push(("Allow", allow_header(ASSET_LINKS_PATH).to_string()));
+            response
+        }
     }
 }
 

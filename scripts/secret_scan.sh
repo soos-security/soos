@@ -141,8 +141,10 @@ scan_target() {
         case "$lower" in
             *.enc|master.key|evidence.key)
                 report "Encrypted biometric/evidence artifact or master key (must never be committed)" "$file ($label)" ;;
-            *.pem|*.key|*.p12|*.pfx|*.jks|*.secret|id_rsa*|id_ecdsa*|id_ed25519*)
+            *.pem|*.key|*.p12|*.pfx|*.jks|*.keystore|*.secret|id_rsa*|id_ecdsa*|id_ed25519*)
                 report "Sensitive key or certificate file" "$file ($label)" ;;
+            keystore.properties|local.properties|google-services.json)
+                report "Android signing, local SDK or Firebase configuration file (GitHub #382)" "$file ($label)" ;;
             *.onnx|*.ort)
                 report "Model weights (download and attest via scripts/download_models.sh instead)" "$file ($label)" ;;
             .env|.env.*)

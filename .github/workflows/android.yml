@@ -1,0 +1,72 @@
+# =============================================================================
+# Android — debug build, unit tests and lint of the soos native Android app
+# =============================================================================
+# GitHub #382, ADR 2026-10-13 "Native Android App for `soos-remote` (Kotlin and
+# Jetpack Compose)". Runs only when android/, this workflow or the build script
+# change. Not a CI Success dependency (separate workflow) and not an advisory
+# check: scripts/pr_checks_gate.sh blocks a pull request that touches these
+# paths while this job fails. Debug build only, no secrets, no signing key,
+# read-only token, actions pinned to full commit SHAs, pinned JDK, Gradle and
+# SDK packages. Gradle dependency verification is strict; while
+# android/gradle/verification-metadata.xml lists no component the job runs a
+# bootstrap, uploads the generated file and FAILS (owner review and commit).
+# =============================================================================
+
+name: Android
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "android/**"
+      - "scripts/android_build.sh"
+      - ".github/workflows/android.yml"
+  push:
+    branches: [main]
+    paths:
+      - "android/**"
+      - "scripts/android_build.sh"
+      - ".github/workflows/android.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  android-debug:
+    name: "Android (debug build)"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: JDK (Temurin, pinned)
+        uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          distribution: temurin
+          java-version: "17.0.16+8"
+
+      - name: Android SDK licences
+        # `yes` ends with SIGPIPE; `|| true` keeps the pipefail shell of the step green.
+        run: (yes || true) | "${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null
+
+      - name: Android SDK packages (pinned)
+        run: '"${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager" --install "platforms;android-36" "build-tools;35.0.0"'
+
+      - name: Build, unit tests, lint and APK permission check
+        id: build
+        run: ./scripts/android_build.sh ci
+
+      - name: Upload the generated verification metadata (bootstrap run only)
+        if: failure() && steps.build.outputs.bootstrap == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: android-verification-metadata
+          path: android/gradle/verification-metadata.xml
+          retention-days: 7

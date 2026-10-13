@@ -280,6 +280,26 @@ pub const ACTION_LOGOUT: &str = "logout";
 pub const ACTION_REGISTER_OPTIONS: &str = "register-options";
 /// `X-Soos-Action` of `POST /api/auth/register/verify`.
 pub const ACTION_REGISTER: &str = "register";
+// ---------------------------------------------------------------------------------------
+// Native Android app binding (ADR 2026-10-13 "Native Android App for `soos-remote` (Kotlin
+// and Jetpack Compose)", GitHub #382)
+// ---------------------------------------------------------------------------------------
+
+/// Longest accepted `[android] package` (bytes).
+pub const MAX_ANDROID_PACKAGE_LEN: usize = 128;
+/// `[android] sha256_cert_fingerprints` entries (current key and one rotation key).
+pub const MAX_ANDROID_CERT_FINGERPRINTS: usize = 2;
+/// Length of one `AA:BB:..` SHA-256 certificate digest (32 pairs, 31 colons).
+pub const ANDROID_CERT_FINGERPRINT_LEN: usize = 95;
+/// `clientDataJSON.origin` prefix of a native Android app (followed by the unpadded
+/// base64url SHA-256 of its signing certificate).
+pub const ANDROID_ORIGIN_PREFIX: &str = "android:apk-key-hash:";
+/// The only relation of the Digital Asset Links statement: Credential Manager may use the
+/// passkeys of `rp_id` in the configured app (no App Links, no other delegation).
+pub const ASSET_LINKS_RELATION: &str = "delegate_permission/common.get_login_creds";
+/// Upper bound of the generated `assetlinks.json` body.
+pub const MAX_ASSET_LINKS_BYTES: usize = 1024;
+
 /// Longest lingering close (ms) of a refused Funnel request or of a refusal before the
 /// request is classified (head errors, `421`, classification `403`): class permits are
 /// released before it, so a client keeping a refused socket open holds no slot for longer.

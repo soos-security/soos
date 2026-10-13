@@ -58,3 +58,22 @@ __pycache__/
 # repository root must never be committed. Durable tooling belongs under scripts/.
 /*.py
 /temp_*.md
+
+# ---------------------------------------------------------------------------
+# Android app (GitHub #382): build outputs, local SDK paths and signing secrets
+# ---------------------------------------------------------------------------
+# Signing keys and their passwords stay outside the repository (ADR 2026-10-13).
+*.jks
+*.keystore
+*.p12
+keystore.properties
+local.properties
+google-services.json
+android/.gradle/
+android/build/
+android/app/build/
+android/.idea/
+android/captures/
+android/.kotlin/
+*.apk
+*.aab

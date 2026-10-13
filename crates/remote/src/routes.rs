@@ -71,6 +71,10 @@ pub enum Route {
     /// `GET|HEAD /api/offline` (ADR 2026-10-13 "Offline History and Back-Online Push
     /// Notifications in `soos-remote`").
     Offline,
+    /// `/.well-known/assetlinks.json`, every method (ADR 2026-10-13 "Native Android App for
+    /// `soos-remote` (Kotlin and Jetpack Compose)"): the handler answers `404` unless an
+    /// `[android]` binding is configured, then `200` on `GET`/`HEAD` and `405` otherwise.
+    AssetLinks,
     /// `404`.
     NotFound,
     /// `405` with an `Allow` header.
@@ -110,6 +114,8 @@ pub const CAMERA_STREAM_PREFIX: &str = "/api/camera/stream/";
 pub const BATTERY_PATH: &str = "/api/battery";
 /// Path of `GET|HEAD /api/offline` (ADR 2026-10-13).
 pub const OFFLINE_PATH: &str = "/api/offline";
+/// Path of the Digital Asset Links statement (ADR 2026-10-13).
+pub const ASSET_LINKS_PATH: &str = "/.well-known/assetlinks.json";
 /// Path of the Web Push service worker.
 pub const SERVICE_WORKER_PATH: &str = "/sw.js";
 
@@ -191,6 +197,9 @@ pub fn route(method: Method, path: &str) -> Route {
         OFFLINE_PATH => Some(Route::Offline),
         _ => None,
     };
+    if path == ASSET_LINKS_PATH {
+        return Route::AssetLinks;
+    }
     if let Some(found) = read_route {
         return match method {
             Method::Get | Method::Head => found,
@@ -378,7 +387,8 @@ pub fn accepts_body(method: Method, path: &str) -> bool {
         )
 }
 
-/// Pure: the routes reachable on the Funnel path without a web session: every asset,
+/// Pure: the routes reachable on the Funnel path without a web session: every asset, the
+/// Digital Asset Links statement (ADR 2026-10-13),
 /// `AuthState`, the login ceremony, `Logout` (an expired session can still clear its
 /// cookie), `NotFound` and `MethodNotAllowed`.
 #[must_use]
@@ -386,6 +396,7 @@ pub fn is_funnel_public(route: Route) -> bool {
     matches!(
         route,
         Route::Asset(_)
+            | Route::AssetLinks
             | Route::AuthState
             | Route::LoginOptions
             | Route::LoginVerify

@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Gradle dependency verification of the soos Android app: every resolved artifact must match
+  a SHA-256 listed here, otherwise the build fails (scripts/android_build.sh runs Gradle with
+  dependency verification set to strict).
+  Bootstrap (ADR 2026-10-13, assumption A-4): the component list starts empty because the
+  first metadata can only be generated where a JDK and the Android SDK exist. The CI job then
+  runs in bootstrap mode, uploads the generated file as an artifact and FAILS; the owner
+  reviews and commits it on the branch (then re-runs the candid review), and every later run
+  is strict. To regenerate after a dependency change, empty the component list again or run
+  scripts/android_build.sh bootstrap where a JDK and the Android SDK exist.
+-->
+<verification-metadata xmlns="https://schema.gradle.org/dependency-verification" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="https://schema.gradle.org/dependency-verification https://schema.gradle.org/dependency-verification/dependency-verification-1.3.xsd">
+   <configuration>
+      <verify-metadata>true</verify-metadata>
+      <verify-signatures>false</verify-signatures>
+   </configuration>
+   <components>
+   </components>
+</verification-metadata>

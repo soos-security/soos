@@ -55,8 +55,9 @@ use soos_remote::battery::SysfsBattery;
 use soos_remote::camera::CameraSettings;
 use soos_remote::camera_ipc::{DaemonPreviewClient, PreviewSource, PreviewSourceFactory};
 use soos_remote::config::{
-    check_not_root, default_config_path, load_config, resolve_alerts_ack_path,
-    resolve_credentials_path, resolve_network_store_path, resolve_push_store_path, RemoteConfig,
+    check_not_root, default_config_path, load_config, load_config_with_android,
+    resolve_alerts_ack_path, resolve_credentials_path, resolve_network_store_path,
+    resolve_push_store_path, AndroidAppConfig, RemoteConfig,
 };
 use soos_remote::credentials::{credential_hash, CredentialStore, StoreError};
 use soos_remote::enroll::{write_code_file, CodeFile, EnrollCode};
@@ -187,6 +188,20 @@ fn main() -> ExitCode {
             return ExitCode::from(EXIT_CONFIG);
         }
     };
+    // The `[android]` binding (ADR 2026-10-13), never logged: `load_config` has already
+    // validated it; this second bounded read returns it, and a file that changed in between
+    // refuses the start.
+    let android = match load_config_with_android(&config_path, runtime_dir.as_deref()) {
+        Ok(loaded) if loaded.remote == config => loaded.android,
+        Ok(_) => {
+            error!("configuration changed during start-up");
+            return ExitCode::from(EXIT_CONFIG);
+        }
+        Err(err) => {
+            error!(%err, "configuration refused");
+            return ExitCode::from(EXIT_CONFIG);
+        }
+    };
     let credentials_path = match resolve_credentials_path(&config.auth, &config_path) {
         Ok(path) => path,
         Err(err) => {
@@ -199,7 +214,7 @@ fn main() -> ExitCode {
         Some(Command::EnrollCode) => enroll_code(&config, uid),
         Some(Command::Passkeys { action }) => passkeys(action, credentials_path, uid),
         Some(Command::Push { action }) => push_command(action, &credentials_path, uid),
-        None => run_service(config, credentials_path, uid),
+        None => run_service(config, android, credentials_path, uid),
     }
 }
 
@@ -482,7 +497,12 @@ fn push_wiring(
 }
 
 /// The service: current-thread runtime, then [`run`].
-fn run_service(config: RemoteConfig, credentials_path: PathBuf, uid: u32) -> ExitCode {
+fn run_service(
+    config: RemoteConfig,
+    android: Option<AndroidAppConfig>,
+    credentials_path: PathBuf,
+    uid: u32,
+) -> ExitCode {
     if config.allow_unlock && config.auth.rp_id.is_none() {
         warn!("allow_unlock is set but rp_id is not: every remote unlock is refused");
     }
@@ -496,7 +516,7 @@ fn run_service(config: RemoteConfig, credentials_path: PathBuf, uid: u32) -> Exi
             return ExitCode::from(EXIT_RUNTIME);
         }
     };
-    let code = runtime.block_on(run(config, credentials_path, uid));
+    let code = runtime.block_on(run(config, android, credentials_path, uid));
     // Blocking-pool tasks still running (a battery read stuck in a hung driver, a push store
     // write, which is temp file + fsync + rename) are abandoned after this bound (B-13).
     runtime.shutdown_timeout(Duration::from_millis(RUNTIME_SHUTDOWN_TIMEOUT_MS));
@@ -504,7 +524,12 @@ fn run_service(config: RemoteConfig, credentials_path: PathBuf, uid: u32) -> Exi
 }
 
 /// Socket preparation, signal handling and the server loop (inside the runtime).
-async fn run(config: RemoteConfig, credentials_path: PathBuf, uid: u32) -> ExitCode {
+async fn run(
+    config: RemoteConfig,
+    android: Option<AndroidAppConfig>,
+    credentials_path: PathBuf,
+    uid: u32,
+) -> ExitCode {
     let Some(parent) = config.socket_path.parent() else {
         error!("socket path has no parent directory");
         return ExitCode::from(EXIT_CONFIG);
@@ -556,6 +581,9 @@ async fn run(config: RemoteConfig, credentials_path: PathBuf, uid: u32) -> ExitC
     };
     let mut state = ServerState::new(config, uid, ZbusSessionSource::new())
         .with_credentials_path(credentials_path);
+    if let Some(app) = android {
+        state = state.with_android_app(app);
+    }
     if let Some(settings) = alerts {
         state = state.with_password_alerts(settings, Arc::new(JournalctlSource));
     }

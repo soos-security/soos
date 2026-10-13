@@ -27,8 +27,8 @@ use crate::credentials::{
 };
 use crate::identity::{ClientHint, PathClass};
 use crate::webauthn::{
-    b64url_decode, parse_client_data, verify_assertion, AssertionOutcome, CeremonyType,
-    RelyingParty, StoredCredential,
+    b64url_decode, parse_client_data_with_policy, verify_assertion, AssertionOutcome, CeremonyType,
+    OriginPolicy, RelyingParty, StoredCredential,
 };
 use crate::websession::WebSessionStore;
 use crate::{
@@ -363,8 +363,20 @@ impl AuthState {
         assertion: &DecodedAssertion,
         now: Instant,
     ) -> Result<Verified, AssertionFailure> {
-        let client = parse_client_data(rp, &assertion.client_data_json, CeremonyType::Get)
-            .map_err(|_| AssertionFailure::Rejected)?;
+        // A native Android app origin is accepted for the login ceremony only (ADR
+        // 2026-10-13); unlock and camera assertions stay web-origin only.
+        let policy = if purpose == ChallengePurpose::Login {
+            OriginPolicy::WebOrAndroidApp
+        } else {
+            OriginPolicy::WebOnly
+        };
+        let client = parse_client_data_with_policy(
+            rp,
+            &assertion.client_data_json,
+            CeremonyType::Get,
+            policy,
+        )
+        .map_err(|_| AssertionFailure::Rejected)?;
         match self
             .challenges
             .take(now, class, purpose, binding, &client.challenge)
