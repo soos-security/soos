@@ -30,7 +30,7 @@
 
 use std::fmt;
 
-use soos_camera_v4l::{Frame, PixelFormat, SensorType};
+use soos_frame::{Frame, PixelFormat, SensorType};
 
 use crate::error::VisionError;
 use zeroize::Zeroizing;

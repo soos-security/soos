@@ -11,7 +11,7 @@
     reason = "Contractual test suite utilizes direct assertions, unwrap, and indexing"
 )]
 
-use soos_camera_v4l::PixelFormat;
+use soos_frame::PixelFormat;
 use soos_vision::{convert_to_rgb, VisionError};
 
 #[test]

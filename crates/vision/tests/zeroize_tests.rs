@@ -11,7 +11,7 @@
 
 use std::sync::Arc;
 
-use soos_camera_v4l::{Frame, PixelFormat};
+use soos_frame::{Frame, PixelFormat};
 use soos_inference_ort::mock::{MockEmbeddingExtractor, MockFaceDetector, MockPadDetector};
 use soos_inference_ort::{BiometricEmbedding, BoundingBox, FaceDetection, PadDetector};
 use soos_vision::{

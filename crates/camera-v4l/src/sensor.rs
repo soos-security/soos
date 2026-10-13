@@ -3,16 +3,9 @@
 use crate::frame::PixelFormat;
 use std::path::{Path, PathBuf};
 
-/// Camera sensor classification.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum SensorType {
-    /// Standard color capture sensor (RGB / YUYV / NV12 / MJPEG).
-    Rgb,
-    /// Infrared or greyscale-only capture sensor.
-    Infrared,
-    /// Sensor capability or type could not be determined.
-    Unknown,
-}
+/// Camera sensor classification, defined in the pure crate `soos-frame` (GitHub #367) and
+/// re-exported here so `soos_camera_v4l::sensor::SensorType` keeps naming the same type.
+pub use soos_frame::SensorType;
 
 /// Preference for selecting camera devices on multi-sensor hardware.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]

@@ -2,7 +2,7 @@
 
 use thiserror::Error;
 
-use soos_camera_v4l::PixelFormat;
+use soos_frame::PixelFormat;
 use soos_inference_ort::InferenceError;
 
 use crate::ir_liveness::IrGateRejection;

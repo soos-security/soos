@@ -59,7 +59,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use soos_camera_v4l::PixelFormat;
+use soos_frame::PixelFormat;
 use soos_inference_ort::embedding::{EmbeddingExtractor, OrtEmbeddingExtractor};
 use soos_inference_ort::registry::{ModelRegistry, RegistryConfig, SharedSession};
 use soos_inference_ort::{FaceDetection, FaceDetector, OrtScrfdDetector, ZeroizingOutputs};

@@ -17,7 +17,8 @@ ADR entry in `AI/DECISIONS.md`. Re-check every value below with the listed `grep
 |---|---|---|---|
 | `crates/protocol` | `soos-protocol` | lib | `#![forbid(unsafe_code)]` |
 | `crates/policy` | `soos-policy` | lib, zero I/O, clockless | `#![forbid(unsafe_code)]` |
-| `crates/vision` | `soos-vision` | lib | `#![forbid(unsafe_code)]` |
+| `crates/frame` | `soos-frame` | lib, pure `Frame`/`PixelFormat`/`SensorType` (re-exported by `soos-camera-v4l`; GitHub #367) | `#![forbid(unsafe_code)]` |
+| `crates/vision` | `soos-vision` | lib (depends on `soos-frame`, never on `soos-camera-v4l`) | `#![forbid(unsafe_code)]` |
 | `crates/inference-ort` | `soos-inference-ort` | lib (ORT CPU) | `#![forbid(unsafe_code)]` |
 | `crates/biometric-store` | `soos-biometric-store` | lib | `#![forbid(unsafe_code)]` |
 | `crates/evidence-store` | `soos-evidence-store` | lib, zero network | `#![forbid(unsafe_code)]` |
@@ -34,9 +35,14 @@ ADR entry in `AI/DECISIONS.md`. Re-check every value below with the listed `grep
 | `tests/fixtures` | `soos-test-fixtures` | dev-only fixture lib (`[lib] path = "mod.rs"`), never a normal dependency [129] | — |
 
 - The authoritative forbid list is `test_business_crates_forbid_unsafe_code` in
-  `tests/invariants/src/lib.rs` (12 crates, `remote` included since GitHub #339, `push-protocol` and `push-sender` since the Web Push ADR of 2026-10-06). `AGENTS.md` lists only 3 — that is a minimum, not the full set.
+  `tests/invariants/src/lib.rs` (13 crates, `remote` included since GitHub #339, `push-protocol` and `push-sender` since the Web Push ADR of 2026-10-06, `frame` since GitHub #367). `AGENTS.md` lists only 3 — that is a minimum, not the full set.
 - Workspace-wide lints live in root `Cargo.toml` (`[workspace.lints]`); every crate declares
   `[lints] workspace = true` and `publish.workspace = true` (required by `deny.toml` private-crate exemption).
+- Portable set shared with the private `soos-macos` repository (ADR 2026-10-13, `Docs/MACOS_PORT.md`): `soos-frame`,
+  `soos-protocol`, `soos-policy`, `soos-push-protocol`, `soos-inference-ort`, `soos-vision`, `soos-biometric-store`.
+  `portable_crates_contract::test_portable_crates_have_no_linux_only_dependencies` forbids v4l, Linux-PAM, zbus,
+  Tokio, desktop stacks and the Linux-only workspace crates in their graphs; the non-required CI job
+  `portable-macos` is the only advisory check of `scripts/pr_loop.sh` (`scripts/pr_checks_gate.sh`).
 - `cargo -p` takes the **package** name (`-p soos-pam`, never `-p pam`) [11].
 
 ## 2. Security & Latency Constants (verify: `grep -rn "pub const" crates/*/src`)

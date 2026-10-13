@@ -19,6 +19,7 @@ Welcome to the technical documentation for **soos** (local zero-trust facial ver
 | [**PAM Docker Test Matrix**](PAM_DOCKER_TEST_MATRIX.md) | Dockerized PAM matrix T1–T15 (`tests/docker/test_suite.sh`, `pam_test_runner`) and its expected outcomes. | PAM Developers, DevOps |
 | [**Policy Crate**](POLICY_CRATE.md) | `soos-policy` zero-I/O authorization, rate limiting and PAD consensus logic. | Daemon Developers |
 | [**Camera V4L2 Crate**](CAMERA_V4L_CRATE.md) | `soos-camera-v4l` MMAP capture manager, format negotiation and `mock-camera` feature. | Daemon Developers |
+| [**Frame Crate**](FRAME_CRATE.md) | `soos-frame` pure, I/O-free `Frame`, `PixelFormat` and `SensorType` shared by capture and vision. | Vision Developers, Daemon Developers |
 | [**Vision Crate**](VISION_CRATE.md) | `soos-vision` preprocessing, alignment, PAD wiring and cosine matching. | Vision Developers |
 | [**Inference ORT Crate**](INFERENCE_ORT_CRATE.md) | `soos-inference-ort` isolated ONNX Runtime CPU sessions and manifest shape validation. | Vision Developers |
 | [**Biometric Store Crate**](BIOMETRIC_STORE_CRATE.md) | `soos-biometric-store` encrypted embeddings at rest. | Daemon Developers, Security Reviewers |
@@ -29,6 +30,7 @@ Welcome to the technical documentation for **soos** (local zero-trust facial ver
 | [**Distribution Deployment Guide**](DISTRIBUTION_DEPLOYMENT.md) | Per-distribution PAM activation, validation and rollback. | Operators, Packagers |
 | [**Network Lock**](NETWORK_LOCK.md) | Opt-in polkit Wi-Fi lock (`soos-admin network-lock`): locked NetworkManager actions, administrator prompt on every request, rfkill option, status diagnostic, documented gaps. | Operators, Security Reviewers |
 | [**Remote Companion**](REMOTE_COMPANION.md) | `soos-remote` user-level lock status page, remote lock and opt-in remote unlock over Tailscale Serve: trust model, accepted unlock risk, `LockedHint` requirements, per-user install, out-of-scope list. | Operators, Security Reviewers |
+| [**macOS Port**](MACOS_PORT.md) | Bootstrap specification of the separate private `soos-macos` repository: unlock surfaces, TCC capture model, RGB-only tier, portable crates and dependency guard, shared-crate tags, signing, owner checklist. | Owner, Contributors, Security Reviewers |
 
 ---
 

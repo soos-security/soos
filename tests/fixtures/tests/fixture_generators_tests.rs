@@ -6,7 +6,7 @@
     reason = "Test assertions index fixed-size fixture buffers"
 )]
 
-use soos_camera_v4l::PixelFormat;
+use soos_frame::PixelFormat;
 use soos_test_fixtures::{onnx, pad, synthetic};
 
 #[test]

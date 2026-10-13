@@ -13,7 +13,7 @@
 )]
 
 pub mod synthetic {
-    use soos_camera_v4l::{Frame, PixelFormat};
+    use soos_frame::{Frame, PixelFormat};
 
     /// Generates a synthetic RGB24 frame with a solid background and an optional colored rectangle.
     pub fn create_synthetic_rgb_frame(width: u32, height: u32, bg_color: [u8; 3]) -> Frame {
@@ -51,7 +51,7 @@ pub mod synthetic {
     reason = "Synthetic fixture pixel generation and coordinate math"
 )]
 pub mod pad {
-    use soos_camera_v4l::{Frame, PixelFormat};
+    use soos_frame::{Frame, PixelFormat};
 
     /// Generates a synthetic genuine live face camera frame.
     /// Real skin tones, natural high-frequency texture gradient, without moire or paper border.

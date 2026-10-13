@@ -23,7 +23,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use soos_camera_v4l::{Frame, PixelFormat};
+use soos_frame::{Frame, PixelFormat};
 use soos_inference_ort::mock::{MockEmbeddingExtractor, MockFaceDetector};
 use soos_inference_ort::pad::{OrtPadDetector, PadDetector};
 use soos_inference_ort::registry::{ModelRegistry, RegistryConfig, SharedSession};

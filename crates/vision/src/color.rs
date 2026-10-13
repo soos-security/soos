@@ -13,7 +13,7 @@
 
 use std::borrow::Cow;
 
-use soos_camera_v4l::PixelFormat;
+use soos_frame::PixelFormat;
 
 use crate::error::VisionError;
 use zeroize::Zeroizing;
