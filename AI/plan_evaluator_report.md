@@ -1,93 +1,92 @@
 # Plan Evaluation Report
+- **Date**: 2026-10-13
+- **Issue**: GitHub-only #365 — opt-in polkit Wi-Fi lock and `soos-admin network-lock status` (Part A of #359; no `AI/BACKLOG.md` id)
+- **Branch**: `feat/network-lock`
+- **Base commit**: `1b6d211`
+- **Round**: 2 (re-evaluation of `AI/architect_spec_network_lock.md` §11 "Revision 1" against round 1 findings F-1 … F-10)
+- **Inputs re-read**: spec §11, `packaging/polkit/49-soos-network-lock.rules`, `packaging/udev/72-soos-network-lock-rfkill.rules`, `tests/docker/network_lock_pkcheck_test.sh`, `tests/invariants/src/network_lock_contract.rs`, `crates/admin-cli/tests/network_lock_{status,install,shell}_tests.rs`, `crates/admin-cli/tests/network_lock_install_test.sh`, `Docs/NETWORK_LOCK.md`, `AI/tester_contract_network_lock.md`
 
-- **Date**: 2026-10-12
-- **Issue**: GitHub-only #354, sub-issue 1 (web quick win), no backlog id — soos-remote direct biometric prompt on Android
-- **Spec**: `AI/architect_spec_remote_direct_biometric.md` (commit `aa48f25`, with the ADR "[2026-10-12] Named Credentials on Authenticated Passkey Ceremonies of `soos-remote`")
-- **Branch**: `feat/remote-direct-biometric`
-- **Base commit**: `fb2977c` (`origin/main`)
-- **Round**: 1
-- **Owner decisions checked**: issue #354 comments "Owner clarification", "Owner decisions (2026-10-12)", "Owner decisions, part 2 (2026-10-12)".
+Owner decisions OD-1 … OD-6 remain authoritative.
 
 ## 1. Coverage Matrix
 
-| Acceptance line (task, owner decisions) | Spec element | Status |
+| Acceptance line (#359 Part A, narrowed by #365 / OD) | Spec element (after Revision 1) | Status |
 |---|---|---|
-| (1a) The login ceremony stays discoverable: no `allowCredentials`, no credential id in the unauthenticated login options (OD part 2) | D-2 (`OptionsCredentials::Discoverable`, type-level), §3.5 `getAssertion(options.body, false)`, RDB3, test 36 unchanged, `test_rdb_login_options_never_name_a_credential`, `test_rdb_s1` | Covered (see PE-3) |
-| (1b) Unlock and camera-start options return the registered credential ids with stored transports, else `["internal","hybrid"]`; the page passes them as `allowCredentials` | D-1, D-3, §3.1 `allow_credentials`, §3.3, §3.5, RDB1, RDB2 | Covered (see PE-1, PE-2) |
-| (1c) These options routes are never reachable unauthenticated over Funnel | D-7, V-4, V-5, RDB4 (`test_rdb_named_options_refused_without_funnel_session`, `test_rdb_s5`) | Covered, verified in code (§2) |
-| (2a) Registration adds `authenticatorAttachment: "platform"` and `hints: ["client-device"]` | D-4, §3.5, RDB5 | Covered (see PE-5) |
-| (2b) Transports from `getTransports()` stored, bounded, allowlisted, backward compatible | D-5, §3.1, §3.2, §3.4, RDB6, RDB7, A-2, A-5, A-6 | Covered |
-| (3) `Docs/REMOTE_COMPANION.md` §2h: preferred passkey service, delete the Proton Pass passkey and re-enroll on the phone with `soos-remote enroll-code` | §10, RDB9 | Covered (see PE-5) |
-| (4) Owner hardware row (pending): unlock and camera start show fingerprint/face directly, sign-in may still show the picker | RDB10 | Covered |
-| Both device-bound and password-manager passkeys accepted (no BE=0 enforcement) | OD-1, D-6, ADR item (4) | Covered: no verifier change |
-| CSP, CSRF, Funnel gates, WebAuthn verification, RC-1 unchanged; remote unlock over Funnel stays supported | D-6, D-7, D-8, §7, RDB8 | Covered |
-| Zero test weakening: amendments listed AM-n and justified | §9 AM-1 … AM-5 | Covered; classification in PE-6 |
-| GitHub-only issue: no `scripts/sync_issue.py` registration, `Refs #354` | Spec header | Covered |
+| Rule lists exactly the documented ids, never `YES`, never `NO`, falls through | R-1 (5 ids), static `test_nlk_rules_file_lists_exactly_the_documented_action_ids` (rule = constant = docs table, `sleep-wake`/hostname/DNS/wwan excluded), `…_only_returns_auth_admin` (single `return`, forbidden results, no `subject.`), `…_falls_through_for_other_actions` (exact guard text `indexOf(action.id) >= 0`, no `else`/`switch`) | Covered |
+| Opt-in install writes root-owned `0644`, symlink refused, temp + `rename`; uninstall removes; temp-root shell test | R-6 (owner + mode checks on every component, dirfd-relative `fstatat`/`renameat`/`unlinkat`, inode proof of the temp file), R-7 (hard-link and stale-temp tests), `test_nlk_install_as_root_requires_root_owned_directories`, shell test S1–S7 incl. `scripts/uninstall.sh --destdir` | Covered |
+| `status` states + `rfkill_uaccess`; injected seams; exit codes; no network names | §4 + R-3 `iwd_dbus_bypass`, R-4 `rfkill_reboot_pending`, fixed warning order test, privacy test | Covered (test-power gap N-1) |
+| Docker `pkcheck`: `network-control` `auth_admin` with the rule, default without | R-2 sentinel differential S1/S2 over every `pkaction` NetworkManager id, plus P1–P5 real-default comparison; owner hardware row NLK12 for the active local subject | Covered (subject-class limit recorded) |
+| Docs: face not used, rfkill / iwd / hardware switch / root gaps | `Docs/NETWORK_LOCK.md` §6 gap list (R-5) | Covered (wording inconsistency N-3) |
+| OD-3 rfkill option off by default | D-4, declarative removal without `--rfkill` | Covered |
+| OD-6 no host install by agents, staging root | `--root`, `may_modify_root` | Covered |
+| Removal on uninstall | R-8 (a) removal before `# 2. Roll Back PAM`, invariant asserts order; (b) package hooks deferred to #362 with documented "uninstall before removing the package" | Covered (invariant power N-2) |
 
-## 2. Facts Verified Against Code
+## 2. Round 1 Findings — Verification of Claimed Resolution
 
-| Fact cited by plan | Code location | Actual value | Match |
+| Round 1 | Claimed resolution | Verified in files | Result |
 |---|---|---|---|
-| `getAssertion` has no `allowCredentials`; call sites unlock/login/camera | `crates/remote/assets/app.js:270-279`, `:771`, `:820`, `:1686` | as stated | Yes |
-| Registration has no `authenticatorAttachment`/`hints`; `residentKey: "required"`, `requireResidentKey: true`, UV required, attestation `none`, `alg: -7`; `excludeCredentials` already sent (tailnet only) | `app.js:862-879` | as stated | Yes |
-| Shared `issue_options` loads the store snapshot under the auth mutex with `Ok(Some(file)) if !file.passkeys.is_empty()` then `options_response(rp_id, challenge)` | `server.rs:546-583`, `:1378` | as stated; refusal order `403 passkeys_not_configured` → `429` → `409`/`503` → `503` → `429 too_many_challenges` | Yes |
-| Login options pass `ChallengePurpose::Login`, Funnel only (`403 forbidden` on the tailnet) | `server.rs:1401-1413` | as stated | Yes |
-| Funnel gate: non-`is_funnel_public` route without a session ⇒ `403 login_required` before routing; register routes always `403 forbidden` | `server.rs:1190-1205`, `routes.rs:379-390` | `is_funnel_public` = `Asset`, `AuthState`, `LoginOptions`, `LoginVerify`, `Logout`, `NotFound`, `MethodNotAllowed` (no `UnlockOptions`, no `CameraOptions`) | Yes |
-| Tailnet callers need exactly one allowed `Tailscale-User-Login` (non-empty allowlist) | `identity.rs:276-304`, `config.rs:233-237` | as stated | Yes |
-| `unlock_options`/`camera_options`: CSRF with required `Origin` before any store read; `403 unlock_disabled`/camera gates before `issue_options` | `server.rs:1416-1437`, `:2176-2197` | as stated | Yes |
-| `RecordJson` and `StoreJson` are `deny_unknown_fields`; `encode_store` field order; `PasskeyRecord` derives `Clone, PartialEq, Eq` with redacted `Debug` | `credentials.rs:37-189` | as stated | Yes |
-| `RegisterVerifyBody` is `deny_unknown_fields`; `decode_registration` runs before `check_code` (a malformed body never consumes the enrollment code) | `auth.rs:625-741`, `server.rs:1745-1790` | as stated | Yes |
-| `persist_counter` mutates the record in place (other fields preserved) | `server.rs:586-610` | as stated | Yes |
-| `MAX_AUTH_BODY_BYTES` 8192; `MAX_ATTESTATION_OBJECT_BYTES` 2048; `MAX_CREDENTIAL_ID_BYTES` 1023; `MAX_CLIENT_DATA_JSON_BYTES` 1024; existing const assertion | `lib.rs:171-217`, `:279-285` | as stated (5713 + 168 = 5881 < 8192) | Yes |
-| `MAX_PASSKEYS` 4; `MAX_CREDENTIAL_STORE_BYTES` 16 384 | `lib.rs:215-217` | as stated; worst record with six transports ≈ 1.7 KiB, 4 records ≈ 6.8 KiB | Yes |
-| `MAX_AUTH_FAILURES` 5 per `AUTH_FAILURE_WINDOW_MS` 300 000 | `lib.rs:235-237` | as stated | Yes |
-| Every response carries `Cache-Control: no-store` (named options not cached) | `http.rs:263` | as stated | Yes |
-| Existing tests pinning the old behaviour: test 39 (`auth_server_tests.rs:675-679`), camera test 24 (`camera_server_tests.rs:246-249`), invariants test 51 (`remote_passkey_contract.rs:308-347`), literals `credentials_tests.rs:42`, `auth_store_tests.rs:778` | grep of `allowCredentials`, `allow_credentials`, `"challenge", "rp_id", "timeout_ms"`, `PasskeyRecord {`, `issue_options`, `options_response`, `getAssertion` over `crates/` and `tests/` | exactly these; test 36 (`auth_server_tests.rs:386-398`) also pins the login shape and is left unchanged; no invariant pins the `§2h` item numbering (RAN-S9 uses needles only) | Yes (exhaustive) |
-| `soos-remote passkeys list` / `passkeys remove N` exist | `main.rs:260-330` | as stated | Yes |
+| F-1 MAJOR `sleep-wake` | dropped; 5 ids | rule file has 5 ids; invariant asserts `len()==5` and that `sleep-wake` is absent; `Docs/NETWORK_LOCK.md:27` lists it as excluded ("already refused for every subject"); Docker `CONTROLS` keeps `sleep-wake` as an unchanged control | **Resolved** |
+| F-2 MAJOR Docker differential | sentinel `90-soos-test-sentinel.rules` returning `YES` for all `org.freedesktop.NetworkManager.*`; S1 all rc 0 without soos rule; S2 locked ids `2 plain`, every other NM id `0 plain`, root `0 plain`; guard pinned statically | `tests/docker/network_lock_pkcheck_test.sh` S1/S2 iterate `pkaction` output (≥ 10 ids required), assert every `LOCKED` id exists in the policy; invariant pins `if (soosNetworkLockActions.indexOf(action.id) >= 0) {` and exactly one `return polkit.Result.AUTH_ADMIN;` over comment-stripped code | **Resolved**. An `indexOf > 0`, `NOT_HANDLED`, extra/missing id or `AUTH_ADMIN_KEEP` mutation now fails S2 or the invariant. |
+| F-3 NM + iwd bypass | warning `iwd_dbus_bypass` | `test_nlk_status_warns_iwd_dbus_bypass_next_to_network_manager` (NM+iwd → warning, exit 0; NM alone → none; iwd-only → `unsupported_backend`, no warning); docs §6 | **Resolved** |
+| F-4 stale rfkill ACL | warning `rfkill_reboot_pending` (rule `ctime` > `now − uptime`, `MAX_UPTIME_BYTES` 64, invalid uptime → no warning) | positive test and invalid-input negatives present | **Resolved in design**; negative timing case missing (N-1) |
+| F-5 gap list | extended | `Docs/NETWORK_LOCK.md:93-99`: docker/lxd/libvirt, sudo timestamp, `run0` / `manage-units` retention, suspend, `auth-polkit=false`, `20-gdm.rules`, `empower.rules`, netdev for iwd and Debian wpa_supplicant | **Resolved** (wording N-3) |
+| F-6 install enforces owner/mode, dirfd-relative | R-6 | tests: group/world-writable `rules.d`, `etc/polkit-1`, `etc` refused (install and uninstall); `chown_root` without root-owned dirs refused. Workspace `nix 0.29` (`fs` feature) offers `fstatat`/`renameat`/`unlinkat` on `Option<RawFd>` / `as_raw_fd()` without `unsafe`; `openat` returns a bare `RawFd`, so the path-created temp file plus `(dev, ino)` proof is a sound `forbid(unsafe_code)` compromise, given that every ancestor is now verified root-owned and not writable | **Resolved** |
+| F-7 atomicity untested | hard-link + stale-temp tests | `…_replaces_a_hard_linked_target_with_a_new_inode` (outside file unchanged, inode differs); `…_fails_cleanly_on_a_stale_temp_name` (target and foreign temp untouched) | **Resolved**. The in-place-write mutant now fails. |
+| F-8 removal paths | uninstall.sh removal before `# 2. Roll Back PAM`; package hooks deferred with reason | invariant `test_nlk_lock_is_opt_in_and_removed_on_uninstall` checks both paths and the order; docs line 47 "run … uninstall before removing the package" | **Resolved**; invariant power N-2 |
+| F-9 harness conventions | read-only `:ro` mount (POA3 not applicable), digest default via `SOOS_DEBIAN_IMAGE:-`, no `${{ github.event`, job in `ci-success.needs` | script uses `-v "${repo}:/workspace:ro"` and pinned `ubuntu:24.04@sha256:008173c2…`; invariant asserts the digest, `:ro`, CI job, `run:` line and `ci-success` membership | **Resolved** |
+| F-10 non-root `unreadable` | documented + ADR | `Docs/NETWORK_LOCK.md:65` | **Resolved** |
 
-## 3. Pillar Analysis
+## 3. Pillar Analysis (round 2)
 
-### Pillar 1 — Architecture and threat model
-- Failure scenario considered: an anonymous Funnel client calls `POST /api/auth/unlock/options` (or camera) and harvests the credential ids. Excluded: the pre-routing gate refuses every non-public route without a valid session (`server.rs:1199`), and the spec pins this statically (`test_rdb_s5`) and behaviourally (no cookie, unknown cookie, revoked session).
-- Failure scenario considered: a future refactor routes login through `Registered`. Excluded by the `OptionsCredentials` argument and the static pin `test_rdb_s1` plus unchanged test 36.
-- Failure scenario considered: the allow list influences verification (e.g. an implementation checks the assertion id against the list instead of the store). Excluded: D-6, allow list never reaches `check_assertion`; `test_rdb_assertion_rules_unchanged_with_allow_list`.
-- Residual R-1 (authenticated caller learns opaque ids) matches the owner decision and the existing `exclude_credentials` precedent on the tailnet register options.
+### Pillar 1 — Architecture & threat model
+- Scenario: a remaining listed action whose default is already stronger than `AUTH_ADMIN`. Re-checked against the host NM 1.58 policy:
+  - `network-control`, `enable-disable-wifi`, `enable-disable-network` and `settings.modify.own` are `yes` for the active subject;
+  - `settings.modify.system` is `auth_admin_keep` (and Arch's rule grants `YES` to local `wheel`).
+
+  Every listed id is therefore tightened for the active local subject. The only widening is for inactive or remote subjects (default `no`), and it is recorded as the equivalent-privilege deviation (D-2, R-1).
+- Scenario: a rule sorting before `49-`. Documented; `status` does not parse foreign rules (accepted limitation).
 - Result: PASS.
 
-### Pillar 2 — PAM deadline and concurrency
-- Failure scenario considered: added work under the auth mutex delays other requests. ≤ 4 base64url encodings of ≤ 1023 bytes from the snapshot already loaded; no extra I/O, no second store read (no TOCTOU). `crates/pam` untouched.
-- Result: PASS (not on the PAM path).
+### Pillar 2 — PAM deadline & concurrency
+- Untouched (no PAM, daemon or IPC change). All new reads are bounded (`MAX_UPTIME_BYTES` added).
+- Result: PASS.
 
-### Pillar 3 — Panic safety and fail-closed
-- Failure scenario considered: a corrupted `transports` key in the store. Strict parse ⇒ `StoreError::Malformed` ⇒ existing fail-closed path (`503 store_unavailable`, sessions dropped), never an authorization. Downgrade (A-6) likewise fails closed.
-- Failure scenario considered: `getTransports` throws or is missing on an old browser. `try`/`catch` ⇒ `[]` ⇒ `EMPTY` ⇒ default transports.
+### Pillar 3 — Panic safety & fail-closed
+- Scenario: a malformed uptime (`inf`, `NaN`, negative, empty, missing). It adds no warning and does not change the exit code, which the tests cover. Informational warnings never mask `modified` / `insecure_permissions` (a modified rfkill rule is not "pending").
+- Scenario: a guard mutation in the shipped rule. It is now caught by the static invariant and by Docker S2.
 - Result: PASS.
 
 ### Pillar 4 — Dependencies
-- No new crate, no JS library. Result: PASS.
-
-### Pillar 5 — Data confidentiality
-- Failure scenario considered: a `debug!` of the options response logs ids. No new log line; `test_rdb_options_never_log_a_credential_id` plus the existing `server_tests.rs:1982` leak test. `PasskeyRecord`/`RegisterVerifyBody` `Debug` stay redacted. Body bounded at 8 KiB before deserialisation, so the `Vec<String>` cannot be abused for allocation.
+- No new crate beyond the existing `sha2` edge. The dirfd operations use the workspace `nix` features already enabled. `forbid(unsafe_code)` is preserved, and the spec explicitly avoids `OwnedFd::from_raw_fd`.
 - Result: PASS.
 
-### Pillar 6 — Test integrity and test power
-- Failure scenario considered: a developer always emits `DEFAULT_ALLOW` regardless of stored transports. Caught by `test_rdb_register_stores_allowlisted_transports` (`usb` included) but not by RDB1/RDB2, whose stored set canonicalises to the default (PE-2).
-- Failure scenario considered: login options name credentials when the Funnel caller already holds a session. Not exercised behaviourally (PE-3).
-- Failure scenario considered: the developer follows the §3.5 comment wording, which itself contains the literal `allowCredentials`, so the exact-count assertions of AM-3 and `test_rdb_s1` fail against a correct implementation (PE-1).
-- Amendments AM-1 … AM-5 classified in PE-6.
-- Result: FINDINGS (MINOR only).
+### Pillar 5 — Data confidentiality & file safety
+- Scenario: an attacker-writable ancestor races the path-based temp creation. Every ancestor component is now required to be owned by the required owner and not group/world-writable, and the temp inode is proven with `fstatat(dirfd, …)` before `renameat`, so a swapped path makes the install abort. A foreign file with the temp name is never removed.
+- Privacy is unchanged: no file under `/etc/NetworkManager` is opened, and the output uses a fixed vocabulary (`test_nlk_status_output_has_no_network_names`).
+- Result: PASS.
 
-## 4. Findings
+### Pillar 6 — Test integrity & test power
+- No existing test is modified. New contracts are additive.
+- Mutants checked:
+  - non-atomic write → fails (hard-link test);
+  - G-first tag parsing, substring tag match, prefix `comm` match → fail;
+  - guard off-by-one, extra or missing id → fail (S2 + invariant);
+  - **"always warn `rfkill_reboot_pending` when the rule is installed and uptime is valid"** → passes every planned test (N-1);
+  - **removal placed after `# 2. Roll Back PAM` but the path mentioned in a header comment earlier** → passes the order invariant (N-2).
+- Result: FINDING (MINOR only).
 
-- **PE-1 [MINOR]** §3.5 gives `getAssertion` a doc comment "... are passed as allowCredentials so the phone ...", while AM-3 and `test_rdb_s1` require `allowCredentials` to occur **exactly once** in `app.js`. Required change: no comment, string or identifier other than the single `publicKey.allowCredentials` assignment may contain the literal (write "allow list" in comments). The tester and developer must apply this wording.
-- **PE-2 [MINOR]** RDB1/RDB2 behaviour tests store `{Hybrid, Internal}`, whose canonical output `["internal","hybrid"]` equals `DEFAULT_ALLOW`, so they cannot distinguish stored from default transports. Required change: the stored record in `test_rdb_unlock_options_name_every_registered_credential` and `test_rdb_camera_options_name_every_registered_credential` uses a set different from the default (e.g. `{Hybrid}` or `{Internal, Usb}`), next to the legacy record that must carry `["internal","hybrid"]`.
-- **PE-3 [MINOR]** `test_rdb_login_options_never_name_a_credential` must also call login options from a Funnel caller presenting a **valid session cookie** (the rotation path) and assert the exact key set and absence of both ids, so an implementation keyed on session presence fails.
-- **PE-4 [MINOR]** `test_rdb_register_transports_bounds` lists four malformed inputs but asserts "5 such ⇒ `429`". Required change: add a fifth malformed input (e.g. `"transports": "internal"` (string) or `[null]`), then assert the next register verify answers `429 rate_limited`; also assert the enrollment code file still exists after the malformed bodies (the decode runs before `check_code`).
-- **PE-5 [MINOR, docs]** Consequences of A-4 and of `excludeCredentials` for the §2h procedure: (a) state that enrollment must be done on the phone itself (a desktop browser or a cross-device QR flow may be refused with `authenticatorAttachment: "platform"`); (b) keep "delete the passkey in Proton Pass" before re-enrolling, and say that if the phone reports the passkey "already exists" the old one is still present in an enabled provider. Wording only; no test change beyond the needles of `test_rdb_s6`.
-- **PE-6 [OBSERVATION — amendment classification]** AM-1(b) and AM-3 touch security-relevant assertions. Evaluated as **owner-required exact replacements, not relaxations**: OD part 2 explicitly requires the unlock and camera options of an authenticated caller to carry the credential ids and the page to send `allowCredentials`, which is impossible while those two assertions stand. The property they protected (S-3: no credential id to an anonymous client, sign-in never names a credential) is preserved and strengthened: AM-1(b) becomes an exact-content assertion on an authenticated tailnet caller; the anonymous direction stays pinned by unchanged test 36 and new `test_rdb_login_options_never_name_a_credential`, `test_rdb_named_options_refused_without_funnel_session`, `test_rdb_refusals_never_name_a_credential`; AM-3 replaces the needle by an exact count of 1 plus the `getAssertion(options.body, false)` call-site pin, following the in-test "Contract migration" precedent (service worker). AM-2 is an exact key-set replacement; AM-4/AM-5 are additive setup. Conditions: every other `forbidden` needle of test 51 stays unchanged, and no further existing test is modified. **Approved.**
+## 4. Findings (round 2)
+
+- **[MINOR] N-1 No negative timing test for `rfkill_reboot_pending`.** An implementation that skips the `ctime > boot` comparison passes every planned test, because all negatives use an invalid uptime, no rule, or a modified rule. — *Required change*: add a test where the installed rfkill rule is older than boot. Either back-date the file's `ctime` reference by writing it, sleeping ≥ 50 ms, then writing `proc/uptime` as `0.01 0.01`, so boot = now − 10 ms is later than the coarse `ctime`; or inject the clock through the env seam. Assert no `rfkill_reboot_pending`.
+- **[MINOR] N-2 The uninstall order invariant matches the first textual occurrence.** `uninstall.find(path)` would be satisfied by a comment or `usage` mention placed before `# 2. Roll Back PAM` even if the actual `rm` came later. — *Required change*: search only non-comment lines containing `rm ` (or the removal helper) for each path, then compare positions.
+- **[MINOR] N-3 Documentation and spec drift.**
+  - `Docs/NETWORK_LOCK.md:94` says "NetworkManager configured with the iwd Wi-Fi backend is covered", but line 93 and the `iwd_dbus_bypass` warning say iwd stays directly reachable by `netdev`. Reword to "NetworkManager's own requests are covered; direct iwd D-Bus access is not".
+  - Spec §2 (line 62 constant) and §3 D-1 (line 179 row) still list `sleep-wake`. §11 supersedes them, but update them inline so the developer does not copy the stale constant.
+  - The invariant doc comment says "the same six actions" (should be five).
+- **[MINOR / observation] N-4 Root production path only exercised by unit tests run as non-root.** The Docker test installs the rule with `install(1)`, not with `soos-admin`, so `chown_root = true` with real root-owned directories never runs in CI. This is acceptable for this PR because the CI cost is high and the logic is covered with `required_owner_uid` injection. Record it in the matrix (NLK12 owner hardware check covers the real `sudo soos-admin network-lock install`).
+
+No CRITICAL or MAJOR finding remains. N-1 … N-3 are small, mechanical additions that the tester/developer phases can absorb without another evaluation round.
 
 ## 5. Verdict
-
-No CRITICAL or MAJOR finding. PE-1 to PE-5 are MINOR plan clarifications to be applied by the tester (PE-1 wording rule, PE-2, PE-3, PE-4) and by the traceability/docs phase (PE-5); PE-6 approves amendments AM-1 to AM-5 as listed in spec §9.
 
 VALIDATION_VERDICT: APPROVED

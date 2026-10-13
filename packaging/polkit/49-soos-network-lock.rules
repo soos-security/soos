@@ -1,0 +1,25 @@
+// soos network lock: Wi-Fi change and disconnect require administrator authentication.
+//
+// Opt-in (GitHub #365, ADR 2026-10-13 "Opt-In polkit Wi-Fi Lock"). Installed as
+// /etc/polkit-1/rules.d/49-soos-network-lock.rules by `soos-admin network-lock install`
+// and removed by `soos-admin network-lock uninstall` or scripts/uninstall.sh.
+// `soos-admin network-lock status` reports `modified` unless this file is byte-identical
+// to the copy shipped with soos: do not edit it in place.
+//
+// It returns AUTH_ADMIN (an administrator password on every request, never cached) for the
+// NetworkManager actions below, for any subject, and returns nothing for every other action
+// so that the next rule or the shipped default decides. It never authorizes an action
+// without authentication and never denies one outright. Face verification is never used
+// for this prompt (see Docs/NETWORK_LOCK.md).
+polkit.addRule(function (action, subject) {
+    var soosNetworkLockActions = [
+        "org.freedesktop.NetworkManager.network-control",
+        "org.freedesktop.NetworkManager.enable-disable-wifi",
+        "org.freedesktop.NetworkManager.enable-disable-network",
+        "org.freedesktop.NetworkManager.settings.modify.system",
+        "org.freedesktop.NetworkManager.settings.modify.own"
+    ];
+    if (soosNetworkLockActions.indexOf(action.id) >= 0) {
+        return polkit.Result.AUTH_ADMIN;
+    }
+});

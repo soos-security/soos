@@ -339,6 +339,11 @@ mod remote_security_hardening_contract;
 #[cfg(all(test, unix))]
 mod remote_direct_biometric_contract;
 
+/// Opt-in polkit Wi-Fi lock and `soos-admin network-lock` (GitHub #365; ADR "[2026-10-13]
+/// Opt-In polkit Wi-Fi Lock and `soos-admin network-lock`"; rows NLK1-NLK3, NLK9-NLK11).
+#[cfg(all(test, unix))]
+mod network_lock_contract;
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,

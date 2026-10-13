@@ -1,0 +1,12 @@
+# soos network lock, rfkill option (GitHub #365, ADR 2026-10-13 "Opt-In polkit Wi-Fi Lock").
+#
+# Off by default. Installed as /etc/udev/rules.d/72-soos-network-lock-rfkill.rules only by
+# `soos-admin network-lock install --rfkill`; removed by `soos-admin network-lock install`
+# (without --rfkill), `soos-admin network-lock uninstall` or scripts/uninstall.sh.
+#
+# Removes the `uaccess` tag that 70-uaccess.rules (and desktop rules such as
+# 61-gnome-settings-daemon-rfkill.rules) add to /dev/rfkill, before 73-seat-late.rules turns
+# the tag into an ACL for the seat user. The desktop airplane-mode toggle then stops working
+# for that user. Takes effect after a reboot. Membership of the group that owns /dev/rfkill
+# still grants access (see Docs/NETWORK_LOCK.md).
+SUBSYSTEM=="misc", KERNEL=="rfkill", TAG-="uaccess"

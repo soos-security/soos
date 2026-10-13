@@ -21,6 +21,8 @@
 #                        ubuntu:24.04 (after lint)
 #   6d. systemd-unit   — soos-daemon.service driven by a real systemd (PID 1)
 #                        in ubuntu:24.04 (after lint)
+#   6e. network-lock-polkit — opt-in polkit Wi-Fi lock under a real polkitd
+#                        (pkcheck) in ubuntu:24.04 (after lint)
 #   7. ci-success      — single aggregate status for merge gating
 #   8. distro-pam-matrix — PAM matrix T1–T15 in the Fedora and Arch sandbox
 #                        images (push to main and manual dispatch only)
@@ -336,6 +338,26 @@ jobs:
         run: ./tests/docker/pam_rollback_test.sh
 
   # ---------------------------------------------------------------------------
+  # Job 6e: opt-in polkit Wi-Fi lock (GitHub #365): pkcheck of the locked
+  # NetworkManager actions under a real polkitd in ubuntu:24.04, without and
+  # with packaging/polkit/49-soos-network-lock.rules, plus a sentinel rule
+  # differential (tests/docker/network_lock_pkcheck_test.sh).
+  # ---------------------------------------------------------------------------
+  network-lock-polkit:
+    name: "Network lock polkit (Docker)"
+    if: github.event_name != 'schedule'
+    needs: lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: pkcheck the locked NetworkManager actions (ubuntu:24.04)
+        run: ./tests/docker/network_lock_pkcheck_test.sh
+
+  # ---------------------------------------------------------------------------
   # Job 6d: packaging/soos-daemon.service under a real systemd (PID 1) in a
   # privileged ubuntu:24.04 container (GitHub #211): fresh release daemon
   # installed by scripts/install.sh, systemd-analyze verify, condition failed
@@ -508,7 +530,7 @@ jobs:
   ci-success:
     name: "CI Success"
     if: always() && github.event_name != 'schedule'
-    needs: [lint, clippy, test, security, pam-integration, authselect-profile, pam-rollback, package-deploy, systemd-unit]
+    needs: [lint, clippy, test, security, pam-integration, authselect-profile, pam-rollback, package-deploy, systemd-unit, network-lock-polkit]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:

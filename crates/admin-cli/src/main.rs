@@ -11,6 +11,7 @@ use std::io;
 use std::path::PathBuf;
 
 use clap::{CommandFactory, FromArgMatches};
+use soos_admin_cli::args::NetworkLockAction;
 use soos_admin_cli::args::{
     camera_list_sensor_preference_given, CameraAction, Cli, Commands, OutputFormat,
     DEFAULT_SOCKET_PATH,
@@ -20,6 +21,11 @@ use soos_admin_cli::camera::{
 };
 use soos_admin_cli::error::AdminCliError;
 use soos_admin_cli::logs::fetch_and_filter_logs;
+use soos_admin_cli::network_lock::{
+    install_network_lock, may_modify_root, network_lock_status, uninstall_network_lock, FileAction,
+    InstallOptions, NetworkLockEnv, ProcServiceProbe, NETWORK_LOCK_RFKILL_DIR,
+    NETWORK_LOCK_RFKILL_FILE, NETWORK_LOCK_RULES_DIR, NETWORK_LOCK_RULES_FILE,
+};
 use soos_admin_cli::redact::DefaultRedactionFilter;
 use soos_admin_cli::status::query_status;
 use soos_admin_cli::test_pam::{effective_timeout_ms, simulate_pam_auth};
@@ -135,6 +141,8 @@ fn run() -> Result<(), AdminCliError> {
             }
         }
 
+        Commands::NetworkLock(args) => run_network_lock(&args.action, cli.format)?,
+
         Commands::Gdm(args) => {
             if args.action == soos_admin_cli::GdmAction::Enable {
                 // Never point GDM at a module that is not installed (GitHub #177).
@@ -195,6 +203,94 @@ fn run() -> Result<(), AdminCliError> {
     }
 
     Ok(())
+}
+
+/// `soos-admin network-lock status|install|uninstall` (GitHub #365).
+fn run_network_lock(action: &NetworkLockAction, format: OutputFormat) -> Result<(), AdminCliError> {
+    let euid = nix::unistd::geteuid().as_raw();
+    match action {
+        NetworkLockAction::Status { root } => {
+            if root.as_os_str().is_empty() {
+                return Err(AdminCliError::NetworkLock(
+                    "--root must not be empty".into(),
+                ));
+            }
+            let env = NetworkLockEnv {
+                root: root.clone(),
+                required_owner_uid: 0,
+            };
+            let probe = ProcServiceProbe { root: root.clone() };
+            let report = network_lock_status(&env, &probe);
+            match format {
+                OutputFormat::Table => print!("{}", report.format_table()),
+                OutputFormat::Json => println!("{}", report.to_json()),
+            }
+            let code = report.exit_code();
+            if code != 0 {
+                std::process::exit(code);
+            }
+        }
+        NetworkLockAction::Install { rfkill, root } => {
+            require_modifiable_root(root, euid)?;
+            let report = install_network_lock(root, InstallOptions { rfkill: *rfkill }, euid == 0)?;
+            print_file_action(
+                report.rules,
+                &root
+                    .join(NETWORK_LOCK_RULES_DIR)
+                    .join(NETWORK_LOCK_RULES_FILE),
+                "polkitd applies it immediately",
+            );
+            print_file_action(
+                report.rfkill_rule,
+                &root
+                    .join(NETWORK_LOCK_RFKILL_DIR)
+                    .join(NETWORK_LOCK_RFKILL_FILE),
+                "reboot so that the seat user loses access to /dev/rfkill",
+            );
+        }
+        NetworkLockAction::Uninstall { root } => {
+            require_modifiable_root(root, euid)?;
+            let report = uninstall_network_lock(root)?;
+            print_file_action(
+                report.rules,
+                &root
+                    .join(NETWORK_LOCK_RULES_DIR)
+                    .join(NETWORK_LOCK_RULES_FILE),
+                "",
+            );
+            print_file_action(
+                report.rfkill_rule,
+                &root
+                    .join(NETWORK_LOCK_RFKILL_DIR)
+                    .join(NETWORK_LOCK_RFKILL_FILE),
+                "",
+            );
+        }
+    }
+    Ok(())
+}
+
+fn require_modifiable_root(root: &std::path::Path, euid: u32) -> Result<(), AdminCliError> {
+    if may_modify_root(root, euid) {
+        Ok(())
+    } else {
+        Err(AdminCliError::NetworkLock(
+            "changing / needs root (use sudo), or pass --root <staging directory>".into(),
+        ))
+    }
+}
+
+fn print_file_action(action: FileAction, path: &std::path::Path, written_note: &str) {
+    match action {
+        FileAction::Written if written_note.is_empty() => {
+            println!("[OK] Wrote {} (mode 0644).", path.display());
+        }
+        FileAction::Written => {
+            println!("[OK] Wrote {} (mode 0644); {written_note}.", path.display());
+        }
+        FileAction::Removed => println!("[OK] Removed {}.", path.display()),
+        FileAction::Absent => println!("[OK] {} is not installed.", path.display()),
+    }
 }
 
 fn main() {

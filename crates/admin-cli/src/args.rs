@@ -67,6 +67,45 @@ pub enum Commands {
 
     /// Inspect V4L2 camera nodes and the camera soos would select (metadata only, no frames).
     Camera(CameraArgs),
+
+    /// Opt-in polkit Wi-Fi lock: status, install and uninstall (GitHub #365).
+    NetworkLock(NetworkLockArgs),
+}
+
+/// Arguments for the `network-lock` command (GitHub #365).
+#[derive(Parser, Debug, Clone)]
+pub struct NetworkLockArgs {
+    /// Action to perform.
+    #[command(subcommand)]
+    pub action: NetworkLockAction,
+}
+
+/// `network-lock` actions.
+#[derive(Subcommand, Debug, Clone, PartialEq, Eq)]
+pub enum NetworkLockAction {
+    /// Read-only diagnostic: backend, rule files, rfkill access (never prints a network name).
+    Status {
+        /// Root directory to inspect (a staging copy in tests; default `/`).
+        #[arg(long, default_value = "/")]
+        root: PathBuf,
+    },
+    /// Write the polkit rule as root:root 0644; with `--rfkill` also the udev rule that
+    /// removes seat-user access to /dev/rfkill (without it, an installed soos rfkill rule is
+    /// removed). Requires root unless `--root` names a staging directory.
+    Install {
+        /// Also install the rfkill udev rule (off by default; disables the airplane-mode toggle).
+        #[arg(long)]
+        rfkill: bool,
+        /// Root directory to write below (a staging directory in tests; default `/`).
+        #[arg(long, default_value = "/")]
+        root: PathBuf,
+    },
+    /// Remove the polkit rule and the rfkill udev rule.
+    Uninstall {
+        /// Root directory to remove from (a staging directory in tests; default `/`).
+        #[arg(long, default_value = "/")]
+        root: PathBuf,
+    },
 }
 
 /// Arguments for the `camera` diagnostics command (GitHub #256).

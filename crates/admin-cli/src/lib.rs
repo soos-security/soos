@@ -7,6 +7,8 @@
 //! - `camera list|probe`: V4L2 node metadata, classification and the shared resolver's
 //!   decision (metadata ioctls only, never frames); `camera list` resolves with the
 //!   `camera_device` / `sensor_preference` of `/etc/soos/daemon.toml`
+//! - `network-lock status|install|uninstall`: opt-in polkit Wi-Fi lock (GitHub #365); the
+//!   status is read-only and never prints a network name
 
 #![forbid(unsafe_code)]
 
@@ -16,6 +18,7 @@ pub mod daemon_config;
 pub mod error;
 pub mod gdm;
 pub mod logs;
+pub mod network_lock;
 mod pam_stack;
 pub mod redact;
 pub mod status;
@@ -24,7 +27,8 @@ pub mod user;
 
 pub use args::{
     AddUserArgs, CameraAction, CameraArgs, CameraListArgs, CameraProbeArgs, Cli, Commands,
-    GdmAction, GdmArgs, LogsArgs, OutputFormat, StatusArgs, TestPamArgs,
+    GdmAction, GdmArgs, LogsArgs, NetworkLockAction, NetworkLockArgs, OutputFormat, StatusArgs,
+    TestPamArgs,
 };
 pub use camera::{CameraEnvironment, CameraListReport, CameraProbeReport};
 pub use error::AdminCliError;
