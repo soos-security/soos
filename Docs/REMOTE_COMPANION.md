@@ -886,6 +886,83 @@ and battery level work the same way. Owner steps and caveats:
     and **camera start** show the fingerprint/face prompt directly with no provider picker, over
     the tailnet and over Funnel; sign-in may still show the picker.
 
+## 2i. Browser support
+
+Policy (ADR 2026-10-13 "Browser Support Policy for the `soos-remote` Web App", GitHub #366,
+owner decisions of 2026-10-13 on #355):
+
+- **Mandatory browsers**: Safari on iPhone, iPad and macOS, Chrome, Firefox and Samsung Internet.
+  Every other browser is **best effort**: it either works or each affected feature says, in a
+  fixed sentence, why it is off here. Nothing is left as a silent, stuck button.
+- **Floor**: features that are *Baseline widely available*; there is no explicit Firefox ESR 115
+  commitment (older engines get the CSS fallbacks below where they understand `@supports`).
+- **Feature detection only**: one pure probe in `app.js` (`browserCapabilities()`) checks
+  `PublicKeyCredential`, the service worker, `PushManager`, `Notification`, `EventSource`,
+  streamed `fetch` bodies, `createImageBitmap` and the home-screen display mode. The page never
+  reads the User-Agent (not even for wording) and the server never reads `User-Agent` either.
+  The flags only hide or disable controls in the page: every server check (identity headers,
+  CSRF, `Origin`, `Sec-Fetch-Site`, passkey user verification, web session) is the same for every
+  browser, so a capability flag can never open a server path.
+- **No polyfill, no CDN, no framework, no bundler**: the CSP and the eleven-file asset set are
+  unchanged; per-feature messages only (no "this browser" panel).
+
+What each feature does when the browser lacks it:
+
+| Feature | Needs | Without it |
+|---|---|---|
+| Status, live updates, **Lock now** | `fetch`; `EventSource` for live updates | Without `EventSource` the page fetches the status every 15 s instead (no battery line). Lock never depends on passkeys. |
+| Sign-in, **Unlock now**, *Add a passkey*, camera start | WebAuthn (`PublicKeyCredential`) | The buttons stay disabled with "This browser cannot use passkeys, so sign-in, unlock, passkey enrollment and the camera view are off here; lock and status still work on the tailnet". A cancelled or timed-out passkey check shows a fixed sentence, never the browser's own error text. |
+| Notifications | service worker, `PushManager`, `Notification` | iPhone or iPad outside the home-screen app: "On iPhone and iPad, notifications only work in the home-screen app: tap Share, then Add to Home Screen, …"; no service worker (private window): "Notifications need a service worker, which this window does not allow …"; other browsers: the existing "this browser does not support them" sentence. |
+| Notifications, at subscribe time | a working push service the PC accepts | Permission refused: "Notifications are blocked …"; no push service or subscribe refused (Brave with Google push off, Chromium builds without Google keys): "This browser has no working push service: in Brave, turn on Use Google services for push messaging; …"; an older subscription in the way: "reload the page, then enable notifications again"; the PC's `unsupported_push_service` (Edge on a computer, `*.notify.windows.com`): "The PC does not accept this browser's push service (Edge on a computer, for example) …", and the refused subscription is dropped again. The whole tap ends within 10 s of the permission answer. |
+| Live camera view | streamed `fetch` (`ReadableStream`, `AbortController`), `createImageBitmap` | The start button is hidden: "This browser cannot show the live camera view (no streamed download or image decoding) …". |
+| Styling | `:has()`, container query units, `dvh` | `@supports not selector(:has(*))` repeats the status dot colours and the feedback spacing on hooks set by `app.js`; `@supports not (container-type: size)` sizes the portrait camera canvas with percentages and viewport units; `100vh` precedes `100dvh`. |
+
+Compatibility matrix. "OK (row)" is verified on hardware by that row; "Expected (row)" is the
+design target, pending the owner's hardware row; "Message" means the feature is not possible
+there and the page says why. Automated cross-engine runs (Playwright) are a separate follow-up.
+
+| Browser | Page + live status + lock | Passkey sign-in / unlock | Notifications | Live camera |
+|---|---|---|---|---|
+| Safari, iPhone/iPad home-screen app (iOS 16.4+) | OK (RMC43, RMC88) | OK (RMC43, RMC44) | Expected (RMC74, RXB12) | Expected (RLC16) |
+| Safari in a tab, or any other iOS browser (all WebKit) | OK (RMC43) | OK in Safari (RMC43); Expected elsewhere (RXB12) | Message: home-screen app needed (RXB12); Add to Home Screen also works from other iOS browsers on iOS 16.4+ | Expected (RXB12) |
+| Safari macOS 13+ | Expected (RXB13) | Expected (RXB13) | Expected (Apple, RXB13) | Expected (RXB13) |
+| Chrome desktop and Android | Expected (RXB14, RAN12) | Expected (RXB14, RDB10) | Expected (FCM, RXB14) | Expected (RXB14) |
+| Firefox desktop | Expected (RXB15) | Expected; platform passkeys depend on the OS (RXB15) | Expected (Mozilla, RXB15) | Expected (RXB15) |
+| Firefox Android | Expected (RXB16) | Expected (RXB16) | Expected (Mozilla, RXB16) | Expected (RXB16) |
+| Samsung Internet | Expected (RXB17) | Expected (RXB17) | Expected (FCM, RXB17) | Expected (RXB17) |
+| Brave desktop / Android | Best effort (RXB18) | Best effort (RXB18) | Message until *Use Google services for push messaging* is on (desktop, RXB18) | Best effort (RXB18) |
+| Edge desktop | Best effort (RXB19) | Best effort (RXB19) | Message: push service not accepted, out of scope (section 9, RXB19) | Best effort (RXB19) |
+| Edge Android, Opera, Vivaldi, DuckDuckGo, other WebViews | Best effort | Best effort (WebAuthn in a WebView is up to the app) | Best effort (expected FCM where available; else a message) | Best effort |
+| Any private / incognito window | Expected (RXB20) | Expected with synced passkeys (RXB20) | Message (RXB20): blocked permission (Chrome) or no service worker (Firefox) | Expected (RXB20) |
+
+Notes:
+
+- **iPhone and iPad**: Web Push exists only in the home-screen app (iOS/iPadOS 16.4 or later).
+  Every iOS browser is WebKit; since iOS 16.4 *Add to Home Screen* is also offered by third-party
+  browsers. Safari and the home-screen app keep separate cookies (section 7).
+- **Edge on a computer** subscribes through the Windows push service (`*.notify.windows.com`),
+  which is not in the push allowlist: notifications are out of scope there (section 9); every
+  other feature is best effort.
+- **Brave** desktop needs *Settings → Privacy and security → Use Google services for push
+  messaging*; without it the subscribe is refused and the page says so.
+- **Private windows**: Chrome incognito refuses the notification permission, Firefox private
+  windows have no service worker; status, lock, passkey sign-in (synced passkeys) and the camera
+  view still work.
+- **Browser secure DNS** (Firefox DNS-over-HTTPS, Chrome or Edge *Use secure DNS*) can bypass
+  MagicDNS, so a tailnet-only `*.ts.net` name does not resolve and the page cannot load at all
+  (section 7). The Funnel name is public and is not affected.
+
+**Owner hardware checks** (matrix rows, pending; agents never install, enable or restart units):
+RXB12 iPhone: Safari tab and one third-party iOS browser show the home-screen sentence for
+notifications, the home-screen app subscribes; RXB13 Safari macOS: page, passkey, notifications,
+camera; RXB14 Chrome desktop and Android; RXB15 Firefox desktop: notifications (Mozilla), the
+private-window sentence, the secure-DNS note; RXB16 Firefox Android; RXB17 Samsung Internet;
+RXB18 Brave: the push-service sentence, then a working subscription once the Google push setting
+is on; RXB19 Edge desktop: page, passkey and camera work, *Enable notifications* shows the Edge
+sentence and nothing stays subscribed (`soos-remote push list` unchanged); RXB20 a private
+window (Chrome incognito and Firefox private): the matching push sentence while status and lock
+keep working.
+
 ## 3. Requirements on the desktop
 
 - **`LockedHint` must be set by the desktop.** GNOME, Plasma and niri set it natively;
@@ -1166,6 +1243,13 @@ reason classes.
 | Signed in in Safari but the home-screen app asks again | Safari and the home-screen app keep separate cookies | Sign in once in each |
 | Android: no notification while the screen is off | A battery saver restricts Chrome (or Firefox) | Set the browser to **Unrestricted** battery usage (section 2h) |
 | "Notifications could not start: the service worker did not register" | `/sw.js` could not be registered or did not activate within 10 s | Reload the page and try again; check that `/sw.js` answers `200` |
+| The tailnet address does not load in one browser, but works in another or with `tailscale ping` | The browser's own secure DNS (Firefox DNS-over-HTTPS, Chrome or Edge *Use secure DNS*) bypasses MagicDNS, so the tailnet-only `*.ts.net` name does not resolve | Turn the browser's secure DNS off, or add an exception for your tailnet domain (Firefox: *Settings → Privacy & Security → DNS over HTTPS*, *Manage Exceptions*); see section 2i |
+| "The PC does not accept this browser's push service (Edge on a computer, for example)…" | The browser's push service is not one of the three allowed hosts (`unsupported_push_service`; Edge desktop uses `*.notify.windows.com`) | Use Chrome, Firefox, Safari or Samsung Internet for notifications (section 2i); the refused subscription is dropped again |
+| "This browser has no working push service…" | The browser refused the subscription (`AbortError` or `NotSupportedError`): Brave without *Use Google services for push messaging*, Chromium builds without Google keys | Turn the Brave setting on, or use a mandatory browser (section 2i) |
+| "Notifications need a service worker, which this window does not allow…" | A private window, or a browser without service workers | Open the page in a normal window |
+| "On iPhone and iPad, notifications only work in the home-screen app…" | The page is open in a Safari tab or another iOS browser | Share → **Add to Home Screen**, then open soos from the icon (iOS 16.4 or later) |
+| "The browser's push service did not answer in time" / "The PC did not confirm the subscription in time" / "The PC could not be reached to save the subscription" | The subscribe or the hand-off to the PC did not finish within 10 s of the permission answer, or the PC was unreachable | Check the connection (tailnet, Funnel) and tap **Enable notifications** again |
+| Passkey buttons disabled with "This browser cannot use passkeys…" | The browser (or an in-app WebView) has no WebAuthn | Use a mandatory browser; lock and status keep working on the tailnet |
 
 ## 8. Residual limitations
 
@@ -1255,6 +1339,14 @@ reason classes.
   read stuck in a hung driver is abandoned, and the same bound applies to every other blocking
   task still running then (a push store write, which is temp file + `fsync` + `rename` and so
   never leaves a torn store).
+- Browser support (section 2i): capability flags are hints for the page only (every server check is the
+  same for every browser); feature detection cannot see a push service that is present but broken until
+  `subscribe` answers (bounded by 10 s); a browser without `EventSource` polls the status every 15 s, which
+  refreshes a Funnel web session's idle timer while the page is open (as an open stream does) and shows no
+  battery line; engines without container queries get an approximate portrait camera box (clipped when the card
+  stage is capped by `max-height: 70vh`; in full screen the box ignores the safe-area padding and `100vh` is the
+  large viewport on mobile); pre-Baseline engines (Firefox ESR 115 included) are best effort; there is no
+  automated cross-engine run yet (hardware rows RXB12–RXB20).
 - The `bind` → `chmod 0600` window of the socket is closed by the `0700` parent directory and
   the unit's `UMask=0077`; the service must therefore be started through the unit (or with the
   same umask).
@@ -1275,7 +1367,7 @@ reason classes.
   inside `soos-remote` (the daemon converts frames for it), and any embedding or evidence access.
 - Battery time-to-empty or time-to-full, battery health or cycle count, peripheral batteries
   (`scope=Device`), low-battery notifications, any write to sysfs, UPower.
-- A native Android app, FCM direct API keys, Edge desktop push (`*.notify.windows.com`), Android
-  Shortcuts/Tasker integration (pointer in section 2h only).
+- A native Android app, FCM direct API keys, Edge desktop push (`*.notify.windows.com`; the page says so,
+  section 2i), Android Shortcuts/Tasker integration (pointer in section 2h only).
 - System-wide packaging (`install.sh`, deb/rpm/Arch): deferred until the owner approves the
   merge; `scripts/install_remote.sh` is the only installer.
