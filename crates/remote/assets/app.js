@@ -42,6 +42,14 @@
  * Battery level (ADR 2026-10-07 "Live Battery Level in soos-remote"): level, charge state
  * and mains presence only, from event: battery on the status stream only, shown with
  * textContent; hidden while the PC is unreachable or the stream is down.
+ *
+ * Browser support (ADR 2026-10-13 "Browser Support Policy for the soos-remote Web App"):
+ * one pure probe, browserCapabilities(), says from feature detection only (never the
+ * User-Agent) what this browser can do; every passkey, push, service worker, stream and
+ * image-decoding call sits behind it. A missing feature disables or hides only its own
+ * control with a fixed explanation; lock and status keep working. The flags are hints for
+ * the page only: every server check is the same for every browser. Messages are fixed
+ * strings of this file; a browser's own error text is never shown.
  */
 "use strict";
 
@@ -126,8 +134,39 @@ const PUSH_UNSUPPORTED_TEXT =
 const PUSH_BLOCKED_TEXT = "Notifications are blocked: allow them for this site in the browser or phone settings";
 const PUSH_WORKER_FAILED_TEXT =
   "Notifications could not start: the service worker did not register (reload the page and try again)";
-// Longest wait for an active service worker before subscribing.
+const PUSH_HOME_SCREEN_TEXT =
+  "On iPhone and iPad, notifications only work in the home-screen app: tap Share, then Add to Home Screen, and open soos from the new icon (iOS 16.4 or later)";
+const PUSH_NO_WORKER_TEXT =
+  "Notifications need a service worker, which this window does not allow (private windows block it): open the page in a normal window";
+const PUSH_NO_SERVICE_TEXT =
+  "This browser has no working push service: in Brave, turn on Use Google services for push messaging; otherwise use Chrome, Firefox, Safari or Samsung Internet";
+const PUSH_STALE_TEXT =
+  "An older notification subscription is in the way: reload the page, then enable notifications again";
+const PUSH_TIMEOUT_TEXT = "The PC did not confirm the subscription in time: check the connection and try again";
+const PUSH_UNREACHABLE_TEXT =
+  "The PC could not be reached to save the subscription: check the connection and try again";
+const PUSH_SLOW_TEXT = "The browser's push service did not answer in time: try again";
+// Fixed texts for the browser's push errors, by DOMException name.
+const PUSH_ERROR_TEXTS = {
+  NotAllowedError: PUSH_BLOCKED_TEXT,
+  AbortError: PUSH_NO_SERVICE_TEXT,
+  NotSupportedError: PUSH_NO_SERVICE_TEXT,
+  InvalidStateError: PUSH_STALE_TEXT,
+  SecurityError: PUSH_NO_WORKER_TEXT,
+};
+const PASSKEY_UNSUPPORTED_TEXT =
+  "This browser cannot use passkeys, so sign-in, unlock, passkey enrollment and the camera view are off here; lock and status still work on the tailnet";
+// Fixed texts for the browser's passkey errors, by DOMException name.
+const PASSKEY_ERROR_TEXTS = {
+  NotAllowedError: "The passkey check was cancelled or timed out",
+  SecurityError: "This address cannot use the passkey: open the exact address the passkey was made for",
+  NotSupportedError: "This browser or device cannot create this kind of passkey",
+};
+// Longest wait for an active service worker before subscribing; also the whole budget of an
+// "Enable notifications" tap from the permission answer on.
 const SERVICE_WORKER_READY_TIMEOUT_MS = 10000;
+// Status refresh cadence when the browser has no EventSource (the server's keep-alive cadence).
+const STATUS_POLL_MS = 15000;
 
 // Results shared by every passkey ceremony.
 const PASSKEY_REASONS = {
@@ -151,6 +190,10 @@ const PASSKEY_REASONS = {
   unavailable: "The PC is unavailable",
   forbidden: "Request refused",
 };
+// Enrollment adds the error of a passkey that already exists (create() only).
+const ENROLL_ERROR_TEXTS = Object.assign({}, PASSKEY_ERROR_TEXTS, {
+  InvalidStateError: PASSKEY_REASONS.already_registered,
+});
 
 const stateNode = document.getElementById("state");
 const activityNode = document.getElementById("activity");
@@ -159,6 +202,7 @@ const feedbackNode = document.getElementById("feedback");
 const lockButton = document.getElementById("lock");
 const unlockButton = document.getElementById("unlock");
 const statusCard = document.getElementById("status-card");
+const statTile = statusCard.querySelector(".stat-tile");
 const loginSection = document.getElementById("login");
 const loginButton = document.getElementById("login-button");
 const loginFeedback = document.getElementById("login-feedback");
@@ -189,6 +233,7 @@ batteryNode.hidden = true;
 updatedNode.parentNode.insertBefore(batteryNode, updatedNode);
 
 let source = null;
+let statusPoll = null;
 let latest = null;
 let lastEventAt = 0;
 let lockRequestedAt = 0;
@@ -203,6 +248,74 @@ let batteryView = null;
 
 function setText(node, text) {
   node.textContent = text;
+}
+
+// The browser features the page relies on, from feature detection only (never the
+// User-Agent). Pure: no request, no DOM write, no storage; recomputed on every call.
+function browserCapabilities() {
+  const nav = window.navigator;
+  const store = nav.credentials;
+  const display =
+    typeof window.matchMedia === "function" ? window.matchMedia("(display-mode: standalone)") : null;
+  return {
+    webauthn:
+      typeof window.PublicKeyCredential !== "undefined" &&
+      !!store &&
+      typeof store.get === "function" &&
+      typeof store.create === "function",
+    serviceWorker: "serviceWorker" in nav,
+    push: "PushManager" in window,
+    notifications: "Notification" in window,
+    standalone: nav.standalone === true || (display !== null && display.matches === true),
+    // iPhone and iPad WebKit (Safari and every other iOS browser): wording only.
+    homeScreen: "standalone" in nav,
+    eventSource: typeof window.EventSource !== "undefined",
+    streams:
+      typeof window.ReadableStream !== "undefined" &&
+      typeof window.AbortController !== "undefined" &&
+      typeof window.Response !== "undefined" &&
+      "body" in window.Response.prototype,
+    imageBitmap: typeof window.createImageBitmap === "function",
+  };
+}
+
+// An error whose message is one of this file's fixed texts.
+function fixedError(text) {
+  const error = new Error(text);
+  error.fixed = true;
+  return error;
+}
+
+// The text to show for a failure: a fixed text of this file, the fixed text for the browser's
+// error name, or the fallback; a browser's own message is never shown.
+function failureText(error, names, fallback) {
+  if (error && error.fixed === true && typeof error.message === "string") {
+    return error.message;
+  }
+  if (error && typeof error.name === "string" && Object.prototype.hasOwnProperty.call(names, error.name)) {
+    return names[error.name];
+  }
+  return fallback;
+}
+
+// Settles like `promise`, or fails with the fixed `text` at `deadline` (Date.now() ms); the
+// timer is cleared on both outcomes.
+function beforeDeadline(promise, deadline, text) {
+  return new Promise(function (resolve, reject) {
+    const timer = setTimeout(function () {
+      reject(fixedError(text));
+    }, Math.max(0, deadline - Date.now()));
+    promise.then(
+      function (value) {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      function (error) {
+        clearTimeout(timer);
+        reject(error);
+      }
+    );
+  });
 }
 
 function reasonFor(result, extra, fallback) {
@@ -286,6 +399,9 @@ function knownTransports(list) {
 // credentials listed by the server (unlock, camera) are passed as the allow list so the
 // phone goes straight to the biometric prompt; sign-in never names one.
 function getAssertion(options, nameCredentials) {
+  if (!browserCapabilities().webauthn) {
+    return Promise.reject(fixedError(PASSKEY_UNSUPPORTED_TEXT));
+  }
   const publicKey = {
     challenge: fromBase64Url(options.challenge),
     rpId: options.rp_id,
@@ -314,6 +430,12 @@ function getAssertion(options, nameCredentials) {
 
 // --- screens ------------------------------------------------------------------------
 
+// The Sign out button and the feedback-line hook of the :has() fallback in style.css.
+function setLogoutHidden(hidden) {
+  logoutButton.hidden = hidden;
+  feedbackNode.classList.toggle("feedback-last", hidden);
+}
+
 function showLogin(message) {
   signedOut = true;
   closeStream();
@@ -321,7 +443,7 @@ function showLogin(message) {
   latest = null;
   loginSection.hidden = false;
   statusCard.hidden = true;
-  logoutButton.hidden = true;
+  setLogoutHidden(true);
   enrollSection.hidden = true;
   alertsSection.hidden = true;
   alertsView = null;
@@ -329,15 +451,21 @@ function showLogin(message) {
   pushView = null;
   stopCameraView(null);
   buildCameraCard().section.hidden = true;
-  setText(loginFeedback, message || " ");
+  loginButton.disabled = !browserCapabilities().webauthn;
+  setText(loginFeedback, loginButton.disabled ? PASSKEY_UNSUPPORTED_TEXT : message || " ");
 }
 
 function showApp(state) {
   signedOut = false;
   loginSection.hidden = true;
   statusCard.hidden = false;
-  logoutButton.hidden = state.mode !== "funnel";
+  setLogoutHidden(state.mode !== "funnel");
   enrollSection.hidden = !(state.mode === "tailnet" && state.enrollment === true);
+  if (!browserCapabilities().webauthn) {
+    enrollButton.disabled = true;
+    setText(enrollFeedback, PASSKEY_UNSUPPORTED_TEXT);
+    setText(feedbackNode, PASSKEY_UNSUPPORTED_TEXT);
+  }
 }
 
 function render(view, reachable) {
@@ -346,6 +474,8 @@ function render(view, reachable) {
   setText(stateNode, label);
   stateNode.dataset.state = state;
   stateNode.className = "state state-" + state.replace(/[^a-z_]/g, "");
+  // Hook of the :has() fallback in style.css: known states only.
+  statTile.dataset.state = Object.prototype.hasOwnProperty.call(LABELS, state) ? state : "unknown";
 
   if (reachable && (view.state === "locked" || view.state === "unlocked")) {
     let activity = view.active ? "Active session" : "Inactive session";
@@ -366,7 +496,7 @@ function render(view, reachable) {
   }
 
   lockButton.disabled = !(reachable && view.state === "unlocked");
-  unlockButton.disabled = !(reachable && view.state === "locked");
+  unlockButton.disabled = !(reachable && view.state === "locked" && browserCapabilities().webauthn);
   if (reachable && view.state === "locked" && lockRequestedAt !== 0) {
     confirmLock();
   }
@@ -467,6 +597,13 @@ function confirmUnlock() {
 
 function openStream() {
   closeStream();
+  if (!browserCapabilities().eventSource) {
+    // No EventSource: the status is fetched at the server's keep-alive cadence instead.
+    statusPoll = setInterval(function () {
+      fetchStatus(true);
+    }, STATUS_POLL_MS);
+    return;
+  }
   source = new EventSource(EVENTS_PATH);
   source.addEventListener("status", function (event) {
     try {
@@ -502,6 +639,10 @@ function closeStream() {
   if (source !== null) {
     source.close();
     source = null;
+  }
+  if (statusPoll !== null) {
+    clearInterval(statusPoll);
+    statusPoll = null;
   }
   clearBattery();
 }
@@ -789,6 +930,10 @@ function unlockFailed(status, result) {
 }
 
 function requestUnlock() {
+  if (!browserCapabilities().webauthn) {
+    setText(feedbackNode, PASSKEY_UNSUPPORTED_TEXT);
+    return;
+  }
   // A deliberate second tap, then the passkey check: a stray tap must never open the PC.
   if (!window.confirm("Unlock the PC now?")) {
     return;
@@ -835,21 +980,25 @@ function requestUnlock() {
           });
       });
     })
-    .catch(function () {
+    .catch(function (error) {
       unlockFailed(0, "cancelled");
-      setText(feedbackNode, "Unlock cancelled or failed");
+      setText(feedbackNode, failureText(error, PASSKEY_ERROR_TEXTS, "Unlock cancelled or failed"));
     });
 }
 
 // --- sign in / sign out (internet access through Tailscale Funnel) ---------------------
 
 function requestLogin() {
+  if (!browserCapabilities().webauthn) {
+    setText(loginFeedback, PASSKEY_UNSUPPORTED_TEXT);
+    return;
+  }
   loginButton.disabled = true;
   setText(loginFeedback, PASSKEY_PROMPT_TEXT);
   postJson(LOGIN_OPTIONS_PATH, "login-options")
     .then(function (options) {
       if (options.status !== 200) {
-        throw new Error(reasonFor(options.result, {}, "Sign-in refused (" + options.status + ")"));
+        throw fixedError(reasonFor(options.result, {}, "Sign-in refused (" + options.status + ")"));
       }
       return getAssertion(options.body, false);
     })
@@ -858,16 +1007,16 @@ function requestLogin() {
     })
     .then(function (outcome) {
       if (outcome.status !== 200) {
-        throw new Error(reasonFor(outcome.result, {}, "Sign-in refused (" + outcome.status + ")"));
+        throw fixedError(reasonFor(outcome.result, {}, "Sign-in refused (" + outcome.status + ")"));
       }
       setText(loginFeedback, " ");
       resume();
     })
     .catch(function (error) {
-      setText(loginFeedback, error && error.message ? error.message : "Sign-in cancelled");
+      setText(loginFeedback, failureText(error, PASSKEY_ERROR_TEXTS, "Sign-in cancelled"));
     })
     .finally(function () {
-      loginButton.disabled = false;
+      loginButton.disabled = !browserCapabilities().webauthn;
     });
 }
 
@@ -901,6 +1050,10 @@ function credentialTransports(response) {
 }
 
 function requestEnroll() {
+  if (!browserCapabilities().webauthn) {
+    setText(enrollFeedback, PASSKEY_UNSUPPORTED_TEXT);
+    return;
+  }
   const code = enrollCode.value.trim();
   if (code.length === 0) {
     setText(enrollFeedback, "Type the code printed by soos-remote enroll-code");
@@ -911,7 +1064,10 @@ function requestEnroll() {
   postJson(REGISTER_OPTIONS_PATH, "register-options", { code: code })
     .then(function (options) {
       if (options.status !== 200) {
-        throw new Error(reasonFor(options.result, {}, "Enrollment refused (" + options.status + ")"));
+        throw fixedError(reasonFor(options.result, {}, "Enrollment refused (" + options.status + ")"));
+      }
+      if (!browserCapabilities().webauthn) {
+        throw fixedError(PASSKEY_UNSUPPORTED_TEXT);
       }
       const o = options.body;
       return navigator.credentials.create({
@@ -946,23 +1102,24 @@ function requestEnroll() {
     })
     .then(function (outcome) {
       if (outcome.status !== 200) {
-        throw new Error(reasonFor(outcome.result, {}, "Enrollment refused (" + outcome.status + ")"));
+        throw fixedError(reasonFor(outcome.result, {}, "Enrollment refused (" + outcome.status + ")"));
       }
       enrollCode.value = "";
       setText(enrollFeedback, "Passkey added");
     })
     .catch(function (error) {
-      setText(enrollFeedback, error && error.message ? error.message : "Enrollment cancelled");
+      setText(enrollFeedback, failureText(error, ENROLL_ERROR_TEXTS, "Enrollment cancelled"));
     })
     .finally(function () {
-      enrollButton.disabled = false;
+      enrollButton.disabled = !browserCapabilities().webauthn;
     });
 }
 
 // --- push notifications (iPhone home-screen app or a supporting browser) ---------------
 
 const PUSH_REASONS = {
-  unsupported_push_service: "This browser's push service is not supported",
+  unsupported_push_service:
+    "The PC does not accept this browser's push service (Edge on a computer, for example): use Chrome, Firefox, Safari or Samsung Internet for notifications",
   too_many_subscriptions:
     "Four devices already receive notifications: remove one on the PC (soos-remote push list, then push remove N)",
   no_subscriptions: "No device receives notifications yet",
@@ -979,7 +1136,21 @@ const PUSH_SERVICES = {
 };
 
 function pushSupported() {
-  return "serviceWorker" in navigator && "PushManager" in window && "Notification" in window;
+  const caps = browserCapabilities();
+  return caps.serviceWorker && caps.push && caps.notifications;
+}
+
+// The fixed reason this browser cannot subscribe (wording only; the server checks are the
+// same for every browser).
+function pushUnsupportedText(fallback) {
+  const caps = browserCapabilities();
+  if (caps.homeScreen && !caps.standalone) {
+    return PUSH_HOME_SCREEN_TEXT;
+  }
+  if (!caps.serviceWorker) {
+    return PUSH_NO_WORKER_TEXT;
+  }
+  return fallback;
 }
 
 function registerServiceWorker() {
@@ -1004,6 +1175,9 @@ function registerServiceWorker() {
 // was active within SERVICE_WORKER_READY_TIMEOUT_MS of the call (the timer is armed before
 // registering, so a register() that never settles is bounded too).
 function readyRegistration() {
+  if (!pushSupported()) {
+    return Promise.resolve(null);
+  }
   return new Promise(function (resolve) {
     const timer = setTimeout(function () {
       resolve(null);
@@ -1064,7 +1238,7 @@ function renderPush(view) {
   }
   pushHint.hidden = true;
   if (!pushSupported()) {
-    setText(pushStateNode, PUSH_UNSUPPORTED_TEXT);
+    setText(pushStateNode, pushUnsupportedText(PUSH_UNSUPPORTED_TEXT));
     pushEnableButton.hidden = true;
     pushTestButton.hidden = true;
     pushDisableButton.hidden = true;
@@ -1164,7 +1338,7 @@ function fetchPush() {
 // The permission request is the first step of the tap (browsers require a user gesture).
 async function enableNotifications() {
   if (!pushSupported()) {
-    setText(pushFeedback, PUSH_UNSUPPORTED_TEXT);
+    setText(pushFeedback, pushUnsupportedText(PUSH_UNSUPPORTED_TEXT));
     return;
   }
   if (pushView === null || pushView.state !== "active" || typeof pushView.public_key !== "string") {
@@ -1172,29 +1346,48 @@ async function enableNotifications() {
     return;
   }
   const publicKey = pushView.public_key;
-  pushEnableButton.disabled = true;
   try {
     const permission = await Notification.requestPermission();
     if (permission !== "granted") {
       setText(pushFeedback, PUSH_BLOCKED_TEXT);
       return;
     }
+    // The button is off only from a granted permission on, and the rest of the tap ends
+    // within SERVICE_WORKER_READY_TIMEOUT_MS (never held by an open permission prompt).
+    pushEnableButton.disabled = true;
+    const deadline = Date.now() + SERVICE_WORKER_READY_TIMEOUT_MS;
     const registration = await readyRegistration();
     if (registration === null) {
       setText(pushFeedback, PUSH_WORKER_FAILED_TEXT);
       return;
     }
-    const subscription = await registration.pushManager.subscribe({
-      userVisibleOnly: true,
-      applicationServerKey: fromBase64Url(publicKey),
-    });
-    const outcome = await postJson(PUSH_SUBSCRIBE_PATH, "push-subscribe", subscription.toJSON());
+    const subscription = await beforeDeadline(
+      registration.pushManager.subscribe({
+        userVisibleOnly: true,
+        applicationServerKey: fromBase64Url(publicKey),
+      }),
+      deadline,
+      PUSH_SLOW_TEXT
+    );
+    const outcome = await beforeDeadline(
+      postJson(PUSH_SUBSCRIBE_PATH, "push-subscribe", subscription.toJSON()).catch(function () {
+        throw fixedError(PUSH_UNREACHABLE_TEXT);
+      }),
+      deadline,
+      PUSH_TIMEOUT_TEXT
+    );
     if (outcome.status !== 200) {
-      throw new Error(reasonFor(outcome.result, PUSH_REASONS, "Refused (" + outcome.status + ")"));
+      if (outcome.result === "unsupported_push_service") {
+        // The PC refuses this browser's push service (Edge on a computer): drop it here too.
+        subscription.unsubscribe().catch(function () {
+          return false;
+        });
+      }
+      throw fixedError(reasonFor(outcome.result, PUSH_REASONS, "Refused (" + outcome.status + ")"));
     }
     setText(pushFeedback, "Notifications enabled on this phone");
   } catch (error) {
-    setText(pushFeedback, error && error.message ? error.message : "Notifications not enabled");
+    setText(pushFeedback, failureText(error, PUSH_ERROR_TEXTS, "Notifications not enabled"));
   } finally {
     pushEnableButton.disabled = false;
     fetchPush();
@@ -1221,6 +1414,10 @@ function sendTestNotification() {
 }
 
 function disableNotifications() {
+  if (!pushSupported()) {
+    setText(pushFeedback, pushUnsupportedText(PUSH_UNSUPPORTED_TEXT));
+    return;
+  }
   pushDisableButton.disabled = true;
   registerServiceWorker()
     .then(function (registration) {
@@ -1267,6 +1464,8 @@ const CAMERA_START_LABEL = "Start camera view";
 const CAMERA_STOP_LABEL = "Stop camera view";
 const CAMERA_STREAM_PATTERN = /^\/api\/camera\/stream\/[A-Za-z0-9_-]{43}$/;
 const CAMERA_LIVE_TEXT = "Live view of the PC camera (tap the image for full screen)";
+const CAMERA_UNSUPPORTED_TEXT =
+  "This browser cannot show the live camera view (no streamed download or image decoding): use Safari, Chrome, Firefox or Samsung Internet";
 // Stage class of the portrait mode (the image turned by 90°); landscape has no class.
 const CAMERA_PORTRAIT_CLASS = "camera-portrait";
 
@@ -1484,6 +1683,17 @@ function renderCamera(view) {
     c.stopButton.hidden = true;
     return;
   }
+  const caps = browserCapabilities();
+  if (!(caps.streams && caps.imageBitmap)) {
+    setText(c.stateLine, CAMERA_UNSUPPORTED_TEXT);
+    c.startButton.hidden = true;
+    c.stopButton.hidden = true;
+    return;
+  }
+  if (!caps.webauthn) {
+    c.startButton.disabled = true;
+    setText(c.feedback, PASSKEY_UNSUPPORTED_TEXT);
+  }
   const streaming = cameraController !== null;
   c.startButton.hidden = streaming;
   c.stopButton.hidden = !streaming;
@@ -1515,7 +1725,7 @@ function fetchCamera() {
 
 // Draws one JPEG part; a part arriving while the previous one decodes is dropped.
 function showCameraFrame(jpeg, controller) {
-  if (cameraDecoding) {
+  if (cameraDecoding || !browserCapabilities().imageBitmap) {
     return;
   }
   cameraDecoding = true;
@@ -1576,6 +1786,9 @@ function headEndOf(buffer, from) {
 // Reads the multipart stream: `--soosframe`, part headers, `Content-Length` digits only
 // (at most CAMERA_MAX_PART_BYTES), the JPEG bytes and a CRLF; anything else aborts.
 function readCameraStream(response, controller) {
+  if (!browserCapabilities().streams) {
+    return Promise.reject(fixedError(CAMERA_UNSUPPORTED_TEXT));
+  }
   const reader = response.body.getReader();
   const opener = asciiBytes(CAMERA_BOUNDARY + "\r\n");
   const closer = asciiBytes(CAMERA_BOUNDARY + "--");
@@ -1583,7 +1796,7 @@ function readCameraStream(response, controller) {
 
   function append(chunk) {
     if (buffer.length + chunk.length > CAMERA_MAX_BUFFER_BYTES) {
-      throw new Error("The camera stream exceeded its bound");
+      throw fixedError("The camera stream exceeded its bound");
     }
     const next = new Uint8Array(buffer.length + chunk.length);
     next.set(buffer, 0);
@@ -1601,12 +1814,12 @@ function readCameraStream(response, controller) {
         return false;
       }
       if (!startsWithBytes(buffer, opener)) {
-        throw new Error("The camera stream is malformed");
+        throw fixedError("The camera stream is malformed");
       }
       const headEnd = headEndOf(buffer, opener.length);
       if (headEnd < 0) {
         if (buffer.length > 1024) {
-          throw new Error("The camera stream is malformed");
+          throw fixedError("The camera stream is malformed");
         }
         return false;
       }
@@ -1625,7 +1838,7 @@ function readCameraStream(response, controller) {
         }
       });
       if (length <= 0 || length > CAMERA_MAX_PART_BYTES) {
-        throw new Error("The camera stream is malformed");
+        throw fixedError("The camera stream is malformed");
       }
       const start = headEnd + 4;
       if (buffer.length < start + length + 2) {
@@ -1662,7 +1875,7 @@ function endCameraView(message) {
   exitCameraFullscreen();
   c.stage.hidden = true;
   clearCameraCanvas();
-  c.startButton.disabled = false;
+  c.startButton.disabled = !browserCapabilities().webauthn;
   if (message) {
     setText(c.feedback, message);
   }
@@ -1702,12 +1915,12 @@ function openCameraStream(path) {
             return {};
           })
           .then(function (body) {
-            throw new Error(cameraReason(body.result, response.status));
+            throw fixedError(cameraReason(body.result, response.status));
           });
       }
       const type = response.headers.get("Content-Type") || "";
       if (type.indexOf("application/octet-stream") !== 0 || !response.body) {
-        throw new Error("The camera stream is malformed");
+        throw fixedError("The camera stream is malformed");
       }
       setText(c.feedback, " ");
       c.startButton.hidden = true;
@@ -1723,13 +1936,17 @@ function openCameraStream(path) {
     })
     .catch(function (error) {
       if (cameraController === controller) {
-        endCameraView(error && error.message ? error.message : "The camera view ended");
+        endCameraView(failureText(error, {}, "The camera view ended"));
       }
     });
 }
 
 function startCameraView() {
   const c = buildCameraCard();
+  if (!browserCapabilities().webauthn) {
+    setText(c.feedback, PASSKEY_UNSUPPORTED_TEXT);
+    return;
+  }
   // A deliberate second tap, then the passkey check: a stray tap must never turn the camera on.
   if (!window.confirm("Start the live camera view of the PC? Its camera light turns on.")) {
     return;
@@ -1739,7 +1956,7 @@ function startCameraView() {
   postJson(CAMERA_OPTIONS_PATH, "camera-options")
     .then(function (options) {
       if (options.status !== 200) {
-        throw new Error(cameraReason(options.result, options.status));
+        throw fixedError(cameraReason(options.result, options.status));
       }
       return getAssertion(options.body, true);
     })
@@ -1767,20 +1984,20 @@ function startCameraView() {
         return null;
       }
       if (outcome.status !== 200) {
-        throw new Error(cameraReason(outcome.body.result, outcome.status));
+        throw fixedError(cameraReason(outcome.body.result, outcome.status));
       }
       const path = outcome.body.stream_path;
       if (typeof path !== "string" || !CAMERA_STREAM_PATTERN.test(path)) {
-        throw new Error("The PC answered an unexpected camera address");
+        throw fixedError("The PC answered an unexpected camera address");
       }
       return openCameraStream(path);
     })
     .catch(function (error) {
-      setText(c.feedback, error && error.message ? error.message : "Camera view cancelled");
+      setText(c.feedback, failureText(error, PASSKEY_ERROR_TEXTS, "Camera view cancelled"));
       fetchCamera();
     })
     .finally(function () {
-      c.startButton.disabled = false;
+      c.startButton.disabled = !browserCapabilities().webauthn;
     });
 }
 

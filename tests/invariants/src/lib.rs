@@ -344,6 +344,14 @@ mod remote_direct_biometric_contract;
 #[cfg(all(test, unix))]
 mod network_lock_contract;
 
+/// Browser capability detection and graceful degradation of the `soos-remote` web app: one pure
+/// probe, guarded browser APIs, passkey/push/camera/status degradation with fixed texts, no
+/// User-Agent logic, CSS fallbacks, unchanged network surface, documentation (GitHub #366, PR 1
+/// of #355, ADR 2026-10-13 "Browser Support Policy for the `soos-remote` Web App"; spec
+/// AI/architect_spec_remote_cross_browser.md §8, §14; rows RXB1-RXB11).
+#[cfg(all(test, unix))]
+mod remote_cross_browser_contract;
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,

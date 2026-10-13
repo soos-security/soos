@@ -690,7 +690,11 @@ code {
   font-size: var(--f-small);
 }
 
-.card > .feedback:last-child,
+.card > .feedback:last-child {
+  margin-bottom: -16px;
+}
+
+/* Its own rule: an engine without :has() drops only this one (fallback at the end). */
 .card > .feedback:has(+ [hidden]:last-child) {
   margin-bottom: -16px;
 }
@@ -842,4 +846,46 @@ button.camera-tool {
 html.camera-lock,
 html.camera-lock body {
   overflow: hidden;
+}
+
+/*
+ * Browser fallbacks (ADR 2026-10-13 "Browser Support Policy for the soos-remote Web App").
+ * Engines without :has(): the same visual states, keyed on hooks app.js sets (data-state on
+ * the stat tile, feedback-last on the action card's feedback line while Sign out is hidden).
+ */
+@supports not selector(:has(*)) {
+  .stat-tile[data-state="locked"] .stat-dot {
+    background: var(--dot-locked);
+  }
+
+  .stat-tile[data-state="unlocked"] .stat-dot {
+    background: var(--banner-warn-border);
+    box-shadow: inset 0 0 0 var(--stroke-card) var(--dot-unlocked);
+  }
+
+  .stat-tile[data-state="unavailable"] .stat-dot,
+  .stat-tile[data-state="unreachable"] .stat-dot {
+    background: var(--dot-alarm);
+  }
+
+  .card > .feedback.feedback-last {
+    margin-bottom: -16px;
+  }
+}
+
+/*
+ * Engines without size containers: the portrait canvas box is the stage turned by 90 degrees.
+ * The card stage is 3:4, so its height is 4/3 of its width (133.333 % wide, 75 % high); in full
+ * screen the stage covers the viewport. object-fit: contain keeps the image undistorted.
+ */
+@supports not (container-type: size) {
+  .camera-stage.camera-portrait .camera-canvas {
+    width: 133.333%;
+    height: 75%;
+  }
+
+  .camera-stage.camera-full.camera-portrait .camera-canvas {
+    width: 100vh;
+    height: 100vw;
+  }
 }
