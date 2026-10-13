@@ -1,160 +1,63 @@
 # Candid Review Report
 
 - **Date**: 2026-10-13
-- **Target Branch**: `feat/remote-cross-browser`
-- **Base (merge-base)**: `bcd3cd2`
-- **Reviewed-Diff-Fingerprint**: `1b959d252e5472a39648868e63dbbe45438688b3aa2588507faed45559a23f8c`
-- **Audited Files**: `AI/DECISIONS.md`, `AI/VERIFICATION_MATRIX.md`, `AI/architect_spec_remote_cross_browser.md`,
-  `AI/auditor_constraints_remote_cross_browser.md`, `AI/tester_contract_remote_cross_browser.md`,
-  `AI/walkthroughs/197_remote_cross_browser.md`, `Docs/REMOTE_COMPANION.md`, `crates/remote/assets/app.js`,
-  `crates/remote/assets/style.css`, `tests/invariants/src/lib.rs`,
-  `tests/invariants/src/remote_cross_browser_contract.rs`
+- **Target Branch**: `fix/network-lock-status-hardening`
+- **Base (merge-base)**: `37d03c4`
+- **Reviewed-Diff-Fingerprint**: `e0d2c34b05d92e5564c94d5e2ed4a7364f0561eea0c222a6fda88bf5f127719d`
+- **Audited Files**: `AI/DECISIONS.md`, `AI/VERIFICATION_MATRIX.md`, `AI/architect_spec_network_lock.md`, `AI/auditor_constraints_network_lock.md`, `AI/tester_contract_network_lock.md`, `AI/walkthroughs/199_network_lock_status_hardening.md`, `Docs/NETWORK_LOCK.md`, `crates/admin-cli/Cargo.toml`, `crates/admin-cli/src/network_lock.rs`, `crates/admin-cli/tests/network_lock_hardening_tests.rs` (new), `crates/admin-cli/tests/network_lock_shell_tests.rs`, `crates/admin-cli/tests/network_lock_status_tests.rs`, `crates/admin-cli/tests/network_lock_uninstall_script_test.sh` (new), `scripts/uninstall.sh`, `tests/docker/network_lock_pkcheck_test.sh`
 
 ## 1. Executive Summary
 
-The diff is PR 1 of #355 (GitHub #366): a single pure `browserCapabilities()` probe in `app.js`
-(feature detection only, no User-Agent), guards before every WebAuthn, service worker, Push,
-`Notification`, `EventSource`, stream-reader and `createImageBitmap` use, per-feature
-degradation with fixed English strings, `fixedError()`/`failureText()` so a browser's own
-exception text is never shown, a push "Enable notifications" tap bounded by
-`SERVICE_WORKER_READY_TIMEOUT_MS` after the permission answer, a 15 s status poll when
-`EventSource` is missing, CSS fallbacks for `:has()` and container query units, the "Browser
-support" docs section (2i) with troubleshooting rows, an ADR, matrix rows and a new static
-invariant module (RXB-S1 to RXB-S11).
+The diff addresses all five items of GitHub #370 (follow-up of PR #369 / #365): (1) the backend probe credits a `comm` match only when `/proc/<pid>/status` of the same process names the same `comm` and all four uids are root (or the `/etc/passwd` `systemd-network` uid for networkd); (2) `status` now uses the same ancestor-directory walker (`walk_dirs`) as `install`/`uninstall`; (3) the pkcheck comment says five actions; (4) `scripts/uninstall.sh` checks every path component below `DESTDIR` for a symlink; (5) install/uninstall (Rust) and `uninstall.sh` remove stale `.<name>.<pid>.tmp` regular files of dead pids. No PAM code is touched. Verified locally: `cargo test -p soos-admin-cli` (all suites green, including the new shell test), `cargo test -p soos-invariants` (591 passed), `cargo clippy -p soos-admin-cli --all-targets -- -D warnings` clean, `cargo fmt --all -- --check` clean, `bash -n scripts/uninstall.sh` OK. No CRITICAL or MAJOR finding.
 
-No Rust production source, server route, CSP, header set, CSRF rule, cookie attribute, WebAuthn
-verifier, push host allowlist, `sw.js`, `index.html` or asset file is in the diff. Capability
-flags only disable or hide client controls, so no flag can open a server path. Re-run by the
-reviewer: `cargo test -p soos-invariants` (591 passed), `cargo test -p soos-remote` (all
-green), `node --check crates/remote/assets/app.js` (OK).
+## 2. Test Changes (mechanical listing from step 3, with justification per change)
 
-Only MINOR and SUGGESTION findings remain.
-
-## 2. Test Changes
-
-Mechanical listing from `target/candid_diff.patch`:
-
-- Test files touched: `tests/invariants/src/lib.rs` (adds one `#[cfg(all(test, unix))] mod
-  remote_cross_browser_contract;` declaration with a doc comment, 8 added lines, nothing removed)
-  and `tests/invariants/src/remote_cross_browser_contract.rs` (new file).
-- Removed or changed assertions (`^-` with `assert`/`#[test]`/`proptest!`/`should_panic`): **none**.
-- New escape hatches (`#[ignore]`, `#[cfg(any())]`, `should_panic`, `tolerance`, `epsilon`): **none**.
-- Inline `mod tests` changes: **none**.
-
-No existing contract was modified. The text pins of earlier contracts (`PUSH_UNSUPPORTED_TEXT`,
-`PUSH_BLOCKED_TEXT`, `PUSH_WORKER_FAILED_TEXT`, `PASSKEY_PROMPT_TEXT`, enable-tap ordering) are
-kept, and the earlier suites stay green without edits. The changed
-`PUSH_REASONS.unsupported_push_service` wording was not pinned by any existing test.
+- Test files touched: `crates/admin-cli/tests/network_lock_hardening_tests.rs` (new), `network_lock_shell_tests.rs` (one new test appended, no line removed), `network_lock_status_tests.rs`, `network_lock_uninstall_script_test.sh` (new), `tests/docker/network_lock_pkcheck_test.sh`.
+- `grep '^-.*(assert|#[test]|...)'`: **no hit** - no assertion or test attribute removed or changed.
+- `grep '^+.*(#[ignore|should_panic|tolerance|epsilon)'`: **no hit**.
+- `grep 'mod tests'`: **no hit** (no inline test module touched).
+- `network_lock_status_tests.rs`: the only `-` line in its hunks is the file header; every change adds `proc/<pid>/status` fixture files (root uids, matching `Name:`) to five existing tests (`test_nlk_proc_probe_matches_exact_comm_names`, `..._ignores_non_numeric_entries_and_near_names`, `..._ignores_oversize_comm_and_missing_proc`, `test_nlk_status_uses_the_probe_result_for_the_backend`, `test_nlk_status_output_has_no_network_names`). Setup-only contract migration required by acceptance item 1 of #370 (a probe that now requires a root-owned status would otherwise see no status file); each insertion is marked "Contract amendment (GitHub #370)". The near-name test gives the near-name processes root status files, so its assertions still exercise the name check, not the uid check. Assertions unchanged.
+- `tests/docker/network_lock_pkcheck_test.sh`: comment only ("six" -> "five"), #370 item 3.
+- Existing `test_nlk_install_fails_cleanly_on_a_stale_temp_name` (unchanged) uses the current pid, which `is_stale_temp_name` explicitly excludes; it still passes and still asserts the file is kept.
 
 ## 3. Deep Reasoning Audit
 
 ### Logic & Architecture
-
-- *Probe purity*: `browserCapabilities()` only reads globals (no request, no DOM write, no
-  storage) and is recomputed at every call site. `pushSupported()` now delegates to it. PASS.
-- *Missing WebAuthn*: `showLogin` disables sign-in and shows `PASSKEY_UNSUPPORTED_TEXT`.
-  `showApp` disables enrollment. `render` keeps unlock disabled. `renderCamera` disables start.
-  All four handlers return early before `confirm`/`postJson`. Every `.finally` re-enables a
-  button only through `!browserCapabilities().webauthn`. Lock, `fetchStatus`, `openStream` and
-  `closeStream` never reference WebAuthn. PASS.
-- *Push mapping*: `NotAllowedError` gives the blocked text, `AbortError`/`NotSupportedError` the
-  no-push-service text, `InvalidStateError` the stale-subscription text and `SecurityError` the
-  no-worker text. The server's `unsupported_push_service` names Edge on a computer and drops
-  the local subscription on a best-effort basis. iOS in a tab (`"standalone" in navigator`
-  without standalone) gets the home-screen text. The acceptance list of #355 is covered. PASS.
-- *Enable-tap bound*: the button is disabled only after a granted permission, and the deadline
-  is computed before `readyRegistration()`, whose own 10 s timer starts right after. `subscribe`
-  and the PC hand-off are wrapped in `beforeDeadline(…, deadline, …)`, which clears its timer
-  on both outcomes, and `finally` re-enables the button. Worst case is about 10 s. A late
-  `subscribe` success after the deadline is re-sent by `syncSubscription` on the next
-  `fetchPush`. PASS.
-- *EventSource fallback*: `openStream` arms `setInterval(fetchStatus(true), 15000)` and
-  `closeStream` clears it. `resume` still does an immediate `fetchStatus`. Stale rendering
-  (45 s) exceeds the poll period. A lock in poll mode is still reported as unconfirmed after
-  5 s: FINDING (MINOR, see §4).
-- *Hooks for CSS fallbacks*: `statTile` exists in `index.html` (`.stat-tile` inside
-  `#status-card`). `data-state` is restricted to known `LABELS` keys, otherwise `unknown`.
-  `feedback-last` is toggled with the logout visibility. `#feedback` → `#logout` is the only
-  `.card > .feedback` + hidden-last-child pair in the markup, so the fallback covers every case
-  the `:has()` rule matched. PASS.
-- *Scope*: Playwright (PR 2) is out of scope and documented as a follow-up. The matrix "OK"
-  cells cite existing rows (RMC/RLC). New platforms are "Expected (RXB12–RXB20)" pending
-  hardware, which complies with "no OK cell without evidence". PASS.
+- Probe TOCTOU: `comm` and `status` are separate reads, but `Name:` and `Uid:` are both parsed from the single `status` buffer, and `Name:` must equal the matched `comm`; a pid reused between the two reads cannot pair one process's name with another's uids (test `..._requires_the_status_name_to_match_comm`). The `/proc/<pid>` inode owner is not used (correct: it is root for non-dumpable processes). `Name:` is kernel-escaped, so a user `comm` cannot inject a forged `Uid:` line. -> PASS
+- Setuid-root via a symlink named `NetworkManager`: real/saved uid stay the user's, any untrusted position rejects (all four positions tested). Unprivileged user namespaces: the reader in the init namespace sees mapped (real) uids. -> PASS
+- `systemd-network` uid from `<root>/etc/passwd` only (no NSS, no `getpwnam`), exact first-field match, ASCII-decimal third field, resolved lazily at most once per call; a near user name, a malformed uid and a line cut by the 1 MiB cap are ignored (tested). Trusted set for NM/iwd is `{0}` only. -> PASS
+- `walk_dirs` reproduces `checked_dir`'s former loop exactly (ENOENT -> Missing, other errno -> Error, non-dir/symlink -> NotRealDir, owner/`0o022` -> Insecure, empty `rel` -> NotRealDir, error messages preserved); `rule_file_state` maps these to Missing / InsecurePermissions / Unreadable, consistent with the previous leaf-only mapping. rfkill and polkit paths are walked independently (a writable `etc/udev` does not affect the polkit rule; tested). -> PASS
+- `is_stale_temp_name`: exact `.<name>.` prefix and `.tmp` suffix, 1-10 digits, no leading zero, `parse_decimal_u32` rejects signs/spaces, `i32::try_from` caps at `i32::MAX`, `pid <= 0` and own pid excluded; `kill(pid, None)` is signal 0 (no signal is ever sent); only `ESRCH` counts as dead, `EPERM`/`Ok` keep the file. -> PASS
+- `remove_stale_temp_files`: type checked with `fstatat(AT_SYMLINK_NOFOLLOW)` relative to the verified directory fd; only `S_IFREG` is removed with `unlinkat(NoRemoveDir)`, so a symlink or directory carrying a stale name is never followed or removed (tested, symlink target content verified). Examination bounded by `MAX_RULES_DIR_ENTRIES`; `ENOENT` race tolerated; directory fsync after removal. Runs before the rule write on install and before rule removal on uninstall. -> PASS (see SUGGESTION 1, 2)
+- `uninstall.sh`: `path_has_symlink_component` tests every component of the path below `DESTDIR`, including the leaf directory, with `[[ -L ]]` (never follows); on a hit the file and its temp files are skipped with a warning. Stale cleanup: the glob prefix is the exact name, the anchored regex rejects leading zeros and more than 10 digits, `(( <= 2147483647 ))` is safe (no leading zero, so no octal; 10 digits fit in 64-bit arithmetic), `[[ -f && ! -L ]]` restricts to regular non-symlink files, liveness comes from host `/proc` (never `${DESTDIR}/proc`), and `rm -f --` on an entry swapped to a symlink would only unlink the link. U1-U4 cover symlinked `etc`, `etc/polkit-1`, `etc/udev`, and live/near/leading-zero/out-of-range/symlink entries. -> PASS (see SUGGESTION 4)
+- All five #370 items implemented; no scope creep. -> PASS
 
 ### PAM Concurrency & Deadlines
-
-No change under `crates/pam`, the daemon or any Rust source. The client-side push bound (above)
-is the only deadline touched. PASS (not applicable).
+- No file under `crates/pam` changed; `soos-admin` is an admin CLI. Added reads are bounded files; no blocking NSS lookup introduced (explicitly avoided). -> PASS (N/A for PAM)
 
 ### Panic Safety & Fail-Closed
-
-No Rust production change. On the client, every new early exit disables or hides a control, and
-none issues a request. Server-side checks (identity headers, CSRF `X-Soos-Action`, `Origin`,
-`Sec-Fetch-Site`, WebAuthn UV, session) are byte-identical: `crates/remote/src` is not in the
-diff. Attempted scenario: spoof `PublicKeyCredential`/`PushManager` globals to "enable" a path.
-The flags only change UI, and every request still meets the unchanged server checks. PASS.
+- No `unwrap`/`expect`/indexing/unchecked arithmetic in production hunks (`saturating_add`, `truncate`, `rposition`, `try_from`, `unwrap_or` only); clippy with the workspace lints is clean. Every probe read/parse failure means the process is ignored (never credited). Status ancestor failures yield `insecure_permissions`/`unreadable` -> exit 1. Cleanup errors abort install/uninstall before the rule is touched (the lock stays in place). -> PASS
+- Documented degradation: an unresolvable `systemd-network` account makes a networkd-only host report `installed`/`missing` instead of `unsupported_backend` (diagnostic only, exit code unchanged). -> SUGGESTION 3
 
 ### Test Integrity & Anti-Weakening
-
-§2 shows no removed or weakened assertion. The new module runs on the real assets with its own
-lexer (strings, template and regex literals kept intact). Each check can fail against a
-plausible wrong implementation:
-- an unguarded `navigator.credentials`/`pushManager`/`getReader`/`createImageBitmap` in any
-  function, or at top level;
-- a `.disabled =` assignment not tied to `browserCapabilities().webauthn`;
-- a handler whose guard comes after `confirm`/`postJson`;
-- `error.message` shown directly;
-- `userAgent` in the page, worker or server;
-- a missing `@supports` fallback or `vh` line;
-- a CSP or asset-set drift.
-
-A helper self-test covers the lexer. PASS.
+- See section 2: no assertion removed or altered; existing-test edits are fixture setup only. New tests include positive controls (root-owned processes detected, a long status with `Uid:` inside the cap detected, a passwd entry inside the cap resolved, 0755 ancestors installed), so an always-false probe or an always-insecure status would fail them. The cap tests are constructed so that a reader parsing a cut line would trust uid 612 or read a `Uid:` line beyond 4096 bytes. -> PASS
 
 ### Memory, Bounds & Secrets
-
-- Camera parser bounds (`CAMERA_MAX_BUFFER_BYTES`, `CAMERA_MAX_PART_BYTES`) are unchanged, and
-  only their error objects became `fixedError`.
-- No passkey material, push endpoint or frame is logged.
-- Every message is set through `textContent` (`setText`).
-- `failureText` never forwards browser text, and unknown error names fall back to fixed strings.
-
-PASS.
+- `status` capped at 4096 bytes, `/etc/passwd` at 1 MiB, both opened `O_NOFOLLOW | O_CLOEXEC`, and only complete lines parsed; directory listing capped at 4096 entries; proc entries still capped by `MAX_PROC_ENTRIES`. `read_bounded` semantics (`TooLarge`) preserved via `read_at_most(cap + 1)`. No credentials, SSIDs or biometric data logged; status output fields unchanged. -> PASS
 
 ### Supply Chain & Automation
-
-No `Cargo.*`, `deny.toml`, `.github/`, `scripts/` or `.githooks/` change. No polyfill, CDN or
-external URL (RXB-S8 asserts it). PASS (not applicable).
+- Only change: `nix` feature `signal` added to an existing workspace dependency (no new crate). `scripts/uninstall.sh` uses only bash builtins plus `rm`; no CI workflow changed. -> PASS
 
 ### English-Only Policy
-
-Code, comments, user strings, docs, ADR, walkthrough and commit message are English. PASS.
+- All code, comments, docs, walkthrough and test messages are English. Walkthrough number 199 (197/198 reserved by other open branches, stated in the walkthrough). -> PASS
 
 ## 4. Detailed Findings & Action Items
 
-- **[MINOR]** `crates/remote/assets/app.js:600-606` (with `requestLock`, `app.js:857-866`):
-  without `EventSource`, status arrives only every 15 s (`STATUS_POLL_MS`). The 5 s
-  `LOCK_CONFIRM_UI_MS` timer therefore almost always fires first and shows "The desktop did not
-  confirm the lock (LockedHint unchanged)" for a lock that succeeded (unlock confirmation works
-  the same way). This affects only pre-Baseline engines and is wording only (the server lock is
-  unaffected). Suggested follow-up: in poll mode, call `fetchStatus` once shortly after a 202
-  lock/unlock, or note the behavior in `Docs/REMOTE_COMPANION.md:913`.
-- **[MINOR]** `crates/remote/assets/style.css:881-890`: the `@supports not (container-type: size)`
-  portrait box is approximate. It is clipped when `max-height: 70vh` caps the card stage, and
-  in full screen it ignores safe-area padding. This is already listed as a residual in
-  `Docs/REMOTE_COMPANION.md` §8 and affects only engines below the agreed Baseline floor. No
-  action required.
-- **[SUGGESTION]** `crates/remote/assets/app.js:1163-1169`: when `serviceWorker` is exposed but
-  `register()` rejects (for example a private-window policy), `readyRegistration()` collapses to
-  `null` and shows the generic `PUSH_WORKER_FAILED_TEXT` instead of the private-window sentence.
-  That text is pinned byte-exact by RAN-S6, so a future change would need a contract migration.
-  The troubleshooting table already covers both sentences.
-- **[SUGGESTION]** `crates/remote/assets/app.js:1349-1356`: the button stays enabled while the
-  permission prompt is open (by design, to honor the 10 s bound). A double tap can issue two
-  `requestPermission` calls. Browsers coalesce these, so the result is harmless.
+- **[SUGGESTION]** `crates/admin-cli/src/network_lock.rs:910` - `remove_stale_temp_files` lists the directory by path (`fs::read_dir(&dir.path)`) instead of through the verified descriptor; harmless because the type check and `unlinkat` are descriptor-relative and the walk guarantees no writable ancestor, but listing via the fd would make the whole operation descriptor-bound.
+- **[SUGGESTION]** `crates/admin-cli/src/network_lock.rs:902` - `kill(pid, 0)` liveness is local to the caller's pid namespace; a concurrent install in another pid namespace sharing the same `/etc` could see its temp file removed (its `renameat` then fails cleanly, no corruption). Worth one sentence in `Docs/NETWORK_LOCK.md`.
+- **[SUGGESTION]** `crates/admin-cli/src/network_lock.rs:205` - the networkd uid is resolved only from `/etc/passwd`; on hosts where `systemd-network` lives only in another database, a networkd-only host reports `installed` rather than `unsupported_backend`. Accepted and documented trade-off (no NSS), noted for visibility.
+- **[SUGGESTION]** `scripts/uninstall.sh:235` - liveness via `-e /proc/<pid>` can see a live process as dead under `hidepid` for a non-root caller; impact is nil in practice (a non-root caller can only modify a `--destdir` it owns), noted for completeness.
 
 ## 5. Final Verdict
-
-No CRITICAL or MAJOR finding. Security invariants, server surface and existing contracts are
-unchanged, and the acceptance criteria of #366 (PR 1 scope of #355) are met.
 
 **VERDICT: APPROVED**

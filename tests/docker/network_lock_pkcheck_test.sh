@@ -8,7 +8,7 @@
 # NetworkManager action, as an unprivileged user, without and then with
 # packaging/polkit/49-soos-network-lock.rules installed (root:root 0644):
 #
-#   P1. Baseline (distribution defaults) recorded for the six locked actions and
+#   P1. Baseline (distribution defaults) recorded for the five locked actions and
 #       the controls.
 #   P2. With the rule, every locked action is an authentication challenge
 #       (exit 2) that is NOT retained (no polkit.retains_authorization_after_challenge):

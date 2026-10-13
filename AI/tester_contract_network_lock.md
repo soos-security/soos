@@ -64,3 +64,43 @@ none (no existing test is modified; the new `Commands::NetworkLock` variant is m
 ## 4. Flakiness check
 
 The status/install tests are filesystem-only with no timing. Run 10×: see the walkthrough §8.
+
+## Follow-up — GitHub #370 (spec §12, plan evaluation APPROVED with F-1 … F-7 folded in)
+
+Branch `fix/network-lock-status-hardening`. Red evidence: a stub that only adds the specified constants (`MAX_PROC_STATUS_BYTES`, `MAX_PASSWD_BYTES`, `SYSTEMD_NETWORK_USER`, `MAX_RULES_DIR_ENTRIES`) compiles and fails every new test on its assertion; the existing 42 status, 24 install and S1–S8 shell checks stay green on it.
+
+| Test (path::name) | Item / matrix ID | Red evidence (failure message) |
+|---|---|---|
+| `network_lock_hardening_tests::test_nlk_proc_probe_ignores_user_owned_services` | G-1 / NLK13 | `left: RunningServices { network_manager: true, networkd: true, iwd: true }` |
+| `network_lock_hardening_tests::test_nlk_proc_probe_requires_all_four_uids_trusted` | G-1 / NLK13 | `left: RunningServices { network_manager: true, .. }` (position 0) |
+| `network_lock_hardening_tests::test_nlk_proc_probe_ignores_missing_or_malformed_status` | G-1 / NLK13 | `left: RunningServices { .., iwd: true }` (no status file) |
+| `network_lock_hardening_tests::test_nlk_proc_probe_trusts_systemd_network_only_for_networkd` | G-1 / NLK13 | `left: RunningServices { .., networkd: true, .. }` (user uid) |
+| `network_lock_hardening_tests::test_nlk_proc_probe_ignores_uid_line_beyond_the_read_cap` | G-1 (F-3) / NLK13 | `left: RunningServices { .., iwd: true }` |
+| `network_lock_hardening_tests::test_nlk_proc_probe_requires_the_status_name_to_match_comm` | G-1 (F-5) / NLK13 | `left: RunningServices { network_manager: true, networkd: true, iwd: true }` |
+| `network_lock_hardening_tests::test_nlk_proc_probe_ignores_systemd_network_entry_cut_by_the_read_cap` | G-1 (F-3) / NLK13 | `left: RunningServices { .., networkd: true, .. }` (uid 612) |
+| `network_lock_hardening_tests::test_nlk_status_spoofed_network_manager_keeps_unsupported_backend` | G-1 / NLK13 | `left: NetworkManager` |
+| `network_lock_hardening_tests::test_nlk_status_insecure_when_an_ancestor_dir_is_group_or_world_writable` | G-2 / NLK14 | `left: Installed` (`etc/polkit-1` 0777) |
+| `network_lock_hardening_tests::test_nlk_status_insecure_when_an_ancestor_dir_is_a_symlink` | G-2 / NLK14 | `left: Installed` |
+| `network_lock_hardening_tests::test_nlk_status_rfkill_rule_insecure_when_its_ancestor_is_writable` | G-2 / NLK14 | `left: Installed` (`etc/udev` 0777) |
+| `network_lock_hardening_tests::test_nlk_install_removes_stale_temp_files_of_dead_processes` | G-5 / NLK16 | `left: [".49-soos-network-lock.rules.4194304.tmp", "49-soos-network-lock.rules"]` |
+| `network_lock_hardening_tests::test_nlk_uninstall_removes_stale_temp_files_of_dead_processes` | G-5 / NLK16 | stale temp file listed after uninstall |
+| `network_lock_hardening_tests::test_nlk_stale_temp_cleanup_keeps_live_foreign_and_non_regular_entries` | G-5 / NLK16 | `stale file of a dead pid removed` |
+| `network_lock_shell_tests::test_nlk_uninstall_script_checks_ancestors_and_cleans_temp_files` (`network_lock_uninstall_script_test.sh` U1–U4) | G-4, G-5 / NLK15, NLK17 | `[FAIL] U1 the rule was removed through a symlinked ancestor` |
+
+Test power (F-4): the dead pids are impossible values (`4194304` = `PID_MAX_LIMIT`, `4194305`, `2147483647`), never a reaped child; every uid position is varied separately; the fake `systemd-network` uid is 61234 (not the host's), and NetworkManager/iwd at that uid must not be credited; the keep test covers pid 1 (`EPERM` as non-root), a live `sleep` child (`Ok`), a temp-named symlink with an untouched outside target, a temp-named directory, a leading-zero pid, an 11-digit pid, a signed pid (`+N`), near names and another file's temp name; the ancestor tests loop over `etc`, `etc/polkit-1` and `etc`, `etc/udev`. The existing `test_nlk_install_fails_cleanly_on_a_stale_temp_name` (current pid) keeps its contract: the current process is alive.
+
+### Migrated existing tests (contract amendments, setup only, assertions untouched)
+
+| Test | Setup change | Reason |
+|---|---|---|
+| `network_lock_status_tests::test_nlk_proc_probe_matches_exact_comm_names` | adds `proc/<pid>/status` (`Name:` = comm, `Uid:` 0 0 0 0) for each fake process | GitHub #370 item 1: a match is credited only for a root-owned process |
+| `network_lock_status_tests::test_nlk_status_uses_the_probe_result_for_the_backend` | same, for the iwd process | idem |
+| `network_lock_status_tests::test_nlk_status_output_has_no_network_names` | same, for the NetworkManager process (the status content is not printed) | idem |
+| `network_lock_status_tests::test_nlk_proc_probe_ignores_non_numeric_entries_and_near_names` | same, for every entry | keeps the test discriminating: without it the test would pass on the missing uid, not on the name rule |
+| `network_lock_status_tests::test_nlk_proc_probe_ignores_oversize_comm_and_missing_proc` | same, for the oversize-comm process | idem, for the comm size rule |
+
+Each change only adds lines (`git diff` of the file has no removed line); every assertion is unchanged.
+
+### Flakiness check
+
+The new tests have no timing dependency (impossible pids, a `sleep 60` child killed on drop). Run 10 times in a row after the implementation (see walkthrough 199).

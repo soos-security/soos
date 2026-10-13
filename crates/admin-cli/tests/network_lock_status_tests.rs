@@ -462,6 +462,27 @@ fn test_nlk_proc_probe_matches_exact_comm_names() {
     fx.write(&fx.path("proc/31337/comm"), b"NetworkManager\n", 0o444);
     fx.write(&fx.path("proc/4242/comm"), b"systemd-network\n", 0o444);
     fx.write(&fx.path("proc/777/comm"), b"iwd\n", 0o444);
+    // Contract amendment (GitHub #370): a match is credited only for a root-owned process.
+    fx.write(
+        &fx.path("proc/1/status"),
+        b"Name:\tsystemd\nUid:\t0\t0\t0\t0\n",
+        0o444,
+    );
+    fx.write(
+        &fx.path("proc/31337/status"),
+        b"Name:\tNetworkManager\nUid:\t0\t0\t0\t0\n",
+        0o444,
+    );
+    fx.write(
+        &fx.path("proc/4242/status"),
+        b"Name:\tsystemd-network\nUid:\t0\t0\t0\t0\n",
+        0o444,
+    );
+    fx.write(
+        &fx.path("proc/777/status"),
+        b"Name:\tiwd\nUid:\t0\t0\t0\t0\n",
+        0o444,
+    );
     let probe = ProcServiceProbe {
         root: fx.root().to_path_buf(),
     };
@@ -486,6 +507,37 @@ fn test_nlk_proc_probe_ignores_non_numeric_entries_and_near_names() {
     fx.write(&fx.path("proc/11/comm"), b"iwdx\n", 0o444);
     fx.write(&fx.path("proc/12/comm"), b"NetworkManagerX\n", 0o444);
     fx.write(&fx.path("proc/13/comm"), b"systemd-resolve\n", 0o444);
+    // Contract amendment (GitHub #370): root-owned, so only the names decide.
+    fx.write(
+        &fx.path("proc/self/status"),
+        b"Name:\tNetworkManager\nUid:\t0\t0\t0\t0\n",
+        0o444,
+    );
+    fx.write(
+        &fx.path("proc/net/status"),
+        b"Name:\tiwd\nUid:\t0\t0\t0\t0\n",
+        0o444,
+    );
+    fx.write(
+        &fx.path("proc/10/status"),
+        b"Name:\tnm-dispatcher\nUid:\t0\t0\t0\t0\n",
+        0o444,
+    );
+    fx.write(
+        &fx.path("proc/11/status"),
+        b"Name:\tiwdx\nUid:\t0\t0\t0\t0\n",
+        0o444,
+    );
+    fx.write(
+        &fx.path("proc/12/status"),
+        b"Name:\tNetworkManagerX\nUid:\t0\t0\t0\t0\n",
+        0o444,
+    );
+    fx.write(
+        &fx.path("proc/13/status"),
+        b"Name:\tsystemd-resolve\nUid:\t0\t0\t0\t0\n",
+        0o444,
+    );
     let probe = ProcServiceProbe {
         root: fx.root().to_path_buf(),
     };
@@ -498,6 +550,12 @@ fn test_nlk_proc_probe_ignores_oversize_comm_and_missing_proc() {
     let mut big = b"iwd\n".to_vec();
     big.resize(MAX_COMM_BYTES as usize + 1, b'\n');
     fx.write(&fx.path("proc/20/comm"), &big, 0o444);
+    // Contract amendment (GitHub #370): root-owned, so only the comm size decides.
+    fx.write(
+        &fx.path("proc/20/status"),
+        b"Name:\tiwd\nUid:\t0\t0\t0\t0\n",
+        0o444,
+    );
     let probe = ProcServiceProbe {
         root: fx.root().to_path_buf(),
     };
@@ -515,6 +573,12 @@ fn test_nlk_status_uses_the_probe_result_for_the_backend() {
     let fx = Fixture::new();
     fx.install_rules();
     fx.write(&fx.path("proc/31337/comm"), b"iwd\n", 0o444);
+    // Contract amendment (GitHub #370): a match is credited only for a root-owned process.
+    fx.write(
+        &fx.path("proc/31337/status"),
+        b"Name:\tiwd\nUid:\t0\t0\t0\t0\n",
+        0o444,
+    );
     let probe = ProcServiceProbe {
         root: fx.root().to_path_buf(),
     };
@@ -682,6 +746,12 @@ fn test_nlk_status_output_has_no_network_names() {
         0o600,
     );
     fx.write(&fx.path("proc/31337/comm"), b"NetworkManager\n", 0o444);
+    // Contract amendment (GitHub #370): a match is credited only for a root-owned process.
+    fx.write(
+        &fx.path("proc/31337/status"),
+        b"Name:\tNetworkManager\nUid:\t0\t0\t0\t0\n",
+        0o444,
+    );
     fx.rfkill(Some("10:242\n"), Some("Q:uaccess\n"), 0o664);
     let probe = ProcServiceProbe {
         root: fx.root().to_path_buf(),

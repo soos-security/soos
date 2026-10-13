@@ -302,3 +302,145 @@ This section supersedes the earlier sections wherever they differ.
 - **R-10 (F-10):** non-root `status` on Arch reports `unreadable` (exit 1) with "run as root"; recorded in the ADR together with the `unreadable` state added to the issue's list.
 
 Updated report: `warnings` vocabulary is `rfkill_uaccess`, `rfkill_reboot_pending`, `iwd_dbus_bypass` (fixed order). New constant `MAX_UPTIME_BYTES: u64 = 64`.
+
+## 12. Follow-up — GitHub #370: status hardening and stale temp-file cleanup
+
+- **Date**: 2026-10-13
+- **Issue**: GitHub-only #370 (candid review findings of PR #369); no `AI/BACKLOG.md` id.
+- **Branch**: `fix/network-lock-status-hardening` (not registered in `scripts/sync_issue.py`; the commit carries `Closes #370`).
+- **Base commit**: `bcd3cd2` (`origin/main`, network lock of PR #369 merged).
+
+This section supersedes §2, §4, §5 and §11 wherever they differ.
+
+### 12.1 Scope & Blast Radius
+
+| Area | Change |
+|---|---|
+| `crates/admin-cli/src/network_lock.rs` | `ProcServiceProbe` trusts a matched process only by its uids (G-1); `rule_file_state` walks every directory component like install (G-2); `install_network_lock` / `uninstall_network_lock` remove stale soos temp files (G-5); new constants `MAX_PROC_STATUS_BYTES`, `MAX_PASSWD_BYTES`, `MAX_RULES_DIR_ENTRIES`, `SYSTEMD_NETWORK_USER` |
+| `crates/admin-cli/Cargo.toml` | the existing `nix` dependency gains the `signal` feature (`kill`); no new crate, no `Cargo.lock` change |
+| `scripts/uninstall.sh` | step 1b checks every directory component below `DESTDIR` for a symbolic link (G-4) and removes stale soos temp files next to each lock file (G-5) |
+| `tests/docker/network_lock_pkcheck_test.sh` | comment "six locked actions" → "five" (G-3); no logic change |
+| Tests | new tests in `network_lock_status_tests.rs`, `network_lock_install_tests.rs`, new shell script `network_lock_uninstall_script_test.sh` run by a new test in `network_lock_shell_tests.rs` |
+| Docs / traceability | `Docs/NETWORK_LOCK.md` §3, §3.1, §8; matrix rows NLK13–NLK17; walkthrough 199 |
+
+Public API: `ProcServiceProbe { root }` keeps its shape (no new field, so `main.rs` and every caller are unchanged). `RuleFileState`, `NetworkLockState`, `NetworkLockReport`, the JSON shape and the output vocabulary are unchanged. No new crate: the existing `nix` dependency of admin-cli gains its `signal` feature for `kill` (no `Cargo.lock` change). No other crate depends on `soos-admin-cli`.
+
+### 12.2 G-1 Backend probe trusts only system-owned processes (item 1)
+
+Threat: any local user can name a process `NetworkManager` (`prctl(PR_SET_NAME)`, or exec through a symlink of that name), so on an iwd-only host a comm-only probe turns `unsupported_backend` into `installed`.
+
+```rust
+/// Read cap of `/proc/<pid>/status`: only this prefix is examined (the `Uid:` line is the
+/// ninth line, about 200 bytes in); a `Uid:` line beyond it is not seen (process ignored).
+pub const MAX_PROC_STATUS_BYTES: u64 = 4096;
+/// Read cap of `<root>/etc/passwd` (prefix examined for the `systemd-network` entry).
+pub const MAX_PASSWD_BYTES: u64 = 1_048_576;
+/// Account systemd-networkd runs as.
+pub const SYSTEMD_NETWORK_USER: &str = "systemd-network";
+```
+
+`ProcServiceProbe::running`:
+1. Resolve once per call `networkd_uid: Option<u32>` from the first `MAX_PASSWD_BYTES` bytes of `<root>/etc/passwd` (opened `O_NOFOLLOW | O_CLOEXEC`): the first line whose first `:`-separated field is exactly `systemd-network` and whose third field parses as `u32`; anything else (missing file, read error, no entry, unparsable uid) → `None`. NSS (`getpwnam`) is deliberately not used: it can block on a network directory (LDAP, SSSD) and cannot be redirected below a test root; the account is a static `sysusers.d` entry in `/etc/passwd` on every supported distribution.
+2. For each numeric `/proc` entry (bound `MAX_PROC_ENTRIES`, unchanged), match `comm` exactly as before. Only on a match, read the first `MAX_PROC_STATUS_BYTES` bytes of `<root>/proc/<pid>/status` (`O_NOFOLLOW | O_CLOEXEC`) and take the first line starting with `Uid:`. It must carry exactly four whitespace-separated decimal `u32` values (real, effective, saved, filesystem). Missing file, read error, missing line, wrong field count or unparsable value → the process is ignored (fail-closed: the backend is not credited).
+3. Trusted uid set per service: `NetworkManager` and `iwd` → `{0}`; `systemd-network` → `{0} ∪ networkd_uid`. **All four** uids must be in the set. Requiring the real uid too excludes a setuid-root binary started by a user through a symlink named `NetworkManager` (real uid = user, effective uid = 0).
+4. The uid comes from the `status` content, not from the owner of `/proc/<pid>`: a non-dumpable process (`prctl(PR_SET_DUMPABLE, 0)`) has its `/proc/<pid>` entries owned by root, so the inode owner is spoofable; the `Uid:` line is not.
+
+Nothing else of a process is read; the uids are never printed (vocabulary unchanged). Sentinels: an empty `status` → ignored; `Uid:` with three or five fields → ignored; `networkd_uid` resolving to `0` adds nothing; a passwd line `systemd-network:x:abc:…` → `None`.
+
+### 12.3 G-2 `status` checks every directory component (item 2)
+
+A shared walker replaces the leaf-only check of `rule_file_state` and the loop of `checked_dir`:
+
+```rust
+/// Outcome of checking every component of `<root>/<rel>` (private).
+enum DirWalk {
+    /// Every component is a real directory owned by `owner`, not group- or world-writable;
+    /// carries the `lstat` of the last component and its full path.
+    Secure(FileStat, PathBuf),
+    /// A component does not exist (`ENOENT`).
+    Missing,
+    /// A component is a symbolic link or not a directory.
+    NotRealDir(PathBuf),
+    /// A component has the wrong owner or is group- or world-writable.
+    Insecure(PathBuf),
+    /// `lstat` failed with another errno (for example `EACCES`).
+    Error(PathBuf, Errno),
+}
+fn walk_dirs(root: &Path, rel: &str, owner: u32) -> DirWalk;
+```
+
+- `checked_dir` (install/uninstall) maps `Missing` → `Ok(None)`, the three failures → the same `AdminCliError::NetworkLock` messages as today; then opens and inode-matches the last directory as before. Behaviour unchanged.
+- `rule_file_state` (status) maps `Missing` → `Missing`, `NotRealDir`/`Insecure` → `InsecurePermissions`, `Error(_, _)` → `Unreadable`; `Secure` continues with the existing file checks. Applies to both files (`etc`, `etc/polkit-1`, `etc/polkit-1/rules.d`; `etc`, `etc/udev`, `etc/udev/rules.d`). The root itself (`/` or the staging root) is not checked, exactly like install.
+- Precedence unchanged: the walk stops at the first failing component, in path order; a missing component wins over a later insecure one (the later one cannot be examined).
+
+### 12.4 G-3 Docker comment (item 3)
+
+`tests/docker/network_lock_pkcheck_test.sh` header P1: "the six locked actions" → "the five locked actions". Comment only.
+
+### 12.5 G-4 `scripts/uninstall.sh` ancestor symlink check (item 4)
+
+Step 1b gains a helper `path_has_symlink_component <destdir> <relative-dir>` that walks every component of `${SYSCONFDIR}/polkit-1/rules.d` (and `${SYSCONFDIR}/udev/rules.d`) below `${DESTDIR}` and returns 0 when any existing component is a symbolic link (`-L`). When it does, the script keeps the file and warns `Keeping <file>: a directory on its path is a symbolic link.` (nothing removed through that path); the `rm -f -- "${lock_file}"` line and its position before `# 2. Roll Back PAM` are unchanged (NLK3 invariant). `DESTDIR` itself is not checked (same rule as `soos-admin`).
+
+### 12.6 G-5 Stale temp-file cleanup (item 5)
+
+An interrupted install (power loss, `SIGKILL`) leaves `.<file>.<pid>.tmp` (mode `0600`, not loaded by polkitd or udev because of the leading dot and the suffix).
+
+```rust
+/// Directory entries examined when looking for stale temp files.
+pub const MAX_RULES_DIR_ENTRIES: usize = 4096;
+```
+
+- `remove_stale_temp_files(dir: &CheckedDir, name: &str) -> Result<(), AdminCliError>` (private), called by `install_network_lock` on each verified directory after both directories are validated and before the first write, and by `uninstall_network_lock` on each directory right after it is validated and before its rule file is removed (the uninstall order of the two directories is unchanged).
+- A name is a soos temp name only when it is exactly `.` + `name` + `.` + 1–10 ASCII digits without a leading zero (the form `write_rule_file` produces) + `.tmp` and the digits parse as a pid in `1..=i32::MAX`.
+- It is stale only when that pid is not the current process and `nix::sys::signal::kill(pid, None)` returns `ESRCH`. `Ok` or `EPERM` (a live process, possibly a concurrent install) → kept. PID reuse can only keep a file, never remove a live one.
+- Only a regular file (`fstatat(dirfd, entry, AT_SYMLINK_NOFOLLOW)` type `S_IFREG`) is removed, with `unlinkat(dirfd, entry, NoRemoveDir)`; a symlink, directory or other type with a temp name is left alone. Listing uses `read_dir` on the verified path (the directory and every ancestor are owner-only writable), bounded by `MAX_RULES_DIR_ENTRIES`; every removal is relative to the verified descriptor. A listing or `unlinkat` error is an `AdminCliError::NetworkLock` (install/uninstall exit 1 before any rule change).
+- The existing contract `test_nlk_install_fails_cleanly_on_a_stale_temp_name` (a temp file with the **current** pid is never removed and install fails cleanly) still holds: the current process is alive by definition.
+- `scripts/uninstall.sh` step 1b also removes, in each lock directory that passed G-4, regular non-symlink files matching `.<file>.<pid>.tmp` (pid `^[1-9][0-9]{0,9}$`) whose pid has no `/proc/<pid>` entry on the running host, and only when `/proc/self` exists (no `/proc` mounted: nothing is removed); it prints `Removed <path>`.
+
+### 12.7 Error Taxonomy (delta)
+
+| Condition | Result |
+|---|---|
+| status: an ancestor directory is a symlink, not a directory, wrongly owned or writable by group/others | `InsecurePermissions` (exit 1) |
+| status: an ancestor cannot be examined (`EACCES`, other errno) | `Unreadable` (exit 1) |
+| probe: comm matches but `status` missing, malformed, or any uid untrusted | process ignored (backend not credited); never an error |
+| install/uninstall: stale-temp listing or removal error | `AdminCliError::NetworkLock`, exit 1; install: before any rule change; uninstall: before the rule file of the directory being cleaned is removed (the polkit directory may already be done, as with today's validation order) |
+
+No PAM, daemon or IPC path is involved.
+
+### 12.8 Invariants Touched
+
+No `unwrap`/`expect`/indexing in production code; `#![forbid(unsafe_code)]` unchanged (`kill`, `fstatat`, `unlinkat` are safe `nix` APIs); every read bounded (`MAX_PROC_STATUS_BYTES`, `MAX_PASSWD_BYTES`, `MAX_RULES_DIR_ENTRIES`); fixed output vocabulary; NLK3 uninstall-order invariant untouched.
+
+### 12.9 Test Hooks for Tester
+
+- `ProcServiceProbe { root }` over a fixture tree with `proc/<pid>/comm`, `proc/<pid>/status` (`Uid:\t<r>\t<e>\t<s>\t<f>`) and `etc/passwd`.
+- `NetworkLockEnv` + `network_lock_status` with ancestors made writable (`chmod`) or replaced by a symlink.
+- `install_network_lock` / `uninstall_network_lock` on a temp root with planted temp names: a dead pid (a child process spawned and reaped by the test, so `kill(pid, 0)` returns `ESRCH`), the current pid, a symlink and a directory carrying a temp name, a near name (`.49-soos-network-lock.rules.12x.tmp`).
+- `scripts/uninstall.sh --destdir` driven by a new shell script for the ancestor symlink and the temp cleanup.
+
+Planned tests (prefix `test_nlk_`):
+
+| Item | Tests |
+|---|---|
+| G-1 | `test_nlk_proc_probe_ignores_user_owned_services`, `test_nlk_proc_probe_requires_all_four_uids_trusted`, `test_nlk_proc_probe_ignores_missing_or_malformed_status`, `test_nlk_proc_probe_trusts_systemd_network_only_for_networkd`, `test_nlk_proc_probe_ignores_uid_line_beyond_the_read_cap`, `test_nlk_status_spoofed_network_manager_keeps_unsupported_backend` |
+| G-2 | `test_nlk_status_insecure_when_an_ancestor_dir_is_group_or_world_writable`, `test_nlk_status_insecure_when_an_ancestor_dir_is_a_symlink`, `test_nlk_status_rfkill_rule_insecure_when_its_ancestor_is_writable` |
+| G-5 | `test_nlk_install_removes_stale_temp_files_of_dead_processes`, `test_nlk_uninstall_removes_stale_temp_files_of_dead_processes`, `test_nlk_stale_temp_cleanup_keeps_live_foreign_and_non_regular_entries` |
+| G-4, G-5 shell | `test_nlk_uninstall_script_checks_ancestors_and_cleans_temp_files` running `network_lock_uninstall_script_test.sh` (U1 symlinked `etc/polkit-1` keeps the rule and its target, U2 symlinked `etc/udev` likewise, U3 stale temp files of a dead pid removed, live-pid and near-name files kept) |
+
+Contract amendments expected (setup only, assertions untouched): the existing probe tests that expect a match (`test_nlk_proc_probe_matches_exact_comm_names`, `test_nlk_status_uses_the_probe_result_for_the_backend`, `test_nlk_status_output_has_no_network_names`) must also write a root `status` file for each fake service process; the two probe tests that expect no match (`test_nlk_proc_probe_ignores_non_numeric_entries_and_near_names`, `test_nlk_proc_probe_ignores_oversize_comm_and_missing_proc`) gain the same root `status` files so that they keep failing a comm-matching bug instead of passing on the missing uid.
+
+### 12.10 Documentation Drift / ADR
+
+No new ADR: the changes tighten the ADR "[2026-10-13] Opt-In polkit Wi-Fi Lock and `soos-admin network-lock`" (D-6 probe, status/install symmetry) without changing a decision. `Docs/NETWORK_LOCK.md`: §3 (temp cleanup, uninstall.sh ancestor check), §3.1 (`backend` from root-owned processes, `systemd-network` for networkd; `insecure_permissions` covers every directory on the path), §8 (new tests).
+
+### 12.11 Revision 1 of §12 (plan evaluation, `AI/plan_evaluator_report.md` F-1 … F-7, APPROVED)
+
+- **F-1**: §12.7 corrected (uninstall order).
+- **F-2**: documented in `Docs/NETWORK_LOCK.md` §3.1 and an *(Amended)* note on the ADR: networkd is credited only as root or as the uid of the `systemd-network` entry of `/etc/passwd`; a missing entry, a userdb-only account or a symlinked `/etc/passwd` drop a real networkd (status `installed`/`missing` instead of `unsupported_backend`, exit code unchanged). Pinned by the no-passwd case of `test_nlk_proc_probe_trusts_systemd_network_only_for_networkd`.
+- **F-3**: one prefix reader `read_complete_lines(path, cap)`: reads at most `cap + 1` bytes; when the file is longer than `cap`, keeps the first `cap` bytes cut after their last `\n` (a line cut by the cap is dropped). Used for `status` and `/etc/passwd`. New test `test_nlk_proc_probe_ignores_systemd_network_entry_cut_by_the_read_cap`; the long-`status` positive control stays in `test_nlk_proc_probe_ignores_uid_line_beyond_the_read_cap`.
+- **F-4**: tests use pids that cannot exist (`4194304` = `PID_MAX_LIMIT`, and `2147483647`) instead of a reaped child; every uid position is varied; the fake `systemd-network` uid is `61234` (not Arch's 192); the keep test covers pid 1 (`EPERM` as non-root), a live child of the test (`Ok`) and a temp-named symlink; the ancestor tests loop over `etc`, `etc/polkit-1` and `etc`, `etc/udev`.
+- **F-5**: the probe also requires the `Name:` line of the same `status` buffer to equal the matched `comm` (closes the pid-reuse pairing of one process's name with another's uids). New test `test_nlk_proc_probe_requires_the_status_name_to_match_comm`.
+- **F-6**: `scripts/uninstall.sh` matches each entry with `[[ -e || -L ]]` guarded glob results and the full-name regex `^\.<file>\.([1-9][0-9]{0,9})\.tmp$`, enforces `pid <= 2147483647`, removes only `-f && ! -L` entries, uses the host `/proc/<pid>` (never `${DESTDIR}/proc`).
+- **F-7**: blast-radius row added; ADR amendment note; walkthrough number 199 (197 and 198 are reserved by open branches, per the orchestrator).
+- Observations recorded in the docs: `kill(pid, 0)` sees only the caller's PID namespace (an install from another namespace sharing `/etc` would have its temp removed and fail cleanly at `renameat`, rule unchanged); a setuid-root binary that sets all four uids to 0 and is exec'd through a symlink named like a service remains a residual G-1 risk (no standard binary does this).

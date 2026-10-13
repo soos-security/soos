@@ -31,3 +31,28 @@ fn test_nlk_shell_install_status_uninstall_in_temp_root() {
     );
     assert!(stdout.contains("all checks passed"), "{stdout}");
 }
+
+/// GitHub #370 (matrix NLK15, NLK17): `scripts/uninstall.sh` checks every directory on the
+/// path for a symbolic link and removes stale temp files of dead processes.
+#[test]
+fn test_nlk_uninstall_script_checks_ancestors_and_cleans_temp_files() {
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let repo = manifest
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("workspace root")
+        .to_path_buf();
+    let output = Command::new("bash")
+        .arg(manifest.join("tests/network_lock_uninstall_script_test.sh"))
+        .arg(env!("CARGO_BIN_EXE_soos-admin"))
+        .arg(&repo)
+        .output()
+        .expect("run bash");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "network_lock_uninstall_script_test.sh failed\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(stdout.contains("all checks passed"), "{stdout}");
+}
