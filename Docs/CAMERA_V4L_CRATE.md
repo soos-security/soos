@@ -4,6 +4,8 @@
 
 The `soos-camera-v4l` crate provides warm camera streaming and snapshot capabilities for `soos-daemon`. In facial recognition authentication, camera initialization latency (100–300ms) would violate the 150ms real-time authentication budget. To circumvent this, the camera manager continuously captures frames in a dedicated background OS thread, updating an atomic `ArcSwapOption<Frame>` snapshot in RAM.
 
+`Frame`, `PixelFormat` and `SensorType` are defined in the pure crate `soos-frame` and re-exported unchanged by this crate (`src/frame.rs`, `src/sensor.rs`; GitHub #367, `Docs/FRAME_CRATE.md`), so every `soos_camera_v4l::` path keeps working.
+
 When an authentication request arrives, consumer vision pipelines query `latest_frame()`, retrieving an $O(1)$ lock-free snapshot in under 100 microseconds without touching camera hardware or kernel MMAP buffers directly.
 
 ---

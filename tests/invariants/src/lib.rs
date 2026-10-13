@@ -352,6 +352,14 @@ mod network_lock_contract;
 #[cfg(all(test, unix))]
 mod remote_cross_browser_contract;
 
+/// Portable shared crates for the separate `soos-macos` repository: dependency guard over the
+/// resolved graph, pure `soos-frame`, camera-v4l re-exports, non-required SHA-pinned macOS job,
+/// advisory check of `pr_loop.sh`, ADR and bootstrap documentation (GitHub #360 / #367, ADR
+/// 2026-10-13 "macOS Port in a Separate Repository"; spec
+/// AI/architect_spec_macos_port_foundation.md; rows MAC1-MAC6).
+#[cfg(all(test, unix))]
+mod portable_crates_contract;
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,
@@ -392,6 +400,7 @@ mod tests {
             "remote",
             "push-protocol",
             "push-sender",
+            "frame",
         ];
 
         for crate_name in business_crates {

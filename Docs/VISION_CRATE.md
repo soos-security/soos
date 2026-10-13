@@ -2,7 +2,7 @@
 
 ## 1. Overview & Purpose
 
-The `soos-vision` crate is the core image processing, landmark alignment, and facial template matching engine for the `soos` Linux Biometric PAM monorepo. It operates as a high-performance business crate positioned strictly between camera acquisition (`soos-camera-v4l`) and ONNX Runtime neural inference (`soos-inference-ort`).
+The `soos-vision` crate is the core image processing, landmark alignment, and facial template matching engine for the `soos` Linux Biometric PAM monorepo. It operates as a high-performance business crate positioned strictly between camera acquisition (`soos-camera-v4l`) and ONNX Runtime neural inference (`soos-inference-ort`). It consumes frames through the pure crate `soos-frame` (`Frame`, `PixelFormat`, `SensorType`; `Docs/FRAME_CRATE.md`) and has no dependency on `soos-camera-v4l` or `v4l`, so it builds on macOS for the separate `soos-macos` repository (GitHub #367, `Docs/MACOS_PORT.md`).
 
 All operations are implemented in **100% pure Rust** with `#![forbid(unsafe_code)]` and zero third-party C/C++ computer vision libraries (strict prohibition of OpenCV).
 

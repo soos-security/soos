@@ -17,7 +17,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use soos_camera_v4l::{Frame, PixelFormat};
+use soos_frame::{Frame, PixelFormat};
 use soos_inference_ort::mock::{MockEmbeddingExtractor, MockFaceDetector, MockPadDetector};
 use soos_vision::{VisionPipeline, VisionPipelineConfig};
 

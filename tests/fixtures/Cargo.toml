@@ -11,7 +11,7 @@ publish.workspace = true
 path = "mod.rs"
 
 [dependencies]
-soos-camera-v4l = { workspace = true }
+soos-frame = { workspace = true }
 
 [lints]
 workspace = true

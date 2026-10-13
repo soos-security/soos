@@ -262,6 +262,7 @@ soos/
 │   ├── pam/                      # cdylib pam_soos.so, synchronous std-only IPC
 │   ├── daemon/                   # root binary, Tokio, supervisor
 │   ├── camera-v4l/               # V4L2 MMAP capture, mock-camera feature
+│   ├── frame/                    # soos-frame pure Frame/PixelFormat/SensorType (portable)
 │   ├── vision/                   # preprocessing, alignment, cosine similarity
 │   ├── inference-ort/            # isolated ONNX Runtime CPU bindings
 │   ├── biometric-store/          # encrypted embeddings at rest
@@ -285,7 +286,7 @@ soos/
 └── AI/                           # AI development guidelines and walkthroughs
 ```
 
-`#![forbid(unsafe_code)]` is strictly enforced in all business crates; the authoritative list is the invariant test `test_business_crates_forbid_unsafe_code` in `tests/invariants/src/lib.rs` (`protocol`, `policy`, `vision`, `inference-ort`, `biometric-store`, `evidence-store`, `enrollment-cli`, `admin-cli`, `gui`, `remote`). The adapter crates `pam` and `camera-v4l` confine documented `unsafe`.
+`#![forbid(unsafe_code)]` is strictly enforced in all business crates; the authoritative list is the invariant test `test_business_crates_forbid_unsafe_code` in `tests/invariants/src/lib.rs` (`protocol`, `policy`, `vision`, `inference-ort`, `biometric-store`, `evidence-store`, `enrollment-cli`, `admin-cli`, `gui`, `remote`, `push-protocol`, `push-sender`, `frame`). The portable subset shared with the separate `soos-macos` repository is guarded by `tests/invariants/src/portable_crates_contract.rs` (ADR 2026-10-13, `Docs/MACOS_PORT.md`). The adapter crates `pam` and `camera-v4l` confine documented `unsafe`.
 
 ---
 

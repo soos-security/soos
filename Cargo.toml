@@ -6,6 +6,7 @@ members = [
     "crates/policy",
     "crates/daemon",
     "crates/camera-v4l",
+    "crates/frame",
     "crates/inference-ort",
     "crates/vision",
     "crates/biometric-store",
@@ -106,6 +107,8 @@ soos-protocol = { path = "crates/protocol", version = "0.1.0" }
 soos-policy = { path = "crates/policy", version = "0.1.0" }
 soos-daemon = { path = "crates/daemon", version = "0.1.0" }
 soos-camera-v4l = { path = "crates/camera-v4l", version = "0.1.0" }
+# Pure frame types shared by the capture backends and soos-vision (GitHub #367, ADR 2026-10-13)
+soos-frame = { path = "crates/frame", version = "0.1.0" }
 soos-test-fixtures = { path = "tests/fixtures", version = "0.1.0" }
 soos-inference-ort = { path = "crates/inference-ort", version = "0.1.0" }
 soos-vision = { path = "crates/vision", version = "0.1.0" }

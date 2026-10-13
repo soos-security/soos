@@ -20,7 +20,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use soos_camera_v4l::{Frame, PixelFormat};
+use soos_frame::{Frame, PixelFormat};
 use soos_inference_ort::error::InferenceError;
 use soos_inference_ort::mock::{MockEmbeddingExtractor, MockFaceDetector, MockPadDetector};
 use soos_inference_ort::pad::{AttackType, PadDetector, PadResult};

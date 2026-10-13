@@ -3581,6 +3581,7 @@ version = "0.1.0"
 dependencies = [
  "arc-swap",
  "libc",
+ "soos-frame",
  "tempfile",
  "thiserror 2.0.20",
  "toml",
@@ -3655,6 +3656,13 @@ dependencies = [
  "serde",
  "tempfile",
  "thiserror 2.0.20",
+ "zeroize",
+]
+
+[[package]]
+name = "soos-frame"
+version = "0.1.0"
+dependencies = [
  "zeroize",
 ]
 
@@ -3792,7 +3800,7 @@ dependencies = [
 name = "soos-test-fixtures"
 version = "0.1.0"
 dependencies = [
- "soos-camera-v4l",
+ "soos-frame",
 ]
 
 [[package]]
@@ -3802,7 +3810,7 @@ dependencies = [
  "jpeg-decoder",
  "ort",
  "proptest",
- "soos-camera-v4l",
+ "soos-frame",
  "soos-inference-ort",
  "soos-test-fixtures",
  "tempfile",

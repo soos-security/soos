@@ -99,6 +99,7 @@ soos/
 │   ├── pam/                # cdylib pam_soos.so
 │   ├── daemon/             # root binary, Tokio
 │   ├── camera-v4l/         # V4L2, mock-camera feature
+│   ├── frame/              # soos-frame pure frame types (portable, shared with soos-macos)
 │   ├── vision/             # preprocessing, alignment
 │   ├── inference-ort/      # isolated ONNX Runtime CPU
 │   ├── biometric-store/    # encrypted embeddings at rest

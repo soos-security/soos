@@ -26,7 +26,7 @@
 use std::time::{Duration, Instant};
 
 use proptest::prelude::*;
-use soos_camera_v4l::PixelFormat;
+use soos_frame::PixelFormat;
 use soos_vision::color::{MAX_MJPEG_COMPRESSED_BYTES, MAX_MJPEG_DIMENSION};
 use soos_vision::{convert_to_rgb, VisionError};
 

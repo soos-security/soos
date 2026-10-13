@@ -168,11 +168,42 @@ WATCH_START=$(date +%s)
 
 # Watch until completion, aborting on the first failing job (45 min ceiling,
 # above the longest job timeout of 40 min).
-if ! timeout "$CI_WATCH_TIMEOUT_SECS" gh pr checks "$PR_NUMBER" --watch --fail-fast --interval 15; then
-    error "CI checks failed, were cancelled, or timed out on GitHub Actions!"
-    gh pr checks "$PR_NUMBER" || true
-    info "Inspect failures with: gh run view --log-failed"
-    exit 1
+WATCH_RC=0
+timeout "$CI_WATCH_TIMEOUT_SECS" gh pr checks "$PR_NUMBER" --watch --fail-fast --interval 15 || WATCH_RC=$?
+
+# Merge decision over every check except the advisory (non-required) macOS job
+# (ADR 2026-10-13 "macOS Port in a Separate Repository"): 0 proceed, 3 pending,
+# anything else blocks. 'CI Success' alone is not sufficient: checks of other
+# workflows (the PR title check) are outside it.
+GATE_HELPER="$(dirname "${BASH_SOURCE[0]}")/pr_checks_gate.sh"
+
+if (( WATCH_RC != 0 )); then
+    # The fail-fast watch also stops on a failing advisory check, or on the
+    # watch timeout: decide on the non-advisory checks only, waiting for the
+    # pending ones within the same time budget.
+    while true; do
+        gate_rc=0; "$GATE_HELPER" "$PR_NUMBER" || gate_rc=$?
+        case "$gate_rc" in
+            0)
+                warn "Only advisory (non-required) checks failed or are unfinished; 'CI Success' decides."
+                break
+                ;;
+            3)
+                if (( $(date +%s) - WATCH_START > CI_WATCH_TIMEOUT_SECS )); then
+                    error "Non-advisory CI checks still pending after ${CI_WATCH_TIMEOUT_SECS}s."
+                    gh pr checks "$PR_NUMBER" || true
+                    exit 1
+                fi
+                sleep 15
+                ;;
+            *)
+                error "CI checks failed, were cancelled, or timed out on GitHub Actions!"
+                gh pr checks "$PR_NUMBER" || true
+                info "Inspect failures with: gh run view --log-failed"
+                exit 1
+                ;;
+        esac
+    done
 fi
 
 # Authoritative verdict: the aggregate check run of the exact validated commit.
@@ -195,6 +226,14 @@ while true; do
 done
 if [[ "$CI_CONCLUSION" != "success" ]]; then
     error "'CI Success' for ${TARGET_HEAD_SHA:0:12} is '$CI_CONCLUSION' — refusing to merge."
+    exit 1
+fi
+# Final snapshot right before the merge: a check of another workflow may have
+# appeared or been re-run since the watch; only a clean gate (0) merges.
+gate_rc=0; "$GATE_HELPER" "$PR_NUMBER" || gate_rc=$?
+if [[ "$gate_rc" != "0" ]]; then
+    error "Non-advisory checks are not all green on ${TARGET_HEAD_SHA:0:12} (gate status $gate_rc) — refusing to merge."
+    gh pr checks "$PR_NUMBER" || true
     exit 1
 fi
 success "All CI checks passed on ${TARGET_HEAD_SHA:0:12}!"

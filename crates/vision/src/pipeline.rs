@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use soos_camera_v4l::Frame;
+use soos_frame::Frame;
 use soos_inference_ort::{
     AttackType, BiometricEmbedding, EmbeddingExtractor, FaceDetection, FaceDetector, FaceLandmarks,
     PadDetector, PadResult,

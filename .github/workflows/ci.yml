@@ -28,6 +28,10 @@
 #                        images (push to main and manual dispatch only)
 #   9. distro-deploy   — Fedora (.rpm, authselect) and Arch (pacman) deployment
 #                        and package harness (push to main and manual dispatch)
+#  10. portable-macos  — clippy and tests of the portable crates shared with the
+#                        separate soos-macos repository on an arm64 macOS runner
+#                        (non-required: not part of CI Success, advisory in
+#                        scripts/pr_loop.sh through scripts/pr_checks_gate.sh)
 # The PR title convention is checked by pr-title.yml (it must also re-run when
 # a PR is retitled, which would needlessly re-run this whole pipeline).
 #
@@ -523,6 +527,62 @@ jobs:
             -v "soos-distro-target-${DISTRO}":/workspace/target \
             "soos-distro-val-${DISTRO}" \
             bash /workspace/tests/docker/test_packages.sh
+
+  # ---------------------------------------------------------------------------
+  # Job 10: Portable crates on macOS (GitHub #367, ADR 2026-10-13 "macOS Port in
+  # a Separate Repository"). Builds (clippy -D warnings) the portable crates the
+  # private soos-macos repository consumes and runs their tests, except the
+  # soos-biometric-store tests (compiled only until a Mac validates the store
+  # semantics). NOT a required check and NOT a CI Success dependency;
+  # scripts/pr_loop.sh treats it as advisory. No secrets, workflow-default
+  # read-only token. Stays on an arm64 image: ort-sys ships no prebuilt ONNX
+  # Runtime for x86_64-apple-darwin.
+  # ---------------------------------------------------------------------------
+  portable-macos:
+    name: "Portable crates (macOS, non-required)"
+    if: github.event_name != 'schedule'
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain (rust-toolchain.toml)
+        run: rustup toolchain install --profile minimal && rustc --version && cargo clippy --version
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: ONNX Runtime cache location
+        run: echo "ORT_CACHE_DIR=${HOME}/.cache/ort.pyke.io" >> "$GITHUB_ENV"
+
+      - name: Restore the ONNX Runtime download cache
+        id: ort-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/ort.pyke.io
+          key: ort-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+
+      - name: Prefetch ONNX Runtime (bounded retry)
+        run: ./scripts/prefetch_onnxruntime.sh
+
+      - name: Save the ONNX Runtime download cache
+        if: github.ref == 'refs/heads/main' && steps.ort-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/ort.pyke.io
+          key: ort-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+
+      - name: cargo clippy (portable crates)
+        run: cargo clippy --locked -p soos-frame -p soos-protocol -p soos-policy -p soos-push-protocol -p soos-inference-ort -p soos-vision -p soos-biometric-store --all-targets --all-features -- -D warnings
+
+      - name: Build test binaries (portable crates)
+        run: cargo test --locked -p soos-frame -p soos-protocol -p soos-policy -p soos-push-protocol -p soos-inference-ort -p soos-vision --all-targets --all-features --no-run
+
+      - name: cargo test (portable crates)
+        run: cargo test --locked -p soos-frame -p soos-protocol -p soos-policy -p soos-push-protocol -p soos-inference-ort -p soos-vision --all-targets --all-features
 
   # ---------------------------------------------------------------------------
   # Job 7: Aggregate status (single required check for merge gating)
