@@ -56,6 +56,10 @@ pub enum AdminCliError {
     /// GDM configuration error.
     #[error("GDM configuration error: {0}")]
     GdmConfig(String),
+
+    /// Network lock install or uninstall refusal (GitHub #365).
+    #[error("network lock: {0}")]
+    NetworkLock(String),
 }
 
 impl From<getrandom::Error> for AdminCliError {

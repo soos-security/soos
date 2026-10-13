@@ -194,6 +194,21 @@ if [[ -f "${TARGET_SYSTEMD_DIR}/soos-daemon.service" || -z "${DESTDIR}" ]]; then
     fi
 fi
 
+# 1b. Remove the opt-in network lock (GitHub #365, Docs/NETWORK_LOCK.md) before any
+# step that can end this script early.
+NETWORK_LOCK_FILES=(
+    "${DESTDIR}${SYSCONFDIR}/polkit-1/rules.d/49-soos-network-lock.rules"
+    "${DESTDIR}${SYSCONFDIR}/udev/rules.d/72-soos-network-lock-rfkill.rules"
+)
+for lock_file in "${NETWORK_LOCK_FILES[@]}"; do
+    if [[ -L "$(dirname "${lock_file}")" ]]; then
+        warn "Keeping ${lock_file}: its directory is a symbolic link."
+    elif [[ -e "${lock_file}" || -L "${lock_file}" ]]; then
+        rm -f -- "${lock_file}"
+        success "Removed ${lock_file}"
+    fi
+done
+
 # 2. Roll Back PAM Configurations
 info "Rolling back PAM configurations..."
 

@@ -3552,6 +3552,7 @@ dependencies = [
  "nix",
  "serde",
  "serde_json",
+ "sha2",
  "soos-camera-v4l",
  "soos-protocol",
  "tempfile",
