@@ -68,6 +68,12 @@ Read-only; it never changes anything and never prints an SSID, BSSID, Wi-Fi pass
 - Precedence: `insecure_permissions`, `modified`, `unreadable`, `unsupported_backend`, then `installed` or `missing`.
 - Exit code `1` when either file is `modified`, `insecure_permissions` or `unreadable`; `0` otherwise (`missing` is a valid opt-in state, and the `rfkill_uaccess` warning is a documented gap).
 
+`soos-gui` also offers the lock as a switch in its feature tour (`Docs/GUI_APPLICATION.md` §1e,
+GitHub #379). Off runs `pkexec soos-admin network-lock uninstall`. On runs
+`pkexec soos-admin network-lock install` only when the rfkill rule is known to be absent (so an
+installed rfkill rule is never dropped silently), and otherwise shows
+`sudo soos-admin network-lock install --rfkill`.
+
 ## 4. Whose password?
 
 `AUTH_ADMIN` asks for the password of an administrator identity: members of `wheel` on Arch and Fedora, of `sudo` on Debian and Ubuntu (polkit's `50-default.rules` / `49-ubuntu-admin.rules`). On a single-user desktop where you are that administrator, the lock asks for **your own password**, exactly like `sudo`. Anyone who knows your session password can therefore still change the network; the lock stops someone who only finds the session unlocked.

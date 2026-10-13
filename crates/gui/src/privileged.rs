@@ -41,6 +41,21 @@ pub const SOOS_ENROLL_PROGRAM: &str = "/usr/bin/soos-enroll";
 #[cfg(soos_custom_bindir)]
 pub const SOOS_ENROLL_PROGRAM: &str = concat!(env!("SOOS_BINDIR"), "/soos-enroll");
 
+/// Absolute path of `soos-admin` as installed by `scripts/install.sh` and the packages; follows
+/// the build-time `SOOS_BINDIR` exactly like [`SOOS_ENROLL_PROGRAM`] (GitHub #318, #379).
+#[cfg(not(soos_custom_bindir))]
+pub const SOOS_ADMIN_PROGRAM: &str = "/usr/bin/soos-admin";
+
+/// Absolute path of `soos-admin` under a non-default install prefix (validated by `build.rs`).
+#[cfg(soos_custom_bindir)]
+pub const SOOS_ADMIN_PROGRAM: &str = concat!(env!("SOOS_BINDIR"), "/soos-admin");
+
+/// Absolute path of `touch` (coreutils), used only to create a soos flag file (GitHub #379).
+pub const TOUCH_PROGRAM: &str = "/usr/bin/touch";
+
+/// Absolute path of `rm` (coreutils), used only to remove a soos flag file (GitHub #379).
+pub const RM_PROGRAM: &str = "/usr/bin/rm";
+
 /// A privileged operation requested by the UI.
 pub enum PrivilegedAction {
     /// `pkexec systemctl stop soos-daemon.service`.

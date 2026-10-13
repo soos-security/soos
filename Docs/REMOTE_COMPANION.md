@@ -1359,6 +1359,13 @@ A missing file, an unknown key or an invalid value exits with status 78 (`EX_CON
 unit does not retry (`RestartPreventExitStatus=78`); runtime failures exit 1 and are restarted.
 The service also refuses to start when its real or effective uid is 0.
 
+`soos-gui` can turn `allow_unlock`, `allow_funnel`, `push_notifications` and `camera_view` **off**
+from its feature tour (`Docs/GUI_APPLICATION.md` §1e, GitHub #379): it rewrites only the
+`key = true` line to `key = false` (and `camera_view_funnel` with `allow_funnel` or
+`camera_view`), verifies the result with a TOML parse, writes it atomically with mode 0600 and
+runs `systemctl --user try-restart soos-remote.service`. Turning a key back on is shown as the
+exact edit, because each widens exposure and has prerequisites only the service validates.
+
 ## 6. HTTP surface
 
 | Method + path | Response |
