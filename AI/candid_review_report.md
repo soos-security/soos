@@ -1,86 +1,61 @@
 # Candid Review Report
 
-- **Date**: 2026-10-15
-- **Target Branch**: `fix/rustls-advisories`
+- **Date**: 2026-10-13
+- **Target Branch**: `test/deflake-rwp-delivery`
 - **Base (merge-base)**: `6f32ef8`
-- **Reviewed-Diff-Fingerprint**: `c4e1ae444cf5861dd56d95d9df1f331ece31dde73ef774b4469fa79e12f3a2d5`
-- **Audited Files**: `Cargo.lock`, `AI/walkthroughs/211_rustls_advisories.md` (new)
+- **Reviewed-Diff-Fingerprint**: `d9dd8b629c43b27f029c539511e490660ca65b9acd5de395d6e70fa304ab1371`
+- **Audited Files**: `AI/VERIFICATION_MATRIX.md`, `AI/walkthroughs/204_deflake_rwp_delivery.md`, `crates/remote/tests/android_push_tests.rs`, `crates/remote/tests/common/push.rs`, `crates/remote/tests/push_server_tests.rs`
 
 ## 1. Executive Summary
 
-The patch is a lockfile-only security bump: `rustls` 0.23.45 → 0.23.46 to clear RUSTSEC-2026-0346
-(secrets exposed through `Debug`) and RUSTSEC-2026-0347 (data leak on a rejected ECH offer), plus
-walkthrough 211. Exactly four `Cargo.lock` lines change (the version and checksum of one package
-entry). The dependency list of the `rustls` entry is unchanged. No source, `Cargo.toml`, `deny.toml`,
-workflow, script or test file is touched. I checked each claim independently and found no defect.
+The diff deflakes `test_rwp_delivery_outcomes` (GitHub #371) by changing only the test harness. `FakeTransport` now records the scripted answer of each call. A new `settle_gone` helper, called from `wait_calls` in both push test files, waits in real time with a bound and without moving the paused clock, until the dispatcher has consumed the blocking-pool removal of the latest `Gone` subscription. The diff touches no production file under `crates/remote/src`. No assertion, virtual bound, step, timeout or panic message was changed or removed, and no `#[ignore]` or retry was added. The root-cause analysis is consistent with the code: `remove_gone` awaits `with_store_lock(remove_endpoint)` on the blocking pool, and with a frozen clock, virtual time moves only through `advance`. I found no CRITICAL or MAJOR issue.
 
-## 2. Test Changes (mechanical listing from step 3, with justification per change)
+## 2. Test Changes (mechanical listing from step 3)
 
-All four mechanical greps over `target/candid_diff.patch` returned no matches:
-
-- test/fixture files touched: none;
-- removed or changed assertions / `#[test]` / `proptest!` / `#[should_panic]`: none;
-- new escape hatches (`#[ignore]`, `#[cfg(any())]`, `should_panic`, tolerance, epsilon): none;
-- inline `mod tests` changes: none.
-
-No test was added, modified or removed. No justification is needed.
+- Test files touched: `crates/remote/tests/android_push_tests.rs`, `crates/remote/tests/common/push.rs`, `crates/remote/tests/push_server_tests.rs`.
+- Removed or changed checks (`^-` lines with assert/#[test]/#[tokio::test]/proptest!/#[should_panic]): **none**. The only removed lines in the whole patch are a doc comment (`common/push.rs`, "One recorded call ...") and the single `calls.push(Call { at_ms, request })` statement, which moved below the queue pop so that the record carries `answer`. `at_ms` is still computed first, so the recorded timestamps do not change.
+- New escape hatches (`#[ignore]`, `#[cfg(any())]`, `should_panic`, tolerance, epsilon): **none** in code. The only match is prose in walkthrough 204 stating that none were added.
+- Inline `mod tests` changes: **none**.
+- Justification: amendments CA-1 to CA-3 (walkthrough 204 §4) only add synchronisation and recording, with every assertion preserved.
 
 ## 3. Deep Reasoning Audit
 
 ### Logic & Architecture
-- Scenario: the bump pulls in a new transitive dependency or changes another package. The diff
-  hunk touches only the `version`/`checksum` lines. The `dependencies` array of the `rustls` entry
-  (`log`, `once_cell`, `ring`, `rustls-pki-types`, `rustls-webpki`, `subtle`, `zeroize`) is
-  identical. `git diff origin/main -- Cargo.lock` shows four changed lines. → PASS.
-- Scenario: the lockfile is inconsistent with the manifests (for example, the reverted
-  `getrandom` hunk the walkthrough mentions leaves a dangling edge). `cargo metadata --locked`
-  succeeds. → PASS.
-- Scenario: the version falls outside the `ureq` 3.4.2 requirement. Resolution under `--locked`
-  succeeds, and `cargo tree --locked -i rustls` resolves `rustls v0.23.46 ← ureq v3.4.2 ←
-  soos-push-sender`. → PASS.
-- Scenario: the walkthrough's claim about the `ort-sys` build-dependency edge is wrong. The
-  `ort-sys` 2.0.0-rc.13 lock entry does list `ureq`. `cargo tree -i ureq -e all --target all`
-  shows the build-dependency path through `soos-inference-ort`. The claim is accurate. → PASS.
+- Scenario: the dispatcher never removes the `Gone` endpoint (regression in `remove_gone`).
+  - **Block 1** (two subscriptions, first answer `Gone`): `settle_gone` exits once the second call is recorded (`count > index + 1`). The unchanged assertions that follow still fail: `subscriptions == 1`, store length 1, the remaining endpoint differs from the gone one, and exactly one `push subscription removed` audit line.
+  - **Block 2** (single subscription): neither exit condition can hold, so the `GONE_WAIT` assertion panics after 10 s.
+  - **Android** test: the unchanged `wait_view(subscriptions == 3)` and the `only the gone endpoint is removed` set equality still fail.
+  - The wait therefore cannot mask that regression → PASS.
+- Scenario: the dispatcher removes the endpoint but never records `gone`. The store check alone is not enough to exit; exit requires a later call or `last_delivery == "gone"`. Otherwise the wait panics → PASS.
+- Scenario: a stale exit in a later `wait_calls` on the same transport. `last_gone` returns an earlier index for which `count > index + 1` already holds, so the helper exits at once without hiding anything. The re-subscribe assumption is documented, and no test re-subscribes a gone endpoint → PASS.
+- Scenario: `store.load()` racing the atomic temp-file plus rename write. A read error yields "not stored", but exiting also requires the view to report `gone`, which `record_gone` sets only after the join → PASS.
+- Scenario: lock ordering in `FakeTransport::deliver`. The queue and default locks are released at the end of their statement before the calls lock is taken, and `last_gone` takes only the calls lock. There is no new deadlock → PASS.
+- `wait_calls` still returns virtual `elapsed`. `settle_gone` never calls `advance`, so virtual-time measurements (for example `let waited = wait_calls(...)`) are unaffected → PASS.
 
 ### PAM Concurrency & Deadlines
-- `crates/pam` is not touched, and `rustls` is not in the PAM dependency graph (the only
-  dependent chain is `ureq` → `soos-push-sender` and the `ort-sys` build script). → PASS (N/A).
+- Not applicable: the diff does not touch `crates/pam`. The real-time wait is bounded (`GONE_WAIT` 10 s per wait, 1 ms sleeps), below the frozen clock's 20 s `WALL_CLOCK_FALLBACK` → PASS.
 
 ### Panic Safety & Fail-Closed
-- No production code changes. A patch release of `rustls` changes no API the workspace uses
-  (`ureq` is exactly pinned and unchanged). → PASS (N/A).
+- The new `unwrap()` and `assert!` calls are confined to integration-test code, and production is untouched. No path to `Allow` or `PAM_SUCCESS` → PASS.
 
 ### Test Integrity & Anti-Weakening
-- See §2. No test is modified. The existing `soos-push-sender` tests and `cargo deny` are a
-  sufficient contract for a lockfile patch bump. → PASS.
+- I checked that the virtual bounds and steps (`10_000`/`100`, `PUSH_COALESCE_MS + JOURNAL_IDLE_TICK_MS + 10_000`) are unchanged, as are the panic messages and every assertion. The new helper only adds a stricter, bounded precondition → PASS.
+- `fmt --check` is clean. `cargo clippy --locked -p soos-remote --all-targets --all-features -D warnings` is clean. `push_server_tests` (22 tests) and `android_push_tests` (5 tests) pass → PASS.
 
 ### Memory, Bounds & Secrets
-- Scenario: RUSTSEC-2026-0346 was exploitable through soos logging before the bump. I checked
-  `crates/push-sender/src/lib.rs`: `UreqDeliverer` (line 257) and `FilteringResolver` (line 180)
-  have hand-written `Debug` impls that print only the type name. `install_logging` turns off the
-  `ureq`, `ureq_proto` and `rustls` targets (lines 359–361). No `log` bridge (`LogTracer` /
-  `tracing-log`) is installed. The walkthrough's auditor constraints match the code. → PASS.
-- Scenario: ECH is configured anywhere (RUSTSEC-2026-0347). No ECH configuration exists in
-  `crates/push-sender/src`. → PASS.
+- Polling is bounded in time. Recording `Scripted` (a `Copy` value) per call adds no secret. No logging was added → PASS.
 
 ### Supply Chain & Automation
-- Scenario: the checksum is forged or wrong. I computed the SHA-256 of the cached
-  `rustls-0.23.46.crate` from the crates.io registry: `48e13bd8…8fdf`, which matches the lockfile. → PASS.
-- Scenario: the advisories are waived instead of fixed. `deny.toml` is unchanged and keeps
-  `ignore = []`. `cargo deny --locked check` → `advisories ok, bans ok, licenses ok, sources ok`. → PASS.
-- Source stays `registry+https://github.com/rust-lang/crates.io-index`. No git or path source is
-  introduced. → PASS.
+- No `Cargo.*`, `deny.toml`, `.github/`, `scripts/` or `.githooks/` change → PASS.
 
 ### English-Only Policy
-- The walkthrough is in English. `./scripts/candid_review.sh` Audit 7 reports OK. → PASS.
+- All code, comments, the walkthrough and the matrix rows are in English → PASS.
 
 ## 4. Detailed Findings & Action Items
 
-- **[SUGGESTION]** `AI/walkthroughs/211_rustls_advisories.md:5` — numbering skips from 199 to 211.
-  The walkthrough explains this (lower numbers are reserved for other open branches), and no
-  repository check enforces contiguous numbering. No action is required.
-
-No CRITICAL, MAJOR or MINOR finding.
+- **[MINOR]** `crates/remote/tests/android_push_tests.rs:316` / `crates/remote/tests/push_server_tests.rs:471`: `settle_gone`, `GONE_WAIT` and `GONE_WAIT_SLEEP` are duplicated byte for byte. This is acknowledged in walkthrough 204 §3 and follows the existing `wait_view` precedent. A future change could move them into `common/push.rs` behind a small `push_view` callback.
+- **[SUGGESTION]** `crates/remote/tests/android_push_tests.rs:294` and `crates/remote/tests/push_server_tests.rs:448`: the doc comments say "the clock waits" where the helper is what waits, since the clock never moves. Consider "the helper first waits, in real time, ...".
+- **[SUGGESTION]** `AI/walkthroughs/204_deflake_rwp_delivery.md:24`: the residual window (two consecutive `Gone` answers that end a round) is documented but not covered by any test. That is acceptable while no test scripts it.
 
 ## 5. Final Verdict
 

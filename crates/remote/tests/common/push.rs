@@ -301,11 +301,13 @@ pub const fn reply(outcome: Outcome, status: Option<u16>, retry_after_s: Option<
     })
 }
 
-/// One recorded call: virtual ms since the transport was made, and the request.
+/// One recorded call: virtual ms since the transport was made, the request, and the
+/// scripted answer it was given.
 #[derive(Clone)]
 pub struct Call {
     pub at_ms: u64,
     pub request: DeliveryRequest,
+    pub answer: Scripted,
 }
 
 impl Call {
@@ -315,6 +317,18 @@ impl Call {
 
     pub fn topic(&self) -> Option<&str> {
         self.request.topic.as_deref()
+    }
+
+    /// Whether this call was answered `Gone` (the service then removes the subscription
+    /// from the store on the blocking pool before its next delivery).
+    pub fn answered_gone(&self) -> bool {
+        matches!(
+            self.answer,
+            Scripted::Reply(DeliveryReply {
+                outcome: Outcome::Gone,
+                ..
+            })
+        )
     }
 }
 
@@ -357,6 +371,17 @@ impl FakeTransport {
         self.0.calls.lock().unwrap().len()
     }
 
+    /// The index and endpoint of the latest call answered `Gone`, if any.
+    pub fn last_gone(&self) -> Option<(usize, String)> {
+        let calls = self.0.calls.lock().unwrap();
+        calls
+            .iter()
+            .enumerate()
+            .rev()
+            .find(|(_, call)| call.answered_gone())
+            .map(|(index, call)| (index, call.endpoint().to_string()))
+    }
+
     /// Calls whose topic is `topic`.
     pub fn calls_with_topic(&self, topic: &str) -> Vec<Call> {
         self.calls()
@@ -391,7 +416,6 @@ impl PushTransport for FakeTransport {
         request: DeliveryRequest,
     ) -> Pin<Box<dyn Future<Output = Result<DeliveryReply, TransportError>> + Send + '_>> {
         let at_ms = self.0.start.elapsed().as_millis() as u64;
-        self.0.calls.lock().unwrap().push(Call { at_ms, request });
         let answer = self
             .0
             .queue
@@ -399,6 +423,11 @@ impl PushTransport for FakeTransport {
             .unwrap()
             .pop_front()
             .unwrap_or(*self.0.default.lock().unwrap());
+        self.0.calls.lock().unwrap().push(Call {
+            at_ms,
+            request,
+            answer,
+        });
         Box::pin(async move {
             match answer {
                 Scripted::Reply(reply) => Ok(reply),
