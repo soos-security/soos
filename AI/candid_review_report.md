@@ -1,12 +1,31 @@
 # Candid Review Report
 
-- **Date**: 2026-10-13
+- **Date**: 2026-10-15
 - **Target Branch**: `feat/onboarding-tour`
-- **Base (merge-base)**: `6f32ef8`
-- **Reviewed-Diff-Fingerprint**: `335215c440578e0a3d1241a5996cb7aa32427aa718dc06a6c2c11dae6d3e3186`
+- **Base (merge-base)**: `94a7cb3`
+- **Reviewed-Diff-Fingerprint**: `ffa0d83af98c440e53f31b0805e19b7533d1421456f6162c36540cd92bdb4523`
 - **Audited Files**: `AI/DECISIONS.md`, `AI/VERIFICATION_MATRIX.md`, `AI/architect_spec_onboarding_tour.md`, `AI/auditor_constraints_onboarding_tour.md`, `AI/tester_contract_onboarding_tour.md`, `AI/walkthroughs/209_onboarding_tour.md`, `Cargo.lock`, `Docs/GUI_APPLICATION.md`, `Docs/NETWORK_LOCK.md`, `Docs/REMOTE_COMPANION.md`, `crates/gui/Cargo.toml`, `crates/gui/src/app.rs`, `crates/gui/src/feature_control.rs`, `crates/gui/src/header.rs`, `crates/gui/src/lib.rs`, `crates/gui/src/onboarding.rs`, `crates/gui/src/onboarding_view.rs`, `crates/gui/src/privileged.rs`, `crates/gui/tests/feature_control_tests.rs`, `crates/gui/tests/onboarding_audit_tests.rs`, `crates/gui/tests/onboarding_feature_tests.rs`, `crates/gui/tests/onboarding_state_tests.rs`, `crates/gui/tests/onboarding_view_tests.rs`
 
 ## 1. Executive Summary
+
+**Re-review after the rebase onto `origin/main` `94a7cb3` (2026-10-15).** The base moved from
+`6f32ef8` to `94a7cb3`, which bumps `rustls` 0.23.45 → 0.23.46 in `Cargo.lock` and adds walkthrough
+211. Because this branch also edits `Cargo.lock`, the fingerprint changed. I re-checked the rebase
+independently:
+
+- `git range-diff origin/feat/onboarding-tour...HEAD` (excluding this report) shows the branch
+  commit as `=` (identical patch); the only new commit is `94a7cb3` itself.
+- `git diff 6f32ef8 origin/feat/onboarding-tour` and `git diff 94a7cb3 HEAD` (both excluding this
+  report, `index` lines dropped) are byte-identical, so the rebase introduced no change.
+- The branch's `Cargo.lock` delta is still only the `"toml"` edge on `soos-gui`, and the lockfile
+  keeps `rustls` 0.23.46 from main. `cargo metadata --locked --format-version 1` succeeds, so the
+  lockfile is consistent with the manifests.
+- I re-ran the mechanical test greps on the new frozen patch (results below) and spot-checked the
+  privileged argv construction (`privileged.rs`, `feature_control.rs`). Nothing changed from the
+  previous review, whose findings are carried forward unchanged. No cargo build or test was re-run
+  for this re-review, because the code under review did not change.
+
+Original summary (2026-10-13, base `6f32ef8`):
 
 The diff adds a first-run onboarding tour to `soos-gui` (GitHub #379, PR 1 of #363): one page per
 feature with a plain-English explanation, the probed state and an on/off control, a per-user
