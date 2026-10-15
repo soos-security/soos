@@ -1,114 +1,134 @@
 # Candid Review Report
 
-- **Date**: 2026-10-13
+- **Date**: 2026-10-15
 - **Target Branch**: `feat/remote-offline-alerts`
-- **Base (merge-base)**: `6f32ef8`
-- **Reviewed-Diff-Fingerprint**: `caf54570623eb8f380cf412883eeebbdef827fa183443c8989afba24199ae8e9`
+- **Base (merge-base)**: `af511eb`
+- **Reviewed-Diff-Fingerprint**: `396018e73d046acb3b0303804de69c555bcfe89f226666b2fc3760ce960fa2d6`
 - **Audited Files**: `.agents/skills/dev-workflow/references/project-facts.md`, `AI/ARCHITECTURE.md`, `AI/DECISIONS.md`, `AI/VERIFICATION_MATRIX.md`, `AI/architect_spec_remote_offline_alerts.md`, `AI/auditor_constraints_remote_offline_alerts.md`, `AI/tester_contract_remote_offline_alerts.md`, `AI/walkthroughs/202_remote_offline_alerts.md`, `Docs/REMOTE_COMPANION.md`, `crates/remote/assets/app.js`, `crates/remote/assets/style.css`, `crates/remote/assets/sw.js`, `crates/remote/src/audit.rs`, `crates/remote/src/config.rs`, `crates/remote/src/lib.rs`, `crates/remote/src/logind.rs`, `crates/remote/src/main.rs`, `crates/remote/src/offline.rs`, `crates/remote/src/push.rs`, `crates/remote/src/routes.rs`, `crates/remote/src/server.rs`, `crates/remote/tests/alerts_server_tests.rs`, `crates/remote/tests/android_push_tests.rs`, `crates/remote/tests/battery_server_tests.rs`, `crates/remote/tests/common/camera.rs`, `crates/remote/tests/common/harness.rs`, `crates/remote/tests/offline_server_tests.rs`, `crates/remote/tests/offline_tests.rs`, `crates/remote/tests/push_server_tests.rs`, `crates/remote/tests/server_tests.rs`, `scripts/install_remote.sh`, `tests/invariants/src/lib.rs`, `tests/invariants/src/remote_offline_contract.rs`
 
 ## 1. Executive Summary
 
-GitHub #376 (tier 1 of #359 Part B) adds an opt-in offline history and a back-online Web Push to
-`soos-remote`. The diff was reviewed against the 2026-10-13 ADR, RC-1, RMC-S9, the Web Push ADR,
-`Docs/REMOTE_COMPANION.md` and the security guidelines. RC-1 holds: no inet socket and no unit
-change. The bus stays read-only: `NameHasOwner` plus four `Properties.Get` reads, no match and no
-mutating call. No network identifier is read. The store follows the passkey and push store rules.
-The new route is never Funnel-public. Existing tests only gained the setup line. The full
-workspace suite passes (`cargo test --locked --workspace --all-targets --all-features`: 3587
-passed, 0 failed, 6 ignored that were already ignored before this change).
-The first review (fingerprint `586b0661…`) found one MINOR documentation defect and one SUGGESTION. The MINOR one is now fixed: re-review of the current diff confirms that the only change since then is the `AI/DECISIONS.md` correction. The SUGGESTION remains open. Nothing is CRITICAL or MAJOR.
+Re-review after the rebase of `feat/remote-offline-alerts` (GitHub #376, tier 1 of #359 Part B,
+PR #386) from base `94a7cb3` onto `origin/main` `af511eb`. Main gained #383 (push delivery test
+deflake: `settle_gone` in `crates/remote/tests/common/push.rs`, `push_server_tests.rs`,
+`android_push_tests.rs`), #394 (actions bump), #384 (motion ADR, `mod ui_motion_spec_contract`)
+and #388 (read-only lock-screen state request: daemon, protocol `RequestKind::LockState`,
+`mod lock_state_contract`). The previous review (fingerprint `caf54570…`, APPROVED, one MINOR
+resolved, one SUGGESTION open) is carried forward. The raw diff against the new merge base was
+re-read independently (`offline.rs` runtime/watcher/stop/persist, `push.rs` scheduler,
+notice delivery and retries, `server.rs` wiring and route, `config.rs`, `logind.rs`, `main.rs`,
+`audit.rs`). No CRITICAL or MAJOR finding.
 
-## 2. Test Changes
+Rebase verification (this review):
+- `git range-diff origin/feat/remote-offline-alerts...HEAD`: the single branch commit `b2dbc3e` →
+  `290b8c1`; the only changes are context lines from main and the placement of the conflicted
+  blocks.
+- Per-file comparison of the sorted added/removed lines of `94a7cb3..origin/feat/remote-offline-alerts`
+  against `af511eb..HEAD`, for all 35 files: identical for 32 files, including `AI/DECISIONS.md`
+  and `tests/invariants/src/lib.rs`. Differences: `AI/VERIFICATION_MATRIX.md` gains exactly one
+  blank line and one `---` separator before the `remote-offline-alerts` section (the file's
+  convention); `AI/candid_review_report.md` (this file, rewritten) and
+  `AI/plan_evaluator_report.md` differ only through their base side (main's versions are now the
+  base); the branch's `AI/plan_evaluator_report.md` is byte-identical to the pre-rebase branch
+  file (`git diff origin/feat/remote-offline-alerts HEAD -- AI/plan_evaluator_report.md` is empty).
+- No loss or duplication: `AI/DECISIONS.md` holds the "Motion System", "Read-Only Lock-Screen State
+  Channel" and "Offline History and Back-Online Push Notifications" ADRs once each, main's first;
+  `git diff af511eb HEAD -- AI/DECISIONS.md` removes no line. `tests/invariants/src/lib.rs`
+  declares `mod remote_offline_contract;` once, after `mod ui_motion_spec_contract;` and
+  `mod lock_state_contract;` (76 `mod` lines = 75 at `af511eb` + 1). The matrix holds one
+  `remote-offline-alerts` section after main's `rwp-delivery-deflake`, `ui-motion-spec` and
+  `lockscreen-status` sections. Walkthrough 202 does not collide with main's 203, 204, 205.
+- Semantic interaction: #388 does not touch `crates/remote`; `soos-remote` only constructs
+  `RequestKind::PreviewFrame` and has no exhaustive match on `RequestKind`, so the new wire kind
+  needs nothing here. #383 adds `Call.answer`, `last_gone` and `settle_gone` to the push test
+  harness; this branch's harness edits are the setup-only `offline: OfflineConfig::default()`
+  lines, and its new back-online delivery path reuses the same `remove_gone` store rewrite that
+  `settle_gone` waits for, so the deflake applies to it unchanged. Both suites pass together.
+- `cargo test --locked -p soos-invariants -p soos-remote -- --test-threads=4`: 1044 passed,
+  0 failed, 0 ignored (soos-invariants 625; soos-remote 419, including `offline_tests` 23,
+  `offline_server_tests` 10, `push_server_tests` 22, `android_push_tests` 5).
 
-Mechanical listing (skill step 3):
+## 2. Test Changes (mechanical listing from step 3, with justification per change)
 
-- Files touched: `alerts_server_tests.rs`, `android_push_tests.rs`, `battery_server_tests.rs`,
+Over `target/candid_diff.patch`:
+- Test files touched: `alerts_server_tests.rs`, `android_push_tests.rs`, `battery_server_tests.rs`,
   `common/camera.rs`, `common/harness.rs`, `push_server_tests.rs`, `server_tests.rs` — each gains
   exactly one line `offline: soos_remote::config::OfflineConfig::default(),` in a `RemoteConfig`
-  struct literal (verified with `git diff`, no other `+`/`-` line). This is a setup-only migration
-  forced by the new `RemoteConfig.offline` field and stated in ADR item (10). No assertion changed.
+  literal and nothing else (verified per file with `git diff af511eb HEAD`). Setup-only migration
+  forced by the new `RemoteConfig.offline` field (ADR item 10). No assertion changed.
 - `tests/invariants/src/lib.rs`: only adds `mod remote_offline_contract;`.
-- New: `offline_tests.rs` (22 tests), `offline_server_tests.rs` (10 tests),
+- New: `offline_tests.rs` (23 tests), `offline_server_tests.rs` (10 tests),
   `remote_offline_contract.rs` (ROA-S1..S5).
-- Removed or changed assertions: none. The first review's only `^-` hit, `AI/DECISIONS.md:123`, is gone after the fix to finding 1. `AI/DECISIONS.md` is now append-only: one line added and none removed.
-- New escape hatches (`#[ignore]`, `should_panic`, tolerance): none in code; the only hit is a
-  sentence in the auditor constraints document.
+- Removed or changed assertions (`^-` with `assert`/`#[test]`/`proptest!`/`should_panic`): none.
+- New escape hatches (`#[ignore]`, `#[cfg(any())]`, `should_panic`, tolerance, epsilon): none in
+  code; the only hit is a sentence in `AI/auditor_constraints_remote_offline_alerts.md` (#38)
+  forbidding them.
 - Inline `mod tests` changes: none.
 
 ## 3. Deep Reasoning Audit
 
 ### Logic & Architecture
-- Tracker: I checked a sleep during an open outage. The outage is closed at the previous sample, then the
-  `sleep` interval is recorded and never pushed (`pushes()` is false only for `Sleep`). An
-  outage under 30 s is dropped. A `wifi_disabled` reading upgrades an open interval. A clock that
-  steps backwards gives an empty wall span, never an inverted one (`OfflineInterval::new`). A
-  `Running` marker with `now < last_alive` gives no interval. → PASS.
-- Release: a held notice is released only on `Online` or after 12 consecutive `Unknown` steps.
-  The streak resets on any real reading. A `shutdown_or_crash` from `start` is held until then. → PASS.
-- Push ordering: `PushRuntime::start` runs before `OfflineRuntime::start`, and the sink checks
-  `is_active()`. The watcher is spawned only when the store was usable. → PASS.
-- Scheduler: `take_due` shares `budget_due` (30 s coalescing and spacing, 20/h). The older
-  first-noted message wins and an alert wins a tie. Notice retries (5 s, 30 s, 2 min, 10 min,
-  then dropped as `Failed`) bypass the budget and are merged per endpoint. Topic `soosonline` is
-  checked distinct at compile time. → PASS.
-- Config: `offline_alerts` without push gives `OfflineRequiresPush`. The `load_config` failure
-  path returns `EXIT_CONFIG` (78), and `packaging/soos-remote.service` has
-  `RestartPreventExitStatus=78`, so there is no restart loop. `with_offline_alerts` also ignores the wiring unless both
-  flags are set. → PASS.
-- `logind.rs` refactor into `connect_system_bus` keeps the single pinned `Builder::address(`,
-  `method_timeout`, `max_queued` and connect timeout. → PASS.
+- Tracker (carried forward, re-read): sleep during an open outage closes the outage at the
+  previous sample and records a non-pushed `sleep`; outages under 30 s are dropped; a backwards
+  wall clock gives an empty span, never inverted; `now < last_alive` gives no interval. → PASS.
+- Release: held notice released on `Online` or after 12 consecutive `Unknown` steps. → PASS.
+- Ordering: `PushRuntime` exists before `OfflineRuntime::start`; the sink drops notices unless
+  `is_active()`; the watcher is spawned only when the store was usable; the sink is invoked after
+  the tracker guard is released (no nested lock with the scheduler). → PASS.
+- Scheduler: `take_due` shares `budget_due` (coalescing, spacing, 20/h); earlier first-noted wins,
+  alert wins ties; notice retries (5 s, 30 s, 2 min, 10 min, then `Failed`) are per endpoint,
+  merged on a new notice, pruned with `known`, and included in `next_wake`. → PASS.
+- Config: `offline_alerts` without push → `OfflineRequiresPush` (exit 78, no restart loop);
+  `with_offline_alerts` ignores the wiring unless both flags are set. → PASS.
+- `connect_system_bus` keeps the single pinned `Builder::address(`, `method_timeout`,
+  `max_queued`, connect timeout. → PASS.
+- Rebase: no main API used by this branch changed (§1). → PASS.
 
 ### PAM Concurrency & Deadlines
-- No PAM code touched. Remote deadlines: each NM observation runs under `NETWORK_READ_DEADLINE_MS`
-  (3 s, which is less than the 5 s tick; a compile-time assert covers connect plus 4 calls). The stop step
-  runs under `OFFLINE_STOP_DEADLINE_MS`, and the shutdown read under 1.5 s. Store lock retries are bounded
-  by `STORE_LOCK_TIMEOUT_MS`. No `std::sync::Mutex` guard is held across an `.await`. I checked
-  `step`, `start`, `persist` and `stop`. → PASS.
+- No PAM code touched. Remote bounds: observation under `NETWORK_READ_DEADLINE_MS` (3 s < 5 s
+  tick, compile-time assert covers connect + 4 calls); stop under `OFFLINE_STOP_DEADLINE_MS`, its
+  shutdown read under 1.5 s; store lock retries bounded by `STORE_LOCK_TIMEOUT_MS`; no
+  `std::sync::Mutex` guard across `.await` (`step`, `start`, `persist`, `stop`, sink). → PASS.
 
 ### Panic Safety & Fail-Closed
-- No `unwrap`/`expect`/indexing in production paths. `spawn_blocking` join errors map to `Io`, and
-  poisoned mutexes are skipped. A malformed or refused store at start sets `failed`. The watcher is
-  then not spawned and `stop()` returns early because the runtime is not active, so the bad file is never rewritten (test
-  `test_roa_store_failed_is_unavailable_and_never_rewritten`). The watcher task is supervised:
-  a panic becomes `TaskPanicked`. This feature has no unlock/allow path. → PASS.
+- No `unwrap`/`expect`/`panic!`/indexing in the new production paths (`offline.rs` grep clean;
+  `main.rs` `unwrap_or(u64::MAX)` only). `spawn_blocking` join errors map to `Io`; poisoned
+  mutexes are skipped. A refused store sets `failed`, the watcher is not spawned and `stop()`
+  returns early, so the bad file is never rewritten. The watcher is supervised (panic →
+  `TaskPanicked`). This feature has no unlock/allow path. → PASS.
 
 ### Test Integrity & Anti-Weakening
-- See §2. The new tests cover outcomes a plausible wrong implementation would get wrong:
-  boottime-vs-wall duration, floor, notice merge, generic payload text, shared budget, Funnel 403,
-  never-rewritten bad store, heartbeat rate and the "off installs nothing" case. → PASS.
+- See §2. New tests discriminate plausible wrong implementations (boottime-vs-wall duration,
+  floor, notice merge, generic payload, shared budget, Funnel 403, never-rewritten bad store,
+  heartbeat rate, "off installs nothing"). → PASS.
 
 ### Memory, Bounds & Secrets
-- History ≤ 32 (evicting); store ≤ 8 KiB enforced on read (`read_owned_file`) and write. A
-  compile-time assert bounds 32 serialized intervals. Notice retries are at most one per known endpoint.
-- The store reuses `read_owned_file`/`try_lock_file`/`check_parent_dir`/`write_atomic`
-  (`O_NOFOLLOW`, owner and mode checks, `flock`, temp file, `fsync`, `rename`, `0600`).
-- Privacy: I searched `offline.rs`, `push.rs` and `logind.rs` for `Ssid`, `HwAddress`, `Ip4Config`,
-  `ActiveConnections`, `Devices`, `AccessPoint` and hostname. There are no hits. Only `State`, `Connectivity`,
-  `WirelessEnabled` and `PreparingForShutdown` are read. No `MessageStream`, `SignalStream`,
-  `AddMatch`, proxy or `Inhibit` is used, and there is no inet socket. Logs are three fixed audit lines, plus the `main.rs` path-refusal
-  `warn!` (see SUGGESTION). Its `%err` prints only the byte limit, never the path.
-- `push_previews = "generic"` gives "Update from your PC — Open soos for details" with
-  `reason: null`. Times and counts stay in the encrypted `soos` member, as alerts already do. The page
-  uses `setText` only, the CSP in `http.rs` is unchanged and `index.html` is unchanged.
-- `/api/offline` is not in `is_funnel_public`, so a Funnel caller without a session gets `403 login_required`
-  (`test_roa_view_over_funnel_requires_session`). It is a GET/HEAD read route and POST gives `405`. → PASS.
+- History ≤ 32 (evicting); store ≤ 8 KiB on read and write, compile-time assert on 32 serialized
+  intervals; notice retries ≤ one per known endpoint. Store uses `read_owned_file`,
+  `try_lock_file`, `check_parent_dir`, `write_atomic` (`O_NOFOLLOW`, owner/mode checks, `flock`,
+  temp + `fsync` + `rename`, `0600`).
+- Privacy: only `State`, `Connectivity`, `WirelessEnabled` (NetworkManager), `NameHasOwner`
+  and `PreparingForShutdown` (logind) are read; no SSID, hardware address, IP config, active
+  connection, access point or hostname; no signal match, proxy or `Inhibit`; no inet socket.
+  Audit lines are fixed vocabulary; `generic` previews carry no reason text. `/api/offline` is
+  not Funnel-public (403 `login_required`), GET/HEAD only. → PASS.
 
 ### Supply Chain & Automation
-- No `Cargo.*`, `deny.toml` or workflow change. `scripts/install_remote.sh` only adds a commented
-  template key. → PASS.
+- No `Cargo.*`, `deny.toml`, workflow or hook change; `scripts/install_remote.sh` adds a commented
+  template key only. → PASS.
 
 ### English-Only Policy
-- All code, comments, docs and UI strings are in English. → PASS.
+- All code, comments, docs and UI strings are English. → PASS.
 
 ## 4. Detailed Findings & Action Items
 
-- **[MINOR — RESOLVED]** `AI/DECISIONS.md:123` — the immutable 2026-10-06 ADR "Tailscale Funnel Access and
-  In-House Passkey Authentication" was changed by accident: "RMC23–RMC25 amended" became
-  "rMC23–RMC25 amended". Restore the original capital `R`. The ADR register is append-only. *Resolved*: the text is back to "RMC23–RMC25 amended", and `git diff origin/main -- AI/DECISIONS.md` removes no existing line.
-- **[SUGGESTION]** `crates/remote/src/main.rs:233` — a refused network store path logs through
-  `warn!` instead of the fixed audit vocabulary that ADR item (6) describes. It also leaves
-  `/api/offline` at `disabled` rather than `unavailable`. This follows the push precedent
-  (`main.rs:464`) and leaks nothing. Consider documenting it or reporting `unavailable`.
+- **[MINOR — RESOLVED, carried forward]** `AI/DECISIONS.md` — the earlier accidental edit to the
+  2026-10-06 ADR ("rMC23") stays fixed; `git diff af511eb HEAD -- AI/DECISIONS.md` removes no line.
+- **[SUGGESTION — open, carried forward]** `crates/remote/src/main.rs` (`offline_wiring`) — a
+  refused network store path logs through `warn!` instead of the fixed audit vocabulary of ADR
+  item (6), and leaves `/api/offline` at `disabled` rather than `unavailable`. Follows the push
+  precedent and leaks nothing (`%err` prints only the byte limit). Consider documenting it or
+  reporting `unavailable`.
 
 ## 5. Final Verdict
 
