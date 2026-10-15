@@ -109,10 +109,17 @@ check_permissions() {
     local aapt2="${ANDROID_HOME:-}/build-tools/${BUILD_TOOLS_VERSION}/aapt2"
     [[ -n "${ANDROID_HOME:-}" && -x "$aapt2" ]] || fail "aapt2 ${BUILD_TOOLS_VERSION} not found under ANDROID_HOME"
     [[ -f "$APK" ]] || fail "debug APK missing: ${APK}"
-    local dump name allowed permission found=0
+    local dump line name allowed permission found=0
+    # aapt2 prints a <uses-permission> request as `uses-permission: name='X'` and a
+    # <uses-permission-sdk-23> request as `uses-permission-sdk-23: name='X'` (either may be
+    # followed by attributes such as maxSdkVersion). Both reach the allowlist; any other
+    # `uses-permission*` line, indented or not, fails closed.
+    local re="^uses-permission(-sdk-23)?: name='([^']+)'"
     dump="$("$aapt2" dump permissions "$APK")" || fail "aapt2 dump permissions failed"
-    while IFS= read -r name; do
-        [[ -n "$name" ]] || continue
+    while IFS= read -r line; do
+        [[ "$line" =~ ^[[:space:]]*uses-permission ]] || continue
+        [[ "$line" =~ $re ]] || fail "unrecognized aapt2 permission line: ${line}"
+        name="${BASH_REMATCH[2]}"
         allowed=0
         for permission in "${ALLOWED_PERMISSIONS[@]}"; do
             if [[ "$name" == "$permission" ]]; then
@@ -123,7 +130,7 @@ check_permissions() {
         if [[ "$name" == "android.permission.INTERNET" ]]; then
             found=1
         fi
-    done < <(sed -n "s/^uses-permission: name='\([^']*\)'.*/\1/p" <<< "$dump")
+    done <<< "$dump"
     [[ "$found" -eq 1 ]] || fail "android.permission.INTERNET not found (unexpected aapt2 output)"
     echo "[OK]    android_build: APK permissions are INTERNET plus the allowlisted library permissions"
 }

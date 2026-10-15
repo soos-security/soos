@@ -198,7 +198,7 @@ impl SoosApp {
         };
         let feature_ctx = cc.egui_ctx.clone();
         let feature_runner = FeatureRunner::new(
-            Arc::new(SystemFeatureExecutor::new(
+            Arc::new(SystemFeatureExecutor::for_desktop(
                 FeaturePaths::system(),
                 Arc::new(SystemProgramRunner),
             )),

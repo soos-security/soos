@@ -236,6 +236,22 @@ the header band reopens it at any time on its overview page (every feature with 
   switches are shown as commands. Only one Polkit dialog is open at a time across the
   `TaskRunner` and the `FeatureRunner` (`SoosApp::submit_task`); the tour cannot be closed while
   an action is pending.
+- **Restart confirmation** (GitHub #398): `soos-remote.service` is `Type=exec`, so
+  `try-restart` returns as soon as the new process runs, before `soos-remote` reads
+  `remote.toml`; a refused configuration exits 78 and is never restarted
+  (`RestartPreventExitStatus=78`). The GUI builds its executor with
+  `SystemFeatureExecutor::for_desktop` (`RestartCheck::DEFAULT`): before the restart it reads
+  `systemctl --user show --property=ActiveState --property=SubState soos-remote.service`; when
+  the unit was inactive, failed or stopping, `try-restart` restarts nothing and the edit applies at
+  the next start. Otherwise it reads the state again 3 times, 500 ms apart (500 ms per call), on
+  the feature worker thread. `failed`, `inactive` or an automatic restart (`SubState=auto-restart…`)
+  is reported at once as "Saved, but soos-remote stopped after the restart (…): see journalctl
+  --user -u soos-remote"; a unit not `active` at the last read is reported as "Saved, but
+  soos-remote was not confirmed running after the restart". A failed first read still leads to
+  the confirmation reads, so a stopped unit may then be reported as stopped. Messages carry only
+  a fixed state word, never `systemctl` output. Bounds: at most `MAX_RESTART_CHECK_POLLS` (10)
+  reads, `MAX_RESTART_CHECK_INTERVAL` (1 s) between them, each call within the 3 s user-manager
+  deadline; the default worst case is 6.5 s including `try-restart`.
 - **Motion**: no animation yet. The page content is keyed by `Tour::generation`, the hook the
   motion system of #358 / #377 will use; reduced-motion preferences are therefore respected.
 

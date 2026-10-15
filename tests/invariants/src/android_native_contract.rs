@@ -796,3 +796,152 @@ fn test_ana_s12_docs_adr_walkthrough() {
     }
     assert!(exists(WALKTHROUGH), "{WALKTHROUGH}");
 }
+
+/// The block of `script` that starts at the line `start` and ends at the first following line
+/// equal to `end` (both included).
+fn script_block(script: &str, start: &str, end: &str) -> String {
+    let mut out = Vec::new();
+    let mut inside = false;
+    for line in script.lines() {
+        if !inside && line == start {
+            inside = true;
+        }
+        if inside {
+            out.push(line);
+            if out.len() > 1 && line == end {
+                return out.join("\n");
+            }
+        }
+    }
+    panic!("block `{start}` … `{end}` not found in {BUILD_SCRIPT}");
+}
+
+/// Runs the script's own `check_permissions` (extracted verbatim) against a fake `aapt2`
+/// printing `dump`; returns `(success, stderr)`.
+fn run_check_permissions(dump: &str, case: usize) -> (bool, String) {
+    let script = read(BUILD_SCRIPT);
+    let version = script
+        .lines()
+        .find(|l| l.starts_with("readonly BUILD_TOOLS_VERSION="))
+        .expect("BUILD_TOOLS_VERSION");
+    let allowed = script_block(&script, "readonly ALLOWED_PERMISSIONS=(", ")");
+    let fail = script_block(&script, "fail() {", "}");
+    let check = script_block(&script, "check_permissions() {", "}");
+    let dir = std::env::temp_dir().join(format!("soos-ana17-{}-{case}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let tools_version = version
+        .trim_start_matches("readonly BUILD_TOOLS_VERSION=")
+        .trim_matches('"');
+    assert!(
+        !tools_version.is_empty() && !tools_version.contains('/'),
+        "{version}"
+    );
+    let tools = dir.join("sdk/build-tools").join(tools_version);
+    std::fs::create_dir_all(&tools).unwrap();
+    let dump_file = dir.join("dump.txt");
+    std::fs::write(&dump_file, dump).unwrap();
+    let aapt2 = tools.join("aapt2");
+    std::fs::write(
+        &aapt2,
+        format!(
+            "#!/usr/bin/env bash\n[[ \"$1 $2\" == \"dump permissions\" ]] || exit 9\ncat '{}'\n",
+            dump_file.display()
+        ),
+    )
+    .unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&aapt2, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let apk = dir.join("app-debug.apk");
+    std::fs::write(&apk, b"apk").unwrap();
+    let harness = format!(
+        "set -euo pipefail\n{version}\nreadonly APK='{}'\n{allowed}\n{fail}\n{check}\ncheck_permissions\n",
+        apk.display()
+    );
+    let output = Command::new("bash")
+        .arg("-c")
+        .arg(&harness)
+        .env("ANDROID_HOME", dir.join("sdk"))
+        .output()
+        .expect("bash");
+    let _ = std::fs::remove_dir_all(&dir);
+    (
+        output.status.success(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    )
+}
+
+/// ANA17 (GitHub #398): the APK permission allowlist covers both `aapt2` request forms,
+/// `uses-permission:` and `uses-permission-sdk-23:`, with exact names; any other
+/// `uses-permission*` line fails closed.
+#[test]
+fn test_ana_s13_permission_check_covers_the_sdk_23_form() {
+    let script = read(BUILD_SCRIPT);
+    assert!(
+        script.contains("uses-permission(-sdk-23)?: name="),
+        "check_permissions must parse the uses-permission-sdk-23 form"
+    );
+    let base = "package: name='org.soos.remote'\n\
+                uses-permission: name='android.permission.INTERNET'\n\
+                permission: org.soos.remote.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION\n\
+                uses-permission: name='org.soos.remote.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION'\n";
+    let cases: [(String, bool, &str); 10] = [
+        (base.to_string(), true, ""),
+        (
+            format!(
+                "{base}uses-permission: name='android.permission.USE_FINGERPRINT' maxSdkVersion='28'\n\
+                 uses-permission-sdk-23: name='android.permission.USE_BIOMETRIC'\n"
+            ),
+            true,
+            "",
+        ),
+        (
+            format!("{base}uses-permission-sdk-23: name='android.permission.USE_BIOMETRIC' maxSdkVersion='35'\n"),
+            true,
+            "",
+        ),
+        (
+            format!("{base}uses-permission-sdk-23: name='android.permission.CAMERA'\n"),
+            false,
+            "unexpected permission in the APK: android.permission.CAMERA",
+        ),
+        (
+            format!("{base}uses-permission: name='android.permission.READ_CONTACTS'\n"),
+            false,
+            "unexpected permission in the APK: android.permission.READ_CONTACTS",
+        ),
+        (
+            format!("{base}uses-permission-sdk-23: name='android.permission.INTERNET.EXTRA'\n"),
+            false,
+            "unexpected permission in the APK: android.permission.INTERNET.EXTRA",
+        ),
+        (
+            format!("{base}uses-permission-sdk-m: name='android.permission.CAMERA'\n"),
+            false,
+            "unrecognized aapt2 permission line",
+        ),
+        (
+            format!("{base}  uses-permission-sdk-23: name='android.permission.CAMERA'\n"),
+            false,
+            "unrecognized aapt2 permission line",
+        ),
+        (
+            format!("{base}uses-permission: name=''\n"),
+            false,
+            "unrecognized aapt2 permission line",
+        ),
+        (
+            "package: name='org.soos.remote'\n\
+             uses-permission-sdk-23: name='android.permission.USE_BIOMETRIC'\n"
+                .to_string(),
+            false,
+            "android.permission.INTERNET not found",
+        ),
+    ];
+    for (case, (dump, pass, message)) in cases.iter().enumerate() {
+        let (ok, stderr) = run_check_permissions(dump, case);
+        assert_eq!(ok, *pass, "case {case}: {stderr}\n{dump}");
+        assert!(stderr.contains(message), "case {case}: {stderr}");
+    }
+}

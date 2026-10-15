@@ -1151,7 +1151,12 @@ touches those paths while the job fails. The first run happens while
 3. Re-run the candid review for the new head. Never push with `--no-verify`.
 4. Note the run id in the pull request.
 
-After that, every run is strict. To regenerate after a dependency change, empty the component
+After that, every run is strict. The first bootstrap run was 38446125267 and the first strict
+green run of the foundation pull request (#391) was 38772439975. In `ci` mode the script then
+checks the APK permissions with `aapt2 dump permissions`: every request line, in the
+`uses-permission: name='…'` form and in the `uses-permission-sdk-23: name='…'` form (a permission
+requested only on Android 6 and later), must name an allowlisted permission, and any other
+`uses-permission*` line fails the job (GitHub #398). To regenerate after a dependency change, empty the component
 list again, or run `scripts/android_build.sh bootstrap` locally. The file is generated on Linux
 x86_64, so platform-specific entries for other systems may be missing.
 
