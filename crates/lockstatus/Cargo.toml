@@ -1,0 +1,30 @@
+[package]
+name = "soos-lockstatus"
+description = "User-level bridge reading the coarse soos lock-screen scan state for screen-locker adapters"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lib]
+name = "soos_lockstatus"
+path = "src/lib.rs"
+
+[[bin]]
+name = "soos-lockstatus"
+path = "src/main.rs"
+
+[dependencies]
+soos-protocol = { workspace = true }
+nix = { workspace = true, features = ["time", "poll"] }
+getrandom = { workspace = true }
+thiserror = { workspace = true }
+clap = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

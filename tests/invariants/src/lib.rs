@@ -381,6 +381,14 @@ mod ui_motion_spec_contract;
 #[cfg(test)]
 mod lock_state_contract;
 
+/// Lock-screen adapters: forbid-unsafe roots, no panic/print path, dependency allow-lists, no
+/// seat binding, private coordination file, brand and motion mirrors, hyprlock snippet cadence,
+/// documentation and ADR (GitHub #401, PR 2 of #352; ADR 2026-10-15 "Lock-Screen Adapters for
+/// swaylock-plugin and hyprlock"; spec AI/architect_spec_lockscreen_adapters.md; rows LKA11,
+/// LKA12).
+#[cfg(all(test, unix))]
+mod lockscreen_adapters_contract;
+
 /// Offline history and back-online push of `soos-remote`: RC-1 kept, read-only bus (four
 /// `Properties.Get` reads, no match, no mutating method), no network identifier anywhere,
 /// enum-only notice, page card and service worker tag, documentation (GitHub #376, tier 1 of
@@ -464,6 +472,8 @@ mod tests {
             "push-protocol",
             "push-sender",
             "frame",
+            "lockstatus",
+            "lock-widget",
         ];
 
         for crate_name in business_crates {

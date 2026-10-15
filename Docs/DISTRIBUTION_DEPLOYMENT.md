@@ -696,6 +696,10 @@ exit unlocked):
 exec swayidle lock 'swaylock-presence &' unlock 'pkill -USR1 swaylock'
 ```
 
+For `swaylock-plugin`, run `swaylock-plugin --command 'soos-lock-widget'` in the wrapper to show
+the animated soos scan state behind the password prompt; for `hyprlock`, the label of
+`packaging/lockscreen/hyprlock-soos.conf` shows it (`Docs/LOCKSCREEN_WIDGET.md`).
+
 For `hyprlock`, put `hyprlock` in the wrapper and use `pkill -USR1 hyprlock` as the `unlock`
 hook. Lock with `loginctl lock-session`. Check the hint with
 `busctl --system get-property org.freedesktop.login1 /org/freedesktop/login1/session/auto org.freedesktop.login1.Session LockedHint`.

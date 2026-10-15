@@ -272,7 +272,9 @@ soos/
 │   ├── gui/                      # soos-gui diagnostic and enrollment GUI (eframe)
 │   ├── remote/                   # soos-remote user-level lock status, remote lock and opt-in unlock companion (§13)
 │   ├── push-protocol/            # soos-push-protocol pure push wire contract (§13)
-│   └── push-sender/              # soos-push-sender sandboxed outbound Web Push user service (§13)
+│   ├── push-sender/              # soos-push-sender sandboxed outbound Web Push user service (§13)
+│   ├── lockstatus/               # soos-lockstatus user-level lock-screen scan-state bridge (ADR 2026-10-15)
+│   └── lock-widget/              # soos-lock-widget swaylock-plugin layer-shell scan widget (ADR 2026-10-15)
 ├── models/
 │   ├── manifest.toml             # model IDs, licenses, SHA-256 checksums
 │   └── README.md
