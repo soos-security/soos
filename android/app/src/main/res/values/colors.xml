@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  soos palette: the only colour literals of the app, identical to crates/gui/src/theme.rs
+  (checked by soos-invariants::android_native_contract).
+-->
+<resources>
+    <color name="soos_blue">#FF0047BB</color>
+    <color name="soos_blue_pressed">#FF003A99</color>
+    <color name="soos_pale">#FFEDF1FF</color>
+    <color name="soos_pale_4">#FFC9D6FA</color>
+    <color name="soos_line">#FFC9D0E1</color>
+    <color name="soos_ink">#FF101820</color>
+    <color name="soos_ink_muted">#FF5A6270</color>
+    <color name="soos_pink">#FFE59BDC</color>
+    <color name="soos_white">#FFFFFFFF</color>
+    <color name="soos_success">#FF29B53B</color>
+    <color name="soos_success_text">#FF146C2A</color>
+    <color name="soos_danger">#FFD92D45</color>
+    <color name="soos_danger_text">#FF8A1426</color>
+    <color name="soos_warn">#FFF59E0B</color>
+    <color name="soos_warn_text">#FF8A4B00</color>
+</resources>

@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Adaptive launcher icon monochrome: the four shapes of crates/remote/assets/icon.svg (viewBox
+  508 x 508, path data copied verbatim), scaled to 48 dp and centred in the 108 dp canvas so
+  that every launcher mask keeps the whole mark inside the 66 dp safe zone.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <group
+        android:translateX="30"
+        android:translateY="30"
+        android:scaleX="0.0944882"
+        android:scaleY="0.0944882">
+        <path android:fillColor="@color/soos_ink" android:pathData="M0 0H254V254H0V0Z" />
+        <path android:fillColor="@color/soos_ink" android:pathData="M254 254H508V508H254V254Z" />
+        <path android:fillColor="@color/soos_ink" android:pathData="M0 254C140.28 254 254 367.72 254 508H0V254Z" />
+        <path android:fillColor="@color/soos_ink" android:pathData="M254 0L508 0V254C367.72 254 254 140.28 254 0Z" />
+    </group>
+</vector>

@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Dark variant: brand ink background and system bars. -->
+<resources>
+    <style name="Theme.Soos" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@color/soos_ink</item>
+        <item name="android:statusBarColor">@color/soos_ink</item>
+        <item name="android:navigationBarColor">@color/soos_ink</item>
+        <item name="android:windowLightStatusBar">false</item>
+    </style>
+</resources>

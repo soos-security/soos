@@ -414,6 +414,15 @@ mod system_onnxruntime_contract;
 #[cfg(all(test, unix))]
 mod readme_assets_contract;
 
+/// Native Android app foundation: no secret file, exact pins, verified Gradle distribution and
+/// dependency metadata, no analytics/Firebase/Play services, manifest hardening, brand colours
+/// and icon, Kotlin hygiene, pinned CI job and build script, login-only and silent app binding
+/// in `soos-remote`, documentation (GitHub #382, PR 1 of #357; ADR 2026-10-13 "Native Android
+/// App for `soos-remote` (Kotlin and Jetpack Compose)"; spec
+/// AI/architect_spec_android_native_app.md; rows ANA5-ANA13).
+#[cfg(all(test, unix))]
+mod android_native_contract;
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,

@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Window theme before Compose draws: brand pale background, brand blue system bars. -->
+<resources>
+    <style name="Theme.Soos" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:windowBackground">@color/soos_pale</item>
+        <item name="android:statusBarColor">@color/soos_blue</item>
+        <item name="android:navigationBarColor">@color/soos_pale</item>
+        <item name="android:windowLightStatusBar">false</item>
+    </style>
+</resources>

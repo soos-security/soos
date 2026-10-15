@@ -1,0 +1,31 @@
+# Exact pins only (no ranges, no dynamic or snapshot versions); checked by
+# soos-invariants::android_native_contract. Compose libraries take their versions from the
+# pinned Compose BOM. Every resolved artifact is checked against
+# gradle/verification-metadata.xml.
+
+[versions]
+agp = "8.13.2"
+kotlin = "2.2.21"
+composeBom = "2025.10.01"
+activityCompose = "1.11.0"
+coreKtx = "1.17.0"
+credentials = "1.5.0"
+coroutines = "1.10.2"
+junit = "4.13.2"
+orgJson = "20250517"
+
+[libraries]
+androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
+androidx-activity-compose = { group = "androidx.activity", name = "activity-compose", version.ref = "activityCompose" }
+androidx-compose-bom = { group = "androidx.compose", name = "compose-bom", version.ref = "composeBom" }
+androidx-compose-ui = { group = "androidx.compose.ui", name = "ui" }
+androidx-compose-material3 = { group = "androidx.compose.material3", name = "material3" }
+androidx-credentials = { group = "androidx.credentials", name = "credentials", version.ref = "credentials" }
+kotlinx-coroutines-android = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-android", version.ref = "coroutines" }
+junit = { group = "junit", name = "junit", version.ref = "junit" }
+org-json = { group = "org.json", name = "json", version.ref = "orgJson" }
+
+[plugins]
+android-application = { id = "com.android.application", version.ref = "agp" }
+kotlin-android = { id = "org.jetbrains.kotlin.android", version.ref = "kotlin" }
+kotlin-compose = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlin" }

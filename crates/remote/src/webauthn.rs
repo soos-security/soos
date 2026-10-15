@@ -17,8 +17,9 @@ use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 
 use crate::{
-    ASSERTION_AUTH_DATA_LEN, CHALLENGE_BYTES, COSE_ALG_ES256, MAX_ATTESTATION_OBJECT_BYTES,
-    MAX_CLIENT_DATA_JSON_BYTES, MAX_CREDENTIAL_ID_BYTES, MAX_SIGNATURE_BYTES, USER_HANDLE_BYTES,
+    ANDROID_ORIGIN_PREFIX, ASSERTION_AUTH_DATA_LEN, CHALLENGE_BYTES, COSE_ALG_ES256,
+    MAX_ATTESTATION_OBJECT_BYTES, MAX_CLIENT_DATA_JSON_BYTES, MAX_CREDENTIAL_ID_BYTES,
+    MAX_SIGNATURE_BYTES, USER_HANDLE_BYTES,
 };
 
 /// Nesting limit of every CBOR parse (attestation object and COSE key).
@@ -41,6 +42,16 @@ pub struct RelyingParty {
     rp_id: String,
     origin: String,
     rp_id_hash: [u8; 32],
+    /// `[android]` binding: the package and its `android:apk-key-hash:` origins (ADR
+    /// 2026-10-13); `None` = web origin only.
+    android: Option<AndroidApp>,
+}
+
+/// The configured native Android app of a relying party.
+#[derive(Clone)]
+struct AndroidApp {
+    package: String,
+    origins: Vec<String>,
 }
 
 impl RelyingParty {
@@ -52,7 +63,23 @@ impl RelyingParty {
             rp_id: rp_id.to_string(),
             origin: format!("https://{rp_id}"),
             rp_id_hash: sha256(rp_id.as_bytes()),
+            android: None,
         }
+    }
+
+    /// Adds the native Android app whose assertions [`OriginPolicy::WebOrAndroidApp`]
+    /// accepts: origins `ANDROID_ORIGIN_PREFIX` + unpadded base64url of each SHA-256
+    /// signing-certificate digest (ADR 2026-10-13).
+    #[must_use]
+    pub fn with_android_app(mut self, package: &str, cert_fingerprints: &[[u8; 32]]) -> Self {
+        self.android = Some(AndroidApp {
+            package: package.to_string(),
+            origins: cert_fingerprints
+                .iter()
+                .map(|digest| format!("{ANDROID_ORIGIN_PREFIX}{}", b64url_encode(digest)))
+                .collect(),
+        });
+        self
     }
 
     /// The RP ID.
@@ -86,10 +113,30 @@ impl CeremonyType {
     }
 }
 
+/// Which origins a ceremony accepts (ADR 2026-10-13).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OriginPolicy {
+    /// Exactly `https://<rp_id>`.
+    WebOnly,
+    /// The web origin, or (for `webauthn.get` only) a configured native Android app origin.
+    WebOrAndroidApp,
+}
+
+/// The kind of origin a validated `clientDataJSON` carried.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClientOrigin {
+    /// `https://<rp_id>`.
+    Web,
+    /// A configured `android:apk-key-hash:` origin.
+    AndroidApp,
+}
+
 /// Validated `clientDataJSON` (no `Debug`: the challenge is a secret of the ceremony).
 pub struct ClientData {
     /// Decoded challenge.
     pub challenge: [u8; CHALLENGE_BYTES],
+    /// The kind of origin.
+    pub origin: ClientOrigin,
 }
 
 /// The members of `clientDataJSON` the verification reads. Unknown members are ignored
@@ -104,6 +151,10 @@ struct RawClientData {
     cross_origin: Option<bool>,
     #[serde(rename = "topOrigin")]
     top_origin: Option<serde::de::IgnoredAny>,
+    /// Set by Android Credential Manager for a native app; any JSON type is accepted here
+    /// (a browser's client data is read exactly as before) and checked only for an app origin.
+    #[serde(rename = "androidPackageName")]
+    android_package_name: Option<serde_json::Value>,
 }
 
 /// Pure. `raw` ≤ `MAX_CLIENT_DATA_JSON_BYTES`, a UTF-8 JSON object with string `type`,
@@ -120,6 +171,24 @@ pub fn parse_client_data(
     raw: &[u8],
     expected: CeremonyType,
 ) -> Result<ClientData, WebAuthnError> {
+    parse_client_data_with_policy(rp, raw, expected, OriginPolicy::WebOnly)
+}
+
+/// Pure; [`parse_client_data`] with an explicit origin policy (ADR 2026-10-13). With
+/// [`OriginPolicy::WebOrAndroidApp`] and [`CeremonyType::Get`] only, an `origin` equal byte for
+/// byte to one configured `android:apk-key-hash:` origin is accepted as
+/// [`ClientOrigin::AndroidApp`]; a present `androidPackageName` must then equal the configured
+/// package. A registration never accepts an Android origin.
+///
+/// # Errors
+///
+/// As [`parse_client_data`].
+pub fn parse_client_data_with_policy(
+    rp: &RelyingParty,
+    raw: &[u8],
+    expected: CeremonyType,
+    policy: OriginPolicy,
+) -> Result<ClientData, WebAuthnError> {
     if raw.is_empty() || raw.len() > MAX_CLIENT_DATA_JSON_BYTES {
         return Err(WebAuthnError::ClientDataMalformed);
     }
@@ -128,9 +197,7 @@ pub fn parse_client_data(
     if parsed.kind != expected.wire() {
         return Err(WebAuthnError::WrongType);
     }
-    if parsed.origin.as_bytes() != rp.origin.as_bytes() {
-        return Err(WebAuthnError::OriginMismatch);
-    }
+    let origin = classify_origin(rp, &parsed, expected, policy)?;
     if parsed.cross_origin == Some(true) || parsed.top_origin.is_some() {
         return Err(WebAuthnError::CrossOrigin);
     }
@@ -140,7 +207,41 @@ pub fn parse_client_data(
         .as_slice()
         .try_into()
         .map_err(|_| WebAuthnError::ClientDataMalformed)?;
-    Ok(ClientData { challenge })
+    Ok(ClientData { challenge, origin })
+}
+
+/// The origin step of [`parse_client_data_with_policy`]: the web origin, else (policy
+/// `WebOrAndroidApp`, `webauthn.get` only) one configured app origin byte for byte, whose
+/// `androidPackageName`, when present, must be the configured package as a JSON string.
+fn classify_origin(
+    rp: &RelyingParty,
+    parsed: &RawClientData,
+    expected: CeremonyType,
+    policy: OriginPolicy,
+) -> Result<ClientOrigin, WebAuthnError> {
+    if parsed.origin.as_bytes() == rp.origin.as_bytes() {
+        return Ok(ClientOrigin::Web);
+    }
+    if policy != OriginPolicy::WebOrAndroidApp || expected != CeremonyType::Get {
+        return Err(WebAuthnError::OriginMismatch);
+    }
+    let Some(app) = rp.android.as_ref() else {
+        return Err(WebAuthnError::OriginMismatch);
+    };
+    if !app
+        .origins
+        .iter()
+        .any(|origin| origin.as_bytes() == parsed.origin.as_bytes())
+    {
+        return Err(WebAuthnError::OriginMismatch);
+    }
+    match &parsed.android_package_name {
+        None => Ok(ClientOrigin::AndroidApp),
+        Some(serde_json::Value::String(name)) if name == &app.package => {
+            Ok(ClientOrigin::AndroidApp)
+        }
+        Some(_) => Err(WebAuthnError::OriginMismatch),
+    }
 }
 
 /// Flags byte (L3 §6.1).

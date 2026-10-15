@@ -16,12 +16,17 @@ use nix::fcntl::OFlag;
 use serde::Deserialize;
 
 use crate::identity::is_valid_host_name;
+use crate::webauthn::b64url_encode;
 use crate::{
     ALERTS_ACK_FILE_NAME, CREDENTIALS_FILE_NAME, MAX_ALLOWED_HOSTS, MAX_ALLOWED_LOGINS,
     MAX_CONFIG_BYTES, MAX_CREDENTIALS_PATH_LEN, MAX_LOCK_SCREEN_PROGRAMS, MAX_LOGIN_LEN,
     MAX_POLL_INTERVAL_MS, MAX_SOCKET_PATH_LEN, MAX_VAPID_SUBJECT_LEN, MIN_POLL_INTERVAL_MS,
     NETWORK_STORE_FILE_NAME, PUSH_STORE_FILE_NAME, SOCKET_DIR_NAME, SOCKET_FILE_NAME,
     TS_NET_SUFFIX,
+};
+use crate::{
+    ANDROID_CERT_FINGERPRINT_LEN, ANDROID_ORIGIN_PREFIX, ASSET_LINKS_RELATION,
+    MAX_ANDROID_CERT_FINGERPRINTS, MAX_ANDROID_PACKAGE_LEN,
 };
 use crate::{
     CAMERA_FULL_WIDTH, CAMERA_HALF_WIDTH, DEFAULT_CAMERA_FPS, DEFAULT_CAMERA_MAX_VIEW_S,
@@ -352,6 +357,187 @@ pub enum ConfigError {
     /// `offline_alerts = true` without `push_notifications = true`.
     #[error("offline_alerts requires push_notifications")]
     OfflineRequiresPush,
+    /// `[android]` without `rp_id`.
+    #[error("[android] requires rp_id")]
+    AndroidRequiresRpId,
+    /// `[android]` without `allow_funnel = true`: the login ceremony is Funnel-only and the
+    /// Digital Asset Links check needs the public Funnel host.
+    #[error("[android] requires allow_funnel")]
+    AndroidRequiresFunnel,
+    /// `[android] package` absent or not a valid application id (never echoed).
+    #[error("[android] package is not a valid application id")]
+    InvalidAndroidPackage,
+    /// `[android] sha256_cert_fingerprints` absent, empty or too long.
+    #[error("[android] sha256_cert_fingerprints needs 1 to {max} entries")]
+    AndroidFingerprintCount {
+        /// `MAX_ANDROID_CERT_FINGERPRINTS`.
+        max: usize,
+    },
+    /// A certificate digest is not `AA:BB:..` upper-case hex, or repeats an earlier one
+    /// (never echoed).
+    #[error("[android] invalid sha256_cert_fingerprints entry at index {index}")]
+    InvalidAndroidFingerprint {
+        /// Index in the file order.
+        index: usize,
+    },
+}
+
+/// `[android]`: the one native app allowed to use the passkeys of `rp_id` (ADR 2026-10-13
+/// "Native Android App for `soos-remote` (Kotlin and Jetpack Compose)"). Public data, but
+/// nothing of it is ever logged: `Debug` is redacted.
+#[derive(Clone, PartialEq, Eq)]
+pub struct AndroidAppConfig {
+    package: String,
+    cert_fingerprints: Vec<[u8; 32]>,
+}
+
+impl fmt::Debug for AndroidAppConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("AndroidAppConfig(<redacted>)")
+    }
+}
+
+impl AndroidAppConfig {
+    /// The application id, verbatim.
+    #[must_use]
+    pub fn package(&self) -> &str {
+        &self.package
+    }
+
+    /// 1..=`MAX_ANDROID_CERT_FINGERPRINTS` distinct SHA-256 signing-certificate digests,
+    /// file order.
+    #[must_use]
+    pub fn cert_fingerprints(&self) -> &[[u8; 32]] {
+        &self.cert_fingerprints
+    }
+
+    /// `ANDROID_ORIGIN_PREFIX` + unpadded base64url of each digest, same order.
+    #[must_use]
+    pub fn origins(&self) -> Vec<String> {
+        self.cert_fingerprints
+            .iter()
+            .map(|digest| format!("{ANDROID_ORIGIN_PREFIX}{}", b64url_encode(digest)))
+            .collect()
+    }
+
+    /// The Digital Asset Links body (one statement), at most `MAX_ASSET_LINKS_BYTES`.
+    #[must_use]
+    pub fn asset_links_json(&self) -> Vec<u8> {
+        let fingerprints: Vec<String> = self
+            .cert_fingerprints
+            .iter()
+            .map(|digest| {
+                digest
+                    .iter()
+                    .map(|byte| format!("{byte:02X}"))
+                    .collect::<Vec<_>>()
+                    .join(":")
+            })
+            .collect();
+        let statement = serde_json::json!([{
+            "relation": [ASSET_LINKS_RELATION],
+            "target": {
+                "namespace": "android_app",
+                "package_name": self.package,
+                "sha256_cert_fingerprints": fingerprints,
+            },
+        }]);
+        serde_json::to_vec(&statement).unwrap_or_default()
+    }
+}
+
+/// A validated configuration and its optional `[android]` binding.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoadedConfig {
+    /// Every other setting.
+    pub remote: RemoteConfig,
+    /// `[android]`, when present.
+    pub android: Option<AndroidAppConfig>,
+}
+
+/// An Android application id: 1..=`MAX_ANDROID_PACKAGE_LEN` bytes, at least two `.`-separated
+/// segments, each starting with an ASCII letter followed by ASCII letters, digits or `_`.
+fn valid_android_package(raw: &str) -> bool {
+    if raw.is_empty() || raw.len() > MAX_ANDROID_PACKAGE_LEN {
+        return false;
+    }
+    let mut segments = 0usize;
+    for segment in raw.split('.') {
+        let mut bytes = segment.bytes();
+        match bytes.next() {
+            Some(first) if first.is_ascii_alphabetic() => {}
+            _ => return false,
+        }
+        if !bytes.all(|b| b.is_ascii_alphanumeric() || b == b'_') {
+            return false;
+        }
+        segments = segments.saturating_add(1);
+    }
+    segments >= 2
+}
+
+/// One `AA:BB:..` digest (exactly `ANDROID_CERT_FINGERPRINT_LEN` bytes, upper-case hex).
+fn parse_android_fingerprint(raw: &str) -> Option<[u8; 32]> {
+    if raw.len() != ANDROID_CERT_FINGERPRINT_LEN {
+        return None;
+    }
+    let mut out = [0u8; 32];
+    for (index, pair) in raw.split(':').enumerate() {
+        let slot = out.get_mut(index)?;
+        let bytes = pair.as_bytes();
+        let [high, low] = bytes else {
+            return None;
+        };
+        *slot = upper_hex(*high)?
+            .checked_mul(16)?
+            .checked_add(upper_hex(*low)?)?;
+    }
+    Some(out)
+}
+
+/// The value of one upper-case hex digit.
+fn upper_hex(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => byte.checked_sub(b'0'),
+        b'A'..=b'F' => byte.checked_sub(b'A')?.checked_add(10),
+        _ => None,
+    }
+}
+
+/// The `[android]` table (ADR 2026-10-13); check order: `rp_id`, `allow_funnel`, package,
+/// digest count, each digest (format, then duplicate).
+fn android_config(
+    table: FileAndroid,
+    rp_id: Option<&str>,
+    allow_funnel: bool,
+) -> Result<AndroidAppConfig, ConfigError> {
+    if rp_id.is_none() {
+        return Err(ConfigError::AndroidRequiresRpId);
+    }
+    if !allow_funnel {
+        return Err(ConfigError::AndroidRequiresFunnel);
+    }
+    let package = table
+        .package
+        .filter(|raw| valid_android_package(raw))
+        .ok_or(ConfigError::InvalidAndroidPackage)?;
+    let raw = table.sha256_cert_fingerprints.unwrap_or_default();
+    if raw.is_empty() || raw.len() > MAX_ANDROID_CERT_FINGERPRINTS {
+        return Err(ConfigError::AndroidFingerprintCount {
+            max: MAX_ANDROID_CERT_FINGERPRINTS,
+        });
+    }
+    let mut cert_fingerprints: Vec<[u8; 32]> = Vec::with_capacity(raw.len());
+    for (index, entry) in raw.iter().enumerate() {
+        let digest = parse_android_fingerprint(entry)
+            .filter(|digest| !cert_fingerprints.contains(digest))
+            .ok_or(ConfigError::InvalidAndroidFingerprint { index })?;
+        cert_fingerprints.push(digest);
+    }
+    Ok(AndroidAppConfig {
+        package,
+        cert_fingerprints,
+    })
 }
 
 /// Pure. `Err(RunningAsRoot)` when `uid == 0 || euid == 0`.
@@ -392,6 +578,15 @@ struct FileConfig {
     camera_quality: Option<u8>,
     battery_status: Option<bool>,
     offline_alerts: Option<bool>,
+    android: Option<FileAndroid>,
+}
+
+/// On-disk shape of the `[android]` table (unknown keys refused).
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FileAndroid {
+    package: Option<String>,
+    sha256_cert_fingerprints: Option<Vec<String>>,
 }
 
 /// The six camera keys of the file.
@@ -686,6 +881,20 @@ fn default_socket_path(runtime_dir: Option<&Path>) -> Result<PathBuf, ConfigErro
 ///
 /// Every [`ConfigError`] variant except the file-level ones.
 pub fn parse_config(text: &str, runtime_dir: Option<&Path>) -> Result<RemoteConfig, ConfigError> {
+    parse_config_with_android(text, runtime_dir).map(|loaded| loaded.remote)
+}
+
+/// Pure: [`parse_config`] plus the `[android]` binding, validated after every other key
+/// (ADR 2026-10-13): `rp_id` required, a valid application id, 1..=`MAX_ANDROID_CERT_FINGERPRINTS`
+/// distinct `AA:BB:..` digests. Never echoes a value.
+///
+/// # Errors
+///
+/// Every [`parse_config`] error and the five `[android]` variants of [`ConfigError`].
+pub fn parse_config_with_android(
+    text: &str,
+    runtime_dir: Option<&Path>,
+) -> Result<LoadedConfig, ConfigError> {
     let file: FileConfig = toml::from_str(text).map_err(|_| ConfigError::Syntax)?;
 
     let raw_logins = file.allowed_logins.unwrap_or_default();
@@ -767,7 +976,11 @@ pub fn parse_config(text: &str, runtime_dir: Option<&Path>) -> Result<RemoteConf
     if offline.enabled && !push.enabled {
         return Err(ConfigError::OfflineRequiresPush);
     }
-    Ok(RemoteConfig {
+    let android = match file.android {
+        Some(table) => Some(android_config(table, rp_id.as_deref(), allow_funnel)?),
+        None => None,
+    };
+    let remote = RemoteConfig {
         allowed_logins,
         socket_path,
         poll_interval_ms,
@@ -785,7 +998,8 @@ pub fn parse_config(text: &str, runtime_dir: Option<&Path>) -> Result<RemoteConf
             enabled: file.battery_status.unwrap_or(true),
         },
         offline,
-    })
+    };
+    Ok(LoadedConfig { remote, android })
 }
 
 /// Bounded read (≤ `MAX_CONFIG_BYTES`) then [`parse_config`].
@@ -799,6 +1013,18 @@ pub fn parse_config(text: &str, runtime_dir: Option<&Path>) -> Result<RemoteConf
 /// [`ConfigError::NotFound`], [`ConfigError::Unreadable`], [`ConfigError::TooLarge`] and
 /// every [`parse_config`] error.
 pub fn load_config(path: &Path, runtime_dir: Option<&Path>) -> Result<RemoteConfig, ConfigError> {
+    load_config_with_android(path, runtime_dir).map(|loaded| loaded.remote)
+}
+
+/// Bounded read (as [`load_config`]) then [`parse_config_with_android`].
+///
+/// # Errors
+///
+/// Every [`load_config`] error and the `[android]` variants of [`ConfigError`].
+pub fn load_config_with_android(
+    path: &Path,
+    runtime_dir: Option<&Path>,
+) -> Result<LoadedConfig, ConfigError> {
     let file = OpenOptions::new()
         .read(true)
         .custom_flags((OFlag::O_NONBLOCK | OFlag::O_CLOEXEC).bits())
@@ -825,7 +1051,7 @@ pub fn load_config(path: &Path, runtime_dir: Option<&Path>) -> Result<RemoteConf
         });
     }
     let text = String::from_utf8(buf).map_err(|_| ConfigError::Syntax)?;
-    parse_config(&text, runtime_dir)
+    parse_config_with_android(&text, runtime_dir)
 }
 
 /// An environment value usable as a base directory: non-empty and absolute.
