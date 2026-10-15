@@ -1,52 +1,46 @@
 # Candid Review Report
 
 - **Date**: 2026-10-15
-- **Target Branch**: `feat/onboarding-tour`
-- **Base (merge-base)**: `3f10f61`
-- **Reviewed-Diff-Fingerprint**: `d696b935a2007c52bbd32c9bb14e61549d17764acd42f163bcba85e314fa39ba`
+- **Target Branch**: `feat/onboarding-tour` (PR #389, rebased onto `origin/main` `8f76427`)
+- **Base (merge-base)**: `8f76427`
+- **Reviewed-Diff-Fingerprint**: `b19df03d98efd156f9f7f768303f0415685beac841118f7af46232e7b46d6e0e`
 - **Audited Files**: `AI/DECISIONS.md`, `AI/VERIFICATION_MATRIX.md`, `AI/architect_spec_onboarding_tour.md`, `AI/auditor_constraints_onboarding_tour.md`, `AI/tester_contract_onboarding_tour.md`, `AI/walkthroughs/209_onboarding_tour.md`, `Cargo.lock`, `Docs/GUI_APPLICATION.md`, `Docs/NETWORK_LOCK.md`, `Docs/REMOTE_COMPANION.md`, `crates/gui/Cargo.toml`, `crates/gui/src/app.rs`, `crates/gui/src/app/capture.rs`, `crates/gui/src/feature_control.rs`, `crates/gui/src/header.rs`, `crates/gui/src/lib.rs`, `crates/gui/src/onboarding.rs`, `crates/gui/src/onboarding_view.rs`, `crates/gui/src/privileged.rs`, `crates/gui/tests/feature_control_tests.rs`, `crates/gui/tests/onboarding_audit_tests.rs`, `crates/gui/tests/onboarding_feature_tests.rs`, `crates/gui/tests/onboarding_state_tests.rs`, `crates/gui/tests/onboarding_view_tests.rs`
 
 ## 1. Executive Summary
 
-Re-review of the full raw diff (merge-base `3f10f61` to the working tree, 25 files, 5776 patch
-lines) after commit `c1853f2`, which answers the CHANGES_REQUESTED review of the rebase (M-1 and
-M-2) and fixes a hidden merge conflict with the README captures of #381/#392
-(`crates/gui/src/app/capture.rs` built `SoosApp` without the tour fields).
+Re-review of the full raw diff (merge-base `8f76427` to the working tree, 25 files, 5776 patch
+lines) after the rebase onto `origin/main` `8f76427` (#397) and the new commit `2d7e3ee`, which
+answers the two MINOR findings of the previous APPROVED review (report bound to merge-base
+`3f10f61`, fingerprint `d696b935...`).
 
-`git range-diff` shows that the two earlier branch commits (`3693833`, `d1e94e4`) differ from the
-previously reviewed ones only in documentation context lines; the code delta since the last review
-is exactly `c1853f2`, which this review read hunk by hunk against `crates/remote` on the base.
+- **Rebase**: `git range-diff` and a per-file comparison of added and removed lines show that the
+  rebase changed no branch content; only context lines of `AI/DECISIONS.md` and
+  `AI/VERIFICATION_MATRIX.md` moved, with the branch's matrix section now after main's PLF1
+  section and a `---` separator.
+- **`2d7e3ee`**: exactly the N-1 text fix (`Feature::OfflineAlerts.when_off()`) and the N-2 row
+  renumbering to `OBT23` with the README snapshot evidence (matrix and spec §11). No test file
+  touched. Both claims were checked against `crates/remote` and the matrix.
 
-- **M-1 resolved**: `RemoteSwitch::Push.keys_to_clear()` is `["push_notifications",
-  "offline_alerts"]`; `disable_remote_keys` only rewrites existing `key = true` lines and its
-  verification refuses any added key, so a file without `offline_alerts` stays without it.
-- **M-2 resolved**: `Feature::OfflineAlerts` is a `soos-remote` key feature
-  (`RemoteSwitch::OfflineAlerts`, key `offline_alerts`, 7 keys parsed), with a GUI off route and a
-  shown "on" command naming `push_notifications = true`.
-- **capture.rs**: closed tour, no tour store, `features_loaded = true`, and a `NoFeatureExecutor`
-  that returns an unknown snapshot for `Refresh` and an error for every change: no probe, no
-  write, no process.
-
-Gates (run in the worktree with the requested environment):
+Gates (run in the worktree with `LIBONNXRUNTIME_NO_PKG_CONFIG=1`, an isolated
+`CARGO_TARGET_DIR`, `CARGO_INCREMENTAL=0`, no debug info, `CARGO_BUILD_JOBS=4`):
 `cargo clippy --locked -p soos-gui --all-targets --all-features -- -D warnings` exit 0;
 `cargo test --locked -p soos-gui -p soos-invariants --all-features -- --test-threads=4` exit 0,
-959 passed, 0 failed, 0 ignored (the README snapshot drift test
-`test_rac_capture_scenes_match_committed_assets` included and green, with `Docs/assets/`
-untouched).
+959 passed, 0 failed, 0 ignored (including `test_rac_capture_scenes_match_committed_assets`, with
+`Docs/assets/` untouched, and 695 invariant tests).
 
-No CRITICAL or MAJOR finding. Two new MINOR findings (wording of the offline alerts "off" text,
-duplicate matrix ID `OBT19`) and the carried-forward MINORs remain.
+No CRITICAL or MAJOR finding. N-1 and N-2 are resolved; the SUGGESTION, the documented
+`ActiveState` follow-up and the earlier MINORs are carried forward.
 
 ## 2. Test Changes (mechanical listing from step 3)
 
-Against the merge-base, all five test files are **new** (`feature_control_tests.rs`,
+Against the merge-base `8f76427`, all five test files are **new** (`feature_control_tests.rs`,
 `onboarding_audit_tests.rs`, `onboarding_feature_tests.rs`, `onboarding_state_tests.rs`,
 `onboarding_view_tests.rs`); the frozen patch has no `^-` assertion/test line, no new
 `#[ignore]`/`#[cfg(any())]`/`should_panic`/tolerance, and no inline `mod tests` change. No test
-that exists on `main` is modified.
+that exists on `main` is modified. `2d7e3ee` touches no test file.
 
-Intra-branch contract migration in `c1853f2` (`git show c1853f2 -- crates/gui/tests`), owner
-approved on 2026-10-15 and recorded in spec §11, ADR item (6) and matrix OBT5/OBT6/OBT19. Each
+Intra-branch contract migration in `6c24ae4` (pre-rebase `c1853f2`; `git show 6c24ae4 -- crates/gui/tests`), owner
+approved on 2026-10-15 and recorded in spec §11, ADR item (6) and matrix OBT5/OBT6/OBT23. Each
 change was checked to be a faithful re-expression of the new contract:
 
 | Test | Change | Assessment |
@@ -64,8 +58,27 @@ does not weaken any check.
 
 ## 3. Deep Reasoning Audit
 
+### Rebase Onto `8f76427` and Commit `2d7e3ee`
+- *Did the rebase change the branch's content?* `origin/main` gained one commit since `3f10f61`:
+  `8f76427` (#397), touching only `crates/daemon/tests/peer_limits_tests.rs`, walkthrough 210 and
+  one matrix section. `git range-diff 3f10f61..c178093 8f76427..HEAD` shows commits 2 to 5 as `=`
+  (identical patches) and commit 1 (`3693833` → `084a533`) as `!`, with differences only in
+  context lines of `AI/DECISIONS.md` and `AI/VERIFICATION_MATRIX.md` and in the two excluded
+  review reports. For every file of the frozen diff, the sorted set of added and removed lines
+  vs the merge-base is identical before (`3f10f61..c178093`) and after (`8f76427..HEAD`) the
+  rebase. `git diff c178093 HEAD` lists exactly the three files of #397. The branch's matrix
+  section is appended after main's PLF1 section and a `---` separator; the branch removes no
+  matrix line. PASS.
+- *Is `2d7e3ee` limited to N-1 and N-2?* `git show --stat 2d7e3ee`: three files, 4 insertions and
+  4 deletions: the `OfflineAlerts` `when_off()` string in `crates/gui/src/onboarding.rs`, the row
+  ID and evidence cell in `AI/VERIFICATION_MATRIX.md`, and "new OBT23" in
+  `AI/architect_spec_onboarding_tour.md`. No test file is touched, and no test pins the old
+  wording (`grep` for "offline history"/"back-online" in `crates/gui/tests` finds nothing). PASS.
+- *Does #397 interact with the GUI?* No: it is a daemon integration test change; `soos-gui` does
+  not depend on `soos-daemon` test code. PASS.
+
 ### Logic & Architecture
-- **Dependency check against `soos-remote` (base `3f10f61`)**: `crates/remote/src/config.rs:106,357`
+- **Dependency check against `soos-remote` (base `8f76427`; `crates/remote` is unchanged by #397)**: `crates/remote/src/config.rs:106,357`
   — `offline_alerts` defaults to `false` and is refused (`offline_alerts requires
   push_notifications`, exit 78) without push; `main.rs` `offline_wiring` enables it only with push.
   Nothing else depends on `offline_alerts`. The Push cascade is now complete: after "Push off"
@@ -87,8 +100,12 @@ does not weaken any check.
   key on (AS-1 preserved). `applied_message` maps the new switch to its feature. All `match`es are
   exhaustive (no wildcard swallowing the new variant in `feature_control.rs`). PASS.
 - **Copy**: the description ("told when this PC comes back online after being offline, with how
-  long it was away") matches §2j of `Docs/REMOTE_COMPANION.md`. The "off" text claims the offline
-  history on the phone page keeps working, which is wrong (see MINOR N-1).
+  long it was away") matches §2j of `Docs/REMOTE_COMPANION.md`. The "off" text now reads "Off: no
+  offline history is recorded and no back-online notification is sent; push alerts keep working."
+  Checked against `crates/remote` on the new base: `config.rs:974` (`enabled:
+  file.offline_alerts.unwrap_or(false)`), `main.rs:236` (no offline settings when off) and
+  `offline.rs:860` (disabled view): with the key off nothing is recorded, and push alerts are an
+  independent key. Previous N-1 resolved. PASS.
 - **`FeatureState::NotAvailable`** stays in the enum with its view label but no feature uses it;
   spec §11 records this deliberately. Acceptable.
 - **Follow-up (non-blocking, documented in spec §11 and walkthrough 209)**: `try-restart` of the
@@ -97,7 +114,7 @@ does not weaken any check.
   writes is accepted by `soos-remote` whenever the original was.
 
 ### PAM Concurrency & Deadlines
-- `crates/pam` untouched. No new blocking path: `c1853f2` adds only data (a key, a switch) to the
+- `crates/pam` untouched. No new blocking path: `6c24ae4` adds only data (a key, a switch) to the
   existing worker-thread edit and the bounded `systemctl --user` restart. PASS.
 
 ### Panic Safety & Fail-Closed
@@ -121,7 +138,7 @@ does not weaken any check.
 - No secret, frame or embedding touched; the `offline_alerts` value is never logged. PASS.
 
 ### Supply Chain & Automation
-- `c1853f2` changes no manifest, lockfile, script or workflow. The branch's only dependency change
+- `6c24ae4` and `2d7e3ee` change no manifest, lockfile, script or workflow. The branch's only dependency change
   remains the `toml` workspace edge for `crates/gui`. PASS.
 
 ### English-Only Policy
@@ -134,31 +151,25 @@ does not weaken any check.
   superseded, `ActiveState` follow-up), matrix OBT5/OBT6 updated with the renamed tests; no stale
   test name or "not available in this version" claim remains outside the revision history (the
   original §4/§5 rows of the spec are explicitly superseded by §11).
-- The new matrix row reuses the ID `OBT19` (see MINOR N-2).
+- The new matrix row is now `OBT23` (IDs OBT1 to OBT23 are unique; OBT19 is the original "tour
+  state in the user's own tree" row), spec §11 says "new OBT23", and the row cites
+  `readme_snapshots::test_rac_capture_scenes_match_committed_assets` for its capture clause.
+  Previous N-2 resolved. PASS.
 
 ## 4. Detailed Findings & Action Items
 
-- **[MINOR] N-1** `crates/gui/src/onboarding.rs:164` (`Feature::OfflineAlerts.when_off()`) —
-  "push alerts and the offline history on the phone page keep working" is inaccurate: with
-  `offline_alerts = false`, `soos-remote` records nothing and `GET /api/offline` returns
-  `state = "disabled"` with no intervals (`crates/remote/src/offline.rs` `OfflineView::disabled`,
-  `crates/remote/src/main.rs` `offline_wiring`). Suggested text: "Off: no offline history is
-  recorded and no back-online notification is sent; push alerts keep working." (No test pins this
-  wording beyond "not the placeholder".)
-- **[MINOR] N-2** `AI/VERIFICATION_MATRIX.md:2603` — the new row reuses `OBT19`, already used at
-  line 2596 (tour state written only in the user's own tree); spec §11 and the commit message also
-  say "new OBT19". Renumber it (next free ID is `OBT23`) and list the README capture evidence
-  (`readme_snapshots::test_rac_capture_scenes_match_committed_assets`) for its capture clause.
+Resolved since the previous review: N-1 (offline alerts "off" text) and N-2 (duplicate matrix ID,
+now `OBT23` with the README snapshot evidence), both in `2d7e3ee`.
+
+Carried forward (unchanged code):
+
 - **[SUGGESTION]** `crates/gui/src/onboarding.rs:319` — a hand-written file with
   `offline_alerts = true` and `push_notifications = false` (already refused by `soos-remote`)
   shows offline alerts as On; the companion page shows the unit state, so this is cosmetic.
   Optionally show such a pair as Unknown or with a hint.
-- **[MINOR, non-blocking follow-up, documented]** `crates/gui/src/feature_control.rs:761` — check
+- **[MINOR, non-blocking follow-up, documented]** `crates/gui/src/feature_control.rs:760` — check
   `ActiveState` after `systemctl --user try-restart soos-remote.service` so that a configuration
   refused for any reason is never reported as success (spec §11, walkthrough 209).
-
-Carried forward (unchanged code):
-
 - **[MINOR]** `crates/gui/src/feature_control.rs:423` (`bool_with_comment`) — a CRLF file gets
   mixed line endings on rewritten lines (still valid TOML).
 - **[MINOR]** `crates/gui/src/feature_control.rs` (`disable_remote`) — read-edit-rename is not
@@ -170,8 +181,8 @@ Carried forward (unchanged code):
 
 ## 5. Final Verdict
 
-M-1 and M-2 of the previous review are resolved in production code, the test migration is
-faithful and within the owner-approved scope, the README capture path is side-effect-free, and
-clippy and the 959 tests are green. Remaining findings are MINOR or SUGGESTION.
+The rebase onto `8f76427` changed no branch content, `2d7e3ee` resolves N-1 and N-2 without
+touching any test, the test migration reviewed earlier is unchanged, and clippy and the 959 tests
+are green. Remaining findings are MINOR or SUGGESTION.
 
 **VERDICT: APPROVED**
