@@ -63,6 +63,11 @@ first PR lays the foundation:
   - `scripts/android_build.sh` downloads Gradle over HTTPS (HTTPS-only redirects), checks the hash
     before unpacking, and runs `assembleDebug testDebugUnitTest lintDebug` with strict dependency
     verification. In `ci` mode it also runs the mandatory `aapt2` permission check.
+  - The first strict run (2026-10-15) found `USE_BIOMETRIC` in the merged APK, declared together
+    with `USE_FINGERPRINT` by `androidx.biometric` 1.1.0, a compile dependency of
+    `androidx.credentials` 1.5.0. Both are install-time permissions that grant no data access and
+    the app never calls that library, so the owner chose to allowlist them in the script rather
+    than strip them from the merged manifest.
   - `verification-metadata.xml` starts empty. This is the trust-on-first-use bootstrap described in
     §2j and in the ADR: the CI run generates the file, uploads it and fails.
 - **Manifest.** Only `INTERNET`. `allowBackup=false`, and the data-extraction rules exclude

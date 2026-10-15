@@ -34,11 +34,16 @@ readonly CACHE="${SOOS_ANDROID_CACHE:-${HOME}/.cache/soos-android}"
 readonly TASKS=(assembleDebug testDebugUnitTest lintDebug)
 readonly BUILD_TOOLS_VERSION="35.0.0"
 readonly APK="${ANDROID_DIR}/app/build/outputs/apk/debug/app-debug.apk"
-# The only permissions the merged manifest may request: INTERNET, and the
-# signature-level receiver permission androidx.core declares for the app itself.
+# The only permissions the merged manifest may request: INTERNET, the
+# signature-level receiver permission androidx.core declares for the app itself,
+# and the two install-time (normal) permissions androidx.biometric 1.1.0 declares as
+# a compile dependency of androidx.credentials 1.5.0 (owner decision 2026-10-15; the
+# app never calls androidx.biometric, and neither permission grants data access).
 readonly ALLOWED_PERMISSIONS=(
     "android.permission.INTERNET"
     "org.soos.remote.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION"
+    "android.permission.USE_BIOMETRIC"
+    "android.permission.USE_FINGERPRINT"
 )
 
 fail() {
@@ -120,7 +125,7 @@ check_permissions() {
         fi
     done < <(sed -n "s/^uses-permission: name='\([^']*\)'.*/\1/p" <<< "$dump")
     [[ "$found" -eq 1 ]] || fail "android.permission.INTERNET not found (unexpected aapt2 output)"
-    echo "[OK]    android_build: APK permissions are INTERNET only (plus the app's own receiver permission)"
+    echo "[OK]    android_build: APK permissions are INTERNET plus the allowlisted library permissions"
 }
 
 case "$MODE" in
