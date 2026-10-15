@@ -562,6 +562,7 @@ fn log_temp_sweep(
 /// Initializes all production pipeline components from a strongly-typed [`PipelineConfig`].
 ///
 /// This includes:
+/// 0. Checking that the linked ONNX Runtime lists the CPU execution provider (GitHub #375).
 /// 1. Spawning the V4L2 camera capture supervisor (or instantiating the mock generator if configured).
 /// 2. Loading or creating cryptographic master keys for biometrics and anti-intrusion evidence.
 /// 3. Instantiating the encrypted biometric template store and evidence snapshot store.
@@ -574,6 +575,11 @@ fn log_temp_sweep(
 pub fn initialize_pipeline(
     config: &crate::config::PipelineConfig,
 ) -> Result<PipelineComponents, crate::error::DaemonError> {
+    // 0. Linked ONNX Runtime (GitHub #375): the C API handshake must succeed and the CPU
+    // execution provider must be listed before the camera, keys, stores or models are touched.
+    soos_inference_ort::verify_cpu_execution_provider()?;
+    tracing::info!("ONNX Runtime CPU execution provider available");
+
     // 1. Camera Manager
     // Single resolution path shared with the parity tests (GitHub #152); the mock camera
     // never enumerates hardware.

@@ -1,0 +1,50 @@
+# =============================================================================
+# Dockerfile.system-ort — Clean Arch Linux image for the distribution build of
+# soos against the system ONNX Runtime (GitHub #375, PR 1 of #361)
+# =============================================================================
+# Used only by tests/docker/system_onnxruntime_test.sh (CI job
+# `system-onnxruntime`). The image is built WITH network access; the soos
+# build and tests then run in a container started with `--network none`.
+#
+# - Base image: the same multi-arch index digest as tests/docker/Dockerfile.arch
+#   (bump both together). Arch is rolling: `pacman -Syu` installs the current
+#   [extra] `onnxruntime-cpu`, which is what an Arch package would link (the
+#   harness prints the installed version).
+# - ONNX Runtime: the distribution-signed `onnxruntime-cpu` package (CPU
+#   execution provider only; never the CUDA/ROCm/OpenVINO variants), found by
+#   `ort-sys` through pkg-config (`/usr/lib/pkgconfig/libonnxruntime.pc`).
+# - Rust: exactly the declared MSRV (`[workspace.package] rust-version`), passed
+#   by the harness as SOOS_MSRV and installed through the verified, pinned
+#   scripts/install_rustup.sh (no curl | sh). There is deliberately no default.
+# =============================================================================
+
+FROM archlinux:latest@sha256:b21322c663be387c0ed9cbc7bbbfe18e41633ad4e7b7c77cfad45f128be20040
+
+ENV RUSTUP_HOME=/usr/local/rustup
+ENV CARGO_HOME=/usr/local/cargo
+ENV PATH="/usr/local/cargo/bin:${PATH}"
+
+# Build dependencies (scripts/check_build_deps.sh ARCH_BUILD), pkg-config, the
+# system ONNX Runtime and the model download tools (curl, ca-certificates).
+RUN pacman -Syu --noconfirm --needed \
+        base-devel \
+        clang \
+        openssl \
+        pkgconf \
+        pam \
+        onnxruntime-cpu \
+        curl \
+        ca-certificates \
+    && pacman -Scc --noconfirm
+
+ARG SOOS_MSRV
+COPY scripts/install_rustup.sh /usr/local/lib/soos/install_rustup.sh
+RUN test -n "${SOOS_MSRV}" \
+    && bash /usr/local/lib/soos/install_rustup.sh --default-toolchain "${SOOS_MSRV}"
+
+# Marker checked by the harness before its destructive in-container steps.
+ENV SOOS_SORT_CONTAINER=1
+
+WORKDIR /workspace
+
+CMD ["bash"]

@@ -375,9 +375,17 @@ fn test_prerelease_workspace_dependencies_are_exact_pinned() {
         checked > 10,
         "workspace dependency parsing found too few entries"
     );
+    // Contract migration (GitHub #375, spec AI/architect_spec_system_onnxruntime.md §11): the
+    // workspace `ort` entry is an inline table (`default-features = false`), so the exact rc
+    // pin is asserted on its `version` key.
+    let ort_line = section
+        .lines()
+        .map(str::trim)
+        .find(|l| l.starts_with("ort = "))
+        .expect("workspace ort entry");
     assert!(
-        section.contains("ort = \"=2.0.0-rc."),
-        "ort must stay exact-pinned to its release candidate until 2.0.0 GA"
+        ort_line.contains("version = \"=2.0.0-rc."),
+        "ort must stay exact-pinned to its release candidate until 2.0.0 GA: {ort_line}"
     );
 }
 

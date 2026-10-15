@@ -11,6 +11,7 @@
 //! - MiniFASNetV2 presentation attack detection (`pad`)
 //! - Hardware-free deterministic simulation mocks (`mock`)
 //! - In-place wiping of ORT-owned output tensors (`outputs`)
+//! - Fail-closed CPU execution provider start-up check of the linked ONNX Runtime (`runtime`)
 
 #![forbid(unsafe_code)]
 
@@ -24,6 +25,7 @@ pub mod mock;
 pub mod outputs;
 pub mod pad;
 pub mod registry;
+pub mod runtime;
 
 pub use detector::{
     letterbox_pad, letterbox_pad_into, nms, unproject, BoundingBox, FaceDetection, FaceDetector,
@@ -43,4 +45,8 @@ pub use pad::{AttackType, OrtPadDetector, PadDetector, PadResult, PadSelfTestRep
 pub use registry::{
     default_intra_threads, ModelRegistry, RegistryConfig, SharedSession, DEFAULT_MAX_INTRA_THREADS,
     MAX_INTRA_THREADS,
+};
+pub use runtime::{
+    check_cpu_execution_provider, verify_cpu_execution_provider, CPU_EXECUTION_PROVIDER,
+    MAX_RUNTIME_ERROR_DETAIL_BYTES,
 };

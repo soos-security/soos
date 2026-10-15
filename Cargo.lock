@@ -2619,6 +2619,7 @@ checksum = "cf211e3776eea6aec988552fa118dd746d70e1b1e5e244058d1c98015f3e5872"
 dependencies = [
  "hmac-sha256",
  "lzma-rust2",
+ "pkg-config",
  "ureq",
 ]
 

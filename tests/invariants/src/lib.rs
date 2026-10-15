@@ -392,6 +392,13 @@ mod remote_offline_contract;
 #[cfg(all(test, unix))]
 mod setup_contract;
 
+/// Distribution build against the system ONNX Runtime: feature tables, MSRV, resolved feature
+/// graphs, daemon CPU execution provider check order, offline Arch CI job, PAM isolation and
+/// documentation (GitHub #375, PR 1 of #361, ADR 2026-10-13 "Distribution Builds: System ONNX
+/// Runtime"; spec AI/architect_spec_system_onnxruntime.md; rows SORT-S1 to SORT-S7).
+#[cfg(all(test, unix))]
+mod system_onnxruntime_contract;
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,

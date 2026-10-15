@@ -44,6 +44,12 @@ pub enum InferenceError {
     #[error("ONNX Runtime error: {0}")]
     Ort(String),
 
+    /// The linked ONNX Runtime failed the start-up check (GitHub #375): it did not answer the C
+    /// API handshake or does not list the CPU execution provider. Fail closed: the daemon,
+    /// `soos-enroll` and `soos-gui` refuse to start.
+    #[error("ONNX Runtime CPU execution provider unavailable: {0}")]
+    CpuExecutionProviderUnavailable(String),
+
     #[error("Invalid image input dimensions: expected {expected:?}, got {actual:?}")]
     InvalidDimensions {
         expected: (u32, u32),

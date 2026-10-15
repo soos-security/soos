@@ -70,6 +70,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         camera_source = Some((Arc::clone(&switchable), backend));
         let cam: Arc<dyn CameraManager> = switchable;
 
+        // Linked ONNX Runtime (GitHub #375): fail before any session is built.
+        soos_inference_ort::verify_cpu_execution_provider()?;
         let mut registry = ModelRegistry::new(RegistryConfig::new(&args.models_dir))?;
         registry.verify_integrity()?;
 

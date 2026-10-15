@@ -3,12 +3,15 @@ name = "soos-inference-ort"
 description = "Isolated ONNX Runtime CPU inference engine for face detection, 5-point landmarks, and SFace 128D embeddings with manifest checksum and shape attestation"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
 [features]
-default = []
+default = ["download-binaries"]
+download-binaries = ["ort/default"]
+system-onnxruntime = ["ort/pkg-config", "ort/api-17"]
 
 [dependencies]
 ort = { workspace = true }

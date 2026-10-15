@@ -3,6 +3,7 @@ name = "soos-frame"
 description = "Pure, I/O-free camera frame types (Frame, PixelFormat, SensorType) shared by capture backends and the vision pipeline"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 publish.workspace = true

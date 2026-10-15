@@ -3,6 +3,7 @@ name = "soos-test-fixtures"
 description = "Dev-only shared test fixtures for soos: synthetic frames, synthetic PAD presentations and minimal ONNX models"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 publish.workspace = true

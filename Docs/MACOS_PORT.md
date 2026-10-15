@@ -98,7 +98,8 @@ Job `portable-macos`, named **"Portable crates (macOS, non-required)"**, on `mac
 arm64 image, §4): clippy `-D warnings` over the seven portable crates (`--all-targets --all-features`, which also
 performs the full `cargo check`), then `cargo test` over the same set without `soos-biometric-store`. Same SHA-pinned
 actions as the Linux jobs, no secrets, read-only token. It is not a `CI Success` dependency; `scripts/pr_loop.sh`
-treats it as the single advisory check through `scripts/pr_checks_gate.sh`.
+treats it as an advisory check through `scripts/pr_checks_gate.sh` (the other one is the system
+ONNX Runtime job, GitHub #375, ADR 2026-10-13 "Distribution Builds: System ONNX Runtime").
 
 **Remediation rule** if the job is red: fix portable production code. If `soos-biometric-store` does not compile on
 macOS, classify it Linux-only, list the blocking calls here and remove it from the portable set in the same change,

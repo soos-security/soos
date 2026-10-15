@@ -126,6 +126,46 @@ advisory check is the job named "Portable crates (macOS, non-required)", matched
   `arch_faillock_ci_contract::test_onnxruntime_prefetch_retries_a_bounded_number_of_times` and
   `arch_faillock_ci_contract::test_docker_harnesses_prefetch_and_share_the_onnxruntime_cache`.
 
+### System ONNX Runtime Job (GitHub #375)
+
+Job `system-onnxruntime` ("System ONNX Runtime (Arch, offline, advisory on PRs)",
+`timeout-minutes: 75`, pull requests and pushes) runs `tests/docker/system_onnxruntime_test.sh`
+(ADR 2026-10-13 "Distribution Builds: System ONNX Runtime"):
+
+1. builds `tests/docker/Dockerfile.system-ort` (at most `SOOS_SORT_BUILD_ATTEMPTS` attempts,
+   default 2, bound 3, for transient mirror or CDN failures): the `archlinux` base digest of
+   `tests/docker/Dockerfile.arch`, `onnxruntime-cpu` and the build dependencies from the signed Arch
+   repositories (`pacman -Syu`), and Rust = `[workspace.package] rust-version` (1.92.0) through
+   `scripts/install_rustup.sh`;
+2. fetches online, in a separate step: `cargo fetch --locked` into a registry volume and the
+   attested models through `scripts/download_models.sh` (SHA-256 verified) into a models volume;
+3. runs `docker run --network none` (repository mounted read-only, `ORT_SKIP_DOWNLOAD=1`,
+   `CARGO_NET_OFFLINE=true`, `RUSTUP_TOOLCHAIN=<MSRV>`): asserts only `lo` exists, no
+   `~/.cache/ort.pyke.io`, `LIBONNXRUNTIME_NO_PKG_CONFIG` and `ORT_LIB_LOCATION` unset, and an
+   `ort-sys` feature graph without `download-binaries`; runs `cargo check --locked --offline
+   --workspace --all-targets --all-features` at the MSRV; builds `--release --workspace
+   --no-default-features --features system-onnxruntime`; checks with `readelf`/`ldd`/`pacman -Qo`
+   that `soos-daemon` links `/usr/lib/libonnxruntime.so.1` of `onnxruntime-cpu` and that
+   `libpam_soos.so` does not; runs the real-model tests against that library
+   (`SOOS_REQUIRE_REAL_MODELS=1` on the shipped-model suites); removes the package and checks that
+   the daemon refuses to start.
+
+Locally, `SOOS_SORT_MODELS=host` mounts `/var/lib/soos/models` read-only instead of downloading.
+Every other `--all-features` job keeps the verified download: the workflow `env:` sets
+`LIBONNXRUNTIME_NO_PKG_CONFIG: "1"` (also exported by `save.sh`), so pkg-config is never consulted
+there.
+
+**Advisory on pull requests, required on `main`.** The base digest is pinned but `[extra]` is
+rolling (keyring drift, mirror outages, Arch rebuilds), so on pull requests the job runs for signal
+only: it is not a `CI Success` dependency and its name is in `ADVISORY_CHECKS` of
+`scripts/pr_checks_gate.sh` (with the macOS job), so `scripts/pr_loop.sh` reports but never blocks
+on it. On push to `main` (and manual dispatch) the aggregate `ci-success-main` ("CI Success (main,
+system ONNX Runtime)", `needs: [ci-success, system-onnxruntime]`) fails unless both succeeded, so a
+broken system build on `main` is a red status. Triage: the job prints the `onnxruntime-cpu` and
+`rustc` versions; re-run once for a mirror outage; otherwise file the distribution regression and
+fix forward in a dedicated `fix/` pull request (or bump the base digest in both Arch Dockerfiles).
+The job is never made `continue-on-error`. Enforced by `soos-invariants::system_onnxruntime_contract::*`.
+
 ### Performance Design
 - **Parallel jobs**: clippy, test, security and lint run concurrently; the critical path is the
   test job instead of the sum of all steps. The previous serial pipeline took ~8.5 minutes, of
