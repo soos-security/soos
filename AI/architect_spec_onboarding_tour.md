@@ -407,3 +407,29 @@ R-9 §9 added (finding 9).
 R-10 **Face unlock wording** (finding 10). The FaceUnlock explanation says per-service switches (`/etc/soos/<service>.disable`, `gdm.disable`) can still turn it off for one service, and the Overview footnote repeats it. The probe keeps `symlink_metadata` (the daemon's rule); PAM's `exists()` differs only for a dangling link, which `soos-admin status` reports.
 
 R-11 **Masked unit** (finding 11). `UnitState::Masked` (from `LoadState=masked`); PhoneCompanion state Off; routing *on* = `Command("systemctl --user unmask soos-remote.service && systemctl --user enable --now soos-remote.service")`, *off* = `Unavailable("The unit is masked, so it cannot start.")`.
+
+## 11. Revision 2 — rebase onto #376 and #381 (2026-10-15)
+
+Owner-approved contract migration (2026-10-15), after the candid review of the rebase found two
+MAJOR gaps caused by #376 (offline history and back-online push, merged first):
+
+- **M-1**: `soos-remote` refuses `offline_alerts = true` without `push_notifications = true` (exit
+  78, `RestartPreventExitStatus=78`), and `try-restart` of the `Type=exec` unit reports success
+  before the configuration is parsed. `RemoteSwitch::Push.keys_to_clear()` is now
+  `["push_notifications", "offline_alerts"]`; a missing key is still never added.
+- **M-2**: AS-3 is superseded. `Feature::OfflineAlerts` is a `soos-remote` key feature
+  (`RemoteSwitch::OfflineAlerts`, key `offline_alerts`, read by `parse_remote_keys`): its state
+  follows the key, "off" goes through `DisableRemote`, "on" is a shown command whose prerequisite
+  is `push_notifications = true`. The state table rows of §4 and §5 for `OfflineAlerts` read like
+  the other remote keys. `FeatureState::NotAvailable` stays in the enum but no feature uses it.
+- **README captures (#381)**: `app/capture.rs` builds `SoosApp` with a closed tour, no tour
+  store and a feature executor that probes and changes nothing.
+- Tests migrated: `test_obt_keys_to_clear_cascade_dependent_keys` (push cascade, offline switch),
+  `test_obt_unknown_snapshot_shows_unknown_everywhere` (renamed from
+  `..._everywhere_but_offline_alerts`), `test_obt_all_on_snapshot_shows_on`,
+  `test_obt_offline_alerts_have_an_off_route_and_need_push_to_turn_on` (replaces
+  `test_obt_offline_alerts_have_no_control_yet`); `RemoteKeys` literals gain `offline_alerts`
+  (setup only); new `test_obt_disable_push_also_clears_offline_alerts` and
+  `test_obt_parse_remote_keys_reads_offline_alerts`. Matrix OBT5, OBT6, new OBT19.
+- Not done (follow-up): checking `ActiveState` after `try-restart`, so that a configuration
+  `soos-remote` refuses for another reason is not reported as success.

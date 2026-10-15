@@ -38,16 +38,18 @@ fn all_on() -> FeatureSnapshot {
             push_notifications: true,
             camera_view: true,
             camera_view_funnel: true,
+            offline_alerts: true,
         }),
         running_as_root: false,
     }
 }
 
-const REMOTE_FEATURES: [(Feature, RemoteSwitch); 4] = [
+const REMOTE_FEATURES: [(Feature, RemoteSwitch); 5] = [
     (Feature::RemoteUnlock, RemoteSwitch::Unlock),
     (Feature::InternetAccess, RemoteSwitch::Funnel),
     (Feature::PushAlerts, RemoteSwitch::Push),
     (Feature::CameraView, RemoteSwitch::CameraView),
+    (Feature::OfflineAlerts, RemoteSwitch::OfflineAlerts),
 ];
 
 // ---------------------------------------------------------------------------------------------
@@ -117,15 +119,14 @@ fn test_obt_presence_explanation_states_the_unlock_without_keypress() {
 // ---------------------------------------------------------------------------------------------
 
 #[test]
-fn test_obt_unknown_snapshot_shows_unknown_everywhere_but_offline_alerts() {
+fn test_obt_unknown_snapshot_shows_unknown_everywhere() {
     let snapshot = FeatureSnapshot::unknown();
     for feature in FEATURES {
-        let expected = if feature == Feature::OfflineAlerts {
-            FeatureState::NotAvailable
-        } else {
-            FeatureState::Unknown
-        };
-        assert_eq!(snapshot.state(feature), expected, "{feature:?}");
+        assert_eq!(
+            snapshot.state(feature),
+            FeatureState::Unknown,
+            "{feature:?}"
+        );
     }
 }
 
@@ -133,12 +134,7 @@ fn test_obt_unknown_snapshot_shows_unknown_everywhere_but_offline_alerts() {
 fn test_obt_all_on_snapshot_shows_on() {
     let snapshot = all_on();
     for feature in FEATURES {
-        let expected = if feature == Feature::OfflineAlerts {
-            FeatureState::NotAvailable
-        } else {
-            FeatureState::On
-        };
-        assert_eq!(snapshot.state(feature), expected, "{feature:?}");
+        assert_eq!(snapshot.state(feature), FeatureState::On, "{feature:?}");
     }
 }
 
@@ -216,12 +212,14 @@ fn test_obt_remote_key_states_follow_each_key() {
             push_notifications: true,
             camera_view: true,
             camera_view_funnel: true,
+            offline_alerts: true,
         };
         match switch {
             RemoteSwitch::Unlock => keys.allow_unlock = false,
             RemoteSwitch::Funnel => keys.allow_funnel = false,
             RemoteSwitch::Push => keys.push_notifications = false,
             RemoteSwitch::CameraView => keys.camera_view = false,
+            RemoteSwitch::OfflineAlerts => keys.offline_alerts = false,
         }
         let snapshot = FeatureSnapshot {
             remote_config: RemoteConfigState::Keys(keys),
@@ -593,14 +591,26 @@ fn test_obt_remote_keys_as_root_or_without_config_show_the_off_command() {
 }
 
 #[test]
-fn test_obt_offline_alerts_have_no_control_yet() {
+fn test_obt_offline_alerts_have_an_off_route_and_need_push_to_turn_on() {
+    // Offline alerts shipped with GitHub #376 (`offline_alerts`, ADR 2026-10-13 "Offline History
+    // and Back-Online Push Notifications"): every feature keeps an off route.
     let s = all_on();
-    for on in [false, true] {
-        assert!(matches!(
-            toggle_route(&s, Feature::OfflineAlerts, on),
-            ToggleRoute::Unavailable(_)
-        ));
+    assert_eq!(
+        toggle_route(&s, Feature::OfflineAlerts, false),
+        ToggleRoute::Action(FeatureAction::DisableRemote(RemoteSwitch::OfflineAlerts))
+    );
+    match toggle_route(&s, Feature::OfflineAlerts, true) {
+        ToggleRoute::Command(text) => {
+            assert!(text.contains("offline_alerts = true"), "{text}");
+            // soos-remote refuses `offline_alerts` without push notifications.
+            assert!(text.contains("push_notifications = true"), "{text}");
+        }
+        other => panic!("expected a command, got {other:?}"),
     }
+    assert_ne!(
+        Feature::OfflineAlerts.when_off(),
+        "Not available in this version."
+    );
 }
 
 #[test]

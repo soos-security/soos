@@ -56,6 +56,7 @@ fn snapshots() -> Vec<FeatureSnapshot> {
             push_notifications: true,
             camera_view: true,
             camera_view_funnel: true,
+            offline_alerts: true,
         }),
         running_as_root: false,
     };

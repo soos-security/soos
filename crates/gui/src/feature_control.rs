@@ -92,6 +92,8 @@ pub enum RemoteSwitch {
     Push,
     /// `camera_view`.
     CameraView,
+    /// `offline_alerts`.
+    OfflineAlerts,
 }
 
 impl RemoteSwitch {
@@ -102,18 +104,20 @@ impl RemoteSwitch {
             Self::Funnel => "allow_funnel",
             Self::Push => "push_notifications",
             Self::CameraView => "camera_view",
+            Self::OfflineAlerts => "offline_alerts",
         }
     }
 
     /// Keys set to `false` when the feature is turned off: the key itself, then the keys
     /// `soos-remote` refuses without it (`camera_view_funnel` needs `camera_view` and
-    /// `allow_funnel`).
+    /// `allow_funnel`; `offline_alerts` needs `push_notifications`, exit 78 otherwise).
     pub fn keys_to_clear(self) -> &'static [&'static str] {
         match self {
             Self::Unlock => &["allow_unlock"],
             Self::Funnel => &["allow_funnel", "camera_view_funnel"],
-            Self::Push => &["push_notifications"],
+            Self::Push => &["push_notifications", "offline_alerts"],
             Self::CameraView => &["camera_view", "camera_view_funnel"],
+            Self::OfflineAlerts => &["offline_alerts"],
         }
     }
 }
@@ -269,13 +273,14 @@ pub fn remote_config_path(
     soos_config_file(xdg_config_home, home, "remote.toml")
 }
 
-const REMOTE_KEY_NAMES: [&str; 6] = [
+const REMOTE_KEY_NAMES: [&str; 7] = [
     "allow_unlock",
     "allow_funnel",
     "password_alerts",
     "push_notifications",
     "camera_view",
     "camera_view_funnel",
+    "offline_alerts",
 ];
 
 /// Reads the tour keys of `remote.toml` text. A missing key is `false`; a non-boolean value or a
@@ -284,7 +289,7 @@ pub fn parse_remote_keys(text: &str) -> RemoteConfigState {
     let Ok(table) = text.parse::<toml::Table>() else {
         return RemoteConfigState::Invalid;
     };
-    let mut values = [false; 6];
+    let mut values = [false; 7];
     for (slot, key) in values.iter_mut().zip(REMOTE_KEY_NAMES) {
         match table.get(key) {
             None => {}
@@ -292,7 +297,7 @@ pub fn parse_remote_keys(text: &str) -> RemoteConfigState {
             Some(_) => return RemoteConfigState::Invalid,
         }
     }
-    let [allow_unlock, allow_funnel, password_alerts, push_notifications, camera_view, camera_view_funnel] =
+    let [allow_unlock, allow_funnel, password_alerts, push_notifications, camera_view, camera_view_funnel, offline_alerts] =
         values;
     RemoteConfigState::Keys(RemoteKeys {
         allow_unlock,
@@ -301,6 +306,7 @@ pub fn parse_remote_keys(text: &str) -> RemoteConfigState {
         push_notifications,
         camera_view,
         camera_view_funnel,
+        offline_alerts,
     })
 }
 

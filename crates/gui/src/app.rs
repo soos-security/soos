@@ -2196,6 +2196,7 @@ fn applied_message(action: FeatureAction) -> String {
                 RemoteSwitch::Funnel => Feature::InternetAccess,
                 RemoteSwitch::Push => Feature::PushAlerts,
                 RemoteSwitch::CameraView => Feature::CameraView,
+                RemoteSwitch::OfflineAlerts => Feature::OfflineAlerts,
             },
             false,
         ),

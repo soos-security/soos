@@ -50,7 +50,7 @@ pub enum Feature {
     CameraView,
     /// Administrator authentication before Wi-Fi changes (polkit rule).
     WifiLock,
-    /// Alerts when the PC goes offline (not in this version).
+    /// Alerts when the PC goes offline and comes back (`offline_alerts`).
     OfflineAlerts,
 }
 
@@ -128,9 +128,8 @@ impl Feature {
                  phone companion. Connecting to known networks keeps working."
             }
             Self::OfflineAlerts => {
-                "Your phone is told when this PC goes offline and when it comes back. This \
-                 feature is not part of this version of soos yet; the tour will offer its \
-                 switch once it ships."
+                "Your phone is told when this PC comes back online after being offline, with \
+                 how long it was away. It uses the push alerts, so those must stay on."
             }
         }
     }
@@ -161,7 +160,10 @@ impl Feature {
                 "Off: any local user can change the Wi-Fi again without a password; the \
                  optional airplane-mode lock is removed as well."
             }
-            Self::OfflineAlerts => "Not available in this version.",
+            Self::OfflineAlerts => {
+                "Off: no back-online notification is sent; push alerts and the offline history \
+                 on the phone page keep working."
+            }
         }
     }
 }
@@ -215,6 +217,8 @@ pub struct RemoteKeys {
     pub camera_view: bool,
     /// `camera_view_funnel`.
     pub camera_view_funnel: bool,
+    /// `offline_alerts`.
+    pub offline_alerts: bool,
 }
 
 /// What is known about `remote.toml`.
@@ -298,7 +302,8 @@ impl FeatureSnapshot {
             Feature::RemoteUnlock
             | Feature::InternetAccess
             | Feature::PushAlerts
-            | Feature::CameraView => {
+            | Feature::CameraView
+            | Feature::OfflineAlerts => {
                 if self.remote_unit == UnitState::NotInstalled {
                     return FeatureState::NotInstalled;
                 }
@@ -311,6 +316,7 @@ impl FeatureSnapshot {
                         Feature::RemoteUnlock => bool_state(Some(keys.allow_unlock)),
                         Feature::InternetAccess => bool_state(Some(keys.allow_funnel)),
                         Feature::PushAlerts => bool_state(Some(keys.push_notifications)),
+                        Feature::OfflineAlerts => bool_state(Some(keys.offline_alerts)),
                         // The view also needs the daemon's `[preview]` permission.
                         _ if !keys.camera_view => FeatureState::Off,
                         _ => bool_state(self.daemon_remote_view),
@@ -318,7 +324,6 @@ impl FeatureSnapshot {
                 }
             }
             Feature::WifiLock => bool_state(self.network_lock_installed),
-            Feature::OfflineAlerts => FeatureState::NotAvailable,
         }
     }
 }
@@ -338,6 +343,7 @@ pub fn remote_switch(feature: Feature) -> Option<RemoteSwitch> {
         Feature::InternetAccess => Some(RemoteSwitch::Funnel),
         Feature::PushAlerts => Some(RemoteSwitch::Push),
         Feature::CameraView => Some(RemoteSwitch::CameraView),
+        Feature::OfflineAlerts => Some(RemoteSwitch::OfflineAlerts),
         _ => None,
     }
 }
@@ -378,6 +384,10 @@ fn remote_prerequisites(switch: RemoteSwitch) -> &'static str {
         RemoteSwitch::CameraView => {
             "It needs `rp_id`, and [preview] of /etc/soos/daemon.toml must allow your uid \
              and `remote_view` (administrator change)."
+        }
+        RemoteSwitch::OfflineAlerts => {
+            "It needs `push_notifications = true` (soos-remote refuses offline alerts without \
+             push alerts)."
         }
     }
 }
@@ -443,7 +453,8 @@ pub fn toggle_route(snapshot: &FeatureSnapshot, feature: Feature, turn_on: bool)
         Feature::RemoteUnlock
         | Feature::InternetAccess
         | Feature::PushAlerts
-        | Feature::CameraView => {
+        | Feature::CameraView
+        | Feature::OfflineAlerts => {
             let Some(switch) = remote_switch(feature) else {
                 return ToggleRoute::Unavailable("Unknown feature.");
             };
@@ -492,7 +503,6 @@ pub fn toggle_route(snapshot: &FeatureSnapshot, feature: Feature, turn_on: bool)
             }
             ToggleRoute::Action(FeatureAction::SetNetworkLock { installed: turn_on })
         }
-        Feature::OfflineAlerts => ToggleRoute::Unavailable("Not available in this version."),
     }
 }
 

@@ -301,6 +301,7 @@ fn test_obt_parse_remote_keys() {
             push_notifications: true,
             camera_view: true,
             camera_view_funnel: false,
+            offline_alerts: false,
         })
     );
     assert_eq!(
@@ -373,7 +374,15 @@ fn test_obt_keys_to_clear_cascade_dependent_keys() {
         RemoteSwitch::Funnel.keys_to_clear(),
         ["allow_funnel", "camera_view_funnel"]
     );
-    assert_eq!(RemoteSwitch::Push.keys_to_clear(), ["push_notifications"]);
+    // soos-remote refuses `offline_alerts` without `push_notifications` (exit 78).
+    assert_eq!(
+        RemoteSwitch::Push.keys_to_clear(),
+        ["push_notifications", "offline_alerts"]
+    );
+    assert_eq!(
+        RemoteSwitch::OfflineAlerts.keys_to_clear(),
+        ["offline_alerts"]
+    );
     assert_eq!(
         RemoteSwitch::CameraView.keys_to_clear(),
         ["camera_view", "camera_view_funnel"]
@@ -383,6 +392,7 @@ fn test_obt_keys_to_clear_cascade_dependent_keys() {
         RemoteSwitch::Funnel,
         RemoteSwitch::Push,
         RemoteSwitch::CameraView,
+        RemoteSwitch::OfflineAlerts,
     ] {
         assert_eq!(switch.keys_to_clear()[0], switch.key());
     }
@@ -946,4 +956,36 @@ fn test_obt_runner_recovers_from_a_dead_worker() {
         !runner.is_busy()
     }));
     runner.submit(FeatureAction::Refresh).unwrap();
+}
+
+#[test]
+fn test_obt_disable_push_also_clears_offline_alerts() {
+    // A remote.toml with offline alerts on: turning push off must not leave a file that
+    // soos-remote refuses (`offline_alerts` requires `push_notifications`, exit 78).
+    let text = format!("{SAMPLE}offline_alerts = true\n");
+    let out = disable_remote_keys(&text, RemoteSwitch::Push.keys_to_clear())
+        .unwrap()
+        .unwrap();
+    assert!(out.contains("\npush_notifications = false\n"), "{out}");
+    assert!(out.contains("\noffline_alerts = false\n"), "{out}");
+    assert_eq!(text.lines().count(), out.lines().count());
+    // Without the key, nothing is added.
+    let out = disable_remote_keys(SAMPLE, RemoteSwitch::Push.keys_to_clear())
+        .unwrap()
+        .unwrap();
+    assert!(!out.contains("offline_alerts"), "{out}");
+}
+
+#[test]
+fn test_obt_parse_remote_keys_reads_offline_alerts() {
+    let RemoteConfigState::Keys(keys) =
+        parse_remote_keys("push_notifications = true\noffline_alerts = true\n")
+    else {
+        panic!("expected keys");
+    };
+    assert!(keys.offline_alerts);
+    assert_eq!(
+        parse_remote_keys("offline_alerts = \"yes\"\n"),
+        RemoteConfigState::Invalid
+    );
 }

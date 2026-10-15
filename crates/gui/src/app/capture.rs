@@ -25,6 +25,8 @@ use soos_vision::{PadInputModality, VisionPipeline, VisionPipelineConfig};
 
 use super::{AppTab, SoosApp};
 use crate::daemon_control::{DaemonMonitor, DaemonState, DaemonStatusProbe, DAEMON_POLL_INTERVAL};
+use crate::feature_control::{FeatureAction, FeatureExecutor, FeatureOutcome, FeatureRunner};
+use crate::onboarding::{FeatureSnapshot, Tour};
 use crate::privileged::{PrivilegedAction, PrivilegedExecutor, PrivilegedOutcome, TaskRunner};
 use crate::state::{EnrollmentGuiState, LatestFrameData, ProfilesGuiState};
 use crate::store_mode::GuiStore;
@@ -156,6 +158,23 @@ struct FixedDaemonProbe {
 impl DaemonStatusProbe for FixedDaemonProbe {
     fn is_active(&self) -> bool {
         self.active
+    }
+}
+
+/// Feature executor that probes nothing and changes nothing: a capture shows no tour and never
+/// reads or writes the host's feature state (GitHub #379 tour, merged after #381).
+#[derive(Debug)]
+struct NoFeatureExecutor;
+
+impl FeatureExecutor for NoFeatureExecutor {
+    fn execute(&self, action: FeatureAction) -> FeatureOutcome {
+        match action {
+            FeatureAction::Refresh => FeatureOutcome::Refreshed(FeatureSnapshot::unknown()),
+            other => FeatureOutcome::Applied {
+                action: other,
+                result: Err("feature switches are disabled in README captures".to_string()),
+            },
+        }
     }
 }
 
@@ -315,5 +334,12 @@ pub fn capture_app(
         switchable_camera: None,
         handover_slot: Arc::new(OnceLock::new()),
         last_source_generation: 0,
+        tour: Tour::closed(),
+        tour_store: None,
+        features: FeatureSnapshot::unknown(),
+        features_loaded: true,
+        feature_runner: FeatureRunner::new(Arc::new(NoFeatureExecutor), Arc::new(|| {})),
+        feature_message: None,
+        refresh_pending: false,
     })
 }

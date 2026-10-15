@@ -24,7 +24,8 @@ Owner decisions applied: OD-1 to OD-4 (spec header). Assumed, owner to confirm:
 
 - **AS-1**: `soos-remote` keys are off-only in the GUI.
 - **AS-2**: `touch` / `rm` under `pkexec` for the flags.
-- **AS-3**: offline alerts are explained but not available.
+- **AS-3** (superseded 2026-10-15, spec §11): offline alerts shipped with #376 first; the tour now
+  reads `offline_alerts`, offers its off switch, and turning push alerts off clears it too.
 - **AS-4**: the location of the state file.
 
 ## 3. Plan Evaluation
@@ -95,3 +96,5 @@ Gates were run with a private target directory: `cargo fmt --all -- --check`, `c
 - Motion on page changes once `feat/gui-motion` lands (#377).
 - A GUI "on" switch for `soos-remote` keys once #362 ships its checked TOML editor.
 - A dedicated `soos-admin` flag subcommand, to replace `touch` / `rm`.
+- Check `ActiveState` after `systemctl --user try-restart soos-remote.service`, so a refused
+  configuration is never reported as success (candid review of the rebase, 2026-10-15).
