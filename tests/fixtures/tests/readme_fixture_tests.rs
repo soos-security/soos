@@ -467,3 +467,166 @@ fn test_rac_strip_png_metadata_keeps_only_image_chunks() {
     no_end.extend(&idat);
     assert!(strip_png_metadata(&no_end).is_err(), "missing IEND");
 }
+
+/// The serialized (snake_case) variant names of `pub enum <name>` in a remote source file.
+fn enum_variants_snake_case(rel: &str, name: &str) -> Vec<String> {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join(rel);
+    let source = std::fs::read_to_string(&path).unwrap();
+    let start = source
+        .find(&format!("pub enum {name} {{"))
+        .unwrap_or_else(|| panic!("{name} in {rel}"));
+    let body = &source[start..start + source[start..].find("\n}").unwrap()];
+    let mut variants = Vec::new();
+    for line in body.lines().skip(1) {
+        let line = line.trim();
+        if line.starts_with("//") || line.starts_with("#[") || line.is_empty() {
+            continue;
+        }
+        let ident = line.trim_end_matches(',');
+        let mut snake = String::new();
+        for (i, c) in ident.chars().enumerate() {
+            if c.is_ascii_uppercase() {
+                if i > 0 {
+                    snake.push('_');
+                }
+                snake.push(c.to_ascii_lowercase());
+            } else {
+                snake.push(c);
+            }
+        }
+        variants.push(snake);
+    }
+    variants
+}
+
+/// The string value of `"key":"value"` at the top level of a flat object (`None` for `null`).
+fn string_field(object: &str, key: &str) -> Option<String> {
+    let rest = &object[object.find(&format!("\"{key}\":")).unwrap() + key.len() + 3..];
+    if rest.starts_with("null") {
+        return None;
+    }
+    let rest = rest.strip_prefix('"').unwrap();
+    Some(rest[..rest.find('"').unwrap()].to_string())
+}
+
+fn number_field(object: &str, key: &str) -> u64 {
+    let rest = &object[object.find(&format!("\"{key}\":")).unwrap() + key.len() + 3..];
+    let end = rest
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(rest.len());
+    rest[..end].parse().unwrap()
+}
+
+/// The objects of the `"intervals":[...]` array (flat objects, no nesting).
+fn interval_objects(body: &str) -> Vec<String> {
+    let start = body.find("\"intervals\":[").unwrap() + 13;
+    let array = &body[start..start + body[start..].find(']').unwrap()];
+    array
+        .split("},{")
+        .filter(|s| !s.is_empty())
+        .map(|s| {
+            let s = s.trim_start_matches('{').trim_end_matches('}');
+            format!("{{{s}}}")
+        })
+        .collect()
+}
+
+/// RAC19 (GitHub #398): `GET /api/offline` serves a synthetic, identity-free offline history with
+/// exactly the serialized keys and enum values of `OfflineView` / `OfflineInterval`, so the web
+/// captures show the "Offline history" card.
+#[test]
+fn test_rac_web_fixture_serves_the_offline_history() {
+    const OFFLINE: &str = "crates/remote/src/offline.rs";
+    let now = 1_790_812_800_000u64;
+    let states = enum_variants_snake_case(OFFLINE, "OfflineState");
+    let monitors = enum_variants_snake_case(OFFLINE, "NetworkMonitor");
+    let reasons = enum_variants_snake_case(OFFLINE, "OfflineReason");
+    assert_eq!(states, ["disabled", "active", "unavailable"]);
+    assert_eq!(
+        reasons,
+        [
+            "network_lost",
+            "wifi_disabled",
+            "sleep",
+            "shutdown_or_crash"
+        ]
+    );
+    let mut bodies = Vec::new();
+    for scene in WebScene::ALL {
+        let body = match route(scene, "GET", "/api/offline", now) {
+            FixtureResponse::Json { status: 200, body } => body,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(
+            top_level_keys(&body),
+            struct_fields(OFFLINE, "OfflineView"),
+            "{body}"
+        );
+        // The card is shown only for `active`; `reason` is set only when unavailable.
+        assert_eq!(string_field(&body, "state").as_deref(), Some("active"));
+        assert_eq!(string_field(&body, "reason"), None, "{body}");
+        let monitor = string_field(&body, "network_monitor").unwrap();
+        assert!(monitors.contains(&monitor), "{monitor}");
+        let intervals = interval_objects(&body);
+        assert!(!intervals.is_empty(), "{body}");
+        let mut previous_start = u64::MAX;
+        for interval in &intervals {
+            assert_eq!(
+                top_level_keys(interval),
+                struct_fields(OFFLINE, "OfflineInterval"),
+                "{interval}"
+            );
+            let reason = string_field(interval, "reason").unwrap();
+            assert!(reasons.contains(&reason), "{reason}");
+            let start = number_field(interval, "start_unix_ms");
+            let end = number_field(interval, "end_unix_ms");
+            assert!(start <= end && end <= now, "{interval}");
+            assert_eq!(number_field(interval, "duration_ms"), end - start);
+            assert!(start <= previous_start, "newest first: {body}");
+            previous_start = start;
+        }
+        for forbidden in [
+            "@",
+            "ts.net",
+            "tailnet.",
+            "127.0.0.1",
+            "localhost",
+            "credential",
+            "endpoint",
+            "https://",
+            "uid",
+            "user",
+            "login\"",
+            "ssid",
+            DEMO_HOST,
+        ] {
+            assert!(!body.contains(forbidden), "{forbidden}: {body}");
+        }
+        assert!(
+            !body
+                .split(|c: char| !(c.is_ascii_digit() || c == '.'))
+                .any(|t| t.split('.').count() == 4 && t.split('.').all(|p| !p.is_empty())),
+            "{body}"
+        );
+        // Times follow the capture clock and never underflow.
+        match route(scene, "GET", "/api/offline", 0) {
+            FixtureResponse::Json { status: 200, body } => {
+                for interval in interval_objects(&body) {
+                    assert_eq!(number_field(&interval, "start_unix_ms"), 0, "{body}");
+                    assert_eq!(number_field(&interval, "duration_ms"), 0, "{body}");
+                }
+            }
+            other => panic!("{other:?}"),
+        }
+        for method in ["HEAD", "POST"] {
+            assert_eq!(
+                route(scene, method, "/api/offline", now),
+                FixtureResponse::NotFound
+            );
+        }
+        bodies.push(body);
+    }
+    assert_ne!(bodies[0], bodies[1], "the scenes show different histories");
+}

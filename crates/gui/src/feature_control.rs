@@ -236,6 +236,118 @@ pub fn unit_show_command() -> (&'static str, Vec<String>) {
     ])
 }
 
+/// `systemctl --user show --property=ActiveState --property=SubState soos-remote.service`
+/// (the state read by a [`RestartCheck`]).
+pub fn companion_state_command() -> (&'static str, Vec<String>) {
+    user_systemctl(&[
+        "show",
+        "--property=ActiveState",
+        "--property=SubState",
+        REMOTE_UNIT,
+    ])
+}
+
+/// State of the companion unit as read by a [`RestartCheck`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompanionState {
+    /// `ActiveState=active` (not an automatic restart).
+    Running,
+    /// `activating`, `reloading` or `refreshing` (not an automatic restart).
+    Changing,
+    /// `ActiveState=deactivating` (not an automatic restart).
+    Stopping,
+    /// `SubState=auto-restart…` (any `ActiveState`): the service exited and systemd waits to
+    /// start it again (`Restart=on-failure`).
+    AutoRestart,
+    /// `ActiveState=inactive`.
+    Inactive,
+    /// `ActiveState=failed` (for example a refused configuration, exit 78, never restarted).
+    Failed,
+    /// Missing or unrecognised `ActiveState`.
+    Unknown,
+}
+
+impl CompanionState {
+    /// Fixed word used in user-facing messages.
+    fn word(self) -> &'static str {
+        match self {
+            Self::Running => "running",
+            Self::Changing => "changing",
+            Self::Stopping => "stopping",
+            Self::AutoRestart => "restarting",
+            Self::Inactive => "inactive",
+            Self::Failed => "failed",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+/// Maps `ActiveState=` / `SubState=` lines (any order, values trimmed, other lines ignored).
+pub fn parse_companion_state(text: &str) -> CompanionState {
+    let mut active = None;
+    let mut sub = None;
+    for line in text.lines() {
+        if let Some(value) = line.strip_prefix("ActiveState=") {
+            active = Some(value.trim());
+        } else if let Some(value) = line.strip_prefix("SubState=") {
+            sub = Some(value.trim());
+        }
+    }
+    let Some(active) = active else {
+        return CompanionState::Unknown;
+    };
+    if sub.is_some_and(|s| s.starts_with("auto-restart")) {
+        return CompanionState::AutoRestart;
+    }
+    match active {
+        "active" => CompanionState::Running,
+        "activating" | "reloading" | "refreshing" => CompanionState::Changing,
+        "deactivating" => CompanionState::Stopping,
+        "inactive" => CompanionState::Inactive,
+        "failed" => CompanionState::Failed,
+        _ => CompanionState::Unknown,
+    }
+}
+
+/// Most state polls of a [`RestartCheck`] (larger values are clamped).
+pub const MAX_RESTART_CHECK_POLLS: u32 = 10;
+/// Longest pause between two polls of a [`RestartCheck`] (larger values are clamped).
+pub const MAX_RESTART_CHECK_INTERVAL: Duration = Duration::from_secs(1);
+
+/// How the desktop executor confirms that `soos-remote` survived a restart.
+///
+/// The unit is `Type=exec`: `systemctl try-restart` returns once the new process is executed,
+/// before `soos-remote` reads its configuration, so a refused configuration (exit 78, never
+/// restarted) is only visible in the unit state shortly afterwards.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RestartCheck {
+    /// State polls after the restart (0 is one poll, at most [`MAX_RESTART_CHECK_POLLS`]).
+    pub polls: u32,
+    /// Pause before each poll (at most [`MAX_RESTART_CHECK_INTERVAL`]).
+    pub interval: Duration,
+    /// Deadline of each state call, the probe before the restart included (at most
+    /// [`USER_SYSTEMCTL_TIMEOUT`]).
+    pub call_timeout: Duration,
+}
+
+impl RestartCheck {
+    /// Production policy: 3 polls 500 ms apart, 500 ms per call. Worst case with the probe and
+    /// `try-restart`: 0.5 s + 3 s + 3 × (0.5 s + 0.5 s) = 6.5 s, on the feature worker thread.
+    pub const DEFAULT: RestartCheck = RestartCheck {
+        polls: 3,
+        interval: Duration::from_millis(500),
+        call_timeout: Duration::from_millis(500),
+    };
+
+    fn clamped(self) -> Self {
+        Self {
+            polls: self.polls.clamp(1, MAX_RESTART_CHECK_POLLS),
+            interval: self.interval.min(MAX_RESTART_CHECK_INTERVAL),
+            call_timeout: self.call_timeout.min(USER_SYSTEMCTL_TIMEOUT),
+        }
+    }
+}
+
 /// Maps `systemctl show` `Key=value` lines to a unit state.
 pub fn parse_unit_show(text: &str) -> UnitState {
     let mut load = None;
@@ -716,12 +828,68 @@ pub trait FeatureExecutor: Send + Sync {
 pub struct SystemFeatureExecutor {
     paths: FeaturePaths,
     runner: Arc<dyn ProgramRunner>,
+    restart_check: Option<RestartCheck>,
 }
 
 impl SystemFeatureExecutor {
-    /// An executor over `paths`, running programs through `runner`.
+    /// An executor over `paths`, running programs through `runner`. It does **not** confirm the
+    /// companion state after a `remote.toml` restart; the desktop GUI uses
+    /// [`SystemFeatureExecutor::for_desktop`].
     pub fn new(paths: FeaturePaths, runner: Arc<dyn ProgramRunner>) -> Self {
-        Self { paths, runner }
+        Self {
+            paths,
+            runner,
+            restart_check: None,
+        }
+    }
+
+    /// The executor of the desktop GUI: [`SystemFeatureExecutor::new`] with
+    /// [`RestartCheck::DEFAULT`].
+    pub fn for_desktop(paths: FeaturePaths, runner: Arc<dyn ProgramRunner>) -> Self {
+        Self::new(paths, runner).with_restart_check(RestartCheck::DEFAULT)
+    }
+
+    /// Confirms the companion state with `check` after each `remote.toml` restart.
+    #[must_use]
+    pub fn with_restart_check(mut self, check: RestartCheck) -> Self {
+        self.restart_check = Some(check);
+        self
+    }
+
+    /// One bounded state read; a failed call (error or non-zero exit) is `Unknown` and its
+    /// output is not parsed.
+    fn companion_state(&self, call_timeout: Duration) -> CompanionState {
+        let (program, args) = companion_state_command();
+        match self
+            .runner
+            .run(program, &args, Some(call_timeout), MAX_UNIT_SHOW_BYTES)
+        {
+            Ok(out) if out.success => parse_companion_state(&String::from_utf8_lossy(&out.stdout)),
+            _ => CompanionState::Unknown,
+        }
+    }
+
+    /// Polls the unit after a restart; only `Running` at the last poll confirms it.
+    fn confirm_restart(&self, check: RestartCheck) -> Result<(), String> {
+        let mut last = CompanionState::Unknown;
+        for _ in 0..check.polls {
+            thread::sleep(check.interval);
+            last = self.companion_state(check.call_timeout);
+            if matches!(
+                last,
+                CompanionState::Failed | CompanionState::Inactive | CompanionState::AutoRestart
+            ) {
+                return Err(format!(
+                    "Saved, but soos-remote stopped after the restart ({}): see journalctl --user -u soos-remote",
+                    last.word()
+                ));
+            }
+        }
+        if last == CompanionState::Running {
+            Ok(())
+        } else {
+            Err("Saved, but soos-remote was not confirmed running after the restart".to_string())
+        }
     }
 
     fn run_checked(
@@ -757,12 +925,24 @@ impl SystemFeatureExecutor {
             return Ok(());
         };
         write_user_file_atomically(path, &edited)?;
+        let check = self.restart_check.map(RestartCheck::clamped);
+        // `try-restart` restarts nothing when the unit is stopped, failed or stopping.
+        let was_running = check.map(|c| {
+            !matches!(
+                self.companion_state(c.call_timeout),
+                CompanionState::Inactive | CompanionState::Failed | CompanionState::Stopping
+            )
+        });
         self.run_checked(
             companion_restart_command(),
             Some(USER_SYSTEMCTL_TIMEOUT),
             "restart soos-remote",
         )
-        .map_err(|e| format!("Saved, but soos-remote did not restart: {e}"))
+        .map_err(|e| format!("Saved, but soos-remote did not restart: {e}"))?;
+        match (check, was_running) {
+            (Some(check), Some(true)) => self.confirm_restart(check),
+            _ => Ok(()),
+        }
     }
 
     fn apply(&self, action: FeatureAction) -> Result<(), String> {

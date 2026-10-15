@@ -81,7 +81,8 @@ scripts/capture_readme_assets.sh   # refresh MANIFEST.toml afterwards
 - `tests/fixtures/examples/readme_web_fixture_server.rs` (std only, binds `127.0.0.1:0`, at most 16
   connections, 2 s I/O timeouts, 8 KiB request head, lifetime clamped to 1–300 s) serves the files of
   `crates/remote/assets` and canned JSON built by `soos_test_fixtures::readme_web::route`: auth state,
-  status, alerts, push (disabled), camera (idle) and an event stream with status, alerts and battery
+  status, alerts, push (disabled), camera (idle), offline history (recording, synthetic intervals
+  relative to the capture time, GitHub #398) and an event stream with status, alerts and battery
   events. Scenes `unlocked` and `locked-alerts`. The bodies carry the exact keys of the `soos-remote`
   types (checked against the sources) and no identity: no login, host name, IP address, passkey id or
   push endpoint. `soos-remote` itself gains no flag, route or mode.

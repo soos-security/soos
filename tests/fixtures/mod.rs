@@ -419,6 +419,42 @@ pub mod readme_web {
         }
     }
 
+    /// One `OfflineInterval` (`crates/remote/src/offline.rs`) that ended `ended_ago_ms` before
+    /// `now_unix_ms` and lasted `lasted_ms` (saturating: `now = 0` gives zeros).
+    fn offline_interval(
+        reason: &str,
+        now_unix_ms: u64,
+        ended_ago_ms: u64,
+        lasted_ms: u64,
+    ) -> String {
+        let end = now_unix_ms.saturating_sub(ended_ago_ms);
+        let start = end.saturating_sub(lasted_ms);
+        format!(
+            "{{\"reason\":\"{reason}\",\"start_unix_ms\":{start},\"end_unix_ms\":{end},\
+             \"duration_ms\":{}}}",
+            end.saturating_sub(start)
+        )
+    }
+
+    /// `GET /api/offline` (`OfflineView`): recording, NetworkManager readable, synthetic
+    /// intervals newest first.
+    fn offline_body(scene: WebScene, now_unix_ms: u64) -> String {
+        const MINUTE: u64 = 60_000;
+        const HOUR: u64 = 60 * MINUTE;
+        let intervals = match scene {
+            WebScene::Unlocked => offline_interval("sleep", now_unix_ms, HOUR, 8 * HOUR),
+            WebScene::LockedWithAlerts => format!(
+                "{},{}",
+                offline_interval("network_lost", now_unix_ms, 30 * MINUTE, 12 * MINUTE),
+                offline_interval("shutdown_or_crash", now_unix_ms, 24 * HOUR, 40 * MINUTE)
+            ),
+        };
+        format!(
+            "{{\"state\":\"active\",\"reason\":null,\"network_monitor\":\"active\",\
+             \"intervals\":[{intervals}]}}"
+        )
+    }
+
     const AUTH_STATE_BODY: &str = "{\"mode\":\"tailnet\",\"authenticated\":true,\"passkeys\":true,\
          \"unlock_enabled\":true,\"enrollment\":false}";
     const PUSH_BODY: &str = "{\"state\":\"disabled\",\"reason\":null,\"public_key\":null,\
@@ -444,6 +480,7 @@ pub mod readme_web {
             "/api/alerts" => json(alerts_body(scene, now_unix_ms)),
             "/api/push" => json(PUSH_BODY.to_string()),
             "/api/camera" => json(CAMERA_BODY.to_string()),
+            "/api/offline" => json(offline_body(scene, now_unix_ms)),
             "/api/events" => FixtureResponse::EventStream(format!(
                 "event: status\ndata: {}\n\nevent: alerts\ndata: {}\n\nevent: battery\ndata: {}\n\n",
                 status_body(scene, now_unix_ms),
