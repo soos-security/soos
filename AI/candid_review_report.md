@@ -2,8 +2,8 @@
 
 - **Date**: 2026-10-15
 - **Target Branch**: `test/deflake-peer-limits`
-- **Base (merge-base)**: `df7859d`
-- **Reviewed-Diff-Fingerprint**: `478168855215de75b9187128c8ce6ced35569318085c57ded1bdd351d4c02d68`
+- **Base (merge-base)**: `3f10f61`
+- **Reviewed-Diff-Fingerprint**: `a842479b732b68f0d3eb7e5f75a3630aca920a2168725e95ac5175057bc84405`
 - **Audited Files**:
   - `AI/VERIFICATION_MATRIX.md`
   - `AI/walkthroughs/210_deflake_peer_limits_reserve_test.md`
@@ -14,11 +14,11 @@
 The diff touches tests and documentation only. In `auth_reserve::test_rsh_auth_admitted_on_reserve_while_two_connections_held`, the sequence "async connect, 20 ms wall-clock sleep, async connect" is replaced by a new helper, `connect_back_to_back`. The helper performs two synchronous `std` connects without yielding, then registers both streams with the Tokio runtime through `from_std` after `set_nonblocking(true)`.
 
 I verified the ordering argument against the daemon code instead of trusting the walkthrough:
-- `ConnectionDispatcher::handle_connection` (`crates/daemon/src/dispatcher.rs:426-460`) runs `SO_PEERCRED`, `try_acquire` and `try_acquire_auth_reserve` synchronously, before its first `.await`.
-- The 200 ms `AUTH_RESERVE_FIRST_REQUEST_TIMEOUT_MS` timer is armed only inside `read_and_process` (`dispatcher.rs:556-569`), when the admitted handler is first polled.
+- `ConnectionDispatcher::handle_connection` (`crates/daemon/src/dispatcher.rs:462-496`) runs `SO_PEERCRED`, `try_acquire` and `try_acquire_auth_reserve` synchronously, before its first `.await`.
+- The 200 ms `AUTH_RESERVE_FIRST_REQUEST_TIMEOUT_MS` timer is armed only inside `read_and_process` (`dispatcher.rs:576-605`), when the admitted handler is first polled.
 - The test's `spawn_server` accept loop spawns one handler per accepted stream. The kernel accept queue is FIFO, and the default `#[tokio::test]` current-thread scheduler runs spawned tasks in FIFO order. The held reserve's handler therefore takes the reserve before `second`'s handler is polled, so the 200 ms window cannot expire in between, whatever the host load.
 
-Production code, PAM, IPC, Cargo and CI are untouched. No assertion changed. I found no CRITICAL or MAJOR issue. This report replaces the earlier report bound to merge-base `94a7cb3`, because `origin/main` moved to `df7859d`.
+Production code, PAM, IPC, Cargo and CI are untouched. No assertion changed. I found no CRITICAL or MAJOR issue. This report replaces the earlier report bound to merge-base `df7859d`, because the branch was rebased onto `origin/main` `3f10f61`.
 
 ## 2. Test Changes
 
@@ -38,6 +38,18 @@ Mechanical listing (step 3) on `target/candid_diff.patch`:
 - *Can the test task hold the runtime between the connects?* Both connects are synchronous, and a Unix stream `connect` with a near-empty backlog returns immediately. Blocking `std` calls inside an async test are acceptable for test setup here. PASS.
 - *Is the earlier `auth` connection still holding a permit?* `permits_back(6)` before the new sequence rules that out. PASS.
 - *Is the documentation consistent?* The PLF1 matrix row and walkthrough 210 match the code. They state the reliance on the current-thread flavour and the sequential accept loop as a known limitation. PASS.
+
+### Rebase Onto `3f10f61`
+- *Did the rebase change the branch's content?* `git range-diff origin/test/deflake-peer-limits...HEAD` shows the nine new `main` commits and one rewritten branch commit. A per-file comparison of the added and removed lines (old merge-base `df7859d` to the pushed branch, against `3f10f61` to `HEAD`) is identical for `crates/daemon/tests/peer_limits_tests.rs`, walkthrough 210 and `AI/VERIFICATION_MATRIX.md`. In the matrix, only the placement changed: the `deflake-peer-limits` section now follows main's Android section (ANA14 to ANA16) after a `---` separator, and its text is unchanged. `AI/plan_evaluator_report.md` matches the pushed branch. PASS.
+- *Do main's daemon changes affect the test or `connect_back_to_back`?*
+  - #388 adds a `LockState` branch (step 6d) and lock-state scan bookkeeping to the Auth path. Both run inside request processing, after the frame read. Admission in `handle_connection` (`SO_PEERCRED`, `try_acquire`, `try_acquire_auth_reserve`) is still synchronous before the first `.await`. The 200 ms reserve timer is still armed only in `read_and_process`. The test sends `RequestKind::Auth`, never `LockState`.
+  - #393 only adds IR emitter configuration and presence-worker wiring. It does not touch `limits.rs`, `peercred.rs`, the admission code or the test file.
+  - #390 raises the MSRV to 1.92. It does not affect `std::os::unix::net::UnixStream::connect`, `set_nonblocking` or `tokio::net::UnixStream::from_std`.
+  - `spawn_server` is still a sequential accept loop. All 14 tests in the file still use plain `#[tokio::test]` with no `flavor`, so the current-thread runtime assumption still holds. PASS.
+- *Re-run after the rebase* (isolated target dir, `CARGO_BUILD_JOBS=4`):
+  - `cargo clippy --locked -p soos-daemon --all-targets --all-features -- -D warnings`: clean.
+  - `cargo test --locked -p soos-daemon --test peer_limits_tests --all-features -- --test-threads=4`: 28 passed.
+  - `cargo test --locked -p soos-invariants`: 695 passed. PASS.
 
 ### PAM Concurrency & Deadlines
 - `crates/pam` is not touched. N/A, PASS.
