@@ -1,12 +1,61 @@
 # Candid Review Report
 
-- **Date**: 2026-10-13
+- **Date**: 2026-10-15
 - **Target Branch**: `feat/ir-antispoofing-mock`
-- **Base (merge-base)**: `6f32ef8`
-- **Reviewed-Diff-Fingerprint**: `067317d4b04b341f896b38e9d8ed49b0fd2e1dccbe232f0a37545f0e7effac9f`
+- **Base (merge-base)**: `94a7cb3`
+- **Reviewed-Diff-Fingerprint**: `19280cecb2e150c17048a6fc8cba55aec143d4554d1b9e88845cce3575bd8451`
 - **Audited Files**: AI/DECISIONS.md, AI/VERIFICATION_MATRIX.md, AI/architect_spec_ir_emitter_control.md, AI/auditor_constraints_ir_emitter_control.md, AI/tester_contract_ir_emitter_control.md, AI/walkthroughs/206_ir_emitter_control.md, Cargo.lock, Docs/CAMERA_V4L_CRATE.md, Docs/DAEMON.md, crates/admin-cli/{Cargo.toml, src/args.rs, src/camera.rs, src/error.rs, src/ir_emitter.rs, src/lib.rs, src/main.rs, tests/ir_emitter_command_tests.rs}, crates/camera-v4l/{Cargo.toml, src/diagnostics.rs, src/ir_emitter.rs, src/ir_emitter_config.rs, src/ir_mock.rs, src/lib.rs, src/mock.rs, src/strobe.rs, src/uvc_xu.rs, tests/ir_emitter_config_tests.rs, tests/ir_emitter_tests.rs, tests/ir_mock_camera_tests.rs, tests/strobe_classification_tests.rs, tests/uvc_xu_tests.rs}, crates/daemon/{src/config.rs, tests/ir_emitter_daemon_config_tests.rs}, tests/fixtures/mod.rs, tests/invariants/src/{ir_emitter_contract.rs, lib.rs}, tests/physical/screensaver_test.md
 
-## 0. Re-review (round 2)
+## 0. Re-review after the rebase onto `main` (round 3)
+
+The branch was rebased from merge-base `6f32ef8` onto `origin/main` `94a7cb3`. That commit (#396)
+only updates `rustls` from 0.23.45 to 0.23.46 in `Cargo.lock` (RUSTSEC-2026-0346, RUSTSEC-2026-0347)
+and adds walkthrough 211. Because this branch also edits `Cargo.lock`, the diff fingerprint changed
+from `067317d4...` to the value above. The whole frozen patch (`target/candid_diff.patch`, 37 files,
+7392 lines) was re-read, with these extra checks:
+
+- **The rebase changed no content.** Excluding this report:
+  - `git diff 6f32ef8 origin/feat/ir-antispoofing-mock` (before the rebase) and
+    `git diff 94a7cb3 HEAD` (after the rebase) were compared textually.
+  - They differ in exactly one line: the `index <blob>..<blob>` header of `Cargo.lock`. That is
+    expected, because the base and result blobs now contain rustls 0.23.46.
+  - Every hunk, including the `Cargo.lock` hunk, is byte-identical.
+  - `git range-diff origin/feat/ir-antispoofing-mock...HEAD` shows #396 as the new base commit and
+    the single branch commit as changed only in `AI/candid_review_report.md`. That report change is
+    the old and new `main` versions of the report appearing as range-diff context.
+- **The lockfile is consistent.**
+  - The branch's `Cargo.lock` hunk still only adds `proptest` and `soos-test-fixtures` as
+    dependencies of `soos-camera-v4l` (dev-dependencies).
+  - `Cargo.lock` on `HEAD` keeps `name = "rustls"` / `version = "0.23.46"`, so the rebase did not
+    revert the advisory fix.
+  - `cargo metadata --locked --format-version 1` succeeds: the lockfile matches every manifest
+    without changes.
+  - No cargo build was run for this round. The code is byte-identical to the round-2 fingerprint,
+    whose test and clippy evidence is listed below.
+- **The mechanical test listing is unchanged.**
+  - No removed or changed assertion or test attribute.
+  - No escape hatch (`#[ignore]`, `#[cfg(any())]`, `should_panic`, tolerance, epsilon).
+  - One new inline `mod tests` (`crates/camera-v4l/src/uvc_xu.rs`).
+  - Every added `unwrap`/`expect`/`panic!` is in a test file or in the prose of the auditor
+    constraints.
+- **Re-checked spots.**
+  - The single `unsafe` ioctl in `UvcXuDevice::query` still checks the length before the call and
+    keeps its `// SAFETY:` invariant.
+  - `ensure_same_node` refuses an unknown or different rdev.
+  - `XuBudget` caps the device test at `MAX_DEVICE_TEST_QUERIES` = 11.
+  - `parse_camera_table` ignores sibling keys of `[camera]` and stays strict inside
+    `[camera.ir_emitter]`.
+  - `ignored_camera_keys` returns at most 8 sanitized names.
+  - The English-only scan found no non-English content in the added lines.
+
+**Carried forward:**
+- The round-2 MINOR (a top-level scalar `camera = "x"` is a deserialization error) stays open and
+  non-blocking.
+- The round-1 SUGGESTION (`StrobeStatus::vetoes_allow` for `Stable(Absent)`) stays recorded as an
+  open ADR decision for split item 4.
+- There is no new finding.
+
+## 0b. Re-review (round 2)
 
 This report supersedes round 1 (fingerprint `202312bc...`, CHANGES_REQUESTED). The whole diff was
 re-frozen and re-read, with a focus on the round-1 delta.
@@ -229,7 +278,7 @@ No existing test was modified or weakened.
 
 ## 5. Final Verdict
 
-Round 2 resolves every round-1 MAJOR and MINOR item. The only open item is the non-blocking MINOR
+Round 3 (rebase onto `94a7cb3`) confirms the reviewed content is unchanged apart from the lockfile base, which keeps rustls 0.23.46. Round 2 resolves every round-1 MAJOR and MINOR item. The only open item is the non-blocking MINOR
 on a top-level scalar `camera` key (§0).
 
 **VERDICT: APPROVED**
