@@ -383,3 +383,38 @@ pub fn daemon_panel(ui: &mut Ui, rect: Rect, switch: &DaemonSwitch) -> Option<Pr
         None
     }
 }
+
+/// Width of the "Features" button in the header band.
+pub const FEATURES_BUTTON_W: f32 = 92.0;
+
+/// Height of the "Features" button.
+pub const FEATURES_BUTTON_H: f32 = 26.0;
+
+/// Paints the "Features" button (pale outline pill on the blue band) that reopens the
+/// onboarding tour on its feature overview (GitHub #379). Returns its response.
+pub fn features_button(ui: &mut Ui, rect: Rect) -> Response {
+    let id = ui.id().with("soos_features_button");
+    let response = ui.interact(rect, id, Sense::click());
+    let painter = ui.painter();
+    let radius = CornerRadius::same(13);
+    if response.hovered() {
+        painter.rect_filled(rect, radius, theme::BLUE_HOVER);
+    }
+    painter.rect_stroke(
+        rect,
+        radius,
+        Stroke::new(1.5, theme::PALE),
+        egui::StrokeKind::Inside,
+    );
+    painter.text(
+        rect.center(),
+        Align2::CENTER_CENTER,
+        "Features",
+        FontId::proportional(theme::F_SMALL + 1.0),
+        theme::PALE,
+    );
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Features"));
+    response
+        .on_hover_cursor(CursorIcon::PointingHand)
+        .on_hover_text("Feature tour: explanations and on/off switches")
+}

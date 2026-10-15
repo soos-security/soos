@@ -18,6 +18,8 @@ waits on I/O it does not own.
 | `systemctl show --property=ActiveState --value soos-daemon.service` | `soos-gui-daemon-monitor` | `daemon_control` |
 | `pkexec` (pause/resume daemon, list/import/delete templates) | `soos-gui-privileged` | `privileged` |
 | Camera-source probing, switching and device release | `soos-gui-camera-source` | `camera_source` |
+| Feature probes and switches of the onboarding tour (`pkexec`, `systemctl --user`, `remote.toml` edit) | `soos-gui-features` | `feature_control` |
+| Tour state write (`gui-tour.json`) | `soos-gui-tour-state` | `onboarding` |
 
 - **Daemon state polling**: `DaemonMonitor` probes through the `DaemonStatusProbe` trait
   (production: `SystemctlProbe`) at most once per `DAEMON_POLL_INTERVAL` (2 s), gated by the
@@ -187,6 +189,55 @@ the stored template (or `None` when the store lookup fails or finds nothing):
   so no stale score is ever displayed for the new selection.
 - the reference is a `Zeroizing<Vec<f32>>` cloned straight from the template's zeroized vector,
   so the template copy is wiped when it is replaced, cleared or dropped (row SGF5).
+
+## 1e. First-Run Tour and Feature Switches (GitHub #379, PR 1 of #363)
+
+On the first launch for a user, `soos-gui` opens a tour window (`egui::Modal`, brand modal frame)
+that explains every soos feature, shows its current state and offers its on/off control. The
+installer turns every feature on (owner decision on #362); the tour is where the user learns
+what each one does and can turn it off. The tour can be skipped, and the **Features** button in
+the header band reopens it at any time on its overview page (every feature with its switch, and
+"Replay the tour").
+
+- **Per-user state**: `$XDG_CONFIG_HOME/soos/gui-tour.json` (else `~/.config/soos/gui-tour.json`),
+  `{"version":1,"seen":true}`, mode 0600 in a 0700 directory, written atomically (temporary file,
+  `fsync`, rename) on the `soos-gui-tour-state` thread when the tour is closed. Reading is bounded
+  (`MAX_TOUR_STATE_BYTES` = 4096), non-blocking (`O_NONBLOCK`, a FIFO is refused by `fstat`) and
+  never follows a symbolic link (`O_NOFOLLOW`). A missing, malformed or oversized file shows the
+  tour; an unreadable one (symbolic link, directory, permission error) never shows it
+  automatically. Nothing is written, and the tour is not shown automatically, when the deepest
+  existing entry of the path belongs to another user (a root session that kept the user's
+  `HOME`). Raising `TOUR_VERSION` shows the tour again after new features.
+- **Pages**: introduction, one page per feature (face unlock, presence auto-unlock, phone
+  companion, remote lock and unlock, Internet access, push alerts, live camera view, Wi-Fi lock,
+  offline alerts), overview. Plain English, no exclamation marks, no emoji (pinned by
+  `onboarding_feature_tests.rs`).
+- **State shown** (`FeatureSnapshot`, probed on the `soos-gui-features` thread, never written):
+  the flag files `/etc/soos/disabled` and `/etc/soos/presence.disable` (any entry counts, the
+  daemon's rule), `[presence] enabled` and `[preview]` of `/etc/soos/daemon.toml` (through the
+  daemon's own bounded reader `read_daemon_config_text`), `systemctl --user show` of
+  `soos-remote.service` (3 s deadline), the keys of `~/.config/soos/remote.toml` (bounded,
+  non-blocking, no symbolic link), and the Wi-Fi lock rule files (polkit rule and the optional
+  rfkill udev rule). An unknown fact is shown as "Unknown", never guessed.
+- **Switches** (`onboarding::toggle_route`):
+
+| Feature | Off | On |
+|---|---|---|
+| Face unlock | `pkexec /usr/bin/touch /etc/soos/disabled` | `pkexec /usr/bin/rm -f -- /etc/soos/disabled` |
+| Presence auto-unlock | `pkexec /usr/bin/touch /etc/soos/presence.disable` | `pkexec /usr/bin/rm -f -- /etc/soos/presence.disable`; shown command when `daemon.toml` disables it; unavailable while face unlock is off |
+| Phone companion | `systemctl --user disable --now soos-remote.service` | `systemctl --user enable --now soos-remote.service` (masked unit: unmask command) |
+| Remote unlock, Internet access, push alerts, camera view, offline alerts | `remote.toml` key set to `false` (with `camera_view_funnel` when it depends on it, and `offline_alerts` when push alerts are turned off, because `soos-remote` refuses offline alerts without push), then `systemctl --user try-restart soos-remote.service` | shown key and restart command, with the prerequisites `soos-remote` checks |
+| Wi-Fi lock | `pkexec soos-admin network-lock uninstall` | `pkexec soos-admin network-lock install` only when the rfkill rule is known to be absent; otherwise the `--rfkill` command is shown |
+
+  The GUI process never writes a root-owned file: root changes run under `pkexec` (Polkit
+  administrator authentication) with fixed argument vectors and absolute programs
+  (`TOUCH_PROGRAM`, `RM_PROGRAM`, `SOOS_ADMIN_PROGRAM`, which follows `SOOS_BINDIR` like
+  `SOOS_ENROLL_PROGRAM`), over a closed set of two flag paths. Running as root, user-level
+  switches are shown as commands. Only one Polkit dialog is open at a time across the
+  `TaskRunner` and the `FeatureRunner` (`SoosApp::submit_task`); the tour cannot be closed while
+  an action is pending.
+- **Motion**: no animation yet. The page content is keyed by `Tour::generation`, the hook the
+  motion system of #358 / #377 will use; reduced-motion preferences are therefore respected.
 
 ## 2. Camera Error States (GitHub #155, review finding CAM-07)
 

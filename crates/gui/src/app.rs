@@ -28,7 +28,15 @@ use crate::camera_source::{
 };
 use crate::camera_status::{camera_status_banner, render_status_banner};
 use crate::daemon_control::{DaemonMonitor, DaemonState, SystemctlProbe, DAEMON_POLL_INTERVAL};
+use crate::feature_control::{
+    FeatureAction, FeatureOutcome, FeaturePaths, FeatureRunner, FeatureRunnerError,
+    SystemFeatureExecutor, SystemProgramRunner,
+};
 use crate::header;
+use crate::onboarding::{
+    should_show_tour, tour_state_path, Feature, FeatureSnapshot, Tour, TourLoad, TourStore,
+};
+use crate::onboarding_view::{show_tour, TourEvent, TourView};
 use crate::privileged::{PkexecExecutor, PrivilegedAction, PrivilegedOutcome, TaskRunner};
 use crate::state::{EnrollmentGuiState, LatestFrameData, ProfilesGuiState};
 use crate::store_mode::GuiStore;
@@ -105,6 +113,16 @@ pub struct SoosApp {
     switchable_camera: Option<Arc<SwitchableCamera>>,
     handover_slot: HandoverSlot,
     last_source_generation: u64,
+
+    // First-run onboarding tour and feature switches (GitHub #379)
+    tour: Tour,
+    tour_store: Option<TourStore>,
+    features: FeatureSnapshot,
+    features_loaded: bool,
+    feature_runner: FeatureRunner,
+    feature_message: Option<(String, bool)>,
+    /// A refresh was requested while the feature runner was busy.
+    refresh_pending: bool,
 }
 
 impl SoosApp {
@@ -160,6 +178,33 @@ impl SoosApp {
             Arc::new(move || repaint_ctx.request_repaint()),
         );
 
+        // First-run tour (GitHub #379): per-user state, read once before the first frame.
+        let tour_store = tour_state_path(
+            std::env::var_os("XDG_CONFIG_HOME").as_deref(),
+            std::env::var_os("HOME").as_deref(),
+        )
+        .map(TourStore::new);
+        // A store in another user's tree (root session with the user's HOME) is never used.
+        let tour_store = tour_store.filter(|store| {
+            crate::onboarding::owned_by_euid(store.path(), nix::unistd::geteuid().as_raw())
+        });
+        let tour_load = tour_store
+            .as_ref()
+            .map_or(TourLoad::Unavailable, TourStore::load);
+        let tour = if should_show_tour(tour_load) {
+            Tour::first_run()
+        } else {
+            Tour::closed()
+        };
+        let feature_ctx = cc.egui_ctx.clone();
+        let feature_runner = FeatureRunner::new(
+            Arc::new(SystemFeatureExecutor::new(
+                FeaturePaths::system(),
+                Arc::new(SystemProgramRunner),
+            )),
+            Arc::new(move || feature_ctx.request_repaint()),
+        );
+
         let mut app = Self {
             current_tab: AppTab::LiveInspection,
             store,
@@ -192,7 +237,15 @@ impl SoosApp {
             switchable_camera: None,
             handover_slot,
             last_source_generation: 0,
+            tour,
+            tour_store,
+            features: FeatureSnapshot::unknown(),
+            features_loaded: false,
+            feature_runner,
+            feature_message: None,
+            refresh_pending: false,
         };
+        app.refresh_features();
 
         app.refresh_profiles();
         app
@@ -270,7 +323,7 @@ impl SoosApp {
     /// list` on a background thread; the result arrives in [`Self::handle_task_outcomes`].
     pub fn refresh_profiles(&mut self) {
         if self.store.uses_polkit() {
-            if let Err(e) = self.tasks.submit(PrivilegedAction::ListProfiles) {
+            if let Err(e) = self.submit_task(PrivilegedAction::ListProfiles) {
                 self.profiles.status_message = Some((format!("Cannot load profiles: {e}"), true));
                 self.load_local_profiles();
             }
@@ -311,12 +364,21 @@ impl SoosApp {
         self.profiles.profiles = summaries;
     }
 
+    /// Submits a privileged action to the `TaskRunner`. Every submission goes through here so
+    /// that only one Polkit dialog is ever open across both runners (GitHub #154, #379).
+    fn submit_task(&mut self, action: PrivilegedAction) -> Result<(), String> {
+        if self.feature_runner.privileged_in_flight() {
+            return Err("another privileged operation is already in progress".to_string());
+        }
+        self.tasks.submit(action).map_err(|e| e.to_string())
+    }
+
     /// Submits a privileged action, reporting a busy runner instead of blocking.
     fn submit_privileged(&mut self, action: PrivilegedAction) -> bool {
-        match self.tasks.submit(action) {
+        match self.submit_task(action) {
             Ok(()) => true,
             Err(e) => {
-                self.daemon_message = Some((format!("{e}"), true));
+                self.daemon_message = Some((e, true));
                 false
             }
         }
@@ -378,6 +440,108 @@ impl SoosApp {
                         ));
                     }
                 },
+            }
+        }
+    }
+
+    /// Starts a background probe of every feature (no-op while a feature action runs; the
+    /// action's outcome triggers a probe itself).
+    fn refresh_features(&mut self) {
+        match self.feature_runner.submit(FeatureAction::Refresh) {
+            Ok(()) => self.refresh_pending = false,
+            // Coalesced: submitted once the runner is idle (no message).
+            Err(FeatureRunnerError::Busy) => self.refresh_pending = true,
+            Err(e) => tracing::warn!("feature refresh not started: {e}"),
+        }
+    }
+
+    /// Applies finished feature actions and probes (non-blocking, GitHub #379).
+    fn handle_feature_outcomes(&mut self) {
+        let mut refresh = false;
+        for outcome in self.feature_runner.poll() {
+            match outcome {
+                FeatureOutcome::Refreshed(snapshot) => {
+                    self.features = snapshot;
+                    self.features_loaded = true;
+                }
+                FeatureOutcome::Applied { action, result } => {
+                    self.feature_message = Some(match result {
+                        Ok(()) => (applied_message(action), false),
+                        Err(e) => {
+                            tracing::warn!(?action, "feature change failed");
+                            (e, true)
+                        }
+                    });
+                    if matches!(action, FeatureAction::SetSystemFlag { .. }) {
+                        if let Some(monitor) = &self.daemon_monitor {
+                            monitor.request_refresh();
+                        }
+                    }
+                    refresh = true;
+                }
+            }
+        }
+        if (refresh || self.refresh_pending) && !self.feature_runner.is_busy() {
+            self.refresh_features();
+        }
+    }
+
+    /// Records that the tour was seen, on a short-lived thread (never on the UI thread).
+    fn persist_tour_seen(&self) {
+        let Some(store) = self.tour_store.clone() else {
+            return;
+        };
+        let spawned = std::thread::Builder::new()
+            .name("soos-gui-tour-state".to_string())
+            .spawn(move || {
+                if let Err(e) = store.mark_seen() {
+                    tracing::warn!("could not record the onboarding tour state: {e}");
+                }
+            });
+        if let Err(e) = spawned {
+            tracing::warn!("could not start the tour state writer: {e}");
+        }
+    }
+
+    /// Renders the tour window (when open) and applies its events.
+    fn render_tour(&mut self, ctx: &egui::Context) {
+        if !self.tour.is_open() {
+            return;
+        }
+        let busy = self.tasks.is_busy() || self.feature_runner.privileged_in_flight();
+        let message = self
+            .feature_message
+            .as_ref()
+            .map(|(text, is_error)| (text.as_str(), *is_error));
+        let view = TourView {
+            snapshot: &self.features,
+            loaded: self.features_loaded,
+            busy,
+            message,
+        };
+        let events = show_tour(ctx, &self.tour, &view);
+        for event in events {
+            match event {
+                TourEvent::Next => self.tour.next(),
+                TourEvent::Back => self.tour.back(),
+                TourEvent::Restart => self.tour.restart(),
+                TourEvent::Close => {
+                    self.tour.close();
+                    self.feature_message = None;
+                    self.persist_tour_seen();
+                }
+                TourEvent::Apply(action) => {
+                    if self.tasks.is_busy() || self.feature_runner.is_busy() {
+                        self.feature_message = Some((
+                            "Another operation is in progress; try again in a moment.".to_string(),
+                            true,
+                        ));
+                    } else if let Err(e) = self.feature_runner.submit(action) {
+                        self.feature_message = Some((e.to_string(), true));
+                    } else {
+                        self.feature_message = None;
+                    }
+                }
             }
         }
     }
@@ -534,7 +698,10 @@ impl SoosApp {
             .map_or(DaemonState::Unknown, DaemonMonitor::state);
         // The switch is disabled while a privileged action is pending (no stacked Polkit
         // dialogs) and submits exactly the old Pause/Resume actions.
-        let switch = header::DaemonSwitch::new(daemon_state, self.tasks.is_busy());
+        let switch = header::DaemonSwitch::new(
+            daemon_state,
+            self.tasks.is_busy() || self.feature_runner.privileged_in_flight(),
+        );
         if let Some(action) = header::daemon_panel(ui, panel, &switch) {
             self.submit_privileged(action);
         }
@@ -553,7 +720,32 @@ impl SoosApp {
             egui::FontId::proportional(theme::F_SMALL),
             theme::PALE.gamma_multiply(0.8),
         );
-        let stats_right = panel.min.x - 20.0;
+        // "Features" button (GitHub #379): reopens the tour on its feature overview.
+        let features_rect = Rect::from_min_size(
+            Pos2::new(
+                panel.min.x - 20.0 - header::FEATURES_BUTTON_W,
+                full.min.y + (band_h - header::FEATURES_BUTTON_H) / 2.0,
+            ),
+            Vec2::new(header::FEATURES_BUTTON_W, header::FEATURES_BUTTON_H),
+        );
+        if features_rect.min.x > x + 8.0 {
+            if header::features_button(ui, features_rect).clicked() {
+                self.tour.open_overview();
+                self.refresh_features();
+            }
+        } else if ui
+            .interact(
+                wordmark,
+                ui.id().with("band_features"),
+                egui::Sense::click(),
+            )
+            .on_hover_text("Click for the feature tour")
+            .clicked()
+        {
+            self.tour.open_overview();
+            self.refresh_features();
+        }
+        let stats_right = features_rect.min.x - 16.0;
         if stats_right - stats_galley.size().x > x + 24.0 {
             let pos = Pos2::new(
                 stats_right - stats_galley.size().x,
@@ -1461,7 +1653,7 @@ impl SoosApp {
                                         uid: self.enrollment.target_uid,
                                         embedding: fused_embedding.clone(),
                                     };
-                                    match self.tasks.submit(action) {
+                                    match self.submit_task(action) {
                                         Ok(()) => {
                                             self.enrollment.status_message = Some((
                                                 "Importing template into the system store; \
@@ -1718,7 +1910,7 @@ impl SoosApp {
                 if self.store.uses_polkit() {
                     // Runs off the UI thread; the outcome arrives in
                     // `handle_task_outcomes` (GitHub #154).
-                    if let Err(e) = self.tasks.submit(PrivilegedAction::DeleteTemplate { uid }) {
+                    if let Err(e) = self.submit_task(PrivilegedAction::DeleteTemplate { uid }) {
                         self.profiles.status_message =
                             Some((format!("Cannot delete template for UID {uid}: {e}"), true));
                     }
@@ -1924,6 +2116,7 @@ impl eframe::App for SoosApp {
         // Apply finished background privileged operations without blocking (GitHub #154).
         self.handle_task_outcomes();
         self.handle_store_task_outcomes();
+        self.handle_feature_outcomes();
         self.sync_camera_source_generation();
         let camera_notice = self.current_camera_notice();
         let camera_status = self.camera.status();
@@ -1980,7 +2173,40 @@ impl eframe::App for SoosApp {
                 }
             });
         });
+        self.render_tour(&ctx);
     }
+}
+
+/// Success message of a feature change.
+fn applied_message(action: FeatureAction) -> String {
+    use crate::feature_control::{RemoteSwitch, SystemFlag};
+    let (feature, on) = match action {
+        FeatureAction::Refresh => return "Feature states refreshed.".to_string(),
+        FeatureAction::SetSystemFlag { flag, present } => (
+            match flag {
+                SystemFlag::Global => Feature::FaceUnlock,
+                SystemFlag::Presence => Feature::PresenceUnlock,
+            },
+            !present,
+        ),
+        FeatureAction::SetCompanion { enabled } => (Feature::PhoneCompanion, enabled),
+        FeatureAction::DisableRemote(switch) => (
+            match switch {
+                RemoteSwitch::Unlock => Feature::RemoteUnlock,
+                RemoteSwitch::Funnel => Feature::InternetAccess,
+                RemoteSwitch::Push => Feature::PushAlerts,
+                RemoteSwitch::CameraView => Feature::CameraView,
+                RemoteSwitch::OfflineAlerts => Feature::OfflineAlerts,
+            },
+            false,
+        ),
+        FeatureAction::SetNetworkLock { installed } => (Feature::WifiLock, installed),
+    };
+    format!(
+        "{} is now {}.",
+        feature.title(),
+        if on { "on" } else { "off" }
+    )
 }
 
 impl Drop for SoosApp {
