@@ -31,6 +31,67 @@ The `soos` installation script (`scripts/install.sh`) guarantees the following f
 
 ## 3. Installation Script (`scripts/install.sh`)
 
+### 3.0 One-Command Setup (`scripts/setup.sh`, GitHub #372)
+
+`scripts/setup.sh` is the one entry point for a source install (PR 1 of #362; ADR 2026-10-13 "One-Command Setup `scripts/setup.sh` and Default-On Installer Profile"; matrix SET1–SET19). Distribution packages will later ship it as `/usr/bin/soos-setup`. It orchestrates the hardened scripts of this section and never replaces them.
+
+```bash
+./scripts/setup.sh --dry-run          # detect and print the plan; no write, no sudo, no build
+./scripts/setup.sh                    # interactive: confirm the plan with y
+./scripts/setup.sh --yes --no-enroll  # non-interactive (required without a terminal)
+```
+
+Run it as yourself from the checkout. It escalates with `sudo` (or `doas`) at most twice: once for the package manager and once to run its own root half (`--system-phase`); `sudo` resets the environment, so the root half receives everything (user, artifact directory, local-seat verdict) as arguments. Started as root (`sudo ./scripts/setup.sh`), it needs the invoking user (`SUDO_USER`, `DOAS_USER`, `PKEXEC_UID`) or `--user`, and builds through `runuser` as the invoking user or the checkout owner. **The build never runs as root.**
+
+| Phase | Runs as | What it does | "Already done" when |
+|---|---|---|---|
+| detect | user | distribution (os-release parsed, never sourced), package manager, systemd, display manager, Tailscale version (`tailscale version` only), session (local seat or not), `/dev/video*` count, target and build user | — (read-only) |
+| packages | root | installs the packages of `check_build_deps.sh --print-packages build|models|gui` that the package manager reports missing (`apt-get install -y --no-install-recommends`, `dnf install -y`, `pacman -S --needed --noconfirm`); never adds a repository, never removed by a rollback | nothing missing |
+| toolchain | build user | `scripts/install_rustup.sh` (verified `rustup-init`) | `cargo` found |
+| build | build user | `cargo build --release --locked --workspace` with `SOOS_BINDIR=<prefix>/bin`, explicit `PATH=~/.cargo/bin:$PATH` (no login shell: `install_rustup.sh` never edits profiles); started as root, under `env -i` with an allow-list (`HOME`, `USER`, `LOGNAME`, `PATH`, `LANG`, `LC_ALL`, `TERM`, proxies), so root's `CARGO_HOME`/`RUSTUP_HOME`/`RUSTFLAGS` never leak | incremental (cargo rebuilds nothing) |
+| system | root | `scripts/install.sh --start --artifact-dir <target>/release --distro <family> --pam-dir <dir>` (its own preflight, journal and rollback) | every installed file equals its source (binaries, PAM module, unit, provision helper, PAM template of the family), `master.key` and the `soos` group exist, `download_models.sh --check-only` passes, the unit is enabled and active; `--reinstall` forces it |
+| access | root | `soos-admin add-user <user>` (log out and back in afterwards) | the user is in `soos` |
+| presence | root | `--presence off` creates `<sysconfdir>/soos/presence.disable`, `--presence on` removes it; without the option the current state is kept and reported (the daemon default is on) | flag already as requested |
+| verify | root | `scripts/wait_daemon_ready.sh --timeout 30`, then `soos-admin camera list` (metadata only) | — (always checked) |
+| enrollment | root | only from a **local seat**, with a camera and no template: stops `soos-daemon` (it owns the camera), runs `soos-enroll --biometrics-dir … --key-file … --models-dir … enroll --username <user>`, starts the daemon again and waits for it | the template `<uid>.cbor.enc` exists |
+| state | root | writes `<localstatedir>/lib/soos/state/setup.json` | content unchanged |
+
+**Local seat.** The user half decides: an SSH variable means remote; otherwise `loginctl show-session <XDG_SESSION_ID or self>` must report `Remote=no` and a seat; only when logind does not know the terminal's session at all (a terminal started by the user service manager), the user's graphical session (`loginctl show-user <user> --property=Display`) is checked the same way. A positive `Remote=yes` or seatless answer is final: an operator over SSH who runs `su - alice` while Alice is logged in at the desk never enrolls her. Started as root, only the shell's own session counts. Any doubt means "not local": enrollment is skipped and the exact command to run at the PC is printed (`sudo systemctl stop soos-daemon && sudo soos-enroll enroll --username <user>; sudo systemctl start soos-daemon`). Residual: a remotely attached tmux pane that inherited a desk session, or a mirrored desk session (VNC), can look local; the enrollment line says that a face is captured now, at this PC.
+
+**State file `setup.json`** (root, `0600`, directory `0700`): format 1, fixed keys only, never a secret and no timestamp (a second identical run writes nothing):
+
+```json
+{
+  "format": 1,
+  "tool": "soos-setup",
+  "profile": "face",
+  "user": "alice",
+  "group_added_by_setup": true,
+  "presence_flag_created_by_setup": false,
+  "presence": "on",
+  "enrolled": true
+}
+```
+
+`group_added_by_setup` and `presence_flag_created_by_setup` are sticky, so a later `--uninstall` can reverse exactly what setup did. The file is read with a 4096-byte bound and refused when it is a symbolic link, not a regular file, not owned by root, group- or world-writable, not in this grammar, or written for another user (format 1 holds one user: remove it to set up a second user, which loses the record of the first run). `uninstall.sh --keep-data` keeps it with the rest of `/var/lib/soos`; `--purge-data` removes it.
+
+**Rollback.** Setup reverses only its own actions of the current run (group membership, presence flag, `/etc/soos` directory) when access, presence or an interrupt fails (HUP, INT, QUIT, TERM). `install.sh` stays the authority for its files and rolls back its own failures; a committed install is kept and the summary prints `sudo ./scripts/uninstall.sh --keep-data`. A daemon stopped for the enrollment is started again on every exit path. Packages and the Rust toolchain are never removed.
+
+| Exit | Meaning |
+|---|---|
+| 0 | done: every phase done, already done or skipped |
+| 1 | runtime failure: setup's own changes of this run rolled back (package, toolchain or `install.sh` failures change nothing else) |
+| 2 | usage or preflight error: nothing changed |
+| 3 | installed, enrollment failed: nothing rolled back, retry command printed |
+| 4 | the root half refused before any system change (for example an invalid `setup.json`); packages, toolchain and build of this run are kept |
+| 40 | build failed: nothing installed |
+| 70 | installed, daemon not ready (after `install.sh`, the verify gate or the enrollment restart); after a skipped system phase it suggests `--reinstall` |
+| 129, 130, 131, 143 | HUP, INT, QUIT, TERM: setup's own changes rolled back, daemon restarted |
+
+**Defaults.** This version installs the face profile: daemon, PAM module file and template, models, unit started, socket access, presence auto-unlock on (daemon default), enrollment. It never activates PAM (§4 and `Docs/DISTRIBUTION_DEPLOYMENT.md` stay the explicit step), never changes the Tailscale configuration, does not install the phone companion, Web Push, Funnel, the camera view or the Wi-Fi network lock. The owner's default-on profile (ADR 2026-10-13) switches those on in later PRs of #362, each toggleable later in the GUI. Limitation: started as root, `cargo` is looked up in `<build home>/.cargo/bin` and root's `PATH` only (a custom `CARGO_HOME` is not seen; run setup as the user instead). A `cargo` without `rustup` gets a warning, since it ignores `rust-toolchain.toml`.
+
+Evidence: `tests/invariants/src/setup_contract.rs` (fake root, stub commands, restricted `PATH`, `sudo` stub with `env -i`; no root needed).
+
 ### 3.1 Build & Runtime Dependencies (GitHub #165)
 
 `scripts/check_build_deps.sh` is the single source of truth for these lists (`--print-packages <build|gui|models> [--distro <id>]`) and, without arguments, runs a read-only build host preflight (`cargo`, `rustc`, `cc`, `pkg-config`, OpenSSL headers via `pkg-config openssl`, `security/pam_appl.h`, `libclang`). The lists were verified by `cargo build --release --locked --workspace` in bare `ubuntu:24.04`, `fedora:40` and `archlinux` containers with only these packages plus rustup.
