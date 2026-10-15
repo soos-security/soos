@@ -999,6 +999,18 @@ mod auth_reserve {
         }
     }
 
+    /// Opens two connections in order without yielding to the (current-thread) runtime, so
+    /// that the server accepts and admits them in that order (GitHub #387).
+    fn connect_back_to_back(sock_path: &std::path::Path) -> (UnixStream, UnixStream) {
+        let first = std::os::unix::net::UnixStream::connect(sock_path).expect("Connect first");
+        let second = std::os::unix::net::UnixStream::connect(sock_path).expect("Connect second");
+        let into_tokio = |stream: std::os::unix::net::UnixStream| {
+            stream.set_nonblocking(true).expect("Set non-blocking");
+            UnixStream::from_std(stream).expect("Register with the runtime")
+        };
+        (into_tokio(first), into_tokio(second))
+    }
+
     fn auth_response(buf: &[u8]) -> Response {
         let resp: Response = decode(buf).expect("Auth answered with a standard Response");
         assert_eq!(resp.request_id, [0x5A; 32], "the request id is echoed");
@@ -1027,13 +1039,13 @@ mod auth_reserve {
         permits_back(&dispatcher, 6).await;
 
         // While one reserve is held (idle), a second concurrent reserve is refused.
-        let held_reserve = UnixStream::connect(&sock_path)
-            .await
-            .expect("Connect reserve");
-        tokio::time::sleep(Duration::from_millis(20)).await;
-        let mut second = UnixStream::connect(&sock_path)
-            .await
-            .expect("Connect second reserve");
+        // Synchronisation (GitHub #387): the daemon closes an idle reserve after
+        // `AUTH_RESERVE_FIRST_REQUEST_TIMEOUT_MS`, so a wall-clock pause between the two
+        // connects lets a starved host release the held reserve before `second` is admitted.
+        // Both connects complete synchronously, without yielding to this current-thread
+        // runtime, so the server accepts them in backlog order within one poll and admits
+        // `held_reserve` strictly before `second`, independently of the host load.
+        let (held_reserve, mut second) = connect_back_to_back(&sock_path);
         send_ignoring_errors(&mut second, &auth_request(current_uid())).await;
         assert!(
             closed_promptly(&mut second).await,
