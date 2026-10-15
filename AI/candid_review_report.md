@@ -1,9 +1,9 @@
 # Candid Review Report
 
-- **Date**: 2026-10-13
+- **Date**: 2026-10-15 (re-review after the rebase onto `origin/main` `515ada3`; first review 2026-10-13)
 - **Target Branch**: `chore/ui-motion-spec`
-- **Base (merge-base)**: `6f32ef8`
-- **Reviewed-Diff-Fingerprint**: `0a8528d3d8950fb4f798eebe3eca19222cfc03c4d0759e446332efa4b8e0f408`
+- **Base (merge-base)**: `515ada3` (previously `6f32ef8`)
+- **Reviewed-Diff-Fingerprint**: `01d34256f783c74aa6f889fa1b35250edf149c36969692d4b7bd5106023d81e6`
 - **Audited Files**: `AI/DECISIONS.md`, `AI/VERIFICATION_MATRIX.md`, `AI/architect_spec_ui_motion.md`,
   `AI/auditor_constraints_ui_motion.md`, `AI/tester_contract_motion.md`, `AI/walkthroughs/203_ui_motion_spec.md`,
   `Docs/GUI_APPLICATION.md`, `Docs/README.md`, `Docs/REMOTE_COMPANION.md`, `Docs/UI_MOTION.md`,
@@ -21,6 +21,22 @@ prototype approval (UIM7) gating the implementation PRs, GUI reduced motion from
 independently and cleared (C-16 added for the later GUI invariant). `cargo fmt --check`, `cargo clippy -p
 soos-invariants --all-targets -D warnings` and `cargo test -p soos-invariants` (611 passed) are green. Two MINOR
 documentation findings (the ADR splice since resolved), no CRITICAL or MAJOR.
+
+**Rebase re-review (2026-10-15).** The branch was rebased from `8967ff5` onto `origin/main` `515ada3` (main gained
+#383, the push-test deflake with matrix section `rwp-delivery-deflake`, and #394, an actions bump). Checked
+independently:
+- `git range-diff origin/chore/ui-motion-spec...HEAD`: the only content change in the branch commit outside the
+  two report files (`AI/candid_review_report.md`, `AI/plan_evaluator_report.md`, whose base text changed on main)
+  is the `AI/VERIFICATION_MATRIX.md` hunk context.
+- Per-file comparison of the branch's added/removed lines before and after the rebase: identical for
+  `AI/DECISIONS.md`, the spec, auditor constraints, tester contract, walkthrough 203, `Docs/GUI_APPLICATION.md`,
+  `Docs/README.md`, `Docs/REMOTE_COMPANION.md`, `Docs/UI_MOTION.md`, the prototype, `tests/invariants/src/lib.rs`
+  and `tests/invariants/src/ui_motion_spec_contract.rs`.
+- `AI/VERIFICATION_MATRIX.md`: the file's first lines equal `origin/main`'s file byte for byte (main's RWPF section,
+  row RWPF1, intact; nothing lost from main); the branch adds exactly `---`, a blank line and the unchanged
+  `ui-motion-spec` section (UIM1–UIM12, 12 rows, no duplicate ids across RWPF/UIM). The `---` separator follows the
+  file's existing convention between component sections.
+- `cargo test --locked -p soos-invariants` on the rebased tree: 611 passed, 0 failed.
 
 ## 2. Test Changes (mechanical listing from step 3, with justification per change)
 
@@ -67,6 +83,9 @@ documentation findings (the ADR splice since resolved), no CRITICAL or MAJOR.
   `href=`, `url(`, `data:`, `blob:`, `@import`, `@font-face`, `<img>`, `<link>`, network/storage/camera APIs and
   `/home/`, and checks every hex colour against `theme.rs`. A plausible wrong prototype fails. PASS.
 - Tried: an overshoot of 5 % would fail UIM-S3 (`MAX_OVERSHOOT`), a non-settling spring panics. PASS.
+- Rebase: the four step-3 greps re-run on the new patch give the same result (test files touched: `lib.rs` and the
+  new module only; no removed assertion, no escape hatch, no inline `mod tests` change). Main's #383 test changes
+  are in the base, not in this diff. PASS.
 
 ### Memory, Bounds & Secrets
 - Prototype (57 337 bytes, under the 96 KiB bound) grep: no external resource, no network, storage, camera API,
