@@ -1,43 +1,61 @@
 # Candid Review Report
 
-- **Date**: 2026-10-13
+- **Date**: 2026-10-15
 - **Target Branch**: `feat/lockscreen-status`
-- **Base (merge-base)**: `6f32ef8`
-- **Reviewed-Diff-Fingerprint**: `10fbf20dbd62bff628ca01050faf1cc5a96953fa4f62617f2ad7640de6c82010`
+- **Base (merge-base)**: `3d9879a`
+- **Reviewed-Diff-Fingerprint**: `3b5e3383f71e28edda18c06ce339eb19d104bfe1237cf7836706c76770501ef7`
 - **Audited Files**: `.github/workflows/fuzz.yml`, `AI/DECISIONS.md`, `AI/VERIFICATION_MATRIX.md`, `AI/architect_spec_lockscreen_status.md`, `AI/auditor_constraints_lockscreen_status.md`, `AI/walkthroughs/205_lockscreen_status.md`, `Docs/DAEMON.md`, `Docs/IPC_PROTOCOL.md`, `crates/daemon/src/dispatcher.rs`, `crates/daemon/src/lib.rs`, `crates/daemon/src/lock_state.rs`, `crates/daemon/src/main.rs`, `crates/daemon/src/presence/worker.rs`, `crates/daemon/tests/lock_state_board_tests.rs`, `crates/daemon/tests/lock_state_dispatcher_tests.rs`, `crates/daemon/tests/lock_state_presence_tests.rs`, `crates/protocol/fuzz/Cargo.toml`, `crates/protocol/fuzz/README.md`, `crates/protocol/fuzz/fuzz_targets/decode_lock_state.rs`, `crates/protocol/src/lib.rs`, `crates/protocol/src/message.rs`, `crates/protocol/src/types.rs`, `crates/protocol/tests/lock_state_tests.rs`, `tests/invariants/src/lib.rs`, `tests/invariants/src/lock_state_contract.rs`
 
 ## 1. Executive Summary
 
-Re-review of GitHub #380 (PR 1 of #352): read-only `RequestKind::LockState` answered with a
-12-byte `LockStateResponse { version, state: Idle|Scanning|NotRecognized, sequence }` from a
-bounded, clockless, non-biometric `LockStateBoard` fed by the PAM `Auth` path and the presence
-worker. The previous review's MAJOR (next presence scan start depended on the previous scan's end)
-is fixed: `PresenceWorker::post_scan_hold` holds after every non-unlocking scan until
-`attempt_ns + NOT_RECOGNIZED_REVEAL_FLOOR_MS`, so the next tick lands at start + floor + 1 s
-whatever the end. Both previous suggestions are addressed (90 ms reveal-floor margin derived from
-constants; logind sessions scan moved to `spawn_blocking` under a 250 ms timeout failing to
-`{Idle, 0}`). `pam_soos.so` is untouched; PAM `Auth` latency only gains two synchronous,
-non-awaiting `watch::Sender` updates. No pre-existing test was modified. No CRITICAL or MAJOR
-finding remains.
+Re-review after the rebase of `feat/lockscreen-status` (GitHub #380, PR 1 of #352) from base
+`94a7cb3` onto `origin/main` `3d9879a` (main gained #383 push-test deflake, #394 actions bump and
+#384 motion ADR with `mod ui_motion_spec_contract` and matrix sections `rwp-delivery-deflake` and
+`ui-motion-spec`). The previous review (fingerprint `10fbf20d…`, APPROVED) is carried forward:
+the production code, tests, fuzz target, docs and specs of this branch are unchanged by the
+rebase, and the raw diff against the new merge base was re-read independently (protocol types,
+`lock_state.rs`, dispatcher `LockState` path and `Auth` publishing, presence `post_scan_hold`,
+`main.rs` wiring). No CRITICAL or MAJOR finding.
 
-Local evidence (this review): `cargo test -p soos-daemon --test lock_state_presence_tests
---test lock_state_board_tests --test lock_state_dispatcher_tests` 10+17+15 passed;
-`cargo test -p soos-protocol --test lock_state_tests` 13 passed; `cargo test -p soos-invariants
-lock_state` 9 passed; `cargo clippy -p soos-daemon -p soos-protocol --all-targets -- -D warnings`
-clean.
+Rebase verification (this review):
+- `git range-diff origin/feat/lockscreen-status...HEAD`: the single branch commit `0243c6b` →
+  `f2508e3`; the only changes are context lines from main (#383, #384, #394) and the placement of
+  the conflicted blocks.
+- Per-file comparison of the sorted added/removed lines of `94a7cb3..origin/feat/lockscreen-status`
+  against `3d9879a..HEAD`, for all 27 files: identical for 24 files, including
+  `AI/DECISIONS.md` and `tests/invariants/src/lib.rs`. Differences: `AI/VERIFICATION_MATRIX.md`
+  gains exactly one blank line and one `---` separator before the `lockscreen-status` section
+  (matches the file's convention; every other section, including main's `ui-motion-spec`, is
+  preceded by `---`); `AI/candid_review_report.md` and `AI/plan_evaluator_report.md` differ only
+  in their removed lines (main's #384 versions are now the base); the branch's
+  `AI/plan_evaluator_report.md` is byte-identical to the pre-rebase branch file.
+- No loss or duplication: `AI/DECISIONS.md` holds exactly one "Motion System for soos-gui and
+  soos-remote" ADR and one "Read-Only Lock-Screen State Channel" ADR, main's first;
+  `tests/invariants/src/lib.rs` declares `mod ui_motion_spec_contract;` then
+  `mod lock_state_contract;` once each (no duplicate `mod` lines); the matrix holds one
+  `lockscreen-status` section (LKS rows unchanged) after main's `rwp-delivery-deflake` and
+  `ui-motion-spec` sections.
+- `cargo test --locked -p soos-invariants -- --test-threads=4`: 620 passed, 0 failed (9
+  `lock_state_contract` and 7 `ui_motion_spec_contract` tests among them).
 
 ## 2. Test Changes (mechanical listing from step 3)
 
 - Test files touched: `crates/daemon/tests/lock_state_{board,dispatcher,presence}_tests.rs`,
   `crates/protocol/tests/lock_state_tests.rs`, `tests/invariants/src/lock_state_contract.rs` (all
-  new files), `tests/invariants/src/lib.rs` (+6 lines: a `mod lock_state_contract;` declaration
-  only).
+  new files), `tests/invariants/src/lib.rs` (+6 lines: doc comment, `#[cfg(test)]` and
+  `mod lock_state_contract;` after main's `mod ui_motion_spec_contract;`).
 - Removed/changed assertions (`^-` with assert/#[test]/proptest/should_panic): **none**.
 - New escape hatches (`#[ignore]`, `cfg(any())`, `should_panic`, tolerance/epsilon): **none**.
 - Inline `mod tests` changes: **none**.
-- Conclusion: purely additive; no contract migration needed.
+- Conclusion: purely additive; no contract migration needed. `unwrap`/`expect` hits in the patch
+  are confined to the new test files.
 
 ## 3. Deep Reasoning Audit
+
+Carried forward from the 2026-10-13 review (code unchanged by the rebase; re-checked against
+the new merge base). Rebase-specific scenario: a lost or duplicated ADR, `mod` declaration,
+test or matrix row from either side → none found (see §1). PASS.
+
 
 ### Logic & Architecture
 - **Fix of MAJOR #1 (cadence).** `run()` now sleeps `LOCK_POLL_INTERVAL_MS + post_scan_hold(tick)`;
