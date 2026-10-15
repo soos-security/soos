@@ -819,12 +819,6 @@ fn managed_remote(values: [bool; 7]) -> String {
     s
 }
 
-fn daemon_preview(uid: &str) -> String {
-    format!(
-        "# Written by scripts/setup.sh (soos-setup): live camera view of the phone companion.\n# Docs/DAEMON.md section 1.5; edit or remove it as an administrator.\n[preview]\nenabled = true\nallowed_uids = [{uid}]\nremote_view = true\n"
-    )
-}
-
 /// Rewrites `key = true` to `key = false` like the soos-gui feature tour does.
 fn gui_turn_off(path: &Path, key: &str) {
     let text = fs::read_to_string(path).expect("read remote.toml");
@@ -930,7 +924,8 @@ fn test_set_u5_dry_run_prints_the_companion_plan_without_change() {
         "camera view on",
         "push on",
         "offline alerts on",
-        "[PLAN] camera view (daemon): will run",
+        "[PLAN] camera view (daemon): manual (not applied)",
+        "soos-daemon reads /etc/soos/daemon.toml",
         "[PLAN] companion units: will run",
         "[PLAN] tailscale: printed only",
         "Dry run",
@@ -976,8 +971,8 @@ fn test_set_u6_full_run_sets_up_the_default_on_companion() {
     );
     let escalate = find_line(&lines, &["uid=1000 sudo", "--system-phase"]);
     assert!(
-        lines[escalate].contains("--camera-view on"),
-        "the daemon side is requested: {}",
+        !lines[escalate].contains("--camera-view"),
+        "the daemon side is not requested outside /etc: {}",
         lines[escalate]
     );
     assert!(
@@ -986,16 +981,19 @@ fn test_set_u6_full_run_sets_up_the_default_on_companion() {
         lines[escalate]
     );
 
-    // Daemon side: created 0644 before the verify gate, then the daemon restarted.
+    // Daemon side: soos-daemon reads only /etc/soos/daemon.toml, so with the fake
+    // --sysconfdir nothing is written, nothing restarted, and the exact change is printed.
     let uid = real_uid();
-    assert_eq!(
-        fs::read_to_string(h.daemon_toml()).expect("daemon.toml"),
-        daemon_preview(&uid)
+    assert!(
+        !h.daemon_toml().exists(),
+        "never written where the daemon does not read"
     );
-    assert_eq!(mode_of(&h.daemon_toml()), 0o644);
-    let restart = find_line(&lines, &["uid=0 systemctl restart soos-daemon.service"]);
-    let camera = find_line(&lines, &["uid=0 soos-admin camera list"]);
-    assert!(restart < camera, "the restart precedes the verify gate");
+    assert!(!has_line(&lines, &["systemctl restart soos-daemon"]));
+    let t = text(&out);
+    assert!(
+        t.contains("/etc/soos/daemon.toml") && t.contains(&format!("allowed_uids = [{uid}]")),
+        "the administrator change for the file the daemon reads is printed:\n{t}"
+    );
 
     // User side: configuration, install, validation, units — all as the user.
     let remote = h.remote_toml();
@@ -1082,11 +1080,11 @@ fn test_set_u7_second_run_is_idempotent() {
             t.contains("[DONE] companion: already up to date"),
             "{args:?}: unchanged installed files are reported:\n{t}"
         );
-        for phase in [
-            "companion config",
-            "camera view (daemon)",
-            "companion units",
-        ] {
+        assert!(
+            t.contains("[PLAN] camera view (daemon): manual (not applied)"),
+            "{args:?}: the daemon side outside /etc is never reported done:\n{t}"
+        );
+        for phase in ["companion config", "companion units"] {
             assert!(
                 t.contains(&format!("[PLAN] {phase}: already done")),
                 "{args:?}: {phase} must be already done:\n{t}"
@@ -1362,7 +1360,7 @@ fn test_set_u14_existing_daemon_toml_is_never_edited() {
     let out = h.run_companion(&[]);
     assert_eq!(code(&out), 0, "{}", text(&out));
     assert!(
-        text(&out).contains("[PLAN] camera view (daemon): already done"),
+        text(&out).contains("[PLAN] camera view (daemon): manual (not applied)"),
         "{}",
         text(&out)
     );
@@ -1486,37 +1484,67 @@ fn test_set_u22_rollback_stops_a_unit_started_by_the_run() {
     fs::set_permissions(h.remote_toml(), fs::Permissions::from_mode(0o600)).unwrap();
 }
 
-/// SET34: a daemon that does not become ready after `daemon.toml` was created removes it
-/// again: when the daemon recovers, the root half is rolled back (exit 1); when it does not, the
-/// install is kept and setup exits 70 (PR 1 convention). The companion never runs after either.
+/// SET34 (lead review of PR #402): soos-daemon reads only `/etc/soos/daemon.toml`, so the
+/// root half never writes the `[preview]` section under another `--sysconfdir`, even when asked
+/// with `--camera-view on`; it reports the step as not applied with the exact change, restarts
+/// nothing, and the run still succeeds.
 #[test]
-fn test_set_u16_daemon_side_failure_removes_daemon_toml() {
-    let mut h = Harness::new("dfail");
-    h.set_env("STUB_READY_FAIL_ONCE", "1");
-    let out = h.run_companion(&[]);
-    assert_eq!(code(&out), 1, "{}", text(&out));
+fn test_set_u16_daemon_side_never_written_outside_etc() {
+    let mut h = Harness::new("dside");
+    let first = h.run(&["--yes", "--no-remote"]);
+    assert_eq!(code(&first), 0, "{}", text(&first));
+    h.set_env("STUB_AS_ROOT", "1");
+    let artifacts = h.repo.join("target/release").display().to_string();
+    let out = h.run(&[
+        "--system-phase",
+        "--yes",
+        "--user",
+        "alice",
+        "--artifact-dir",
+        &artifacts,
+        "--local-seat",
+        "no",
+        "--distro",
+        "arch",
+        "--camera-view",
+        "on",
+    ]);
+    assert_eq!(code(&out), 0, "{}", text(&out));
+    let t = text(&out);
     assert!(
-        !h.daemon_toml().exists(),
-        "the created daemon.toml is removed"
+        t.contains("[SKIP] camera view (daemon): not applied")
+            && t.contains("/etc/soos/daemon.toml")
+            && t.contains(&format!("allowed_uids = [{}]", real_uid())),
+        "{t}"
     );
-    assert!(
-        !h.state.join("in_group").exists(),
-        "the root half's own changes are rolled back"
-    );
-    let lines = h.log_lines();
-    assert!(!has_line(&lines, &["install_remote.sh"]));
-    assert!(!h.remote_toml().exists());
+    assert!(!h.daemon_toml().exists());
+    assert!(!h.root.join("etc/soos").read_dir().is_ok_and(|mut d| d
+        .any(|e| e.is_ok_and(|e| e.file_name().to_string_lossy().starts_with(".daemon.toml")))));
+    assert!(!has_line(
+        &h.log_lines(),
+        &["systemctl restart soos-daemon"]
+    ));
+}
 
-    let mut h = Harness::new("dfail70");
-    h.set_env("STUB_READY_RC", "1");
+/// SET30 (lead review of PR #402): a `remote.toml.soos-setup.bak` that is not a regular file is
+/// refused before any change (a backup could not be written or restored through it).
+#[test]
+fn test_set_u23_backup_path_must_be_a_regular_file() {
+    let h = Harness::new("bakdir");
+    let dir = h.home.join(".config/soos");
+    fs::create_dir_all(dir.join("remote.toml.soos-setup.bak")).unwrap();
+    let before = h.snapshot();
     let out = h.run_companion(&[]);
-    assert_eq!(code(&out), 70, "{}", text(&out));
+    assert_eq!(code(&out), 2, "{}", text(&out));
+    assert!(text(&out).contains("soos-setup.bak"), "{}", text(&out));
+    assert_eq!(before, h.snapshot());
+    let out = h.run(&["--yes"]);
+    assert_eq!(code(&out), 0, "{}", text(&out));
     assert!(
-        !h.daemon_toml().exists(),
-        "the created daemon.toml is removed"
+        text(&out).contains("[PLAN] companion: skipped (unsafe path)"),
+        "{}",
+        text(&out)
     );
-    assert!(h.root.join("var/lib/soos/state/setup.json").exists());
-    assert!(!has_line(&h.log_lines(), &["install_remote.sh"]));
     assert!(!h.remote_toml().exists());
 }
 

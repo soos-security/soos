@@ -68,6 +68,11 @@ readonly MAX_LOGIN_LEN=254
 readonly MAX_HOST_LEN=253
 readonly COMPANION_SETTLE_S=2
 readonly REMOTE_CONFIG_MARKER="# Managed by scripts/setup.sh (soos-setup): re-running setup rewrites this file."
+# The only daemon configuration soos-daemon reads (crates/daemon/src/config.rs
+# DEFAULT_CONFIG_PATH; packaging/soos-daemon.service passes no --config). The camera-view
+# daemon side is written, and reported done, only when <sysconfdir>/soos/daemon.toml is
+# this file; with another --sysconfdir it is a printed manual step.
+readonly DAEMON_READ_CONFIG="/etc/soos/daemon.toml"
 readonly DAEMON_PREVIEW_MARKER="# Written by scripts/setup.sh (soos-setup): live camera view of the phone companion."
 # The boolean keys of remote.toml, in the order setup writes them (prerequisites first).
 readonly COMPANION_KEYS=(allow_funnel allow_unlock password_alerts push_notifications
@@ -1006,9 +1011,13 @@ daemon_toml_allows_view() {
     [[ "${enabled}" == true && "${remote}" == true && "${uid_ok}" == true ]]
 }
 
-# absent | done | allows | unreadable | manual | link (read-only).
+# elsewhere | absent | done | allows | unreadable | manual | link (read-only). "elsewhere":
+# <sysconfdir>/soos/daemon.toml is not the file soos-daemon reads; it is never read or
+# written then.
 daemon_preview_state() {
-    if [[ -L "${DAEMON_TOML}" ]]; then
+    if [[ "${DAEMON_TOML}" != "${DAEMON_READ_CONFIG}" ]]; then
+        printf 'elsewhere'
+    elif [[ -L "${DAEMON_TOML}" ]]; then
         printf 'link'
     elif [[ ! -e "${DAEMON_TOML}" ]]; then
         printf 'absent'
@@ -1025,7 +1034,7 @@ daemon_preview_state() {
 
 daemon_preview_hint() {
     printf 'as an administrator add to %s: [preview] enabled = true, allowed_uids = [%s], remote_view = true; then: sudo systemctl restart soos-daemon' \
-        "${DAEMON_TOML}" "${TARGET_UID}"
+        "${DAEMON_READ_CONFIG}" "${TARGET_UID}"
 }
 
 # Classifies remote.toml: absent, template (the untouched install_remote.sh template),
@@ -1213,6 +1222,10 @@ resolve_companion() {
             return 0
         fi
     fi
+    if [[ -e "${REMOTE_BACKUP}" && ! ( -f "${REMOTE_BACKUP}" && -O "${REMOTE_BACKUP}" ) ]]; then
+        companion_skip "unsafe path" "${REMOTE_BACKUP} is not a regular file owned by ${TARGET_USER}"
+        return 0
+    fi
     if [[ -e "${REMOTE_CONFIG}" && ! ( -f "${REMOTE_CONFIG}" && -O "${REMOTE_CONFIG}" && -r "${REMOTE_CONFIG}" ) ]]; then
         companion_skip "unsafe path" "${REMOTE_CONFIG} is not a readable regular file owned by ${TARGET_USER}"
         return 0
@@ -1339,6 +1352,7 @@ print_daemon_preview_plan() {
         allows) plan "camera view (daemon)" "already done" "${DAEMON_TOML} allows the view" ;;
         unreadable) plan "camera view (daemon)" "checked at run time (needs root)" "${DAEMON_TOML} is not readable by ${TARGET_USER}" ;;
         link) plan "camera view (daemon)" "skipped" "${DAEMON_TOML} is a symbolic link; setup never follows it" ;;
+        elsewhere) plan "camera view (daemon)" "manual (not applied)" "soos-daemon reads ${DAEMON_READ_CONFIG}, not ${DAEMON_TOML} (--sysconfdir), so setup writes nothing: $(daemon_preview_hint)" ;;
         *) plan "camera view (daemon)" "manual" "${DAEMON_TOML} exists and setup never edits it: $(daemon_preview_hint)" ;;
     esac
 }
@@ -1611,6 +1625,11 @@ phase_preview() {
             ;;
         link)
             printf '[SKIP] camera view (daemon): %s is a symbolic link; setup never follows it\n' "${DAEMON_TOML}"
+            return 0
+            ;;
+        elsewhere)
+            printf '[SKIP] camera view (daemon): not applied: soos-daemon reads %s, not %s; %s\n' \
+                "${DAEMON_READ_CONFIG}" "${DAEMON_TOML}" "$(daemon_preview_hint)"
             return 0
             ;;
         absent) ;;
@@ -2306,7 +2325,7 @@ print_companion_guide() {
             warn "  Password alerts need read access to the system journal: as an administrator run 'sudo usermod -aG systemd-journal ${TARGET_USER}', then log out and back in (setup never changes groups)."
         fi
     fi
-    if [[ "${CAMERA_DAEMON}" == on && ( "${DAEMON_PREVIEW_STATE}" == manual || "${DAEMON_PREVIEW_STATE}" == link ) ]]; then
+    if [[ "${CAMERA_DAEMON}" == on && ( "${DAEMON_PREVIEW_STATE}" == manual || "${DAEMON_PREVIEW_STATE}" == link || "${DAEMON_PREVIEW_STATE}" == elsewhere ) ]]; then
         warn "  Camera view: $(daemon_preview_hint)"
     fi
     info "  Optional: 'loginctl enable-linger ${TARGET_USER}' keeps the companion answering while you are logged out (setup never enables it)."
@@ -2358,7 +2377,9 @@ SYSTEM_ARGS=(--system-phase --yes --user "${TARGET_USER}" --artifact-dir "${ARTI
 [[ "${ENROLL}" != true ]] && SYSTEM_ARGS+=(--no-enroll)
 [[ "${REINSTALL}" == true ]] && SYSTEM_ARGS+=(--reinstall)
 # The root half resolves the uid of the [preview] section itself; only the decision is passed.
-[[ "${CAMERA_DAEMON}" == on ]] && SYSTEM_ARGS+=(--camera-view on)
+if [[ "${CAMERA_DAEMON}" == on && "${DAEMON_PREVIEW_STATE}" != elsewhere ]]; then
+    SYSTEM_ARGS+=(--camera-view on)
+fi
 info "Escalating once for the system phase: ${ESCALATE[0]} bash scripts/setup.sh --system-phase ..."
 rc=0
 as_root bash "${SCRIPT_PATH}" "${SYSTEM_ARGS[@]}" || rc=$?

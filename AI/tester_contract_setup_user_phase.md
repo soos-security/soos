@@ -22,7 +22,8 @@
 | `setup_user_phase_contract::test_set_u14_existing_daemon_toml_is_never_edited` | SET32 | exit 2 |
 | `setup_user_phase_contract::test_set_u15_companion_failures_roll_back_and_exit_5` | SET33 | exit 2 instead of 5 |
 | `setup_user_phase_contract::test_set_u22_rollback_stops_a_unit_started_by_the_run` | SET33 | added after the candid review round 2; red against the draft that only journaled enabled units |
-| `setup_user_phase_contract::test_set_u16_daemon_side_failure_removes_daemon_toml` | SET34 | exit 2 instead of 1 |
+| `setup_user_phase_contract::test_set_u16_daemon_side_never_written_outside_etc` | SET34 | rewritten after the lead review of PR #402 (was `test_set_u16_daemon_side_failure_removes_daemon_toml`, unreachable once the daemon side is gated on `/etc`); red against the ungated code, which created the file under the fake `--sysconfdir` |
+| `setup_user_phase_contract::test_set_u23_backup_path_must_be_a_regular_file` | SET30 | added after the lead review; red against the code that only refused a symbolic-link backup |
 | `setup_user_phase_contract::test_set_u17_install_remote_uses_cargo_target_dir` | SET35 | `install: cannot stat '<repo>/target/release/soos-remote'` (hard-coded path) |
 | `setup_user_phase_contract::test_set_u2_install_remote_honours_cargo_target_dir_statically` | SET35 | `install_remote.sh must resolve CARGO_TARGET_DIR` |
 | `setup_user_phase_contract::test_set_u18_docs_adr_matrix_and_walkthrough` | SET36 | `Docs/PACKAGING_AND_PROVISIONING.md must mention --tailscale-login` |
