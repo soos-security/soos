@@ -230,3 +230,13 @@ branches may deliver the same backlog id).
   intentionally **not** registered in `BRANCH_TO_ISSUE`. `--auto` is a visible no-op for them, and
   the commit message closes the issue explicitly with `Closes #N`. Register a branch only when it
   implements a `### Issue #N` heading of `AI/BACKLOG.md`.
+
+## 9. README Assets (GitHub #381)
+
+README images are generated, never hand-edited (ADR 2026-10-13). After a change to a captured
+`soos-gui` screen, run `scripts/capture_readme_assets.sh` and commit the regenerated
+`Docs/assets/screenshots/gui-*.png` and `Docs/assets/MANIFEST.toml`; the snapshot test
+`crates/gui/tests/readme_snapshots.rs` otherwise fails in CI with that instruction. Regenerating the
+images through the script is not test weakening (they are generated data, not assertions). The
+optional phone web app captures use `scripts/capture_readme_web.sh` with an installed browser. Details,
+budget and formats: [README_ASSETS.md](README_ASSETS.md).

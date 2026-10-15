@@ -11,6 +11,11 @@ publish.workspace = true
 default = ["download-binaries"]
 download-binaries = ["soos-inference-ort/download-binaries", "soos-vision/download-binaries", "soos-enrollment-cli/download-binaries"]
 system-onnxruntime = ["soos-inference-ort/system-onnxruntime", "soos-vision/system-onnxruntime", "soos-enrollment-cli/system-onnxruntime"]
+# Dev-only README screenshot capture (GitHub #381, ADR 2026-10-13 "README Assets Are Generated
+# From Synthetic Data, Never Hand-Edited"): exposes `soos_gui::app::capture`, the synthetic
+# scene builder used by `tests/readme_snapshots.rs`. Never a default feature, never enabled by
+# packaging or install scripts (enforced by tests/invariants readme_assets_contract).
+readme-capture = []
 
 [dependencies]
 soos-protocol = { workspace = true }
@@ -35,6 +40,9 @@ eframe = { version = "0.35", default-features = false, features = ["default_font
 
 [dev-dependencies]
 tempfile = { workspace = true }
+soos-test-fixtures = { workspace = true }
+soos-frame = { workspace = true }
+png = "0.18"
 
 [lints]
 workspace = true

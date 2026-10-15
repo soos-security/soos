@@ -37,6 +37,10 @@ use crate::theme;
 use crate::widgets::{self, BannerKind};
 use crate::worker::{spawn_vision_worker, GuiEnrollmentFeedback, WorkerSharedInput};
 
+/// Synthetic README capture scenes (dev-only `readme-capture` feature, GitHub #381).
+#[cfg(feature = "readme-capture")]
+pub mod capture;
+
 /// Application navigation tabs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AppTab {
