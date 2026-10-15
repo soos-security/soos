@@ -3,138 +3,134 @@
 - **Date**: 2026-10-16
 - **Target Branch**: `feat/setup-user-phase`
 - **Base (merge-base)**: `2025738`
-- **Reviewed-Diff-Fingerprint**: `2770ee0bc045b78752dd42db81b2316341473cf3e8aa4ee48c442c24e7f42cff`
+- **Reviewed-Diff-Fingerprint**: `da92335806c6df8bfb4207f66c38c3eb159e3b239a6015672a2b9752d2296e0d`
 - **Audited Files**: `AI/DECISIONS.md`, `AI/VERIFICATION_MATRIX.md`, `AI/architect_spec_setup_user_phase.md`, `AI/auditor_constraints_setup_user_phase.md`, `AI/tester_contract_setup_user_phase.md`, `AI/walkthroughs/213_setup_user_phase.md`, `Docs/PACKAGING_AND_PROVISIONING.md`, `Docs/REMOTE_COMPANION.md`, `README.md`, `crates/remote/tests/setup_render_tests.rs`, `scripts/install_remote.sh`, `scripts/setup.sh`, `tests/fixtures/setup/remote.toml`, `tests/invariants/src/lib.rs`, `tests/invariants/src/setup_contract.rs`, `tests/invariants/src/setup_user_phase_contract.rs`
 
 ## 1. Executive Summary
 
-The diff adds the user phase of `scripts/setup.sh` (GitHub #400, PR 2 of #362): a setup-managed
-`remote.toml` with the owner's default-on features and prerequisite cascade, orchestration of
-`scripts/install_remote.sh` as the session owner (never root), validation through the real
-`soos-remote` parser, user-unit enablement with a journaled rollback (exit 5), the daemon-side
-`[preview]` file created only when `daemon.toml` is absent (hard link, never replacing), and the
-`install_remote.sh` `CARGO_TARGET_DIR` fix. No Rust production code changes; no PAM, IPC or daemon
-code is touched. The only modified pre-existing test is SET3, an owner-approved contract migration
-recorded in ADR 2026-10-15 item (1). Contract tests (22 new invariants, 3 parser tests) and the
-existing setup suite were run and pass. No CRITICAL or MAJOR defect was found; two MINOR and two
-SUGGESTION items are listed.
+The diff adds the phone-companion user phase to `scripts/setup.sh` (GitHub #400, PR 2 of #362): new options, a
+strict classifier for `remote.toml` (absent / untouched template / setup-managed / user), the owner's default-on
+feature set with prerequisite cascade and preserved explicit `false`, an atomic 0600 write with backup, a call to
+`install_remote.sh` as the user, validation with `soos-remote --config … passkeys list`, user-unit enable/start with
+a journaled rollback (exit 5), a root-half creation of `/etc/soos/daemon.toml` `[preview]` only when absent and only
+when `--sysconfdir` is `/etc`, and printed (never executed) Tailscale steps. `install_remote.sh` now honours
+`CARGO_TARGET_DIR`. No Rust production code changes; `crates/pam` untouched.
 
-## 2. Test Changes
+Verified locally: `cargo test --locked -p soos-invariants --all-features setup_` (51 passed, including all 23
+`setup_user_phase_contract` tests and the migrated SET3), `cargo test --locked -p soos-remote --test
+setup_render_tests` (3 passed), `cargo test -p soos-invariants --all-features remote` (147 passed), `bash -n
+scripts/setup.sh`. `shellcheck` is not installed on this host (CI runs it).
 
-Mechanical listing (step 3 of the skill) on `target/candid_diff.patch`:
+No CRITICAL or MAJOR finding. Three MINOR items and one SUGGESTION are listed in section 4.
 
-- Test files touched: `crates/remote/tests/setup_render_tests.rs` (new), `tests/fixtures/setup/remote.toml` (new),
-  `tests/invariants/src/lib.rs` (module registration only), `tests/invariants/src/setup_contract.rs` (modified),
-  `tests/invariants/src/setup_user_phase_contract.rs` (new).
-- Removed/changed assertion lines matched by the grep: none matched the `^-...assert` pattern, but a manual read of
-  the `setup_contract.rs` hunk shows SET3 (`test_set_s3_no_pam_tailscale_remote_or_network_lock_action`) was
-  relaxed: the banned strings `install_remote.sh`, `[preview]` and `remote.toml` were removed, and the Tailscale
-  static rule now accepts the word `tailscale ` inside a quoted string in addition to `tailscale version`.
-  **Justification**: ADR 2026-10-15 "Setup User Phase…" item (1) records this as an owner-approved contract
-  migration (2026-10-15, commit 40b0fb1); the scope of #400 is exactly to run `install_remote.sh`, write
-  `remote.toml` and the `[preview]` section, so these bans are superseded by the backlog acceptance lines. All other
-  bans and the dynamic executed-call check `assert_no_forbidden_calls` (only `tailscale version` may execute; no
-  `pam-auth-update`, `authselect`, `curl`, `usermod`) are unchanged. Accepted as a justified migration, not weakening.
-- New escape hatches (`#[ignore]`, `cfg(any())`, `should_panic`, tolerance): none.
-- Inline `mod tests` changes: none.
+## 2. Test Changes (mechanical listing from step 3, with justification per change)
+
+Test files touched (`grep '^diff --git' | grep tests/fixtures`):
+- `crates/remote/tests/setup_render_tests.rs` (new)
+- `tests/fixtures/setup/remote.toml` (new)
+- `tests/invariants/src/lib.rs` (module registration only)
+- `tests/invariants/src/setup_contract.rs` (**existing test modified**)
+- `tests/invariants/src/setup_user_phase_contract.rs` (new)
+
+Removed/changed checks (`^-.*assert|#[test]…`): none matched by the regex, but manual reading of the
+`setup_contract.rs` hunk shows a real contract migration of `test_set_s3_no_pam_tailscale_remote_or_network_lock_action`:
+- the banned strings `install_remote.sh`, `[preview]`, `remote.toml` were removed from the forbidden list;
+- the Tailscale rule changed from "every `tailscale ` must be `tailscale version`" to "`tailscale version`, or inside a
+  quoted string" (every occurrence on a line is now checked, not only the first, which is stricter in that respect).
+- Justification: owner decision recorded on GitHub #400 (comment of 2026-10-15T21:25Z, account `Willi363363`):
+  "SET3 contract migration approved … All other bans and the executed-call check stay." The other bans
+  (`$EUID`/`$UID`, PAM, network lock, `curl`/`wget`, `chmod 666`, `pkexec`, …) and the behavioural
+  `assert_no_forbidden_calls` are unchanged; matrix row SET3 text updated accordingly; the tester contract lists the
+  migration. Provenance note: the approval comment was posted ~20 s after commit 40b0fb1 from the owner's account,
+  so it was most likely transcribed by the lead agent; the lead should make sure the owner really gave this approval
+  in chat (not a code defect, recorded for traceability).
+
+New escape hatches (`#[ignore]`, `should_panic`, tolerance, epsilon): none.
+Inline `mod tests` changes: none.
+
+`setup_user_phase_contract.rs` is new on this branch (no test from `main` weakened). Within the branch,
+`test_set_u16` was rewritten after the lead review (R3-1) because the `/etc` creation path became unreachable with a
+fake `--sysconfdir`; this is a spec revision, not a weakening of a merged contract (see MINOR-2 on the resulting
+coverage gap).
 
 ## 3. Deep Reasoning Audit
 
 ### Logic & Architecture
-
-Scenarios attempted:
-- **Prerequisite cascade ordering**: `resolve_features` reads `FEATURE_VALUE[prereq]` under `set -u`; `COMPANION_KEYS`
-  orders every prerequisite before its dependant (password_alerts → push → offline; camera_view, allow_funnel →
-  camera_view_funnel), so there is no unset read. PASS.
-- **Writing a combination `soos-remote` refuses (exit 78)**: the cascade forces dependants off; an explicit `on` with an
-  off prerequisite is refused at parse time (no file) and again in `resolve_companion` (with the managed file) before
-  any change. Verified against the real parser by `setup_render_tests.rs` (accepted and refused variants). PASS.
-- **GUI-disabled feature kept off on re-run**: soos-gui's `disable_remote_keys` rewrites only `key = true` lines in place
-  and keeps the marker comment, so the file stays "managed" and `FILE_BOOL[...] == false` is honoured. PASS.
-- **User-written file**: anything without the marker and strict grammar (and not the exact untouched template) is
-  classified `user` and never edited; with companion options it is refused (exit 2). Template detection requires
-  exactly one `allowed_logins = []` and no other non-comment line, matching `install_remote.sh`'s template. PASS.
-- **Validation step**: `soos-remote --config <file> passkeys list` runs `load_config`, `load_config_with_android` and
-  `resolve_credentials_path` (EXIT_CONFIG 78) before the subcommand; an absent passkey store yields `Ok(None)` →
-  "No passkey registered." exit 0, so a first install is not falsely refused. PASS.
-- **Password alerts without journal access**: `soos-remote` logs "password alerts unavailable" and still starts, so the
-  default-on profile does not fail with exit 5 on hosts where the user is not in `systemd-journal`. PASS.
-- **Daemon `[preview]` file**: field names `enabled`, `allowed_uids`, `remote_view` match `PreviewConfigFile`;
-  `from_toml_str` starts from `runtime_default()`, so a file holding only `[preview]` changes nothing else. PASS.
-- **`--sysconfdir` other than `/etc`**: `DAEMON_TOML` follows `SYSCONFDIR`, while `soos-daemon` reads the hard-coded
-  `DEFAULT_CONFIG_PATH = /etc/soos/daemon.toml`; see MINOR finding 1.
-- **Exit-code composition**: root half 0 → companion failure becomes 5; root half 3 stays 3 with the companion failure
-  printed; any other root exit skips the companion. Matches ADR item (2) and the docs table. PASS.
+- Prerequisite ordering in `resolve_features`: `COMPANION_KEYS` lists each prerequisite before its dependent, so
+  `FEATURE_VALUE[${prereq}]` is always set under `set -u` → PASS.
+- Explicit `on` vs prerequisite `off` from flags (parse time, exit 2) and from the managed file (preflight, exit 2
+  with "add --x on") → PASS (SET22, SET26).
+- `classify_remote_config`: multi-login arrays, tables, indented keys, duplicate keys, unknown keys, missing
+  `rp_id`, oversize (>16 KiB) all fall to `user` and are never edited → PASS. Compatibility with the GUI tour writer
+  (`crates/gui/src/feature_control.rs::disable_remote_keys` rewrites only `key = true` → `key = false`, keeps every
+  other line) keeps the marker and grammar → PASS.
+- Template detection matches the real `install_remote.sh` heredoc (only `allowed_logins = []` uncommented) → PASS.
+- Daemon side: `from_toml_str` starts from `DaemonConfig::runtime_default()`, so a `daemon.toml` holding only
+  `[preview]` changes nothing else of the daemon behaviour → PASS. `allowed_uids` comes from the root half's own
+  `TARGET_UID` → PASS. Gate on `DAEMON_READ_CONFIG == /etc/soos/daemon.toml` in both halves → PASS.
+- Exit-code composition: root rc 0 → companion 0/5; rc 3 kept with a companion failure; any other rc skips the
+  companion → PASS.
+- Validation command: `soos-remote --config <file> passkeys list` loads and validates the whole config (exit 78) and
+  only reads the passkey store (no side effect) → PASS.
+- `install_remote.sh` `TARGET_DIR` resolution mirrors `resolve_target_dir` (relative → checkout) → PASS.
 
 ### PAM Concurrency & Deadlines
-
-No change under `crates/pam` and no IPC or daemon code change. Every `systemctl` and `soos-remote` call in the new
-phase is wrapped in `run_bounded` (`QUERY_TIMEOUT_S`, `timeout --kill-after=2`); the settle sleep is a fixed 2 s.
-`install_remote.sh` (cargo build) is unbounded by design, as is the existing workspace build. PASS (PAM not affected).
+- `crates/pam` not touched. All new `systemctl --user` and `soos-remote` calls go through `run_bounded` (10 s);
+  `wait_daemon_ready.sh` 30 s; settle 2 s → PASS. `install_remote.sh` (cargo build) is unbounded by design, as the
+  PR 1 build step.
 
 ### Panic Safety & Fail-Closed
-
-No Rust production code. Shell fail-closed review: `run_companion_phase` runs in an `||` context, so every step checks
-its status explicitly (`|| { companion_failed …; return; }`), and `return` propagates `EXIT_COMPANION` from
-`companion_failed`. The config fingerprint is rechecked before writing; symbolic links are re-checked immediately
-before the write; rollback restores a replaced file through a fresh 0600 temporary file and rename. A signal during the
-phase triggers `rollback_companion`. No path turns a refusal into success. PASS.
+- No Rust production code. Shell: `run_companion_phase` runs in a `||` context; every step checks its status and
+  returns through `companion_failed` (verified each branch returns 5) → PASS.
+- No path turns a companion failure into success: validation exit ≠ 0, unit not active after settle, failed
+  install → exit 5 with rollback → PASS.
+- Signals during the user phase replay the journal (HUP/INT/QUIT/TERM) → PASS.
 
 ### Test Integrity & Anti-Weakening
-
-- SET3 migration reviewed in §2 (owner-approved, recorded in the ADR).
-- The new tests can fail against plausible wrong implementations: the render is asserted byte-equal to a fixture that
-  the real `soos-remote` parser must accept, and four never-written variants must be refused for their prerequisite
-  (not for syntax); behavioural tests drive the real script with fake root/HOME and stub commands (exit 5 rollback,
-  unit kept disabled, explicit `false` kept, daemon.toml never edited, root start skipped).
-- Runs: `cargo test -p soos-remote --test setup_render_tests` → 3 passed; `cargo test -p soos-invariants -- setup` →
-  50 passed, 0 failed, 0 ignored.
-- SET3's new quote heuristic would accept a command substitution inside double quotes (`"$(tailscale funnel …)"`); see
-  SUGGESTION 3. No such construct exists in the current `setup.sh` (manual check of every `tailscale` occurrence).
+- SET3 migration justified by the owner decision (section 2). Behavioural tests run the real script against a fake
+  root/HOME with stubs; render fixture byte-equality plus real `parse_config` acceptance/refusal of variants would
+  catch a wrong key, wrong cascade or wrong quoting → PASS, with MINOR-1 and MINOR-2.
 
 ### Memory, Bounds & Secrets
-
-- Reads are bounded: `remote.toml` at 16384 bytes (oversized → `user`, never edited), `daemon.toml` scan at 65536 bytes.
-- `remote.toml` is written 0600 via `umask 077` + `mktemp` + rename in a directory checked to be owned and not group- or
-  world-writable; the backup is 0600. `daemon.toml` is written 0644 by root via a temporary file + `ln` (never replaces
-  an existing file).
-- The login is validated by `^[A-Za-z0-9._%+@-]+$` (≤254) and rp_id by strict DNS label rules ending in `.ts.net`;
-  neither can break out of a TOML string. The login is never printed in the plan or summary (only "login given"); the
-  `passkeys list` output (credential fingerprints) is discarded. No password, frame or embedding is involved. PASS.
+- Reads bounded with `head -c` (16 KiB / 64 KiB). Login never printed (plan says "login given"; usage errors do not
+  echo it); validation stdout discarded; no enroll code, VAPID key or passkey data handled → PASS.
+- `remote.toml` 0600 via `mktemp` under `umask 077` and same-directory `mv -f`; directory 0700; symlinks refused for
+  config home, directory, file and backup; foreign or group/world-writable directory refused; backup must be a
+  regular owned file → PASS.
+- `daemon.toml` created 0644 via hard link (no clobber), never through a symlink, never edited when present → PASS.
+- Login/node-name character sets cannot break out of a TOML string (no quote, backslash, newline) → PASS.
 
 ### Supply Chain & Automation
-
-`scripts/` changed: no download, no `curl`/`wget`, no new tool, no `eval`. `install_remote.sh` now honours
-`CARGO_TARGET_DIR` (relative values resolved against the checkout, as cargo does). No `Cargo.*`, `deny.toml` or
-`.github/` change. `shellcheck` is not installed locally, so the CI lint result was not reproduced; `bash -n` passes. PASS.
+- No `Cargo.*`, `deny.toml`, `.github/` or hook changes. `scripts/` changes contain no download (`curl`/`wget`),
+  no `eval`, no `sudo` in the user phase, no Tailscale execution other than `tailscale version` → PASS.
 
 ### English-Only Policy
-
-All added code, comments, docs, ADR, walkthrough and test text are English (non-ASCII grep of added lines: no hit). PASS.
+- Code, comments, docs, matrix, ADR and walkthrough are English → PASS.
 
 ## 4. Detailed Findings & Action Items
 
-- **[MINOR]** `scripts/setup.sh:931` (`DAEMON_TOML="${SYSCONFDIR}/soos/daemon.toml"`) — with a non-default
-  `--sysconfdir`, setup creates `[preview]` in a file `soos-daemon` never reads (it reads only
-  `/etc/soos/daemon.toml` unless `--config` is passed, and the installed unit passes none); the plan then reports
-  "camera view (daemon): already done" although the view is not allowed. This follows the pre-existing convention of
-  the other `SYSCONFDIR` paths, so it is not blocking. Required change (follow-up): skip the daemon side with a printed
-  hint when `SYSCONFDIR` is not `/etc`, or document the limitation next to `--sysconfdir`.
-- **[MINOR]** `scripts/setup.sh:2084` (`write_remote_config`) — the backup is moved with
-  `mv -f -- "${tmp}" "${REMOTE_BACKUP}"` after only a symlink check; if `remote.toml.soos-setup.bak` is a directory,
-  `mv` moves the temporary file into it and a later rollback cannot restore from it (an error is printed; the
-  original content is still inside that directory). Required change (follow-up): in `resolve_companion`, refuse a
-  `REMOTE_BACKUP` that exists and is not a regular file, alongside the symlink check at line 1198.
-- **[SUGGESTION]** `tests/invariants/src/setup_contract.rs:165` (SET3) — the quote-parity heuristic also accepts
-  `"$(tailscale serve …)"`, which would execute. The dynamic `assert_no_forbidden_calls` covers exercised paths only.
-  A future contract could also reject `$(` or a backtick between the opening quote and `tailscale `.
-- **[SUGGESTION]** `scripts/setup.sh:1624` (`phase_preview`) — a signal between `mktemp` and `rm` leaves a
-  `.daemon.toml.XXXXXX` file in `<sysconfdir>/soos`; journaling the temporary path would let `rollback_journal`
-  remove it.
+- **[MINOR]** `tests/invariants/src/setup_contract.rs:165` (and `tests/invariants/src/setup_user_phase_contract.rs:68`
+  `quoted_at`) — the "inside a quoted string" heuristic counts quotes before the match, so an executed call wrapped
+  in a command substitution inside double quotes (`x="$(tailscale serve …)"`) passes the static check. The current
+  script has no such use (only `info "… tailscale funnel/serve …"` lines) and the behavioural
+  `assert_no_forbidden_calls` still covers the tested paths. Required change (follow-up, test-side hardening only):
+  also reject a match preceded by an unclosed `$(` or a backtick on the same line.
+- **[MINOR]** `scripts/setup.sh:1613` (`phase_preview` create/restart/readiness-failure path, lines 1641–1662 and the
+  caller at 1800–1806) — the `/etc` creation path (hard link, restart, removal + second restart, `PREVIEW_DAEMON_DOWN`
+  → exit 70, otherwise `fail_and_rollback` → exit 1, `unset 'JOURNAL[...]'`) has no automated coverage: the fake-root
+  harness can never reach it because `DAEMON_READ_CONFIG` is a hard-coded `/etc` path. Only the owner hardware row
+  SET39 exercises it. Required change (follow-up): add it to the Dockerized matrix (`tests/docker/`, real `/etc`
+  in a container) so the rollback branches are executed at least once in CI.
+- **[MINOR]** `scripts/setup.sh:1805` — a failure of the optional camera-view daemon side while the daemon is healthy
+  without it rolls back the whole root half, i.e. the face install (spec R-U15), whereas every other companion failure
+  keeps the face install (exit 5). This is spec-conformant but inconsistent for the user; recommended: record it
+  explicitly under "Owner to confirm" in the ADR/walkthrough, or downgrade it to "file removed, `[SKIP]`, face install
+  kept" in a later PR.
+- **[SUGGESTION]** `scripts/setup.sh` `resolve_companion` — when `remote.toml` is user-written (`kept`), a plain
+  `--yes` run still rebuilds, reinstalls and `try-restart`s the companion. It is in the plan line and spec, but a
+  one-line note in `Docs/PACKAGING_AND_PROVISIONING.md` §3.0 ("a hand-written configuration still gets the companion
+  binaries updated; use `--no-remote` to avoid it") would avoid surprise.
 
 ## 5. Final Verdict
-
-No CRITICAL or MAJOR finding. The single modified pre-existing test is an owner-approved contract migration recorded
-in the ADR, and the contract tests pass.
 
 **VERDICT: APPROVED**
