@@ -1,9 +1,9 @@
 # Candid Review Report
 
-- **Date**: 2026-10-15 (round 3, after the rebase onto `origin/main` `94a7cb3`; rounds 1–2 on 2026-10-13)
+- **Date**: 2026-10-15 (round 4, after the rebase onto `origin/main` `0be59f6`; round 3 on `94a7cb3` the same day; rounds 1–2 on 2026-10-13)
 - **Target Branch**: `feat/system-onnxruntime`
-- **Base (merge-base)**: `94a7cb3` (previously `6f32ef8`)
-- **Reviewed-Diff-Fingerprint**: `868bdaf3771d80ecf4ad305bc1476e782125ab5117277b2f999e32c8c6514592`
+- **Base (merge-base)**: `0be59f6` (previously `94a7cb3`, before that `6f32ef8`)
+- **Reviewed-Diff-Fingerprint**: `a286fbe242f54c9105fa9c15364684e14f6545f56b55d2f9f05970fc19695a17`
 - **Audited Files**: `.agents/skills/dev-workflow/references/project-facts.md`, `.github/workflows/ci.yml`,
   `AI/DECISIONS.md`, `AI/VERIFICATION_MATRIX.md`, `AI/architect_spec_system_onnxruntime.md`,
   `AI/auditor_constraints_system_onnxruntime.md`, `AI/walkthroughs/201_system_onnxruntime.md`,
@@ -205,6 +205,67 @@ patch (`target/candid_diff.patch`, 49 files) and the rebase itself.
   identical to round 2 apart from the upstream lockfile bump, and upstream CI validated that bump.
 
 Previous findings carry forward unchanged: no CRITICAL, MAJOR or MINOR finding remains open, and
+the four SUGGESTION items in section 4 still apply.
+
+## 3d. Re-Review After the Rebase onto `origin/main` `0be59f6` (round 4)
+
+The branch was rebased from `94a7cb3` onto `0be59f6`. Main gained #383 (push delivery test
+deflake), #394 (actions bump), #384 (motion specification), #388 (read-only lock-screen state
+request), #386 (remote offline alerts) and #385 (`scripts/setup.sh` one-command setup core). The
+rebase had append-only conflicts in `AI/DECISIONS.md`, `tests/invariants/src/lib.rs` and
+`AI/VERIFICATION_MATRIX.md`. I re-checked the whole new patch (`target/candid_diff.patch`, 49
+files) and the rebase itself.
+
+- **The rebase changed nothing except placement.** `git range-diff origin/feat/system-onnxruntime...HEAD`
+  pairs the old and new branch commits; the review-report commit is identical (`=`), and the
+  feature commit differs only by context. For each of the 51 files of the feature commit, I
+  compared the sorted added and removed lines of the old commit (`7e7e6af`) and the new one
+  (`6b73f12`). 48 files are identical. The three that differ:
+  - `AI/VERIFICATION_MATRIX.md`: the only extra lines are a blank line and a `---` separator, so
+    the `system-onnxruntime` section follows main's new sections (`rwp-delivery-deflake`,
+    `ui-motion-spec`, setup SET rows). The content of the section and the MAC5 amendment are
+    unchanged.
+  - `AI/plan_evaluator_report.md` and `AI/candid_review_report.md`: whole-file rewrites whose
+    removed lines differ because main changed the old text. The resulting file contents are
+    byte-identical to the pre-rebase versions. Both files are excluded from the review patch.
+- **The conflict resolutions are correct.** `AI/DECISIONS.md`: main's three new ADRs (#388, #386,
+  #385) come first, then this branch's "Distribution Builds: System ONNX Runtime" ADR, unchanged.
+  `tests/invariants/src/lib.rs`: 78 modules (77 on main plus `system_onnxruntime_contract`,
+  registered after `setup_contract` under `#[cfg(all(test, unix))]`). No conflict markers in the
+  patch.
+- **Interaction with #385 `scripts/setup.sh`.** setup.sh builds with
+  `cargo build --release --locked --workspace` as the build user, then runs `scripts/install.sh
+  --start`. That command uses default features, so it gets `download-binaries` (= `ort/default`),
+  the same SHA-256-verified download as on main. No crate enables `system-onnxruntime` by default,
+  so `pkg-config` is never consulted for libonnxruntime there, and `LIBONNXRUNTIME_NO_PKG_CONFIG`
+  is not needed. When setup.sh is started as root, it builds under `env -i` with an allow-list,
+  so stray `ORT_*`/`PKG_CONFIG_*` variables from root never reach the build. setup.sh, install.sh
+  and the packaging builders (`build_deb.sh`, `build_rpm.sh`, `build_arch.sh`,
+  `build_packages.sh`, `PKGBUILD`, `debian/rules`) do not use `--all-features`. Moving packages to
+  the system library stays a later PR of #361, as the ADR says. The pinned toolchain
+  (`rust-toolchain.toml` 1.98.1, installed by `install_rustup.sh`) is above the new MSRV 1.92. →
+  PASS, no gap.
+- **Interaction with the other main changes.**
+  - #394 bumped `taiki-e/install-action` and `upload-artifact`. This branch's new job uses only
+    `actions/checkout@3d3c42e…` (v7.0.1), the same SHA as all 16 other checkout pins.
+  - #388 and #386 add no crate manifest, so `rust-version.workspace` coverage is unchanged.
+  - `crates/daemon/src/pipeline.rs` was not touched on main. `crates/daemon/src/main.rs` changed
+    on main (lock-state board), but the start-up check still runs inside
+    `initialize_pipeline`, before `bind_socket`.
+  - Residual: whether main's new daemon, remote and protocol code compiles under the MSRV 1.92 was
+    not built locally (RAM). It is gated before merge: `incompatible_msrv` in the required clippy
+    job now applies `rust-version = "1.92"` to all of that code, and the advisory system job builds
+    the workspace with 1.92.0.
+- **Test changes are unchanged.** The step-3 listing returns the same 10 test files and no removed
+  assertion, new escape hatch or inline `mod tests` change (§2 still holds).
+- **Tests run in this round** (lead-restricted scope):
+  `cargo test --locked -p soos-invariants -p soos-inference-ort -- --test-threads=4`, with
+  `CARGO_INCREMENTAL=0` and no debuginfo. Exit 0, 851 passed, 0 failed, 0 ignored. That includes
+  668 `soos-invariants` unit tests: every SORT-S contract, the amended MAC5 and dependency-tooling
+  contracts, and main's new `setup_contract`, `remote_offline_contract`, lock-state and
+  `ui_motion_spec_contract`, run against this branch's `Cargo.toml`, `ci.yml` and `save.sh`.
+
+Previous findings carry forward unchanged. No CRITICAL, MAJOR or MINOR finding remains open, and
 the four SUGGESTION items in section 4 still apply.
 
 ## 4. Detailed Findings & Action Items
