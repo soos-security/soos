@@ -3,10 +3,27 @@
 - **Date**: 2026-10-15
 - **Target Branch**: `feat/android-native-app`
 - **Base (merge-base)**: `6f32ef8`
-- **Reviewed-Diff-Fingerprint**: `1d5ff6887298a4834cd902e95cd14f1e083efd06e2a15e443c23a901d04d3858`
+- **Reviewed-Diff-Fingerprint**: `cd6d2ac3f60541d6755ba5b10b1f06a997ca7e91bd61c1a043c0d5760175efd0`
 - **Audited Files**: `.github/workflows/android.yml`, `.gitignore`, `AI/DECISIONS.md`, `AI/VERIFICATION_MATRIX.md`, `AI/architect_spec_android_native_app.md`, `AI/auditor_constraints_android_native_app.md`, `AI/tester_contract_android_native_app.md`, `AI/walkthroughs/208_android_native_app.md`, `Docs/REMOTE_COMPANION.md`, `android/**` (Gradle project: `build.gradle.kts`, `settings.gradle.kts`, `gradle.properties`, `gradle/libs.versions.toml`, `gradle/verification-metadata.xml`, `gradle/wrapper/gradle-wrapper.properties`, `app/build.gradle.kts`, `AndroidManifest.xml`, 11 Kotlin sources, 10 resources, 5 JVM unit tests), `crates/remote/src/{auth,config,lib,main,routes,server,webauthn}.rs`, `crates/remote/tests/android_app_tests.rs`, `scripts/android_build.sh`, `scripts/secret_scan.sh`, `tests/invariants/src/android_native_contract.rs`, `tests/invariants/src/lib.rs`
 
 ## 1. Executive Summary
+
+**Re-review of 2026-10-15, second pass (HEAD `d4a43ea`).** The review of HEAD `9a58e09`
+(APPROVED, report commit `21c0f3f`, fingerprint `1d5ff688...`) is superseded. The only change
+since then is commit `d4a43ea` (`git diff 21c0f3f d4a43ea`: `scripts/android_build.sh`,
+`AI/DECISIONS.md` Android ADR item (7), `AI/VERIFICATION_MATRIX.md` row ANA12,
+`AI/walkthroughs/208_android_native_app.md`). It adds `android.permission.USE_BIOMETRIC` and
+`android.permission.USE_FINGERPRINT` to `ALLOWED_PERMISSIONS`, the exact-match allowlist of the
+mandatory `aapt2` check, after the first strict CI run rejected `USE_BIOMETRIC` merged from
+`androidx.biometric` 1.1.0 (a compile dependency of `androidx.credentials` 1.5.0; owner decision
+2026-10-15). The change was audited in full (see "Supply Chain & Automation", *Permission
+allowlist*); no CRITICAL or MAJOR finding. One new MINOR (pre-existing gap in the same check,
+`uses-permission-sdk-23` lines are not inspected) and one new SUGGESTION (the invariant does not
+pin the allowlist) are added; earlier findings are carried forward unchanged. Command run:
+`cargo test --locked -p soos-invariants` (616 passed, including `test_ana_s6_manifest_hardening`
+and `test_ana_s10_build_script`); `bash -n scripts/android_build.sh` (clean).
+
+Previous re-review (HEAD `9a58e09`, carried forward):
 
 **Re-review of 2026-10-15 (HEAD `9a58e09`).** The previous review (APPROVED, HEAD `8f629a0`,
 fingerprint `787be720...`) is superseded. The only change since then is commit `9a58e09`, which
@@ -50,6 +67,8 @@ resolved through the GitHub API to their tagged versions (match).
 - New escape hatches (`#[ignore]`, `should_panic`, tolerance, epsilon): none.
 - Inline `mod tests` added/removed: none.
 - Conclusion: **no pre-existing test was modified, weakened or deleted.**
+- Re-check on the frozen patch at HEAD `d4a43ea`: identical result (the two `^-` hits above are
+  still the only ones; no escape hatch; commit `d4a43ea` touches no test file).
 
 ## 3. Deep Reasoning Audit
 
@@ -186,9 +205,30 @@ the app's own androidx receiver permission. `.gitignore` and `secret_scan.sh` no
   attest what Google Maven / Maven Central served to that runner, not upstream signatures) is
   the accepted risk of A-4. PASS.
 
+- *Permission allowlist (commit `d4a43ea`, re-review 2026-10-15)*: `check_permissions` compares
+  each `uses-permission:` name with `[[ "$name" == "$permission" ]]`; the right-hand side is
+  quoted, so the match is literal (no glob, no prefix, no regex), and the two new entries are
+  literal full names with no wildcard. Tried: `android.permission.USE_BIOMETRIC_X`,
+  `android.permission.USE_*`, a permission differing only in case → all rejected by `fail`.
+  The `INTERNET`-present check is unchanged. Protection level: `USE_BIOMETRIC` (API 28) and
+  `USE_FINGERPRINT` (API 23, deprecated) are both `normal` permissions in the platform
+  manifest, granted at install time, with no runtime prompt and no access to biometric data
+  (they only allow invoking the system prompt, which returns a pass/fail result); the ADR,
+  matrix, walkthrough and script comment describe them as such, which is correct. The app's own
+  `android/app/src/main/AndroidManifest.xml` still declares only `INTERNET`
+  (`test_ana_s6_manifest_hardening` passes); no source or Gradle file references
+  `androidx.biometric` (it is present only as a transitive component in
+  `verification-metadata.xml`, version 1.1.0, consistent with the commit message). Nothing
+  else is relaxed: no permission is removed from the check, the `ci` mode still fails on a
+  missing `aapt2` or APK, the success message is only reworded. Alternative considered:
+  stripping both with `tools:node="remove"` in the app manifest would be marginally tighter but
+  would touch the invariant-pinned manifest; the owner's allowlist choice is documented in ADR
+  item (7). PASS (see MINOR 3 and SUGGESTION 6).
+
 ### English-Only Policy
 
-Added lines scanned for French words and accented characters: none. Code, comments, docs,
+Lines added by `d4a43ea` scanned for French words and non-ASCII characters: none (the only
+non-ASCII characters in the touched ADR paragraph are pre-existing en dashes). Added lines scanned for French words and accented characters: none. Code, comments, docs,
 UI strings and script output are English. PASS.
 
 ## 4. Detailed Findings & Action Items
@@ -204,6 +244,12 @@ UI strings and script output are English. PASS.
   dark-mode switch) silently drops the session and asks for a new passkey sign-in. Safe
   (fail-closed), but a `ViewModel`-scoped holder would keep the in-memory session across
   configuration changes without persisting it.
+- **[MINOR]** `scripts/android_build.sh:126` — the `sed` filter extracts only lines starting with
+  `uses-permission: `; `aapt2 dump permissions` prints `<uses-permission-sdk-23>` entries as
+  `uses-permission-sdk-23: name='...'`, which are silently skipped, so a library could merge a
+  permission through that element without tripping the allowlist. Pre-existing (not introduced
+  by `d4a43ea`) and the app's own manifest is pinned by `test_ana_s6`; in a follow-up, match
+  `^uses-permission(-sdk-23)?: ` (or fail on any unrecognised `uses-permission*` line).
 - **[SUGGESTION]** `crates/remote/src/config.rs:431` — `asset_links_json` falls back to an empty
   body on a serialization error, which would be served as `200`; it cannot fail today, but
   building the body once at parse time and refusing the configuration (or asserting
@@ -216,6 +262,11 @@ UI strings and script output are English. PASS.
 - **[SUGGESTION]** `android/gradle/verification-metadata.xml:16` — consider enabling
   `verify-signatures` (with a reviewed `trusted-keys` list) in a later PR to reduce reliance on
   the trust-on-first-use SHA-256 snapshot now committed from run 38446125267 (still open).
+- **[SUGGESTION]** `tests/invariants/src/android_native_contract.rs:669` —
+  `test_ana_s10_build_script` checks that `"android.permission.INTERNET"` is in the script but
+  not the exact contents of `ALLOWED_PERMISSIONS`; pinning the four-entry array (and the quoted
+  `== "$permission"` comparison) would make any future widening of the allowlist an explicit,
+  reviewed contract change.
 
 ## 5. Final Verdict
 
@@ -225,6 +276,10 @@ surface and the CI supply chain. The Android project is uncompiled locally; its 
 an intentional, documented, blocking bootstrap. Re-review of 2026-10-15: the committed
 bootstrap metadata is SHA-256 only, keeps `verify-metadata` on, adds no trust or ignored-key
 rule, covers every catalog pin at its exact version and contains only Google Maven / Maven
-Central groups expected for AGP 8.13.2 and Kotlin 2.2.21; no new finding.
+Central groups expected for AGP 8.13.2 and Kotlin 2.2.21; no new finding. Second re-review of
+2026-10-15 (`d4a43ea`): the allowlist grows by two literal, exact-match, install-time (`normal`)
+permissions merged from `androidx.biometric` 1.1.0 on a documented owner decision; the app
+manifest still declares `INTERNET` only and the docs are consistent; only a MINOR and a
+SUGGESTION are added.
 
 **VERDICT: APPROVED**
