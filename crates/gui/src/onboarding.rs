@@ -161,8 +161,8 @@ impl Feature {
                  optional airplane-mode lock is removed as well."
             }
             Self::OfflineAlerts => {
-                "Off: no back-online notification is sent; push alerts and the offline history \
-                 on the phone page keep working."
+                "Off: no offline history is recorded and no back-online notification is sent; \
+                 push alerts keep working."
             }
         }
     }

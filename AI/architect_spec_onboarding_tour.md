@@ -430,6 +430,6 @@ MAJOR gaps caused by #376 (offline history and back-online push, merged first):
   `test_obt_offline_alerts_have_an_off_route_and_need_push_to_turn_on` (replaces
   `test_obt_offline_alerts_have_no_control_yet`); `RemoteKeys` literals gain `offline_alerts`
   (setup only); new `test_obt_disable_push_also_clears_offline_alerts` and
-  `test_obt_parse_remote_keys_reads_offline_alerts`. Matrix OBT5, OBT6, new OBT19.
+  `test_obt_parse_remote_keys_reads_offline_alerts`. Matrix OBT5, OBT6, new OBT23.
 - Not done (follow-up): checking `ActiveState` after `try-restart`, so that a configuration
   `soos-remote` refuses for another reason is not reported as success.
