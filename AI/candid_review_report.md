@@ -1,9 +1,9 @@
 # Candid Review Report
 
-- **Date**: 2026-10-13
+- **Date**: 2026-10-15 (round 3, after the rebase onto `origin/main` `94a7cb3`; rounds 1–2 on 2026-10-13)
 - **Target Branch**: `feat/system-onnxruntime`
-- **Base (merge-base)**: `6f32ef8`
-- **Reviewed-Diff-Fingerprint**: `7599ce40b50a6d9064c8e3d4e4789850da21cafb0bbbd1329eba228c708aa7bb`
+- **Base (merge-base)**: `94a7cb3` (previously `6f32ef8`)
+- **Reviewed-Diff-Fingerprint**: `868bdaf3771d80ecf4ad305bc1476e782125ab5117277b2f999e32c8c6514592`
 - **Audited Files**: `.agents/skills/dev-workflow/references/project-facts.md`, `.github/workflows/ci.yml`,
   `AI/DECISIONS.md`, `AI/VERIFICATION_MATRIX.md`, `AI/architect_spec_system_onnxruntime.md`,
   `AI/auditor_constraints_system_onnxruntime.md`, `AI/walkthroughs/201_system_onnxruntime.md`,
@@ -172,6 +172,40 @@ The two round-1 MINOR findings were addressed; this report covers the whole new 
   No Rust production code changed in the delta.
 - **`runtime.rs` suggestion** not applied. Accepted: SORT4 requires the bounded payload, and the
   payload is `ort`'s fixed handshake text.
+
+## 3c. Re-Review After the Rebase onto `origin/main` `94a7cb3` (round 3)
+
+The branch was rebased from `6f32ef8` onto `94a7cb3`. Main gained only #396 (`rustls` 0.23.45 →
+0.23.46 for RUSTSEC-2026-0346/-0347, a four-line `Cargo.lock` change) and walkthrough 211. The
+diff fingerprint changed because this branch also edits `Cargo.lock`. I re-checked the whole new
+patch (`target/candid_diff.patch`, 49 files) and the rebase itself.
+
+- **The rebase changed nothing else.** `git range-diff origin/feat/system-onnxruntime...HEAD` shows
+  the new upstream commit and, for the branch commit, hunks in `AI/candid_review_report.md` only
+  (context shift, because main's report text changed). A tree diff of
+  `origin/feat/system-onnxruntime` against `HEAD` lists exactly `AI/walkthroughs/211_rustls_advisories.md`
+  (from main) and the four `rustls` version/checksum lines in `Cargo.lock`. Every other file in the
+  branch diff is byte-identical to the round-2 version.
+- **The lockfile is consistent.** Against the new merge base, the `Cargo.lock` delta is still the
+  single `pkg-config` edge under `ort-sys`. There is exactly one `rustls` entry, at `0.23.46` with
+  main's checksum. `ureq` 3.4.2 (pulled by `ort-sys` through `download-binaries` = `ort/default`)
+  keeps its unchanged dependency list, including `rustls`, so the default download path uses the
+  patched version. The `ort`/`ureq` feature edits on this branch do not add or drop a TLS crate in
+  the lockfile (the lockfile is feature-independent, and the round-1 `cargo tree` comparison showed
+  an identical default third-party graph). `cargo metadata --locked --format-version 1` succeeds,
+  so the lockfile needs no update.
+- **The patch has no rebase leftovers.** It has no conflict markers, and no hunk mentions `rustls`
+  (main's bump is in the base).
+- **Test changes are unchanged.** The step-3 listing returns the same 10 test files and no removed
+  assertion, new escape hatch or inline `mod tests` change (§2 still holds).
+- **Production code was re-read.** `crates/inference-ort/src/runtime.rs` is unchanged: only
+  `Ok(true)` passes, the probe runs under `catch_unwind`, and the detail is bounded before
+  allocation.
+- No Rust build was run in this round, at the lead's request (shared RAM). The source tree is
+  identical to round 2 apart from the upstream lockfile bump, and upstream CI validated that bump.
+
+Previous findings carry forward unchanged: no CRITICAL, MAJOR or MINOR finding remains open, and
+the four SUGGESTION items in section 4 still apply.
 
 ## 4. Detailed Findings & Action Items
 
