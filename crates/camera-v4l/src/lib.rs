@@ -10,12 +10,18 @@ pub mod deep_grey;
 pub mod diagnostics;
 pub mod error;
 pub mod frame;
+pub mod ir_emitter;
+pub mod ir_emitter_config;
+#[cfg(feature = "mock-camera")]
+pub mod ir_mock;
 pub mod manager;
 pub mod mock;
 pub mod resolver;
 pub mod sensor;
 pub mod stable_path;
 pub mod status;
+pub mod strobe;
+pub mod uvc_xu;
 pub mod v4l_guard;
 pub mod v4l_impl;
 
@@ -25,6 +31,10 @@ pub use deep_grey::{
 };
 pub use error::CameraError;
 pub use frame::{Frame, PixelFormat};
+pub use ir_emitter::{EmitterCapability, EmitterState, IrEmitter, IrEmitterError, UvcXuEmitter};
+pub use ir_emitter_config::{
+    IrEmitterConfigError, IrEmitterMode, IrEmitterSettings, UsbDeviceId, XuEmitterDescriptor,
+};
 pub use manager::{CameraHealth, CameraManager};
 pub use mock::MockCameraManager;
 pub use resolver::{
@@ -47,6 +57,8 @@ pub use sensor::{
 };
 pub use stable_path::{stable_device_path, DEFAULT_BY_ID_DIR};
 pub use status::{CameraErrorKind, CameraStatus, CameraStatusCell};
+pub use strobe::{classify_strobe, LumaSample, StrobeClass, StrobeMonitor, StrobeStatus};
+pub use uvc_xu::{UvcXuDevice, XuBudget, XuControl, XuError, XuQuery, XuReadOnly};
 pub use v4l_impl::{
     fourcc_to_pixel_format, negotiate_format, pixel_format_to_fourcc, plan_capture,
     plan_capture_with_hints, supervisor_alias_hints, supervisor_sensor_hints, CapturePlan,

@@ -30,6 +30,7 @@ soos-camera-v4l = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+soos-camera-v4l = { workspace = true, features = ["mock-camera"] }
 
 [lints]
 workspace = true

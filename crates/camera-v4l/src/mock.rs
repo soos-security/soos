@@ -11,6 +11,9 @@ use std::sync::{Arc, RwLock};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+/// Generates one frame from `(width, height, sequence, timestamp_mono_ns)`.
+type FrameSource = Arc<dyn Fn(u32, u32, u64, u64) -> Frame + Send + Sync>;
+
 /// Synthetic frame generator and fault injector for headless CI and unit testing.
 pub struct MockCameraManager {
     config: CameraConfig,
@@ -27,7 +30,28 @@ pub struct MockCameraManager {
     last_activity: Arc<RwLock<Instant>>,
     /// Test hook of `stream_started_mono_ns` (0 = `None`), GitHub #331.
     stream_started_ns: AtomicU64,
+    /// Frame generator of [`MockCameraManager::new_ir`] (`None`: the default synthetic frame).
+    frame_source: Option<FrameSource>,
     worker_handle: Option<JoinHandle<()>>,
+}
+
+/// Generates one frame through `source`, or the default synthetic frame.
+fn make_frame(
+    source: Option<&FrameSource>,
+    config: &CameraConfig,
+    sequence: u64,
+    timestamp_mono_ns: u64,
+) -> Frame {
+    match source {
+        Some(source) => source(config.width, config.height, sequence, timestamp_mono_ns),
+        None => generate_synthetic_frame(
+            config.width,
+            config.height,
+            config.format,
+            sequence,
+            timestamp_mono_ns,
+        ),
+    }
 }
 
 /// Stores a new frame into the ArcSwapOption slot only if its sequence number is >=
@@ -46,6 +70,43 @@ fn store_frame_monotonic(latest: &ArcSwapOption<Frame>, new_frame: Arc<Frame>) {
 impl MockCameraManager {
     /// Creates and starts a new mock camera manager with the given configuration.
     pub fn new(config: CameraConfig) -> Self {
+        Self::with_frame_source(config, None)
+    }
+
+    /// Creates a mock camera whose frames are synthetic near-infrared frames (Grey, stamped
+    /// `Infrared`, whatever `config.format`), lit or unlit as `scene` says at generation time
+    /// (GitHub #378). `mock-camera` feature only.
+    #[cfg(feature = "mock-camera")]
+    pub fn new_ir(config: CameraConfig, scene: crate::ir_mock::MockIrScene) -> Self {
+        let source: FrameSource = Arc::new(move |width, height, sequence, timestamp| {
+            crate::ir_mock::synthetic_ir_frame(
+                width,
+                height,
+                sequence,
+                timestamp,
+                scene.is_lit(sequence),
+            )
+        });
+        Self::with_frame_source(config, Some(source))
+    }
+
+    /// Generates exactly one frame now (next sequence number, current monotonic time) through
+    /// the frame source, stores it and returns it, even while frozen; readiness, warm-up and
+    /// activity are not touched (GitHub #378, deterministic IR mock tests). `mock-camera` only.
+    #[cfg(feature = "mock-camera")]
+    pub fn step_frame(&self) -> Option<Arc<Frame>> {
+        let seq = self.sequence.fetch_add(1, Ordering::SeqCst);
+        let frame = Arc::new(make_frame(
+            self.frame_source.as_ref(),
+            &self.config,
+            seq,
+            monotonic_nanos(),
+        ));
+        store_frame_monotonic(&self.latest_frame, Arc::clone(&frame));
+        Some(frame)
+    }
+
+    fn with_frame_source(config: CameraConfig, frame_source: Option<FrameSource>) -> Self {
         let latest_frame = Arc::new(ArcSwapOption::empty());
         let is_ready = Arc::new(AtomicBool::new(false));
         let starved = Arc::new(AtomicBool::new(false));
@@ -68,6 +129,7 @@ impl MockCameraManager {
         let error_clone = Arc::clone(&active_error);
         let activity_clone = Arc::clone(&last_activity);
         let cfg = config.clone();
+        let source_clone = frame_source.clone();
 
         let handle = thread::Builder::new()
             .name("soos-mock-camera".into())
@@ -161,8 +223,7 @@ impl MockCameraManager {
                     let seq = sequence_clone.fetch_add(1, Ordering::SeqCst);
                     // Generate synthetic frame with true CLOCK_MONOTONIC timestamp
                     let mono_ns = monotonic_nanos();
-                    let frame =
-                        generate_synthetic_frame(cfg.width, cfg.height, cfg.format, seq, mono_ns);
+                    let frame = make_frame(source_clone.as_ref(), &cfg, seq, mono_ns);
 
                     if starved_clone.load(Ordering::Acquire) {
                         ready_clone.store(false, Ordering::Release);
@@ -208,6 +269,7 @@ impl MockCameraManager {
             active_error,
             last_activity,
             stream_started_ns: AtomicU64::new(0),
+            frame_source,
             worker_handle: handle,
         }
     }
@@ -332,13 +394,7 @@ impl CameraManager for MockCameraManager {
             if !has_error {
                 let seq = self.sequence.fetch_add(1, Ordering::SeqCst);
                 let mono_ns = monotonic_nanos();
-                let frame = generate_synthetic_frame(
-                    self.config.width,
-                    self.config.height,
-                    self.config.format,
-                    seq,
-                    mono_ns,
-                );
+                let frame = make_frame(self.frame_source.as_ref(), &self.config, seq, mono_ns);
                 store_frame_monotonic(&self.latest_frame, Arc::new(frame));
                 // The wake frame ends any re-warmup started after the first stabilized frame
                 // (suspension, or a cleared injected error / starvation), so the capture thread

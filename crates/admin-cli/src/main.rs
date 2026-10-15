@@ -16,10 +16,15 @@ use soos_admin_cli::args::{
     camera_list_sensor_preference_given, CameraAction, Cli, Commands, OutputFormat,
     DEFAULT_SOCKET_PATH,
 };
+use soos_admin_cli::args::{IrEmitterAction, IrEmitterModeArg};
 use soos_admin_cli::camera::{
     collect_list_report, probe_report, resolve_list_settings, CameraEnvironment,
 };
 use soos_admin_cli::error::AdminCliError;
+use soos_admin_cli::ir_emitter::{
+    check_ir_node, configure_ir_emitter, ensure_same_node, probe_ir_emitter, ConfigureRequest,
+    IrEmitterEnv, WriteOutcome,
+};
 use soos_admin_cli::logs::fetch_and_filter_logs;
 use soos_admin_cli::network_lock::{
     install_network_lock, may_modify_root, network_lock_status, uninstall_network_lock, FileAction,
@@ -31,6 +36,8 @@ use soos_admin_cli::status::query_status;
 use soos_admin_cli::test_pam::{effective_timeout_ms, simulate_pam_auth};
 use soos_admin_cli::user::add_user_to_soos_group;
 use soos_camera_v4l::diagnostics::SystemV4lDeviceProbe;
+use soos_camera_v4l::uvc_xu::{UvcXuDevice, PROBE_MAX_UNIT_ID};
+use soos_camera_v4l::IrEmitterMode;
 
 fn run() -> Result<(), AdminCliError> {
     // Parsed through `ArgMatches` so `camera list` can tell an explicit `--sensor-preference`
@@ -100,6 +107,9 @@ fn run() -> Result<(), AdminCliError> {
         }
 
         Commands::Camera(args) => {
+            if let CameraAction::IrEmitter(ir) = &args.action {
+                return run_ir_emitter(&ir.action, cli.format);
+            }
             let env = CameraEnvironment::default();
             let probe = SystemV4lDeviceProbe;
             let (text, code) = match &args.action {
@@ -134,6 +144,7 @@ fn run() -> Result<(), AdminCliError> {
                     };
                     (text, report.exit_code())
                 }
+                CameraAction::IrEmitter(_) => return Ok(()),
             };
             println!("{}", text.trim_end());
             if code != 0 {
@@ -202,6 +213,76 @@ fn run() -> Result<(), AdminCliError> {
         }
     }
 
+    Ok(())
+}
+
+/// `soos-admin camera ir-emitter probe|configure` (GitHub #378). Single-threaded: the device
+/// test blocks the termination signals of this (only) thread.
+fn run_ir_emitter(action: &IrEmitterAction, format: OutputFormat) -> Result<(), AdminCliError> {
+    let camera = CameraEnvironment::default();
+    let probe = SystemV4lDeviceProbe;
+    let env = IrEmitterEnv {
+        camera: &camera,
+        probe: &probe,
+        euid: nix::unistd::geteuid().as_raw(),
+    };
+    let open = |device: &std::path::Path| -> Result<UvcXuDevice, AdminCliError> {
+        let node = check_ir_node(&env, device)?;
+        let opened = UvcXuDevice::open(&node.node)
+            .map_err(|e| AdminCliError::IrEmitter(format!("cannot open the camera node: {e}")))?;
+        // The descriptor must be the node that was classified Infrared uvcvideo.
+        ensure_same_node(node.rdev, opened.rdev())?;
+        Ok(opened)
+    };
+    match action {
+        IrEmitterAction::Probe(args) => {
+            let mut device = open(&args.device)?;
+            let units = args.unit.map_or(1..=PROBE_MAX_UNIT_ID, |unit| unit..=unit);
+            let report = probe_ir_emitter(&env, &args.device, units, &args.config, &mut device)?;
+            if args.json || format == OutputFormat::Json {
+                println!("{}", report.to_json());
+            } else {
+                print!("{}", report.format_table());
+            }
+            let code = report.exit_code();
+            if code != 0 {
+                std::process::exit(code);
+            }
+        }
+        IrEmitterAction::Configure(args) => {
+            let mut device = open(&args.device)?;
+            let request = ConfigureRequest {
+                device: args.device.clone(),
+                mode: match args.mode {
+                    IrEmitterModeArg::Off => IrEmitterMode::Off,
+                    IrEmitterModeArg::Auto => IrEmitterMode::Auto,
+                },
+                unit: args.unit,
+                selector: args.selector,
+                on: args.on.0.clone(),
+                off: args.off.0.clone(),
+                config_path: args.config.clone(),
+                dry_run: args.dry_run,
+                test_on_device: args.test_on_device,
+            };
+            let report = configure_ir_emitter(&env, &request, &mut device)?;
+            if report.device_test.is_some() {
+                println!(
+                    "[OK] The control read back both payloads; the original value was restored."
+                );
+            }
+            print!("{}", report.section);
+            match report.written {
+                None => println!("[OK] Dry run: nothing was written."),
+                Some(WriteOutcome::Created) => {
+                    println!("[OK] Created {} (mode 0644).", args.config.display())
+                }
+                Some(WriteOutcome::Updated) => {
+                    println!("[OK] Updated {}.", args.config.display());
+                }
+            }
+        }
+    }
     Ok(())
 }
 

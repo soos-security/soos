@@ -202,15 +202,20 @@ const V4L2_CHAR_MAJOR: u32 = 81;
 /// opening some other device nodes has side effects (a tape drive rewinds on close, a tty
 /// changes its modem lines). A refused path reports `ENOTTY`, the errno the V4L2 ioctls would
 /// return on it.
-fn ensure_v4l2_char_device(dev_path: &Path) -> Result<(), ProbeFailure> {
-    use std::os::unix::fs::{FileTypeExt, MetadataExt};
-
+pub(crate) fn ensure_v4l2_char_device(dev_path: &Path) -> Result<(), ProbeFailure> {
     let metadata = std::fs::metadata(dev_path).map_err(|e| ProbeFailure::from_io_error(&e))?;
-    if metadata.file_type().is_char_device() && libc::major(metadata.rdev()) == V4L2_CHAR_MAJOR {
+    if is_v4l2_char_device(&metadata) {
         Ok(())
     } else {
         Err(ProbeFailure::Other(Some(libc::ENOTTY)))
     }
+}
+
+/// `true` when `metadata` describes a V4L2 character device (major 81). Also used on an open
+/// descriptor (`File::metadata`, i.e. `fstat`) to re-check the node after `open(2)`.
+pub(crate) fn is_v4l2_char_device(metadata: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::{FileTypeExt, MetadataExt};
+    metadata.file_type().is_char_device() && libc::major(metadata.rdev()) == V4L2_CHAR_MAJOR
 }
 
 /// Body of [`SystemV4lDeviceProbe::details`] (metadata ioctls only).

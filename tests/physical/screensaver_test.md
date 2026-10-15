@@ -300,7 +300,7 @@ No line may contain a user name above `debug`, a score, an embedding, a frame or
      screen (Settings → Power → Screen Blank set to a short delay).
    - **Expected Result**: `Presence scan gated by the lid or the screen state` with
      `lid_closed="true"` (or `display_state="off"`), no scan, and the camera LED goes off after
-     `[camera] idle_timeout_secs` (default 10 s). Opening the lid or waking the screen logs
+     `[pipeline] idle_timeout_secs` (default 10 s). Opening the lid or waking the screen logs
      `Presence scan gate open` and the scans resume. A state the daemon cannot read
      (`display_state="unknown"`) does not gate.
    - **Record**: the `display_state` value logged while GNOME blanks the screen, and
