@@ -2,8 +2,8 @@
 
 - **Date**: 2026-10-15
 - **Target Branch**: `test/readme-capture`
-- **Base (merge-base)**: `94a7cb3`
-- **Reviewed-Diff-Fingerprint**: `cb76b5a5d59f218574eea7a8c217ce4ac72439d0d7b6ce952a4e86a796f89db5`
+- **Base (merge-base)**: `bcfef93`
+- **Reviewed-Diff-Fingerprint**: `cfbe3f91c301ed7ecbc6ed93d8786cf1ad143518efadd77bdb1d5806012032da`
 - **Audited Files**: AI/DECISIONS.md, AI/VERIFICATION_MATRIX.md, AI/architect_spec_readme_capture.md,
   AI/auditor_constraints_readme_capture.md, AI/walkthroughs/207_readme_capture.md, Cargo.lock,
   Docs/DEVELOPMENT_WORKFLOW.md, Docs/GUI_APPLICATION.md, Docs/README.md, Docs/README_ASSETS.md,
@@ -17,32 +17,56 @@
   tests/fixtures/tests/readme_fixture_tests.rs, tests/invariants/src/lib.rs,
   tests/invariants/src/readme_assets_contract.rs
 
-## 0. Re-review After the Rebase Onto `main` (2026-10-15)
+## 0. Re-review After the Rebase Onto `main` `bcfef93` (2026-10-15)
 
-The branch was rebased from merge-base `6f32ef8` onto `origin/main` `94a7cb3` (#396: `rustls`
-0.23.45 -> 0.23.46 in `Cargo.lock`, plus walkthrough 211). The previous APPROVED report was bound to
-fingerprint `751b8463...`; this review re-freezes the diff (`--prepare`) and re-checks it:
+The branch was rebased from merge-base `94a7cb3` onto `origin/main` `bcfef93`. Main gained #383
+(push-test deflake), #394 (actions bump), #384 (motion spec), #388 (lock-screen state request),
+#386 (remote offline history, including `crates/remote/assets/app.js`/`style.css`/`sw.js`), #385
+(`scripts/setup.sh`) and #390 (system ONNX Runtime, MSRV 1.92, a new `[features]` table in
+`crates/gui/Cargo.toml`). The previous APPROVED report was bound to fingerprint `cb76b5a5...`;
+this review re-freezes the diff (`--prepare`) and re-checks it, including the follow-up commit
+`f6c7511`.
 
-- `git range-diff origin/test/readme-capture...HEAD`: the only interdiff hunks are in
-  `AI/candid_review_report.md` (the base report changed on `main`); no code, doc, script, test or
-  asset hunk differs.
-- For every other file in the patch, the added/removed lines of `git diff 6f32ef8
-  origin/test/readme-capture` and `git diff 94a7cb3 HEAD` are byte-identical (scripted comparison),
-  so the rebase introduced nothing beyond shifted `Cargo.lock` context.
-- `Cargo.lock` branch hunk is still exactly three dependency-list lines on `soos-gui` (`png`,
-  `soos-frame`, `soos-test-fixtures`); the lockfile keeps `rustls` at `0.23.46`, and the frozen
-  patch contains no `rustls` line, so the security bump is not reverted.
-  `cargo metadata --locked --format-version 1` succeeds (lockfile consistent with the manifests).
-- Mechanical test listing re-run on the new patch: no removed line at all in the patch (it is
-  append-only), no escape hatch, no inline `mod tests` change; results identical to section 2.
-- Spot re-checks: `capture.rs` still has no `unwrap`/`expect`/`panic!`/`unsafe`, the feature is
-  still `[]` and non-default, the `app.rs` hunk is only the gated `mod capture;`, and the
-  previous MINOR line references (`tests/fixtures/mod.rs:199/285/495/587`,
-  `readme_snapshots.rs:43-46`) still point at the same code.
+- `git range-diff origin/test/readme-capture...HEAD`: the seven `main` commits appear as new; the
+  branch commit `e88843b` maps to `b8d7ddb` with interdiff hunks only in the three "both sides
+  appended" files and in the per-branch report files.
+- Scripted per-file comparison of the sorted added/removed lines of `git diff 94a7cb3 1b276b8`
+  (old branch) versus `git diff bcfef93 b8d7ddb` (rebased): same 30 files; 25 identical,
+  including `AI/DECISIONS.md` (one appended ADR line) and `tests/invariants/src/lib.rs` (the
+  8-line `readme_assets_contract` registration, appended after main's modules).
+  `AI/VERIFICATION_MATRIX.md` differs only by an added blank line and `---` separator before the
+  `readme-capture` section (placement only). `AI/candid_review_report.md` and
+  `AI/plan_evaluator_report.md` differ only because main's versions changed; the branch blobs are
+  byte-identical. The three PNG blobs are identical.
+- **Semantic conflict found and fixed**: after the rebase, `crates/gui/Cargo.toml` held two
+  `[features]` tables (main's #390 table and this branch's), so `cargo metadata` failed with
+  "duplicate key". Commit `f6c7511` moves the `readme-capture = []` line and its comment into
+  main's single table, `default = ["download-binaries"]` unchanged. The frozen patch now shows
+  the gui manifest as additions only (the feature line plus the three dev-dependencies); the
+  `system_onnxruntime_contract` feature lines and RAC15 (`readme-capture=[]`, not in `default`,
+  `png`/`soos-test-fixtures` only in `[dev-dependencies]`) both hold.
+- Rendering interaction: main changed only `crates/gui/src/main.rs` (an ONNX Runtime provider
+  check before the model registry, not reachable from the capture scenes) and the gui manifest;
+  no `Cargo.lock` package version changed (egui/eframe/epaint identical). RAC1
+  `test_rac_capture_scenes_match_committed_assets` passes, so the committed PNGs are not stale.
+- Web app interaction (#386): `crates/remote/assets` still holds exactly 11 files (RAC8 holds);
+  the view structs bound by RAC9 are unchanged and the RAC9 test passes. The new
+  `GET /api/offline` endpoint is not served by the README fixture (see the new MINOR in section 4).
+- `tests/docker/system_onnxruntime_test.sh` (from #390) runs `cargo check --workspace
+  --all-features`, which compiles the gated module in a check build only; nothing is packaged
+  from it and RAC15 still finds no packaging/install file naming the feature.
+- Mechanical test listing on the new patch: no removed line in the whole patch (append-only), no
+  escape hatch beyond the RAC1 drift tolerance, no inline `mod tests` change. The previous MINOR
+  line references (`tests/fixtures/mod.rs:199/285/495/587`, `readme_snapshots.rs:43-46`) still
+  point at the same code.
+- Re-run with `LIBONNXRUNTIME_NO_PKG_CONFIG=1 CARGO_INCREMENTAL=0 CARGO_PROFILE_*_DEBUG=0
+  CARGO_BUILD_JOBS=4`: `cargo clippy --locked -p soos-gui --all-targets --all-features -- -D
+  warnings` clean; `cargo test --locked -p soos-gui -p soos-invariants --all-features --
+  --test-threads=4` 843 passed, 0 failed (`readme_snapshots` 9/9 including RAC1, all
+  `readme_assets_contract` RAC10-RAC16 tests).
 
-All previous findings are carried forward unchanged (section 4). Sections 1-3 below are the
-original 2026-10-13 audit, which still applies verbatim to this diff. Cargo builds/tests were not
-re-run for this re-review (shared-host RAM constraint); the code under test is unchanged.
+All previous findings are carried forward unchanged; one MINOR is added (section 4). Sections 1-3
+below are the original 2026-10-13 audit, which still applies to this diff.
 
 ## 1. Executive Summary
 
@@ -178,6 +202,12 @@ append-only module registrations above is modified.
   unconfirmed until the first Ubuntu CI run (RAC17 pending). Risk is low (same SIMD level and
   glibc `powf` family on both machines), but if CI fails, the fix is to regenerate or tune the
   tolerance in a new reviewed diff, never to skip the test.
+- **[MINOR]** `tests/fixtures/mod.rs:442-447` — the README web fixture serves no
+  `GET /api/offline` (added to `soos-remote` by #386). The web app swallows the 404 and keeps the
+  new "Offline history" card hidden, so `scripts/capture_readme_web.sh` captures would omit that
+  feature rather than look broken. No web capture is committed yet (RAC18 pending), so nothing in
+  the repository is stale. Open follow-up for the RAC18 web captures: serve a synthetic
+  `/api/offline` body and extend RAC8/RAC9 to bind it to the real view type.
 - **[SUGGESTION]** `Docs/assets/screenshots/gui-guided-enrollment.png` — a 2-pixel pale band
   crosses the chin at y = 535-536 (pixels `(235,226,227)` over skin `(232,196,170)`), at the
   bottom edge of the mock detection box; it is drawn by the real GUI, not by the fixture or the
@@ -185,7 +215,8 @@ append-only module registrations above is modified.
 
 ## 5. Final Verdict
 
-No CRITICAL or MAJOR finding. Capture code is compile-gated and side-effect-free, the committed
+No CRITICAL or MAJOR finding (the post-rebase duplicate `[features]` table is fixed by
+`f6c7511`). Capture code is compile-gated and side-effect-free, the committed
 PNGs are synthetic, identity-free and metadata-free, the fixture server is loopback-only, bounded
 and dev-only, the invariant enforces the manifest/hash/budget/metadata rules, no test is weakened,
 and all targeted suites, clippy and fmt pass locally.
