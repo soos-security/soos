@@ -440,6 +440,17 @@ on the existing stream (only on change), with the visibility of `/api/status`; `
 change is involved. The service runtime shutdown is bounded by `RUNTIME_SHUTDOWN_TIMEOUT_MS`
 (1 s). Matrix rows RBS1–RBS12.
 
+Offline history (ADR 2026-10-13 "Offline History and Back-Online Push Notifications in
+`soos-remote`", GitHub #376, tier 1 of #359 Part B; `offline_alerts = true` requires
+`push_notifications = true`). Every 5 s `soos-remote` asks the bus driver `NameHasOwner` and,
+only while NetworkManager is running, reads three of its manager properties (`State`,
+`Connectivity`, `WirelessEnabled`) with `Properties.Get`. It installs no signal match and calls
+no mutating method, so RMC-S9 and RC-1 are unchanged. A suspend shows as the
+`CLOCK_BOOTTIME` − `CLOCK_MONOTONIC` gap. A clean stop reads logind's `PreparingForShutdown`
+once and writes a stop marker in `remote-network.json` (`0600`, at most 8 KiB, at most 32
+intervals). After an outage, one fixed-vocabulary back-online Web Push shares the alert budget.
+No SSID, address or location is ever read. Matrix rows ROA1–ROA14.
+
 Android phones (ADR 2026-10-09 "Android Support for the `soos-remote` Phone Companion and Web
 Push", GitHub #349, `Docs/REMOTE_COMPANION.md` §2h): the phone web app is the iPhone home-screen
 app or Android Chrome, Samsung Internet or Firefox (in a tab or installed), with full parity. The

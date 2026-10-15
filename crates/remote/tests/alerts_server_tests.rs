@@ -219,6 +219,7 @@ async fn start_alerts(env: &Env, journal: &ScriptedJournal, options: AlertOption
         push: soos_remote::config::PushConfig::default(),
         camera: soos_remote::config::CameraConfig::default(),
         battery: soos_remote::config::BatteryConfig::default(),
+        offline: soos_remote::config::OfflineConfig::default(),
     };
     let settings = AlertSettings {
         owner_login: options

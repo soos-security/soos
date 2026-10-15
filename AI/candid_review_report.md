@@ -1,156 +1,134 @@
 # Candid Review Report
 
 - **Date**: 2026-10-15
-- **Target Branch**: `feat/lockscreen-status`
-- **Base (merge-base)**: `3d9879a`
-- **Reviewed-Diff-Fingerprint**: `3b5e3383f71e28edda18c06ce339eb19d104bfe1237cf7836706c76770501ef7`
-- **Audited Files**: `.github/workflows/fuzz.yml`, `AI/DECISIONS.md`, `AI/VERIFICATION_MATRIX.md`, `AI/architect_spec_lockscreen_status.md`, `AI/auditor_constraints_lockscreen_status.md`, `AI/walkthroughs/205_lockscreen_status.md`, `Docs/DAEMON.md`, `Docs/IPC_PROTOCOL.md`, `crates/daemon/src/dispatcher.rs`, `crates/daemon/src/lib.rs`, `crates/daemon/src/lock_state.rs`, `crates/daemon/src/main.rs`, `crates/daemon/src/presence/worker.rs`, `crates/daemon/tests/lock_state_board_tests.rs`, `crates/daemon/tests/lock_state_dispatcher_tests.rs`, `crates/daemon/tests/lock_state_presence_tests.rs`, `crates/protocol/fuzz/Cargo.toml`, `crates/protocol/fuzz/README.md`, `crates/protocol/fuzz/fuzz_targets/decode_lock_state.rs`, `crates/protocol/src/lib.rs`, `crates/protocol/src/message.rs`, `crates/protocol/src/types.rs`, `crates/protocol/tests/lock_state_tests.rs`, `tests/invariants/src/lib.rs`, `tests/invariants/src/lock_state_contract.rs`
+- **Target Branch**: `feat/remote-offline-alerts`
+- **Base (merge-base)**: `af511eb`
+- **Reviewed-Diff-Fingerprint**: `396018e73d046acb3b0303804de69c555bcfe89f226666b2fc3760ce960fa2d6`
+- **Audited Files**: `.agents/skills/dev-workflow/references/project-facts.md`, `AI/ARCHITECTURE.md`, `AI/DECISIONS.md`, `AI/VERIFICATION_MATRIX.md`, `AI/architect_spec_remote_offline_alerts.md`, `AI/auditor_constraints_remote_offline_alerts.md`, `AI/tester_contract_remote_offline_alerts.md`, `AI/walkthroughs/202_remote_offline_alerts.md`, `Docs/REMOTE_COMPANION.md`, `crates/remote/assets/app.js`, `crates/remote/assets/style.css`, `crates/remote/assets/sw.js`, `crates/remote/src/audit.rs`, `crates/remote/src/config.rs`, `crates/remote/src/lib.rs`, `crates/remote/src/logind.rs`, `crates/remote/src/main.rs`, `crates/remote/src/offline.rs`, `crates/remote/src/push.rs`, `crates/remote/src/routes.rs`, `crates/remote/src/server.rs`, `crates/remote/tests/alerts_server_tests.rs`, `crates/remote/tests/android_push_tests.rs`, `crates/remote/tests/battery_server_tests.rs`, `crates/remote/tests/common/camera.rs`, `crates/remote/tests/common/harness.rs`, `crates/remote/tests/offline_server_tests.rs`, `crates/remote/tests/offline_tests.rs`, `crates/remote/tests/push_server_tests.rs`, `crates/remote/tests/server_tests.rs`, `scripts/install_remote.sh`, `tests/invariants/src/lib.rs`, `tests/invariants/src/remote_offline_contract.rs`
 
 ## 1. Executive Summary
 
-Re-review after the rebase of `feat/lockscreen-status` (GitHub #380, PR 1 of #352) from base
-`94a7cb3` onto `origin/main` `3d9879a` (main gained #383 push-test deflake, #394 actions bump and
-#384 motion ADR with `mod ui_motion_spec_contract` and matrix sections `rwp-delivery-deflake` and
-`ui-motion-spec`). The previous review (fingerprint `10fbf20d…`, APPROVED) is carried forward:
-the production code, tests, fuzz target, docs and specs of this branch are unchanged by the
-rebase, and the raw diff against the new merge base was re-read independently (protocol types,
-`lock_state.rs`, dispatcher `LockState` path and `Auth` publishing, presence `post_scan_hold`,
-`main.rs` wiring). No CRITICAL or MAJOR finding.
+Re-review after the rebase of `feat/remote-offline-alerts` (GitHub #376, tier 1 of #359 Part B,
+PR #386) from base `94a7cb3` onto `origin/main` `af511eb`. Main gained #383 (push delivery test
+deflake: `settle_gone` in `crates/remote/tests/common/push.rs`, `push_server_tests.rs`,
+`android_push_tests.rs`), #394 (actions bump), #384 (motion ADR, `mod ui_motion_spec_contract`)
+and #388 (read-only lock-screen state request: daemon, protocol `RequestKind::LockState`,
+`mod lock_state_contract`). The previous review (fingerprint `caf54570…`, APPROVED, one MINOR
+resolved, one SUGGESTION open) is carried forward. The raw diff against the new merge base was
+re-read independently (`offline.rs` runtime/watcher/stop/persist, `push.rs` scheduler,
+notice delivery and retries, `server.rs` wiring and route, `config.rs`, `logind.rs`, `main.rs`,
+`audit.rs`). No CRITICAL or MAJOR finding.
 
 Rebase verification (this review):
-- `git range-diff origin/feat/lockscreen-status...HEAD`: the single branch commit `0243c6b` →
-  `f2508e3`; the only changes are context lines from main (#383, #384, #394) and the placement of
-  the conflicted blocks.
-- Per-file comparison of the sorted added/removed lines of `94a7cb3..origin/feat/lockscreen-status`
-  against `3d9879a..HEAD`, for all 27 files: identical for 24 files, including
-  `AI/DECISIONS.md` and `tests/invariants/src/lib.rs`. Differences: `AI/VERIFICATION_MATRIX.md`
-  gains exactly one blank line and one `---` separator before the `lockscreen-status` section
-  (matches the file's convention; every other section, including main's `ui-motion-spec`, is
-  preceded by `---`); `AI/candid_review_report.md` and `AI/plan_evaluator_report.md` differ only
-  in their removed lines (main's #384 versions are now the base); the branch's
-  `AI/plan_evaluator_report.md` is byte-identical to the pre-rebase branch file.
-- No loss or duplication: `AI/DECISIONS.md` holds exactly one "Motion System for soos-gui and
-  soos-remote" ADR and one "Read-Only Lock-Screen State Channel" ADR, main's first;
-  `tests/invariants/src/lib.rs` declares `mod ui_motion_spec_contract;` then
-  `mod lock_state_contract;` once each (no duplicate `mod` lines); the matrix holds one
-  `lockscreen-status` section (LKS rows unchanged) after main's `rwp-delivery-deflake` and
-  `ui-motion-spec` sections.
-- `cargo test --locked -p soos-invariants -- --test-threads=4`: 620 passed, 0 failed (9
-  `lock_state_contract` and 7 `ui_motion_spec_contract` tests among them).
+- `git range-diff origin/feat/remote-offline-alerts...HEAD`: the single branch commit `b2dbc3e` →
+  `290b8c1`; the only changes are context lines from main and the placement of the conflicted
+  blocks.
+- Per-file comparison of the sorted added/removed lines of `94a7cb3..origin/feat/remote-offline-alerts`
+  against `af511eb..HEAD`, for all 35 files: identical for 32 files, including `AI/DECISIONS.md`
+  and `tests/invariants/src/lib.rs`. Differences: `AI/VERIFICATION_MATRIX.md` gains exactly one
+  blank line and one `---` separator before the `remote-offline-alerts` section (the file's
+  convention); `AI/candid_review_report.md` (this file, rewritten) and
+  `AI/plan_evaluator_report.md` differ only through their base side (main's versions are now the
+  base); the branch's `AI/plan_evaluator_report.md` is byte-identical to the pre-rebase branch
+  file (`git diff origin/feat/remote-offline-alerts HEAD -- AI/plan_evaluator_report.md` is empty).
+- No loss or duplication: `AI/DECISIONS.md` holds the "Motion System", "Read-Only Lock-Screen State
+  Channel" and "Offline History and Back-Online Push Notifications" ADRs once each, main's first;
+  `git diff af511eb HEAD -- AI/DECISIONS.md` removes no line. `tests/invariants/src/lib.rs`
+  declares `mod remote_offline_contract;` once, after `mod ui_motion_spec_contract;` and
+  `mod lock_state_contract;` (76 `mod` lines = 75 at `af511eb` + 1). The matrix holds one
+  `remote-offline-alerts` section after main's `rwp-delivery-deflake`, `ui-motion-spec` and
+  `lockscreen-status` sections. Walkthrough 202 does not collide with main's 203, 204, 205.
+- Semantic interaction: #388 does not touch `crates/remote`; `soos-remote` only constructs
+  `RequestKind::PreviewFrame` and has no exhaustive match on `RequestKind`, so the new wire kind
+  needs nothing here. #383 adds `Call.answer`, `last_gone` and `settle_gone` to the push test
+  harness; this branch's harness edits are the setup-only `offline: OfflineConfig::default()`
+  lines, and its new back-online delivery path reuses the same `remove_gone` store rewrite that
+  `settle_gone` waits for, so the deflake applies to it unchanged. Both suites pass together.
+- `cargo test --locked -p soos-invariants -p soos-remote -- --test-threads=4`: 1044 passed,
+  0 failed, 0 ignored (soos-invariants 625; soos-remote 419, including `offline_tests` 23,
+  `offline_server_tests` 10, `push_server_tests` 22, `android_push_tests` 5).
 
-## 2. Test Changes (mechanical listing from step 3)
+## 2. Test Changes (mechanical listing from step 3, with justification per change)
 
-- Test files touched: `crates/daemon/tests/lock_state_{board,dispatcher,presence}_tests.rs`,
-  `crates/protocol/tests/lock_state_tests.rs`, `tests/invariants/src/lock_state_contract.rs` (all
-  new files), `tests/invariants/src/lib.rs` (+6 lines: doc comment, `#[cfg(test)]` and
-  `mod lock_state_contract;` after main's `mod ui_motion_spec_contract;`).
-- Removed/changed assertions (`^-` with assert/#[test]/proptest/should_panic): **none**.
-- New escape hatches (`#[ignore]`, `cfg(any())`, `should_panic`, tolerance/epsilon): **none**.
-- Inline `mod tests` changes: **none**.
-- Conclusion: purely additive; no contract migration needed. `unwrap`/`expect` hits in the patch
-  are confined to the new test files.
+Over `target/candid_diff.patch`:
+- Test files touched: `alerts_server_tests.rs`, `android_push_tests.rs`, `battery_server_tests.rs`,
+  `common/camera.rs`, `common/harness.rs`, `push_server_tests.rs`, `server_tests.rs` — each gains
+  exactly one line `offline: soos_remote::config::OfflineConfig::default(),` in a `RemoteConfig`
+  literal and nothing else (verified per file with `git diff af511eb HEAD`). Setup-only migration
+  forced by the new `RemoteConfig.offline` field (ADR item 10). No assertion changed.
+- `tests/invariants/src/lib.rs`: only adds `mod remote_offline_contract;`.
+- New: `offline_tests.rs` (23 tests), `offline_server_tests.rs` (10 tests),
+  `remote_offline_contract.rs` (ROA-S1..S5).
+- Removed or changed assertions (`^-` with `assert`/`#[test]`/`proptest!`/`should_panic`): none.
+- New escape hatches (`#[ignore]`, `#[cfg(any())]`, `should_panic`, tolerance, epsilon): none in
+  code; the only hit is a sentence in `AI/auditor_constraints_remote_offline_alerts.md` (#38)
+  forbidding them.
+- Inline `mod tests` changes: none.
 
 ## 3. Deep Reasoning Audit
 
-Carried forward from the 2026-10-13 review (code unchanged by the rebase; re-checked against
-the new merge base). Rebase-specific scenario: a lost or duplicated ADR, `mod` declaration,
-test or matrix row from either side → none found (see §1). PASS.
-
-
 ### Logic & Architecture
-- **Fix of MAJOR #1 (cadence).** `run()` now sleeps `LOCK_POLL_INTERVAL_MS + post_scan_hold(tick)`;
-  for `Scanned(non-Unlocked)` the hold is `(last_scan_started_ns + REVEAL_FLOOR_NS) - now`, capped
-  at the floor, so the next tick starts at `start + floor + poll + ε` independent of the end
-  (spoof veto at the first capture vs full non-match at the budget). `tracker.due()` is already
-  start-anchored (`last_scan_started_ns + scan_interval`) and the tick grid after the hold is now
-  start-anchored too, so the residual "end mod poll interval" quantisation that existed before is
-  also gone. Unlock and skipped ticks: `Duration::ZERO` (no unlock-latency change). Clock failure
-  during the hold computation: full floor (bounded, outcome-independent). `Preempted`/
-  `ShuttingDown` also hold — harmless (PAM is never delayed; shutdown is still observed through the
-  `select!`). PASS.
-- **Visible trace.** Reveal at `max(end, start + floor)`; next scan at `≈ start + floor + 1 s`,
-  i.e. ~1 s after reveal, before the 3 s `NotRecognized → Idle` decay, so both failure kinds render
-  `Idle0 → Scanning1 → NotRecognized2 → Scanning3`. With a larger `scan_interval` the Idle decay
-  and the next scan are both start-anchored, so still identical. PASS.
-- **Sequence numbers.** Hidden phase reads `2·scans − 1`, revealed `2·scans`; a superseding scan
-  (PAM or presence) moves `2k−1 → 2k+1` identically whether the earlier end existed or not; a
-  superseded guard's `finish`/`Drop` is a no-op (`scan_id` check). Abandoned scans (preempted, `?`
-  early return in the PAM path) reveal `Idle` at the floor — reveals only "no claim". PASS.
-- **Floor derivation.** 1200 (`MAX_CAMERA_WAKE_WAIT_MS`) + 1000 (`PRESENCE_WAKE_SETTLE_MS`) + 900
-  (`DECISION_BUDGET_MS`) + 50 (`RESPONSE_WRITE_MARGIN_MS`) + 90 (`DEFAULT_INFERENCE_ESTIMATE_MS` 80 +
-  `FRAME_POLL_INTERVAL_MS` 10) = 3240 ms, all `saturating_add` of the source constants (single source
-  of truth); matches `scan()` (wake bound, settle `wait_ms ≤ settle_ms`, deadline = settle end +
-  budget + margin). Docs/ADR/DAEMON.md agree. PASS (residual on slow hardware: see SUGGESTION 1).
-- **Other timing channels searched.** (a) Post-Allow failures (`SessionChanged`, `AccountRefused`,
-  `LidClosed`, `UnlockFailed`) can end after the floor only when bounded D-Bus calls stall; they
-  require an already matching face, so not a PAD oracle — documented accepted residual in the ADR.
-  (b) PAM scans with `timeout_ms > 2500` may reveal at their end; the PAM caller (the locker)
-  already sees that timing — documented. (c) `UnlockFailed` starts the logind backoff (pre-existing,
-  post-match only). (d) `LockState` answer path: no reason, no timestamp, no other UID's data;
-  neutral `{Idle,0}` for clock error, no local seat session, timeout or failed blocking job; quota
-  refusal is a standard `Response{ProtocolError, RateLimited}` keyed on peer UID, not on board
-  state. No new channel found.
-- **Authorization.** `LockState` is dispatched after wire validation and `verify_peer_credentials`
-  (unprivileged peer only for its own UID → `UidMismatch` otherwise; root any UID), then per-peer
-  quota (8/s, 64 tracked UIDs), then `has_local_seat_session(uid_hint)` (the preview predicate).
-  Never records an attempt, wakes the camera, registers PAM priority or unlocks (tests LKS13, board
-  purity, dispatcher side-effect test). Auth-reserved connection still admits only `Auth`. PASS.
-- **Wiring.** `main.rs` creates one board and hands clones to the dispatcher and the presence
-  worker. PASS.
+- Tracker (carried forward, re-read): sleep during an open outage closes the outage at the
+  previous sample and records a non-pushed `sleep`; outages under 30 s are dropped; a backwards
+  wall clock gives an empty span, never inverted; `now < last_alive` gives no interval. → PASS.
+- Release: held notice released on `Online` or after 12 consecutive `Unknown` steps. → PASS.
+- Ordering: `PushRuntime` exists before `OfflineRuntime::start`; the sink drops notices unless
+  `is_active()`; the watcher is spawned only when the store was usable; the sink is invoked after
+  the tracker guard is released (no nested lock with the scheduler). → PASS.
+- Scheduler: `take_due` shares `budget_due` (coalescing, spacing, 20/h); earlier first-noted wins,
+  alert wins ties; notice retries (5 s, 30 s, 2 min, 10 min, then `Failed`) are per endpoint,
+  merged on a new notice, pruned with `known`, and included in `next_wake`. → PASS.
+- Config: `offline_alerts` without push → `OfflineRequiresPush` (exit 78, no restart loop);
+  `with_offline_alerts` ignores the wiring unless both flags are set. → PASS.
+- `connect_system_bus` keeps the single pinned `Builder::address(`, `method_timeout`,
+  `max_queued`, connect timeout. → PASS.
+- Rebase: no main API used by this branch changed (§1). → PASS.
 
 ### PAM Concurrency & Deadlines
-- `crates/pam` not in the diff; no Tokio, deadlines, `catch_unwind` or `PAM_IGNORE` paths changed.
-  Daemon `Auth` path: `begin_scan`/`finish` are synchronous `send_modify`/`send_if_modified` (no
-  await, no I/O, no logging); no post-scan hold exists in the dispatcher. PASS.
+- No PAM code touched. Remote bounds: observation under `NETWORK_READ_DEADLINE_MS` (3 s < 5 s
+  tick, compile-time assert covers connect + 4 calls); stop under `OFFLINE_STOP_DEADLINE_MS`, its
+  shutdown read under 1.5 s; store lock retries bounded by `STORE_LOCK_TIMEOUT_MS`; no
+  `std::sync::Mutex` guard across `.await` (`step`, `start`, `persist`, `stop`, sink). → PASS.
 
 ### Panic Safety & Fail-Closed
-- Production hunks: no `unwrap/expect/panic!/todo!/unreachable!`, no indexing; all arithmetic
-  saturating; `now < stamp` handled by `saturating_sub` (board test covers it). `spawn_blocking` +
-  `timeout`: only `Ok(Ok(true))` serves data; `JoinError`/elapsed/`false` → neutral. The
-  `ScanGuard` `Drop` settles to `Idle` (never `NotRecognized`, never a success claim). Only
-  `Verdict::Allow` maps to `Recognized`, which reads `Idle` — no state ever reads as success.
-  PASS.
+- No `unwrap`/`expect`/`panic!`/indexing in the new production paths (`offline.rs` grep clean;
+  `main.rs` `unwrap_or(u64::MAX)` only). `spawn_blocking` join errors map to `Io`; poisoned
+  mutexes are skipped. A refused store sets `failed`, the watcher is not spawned and `stop()`
+  returns early, so the bad file is never rewritten. The watcher is supervised (panic →
+  `TaskPanicked`). This feature has no unlock/allow path. → PASS.
 
 ### Test Integrity & Anti-Weakening
-- LKS19 `test_lks_fast_and_slow_presence_failures_schedule_the_next_scan_identically` drives the
-  real `run()` loop: with the old behaviour (`scan_interval` 1000 ms in `fast_presence_config`)
-  the fast gap would be ≈1.0 s and the slow ≈1.9 s, failing both the `expected ≈ 4.24 s` window and
-  the 250 ms equality bound; it also asserts the identical 4-step visible trace. The
-  `post_scan_hold` unit test pins the anchoring to the scan start (±5/50 ms) for both outcomes and
-  `ZERO` for unlock and skipped ticks. Mapping tests cover no-match, spoof, camera unavailable,
-  post-match refusal, preemption, unlock, and every PAM failure class. No pre-existing test
-  touched. PASS.
+- See §2. New tests discriminate plausible wrong implementations (boottime-vs-wall duration,
+  floor, notice merge, generic payload, shared budget, Funnel 403, never-rewritten bad store,
+  heartbeat rate, "off installs nothing"). → PASS.
 
 ### Memory, Bounds & Secrets
-- Board: `MAX_LOCK_STATE_UIDS` = 32 with LRU eviction; entries hold counters and monotonic stamps
-  only. Quota table 64 UIDs. Response ≤ 12-byte payload, encoded via the bounded codec into
-  `Zeroizing`. Logs: `debug!` with `peer_uid` only; no frames, embeddings, reasons or credentials.
-  Fuzz target `decode_lock_state` asserts no panic, closed state set, size bound, round trip and
-  disjointness from `Response`; added to the CI fuzz matrix. PASS.
+- History ≤ 32 (evicting); store ≤ 8 KiB on read and write, compile-time assert on 32 serialized
+  intervals; notice retries ≤ one per known endpoint. Store uses `read_owned_file`,
+  `try_lock_file`, `check_parent_dir`, `write_atomic` (`O_NOFOLLOW`, owner/mode checks, `flock`,
+  temp + `fsync` + `rename`, `0600`).
+- Privacy: only `State`, `Connectivity`, `WirelessEnabled` (NetworkManager), `NameHasOwner`
+  and `PreparingForShutdown` (logind) are read; no SSID, hardware address, IP config, active
+  connection, access point or hostname; no signal match, proxy or `Inhibit`; no inet socket.
+  Audit lines are fixed vocabulary; `generic` previews carry no reason text. `/api/offline` is
+  not Funnel-public (403 `login_required`), GET/HEAD only. → PASS.
 
 ### Supply Chain & Automation
-- `.github/workflows/fuzz.yml`: matrix string only; SHA pins and permissions unchanged. No new
-  dependency (`Cargo.toml` change is a fuzz `[[bin]]`). PASS.
+- No `Cargo.*`, `deny.toml`, workflow or hook change; `scripts/install_remote.sh` adds a commented
+  template key only. → PASS.
 
 ### English-Only Policy
-- All code, comments and docs in English. PASS.
+- All code, comments, docs and UI strings are English. → PASS.
 
 ## 4. Detailed Findings & Action Items
 
-- **[SUGGESTION]** `crates/daemon/src/lock_state.rs:48` — the 3240 ms floor bounds a regular
-  non-match only while inference admission overrun stays within one nominal estimate (80 ms); on
-  hardware whose real inference greatly exceeds the estimate a full non-match could end past the
-  floor and become distinguishable from an early veto. Consider a `debug!`-level counter (no
-  outcome detail) when a non-unlocking presence scan ends after the floor, to detect this in the
-  field.
-- **[SUGGESTION]** `crates/daemon/src/dispatcher.rs:1232` — on timeout the `spawn_blocking`
-  sessions scan keeps running detached and is not tracked by `BlockingTasks`; bounded by the 8/s
-  per-UID quota and harmless (read-only `read_dir`), but tracking it would keep shutdown draining
-  symmetric with the evidence writes.
-- **[SUGGESTION]** `crates/daemon/src/presence/worker.rs:675` — post-Allow failures
-  (`SessionChanged`, `AccountRefused`, `LidClosed`, `UnlockFailed`) can be revealed after the floor
-  when bounded D-Bus calls stall; accepted and documented in the ADR (needs an already matching
-  face), noted here for the owner's confirmation on #352.
+- **[MINOR — RESOLVED, carried forward]** `AI/DECISIONS.md` — the earlier accidental edit to the
+  2026-10-06 ADR ("rMC23") stays fixed; `git diff af511eb HEAD -- AI/DECISIONS.md` removes no line.
+- **[SUGGESTION — open, carried forward]** `crates/remote/src/main.rs` (`offline_wiring`) — a
+  refused network store path logs through `warn!` instead of the fixed audit vocabulary of ADR
+  item (6), and leaves `/api/offline` at `disabled` rather than `unavailable`. Follows the push
+  precedent and leaks nothing (`%err` prints only the byte limit). Consider documenting it or
+  reporting `unavailable`.
 
 ## 5. Final Verdict
 

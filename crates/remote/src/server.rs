@@ -45,6 +45,12 @@
 //! only once the first JPEG is ready and then streams `soosframe` multipart parts until
 //! an end condition. Tailnet only unless `camera_view_funnel = true`. Never recorded.
 //!
+//! Offline history (ADR 2026-10-13 "Offline History and Back-Online Push Notifications in
+//! `soos-remote`"): when `offline_alerts = true` (with push) and a source is wired, `serve`
+//! starts the offline runtime after the push store, supervises its watcher, and on a clean
+//! shutdown writes the stop marker under `OFFLINE_STOP_DEADLINE_MS`. `GET /api/offline` has
+//! the visibility of `/api/alerts` (never Funnel-public).
+//!
 //! Battery level (ADR 2026-10-07 "Live Battery Level in `soos-remote`"): when
 //! `battery_status = true` and a source is wired, `serve` supervises a sampler that reads the
 //! source every `BATTERY_SAMPLE_INTERVAL_MS` only while a stream is open. `GET /api/battery`
@@ -101,6 +107,7 @@ use crate::http::{
 use crate::identity::{check_host, classify_request, client_hint, ClientHint, PathClass};
 use crate::journal::JournalSource;
 use crate::logind::{SessionSource, SourceError};
+use crate::offline::{NetworkSource, OfflineClock, OfflineRuntime, OfflineSettings, OfflineView};
 use crate::push::{run_dispatcher, PushRuntime, PushSettings, PushTransport, PushView};
 use crate::routes::{
     accepts_body, allow_header, camera_stream_token, check_alerts_ack_csrf, check_auth_csrf,
@@ -113,6 +120,7 @@ use crate::webauthn::{
     b64url_encode, parse_client_data, verify_registration, CeremonyType, RelyingParty,
 };
 use crate::websession::{clear_cookie_header, session_token_hash, set_cookie_header, Touch};
+use crate::OFFLINE_STOP_DEADLINE_MS;
 use crate::{
     ACTION_CAMERA_OPTIONS, ACTION_CAMERA_STOP, ACTION_CAMERA_STREAM, ACTION_CAMERA_VIEW,
     CAMERA_FIRST_FRAME_TIMEOUT_MS, CAMERA_VIEW_TOKEN_BYTES, CAMERA_VIEW_TOKEN_TTL_MS,
@@ -150,6 +158,13 @@ const STREAM_SINK_BYTES: usize = 64;
 /// Most bytes discarded by the lingering close before the connection is dropped.
 const LINGER_MAX_BYTES: usize = 64 * 1024;
 
+/// What `with_offline_alerts` wires: settings, bus source and clock.
+type OfflineWiring = (
+    OfflineSettings,
+    Arc<dyn NetworkSource>,
+    Arc<dyn OfflineClock>,
+);
+
 /// Source of `checked_unix_ms` (Unix time in ms); production uses `SystemTime::now`.
 pub type UnixClock = Arc<dyn Fn() -> u64 + Send + Sync>;
 
@@ -167,6 +182,7 @@ pub struct ServerState<S: SessionSource> {
     push: Option<(PushSettings, Arc<dyn PushTransport>)>,
     camera: Option<(CameraSettings, PreviewSourceFactory)>,
     battery: Option<Arc<dyn BatterySource>>,
+    offline: Option<OfflineWiring>,
 }
 
 impl<S: SessionSource> ServerState<S> {
@@ -190,6 +206,7 @@ impl<S: SessionSource> ServerState<S> {
             push: None,
             camera: None,
             battery: None,
+            offline: None,
         }
     }
 
@@ -210,6 +227,23 @@ impl<S: SessionSource> ServerState<S> {
     pub fn with_battery(mut self, source: Arc<dyn BatterySource>) -> Self {
         if self.config.battery.enabled {
             self.battery = Some(source);
+        }
+        self
+    }
+
+    /// Wires the offline history and back-online push (production and tests): the settings
+    /// resolved by `main`, the bus source and the clock. Ignored unless both
+    /// `config.offline.enabled` and `config.push.enabled` (ADR 2026-10-13; the configuration
+    /// already refuses the first without the second).
+    #[must_use]
+    pub fn with_offline_alerts(
+        mut self,
+        settings: OfflineSettings,
+        source: Arc<dyn NetworkSource>,
+        clock: Arc<dyn OfflineClock>,
+    ) -> Self {
+        if self.config.offline.enabled && self.config.push.enabled {
+            self.offline = Some((settings, source, clock));
         }
         self
     }
@@ -376,6 +410,8 @@ struct Shared<S: SessionSource> {
     camera: Arc<CameraRuntime>,
     /// Battery level (`None` when `battery_status` is off or no source is wired).
     battery: Option<Arc<BatteryRuntime>>,
+    /// Offline history (`None` when `offline_alerts` is off or not wired).
+    offline: Option<Arc<OfflineRuntime>>,
 }
 
 impl<S: SessionSource> Shared<S> {
@@ -384,11 +420,13 @@ impl<S: SessionSource> Shared<S> {
         alerts: Option<Arc<AlertsRuntime>>,
         push: Option<Arc<PushRuntime>>,
         battery: Option<Arc<BatteryRuntime>>,
+        offline: Option<Arc<OfflineRuntime>>,
     ) -> Self {
         Self {
             alerts,
             push,
             battery,
+            offline,
             seq: AtomicU64::new(state.seq_start),
             fatal: AtomicBool::new(false),
             subscribers: AtomicUsize::new(0),
@@ -789,7 +827,28 @@ pub async fn serve<S: SessionSource>(
         .as_ref()
         .map(|source| Arc::new(BatteryRuntime::new(Arc::clone(source))));
     let sampler = battery.clone();
-    let shared = Arc::new(Shared::new(state, alerts, push, battery));
+    // The offline history starts after the push store (its sink drops notices until then).
+    let offline = match state.offline.as_ref() {
+        Some((settings, source, clock)) => {
+            let runtime = OfflineRuntime::new(
+                settings,
+                state.file_owner_uid,
+                Arc::clone(&state.random),
+                Arc::clone(clock),
+                Arc::clone(source),
+                push.as_ref().map(PushRuntime::offline_sink),
+            );
+            runtime.start().await;
+            Some(runtime)
+        }
+        None => None,
+    };
+    let watcher = offline
+        .as_ref()
+        .filter(|runtime| runtime.is_active())
+        .cloned();
+    let stopper = offline.clone();
+    let shared = Arc::new(Shared::new(state, alerts, push, battery, offline));
     let connections: Arc<Mutex<JoinSet<()>>> = Arc::new(Mutex::new(JoinSet::new()));
     let mut supervised: JoinSet<ServeError> = JoinSet::new();
     supervised.spawn(poller(Arc::clone(&shared)));
@@ -804,6 +863,13 @@ pub async fn serve<S: SessionSource>(
         // No push error ends the dispatcher; a panic is `TaskPanicked` (supervised set).
         supervised.spawn(async move {
             run_dispatcher(runtime).await;
+            std::future::pending::<ServeError>().await
+        });
+    }
+    if let Some(runtime) = watcher {
+        // The offline watcher never ends `serve` on its own; a panic is `TaskPanicked`.
+        supervised.spawn(async move {
+            runtime.run_watcher().await;
             std::future::pending::<ServeError>().await
         });
     }
@@ -833,6 +899,14 @@ pub async fn serve<S: SessionSource>(
     shared.closing.send_replace(true);
     supervised.abort_all();
     while supervised.join_next().await.is_some() {}
+    // Clean stop marker of the offline history, after the watcher ended (bounded).
+    if let (Ok(()), Some(runtime)) = (&result, stopper.as_ref()) {
+        let _ = timeout(
+            Duration::from_millis(OFFLINE_STOP_DEADLINE_MS),
+            runtime.stop(),
+        )
+        .await;
+    }
     {
         let mut set = connections.lock().await;
         set.abort_all();
@@ -1297,6 +1371,7 @@ async fn handle_connection<S: SessionSource>(
         Route::AlertsAck => Some(alerts_ack(&shared, &ctx).await),
         Route::Push => Some(push_view_response(&shared).await),
         Route::Battery => Some(battery_response(&shared).await),
+        Route::Offline => Some(offline_response(&shared)),
         Route::PushSubscribe => {
             push_body_route(&shared, &ctx, &mut stream, PushBodyRoute::Subscribe).await
         }
@@ -2507,6 +2582,23 @@ fn camera_first_frame_refusal(runtime: &CameraRuntime, end: ViewEnd) -> Option<R
     };
     runtime.audit_refused();
     Some(response)
+}
+
+/// `GET|HEAD /api/offline` (the disabled view when the offline history is off or unwired).
+fn offline_response<S: SessionSource>(shared: &Shared<S>) -> Response {
+    let view = shared
+        .offline
+        .as_ref()
+        .map_or_else(OfflineView::disabled, |runtime| runtime.view());
+    match serde_json::to_vec(&view) {
+        Ok(body) => Response {
+            status: 200,
+            content_type: "application/json",
+            body,
+            extra_headers: Vec::new(),
+        },
+        Err(_) => Response::json(503, "unavailable"),
+    }
 }
 
 /// `GET|HEAD /api/battery` (the disabled view when the battery level is off or unwired).

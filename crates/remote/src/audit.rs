@@ -7,7 +7,10 @@
 //! `push sender unavailable`, `push notifications unavailable`; ADR 2026-10-06 "Web Push
 //! Notifications for Failed-Password Alerts Through a Separate Sender Unit", W-14), and of the
 //! live camera view (`camera view started`, `camera view ended`, `camera view refused`; ADR
-//! 2026-10-07 "Live Camera View in `soos-remote` Through the Daemon Preview Channel").
+//! 2026-10-07 "Live Camera View in `soos-remote` Through the Daemon Preview Channel"), and of
+//! the offline history (`offline alerts active`, `offline alerts unavailable`, `offline history
+//! not persisted`; ADR 2026-10-13 "Offline History and Back-Online Push Notifications in
+//! `soos-remote`").
 //!
 //! Each line is one `INFO` or `WARN` event with a constant message and no field. It is dispatched to
 //! the current subscriber after its own `enabled` check instead of through a `tracing` macro:
@@ -203,6 +206,42 @@ static PUSH_UNAVAILABLE_META: Metadata<'static> = Metadata::new(
     Kind::EVENT,
 );
 
+static OFFLINE_ACTIVE_CALLSITE: AuditCallsite = AuditCallsite(&OFFLINE_ACTIVE_META);
+static OFFLINE_ACTIVE_META: Metadata<'static> = Metadata::new(
+    "offline alerts active",
+    "soos_remote::audit",
+    Level::INFO,
+    Some(file!()),
+    Some(line!()),
+    Some(module_path!()),
+    FieldSet::new(FIELDS, Identifier(&OFFLINE_ACTIVE_CALLSITE)),
+    Kind::EVENT,
+);
+
+static OFFLINE_UNAVAILABLE_CALLSITE: AuditCallsite = AuditCallsite(&OFFLINE_UNAVAILABLE_META);
+static OFFLINE_UNAVAILABLE_META: Metadata<'static> = Metadata::new(
+    "offline alerts unavailable",
+    "soos_remote::audit",
+    Level::WARN,
+    Some(file!()),
+    Some(line!()),
+    Some(module_path!()),
+    FieldSet::new(FIELDS, Identifier(&OFFLINE_UNAVAILABLE_CALLSITE)),
+    Kind::EVENT,
+);
+
+static OFFLINE_NOT_PERSISTED_CALLSITE: AuditCallsite = AuditCallsite(&OFFLINE_NOT_PERSISTED_META);
+static OFFLINE_NOT_PERSISTED_META: Metadata<'static> = Metadata::new(
+    "offline history not persisted",
+    "soos_remote::audit",
+    Level::WARN,
+    Some(file!()),
+    Some(line!()),
+    Some(module_path!()),
+    FieldSet::new(FIELDS, Identifier(&OFFLINE_NOT_PERSISTED_CALLSITE)),
+    Kind::EVENT,
+);
+
 /// Dispatches one audit event whose message is the metadata name.
 fn emit(meta: &'static Metadata<'static>) {
     tracing::dispatcher::get_default(|dispatch| {
@@ -290,4 +329,19 @@ pub fn camera_view_ended() {
 /// caller to one line per `CAMERA_REFUSED_AUDIT_MIN_INTERVAL_MS`).
 pub fn camera_view_refused() {
     emit(&CAMERA_REFUSED_META);
+}
+
+/// `INFO offline alerts active` (the offline history store was usable at start).
+pub fn offline_active() {
+    emit(&OFFLINE_ACTIVE_META);
+}
+
+/// `WARN offline alerts unavailable` (the offline history store was refused at start).
+pub fn offline_unavailable() {
+    emit(&OFFLINE_UNAVAILABLE_META);
+}
+
+/// `WARN offline history not persisted` (once per streak of failed history writes).
+pub fn offline_not_persisted() {
+    emit(&OFFLINE_NOT_PERSISTED_META);
 }

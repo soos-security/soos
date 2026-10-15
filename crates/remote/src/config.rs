@@ -20,7 +20,8 @@ use crate::{
     ALERTS_ACK_FILE_NAME, CREDENTIALS_FILE_NAME, MAX_ALLOWED_HOSTS, MAX_ALLOWED_LOGINS,
     MAX_CONFIG_BYTES, MAX_CREDENTIALS_PATH_LEN, MAX_LOCK_SCREEN_PROGRAMS, MAX_LOGIN_LEN,
     MAX_POLL_INTERVAL_MS, MAX_SOCKET_PATH_LEN, MAX_VAPID_SUBJECT_LEN, MIN_POLL_INTERVAL_MS,
-    PUSH_STORE_FILE_NAME, SOCKET_DIR_NAME, SOCKET_FILE_NAME, TS_NET_SUFFIX,
+    NETWORK_STORE_FILE_NAME, PUSH_STORE_FILE_NAME, SOCKET_DIR_NAME, SOCKET_FILE_NAME,
+    TS_NET_SUFFIX,
 };
 use crate::{
     CAMERA_FULL_WIDTH, CAMERA_HALF_WIDTH, DEFAULT_CAMERA_FPS, DEFAULT_CAMERA_MAX_VIEW_S,
@@ -89,6 +90,16 @@ pub struct RemoteConfig {
     pub camera: CameraConfig,
     /// Battery level settings (ADR 2026-10-07 "Live Battery Level in `soos-remote`").
     pub battery: BatteryConfig,
+    /// Offline history and back-online push settings (ADR 2026-10-13 "Offline History and
+    /// Back-Online Push Notifications in `soos-remote`").
+    pub offline: OfflineConfig,
+}
+
+/// Offline history and back-online push settings; `Default` = off.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct OfflineConfig {
+    /// `offline_alerts`; default `false`; requires `push_notifications = true`.
+    pub enabled: bool,
 }
 
 /// Output width of the live view.
@@ -338,6 +349,9 @@ pub enum ConfigError {
     /// `camera_quality` outside the accepted range (the value is never echoed).
     #[error("camera_quality out of range")]
     CameraQualityOutOfRange,
+    /// `offline_alerts = true` without `push_notifications = true`.
+    #[error("offline_alerts requires push_notifications")]
+    OfflineRequiresPush,
 }
 
 /// Pure. `Err(RunningAsRoot)` when `uid == 0 || euid == 0`.
@@ -377,6 +391,7 @@ struct FileConfig {
     camera_width: Option<u32>,
     camera_quality: Option<u8>,
     battery_status: Option<bool>,
+    offline_alerts: Option<bool>,
 }
 
 /// The six camera keys of the file.
@@ -746,6 +761,12 @@ pub fn parse_config(text: &str, runtime_dir: Option<&Path>) -> Result<RemoteConf
         camera_quality: file.camera_quality,
     };
     let camera = camera_config(&camera_keys, rp_id.as_deref(), allow_funnel)?;
+    let offline = OfflineConfig {
+        enabled: file.offline_alerts.unwrap_or(false),
+    };
+    if offline.enabled && !push.enabled {
+        return Err(ConfigError::OfflineRequiresPush);
+    }
     Ok(RemoteConfig {
         allowed_logins,
         socket_path,
@@ -763,6 +784,7 @@ pub fn parse_config(text: &str, runtime_dir: Option<&Path>) -> Result<RemoteConf
         battery: BatteryConfig {
             enabled: file.battery_status.unwrap_or(true),
         },
+        offline,
     })
 }
 
@@ -897,6 +919,27 @@ pub fn resolve_push_store_path(credentials_path: &Path) -> Result<PathBuf, Confi
         .filter(|parent| !parent.as_os_str().is_empty())
         .ok_or_else(invalid)?;
     let path = parent.join(PUSH_STORE_FILE_NAME);
+    if path.as_os_str().len() > MAX_CREDENTIALS_PATH_LEN {
+        return Err(invalid());
+    }
+    Ok(path)
+}
+
+/// Pure. `<parent of credentials_path>/NETWORK_STORE_FILE_NAME` (the offline history).
+///
+/// # Errors
+///
+/// [`ConfigError::InvalidCredentialsPath`] when `credentials_path` has no parent or the
+/// result exceeds `MAX_CREDENTIALS_PATH_LEN`.
+pub fn resolve_network_store_path(credentials_path: &Path) -> Result<PathBuf, ConfigError> {
+    let invalid = || ConfigError::InvalidCredentialsPath {
+        max: MAX_CREDENTIALS_PATH_LEN,
+    };
+    let parent = credentials_path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .ok_or_else(invalid)?;
+    let path = parent.join(NETWORK_STORE_FILE_NAME);
     if path.as_os_str().len() > MAX_CREDENTIALS_PATH_LEN {
         return Err(invalid());
     }

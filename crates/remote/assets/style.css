@@ -889,3 +889,8 @@ html.camera-lock body {
     height: 100vw;
   }
 }
+
+/* Offline history (ADR 2026-10-13): the list reuses the shared .table rules; a row may wrap. */
+.offline-history li {
+  flex-wrap: wrap;
+}

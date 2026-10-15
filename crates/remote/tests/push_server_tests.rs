@@ -204,6 +204,7 @@ async fn start_push(
         push,
         camera: soos_remote::config::CameraConfig::default(),
         battery: soos_remote::config::BatteryConfig::default(),
+        offline: soos_remote::config::OfflineConfig::default(),
     };
     let alert_settings = AlertSettings {
         owner_login: Some(OwnerLogin::parse(OWNER).unwrap()),

@@ -374,6 +374,15 @@ mod ui_motion_spec_contract;
 #[cfg(test)]
 mod lock_state_contract;
 
+/// Offline history and back-online push of `soos-remote`: RC-1 kept, read-only bus (four
+/// `Properties.Get` reads, no match, no mutating method), no network identifier anywhere,
+/// enum-only notice, page card and service worker tag, documentation (GitHub #376, tier 1 of
+/// #359 Part B, ADR 2026-10-13 "Offline History and Back-Online Push Notifications in
+/// `soos-remote`"; spec AI/architect_spec_remote_offline_alerts.md §7, §10.6; rows ROA1, ROA2,
+/// ROA6, ROA9-ROA11).
+#[cfg(all(test, unix))]
+mod remote_offline_contract;
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,

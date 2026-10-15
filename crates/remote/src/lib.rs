@@ -31,6 +31,12 @@
 //! accesses, sent as `event: battery` on the status stream and as `GET /api/battery`, with
 //! the visibility of `/api/status` (ADR 2026-10-07 "Live Battery Level in `soos-remote`").
 //!
+//! When `offline_alerts = true` (with `push_notifications = true`) it also records the intervals
+//! during which the PC was offline (network lost, Wi-Fi turned off, sleep, shutdown or crash),
+//! from read-only NetworkManager and logind property reads and the boot/monotonic clock gap,
+//! and sends one fixed-vocabulary back-online Web Push after an outage (ADR 2026-10-13
+//! "Offline History and Back-Online Push Notifications in `soos-remote`").
+//!
 //! This file is the single source of the crate constants (architect spec §3).
 
 #![forbid(unsafe_code)]
@@ -52,6 +58,7 @@ pub mod http;
 pub mod identity;
 pub mod journal;
 pub mod logind;
+pub mod offline;
 pub mod push;
 pub mod routes;
 pub mod server;
@@ -658,3 +665,56 @@ const _: () = assert!(MAX_BATTERIES <= MAX_POWER_SUPPLIES);
 // Any value of at most `MAX_SYSFS_MICRO_DIGITS` digits fits a `u64`.
 const _: () = assert!(MAX_SYSFS_MICRO_DIGITS < 20);
 const _: () = assert!(BATTERY_READ_TIMEOUT_MS < RUNTIME_SHUTDOWN_TIMEOUT_MS);
+
+// ---------------------------------------------------------------------------------------
+// Offline history and back-online push (ADR 2026-10-13 "Offline History and Back-Online Push
+// Notifications in `soos-remote`", architect spec `AI/architect_spec_remote_offline_alerts.md`
+// §3, §15, §16).
+// ---------------------------------------------------------------------------------------
+
+/// Offline history file name (sibling of the credential store).
+pub const NETWORK_STORE_FILE_NAME: &str = "remote-network.json";
+/// Largest offline history file; larger → `store_failed`.
+pub const MAX_NETWORK_STORE_BYTES: usize = 8192;
+/// Recorded intervals kept; the oldest is evicted.
+pub const MAX_OFFLINE_INTERVALS: usize = 32;
+/// Period of the offline watcher (clock samples and NetworkManager reads).
+pub const OFFLINE_TICK_MS: u64 = 5000;
+/// Shortest recorded interval, also the smallest suspend recorded as `sleep`.
+pub const OFFLINE_MIN_INTERVAL_MS: u64 = 30_000;
+/// At most one unchanged-history write (`last_alive_unix_ms`) per this interval.
+pub const OFFLINE_HEARTBEAT_MS: u64 = 60_000;
+/// Bound of one whole NetworkManager observation (connect included).
+pub const NETWORK_READ_DEADLINE_MS: u64 = 3000;
+/// Bound of the logind `PreparingForShutdown` read of the stop step (connect included).
+pub const OFFLINE_SHUTDOWN_READ_MS: u64 = 1500;
+/// Bound of the whole stop step (shutdown read plus the marker write).
+pub const OFFLINE_STOP_DEADLINE_MS: u64 = 3000;
+/// Consecutive `unknown` steps after which a held back-online notice is released (hosts
+/// without a readable NetworkManager).
+pub const OFFLINE_UNMONITORED_RELEASE_TICKS: u32 = 12;
+/// Delays of the retries of one back-online notice for one subscription.
+pub const OFFLINE_RETRY_DELAYS_MS: [u64; 4] = [5_000, 30_000, 120_000, 600_000];
+/// `Topic` of a back-online notice (never replaces an undelivered alert); ASCII letters and
+/// digits only.
+pub const PUSH_OFFLINE_TOPIC: &str = "soosonline";
+
+const _: () = assert!(NETWORK_READ_DEADLINE_MS < OFFLINE_TICK_MS);
+const _: () = assert!(OFFLINE_TICK_MS < OFFLINE_MIN_INTERVAL_MS);
+const _: () = assert!(OFFLINE_TICK_MS <= OFFLINE_HEARTBEAT_MS);
+const _: () =
+    assert!(DBUS_CONNECT_TIMEOUT_MS + 4 * DBUS_CALL_TIMEOUT_MS <= NETWORK_READ_DEADLINE_MS);
+const _: () = assert!(DBUS_CONNECT_TIMEOUT_MS + DBUS_CALL_TIMEOUT_MS <= OFFLINE_SHUTDOWN_READ_MS);
+const _: () = assert!(OFFLINE_SHUTDOWN_READ_MS + STORE_LOCK_TIMEOUT_MS < OFFLINE_STOP_DEADLINE_MS);
+// 192 bytes bound one serialized interval with four 20-digit numbers.
+const _: () = assert!(MAX_OFFLINE_INTERVALS * 192 + 256 <= MAX_NETWORK_STORE_BYTES);
+const _: () = assert!(PUSH_OFFLINE_TOPIC.len() <= soos_push_protocol::MAX_TOPIC_LEN);
+const _: () = assert!(is_ascii_alphanumeric_topic(PUSH_OFFLINE_TOPIC.as_bytes()));
+const _: () = assert!(!const_bytes_eq(
+    PUSH_OFFLINE_TOPIC.as_bytes(),
+    PUSH_TOPIC.as_bytes()
+));
+const _: () = assert!(!const_bytes_eq(
+    PUSH_OFFLINE_TOPIC.as_bytes(),
+    PUSH_TEST_TOPIC.as_bytes()
+));
