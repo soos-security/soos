@@ -48,7 +48,7 @@ pub const MESSAGE_TAG_MIN: u8 = 0x80;
 /// A decoded client-to-daemon message.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ClientMessage {
-    /// Request expecting a daemon response (`Auth`, `Status`, `PreviewFrame`).
+    /// Request expecting a daemon response (`Auth`, `Status`, `PreviewFrame`, `LockState`).
     Request(Request),
     /// Best-effort telemetry event (no response).
     Event(Event),

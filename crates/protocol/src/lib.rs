@@ -51,7 +51,8 @@ pub use message::{
     MESSAGE_TAG_EVENT, MESSAGE_TAG_REQUEST,
 };
 pub use types::{
-    Event, EventKind, ReasonClass, Request, RequestKind, Response, ResponseFreshnessError,
-    StatusResponse, Verdict, CURRENT_VERSION, MAX_MESSAGE_SIZE, MAX_RESPONSE_FUTURE_SKEW_NS,
+    Event, EventKind, LockStateResponse, LockWidgetState, ReasonClass, Request, RequestKind,
+    Response, ResponseFreshnessError, StatusResponse, Verdict, CURRENT_VERSION,
+    LOCK_STATE_RESPONSE_MAX_PAYLOAD, MAX_MESSAGE_SIZE, MAX_RESPONSE_FUTURE_SKEW_NS,
     MAX_SERVICE_LEN, REQUEST_ID_LEN,
 };

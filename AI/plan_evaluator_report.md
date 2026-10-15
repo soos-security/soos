@@ -1,99 +1,154 @@
-# Plan Evaluation Report
+# Plan Evaluation Report — Round 2
 - **Date**: 2026-10-13
-- **Issue**: GitHub-only (not in `AI/BACKLOG.md`): motion ADR, design direction and motion tokens (GitHub #377 = PR 1 of #358)
-- **Branch**: `chore/ui-motion-spec`
+- **Issue**: GitHub #380 (PR 1 of #352) — read-only `LockState` request kind and daemon lock-state snapshot
+- **Branch**: `feat/lockscreen-status`
 - **Base commit**: `6f32ef8`
-- **Spec evaluated**: `AI/architect_spec_ui_motion.md`, plus the draft invariants `tests/invariants/src/ui_motion_spec_contract.rs` (registered in `tests/invariants/src/lib.rs`)
+- **Spec evaluated**: `AI/architect_spec_lockscreen_status.md`
+- **Draft contract tests checked for power**: `crates/protocol/tests/lock_state_tests.rs`,
+  `crates/daemon/tests/lock_state_{board,dispatcher,presence}_tests.rs`,
+  `tests/invariants/src/lock_state_contract.rs`, `crates/protocol/fuzz/fuzz_targets/decode_lock_state.rs`
 
 ## 1. Coverage Matrix
-| Acceptance line (#377 / #358 "Spec and ADR" + owner decisions) | Spec element | Status |
+
+| Acceptance line (epic #352, PR 1) / TDD test | Spec element | Status |
 |---|---|---|
-| ADR amendment in `AI/DECISIONS.md` (amends brand ADR item (3), CSP/routes/11-file asset set/no gradients/no decorative shadows restated) | §1 row 1, D-1, D-9, §7; UIM-S1 | Covered (UIM-S1 needles miss "routes" and the asset set, see m3) |
-| `Docs/UI_MOTION.md` (tokens, components, reduced motion, anti-slop rules) | D-1…D-16, §1; UIM-S2, S3, S5 | Covered |
-| `Docs/REMOTE_COMPANION.md` §2e update | §1, UIM-S6 (S55 needles kept) | Covered |
-| Tester contract for `feat/remote-motion` and `feat/gui-motion` | `AI/tester_contract_motion.md`, §8; UIM-S1 needles | Covered |
-| Static self-contained HTML prototype in `Docs/prototypes/` | D-16; UIM-S4 | Covered (test power gaps, m1) |
-| Optional invariant tests | UIM-S1…S6 | Covered |
-| Owner 1: keep brand, no gradients, no decorative shadows | D-1, D-2, D-16 | Covered |
-| Owner 2: spring overshoot at most 4 % | D-5, D-6; UIM-S3 | Covered, math re-verified (§2) |
-| Owner 3: prototype approval before implementation PRs merge | D-16 (matrix UIM7); UIM-S5 needle `UIM7` | Covered |
-| Owner 4: GUI reduced motion = XDG portal + `--reduce-motion` / `SOOS_REDUCE_MOTION` | D-13; UIM-S5 | Covered (dependency recording, m5) |
-| Owner 5: GUI dark variant out of scope | D-15; UIM-S5 | Covered |
-| Owner 6–8: four-PR split | §1 consumers, §8 later PRs | Covered |
-| #358 lines judged not applicable (custom unlock dialog, battery bar, toasts, overlay interpolation) | D-10, D-15, §9 | Recorded as drift with rationale; owner sees them in the prototype review |
-| Every existing test unmodified | §7; `git diff` touches only `lib.rs` (module registration) | Covered |
+| ADR | §8 "Read-Only Lock-Screen State Channel" (threat model, collapsed state, floor, authorization, quota) | Covered (ADR text must scope the floor claim, F4) |
+| `RequestKind::LockState` wire 3 | §2.1, §3; `test_lks_request_kind_lock_state_is_wire_value_3` | Covered |
+| Bounded `LockStateResponse` | §2.1 `LOCK_STATE_RESPONSE_MAX_PAYLOAD = 12`; `test_lks_response_payload_is_bounded`, fuzz bound assert | Covered |
+| Docs wire table | §1 Docs row; existing `test_ipc_protocol_doc_wire_indices_match_code` + `test_lks_ipc_doc_lists_lock_state_wire_rows` | Covered |
+| proptest | `prop_lks_round_trip`, `prop_lks_lock_state_is_never_another_response`, `prop_lks_decoder_never_panics`, `prop_lks_request_round_trip` | Covered |
+| Fuzz target | §1 `decode_lock_state` + workflow matrix; `test_lks_fuzz_harness_covers_the_lock_state_response` | Covered |
+| Unknown state byte decodes to error | §2.1 "3..=255, or a multi-byte varint ⇒ `CodecError::Deserialize`"; `test_lks_unknown_state_byte_is_a_decode_error` | **Defective**: the multi-byte half is false for the specified representation (F1) |
+| UID mismatch ⇒ `ProtocolError`/`UidMismatch` | §2.4 reuses Step 6; `test_lks_other_uid_is_refused_uid_mismatch` | Covered |
+| UID without local seat session gets no data | §2.4 step 1.3 `has_local_seat_session(uid_hint)` ⇒ `{Idle,0}`; `test_lks_uid_without_local_seat_session_gets_no_data` | Covered |
+| Never records a rate-limit attempt | §2.4 step 2, separate `lock_state_limiter`; `test_lks_lock_state_has_no_side_effect` (`tracked_uids == 0`, 40 remaining), quota test | Covered |
+| Never wakes the camera | §2.4 step 2; `camera.wakes() == 0`, `inferences() == 0` | Covered |
+| Never changes presence timing | §2.3/§6; `test_lks_lock_state_polling_never_changes_presence_timing` | Covered |
+| Every Deny reason incl. PAD ⇒ single `NotRecognized` | §2.3 mapping; PAM low score / PAD / no face / multiple faces / camera; presence no-match / spoof / camera | Covered (gaps: PAM `Aborted`/deadline and presence post-`Allow` failures untested, F7) |
+| Errors/timeouts never map to a success | No success value on the wire (§2.1); `Allow`/`Unlocked` ⇒ `Idle`; drop ⇒ `Idle`; clock `None` ⇒ `Idle` | Covered |
+| Invariant: no score/reason/frame/embedding/template/session-id fields | `test_lks_lock_state_response_has_only_coarse_fields`, `test_lks_daemon_snapshot_stores_nothing_biometric` | Covered |
+| Invariant: forbid unsafe | `lock_state.rs` `#![forbid(unsafe_code)]` asserted | Covered |
+| Invariant: no unwrap/expect | `lock_state.rs` textual check + workspace `unwrap_used`/`expect_used = "deny"` (`Cargo.toml:130-131`) | Covered |
+| Invariant: nothing biometric logged | `lock_state.rs` has no log macro at all (asserted) | Partial: the dispatcher handler and the publication sites are not pinned (F6) |
+| Owner Q2: visible states Scanning / Idle / Not recognized only | `LockWidgetState` 3 variants; `test_lks_widget_state_has_exactly_the_owner_approved_values` | Covered |
+| Owner Q3: animate for PAM and presence | §2.3 two publication points; dispatcher + presence tests | Covered |
+| PAM untouched | `test_lks_pam_module_is_untouched` | Covered |
+| One shared board | `test_lks_daemon_shares_one_board` | Covered |
 
 ## 2. Facts Verified Against Code
+
 | Fact cited by plan | Code location | Actual value | Match |
 |---|---|---|---|
-| Only web motion token `--t-fast: 120ms` | `crates/remote/assets/style.css` l.85 | `--t-fast: 120ms;` | Yes |
-| Button transition and press scale | `style.css` l.476, l.481 | `background-color/box-shadow/transform var(--t-fast)`; `scale(0.98)` | Yes |
-| One reduced-motion block | `style.css` l.754; S48 `media_blocks(...).len() == 1` | one block, `* { transition: none !important }` | Yes |
-| Five `:has()` selectors with pinned fallbacks | `style.css` l.400–410, 698; `HAS_FALLBACKS` (5) in `remote_cross_browser_contract.rs` l.138 | 5 selectors, RXB-S7 panics on an unpinned one | Yes |
-| `data-state` hooks set synchronously in `render()` | `app.js` l.471–478 | `stateNode.dataset.state`, `className`, `statTile.dataset.state` (known states else `unknown`) | Yes |
-| Native unlock confirmation | `app.js` l.938 | `window.confirm("Unlock the PC now?")` | Yes |
-| `lockRequestedAt` / `unlockRequestedAt`, 5000 ms deadlines | `app.js` l.59, 62, 853, 952 | `LOCK_CONFIRM_UI_MS = UNLOCK_CONFIRM_UI_MS = 5000`; unlock flag set after `getAssertion` | Yes |
-| Camera full screen hooks | `app.js` l.1601–1645, `endCameraView` l.1868 | `camera-full`, `camera-lock`; `endCameraView` exits then hides and clears synchronously | Yes |
-| Brand CSS parser: one at-rule level, no nesting | `remote_brand_contract.rs` `parse_css` l.566 | "nested at-rule" / "nested block" errors | Yes |
-| `app.js` style ban | `remote_camera_contract.rs` l.1132 | `.style.`, `cssText`, `setAttribute("style"`, `"style"` | Yes |
-| GUI motion today | `crates/gui/src/widgets.rs` l.196, l.772 | `animate_value_with_time(…, 0.25)`, `animate_bool_with_time(…, 0.15)` | Yes |
-| Spinners | `camera_status.rs` l.154, `header.rs` l.374 | `egui::Spinner` | Yes |
-| GUI shadows | `theme.rs` l.94, 195–206 | `SHADOW` window/popup shadows | Yes |
-| egui version | `Cargo.lock` | 0.35.0 | Yes |
-| zbus | root `Cargo.toml` l.60 | `default-features = false, features = ["tokio"]` (no `blocking-api`, needs a Tokio runtime) | Yes (see m5) |
-| soos-gui has no zbus/Tokio | `crates/gui/Cargo.toml` | none | Yes |
-| soos-gui is Linux-only (not portable) | `portable_crates_contract.rs` l.92 | listed as Linux-only crate, zbus allowed | Yes |
-| Spring D-5 (independent `python3 -I`) | `/tmp/claude-1000/spring_check.py` | ωn 20, ζ 0.75, ωd 13.2288, overshoot 2.8375 % at 237.5 ms, last 0.1 % excursion 399.93 ms | Yes (settle margin only 0.07 ms; test allows +1 ms) |
-| 380/32 drift numbers (§9) | same script | ζ 0.8208, overshoot 1.095 %, settle 442.6 ms | Yes |
-| D-6 `linear()` | same script | 22 stops, max error 0.0030 at 21.7 %, peak 1.0271 | Yes |
-| D-6 fallback `cubic-bezier(0.37, 0.73, 0.1, 1.15)` | same script | peak 1.0302, max error 0.0400 | Yes |
-| Closed-form stepping, D-7 criterion | same script | settles at 0.400 s (30 Hz), 0.400 s (60 Hz), 0.403 s (144 Hz), never unsettles | Yes |
-| Docs index test scope | `maintainer_hygiene_contract.rs` l.488 | top-level `Docs/*.md` only; `Docs/prototypes/*.html` not required in the index | OK |
-| `/home/` path test scope | same file l.120 | scripts, hooks, packaging, tests/docker…; not `Docs/` (UIM-S4 forbids `/home/` anyway) | OK |
-| Secret scan | `scripts/secret_scan.sh` l.82 | PEM, GitHub, AWS, Slack, `sk-` patterns; key file names | Prototype cannot match (no keys) |
-| English check | `scripts/candid_review.sh` l.304 | scans `*.rs *.md *.sh *.yml *.toml`, **not `*.html`** | Gap (m7) |
-| Draft test formatting | `rustfmt --check` | fails (l.115 `STANDARD_EASINGS`, l.289–290, self-test) | m8 |
+| `RequestKind` = Auth 0 / Status 1 / PreviewFrame 2 | `crates/protocol/src/types.rs:59-66` | same; LockState appended at index 3 | Yes |
+| `MAX_CAMERA_WAKE_WAIT_MS` | `crates/daemon/src/consensus.rs:28` | 1200 | Yes |
+| `PRESENCE_WAKE_SETTLE_MS` | `crates/daemon/src/presence/mod.rs:88` | 1000 | Yes |
+| `DECISION_BUDGET_MS` | `crates/daemon/src/pipeline.rs:19` | 900 | Yes |
+| `RESPONSE_WRITE_MARGIN_MS` | `crates/daemon/src/inference.rs:30` | 50 | Yes |
+| Floor = 1200 + 1000 + 900 + 50 | derived | 3150 | Yes |
+| "Floor equals the longest regular non-matching presence scan" | `presence/worker.rs:633-690` (wake ≤ 1200, settle ≤ 1000, budget 900 + margin) | true for presence pre-`Allow` outcomes | Yes (presence only, F4) |
+| Longest PAM scan | `config.rs:22-34` connection_timeout default 2500, bounds 100..=10 000; PAM `timeout_ms` ≤ 5000 | up to ~5000 ms, above the floor | Not covered by the floor (F4) |
+| Post-`Allow` presence steps | `presence/mod.rs:45,65,80`: `DBUS_CALL_TIMEOUT_MS` 500, `MAX_ALLOW_TO_UNLOCK_MS` 1000, `ACCOUNT_CHECK_TIMEOUT_MS` 500 | can push `SessionChanged`/`AccountRefused`/`LidClosed`/`AllowExpired`/`UnlockFailed` past the floor | F4 |
+| `RateLimiter::new_with_capacity(8, 1 s, 64)` | `crates/policy/src/rate_limit.rs:41,84` | constructor is `RateLimitConfig::new_with_capacity`; limiter is `RateLimiter::new(config)` | No (F2) |
+| "limiter table full ⇒ RateLimited" | `rate_limit.rs:165-186` | a new UID evicts the LRU UID; refusal for capacity only when capacity is 0 | No (F2) |
+| Step 6 answers `UidMismatch` for an unprivileged mismatching peer | `dispatcher.rs:756-783` | yes | Yes |
+| Step 6b is `Auth` only | `dispatcher.rs:787-791` | yes | Yes |
+| Auth-reserved connection admits only `Auth` | `dispatcher.rs:596-607` | yes | Yes |
+| One-shot only for `Auth` | `dispatcher.rs:612` | yes; LockState stays persistent | Yes |
+| No exhaustive `match` on `RequestKind` outside protocol | `dispatcher.rs` (`==`, `matches!`); `limits.rs`/`preview.rs` doc comments only; clients only construct | yes. Note: every kind other than `Status`/`PreviewFrame` currently falls through into the `Auth` pipeline, so the 6d branch must return before Step 7 (pinned by `test_lks_lock_state_has_no_side_effect`) | Yes |
+| Publication point "after 8d, before 8d-1" | `dispatcher.rs:938-973` | 8c records the attempt, 8d answers missing template/store error, 8d-1 `notify_activity` | Yes |
+| Presence publication "after `record_attempt_with_reserve` and `mark_scan_started`" | `presence/worker.rs:608-618` | yes | Yes |
+| `ScanOutcome` list | `presence/worker.rs:119-150` | 14 variants as listed | Yes |
+| `has_local_seat_session` | `session.rs:96` | exists; emits `warn!` on every call when the sessions dir is missing (`session.rs:110-115`) | Yes (F5) |
+| Per-UID connection cap | `limits.rs:23,49` | 2 regular + 1 auth reserve | Yes (F8) |
+| Codec strictness | `codec.rs:277-286` (`postcard::take_from_bytes` + trailing rejection) | trailing bytes rejected; `Response` payload ≥ 37 bytes vs ≤ 12 ⇒ mutually exclusive | Yes |
+| Postcard varint canonicality | `postcard-1.1.3/src/de/deserializer.rs:85-101` | **overlong varints accepted** (`0x81 0x00` decodes to 1) | No (F1) |
+| Old daemon rejects kind 3 | serde-derived enum index check | `Deserialize` error ⇒ frame rejected, connection closed | Yes |
+| Existing invariants needing updates | `protocol_codec_contract.rs:255-268` (wire-index rows), `daemon_docs_contract.rs:125-140` | the IPC doc must gain the `RequestKind::LockState` / 3 row; the spec plans it | Yes |
 
 ## 3. Pillar Analysis
+
 ### Pillar 1 — Architecture & threat model
-- Failure scenario considered: the View Transition snapshot or a motion hook widens the web app's surface (new asset, CSP relaxation, frame retained by an effect). D-9 forbids WAAPI, `.style.`, new assets and CSP changes; `::view-transition-*` styles live in `style.css` under `style-src 'self'`. `endCameraView` hides the stage and clears the canvas synchronously after `exitCameraFullscreen`, so the old-state capture (next rendering step) never holds a frame. No daemon, PAM, IPC or socket change.
-- Result: PASS (one robustness gap in the View Transition callback, m4).
+- Failure scenario (cross-UID): unprivileged UID 1001 sends `LockState` with `uid_hint = 1000` ⇒ Step 6 answers `UidMismatch` before 6d. Root may query any UID (diagnostics, consistent with existing root semantics). PASS.
+- Failure scenario (remote same-UID): an SSH process of the locked user reads `Scanning` and learns when a face scan runs at the machine. Accepted as the user's own coarse data and recorded in the ADR (no cgroup check). PASS with documentation.
+- Failure scenario (wire exclusivity): a `Response` payload decoded as `LockStateResponse` leaves ≥ 25 trailing bytes ⇒ `TrailingBytes`; the reverse is too short. PASS. The "multi-byte varint is an error" claim is false under postcard (F1).
+- Failure scenario (old daemon): kind 3 ⇒ decode error ⇒ connection closed with one `warn!` per attempt; a 4 Hz bridge would flood an old daemon's journal unless it backs off (PR 2 concern, F5/F8).
+- No new socket, no permission change, UDS only.
+- Result: FINDING (F1 MAJOR).
 
 ### Pillar 2 — PAM deadline & concurrency
-- N/A for PAM: no `crates/pam` change. Analogue checked: the GUI UI thread. Scenario: portal read blocks the UI; D-13 confines it to a background thread with one 200 ms deadline and `try_recv` on the UI side. Scenario: the background thread panics (a zbus `tokio` build outside a runtime context panics) and drops the sender; the spec does not say that `Disconnected` or a UI-side elapsed deadline maps to "no preference", so motion could stay "reduced" for the whole session (fail-safe direction, but silent).
-- Result: FINDING (MINOR, m6).
+- `crates/pam` is untouched and pinned by an invariant. The `Auth` path gains two `watch::Sender::send_modify` calls on a ≤ 32-entry map (no `.await`, no I/O): `timeout_ms` arithmetic unchanged.
+- Failure scenario (supersession race): PAM registers interactive demand at Step 8; the presence consensus returns `Preempted` and its guard drop races with the PAM `begin_scan` at 8d. If the drop lands first, `Idle` (sequence + 1) is visible during the template lookup and attempt recording; if the presence scan had already ended hidden (`NotRecognized` before the floor), the PAM begin supersedes it directly (visible sequence jumps by 2). The two cases are distinguishable to a reader (F3).
+- Failure scenario (stale guard): a PAM scan with `deadline_monotonic_ns == 0` is bounded by `connection_timeout` ≤ 10 000 ms; `MAX_SCANNING_MS` = 10 000 may make such a still-running scan read `Idle` at its very end. Benign (no success value).
+- Result: FINDING (F3 MINOR).
 
 ### Pillar 3 — Panic safety & fail-closed
-- Scenario: `dt = NaN/inf/negative/10 s` or a non-finite target produces a non-finite position, or repaint never stops. D-7 clamps `dt` to `[0, 0.05]`, snaps non-finite state, ignores non-finite targets. Gap: if the widget helper calls `retarget(target)` every frame (normal immediate-mode use) and `retarget` resets `span` even when the target is unchanged, the settle thresholds shrink each frame (never settled → continuous repaint, violating D-14) or `span = 0` snaps mid-overshoot. No security decision depends on motion; a View Transition throw falls back to the direct class change.
-- Result: FINDING (MINOR, m9).
+- No success value exists on the wire; `Allow`/`Unlocked`, a dropped guard and a clock failure read `Idle`; every rendered non-`Allow` verdict after the begin reads `NotRecognized`. An implementation mapping `Allow` to `NotRecognized`, or a failure to `Idle`, fails `test_lks_pam_allow_publishes_scanning_then_idle` / `assert_not_recognized`.
+- Failure scenario: a clock error on the read path ⇒ `{Idle, 0}`, but §2.4 orders the quota (which needs `now`) before the clock read (F2).
+- `lock_state.rs` arithmetic is saturating; `view` is pure; the workspace denies `unwrap`/`expect`.
+- Result: PASS (ordering ambiguity tracked as F2).
 
 ### Pillar 4 — Dependencies
-- Scenario: the later `feat/gui-motion` PR needs the portal read; the workspace `zbus` has `default-features = false, features = ["tokio"]`, so `zbus::blocking` (#358 wording) does not exist and the GUI must add direct `zbus` **and** `tokio` dependencies and run a current-thread runtime. `Docs/UI_MOTION.md` §8 already says so, but the spec (§1, §4, §7) and the ADR text do not record the new direct dependencies of `soos-gui`, while #358 told the owner "optional `zbus` ... no other new dependency". No new crate enters `Cargo.lock` (both already locked) and `soos-gui` is not a portable crate, so `deny.toml` and the portability guard are unaffected. No OpenCV, nokhwa, animation library or web font.
-- Result: FINDING (MINOR, m5).
+- No new crate (tokio `watch` is already a daemon dependency; postcard/serde unchanged). The fuzz crate gains one `[[bin]]`. PASS.
 
 ### Pillar 5 — Data confidentiality
-- Scenario: the prototype embeds the owner's face or a brand-pack raster, or an effect caches a camera frame. D-16 forbids images, `data:` URIs, `url(`, fonts and the private brand pack and uses a flat camera placeholder; D-9/§7 forbid frame capture, blur or caching. `SOOS_REDUCE_MOTION` longer than 8 bytes is ignored and never logged.
-- Result: PASS.
+- The board stores phase, sequence and timestamps only; no reason, score, frame, template, session id or PID (asserted textually). `since_monotonic_ns` dropped as a timing oracle.
+- Failure scenario (PAD oracle): presence PAD veto at 300 ms vs non-match at ~3100 ms ⇒ both reveal at start + 3150 (`test_lks_fast_and_slow_failures_are_indistinguishable`). PASS for presence pre-`Allow` outcomes.
+- Failure scenario (beyond the floor): (a) PAM scans with `timeout_ms`/`connection_timeout` above ~3150 ms end a non-match at up to ~5000 ms while a PAD veto reveals at 3150 ms; (b) presence post-`Allow` refusals (`LidClosed`, `AccountRefused`, `SessionChanged`, `AllowExpired`, `UnlockFailed`) run bounded D-Bus calls after the `Allow` and may reveal after the floor, i.e. "the face matched and passed PAD but the unlock was refused". (a) adds no channel beyond the PAM call duration the locker already exposes; (b) is narrow. The spec's §6 claim that the floor "hides their duration difference" is nonetheless absolute and must be scoped (F4).
+- Logging: `lock_state.rs` has no log macro (asserted); the dispatcher handler's logging is specified in prose only (F6); a `warn!` per refused poll, and the session validator's `warn!` per call when `/run/systemd/sessions` is missing, can flood the journal at poll rate (F5).
+- Result: FINDING (F4, F5, F6 MINOR).
 
 ### Pillar 6 — Test integrity
-- Existing tests: the diff only registers `mod ui_motion_spec_contract;` in `lib.rs`; no existing test changes. The design keeps RXB-S7 (no sixth `:has()`), S44/S46 (`--ease-spring` second declaration inside `@supports` is not a top-level `:root` palette/role token), S45 (no colour functions, `linear(` is not one), S48 (one reduced block) and the camera style ban green.
-- Power: UIM-S3 recomputes the pinned spring from first principles and would fail on 380/32 vs a doc stating 400/30, on a `>` 4 % overshoot, on a reordered or mistyped `linear()` stop and on a non-monotonic easing. UIM-S2's row check fails on a wrong value or a swapped Rust name. Weak spots: (a) UIM-S4 self-containment can be bypassed (`<script` + newline + `src=`, `import("//cdn…")`, `img.src = "//…"`, `srcset=`, `<source`, `<audio`, `<use href="//…">`), and colour/shadow rules miss named colours, `text-shadow` and `drop-shadow` (a prototype loading GSAP from a protocol-relative URL, or using `color: red` or a glow, passes); (b) the UIM-S2 exit check compares the test's own constants (cannot fail; the doc-row check is the real pin); (c) UIM-S5 needle `reduced-motion` is implied by `prefers-reduced-motion`; (d) UIM-S1 does not pin the "routes" / asset-set restatement #358 requires; (e) the draft fails `cargo fmt --check`.
-- Result: FINDING (MINOR, m1, m2, m3, m8).
+- Draft tests are new files; the only existing file modified is `tests/invariants/src/lib.rs` (module registration). Existing invariants `test_ipc_protocol_doc_wire_indices_match_code` and `test_ipc_protocol_doc_enum_references_resolve` will require the new doc row, which the spec plans. No existing test is weakened.
+- Failure scenario (unsatisfiable contract): `test_lks_unknown_state_byte_is_a_decode_error` asserts `[CURRENT_VERSION, 0x81, 0x00, 0x01]` is an error. With the spec's serde-derived "varint discriminant", postcard 1.1.3 decodes `0x81 0x00` as index 1 (`Scanning`) and `0x01` as `sequence = 1` ⇒ `Ok`. The specified implementation cannot meet this contract; the developer would have to invent a representation or be tempted to weaken the test. The comment "varint 129" is also wrong (129 is `0x81 0x01`).
+- Power gaps: the quota test only asserts `refused >= 1` (acceptable, because the side-effect test requires 8 accepted); no PAM `Aborted`/deadline case; no presence post-`Allow` failure case; no board test for a begin over a hidden `NotRecognized` (F7).
+- Result: FINDING (F1 MAJOR, F7 MINOR).
 
 ## 4. Findings
-- **[MINOR] m1** UIM-S4 self-containment and brand checks are bypassable (see Pillar 6 (a)). Required change: forbid every `<script` occurrence other than the exact `<script>` opening tag, plus `import(`, `import `, `new image`, `.src`, `srcset`, `<source`, `<audio`, `<track`, `<use`, `<image`, `worker(`, `href="//`, `text-shadow`, `drop-shadow`; scan CSS declaration values inside `<style>` for the brand contract's named colours.
-- **[MINOR] m2** UIM-S2's exit assertion is tautological and UIM-S5's `reduced-motion` needle is redundant. Required change: check the 0.7 × entry relation on the values read from the `Docs/UI_MOTION.md` table rows; replace `reduced-motion` with `` `reduced-motion` `` together with `org.freedesktop.appearance` on one line (or `u32`).
-- **[MINOR] m3** UIM-S1 does not pin the restatement #358 requires. Required change: add ADR needles for the unchanged routes and the eleven-file asset set (for example "routes" and "eleven").
-- **[MINOR] m4** D-9 View Transition: the update callback is deferred, so an Escape or `fullscreenchange` exit followed by a quick re-enter can run the stale "remove `camera-full`" after the synchronous enter (`cameraFull = true`, no overlay, close button visible); `transition.ready` and `finished` reject unhandled when the transition is skipped. Required change: the callback applies `classList.toggle("camera-full", cameraFull)` (and `camera-lock`) from the current flag, the promise rejections are caught, and exits caused by `endCameraView` (view end, lock, `pagehide`) skip the View Transition. The tester contract pins all three.
-- **[MINOR] m5** Record the `soos-gui` dependency change. Required change: in spec §1/§4/§7 and in the ADR, state that `feat/gui-motion` adds workspace `zbus` and `tokio` (`rt`, `time`) as direct `soos-gui` dependencies (no new crate in `Cargo.lock`, `blocking-api` not enabled, a current-thread runtime on one background thread), correcting #358's "no other new dependency".
-- **[MINOR] m6** D-13 does not cover the background thread dying. Required change: the UI side treats `TryRecvError::Disconnected`, or `PORTAL_READ_DEADLINE_MS` elapsed since start-up, as `PortalAnswer::Unavailable` (full motion), and the thread body runs under `catch_unwind` or returns `Unavailable` on every error. The tester contract adds a `resolve_motion_prefs` case for it.
-- **[MINOR] m7** `scripts/candid_review.sh` does not scan `*.html`, so the prototype's English is enforced only by `lang="en"`. Required change: the auditor and the candid reviewer read the prototype text by hand (record this in the auditor constraints); do not change the script in this PR.
-- **[MINOR] m8** The draft `ui_motion_spec_contract.rs` fails `cargo fmt --check` (l.115, l.289–290). Required change: run `cargo fmt` before the tester commits it.
-- **[MINOR] m9** D-7 leaves `retarget` with an unchanged target unspecified. Required change: `retarget(t)` is a no-op when `t` equals the current target; only a real target change resets `span` and keeps the velocity. The tester contract tests that 120 frames of repeated same-target `retarget` + `step` settle within 450 ms and then request no repaint.
-- **[MINOR] m10** D-8 has two gaps. First, the pending loop (`animation` on `transform`) and the state turn (`transition` on `transform`) drive the same property on `.stat-star`, so the star snaps when `is-pending` clears together with the state change. Second, "turns back when protection returns" is wrong for `unreachable`, `unavailable` and `unknown`, which also show 0°. Required change: put the state turn on the individual `rotate` property and the pending loop on `transform` (or the reverse), so the two compose. Also word D-8 as "0° in every state except a confirmed `unlocked`".
-- **[MINOR] m11** Matrix rows UIM8–UIM12 cite tests of later PRs (`remote_motion_contract.rs`, `motion_tests.rs`). Required change: those rows stay in a pending status (not `✅ Verified`/`☑ Validated`), or `matrix_citations` fails.
 
-No CRITICAL or MAJOR finding. Every fact the plan cites matches the code, the spring and `linear()` figures hold to the stated precision, and no existing test is modified. The MINOR items are carried as constraints into `AI/tester_contract_motion.md` and `AI/auditor_constraints_ui_motion.md`.
+- **[MAJOR] F1 — `LockWidgetState` wire representation contradicts the decoder.** §2.1 specifies a serde-derived enum ("varint discriminant 0..=2") and claims a multi-byte varint is a decode error. Postcard 1.1.3 accepts overlong varints (`try_take_varint_u32` stops at the first byte without the continuation bit and never checks canonicality), so `0x81 0x00` decodes as `Scanning`; the drafted contract `test_lks_unknown_state_byte_is_a_decode_error` cannot pass against the specified type. **Required plan change**: specify the representation explicitly, e.g. `#[serde(try_from = "u8", into = "u8")]` with `impl TryFrom<u8> for LockWidgetState` rejecting values above 2 (postcard encodes `u8` as one raw byte, so `0x81` is refused and the 12-byte bound still holds); state it in §2.1 and in the `Docs/IPC_PROTOCOL.md` row ("raw `u8`, not a varint"); have the tester fix the "varint 129" comment (`0x81 0x00` encodes 1). Alternatively drop the multi-byte claim and that assertion, but the explicit raw byte is preferred because it makes "unknown state byte ⇒ error" literally true for every byte.
+- **[MINOR] F2 — Rate limiter citation and read-path order.** `RateLimiter::new_with_capacity` does not exist (use `RateLimiter::new(RateLimitConfig::new_with_capacity(8, 1_000_000_000, 64))`); the limiter never refuses because its table is full (it evicts the LRU UID), so remove "table full ⇒ RateLimited" or document the eviction (it resets that UID's quota; acceptable, peers are `soos` group members). §2.4 lists the quota (needs `now`) before the clock read: specify clock first, and whether a clock error answers `{Idle, 0}` without consuming quota.
+- **[MINOR] F3 — Supersession and drop leak the hidden end through `sequence` / an `Idle` flicker.** A dropped (preempted) guard publishes `Idle` with `sequence + 1` immediately, while an ended-but-hidden `NotRecognized` keeps reading `Scanning`; a PAM begin over a hidden entry jumps the visible sequence by 2, over a running scan by 1. A user-triggered PAM attempt during a presence scan therefore reveals whether that presence scan had already ended (early end ≈ PAD veto). The PAM call already gives the attacker an equivalent timing channel, so no new capability, but the spec's own invariant ("the end of the scan is not observable before the floor") is violated. **Required**: either define a uniform rule (a begin over a hidden entry yields the same visible sequence step as a begin over a running scan; a preempted drop publishes nothing visible before the superseding begin or the floor) or state the residual leak in the ADR; add one board test pinning the chosen rule.
+- **[MINOR] F4 — Scope of the reveal-floor guarantee.** The floor (3150 ms, verified) covers presence pre-`Allow` outcomes and default PAM scans (`connection_timeout` 2500 ms) only. PAM scans can last up to ~5000 ms (`timeout_ms` ≤ 5000, `connection_timeout` ≤ 10 000), and presence post-`Allow` refusals can end after the floor. **Required**: rephrase §6 and the ADR ("hides PAD vs non-match for presence scans; PAM scan duration is already observable through the PAM call"), and either cap the reveal of post-`Allow` presence refusals so it is indistinguishable from a regular failure, or record that residual oracle explicitly.
+- **[MINOR] F5 — Journal flooding at poll rate.** §2.4 logs `warn!` on every quota refusal, and `SessionValidator::any_session_matches` emits `warn!` on every call when the sessions directory is missing; an old daemon also `warn!`s on every rejected kind-3 frame. **Required**: log the quota refusal at `debug!` or on transition only, and state that the bridge (PR 2) backs off after a refusal or a closed connection.
+- **[MINOR] F6 — Logging/side-effect invariant only covers `lock_state.rs`.** "Nothing biometric logged" and "never wakes camera / never records an attempt" are tested behaviourally, but no static check pins `handle_lock_state_request`. **Required**: add an invariant on the body of `handle_lock_state_request` in `dispatcher.rs` (no `notify_activity`, `register_interactive`, `policy.write`, `pipeline`, `ReasonClass`; log macros carry no state value and no UID other than the peer's).
+- **[MINOR] F7 — Test-plan gaps.** Add: PAM `ConsensusRun::Aborted` / deadline expiry ⇒ `NotRecognized`; one presence post-`Allow` failure (e.g. `SessionChanged` or `LidClosed`) ⇒ `NotRecognized`; the F3 board rule. Fix the misleading "varint 129" comment (F1).
+- **[MINOR] F8 — Connection budget for the future bridge.** `DEFAULT_MAX_CONNECTIONS_PER_UID` = 2 (+1 auth reserve). A persistent `LockState` connection shares the user's regular slots with the GUI preview and `soos-remote`. The spec should state for PR 2 that the bridge holds at most one connection, reconnects within `DEFAULT_MAX_CONNECTION_LIFETIME_MS` (30 s), and backs off on an old daemon.
 
-## 5. Verdict
+### Round 1 verdict
+
+One MAJOR finding (F1): the specified wire representation of `LockWidgetState` could not satisfy the "unknown state byte decodes to error" contract, because postcard accepts overlong varints. Round 1 verdict: REVISION_REQUIRED.
+
+## 5. Round 2 — Re-evaluation of spec §9 "Revision 1" (R1–R8) and the updated draft tests
+
+### 5.1 Resolution of round-1 findings
+
+| Finding | Revision | Verification | Status |
+|---|---|---|---|
+| F1 (MAJOR) state encoding | R1: `#[serde(try_from = "u8", into = "u8")]`, `TryFrom<u8>` rejects values above 2, raw byte documented | A postcard `u8` is one raw byte, so `0x81` is refused before any varint is read. The 12-byte bound still holds: 1 version byte + 1 state byte + 10 bytes for the `u64` sequence varint. `test_lks_unknown_state_byte_is_a_decode_error` now covers bytes 3..=255 and the overlong case, with a corrected comment ("0x81 0x00 = 1"). A serde-derived enum would fail it, as required. | Resolved |
+| F2 limiter / order | R2: clock first (`Err` ⇒ `{Idle,0}`, nothing recorded); `RateLimiter::new(RateLimitConfig::new_with_capacity(..))`; LRU eviction documented | Matches `rate_limit.rs:41,84,165-186` | Resolved |
+| F3 supersession leak | R3: per-UID `scans` counter. The sequence is `2*scans-1` while the end is hidden and `2*scans` once it is visible. Every end (Recognized, NotRecognized, abandoned, clock failure) is revealed at `max(end, start+FLOOR)`, and `begin_scan` always sets `scans += 1`. | A begin over an ended-but-hidden scan and a begin over a running scan now give the same sequence (2s-1 → 2s+1). A preempted drop stays hidden, so the `Idle` flicker is gone. Pinned by `test_lks_supersession_does_not_reveal_a_hidden_end`, `test_lks_abandoned_scan_reads_idle_after_the_floor`, `test_lks_presence_preempted_scan_reads_idle` ("not observable before the floor"), and by the PAM `Allow` and presence-unlock tests, which now read `(Scanning,1)` until the floor and then `(Idle,2)`. | Resolved |
+| F4 floor scope | R4: claim scoped to presence pre-match ends and PAM at the shipped `timeout_ms=2500`; longer PAM scans and post-match refusals are accepted in the ADR | The shipped `timeout_ms=2500` appears in `Docs/DISTRIBUTION_DEPLOYMENT.md` and `Docs/DAEMON.md`, and `DEFAULT_CONNECTION_TIMEOUT_MS` = 2500. PAM scans begin after the request starts, so they end within 2500 ms of the request start, below 3150. The PAM code default is `DEFAULT_TIMEOUT_MS` = 1000 (`crates/pam/src/config.rs:9`), which is even shorter. The rationale holds: the locker already sees PAM durations, and a post-match refusal needs a face that already matched. | Resolved |
+| F5 logging | R5: quota refusals at `debug!`, state never logged; PR 2 bridge backs off | The pre-existing `SessionValidator` warning stays (a missing `/run/systemd/sessions` is abnormal on systemd hosts). Accepted. | Resolved |
+| F6 static check | R6: `test_lks_dispatcher_read_path_has_no_side_effect` | Forbids `notify_activity`, `register_interactive`, `policy`, `pipeline`, `biometric_store`, `camera`, `evidence`, `info!`/`warn!`/`error!` and `begin_scan`. `ReasonClass::` may only appear as `RateLimited`. | Resolved (residual R2-2 below) |
+| F7 test gaps | R7 | Added `test_lks_pam_aborted_consensus_maps_to_not_recognized` (detector failure ⇒ `Unavailable` precondition), `test_lks_pam_short_deadline_maps_to_not_recognized` (400 ms deadline, no face), `test_lks_presence_post_match_refusal_maps_to_not_recognized` (`AccountRefused(PasswordLocked)`, zero unlock calls), and the board supersession test | Resolved |
+| F8 client budget | R8: one connection, reconnect before the 30 s lifetime / 1024 requests, ≤ 4 Hz, back off | Matches `limits.rs:23,32,35,49` | Resolved (PR 2 contract) |
+
+### 5.2 Round-2 attack on the revised design
+
+- **Timing oracle (R3).** If every end is revealed at `max(end, start+FLOOR)`, can a reader still tell an early PAD veto from a non-match or an early `Allow`? Before the floor, all of them read `(Scanning, 2s-1)`. At the floor, Recognized and abandoned ends read `Idle` and NotRecognized ends read `NotRecognized`, as intended. `test_lks_fast_and_slow_failures_are_indistinguishable` still pins this. PASS.
+- **Supersession (R3).** A begin at T0+500 ms over a hidden end and over a running scan gives identical views up to T0+FLOOR, and dropping the preempted guard afterwards changes nothing. PASS.
+- **Stale guard.** A running scan older than `MAX_SCANNING_MS` reads `Idle` with sequence `2s-1`. A hidden end can only exist while `now < max(end, start+3150)`, which is far below 10 s, so the staleness rule cannot release a hidden end early. PASS.
+- **Fail-closed.** There is still no success value. Aborted, deadline, camera and post-match refusals all map to `NotRecognized`, and the new tests check the `Unavailable` precondition, so a test cannot pass vacuously. PASS.
+- **Cross-UID / DoS.** Unchanged from round 1: Step 6 `UidMismatch`, the local-seat predicate, an 8/s per-peer quota with the clock read first, and a bounded board (32) and limiter (64). PASS.
+
+### 5.3 Round-2 findings
+
+- **[MINOR] R2-1 — The sequence is not monotonic across board eviction.** When a UID's entry is evicted (more than 32 UIDs published) and later begins again, `scans` restarts and the sequence goes backwards. There is no security impact. The PR 2 bridge must treat a lower sequence as a new epoch and must not compare across it. Document this in `Docs/IPC_PROTOCOL.md` §14. No spec change is blocking.
+- **[MINOR] R2-2 — The log check in the R6 invariant only reads the line that contains `debug!`.** A multi-line `debug!(` call with `state = ?view.state` on the next line, or `trace!`/`tracing::event!`, would pass. The developer must keep each log call in the handler on a single line, or the tester should extend the check to the whole macro invocation and also forbid `trace!`/`event!`. This does not block, because R5 states the rule and the candid review will check it.
+- **[INFO]** The R6 forbidden substring `policy` is case-sensitive. The developer must import `RateLimitConfig`/`RateLimiter` at module level rather than writing `soos_policy::` paths inside `handle_lock_state_request`, otherwise the invariant fails on a legitimate implementation.
+
+## 6. Verdict
+
+All round-1 findings are resolved by Revision 1 (R1–R8) and the updated draft tests. Round 2 found no CRITICAL or MAJOR issue; R2-1 and R2-2 are MINOR and can be handled in the developer and tester phases without a further spec revision.
+
 VALIDATION_VERDICT: APPROVED

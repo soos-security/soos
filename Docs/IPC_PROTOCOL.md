@@ -38,7 +38,7 @@ Every message transmitted over the Unix domain stream socket is framed by a 4-by
 
 ### Payload Encoding (Postcard)
 Postcard writes the struct fields in declaration order with no field tags and no message-type tag. The field widths are **not fixed**:
-- `u8` (`version`, `StatusResponse` booleans, `PreviewResponse::format`) is one raw byte; `[u8; 32]` (`request_id`) is 32 raw bytes.
+- `u8` (`version`, `StatusResponse` booleans, `PreviewResponse::format`, `LockStateResponse::state`) is one raw byte; `[u8; 32]` (`request_id`) is 32 raw bytes.
 - Every other integer (`u32` such as `uid_hint`, `pid`, `width`; `u64` such as `*_monotonic_ns`, `uptime_secs`, `sequence`) is an unsigned LEB128 **varint** (1 to 5 bytes for `u32`, 1 to 10 bytes for `u64`): `uid_hint = 1` takes one byte, `uid_hint = 1000` two.
 - Every enum discriminant (`RequestKind`, `EventKind`, `Verdict`, `ReasonClass`) is a varint of the variant index listed in the table below (one byte for every current variant).
 - A `String` (`service`) and a `Vec<u8>` (`PreviewResponse::data`) are a varint length followed by the bytes; an `Option` is a one-byte tag (`0` = `None`, `1` = `Some`) followed by the value.
@@ -62,6 +62,7 @@ Requests and events share the socket and the framing. Since GitHub #204, every c
 | `RequestKind::Auth` | 0 |
 | `RequestKind::Status` | 1 |
 | `RequestKind::PreviewFrame` | 2 |
+| `RequestKind::LockState` | 3 |
 | `EventKind::PasswordFailed` | 0 |
 | `Verdict::Allow` | 0 |
 | `Verdict::Deny` | 1 |
@@ -80,6 +81,11 @@ Requests and events share the socket and the framing. Since GitHub #204, every c
 | `ReasonClass::UidMismatch` | 10 |
 | `ReasonClass::MalformedRequest` | 11 |
 | `ReasonClass::InternalError` | 12 |
+| `LockWidgetState::Idle` | 0 |
+| `LockWidgetState::Scanning` | 1 |
+| `LockWidgetState::NotRecognized` | 2 |
+
+`LockWidgetState` is the only enum that is **not** a varint: it travels as one raw byte (`#[serde(try_from = "u8", into = "u8")]`), so any byte above 2, and any overlong encoding, is a decode error (§14).
 
 Hand-written wire encoders (for example the Docker mock daemon `tests/docker/mock_daemon.py`) must use these indices, and must encode `issued_monotonic_ns` / `expires_monotonic_ns` as real CLOCK_MONOTONIC varints for any response the PAM client should honor (`mock_daemon.py --stamps monotonic`, GitHub #287).
 
@@ -146,6 +152,10 @@ Best-effort telemetry notification sent by PAM following password failures:
 | `RequestKind::Auth` (0) | PAM module | `Response` (above); the daemon closes the connection after it |
 | `RequestKind::Status` (1) | `soos-admin status`, any admitted peer | `StatusResponse` |
 | `RequestKind::PreviewFrame` (2) | `soos-gui` preview and the `soos-remote` live camera view, authorized peers only (§9) | `PreviewResponse`, or a `Response` with `ProtocolError` on refusal |
+| `RequestKind::LockState` (3) | lock-screen widgets (bridge `soos-lockstatus`, later PRs of #352): a peer for its own UID, or root (§14) | `LockStateResponse`, or a `Response` with `ProtocolError` on refusal |
+
+### `LockStateResponse`
+Collapsed lock-screen scan state returned for `RequestKind::LockState` (§14, bounded by `LOCK_STATE_RESPONSE_MAX_PAYLOAD` = 12 bytes, far below `MAX_MESSAGE_SIZE`): `version: u8`, `state: LockWidgetState` (one raw byte: `Idle` 0, `Scanning` 1, `NotRecognized` 2), `sequence: u64` (varint). It carries no score, reason class, frame, embedding, template, session id or timestamp.
 
 ### `StatusResponse`
 Non-biometric health snapshot returned for `RequestKind::Status` (bounded by `MAX_MESSAGE_SIZE`): `version: u8`, `socket_ready`, `camera_ready`, `models_verified`, `is_healthy` (`bool`, one byte each), `pid: u32`, `uptime_secs: u64`, `memory_locked: bool` (whether `mlockall` swap protection is active, GitHub #201; appended last, so the daemon and `soos-admin` / `soos-gui` must be upgraded together). It carries no frame, template, embedding or UID data.
@@ -358,7 +368,7 @@ u32 BE length | postcard(Request | Event) | message_tag:u8
 
 | Tag | Constant | Message |
 |---|---|---|
-| `0xA0` | `MESSAGE_TAG_REQUEST` | `Request` (`Auth`, `Status`, `PreviewFrame`) |
+| `0xA0` | `MESSAGE_TAG_REQUEST` | `Request` (`Auth`, `Status`, `PreviewFrame`, `LockState`) |
 | `0xA1` | `MESSAGE_TAG_EVENT` | `Event` (`PasswordFailed`) |
 
 `encode_request` / `encode_event` produce tagged frames (bounded by `MAX_MESSAGE_SIZE`, trailer included); `pam_soos.so`, `soos-admin` (`status`, `test-pam`) and `soos-gui` (preview) use them. Responses are unchanged.
@@ -375,3 +385,32 @@ A rejected frame closes the connection without running any handler and without a
 ## 13. Atomic `Auth` Rate-Limit Reservation (GitHub #200)
 
 The per-UID `Auth` limit (`soos_policy::RateLimiter` inside the `AuthorizationEngine`) is reserved once per request with `AuthorizationEngine::record_attempt` under the policy **write** lock, after the deadline check and before the camera wake, enrollment lookup and vision work. A rejected reservation answers `ProtocolError` / `RateLimited` immediately. Nothing is recorded after the consensus loop, so concurrent requests can never all pass the last remaining attempt (review finding DMN-10), and requests ending early (not enrolled, camera unavailable, cancelled) still count against the window.
+
+## 14. Read-Only Lock-Screen State (`RequestKind::LockState`, GitHub #380)
+
+PR 1 of the lock-screen widget epic (#352; ADR 2026-10-13 "Read-Only Lock-Screen State Channel"). A widget drawn by the screen locker (the locked user's process) asks the daemon whether a face scan of that user is running or has just failed, so it can animate. It never controls anything.
+
+**Request.** A standard tagged `Request` with `kind = LockState` (wire 3); `uid_hint` is the UID whose state is asked; `service` and `deadline_monotonic_ns` are validated (§2) but not otherwise used. Not one-shot: one persistent connection may poll, within the per-UID connection cap, `max_requests_per_connection` (1024) and `max_connection_lifetime` (30 s) of §11. The auth-reserved connection refuses it like every non-`Auth` message.
+
+**Daemon decision order** (`ConnectionDispatcher::handle_lock_state_request`, after wire validation and the `SO_PEERCRED` check):
+
+| Step | Check | Result on failure |
+|---|---|---|
+| 1 | Wire validation (`Request::validate`) | `Response` `ProtocolError` / `MalformedRequest` |
+| 2 | An unprivileged peer asks only for its own UID (`SO_PEERCRED` UID == `uid_hint`); root may ask for any UID (diagnostics) | `Response` `ProtocolError` / `UidMismatch` |
+| 3 | Monotonic clock | `LockStateResponse { Idle, 0 }`, nothing recorded |
+| 4 | Per-peer-UID quota `LOCK_STATE_MAX_REQUESTS_PER_SEC` (8) per `LOCK_STATE_RATE_WINDOW_NS` (1 s), `LOCK_STATE_MAX_TRACKED_UIDS` (64, least recently used evicted); its own limiter, never the authentication limiter | `Response` `ProtocolError` / `RateLimited` (logged at `debug` only) |
+| 5 | `uid_hint` owns a local seat session (the preview predicate, ADR 2026-10-07 LC-3a), checked on the blocking pool under `LOCK_STATE_SESSION_CHECK_TIMEOUT_MS` (250 ms) | `LockStateResponse { Idle, 0 }` (also on expiry): no data and no hint about any other session |
+| 6 | Snapshot view of `uid_hint` | `LockStateResponse` |
+
+The read path never records an authentication attempt, wakes the camera, runs an inference, registers PAM priority, touches presence timing or unlocks anything.
+
+**What publishes.** The PAM `Auth` path publishes `Scanning` after the attempt is reserved and the template is found, right before the camera wake (requests refused earlier publish nothing); the presence worker publishes `Scanning` after it records its attempt. Only `Allow` / a presence unlock ends as recognized, which reads `Idle` (there is no success value; the session unlocking is the signal). Every other end after the scan started (`Deny` of any reason, PAD reject included, no face, multiple faces, low score, camera not ready, aborted consensus, timeout, a presence refusal after a match) reads `NotRecognized`. A preempted, stopped or abandoned scan reads `Idle`.
+
+**Reveal floor and hold** (`crates/daemon/src/lock_state.rs`). Every scan end becomes visible only at `max(end, start + NOT_RECOGNIZED_REVEAL_FLOOR_MS)`; before that the scan reads `Scanning` with the sequence of its begin. `NOT_RECOGNIZED_REVEAL_FLOOR_MS` = `MAX_CAMERA_WAKE_WAIT_MS + PRESENCE_WAKE_SETTLE_MS + DECISION_BUDGET_MS + RESPONSE_WRITE_MARGIN_MS + REVEAL_FLOOR_MARGIN_MS` = 1200 + 1000 + 900 + 50 + 90 = 3240 ms: the longest regular non-matching presence scan plus `REVEAL_FLOOR_MARGIN_MS` (`DEFAULT_INFERENCE_ESTIMATE_MS + FRAME_POLL_INTERVAL_MS` = 90 ms, one inference finishing after its admission estimate plus one frame poll), so a presentation-attack veto (which stops at the first capture) is indistinguishable from a full non-match at the locked screen. **The presence cadence does not leak the end either**: after every presence scan that did not unlock, the worker holds until that scan's start plus the floor before its usual `LOCK_POLL_INTERVAL_MS` pause (`PresenceWorker::post_scan_hold`), so the next scan starts at the same offset from the previous start (about floor + 1 s) whatever the previous end; an unlock is not delayed. The floor covers presence scans ending before a match and PAM scans at the shipped `timeout_ms=2500`; a longer PAM `timeout_ms` or a presence refusal after a match may be revealed later, at its end (accepted in the ADR). A revealed `NotRecognized` reads `Idle` after `NOT_RECOGNIZED_HOLD_MS` (3000 ms); a scan still running after `MAX_SCANNING_MS` (10 000 ms) reads `Idle`.
+
+**Sequence.** `sequence` is per UID: `2 × scans − 1` while the current scan's end is hidden, `2 × scans` once it is visible, `0` when nothing was ever published. A new scan always advances it the same way, whether the scan it replaces had already ended or not. It restarts when the daemon restarts or forgets the UID (the board holds `MAX_LOCK_STATE_UIDS` = 32 UIDs and evicts the least recently active one), so a client treats a **lower** value as a new epoch and never compares values across epochs.
+
+**Client contract** (for the PR 2 bridge). Decode the answer strictly as `LockStateResponse` first, then as `Response` (a refusal); the two never decode as each other (37+ versus at most 12 payload bytes, strict codec). Use at most one connection, reconnect before the 30 s lifetime and the 1024-request cap, poll at most 4 Hz, and back off on a refusal or a closed connection. A daemon older than #380 cannot decode `kind = 3`, closes the connection without an answer and logs a warning: the client must render that as unavailable and back off.
+
+**Verification.** `crates/protocol/tests/lock_state_tests.rs` (wire values, raw state byte, bound, strictness, exclusivity, proptest), the fuzz target `decode_lock_state`, `crates/daemon/tests/lock_state_board_tests.rs`, `lock_state_dispatcher_tests.rs`, `lock_state_presence_tests.rs` and `tests/invariants/src/lock_state_contract.rs`.

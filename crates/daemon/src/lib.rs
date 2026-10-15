@@ -9,6 +9,7 @@ pub mod error;
 pub mod health;
 pub mod inference;
 pub mod limits;
+pub mod lock_state;
 pub mod logging;
 pub mod mlock;
 pub mod peercred;

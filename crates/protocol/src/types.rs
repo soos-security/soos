@@ -63,6 +63,9 @@ pub enum RequestKind {
     Status = 1,
     /// Live video camera preview frame request for GUI diagnostics.
     PreviewFrame = 2,
+    /// Read-only lock-screen scan state of `uid_hint` (GitHub #380, ADR 2026-10-13
+    /// "Read-Only Lock-Screen State Channel"); answered with a [`LockStateResponse`].
+    LockState = 3,
 }
 
 /// Telemetry event notified by the PAM module to the daemon (best-effort).
@@ -319,6 +322,86 @@ impl Drop for PreviewResponse {
     fn drop(&mut self) {
         use zeroize::Zeroize;
         self.zeroize();
+    }
+}
+
+/// Largest encoded [`LockStateResponse`] payload: `version` (1) + `state` (1) + `sequence`
+/// (`u64` varint, at most 10).
+pub const LOCK_STATE_RESPONSE_MAX_PAYLOAD: usize = 12;
+
+/// Collapsed scan state shown at a locked screen (ADR 2026-10-13 "Read-Only Lock-Screen State
+/// Channel", owner decision of 2026-10-13 on #352).
+///
+/// Exactly three values: every failure reason collapses into `NotRecognized` and there is no
+/// success value (the session unlocking is the success signal). Travels as one raw byte; any
+/// other byte value is a decode error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "u8", into = "u8")]
+#[repr(u8)]
+pub enum LockWidgetState {
+    /// No scan in progress and nothing to report.
+    Idle = 0,
+    /// A face scan (PAM request or presence scan) is in progress.
+    Scanning = 1,
+    /// The last scan ended without verifying the face, whatever the reason.
+    NotRecognized = 2,
+}
+
+/// A byte that names no [`LockWidgetState`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UnknownLockWidgetState(pub u8);
+
+impl core::fmt::Display for UnknownLockWidgetState {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "unknown lock widget state: {}", self.0)
+    }
+}
+
+impl std::error::Error for UnknownLockWidgetState {}
+
+impl From<LockWidgetState> for u8 {
+    fn from(state: LockWidgetState) -> Self {
+        match state {
+            LockWidgetState::Idle => 0,
+            LockWidgetState::Scanning => 1,
+            LockWidgetState::NotRecognized => 2,
+        }
+    }
+}
+
+impl TryFrom<u8> for LockWidgetState {
+    type Error = UnknownLockWidgetState;
+
+    fn try_from(byte: u8) -> Result<Self, Self::Error> {
+        match byte {
+            0 => Ok(Self::Idle),
+            1 => Ok(Self::Scanning),
+            2 => Ok(Self::NotRecognized),
+            other => Err(UnknownLockWidgetState(other)),
+        }
+    }
+}
+
+/// Answer to `RequestKind::LockState` (bounded by [`LOCK_STATE_RESPONSE_MAX_PAYLOAD`]).
+///
+/// Carries no biometric data, no reason, no timestamp and no identifier. A refusal is a
+/// standard [`Response`] instead; the two never decode as each other (strict codec).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LockStateResponse {
+    /// Protocol version.
+    pub version: u8,
+    /// Collapsed scan state.
+    pub state: LockWidgetState,
+    /// Per-UID visible transition counter; `0` when nothing was ever published. It restarts
+    /// when the daemon restarts or forgets the UID: a lower value starts a new epoch.
+    pub sequence: u64,
+}
+
+impl LockStateResponse {
+    /// Whether the response carries [`CURRENT_VERSION`].
+    #[must_use]
+    pub fn is_current(&self) -> bool {
+        self.version == CURRENT_VERSION
     }
 }
 
