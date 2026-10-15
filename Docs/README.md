@@ -15,6 +15,7 @@ Welcome to the technical documentation for **soos** (local zero-trust facial ver
 | [**Development Workflow & Branching**](DEVELOPMENT_WORKFLOW.md) | Branch strategy, multi-agent TDD cycle, PR loop, and automated Copilot review. | Contributors, AI Agents |
 | [**Conventional Commits Specification**](COMMIT_CONVENTION.md) | Standardized commit message format, allowed types and scopes, and hook validation. | Contributors, AI Agents |
 | [**GUI Application**](GUI_APPLICATION.md) | `soos-gui` threading model (background daemon polling, off-UI-thread `pkexec`), camera error banners, stderr logging and the brand visual design system (palette, header, page layouts). | GUI Developers, Support |
+| [**UI Motion**](UI_MOTION.md) | Motion system of `soos-gui` and the `soos-remote` web app: tokens, spring (overshoot at most 4 %), signature star move, per-component specs, reduced motion (web `prefers-reduced-motion`, GUI XDG portal and overrides), egui repaint budget, static prototype. | GUI Developers, Web Developers, Owner |
 | [**Security & Code Quality Guidelines**](SECURITY_AND_QUALITY_GUIDELINES.md) | Compiler profiles, workspace lints, panic safety and secure coding rules. | All Contributors, AI Agents |
 | [**PAM Docker Test Matrix**](PAM_DOCKER_TEST_MATRIX.md) | Dockerized PAM matrix T1–T15 (`tests/docker/test_suite.sh`, `pam_test_runner`) and its expected outcomes. | PAM Developers, DevOps |
 | [**Policy Crate**](POLICY_CRATE.md) | `soos-policy` zero-I/O authorization, rate limiting and PAD consensus logic. | Daemon Developers |

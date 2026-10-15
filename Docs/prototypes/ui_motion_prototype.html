@@ -1,0 +1,972 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>soos motion prototype</title>
+<!--
+  soos motion prototype (GitHub issue 377, PR 1 of issue 358; ADR "[2026-10-13] Motion System for soos-gui and
+  soos-remote"; specification Docs/UI_MOTION.md). Static and self-contained: no network request, no
+  image, no font file. Colours come only from crates/gui/src/theme.rs; the star and wordmark vectors are
+  the ones already published in crates/remote/assets/index.html. The camera stage is a flat placeholder.
+  Prototype-only liberties (inline style and script, a script spring that writes transforms) are not
+  allowed in the product, where the CSP and the class-hook rules of Docs/UI_MOTION.md apply.
+-->
+<style>
+/* Palette: identical to crates/gui/src/theme.rs. */
+:root {
+  --blue: #0047BB;
+  --blue-hover: #1D5CC3;
+  --blue-pressed: #003A99;
+  --pale: #EDF1FF;
+  --pale-2: #E4EAFD;
+  --pale-3: #DCE4FC;
+  --pale-4: #C9D6FA;
+  --line: #C9D0E1;
+  --ink: #101820;
+  --ink-muted: #5A6270;
+  --ink-weak: #7A818E;
+  --pink: #E59BDC;
+  --white: #FFFFFF;
+  --success: #29B53B;
+  --success-toggle: #46BE82;
+  --success-bg: #E6F6EA;
+  --success-text: #146C2A;
+  --danger: #D92D45;
+  --danger-bg: #FDE8EB;
+  --danger-text: #8A1426;
+  --warn-border: #F5B547;
+  --warn-bg: #FFF4E0;
+  --warn-text: #8A4B00;
+  --font: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+}
+
+/* Motion tokens: Docs/UI_MOTION.md section 2 (theme.rs names in kebab case, same values). */
+:root {
+  --t-fast: 120ms;
+  --t-short: 180ms;
+  --t-medium: 260ms;
+  --t-long: 380ms;
+  --t-spring: 400ms;
+  --t-short-exit: 126ms;
+  --t-medium-exit: 182ms;
+  --t-long-exit: 266ms;
+  --t-stagger: 30ms;
+  --t-pending: 1200ms;
+  --ease-standard: cubic-bezier(0.2, 0, 0, 1);
+  --ease-enter: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-exit: cubic-bezier(0.4, 0, 1, 1);
+  --ease-spring: cubic-bezier(0.37, 0.73, 0.1, 1.15);
+  --press-scale: 0.98;
+  --rise: 6px;
+  --slide: 8px;
+  --star-turn: 45deg;
+}
+
+/* The spring curve where linear() exists (section 3); the cubic-bezier above is the fallback. */
+@supports (transition-timing-function: linear(0, 1)) {
+  :root {
+    --ease-spring: linear(0, 0.0063 1.5%, 0.0263 3%, 0.0595 4.8%, 0.1065 6.6%, 0.1522 8.2%, 0.2104 10%, 0.4504 16.9%, 0.5562 20.1%, 0.6552 23.4%, 0.7391 26.6%, 0.8083 29.6%, 0.8658 32.8%, 0.9136 35.9%, 0.9524 39.3%, 0.9829 42.9%, 1.0052 46.8%, 1.0197 51%, 1.0271 55.9%, 1.0269 63.8%, 1.0085 84.4%, 1);
+  }
+}
+
+/* Review aid: every duration four times longer (prototype only). */
+html.slow {
+  --t-fast: 480ms;
+  --t-short: 720ms;
+  --t-medium: 1040ms;
+  --t-long: 1520ms;
+  --t-spring: 1600ms;
+  --t-short-exit: 504ms;
+  --t-medium-exit: 728ms;
+  --t-long-exit: 1064ms;
+  --t-stagger: 120ms;
+  --t-pending: 4800ms;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html { background: var(--pale); }
+body {
+  min-height: 100vh;
+  background: var(--pale);
+  color: var(--ink);
+  font-family: var(--font);
+  font-size: 15px;
+  line-height: 1.4;
+}
+button, input { font: inherit; }
+h1, h2, h3 { line-height: 1.2; }
+svg.star { display: block; fill: var(--pink); }
+
+/* Page frame: blue band, pale body cut out of it. */
+.band { background: var(--blue); color: var(--pale); }
+.band-row {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 12px 20px;
+  max-width: 1200px; margin: 0 auto; padding: 14px 16px 34px;
+}
+.wordmark { height: 18px; width: auto; fill: var(--pale); }
+.band-pill {
+  padding: 5px 12px; border-radius: 999px; background: var(--pale); color: var(--ink);
+  font-size: 12px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase;
+}
+.controls { display: flex; flex-wrap: wrap; gap: 8px 16px; margin-left: auto; align-items: center; }
+.controls label { display: flex; align-items: center; gap: 8px; font-weight: 600; cursor: pointer; }
+.controls input { width: 18px; height: 18px; accent-color: var(--pink); }
+main.page {
+  max-width: 1200px; margin: -20px auto 0; padding: 24px 16px 48px;
+  border-radius: 20px 20px 0 0; background: var(--pale);
+}
+.intro { max-width: 860px; color: var(--ink-muted); margin-bottom: 20px; }
+.intro strong { color: var(--ink); }
+.section-title { font-size: 13px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; color: var(--blue); margin: 28px 0 12px; }
+
+.grid { display: grid; grid-template-columns: 380px minmax(0, 1fr); gap: 24px; align-items: start; }
+@media (max-width: 900px) { .grid { grid-template-columns: minmax(0, 1fr); } }
+
+.card {
+  display: flex; flex-direction: column; gap: 12px; padding: 20px;
+  border: 2px solid var(--blue); border-radius: 20px; background: var(--pale); color: var(--ink);
+}
+.card h2 { font-size: 20px; }
+.detail { color: var(--ink-muted); }
+.hint { font-size: 13px; color: var(--ink-muted); }
+
+/* Token sheet. */
+.tokens { display: grid; grid-template-columns: minmax(0, 1fr) 340px; gap: 20px; }
+@media (max-width: 900px) { .tokens { grid-template-columns: minmax(0, 1fr); } }
+table.tok { width: 100%; border-collapse: collapse; font-size: 13px; }
+table.tok th, table.tok td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+table.tok th { color: var(--ink-muted); font-weight: 600; }
+table.tok code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; }
+.chart { width: 100%; height: auto; background: var(--white); border-radius: 14px; border: 1px solid var(--line); }
+.chart .axis { stroke: var(--line); stroke-width: 1; fill: none; }
+.chart .c-spring { stroke: var(--blue); stroke-width: 3; fill: none; }
+.chart .c-linear { stroke: var(--pink); stroke-width: 2; fill: none; stroke-dasharray: 6 4; }
+.chart .c-fallback { stroke: var(--ink-weak); stroke-width: 2; fill: none; }
+.chart .c-standard { stroke: var(--success-text); stroke-width: 2; fill: none; }
+.legend { display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 12px; color: var(--ink-muted); }
+.legend span::before { content: ""; display: inline-block; width: 14px; height: 3px; margin-right: 6px; vertical-align: middle; background: currentColor; }
+.lg-spring { color: var(--blue); }
+.lg-linear { color: var(--pink); }
+.lg-fallback { color: var(--ink-weak); }
+.lg-standard { color: var(--success-text); }
+
+/* Race: the same 220 px move with each curve. */
+.race { display: grid; gap: 6px; }
+.lane { position: relative; height: 22px; border-radius: 999px; background: var(--pale-2); }
+.lane i {
+  position: absolute; left: 3px; top: 3px; width: 16px; height: 16px; border-radius: 999px;
+  background: var(--blue); translate: 0 0;
+}
+.lane.l-spring i { transition: translate var(--t-spring) var(--ease-spring); }
+.lane.l-fallback i { background: var(--ink-weak); transition: translate var(--t-spring) cubic-bezier(0.37, 0.73, 0.1, 1.15); }
+.lane.l-standard i { background: var(--success-text); transition: translate var(--t-medium) var(--ease-standard); }
+.lane.l-enter i { background: var(--pink); transition: translate var(--t-medium) var(--ease-enter); }
+.race.go .lane i { translate: calc(100cqw - 22px) 0; }
+.lane { container-type: inline-size; }
+.lane b { position: absolute; right: 10px; top: 2px; font-size: 11px; font-weight: 600; color: var(--ink-muted); }
+
+/* Buttons (phone page look). */
+button {
+  position: relative; display: block; width: 100%; min-height: 48px; padding: 12px 20px;
+  border: 0; border-radius: 999px; background: var(--blue); color: var(--pale);
+  font-size: 17px; font-weight: 600; cursor: pointer; touch-action: manipulation;
+  scale: 1;
+  transition: background-color var(--t-fast) var(--ease-standard), color var(--t-fast) var(--ease-standard), box-shadow var(--t-fast) var(--ease-standard), scale var(--t-spring) var(--ease-spring);
+}
+button:active:not(:disabled) {
+  background: var(--blue-pressed);
+  scale: var(--press-scale);
+  transition: background-color var(--t-fast) var(--ease-standard), scale var(--t-fast) var(--ease-standard);
+}
+@media (hover: hover) { button:hover:not(:disabled) { background: var(--blue-hover); } }
+button.secondary { background: transparent; color: var(--blue); box-shadow: inset 0 0 0 2px var(--blue); }
+button.secondary:active:not(:disabled) { background: var(--pale-4); }
+@media (hover: hover) { button.secondary:hover:not(:disabled) { background: var(--pale-3); } }
+button.secondary.danger { color: var(--danger-text); box-shadow: inset 0 0 0 2px var(--danger-text); }
+@media (hover: hover) { button.secondary.danger:hover:not(:disabled) { background: var(--danger-bg); } }
+button:disabled { background: var(--line); color: var(--ink-weak); box-shadow: none; cursor: default; }
+button.secondary:disabled { background: transparent; box-shadow: inset 0 0 0 2px var(--line); }
+button.small { display: inline-block; width: auto; min-height: 36px; padding: 6px 14px; font-size: 14px; }
+button:focus-visible, input:focus-visible { outline: 3px solid var(--blue); outline-offset: 3px; }
+:focus:not(:focus-visible) { outline: none; }
+
+/* Pending star inside a button: the label never moves. */
+button.is-pending::after {
+  content: "";
+  position: absolute; right: 20px; top: 50%; width: 16px; height: 16px; margin-top: -8px;
+  background: currentColor;
+  clip-path: path("M8 0C8 4.418 11.582 8 16 8L8 8ZM0 8C4.418 8 8 11.582 8 16V8H0Z");
+  animation: star-pending var(--t-pending) var(--ease-standard) infinite;
+}
+@keyframes star-pending { from { transform: rotate(0deg); } to { transform: rotate(90deg); } }
+
+/* ---------------- Phone mock (soos-remote web app) ---------------- */
+.phone {
+  position: relative; width: 100%; max-width: 380px; overflow: hidden;
+  border: 2px solid var(--ink); border-radius: 36px; background: var(--blue);
+}
+.p-band { display: flex; align-items: center; justify-content: space-between; height: 56px; padding: 0 18px; }
+.p-band .wordmark { height: 15px; }
+.p-page {
+  display: flex; flex-direction: column; gap: 14px; margin-top: -1px; padding: 18px 14px 22px;
+  border-radius: 20px 20px 0 0; background: var(--pale); min-height: 640px;
+}
+.p-page .card { padding: 18px; }
+/* W4: sections revealed from [hidden] rise in; hiding is instant. */
+.p-page .card, .p-page .stat-tile {
+  opacity: 1; translate: 0 0;
+  transition: opacity var(--t-medium) var(--ease-enter), translate var(--t-medium) var(--ease-enter);
+}
+@starting-style {
+  .p-page .card, .p-page .stat-tile { opacity: 0; translate: 0 var(--rise); }
+}
+[hidden] { display: none !important; }
+
+/* W1: status tile. */
+.stat-tile { position: relative; min-height: 196px; padding-bottom: 38px; overflow: hidden; border-radius: 20px; background: var(--blue); color: var(--pale); }
+.stat-strip {
+  display: flex; align-items: center; justify-content: space-between; height: 44px; margin: 2px; padding: 0 18px;
+  border-radius: 18px 18px 0 0; background: var(--pale); color: var(--ink);
+  font-size: 12px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase;
+}
+.stat-dot { width: 10px; height: 10px; border-radius: 999px; background: var(--ink-weak); transition: background-color var(--t-medium) var(--ease-standard), box-shadow var(--t-medium) var(--ease-standard); }
+.stat-tile[data-state="locked"] .stat-dot { background: var(--success-text); }
+.stat-tile[data-state="unlocked"] .stat-dot { background: var(--warn-border); box-shadow: inset 0 0 0 2px var(--warn-text); }
+.stat-tile[data-state="unreachable"] .stat-dot { background: var(--danger-text); }
+.state { margin: 20px 20px 6px; font-size: 44px; font-weight: 800; line-height: 1; letter-spacing: -0.02em; }
+.state-locked, .state-unlocked { font-size: 58px; }
+.state-unknown, .state-unreachable { opacity: 0.7; }
+/* One keyframe name per state class: an identical class rewrite on a poll replays nothing. */
+.state-locked { animation: state-in-locked var(--t-medium) var(--ease-enter); }
+.state-unlocked { animation: state-in-unlocked var(--t-medium) var(--ease-enter); }
+.state-unknown, .state-unreachable { animation: state-in-other var(--t-medium) var(--ease-enter); }
+@keyframes state-in-locked { from { opacity: 0.4; translate: 0 4px; } to { opacity: 1; translate: 0 0; } }
+@keyframes state-in-unlocked { from { opacity: 0.4; translate: 0 4px; } to { opacity: 1; translate: 0 0; } }
+@keyframes state-in-other { from { opacity: 0.3; translate: 0 4px; } to { opacity: 0.7; translate: 0 0; } }
+.stat-tile .detail { padding: 0 92px 0 20px; color: var(--pale); font-variant-numeric: tabular-nums; }
+.stat-tile .detail.small { font-size: 13px; opacity: 0.8; }
+/* Section 5: the signature star. */
+.stat-star {
+  position: absolute; right: 18px; bottom: 16px; width: 60px; height: 60px;
+  rotate: 0deg; transition: rotate var(--t-spring) var(--ease-spring);
+}
+.stat-tile[data-state="unlocked"] .stat-star { rotate: var(--star-turn); }
+.stat-tile.is-pending .stat-star { animation: star-pending var(--t-pending) var(--ease-standard) infinite; }
+
+.feedback { min-height: 1.4em; color: var(--ink-muted); font-size: 14px; }
+
+/* W5: banners. */
+.banner {
+  position: relative; padding: 12px 14px 12px 44px; border: 1px solid var(--line); border-radius: 12px;
+  background: var(--pale-2); color: var(--ink); font-size: 15px; font-weight: 600;
+  transition: background-color var(--t-medium) var(--ease-standard), border-color var(--t-medium) var(--ease-standard), color var(--t-medium) var(--ease-standard), opacity var(--t-short) var(--ease-enter), translate var(--t-short) var(--ease-enter);
+}
+.banner::before {
+  content: "i"; position: absolute; top: 13px; left: 14px; display: flex; align-items: center; justify-content: center;
+  width: 20px; height: 20px; border-radius: 999px; background: var(--blue); color: var(--pale-2); font-size: 13px; font-weight: 700;
+  transition: background-color var(--t-medium) var(--ease-standard);
+}
+@starting-style { .banner { opacity: 0; translate: 0 calc(-1 * var(--slide)); } }
+.alerts-attention .alerts-summary { border-color: var(--danger); background: var(--danger-bg); color: var(--danger-text); animation: nudge var(--t-medium) var(--ease-standard) 2; }
+.alerts-attention .alerts-summary::before { content: "!"; background: var(--danger-text); }
+@keyframes nudge { 25% { translate: -3px 0; } 75% { translate: 3px 0; } }
+.banner-warn { border-color: var(--warn-border); background: var(--warn-bg); color: var(--warn-text); }
+.banner-warn::before { content: "!"; background: var(--warn-text); }
+
+/* W6: lists stagger on their first render only. */
+.table { list-style: none; border-radius: 14px; background: var(--pale-2); overflow: hidden; }
+.table li { padding: 10px 14px; border-bottom: 1px solid var(--line); font-size: 14px; }
+.table li:last-child { border-bottom: 0; }
+.stagger-once li { animation: rise-in var(--t-medium) var(--ease-enter) backwards; }
+.stagger-once li:nth-child(2) { animation-delay: var(--t-stagger); }
+.stagger-once li:nth-child(3) { animation-delay: calc(var(--t-stagger) * 2); }
+.stagger-once li:nth-child(4) { animation-delay: calc(var(--t-stagger) * 3); }
+.stagger-once li:nth-child(5) { animation-delay: calc(var(--t-stagger) * 4); }
+.stagger-once li:nth-child(n+6) { animation-delay: calc(var(--t-stagger) * 5); }
+@keyframes rise-in { from { opacity: 0; translate: 0 var(--rise); } to { opacity: 1; translate: 0 0; } }
+
+/* W7: button swap of the notifications card (no switch). */
+.push-actions button { transition: background-color var(--t-fast) var(--ease-standard), opacity var(--t-short) var(--ease-enter), scale var(--t-spring) var(--ease-spring); }
+@starting-style { .push-actions button { opacity: 0; } }
+.push-actions { display: flex; flex-direction: column; gap: 10px; }
+
+/* W8: camera card and full screen. */
+.camera-stage {
+  position: relative; display: flex; align-items: center; justify-content: center; aspect-ratio: 4 / 3;
+  border-radius: 14px; background: var(--ink); color: var(--pale); cursor: zoom-in; overflow: hidden;
+  view-transition-name: camera-stage;
+}
+.camera-guide { width: 46%; aspect-ratio: 3 / 4; border: 2px solid var(--pale-4); border-radius: 40% 40% 36% 36%; opacity: 0.6; }
+.camera-label { position: absolute; left: 12px; bottom: 10px; font-size: 12px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; color: var(--pale-4); }
+.camera-tools { position: absolute; top: 8px; right: 8px; }
+.camera-stage.camera-full { position: fixed; inset: 0; z-index: 100; aspect-ratio: auto; border-radius: 0; cursor: zoom-out; }
+html.camera-lock, html.camera-lock body { overflow: hidden; }
+::view-transition-group(camera-stage) { animation-duration: var(--t-long); animation-timing-function: var(--ease-standard); }
+html:not(.camera-lock)::view-transition-group(camera-stage) { animation-duration: var(--t-long-exit); }
+::view-transition-old(root), ::view-transition-new(root) { animation-duration: var(--t-medium); }
+
+/* W9: code input. */
+.code {
+  width: 100%; min-height: 48px; padding: 10px 14px; border: 2px solid var(--ink-weak); border-radius: 10px;
+  background: var(--white); color: var(--ink); font-size: 18px; letter-spacing: 0.12em;
+  transition: border-color var(--t-fast) var(--ease-standard);
+}
+.code:focus { border-color: var(--blue); }
+
+.sim { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+
+/* ---------------- Desktop mock (soos-gui) ---------------- */
+.desk { border: 2px solid var(--ink); border-radius: 16px; overflow: hidden; background: var(--blue); }
+.g-band { position: relative; display: flex; align-items: flex-end; gap: 0; height: 52px; padding: 0 14px; }
+.g-band .wordmark { height: 13px; margin: 0 18px 18px 4px; }
+.tabs { position: relative; display: flex; height: 40px; }
+/* G3: the pale tab slides between the equal-width tabs. */
+.tab-pill {
+  position: absolute; left: 0; bottom: 0; width: 132px; height: 40px; border-radius: 20px 20px 0 0;
+  background: var(--pale); translate: 0 0; transition: translate var(--t-medium) var(--ease-standard);
+}
+.tabs[data-active="1"] .tab-pill { translate: 132px 0; }
+.tabs[data-active="2"] .tab-pill { translate: 264px 0; }
+.tab {
+  position: relative; width: 132px; height: 40px; min-height: 0; padding: 0; border-radius: 20px 20px 0 0;
+  background: transparent; color: var(--pale); font-size: 14px; font-weight: 600; scale: 1;
+  transition: color var(--t-fast) var(--ease-standard);
+}
+.tab:active:not(:disabled) { background: transparent; scale: 1; }
+@media (hover: hover) { .tab:hover:not(:disabled) { background: transparent; } }
+.tab[aria-selected="true"] { color: var(--ink); }
+.daemon { margin-left: auto; display: flex; align-items: center; gap: 10px; padding-bottom: 12px; color: var(--pale); font-size: 13px; font-weight: 600; }
+.g-body { padding: 18px; border-radius: 0; background: var(--pale); min-height: 470px; }
+.g-panel { display: grid; grid-template-columns: minmax(0, 1fr) 170px; gap: 14px; }
+@media (max-width: 640px) { .g-panel { grid-template-columns: minmax(0, 1fr); } }
+.g-col { display: flex; flex-direction: column; gap: 14px; }
+/* G4: cards fade in and rise, staggered, when a tab opens. */
+.g-panel > * > .card, .g-panel > * > .g-tile {
+  opacity: 1; translate: 0 0;
+  transition: opacity var(--t-medium) var(--ease-enter), translate var(--t-medium) var(--ease-enter);
+}
+.g-panel > :nth-child(2) > :nth-child(1) { transition-delay: var(--t-stagger); }
+.g-panel > :nth-child(1) > :nth-child(2) { transition-delay: calc(var(--t-stagger) * 2); }
+.g-panel > :nth-child(2) > :nth-child(2) { transition-delay: calc(var(--t-stagger) * 3); }
+@starting-style {
+  .g-panel > * > .card, .g-panel > * > .g-tile { opacity: 0; translate: 0 var(--rise); }
+}
+.g-tile { position: relative; min-height: 150px; border-radius: 20px; background: var(--blue); color: var(--pale); overflow: hidden; }
+.g-tile .stat-strip { height: 36px; }
+.g-count { position: relative; height: 64px; margin: 12px 16px 0; font-size: 56px; font-weight: 800; line-height: 1; font-variant-numeric: tabular-nums; }
+.g-count span { position: absolute; left: 0; top: 0; }
+.v-a { animation: count-a var(--t-short) var(--ease-standard); }
+.v-b { animation: count-b var(--t-short) var(--ease-standard); }
+@keyframes count-a { from { opacity: 0; } to { opacity: 1; } }
+@keyframes count-b { from { opacity: 0; } to { opacity: 1; } }
+.g-star-tile { display: flex; align-items: center; justify-content: center; min-height: 150px; }
+.g-star { width: 72px; height: 72px; rotate: 0deg; transition: rotate var(--t-spring) var(--ease-spring); }
+.desk[data-daemon="inactive"] .g-star { rotate: var(--star-turn); }
+
+/* G2: daemon switch (thumb on the script spring, track colour cross-fade). */
+.switch {
+  position: relative; width: 46px; height: 26px; min-height: 0; padding: 0; border-radius: 999px;
+  background: var(--ink-weak); scale: 1;
+  transition: background-color var(--t-short) var(--ease-standard);
+}
+.switch.on { background: var(--success-toggle); }
+@media (hover: hover) { .switch:hover:not(:disabled) { background: var(--ink-weak); } .switch.on:hover:not(:disabled) { background: var(--success-toggle); } }
+.switch:active:not(:disabled) { background: var(--ink-weak); scale: 1; }
+.switch.on:active:not(:disabled) { background: var(--success-toggle); }
+.thumb { position: absolute; left: 3px; top: 3px; width: 20px; height: 20px; border-radius: 999px; background: var(--white); }
+.pending-star { width: 22px; height: 22px; animation: star-pending var(--t-pending) var(--ease-standard) infinite; }
+.pending-star.pale { fill: var(--pale); }
+
+/* G7: camera status cross-fade. */
+.g-states { position: relative; min-height: 210px; }
+.g-state {
+  position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; text-align: center;
+  border-radius: 14px; opacity: 0;
+  transition: opacity var(--t-short-exit) var(--ease-exit);
+}
+.g-state.on { opacity: 1; transition: opacity var(--t-short) var(--ease-standard); }
+.g-state h3 { font-size: 19px; }
+.g-state.live { background: var(--ink); color: var(--pale-4); }
+.g-state.busy h3 { color: var(--warn-text); }
+
+/* G6: progress fill (transform only). */
+.track { position: relative; height: 18px; border-radius: 999px; background: var(--pale-3); overflow: hidden; }
+.fill {
+  position: absolute; inset: 0; border-radius: 999px; background: var(--blue);
+  transform-origin: left center; scale: 0 1;
+  transition: scale var(--t-medium) var(--ease-standard);
+}
+
+/* G5: banners enter and leave. */
+.g-banners { display: flex; flex-direction: column; gap: 8px; min-height: 52px; }
+.banner.leaving { opacity: 0; translate: 0 calc(-1 * var(--slide)); transition: opacity var(--t-short-exit) var(--ease-exit), translate var(--t-short-exit) var(--ease-exit); }
+.banner-danger { border-color: var(--danger); background: var(--danger-bg); color: var(--danger-text); }
+.banner-danger::before { content: "!"; background: var(--danger-text); }
+.banner-success { border-color: var(--success); background: var(--success-bg); color: var(--success-text); }
+.banner-success::before { content: "\2713"; background: var(--success-text); }
+
+.meter { font-size: 12px; color: var(--ink-muted); font-variant-numeric: tabular-nums; }
+.row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+
+/* Reduced motion (product: the single @media (prefers-reduced-motion: reduce) block; here the
+   toggle, initialised from that media query, sets html.rm). */
+html.rm *, html.rm *::before, html.rm *::after {
+  animation: none !important;
+  transition-property: opacity, color, background-color, border-color !important;
+  transition-duration: var(--t-fast) !important;
+  transition-delay: 0s !important;
+}
+</style>
+</head>
+<body>
+<header class="band">
+  <div class="band-row">
+    <svg class="wordmark" viewBox="0 0 514 64" aria-label="soos" role="img">
+      <path d="M128.5 32H112.438V16H58.3913C54.7967 16.0001 53.9151 20.9841 57.2932 22.2078L128.5 48V56C128.5 60.4183 124.904 64 120.469 64H0V32H16.0625V48H70.1087C73.7034 48 74.585 43.0159 71.2068 41.7922L0 16V8C0 3.58172 3.59571 0 8.03125 0H128.5V32Z"/>
+      <path d="M514 32H497.938V16H443.891C440.297 16.0001 439.415 20.9841 442.793 22.2078L514 48V56C514 60.4183 510.404 64 505.969 64H385.5V32H401.562V48H455.609C459.203 48 460.085 43.0159 456.707 41.7922L385.5 16V8C385.5 3.58172 389.096 0 393.531 0H514V32Z"/>
+      <path d="M257 48C257 56.8366 249.809 64 240.938 64H144.562C135.691 64 128.5 56.8366 128.5 48H257ZM240.938 0C249.809 0 257 7.16344 257 16V32H240.938V24C240.938 19.5817 237.342 16 232.906 16H152.594C148.158 16 144.562 19.5817 144.562 24V32H128.5V16C128.5 7.16344 135.691 0 144.562 0H240.938Z"/>
+      <path d="M240.938 48H257C257 39.1634 249.809 32 240.938 32V48Z"/>
+      <path d="M257 32H273.062V40C273.062 44.4183 276.658 48 281.094 48H361.406C365.842 48 369.438 44.4183 369.438 40V32H385.5V48C385.5 56.8366 378.309 64 369.438 64H273.062C264.191 64 257 56.8366 257 48V32ZM369.438 0C378.309 0 385.5 7.16344 385.5 16H363.013V16.1594C362.494 16.0545 361.956 16 361.406 16H257C257 7.16344 264.191 0 273.062 0H369.438Z"/>
+      <path d="M273.062 16H257C257 24.8366 264.191 32 273.062 32V16Z"/>
+    </svg>
+    <span class="band-pill">Motion prototype</span>
+    <div class="controls">
+      <label><input type="checkbox" id="reduce-motion"> Reduce motion</label>
+      <label><input type="checkbox" id="slow-motion"> Slow &times;4</label>
+    </div>
+  </div>
+</header>
+
+<main class="page">
+  <p class="intro">Owner review of the motion specification (<strong>Docs/UI_MOTION.md</strong>, GitHub issue 377). Every
+  animation below explains a state change; the words always change first. Use <strong>Reduce motion</strong> to see
+  the accessible variant (it starts from your system setting) and <strong>Slow &times;4</strong> to inspect the curves.
+  Approval of this page (matrix row UIM7) is required before the web and GUI motion pull requests merge.</p>
+
+  <h2 class="section-title">Tokens and curves</h2>
+  <div class="tokens">
+    <div class="card">
+      <table class="tok">
+        <thead><tr><th>CSS</th><th>Rust (theme.rs)</th><th>Value</th><th>Use</th></tr></thead>
+        <tbody>
+          <tr><td><code>--t-fast</code></td><td><code>T_FAST</code></td><td>120 ms</td><td>hover, press-in, control colours</td></tr>
+          <tr><td><code>--t-short</code></td><td><code>T_SHORT</code></td><td>180 ms</td><td>switch track, fades, banners in</td></tr>
+          <tr><td><code>--t-medium</code></td><td><code>T_MEDIUM</code></td><td>260 ms</td><td>cards, tab indicator, state word</td></tr>
+          <tr><td><code>--t-long</code></td><td><code>T_LONG</code></td><td>380 ms</td><td>camera full screen</td></tr>
+          <tr><td><code>--t-spring</code></td><td><code>T_SPRING</code></td><td>400 ms</td><td>paired with the spring curve</td></tr>
+          <tr><td><code>--t-*-exit</code></td><td><code>T_*_EXIT</code></td><td>126 / 182 / 266 ms</td><td>exits at 0.7 &times; entry</td></tr>
+          <tr><td><code>--t-stagger</code></td><td><code>T_STAGGER</code></td><td>30 ms</td><td>per item, at most 6</td></tr>
+          <tr><td><code>--t-pending</code></td><td><code>T_PENDING</code></td><td>1200 ms</td><td>pending star quarter turn</td></tr>
+          <tr><td><code>--ease-standard</code></td><td><code>EASE_STANDARD</code></td><td>cubic-bezier(0.2, 0, 0, 1)</td><td>default</td></tr>
+          <tr><td><code>--ease-enter</code></td><td><code>EASE_ENTER</code></td><td>cubic-bezier(0.16, 1, 0.3, 1)</td><td>appearing</td></tr>
+          <tr><td><code>--ease-exit</code></td><td><code>EASE_EXIT</code></td><td>cubic-bezier(0.4, 0, 1, 1)</td><td>leaving</td></tr>
+          <tr><td><code>--ease-spring</code></td><td><code>SPRING_*</code></td><td>k 400, c 30, m 1: &zeta; 0.75, overshoot 2.84 %, settled at 400 ms</td><td>press release, switch, star</td></tr>
+          <tr><td><code>--press-scale</code> / <code>--rise</code> / <code>--slide</code> / <code>--star-turn</code></td><td><code>PRESS_SCALE</code> &hellip;</td><td>0.98 / 6 px / 8 px / 45&deg;</td><td>distances stay small</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="card">
+      <svg class="chart" viewBox="0 0 320 200" role="img" aria-label="Easing curves over normalized time">
+        <polyline class="axis" points="20,170 300,170"/>
+        <polyline class="axis" points="20,20 20,170"/>
+        <polyline class="axis" points="20,50 300,50"/>
+        <polyline class="c-standard" id="curve-standard" points=""/>
+        <polyline class="c-fallback" id="curve-fallback" points=""/>
+        <polyline class="c-spring" id="curve-spring" points=""/>
+        <polyline class="c-linear" id="curve-linear" points=""/>
+      </svg>
+      <div class="legend">
+        <span class="lg-spring">spring (exact)</span>
+        <span class="lg-linear">CSS linear()</span>
+        <span class="lg-fallback">cubic-bezier fallback</span>
+        <span class="lg-standard">ease-standard</span>
+      </div>
+      <div class="race" id="race">
+        <div class="lane l-spring"><i></i><b>spring</b></div>
+        <div class="lane l-fallback"><i></i><b>fallback</b></div>
+        <div class="lane l-enter"><i></i><b>enter</b></div>
+        <div class="lane l-standard"><i></i><b>standard</b></div>
+      </div>
+      <button class="small secondary" id="race-go" type="button">Play the curves</button>
+      <p class="hint">The upper line marks the target; the spring peaks 2.84 % above it and settles at 400 ms.</p>
+    </div>
+  </div>
+
+  <div class="grid">
+    <section>
+      <h2 class="section-title">Phone web app (soos-remote)</h2>
+      <div class="phone" id="phone">
+        <div class="p-band">
+          <svg class="wordmark" viewBox="0 0 514 64" aria-hidden="true">
+            <path d="M128.5 32H112.438V16H58.3913C54.7967 16.0001 53.9151 20.9841 57.2932 22.2078L128.5 48V56C128.5 60.4183 124.904 64 120.469 64H0V32H16.0625V48H70.1087C73.7034 48 74.585 43.0159 71.2068 41.7922L0 16V8C0 3.58172 3.59571 0 8.03125 0H128.5V32Z"/>
+            <path d="M514 32H497.938V16H443.891C440.297 16.0001 439.415 20.9841 442.793 22.2078L514 48V56C514 60.4183 510.404 64 505.969 64H385.5V32H401.562V48H455.609C459.203 48 460.085 43.0159 456.707 41.7922L385.5 16V8C385.5 3.58172 389.096 0 393.531 0H514V32Z"/>
+            <path d="M257 48C257 56.8366 249.809 64 240.938 64H144.562C135.691 64 128.5 56.8366 128.5 48H257ZM240.938 0C249.809 0 257 7.16344 257 16V32H240.938V24C240.938 19.5817 237.342 16 232.906 16H152.594C148.158 16 144.562 19.5817 144.562 24V32H128.5V16C128.5 7.16344 135.691 0 144.562 0H240.938Z"/>
+            <path d="M240.938 48H257C257 39.1634 249.809 32 240.938 32V48Z"/>
+            <path d="M257 32H273.062V40C273.062 44.4183 276.658 48 281.094 48H361.406C365.842 48 369.438 44.4183 369.438 40V32H385.5V48C385.5 56.8366 378.309 64 369.438 64H273.062C264.191 64 257 56.8366 257 48V32ZM369.438 0C378.309 0 385.5 7.16344 385.5 16H363.013V16.1594C362.494 16.0545 361.956 16 361.406 16H257C257 7.16344 264.191 0 273.062 0H369.438Z"/>
+            <path d="M273.062 16H257C257 24.8366 264.191 32 273.062 32V16Z"/>
+          </svg>
+          <span class="band-pill">Remote</span>
+        </div>
+        <div class="p-page" aria-live="polite">
+          <div class="stat-tile" id="tile" data-state="unknown">
+            <div class="stat-strip"><span>PC status</span><span class="stat-dot" aria-hidden="true"></span></div>
+            <p id="state" class="state state-unknown">Connecting</p>
+            <p class="detail" id="activity">&nbsp;</p>
+            <p class="detail small" id="updated">&nbsp;</p>
+            <svg class="stat-star star" viewBox="0 0 508 508" aria-hidden="true"><path d="M254 0C254 140.28 367.72 254 508 254L254 254Z"/><path d="M0 254C140.28 254 254 367.72 254 508V254H0Z"/></svg>
+          </div>
+          <div class="card">
+            <button id="lock" type="button" disabled>Lock now</button>
+            <button id="unlock" type="button" class="secondary danger" disabled>Unlock now</button>
+            <p id="feedback" class="feedback" role="status">&nbsp;</p>
+          </div>
+          <div class="card" id="alerts">
+            <h2>Failed passwords on the PC</h2>
+            <p class="banner alerts-summary" id="alerts-summary">No failed password since the last check</p>
+            <p class="banner banner-warn" id="coverage" hidden>The lock screen is not covered by these alerts</p>
+            <ul class="table" id="history"></ul>
+          </div>
+          <div class="card" id="push" hidden>
+            <h2>Notifications</h2>
+            <p class="detail" id="push-state">This phone does not receive alerts yet.</p>
+            <div class="push-actions">
+              <button id="push-enable" type="button">Enable notifications</button>
+              <button id="push-test" type="button" class="secondary" hidden>Send test notification</button>
+              <button id="push-disable" type="button" class="secondary" hidden>Disable notifications</button>
+            </div>
+          </div>
+          <div class="card" id="camera" hidden>
+            <h2>Live camera</h2>
+            <div class="camera-stage" id="stage" role="button" tabindex="0" aria-label="Full screen">
+              <div class="camera-guide"></div>
+              <span class="camera-label">Live view placeholder</span>
+              <div class="camera-tools"><button class="small" id="stage-close" type="button" hidden>Close</button></div>
+            </div>
+            <p class="hint">Tap the stage: View Transition on the overlay path (instant without the API or under reduced motion).</p>
+          </div>
+          <div class="card">
+            <h2>Add a passkey</h2>
+            <input class="code" type="text" placeholder="XXXXX-XXXXX" aria-label="Enrollment code" maxlength="11">
+          </div>
+        </div>
+      </div>
+      <div class="sim">
+        <button class="small secondary" id="sim-connect" type="button">PC answers: unlocked</button>
+        <button class="small secondary" id="sim-fail" type="button">Failed passwords</button>
+        <button class="small secondary" id="sim-push" type="button">Show notifications card</button>
+        <button class="small secondary" id="sim-camera" type="button">Show camera card</button>
+        <button class="small secondary" id="sim-offline" type="button">PC unreachable</button>
+      </div>
+      <p class="hint">Lock and unlock wait 1.5 s for the simulated PC; the pending star never runs longer than the 5 s confirmation window (Slow &times;4 stretches every simulated timer too).</p>
+    </section>
+
+    <section>
+      <h2 class="section-title">Desktop GUI (soos-gui)</h2>
+      <div class="desk" id="desk" data-daemon="active">
+        <div class="g-band">
+          <svg class="wordmark" viewBox="0 0 514 64" aria-hidden="true">
+            <path d="M128.5 32H112.438V16H58.3913C54.7967 16.0001 53.9151 20.9841 57.2932 22.2078L128.5 48V56C128.5 60.4183 124.904 64 120.469 64H0V32H16.0625V48H70.1087C73.7034 48 74.585 43.0159 71.2068 41.7922L0 16V8C0 3.58172 3.59571 0 8.03125 0H128.5V32Z"/>
+            <path d="M514 32H497.938V16H443.891C440.297 16.0001 439.415 20.9841 442.793 22.2078L514 48V56C514 60.4183 510.404 64 505.969 64H385.5V32H401.562V48H455.609C459.203 48 460.085 43.0159 456.707 41.7922L385.5 16V8C385.5 3.58172 389.096 0 393.531 0H514V32Z"/>
+            <path d="M257 48C257 56.8366 249.809 64 240.938 64H144.562C135.691 64 128.5 56.8366 128.5 48H257ZM240.938 0C249.809 0 257 7.16344 257 16V32H240.938V24C240.938 19.5817 237.342 16 232.906 16H152.594C148.158 16 144.562 19.5817 144.562 24V32H128.5V16C128.5 7.16344 135.691 0 144.562 0H240.938Z"/>
+            <path d="M240.938 48H257C257 39.1634 249.809 32 240.938 32V48Z"/>
+            <path d="M257 32H273.062V40C273.062 44.4183 276.658 48 281.094 48H361.406C365.842 48 369.438 44.4183 369.438 40V32H385.5V48C385.5 56.8366 378.309 64 369.438 64H273.062C264.191 64 257 56.8366 257 48V32ZM369.438 0C378.309 0 385.5 7.16344 385.5 16H363.013V16.1594C362.494 16.0545 361.956 16 361.406 16H257C257 7.16344 264.191 0 273.062 0H369.438Z"/>
+            <path d="M273.062 16H257C257 24.8366 264.191 32 273.062 32V16Z"/>
+          </svg>
+          <div class="tabs" id="tabs" data-active="0" role="tablist">
+            <span class="tab-pill" aria-hidden="true"></span>
+            <button class="tab" type="button" role="tab" aria-selected="true" data-tab="0">Live view</button>
+            <button class="tab" type="button" role="tab" aria-selected="false" data-tab="1">Enrollment</button>
+            <button class="tab" type="button" role="tab" aria-selected="false" data-tab="2">Profiles</button>
+          </div>
+          <div class="daemon">
+            <span id="daemon-label">Daemon active</span>
+            <span id="daemon-pending" hidden><svg class="pending-star pale" viewBox="0 0 508 508" aria-hidden="true"><path d="M254 0C254 140.28 367.72 254 508 254L254 254Z"/><path d="M0 254C140.28 254 254 367.72 254 508V254H0Z"/></svg></span>
+            <button class="switch on" id="daemon-switch" type="button" role="switch" aria-checked="true" aria-label="Daemon"><span class="thumb" id="daemon-thumb"></span></button>
+          </div>
+        </div>
+        <div class="g-body" id="g-body"></div>
+      </div>
+      <div class="sim">
+        <span class="meter" id="meter">Motion frames: 0 (none while idle)</span>
+      </div>
+      <p class="hint">The switch thumb runs the closed-form spring of motion.rs; toggle the demo switch quickly to see it
+      reverse without a jump. Motion requests frames only while something moves (counter above).</p>
+    </section>
+  </div>
+
+  <template id="panel-0">
+    <div class="g-panel">
+      <div class="g-col">
+        <div class="card">
+          <h2>Camera</h2>
+          <div class="g-states">
+            <div class="g-state on" data-s="opening"><svg class="pending-star star" viewBox="0 0 508 508" aria-hidden="true"><path d="M254 0C254 140.28 367.72 254 508 254L254 254Z"/><path d="M0 254C140.28 254 254 367.72 254 508V254H0Z"/></svg><h3>Opening the camera</h3><p class="detail">Waiting for the first frame</p></div>
+            <div class="g-state live" data-s="live"><div class="camera-guide"></div><span class="camera-label">Live view placeholder</span></div>
+            <div class="g-state busy" data-s="busy"><h3>Camera busy</h3><p class="detail">Another application holds the camera</p></div>
+          </div>
+          <div class="row">
+            <button class="small secondary" type="button" data-cam="opening">Opening</button>
+            <button class="small secondary" type="button" data-cam="live">Live</button>
+            <button class="small secondary" type="button" data-cam="busy">Busy</button>
+          </div>
+        </div>
+        <div class="card">
+          <h2>Banners</h2>
+          <div class="g-banners" id="g-banners"></div>
+          <div class="row">
+            <button class="small secondary" type="button" data-banner="info">Info</button>
+            <button class="small secondary" type="button" data-banner="success">Stored</button>
+            <button class="small secondary" type="button" data-banner="danger">Error</button>
+            <button class="small secondary" type="button" data-banner="clear">Clear</button>
+          </div>
+        </div>
+      </div>
+      <div class="g-col">
+        <div class="g-tile"><div class="stat-strip"><span>FPS</span></div><div class="g-count"><span class="v-a">30</span></div></div>
+        <div class="g-tile g-star-tile"><svg class="g-star star" viewBox="0 0 508 508" aria-hidden="true"><path d="M254 0C254 140.28 367.72 254 508 254L254 254Z"/><path d="M0 254C140.28 254 254 367.72 254 508V254H0Z"/></svg></div>
+      </div>
+    </div>
+  </template>
+  <template id="panel-1">
+    <div class="g-panel">
+      <div class="g-col">
+        <div class="card">
+          <h2>Guided enrollment</h2>
+          <div class="track"><div class="fill" id="fill"></div></div>
+          <p class="detail" id="progress-text">0 of 5 captures</p>
+          <div class="row">
+            <button class="small" type="button" id="capture">Capture</button>
+            <button class="small secondary" type="button" id="reset">Reset</button>
+          </div>
+        </div>
+        <div class="card">
+          <h2>Retarget demo</h2>
+          <div class="row"><button class="switch" id="demo-switch" type="button" role="switch" aria-checked="false" aria-label="Demo switch"><span class="thumb" id="demo-thumb"></span></button><span class="detail">Toggle twice quickly.</span></div>
+        </div>
+      </div>
+      <div class="g-col">
+        <div class="g-tile"><div class="stat-strip"><span>Captures</span></div><div class="g-count" id="cap-count"><span class="v-a">0</span></div></div>
+        <div class="g-tile g-star-tile"><svg class="g-star star" viewBox="0 0 508 508" aria-hidden="true"><path d="M254 0C254 140.28 367.72 254 508 254L254 254Z"/><path d="M0 254C140.28 254 254 367.72 254 508V254H0Z"/></svg></div>
+      </div>
+    </div>
+  </template>
+  <template id="panel-2">
+    <div class="g-panel">
+      <div class="g-col">
+        <div class="card">
+          <h2>Biometric profiles</h2>
+          <ul class="table"><li>owner &middot; sface_2021dec &middot; 128-D</li><li>owner (glasses) &middot; sface_2021dec &middot; 128-D</li></ul>
+          <div class="row"><button class="small" type="button" id="add-template">Add a template</button></div>
+        </div>
+      </div>
+      <div class="g-col">
+        <div class="g-tile"><div class="stat-strip"><span>Templates</span></div><div class="g-count" id="tpl-count"><span class="v-a">2</span></div></div>
+        <div class="g-tile g-star-tile"><svg class="g-star star" viewBox="0 0 508 508" aria-hidden="true"><path d="M254 0C254 140.28 367.72 254 508 254L254 254Z"/><path d="M0 254C140.28 254 254 367.72 254 508V254H0Z"/></svg></div>
+      </div>
+    </div>
+  </template>
+</main>
+
+<script>
+"use strict";
+(function () {
+  const root = document.documentElement;
+  const $ = function (id) { return document.getElementById(id); };
+
+  // ---- Review toggles -------------------------------------------------------------------------
+  const reduceBox = $("reduce-motion");
+  const slowBox = $("slow-motion");
+  const media = typeof window.matchMedia === "function" ? window.matchMedia("(prefers-reduced-motion: reduce)") : null;
+  function setReduced(on) { reduceBox.checked = on; root.classList.toggle("rm", on); }
+  function reduced() { return root.classList.contains("rm"); }
+  function speed() { return root.classList.contains("slow") ? 4 : 1; }
+  setReduced(media !== null && media.matches);
+  if (media !== null && typeof media.addEventListener === "function") {
+    media.addEventListener("change", function () { setReduced(media.matches); });
+  }
+  reduceBox.addEventListener("change", function () { setReduced(reduceBox.checked); });
+  slowBox.addEventListener("change", function () { root.classList.toggle("slow", slowBox.checked); });
+
+  // ---- Spring (closed form, as motion.rs) ------------------------------------------------------
+  const K = 400, C = 30, M = 1;
+  const WN = Math.sqrt(K / M), ZETA = C / (2 * Math.sqrt(K * M)), WD = WN * Math.sqrt(1 - ZETA * ZETA);
+  const MAX_DT = 0.05, EPS = 0.001, VEL = 0.1;
+  function springX(t) { return 1 - Math.exp(-ZETA * WN * t) * (Math.cos(WD * t) + ZETA * WN / WD * Math.sin(WD * t)); }
+  function Spring(value) { this.value = value; this.velocity = 0; this.target = value; this.span = 0; }
+  Spring.prototype.retarget = function (target) {
+    if (!Number.isFinite(target)) { return; }
+    this.target = target; this.span = Math.abs(target - this.value);
+  };
+  Spring.prototype.step = function (dt) {
+    if (!(dt > 0)) { dt = 0; }
+    dt = Math.min(dt, MAX_DT);
+    const e = this.value - this.target, a = ZETA * WN, b = (this.velocity + a * e) / WD;
+    const decay = Math.exp(-a * dt), s = Math.sin(WD * dt), c = Math.cos(WD * dt);
+    const ne = decay * (e * c + b * s);
+    const nv = decay * (-a * (e * c + b * s) + (-e * WD * s + b * WD * c));
+    this.value = this.target + ne; this.velocity = nv;
+    if (!Number.isFinite(this.value) || !Number.isFinite(this.velocity)) { this.value = this.target; this.velocity = 0; }
+    if (this.settled()) { this.value = this.target; this.velocity = 0; }
+    return this.value;
+  };
+  Spring.prototype.settled = function () {
+    const span = Math.max(this.span, 1e-9);
+    return Math.abs(this.target - this.value) <= EPS * span && Math.abs(this.velocity) <= VEL * span;
+  };
+
+  // A tiny frame scheduler: frames are requested only while a spring is unsettled.
+  const springs = [];
+  let frames = 0, rafPending = false, last = 0;
+  const meter = $("meter");
+  function tick(now) {
+    rafPending = false;
+    const dt = last === 0 ? 1 / 60 : (now - last) / 1000 / speed();
+    last = now;
+    let busy = false;
+    springs.forEach(function (item) {
+      if (item.spring.settled() && item.spring.value === item.spring.target) { return; }
+      item.spring.step(dt); item.apply(item.spring.value);
+      busy = busy || !item.spring.settled();
+    });
+    frames += 1;
+    meter.textContent = "Motion frames: " + frames + (busy ? " (moving)" : " (settled: no more frames)");
+    if (busy) { request(); } else { last = 0; }
+  }
+  function request() { if (!rafPending) { rafPending = true; window.requestAnimationFrame(tick); } }
+  function animateTo(item, target) {
+    item.spring.retarget(target);
+    if (reduced()) { item.spring.value = target; item.spring.velocity = 0; item.apply(target); return; }
+    request();
+  }
+  function thumbItem(el) {
+    return { spring: new Spring(0), apply: function (v) { el.style.transform = "translateX(" + (v * 20).toFixed(2) + "px)"; } };
+  }
+
+  // ---- Curves chart and race -------------------------------------------------------------------
+  const LINEAR = [[0, 0], [0.015, 0.0063], [0.03, 0.0263], [0.048, 0.0595], [0.066, 0.1065], [0.082, 0.1522], [0.1, 0.2104], [0.169, 0.4504], [0.201, 0.5562], [0.234, 0.6552], [0.266, 0.7391], [0.296, 0.8083], [0.328, 0.8658], [0.359, 0.9136], [0.393, 0.9524], [0.429, 0.9829], [0.468, 1.0052], [0.51, 1.0197], [0.559, 1.0271], [0.638, 1.0269], [0.844, 1.0085], [1, 1]];
+  function bezier(p, x) {
+    let lo = 0, hi = 1;
+    const coord = function (t, a, b) { const u = 1 - t; return 3 * u * u * t * a + 3 * u * t * t * b + t * t * t; };
+    for (let i = 0; i < 40; i += 1) { const mid = (lo + hi) / 2; if (coord(mid, p[0], p[2]) < x) { lo = mid; } else { hi = mid; } }
+    return coord((lo + hi) / 2, p[1], p[3]);
+  }
+  function points(fn) {
+    const out = [];
+    for (let i = 0; i <= 140; i += 1) { const x = i / 140; out.push((20 + x * 280).toFixed(1) + "," + (170 - fn(x) * 120).toFixed(1)); }
+    return out.join(" ");
+  }
+  $("curve-spring").setAttribute("points", points(function (x) { return springX(x * 0.4); }));
+  $("curve-linear").setAttribute("points", LINEAR.map(function (p) { return (20 + p[0] * 280).toFixed(1) + "," + (170 - p[1] * 120).toFixed(1); }).join(" "));
+  $("curve-fallback").setAttribute("points", points(function (x) { return bezier([0.37, 0.73, 0.1, 1.15], x); }));
+  $("curve-standard").setAttribute("points", points(function (x) { return bezier([0.2, 0, 0, 1], x); }));
+  $("race-go").addEventListener("click", function () { $("race").classList.toggle("go"); });
+
+  // ---- Phone: status, lock, unlock -------------------------------------------------------------
+  const tile = $("tile"), stateNode = $("state"), lockBtn = $("lock"), unlockBtn = $("unlock"), feedback = $("feedback");
+  const LABELS = { locked: "Locked", unlocked: "Unlocked", unknown: "Connecting", unreachable: "Unreachable" };
+  let current = "unknown", requestTimer = 0;
+  function render(state) {
+    // Security truth first: text, class, data-state and disabled change on the same frame.
+    current = state;
+    stateNode.textContent = LABELS[state];
+    stateNode.className = "state state-" + state;
+    tile.dataset.state = state;
+    $("activity").textContent = state === "unreachable" ? "The PC is off, asleep, or unreachable" : (state === "unknown" ? " " : "Active session");
+    $("updated").textContent = state === "unknown" ? " " : "Updated just now";
+    lockBtn.disabled = state !== "unlocked";
+    unlockBtn.disabled = state !== "locked";
+  }
+  function setPending(button, on) {
+    button.classList.toggle("is-pending", on);
+    tile.classList.toggle("is-pending", on);
+  }
+  function settle(button, state, text) {
+    window.clearTimeout(requestTimer);
+    setPending(button, false);
+    render(state);
+    feedback.textContent = text;
+  }
+  lockBtn.addEventListener("click", function () {
+    lockBtn.disabled = true;
+    feedback.textContent = "Lock requested…";
+    setPending(lockBtn, true);
+    requestTimer = window.setTimeout(function () { settle(lockBtn, "locked", "The PC is locked"); }, 1500 * speed());
+  });
+  unlockBtn.addEventListener("click", function () {
+    if (!window.confirm("Unlock the PC now?")) { return; }
+    unlockBtn.disabled = true;
+    feedback.textContent = "Confirm with your passkey (simulated)…";
+    window.setTimeout(function () {
+      feedback.textContent = "Unlock requested…";
+      setPending(unlockBtn, true);
+      requestTimer = window.setTimeout(function () { settle(unlockBtn, "unlocked", "The PC is unlocked"); }, 1500 * speed());
+    }, 700 * speed());
+  });
+  $("sim-connect").addEventListener("click", function () { render("unlocked"); feedback.textContent = " "; });
+  $("sim-offline").addEventListener("click", function () { render(current === "unreachable" ? "locked" : "unreachable"); });
+
+  // Alerts: attention class, coverage banner, list stagger on the first render only.
+  const history = $("history");
+  let alertsRendered = false;
+  function renderHistory(items) {
+    history.classList.toggle("stagger-once", !alertsRendered);
+    alertsRendered = true;
+    history.replaceChildren();
+    items.forEach(function (text) { const li = document.createElement("li"); li.textContent = text; history.appendChild(li); });
+  }
+  $("sim-fail").addEventListener("click", function () {
+    $("alerts").classList.add("alerts-attention");
+    $("alerts-summary").textContent = "3 failed passwords wait for your acknowledgement";
+    $("coverage").hidden = false;
+    renderHistory(["21:42 · sudo · wrong password", "21:41 · sudo · wrong password", "21:40 · login screen · wrong password"]);
+  });
+
+  // Notifications: button swap, no switch.
+  $("sim-push").addEventListener("click", function () { $("push").hidden = false; });
+  function pushState(on) {
+    $("push-state").textContent = on ? "1 device receives alerts from this PC." : "This phone does not receive alerts yet.";
+    $("push-enable").hidden = on; $("push-test").hidden = !on; $("push-disable").hidden = !on;
+  }
+  $("push-enable").addEventListener("click", function () { pushState(true); });
+  $("push-disable").addEventListener("click", function () { pushState(false); });
+
+  // Camera full screen through a feature-detected View Transition (overlay path).
+  const stage = $("stage");
+  let full = false;
+  function withViewTransition(apply) {
+    if (reduced() || typeof document.startViewTransition !== "function") { apply(); return; }
+    try {
+      const transition = document.startViewTransition(apply);
+      // A skipped transition rejects these promises: never leave them unhandled.
+      [transition.ready, transition.updateCallbackDone, transition.finished].forEach(function (p) {
+        if (p && typeof p.catch === "function") { p.catch(function () {}); }
+      });
+    } catch (_) { apply(); }
+  }
+  // The flag is written first; the callback reads the CURRENT flag, so a quick exit and re-entry
+  // can never leave the overlay in a stale state.
+  function applyFull() {
+    stage.classList.toggle("camera-full", full);
+    root.classList.toggle("camera-lock", full);
+    $("stage-close").hidden = !full;
+  }
+  function setFull(on) {
+    full = on;
+    withViewTransition(applyFull);
+  }
+  $("sim-camera").addEventListener("click", function () { $("camera").hidden = false; });
+  stage.addEventListener("click", function (event) { if (event.target === $("stage-close")) { return; } if (!full) { setFull(true); } });
+  stage.addEventListener("keydown", function (event) { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); setFull(!full); } });
+  $("stage-close").addEventListener("click", function () { setFull(false); });
+  document.addEventListener("keydown", function (event) { if (event.key === "Escape" && full) { setFull(false); } });
+
+  window.setTimeout(function () { render("locked"); }, 900);
+
+  // ---- Desktop GUI ---------------------------------------------------------------------------
+  const desk = $("desk"), tabs = $("tabs"), body = $("g-body");
+  function showPanel(index) {
+    tabs.dataset.active = String(index);
+    tabs.querySelectorAll(".tab").forEach(function (t) { t.setAttribute("aria-selected", t.dataset.tab === String(index) ? "true" : "false"); });
+    body.replaceChildren($("panel-" + index).content.cloneNode(true));
+    wirePanel(index);
+  }
+  tabs.addEventListener("click", function (event) {
+    const tab = event.target.closest(".tab");
+    if (tab !== null && tab.dataset.tab !== tabs.dataset.active) { showPanel(Number(tab.dataset.tab)); }
+  });
+
+  // Count cross-fade: alternate two keyframe names so each change replays the fade.
+  function setCount(box, value) {
+    const old = box.querySelector("span");
+    const span = document.createElement("span");
+    span.className = old !== null && old.className === "v-a" ? "v-b" : "v-a";
+    span.textContent = String(value);
+    box.replaceChildren(span);
+  }
+
+  let progress = 0;
+  // One registered spring for the demo switch; each visit to the tab rebinds its element.
+  const demoItem = { el: null, spring: new Spring(0), apply: function (v) { if (demoItem.el !== null && demoItem.el.isConnected) { demoItem.el.style.transform = "translateX(" + (v * 20).toFixed(2) + "px)"; } } };
+  springs.push(demoItem);
+  function wirePanel(index) {
+    if (index === 0) {
+      body.querySelectorAll("[data-cam]").forEach(function (b) {
+        b.addEventListener("click", function () {
+          body.querySelectorAll(".g-state").forEach(function (s) { s.classList.toggle("on", s.dataset.s === b.dataset.cam); });
+        });
+      });
+      const box = $("g-banners");
+      const TEXT = { info: ["", "Look at the camera, one face only"], success: ["banner-success", "Template stored"], danger: ["banner-danger", "The store could not be written (stays until dismissed)"] };
+      body.querySelectorAll("[data-banner]").forEach(function (b) {
+        b.addEventListener("click", function () {
+          const old = box.querySelector(".banner:not(.leaving)");
+          if (old !== null) {
+            old.classList.add("leaving");
+            window.setTimeout(function () { old.remove(); }, reduced() ? 0 : 126 * speed());
+          }
+          if (b.dataset.banner === "clear") { return; }
+          const p = document.createElement("p");
+          p.className = ("banner " + TEXT[b.dataset.banner][0]).trim();
+          p.textContent = TEXT[b.dataset.banner][1];
+          box.appendChild(p);
+        });
+      });
+    } else if (index === 1) {
+      const fill = $("fill");
+      const update = function () {
+        fill.style.scale = (progress / 5) + " 1";
+        $("progress-text").textContent = progress + " of 5 captures";
+        setCount($("cap-count"), progress);
+      };
+      fill.style.scale = (progress / 5) + " 1";
+      $("progress-text").textContent = progress + " of 5 captures";
+      $("cap-count").querySelector("span").textContent = String(progress);
+      $("capture").addEventListener("click", function () { if (progress < 5) { progress += 1; update(); } });
+      $("reset").addEventListener("click", function () { progress = 0; update(); });
+      const demo = $("demo-switch");
+      demoItem.el = $("demo-thumb");
+      demoItem.spring = new Spring(0);
+      const item = demoItem;
+      let on = false;
+      demo.addEventListener("click", function () {
+        on = !on;
+        demo.classList.toggle("on", on);
+        demo.setAttribute("aria-checked", on ? "true" : "false");
+        animateTo(item, on ? 1 : 0);
+      });
+    } else {
+      let count = 2;
+      $("add-template").addEventListener("click", function () { count += 1; setCount($("tpl-count"), count); });
+    }
+  }
+
+  // Daemon switch: privileged action pending (star), then the confirmed state springs the thumb.
+  const sw = $("daemon-switch"), daemonThumb = thumbItem($("daemon-thumb"));
+  springs.push(daemonThumb);
+  daemonThumb.spring = new Spring(1); daemonThumb.apply(1);
+  let active = true;
+  sw.addEventListener("click", function () {
+    sw.hidden = true;
+    $("daemon-pending").hidden = false;
+    $("daemon-label").textContent = "Waiting for authorization…";
+    window.setTimeout(function () {
+      active = !active;
+      $("daemon-pending").hidden = true;
+      sw.hidden = false;
+      $("daemon-label").textContent = active ? "Daemon active" : "Daemon inactive";
+      desk.dataset.daemon = active ? "active" : "inactive";
+      sw.classList.toggle("on", active);
+      sw.setAttribute("aria-checked", active ? "true" : "false");
+      animateTo(daemonThumb, active ? 1 : 0);
+    }, 1600 * speed());
+  });
+
+  showPanel(0);
+  window.setTimeout(function () {
+    body.querySelectorAll(".g-state").forEach(function (s) { s.classList.toggle("on", s.dataset.s === "live"); });
+  }, 1400);
+}());
+</script>
+</body>
+</html>
