@@ -2343,3 +2343,13 @@ Shared-crate preparation for the separate private `soos-macos` repository (ADR 2
 | MAC7 | Every existing test passes unchanged except the import-path amendments AM-1 to AM-3 (13 vision test files and the fixture generator test swap `use soos_camera_v4l::` for `use soos_frame::`; assertions untouched) | `soos-vision::zeroize_tests::test_rgb_buffer_zeroized_after_pipeline`, `soos-camera-v4l::frame_zeroize_tests::test_frame_zeroize_trait`, full workspace run recorded in `AI/walkthroughs/198_macos_port_foundation.md` §8 | ✅ Verified |
 | MAC8 | `soos-biometric-store` tests run green on macOS | Not yet run on macOS (compiled by the `portable-macos` clippy step only, spec D-4) | ⬜ Pending (store tests not yet run on macOS) |
 | MAC9 | First green run of the `portable-macos` job on GitHub Actions | The job first runs on the pull request of this branch; agents never push | ⬜ Pending (first macOS CI run happens on the pull request) |
+
+---
+
+## Component: `rwp-delivery-deflake` (GitHub #371, `test/deflake-rwp-delivery`, walkthrough 204)
+
+The Web Push delivery tests no longer race the blocking-pool removal of a subscription answered `Gone`: `wait_calls` waits in real time, without moving the paused clock, until the dispatcher has consumed that store write, and only then spends virtual time. Production code is unchanged and no assertion, virtual bound or step changed (contract amendments CA-1 to CA-3, walkthrough 204 §4). GitHub-only issue: no backlog id, branch not registered, the commit carries `Closes #371`.
+
+| ID | Criterion | Evidence | Status |
+|----|-----------|----------|--------|
+| RWPF1 | After a `Gone` answer, `wait_calls` in `push_server_tests.rs` and `android_push_tests.rs` never advances the virtual clock until the removal is consumed: a later transport call was recorded, or the endpoint left the store and `GET /api/push` reports `last_delivery: "gone"` (real-time bound `GONE_WAIT` 10 s, below the frozen clock's 20 s fallback); `FakeTransport` records each call's scripted answer (`Call::answered_gone`, `FakeTransport::last_gone`) | Integration tests (`test_rwp_delivery_outcomes`, `test_ran_endpoints_subscribe_store_and_dispatch`); stress loop with 8 runs in parallel pinned to 2 CPUs, 4 busy loops, 3 `fsync` writers and `TMPDIR` on ext4: `test_rwp_delivery_outcomes` failed 26 times in 40 runs before (all with the CI message `2 calls not reached within 10000 ms (1 so far)`) and 0 times in 200 runs after; `test_ran_endpoints_subscribe_store_and_dispatch` 0 of 40 after (walkthrough 204 §6) | ✅ Verified |

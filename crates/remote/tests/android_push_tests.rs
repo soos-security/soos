@@ -290,10 +290,16 @@ async fn until_active(h: &Harness, j: &ScriptedJournal) {
 }
 
 /// Moves the clock until the transport saw `n` calls.
+///
+/// Contract migration (GitHub #371): before each step the clock waits, in real time, for the
+/// blocking-pool removal of a subscription answered `Gone` ([`settle_gone`]); the virtual
+/// steps alone could run out while the dispatcher awaited that store write.
 async fn wait_calls(h: &Harness, t: &FakeTransport, n: usize, max_ms: u64) {
     let mut elapsed = 0;
+    let mut settled = None;
     loop {
         pump().await;
+        settle_gone(h, t, &mut settled).await;
         if t.count() >= n {
             return;
         }
@@ -306,6 +312,48 @@ async fn wait_calls(h: &Harness, t: &FakeTransport, n: usize, max_ms: u64) {
         elapsed += 100;
     }
 }
+
+/// Waits in real time (never moving the clock) until the dispatcher has consumed the
+/// blocking-pool removal of the latest subscription answered `Gone`: a later call was made,
+/// or the endpoint left the store and `GET /api/push` reports `last_delivery: "gone"`. A
+/// call index already settled is skipped; panics after [`GONE_WAIT`]. Assumes a gone
+/// endpoint is not subscribed again before a later `wait_calls` on the same transport.
+async fn settle_gone(h: &Harness, t: &FakeTransport, settled: &mut Option<usize>) {
+    let Some((index, endpoint)) = t.last_gone() else {
+        return;
+    };
+    if *settled == Some(index) {
+        return;
+    }
+    let store = PushStore::new(h.dir.join(PUSH_STORE_FILE_NAME), own_uid());
+    let start = std::time::Instant::now();
+    loop {
+        pump().await;
+        if t.count() > index + 1 {
+            break;
+        }
+        let stored = store.load().ok().flatten().is_some_and(|file| {
+            file.subscriptions
+                .iter()
+                .any(|s| s.endpoint.as_str() == endpoint)
+        });
+        if !stored && push_view(h).await["last_delivery"] == "gone" {
+            break;
+        }
+        assert!(
+            start.elapsed() < GONE_WAIT,
+            "the removal of a gone subscription never completed"
+        );
+        std::thread::sleep(GONE_WAIT_SLEEP);
+    }
+    *settled = Some(index);
+}
+
+/// Real-time bound of one [`settle_gone`] wait (shorter than the frozen clock's
+/// `WALL_CLOCK_FALLBACK`, which counts from `FrozenClock::hold` for the whole harness).
+const GONE_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+/// Real-time sleep between two rounds of [`settle_gone`].
+const GONE_WAIT_SLEEP: std::time::Duration = std::time::Duration::from_millis(1);
 
 /// Polls `GET /api/push` (real-time sleeps for blocking-pool store work) until `done`.
 async fn wait_view(h: &Harness, done: impl Fn(&Value) -> bool) -> Value {
