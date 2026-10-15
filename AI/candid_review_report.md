@@ -2,11 +2,62 @@
 
 - **Date**: 2026-10-15
 - **Target Branch**: `feat/ir-antispoofing-mock`
-- **Base (merge-base)**: `94a7cb3`
-- **Reviewed-Diff-Fingerprint**: `19280cecb2e150c17048a6fc8cba55aec143d4554d1b9e88845cce3575bd8451`
+- **Base (merge-base)**: `a3cae16`
+- **Reviewed-Diff-Fingerprint**: `81e0e21b04fb5dea4614b984cb03f693a09a642ebad8efa01bf0cb3743072efc`
 - **Audited Files**: AI/DECISIONS.md, AI/VERIFICATION_MATRIX.md, AI/architect_spec_ir_emitter_control.md, AI/auditor_constraints_ir_emitter_control.md, AI/tester_contract_ir_emitter_control.md, AI/walkthroughs/206_ir_emitter_control.md, Cargo.lock, Docs/CAMERA_V4L_CRATE.md, Docs/DAEMON.md, crates/admin-cli/{Cargo.toml, src/args.rs, src/camera.rs, src/error.rs, src/ir_emitter.rs, src/lib.rs, src/main.rs, tests/ir_emitter_command_tests.rs}, crates/camera-v4l/{Cargo.toml, src/diagnostics.rs, src/ir_emitter.rs, src/ir_emitter_config.rs, src/ir_mock.rs, src/lib.rs, src/mock.rs, src/strobe.rs, src/uvc_xu.rs, tests/ir_emitter_config_tests.rs, tests/ir_emitter_tests.rs, tests/ir_mock_camera_tests.rs, tests/strobe_classification_tests.rs, tests/uvc_xu_tests.rs}, crates/daemon/{src/config.rs, tests/ir_emitter_daemon_config_tests.rs}, tests/fixtures/mod.rs, tests/invariants/src/{ir_emitter_contract.rs, lib.rs}, tests/physical/screensaver_test.md
 
-## 0. Re-review after the rebase onto `main` (round 3)
+## 0. Re-review after the rebase onto `main` (round 4)
+
+The branch was rebased from merge-base `94a7cb3` onto `origin/main` `a3cae16`. `main` gained #383
+(push-test deflake), #394 (actions bump), #384 (motion spec), #388 (read-only lock-screen state
+request), #386 (remote offline alerts), #385 (`scripts/setup.sh`), #390 (system ONNX Runtime, MSRV
+1.92 enforced through `rust-version.workspace = true` and clippy `incompatible_msrv`) and #392
+(README capture, which appends `pub mod readme` and `pub mod readme_web` to `tests/fixtures/mod.rs`).
+The fingerprint changed from `19280cec...` to the value above. The frozen patch (37 files, 7394
+lines, same file set as round 3) was re-read with these extra checks:
+
+- **The rebase changed only placement.**
+  - `git range-diff origin/feat/ir-antispoofing-mock...HEAD` shows the 8 new `main` commits as the
+    new base and the single feature commit with context-only differences.
+  - Per file, the sorted added/removed lines of `git diff 94a7cb3 2fbc32f` (before) and
+    `git diff a3cae16 25a684e` (after) were hashed and compared. 35 of 37 files are identical,
+    including every Rust source, test, manifest, `Cargo.lock` and `AI/DECISIONS.md`.
+  - `AI/VERIFICATION_MATRIX.md` differs by exactly one added `---` separator line (and its blank
+    line) between `main`'s rows and this branch's block. `AI/candid_review_report.md` is this report.
+  - `AI/plan_evaluator_report.md` (excluded from the patch) is byte-identical to the pre-rebase
+    branch version.
+- **`tests/fixtures/mod.rs` junction.** The branch block starts after `main`'s closing brace of
+  `pub mod readme_web` (line 633). The `#[allow(clippy::arithmetic_side_effects,
+  clippy::cast_possible_truncation, clippy::cast_sign_loss, clippy::cast_possible_wrap, reason =
+  "Synthetic fixture pixel generation over bounded coordinates")]` attribute directly above
+  `pub mod ir_strobe` is the branch's own (identical to the pre-rebase file, lines 198 on), and
+  `main`'s attributes stay attached to `readme_web`. No attribute was misattached.
+- **Semantic interaction with `main`.**
+  - `main` did not touch `crates/daemon/src/config.rs`, `crates/camera-v4l/src` or
+    `crates/admin-cli/src`. #388 (`lock_state`, dispatcher, presence worker) and #386 (`remote`)
+    never read `[camera]` or `PipelineConfig::ir_emitter`. The only new `PipelineConfig` literal on
+    `main` (`system_onnxruntime_startup_tests.rs`) uses `..Default::default()`, so the new
+    `ir_emitter` field does not break it. No `main` file writes a `[camera]` key (setup script and
+    packaging included), so the round-2 sibling-key behavior is not exercised by new defaults.
+  - MSRV 1.92: the three touched crates now inherit `rust-version = "1.92"`. Clippy with
+    `-D warnings` (which includes `incompatible_msrv`) is clean on the new ioctl, UVC XU, strobe and
+    admin-cli code. `main`'s new `system_onnxruntime_contract` invariants pass with this branch.
+- **Mechanical test listing unchanged.** No removed or changed assertion or test attribute, no
+  escape hatch, one new inline `mod tests` (`crates/camera-v4l/src/uvc_xu.rs`).
+- **Evidence (round 4, on `25a684e` + this report).** With `LIBONNXRUNTIME_NO_PKG_CONFIG=1`,
+  `CARGO_INCREMENTAL=0`, `CARGO_BUILD_JOBS=4`:
+  - `cargo clippy --locked -p soos-camera-v4l -p soos-admin-cli -p soos-daemon -p soos-test-fixtures
+    --all-targets --all-features -- -D warnings`: clean (0 warnings).
+  - `cargo test --locked -p soos-camera-v4l -p soos-admin-cli -p soos-test-fixtures -p soos-invariants
+    --all-features -- --test-threads=4`: 1319 passed, 0 failed, 3 ignored (78 suites). The daemon
+    test suites were compiled by clippy `--all-targets` but not run in this round (memory limit);
+    the daemon config code is unchanged since round 2, where they passed.
+
+**Carried forward:** the round-2 MINOR (top-level scalar `camera = "x"` is a deserialization error)
+stays open and non-blocking; the round-1 SUGGESTION (`StrobeStatus::vetoes_allow` for
+`Stable(Absent)`) stays an open ADR decision for split item 4. No new finding.
+
+## 0a. Re-review after the rebase onto `main` (round 3)
 
 The branch was rebased from merge-base `6f32ef8` onto `origin/main` `94a7cb3`. That commit (#396)
 only updates `rustls` from 0.23.45 to 0.23.46 in `Cargo.lock` (RUSTSEC-2026-0346, RUSTSEC-2026-0347)
@@ -278,7 +329,7 @@ No existing test was modified or weakened.
 
 ## 5. Final Verdict
 
-Round 3 (rebase onto `94a7cb3`) confirms the reviewed content is unchanged apart from the lockfile base, which keeps rustls 0.23.46. Round 2 resolves every round-1 MAJOR and MINOR item. The only open item is the non-blocking MINOR
+Round 4 (rebase onto `a3cae16`) confirms the reviewed content is unchanged apart from placement in `AI/VERIFICATION_MATRIX.md` and `tests/fixtures/mod.rs`, and finds no semantic conflict with `main`. Round 3 (rebase onto `94a7cb3`) confirms the reviewed content is unchanged apart from the lockfile base, which keeps rustls 0.23.46. Round 2 resolves every round-1 MAJOR and MINOR item. The only open item is the non-blocking MINOR
 on a top-level scalar `camera` key (§0).
 
 **VERDICT: APPROVED**
