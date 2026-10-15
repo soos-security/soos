@@ -1,285 +1,103 @@
 # Candid Review Report
 
 - **Date**: 2026-10-15
-- **Target Branch**: `feat/android-native-app`
-- **Base (merge-base)**: `6f32ef8`
-- **Reviewed-Diff-Fingerprint**: `cd6d2ac3f60541d6755ba5b10b1f06a997ca7e91bd61c1a043c0d5760175efd0`
-- **Audited Files**: `.github/workflows/android.yml`, `.gitignore`, `AI/DECISIONS.md`, `AI/VERIFICATION_MATRIX.md`, `AI/architect_spec_android_native_app.md`, `AI/auditor_constraints_android_native_app.md`, `AI/tester_contract_android_native_app.md`, `AI/walkthroughs/208_android_native_app.md`, `Docs/REMOTE_COMPANION.md`, `android/**` (Gradle project: `build.gradle.kts`, `settings.gradle.kts`, `gradle.properties`, `gradle/libs.versions.toml`, `gradle/verification-metadata.xml`, `gradle/wrapper/gradle-wrapper.properties`, `app/build.gradle.kts`, `AndroidManifest.xml`, 11 Kotlin sources, 10 resources, 5 JVM unit tests), `crates/remote/src/{auth,config,lib,main,routes,server,webauthn}.rs`, `crates/remote/tests/android_app_tests.rs`, `scripts/android_build.sh`, `scripts/secret_scan.sh`, `tests/invariants/src/android_native_contract.rs`, `tests/invariants/src/lib.rs`
+- **Target Branch**: `feat/android-native-app` (PR #391, rebased onto `origin/main`)
+- **Base (merge-base)**: `85a7f42`
+- **Reviewed-Diff-Fingerprint**: `8ff37e77b38e9c987ceab52c9f1e62a87a427467204947dab48cf9aafa26e902`
+- **Audited Files**: `.github/workflows/android.yml`, `.gitignore`, `AI/DECISIONS.md`, `AI/VERIFICATION_MATRIX.md`, `AI/architect_spec_android_native_app.md`, `AI/auditor_constraints_android_native_app.md`, `AI/tester_contract_android_native_app.md`, `AI/walkthroughs/208_android_native_app.md`, `Docs/REMOTE_COMPANION.md`, `android/app/build.gradle.kts`, `android/app/src/main/AndroidManifest.xml`, `android/app/src/main/java/org/soos/remote/MainActivity.kt`, `android/app/src/main/java/org/soos/remote/auth/PasskeyJson.kt`, `android/app/src/main/java/org/soos/remote/auth/PasskeySignIn.kt`, `android/app/src/main/java/org/soos/remote/config/PcUrl.kt`, `android/app/src/main/java/org/soos/remote/data/SettingsStore.kt`, `android/app/src/main/java/org/soos/remote/net/ApiJson.kt`, `android/app/src/main/java/org/soos/remote/net/HttpTransport.kt`, `android/app/src/main/java/org/soos/remote/net/SessionCookie.kt`, `android/app/src/main/java/org/soos/remote/net/SoosApi.kt`, `android/app/src/main/java/org/soos/remote/net/UrlConnectionTransport.kt`, `android/app/src/main/java/org/soos/remote/ui/SoosApp.kt`, `android/app/src/main/java/org/soos/remote/ui/theme/Theme.kt`, `android/app/src/main/res/drawable/ic_launcher_foreground.xml`, `android/app/src/main/res/drawable/ic_launcher_monochrome.xml`, `android/app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml`, `android/app/src/main/res/values-night/themes.xml`, `android/app/src/main/res/values/colors.xml`, `android/app/src/main/res/values/strings.xml`, `android/app/src/main/res/values/themes.xml`, `android/app/src/main/res/xml/data_extraction_rules.xml`, `android/app/src/main/res/xml/network_security_config.xml`, `android/app/src/test/java/org/soos/remote/ApiJsonTest.kt`, `android/app/src/test/java/org/soos/remote/PasskeyJsonTest.kt`, `android/app/src/test/java/org/soos/remote/PcUrlTest.kt`, `android/app/src/test/java/org/soos/remote/SessionCookieTest.kt`, `android/app/src/test/java/org/soos/remote/SoosApiTest.kt`, `android/build.gradle.kts`, `android/gradle.properties`, `android/gradle/libs.versions.toml`, `android/gradle/verification-metadata.xml`, `android/gradle/wrapper/gradle-wrapper.properties`, `android/settings.gradle.kts`, `crates/remote/src/auth.rs`, `crates/remote/src/config.rs`, `crates/remote/src/lib.rs`, `crates/remote/src/main.rs`, `crates/remote/src/routes.rs`, `crates/remote/src/server.rs`, `crates/remote/src/webauthn.rs`, `crates/remote/tests/android_app_tests.rs`, `scripts/android_build.sh`, `scripts/secret_scan.sh`, `tests/invariants/src/android_native_contract.rs`, `tests/invariants/src/lib.rs`
 
 ## 1. Executive Summary
 
-**Re-review of 2026-10-15, second pass (HEAD `d4a43ea`).** The review of HEAD `9a58e09`
-(APPROVED, report commit `21c0f3f`, fingerprint `1d5ff688...`) is superseded. The only change
-since then is commit `d4a43ea` (`git diff 21c0f3f d4a43ea`: `scripts/android_build.sh`,
-`AI/DECISIONS.md` Android ADR item (7), `AI/VERIFICATION_MATRIX.md` row ANA12,
-`AI/walkthroughs/208_android_native_app.md`). It adds `android.permission.USE_BIOMETRIC` and
-`android.permission.USE_FINGERPRINT` to `ALLOWED_PERMISSIONS`, the exact-match allowlist of the
-mandatory `aapt2` check, after the first strict CI run rejected `USE_BIOMETRIC` merged from
-`androidx.biometric` 1.1.0 (a compile dependency of `androidx.credentials` 1.5.0; owner decision
-2026-10-15). The change was audited in full (see "Supply Chain & Automation", *Permission
-allowlist*); no CRITICAL or MAJOR finding. One new MINOR (pre-existing gap in the same check,
-`uses-permission-sdk-23` lines are not inspected) and one new SUGGESTION (the invariant does not
-pin the allowlist) are added; earlier findings are carried forward unchanged. Command run:
-`cargo test --locked -p soos-invariants` (616 passed, including `test_ana_s6_manifest_hardening`
-and `test_ana_s10_build_script`); `bash -n scripts/android_build.sh` (clean).
+Context-free review of the raw diff (merge-base `85a7f42` to the working tree) after the rebase onto main,
+with focus on the reconciliation of the `[android]` binding (`AndroidAppConfig`, `/.well-known/assetlinks.json`,
+`ServerState.android`) with main's offline-alerts feature (`OfflineConfig`, `/api/offline`, `ServerState.offline`).
+The merge is clean: both features are independently opt-in, validation ordering is camera, then offline, then
+`[android]`, every new error is a fixed value-free `ConfigError` mapped to exit 78, the route table carries both
+`Route::Offline` and `Route::AssetLinks`, only `AssetLinks` is Funnel-public, and an absent binding yields the exact
+unknown-path `404`. No CRITICAL or MAJOR finding; one MINOR robustness note on the CI permission check.
 
-Previous re-review (HEAD `9a58e09`, carried forward):
+## 2. Test Changes
 
-**Re-review of 2026-10-15 (HEAD `9a58e09`).** The previous review (APPROVED, HEAD `8f629a0`,
-fingerprint `787be720...`) is superseded. The only change since then is commit `9a58e09`, which
-populates `android/gradle/verification-metadata.xml` with the metadata generated by the
-bootstrap CI run 38446125267 (assumption A-4); `git diff 8f629a0 9a58e09` touches that file only,
-and only inside `<components>` (the header comment and `<configuration>` block are unchanged).
-The new content was audited in full (see "Supply Chain & Automation", *Committed metadata*);
-the findings of the previous review are carried forward unchanged in section 4, with
-SUGGESTION 5 updated. The report file itself is excluded from the fingerprint by
-`scripts/candid_subagent.sh` (`REVIEW_EXCLUDES` pathspec `:(exclude)AI/candid_review_report.md`,
-applied to the fingerprint, the file list and the zero-change check). Command run for this
-re-review: `cargo test --locked -p soos-invariants android_native_contract` (12 passed,
-including `test_ana_s4_dependency_verification_metadata`, which now takes its populated branch
-and checks every catalog library, the Compose BOM and the three plugin markers at their pinned
-versions with a SHA-256).
+Mechanical listing (step 3 of the procedure) on `target/candid_diff.patch`:
 
-Original summary (2026-10-13, carried forward):
-
-First PR of #357 (GitHub #382, part 2 of #354): an opt-in `[android]` table in `soos-remote`, a
-`/.well-known/assetlinks.json` route, acceptance of the `android:apk-key-hash:` origin for the
-**Login** WebAuthn ceremony only, and a new native Kotlin/Compose app (settings, Funnel passkey
-sign-in through Credential Manager, status, lock) with a path-filtered CI job.
-
-The server changes are fail-closed and narrowly scoped: without `[android]` every behaviour is
-byte-identical (asserted by tests), the app origin is matched byte for byte against origins
-computed from parsed 32-byte digests, only for `CeremonyType::Get` with `ChallengePurpose::Login`;
-unlock, camera view and registration remain web-origin only. The Android app was read (it has
-never been compiled locally; the first CI run is a deliberate trust-on-first-use bootstrap that
-fails by design). No CRITICAL or MAJOR finding; four MINOR/SUGGESTION items are listed.
-
-Commands run in this worktree: `cargo test -p soos-remote --test android_app_tests` (30 passed),
-`cargo test -p soos-remote` (all suites green, 0 failures), `cargo test -p soos-invariants`
-(616 passed), `cargo clippy -p soos-remote --all-targets -- -D warnings` (clean). Gradle
-distribution SHA-256 checked against services.gradle.org (match); the three action SHAs
-resolved through the GitHub API to their tagged versions (match).
-
-## 2. Test Changes (mechanical listing from step 3, with justification per change)
-
-- Test files touched: all **new** — `android/app/src/test/java/org/soos/remote/{ApiJson,PasskeyJson,PcUrl,SessionCookie,SoosApi}Test.kt`, `crates/remote/tests/android_app_tests.rs`, `tests/invariants/src/android_native_contract.rs`; `tests/invariants/src/lib.rs` only gains a `mod android_native_contract;` declaration.
-- Removed/changed assertion lines (`^-` with assert/#[test]/...): two hits, both in `crates/remote/src/auth.rs` production code (the `parse_client_data` import and call replaced by `parse_client_data_with_policy`). Not test code.
-- New escape hatches (`#[ignore]`, `should_panic`, tolerance, epsilon): none.
-- Inline `mod tests` added/removed: none.
-- Conclusion: **no pre-existing test was modified, weakened or deleted.**
-- Re-check on the frozen patch at HEAD `d4a43ea`: identical result (the two `^-` hits above are
-  still the only ones; no escape hatch; commit `d4a43ea` touches no test file).
+- Test files touched (all **new** relative to the merge-base, nothing pre-existing modified):
+  `android/app/src/test/java/org/soos/remote/{ApiJsonTest,PasskeyJsonTest,PcUrlTest,SessionCookieTest,SoosApiTest}.kt`,
+  `crates/remote/tests/android_app_tests.rs`, `tests/invariants/src/android_native_contract.rs`,
+  `tests/invariants/src/lib.rs` (module registration only).
+- Removed/changed assertions: none. The two `^-` hits (patch lines 6415, 6426) are production imports/calls in
+  `crates/remote/src/auth.rs` (`parse_client_data` replaced by `parse_client_data_with_policy`), not checks.
+- New escape hatches (`#[ignore]`, `should_panic`, tolerance, `cfg(any())`): none.
+- Inline test modules changed: none.
+- Rebase migration: `crates/remote/tests/android_app_tests.rs:682` adds `offline: soos_remote::config::OfflineConfig::default()`
+  to a `RemoteConfig` struct literal, the same setup-only migration main applied to its other harnesses after adding the
+  field. No assertion touched; justified (a new required field, the default is `offline_alerts` off, which preserves the
+  test's original premise).
 
 ## 3. Deep Reasoning Audit
 
 ### Logic & Architecture
-
-- *Origin confusion*: tried padded (`...=`), standard-alphabet base64, upper-cased scheme,
-  trailing `/`, truncated, colon-hex form, another digest → all `OriginMismatch`
-  (`webauthn.rs` `classify_origin` compares bytes of origins built by `b64url_encode`, which is
-  `Base64UrlUnpadded`; tests `test_ana_near_android_origins_are_refused`,
-  `test_ana_arbitrary_origins_never_pass_as_android`). PASS.
-- *Ceremony scope*: policy is `WebOrAndroidApp` only when `purpose == ChallengePurpose::Login`
-  (`auth.rs:368`), and `classify_origin` additionally requires `CeremonyType::Get`; registration
-  still calls `parse_client_data` (WebOnly). `verify_assertion` does not re-parse the client
-  data (only hashes it), so no second, divergent origin check. Unlock/camera/registration with
-  the app origin refused end to end (`test_ana_unlock_and_registration_stay_web_origin_only`,
-  `test_ana_check_assertion_accepts_the_app_origin_for_login_only`). PASS.
-- *Not configured*: `RelyingParty.android = None` → app origin refused even with the permissive
-  policy; `asset_links = None` unless both `rp_id` and `[android]` exist. PASS.
-- *`androidPackageName`*: absent accepted, string equal to the package accepted, any other value
-  or type refused. A browser client data carrying the member is unaffected because the web
-  origin returns before the member is examined. PASS.
-- *Config*: `[android]` requires `rp_id` and `allow_funnel = true`; package grammar (>= 2
-  segments, letter-first, `[A-Za-z0-9_]`, <= 128 bytes); 1..=2 fingerprints, exactly 95 chars,
-  upper-case hex pairs (3k-1 = 95 forces k = 32, `get_mut` guards over-length), duplicates
-  refused; `deny_unknown_fields`. Errors never echo values; `AndroidAppConfig` `Debug` is
-  redacted. Every failure maps to `EXIT_CONFIG` (78) in `main.rs`. PASS.
-- *Duplicated bounded read (RMC-S10)*: `load_config` is kept first (the existing invariant
-  `check_not_root` before `load_config(` still holds); the second `load_config_with_android`
-  read is compared on `RemoteConfig` and a difference refuses start-up with exit 78. Both reads
-  are fully validated, so a change confined to `[android]` between the reads can only yield a
-  validated table. PASS (see SUGGESTION 4).
-- *Asset links route*: `route()` returns `AssetLinks` for every method before method dispatch;
-  off → `Response::json(404, "not_found")`, same as `Route::NotFound`, same `Touch::Keep`
-  session handling, same `accepts_body` (false), same Funnel-public classification, so headers
-  and body are identical (`test_ana_asset_links_absent_is_byte_identical_404` over every method
-  and both path classes). On: `200 application/json` on GET/HEAD, `405` + `Allow: GET, HEAD`
-  otherwise, no `Set-Cookie`, Funnel host must equal `rp_id` (421 otherwise), single
-  `delegate_permission/common.get_login_creds` relation. Funnel anonymous capacity still
-  applies. PASS.
-- *App/server contract*: options fields (`challenge`, `rp_id`, `timeout_ms`), verify body fields
-  (`id`, `client_data_json`, `authenticator_data`, `signature`, `user_handle`, matching the
-  `deny_unknown_fields` `AssertionBody`), `X-Soos-Action` tokens and `Origin: https://<host>`
-  (accepted by `check_action_csrf`; no `Sec-Fetch-Site` sent, which is allowed) all match the
-  server. `parseLoginOptions` pins `rp_id` to the configured host. PASS.
+- `parse_config_with_android`: camera keys, then `OfflineRequiresPush`, then `android_config` — an `[android]` error never
+  masks an earlier error (existing precedence kept, ANA1). `parse_config`/`load_config` delegate to the `_with_android`
+  variants, so a bad table is refused on every load path. PASS.
+- `android_config`: requires `rp_id` then `allow_funnel`; package rule (≥ 2 segments, letter-first, `[A-Za-z0-9_]`, ≤ 128 bytes);
+  1–2 digests; each digest exactly 95 bytes, 32 upper-case hex pairs; duplicates refused. Tried `"AA:BB"` short, lower-case,
+  `"AAA:..."` (length 95 but a 3-byte pair → `let [high, low]` fails), 33 pairs (length mismatch), `..` empty segment,
+  `1abc.def`. All refused. PASS.
+- Independence: no code path reads `offline` from the android code or vice versa; `[android]` without `offline_alerts` and the
+  reverse both validate. PASS.
+- Routing: `route()` returns `AssetLinks` for every method on the exact path (query stripped); `Offline` unchanged (GET/HEAD,
+  else 405). `is_funnel_public` adds `AssetLinks` only; `Offline` stays session-gated on Funnel. PASS.
+- `asset_links_response`: absent binding → `Response::json(404, "not_found")`, the same constructor as `Route::NotFound`, for
+  every method; no body read since `accepts_body` is false for the path (same as an unknown path). Present → 200 on GET/HEAD,
+  405 with `Allow: GET, HEAD` otherwise. Body size: 128-byte package + two 95-byte digests ≈ 470 bytes < `MAX_ASSET_LINKS_BYTES`. PASS.
+- Origin policy: `AuthState` widens to `WebOrAndroidApp` only for `ChallengePurpose::Login`; `classify_origin` additionally
+  requires `CeremonyType::Get` and a configured `RelyingParty.android`; non-string or mismatching `androidPackageName` refused;
+  `crossOrigin`/`topOrigin` checks still run after the origin step. Registration and unlock stay web-only. Matches ADR
+  2026-10-13 item (4). PASS.
+- `main.rs` double bounded read with `loaded.remote == config` equality: a file swapped between the two reads refuses the
+  start (exit 78) rather than mixing configurations. PASS.
+- Docs: two `## 2j.` headings in `Docs/REMOTE_COMPANION.md` (lines 985 and 1063) are imposed by the literal headings the two
+  immutable invariant suites look up; cosmetic only, accepted.
 
 ### PAM Concurrency & Deadlines
-
-Not touched (`crates/pam` absent from the diff). The new route is synchronous and allocation is
-a clone of a prebuilt <= ~450-byte body. PASS.
+- No file under `crates/pam` changes. N/A — PASS.
 
 ### Panic Safety & Fail-Closed
-
-No `unwrap`/`expect`/`panic!`/indexing added in production Rust (`parse_android_fingerprint`
-uses `get_mut`, `checked_*`, slice patterns). `asset_links_json` uses `unwrap_or_default` on an
-infallible `serde_json::Value` serialization (SUGGESTION 3). No path turns an error into a
-session: every parse failure is `AssertionFailure::Rejected`. PASS.
+- No `unwrap`/`expect`/indexing in the new Rust: `serde_json::to_vec(..).unwrap_or_default()` (infallible for a `Value`,
+  and an empty body would only break the opt-in Asset Links, never widen access); `out.get_mut(index)?` bounds the digest
+  write; checked arithmetic in `upper_hex`. Every new config error returns `EXIT_CONFIG` (78). No path turns an error
+  into an accepted origin: every branch of `classify_origin` that is not an exact match returns `OriginMismatch`. PASS.
 
 ### Test Integrity & Anti-Weakening
-
-See section 2. New tests can fail against plausible wrong implementations (prefix match, case
-folding, padding tolerance, policy applied to unlock, 404 differing from the unknown path,
-cookie on the asset links route). PASS.
+- See §2: no pre-existing test or assertion modified; the single rebase migration is setup-only. ANA1–ANA4 tests exercise
+  absent/present binding, near-form origins, wrong package, wrong digest, unlock/registration refusal; a plausible wrong
+  implementation (e.g. widening for every purpose, or a non-identical 404) would fail them. PASS.
 
 ### Memory, Bounds & Secrets
-
-Server: fingerprint count and package length bounded, statement bounded by construction.
-Android: response body capped at 16 KiB, Credential Manager response at 16384 chars, credential
-id at 1368 chars; 5 s connect/read timeouts; HTTPS-only (`HttpsURLConnection` cast, network
-security config without cleartext and system CAs only, `usesCleartextTraffic=false`);
-`instanceFollowRedirects = false`; no cache, no cookie handler; session cookie
-(`__Host-soos_session`, 43-char base64url only) held in memory in `SoosApi`, cleared on
-sign-out, server clear and `login_required`; only the PC origin and the last successful
-credential id are persisted, in private `SharedPreferences` excluded from backup and device
-transfer. No `Log.`, `println`, WebView, analytics, Firebase or Play services. Manifest: only
-`INTERNET`, one exported launcher activity; the CI permission check allows only `INTERNET` plus
-the app's own androidx receiver permission. `.gitignore` and `secret_scan.sh` now cover
-`*.keystore`, `keystore.properties`, `local.properties`, `google-services.json`. PASS.
+- `AndroidAppConfig` `Debug` is `AndroidAppConfig(<redacted>)`; `LoadedConfig` derives `Debug` but only through that impl.
+  `ConfigError` messages carry only an index or the constant max, never a value. No `tracing` call names the package, the
+  digests or the origins; `debug!(?resolved)` prints the route variant only. Allocation bounded (≤ 2 digests, ≤ 128-byte package,
+  config ≤ `MAX_CONFIG_BYTES`). Kotlin transport: HTTPS-only cast, no redirects, 5 s timeouts, 16 KiB bounded read, cookie
+  in memory only. PASS.
 
 ### Supply Chain & Automation
-
-- `android.yml`: `permissions: contents: read`, `persist-credentials: false`, no secrets, no
-  `${{ github.event.* }}` in `run:`, actions pinned by full SHA (verified against v7.0.1 /
-  v6.0.1 / v7.0.1 tags), JDK and SDK packages pinned, path-filtered but blocking through
-  `scripts/pr_checks_gate.sh` (every non-advisory failing check blocks). PASS.
-- Gradle: no wrapper jar/gradlew committed; distribution URL regex-pinned and SHA-256 verified
-  before unpacking (value checked against services.gradle.org); curl HTTPS-only including
-  redirects; exact version pins only; repository content filters; `FAIL_ON_PROJECT_REPOS`;
-  no build or configuration cache. PASS.
-- *Bootstrap (TOFU)*: `verification-metadata.xml` starts empty; `ci` mode writes it, uploads it
-  and **exits 1**, so an unverified build can never pass or merge; after the owner commits the
-  metadata, every run is `--dependency-verification strict`. Documented in the ADR (assumption
-  A-4), the script header, the workflow header and the metadata file. Acceptable for a
-  first-PR foundation given no local JDK/SDK; the residual risk is that the first resolution
-  (from Google Maven / Maven Central over HTTPS, on a GitHub runner) is trusted. Note that
-  committing the metadata changes the diff, so a fresh candid review is required before merge
-  (stated in the ADR). `verify-signatures` is off (SUGGESTION 5). PASS.
-- *Committed metadata (commit `9a58e09`, re-review 2026-10-15)*: parsed as XML. Root children
-  are only `configuration` and `components`; `configuration` holds only
-  `<verify-metadata>true</verify-metadata>` and `<verify-signatures>false</verify-signatures>`
-  (unchanged from the reviewed bootstrap file). The only element types in the file are
-  `verification-metadata`, `configuration`, `verify-metadata`, `verify-signatures`,
-  `components`, `component`, `artifact`, `sha256`: no `trusted-artifacts`, `trust`,
-  `trusted-keys`, `ignored-keys`, `also-trust`, `pgp`, `md5`, `sha1` or `sha512`. 494
-  components, 864 artifacts, 864 `<sha256>` entries, every value 64 lower-case hex characters,
-  every `origin="Generated by Gradle"` (no hand-written entry). Tried to find a weakening:
-  a trust rule or ignored key (none), an artifact without a checksum (artifact count equals
-  checksum count), a non-SHA-256 checksum (none), a relaxed mode in `gradle.properties`
-  (none; the invariant also checks it). PASS.
-- *Groups*: AndroidX (`androidx.*`), Android tooling (`com.android.*`, AGP, lint, aapt2, UTP),
-  Google (`com.google.*`: guava, protobuf, gson, dagger, tink, auto, errorprone, jimfs,
-  flatbuffers, testing.platform), JetBrains/Kotlin (`org.jetbrains.*`), and the usual Maven
-  Central transitive build-time dependencies of AGP and the Kotlin Gradle plugin (netty, grpc,
-  bouncycastle, jaxb/jakarta/glassfish, apache commons/httpcomponents, ow2 asm, jna, jopt-simple,
-  kxml2, jose4j, caffeine, java-diff-utils, tensorflow-lite-metadata, opentelemetry/opencensus
-  API, slf4j-api, checker-qual, jspecify, Maven parent POMs) plus the test-only JUnit 4.13.2,
-  hamcrest-core 1.3 and org.json 20250517. No `play-services`, `firebase`,
-  `credentials-play-services-auth`, analytics or unexpected coordinates. Every `com.android.*`,
-  `com.google.*` and `androidx.*` group can only come from Google Maven or Maven Central under
-  the `settings.gradle.kts` content filters and `FAIL_ON_PROJECT_REPOS`. PASS.
-- *Pins vs `libs.versions.toml`*: AGP `com.android.tools.build:gradle` 8.13.2, Kotlin Gradle
-  plugin 2.2.21, `compose-bom` 2025.10.01, `activity-compose` 1.11.0, `core-ktx` 1.17.0,
-  `credentials` 1.5.0, `kotlinx-coroutines-android` 1.10.2, `junit` 4.13.2, `org.json`
-  20250517 and the three plugin markers are present at exactly the pinned versions (also
-  enforced by `test_ana_s4_dependency_verification_metadata`). Several components appear at
-  more than one version (e.g. guava, kotlin-stdlib, coroutines): these are POM/module metadata
-  of versions considered during conflict resolution, each still SHA-256 pinned. The only
-  pre-release versions are `com.google.testing.platform:*:0.0.9-alpha03`, the Unified Test
-  Platform artifacts AGP 8.13.2 itself pins (build-time tooling, not shipped in the APK).
-  PASS.
-- *A-4 consistency*: the file states the bootstrap origin; the commit message records the run
-  id 38446125267 and the 864-artifact count, which match the file; with components present,
-  `scripts/android_build.sh ci` no longer takes the bootstrap branch (`grep -q '<component '`)
-  and runs `--dependency-verification strict`. The trust-on-first-use residual (the hashes
-  attest what Google Maven / Maven Central served to that runner, not upstream signatures) is
-  the accepted risk of A-4. PASS.
-
-- *Permission allowlist (commit `d4a43ea`, re-review 2026-10-15)*: `check_permissions` compares
-  each `uses-permission:` name with `[[ "$name" == "$permission" ]]`; the right-hand side is
-  quoted, so the match is literal (no glob, no prefix, no regex), and the two new entries are
-  literal full names with no wildcard. Tried: `android.permission.USE_BIOMETRIC_X`,
-  `android.permission.USE_*`, a permission differing only in case → all rejected by `fail`.
-  The `INTERNET`-present check is unchanged. Protection level: `USE_BIOMETRIC` (API 28) and
-  `USE_FINGERPRINT` (API 23, deprecated) are both `normal` permissions in the platform
-  manifest, granted at install time, with no runtime prompt and no access to biometric data
-  (they only allow invoking the system prompt, which returns a pass/fail result); the ADR,
-  matrix, walkthrough and script comment describe them as such, which is correct. The app's own
-  `android/app/src/main/AndroidManifest.xml` still declares only `INTERNET`
-  (`test_ana_s6_manifest_hardening` passes); no source or Gradle file references
-  `androidx.biometric` (it is present only as a transitive component in
-  `verification-metadata.xml`, version 1.1.0, consistent with the commit message). Nothing
-  else is relaxed: no permission is removed from the check, the `ci` mode still fails on a
-  missing `aapt2` or APK, the success message is only reworded. Alternative considered:
-  stripping both with `tools:node="remove"` in the app manifest would be marginally tighter but
-  would touch the invariant-pinned manifest; the owner's allowlist choice is documented in ADR
-  item (7). PASS (see MINOR 3 and SUGGESTION 6).
+- `.github/workflows/android.yml`: actions pinned by full SHA, `permissions: contents: read`, `persist-credentials: false`,
+  no secrets, no `${{ github.event.* }}` in `run:`. `scripts/android_build.sh`: Gradle URL regex-restricted to
+  services.gradle.org, SHA-256 checked before unpack, HTTPS-only curl with redirect protocol pinned, strict dependency
+  verification, bootstrap run always fails. `secret_scan.sh` gains `*.keystore`, `keystore.properties`, `local.properties`,
+  `google-services.json`. PASS with one MINOR note (§4).
 
 ### English-Only Policy
-
-Lines added by `d4a43ea` scanned for French words and non-ASCII characters: none (the only
-non-ASCII characters in the touched ADR paragraph are pre-existing en dashes). Added lines scanned for French words and accented characters: none. Code, comments, docs,
-UI strings and script output are English. PASS.
+- No non-ASCII French characters in added lines; all code, comments, docs and messages are English. PASS.
 
 ## 4. Detailed Findings & Action Items
 
-- **[MINOR]** `android/app/src/main/java/org/soos/remote/ui/SoosApp.kt:257` — a server refusal
-  (`passkey_rejected`, e.g. after `soos-remote passkeys` revoked that credential while it still
-  exists in the phone's provider) keeps the remembered credential id, so every later attempt
-  goes straight to the same rejected passkey (and accrues rate-limited failures); only
-  `NoCredentialException` clears it. Clear `settings.credentialId` on `passkey_rejected` (or
-  offer "use another passkey") in a follow-up.
-- **[MINOR]** `android/app/src/main/java/org/soos/remote/ui/SoosApp.kt:193` — `SoosApi` (and
-  thus the in-memory session) is held by `remember`, so an activity recreation (rotation,
-  dark-mode switch) silently drops the session and asks for a new passkey sign-in. Safe
-  (fail-closed), but a `ViewModel`-scoped holder would keep the in-memory session across
-  configuration changes without persisting it.
-- **[MINOR]** `scripts/android_build.sh:126` — the `sed` filter extracts only lines starting with
-  `uses-permission: `; `aapt2 dump permissions` prints `<uses-permission-sdk-23>` entries as
-  `uses-permission-sdk-23: name='...'`, which are silently skipped, so a library could merge a
-  permission through that element without tripping the allowlist. Pre-existing (not introduced
-  by `d4a43ea`) and the app's own manifest is pinned by `test_ana_s6`; in a follow-up, match
-  `^uses-permission(-sdk-23)?: ` (or fail on any unrecognised `uses-permission*` line).
-- **[SUGGESTION]** `crates/remote/src/config.rs:431` — `asset_links_json` falls back to an empty
-  body on a serialization error, which would be served as `200`; it cannot fail today, but
-  building the body once at parse time and refusing the configuration (or asserting
-  `<= MAX_ASSET_LINKS_BYTES`) would make the bound and the failure mode explicit.
-- **[SUGGESTION]** `crates/remote/src/main.rs:188` — the second read compares only
-  `RemoteConfig`; the `[android]` table itself is not compared between the two reads. Harmless
-  (both reads are fully validated, owner-controlled file), but a single
-  `load_config_with_android` call kept textually after `check_not_root` would remove the
-  window entirely.
-- **[SUGGESTION]** `android/gradle/verification-metadata.xml:16` — consider enabling
-  `verify-signatures` (with a reviewed `trusted-keys` list) in a later PR to reduce reliance on
-  the trust-on-first-use SHA-256 snapshot now committed from run 38446125267 (still open).
-- **[SUGGESTION]** `tests/invariants/src/android_native_contract.rs:669` —
-  `test_ana_s10_build_script` checks that `"android.permission.INTERNET"` is in the script but
-  not the exact contents of `ALLOWED_PERMISSIONS`; pinning the four-entry array (and the quoted
-  `== "$permission"` comparison) would make any future widening of the allowlist an explicit,
-  reviewed contract change.
+- **[MINOR]** `scripts/android_build.sh:120` — `check_permissions` extracts only lines starting with
+  `uses-permission: name=`; `aapt2 dump permissions` prints `uses-permission-sdk-23: name='...'` for
+  `<uses-permission-sdk-23>` entries, which would bypass the allowlist. Low risk today (the app manifest declares
+  `INTERNET` only and the invariant suite checks the manifest), but a merged library could add one unnoticed. Suggested
+  correction: match `^uses-permission(-sdk-23)?: name='...'`. Non-blocking.
 
 ## 5. Final Verdict
-
-No CRITICAL or MAJOR finding after attacking origin matching, ceremony scoping, the off-state
-404 identity, Funnel exposure, configuration fail-closed paths, the Android network/storage
-surface and the CI supply chain. The Android project is uncompiled locally; its first CI run is
-an intentional, documented, blocking bootstrap. Re-review of 2026-10-15: the committed
-bootstrap metadata is SHA-256 only, keeps `verify-metadata` on, adds no trust or ignored-key
-rule, covers every catalog pin at its exact version and contains only Google Maven / Maven
-Central groups expected for AGP 8.13.2 and Kotlin 2.2.21; no new finding. Second re-review of
-2026-10-15 (`d4a43ea`): the allowlist grows by two literal, exact-match, install-time (`normal`)
-permissions merged from `androidx.biometric` 1.1.0 on a documented owner decision; the app
-manifest still declares `INTERNET` only and the docs are consistent; only a MINOR and a
-SUGGESTION are added.
 
 **VERDICT: APPROVED**
