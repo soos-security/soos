@@ -2569,3 +2569,13 @@ Native Kotlin + Jetpack Compose Android app foundation and the opt-in `[android]
 | ANA14 | Hardware (owner): with `[android]` and Funnel on, sign-in from the app with fingerprint or screen lock (provider recorded); the second sign-in goes straight to the biometric prompt; status and lock over Funnel after sign-in | Manual check (`Docs/REMOTE_COMPANION.md` §2j owner check, walkthrough 208) | ⬜ Pending owner verification |
 | ANA15 | Hardware (owner): adaptive icon (themed icon OK), blue header and system bars, light and dark | Manual check (`Docs/REMOTE_COMPANION.md` §2j owner check) | ⬜ Pending owner verification |
 | ANA16 | Hardware (owner): over the tailnet, status and lock from the app; the web app and the iPhone home-screen app still work | Manual check (`Docs/REMOTE_COMPANION.md` §2j owner check) | ⬜ Pending owner verification |
+
+---
+
+## Component: `deflake-peer-limits` (GitHub #387, `test/deflake-peer-limits`, walkthrough 210)
+
+Synchronisation fix for the auth-reserve socket test of RSH5. Root cause: under CPU starvation, the idle held reserve outlived the daemon's 200 ms `AUTH_RESERVE_FIRST_REQUEST_TIMEOUT_MS` window before the second connection was admitted, so the second connection legitimately took the freed reserve. The daemon is correct and no production code changes. Test-only setup change: the two connections are opened back to back without yielding to the current-thread runtime. Every assertion is unchanged. GitHub-only issue: no backlog id, branch not registered, the commit carries `Closes #387`.
+
+| # | Criterion | Test Method | Status |
+|---|---|---|---|
+| PLF1 | While one auth-reserved connection of a UID is held idle, a second concurrent reserve of the same UID is closed without any payload, and this holds regardless of host load. The held reserve is admitted strictly before the second connection, through FIFO admission on the current-thread runtime rather than a wall-clock sleep. Evidence: under a CPU-starvation harness (test pinned to one CPU at `nice 19` next to busy loops on that CPU), the test failed 48/100 before the fix and 0/100 after it. With `AUTH_RESERVED_CONNECTIONS_PER_UID = 2` (mutation), the test still fails | `soos-daemon::peer_limits_tests::auth_reserve::test_rsh_auth_admitted_on_reserve_while_two_connections_held` | ✅ Verified |
