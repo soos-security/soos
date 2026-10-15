@@ -1,9 +1,9 @@
 # Candid Review Report
 
-- **Date**: 2026-10-13
+- **Date**: 2026-10-15
 - **Target Branch**: `test/readme-capture`
-- **Base (merge-base)**: `6f32ef8`
-- **Reviewed-Diff-Fingerprint**: `751b84639196cd131332d3ab33b60e6c4a9d472064a3650d12b9aec17675524a`
+- **Base (merge-base)**: `94a7cb3`
+- **Reviewed-Diff-Fingerprint**: `cb76b5a5d59f218574eea7a8c217ce4ac72439d0d7b6ce952a4e86a796f89db5`
 - **Audited Files**: AI/DECISIONS.md, AI/VERIFICATION_MATRIX.md, AI/architect_spec_readme_capture.md,
   AI/auditor_constraints_readme_capture.md, AI/walkthroughs/207_readme_capture.md, Cargo.lock,
   Docs/DEVELOPMENT_WORKFLOW.md, Docs/GUI_APPLICATION.md, Docs/README.md, Docs/README_ASSETS.md,
@@ -16,6 +16,33 @@
   tests/fixtures/examples/readme_web_fixture_server.rs, tests/fixtures/mod.rs,
   tests/fixtures/tests/readme_fixture_tests.rs, tests/invariants/src/lib.rs,
   tests/invariants/src/readme_assets_contract.rs
+
+## 0. Re-review After the Rebase Onto `main` (2026-10-15)
+
+The branch was rebased from merge-base `6f32ef8` onto `origin/main` `94a7cb3` (#396: `rustls`
+0.23.45 -> 0.23.46 in `Cargo.lock`, plus walkthrough 211). The previous APPROVED report was bound to
+fingerprint `751b8463...`; this review re-freezes the diff (`--prepare`) and re-checks it:
+
+- `git range-diff origin/test/readme-capture...HEAD`: the only interdiff hunks are in
+  `AI/candid_review_report.md` (the base report changed on `main`); no code, doc, script, test or
+  asset hunk differs.
+- For every other file in the patch, the added/removed lines of `git diff 6f32ef8
+  origin/test/readme-capture` and `git diff 94a7cb3 HEAD` are byte-identical (scripted comparison),
+  so the rebase introduced nothing beyond shifted `Cargo.lock` context.
+- `Cargo.lock` branch hunk is still exactly three dependency-list lines on `soos-gui` (`png`,
+  `soos-frame`, `soos-test-fixtures`); the lockfile keeps `rustls` at `0.23.46`, and the frozen
+  patch contains no `rustls` line, so the security bump is not reverted.
+  `cargo metadata --locked --format-version 1` succeeds (lockfile consistent with the manifests).
+- Mechanical test listing re-run on the new patch: no removed line at all in the patch (it is
+  append-only), no escape hatch, no inline `mod tests` change; results identical to section 2.
+- Spot re-checks: `capture.rs` still has no `unwrap`/`expect`/`panic!`/`unsafe`, the feature is
+  still `[]` and non-default, the `app.rs` hunk is only the gated `mod capture;`, and the
+  previous MINOR line references (`tests/fixtures/mod.rs:199/285/495/587`,
+  `readme_snapshots.rs:43-46`) still point at the same code.
+
+All previous findings are carried forward unchanged (section 4). Sections 1-3 below are the
+original 2026-10-13 audit, which still applies verbatim to this diff. Cargo builds/tests were not
+re-run for this re-review (shared-host RAM constraint); the code under test is unchanged.
 
 ## 1. Executive Summary
 
