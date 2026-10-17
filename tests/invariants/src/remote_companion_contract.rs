@@ -873,7 +873,8 @@ fn test_rmc_architecture_and_strategy_documents_describe_the_companion() {
     let security = read("Docs/SECURITY_AND_QUALITY_GUIDELINES.md");
     let zbus_line = security
         .lines()
-        .find(|l| l.contains("`zbus` 5"))
+        // Owner-approved needle update (2026-10-17, #416): the guidelines now name zbus 6.
+        .find(|l| l.contains("`zbus` 6"))
         .expect("the zbus dependency line");
     assert!(
         zbus_line.contains("soos-remote"),

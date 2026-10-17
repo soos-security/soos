@@ -1,7 +1,7 @@
 //! Contract tests of GitHub #323 for the pure mapping of a logind `Properties.GetAll` reply
 //! to a presence session state (matrix PAU18, PAU27 `Name`, PAU14 error text bound).
 //!
-//! No bus is needed: replies are hand-built `zvariant::OwnedValue` maps.
+//! No bus is needed: replies are hand-built `zbus::OwnedVariant` maps.
 
 #![allow(
     clippy::unwrap_used,
@@ -14,7 +14,7 @@
 
 use std::collections::HashMap;
 
-use zbus::zvariant::{ObjectPath, OwnedValue, Value};
+use zbus::{ObjectPath, OwnedVariant, Variant};
 
 use soos_daemon::presence::logind::{
     session_state_from_properties, PresenceLogindError, SessionId,
@@ -22,8 +22,8 @@ use soos_daemon::presence::logind::{
 use soos_daemon::presence::MAX_LOGIND_ERROR_LEN;
 use soos_daemon::session_policy::SessionRecord;
 
-fn ov<'a>(value: impl Into<Value<'a>>) -> OwnedValue {
-    OwnedValue::try_from(value.into()).unwrap()
+fn ov<'a>(value: impl Into<Variant<'a>>) -> OwnedVariant {
+    OwnedVariant::try_from(value.into()).unwrap()
 }
 
 fn id(raw: &str) -> SessionId {
@@ -31,7 +31,7 @@ fn id(raw: &str) -> SessionId {
 }
 
 /// A `GetAll` reply of an active, local, seat-attached, locked user session of UID 1000.
-fn reply(session_id: &str) -> HashMap<String, OwnedValue> {
+fn reply(session_id: &str) -> HashMap<String, OwnedVariant> {
     let mut map = HashMap::new();
     map.insert("Id".to_string(), ov(session_id));
     map.insert(
@@ -57,7 +57,7 @@ fn reply(session_id: &str) -> HashMap<String, OwnedValue> {
     map
 }
 
-fn map(props: &HashMap<String, OwnedValue>) -> soos_daemon::presence::logind::LogindSessionState {
+fn map(props: &HashMap<String, OwnedVariant>) -> soos_daemon::presence::logind::LogindSessionState {
     session_state_from_properties(&id("4"), props).expect("well-formed reply")
 }
 
