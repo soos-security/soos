@@ -1746,3 +1746,96 @@ fn test_set_u18_docs_adr_matrix_and_walkthrough() {
         "walkthrough 213 must exist"
     );
 }
+
+/// SET34 (root path, owner decision of 2026-10-17): the `/etc/soos/daemon.toml` creation path,
+/// which the fake-`--sysconfdir` harness above cannot reach, runs as real root in Docker:
+/// `tests/docker/setup_root_preview_test.sh` drives the unmodified `setup.sh` through the real
+/// `sudo` under a real systemd, and its CI job is required (part of `CI Success`).
+#[test]
+fn test_set_u24_root_preview_docker_job_wired_into_ci() {
+    const DOCKER_TEST: &str = "tests/docker/setup_root_preview_test.sh";
+    assert!(
+        is_executable(&workspace_root().join(DOCKER_TEST)),
+        "{DOCKER_TEST} must be executable"
+    );
+    let script = read_repo(DOCKER_TEST);
+    for needle in [
+        // Pinned systemd image of the systemd-unit job, read-only workspace.
+        "tests/docker/Dockerfile.systemd",
+        "\"${repo}:/workspace:ro\"",
+        "--privileged --cgroupns=private",
+        "host_sysctl_snapshot",
+        "assert_host_state_units_masked",
+        // The setup.sh under test is the repository's, byte for byte, escalating with sudo.
+        "cmp -s /workspace/scripts/setup.sh \"${CHECKOUT}/scripts/setup.sh\"",
+        "NOPASSWD",
+        "runuser -u \"${TEST_USER}\"",
+        "/workspace/packaging/soos-daemon.service",
+        "/workspace/scripts/wait_daemon_ready.sh",
+        "readonly DAEMON_TOML=\"/etc/soos/daemon.toml\"",
+        // The cases of the owner decision.
+        "case_a1",
+        "case_a2",
+        "case_b",
+        "case_c1",
+        "case_c2",
+        "case_d",
+        "case_e1",
+        "case_e2",
+        "644 root:root 1",
+        "expect_rc 1",
+        "expect_rc 70",
+        "companion_not_run",
+        "is a symbolic link; setup never follows it",
+        "exists and setup never edits it",
+    ] {
+        assert!(
+            script.contains(needle),
+            "{DOCKER_TEST} must contain `{needle}`"
+        );
+    }
+    assert!(
+        !code_of(DOCKER_TEST).contains("--sysconfdir"),
+        "the root path runs with the default /etc, never a --sysconfdir"
+    );
+    assert!(
+        !script.contains(":/workspace\"") && !script.contains(":/workspace "),
+        "the workspace is mounted read-only"
+    );
+    // No test hook in setup.sh: the path soos-daemon reads is a literal constant.
+    let setup = read_repo(SETUP);
+    assert!(
+        setup
+            .lines()
+            .any(|l| l.trim() == "readonly DAEMON_READ_CONFIG=\"/etc/soos/daemon.toml\""),
+        "setup.sh must keep /etc/soos/daemon.toml as a literal constant"
+    );
+    let ci = read_repo(".github/workflows/ci.yml");
+    let start = ci
+        .find("\n  setup-root-preview:")
+        .expect("CI job setup-root-preview");
+    let job = &ci[start + 1..];
+    let job = &job[..job.find("\n  # ----").unwrap_or(job.len())];
+    for needle in [
+        "needs: lint",
+        "timeout-minutes:",
+        "persist-credentials: false",
+        "uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1",
+        "run: ./tests/docker/setup_root_preview_test.sh",
+    ] {
+        assert!(job.contains(needle), "setup-root-preview: `{needle}`");
+    }
+    assert!(
+        !job.contains("permissions:"),
+        "no job-level permissions (workflow default contents: read)"
+    );
+    let needs = ci
+        .lines()
+        .find(|l| l.trim_start().starts_with("needs: [lint, clippy"))
+        .expect("ci-success needs");
+    assert!(needs.contains("setup-root-preview"), "required: {needs}");
+    assert!(
+        !read_repo("scripts/pr_checks_gate.sh").contains("setup.sh root camera view"),
+        "the job is required, never advisory"
+    );
+}

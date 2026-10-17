@@ -23,6 +23,8 @@
 | `setup_user_phase_contract::test_set_u15_companion_failures_roll_back_and_exit_5` | SET33 | exit 2 instead of 5 |
 | `setup_user_phase_contract::test_set_u22_rollback_stops_a_unit_started_by_the_run` | SET33 | added after the candid review round 2; red against the draft that only journaled enabled units |
 | `setup_user_phase_contract::test_set_u16_daemon_side_never_written_outside_etc` | SET34 | rewritten after the lead review of PR #402 (was `test_set_u16_daemon_side_failure_removes_daemon_toml`, unreachable once the daemon side is gated on `/etc`); red against the ungated code, which created the file under the fake `--sysconfdir` |
+| `tests/docker/setup_root_preview_test.sh` (cases A1, A2, B, C1, C2, D, E1, E2) | SET34 | added for the owner decision of 2026-10-17 (spec §13, R4-1); the current `setup.sh` passes, so each case was proven red against a deliberately broken copy, never committed (see walkthrough 213 §7) |
+| `setup_user_phase_contract::test_set_u24_root_preview_docker_job_wired_into_ci` | SET34 | added with R4-1; red before the CI job existed (`CI job setup-root-preview`) |
 | `setup_user_phase_contract::test_set_u23_backup_path_must_be_a_regular_file` | SET30 | added after the lead review; red against the code that only refused a symbolic-link backup |
 | `setup_user_phase_contract::test_set_u17_install_remote_uses_cargo_target_dir` | SET35 | `install: cannot stat '<repo>/target/release/soos-remote'` (hard-coded path) |
 | `setup_user_phase_contract::test_set_u2_install_remote_honours_cargo_target_dir_statically` | SET35 | `install_remote.sh must resolve CARGO_TARGET_DIR` |
