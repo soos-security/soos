@@ -240,3 +240,22 @@ README images are generated, never hand-edited (ADR 2026-10-13). After a change 
 images through the script is not test weakening (they are generated data, not assertions). The
 optional phone web app captures use `scripts/capture_readme_web.sh` with an installed browser. Details,
 budget and formats: [README_ASSETS.md](README_ASSETS.md).
+
+## 10. README Structure (GitHub #408)
+
+The root `README.md` is a product landing page (ADR 2026-10-17 "README Restructure as a Product
+Landing Page"). Its level-2 sections keep this order: Why soos, Features, Screenshots, Quick Start,
+Upgrade, How it works (with a Mermaid diagram), Security model, Comparison, FAQ, Roadmap,
+Documentation, Contributing and security, License. `soos-invariants::readme_contract` (rows
+RDM1–RDM8) checks the order, that every relative link resolves, at most 6 badges and no release
+badge while no tag exists, the banned wording (`enterprise-grade`, `military-grade`, `unbreakable`,
+`certified`), the security section and the cited comparison; `readme_assets_contract` checks the
+images. Rules when editing it:
+
+- Keep the Quick Start, Upgrade and License text that existing contracts pin (installer,
+  onboarding, setup, upgrade and licence invariants); verbose parts may move into `<details>`.
+- List a feature only once it is merged, with a link to its doc; cite a source for every
+  comparison cell and never add accuracy numbers.
+- Never add an image by hand: regenerate the screenshots with
+  [`scripts/capture_readme_assets.sh`](../scripts/capture_readme_assets.sh) (section 9) and update the
+  source commit the README states for them.
