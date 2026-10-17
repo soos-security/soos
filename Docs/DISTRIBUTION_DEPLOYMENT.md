@@ -700,6 +700,14 @@ For `swaylock-plugin`, run `swaylock-plugin --command 'soos-lock-widget'` in the
 the animated soos scan state behind the password prompt; for `hyprlock`, the label of
 `packaging/lockscreen/hyprlock-soos.conf` shows it (`Docs/LOCKSCREEN_WIDGET.md`).
 
+On GNOME no wrapper is needed (the shell sets `LockedHint` itself). The scan state is shown on
+the GNOME lock screen by the opt-in system extension `soos-lockscreen@soos`
+(`packaging/gnome-shell/soos-lockscreen@soos/`, GNOME 45 or later), installed by hand for now:
+copy the directory to `/usr/share/gnome-shell/extensions/`, install `soos-lockstatus` root-owned
+in `/usr/local/bin` or `/usr/bin`, log out and back in, then run
+`gnome-extensions enable soos-lockscreen@soos` as the user (`Docs/LOCKSCREEN_WIDGET.md` §11).
+`/etc/soos/lockwidget.disable` turns it off for every user without uninstalling it.
+
 For `hyprlock`, put `hyprlock` in the wrapper and use `pkill -USR1 hyprlock` as the `unlock`
 hook. Lock with `loginctl lock-session`. Check the hint with
 `busctl --system get-property org.freedesktop.login1 /org/freedesktop/login1/session/auto org.freedesktop.login1.Session LockedHint`.

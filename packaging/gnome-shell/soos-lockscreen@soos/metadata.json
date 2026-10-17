@@ -1,0 +1,8 @@
+{
+  "uuid": "soos-lockscreen@soos",
+  "name": "soos lock screen",
+  "description": "Shows whether soos is scanning your face on the GNOME lock screen and unlock dialog: Scanning, Not recognized, or nothing. Read-only: it cannot unlock, start a scan, wake the camera or send input. Reads soos-lockstatus --watch.",
+  "session-modes": ["user", "unlock-dialog"],
+  "shell-version": ["45", "46", "47", "48", "49", "50", "51"],
+  "url": "https://github.com/soos-security/soos"
+}
