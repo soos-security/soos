@@ -2,8 +2,8 @@
 
 - **Date**: 2026-10-17
 - **Target Branch**: `feat/android-alerts`
-- **Base (merge-base)**: `f1e7616`
-- **Reviewed-Diff-Fingerprint**: `3d9e0556a33dd94f50a774cd5b1ee2c891b07d1b51bfe351304768abce4fea15`
+- **Base (merge-base)**: `e216ac1`
+- **Reviewed-Diff-Fingerprint**: `0df40a80b2f183769a888199f5bc66bd66c16df9352f0f39d2cc9de3b1e9873a`
 - **Audited Files**: `AI/DECISIONS.md`, `AI/VERIFICATION_MATRIX.md`, `AI/architect_spec_android_alerts.md`,
   `AI/auditor_constraints_android_alerts.md`, `AI/tester_contract_android_alerts.md`,
   `AI/walkthroughs/219_android_alerts.md`, `Docs/REMOTE_COMPANION.md`,
@@ -17,123 +17,115 @@
 
 ## 1. Executive Summary
 
-Review of the failed-password alerts list with acknowledgement in the native Android app
-(GitHub #404, matrix ANA18-ANA21), rebased onto `origin/main` `f1e7616`, which added the opt-in
-PC-offline heartbeat (#419) and the process-wide `SharedApi`. The rebase is clean: the alerts go
-through the single shared client obtained in `HomeScreen` with
-`remember(pc.origin) { SharedApi.forOrigin(pc.origin) }`; no second `SoosApi` is created anywhere
-in the diff. `SoosApi.send` keeps main's `sent` snapshot and `synchronized` cookie/`login_required`
-logic unchanged and only appends the snapshot headers before `Content-Type`/`Cookie`. The parser is
-strict and bounded (16384 chars, 32 entries, `u32` counters, 16-hex epoch); transport timeouts
-remain 5 s connect / 5 s read with the 16 KiB read bound. Test files are add-only.
-`soos-invariants` passes (736 passed, 0 failed). Two MINOR UX findings on the acknowledgement
-feedback text; no CRITICAL or MAJOR finding.
+The change adds the failed-password alerts list and its acknowledgement to the native Android app
+(GitHub #404, matrix ANA18 to ANA21), rebased onto a main that already has the opt-in PC-offline
+heartbeat with a process-wide `SharedApi`. The client-only change uses the single shared
+`SoosApi` (`remember(pc.origin) { SharedApi.forOrigin(pc.origin) }`). No second `SoosApi` is
+created in production code, since `SharedApi.kt:16` is the only constructor call. The change
+keeps main's `sent`/`synchronized` session logic as it is and only appends the snapshot headers
+through a new defaulted `extra` parameter. The parser is strict and bounded to 16384 chars and 32
+entries. The transport stays at 5 s connect/read and 16384 bytes. Every test change is add-only.
+`soos-invariants` passes: 747 passed, 0 failed. No CRITICAL or MAJOR defect was found. One MINOR
+UX item and one SUGGESTION remain.
 
 ## 2. Test Changes
 
-Mechanical listing from `target/candid_diff.patch`:
+Mechanical listing of the frozen patch:
 
-- Test files touched: `android/app/src/test/java/org/soos/remote/ApiJsonTest.kt`,
-  `android/app/src/test/java/org/soos/remote/SoosApiTest.kt`,
-  `tests/invariants/src/android_native_contract.rs`.
-- Removed or changed lines in test files (`^-` inside those hunks): **none**. Every hunk is
-  additions only (new imports, new helpers `rust_usize_const`/`kotlin_int_const`, new assertions
-  appended to `test_ana_s8_kotlin_hygiene`, new test `test_ana_s14_alerts_contract`, new Kotlin
-  tests for ANA18/ANA19).
-- New escape hatches (`#[ignore]`, `@Ignore`, `should_panic`, tolerance, epsilon): **none**.
+- Test files touched: `ApiJsonTest.kt` (+159/-0), `SoosApiTest.kt` (+140/-0),
+  `tests/invariants/src/android_native_contract.rs` (+160/-0). `git diff e216ac1 -- android/app/src/test tests/`
+  shows insertions only.
+- Removed or changed assertions (`^-` with assert/#[test]/proptest/should_panic): **none**.
+- New escape hatches (`#[ignore]`, `@Ignore`, `should_panic`, tolerance/epsilon): **none**.
 - Inline test modules changed: none.
-
-Justification: no existing assertion was modified, weakened or deleted; nothing to justify.
+- New tests can fail against plausible wrong implementations. Examples: header order and count
+  (`ackCarriesExactlyTheSnapshotHeadersAndNoBody`), no network call on an invalid snapshot, the
+  boundaries 32/33 entries and 16384/16385 chars, `4294967295` accepted and `4294967296` refused,
+  and a `200` without a view returning `Unreachable`. The invariant test pins the Kotlin constants
+  to `crates/remote/src/lib.rs` and `routes.rs`, and it pins `MAX_ALERTS_BODY_CHARS` to the
+  transport's `MAX_RESPONSE_BYTES`.
 
 ## 3. Deep Reasoning Audit
 
 ### Logic & Architecture
-
-- Shared client: `HomeScreen` uses `SharedApi.forOrigin`; `alerts()`/`ackAlerts()` are methods
-  of that client, so the in-memory session cookie stays single for the screens and the heartbeat
-  job. Tried: searched the diff for any `SoosApi(` construction in production code: none. PASS.
-- Compose coexistence: `HeartbeatCard` lives only in `SettingsScreen` (unchanged by this diff);
-  `HomeScreen` now wraps its content in `PullToRefreshBox` + `Column(fillMaxSize().verticalScroll())`
-  (correct modifier order: viewport sized before the scroll). The Settings button stays in the
-  scrollable row, so the heartbeat settings remain reachable. PASS.
-- Never acknowledging an undisplayed view: the button passes the exact `AlertsView` rendered in
-  that composition; `acknowledge` sends its `epoch`/`through`; the button is hidden without an
-  epoch or when nothing is pending, and disabled while `busy` (refresh, lock, ack). A refused or
-  unreachable ack triggers `refresh()` and never retries automatically. Tried a concurrent pull to
-  refresh during an ack: `onRefresh` is ignored while `busy`. PASS.
-- Server agreement: field names match `crates/remote/src/alerts.rs::AlertsView`/`AlertRecord`
-  (snake_case serde); ack refusals (`403 forbidden/alerts_disabled`, `400 bad_request`,
-  `429 rate_limited`, `409 stale_view`, `503 unavailable`) match `server.rs::alerts_ack`; the
-  CSRF path is the same `check_action_csrf` as `lock`, which the app already satisfies. The
-  invariant test pins the action, paths, headers and bounds against `lib.rs`/`routes.rs`. PASS.
-- `login_required`: the 403 handling in `send` is untouched and covers the ack and the GET; the
-  `session == sent` guard prevents dropping a session stored meanwhile by another caller. PASS
-  (see MINOR 2 on the feedback text).
+- **Wire contract.** I compared each field and enum of `crates/remote/src/alerts.rs` and
+  `journal.rs` (`serde(rename_all = "snake_case")`) with `ApiJson.ALERT_*`: states, reasons,
+  coverage, sources, accounts and kinds match exactly. The server sends counters as `u32`, which
+  matches `MAX_ALERT_COUNT`. `through`/`id`/times are `u64`. A value above `Long.MAX_VALUE` makes
+  the whole view `null`, so the app fails safe: no ack is possible. PASS.
+- **Ack refusal tokens.** I mapped them to `server.rs:2145-2175`: `403 alerts_disabled`,
+  `400 bad_request`, `429 rate_limited`, `503 unavailable`, `409 stale_view`, plus the generic
+  `403 forbidden`, which falls back to `alerts_ack_refused`. PASS.
+- **No ack of a view that is not displayed.** The button passes the `view` of the composition
+  that drew it. `acknowledge()` takes `epoch` and `through` from that same object and returns
+  early when `epoch == null`. The button only shows when `pending && view.epoch != null`. After a
+  refusal, `refresh()` reloads the view and never retries the ack. A `200` body that does not
+  parse becomes `Unreachable`, so the UI does not show "Acknowledged". PASS.
+- **SharedApi coexistence.** `HomeScreen` uses the shared client already introduced on main
+  (line 297, outside the diff). `HeartbeatCard` lives in `SettingsScreen`, so the two screens
+  never compose at the same time and do not conflict. PASS.
+- **Compose layout.** `PullToRefreshBox(fillMaxSize)` wraps `Column(verticalScroll)` inside the
+  bounded `Box(fillMaxSize)` of `SoosApp`. No parent scrolls, so there is no
+  infinite-height-constraint crash. PASS.
+- **Compile correctness (by reading).** I checked the imports: `StringRes`, `rememberScrollState`,
+  `verticalScroll`, `ExperimentalMaterial3Api`, `PullToRefreshBox` (material3 >= 1.3, and BOM
+  2025.10.01 gives 1.4.x), `stringResource`, `java.time.*`, `AlertRecord`/`AlertsView`,
+  `org.soos.remote.R` (already present), and `JSONArray`/`JSONException`/`JSONObject` in
+  `ApiJson`. `return null` inside named arguments within `try` is valid Kotlin. Integer literals
+  are passed for `Long` parameters in the tests, which Kotlin converts. The `when` blocks over the
+  sealed `ApiResult` are exhaustive. `warningsAsErrors = false`, so an opt-in marker on a
+  stabilized API cannot break the build. PASS.
 
 ### PAM Concurrency & Deadlines
-
-Not affected (Android app only; no `crates/pam` change). Network calls run on `Dispatchers.IO`
-with the unchanged 5 s connect/read timeouts of `UrlConnectionTransport`. PASS.
+- Not applicable: this is Android client code only. No `crates/pam` change. PASS.
 
 ### Panic Safety & Fail-Closed
-
-`parseAlerts` catches its private `Malformed` and `JSONException`; `history.get(index)` is bounded
-by `length()`; casts use `as?`. `alertTime` catches `DateTimeException` for instants that cannot
-be formatted. Any malformed `200` becomes `Unreachable`, shown as the fixed "Alerts could not be
-loaded". An invalid snapshot is refused locally without a network call. PASS.
+- `parseAlerts` catches its private `Malformed` exception and `JSONException`. `alertTime`
+  catches `DateTimeException`. I/O runs on `Dispatchers.IO`, and every `IOException` becomes
+  `Unreachable`. No `!!` appears in the production hunks. When a load fails, the card shows a
+  fixed "could not be loaded" text and never shows stale counts, because `alerts` is set to
+  `null`. PASS.
 
 ### Test Integrity & Anti-Weakening
-
-New tests can fail against plausible wrong implementations: exact header list and order for the
-ack, header counts of 1, no body, no `Content-Type`; 32 vs 33 entries; 16384 vs 16385 chars;
-`4294967295` vs `4294967296`; uppercase, short, long and non-hex epochs; an invalid snapshot sends
-nothing; the cookie is carried on both routes. PASS.
+- See §2: the changes are add-only and have no escape hatches. PASS.
 
 ### Memory, Bounds & Secrets
-
-- 16 KiB: `MAX_ALERTS_BODY_CHARS = 16384` is checked before `JSONObject` parsing and pinned to
-  `MAX_RESPONSE_BYTES = 16384` by the invariant test. PASS.
-- 32 entries: checked before allocating `ArrayList(history.length())`. PASS.
-- No server text is displayed: every value selects a fixed `strings.xml` resource; no exception
-  message is shown (the invariant test forbids `.message`/`localizedMessage`). The view carries no
-  password or typed text. PASS.
+- **Bounds.** The transport bound is 16384 bytes. The parser bound is 16384 chars, checked
+  before `JSONObject` parses. The history holds at most 32 entries, checked before the
+  `ArrayList` is allocated. Timeouts stay at 5000 ms (`UrlConnectionTransport.kt:47-48`). PASS.
+- **Session.** `send` captures `sent` before the request. A `403 login_required` clears the
+  session only when `session == sent`, so a session stored by the heartbeat in the meantime
+  survives. The snapshot headers are appended before `Content-Type`/`Cookie`, and the test pins
+  the exact header list. The cookie stays in memory only. PASS.
+- **Secrets and text.** No server text is rendered: every token only selects a fixed
+  `strings.xml` resource. No logging is added. The alerts carry no password text. PASS.
 
 ### Supply Chain & Automation
-
-No dependency, Gradle, workflow or script change. `PullToRefreshBox` exists in the material3
-version of Compose BOM `2025.10.01` and is opted in with `@OptIn(ExperimentalMaterial3Api::class)`.
-PASS.
+- No dependency, Gradle, workflow or script changes. PASS.
 
 ### English-Only Policy
+- Code, comments, strings, docs, ADR and matrix lines are in English. PASS.
 
-All added code, comments, strings and docs are English. PASS.
-
-### Kotlin Compile Correctness (by reading)
-
-Imports are present for `StringRes`, `rememberScrollState`, `verticalScroll`, `PullToRefreshBox`,
-`ExperimentalMaterial3Api`, `stringResource`, the `java.time` types, `AlertRecord`, `AlertsView`
-and `org.soos.remote.R`; the helpers `string`, `long`, `array` and `objectOf` exist in `ApiJson`.
-`when` branches over the sealed `ApiResult` are exhaustive (`is ApiResult.Refused,
-ApiResult.Unreachable ->` is legal). `stringResource(id, Long)` with `%d` formats a `Long`. Local
-functions mutating `by remember` state inside a composable are valid. No compile issue found; not
-verified by a build (no JDK locally; the CI `Android (debug build)` job is the authority).
+### Documentation registers
+- `AI/DECISIONS.md` gains one add-only ADR line, and its title occurs once. `AI/VERIFICATION_MATRIX.md`
+  gains four add-only lines, ANA18 to ANA21, with no duplicate ANA id in the file. PASS.
 
 ## 4. Detailed Findings & Action Items
 
-- **[MINOR]** `android/app/src/main/java/org/soos/remote/ui/SoosApp.kt:314` — `loadAlerts()`
-  does not clear `ackFeedback`, so after a successful acknowledgement a later Refresh or pull to
-  refresh that shows new pending attempts still displays "Acknowledged." under the new counts.
-  Suggest clearing the feedback on any user-initiated refresh (keeping it only for the refresh
-  that follows a refused acknowledgement). Not security relevant: the counts and the button are
-  correct.
-- **[MINOR]** `android/app/src/main/java/org/soos/remote/ui/SoosApp.kt:374` — on an ack refused
-  with `login_required`, `refresh()` finds the session gone and calls `clearAlerts()`
-  (`SoosApp.kt:311`), which resets `ackFeedback`, and the card is hidden while signed out; the
-  `alerts_ack_login_required` text is therefore never shown. The user still sees "Signed out" and
-  the passkey button, so nothing misleading is displayed; the string is effectively dead.
+- **[MINOR]** `android/app/src/main/java/org/soos/remote/ui/SoosApp.kt:314`: `loadAlerts()`
+  (called by every refresh and pull-to-refresh) never clears `ackFeedback`. An "Acknowledged."
+  message therefore stays under a later view that may already show new unacknowledged attempts.
+  It only clears on the next ack tap (line 495) or when the card is cleared. This is a cosmetic
+  issue and not a security one: counts and the button still reflect the fresh view. Suggested
+  fix: reset `ackFeedback` whenever a refresh, other than the one that follows a refusal, loads a
+  new view.
+- **[SUGGESTION]** `android/app/src/main/java/org/soos/remote/ui/SoosApp.kt:362`: an ack attempt
+  on a view whose state is `unavailable` but whose counts are still pending reaches the server
+  only to get `503 unavailable`. The button could be hidden for `state != "active"`. This is
+  optional.
 
 ## 5. Final Verdict
 
-No CRITICAL or MAJOR finding. Shared client, session logic, bounds and test integrity verified.
+No CRITICAL or MAJOR finding.
 
 **VERDICT: APPROVED**
