@@ -2,11 +2,42 @@
 
 - **Date**: 2026-10-17
 - **Target Branch**: `feat/phone-onboarding-tour`
-- **Base (merge-base)**: `f1e7616` (rebased from `aa25f78`; `origin/main` gained #419)
-- **Reviewed-Diff-Fingerprint**: `34bb2bc6402b800cad5f48e992fc6cec2c158bd5d16d22bb8419a2e217445ffd`
+- **Base (merge-base)**: `e216ac1` (rebased from `f1e7616`; `origin/main` gained #407)
+- **Reviewed-Diff-Fingerprint**: `086d73b116143f8d0c8fc376d8d067da8fe06bca161143ed0bcfe22460fbbbee`
 - **Audited Files**: `AI/DECISIONS.md`, `AI/VERIFICATION_MATRIX.md`, `AI/architect_spec_phone_onboarding_tour.md`, `AI/auditor_constraints_phone_onboarding_tour.md`, `AI/walkthroughs/222_phone_onboarding_tour.md`, `Docs/REMOTE_COMPANION.md`, `crates/remote/assets/app.js`, `crates/remote/assets/style.css`, `tests/invariants/src/lib.rs`, `tests/invariants/src/remote_alerts_contract.rs`, `tests/invariants/src/remote_companion_contract.rs`, `tests/invariants/src/remote_passkey_contract.rs`, `tests/invariants/src/remote_push_contract.rs`, `tests/invariants/src/remote_tour_contract.rs`
 
-## 0. Re-Review After the Rebase Onto `origin/main` `f1e7616`
+## 0. Re-Review After the Rebase Onto `origin/main` `e216ac1`
+
+Independent re-review of the new frozen patch (`--prepare`, merge-base `e216ac1`) after the rebase
+from `f1e7616` onto `e216ac1`. `origin/main` gained only #407 (`e216ac1`, GNOME Shell unlock-dialog
+extension: `packaging/gnome-shell/soos-lockscreen@soos/`, `Docs/LOCKSCREEN_WIDGET.md`,
+`Docs/DISTRIBUTION_DEPLOYMENT.md`, `lockscreen_gnome_contract.rs`, ADR/matrix/walkthrough 215).
+
+Rebase integrity, checked mechanically:
+- `git range-diff f1e7616..fd8324a origin/main..HEAD`: `9aed33c` (migration, formerly `28bcf34`) `=`;
+  `3e06dd1` (formerly `18cfdc8`) `!` only through `AI/DECISIONS.md` context (main's GNOME ADR line now
+  precedes the tour ADR line); both report commits `=`.
+- The `+`/`-` lines of `git diff f1e7616 fd8324a` and `git diff e216ac1 HEAD` (without the two report
+  files) are byte-identical (2498 lines each). `git diff e216ac1 HEAD -- AI/DECISIONS.md` adds exactly
+  one line (the tour ADR) and removes none; the "[2026-10-15] Lock-Screen Adapters" ADR entry exists
+  exactly once, as on main. `tests/invariants/src/lib.rs` adds only `mod remote_tour_contract;` (main's
+  module count plus one).
+
+Interaction with #407: no shared file besides the append-only `AI/DECISIONS.md`,
+`AI/VERIFICATION_MATRIX.md` and `tests/invariants/src/lib.rs`; `lockscreen_gnome_contract.rs` does not
+read `crates/remote/assets/`, `app.js` or any tour text; the GNOME extension does not touch the phone
+web app, `remote.toml` keys or `soos-gui` onboarding. No semantic interaction.
+
+Test assertions: unchanged from the pass below (only the RMC-S18/S30/S38 operands of the
+owner-approved migration, now `9aed33c`; no removed assertion line, no new escape hatch).
+
+Executed evidence (this pass): the same `cargo test --locked -p soos-invariants -p soos-remote --
+--test-threads=4` command: 45 test binaries, 1213 passed, 0 failed (soos-invariants 758).
+
+The previous pass (base `f1e7616`, fingerprint `34bb2bc6…`) follows; its #402/#419 analysis and all
+findings still apply to the unchanged branch content.
+
+## 0b. Re-Review After the Rebase Onto `origin/main` `f1e7616`
 
 Independent re-review, without author context, of the frozen patch `target/candid_diff.patch`
 (`./scripts/candid_subagent.sh --prepare`, merge-base `f1e7616`) after the branch was rebased from
