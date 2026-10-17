@@ -46,6 +46,12 @@ const GATE: &str = "scripts/pr_checks_gate.sh";
 const GUI_THEME: &str = "crates/gui/src/theme.rs";
 const ICON_SVG: &str = "crates/remote/assets/icon.svg";
 const REMOTE_LIB: &str = "crates/remote/src/lib.rs";
+const REMOTE_ROUTES: &str = "crates/remote/src/routes.rs";
+const API_JSON: &str = "android/app/src/main/java/org/soos/remote/net/ApiJson.kt";
+const SOOS_APP: &str = "android/app/src/main/java/org/soos/remote/ui/SoosApp.kt";
+const STRINGS: &str = "android/app/src/main/res/values/strings.xml";
+const ALERTS_WALKTHROUGH: &str = "AI/walkthroughs/219_android_alerts.md";
+const ALERTS_ADR_TITLE: &str = "[2026-10-17] Failed-Password Alerts in the Native Android App";
 const DOC: &str = "Docs/REMOTE_COMPANION.md";
 const DECISIONS: &str = "AI/DECISIONS.md";
 const WALKTHROUGH: &str = "AI/walkthroughs/208_android_native_app.md";
@@ -182,6 +188,28 @@ fn kotlin_str_const(src: &str, name: &str) -> String {
         + needle.len();
     let end = src[at..].find('"').unwrap();
     src[at..at + end].to_string()
+}
+
+/// The integer value of `pub const name: usize = N;` in `src`.
+fn rust_usize_const(src: &str, name: &str) -> u64 {
+    let needle = format!("pub const {name}: usize = ");
+    let at = src
+        .find(&needle)
+        .unwrap_or_else(|| panic!("{name} not found"))
+        + needle.len();
+    let end = src[at..].find(';').unwrap();
+    src[at..at + end].replace('_', "").parse().unwrap()
+}
+
+/// The integer value of `const val name = N` in Kotlin `src`.
+fn kotlin_int_const(src: &str, name: &str) -> u64 {
+    let needle = format!("const val {name} = ");
+    let at = src
+        .find(&needle)
+        .unwrap_or_else(|| panic!("{name} not found"))
+        + needle.len();
+    let end = src[at..].find('\n').unwrap();
+    src[at..at + end].trim().replace('_', "").parse().unwrap()
 }
 
 /// ANA7: no signing key, password, local SDK path or Firebase file is tracked under
@@ -583,6 +611,41 @@ fn test_ana_s8_kotlin_hygiene() {
             "{kotlin} equals lib.rs"
         );
     }
+    // Failed-password alerts (GitHub #404, matrix ANA20): the action, the paths, the snapshot
+    // headers and the bounds equal the server.
+    assert_eq!(
+        kotlin_str_const(&api, "ACTION_ALERTS_ACK"),
+        rust_str_const(&lib, "ACTION_ALERTS_ACK"),
+        "ACTION_ALERTS_ACK equals lib.rs"
+    );
+    let routes = strip_comments(production_part(&read(REMOTE_ROUTES)));
+    for name in ["ALERTS_PATH", "ALERTS_ACK_PATH"] {
+        assert_eq!(
+            kotlin_str_const(&api, name),
+            rust_str_const(&routes, name),
+            "{name} equals routes.rs"
+        );
+    }
+    for name in ["ALERTS_EPOCH_HEADER", "ALERTS_THROUGH_HEADER"] {
+        assert_eq!(
+            kotlin_str_const(&api, name).to_ascii_lowercase(),
+            rust_str_const(&lib, name),
+            "{name} equals lib.rs"
+        );
+    }
+    let api_json = read(API_JSON);
+    for name in ["MAX_ALERT_HISTORY", "ALERTS_EPOCH_HEX_LEN"] {
+        assert_eq!(
+            kotlin_int_const(&api_json, name),
+            rust_usize_const(&lib, name),
+            "{name} equals lib.rs"
+        );
+    }
+    assert_eq!(
+        kotlin_int_const(&api_json, "MAX_ALERTS_BODY_CHARS"),
+        kotlin_int_const(&read(TRANSPORT), "MAX_RESPONSE_BYTES"),
+        "the alerts parser keeps the 16 KiB transport bound"
+    );
     assert!(api.contains("headers += \"Origin\" to origin"));
     let transport = read(TRANSPORT);
     for needle in [
@@ -795,6 +858,103 @@ fn test_ana_s12_docs_adr_walkthrough() {
         assert!(adr.contains(needle), "ADR must mention {needle}");
     }
     assert!(exists(WALKTHROUGH), "{WALKTHROUGH}");
+}
+
+/// ANA20: failed-password alerts in the app (GitHub #404, PR 2 of #357): §2j, the ADR entry and
+/// walkthrough 219; every alerts text referenced by the UI is a `strings.xml` resource; times are
+/// rendered in the phone's time zone; pull to refresh; no exception or server text is shown.
+#[test]
+fn test_ana_s14_alerts_contract() {
+    let doc = read(DOC);
+    let start = doc.find("## 2j. Native Android app").expect("section 2j");
+    let end = start + doc[start..].find("\n## 3.").unwrap();
+    let section = &doc[start..end];
+    for needle in [
+        "GET /api/alerts",
+        "POST /api/alerts/ack",
+        "X-Soos-Action: alerts-ack",
+        "X-Soos-Alerts-Epoch",
+        "X-Soos-Alerts-Through",
+        "time zone",
+        "pull",
+        "stale_view",
+        "ANA21",
+    ] {
+        assert!(section.contains(needle), "§2j must mention {needle}");
+    }
+    let decisions = read(DECISIONS);
+    let adr = decisions
+        .lines()
+        .find(|l| l.contains(ALERTS_ADR_TITLE))
+        .expect("alerts ADR recorded");
+    for needle in [
+        "#404",
+        "#357",
+        "alerts-ack",
+        "no server change",
+        "verification-metadata.xml",
+        "strings.xml",
+        "colors.xml",
+        "ANA18",
+    ] {
+        assert!(adr.contains(needle), "alerts ADR must mention {needle}");
+    }
+    assert!(exists(ALERTS_WALKTHROUGH), "{ALERTS_WALKTHROUGH}");
+
+    let app = read(SOOS_APP);
+    let strings = read(STRINGS);
+    let mut referenced = 0;
+    for kind in ["R.string.", "R.plurals."] {
+        for (at, _) in app.match_indices(kind) {
+            let rest = &app[at + kind.len()..];
+            let name: String = rest
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                .collect();
+            if !name.starts_with("alerts_") {
+                continue;
+            }
+            let tag = if kind == "R.string." {
+                "string"
+            } else {
+                "plurals"
+            };
+            assert!(
+                strings.contains(&format!("<{tag} name=\"{name}\"")),
+                "{kind}{name} is defined in strings.xml"
+            );
+            referenced += 1;
+        }
+    }
+    assert!(
+        referenced >= 10,
+        "the alerts card uses strings.xml ({referenced})"
+    );
+    for needle in [
+        "ZoneId.systemDefault()",
+        "PullToRefreshBox",
+        "api.alerts()",
+        "api.ackAlerts(",
+    ] {
+        assert!(app.contains(needle), "SoosApp.kt needs {needle}");
+    }
+    for forbidden in [".message", "localizedMessage", "toString()}"] {
+        assert!(!app.contains(forbidden), "SoosApp.kt shows {forbidden}");
+    }
+    // A server token only selects a fixed text (`refusalText(result..)`), never a bare
+    // `Text(result..)` composable.
+    for (at, _) in app.match_indices("Text(result") {
+        let before = app[..at].chars().next_back().unwrap_or(' ');
+        assert!(
+            before.is_ascii_alphanumeric(),
+            "SoosApp.kt displays a server value at byte {at}"
+        );
+    }
+    let api = read(SOOS_API);
+    assert!(
+        api.contains("fun alerts(): ApiResult<AlertsView>"),
+        "alerts() returns the parsed view"
+    );
 }
 
 /// The block of `script` that starts at the line `start` and ends at the first following line

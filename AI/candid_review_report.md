@@ -1,192 +1,133 @@
 # Candid Review Report
 
-- **Date**: 2026-10-16
-- **Target Branch**: `feat/lockscreen-adapters`
-- **Base (merge-base)**: `2025738`
-- **Reviewed-Diff-Fingerprint**: `7db27bb19b70f1d398379f41c85b5a2b1c73dd5af803292bc0cdd0aa844d82d4`
-- **Audited Files**: `.agents/skills/dev-workflow/references/project-facts.md`, `AGENTS.md`, `AI/ARCHITECTURE.md`,
-  `AI/DECISIONS.md`, `AI/VERIFICATION_MATRIX.md`, `AI/architect_spec_lockscreen_adapters.md`,
-  `AI/auditor_constraints_lockscreen_adapters.md`, `AI/tester_contract_lockscreen_adapters.md`,
-  `AI/walkthroughs/214_lockscreen_adapters.md`, `Cargo.lock`, `Cargo.toml`, `Docs/DISTRIBUTION_DEPLOYMENT.md`,
-  `Docs/IPC_PROTOCOL.md`, `Docs/LOCKSCREEN_WIDGET.md`, `Docs/README.md`, `crates/lock-widget/Cargo.toml`,
-  `crates/lock-widget/src/{args,font,layout,lib,main,palette,raster,render,scene,wayland}.rs`,
-  `crates/lock-widget/tests/{lock_widget_cli_tests,lock_widget_render_tests,lock_widget_scene_tests}.rs`,
-  `crates/lockstatus/Cargo.toml`, `crates/lockstatus/src/{args,client,format,lib,main,motion,poll,shared,view}.rs`,
-  `crates/lockstatus/tests/common/mod.rs`,
-  `crates/lockstatus/tests/{lockstatus_cli_tests,lockstatus_client_tests,lockstatus_poll_tests,lockstatus_shared_tests,lockstatus_view_format_tests}.rs`,
-  `deny.toml`, `packaging/lockscreen/hyprlock-soos.conf`, `scripts/candid_review.sh`, `tests/invariants/src/lib.rs`,
-  `tests/invariants/src/lockscreen_adapters_contract.rs`
+- **Date**: 2026-10-17
+- **Target Branch**: `feat/android-alerts`
+- **Base (merge-base)**: `9e82795`
+- **Reviewed-Diff-Fingerprint**: `1f37f7174bf516bd7159f309a77a314a5fba5b755186add2295b7bcf3f469a98`
+- **Audited Files**: `AI/DECISIONS.md`, `AI/VERIFICATION_MATRIX.md`, `AI/architect_spec_android_alerts.md`,
+  `AI/auditor_constraints_android_alerts.md`, `AI/tester_contract_android_alerts.md`,
+  `AI/walkthroughs/219_android_alerts.md`, `Docs/REMOTE_COMPANION.md`,
+  `android/app/src/main/java/org/soos/remote/net/ApiJson.kt`,
+  `android/app/src/main/java/org/soos/remote/net/SoosApi.kt`,
+  `android/app/src/main/java/org/soos/remote/ui/SoosApp.kt`,
+  `android/app/src/main/res/values/strings.xml`,
+  `android/app/src/test/java/org/soos/remote/ApiJsonTest.kt`,
+  `android/app/src/test/java/org/soos/remote/SoosApiTest.kt`,
+  `tests/invariants/src/android_native_contract.rs`
 
 ## 1. Executive Summary
 
-Independent review of the frozen patch (7 672 lines, 50 files), done without author context. The diff adds two
-user-level `#![forbid(unsafe_code)]` crates: `soos-lockstatus` (bounded blocking `RequestKind::LockState` client,
-per-user `flock` coordination in `$XDG_RUNTIME_DIR` with a 250 ms cache and a shared 1/2/4 s failure back-off,
-`--once` for hyprlock labels, `--watch` JSON lines) and `soos-lock-widget` (wlr-layer-shell background for
-`swaylock-plugin --command`, no seat, CPU rasterizer, bounded shared memory). The diff does not touch PAM, daemon or
-protocol code. No new crate enters `Cargo.lock` (two path packages only). No existing test or assertion is modified.
-The only change to an existing test file adds lines and removes none: two list entries and one module declaration.
+GitHub #404 (PR 2 of #357) adds the failed-password alerts list and its acknowledgement to the native
+Android app. The change is client-only: `git diff --stat` against the merge base shows no change under
+`crates/`, `scripts/`, `.github/`, `android/gradle/`, `android/app/build.gradle.kts` or the manifest, so
+RC-1, the dependency verification metadata, the `aapt2` allowlist and every Rust security invariant are
+untouched. The wire contract was checked against the server source, not the spec: the field names,
+nullability and integer types of `AlertsView`/`AlertRecord` (`crates/remote/src/alerts.rs`), the six
+snake-case enums (`alerts.rs`, `journal.rs`), the `alerts_ack` gate order and refusal tokens
+(`crates/remote/src/server.rs`), `check_action_csrf` and `parse_alerts_ack_headers`
+(`crates/remote/src/routes.rs`) all match the Kotlin client. No CRITICAL or MAJOR finding; three MINOR
+and one SUGGESTION items below.
 
-Re-run locally with the shared-RAM environment: `cargo test -p soos-lockstatus -p soos-lock-widget` (103 tests,
-all green), `cargo clippy -p soos-lockstatus -p soos-lock-widget --all-targets -- -D warnings` (clean),
-`cargo test -p soos-invariants lockscreen forbid_unsafe` (15 green, including
-`test_business_crates_forbid_unsafe_code`), `cargo fmt --all -- --check` (clean).
+## 2. Test Changes (mechanical listing from step 3)
 
-No CRITICAL, MAJOR or MINOR finding. Two SUGGESTIONS.
-
-## 2. Test Changes (mechanical listing from step 3, with justification per change)
-
-- Test files touched (`grep '^diff --git' | grep 'tests?[/_.]|/tests/|fixtures'`):
-  - New: `crates/lock-widget/tests/lock_widget_{cli,render,scene}_tests.rs`,
-    `crates/lockstatus/tests/common/mod.rs`, `crates/lockstatus/tests/lockstatus_{cli,client,poll,shared,view_format}_tests.rs`,
-    `tests/invariants/src/lockscreen_adapters_contract.rs`.
-  - Modified: `tests/invariants/src/lib.rs`. Additions only: a `#[cfg(all(test, unix))] mod lockscreen_adapters_contract;`
-    declaration, plus `"lockstatus"` and `"lock-widget"` appended to the `test_business_crates_forbid_unsafe_code` list.
-    This makes the invariant stricter.
-- Removed or changed checks (`^-[^-].*(assert|#[test]|#[tokio::test|proptest!|#[should_panic)`): **none**.
-- New escape hatches (`#[ignore`, `#[cfg(any())]`, `should_panic`, `tolerance`, `epsilon`): **none**.
-- Inline `mod tests` added or removed: **none**.
-- Conclusion: no test is weakened. The `scripts/candid_review.sh` `BUSINESS_CRATES` list gains the same two crates
-  and stays in sync with the invariant (checked by `test_lka12_both_crate_roots_forbid_unsafe`).
+- Test files touched: `android/app/src/test/java/org/soos/remote/ApiJsonTest.kt`,
+  `android/app/src/test/java/org/soos/remote/SoosApiTest.kt`,
+  `tests/invariants/src/android_native_contract.rs` (plus the tester contract document).
+- `grep -nE '^-[^-].*(assert|#\[test\]|@Test|proptest!|#\[should_panic)'` on the frozen patch: **no
+  output**. `git diff $(git merge-base origin/main HEAD) HEAD -- '*tests*' 'tests/'` (and `*test*`)
+  contains additions only (509 insertions, 0 deletions).
+- New escape hatches (`#[ignore]`, `@Ignore`, `should_panic`, tolerance/epsilon): **none**.
+- `test_ana_s8_kotlin_hygiene` gains an add-only block (ACTION_ALERTS_ACK, the two paths, the two header
+  names, `MAX_ALERT_HISTORY`, `ALERTS_EPOCH_HEX_LEN`, the body bound) inserted before the existing
+  `Origin` needle; every pre-existing line of the function is unchanged. New test
+  `test_ana_s14_alerts_contract`; new helpers `rust_usize_const`, `kotlin_int_const`.
+- The Kotlin files gain imports and appended `@Test` methods only.
+- Conclusion: **no pre-existing assertion was removed, weakened or changed.**
 
 ## 3. Deep Reasoning Audit
 
 ### Logic & Architecture
-
-- *Can a refusal be shown as anything but Idle?* `query_lock_state` decodes `LockStateResponse` first. Any decoded
-  `Response`, an `Allow` verdict included, then becomes `Refused`. A `Response` can never decode as a
-  `LockStateResponse`: the codec is strict, rejects trailing bytes, and a `Response` payload is longer than 12 bytes.
-  `fetch_view` maps every error to `UNAVAILABLE`, and `presented()` collapses that into Idle. Neither `ViewState` nor
-  `Presented` has a success state. **PASS**.
-- *Other protocol version*: `is_current()` is checked both in the client and in `LockView::from_response`. **PASS**.
-- *Coordination and quota*: every client takes `LOCK_EX|LOCK_NB` on the private lock file and re-reads the record under
-  the lock. A client that waited for another client's exchange therefore gets a `Cache` hit. A client contacts the
-  daemon only when the record is older than 250 ms (or than the failure back-off step), and keeps one connection at a
-  time. That gives at most about 4 requests/s against the daemon's 8/s quota (`LOCK_STATE_MAX_REQUESTS_PER_SEC`).
-  Record writes and reads both happen under the lock, so no read is ever torn. **PASS**.
-- *Starved exchange*: with less than 50 ms left after taking the lock, the result is `LockBusy`. No failure record is
-  written and the poller keeps its last view, so nothing flickers. **PASS**.
-- *Cache decoding*: the format is strict: six fields, a leading `v1`, decimal-only numbers and a 16-character lowercase
-  hex hash. A record is consistent only if `unavailable` comes with sequence 0 and failures 1..=3, and vice versa. At
-  most 129 bytes are read. The 79-byte maximum stated in the constant's comment is correct
-  (3+14+1+20+1+1+1+20+1+16+1). **PASS**.
-- *Scene state machine*: traced these sequences:
-  - Scanning(1) → transient Unavailable → Scanning(1): the scan start is kept, and the stop is bounded by
-    `scan_start + 4800` rounded down to the half-turn grid.
-  - A new scan joining a running turn: `max(old_stop, wanted)` never exceeds the new scan's own bound, because
-    `old_stop ≤ old_start + 4800 ≤ now + 4800`.
-  - NotRecognized(2) → Unavailable → NotRecognized(2): no second shake.
-  - Daemon restart: a lower non-zero sequence resets the shake and the scan start.
-  - The daemon's neutral sequence-0 answer: ignored for epochs.
-
-  This is consistent with the §14 sequence rule (`2 × scans − 1` while hidden, `2 × scans` once visible). **PASS**.
-- *Brand mirror*: `star_contains` matches `STAR_SPIKES`. The spikes are quarter-circle Bézier approximations centred
-  on the outer corners, with a radius of half the box. The palette values equal those in `crates/gui/src/theme.rs`.
-  **PASS**.
-- *CLI*: `--format` has `requires = "once"` and a default value, which does not break `--watch` (covered by the CLI
-  tests). `--once` swallows usage errors and always exits 0. The widget delays every exit except help and version by
-  1000 ms. **PASS**.
+- Parser vs server: `through: u64`, counters `u32` (cap `4294967295` = `MAX_ALERT_COUNT`), `count: u32`
+  with the record minimum 1, `id`/times `u64`, `Option<_>` serialized as `null` → nullable members
+  accept absent or `null`. Tried: `through = 18446744073709551615` (JVM `BigInteger`, Android
+  `Double`) → `long()` accepts only `Int`/`Long` → `null` on both runtimes. `1.5`, `"3"`, `true`, `-1`
+  refused. PASS.
+- Epoch: the server parses exactly 16 lowercase hex characters; `isAlertsEpoch` is the same set; a
+  bad snapshot is refused locally before any I/O (`ackWithAnInvalidSnapshotSendsNothing`). PASS.
+- Ack wire: body-less `POST`, `Origin`, `X-Soos-Action: alerts-ack`, one epoch and one decimal through
+  header (the server requires 1–N ASCII digits, `Long.toString()` of a non-negative value satisfies
+  it); no `Content-Type`; the cookie through the shared `send`. Same no-body POST shape as the existing
+  `lock()`. PASS.
+- `200` of the ack is parsed as the fresh view (`alerts_response(200, &view)`), refusals as
+  `Refused(status, token)`. A `200 {"result":...}` is `Unreachable` (tested). PASS.
+- UI flow: `stale_view` → feedback kept, `refresh()` re-reads the view, the button needs another tap
+  (never a blind retry). `busy` gates the Refresh, Lock, Acknowledge and pull-to-refresh actions.
+  Layout: the scrolling `Column` sits in a `PullToRefreshBox` inside a `fillMaxSize` `Box` with bounded
+  height, so no nested infinite-height scroll. FINDINGS MINOR-1, MINOR-2.
 
 ### PAM Concurrency & Deadlines
-
-- `crates/pam` is not in the diff. Neither new crate has Tokio, zbus or an async runtime (checked by the dependency
-  allow-list invariant). **PASS**.
-- *Can the bridge block past its budget?* One cumulative `Deadline` bounds every blocking step:
-  - connect: non-blocking socket, retried every 5 ms on `EAGAIN`, deadline re-checked after the loop;
-  - every write and read: `SO_SNDTIMEO`/`SO_RCVTIMEO` re-armed with the remaining time, and a zero budget never
-    reaches `set_*_timeout`;
-  - the lock wait and the exchange share the caller's 250 ms budget (the exchange gets what is `left`).
-
-  The stall, late-answer and missing-socket tests pin the bound. The stall test's lower bound (`≥ BUDGET − 20 ms`)
-  proves the deadline really waits, and its upper bound includes CI slack. **PASS**.
-- *Can the adapters starve `pam_soos.so`?* Each user has at most one short connection at a time. The remaining case
-  (two other clients already at the regular cap) is documented in the ADR as accepted and pre-existing. **PASS**.
+- Not applicable: no change under `crates/pam` or any Rust crate. Network calls stay on
+  `Dispatchers.IO` with the unchanged 5 s / 16 KiB transport. PASS.
 
 ### Panic Safety & Fail-Closed
-
-- Production code has no `unwrap`/`expect`/`panic!`/indexing: workspace clippy lints are clean, and the invariant
-  `test_lka12_no_panic_or_print_macro_in_production_code` passes. Arithmetic is saturating or checked. Float-to-int
-  casts are documented saturating `as` conversions with NaN → 0. **PASS**.
-- `--once` has a silent panic hook and `catch_unwind`; a panic renders Idle and exits 0. The widget has a silent hook
-  and `catch_unwind` on the main loop. A poller-thread panic drops the sender, which gives `ChannelEvent::Closed`,
-  then `Exit::PollerGone` (exit 1 after the delay). **PASS**.
-- Every failure path renders Idle, never a success state. Nothing in this diff can unlock or authenticate. **PASS**.
+- `parseAlerts` is total: `objectOf` catches `JSONException`; the private `Malformed` and
+  `JSONException` are caught inside the function; no `!!`, every cast is `as?`. `alertTime` catches
+  `DateTimeException`. A malformed view shows "Alerts could not be loaded", never "no attempts"
+  (unknown state/enum refuses the whole view). PASS.
 
 ### Test Integrity & Anti-Weakening
-
-- Mechanical listing above: no assertion removed or modified, no escape hatch. **PASS**.
-- *Would a plausible wrong implementation pass?*
-  - An unbounded read fails `test_lka1_stalled_daemon_times_out_within_the_budget`.
-  - Allocating before the length check is caught by the 0/4097/`u32::MAX` test, which asserts the budget.
-  - A missing `flock` fails the test where 8 concurrent clients must make a single connection.
-  - Treating a refusal as success fails `test_lka1_refusal_of_any_verdict_is_unavailable`, which iterates every
-    verdict including `Allow`.
-  - The request deadline bound in `test_lka1_request_fields_and_one_request_per_connection` is loose (SUGGESTION 1).
-
-  **PASS**, with one suggestion.
-- The mock daemon uses the real `soos_protocol::encode`/`decode_client_message`, so it does not hide any part of the
-  wire contract. **PASS**.
+- See section 2: additions only. The new tests would fail against plausible wrong implementations
+  (an `opt*`-coercing parser fails the `"3"`/`1.5`/`true` cases; a client adding `Content-Type` or a
+  second header fails the exact header-list assertion; sending an invalid snapshot fails the
+  no-request assertion; 33 entries and 16385 chars are refused).
+- Re-run: `cargo test -p soos-invariants --lib android_native_contract -- --test-threads=3`: 14 passed;
+  `cargo test -p soos-invariants -- --test-threads=3`: 708 passed, 0 failed;
+  `cargo clippy -p soos-invariants --all-targets -- -D warnings`: clean; `cargo fmt --check -p
+  soos-invariants`: clean (all with the scoped low-memory environment).
+- The JVM tests (ANA18, ANA19) cannot run on this host (no JDK/SDK); they are honestly marked pending
+  the CI job `Android (debug build)` in the matrix. I read them for compile-level correctness
+  (Long/Int literal typing, `ApiResult` data-class equality, `Fake` throwing `IOException` on an empty
+  queue → `Unreachable`): no issue found. PASS (with the CI run as the remaining evidence).
 
 ### Memory, Bounds & Secrets
-
-- Response frame: the declared length is checked (`0 < n ≤ MAX_MESSAGE_SIZE`) before the `vec!`, so at most 4 100
-  bytes are allocated. **PASS**.
-- Widget buffers: `buffer_len` allows at most 8192 px per side and 33 554 432 px per surface, at most 67 108 864 px
-  across outputs, at most 8 outputs, and 2 buffers per output. An output over budget gets no buffer and one stderr
-  line that names only its size. The 512 MiB worst case of shared memory is documented as a follow-up. **PASS**.
-- Coordination file:
-  - the runtime directory must be absolute, not a symlink, owned by the UID, with `mode & 0o077 == 0`;
-  - the file is opened with `O_NOFOLLOW | O_CLOEXEC` and mode `0600`;
-  - `fstat` on the opened descriptor then checks: regular file, correct owner, `nlink == 1`, private mode.
-
-  The `fstat` check also rejects a FIFO or device planted by the same user. **PASS**.
-- Neither crate has a logger. Stderr lines never contain the state, and nothing biometric is ever received. **PASS**.
+- Body ≤ 16384 characters (pinned to `MAX_RESPONSE_BYTES` by ANA-S8), history ≤ 32 (pinned to
+  `lib.rs`), all strings from closed sets. The largest legal server view (32 records) is ~6 KB, well
+  under the bound. No logging; no server text, status number or exception text is rendered on the
+  alerts card (server tokens only select `strings.xml` resources). The session cookie stays in memory
+  and is still dropped on `login_required`. No password ever transits (the alerts carry classes,
+  times and counts only). PASS.
 
 ### Supply Chain & Automation
-
-- `Cargo.lock` gains only the two path packages. `smithay-client-toolkit` 0.20.0 was already locked with the same
-  features. `deny.toml` changes a comment only. `scripts/candid_review.sh` only extends the business crate list.
-  No `.github/` or `.githooks/` change. **PASS**.
+- No change to `libs.versions.toml`, `verification-metadata.xml`, `build.gradle.kts`, the manifest,
+  CI workflows or scripts. `PullToRefreshBox` comes from the already-resolved material3 artifact;
+  `java.time` is platform API at minSdk 34. PASS.
 
 ### English-Only Policy
-
-- All code, comments, documentation and AI documents in the diff are English (`Bézier` is the English proper noun).
-  **PASS**.
-
-### Documentation Accuracy
-
-- `Docs/LOCKSCREEN_WIDGET.md` matches the code and tests on all of these points:
-  - the three states, their glyphs and words;
-  - budgets: 8 outputs, 8192 px per side, 33 554 432 / 67 108 864 px;
-  - the `--interval-ms` clamp (250..=2000) and the 1/2/4 s back-off;
-  - the JSON key set and the 96-byte line bound;
-  - the coordination rules: lock-busy behaviour per client, and stderr written only by the widget at start;
-  - the record example, whose hash `6db2722693fa5425` matches the FNV-1a test vector;
-  - the reduced-motion order, the motion tokens and the 4.8 s cap;
-  - the troubleshooting row for the 250 ms session check.
-- `Docs/IPC_PROTOCOL.md` §14 "Client implementation" matches `client.rs` and `shared.rs`: tagged request, `service`,
-  `uid_hint`, deadline = monotonic + remaining budget (≥ 50 ms), decode order, one connection, flock + cache.
-- ADR 2026-10-15 (end of `AI/DECISIONS.md`): items (1)–(9) match the code. This covers exit codes and delays, no seat,
-  buffer policy, motion, reduced motion and accepted residuals; item 9g notes that the hyprlock glyph has no cap.
-- `AI/VERIFICATION_MATRIX.md` LKA1–LKA17: every referenced test prefix exists and passes. The counts in walkthrough 214
-  §8 match the `#[test]` counts: client 13, shared 17, view/format 14, poll 8, CLI 13; scene 17, render 16, CLI 5;
-  11 invariant tests. One small wording mismatch is noted in SUGGESTION 2.
-- `AI/walkthroughs/214_lockscreen_adapters.md` is consistent with the diff; "Existing tests migrated: none" is true.
+- All code, comments, resources, docs, ADR, matrix rows and the walkthrough are English. PASS.
 
 ## 4. Detailed Findings & Action Items
 
-- **[SUGGESTION]** `crates/lockstatus/tests/lockstatus_client_tests.rs:53`: the request-deadline check accepts any
-  `deadline_monotonic_ns` up to `before + EXCHANGE_BUDGET_MS + 5 000 ms`. A client that sent a 5 s deadline would
-  still pass, although the IPC §14 contract says "CLOCK_MONOTONIC + the budget". Optionally add a new, separate test
-  that pins the upper bound closer to `before + EXCHANGE_BUDGET_MS` plus a small scheduling margin. Do not edit this
-  assertion.
-- **[SUGGESTION]** `AI/VERIFICATION_MATRIX.md:2414` (row LKA1): the row says "a `CLOCK_MONOTONIC` + 250 ms deadline".
-  Through the coordinated path, the request actually carries `CLOCK_MONOTONIC` plus the budget left after the lock
-  (at least 50 ms), as `Docs/IPC_PROTOCOL.md` §14 correctly states. Align the wording, for example "+ the remaining
-  exchange budget, at most 250 ms".
-
-No CRITICAL, MAJOR or MINOR finding.
+- **[MINOR-1]** `android/app/src/main/java/org/soos/remote/ui/SoosApp.kt:224` (`loadAlerts`) and `:272`
+  (`acknowledge`) — `ackFeedback` is only cleared by `clearAlerts()` or a new tap, so "Acknowledged."
+  stays displayed after later refreshes, including when the refreshed view shows new unacknowledged
+  attempts next to it. Suggested correction: clear `ackFeedback` when a refresh (not triggered by the
+  acknowledgement itself) loads a new view.
+- **[MINOR-2]** `android/app/src/main/java/org/soos/remote/ui/SoosApp.kt:287` — on an ack refused with
+  `login_required`, `send` drops the session, the follow-up `refresh()` sees a signed-out state and
+  `clearAlerts()` erases the `alerts_ack_login_required` feedback, so that fixed sentence is never
+  shown (the user still sees "Signed out" and the sign-in button, so this is cosmetic).
+- **[MINOR-3]** `android/app/src/main/res/values/strings.xml:18` and `SoosApp.kt:485` — the spec
+  (§3) asks for plurals; the implementation uses `_one`/`_other` string pairs selected by
+  `count == 1`. Correct for English (the app is English-only) and documented in the walkthrough, but
+  it deviates from the spec and Android lint reports `PluralsCandidate` warnings (not errors:
+  `warningsAsErrors = false`, so CI is not blocked).
+- **[SUGGESTION]** `tests/invariants/src/android_native_contract.rs:946` — the bare `Text(result`
+  check only inspects the preceding character; `Text(text = result...)` or `Text(r.result)` would pass.
+  Acceptable as a needle check; a stricter form could be added later.
 
 ## 5. Final Verdict
+
+No CRITICAL or MAJOR finding; no pre-existing test assertion was changed. The Kotlin evidence (ANA18,
+ANA19) remains pending the CI job `Android (debug build)` on the pull request, as the matrix states.
 
 **VERDICT: APPROVED**
