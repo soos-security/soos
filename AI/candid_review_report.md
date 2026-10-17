@@ -2,8 +2,8 @@
 
 - **Date**: 2026-10-17
 - **Target Branch**: `feat/android-offline-heartbeat`
-- **Base (merge-base)**: `6eb0746`
-- **Reviewed-Diff-Fingerprint**: `6285840149ecb8a7749ab11d5e8b5941e45a7284511e61cd4266f1d15c28b6c3`
+- **Base (merge-base)**: `aa25f78` (rebased from `6eb0746`; `origin/main` gained #417, #413 and #402)
+- **Reviewed-Diff-Fingerprint**: `21d010487a548c839022a99993c04871f8e6eff582fa486b0b587979acc15cc2`
 - **Audited Files**: `AI/DECISIONS.md`, `AI/VERIFICATION_MATRIX.md`,
   `AI/architect_spec_android_offline_heartbeat.md`,
   `AI/auditor_constraints_android_offline_heartbeat.md`,
@@ -26,6 +26,58 @@
   `android/app/src/test/java/org/soos/remote/SharedApiTest.kt`, `scripts/android_build.sh`,
   `tests/invariants/src/android_heartbeat_contract.rs`,
   `tests/invariants/src/android_native_contract.rs`, `tests/invariants/src/lib.rs`
+
+## 0. Re-Review After the Rebase Onto `origin/main` `aa25f78`
+
+Independent re-review, without author context, of the branch after its rebase from `6eb0746` onto
+`aa25f78`. `origin/main` gained three commits in between: #417 (`085ba63`, zbus 5 -> 6 migration in
+`Cargo.toml`/`Cargo.lock`, `crates/daemon/src/presence/logind.rs`, `crates/remote/src/{logind,offline,session}.rs`,
+their tests and three invariant files), #413 (`01ce6fa`, lazy second shm buffer of `soos-lock-widget`)
+and #402 (`aa25f78`, the phone-companion user phase of `scripts/setup.sh`, merged just before this one).
+
+Rebase integrity, checked mechanically:
+- `git range-diff 6eb0746..10e4daf aa25f78..1b6cb07`: commit 1 (`4248d07`, the owner-approved
+  ANA-S6 contract migration, formerly `c8dccd1`) is `=`; commit 2 (`1b6cb07`, formerly `10e4daf`) is
+  `!` only because of context lines in `AI/DECISIONS.md` (neighbouring ADR lines changed on main) and
+  the pre-images of `AI/candid_review_report.md` and `AI/plan_evaluator_report.md`, which main rewrote.
+- The `+`/`-` lines of `git diff 6eb0746 10e4daf` and `git diff aa25f78 1b6cb07` (both excluding the
+  two report files) are byte-identical (2534 lines), and both report files are byte-identical between
+  `10e4daf` and `1b6cb07`. The branch's own changes are therefore unchanged by the rebase.
+
+Semantic interaction with what main gained:
+- The branch touches no Rust production crate, no `Cargo.*`, no workflow; #417 changed only Rust
+  crates, lock file and invariant files the branch does not edit (`remote_companion_contract.rs`,
+  `presence_unlock_contract.rs`, `portable_crates_contract.rs`). The Android app reaches
+  `soos-remote` only over HTTPS (`GET /api/status`, unchanged by #417), so the zbus 6 migration does
+  not reach it.
+- #413 touches `crates/lock-widget` only: no interaction.
+- #402 and the branch both edit `Docs/REMOTE_COMPANION.md` and `tests/invariants/src/lib.rs` in
+  disjoint hunks (#402: §2j setup note, §4 one-command install, the `setup_user_phase_contract`
+  registration; branch: §2j PC offline alerts and owner check step 6, §8, §9, the
+  `android_heartbeat_contract` registration). The merged document reads coherently. `scripts/setup.sh`
+  installs no Android component and #402 does not touch `scripts/android_build.sh`, `android/` or
+  `.github/workflows/android.yml`.
+
+Executed evidence (this review): `LIBONNXRUNTIME_NO_PKG_CONFIG=1 CARGO_TARGET_DIR=~/.cache/soos-targets/android-offline-heartbeat
+CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_BUILD_JOBS=4 cargo test --locked
+-p soos-invariants -- --test-threads=4`: 735 passed, 0 failed (AHB-S1..S4, the migrated ANA-S6 and main's
+new SET20-SET39 together); `cargo clippy --locked -p soos-invariants --all-targets -- -D warnings`: clean;
+`cargo fmt --all -- --check`: clean. The JVM unit tests (AHB4-AHB6) cannot run on this host (no JDK/SDK);
+no Android input changed in the rebase, and they run in the CI job `Android (debug build)`.
+
+Test assertions: the step-3 greps on the new frozen patch (2853 lines) find exactly the two removed
+assertions at patch lines 2776-2777 and the removed `"<service"` needle at line 2822, all in
+`test_ana_s6_manifest_hardening`: the owner-approved 2026-10-17 migration recorded in its own commit
+`4248d07` and in the ADR item (8) amendment and matrix ANA9. No new `#[ignore]`/`cfg(any())`/`should_panic`/
+tolerance, no inline test module change, no other pre-existing assertion changed.
+
+Sections 1-4 below are the previous APPROVED review (fingerprint `62858401…`, base `6eb0746`), re-read
+against the rebased code; their findings still apply to the unchanged branch content. Updated
+references: the MINOR on branch SHAs now also applies to `c8dccd1` -> `4248d07` (still cited as
+`c8dccd1` in the matrix row ANA9, now `AI/VERIFICATION_MATRIX.md:2632`, and in the spec, tester
+contract, auditor constraints, plan report and walkthrough); the `invariants` count of section 1 is now
+735; the ragged-line SUGGESTION in `Docs/REMOTE_COMPANION.md` now refers to line 1663 (line 1214 is
+unchanged; #402 grew the document after it).
 
 ## 1. Executive Summary
 
@@ -158,7 +210,7 @@ All added code, comments, docs and texts are English. PASS.
 
 ## 4. Detailed Findings & Action Items
 
-- **[MINOR]** `AI/VERIFICATION_MATRIX.md:2601` (also
+- **[MINOR]** `AI/VERIFICATION_MATRIX.md:2632` (also
   `AI/walkthroughs/223_android_offline_heartbeat.md:6`,
   `AI/architect_spec_android_offline_heartbeat.md:4,290`) — the ANA9 amendment cites the branch
   commit `c8dccd1`, which becomes unreachable after the squash merge into `main`. Required
@@ -176,8 +228,8 @@ All added code, comments, docs and texts are English. PASS.
   — `enable()`/`disable()` run a synchronous `SharedPreferences.commit()` and `JobScheduler`
   binder calls on the main thread from the switch handler. Cheap today; consider moving them off
   the main thread if StrictMode is ever enabled.
-- **[SUGGESTION]** `Docs/REMOTE_COMPANION.md:1214,1648` — line 1214 exceeds the document's
-  ~100-column wrap and line 1648 leaves a short ragged line; rewrap.
+- **[SUGGESTION]** `Docs/REMOTE_COMPANION.md:1214,1663` — line 1214 exceeds the document's
+  ~100-column wrap and line 1663 leaves a short ragged line; rewrap.
 
 ## 5. Final Verdict
 
