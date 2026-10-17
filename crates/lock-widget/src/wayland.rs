@@ -8,8 +8,12 @@
 //!   pointer or touch object: it can neither read nor send input);
 //! - creates one background layer surface per output (at most `MAX_OUTPUTS`), anchored to every
 //!   edge, `KeyboardInteractivity::None`;
-//! - draws with two shared-memory buffers per surface within the pixel budgets of
-//!   [`crate::layout`], painting a buffer fully once and then only the widget box;
+//! - draws with one shared-memory buffer per surface, and a second one only while the compositor
+//!   still holds the first ([`crate::layout::needs_extra_buffer`], at most
+//!   [`crate::layout::MAX_BUFFERS_PER_SURFACE`]), within the pixel budgets of [`crate::layout`];
+//!   each buffer has its own pool of exactly [`crate::layout::slot_len`] bytes (no pool ever
+//!   grows, so a failed allocation leaves nothing behind and is retried like a busy buffer);
+//!   a buffer is painted fully once and then only the widget box;
 //! - redraws every `AMBIENT_REPAINT_MS` only while the scene animates (idle draws nothing);
 //! - reads the lock state on one poller thread through `soos-lockstatus` (coordinated per user).
 
@@ -45,7 +49,9 @@ use soos_lockstatus::motion::{MotionPrefs, AMBIENT_REPAINT_MS};
 use soos_lockstatus::poll::Poller;
 use soos_lockstatus::view::LockView;
 
-use crate::layout::{buffer_len, Layout, BUFFERS_PER_SURFACE, MAX_OUTPUTS, MAX_TOTAL_PIXELS};
+use crate::layout::{
+    buffer_len, needs_extra_buffer, slot_len, Layout, Rect, MAX_OUTPUTS, MAX_TOTAL_PIXELS,
+};
 use crate::raster::Canvas;
 use crate::render::{paint_full, paint_widget};
 use crate::scene::Scene;
@@ -92,13 +98,46 @@ pub struct WidgetConfig {
     pub prefs: MotionPrefs,
 }
 
+/// One shared-memory buffer of the configured size in its own pool.
+struct ShmBuffer {
+    /// Declared before `pool`: dropped first.
+    buffer: Buffer,
+    pool: SlotPool,
+    /// Whether the buffer was painted fully once.
+    painted: bool,
+}
+
+impl ShmBuffer {
+    /// One ARGB8888 buffer of `width` × `height` in a pool of exactly [`slot_len`] bytes; `None`
+    /// on any failure (nothing is kept).
+    fn new(shm: &Shm, width: u32, height: u32) -> Option<Self> {
+        let len = slot_len(width, height)?;
+        let w = i32::try_from(width).ok()?;
+        let h = i32::try_from(height).ok()?;
+        let stride = i32::try_from(u64::from(width).saturating_mul(4)).ok()?;
+        let mut pool = SlotPool::new(len, shm).ok()?;
+        let (buffer, _) = pool
+            .create_buffer(w, h, stride, wl_shm::Format::Argb8888)
+            .ok()?;
+        Some(Self {
+            buffer,
+            pool,
+            painted: false,
+        })
+    }
+
+    /// Whether the compositor no longer holds the buffer (it can be drawn).
+    fn is_free(&mut self) -> bool {
+        self.buffer.canvas(&mut self.pool).is_some()
+    }
+}
+
 /// One output's layer surface and its buffers.
 struct OutputSurface {
     output: wl_output::WlOutput,
     layer: LayerSurface,
-    pool: Option<SlotPool>,
-    /// Buffers of the configured size and whether each was painted fully once.
-    buffers: Vec<(Buffer, bool)>,
+    /// Buffers of the configured size (one after configure, at most `MAX_BUFFERS_PER_SURFACE`).
+    buffers: Vec<ShmBuffer>,
     layout: Option<Layout>,
     pixels: u64,
 }
@@ -277,16 +316,16 @@ impl Widget {
         self.surfaces.push(OutputSurface {
             output,
             layer,
-            pool: None,
             buffers: Vec::new(),
             layout: None,
             pixels: 0,
         });
     }
 
-    /// (Re)allocates the buffers of surface `index` for `width` × `height` within the budgets;
-    /// a surface over a budget (or whose shared memory cannot be allocated) keeps no buffer and is
-    /// not drawn. Returns whether the surface can be drawn.
+    /// (Re)allocates the first buffer of surface `index` for `width` × `height` within the
+    /// budgets (a second one is allocated by [`Self::draw_all`] only when needed); a surface over a
+    /// budget (or whose shared memory cannot be allocated) keeps no buffer and is not drawn.
+    /// Returns whether the surface can be drawn.
     fn configure_surface(&mut self, index: usize, width: u32, height: u32) -> bool {
         let others = self
             .surfaces
@@ -306,56 +345,48 @@ impl Widget {
             return true;
         }
         surface.buffers.clear();
-        surface.pool = None;
         surface.layout = None;
         surface.pixels = 0;
         let pixels = u64::from(width).saturating_mul(u64::from(height));
-        let Some(len) = buffer_len(width, height) else {
+        if buffer_len(width, height).is_none() {
             return false;
-        };
+        }
         if others.saturating_add(pixels) > MAX_TOTAL_PIXELS {
             return false;
         }
-        let (Ok(w), Ok(h), Ok(stride)) = (
-            i32::try_from(width),
-            i32::try_from(height),
-            i32::try_from(u64::from(width).saturating_mul(4)),
-        ) else {
+        let Some(first) = ShmBuffer::new(shm, width, height) else {
             return false;
         };
-        let Some(pool_len) = len.checked_mul(BUFFERS_PER_SURFACE) else {
-            return false;
-        };
-        let Ok(mut pool) = SlotPool::new(pool_len, shm) else {
-            return false;
-        };
-        let mut buffers = Vec::with_capacity(BUFFERS_PER_SURFACE);
-        for _ in 0..BUFFERS_PER_SURFACE {
-            match pool.create_buffer(w, h, stride, wl_shm::Format::Argb8888) {
-                Ok((buffer, _)) => buffers.push((buffer, false)),
-                Err(_) => return false,
-            }
-        }
-        surface.pool = Some(pool);
-        surface.buffers = buffers;
+        surface.buffers.push(first);
         surface.layout = Layout::for_surface(width, height);
         surface.pixels = pixels;
         surface.layout.is_some()
     }
 
     /// Draws the current frame on every surface; returns whether a surface had no free buffer
-    /// (a retry is needed).
+    /// (a retry is needed). A released buffer is reused; when the compositor still holds every
+    /// buffer and the policy allows, a second one is allocated (painted fully on its first use); a
+    /// failed allocation is treated like a busy buffer.
     fn draw_all(&mut self) -> bool {
         let frame = self.scene.frame(self.now_ms());
         let mut retry = false;
+        let shm = &self.shm;
         for surface in &mut self.surfaces {
-            let (Some(pool), Some(layout)) = (surface.pool.as_mut(), surface.layout) else {
+            let Some(layout) = surface.layout else {
                 continue;
             };
-            let Some((buffer, painted)) = surface
-                .buffers
-                .iter_mut()
-                .find(|(buffer, _)| buffer.canvas(pool).is_some())
+            let mut free = surface.buffers.iter_mut().position(ShmBuffer::is_free);
+            if needs_extra_buffer(surface.buffers.len(), free.is_some()) {
+                if let Some(extra) = ShmBuffer::new(shm, layout.width, layout.height) {
+                    surface.buffers.push(extra);
+                    free = surface.buffers.len().checked_sub(1);
+                }
+            }
+            let Some(ShmBuffer {
+                buffer,
+                pool,
+                painted,
+            }) = free.and_then(|index| surface.buffers.get_mut(index))
             else {
                 retry = true;
                 continue;
@@ -373,7 +404,7 @@ impl Widget {
                 layout.widget
             } else {
                 paint_full(&mut canvas, &layout, &frame);
-                crate::layout::Rect {
+                Rect {
                     x: 0,
                     y: 0,
                     w: layout.width,

@@ -1,72 +1,49 @@
 # Plan Evaluation Report
 - **Date**: 2026-10-17
-- **Issue**: GitHub-only (no backlog id) — pin the refusal of `LockState` on the auth-reserved connection (GitHub #410, part of epic #352; PR #403 follow-up)
-- **Branch**: `test/daemon-lockstate-reserve`
+- **Issue**: GitHub #412 (part of epic #352; follow-up of PR #403, walkthrough 214 §9) — lazy second
+  shared-memory buffer of `soos-lock-widget`
+- **Branch**: `fix/lock-widget-memory`
 - **Base commit**: `9e82795`
-- **Plan evaluated**: `AI/architect_spec_lockstate_reserve_refusal.md` §1–§11
-- **Mode**: self-check by the implementing agent against `AI/ARCHITECTURE.md`, `AI/DECISIONS.md`, `AI/BACKLOG.md`, `AI/VERIFICATION_MATRIX.md` and the code; the independent candid review runs separately.
+- **Plan evaluated**: `AI/architect_spec_lock_widget_memory.md` §1–§7
 
 ## 1. Coverage Matrix
 
-| Acceptance line (GitHub #410) | Spec element | Status |
+| Requirement (issue #412) | Spec element | Status |
 |---|---|---|
-| `LockState` (own UID) on the reserve is closed without payload, permit released | §8 LRR1 | Mapped |
-| After the refusal the `LockState` quota is untouched (8 regular requests answered in one window) | §8 LRR2 | Mapped |
-| After the refusal the board sequence is unchanged | §8 LRR2 (published scan, view and `tracked_uids` compared) | Mapped |
-| After the refusal an `Auth` is still admitted on the reserve | §8 LRR2 and LRR3 | Mapped |
-| Repeated reserve `LockState` cannot keep the PAM reserve occupied | §8 LRR3 (16 attempts, then `Auth` answered) | Mapped |
-| New matrix rows, unused prefix, Verified | §1 (`LRR1`–`LRR3`; `LRR` absent from `origin/main`) | Mapped |
-| Dated clarification in `AI/DECISIONS.md`, no new ADR | §1, §11 | Mapped |
-| `Docs/IPC_PROTOCOL.md` §14 / `Docs/LOCKSCREEN_WIDGET.md` wording | §1, §11 | Mapped |
-| Walkthrough 217 closes the #403 follow-up | §1, §11 | Mapped |
-| Tests skipped as root like the siblings | §8 header | Mapped |
-| No change to `crates/pam` or the protocol wire | §1 | Mapped |
+| Budgets and `buffer_len` unchanged, LKA9 tests untouched | §3 (constants kept, `BUFFERS_PER_SURFACE` kept as an alias) | Covered |
+| `MAX_BUFFERS_PER_SURFACE = 2` replaces the eager count | §3 | Covered |
+| Pure allocation policy | §3 `needs_extra_buffer` | Covered |
+| Byte helper asserted in tests | §3 `slot_len`, `surface_shm_bytes`; §5 | Covered |
+| One buffer at configure time | §4 `configure_surface` | Covered |
+| Reuse a released buffer; second buffer only when all are busy; first use is `paint_full` | §4 `draw_all` 1–2 | Covered |
+| Failed allocation = busy: `retry`, no stderr line, no state logged | §4 `draw_all` 3 | Covered |
+| Damage, commit, timer, retry, seat-less binding, exit codes, stderr unchanged | §4, §7 | Covered |
+| Module docs, `Docs/LOCKSCREEN_WIDGET.md`, ADR note, matrix, walkthrough | §4, §6 | Covered |
+| Owner hardware row | §6 LKA19 (pending) | Covered |
 
-## 2. Facts Verified Against Code
+## 2. Checks Against the Reference Documents
 
-| Fact cited by plan | Code location | Actual value | Match |
-|---|---|---|---|
-| Admission class chosen from `SO_PEERCRED` before any read | `crates/daemon/src/dispatcher.rs::handle_connection` (`get_peer_credentials`, `try_acquire`, then `try_acquire_auth_reserve`) | as cited | Yes |
-| Non-`Auth` refusal after classification, before `handle_request` | `dispatcher.rs::read_and_process` (`admission == AdmissionClass::AuthReserve && !matches!(.., RequestKind::Auth)` → `DaemonError::Protocol`) | as cited | Yes |
-| Reserve closed after one message | `handle_connection`: `if output.one_shot \|\| admission == AdmissionClass::AuthReserve` | as cited | Yes |
-| `AUTH_RESERVE_FIRST_REQUEST_TIMEOUT_MS` | `crates/daemon/src/limits.rs` | 200 | Yes |
-| `LOCK_STATE_MAX_REQUESTS_PER_SEC` / window | `crates/daemon/src/lock_state.rs` | 8 / `1_000_000_000` ns, sliding (`crates/policy/src/rate_limit.rs::check_and_record`) | Yes |
-| Quota is recorded only inside `handle_lock_state_request` | `dispatcher.rs::handle_lock_state_request` (`lock_state_limiter.check_and_record`) | as cited | Yes |
-| Default dispatcher clock is real | `ConnectionDispatcher::new`: `clock_fn: current_monotonic_nanos` | as cited (the quota is live in `two_held`) | Yes |
-| `DEFAULT_MAX_REQUESTS_PER_CONNECTION` | `limits.rs` | 1024 | Yes |
-| Board API is public | `lock_state.rs`: `begin_scan`, `ScanGuard::finish`, `view`, `tracked_uids`; `dispatcher.rs::lock_state_board` | public | Yes |
-| ADR 2026-10-13 item (5) "the auth-reserved connection still refuses it" | `AI/DECISIONS.md`, entry of 2026-10-13 | present | Yes |
-| ADR 2026-10-15 item (3) accepted residual | `AI/DECISIONS.md`, entry of 2026-10-15 | present | Yes |
-| Existing reserve test covers Status, PreviewFrame, PasswordFailed only | `peer_limits_tests.rs::auth_reserve::test_rsh_reserve_closes_non_auth_without_payload` | as cited | Yes |
+- **AI/ARCHITECTURE.md**: `crates/lock-widget` is a user-level swaylock-plugin layer-shell program (ADR
+  2026-10-15); nothing in PAM, the daemon or the IPC changes. No Tokio, no seat. Pass.
+- **AI/DECISIONS.md**: ADR 2026-10-15 item (5) (no new crate) holds: `SlotPool` and `Shm` are already used.
+  Item (6) "two buffers per surface" changes in allocation timing only; the spec records an amending ADR
+  note rather than silently diverging. The pixel budgets of item (6) are unchanged. Pass.
+- **AI/BACKLOG.md**: no backlog id (GitHub-only branch, like `feat/lockscreen-adapters`); no backlog edit.
+- **AI/VERIFICATION_MATRIX.md**: LKA18/LKA19 are unused on origin/main. LKA9 evidence is untouched. The new
+  evidence names `test_lka18_*`, which `matrix_citations` resolves once the tests exist.
+- **Code**: verified in smithay-client-toolkit 0.20.0 that (a) `SlotPool::new_slot` rounds slots to 64 bytes and
+  `alloc` grows to at least twice the pool when a slot does not fit, hence the exact `slot_len` pool size; (b)
+  `RawPool::resize` records the new length before `set_len` and the remap, so a failed growth corrupts the
+  pool, hence one exactly-sized pool per buffer instead of growing (a deviation from the issue's "the
+  SlotPool grows" wording, with identical memory and behaviour, justified in spec §4).
 
-## 3. Pillar Analysis
+## 3. Risks
 
-### Pillar 1 — Architecture & threat model
-- Failure scenario considered: a widget poller at the regular cap repeatedly lands on the reserve and keeps it busy while PAM needs it.
-- Result: PASS. The reserve is released after one classified frame (or 200 ms); LRR3 pins that an `Auth` is still answered after repeated attempts. The accept-time alternative is out of scope (it needs an S-3 design change and owner approval, spec §3) and is not invented here.
+| Risk | Mitigation | Verdict |
+|---|---|---|
+| Removing `BUFFERS_PER_SURFACE` breaks `test_lka9_memory_bounds` (immutable contract) | Kept as an alias equal to `MAX_BUFFERS_PER_SURFACE` | Resolved |
+| The Wayland loop has no CI compositor | Policy and sizes are pure and unit-tested; LKA19 owner hardware row | Accepted (pending row) |
+| A compositor that never releases | At most 2 buffers (policy), retry timer as before | Unchanged worst case |
+| Static LKA12 scans (no `unwrap`, no print macro, no seat) | Constraint list for the developer | Covered |
 
-### Pillar 2 — PAM deadline & concurrency
-- Failure scenario considered: the PR touches `crates/pam` or the reserve window.
-- Result: PASS. No production change; PAM untouched.
-
-### Pillar 3 — Panic safety & fail-closed
-- Failure scenario considered: the refusal path answers something (a `Response` or `LockStateResponse`) instead of EOF.
-- Result: PASS. `closed_promptly` panics on any payload byte.
-
-### Pillar 4 — Dependencies
-- Result: PASS. No dependency change.
-
-### Pillar 5 — Data confidentiality
-- Failure scenario considered: the reserve answers `LockState` and leaks the board state over the reserve.
-- Result: PASS. LRR1 asserts no payload; LRR2 asserts the board is not touched.
-
-### Pillar 6 — Test integrity
-- Failure scenario considered: the new tests pass even if the guard is removed (vacuous).
-- Result: PASS with a required procedure: the tests pass on `main` by construction, so their power is shown by temporary mutations (guard removed; guard that records the `LockState` quota before refusing). Each mutation must fail at least one new test. LRR2's quota assertion is made non-vacuous by checking, when the requests fit inside the window, that the request beyond the quota is `RateLimited` (the quota is live in this harness). No existing test is edited.
-
-## 4. Findings
-
-- **[MINOR]** The quota-is-live check (request beyond the quota refused) depends on wall-clock time on a starved host; it must be conditional on the elapsed time being inside the window, never a flaky hard assertion. — Adopted in the test design.
-
-## 5. Verdict
 VALIDATION_VERDICT: APPROVED

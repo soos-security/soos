@@ -1,96 +1,128 @@
 # Candid Review Report
 
 - **Date**: 2026-10-17
-- **Target Branch**: `test/daemon-lockstate-reserve`
-- **Base (merge-base)**: `9e82795`
-- **Reviewed-Diff-Fingerprint**: `9780caa7204a16bba771254fc48ba242a3980a94b0079de36cf0fbafddef2d31`
-- **Audited Files**: `AI/DECISIONS.md`, `AI/VERIFICATION_MATRIX.md`, `AI/architect_spec_lockstate_reserve_refusal.md`, `AI/walkthroughs/217_lockstate_reserve_refusal.md`, `Docs/IPC_PROTOCOL.md`, `Docs/LOCKSCREEN_WIDGET.md`, `crates/daemon/tests/peer_limits_tests.rs`
+- **Target Branch**: `fix/lock-widget-memory`
+- **Base (merge-base)**: `6eb0746` (rebased from `9e82795`; `origin/main` gained only #411)
+- **Reviewed-Diff-Fingerprint**: `f2b3b47150c328630d51ebd61599c1ab0d0fa6660f3f55f2323b99713229f01e`
+- **Audited Files**: `AI/DECISIONS.md`, `AI/VERIFICATION_MATRIX.md`, `AI/architect_spec_lock_widget_memory.md`,
+  `AI/auditor_constraints_lock_widget_memory.md`, `AI/tester_contract_lock_widget_memory.md`,
+  `AI/walkthroughs/218_lock_widget_memory.md`, `Docs/LOCKSCREEN_WIDGET.md`, `crates/lock-widget/src/layout.rs`,
+  `crates/lock-widget/src/wayland.rs`, `crates/lock-widget/tests/lock_widget_buffer_tests.rs`
 
 ## 1. Executive Summary
 
-The change (GitHub #410, PR #403 follow-up) is test and documentation only: no production code is
-touched. It adds a nested module `auth_reserve::lock_state_on_reserve` with three socket tests
-(LRR1-LRR3) pinning that a `LockState` request arriving on the auth-reserved connection is refused
-at first-frame classification, without payload, without consuming the per-UID `LockState` quota,
-without reading or mutating the lock-state board, and that the reserve permit is released so a
-following `Auth` is still served. The documentation and the ADR clarification entry describe
-exactly what `ConnectionDispatcher::read_and_process` already does (`crates/daemon/src/dispatcher.rs`
-lines 632-643: the non-`Auth` guard runs after `decode_client_message` and before `handle_request`,
-hence before `handle_lock_state_request` and its `lock_state_limiter.check_and_record`). No
-defect found.
+GitHub #412: `soos-lock-widget` now allocates one shared-memory buffer per surface at configure time and a
+second one only when every allocated buffer is still held by the compositor (at most
+`MAX_BUFFERS_PER_SURFACE` = 2). Each buffer lives in its own `SlotPool` of exactly `slot_len` bytes
+(`buffer_len` rounded up to 64). The change is confined to one user-level, seat-less, `forbid(unsafe_code)`
+crate with no PAM, IPC or daemon impact. No defect of MAJOR or CRITICAL severity was found; no pre-existing
+test was touched.
 
-## 2. Test Changes (mechanical listing from step 3)
+This report re-reviews the branch after its rebase onto `origin/main` `6eb0746` (#411: daemon tests LRR1-LRR3
+pinning the `LockState` refusal on the auth-reserved connection, their DECISIONS clarification, matrix rows and
+walkthrough 217). The previous report (fingerprint `52c4e90d…`, base `9e82795`) was APPROVED; its findings are
+carried forward below.
 
-- Test files touched: `crates/daemon/tests/peer_limits_tests.rs` only (192 added lines, 0 removed).
-- Removed or changed `assert`/`#[test]`/`#[tokio::test]`/`proptest!`/`#[should_panic]` lines:
-  **none** (the `^-` grep on the frozen patch is empty; `git diff $(git merge-base origin/main HEAD) HEAD -- '*tests*' 'tests/'`
-  contains no removed content line).
-- New escape hatches (`#[ignore]`, `#[cfg(any())]`, `should_panic`, tolerance/epsilon): **none**.
-- Inline `mod tests` changes: none. One new nested test module `lock_state_on_reserve` inside the
-  existing `auth_reserve` module reuses the existing helpers (`two_held`, `permits_back`,
-  `closed_promptly`, `exchange`, `auth_request`, `auth_response`) without modifying them.
-- No pre-existing assertion was removed or changed.
+### Rebase verification
+
+- `git range-diff 9e82795..6c6e86d 6eb0746..HEAD`: the fix commit and the review commit map one-to-one; the only
+  differences are the `AI/DECISIONS.md` context lines shifted by main's #411 entry and the regenerated
+  `AI/candid_review_report.md` / `AI/plan_evaluator_report.md` (whose diff base changed with main).
+- Per-file comparison of the added/removed lines against the old and the new merge base: identical for
+  `AI/VERIFICATION_MATRIX.md`, `AI/architect_spec_lock_widget_memory.md`,
+  `AI/auditor_constraints_lock_widget_memory.md`, `AI/tester_contract_lock_widget_memory.md`,
+  `AI/walkthroughs/218_lock_widget_memory.md`, `Docs/LOCKSCREEN_WIDGET.md`, `crates/lock-widget/src/layout.rs`,
+  `crates/lock-widget/src/wayland.rs` and `crates/lock-widget/tests/lock_widget_buffer_tests.rs`. The code under
+  review is byte-identical to the previously approved diff.
+- `AI/DECISIONS.md`: the changed lines (`^[-+]*` hunks) hash identically before and after the rebase
+  (`f81040ef…`), and main's original #401 line is unchanged between `9e82795` and `6eb0746` (`8c8d9bf4…`), so
+  the amendment applies to the same text. The file holds exactly one #401 entry (line 144, carrying the
+  "*(amended 2026-10-17 by ADR "Lazy Second Shared-Memory Buffer of soos-lock-widget" …)*" note), main's
+  "Clarification — Where `LockState` Is Refused on the Auth-Reserved Connection" entry (line 145, untouched) and
+  this branch's ADR (line 146), one occurrence each. The post-rebase amend `47dea16` → `6982101` only removed the
+  stale duplicate copy of the #401 entry.
+- Main's #411 changes are absent from the frozen patch (they are part of the base), so no daemon, protocol or
+  PAM file is in this diff; #411 touches only daemon tests and docs and does not interact with the widget.
+
+## 2. Test Changes
+
+Mechanical listing from `target/candid_diff.patch`:
+
+- Test files touched: only `crates/lock-widget/tests/lock_widget_buffer_tests.rs` (new file, 160 added lines).
+- Removed or changed `assert`/`#[test]`/`proptest!`/`should_panic` lines: **none** (grep empty).
+- New escape hatches (`#[ignore]`, `cfg(any())`, `should_panic`, tolerance/epsilon): **none**.
+- Inline `mod tests` changes: **none**.
+- `git diff $(git merge-base origin/main HEAD) HEAD -- '*tests*' 'tests/'`: one file, 160 insertions, 0
+  deletions.
+- `test_lka9_memory_bounds` (`lock_widget_render_tests.rs:74`, `assert_eq!(BUFFERS_PER_SURFACE, 2)`) is
+  unchanged; production keeps `BUFFERS_PER_SURFACE` as an alias of `MAX_BUFFERS_PER_SURFACE` so the contract
+  still holds (and passes).
 
 ## 3. Deep Reasoning Audit
 
 ### Logic & Architecture
-- Checked that the third connection really lands on the reserve: `two_held` holds two served
-  regular connections (6 free permits of 8) and the per-UID cap is 2, so the next connection is
-  `AdmissionClass::AuthReserve` (same precondition as the existing `test_rsh_*` siblings). PASS.
-- Checked the claimed ordering against the source: the guard at `dispatcher.rs:634` precedes
-  `handle_request`, and the quota check is inside `handle_lock_state_request` (`dispatcher.rs:1209`).
-  The docs' statement "not at accept, at first-frame classification" matches `handle_connection`
-  choosing the admission class from `SO_PEERCRED` before any read. PASS.
-- Constants: `LOCK_STATE_MAX_REQUESTS_PER_SEC = 8` is imported from the source of truth; the
-  window `Duration` is a mirrored literal whose source is named in its doc comment. Nonce
-  arithmetic stays below 0xFF (maximum 0x6F and 0xCF), no `u8` overflow. PASS.
-- Scope: matches #410 (tests plus clarification docs), no scope creep. PASS.
+- Verified against the locked toolkit (smithay-client-toolkit 0.20.0, the version the workspace declares):
+  `SlotPool::new_slot` rounds to `(len + 63) & !63`; `alloc` grows to `max(rv + size, 2 x len)` when the slot
+  does not fit; `RawPool::resize` sets `self.len` before `set_len`. So a pool of exactly `slot_len` bytes takes
+  its single slot without growth, and the code never calls `resize`. The spec claims hold. PASS.
+- `Buffer::canvas` returns `None` while `active_buffers != 0`, so `is_free` matches "not held". PASS.
+- Scenario: compositor never releases. Frame 1 uses buffer 0; frame 2 finds none free and
+  `needs_extra_buffer(1, false)` allocates buffer 1; frame 3 finds none free, `needs_extra_buffer(2, false)` is
+  false, `retry = true`. Bounded at two. PASS.
+- Scenario: extra allocation fails. `free` stays `None`, so `retry = true`, no push, no stderr. Retried on every
+  33 ms tick by the existing timer (bounded rate). PASS.
+- Scenario: first paint of a new buffer. `painted: false` leads to `paint_full` with full damage; the
+  partial-damage path only runs on a buffer previously painted fully, so no stale pixels. PASS.
+- Scenario: reconfigure to a new size while a buffer is held. `buffers.clear()` drops `Buffer` before
+  `SlotPool` (field order) as before; a same-size reconfigure keeps the buffers (unchanged early return). PASS.
+- `layout.width/height` equal the configured `width/height` (`Layout::for_surface` stores them), so the extra
+  buffer has the same size as the first. PASS.
+- Pixel budgets, `buffer_len`, damage, commit, timer and exit behaviour unchanged. PASS.
 
 ### PAM Concurrency & Deadlines
-- `crates/pam` is not touched. Every socket wait in the new tests is bounded (`closed_promptly`
-  uses `CLOSE_DEADLINE`, `permits_back` a 2 s deadline). PASS.
+- No file in `crates/pam` is touched; the widget is a separate user-level program. N/A, PASS.
 
 ### Panic Safety & Fail-Closed
-- No production code changed. LRR3 additionally asserts `Verdict::Unavailable` for the reserve
-  `Auth` with no pipeline (fail-closed, never `Allow`). PASS.
+- No `unwrap`/`expect`/panic macro/indexing added in production; `get_mut`, `checked_sub`,
+  `checked_next_multiple_of`, `checked_mul` and `try_from` are used. Every allocation failure maps to `None`,
+  i.e. "surface not drawn" or "busy". No authentication decision exists in this crate. PASS.
 
 ### Test Integrity & Anti-Weakening
-- Discrimination reasoning: if the guard let `LockState` through on the reserve, the daemon would
-  answer a `LockStateResponse` and `closed_promptly` panics on the payload (LRR1-LRR3 fail). If
-  the guard ran after the quota check, the reserve request would consume a token and the 8th
-  regular request in LRR2 (or the quota after 16 attempts in LRR3) would be refused, failing
-  `assert_full_quota_available`. If the permit were not released, `permits_back` times out.
-- The "beyond quota" check is conditional on the 9 requests fitting in one window; the quota is
-  thus proven live on normal hosts, and on a very slow host the remaining assertions still hold.
-  Acceptable and documented in the helper. PASS.
-- The tests skip as root like their siblings; verified the suite runs as UID 1000 and the sibling
-  `test_rsh_reserve_idle_connection_closed_within_window` takes 0.20 s, so the non-root path
-  executes.
+- See section 2. The new tests fail against an eager policy (`needs_extra_buffer` always true breaks
+  `no_extra_buffer_while_one_is_free` and the prompt-release replay) and against a never-allocating policy
+  (holding-compositor replay). The replay mirrors the production selection loop; the Wayland loop itself has no
+  CI compositor, recorded as owner hardware row LKA19 (pending). PASS.
 
 ### Memory, Bounds & Secrets
-- Test reads allocate `4 + len` from a daemon-produced frame header in a local test harness;
-  acceptable for tests. No secrets, frames or embeddings involved. PASS.
+- Shared memory is bounded by `MAX_BUFFERS_PER_SURFACE x slot_len` per surface, and the former latent pool
+  doubling on unaligned sizes is removed. No state, frame or secret is logged; no new stderr line. PASS.
 
 ### Supply Chain & Automation
-- No `Cargo.*`, `deny.toml`, `.github/`, `scripts/` or `.githooks/` change. N/A.
+- `Cargo.lock` and `crates/lock-widget/Cargo.toml` unchanged (`git diff --exit-code` clean). No scripts, hooks
+  or workflows touched. PASS.
 
 ### English-Only Policy
-- All added code, comments, docs, spec and walkthrough text is in English. PASS.
+- All code, comments, docs, ADR, matrix rows and the commit message are in English. PASS.
 
-### Commands re-run by the reviewer
-- `cargo test -p soos-daemon --test peer_limits_tests -- --test-threads=3`: 31 passed, 0 failed
-  (LRR1-LRR3 included; the LRR subset was re-run three more times, all green).
-- `cargo clippy -p soos-daemon --all-targets -- -D warnings`: clean.
-- `cargo fmt -p soos-daemon -- --check`: clean.
-- All with `LIBONNXRUNTIME_NO_PKG_CONFIG=1 CARGO_TARGET_DIR=~/.cache/soos-targets/daemon-lockstate-reserve CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_BUILD_JOBS=3`.
+### Commands re-run after the rebase (mandated environment, `--test-threads=4`)
+- `cargo test --locked -p soos-lock-widget -p soos-invariants -- --test-threads=4`: exit 0, 752 passed, 0
+  failed, 0 ignored (invariants 707; lock-widget buffer 7, CLI 5, render 16, scene 17).
+
+### Commands run before the rebase (scoped, mandated environment, `--test-threads=3`)
+- `cargo test -p soos-lock-widget --locked`: all suites green (7 new LKA18 tests plus the LKA8/LKA9/LKA12/LKA13
+  suites).
+- `cargo clippy -p soos-lock-widget --locked --all-targets -- -D warnings`: clean.
+- `cargo fmt -p soos-lock-widget -- --check`: clean.
+- `cargo test -p soos-invariants --locked`: 707 passed.
 
 ## 4. Detailed Findings & Action Items
 
-- **[SUGGESTION]** `crates/daemon/tests/peer_limits_tests.rs` (`QUOTA_WINDOW`) — the 1 s window is
-  a literal mirroring `LOCK_STATE_RATE_WINDOW_NS`; `Duration::from_nanos(LOCK_STATE_RATE_WINDOW_NS)`
-  would keep a single source of truth. Optional.
-
-No CRITICAL, MAJOR or MINOR findings.
+- **[MINOR]** `crates/lock-widget/src/wayland.rs` (`draw_all`) — on a host where the second `SlotPool::new`
+  keeps failing while the compositor holds the first buffer, a memfd creation is attempted on every 33 ms retry
+  tick. It is bounded by the existing timer and leaves no lasting side effect; no change required.
+- **[SUGGESTION]** `AI/walkthroughs/218_lock_widget_memory.md` — after the rebase, 217 (#411) is present and
+  numbers 213, 215 and 216 are still absent (presumably reserved by parallel branches); the invariants suite
+  accepts the gap.
 
 ## 5. Final Verdict
 
