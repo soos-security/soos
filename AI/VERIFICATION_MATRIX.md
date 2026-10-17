@@ -2535,6 +2535,24 @@ Reproducible, synthetic README screenshots (ADR 2026-10-13 "README Assets Are Ge
 
 ---
 
+## Component: `readme-redesign` (GitHub #408, PR 2 of #356, `chore/readme-redesign`, walkthrough 216; development branch, not merged until the owner approves)
+
+README restructured as a product landing page (ADR 2026-10-17 "README Restructure as a Product Landing Page", spec `AI/architect_spec_readme_redesign.md`, auditor constraints `AI/auditor_constraints_readme_redesign.md` AC-1..AC-9). Owner questions Q1, Q4–Q8 of #356 are assumed — owner to confirm. The existing README contracts (installer, onboarding #207, setup, upgrade, licence, GDM follow-ups, RAC10) pass unchanged.
+
+| # | Criterion | Test Method | Status |
+|---|---|---|---|
+| RDM1 | Every relative Markdown or HTML link of `README.md` (images included) resolves to an existing file or directory inside the repository; anchors, queries, external URLs, fenced and inline code ignored | `soos-invariants::readme_contract::test_rdm_readme_relative_links_resolve` | ✅ Verified |
+| RDM2 | The link parser finds inline links, nested badges, reference definitions and HTML `href`/`src`, ignores code, and the resolver refuses missing files, absolute paths, empty paths and paths leaving the root | `soos-invariants::readme_contract::test_rdm_link_parser_and_resolver` | ✅ Verified |
+| RDM3 | At most 6 badges; no release badge while `git tag --list` is empty and no `CHANGELOG.md` exists; every workflow badge names an existing `.github/workflows/` file; the Rust badge shows the `rust-toolchain.toml` channel | `soos-invariants::readme_contract::test_rdm_readme_badges_are_bounded_and_real` | ✅ Verified |
+| RDM4 | Badge, workflow-name, release-badge and whole-word helpers on synthetic input | `soos-invariants::readme_contract::test_rdm_badge_and_word_helpers` | ✅ Verified |
+| RDM5 | `README.md` never uses "enterprise-grade", "military-grade", "unbreakable" or "certified" as a whole word (case-insensitive) | `soos-invariants::readme_contract::test_rdm_readme_has_no_banned_words` | ✅ Verified |
+| RDM6 | Level-2 sections Why, Features, Screenshots, Quick Start, How it works, Security, Comparison, FAQ, Roadmap, License appear in this order; How it works holds a ```` ```mermaid ```` block | `soos-invariants::readme_contract::test_rdm_readme_sections_in_order_with_mermaid` | ✅ Verified |
+| RDM7 | The security section names `PAM_IGNORE`, `/etc/soos/disabled` and `#212` and links `AI/ARCHITECTURE.md` and `Docs/REMOTE_COMPANION.md` | `soos-invariants::readme_contract::test_rdm_security_section_states_fallback_kill_switch_and_pad_caveat` | ✅ Verified |
+| RDM8 | The comparison section links upstream Howdy (`github.com/boltgolt/howdy`) and Microsoft (`learn.microsoft.com`) documentation | `soos-invariants::readme_contract::test_rdm_comparison_cites_upstream_sources` | ✅ Verified |
+| RDM9 | The README renders correctly on GitHub in the light and dark themes and at mobile width (badges, hero image, tables, Mermaid diagram, `<details>` blocks) | Owner hand check on the pull request | ⬜ Pending (owner checks the rendered pull request) |
+
+---
+
 ## Component: `ir-emitter-control` (GitHub #378, PR 1 of #353, `feat/ir-antispoofing-mock`, walkthrough 206; development branch, not merged until the owner approves)
 
 UVC extension-unit IR emitter control, `[camera.ir_emitter]`, strobe classification and `soos-admin camera ir-emitter probe|configure` (ADR 2026-10-13 "UVC Extension-Unit IR Emitter Control and Strobe Classification", spec `AI/architect_spec_ir_emitter_control.md`, tester contract `AI/tester_contract_ir_emitter_control.md`, auditor constraints `AI/auditor_constraints_ir_emitter_control.md`, `Docs/CAMERA_V4L_CRATE.md`, `Docs/DAEMON.md`). GitHub-only issue: no backlog id, branch not registered in `scripts/sync_issue.py`. Owner decision 2026-10-12: the owner's PC has an RGB camera only; the IR hardware rows (IRA25–IRA27) are run by another project member on an IR PC.

@@ -37,6 +37,18 @@ Welcome to the technical documentation for **soos** (local zero-trust facial ver
 
 ---
 
+## Project README
+
+The root [`README.md`](../README.md) is the product landing page: hero, Why soos, features, screenshots,
+Quick Start, upgrade, How it works (Mermaid diagram), security model, comparison, FAQ, roadmap,
+documentation, contributing and license. Its structure and links are checked by
+`soos-invariants::readme_contract` (ADR 2026-10-17, rows RDM1–RDM8), its images by
+`readme_assets_contract` ([README Assets](README_ASSETS.md)). Screenshots are regenerated from synthetic
+data with [`scripts/capture_readme_assets.sh`](../scripts/capture_readme_assets.sh), never edited by hand;
+editing rules are in [Development Workflow](DEVELOPMENT_WORKFLOW.md) §10.
+
+---
+
 ## Architectural Reference Documents
 
 For core security requirements, design decisions, and system constraints:
