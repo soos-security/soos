@@ -1064,9 +1064,11 @@ lists the 10 newest intervals with start, end, duration and reason.
 
 A native Android app (ADR 2026-10-13 "Native Android App for `soos-remote` (Kotlin and Jetpack
 Compose)", GitHub #382, first PR of #357) is an alternative to the web app: each user chooses.
-This first version shows the PC status, locks the PC and signs in over Funnel with a passkey.
-Unlock, the live camera view, push notifications and alerts stay in the web app for now. The
-app is sideloaded only (no store) and its application id is `org.soos.remote` (owner to confirm).
+This first version shows the PC status, locks the PC and signs in over Funnel with a passkey;
+the second (GitHub #404, PR 2 of #357) adds the failed-password alerts with acknowledgement.
+Unlock, the live camera view, push notifications, the battery level and the offline history stay
+in the web app for now. The app is sideloaded only (no store) and its application id is
+`org.soos.remote` (owner to confirm).
 
 **What the app does.**
 
@@ -1075,6 +1077,20 @@ app is sideloaded only (no store) and its application id is `org.soos.remote` (o
 - **Status and lock.** Over the tailnet (Tailscale app on, a login in `allowed_logins`), the app
   reads `GET /api/status` and calls `POST /api/lock` like the web page. Each request carries
   `Origin: https://<rp_id>` and the route's `X-Soos-Action`.
+- **Failed-password alerts** (section 2c; same server, no server change). While signed in (a
+  tailnet identity or the Funnel web session), the home screen shows a *Password alerts* card.
+  The app reads `GET /api/alerts` when the screen opens, on *Refresh* and on pull to refresh
+  (swipe down). It shows one fixed sentence per state (`disabled`, `starting`, `active`,
+  `unavailable` with a fixed reason), the unacknowledged counts, the last attempt and the history
+  (time, source, account class, count). Times are rendered in the phone's time zone and locale.
+  *Acknowledge* sends `POST /api/alerts/ack` with no body, `X-Soos-Action: alerts-ack`, exactly one
+  `X-Soos-Alerts-Epoch` and one `X-Soos-Alerts-Through` header naming the displayed view, and
+  `Origin`, like the web page. The `200` answer is the fresh view. On `409 stale_view` (the service
+  restarted) the app shows the fresh view and asks you to acknowledge again; it never acknowledges
+  a view you have not seen. The parser is strict and bounded: an unknown state or class, a wrong
+  type, more than 32 entries or a body over 16 KiB is treated as unreadable ("Alerts could not be
+  loaded"). Every text on the card is a fixed string of the app: no server text, status number or
+  exception text is ever displayed.
 - **Sign-in over Funnel.** The app uses Android Credential Manager (Android 14 or later, no
   Google Play services library in the app). It runs the existing login ceremony: login options,
   then the passkey prompt with user verification, then login verify. The server still uses the
@@ -1170,6 +1186,18 @@ x86_64, so platform-specific entries for other systems may be missing.
    prompt.
 4. Over Funnel, status and lock work after sign-in.
 5. The web app and the iPhone home-screen app still work.
+
+**Owner hardware check of the alerts (matrix ANA21).** With `password_alerts = true`, type a wrong
+password at the lock screen or in `sudo`, then:
+
+1. Over the tailnet, open the app: the *Password alerts* card shows the count, the last attempt
+   and the history, with the times of your phone's time zone. Pull down to refresh after a new
+   attempt.
+2. Tap *Acknowledge*: the card says "Acknowledged." and the entries disappear, in the app and in
+   the web page.
+3. Repeat over Funnel after a passkey sign-in.
+4. Restart `soos-remote` between reading and acknowledging: the app reports the stale view, shows
+   the fresh one, and the next *Acknowledge* works.
 
 ## 3. Requirements on the desktop
 

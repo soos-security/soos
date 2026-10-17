@@ -6,6 +6,8 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import org.soos.remote.net.AlertRecord
+import org.soos.remote.net.AlertsView
 import org.soos.remote.net.ApiResult
 import org.soos.remote.net.HttpRequest
 import org.soos.remote.net.HttpResponse
@@ -93,5 +95,143 @@ class SoosApiTest {
         val api = SoosApi(origin, Fake(ArrayDeque()))
         assertEquals(ApiResult.Unreachable, api.authState())
         assertEquals(ApiResult.Unreachable, api.lock())
+    }
+
+    // --- failed-password alerts (GitHub #404, matrix ANA19) ---------------------------------
+
+    private val epoch = "0123456789abcdef"
+    private val alertsJson =
+        """{"state":"active","reason":null,"epoch":"$epoch","lock_screen":"monitored",""" +
+            """"unacknowledged_wrong_password":2,"unacknowledged_locked_out":0,""" +
+            """"last_unix_ms":1700000000000,"last_source":"sudo","through":9,"history":[""" +
+            """{"id":8,"first_unix_ms":1699999999000,"last_unix_ms":1700000000000,""" +
+            """"source":"sudo","account":"root","kind":"wrong_password","count":2}]}"""
+    private val alertsView = AlertsView(
+        "active", null, epoch, "monitored", 2, 0, 1700000000000, "sudo", 9,
+        listOf(AlertRecord(8, 1699999999000, 1700000000000, "sudo", "root", "wrong_password", 2)),
+    )
+    private val clearedJson =
+        """{"state":"active","reason":null,"epoch":"$epoch","lock_screen":"monitored",""" +
+            """"unacknowledged_wrong_password":0,"unacknowledged_locked_out":0,""" +
+            """"last_unix_ms":null,"last_source":null,"through":9,"history":[]}"""
+
+    private fun HttpRequest.headerCount(name: String): Int =
+        headers.count { it.first.equals(name, ignoreCase = true) }
+
+    @Test
+    fun alertsIsAPlainGet() {
+        val fake = Fake(ArrayDeque(listOf(answer(200, alertsJson))))
+        val api = SoosApi(origin, fake)
+        assertEquals(ApiResult.Ok(alertsView), api.alerts())
+        val request = fake.requests.single()
+        assertEquals("GET", request.method)
+        assertEquals("$origin/api/alerts", request.url)
+        assertEquals("application/json", request.header("Accept"))
+        assertNull(request.header("Origin"))
+        assertNull(request.header("X-Soos-Action"))
+        assertNull(request.header("X-Soos-Alerts-Epoch"))
+        assertNull(request.header("X-Soos-Alerts-Through"))
+        assertNull(request.header("Cookie"))
+        assertNull(request.body)
+    }
+
+    @Test
+    fun ackCarriesExactlyTheSnapshotHeadersAndNoBody() {
+        val fake = Fake(ArrayDeque(listOf(answer(200, clearedJson))))
+        val api = SoosApi(origin, fake)
+        val cleared = api.ackAlerts(epoch, 9)
+        assertEquals(
+            ApiResult.Ok(AlertsView("active", null, epoch, "monitored", 0, 0, null, null, 9, emptyList())),
+            cleared,
+        )
+        val request = fake.requests.single()
+        assertEquals("POST", request.method)
+        assertEquals("$origin/api/alerts/ack", request.url)
+        assertNull("the acknowledgement has no body", request.body)
+        assertNull(request.header("Content-Type"))
+        assertEquals(1, request.headerCount("Origin"))
+        assertEquals(origin, request.header("Origin"))
+        assertEquals(1, request.headerCount("X-Soos-Action"))
+        assertEquals("alerts-ack", request.header("X-Soos-Action"))
+        assertEquals(SoosApi.ACTION_ALERTS_ACK, "alerts-ack")
+        assertEquals(1, request.headerCount("X-Soos-Alerts-Epoch"))
+        assertEquals(epoch, request.header("X-Soos-Alerts-Epoch"))
+        assertEquals(1, request.headerCount("X-Soos-Alerts-Through"))
+        assertEquals("9", request.header("X-Soos-Alerts-Through"))
+        assertEquals("application/json", request.header("Accept"))
+        assertNull(request.header("Cookie"))
+        assertEquals(
+            listOf("Accept", "Origin", "X-Soos-Action", "X-Soos-Alerts-Epoch", "X-Soos-Alerts-Through"),
+            request.headers.map { it.first },
+        )
+    }
+
+    @Test
+    fun alertsAndAckSendTheSessionCookie() {
+        val fake = Fake(
+            ArrayDeque(
+                listOf(
+                    answer(200, """{"result":"logged_in"}""", listOf("__Host-soos_session=$token; Path=/; Secure")),
+                    answer(200, alertsJson),
+                    answer(200, clearedJson),
+                ),
+            ),
+        )
+        val api = SoosApi(origin, fake)
+        assertEquals(ApiResult.Ok("logged_in"), api.loginVerify("""{"id":"x"}"""))
+        assertEquals(ApiResult.Ok(alertsView), api.alerts())
+        assertEquals("__Host-soos_session=$token", fake.requests[1].header("Cookie"))
+        assertTrue(api.ackAlerts(epoch, 9) is ApiResult.Ok)
+        assertEquals("__Host-soos_session=$token", fake.requests[2].header("Cookie"))
+        assertEquals(1, fake.requests[2].headerCount("Cookie"))
+    }
+
+    @Test
+    fun ackRefusalsAreReportedWithTheirFixedToken() {
+        val fake = Fake(
+            ArrayDeque(
+                listOf(
+                    answer(409, """{"result":"stale_view"}"""),
+                    answer(429, """{"result":"rate_limited"}"""),
+                    answer(403, """{"result":"alerts_disabled"}"""),
+                    answer(200, """{"result":"acknowledged"}"""),
+                    answer(403, """{"result":"login_required"}"""),
+                ),
+            ),
+        )
+        val api = SoosApi(origin, fake)
+        assertEquals(ApiResult.Refused(409, "stale_view"), api.ackAlerts(epoch, 9))
+        assertEquals(ApiResult.Refused(429, "rate_limited"), api.ackAlerts(epoch, 9))
+        assertEquals(ApiResult.Refused(403, "alerts_disabled"), api.ackAlerts(epoch, 9))
+        assertEquals("a 200 without a view is unreadable", ApiResult.Unreachable, api.ackAlerts(epoch, 9))
+        assertEquals(ApiResult.Refused(403, "login_required"), api.alerts())
+        assertEquals(ApiResult.Unreachable, api.ackAlerts(epoch, 9))
+    }
+
+    @Test
+    fun ackWithAnInvalidSnapshotSendsNothing() {
+        val fake = Fake(ArrayDeque(listOf(answer(200, clearedJson))))
+        val api = SoosApi(origin, fake)
+        for (bad in listOf("", "0123456789ABCDEF", "0123456789abcde", "0123456789abcdef0", "0123456789abcdeg", "0123456789abcde\n")) {
+            assertEquals(ApiResult.Refused(400, "bad_request"), api.ackAlerts(bad, 9))
+        }
+        assertEquals(ApiResult.Refused(400, "bad_request"), api.ackAlerts(epoch, -1))
+        assertTrue("nothing reached the network", fake.requests.isEmpty())
+    }
+
+    @Test
+    fun alertsWithAMalformedBodyAreUnreachable() {
+        val fake = Fake(
+            ArrayDeque(
+                listOf(
+                    answer(200, """{"state":"exploded"}"""),
+                    answer(200, "<html>"),
+                ),
+            ),
+        )
+        val api = SoosApi(origin, fake)
+        assertEquals(ApiResult.Unreachable, api.alerts())
+        assertEquals(ApiResult.Unreachable, api.alerts())
+        assertEquals("network error", ApiResult.Unreachable, api.alerts())
     }
 }
