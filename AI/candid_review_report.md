@@ -1,149 +1,128 @@
 # Candid Review Report
 
 - **Date**: 2026-10-17
-- **Target Branch**: `feat/android-alerts`
-- **Base (merge-base)**: `6f89f05`
-- **Reviewed-Diff-Fingerprint**: `767f1b3040aa45841249deb8359ca9606bdca0b51b83efa5823fce3f9140dd23`
-- **Audited Files**: `AI/DECISIONS.md`, `AI/VERIFICATION_MATRIX.md`, `AI/architect_spec_android_alerts.md`,
-  `AI/auditor_constraints_android_alerts.md`, `AI/tester_contract_android_alerts.md`,
-  `AI/walkthroughs/219_android_alerts.md`, `Docs/REMOTE_COMPANION.md`,
-  `android/app/src/main/java/org/soos/remote/net/ApiJson.kt`,
-  `android/app/src/main/java/org/soos/remote/net/SoosApi.kt`,
-  `android/app/src/main/java/org/soos/remote/ui/SoosApp.kt`,
-  `android/app/src/main/res/values/strings.xml`,
-  `android/app/src/test/java/org/soos/remote/ApiJsonTest.kt`,
-  `android/app/src/test/java/org/soos/remote/SoosApiTest.kt`,
-  `tests/invariants/src/android_native_contract.rs`
+- **Target Branch**: `chore/readme-redesign` (PR #409, GitHub #408)
+- **Base (merge-base)**: `27d1e7c` (= `origin/main` after `git fetch origin`, includes #406, #407, #418, #419; `origin/main` is an ancestor of `HEAD`)
+- **Reviewed-Diff-Fingerprint**: `cdf548d17ec6a3864ff6fa04b56cd2354532c667c03d92adad82d373ab176bc7`
+- **Audited Files**: `AI/DECISIONS.md`, `AI/VERIFICATION_MATRIX.md`, `AI/architect_spec_readme_redesign.md`, `AI/auditor_constraints_readme_redesign.md`, `AI/walkthroughs/216_readme_redesign.md`, `Docs/DEVELOPMENT_WORKFLOW.md`, `Docs/README.md`, `Docs/REMOTE_COMPANION.md`, `README.md`, `tests/invariants/src/lib.rs`, `tests/invariants/src/readme_contract.rs`
 
 ## 1. Executive Summary
 
-The rebased branch adds the failed-password alerts list and acknowledgement to the native
-Kotlin/Compose app (GitHub #404, matrix ANA18-ANA21) on top of main, which already holds the
-process-wide `SharedApi`, the opt-in heartbeat (#419), the GNOME extension (#407) and the phone
-web-app tour (#418, §2k). The alerts use the single shared client
-(`SharedApi.forOrigin` at `SoosApp.kt:297`; the only other user is `HeartbeatJobService.kt:39`; no
-second `SoosApi` is constructed). `SoosApi.send` keeps main's `sent` snapshot and synchronized
-cookie logic unchanged; the branch only appends the snapshot headers. The parser is strict and
-bounded (16384 chars, 32 entries, `u32` counters, 16-hex epoch). Test files are add-only. The
-`soos-invariants` suite passes (759 passed, 0 failed). Two MINOR items and one SUGGESTION; no
-CRITICAL or MAJOR finding.
+Documentation-only change plus one new static invariant module. No production code, no
+`Cargo.*`, no workflow or script change. Every factual claim of the rewritten `README.md` and of
+the edited lines of `Docs/REMOTE_COMPANION.md`, `Docs/README.md`, `Docs/DEVELOPMENT_WORKFLOW.md`
+and `AI/DECISIONS.md` was checked against `origin/main` (`27d1e7c`). No claim was found false.
+The companion wording matches `scripts/setup.sh` (all seven keys written `true`, fixture
+`tests/fixtures/setup/remote.toml`), the code defaults and dependency checks of
+`crates/remote/src/config.rs` (exit 78 = `EXIT_CONFIG`), `scripts/install_remote.sh` (all keys
+commented `false`) and the `soos-gui` switches (`RemoteSwitch` in
+`crates/gui/src/feature_control.rs`, routed in `crates/gui/src/onboarding.rs`). Every listed
+feature is merged on `origin/main`. `cargo test --locked -p soos-invariants` passes: 771 passed,
+0 failed, the four new `test_rdm_companion_*` tests included. Only SUGGESTION-level items remain.
 
-## 2. Test Changes
+## 2. Test Changes (mechanical listing from step 3)
 
-Mechanical listing from `target/candid_diff.patch`:
-
-- Test files touched: `android/app/src/test/java/org/soos/remote/ApiJsonTest.kt` (+159),
-  `android/app/src/test/java/org/soos/remote/SoosApiTest.kt` (+140),
-  `tests/invariants/src/android_native_contract.rs` (additions only).
-- Removed or changed assertions (`^-` lines with `assert`/`#[test]`): **none**.
-  `git diff 6f89f05 -- android/app/src/test` contains 0 removed lines.
-- New escape hatches (`#[ignore]`, `should_panic`, tolerance): **none**.
-- Inline test modules changed: none.
-
-New tests: ApiJsonTest (5 tests, ANA18), SoosApiTest (6 tests, ANA19), `test_ana_s14_alerts_contract`
-and an add-only extension of `test_ana_s8_kotlin_hygiene` (ANA20). They would fail against
-plausible wrong implementations (missing or duplicated header, uppercase epoch accepted, 33
-entries accepted, 16385 chars accepted, a 2^32 counter accepted, a body sent on the ack).
+- Test files touched: `tests/invariants/src/lib.rs` (adds `mod readme_contract;` under
+  `#[cfg(all(test, unix))]`, nothing removed), `tests/invariants/src/readme_contract.rs` (new file).
+- Removed or changed assertions (`^-` with assert/#[test]/proptest/should_panic): **none**.
+- New escape hatches (`#[ignore]`, `#[cfg(any())]`, `should_panic`, tolerance/epsilon): **none**.
+- Inline `mod tests` changes: **none**.
+- No existing test on `origin/main` was edited. The old README sentence "(each can be turned off
+  later in soos-gui)" from #402 was replaced. No existing contract pinned it: the
+  setup/installer/onboarding/upgrade/licence README contracts all pass unchanged.
 
 ## 3. Deep Reasoning Audit
 
 ### Logic & Architecture
-
-- Shared client: searched for a second `SoosApi(` in production code: only the class declaration
-  and `ApiHolder` create one. PASS.
-- Session handling: `ackAlerts` goes through `send`, so the cookie is read once into `sent`, the
-  `Set-Cookie` update and the `login_required` drop run under `synchronized(this)` and only drop
-  the session when `session == sent`. A heartbeat request racing an ack cannot drop a freshly
-  stored session. PASS.
-- Header order and duplicates: `extra` is appended after `X-Soos-Action` and before
-  `Content-Type` (absent, body null) and `Cookie`; `ackCarriesExactlyTheSnapshotHeadersAndNoBody`
-  pins the exact list. PASS.
-- Local snapshot refusal: an invalid epoch (length, case, non-hex, newline) or a negative
-  `through` returns `Refused(400, "bad_request")` without touching the transport. PASS.
-- Never acknowledging an undisplayed view: the button closure captures the `view` of the current
-  composition; `acknowledge` sends that view's epoch/through; any non-`Ok` result triggers
-  `refresh()` so the user sees the fresh view before a new acknowledgement; the button is
-  disabled while `busy` (pull to refresh is also guarded by `!busy`). A `200` whose body is not a
-  view is `Unreachable`, never a silent success. PASS.
-- Compose structure: `HeartbeatCard` lives in `SettingsScreen` (main), `AlertsCard` in
-  `HomeScreen`; they are never composed together and share no state. `PullToRefreshBox`
-  (material3 1.3+, BOM 2025.10.01) wraps a `fillMaxSize().verticalScroll(...)` column, a valid
-  nesting. PASS.
-- Kotlin compile by reading: imports (`StringRes`, `rememberScrollState`, `verticalScroll`,
-  `ExperimentalMaterial3Api`, `PullToRefreshBox`, `stringResource`, `java.time.*`,
-  `AlertRecord`, `AlertsView`) are present and used; `when` over the sealed `ApiResult` is
-  exhaustive; `is ApiResult.Refused, ApiResult.Unreachable ->` is a legal mixed branch;
-  `records += ... ?: return null` on an `ArrayList` is valid; `java.time` is fine with
-  `minSdk = 34`. PASS.
-- FINDING (MINOR): `SoosApp.kt:377` `refresh()` after a refused acknowledgement reaches
-  `clearAlerts()` (`SoosApp.kt:357`) when the refusal was `login_required` (the session is now
-  dropped, `authenticated` false), so `R.string.alerts_ack_login_required` (`SoosApp.kt:530`) is
-  set and immediately cleared, never shown. Fail-safe (the sign-in button appears); only an
-  explanatory text is lost.
-- FINDING (MINOR): `ackFeedback` survives later successful refreshes (only `clearAlerts` and a
-  new click reset it), so "Acknowledged." can sit under a newer view with new pending attempts
-  after a pull to refresh. Cosmetic; it does not enable a blind acknowledgement.
+- Phone companion vs `scripts/setup.sh`: `COMPANION_KEYS` = `allow_funnel allow_unlock
+  password_alerts push_notifications offline_alerts camera_view camera_view_funnel`, all `true`
+  in the render fixture. README L37-40, L56, L96-100, L290-303 and FAQ L352-360 say setup turns
+  them on. PASS.
+- Code defaults: every key is `unwrap_or(false)` in `config.rs`, and `install_remote.sh` comments
+  them as `= false`. "A manual install and the code defaults leave all of them off" is correct. PASS.
+- Dependency list (README L299-302) vs `config.rs`: `CameraFunnelRequiresCameraView`,
+  `CameraFunnelRequiresFunnel`, `PushRequiresAlerts`, `OfflineRequiresPush`,
+  `AndroidRequiresFunnel`. "`offline_alerts` with `password_alerts`" is transitively correct
+  (offline needs push, push needs alerts). Exit 78 = `EXIT_CONFIG` (`crates/remote/src/lib.rs:139`). PASS.
+- soos-gui switches: `RemoteSwitch` = Unlock, Funnel, Push, CameraView, OfflineAlerts, with no
+  `password_alerts` switch. Funnel clears `camera_view_funnel`, and so does CameraView. "All but
+  the failed-password alerts" and "turning Funnel or the camera view off also sets
+  `camera_view_funnel` to false" are both correct. The **Features** header button exists
+  (`header.rs`, `app.rs:723`). PASS (see S-1 for an under-statement).
+- Passkey claims vs `Docs/REMOTE_COMPANION.md` §2b, §2f and `AI/ARCHITECTURE.md`: a Funnel
+  session needs a passkey sign-in, every unlock needs a fresh UV assertion "on every path", and
+  every camera view starts with a fresh UV assertion on the tailnet and over Funnel. On the
+  tailnet, status and lock need no passkey. PASS.
+- Native Android app (§2j "Native Android app", the second §2j heading, which predates this
+  branch): status, lock, Funnel passkey sign-in, failed-password alerts with acknowledgement
+  (#406), and offline alerts when turned on (#419). Unlock and the camera view stay in the web
+  app. PASS.
+- Phone tour §2k (#418) is listed as "a first-run feature tour in the web app". PASS.
+- Kill switch: `crates/pam/src/config.rs:120` (`flag_dir.join("disabled")`) and
+  `crates/daemon/src/presence/switch.rs` (`GLOBAL_DISABLE_FLAG`) both read it. PASS.
+- Lock-screen widget: swaylock-plugin, hyprlock and GNOME Shell 45 or later (#407, `LOCKSCREEN_WIDGET.md` L24-26), KDE later. PASS.
+- Merged-only rule: `gh pr list --state merged --limit 12` and `git log origin/main` contain
+  #402, #403, #406, #407, #413, #418 and #419. No unmerged feature is listed. PASS.
+- Other spot checks: the badge workflows `ci.yml`/`fuzz.yml` exist; the Rust 1.98.1 badge matches
+  `rust-toolchain.toml`; the evidence 7-day retention and daily cap; `sensor_preference`; the
+  uncalibrated IR PAD threshold (ADR 2026-09-30); the 2.7x single-scale PAD and #212; model
+  attestation stops the start (`models/README.md` L61); setup creates the `[preview]` section
+  only when `daemon.toml` is absent. PASS.
+- `Docs/REMOTE_COMPANION.md` heading renames (`(opt-in)` → `(off by default, on after
+  scripts/setup.sh)`): no repository link or test targets the old anchors. PASS.
+- `AI/DECISIONS.md`: exactly one appended line (`+` 1, `-` 0) and no duplicated or reverted line
+  compared with `origin/main`. PASS.
 
 ### PAM Concurrency & Deadlines
-
-No PAM, daemon or Rust production code changed. Network calls run on `Dispatchers.IO` through the
-unchanged `UrlConnectionTransport` (5 s connect/read timeouts from main). N/A / PASS.
+No change under `crates/pam` or `crates/daemon`. The README statements (`timeout_ms` default
+1000 ms, no Tokio, `PAM_IGNORE` fallback) match `AGENTS.md` and the ADR. PASS.
 
 ### Panic Safety & Fail-Closed
-
-`parseAlerts` catches its private `Malformed` and `JSONException`; `long()` rejects doubles,
-`BigInteger` and strings (`1.5`, `18446744073709551615`, `"3"` tested); `alertTime` catches
-`DateTimeException` for out-of-range instants. No `!!` added. Every malformed input yields
-`null` → `Unreachable` → "Alerts could not be loaded". PASS.
+No production code. `expect`/`unwrap_or` appear only in test code. The README never states a
+path to `PAM_SUCCESS` other than a fresh `Allow`. PASS.
 
 ### Test Integrity & Anti-Weakening
-
-Section 2 listing: zero removed or modified assertions in Kotlin or Rust tests. PASS.
-
-- FINDING (SUGGESTION): `tests/invariants/src/android_native_contract.rs:904` slices §2j up to
-  `"\n## 3."`, so the slice now also spans §2k (feature tour); a needle such as `pull` or
-  `time zone` could be satisfied by §2k text. Bounding the slice at the next `"\n## "` heading
-  would make the check exact. All needles are currently genuinely present in the §2j additions.
+- RDM10 returns early if the fixture sets no exposure key. RDM12 asserts the fixture yields
+  exactly the four keys, which closes that bypass. Tried: emptying the fixture makes RDM12 fail.
+  PASS.
+- RDM10 can fail against a plausible wrong README: re-inserting "opt-in unlock" in the Mermaid
+  node or "Remote unlock is off by default" is caught (helper cases in RDM11). PASS.
+- `section(&readme, "Security")` returns the first `## ` heading containing "security", which is
+  "Security model" (it precedes "Contributing and security"). PASS.
+- RDM12's `claims_independent_opt_out` is a phrase denylist, so a new wording such as "any key can
+  be set to false" would slip through. This is acceptable as a regression guard, and the
+  positive needle check (exit 78 and the dependent keys) carries the contract (S-3).
+- Test run: 771 passed, 0 failed.
 
 ### Memory, Bounds & Secrets
-
-- 16 KiB: `MAX_ALERTS_BODY_CHARS = 16384` equals `MAX_RESPONSE_BYTES` (pinned by the invariant);
-  the transport already throws above 16384 bytes and chars ≤ bytes, so the parser bound is a
-  consistent second line. Boundary 16384/16385 tested. PASS.
-- 32 entries: `MAX_ALERT_HISTORY = 32` pinned to `crates/remote/src/lib.rs`; 32 accepted, 33
-  refused. PASS.
-- 5 s timeouts: unchanged transport. PASS.
-- Secrets: no password, cookie or server text displayed; only fixed `strings.xml` texts selected
-  by enumerated tokens; the cookie stays in memory. PASS.
+No runtime code. The README examples use synthetic values (`alice`, `you@example.com`,
+`mypc.tail1234.ts.net`). No secret, real host name or face image is added. PASS.
 
 ### Supply Chain & Automation
-
-No `Cargo.*`, Gradle, `deny.toml`, workflow or script change. PASS.
+No `Cargo.*`, `deny.toml`, `.github/`, `scripts/` or `.githooks/` change. PASS.
 
 ### English-Only Policy
-
-All code, comments, strings and documents in the diff are English. PASS.
-
-### Documents
-
-- `AI/DECISIONS.md`: one new ADR line, its title present exactly once, add-only. PASS.
-- `AI/VERIFICATION_MATRIX.md`: ANA18-ANA21 each present once, add-only. PASS.
-- `Docs/REMOTE_COMPANION.md`: the alerts bullet and the "Owner hardware check of the alerts
-  (matrix ANA21)" sit inside "## 2j. Native Android app", immediately before "## 2k. Feature
-  tour"; the only removed lines are the intro sentence, rewritten to drop "alerts" from the
-  web-only list. PASS.
+All added text is English. PASS.
 
 ## 4. Detailed Findings & Action Items
 
-- **[MINOR]** `android/app/src/main/java/org/soos/remote/ui/SoosApp.kt:377` — after a
-  `login_required` acknowledgement refusal, `refresh()` → `clearAlerts()` (line 357) erases the
-  `alerts_ack_login_required` feedback; surface it through `message` instead, or keep the
-  feedback when clearing on sign-out.
-- **[MINOR]** `android/app/src/main/java/org/soos/remote/ui/SoosApp.kt:681` — `ackFeedback` is not
-  reset by a successful refresh; reset it in `loadAlerts` when a view with another `through`
-  arrives.
-- **[SUGGESTION]** `tests/invariants/src/android_native_contract.rs:904` — bound the §2j slice at
-  the next `"\n## "` heading rather than `"\n## 3."` (add-only tightening in a follow-up).
+- **[SUGGESTION] S-1** `README.md:296` — "Funnel, remote unlock and the camera view each have an
+  off switch in `soos-gui`" is true but omits that push and offline alerts also have switches
+  (`RemoteSwitch::Push`, `RemoteSwitch::OfflineAlerts`). The feature table at L56 states it
+  correctly ("all but the failed-password alerts"). Optionally add "push and offline alerts" to
+  L296.
+- **[SUGGESTION] S-2** `Docs/REMOTE_COMPANION.md:200` (unedited line) — the §2b example comment
+  `allow_funnel = true  # opt-in; false (the default) ...` and `AI/ARCHITECTURE.md:406,413`
+  ("Push sender (opt-in)", "Unlock (opt-in)") still use "opt-in" for keys that setup turns on.
+  They describe the code default correctly. Align them in a follow-up if desired.
+- **[SUGGESTION] S-3** `tests/invariants/src/readme_contract.rs:874` — `claims_independent_opt_out`
+  matches four fixed phrasings only. Consider a broader pattern (e.g. "can be set to `false`"
+  without "depend") if the README is rewritten again.
+- **[SUGGESTION] S-4** (outside the diff) `scripts/setup.sh` `--help` says every companion feature
+  "can be turned off later in soos-gui (Features)", which is not true for `password_alerts`. The
+  README is now more accurate than the script help. File it as a follow-up.
+
+No CRITICAL, MAJOR or MINOR findings.
 
 ## 5. Final Verdict
 
