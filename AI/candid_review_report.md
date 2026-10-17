@@ -2,9 +2,56 @@
 
 - **Date**: 2026-10-17
 - **Target Branch**: `feat/setup-user-phase`
-- **Base (merge-base)**: `9e82795`
-- **Reviewed-Diff-Fingerprint**: `ae799ec64e580e631e2ac4741baf91c3c2dee199931077952513192fbfacaa55`
-- **Audited Files**: `.github/workflows/ci.yml`, `AI/DECISIONS.md`, `AI/VERIFICATION_MATRIX.md`, `AI/architect_spec_setup_user_phase.md`, `AI/auditor_constraints_setup_user_phase.md`, `AI/tester_contract_setup_user_phase.md`, `AI/walkthroughs/213_setup_user_phase.md`, `Docs/CI_CD_AND_SECURITY.md`, `Docs/PACKAGING_AND_PROVISIONING.md`, `Docs/REMOTE_COMPANION.md`, `README.md`, `crates/remote/tests/setup_render_tests.rs`, `scripts/install_remote.sh`, `scripts/setup.sh`, `tests/docker/setup_root_preview_test.sh` (untracked, new), `tests/fixtures/setup/remote.toml`, `tests/invariants/src/lib.rs`, `tests/invariants/src/setup_contract.rs`, `tests/invariants/src/setup_user_phase_contract.rs`
+- **Base (merge-base)**: `01ce6fa` (rebased from `9e82795`; `origin/main` gained #411, #417 and #413)
+- **Reviewed-Diff-Fingerprint**: `7c946bc13225f52c5b2760673d8e14e991c74df283871e6ad11b868bdebad3f0`
+- **Audited Files**: `.github/workflows/ci.yml`, `AI/DECISIONS.md`, `AI/VERIFICATION_MATRIX.md`, `AI/architect_spec_setup_user_phase.md`, `AI/auditor_constraints_setup_user_phase.md`, `AI/tester_contract_setup_user_phase.md`, `AI/walkthroughs/213_setup_user_phase.md`, `Docs/CI_CD_AND_SECURITY.md`, `Docs/PACKAGING_AND_PROVISIONING.md`, `Docs/REMOTE_COMPANION.md`, `README.md`, `crates/remote/tests/setup_render_tests.rs`, `scripts/install_remote.sh`, `scripts/setup.sh`, `tests/docker/setup_root_preview_test.sh`, `tests/fixtures/setup/remote.toml`, `tests/invariants/src/lib.rs`, `tests/invariants/src/setup_contract.rs`, `tests/invariants/src/setup_user_phase_contract.rs`
+
+## 0. Re-Review After the Rebase Onto `origin/main` `01ce6fa`
+
+Independent re-review, without author context, of the branch after its rebase from `9e82795` onto
+`01ce6fa`. `origin/main` gained three commits in between: #411 (`6eb0746`, daemon `LockState` refusal
+test on the auth-reserved connection), #417 (`085ba63`, zbus 5 -> 6 migration in `Cargo.toml`/`Cargo.lock`,
+`crates/daemon/src/presence/logind.rs`, `crates/remote/src/{logind,offline,session}.rs`, their tests and
+three invariant files) and #413 (`01ce6fa`, lazy second shm buffer of `soos-lock-widget`).
+
+Rebase integrity, checked mechanically:
+- `git range-diff 9e82795..origin/feat/setup-user-phase 01ce6fa..HEAD`: commit 1 (`7171450`, the
+  owner-approved SET3 contract migration, formerly `e57c0e1`) is `=`; commits 2-4 are `!` only because
+  of context lines in `AI/DECISIONS.md` (the ADR line now follows the #410/#412 ADR lines), in
+  `AI/candid_review_report.md` and `AI/plan_evaluator_report.md` (pre-images changed on main), and in
+  `.github/workflows/ci.yml` hunk headers.
+- The `+`/`-` lines of `git diff 9e82795 origin/feat/setup-user-phase` and `git diff 01ce6fa HEAD`
+  (both excluding the two report files) are byte-identical, and the branch's
+  `AI/plan_evaluator_report.md` is byte-identical before and after the rebase. The branch's own changes
+  are therefore unchanged by the rebase.
+
+Semantic interaction with what main gained:
+- `git diff 9e82795 01ce6fa` touches nothing under `scripts/`, `.github/`, `packaging/` or
+  `tests/docker/`; `setup.sh` queries logind only through `loginctl` (shell), so the zbus 6 migration
+  does not reach it.
+- `crates/remote/tests/setup_render_tests.rs` uses only `soos_remote::config::{parse_config, ConfigError}`;
+  #417 changed `logind.rs`, `offline.rs`, `session.rs`, not `config.rs`. The test builds and passes
+  against the zbus 6 `soos-remote`.
+- #417 edited `remote_companion_contract.rs`, `presence_unlock_contract.rs` and
+  `portable_crates_contract.rs`; the branch edits `lib.rs` (one module registration), `setup_contract.rs`
+  and the new `setup_user_phase_contract.rs`. No overlap; the whole invariant suite passes together.
+- #413 and #411 touch `crates/lock-widget` and `crates/daemon` tests only: no interaction.
+
+Executed evidence (this review): `LIBONNXRUNTIME_NO_PKG_CONFIG=1 CARGO_TARGET_DIR=~/.cache/soos-targets/setup-user-phase
+CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_BUILD_JOBS=4 cargo test --locked
+-p soos-invariants -p soos-remote -- --test-threads=4`: 1186 passed, 0 failed (soos-invariants 731);
+`cargo clippy --locked -p soos-invariants -p soos-remote --all-targets -- -D warnings`: clean (zbus 6.0.0).
+The Docker harness `tests/docker/setup_root_preview_test.sh` was not re-run here (no input of it changed
+in the rebase); it runs as the required CI job `setup-root-preview`.
+
+Test assertions: the step-3 greps on the new frozen patch find no removed assertion, no new
+`#[ignore]`/`cfg(any())`/`should_panic`/tolerance, no inline test module change. The only modified
+pre-existing test remains SET3 in `setup_contract.rs`, the owner-approved 2026-10-15 migration recorded
+in its own commit `7171450` and in ADR 2026-10-15 "Setup User Phase". No other pre-existing assertion changed.
+
+Sections 1-4 below are the previous APPROVED review (fingerprint `ae799ec6…`, base `9e82795`), whose
+findings still apply to the unchanged branch content; line references in `scripts/setup.sh` are unchanged.
+The SUGGESTION on stale commit references now also applies to `e57c0e1` -> `7171450`.
 
 ## 1. Executive Summary
 
@@ -142,5 +189,7 @@ Inline test modules changed: none.
   content verified identical). Reference the subject line or both SHAs.
 
 ## 5. Final Verdict
+
+No CRITICAL or MAJOR finding after the rebase; the two MINOR and two SUGGESTION items above carry forward.
 
 **VERDICT: APPROVED**
