@@ -1,4 +1,49 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">soos</string>
+
+    <!-- Failed-password alerts (GitHub #404). Fixed texts only: server values select one of
+         them and are never shown themselves. Counts pick the _one or _other text (English only). -->
+    <string name="alerts_title">Password alerts</string>
+    <string name="alerts_state_disabled">Password alerts are off on the PC (password_alerts in remote.toml).</string>
+    <string name="alerts_state_starting">Password alerts are starting.</string>
+    <string name="alerts_state_active_none">No failed password attempts.</string>
+    <string name="alerts_state_active_none_partial">No failed password attempts (sudo, login, other).</string>
+    <string name="alerts_state_unavailable">Password alerts are unavailable.</string>
+    <string name="alerts_reason_no_journal_access">The account cannot read the system journal.</string>
+    <string name="alerts_reason_journal_reader_failed">The journal reader stopped.</string>
+    <string name="alerts_reason_owner_unresolved">The owner account could not be resolved.</string>
+    <string name="alerts_reason_overflow">The attempt counter is exhausted. Restart the service.</string>
+    <string name="alerts_reason_rng_failed">The random source failed.</string>
+    <string name="alerts_wrong_password_count_one">%d failed password attempt</string>
+    <string name="alerts_wrong_password_count_other">%d failed password attempts</string>
+    <string name="alerts_locked_out_count_one">%d attempt while locked out</string>
+    <string name="alerts_locked_out_count_other">%d attempts while locked out</string>
+    <string name="alerts_last_attempt">Last at %1$s (%2$s).</string>
+    <string name="alerts_lock_screen_not_monitored">Lock screen not monitored. See the setup in the documentation.</string>
+    <string name="alerts_history_title">Recent attempts</string>
+    <string name="alerts_history_row">%1$s, %2$s, %3$s: %4$s</string>
+    <string name="alerts_record_wrong_password_one">%d wrong password</string>
+    <string name="alerts_record_wrong_password_other">%d wrong passwords</string>
+    <string name="alerts_record_locked_out_one">%d attempt while locked out</string>
+    <string name="alerts_record_locked_out_other">%d attempts while locked out</string>
+    <string name="alerts_source_lock_screen">lock screen</string>
+    <string name="alerts_source_sudo">sudo</string>
+    <string name="alerts_source_login">login</string>
+    <string name="alerts_source_other">other</string>
+    <string name="alerts_account_owner">your account</string>
+    <string name="alerts_account_root">root</string>
+    <string name="alerts_account_other">another account</string>
+    <string name="alerts_acknowledge">Acknowledge</string>
+    <string name="alerts_ack_done">Acknowledged.</string>
+    <string name="alerts_ack_stale_view">New attempts since this view. Check them and acknowledge again.</string>
+    <string name="alerts_ack_rate_limited">Please wait a moment before acknowledging again.</string>
+    <string name="alerts_ack_disabled">Password alerts are off on the PC.</string>
+    <string name="alerts_ack_unavailable">Password alerts are unavailable.</string>
+    <string name="alerts_ack_bad_request">The view changed. Refresh and acknowledge again.</string>
+    <string name="alerts_ack_login_required">Your session ended. Sign in again.</string>
+    <string name="alerts_ack_refused">The PC refused the acknowledgement.</string>
+    <string name="alerts_ack_unreachable">The acknowledgement did not reach the PC.</string>
+    <string name="alerts_load_failed">Alerts could not be loaded.</string>
+    <string name="alerts_time_unknown">unknown time</string>
 </resources>

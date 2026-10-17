@@ -14,9 +14,10 @@ sealed interface ApiResult<out T> {
 }
 
 /**
- * Client of the `soos-remote` HTTP surface for the native app: status, lock and the Funnel
- * passkey login. Every POST carries `Origin: <origin>` and the route's exact `X-Soos-Action`;
- * the web session cookie is kept in memory only and dropped on sign-out or `login_required`.
+ * Client of the `soos-remote` HTTP surface for the native app: status, lock, the
+ * failed-password alerts and the Funnel passkey login. Every POST carries `Origin: <origin>`
+ * and the route's exact `X-Soos-Action`; the web session cookie is kept in memory only and
+ * dropped on sign-out or `login_required`.
  */
 class SoosApi(private val origin: String, private val transport: HttpTransport) {
     @Volatile
@@ -31,6 +32,30 @@ class SoosApi(private val origin: String, private val transport: HttpTransport) 
     fun status(): ApiResult<StatusView> = get(STATUS_PATH) { ApiJson.parseStatus(it) }
 
     fun lock(): ApiResult<String> = post(LOCK_PATH, ACTION_LOCK, null)
+
+    /** `GET /api/alerts` (tailnet identity or web session). */
+    fun alerts(): ApiResult<AlertsView> = get(ALERTS_PATH) { ApiJson.parseAlerts(it) }
+
+    /**
+     * `POST /api/alerts/ack` of the displayed view: no body, `X-Soos-Action: alerts-ack` and
+     * exactly one epoch and one through header (`Docs/REMOTE_COMPANION.md` §2c). The `200`
+     * answer is the fresh view. A snapshot the server would refuse is never sent.
+     */
+    fun ackAlerts(epoch: String, through: Long): ApiResult<AlertsView> {
+        if (!ApiJson.isAlertsEpoch(epoch) || through < 0) {
+            return ApiResult.Refused(BAD_REQUEST, "bad_request")
+        }
+        val snapshot = listOf(
+            ALERTS_EPOCH_HEADER to epoch,
+            ALERTS_THROUGH_HEADER to through.toString(),
+        )
+        val response = send("POST", ALERTS_ACK_PATH, ACTION_ALERTS_ACK, null, snapshot)
+            ?: return ApiResult.Unreachable
+        val body = response.body.decodeToString()
+        if (response.status != 200) return ApiResult.Refused(response.status, ApiJson.parseResult(body))
+        val view = ApiJson.parseAlerts(body) ?: return ApiResult.Unreachable
+        return ApiResult.Ok(view)
+    }
 
     fun loginOptions(expectedRpId: String): ApiResult<LoginOptions> {
         val response = send("POST", LOGIN_OPTIONS_PATH, ACTION_LOGIN_OPTIONS, null)
@@ -72,12 +97,19 @@ class SoosApi(private val origin: String, private val transport: HttpTransport) 
         }
     }
 
-    private fun send(method: String, path: String, action: String?, json: String?): HttpResponse? {
+    private fun send(
+        method: String,
+        path: String,
+        action: String?,
+        json: String?,
+        extra: List<Pair<String, String>> = emptyList(),
+    ): HttpResponse? {
         val headers = mutableListOf("Accept" to "application/json")
         if (method == "POST") {
             headers += "Origin" to origin
         }
         if (action != null) headers += ACTION_HEADER to action
+        headers += extra
         if (json != null) headers += "Content-Type" to "application/json"
         val sent = session
         sent?.let { headers += "Cookie" to SessionCookie.header(it) }
@@ -117,5 +149,15 @@ class SoosApi(private val origin: String, private val transport: HttpTransport) 
         const val LOGIN_OPTIONS_PATH = "/api/auth/login/options"
         const val LOGIN_VERIFY_PATH = "/api/auth/login/verify"
         const val LOGOUT_PATH = "/api/auth/logout"
+
+        /** Equals `ACTION_ALERTS_ACK` of `crates/remote/src/lib.rs`. */
+        const val ACTION_ALERTS_ACK = "alerts-ack"
+        const val ALERTS_PATH = "/api/alerts"
+        const val ALERTS_ACK_PATH = "/api/alerts/ack"
+        const val ALERTS_EPOCH_HEADER = "X-Soos-Alerts-Epoch"
+        const val ALERTS_THROUGH_HEADER = "X-Soos-Alerts-Through"
+
+        /** Status of a snapshot refused locally (never sent). */
+        private const val BAD_REQUEST = 400
     }
 }
