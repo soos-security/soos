@@ -2,8 +2,8 @@
 
 - **Date**: 2026-10-17
 - **Target Branch**: `fix/lock-widget-memory`
-- **Base (merge-base)**: `6eb0746` (rebased from `9e82795`; `origin/main` gained only #411)
-- **Reviewed-Diff-Fingerprint**: `f2b3b47150c328630d51ebd61599c1ab0d0fa6660f3f55f2323b99713229f01e`
+- **Base (merge-base)**: `085ba63` (rebased from `6eb0746`; `origin/main` gained only #417)
+- **Reviewed-Diff-Fingerprint**: `823d38c9fcc7642d4ca5e8697f363bcbec67a0b5d4392ce2fb96fcdec7240e9e`
 - **Audited Files**: `AI/DECISIONS.md`, `AI/VERIFICATION_MATRIX.md`, `AI/architect_spec_lock_widget_memory.md`,
   `AI/auditor_constraints_lock_widget_memory.md`, `AI/tester_contract_lock_widget_memory.md`,
   `AI/walkthroughs/218_lock_widget_memory.md`, `Docs/LOCKSCREEN_WIDGET.md`, `crates/lock-widget/src/layout.rs`,
@@ -18,31 +18,43 @@ second one only when every allocated buffer is still held by the compositor (at 
 crate with no PAM, IPC or daemon impact. No defect of MAJOR or CRITICAL severity was found; no pre-existing
 test was touched.
 
-This report re-reviews the branch after its rebase onto `origin/main` `6eb0746` (#411: daemon tests LRR1-LRR3
-pinning the `LockState` refusal on the auth-reserved connection, their DECISIONS clarification, matrix rows and
-walkthrough 217). The previous report (fingerprint `52c4e90d…`, base `9e82795`) was APPROVED; its findings are
-carried forward below.
+This report re-reviews the branch after its rebase onto `origin/main` `085ba63` (#417: zbus 5 -> 6 migration
+in `Cargo.toml`/`Cargo.lock`, the `crates/daemon` and `crates/remote` logind code, docs, matrix rows PAU17/RMC17/
+RMC19 and three invariant files). The previous report (fingerprint `f2b3b471…`, base `6eb0746`) was APPROVED;
+the report before it (fingerprint `52c4e90d…`, base `9e82795`) was APPROVED too. Their findings are carried
+forward below.
 
 ### Rebase verification
 
-- `git range-diff 9e82795..6c6e86d 6eb0746..HEAD`: the fix commit and the review commit map one-to-one; the only
-  differences are the `AI/DECISIONS.md` context lines shifted by main's #411 entry and the regenerated
-  `AI/candid_review_report.md` / `AI/plan_evaluator_report.md` (whose diff base changed with main).
-- Per-file comparison of the added/removed lines against the old and the new merge base: identical for
-  `AI/VERIFICATION_MATRIX.md`, `AI/architect_spec_lock_widget_memory.md`,
-  `AI/auditor_constraints_lock_widget_memory.md`, `AI/tester_contract_lock_widget_memory.md`,
-  `AI/walkthroughs/218_lock_widget_memory.md`, `Docs/LOCKSCREEN_WIDGET.md`, `crates/lock-widget/src/layout.rs`,
-  `crates/lock-widget/src/wayland.rs` and `crates/lock-widget/tests/lock_widget_buffer_tests.rs`. The code under
-  review is byte-identical to the previously approved diff.
-- `AI/DECISIONS.md`: the changed lines (`^[-+]*` hunks) hash identically before and after the rebase
-  (`f81040ef…`), and main's original #401 line is unchanged between `9e82795` and `6eb0746` (`8c8d9bf4…`), so
-  the amendment applies to the same text. The file holds exactly one #401 entry (line 144, carrying the
-  "*(amended 2026-10-17 by ADR "Lazy Second Shared-Memory Buffer of soos-lock-widget" …)*" note), main's
-  "Clarification — Where `LockState` Is Refused on the Auth-Reserved Connection" entry (line 145, untouched) and
-  this branch's ADR (line 146), one occurrence each. The post-rebase amend `47dea16` → `6982101` only removed the
-  stale duplicate copy of the #401 entry.
-- Main's #411 changes are absent from the frozen patch (they are part of the base), so no daemon, protocol or
-  PAM file is in this diff; #411 touches only daemon tests and docs and does not interact with the widget.
+- `git range-diff origin/fix/lock-widget-memory~3..origin/fix/lock-widget-memory 085ba63..HEAD`: the fix commit
+  (`4fd0d5d` = `df2508d`) and the earlier post-rebase review commit (`3ea706c` = `d2fbeb1`) are identical; the
+  first review commit (`6982101` ! `8628321`) differs only in `AI/candid_review_report.md`, the file that
+  conflicted because main rewrote it for #417 (branch side kept, now superseded by this report).
+- Per-file patch-id comparison (`git diff 6eb0746 <old tip>` vs `git diff 085ba63 HEAD`, `git patch-id
+  --stable`): identical for `AI/DECISIONS.md`, `AI/VERIFICATION_MATRIX.md`, `AI/architect_spec_lock_widget_memory.md`,
+  `AI/auditor_constraints_lock_widget_memory.md`, `AI/plan_evaluator_report.md`,
+  `AI/tester_contract_lock_widget_memory.md`, `AI/walkthroughs/218_lock_widget_memory.md`,
+  `Docs/LOCKSCREEN_WIDGET.md`, `crates/lock-widget/src/layout.rs`, `crates/lock-widget/src/wayland.rs` and
+  `crates/lock-widget/tests/lock_widget_buffer_tests.rs`. The code under review is byte-identical to the
+  previously approved diff.
+- Content proof: `git diff <old tip> HEAD` equals `git diff 6eb0746 085ba63` (both excluding the report) except
+  for one blob `index` header line of `AI/VERIFICATION_MATRIX.md`, which both sides edit; the rebase added
+  exactly main's #417 changes and nothing else.
+- `AI/VERIFICATION_MATRIX.md`: #417 edits rows PAU17, RMC17 and RMC19; this branch adds LKA18/LKA19 (lines
+  2431-2432). Disjoint rows, no conflict markers anywhere in `AI/`, `Docs/` or `crates/lock-widget`.
+- `AI/DECISIONS.md`: still exactly one #401 entry (line 144, with the amendment note), the #411 clarification
+  (line 145) and this branch's ADR (line 146); #417 does not touch the file.
+
+### Interaction with the zbus 6 migration
+
+- `soos-lock-widget` has no `zbus`/`zvariant` dependency (`crates/lock-widget/Cargo.toml`, and `cargo tree
+  --locked -p soos-lock-widget` lists no zbus crate); the branch leaves `Cargo.toml`, `Cargo.lock` and
+  `crates/lock-widget/Cargo.toml` untouched relative to `085ba63`.
+- #417's invariant edits (`portable_crates_contract.rs`, `presence_unlock_contract.rs`,
+  `remote_companion_contract.rs`) do not mention the lock widget, and the full `soos-invariants` suite passes on
+  the rebased tree. No semantic interaction.
+- Walkthrough numbering: main adds 221 (#417); this branch's 218 sits between 217 and 221. Numbers 213, 215,
+  216, 219 and 220 are absent (reserved by parallel branches); the invariants suite accepts the gaps.
 
 ## 2. Test Changes
 
@@ -104,11 +116,14 @@ Mechanical listing from `target/candid_diff.patch`:
 ### English-Only Policy
 - All code, comments, docs, ADR, matrix rows and the commit message are in English. PASS.
 
-### Commands re-run after the rebase (mandated environment, `--test-threads=4`)
+### Commands re-run after the rebase onto `085ba63` (mandated environment, `--test-threads=4`)
 - `cargo test --locked -p soos-lock-widget -p soos-invariants -- --test-threads=4`: exit 0, 752 passed, 0
   failed, 0 ignored (invariants 707; lock-widget buffer 7, CLI 5, render 16, scene 17).
 
-### Commands run before the rebase (scoped, mandated environment, `--test-threads=3`)
+### Commands re-run after the earlier rebase onto `6eb0746`
+- Same command: exit 0, 752 passed, 0 failed, 0 ignored.
+
+### Commands run before the first rebase (scoped, mandated environment, `--test-threads=3`)
 - `cargo test -p soos-lock-widget --locked`: all suites green (7 new LKA18 tests plus the LKA8/LKA9/LKA12/LKA13
   suites).
 - `cargo clippy -p soos-lock-widget --locked --all-targets -- -D warnings`: clean.
@@ -120,9 +135,9 @@ Mechanical listing from `target/candid_diff.patch`:
 - **[MINOR]** `crates/lock-widget/src/wayland.rs` (`draw_all`) — on a host where the second `SlotPool::new`
   keeps failing while the compositor holds the first buffer, a memfd creation is attempted on every 33 ms retry
   tick. It is bounded by the existing timer and leaves no lasting side effect; no change required.
-- **[SUGGESTION]** `AI/walkthroughs/218_lock_widget_memory.md` — after the rebase, 217 (#411) is present and
-  numbers 213, 215 and 216 are still absent (presumably reserved by parallel branches); the invariants suite
-  accepts the gap.
+- **[SUGGESTION]** `AI/walkthroughs/218_lock_widget_memory.md` — after the rebase, 217 (#411) and 221 (#417) are
+  present and numbers 213, 215, 216, 219 and 220 are absent (presumably reserved by parallel branches); the
+  invariants suite accepts the gaps.
 
 ## 5. Final Verdict
 
