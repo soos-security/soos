@@ -2,9 +2,64 @@
 
 - **Date**: 2026-10-17
 - **Target Branch**: `feat/phone-onboarding-tour`
-- **Base (merge-base)**: `6eb0746`
-- **Reviewed-Diff-Fingerprint**: `883138b707fdf2118890b33c964327b7e038af0ee693dcaaa38d0d1679d30fa3`
+- **Base (merge-base)**: `aa25f78` (rebased from `6eb0746`; `origin/main` gained #417, #413 and #402)
+- **Reviewed-Diff-Fingerprint**: `75213bf158fb3328bf99c0440f904063d09f45182b86120cdd10560ecc2b10e1`
 - **Audited Files**: `AI/DECISIONS.md`, `AI/VERIFICATION_MATRIX.md`, `AI/architect_spec_phone_onboarding_tour.md`, `AI/auditor_constraints_phone_onboarding_tour.md`, `AI/walkthroughs/222_phone_onboarding_tour.md`, `Docs/REMOTE_COMPANION.md`, `crates/remote/assets/app.js`, `crates/remote/assets/style.css`, `tests/invariants/src/lib.rs`, `tests/invariants/src/remote_alerts_contract.rs`, `tests/invariants/src/remote_companion_contract.rs`, `tests/invariants/src/remote_passkey_contract.rs`, `tests/invariants/src/remote_push_contract.rs`, `tests/invariants/src/remote_tour_contract.rs`
+
+## 0. Re-Review After the Rebase Onto `origin/main` `aa25f78`
+
+Independent re-review, without author context, of the branch after its rebase from `6eb0746` onto
+`aa25f78`. `origin/main` gained three commits in between: #417 (`085ba63`, zbus 5 -> 6 migration in
+`Cargo.toml`/`Cargo.lock`, `crates/daemon/src/presence/logind.rs`, `crates/remote/src/{logind,offline,session}.rs`,
+their tests and three invariant files), #413 (`01ce6fa`, lazy second shm buffer of `soos-lock-widget`)
+and #402 (`aa25f78`, setup user phase: `scripts/setup.sh`, `scripts/install_remote.sh`, the Docker
+harness, `setup_user_phase_contract.rs`, `Docs/REMOTE_COMPANION.md` §2j/§4 wording).
+
+Rebase integrity, checked mechanically:
+- `git range-diff 6eb0746..78615dd aa25f78..HEAD`: commit 1 (`b672cfb`, the owner-approved
+  RMC-S18/S30/S38 contract migration, formerly `73c24ee`) is `=`; commit 2 (`3265761`, formerly
+  `78615dd`) is `!` only because of context lines in `AI/DECISIONS.md` (the ADR line now follows
+  the #412 and #400 ADR lines) and of the pre-images of `AI/candid_review_report.md` and
+  `AI/plan_evaluator_report.md` that changed on main.
+- The `+`/`-` lines of `git diff 6eb0746 78615dd` and `git diff aa25f78 HEAD` (both excluding the
+  two report files) are byte-identical; `AI/plan_evaluator_report.md` and the previous
+  `AI/candid_review_report.md` are byte-identical before and after the rebase. The branch's own
+  changes are therefore unchanged by the rebase. Sections 1-5 below refer to the migration commit
+  by its pre-rebase hash `73c24ee`, now `b672cfb`.
+
+Semantic interaction with what main gained:
+- `git diff 6eb0746 aa25f78` touches neither `crates/remote/assets/` nor `crates/gui/src/onboarding.rs`,
+  so the tour text, the storage block and the shared GUI wording pinned by `remote_tour_contract`
+  are untouched by main.
+- #417 changed `crates/remote/src/{logind,offline,session}.rs` only (D-Bus types); the tour is
+  page-only (no request, no server data), and every `remote.toml` key it names (`battery_status`,
+  `allow_unlock`, `allow_funnel`, `camera_view_funnel`, `password_alerts`, `push_notifications`,
+  `offline_alerts`, `camera_view`, `[android]`) still exists in `crates/remote/src/config.rs`.
+  #417 edited one line of `remote_companion_contract.rs` (the `zbus` 6 guideline lookup); the branch
+  adds the `TOUR_STORAGE_*` markers, `app_without_tour_storage` and one test elsewhere in that file:
+  no overlap, both pass together.
+- #402: `setup.sh` writes the setup-managed `remote.toml` keeping an explicit `false`, so the tour's
+  "set <key> = false in ~/.config/soos/remote.toml" advice survives a later setup re-run; the
+  dependency cascades it enforces (`offline_alerts` needs `push_notifications`, `camera_view_funnel`
+  needs `camera_view` and `allow_funnel`) match the keys the tour tells the user to turn off together.
+  #402's `Docs/REMOTE_COMPANION.md` edits (§2j setup line, §4 one-command install) do not overlap the
+  branch's new §2k. `setup_user_phase_contract.rs` does not inspect `app.js`.
+- #413 touches `crates/lock-widget` only: no interaction.
+
+Executed evidence (this review): `LIBONNXRUNTIME_NO_PKG_CONFIG=1 CARGO_TARGET_DIR=~/.cache/soos-targets/phone-onboarding-tour
+CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_BUILD_JOBS=4 cargo test --locked
+-p soos-invariants -p soos-remote -- --test-threads=4`: 1198 passed, 0 failed (soos-invariants 743);
+`cargo clippy --locked -p soos-invariants -p soos-remote --all-targets -- -D warnings`: clean (zbus 6.0.0).
+
+Test assertions: the step-3 greps on the new frozen patch find no removed assertion line, no new
+`#[ignore]`/`cfg(any())`/`should_panic`/tolerance, no inline test module change. The only modified
+pre-existing tests remain RMC-S18, RMC-S30 and RMC-S38 (operand `app` -> `app_without_tour_storage(&app)`),
+the owner-approved 2026-10-17 migration recorded in its own commit `b672cfb` and in ADR 2026-10-17
+"Phone Onboarding Tour in the `soos-remote` Web App and Its Single Storage Exception". No other
+pre-existing assertion changed.
+
+Sections 1-5 below are the previous APPROVED review (fingerprint `883138b7…`, base `6eb0746`), whose
+findings still apply to the unchanged branch content.
 
 ## 1. Executive Summary
 
