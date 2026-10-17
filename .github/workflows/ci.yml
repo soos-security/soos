@@ -29,6 +29,8 @@
 #                        advisory on pull requests: not part of CI Success,
 #                        listed in scripts/pr_checks_gate.sh; required on push
 #                        to main through ci-success-main)
+#   6g. setup-root-preview — scripts/setup.sh camera view, daemon side, as real
+#                        root under a real systemd in ubuntu:24.04 (after lint)
 #   7. ci-success      — single aggregate status for merge gating
 #   7b. ci-success-main — push/dispatch-only aggregate: CI Success and
 #                        system-onnxruntime must both succeed on main
@@ -375,6 +377,31 @@ jobs:
         run: ./tests/docker/network_lock_pkcheck_test.sh
 
   # ---------------------------------------------------------------------------
+  # Job 6g: scripts/setup.sh camera view, daemon side, as REAL root (GitHub #400,
+  # matrix SET34): the unmodified setup.sh escalates with the real sudo into its
+  # root half, which creates /etc/soos/daemon.toml ([preview], 0644, hard link)
+  # only when absent, restarts the shipped soos-daemon.service under a real
+  # systemd (PID 1, privileged ubuntu:24.04 image of tests/docker/Dockerfile.systemd,
+  # stand-in daemon, no face pipeline), gates on scripts/wait_daemon_ready.sh and
+  # rolls back on failure (exit 1 / 70, companion never run); an existing file or
+  # a symbolic link is never followed or edited
+  # (tests/docker/setup_root_preview_test.sh).
+  # ---------------------------------------------------------------------------
+  setup-root-preview:
+    name: "setup.sh root camera view (Docker)"
+    if: github.event_name != 'schedule'
+    needs: lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Create /etc/soos/daemon.toml as root under a real systemd (ubuntu:24.04)
+        run: ./tests/docker/setup_root_preview_test.sh
+
+  # ---------------------------------------------------------------------------
   # Job 6f: distribution build against the system ONNX Runtime (GitHub #375,
   # PR 1 of #361): digest-pinned Arch image with onnxruntime-cpu from [extra]
   # and Rust = [workspace.package] rust-version; crates and models are fetched
@@ -629,7 +656,7 @@ jobs:
   ci-success:
     name: "CI Success"
     if: always() && github.event_name != 'schedule'
-    needs: [lint, clippy, test, security, pam-integration, authselect-profile, pam-rollback, package-deploy, systemd-unit, network-lock-polkit]
+    needs: [lint, clippy, test, security, pam-integration, authselect-profile, pam-rollback, package-deploy, systemd-unit, network-lock-polkit, setup-root-preview]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
