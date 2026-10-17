@@ -3,7 +3,8 @@
  *
  * Server data only ever reaches the DOM through textContent. The page keeps no state
  * beyond the live EventSource: no script-readable cookie (the web session cookie is
- * HttpOnly), no storage. The only service worker (/sw.js) shows push notifications and,
+ * HttpOnly), and no storage but one fixed flag remembering that the feature tour was closed
+ * (the single tour storage block below). The only service worker (/sw.js) shows push notifications and,
  * when the browser renews a push subscription, re-sends it once to the PC. Staleness is measured with the browser's own
  * clock from the arrival of the last event, never by comparing checked_unix_ms with the
  * phone's clock.
@@ -55,6 +56,14 @@
  * control with a fixed explanation; lock and status keep working. The flags are hints for
  * the page only: every server check is the same for every browser. Messages are fixed
  * strings of this file; a browser's own error text is never shown.
+ *
+ * Feature tour (ADR 2026-10-17 "Phone Onboarding Tour in the soos-remote Web App and Its
+ * Single Storage Exception"): a short tour opens once after sign-in, or on the first tailnet
+ * visit, and again from Feature tour in the footer. It explains each feature of this page,
+ * what it exposes and where to turn it off, with fixed text only; it reads no server data,
+ * makes no request and switches nothing. The card is built at runtime (no markup id). The
+ * browser remembers only that the tour was closed, through the one guarded helper of the
+ * tour storage block; when site data is blocked the tour simply shows again.
  */
 "use strict";
 
@@ -489,6 +498,10 @@ function showLogin(message) {
   buildCameraCard().section.hidden = true;
   loginButton.disabled = !browserCapabilities().webauthn;
   setText(loginFeedback, loginButton.disabled ? PASSKEY_UNSUPPORTED_TEXT : message || " ");
+  // The feature tour never stays over the sign-in screen (it is not marked as seen).
+  if (tour !== null) {
+    tour.section.hidden = true;
+  }
 }
 
 function showApp(state) {
@@ -502,6 +515,7 @@ function showApp(state) {
     setText(enrollFeedback, PASSKEY_UNSUPPORTED_TEXT);
     setText(feedbackNode, PASSKEY_UNSUPPORTED_TEXT);
   }
+  offerTour();
 }
 
 function render(view, reachable) {
@@ -2143,6 +2157,333 @@ function startCameraView() {
     });
 }
 
+// --- feature tour (ADR 2026-10-17, GitHub #414) -----------------------------------------
+
+// Fixed English text only: the tour reads no server data, makes no request and switches
+// nothing. The six features shared with the soos-gui tour keep its titles, explanations and
+// "Off:" lines (crates/gui/src/onboarding.rs); "where" says where to turn a feature off
+// (manual edits name every key that depends on it, which soos-remote would refuse otherwise),
+// and "target" names the card of this page that "Show it on this page" moves to ("" for none).
+const TOUR_INTRO_TITLE = "Welcome to soos";
+const TOUR_INTRO_TEXT =
+  "This page shows the lock state of your PC and lets this phone act on it. The next steps explain each feature it offers, what it exposes and where to turn it off. The tour itself changes no setting.";
+const TOUR_INTRO_NOTE =
+  "This browser only remembers that you closed the tour, nothing else. You can reopen it at any time with Feature tour at the bottom of the page.";
+const TOUR_STEPS = [
+  {
+    title: "Phone companion",
+    text: "A small service in your user session shows the lock state of this PC on your phone and lets you lock it remotely. It listens only on a local socket that Tailscale publishes to devices of your tailnet.",
+    off: "Off: the service is stopped and disabled; the phone page is unreachable.",
+    where:
+      "On the PC: Features in soos-gui, or run as your own user: systemctl --user disable --now soos-remote.service",
+    target: "",
+  },
+  {
+    title: "Battery level",
+    text: "The status card shows the battery level of the PC, whether it is charging and whether it is plugged in. The PC reads it from its power supply information; nothing else about the hardware is sent.",
+    off: "Off: the PC stops reading its battery and the line disappears from this page.",
+    where:
+      "On the PC: set battery_status = false in ~/.config/soos/remote.toml, then run: systemctl --user restart soos-remote.service",
+    target: "status",
+  },
+  {
+    title: "Remote lock and unlock",
+    text: "Locking from the phone is always available while the companion runs. Unlocking from the phone additionally needs a passkey check (Face ID, fingerprint or screen lock) every time.",
+    off: "Off: the phone can still lock this PC, never unlock it.",
+    where:
+      "Unlock, on the PC: Features in soos-gui, or set allow_unlock = false in ~/.config/soos/remote.toml, then run: systemctl --user restart soos-remote.service. Locking stays available while the companion runs.",
+    target: "status",
+  },
+  {
+    title: "Internet access",
+    text: "Tailscale Funnel makes the phone page reachable from the Internet without the VPN app on the phone. Every action still needs your passkey, but the page is then exposed beyond your tailnet.",
+    off: "Off: the page is reachable only from devices signed in to your tailnet.",
+    where:
+      "On this phone, Sign out ends this phone's session. On the PC: set allow_funnel = false and camera_view_funnel = false in ~/.config/soos/remote.toml and remove its [android] table if there is one, then run: systemctl --user restart soos-remote.service. Without an [android] table, Features in soos-gui does the same.",
+    target: "logout",
+  },
+  {
+    title: "Failed-password history",
+    text: "This page lists failed password attempts on the PC, read from the system journal: the time, the source (lock screen, sudo, login), the account class and the count, never the typed text.",
+    off: "Off: the PC stops reading the journal and the list disappears; push alerts and offline alerts depend on it and stop too.",
+    where:
+      "On the PC: set password_alerts = false, push_notifications = false and offline_alerts = false in ~/.config/soos/remote.toml, then run: systemctl --user restart soos-remote.service",
+    target: "alerts",
+  },
+  {
+    title: "Push alerts",
+    text: "Failed password attempts on this PC are pushed to your phone as notifications. Alerts carry the time, source, account and count, never the typed text.",
+    off: "Off: no notification is sent; alerts remain visible on the phone page.",
+    where:
+      "This phone only: Disable notifications in the Notifications card. Every device, on the PC: Features in soos-gui, or set push_notifications = false and offline_alerts = false in ~/.config/soos/remote.toml, then run: systemctl --user restart soos-remote.service",
+    target: "push",
+  },
+  {
+    title: "Live camera view",
+    text: "You can watch the PC camera live from the phone, for a limited time and after a passkey check per view. Nothing is recorded or stored.",
+    off: "Off: the phone can no longer open the camera of this PC.",
+    where:
+      "On the PC: Features in soos-gui, or set camera_view = false and camera_view_funnel = false in ~/.config/soos/remote.toml, then run: systemctl --user restart soos-remote.service. A running view stops with Stop camera view or when you leave this page.",
+    target: "camera",
+  },
+  {
+    title: "Offline alerts",
+    text: "Your phone is told when this PC comes back online after being offline, with how long it was away. It uses the push alerts, so those must stay on.",
+    off: "Off: no offline history is recorded and no back-online notification is sent; push alerts keep working.",
+    where:
+      "On the PC: Features in soos-gui, or set offline_alerts = false in ~/.config/soos/remote.toml, then run: systemctl --user restart soos-remote.service",
+    target: "offline",
+  },
+];
+const TOUR_NEXT_LABEL = "Next";
+const TOUR_DONE_LABEL = "Done";
+const TOUR_BACK_LABEL = "Back";
+const TOUR_SKIP_LABEL = "Skip tour";
+const TOUR_SHOW_LABEL = "Show it on this page";
+const TOUR_REPLAY_LABEL = "Feature tour";
+const TOUR_REGION_LABEL = "Feature tour";
+
+// soos-tour-storage:begin
+// The only storage of the page (owner decision of 2026-10-17 on GitHub #363): one key whose
+// only value is a fixed word, meaning "the tour was closed once in this browser"; nothing
+// personal. Every access, the property read included (it throws when site data is blocked),
+// sits in the one try block: a blocked or failing storage reads as "not seen", so the tour
+// shows again and is dismissed as usual.
+const TOUR_STORAGE_KEY = "soos-remote-tour-v1";
+const TOUR_STORAGE_SEEN = "seen";
+
+// With markSeen === true, remembers the closed tour; otherwise answers whether it was.
+function tourStorage(markSeen) {
+  try {
+    if (markSeen === true) {
+      window.localStorage.setItem(TOUR_STORAGE_KEY, TOUR_STORAGE_SEEN);
+      return true;
+    }
+    return window.localStorage.getItem(TOUR_STORAGE_KEY) === TOUR_STORAGE_SEEN;
+  } catch (_) {
+    return false;
+  }
+}
+// soos-tour-storage:end
+
+let tour = null;
+// The page shown: 0 is the introduction, 1..TOUR_STEPS.length the features.
+let tourIndex = 0;
+// True once the first-run tour was offered in this page lifetime.
+let tourOffered = false;
+// True while a tour opened from the Feature tour button is shown (the focus goes back to it).
+let tourReplayed = false;
+
+// Builds the tour card (top of the page, hidden) and the Feature tour button of the footer.
+function buildTourCard() {
+  if (tour !== null) {
+    return tour;
+  }
+  const section = document.createElement("section");
+  section.className = "card tour";
+  section.hidden = true;
+  section.setAttribute("aria-label", TOUR_REGION_LABEL);
+  const counter = document.createElement("p");
+  counter.className = "tour-step";
+  const title = document.createElement("h2");
+  title.tabIndex = -1;
+  const text = document.createElement("p");
+  text.className = "tour-text";
+  const off = document.createElement("p");
+  off.className = "detail";
+  const where = document.createElement("p");
+  where.className = "banner tour-where";
+  const showButton = document.createElement("button");
+  showButton.type = "button";
+  showButton.className = "secondary";
+  setText(showButton, TOUR_SHOW_LABEL);
+  const nav = document.createElement("div");
+  nav.className = "tour-nav";
+  const backButton = document.createElement("button");
+  backButton.type = "button";
+  backButton.className = "secondary";
+  setText(backButton, TOUR_BACK_LABEL);
+  const nextButton = document.createElement("button");
+  nextButton.type = "button";
+  setText(nextButton, TOUR_NEXT_LABEL);
+  nav.appendChild(backButton);
+  nav.appendChild(nextButton);
+  const skipButton = document.createElement("button");
+  skipButton.type = "button";
+  skipButton.className = "secondary";
+  setText(skipButton, TOUR_SKIP_LABEL);
+  section.appendChild(counter);
+  section.appendChild(title);
+  section.appendChild(text);
+  section.appendChild(off);
+  section.appendChild(where);
+  section.appendChild(showButton);
+  section.appendChild(nav);
+  section.appendChild(skipButton);
+  loginSection.parentNode.insertBefore(section, loginSection);
+  const replayButton = document.createElement("button");
+  replayButton.type = "button";
+  replayButton.className = "tour-replay";
+  setText(replayButton, TOUR_REPLAY_LABEL);
+  const footer = document.querySelector("footer");
+  if (footer !== null) {
+    footer.insertBefore(replayButton, footer.firstChild);
+  }
+  replayButton.addEventListener("click", openTour);
+  nextButton.addEventListener("click", tourNext);
+  backButton.addEventListener("click", tourBack);
+  showButton.addEventListener("click", showTourTarget);
+  skipButton.addEventListener("click", closeTour);
+  tour = {
+    section: section,
+    counter: counter,
+    title: title,
+    text: text,
+    off: off,
+    where: where,
+    showButton: showButton,
+    backButton: backButton,
+    nextButton: nextButton,
+    skipButton: skipButton,
+    replayButton: replayButton,
+  };
+  return tour;
+}
+
+// True when neither the node nor any ancestor is hidden.
+function shownOnPage(node) {
+  for (let n = node; n !== null && n !== document.body; n = n.parentNode) {
+    if (n.hidden === true) {
+      return false;
+    }
+  }
+  return true;
+}
+
+// The card of this page a step points to, or null when it is not shown right now.
+function tourTarget(name) {
+  let node = null;
+  if (name === "status") {
+    node = statusCard;
+  } else if (name === "logout") {
+    node = logoutButton;
+  } else if (name === "alerts") {
+    node = alertsSection;
+  } else if (name === "push") {
+    node = pushSection;
+  } else if (name === "offline") {
+    node = offlineSection;
+  } else if (name === "camera" && camera !== null) {
+    node = camera.section;
+  }
+  return node !== null && shownOnPage(node) ? node : null;
+}
+
+function renderTour() {
+  const t = buildTourCard();
+  const index = Math.max(0, Math.min(tourIndex, TOUR_STEPS.length));
+  const total = TOUR_STEPS.length + 1;
+  tourIndex = index;
+  setText(t.counter, "Step " + (index + 1) + " of " + total);
+  if (index === 0) {
+    setText(t.title, TOUR_INTRO_TITLE);
+    setText(t.text, TOUR_INTRO_TEXT);
+    setText(t.off, TOUR_INTRO_NOTE);
+    setText(t.where, " ");
+    t.where.hidden = true;
+    t.showButton.hidden = true;
+  } else {
+    const step = TOUR_STEPS[index - 1];
+    setText(t.title, step.title);
+    setText(t.text, step.text);
+    setText(t.off, step.off);
+    setText(t.where, step.where);
+    t.where.hidden = false;
+    t.showButton.hidden = tourTarget(step.target) === null;
+  }
+  t.backButton.hidden = index === 0;
+  t.skipButton.hidden = index === TOUR_STEPS.length;
+  setText(t.nextButton, index === TOUR_STEPS.length ? TOUR_DONE_LABEL : TOUR_NEXT_LABEL);
+}
+
+// Opens the tour on its introduction and moves the focus to its title; `event` is set when
+// the Feature tour button opened it.
+function openTour(event) {
+  const t = buildTourCard();
+  tourReplayed = event !== undefined;
+  tourIndex = 0;
+  renderTour();
+  t.section.hidden = false;
+  t.title.focus();
+}
+
+// Skip, Done, Escape or a link: the card is hidden first (the focus goes back to the Feature
+// tour button when the tour was opened from it), then the closed tour is remembered.
+function closeTour() {
+  const t = buildTourCard();
+  t.section.hidden = true;
+  if (tourReplayed) {
+    tourReplayed = false;
+    t.replayButton.focus();
+  }
+  tourStorage(true);
+}
+
+function tourNext() {
+  if (tourIndex >= TOUR_STEPS.length) {
+    closeTour();
+    return;
+  }
+  tourIndex += 1;
+  renderTour();
+}
+
+function tourBack() {
+  const t = buildTourCard();
+  if (tourIndex > 0) {
+    tourIndex -= 1;
+    renderTour();
+  }
+  if (tourIndex === 0) {
+    // The Back button is now hidden: keep the focus in the card.
+    t.nextButton.focus();
+  }
+}
+
+// Closes the tour and moves the focus (and so the scroll position) to the card of the step;
+// nothing is clicked or changed.
+function showTourTarget() {
+  const step = TOUR_STEPS[tourIndex - 1];
+  const node = step === undefined ? null : tourTarget(step.target);
+  if (node === null) {
+    renderTour();
+    return;
+  }
+  closeTour();
+  if (node.tabIndex < 0 && !node.hasAttribute("tabindex")) {
+    node.setAttribute("tabindex", "-1");
+  }
+  node.focus();
+}
+
+// The first-run tour: once per page lifetime, when this browser does not remember it.
+function offerTour() {
+  if (tourOffered) {
+    return;
+  }
+  tourOffered = true;
+  if (!tourStorage()) {
+    openTour();
+  }
+}
+
+// Escape closes an open tour (a camera full screen takes Escape first).
+function tourKeydown(event) {
+  if (event.key === "Escape" && !cameraFull && tour !== null && !tour.section.hidden) {
+    closeTour();
+  }
+}
+
 // --- life cycle -----------------------------------------------------------------------
 
 function resume() {
@@ -2196,11 +2537,14 @@ window.addEventListener("pagehide", function () {
 });
 document.addEventListener("fullscreenchange", cameraFullscreenChanged);
 document.addEventListener("webkitfullscreenchange", cameraFullscreenChanged);
+// The tour listener runs first, so an Escape that leaves the camera full screen keeps the tour.
+document.addEventListener("keydown", tourKeydown);
 document.addEventListener("keydown", function (event) {
   if (event.key === "Escape" && cameraFull) {
     exitCameraFullscreen();
   }
 });
+buildTourCard();
 window.addEventListener("pageshow", resume);
 setInterval(renderUpdated, TICK_MS);
 registerServiceWorker();

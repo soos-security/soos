@@ -1213,6 +1213,42 @@ for it, and the alerts stay off if you refuse.
    the PC up, once normally and once with Battery Saver on: no alert arrives (record any false
    alert; it would argue for a network constraint, see the ADR amendment). Turn the alerts off: no further notification.
 
+## 2k. Feature tour (phone web app)
+
+ADR 2026-10-17 "Phone Onboarding Tour in the `soos-remote` Web App and Its Single Storage
+Exception" (GitHub #414, PR 2 of #363; the `soos-gui` tour is PR 1, `Docs/GUI_APPLICATION.md`).
+A short tour explains every feature of the phone page, what it exposes and where to turn it off.
+
+- **When.** It opens once on its own: on the first visit over the tailnet, or right after the
+  first passkey sign-in over Funnel (never over the sign-in screen). **Feature tour** at the
+  bottom of the page reopens it at any time. **Skip tour**, **Done** and Escape close it.
+- **Steps.** An introduction, then one step per feature: Phone companion, Battery level, Remote
+  lock and unlock, Internet access, Failed-password history, Push alerts, Live camera view,
+  Offline alerts. The six features the PC tour also covers keep its exact titles, explanations
+  and "Off:" lines (`crates/gui/src/onboarding.rs`). Each step says where to turn the feature
+  off: **Features** in `soos-gui` where it has a switch, otherwise the exact `remote.toml` key,
+  always with the keys that depend on it (for example `push_notifications = false` together
+  with `offline_alerts = false`, `allow_funnel = false` together with `camera_view_funnel =
+  false` and no `[android]` table), because `soos-remote` refuses a file that leaves a dependent
+  key on (exit 78). **Show it on this page** moves to the matching card when it is shown (the
+  status card, Sign out, the failed-password card, Notifications, Camera, Offline history).
+- **What it never does.** The tour switches nothing on its own, makes no request and shows fixed
+  English text only: no server data (alert counts, devices, battery level, camera state) and no
+  user data. The card and the footer button are built by `app.js` (no new markup id, no inline
+  style, CSP unchanged). Motion: the card enters with the `Docs/UI_MOTION.md` W4 entry
+  (`--t-medium`, `--ease-enter`, `--rise`) where `@starting-style` exists, and at once otherwise
+  or with reduced motion.
+- **What the browser stores.** The only storage of the web app, a narrow exception approved by
+  the owner on 2026-10-17 (#363): one `localStorage` key `soos-remote-tour-v1` whose only value
+  is the fixed word `seen`, written when the tour is closed. It holds nothing personal and is
+  read and written only by one guarded helper in `app.js`; clearing the site data of the page
+  shows the tour again. When the browser blocks site data (some private windows, "block all
+  cookies"), the tour simply opens on every visit and closes as usual, without an error.
+- **Native Android app.** The same tour in the native Android app (section 2j) is a follow-up
+  of #357; the app has no tour yet.
+
+Matrix rows PTR1–PTR11; invariant `remote_tour_contract`.
+
 ## 3. Requirements on the desktop
 
 - **`LockedHint` must be set by the desktop.** GNOME, Plasma and niri set it natively;

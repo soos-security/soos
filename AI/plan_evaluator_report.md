@@ -1,59 +1,78 @@
 # Plan Evaluation Report
-- **Date**: 2026-10-17 (round 1)
-- **Issue**: GitHub-only (no backlog id) — GNOME Shell unlock-dialog extension `soos-lockscreen@soos` (GitHub #405, PR 4 of epic #352)
-- **Branch**: `feat/lockscreen-gnome`
-- **Base commit**: `9e82795`
-- **Plan evaluated**: `AI/architect_spec_lockscreen_gnome.md` §1–§7
-- **Mode**: self-check by the implementing agent against `AI/ARCHITECTURE.md`, `AI/DECISIONS.md`, `AI/BACKLOG.md`, `AI/VERIFICATION_MATRIX.md` and the GNOME Shell sources; the independent candid review follows separately.
+- **Date**: 2026-10-17
+- **Issue**: GitHub-only (no backlog id) — first-run onboarding tour in the `soos-remote` web app (GitHub #414, PR 2 of epic #363)
+- **Branch**: `feat/phone-onboarding-tour`
+- **Base commit**: `6eb0746` (plus the lead's contract migration `73c24ee`)
+- **Plan evaluated**: `AI/architect_spec_phone_onboarding_tour.md` §1–§8
+- **Mode**: self-check by the implementing agent against `AI/ARCHITECTURE.md`, `AI/DECISIONS.md`, `AI/VERIFICATION_MATRIX.md`, `Docs/UI_MOTION.md`, `Docs/REMOTE_COMPANION.md` and the code; the independent candid review runs separately.
 
 ## 1. Coverage Matrix
 
-| Requirement (issue #405 / epic #352 / owner) | Spec element | Status |
+| Acceptance line (#363 phone part, #414, owner decision 2026-10-17) | Spec element | Status |
 |---|---|---|
-| System extension, `unlock-dialog` session mode (owner 2026-10-12) | §3 `session-modes` `["user", "unlock-dialog"]`, uuid `soos-lockscreen@soos`, never `gdm` | Covered |
-| Declared `shell-version` range starting at the first ESM release | §3: 45–51, APIs checked in 45.0 and 51.1 sources; owner to confirm | Covered |
-| `soos-lockstatus --watch` through `Gio.Subprocess`, absolute path, bounded lines | §4.2 candidates, fixed argv, 256-byte chunks and lines | Covered |
-| Only Scanning / Idle / Not recognized; `available:false` like Idle (Q2) | §4.2 parse and `present`, §4.3 labels | Covered |
-| Animate for PAM and presence scans alike (Q3) | §4.4 driven by the bridge's state only (the daemon already publishes both) | Covered |
-| Every callback in `try`/`catch`; no keyboard or input signal | §4.6, §5 S2 | Covered |
-| `disable()` comment and full cleanup | §4.1 | Covered |
-| `enable-animations` reduced motion | §4.4 via `St.Settings` | Covered |
-| Kill switch `/etc/soos/lockwidget.disable` (ADR 2026-10-15 item 8) | §4.5 | Covered |
-| Cannot unlock, scan, wake the camera or send input | §5 S1–S3, S9 | Covered |
-| Static contract tests (no gnome-shell in CI) | §6 LKG1–LKG8 | Covered |
-| PAM, daemon, protocol unchanged | §5 S8, LKG7, LKG11 | Covered |
-| ADR, `Docs/LOCKSCREEN_WIDGET.md` (row, install, troubleshooting, kill switch), `Docs/DISTRIBUTION_DEPLOYMENT.md` §5, matrix rows with pending owner hardware rows, walkthrough 215 | §2 files, §6 | Covered |
+| Short tour on first sign-in in the web app | §2 first run (`offerTour` from `showApp`, once per page lifetime) | Mapped |
+| Same wording as the PC tour | §4 (six shared titles, explanations, "Off:" lines equal to `onboarding.rs`) | Mapped |
+| Explains each phone-side feature and its exposure | §4 (eight steps, two phone-only) | Mapped |
+| Links to where each can be turned off | §2 links, §4 table | Mapped |
+| Switches nothing on its own | §5 | Mapped |
+| One key `soos-remote-tour-v1`, fixed value | §3 | Mapped |
+| Single guarded helper, every access in try/catch | §3 (exact code) | Mapped |
+| Blocked storage: tour unseen but dismissable, no error | §2 blocked storage, §3 | Mapped |
+| No other storage API | §3, PTR-S4 | Mapped |
+| Fixed English text, no user data | §4 | Mapped |
+| CSP without `unsafe-inline`, no `innerHTML`, feature detection, no new origin, no network call | §7, existing RXB-S8 / RMC-S49 / RMC-S18 plus PTR-S9 | Mapped |
+| Brand and motion tokens, reduced motion | §6 | Mapped |
+| ADR, matrix rows (unused prefix), walkthrough 222, `Docs/REMOTE_COMPANION.md` | §1, PTR-S10 | Mapped |
+| Native Android app parity | out of scope, follow-up | Mapped |
 
-## 2. Facts Verified
+## 2. Facts Verified Against Code
 
-| Fact cited by the plan | Check | Actual | Match |
+| Fact cited by plan | Code location | Actual value | Match |
 |---|---|---|---|
-| ESM extensions start at 45 | `js/extensions/extension.js` 45.0 exports `class Extension`; 44 used `imports` | ESM since 45 | Yes |
-| `Main.layoutManager.screenShieldGroup` is a `BinLayout` `St.Widget` | `js/ui/layout.js` 45.0 line 267, 51.1 line 264 | identical | Yes |
-| `ScreenShield.actor` is that group | 51.1 `screenShield.js` line 54 | `this.actor = Main.layoutManager.screenShieldGroup` | Yes |
-| `Main.sessionMode.isLocked` and `updated` | `js/ui/sessionMode.js` (`unlock-dialog` has `isLocked: true`; `emit('updated')`) | present in 45 and 51 | Yes |
-| `enable_animations` drives `ease` | `js/misc/animationUtils.js` `adjustAnimationTime` returns 0 when `!St.Settings.get().enable_animations` | 45 and 51 | Yes |
-| A thrown `enable()`/`disable()` is contained | `js/ui/extensionSystem.js` 45.0: `try { … stateObj.disable(); } catch (e) { this.logExtensionError(uuid, e); }`, same for enable | contained | Yes |
-| Extensions stay enabled across a lock when their modes include `unlock-dialog` | 51.1 `_extensionSupportsSessionMode` checks `currentMode` and `parentMode` | Yes | Yes |
-| `Clutter.BoxLayout` has `orientation` and `spacing`; `EASE_OUT_CUBIC`, `rotation-angle-z`, `translation-x`, `set_pivot_point` | `Clutter-51.gir` | present | Yes |
-| `St.DrawingArea` `repaint` + `get_context()` + `$dispose()`; theme foreground colour has `red/green/blue/alpha` | 45.0 and 51.1 `switcherPopup.js` `drawArrow`; 51.1 `environment.js` `setSourceColor` reads those fields | present | Yes |
-| `Layout.MonitorConstraint({primary: true})` exported and used by the unlock dialog | `js/ui/layout.js` 45.0 line 41 and 51.1 line 30 (`export const MonitorConstraint`), 51.1 `unlockDialog.js` line 772 | present | Yes |
-| `--watch` contract: keys `state`, `available`, `sequence`, ≤ 96 bytes | `crates/lockstatus/src/format.rs` `json`, matrix LKA5 | Yes | Yes |
-| `PENDING_LOOP_MAX_MS` = 4800 | `crates/lockstatus/src/motion.rs` line 23 | 4800 | Yes |
-| `gnome-extensions enable` on an unknown extension | 45.0 `command-enable.c`: prints "Extension … does not exist" | Yes | Yes |
-| `gnome-extensions info` state names | 45.0 `STATE_ENABLED`, 46+ `STATE_ACTIVE` | documented both | Yes |
+| Storage exception strips exactly one marked block | `tests/invariants/src/remote_companion_contract.rs::app_without_tour_storage` (73c24ee) | markers `// soos-tour-storage:begin` / `:end`, at most one block | Yes |
+| `index.html` id set is pinned | `remote_brand_contract.rs::test_rmc_s50_*` (`PAGE_IDS`, `getElementById` set) | 29 ids, `app.js` must use exactly them | Yes (tour built at run time) |
+| No template literal, `.message` only in `failureText`, two-argument `setText` | `remote_cross_browser_contract.rs::test_rxb_s5_*` | as cited | Yes |
+| Asset set and CSP pinned | `test_rxb_s8_no_new_network_surface` | 11 files, pinned CSP | Yes (unchanged) |
+| One reduced-motion block | `test_rmc_s48_*` | exactly one | Yes (unchanged) |
+| Motion token values | `Docs/UI_MOTION.md` §2, `ui_motion_spec_contract.rs` `TOKENS` | `--t-medium` 260ms, `--ease-enter` cubic-bezier(0.16, 1, 0.3, 1), `--rise` 6px | Yes |
+| Shared GUI wording | `crates/gui/src/onboarding.rs::Feature::{title, explanation, when_off}` | nine features, six phone-side | Yes |
+| GUI header button and labels | `onboarding_view.rs` | "Features", "Next", "Done", "Back", "Skip tour" | Yes |
+| Key dependants (`soos-remote` exit 78) | `crates/remote/src/config.rs` errors | `camera_view_funnel` needs `camera_view` and `allow_funnel`; `push_notifications` needs `password_alerts`; `offline_alerts` needs `push_notifications`; `[android]` needs `allow_funnel` | Yes |
+| `battery_status` default `true`, others default `false` | `Docs/REMOTE_COMPANION.md` §5 | as cited | Yes |
+| Prefix `PTR` unused | `grep -rn "PTR[0-9]" AI Docs tests` | no match | Yes |
 
-## 3. Pillars
+## 3. Pillar Analysis
 
-1. **Security invariants.** No path to unlock or input; no privileged component; no new socket; the extension only reads three coarse states the locked user's own processes can already read. Executing only root-owned binaries closes the "system extension executes a user-writable file" gap. No logging of state or bridge output. Pass.
-2. **Fail-safe.** Every failure renders Idle or removes the card; the shell contains exceptions; the stock unlock dialog is never touched (no `Main.screenShield` call, card added as a non-reactive child). Pass.
-3. **Bounds.** One process, one restart timer, one turn timer, 256-byte lines, pending buffer ≤ 512 bytes; back-off 1/2/4/8 s; the bridge itself polls at most 4 Hz. Pass.
-4. **Traceability.** LKG1–LKG8 static, LKG9–LKG10 owner hardware, LKG11 CI. Pass.
-5. **Scope.** No change to PAM, daemon, protocol, `soos-lockstatus`; KDE and installer untouched. Pass.
+### Pillar 1 — Architecture & threat model
+- Failure scenario considered: the tour reads server data (alert counts, devices) and a shoulder-surfer reads it from the first-run card. Result: PASS — §4/§5 forbid every server view in the tour functions (PTR-S5, PTR-S6).
+- Failure scenario considered: a new element id or inline style breaks the CSP-clean markup. Result: PASS — no `index.html` change; `.style.` banned (PTR-S9).
+
+### Pillar 2 — PAM deadline & concurrency
+- Not touched: no Rust code, no PAM, daemon or IPC change. The tour makes no request, so it adds no load on the companion's bounded connection pool.
+
+### Pillar 3 — Panic safety & fail-closed
+- Failure scenario considered: Safari with cookies blocked throws `SecurityError` on the `window.localStorage` getter, and an unguarded access stops `app.js` before the lock button is wired. Result: PASS — the getter itself sits inside the `try` (§3 exact code); `closeTour` hides the card before the call, so even a hypothetical throw could not leave the card stuck open.
+- Failure scenario considered: storage quota exceeded on `setItem`. Result: PASS — caught, `false`.
+
+### Pillar 4 — Dependencies
+- No dependency; no new asset, font or library.
+
+### Pillar 5 — Data confidentiality
+- Failure scenario considered: the stored value grows into a profile (timestamps, step reached). Result: PASS — exact code writes only the constant `seen`; PTR-S2 pins one key and one value.
+- Failure scenario considered: a manual-edit instruction leaves a dependant key on and the service refuses to start (exit 78), so the user loses the companion while trying to reduce exposure. Result: FINDING (MAJOR, fixed in the plan) — §4 table lists every dependant per key.
+
+### Pillar 6 — Test integrity
+- Failure scenario considered: the developer writes storage outside the block. Result: caught by RMC-S18/S30/S38 (migrated) and PTR-S1.
+- Failure scenario considered: the GUI wording changes and the phone drifts silently. Result: caught, PTR-S5 compares the strings with `onboarding.rs`.
+- Failure scenario considered: the existing CSS parsers of RMC-S45/S46/S47 or RXB-S7 reject `@starting-style`. Result: FINDING (MINOR, to verify in the red phase): if a parser fails, the motion falls back to no entry animation rather than any change to an existing test.
+- No existing test is modified by this plan (the lead's 73c24ee is the only migration).
 
 ## 4. Findings
 
-- F1 (MINOR, accepted): the change-set guard of LKG7 only runs in full clones (the CI test job is shallow); the PAM Docker matrix and the candid review cover the PR itself.
-- F2 (INFO): the `shell-version` list, the card position, the binary candidates and the easing approximation are owner-to-confirm defaults (spec §7), not decisions invented here.
+- **[MAJOR]** Manual off instructions must list dependants (exit 78 otherwise) — applied in spec §4.
+- **[MINOR]** `@starting-style` parse support in the existing CSS helpers is unverified — verify in Phase 2; fall back to no motion if needed.
+- **[MINOR, out of scope]** `soos-gui` turning `allow_funnel` off does not remove an `[android]` table, which `soos-remote` then refuses (exit 78); the phone text names the manual step and the GUI gap is reported as a follow-up.
+
+## 5. Verdict
 
 VALIDATION_VERDICT: APPROVED
