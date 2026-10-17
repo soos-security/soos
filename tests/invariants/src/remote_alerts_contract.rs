@@ -29,8 +29,8 @@
 )]
 
 use crate::remote_companion_contract::{
-    exists, macro_invocations, production_part, read, rust_files, strip_comments, toml_table,
-    TRACING_MACROS,
+    app_without_tour_storage, exists, macro_invocations, production_part, read, rust_files,
+    strip_comments, toml_table, TRACING_MACROS,
 };
 
 const JOURNAL_RS: &str = "crates/remote/src/journal.rs";
@@ -364,8 +364,9 @@ fn test_rmc_s30_page_alert_ui() {
         "?through=",
         "document.cookie",
     ] {
+        // Owner-approved contract migration (2026-10-17, #363): see `app_without_tour_storage`.
         assert!(
-            !app.contains(forbidden),
+            !app_without_tour_storage(&app).contains(forbidden),
             "app.js must not contain {forbidden}"
         );
     }

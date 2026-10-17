@@ -39,6 +39,32 @@ pub(crate) fn workspace_root() -> PathBuf {
         .to_path_buf()
 }
 
+/// Start marker of the only `app.js` block allowed to use `localStorage`: the phone tour's
+/// "seen" flag (owner decision of 2026-10-17 on GitHub #363, narrow exception to the web app's
+/// no-storage contract; the block itself is pinned by `remote_tour_contract`).
+pub(crate) const TOUR_STORAGE_BEGIN: &str = "// soos-tour-storage:begin";
+/// End marker of the phone tour storage block (see [`TOUR_STORAGE_BEGIN`]).
+pub(crate) const TOUR_STORAGE_END: &str = "// soos-tour-storage:end";
+
+/// `app.js` with the single phone tour storage block removed, so the no-storage checks
+/// still cover every other line. Panics unless both markers appear at most once, in order,
+/// and together (a missing block leaves the text unchanged).
+pub(crate) fn app_without_tour_storage(app: &str) -> String {
+    let begins = app.matches(TOUR_STORAGE_BEGIN).count();
+    let ends = app.matches(TOUR_STORAGE_END).count();
+    assert!(
+        begins <= 1 && begins == ends,
+        "app.js has at most one tour storage block: {begins} begin and {ends} end markers"
+    );
+    match (app.find(TOUR_STORAGE_BEGIN), app.find(TOUR_STORAGE_END)) {
+        (Some(start), Some(end)) => {
+            assert!(start < end, "the tour storage block ends after it begins");
+            format!("{}{}", &app[..start], &app[end + TOUR_STORAGE_END.len()..])
+        }
+        _ => app.to_string(),
+    }
+}
+
 pub(crate) fn read(rel: &str) -> String {
     let path = workspace_root().join(rel);
     fs::read_to_string(&path).unwrap_or_else(|e| panic!("Cannot read {}: {e}", path.display()))
@@ -1420,6 +1446,30 @@ fn test_rmc_s7b_documentation_describes_the_effective_host() {
         assert!(
             !doc.contains(stale),
             "Docs/REMOTE_COMPANION.md must no longer contain `{stale}` (RMC-S7b, RMC20 verified)"
+        );
+    }
+}
+
+/// The phone tour storage exception (owner decision 2026-10-17, #363) removes exactly one
+/// marked block: `localStorage` anywhere else stays visible to the no-storage checks.
+#[test]
+fn test_rmc_tour_storage_exception_is_one_marked_block() {
+    let block = format!("{TOUR_STORAGE_BEGIN}\nlocalStorage.getItem(k);\n{TOUR_STORAGE_END}");
+    let inside_only = format!("a();\n{block}\nb();\n");
+    let stripped = app_without_tour_storage(&inside_only);
+    assert!(!stripped.contains("localStorage"));
+    assert!(stripped.contains("a();") && stripped.contains("b();"));
+    let also_outside = format!("{inside_only}localStorage.setItem(x, y);\n");
+    assert!(app_without_tour_storage(&also_outside).contains("localStorage"));
+    assert_eq!(app_without_tour_storage("no block\n"), "no block\n");
+    for bad in [
+        format!("{block}\n{block}"),
+        format!("{TOUR_STORAGE_END}\n{TOUR_STORAGE_BEGIN}"),
+        format!("{TOUR_STORAGE_BEGIN}\nlocalStorage;\n"),
+    ] {
+        assert!(
+            std::panic::catch_unwind(|| app_without_tour_storage(&bad)).is_err(),
+            "rejected: {bad:?}"
         );
     }
 }

@@ -29,8 +29,8 @@
 use std::process::Command;
 
 use crate::remote_companion_contract::{
-    exists, macro_invocations, production_part, read, rust_files, strip_comments, toml_table,
-    workspace_root, TRACING_MACROS,
+    app_without_tour_storage, exists, macro_invocations, production_part, read, rust_files,
+    strip_comments, toml_table, workspace_root, TRACING_MACROS,
 };
 
 const PROTOCOL_LIB: &str = "crates/push-protocol/src/lib.rs";
@@ -732,8 +732,9 @@ fn test_rmc_s38_page_and_service_worker() {
         "the first awaited call of enableNotifications is Notification.requestPermission()"
     );
     for forbidden in ["innerHTML", "localStorage", "sessionStorage", "indexedDB"] {
+        // Owner-approved contract migration (2026-10-17, #363): see `app_without_tour_storage`.
         assert!(
-            !app.contains(forbidden),
+            !app_without_tour_storage(&app).contains(forbidden),
             "app.js must not contain {forbidden}"
         );
     }

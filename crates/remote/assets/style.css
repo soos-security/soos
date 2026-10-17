@@ -83,6 +83,10 @@
   --strip-h: 44px;
   --touch: 48px;
   --t-fast: 120ms;
+  /* Motion tokens of Docs/UI_MOTION.md section 2 used by the feature tour (W4 card entry). */
+  --t-medium: 260ms;
+  --ease-enter: cubic-bezier(0.16, 1, 0.3, 1);
+  --rise: 6px;
 }
 
 /*
@@ -521,6 +525,10 @@ button.danger:not(.secondary) {
   button.danger:not(.secondary):hover:not(:disabled) {
     background: var(--danger-fill-hover);
   }
+
+  footer button.tour-replay:hover:not(:disabled) {
+    background: transparent;
+  }
 }
 
 button:disabled {
@@ -742,7 +750,8 @@ footer a {
 /* Focus: a visible ring for keyboard focus, none for pointer focus. */
 button:focus-visible,
 a:focus-visible,
-input:focus-visible {
+input:focus-visible,
+.tour h2:focus-visible {
   outline: 3px solid var(--focus);
   outline-offset: 3px;
 }
@@ -893,4 +902,67 @@ html.camera-lock body {
 /* Offline history (ADR 2026-10-13): the list reuses the shared .table rules; a row may wrap. */
 .offline-history li {
   flex-wrap: wrap;
+}
+
+/*
+ * Feature tour (ADR 2026-10-17, GitHub #414): the card is built by app.js at the top of the
+ * page and holds fixed text only. It enters like the other revealed cards (Docs/UI_MOTION.md
+ * W4: opacity and --rise over --t-medium with --ease-enter) where @starting-style exists, and
+ * at once otherwise or under reduced motion (the reduced-motion block removes every
+ * transition). The footer button reads as a link and keeps the 48 px touch height.
+ */
+.tour {
+  transition: opacity var(--t-medium) var(--ease-enter), transform var(--t-medium) var(--ease-enter);
+}
+
+@starting-style {
+  .tour {
+    opacity: 0;
+    transform: translateY(var(--rise));
+  }
+}
+
+.tour-step {
+  color: var(--text-muted);
+  font-size: var(--f-caption);
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.tour-text {
+  color: var(--text);
+  font-size: var(--f-body);
+}
+
+.tour-where {
+  font-size: var(--f-body);
+  font-weight: 400;
+}
+
+.tour-nav {
+  display: flex;
+  gap: var(--gap-item);
+}
+
+.tour-nav button {
+  flex: 1 1 0;
+}
+
+footer button.tour-replay {
+  display: inline-flex;
+  align-items: center;
+  width: auto;
+  padding: 0 12px;
+  border-radius: var(--r-banner);
+  background: transparent;
+  color: var(--link);
+  font-size: var(--f-small);
+  font-weight: 400;
+  text-decoration: underline;
+}
+
+footer button.tour-replay:active:not(:disabled) {
+  background: transparent;
+  transform: none;
 }

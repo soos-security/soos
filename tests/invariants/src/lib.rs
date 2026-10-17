@@ -458,6 +458,17 @@ mod android_native_contract;
 #[cfg(all(test, unix))]
 mod android_heartbeat_contract;
 
+/// Phone onboarding tour of the `soos-remote` web app: the single marked `localStorage` block
+/// (one key `soos-remote-tour-v1`, one fixed value, every access in one `try`/`catch`), no
+/// other storage API, fixed English text with the `soos-gui` wording, no data read, no request
+/// and no switch from the tour, first run, replay and links, brand and motion tokens,
+/// documentation (GitHub #414, PR 2 of #363; owner decision of 2026-10-17 on #363; ADR
+/// 2026-10-17 "Phone Onboarding Tour in the `soos-remote` Web App and Its Single Storage
+/// Exception"; spec AI/architect_spec_phone_onboarding_tour.md; rows PTR1-PTR10, PTR11 being the owner's
+/// manual phone check).
+#[cfg(all(test, unix))]
+mod remote_tour_contract;
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,
