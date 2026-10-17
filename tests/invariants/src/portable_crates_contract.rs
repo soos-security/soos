@@ -232,7 +232,8 @@ fn test_mac_guard_query_sees_linux_only_crates() {
         ("soos-pam", &["pam-bindings"][..]),
         (
             "soos-daemon",
-            &["zbus", "zvariant", "tokio", "soos-camera-v4l"][..],
+            // zvariant was merged into zbus 6 (#416, owner-approved witness update).
+            &["zbus", "zbus_macros", "tokio", "soos-camera-v4l"][..],
         ),
         ("soos-gui", &["wayland-client", "x11rb"][..]),
     ] {
