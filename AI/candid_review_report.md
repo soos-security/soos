@@ -1,91 +1,135 @@
 # Candid Review Report
 
-- **Date**: 2026-10-18
-- **Target Branch**: `test/deflake-gui-store-task`
+- **Date**: 2026-10-17
+- **Target Branch**: `fix/android-alerts-feedback`
 - **Base (merge-base)**: `74782b8`
-- **Reviewed-Diff-Fingerprint**: `ffbb716da4e88858cd9375ae08dda714ad5fb2016f8290040011557984507848`
-- **Audited Files**: `AI/VERIFICATION_MATRIX.md`, `AI/walkthroughs/226_deflake_gui_store_task.md`, `Docs/GUI_APPLICATION.md`, `crates/gui/tests/store_task_tests.rs`
+- **Reviewed-Diff-Fingerprint**: `c88fbebee96e6346ff9803c3e270bdea812b88db6de871afed267012e2b07ef4`
+- **Audited Files**: `AI/VERIFICATION_MATRIX.md`, `AI/walkthroughs/227_android_alerts_feedback.md`,
+  `Docs/REMOTE_COMPANION.md`, `android/app/src/main/java/org/soos/remote/alerts/AlertsFeedback.kt`,
+  `android/app/src/main/java/org/soos/remote/ui/SoosApp.kt`,
+  `android/app/src/test/java/org/soos/remote/AlertsFeedbackTest.kt`,
+  `tests/invariants/src/android_alerts_feedback_contract.rs`, `tests/invariants/src/lib.rs`
 
 ## 1. Executive Summary
 
-This is a test-only change. The `wait_outcome` helper in `crates/gui/tests/store_task_tests.rs` checked its 10 s deadline before polling. A test thread descheduled across the deadline therefore exited without a final poll. The helper is rebuilt on a generic `poll_until(deadline_passed, poll, pause)` that polls first and checks the deadline after. Two new tests, DGS1 and DGS2, cover the ordering and the bound. No production, PAM, IPC, Cargo or automation file changes. No SGU test body, assertion, message or `#[test]` attribute changes. There is one minor documentation remark and one cosmetic suggestion, and no CRITICAL or MAJOR finding.
+Android-only client fix (GitHub #420). The acknowledgement feedback of the alerts card moves
+from a `@StringRes Int?` decided inline in `HomeScreen` to a pure Kotlin helper
+(`AlertsFeedback`: `ofAck`, `needsRefresh`, `afterRefresh`). `refresh()` now clears the feedback
+before its first request, has a single exit, and re-applies only the feedback carried by the
+acknowledgement's follow-up refresh; a `login_required` refusal followed by a signed-out
+refresh is shown as the screen message. No server, protocol, PAM, dependency, permission or
+string-resource change. The test side of the diff is purely additive. No CRITICAL or MAJOR
+finding; two MINOR notes and one SUGGESTION.
 
-## 2. Test Changes (mechanical listing from step 3)
+## 2. Test Changes
 
-- Test files touched: `crates/gui/tests/store_task_tests.rs` only.
-- Removed or changed check lines: one, at patch line 158: `assert!(outcomes.is_empty(), "one outcome per task");` in the old `wait_outcome` body. Justification: the helper was rewritten, and the new `poll` closure keeps the same assertion with the same condition and message. It still fires exactly when an outcome was popped and others remain. The panic text `no store task outcome within 10 s` and the 10 s bound are kept. The assertion moved inside a helper and was not weakened.
-- New escape hatches (`#[ignore]`, `should_panic`, tolerance, epsilon): none.
-- Changes to inline `mod tests`: none.
-- New tests: `test_dgs_wait_polls_once_more_after_a_stall_past_the_deadline`, `test_dgs_wait_still_gives_up_after_the_timeout`.
-- `git diff 74782b8 HEAD -- tests 'crates/*/tests' android/app/src/test` touches only the file above. No pre-existing assertion was removed or changed.
+Mechanical listing from `target/candid_diff.patch`:
+
+- Test files touched: `android/app/src/test/java/org/soos/remote/AlertsFeedbackTest.kt` (new),
+  `tests/invariants/src/android_alerts_feedback_contract.rs` (new),
+  `tests/invariants/src/lib.rs` (+8 lines: one new `mod` declaration with its doc comment).
+- Removed or changed assertions / `#[test]` lines (`^-` grep): **none**.
+- New escape hatches (`#[ignore]`, `should_panic`, tolerance, epsilon): **none**.
+- Inline `mod tests` changes: **none**.
+- `git diff 74782b8 HEAD --stat -- tests 'crates/*/tests' android/app/src/test`: 384 insertions,
+  0 deletions. No pre-existing assertion was removed, weakened or changed.
 
 ## 3. Deep Reasoning Audit
 
 ### Logic & Architecture
 
-- I traced the old and new ordering by hand on the DGS1 scenario:
-  - The old order runs check(false), poll(None), pause (sets the flag), check(true) and returns `None`. DGS1 therefore fails red, as the walkthrough states (`left: None`, `right: Some(2)`).
-  - The new order runs poll(None), check(false), pause, poll(Some(2)) and returns `Some(2)`.
-  
-  PASS.
-- DGS2 takes `started` before `after(30 ms)` builds its deadline. `poll_until` returns `None` only when `Instant::now() >= deadline`, so `took >= 30 ms` holds by construction. The 10 s upper bound is generous, so the test is not load-sensitive. PASS.
-- `after()` computes its deadline when it is called, at the start of `wait_outcome`, as before. The bound is still 10 s. PASS.
-- The new helper adds at most one poll after the deadline. It cannot loop forever, because the real-clock predicate stays true once it becomes true. PASS.
-- I checked the production claims against `crates/gui/src/store_tasks.rs`:
-  - The worker runs the job under `catch_unwind`, then calls `tx.send`, then `notify` (lines 177-183).
-  - `poll` drains `try_iter` and synthesizes `WORKER_LOST_MESSAGE` for a finished worker that sent no outcome (lines 229-243).
-  - `worker_failure_tests::wait_outcome` receives first and checks the deadline after (lines 274-283).
-  - `BiometricStore::with_lock_timeout` exists, and `LOCK_WAIT` is 600 ms.
-  
-  All of these claims are accurate.
-- I checked the CI evidence with `gh run view 39062359937 --attempt 1 --log-failed`:
-  - `running 6 tests` at 19:29:08.651.
-  - The enroll test reports `FAILED` at 19:29:20.889.
-  - The delete test reports `ok` at 19:29:20.8917, 2.7 ms later.
-  - The run reports `finished in 12.24s`, with the panic at old line 91, the helper's `panic!`.
-  
-  All of this is accurate. See MINOR 1 for the one inference stated as fact.
+- Stale "Acknowledged.": after `200`, `needsRefresh` is false and the card shows DONE; every
+  later `refresh()` (Refresh button, pull to refresh, sign-in, sign-out, Lock PC,
+  `LaunchedEffect`) passes `carried = null`, sets `ackFeedback = null` first, and
+  `afterRefresh(null, *)` yields `NONE` for every outcome. PASS.
+- `login_required` path: the Funnel gate (`crates/remote/src/server.rs` around line 1307) answers
+  `403 login_required` for a non-public route without a valid session before routing, so `ofAck`
+  gives `LOGIN_REQUIRED`; the follow-up `authState()` reports unauthenticated, `clearAlerts()`
+  hides the card and `afterRefresh(LOGIN_REQUIRED, SIGNED_OUT)` sets `message` to the fixed
+  `alerts_ack_login_required` string ("Your session ended. Sign in again.", verified in
+  `strings.xml`). PASS.
+- Unreachable during the follow-up refresh: the early `return` became an `if/else` expression;
+  `busy = false` is always reached and the unreachable message is not overwritten (`NONE`). PASS.
+- Token mapping in `ofAck` is identical to the removed `ackRefusalText` (six tokens, anything
+  else or a null token → REFUSED). `ackFeedbackText` is an exhaustive `when` (no `else`) over the
+  nine enum entries, each mapped to the same `R.string` as before. PASS.
+- Server-behaviour claims (walkthrough §2, `AlertsCard` comment, §2j) verified against code:
+  `RemoteAlerts::acknowledge` returns `Unavailable` only on a poisoned lock or a missing book
+  (`alerts.rs` 1041–1046); `RemoteAlerts::view` returns `AlertsView::empty` (epoch `None`, zero
+  counts) in both cases (`alerts.rs` 929–948); `AlertsView::disabled()` is `empty(...)`;
+  `alerts_ack` answers `403 alerts_disabled` when `shared.alerts` is `None` (`server.rs`
+  2150–2152); web rule `alertsAckButton.hidden = !(wrong > 0 || lockedOut > 0) || typeof
+  view.epoch !== "string"` (`app.js` 820). `WEB_SESSION_IDLE_MS = 900_000` matches "more than 15
+  minutes" in owner step 5; Funnel requests refresh the session (`Touch::Refresh`), so asking to
+  keep PC offline alerts off during that step is correct. PASS.
+- Re-entrancy: `acknowledge()` sets `busy = false` then calls `refresh()`, whose first two
+  statements (`ackFeedback = null`, `busy = true`) run before any suspension point, so no other
+  refresh can start in between. PASS.
 
 ### PAM Concurrency & Deadlines
 
-There is no `crates/pam` change, so this pillar does not apply. PASS.
+Not affected: no file under `crates/pam`, the daemon or IPC changes. PASS (N/A).
 
 ### Panic Safety & Fail-Closed
 
-Only test code changes. `unwrap_or_else(|| panic!(..))` sits in a test helper covered by the file's existing test lint allowance. No production path is touched. PASS.
+No authorization decision is touched; the change is display-only. The Kotlin helper has no
+`!!`, no indexing and no throw. The Rust code is test-only (`#[cfg(all(test, unix))]`) with the
+same explicit `allow` list as the sibling contract modules. PASS.
 
 ### Test Integrity & Anti-Weakening
 
-- I reviewed the step 3 output above. The new body keeps the single removed assertion line word for word.
-- The SGU test bodies do not change in the diff: `test_sgu_enroll_submit_never_blocks_on_a_held_store_lock`, `test_sgu_delete_submit_never_blocks_and_keeps_the_template_when_busy` and the other four.
-- DGS1 fails against the plausible wrong implementation, the old order. DGS2 fails against an unbounded implementation or one that returns early (`took >= 30 ms`, `took < 10 s`, `polls >= 1`). PASS.
+- The diff is additive (section 2).
+- The JVM tests fail against plausible wrong implementations: carrying DONE through a plain
+  refresh (`afterRefresh(null, *)` must be `NONE`), dropping the signed-out promotion, promoting
+  any other feedback to the notice (`aSignedOutRefreshShowsOnlyTheLoginRequiredNotice` iterates
+  every entry), or a token-mapping regression. The static AAF2 test pins "clear first", the
+  single exit (`return` count 0), the only carried call site and the exhaustive mapping.
+- The JVM tests could not be compiled on this host (no `java`, `kotlinc` or `gradle`); they rely
+  on the CI job `Android (debug build)`, as matrix row AAF1 states (pending). By reading, the
+  `AlertsView` constructor arguments match `net/ApiJson.kt`, `ApiResult.Refused(Int, String?)`
+  and `Ok<T>` match `net/SoosApi.kt`, and `.entries` is available (Kotlin 2.2.21, already used
+  by `HeartbeatTextsTest.kt`). PASS.
 
 ### Memory, Bounds & Secrets
 
-The wait stays bounded: 10 s in SGU use and 30 ms in DGS2. Nothing new is logged, and no frames, embeddings or credentials are involved. PASS.
+No new I/O, allocation or network call. Only fixed `strings.xml` texts are displayed; a server
+token only selects an enum value; no `.message`, `localizedMessage` or logging (the existing
+`test_ana_s14_alerts_contract` and `test_ana_s8_kotlin_hygiene` still pass). No password, frame
+or embedding is involved. PASS.
 
 ### Supply Chain & Automation
 
-No `Cargo.*`, `deny.toml`, `.github/`, `scripts/` or `.githooks/` change. PASS.
+No `Cargo.*`, Gradle, `deny.toml`, `.github/`, `scripts/` or `.githooks/` change. PASS (N/A).
 
 ### English-Only Policy
 
-All added text is in English ("Synchronisation" is British spelling, still English). The commit subject `test(gui): deflake the held-store-lock enroll task test` follows Conventional Commits with one scope and is under 72 characters. PASS.
+All code, comments, docs and the commit message are English; non-ASCII characters are only
+typographic (em dash, en dash, section sign, the matrix status symbols used elsewhere). The
+commit subject `fix(android): keep alerts ack feedback in step with the displayed view` is a
+single-scope Conventional Commit of 70 characters. PASS.
 
-### Commands re-run by the reviewer
+### Commands Re-run
 
-All commands ran with `LIBONNXRUNTIME_NO_PKG_CONFIG=1 CARGO_TARGET_DIR=~/.cache/soos-targets/deflake-gui-store-task CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_BUILD_JOBS=3`:
+With `LIBONNXRUNTIME_NO_PKG_CONFIG=1 CARGO_TARGET_DIR=~/.cache/soos-targets/android-alerts-feedback
+CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_BUILD_JOBS=3`:
 
-- `cargo fmt -p soos-gui -- --check`: clean.
-- `cargo clippy -p soos-gui --all-targets -- -D warnings`: clean.
-- `cargo test -p soos-gui --test store_task_tests -- --test-threads=3`: 8 passed, which matches the walkthrough.
-- `cargo test -p soos-invariants -- --test-threads=3`: 771 passed.
-- I did not reproduce the 50/50 load run cited in DGS1. The evidence that matters is the deterministic DGS1 red/green pair, as the walkthrough itself says.
+- `cargo test -p soos-invariants --lib -- --test-threads=3`: 774 passed, 0 failed.
+- `cargo clippy -p soos-invariants --all-targets -- -D warnings`: clean.
+- `cargo fmt --check -p soos-invariants`: clean.
 
 ## 4. Detailed Findings & Action Items
 
-- **[MINOR]** `AI/walkthroughs/226_deflake_gui_store_task.md:17`: The walkthrough says the failure was at the *second* `wait_outcome` deadline, about 19:29:19.3, and that the panic came 1.6 s late. The CI backtrace shows only that the test function called `wait_outcome`, without the call-site line, so it does not show which of the two calls failed. If it was the first call, the deadline was about 19:29:18.66 and the panic came about 2.2 s late. The root-cause conclusion holds either way: the test thread was descheduled past its deadline. Optional correction: present this as an inference ("assuming the second call").
-- **[SUGGESTION]** `AI/VERIFICATION_MATRIX.md:1795-1796`: the SGU1 and SGU2 rows have a stray space before the period ("` . Note:`"). Cosmetic.
+- **[MINOR]** `AI/walkthroughs/227_android_alerts_feedback.md:90` — section 7 says the candid
+  review was "Not run in this session" and that no `AI/candid_review_report.md` is written; with
+  this report committed, the sentence is outdated. Either accept it as a record of the author
+  session or update it (which changes the diff and needs a new review run).
+- **[MINOR]** `android/app/src/main/java/org/soos/remote/ui/SoosApp.kt:385` — on a refused
+  acknowledgement, `ackFeedback = feedback` is reset to `null` by `refresh()` in the same frame
+  and restored only after the follow-up round-trips, so the refusal text is invisible while that
+  refresh is in flight. The final state is correct; the assignment only matters for `200`.
+- **[SUGGESTION]** `tests/invariants/src/android_alerts_feedback_contract.rs:175-185` — the
+  call-site counting (`refresh()` count `>= 5`, `refresh(` count equal to `refresh()` count + 2)
+  is brittle against unrelated future edits (for example a comment mentioning `refresh(`).
 
 ## 5. Final Verdict
 
