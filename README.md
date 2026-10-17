@@ -32,7 +32,8 @@ match value comes from mock models on synthetic data, not from the real models. 
 - **Privilege separation.** The PAM module never touches the camera. It asks a sandboxed root daemon over a
   Unix socket with small, bounded messages, and the daemon is the only process that opens `/dev/video*`.
 - **Your password always works.** Every error, timeout, missing camera or unknown face makes the module step
-  aside (`PAM_IGNORE`), and the usual password prompt continues. A kill switch turns soos off at once.
+  aside (`PAM_IGNORE`), and the usual password prompt continues. A kill switch turns face unlock and presence
+  auto-unlock off at once.
 - **Optional phone companion.** See from your phone whether the PC is locked, lock it remotely, unlock it
   with a passkey and watch the PC camera live, over your own Tailscale network or, through Tailscale Funnel,
   from the internet. The one-command setup turns these features on and a manual install leaves them off
@@ -51,9 +52,9 @@ Every feature below is merged on `main` and documented.
 | One-command setup | `scripts/setup.sh` detects the host, installs the build dependencies and the pinned Rust toolchain, builds, installs and enrolls your face; with your Tailscale login and node name it also sets up the phone companion with every feature on; PAM activation stays a separate step | [`Docs/PACKAGING_AND_PROVISIONING.md`](Docs/PACKAGING_AND_PROVISIONING.md) §3.0 |
 | Packages and installer | `.deb`, `.rpm` and Arch packages, a fail-closed installer that rolls back on error, upgrade and uninstall procedures | [`Docs/PACKAGING_AND_PROVISIONING.md`](Docs/PACKAGING_AND_PROVISIONING.md) §7, §9 |
 | Desktop app `soos-gui` | Live diagnostic, guided enrollment with liveness checks, enrolled profiles, first-run tour with feature switches | [`Docs/GUI_APPLICATION.md`](Docs/GUI_APPLICATION.md) |
-| Lock-screen widget | Shows on the lock screen whether soos is scanning your face: a swaylock-plugin background widget and a hyprlock label (GNOME Shell and KDE Plasma adapters come later) | [`Docs/LOCKSCREEN_WIDGET.md`](Docs/LOCKSCREEN_WIDGET.md) |
+| Lock-screen widget | Shows on the lock screen whether soos is scanning your face: a swaylock-plugin background widget, a hyprlock label and a GNOME Shell 45+ extension (a KDE Plasma adapter comes later) | [`Docs/LOCKSCREEN_WIDGET.md`](Docs/LOCKSCREEN_WIDGET.md) |
 | Phone companion `soos-remote` | User-level service reached over Tailscale Serve, or Funnel from the internet: lock status, remote lock, passkey unlock, failed-password alerts, push notifications, live camera view after a passkey check, battery level, offline history. The one-command setup turns Funnel, unlock, the camera view and the alerts on; a manual install leaves them off; each can be turned off in `remote.toml`, and all but the failed-password alerts also in `soos-gui` | [`Docs/REMOTE_COMPANION.md`](Docs/REMOTE_COMPANION.md) |
-| Native Android app (first version) | Sideloaded Kotlin app for the companion: PC status, remote lock, passkey sign-in over Funnel, opt-in PC offline alerts | [`Docs/REMOTE_COMPANION.md`](Docs/REMOTE_COMPANION.md) §2j |
+| Native Android app (first version) | Sideloaded Kotlin app for the companion: PC status, remote lock, passkey sign-in over Funnel, opt-in PC offline alerts | [`Docs/REMOTE_COMPANION.md`](Docs/REMOTE_COMPANION.md) §2j "Native Android app" |
 | Network lock | Opt-in polkit rule: changing the Wi-Fi network or turning the radio off asks for an administrator password | [`Docs/NETWORK_LOCK.md`](Docs/NETWORK_LOCK.md) |
 | Intrusion snapshots | Opt-in, encrypted camera snapshots of failed attempts, with daily caps and 7-day retention | [`Docs/EVIDENCE_STORE_CRATE.md`](Docs/EVIDENCE_STORE_CRATE.md) |
 | Attested models | Every model file is checked against its SHA-256 at daemon start (a missing or modified file stops the start) and against its declared tensor shapes before use | [`models/README.md`](models/README.md) |
@@ -94,7 +95,7 @@ at the PC), stops `soos-daemon` during the enrollment (the daemon owns the camer
 auto-unlock stays on (`--presence off` turns it off). It does **not** activate PAM (step 4 stays explicit).
 With your Tailscale login and node name (`--tailscale-login you@example.com --rp-id mypc.tail1234.ts.net`, or
 asked interactively) it also sets up the phone companion as you, with every feature on (each can be turned off
-later in soos-gui), and prints the Tailscale and passkey steps it never runs itself; `--no-remote` skips it.
+later in `remote.toml`, and all but the failed-password alerts in soos-gui), and prints the Tailscale and passkey steps it never runs itself; `--no-remote` skips it.
 Details, flags and exit codes:
 [`Docs/PACKAGING_AND_PROVISIONING.md`](Docs/PACKAGING_AND_PROVISIONING.md) §3.0.
 
@@ -367,7 +368,7 @@ GDM only. `scripts/uninstall.sh` restores the PAM stack (see the [Quick Start](#
 
 Debian 12, Ubuntu 24.04, Fedora 40 / RHEL 9 and Arch Linux with systemd. Presence auto-unlock works with GNOME
 and KDE Plasma lock screens; wlroots lockers need the `swayidle` hooks. The lock-screen widget supports
-swaylock-plugin and hyprlock ([`Docs/DISTRIBUTION_DEPLOYMENT.md`](Docs/DISTRIBUTION_DEPLOYMENT.md),
+swaylock-plugin, hyprlock and GNOME Shell 45 or later; KDE Plasma comes later ([`Docs/DISTRIBUTION_DEPLOYMENT.md`](Docs/DISTRIBUTION_DEPLOYMENT.md),
 [`Docs/LOCKSCREEN_WIDGET.md`](Docs/LOCKSCREEN_WIDGET.md)).
 </details>
 

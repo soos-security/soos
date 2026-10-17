@@ -120,7 +120,7 @@ Consequences:
   `remote unlock requested`, an accepted Funnel login one line `remote login accepted`, a new
   passkey one line `passkey registered`, without any of these.
 
-## 2a. Remote unlock (opt-in)
+## 2a. Remote unlock (off by default, on after `scripts/setup.sh`)
 
 `POST /api/unlock` asks systemd-logind to unlock the owner's local session (the same session
 the lock picks: `Class=user`, `Remote=false`, on a seat, the active one first). logind emits its
@@ -171,8 +171,9 @@ without any paid service, through **Tailscale Funnel** on the node's own `*.ts.n
 **port 443** only. Authentication is in-house: WebAuthn passkeys (user verification required:
 Face ID, fingerprint or screen lock), verified by `soos-remote` itself.
 
-**Funnel is optional.** The default, and the recommended deployment, stays **tailnet-only**
-(`tailscale serve`, the phone connected to the tailnet with the Tailscale VPN): with
+**Funnel is optional.** The code default and the manual install stay **tailnet-only**
+(`tailscale serve`, the phone connected to the tailnet with the Tailscale VPN); the one-command
+`scripts/setup.sh` turns Funnel on (owner decision of 2026-10-15: no VPN on the phone, section 4): with
 `allow_funnel` absent or `false` every Funnel request is `403`, and the passkeys still protect
 every unlock (section 2a). Enable Funnel only if you accept the extra public exposure described
 under *Accepted risk* below. Other public exposure paths (for example Cloudflare Tunnel or
@@ -255,7 +256,7 @@ accepted, bounded stall: each Funnel request re-reads at most 16 KiB of the loca
 again only when it changed), and a write (registration, removal, counter change of a device-bound
 passkey) is one small atomic write waited for at most 500 ms on the lock.
 
-## 2c. Failed-password alerts (opt-in)
+## 2c. Failed-password alerts (off by default, on after `scripts/setup.sh`)
 
 When someone types a wrong password on the PC (lock screen, `sudo`, GDM or console login, any
 other local PAM password check), the page shows a banner such as
@@ -346,7 +347,7 @@ lock-screen attempts that only `unix_chkpwd` logs); root-side attempts (`sudo`, 
 and the first failure of each lock-screen prompt are still counted. Such a process already runs
 as you. Section 8 lists the other residual limitations.
 
-## 2d. Push notifications (opt-in)
+## 2d. Push notifications (off by default, on after `scripts/setup.sh`)
 
 With `push_notifications = true` the phone is told about failed passwords on the PC **even
 when the app is closed**: a standard Web Push notification to the phone web app: the
@@ -591,7 +592,7 @@ soos Brand Direction Applied to the `soos-remote` Web App" in `AI/DECISIONS.md`)
   from the brand archive. The later camera card (section 2f) is built by `app.js` at runtime with
   the same tokens and adds no element id.
 
-## 2f. Live camera view (opt-in)
+## 2f. Live camera view (off by default, on after `scripts/setup.sh`)
 
 The page can show the PC's camera live (ADR "[2026-10-07] Live Camera View in `soos-remote`
 Through the Daemon Preview Channel", GitHub #345): to check who is in front of the PC, or that
@@ -982,7 +983,7 @@ sentence and nothing stays subscribed (`soos-remote push list` unchanged); RXB20
 window (Chrome incognito and Firefox private): the matching push sentence while status and lock
 keep working.
 
-## 2j. Offline history and back-online notifications (opt-in)
+## 2j. Offline history and back-online notifications (off by default, on after `scripts/setup.sh`)
 
 ADR 2026-10-13 "Offline History and Back-Online Push Notifications in `soos-remote`" (GitHub #376,
 tier 1 of #359 Part B). The PC cannot report its own disappearance while it is offline, so this
