@@ -293,10 +293,12 @@ of trust.
   Funnel (`camera_view`, `camera_view_funnel`), turned on, together with the failed-password, push and offline
   alerts. Each of the four is passkey-protected: a request over Funnel needs a passkey sign-in, every unlock
   needs a fresh passkey check with user verification, and every camera view starts with one. On the tailnet,
-  status and lock need no passkey. Funnel, remote unlock and the camera view each have an off switch in
-  `soos-gui` (the feature switches of the first-run tour, also reached with its **Features** button); turning
-  Funnel or the camera view off there also sets `camera_view_funnel` to `false`. In `remote.toml`, set a key to
-  `false` together with the keys that depend on it, or `soos-remote` refuses the file (exit 78):
+  status and lock need no passkey. Funnel, remote unlock, the camera view, push and offline alerts each have an
+  off switch in `soos-gui` (the feature switches of the first-run tour, also reached with its **Features**
+  button); turning Funnel or the camera view off there also sets `camera_view_funnel` to `false`, and turning
+  push off also sets `offline_alerts` to `false`. The failed-password alerts have no switch there. In
+  `remote.toml`, set a key to `false` together with the keys that depend on it, or `soos-remote` refuses the
+  file (exit 78):
   `camera_view_funnel` goes off with `allow_funnel` or `camera_view`, `push_notifications` and `offline_alerts`
   with `password_alerts`, `offline_alerts` with `push_notifications`, and an `[android]` table needs
   `allow_funnel`. A manual install (`scripts/install_remote.sh`) and the code defaults leave all of

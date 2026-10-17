@@ -450,6 +450,13 @@ mod readme_assets_contract;
 #[cfg(all(test, unix))]
 mod readme_contract;
 
+/// Companion off-switch and opt-in wording tied to the setup defaults: `setup.sh` never says
+/// every feature has a `soos-gui` switch (none exists for `password_alerts`), the docs no
+/// longer call setup-enabled keys opt-in, and the README names every switch (GitHub #423,
+/// part of #362; spec AI/architect_spec_companion_wording.md; rows CWD1-CWD5).
+#[cfg(all(test, unix))]
+mod companion_wording_contract;
+
 /// Native Android app foundation: no secret file, exact pins, verified Gradle distribution and
 /// dependency metadata, no analytics/Firebase/Play services, manifest hardening, brand colours
 /// and icon, Kotlin hygiene, pinned CI job and build script, login-only and silent app binding
