@@ -2,8 +2,8 @@
 
 - **Date**: 2026-10-17
 - **Target Branch**: `chore/readme-redesign`
-- **Base (merge-base)**: `9e82795`
-- **Reviewed-Diff-Fingerprint**: `c9ed6b0fe236f381e82bf13d4254bc512301f23280410008d3dbba46350c9d88`
+- **Base (merge-base)**: `aa25f78`
+- **Reviewed-Diff-Fingerprint**: `a49bd92b6f909255653a1c9fe424b6fcfbcd6e826e681c2da731b876189b95ed`
 - **Audited Files**: `AI/DECISIONS.md`, `AI/VERIFICATION_MATRIX.md`, `AI/architect_spec_readme_redesign.md`,
   `AI/auditor_constraints_readme_redesign.md`, `AI/walkthroughs/216_readme_redesign.md`,
   `Docs/DEVELOPMENT_WORKFLOW.md`, `Docs/README.md`, `README.md`, `tests/invariants/src/lib.rs`,
@@ -11,90 +11,110 @@
 
 ## 1. Executive Summary
 
-Documentation-only change (GitHub #408, PR 2 of #356): `README.md` is restructured as a product landing
-page, and a new std-only invariant module `readme_contract` (RDM1-RDM8) pins its links, badges, wording,
-section order, security section and cited comparison. No runtime crate, workflow, script, dependency or
-asset is touched. The existing Quick Start, Upgrade and License text is preserved: the only README lines
-removed are the old title, the old "enterprise-grade" intro paragraph and two section headers/separators.
-Scoped gates re-run by this reviewer: `cargo test -p soos-invariants -- --test-threads=3` (715 passed,
-0 failed, 0 ignored), `cargo clippy -p soos-invariants --all-targets -- -D warnings` (clean),
-`cargo fmt --check -p soos-invariants` (clean). No CRITICAL or MAJOR finding.
+Re-review after the rebase of `chore/readme-redesign` from `9e82795` onto `origin/main` `aa25f78`
+(main gained #411, #417 zbus 6 migration, #413 lazy lock-widget buffer and #402 setup user phase).
 
-## 2. Test Changes (mechanical listing from step 3, with justification per change)
+Rebase integrity: `git range-diff 9e82795..3a1ce5c aa25f78..03f5ff1` shows only context changes.
+Per file, the delta between the old and new branch tips equals main's own delta (identical
+`git patch-id`) for every file except `AI/DECISIONS.md`, where both sides appended an ADR at the end;
+the conflict was resolved by keeping main's ADRs and appending the branch ADR unchanged (the branch's
+`+`/`-` lines against each base are byte-identical; no conflict marker remains). The branch's own
+changes are unchanged by the rebase.
 
-- Test files touched: `tests/invariants/src/lib.rs` (+8 lines: doc comment and
-  `#[cfg(all(test, unix))] mod readme_contract;` only) and `tests/invariants/src/readme_contract.rs` (new).
-- Removed or changed assertions (`^-` lines with `assert`, `#[test]`, `proptest!`, `should_panic`): **none**.
-- New escape hatches (`#[ignore]`, `#[cfg(any())]`, `should_panic`, tolerance, epsilon): **none**.
+Gates: `cargo test --locked -p soos-invariants -- --test-threads=4` → 739 passed, 0 failed;
+`cargo clippy --locked -p soos-invariants --all-targets -- -D warnings` → clean.
+
+However, the semantic check against #402 (merged just before) finds that the new README's security
+and feature claims now contradict the recommended install path: `scripts/setup.sh` writes
+`allow_unlock = true`, `camera_view = true` and `camera_view_funnel = true` by default (ADR
+2026-10-15 "Setup User Phase", item (3)), and the README's own Quick Start (text from #402) says the
+companion is set up "with every feature on". The README Security model still says "Remote unlock is
+off by default". Since the ADR of this branch makes truthfulness the security property of the README,
+this is a MAJOR finding. Verdict: CHANGES_REQUESTED.
+
+## 2. Test Changes
+
+Mechanical listing from `target/candid_diff.patch`:
+
+- Test files touched: `tests/invariants/src/lib.rs` (adds `#[cfg(all(test, unix))] mod readme_contract;`
+  and its doc comment only), `tests/invariants/src/readme_contract.rs` (new file, RDM1–RDM8).
+- Removed or changed assertions (`^-` with `assert`/`#[test]`/`proptest!`/`should_panic`): none.
+- New escape hatches (`#[ignore]`, `#[cfg(any())]`, `should_panic`, tolerance, epsilon): none.
 - Inline `mod tests` changes: none.
-- `git diff $(git merge-base origin/main HEAD) HEAD -- '*tests*' 'tests/'` confirms only the two files above;
-  no pre-existing assertion was removed or changed. No setup-only edit of an existing test.
+
+No pre-existing test assertion is changed by the branch. The only test change main brought in
+(SET3 in `setup_contract.rs`, owner-approved 2026-10-15) belongs to #402 and is recorded in its ADR;
+it is not part of this diff.
 
 ## 3. Deep Reasoning Audit
 
 ### Logic & Architecture
-- Section order: README headings are Why soos, Features, Screenshots, Quick Start, Upgrade, How it works,
-  Security model, Comparison, FAQ, Roadmap, Documentation, Contributing and security, License. The ordered
-  matcher picks "Security model" as index 5 before "Contributing and security", so RDM7 inspects the right
-  section. PASS.
-- Facts checked against the repository: `ci.yml` and `fuzz.yml` exist; toolchain `1.98.1`;
-  `PrivateNetwork=yes` in `packaging/soos-daemon.service`; AES-256-GCM in `crates/biometric-store/src/crypto.rs`;
-  `Verdict::{Allow, Deny, Unavailable}` in `crates/protocol/src/types.rs`; 2.7x single-scale PAD, IR
-  exposure/contrast/texture gate and stricter uncalibrated IR threshold (ARCHITECTURE PAD stage, #169, #212);
-  `/etc/soos/disabled` also stops presence (`crates/daemon/src/presence/worker.rs:45`); evidence 7-day retention
-  and daily cap; `soos-remote` single `0600` Unix socket; doc anchors `DAEMON.md` §6,
-  `PACKAGING_AND_PROVISIONING.md` §3.0/§7/§9, `DISTRIBUTION_DEPLOYMENT.md` §5.5, `REMOTE_COMPANION.md` §8;
-  screenshot commit `a3cae16` is an ancestor of HEAD; no git tag and no `CHANGELOG.md` (no release badge
-  is correct); roadmap issues #352-#363 are all open with titles matching the summaries. PASS.
-- Acceptance vs #408 scope: hero, at most 6 badges (5 shown), captioned synthetic hero image, Why/Features/
-  Screenshots, Quick Start kept, Mermaid diagram, security model with PAM_IGNORE, kill switch, #212 caveat and
-  no certification, sourced comparison without accuracy numbers, FAQ, static roadmap, existing License text.
-  No SECURITY.md/CONTRIBUTING.md, no logo. PASS.
+
+- Section order, Mermaid block, badges (5 ≤ 6, no release badge, `rust-1.98.1` equals
+  `rust-toolchain.toml`), link resolution: verified by RDM1–RDM8, all green on the rebased tree. PASS.
+- Quick Start after rebase contains #402's companion paragraph; the `<details>` wrapping of the
+  installer paragraph is intact and existing contracts (onboarding, installer, setup SET17, GDM, UPG7,
+  licence, RAC10) pass. PASS.
+- Interaction with #402 (setup user phase defaults): the security model, Why, Features, Mermaid and FAQ
+  describe remote unlock and camera view as opt-in / off by default, while the one-command setup the
+  README recommends turns them on (and camera view over Funnel). FINDING (MAJOR, see §4).
+- Feature row "One-command setup" omits that setup now also sets up the phone companion. FINDING (MINOR).
+- Interaction with #417 (zbus 6), #413 (lock-widget lazy buffer), #411 (LockState refusal test): no
+  README claim depends on zbus versions, buffer counts or reserve semantics; the lock-widget row only
+  names swaylock-plugin and hyprlock, still accurate. PASS.
 
 ### PAM Concurrency & Deadlines
-- No change in `crates/pam` or any runtime code. README statements (blocking, no Tokio, deadline from
-  `timeout_ms` default 1000 ms) match AGENTS.md and the ADR. PASS (not applicable to code).
+
+No runtime code changed. README statements (blocking, no Tokio, deadline from `timeout_ms`, default
+1000 ms) match `crates/pam/src/config.rs` and the ADR. PASS.
 
 ### Panic Safety & Fail-Closed
-- Only test code; panics are confined to the invariant module with the usual `#![allow]` reason.
-  `has_release_evidence` treats a missing or failing `git` as "no tag" (stricter), and strips `GIT_*`
-  variables so it behaves inside hooks. The README never claims an error path leads to `PAM_SUCCESS`;
-  it states the opposite. PASS.
+
+No production code. README fail-closed wording (`PAM_SUCCESS` only on a fresh `Allow`, else
+`PAM_IGNORE`) matches the invariants. Test code uses the standard invariant `#![allow]`. PASS.
 
 ### Test Integrity & Anti-Weakening
-- Tried to break the parser: nested badges `[![..](a)](b)`, reference definitions, `href`/`src`/`srcset`,
-  `srcset` not mistaken for `src` (the `=` check), inline and fenced code ignored, `../` climbing, absolute
-  paths and empty paths refused (RDM2 asserts each). Whole-word matcher rejects `uncertified` and accepts
-  `self-certified` (RDM4). A plausible wrong README (missing section, extra badge, banned word, missing
-  #212) fails the contract; the walkthrough's red run is consistent with this. PASS.
+
+New tests can fail against plausible wrong READMEs (missing file link, banned word, reordered
+sections, missing needles; RDM2/RDM4 self-check the helpers with negative cases). No existing assertion
+touched. PASS.
 
 ### Memory, Bounds & Secrets
-- Test reads two repository files, runs one `git tag --list`, writes a scratch tree under
-  `target/readme_contract/` and removes it. No image added; the README only references the three synthetic
-  PNGs under the existing RAC contract. No real host name, account or face. PASS.
+
+Test reads two files, runs `git tag --list` with `GIT_*` removed, writes a scratch tree under
+`target/readme_contract/`; resolver refuses absolute and escaping paths. README contains only the three
+synthetic PNGs and placeholder identities (`alice`, `you@example.com`, `mypc.tail1234.ts.net` from main).
+PASS.
 
 ### Supply Chain & Automation
-- No `Cargo.*`, `deny.toml`, `.github/`, `scripts/` or `.githooks/` change; std only. PASS.
+
+No `Cargo.*`, workflow, script or dependency change in this diff. PASS.
 
 ### English-Only Policy
-- All added text is English; no accented non-English characters found in the added files. PASS.
+
+All added text is English. PASS.
 
 ## 4. Detailed Findings & Action Items
 
-- **[MINOR]** `README.md` Features row "Native Android app" — cites `Docs/REMOTE_COMPANION.md` §2j, but that
-  document has two `## 2j.` headings (offline history at line 985, Android app at line 1063; pre-existing
-  duplication on `main`). The reference is ambiguous; renumbering the second heading in a follow-up would
-  remove the ambiguity. Not introduced by this diff.
-- **[MINOR]** `tests/invariants/src/readme_contract.rs` `link_targets` / `image_urls` — parsing is line-based,
-  so an HTML tag whose `src`/`href` attribute sits on a different line than the tag start, or a Markdown link
-  split across lines, escapes RDM1/RDM3. The current README keeps every tag on one line, so the contract is
-  correct today; a future multi-line `<img>` would only reduce coverage.
-- **[SUGGESTION]** `is_release_badge` matches the substring `release` anywhere in the URL, so a future
-  `release.yml` workflow badge would be refused while no tag exists. This is strict in the safe direction.
+- **[MAJOR]** `README.md:285` — "Remote unlock is off by default and needs a passkey check on every
+  request" is no longer true for the path the README recommends: since #402, `scripts/setup.sh`
+  (`COMPANION_KEYS`, defaults printed at `scripts/setup.sh:2283-2284`) writes `allow_unlock = true`,
+  `camera_view = true` and `camera_view_funnel = true`, and the README's own Quick Start says "with every
+  feature on". Required correction: state that the code and manual defaults are off, but the
+  one-command setup turns remote unlock, camera view and camera view over Funnel on when the companion
+  is configured (each switchable off in soos-gui or with `--remote-unlock off` / `--camera-view off` /
+  `--no-remote`).
+- **[MAJOR]** `README.md:337-339` (FAQ "Does any image leave my machine?"), `README.md:37` (Why),
+  `README.md:53` (Features), `README.md:233,246` (Mermaid labels) — camera view and unlock are described
+  as "opt-in" and the camera view as streaming "through your Tailscale network"; with the setup default
+  `camera_view_funnel = true` the stream can go over Tailscale Funnel (public HTTPS endpoint) after a
+  passkey check. Required correction: align the wording with the setup defaults (on with the companion
+  setup, off in the manual path) and mention Funnel.
+- **[MINOR]** `README.md:49` — the "One-command setup" feature row does not mention that setup also
+  configures the phone companion (#402) when given a Tailscale login. Add it.
+- **[SUGGESTION]** Consider an RDM needle tying the security section's default wording to the setup
+  defaults so a later setup change cannot silently invalidate the README again.
 
 ## 5. Final Verdict
 
-No CRITICAL or MAJOR finding; no pre-existing test assertion removed or changed; scoped tests, clippy and
-fmt are green.
-
-**VERDICT: APPROVED**
+**VERDICT: CHANGES_REQUESTED**
