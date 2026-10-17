@@ -5,6 +5,7 @@ import android.app.Activity
 import android.content.pm.PackageManager
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.annotation.StringRes
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -17,14 +18,18 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -35,8 +40,14 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.colorResource
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import java.time.DateTimeException
+import java.time.Instant
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
+import java.time.format.FormatStyle
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -49,6 +60,8 @@ import org.soos.remote.config.PcUrlError
 import org.soos.remote.config.PcUrlResult
 import org.soos.remote.data.SettingsStore
 import org.soos.remote.heartbeat.HeartbeatController
+import org.soos.remote.net.AlertRecord
+import org.soos.remote.net.AlertsView
 import org.soos.remote.net.ApiResult
 import org.soos.remote.net.AuthStateView
 import org.soos.remote.net.SharedApi
@@ -272,6 +285,7 @@ private fun refusalText(status: Int, result: String?): String = when (result) {
     else -> "The PC refused the request ($status)."
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun HomeScreen(
     activity: Activity,
@@ -286,6 +300,29 @@ private fun HomeScreen(
     var status by remember { mutableStateOf<StatusView?>(null) }
     var message by remember { mutableStateOf<String?>(null) }
     var busy by remember { mutableStateOf(false) }
+    var refreshing by remember { mutableStateOf(false) }
+    var alerts by remember { mutableStateOf<AlertsView?>(null) }
+    var alertsFailed by remember { mutableStateOf(false) }
+    var ackFeedback by remember { mutableStateOf<Int?>(null) }
+
+    fun clearAlerts() {
+        alerts = null
+        alertsFailed = false
+        ackFeedback = null
+    }
+
+    suspend fun loadAlerts() {
+        when (val result = withContext(Dispatchers.IO) { api.alerts() }) {
+            is ApiResult.Ok -> {
+                alerts = result.value
+                alertsFailed = false
+            }
+            is ApiResult.Refused, ApiResult.Unreachable -> {
+                alerts = null
+                alertsFailed = true
+            }
+        }
+    }
 
     suspend fun refresh() {
         busy = true
@@ -293,6 +330,7 @@ private fun HomeScreen(
         auth = (authResult as? ApiResult.Ok)?.value
         if (authResult is ApiResult.Unreachable) {
             status = null
+            clearAlerts()
             message = "The PC is unreachable. Check Tailscale or Funnel."
             busy = false
             return
@@ -313,10 +351,30 @@ private fun HomeScreen(
                     message = "The PC is unreachable. Check Tailscale or Funnel."
                 }
             }
+            loadAlerts()
         } else {
             status = null
+            clearAlerts()
         }
         busy = false
+    }
+
+    suspend fun acknowledge(view: AlertsView) {
+        val epoch = view.epoch ?: return
+        busy = true
+        val result = withContext(Dispatchers.IO) { api.ackAlerts(epoch, view.through) }
+        ackFeedback = when (result) {
+            is ApiResult.Ok -> {
+                alerts = result.value
+                alertsFailed = false
+                R.string.alerts_ack_done
+            }
+            is ApiResult.Refused -> ackRefusalText(result.result)
+            ApiResult.Unreachable -> R.string.alerts_ack_unreachable
+        }
+        busy = false
+        // A refused acknowledgement shows the fresh view (never acknowledged blindly).
+        if (result !is ApiResult.Ok) refresh()
     }
 
     suspend fun signIn() {
@@ -365,69 +423,262 @@ private fun HomeScreen(
 
     LaunchedEffect(pc.origin) { refresh() }
 
-    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        Text(pc.host, style = MaterialTheme.typography.bodySmall)
-        Card(modifier = Modifier.fillMaxWidth()) {
-            Column(modifier = Modifier.padding(16.dp)) {
-                val current = auth
-                val text = when {
-                    current == null -> "Connecting..."
-                    !current.authenticated -> "Signed out"
-                    status != null -> stateText(status?.state.orEmpty())
-                    else -> "Status unavailable"
-                }
-                Text(text, style = MaterialTheme.typography.headlineSmall)
-                status?.let {
-                    if (it.idle) Text("Idle", style = MaterialTheme.typography.bodyMedium)
+    PullToRefreshBox(
+        isRefreshing = refreshing,
+        onRefresh = {
+            if (!busy) {
+                scope.launch {
+                    refreshing = true
+                    refresh()
+                    refreshing = false
                 }
             }
-        }
-        message?.let { Text(it, color = MaterialTheme.colorScheme.error) }
-        val current = auth
-        if (current != null && current.mode == "funnel" && !current.authenticated) {
-            Button(
-                enabled = !busy,
-                onClick = { scope.launch { signIn() } },
-                modifier = Modifier.fillMaxWidth(),
-            ) { Text("Sign in with passkey") }
-        }
-        if (current != null && current.authenticated) {
-            Button(
-                enabled = !busy && status?.state == "unlocked",
-                onClick = {
-                    scope.launch {
-                        busy = true
-                        when (val result = withContext(Dispatchers.IO) { api.lock() }) {
-                            is ApiResult.Ok -> message = null
-                            is ApiResult.Refused ->
-                                message = refusalText(result.status, result.result)
-                            ApiResult.Unreachable ->
-                                message = "The PC is unreachable. Check Tailscale or Funnel."
-                        }
-                        busy = false
-                        refresh()
+        },
+        modifier = Modifier.fillMaxSize(),
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .verticalScroll(rememberScrollState()),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Text(pc.host, style = MaterialTheme.typography.bodySmall)
+            Card(modifier = Modifier.fillMaxWidth()) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    val current = auth
+                    val text = when {
+                        current == null -> "Connecting..."
+                        !current.authenticated -> "Signed out"
+                        status != null -> stateText(status?.state.orEmpty())
+                        else -> "Status unavailable"
                     }
-                },
-                modifier = Modifier.fillMaxWidth(),
-            ) { Text("Lock PC") }
-        }
-        Spacer(modifier = Modifier.height(8.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            OutlinedButton(enabled = !busy, onClick = { scope.launch { refresh() } }) {
-                Text("Refresh")
+                    Text(text, style = MaterialTheme.typography.headlineSmall)
+                    status?.let {
+                        if (it.idle) Text("Idle", style = MaterialTheme.typography.bodyMedium)
+                    }
+                }
             }
-            if (current != null && current.mode == "funnel" && current.authenticated) {
-                OutlinedButton(
+            message?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+            val current = auth
+            if (current != null && current.mode == "funnel" && !current.authenticated) {
+                Button(
                     enabled = !busy,
+                    onClick = { scope.launch { signIn() } },
+                    modifier = Modifier.fillMaxWidth(),
+                ) { Text("Sign in with passkey") }
+            }
+            if (current != null && current.authenticated) {
+                Button(
+                    enabled = !busy && status?.state == "unlocked",
                     onClick = {
                         scope.launch {
-                            withContext(Dispatchers.IO) { api.logout() }
+                            busy = true
+                            when (val result = withContext(Dispatchers.IO) { api.lock() }) {
+                                is ApiResult.Ok -> message = null
+                                is ApiResult.Refused ->
+                                    message = refusalText(result.status, result.result)
+                                ApiResult.Unreachable ->
+                                    message = "The PC is unreachable. Check Tailscale or Funnel."
+                            }
+                            busy = false
                             refresh()
                         }
                     },
-                ) { Text("Sign out") }
+                    modifier = Modifier.fillMaxWidth(),
+                ) { Text("Lock PC") }
+                AlertsCard(
+                    view = alerts,
+                    failed = alertsFailed,
+                    feedback = ackFeedback,
+                    busy = busy,
+                    onAcknowledge = { view ->
+                        ackFeedback = null
+                        scope.launch { acknowledge(view) }
+                    },
+                )
             }
-            TextButton(onClick = onSettings) { Text("Settings") }
+            Spacer(modifier = Modifier.height(8.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedButton(enabled = !busy, onClick = { scope.launch { refresh() } }) {
+                    Text("Refresh")
+                }
+                if (current != null && current.mode == "funnel" && current.authenticated) {
+                    OutlinedButton(
+                        enabled = !busy,
+                        onClick = {
+                            scope.launch {
+                                withContext(Dispatchers.IO) { api.logout() }
+                                refresh()
+                            }
+                        },
+                    ) { Text("Sign out") }
+                }
+                TextButton(onClick = onSettings) { Text("Settings") }
+            }
+        }
+    }
+}
+
+/** Fixed text of a refused acknowledgement (the server token only selects it). */
+@StringRes
+private fun ackRefusalText(result: String?): Int = when (result) {
+    "stale_view" -> R.string.alerts_ack_stale_view
+    "rate_limited" -> R.string.alerts_ack_rate_limited
+    "alerts_disabled" -> R.string.alerts_ack_disabled
+    "unavailable" -> R.string.alerts_ack_unavailable
+    "bad_request" -> R.string.alerts_ack_bad_request
+    "login_required" -> R.string.alerts_ack_login_required
+    else -> R.string.alerts_ack_refused
+}
+
+@StringRes
+private fun alertsReasonText(reason: String?): Int? = when (reason) {
+    "no_journal_access" -> R.string.alerts_reason_no_journal_access
+    "journal_reader_failed" -> R.string.alerts_reason_journal_reader_failed
+    "owner_unresolved" -> R.string.alerts_reason_owner_unresolved
+    "overflow" -> R.string.alerts_reason_overflow
+    "rng_failed" -> R.string.alerts_reason_rng_failed
+    else -> null
+}
+
+@StringRes
+private fun alertSourceText(source: String?): Int = when (source) {
+    "lock_screen" -> R.string.alerts_source_lock_screen
+    "sudo" -> R.string.alerts_source_sudo
+    "login" -> R.string.alerts_source_login
+    else -> R.string.alerts_source_other
+}
+
+@StringRes
+private fun alertAccountText(account: String): Int = when (account) {
+    "owner" -> R.string.alerts_account_owner
+    "root" -> R.string.alerts_account_root
+    else -> R.string.alerts_account_other
+}
+
+/** A journal time in the phone's time zone and locale, or `null` when it cannot be shown. */
+private fun alertTime(unixMs: Long): String? =
+    try {
+        DateTimeFormatter.ofLocalizedDateTime(FormatStyle.SHORT)
+            .withZone(ZoneId.systemDefault())
+            .format(Instant.ofEpochMilli(unixMs))
+    } catch (ignored: DateTimeException) {
+        null
+    }
+
+@Composable
+private fun timeText(unixMs: Long): String =
+    alertTime(unixMs) ?: stringResource(R.string.alerts_time_unknown)
+
+/** `count` with the `_one` text for exactly one, the `_other` text otherwise. */
+@Composable
+private fun countText(count: Long, @StringRes one: Int, @StringRes other: Int): String =
+    stringResource(if (count == 1L) one else other, count)
+
+@Composable
+private fun recordText(record: AlertRecord): String {
+    val what = if (record.kind == "locked_out") {
+        countText(record.count, R.string.alerts_record_locked_out_one, R.string.alerts_record_locked_out_other)
+    } else {
+        countText(record.count, R.string.alerts_record_wrong_password_one, R.string.alerts_record_wrong_password_other)
+    }
+    return stringResource(
+        R.string.alerts_history_row,
+        timeText(record.lastUnixMs),
+        stringResource(alertSourceText(record.source)),
+        stringResource(alertAccountText(record.account)),
+        what,
+    )
+}
+
+/**
+ * Failed-password alerts (`Docs/REMOTE_COMPANION.md` §2c, §2j): one fixed sentence per state,
+ * the unacknowledged counts, the history in the phone's time zone and the Acknowledge button.
+ */
+@Composable
+private fun AlertsCard(
+    view: AlertsView?,
+    failed: Boolean,
+    @StringRes feedback: Int?,
+    busy: Boolean,
+    onAcknowledge: (AlertsView) -> Unit,
+) {
+    if (view == null && !failed) return
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Text(stringResource(R.string.alerts_title), style = MaterialTheme.typography.titleMedium)
+            if (view == null) {
+                Text(stringResource(R.string.alerts_load_failed), color = MaterialTheme.colorScheme.error)
+            } else {
+                val wrong = view.unacknowledgedWrongPassword
+                val lockedOut = view.unacknowledgedLockedOut
+                val pending = view.state != "disabled" && (wrong > 0 || lockedOut > 0)
+                val notMonitored = view.lockScreen == "not_configured"
+                val summary: Int? = when (view.state) {
+                    "disabled" -> R.string.alerts_state_disabled
+                    "starting" -> R.string.alerts_state_starting
+                    "unavailable" -> R.string.alerts_state_unavailable
+                    else -> if (pending) {
+                        null
+                    } else if (notMonitored) {
+                        R.string.alerts_state_active_none_partial
+                    } else {
+                        R.string.alerts_state_active_none
+                    }
+                }
+                summary?.let { Text(stringResource(it)) }
+                if (view.state == "unavailable") {
+                    alertsReasonText(view.reason)?.let { Text(stringResource(it)) }
+                }
+                if (pending) {
+                    if (wrong > 0) {
+                        Text(
+                            countText(wrong, R.string.alerts_wrong_password_count_one, R.string.alerts_wrong_password_count_other),
+                            color = MaterialTheme.colorScheme.error,
+                            fontWeight = FontWeight.Bold,
+                        )
+                    }
+                    if (lockedOut > 0) {
+                        Text(
+                            countText(lockedOut, R.string.alerts_locked_out_count_one, R.string.alerts_locked_out_count_other),
+                            color = MaterialTheme.colorScheme.error,
+                            fontWeight = FontWeight.Bold,
+                        )
+                    }
+                    view.lastUnixMs?.let { last ->
+                        Text(
+                            stringResource(
+                                R.string.alerts_last_attempt,
+                                timeText(last),
+                                stringResource(alertSourceText(view.lastSource)),
+                            ),
+                        )
+                    }
+                }
+                if (notMonitored && view.state != "disabled") {
+                    Text(
+                        stringResource(R.string.alerts_lock_screen_not_monitored),
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
+                if (view.history.isNotEmpty()) {
+                    Text(stringResource(R.string.alerts_history_title), style = MaterialTheme.typography.titleSmall)
+                    for (record in view.history) {
+                        Text(recordText(record), style = MaterialTheme.typography.bodyMedium)
+                    }
+                }
+                if (pending && view.epoch != null) {
+                    Button(
+                        enabled = !busy,
+                        onClick = { onAcknowledge(view) },
+                        modifier = Modifier.fillMaxWidth(),
+                    ) { Text(stringResource(R.string.alerts_acknowledge)) }
+                }
+            }
+            feedback?.let { Text(stringResource(it), style = MaterialTheme.typography.bodyMedium) }
         }
     }
 }
