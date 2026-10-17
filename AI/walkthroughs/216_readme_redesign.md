@@ -3,7 +3,7 @@
 - **Date**: 2026-10-17
 - **Issue**: GitHub #408 (PR 2 of epic #356; no backlog id, branch not registered in `scripts/sync_issue.py`) — **Branch**: `chore/readme-redesign`
 - **Base commit**: `9e82795`
-- **Matrix criteria**: RDM1–RDM9 (component `readme-redesign`)
+- **Matrix criteria**: RDM1–RDM11 (component `readme-redesign`)
 
 ## 1. Context & Objectives
 
@@ -57,10 +57,18 @@ New module `tests/invariants/src/readme_contract.rs` (std only), registered in `
 | RDM6 | `test_rdm_readme_sections_in_order_with_mermaid` |
 | RDM7 | `test_rdm_security_section_states_fallback_kill_switch_and_pad_caveat` |
 | RDM8 | `test_rdm_comparison_cites_upstream_sources` |
+| RDM10 | `test_rdm_companion_wording_matches_setup_defaults` |
+| RDM11 | `test_rdm_companion_wording_helpers` |
 
 Red run on the old README: RDM5 failed on "enterprise-grade"; RDM6 and RDM7 failed with no `Why` heading;
 RDM8 failed with no Comparison section. RDM1 and RDM3 passed (the old README had no broken link and no badge),
 and so did the helper self-tests RDM2 and RDM4.
+
+RDM10 and RDM11 were added after the rebase onto #402 (review round of 2026-10-17): `scripts/setup.sh` now
+writes `allow_funnel`, `allow_unlock`, `camera_view` and `camera_view_funnel` = `true`, so the README may no
+longer call remote unlock or the camera view opt-in. Red run before the wording fix: RDM10 failed on six text
+units (the Why bullet, the companion row, two Mermaid labels, the security bullet "Remote unlock is off by
+default" and the FAQ camera answer, which also named only the Tailscale network); RDM11 passed.
 
 ## 5. Auditor Constraints
 
@@ -81,7 +89,7 @@ and so did the helper self-tests RDM2 and RDM4.
 - `Docs/README.md`: "Project README" paragraph (structure, contracts, regeneration script).
 - `Docs/DEVELOPMENT_WORKFLOW.md` §10: README structure and editing rules.
 - `AI/DECISIONS.md`: ADR "[2026-10-17] README Restructure as a Product Landing Page".
-- `AI/VERIFICATION_MATRIX.md`: component `readme-redesign`, rows RDM1–RDM9.
+- `AI/VERIFICATION_MATRIX.md`: component `readme-redesign`, rows RDM1–RDM11.
 
 No runtime crate, packaging, script, workflow or asset file changed; no dependency added.
 
@@ -94,7 +102,7 @@ Run by an independent reviewer on the final diff. This walkthrough does not reco
 All runs are scoped (`-p soos-invariants`, `--test-threads=3`):
 - `cargo fmt --all -- --check`: clean.
 - `cargo clippy -p soos-invariants --locked --all-targets --all-features -- -D warnings`: clean.
-- `cargo test -p soos-invariants --locked --all-features`: all tests pass. That covers RDM1–RDM8, RAC10–RAC16,
+- `cargo test -p soos-invariants --locked --all-features`: all tests pass. That covers RDM1–RDM8, RDM10, RDM11, RAC10–RAC16,
   the installer, onboarding, setup, upgrade, licence and GDM follow-up README contracts, and the matrix
   citation check.
 
@@ -105,7 +113,9 @@ The full workspace gates run through `./save.sh` before the push.
 - RDM9: the owner checks the GitHub render in light and dark themes and at mobile width.
 - The phone web app captures (RAC18) and a lock-screen widget screenshot are not in the README yet. They come
   with the PR 3 visual refresh, after the UI redesign.
-- When PR #402 merges, its `setup.sh` wording replaces the byte-identical paragraph kept here.
+- PR #402 merged before this PR: its `setup.sh` paragraph is the one in the Quick Start, and the companion
+  wording of the Why, Features, How it works, Security model and FAQ sections follows its default-on profile
+  (ADR 2026-10-17 item 7).
 - Repository settings proposed in the PR body (description, topics, social preview) are applied by the owner.
 - The release-badge rule treats a CI clone without tags as untagged. A future release badge therefore needs a
   `CHANGELOG.md` or a tag fetched in CI.

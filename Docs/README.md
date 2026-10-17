@@ -31,7 +31,7 @@ Welcome to the technical documentation for **soos** (local zero-trust facial ver
 | [**Distribution Deployment Guide**](DISTRIBUTION_DEPLOYMENT.md) | Per-distribution PAM activation, validation and rollback. | Operators, Packagers |
 | [**Network Lock**](NETWORK_LOCK.md) | Opt-in polkit Wi-Fi lock (`soos-admin network-lock`): locked NetworkManager actions, administrator prompt on every request, rfkill option, status diagnostic, documented gaps. | Operators, Security Reviewers |
 | [**Lock-Screen Widget**](LOCKSCREEN_WIDGET.md) | Animated soos face-scan state on the lock screen: the `soos-lockstatus` bridge (hyprlock labels, `--watch`), the `soos-lock-widget` swaylock-plugin background, the three visible states, per-user coordination, reduced motion, setup and troubleshooting. | Operators, Desktop Users, Security Reviewers |
-| [**Remote Companion**](REMOTE_COMPANION.md) | `soos-remote` user-level lock status page, remote lock and opt-in remote unlock over Tailscale Serve: trust model, accepted unlock risk, `LockedHint` requirements, per-user install, out-of-scope list. | Operators, Security Reviewers |
+| [**Remote Companion**](REMOTE_COMPANION.md) | `soos-remote` user-level lock status page, remote lock and passkey remote unlock over Tailscale Serve or Funnel (on after `scripts/setup.sh`, off in a manual install): trust model, accepted unlock risk, `LockedHint` requirements, per-user install, out-of-scope list. | Operators, Security Reviewers |
 | [**README Assets**](README_ASSETS.md) | Reproducible, synthetic README screenshots: `Docs/assets` layout, budget and formats, `MANIFEST.toml`, the headless `soos-gui` capture (`readme-capture` feature, CPU rasterizer, drift check) and the optional phone web app capture. | Contributors, AI Agents |
 | [**macOS Port**](MACOS_PORT.md) | Bootstrap specification of the separate private `soos-macos` repository: unlock surfaces, TCC capture model, RGB-only tier, portable crates and dependency guard, shared-crate tags, signing, owner checklist. | Owner, Contributors, Security Reviewers |
 
@@ -42,7 +42,7 @@ Welcome to the technical documentation for **soos** (local zero-trust facial ver
 The root [`README.md`](../README.md) is the product landing page: hero, Why soos, features, screenshots,
 Quick Start, upgrade, How it works (Mermaid diagram), security model, comparison, FAQ, roadmap,
 documentation, contributing and license. Its structure and links are checked by
-`soos-invariants::readme_contract` (ADR 2026-10-17, rows RDM1–RDM8), its images by
+`soos-invariants::readme_contract` (ADR 2026-10-17, rows RDM1–RDM8, RDM10, RDM11), its images by
 `readme_assets_contract` ([README Assets](README_ASSETS.md)). Screenshots are regenerated from synthetic
 data with [`scripts/capture_readme_assets.sh`](../scripts/capture_readme_assets.sh), never edited by hand;
 editing rules are in [Development Workflow](DEVELOPMENT_WORKFLOW.md) §10.

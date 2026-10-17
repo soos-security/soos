@@ -1,6 +1,6 @@
 //! README landing-page contract (GitHub #408, PR 2 of #356; ADR 2026-10-17 "README Restructure
 //! as a Product Landing Page"; architect spec `AI/architect_spec_readme_redesign.md` §3; matrix
-//! RDM1–RDM8):
+//! RDM1–RDM8, RDM10, RDM11):
 //!
 //! - every relative Markdown or HTML link of `README.md` (images included) resolves to an
 //!   existing file or directory; `#anchors`, queries, external URLs and code are ignored;
@@ -9,7 +9,9 @@
 //! - no overstated wording ("enterprise-grade", "military-grade", "unbreakable", "certified");
 //! - the landing-page sections appear in order, with a Mermaid diagram under "How it works";
 //! - the security section states the password fallback, the kill switch and the PAD caveat;
-//! - the comparison cites upstream Howdy and Microsoft documentation.
+//! - the comparison cites upstream Howdy and Microsoft documentation;
+//! - while `scripts/setup.sh` turns Funnel, remote unlock or the camera view on, the README never
+//!   calls them opt-in and its security section names the setup, passkey and opt-out paths.
 //!
 //! The image provenance rules (alt text, `Docs/assets/`, allowed badge hosts, manifest) stay in
 //! `readme_assets_contract` (RAC10–RAC16). std only.
@@ -665,4 +667,187 @@ fn test_rdm_comparison_cites_upstream_sources() {
             "the comparison must link {source}*: {targets:?}"
         );
     }
+}
+
+// ---------------------------------------------------------------------------------------
+// RDM10 – RDM11 — companion wording tied to the setup defaults
+// ---------------------------------------------------------------------------------------
+
+/// The setup render fixture, byte-equal to what `scripts/setup.sh` writes (asserted by
+/// `setup_user_phase_contract` and `crates/remote/tests/setup_render_tests.rs`).
+const SETUP_RENDER_FIXTURE: &str = "tests/fixtures/setup/remote.toml";
+/// Companion keys whose default the README describes: Funnel, remote unlock and the camera
+/// view (ADR 2026-10-15 "Setup User Phase: Phone Companion Profile With Default-On Features").
+const COMPANION_EXPOSURE_KEYS: [&str; 4] = [
+    "allow_funnel",
+    "allow_unlock",
+    "camera_view",
+    "camera_view_funnel",
+];
+/// Needles the security section must contain while setup turns any of those keys on.
+const COMPANION_DEFAULT_NEEDLES: [&str; 4] =
+    ["scripts/setup.sh", "passkey", "soos-gui", "remote.toml"];
+
+/// The keys of `COMPANION_EXPOSURE_KEYS` that the TOML text sets to `true`.
+fn keys_set_true(toml: &str) -> Vec<&'static str> {
+    COMPANION_EXPOSURE_KEYS
+        .iter()
+        .copied()
+        .filter(|key| {
+            toml.lines().any(|line| {
+                let mut parts = line.splitn(2, '=');
+                let name = parts.next().unwrap_or("").trim();
+                let value = parts.next().unwrap_or("").trim();
+                name == *key && value == "true"
+            })
+        })
+        .collect()
+}
+
+/// Text units of a Markdown document: every table row and every fenced line on its own,
+/// list items and paragraphs joined across their wrapped lines.
+fn text_units(markdown: &str) -> Vec<String> {
+    let mut units = Vec::new();
+    let mut current = String::new();
+    let mut in_fence = false;
+    let flush = |current: &mut String, units: &mut Vec<String>| {
+        if !current.trim().is_empty() {
+            units.push(current.trim().to_string());
+        }
+        current.clear();
+    };
+    for line in markdown.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+            flush(&mut current, &mut units);
+            in_fence = !in_fence;
+            continue;
+        }
+        let list_item = trimmed.starts_with("- ")
+            || trimmed
+                .split_once(". ")
+                .is_some_and(|(n, _)| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()));
+        if in_fence || trimmed.starts_with('|') {
+            flush(&mut current, &mut units);
+            units.push(trimmed.to_string());
+        } else if trimmed.is_empty() {
+            flush(&mut current, &mut units);
+        } else {
+            if list_item {
+                flush(&mut current, &mut units);
+            }
+            current.push(' ');
+            current.push_str(trimmed);
+        }
+    }
+    flush(&mut current, &mut units);
+    units
+}
+
+/// Whether a unit calls remote unlock or the camera view opt-in or off by default.
+fn calls_exposure_opt_in(unit: &str) -> bool {
+    let lower = unit.to_ascii_lowercase().replace("auto-unlock", "");
+    let opt_in = ["opt-in", "opt in", "off by default"]
+        .iter()
+        .any(|w| lower.contains(w));
+    let exposure = ["unlock", "camera view", "camera preview", "live camera"]
+        .iter()
+        .any(|w| lower.contains(w));
+    opt_in && exposure
+}
+
+/// Whether a unit says the camera view goes through Tailscale without naming Funnel.
+fn camera_view_omits_funnel(unit: &str) -> bool {
+    let lower = unit.to_ascii_lowercase();
+    let camera = ["camera view", "camera preview", "live camera"]
+        .iter()
+        .any(|w| lower.contains(w));
+    camera && lower.contains("tailscale") && !lower.contains("funnel")
+}
+
+/// RDM10: while `scripts/setup.sh` turns Funnel, remote unlock or the camera view on, the
+/// README never calls them opt-in or off by default, the camera view over Tailscale names
+/// Funnel, and the security section names setup, the passkey, soos-gui, `remote.toml` and
+/// every such key.
+#[test]
+fn test_rdm_companion_wording_matches_setup_defaults() {
+    let on = keys_set_true(&read(SETUP_RENDER_FIXTURE));
+    if on.is_empty() {
+        return;
+    }
+    let readme = read("README.md");
+    let units = text_units(&readme);
+    let opt_in: Vec<&String> = units.iter().filter(|u| calls_exposure_opt_in(u)).collect();
+    assert!(
+        opt_in.is_empty(),
+        "scripts/setup.sh turns {on:?} on, so README.md must not call remote unlock or the camera view opt-in or off by default: {opt_in:#?}"
+    );
+    if on.contains(&"camera_view_funnel") {
+        let no_funnel: Vec<&String> = units
+            .iter()
+            .filter(|u| camera_view_omits_funnel(u))
+            .collect();
+        assert!(
+            no_funnel.is_empty(),
+            "setup writes camera_view_funnel = true, so a camera view over Tailscale must name Funnel: {no_funnel:#?}"
+        );
+    }
+    let security = section(&readme, "Security").expect("README.md must have a Security section");
+    for needle in COMPANION_DEFAULT_NEEDLES
+        .iter()
+        .copied()
+        .chain(on.iter().copied())
+    {
+        assert!(
+            security.contains(needle),
+            "the README security section must mention `{needle}` (setup turns {on:?} on)"
+        );
+    }
+}
+
+/// RDM11: the RDM10 helpers on synthetic input.
+#[test]
+fn test_rdm_companion_wording_helpers() {
+    assert_eq!(
+        keys_set_true("allow_funnel = true\nallow_unlock=false\n# camera_view = true\ncamera_view_funnel = true\n"),
+        vec!["allow_funnel", "camera_view_funnel"]
+    );
+    assert!(keys_set_true("allow_unlock = \"true\"\n").is_empty());
+
+    let units = text_units(
+        "Para one\nwrapped.\n\n- item a\n  wrapped\n- item b\n1. step\n| a | b |\n```mermaid\nx --> y\n```\n",
+    );
+    assert_eq!(
+        units,
+        vec![
+            "Para one wrapped.",
+            "- item a wrapped",
+            "- item b",
+            "1. step",
+            "| a | b |",
+            "x --> y",
+        ]
+    );
+
+    assert!(calls_exposure_opt_in("and, if you\nopt in, unlock it"));
+    assert!(calls_exposure_opt_in("Remote unlock is off by default."));
+    assert!(calls_exposure_opt_in("opt-in live camera view"));
+    assert!(calls_exposure_opt_in(
+        "remote[\"soos-remote<br/>opt-in unlock\"]"
+    ));
+    assert!(!calls_exposure_opt_in(
+        "Presence auto-unlock, opt-in polkit rule"
+    ));
+    assert!(!calls_exposure_opt_in("Opt-in, encrypted camera snapshots"));
+    assert!(!calls_exposure_opt_in(
+        "remote unlock, on by default with setup"
+    ));
+
+    assert!(camera_view_omits_funnel(
+        "the live camera view streams through your Tailscale network"
+    ));
+    assert!(!camera_view_omits_funnel(
+        "the live camera view streams over Tailscale Serve or Funnel"
+    ));
+    assert!(!camera_view_omits_funnel("lock status over Tailscale"));
 }

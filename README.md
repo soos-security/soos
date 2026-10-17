@@ -33,8 +33,10 @@ match value comes from mock models on synthetic data, not from the real models. 
   Unix socket with small, bounded messages, and the daemon is the only process that opens `/dev/video*`.
 - **Your password always works.** Every error, timeout, missing camera or unknown face makes the module step
   aside (`PAM_IGNORE`), and the usual password prompt continues. A kill switch turns soos off at once.
-- **Optional phone companion.** See from your phone whether the PC is locked, lock it remotely and, if you
-  opt in, unlock it with a passkey, over your own Tailscale network.
+- **Optional phone companion.** See from your phone whether the PC is locked, lock it remotely, unlock it
+  with a passkey and watch the PC camera live, over your own Tailscale network or, through Tailscale Funnel,
+  from the internet. The one-command setup turns these features on and a manual install leaves them off
+  (see the [Security model](#security-model)).
 
 ---
 
@@ -46,12 +48,12 @@ Every feature below is merged on `main` and documented.
 |---|---|---|
 | Face verification in PAM | `pam_soos.so` for `sudo`, console login, screen lockers and GDM, with password fallback | [`Docs/PAM_MODULE.md`](Docs/PAM_MODULE.md), [`Docs/DISTRIBUTION_DEPLOYMENT.md`](Docs/DISTRIBUTION_DEPLOYMENT.md) |
 | Presence auto-unlock | Unlocks your locked local session when your face is seen (GNOME, KDE Plasma; wlroots lockers through `swayidle` hooks); respects `pam_faillock` and account expiry; on by default and easy to turn off | [`Docs/DAEMON.md`](Docs/DAEMON.md) §6 |
-| One-command setup | `scripts/setup.sh` detects the host, installs the build dependencies and the pinned Rust toolchain, builds, installs and enrolls your face; PAM activation stays a separate step | [`Docs/PACKAGING_AND_PROVISIONING.md`](Docs/PACKAGING_AND_PROVISIONING.md) §3.0 |
+| One-command setup | `scripts/setup.sh` detects the host, installs the build dependencies and the pinned Rust toolchain, builds, installs and enrolls your face; with your Tailscale login and node name it also sets up the phone companion with every feature on; PAM activation stays a separate step | [`Docs/PACKAGING_AND_PROVISIONING.md`](Docs/PACKAGING_AND_PROVISIONING.md) §3.0 |
 | Packages and installer | `.deb`, `.rpm` and Arch packages, a fail-closed installer that rolls back on error, upgrade and uninstall procedures | [`Docs/PACKAGING_AND_PROVISIONING.md`](Docs/PACKAGING_AND_PROVISIONING.md) §7, §9 |
 | Desktop app `soos-gui` | Live diagnostic, guided enrollment with liveness checks, enrolled profiles, first-run tour with feature switches | [`Docs/GUI_APPLICATION.md`](Docs/GUI_APPLICATION.md) |
 | Lock-screen widget | Shows on the lock screen whether soos is scanning your face: a swaylock-plugin background widget and a hyprlock label (GNOME Shell and KDE Plasma adapters come later) | [`Docs/LOCKSCREEN_WIDGET.md`](Docs/LOCKSCREEN_WIDGET.md) |
-| Phone companion `soos-remote` | User-level service reached over Tailscale: lock status, remote lock, opt-in passkey unlock, failed-password alerts, push notifications, opt-in live camera view, battery level, offline history | [`Docs/REMOTE_COMPANION.md`](Docs/REMOTE_COMPANION.md) |
-| Native Android app (first version) | Sideloaded Kotlin app for the companion: PC status, remote lock, passkey sign-in over Funnel | [`Docs/REMOTE_COMPANION.md`](Docs/REMOTE_COMPANION.md) §2j |
+| Phone companion `soos-remote` | User-level service reached over Tailscale Serve, or Funnel from the internet: lock status, remote lock, passkey unlock, failed-password alerts, push notifications, live camera view after a passkey check, battery level, offline history. The one-command setup turns Funnel, unlock, the camera view and the alerts on; a manual install leaves them off; each can be turned off in `soos-gui` or `remote.toml` | [`Docs/REMOTE_COMPANION.md`](Docs/REMOTE_COMPANION.md) |
+| Native Android app (first version) | Sideloaded Kotlin app for the companion: PC status, remote lock, passkey sign-in over Funnel, opt-in PC offline alerts | [`Docs/REMOTE_COMPANION.md`](Docs/REMOTE_COMPANION.md) §2j |
 | Network lock | Opt-in polkit rule: changing the Wi-Fi network or turning the radio off asks for an administrator password | [`Docs/NETWORK_LOCK.md`](Docs/NETWORK_LOCK.md) |
 | Intrusion snapshots | Opt-in, encrypted camera snapshots of failed attempts, with daily caps and 7-day retention | [`Docs/EVIDENCE_STORE_CRATE.md`](Docs/EVIDENCE_STORE_CRATE.md) |
 | Attested models | Every model file is checked against its SHA-256 at daemon start (a missing or modified file stops the start) and against its declared tensor shapes before use | [`models/README.md`](models/README.md) |
@@ -230,7 +232,7 @@ flowchart LR
         store[("Encrypted templates<br/>AES-256-GCM")]
     end
     subgraph user["Your user session"]
-        remote["soos-remote<br/>lock status, remote lock,<br/>opt-in unlock"]
+        remote["soos-remote<br/>lock status, remote lock,<br/>passkey unlock"]
         push["soos-push-sender<br/>outbound Web Push only"]
     end
     logind["systemd-logind"]
@@ -243,7 +245,7 @@ flowchart LR
     vision -- "presence auto-unlock" --> logind
     phone -- "HTTPS through Tailscale Serve or Funnel" --> remote
     remote -- "lock and unlock requests" --> logind
-    remote -- "opt-in camera preview" --> ipc
+    remote -- "camera preview after a passkey check" --> ipc
     remote -- "encrypted alert summary" --> push
 ```
 
@@ -282,8 +284,16 @@ of trust.
   ([#212](https://github.com/soos-security/soos/issues/212)). On infrared frames the threshold is stricter but
   not calibrated yet. soos has had no independent security audit and no certification. A good photo, screen
   or mask may still pass.
-- **Phone companion.** Remote unlock is off by default and needs a passkey check on every request. Its residual
-  risks are listed in [`Docs/REMOTE_COMPANION.md`](Docs/REMOTE_COMPANION.md) §8.
+- **Phone companion.** When it sets up the companion, the one-command setup (`scripts/setup.sh`) writes
+  `remote.toml` (`~/.config/soos/`, or `$XDG_CONFIG_HOME/soos/`) with Internet access through Tailscale Funnel (`allow_funnel`), remote unlock
+  (`allow_unlock`) and the live camera view, on the tailnet and over Funnel (`camera_view`,
+  `camera_view_funnel`), turned on, together with the failed-password, push and offline alerts. Each of the
+  four is passkey-protected: a request over Funnel needs a passkey sign-in, every unlock needs a fresh passkey
+  check with user verification, and every camera view starts with one. On the tailnet, status and lock need
+  no passkey. Each feature can be turned off in `soos-gui` (the feature switches of the first-run tour, also
+  reached with its **Features** button) or by setting its key to `false` in `remote.toml`. A manual install
+  (`scripts/install_remote.sh`) and the code defaults leave all of them off. Its residual risks are listed in
+  [`Docs/REMOTE_COMPANION.md`](Docs/REMOTE_COMPANION.md) §8.
 
 The full threat model, the actors considered and the mandatory invariants are in
 [`AI/ARCHITECTURE.md`](AI/ARCHITECTURE.md) §2.
@@ -334,9 +344,13 @@ liveness check has the limits listed in the [Security model](#security-model).
 <details>
 <summary><b>Does any image leave my machine?</b></summary>
 
-Not for face unlock: the daemon has no network access, and the models run locally. Two opt-in features handle
-images: intrusion snapshots are stored encrypted on the local disk only, and the companion's live camera view
-streams frames to your phone through your Tailscale network after a passkey check, without recording them.
+Not for face verification: the daemon has no network access, and the models run locally. Two features handle
+images. Intrusion snapshots are off unless you turn them on and are stored encrypted on the local disk only.
+The companion's live camera view streams frames to your phone after a fresh passkey check, without recording
+them, over your Tailscale network and, with `camera_view_funnel`, through Tailscale Funnel from the internet.
+The one-command setup turns both keys on in `remote.toml` and creates the daemon's `[preview]` section when
+`/etc/soos/daemon.toml` does not exist yet; a manual install leaves the view off, and you can turn it off in
+`soos-gui` or `remote.toml`.
 </details>
 
 <details>

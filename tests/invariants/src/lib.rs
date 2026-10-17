@@ -444,8 +444,9 @@ mod readme_assets_contract;
 /// README landing page: every relative link resolves, at most 6 real badges and no release
 /// badge without a tag, no overstated wording, required sections in order with a Mermaid
 /// diagram, security section with the password fallback, kill switch and PAD caveat, cited
-/// comparison (GitHub #408, PR 2 of #356; ADR 2026-10-17 "README Restructure as a Product
-/// Landing Page"; spec AI/architect_spec_readme_redesign.md; rows RDM1-RDM8).
+/// comparison, companion wording tied to the setup defaults (GitHub #408, PR 2 of #356; ADR
+/// 2026-10-17 "README Restructure as a Product Landing Page"; spec
+/// AI/architect_spec_readme_redesign.md; rows RDM1-RDM8, RDM10, RDM11).
 #[cfg(all(test, unix))]
 mod readme_contract;
 
