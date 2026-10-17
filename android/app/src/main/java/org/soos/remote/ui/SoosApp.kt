@@ -1,6 +1,10 @@
 package org.soos.remote.ui
 
+import android.Manifest
 import android.app.Activity
+import android.content.pm.PackageManager
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -18,6 +22,7 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -27,6 +32,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.colorResource
 import androidx.compose.ui.text.font.FontWeight
@@ -42,15 +48,15 @@ import org.soos.remote.config.PcUrl
 import org.soos.remote.config.PcUrlError
 import org.soos.remote.config.PcUrlResult
 import org.soos.remote.data.SettingsStore
+import org.soos.remote.heartbeat.HeartbeatController
 import org.soos.remote.net.ApiResult
 import org.soos.remote.net.AuthStateView
-import org.soos.remote.net.SoosApi
+import org.soos.remote.net.SharedApi
 import org.soos.remote.net.StatusView
-import org.soos.remote.net.UrlConnectionTransport
 
 /** Root of the app: the settings screen until a PC address is saved, then the home screen. */
 @Composable
-fun SoosApp(activity: Activity, settings: SettingsStore) {
+fun SoosApp(activity: Activity, settings: SettingsStore, heartbeat: HeartbeatController) {
     var pcUrl by remember { mutableStateOf(settings.pcUrl) }
     var editing by remember { mutableStateOf(false) }
     Column(
@@ -71,11 +77,14 @@ fun SoosApp(activity: Activity, settings: SettingsStore) {
                 SettingsScreen(
                     initial = current.orEmpty(),
                     onSave = { result ->
-                        settings.pcUrl = result.origin
+                        // Saved through the heartbeat, which starts over for another PC.
+                        heartbeat.savePcUrl(result.origin)
                         pcUrl = result.origin
                         editing = false
                     },
                     onCancel = if (valid != null) ({ editing = false }) else null,
+                    activity = activity,
+                    heartbeat = if (valid != null) heartbeat else null,
                 )
             } else {
                 HomeScreen(
@@ -125,6 +134,8 @@ private fun SettingsScreen(
     initial: String,
     onSave: (PcUrlResult.Valid) -> Unit,
     onCancel: (() -> Unit)?,
+    activity: Activity,
+    heartbeat: HeartbeatController?,
 ) {
     var text by remember { mutableStateOf(initial) }
     var error by remember { mutableStateOf<String?>(null) }
@@ -158,6 +169,84 @@ private fun SettingsScreen(
                 OutlinedButton(onClick = onCancel) { Text("Cancel") }
             }
         }
+        // Shown only once a valid PC address is saved.
+        if (heartbeat != null) {
+            HeartbeatCard(activity = activity, heartbeat = heartbeat)
+        }
+    }
+}
+
+/**
+ * The opt-in PC-offline heartbeat (off by default). The notification permission is requested
+ * here only, when the user turns the heartbeat on.
+ */
+@Composable
+private fun HeartbeatCard(activity: Activity, heartbeat: HeartbeatController) {
+    fun notificationsAllowed(): Boolean =
+        activity.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) ==
+            PackageManager.PERMISSION_GRANTED
+
+    val blocked = "Notifications are blocked. Allow them for soos in the Android settings " +
+        "to receive the PC alerts."
+    var enabled by remember { mutableStateOf(heartbeat.enabled) }
+    val refused = "The PC check could not be scheduled. Try again."
+    var note by remember {
+        mutableStateOf(
+            when {
+                heartbeat.scheduleRefused -> refused
+                heartbeat.enabled && !notificationsAllowed() -> blocked
+                else -> null
+            },
+        )
+    }
+
+    fun turnOn() {
+        enabled = heartbeat.enable()
+        note = if (enabled) null else refused
+    }
+
+    val contract = ActivityResultContracts.RequestPermission()
+    val prompt = rememberLauncherForActivityResult(contract) { granted ->
+        if (granted) {
+            turnOn()
+        } else {
+            enabled = false
+            note = blocked
+        }
+    }
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    "PC offline alerts",
+                    style = MaterialTheme.typography.titleMedium,
+                    modifier = Modifier.weight(1f),
+                )
+                Switch(
+                    checked = enabled,
+                    onCheckedChange = { on ->
+                        when {
+                            !on -> {
+                                heartbeat.disable()
+                                enabled = false
+                                note = null
+                            }
+                            notificationsAllowed() -> turnOn()
+                            else -> prompt.launch(Manifest.permission.POST_NOTIFICATIONS)
+                        }
+                    },
+                )
+            }
+            Text(
+                "Checks your PC every 15 minutes in the background. You get one alert after " +
+                    "two failed checks in a row, and one more when the PC is back online.",
+                style = MaterialTheme.typography.bodyMedium,
+            )
+            note?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+        }
     }
 }
 
@@ -190,7 +279,8 @@ private fun HomeScreen(
     pc: PcUrlResult.Valid,
     onSettings: () -> Unit,
 ) {
-    val api = remember(pc.origin) { SoosApi(pc.origin, UrlConnectionTransport()) }
+    // One client per PC for the whole process: the heartbeat reuses its in-memory session.
+    val api = remember(pc.origin) { SharedApi.forOrigin(pc.origin) }
     val scope = rememberCoroutineScope()
     var auth by remember { mutableStateOf<AuthStateView?>(null) }
     var status by remember { mutableStateOf<StatusView?>(null) }

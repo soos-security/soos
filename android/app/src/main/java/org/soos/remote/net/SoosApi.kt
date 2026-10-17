@@ -79,22 +79,28 @@ class SoosApi(private val origin: String, private val transport: HttpTransport) 
         }
         if (action != null) headers += ACTION_HEADER to action
         if (json != null) headers += "Content-Type" to "application/json"
-        session?.let { headers += "Cookie" to SessionCookie.header(it) }
+        val sent = session
+        sent?.let { headers += "Cookie" to SessionCookie.header(it) }
         val request = HttpRequest(method, origin + path, headers, json?.encodeToByteArray())
         val response = try {
             transport.execute(request)
         } catch (ignored: IOException) {
             return null
         }
-        when (val update = SessionCookie.fromSetCookie(response.setCookies)) {
-            is CookieUpdate.Set -> session = update.value
-            CookieUpdate.Cleared -> session = null
-            CookieUpdate.None -> {}
-        }
-        if (response.status == 403 &&
-            ApiJson.parseResult(response.body.decodeToString()) == "login_required"
-        ) {
-            session = null
+        synchronized(this) {
+            when (val update = SessionCookie.fromSetCookie(response.setCookies)) {
+                is CookieUpdate.Set -> session = update.value
+                CookieUpdate.Cleared -> session = null
+                CookieUpdate.None -> {}
+            }
+            // The screens and the heartbeat share this client: a refusal of a request sent
+            // with another (or no) session never drops a session stored meanwhile.
+            if (response.status == 403 &&
+                session == sent &&
+                ApiJson.parseResult(response.body.decodeToString()) == "login_required"
+            ) {
+                session = null
+            }
         }
         return response
     }

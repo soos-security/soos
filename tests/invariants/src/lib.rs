@@ -441,6 +441,14 @@ mod readme_assets_contract;
 #[cfg(all(test, unix))]
 mod android_native_contract;
 
+/// Opt-in PC-offline heartbeat of the native Android app: pinned APK permission allowlist,
+/// one guarded job service, Kotlin contract of the persisted platform job, fixed texts, docs
+/// (GitHub #415, part of #359 tier 3; ADR 2026-10-13 "Native Android App for `soos-remote`
+/// (Kotlin and Jetpack Compose)" item (8), amended 2026-10-17; spec
+/// AI/architect_spec_android_offline_heartbeat.md; rows AHB1-AHB8).
+#[cfg(all(test, unix))]
+mod android_heartbeat_contract;
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,

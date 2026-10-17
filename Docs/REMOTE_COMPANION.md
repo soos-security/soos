@@ -1064,7 +1064,8 @@ lists the 10 newest intervals with start, end, duration and reason.
 
 A native Android app (ADR 2026-10-13 "Native Android App for `soos-remote` (Kotlin and Jetpack
 Compose)", GitHub #382, first PR of #357) is an alternative to the web app: each user chooses.
-This first version shows the PC status, locks the PC and signs in over Funnel with a passkey.
+This first version shows the PC status, locks the PC, signs in over Funnel with a passkey and,
+when turned on, alerts you when the PC stops answering (PC offline alerts, below).
 Unlock, the live camera view, push notifications and alerts stay in the web app for now. The
 app is sideloaded only (no store) and its application id is `org.soos.remote` (owner to confirm).
 
@@ -1160,7 +1161,42 @@ requested only on Android 6 and later), must name an allowlisted permission, and
 list again, or run `scripts/android_build.sh bootstrap` locally. The file is generated on Linux
 x86_64, so platform-specific entries for other systems may be missing.
 
-**Owner hardware check (matrix ANA14–ANA16).**
+**PC offline alerts (opt-in, GitHub #415, part of #359).** The app can check your PC in the
+background and notify you when it stops answering. It is off by default. Turn on
+**PC offline alerts** in the settings screen (shown once a PC address is saved). Android then
+asks for the notification permission (`POST_NOTIFICATIONS`); this is the only time the app asks
+for it, and the alerts stay off if you refuse.
+
+- **Checks.** Every 15 minutes (the Android minimum; two checks are 10 to 20 minutes apart),
+  one `GET /api/status` on the saved address, with the same HTTPS rules as the screens (no
+  redirect, 5 s timeouts, 16 KiB, system certificates). No other request is made. Any answer
+  from `soos-remote`, including a refusal, counts as reachable; only no answer counts as a
+  failure. In airplane mode the check is skipped.
+- **Notifications.** "PC went offline" once after two checks in a row fail, then
+  "PC back online" once when the PC answers again. The texts are fixed English and never name
+  the PC, its address or any status value. Tapping one opens the app.
+- **Sign-in.** Over Funnel the check uses the in-memory web session of the app while the app
+  process is alive; the session cookie is never written to storage. When no session exists,
+  `soos-remote` answers `403 login_required`: the PC is reachable and the offline detection
+  keeps working. The app shows "Sign-in needed" once after you turn the alerts on (again after
+  you turn them off and on, or change the PC address), never after every app run. It does not
+  retry faster.
+- **Reboot.** The job is persisted (`RECEIVE_BOOT_COMPLETED`), so it survives a phone reboot.
+  The app declares no broadcast receiver; the system scheduler alone may start the job, which
+  is not exported (`BIND_JOB_SERVICE`).
+- **Limits (best effort).** Doze and App Standby defer the checks while the phone is idle, so
+  an alert can come late. A force stop in the Android settings cancels the job until you open
+  the app again, which schedules it again. If you block notifications during an outage and
+  allow them again later, that outage is not reported. Battery Saver, Data Saver or the
+  restricted battery setting can block the app's background network, so checks fail and a
+  false "PC went offline" can follow: set the app's battery use to unrestricted. With the
+  Tailscale VPN off, or with no network outside airplane mode, the PC is unreachable from the
+  phone and an alert follows. The ADR amendment of 2026-10-17 explains
+  why no network constraint is used.
+- **Turn it off** with the same switch: the job is cancelled and the stored count is cleared.
+  Nothing is logged, and the stored state is only the switch, a count and two flags.
+
+**Owner hardware check (matrix ANA14–ANA16, AHB8).**
 
 1. Install the debug APK signed with the dedicated key. The launcher shows the adaptive soos icon
    (themed icons OK), with blue system bars.
@@ -1170,6 +1206,12 @@ x86_64, so platform-specific entries for other systems may be missing.
    prompt.
 4. Over Funnel, status and lock work after sign-in.
 5. The web app and the iPhone home-screen app still work.
+6. PC offline alerts (AHB8): turn them on and allow notifications. Disconnect the PC from the
+   network for more than 30 minutes: exactly one "PC went offline" arrives. Reconnect it:
+   exactly one "PC back online" arrives. Reboot the phone with the alerts on and repeat the
+   disconnection: the alert still arrives. Leave the phone idle for more than 30 minutes with
+   the PC up, once normally and once with Battery Saver on: no alert arrives (record any false
+   alert; it would argue for a network constraint, see the ADR amendment). Turn the alerts off: no further notification.
 
 ## 3. Requirements on the desktop
 
@@ -1599,6 +1641,13 @@ reason classes.
   metadata is trusted on first use; the debug APK is debuggable; Credential Manager providers
   other than Google Password Manager are best effort; the Digital Asset Links check needs the
   public Funnel host.
+- PC offline alerts of the Android app (section 2j): the heartbeat is best effort. Doze and App
+  Standby defer its checks, so an alert can come well after 30 minutes; a force stop cancels it
+  until the app is opened again; with the phone's Tailscale VPN off, without any network
+  outside airplane mode, or with Battery Saver, Data Saver or the restricted battery setting
+  blocking background network, checks fail and can raise "PC went offline"; while the app process
+  lives, a check over Funnel refreshes the web session idle timer (accepted risk, the 8 h
+  absolute lifetime is unchanged).
 
 ## 9. Out of scope (each needs its own ADR)
 
@@ -1610,7 +1659,8 @@ reason classes.
   reverse proxy): explored separately; it needs its own ADR before it may reach this socket.
 - **Lock/unlock-state notifications**, camera view notifications (removed 2026-10-07),
   real-time "monitoring lost" notifications (section 2j covers only the after-the-fact back-online
-  notification; the watchdog and the Android heartbeat need their own ADR), a "network changed"
+  notification and the opt-in PC offline alerts of the Android app; the watchdog needs its own
+  ADR), a "network changed"
   notification, notification actions, and push hosts other than Apple,
   Google and Mozilla (section 2d covers failed-password alerts and the test notification, section
   2j the back-online notification).

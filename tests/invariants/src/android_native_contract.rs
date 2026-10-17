@@ -852,7 +852,7 @@ fn script_block(script: &str, start: &str, end: &str) -> String {
 
 /// Runs the script's own `check_permissions` (extracted verbatim) against a fake `aapt2`
 /// printing `dump`; returns `(success, stderr)`.
-fn run_check_permissions(dump: &str, case: usize) -> (bool, String) {
+pub(crate) fn run_check_permissions(dump: &str, case: usize) -> (bool, String) {
     let script = read(BUILD_SCRIPT);
     let version = script
         .lines()
