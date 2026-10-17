@@ -389,6 +389,15 @@ mod lock_state_contract;
 #[cfg(all(test, unix))]
 mod lockscreen_adapters_contract;
 
+/// GNOME Shell lock-screen extension: metadata session modes and versions, ESM shape, no unlock
+/// path or input signal, subprocess without a shell, three states and fields with bounded lines,
+/// `disable()` cleanup and guarded callbacks, kill switch, reduced motion, brand and motion
+/// mirrors, untouched PAM/daemon/protocol, documentation (GitHub #405, PR 4 of #352; ADR
+/// 2026-10-17 "GNOME Shell Lock-Screen Extension"; spec AI/architect_spec_lockscreen_gnome.md;
+/// rows LKG1-LKG8).
+#[cfg(all(test, unix))]
+mod lockscreen_gnome_contract;
+
 /// Offline history and back-online push of `soos-remote`: RC-1 kept, read-only bus (four
 /// `Properties.Get` reads, no match, no mutating method), no network identifier anywhere,
 /// enum-only notice, page card and service worker tag, documentation (GitHub #376, tier 1 of

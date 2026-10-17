@@ -1,0 +1,51 @@
+/*
+ * soos lock-screen card (GitHub 405, PR 4 of the lock-screen epic).
+ * Colours mirror crates/gui/src/theme.rs by value (ADR 2026-10-06 "soos Brand Direction"):
+ * BLUE 0047BB, PALE EDF1FF, PALE_4 C9D6FA, PINK E59BDC, WARN_BORDER F5B547.
+ * The ring cross-fade uses T_SHORT (180 ms) of Docs/UI_MOTION.md; reduced motion sets it to 0.
+ */
+
+.soos-lock-card {
+  margin-top: 48px;
+  padding: 8px;
+  border-radius: 20px;
+  border: 2px solid #C9D6FA;
+  background-color: #0047BB;
+}
+
+.soos-lock-ring {
+  width: 40px;
+  height: 40px;
+  border-radius: 20px;
+  border: 3px solid #C9D6FA;
+  transition-duration: 180ms;
+}
+
+.soos-lock-ring.soos-idle {
+  border-color: #C9D6FA;
+}
+
+.soos-lock-ring.soos-scanning {
+  border-color: #EDF1FF;
+}
+
+.soos-lock-ring.soos-not-recognized {
+  border-color: #F5B547;
+}
+
+.soos-lock-star {
+  width: 22px;
+  height: 22px;
+  color: #E59BDC;
+}
+
+.soos-lock-label {
+  color: #EDF1FF;
+  font-size: 15px;
+  font-weight: bold;
+  margin-right: 10px;
+}
+
+.soos-reduced-motion .soos-lock-ring {
+  transition-duration: 0ms;
+}
