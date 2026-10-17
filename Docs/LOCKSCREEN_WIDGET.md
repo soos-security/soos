@@ -2,13 +2,14 @@
 
 Shows whether soos is scanning your face while the screen is locked, in the soos brand, on the
 lock screens that allow it. Epic GitHub #352; this page covers PR 2 (GitHub #401): the
-`soos-lockstatus` bridge, the **hyprlock** label and the **swaylock-plugin** background widget.
-GNOME Shell and KDE Plasma adapters follow in later pull requests (owner decision of 2026-10-13:
-swaylock-plugin and hyprlock first, then GNOME, then KDE).
+`soos-lockstatus` bridge, the **hyprlock** label and the **swaylock-plugin** background widget,
+and PR 4 (GitHub #405): the **GNOME Shell** system extension `soos-lockscreen@soos` (§11). The
+KDE Plasma adapter follows in a later pull request (owner decision of 2026-10-13: swaylock-plugin
+and hyprlock first, then GNOME, then KDE).
 
 Decisions: ADR 2026-10-13 "Read-Only Lock-Screen State Channel" (the daemon side, PR 1, GitHub
 #380) and ADR 2026-10-15 "Lock-Screen Adapters for swaylock-plugin and hyprlock" in
-`AI/DECISIONS.md`. Wire contract: `Docs/IPC_PROTOCOL.md` §14. Motion: `Docs/UI_MOTION.md`.
+`AI/DECISIONS.md`, and ADR 2026-10-17 "GNOME Shell Lock-Screen Extension" for §11. Wire contract: `Docs/IPC_PROTOCOL.md` §14. Motion: `Docs/UI_MOTION.md`.
 
 ## 1. Why adapters
 
@@ -21,7 +22,8 @@ adapter that reads it:
 |---|---|---|
 | swaylock-plugin (`--command`, wlr-layer-shell background) | `soos-lock-widget` | full: star, ring, words |
 | hyprlock (`label` with `cmd[update:N]`) | `soos-lockstatus --once` and `packaging/lockscreen/hyprlock-soos.conf` | coarse: a glyph and words per poll |
-| GNOME Shell, KDE Plasma | later PRs, through `soos-lockstatus --watch` | — |
+| GNOME Shell 45 or later (lock screen and unlock dialog) | system extension `soos-lockscreen@soos` (`packaging/gnome-shell/`), through `soos-lockstatus --watch` (§11) | full: star, ring, words |
+| KDE Plasma | later PR, through `soos-lockstatus --watch` | — |
 | plain swaylock, i3lock, xscreensaver | none (no extension point); use swaylock-plugin | — |
 
 No adapter can unlock, start a scan, wake the camera or send input to the locker. Removing or
@@ -184,6 +186,7 @@ scan about every 4.24 s), the turn continues from scan to scan.
 | Never "Scanning" on swaylock-plugin | presence needs `LockedHint` (wrapper of `Docs/DISTRIBUTION_DEPLOYMENT.md` §5.5); PAM face runs only on Enter | add the wrapper and `swayidle` hooks |
 | Widget missing, swaylock-plugin colour shown | no wlr-layer-shell in swaylock-plugin's nested server, `libwayland-client.so` missing (workspace build only), or an output over the pixel budget or out of shared memory | read the widget's stderr (swaylock-plugin forwards it): one line names the setup error or the skipped output, never the state |
 | Always idle although the daemon runs and scans | the daemon's logind session check (at most 250 ms, `LOCK_STATE_SESSION_CHECK_TIMEOUT_MS`) answers after the client's 250 ms budget: every poll times out and backs off (the daemon would answer Idle on such a timeout anyway) | check `systemd-logind` health; `soos-lockstatus --watch` shows `"available":false` |
+| GNOME: no card on the lock screen | extension not enabled for this user, shell version not in `metadata.json`, kill switch present, or no root-owned `soos-lockstatus` in `/usr/bin` or `/usr/local/bin` (the card then stays Idle) | §11: `gnome-extensions info soos-lockscreen@soos`; `journalctl --user -b \| grep soos-lockscreen` |
 | hyprlock label empty | `soos-lockstatus` not on hyprlock's `PATH`; idle with `--format text` | use an absolute path; use `--format label` |
 
 ## 10. Security notes
@@ -193,5 +196,69 @@ scan about every 4.24 s), the turn continues from scan to scan.
 - No new socket, no permission change, no privileged component, no network, no D-Bus.
 - `pam_soos.so`, the daemon and the protocol are unchanged by this PR.
 - Kill switch: remove the `--command` argument or the hyprlock label. The `/etc/soos/lockwidget.disable`
-  file proposed in the epic is deferred to the GNOME adapter, where an extension runs inside the
-  shell.
+  file proposed in the epic applies to the GNOME adapter, where an extension runs inside the
+  shell (§11); the swaylock-plugin widget and the hyprlock label do not read it.
+
+## 11. GNOME Shell (system extension `soos-lockscreen@soos`)
+
+PR 4 of #352 (GitHub #405, ADR 2026-10-17 "GNOME Shell Lock-Screen Extension"). GNOME Shell is
+its own locker, so the adapter is a GJS extension in the `unlock-dialog` session mode (owner
+decision of 2026-10-12: a **system** extension; extensions.gnome.org is out of scope). Files:
+`packaging/gnome-shell/soos-lockscreen@soos/` (`metadata.json`, `extension.js`, `stylesheet.css`).
+
+**What it does.** While the session is locked (lock screen and unlock dialog), the extension
+runs `soos-lockstatus --watch` with `Gio.Subprocess` (fixed argument list, no shell), reads its
+JSON lines (at most 256 bytes per line; a longer one stops the bridge) and shows one card at the
+top centre of the primary monitor, below the top bar: brand blue, a ring, the pink star and the words
+"Scanning" or "Not recognized", exactly the three states of §2. `"available":false` looks like
+Idle. The card is not reactive and the extension connects no input signal: it cannot take
+input, unlock, start a scan or wake the camera. When the session unlocks it stops the bridge
+and removes the card; when the bridge ends it shows Idle and restarts it after 1 s, 2 s, 4 s,
+then every 8 s while the session stays locked.
+
+**Requirements.** GNOME 45 or later (the ESM extension format; `shell-version` lists 45 to 51).
+`soos-lockstatus` must be a root-owned file, not writable by group or others, in `/usr/bin` or
+`/usr/local/bin`: the extension never looks in `PATH` or in your home directory, so the
+`~/.local/bin` install of §3 is not used here. The user must be in the `soos` group (§3).
+
+**Manual install** (the installer opt-in is a later PR of #352):
+
+```sh
+cargo build --locked --release -p soos-lockstatus
+sudo install -Dm0755 -o root -g root target/release/soos-lockstatus /usr/local/bin/soos-lockstatus
+sudo cp -r packaging/gnome-shell/soos-lockscreen@soos /usr/share/gnome-shell/extensions/
+sudo chown -R root:root /usr/share/gnome-shell/extensions/soos-lockscreen@soos
+# Log out and back in (the shell reads system extensions at start), then, as the user:
+gnome-extensions enable soos-lockscreen@soos
+gnome-extensions info soos-lockscreen@soos   # State: ACTIVE (ENABLED on GNOME 45)
+```
+
+Uninstall: `gnome-extensions disable soos-lockscreen@soos`, then remove
+`/usr/share/gnome-shell/extensions/soos-lockscreen@soos`.
+
+**Kill switch.** `sudo touch /etc/soos/lockwidget.disable` turns the card off for every user
+without uninstalling anything; it is read at every lock, so it applies from the next lock.
+Remove the file to turn the card back on. Disabling the extension, removing it, the kill switch
+or an error inside the extension each leave the stock GNOME unlock dialog and password unlock
+exactly as they are (presence unlock does not depend on the extension either).
+
+**Reduced motion.** The extension follows `org.gnome.desktop.interface enable-animations`
+(Settings → Accessibility → Reduce Animation, or
+`gsettings set org.gnome.desktop.interface enable-animations false`), read through the shell:
+the ring colour changes at once, the star does not turn and the card does not shake.
+`SOOS_REDUCE_MOTION` and `--reduce-motion` (§8) do not apply to GNOME.
+
+**Motion** (tokens of `Docs/UI_MOTION.md`, as in §8): ring colour cross-fade 180 ms; while
+scanning the star turns one quarter per 1200 ms, at most 4.8 s after the scan started, and
+always comes to rest on a half turn; a new Not recognized shakes the card once by at most 8 px
+over 260 ms; the card fades in over 180 ms when the screen locks.
+
+**Troubleshooting.**
+
+| Symptom | Check |
+|---|---|
+| `gnome-extensions enable` prints that the extension does not exist | the shell reads system extensions at start: log out and back in after copying |
+| State `OUT OF DATE` | the running GNOME version is not in `shell-version`; nothing is shown and the stock lock screen is unchanged |
+| State `ERROR` | `journalctl --user -b -g soos-lockscreen` (or `journalctl -b /usr/bin/gnome-shell`); the stock lock screen is unchanged |
+| Card always idle | `soos-lockstatus` missing from `/usr/bin` and `/usr/local/bin`, not root-owned, or writable by group or others (one warning per lock in the journal); otherwise as in §9 |
+| No card at all | kill switch `/etc/soos/lockwidget.disable` present; extension disabled for this user |
