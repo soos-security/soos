@@ -86,7 +86,8 @@ on screen; C6 no colour literal; C7 no dependency, manifest, permission or metad
 ## 7. Out of Scope
 
 Battery and offline-history cards (next, read-only); push (needs its own owner/ADR decision); unlock and camera view
-(need a server-origin ADR); Keystore device key (#354 part 2); heartbeat (#359); release signing (#361).
+(need a server-origin ADR); Keystore device key (#354 part 2); release signing (#361). The opt-in PC-offline heartbeat (#415, part of #359)
+landed first (PR #419): the alerts reuse its process-wide `SharedApi.forOrigin` client, so the session stays single.
 
 ## 8. Owner Check (ANA21)
 
