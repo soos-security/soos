@@ -36,14 +36,20 @@ readonly BUILD_TOOLS_VERSION="35.0.0"
 readonly APK="${ANDROID_DIR}/app/build/outputs/apk/debug/app-debug.apk"
 # The only permissions the merged manifest may request: INTERNET, the
 # signature-level receiver permission androidx.core declares for the app itself,
-# and the two install-time (normal) permissions androidx.biometric 1.1.0 declares as
+# the two install-time (normal) permissions androidx.biometric 1.1.0 declares as
 # a compile dependency of androidx.credentials 1.5.0 (owner decision 2026-10-15; the
-# app never calls androidx.biometric, and neither permission grants data access).
+# app never calls androidx.biometric, and neither permission grants data access),
+# and the two permissions of the opt-in PC-offline heartbeat (owner decision
+# 2026-10-17, GitHub #359/#415): POST_NOTIFICATIONS (runtime prompt) and
+# RECEIVE_BOOT_COMPLETED (persisted job, no receiver). Pinned by
+# soos-invariants::android_heartbeat_contract.
 readonly ALLOWED_PERMISSIONS=(
     "android.permission.INTERNET"
     "org.soos.remote.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION"
     "android.permission.USE_BIOMETRIC"
     "android.permission.USE_FINGERPRINT"
+    "android.permission.POST_NOTIFICATIONS"
+    "android.permission.RECEIVE_BOOT_COMPLETED"
 )
 
 fail() {
@@ -132,7 +138,7 @@ check_permissions() {
         fi
     done <<< "$dump"
     [[ "$found" -eq 1 ]] || fail "android.permission.INTERNET not found (unexpected aapt2 output)"
-    echo "[OK]    android_build: APK permissions are INTERNET plus the allowlisted library permissions"
+    echo "[OK]    android_build: APK permissions are INTERNET plus the allowlisted app and library permissions"
 }
 
 case "$MODE" in

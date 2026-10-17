@@ -1,11 +1,17 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  soos native Android app (GitHub #382). One permission (INTERNET), no backup, no cleartext,
-  system CAs only, exactly one exported component (the launcher activity).
+  soos native Android app (GitHub #382). Three permissions: INTERNET, POST_NOTIFICATIONS
+  (runtime prompt, asked only when the opt-in PC-offline heartbeat is turned on) and
+  RECEIVE_BOOT_COMPLETED (the persisted heartbeat job survives a reboot; no receiver is
+  declared). GitHub #415, owner decision of 2026-10-17 on #359. No backup, no cleartext, system
+  CAs only, exactly one exported component (the launcher activity); the heartbeat job service
+  is not exported and only the system scheduler may bind it.
 -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
 
     <application
         android:allowBackup="false"
@@ -26,5 +32,10 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <service
+            android:name=".heartbeat.HeartbeatJobService"
+            android:exported="false"
+            android:permission="android.permission.BIND_JOB_SERVICE" />
     </application>
 </manifest>

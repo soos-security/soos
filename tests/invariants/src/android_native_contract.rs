@@ -435,8 +435,43 @@ fn test_ana_s6_manifest_hardening() {
         .match_indices("<uses-permission")
         .map(|(at, _)| &manifest[at..at + manifest[at..].find("/>").unwrap()])
         .collect();
-    assert_eq!(permissions.len(), 1, "exactly one permission");
-    assert!(permissions[0].contains("android.permission.INTERNET"));
+    // Owner-approved contract migration (2026-10-17, #359): the opt-in PC-offline heartbeat
+    // adds exactly POST_NOTIFICATIONS (runtime prompt) and RECEIVE_BOOT_COMPLETED (a persisted
+    // JobScheduler job survives a reboot; no receiver is declared) to INTERNET.
+    let mut names: Vec<&str> = permissions
+        .iter()
+        .map(|p| {
+            let at = p.find("android:name=\"").expect("named permission") + "android:name=\"".len();
+            &p[at..at + p[at..].find('"').expect("closing quote")]
+        })
+        .collect();
+    names.sort_unstable();
+    assert_eq!(
+        names,
+        [
+            "android.permission.INTERNET",
+            "android.permission.POST_NOTIFICATIONS",
+            "android.permission.RECEIVE_BOOT_COMPLETED",
+        ],
+        "exactly INTERNET, POST_NOTIFICATIONS and RECEIVE_BOOT_COMPLETED"
+    );
+    // The heartbeat runs in at most one platform JobService, never exported and callable only
+    // by the system scheduler.
+    let services: Vec<&str> = manifest
+        .match_indices("<service")
+        .map(|(at, _)| &manifest[at..at + manifest[at..].find('>').expect("service tag end")])
+        .collect();
+    assert!(services.len() <= 1, "at most one service");
+    for service in &services {
+        assert!(
+            service.contains("android:permission=\"android.permission.BIND_JOB_SERVICE\""),
+            "the service is guarded by BIND_JOB_SERVICE: {service}"
+        );
+        assert!(
+            service.contains("android:exported=\"false\""),
+            "the service is not exported: {service}"
+        );
+    }
     for needle in [
         "android:allowBackup=\"false\"",
         "android:usesCleartextTraffic=\"false\"",
@@ -449,7 +484,6 @@ fn test_ana_s6_manifest_hardening() {
     }
     assert_eq!(manifest.matches("android:exported=\"true\"").count(), 1);
     for forbidden in [
-        "<service",
         "<receiver",
         "<provider",
         "android:autoVerify",
@@ -818,7 +852,7 @@ fn script_block(script: &str, start: &str, end: &str) -> String {
 
 /// Runs the script's own `check_permissions` (extracted verbatim) against a fake `aapt2`
 /// printing `dump`; returns `(success, stderr)`.
-fn run_check_permissions(dump: &str, case: usize) -> (bool, String) {
+pub(crate) fn run_check_permissions(dump: &str, case: usize) -> (bool, String) {
     let script = read(BUILD_SCRIPT);
     let version = script
         .lines()

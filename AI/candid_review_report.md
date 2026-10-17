@@ -1,195 +1,236 @@
 # Candid Review Report
 
 - **Date**: 2026-10-17
-- **Target Branch**: `feat/setup-user-phase`
-- **Base (merge-base)**: `01ce6fa` (rebased from `9e82795`; `origin/main` gained #411, #417 and #413)
-- **Reviewed-Diff-Fingerprint**: `7c946bc13225f52c5b2760673d8e14e991c74df283871e6ad11b868bdebad3f0`
-- **Audited Files**: `.github/workflows/ci.yml`, `AI/DECISIONS.md`, `AI/VERIFICATION_MATRIX.md`, `AI/architect_spec_setup_user_phase.md`, `AI/auditor_constraints_setup_user_phase.md`, `AI/tester_contract_setup_user_phase.md`, `AI/walkthroughs/213_setup_user_phase.md`, `Docs/CI_CD_AND_SECURITY.md`, `Docs/PACKAGING_AND_PROVISIONING.md`, `Docs/REMOTE_COMPANION.md`, `README.md`, `crates/remote/tests/setup_render_tests.rs`, `scripts/install_remote.sh`, `scripts/setup.sh`, `tests/docker/setup_root_preview_test.sh`, `tests/fixtures/setup/remote.toml`, `tests/invariants/src/lib.rs`, `tests/invariants/src/setup_contract.rs`, `tests/invariants/src/setup_user_phase_contract.rs`
+- **Target Branch**: `feat/android-offline-heartbeat`
+- **Base (merge-base)**: `aa25f78` (rebased from `6eb0746`; `origin/main` gained #417, #413 and #402)
+- **Reviewed-Diff-Fingerprint**: `21d010487a548c839022a99993c04871f8e6eff582fa486b0b587979acc15cc2`
+- **Audited Files**: `AI/DECISIONS.md`, `AI/VERIFICATION_MATRIX.md`,
+  `AI/architect_spec_android_offline_heartbeat.md`,
+  `AI/auditor_constraints_android_offline_heartbeat.md`,
+  `AI/tester_contract_android_offline_heartbeat.md`,
+  `AI/walkthroughs/223_android_offline_heartbeat.md`, `Docs/REMOTE_COMPANION.md`,
+  `android/app/src/main/AndroidManifest.xml`,
+  `android/app/src/main/java/org/soos/remote/MainActivity.kt`,
+  `android/app/src/main/java/org/soos/remote/data/SettingsStore.kt`,
+  `android/app/src/main/java/org/soos/remote/heartbeat/Heartbeat.kt`,
+  `android/app/src/main/java/org/soos/remote/heartbeat/HeartbeatController.kt`,
+  `android/app/src/main/java/org/soos/remote/heartbeat/HeartbeatJobService.kt`,
+  `android/app/src/main/java/org/soos/remote/heartbeat/HeartbeatNotifier.kt`,
+  `android/app/src/main/java/org/soos/remote/heartbeat/PlatformHeartbeatScheduler.kt`,
+  `android/app/src/main/java/org/soos/remote/net/SharedApi.kt`,
+  `android/app/src/main/java/org/soos/remote/net/SoosApi.kt`,
+  `android/app/src/main/java/org/soos/remote/ui/SoosApp.kt`,
+  `android/app/src/test/java/org/soos/remote/HeartbeatControllerTest.kt`,
+  `android/app/src/test/java/org/soos/remote/HeartbeatPolicyTest.kt`,
+  `android/app/src/test/java/org/soos/remote/HeartbeatTextsTest.kt`,
+  `android/app/src/test/java/org/soos/remote/SharedApiTest.kt`, `scripts/android_build.sh`,
+  `tests/invariants/src/android_heartbeat_contract.rs`,
+  `tests/invariants/src/android_native_contract.rs`, `tests/invariants/src/lib.rs`
 
-## 0. Re-Review After the Rebase Onto `origin/main` `01ce6fa`
+## 0. Re-Review After the Rebase Onto `origin/main` `aa25f78`
 
-Independent re-review, without author context, of the branch after its rebase from `9e82795` onto
-`01ce6fa`. `origin/main` gained three commits in between: #411 (`6eb0746`, daemon `LockState` refusal
-test on the auth-reserved connection), #417 (`085ba63`, zbus 5 -> 6 migration in `Cargo.toml`/`Cargo.lock`,
-`crates/daemon/src/presence/logind.rs`, `crates/remote/src/{logind,offline,session}.rs`, their tests and
-three invariant files) and #413 (`01ce6fa`, lazy second shm buffer of `soos-lock-widget`).
+Independent re-review, without author context, of the branch after its rebase from `6eb0746` onto
+`aa25f78`. `origin/main` gained three commits in between: #417 (`085ba63`, zbus 5 -> 6 migration in
+`Cargo.toml`/`Cargo.lock`, `crates/daemon/src/presence/logind.rs`, `crates/remote/src/{logind,offline,session}.rs`,
+their tests and three invariant files), #413 (`01ce6fa`, lazy second shm buffer of `soos-lock-widget`)
+and #402 (`aa25f78`, the phone-companion user phase of `scripts/setup.sh`, merged just before this one).
 
 Rebase integrity, checked mechanically:
-- `git range-diff 9e82795..origin/feat/setup-user-phase 01ce6fa..HEAD`: commit 1 (`7171450`, the
-  owner-approved SET3 contract migration, formerly `e57c0e1`) is `=`; commits 2-4 are `!` only because
-  of context lines in `AI/DECISIONS.md` (the ADR line now follows the #410/#412 ADR lines), in
-  `AI/candid_review_report.md` and `AI/plan_evaluator_report.md` (pre-images changed on main), and in
-  `.github/workflows/ci.yml` hunk headers.
-- The `+`/`-` lines of `git diff 9e82795 origin/feat/setup-user-phase` and `git diff 01ce6fa HEAD`
-  (both excluding the two report files) are byte-identical, and the branch's
-  `AI/plan_evaluator_report.md` is byte-identical before and after the rebase. The branch's own changes
-  are therefore unchanged by the rebase.
+- `git range-diff 6eb0746..10e4daf aa25f78..1b6cb07`: commit 1 (`4248d07`, the owner-approved
+  ANA-S6 contract migration, formerly `c8dccd1`) is `=`; commit 2 (`1b6cb07`, formerly `10e4daf`) is
+  `!` only because of context lines in `AI/DECISIONS.md` (neighbouring ADR lines changed on main) and
+  the pre-images of `AI/candid_review_report.md` and `AI/plan_evaluator_report.md`, which main rewrote.
+- The `+`/`-` lines of `git diff 6eb0746 10e4daf` and `git diff aa25f78 1b6cb07` (both excluding the
+  two report files) are byte-identical (2534 lines), and both report files are byte-identical between
+  `10e4daf` and `1b6cb07`. The branch's own changes are therefore unchanged by the rebase.
 
 Semantic interaction with what main gained:
-- `git diff 9e82795 01ce6fa` touches nothing under `scripts/`, `.github/`, `packaging/` or
-  `tests/docker/`; `setup.sh` queries logind only through `loginctl` (shell), so the zbus 6 migration
-  does not reach it.
-- `crates/remote/tests/setup_render_tests.rs` uses only `soos_remote::config::{parse_config, ConfigError}`;
-  #417 changed `logind.rs`, `offline.rs`, `session.rs`, not `config.rs`. The test builds and passes
-  against the zbus 6 `soos-remote`.
-- #417 edited `remote_companion_contract.rs`, `presence_unlock_contract.rs` and
-  `portable_crates_contract.rs`; the branch edits `lib.rs` (one module registration), `setup_contract.rs`
-  and the new `setup_user_phase_contract.rs`. No overlap; the whole invariant suite passes together.
-- #413 and #411 touch `crates/lock-widget` and `crates/daemon` tests only: no interaction.
+- The branch touches no Rust production crate, no `Cargo.*`, no workflow; #417 changed only Rust
+  crates, lock file and invariant files the branch does not edit (`remote_companion_contract.rs`,
+  `presence_unlock_contract.rs`, `portable_crates_contract.rs`). The Android app reaches
+  `soos-remote` only over HTTPS (`GET /api/status`, unchanged by #417), so the zbus 6 migration does
+  not reach it.
+- #413 touches `crates/lock-widget` only: no interaction.
+- #402 and the branch both edit `Docs/REMOTE_COMPANION.md` and `tests/invariants/src/lib.rs` in
+  disjoint hunks (#402: §2j setup note, §4 one-command install, the `setup_user_phase_contract`
+  registration; branch: §2j PC offline alerts and owner check step 6, §8, §9, the
+  `android_heartbeat_contract` registration). The merged document reads coherently. `scripts/setup.sh`
+  installs no Android component and #402 does not touch `scripts/android_build.sh`, `android/` or
+  `.github/workflows/android.yml`.
 
-Executed evidence (this review): `LIBONNXRUNTIME_NO_PKG_CONFIG=1 CARGO_TARGET_DIR=~/.cache/soos-targets/setup-user-phase
+Executed evidence (this review): `LIBONNXRUNTIME_NO_PKG_CONFIG=1 CARGO_TARGET_DIR=~/.cache/soos-targets/android-offline-heartbeat
 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_BUILD_JOBS=4 cargo test --locked
--p soos-invariants -p soos-remote -- --test-threads=4`: 1186 passed, 0 failed (soos-invariants 731);
-`cargo clippy --locked -p soos-invariants -p soos-remote --all-targets -- -D warnings`: clean (zbus 6.0.0).
-The Docker harness `tests/docker/setup_root_preview_test.sh` was not re-run here (no input of it changed
-in the rebase); it runs as the required CI job `setup-root-preview`.
+-p soos-invariants -- --test-threads=4`: 735 passed, 0 failed (AHB-S1..S4, the migrated ANA-S6 and main's
+new SET20-SET39 together); `cargo clippy --locked -p soos-invariants --all-targets -- -D warnings`: clean;
+`cargo fmt --all -- --check`: clean. The JVM unit tests (AHB4-AHB6) cannot run on this host (no JDK/SDK);
+no Android input changed in the rebase, and they run in the CI job `Android (debug build)`.
 
-Test assertions: the step-3 greps on the new frozen patch find no removed assertion, no new
-`#[ignore]`/`cfg(any())`/`should_panic`/tolerance, no inline test module change. The only modified
-pre-existing test remains SET3 in `setup_contract.rs`, the owner-approved 2026-10-15 migration recorded
-in its own commit `7171450` and in ADR 2026-10-15 "Setup User Phase". No other pre-existing assertion changed.
+Test assertions: the step-3 greps on the new frozen patch (2853 lines) find exactly the two removed
+assertions at patch lines 2776-2777 and the removed `"<service"` needle at line 2822, all in
+`test_ana_s6_manifest_hardening`: the owner-approved 2026-10-17 migration recorded in its own commit
+`4248d07` and in the ADR item (8) amendment and matrix ANA9. No new `#[ignore]`/`cfg(any())`/`should_panic`/
+tolerance, no inline test module change, no other pre-existing assertion changed.
 
-Sections 1-4 below are the previous APPROVED review (fingerprint `ae799ec6…`, base `9e82795`), whose
-findings still apply to the unchanged branch content; line references in `scripts/setup.sh` are unchanged.
-The SUGGESTION on stale commit references now also applies to `e57c0e1` -> `7171450`.
+Sections 1-4 below are the previous APPROVED review (fingerprint `62858401…`, base `6eb0746`), re-read
+against the rebased code; their findings still apply to the unchanged branch content. Updated
+references: the MINOR on branch SHAs now also applies to `c8dccd1` -> `4248d07` (still cited as
+`c8dccd1` in the matrix row ANA9, now `AI/VERIFICATION_MATRIX.md:2632`, and in the spec, tester
+contract, auditor constraints, plan report and walkthrough); the `invariants` count of section 1 is now
+735; the ragged-line SUGGESTION in `Docs/REMOTE_COMPANION.md` now refers to line 1663 (line 1214 is
+unchanged; #402 grew the document after it).
 
 ## 1. Executive Summary
 
-The frozen patch (merge-base `9e82795` to the working tree, 4631 lines) adds the phone-companion user
-phase to `scripts/setup.sh` (GitHub #400, PR 2 of #362): companion options, a strict `remote.toml`
-classifier (absent / untouched template / setup-managed / user), default-on feature resolution with the
-prerequisite cascade, a journaled companion rollback with exit 5, the root-half camera-view daemon side
-(`/etc/soos/daemon.toml` `[preview]` created only when absent, by hard link, restart + readiness gate,
-removal on failure with exit 1 or 70), and the `install_remote.sh` `CARGO_TARGET_DIR` fix. The newest,
-uncommitted part adds a privileged-systemd Docker harness `tests/docker/setup_root_preview_test.sh`
-that drives the unmodified `setup.sh` through the real `sudo` into the real `/etc` creation path, a
-required CI job `setup-root-preview` (in `CI Success` needs), the invariant
-`test_set_u24_root_preview_docker_job_wired_into_ci`, and matrix/docs updates.
+The diff adds the opt-in PC-offline heartbeat to the native Android app (GitHub #415, part of
+#359 tier 3): one non-exported platform `JobService` guarded by `BIND_JOB_SERVICE`, a persisted
+15 min / 5 min flex periodic job without a network constraint, a pure state machine (alert after
+2 consecutive failures, one back-online notice, one sign-in notice per opt-in), a pure
+controller under a process-wide lock, a process-wide `SoosApi` per origin (`SharedApi`), a
+session-drop guard in `SoosApi.send`, the settings-screen switch with the only runtime
+`POST_NOTIFICATIONS` prompt, the two new permissions in the manifest and in the APK allowlist,
+and docs, ADR amendment, matrix rows AHB1–AHB8 and walkthrough 223.
 
-Executed evidence (this review, not the author's): `bash tests/docker/setup_root_preview_test.sh`
-passed all eight cases (A1 A2 B C1 C2 D E1 E2) and the host sysctl guard; `cargo test -p soos-invariants`
-731 passed / 0 failed; `cargo test -p soos-remote --test setup_render_tests` 3 passed; ShellCheck
-(stable, all severities) on `setup.sh`, `install_remote.sh` and the new harness: clean.
+No production Rust is touched; no PAM, daemon or IPC path is affected. The Kotlin was read for
+compile errors and Android API misuse (`minSdk` 34, `targetSdk` 36, Kotlin 2.2.21): none found.
+`cargo test --locked -p soos-invariants` passes (711 passed, 0 failed, including AHB-S1..S4 and
+the migrated ANA-S6); `cargo fmt --all -- --check` and
+`cargo clippy -p soos-invariants --all-targets -- -D warnings` are clean. No CRITICAL or MAJOR
+finding; two MINOR and two SUGGESTION items below.
 
-No CRITICAL or MAJOR finding. Four MINOR/SUGGESTION items are listed in section 4.
-
-## 2. Test Changes (mechanical listing from step 3)
+## 2. Test Changes (mechanical listing from step 3, with justification per change)
 
 Test files touched:
-- `crates/remote/tests/setup_render_tests.rs` (new): the setup render fixture and every cascade
-  variant parsed by the real `soos-remote` `parse_config`; one variant the cascade never writes is
-  refused. Additive.
-- `tests/docker/setup_root_preview_test.sh` (new, untracked): Docker harness, additive.
-- `tests/fixtures/setup/remote.toml` (new): fixture, byte-equal to the render (asserted in SET38).
-- `tests/invariants/src/lib.rs`: registers `setup_user_phase_contract`. Additive.
-- `tests/invariants/src/setup_user_phase_contract.rs` (new): SET20-SET39 contracts, including the new
-  `test_set_u24_root_preview_docker_job_wired_into_ci`. Additive.
-- `tests/invariants/src/setup_contract.rs`: **modified** `test_set_s3_no_pam_tailscale_remote_or_network_lock_action`.
 
-Removed/changed assertions (`^-` assert grep): none matched the grep, but the SET3 diff removes three
-banned needles (`install_remote.sh`, `[preview]`, `remote.toml`) and relaxes the `tailscale ` rule to
-"`tailscale version` or inside a quoted string". Justification: this is the scope change of the issue
-itself (the user phase must run `install_remote.sh` and write `remote.toml` / `[preview]`), recorded as
-an owner-approved contract migration in its own commit `e57c0e1` (verified byte-identical to the
-referenced pre-rebase commit `40b0fb1`, and not modified since), documented in the test doc comment, in
-`AI/tester_contract_setup_user_phase.md` and ADR 2026-10-15. The executed-call check
-`assert_no_forbidden_calls` (only `tailscale version` may run) is unchanged and still applied by the new
-behavioral contracts. Accepted as a justified migration, not a weakening. See finding 2 for a residual
-gap of the quote heuristic.
+- `android/app/src/test/.../HeartbeatControllerTest.kt` — new.
+- `android/app/src/test/.../HeartbeatPolicyTest.kt` — new.
+- `android/app/src/test/.../HeartbeatTextsTest.kt` — new.
+- `android/app/src/test/.../SharedApiTest.kt` — new.
+- `tests/invariants/src/android_heartbeat_contract.rs` — new.
+- `tests/invariants/src/lib.rs` — registers the new module only.
+- `tests/invariants/src/android_native_contract.rs` — modified (below).
 
-New escape hatches (`#[ignore]`, `cfg(any())`, `should_panic`, tolerance/epsilon): none.
-Inline test modules changed: none.
+Removed or changed checks:
+
+- patch lines 2776–2777, `test_ana_s6_manifest_hardening`:
+  `assert_eq!(permissions.len(), 1, "exactly one permission")` and
+  `assert!(permissions[0].contains("android.permission.INTERNET"))` are replaced by an exact
+  sorted equality against `[INTERNET, POST_NOTIFICATIONS, RECEIVE_BOOT_COMPLETED]`. Still an
+  exact-set check (an extra or missing permission fails). Justified by the owner decision of
+  2026-10-17 on #359, which names exactly these two permissions; recorded as the ANA9
+  amendment in the matrix and as the lead's contract migration in the walkthrough.
+- patch line 2822: `"<service"` removed from the forbidden list of the same test. Replaced by
+  "at most one `<service>`, each with `BIND_JOB_SERVICE` and `exported=\"false\"`", plus the
+  stricter AHB-S2 (exactly one service with the exact name, no intent filter on it). Justified
+  by the same owner decision (one platform `JobService`). `<receiver>` and `<provider>` stay
+  forbidden; the exported-component count (1) is unchanged.
+- `run_check_permissions` becomes `pub(crate)`: visibility only, no assertion change.
+
+New escape hatches (`#[ignore]`, `should_panic`, tolerance): none. Inline `mod tests` changes:
+none. No pre-existing Kotlin test file is modified (`SoosApiTest.kt` untouched; its
+`login_required drops the session` case still holds because the session sent equals the stored
+one).
 
 ## 3. Deep Reasoning Audit
 
 ### Logic & Architecture
-- Root half receives only `--camera-view on`; `--system-phase` rejects any other companion option
-  (parser block after option parsing). Tried: `--system-phase --funnel on` → usage error. PASS.
-- `daemon_preview_state` ordering: `elsewhere` (sysconfdir not `/etc`) before any read; `-L` before
-  `-e` so a dangling link is `link`, not `absent`. Harness E1 (dangling link) and E2 (link to file)
-  confirm: link kept, target never created or edited, no restart. PASS.
-- Creation race: `ln tmp daemon.toml` fails if the file appeared after the check → `return 1` →
-  `fail_and_rollback`; the administrator file is never overwritten. PASS.
-- Failure path: file removed and its journal entry dropped before the second restart; second failure
-  → `PREVIEW_DAEMON_DOWN` → exit 70 without further rollback; otherwise exit 1 with journal rollback
-  (removes `/etc/soos` only when this run created it, `rmdir` never removes a non-empty dir). Harness
-  C1/C2/D assert exactly this, including that the daemon was actually restarted with and then without
-  the file (start log). PASS.
-- Companion runs only after root-half exit 0 or 3; any other exit prints `[SKIP] companion` and keeps
-  the root exit code (harness `companion_not_run` on C1/C2/D). Exit 3 is preserved over 5. PASS.
-- `install_remote.sh`: relative `CARGO_TARGET_DIR` resolved against the checkout where cargo runs
-  (`cd "${REPO_ROOT}"`). PASS.
-- Restart bound vs unit start timeout: see finding 1. MINOR.
+
+- `classify`: `Ok` → reachable; `Refused(403, "login_required")` → sign-in; other refusal with
+  a token → reachable; `Refused(_, null)` (gateway 502, non-soos body) and `Unreachable` →
+  failure. Tried: a captive portal or foreign server — HTTPS to a `ts.net` host with system CAs
+  fails the handshake (IOException → `Unreachable`); a 200 with a non-soos body fails parsing →
+  `Unreachable`. PASS.
+- `next`: walked the full table incl. saturation (`Int.MAX_VALUE`/`Int.MIN_VALUE` stored counts
+  are clamped before `+1`, no overflow), outage during a sign-in episode, recovery via
+  `login_required`, second outage. Matches spec §2.1. PASS.
+- Controller: `enable` resets state then schedules; refusal turns the switch off and cancels;
+  `ensureScheduled` keeps a pending job's period and the state; `onCheck` drops results while
+  disabled (and cancels) or for a different saved address; a notice is returned only after a
+  successful synchronous `commit()`, so a failing write cannot repeat a notice each period.
+  `savePcUrl` resets state and saves the address under the same lock. PASS.
+- Job service: work off the main thread; `cancelIfDisabled` before any request; airplane mode
+  and invalid address count nothing; stopped run discarded; `jobFinished(params, false)` in
+  `finally`; `onStopJob` returns `false` (no backoff). `cancel()` of a running job from inside
+  the worker triggers `onStopJob` and is harmless. PASS.
+- `SoosApi.send` guard: tried the race "job sends without a session, UI signs in, late 403" —
+  the session is kept (pinned by `SharedApiTest`). Tried "logout while a job request is in
+  flight" — `soos-remote` emits `Set-Cookie` only on login verify and logout
+  (`crates/remote/src/server.rs`), so a status response cannot resurrect a cleared session.
+  PASS.
+- `SharedApi` race across an address change (job read the old address, UI switched to the new
+  one): the result is dropped by `onCheck`, but `forOrigin(old)` replaces the holder's client
+  → MINOR-2.
+- Docs reference a branch commit SHA that disappears with the squash merge → MINOR-1.
 
 ### PAM Concurrency & Deadlines
-- No change under `crates/pam`. All new `systemctl`/`soos-remote` calls go through `run_bounded`;
-  `daemon_ready` uses `wait_daemon_ready.sh` with its own timeout. PASS (not applicable to PAM).
+
+Not affected: no change under `crates/pam` or any Rust production crate. The Android check is
+bounded by the existing transport (5 s connect, 5 s read, 16 KiB body, no redirects) and by the
+platform job time limit. PASS.
 
 ### Panic Safety & Fail-Closed
-- No Rust production code changed. In shell, every error of the preview path leads to exit 1 or 70,
-  never to a `[DONE]`; `ensure_soos_conf_dir` refuses a symlinked or non-directory `/etc/soos`. The
-  companion failure path rolls back its own journal and exits 5. Tried: readiness gate fails while
-  restart succeeds (C1) → exit 1, file gone, daemon healthy again. PASS.
+
+No Rust production code. Kotlin: no `!!` in production code; `PlatformHeartbeatScheduler` maps
+`IllegalArgumentException`, `SecurityException`, `IllegalStateException` to `false`; the worker
+catches `RuntimeException` and still finishes the job. The heartbeat never grants anything (it
+only reads `/api/status` and posts local notifications), so no fail-open authorization path
+exists. PASS.
 
 ### Test Integrity & Anti-Weakening
-- New harness can fail on plausible wrong implementations: content compared to an independently
-  spelled expected file; mode/owner/link-count asserted; inode+mtime identity for "never edited";
-  invocation ID to prove restart/no restart; start log proves the daemon really ran with the file.
-  A setup.sh that edited an existing file, followed a symlink, skipped the restart or left the file
-  after a failed gate would fail B, E1/E2, A1 or C1 respectively. PASS.
-- `setup.sh` under test is byte-compared to the workspace copy (`cmp -s`), no test hook added to
-  `setup.sh` (`DAEMON_READ_CONFIG` is a literal constant, asserted by SET34 invariant). PASS.
-- `test_set_u24` is a static wiring check (job present, required in `CI Success`, not advisory in
-  `pr_checks_gate.sh`, read-only mount, no `--sysconfdir`). Appropriate for wiring. PASS.
-- SET3 migration: justified (section 2). Residual heuristic gap: finding 2.
+
+See §2: the only changed assertions are the owner-approved ANA-S6 migration, replaced by
+equally exact or stricter checks. New JVM tests fail against plausible wrong implementations:
+alerting after one failure, re-alerting during a long outage, missing back-online, re-arming
+the sign-in notice on `REACHABLE`, counting a stale-address check, dropping a session on a late
+refusal (would fail `aLateRefusalOfARequestSentWithoutASessionKeepsANewSession`). AHB-S1 runs
+the script's own `check_permissions` and checks refusal of near-miss and non-approved names.
+JVM results AHB4–AHB6 are honestly left "Pending CI" in the matrix. PASS.
 
 ### Memory, Bounds & Secrets
-- `remote.toml` / `daemon.toml` scans are bounded (`head -c` 16 KiB / 64 KiB). Login validated by a
-  strict charset before any TOML write (no injection). The plan prints "login given", not the login.
-  `remote.toml` 0600 in a 0700 dir via temp file + rename; backup 0600; symlinked paths refused.
-  `daemon.toml` 0644 root:root (non-secret content: uid list and booleans). PASS.
-- Harness host isolation: `--privileged --cgroupns=private`, tmpfs `/run`, masked host-state units
-  asserted, host `kernel.*/vm.*/fs.*` sysctls compared before/after (passed locally). The workspace is
-  mounted read-only. PASS.
+
+Stored state is a boolean, a clamped int and two flags; the session cookie stays in memory
+(`SharedApi` holds no storage, pinned by AHB-S3). Notification texts are fixed English without
+host, URL or status values (`HeartbeatTextsTest`, AHB-S3). `PendingIntent` is explicit and
+`FLAG_IMMUTABLE`. No logging added. Accepted risk (documented in ADR and §8): while the process
+lives, a Funnel check refreshes the session idle timer; the absolute 8 h lifetime is unchanged.
+PASS.
 
 ### Supply Chain & Automation
-- New CI job: `actions/checkout` pinned by SHA (same pin as the other jobs), `persist-credentials: false`,
-  no job-level `permissions:` (workflow default `contents: read`), no `${{ github.event.* }}` in `run:`,
-  `timeout-minutes: 20`, `needs: lint`, added to `CI Success` needs whose step fails on any non-success
-  result. Docker image is the existing digest-pinned `tests/docker/Dockerfile.systemd`; the container
-  installs `python3-minimal` and `sudo` from Ubuntu archives (same trust as the existing systemd job).
-  The new `.sh` is picked up by the lint job's `git ls-files '*.sh'` ShellCheck once committed. No
-  `Cargo.*` / `deny.toml` change. PASS.
+
+No dependency, catalog, Gradle or verification-metadata change; no workflow change.
+`scripts/android_build.sh` only extends `ALLOWED_PERMISSIONS` with the two owner-approved names
+and updates a message; `check_permissions` logic unchanged. `RECEIVE_BOOT_COMPLETED` is required
+by `setPersisted(true)`; `ACCESS_NETWORK_STATE` correctly avoided (no network constraint).
+Lint: `NotificationPermission` satisfied (declared), `MissingPermission` satisfied
+(`checkSelfPermission` in the same method), job service guarded by `BIND_JOB_SERVICE`;
+`warningsAsErrors = false`. PASS.
 
 ### English-Only Policy
-- Code, comments, docs, harness output and test messages reviewed: English only. PASS.
+
+All added code, comments, docs and texts are English. PASS.
 
 ## 4. Detailed Findings & Action Items
 
-- **[MINOR]** `scripts/setup.sh:1652` (and `:1656`) — `systemctl restart soos-daemon` is bounded by
-  `QUERY_TIMEOUT_S=10` while the shipped unit is `Type=notify` with `TimeoutStartSec=60`
-  (`packaging/soos-daemon.service:30`). On a slow host where the real daemon (model verification and
-  ONNX session load) needs more than 10 s to send `READY=1`, the client is killed, the step is treated
-  as failed, the new `daemon.toml` is removed and the run exits 1 although the configuration was valid.
-  Fail-closed, so not a security issue, and the same pattern pre-exists at `:1728`; consider
-  `systemctl restart --no-block` followed by the `daemon_ready` gate, or a dedicated start timeout.
-- **[MINOR]** `tests/invariants/src/setup_contract.rs:165` and
-  `tests/invariants/src/setup_user_phase_contract.rs:68` (`quoted_at`) — the quote-parity heuristic
-  treats `x="$(tailscale serve --bg ...)"` as "inside a quoted message", so the static rule would not
-  catch an executed `tailscale serve`/`funnel` (or `usermod`, `enable-linger`) inside a quoted command
-  substitution. The behavioral `assert_no_forbidden_calls` still catches it on exercised paths only.
-  Suggest additionally banning `$(tailscale`, `` `tailscale `` and `$(usermod` in the static checks.
-- **[SUGGESTION]** `scripts/setup.sh:1643-1650` — a signal between `mktemp` and `rm -f "${tmp}"`
-  leaves `/etc/soos/.daemon.toml.XXXXXX`, and a signal between `ln` and `JOURNAL+=(daemon_toml_created)`
-  leaves an unjournaled `daemon.toml`. The windows are a few instructions wide; journaling cannot simply
-  move before `ln` (a lost race would then delete an administrator file), so the fix would be a local
-  trap or a flag consulted by `on_signal`.
-- **[SUGGESTION]** `AI/tester_contract_setup_user_phase.md:6`, `AI/architect_spec_setup_user_phase.md:6`
-  — refer to the SET3 migration as commit `40b0fb1`; on this branch it is `e57c0e1` (rebased,
-  content verified identical). Reference the subject line or both SHAs.
+- **[MINOR]** `AI/VERIFICATION_MATRIX.md:2632` (also
+  `AI/walkthroughs/223_android_offline_heartbeat.md:6`,
+  `AI/architect_spec_android_offline_heartbeat.md:4,290`) — the ANA9 amendment cites the branch
+  commit `c8dccd1`, which becomes unreachable after the squash merge into `main`. Required
+  change: cite the migrated test (`android_native_contract::test_ana_s6_manifest_hardening`)
+  and the PR number instead of the branch SHA, at least in the matrix row.
+- **[MINOR]** `android/app/src/main/java/org/soos/remote/heartbeat/HeartbeatJobService.kt:39` —
+  a job that read the previous address before the user saved a new one calls
+  `SharedApi.forOrigin(oldOrigin)`, which replaces the holder's client for the new origin; the
+  screen keeps its remembered instance, but the next job gets a fresh client without the
+  in-memory session (a spurious "Sign-in needed" over Funnel is possible). The outcome itself is
+  correctly dropped by `onCheck`. Suggested change: re-read `settings.pcUrl` right before the
+  request and skip when it changed, or make `ApiHolder` not replace a client for a lookup that
+  does not match the current saved origin. Narrow race; not blocking.
+- **[SUGGESTION]** `android/app/src/main/java/org/soos/remote/heartbeat/HeartbeatController.kt:44,76`
+  — `enable()`/`disable()` run a synchronous `SharedPreferences.commit()` and `JobScheduler`
+  binder calls on the main thread from the switch handler. Cheap today; consider moving them off
+  the main thread if StrictMode is ever enabled.
+- **[SUGGESTION]** `Docs/REMOTE_COMPANION.md:1214,1663` — line 1214 exceeds the document's
+  ~100-column wrap and line 1663 leaves a short ragged line; rewrap.
 
 ## 5. Final Verdict
-
-No CRITICAL or MAJOR finding after the rebase; the two MINOR and two SUGGESTION items above carry forward.
 
 **VERDICT: APPROVED**
