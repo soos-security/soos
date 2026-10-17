@@ -18,6 +18,7 @@
     reason = "Contractual test suite utilizes direct assertions"
 )]
 
+use std::cell::Cell;
 use std::fs::File;
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -77,18 +78,98 @@ fn hold_lock(dir: &Path) -> Flock<File> {
         .unwrap()
 }
 
+/// Calls `poll` until it yields a value, calling `pause` between two polls, and gives up with
+/// `None` once `deadline_passed` reports that the deadline has passed.
+///
+/// The deadline is checked after each poll, never before it: when the whole test process is
+/// descheduled across the deadline (CPU or I/O starvation on a CI runner), the outcome that was
+/// queued meanwhile is still picked up by one last poll instead of being reported as missing.
+fn poll_until<T>(
+    mut deadline_passed: impl FnMut() -> bool,
+    mut poll: impl FnMut() -> Option<T>,
+    mut pause: impl FnMut(),
+) -> Option<T> {
+    loop {
+        if let Some(value) = poll() {
+            return Some(value);
+        }
+        if deadline_passed() {
+            return None;
+        }
+        pause();
+    }
+}
+
+/// Real-clock deadline predicate: true once `timeout` has elapsed since this call.
+fn after(timeout: Duration) -> impl FnMut() -> bool {
+    let deadline = Instant::now() + timeout;
+    move || Instant::now() >= deadline
+}
+
 /// Polls the runner like the UI does once per frame, until one outcome arrives.
 fn wait_outcome(runner: &mut StoreTaskRunner) -> StoreTaskOutcome {
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while Instant::now() < deadline {
-        let mut outcomes = runner.poll();
-        if let Some(outcome) = outcomes.pop() {
-            assert!(outcomes.is_empty(), "one outcome per task");
-            return outcome;
-        }
-        std::thread::sleep(Duration::from_millis(5));
-    }
-    panic!("no store task outcome within 10 s");
+    let outcome = poll_until(
+        after(Duration::from_secs(10)),
+        || {
+            let mut outcomes = runner.poll();
+            let outcome = outcomes.pop();
+            if outcome.is_some() {
+                assert!(outcomes.is_empty(), "one outcome per task");
+            }
+            outcome
+        },
+        || std::thread::sleep(Duration::from_millis(5)),
+    );
+    outcome.unwrap_or_else(|| panic!("no store task outcome within 10 s"))
+}
+
+/// GitHub #425 (DGS1): a stall that carries the clock past the deadline while the test process
+/// is descheduled (a starved CI runner) must not hide an outcome that is already queued: the
+/// wait polls once more after the deadline before giving up. The stall is simulated with a
+/// deadline flag set by `pause`, so this test does not depend on host timing.
+#[test]
+fn test_dgs_wait_polls_once_more_after_a_stall_past_the_deadline() {
+    let stalled_past_deadline = Cell::new(false);
+    let mut polls = 0_u32;
+    let got = poll_until(
+        || stalled_past_deadline.get(),
+        || {
+            polls += 1;
+            (polls >= 2).then_some(polls)
+        },
+        // The process is frozen during the pause and wakes up after the deadline.
+        || stalled_past_deadline.set(true),
+    );
+    assert_eq!(
+        got,
+        Some(2),
+        "the outcome queued during the stall must be returned by a final poll"
+    );
+}
+
+/// DGS2: the real-clock wait stays bounded: a source that never yields gives up once the
+/// timeout has elapsed, not before it.
+#[test]
+fn test_dgs_wait_still_gives_up_after_the_timeout() {
+    let started = Instant::now();
+    let mut polls = 0_u32;
+    let got: Option<()> = poll_until(
+        after(Duration::from_millis(30)),
+        || {
+            polls += 1;
+            None
+        },
+        || std::thread::sleep(Duration::from_millis(5)),
+    );
+    let took = started.elapsed();
+    assert_eq!(got, None);
+    assert!(took >= Duration::from_millis(30), "gave up early: {took:?}");
+    // Generous upper bound so that host load alone cannot fail this test.
+    assert!(
+        took < Duration::from_secs(10),
+        "the wait is unbounded: {took:?}"
+    );
+    assert!(polls >= 1, "the source was never polled");
 }
 
 #[test]
