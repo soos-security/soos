@@ -85,10 +85,14 @@ Options: `--reduce-motion`, `--interval-ms N` (clamped to 250..=2000, default 50
 (diagnostics).
 
 Budgets: at most 8 outputs; buffers at the logical size (scale 1; a HiDPI compositor upscales),
-two per output, at most 8192 pixels per side, 33 554 432 pixels per output and 67 108 864 pixels in
-total (an output over budget gets no widget surface; that swaylock-plugin then shows its own
-colour there is an assumption to confirm on hardware, matrix LKA14). The widget redraws at most
-30 times per second and only while something moves; once the state is stable it draws nothing.
+one buffer per output, a second only while the compositor still holds the first (never more than
+two), at most 8192 pixels per side, 33 554 432 pixels per output and 67 108 864 pixels in total (an
+output over budget gets no widget surface; that swaylock-plugin then shows its own colour there is
+an assumption to confirm on hardware, matrix LKA14). Shared memory is therefore 4 bytes per pixel
+of each output (128 MiB for an output at the per-output budget, 256 MiB for two of them) when the
+compositor releases each buffer promptly, and at most twice that (512 MiB) on a compositor that
+keeps holding the buffer it last received. The widget redraws at most 30 times per second and only
+while something moves; once the state is stable it draws nothing.
 
 ## 5. hyprlock
 
