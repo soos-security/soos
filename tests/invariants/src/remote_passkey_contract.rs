@@ -27,8 +27,8 @@
 use std::process::Command;
 
 use crate::remote_companion_contract::{
-    exists, field_keys, macro_invocations, production_part, read, rust_files, strip_comments,
-    toml_table, workspace_root, TRACING_MACROS,
+    app_without_tour_storage, exists, field_keys, macro_invocations, production_part, read,
+    rust_files, strip_comments, toml_table, workspace_root, TRACING_MACROS,
 };
 
 /// Every production source of `crates/remote/src`, with the passkey modules required.
@@ -339,8 +339,10 @@ fn test_rmc_s18_page_uses_modal_webauthn_without_storage() {
         "innerHTML",
         "eval(",
     ] {
+        // Owner-approved contract migration (2026-10-17, #363): only the single phone tour
+        // storage block may use `localStorage`; every other line keeps the full ban.
         assert!(
-            !app.contains(forbidden),
+            !app_without_tour_storage(&app).contains(forbidden),
             "app.js must not contain {forbidden}"
         );
     }
