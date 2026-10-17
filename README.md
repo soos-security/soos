@@ -52,7 +52,7 @@ Every feature below is merged on `main` and documented.
 | Packages and installer | `.deb`, `.rpm` and Arch packages, a fail-closed installer that rolls back on error, upgrade and uninstall procedures | [`Docs/PACKAGING_AND_PROVISIONING.md`](Docs/PACKAGING_AND_PROVISIONING.md) §7, §9 |
 | Desktop app `soos-gui` | Live diagnostic, guided enrollment with liveness checks, enrolled profiles, first-run tour with feature switches | [`Docs/GUI_APPLICATION.md`](Docs/GUI_APPLICATION.md) |
 | Lock-screen widget | Shows on the lock screen whether soos is scanning your face: a swaylock-plugin background widget and a hyprlock label (GNOME Shell and KDE Plasma adapters come later) | [`Docs/LOCKSCREEN_WIDGET.md`](Docs/LOCKSCREEN_WIDGET.md) |
-| Phone companion `soos-remote` | User-level service reached over Tailscale Serve, or Funnel from the internet: lock status, remote lock, passkey unlock, failed-password alerts, push notifications, live camera view after a passkey check, battery level, offline history. The one-command setup turns Funnel, unlock, the camera view and the alerts on; a manual install leaves them off; each can be turned off in `soos-gui` or `remote.toml` | [`Docs/REMOTE_COMPANION.md`](Docs/REMOTE_COMPANION.md) |
+| Phone companion `soos-remote` | User-level service reached over Tailscale Serve, or Funnel from the internet: lock status, remote lock, passkey unlock, failed-password alerts, push notifications, live camera view after a passkey check, battery level, offline history. The one-command setup turns Funnel, unlock, the camera view and the alerts on; a manual install leaves them off; each can be turned off in `remote.toml`, and all but the failed-password alerts also in `soos-gui` | [`Docs/REMOTE_COMPANION.md`](Docs/REMOTE_COMPANION.md) |
 | Native Android app (first version) | Sideloaded Kotlin app for the companion: PC status, remote lock, passkey sign-in over Funnel, opt-in PC offline alerts | [`Docs/REMOTE_COMPANION.md`](Docs/REMOTE_COMPANION.md) §2j |
 | Network lock | Opt-in polkit rule: changing the Wi-Fi network or turning the radio off asks for an administrator password | [`Docs/NETWORK_LOCK.md`](Docs/NETWORK_LOCK.md) |
 | Intrusion snapshots | Opt-in, encrypted camera snapshots of failed attempts, with daily caps and 7-day retention | [`Docs/EVIDENCE_STORE_CRATE.md`](Docs/EVIDENCE_STORE_CRATE.md) |
@@ -285,15 +285,16 @@ of trust.
   not calibrated yet. soos has had no independent security audit and no certification. A good photo, screen
   or mask may still pass.
 - **Phone companion.** When it sets up the companion, the one-command setup (`scripts/setup.sh`) writes
-  `remote.toml` (`~/.config/soos/`, or `$XDG_CONFIG_HOME/soos/`) with Internet access through Tailscale Funnel (`allow_funnel`), remote unlock
-  (`allow_unlock`) and the live camera view, on the tailnet and over Funnel (`camera_view`,
-  `camera_view_funnel`), turned on, together with the failed-password, push and offline alerts. Each of the
-  four is passkey-protected: a request over Funnel needs a passkey sign-in, every unlock needs a fresh passkey
-  check with user verification, and every camera view starts with one. On the tailnet, status and lock need
-  no passkey. Each feature can be turned off in `soos-gui` (the feature switches of the first-run tour, also
-  reached with its **Features** button) or by setting its key to `false` in `remote.toml`. A manual install
-  (`scripts/install_remote.sh`) and the code defaults leave all of them off. Its residual risks are listed in
-  [`Docs/REMOTE_COMPANION.md`](Docs/REMOTE_COMPANION.md) §8.
+  `remote.toml` (in `~/.config/soos/`, or `$XDG_CONFIG_HOME/soos/`) with Internet access through Tailscale
+  Funnel (`allow_funnel`), remote unlock (`allow_unlock`) and the live camera view, on the tailnet and over
+  Funnel (`camera_view`, `camera_view_funnel`), turned on, together with the failed-password, push and offline
+  alerts. Each of the four is passkey-protected: a request over Funnel needs a passkey sign-in, every unlock
+  needs a fresh passkey check with user verification, and every camera view starts with one. On the tailnet,
+  status and lock need no passkey. Funnel, remote unlock and the camera view each have an off switch in
+  `soos-gui` (the feature switches of the first-run tour, also reached with its **Features** button); turning
+  Funnel or the camera view off there also sets `camera_view_funnel` to `false`. Every key can be set to
+  `false` in `remote.toml`. A manual install (`scripts/install_remote.sh`) and the code defaults leave all of
+  them off. Its residual risks are listed in [`Docs/REMOTE_COMPANION.md`](Docs/REMOTE_COMPANION.md) §8.
 
 The full threat model, the actors considered and the mandatory invariants are in
 [`AI/ARCHITECTURE.md`](AI/ARCHITECTURE.md) §2.

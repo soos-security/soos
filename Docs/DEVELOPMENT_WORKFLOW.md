@@ -258,8 +258,9 @@ images. Rules when editing it:
   comparison cell and never add accuracy numbers.
 - Describe the phone companion defaults as `scripts/setup.sh` writes them: while setup turns
   Funnel, remote unlock and the camera view on, never call them opt-in or off by default; say
-  that each is passkey-protected, can be turned off in `soos-gui` or `remote.toml`, and stays off
-  in a manual install (RDM10 reads `tests/fixtures/setup/remote.toml`).
+  that each is passkey-protected, which ones `soos-gui` can turn off (every key can be set to
+  `false` in `remote.toml`), and that they stay off in a manual install (RDM10 reads
+  `tests/fixtures/setup/remote.toml`).
 - Never add an image by hand: regenerate the screenshots with
   [`scripts/capture_readme_assets.sh`](../scripts/capture_readme_assets.sh) (section 9) and update the
   source commit the README states for them.
