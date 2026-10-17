@@ -2,8 +2,8 @@
 
 - **Date**: 2026-10-17
 - **Target Branch**: `feat/lockscreen-gnome`
-- **Base (merge-base)**: `9e82795`
-- **Reviewed-Diff-Fingerprint**: `fcea5b8a017743569a71e0dd6034adc2518d764ebeca4ed2e3e65baa85c2c61d`
+- **Base (merge-base)**: `f1e7616`
+- **Reviewed-Diff-Fingerprint**: `eded60160fa45ac3e2476d4c873e837cde78b4cc8b231831eaf2ea21dfd8f464`
 - **Audited Files**: `AI/DECISIONS.md`, `AI/VERIFICATION_MATRIX.md`, `AI/architect_spec_lockscreen_gnome.md`,
   `AI/auditor_constraints_lockscreen_gnome.md`, `AI/tester_contract_lockscreen_gnome.md`,
   `AI/walkthroughs/215_lockscreen_gnome.md`, `Docs/DISTRIBUTION_DEPLOYMENT.md`, `Docs/LOCKSCREEN_WIDGET.md`,
@@ -13,86 +13,94 @@
 
 ## 1. Executive Summary
 
-The change adds an opt-in GNOME Shell system extension (`soos-lockscreen@soos`, session modes `user`
-and `unlock-dialog`) that, while the session is locked, spawns the root-owned `soos-lockstatus --watch`
-with a fixed argv (no shell, no PATH lookup), parses its JSON lines with a strict three-key / three-state
-validator and a bounded line buffer, and draws one non-reactive card. No Rust production code, PAM,
-daemon, protocol or bridge file is touched. The extension has no unlock, input or IPC-write path. No
-CRITICAL or MAJOR defect was found; two MINOR and one SUGGESTION item are recorded below.
+Independent re-review of PR #407 (GNOME Shell unlock-dialog extension, GitHub #405) after its rebase
+from `9e82795` onto `origin/main` `f1e7616` (which gained #411, #413, #417 zbus 6, #402 setup user
+phase and #419 Android heartbeat). The merge base equals the current `origin/main` tip.
+
+Content proof, per file, comparing the added/removed lines of the previously reviewed branch
+(`9e82795..origin/feat/lockscreen-gnome`) with the rebased branch (`f1e7616..HEAD`):
+
+- Identical: `extension.js`, `metadata.json`, `stylesheet.css`, `lockscreen_gnome_contract.rs`,
+  `tests/invariants/src/lib.rs`, the spec, tester contract, auditor constraints, walkthrough 215,
+  `Docs/LOCKSCREEN_WIDGET.md`, `Docs/DISTRIBUTION_DEPLOYMENT.md` and `AI/DECISIONS.md`.
+- `AI/VERIFICATION_MATRIX.md`: the only difference is that the `lockscreen-gnome` section is now
+  closed by the file's usual `---` separator (two blank lines replaced by `---` plus one blank line).
+- `AI/plan_evaluator_report.md` (excluded from the fingerprint): byte-identical to the reviewed
+  branch version.
+
+No code, contract or documentation content changed with the rebase. No defect found.
 
 ## 2. Test Changes
 
-Mechanical listing from `target/candid_diff.patch`:
+Mechanical listing on `target/candid_diff.patch`:
 
-- Test files touched: `tests/invariants/src/lib.rs` (one added `#[cfg(all(test, unix))] mod lockscreen_gnome_contract;`
-  declaration with a doc comment, no other line changed) and `tests/invariants/src/lockscreen_gnome_contract.rs` (new file).
-- Removed or changed assertions (`^-...assert|#[test]|proptest!|should_panic`): **none**.
-- New escape hatches (`#[ignore]`, `#[cfg(any())]`, `should_panic`, tolerance, epsilon): **none**.
+- Test files touched: `tests/invariants/src/lib.rs` (one new `#[cfg(all(test, unix))] mod
+  lockscreen_gnome_contract;` registration with its doc comment) and the new
+  `tests/invariants/src/lockscreen_gnome_contract.rs`.
+- Removed or changed assertions / `#[test]`: none. The only removed lines in the whole patch are
+  seven documentation lines of `Docs/LOCKSCREEN_WIDGET.md` (the "GNOME later" wording replaced by
+  the shipped adapter).
+- New escape hatches (`#[ignore]`, `should_panic`, tolerance, epsilon): none.
 - Inline `mod tests` changes: none.
-- `git diff $(git merge-base origin/main HEAD) HEAD -- '*tests*' 'tests/'` contains no removed line other than
-  the `--- a/` / `--- /dev/null` headers: no pre-existing assertion was removed or changed.
+
+No pre-existing assertion changed.
 
 ## 3. Deep Reasoning Audit
 
 ### Logic & Architecture
-- Strict parsing: `parseLine` rejects non-objects, arrays, extra/missing keys (sorted key comparison),
-  unknown states, non-boolean `available`, negative or non-safe-integer `sequence`. `available:false`
-  is drawn as Idle via `present()`. PASS.
-- Lifecycle: `_sync()` builds the card and starts the bridge only when `Main.sessionMode.isLocked` and the
-  kill switch is absent; on unlock (`updated` with `isLocked` false) `_stopAll()` removes timers, kills the
-  bridge and destroys the actor. Double exit notification (EOF and `wait_async`) is de-duplicated by the
-  `bridge !== this._bridge` identity guard. PASS.
-- Respawn: back-off 1/2/4/8 s capped, reset to 0 only on a valid line; respawn is not scheduled when the
-  card is gone, and a missing root-owned binary logs one fixed warning without a respawn loop. PASS.
-- Star loop: bounded by `PENDING_LOOP_MAX_MS` after the scan start and always rests on a half turn
-  (at most one extra quarter step). `--watch` emits only on change (Docs/LOCKSCREEN_WIDGET.md section 6),
-  so no heartbeat re-arms the loop. PASS.
-- Sequence restart after a daemon restart can suppress one shake (see MINOR 2). Cosmetic only.
+- `AI/DECISIONS.md` against `origin/main`: `diff` shows exactly one added line, the
+  "[2026-10-17] GNOME Shell Lock-Screen Extension" ADR, placed after main's #400 entry. The
+  "[2026-10-15] Lock-Screen Adapters" entry appears once (line 144), in main's current post-#413
+  wording; the other "Lock-Screen Adapters" hits are references inside later entries. Main's
+  #410 (LockState refusal clarification), #412 (lazy second shm buffer) and #400 (setup user
+  phase) entries are each present once, and #415 appears once, inside main's amended native
+  Android ADR. A duplicate-heading scan (`uniq -d` over all ADR headings) returns nothing. PASS.
+- Matrix section `lockscreen-gnome` is preceded and followed by `---`. The closing `---` directly
+  follows the last table row; a thematic break ends a GFM table, so rendering is correct. PASS.
+- Semantic interaction with main: zbus 6 (#417) is irrelevant (the extension is GJS and only
+  spawns `soos-lockstatus --watch`). The `--watch` JSON line contract (`state`, `available`,
+  `sequence`) and `PENDING_LOOP_MAX_MS` mirrored by LKG8 still match main's `soos-lockstatus`;
+  #413 only changed lock-widget buffer allocation. The LKG7 change-set guard computes
+  `merge-base HEAD origin/main` and requires no change under `crates/pam`, `crates/daemon`,
+  `crates/protocol`, `crates/lockstatus`; the patch touches only `AI/`, `Docs/`, `packaging/` and
+  `tests/invariants/`, and the test passes locally. PASS.
+- Extension logic re-read: card built only while `Main.sessionMode.isLocked` and the kill switch
+  is absent; three states, `available:false` drawn as Idle; strict three-key parse with a safe
+  integer sequence; respawn back-off bounded at 8 s; stale bridge callbacks ignored by an identity
+  check. PASS.
 
 ### PAM Concurrency & Deadlines
-- `crates/pam` untouched; the extension never talks to PAM or the daemon socket directly, only via the
-  existing read-only bridge. All I/O is async (`read_bytes_async`, `wait_async`) on the shell main loop,
-  so a hung bridge cannot block gnome-shell. PASS.
+- No change in `crates/pam`. The extension runs in gnome-shell, outside the PAM stack, and cannot
+  stall `login`/`sudo`/`gdm` (`session-modes` excludes `gdm`). PASS.
 
 ### Panic Safety & Fail-Closed
-- Every signal callback, GLib source callback, async callback and `enable()`/`_sync()` is wrapped in
-  `try/catch`; failures fall back to `_stopAll()` / Idle. The extension has no path to an unlock, so a
-  failure can only hide the card; the stock unlock dialog is never replaced or wrapped. PASS.
+- Every signal, timeout and async callback is wrapped in `try`; any failure tears the card down
+  (`_stopAll`) or draws Idle. No unlock path (`screenShield`, `AuthPrompt`, `LoginManager`) and no
+  input signal; card actors are non-reactive and unfocusable. A broken extension leaves the stock
+  unlock dialog intact. PASS.
 
 ### Test Integrity & Anti-Weakening
-- No existing assertion changed (section 2). New contracts LKG1-LKG8 are static checks that would fail on a
-  plausible wrong implementation (e.g. adding `gdm` to session modes, a shell spawn, an input signal,
-  an `unlock` reference, a missing `GLib.Source.remove`, a palette drift). `node --check` is skipped
-  when node is absent and says so. Re-run locally: `cargo test -p soos-invariants lockscreen -- --test-threads=3`
-  22 passed; `cargo clippy -p soos-invariants --all-targets -- -D warnings` clean; `cargo fmt --check` clean;
-  `node --check` on an `.mjs` copy of `extension.js` OK. PASS.
+- Contract file identical to the reviewed version; all 746 `soos-invariants` tests pass on the
+  rebased tree, including LKG1-LKG8. No assertion removed or relaxed. PASS.
 
 ### Memory, Bounds & Secrets
-- Reads are 256-byte chunks; `_consume` fails the bridge on any line over 256 bytes and on a pending
-  remainder over 256 bytes, so the buffer never exceeds 512 bytes. UTF-8 is decoded per complete line with
-  a fatal decoder (errors caught and ignored). Logs are fixed `console.warn` strings only, never a line,
-  state or exception text. No frames, embeddings or credentials are reachable. PASS.
-- Binary trust: candidates restricted to `/usr/bin` and `/usr/local/bin`, root-owned, no group/other write,
-  executable; absolute argv, `STDERR_SILENCE`, `force_exit` on stop; GSubprocess reaps the child. PASS.
+- stdout read in 256-byte chunks; the pending buffer is bounded by `MAX_LINE_BYTES +
+  READ_CHUNK_BYTES`; an over-long line stops the bridge. Only fixed `console.warn` strings, never
+  line content or exception text. The binary is accepted only from `/usr/bin` or `/usr/local/bin`
+  when root-owned, not group/other-writable and executable. No biometric data crosses this path.
+  PASS.
 
 ### Supply Chain & Automation
-- No `Cargo.*`, `deny.toml`, `.github/`, `scripts/` or hook change. No new dependency. PASS.
+- No `Cargo.*`, `deny.toml`, `.github/`, `scripts/` or `.githooks/` change. PASS.
 
 ### English-Only Policy
-- Diff scanned for non-English text and accented characters: none. PASS.
+- All added text is English. PASS.
 
 ## 4. Detailed Findings & Action Items
 
-- **[MINOR]** `tests/invariants/src/lockscreen_gnome_contract.rs:453` — the change-set guard fails any
-  future branch that touches both `packaging/gnome-shell/` and `crates/daemon|pam|protocol|lockstatus`
-  (for instance a later installer opt-in or a joint fix). It is correct for this PR, but a future
-  legitimate combined change will have to be split or the contract migrated through a backlog line.
-  No action required now; record it for the KDE/installer PRs.
-- **[MINOR]** `packaging/gnome-shell/soos-lockscreen@soos/extension.js:371` — `sequence` restarts with
-  the daemon, so a Not recognized after a daemon restart that reuses an already-shaken sequence number
-  does not shake the card. Cosmetic only (label and ring colour are still correct).
-- **[SUGGESTION]** `packaging/gnome-shell/soos-lockscreen@soos/extension.js:246` — the kill switch is read
-  only on session-mode transitions; this matches the documented "applies from the next lock" behaviour.
+- **[SUGGESTION]** `AI/VERIFICATION_MATRIX.md` (end of the `lockscreen-gnome` table) — a blank line
+  between the LKG11 row and the closing `---` would match the rest of the file. Rendering is
+  already correct; no action required for merge.
 
 ## 5. Final Verdict
 
