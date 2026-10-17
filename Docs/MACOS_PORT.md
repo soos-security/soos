@@ -80,7 +80,7 @@ embeddings within tolerance as the CPU baseline.
 |---|---|
 | V4L2 | `v4l`, `v4l2-sys-mit`, `v4l-sys` |
 | Linux-PAM ABI | `pam-bindings`, `pam-sys`, `pam` |
-| D-Bus / logind | `zbus`, `zbus_macros`, `zbus_names`, `zvariant` |
+| D-Bus / logind | `zbus`, `zbus_macros`, `zbus_utils`, `zruntime`, `zbus_names`, `zvariant` |
 | udev / systemd / inotify | `udev`, `libudev-sys`, `libsystemd`, `sd-notify`, `inotify`, `inotify-sys` |
 | Async runtime | `tokio`, `tokio-macros` |
 | Linux desktop session | `wayland-client`, `wayland-sys`, `x11rb`, `x11-dl` |

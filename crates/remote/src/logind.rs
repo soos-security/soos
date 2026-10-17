@@ -13,9 +13,10 @@
 
 use std::collections::HashMap;
 use std::future::Future;
+use std::num::NonZeroUsize;
 use std::time::Duration;
 
-use zbus::zvariant::{OwnedObjectPath, OwnedValue};
+use zbus::{OwnedObjectPath, OwnedVariant};
 
 use crate::session::{is_valid_session_id, session_props_from_properties, SessionProps};
 use crate::{
@@ -39,7 +40,10 @@ const VANISHED_ERRORS: [&str; 2] = [
     "org.freedesktop.login1.NoSuchSession",
 ];
 /// Bound of the queue of unsolicited messages held by the connection.
-const MAX_QUEUED_MESSAGES: usize = 16;
+const MAX_QUEUED_MESSAGES: NonZeroUsize = match NonZeroUsize::new(16) {
+    Some(n) => n,
+    None => NonZeroUsize::MIN,
+};
 
 /// Failure of a logind access; status → `unavailable`, lock → `503`.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -113,7 +117,6 @@ fn truncated_error_name(name: &str) -> &str {
 /// [`SourceError::BusUnavailable`], [`SourceError::Timeout`].
 pub(crate) async fn connect_system_bus() -> Result<zbus::Connection, SourceError> {
     let builder = zbus::connection::Builder::address(SYSTEM_BUS_ADDRESS)
-        .map_err(|_| SourceError::BusUnavailable)?
         .method_timeout(Duration::from_millis(DBUS_CALL_TIMEOUT_MS))
         .max_queued(MAX_QUEUED_MESSAGES);
     match tokio::time::timeout(
@@ -125,6 +128,25 @@ pub(crate) async fn connect_system_bus() -> Result<zbus::Connection, SourceError
         Ok(Ok(connection)) => Ok(connection),
         Ok(Err(_)) => Err(SourceError::BusUnavailable),
         Err(_) => Err(SourceError::Timeout),
+    }
+}
+
+/// The D-Bus error name of a failed call when logind or the bus answered with an error
+/// reply, `None` for every other failure (transport, I/O, malformed reply).
+///
+/// zbus 6 reports an error reply whose name is a standard `org.freedesktop.DBus.Error.*`
+/// name as [`zbus::Error::FDO`] and every other name as [`zbus::Error::MethodError`]; zbus 5
+/// reported both as `MethodError`. Both are error replies and keep their exact name
+/// (GitHub #416), so `UnknownObject` still means "the session vanished" and
+/// `ServiceUnknown` still means "the service is not running".
+#[must_use]
+pub fn method_error_name(error: &zbus::Error) -> Option<String> {
+    match error {
+        zbus::Error::MethodError(name, _, _) => Some(name.as_str().to_string()),
+        zbus::Error::FDO(fdo) if !matches!(**fdo, zbus::fdo::Error::ZBus(_)) => {
+            Some(zbus::DBusError::name(&**fdo).as_str().to_string())
+        }
+        _ => None,
     }
 }
 
@@ -167,7 +189,7 @@ impl ZbusSessionSource {
         body: &B,
     ) -> Result<zbus::Message, CallFailure>
     where
-        B: serde::Serialize + zbus::zvariant::DynamicType + Sync,
+        B: serde::Serialize + zbus::DynamicType + Sync,
     {
         let connection = self.connection().await.map_err(CallFailure::Transport)?;
         let reply = tokio::time::timeout(
@@ -183,13 +205,13 @@ impl ZbusSessionSource {
         .await;
         match reply {
             Ok(Ok(message)) => Ok(message),
-            Ok(Err(zbus::Error::MethodError(name, _, _))) => {
-                Err(CallFailure::Method(name.as_str().to_string()))
-            }
-            Ok(Err(_)) => {
-                self.reset().await;
-                Err(CallFailure::Transport(SourceError::BusUnavailable))
-            }
+            Ok(Err(error)) => match method_error_name(&error) {
+                Some(name) => Err(CallFailure::Method(name)),
+                None => {
+                    self.reset().await;
+                    Err(CallFailure::Transport(SourceError::BusUnavailable))
+                }
+            },
             Err(_) => {
                 self.reset().await;
                 Err(CallFailure::Transport(SourceError::Timeout))
@@ -210,7 +232,7 @@ impl ZbusSessionSource {
     /// Decodes a reply body; a shape mismatch drops the connection.
     async fn decode<T>(&self, message: &zbus::Message) -> Result<T, SourceError>
     where
-        T: for<'d> serde::Deserialize<'d> + zbus::zvariant::Type,
+        T: for<'d> serde::Deserialize<'d> + zbus::Type,
     {
         match message.body().deserialize::<T>() {
             Ok(value) => Ok(value),
@@ -240,7 +262,7 @@ impl ZbusSessionSource {
     async fn session_properties(
         &self,
         path: &str,
-    ) -> Result<Option<HashMap<String, OwnedValue>>, SourceError> {
+    ) -> Result<Option<HashMap<String, OwnedVariant>>, SourceError> {
         match self
             .call(path, PROPERTIES_IFACE, "GetAll", &(LOGIND_SESSION_IFACE,))
             .await
