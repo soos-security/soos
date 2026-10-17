@@ -1,7 +1,7 @@
 //! Contract tests of GitHub #339 for the pure session mapping, selection, status view and
 //! change detection (spec §2.6, D7, D8, RC-3, RC-5).
 //!
-//! No bus is needed: `GetAll` replies are hand-built `zvariant::OwnedValue` maps.
+//! No bus is needed: `GetAll` replies are hand-built `zbus::OwnedVariant` maps.
 
 #![allow(
     clippy::unwrap_used,
@@ -17,7 +17,7 @@
 
 use std::collections::HashMap;
 
-use zbus::zvariant::{ObjectPath, OwnedValue, Value};
+use zbus::{ObjectPath, OwnedVariant, Variant};
 
 use soos_remote::logind::SourceError;
 use soos_remote::session::{select_session, session_props_from_properties, SessionProps};
@@ -26,12 +26,12 @@ use soos_remote::MAX_SESSION_ID_LEN;
 
 const UID: u32 = 1000;
 
-fn ov<'a>(value: impl Into<Value<'a>>) -> OwnedValue {
-    OwnedValue::try_from(value.into()).unwrap()
+fn ov<'a>(value: impl Into<Variant<'a>>) -> OwnedVariant {
+    OwnedVariant::try_from(value.into()).unwrap()
 }
 
 /// A `GetAll` reply of an active, local, seat-attached, unlocked, idle user session.
-fn reply(id: &str) -> HashMap<String, OwnedValue> {
+fn reply(id: &str) -> HashMap<String, OwnedVariant> {
     let mut map = HashMap::new();
     map.insert("Id".to_string(), ov(id));
     map.insert(

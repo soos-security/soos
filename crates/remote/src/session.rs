@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 use std::hash::BuildHasher;
 
-use zbus::zvariant::{OwnedValue, Value};
+use zbus::{OwnedVariant, Variant};
 
 use crate::logind::SourceError;
 use crate::MAX_SESSION_ID_LEN;
@@ -47,33 +47,33 @@ pub fn is_valid_session_id(raw: &str) -> bool {
 }
 
 /// String content of a property.
-fn as_str(value: &OwnedValue) -> Option<&str> {
+fn as_str(value: &OwnedVariant) -> Option<&str> {
     match &**value {
-        Value::Str(s) => Some(s.as_str()),
+        Variant::Str(s) => Some(s.as_str()),
         _ => None,
     }
 }
 
 /// Boolean content of a property.
-fn as_bool(value: &OwnedValue) -> Option<bool> {
+fn as_bool(value: &OwnedVariant) -> Option<bool> {
     match &**value {
-        Value::Bool(b) => Some(*b),
+        Variant::Bool(b) => Some(*b),
         _ => None,
     }
 }
 
 /// Unsigned 64-bit content of a property.
-fn as_u64(value: &OwnedValue) -> Option<u64> {
+fn as_u64(value: &OwnedVariant) -> Option<u64> {
     match &**value {
-        Value::U64(n) => Some(*n),
+        Variant::U64(n) => Some(*n),
         _ => None,
     }
 }
 
 /// First field of a structure property (`User (uo)`, `Seat (so)`).
-fn first_field(value: &OwnedValue) -> Option<&Value<'static>> {
+fn first_field(value: &OwnedVariant) -> Option<&Variant<'static>> {
     match &**value {
-        Value::Structure(s) => s.fields().first(),
+        Variant::Structure(s) => s.fields().first(),
         _ => None,
     }
 }
@@ -91,7 +91,7 @@ fn non_empty(s: &str) -> Option<String> {
 /// missing, ill-typed or differs from `expected_id`.
 pub fn session_props_from_properties<S: BuildHasher>(
     expected_id: &str,
-    properties: &HashMap<String, OwnedValue, S>,
+    properties: &HashMap<String, OwnedVariant, S>,
 ) -> Result<SessionProps, SourceError> {
     if !is_valid_session_id(expected_id) {
         return Err(SourceError::Malformed);
@@ -107,7 +107,7 @@ pub fn session_props_from_properties<S: BuildHasher>(
         .get("User")
         .and_then(first_field)
         .and_then(|field| match field {
-            Value::U32(uid) => Some(*uid),
+            Variant::U32(uid) => Some(*uid),
             _ => None,
         });
     let active = properties.get("Active").and_then(as_bool) == Some(true)
@@ -117,7 +117,7 @@ pub fn session_props_from_properties<S: BuildHasher>(
         .get("Seat")
         .and_then(first_field)
         .and_then(|field| match field {
-            Value::Str(s) => non_empty(s.as_str()),
+            Variant::Str(s) => non_empty(s.as_str()),
             _ => None,
         });
     let class = properties.get("Class").and_then(as_str).and_then(non_empty);

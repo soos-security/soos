@@ -182,7 +182,8 @@ fn test_pau_zbus_is_declared_once_in_the_workspace() {
         "exactly one zbus entry in [workspace.dependencies]"
     );
     let line = zbus[0];
-    assert!(line.contains("version = \"5\""), "zbus 5: {line}");
+    // Owner-approved version pin update (2026-10-17, #416): zbus 6 (RUSTSEC-2026-0370/0371).
+    assert!(line.contains("version = \"6\""), "zbus 6: {line}");
     assert!(line.contains("default-features = false"), "{line}");
     assert!(line.contains("features = [\"tokio\"]"), "{line}");
 }
@@ -258,8 +259,9 @@ fn test_pau_lockfile_pins_zbus_5_without_libdbus() {
     }
     assert_eq!(zbus_versions.len(), 1, "one zbus version in Cargo.lock");
     assert!(
-        zbus_versions[0].starts_with("version = \"5."),
-        "zbus 5.x: {}",
+        // Owner-approved version pin update (2026-10-17, #416).
+        zbus_versions[0].starts_with("version = \"6."),
+        "zbus 6.x: {}",
         zbus_versions[0]
     );
     for forbidden in ["name = \"dbus\"", "name = \"libdbus-sys\""] {

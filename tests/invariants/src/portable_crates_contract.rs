@@ -52,9 +52,10 @@ const MACOS_TESTED_CRATES: [&str; 6] = [
 /// Package names no portable crate may reach (spec §3.1).
 ///
 /// Defensive entries, absent from `Cargo.lock` today: `v4l-sys`, `pam-sys`, `pam`, `udev`,
-/// `libudev-sys`, `libsystemd`, `sd-notify`, `inotify`, `inotify-sys`. Every other entry is
-/// witnessed by `test_mac_guard_query_sees_linux_only_crates`.
-const FORBIDDEN_PORTABLE_DEPENDENCIES: [&str; 31] = [
+/// `libudev-sys`, `libsystemd`, `sd-notify`, `inotify`, `inotify-sys`, and `zbus_names` and
+/// `zvariant` (merged into zbus 6, GitHub #416). Every other entry is witnessed by
+/// `test_mac_guard_query_sees_linux_only_crates`.
+const FORBIDDEN_PORTABLE_DEPENDENCIES: [&str; 33] = [
     // V4L2
     "v4l",
     "v4l2-sys-mit",
@@ -66,6 +67,8 @@ const FORBIDDEN_PORTABLE_DEPENDENCIES: [&str; 31] = [
     // D-Bus / logind
     "zbus",
     "zbus_macros",
+    "zbus_utils",
+    "zruntime",
     "zbus_names",
     "zvariant",
     // udev / systemd / inotify
@@ -232,7 +235,8 @@ fn test_mac_guard_query_sees_linux_only_crates() {
         ("soos-pam", &["pam-bindings"][..]),
         (
             "soos-daemon",
-            &["zbus", "zvariant", "tokio", "soos-camera-v4l"][..],
+            // zvariant was merged into zbus 6 (#416, owner-approved witness update).
+            &["zbus", "zbus_macros", "tokio", "soos-camera-v4l"][..],
         ),
         ("soos-gui", &["wayland-client", "x11rb"][..]),
     ] {

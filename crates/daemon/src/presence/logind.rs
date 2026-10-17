@@ -10,9 +10,10 @@
 
 use std::collections::HashMap;
 use std::future::Future;
+use std::num::NonZeroUsize;
 use std::time::Duration;
 
-use zbus::zvariant::{OwnedObjectPath, OwnedValue, Value};
+use zbus::{OwnedObjectPath, OwnedVariant, Variant};
 
 use super::account::UserName;
 use super::{
@@ -37,7 +38,10 @@ const VANISHED_ERRORS: [&str; 2] = [
     "org.freedesktop.login1.NoSuchSession",
 ];
 /// Bound of the queue of unsolicited messages held by the connection.
-const MAX_QUEUED_MESSAGES: usize = 16;
+const MAX_QUEUED_MESSAGES: NonZeroUsize = match NonZeroUsize::new(16) {
+    Some(n) => n,
+    None => NonZeroUsize::MIN,
+};
 
 /// Validated logind session ID (ASCII alphanumeric, 1..=`MAX_SESSION_ID_LEN` bytes).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -144,25 +148,25 @@ pub trait PresenceLogind: Send + Sync + 'static {
 }
 
 /// String content of a property.
-fn as_str(value: &OwnedValue) -> Option<&str> {
+fn as_str(value: &OwnedVariant) -> Option<&str> {
     match &**value {
-        Value::Str(s) => Some(s.as_str()),
+        Variant::Str(s) => Some(s.as_str()),
         _ => None,
     }
 }
 
 /// Boolean content of a property.
-fn as_bool(value: &OwnedValue) -> Option<bool> {
+fn as_bool(value: &OwnedVariant) -> Option<bool> {
     match &**value {
-        Value::Bool(b) => Some(*b),
+        Variant::Bool(b) => Some(*b),
         _ => None,
     }
 }
 
 /// First field of a structure property (`User (uo)`, `Seat (so)`).
-fn first_field(value: &OwnedValue) -> Option<&Value<'static>> {
+fn first_field(value: &OwnedVariant) -> Option<&Variant<'static>> {
     match &**value {
-        Value::Structure(s) => s.fields().first(),
+        Variant::Structure(s) => s.fields().first(),
         _ => None,
     }
 }
@@ -179,7 +183,7 @@ fn first_field(value: &OwnedValue) -> Option<&Value<'static>> {
 /// `expected_id`.
 pub fn session_state_from_properties<S: std::hash::BuildHasher>(
     expected_id: &SessionId,
-    properties: &HashMap<String, OwnedValue, S>,
+    properties: &HashMap<String, OwnedVariant, S>,
 ) -> Result<LogindSessionState, PresenceLogindError> {
     let id = properties
         .get("Id")
@@ -192,7 +196,7 @@ pub fn session_state_from_properties<S: std::hash::BuildHasher>(
         .get("User")
         .and_then(first_field)
         .and_then(|field| match field {
-            Value::U32(uid) => Some(*uid),
+            Variant::U32(uid) => Some(*uid),
             _ => None,
         });
     let active = properties.get("Active").and_then(as_bool) == Some(true)
@@ -202,7 +206,7 @@ pub fn session_state_from_properties<S: std::hash::BuildHasher>(
         .get("Seat")
         .and_then(first_field)
         .and_then(|field| match field {
-            Value::Str(s) => non_empty(s.as_str()),
+            Variant::Str(s) => non_empty(s.as_str()),
             _ => None,
         });
     let class = properties.get("Class").and_then(as_str).and_then(non_empty);
@@ -223,6 +227,24 @@ pub fn session_state_from_properties<S: std::hash::BuildHasher>(
         locked,
         user_name,
     })
+}
+
+/// The D-Bus error name of a failed call when logind (or the bus) answered with an error
+/// reply, `None` for every other failure (transport, I/O, malformed reply).
+///
+/// zbus 6 reports an error reply whose name is a standard `org.freedesktop.DBus.Error.*`
+/// name as [`zbus::Error::FDO`] and every other name as [`zbus::Error::MethodError`]; zbus 5
+/// reported both as `MethodError`. Both are error replies and keep their exact name
+/// (GitHub #416), so `UnknownObject` still means "the session vanished".
+#[must_use]
+pub fn method_error_name(error: &zbus::Error) -> Option<String> {
+    match error {
+        zbus::Error::MethodError(name, _, _) => Some(name.as_str().to_string()),
+        zbus::Error::FDO(fdo) if !matches!(**fdo, zbus::fdo::Error::ZBus(_)) => {
+            Some(zbus::DBusError::name(&**fdo).as_str().to_string())
+        }
+        _ => None,
+    }
 }
 
 /// Production logind access over the pinned system bus (no I/O before the first
@@ -280,7 +302,7 @@ impl ZbusLogind {
         body: &B,
     ) -> Result<zbus::Message, CallFailure>
     where
-        B: serde::Serialize + zbus::zvariant::DynamicType + Sync,
+        B: serde::Serialize + zbus::DynamicType + Sync,
     {
         let connection = self.current().await.map_err(CallFailure::Transport)?;
         let reply = tokio::time::timeout(
@@ -296,13 +318,13 @@ impl ZbusLogind {
         .await;
         match reply {
             Ok(Ok(message)) => Ok(message),
-            Ok(Err(zbus::Error::MethodError(name, _, _))) => {
-                Err(CallFailure::Method(name.as_str().to_string()))
-            }
-            Ok(Err(_)) => {
-                self.reset().await;
-                Err(CallFailure::Transport(PresenceLogindError::BusUnavailable))
-            }
+            Ok(Err(error)) => match method_error_name(&error) {
+                Some(name) => Err(CallFailure::Method(name)),
+                None => {
+                    self.reset().await;
+                    Err(CallFailure::Transport(PresenceLogindError::BusUnavailable))
+                }
+            },
             Err(_) => {
                 self.reset().await;
                 Err(CallFailure::Transport(PresenceLogindError::Timeout))
@@ -313,7 +335,7 @@ impl ZbusLogind {
     /// Decodes a reply body; a shape mismatch drops the connection.
     async fn decode<T>(&self, message: &zbus::Message) -> Result<T, PresenceLogindError>
     where
-        T: for<'d> serde::Deserialize<'d> + zbus::zvariant::Type,
+        T: for<'d> serde::Deserialize<'d> + zbus::Type,
     {
         match message.body().deserialize::<T>() {
             Ok(value) => Ok(value),
@@ -328,7 +350,7 @@ impl ZbusLogind {
     async fn mapped(
         &self,
         id: &SessionId,
-        properties: &HashMap<String, OwnedValue>,
+        properties: &HashMap<String, OwnedVariant>,
     ) -> Result<LogindSessionState, PresenceLogindError> {
         let mapped = session_state_from_properties(id, properties);
         if mapped.is_err() {
@@ -341,7 +363,7 @@ impl ZbusLogind {
     async fn session_properties(
         &self,
         path: &str,
-    ) -> Result<Option<HashMap<String, OwnedValue>>, PresenceLogindError> {
+    ) -> Result<Option<HashMap<String, OwnedVariant>>, PresenceLogindError> {
         match self
             .call(path, PROPERTIES_IFACE, "GetAll", &(LOGIND_SESSION_IFACE,))
             .await
@@ -361,7 +383,6 @@ impl PresenceLogind for ZbusLogind {
             return Ok(());
         }
         let builder = zbus::connection::Builder::address(self.address())
-            .map_err(|_| PresenceLogindError::BusUnavailable)?
             .method_timeout(Duration::from_millis(DBUS_CALL_TIMEOUT_MS))
             .max_queued(MAX_QUEUED_MESSAGES);
         match tokio::time::timeout(
@@ -455,7 +476,7 @@ impl PresenceLogind for ZbusLogind {
             Err(CallFailure::Method(name)) => return Err(PresenceLogindError::call(&name)),
             Err(CallFailure::Transport(err)) => return Err(err),
         };
-        let value: OwnedValue = self.decode(&reply).await?;
+        let value: OwnedVariant = self.decode(&reply).await?;
         as_bool(&value).ok_or(PresenceLogindError::Malformed)
     }
 

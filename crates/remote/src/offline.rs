@@ -30,7 +30,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use tokio::time::{sleep, timeout, Instant, MissedTickBehavior};
-use zbus::zvariant::OwnedValue;
+use zbus::OwnedVariant;
 
 use crate::audit;
 use crate::auth::RandomSource;
@@ -38,7 +38,7 @@ use crate::credentials::{
     check_parent_dir, read_owned_file, try_lock_file, write_atomic, StoreError, STORE_LOCK_RETRY_MS,
 };
 use crate::journal::BoxFuture;
-use crate::logind::{connect_system_bus, SourceError};
+use crate::logind::{connect_system_bus, method_error_name, SourceError};
 use crate::server::UnixClock;
 use crate::{
     DBUS_CALL_TIMEOUT_MS, MAX_NETWORK_STORE_BYTES, MAX_OFFLINE_INTERVALS, NETWORK_READ_DEADLINE_MS,
@@ -682,7 +682,7 @@ impl ZbusNetworkSource {
     ) -> Result<zbus::Message, SourceError> {
         match result {
             Ok(Ok(message)) => Ok(message),
-            Ok(Err(zbus::Error::MethodError(..))) => Err(SourceError::Call),
+            Ok(Err(error)) if method_error_name(&error).is_some() => Err(SourceError::Call),
             Ok(Err(_)) => {
                 self.reset().await;
                 Err(SourceError::BusUnavailable)
@@ -725,7 +725,7 @@ impl ZbusNetworkSource {
         object: &'static str,
         interface: &'static str,
         property: &'static str,
-    ) -> Result<OwnedValue, SourceError> {
+    ) -> Result<OwnedVariant, SourceError> {
         let connection = self.connection().await?;
         let result = timeout(
             Duration::from_millis(DBUS_CALL_TIMEOUT_MS),
@@ -739,7 +739,7 @@ impl ZbusNetworkSource {
         )
         .await;
         let message = self.reply(result).await?;
-        match message.body().deserialize::<OwnedValue>() {
+        match message.body().deserialize::<OwnedVariant>() {
             Ok(value) => Ok(value),
             Err(_) => {
                 self.reset().await;

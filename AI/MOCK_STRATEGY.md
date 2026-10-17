@@ -57,7 +57,7 @@ without a real lock screen and without reading `/etc` or `/run`
 - `PresenceWorker::tick()` with `with_clock_fn` (a `fn` pointer over `CLOCK_MONOTONIC` plus a
   static offset) drives grace, interval and backoff deterministically.
 The production `ZbusLogind` is exercised only on hardware (`tests/physical/`); its pure reply
-mapping `session_state_from_properties` is tested with hand-built `zvariant::OwnedValue` maps.
+mapping `session_state_from_properties` is tested with hand-built `zbus::OwnedVariant` maps.
 
 ## Remote Companion Doubles (GitHub #339)
 `soos-remote` is generic over its logind access (`soos_remote::logind::SessionSource`) and
@@ -81,7 +81,7 @@ real socket directory:
 - the HTTP client is raw bytes over `tokio::net::UnixStream` against a listener bound in a
   `tempfile::TempDir`.
 The production `ZbusSessionSource` is exercised only on the owner's host; its pure reply
-mapping `session_props_from_properties` is tested with hand-built `zvariant::OwnedValue` maps,
+mapping `session_props_from_properties` is tested with hand-built `zbus::OwnedVariant` maps,
 and the socket helpers over `TempDir` (symlink, regular file and foreign-uid cases).
 
 ### Battery level doubles (ADR 2026-10-07 "Live Battery Level in `soos-remote`", GitHub #346)

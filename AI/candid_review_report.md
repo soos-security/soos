@@ -1,96 +1,156 @@
 # Candid Review Report
 
 - **Date**: 2026-10-17
-- **Target Branch**: `test/daemon-lockstate-reserve`
-- **Base (merge-base)**: `9e82795`
-- **Reviewed-Diff-Fingerprint**: `9780caa7204a16bba771254fc48ba242a3980a94b0079de36cf0fbafddef2d31`
-- **Audited Files**: `AI/DECISIONS.md`, `AI/VERIFICATION_MATRIX.md`, `AI/architect_spec_lockstate_reserve_refusal.md`, `AI/walkthroughs/217_lockstate_reserve_refusal.md`, `Docs/IPC_PROTOCOL.md`, `Docs/LOCKSCREEN_WIDGET.md`, `crates/daemon/tests/peer_limits_tests.rs`
+- **Target Branch**: `fix/zbus-6`
+- **Base (merge-base)**: `6eb0746`
+- **Reviewed-Diff-Fingerprint**: `e91e6fbcd64d1dd1a9bba9bb765b40c2a077182c359a0891ab28b5d3fc42ef8e`
+- **Audited Files**: `AI/ARCHITECTURE.md`, `AI/MOCK_STRATEGY.md`, `AI/VERIFICATION_MATRIX.md`, `AI/walkthroughs/221_zbus_6_migration.md`, `Cargo.lock`, `Cargo.toml`, `Docs/MACOS_PORT.md`, `Docs/SECURITY_AND_QUALITY_GUIDELINES.md`, `crates/daemon/src/presence/logind.rs`, `crates/daemon/tests/presence_logind_error_name_tests.rs` (new), `crates/daemon/tests/presence_logind_mapping_tests.rs`, `crates/remote/src/logind.rs`, `crates/remote/src/offline.rs`, `crates/remote/src/session.rs`, `crates/remote/tests/logind_error_name_tests.rs` (new), `crates/remote/tests/session_tests.rs`, `tests/invariants/src/portable_crates_contract.rs`, `tests/invariants/src/presence_unlock_contract.rs`, `tests/invariants/src/remote_companion_contract.rs`
 
 ## 1. Executive Summary
 
-The change (GitHub #410, PR #403 follow-up) is test and documentation only: no production code is
-touched. It adds a nested module `auth_reserve::lock_state_on_reserve` with three socket tests
-(LRR1-LRR3) pinning that a `LockState` request arriving on the auth-reserved connection is refused
-at first-frame classification, without payload, without consuming the per-UID `LockState` quota,
-without reading or mutating the lock-state board, and that the reserve permit is released so a
-following `Auth` is still served. The documentation and the ADR clarification entry describe
-exactly what `ConnectionDispatcher::read_and_process` already does (`crates/daemon/src/dispatcher.rs`
-lines 632-643: the non-`Auth` guard runs after `decode_client_message` and before `handle_request`,
-hence before `handle_lock_state_request` and its `lock_state_limiter.check_and_record`). No
-defect found.
+The diff migrates the workspace `zbus` dependency from 5.19.0 to 6.0.0 (removing `zvariant`,
+`zvariant_derive`, `zvariant_utils`, `zbus_names` and eight async helper crates; adding
+`zbus_utils` 6.0.0 and `zruntime` 0.2.0; `tokio` moves 1.53.1 -> 1.53.3 because zbus 6 requires
+it). The code changes are type renames (`OwnedValue`/`Value` -> `OwnedVariant`/`Variant`,
+`zbus::zvariant::{Type,DynamicType}` -> `zbus::{Type,DynamicType}`), the infallible
+`Builder::address` (the address error is now reported by `build()`), `max_queued` taking a
+`NonZeroUsize`, and a new `method_error_name` classifier that compensates for zbus 6 reporting
+standard `org.freedesktop.DBus.Error.*` error replies as `Error::FDO` instead of
+`Error::MethodError`.
 
-## 2. Test Changes (mechanical listing from step 3)
+Every behavioural claim was verified against the zbus 6.0.0 and zbus 5.19.0 / zvariant 5.15.0
+sources and with a throwaway probe built against zbus 6.0.0. D-Bus behaviour of both logind
+clients and the NetworkManager reader is preserved: same calls, same timeouts and bounds, same
+error-name strings, same reset-on-transport-failure and fail-closed paths. No CRITICAL or MAJOR
+finding.
 
-- Test files touched: `crates/daemon/tests/peer_limits_tests.rs` only (192 added lines, 0 removed).
-- Removed or changed `assert`/`#[test]`/`#[tokio::test]`/`proptest!`/`#[should_panic]` lines:
-  **none** (the `^-` grep on the frozen patch is empty; `git diff $(git merge-base origin/main HEAD) HEAD -- '*tests*' 'tests/'`
-  contains no removed content line).
-- New escape hatches (`#[ignore]`, `#[cfg(any())]`, `should_panic`, tolerance/epsilon): **none**.
-- Inline `mod tests` changes: none. One new nested test module `lock_state_on_reserve` inside the
-  existing `auth_reserve` module reuses the existing helpers (`two_held`, `permits_back`,
-  `closed_promptly`, `exchange`, `auth_request`, `auth_response`) without modifying them.
-- No pre-existing assertion was removed or changed.
+## 2. Test Changes (mechanical listing from step 3, with justification per change)
+
+Step-3 greps on `target/candid_diff.patch`:
+
+- Removed/changed assertion lines: exactly one hit by the grep (`presence_unlock_contract.rs`,
+  `version = "5"` -> `version = "6"`). A manual read of all test hunks finds four assertion
+  changes in total, all in commit `96523e9` and all owner-approved pin updates:
+  1. `test_pau_zbus_is_declared_once_in_the_workspace`: `version = "5"` -> `version = "6"`.
+  2. `test_pau_lockfile_pins_zbus_5_without_libdbus`: `starts_with("version = \"5.")` -> `"6."`;
+     the single-version and the `dbus`/`libdbus-sys` ban checks are unchanged.
+  3. `test_mac_guard_query_sees_linux_only_crates`: daemon witness `zvariant` -> `zbus_macros`
+     (`zvariant` no longer exists in the graph; `zbus_macros` is a real member of the graph and is
+     in the forbidden list, so the witness still makes the check non-vacuous).
+  4. `test_rmc_architecture_and_strategy_documents_describe_the_companion`: needle `` `zbus` 5 ``
+     -> `` `zbus` 6 ``; the doc line still carries the other checked needles (test passes).
+- Uncommitted change to `FORBIDDEN_PORTABLE_DEPENDENCIES`: 31 -> 33 entries (`zbus_utils`,
+  `zruntime` added; `zbus_names`/`zvariant` kept as defensive entries). This makes the guard
+  stricter, it does not weaken it. The uniqueness assertion over the list still holds.
+- `presence_logind_mapping_tests.rs` and `session_tests.rs`: only imports, helper signatures and
+  the module doc change (`OwnedValue` -> `OwnedVariant`); no assertion, input value or test body
+  changes.
+- New escape hatches (`#[ignore]`, `should_panic`, tolerance, epsilon): none.
+- Inline `mod tests` changes: none.
+- New tests: `crates/daemon/tests/presence_logind_error_name_tests.rs` and
+  `crates/remote/tests/logind_error_name_tests.rs` (3 tests each). Each one first asserts the zbus 6
+  variant (`FDO` vs `MethodError`) the hand-built reply produces, then asserts that the exact name
+  is recovered, and that `InvalidReply`, `InputOutput` and `FDO(ZBus(_))` give `None`. They would
+  fail against the naive port (matching only `MethodError`) for all nine standard names.
 
 ## 3. Deep Reasoning Audit
 
 ### Logic & Architecture
-- Checked that the third connection really lands on the reserve: `two_held` holds two served
-  regular connections (6 free permits of 8) and the per-UID cap is 2, so the next connection is
-  `AdmissionClass::AuthReserve` (same precondition as the existing `test_rsh_*` siblings). PASS.
-- Checked the claimed ordering against the source: the guard at `dispatcher.rs:634` precedes
-  `handle_request`, and the quota check is inside `handle_lock_state_request` (`dispatcher.rs:1209`).
-  The docs' statement "not at accept, at first-frame classification" matches `handle_connection`
-  choosing the admission class from `SO_PEERCRED` before any read. PASS.
-- Constants: `LOCK_STATE_MAX_REQUESTS_PER_SEC = 8` is imported from the source of truth; the
-  window `Duration` is a mirrored literal whose source is named in its doc comment. Nonce
-  arithmetic stays below 0xFF (maximum 0x6F and 0xCF), no `u8` overflow. PASS.
-- Scope: matches #410 (tests plus clarification docs), no scope creep. PASS.
+
+- **Error-reply classification.** zbus 5 `From<Message> for Error` always built
+  `MethodError(name, detail, msg)`. zbus 6 builds the same value and passes it through
+  `fdo::Error::from` (macro-generated in `zbus_macros-6.0.0/src/error.rs`): a name equal to a
+  `fdo::Error` variant's fully qualified name becomes that variant, wrapped in `Error::FDO`; any
+  other name returns `fdo::Error::ZBus(original)`, which `From<fdo::Error> for Error` unwraps back
+  to the original `MethodError`. `DBusError::name` for a `fdo::Error` variant returns
+  `ErrorName::from_static_str_unchecked(fqn)` with the same `fqn` the conversion matched, so the
+  name is round-trip exact (including the `Spawn.*` names). `method_error_name` excludes
+  `fdo::Error::ZBus(_)`, so a wrapped transport error can never be taken for a refusal. Result:
+  the set of failures mapped to `CallFailure::Method(name)` (daemon, remote) and to
+  `SourceError::Call` (offline) is exactly the zbus 5 `MethodError` set, with the same name
+  strings, so `VANISHED_ERRORS` (`UnknownObject`, `NoSuchSession`) and the bounded error text
+  behave exactly as before. PASS.
+- **No other FDO producer on the client path.** Searched zbus 6 for `Error::FDO` construction
+  outside tests and the object server: only the `From` impls above and `proxy/mod.rs` (no proxy
+  is used). `Error::DBus` is produced only by the object server (none registered). Reply errors
+  are produced only by `socket_reader.rs:139` (`Type::Error => Err(msg.clone().into())`),
+  identical to zbus 5. PASS.
+- **Method timeout.** zbus 6 still reports a `method_timeout` expiry as
+  `Error::InputOutput(ErrorKind::TimedOut)` (`runtime/timeout.rs`), so it stays a transport
+  failure with a connection reset, as in zbus 5; the outer `tokio::time::timeout` paths are
+  untouched. PASS.
+- **`Builder::address`.** zbus 6 records an invalid address and reports it from `build()`
+  (`connection/builder.rs:205-214`); the `build()` error arm already maps to `BusUnavailable` in
+  both `ZbusLogind::connect` and `connect_system_bus`, inside the same connect timeout. The
+  addresses themselves (`self.address()`, `SYSTEM_BUS_ADDRESS`) are unchanged. PASS.
+- **`max_queued`.** The bound is still 16 (`NonZeroUsize`), built in a `const` with a
+  non-panicking fallback. PASS.
+- **Reply decoding.** Probe against zbus 6.0.0: a `Properties.Get` reply of signature `v`
+  deserialized as `OwnedVariant` gives `Bool(true)` directly (not a nested variant), and an
+  `a{sv}` `GetAll` reply gives `Structure([U32, ObjectPath])` for `User`, exactly the shapes that
+  `as_bool`, `first_field` and the `u32`/`bool` `TryFrom` conversions expect.
+  `ov_try_from!`/`value_try_from!` in zbus 6 `wire/owned_variant.rs`/`from_variant.rs` are
+  token-for-token the zvariant 5.15.0 implementations (strict variant match, `IncorrectType`
+  otherwise). PASS.
+- **Scope.** Daemon and remote are the only zbus consumers (`git grep`); no consumer was missed.
+  The RMC17 source needles (`Builder::address(SYSTEM_BUS_ADDRESS)`, `.max_queued(`, no proxy,
+  object server or signal stream) still hold; the invariant suite passes. PASS.
 
 ### PAM Concurrency & Deadlines
-- `crates/pam` is not touched. Every socket wait in the new tests is bounded (`closed_promptly`
-  uses `CLOSE_DEADLINE`, `permits_back` a 2 s deadline). PASS.
+
+`crates/pam` is not touched and does not depend on zbus (PAU17 invariant passes). PASS.
 
 ### Panic Safety & Fail-Closed
-- No production code changed. LRR3 additionally asserts `Verdict::Unavailable` for the reserve
-  `Auth` with no pipeline (fail-closed, never `Allow`). PASS.
+
+No `unwrap`/`expect`/indexing added in production code; the `const` uses a `match`. Every error
+still maps to `BusUnavailable`/`Timeout`/`Malformed`/`Call`, and nothing maps to an unlock or a
+"session present" result that did not do so before. Scenario tried: a zbus 6 `FDO(ZBus(InvalidReply))`
+-> `None` -> transport + reset (test-covered). PASS.
 
 ### Test Integrity & Anti-Weakening
-- Discrimination reasoning: if the guard let `LockState` through on the reserve, the daemon would
-  answer a `LockStateResponse` and `closed_promptly` panics on the payload (LRR1-LRR3 fail). If
-  the guard ran after the quota check, the reserve request would consume a token and the 8th
-  regular request in LRR2 (or the quota after 16 attempts in LRR3) would be refused, failing
-  `assert_full_quota_available`. If the permit were not released, `permits_back` times out.
-- The "beyond quota" check is conditional on the 9 requests fitting in one window; the quota is
-  thus proven live on normal hosts, and on a very slow host the remaining assertions still hold.
-  Acceptable and documented in the helper. PASS.
-- The tests skip as root like their siblings; verified the suite runs as UID 1000 and the sibling
-  `test_rsh_reserve_idle_connection_closed_within_window` takes 0.20 s, so the non-root path
-  executes.
+
+See §2. The only assertion changes are the four owner-approved pin updates in `96523e9`. The
+forbidden-crate list got stricter. Tests run: `cargo test --locked -p soos-invariants -p soos-remote`
+(707 invariant tests plus all remote suites) and `cargo test --locked -p soos-daemon` all green
+with `--test-threads=4`; `cargo clippy --locked -p soos-daemon -p soos-remote --all-targets -- -D warnings`
+clean. PASS.
 
 ### Memory, Bounds & Secrets
-- Test reads allocate `4 + len` from a daemon-produced frame header in a local test harness;
-  acceptable for tests. No secrets, frames or embeddings involved. PASS.
+
+Bounds are unchanged: queue 16, `DBUS_CALL_TIMEOUT_MS`, `DBUS_CONNECT_TIMEOUT_MS`,
+`MAX_LOGIND_ERROR_LEN` / `truncated_error_name`. No new logging. The error description (`detail`)
+is not read by `method_error_name`; only the name is kept. PASS.
 
 ### Supply Chain & Automation
-- No `Cargo.*`, `deny.toml`, `.github/`, `scripts/` or `.githooks/` change. N/A.
+
+`cargo deny --locked check` -> `advisories ok, bans ok, licenses ok, sources ok`. Lockfile: 13
+packages removed (including the three RUSTSEC-2026-0370/0371/0372 crates), 2 added (`zbus_utils`,
+`zruntime`, both from crates.io), `tokio` 1.53.1 -> 1.53.3 (patch bump required by zbus 6,
+documented in `AI/ARCHITECTURE.md`). MSRV: zbus 6.0.0 / zbus_macros / zbus_utils declare 1.89,
+zruntime 1.88, tokio 1.53.3 declares 1.71, all at or below the workspace 1.92. Features: still
+`default-features = false, features = ["tokio"]`; no `default-rt`, `p2p`, `unixexec` or process
+features are enabled. No workflow or script change. PASS.
 
 ### English-Only Policy
-- All added code, comments, docs, spec and walkthrough text is in English. PASS.
 
-### Commands re-run by the reviewer
-- `cargo test -p soos-daemon --test peer_limits_tests -- --test-threads=3`: 31 passed, 0 failed
-  (LRR1-LRR3 included; the LRR subset was re-run three more times, all green).
-- `cargo clippy -p soos-daemon --all-targets -- -D warnings`: clean.
-- `cargo fmt -p soos-daemon -- --check`: clean.
-- All with `LIBONNXRUNTIME_NO_PKG_CONFIG=1 CARGO_TARGET_DIR=~/.cache/soos-targets/daemon-lockstate-reserve CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_BUILD_JOBS=3`.
+All added text (code, comments, docs, walkthrough) scanned; English only. PASS.
 
 ## 4. Detailed Findings & Action Items
 
-- **[SUGGESTION]** `crates/daemon/tests/peer_limits_tests.rs` (`QUOTA_WINDOW`) — the 1 s window is
-  a literal mirroring `LOCK_STATE_RATE_WINDOW_NS`; `Duration::from_nanos(LOCK_STATE_RATE_WINDOW_NS)`
-  would keep a single source of truth. Optional.
-
-No CRITICAL, MAJOR or MINOR findings.
+- **[SUGGESTION]** `crates/daemon/src/presence/logind.rs:240` and `crates/remote/src/logind.rs:143`:
+  `method_error_name` is duplicated word for word in both crates, along with two identical test
+  files. It is the same pattern as the existing duplicated `call()` mapping, so this is acceptable
+  for now. A future shared helper would give it one source of truth.
+- **[SUGGESTION]** `tests/invariants/src/presence_unlock_contract.rs:249`: the test name
+  `test_pau_lockfile_pins_zbus_5_without_libdbus` (also cited in `AI/VERIFICATION_MATRIX.md`
+  PAU17) now asserts zbus 6. Renaming it is optional and needs owner approval because it is a test
+  change.
+- **[SUGGESTION]** `AI/DECISIONS.md`: the ADR 2026-10-02 text still says `zbus` 5 (it is a
+  historical record and is left untouched). If the project wants an ADR trail for a dependency
+  major bump, it could add a short dated note there that cites #416 and the three advisories.
+- **[SUGGESTION]** The new tests check `method_error_name` in isolation. No test drives the
+  `call()` arms themselves (no reset for an error reply, reset for a transport failure). Those
+  arms are a direct `match` on the classifier and were read by hand, so the risk is low.
 
 ## 5. Final Verdict
 
