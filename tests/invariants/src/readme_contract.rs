@@ -1,6 +1,6 @@
 //! README landing-page contract (GitHub #408, PR 2 of #356; ADR 2026-10-17 "README Restructure
 //! as a Product Landing Page"; architect spec `AI/architect_spec_readme_redesign.md` §3; matrix
-//! RDM1–RDM8, RDM10, RDM11):
+//! RDM1–RDM8, RDM10–RDM13):
 //!
 //! - every relative Markdown or HTML link of `README.md` (images included) resolves to an
 //!   existing file or directory; `#anchors`, queries, external URLs and code are ignored;
@@ -850,4 +850,88 @@ fn test_rdm_companion_wording_helpers() {
         "the live camera view streams over Tailscale Serve or Funnel"
     ));
     assert!(!camera_view_omits_funnel("lock status over Tailscale"));
+}
+
+// ---------------------------------------------------------------------------------------
+// RDM12 – RDM13 — turning companion keys off in `remote.toml`
+// ---------------------------------------------------------------------------------------
+
+/// Needles the security section must contain so a reader can turn a key off in `remote.toml`
+/// without `soos-remote` refusing the file (`crates/remote/src/config.rs`: `PushRequiresAlerts`,
+/// `OfflineRequiresPush`, `CameraFunnelRequiresCameraView`, `CameraFunnelRequiresFunnel`,
+/// `AndroidRequiresFunnel`, exit 78).
+const COMPANION_DEPENDENCY_NEEDLES: [&str; 6] = [
+    "exit 78",
+    "password_alerts",
+    "push_notifications",
+    "offline_alerts",
+    "camera_view_funnel",
+    "[android]",
+];
+
+/// Whether a unit says every companion key can be turned off in `remote.toml` on its own,
+/// without naming the keys that depend on it.
+fn claims_independent_opt_out(unit: &str) -> bool {
+    let lower = unit.to_ascii_lowercase();
+    let independent = [
+        "every key can be set to",
+        "each can be turned off in `remote.toml`",
+        "each can be turned off in remote.toml",
+        "or by setting its key to `false`",
+    ]
+    .iter()
+    .any(|w| lower.contains(w));
+    independent && lower.contains("remote.toml") && !lower.contains("depend")
+}
+
+/// RDM12: the setup render fixture really sets the exposure keys (so RDM10 never passes by
+/// reading nothing), no README unit claims a key can be turned off in `remote.toml` on its own,
+/// and the security section names the dependent keys and the exit 78 refusal.
+#[test]
+fn test_rdm_companion_opt_out_names_dependent_keys() {
+    let on = keys_set_true(&read(SETUP_RENDER_FIXTURE));
+    assert_eq!(
+        on,
+        COMPANION_EXPOSURE_KEYS.to_vec(),
+        "{SETUP_RENDER_FIXTURE} must set every exposure key to `true` as `key = true` lines; update RDM10 and the README with the setup defaults"
+    );
+    let readme = read("README.md");
+    let independent: Vec<String> = text_units(&readme)
+        .into_iter()
+        .filter(|u| claims_independent_opt_out(u))
+        .collect();
+    assert!(
+        independent.is_empty(),
+        "README.md must not say a companion key can be turned off in remote.toml on its own (soos-remote exits 78 on a dangling dependant): {independent:#?}"
+    );
+    let security = section(&readme, "Security").expect("README.md must have a Security section");
+    for needle in COMPANION_DEPENDENCY_NEEDLES {
+        assert!(
+            security.contains(needle),
+            "the README security section must mention `{needle}` when it explains remote.toml opt-outs"
+        );
+    }
+}
+
+/// RDM13: the RDM12 helper on synthetic input.
+#[test]
+fn test_rdm_companion_opt_out_helper() {
+    assert!(claims_independent_opt_out(
+        "Every key can be set to `false` in `remote.toml`."
+    ));
+    assert!(claims_independent_opt_out(
+        "each can be turned off in `remote.toml`, and in soos-gui"
+    ));
+    assert!(claims_independent_opt_out(
+        "turned off in soos-gui or by setting its key to `false` in `remote.toml`"
+    ));
+    assert!(!claims_independent_opt_out(
+        "every key in `remote.toml` together with the keys that depend on it"
+    ));
+    assert!(!claims_independent_opt_out(
+        "In `remote.toml`, set a key to `false` together with the keys that depend on it"
+    ));
+    assert!(!claims_independent_opt_out(
+        "every key can be set to anything"
+    ));
 }

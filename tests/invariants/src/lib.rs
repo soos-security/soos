@@ -446,7 +446,7 @@ mod readme_assets_contract;
 /// diagram, security section with the password fallback, kill switch and PAD caveat, cited
 /// comparison, companion wording tied to the setup defaults (GitHub #408, PR 2 of #356; ADR
 /// 2026-10-17 "README Restructure as a Product Landing Page"; spec
-/// AI/architect_spec_readme_redesign.md; rows RDM1-RDM8, RDM10, RDM11).
+/// AI/architect_spec_readme_redesign.md; rows RDM1-RDM8, RDM10-RDM13).
 #[cfg(all(test, unix))]
 mod readme_contract;
 

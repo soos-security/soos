@@ -109,7 +109,7 @@ Constraints from the existing immutable contracts (unchanged files):
 
 No release badge: `git tag --list` is empty and no release file exists.
 
-## 3. Test contract: `tests/invariants/src/readme_contract.rs` (rows RDM1–RDM8, RDM10, RDM11)
+## 3. Test contract: `tests/invariants/src/readme_contract.rs` (rows RDM1–RDM8, RDM10–RDM13)
 
 Registered in `tests/invariants/src/lib.rs` as `#[cfg(all(test, unix))] mod readme_contract;`.
 std only, no new dependency. Helpers (pure, unit-tested on synthetic Markdown):
@@ -141,6 +141,8 @@ std only, no new dependency. Helpers (pure, unit-tested on synthetic Markdown):
 | RDM8 | `test_rdm_comparison_cites_upstream_sources` | the Comparison section links `github.com/boltgolt/howdy` and `learn.microsoft.com` |
 | RDM10 | `test_rdm_companion_wording_matches_setup_defaults` | while the setup render fixture `tests/fixtures/setup/remote.toml` sets `allow_funnel`, `allow_unlock`, `camera_view` or `camera_view_funnel` to `true`: no text unit calls remote unlock or the camera view opt-in or off by default, a camera view over Tailscale names Funnel, and the Security section names `scripts/setup.sh`, `passkey`, `soos-gui`, `remote.toml` and each key set to `true` (review round of 2026-10-17, after #402) |
 | RDM11 | `test_rdm_companion_wording_helpers` | synthetic cases for the RDM10 helpers |
+| RDM12 | `test_rdm_companion_opt_out_names_dependent_keys` | the fixture yields all four exposure keys; no README unit says a key can be turned off in `remote.toml` on its own; the Security section names `exit 78` and the dependent keys (review after the rebase onto #418) |
+| RDM13 | `test_rdm_companion_opt_out_helper` | synthetic cases for the RDM12 detector |
 | RDM9 | owner check | GitHub light, dark and mobile-width render of the README (manual, not automated) |
 
 Expected red state: before the README rewrite, RDM3 passes (no badge), RDM1 passes, RDM5 fails on
@@ -153,7 +155,7 @@ RDM2 and RDM4 are helper self-tests and pass.
   contracts, link to `Docs/README_ASSETS.md` and `scripts/capture_readme_assets.sh`.
 - `Docs/DEVELOPMENT_WORKFLOW.md`: README structure rules and asset regeneration.
 - `AI/DECISIONS.md`: ADR "[2026-10-17] README Restructure as a Product Landing Page".
-- `AI/VERIFICATION_MATRIX.md`: component `readme-redesign`, rows RDM1–RDM11 (RDM9 pending owner).
+- `AI/VERIFICATION_MATRIX.md`: component `readme-redesign`, rows RDM1–RDM13 (RDM9 pending owner).
 - `AI/walkthroughs/216_readme_redesign.md`.
 
 ## 5. Security invariants touched

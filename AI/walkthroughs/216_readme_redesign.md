@@ -3,7 +3,7 @@
 - **Date**: 2026-10-17
 - **Issue**: GitHub #408 (PR 2 of epic #356; no backlog id, branch not registered in `scripts/sync_issue.py`) — **Branch**: `chore/readme-redesign`
 - **Base commit**: `9e82795`
-- **Matrix criteria**: RDM1–RDM11 (component `readme-redesign`)
+- **Matrix criteria**: RDM1–RDM13 (component `readme-redesign`)
 
 ## 1. Context & Objectives
 
@@ -59,6 +59,8 @@ New module `tests/invariants/src/readme_contract.rs` (std only), registered in `
 | RDM8 | `test_rdm_comparison_cites_upstream_sources` |
 | RDM10 | `test_rdm_companion_wording_matches_setup_defaults` |
 | RDM11 | `test_rdm_companion_wording_helpers` |
+| RDM12 | `test_rdm_companion_opt_out_names_dependent_keys` |
+| RDM13 | `test_rdm_companion_opt_out_helper` |
 
 Red run on the old README: RDM5 failed on "enterprise-grade"; RDM6 and RDM7 failed with no `Why` heading;
 RDM8 failed with no Comparison section. RDM1 and RDM3 passed (the old README had no broken link and no badge),
@@ -69,6 +71,10 @@ writes `allow_funnel`, `allow_unlock`, `camera_view` and `camera_view_funnel` = 
 longer call remote unlock or the camera view opt-in. Red run before the wording fix: RDM10 failed on six text
 units (the Why bullet, the companion row, two Mermaid labels, the security bullet "Remote unlock is off by
 default" and the FAQ camera answer, which also named only the Tailscale network); RDM11 passed.
+
+RDM12 and RDM13 were added after the rebase onto #418: setting one companion key to `false` in `remote.toml`
+while a dependent key stays `true` makes `soos-remote` exit 78, so the README must name the dependants. Red
+run on the previous README: RDM12 failed ("Every key can be set to `false` in `remote.toml`"); RDM13 passed.
 
 ## 5. Auditor Constraints
 
@@ -89,7 +95,7 @@ default" and the FAQ camera answer, which also named only the Tailscale network)
 - `Docs/README.md`: "Project README" paragraph (structure, contracts, regeneration script).
 - `Docs/DEVELOPMENT_WORKFLOW.md` §10: README structure and editing rules.
 - `AI/DECISIONS.md`: ADR "[2026-10-17] README Restructure as a Product Landing Page".
-- `AI/VERIFICATION_MATRIX.md`: component `readme-redesign`, rows RDM1–RDM11.
+- `AI/VERIFICATION_MATRIX.md`: component `readme-redesign`, rows RDM1–RDM13.
 
 No runtime crate, packaging, script, workflow or asset file changed; no dependency added.
 
@@ -102,7 +108,7 @@ Run by an independent reviewer on the final diff. This walkthrough does not reco
 All runs are scoped (`-p soos-invariants`, `--test-threads=3`):
 - `cargo fmt --all -- --check`: clean.
 - `cargo clippy -p soos-invariants --locked --all-targets --all-features -- -D warnings`: clean.
-- `cargo test -p soos-invariants --locked --all-features`: all tests pass. That covers RDM1–RDM8, RDM10, RDM11, RAC10–RAC16,
+- `cargo test -p soos-invariants --locked --all-features`: all tests pass. That covers RDM1–RDM8, RDM10–RDM13, RAC10–RAC16,
   the installer, onboarding, setup, upgrade, licence and GDM follow-up README contracts, and the matrix
   citation check.
 

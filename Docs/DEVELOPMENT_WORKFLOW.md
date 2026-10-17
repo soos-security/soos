@@ -247,7 +247,7 @@ The root `README.md` is a product landing page (ADR 2026-10-17 "README Restructu
 Landing Page"). Its level-2 sections keep this order: Why soos, Features, Screenshots, Quick Start,
 Upgrade, How it works (with a Mermaid diagram), Security model, Comparison, FAQ, Roadmap,
 Documentation, Contributing and security, License. `soos-invariants::readme_contract` (rows
-RDM1–RDM8, RDM10, RDM11) checks the order, that every relative link resolves, at most 6 badges and no release
+RDM1–RDM8, RDM10–RDM13) checks the order, that every relative link resolves, at most 6 badges and no release
 badge while no tag exists, the banned wording (`enterprise-grade`, `military-grade`, `unbreakable`,
 `certified`), the security section and the cited comparison; `readme_assets_contract` checks the
 images. Rules when editing it:
@@ -258,9 +258,9 @@ images. Rules when editing it:
   comparison cell and never add accuracy numbers.
 - Describe the phone companion defaults as `scripts/setup.sh` writes them: while setup turns
   Funnel, remote unlock and the camera view on, never call them opt-in or off by default; say
-  that each is passkey-protected, which ones `soos-gui` can turn off (every key can be set to
-  `false` in `remote.toml`), and that they stay off in a manual install (RDM10 reads
-  `tests/fixtures/setup/remote.toml`).
+  that each is passkey-protected, which ones `soos-gui` can turn off, that a key set to `false` in
+  `remote.toml` takes the keys that depend on it along (else `soos-remote` exits 78), and that
+  they stay off in a manual install (RDM10 and RDM12 read `tests/fixtures/setup/remote.toml`).
 - Never add an image by hand: regenerate the screenshots with
   [`scripts/capture_readme_assets.sh`](../scripts/capture_readme_assets.sh) (section 9) and update the
   source commit the README states for them.

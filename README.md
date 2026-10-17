@@ -53,7 +53,7 @@ Every feature below is merged on `main` and documented.
 | Packages and installer | `.deb`, `.rpm` and Arch packages, a fail-closed installer that rolls back on error, upgrade and uninstall procedures | [`Docs/PACKAGING_AND_PROVISIONING.md`](Docs/PACKAGING_AND_PROVISIONING.md) §7, §9 |
 | Desktop app `soos-gui` | Live diagnostic, guided enrollment with liveness checks, enrolled profiles, first-run tour with feature switches | [`Docs/GUI_APPLICATION.md`](Docs/GUI_APPLICATION.md) |
 | Lock-screen widget | Shows on the lock screen whether soos is scanning your face: a swaylock-plugin background widget, a hyprlock label and a GNOME Shell 45+ extension (a KDE Plasma adapter comes later) | [`Docs/LOCKSCREEN_WIDGET.md`](Docs/LOCKSCREEN_WIDGET.md) |
-| Phone companion `soos-remote` | User-level service reached over Tailscale Serve, or Funnel from the internet: lock status, remote lock, passkey unlock, failed-password alerts, push notifications, live camera view after a passkey check, battery level, offline history, a first-run feature tour in the web app. The one-command setup turns Funnel, unlock, the camera view and the alerts on; a manual install leaves them off; each can be turned off in `remote.toml`, and all but the failed-password alerts also in `soos-gui` | [`Docs/REMOTE_COMPANION.md`](Docs/REMOTE_COMPANION.md) |
+| Phone companion `soos-remote` | User-level service reached over Tailscale Serve, or Funnel from the internet: lock status, remote lock, passkey unlock, failed-password alerts, push notifications, live camera view after a passkey check, battery level, offline history, a first-run feature tour in the web app. The one-command setup turns Funnel, unlock, the camera view and the alerts on; a manual install leaves them off; all but the failed-password alerts can be turned off in `soos-gui`, and every key in `remote.toml` together with the keys that depend on it | [`Docs/REMOTE_COMPANION.md`](Docs/REMOTE_COMPANION.md) |
 | Native Android app (first version) | Sideloaded Kotlin app for the companion: PC status, remote lock, passkey sign-in over Funnel, opt-in PC offline alerts | [`Docs/REMOTE_COMPANION.md`](Docs/REMOTE_COMPANION.md) §2j "Native Android app" |
 | Network lock | Opt-in polkit rule: changing the Wi-Fi network or turning the radio off asks for an administrator password | [`Docs/NETWORK_LOCK.md`](Docs/NETWORK_LOCK.md) |
 | Intrusion snapshots | Opt-in, encrypted camera snapshots of failed attempts, with daily caps and 7-day retention | [`Docs/EVIDENCE_STORE_CRATE.md`](Docs/EVIDENCE_STORE_CRATE.md) |
@@ -94,8 +94,10 @@ running it again is safe. It enrolls your face only from a local seat (from SSH 
 at the PC), stops `soos-daemon` during the enrollment (the daemon owns the camera) and starts it again. Presence
 auto-unlock stays on (`--presence off` turns it off). It does **not** activate PAM (step 4 stays explicit).
 With your Tailscale login and node name (`--tailscale-login you@example.com --rp-id mypc.tail1234.ts.net`, or
-asked interactively) it also sets up the phone companion as you, with every feature on (each can be turned off
-later in `remote.toml`, and all but the failed-password alerts in soos-gui), and prints the Tailscale and passkey steps it never runs itself; `--no-remote` skips it.
+asked interactively) it also sets up the phone companion as you, with every feature on (all but the failed-password
+alerts can be turned off later in soos-gui, and every key in `remote.toml` together with the keys that depend
+on it, see the [Security model](#security-model)), and prints the Tailscale and passkey steps it never runs
+itself; `--no-remote` skips it.
 Details, flags and exit codes:
 [`Docs/PACKAGING_AND_PROVISIONING.md`](Docs/PACKAGING_AND_PROVISIONING.md) §3.0.
 
@@ -293,8 +295,11 @@ of trust.
   needs a fresh passkey check with user verification, and every camera view starts with one. On the tailnet,
   status and lock need no passkey. Funnel, remote unlock and the camera view each have an off switch in
   `soos-gui` (the feature switches of the first-run tour, also reached with its **Features** button); turning
-  Funnel or the camera view off there also sets `camera_view_funnel` to `false`. Every key can be set to
-  `false` in `remote.toml`. A manual install (`scripts/install_remote.sh`) and the code defaults leave all of
+  Funnel or the camera view off there also sets `camera_view_funnel` to `false`. In `remote.toml`, set a key to
+  `false` together with the keys that depend on it, or `soos-remote` refuses the file (exit 78):
+  `camera_view_funnel` goes off with `allow_funnel` or `camera_view`, `push_notifications` and `offline_alerts`
+  with `password_alerts`, `offline_alerts` with `push_notifications`, and an `[android]` table needs
+  `allow_funnel`. A manual install (`scripts/install_remote.sh`) and the code defaults leave all of
   them off. Its residual risks are listed in [`Docs/REMOTE_COMPANION.md`](Docs/REMOTE_COMPANION.md) §8.
 
 The full threat model, the actors considered and the mandatory invariants are in
@@ -352,7 +357,7 @@ The companion's live camera view streams frames to your phone after a fresh pass
 them, over your Tailscale network and, with `camera_view_funnel`, through Tailscale Funnel from the internet.
 The one-command setup turns both keys on in `remote.toml` and creates the daemon's `[preview]` section when
 `/etc/soos/daemon.toml` does not exist yet; a manual install leaves the view off, and you can turn it off in
-`soos-gui` or `remote.toml`.
+`soos-gui`, or in `remote.toml` with `camera_view_funnel` too.
 </details>
 
 <details>

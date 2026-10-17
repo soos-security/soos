@@ -172,9 +172,9 @@ without any paid service, through **Tailscale Funnel** on the node's own `*.ts.n
 Face ID, fingerprint or screen lock), verified by `soos-remote` itself.
 
 **Funnel is optional.** The code default and the manual install stay **tailnet-only**
-(`tailscale serve`, the phone connected to the tailnet with the Tailscale VPN); the one-command
-`scripts/setup.sh` turns Funnel on (owner decision of 2026-10-15: no VPN on the phone, section 4): with
-`allow_funnel` absent or `false` every Funnel request is `403`, and the passkeys still protect
+(`tailscale serve`, the phone connected to the tailnet with the Tailscale VPN). The one-command
+`scripts/setup.sh` turns Funnel on (ADR 2026-10-15 "Setup User Phase: Phone Companion Profile With
+Default-On Features" item (3)). With `allow_funnel` absent or `false` every Funnel request is `403`, and the passkeys still protect
 every unlock (section 2a). Enable Funnel only if you accept the extra public exposure described
 under *Accepted risk* below. Other public exposure paths (for example Cloudflare Tunnel or
 Cloudflare Access) are not covered by this page or by the ADR.
