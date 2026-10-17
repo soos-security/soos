@@ -10,8 +10,15 @@ pub const MAX_SURFACE_DIM: u32 = 8192;
 pub const MAX_SURFACE_PIXELS: u64 = 33_554_432;
 /// Largest sum of surface pixels across outputs.
 pub const MAX_TOTAL_PIXELS: u64 = 67_108_864;
-/// Buffers per surface (the compositor may hold one while the other is drawn).
-pub const BUFFERS_PER_SURFACE: usize = 2;
+/// Buffers per surface at most: one is allocated when the surface is configured, a second only
+/// while the compositor still holds every allocated one (see [`needs_extra_buffer`]).
+pub const MAX_BUFFERS_PER_SURFACE: usize = 2;
+/// Former name of [`MAX_BUFFERS_PER_SURFACE`], kept for the LKA9 contract: the upper bound, not the
+/// number of buffers allocated up front.
+pub const BUFFERS_PER_SURFACE: usize = MAX_BUFFERS_PER_SURFACE;
+/// Alignment of a buffer slot in a shared-memory pool (smithay-client-toolkit's
+/// `SlotPool::new_slot` rounds every slot up to 64 bytes).
+pub const SHM_SLOT_ALIGN: usize = 64;
 /// Vertical position of the widget centre (below swaylock's centred indicator).
 pub const WIDGET_CENTER_Y_FRACTION: f32 = 0.78;
 
@@ -97,6 +104,32 @@ pub fn buffer_len(width: u32, height: u32) -> Option<usize> {
         return None;
     }
     usize::try_from(pixels.checked_mul(4)?).ok()
+}
+
+/// Bytes of the shared-memory pool holding one buffer of `width` × `height`: [`buffer_len`]
+/// rounded up to [`SHM_SLOT_ALIGN`] (a pool of exactly this size takes the buffer without
+/// growing); `None` when `buffer_len` is `None` or on overflow.
+#[must_use]
+pub fn slot_len(width: u32, height: u32) -> Option<usize> {
+    buffer_len(width, height)?.checked_next_multiple_of(SHM_SLOT_ALIGN)
+}
+
+/// Shared-memory bytes of one surface holding `buffers` buffers of `width` × `height`; `None`
+/// when `buffers` is 0 or above [`MAX_BUFFERS_PER_SURFACE`], or when [`slot_len`] is `None`.
+#[must_use]
+pub fn surface_shm_bytes(width: u32, height: u32, buffers: usize) -> Option<usize> {
+    if buffers == 0 || buffers > MAX_BUFFERS_PER_SURFACE {
+        return None;
+    }
+    slot_len(width, height)?.checked_mul(buffers)
+}
+
+/// Allocation policy of a surface holding `allocated` buffers: one more is allowed only when
+/// none is free (`any_free` is false: the compositor still holds every allocated buffer) and
+/// fewer than [`MAX_BUFFERS_PER_SURFACE`] exist.
+#[must_use]
+pub const fn needs_extra_buffer(allocated: usize, any_free: bool) -> bool {
+    !any_free && allocated < MAX_BUFFERS_PER_SURFACE
 }
 
 /// Saturating float-to-pixel conversion (`NaN` and negatives → 0).
