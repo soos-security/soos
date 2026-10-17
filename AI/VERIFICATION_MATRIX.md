@@ -2430,6 +2430,18 @@ Read-only lock-screen state channel (ADR 2026-10-13 "Read-Only Lock-Screen State
 | LKA17 | Dockerized PAM matrix and every CI job green with the two new crates (PAM unchanged) | Runs in CI on the pull request | ⬜ Pending (first CI run happens on the pull request) |
 ---
 
+## Component: `lockstate-reserve-refusal` (GitHub #410, part of #352, PR #403 follow-up, `test/daemon-lockstate-reserve`, walkthrough 217)
+
+Test evidence for the refusal of `RequestKind::LockState` on the auth-reserved connection (ADR 2026-10-12 S-3; ADR 2026-10-13 "Read-Only Lock-Screen State Channel" item 5; ADR 2026-10-15 "Lock-Screen Adapters" item 3 residual; clarification entry of 2026-10-17 in `AI/DECISIONS.md`; spec `AI/architect_spec_lockstate_reserve_refusal.md`). The refusal happens at first-frame classification in `ConnectionDispatcher::read_and_process`, before any lock-state processing; no production code changes. The socket tests run as the unprivileged test user and are skipped as root, like their siblings. Each row was shown to discriminate by a temporary, uncommitted mutation of the reserve guard (walkthrough 217 §4).
+
+| # | Criterion | Test Method | Status |
+|---|---|---|---|
+| LRR1 | With both regular connections of the UID held, a `LockState` request for the caller's own UID lands on the auth-reserved connection and is closed without any payload, and the reserve permit is released | `soos-daemon::peer_limits_tests::test_lrr_reserve_closes_lock_state_without_payload` | ✅ Verified |
+| LRR2 | That refusal runs before any lock-state processing: the UID's `LockState` quota is untouched (all 8 requests of one window answered on a regular connection, the request beyond them refused when they fit in the window), the board view (state and sequence) and its tracked UIDs are unchanged, and an `Auth` is then still admitted on the reserve and answered | `soos-daemon::peer_limits_tests::test_lrr_reserve_lock_state_consumes_no_quota_and_leaves_the_board` | ✅ Verified |
+| LRR3 | Repeated `LockState` attempts on the reserve (16, twice the per-second quota) cannot keep the PAM reserve occupied or drain the quota: each is closed without payload and releases the reserve, the regular connection still gets the full quota, and an `Auth` on the reserve is still answered | `soos-daemon::peer_limits_tests::test_lrr_repeated_reserve_lock_state_cannot_hold_the_pam_reserve` | ✅ Verified |
+
+---
+
 ## Component: `remote-offline-alerts` (GitHub #376, tier 1 of #359 Part B, `feat/remote-offline-alerts`, walkthrough 202)
 
 Offline history and back-online Web Push of `soos-remote` (ADR 2026-10-13 "Offline History and Back-Online Push Notifications in `soos-remote`", spec `AI/architect_spec_remote_offline_alerts.md` §14–§16, tester contract `AI/tester_contract_remote_offline_alerts.md`, auditor constraints `AI/auditor_constraints_remote_offline_alerts.md` 1–38, `Docs/REMOTE_COMPANION.md` §2j).
