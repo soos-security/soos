@@ -1232,4 +1232,196 @@ mod auth_reserve {
         assert!(elapsed < CLOSE_DEADLINE + Duration::from_millis(200));
         permits_back(&dispatcher, 6).await;
     }
+
+    // -----------------------------------------------------------------------
+    // GitHub #410 (part of #352, PR #403 follow-up; spec
+    // AI/architect_spec_lockstate_reserve_refusal.md, rows LRR1-LRR3): a `LockState` request
+    // on the auth-reserved connection is refused at first-frame classification, before any
+    // lock-state processing. New tests only; nothing above is changed.
+    // -----------------------------------------------------------------------
+
+    mod lock_state_on_reserve {
+        use super::*;
+        use soos_daemon::lock_state::{ScanEnd, LOCK_STATE_MAX_REQUESTS_PER_SEC};
+        use soos_daemon::pipeline::current_monotonic_nanos;
+        use soos_protocol::message::encode_request;
+        use soos_protocol::types::LockStateResponse;
+
+        /// Free permits once the two regular connections of `two_held` are held.
+        const FREE_WITH_TWO_HELD: usize = 6;
+        /// Reserve attempts of LRR3: twice the per-second `LockState` quota.
+        const RESERVE_LOCK_STATE_ATTEMPTS: usize = 2 * LOCK_STATE_MAX_REQUESTS_PER_SEC as usize;
+        /// The `LockState` quota window (`LOCK_STATE_RATE_WINDOW_NS`).
+        const QUOTA_WINDOW: Duration = Duration::from_secs(1);
+
+        /// A tagged `LockState` request for `uid` (the shape `soos-lockstatus` sends).
+        fn lock_state_request(uid: u32, nonce: u8) -> Request {
+            Request {
+                version: CURRENT_VERSION,
+                kind: RequestKind::LockState,
+                request_id: [nonce; 32],
+                uid_hint: uid,
+                service: "soos-lockstatus".to_string(),
+                deadline_monotonic_ns: u64::MAX,
+            }
+        }
+
+        /// Sends one `LockState` for the caller's own UID on a live connection and returns
+        /// `true` when the answer is a `LockStateResponse`, `false` when it is a standard
+        /// `Response` (a refusal such as `ProtocolError`/`RateLimited`).
+        async fn lock_state_answered(client: &mut UnixStream, nonce: u8) -> bool {
+            let framed = encode_request(&lock_state_request(current_uid(), nonce)).expect("encode");
+            client.write_all(&framed).await.expect("Write request");
+            client.flush().await.expect("Flush request");
+            let mut len_bytes = [0u8; 4];
+            client.read_exact(&mut len_bytes).await.expect("Read len");
+            let len = u32::from_be_bytes(len_bytes) as usize;
+            let mut buf = vec![0u8; 4 + len];
+            buf[..4].copy_from_slice(&len_bytes);
+            client.read_exact(&mut buf[4..]).await.expect("Read body");
+            if let Ok(lock) = decode::<LockStateResponse>(&buf) {
+                assert!(
+                    decode::<Response>(&buf).is_err(),
+                    "exactly one interpretation"
+                );
+                assert_eq!(lock.version, CURRENT_VERSION);
+                return true;
+            }
+            let refused: Response = decode(&buf).expect("a LockStateResponse or a Response");
+            assert_eq!(refused.request_id, [nonce; 32], "the request id is echoed");
+            false
+        }
+
+        /// Opens a connection while the two regular permits are held (so it lands on the
+        /// reserve), sends a `LockState` for the caller's own UID, asserts that it is closed
+        /// without any payload, then waits until the reserve permit is released.
+        async fn refuse_lock_state_on_reserve(
+            sock_path: &std::path::Path,
+            dispatcher: &ConnectionDispatcher,
+            nonce: u8,
+        ) {
+            let mut client = UnixStream::connect(sock_path).await.expect("Connect");
+            let framed = encode_request(&lock_state_request(current_uid(), nonce)).expect("encode");
+            let _ = client.write_all(&framed).await;
+            let _ = client.flush().await;
+            assert!(
+                closed_promptly(&mut client).await,
+                "LockState on the auth-reserved connection is closed without an answer"
+            );
+            permits_back(dispatcher, FREE_WITH_TWO_HELD).await;
+        }
+
+        /// Sends `LOCK_STATE_MAX_REQUESTS_PER_SEC` `LockState` requests on the held regular
+        /// connection and asserts that every one is answered (the whole quota is available).
+        /// When all of them and the request after them fit inside one quota window, that next
+        /// request must be refused: the quota is live in this harness, so the check above is
+        /// not vacuous. On a host too slow to fit them in one window, the extra check is not
+        /// made (the answered ones still prove that nothing consumed the quota).
+        async fn assert_full_quota_available(regular: &mut UnixStream, first_nonce: u8) {
+            let started = Instant::now();
+            for i in 0..LOCK_STATE_MAX_REQUESTS_PER_SEC as u8 {
+                assert!(
+                    lock_state_answered(regular, first_nonce + i).await,
+                    "LockState {i} on a regular connection is answered: the refused reserve \
+                     request consumed none of the quota"
+                );
+            }
+            let beyond = lock_state_answered(regular, first_nonce + 0x7F).await;
+            if started.elapsed() < QUOTA_WINDOW {
+                assert!(
+                    !beyond,
+                    "the request beyond the quota within one window is refused"
+                );
+            }
+        }
+
+        /// LRR1: `LockState` for the caller's own UID on the auth-reserved connection is
+        /// closed without any payload, and the reserve permit is released.
+        #[tokio::test]
+        async fn test_lrr_reserve_closes_lock_state_without_payload() {
+            if current_uid() == 0 {
+                return;
+            }
+            let (_dir, sock_path, dispatcher, _c1, _c2) = two_held("reserve_lock_state.sock").await;
+            refuse_lock_state_on_reserve(&sock_path, &dispatcher, 0x40).await;
+        }
+
+        /// LRR2: the refusal happens before any lock-state processing: the `LockState` quota
+        /// of the UID is untouched, the board is unchanged, and the reserve still admits an
+        /// `Auth`.
+        #[tokio::test]
+        async fn test_lrr_reserve_lock_state_consumes_no_quota_and_leaves_the_board() {
+            if current_uid() == 0 {
+                return;
+            }
+            let uid = current_uid();
+            let (_dir, sock_path, dispatcher, mut c1, _c2) =
+                two_held("reserve_lock_state_quota.sock").await;
+
+            // A settled, revealed scan for the UID: the board reads `Idle` with sequence 2,
+            // a view that no longer changes with time.
+            let board = dispatcher.lock_state_board();
+            let begin = current_monotonic_nanos()
+                .expect("clock")
+                .saturating_sub(10_000_000_000);
+            board
+                .begin_scan(uid, begin)
+                .finish(ScanEnd::Recognized, Some(begin + 50_000_000));
+            let before = board.view(uid, current_monotonic_nanos().expect("clock"));
+            assert_eq!(before.sequence, 2, "precondition: one revealed scan");
+            let tracked_before = board.tracked_uids();
+
+            refuse_lock_state_on_reserve(&sock_path, &dispatcher, 0x41).await;
+
+            assert_eq!(
+                board.view(uid, current_monotonic_nanos().expect("clock")),
+                before,
+                "the refused request leaves the board unchanged"
+            );
+            assert_eq!(board.tracked_uids(), tracked_before);
+
+            assert_full_quota_available(&mut c1, 0x50).await;
+
+            // The reserve is free again: an Auth is still admitted on it and answered.
+            let mut auth = UnixStream::connect(&sock_path).await.expect("Connect auth");
+            let buf = exchange(&mut auth, &auth_request(uid)).await;
+            auth_response(&buf);
+            assert!(
+                closed_promptly(&mut auth).await,
+                "the reserve serves one Auth, then closes"
+            );
+            permits_back(&dispatcher, FREE_WITH_TWO_HELD).await;
+        }
+
+        /// LRR3: repeated `LockState` attempts on the reserve (twice the per-second quota)
+        /// cannot keep the PAM reserve occupied or drain the quota: each is closed without
+        /// payload and releases the reserve, the regular connection still gets the full
+        /// quota, and an `Auth` on the reserve is still answered.
+        #[tokio::test]
+        async fn test_lrr_repeated_reserve_lock_state_cannot_hold_the_pam_reserve() {
+            if current_uid() == 0 {
+                return;
+            }
+            let (_dir, sock_path, dispatcher, mut c1, _c2) =
+                two_held("reserve_lock_state_loop.sock").await;
+            for attempt in 0..RESERVE_LOCK_STATE_ATTEMPTS {
+                refuse_lock_state_on_reserve(&sock_path, &dispatcher, 0x60 + attempt as u8).await;
+            }
+            assert_full_quota_available(&mut c1, 0x10).await;
+
+            let mut auth = UnixStream::connect(&sock_path).await.expect("Connect auth");
+            let buf = exchange(&mut auth, &auth_request(current_uid())).await;
+            let resp = auth_response(&buf);
+            assert_eq!(
+                resp.verdict,
+                Verdict::Unavailable,
+                "no pipeline: fail closed"
+            );
+            assert!(
+                closed_promptly(&mut auth).await,
+                "the reserve serves one Auth, then closes"
+            );
+            permits_back(&dispatcher, FREE_WITH_TWO_HELD).await;
+        }
+    }
 }

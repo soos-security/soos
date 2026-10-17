@@ -153,7 +153,11 @@ never a success state and never another user's state.
 Accepted residual: when two other clients of the same user (for example a `soos-gui` camera
 preview and a `soos-remote` camera view) already hold both regular connections, the single
 lock-status connection falls back to the reserved one for its short exchange; the daemon refuses
-`LockState` there and the clients back off.
+`LockState` there and the clients back off. The daemon cannot refuse it when the connection is
+accepted, because the lock-status clients and `pam_soos.so` in the locker run as the same user; it
+refuses it as soon as it has read and classified the request, without answering, without counting
+it against the `LockState` quota, and it frees the reserved connection right away for the next
+face `Auth`.
 
 ## 8. Reduced motion
 

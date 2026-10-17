@@ -390,7 +390,7 @@ The per-UID `Auth` limit (`soos_policy::RateLimiter` inside the `AuthorizationEn
 
 PR 1 of the lock-screen widget epic (#352; ADR 2026-10-13 "Read-Only Lock-Screen State Channel"). A widget drawn by the screen locker (the locked user's process) asks the daemon whether a face scan of that user is running or has just failed, so it can animate. It never controls anything.
 
-**Request.** A standard tagged `Request` with `kind = LockState` (wire 3); `uid_hint` is the UID whose state is asked; `service` and `deadline_monotonic_ns` are validated (§2) but not otherwise used. Not one-shot: one persistent connection may poll, within the per-UID connection cap, `max_requests_per_connection` (1024) and `max_connection_lifetime` (30 s) of §11. The auth-reserved connection refuses it like every non-`Auth` message.
+**Request.** A standard tagged `Request` with `kind = LockState` (wire 3); `uid_hint` is the UID whose state is asked; `service` and `deadline_monotonic_ns` are validated (§2) but not otherwise used. Not one-shot: one persistent connection may poll, within the per-UID connection cap, `max_requests_per_connection` (1024) and `max_connection_lifetime` (30 s) of §11. The auth-reserved connection refuses it like every non-`Auth` message (§11): the refusal happens at first-frame classification, not at accept (the admission class is chosen from `SO_PEERCRED` before any byte is read), and before any `LockState` processing, so no `LockState` quota is consumed, the snapshot is not read, nothing is answered and the reserve permit is released at once (matrix LRR1–LRR3).
 
 **Daemon decision order** (`ConnectionDispatcher::handle_lock_state_request`, after wire validation and the `SO_PEERCRED` check):
 
