@@ -17,6 +17,8 @@ members = [
     "crates/remote",
     "crates/push-protocol",
     "crates/push-sender",
+    "crates/lockstatus",
+    "crates/lock-widget",
     "tests/invariants",
     "tests/fixtures",
 ]
@@ -105,6 +107,11 @@ ureq = { version = "=3.4.2", default-features = false, features = ["rustls"] }
 # CLI argument parsing
 clap = { version = "4", features = ["derive"] }
 
+# wlr-layer-shell client of the lock-screen widget soos-lock-widget only (ADR 2026-10-15
+# "Lock-Screen Adapters for swaylock-plugin and hyprlock"): already locked at 0.20.0 with
+# exactly these features through smithay-clipboard, so no new crate enters Cargo.lock
+smithay-client-toolkit = { version = "0.20", default-features = false, features = ["calloop"] }
+
 # Internal workspace crates
 soos-protocol = { path = "crates/protocol", version = "0.1.0" }
 soos-policy = { path = "crates/policy", version = "0.1.0" }
@@ -122,6 +129,7 @@ soos-admin-cli = { path = "crates/admin-cli", version = "0.1.0" }
 soos-gui = { path = "crates/gui", version = "0.1.0" }
 soos-remote = { path = "crates/remote", version = "0.1.0" }
 soos-push-protocol = { path = "crates/push-protocol", version = "0.1.0" }
+soos-lockstatus = { path = "crates/lockstatus", version = "0.1.0" }
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"

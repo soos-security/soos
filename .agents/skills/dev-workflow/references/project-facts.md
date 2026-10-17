@@ -28,6 +28,8 @@ ADR entry in `AI/DECISIONS.md`. Re-check every value below with the listed `grep
 | `crates/remote` | `soos-remote` | lib + bin (current-thread Tokio, user-level, Unix socket only, zbus, in-house WebAuthn on RustCrypto `p256`; optional Tailscale Funnel; no other crate depends on it; its only soos dependency is `soos-protocol`, for the opt-in live camera view through the daemon preview channel, plus pure-Rust `jpeg-encoder` (ADR 2026-10-07, GitHub #345; RMC-S4 migrated). GitHub #339) | `#![forbid(unsafe_code)]` |
 | `crates/push-protocol` | `soos-push-protocol` | lib (pure Web Push wire contract shared by `soos-remote` and the sender: endpoint allowlist, public-address predicate, bounded frames, status classification; no I/O, no network crate) | `#![forbid(unsafe_code)]` |
 | `crates/push-sender` | `soos-push-sender` | lib + bin (optional sandboxed user unit, the only network-capable part of the companion: one outbound HTTPS Web Push request per framed Unix-socket request, `ureq` + rustls/ring, holds no key; ADR 2026-10-06) | `#![forbid(unsafe_code)]` |
+| `crates/lockstatus` | `soos-lockstatus` | lib + bin (user-level lock-screen scan-state bridge: bounded blocking `LockState` client, one request per connection, per-user `flock` + 250 ms cache in `$XDG_RUNTIME_DIR/soos-lockstatus.lock`, `--once` for hyprlock, `--watch` JSON; ADR 2026-10-15, GitHub #401) | `#![forbid(unsafe_code)]` |
+| `crates/lock-widget` | `soos-lock-widget` | lib + bin (swaylock-plugin wlr-layer-shell background: `smithay-client-toolkit` 0.20 `calloop` only, no seat, CPU rasterizer; ADR 2026-10-15, GitHub #401) | `#![forbid(unsafe_code)]` |
 | `crates/pam` | `soos-pam` → `libpam_soos.so` | cdylib + rlib | adapter: `unsafe` allowed, `// SAFETY:` mandatory |
 | `crates/camera-v4l` | `soos-camera-v4l` | lib, `mock-camera` feature | adapter: `unsafe` allowed, `// SAFETY:` mandatory |
 | `crates/daemon` | `soos-daemon` | lib + bin (Tokio) | `main.rs` forbids; `lib.rs` only denies undocumented unsafe (`mlock.rs`) |
@@ -35,7 +37,7 @@ ADR entry in `AI/DECISIONS.md`. Re-check every value below with the listed `grep
 | `tests/fixtures` | `soos-test-fixtures` | dev-only fixture lib (`[lib] path = "mod.rs"`), never a normal dependency [129] | — |
 
 - The authoritative forbid list is `test_business_crates_forbid_unsafe_code` in
-  `tests/invariants/src/lib.rs` (13 crates, `remote` included since GitHub #339, `push-protocol` and `push-sender` since the Web Push ADR of 2026-10-06, `frame` since GitHub #367). `AGENTS.md` lists only 3 — that is a minimum, not the full set.
+  `tests/invariants/src/lib.rs` (15 crates, `remote` included since GitHub #339, `push-protocol` and `push-sender` since the Web Push ADR of 2026-10-06, `frame` since GitHub #367, `lockstatus` and `lock-widget` since GitHub #401). `AGENTS.md` lists only 3 — that is a minimum, not the full set.
 - Workspace-wide lints live in root `Cargo.toml` (`[workspace.lints]`); every crate declares
   `[lints] workspace = true` and `publish.workspace = true` (required by `deny.toml` private-crate exemption).
 - Portable set shared with the private `soos-macos` repository (ADR 2026-10-13, `Docs/MACOS_PORT.md`): `soos-frame`,

@@ -71,7 +71,8 @@ wildcards = "deny"
 # Crates locked in three versions (each version is documented here):
 #   getrandom@0.4.3        kept (not skipped): direct dependency of soos-admin-cli,
 #                          soos-biometric-store, soos-enrollment-cli, soos-evidence-store,
-#                          soos-gui and soos-pam, and of tempfile (dev-dependency)
+#                          soos-gui, soos-lockstatus and soos-pam, and of tempfile
+#                          (dev-dependency)
 #   getrandom@0.3.4        skipped: ahash (egui/eframe/winit) and rand_core 0.9 (proptest)
 #   getrandom@0.2.17       skipped: rand_core 0.6 (crypto-common via aes-gcm) and ring (via
 #                          ureq/rustls of soos-push-sender)

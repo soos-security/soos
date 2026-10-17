@@ -1,0 +1,28 @@
+[package]
+name = "soos-lock-widget"
+description = "Animated soos face-scan widget drawn as the swaylock-plugin background (wlr-layer-shell)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lib]
+name = "soos_lock_widget"
+path = "src/lib.rs"
+
+[[bin]]
+name = "soos-lock-widget"
+path = "src/main.rs"
+
+[dependencies]
+soos-lockstatus = { workspace = true }
+smithay-client-toolkit = { workspace = true }
+clap = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true
