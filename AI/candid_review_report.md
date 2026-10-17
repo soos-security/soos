@@ -1,138 +1,149 @@
 # Candid Review Report
 
 - **Date**: 2026-10-17
-- **Target Branch**: `chore/readme-redesign` (PR #409, GitHub #408)
-- **Base (merge-base)**: `f1e7616` (`origin/main` has since advanced to `e216ac1`, #407 merged at 2026-10-17T20:07:30Z during this review)
-- **Reviewed-Diff-Fingerprint**: `6b0c6263006cbef0db60c5412f48e3569f5ea67c7941dd05c230df4f97138ea9`
+- **Target Branch**: `chore/readme-redesign` (PR #409, GitHub #408, PR 2 of #356)
+- **Base (merge-base)**: `e216ac1` (current `origin/main` after `git fetch origin`; `origin/main` is an ancestor of `HEAD`)
+- **Reviewed-Diff-Fingerprint**: `6999c5c4ec5a61b3cebf24751911a1d021dfcab51f59779b19d77f462fb40c25`
 - **Audited Files**: `AI/DECISIONS.md`, `AI/VERIFICATION_MATRIX.md`, `AI/architect_spec_readme_redesign.md`,
   `AI/auditor_constraints_readme_redesign.md`, `AI/walkthroughs/216_readme_redesign.md`,
-  `Docs/DEVELOPMENT_WORKFLOW.md`, `Docs/README.md`, `README.md`, `tests/invariants/src/lib.rs`,
-  `tests/invariants/src/readme_contract.rs`
+  `Docs/DEVELOPMENT_WORKFLOW.md`, `Docs/README.md`, `Docs/REMOTE_COMPANION.md`, `README.md`,
+  `tests/invariants/src/lib.rs`, `tests/invariants/src/readme_contract.rs`
 
 ## 1. Executive Summary
 
-Documentation-only change plus one new std-only invariant module (`readme_contract`, RDM1–RDM8,
-RDM10, RDM11). No production code, no PAM, IPC, daemon or supply-chain change. Every README claim
-was checked against `origin/main`. The phone companion wording matches `scripts/setup.sh`
-(`COMPANION_KEYS`, lines 78–90), the render fixture `tests/fixtures/setup/remote.toml`, the code
-defaults in `crates/remote/src/config.rs` (all `unwrap_or(false)`), the commented-out `false`
-template of `scripts/install_remote.sh`, the `RemoteSwitch::keys_cleared` table of
-`crates/gui/src/feature_control.rs:114-121` and `Docs/REMOTE_COMPANION.md` §2a, §2b and §2f. `cargo
-test --locked -p soos-invariants` passes (745 passed, 0 failed).
-
-However `origin/main` moved during the review: PR #407 (GNOME Shell unlock-dialog extension) was
-merged. Because of that the README now states that a merged feature "comes later", and the branch no
-longer merges cleanly into `origin/main` (`AI/DECISIONS.md`, `AI/candid_review_report.md`). A rebase,
-a README fix and a new review are needed.
+Documentation-only change plus one new invariant test module. The README becomes a landing page;
+every factual claim was checked against `origin/main` code and docs (setup defaults, code defaults,
+manual installer template, `soos-gui` switches, passkey requirements, kill switch, lock-screen widget
+support, merged features, model attestation, evidence retention, template encryption, daemon
+sandbox). No false claim was found. The new RDM10/RDM11 tests are sound and fail on the plausible
+regressions they target; no existing assertion was touched. `AI/DECISIONS.md` gains exactly one
+appended ADR line, nothing removed or duplicated. `cargo test --locked -p soos-invariants`:
+756 passed, 0 failed. Only MINOR and SUGGESTION findings remain.
 
 ## 2. Test Changes
 
 Mechanical listing from `target/candid_diff.patch`:
 
 - Test files touched: `tests/invariants/src/lib.rs` (adds `mod readme_contract;` under
-  `#[cfg(all(test, unix))]`, nothing removed), `tests/invariants/src/readme_contract.rs` (new file).
-- Removed or changed assertions (`^-` with `assert`/`#[test]`/`proptest!`/`should_panic`): **none**.
-- New escape hatches (`#[ignore]`, `#[cfg(any())]`, `should_panic`, tolerance, epsilon): **none**.
-- Inline `mod tests` added or removed: **none**.
+  `#[cfg(all(test, unix))]`), `tests/invariants/src/readme_contract.rs` (new, 853 lines).
+- Removed or changed assertions (`^-.*assert|#[test]|proptest!|should_panic`): **none**.
+- New escape hatches (`#[ignore]`, `#[cfg(any())]`, `should_panic`, tolerance/epsilon): **none**.
+- Inline `mod tests` changes: **none**.
 
-No existing assertion on `origin/main` was edited or weakened. The setup, installer, onboarding,
-upgrade, licence and GDM README contracts run unchanged and pass on the new README.
+No existing test of `origin/main` was edited, weakened or removed; the README edits keep every
+pinned string of the existing installer, onboarding, setup, upgrade, licence and GDM contracts
+(the full `soos-invariants` suite passes).
 
 ## 3. Deep Reasoning Audit
 
 ### Logic & Architecture
 
-- Companion defaults: `setup.sh` writes `allow_funnel`, `allow_unlock`, `password_alerts`,
-  `push_notifications`, `offline_alerts`, `camera_view`, `camera_view_funnel = true` (fixture and
-  `setup.sh:2283-2284`). README lines 36–39, 55, 287–297 and 348–354 say so. Code defaults (`config.rs`
-  lines 611–612, 668 and the doc comments 106, 123, 125, 176, 201) and `install_remote.sh:103-142` are
-  all off, as the README says → PASS.
-- soos-gui switches: `RemoteSwitch` = Unlock, Funnel, Push, CameraView, OfflineAlerts; there is no
-  `password_alerts` switch; Funnel and CameraView also clear `camera_view_funnel`. README line 55 ("all
-  but the failed-password alerts also in `soos-gui`") and lines 293–295 match. The switches only turn
-  features off (`DisableRemote`), which matches "off switch". The **Features** header button exists
-  (`header.rs:393-416`, `onboarding.rs:607`) → PASS. README lines 96–97 disagree with this → finding 3.
-- Passkeys: every unlock needs a fresh UV assertion on the tailnet and over Funnel
-  (`REMOTE_COMPANION.md:142-146`), every camera view starts with one (`:634-635`), Funnel needs a
-  passkey sign-in (`:224-226`), and on the tailnet status and lock need no passkey → PASS.
-- `[preview]` is created only when `daemon.toml` is absent (`setup.sh:194-195, 960-962, 1350`) → PASS.
-- Merged-only features: #419 (Android PC-offline alerts) is merged and listed → PASS. #407 (GNOME
-  Shell extension) is now **MERGED** but described as coming later → finding 1.
-- Other claims checked: `PrivateNetwork=yes` (`packaging/soos-daemon.service:81`), Rust 1.98.1,
-  the `fuzz.yml` workflow, commit `a3cae16`, #392 merged, the three screenshots, the 3 s lock grace
-  (`lock_grace_ms = 3000`), the PAD scale 2.7 and #212, the stricter, uncalibrated IR threshold and
-  exposure gate (`ir_liveness.rs:13-21`), the 7-day retention and daily cap of the evidence store,
-  `sensor_preference` and the emitter not being driven, `soos-notify`, `with-faillock`, the 30 s /
-  37.5 s wait, and the titles and open state of the roadmap epics #352–#363 → PASS.
-- Kill switch: `/etc/soos/disabled` stops face PAM and presence, but `crates/remote` never reads it,
-  so remote unlock still works → finding 4.
+Claims checked against `origin/main`:
+
+- **Setup defaults.** `scripts/setup.sh` `COMPANION_KEYS` = allow_funnel, allow_unlock,
+  password_alerts, push_notifications, offline_alerts, camera_view, camera_view_funnel; the render
+  fixture `tests/fixtures/setup/remote.toml` sets all seven to `true`. README L37-40, L52, L56,
+  L96-98, L288-298 and FAQ L349-355 match. PASS.
+- **Code defaults / manual install.** `crates/remote/src/config.rs`: every one of those keys
+  `unwrap_or(false)`; `battery_status` defaults to `true` (README lists battery level as a feature
+  and never calls it off). `scripts/install_remote.sh` writes all of them commented as `false`.
+  "A manual install ... and the code defaults leave all of them off" holds. PASS.
+- **soos-gui switches.** `crates/gui/src/feature_control.rs` `RemoteSwitch` = Unlock, Funnel, Push,
+  CameraView, OfflineAlerts, all wired in `crates/gui/src/onboarding.rs` L342-346; no
+  `password_alerts` switch. `keys_to_clear`: Funnel -> `allow_funnel`, `camera_view_funnel`;
+  CameraView -> `camera_view`, `camera_view_funnel`. README "all but the failed-password alerts
+  also in soos-gui" and "turning Funnel or the camera view off there also sets
+  `camera_view_funnel` to `false`" are exact. The **Features** header button exists (`header.rs`,
+  `app.rs` L723). PASS.
+- **Passkeys.** `Docs/REMOTE_COMPANION.md` L13 (Funnel behind passkey login), L142-146 (every
+  unlock, tailnet and Funnel, fresh assertion with user verification), L635 (fresh passkey check
+  per camera view), L933 (lock never depends on passkeys). README L292-294 matches. PASS.
+- **Kill switch.** `crates/pam/src/config.rs` L120 (`disabled` flag) and
+  `crates/daemon/src/presence/switch.rs` (`GLOBAL_DISABLE_FLAG = "disabled"` stops presence).
+  PASS.
+- **Lock-screen widget.** `Docs/LOCKSCREEN_WIDGET.md` table: swaylock-plugin, hyprlock, GNOME
+  Shell 45+ (#407 merged as `e216ac1`), KDE Plasma "later PR". PASS.
+- **Merged features only.** `gh pr list --state merged`: #419 (Android opt-in offline heartbeat),
+  #413, #407, #403, #402 are all on `origin/main`. Android row "opt-in PC offline alerts" matches
+  #419. PASS.
+- Other claims spot-checked: `PrivateNetwork=yes` (`packaging/soos-daemon.service` L81), SHA-256 and
+  tensor-shape attestation (`models/README.md` L59-63), 7-day retention and daily cap
+  (`Docs/EVIDENCE_STORE_CRATE.md` L14-15), AES-256-GCM templates, `PreferIr` default and no emitter
+  control (`Docs/CAMERA_V4L_CRATE.md`), IR gate (`crates/vision/src/ir_liveness.rs`), single 2.7x
+  crop, screenshot source commit `a3cae16` (#392, last change to `Docs/assets/screenshots`). PASS.
+- **Docs edits.** `Docs/REMOTE_COMPANION.md` headings "off by default, on after
+  `scripts/setup.sh`" for 2a/2c/2d/2f/2j and the Funnel paragraph agree with config.rs and setup.sh;
+  `Docs/README.md` and `Docs/DEVELOPMENT_WORKFLOW.md` §10 list the same section order as the README.
+  PASS, with finding 1 (stale ADR sentence) and suggestion 4.
 
 ### PAM Concurrency & Deadlines
-No `crates/pam` change. The README describes the deadline as `timeout_ms`, default 1000 ms, which
-matches the ADR → PASS.
+
+No production code changed. The README restates the deadline (`timeout_ms`, default 1000 ms) and
+"no Tokio" correctly. PASS (not applicable).
 
 ### Panic Safety & Fail-Closed
-No production code. The README never claims a path from an error to `PAM_SUCCESS`; it says only a
-fresh `Allow` becomes `PAM_SUCCESS` → PASS.
+
+No production code changed. The README never implies an error path leads to `PAM_SUCCESS`
+("Only a fresh `Allow` for your UID becomes `PAM_SUCCESS`"). The test module uses `expect` /
+`unwrap_or` only in test code. PASS.
 
 ### Test Integrity & Anti-Weakening
-- RDM10 reads the byte-equal setup fixture, so the wording check follows the defaults. The fixture
-  is also pinned by `setup_user_phase_contract` and `crates/remote/tests/setup_render_tests.rs`. A
-  missing fixture panics in `read`, so the test does not pass silently. The early return when no
-  exposure key is `true` is intended: the wording rule only applies while setup turns these keys on.
-- Mutation reasoning: adding "Remote unlock is off by default" or "opt-in live camera view" to any
-  paragraph, table row or Mermaid line fails RDM10 (helpers RDM11 show this). Dropping `remote.toml`,
-  `passkey`, `soos-gui`, `scripts/setup.sh` or any exposure key from the security section fails it. A
-  camera view over Tailscale that does not name Funnel fails it. The "auto-unlock" stripping and the
-  "camera snapshots" exclusion stop false positives on presence and evidence → sound.
-- Limitation (not a defect): RDM10 cannot catch an inaccurate statement about **which** switches
-  soos-gui has (finding 3), and it checks only README.md, not `Docs/REMOTE_COMPANION.md` (finding 5).
+
+- RDM10 scenarios: replacing README L56 with "remote unlock (opt-in)" or the old diagram label
+  "opt-in unlock" -> `calls_exposure_opt_in` flags it (helper asserts cover both). Dropping
+  "Funnel" from the FAQ camera paragraph -> `camera_view_omits_funnel` flags it. Removing
+  `remote.toml`, `soos-gui`, `passkey` or any of the four keys from the security section -> needle
+  assertion fails. The test fails against plausible wrong text. PASS.
+- `auto-unlock` is stripped before matching, so "presence auto-unlock ... opt-in" does not
+  false-positive; the snapshot and polkit opt-in lines are correctly excluded (helper asserts). PASS.
+- The early `return` when the fixture sets no exposure key is by design (the wording rule follows
+  the defaults); the fixture is byte-pinned to the setup render by `setup_user_phase_contract` and
+  `crates/remote/tests/setup_render_tests.rs`, so it cannot drift silently. See suggestion 3.
+- Coverage gap: RDM10 does not check the alert keys; see suggestion 2.
 
 ### Memory, Bounds & Secrets
-No runtime code. No real face, login or host name: the fixture and README use `example.com` and
-`tail1234` placeholders → PASS.
+
+The test reads repository files only. The README states no password, frame or embedding ever
+crosses IPC or logs, consistent with the invariants. No secret, real host name or real login
+appears (examples use `example.com` and `tail1234.ts.net`). PASS.
 
 ### Supply Chain & Automation
-No `Cargo.*`, `deny.toml`, `.github/` or script change. The new module uses std only → PASS.
-Mergeability: `git merge-tree origin/main HEAD` reports conflicts in `AI/DECISIONS.md` and
-`AI/candid_review_report.md` → finding 2.
+
+No `Cargo.*`, `deny.toml`, `.github/`, `scripts/` or hook change. Badges point to the existing
+workflows `ci.yml` and `fuzz.yml` (RDM3). PASS.
 
 ### English-Only Policy
-All added text is English → PASS.
+
+All added text is English. PASS.
 
 ## 4. Detailed Findings & Action Items
 
-1. **[MAJOR]** `README.md:54` (also `README.md:369-371`, FAQ) — The Features row says "GNOME Shell
-   and KDE Plasma adapters come later", and the FAQ says the widget supports only swaylock-plugin and
-   hyprlock. PR #407 (`soos-lockscreen@soos` GNOME Shell extension, `Docs/LOCKSCREEN_WIDGET.md` §11) is
-   merged on `origin/main` (`e216ac1`). This now breaks the rule of ADR item (3) that every merged
-   feature is described truthfully. Fix after the rebase: list GNOME Shell (45 or later, system
-   extension) as supported, and keep only KDE Plasma as "later".
-2. **[MAJOR]** branch vs `origin/main` — The branch conflicts with `origin/main` `e216ac1` in
-   `AI/DECISIONS.md` (both append a 2026-10-17 ADR at the end) and `AI/candid_review_report.md`. The
-   PR cannot be merged as it is. Fix: rebase onto `origin/main`, keep both ADRs, then run a new
-   candid review (the fingerprint will change).
-3. **[MINOR]** `README.md:96-97` — "with every feature on (each can be turned off later in
-   soos-gui)" is wrong for `password_alerts`. No `RemoteSwitch` exists for it
-   (`feature_control.rs:86-121`), and README line 55 and ADR item (7) both say so. The only soos-gui
-   route is stopping the whole companion. Fix: "with every feature on (all but the failed-password
-   alerts can be turned off later in soos-gui, and every key in `remote.toml`)". No existing contract
-   pins this sentence (`setup_contract.rs:234-242` only checks the position of `./scripts/setup.sh`),
-   and #402 is merged, so the "byte-identical for #402 rebase" reason of ADR item (2) no longer
-   applies.
-4. **[MINOR]** `README.md:35` — "A kill switch turns soos off at once" overstates it.
-   `/etc/soos/disabled` stops face PAM and presence auto-unlock, but `soos-remote` does not read it,
-   so passkey remote unlock and the camera view of a set-up companion keep working. Fix: "A kill
-   switch turns face unlock off at once", as the accurate Security model bullet at line 280 says.
-5. **[SUGGESTION]** `Docs/REMOTE_COMPANION.md:123, 258, 349, 594, 985, 174` (outside the diff) — The
-   headings still say "(opt-in)" and §2b says the default stays tailnet-only. That now contradicts the
-   setup defaults the README states. A follow-up should align the doc, or extend RDM10 to it.
-6. **[SUGGESTION]** `README.md:56` — The link "§2j" is ambiguous: `Docs/REMOTE_COMPANION.md` has two
-   `## 2j` headings (lines 985 and 1063, pre-existing). Renumber the Android section in a follow-up.
+1. **[MINOR]** `AI/DECISIONS.md:149` (item (2) of the new ADR) — states that "the `setup.sh`
+   paragraph stays byte-identical so the open PR #402 rebases without conflict", but the branch
+   changed that paragraph (README L97-98: "each can be turned off later in `remote.toml`, and all
+   but the failed-password alerts in soos-gui"; the change itself is correct, since the old text
+   implied every feature had a soos-gui switch), and #402 is already merged. Reword item (2): the
+   paragraph keeps its pinned substrings and was corrected for the soos-gui switch list.
+2. **[SUGGESTION]** `tests/invariants/src/readme_contract.rs:681` — `COMPANION_EXPOSURE_KEYS`
+   covers only Funnel, unlock and the camera view; setup also turns `password_alerts`,
+   `push_notifications` and `offline_alerts` on, yet a README sentence calling the failed-password
+   or push alerts "opt-in" would pass, although `Docs/DEVELOPMENT_WORKFLOW.md` §10 asks the README
+   to describe all companion defaults as setup writes them. Optional follow-up as a new test.
+3. **[SUGGESTION]** `tests/invariants/src/readme_contract.rs:692` — `keys_set_true` matches only
+   `key = true` with nothing after the value; if setup ever wrote an inline comment, RDM10 would
+   return early and pass vacuously. Consider asserting that the fixture yields at least one key
+   while `scripts/setup.sh` lists them in `COMPANION_KEYS`.
+4. **[SUGGESTION]** `Docs/REMOTE_COMPANION.md:123` (also 259, 350, 595, 986) — "on after
+   `scripts/setup.sh`" holds only when setup runs the companion phase (Tailscale login and `rp_id`
+   given, no `--no-remote`); the camera view also needs the daemon `[preview]` section, which setup
+   creates only when `daemon.toml` is absent (the README FAQ already says so). A short qualifier
+   would make this explicit.
+5. **[SUGGESTION]** `README.md:98` — the reworded line is about 150 characters, wider than the
+   surrounding wrap; cosmetic only.
 
 ## 5. Final Verdict
 
-Two MAJOR findings (1, 2): the README describes the now-merged GNOME Shell extension as future work,
-and the branch conflicts with `origin/main`. Rebase, fix findings 1–4, then run a new review.
+No CRITICAL or MAJOR finding. Every README claim checked matches `origin/main`; the new tests are
+sound and no existing test changed; the ADR register only gains one appended line.
 
-**VERDICT: CHANGES_REQUESTED**
+**VERDICT: APPROVED**
