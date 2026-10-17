@@ -2,8 +2,8 @@
 
 - **Date**: 2026-10-17
 - **Target Branch**: `fix/lock-widget-memory`
-- **Base (merge-base)**: `9e82795`
-- **Reviewed-Diff-Fingerprint**: `52c4e90d3c9bc15178c867d1778632db6a85c24aeccf8bc0137562303c0fa4c1`
+- **Base (merge-base)**: `6eb0746` (rebased from `9e82795`; `origin/main` gained only #411)
+- **Reviewed-Diff-Fingerprint**: `f2b3b47150c328630d51ebd61599c1ab0d0fa6660f3f55f2323b99713229f01e`
 - **Audited Files**: `AI/DECISIONS.md`, `AI/VERIFICATION_MATRIX.md`, `AI/architect_spec_lock_widget_memory.md`,
   `AI/auditor_constraints_lock_widget_memory.md`, `AI/tester_contract_lock_widget_memory.md`,
   `AI/walkthroughs/218_lock_widget_memory.md`, `Docs/LOCKSCREEN_WIDGET.md`, `crates/lock-widget/src/layout.rs`,
@@ -17,6 +17,32 @@ second one only when every allocated buffer is still held by the compositor (at 
 (`buffer_len` rounded up to 64). The change is confined to one user-level, seat-less, `forbid(unsafe_code)`
 crate with no PAM, IPC or daemon impact. No defect of MAJOR or CRITICAL severity was found; no pre-existing
 test was touched.
+
+This report re-reviews the branch after its rebase onto `origin/main` `6eb0746` (#411: daemon tests LRR1-LRR3
+pinning the `LockState` refusal on the auth-reserved connection, their DECISIONS clarification, matrix rows and
+walkthrough 217). The previous report (fingerprint `52c4e90d…`, base `9e82795`) was APPROVED; its findings are
+carried forward below.
+
+### Rebase verification
+
+- `git range-diff 9e82795..6c6e86d 6eb0746..HEAD`: the fix commit and the review commit map one-to-one; the only
+  differences are the `AI/DECISIONS.md` context lines shifted by main's #411 entry and the regenerated
+  `AI/candid_review_report.md` / `AI/plan_evaluator_report.md` (whose diff base changed with main).
+- Per-file comparison of the added/removed lines against the old and the new merge base: identical for
+  `AI/VERIFICATION_MATRIX.md`, `AI/architect_spec_lock_widget_memory.md`,
+  `AI/auditor_constraints_lock_widget_memory.md`, `AI/tester_contract_lock_widget_memory.md`,
+  `AI/walkthroughs/218_lock_widget_memory.md`, `Docs/LOCKSCREEN_WIDGET.md`, `crates/lock-widget/src/layout.rs`,
+  `crates/lock-widget/src/wayland.rs` and `crates/lock-widget/tests/lock_widget_buffer_tests.rs`. The code under
+  review is byte-identical to the previously approved diff.
+- `AI/DECISIONS.md`: the changed lines (`^[-+]*` hunks) hash identically before and after the rebase
+  (`f81040ef…`), and main's original #401 line is unchanged between `9e82795` and `6eb0746` (`8c8d9bf4…`), so
+  the amendment applies to the same text. The file holds exactly one #401 entry (line 144, carrying the
+  "*(amended 2026-10-17 by ADR "Lazy Second Shared-Memory Buffer of soos-lock-widget" …)*" note), main's
+  "Clarification — Where `LockState` Is Refused on the Auth-Reserved Connection" entry (line 145, untouched) and
+  this branch's ADR (line 146), one occurrence each. The post-rebase amend `47dea16` → `6982101` only removed the
+  stale duplicate copy of the #401 entry.
+- Main's #411 changes are absent from the frozen patch (they are part of the base), so no daemon, protocol or
+  PAM file is in this diff; #411 touches only daemon tests and docs and does not interact with the widget.
 
 ## 2. Test Changes
 
@@ -78,7 +104,11 @@ Mechanical listing from `target/candid_diff.patch`:
 ### English-Only Policy
 - All code, comments, docs, ADR, matrix rows and the commit message are in English. PASS.
 
-### Commands re-run (scoped, mandated environment, `--test-threads=3`)
+### Commands re-run after the rebase (mandated environment, `--test-threads=4`)
+- `cargo test --locked -p soos-lock-widget -p soos-invariants -- --test-threads=4`: exit 0, 752 passed, 0
+  failed, 0 ignored (invariants 707; lock-widget buffer 7, CLI 5, render 16, scene 17).
+
+### Commands run before the rebase (scoped, mandated environment, `--test-threads=3`)
 - `cargo test -p soos-lock-widget --locked`: all suites green (7 new LKA18 tests plus the LKA8/LKA9/LKA12/LKA13
   suites).
 - `cargo clippy -p soos-lock-widget --locked --all-targets -- -D warnings`: clean.
@@ -90,8 +120,9 @@ Mechanical listing from `target/candid_diff.patch`:
 - **[MINOR]** `crates/lock-widget/src/wayland.rs` (`draw_all`) — on a host where the second `SlotPool::new`
   keeps failing while the compositor holds the first buffer, a memfd creation is attempted on every 33 ms retry
   tick. It is bounded by the existing timer and leaves no lasting side effect; no change required.
-- **[SUGGESTION]** `AI/walkthroughs/218_lock_widget_memory.md` — numbers 215 to 217 are absent on this branch
-  (presumably reserved by parallel branches); the invariants suite accepts the gap.
+- **[SUGGESTION]** `AI/walkthroughs/218_lock_widget_memory.md` — after the rebase, 217 (#411) is present and
+  numbers 213, 215 and 216 are still absent (presumably reserved by parallel branches); the invariants suite
+  accepts the gap.
 
 ## 5. Final Verdict
 
