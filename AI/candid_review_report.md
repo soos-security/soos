@@ -1,163 +1,110 @@
 # Candid Review Report
 
-- **Date**: 2026-10-18
-- **Target Branch**: `feat/android-onboarding-tour`
-- **Base (merge-base)**: `54adaed` (= `origin/main` after `git fetch origin`, includes #426 and #422; previous base `74782b8`)
-- **Reviewed-Diff-Fingerprint**: `07228264ec3bbec0b3e14a75acbcd57f91f1f41c868680259df1e3b180c3121b`
-- **Audited Files**: `AI/DECISIONS.md`, `AI/VERIFICATION_MATRIX.md`, `AI/architect_spec_android_onboarding_tour.md`, `AI/auditor_constraints_android_onboarding_tour.md`, `AI/walkthroughs/230_android_onboarding_tour.md`, `Docs/REMOTE_COMPANION.md`, `android/app/src/main/java/org/soos/remote/data/SettingsStore.kt`, `android/app/src/main/java/org/soos/remote/tour/Tour.kt`, `android/app/src/main/java/org/soos/remote/ui/SoosApp.kt`, `android/app/src/main/java/org/soos/remote/ui/TourCard.kt`, `android/app/src/main/res/values/strings.xml`, `android/app/src/test/java/org/soos/remote/TourControllerTest.kt`, `tests/invariants/src/android_tour_contract.rs`, `tests/invariants/src/lib.rs`
+- **Date**: 2026-10-17
+- **Target Branch**: `chore/companion-wording`
+- **Base (merge-base)**: `74782b8`
+- **Reviewed-Diff-Fingerprint**: `e32864ec11f16a7713afad0527313705361fab344ac0b0a1f76e70a88a5f673d`
+- **Audited Files**: `AI/ARCHITECTURE.md`, `AI/VERIFICATION_MATRIX.md`, `AI/architect_spec_companion_wording.md`,
+  `AI/auditor_constraints_companion_wording.md`, `AI/walkthroughs/228_companion_wording.md`,
+  `Docs/PACKAGING_AND_PROVISIONING.md`, `Docs/REMOTE_COMPANION.md`, `README.md`, `scripts/setup.sh`,
+  `tests/invariants/src/companion_wording_contract.rs`, `tests/invariants/src/lib.rs`
 
 ## 1. Executive Summary
 
-Re-review after the rebase of the branch from `74782b8` onto `origin/main` `54adaed`, which
-gained #426 (`crates/gui/tests/store_task_tests.rs` wait helper, matrix DGS1-DGS2, walkthrough
-226) and #422 (Android alerts acknowledgement feedback: `alerts/AlertsFeedback.kt`,
-`SoosApp.kt` refresh/acknowledge rewrite, invariant `android_alerts_feedback_contract`,
-walkthrough 227, `Docs/REMOTE_COMPANION.md` owner check).
-
-Rebase integrity: `git range-diff 74782b8..66b36bc 54adaed..bd16875` shows only context-line
-changes (the hunk anchors moved past the DGS rows, the `android_alerts_feedback_contract` module
-and the #422 owner-check step). `git diff --numstat` of the feature commit is identical before
-and after (15 files), and the SHA-256 of the added/removed lines of every file is identical
-before and after (15/15 "same"). The branch's own changes are therefore unchanged.
-
-Semantic interaction: the only file both #422 and this branch touch is `SoosApp.kt`. The merged
-`HomeScreen` keeps the #422 `refresh(carried)` / `acknowledge` / `AlertsFeedback.afterRefresh`
-logic byte-for-byte; the tour only adds parameters, the `homeReady`/`tourShown` guards, one
-`BackHandler`, the shared `scroll` state and two composables at the top and bottom of the column.
-It reads no alerts state and calls no API. #426 touches only `crates/gui/tests` and has no
-overlap. `cargo test --locked -p soos-invariants -- --test-threads=3` on the rebased tree:
-782 passed, 0 failed, including `android_alerts_feedback_contract`, `remote_tour_contract`
-and the 8 `android_tour_contract` tests.
-
-The original content review (below) still holds for the unchanged branch diff: a first-run
-feature tour for the native Android app: a pure-Kotlin step model and
-controller (`tour/Tour.kt`), a Compose card (`ui/TourCard.kt`), 50 fixed `strings.xml`
-resources, one Boolean `tour_seen` in the existing private `SettingsStore`, home-screen wiring
-in `SoosApp.kt`, the JVM tests, and a static Rust contract (`android_tour_contract`, 8 tests).
-No server, PAM, daemon, manifest or dependency change. No CRITICAL or MAJOR finding; two MINOR
-and one SUGGESTION.
+Wording-only change (GitHub #423): the `setup.sh` help and closing companion summary, the README security
+model, `Docs/REMOTE_COMPANION.md` §2b, `Docs/PACKAGING_AND_PROVISIONING.md` "Defaults" and two
+`AI/ARCHITECTURE.md` companion table row headers now match the code: `soos-gui` (Features) has switches only for
+`allow_unlock`, `allow_funnel`, `push_notifications`, `camera_view` and `offline_alerts`
+(`crates/gui/src/feature_control.rs` `RemoteSwitch::key`), so the failed-password alerts are turned off with
+`--password-alerts off` or in `remote.toml`. A new std-only invariant module (CWD1–CWD5) locks the wording.
+No runtime code, shell logic, option, exit code or dependency changes. No pre-existing test assertion is
+removed or changed. No MAJOR or CRITICAL finding.
 
 ## 2. Test Changes
 
-Mechanical listing of the frozen patch:
+Mechanical listing on the frozen patch:
 
-- Test files touched: `android/app/src/test/java/org/soos/remote/TourControllerTest.kt` (new),
-  `tests/invariants/src/android_tour_contract.rs` (new), `tests/invariants/src/lib.rs`
-  (+10 lines: one doc comment and one `#[cfg(all(test, unix))] mod android_tour_contract;`).
-- `grep '^-[^-].*(assert|#[test]|@Test)'`: **no match**. No line was removed from any test.
-- `git diff 54adaed --stat -- tests 'crates/*/tests' android/app/src/test`: 3 files, 1184
-  insertions, 0 deletions (identical to the pre-rebase count).
-- No new `#[ignore]`, `@Ignore`, `should_panic`, tolerance or epsilon.
+- Test files touched: `tests/invariants/src/companion_wording_contract.rs` (new), `tests/invariants/src/lib.rs`
+  (one new `#[cfg(all(test, unix))] mod companion_wording_contract;` declaration with a doc comment).
+- Removed/changed check lines (`^-` with `assert`/`#[test]`/...): one hit, patch line 17, which is the
+  removed `AI/ARCHITECTURE.md` "Unlock (opt-in)" table row (the word "assertion" in prose), not a test.
+- New escape hatches (`#[ignore]`, `should_panic`, `tolerance`, `epsilon`, `cfg(any())`): none.
+- Inline `mod tests` changes: none.
+- `git diff 74782b8 HEAD -- tests 'crates/*/tests' android/app/src/test`: 281 insertions, 0 deletions.
 
-No pre-existing assertion was removed or changed; #426's `store_task_tests` and #422's
-`AlertsFeedbackTest` / `android_alerts_feedback_contract` are untouched by this branch.
-
-Duplicate check: `AI/DECISIONS.md` holds exactly one "Phone Onboarding Tour in the Native
-Android App" ADR; the matrix gains exactly one new `## Component` section (173 on main, 174
-after) with ATR1-ATR9 each present once; no matrix row id is duplicated; walkthrough numbers
-226, 227 and 230 are distinct.
+Verdict: additions only; no pre-existing assertion of `origin/main` modified, weakened or deleted.
 
 ## 3. Deep Reasoning Audit
 
 ### Logic & Architecture
 
-- `TourController.offer`: no-op unless `statusShown`, not yet offered and not open; else opens
-  iff `!store.tourSeen`. Tried: offer while already open (no-op), offer after close (no-op, no
-  store read), offer with `seen = true` (marked offered, stays closed). PASS.
-- `next` on the last step calls `close` (Done remembers); `back` stops at index 0; `close` on a
-  closed tour writes nothing. Index is always 0..LAST by construction; `step`/`number` clamp
-  defensively. PASS.
-- Wiring: `LaunchedEffect(homeReady, status != null)` offers only once a status view exists and
-  `auth.authenticated` is true; `tourShown = open && homeReady`, so a sign-out or the Funnel
-  sign-in state hides the card and disables the `BackHandler`. Settings screen never renders it
-  (separate branch of `SoosApp`). The replay button is under the same `homeReady` guard, last in
-  the column ("at the bottom of the home screen" is accurate); the card is first in the column
-  and `scroll.scrollTo(0)` runs when it appears ("at the top" is accurate). PASS.
-- Scenario (after #422): a refused acknowledgement triggers `refresh(carried)`; a Funnel
-  session expiry sets `auth.authenticated = false` and `status = null`, so `tourShown` turns
-  false and the card and `BackHandler` go away; after a new sign-in `status != null` re-runs
-  the offer effect, which is a no-op because `offered` is already true. PASS.
-- Scenario: tour open, user opens Settings and returns: `tourState` lives in `SoosApp`, so the
-  tour resumes at the same step without writing the flag. Acceptable.
-- Scenario: rotation / process death: `remember` (not `rememberSaveable`) loses the open state;
-  the tour is re-offered from the introduction if never closed. No configChanges in the
-  manifest. Acknowledged in walkthrough 230 (P-2). MINOR, see 4.
+- Claim "Funnel, remote unlock, push, offline alerts and the camera view can be turned off later in soos-gui
+  (Features), which also turns off the features that need them": checked against `RemoteSwitch::key` and
+  `RemoteSwitch::keys_to_clear` (Funnel → `camera_view_funnel`, Push → `offline_alerts`, Camera view →
+  `camera_view_funnel`). PASS. `[android]` (needs `allow_funnel`) is never written by `setup.sh` (grep), so
+  the help sentence is accurate for setup-managed files.
+- Claim "set password_alerts, push_notifications and offline_alerts to false in remote.toml": consistent with
+  `crates/remote/src/config.rs` (`push_notifications requires password_alerts`, `offline_alerts requires
+  push_notifications`, exit 78). PASS.
+- Closing summary "run setup again with --password-alerts off": `resolve_features` sets `password_alerts`
+  false and cascades push and offline alerts to false via `FEATURE_PREREQS` ("needs password alerts"); the
+  line is printed only for a setup-managed configuration, since `print_companion_guide` returns early when
+  `CONFIG_ACTION == kept` (user-written file, which setup never edits). PASS.
+- `Docs/REMOTE_COMPANION.md`: `allow_funnel` code default is `file.allow_funnel.unwrap_or(false)` and Funnel
+  requests are `403` while it is false; `setup.sh` `COMPANION_KEYS` includes `allow_funnel` default true. PASS.
+- `AI/ARCHITECTURE.md` "Push sender" / "Unlock" headers "off by default in code; on with `scripts/setup.sh`":
+  `push_notifications.unwrap_or(false)`, `allow_unlock` default false; setup writes both true and enables
+  `soos-push-sender.service` with push. Cell text byte-identical apart from the header. PASS.
+- README: "turning push off also sets `offline_alerts` to `false`" matches `keys_to_clear(Push)`. PASS.
+- `--help` rendered (`bash scripts/setup.sh --help`): the new paragraph prints with no expansion artefact; the
+  heredoc text contains no `$` or backtick. `bash -n` passes. PASS.
 
 ### PAM Concurrency & Deadlines
 
-Not applicable: no change in `crates/pam` or any blocking PAM path. PASS.
+No change under `crates/pam` or any runtime crate. Not applicable; PASS.
 
 ### Panic Safety & Fail-Closed
 
-- Kotlin: `TourStep.entries[index.coerceIn(0, LAST)]` cannot go out of bounds; the `when (step)`
-  map is exhaustive (compile-time). `stringResource(R.string.tour_step_counter, number, TOTAL)`
-  matches `%1$d`/`%2$d`. No `!!`. PASS.
-- No authorization path is touched; the tour calls no action, so it cannot produce an unlock or
-  lock. PASS.
+No production code changed. The new test module uses `expect`/`panic!` under an explicit test-only
+`#![allow(...)]`, consistent with the other invariant modules. PASS.
 
 ### Test Integrity & Anti-Weakening
 
-- Additions only (section 2).
-- `TourControllerTest` would fail against plausible wrong implementations: writing the flag on
-  open, re-offering after close, Done not remembering, Back past the introduction, replay not
-  resetting the index, a closed tour reacting to Next. Read/write counters on the fake store
-  pin "only close writes". I checked that it compiles against the code as written (Kotlin
-  2.2.21, `entries`, `var` destructuring, `assertSame` on the unchanged state instances).
-  It runs only in CI (no JDK on the host; `java`/`gradle` not found) — noted, not a finding.
-- `android_tour_contract` re-run on the rebased tree: 8/8 pass (782/782 invariants), including byte-equality of the eight shared
-  steps with `TOUR_STEPS` of `crates/remote/assets/app.js` after decoding Android escapes.
-  PASS.
+- See §2: additions only.
+- New tests can fail on a plausible wrong state: CWD5 proves the detector flags the old sentence of both the
+  help and the summary; CWD2 fails if a `password_alerts` switch is added (forcing the help to be updated);
+  CWD3 checks exactly one "Push sender" and one "Unlock" row and that the Unlock row keeps `default \`false\``.
+- Scoped run: `cargo test -p soos-invariants -- --test-threads=3` → 776 passed, 0 failed (CWD1–CWD5 included,
+  SET and RDM contracts green). `cargo clippy -p soos-invariants --all-targets -- -D warnings` clean;
+  `cargo fmt --check -p soos-invariants` clean. PASS.
 
 ### Memory, Bounds & Secrets
 
-- Storage: one Boolean `tour_seen` in the existing `MODE_PRIVATE` `soos_settings` file. No
-  credential, session cookie, server data or PC address is read by the tour code. Nothing is
-  logged. No new I/O, no network. PASS.
+No new I/O beyond test-time reads of repository files. No password, identity, frame or embedding appears in
+new text (the help names configuration keys only). PASS.
 
 ### Supply Chain & Automation
 
-- No `Cargo.*`, Gradle catalog, `verification-metadata.xml`, manifest, `.github/` or script
-  change. `androidx.activity.compose.BackHandler` comes from the already-declared
-  `activity-compose` 1.11.0. PASS.
+`scripts/setup.sh` changes only a heredoc paragraph and one quoted `info` string: no command, variable,
+option or exit code changed; no new command word (SET2/SET3 green). No `Cargo.*`, workflow or hook change.
+PASS.
 
 ### English-Only Policy
 
-- Patch grepped for non-ASCII French accents: none. Commit subject
-  `feat(android): add the first-run feature tour to the native app` is English, one scope,
-  under 72 characters. PASS.
-
-### Factual Accuracy of Doc and String Claims
-
-Verified against the code:
-
-- "every 15 minutes", "one alert after two failed checks in a row": `Heartbeat.kt`
-  (15 min period, `FAILURES_BEFORE_ALERT = 2`), and the same sentence in the Settings card. TRUE.
-- "Settings, then the PC offline alerts switch": `HeartbeatCard` is in `SettingsScreen`, title
-  "PC offline alerts". "only then asks to show notifications": the permission prompt runs only
-  when the switch is turned on. TRUE.
-- "Password alerts card of the home screen": `alerts_title` = "Password alerts". TRUE.
-- "Lock PC on the home screen": the `Lock PC` button exists. TRUE.
-- "remove its [android] table": `config.rs` refuses `[android]` without `allow_funnel`
-  (exit 78). "Without an [android] table, Features in soos-gui does the same": GUI
-  `RemoteSwitch::Funnel` clears `allow_funnel` and `camera_view_funnel`. TRUE.
-- Push and camera where lines: `PUSH_DISABLE_LABEL = "Disable notifications"`,
-  `CAMERA_STOP_LABEL = "Stop camera view"` in `app.js`; GUI `Push` clears
-  `push_notifications` and `offline_alerts`. TRUE.
-- `battery_status` key exists (`config.rs`). The app shows no battery, unlock, push or camera
-  view (checked `HomeScreen`). TRUE.
-- Docs counter "Step 1 of 10" to "Step 10 of 10": `TOTAL = 10`. TRUE.
+All new text in English. Commit subject `chore(docs): align companion off-switch and opt-in wording`
+(one scope, 59 characters). PASS.
 
 ## 4. Detailed Findings & Action Items
 
-- **[MINOR]** `android/app/src/main/java/org/soos/remote/ui/SoosApp.kt:82` — `tourState` uses
-  `remember`, so an open tour is lost on rotation or process recreation and re-offered from the
-  introduction if never closed. Matches the other screen state and is documented (walkthrough
-  230, P-2); a `rememberSaveable` with a `Saver` would keep the step. No action required.
-- **[MINOR]** `android/app/src/main/res/values/strings.xml:72` — "In this app, Sign out ends
-  this phone's session" while the Sign out button is shown only in Funnel mode and signed in.
-  Not wrong (there is no app session to end over the tailnet), but could say "over Funnel".
-- **[SUGGESTION]** The byte-equal shared texts say "this page" inside the native app. Accepted
-  by design (ADR item (2), P-1); listed only for the owner check ATR9.
+- **[SUGGESTION]** `Docs/PACKAGING_AND_PROVISIONING.md:97` — "each can be switched off later in soos-gui
+  except the failed-password alerts": camera view over Funnel (`camera_view_funnel`) has no switch of its own
+  either; it goes off only through the Funnel or camera view switch. Accurate in effect, slightly imprecise.
+- **[SUGGESTION]** `AI/walkthroughs/228_companion_wording.md:28` — "`crates/remote/src/config.rs` (every key
+  defaults to `false`)": true for the companion feature keys, but `battery_status` defaults to `true`;
+  "every feature key" would be exact.
+- **[SUGGESTION]** `scripts/setup.sh:175` — "which also turns off the features that need them" does not
+  cover a manually added `[android]` table (needs `allow_funnel`; the GUI Funnel switch does not remove it).
+  Not written by setup, so out of this help's scope; pre-existing GUI behaviour.
 
 ## 5. Final Verdict
 
