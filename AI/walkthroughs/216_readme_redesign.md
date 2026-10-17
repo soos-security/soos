@@ -125,6 +125,8 @@ The full workspace gates run through `./save.sh` before the push.
 - PR #407 (GNOME Shell extension) merged during the review: the Features row and the FAQ name it, and
   only the KDE Plasma adapter is listed as later. `Docs/REMOTE_COMPANION.md` section headings 2a, 2c, 2d, 2f
   and 2j (offline history) and the Funnel paragraph of 2b now say "off by default, on after `scripts/setup.sh`".
+- PR #406 (Android failed-password alerts) merged before the push: the Android row lists them and says that
+  unlock and the camera view stay in the web app.
 - Repository settings proposed in the PR body (description, topics, social preview) are applied by the owner.
 - The release-badge rule treats a CI clone without tags as untagged. A future release badge therefore needs a
   `CHANGELOG.md` or a tag fetched in CI.
