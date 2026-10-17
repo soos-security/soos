@@ -20,8 +20,11 @@ Supported hosts: Debian 12, Ubuntu 24.04, Fedora 40 / RHEL 9 and Arch Linux (x86
 `scripts/setup.sh` runs the steps below for you and reports each one as done, already done or skipped, so
 running it again is safe. It enrolls your face only from a local seat (from SSH it prints the command to run
 at the PC), stops `soos-daemon` during the enrollment (the daemon owns the camera) and starts it again. Presence
-auto-unlock stays on (`--presence off` turns it off). It does **not** activate PAM (step 4 stays explicit) and
-does not set up the phone companion yet. Details, flags and exit codes:
+auto-unlock stays on (`--presence off` turns it off). It does **not** activate PAM (step 4 stays explicit).
+With your Tailscale login and node name (`--tailscale-login you@example.com --rp-id mypc.tail1234.ts.net`, or
+asked interactively) it also sets up the phone companion as you, with every feature on (each can be turned off
+later in soos-gui), and prints the Tailscale and passkey steps it never runs itself; `--no-remote` skips it.
+Details, flags and exit codes:
 [`Docs/PACKAGING_AND_PROVISIONING.md`](Docs/PACKAGING_AND_PROVISIONING.md) §3.0.
 
 The manual procedure, step by step:

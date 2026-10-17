@@ -407,6 +407,16 @@ mod remote_offline_contract;
 #[cfg(all(test, unix))]
 mod setup_contract;
 
+/// One-command setup `scripts/setup.sh`, user phase: the phone companion profile written with
+/// the owner's default-on features, an explicit `false` kept, prerequisites cascaded, the daemon
+/// `[preview]` section created only when `daemon.toml` is absent, the companion installed and
+/// started as the user (never root), only `tailscale version` run, companion rollback with exit
+/// 5, and the `install_remote.sh` `CARGO_TARGET_DIR` fix (GitHub #400, PR 2 of #362; ADR
+/// 2026-10-15 "Setup User Phase: Phone Companion Profile With Default-On Features"; spec
+/// AI/architect_spec_setup_user_phase.md; rows SET20-SET39).
+#[cfg(all(test, unix))]
+mod setup_user_phase_contract;
+
 /// Distribution build against the system ONNX Runtime: feature tables, MSRV, resolved feature
 /// graphs, daemon CPU execution provider check order, offline Arch CI job, PAM isolation and
 /// documentation (GitHub #375, PR 1 of #361, ADR 2026-10-13 "Distribution Builds: System ONNX
