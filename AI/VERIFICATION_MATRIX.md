@@ -2686,6 +2686,19 @@ Native Kotlin + Jetpack Compose Android app foundation and the opt-in `[android]
 
 ---
 
+## Component: `android-alerts-feedback` (GitHub #420, part of #357, follow-up of #404 / PR #406, no backlog id, `fix/android-alerts-feedback`, walkthrough 227)
+
+Acknowledgement feedback of the alerts card in the native Android app (rows ANA18–ANA21 above). Android-only client fix, no server change, no new dependency or permission. The feedback decision is the pure helper `android/app/src/main/java/org/soos/remote/alerts/AlertsFeedback.kt`; its JVM unit tests run only in the CI job `Android (debug build)` (no JDK or Android SDK on the development host), the wiring of `ui/SoosApp.kt` is pinned statically.
+
+| # | Criterion | Test Method | Status |
+|---|---|---|---|
+| AAF1 | Feedback decision: a successful acknowledgement then any refresh shows no feedback; `stale_view` (and `rate_limited`) keeps its text after the follow-up refresh; a `login_required` refusal followed by a signed-out refresh shows the login-required text as the screen message; an unreachable acknowledgement shows the unreachable text; every refusal token selects a fixed feedback, an unknown or missing token the generic refusal; a signed-out refresh promotes only the login-required text, an unreachable refresh none | `android/app/src/test/java/org/soos/remote/AlertsFeedbackTest.kt::{aSuccessfulAckThenARefreshClearsTheFeedback,staleViewKeepsItsTextAfterTheFollowUpRefresh,loginRequiredThenASignedOutRefreshStillShowsTheLoginRequiredText,anUnreachableAckShowsTheUnreachableText,everyRefusalTokenSelectsAFixedFeedback,aSignedOutRefreshShowsOnlyTheLoginRequiredNotice}` (CI only) | ⬜ Pending CI run of `Android (debug build)` on the pull request |
+| AAF2 | The helper is pure (only `org.soos.remote.net` imports, no Android, resource, coroutine or logging API) and holds the token mapping; the four required JVM tests exist | `soos-invariants::android_alerts_feedback_contract::test_aaf_s1_pure_helper_and_jvm_tests` | ✅ Verified |
+| AAF3 | `HomeScreen` wiring: `refresh()` clears the feedback before any request and has a single exit that applies `AlertsFeedback.afterRefresh`; only `acknowledge()` carries its refusal into the follow-up refresh; the login-required notice reaches the screen message as a fixed `strings.xml` text; the feedback-to-text mapping is exhaustive; the *Acknowledge* rule (`pending && view.epoch != null`) is unchanged and documented as the web app's rule (`crates/remote/assets/app.js`); §2j, rows AAF1–AAF4 and walkthrough 227 | `soos-invariants::android_alerts_feedback_contract::{test_aaf_s2_home_screen_wiring,test_aaf_s3_docs_matrix_walkthrough}` | ✅ Verified |
+| AAF4 | Hardware (owner): "Acknowledged." disappears on *Refresh* and on pull to refresh; over Funnel, an *Acknowledge* after the web session expired hides the alerts card and shows "Your session ended. Sign in again." | Manual check (`Docs/REMOTE_COMPANION.md` §2j owner check of the alerts, step 5) | ⬜ Pending owner verification |
+
+---
+
 ## Component: `deflake-peer-limits` (GitHub #387, `test/deflake-peer-limits`, walkthrough 210)
 
 Synchronisation fix for the auth-reserve socket test of RSH5. Root cause: under CPU starvation, the idle held reserve outlived the daemon's 200 ms `AUTH_RESERVE_FIRST_REQUEST_TIMEOUT_MS` window before the second connection was admitted, so the second connection legitimately took the freed reserve. The daemon is correct and no production code changes. Test-only setup change: the two connections are opened back to back without yielding to the current-thread runtime. Every assertion is unchanged. GitHub-only issue: no backlog id, branch not registered, the commit carries `Closes #387`.

@@ -52,6 +52,9 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.soos.remote.R
+import org.soos.remote.alerts.AckFeedback
+import org.soos.remote.alerts.AlertsFeedback
+import org.soos.remote.alerts.RefreshOutcome
 import org.soos.remote.auth.PasskeyJson
 import org.soos.remote.auth.PasskeyOutcome
 import org.soos.remote.auth.PasskeySignIn
@@ -303,7 +306,7 @@ private fun HomeScreen(
     var refreshing by remember { mutableStateOf(false) }
     var alerts by remember { mutableStateOf<AlertsView?>(null) }
     var alertsFailed by remember { mutableStateOf(false) }
-    var ackFeedback by remember { mutableStateOf<Int?>(null) }
+    var ackFeedback by remember { mutableStateOf<AckFeedback?>(null) }
 
     fun clearAlerts() {
         alerts = null
@@ -324,19 +327,24 @@ private fun HomeScreen(
         }
     }
 
-    suspend fun refresh() {
+    /**
+     * Reloads the auth state, the status and the alerts. Every refresh drops the previous
+     * acknowledgement feedback first, so it never outlives the view it was about; [carried] is
+     * the refusal of the acknowledgement that asked for this refresh, shown again under the
+     * fresh view ([AlertsFeedback.afterRefresh]).
+     */
+    suspend fun refresh(carried: AckFeedback? = null) {
+        ackFeedback = null
         busy = true
         val authResult = withContext(Dispatchers.IO) { api.authState() }
         auth = (authResult as? ApiResult.Ok)?.value
-        if (authResult is ApiResult.Unreachable) {
+        val current = auth
+        val outcome = if (authResult is ApiResult.Unreachable) {
             status = null
             clearAlerts()
             message = "The PC is unreachable. Check Tailscale or Funnel."
-            busy = false
-            return
-        }
-        val current = auth
-        if (current != null && current.authenticated) {
+            RefreshOutcome.UNREACHABLE
+        } else if (current != null && current.authenticated) {
             when (val result = withContext(Dispatchers.IO) { api.status() }) {
                 is ApiResult.Ok -> {
                     status = result.value
@@ -352,10 +360,16 @@ private fun HomeScreen(
                 }
             }
             loadAlerts()
+            RefreshOutcome.AUTHENTICATED
         } else {
             status = null
             clearAlerts()
+            RefreshOutcome.SIGNED_OUT
         }
+        val shown = AlertsFeedback.afterRefresh(carried, outcome)
+        ackFeedback = shown.card
+        // Signed out, the alerts card is hidden: its login-required text becomes the message.
+        shown.notice?.let { message = activity.getString(ackFeedbackText(it)) }
         busy = false
     }
 
@@ -363,18 +377,16 @@ private fun HomeScreen(
         val epoch = view.epoch ?: return
         busy = true
         val result = withContext(Dispatchers.IO) { api.ackAlerts(epoch, view.through) }
-        ackFeedback = when (result) {
-            is ApiResult.Ok -> {
-                alerts = result.value
-                alertsFailed = false
-                R.string.alerts_ack_done
-            }
-            is ApiResult.Refused -> ackRefusalText(result.result)
-            ApiResult.Unreachable -> R.string.alerts_ack_unreachable
+        val feedback = AlertsFeedback.ofAck(result)
+        if (result is ApiResult.Ok) {
+            alerts = result.value
+            alertsFailed = false
         }
+        ackFeedback = feedback
         busy = false
-        // A refused acknowledgement shows the fresh view (never acknowledged blindly).
-        if (result !is ApiResult.Ok) refresh()
+        // A refused acknowledgement shows the fresh view (never acknowledged blindly) and keeps
+        // its fixed text under it.
+        if (AlertsFeedback.needsRefresh(result)) refresh(carried = feedback)
     }
 
     suspend fun signIn() {
@@ -519,16 +531,18 @@ private fun HomeScreen(
     }
 }
 
-/** Fixed text of a refused acknowledgement (the server token only selects it). */
+/** Fixed text of an acknowledgement feedback (a server token only selects the feedback). */
 @StringRes
-private fun ackRefusalText(result: String?): Int = when (result) {
-    "stale_view" -> R.string.alerts_ack_stale_view
-    "rate_limited" -> R.string.alerts_ack_rate_limited
-    "alerts_disabled" -> R.string.alerts_ack_disabled
-    "unavailable" -> R.string.alerts_ack_unavailable
-    "bad_request" -> R.string.alerts_ack_bad_request
-    "login_required" -> R.string.alerts_ack_login_required
-    else -> R.string.alerts_ack_refused
+private fun ackFeedbackText(feedback: AckFeedback): Int = when (feedback) {
+    AckFeedback.DONE -> R.string.alerts_ack_done
+    AckFeedback.STALE_VIEW -> R.string.alerts_ack_stale_view
+    AckFeedback.RATE_LIMITED -> R.string.alerts_ack_rate_limited
+    AckFeedback.DISABLED -> R.string.alerts_ack_disabled
+    AckFeedback.UNAVAILABLE -> R.string.alerts_ack_unavailable
+    AckFeedback.BAD_REQUEST -> R.string.alerts_ack_bad_request
+    AckFeedback.LOGIN_REQUIRED -> R.string.alerts_ack_login_required
+    AckFeedback.REFUSED -> R.string.alerts_ack_refused
+    AckFeedback.UNREACHABLE -> R.string.alerts_ack_unreachable
 }
 
 @StringRes
@@ -599,7 +613,7 @@ private fun recordText(record: AlertRecord): String {
 private fun AlertsCard(
     view: AlertsView?,
     failed: Boolean,
-    @StringRes feedback: Int?,
+    feedback: AckFeedback?,
     busy: Boolean,
     onAcknowledge: (AlertsView) -> Unit,
 ) {
@@ -670,6 +684,11 @@ private fun AlertsCard(
                         Text(recordText(record), style = MaterialTheme.typography.bodyMedium)
                     }
                 }
+                // Same rule as the web app (`crates/remote/assets/app.js`, `alertsAckButton`):
+                // shown while counts are pending and the view has an epoch, whatever the state.
+                // A `starting` or `unavailable` state with a book still acknowledges (200);
+                // without a book the server view is empty (no epoch, zero counts), so the button
+                // is already hidden, and `disabled` is excluded by `pending` (403 alerts_disabled).
                 if (pending && view.epoch != null) {
                     Button(
                         enabled = !busy,
@@ -678,7 +697,9 @@ private fun AlertsCard(
                     ) { Text(stringResource(R.string.alerts_acknowledge)) }
                 }
             }
-            feedback?.let { Text(stringResource(it), style = MaterialTheme.typography.bodyMedium) }
+            feedback?.let {
+                Text(stringResource(ackFeedbackText(it)), style = MaterialTheme.typography.bodyMedium)
+            }
         }
     }
 }
