@@ -144,18 +144,32 @@ fn test_set_s2_package_lists_come_only_from_check_build_deps() {
     }
 }
 
-/// SET3: this PR never touches PAM, Tailscale, the remote companion, the daemon `[preview]`
-/// section, the network lock, never downloads anything itself and never loosens a mode.
+/// SET3: setup.sh never touches PAM or the network lock, never runs a Tailscale command other
+/// than the read-only `tailscale version` (`serve` / `funnel` steps are only printed, inside a
+/// quoted message), never downloads anything itself and never loosens a mode.
+///
+/// Contract migration approved by the owner on 2026-10-15 (GitHub #400, part 2 of #362): the
+/// user phase may run `install_remote.sh`, write `remote.toml` and the daemon `[preview]`
+/// section, so those three words are no longer banned; the Tailscale rule now allows the word
+/// only as `tailscale version` or inside a quoted string. The executed-call check
+/// (`assert_no_forbidden_calls`) is unchanged.
 #[test]
 fn test_set_s3_no_pam_tailscale_remote_or_network_lock_action() {
     let code = setup_code();
     for line in code.lines() {
-        if let Some(pos) = line.replace("command -v tailscale ", "").find("tailscale ") {
-            let line = line.replace("command -v tailscale ", "");
+        let line_without_probe = line.replace("command -v tailscale ", "");
+        let mut search = 0;
+        while let Some(found) = line_without_probe[search..].find("tailscale ") {
+            let pos = search + found;
+            let before = &line_without_probe[..pos];
+            let quoted =
+                before.matches('"').count() % 2 == 1 || before.matches('\'').count() % 2 == 1;
             assert!(
-                line[pos..].starts_with("tailscale version"),
-                "only the read-only `tailscale version` is allowed: {line}"
+                quoted || line_without_probe[pos..].starts_with("tailscale version"),
+                "only the read-only `tailscale version` may run; other Tailscale commands may \
+                 only be printed inside a quoted message: {line}"
             );
+            search = pos + "tailscale ".len();
         }
         for banned in ["$EUID", "${EUID", "$UID", "${UID"] {
             assert!(
@@ -170,9 +184,6 @@ fn test_set_s3_no_pam_tailscale_remote_or_network_lock_action() {
         "gdm enable",
         "/pam.d",
         "network-lock install",
-        "install_remote.sh",
-        "[preview]",
-        "remote.toml",
         "curl ",
         "wget ",
         "chmod 666",
@@ -184,7 +195,7 @@ fn test_set_s3_no_pam_tailscale_remote_or_network_lock_action() {
     ] {
         assert!(
             !code.contains(forbidden),
-            "setup.sh must not contain '{forbidden}' in this PR"
+            "setup.sh must not contain '{forbidden}'"
         );
     }
     assert!(

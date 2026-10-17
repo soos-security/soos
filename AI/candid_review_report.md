@@ -1,191 +1,145 @@
 # Candid Review Report
 
-- **Date**: 2026-10-16
-- **Target Branch**: `feat/lockscreen-adapters`
-- **Base (merge-base)**: `2025738`
-- **Reviewed-Diff-Fingerprint**: `7db27bb19b70f1d398379f41c85b5a2b1c73dd5af803292bc0cdd0aa844d82d4`
-- **Audited Files**: `.agents/skills/dev-workflow/references/project-facts.md`, `AGENTS.md`, `AI/ARCHITECTURE.md`,
-  `AI/DECISIONS.md`, `AI/VERIFICATION_MATRIX.md`, `AI/architect_spec_lockscreen_adapters.md`,
-  `AI/auditor_constraints_lockscreen_adapters.md`, `AI/tester_contract_lockscreen_adapters.md`,
-  `AI/walkthroughs/214_lockscreen_adapters.md`, `Cargo.lock`, `Cargo.toml`, `Docs/DISTRIBUTION_DEPLOYMENT.md`,
-  `Docs/IPC_PROTOCOL.md`, `Docs/LOCKSCREEN_WIDGET.md`, `Docs/README.md`, `crates/lock-widget/Cargo.toml`,
-  `crates/lock-widget/src/{args,font,layout,lib,main,palette,raster,render,scene,wayland}.rs`,
-  `crates/lock-widget/tests/{lock_widget_cli_tests,lock_widget_render_tests,lock_widget_scene_tests}.rs`,
-  `crates/lockstatus/Cargo.toml`, `crates/lockstatus/src/{args,client,format,lib,main,motion,poll,shared,view}.rs`,
-  `crates/lockstatus/tests/common/mod.rs`,
-  `crates/lockstatus/tests/{lockstatus_cli_tests,lockstatus_client_tests,lockstatus_poll_tests,lockstatus_shared_tests,lockstatus_view_format_tests}.rs`,
-  `deny.toml`, `packaging/lockscreen/hyprlock-soos.conf`, `scripts/candid_review.sh`, `tests/invariants/src/lib.rs`,
-  `tests/invariants/src/lockscreen_adapters_contract.rs`
+- **Date**: 2026-10-17
+- **Target Branch**: `feat/setup-user-phase`
+- **Base (merge-base)**: `9e82795`
+- **Reviewed-Diff-Fingerprint**: `ae799ec64e580e631e2ac4741baf91c3c2dee199931077952513192fbfacaa55`
+- **Audited Files**: `.github/workflows/ci.yml`, `AI/DECISIONS.md`, `AI/VERIFICATION_MATRIX.md`, `AI/architect_spec_setup_user_phase.md`, `AI/auditor_constraints_setup_user_phase.md`, `AI/tester_contract_setup_user_phase.md`, `AI/walkthroughs/213_setup_user_phase.md`, `Docs/CI_CD_AND_SECURITY.md`, `Docs/PACKAGING_AND_PROVISIONING.md`, `Docs/REMOTE_COMPANION.md`, `README.md`, `crates/remote/tests/setup_render_tests.rs`, `scripts/install_remote.sh`, `scripts/setup.sh`, `tests/docker/setup_root_preview_test.sh` (untracked, new), `tests/fixtures/setup/remote.toml`, `tests/invariants/src/lib.rs`, `tests/invariants/src/setup_contract.rs`, `tests/invariants/src/setup_user_phase_contract.rs`
 
 ## 1. Executive Summary
 
-Independent review of the frozen patch (7 672 lines, 50 files), done without author context. The diff adds two
-user-level `#![forbid(unsafe_code)]` crates: `soos-lockstatus` (bounded blocking `RequestKind::LockState` client,
-per-user `flock` coordination in `$XDG_RUNTIME_DIR` with a 250 ms cache and a shared 1/2/4 s failure back-off,
-`--once` for hyprlock labels, `--watch` JSON lines) and `soos-lock-widget` (wlr-layer-shell background for
-`swaylock-plugin --command`, no seat, CPU rasterizer, bounded shared memory). The diff does not touch PAM, daemon or
-protocol code. No new crate enters `Cargo.lock` (two path packages only). No existing test or assertion is modified.
-The only change to an existing test file adds lines and removes none: two list entries and one module declaration.
+The frozen patch (merge-base `9e82795` to the working tree, 4631 lines) adds the phone-companion user
+phase to `scripts/setup.sh` (GitHub #400, PR 2 of #362): companion options, a strict `remote.toml`
+classifier (absent / untouched template / setup-managed / user), default-on feature resolution with the
+prerequisite cascade, a journaled companion rollback with exit 5, the root-half camera-view daemon side
+(`/etc/soos/daemon.toml` `[preview]` created only when absent, by hard link, restart + readiness gate,
+removal on failure with exit 1 or 70), and the `install_remote.sh` `CARGO_TARGET_DIR` fix. The newest,
+uncommitted part adds a privileged-systemd Docker harness `tests/docker/setup_root_preview_test.sh`
+that drives the unmodified `setup.sh` through the real `sudo` into the real `/etc` creation path, a
+required CI job `setup-root-preview` (in `CI Success` needs), the invariant
+`test_set_u24_root_preview_docker_job_wired_into_ci`, and matrix/docs updates.
 
-Re-run locally with the shared-RAM environment: `cargo test -p soos-lockstatus -p soos-lock-widget` (103 tests,
-all green), `cargo clippy -p soos-lockstatus -p soos-lock-widget --all-targets -- -D warnings` (clean),
-`cargo test -p soos-invariants lockscreen forbid_unsafe` (15 green, including
-`test_business_crates_forbid_unsafe_code`), `cargo fmt --all -- --check` (clean).
+Executed evidence (this review, not the author's): `bash tests/docker/setup_root_preview_test.sh`
+passed all eight cases (A1 A2 B C1 C2 D E1 E2) and the host sysctl guard; `cargo test -p soos-invariants`
+731 passed / 0 failed; `cargo test -p soos-remote --test setup_render_tests` 3 passed; ShellCheck
+(stable, all severities) on `setup.sh`, `install_remote.sh` and the new harness: clean.
 
-No CRITICAL, MAJOR or MINOR finding. Two SUGGESTIONS.
+No CRITICAL or MAJOR finding. Four MINOR/SUGGESTION items are listed in section 4.
 
-## 2. Test Changes (mechanical listing from step 3, with justification per change)
+## 2. Test Changes (mechanical listing from step 3)
 
-- Test files touched (`grep '^diff --git' | grep 'tests?[/_.]|/tests/|fixtures'`):
-  - New: `crates/lock-widget/tests/lock_widget_{cli,render,scene}_tests.rs`,
-    `crates/lockstatus/tests/common/mod.rs`, `crates/lockstatus/tests/lockstatus_{cli,client,poll,shared,view_format}_tests.rs`,
-    `tests/invariants/src/lockscreen_adapters_contract.rs`.
-  - Modified: `tests/invariants/src/lib.rs`. Additions only: a `#[cfg(all(test, unix))] mod lockscreen_adapters_contract;`
-    declaration, plus `"lockstatus"` and `"lock-widget"` appended to the `test_business_crates_forbid_unsafe_code` list.
-    This makes the invariant stricter.
-- Removed or changed checks (`^-[^-].*(assert|#[test]|#[tokio::test|proptest!|#[should_panic)`): **none**.
-- New escape hatches (`#[ignore`, `#[cfg(any())]`, `should_panic`, `tolerance`, `epsilon`): **none**.
-- Inline `mod tests` added or removed: **none**.
-- Conclusion: no test is weakened. The `scripts/candid_review.sh` `BUSINESS_CRATES` list gains the same two crates
-  and stays in sync with the invariant (checked by `test_lka12_both_crate_roots_forbid_unsafe`).
+Test files touched:
+- `crates/remote/tests/setup_render_tests.rs` (new): the setup render fixture and every cascade
+  variant parsed by the real `soos-remote` `parse_config`; one variant the cascade never writes is
+  refused. Additive.
+- `tests/docker/setup_root_preview_test.sh` (new, untracked): Docker harness, additive.
+- `tests/fixtures/setup/remote.toml` (new): fixture, byte-equal to the render (asserted in SET38).
+- `tests/invariants/src/lib.rs`: registers `setup_user_phase_contract`. Additive.
+- `tests/invariants/src/setup_user_phase_contract.rs` (new): SET20-SET39 contracts, including the new
+  `test_set_u24_root_preview_docker_job_wired_into_ci`. Additive.
+- `tests/invariants/src/setup_contract.rs`: **modified** `test_set_s3_no_pam_tailscale_remote_or_network_lock_action`.
+
+Removed/changed assertions (`^-` assert grep): none matched the grep, but the SET3 diff removes three
+banned needles (`install_remote.sh`, `[preview]`, `remote.toml`) and relaxes the `tailscale ` rule to
+"`tailscale version` or inside a quoted string". Justification: this is the scope change of the issue
+itself (the user phase must run `install_remote.sh` and write `remote.toml` / `[preview]`), recorded as
+an owner-approved contract migration in its own commit `e57c0e1` (verified byte-identical to the
+referenced pre-rebase commit `40b0fb1`, and not modified since), documented in the test doc comment, in
+`AI/tester_contract_setup_user_phase.md` and ADR 2026-10-15. The executed-call check
+`assert_no_forbidden_calls` (only `tailscale version` may run) is unchanged and still applied by the new
+behavioral contracts. Accepted as a justified migration, not a weakening. See finding 2 for a residual
+gap of the quote heuristic.
+
+New escape hatches (`#[ignore]`, `cfg(any())`, `should_panic`, tolerance/epsilon): none.
+Inline test modules changed: none.
 
 ## 3. Deep Reasoning Audit
 
 ### Logic & Architecture
-
-- *Can a refusal be shown as anything but Idle?* `query_lock_state` decodes `LockStateResponse` first. Any decoded
-  `Response`, an `Allow` verdict included, then becomes `Refused`. A `Response` can never decode as a
-  `LockStateResponse`: the codec is strict, rejects trailing bytes, and a `Response` payload is longer than 12 bytes.
-  `fetch_view` maps every error to `UNAVAILABLE`, and `presented()` collapses that into Idle. Neither `ViewState` nor
-  `Presented` has a success state. **PASS**.
-- *Other protocol version*: `is_current()` is checked both in the client and in `LockView::from_response`. **PASS**.
-- *Coordination and quota*: every client takes `LOCK_EX|LOCK_NB` on the private lock file and re-reads the record under
-  the lock. A client that waited for another client's exchange therefore gets a `Cache` hit. A client contacts the
-  daemon only when the record is older than 250 ms (or than the failure back-off step), and keeps one connection at a
-  time. That gives at most about 4 requests/s against the daemon's 8/s quota (`LOCK_STATE_MAX_REQUESTS_PER_SEC`).
-  Record writes and reads both happen under the lock, so no read is ever torn. **PASS**.
-- *Starved exchange*: with less than 50 ms left after taking the lock, the result is `LockBusy`. No failure record is
-  written and the poller keeps its last view, so nothing flickers. **PASS**.
-- *Cache decoding*: the format is strict: six fields, a leading `v1`, decimal-only numbers and a 16-character lowercase
-  hex hash. A record is consistent only if `unavailable` comes with sequence 0 and failures 1..=3, and vice versa. At
-  most 129 bytes are read. The 79-byte maximum stated in the constant's comment is correct
-  (3+14+1+20+1+1+1+20+1+16+1). **PASS**.
-- *Scene state machine*: traced these sequences:
-  - Scanning(1) → transient Unavailable → Scanning(1): the scan start is kept, and the stop is bounded by
-    `scan_start + 4800` rounded down to the half-turn grid.
-  - A new scan joining a running turn: `max(old_stop, wanted)` never exceeds the new scan's own bound, because
-    `old_stop ≤ old_start + 4800 ≤ now + 4800`.
-  - NotRecognized(2) → Unavailable → NotRecognized(2): no second shake.
-  - Daemon restart: a lower non-zero sequence resets the shake and the scan start.
-  - The daemon's neutral sequence-0 answer: ignored for epochs.
-
-  This is consistent with the §14 sequence rule (`2 × scans − 1` while hidden, `2 × scans` once visible). **PASS**.
-- *Brand mirror*: `star_contains` matches `STAR_SPIKES`. The spikes are quarter-circle Bézier approximations centred
-  on the outer corners, with a radius of half the box. The palette values equal those in `crates/gui/src/theme.rs`.
-  **PASS**.
-- *CLI*: `--format` has `requires = "once"` and a default value, which does not break `--watch` (covered by the CLI
-  tests). `--once` swallows usage errors and always exits 0. The widget delays every exit except help and version by
-  1000 ms. **PASS**.
+- Root half receives only `--camera-view on`; `--system-phase` rejects any other companion option
+  (parser block after option parsing). Tried: `--system-phase --funnel on` → usage error. PASS.
+- `daemon_preview_state` ordering: `elsewhere` (sysconfdir not `/etc`) before any read; `-L` before
+  `-e` so a dangling link is `link`, not `absent`. Harness E1 (dangling link) and E2 (link to file)
+  confirm: link kept, target never created or edited, no restart. PASS.
+- Creation race: `ln tmp daemon.toml` fails if the file appeared after the check → `return 1` →
+  `fail_and_rollback`; the administrator file is never overwritten. PASS.
+- Failure path: file removed and its journal entry dropped before the second restart; second failure
+  → `PREVIEW_DAEMON_DOWN` → exit 70 without further rollback; otherwise exit 1 with journal rollback
+  (removes `/etc/soos` only when this run created it, `rmdir` never removes a non-empty dir). Harness
+  C1/C2/D assert exactly this, including that the daemon was actually restarted with and then without
+  the file (start log). PASS.
+- Companion runs only after root-half exit 0 or 3; any other exit prints `[SKIP] companion` and keeps
+  the root exit code (harness `companion_not_run` on C1/C2/D). Exit 3 is preserved over 5. PASS.
+- `install_remote.sh`: relative `CARGO_TARGET_DIR` resolved against the checkout where cargo runs
+  (`cd "${REPO_ROOT}"`). PASS.
+- Restart bound vs unit start timeout: see finding 1. MINOR.
 
 ### PAM Concurrency & Deadlines
-
-- `crates/pam` is not in the diff. Neither new crate has Tokio, zbus or an async runtime (checked by the dependency
-  allow-list invariant). **PASS**.
-- *Can the bridge block past its budget?* One cumulative `Deadline` bounds every blocking step:
-  - connect: non-blocking socket, retried every 5 ms on `EAGAIN`, deadline re-checked after the loop;
-  - every write and read: `SO_SNDTIMEO`/`SO_RCVTIMEO` re-armed with the remaining time, and a zero budget never
-    reaches `set_*_timeout`;
-  - the lock wait and the exchange share the caller's 250 ms budget (the exchange gets what is `left`).
-
-  The stall, late-answer and missing-socket tests pin the bound. The stall test's lower bound (`≥ BUDGET − 20 ms`)
-  proves the deadline really waits, and its upper bound includes CI slack. **PASS**.
-- *Can the adapters starve `pam_soos.so`?* Each user has at most one short connection at a time. The remaining case
-  (two other clients already at the regular cap) is documented in the ADR as accepted and pre-existing. **PASS**.
+- No change under `crates/pam`. All new `systemctl`/`soos-remote` calls go through `run_bounded`;
+  `daemon_ready` uses `wait_daemon_ready.sh` with its own timeout. PASS (not applicable to PAM).
 
 ### Panic Safety & Fail-Closed
-
-- Production code has no `unwrap`/`expect`/`panic!`/indexing: workspace clippy lints are clean, and the invariant
-  `test_lka12_no_panic_or_print_macro_in_production_code` passes. Arithmetic is saturating or checked. Float-to-int
-  casts are documented saturating `as` conversions with NaN → 0. **PASS**.
-- `--once` has a silent panic hook and `catch_unwind`; a panic renders Idle and exits 0. The widget has a silent hook
-  and `catch_unwind` on the main loop. A poller-thread panic drops the sender, which gives `ChannelEvent::Closed`,
-  then `Exit::PollerGone` (exit 1 after the delay). **PASS**.
-- Every failure path renders Idle, never a success state. Nothing in this diff can unlock or authenticate. **PASS**.
+- No Rust production code changed. In shell, every error of the preview path leads to exit 1 or 70,
+  never to a `[DONE]`; `ensure_soos_conf_dir` refuses a symlinked or non-directory `/etc/soos`. The
+  companion failure path rolls back its own journal and exits 5. Tried: readiness gate fails while
+  restart succeeds (C1) → exit 1, file gone, daemon healthy again. PASS.
 
 ### Test Integrity & Anti-Weakening
-
-- Mechanical listing above: no assertion removed or modified, no escape hatch. **PASS**.
-- *Would a plausible wrong implementation pass?*
-  - An unbounded read fails `test_lka1_stalled_daemon_times_out_within_the_budget`.
-  - Allocating before the length check is caught by the 0/4097/`u32::MAX` test, which asserts the budget.
-  - A missing `flock` fails the test where 8 concurrent clients must make a single connection.
-  - Treating a refusal as success fails `test_lka1_refusal_of_any_verdict_is_unavailable`, which iterates every
-    verdict including `Allow`.
-  - The request deadline bound in `test_lka1_request_fields_and_one_request_per_connection` is loose (SUGGESTION 1).
-
-  **PASS**, with one suggestion.
-- The mock daemon uses the real `soos_protocol::encode`/`decode_client_message`, so it does not hide any part of the
-  wire contract. **PASS**.
+- New harness can fail on plausible wrong implementations: content compared to an independently
+  spelled expected file; mode/owner/link-count asserted; inode+mtime identity for "never edited";
+  invocation ID to prove restart/no restart; start log proves the daemon really ran with the file.
+  A setup.sh that edited an existing file, followed a symlink, skipped the restart or left the file
+  after a failed gate would fail B, E1/E2, A1 or C1 respectively. PASS.
+- `setup.sh` under test is byte-compared to the workspace copy (`cmp -s`), no test hook added to
+  `setup.sh` (`DAEMON_READ_CONFIG` is a literal constant, asserted by SET34 invariant). PASS.
+- `test_set_u24` is a static wiring check (job present, required in `CI Success`, not advisory in
+  `pr_checks_gate.sh`, read-only mount, no `--sysconfdir`). Appropriate for wiring. PASS.
+- SET3 migration: justified (section 2). Residual heuristic gap: finding 2.
 
 ### Memory, Bounds & Secrets
-
-- Response frame: the declared length is checked (`0 < n ≤ MAX_MESSAGE_SIZE`) before the `vec!`, so at most 4 100
-  bytes are allocated. **PASS**.
-- Widget buffers: `buffer_len` allows at most 8192 px per side and 33 554 432 px per surface, at most 67 108 864 px
-  across outputs, at most 8 outputs, and 2 buffers per output. An output over budget gets no buffer and one stderr
-  line that names only its size. The 512 MiB worst case of shared memory is documented as a follow-up. **PASS**.
-- Coordination file:
-  - the runtime directory must be absolute, not a symlink, owned by the UID, with `mode & 0o077 == 0`;
-  - the file is opened with `O_NOFOLLOW | O_CLOEXEC` and mode `0600`;
-  - `fstat` on the opened descriptor then checks: regular file, correct owner, `nlink == 1`, private mode.
-
-  The `fstat` check also rejects a FIFO or device planted by the same user. **PASS**.
-- Neither crate has a logger. Stderr lines never contain the state, and nothing biometric is ever received. **PASS**.
+- `remote.toml` / `daemon.toml` scans are bounded (`head -c` 16 KiB / 64 KiB). Login validated by a
+  strict charset before any TOML write (no injection). The plan prints "login given", not the login.
+  `remote.toml` 0600 in a 0700 dir via temp file + rename; backup 0600; symlinked paths refused.
+  `daemon.toml` 0644 root:root (non-secret content: uid list and booleans). PASS.
+- Harness host isolation: `--privileged --cgroupns=private`, tmpfs `/run`, masked host-state units
+  asserted, host `kernel.*/vm.*/fs.*` sysctls compared before/after (passed locally). The workspace is
+  mounted read-only. PASS.
 
 ### Supply Chain & Automation
-
-- `Cargo.lock` gains only the two path packages. `smithay-client-toolkit` 0.20.0 was already locked with the same
-  features. `deny.toml` changes a comment only. `scripts/candid_review.sh` only extends the business crate list.
-  No `.github/` or `.githooks/` change. **PASS**.
+- New CI job: `actions/checkout` pinned by SHA (same pin as the other jobs), `persist-credentials: false`,
+  no job-level `permissions:` (workflow default `contents: read`), no `${{ github.event.* }}` in `run:`,
+  `timeout-minutes: 20`, `needs: lint`, added to `CI Success` needs whose step fails on any non-success
+  result. Docker image is the existing digest-pinned `tests/docker/Dockerfile.systemd`; the container
+  installs `python3-minimal` and `sudo` from Ubuntu archives (same trust as the existing systemd job).
+  The new `.sh` is picked up by the lint job's `git ls-files '*.sh'` ShellCheck once committed. No
+  `Cargo.*` / `deny.toml` change. PASS.
 
 ### English-Only Policy
-
-- All code, comments, documentation and AI documents in the diff are English (`Bézier` is the English proper noun).
-  **PASS**.
-
-### Documentation Accuracy
-
-- `Docs/LOCKSCREEN_WIDGET.md` matches the code and tests on all of these points:
-  - the three states, their glyphs and words;
-  - budgets: 8 outputs, 8192 px per side, 33 554 432 / 67 108 864 px;
-  - the `--interval-ms` clamp (250..=2000) and the 1/2/4 s back-off;
-  - the JSON key set and the 96-byte line bound;
-  - the coordination rules: lock-busy behaviour per client, and stderr written only by the widget at start;
-  - the record example, whose hash `6db2722693fa5425` matches the FNV-1a test vector;
-  - the reduced-motion order, the motion tokens and the 4.8 s cap;
-  - the troubleshooting row for the 250 ms session check.
-- `Docs/IPC_PROTOCOL.md` §14 "Client implementation" matches `client.rs` and `shared.rs`: tagged request, `service`,
-  `uid_hint`, deadline = monotonic + remaining budget (≥ 50 ms), decode order, one connection, flock + cache.
-- ADR 2026-10-15 (end of `AI/DECISIONS.md`): items (1)–(9) match the code. This covers exit codes and delays, no seat,
-  buffer policy, motion, reduced motion and accepted residuals; item 9g notes that the hyprlock glyph has no cap.
-- `AI/VERIFICATION_MATRIX.md` LKA1–LKA17: every referenced test prefix exists and passes. The counts in walkthrough 214
-  §8 match the `#[test]` counts: client 13, shared 17, view/format 14, poll 8, CLI 13; scene 17, render 16, CLI 5;
-  11 invariant tests. One small wording mismatch is noted in SUGGESTION 2.
-- `AI/walkthroughs/214_lockscreen_adapters.md` is consistent with the diff; "Existing tests migrated: none" is true.
+- Code, comments, docs, harness output and test messages reviewed: English only. PASS.
 
 ## 4. Detailed Findings & Action Items
 
-- **[SUGGESTION]** `crates/lockstatus/tests/lockstatus_client_tests.rs:53`: the request-deadline check accepts any
-  `deadline_monotonic_ns` up to `before + EXCHANGE_BUDGET_MS + 5 000 ms`. A client that sent a 5 s deadline would
-  still pass, although the IPC §14 contract says "CLOCK_MONOTONIC + the budget". Optionally add a new, separate test
-  that pins the upper bound closer to `before + EXCHANGE_BUDGET_MS` plus a small scheduling margin. Do not edit this
-  assertion.
-- **[SUGGESTION]** `AI/VERIFICATION_MATRIX.md:2414` (row LKA1): the row says "a `CLOCK_MONOTONIC` + 250 ms deadline".
-  Through the coordinated path, the request actually carries `CLOCK_MONOTONIC` plus the budget left after the lock
-  (at least 50 ms), as `Docs/IPC_PROTOCOL.md` §14 correctly states. Align the wording, for example "+ the remaining
-  exchange budget, at most 250 ms".
-
-No CRITICAL, MAJOR or MINOR finding.
+- **[MINOR]** `scripts/setup.sh:1652` (and `:1656`) — `systemctl restart soos-daemon` is bounded by
+  `QUERY_TIMEOUT_S=10` while the shipped unit is `Type=notify` with `TimeoutStartSec=60`
+  (`packaging/soos-daemon.service:30`). On a slow host where the real daemon (model verification and
+  ONNX session load) needs more than 10 s to send `READY=1`, the client is killed, the step is treated
+  as failed, the new `daemon.toml` is removed and the run exits 1 although the configuration was valid.
+  Fail-closed, so not a security issue, and the same pattern pre-exists at `:1728`; consider
+  `systemctl restart --no-block` followed by the `daemon_ready` gate, or a dedicated start timeout.
+- **[MINOR]** `tests/invariants/src/setup_contract.rs:165` and
+  `tests/invariants/src/setup_user_phase_contract.rs:68` (`quoted_at`) — the quote-parity heuristic
+  treats `x="$(tailscale serve --bg ...)"` as "inside a quoted message", so the static rule would not
+  catch an executed `tailscale serve`/`funnel` (or `usermod`, `enable-linger`) inside a quoted command
+  substitution. The behavioral `assert_no_forbidden_calls` still catches it on exercised paths only.
+  Suggest additionally banning `$(tailscale`, `` `tailscale `` and `$(usermod` in the static checks.
+- **[SUGGESTION]** `scripts/setup.sh:1643-1650` — a signal between `mktemp` and `rm -f "${tmp}"`
+  leaves `/etc/soos/.daemon.toml.XXXXXX`, and a signal between `ln` and `JOURNAL+=(daemon_toml_created)`
+  leaves an unjournaled `daemon.toml`. The windows are a few instructions wide; journaling cannot simply
+  move before `ln` (a lost race would then delete an administrator file), so the fix would be a local
+  trap or a flag consulted by `on_signal`.
+- **[SUGGESTION]** `AI/tester_contract_setup_user_phase.md:6`, `AI/architect_spec_setup_user_phase.md:6`
+  — refer to the SET3 migration as commit `40b0fb1`; on this branch it is `e57c0e1` (rebased,
+  content verified identical). Reference the subject line or both SHAs.
 
 ## 5. Final Verdict
 

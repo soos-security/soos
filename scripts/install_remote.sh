@@ -36,6 +36,10 @@ CONFIG_DIR="${CONFIG_HOME}/soos"
 CONFIG_PATH="${CONFIG_HOME}/soos/remote.toml"
 RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 SOCKET_PATH="${RUNTIME_DIR}/soos-remote/remote.sock"
+# The cargo target directory cargo really builds into: CARGO_TARGET_DIR when set (a
+# relative value is relative to the checkout, where cargo runs), else <checkout>/target.
+TARGET_DIR="${CARGO_TARGET_DIR:-${REPO_ROOT}/target}"
+[[ "${TARGET_DIR}" == /* ]] || TARGET_DIR="${REPO_ROOT}/${TARGET_DIR}"
 
 usage() {
     echo "usage: scripts/install_remote.sh [--uninstall]"
@@ -58,8 +62,8 @@ install_companion() {
     (cd "${REPO_ROOT}" && cargo build --release --locked -p soos-remote -p soos-push-sender)
 
     echo "Installing the binaries to ${BIN_DIR}..."
-    install -Dm755 "${REPO_ROOT}/target/release/soos-remote" "${BIN_PATH}"
-    install -Dm755 "${REPO_ROOT}/target/release/soos-push-sender" "${SENDER_BIN_PATH}"
+    install -Dm755 "${TARGET_DIR}/release/soos-remote" "${BIN_PATH}"
+    install -Dm755 "${TARGET_DIR}/release/soos-push-sender" "${SENDER_BIN_PATH}"
 
     echo "Installing the user units to ${CONFIG_HOME}/systemd/user/..."
     install -Dm644 "${UNIT_SRC}" "${UNIT_PATH}"

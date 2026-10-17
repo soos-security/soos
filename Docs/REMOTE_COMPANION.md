@@ -374,7 +374,7 @@ are added to the next notification, so the counts you receive add up). Any proce
 you can forge lock-screen journal lines and therefore cause **false notifications** (bounded by
 these limits), exactly like the false alerts of section 2c.
 
-**Setup** (owner steps, nothing is enabled by the installer):
+**Setup** (owner steps, nothing is enabled by `scripts/install_remote.sh`; `scripts/setup.sh` of section 4 does steps 1–3 for you):
 
 1. Make section 2c work first (`password_alerts = true`) and set `rp_id` (section 2b).
 2. In `remote.toml`:
@@ -1199,9 +1199,23 @@ x86_64, so platform-specific entries for other systems may be missing.
 
 ## 4. Installation (per user, no root)
 
+**One command.** `./scripts/setup.sh --tailscale-login you@example.com --rp-id <this-pc>.<tailnet>.ts.net`
+(run as yourself, not with `sudo`) installs soos and then this companion with every feature on
+(Funnel, remote unlock, camera view also over Funnel, password alerts, push, offline alerts; owner
+decisions of 2026-10-12 and 2026-10-15, GitHub #400): it writes a setup-managed `remote.toml`
+(mode 0600; a key you turned off later, for example in the soos-gui feature tour, stays off),
+runs `scripts/install_remote.sh`, validates the file with `soos-remote passkeys list`, enables
+and starts the user units, creates the daemon `[preview]` section when `/etc/soos/daemon.toml`
+does not exist yet, and prints the steps below that need your Tailscale account (it runs no
+`tailscale` command except `tailscale version`). Details: `Docs/PACKAGING_AND_PROVISIONING.md`
+§3.0. The manual procedure follows.
+
 ```bash
 scripts/install_remote.sh
 ```
+
+The binaries are copied from the cargo target directory the build used: `CARGO_TARGET_DIR`
+when set (relative to the checkout when relative), else `target/` of the checkout.
 
 The script refuses to run as root and never calls `sudo`. It builds `soos-remote` (release,
 `--locked`), installs the binary to `~/.local/bin/soos-remote`, the user unit
