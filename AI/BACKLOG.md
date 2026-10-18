@@ -2039,3 +2039,33 @@ On physical hardware lock screens (GDM):
   - Bash parser for the fixed manifest schema with strict validation (bare file names, 64-hex digests, `https://`/`file://` sources); `sha256sum`/`curl` preflight and `--preflight` mode before any write; `https`-only downloads
   - Acceptance: deploy, `--check-only` and tamper detection work with neither `python3` nor `curl` on PATH; malformed entries rejected before the target directory exists
   - TDD: `test_download_models_deploys_and_verifies_without_python`, `test_download_models_parses_repository_manifest_without_python`, `test_download_models_rejects_malformed_or_unsafe_entries`, `test_download_models_preflight_requires_curl_for_remote_sources`
+
+## Active-IR Anti-Spoofing (epic #353)
+
+> GitHub-only sub-issues of epic #353 (owner feature intake of 2026-10-12). Their branches are not registered in `scripts/sync_issue.py`. Split item 1 (#378, emitter control and strobe classification) is recorded in `AI/DECISIONS.md` and matrix IRA1–IRA28.
+
+### GitHub #431 — feat(vision): active-illumination on/off differential liveness cues (split item 2 of #353)
+
+> **Branch**: `feat/ir-active-cues`  
+> **Architecture ref**: ADR 2026-09-30 "Format-Aware PAD and Short-Term IR Liveness Policy" (amended), ADR 2026-10-18 "Active-Illumination Differential Liveness Cues"  
+> **VERIFICATION_MATRIX**: IRA29–IRA37 (IRA36, IRA37 pending on IR hardware)
+
+#### Problem Statement
+
+The IR path only had a loose exposure/contrast/texture gate on one frame and an RGB-trained PAD model, so a static IR image (CVE-2021-34466 class), a screen or a flat print was not specifically defended against. Comparing a frame lit by the emitter with an unlit frame of the same scene measures the response to light that `soos` controls.
+
+#### Sub-issues
+
+- [x] **#431.1** — Zero-I/O cue module in `soos-vision`
+  - `crates/vision/src/ir_active.rs`: static pair, response ratio, saturation, skin NIR reflectance band, inverse-square relief, corneal glint; veto-only `IrActiveCuesClear`; validated, provisional and uncalibrated `IrActiveConfig`; `Zeroizing` crop copies; fail-closed input checks
+  - Acceptance: only the synthetic shaded head passes; every malformed input or configuration rejects; no input panics
+  - TDD: `ir_active_cues_tests::*`, `soos-invariants::ir_active_contract::*`
+
+- [x] **#431.2** — Synthetic lit/unlit fixtures
+  - `tests/fixtures` `ir_strobe::active_pair`: shaded head (accepted), flat print, screen, no glint, saturated, unlit, static injection (rejected), non-biometric
+  - Acceptance: each attack fixture is rejected by its intended cue
+  - TDD: `test_ira_active_only_the_shaded_head_passes` and the per-fixture tests of IRA30
+
+- [ ] **#431.3** — Calibration on a real IR module (owner decision 2026-10-12: another project member's IR PC)
+  - Measure the cue statistics on bona fide and attack lit/unlit pairs and replace the provisional constants through an ADR
+  - Acceptance: matrix IRA36, IRA37

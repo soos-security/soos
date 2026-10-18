@@ -351,6 +351,12 @@ mod network_lock_contract;
 #[cfg(all(test, unix))]
 mod ir_emitter_contract;
 
+/// Active-illumination on/off differential liveness cues: zero-I/O, silent `ir_active.rs`,
+/// `Zeroizing` crop copies, veto-only result, ADR and docs recorded (GitHub #431, PR 2 of #353;
+/// spec AI/architect_spec_ir_active_cues.md; row IRA35).
+#[cfg(all(test, unix))]
+mod ir_active_contract;
+
 /// Browser capability detection and graceful degradation of the `soos-remote` web app: one pure
 /// probe, guarded browser APIs, passkey/push/camera/status degradation with fixed texts, no
 /// User-Agent logic, CSS fallbacks, unchanged network surface, documentation (GitHub #366, PR 1

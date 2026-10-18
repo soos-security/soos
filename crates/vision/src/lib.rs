@@ -7,6 +7,7 @@
 //! - Cosine similarity matcher with zero-norm and dimension protections
 //! - `VisionPipeline` orchestrator enforcing the single-face security invariant
 //! - Format-aware PAD policy: fail-closed IR gate and stricter threshold for `Grey` frames
+//! - Active-illumination lit/unlit differential cues for IR frames (veto only, uncalibrated)
 //! - Pre-PAD face quality gate: minimum face size and optional PAD crop sharpness floor
 
 #![forbid(unsafe_code)]
@@ -15,6 +16,7 @@ pub mod align;
 pub mod color;
 pub mod crop;
 pub mod error;
+pub mod ir_active;
 pub mod ir_liveness;
 pub mod letterbox;
 pub mod matcher;
@@ -29,6 +31,10 @@ pub use crop::{
     crop_and_resize, crop_pad_context, expand_bbox_for_pad, pad_crop_window, PadCropWindow,
 };
 pub use error::VisionError;
+pub use ir_active::{
+    evaluate_ir_active_cues, ir_active_statistics, IrActiveConfig, IrActiveConfigError,
+    IrActiveCuesClear, IrActiveRejection, IrActiveStatistics,
+};
 pub use ir_liveness::{
     evaluate_ir_gate, ir_crop_statistics, IrCropStatistics, IrGateRejection, PadInputModality,
     DEFAULT_IR_PAD_THRESHOLD, IR_MAX_MEAN_LUMA, IR_MIN_LUMA_STDDEV, IR_MIN_MEAN_LUMA,
