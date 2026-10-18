@@ -2925,6 +2925,17 @@ Companion off-switch and opt-in wording aligned with the setup defaults (#400 an
 | LWF5 | `uninstall.sh` never removes a file through a symbolic link in place of `<prefix>/share/soos` (hyprlock snippet and Arch PAM snippet behind it untouched, the link kept, a warning printed, exit 0) | `soos-invariants::lockscreen_installer_contract::test_lwf5_uninstall_refuses_a_linked_share_soos` | ✅ Verified |
 | LWF6 | Documentation agrees with the code: the off notice is documented (no "nothing enabled or printed"), the read path and "not applied" are documented, the rollback paragraph covers the lock-widget and camera-view failures (the `--check-config` refusal included), no `setup.sh --uninstall` is promised; matrix rows and walkthrough present | `soos-invariants::lockscreen_installer_contract::test_lwf6_documentation_and_traceability` | ✅ Verified |
 
+## Component: `setup-read-paths` (GitHub #455, part of #362, follow-up of #402 / #452 / #454, no backlog id, `fix/setup-read-paths`, walkthrough 244)
+
+| ID | Acceptance criterion | Evidence | Status |
+|---|---|---|---|
+| SRP1 | `setup.sh` pins `KILL_SWITCH_READ_FLAG="/etc/soos/disabled"`, equal to `pam_soos.so`'s `DEFAULT_FLAG_DIR` joined with `disabled` (`flag_dir` set only from `DEFAULT_FLAG_DIR`) and to soos-daemon's `DEFAULT_KILL_SWITCH_DIR` joined with `GLOBAL_DISABLE_FLAG` (watched by `main.rs` with no path option); the only `Rescue:` line prints it and never `<sysconfdir>` | `soos-invariants::setup_user_phase_contract::test_srp1_rescue_kill_switch_matches_pam_and_daemon` | ✅ Verified |
+| SRP2 | With a `--sysconfdir` other than `/etc`, the summary prints `Rescue: sudo touch /etc/soos/disabled`, never `<sysconfdir>/soos/disabled`, and no kill switch is created | `soos-invariants::setup_user_phase_contract::test_srp2_summary_rescue_names_the_read_kill_switch` | ✅ Verified |
+| SRP3 | `--sysconfdir` spelt `<etc>/`, `<etc>//` or `<parent>//etc/./` (read paths pointed at the fake root) is the read directory: the dry-run plan creates `daemon.toml` and `lockwidget.disable` there, never says "not applied", prints only normalised paths and writes nothing | `soos-invariants::setup_user_phase_contract::test_srp3_slash_spellings_of_the_read_directory_are_applied` | ✅ Verified |
+| SRP4 | A real run with `--sysconfdir <etc>//` reports `[DONE] lock widget: turned off (<etc>/soos/lockwidget.disable)` and never "not applied" | `soos-invariants::setup_user_phase_contract::test_srp4_double_slash_sysconfdir_run_reports_the_flag_done` | ✅ Verified |
+| SRP5 | The comparison never follows a symbolic link (a link to the read directory stays "not applied"); a `..` component of `--sysconfdir` or `--prefix` exits 2 before any change | `soos-invariants::setup_user_phase_contract::test_srp5_links_are_not_followed_and_dot_dot_is_refused` | ✅ Verified |
+| SRP6 | `Docs/PACKAGING_AND_PROVISIONING.md` documents the rescue read path and the normalisation (`/etc/`, `/etc//`, `..`, symbolic link); the ADR records the fix; matrix rows and walkthrough 244 present | `soos-invariants::setup_user_phase_contract::test_srp6_documentation_and_traceability` | ✅ Verified |
+
 ---
 
 ## Component: `release-dry-run` (GitHub #444, part of #361, no backlog id, `chore/release-dry-run`, walkthrough 239)
