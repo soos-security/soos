@@ -1,67 +1,65 @@
 # Plan Evaluation Report
-- **Date**: 2026-10-17
-- **Issue**: GitHub-only (no backlog id) — README restructure as a product landing page (GitHub #408, PR 2 of epic #356)
-- **Branch**: `chore/readme-redesign`
-- **Base commit**: `9e82795`
-- **Plan evaluated**: `AI/architect_spec_readme_redesign.md` §0–§5
-- **Mode**: self-check by the implementing agent (docs-only change; phases 1–4 condensed as allowed by the
-  dev-workflow skill for a docs-only change). The independent candid review still runs separately.
+- **Date**: 2026-10-18
+- **Issue**: GitHub-only (no backlog id) — first-run feature tour in the native Android app (GitHub #427, PR 3 of epic #363)
+- **Branch**: `feat/android-onboarding-tour`
+- **Base commit**: `74782b8`
+- **Plan evaluated**: `AI/architect_spec_android_onboarding_tour.md` §0–§7
+- **Mode**: self-check by the implementing agent (phases run in one session as the dev-workflow skill allows). The
+  independent candid review still runs separately before any push.
 
 ## 1. Coverage Matrix
 
-| #356 PR 2 acceptance line | Spec element | Status |
+| #363 PR 3 / #427 acceptance line | Spec element | Status |
 |---|---|---|
-| Hero: title, tagline, at most 6 real badges, no release badge | §1 item 1, §2, RDM3 | Covered |
-| No logo image (Q8 unanswered, no brand generator, owner pack never used) | §0 Q8, §1 item 1 | Covered |
-| Hero visual with mock/synthetic caption and source commit | §1 items 2 and 5 | Covered |
-| Why, feature table of merged features with doc links, screenshots | §1 items 3–5, RDM1, RDM6 | Covered |
-| Lock-screen widget only as merged (#403), doc link, no screenshot | §1 item 4 | Covered |
-| Quick Start verbatim; `setup.sh` paragraph byte-identical for #402 | §1 item 6 | Covered |
-| Mermaid diagram (PAM, UDS, daemon, store, soos-remote, push-sender) | §1 item 8, RDM6 | Covered |
-| Security model in plain words, PAD caveat #212, ARCHITECTURE and REMOTE_COMPANION §8 links | §1 item 9, RDM7 | Covered |
-| Cited comparison with Howdy and Windows Hello, no numbers or superlatives | §1 item 10, RDM5, RDM8 | Covered |
-| FAQ 5–8, static roadmap #352–#363, contributing/security links, no new SECURITY/CONTRIBUTING | §1 items 11–14 | Covered |
-| License text kept | §1 item 15, `licence_contract` | Covered |
-| Banned words, relative links, heading order, security needles | RDM1–RDM7 | Covered |
-| Docs index, DEVELOPMENT_WORKFLOW, ADR, matrix rows, walkthrough 216 | §4 | Covered |
-| Manual light/dark/mobile render | RDM9 (owner row) | Covered (pending owner) |
+| Tour in `ui/SoosApp.kt`, once after the PC address is saved and the first status view loads | §3 (`offer` from `HomeScreen` when `homeReady && status != null`) | Covered |
+| Never over the sign-in or the settings screen | §3 (render gated by `homeReady`; the settings screen gets no tour state) | Covered |
+| Skip tour / Done / back; reopened from Feature tour | §1 table (`close`, `next` on last), §3 (`BackHandler`, `TextButton`) | Covered |
+| Intro plus one step per feature, the heartbeat with its own switch as off path | §1 `TourStep`, §4 | Covered |
+| Every text a `strings.xml` resource | §3, §4, ATR-S3 | Covered |
+| Shared titles, explanations, "Off:" lines byte-equal to `app.js`, enforced by an invariant | §4, ATR-S1 | Covered |
+| Off paths name the dependent `remote.toml` keys (never exit 78) | §4, ATR-S2 | Covered |
+| No request, switches nothing, reads no server or user data | §3, ATR-S5 | Covered |
+| One Boolean `tour_seen` in `soos_settings`, no new storage API | §2, ATR-S4 | Covered |
+| Manifest, permissions, runtime prompt, dependencies, verification metadata unchanged | §6, ATR-S6, ANA-S4/S6, AHB-S3 | Covered |
+| No logging; theme role colours; no animation | §3, ATR-S5, ATR-S6, ANA-S7/S8 | Covered |
+| JVM tests, invariant, ADR, §2j, matrix rows, walkthrough 230, owner hardware row | §5, ATR-S7 | Covered |
 
 ## 2. Facts Verified
 
 | Fact | Check | Actual | Match |
 |---|---|---|---|
-| No git tag, no release | `git tag --list`, `gh release list` | both empty | Yes |
-| Workflows exist | `.github/workflows/` | `ci.yml` (name CI), `fuzz.yml` (name Fuzz, nightly schedule) | Yes |
-| Rust pin | `rust-toolchain.toml` | `channel = "1.98.1"` | Yes |
-| Screenshot source commit | `git log -- Docs/assets/` | `a3cae16` (#392) only | Yes |
-| Epics #352–#363 | `gh issue view` | all 12 open | Yes |
-| Lock-screen widget merged | `git log` | `9e82795` (#403), `Docs/LOCKSCREEN_WIDGET.md` | Yes |
-| Daemon has no network | `packaging/soos-daemon.service` | `RestrictAddressFamilies=AF_UNIX`, `PrivateNetwork=yes`, `IPAddressDeny=any` | Yes |
-| Templates encrypted | `Docs/BIOMETRIC_STORE_CRATE.md` | AES-256-GCM | Yes |
-| IPC framing | `Docs/IPC_PROTOCOL.md` §2 | u32 big-endian length prefix + postcard over a Unix stream socket | Yes |
-| PAD is single-scale by default | `AI/ARCHITECTURE.md` §7, `models/README.md` §2, GitHub #212 (open) | MiniFASNetV2 at 2.7×; MiniFASNetV1SE attested but disabled | Yes |
-| Howdy facts | upstream README and `howdy/src/pam/main.cc` (master) | MIT; built-in IR emitters and camera; "in no way as secure as a password"; PAM module spawns a Python compare process | Yes |
-| Windows Hello facts | Microsoft Learn "Windows Hello face authentication", "Enhanced Sign-in Security" | near-IR camera; ESS isolates the face algorithm and templates in VBS on ESS-capable IR cameras | Yes |
-| Existing README contracts | grep of `tests/invariants/src` | 9 tests read `README.md`; needles listed in spec §1 | Yes |
-| Matrix prefix `RDM` unused | grep `AI/VERIFICATION_MATRIX.md` | 0 hits | Yes |
-| Walkthrough 216 free | `ls AI/walkthroughs` | highest 214, 216 reserved | Yes |
+| Web tour strings | `crates/remote/assets/app.js` lines 2167–2244 | 8 steps with `title`, `text`, `off`, `where`, `target`; labels Next, Done, Back, Skip tour, Feature tour | Yes |
+| Web strings have no `"`, `<`, `&`, `\` | `plain_text` of `remote_tour_contract` (PTR-S5) | enforced on main | Yes |
+| One apostrophe in the web texts, in a where line only | grep `'` in `TOUR_STEPS` | Internet access `where` ("this phone's") | Yes |
+| The app shows no battery, unlock, push or camera | `SoosApp.kt`, `Docs/REMOTE_COMPANION.md` §2j intro | "Unlock, the live camera view, push notifications, the battery level and the offline history stay in the web app for now" | Yes |
+| Tailnet requests are authenticated | `crates/remote/src/server.rs::auth_state_view` | `PathClass::Tailnet => true`, Funnel needs a session | Yes |
+| Settings store file and backup exclusion | `SettingsStore.kt`, manifest, `data_extraction_rules.xml` | `soos_settings`, `MODE_PRIVATE`, `allowBackup="false"`, `sharedpref` excluded from cloud backup and device transfer | Yes |
+| Existing store needles | AHB-S3, ANA-S8 | heartbeat keys, `getBoolean(KEY_HEARTBEAT_ENABLED, false)`, no `cookie"`/`session"` | Kept |
+| Heartbeat package has exactly five sources | AHB-S3 | the tour lives in `tour/` and `ui/` | Kept |
+| `BackHandler` available without a new dependency | `libs.versions.toml` | `activity-compose` 1.11.0 (`androidx.activity.compose.BackHandler`) | Yes |
+| CI runs the JVM tests | `scripts/android_build.sh` | `assembleDebug testDebugUnitTest lintDebug` | Yes |
+| Matrix prefix `ATR` unused | grep `AI/VERIFICATION_MATRIX.md` | 0 rows | Yes |
+| Walkthrough 230 free | `ls AI/walkthroughs` | highest 223 | Yes |
+| Docs §2j / §2k | `Docs/REMOTE_COMPANION.md` | "## 2j. Native Android app" then "## 2k. Feature tour (phone web app)", whose last bullet says the app has no tour yet | Update the bullet, keep its "native Android app" needle (PTR-S10) |
 
 ## 3. Pillar Analysis
 
-- **Architecture alignment**: no runtime code; the README describes the existing invariants (ARCHITECTURE §2)
-  without changing them.
-- **Test integrity**: no existing test file is edited except the module registration in `lib.rs` (addition
-  only). Every existing README needle is kept by moving the Quick Start, Upgrade and License text verbatim.
-- **Fail-closed / truthfulness**: the PAD caveat, the password-as-root-of-trust statement and the remote
-  residual limitations link are asserted by RDM7.
-- **Privacy**: only the three synthetic PNGs already covered by RAC11–RAC13; no new image.
-- **Supply chain**: std only in the new test module.
+- **Architecture alignment**: Android-only; no server, route, CSP or `remote.toml` change. The PAM, daemon and
+  IPC invariants are not involved.
+- **Test integrity**: no existing test is edited; the new invariant module is registered in `lib.rs` (addition
+  only). No contract migration.
+- **Fail-closed / truthfulness**: the where lines must not claim the app shows a card it does not have; they point
+  to the web app or `soos-gui` for unlock, push, camera and battery. Key sets are pinned to the web lines.
+- **Privacy**: the only new stored datum is a Boolean, excluded from backup and transfer.
+- **Supply chain**: no new Gradle dependency; std only in the invariant.
 
 ## 4. Findings
 
 | # | Severity | Finding | Resolution |
 |---|---|---|---|
-| P-1 | MINOR | A test that runs `git tag --list` may run inside a git hook with `GIT_DIR` set, and CI checkouts are shallow without tags | Clear every `GIT_*` variable and run in the workspace root; a missing or failing `git` counts as "no tag" (stricter, never weaker) |
-| P-2 | MINOR | The release-badge rule could later block a legitimate release badge in a shallow CI clone | Accepted: a release file (`CHANGELOG.md`) also counts as release evidence; documented in the ADR |
+| P-1 | MINOR | The byte-equal web texts say "this page" (Battery off line, Failed-password history text) | Accepted: byte equality is the acceptance criterion; the app-specific where lines say where the feature lives in the app or in the web app |
+| P-2 | MINOR | `remember` (not `rememberSaveable`) loses an open tour on an activity recreation (rotation) | Accepted, as for every other screen state of the app; the tour then opens again at the introduction because it was not closed |
+| P-3 | MAJOR → mitigated | No JDK/SDK on the host: the Kotlin is compiled and the JVM tests run only in the CI job `Android (debug build)` | Use only APIs already used by the app or shipped by the pinned libraries; matrix rows of the JVM tests stay "Pending CI" until a green run id is recorded |
+| P-4 | MINOR | The step map from `TourStep` to resources could drift from `strings.xml` | ATR-S3 checks every referenced and every defined `tour_*` resource, and the exhaustive `when` fails compilation on a missing step |
 
 VALIDATION_VERDICT: APPROVED

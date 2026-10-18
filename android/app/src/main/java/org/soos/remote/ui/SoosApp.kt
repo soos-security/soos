@@ -3,6 +3,7 @@ package org.soos.remote.ui
 import android.Manifest
 import android.app.Activity
 import android.content.pm.PackageManager
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.annotation.StringRes
@@ -69,12 +70,19 @@ import org.soos.remote.net.ApiResult
 import org.soos.remote.net.AuthStateView
 import org.soos.remote.net.SharedApi
 import org.soos.remote.net.StatusView
+import org.soos.remote.tour.TourController
+import org.soos.remote.tour.TourState
 
-/** Root of the app: the settings screen until a PC address is saved, then the home screen. */
+/**
+ * Root of the app: the settings screen until a PC address is saved, then the home screen. The
+ * feature tour (GitHub #427) lives on the home screen only, never on the settings screen.
+ */
 @Composable
 fun SoosApp(activity: Activity, settings: SettingsStore, heartbeat: HeartbeatController) {
     var pcUrl by remember { mutableStateOf(settings.pcUrl) }
     var editing by remember { mutableStateOf(false) }
+    val tour = remember { TourController(settings) }
+    var tourState by remember { mutableStateOf(TourState()) }
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -108,6 +116,12 @@ fun SoosApp(activity: Activity, settings: SettingsStore, heartbeat: HeartbeatCon
                     settings = settings,
                     pc = valid,
                     onSettings = { editing = true },
+                    tourState = tourState,
+                    onTourOffer = { tourState = tour.offer(tourState, statusShown = true) },
+                    onTourReplay = { tourState = tour.replay(tourState) },
+                    onTourNext = { tourState = tour.next(tourState) },
+                    onTourBack = { tourState = tour.back(tourState) },
+                    onTourClose = { tourState = tour.close(tourState) },
                 )
             }
         }
@@ -295,6 +309,12 @@ private fun HomeScreen(
     settings: SettingsStore,
     pc: PcUrlResult.Valid,
     onSettings: () -> Unit,
+    tourState: TourState,
+    onTourOffer: () -> Unit,
+    onTourReplay: () -> Unit,
+    onTourNext: () -> Unit,
+    onTourBack: () -> Unit,
+    onTourClose: () -> Unit,
 ) {
     // One client per PC for the whole process: the heartbeat reuses its in-memory session.
     val api = remember(pc.origin) { SharedApi.forOrigin(pc.origin) }
@@ -435,6 +455,19 @@ private fun HomeScreen(
 
     LaunchedEffect(pc.origin) { refresh() }
 
+    // The feature tour: offered once the first status view is shown (a tailnet identity or a
+    // Funnel session), shown only then, so never over the passkey sign-in; system back closes it.
+    val homeReady = auth?.authenticated == true
+    val tourShown = tourState.open && homeReady
+    val scroll = rememberScrollState()
+    LaunchedEffect(homeReady, status != null) {
+        if (homeReady && status != null) onTourOffer()
+    }
+    LaunchedEffect(tourShown) {
+        if (tourShown) scroll.scrollTo(0)
+    }
+    BackHandler(enabled = tourShown) { onTourClose() }
+
     PullToRefreshBox(
         isRefreshing = refreshing,
         onRefresh = {
@@ -451,9 +484,17 @@ private fun HomeScreen(
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .verticalScroll(rememberScrollState()),
+                .verticalScroll(scroll),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
+            if (tourShown) {
+                TourCard(
+                    state = tourState,
+                    onNext = onTourNext,
+                    onBack = onTourBack,
+                    onSkip = onTourClose,
+                )
+            }
             Text(pc.host, style = MaterialTheme.typography.bodySmall)
             Card(modifier = Modifier.fillMaxWidth()) {
                 Column(modifier = Modifier.padding(16.dp)) {
@@ -526,6 +567,9 @@ private fun HomeScreen(
                     ) { Text("Sign out") }
                 }
                 TextButton(onClick = onSettings) { Text("Settings") }
+            }
+            if (homeReady) {
+                TextButton(onClick = onTourReplay) { Text(stringResource(R.string.tour_replay)) }
             }
         }
     }

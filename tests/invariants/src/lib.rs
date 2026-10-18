@@ -486,6 +486,16 @@ mod android_alerts_feedback_contract;
 #[cfg(all(test, unix))]
 mod remote_tour_contract;
 
+/// First-run feature tour of the native Android app: shared wording byte-equal to the web
+/// tour, off paths with the dependent `remote.toml` keys, every text a used `strings.xml`
+/// resource, one Boolean `tour_seen` in `SettingsStore`, no request, switch or logging in the
+/// tour code, wiring, theme roles, unchanged manifest and dependencies, documentation (GitHub
+/// #427, PR 3 of #363; ADR 2026-10-18 "Phone Onboarding Tour in the Native Android App"; spec
+/// AI/architect_spec_android_onboarding_tour.md; rows ATR2-ATR8, ATR1 being the JVM tests and
+/// ATR9 the owner's manual phone check).
+#[cfg(all(test, unix))]
+mod android_tour_contract;
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,
