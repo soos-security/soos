@@ -2,31 +2,56 @@
 
 - **Date**: 2026-10-18
 - **Target Branch**: `feat/ir-active-cues`
-- **Base (merge-base)**: `3f76090` (origin/main after #430)
-- **Reviewed-Diff-Fingerprint**: `e638fa05e55619c8166ff4ca254273e0e4b034e6995ee4e1a99f2b5075216895`
+- **Base (merge-base)**: `4368526` (origin/main after #445, #440 and #434; the branch was rebased from `3f76090`)
+- **Reviewed-Diff-Fingerprint**: `9d163e5c694230ee3530858009c168e417bf4fe5ccb6066780bd6f0bf579b083`
 - **Audited Files**: `AI/BACKLOG.md`, `AI/DECISIONS.md`, `AI/VERIFICATION_MATRIX.md`, `AI/architect_spec_ir_active_cues.md`, `AI/auditor_constraints_ir_active_cues.md`, `AI/tester_contract_ir_active_cues.md`, `AI/walkthroughs/232_ir_active_cues.md`, `Docs/VISION_CRATE.md`, `crates/vision/src/ir_active.rs`, `crates/vision/src/lib.rs`, `crates/vision/tests/ir_active_cues_tests.rs`, `tests/fixtures/mod.rs`, `tests/invariants/src/ir_active_contract.rs`, `tests/invariants/src/lib.rs`
 
 ## 1. Executive Summary
+
+Independent re-review after the rebase of `feat/ir-active-cues` onto `origin/main` `4368526`
+(#445 `soos-daemon --check-config`, #440 setup start bounds, #434 lock-screen installer). The
+previous review (fingerprint `e638fa05...`, base `3f76090`) is superseded by this one.
 
 The branch adds `soos_vision::ir_active`, a pure, zero-I/O, veto-only evaluation of a lit/unlit
 IR frame pair (static pair, response ratio, saturation, reflectance band, inverse-square relief,
 corneal glint), synthetic fixtures in `soos-test-fixtures::ir_strobe`, 24 contract tests, 4 static
 invariants, and documentation (ADR, matrix IRA29–IRA37, backlog, `Docs/VISION_CRATE.md` §2.4.5,
 walkthrough 232). There is no consumer: `soos-daemon`, `soos-policy` and `crates/pam` are
-untouched, so no authentication path changes. The diff is add-only for every test file. No
-CRITICAL, MAJOR or MINOR finding.
+untouched, so no authentication path changes. No CRITICAL, MAJOR or MINOR finding.
 
-Re-run by this reviewer (`LIBONNXRUNTIME_NO_PKG_CONFIG=1`, dedicated `CARGO_TARGET_DIR`,
-`CARGO_INCREMENTAL=0`, debug info off, `CARGO_BUILD_JOBS=3`, `--test-threads=3`):
+### Rebase verification
 
-- `cargo test -p soos-vision --test ir_active_cues_tests`: 24 passed.
-- `cargo test -p soos-vision`: every target green (no failure).
-- `cargo test -p soos-invariants ir_active`: 4 passed (787 filtered, 791 total, matching the walkthrough).
-- `cargo clippy -p soos-vision -p soos-invariants -p soos-test-fixtures --all-targets -- -D warnings`: clean.
-- `cargo fmt --check -p soos-vision`: clean.
-- A throw-away binary outside the repository printed `ir_active_statistics` and the verdict for every
-  fixture; every value of the walkthrough §6 table (face response, ratio, saturated fraction, lit
-  mean, relief, glints, result) matches the code's output.
+- Merge base is `4368526` = `origin/main`; the branch is the two commits `5a66b90` (feature) and
+  `ff54e00` (previous report) on top of it.
+- Blob comparison against the pre-rebase head `origin/feat/ir-active-cues` (`e20747e`): 13 of the
+  16 changed paths are byte-identical, including every code, test, fixture and spec file
+  (`crates/vision/src/ir_active.rs`, `crates/vision/src/lib.rs`,
+  `crates/vision/tests/ir_active_cues_tests.rs`, `tests/fixtures/mod.rs`,
+  `tests/invariants/src/ir_active_contract.rs`, `Docs/VISION_CRATE.md`, `AI/BACKLOG.md`, the spec,
+  tester contract, auditor constraints, walkthrough 232). None of these was touched by main between
+  `3f76090` and `4368526`.
+- The three differing paths (`AI/DECISIONS.md`, `AI/VERIFICATION_MATRIX.md`,
+  `tests/invariants/src/lib.rs`) were also changed by main; their branch-side `+`/`-` lines against
+  each base are identical before and after the rebase. The only difference is main's added context.
+- `AI/DECISIONS.md`: exactly one "Active-Illumination Differential Liveness Cues" entry, appended
+  after main's two new 2026-10-18 entries (#441 check-config, #432 lock-screen installer); no
+  duplicate ADR title in the file.
+- `AI/VERIFICATION_MATRIX.md`: IRA29–IRA37 present once each; no duplicate IRA, DCC or LKI row id.
+- Walkthrough numbering: 232 is unique (main added 233, 237, 240).
+- Semantic interaction: main's changes live in `crates/daemon`, `scripts/`, packaging and their
+  invariants; the branch touches only `crates/vision`, `tests/fixtures` and its own invariant. The
+  new `ir_active_contract` reads only `ir_active.rs` and the docs (no git, daemon or policy probe),
+  and neither `lockscreen_installer_contract` nor `daemon_check_config_contract` references
+  `crates/vision` or `ir_active`. The full `soos-invariants` suite passes on the rebased tree. None found.
+
+Re-run by this reviewer on the rebased tree (`LIBONNXRUNTIME_NO_PKG_CONFIG=1`,
+`CARGO_TARGET_DIR=~/.cache/soos-targets/ir-active-cues`, `CARGO_INCREMENTAL=0`, debug info off,
+`CARGO_BUILD_JOBS=3`):
+
+- `cargo test --locked -p soos-vision -p soos-test-fixtures -p soos-invariants -- --test-threads=3`:
+  32 test binaries, 1019 passed, 0 failed, 1 ignored (the pre-existing LFW evaluation test).
+  `soos-invariants`: 809 passed (791 before the rebase plus main's new rows);
+  `ir_active_cues_tests`: 24 passed.
 
 ## 2. Test Changes
 
@@ -39,8 +64,7 @@ Mechanical listing from `target/candid_diff.patch`:
 - Removed or changed assertion / `#[test]` / proptest lines (`^-` grep): **none**.
 - New escape hatches (`#[ignore]`, `#[cfg(any())]`, `should_panic`, tolerance, epsilon): **none**.
 - Inline `mod tests` changes: **none**.
-- `git diff $(git merge-base origin/main HEAD) HEAD -- tests 'crates/*/tests' android/app/src/test`
-  contains no removed line: no pre-existing assertion was removed or changed. The existing
+- The frozen patch against `4368526` contains no removed line at all (`grep -c '^-[^-]'` = 0): no pre-existing assertion was removed or changed. The existing
   `ir_strobe` consumers (`soos-camera-v4l` strobe tests) use functions the diff does not touch.
 
 ## 3. Deep Reasoning Audit
