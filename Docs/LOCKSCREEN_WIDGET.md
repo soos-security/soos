@@ -3,13 +3,15 @@
 Shows whether soos is scanning your face while the screen is locked, in the soos brand, on the
 lock screens that allow it. Epic GitHub #352; this page covers PR 2 (GitHub #401): the
 `soos-lockstatus` bridge, the **hyprlock** label and the **swaylock-plugin** background widget,
-and PR 4 (GitHub #405): the **GNOME Shell** system extension `soos-lockscreen@soos` (§11). The
+PR 4 (GitHub #405): the **GNOME Shell** system extension `soos-lockscreen@soos` (§11), and PR 6
+(GitHub #432): the installer opt-in through `scripts/install.sh` and `scripts/setup.sh` (§3). The
 KDE Plasma adapter follows in a later pull request (owner decision of 2026-10-13: swaylock-plugin
 and hyprlock first, then GNOME, then KDE).
 
 Decisions: ADR 2026-10-13 "Read-Only Lock-Screen State Channel" (the daemon side, PR 1, GitHub
 #380) and ADR 2026-10-15 "Lock-Screen Adapters for swaylock-plugin and hyprlock" in
-`AI/DECISIONS.md`, and ADR 2026-10-17 "GNOME Shell Lock-Screen Extension" for §11. Wire contract: `Docs/IPC_PROTOCOL.md` §14. Motion: `Docs/UI_MOTION.md`.
+`AI/DECISIONS.md`, ADR 2026-10-17 "GNOME Shell Lock-Screen Extension" for §11, and ADR
+2026-10-18 "Installer Opt-In of the Lock-Screen Adapters and the Shipped Widget Build" for §3. Wire contract: `Docs/IPC_PROTOCOL.md` §14. Motion: `Docs/UI_MOTION.md`.
 
 ## 1. Why adapters
 
@@ -44,23 +46,54 @@ failure no earlier than 3.24 s after the scan started and holds it 3 s (`Docs/IP
 §14), so the screen never tells a presentation attack from an ordinary non-match. Transport errors
 look exactly like Idle on the screen; only `--watch` reports `"available":false` for diagnostics.
 
-## 3. Build and install (user level)
+## 3. Build and install
 
 Both programs run as the locked user; they need no privilege beyond the `soos` group membership
 face unlock already requires (`/run/soos/daemon.sock` stays `0660 root:soos`).
+
+**With the installer (default).** `scripts/install.sh` (and the packages, which stage through it
+or list the same files) installs, root-owned:
+
+| File | Mode |
+|---|---|
+| `/usr/bin/soos-lockstatus`, `/usr/bin/soos-lock-widget` (when built; a build without them installs and says so) | 0755 |
+| `/usr/share/gnome-shell/extensions/soos-lockscreen@soos/` (`metadata.json`, `extension.js`, `stylesheet.css`) | 0755 / 0644 |
+| `/usr/share/soos/lockscreen/hyprlock-soos.conf` (the snippet of §5) | 0644 |
+
+Every file is journaled: a failed install removes them again, and `scripts/uninstall.sh` removes
+exactly these files (never through a symbolic link; a file you added to the extension directory
+keeps it). The installer enables nothing. `scripts/setup.sh` then opts you in, on by default:
+
+- it detects `swaylock-plugin`, `hyprlock` and `gnome-shell` (`command -v` only; the dry run and
+  the plan show what it found and what it will do);
+- **GNOME**: as you (never root), from a local seat whose desktop is GNOME
+  (`XDG_CURRENT_DESKTOP`), after the system phase it runs
+  `gnome-extensions enable soos-lockscreen@soos`; GNOME Shell reads a new system extension at
+  login, so on the first install the enable is usually refused: log out and back in, then run
+  that command (setup prints it; a refusal never fails setup). From SSH, as root or from another
+  desktop the command is printed instead;
+- **swaylock-plugin** and **hyprlock**: setup prints the exact line (§4, §5) and never edits a
+  locker configuration;
+- `--lock-widget off` creates `/etc/soos/lockwidget.disable` (no GNOME card for any user, nothing
+  enabled or printed), `--lock-widget on` removes it, and without the option the current state is
+  kept (`Docs/PACKAGING_AND_PROVISIONING.md` §3.0).
+
+**Shipped build.** Every installer path (`install.sh --build`, `setup.sh`, the PKGBUILD, the Debian
+rules and the RPM spec) runs `cargo build --release --locked --workspace`. That whole-workspace build
+unifies features with `soos-gui`, which enables the `libwayland-client` backend of
+`wayland-backend` loaded at run time (`dlopen`): the installed widget needs `libwayland-client.so.0`
+(present wherever swaylock-plugin runs, since swaylock-plugin itself links it; a missing library
+is reported as a setup error on stderr). Built on its own (`-p soos-lock-widget`) the widget uses
+the pure-Rust backend and links no Wayland C library; that variant is not installed by any
+script.
+
+**By hand (user level, swaylock-plugin and hyprlock only).**
 
 ```sh
 cargo build --locked --release -p soos-lockstatus -p soos-lock-widget
 install -Dm0755 target/release/soos-lockstatus  ~/.local/bin/soos-lockstatus
 install -Dm0755 target/release/soos-lock-widget ~/.local/bin/soos-lock-widget
 ```
-
-The installer opt-in (detecting the locker and installing the adapter) is a later PR of #352.
-Built on its own (`-p soos-lock-widget`, as above), the widget uses the pure-Rust Wayland
-backend of `wayland-backend` and links no Wayland C library (`ldd` lists only the C runtime). A
-whole-workspace build unifies features with `soos-gui`, which enables the `libwayland-client`
-backend loaded at run time (`dlopen`); with that build a missing library is reported as a setup
-error. The installer PR of #352 decides which variant ships.
 
 ## 4. swaylock-plugin (driftwm, sway, any wlroots compositor)
 
@@ -73,6 +106,9 @@ starts the locker, for example in the `SetLockedHint` wrapper of `Docs/DISTRIBUT
 ```sh
 swaylock-plugin --command 'soos-lock-widget'
 ```
+
+After the installer, `scripts/setup.sh` prints this line with the absolute path
+(`swaylock-plugin --command '/usr/bin/soos-lock-widget'`).
 
 `--command` (one process for every output) is recommended. `--command-each` also works (one
 instance per output); every instance shares the same coordination, so the daemon still sees one
@@ -98,7 +134,10 @@ while something moves; once the state is stable it draws nothing.
 
 ## 5. hyprlock
 
-Append `packaging/lockscreen/hyprlock-soos.conf` to `~/.config/hypr/hyprlock.conf`:
+Append `packaging/lockscreen/hyprlock-soos.conf` (installed as
+`/usr/share/soos/lockscreen/hyprlock-soos.conf`) to `~/.config/hypr/hyprlock.conf`, for example
+`cat /usr/share/soos/lockscreen/hyprlock-soos.conf >> ~/.config/hypr/hyprlock.conf` (the line
+`scripts/setup.sh` prints; it never runs it):
 
 ```ini
 label {
@@ -194,10 +233,10 @@ scan about every 4.24 s), the turn continues from scan to scan.
 - Nothing biometric leaves the daemon: the answer is three states and a counter. Neither program
   logs the state; neither has a logger.
 - No new socket, no permission change, no privileged component, no network, no D-Bus.
-- `pam_soos.so`, the daemon and the protocol are unchanged by this PR.
+- `pam_soos.so`, the daemon and the protocol are unchanged by these PRs.
 - Kill switch: remove the `--command` argument or the hyprlock label. The `/etc/soos/lockwidget.disable`
-  file proposed in the epic applies to the GNOME adapter, where an extension runs inside the
-  shell (§11); the swaylock-plugin widget and the hyprlock label do not read it.
+  file (`scripts/setup.sh --lock-widget off`) applies to the GNOME adapter, where an extension
+  runs inside the shell (§11); the swaylock-plugin widget and the hyprlock label do not read it.
 
 ## 11. GNOME Shell (system extension `soos-lockscreen@soos`)
 
@@ -221,7 +260,9 @@ then every 8 s while the session stays locked.
 `/usr/local/bin`: the extension never looks in `PATH` or in your home directory, so the
 `~/.local/bin` install of §3 is not used here. The user must be in the `soos` group (§3).
 
-**Manual install** (the installer opt-in is a later PR of #352):
+**Install.** `scripts/install.sh` copies the extension to `/usr/share/gnome-shell/extensions/` and
+`soos-lockstatus` to `/usr/bin`, and `scripts/setup.sh` runs `gnome-extensions enable` for you from
+a local GNOME seat (§3). **Manual install**, the same steps by hand:
 
 ```sh
 cargo build --locked --release -p soos-lockstatus
