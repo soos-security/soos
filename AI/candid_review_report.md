@@ -1,110 +1,103 @@
 # Candid Review Report
 
 - **Date**: 2026-10-18
-- **Target Branch**: `chore/docs-followups`
-- **Base (merge-base)**: `ed0bb84`
-- **Reviewed-Diff-Fingerprint**: `ad81c9f77c561caeddf9d2c264ee1571f0d57f966ba3e9e4dc226283564db6ad`
-- **Audited Files**: `AI/DECISIONS.md`, `AI/VERIFICATION_MATRIX.md`, `AI/walkthroughs/238_docs_followups.md`, `Docs/REMOTE_COMPANION.md`, `README.md`
+- **Target Branch**: `fix/lockwidget-flag-path`
+- **Base (merge-base)**: `cb071cd`
+- **Reviewed-Diff-Fingerprint**: `0639e197520a061c9b53ed338dc81234e835594d6c32ce2b44addcddfb956edc`
+- **Audited Files**: `AI/DECISIONS.md`, `AI/VERIFICATION_MATRIX.md`, `AI/walkthroughs/242_lockwidget_flag_path.md`, `Docs/LOCKSCREEN_WIDGET.md`, `Docs/PACKAGING_AND_PROVISIONING.md`, `scripts/setup.sh`, `scripts/uninstall.sh`, `tests/invariants/src/lockscreen_installer_contract.rs`
 
 ## 1. Executive Summary
 
-Re-review after the rebase of `chore/docs-followups` onto `origin/main` `ed0bb84` (which gained #434,
-#435, #440, #442, #445 and #447). The frozen patch is documentation only (GitHub #443, part of #363):
-OBT9 prose, README companion wording (the `[android]` Funnel rule, the three tours, the two kinds of
-offline alerts), a dated zbus 6 note in ADR 2026-10-02 "Presence Auto-Unlock Through logind",
-disambiguated "section 2j" cross-references in `Docs/REMOTE_COMPANION.md`, matrix component
-`docs-followups` (DFW1-DFW5) and walkthrough 238. No code, test, configuration or dependency file is
-touched. Both README feature-table rows that conflicted during the rebase were checked against the code
-on the new base and are true. No CRITICAL or MAJOR finding.
+This review was rerun after the rebase onto `origin/main` `cb071cd`. That base adds #446 (doc follow-ups) on top of the
+previous base `ed0bb84` (#447, release dry run). The review covers the raw diff from `cb071cd` to the working tree, frozen
+in `target/candid_diff.patch`.
+
+The rebase did not change the branch's own work. `git range-diff ed0bb84..origin/fix/lockwidget-flag-path cb071cd..HEAD`
+reports the fix commit as identical (`ac4d7b4 = 3884c12`). A diff of the two per-commit patches differs only in their
+`index` lines. Before this rewrite, the review-report commit `f504156` had the same report blob as the pushed `5520cc3`.
+Every other difference between `5520cc3` and `HEAD` is #446's content (`AI/DECISIONS.md`, `AI/VERIFICATION_MATRIX.md`,
+walkthrough 238, `Docs/REMOTE_COMPANION.md`, `README.md`).
+
+The diff implements GitHub #451:
+- `scripts/setup.sh` pins `LOCK_WIDGET_READ_FLAG="/etc/soos/lockwidget.disable"`, which is the GNOME extension's
+  `KILL_SWITCH_PATH`. It reports the lock-widget step `[DONE]` only when `<sysconfdir>/soos/lockwidget.disable` is that
+  path. In every other case it reports `[SKIP]`, with "not applied" and the exact `sudo touch` or `sudo rm -f` command.
+- The GNOME success line now mentions the log-out.
+- `scripts/uninstall.sh` never follows a symbolic link in place of `<prefix>/share/soos`.
+- Docs, matrix rows LWF1–LWF6 and walkthrough 242 are added.
+
+Results: `bash -n` passes on both scripts, and `cargo test --locked -p soos-invariants` reports 828 passed and 0 failed.
+There are no CRITICAL or MAJOR findings.
 
 ## 2. Test Changes
 
 Mechanical listing from `target/candid_diff.patch`:
+- **Test files touched**: only `tests/invariants/src/lockscreen_installer_contract.rs`, with 277 added lines and no
+  removed lines. The patch appends a new `#451` section after the last existing test (`test_lki10_...`).
+- **Removed or changed assertions** (`^-` with `assert`, `#[test]` or `proptest!`): none.
+- **New escape hatches** (`#[ignore]`, `#[cfg(any())]`, `should_panic`, tolerance, epsilon): none.
+- **Inline `mod tests` changes**: none.
 
-- Test, fixture or `tests/` files touched: none.
-- Removed or changed `assert` / `#[test]` / `proptest!` / `#[should_panic]` lines: none. The single
-  `^-` hit is the ADR 2026-10-02 paragraph in `AI/DECISIONS.md` (prose), replaced by the same text plus
-  the dated note "(2026-10-18 note: migrated to zbus 6 by #417 for RUSTSEC-2026-0370/-0371/-0372)".
-- New escape hatches (`#[ignore]`, `#[cfg(any())]`, `should_panic`, tolerance, epsilon): none.
-- Inline `mod tests` changes: none.
-
-No test weakening.
+No pre-existing assertion changed. The new tests LWF1–LWF6 can fail against plausible wrong implementations:
+- LWF1 cross-checks `setup.sh` against `extension.js` `KILL_SWITCH_PATH`, and checks that no other component reads the
+  flag.
+- LWF2 rejects any `[DONE] lock widget` line, and any "no GNOME card" claim, under a non-`/etc` sysconfdir.
+- LWF3 proves the `[DONE]` path still works when the read path matches.
+- LWF5 uses a real symbolic link and checks that the targets stay byte-for-byte unchanged.
 
 ## 3. Deep Reasoning Audit
 
 ### Logic & Architecture
-
-- **Phone companion row (`README.md:56`)**: kept from the branch. Its new clause "`soos-gui` turns
-  Internet access (`allow_funnel`) off only once the `[android]` table of the native Android app is
-  removed from `remote.toml`" matches `disable_remote_keys` in `crates/gui/src/feature_control.rs`
-  on the base: when the parsed file contains `android` and the keys include `allow_funnel`, it returns
-  `RemoteEditError::FunnelRequiredByAndroid` before any edit. The clause does not contradict #430:
-  every other switch still edits the top-level keys above one `[android]` table (that table copied
-  byte for byte, any other table or a target key inside it `UnsupportedLayout`); the row only restricts
-  `allow_funnel`. The onboarding note `FUNNEL_ANDROID_NOTE` (`crates/gui/src/onboarding.rs`) says the
-  same. PASS.
-- **Native Android app row (`README.md:57`)**: identical to `origin/main` (#442 "read-only battery and
-  offline-history cards"); the branch does not change it. Checked against `android/.../cards/CardModel.kt`
-  and `ui/PcCards.kt` (cards present) and `SettingsStore.kt` (`heartbeat_enabled` defaults to `false`,
-  matching "PC offline alerts once turned on in its settings"). PASS.
-- **Security off-switch paragraph (`README.md:297-305`)**: "the two phone tours ... switch nothing and
-  only say where each feature is turned off" matches `Docs/REMOTE_COMPANION.md` §2j "Feature tour in
-  the app" and the web tour section (both "switches nothing"; each step gives the `soos-gui`
-  **Features** switch or the `remote.toml` keys with their dependants). "While `remote.toml` has an
-  `[android]` table, `soos-gui` does not turn Internet access off" matches `FunnelRequiredByAndroid`.
-  The Android PC offline alerts are "off until it is turned on ... in the app's settings": matches the
-  default `false` of `heartbeat_enabled`. The back-online notifications are attributed to
-  `offline_alerts` of `soos-remote` (§2j "Offline history"). PASS.
-- **Claims against the rest of the new base**: #434 (lock-screen installer), #435 (IR differential
-  liveness cues), #440, #445 and #447 (release dry run) touch none of the edited README units, ADR
-  paragraph, matrix rows or companion cross-references; no branch sentence describes their areas.
-  The lock-screen widget row and the other feature-table rows are main's text, unchanged. PASS.
-- **ADR note**: workspace pin `zbus = { version = "6", default-features = false, features = ["tokio"] }`
-  (`Cargo.toml:65`) matches the note; the original "zbus 5" decision text is kept. PASS.
-- **"section 2j" disambiguation**: every changed reference names "Offline history" or "Native Android
-  app" correctly for its subject (offline intervals / back-online push → Offline history; assetlinks,
-  signing key, PC offline alerts, app scope, app tour → Native Android app). Both `## 2j.` headings are
-  unchanged. PASS.
-- **Duplicates**: one `## Component: \`docs-followups\`` heading and one DFW1 row in the matrix, one
-  `---` separator before it (after the RDR component of #447); one ADR "Presence Auto-Unlock Through
-  logind (GitHub #323" entry; one Phone companion and one Native Android app feature row (the second
-  "Phone companion" match at `README.md:330` is the comparison table, present on main). Walkthrough 238
-  is new and fills the gap left on main between 237 and 239. PASS.
-- **Invariants**: `cargo test --locked -p soos-invariants -- --test-threads=3` on the rebased tree:
-  822 passed, 0 failed. PASS.
+- **Rebase interaction with #446.** Both PRs edit `AI/DECISIONS.md` and `AI/VERIFICATION_MATRIX.md`, on different lines.
+  #446 changed ADR 2026-10-02 and matrix row OBT9. This branch changes only the 2026-10-18 lock-screen ADR line and
+  appends a new LWF section. The diff against `cb071cd` touches neither #446 hunk, and `README.md` and
+  `Docs/REMOTE_COMPANION.md` are not in the diff, so no #446 change is reverted. The walkthrough numbers do not collide:
+  238 belongs to #446 and 242 to this branch. → PASS.
+- **Rebase interaction with #447.** #447 was already in the old base. `scripts/release_dry_run.sh` builds the source
+  tarball with `git archive` of `HEAD`, so the changed `setup.sh` and `uninstall.sh` are shipped as tracked files, with no
+  pinned file list or checksum to update. Both PRs edit `Docs/PACKAGING_AND_PROVISIONING.md`, but the
+  `release_dry_run_contract` needles in that file still pass (828/828). → PASS.
+- **Scenario: non-`/etc` sysconfdir.** Tried `off` twice, a plain run, `on`, a plain run again, and a dry run. The flag is
+  still created or removed and journaled under `<sysconfdir>`, but every phase, plan and summary line says "not applied"
+  with the read path and the command. The command matches the requested state: `lock_widget_requested` uses
+  `lock_widget_will_be_off`, and the plan note is computed once, before the `case`. → PASS.
+- **Scenario: `--sysconfdir /etc/` (trailing slash).** The comparison is a string comparison, so this path is reported
+  "not applied" although it is the read path. That is a false negative in the conservative direction: setup never falsely
+  claims `[DONE]`. → SUGGESTION.
+- The rollback paragraph says a lock-widget or camera-view failure triggers rollback. This matches `fail_and_rollback`,
+  which is called for "lock widget" and "camera view (daemon)" (setup.sh, around lines 2154 and 2160). → PASS.
 
 ### PAM Concurrency & Deadlines
-
-No Rust or PAM file touched. PASS (not applicable).
+No `crates/pam` change. The only external call touched is `gnome-extensions enable`, whose message text changed. The call
+stays wrapped in `run_bounded "${QUERY_TIMEOUT_S}"`. → PASS (not applicable).
 
 ### Panic Safety & Fail-Closed
-
-No production code touched; no wording claims a fail-open path. PASS.
+No Rust production code changes. In the scripts, the new branches only downgrade `[DONE]` to `[SKIP]`, and no path claims
+a protection or state that was not applied. The symbolic-link refusal on the flag itself is kept, before the `case`. →
+PASS.
 
 ### Test Integrity & Anti-Weakening
-
-Section 2 listing: no test touched. Rows DFW1-DFW5 cite existing tests that exist on the base
-(`test_gak3_funnel_is_refused_while_android_is_configured`, `test_gak4_...`, the README and companion
-wording guards, the `## 2j.` heading checks); all ran green. PASS.
+See section 2. The diff only adds tests, and the LKI rows are unchanged. → PASS.
 
 ### Memory, Bounds & Secrets
-
-No data, key, credential or command added. PASS.
+- **`uninstall.sh` with `<prefix>/share/soos` as a symbolic link.** `SOOS_SHARE_LINKED=true` skips both the Arch snippet
+  removal and the hyprlock snippet removal, along with every `rmdir`, and prints a warning. A link at the `pam/` or
+  `lockscreen/` subdirectory is also refused. `share/soos` is referenced nowhere else in the script. → PASS.
+- No secrets, frames or embeddings appear in the new output. Only fixed paths and commands are printed. → PASS.
 
 ### Supply Chain & Automation
-
-No `Cargo.*`, `deny.toml`, `.github/`, `scripts/` or `.githooks/` change. PASS.
+The diff touches no `Cargo.*`, `deny.toml`, `.github/` or hook files. The script changes use only coreutils and add no
+downloads. → PASS.
 
 ### English-Only Policy
-
-All added text is English. PASS.
+All code, comments, docs and test messages in the diff are English. → PASS.
 
 ## 4. Detailed Findings & Action Items
 
-- **[SUGGESTION]** `AI/VERIFICATION_MATRIX.md` (component `docs-followups` intro, "the code on `main`
-  (3f76090)") and `AI/walkthroughs/238_docs_followups.md:5` ("Base commit: `3f76090`") still name the
-  pre-rebase base. Every claim was re-checked on `ed0bb84` and holds, so this is a provenance note only;
-  updating it is optional.
+- **[SUGGESTION]** `scripts/setup.sh:519` — `LOCK_WIDGET_FLAG` is built from the raw `--sysconfdir` value, so `/etc/` or
+  `/etc/.` is reported "not applied" even though it is the read path. This is fail-safe (never a false `[DONE]`) and
+  follows the same rule as `DAEMON_READ_CONFIG`. A possible follow-up is to normalize trailing slashes in `--sysconfdir`.
+  No action is required for this PR.
 
 ## 5. Final Verdict
 

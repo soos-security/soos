@@ -1086,3 +1086,280 @@ fn test_lki10_packages_variant_and_documentation() {
         .join("AI/walkthroughs/233_lockscreen_installer.md")
         .is_file());
 }
+
+// ---------------------------------------------------------------------------
+// Lock-widget flag read path and review follow-ups (GitHub #451, follow-up of PR #434; rows
+// LWF1-LWF6)
+// ---------------------------------------------------------------------------
+
+/// The one lock-widget kill switch the GNOME extension reads (its `KILL_SWITCH_PATH`).
+const READ_FLAG: &str = "/etc/soos/lockwidget.disable";
+
+fn lines_of(out: &Output) -> Vec<String> {
+    text(out).lines().map(str::to_string).collect()
+}
+
+/// A non-/etc `--sysconfdir` run never reports the lock-widget step as applied: no
+/// `[DONE] lock widget` line, one `[SKIP] lock widget` line saying "not applied" with the
+/// path the extension reads and the exact administrator command, and every lock-widget plan
+/// line saying "not applied".
+fn assert_lock_widget_not_applied(out: &Output, command: &str) {
+    let lines = lines_of(out);
+    let t = text(out);
+    assert!(
+        !lines.iter().any(|l| l.starts_with("[DONE] lock widget")),
+        "a flag the extension never reads is never reported done:\n{t}"
+    );
+    let skips: Vec<&String> = lines
+        .iter()
+        .filter(|l| l.starts_with("[SKIP] lock widget: "))
+        .collect();
+    assert_eq!(skips.len(), 1, "one lock-widget phase line:\n{t}");
+    for needle in ["not applied", READ_FLAG, command] {
+        assert!(skips[0].contains(needle), "missing {needle}: {}", skips[0]);
+    }
+    let plans: Vec<&String> = lines
+        .iter()
+        .filter(|l| l.starts_with("[PLAN] lock widget: "))
+        .collect();
+    assert_eq!(plans.len(), 1, "one lock-widget plan line:\n{t}");
+    assert!(
+        plans[0].contains("not applied") && plans[0].contains(READ_FLAG),
+        "{}",
+        plans[0]
+    );
+    assert!(
+        !t.contains("no GNOME card"),
+        "no line claims the card is off:\n{t}"
+    );
+}
+
+/// LWF1: the read path is pinned on both sides: `setup.sh` names the extension's
+/// `KILL_SWITCH_PATH` as the only file whose flag step may be reported done, and no other
+/// shipped component reads `lockwidget.disable` (the swaylock-plugin widget, the bridge and
+/// the hyprlock snippet do not).
+#[test]
+fn test_lwf1_read_path_matches_the_gnome_extension() {
+    let script = read_repo("scripts/setup.sh");
+    assert!(
+        script
+            .lines()
+            .any(|l| l == format!("readonly LOCK_WIDGET_READ_FLAG=\"{READ_FLAG}\"")),
+        "setup.sh pins the read path"
+    );
+    let ext = read_repo("packaging/gnome-shell/soos-lockscreen@soos/extension.js");
+    let declared = ext
+        .lines()
+        .find_map(|l| l.strip_prefix("const KILL_SWITCH_PATH = '"))
+        .and_then(|rest| rest.strip_suffix("';"))
+        .expect("KILL_SWITCH_PATH in extension.js");
+    assert_eq!(declared, READ_FLAG, "setup.sh and extension.js agree");
+    for rel in [
+        "crates/lockstatus",
+        "crates/lock-widget",
+        "packaging/lockscreen",
+    ] {
+        let mut stack = vec![workspace_root().join(rel)];
+        while let Some(dir) = stack.pop() {
+            for entry in fs::read_dir(&dir).unwrap().flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else if let Ok(body) = fs::read_to_string(&path) {
+                    assert!(
+                        !body.contains("lockwidget.disable"),
+                        "{} reads the flag: setup.sh must learn its read path",
+                        path.display()
+                    );
+                }
+            }
+        }
+    }
+    // The applied/not-applied decision is a comparison with the read path, never a guess.
+    assert!(script.contains("\"${LOCK_WIDGET_FLAG}\" != \"${LOCK_WIDGET_READ_FLAG}\""));
+}
+
+/// LWF2: with a `--sysconfdir` other than `/etc` (the harness's fake root), `--lock-widget off`,
+/// a repeated `off`, a plain run, `--lock-widget on` and a dry run never report the step as
+/// applied, print the exact command for `/etc/soos/lockwidget.disable`, and the summary repeats
+/// it; the user locker files stay untouched.
+#[test]
+fn test_lwf2_non_etc_sysconfdir_never_reports_the_flag_applied() {
+    let h = Harness::new("lwf_elsewhere", &["gnome-shell"]);
+    let touch = format!("sudo touch {READ_FLAG}");
+    let remove = format!("sudo rm -f {READ_FLAG}");
+
+    let out = h.run(&["--dry-run", "--lock-widget", "off"]);
+    assert_eq!(code(&out), 0, "{}", text(&out));
+    let plan = lines_of(&out)
+        .into_iter()
+        .find(|l| l.starts_with("[PLAN] lock widget: "))
+        .expect("plan line");
+    assert!(
+        plan.contains("not applied") && plan.contains(&touch),
+        "{plan}"
+    );
+
+    let out = h.run(&["--yes", "--lock-widget", "off"]);
+    assert_eq!(code(&out), 0, "{}", text(&out));
+    assert_lock_widget_not_applied(&out, &touch);
+    assert!(
+        lines_of(&out)
+            .iter()
+            .any(|l| l.contains("Lock screen") && l.contains(&touch)),
+        "the summary prints the manual step:\n{}",
+        text(&out)
+    );
+
+    let out = h.run(&["--yes", "--lock-widget", "off"]);
+    assert_eq!(code(&out), 0, "{}", text(&out));
+    assert_lock_widget_not_applied(&out, &touch);
+
+    let out = h.run(&["--yes"]);
+    assert_eq!(code(&out), 0, "{}", text(&out));
+    assert_lock_widget_not_applied(&out, &touch);
+
+    let out = h.run(&["--yes", "--lock-widget", "on"]);
+    assert_eq!(code(&out), 0, "{}", text(&out));
+    assert_lock_widget_not_applied(&out, &remove);
+    assert!(
+        lines_of(&out)
+            .iter()
+            .any(|l| l.contains("Lock screen") && l.contains(&remove)),
+        "the summary prints the manual step:\n{}",
+        text(&out)
+    );
+
+    let out = h.run(&["--yes"]);
+    assert_eq!(code(&out), 0, "{}", text(&out));
+    assert_lock_widget_not_applied(&out, &remove);
+}
+
+/// LWF3: when `<sysconfdir>/soos/lockwidget.disable` is the file the extension reads (the read
+/// path pointed at the fake root in a copy of the script), the step is reported done and
+/// never "not applied".
+#[test]
+fn test_lwf3_read_path_flag_is_reported_done() {
+    let h = Harness::new("lwf_applied", &[]);
+    let path = h.repo.join("scripts/setup.sh");
+    let original = format!("readonly LOCK_WIDGET_READ_FLAG=\"{READ_FLAG}\"");
+    let script = fs::read_to_string(&path).unwrap();
+    assert!(script.contains(&original), "read path line present");
+    fs::write(
+        &path,
+        script.replace(
+            &original,
+            &format!("readonly LOCK_WIDGET_READ_FLAG=\"{}\"", h.flag().display()),
+        ),
+    )
+    .unwrap();
+
+    let out = h.run(&["--yes", "--lock-widget", "off"]);
+    assert_eq!(code(&out), 0, "{}", text(&out));
+    let t = text(&out);
+    assert!(
+        t.contains(&format!(
+            "[DONE] lock widget: turned off ({})",
+            h.flag().display()
+        )),
+        "{t}"
+    );
+    assert!(!t.contains("not applied: the GNOME extension reads"), "{t}");
+    assert!(h.flag().is_file());
+
+    let out = h.run(&["--yes", "--lock-widget", "on"]);
+    assert_eq!(code(&out), 0, "{}", text(&out));
+    let t = text(&out);
+    assert!(t.contains("[DONE] lock widget: turned on ("), "{t}");
+    assert!(!t.contains("not applied: the GNOME extension reads"), "{t}");
+    assert!(!h.flag().exists());
+}
+
+/// LWF4: the GNOME enable success line does not promise the card at the next lock without
+/// saying that GNOME Shell may first need a log-out.
+#[test]
+fn test_lwf4_gnome_success_line_mentions_the_log_out() {
+    let h = Harness::new("lwf_gnome", &["gnome-shell"]);
+    let out = h.run(&["--yes"]);
+    assert_eq!(code(&out), 0, "{}", text(&out));
+    let line = lines_of(&out)
+        .into_iter()
+        .find(|l| l.starts_with("[DONE] lock screen (GNOME): soos-lockscreen@soos enabled for"))
+        .unwrap_or_else(|| panic!("success line:\n{}", text(&out)));
+    assert!(line.contains("log out and back in"), "{line}");
+}
+
+/// LWF5: uninstall.sh never removes a file through a symbolic link in place of
+/// `<prefix>/share/soos` (the hyprlock snippet and the Arch PAM snippet below it stay, the link
+/// stays a link) and still succeeds.
+#[test]
+fn test_lwf5_uninstall_refuses_a_linked_share_soos() {
+    let dir = scratch("lwf_share_link");
+    let stage = dir.join("stage");
+    let target = dir.join("target");
+    for rel in ["lockscreen/hyprlock-soos.conf", "pam/system-auth.snippet"] {
+        let file = target.join(rel);
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(&file, "keep\n").unwrap();
+    }
+    let share = stage.join("usr/share/soos");
+    fs::create_dir_all(share.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(&target, &share).unwrap();
+    let out = run_uninstall(&stage);
+    assert_eq!(code(&out), 0, "{}", text(&out));
+    for rel in ["lockscreen/hyprlock-soos.conf", "pam/system-auth.snippet"] {
+        assert_eq!(
+            fs::read_to_string(target.join(rel)).unwrap(),
+            "keep\n",
+            "{rel} untouched behind the link"
+        );
+    }
+    assert!(fs::symlink_metadata(&share)
+        .unwrap()
+        .file_type()
+        .is_symlink());
+    assert!(text(&out).contains("symbolic link"), "{}", text(&out));
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// LWF6: the documentation agrees with the code: the off state prints a notice (not "nothing
+/// printed"), the read path and the "not applied" report are documented, the rollback
+/// paragraph covers the lock-widget and camera-view failures (the `--check-config` refusal
+/// included), no `setup.sh --uninstall` is promised, and the traceability is present.
+#[test]
+fn test_lwf6_documentation_and_traceability() {
+    let widget = read_repo("Docs/LOCKSCREEN_WIDGET.md");
+    let flat: String = widget.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(
+        !flat.contains("nothing enabled or printed"),
+        "the off notice is printed"
+    );
+    for needle in ["not applied", READ_FLAG, "off notice"] {
+        assert!(flat.contains(needle), "LOCKSCREEN_WIDGET.md: {needle}");
+    }
+    let pkg = read_repo("Docs/PACKAGING_AND_PROVISIONING.md");
+    let flat: String = pkg.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(
+        !flat.contains("a later `--uninstall`"),
+        "no setup.sh --uninstall is promised"
+    );
+    let rollback = flat
+        .split("**Rollback.**")
+        .nth(1)
+        .and_then(|rest| rest.split(" | Exit |").next())
+        .expect("rollback paragraph");
+    for needle in ["lock widget", "camera view", "--check-config"] {
+        assert!(rollback.contains(needle), "rollback paragraph: {needle}");
+    }
+    assert!(flat.contains("not applied") && flat.contains(READ_FLAG));
+    let matrix = read_repo("AI/VERIFICATION_MATRIX.md");
+    for row in 1..=6 {
+        assert!(
+            matrix.contains(&format!("| LWF{row} |")),
+            "matrix row LWF{row}"
+        );
+    }
+    assert!(workspace_root()
+        .join("AI/walkthroughs/242_lockwidget_flag_path.md")
+        .is_file());
+}
