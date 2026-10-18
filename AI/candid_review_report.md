@@ -1,121 +1,105 @@
 # Candid Review Report
 
 - **Date**: 2026-10-18
-- **Target Branch**: `chore/readme-web-captures` (PR #450, GitHub #448, part of #356)
-- **Base (merge-base)**: `2e510b8`
-- **Reviewed-Diff-Fingerprint**: `ac2162a2ecc946c4a1eb1ff9961bda0876eb6e62341995570f65f0546dcf236d`
-- **Audited Files**: `AI/VERIFICATION_MATRIX.md`, `AI/walkthroughs/241_readme_web_captures.md`,
-  `Docs/README_ASSETS.md`, `Docs/assets/MANIFEST.toml`,
-  `Docs/assets/screenshots/web-{unlocked,locked-alerts}-{light,dark}.png`, `README.md`,
-  `scripts/capture_readme_web.sh`, `tests/fixtures/examples/readme_web_fixture_server.rs`,
-  `tests/fixtures/mod.rs`, `tests/fixtures/tests/readme_fixed_clock_tests.rs`,
-  `tests/fixtures/tests/readme_tour_seen_tests.rs`
+- **Target Branch**: `fix/presence-flag-path`
+- **Base (merge-base)**: `8f03eb7`
+- **Reviewed-Diff-Fingerprint**: `1509ecae0acd25be7b5f36c7b92a5804f24f5813f290103f316488a8e7928c84`
+- **Audited Files**: `AI/DECISIONS.md`, `AI/VERIFICATION_MATRIX.md`, `AI/walkthroughs/243_presence_flag_path.md`, `Docs/PACKAGING_AND_PROVISIONING.md`, `scripts/setup.sh`, `tests/invariants/src/setup_contract.rs`
 
 ## 1. Executive Summary
 
-Independent re-review after the rebase onto `origin/main` `2e510b8`, which replaced the earlier
-merge-of-main commit with a linear history. Main gained #442, #447, #446 and #452 since the old
-merge-base `33b5672`. The frozen patch contains only branch work: 15 files, no `crates/`, `Cargo.*`,
-`.github/` or packaging change.
-
-Content proof against the pre-rebase branch `origin/chore/readme-web-captures` (`747681e`): every
-branch file except `README.md` and `AI/VERIFICATION_MATRIX.md` has the same blob as before (fixtures,
-example, both test files, script, the four PNGs, `MANIFEST.toml`, `Docs/README_ASSETS.md`,
-walkthrough 241). For `README.md` and `AI/VERIFICATION_MATRIX.md`, the added and removed lines of the
-branch against `2e510b8` are identical to the old branch's lines against the main it had merged
-(`33b5672`). The remaining blob differences come only from main's own changes (#446 README rows and
-security paragraph, #442/#446 matrix rows). No blocking finding.
+GitHub #453: `scripts/setup.sh` wrote the presence kill switch at `<sysconfdir>/soos/presence.disable`
+and reported `[DONE]`, while soos-daemon (`crates/daemon/src/presence/mod.rs`
+`DEFAULT_KILL_SWITCH_DIR = "/etc/soos"`, `PRESENCE_DISABLE_FLAG`, watched by `main.rs:222` with no
+path option) and soos-gui (`feature_control.rs` `SOOS_ETC_DIR`) only read
+`/etc/soos/presence.disable`. The diff pins `readonly PRESENCE_READ_FLAG`, adds
+`presence_flag_elsewhere` / `presence_not_applied` / `presence_requested`, and turns every plan,
+phase and summary line into a "not applied" line with the exact `sudo touch` / `sudo rm -f`
+command when the two paths differ. The state file, journal, rollback and symlink refusal are
+unchanged. The change mirrors the merged lock-widget fix (#452) line for line. No daemon, PAM,
+GUI or protocol code is touched. `cargo test -p soos-invariants`: 832 passed, 0 failed (PFP1-PFP4
+included); `cargo fmt --check` clean; `bash -n scripts/setup.sh` clean (shellcheck not installed
+locally; CI runs it).
 
 ## 2. Test Changes
 
 Mechanical listing from `target/candid_diff.patch`:
 
-- Test files touched: `tests/fixtures/mod.rs` (fixture library), `tests/fixtures/examples/readme_web_fixture_server.rs`
-  (example binary), `tests/fixtures/tests/readme_fixed_clock_tests.rs` (new),
-  `tests/fixtures/tests/readme_tour_seen_tests.rs` (new).
-- Removed or changed assertions / `#[test]` / `#[tokio::test]` / `proptest!` / `should_panic`: **none** (grep empty).
-- New escape hatches (`#[ignore]`, `#[cfg(any())]`, `should_panic`, tolerance, epsilon): **none**.
+- Test files touched: `tests/invariants/src/setup_contract.rs` only (additions only, appended
+  after the last existing test).
+- Removed/changed assertions (`^-` with `assert|#[test]|...`): **none**.
+- New escape hatches (`#[ignore]`, `should_panic`, tolerance, epsilon): **none**.
 - Inline `mod tests` changes: **none**.
-- Every removed code line under `tests/fixtures` was checked by hand. It is fixture-server plumbing
-  for the clock parameter, not a check: the `use ... serve` import and the `serve(..)` call of the
-  example (now `serve_with_clock(.., clock)`), the `handle(..)` signature (gains
-  `clock: FixtureClock`), the `route(.., now_unix_ms())` call (now `clock.now_unix_ms()`), and the
-  worker's `handle(..)` call. `serve` keeps its signature and delegates to
-  `serve_with_clock(.., FixtureClock::Real)`, so the existing RAC8, RAC9 and RAC19 tests run
-  unchanged. No contract migration needed.
+
+New tests PFP1-PFP4 are additive. Each fails against the base code: PFP1 and PFP3 require the
+`readonly PRESENCE_READ_FLAG=...` line; PFP2 requires "not applied" and the command, which base
+code never prints; PFP4 requires the new docs/matrix/walkthrough. PFP3 patches the harness copy
+of the script only (`h.repo`), not the repository file. No existing test was weakened.
 
 ## 3. Deep Reasoning Audit
 
 ### Logic & Architecture
-- Interaction with #446: #446 rewrote the "Phone companion `soos-remote`" feature row (the
-  `allow_funnel` / `[android]` rule) and the security paragraph (three tours, two kinds of offline
-  alerts). The branch's README hunk sits only in the "Screenshots" section after the GUI table and
-  does not overlap those lines. The captions still match the pictures (unlocked: no failed password,
-  one synthetic offline period; locked: idle, two failed `sudo` passwords to acknowledge) and do not
-  contradict #446: the captures show no tour because the fixture marks it seen, and the README makes
-  no claim about the tour being visible in them. PASS.
-- #447 (release dry run) and #452 (setup lock-widget flag) touch no file of this branch; the release
-  dry-run contract does not inspect `Docs/assets` or PNG sizes. PASS.
-- `capture_page` returns `None` unless `<head>` and `<script src="app.js"></script>` occur exactly
-  once; the current `crates/remote/assets/index.html` has each once (lines 3 and 97). A missing marker
-  gives 404. PASS.
-- Routes: `route` rejects every method other than `GET` before the path match; `/readme/tour-seen` and
-  `/readme/capture` are exact matches. PASS.
-- `FIXED_CAPTURE_UNIX_MS` = 1 790 847 660 000 is 2026-10-01 09:41:00 UTC (`date -u -d @1790847660`).
-  `--serve-ms 240000` is inside the example's clamp `[1000, 300000]`. PASS.
-- The tour flag constants match `crates/remote/assets/app.js` (`TOUR_STORAGE_KEY = "soos-remote-tour-v1"`,
-  `TOUR_STORAGE_SEEN = "seen"`). PASS.
+- Scenario: `--sysconfdir <fakeroot>/etc --presence off` run twice, then plain, then `on`, then
+  plain (PFP2). Each branch of `phase_presence` (create, already present, remove, already absent,
+  report-only) has an `elsewhere` arm printing `[SKIP] ... not applied ...`; no `[DONE]` path is
+  reachable when `PRESENCE_FLAG != PRESENCE_READ_FLAG`. PASS.
+- Scenario: dry run with each `--presence` value: `PRESENCE_PLAN_NOTE` is built from
+  `presence_requested`, which mirrors the requested or recorded state, so the printed command
+  (`touch` for off, `rm -f` for on) matches the request. The `*` plan arm uses `presence_report`,
+  which carries its own note. PASS.
+- Scenario: default `/etc`: `presence_report` falls through to the unchanged `presence_state`
+  (kill-switch, flag, on) and every phase arm keeps the original `[DONE]` text (PFP3). PASS.
+- Scenario: `--sysconfdir /etc/` or `//etc`: string comparison reports "not applied" although
+  the daemon would read the file. Fails safe (under-reports, never over-reports), identical to
+  `DAEMON_READ_CONFIG` and `LOCK_WIDGET_READ_FLAG`, and documented in walkthrough 243. SUGGESTION
+  only.
+- In the elsewhere case `presence_report` no longer mentions `<sysconfdir>/soos/disabled`; that
+  file is also not read by the daemon in that case, so dropping it is accurate. PASS.
+- Single source of truth: PFP1 parses the daemon and GUI constants and checks `main.rs` uses
+  the constant directory, and scans `crates/*/src`, `packaging`, `scripts` for any new reader.
+  `git grep` confirms the only non-test, non-doc sources naming the flag are in the known list.
+  PASS.
 
 ### PAM Concurrency & Deadlines
-- No PAM code touched. N/A, PASS.
+- No change under `crates/pam`. N/A, PASS.
 
 ### Panic Safety & Fail-Closed
-- The new fixture code has no `unwrap`/`expect`/indexing; I/O errors map to 404 or are ignored per
-  connection. No authorization path is touched; nothing can reach `Allow`/`PAM_SUCCESS`. PASS.
+- No Rust production code changes. The script change only alters reporting; no path turns an
+  unapplied step into a success claim; the opposite direction (false "not applied") is the safe
+  one. PASS.
 
 ### Test Integrity & Anti-Weakening
-- Step 3 output reviewed above: no pre-existing assertion removed or changed.
-- Ran `LIBONNXRUNTIME_NO_PKG_CONFIG=1 CARGO_TARGET_DIR=~/.cache/soos-targets/readme-web-captures
-  CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_BUILD_JOBS=3
-  cargo test --locked -p soos-invariants -p soos-test-fixtures -- --test-threads=3` on the rebased
-  tree: 843 passed, 0 failed, 0 ignored (828 invariants, 3 fixture generators, 3 fixed clock,
-  7 README fixture, 2 tour-seen). PASS.
+- See section 2. `unwrap`/`expect`/`panic!` in the new test helpers are test-only. The PFP1 scan
+  ignores unreadable directories with `continue` but asserts that the daemon file is seen, so an
+  empty scan cannot pass vacuously. PASS.
 
 ### Memory, Bounds & Secrets
-- Visual check of all four PNGs (780x1688): only synthetic fixture data ("your account", `sudo`,
-  09:38 AM alerts, an Oct 1 sleep period). No face or photo, no login or user name, no host name,
-  IP address, e-mail, passkey id or push endpoint, no tour overlay.
-- PNG chunks are only `IHDR`, `IDAT` and `IEND` (no `tEXt`, `tIME` or `eXIf`); `strings` finds no
-  path, user or address text.
-- `sha256sum` of each PNG equals its `MANIFEST.toml` entry:
-  `web-locked-alerts-dark` `4cb600f4…af33`, `web-locked-alerts-light` `02a30d2b…c71b`,
-  `web-unlocked-dark` `c150088e…8d98`, `web-unlocked-light` `03838f7b…6a35`. PASS.
+- Messages print only file paths and fixed commands; no credentials, frames or embeddings.
+  Flag creation still uses `set -C` (no-clobber) and the symlink refusal precedes the new code;
+  mode `0644` unchanged. PASS.
 
 ### Supply Chain & Automation
-- No `Cargo.*`, `deny.toml`, `.github/` or packaging change. The script keeps `set -euo pipefail`,
-  installs or downloads nothing, and `TZ=UTC` only scopes the browser process. PASS.
+- No `Cargo.*`, `deny.toml`, `.github/` or hook change. `scripts/setup.sh` gains no new external
+  command or `eval`; all expansions are quoted. PASS.
 
 ### English-Only Policy
-- All code, comments, docs, matrix rows and the walkthrough are in English. PASS.
+- Code, comments, messages, ADR amendment, matrix rows and walkthrough 243 are in English. PASS.
 
 ## 4. Detailed Findings & Action Items
 
-- **[SUGGESTION]** `README.md` "Screenshots" — the first sentence still says "All screenshots are
-  generated ... by `scripts/capture_readme_assets.sh` ... the user `alice`", while the web captures
-  come from `scripts/capture_readme_web.sh` (named in the next paragraph). Optional: say "The GUI
-  screenshots" there. Not introduced by the rebase.
-- **[SUGGESTION]** `tests/fixtures/tests/readme_fixed_clock_tests.rs` — the per-route loop compares
-  `route(.., now)` with `route(.., FixtureClock::Fixed.now_unix_ms())`, the same value on both sides,
-  so it is close to tautological; the pinned instant and the over-the-wire `checked_unix_ms` check
-  carry the real contract. Carried over from the previous review.
-- **[SUGGESTION]** `tests/fixtures/mod.rs` (`CAPTURE_CLOCK_SCRIPT`) — a bare `Date()` call (without
-  `new`) would throw on the capture page because `window.Date` becomes a class; the assets contain no
-  such call today. Carried over from the previous review.
+- **[SUGGESTION]** `scripts/setup.sh:1006-1008` — `presence_flag_elsewhere` is a plain string
+  comparison, so `--sysconfdir /etc/` (trailing slash) or `//etc` is reported "not applied" even
+  though the daemon reads that file. Fail-safe and consistent with `DAEMON_READ_CONFIG`
+  (`setup.sh:1336`) and `LOCK_WIDGET_READ_FLAG` (`setup.sh:1061`); a shared normalisation of
+  `SYSCONFDIR` (strip trailing and duplicate slashes) could be a follow-up for all three.
+- **[SUGGESTION]** `scripts/setup.sh:2389`, `2400`, `2406` — in the elsewhere case the plan status
+  column still says "already done" while the detail says "not applied". The detail is correct and
+  tested, and it matches the merged lock-widget precedent (`setup.sh:2415`, `2422`, `2426`), but a
+  status such as "manual (not applied)" (as used for the camera view at `setup.sh:1673`) would be
+  clearer. Changing it later must keep PFP2's "one `[PLAN] presence:` line" contract.
 
-RAC18 stays Pending for the owner's visual check.
+No CRITICAL, MAJOR or MINOR findings.
 
 ## 5. Final Verdict
-
-No CRITICAL, MAJOR or MINOR finding.
 
 **VERDICT: APPROVED**
