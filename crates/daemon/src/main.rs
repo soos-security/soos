@@ -3,12 +3,14 @@
 #![forbid(unsafe_code)]
 
 use clap::Parser;
-use std::path::PathBuf;
+use std::io::Write as _;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::signal::unix::{signal, SignalKind};
 use tracing::{error, info, warn};
 
+use soos_daemon::check_config::{check_default_config, CheckStream};
 use soos_daemon::config::DaemonConfig;
 use soos_daemon::dispatcher::ConnectionDispatcher;
 use soos_daemon::health::HealthState;
@@ -50,12 +52,33 @@ struct Cli {
     /// Force mock camera capture manager rather than hardware V4L2 device.
     #[arg(long)]
     mock_camera: bool,
+
+    /// Validate the configuration file (--config, else /etc/soos/daemon.toml) and exit:
+    /// 0 valid, 66 unreadable, 78 invalid. Opens no socket, camera, model or runtime.
+    #[arg(long, conflicts_with = "mock_camera")]
+    check_config: bool,
+}
+
+/// `--check-config` (GitHub #441): one bounded line on stdout (valid) or stderr (refused),
+/// returning the sysexits code. A failed write is ignored: the exit code still says the result.
+fn run_check_config(config: Option<&Path>) -> u8 {
+    let report = check_default_config(config);
+    let _ignored = match report.stream {
+        CheckStream::Stdout => {
+            let mut out = std::io::stdout().lock();
+            writeln!(out, "{}", report.line).and_then(|()| out.flush())
+        }
+        CheckStream::Stderr => {
+            let mut err = std::io::stderr().lock();
+            writeln!(err, "{}", report.line).and_then(|()| err.flush())
+        }
+    };
+    report.exit_code
 }
 
 /// Runs the daemon until SIGINT/SIGTERM and the bounded drain; returns what is left of the
 /// one-`connection_timeout` shutdown budget for the runtime shutdown (GitHub #289).
-async fn run() -> Result<Duration, Box<dyn std::error::Error>> {
-    let cli = Cli::parse();
+async fn run(cli: Cli) -> Result<Duration, Box<dyn std::error::Error>> {
     let mut config = DaemonConfig::load_or_default(cli.config.as_deref())?;
 
     if cli.mock_camera {
@@ -299,10 +322,16 @@ async fn run() -> Result<Duration, Box<dyn std::error::Error>> {
 /// without bound for every blocking job (GitHub #289): `shutdown_runtime` gives the blocking
 /// pool what is left of the shutdown budget, then exits without awaiting abandoned jobs.
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let cli = Cli::parse();
+    // GitHub #441: the check returns before the runtime, logging, the panic hook, mlockall, the
+    // pipeline, the camera, the models and the socket exist.
+    if cli.check_config {
+        std::process::exit(i32::from(run_check_config(cli.config.as_deref())));
+    }
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
-    match runtime.block_on(run()) {
+    match runtime.block_on(run(cli)) {
         Ok(remaining) => {
             shutdown_runtime(runtime, remaining);
             Ok(())

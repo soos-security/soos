@@ -225,6 +225,37 @@ With `mode = "off"`, keys that are present are still validated. The section is n
 by `soos-admin camera ir-emitter configure` (see `Docs/CAMERA_V4L_CRATE.md`), inside a managed
 `# BEGIN soos-admin camera.ir_emitter` / `# END soos-admin camera.ir_emitter` block.
 
+### 1.9 Checking a configuration: `--check-config` (GitHub #441)
+
+`soos-daemon --check-config [--config <FILE>]` loads the file exactly as the daemon start does and
+exits: the same `DaemonConfig::load_classified` path (`crates/daemon/src/config.rs`, which the start
+path `load_or_default_with_system_path` is built on), the same bounded reader, the same bounds and
+validation, and the same unknown-key policy (unknown keys are ignored, so they are accepted). A file
+is accepted exactly when the daemon would start with it. Without `--config`, `/etc/soos/daemon.toml`
+is checked, and its absence is valid (the built-in defaults apply).
+
+The check returns before the Tokio runtime is built: it opens no socket, camera or model, initializes
+no logging, takes no memory lock, and needs no root (only read access to the file). It prints one
+English line of at most 512 bytes (`MAX_CHECK_DIAGNOSTIC_BYTES`): on stdout when valid (with the
+number of configuration warnings, which the daemon logs at start), on stderr when refused. Only the
+first line of the error is printed, so a TOML error gives its line and column but never quotes the
+file; control characters are replaced with `?`.
+
+| Exit | sysexits name | Meaning |
+|---|---|---|
+| 0 | `EX_OK` | valid (or no file at `/etc/soos/daemon.toml` without `--config`) |
+| 66 | `EX_NOINPUT` | the file cannot be opened or read: missing, a dangling symbolic link, a directory, FIFO or device node, permission denied |
+| 78 | `EX_CONFIG` | the file is refused: larger than 1 MiB, not UTF-8, not valid TOML, a value of the wrong type, or a validation error (§1.1–§1.7) |
+| 2 | (clap) | usage error, for example `--check-config` together with `--mock-camera` |
+
+```bash
+sudo /usr/libexec/soos/soos-daemon --check-config            # /etc/soos/daemon.toml
+/usr/libexec/soos/soos-daemon --check-config --config ./daemon.toml
+```
+
+`scripts/setup.sh` runs `soos-daemon --check-config --config /etc/soos/daemon.toml` on the file it
+has just created, before it restarts the daemon (`Docs/PACKAGING_AND_PROVISIONING.md` §3.0).
+
 ## 2. Connection Model
 
 - One Tokio task per accepted connection, tracked in `soos_daemon::shutdown::ConnectionTasks`

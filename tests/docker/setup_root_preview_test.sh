@@ -21,6 +21,9 @@
 #     READY=1, answers "healthy" and records every start. A mode file read at
 #     each start makes it refuse to start or report unhealthy, either only
 #     while /etc/soos/daemon.toml exists, or always. No face pipeline runs.
+#     Run by setup.sh as `soos-daemon --check-config --config <file>`, it only
+#     records the call (never starts, never binds) and refuses in the mode
+#     check-refuses.
 #   - /usr/bin/soos-admin answers the status query of wait_daemon_ready.sh
 #     over that socket and the camera report of the verify phase.
 #   - setup.sh is copied byte for byte into a fake checkout whose install.sh
@@ -48,6 +51,12 @@
 #   E1 /etc/soos/daemon.toml is a dangling symbolic link: refused and printed,
 #      link kept, its target never created, no restart; exit 0.
 #   E2 A symbolic link to an existing file: refused, the file never edited.
+#   F1 soos-daemon --check-config refuses the created file (GitHub #441): the
+#      file and the /etc/soos created by the run removed, no restart (same
+#      invocation, never started with the file), daemon healthy, exit 1,
+#      companion never runs.
+#   F2 The created file is checked exactly once by the installed daemon, before
+#      the restart on it; exit 0.
 #
 # Host isolation: the container runs --privileged (systemd and the unit sandbox
 # need namespaces) with a private cgroup namespace and tmpfs /run, like the
@@ -78,14 +87,15 @@ readonly COMPANION_LOG="${TEST_DIR}/user/companion.log"
 readonly LINK_TARGET="${TEST_DIR}/link-target.toml"
 readonly LOGIN="owner.login@example.com"
 readonly RP_ID="pc.tail1234.ts.net"
-readonly ALL_CASES=(A1 A2 B C1 C2 D E1 E2)
+readonly CHECK_LOG="${TEST_DIR}/check-config.log"
+readonly ALL_CASES=(A1 A2 B C1 C2 D E1 E2 F1 F2)
 
 info() { echo "[INFO]  $*"; }
 ok()   { echo "[OK]    $*"; }
 fail() { echo "[FAIL]  $*" >&2; exit 1; }
 
 usage() {
-    sed -n '2,65p' "$0"
+    sed -n '2,74p' "$0"
 }
 
 DOCKER=""
@@ -211,6 +221,33 @@ MODE_FILE = "/var/lib/soos-setup-test/daemon-mode"
 START_LOG = "/var/lib/soos/setup-test-daemon-starts.log"
 CONFIG = "/etc/soos/daemon.toml"
 SOCKET_PATH = "/run/soos/daemon.sock"
+CHECK_LOG = "/var/lib/soos-setup-test/check-config.log"
+
+
+def check_config():
+    """`--check-config [--config FILE]` (GitHub #441): records the call; never starts or binds."""
+    path = CONFIG
+    args = sys.argv[1:]
+    if "--config" in args[:-1]:
+        path = args[args.index("--config") + 1]
+    try:
+        with open(MODE_FILE, encoding="ascii") as handle:
+            mode = handle.read().strip()
+    except OSError:
+        mode = "ok"
+    try:
+        with open(START_LOG, encoding="ascii") as log:
+            present_starts = sum(1 for line in log if "daemon_toml=present" in line)
+    except OSError:
+        present_starts = 0
+    with open(CHECK_LOG, "a", encoding="ascii") as log:
+        log.write("check config=%s file=%s present_starts=%d\n" % (
+            path, "present" if os.path.isfile(path) else "absent", present_starts))
+    if mode == "check-refuses":
+        print("soos-daemon: configuration refused: stub (mode check-refuses)", file=sys.stderr)
+        return 78
+    print("soos-daemon: configuration '%s' is valid" % path)
+    return 0
 
 
 def notify(message):
@@ -225,6 +262,8 @@ def notify(message):
 
 
 def main():
+    if "--check-config" in sys.argv:
+        return check_config()
     try:
         with open(MODE_FILE, encoding="ascii") as handle:
             mode = handle.read().strip()
@@ -657,6 +696,47 @@ case_e1() {
 case_e2() {
     case_e E2 true
     ok "E2 symbolic link to a file: refused and printed, target never edited, no restart, exit 0"
+}
+
+# F1: soos-daemon --check-config refuses the created file: removed again, never restarted on.
+case_f1() {
+    local id="F1" before
+    reset_case absent check-refuses
+    : > "${CHECK_LOG}"
+    before="$(invocation)"
+    run_setup
+    expect_rc 1 "${id}"
+    expect_out "[FAIL] camera view (daemon): soos-daemon --check-config refused ${DAEMON_TOML} (removed again; ${UNIT} not restarted)" "${id}"
+    expect_out "Setup FAILED in phase camera view (daemon)" "${id}"
+    grep -qx "check config=${DAEMON_TOML} file=present present_starts=0" "${CHECK_LOG}" \
+        || case_fail "${id}: the created file was not checked: $(cat "${CHECK_LOG}")"
+    [[ ! -e "${DAEMON_TOML}" && ! -L "${DAEMON_TOML}" ]] || case_fail "${id}: ${DAEMON_TOML} was not removed"
+    [[ ! -e /etc/soos ]] || case_fail "${id}: /etc/soos created by the run was not removed"
+    no_temp_files "${id}"
+    [[ "$(invocation)" == "${before}" ]] || case_fail "${id}: ${UNIT} was restarted"
+    if grep -q "daemon_toml=present" "${START_LOG}"; then
+        case_fail "${id}: the daemon was started with the refused file"
+    fi
+    systemctl is-active --quiet "${UNIT}" || case_fail "${id}: ${UNIT} is not active"
+    daemon_ready || case_fail "${id}: ${UNIT} is not healthy"
+    companion_not_run "${id}"
+    ok "F1 check refused: file and /etc/soos removed, no restart, daemon healthy, exit 1, companion never ran"
+}
+
+# F2: the created file is checked exactly once, before the daemon is restarted on it.
+case_f2() {
+    local id="F2"
+    reset_case absent ok
+    : > "${CHECK_LOG}"
+    run_setup
+    expect_rc 0 "${id}"
+    [[ "$(cat "${CHECK_LOG}")" == "check config=${DAEMON_TOML} file=present present_starts=0" ]] \
+        || case_fail "${id}: expected one check of the created file before any start with it: $(cat "${CHECK_LOG}")"
+    grep -qx "start mode=ok daemon_toml=present" "${START_LOG}" \
+        || case_fail "${id}: the daemon was not restarted on the checked file"
+    expect_out "[DONE] camera view (daemon): ${DAEMON_TOML} created" "${id}"
+    companion_ran "${id}"
+    ok "F2 check passed: one check of the created file before the restart, exit 0"
 }
 
 in_container() {

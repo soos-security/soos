@@ -480,6 +480,7 @@ BIOMETRICS_DIR="${SOOS_STATE_ROOT}/biometrics"
 MODELS_DIR="${SOOS_STATE_ROOT}/models"
 MASTER_KEY="${SOOS_STATE_ROOT}/master.key"
 ADMIN_BIN="${PREFIX}/bin/soos-admin"
+DAEMON_BIN="${PREFIX}/libexec/soos/soos-daemon"
 ENROLL_BIN="${PREFIX}/bin/soos-enroll"
 UNIT="soos-daemon.service"
 
@@ -1651,6 +1652,14 @@ phase_preview() {
     fi
     rm -f -- "${tmp}"
     JOURNAL+=(daemon_toml_created)
+    # GitHub #441: the installed daemon validates the new file with its own loader before any
+    # restart; a refused file is removed again and the daemon keeps running untouched.
+    if ! run_bounded "${QUERY_TIMEOUT_S}" "${DAEMON_BIN}" --check-config --config "${DAEMON_TOML}"; then
+        printf '[FAIL] camera view (daemon): soos-daemon --check-config refused %s (removed again; %s not restarted)\n' "${DAEMON_TOML}" "${UNIT}"
+        rm -f -- "${DAEMON_TOML}"
+        unset 'JOURNAL[${#JOURNAL[@]}-1]'
+        return 1
+    fi
     info "Restarting ${UNIT} to load the [preview] section of ${DAEMON_TOML}"
     if ! run_bounded "${QUERY_TIMEOUT_S}" systemctl restart "${UNIT}" || ! daemon_ready; then
         printf '[FAIL] camera view (daemon): %s did not become ready with %s (removed again)\n' "${UNIT}" "${DAEMON_TOML}"
