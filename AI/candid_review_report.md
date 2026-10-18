@@ -1,128 +1,91 @@
 # Candid Review Report
 
-- **Date**: 2026-10-17
-- **Target Branch**: `chore/readme-redesign` (PR #409, GitHub #408)
-- **Base (merge-base)**: `27d1e7c` (= `origin/main` after `git fetch origin`, includes #406, #407, #418, #419; `origin/main` is an ancestor of `HEAD`)
-- **Reviewed-Diff-Fingerprint**: `cdf548d17ec6a3864ff6fa04b56cd2354532c667c03d92adad82d373ab176bc7`
-- **Audited Files**: `AI/DECISIONS.md`, `AI/VERIFICATION_MATRIX.md`, `AI/architect_spec_readme_redesign.md`, `AI/auditor_constraints_readme_redesign.md`, `AI/walkthroughs/216_readme_redesign.md`, `Docs/DEVELOPMENT_WORKFLOW.md`, `Docs/README.md`, `Docs/REMOTE_COMPANION.md`, `README.md`, `tests/invariants/src/lib.rs`, `tests/invariants/src/readme_contract.rs`
+- **Date**: 2026-10-18
+- **Target Branch**: `test/deflake-gui-store-task`
+- **Base (merge-base)**: `74782b8`
+- **Reviewed-Diff-Fingerprint**: `ffbb716da4e88858cd9375ae08dda714ad5fb2016f8290040011557984507848`
+- **Audited Files**: `AI/VERIFICATION_MATRIX.md`, `AI/walkthroughs/226_deflake_gui_store_task.md`, `Docs/GUI_APPLICATION.md`, `crates/gui/tests/store_task_tests.rs`
 
 ## 1. Executive Summary
 
-Documentation-only change plus one new static invariant module. No production code, no
-`Cargo.*`, no workflow or script change. Every factual claim of the rewritten `README.md` and of
-the edited lines of `Docs/REMOTE_COMPANION.md`, `Docs/README.md`, `Docs/DEVELOPMENT_WORKFLOW.md`
-and `AI/DECISIONS.md` was checked against `origin/main` (`27d1e7c`). No claim was found false.
-The companion wording matches `scripts/setup.sh` (all seven keys written `true`, fixture
-`tests/fixtures/setup/remote.toml`), the code defaults and dependency checks of
-`crates/remote/src/config.rs` (exit 78 = `EXIT_CONFIG`), `scripts/install_remote.sh` (all keys
-commented `false`) and the `soos-gui` switches (`RemoteSwitch` in
-`crates/gui/src/feature_control.rs`, routed in `crates/gui/src/onboarding.rs`). Every listed
-feature is merged on `origin/main`. `cargo test --locked -p soos-invariants` passes: 771 passed,
-0 failed, the four new `test_rdm_companion_*` tests included. Only SUGGESTION-level items remain.
+This is a test-only change. The `wait_outcome` helper in `crates/gui/tests/store_task_tests.rs` checked its 10 s deadline before polling. A test thread descheduled across the deadline therefore exited without a final poll. The helper is rebuilt on a generic `poll_until(deadline_passed, poll, pause)` that polls first and checks the deadline after. Two new tests, DGS1 and DGS2, cover the ordering and the bound. No production, PAM, IPC, Cargo or automation file changes. No SGU test body, assertion, message or `#[test]` attribute changes. There is one minor documentation remark and one cosmetic suggestion, and no CRITICAL or MAJOR finding.
 
 ## 2. Test Changes (mechanical listing from step 3)
 
-- Test files touched: `tests/invariants/src/lib.rs` (adds `mod readme_contract;` under
-  `#[cfg(all(test, unix))]`, nothing removed), `tests/invariants/src/readme_contract.rs` (new file).
-- Removed or changed assertions (`^-` with assert/#[test]/proptest/should_panic): **none**.
-- New escape hatches (`#[ignore]`, `#[cfg(any())]`, `should_panic`, tolerance/epsilon): **none**.
-- Inline `mod tests` changes: **none**.
-- No existing test on `origin/main` was edited. The old README sentence "(each can be turned off
-  later in soos-gui)" from #402 was replaced. No existing contract pinned it: the
-  setup/installer/onboarding/upgrade/licence README contracts all pass unchanged.
+- Test files touched: `crates/gui/tests/store_task_tests.rs` only.
+- Removed or changed check lines: one, at patch line 158: `assert!(outcomes.is_empty(), "one outcome per task");` in the old `wait_outcome` body. Justification: the helper was rewritten, and the new `poll` closure keeps the same assertion with the same condition and message. It still fires exactly when an outcome was popped and others remain. The panic text `no store task outcome within 10 s` and the 10 s bound are kept. The assertion moved inside a helper and was not weakened.
+- New escape hatches (`#[ignore]`, `should_panic`, tolerance, epsilon): none.
+- Changes to inline `mod tests`: none.
+- New tests: `test_dgs_wait_polls_once_more_after_a_stall_past_the_deadline`, `test_dgs_wait_still_gives_up_after_the_timeout`.
+- `git diff 74782b8 HEAD -- tests 'crates/*/tests' android/app/src/test` touches only the file above. No pre-existing assertion was removed or changed.
 
 ## 3. Deep Reasoning Audit
 
 ### Logic & Architecture
-- Phone companion vs `scripts/setup.sh`: `COMPANION_KEYS` = `allow_funnel allow_unlock
-  password_alerts push_notifications offline_alerts camera_view camera_view_funnel`, all `true`
-  in the render fixture. README L37-40, L56, L96-100, L290-303 and FAQ L352-360 say setup turns
-  them on. PASS.
-- Code defaults: every key is `unwrap_or(false)` in `config.rs`, and `install_remote.sh` comments
-  them as `= false`. "A manual install and the code defaults leave all of them off" is correct. PASS.
-- Dependency list (README L299-302) vs `config.rs`: `CameraFunnelRequiresCameraView`,
-  `CameraFunnelRequiresFunnel`, `PushRequiresAlerts`, `OfflineRequiresPush`,
-  `AndroidRequiresFunnel`. "`offline_alerts` with `password_alerts`" is transitively correct
-  (offline needs push, push needs alerts). Exit 78 = `EXIT_CONFIG` (`crates/remote/src/lib.rs:139`). PASS.
-- soos-gui switches: `RemoteSwitch` = Unlock, Funnel, Push, CameraView, OfflineAlerts, with no
-  `password_alerts` switch. Funnel clears `camera_view_funnel`, and so does CameraView. "All but
-  the failed-password alerts" and "turning Funnel or the camera view off also sets
-  `camera_view_funnel` to false" are both correct. The **Features** header button exists
-  (`header.rs`, `app.rs:723`). PASS (see S-1 for an under-statement).
-- Passkey claims vs `Docs/REMOTE_COMPANION.md` §2b, §2f and `AI/ARCHITECTURE.md`: a Funnel
-  session needs a passkey sign-in, every unlock needs a fresh UV assertion "on every path", and
-  every camera view starts with a fresh UV assertion on the tailnet and over Funnel. On the
-  tailnet, status and lock need no passkey. PASS.
-- Native Android app (§2j "Native Android app", the second §2j heading, which predates this
-  branch): status, lock, Funnel passkey sign-in, failed-password alerts with acknowledgement
-  (#406), and offline alerts when turned on (#419). Unlock and the camera view stay in the web
-  app. PASS.
-- Phone tour §2k (#418) is listed as "a first-run feature tour in the web app". PASS.
-- Kill switch: `crates/pam/src/config.rs:120` (`flag_dir.join("disabled")`) and
-  `crates/daemon/src/presence/switch.rs` (`GLOBAL_DISABLE_FLAG`) both read it. PASS.
-- Lock-screen widget: swaylock-plugin, hyprlock and GNOME Shell 45 or later (#407, `LOCKSCREEN_WIDGET.md` L24-26), KDE later. PASS.
-- Merged-only rule: `gh pr list --state merged --limit 12` and `git log origin/main` contain
-  #402, #403, #406, #407, #413, #418 and #419. No unmerged feature is listed. PASS.
-- Other spot checks: the badge workflows `ci.yml`/`fuzz.yml` exist; the Rust 1.98.1 badge matches
-  `rust-toolchain.toml`; the evidence 7-day retention and daily cap; `sensor_preference`; the
-  uncalibrated IR PAD threshold (ADR 2026-09-30); the 2.7x single-scale PAD and #212; model
-  attestation stops the start (`models/README.md` L61); setup creates the `[preview]` section
-  only when `daemon.toml` is absent. PASS.
-- `Docs/REMOTE_COMPANION.md` heading renames (`(opt-in)` → `(off by default, on after
-  scripts/setup.sh)`): no repository link or test targets the old anchors. PASS.
-- `AI/DECISIONS.md`: exactly one appended line (`+` 1, `-` 0) and no duplicated or reverted line
-  compared with `origin/main`. PASS.
+
+- I traced the old and new ordering by hand on the DGS1 scenario:
+  - The old order runs check(false), poll(None), pause (sets the flag), check(true) and returns `None`. DGS1 therefore fails red, as the walkthrough states (`left: None`, `right: Some(2)`).
+  - The new order runs poll(None), check(false), pause, poll(Some(2)) and returns `Some(2)`.
+  
+  PASS.
+- DGS2 takes `started` before `after(30 ms)` builds its deadline. `poll_until` returns `None` only when `Instant::now() >= deadline`, so `took >= 30 ms` holds by construction. The 10 s upper bound is generous, so the test is not load-sensitive. PASS.
+- `after()` computes its deadline when it is called, at the start of `wait_outcome`, as before. The bound is still 10 s. PASS.
+- The new helper adds at most one poll after the deadline. It cannot loop forever, because the real-clock predicate stays true once it becomes true. PASS.
+- I checked the production claims against `crates/gui/src/store_tasks.rs`:
+  - The worker runs the job under `catch_unwind`, then calls `tx.send`, then `notify` (lines 177-183).
+  - `poll` drains `try_iter` and synthesizes `WORKER_LOST_MESSAGE` for a finished worker that sent no outcome (lines 229-243).
+  - `worker_failure_tests::wait_outcome` receives first and checks the deadline after (lines 274-283).
+  - `BiometricStore::with_lock_timeout` exists, and `LOCK_WAIT` is 600 ms.
+  
+  All of these claims are accurate.
+- I checked the CI evidence with `gh run view 39062359937 --attempt 1 --log-failed`:
+  - `running 6 tests` at 19:29:08.651.
+  - The enroll test reports `FAILED` at 19:29:20.889.
+  - The delete test reports `ok` at 19:29:20.8917, 2.7 ms later.
+  - The run reports `finished in 12.24s`, with the panic at old line 91, the helper's `panic!`.
+  
+  All of this is accurate. See MINOR 1 for the one inference stated as fact.
 
 ### PAM Concurrency & Deadlines
-No change under `crates/pam` or `crates/daemon`. The README statements (`timeout_ms` default
-1000 ms, no Tokio, `PAM_IGNORE` fallback) match `AGENTS.md` and the ADR. PASS.
+
+There is no `crates/pam` change, so this pillar does not apply. PASS.
 
 ### Panic Safety & Fail-Closed
-No production code. `expect`/`unwrap_or` appear only in test code. The README never states a
-path to `PAM_SUCCESS` other than a fresh `Allow`. PASS.
+
+Only test code changes. `unwrap_or_else(|| panic!(..))` sits in a test helper covered by the file's existing test lint allowance. No production path is touched. PASS.
 
 ### Test Integrity & Anti-Weakening
-- RDM10 returns early if the fixture sets no exposure key. RDM12 asserts the fixture yields
-  exactly the four keys, which closes that bypass. Tried: emptying the fixture makes RDM12 fail.
-  PASS.
-- RDM10 can fail against a plausible wrong README: re-inserting "opt-in unlock" in the Mermaid
-  node or "Remote unlock is off by default" is caught (helper cases in RDM11). PASS.
-- `section(&readme, "Security")` returns the first `## ` heading containing "security", which is
-  "Security model" (it precedes "Contributing and security"). PASS.
-- RDM12's `claims_independent_opt_out` is a phrase denylist, so a new wording such as "any key can
-  be set to false" would slip through. This is acceptable as a regression guard, and the
-  positive needle check (exit 78 and the dependent keys) carries the contract (S-3).
-- Test run: 771 passed, 0 failed.
+
+- I reviewed the step 3 output above. The new body keeps the single removed assertion line word for word.
+- The SGU test bodies do not change in the diff: `test_sgu_enroll_submit_never_blocks_on_a_held_store_lock`, `test_sgu_delete_submit_never_blocks_and_keeps_the_template_when_busy` and the other four.
+- DGS1 fails against the plausible wrong implementation, the old order. DGS2 fails against an unbounded implementation or one that returns early (`took >= 30 ms`, `took < 10 s`, `polls >= 1`). PASS.
 
 ### Memory, Bounds & Secrets
-No runtime code. The README examples use synthetic values (`alice`, `you@example.com`,
-`mypc.tail1234.ts.net`). No secret, real host name or face image is added. PASS.
+
+The wait stays bounded: 10 s in SGU use and 30 ms in DGS2. Nothing new is logged, and no frames, embeddings or credentials are involved. PASS.
 
 ### Supply Chain & Automation
+
 No `Cargo.*`, `deny.toml`, `.github/`, `scripts/` or `.githooks/` change. PASS.
 
 ### English-Only Policy
-All added text is English. PASS.
+
+All added text is in English ("Synchronisation" is British spelling, still English). The commit subject `test(gui): deflake the held-store-lock enroll task test` follows Conventional Commits with one scope and is under 72 characters. PASS.
+
+### Commands re-run by the reviewer
+
+All commands ran with `LIBONNXRUNTIME_NO_PKG_CONFIG=1 CARGO_TARGET_DIR=~/.cache/soos-targets/deflake-gui-store-task CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_BUILD_JOBS=3`:
+
+- `cargo fmt -p soos-gui -- --check`: clean.
+- `cargo clippy -p soos-gui --all-targets -- -D warnings`: clean.
+- `cargo test -p soos-gui --test store_task_tests -- --test-threads=3`: 8 passed, which matches the walkthrough.
+- `cargo test -p soos-invariants -- --test-threads=3`: 771 passed.
+- I did not reproduce the 50/50 load run cited in DGS1. The evidence that matters is the deterministic DGS1 red/green pair, as the walkthrough itself says.
 
 ## 4. Detailed Findings & Action Items
 
-- **[SUGGESTION] S-1** `README.md:296` — "Funnel, remote unlock and the camera view each have an
-  off switch in `soos-gui`" is true but omits that push and offline alerts also have switches
-  (`RemoteSwitch::Push`, `RemoteSwitch::OfflineAlerts`). The feature table at L56 states it
-  correctly ("all but the failed-password alerts"). Optionally add "push and offline alerts" to
-  L296.
-- **[SUGGESTION] S-2** `Docs/REMOTE_COMPANION.md:200` (unedited line) — the §2b example comment
-  `allow_funnel = true  # opt-in; false (the default) ...` and `AI/ARCHITECTURE.md:406,413`
-  ("Push sender (opt-in)", "Unlock (opt-in)") still use "opt-in" for keys that setup turns on.
-  They describe the code default correctly. Align them in a follow-up if desired.
-- **[SUGGESTION] S-3** `tests/invariants/src/readme_contract.rs:874` — `claims_independent_opt_out`
-  matches four fixed phrasings only. Consider a broader pattern (e.g. "can be set to `false`"
-  without "depend") if the README is rewritten again.
-- **[SUGGESTION] S-4** (outside the diff) `scripts/setup.sh` `--help` says every companion feature
-  "can be turned off later in soos-gui (Features)", which is not true for `password_alerts`. The
-  README is now more accurate than the script help. File it as a follow-up.
-
-No CRITICAL, MAJOR or MINOR findings.
+- **[MINOR]** `AI/walkthroughs/226_deflake_gui_store_task.md:17`: The walkthrough says the failure was at the *second* `wait_outcome` deadline, about 19:29:19.3, and that the panic came 1.6 s late. The CI backtrace shows only that the test function called `wait_outcome`, without the call-site line, so it does not show which of the two calls failed. If it was the first call, the deadline was about 19:29:18.66 and the panic came about 2.2 s late. The root-cause conclusion holds either way: the test thread was descheduled past its deadline. Optional correction: present this as an inference ("assuming the second call").
+- **[SUGGESTION]** `AI/VERIFICATION_MATRIX.md:1795-1796`: the SGU1 and SGU2 rows have a stray space before the period ("` . Note:`"). Cosmetic.
 
 ## 5. Final Verdict
 
