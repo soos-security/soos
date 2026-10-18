@@ -1,123 +1,96 @@
 # Candid Review Report
 
 - **Date**: 2026-10-18
-- **Target Branch**: `chore/release-dry-run`
-- **Base (merge-base)**: `54d69f0` (origin/main after #445, #440, #434, #435 and #442)
-- **Reviewed-Diff-Fingerprint**: `0d5740dced03567e87512506dee5b5916e2ecf0745959163e32085cd14fdd62f`
-- **Audited Files**: `.github/workflows/ci.yml`, `AI/BACKLOG.md`, `AI/DECISIONS.md`,
-  `AI/VERIFICATION_MATRIX.md`, `AI/architect_spec_release_dry_run.md`,
-  `AI/auditor_constraints_release_dry_run.md`, `AI/walkthroughs/239_release_dry_run.md`,
-  `Docs/CI_CD_AND_SECURITY.md`, `Docs/PACKAGING_AND_PROVISIONING.md`, `Docs/README.md`,
-  `Docs/RELEASING.md`, `scripts/release_dry_run.sh`, `tests/docker/release_dry_run_test.sh`,
-  `tests/invariants/src/lib.rs`, `tests/invariants/src/release_dry_run_contract.rs`
+- **Target Branch**: `chore/docs-followups`
+- **Base (merge-base)**: `3f76090`
+- **Reviewed-Diff-Fingerprint**: `5d3a5afccf339eba5d038e60f6b9d759b1b52778f4ae9eb94990dd8c9d4f419f`
+- **Audited Files**: `AI/DECISIONS.md`, `AI/VERIFICATION_MATRIX.md`, `AI/walkthroughs/238_docs_followups.md`, `Docs/REMOTE_COMPANION.md`, `README.md`
 
 ## 1. Executive Summary
 
-Independent re-review after the rebase of `chore/release-dry-run` (GitHub #444, part of #361) from
-`3f76090` onto `54d69f0`. The frozen patch (`target/candid_diff.patch`, 2295 lines) was compared,
-file by file, with the pre-rebase branch (`origin/chore/release-dry-run`, commit `325dbac` against
-`3f76090`): the added and removed lines of 12 of the 15 files are identical, and
-`AI/plan_evaluator_report.md` (excluded from the fingerprint) is byte-identical. The only
-differences are in the three append-conflict files:
-
-- `AI/BACKLOG.md`: the same 28 added lines; one blank separator line moved from before the entry
-  to after it. The `### GitHub #444` entry sits at line 2043 inside
-  `## Full Project Review Remediation (2026-09-29)` (line 1979), directly after the #415/#416
-  model-deploy entry and before main's new `## Active-IR Anti-Spoofing (epic #353)` section
-  (line 2072). It is not filed under the IR epic.
-- `AI/VERIFICATION_MATRIX.md`: the same component section, preceded by a blank line and a `---`
-  separator after main's last table (LKI12), matching the separator style used between the
-  other components.
-- `AI/DECISIONS.md`: the same single appended ADR line, now after main's #439 ADR.
-
-No semantic conflict with main's changes was found and the soos-invariants suite passes
-(822 tests). No CRITICAL or MAJOR finding.
+Documentation-only change for GitHub #443 (part of #363): OBT9 prose, README companion wording (the
+`[android]` Funnel rule, the three tours, the two kinds of offline alerts), a dated zbus 6 note in ADR
+2026-10-02 "Presence Auto-Unlock Through logind", disambiguated "section 2j" cross-references in
+`Docs/REMOTE_COMPANION.md`, a new matrix component `docs-followups` (DFW1-DFW5) and walkthrough 238.
+No code, test, configuration or dependency file is touched. Every factual claim was checked against
+the code on the merge base; all hold. No CRITICAL or MAJOR finding.
 
 ## 2. Test Changes
 
-Mechanical listing from the frozen patch:
+Mechanical listing from `target/candid_diff.patch`:
 
-- Test files touched: `tests/docker/release_dry_run_test.sh` (new),
-  `tests/invariants/src/release_dry_run_contract.rs` (new), `tests/invariants/src/lib.rs`
-  (one added `#[cfg(all(test, unix))] mod release_dry_run_contract;` with its doc comment).
-- Removed or changed assertions (`^-` lines with `assert`, `#[test]`, `proptest!`,
-  `#[should_panic]`): none.
-- New escape hatches (`#[ignore]`, `#[cfg(any())]`, `should_panic`, tolerance, epsilon): none.
-- Inline `mod tests` changes: none.
+- Test files touched: none.
+- `git diff <merge-base> HEAD -- tests 'crates/*/tests' android/app/src/test`: empty.
+- Removed lines matching `assert|#[test]|...`: 1 hit, patch line 9, the ADR 2026-10-02 line of
+  `AI/DECISIONS.md` (prose that contains the word "assert"); it is replaced by the same text plus the
+  dated zbus note. Not a test.
+- New escape hatches (`#[ignore]`, `should_panic`, tolerance): none. Inline `mod tests` changes: none.
 
-All test changes are additions. No pre-existing assertion was modified by the rebase.
+No pre-existing assertion was removed or changed.
 
 ## 3. Deep Reasoning Audit
 
 ### Logic & Architecture
 
-- Rebase fidelity: per-file comparison of `+`/`-` lines between the old and new branch diffs
-  → identical for `ci.yml`, both scripts, both invariant files, all `Docs/` files, the spec, the
-  auditor constraints and walkthrough 239 → PASS.
-- Interaction with main's #434 (lock-screen adapters): `PKGBUILD`, `soos.spec` and `install.sh`
-  now install `soos-lockstatus`, `soos-lock-widget`, `packaging/gnome-shell/soos-lockscreen@soos/*`
-  and `packaging/lockscreen/hyprlock-soos.conf`. The two crates were already workspace members on
-  the old base and have no cargo features, so the harness's
-  `cargo build --release --workspace --no-default-features --features system-onnxruntime` still
-  builds both binaries. The packaging files are tracked and there is no `.gitattributes`
-  (`export-ignore`), so `git archive HEAD` puts them in the source tarball → PASS.
-- Interaction with #435 (`crates/vision/src/ir_active.rs`) and #445 (`crates/daemon/src/check_config.rs`):
-  plain workspace sources with no new dependency, `Cargo.toml`/`Cargo.lock` unchanged between
-  `3f76090` and `54d69f0`, so the vendor set and the `--check-vendor` comparison are unaffected → PASS.
-- Interaction with #440 (`setup.sh` start bounds) and #442 (Android): no CI, build or vendor
-  impact; `android/` is part of the git archive as before → PASS.
-- `ci.yml`: main changed nothing in `.github/` between the two bases; the branch's hunk (header
-  comment, job comment, `rustup toolchain install`, release dry-run step with
-  `timeout-minutes: 40`) applies unchanged in the `system-onnxruntime` job. The last CI run of
-  PR #447 took 12m34s for that job, inside its 75-minute job timeout → PASS.
-- Doc coherence: the `Docs/PACKAGING_AND_PROVISIONING.md` §7.5 edit merged cleanly next to
-  main's lock-screen text; `Docs/RELEASING.md` does not enumerate shipped binaries, so #434 does
-  not make it stale → PASS.
+- OBT9 "refuses tables other than one `[android]` table": `disable_remote_keys` in
+  `crates/gui/src/feature_control.rs` returns `UnsupportedLayout` for a second header, any
+  non-`[android]` header, or a target key inside the table. PASS.
+- README "`soos-gui` turns `allow_funnel` off only once the `[android]` table is removed": the edit
+  returns `FunnelRequiredByAndroid` when the parsed table contains `android` and the keys include
+  `allow_funnel`; `FUNNEL_ANDROID_NOTE` in `crates/gui/src/onboarding.rs` says the same. PASS.
+- README tours: §2k (web app tour) and §2j "Native Android app" / "Feature tour in the app" ("The tour
+  switches nothing, makes no request") confirm both phone tours switch nothing; the `soos-gui` tour
+  carries the switches. PASS.
+- README PC offline alerts "off until it is turned on, and is turned off, in the app's settings":
+  matches §2j "PC offline alerts" and "Turn it off with the same switch". PASS.
+- "section 2j" cross-references: each edited reference (§2k, §5 `offline_alerts` and `[android]`
+  rows, §6 `/api/offline` and `assetlinks.json` rows, §8, §9) was matched to the section it
+  describes; every target is correct and both `## 2j.` headings are byte-identical. PASS.
+- ADR zbus note: `Cargo.toml` pins `zbus = { version = "6", ... }`; commit `085ba63` (#417) names
+  RUSTSEC-2026-0370/-0371/-0372. The original text is kept and a dated note appended, consistent with
+  the existing dated-amendment practice and with the issue text. PASS.
+- Matrix: DFW1-DFW5 all present; every cited test exists (`test_gak3_...`, `test_gak4_...`,
+  `test_cwd_readme_names_push_and_offline_switches`, `test_rdm_companion_opt_out_names_dependent_keys`,
+  `test_rdm_companion_wording_matches_setup_defaults`, `test_atr_s5_...`, `test_roa_s5_...`,
+  `test_ana_s12_...`, `test_ahb_s4_...`, `test_aaf_s3_...`, `test_atr_s7_...`,
+  `presence_logind_error_name_tests::test_standard_error_reply_keeps_its_exact_name`). PASS.
 
 ### PAM Concurrency & Deadlines
 
-No change under `crates/pam` or any runtime crate → N/A, PASS.
+No PAM code touched. N/A, PASS.
 
 ### Panic Safety & Fail-Closed
 
-No Rust production code changed. The scripts keep their fail-closed `--check-vendor` behaviour
-(content unchanged; RDR-S2 tests pass) → PASS.
+No production code touched; the docs claim no new allow path. PASS.
 
 ### Test Integrity & Anti-Weakening
 
-The section 2 listing is additions only; the new contract module is registered under
-`#[cfg(all(test, unix))]` like its neighbours; the whole `soos-invariants` suite, including the
-pre-existing CI invariants (SHA-pinned actions, workflow `permissions: contents: read`,
-`ci-success` needs, `ADVISORY_CHECKS` in `scripts/pr_checks_gate.sh`), passes on the rebased
-tree → PASS.
+No test touched (section 2). Re-ran with the scoped environment: `cargo test -p soos-invariants --
+--test-threads=3`: 787 passed, 0 failed (covers the README wording guards CWD4 / RDM10 / RDM12 and the
+`## 2j.` heading lookups); `cargo test -p soos-gui --test remote_android_edit_tests --
+--test-threads=3`: 8 passed; `cargo clippy -p soos-invariants --all-targets -- -D warnings`: clean;
+`python3 scripts/sync_issue.py --check`: OK. PASS.
 
 ### Memory, Bounds & Secrets
 
-No secret, token or credential is read or written; no `${{ secrets.* }}` added → PASS.
+No secrets, frames, embeddings or credentials in the text; no password-capture wording. PASS.
 
 ### Supply Chain & Automation
 
-- Every `uses:` in `ci.yml` is pinned by a 40-hex SHA (a grep for unpinned `uses:` returns nothing).
-- Workflow-level `permissions: contents: read` unchanged; no job-level escalation added.
-- `ci-success-main` still needs `[ci-success, system-onnxruntime]`; the job stays advisory on pull
-  requests through the existing `ADVISORY_CHECKS` entry.
-- No `${{ github.event.* }}` interpolation in `run:`; no `upload-artifact`, cache save, `gh`,
-  `git tag`/`push`, `gpg` or `curl` command in either script (comments only) → PASS.
+No `Cargo.*`, `deny.toml`, `.github/`, `scripts/` or hook change. N/A, PASS.
 
 ### English-Only Policy
 
-All added text is English → PASS.
+All added text is English; non-ASCII characters are only typographic symbols already used in these
+files. Commit subject is 70 characters, Conventional Commits, one scope. PASS.
 
 ## 4. Detailed Findings & Action Items
 
-None. Commands run on the rebased tree:
-
-- `bash -n scripts/release_dry_run.sh` and `bash -n tests/docker/release_dry_run_test.sh`: OK.
-- `LIBONNXRUNTIME_NO_PKG_CONFIG=1 ... cargo test --locked -p soos-invariants -- --test-threads=3`:
-  822 passed, 0 failed, 0 ignored.
-
-The Docker harness itself (`tests/docker/release_dry_run_test.sh`) was not run locally; it runs in
-the `system-onnxruntime` CI job.
+- **[SUGGESTION]** `README.md:298` — "the two phone tours ... switch nothing and only say where each
+  feature is turned off" slightly understates the tours, which also explain each feature. Optional
+  rewording, e.g. "explain each feature and say where it is turned off".
+- **[SUGGESTION]** `AI/walkthroughs/238_docs_followups.md` — the number skips 232-237 on this branch
+  (presumably reserved by parallel branches); no invariant requires contiguity. Confirm at merge time.
 
 ## 5. Final Verdict
 
