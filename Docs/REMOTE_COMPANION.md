@@ -1067,7 +1067,8 @@ A native Android app (ADR 2026-10-13 "Native Android App for `soos-remote` (Kotl
 Compose)", GitHub #382, first PR of #357) is an alternative to the web app: each user chooses.
 This first version shows the PC status, locks the PC, signs in over Funnel with a passkey and,
 when turned on, alerts you when the PC stops answering (PC offline alerts, below); the second
-(GitHub #404, PR 2 of #357) adds the failed-password alerts with acknowledgement.
+(GitHub #404, PR 2 of #357) adds the failed-password alerts with acknowledgement, and a
+first-run feature tour (GitHub #427, below) explains each feature and where to turn it off.
 Unlock, the live camera view, push notifications, the battery level and the offline history stay
 in the web app for now. The app is sideloaded only (no store) and its application id is
 `org.soos.remote` (owner to confirm).
@@ -1257,6 +1258,45 @@ password at the lock screen or in `sudo`, then:
    expires (or restart `soos-remote`), and tap *Acknowledge*: the alerts card disappears and the
    screen says "Your session ended. Sign in again."
 
+### Feature tour in the app
+
+ADR 2026-10-18 "Phone Onboarding Tour in the Native Android App" (GitHub #427, PR 3 of #363; the
+web app tour is section 2k, the `soos-gui` tour `Docs/GUI_APPLICATION.md`).
+
+- **When.** The tour opens once on its own, at the top of the home screen, after the PC address
+  is saved and the first status is shown (over the tailnet, or after the passkey sign-in over
+  Funnel); never on the settings screen and never while the app waits for a sign-in.
+  **Feature tour** at the bottom of the home screen reopens it at any time. **Skip tour**,
+  **Done** and the system back gesture close it; **Back** goes to the previous step.
+- **Steps.** An introduction, then Phone companion, Battery level, Remote lock and unlock,
+  Internet access, Failed-password history, Push alerts, Live camera view, Offline alerts (the
+  eight steps of the web tour, with its exact titles, explanations and "Off:" lines from
+  `crates/remote/assets/app.js`), and **PC offline alerts**, the app's own opt-in check, turned
+  off with its switch in Settings. The app does not show the battery level, unlock, push alerts
+  or the camera view itself: those steps say that the web app on the phone does. Every manual
+  off path names the same `remote.toml` keys as the web tour, dependants included (for example
+  `allow_funnel = false` with `camera_view_funnel = false` and no `[android]` table), so
+  `soos-remote` never refuses the edited file (exit 78).
+- **What it never does.** The tour switches nothing, makes no request, shows fixed English
+  texts of `strings.xml` only (no server or user data) and logs nothing. No animation.
+- **What the app stores.** One Boolean `tour_seen` in the app's private settings file
+  `soos_settings`, set when the tour is closed; it is excluded from backups and device
+  transfer like the rest of that file. Clearing the app's storage shows the tour again.
+
+Matrix rows ATR1–ATR9 (ATR9: owner check on a phone, light and dark); invariant
+`android_tour_contract`.
+
+**Owner hardware check of the tour (matrix ATR9).** On a phone, in light and in dark mode:
+
+1. Install the app on a phone where it was never opened (or clear its storage), save the PC
+   address: no tour on the settings screen. Over the tailnet the tour opens with the first
+   status; over Funnel it opens only after the passkey sign-in.
+2. Walk every step with Next and Back; check the texts are readable in both modes and the
+   counter reads "Step 1 of 10" to "Step 10 of 10".
+3. Close it with Skip tour, then reopen the app: it stays closed. Reopen it with Feature tour
+   and close it once with Done and once with the system back gesture.
+4. The status, Lock PC, the alerts card and the PC offline alerts switch still work.
+
 ## 2k. Feature tour (phone web app)
 
 ADR 2026-10-17 "Phone Onboarding Tour in the `soos-remote` Web App and Its Single Storage
@@ -1288,8 +1328,8 @@ A short tour explains every feature of the phone page, what it exposes and where
   read and written only by one guarded helper in `app.js`; clearing the site data of the page
   shows the tour again. When the browser blocks site data (some private windows, "block all
   cookies"), the tour simply opens on every visit and closes as usual, without an error.
-- **Native Android app.** The same tour in the native Android app (section 2j) is a follow-up
-  of #357; the app has no tour yet.
+- **Native Android app.** The native Android app has the same tour with its own off paths
+  (section 2j, "Feature tour in the app", GitHub #427).
 
 Matrix rows PTR1–PTR11; invariant `remote_tour_contract`.
 

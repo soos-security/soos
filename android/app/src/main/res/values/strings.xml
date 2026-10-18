@@ -46,4 +46,54 @@
     <string name="alerts_ack_unreachable">The acknowledgement did not reach the PC.</string>
     <string name="alerts_load_failed">Alerts could not be loaded.</string>
     <string name="alerts_time_unknown">unknown time</string>
+
+    <!-- First-run feature tour (GitHub #427, PR 3 of #363). Fixed English texts only. For the
+         eight steps shared with the web tour, title, text and off are byte-equal to TOUR_STEPS
+         of crates/remote/assets/app.js; each where line names the same remote.toml keys
+         (checked by soos-invariants::android_tour_contract). -->
+    <string name="tour_intro_title">Welcome to soos</string>
+    <string name="tour_intro_text">This app shows the lock state of your PC and lets this phone act on it. The next steps explain each feature it offers, what it exposes and where to turn it off. The tour itself changes no setting.</string>
+    <string name="tour_intro_note">This app only remembers that you closed the tour, nothing else. You can reopen it at any time with Feature tour at the bottom of the home screen.</string>
+    <string name="tour_phone_companion_title">Phone companion</string>
+    <string name="tour_phone_companion_text">A small service in your user session shows the lock state of this PC on your phone and lets you lock it remotely. It listens only on a local socket that Tailscale publishes to devices of your tailnet.</string>
+    <string name="tour_phone_companion_off">Off: the service is stopped and disabled; the phone page is unreachable.</string>
+    <string name="tour_phone_companion_where">On the PC: Features in soos-gui, or run as your own user: systemctl --user disable --now soos-remote.service</string>
+    <string name="tour_battery_title">Battery level</string>
+    <string name="tour_battery_text">The status card shows the battery level of the PC, whether it is charging and whether it is plugged in. The PC reads it from its power supply information; nothing else about the hardware is sent.</string>
+    <string name="tour_battery_off">Off: the PC stops reading its battery and the line disappears from this page.</string>
+    <string name="tour_battery_where">This app does not show the battery level yet; the web app on this phone does. On the PC: set battery_status = false in ~/.config/soos/remote.toml, then run: systemctl --user restart soos-remote.service</string>
+    <string name="tour_remote_lock_title">Remote lock and unlock</string>
+    <string name="tour_remote_lock_text">Locking from the phone is always available while the companion runs. Unlocking from the phone additionally needs a passkey check (Face ID, fingerprint or screen lock) every time.</string>
+    <string name="tour_remote_lock_off">Off: the phone can still lock this PC, never unlock it.</string>
+    <string name="tour_remote_lock_where">Lock PC on the home screen of this app locks the PC while the companion runs; unlocking is done in the web app on this phone. Unlock, on the PC: Features in soos-gui, or set allow_unlock = false in ~/.config/soos/remote.toml, then run: systemctl --user restart soos-remote.service. Locking stays available while the companion runs.</string>
+    <string name="tour_internet_access_title">Internet access</string>
+    <string name="tour_internet_access_text">Tailscale Funnel makes the phone page reachable from the Internet without the VPN app on the phone. Every action still needs your passkey, but the page is then exposed beyond your tailnet.</string>
+    <string name="tour_internet_access_off">Off: the page is reachable only from devices signed in to your tailnet.</string>
+    <string name="tour_internet_access_where">In this app, Sign out ends this phone\'s session. On the PC: set allow_funnel = false and camera_view_funnel = false in ~/.config/soos/remote.toml and remove its [android] table if there is one, then run: systemctl --user restart soos-remote.service. Without an [android] table, Features in soos-gui does the same. This app then reaches the PC only over the tailnet.</string>
+    <string name="tour_failed_passwords_title">Failed-password history</string>
+    <string name="tour_failed_passwords_text">This page lists failed password attempts on the PC, read from the system journal: the time, the source (lock screen, sudo, login), the account class and the count, never the typed text.</string>
+    <string name="tour_failed_passwords_off">Off: the PC stops reading the journal and the list disappears; push alerts and offline alerts depend on it and stop too.</string>
+    <string name="tour_failed_passwords_where">In this app the list is the Password alerts card of the home screen. On the PC: set password_alerts = false, push_notifications = false and offline_alerts = false in ~/.config/soos/remote.toml, then run: systemctl --user restart soos-remote.service</string>
+    <string name="tour_push_alerts_title">Push alerts</string>
+    <string name="tour_push_alerts_text">Failed password attempts on this PC are pushed to your phone as notifications. Alerts carry the time, source, account and count, never the typed text.</string>
+    <string name="tour_push_alerts_off">Off: no notification is sent; alerts remain visible on the phone page.</string>
+    <string name="tour_push_alerts_where">This app receives no push alert; they reach the web app on this phone, where Disable notifications in its Notifications card stops them for this phone. Every device, on the PC: Features in soos-gui, or set push_notifications = false and offline_alerts = false in ~/.config/soos/remote.toml, then run: systemctl --user restart soos-remote.service</string>
+    <string name="tour_camera_view_title">Live camera view</string>
+    <string name="tour_camera_view_text">You can watch the PC camera live from the phone, for a limited time and after a passkey check per view. Nothing is recorded or stored.</string>
+    <string name="tour_camera_view_off">Off: the phone can no longer open the camera of this PC.</string>
+    <string name="tour_camera_view_where">This app does not open the camera; the web app on this phone does. On the PC: Features in soos-gui, or set camera_view = false and camera_view_funnel = false in ~/.config/soos/remote.toml, then run: systemctl --user restart soos-remote.service. A running view stops with Stop camera view in the web app or when you leave it.</string>
+    <string name="tour_offline_alerts_title">Offline alerts</string>
+    <string name="tour_offline_alerts_text">Your phone is told when this PC comes back online after being offline, with how long it was away. It uses the push alerts, so those must stay on.</string>
+    <string name="tour_offline_alerts_off">Off: no offline history is recorded and no back-online notification is sent; push alerts keep working.</string>
+    <string name="tour_offline_alerts_where">These notifications reach the web app on this phone, as push alerts. On the PC: Features in soos-gui, or set offline_alerts = false in ~/.config/soos/remote.toml, then run: systemctl --user restart soos-remote.service. The PC offline alerts of this app, the next step, work without them.</string>
+    <string name="tour_pc_offline_alerts_title">PC offline alerts</string>
+    <string name="tour_pc_offline_alerts_text">This app can check your PC every 15 minutes in the background. You get one alert after two failed checks in a row, and one more when the PC is back online. It is off until you turn it on, and only then asks to show notifications.</string>
+    <string name="tour_pc_offline_alerts_off">Off: this app makes no background check and shows no PC alert; nothing changes on the PC.</string>
+    <string name="tour_pc_offline_alerts_where">In this app: Settings, then the PC offline alerts switch. Nothing on the PC depends on it.</string>
+    <string name="tour_next">Next</string>
+    <string name="tour_done">Done</string>
+    <string name="tour_back">Back</string>
+    <string name="tour_skip">Skip tour</string>
+    <string name="tour_replay">Feature tour</string>
+    <string name="tour_step_counter">Step %1$d of %2$d</string>
 </resources>
