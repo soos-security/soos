@@ -51,6 +51,12 @@ readonly CAMERA_TIMEOUT_S=15
 readonly LOGINCTL_TIMEOUT_S=5
 readonly MAX_USER_LEN=32
 readonly QUERY_TIMEOUT_S=10
+# Bound of every systemctl start|restart|stop|try-restart of soos-daemon.service
+# (GitHub #437): TimeoutStartSec=60 of packaging/soos-daemon.service plus a 30 s
+# margin for a graceful stop (the first half of a restart) and the job hand-off,
+# so a slow but legitimate start (model verification and warm-up before READY=1)
+# is never cut by the 10 s query bound. Tied to the unit by invariant SET40.
+readonly UNIT_START_TIMEOUT_S=90
 
 readonly EXIT_FAILURE=1
 readonly EXIT_USAGE=2
@@ -1491,7 +1497,7 @@ rollback_journal() {
             soos_conf_dir_created) rmdir -- "${SYSCONFDIR}/soos" 2>/dev/null ;;
             daemon_toml_created)
                 rm -f -- "${DAEMON_TOML}"
-                run_bounded "${QUERY_TIMEOUT_S}" systemctl try-restart "${UNIT}" >/dev/null 2>&1
+                run_bounded "${UNIT_START_TIMEOUT_S}" systemctl try-restart "${UNIT}" >/dev/null 2>&1
                 ;;
         esac
     done
@@ -1528,7 +1534,7 @@ on_exit_system() {
     local rc=$?
     if [[ "${DAEMON_STOPPED}" == true ]]; then
         DAEMON_STOPPED=false
-        if ! run_bounded "${QUERY_TIMEOUT_S}" systemctl start "${UNIT}"; then
+        if ! run_bounded "${UNIT_START_TIMEOUT_S}" systemctl start "${UNIT}"; then
             error "Could not start ${UNIT} again: sudo systemctl start soos-daemon"
             [[ "${rc}" -eq 0 || "${rc}" -eq "${EXIT_INCOMPLETE}" ]] && rc="${EXIT_NOT_READY}"
         fi
@@ -1661,11 +1667,11 @@ phase_preview() {
         return 1
     fi
     info "Restarting ${UNIT} to load the [preview] section of ${DAEMON_TOML}"
-    if ! run_bounded "${QUERY_TIMEOUT_S}" systemctl restart "${UNIT}" || ! daemon_ready; then
+    if ! run_bounded "${UNIT_START_TIMEOUT_S}" systemctl restart "${UNIT}" || ! daemon_ready; then
         printf '[FAIL] camera view (daemon): %s did not become ready with %s (removed again)\n' "${UNIT}" "${DAEMON_TOML}"
         rm -f -- "${DAEMON_TOML}"
         unset 'JOURNAL[${#JOURNAL[@]}-1]'
-        if ! run_bounded "${QUERY_TIMEOUT_S}" systemctl restart "${UNIT}" || ! daemon_ready; then
+        if ! run_bounded "${UNIT_START_TIMEOUT_S}" systemctl restart "${UNIT}" || ! daemon_ready; then
             PREVIEW_DAEMON_DOWN=true
         fi
         return 1
@@ -1725,7 +1731,7 @@ phase_enrollment() {
     # the EXIT trap starts it again on every exit path.
     info "Stopping ${UNIT} for the enrollment (it owns the camera); it is started again afterwards."
     DAEMON_STOPPED=true
-    run_bounded "${QUERY_TIMEOUT_S}" systemctl stop "${UNIT}" || rc=$?
+    run_bounded "${UNIT_START_TIMEOUT_S}" systemctl stop "${UNIT}" || rc=$?
     if [[ "${rc}" -eq 0 ]]; then
         # Without a terminal the run was confirmed with --yes: soos-enroll then saves the
         # new template without its own [y/N] prompt (only reached when none exists).
@@ -1737,7 +1743,7 @@ phase_enrollment() {
     fi
     # The stop marker is cleared only once the unit was started again, so a signal
     # before that point still leaves the restart to the EXIT trap.
-    if run_bounded "${QUERY_TIMEOUT_S}" systemctl start "${UNIT}"; then
+    if run_bounded "${UNIT_START_TIMEOUT_S}" systemctl start "${UNIT}"; then
         DAEMON_STOPPED=false
         if ! daemon_ready; then
             printf '[FAIL] enrollment: %s did not become ready; see journalctl -u soos-daemon.service\n' "${UNIT}"
