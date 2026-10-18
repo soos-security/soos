@@ -322,6 +322,8 @@ Matrix rows GRE1–GRE6 and ISE1–ISE4 in `AI/VERIFICATION_MATRIX.md`; tests in
 `crates/gui/tests/responsiveness_tests.rs`, `crates/gui/tests/camera_status_tests.rs`,
 `crates/gui/tests/import_privacy_tests.rs` and `crates/camera-v4l/tests/camera_status_tests.rs`.
 Direct-mode store mutations off the UI thread: rows SGU1–SGU2, `crates/gui/tests/store_task_tests.rs`.
+Its `wait_outcome` helper polls once more after its 10 s deadline, so a descheduled test process
+is not reported as a missing outcome (rows DGS1–DGS2, walkthrough 226).
 Live verification reference selection: rows SGF1–SGF2, `crates/gui/tests/match_reference_selection_tests.rs`;
 wipe-on-drop reference: row SGF5, `crates/gui/tests/match_reference_zeroize_tests.rs`.
 Failure paths without a daemon or camera (oversized, zero-length and truncated preview replies,
