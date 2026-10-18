@@ -53,7 +53,7 @@ Every feature below is merged on `main` and documented.
 | Packages and installer | `.deb`, `.rpm` and Arch packages, a fail-closed installer that rolls back on error, upgrade and uninstall procedures | [`Docs/PACKAGING_AND_PROVISIONING.md`](Docs/PACKAGING_AND_PROVISIONING.md) §7, §9 |
 | Desktop app `soos-gui` | Live diagnostic, guided enrollment with liveness checks, enrolled profiles, first-run tour with feature switches | [`Docs/GUI_APPLICATION.md`](Docs/GUI_APPLICATION.md) |
 | Lock-screen widget | Shows on the lock screen whether soos is scanning your face: a swaylock-plugin background widget, a hyprlock label and a GNOME Shell 45+ extension (a KDE Plasma adapter comes later) | [`Docs/LOCKSCREEN_WIDGET.md`](Docs/LOCKSCREEN_WIDGET.md) |
-| Phone companion `soos-remote` | User-level service reached over Tailscale Serve, or Funnel from the internet: lock status, remote lock, passkey unlock, failed-password alerts, push notifications, live camera view after a passkey check, battery level, offline history, a first-run feature tour in the web app. The one-command setup turns Funnel, unlock, the camera view and the alerts on; a manual install leaves them off; all but the failed-password alerts can be turned off in `soos-gui`, and every key in `remote.toml` together with the keys that depend on it | [`Docs/REMOTE_COMPANION.md`](Docs/REMOTE_COMPANION.md) |
+| Phone companion `soos-remote` | User-level service reached over Tailscale Serve, or Funnel from the internet: lock status, remote lock, passkey unlock, failed-password alerts, push notifications, live camera view after a passkey check, battery level, offline history, a first-run feature tour in the web app. The one-command setup turns Funnel, unlock, the camera view and the alerts on; a manual install leaves them off; all but the failed-password alerts can be turned off in `soos-gui`, and every key in `remote.toml` together with the keys that depend on it; `soos-gui` turns Internet access (`allow_funnel`) off only once the `[android]` table of the native Android app is removed from `remote.toml` | [`Docs/REMOTE_COMPANION.md`](Docs/REMOTE_COMPANION.md) |
 | Native Android app | Sideloaded Kotlin app for the companion: PC status, remote lock, passkey sign-in over Funnel, failed-password alerts with acknowledgement, read-only battery and offline-history cards, PC offline alerts once turned on in its settings; unlock and the camera view stay in the web app | [`Docs/REMOTE_COMPANION.md`](Docs/REMOTE_COMPANION.md) §2j "Native Android app" |
 | Network lock | Opt-in polkit rule: changing the Wi-Fi network or turning the radio off asks for an administrator password | [`Docs/NETWORK_LOCK.md`](Docs/NETWORK_LOCK.md) |
 | Intrusion snapshots | Opt-in, encrypted camera snapshots of failed attempts, with daily caps and 7-day retention | [`Docs/EVIDENCE_STORE_CRATE.md`](Docs/EVIDENCE_STORE_CRATE.md) |
@@ -294,9 +294,15 @@ of trust.
   alerts. Each of the four is passkey-protected: a request over Funnel needs a passkey sign-in, every unlock
   needs a fresh passkey check with user verification, and every camera view starts with one. On the tailnet,
   status and lock need no passkey. Funnel, remote unlock, the camera view, push and offline alerts each have an
-  off switch in `soos-gui` (the feature switches of the first-run tour, also reached with its **Features**
-  button); turning Funnel or the camera view off there also sets `camera_view_funnel` to `false`, and turning
-  push off also sets `offline_alerts` to `false`. The failed-password alerts have no switch there. In
+  off switch in `soos-gui` (the feature switches of the `soos-gui` first-run tour, also reached with its
+  **Features** button; the two phone tours, in the web app and in the native Android app, switch nothing and
+  only say where each feature is turned off); turning Funnel or the camera view off there also sets
+  `camera_view_funnel` to `false`, and turning push off also sets `offline_alerts` to `false`. While
+  `remote.toml` has an `[android]` table, `soos-gui` does not turn Internet access (`allow_funnel`) off: remove
+  that table first. The failed-password alerts have no switch there. These offline alerts are the back-online
+  notifications sent by `soos-remote` (`offline_alerts`, [`Docs/REMOTE_COMPANION.md`](Docs/REMOTE_COMPANION.md)
+  §2j "Offline history"); the native Android app has its own PC offline alerts, a background check of the PC
+  that stays off until it is turned on, and is turned off, in the app's settings (§2j "Native Android app"). In
   `remote.toml`, set a key to `false` together with the keys that depend on it, or `soos-remote` refuses the
   file (exit 78):
   `camera_view_funnel` goes off with `allow_funnel` or `camera_view`, `push_notifications` and `offline_alerts`
